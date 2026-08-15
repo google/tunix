@@ -35,6 +35,10 @@ _LIVE_SNAPSHOT_INTERVAL_SECONDS = 30
 _INCIDENT_MIN_PREFIX = 1400
 _INCIDENT_MAX_PREFIX = 3072
 _INCIDENT_MAX_BYTES = 128 * 1024 * 1024
+_KV_OBSERVER_CANDIDATES = 3
+_KV_OBSERVER_PAGES = 16
+_KV_OBSERVER_MAX_BYTES = 128 * 1024 * 1024
+_KV_OBSERVER_MAX_READ_BYTES = 640 * 1024 * 1024
 _ADMITTED_MAX_CONCURRENCY = (32, 256)
 _ARTIFACT_BUCKET = "gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38"
 
@@ -70,7 +74,7 @@ def _capture_values(document: Mapping[str, Any], *, unified: bool) -> dict[str, 
   env = p33._env_values(document)
   state = env["CANON_STATE"]
   jobset = document["metadata"]["name"]
-  return {
+  values = {
       "CANON_KV_UNIFIED": "1" if unified else "0",
       "CANON_P38_PRECHECK_ONLY": "1",
       "CANON_P38_CONTROLLED_EXIT": "1",
@@ -93,6 +97,10 @@ def _capture_values(document: Mapping[str, Any], *, unified: bool) -> dict[str, 
       ),
       "CANON_P38_LIVE_SNAPSHOT_STOP_FILE": f"{state}/p38_live.stop",
       "CANON_P38_LIVE_SNAPSHOT_WORKER_LOG": f"{state}/p38_live_worker.log",
+      "CANON_P38_LIVE_COLLECT_REQUEST_FILE": f"{state}/p38_collect.request",
+      "CANON_P38_LIVE_COLLECT_ACK_FILE": f"{state}/p38_collect.ack",
+      "CANON_P38_LIVE_COMPLETE_REQUEST_FILE": f"{state}/p38_complete.request",
+      "CANON_P38_LIVE_COMPLETE_ACK_FILE": f"{state}/p38_complete.ack",
       "CANON_P38_SERVING_CAPTURE_MAX_CALLS": str(_CAPTURE_RECORDS),
       "CANON_P38_SERVING_CAPTURE_MIN_PREFIX": str(
           _CAPTURE_PREFIX_BOUNDS[0]
@@ -109,6 +117,29 @@ def _capture_values(document: Mapping[str, Any], *, unified: bool) -> dict[str, 
       "CANON_P38_SERVING_CAPTURE_ARCHIVE": f"{state}/p38_serving_capture.tar",
       "CANON_P38_GCS_PREFIX": f"{_ARTIFACT_BUCKET}/{jobset}/attempt-0",
   }
+  # P38.2n is a single stock discriminator.  The already-falsified U arm is
+  # still renderable as historical infrastructure, but it must not silently
+  # masquerade as the live-vs-clean KV experiment.
+  if not unified:
+    values.update({
+        "CANON_P38_KV_OBSERVER_DIR": (
+            f"{state}/p38_serving_capture"
+        ),
+        "CANON_P38_KV_OBSERVER_MAX_CANDIDATES": str(
+            _KV_OBSERVER_CANDIDATES
+        ),
+        "CANON_P38_KV_OBSERVER_MAX_PAGES": str(_KV_OBSERVER_PAGES),
+        "CANON_P38_KV_OBSERVER_MAX_BYTES": str(
+            _KV_OBSERVER_MAX_BYTES
+        ),
+        "CANON_P38_KV_OBSERVER_MAX_READ_BYTES": str(
+            _KV_OBSERVER_MAX_READ_BYTES
+        ),
+        "CANON_P38_KV_OBSERVER_CLASSIFICATION": (
+            f"{state}/p38_kv_observer.classification.json"
+        ),
+    })
+  return values
 
 
 def validate_capture_jobset(
@@ -135,6 +166,13 @@ def validate_capture_jobset(
       f"{capture_dir}/p38_incident_ledger.jsonl"
   ):
     raise ValueError("P38 incident ledger must live in the capture directory")
+  if not unified:
+    if env["CANON_P38_KV_OBSERVER_DIR"].rstrip("/") != capture_dir:
+      raise ValueError("P38 KV observer must live in the capture directory")
+    if not env["CANON_P38_KV_OBSERVER_CLASSIFICATION"].endswith(
+        "p38_kv_observer.classification.json"
+    ):
+      raise ValueError("P38 KV observer classification path drifted")
   if env["CANON_P38_LIVE_SNAPSHOT_STOP_FILE"] != (
       f"{env['CANON_STATE']}/p38_live.stop"
   ):
@@ -143,6 +181,15 @@ def validate_capture_jobset(
       f"{env['CANON_STATE']}/p38_live_worker.log"
   ):
     raise ValueError("P38 live snapshot worker log path drifted")
+  expected_live_control_paths = {
+      "CANON_P38_LIVE_COLLECT_REQUEST_FILE": "p38_collect.request",
+      "CANON_P38_LIVE_COLLECT_ACK_FILE": "p38_collect.ack",
+      "CANON_P38_LIVE_COMPLETE_REQUEST_FILE": "p38_complete.request",
+      "CANON_P38_LIVE_COMPLETE_ACK_FILE": "p38_complete.ack",
+  }
+  for key, basename in expected_live_control_paths.items():
+    if env[key] != f"{env['CANON_STATE']}/{basename}":
+      raise ValueError(f"P38 live worker control path drifted: {key}")
   if env["CANON_P38_DIAGNOSTIC_ROUND_FILE"] != (
       f"{env['CANON_STATE']}/p38_diagnostic_round"
   ):

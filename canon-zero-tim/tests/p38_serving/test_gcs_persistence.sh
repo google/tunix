@@ -17,6 +17,7 @@ install_fake_gcloud() {
 
 make_case() {
   local root="$1" job="$2"
+  unset CANON_P38_KV_OBSERVER_DIR CANON_P38_KV_OBSERVER_CLASSIFICATION || true
   mkdir -p "$root/state/capture"
   printf 'run\n' > "$root/state/run.log"
   printf '{}\n' > "$root/state/pre.jsonl"
@@ -105,8 +106,17 @@ unset FAKE_GCS_FAIL_CP
 install_fake_gcloud "$tmp/worker"
 make_case "$tmp/worker" canon-p38-test-worker
 bash "$PERSIST" probe > "$tmp/worker/probe.log"
+export CANON_P38_KV_OBSERVER_DIR="$tmp/worker/state/capture"
+printf '{"arm":"A"}\n' > \
+  "$CANON_P38_KV_OBSERVER_DIR/p38_kv_observer_0000_a.json"
+printf 'observer-npz\n' > \
+  "$CANON_P38_KV_OBSERVER_DIR/p38_kv_observer_0000_a.npz"
 export CANON_P38_LIVE_SNAPSHOT_INTERVAL_SECONDS=1
 export CANON_P38_LIVE_SNAPSHOT_STOP_FILE="$tmp/worker/state/live.stop"
+export CANON_P38_LIVE_COLLECT_REQUEST_FILE="$tmp/worker/state/collect.request"
+export CANON_P38_LIVE_COLLECT_ACK_FILE="$tmp/worker/state/collect.ack"
+export CANON_P38_LIVE_COMPLETE_REQUEST_FILE="$tmp/worker/state/complete.request"
+export CANON_P38_LIVE_COMPLETE_ACK_FILE="$tmp/worker/state/complete.ack"
 worker_log="$tmp/worker/state/live-worker.log"
 bash "$ROOT/tasks/p38-pathways-decode-prefill-carrier/scripts/p38_live_snapshot_worker.sh" \
   > "$worker_log" 2>&1 &
@@ -124,12 +134,64 @@ if ! kill -0 "$worker_pid" 2>/dev/null; then
   wait "$worker_pid" || true
   exit 1
 fi
+printf 'action=collect\n' > "$CANON_P38_LIVE_COLLECT_REQUEST_FILE.partial"
+mv "$CANON_P38_LIVE_COLLECT_REQUEST_FILE.partial" \
+  "$CANON_P38_LIVE_COLLECT_REQUEST_FILE"
+for unused in 1 2 3 4 5; do
+  [ ! -s "$CANON_P38_LIVE_COLLECT_ACK_FILE" ] || break
+  sleep 1
+done
+grep -q '^action=collect status=PASS$' "$CANON_P38_LIVE_COLLECT_ACK_FILE"
+test -s "$FAKE_GCS_ROOT/yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-p38-test-worker/attempt-0/COLLECTED.json"
+test ! -e "$FAKE_GCS_ROOT/yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-p38-test-worker/attempt-0/COMPLETE.json"
+printf 'action=complete\n' > "$CANON_P38_LIVE_COMPLETE_REQUEST_FILE.partial"
+mv "$CANON_P38_LIVE_COMPLETE_REQUEST_FILE.partial" \
+  "$CANON_P38_LIVE_COMPLETE_REQUEST_FILE"
+for unused in 1 2 3 4 5; do
+  [ ! -s "$CANON_P38_LIVE_COMPLETE_ACK_FILE" ] || break
+  sleep 1
+done
+grep -q '^action=complete status=PASS$' "$CANON_P38_LIVE_COMPLETE_ACK_FILE"
+test -s "$FAKE_GCS_ROOT/yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-p38-test-worker/attempt-0/COMPLETE.json"
 touch "$CANON_P38_LIVE_SNAPSHOT_STOP_FILE"
 wait "$worker_pid"
+grep -q 'LIVE_COLLECT_PASS' "$worker_log"
+grep -q 'LIVE_COMPLETE_PASS' "$worker_log"
 grep -q 'LIVE_WORKER_COMPLETE snapshots=' "$worker_log"
 worker_live="$(find "$FAKE_GCS_ROOT" -path '*/live/*/LIVE.json' -type f | head -n 1)"
 test -s "$worker_live"
 worker_live_dir="$(dirname "$worker_live")"
 (cd "$worker_live_dir" && sha256sum -c SHA256SUMS --quiet)
+find "$FAKE_GCS_ROOT" -path '*/live/*/p38_kv_observer_0000_a.json' \
+  -type f | grep -q .
+find "$FAKE_GCS_ROOT" -path '*/live/*/p38_kv_observer_0000_a.npz' \
+  -type f | grep -q .
 
-echo "[P38.GCS] PERSISTENCE_TEST_PASS probe=verified prefix_reuse=rejected live=immutable worker=durable collected=verified complete=last missing=rejected upload_failure=rejected"
+install_fake_gcloud "$tmp/out-of-order"
+make_case "$tmp/out-of-order" canon-p38-test-out-of-order
+bash "$PERSIST" probe > "$tmp/out-of-order/probe.log"
+export CANON_P38_LIVE_SNAPSHOT_INTERVAL_SECONDS=1
+export CANON_P38_LIVE_SNAPSHOT_STOP_FILE="$tmp/out-of-order/state/live.stop"
+export CANON_P38_LIVE_COLLECT_REQUEST_FILE="$tmp/out-of-order/state/collect.request"
+export CANON_P38_LIVE_COLLECT_ACK_FILE="$tmp/out-of-order/state/collect.ack"
+export CANON_P38_LIVE_COMPLETE_REQUEST_FILE="$tmp/out-of-order/state/complete.request"
+export CANON_P38_LIVE_COMPLETE_ACK_FILE="$tmp/out-of-order/state/complete.ack"
+out_of_order_log="$tmp/out-of-order/state/live-worker.log"
+bash "$ROOT/tasks/p38-pathways-decode-prefill-carrier/scripts/p38_live_snapshot_worker.sh" \
+  > "$out_of_order_log" 2>&1 &
+out_of_order_pid=$!
+for unused in 1 2 3 4 5; do
+  grep -q 'LIVE_WORKER_START' "$out_of_order_log" 2>/dev/null && break
+  sleep 1
+done
+grep -q 'LIVE_WORKER_START' "$out_of_order_log"
+printf 'action=complete\n' > "$CANON_P38_LIVE_COMPLETE_REQUEST_FILE"
+out_of_order_rc=0
+wait "$out_of_order_pid" || out_of_order_rc=$?
+test "$out_of_order_rc" -ne 0
+grep -q 'completion requested before collection acknowledgement' \
+  "$out_of_order_log"
+test ! -e "$CANON_P38_LIVE_COMPLETE_ACK_FILE"
+test ! -e "$FAKE_GCS_ROOT/yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-p38-test-out-of-order/attempt-0/COMPLETE.json"
+
+echo "[P38.GCS] PERSISTENCE_TEST_PASS probe=verified prefix_reuse=rejected live=immutable worker=durable collected=verified complete=last out_of_order=rejected missing=rejected upload_failure=rejected"

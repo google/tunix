@@ -16,6 +16,63 @@ done
 export JAX_PLATFORMS="proxy,cpu"
 export JAX_BACKEND_TARGET="grpc://localhost:29000"
 export PATHWAYS_HEAD="localhost"
+
+p38_stop_live_worker() {
+  if [ -z "${p38_live_pid:-}" ]; then
+    return 0
+  fi
+  touch "$CANON_P38_LIVE_SNAPSHOT_STOP_FILE"
+  p38_live_rc=0
+  wait "$p38_live_pid" || p38_live_rc=$?
+  cat "$CANON_P38_LIVE_SNAPSHOT_WORKER_LOG"
+  echo "[P38.GCS] LIVE_WORKER_JOINED rc=$p38_live_rc"
+  p38_live_pid=""
+  return 0
+}
+
+p38_request_live_action() {
+  local action="$1" request_file ack_file partial unused
+  case "$action" in
+    collect)
+      request_file="$CANON_P38_LIVE_COLLECT_REQUEST_FILE"
+      ack_file="$CANON_P38_LIVE_COLLECT_ACK_FILE"
+      ;;
+    complete)
+      request_file="$CANON_P38_LIVE_COMPLETE_REQUEST_FILE"
+      ack_file="$CANON_P38_LIVE_COMPLETE_ACK_FILE"
+      ;;
+    *)
+      echo "[run] FATAL: unknown P38 live-worker action: $action" >&2
+      return 2
+      ;;
+  esac
+  if [ -e "$request_file" ] || [ -e "$ack_file" ]; then
+    echo "[run] FATAL: repeated P38 live-worker action: $action" >&2
+    return 2
+  fi
+  partial="${request_file}.partial"
+  (umask 077; printf 'action=%s\n' "$action" > "$partial")
+  mv -- "$partial" "$request_file"
+  echo "[P38.GCS] LIVE_ACTION_REQUESTED action=$action request=$request_file"
+  for unused in $(seq 1 900); do
+    if [ -s "$ack_file" ]; then
+      if [ "$(cat "$ack_file")" != "action=$action status=PASS" ]; then
+        echo "[run] FATAL: malformed P38 live-worker acknowledgement: $ack_file" >&2
+        return 2
+      fi
+      echo "[P38.GCS] LIVE_ACTION_ACKNOWLEDGED action=$action ack=$ack_file"
+      return 0
+    fi
+    if ! kill -0 "$p38_live_pid" 2>/dev/null; then
+      echo "[run] FATAL: P38 live worker exited before $action acknowledgement" >&2
+      cat "$CANON_P38_LIVE_SNAPSHOT_WORKER_LOG" >&2 || true
+      return 2
+    fi
+    sleep 1
+  done
+  echo "[run] FATAL: timed out waiting for P38 live-worker action: $action" >&2
+  return 2
+}
 if [ "${CANON_P32_DP_ADMISSION:-0}" = "1" ] && \
    [ "${CANON_P32_TRAIN_ADMITTED:-0}" != "1" ]; then
   echo "[run] REFUSING: P32 profile is admission-only." >&2
@@ -43,6 +100,9 @@ if [ "${CANON_P33_WORKLOAD_LAUNCH_ADMITTED:-0}" = "1" ]; then
   if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
     report_keys+=(CANON_P38_SERVING_CAPTURE_CLASSIFICATION
                   CANON_P38_SERVING_CAPTURE_ARCHIVE)
+    if [ -n "${CANON_P38_KV_OBSERVER_DIR:-}" ]; then
+      report_keys+=(CANON_P38_KV_OBSERVER_CLASSIFICATION)
+    fi
     if [ -e "$CANON_P38_SERVING_CAPTURE_DIR" ]; then
       echo "[run] FATAL: P38 serving-capture directory already exists: $CANON_P38_SERVING_CAPTURE_DIR" >&2
       exit 1
@@ -116,9 +176,17 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
     }
   : "${CANON_P38_LIVE_SNAPSHOT_STOP_FILE:?}"
   : "${CANON_P38_LIVE_SNAPSHOT_WORKER_LOG:?}"
+  : "${CANON_P38_LIVE_COLLECT_REQUEST_FILE:?}"
+  : "${CANON_P38_LIVE_COLLECT_ACK_FILE:?}"
+  : "${CANON_P38_LIVE_COMPLETE_REQUEST_FILE:?}"
+  : "${CANON_P38_LIVE_COMPLETE_ACK_FILE:?}"
   : "${CANON_P38_DIAGNOSTIC_ROUND_FILE:?}"
   if [ -e "$CANON_P38_LIVE_SNAPSHOT_STOP_FILE" ] || \
      [ -e "$CANON_P38_LIVE_SNAPSHOT_WORKER_LOG" ] || \
+     [ -e "$CANON_P38_LIVE_COLLECT_REQUEST_FILE" ] || \
+     [ -e "$CANON_P38_LIVE_COLLECT_ACK_FILE" ] || \
+     [ -e "$CANON_P38_LIVE_COMPLETE_REQUEST_FILE" ] || \
+     [ -e "$CANON_P38_LIVE_COMPLETE_ACK_FILE" ] || \
      [ -e "$CANON_P38_DIAGNOSTIC_ROUND_FILE" ]; then
     echo "[run] FATAL: P38 live snapshot state already exists" >&2
     exit 1
@@ -127,6 +195,7 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
   bash "$CANON_PKG/tasks/p38-pathways-decode-prefill-carrier/scripts/p38_live_snapshot_worker.sh" \
     > "$CANON_P38_LIVE_SNAPSHOT_WORKER_LOG" 2>&1 &
   p38_live_pid=$!
+  trap 'p38_stop_live_worker' EXIT
   echo "[P38.GCS] LIVE_WORKER_LAUNCHED pid=$p38_live_pid"
 fi
 LOG_BASE="$LOG"
@@ -153,13 +222,6 @@ tee_rc="${pipeline_status[1]:-1}"
 set +e
 echo "[run] exit=$rc"
 echo "[run] transport_rc=$tee_rc"
-if [ -n "${p38_live_pid:-}" ]; then
-  touch "$CANON_P38_LIVE_SNAPSHOT_STOP_FILE"
-  p38_live_rc=0
-  wait "$p38_live_pid" || p38_live_rc=$?
-  cat "$CANON_P38_LIVE_SNAPSHOT_WORKER_LOG"
-  echo "[P38.GCS] LIVE_WORKER_JOINED rc=$p38_live_rc"
-fi
 if [ "${CANON_P46_EVALUATION:-0}" = "1" ]; then
   n_eval_subshard=$(grep -ac '^P46_EVAL_SUBSHARD_PASS ' "$LOG" || true)
   n_eval_report=$(grep -ac '^P46_EVAL_LOGICAL_REPORT_PASS ' "$LOG" || true)
@@ -234,6 +296,33 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
     sed 's/^/[CANON_P38_SERVING_CLASSIFICATION_JSON] /' \
       "$CANON_P38_SERVING_CAPTURE_CLASSIFICATION"
   fi
+  p38_kv_observer_rc=0
+  if [ -n "${CANON_P38_KV_OBSERVER_DIR:-}" ]; then
+    shopt -s nullglob
+    p38_kv_capsules=(
+      "${CANON_P38_MISMATCH_CAPSULE%.npz}".round-*.npz
+      "$CANON_P38_MISMATCH_CAPSULE"
+    )
+    shopt -u nullglob
+    p38_kv_args=()
+    for p38_kv_capsule in "${p38_kv_capsules[@]}"; do
+      [ -s "$p38_kv_capsule" ] || continue
+      p38_kv_args+=(--capsule "$p38_kv_capsule")
+    done
+    JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
+      python3 "$CANON_PKG/tasks/p38-pathways-decode-prefill-carrier/scripts/classify_p38_kv_observer.py" \
+        --directory "$CANON_P38_KV_OBSERVER_DIR" \
+        "${p38_kv_args[@]}" \
+        --require-red-join \
+        --output "$CANON_P38_KV_OBSERVER_CLASSIFICATION" || \
+      p38_kv_observer_rc=$?
+    if [ -s "$CANON_P38_KV_OBSERVER_CLASSIFICATION" ]; then
+      p38_kv_sha="$(sha256sum "$CANON_P38_KV_OBSERVER_CLASSIFICATION" | awk '{print $1}')"
+      echo "[CANON_P38_KV_OBSERVER_CLASSIFICATION] path=$CANON_P38_KV_OBSERVER_CLASSIFICATION sha256=$p38_kv_sha"
+      sed 's/^/[CANON_P38_KV_OBSERVER_CLASSIFICATION_JSON] /' \
+        "$CANON_P38_KV_OBSERVER_CLASSIFICATION"
+    fi
+  fi
   if [ -d "$CANON_P38_SERVING_CAPTURE_DIR" ]; then
     tar --sort=name --mtime=@0 --owner=0 --group=0 \
       -C "$CANON_P38_SERVING_CAPTURE_DIR" \
@@ -241,13 +330,15 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
     p38_archive_sha="$(sha256sum "$CANON_P38_SERVING_CAPTURE_ARCHIVE" | awk '{print $1}')"
     p38_archive_bytes="$(wc -c < "$CANON_P38_SERVING_CAPTURE_ARCHIVE" | tr -d '[:space:]')"
     p38_persist_rc=0
-    bash "$CANON_PKG/tasks/p38-pathways-decode-prefill-carrier/scripts/persist_p38_gcs.sh" \
-      collect || p38_persist_rc=$?
+    p38_request_live_action collect || p38_persist_rc=$?
     echo "[CANON_P38_SERVING_ARCHIVE] path=$CANON_P38_SERVING_CAPTURE_ARCHIVE bytes=$p38_archive_bytes sha256=$p38_archive_sha encoding=base64"
     base64 "$CANON_P38_SERVING_CAPTURE_ARCHIVE" | \
       sed 's/^/[CANON_P38_SERVING_ARCHIVE_B64] /'
   fi
   if [ "$p38_capture_rc" -ne 0 ] && [ "$rc" -eq 0 ]; then
+    rc=2
+  fi
+  if [ "${p38_kv_observer_rc:-0}" -ne 0 ] && [ "$rc" -eq 0 ]; then
     rc=2
   fi
 fi
@@ -275,10 +366,14 @@ n_p38_capture_observe=$(grep -ac '^\[CANON_P38_SERVING_CAPTURE_OBSERVE\]' "$LOG"
 n_p38_capture_error=$(grep -ac '^\[CANON_P38_SERVING_CAPTURE_ERROR\]' "$LOG" || true)
 n_p38_request_journal=$(grep -ac '^\[CANON_P38_REQUEST_JOURNAL\]' "$LOG" || true)
 n_p38_incident_ledger=$(grep -ac '^\[CANON_P38_INCIDENT_LEDGER\]' "$LOG" || true)
+n_p38_kv_observer_init=$(grep -ac '^\[CANON_P38_KV_OBSERVER_INIT\]' "$LOG" || true)
+n_p38_kv_observer_candidate=$(grep -ac '^\[CANON_P38_KV_OBSERVER_CANDIDATE\]' "$LOG" || true)
+n_p38_kv_observer_a=$(grep -ac '^\[CANON_P38_KV_OBSERVER_RECORD\] arm=A ' "$LOG" || true)
+n_p38_kv_observer_b=$(grep -ac '^\[CANON_P38_KV_OBSERVER_RECORD\] arm=B ' "$LOG" || true)
 n_p38_coverage=$(grep -ac '^\[CANON_P38\] DIAGNOSTIC_COVERAGE_CONTRACT .*prompt_groups=32 .*unit_prompts=4 .*units=8 .*trajectories=256 .*partial_tail=reject verdict=PASS' "$LOG" || true)
 n_p38_standard_init=$(grep -ac '^\[CANON_P38_SERVING_CAPTURE_INIT\].*expected_path=standard' "$LOG" || true)
 n_p38_standard_observe=$(grep -aEc '^\[CANON_P38_SERVING_CAPTURE_OBSERVE\].*"program_path"[[:space:]]*:[[:space:]]*"standard"' "$LOG" || true)
-echo "[run] PATHTRACE fixed_ar=$n_ar embed=$n_emb logprob_m=$n_lp wandb_online=$n_wandb p34_wandb_online=$n_wandb_p34 eval_off=$n_eval_off eval_on=$n_eval_on p35_base=$n_p35_base p35_stop=$n_p35_stop p35_replay=$n_p35_replay p35_stage_begin=$n_p35_stage_begin p35_stage_ready=$n_p35_stage_ready p35_stage_complete=$n_p35_stage_complete p38_precheck=$n_p38_precheck p38_rounds=$n_p38_rounds p38_controlled_exit=$n_p38_controlled_exit p38_kv_unified=$n_p38_kv_unified p38_capture_init=$n_p38_capture_init p38_capture_observe=$n_p38_capture_observe p38_capture_error=$n_p38_capture_error p38_request_journal=$n_p38_request_journal p38_incident_ledger=$n_p38_incident_ledger p38_coverage=$n_p38_coverage"
+echo "[run] PATHTRACE fixed_ar=$n_ar embed=$n_emb logprob_m=$n_lp wandb_online=$n_wandb p34_wandb_online=$n_wandb_p34 eval_off=$n_eval_off eval_on=$n_eval_on p35_base=$n_p35_base p35_stop=$n_p35_stop p35_replay=$n_p35_replay p35_stage_begin=$n_p35_stage_begin p35_stage_ready=$n_p35_stage_ready p35_stage_complete=$n_p35_stage_complete p38_precheck=$n_p38_precheck p38_rounds=$n_p38_rounds p38_controlled_exit=$n_p38_controlled_exit p38_kv_unified=$n_p38_kv_unified p38_capture_init=$n_p38_capture_init p38_capture_observe=$n_p38_capture_observe p38_capture_error=$n_p38_capture_error p38_request_journal=$n_p38_request_journal p38_incident_ledger=$n_p38_incident_ledger p38_kv_observer_init=$n_p38_kv_observer_init p38_kv_observer_candidate=$n_p38_kv_observer_candidate p38_kv_observer_a=$n_p38_kv_observer_a p38_kv_observer_b=$n_p38_kv_observer_b p38_coverage=$n_p38_coverage"
 if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
   if [ "$n_p38_capture_init" -ne 1 ] || [ "$n_p38_capture_observe" -le 0 ]; then
     echo "[run] FATAL: P38 serving capture hook was not observed: init=$n_p38_capture_init observe=$n_p38_capture_observe" >&2
@@ -292,12 +387,22 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
     echo "[run] FATAL: P38 serving capture reported internal errors: $n_p38_capture_error" >&2
     exit 1
   fi
+  if [ -n "${CANON_P38_KV_OBSERVER_DIR:-}" ] && \
+     { [ "$n_p38_kv_observer_init" -ne 1 ] || \
+       [ "$n_p38_kv_observer_candidate" -ne 3 ] || \
+       [ "$n_p38_kv_observer_a" -ne 3 ] || \
+       [ "$n_p38_kv_observer_b" -ne 3 ] || \
+       [ "${p38_kv_observer_rc:-1}" -ne 0 ] || \
+       [ ! -s "${CANON_P38_KV_OBSERVER_CLASSIFICATION:-}" ]; }; then
+    echo "[run] FATAL: P38 KV observer contract failed: init=$n_p38_kv_observer_init candidates=$n_p38_kv_observer_candidate A=$n_p38_kv_observer_a B=$n_p38_kv_observer_b classifier=${p38_kv_observer_rc:-unset}" >&2
+    exit 1
+  fi
   if [ "${p38_persist_rc:-1}" -ne 0 ]; then
     echo "[run] FATAL: P38 GCS evidence collection failed: rc=${p38_persist_rc:-unset}" >&2
     exit 1
   fi
-  if [ "${p38_live_rc:-1}" -ne 0 ]; then
-    echo "[run] FATAL: P38 live snapshot worker failed: rc=${p38_live_rc:-unset}" >&2
+  if ! kill -0 "${p38_live_pid:?}" 2>/dev/null; then
+    echo "[run] FATAL: P38 live snapshot worker is not alive after collection" >&2
     exit 1
   fi
   if [ "${tee_rc:-1}" -ne 0 ]; then
@@ -511,15 +616,21 @@ PY
     exit 1
   fi
   if [ "$rc" -ne "$p38_expected_rc" ] || [ "$n_p38_precheck" -ne 1 ] || \
-     [ "${p38_capture_rc:-1}" -ne 0 ]; then
-    echo "[run] FATAL: P38 serving precheck is incomplete: rc=$rc expected_rc=$p38_expected_rc markers=$n_p38_precheck capture_rc=${p38_capture_rc:-unset}" >&2
+     [ "${p38_capture_rc:-1}" -ne 0 ] || \
+     [ "${p38_kv_observer_rc:-0}" -ne 0 ]; then
+    echo "[run] FATAL: P38 serving precheck is incomplete: rc=$rc expected_rc=$p38_expected_rc markers=$n_p38_precheck capture_rc=${p38_capture_rc:-unset} kv_observer_rc=${p38_kv_observer_rc:-unset}" >&2
     exit 1
   fi
-  bash "$CANON_PKG/tasks/p38-pathways-decode-prefill-carrier/scripts/persist_p38_gcs.sh" \
-    complete || {
+  p38_request_live_action complete || {
       echo "[run] FATAL: P38 GCS completion marker failed" >&2
       exit 1
     }
+  p38_stop_live_worker
+  trap - EXIT
+  if [ "${p38_live_rc:-1}" -ne 0 ]; then
+    echo "[run] FATAL: P38 live snapshot worker failed: rc=${p38_live_rc:-unset}" >&2
+    exit 1
+  fi
   echo "[run] P38 serving controlled precheck accepted exit=$p38_expected_rc; backward=0 optimizer_commits=0"
   rc=0
 elif [ "$rc" -eq 0 ] && [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then

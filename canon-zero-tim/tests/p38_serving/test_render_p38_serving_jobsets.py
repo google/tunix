@@ -101,6 +101,22 @@ class RenderP38ServingJobsetsTest(unittest.TestCase):
             env["CANON_STATE"] + "/p38_live_worker.log",
         )
         self.assertEqual(
+            env["CANON_P38_LIVE_COLLECT_REQUEST_FILE"],
+            env["CANON_STATE"] + "/p38_collect.request",
+        )
+        self.assertEqual(
+            env["CANON_P38_LIVE_COLLECT_ACK_FILE"],
+            env["CANON_STATE"] + "/p38_collect.ack",
+        )
+        self.assertEqual(
+            env["CANON_P38_LIVE_COMPLETE_REQUEST_FILE"],
+            env["CANON_STATE"] + "/p38_complete.request",
+        )
+        self.assertEqual(
+            env["CANON_P38_LIVE_COMPLETE_ACK_FILE"],
+            env["CANON_STATE"] + "/p38_complete.ack",
+        )
+        self.assertEqual(
             env["CANON_P38_GCS_PREFIX"],
             "gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/"
             + document["metadata"]["name"]
@@ -117,6 +133,19 @@ class RenderP38ServingJobsetsTest(unittest.TestCase):
         self.assertIn("--max_response_length=2048", env["CANON_RUN_CMD"])
         self.assertEqual(renderer._DIAGNOSTIC_UNITS, 8)
         self.assertEqual(renderer._COVERED_PROMPTS, 32)
+        if env["CANON_KV_UNIFIED"] == "0":
+          self.assertEqual(
+              env["CANON_P38_KV_OBSERVER_DIR"],
+              env["CANON_P38_SERVING_CAPTURE_DIR"],
+          )
+          self.assertEqual(env["CANON_P38_KV_OBSERVER_MAX_CANDIDATES"], "3")
+          self.assertEqual(env["CANON_P38_KV_OBSERVER_MAX_PAGES"], "16")
+          self.assertEqual(env["CANON_P38_KV_OBSERVER_MAX_BYTES"], "134217728")
+          self.assertEqual(
+              env["CANON_P38_KV_OBSERVER_MAX_READ_BYTES"], "671088640"
+          )
+        else:
+          self.assertNotIn("CANON_P38_KV_OBSERVER_DIR", env)
 
   def test_renders_preregistered_concurrency_32_arm(self):
     with tempfile.TemporaryDirectory() as tmp:
@@ -171,6 +200,21 @@ class RenderP38ServingJobsetsTest(unittest.TestCase):
         if item["name"] == "CANON_P38_SERVING_CAPTURE_MAX_CALLS"
     )
     entry["value"] = "2"
+    with self.assertRaisesRegex(ValueError, "environment drifted"):
+      renderer.validate_capture_jobset(document, unified=unified)
+
+  def test_rejects_stock_observer_contract_drift(self):
+    base = renderer.p33.load_base(_BASE)
+    spec, unified = renderer._SPECS[0]
+    document = renderer.render_jobset(
+        base, spec, _SOURCE, _RUN_ID, unified=unified
+    )
+    main = renderer._main_container(document)
+    entry = next(
+        item for item in main["env"]
+        if item["name"] == "CANON_P38_KV_OBSERVER_MAX_PAGES"
+    )
+    entry["value"] = "8"
     with self.assertRaisesRegex(ValueError, "environment drifted"):
       renderer.validate_capture_jobset(document, unified=unified)
 

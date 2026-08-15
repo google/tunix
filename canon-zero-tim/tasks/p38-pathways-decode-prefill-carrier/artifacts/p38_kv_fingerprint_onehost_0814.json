@@ -1,0 +1,32 @@
+{
+  "cache_shape": [12, 256, 8, 2, 128],
+  "claim_ceiling": [
+    "This rehearses the observer primitive and TP4 sharding only.",
+    "It does not reproduce the production A-B carrier.",
+    "A compact fingerprint is not a cryptographic content proof."
+  ],
+  "compile_seconds": 34.27576101012528,
+  "devices": [
+    "TPU_0(process=0,(0,0,0,0))",
+    "TPU_1(process=0,(1,0,0,0))",
+    "TPU_2(process=0,(0,1,0,0))",
+    "TPU_3(process=0,(1,1,0,0))"
+  ],
+  "endpoint_exact": true,
+  "fingerprint_sha256": "8082b9a87d742a006b2c023e5c307713ec3c3b46f91be7cfd9e4973a53795d15",
+  "host_transfer_seconds": 0.007750316988676786,
+  "layers": 36,
+  "negative_control_detected": true,
+  "negative_sha256": "654d708095c34b04a5dfac33d420c9a97bcde1baaf4eab84f88299375b96c219",
+  "output_bytes": 5308416,
+  "read_bytes": 339738624,
+  "repeat_exact": true,
+  "repeat_sha256": "8082b9a87d742a006b2c023e5c307713ec3c3b46f91be7cfd9e4973a53795d15",
+  "schema": "p38-kv-prefix-table-onehost-v1",
+  "scope": "observer-primitive-not-production-carrier",
+  "selected_pages": 9,
+  "sharding": "NamedSharding(mesh=Mesh('model': 4, axis_types=(Auto,)), spec=P(None, None, 'model', None, None), memory_kind=device)",
+  "status": "PASS",
+  "steady_seconds": 0.9513741140253842,
+  "valid_tokens": [256, 256, 256, 256, 256, 256, 256, 256, 128]
+}

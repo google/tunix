@@ -1,10 +1,112 @@
-# P38 FrozenLake: run P38s15 from pinned P38.2l source
+# P38 FrozenLake: P38.2n live-KV discriminator
 
 This runbook is diagnostic-only. It never launches FrozenLake full training,
 evaluation, backward, optimizer commit, prefix cache, or unified KV. P48 is a
 separate workstream and waits for its DP16 resources.
 
-## Current fact
+## Current fact and admitted next run
+
+P38s16 is complete and must not be rerun. The exact host audit joins all 60
+mismatch elements and identifies one natural single-active red call (4223) at
+the unchanged production fixed-M geometry. The archive has no live KV bytes,
+so it cannot decide stale content versus a decode-program seam.
+
+P38.2n N3 is locally complete. Patch 16 captures bounded live A and exact
+same-prefix clean B KV fingerprints with one shared callable. The real
+Qwen3-8B DP1xTP4 r6 rehearsal produced exactly three A/B pairs, exact
+token/extent/provenance joins, and
+`observer_pairs_valid_red_join_pending`, with no backward or optimizer commit.
+Both pinned model overlays verify all 30 manifest entries and pass 29 runner
+tests. Details are in:
+
+```text
+canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/
+  phases/p38-2n-live-kv-content-discriminator.md
+  artifacts/p38_2n_kv_observer_onehost_0815.md
+```
+
+The worker-owned terminal protocol is part of that admission: the worker must
+ACK `collect`, all postflight checks must pass, then it must ACK `complete`.
+`COLLECTED` without `COMPLETE` is useful crash/failure evidence, not admission.
+
+Exactly one new production-shape stock run is admitted after the reviewed
+worktree is committed and pushed. Do not run from an uncommitted tree. Do not
+render unified KV, concurrency 32, E0-lite, backward, full training, or any
+repair arm.
+
+## P38s17 operator sequence — stock live-KV discriminator
+
+Run from a clean clone after publication:
+
+```bash
+set -euo pipefail
+git fetch origin yuxzhang/canon-zero-tim
+SOURCE_COMMIT="$(git rev-parse FETCH_HEAD)"
+RUN_ID=p38s17
+WORKTREE="/tmp/canon-zero-tim-$RUN_ID"
+OUT="/tmp/p38-serving-$RUN_ID"
+EVIDENCE="/tmp/p38-return-$RUN_ID"
+test ! -e "$WORKTREE"
+test ! -e "$OUT"
+test ! -e "$EVIDENCE"
+git worktree add --detach "$WORKTREE" "$SOURCE_COMMIT"
+cd "$WORKTREE"
+test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
+test -z "$(git status --porcelain)"
+rg -q '16-tpu-runner-p38-kv-observer.patch' canon-zero-tim/install.sh
+rg -q 'observer_pairs_valid_red_join_pending' \
+  canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/classify_p38_kv_observer.py
+mkdir -p "$EVIDENCE"
+printf '%s\n' "$SOURCE_COMMIT" > "$EVIDENCE/source_commit.txt"
+
+python3 canon-zero-tim/cluster/render_p38_serving_jobsets.py \
+  --source-commit "$SOURCE_COMMIT" \
+  --run-id "$RUN_ID" \
+  --output-dir "$OUT" \
+  --stock-only \
+  --max-concurrency 256 | tee "$EVIDENCE/render.txt"
+
+STOCK="$OUT/jobset-p38-serving-stock.yaml"
+test -s "$STOCK"
+test ! -e "$OUT/jobset-p38-serving-unified.yaml"
+cp "$STOCK" "$EVIDENCE/rendered-stock.yaml"
+grep -Fq 'name: CANON_P38_KV_OBSERVER_DIR' "$STOCK"
+grep -Fq 'name: CANON_P38_KV_OBSERVER_MAX_CANDIDATES' "$STOCK"
+grep -Fq 'value: "3"' "$STOCK"
+grep -Fq -- '--max_concurrency=256' "$STOCK"
+grep -Fq 'name: CANON_KV_UNIFIED' "$STOCK"
+kubectl apply --dry-run=server -f "$STOCK" | \
+  tee "$EVIDENCE/dry-run-stock.txt"
+kubectl apply -f "$STOCK" | tee "$EVIDENCE/apply.txt"
+```
+
+The terminal bundle is valid only if all of these hold:
+
+```text
+[CANON_P38_KV_OBSERVER_INIT] exactly 1
+[CANON_P38_KV_OBSERVER_CANDIDATE] exactly 3
+[CANON_P38_KV_OBSERVER_RECORD] arm=A exactly 3
+[CANON_P38_KV_OBSERVER_RECORD] arm=B exactly 3
+[CANON_P38] PRECHECK_ROUND_COMPLETE exactly 3
+B-C exact in every round
+backward=0 and optimizer_commits=0
+p38_kv_observer.classification.json status=PASS
+red_joins >= 1
+COLLECTED.json and COMPLETE.json both present
+SHA256SUMS verifies
+```
+
+Interpret only the classifier:
+
+- `live_kv_fingerprint_differs_on_red_row`: localize the first differing
+  layer/logical page/prefix extent and repair that cache writer/lifecycle path.
+- `live_kv_fingerprint_equal_on_red_row`: reject KV content for that observed
+  incident and start the ordered in-situ decode seam walk.
+- `observer_pairs_valid_red_join_pending`, missing pairs, missing terminal
+  markers, or no red join: INCONCLUSIVE; do not claim a cause or launch a
+  repair.
+
+## Historical fact
 
 P38s15/source `58a0ed84` successfully executed all three Frozen-Weight
 diagnostic rounds (768 trajectories total, 51,330 action tokens) on 64 TPU

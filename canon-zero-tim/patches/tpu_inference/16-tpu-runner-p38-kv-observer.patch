@@ -1,0 +1,480 @@
+--- tpu_runner_p21_l30.py
++++ tpu_runner_p21_l30.py
+@@ -96,6 +96,12 @@
+ from tpu_inference.utils import (device_array, make_optimized_mesh,
+                                  time_function, to_jax_dtype, to_torch_dtype)
+ 
++from p38_kv_fingerprint import (
++    estimate_fingerprint_read_bytes,
++    fingerprint_kv_cache_layer_prefixes,
++    global_page_indices,
++)
++
+ # Patch to classify specific non-LoRA keys as base weights. Without this, vLLM's `add_lora`
+ # crashes with "unsupported LoRA weight" on base model parameters like `lm_head.weight`
+ # because upstream's `is_base_embedding_weights` uses a strict layer-name whitelist.
+@@ -977,6 +983,23 @@
+ _P38_DIAGNOSTIC_ROUND_FILE = os.environ.get(
+     "CANON_P38_DIAGNOSTIC_ROUND_FILE", "")
+ _P38_INCIDENT_STATE = {"records": 0, "bytes": 0}
++_P38_KV_OBSERVER_DIR = os.environ.get("CANON_P38_KV_OBSERVER_DIR", "")
++_P38_KV_OBSERVER_MAX_CANDIDATES = int(os.environ.get(
++    "CANON_P38_KV_OBSERVER_MAX_CANDIDATES", "4") or "4")
++_P38_KV_OBSERVER_MAX_PAGES = int(os.environ.get(
++    "CANON_P38_KV_OBSERVER_MAX_PAGES", "16") or "16")
++_P38_KV_OBSERVER_MAX_BYTES = int(os.environ.get(
++    "CANON_P38_KV_OBSERVER_MAX_BYTES", str(128 * 1024 * 1024)) or
++    str(128 * 1024 * 1024))
++_P38_KV_OBSERVER_MAX_READ_BYTES = int(os.environ.get(
++    "CANON_P38_KV_OBSERVER_MAX_READ_BYTES", str(640 * 1024 * 1024)) or
++    str(640 * 1024 * 1024))
++_P38_KV_OBSERVER_CANDIDATES = {}
++_P38_KV_OBSERVER_CANDIDATE_ROUNDS = set()
++_P38_KV_OBSERVER_A_RECORDS = []
++_P38_KV_OBSERVER_MATCHED_A = set()
++_P38_KV_OBSERVER_STATE = {"records": 0, "bytes": 0}
++_P38_KV_OBSERVER_FN = None
+ 
+ if _P38_SERVING_CAPTURE_DIR and _P38_SERVING_CAPTURE_MAX_CALLS < 1:
+     raise RuntimeError(
+@@ -1044,6 +1067,33 @@
+         flush=True,
+     )
+ 
++if _P38_KV_OBSERVER_DIR:
++    if not _P38_SERVING_CAPTURE_DIR:
++        raise RuntimeError("P38 KV observer requires serving capture")
++    if os.path.realpath(_P38_KV_OBSERVER_DIR) != os.path.realpath(
++            _P38_SERVING_CAPTURE_DIR):
++        raise RuntimeError(
++            "P38 KV observer must write into the serving capture directory")
++    if _P38_SERVING_CAPTURE_EXPECTED_PATH != "standard":
++        raise RuntimeError("P38 KV observer requires the standard path")
++    if not (1 <= _P38_KV_OBSERVER_MAX_CANDIDATES <= 8):
++        raise RuntimeError("P38 KV observer candidate bound is invalid")
++    if not (1 <= _P38_KV_OBSERVER_MAX_PAGES <= 32):
++        raise RuntimeError("P38 KV observer page bound is invalid")
++    if not (1024 * 1024 <= _P38_KV_OBSERVER_MAX_BYTES <= 256 * 1024 * 1024):
++        raise RuntimeError("P38 KV observer output byte bound is invalid")
++    if not (64 * 1024 * 1024 <= _P38_KV_OBSERVER_MAX_READ_BYTES <=
++            2 * 1024 * 1024 * 1024):
++        raise RuntimeError("P38 KV observer read byte bound is invalid")
++    print(
++        "[CANON_P38_KV_OBSERVER_INIT] "
++        f"enabled=1 candidates={_P38_KV_OBSERVER_MAX_CANDIDATES} "
++        f"pages={_P38_KV_OBSERVER_MAX_PAGES} "
++        f"max_output_bytes={_P38_KV_OBSERVER_MAX_BYTES} "
++        f"max_read_bytes={_P38_KV_OBSERVER_MAX_READ_BYTES}",
++        flush=True,
++    )
++
+ 
+ def _p18_leaf(x):
+     """Materialise one leaf to numpy plus its sharding/dtype, or a plain scalar."""
+@@ -1573,6 +1623,376 @@
+         f"requests={len(request_records)} bytes={state['bytes']}",
+         flush=True,
+     )
++    _p38_kv_observer_note_candidate(record)
++
++
++def _p38_kv_observer_note_candidate(incident_record):
++    """Remember one deep, naturally single-active decode request per round."""
++    if not _P38_KV_OBSERVER_DIR:
++        return
++    if int(incident_record["scheduled_request_count"]) != 1:
++        return
++    requests = incident_record["requests"]
++    if len(requests) != 1:
++        raise RuntimeError(
++            "P38 KV observer single-active incident did not map one request")
++    diagnostic_round = int(incident_record["diagnostic_round"])
++    if diagnostic_round in _P38_KV_OBSERVER_CANDIDATE_ROUNDS:
++        return
++    if len(_P38_KV_OBSERVER_CANDIDATES) >= _P38_KV_OBSERVER_MAX_CANDIDATES:
++        return
++    request = requests[0]
++    request_id = str(request["request_id"])
++    if request_id in _P38_KV_OBSERVER_CANDIDATES:
++        return
++    candidate = {
++        "request_id": request_id,
++        "diagnostic_round": diagnostic_round,
++        "tag_call_index": int(incident_record["call_index"]),
++        "tag_prefix": int(request["num_computed_tokens"]),
++        "tag_dp_rank": int(request["dp_rank"]),
++        "tag_physical_pages": [
++            int(value) for value in request["physical_pages"]
++        ],
++    }
++    _P38_KV_OBSERVER_CANDIDATES[request_id] = candidate
++    _P38_KV_OBSERVER_CANDIDATE_ROUNDS.add(diagnostic_round)
++    print(
++        "[CANON_P38_KV_OBSERVER_CANDIDATE] "
++        f"round={diagnostic_round} request={request_id} "
++        f"call={candidate['tag_call_index']} "
++        f"prefix={candidate['tag_prefix']}",
++        flush=True,
++    )
++
++
++def _p38_kv_observer_request_finished(
++        request_state, sampled_ids, seq_len, max_model_len):
++    """Return true only at a host-visible EOS, max-token, or model-limit end."""
++    sampled = [int(value) for value in sampled_ids]
++    sampling_params = getattr(request_state, "sampling_params", None)
++    if sampling_params is None:
++        raise RuntimeError("P38 KV observer request has no sampling params")
++    stop_ids = {
++        int(value) for value in getattr(
++            sampling_params, "all_stop_token_ids", ())
++    }
++    eos_done = bool(sampled and sampled[-1] in stop_ids)
++    max_tokens = getattr(sampling_params, "max_tokens", None)
++    max_done = (
++        max_tokens is not None
++        and len(getattr(request_state, "output_token_ids", ())) >=
++        int(max_tokens)
++    )
++    model_done = int(seq_len) >= int(max_model_len)
++    return eos_done or max_done or model_done
++
++
++def _p38_kv_observer_dp_rank(req_ids_dp, request_id):
++    matches = [
++        int(dp_rank) for dp_rank, request_ids in req_ids_dp.items()
++        if request_id in request_ids
++    ]
++    if len(matches) != 1:
++        raise RuntimeError(
++            "P38 KV observer request does not have one DP rank: "
++            f"request={request_id} matches={matches}")
++    return matches[0]
++
++
++def _p38_kv_observer_prefix_matches(full_token_ids, target_token_ids):
++    full = np.asarray(full_token_ids, dtype=np.int32).reshape(-1)
++    target = np.asarray(target_token_ids, dtype=np.int32).reshape(-1)
++    return bool(full.size >= target.size and np.array_equal(
++        full[:target.size], target))
++
++
++def _p38_kv_observer_padded_pages(physical_pages, max_pages):
++    pages = np.asarray(physical_pages)
++    if pages.ndim != 1 or pages.dtype.kind not in "iu" or pages.size == 0:
++        raise RuntimeError(
++            "P38 KV observer physical pages must be a non-empty integer vector")
++    if pages.size > int(max_pages):
++        raise RuntimeError(
++            "P38 KV observer request exceeds its registered page bound: "
++            f"pages={pages.size} bound={max_pages}")
++    pages = pages.astype(np.int32, copy=False)
++    result = np.full((int(max_pages),), pages[-1], dtype=np.int32)
++    result[:pages.size] = pages
++    return result
++
++
++def _p38_kv_observer_write(arm, arrays, meta):
++    """Persist one bounded, exclusive NPZ+JSON record and return its index."""
++    import hashlib as _hashlib
++    import io as _io
++    import json as _json
++    import os as _os
++    from pathlib import Path as _Path
++
++    if arm not in ("A", "B"):
++        raise RuntimeError(f"unsupported P38 KV observer arm: {arm!r}")
++    state = _P38_KV_OBSERVER_STATE
++    record_index = int(state["records"])
++    base = _Path(_P38_KV_OBSERVER_DIR) / (
++        f"p38_kv_observer_{record_index:04d}_{arm.lower()}")
++    npz_path = _Path(str(base) + ".npz")
++    json_path = _Path(str(base) + ".json")
++    if npz_path.exists() or json_path.exists():
++        raise RuntimeError(f"P38 KV observer evidence collision at {base}")
++
++    payload = _io.BytesIO()
++    np.savez(payload, **arrays)
++    npz_bytes = payload.getvalue()
++    npz_sha256 = _hashlib.sha256(npz_bytes).hexdigest()
++    metadata = {
++        **meta,
++        "schema": "p38-live-kv-prefix-table-v1",
++        "arm": arm,
++        "record_index": record_index,
++        "npz_sha256": npz_sha256,
++        "array_keys": sorted(arrays),
++    }
++    json_bytes = (_json.dumps(
++        metadata, sort_keys=True, indent=2, default=str) + "\n").encode()
++    new_bytes = len(npz_bytes) + len(json_bytes)
++    if int(state["bytes"]) + new_bytes > _P38_KV_OBSERVER_MAX_BYTES:
++        raise RuntimeError(
++            "P38 KV observer exceeded its registered output byte bound")
++
++    npz_fd = _os.open(
++        npz_path, _os.O_CREAT | _os.O_EXCL | _os.O_WRONLY, 0o600)
++    try:
++        written = _os.write(npz_fd, npz_bytes)
++        if written != len(npz_bytes):
++            raise RuntimeError("P38 KV observer NPZ write was incomplete")
++        _os.fsync(npz_fd)
++    finally:
++        _os.close(npz_fd)
++    json_fd = _os.open(
++        json_path, _os.O_CREAT | _os.O_EXCL | _os.O_WRONLY, 0o600)
++    try:
++        written = _os.write(json_fd, json_bytes)
++        if written != len(json_bytes):
++            raise RuntimeError("P38 KV observer JSON write was incomplete")
++        _os.fsync(json_fd)
++    finally:
++        _os.close(json_fd)
++    if _hashlib.sha256(npz_path.read_bytes()).hexdigest() != npz_sha256:
++        raise RuntimeError("P38 KV observer NPZ self-check failed")
++    state["records"] += 1
++    state["bytes"] += new_bytes
++    print(
++        "[CANON_P38_KV_OBSERVER_RECORD] "
++        f"arm={arm} record={record_index} "
++        f"request={metadata['request_id']} "
++        f"tokens={metadata['target_seq_len']} "
++        f"pages={metadata['logical_pages']} bytes={state['bytes']}",
++        flush=True,
++    )
++    return record_index, npz_sha256
++
++
++def _p38_kv_observer_capture(
++        runner, arm, request_id, dp_rank, target_token_ids, physical_pages,
++        candidate):
++    """Capture one fixed-shape all-prefix table from every live KV layer."""
++    import time as _time
++
++    global _P38_KV_OBSERVER_FN
++    target_tokens = np.asarray(target_token_ids, dtype=np.int32).reshape(-1)
++    if target_tokens.size < 1:
++        raise RuntimeError("P38 KV observer target token prefix is empty")
++    if not runner.kv_caches:
++        raise RuntimeError("P38 KV observer found no KV cache layers")
++    cache_shapes = [tuple(int(value) for value in cache.shape)
++                    for cache in runner.kv_caches]
++    if len(set(cache_shapes)) != 1:
++        raise RuntimeError("P38 KV observer cache layer shapes drifted")
++    cache_shape = cache_shapes[0]
++    if int(runner.block_size) != int(cache_shape[1]):
++        raise RuntimeError(
++            "P38 KV observer runner/cache page sizes differ: "
++            f"runner={runner.block_size} cache={cache_shape[1]}")
++    logical_pages = (
++        target_tokens.size + int(runner.block_size) - 1
++    ) // int(runner.block_size)
++    pages = [int(value) for value in physical_pages[:logical_pages]]
++    if len(pages) != logical_pages:
++        raise RuntimeError(
++            "P38 KV observer block table is shorter than the target prefix")
++    padded_local_pages = _p38_kv_observer_padded_pages(
++        pages, _P38_KV_OBSERVER_MAX_PAGES)
++    padded_global_pages = global_page_indices(
++        cache_shape, int(runner.dp_size), int(dp_rank), padded_local_pages)
++    read_bytes = estimate_fingerprint_read_bytes(
++        cache_shapes, _P38_KV_OBSERVER_MAX_PAGES)
++    if read_bytes > _P38_KV_OBSERVER_MAX_READ_BYTES:
++        raise RuntimeError(
++            "P38 KV observer exceeds its registered device-read bound: "
++            f"read={read_bytes} bound={_P38_KV_OBSERVER_MAX_READ_BYTES}")
++    valid_tokens = np.full(
++        (logical_pages,), int(runner.block_size), dtype=np.int32)
++    valid_tokens[-1] = (
++        target_tokens.size -
++        (logical_pages - 1) * int(runner.block_size)
++    )
++    if not 1 <= int(valid_tokens[-1]) <= int(runner.block_size):
++        raise RuntimeError("P38 KV observer final page extent is invalid")
++
++    if _P38_KV_OBSERVER_FN is None:
++        _P38_KV_OBSERVER_FN = jax.jit(
++            fingerprint_kv_cache_layer_prefixes)
++    start = _time.monotonic()
++    result = _P38_KV_OBSERVER_FN(
++        tuple(runner.kv_caches),
++        jnp.asarray(padded_global_pages, dtype=jnp.int32),
++    )
++    aggregates, samples = jax.device_get(result)
++    elapsed = _time.monotonic() - start
++    token_sha256 = _p38_token_history_sha256(target_tokens.tolist())
++    arrays = {
++        "aggregates": np.asarray(aggregates),
++        "samples": np.asarray(samples),
++        "token_ids": target_tokens,
++        "physical_pages": np.asarray(pages, dtype=np.int32),
++        "padded_global_pages": np.asarray(
++            padded_global_pages, dtype=np.int32),
++        "valid_tokens": valid_tokens,
++    }
++    meta = {
++        "request_id": str(request_id),
++        "source_a_request_id": str(candidate.get(
++            "source_a_request_id", candidate["request_id"])),
++        "source_a_record_index": candidate.get("source_a_record_index"),
++        "diagnostic_round": int(candidate["diagnostic_round"]),
++        "tag_call_index": int(candidate["tag_call_index"]),
++        "tag_prefix": int(candidate["tag_prefix"]),
++        "dp_rank": int(dp_rank),
++        "target_seq_len": int(target_tokens.size),
++        "token_history_sha256": token_sha256,
++        "block_size": int(runner.block_size),
++        "logical_pages": int(logical_pages),
++        "observer_pages": int(_P38_KV_OBSERVER_MAX_PAGES),
++        "layer_count": int(len(runner.kv_caches)),
++        "cache_shape": list(cache_shape),
++        "cache_dtype": str(runner.kv_caches[0].dtype),
++        "cache_sharding": str(getattr(
++            runner.kv_caches[0], "sharding", None)),
++        "device_read_bytes": int(read_bytes),
++        "elapsed_seconds": float(elapsed),
++        "fingerprint_claim": "diagnostic_non_cryptographic",
++    }
++    record_index, npz_sha256 = _p38_kv_observer_write(arm, arrays, meta)
++    return {
++        **candidate,
++        "record_index": int(record_index),
++        "npz_sha256": npz_sha256,
++        "target_token_ids": target_tokens.copy(),
++        "target_seq_len": int(target_tokens.size),
++        "token_history_sha256": token_sha256,
++        "logical_pages": int(logical_pages),
++    }
++
++
++def _p38_kv_observer_after_standard(
++        runner, scheduler_output, req_ids_dp, prompt_rescore_req_ids, output):
++    """Capture finished live A candidates and exact-prefix clean B records."""
++    if not _P38_KV_OBSERVER_DIR:
++        return
++    prompt_rescore_req_ids = {
++        str(value) for value in prompt_rescore_req_ids
++    }
++    is_prompt_rescore = bool(prompt_rescore_req_ids)
++    if not is_prompt_rescore:
++        if output is None:
++            raise RuntimeError("P38 KV observer A path requires sampled output")
++        if isinstance(output, AsyncTPUModelRunnerOutput):
++            raise RuntimeError("P38 KV observer does not admit async scheduling")
++        req_ids = [str(value) for value in output.req_ids]
++        sampled_rows = list(output.sampled_token_ids)
++        if len(req_ids) != len(sampled_rows):
++            raise RuntimeError("P38 KV observer sampled-request rows drifted")
++        for request_id, sampled_ids in zip(req_ids, sampled_rows):
++            scheduled_tokens = int(
++                scheduler_output.num_scheduled_tokens.get(request_id, 0))
++            if scheduled_tokens <= 0:
++                continue
++            candidate = _P38_KV_OBSERVER_CANDIDATES.get(request_id)
++            if candidate is None or any(
++                    record["request_id"] == request_id
++                    for record in _P38_KV_OBSERVER_A_RECORDS):
++                continue
++            request_state = runner.requests.get(request_id)
++            if request_state is None:
++                raise RuntimeError(
++                    f"P38 KV observer candidate disappeared: {request_id}")
++            seq_len = (
++                int(request_state.num_computed_tokens) +
++                scheduled_tokens
++            )
++            if not _p38_kv_observer_request_finished(
++                    request_state, sampled_ids, seq_len,
++                    runner.max_model_len):
++                continue
++            request_index = int(runner.input_batch.req_id_to_index[request_id])
++            token_ids = np.asarray(
++                runner.input_batch.token_ids_cpu[
++                    request_index, :seq_len], dtype=np.int32)
++            dp_rank = _p38_kv_observer_dp_rank(req_ids_dp, request_id)
++            pages = _p38_primary_pages(request_state.block_ids)
++            record = _p38_kv_observer_capture(
++                runner, "A", request_id, dp_rank, token_ids, pages,
++                candidate)
++            _P38_KV_OBSERVER_A_RECORDS.append(record)
++        return
++
++    # Prompt-logprob-only requests need not appear in output.req_ids: that
++    # vector describes sampled rows, while a clean rescore can update KV and
++    # return prompt logprobs without sampling a token.  Enumerate the identity
++    # set frozen before _sample_from_logits() consumed it instead.  The
++    # scheduler and DP-rank checks below remain the fail-closed proof that the
++    # request participated in this exact call.
++    for request_id in sorted(prompt_rescore_req_ids):
++        scheduled_tokens = int(
++            scheduler_output.num_scheduled_tokens.get(request_id, 0))
++        if scheduled_tokens <= 0:
++            continue
++        request_state = runner.requests.get(request_id)
++        if request_state is None:
++            raise RuntimeError(
++                f"P38 KV observer rescore request disappeared: {request_id}")
++        seq_len = (
++            int(request_state.num_computed_tokens) +
++            scheduled_tokens
++        )
++        if seq_len < int(request_state.num_tokens):
++            continue
++        request_index = int(runner.input_batch.req_id_to_index[request_id])
++        full_token_ids = np.asarray(
++            runner.input_batch.token_ids_cpu[
++                request_index, :int(request_state.num_tokens)],
++            dtype=np.int32)
++        for candidate in _P38_KV_OBSERVER_A_RECORDS:
++            candidate_index = int(candidate["record_index"])
++            if candidate_index in _P38_KV_OBSERVER_MATCHED_A:
++                continue
++            target_token_ids = candidate["target_token_ids"]
++            if not _p38_kv_observer_prefix_matches(
++                    full_token_ids, target_token_ids):
++                continue
++            dp_rank = _p38_kv_observer_dp_rank(req_ids_dp, request_id)
++            pages = _p38_primary_pages(request_state.block_ids)
++            clean_candidate = {
++                **candidate,
++                "request_id": request_id,
++                "source_a_request_id": candidate["request_id"],
++                "source_a_record_index": candidate_index,
++            }
++            _p38_kv_observer_capture(
++                runner, "B", request_id, dp_rank, target_token_ids, pages,
++                clean_candidate)
++            _P38_KV_OBSERVER_MATCHED_A.add(candidate_index)
+ 
+ 
+ def _p38_observe_scheduled_prefixes(prefixes, program_path):
+@@ -2802,6 +3222,12 @@
+                     f"error={type(exc).__name__}: {exc}",
+                     flush=True,
+                 )
++            # Unlike the broad serving-envelope capture above, the live-KV
++            # discriminator is a bounded, pre-registered experiment.  Its
++            # contracts fail closed: a missing A/B record would otherwise turn
++            # an invalid diagnostic run into a false green.
++            _p38_kv_observer_after_standard(
++                self, scheduler_output, req_ids_dp, frozenset(), output)
+             return output
+ 
+     def _modify_prev_results(self):
+@@ -3125,6 +3551,16 @@
+                 hidden_states.expert_indices = expert_indices
+                 return hidden_states
+ 
++        # Capture clean B after model_fn has materialized the final prompt
++        # chunk into KV and after maybe_forbid_compile has exited.  The
++        # observer owns a separate bounded JIT and must never compile inside
++        # the engine's compile-forbidden region.  sample_tokens() is too late
++        # because prompt-only identity can be consumed there.
++        if self.input_batch.num_prompt_logprobs:
++            _p38_kv_observer_after_standard(
++                self, scheduler_output, req_ids_dp,
++                frozenset(self.input_batch.num_prompt_logprobs), None)
++
+         if self.is_pooling_model:
+             num_reqs = self.input_batch.num_reqs
+ 

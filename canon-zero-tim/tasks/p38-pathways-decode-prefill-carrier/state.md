@@ -6,9 +6,25 @@
 - Definition of done: one source-pinned flag-on run reports exact
   `S_decode_vs_S_prefill`, exact `S_prefill_vs_T_old`, and exact
   `T_old_vs_T_current` before a strict full workload is admitted.
-- Active phase: P38.2m fixed-M single-active discriminator completed with P38s16
-  from source `4101f752667b`. Patch 15 fixed-M compile-geometry attestation and
-  exact-token single-active records successfully captured across 3 frozen rounds.
+- Active phase: P38.2n live-KV content discriminator. P38.2m completed with
+  P38s16/source `4101f752667b`; the exact host audit is frozen. N3 is locally
+  complete and one stock N4 production-shape discriminator is admitted after
+  review plus publication of the current worktree.
+- The all-prefix fingerprint primitive passes CPU and real TP4 v5p rehearsal:
+  36 layers x 9 pages, 339,738,624 bytes read, 5,308,416 bytes returned,
+  0.9514 s warm plus 0.0078 s host transfer, endpoint exact, repeat exact, and
+  a normal-BF16 one-bit negative detected. One table covers page extents
+  1..256; it is intended once per completed deep candidate, never per token.
+  Patch 16 now wires both live A and exact-prefix clean B. The real Qwen3-8B
+  DP1xTP4 r6 rehearsal produced 3 A + 3 B records, exact token/extent/
+  provenance pairs, and
+  `classification=observer_pairs_valid_red_join_pending` with no backward or
+  optimizer commit.
+- Final pinned-image gates pass: Qwen3-1.7B and Qwen3-8B each passed 29 runner
+  tests and verified all 30 manifest files. Focused P38 tests, postflight, GCS
+  persistence, and the one-host v5p gate pass. The broad host CPU suite has
+  one environment-only failure because the host venv's `tpu_inference` lacks
+  `compute_and_gather_logprobs`; it is not the pinned engine image.
 - Task directory:
   `canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/`.
 
@@ -21,9 +37,16 @@
   - B-C boundary (`S_prefill` vs `T_old`): STRICT EXACT 0 on all 3 rounds.
   - A-B boundary (`S_decode` vs `S_prefill`): Round 1 had 52 differing bytes
     (32 elements), Round 2 had 27 differing bytes, Round 3 had 18 differing bytes.
-  - Incident ledger: 3,669 records / 4,217 calls / 91.7 MB, successfully
+  - Incident ledger: 3,686 records / 4,234 calls / 91.7 MB, successfully
     recording fixed-M compile geometry and exact tokens for natural single-active calls.
   - Evidence archived under `evidence/p38s16/`.
+- The reproducible P38s16 audit validates 44,676 request entries and joins all
+  60 A-B mismatch elements with zero missing/ambiguous joins. The only
+  naturally single-active mismatch is round 2 / row 255 / call 4223 / request
+  `2529-a6d304ba`, prefix 2209, with `A=-0.041210174560546875`,
+  `B=C=-0.04151153564453125`. All ledger entries with compile geometry share
+  one production fixed-M signature. This is exact call identity, not live-KV
+  content evidence. See `artifacts/p38s16_single_active_audit_0814.json`.
 - P38s15/source `58a0ed84` completed all 3 Frozen-Weight diagnostic rounds
   (768 trajectories total, 51,330 action tokens) with zero backward and zero
   optimizer commits, exiting with controlled code 42. It measured exact B-C
@@ -116,11 +139,11 @@
   fail-closed.
 - No P38 PVC is mounted. GCS is the sole durable evidence transport for this
   phase; adding a second storage system remains out of scope.
-- A live worker now uploads immutable, SHA-sealed host evidence every 30
-  seconds when log/journal/ledger/round/report/capsule state changes, and once
-  more after the workload stops. `LIVE.json` is written last. A live snapshot
-  is crash evidence only; `COLLECTED` and postflight-only `COMPLETE` retain
-  their prior meanings.
+- A live worker uploads immutable, SHA-sealed host evidence every 30 seconds
+  when log/journal/ledger/round/report/capsule state changes. It now also owns
+  terminal persistence through atomic collect/complete requests and ACKs.
+  `COLLECTED` can survive a later postflight failure; `COMPLETE` remains
+  postflight-only and is requested last.
 
 - Row 231 E0-lite is complete. REF reproduced production B/T-old exactly, but
   mask-derived R0/R1 missed production A at 470 / 566 action values. Verdict:
@@ -173,9 +196,21 @@
 - The old DP1 replay scripts and reports are explicitly labeled E0-lite. They
   remain useful counterfactuals but cannot establish production program
   identity or unlock the first-divergence seam walk.
+- Call-4223 E0-lite completed with `E0_LITE_ENVELOPE_NOT_REPRODUCED`.
+  REF reproduced all 646 production B/T-old action values, while repeat-exact
+  R0/R1 differed from production at 428 values (`max_abs=29.4570369720459`).
+  The one-bit negative and 399-leaf weight gates passed. This replay cannot
+  select an operator repair; P38.2n N3 therefore proceeded to the now-complete
+  live/clean observer gate.
 
 ## Local gates at this checkpoint
 
+- Current pinned-image P33 CPU/adjacent gate: PASS with workload 85/85,
+  alignment 37/37, all focused P38 persistence/postflight tests, and terminal
+  `[P33.WORKLOAD] CPU_GATE PASS`.
+- Worker-owned persistence rejects complete-before-collect and preserves
+  completion-last semantics. The direct host renderer import lacks `metrax`;
+  the same renderer tests pass in the pinned image and only that result counts.
 - P38.2m focused classifiers: serving capture 36/36 and replay 7/7 PASS.
 - Complete pinned-image P33 CPU/adjacent gate: PASS with workload 85/85,
   alignment 37/37, and terminal marker `[P33.WORKLOAD] CPU_GATE PASS`.
@@ -230,26 +265,26 @@
 
 ## Next action
 
-1. P38.2m publication is approved. Do not launch a target acquisition until
-   the published source is pinned and separately approved.
-2. Do not run `run_p38_frozenlake_replay.sh` as strict E0; it is a DP1,
-   batch-size-one E0-lite counterfactual and changes the executable geometry.
-3. After publication approval, one production-shape stock acquisition may be
-   used only to obtain an exact mismatch join carrying the new fixed-M fields
-   and exact single-active token history. Patch 15 alone does not identify the
-   carrier.
-4. Once that join exists, add exactly one observer with its own neutrality
-   gate: live KV page content versus deterministic recomputation, or—if KV is
-   exact—the first-divergence seam walk. Do not rerun concurrency 32 or
-   KV-unified.
+1. Review, commit, and push the current worktree. No target may render from an
+   uncommitted tree.
+2. Render exactly one new `p38s17` stock-only production discriminator at
+   DP16xTP4, concurrency 256. Do not apply a unified or concurrency arm.
+3. Require three A/B observer pairs, complete red-row join, worker-owned
+   COLLECTED/COMPLETE markers, exact B-C, no backward, and zero optimizer
+   commits.
+4. If a joined red row has differing live/clean KV fingerprints, localize the
+   first dirty layer/page and repair its writer/lifecycle path. If every
+   covered red-row fingerprint is equal, reject KV content for that incident
+   and begin the ordered in-situ q_norm/post-RoPE/RPA/residual/logits seam walk.
 
 ## Claim ceiling and blockers
 
 - Observation generations are not allocator generations. They cannot prove an
   unobserved free/reuse event or equal KV contents.
-- Full device KV content hashing is intentionally absent from P38s12a because
-  it can perturb the program. Add it only for an exactly joined red request and
-  only with observer-neutrality evidence.
+- Patch 16 records bounded integer aggregates and fixed samples for live and
+  clean KV. These are diagnostic fingerprints, not cryptographic hashes or a
+  mathematical proof of full-byte equality. They choose a branch only when
+  joined to a production A-B-red row.
 - Fixed-M attestation proves that scheduler occupancy one did not collapse the
   production input aval. It does not fingerprint a compiled executable and it
   does not prove equal KV content.
@@ -263,9 +298,10 @@
 ## Rollback
 
 Leave `CANON_P38_SERVING_CAPTURE_DIR`, `CANON_P38_REQUEST_JOURNAL`,
-`CANON_P38_PRECHECK_ONLY`, and `CANON_KV_UNIFIED` unset. The diagnostic is
-default-off and does not change training, evaluation, prefix cache, precision,
-optimizer placement, or canonical kernels.
+`CANON_P38_KV_OBSERVER_DIR`, `CANON_P38_PRECHECK_ONLY`, and
+`CANON_KV_UNIFIED` unset. The diagnostic is default-off and does not change
+training, evaluation, prefix cache, precision, optimizer placement, or
+canonical kernels.
 
-- Updated: 2026-08-14 UTC; P38s15 is complete; P38.2m is implemented, locally
-  gated, and approved for publication. No target run occurred in P38.2m.
+- Updated: 2026-08-15 UTC; P38.2n N3 is locally complete. No target N4 run,
+  backward, optimizer commit, commit, or push occurred in this worktree.

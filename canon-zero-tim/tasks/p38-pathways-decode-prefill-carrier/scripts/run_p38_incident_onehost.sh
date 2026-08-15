@@ -75,6 +75,11 @@ if [ "$mode" = on ]; then
     -e CANON_P38_SERVING_CAPTURE_PREFIX_BOUNDS=0,512,1024,1536,3072
     -e CANON_P38_SERVING_CAPTURE_FREE_SPACE_MULTIPLIER=5
     -e CANON_P38_SERVING_CAPTURE_EXPECTED_PATH=standard
+    -e CANON_P38_KV_OBSERVER_DIR="$capture"
+    -e CANON_P38_KV_OBSERVER_MAX_CANDIDATES=3
+    -e CANON_P38_KV_OBSERVER_MAX_PAGES=16
+    -e CANON_P38_KV_OBSERVER_MAX_BYTES=134217728
+    -e CANON_P38_KV_OBSERVER_MAX_READ_BYTES=671088640
   )
 fi
 
@@ -168,6 +173,44 @@ assert {row["diagnostic_round"] for row in rows} <= {0, 1, 2}
 assert all(row["requests"] for row in rows)
 print(f"[P38.INCIDENT.ONEHOST] LEDGER_PASS records={len(rows)} bytes={path.stat().st_size}")
 PY
+  python3 - "$capture" <<'PY'
+import hashlib, json, pathlib, sys
+import numpy as np
+
+root = pathlib.Path(sys.argv[1])
+records = [json.loads(path.read_text()) for path in sorted(
+    root.glob("p38_kv_observer_*.json"))]
+assert records, "P38 one-host observer produced no records"
+assert {record["arm"] for record in records} == {"A", "B"}
+by_a = {record["record_index"]: record for record in records
+        if record["arm"] == "A"}
+by_b = [record for record in records if record["arm"] == "B"]
+assert len(by_a) == len(by_b), (len(by_a), len(by_b))
+for record in records:
+  npz = root / f"p38_kv_observer_{record['record_index']:04d}_{record['arm'].lower()}.npz"
+  assert hashlib.sha256(npz.read_bytes()).hexdigest() == record["npz_sha256"]
+  with np.load(npz) as arrays:
+    assert set(arrays.files) == set(record["array_keys"])
+for record in records:
+  if record["arm"] != "B":
+    continue
+  source = by_a[record["source_a_record_index"]]
+  assert record["source_a_request_id"] == source["request_id"]
+  assert record["token_history_sha256"] == source["token_history_sha256"]
+  assert record["target_seq_len"] == source["target_seq_len"]
+  a_path = root / f"p38_kv_observer_{source['record_index']:04d}_a.npz"
+  b_path = root / f"p38_kv_observer_{record['record_index']:04d}_b.npz"
+  with np.load(a_path) as a, np.load(b_path) as b:
+    np.testing.assert_array_equal(a["token_ids"], b["token_ids"])
+    np.testing.assert_array_equal(a["valid_tokens"], b["valid_tokens"])
+print(f"[P38.INCIDENT.ONEHOST] KV_OBSERVER_PASS records={len(records)} A={len(by_a)} B={len(by_b)}")
+PY
+  python3 \
+    "$pkg/tasks/p38-pathways-decode-prefill-carrier/scripts/classify_p38_kv_observer.py" \
+    --directory "$capture" \
+    --output "$state/p38_kv_observer.classification.json"
+  grep -q '"classification": "observer_pairs_valid_red_join_pending"' \
+    "$state/p38_kv_observer.classification.json"
 fi
 sha256sum "$raw" "$pre_report" "$round_file" "$0"
 echo "[P38.INCIDENT.ONEHOST] PASS mode=$mode rounds=3 backward=0 optimizer_commits=0"

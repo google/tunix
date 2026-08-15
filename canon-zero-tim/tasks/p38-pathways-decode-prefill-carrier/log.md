@@ -1255,4 +1255,88 @@
   `pre_alignment.json`, `p38_frozenlake_mismatch_capsule.npz`, `incident-ledger.jsonl`,
   `request-journal.jsonl`, `source_commit.txt`, `SHA256SUMS`).
 - Next: Analyze single-active incident records to choose decisive next observer.
+## 2026-08-14 UTC — P38.2n opened from the P38s16 single-active incident
 
+- Reconciled the complete committed P38s16 bundle rather than its early live
+  snapshot: 3,686 incident records / 4,234 calls / 44,676 request entries.
+- Added a reproducible host-only audit. It joins all 60 mismatch elements with
+  zero missing/ambiguous joins and isolates call 4223 as the sole natural
+  single-active mismatch. Its fixed-M geometry is production-shaped; its live
+  KV bytes were not captured, so the claim remains host identity only.
+- Opened P38.2n with a two-way verdict: live KV differs from a deterministic
+  clean oracle, or KV is exact and the ordered decode seam walk begins.
+- Moved final GCS persistence into the already-live snapshot worker through
+  atomic collect/complete requests and ACKs. `COMPLETE` remains impossible
+  until the head has accepted every postflight check.
+- Focused persistence and outer-postflight tests pass. Direct host import of
+  the renderer test lacks `metrax`; it is not counted until the pinned-image
+  gate runs.
+- No live-KV observer, target run, backward, optimizer commit, commit, or push
+  occurred. The target remains NOT ADMITTED.
+
+## 2026-08-14 UTC — call-4223 one-host E0-lite completed
+
+- Ran the P38s16 round-2 / row-255 capsule on the authorized four-chip v5p
+  host as DP1xTP4 E0-lite. The exact call-4223 token history selected the row,
+  but the replay did not claim the production DP16 executable.
+- REF reproduced all 646 production B/T-old values exactly. R0 and R1 were
+  exact to each other and on repeat, but each differed from the captured
+  production values at 428 positions with maximum absolute difference
+  `29.4570369720459`.
+- The one-bit negative control fired, all 399 mapped weight leaves were exact,
+  and no backward or optimizer commit ran.
+- Verdict: `E0_LITE_ENVELOPE_NOT_REPRODUCED`. Do not begin an operator seam
+  walk from this replay. P38.2n N3 live-KV observation remains next.
+
+## 2026-08-14 UTC — P38.2n KV fingerprint primitive rehearsal
+
+- Added a shared BF16 page fingerprint with DP-local-to-global page mapping,
+  exact integer aggregates, masked invalid tails, fixed samples, and a read
+  byte bound. It is explicitly not a cryptographic hash.
+- CPU gate: repeat exact, valid-region one-bit mutation red, invalid page-tail
+  mutation masked, and invalid geometry/dtype rejected.
+- Real four-chip v5p TP4 all-prefix rehearsal: 36 layers x 9 pages,
+  339,738,624 bytes read and 5,308,416 bytes returned; compile 34.276 s, warm
+  0.9514 s, host transfer 0.0078 s, endpoint exact, repeat exact, negative red.
+- The all-prefix table covers valid extents 1..256 and is therefore bounded to
+  one end-of-request capture per deep candidate. Per-token use is forbidden.
+- The first negative used the low bit of BF16 +0 and stayed green because the
+  device path may flush that subnormal. The final negative flips a normal
+  non-zero BF16 value and is observed. This is retained as a test-design
+  lesson, not hidden as a passing first attempt.
+- N3 remains incomplete and target launch remains NOT ADMITTED: production
+  runner wiring and an exact token-prefix B/rescore clean-oracle join are still
+  required. A live-only record cannot distinguish stale content from a clean
+  value.
+- Packaging verification passed in the pinned image: complete P33 CPU/adjacent
+  gate PASS, and both model overlays passed 25 tests with all 30 manifest
+  entries verified. This closes install-list drift, not runtime observation.
+
+## 2026-08-15 UTC — P38.2n N3 runner wiring and one-host gate completed
+
+- Added default-off Patch 16 and one shared fixed-shape all-prefix KV
+  fingerprint callable for live decode A and exact-prefix clean-rescore B.
+- Rejected rehearsals r1-r5 found three concrete wiring bugs: prompt-logprob
+  identity is consumed before post-sampling observation; prompt-only requests
+  need not appear in sampled output rows; and the observer JIT must run outside
+  `maybe_forbid_compile`. The final B hook is after clean `model_fn` and outside
+  that context. An AST test fail-closes this placement.
+- Real Qwen3-8B DP1xTP4 r6 completed three frozen-weight rounds with no
+  backward/commit and produced exactly 3 A + 3 B records. Every pair had exact
+  token history, target length, valid extent, and provenance. The classifier
+  returned `observer_pairs_valid_red_join_pending`; all local fingerprints
+  were exact because local A-B was exact.
+- Added fail-closed target integration: stock-only renderer bounds, red-row
+  join classifier, postflight cardinality, incremental GCS persistence, and
+  worker-owned completion-last terminal evidence. Unified KV never enables
+  the observer.
+- Final exact-image gate PASS: Qwen3-1.7B and Qwen3-8B each verified 30
+  manifest files and passed 29 runner tests. Focused P38 observer, renderer,
+  postflight, persistence, classifier, syntax, and diff gates pass.
+- The broad host CPU suite has one environment-only failure in its existing
+  canonical-adapter replay: the host venv's `tpu_inference` does not export
+  `compute_and_gather_logprobs`. The pinned image used by the target and
+  exact-image gate does. No functionality was weakened to hide this mismatch.
+- N3 is locally complete. One N4 production stock discriminator is admitted
+  only after review/commit/push. No target launch, backward, optimizer commit,
+  commit, or push occurred in this worktree.

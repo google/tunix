@@ -195,6 +195,28 @@ if [ "$mode" = snapshot ]; then
       live_files+=("$capsule_name")
     done
   fi
+  if [ "${CANON_P38_LIVE_INCLUDE_OBSERVER:-0}" = "1" ]; then
+    if [ -z "${CANON_P38_KV_OBSERVER_DIR:-}" ] || \
+       [ ! -d "$CANON_P38_KV_OBSERVER_DIR" ]; then
+      echo "[P38.GCS] REFUSING: observer snapshot requested without a directory" >&2
+      exit 1
+    fi
+    shopt -s nullglob
+    observer_sources=(
+      "$CANON_P38_KV_OBSERVER_DIR"/p38_kv_observer_*.json
+      "$CANON_P38_KV_OBSERVER_DIR"/p38_kv_observer_*.npz
+    )
+    shopt -u nullglob
+    if [ "${#observer_sources[@]}" -eq 0 ]; then
+      echo "[P38.GCS] REFUSING: observer snapshot requested without records" >&2
+      exit 1
+    fi
+    for observer_source in "${observer_sources[@]}"; do
+      observer_name="$(basename "$observer_source")"
+      cp -- "$observer_source" "$live_stage/$observer_name"
+      live_files+=("$observer_name")
+    done
+  fi
   if [ "${#live_files[@]}" -eq 0 ]; then
     echo "[P38.GCS] SNAPSHOT_SKIPPED sequence=$snapshot_sequence reason=no-host-evidence"
     rmdir "$live_stage"
@@ -260,6 +282,11 @@ if [ "$mode" = collect ]; then
     run.log pre-alignment.jsonl mismatch-capsule.npz
     serving-classification.json serving-capture.tar
   )
+  if [ -n "${CANON_P38_KV_OBSERVER_CLASSIFICATION:-}" ]; then
+    copy_required "$CANON_P38_KV_OBSERVER_CLASSIFICATION" \
+      kv-observer-classification.json
+    collected_files+=(kv-observer-classification.json)
+  fi
   shopt -s nullglob
   round_capsules=("${CANON_P38_MISMATCH_CAPSULE%.npz}".round-*.npz)
   shopt -u nullglob

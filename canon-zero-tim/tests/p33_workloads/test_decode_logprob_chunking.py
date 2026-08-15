@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import ast
 from contextlib import nullcontext
 import importlib.util
+import inspect
 from pathlib import Path
 import sys
 import tempfile
+import textwrap
 from types import SimpleNamespace
 import unittest
 from unittest import mock
@@ -18,6 +21,10 @@ import numpy as np
 
 
 def _load_runner(path: Path):
+  # The production overlay directory is prepended through PYTHONPATH. Mirror
+  # that import contract when this test loads the runner by absolute filename,
+  # so sibling shims such as p38_kv_fingerprint resolve identically.
+  sys.path.insert(0, str(path.parent))
   spec = importlib.util.spec_from_file_location("canon_p33_test_runner", path)
   if spec is None or spec.loader is None:
     raise RuntimeError(f"cannot load canonical runner from {path}")
@@ -754,6 +761,191 @@ class DecodeLogprobChunkingTest(unittest.TestCase):
     self.assertEqual(payload["generated_tokens"].shape, (1, 2))
     self.assertEqual(payload["logprob_values"].shape, (1, 2, 1))
     self.assertEqual(meta["program_path"], "standard")
+
+  def test_kv_observer_helpers_fail_closed_and_match_exact_prefix(self):
+    finished = SimpleNamespace(
+        sampling_params=SimpleNamespace(
+            all_stop_token_ids={99}, max_tokens=4),
+        output_token_ids=[7, 8, 9, 10],
+    )
+    self.assertTrue(self.runner._p38_kv_observer_request_finished(
+        finished, [10], 12, 4096))
+    finished.output_token_ids = []
+    self.assertTrue(self.runner._p38_kv_observer_request_finished(
+        finished, [99], 12, 4096))
+    self.assertFalse(self.runner._p38_kv_observer_request_finished(
+        finished, [10], 12, 4096))
+    self.assertTrue(self.runner._p38_kv_observer_prefix_matches(
+        [1, 2, 3, 4], [1, 2, 3]))
+    self.assertFalse(self.runner._p38_kv_observer_prefix_matches(
+        [1, 9, 3, 4], [1, 2, 3]))
+    np.testing.assert_array_equal(
+        self.runner._p38_kv_observer_padded_pages([7, 8], 4),
+        np.array([7, 8, 8, 8], dtype=np.int32),
+    )
+    with self.assertRaisesRegex(RuntimeError, "page bound"):
+      self.runner._p38_kv_observer_padded_pages([1, 2, 3], 2)
+
+  def test_kv_observer_selects_one_single_active_candidate_per_round(self):
+    original = {
+        "dir": self.runner._P38_KV_OBSERVER_DIR,
+        "candidates": dict(self.runner._P38_KV_OBSERVER_CANDIDATES),
+        "rounds": set(self.runner._P38_KV_OBSERVER_CANDIDATE_ROUNDS),
+    }
+    try:
+      self.runner._P38_KV_OBSERVER_DIR = "/tmp/p38-test"
+      self.runner._P38_KV_OBSERVER_CANDIDATES.clear()
+      self.runner._P38_KV_OBSERVER_CANDIDATE_ROUNDS.clear()
+      base = {
+          "scheduled_request_count": 1,
+          "diagnostic_round": 2,
+          "call_index": 4223,
+          "requests": [{
+              "request_id": "candidate-a",
+              "num_computed_tokens": 2209,
+              "dp_rank": 0,
+              "physical_pages": [36, 9],
+          }],
+      }
+      self.runner._p38_kv_observer_note_candidate(base)
+      duplicate_round = {
+          **base,
+          "call_index": 4224,
+          "requests": [{
+              **base["requests"][0],
+              "request_id": "candidate-b",
+          }],
+      }
+      self.runner._p38_kv_observer_note_candidate(duplicate_round)
+      self.assertEqual(
+          list(self.runner._P38_KV_OBSERVER_CANDIDATES), ["candidate-a"])
+    finally:
+      self.runner._P38_KV_OBSERVER_DIR = original["dir"]
+      self.runner._P38_KV_OBSERVER_CANDIDATES.clear()
+      self.runner._P38_KV_OBSERVER_CANDIDATES.update(original["candidates"])
+      self.runner._P38_KV_OBSERVER_CANDIDATE_ROUNDS.clear()
+      self.runner._P38_KV_OBSERVER_CANDIDATE_ROUNDS.update(original["rounds"])
+
+  def test_kv_observer_captures_finished_a_then_exact_prefix_b(self):
+    original = {
+        "dir": self.runner._P38_KV_OBSERVER_DIR,
+        "candidates": dict(self.runner._P38_KV_OBSERVER_CANDIDATES),
+        "a_records": list(self.runner._P38_KV_OBSERVER_A_RECORDS),
+        "matched": set(self.runner._P38_KV_OBSERVER_MATCHED_A),
+    }
+    candidate = {
+        "request_id": "decode-a",
+        "diagnostic_round": 0,
+        "tag_call_index": 17,
+        "tag_prefix": 1600,
+        "tag_dp_rank": 0,
+        "tag_physical_pages": [4, 5],
+    }
+    try:
+      self.runner._P38_KV_OBSERVER_DIR = "/tmp/p38-test"
+      self.runner._P38_KV_OBSERVER_CANDIDATES.clear()
+      self.runner._P38_KV_OBSERVER_CANDIDATES["decode-a"] = candidate
+      self.runner._P38_KV_OBSERVER_A_RECORDS.clear()
+      self.runner._P38_KV_OBSERVER_MATCHED_A.clear()
+      decode_state = SimpleNamespace(
+          num_computed_tokens=2,
+          output_token_ids=[42],
+          sampling_params=SimpleNamespace(
+              all_stop_token_ids=set(), max_tokens=1),
+          block_ids=[[4]],
+      )
+      decode_runner = SimpleNamespace(
+          input_batch=SimpleNamespace(
+              num_prompt_logprobs={},
+              req_id_to_index={"decode-a": 0},
+              token_ids_cpu=np.array([[11, 12, 13, 42]], dtype=np.int32),
+          ),
+          requests={"decode-a": decode_state},
+          max_model_len=4096,
+      )
+      output = SimpleNamespace(
+          req_ids=["decode-a"], sampled_token_ids=[[42]])
+      scheduler = SimpleNamespace(
+          num_scheduled_tokens={"decode-a": 1})
+      a_record = {
+          **candidate,
+          "record_index": 0,
+          "target_token_ids": np.array([11, 12, 13], dtype=np.int32),
+      }
+      with mock.patch.object(
+          self.runner, "_p38_kv_observer_capture", return_value=a_record
+      ) as capture:
+        self.runner._p38_kv_observer_after_standard(
+            decode_runner, scheduler, {0: ["decode-a"]}, set(), output)
+      self.assertEqual(capture.call_args.args[1], "A")
+      np.testing.assert_array_equal(
+          capture.call_args.args[4], np.array([11, 12, 13]))
+      self.assertEqual(len(self.runner._P38_KV_OBSERVER_A_RECORDS), 1)
+
+      clean_state = SimpleNamespace(
+          num_computed_tokens=0,
+          num_tokens=4,
+          block_ids=[[8]],
+      )
+      clean_runner = SimpleNamespace(
+          input_batch=SimpleNamespace(
+              num_prompt_logprobs={"clean-b": 1},
+              req_id_to_index={"clean-b": 0},
+              token_ids_cpu=np.array([[11, 12, 13, 42]], dtype=np.int32),
+          ),
+          requests={"clean-b": clean_state},
+      )
+      # Prompt-logprob-only work is captured immediately after model_fn, before
+      # sample_tokens can consume its identity or return through a prompt-only
+      # path.  B therefore has no sampled output object by construction.
+      clean_scheduler = SimpleNamespace(
+          num_scheduled_tokens={"clean-b": 4})
+      with mock.patch.object(
+          self.runner, "_p38_kv_observer_capture", return_value={}
+      ) as capture:
+        self.runner._p38_kv_observer_after_standard(
+            clean_runner, clean_scheduler, {0: ["clean-b"]},
+            {"clean-b"}, None)
+      self.assertEqual(capture.call_args.args[1], "B")
+      self.assertEqual(capture.call_args.args[6]["source_a_record_index"], 0)
+      self.assertEqual(self.runner._P38_KV_OBSERVER_MATCHED_A, {0})
+    finally:
+      self.runner._P38_KV_OBSERVER_DIR = original["dir"]
+      self.runner._P38_KV_OBSERVER_CANDIDATES.clear()
+      self.runner._P38_KV_OBSERVER_CANDIDATES.update(original["candidates"])
+      self.runner._P38_KV_OBSERVER_A_RECORDS.clear()
+      self.runner._P38_KV_OBSERVER_A_RECORDS.extend(original["a_records"])
+      self.runner._P38_KV_OBSERVER_MATCHED_A.clear()
+      self.runner._P38_KV_OBSERVER_MATCHED_A.update(original["matched"])
+
+  def test_kv_observer_clean_b_hook_is_outside_compile_forbidden_context(self):
+    source = textwrap.dedent(inspect.getsource(
+        self.runner.TPUModelRunner._execute_model))
+    tree = ast.parse(source)
+    parents = {}
+    for parent in ast.walk(tree):
+      for child in ast.iter_child_nodes(parent):
+        parents[child] = parent
+    hooks = []
+    for node in ast.walk(tree):
+      if not isinstance(node, ast.Call):
+        continue
+      if not isinstance(node.func, ast.Name):
+        continue
+      if node.func.id != "_p38_kv_observer_after_standard":
+        continue
+      if len(node.args) != 5 or not isinstance(node.args[-1], ast.Constant):
+        continue
+      if node.args[-1].value is None:
+        hooks.append(node)
+    self.assertEqual(len(hooks), 1)
+    ancestor = parents.get(hooks[0])
+    while ancestor is not None and not isinstance(
+        ancestor, (ast.FunctionDef, ast.AsyncFunctionDef)):
+      self.assertNotIsInstance(
+          ancestor, (ast.With, ast.AsyncWith),
+          "clean-B observer must compile outside maybe_forbid_compile")
+      ancestor = parents.get(ancestor)
 
 
 if __name__ == "__main__":

@@ -9,7 +9,11 @@ run_case() (
   local mode="$1" state command rc
   echo "[P38.SERVING] CASE mode=$mode"
   state="$(mktemp -d)"
-  trap 'rm -r "$state"' EXIT
+  if [ "${P38_KEEP_TEST_STATE:-0}" = "1" ]; then
+    echo "[P38.SERVING] KEEP_STATE path=$state"
+  else
+    trap 'rm -r "$state"' EXIT
+  fi
   mkdir -p "$state/bin" "$state/fake-gcs"
   cp "$ROOT/tests/p38_serving/fake_gcloud.sh" "$state/bin/gcloud"
   chmod +x "$state/bin/gcloud"
@@ -35,6 +39,10 @@ run_case() (
   export CANON_P38_LIVE_SNAPSHOT_INTERVAL_SECONDS=1
   export CANON_P38_LIVE_SNAPSHOT_STOP_FILE="$state/p38_live.stop"
   export CANON_P38_LIVE_SNAPSHOT_WORKER_LOG="$state/p38_live_worker.log"
+  export CANON_P38_LIVE_COLLECT_REQUEST_FILE="$state/p38_collect.request"
+  export CANON_P38_LIVE_COLLECT_ACK_FILE="$state/p38_collect.ack"
+  export CANON_P38_LIVE_COMPLETE_REQUEST_FILE="$state/p38_complete.request"
+  export CANON_P38_LIVE_COMPLETE_ACK_FILE="$state/p38_complete.ack"
   export CANON_P38_SERVING_CAPTURE_EXPECTED_RECORDS=4
   export CANON_P38_SERVING_CAPTURE_EXPECTED_PATH=standard
   export CANON_P38_SERVING_CAPTURE_PREFIX_BOUNDS=1536,1664,1792,1920,2048
@@ -44,6 +52,12 @@ run_case() (
   export CANON_P38_GCS_PREFIX="gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/postflight-$mode/attempt-0"
   export CANON_P38_MISMATCH_CAPSULE="$state/mismatch.npz"
   export CANON_KV_UNIFIED=0
+  export CANON_P38_KV_OBSERVER_DIR="$state/capture"
+  export CANON_P38_KV_OBSERVER_MAX_CANDIDATES=3
+  export CANON_P38_KV_OBSERVER_MAX_PAGES=16
+  export CANON_P38_KV_OBSERVER_MAX_BYTES=134217728
+  export CANON_P38_KV_OBSERVER_MAX_READ_BYTES=671088640
+  export CANON_P38_KV_OBSERVER_CLASSIFICATION="$state/kv-observer.json"
   command="python3 $ROOT/tests/p38_serving/make_fixture.py --directory $state/capture --mismatch-capsule $CANON_P38_MISMATCH_CAPSULE"
   if [ "$mode" = missing-journal ]; then
     command+=" --omit-request-journal"
@@ -59,6 +73,16 @@ run_case() (
   command+="; printf '%s\\n' '[CANON_P38_SERVING_CAPTURE_OBSERVE] {\"call\":1,\"program_path\":\"standard\",\"one_token_requests\":1}'"
   command+="; printf '%s\\n' '[CANON_P38_REQUEST_JOURNAL] record=1 request=request-0 prefix=1600 stratum=0 dp=0'"
   command+="; printf '%s\\n' '[CANON_P38_INCIDENT_LEDGER] record=1 call=1 requests=1 bytes=1'"
+  if [[ "$mode" != unified-* ]]; then
+    command+="; printf '%s\\n' '[CANON_P38_KV_OBSERVER_INIT] enabled=1 candidates=3 pages=16 max_output_bytes=134217728 max_read_bytes=671088640'"
+    command+="; printf '%s\\n' '[CANON_P38_KV_OBSERVER_CANDIDATE] round=0 request=decode-0 call=1 prefix=1600'"
+    command+="; printf '%s\\n' '[CANON_P38_KV_OBSERVER_CANDIDATE] round=1 request=decode-1 call=2 prefix=1600'"
+    command+="; printf '%s\\n' '[CANON_P38_KV_OBSERVER_CANDIDATE] round=2 request=decode-2 call=3 prefix=1600'"
+    for observer_record in 0 1 2; do
+      command+="; printf '%s\\n' '[CANON_P38_KV_OBSERVER_RECORD] arm=A record=$((observer_record * 2)) request=decode-$observer_record tokens=1601 pages=7 bytes=1'"
+      command+="; printf '%s\\n' '[CANON_P38_KV_OBSERVER_RECORD] arm=B record=$((observer_record * 2 + 1)) request=clean-$observer_record tokens=1601 pages=7 bytes=2'"
+    done
+  fi
   if [ "$mode" != missing-coverage ]; then
     command+="; printf '%s\\n' '[CANON_P38] DIAGNOSTIC_COVERAGE_CONTRACT prompt_groups=32 unit_prompts=4 units=8 generations=8 trajectories=256 partial_tail=reject verdict=PASS'"
   fi
@@ -71,8 +95,20 @@ run_case() (
     command+="; printf '%s\\n' '[PATHTRACE] KV_UNIFIED_two_pass'"
   elif [ "$mode" = unified-missing ]; then
     export CANON_KV_UNIFIED=1
+    unset CANON_P38_KV_OBSERVER_DIR \
+      CANON_P38_KV_OBSERVER_MAX_CANDIDATES \
+      CANON_P38_KV_OBSERVER_MAX_PAGES \
+      CANON_P38_KV_OBSERVER_MAX_BYTES \
+      CANON_P38_KV_OBSERVER_MAX_READ_BYTES \
+      CANON_P38_KV_OBSERVER_CLASSIFICATION
   elif [ "$mode" = unified-exact ]; then
     export CANON_KV_UNIFIED=1
+    unset CANON_P38_KV_OBSERVER_DIR \
+      CANON_P38_KV_OBSERVER_MAX_CANDIDATES \
+      CANON_P38_KV_OBSERVER_MAX_PAGES \
+      CANON_P38_KV_OBSERVER_MAX_BYTES \
+      CANON_P38_KV_OBSERVER_MAX_READ_BYTES \
+      CANON_P38_KV_OBSERVER_CLASSIFICATION
     command+="; printf '%s\\n' '[PATHTRACE] KV_UNIFIED_two_pass'"
     command+="; printf '%s\\n' '[CANON_P38] PRECHECK_ROUND_COMPLETE round=1/1 step=0 N_action=1 verdict=PASS a_b_differing_bytes=0 backward=0 optimizer_commits=0'"
     command+="; printf '%s\\n' '[CANON_P38] PRECHECK_COMPLETE STOP_BEFORE_BACKWARD step=0 N_action=1'"
@@ -99,9 +135,17 @@ run_case() (
     grep -q 'P38 serving controlled precheck accepted exit=42' "$state/driver.log"
     grep -q '\[CANON_P38\] DEPTH_SUFFICIENCY min=1686 observed=1700 verdict=PASS' "$state/driver.log"
     grep -q '"verdict": "PASS"' "$CANON_P38_SERVING_CAPTURE_CLASSIFICATION"
+    if [ "$mode" = exact ]; then
+      grep -q '"classification": "live_kv_fingerprint_equal_on_red_row"' \
+        "$CANON_P38_KV_OBSERVER_CLASSIFICATION"
+    fi
     test -s "$CANON_P38_SERVING_CAPTURE_ARCHIVE"
     grep -q '\[P38.GCS\] LIVE_WORKER_JOINED rc=0' "$state/driver.log"
+    grep -q '\[P38.GCS\] LIVE_ACTION_ACKNOWLEDGED action=collect' "$state/driver.log"
+    grep -q '\[P38.GCS\] LIVE_ACTION_ACKNOWLEDGED action=complete' "$state/driver.log"
     find "$FAKE_GCS_ROOT" -path '*/live/*/LIVE.json' -type f | grep -q .
+    test -s "$CANON_P38_LIVE_COLLECT_ACK_FILE"
+    test -s "$CANON_P38_LIVE_COMPLETE_ACK_FILE"
   else
     [ "$rc" -ne 0 ]
     if grep -q 'P38 serving controlled precheck accepted' "$state/driver.log"; then

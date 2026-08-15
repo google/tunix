@@ -1,0 +1,180 @@
+{
+  "claim_ceiling": [
+    "The join proves the exact historical decode call and fixed-M geometry.",
+    "It does not contain live KV bytes or prove clean-KV equality.",
+    "A DP1 one-host replay is E0-lite, not production-executable identity."
+  ],
+  "claim_level": "exact-host-join-not-kv-content",
+  "evidence_dir": "/home/yuxuan/code_rl_repro/sequence_packing/p48p49_integration/canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/evidence/p38s16",
+  "fixed_m_geometry_signatures": 1,
+  "joined_mismatch_elements": 60,
+  "last_call_index": 4234,
+  "ledger": "incident-ledger.jsonl",
+  "ledger_records": 3686,
+  "ledger_request_entries": 44676,
+  "rounds": [
+    {
+      "capsule": "p38_frozenlake_mismatch_capsule.round-000000.npz",
+      "diagnostic_round": 0,
+      "mismatch_elements": 32
+    },
+    {
+      "capsule": "p38_frozenlake_mismatch_capsule.round-000001.npz",
+      "diagnostic_round": 1,
+      "mismatch_elements": 17
+    },
+    {
+      "capsule": "p38_frozenlake_mismatch_capsule.round-000002.npz",
+      "diagnostic_round": 2,
+      "mismatch_elements": 11
+    }
+  ],
+  "schema": "p38-single-active-audit-v1",
+  "single_active_mismatch_elements": 1,
+  "status": "PASS",
+  "target": {
+    "abs_a_b": 0.000301361083984375,
+    "call_index": 4223,
+    "co_batch_request_ids": [
+      "2529-a6d304ba"
+    ],
+    "compile_geometry": {
+      "block_tables": {
+        "dtype": "int32",
+        "shape": [
+          6400
+        ],
+        "sharding": "NamedSharding(mesh=Mesh('data': 16, 'attn_dp': 1, 'attn_dp_expert': 1, 'expert': 1, 'model': 4, 'dcp': 1, axis_types=(Auto, Auto, Auto, Auto, Auto, Auto)), spec=P(('data', 'attn_dp', 'attn_dp_expert'),), memory_kind=device)"
+      },
+      "canonical_logprob_rows": 256,
+      "dp_size": 16,
+      "global_padded_rows": 4096,
+      "input_ids": {
+        "dtype": "int32",
+        "shape": [
+          4096
+        ],
+        "sharding": "NamedSharding(mesh=Mesh('data': 16, 'attn_dp': 1, 'attn_dp_expert': 1, 'expert': 1, 'model': 4, 'dcp': 1, axis_types=(Auto, Auto, Auto, Auto, Auto, Auto)), spec=P(('data', 'attn_dp', 'attn_dp_expert'),), memory_kind=device)"
+      },
+      "input_positions": {
+        "dtype": "int32",
+        "shape": [
+          4096
+        ],
+        "sharding": "NamedSharding(mesh=Mesh('data': 16, 'attn_dp': 1, 'attn_dp_expert': 1, 'expert': 1, 'model': 4, 'dcp': 1, axis_types=(Auto, Auto, Auto, Auto, Auto, Auto)), spec=P(('data', 'attn_dp', 'attn_dp_expert'),), memory_kind=device)"
+      },
+      "max_num_reqs": 256,
+      "padded_rows_per_dp": 256,
+      "query_start_loc": {
+        "dtype": "int32",
+        "shape": [
+          272
+        ],
+        "sharding": "NamedSharding(mesh=Mesh('data': 16, 'attn_dp': 1, 'attn_dp_expert': 1, 'expert': 1, 'model': 4, 'dcp': 1, axis_types=(Auto, Auto, Auto, Auto, Auto, Auto)), spec=P(('data', 'attn_dp', 'attn_dp_expert'),), memory_kind=device)"
+      },
+      "request_distribution": {
+        "dtype": "int32",
+        "shape": [
+          48
+        ],
+        "sharding": "NamedSharding(mesh=Mesh('data': 16, 'attn_dp': 1, 'attn_dp_expert': 1, 'expert': 1, 'model': 4, 'dcp': 1, axis_types=(Auto, Auto, Auto, Auto, Auto, Auto)), spec=P(('data', 'attn_dp', 'attn_dp_expert'),), memory_kind=device)"
+      },
+      "seq_lens": {
+        "dtype": "int32",
+        "shape": [
+          256
+        ],
+        "sharding": "NamedSharding(mesh=Mesh('data': 16, 'attn_dp': 1, 'attn_dp_expert': 1, 'expert': 1, 'model': 4, 'dcp': 1, axis_types=(Auto, Auto, Auto, Auto, Auto, Auto)), spec=P(('data', 'attn_dp', 'attn_dp_expert'),), memory_kind=device)"
+      }
+    },
+    "completion_position": 1173,
+    "diagnostic_round": 2,
+    "dp_rank": 0,
+    "local_scheduler_slot": 0,
+    "num_computed_tokens": 2209,
+    "page_generations": [
+      {
+        "logical_page": 0,
+        "observation_generation": 7,
+        "observed_logical_page": 0,
+        "observed_request_id": "2529-a6d304ba",
+        "physical_page": 36
+      },
+      {
+        "logical_page": 1,
+        "observation_generation": 7,
+        "observed_logical_page": 1,
+        "observed_request_id": "2529-a6d304ba",
+        "physical_page": 9
+      },
+      {
+        "logical_page": 2,
+        "observation_generation": 7,
+        "observed_logical_page": 2,
+        "observed_request_id": "2529-a6d304ba",
+        "physical_page": 47
+      },
+      {
+        "logical_page": 3,
+        "observation_generation": 6,
+        "observed_logical_page": 3,
+        "observed_request_id": "2529-a6d304ba",
+        "physical_page": 74
+      },
+      {
+        "logical_page": 4,
+        "observation_generation": 5,
+        "observed_logical_page": 4,
+        "observed_request_id": "2529-a6d304ba",
+        "physical_page": 27
+      },
+      {
+        "logical_page": 5,
+        "observation_generation": 8,
+        "observed_logical_page": 5,
+        "observed_request_id": "2529-a6d304ba",
+        "physical_page": 38
+      },
+      {
+        "logical_page": 6,
+        "observation_generation": 12,
+        "observed_logical_page": 6,
+        "observed_request_id": "2529-a6d304ba",
+        "physical_page": 10
+      },
+      {
+        "logical_page": 7,
+        "observation_generation": 15,
+        "observed_logical_page": 7,
+        "observed_request_id": "2529-a6d304ba",
+        "physical_page": 3
+      },
+      {
+        "logical_page": 8,
+        "observation_generation": 15,
+        "observed_logical_page": 8,
+        "observed_request_id": "2529-a6d304ba",
+        "physical_page": 48
+      }
+    ],
+    "physical_pages": [
+      36,
+      9,
+      47,
+      74,
+      27,
+      38,
+      10,
+      3,
+      48
+    ],
+    "request_id": "2529-a6d304ba",
+    "s_decode": -0.041210174560546875,
+    "s_prefill": -0.04151153564453125,
+    "scheduled_request_count": 1,
+    "single_active_token_ids_present": true,
+    "source_row": 255,
+    "t_old": -0.04151153564453125,
+    "token_history_sha256": "13ca569e1d78e341b95d60577c4bc918bd32d82807a7e51995d1ab37c0a5ff51"
+  }
+}

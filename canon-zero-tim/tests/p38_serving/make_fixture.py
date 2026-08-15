@@ -43,6 +43,70 @@ def _write(
   )
 
 
+def _write_kv_observer_pair(
+    directory: Path, pair_index: int, token_ids: np.ndarray
+) -> None:
+  page_size = 256
+  logical_pages = (int(token_ids.size) + page_size - 1) // page_size
+  observer_pages = 8
+  valid_tokens = np.full(logical_pages, page_size, dtype=np.int32)
+  valid_tokens[-1] = token_ids.size - (logical_pages - 1) * page_size
+  arrays = {
+      "aggregates": np.zeros(
+          (1, observer_pages, page_size, 4), dtype=np.uint32
+      ),
+      "samples": np.zeros(
+          (1, observer_pages, page_size, 3, 2), dtype=np.uint16
+      ),
+      "token_ids": np.asarray(token_ids, dtype=np.int32),
+      "physical_pages": np.arange(
+          7, 7 + logical_pages, dtype=np.int32
+      ),
+      "padded_global_pages": np.pad(
+          np.arange(7, 7 + logical_pages, dtype=np.int32),
+          (0, observer_pages - logical_pages),
+          mode="edge",
+      ),
+      "valid_tokens": valid_tokens,
+  }
+  token_sha = hashlib.sha256(
+      np.ascontiguousarray(token_ids, dtype="<i8").tobytes()
+  ).hexdigest()
+  a_index = pair_index * 2
+  for arm, record_index in (("A", a_index), ("B", a_index + 1)):
+    base = directory / (
+        f"p38_kv_observer_{record_index:04d}_{arm.lower()}"
+    )
+    npz_path = Path(str(base) + ".npz")
+    with npz_path.open("xb") as stream:
+      np.savez(stream, **arrays)
+    record = {
+        "schema": "p38-live-kv-prefix-table-v1",
+        "arm": arm,
+        "record_index": record_index,
+        "request_id": (
+            f"decode-{pair_index}" if arm == "A" else f"clean-{pair_index}"
+        ),
+        "source_a_request_id": f"decode-{pair_index}",
+        "source_a_record_index": None if arm == "A" else a_index,
+        "diagnostic_round": 0,
+        "target_seq_len": int(token_ids.size),
+        "token_history_sha256": token_sha,
+        "block_size": page_size,
+        "logical_pages": logical_pages,
+        "observer_pages": observer_pages,
+        "layer_count": 1,
+        "cache_shape": [32, page_size, 1, 2, 4],
+        "cache_dtype": "bfloat16",
+        "cache_sharding": "fixture",
+        "npz_sha256": hashlib.sha256(npz_path.read_bytes()).hexdigest(),
+        "array_keys": sorted(arrays),
+    }
+    Path(str(base) + ".json").write_text(
+        json.dumps(record, sort_keys=True), encoding="utf-8"
+    )
+
+
 def main() -> int:
   parser = argparse.ArgumentParser()
   parser.add_argument("--directory", required=True, type=Path)
@@ -318,6 +382,9 @@ def main() -> int:
         ),
         **capsule_arrays,
     )
+  observer_tokens = np.asarray(full_history[:1601], dtype=np.int32)
+  for pair_index in range(3):
+    _write_kv_observer_pair(args.directory, pair_index, observer_tokens)
   return 0
 
 
