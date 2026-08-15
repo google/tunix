@@ -20,7 +20,6 @@ import argparse
 import logging
 import os
 import sys
-from typing import Any
 
 os.environ.setdefault("VLLM_ALLOW_LONG_MAX_MODEL_LEN", "1")
 os.environ.setdefault("VLLM_TPU_RPA_VERSION", "2")
@@ -138,6 +137,7 @@ from jax.experimental import mesh_utils  # pylint: disable=g-import-not-at-top
 from jax.sharding import Mesh  # pylint: disable=g-import-not-at-top
 from transformers import AutoTokenizer  # pylint: disable=g-import-not-at-top
 
+from tunix.experimental.examples.math_gsm8k_dist import gsm8k  # pylint: disable=g-import-not-at-top
 from tunix.experimental.rollout import legacy_vllm_sampler_adapter  # pylint: disable=g-import-not-at-top
 from tunix.experimental.worker import remote_execution  # pylint: disable=g-import-not-at-top
 from tunix.experimental.worker import rollout_worker  # pylint: disable=g-import-not-at-top
@@ -145,9 +145,6 @@ from tunix.generate import mappings as mappings_lib  # pylint: disable=g-import-
 from tunix.generate import tokenizer_adapter as tokenizer_adapter_lib  # pylint: disable=g-import-not-at-top
 from tunix.generate import vllm_sampler  # pylint: disable=g-import-not-at-top
 from tunix.models.qwen3 import mapping_vllm_jax  # pylint: disable=g-import-not-at-top
-from tunix.rl.agentic.agents import agent_types  # pylint: disable=g-import-not-at-top
-from tunix.rl.agentic.agents import base_agent  # pylint: disable=g-import-not-at-top
-from tunix.rl.agentic.environments import base_environment  # pylint: disable=g-import-not-at-top
 from tunix.rl.agentic.parser.chat_template_parser import parser as chat_parser_lib  # pylint: disable=g-import-not-at-top
 logging.info("Finished importing rollout dependencies.")
 
@@ -156,82 +153,6 @@ def _create_rollout_mesh() -> Mesh:
   shape = (1, jax.device_count())
   devices = mesh_utils.create_device_mesh(shape, jax.devices())
   return Mesh(devices, axis_names=("dp", "tp"))
-
-
-class _GSM8KDemoEnv(base_environment.BaseTaskEnv):
-  """Minimal single-step math environment for the distributed demo."""
-
-  def __init__(
-      self,
-      prompt: str = "",
-      gold_answer: str = "",
-      group_id: str = "",
-      pair_index: int = 0,
-      policy_version: int = 0,
-      max_steps: int = 1,
-      **kwargs: Any,
-  ):
-    super().__init__(
-        task={
-            "prompts": prompt,
-            "gold_answer": gold_answer,
-            "policy_version": policy_version,
-        },
-        max_steps=max_steps,
-        group_id=group_id,
-        pair_index=pair_index,
-        **kwargs,
-    )
-
-  def _initial_observation(self) -> dict[str, str]:
-    return {"prompts": self.task.get("prompts", "")}
-
-  def _step_impl(self, action: Any) -> base_environment.EnvStepResult:
-    answer = str(action)
-    gold_answer = str(self.task.get("gold_answer", ""))
-    is_correct = bool(gold_answer) and gold_answer in answer
-    return base_environment.EnvStepResult(
-        observation={"answer": answer, "gold_answer": gold_answer},
-        reward=1.0 if is_correct else 0.0,
-        done=True,
-        info={"correct": is_correct},
-    )
-
-
-class _GSM8KDemoEnvPool:
-  """Creates one lightweight environment per rollout request."""
-
-  def acquire_env(
-      self, config: dict[str, Any] | None = None
-  ) -> _GSM8KDemoEnv:
-    return _GSM8KDemoEnv(**dict(config or {}))
-
-  def release_env(self, env: _GSM8KDemoEnv) -> None:
-    env.close()
-
-
-class _GSM8KDemoAgent(base_agent.ConversationAgentBase):
-  """Minimal agent that forwards model text as the environment action."""
-
-  name = "gsm8k_demo_agent"
-
-  def __init__(self):
-    super().__init__(
-        "Solve the math problem. Return the final numeric answer clearly."
-    )
-
-  def update_from_model(self, response: str, **kwargs) -> agent_types.Action:
-    del kwargs
-    action = agent_types.Action(action=response)
-    self.trajectory.steps.append(
-        agent_types.Step(
-            model_response=response,
-            thought="",
-            action=action,
-        )
-    )
-    self.chat_completions.append({"role": "assistant", "content": response})
-    return action
 
 
 def _create_vllm_worker(tokenizer):
@@ -287,13 +208,13 @@ def _create_vllm_worker(tokenizer):
       top_p=1.0,
       return_logprobs=True,
       rollout_vllm_model_version=vllm_model,
+      env_name=gsm8k.GSM8K_ENV_NAME,
+      agent_name=gsm8k.GSM8K_AGENT_NAME,
   )
   return rollout_worker.RolloutWorker(
       worker_id="vllm-rollout-0",
       config=config,
       sampler=sampler_adapter,
-      env_pool=_GSM8KDemoEnvPool(),
-      agent_factory=_GSM8KDemoAgent,
       tokenizer=rollout_tokenizer,
       chat_parser=chat_parser,
       max_concurrency=64,
