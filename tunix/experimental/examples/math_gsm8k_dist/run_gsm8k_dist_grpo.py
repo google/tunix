@@ -495,6 +495,10 @@ def main() -> None:
       args.batch_size * args.num_generations,
       args.reward_mode,
   )
+  trajectories_per_step = args.batch_size * args.num_generations
+  microbatches_per_step = (
+      trajectories_per_step + args.train_micro_batch_size - 1
+  ) // args.train_micro_batch_size
 
   tokenizer_path = args.tokenizer_path or os.getenv("MODEL_DIR") or args.model_id
   tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
@@ -548,16 +552,14 @@ def main() -> None:
           args.max_steps,
       ),
       on_step_end=lambda step, result: logging.info(
-          "GRPO step %d/%d finished: policy_version=%d rollouts=%d "
-          "microbatches=%d reward_mean=%.3f reward_std=%.3f train_result=%s.",
-          result.step + 1,
+          "GRPO step %d/%d finished: policy_version=%d "
+          "expected_rollouts=%d expected_microbatches=%d train_result=%s.",
+          step,
           args.max_steps,
-          result.policy_version,
-          result.num_rollouts,
-          result.num_microbatches,
-          result.reward_mean,
-          result.reward_std,
-          result.train_result,
+          step,
+          trajectories_per_step,
+          microbatches_per_step,
+          result,
       ),
   )
 
