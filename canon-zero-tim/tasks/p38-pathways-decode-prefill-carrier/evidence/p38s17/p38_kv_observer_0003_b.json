@@ -1,0 +1,39 @@
+{
+  "arm": "B",
+  "array_keys": [
+    "aggregates",
+    "padded_global_pages",
+    "physical_pages",
+    "samples",
+    "token_ids",
+    "valid_tokens"
+  ],
+  "block_size": 256,
+  "cache_dtype": "bfloat16",
+  "cache_shape": [
+    5216,
+    256,
+    8,
+    2,
+    128
+  ],
+  "cache_sharding": "NamedSharding(mesh=Mesh('data': 16, 'attn_dp': 1, 'attn_dp_expert': 1, 'expert': 1, 'model': 4, 'dcp': 1, axis_types=(Auto, Auto, Auto, Auto, Auto, Auto)), spec=P(('data', 'attn_dp', 'attn_dp_expert'), None, ('model', 'expert', 'dcp')), memory_kind=device)",
+  "device_read_bytes": 603979776,
+  "diagnostic_round": 1,
+  "dp_rank": 4,
+  "elapsed_seconds": 2.179838552023284,
+  "fingerprint_claim": "diagnostic_non_cryptographic",
+  "layer_count": 36,
+  "logical_pages": 7,
+  "npz_sha256": "8d841967a85132ea9aea7d207c90c2a6599413efb268091ebc094fa437af99ae",
+  "observer_pages": 16,
+  "record_index": 3,
+  "request_id": "1793-a874b39f",
+  "schema": "p38-live-kv-prefix-table-v1",
+  "source_a_record_index": 2,
+  "source_a_request_id": "1529-9f69deea",
+  "tag_call_index": 1924,
+  "tag_prefix": 1706,
+  "target_seq_len": 1723,
+  "token_history_sha256": "ea1538dd177dc064f19b8a2b68fcd058164aef5852ec9fe6fb8f96e06d4db471"
+}

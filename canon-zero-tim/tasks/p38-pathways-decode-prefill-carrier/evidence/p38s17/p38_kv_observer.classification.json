@@ -1,0 +1,149 @@
+{
+  "claim_ceiling": [
+    "A/B token prefixes and valid extents are exact.",
+    "The integer aggregates and fixed samples are diagnostic fingerprints, not cryptographic hashes.",
+    "An equal fingerprint does not mathematically prove full KV byte equality.",
+    "Only a candidate joined to an A/B-red capsule row can choose the mechanism branch."
+  ],
+  "claim_level": "bit-level-diagnostic-fingerprint-not-full-kv-bytes",
+  "classification": "live_kv_fingerprint_differs_on_red_row",
+  "comparisons": [
+    {
+      "aggregate_prefix_cells_differing": 0,
+      "clean_b_record_index": 1,
+      "clean_b_request_id": "892-9c2d2390",
+      "diagnostic_round": 0,
+      "differing_layers": [
+        0,
+        1,
+        2
+      ],
+      "differing_logical_pages": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8
+      ],
+      "fingerprint_equal": false,
+      "first_difference": {
+        "aggregate_diff": false,
+        "layer": 0,
+        "logical_page": 0,
+        "page_prefix_extent": 142,
+        "sample_diff": true
+      },
+      "sample_prefix_cells_differing": 510,
+      "source_a_record_index": 0,
+      "source_a_request_id": "635-84c52c33",
+      "target_seq_len": 2262
+    },
+    {
+      "aggregate_prefix_cells_differing": 0,
+      "clean_b_record_index": 3,
+      "clean_b_request_id": "1793-a874b39f",
+      "diagnostic_round": 1,
+      "differing_layers": [
+        0,
+        1,
+        2
+      ],
+      "differing_logical_pages": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6
+      ],
+      "fingerprint_equal": false,
+      "first_difference": {
+        "aggregate_diff": false,
+        "layer": 0,
+        "logical_page": 0,
+        "page_prefix_extent": 108,
+        "sample_diff": true
+      },
+      "sample_prefix_cells_differing": 850,
+      "source_a_record_index": 2,
+      "source_a_request_id": "1529-9f69deea",
+      "target_seq_len": 1723
+    },
+    {
+      "aggregate_prefix_cells_differing": 0,
+      "clean_b_record_index": 5,
+      "clean_b_request_id": "2740-bd3b2b64",
+      "diagnostic_round": 2,
+      "differing_layers": [
+        0,
+        1,
+        2
+      ],
+      "differing_logical_pages": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6
+      ],
+      "fingerprint_equal": false,
+      "first_difference": {
+        "aggregate_diff": false,
+        "layer": 0,
+        "logical_page": 0,
+        "page_prefix_extent": 118,
+        "sample_diff": true
+      },
+      "sample_prefix_cells_differing": 1782,
+      "source_a_record_index": 4,
+      "source_a_request_id": "2483-a234d3fe",
+      "target_seq_len": 1872
+    }
+  ],
+  "pairs": 3,
+  "records": 6,
+  "red_joins": [
+    {
+      "capsule": "p38_frozenlake_mismatch_capsule.round-000000.npz",
+      "diagnostic_round": 0,
+      "mismatch_count": 1,
+      "mismatch_positions": [
+        1
+      ],
+      "source_a_record_index": 0,
+      "source_row": 207,
+      "target_seq_len": 2262
+    },
+    {
+      "capsule": "p38_frozenlake_mismatch_capsule.round-000001.npz",
+      "diagnostic_round": 1,
+      "mismatch_count": 1,
+      "mismatch_positions": [
+        1
+      ],
+      "source_a_record_index": 2,
+      "source_row": 223,
+      "target_seq_len": 1723
+    },
+    {
+      "capsule": "p38_frozenlake_mismatch_capsule.round-000002.npz",
+      "diagnostic_round": 2,
+      "mismatch_count": 1,
+      "mismatch_positions": [
+        1
+      ],
+      "source_a_record_index": 4,
+      "source_row": 223,
+      "target_seq_len": 1872
+    }
+  ],
+  "schema": "p38-live-kv-classification-v1",
+  "status": "PASS"
+}

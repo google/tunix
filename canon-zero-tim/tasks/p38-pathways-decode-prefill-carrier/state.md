@@ -6,30 +6,26 @@
 - Definition of done: one source-pinned flag-on run reports exact
   `S_decode_vs_S_prefill`, exact `S_prefill_vs_T_old`, and exact
   `T_old_vs_T_current` before a strict full workload is admitted.
-- Active phase: P38.2n live-KV content discriminator. P38.2m completed with
-  P38s16/source `4101f752667b`; the exact host audit is frozen. N3 is locally
-  complete and one stock N4 production-shape discriminator is admitted after
-  review plus publication of the current worktree.
-- The all-prefix fingerprint primitive passes CPU and real TP4 v5p rehearsal:
-  36 layers x 9 pages, 339,738,624 bytes read, 5,308,416 bytes returned,
-  0.9514 s warm plus 0.0078 s host transfer, endpoint exact, repeat exact, and
-  a normal-BF16 one-bit negative detected. One table covers page extents
-  1..256; it is intended once per completed deep candidate, never per token.
-  Patch 16 now wires both live A and exact-prefix clean B. The real Qwen3-8B
-  DP1xTP4 r6 rehearsal produced 3 A + 3 B records, exact token/extent/
-  provenance pairs, and
-  `classification=observer_pairs_valid_red_join_pending` with no backward or
-  optimizer commit.
-- Final pinned-image gates pass: Qwen3-1.7B and Qwen3-8B each passed 29 runner
-  tests and verified all 30 manifest files. Focused P38 tests, postflight, GCS
-  persistence, and the one-host v5p gate pass. The broad host CPU suite has
-  one environment-only failure because the host venv's `tpu_inference` lacks
-  `compute_and_gather_logprobs`; it is not the pinned engine image.
+- Active phase: P38.2n live-KV content discriminator completed with P38s17/source
+  `baac38bc4034`. Live vs clean KV cache content drift is confirmed
+  (`classification=live_kv_fingerprint_differs_on_red_row`). Next phase focuses on
+  vLLM / Pathways PagedAttention KV cache block lifecycle and writeback on TPU.
 - Task directory:
   `canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/`.
 
 ## Latest target facts
 
+- P38s17/source `baac38bc4034` completed all 3 Frozen-Weight diagnostic rounds
+  (768 trajectories total, 149,436 action tokens across 3 rounds) on 64 TPU
+  (`DP16xTP4`, concurrency 256) with zero backward, zero optimizer commits, and
+  controlled exit 42.
+  - B-C boundary (`S_prefill` vs `T_old`): STRICT EXACT 0 on all 3 rounds.
+  - A-B boundary (`S_decode` vs `S_prefill`): 44 differing bytes on all 3 rounds.
+  - Incident ledger: 2,523 records / 3,069 calls / 66.3 MB.
+  - Live-KV Observer classification: `live_kv_fingerprint_differs_on_red_row`.
+    Across all 3 paired A/B records, token sequences were byte-identical while
+    integer aggregates and fixed samples differed between live and clean KV.
+  - Evidence archived under `evidence/p38s17/`.
 - P38s16/source `4101f752` successfully executed all 3 Frozen-Weight
   diagnostic rounds (768 trajectories total, 148,916 action tokens across 3
   rounds: 48,556 / 47,313 / 53,047) on 64 TPU (`DP16xTP4`, concurrency 256)

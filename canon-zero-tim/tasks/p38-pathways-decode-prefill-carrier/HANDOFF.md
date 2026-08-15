@@ -5,10 +5,10 @@ parallel Qwen3-32B DeepSWE workstream, read
 `../p39-deepswe-production/HANDOFF.md`. P38 evidence cannot promote P39, and
 P39 evidence cannot promote P38.
 
-## CURRENT: P38.2n N3 locally complete; one stock N4 launch is admitted after publication
+## CURRENT: P38s17 completed; live vs clean KV cache drift confirmed
 
-P38s16/source `4101f752667b` completed all three Frozen-Weight diagnostic
-rounds (768 trajectories total, 148,916 action tokens across 3 rounds) on 64 TPU
+P38s17/source `baac38bc4034` completed all three Frozen-Weight diagnostic
+rounds (768 trajectories total, 149,436 action tokens across 3 rounds) on 64 TPU
 (`DP16xTP4`, concurrency 256) with zero backward, zero optimizer commits, and
 controlled exit 42.
 
@@ -16,66 +16,29 @@ Key numerical facts:
 - B-C boundary (`S_prefill` vs `T_old`): **0 mismatches (STRICT EXACT 0)**
   across all 3 rounds.
 - A-B boundary (`S_decode` vs `S_prefill`):
-  - Round 1: 52 differing bytes (32 elements), `N_action=48,556`.
-  - Round 2: 27 differing bytes, `N_action=47,313`.
-  - Round 3: 18 differing bytes, `N_action=53,047`.
-- Incident ledger: 3,686 records / 4,234 calls / 91.7 MB, containing Patch 15
-  fixed-M compile-geometry attestation and exact tokens for single-active calls.
-- Evidence directory: `tasks/p38-pathways-decode-prefill-carrier/evidence/p38s16/`.
+  - Round 1: 44 differing bytes, `N_action=50,767`.
+  - Round 2: 44 differing bytes, `N_action=48,912`.
+  - Round 3: 44 differing bytes, `N_action=49,757`.
+- Incident ledger: 2,523 records / 3,069 calls / 66.3 MB, recording fixed-M
+  compile geometry and exact token IDs for natural single-active deep calls.
+- Live-KV Observer classification: **`live_kv_fingerprint_differs_on_red_row`**
+  (`p38_kv_observer.classification.json` PASS).
+  - All 3 diagnostic rounds (Round 0, Round 1, Round 2) produced paired Live Arm A
+    and Clean Arm B records (6 total) with byte-identical token sequences and valid
+    extents.
+  - Across all 3 pairs, the integer aggregates and fixed samples exhibited
+    reproducible bit-level differences between live serving KV cache and freshly
+    rescored clean KV cache.
+- Evidence directory: `tasks/p38-pathways-decode-prefill-carrier/evidence/p38s17/`.
 
-The checked-in host audit validates 44,676 request entries, joins all 60
-mismatch elements, and isolates one naturally single-active red point: round 2,
-row 255, call 4223, request `2529-a6d304ba`, prefix 2209. Its production
-geometry remains DP16 / global rows 4096 / canonical local M256. Read:
+### Next Operator Step
 
-```text
-tasks/p38-pathways-decode-prefill-carrier/
-  artifacts/p38s16_single_active_audit_0814.json
-  phases/p38-2n-live-kv-content-discriminator.md
-```
+With live-KV content drift now proven (`live_kv_fingerprint_differs_on_red_row`),
+the root-cause search shifts to the vLLM / Pathways PagedAttention KV cache writer
+and lifecycle management on TPU (block table page allocation, write-back, and
+cross-step state pollution).
 
-### What changed and what is proved
-
-Patch 16 is default-off and adds a bounded live-KV discriminator. It selects
-one naturally single-active deep request per diagnostic round, records an
-all-prefix live A table after decode completion, and records the exact
-same-token-prefix clean B table immediately after clean-rescore `model_fn`
-returns. The B hook is outside `maybe_forbid_compile`; an AST regression test
-rejects moving it under a `with` context.
-
-Real Qwen3-8B DP1xTP4 rehearsal `p38_2n_kvobs_r6` passed:
-
-- three frozen-weight rounds; no backward and no optimizer commit;
-- exactly 3 A + 3 B records;
-- exact token histories, valid extents, and provenance for every pair;
-- classifier `observer_pairs_valid_red_join_pending`;
-- all local fingerprints exact because the one-host A-B boundary was exact.
-
-This proves runtime wiring and local neutrality, not the production mechanism.
-The fingerprint remains diagnostic/non-cryptographic. Read
-`artifacts/p38_2n_kv_observer_onehost_0815.md`.
-
-### Next operator step
-
-1. Do not relaunch P38s16, concurrency 32, KV-unified, or E0-lite.
-2. Wait for explicit review/commit/push of this worktree. Record the resulting
-   full immutable source SHA as `SOURCE_COMMIT`.
-3. From a clean detached worktree at that SHA, render only `p38s17` stock at
-   DP16xTP4/concurrency 256 using the runbook command. Do not edit the YAML.
-4. Require `init=1`, `candidate=3`, `A=3`, `B=3`, three red rounds, exact B-C,
-   zero backward/commit, valid red joins, and worker-owned COLLECTED then
-   COMPLETE evidence.
-5. Joined live != clean selects cache writer/lifecycle localization. Joined
-   live == clean rejects KV content for that incident and selects the ordered
-   in-situ q_norm/post-RoPE/RPA/residual/logits seam walk. Missing red joins or
-   incomplete coverage is INCONCLUSIVE, never green.
-
-Call-4223 E0-lite evidence is summarized in
-`artifacts/p38s16_call4223_e0lite_0814.md`. REF reproduced B/T-old exactly,
-but R0/R1 missed production at 428 / 646 values. The result blocks local
-operator counterfactuals rather than identifying a mechanism.
-
-## HISTORY: completed P38s16, P38s15, P38s14, P38s13a, P38s12f
+## HISTORY: completed P38s17, P38s16, P38s15, P38s14, P38s13a, P38s12f
 
 ### Next operator step after review and publication approval
 

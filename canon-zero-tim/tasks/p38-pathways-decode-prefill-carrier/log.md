@@ -1340,3 +1340,20 @@
 - N3 is locally complete. One N4 production stock discriminator is admitted
   only after review/commit/push. No target launch, backward, optimizer commit,
   commit, or push occurred in this worktree.
+
+## 2026-08-15 UTC — P38s17 live vs clean KV cache drift confirmed
+
+- Type: target hardware observation and classification
+- Command: `canon-p38-fl-stock-p38s17-baac38bc` on 64 TPU (`DP16xTP4`, concurrency 256).
+- Result: completed all 3 Frozen-Weight diagnostic rounds (768 trajectories total,
+  149,436 action tokens across 3 rounds) with zero backward, zero optimizer
+  commits, and controlled exit 42.
+- Key numbers:
+  - B-C boundary (`S_prefill` vs `T_old`): STRICT EXACT 0 on all 3 rounds.
+  - A-B boundary (`S_decode` vs `S_prefill`): 44 differing bytes on all 3 rounds.
+  - Incident ledger: 2,523 records / 3,069 calls / 66.3 MB.
+- Live-KV Observer classification: `live_kv_fingerprint_differs_on_red_row`.
+  All 3 diagnostic rounds produced 6 total A/B records with exact token sequences
+  and valid extents. Bit-level aggregate and sample fingerprint differences
+  were observed between live serving KV cache and clean rescored KV cache.
+- Evidence archived under `tasks/p38-pathways-decode-prefill-carrier/evidence/p38s17/`.
