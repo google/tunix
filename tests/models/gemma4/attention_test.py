@@ -196,9 +196,10 @@ class FlashAttentionMaskTest(parameterized.TestCase):
     h, kh = config.num_heads, config.num_kv_heads
     offset = kv_len - q_len
 
-    q = jax.random.normal(jax.random.PRNGKey(0), (b, q_len, h, d))
-    k = jax.random.normal(jax.random.PRNGKey(1), (b, kv_len, kh, d))
-    v = jax.random.normal(jax.random.PRNGKey(2), (b, kv_len, kh, d))
+    q = jnp.ones((b, q_len, h, d))
+    k = jnp.ones((b, kv_len, kh, d))
+    v = jnp.arange(kv_len, dtype=jnp.float32)[None, :, None, None]
+    v = jnp.broadcast_to(v, (b, kv_len, kh, d))
     mask_shape = (b, q_len, kv_len) if mask_3d else (q_len, kv_len)
     attn_mask = jnp.ones(mask_shape, dtype=jnp.bool_)
     segment_pos = jnp.broadcast_to(
@@ -217,6 +218,9 @@ class FlashAttentionMaskTest(parameterized.TestCase):
     )
     self.assertEqual(out.shape, (b, q_len, h, d))
     self.assertFalse(jnp.isnan(out).any())
+    # offset = 12. For query 0, valid kv positions are [9, 10, 11, 12, 13, 14,
+    # 15]. Mean is 12.0.
+    np.testing.assert_allclose(out[0, 0, 0, 0], 12.0, atol=1e-3)
 
 
 class FlashAttentionBlockSizeTest(parameterized.TestCase):
@@ -258,6 +262,21 @@ class FlashAttentionBlockSizeTest(parameterized.TestCase):
 
 
 class AttentionTest(parameterized.TestCase):
+
+  def _make_mock_splash(self, return_lse=False):
+    """Returns a 1x1 mesh and a mock splash kernel that outputs zeros."""
+    devices = np.array(jax.devices()[:1]).reshape(1, 1)
+    mesh = jax.sharding.Mesh(devices, ('fsdp', 'tp'))
+
+    def mock_kernel(q_in, k_in, v_in, segment_ids=None):
+      del k_in, v_in, segment_ids
+      out = jnp.zeros_like(q_in)
+      if return_lse:
+        lse = jnp.zeros(q_in.shape[:-1], dtype=jnp.float32)
+        return out, (lse,)
+      return out
+
+    return mesh, mock_kernel
 
   def test_attention_with_segment_ids_rectangular_routing(self):
     config = model_lib.ModelConfig.gemma4_e2b()
@@ -502,6 +521,7 @@ class AttentionTest(parameterized.TestCase):
           # end_index = 4 -> position 4 is valid and attended to.
           end_index=4,
           use_shared_cache=False,
+          mask_indices=None,
       ),
       dict(
           testcase_name='shared_cache_adjusted_index',
@@ -509,10 +529,19 @@ class AttentionTest(parameterized.TestCase):
           # not None). end_index = 5 -> adjusted to 4 by `end_idx - 1`.
           end_index=5,
           use_shared_cache=True,
+          mask_indices=None,
+      ),
+      dict(
+          testcase_name='gapped_mask_logical_end',
+          # Case 3: Gapped mask (_has_physical_gap is True). Uses logical_end
+          # (count - 1 = 4) instead of end_index, killing mutant at line 1374.
+          end_index=0,
+          use_shared_cache=False,
+          mask_indices=[0, 1, 2, 4, 6],
       ),
   )
   def test_eager_attention_decoding_sliding_window_cache_indexing(
-      self, end_index, use_shared_cache
+      self, end_index, use_shared_cache, mask_indices=None
   ):
     config = model_lib.ModelConfig.gemma4_e2b()
     config.sliding_window_size = 8
@@ -533,7 +562,14 @@ class AttentionTest(parameterized.TestCase):
     v = v.at[:, 4, :, :].set(5.0)
     v = v.at[:, 6, :, :].set(100.0)
 
-    attn_mask = jnp.ones((b, q_len, cache_len), dtype=jnp.bool_)
+    if mask_indices is not None:
+      attn_mask = (
+          jnp.zeros((b, q_len, cache_len), dtype=jnp.bool_)
+          .at[:, :, mask_indices]
+          .set(True)
+      )
+    else:
+      attn_mask = jnp.ones((b, q_len, cache_len), dtype=jnp.bool_)
     segment_pos = jnp.array([[4]], dtype=jnp.int32)
 
     cache_dict = {'end_index': jnp.array([end_index])}
@@ -683,6 +719,10 @@ class AttentionTest(parameterized.TestCase):
     np.testing.assert_allclose(cache['k'][:, :prefill_len, ...], k_prefill)
     np.testing.assert_allclose(cache['v'][:, :prefill_len, ...], v_prefill)
 
+    # Overwrite cache with 1.0 to explicitly test decode preservation
+    cache['k'] = cache['k'].at[:, :prefill_len].set(1.0)
+    cache['v'] = cache['v'].at[:, :prefill_len].set(1.0)
+
     # 2. Decode step with seq_len == 1
     x_decode = jax.random.normal(
         jax.random.PRNGKey(1), (b, 1, config.embed_dim)
@@ -698,6 +738,14 @@ class AttentionTest(parameterized.TestCase):
         force_eager=True,
     )
     self.assertEqual(cache['end_index'][0], prefill_len + 1)
+    np.testing.assert_allclose(cache['k'], k_decode)
+    np.testing.assert_allclose(cache['v'], v_decode)
+    # Verify prior cache slots are preserved (end_index non-zero update).
+    np.testing.assert_allclose(cache['k'][:, :4], 1.0)
+    np.testing.assert_allclose(cache['v'][:, :4], 1.0)
+    # Verify future cache slots remain untouched (0.0).
+    np.testing.assert_allclose(cache['k'][:, 5:], 0.0)
+    np.testing.assert_allclose(cache['v'][:, 5:], 0.0)
     np.testing.assert_allclose(cache['k'], k_decode)
     np.testing.assert_allclose(cache['v'], v_decode)
 
@@ -831,8 +879,12 @@ class AttentionTest(parameterized.TestCase):
     self.assertFalse(jnp.isnan(out).any())
     np.testing.assert_allclose(out[:, 0, :, :], 5.0, atol=1e-2)
 
-  def test_flash_attention_single_with_segment_ids(self):
-    """Verify _flash_attention_single execution path with segment_ids."""
+  @parameterized.named_parameters(
+      ('with_segments', True),
+      ('without_segments', False),
+  )
+  def test_flash_attention_single_segment_ids(self, with_segments):
+    """Verify _flash_attention_single execution path with and without segment_ids."""
     config = model_lib.ModelConfig.gemma4_e2b()
     config.use_flash_attention = True
     config.flash_attention_block_size = 16
@@ -845,20 +897,19 @@ class AttentionTest(parameterized.TestCase):
     x = jnp.zeros((b, t, config.embed_dim))
     segment_pos = jnp.zeros((b, t), dtype=jnp.int32)
     attn_mask = jnp.ones((b, t, t), dtype=jnp.bool_)
-    segment_ids = jnp.zeros((b, t), dtype=jnp.int32)
+    segment_ids = jnp.zeros((b, t), dtype=jnp.int32) if with_segments else None
 
     kernel_called = []
+    mesh, mock_kernel = self._make_mock_splash()
 
-    def mock_kernel(q_in, k_in, v_in, segment_ids=None):
+    def wrapped_mock_kernel(q_in, k_in, v_in, segment_ids=None):
       kernel_called.append(segment_ids)
-      self.assertIsNotNone(segment_ids)
-      return jnp.zeros_like(q_in)
-
-    devices = np.array(jax.devices()[:1]).reshape(1, 1)
-    mesh = jax.sharding.Mesh(devices, ('fsdp', 'tp'))
+      if with_segments:
+        self.assertIsNotNone(segment_ids)
+      return mock_kernel(q_in, k_in, v_in, segment_ids)
 
     with mesh, mock.patch.object(
-        attn, '_make_splash_kernel', return_value=(mock_kernel, None)
+        attn, '_make_splash_kernel', return_value=(wrapped_mock_kernel, None)
     ):
       new_cache, out, (k_proj, v_proj, *_) = attn.block(
           x,
@@ -868,44 +919,8 @@ class AttentionTest(parameterized.TestCase):
           segment_ids=segment_ids,
       )
       self.assertTrue(kernel_called)
-      self.assertEqual(out.shape, (b, t, config.embed_dim))
-      self.assertFalse(jnp.isnan(out).any())
-
-  def test_flash_attention_single_without_segment_ids(self):
-    """Verify _flash_attention_single execution path without segment_ids."""
-    config = model_lib.ModelConfig.gemma4_e2b()
-    config.use_flash_attention = True
-    config.flash_attention_block_size = 16
-    attn = attention_lib.Attention(
-        config=config,
-        attn_type=model_lib.AttentionType.GLOBAL,
-        rngs=nnx.Rngs(0),
-    )
-    b, t = 2, 16
-    x = jnp.zeros((b, t, config.embed_dim))
-    segment_pos = jnp.zeros((b, t), dtype=jnp.int32)
-    attn_mask = jnp.ones((b, t, t), dtype=jnp.bool_)
-
-    called_with_segments = []
-
-    def mock_kernel(q_in, k_in, v_in, segment_ids=None):
-      called_with_segments.append(segment_ids)
-      return jnp.zeros_like(q_in)
-
-    devices = np.array(jax.devices()[:1]).reshape(1, 1)
-    mesh = jax.sharding.Mesh(devices, ('fsdp', 'tp'))
-
-    with mesh, mock.patch.object(
-        attn, '_make_splash_kernel', return_value=(mock_kernel, None)
-    ):
-      new_cache, out, (k_proj, v_proj, *_) = attn.block(
-          x,
-          segment_pos,
-          cache=None,
-          attn_mask=attn_mask,
-          segment_ids=None,
-      )
-      self.assertEqual(called_with_segments, [None])
+      if not with_segments:
+        self.assertEqual(kernel_called, [None])
       self.assertEqual(out.shape, (b, t, config.embed_dim))
       self.assertEqual(k_proj.shape, (b, t, attn.num_kv_heads, attn.head_dim))
       self.assertEqual(v_proj.shape, (b, t, attn.num_kv_heads, attn.head_dim))
@@ -1155,6 +1170,326 @@ class AttentionTest(parameterized.TestCase):
     self.assertTrue((cache['k'] == 0.0).all())
     self.assertTrue((cache['v'] == 0.0).all())
     self.assertTrue((cache['end_index'] == 0).all())
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='global_unpadded',
+          attn_type=model_lib.AttentionType.GLOBAL,
+          use_input_mask=False,
+      ),
+      dict(
+          testcase_name='global_padded',
+          attn_type=model_lib.AttentionType.GLOBAL,
+          use_input_mask=True,
+      ),
+      dict(
+          testcase_name='local_sliding_unpadded',
+          attn_type=model_lib.AttentionType.LOCAL_SLIDING,
+          use_input_mask=False,
+      ),
+      dict(
+          testcase_name='local_sliding_padded',
+          attn_type=model_lib.AttentionType.LOCAL_SLIDING,
+          use_input_mask=True,
+      ),
+  )
+  def test_split_attention_eager_fallback_concatenates_prefix(
+      self, attn_type, use_input_mask
+  ):
+    config = model_lib.ModelConfig.gemma4_e2b()
+    config.sliding_window_size = 16
+    config.use_sliding_window_kv_cache = True
+
+    # 1. Baseline: use_split_attention = False
+    config_base = dataclasses.replace(
+        config, use_flash_attention=False, use_split_attention=False
+    )
+    attn_base = attention_lib.Attention(
+        config=config_base,
+        attn_type=attn_type,
+        rngs=nnx.Rngs(0),
+    )
+
+    b, prefix_len, suffix_len = 2, 8, 4
+    cache_len = 16
+    kh, d = attn_base.num_kv_heads, attn_base.head_dim
+
+    cache_split = {
+        'k': jax.random.normal(jax.random.PRNGKey(10), (b, cache_len, kh, d)),
+        'v': jax.random.normal(jax.random.PRNGKey(11), (b, cache_len, kh, d)),
+        'end_index': jnp.array([prefix_len, prefix_len], dtype=jnp.int32),
+    }
+    cache_base = jax.tree.map(jnp.copy, cache_split)
+
+    x = jax.random.normal(
+        jax.random.PRNGKey(0), (b, suffix_len, config.embed_dim)
+    )
+    segment_pos = jnp.broadcast_to(
+        jnp.arange(prefix_len, prefix_len + suffix_len, dtype=jnp.int32)[
+            None, :
+        ],
+        (b, suffix_len),
+    )
+    total_len = prefix_len + suffix_len
+    attn_mask = jnp.ones((b, suffix_len, total_len), dtype=jnp.bool_)
+    if use_input_mask:
+      input_mask = jnp.ones((b, suffix_len), dtype=jnp.bool_)
+      input_mask = input_mask.at[1, -1].set(False)
+    else:
+      input_mask = None
+    _, out_base, layers_kvs_base = attn_base.block(
+        x,
+        segment_pos,
+        cache=cache_base,
+        attn_mask=attn_mask,
+        is_chunked_prefill=True,
+        prefix_length=prefix_len,
+        input_mask=input_mask,
+        force_eager=True,
+    )
+
+    # 2. Split attention with eager fallback: use_split_attention = True,
+    # force_eager = True
+    config_split = dataclasses.replace(
+        config, use_flash_attention=True, use_split_attention=True
+    )
+    attn_split = attention_lib.Attention(
+        config=config_split,
+        attn_type=attn_type,
+        rngs=nnx.Rngs(0),
+    )
+    _, out_split, layers_kvs_split = attn_split.block(
+        x,
+        segment_pos,
+        cache=cache_split,
+        attn_mask=attn_mask,
+        is_chunked_prefill=True,
+        prefix_length=prefix_len,
+        input_mask=input_mask,
+        force_eager=True,
+    )
+
+    np.testing.assert_allclose(out_split, out_base, atol=1e-5, rtol=1e-5)
+    self.assertLen(layers_kvs_split, 6)
+    k_proj, v_proj, _, _, split_k, split_v = layers_kvs_split
+    self.assertIsNone(split_k)
+    self.assertIsNone(split_v)
+    np.testing.assert_allclose(k_proj, layers_kvs_base[0], atol=1e-5)
+    np.testing.assert_allclose(v_proj, layers_kvs_base[1], atol=1e-5)
+
+  @parameterized.named_parameters(
+      ('has_split_prefix', True),
+      ('no_split_prefix', False),
+  )
+  def test_follower_layer_routing_with_shared_cache(self, has_split_prefix):
+    """Verifies follower layer routes to split or single flash attention."""
+    config = model_lib.ModelConfig.gemma4_e2b()
+    config.use_flash_attention = True
+    config.use_split_attention = True
+    config.flash_attention_block_size = 8
+    attn = attention_lib.Attention(
+        config=config,
+        attn_type=model_lib.AttentionType.GLOBAL,
+        rngs=nnx.Rngs(0),
+    )
+
+    b, q_len, kv_len, d = 1, 8, 16, config.head_dim
+    x = jnp.zeros((b, q_len, config.embed_dim))
+    segment_pos = jnp.zeros((b, q_len), dtype=jnp.int32)
+    attn_mask = jnp.ones((b, q_len, kv_len), dtype=jnp.bool_)
+
+    dummy_k = jnp.zeros((b, kv_len, config.num_kv_heads, d))
+    dummy_v = jnp.zeros((b, kv_len, config.num_kv_heads, d))
+    kv_shared_cache = {
+        'k': dummy_k,
+        'v': dummy_v,
+        'valid_mask': jnp.ones((b, kv_len), dtype=jnp.bool_),
+        'prior_end_index': jnp.array([kv_len - q_len], dtype=jnp.int32),
+        'split_prefix_k': dummy_k if has_split_prefix else None,
+        'split_prefix_v': dummy_v if has_split_prefix else None,
+    }
+
+    # For _flash_attention_split, we need mock_kernel to return (q, (lse,))
+    # For _flash_attention_single, we need mock_kernel to return q
+    def mock_kernel(q_in, k_in, v_in, segment_ids=None):
+      del k_in, v_in, segment_ids
+      if has_split_prefix:
+        lse = jnp.zeros(q_in.shape[:-1], dtype=jnp.float32)
+        return jnp.zeros_like(q_in), (lse,)
+      return jnp.zeros_like(q_in)
+
+    mesh = jax.sharding.Mesh(
+        np.array(jax.devices()[:1]).reshape(1, 1), ('fsdp', 'tp')
+    )
+
+    with mesh, mock.patch.object(
+        attn, '_flash_attention_split', wraps=attn._flash_attention_split
+    ) as mock_split, mock.patch.object(
+        attn, '_flash_attention_single', wraps=attn._flash_attention_single
+    ) as mock_single, mock.patch.object(
+        attn, '_make_splash_kernel', return_value=(mock_kernel, None)
+    ):
+      attn.block(
+          x,
+          segment_pos,
+          cache=None,
+          attn_mask=attn_mask,
+          kv_shared_cache=kv_shared_cache,
+          is_chunked_prefill=True,
+          prefix_length=kv_len - q_len,
+      )
+
+      if has_split_prefix:
+        mock_split.assert_called_once()
+        mock_single.assert_not_called()
+      else:
+        mock_split.assert_not_called()
+        mock_single.assert_called_once()
+
+  @parameterized.named_parameters(
+      dict(
+          testcase_name='local_sliding_q_len_greater_than_window',
+          attn_type=model_lib.AttentionType.LOCAL_SLIDING,
+          q_len=32,
+          window_size=16,
+          expected_mask_type=mask_lib.LocalMask,
+      ),
+      dict(
+          testcase_name='global_full_causal',
+          attn_type=model_lib.AttentionType.GLOBAL,
+          q_len=32,
+          window_size=16,
+          expected_mask_type=mask_lib.CausalMask,
+      ),
+      dict(
+          testcase_name='local_sliding_q_len_equal_window',
+          attn_type=model_lib.AttentionType.LOCAL_SLIDING,
+          q_len=16,
+          window_size=16,
+          expected_mask_type=mask_lib.LocalMask,
+      ),
+  )
+  def test_split_attention_suffix_mask_respects_window_size(
+      self, attn_type, q_len, window_size, expected_mask_type
+  ):
+    """Verifies that _flash_attention_split constructs the correct suffix mask."""
+    config = model_lib.ModelConfig.gemma4_e2b()
+    config.sliding_window_size = window_size
+    config.flash_attention_block_size = 16
+    config.use_split_attention = True
+    config.use_flash_attention = True
+    attn = attention_lib.Attention(
+        config=config, attn_type=attn_type, rngs=nnx.Rngs(0)
+    )
+
+    captured_masks = []
+    mock_kernel = lambda q, k, v, segment_ids=None: (
+        q,
+        (jnp.zeros(q.shape[:-1], dtype=jnp.float32),),
+    )
+    dummy = jnp.zeros((1, 1, 1, 1))
+    mesh = jax.sharding.Mesh(
+        np.array(jax.devices()[:1]).reshape(1, 1), ('fsdp', 'tp')
+    )
+
+    with mock.patch.object(
+        attn,
+        '_make_splash_kernel',
+        side_effect=lambda m, *a, **kw: (
+            captured_masks.append(m.masks[0]),
+            (mock_kernel, None),
+        )[1],
+    ):
+      attn._flash_attention_split(
+          query_proj=dummy,
+          key_proj=dummy,
+          value_proj=dummy,
+          split_prefix_k=dummy,
+          split_prefix_v=dummy,
+          q_len=q_len,
+          prefix_kv_len=16,
+          qh=config.num_heads,
+          block_sizes=attn._make_block_sizes(is_rectangular=True, q_len=q_len),
+          head_shards=1,
+          q_seq_shards=1,
+          mesh=mesh,
+          shd_b=None,
+          shd_n=None,
+          shd_t=None,
+          shd_h=None,
+          shd_n_kv=None,
+          shd_spec=P(None, None, None, None),
+      )
+
+    self.assertLen(captured_masks, 2)
+    prefix_mask = captured_masks[0]
+    suffix_mask = captured_masks[1]
+    self.assertIsInstance(suffix_mask, expected_mask_type)
+
+    row = np.arange(q_len)[:, None]
+    col = np.arange(q_len)[None, :]
+    if attn_type == model_lib.AttentionType.LOCAL_SLIDING:
+      expected_suffix = (col <= row) & (col > row - window_size)
+    else:
+      expected_suffix = col <= row
+    np.testing.assert_array_equal(suffix_mask[np.s_[:, :]], expected_suffix)
+
+    if (
+        q_len > window_size
+        and attn_type == model_lib.AttentionType.LOCAL_SLIDING
+    ):
+      self.assertFalse(prefix_mask[np.s_[:, :]][window_size:, :].any())
+
+  def test_flash_attention_single_reconstructs_concatenated_prefix_kv(self):
+    """Verifies single-kernel flash attention concatenates split_prefix_k/v.
+
+    Triggered when split attention is bypassed.
+    """
+    config = model_lib.ModelConfig.gemma4_e2b()
+    attn = attention_lib.Attention(
+        config=config,
+        attn_type=model_lib.AttentionType.GLOBAL,
+        rngs=nnx.Rngs(0),
+    )
+    b, q_len, prefix_len = 1, 8, 16
+    h, kh, d = config.num_heads, config.num_kv_heads, config.head_dim
+    dummy_q = jnp.zeros((b, h, q_len, d))
+    dummy_k = jnp.zeros((b, kh, q_len, d))
+    dummy_v = jnp.zeros((b, kh, q_len, d))
+    split_prefix_k = jnp.ones((b, prefix_len, kh, d))
+    split_prefix_v = jnp.ones((b, prefix_len, kh, d))
+
+    captured_kv_shapes = []
+
+    def mock_kernel(q_in, k_in, v_in, segment_ids=None):
+      del segment_ids
+      captured_kv_shapes.append((k_in.shape, v_in.shape))
+      return q_in
+
+    mesh = jax.sharding.Mesh(
+        np.array(jax.devices()[:1]).reshape(1, 1), ('fsdp', 'tp')
+    )
+    _, new_k, new_v = attn._flash_attention_single(
+        query_proj=dummy_q,
+        key_proj=dummy_k,
+        value_proj=dummy_v,
+        split_prefix_k=split_prefix_k,
+        split_prefix_v=split_prefix_v,
+        segment_ids=None,
+        splash_attn_kernel=mock_kernel,
+        kernel_spec=None,
+        shd_spec=P(None, None, None, None),
+        unsharded_seq_kv=P(None, None, None, None),
+        mesh=mesh,
+        shd_b=None,
+        shd_t=None,
+    )
+
+    expected_seq_len = prefix_len + q_len
+    self.assertEqual(captured_kv_shapes[0][0][1], expected_seq_len)
+    self.assertEqual(captured_kv_shapes[0][1][1], expected_seq_len)
+    self.assertEqual(new_k.shape[1], expected_seq_len)
+    self.assertEqual(new_v.shape[1], expected_seq_len)
 
 
 if __name__ == '__main__':
