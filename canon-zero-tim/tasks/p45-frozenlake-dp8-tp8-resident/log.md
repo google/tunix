@@ -160,3 +160,12 @@
 - Next: render the immutable published head in `new` mode, select the eval
   manifest for the requested full training plus held-out evaluation, and run
   through step 10/11 before exercising explicit resume.
+
+## 2026-08-15 UTC — P45r6 Step 0 failure on precomputed gradient checkpoint assertion
+
+- Type: target failure analysis
+- Command: `canon-p45-fl-eval-p45r6-7277defd` on 64 TPU (`DP8xTP8`, resident optimizer, concurrency 256).
+- Result: completed preflight, model loading into HBM, rollout, and Step 0 forward alignment checks; failed at Step 0 gradient accumulation with `ValueError: P28 G6 canary requires checkpointing disabled` at `tunix/sft/peft_trainer.py:856`.
+- Root Cause: `PeftTrainer._validate_precomputed_gradient_contract()` retained the legacy canary-only assertion forbidding `checkpoint_root_directory`, which conflicts with the newly added P45 GCS checkpointing feature (`CANON_FROZENLAKE_CKPT_ROOT`).
+- Raw log archived: `canon-zero-tim/debug_logs/p45_p45r6_checkpoint_contract_error.raw.log`.
+- Next: relax the assertion in `peft_trainer.py` to allow checkpointing when `CANON_FROZENLAKE_CKPT_ROOT` is set.

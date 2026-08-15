@@ -24,14 +24,11 @@
   through committed step 10/11, measure host-memory behavior, and verify exactly
   one durable checkpoint. A separate `resume` render using the same immutable
   source/tag is admitted only after a step-10 checkpoint exists.
-- Blockers: Pathways checkpoint memory/latency/durability/restore and the 350G
-  long-run memory trend remain unverified. The mechanism behind the p45r5 host
-  OOM is still not isolated; the next run supplies the missing RSS/cgroup
-  timeline rather than assuming a cause.
-- Key artifacts: `../../debug_logs/p45_p45r5_frozenlake_resident.raw.log`;
+- Blockers: `p45r6` failed at Step 0 due to `ValueError: P28 G6 canary requires checkpointing disabled` in `peft_trainer.py:856` when GCS checkpointing is enabled. This assertion requires relaxation for `CANON_FROZENLAKE_CKPT_ROOT`.
+- Key artifacts: `../../debug_logs/p45_p45r6_checkpoint_contract_error.raw.log`;
+  `../../debug_logs/p45_p45r5_frozenlake_resident.raw.log`;
   `../../cluster/P45_FROZENLAKE_RESIDENT_RUNBOOK.md`; `HANDOFF.md`; `plan.md`;
   `phases/p45-2b-qwen8b-tp8-overlay.md`;
   `phases/p45-3a-gcs-checkpoint-resume.md`;
-  `phases/p45-3b-host-memory-hardening.md`; `phases/p45-3-target-run.md`;
-  `../p41-optimizer-residency/phases/p41-4-frozenlake-capacity.md`
+  `phases/p45-3b-host-memory-hardening.md`; `phases/p45-3-target-run.md`
 - Updated: 2026-08-15 UTC
