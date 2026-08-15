@@ -31,11 +31,13 @@ must report `convergence-only` when warning-only alignment is enabled.
 Attempt `p45r5` from source `42139ffa` on 64 TPU (`DP8xTP8`, resident optimizer)
 successfully passed model loading, compilation, rollout, and sustained training for
 ~60 hours (2.5 days), reaching `train_steps=47` and `[CANON_ALIGN] step=1535 verdict=PASS`.
-The job terminated at `Sat, 15 Aug 2026 06:03:58 UTC` due to Linux kernel host RAM
-exhaustion (`Exit Code: 137 (OOMKilled)` on container `jax-tpu`), having reached the
-Kubernetes pod memory limit of 200GiB from multi-day trajectory/logging/cache accumulation.
-TPU HBM remained fully healthy throughout. For subsequent full runs, increase the head pod
-Host memory limit to 350GiB+ and incorporate periodic host GC cycles.
+The job terminated at `Sat, 15 Aug 2026 06:03:58 UTC` with `Exit Code: 137
+(OOMKilled)` on `jax-tpu` at the 200G Kubernetes memory limit. TPU HBM remained
+healthy. The archived log does not contain a complete cgroup/RSS timeline, so
+trajectory, logging, and compilation-cache accumulation remain hypotheses.
+The next source raises only the P45 `jax-tpu` limit to 350G, releases completed
+eval/rollout references, runs cyclic GC once per committed step, and emits
+host-memory evidence; the larger limit by itself is not a root-cause fix.
 
 ## Operator: fetch and verify one immutable source
 
@@ -108,18 +110,25 @@ CANON_LOCAL_TRAJECTORIES=32
 MIN_TOKEN_BUCKET=2048
 CANON_OPT_STATE_RESIDENT=1
 CANON_P30_OPT_STATE_OFFLOAD=0
+CANON_P28_BATCHED_REPORT=1
 CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY=1
 CANON_FROZENLAKE_CKPT_MODE=new
 CANON_FROZENLAKE_CKPT_ROOT=gs://yuxzhang-tunix-models/canon-zero-tim/checkpoints/frozenlake
 CANON_FROZENLAKE_CKPT_TAG=fl-prod-001
 CANON_FROZENLAKE_CKPT_INTERVAL=10
 CANON_FROZENLAKE_CKPT_MAX_TO_KEEP=1
+jax-tpu resources.limits.memory=350G
 --train_trajectory_micro_batch_size=8
 --vllm_max_num_seqs=32
 --vllm_max_num_batched_tokens=256
 --learning_rate=1e-6
 --max_steps=450
 ```
+
+Only the grouped report-window optimization is admitted for this source.
+`CANON_BATCHED_EVIDENCE` and `CANON_P28_BATCHED_REVERSE` remain absent because
+their P32 grouped mirrors are not implemented; do not hand-add them to the
+rendered manifest.
 
 The local gate must show seven `P45_QWEN8B_TP8_SITE_PASS` lines plus:
 
@@ -208,6 +217,10 @@ The first update is admitted only if all of the following are present:
    replicas, and no accumulator/reference mutation;
 10. finite HBM snapshots at before-reverse, after-accumulation, and
     after-commit with no TPU OOM.
+11. `[P45.HOST_MEMORY]` includes a `train_start` baseline and a
+    `global_step_complete` post-GC record with a non-null cgroup limit.
+12. `[PERF] stage=p32_vag_reverse` is present and reports finite `seconds`,
+    `adjoint`, and `accumulate` values, proving the grouped fast path executed.
 
 ## Checkpoint/resume gate
 
@@ -254,6 +267,9 @@ For the evaluation variant, require exactly one
 `[CANON_P33_EVAL] ENABLED workload=frozenlake cadence=10 held_out_rows=100 generations=8`
 marker plus finite `[CANON_FROZENLAKE_P42_JSON]` summaries at policy steps
 0,10,...,440. The plain full variant must instead attest evaluation disabled.
+The eval variant must additionally emit one `phase=eval_materialized` memory
+record per scheduled policy step. The existing `_last_eval_train_step` guard
+is the exactly-once authority; do not add a second evaluation queue.
 
 ## Terminal evidence and return bundle
 
@@ -285,6 +301,9 @@ final JobSet condition, pod exit code/reason, and whether evaluation was
 enabled.
 Include a GCS listing of the campaign `actor/` prefix showing the one retained
 complete checkpoint and, for resume, the three `P45.CHECKPOINT` markers above.
+Also include every `[P45.HOST_MEMORY]` line through step 11 and summarize the
+post-GC current/peak/RSS trend. A rising trend is diagnostic and prevents a
+long-run memory-stability claim even when the pod remains below 350G.
 
 ## Rollback
 

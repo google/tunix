@@ -16,7 +16,8 @@ Do not mutate or promote the existing DP16xTP4 carrier-debug evidence.
 | P45.2 | Local static and render admission | generated manifests attest DP8xTP8, M2048/M256, 32 local trajectories, resident optimizer, evaluation selection, and hard safety gates | completed |
 | P45.2b | Isolated Qwen3-8B TP8 engine overlay and exact-image admission | target image installs `qwen8b_tp8`; seven TP8 projection shapes, canonical forward/VJP, manifest integrity, and TP4 rejection all pass | completed |
 | P45.3a | GCS checkpoint/resume admission | fresh/resume manifests are fail-closed, save every 10 committed steps with `LatestN(1)`, restore actor/Adam/step metadata, and sync the restored actor into vLLM before the first rollout | local implementation complete; target pending |
-| P45.3 | 64-chip full/eval target run | first real update reports device-resident state, optimizer H2D/D2H zero, finite update, HBM headroom, online W&B, and continued training; step 10 publishes one restorable GCS checkpoint; no OOM | pending on P45.3a |
+| P45.3b | Long-run host-memory and warm-step hardening | P45 alone renders a 350G `jax-tpu` limit; evaluation remains exactly once per policy cadence; cgroup/RSS evidence is emitted at eval and committed-step boundaries; large per-step references are released before bounded GC; the wired P32 grouped report adjoint is enabled | local implementation complete; target pending |
+| P45.3 | 64-chip full/eval target run | first real update reports device-resident state, optimizer H2D/D2H zero, finite update, HBM headroom, online W&B, and continued training; step 10 publishes one restorable GCS checkpoint; resume restores step 10 and commits step 11; host memory remains below its limit with a measurable post-GC trend | pending on P45.3a/P45.3b |
 
 ## Decisions
 
@@ -40,6 +41,27 @@ Do not mutate or promote the existing DP16xTP4 carrier-debug evidence.
 - Decision: forced close-time checkpoints are disabled for P45. Otherwise an
   off-interval graceful exit could save step 17 and, under `LatestN(1)`, delete
   the last admitted step-10 recovery point.
+- Confirmed: P45 uses the agentic evaluation path, which materializes the
+  complete held-out rollout and guards it with `_last_eval_train_step`; the
+  base `RLLearner` evaluation queue is not on this workload's execution path.
+  P45.3b preserves that semantic and adds a focused exactly-once regression
+  gate rather than rewriting generic evaluation.
+- Decision: the P45 renderer, not the shared 64-chip base manifest, raises the
+  `jax-tpu` memory limit from 200G to 350G. The larger limit is crash headroom,
+  not evidence that the p45r5 growth mechanism is fixed.
+- Decision: P45 emits cgroup and process-RSS snapshots at evaluation and
+  committed-step boundaries, drops per-step rollout/evaluation references,
+  and runs Python cyclic GC once per committed step. Do not call
+  `jax.clear_caches()` in the production loop.
+- Decision: enable `CANON_P28_BATCHED_REPORT=1` because its compiled adjoint is
+  implemented in P45's P32 grouped reverse path. Do not enable
+  `CANON_BATCHED_EVIDENCE` or `CANON_P28_BATCHED_REVERSE` until their P32
+  grouped mirrors and verify gates exist; setting them now would be a
+  non-functional performance claim.
+- Claim boundary: p45r5 proves sustained resident training through step 47 and
+  a 200G host OOM. Its archived log does not contain a complete RSS/cgroup
+  timeline, so trajectory, logging, and compilation-cache accumulation remain
+  hypotheses until P45.3b target evidence separates them.
 - Claim ceiling: resume is committed-step training continuation. It does not
   restore an in-flight rollout or the vLLM sampling RNG and is not a bitwise
   continuation of the interrupted trajectory stream.

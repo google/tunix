@@ -118,12 +118,14 @@ CANON_LOCAL_TRAJECTORIES=32
 MIN_TOKEN_BUCKET=2048
 CANON_OPT_STATE_RESIDENT=1
 CANON_P30_OPT_STATE_OFFLOAD=0
+CANON_P28_BATCHED_REPORT=1
 CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY=1
 CANON_FROZENLAKE_CKPT_MODE=new
 CANON_FROZENLAKE_CKPT_ROOT=gs://yuxzhang-tunix-models/canon-zero-tim/checkpoints/frozenlake
 CANON_FROZENLAKE_CKPT_TAG=fl-prod-001
 CANON_FROZENLAKE_CKPT_INTERVAL=10
 CANON_FROZENLAKE_CKPT_MAX_TO_KEEP=1
+jax-tpu resources.limits.memory=350G
 --train_trajectory_micro_batch_size=8
 --vllm_max_num_seqs=32
 --vllm_max_num_batched_tokens=256
@@ -133,6 +135,16 @@ CANON_FROZENLAKE_CKPT_MAX_TO_KEEP=1
 
 If either optimizer value is `0/1` instead of `1/0`, stop: the wrong renderer
 or manifest was selected. Do not hand-edit generated YAML.
+
+`CANON_P28_BATCHED_REPORT=1` selects the compiled report-window adjoint in the
+P32 grouped reverse path used by DP8. Do not add `CANON_BATCHED_EVIDENCE=1` or
+`CANON_P28_BATCHED_REVERSE=1` to this profile: their P32 grouped mirrors are
+not implemented in this source, so those flags would not deliver their
+one-host measurements to P45.
+
+The checked-in shared 64-chip base remains at a 200G `jax-tpu` limit. Only the
+P45 renderer may produce 350G. Treat that as crash headroom while collecting a
+host-memory timeline, not as proof that the p45r5 growth mechanism was fixed.
 
 `CANON_MODEL_DIR_NAME` is resolved when the profile is sourced inside the pod,
 not duplicated in the generated YAML. Before launch the source-level grep in
@@ -169,6 +181,7 @@ The complete log must show:
 [CANON_P33_DP8] update_step_committed train_steps=1
 [P45.CHECKPOINT] PREFLIGHT mode=new ... interval=10 max_to_keep=1
 [P45.CHECKPOINT] NEW_PASS latest=none
+[PERF] stage=p32_vag_reverse ... adjoint=<SECONDS> ...
 ```
 
 The update record must additionally contain:
@@ -185,12 +198,31 @@ commit; a finite gradient and parameter delta; a valid optimizer transaction;
 exact DP replicas; and no TPU OOM. Seeing `pinned-host-offload` is not an
 optimization fallback—it violates the P45 placement contract.
 
+The `p32_vag_reverse` line proves that the grouped report optimization reached
+the live DP8 path. Archive `seconds`, `adjoint`, and `accumulate` for warm
+updates; the optimization is enabled for throughput, but its DP8 target gain
+must be measured rather than inherited from the one-host result.
+
 For `$EVAL`, require exactly one evaluation enablement marker and finite
 `[CANON_FROZENLAKE_P42_JSON]` summaries at policy steps `0,10,...,440`:
 
 ```text
 [CANON_P33_EVAL] ENABLED workload=frozenlake cadence=10 held_out_rows=100 generations=8
 ```
+
+P45 must also emit one baseline, one record whenever evaluation is
+materialized, and one post-GC record per committed update:
+
+```text
+[P45.HOST_MEMORY] {"phase":"train_start",...}
+[P45.HOST_MEMORY] {"phase":"eval_materialized",...}
+[P45.HOST_MEMORY] {"phase":"global_step_complete","gc_collected":<N>,...}
+```
+
+Archive the complete marker series. Missing cgroup files appear as `null`, not
+zero. A monotonically rising post-GC `cgroup_current_bytes` is an unresolved
+leak signal even if the 350G limit prevents an immediate OOM; do not call the
+long run memory-stable from one update.
 
 ## 6. Checkpoint and explicit resume
 
@@ -247,6 +279,10 @@ exactly one complete step is retained. Resume is committed-step continuation,
 not exact trajectory continuation: up to nine updates after the newest saved
 boundary may be replayed, and rollout/environment RNG plus W&B run identity are
 not restored.
+
+For P45.3b, also return every `[P45.HOST_MEMORY]` line through step 11 and a
+small table of `step`, `phase`, `cgroup_current_bytes`,
+`cgroup_peak_bytes`, `process_rss_bytes`, and `gc_collected`.
 
 ## Rollback
 

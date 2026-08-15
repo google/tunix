@@ -92,3 +92,58 @@
 - Claim ceiling: this proves local wiring and fail-closed contracts only. Resume continues committed actor/Adam/global-step state; it does not restore in-flight rollout/environment state, vLLM RNG or W&B identity, and can replay up to nine updates.
 - Rollback: stop selecting the P45 renderer or revert the checkpoint CL; historical P33 DP16xTP4 remains checkpoint-disabled.
 - Next: launch `new` through step 10/11, verify exactly one durable `actor/10`, then explicitly relaunch `resume` from the same immutable source/tag and require step 11 commit.
+
+## 2026-08-15 UTC — P45.3b host-memory hardening locally admitted
+
+- Type: implementation, correction, and local validation
+- Correction: P45 runs through `AgenticRLLearner`; its held-out evaluation is
+  already materialized as one complete list and guarded by
+  `_last_eval_train_step`. The generic `RLLearner` unbounded evaluation queue
+  is not on this carrier's execution path and was not modified.
+- Action: isolated a 350G `jax-tpu` limit in the P45 renderer while preserving
+  the shared base at 200G; added dependency-free cgroup/RSS telemetry; released
+  completed eval/rollout references; ran Python cyclic GC once per committed
+  step; documented the target memory/checkpoint/resume gate.
+- Commands: pinned-image
+  `canon-zero-tim/tests/p45_frozenlake_dp8_tp8/run_exact_image.sh`; host focused
+  memory/renderer tests; Python and shell syntax checks; `git diff --check`.
+- Result: pinned image
+  `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`
+  passed 101 workload/renderer tests, 37 alignment tests, profile admission,
+  seven TP8 sites, and exact canonical forward/VJP. No 64-chip job was
+  launched, so a stable post-GC slope and the p45r5 allocation mechanism remain
+  unproven.
+- Rollback: stop selecting the P45 renderer/profile or revert only the P45.3b
+  renderer/profile/telemetry changes. Do not change shared P33/P38 manifests.
+- Next: fresh mode through step 10/11 with complete host-memory series, then an
+  explicit resume from actor/10 through committed step 11.
+
+## 2026-08-15 UTC — admit the wired grouped report optimization for P45
+
+- Type: implementation, scope correction, and validation
+- Fact: P45 executes the P32 grouped reverse path. That path implements
+  `CANON_P28_BATCHED_REPORT`, but the advertised batched-evidence and
+  batched-reverse improvements are still confined to the non-grouped P28 path.
+- Action: enabled only `CANON_P28_BATCHED_REPORT=1` in the P45 profile; added a
+  profile gate and a negative source test preventing the two unported flags
+  from being advertised; added the live `p32_vag_reverse` timing requirement
+  to the operator handoff.
+- Commands: pinned-image
+  `canon-zero-tim/tests/p45_frozenlake_dp8_tp8/run_exact_image.sh`; shell syntax;
+  `git diff --check`.
+- Result: pinned image
+  `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`
+  passed 102 workload/renderer tests, 37 alignment tests, merged profile
+  admission with `batched_report=on`, seven TP8 projection sites, and exact
+  canonical forward/VJP. The host-only aggregate runner remained
+  non-authoritative because that Python lacks `datasets` and `metrax`; its 39
+  loaded tests passed before those two import errors.
+- Claim boundary: no DP8 target update has measured the grouped optimization's
+  throughput gain. The one-host number is not promoted to P45; the next run
+  must archive `p32_vag_reverse` `seconds`, `adjoint`, and `accumulate`.
+- Rollback: remove the single P45 profile export and its profile/documentation
+  assertions. The optimization implementation and all P33/P38 profiles remain
+  unchanged.
+- Next: publish the locally admitted P45 source, then launch fresh mode through
+  step 10/11 and collect memory, checkpoint, numerical, and grouped timing
+  evidence.

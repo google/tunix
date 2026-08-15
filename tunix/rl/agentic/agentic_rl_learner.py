@@ -43,6 +43,7 @@ from tunix.rl import deepswe_debug
 from tunix.rl import dp_workloads
 from tunix.perf.experimental import constants as perf_constants
 from tunix.rl import function_registry
+from tunix.rl import host_memory as host_memory_lib
 from tunix.rl import perf_log
 from tunix.rl import reward_manager  # pylint: disable=unused-import
 from tunix.rl import rl_cluster as rl_cluster_lib
@@ -60,6 +61,22 @@ from tunix.rl.queue import data_queue as queue_lib
 from tunix.sft import utils as sft_utils
 
 ArrayLike = typing.ArrayLike
+
+
+def _emit_p45_host_memory(
+    *, phase: str, step: int, gc_collected: int | None = None
+) -> None:
+  print(
+      "[P45.HOST_MEMORY] "
+      + json.dumps(
+          host_memory_lib.record(
+              phase=phase, step=step, gc_collected=gc_collected
+          ),
+          sort_keys=True,
+          separators=(",", ":"),
+      ),
+      flush=True,
+  )
 
 
 def _p38_diagnostic_consumer_contract(
@@ -2061,6 +2078,13 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         if eval_dataset
         else []
     )
+    p45_host_memory_enabled, p45_host_gc_interval = (
+        host_memory_lib.contract(os.environ)
+    )
+    if p45_host_memory_enabled:
+      _emit_p45_host_memory(
+          phase="train_start", step=int(self.rl_cluster.global_steps)
+      )
     p31_eval_rollout_enabled = (
         os.environ.get("CANON_P31_ENABLE_EVAL", "") == "1"
     )
@@ -2357,6 +2381,9 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
 
       # --- Evaluation Logic on FIRST microbatch ---
       current_eval_dataset = None
+      eval_examples = None
+      eval_future = None
+      eval_orchestrator = None
       p31_eval_rollout = p31_eval_rollout_enabled
       if (
           (not p28_g6_update or p31_eval_rollout)
@@ -2396,6 +2423,10 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
               _eval_runner_async(eval_orchestrator), self.loop
           )
           eval_examples = eval_future.result()
+          if p45_host_memory_enabled:
+            _emit_p45_host_memory(
+                phase="eval_materialized", step=int(current_train_step)
+            )
           if p31_eval_rollout:
             expected_eval_rewards = (
                 len(all_eval_prompts) * self._num_generations()
@@ -2502,6 +2533,14 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           self.rl_cluster.update_critic(
               chunked_train_micro_batch, current_eval_dataset, skip_jit
           )
+      # Evaluation can contain hundreds of full trajectory objects. Keep it
+      # alive only through the actor/critic call that consumes it; otherwise
+      # Python function locals retain the most recent eval until the next
+      # cadence boundary.
+      current_eval_dataset = None
+      eval_examples = None
+      eval_future = None
+      eval_orchestrator = None
 
       if onehost_no_commit:
         from flax import nnx  # pylint: disable=g-import-not-at-top
@@ -2842,6 +2881,29 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             self._put_prompts_to_queue(prompt_queue, batch)
           except StopIteration:
             prompt_queue.put(None)
+
+        if p45_host_memory_enabled:
+          # These are complete-step host references, not device state. Drop
+          # them before cyclic GC so the post-GC record is a useful long-run
+          # baseline. JAX compilation caches are deliberately left intact.
+          del train_micro_batch
+          del merged_train_micro_batch
+          del chunked_train_micro_batch
+          del train_rewards
+          del eval_rewards
+          del adv
+          del cmask
+          del valid_mask
+          del raw_lengths
+          completed_step = int(self.rl_cluster.actor_trainer.train_steps)
+          collected = host_memory_lib.maybe_collect_garbage(
+              step=completed_step, interval=p45_host_gc_interval
+          )
+          _emit_p45_host_memory(
+              phase="global_step_complete",
+              step=completed_step,
+              gc_collected=collected,
+          )
 
         self.rl_cluster.buffer_metrics(
             self.rl_cluster.perf_v2.export(),

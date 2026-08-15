@@ -14,6 +14,10 @@ import yaml
 _ROOT = Path(__file__).resolve().parents[3]
 _RENDERER_PATH = _ROOT / "canon-zero-tim/cluster/render_p45_frozenlake.py"
 _BASE_PATH = _ROOT / "canon-zero-tim/cluster/jobset-64chip.yaml"
+_PROFILE_PATH = _ROOT / (
+    "canon-zero-tim/cluster/profiles/"
+    "qwen3-8b-dp8-tp8-frozenlake-resident.env"
+)
 _SOURCE_COMMIT = "4" * 40
 _CHECKPOINT_TAG = "fl-prod-001"
 
@@ -36,7 +40,20 @@ def _main_env(document):
   return {entry["name"]: entry.get("value") for entry in container["env"]}
 
 
+def _main_container(document):
+  pod = document["spec"]["replicatedJobs"][0]["template"]["spec"][
+      "template"
+  ]["spec"]
+  return next(item for item in pod["containers"] if item["name"] == "jax-tpu")
+
+
 class RenderP45FrozenLakeTest(unittest.TestCase):
+
+  def test_profile_enables_only_the_admitted_grouped_report_optimization(self):
+    profile = _PROFILE_PATH.read_text()
+    self.assertIn("export CANON_P28_BATCHED_REPORT=1", profile)
+    self.assertNotIn("export CANON_BATCHED_EVIDENCE=1", profile)
+    self.assertNotIn("export CANON_P28_BATCHED_REVERSE=1", profile)
 
   def test_renders_isolated_full_and_eval_resident_jobsets(self):
     with tempfile.TemporaryDirectory() as tmp:
@@ -53,6 +70,10 @@ class RenderP45FrozenLakeTest(unittest.TestCase):
       self.assertEqual(len({doc["metadata"]["name"] for doc in documents}), 2)
       for document in documents:
         env = _main_env(document)
+        self.assertEqual(
+            _main_container(document)["resources"]["limits"]["memory"],
+            "350G",
+        )
         self.assertEqual(
             env["CANON_PROFILE_FILE"],
             "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-resident.env",
@@ -96,6 +117,11 @@ class RenderP45FrozenLakeTest(unittest.TestCase):
       self.assertNotIn("--num_test_batches=4", by_eval["0"]["CANON_RUN_CMD"])
       self.assertIn("--num_test_batches=4", by_eval["1"]["CANON_RUN_CMD"])
       self.assertIn("--eval_every_n_steps=10", by_eval["1"]["CANON_RUN_CMD"])
+
+      base = yaml.safe_load(_BASE_PATH.read_text())
+      self.assertEqual(
+          _main_container(base)["resources"]["limits"]["memory"], "200G"
+      )
 
   def test_refuses_overwrite(self):
     with tempfile.TemporaryDirectory() as tmp:
@@ -154,6 +180,22 @@ class RenderP45FrozenLakeTest(unittest.TestCase):
             run_id="p45-invalid",
             checkpoint_tag=_CHECKPOINT_TAG,
             checkpoint_mode="automatic",
+        )
+
+  def test_rejects_base_memory_limit_drift(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      base = yaml.safe_load(_BASE_PATH.read_text())
+      _main_container(base)["resources"]["limits"]["memory"] = "201G"
+      base_path = Path(tmp) / "base.yaml"
+      base_path.write_text(yaml.safe_dump(base, sort_keys=False))
+      with self.assertRaisesRegex(ValueError, "memory limit drifted"):
+        renderer.render_all(
+            base_path=base_path,
+            output_dir=Path(tmp) / "out",
+            source_commit=_SOURCE_COMMIT,
+            run_id="p45-memory-drift",
+            checkpoint_tag=_CHECKPOINT_TAG,
+            checkpoint_mode="new",
         )
 
 
