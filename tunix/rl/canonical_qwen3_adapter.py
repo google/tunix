@@ -69,6 +69,14 @@ def _segmented_loss_geometry(environ) -> tuple[int, tuple[int, int]]:
           "P41 segmented loss requires the bounded GSM8K L3 update canary"
       )
     return 2, (256, 64)
+  if (
+      environ.get("CANON_GSM8K_TRAIN", "") == "1"
+      and environ.get("CANON_P33_WORKLOAD_LAUNCH_ADMITTED", "") != "1"
+      and environ.get("CANON_P34_DEEPSWE", "") != "1"
+  ):
+    # One-host real-geometry GSM8K training: 4 prompts x 8 generations per
+    # update at prompt/response 1024/1024 (admitted 2026-08-15 for P51).
+    return 32, (1024, 1024)
   if environ.get("CANON_P31_CONVERGENCE", "") == "1":
     return 32, (4096, 2048)
   return 8, (2048, 64)

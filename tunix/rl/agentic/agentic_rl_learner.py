@@ -160,6 +160,10 @@ def _segmented_update_geometry(environ) -> tuple[int, int, str, bool]:
     )
   if p41_optimizer_bench:
     return 2, 2, "[P41.OPTIMIZER]", False
+  if environ.get("CANON_GSM8K_TRAIN", "") == "1":
+    # One-host real-geometry GSM8K training (P51): 32 trajectories per
+    # update chunked 16x2. The P33/P34 cluster branches return earlier.
+    return 32, 2, "[CANON_GSM8K_TRAIN]", False
   if p31_convergence:
     return 32, 2, "[CANON_FROZENLAKE_P31]", False
   return 8, 2, "[CANON_FROZENLAKE_P27]", False
@@ -595,8 +599,11 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         "CANON_P34_RUN_STAGE" if p34_workload else "CANON_P33_RUN_STAGE",
         "",
     )
+    gsm8k_train = os.environ.get("CANON_GSM8K_TRAIN", "") == "1"
     expected_mode = (
-        "train" if p31_convergence or canonical_workload else "update-canary"
+        "train"
+        if p31_convergence or canonical_workload or gsm8k_train
+        else "update-canary"
     )
     if alignment.execution_mode() != expected_mode:
       raise alignment.AlignmentGateError(
@@ -2660,6 +2667,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             f"Global step {self.rl_cluster.global_steps} completed in"
             f" {global_step_time:.2f} seconds."
         )
+        _canon_xprof_step_boundary()
         # One-line per-step diagnostic: raw rewards, solve rate, completion
         # length, advantage scale, and eval (when an eval just fired this
         # step). Mirrors the per-iter view a wandb dashboard would show
@@ -2912,3 +2920,35 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           self.algo_config.off_policy_steps,
       )
     return filtered_train_micro_batch
+
+
+_CANON_XPROF = {"calls": 0, "active": False, "done": False}
+
+
+def _canon_xprof_step_boundary():
+  """Env-gated jax.profiler window keyed on completed global steps.
+
+  CANON_XPROF_DIR enables the capture (empty or unset means off, so the
+  docker -e K="" idiom stays inert). The trace starts once
+  CANON_XPROF_SKIP_STEPS global steps have completed and stops
+  CANON_XPROF_STEPS completed steps later, writing an XProf xplane plus
+  perfetto_trace.json.gz into the directory in one capture.
+  """
+  directory = os.environ.get("CANON_XPROF_DIR", "")
+  if not directory or _CANON_XPROF["done"]:
+    return
+  skip = int(os.environ.get("CANON_XPROF_SKIP_STEPS", "") or "2")
+  steps = int(os.environ.get("CANON_XPROF_STEPS", "") or "1")
+  _CANON_XPROF["calls"] += 1
+  if not _CANON_XPROF["active"] and _CANON_XPROF["calls"] == skip:
+    jax.profiler.start_trace(directory, create_perfetto_trace=True)
+    _CANON_XPROF["active"] = True
+    print(
+        f"[P51.XPROF] start dir={directory} after_completed_steps={skip}",
+        flush=True,
+    )
+  elif _CANON_XPROF["active"] and _CANON_XPROF["calls"] >= skip + steps:
+    jax.profiler.stop_trace()
+    _CANON_XPROF["active"] = False
+    _CANON_XPROF["done"] = True
+    print(f"[P51.XPROF] stop captured_steps={steps}", flush=True)

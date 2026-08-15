@@ -287,6 +287,7 @@ def requires_alignment_train_mode(
   values = os.environ if environ is None else environ
   return (
       values.get("CANON_P31_CONVERGENCE", "") == "1"
+      or values.get("CANON_GSM8K_TRAIN", "") == "1"
       or active_workload(values) is not None
   )
 

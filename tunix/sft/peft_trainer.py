@@ -348,6 +348,11 @@ def _precomputed_expected_microbatches(environ) -> int:
       )
     return 1
   if (
+      environ.get("CANON_GSM8K_TRAIN", "") == "1"
+      and environ.get("CANON_P33_WORKLOAD_LAUNCH_ADMITTED", "") != "1"
+  ):
+    return 16
+  if (
       environ.get("CANON_P31_CONVERGENCE", "") == "1"
   ):
     return 16
@@ -825,7 +830,9 @@ class PeftTrainer:
         "CANON_P28_G6_UPDATE": "1",
         (
             "CANON_ALIGNMENT_TRAIN"
-            if p31_convergence or p33_workload
+            if p31_convergence
+            or p33_workload
+            or os.environ.get("CANON_GSM8K_TRAIN", "") == "1"
             else "CANON_ALIGNMENT_UPDATE_CANARY"
         ): "1",
     }
