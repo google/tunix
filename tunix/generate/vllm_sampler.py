@@ -23,6 +23,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union, cast
 
 from absl import logging
 from flax import nnx
+from flax import traverse_util
 import jax
 import jaxtyping
 import numpy as np
@@ -124,6 +125,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       self,
       tokenizer: Any,
       config: VllmConfig,
+      converter: Any = None,
   ):
     """Initializes the VllmSampler.
 
@@ -150,6 +152,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       self.tokenizer = tok_adapter.TokenizerAdapter(tokenizer)
     self.config = config
     self.args = self._vllm_config(config)
+    self.converter = converter
     self._driver: VLLMInProcessDriver | None = None
     self.llm: LLM | None = None
     self._request_counter = count()
@@ -181,6 +184,63 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
           " jax.sharding.Mesh."
       )
 
+  def _assign_converted_state(self, converted: Any) -> None:
+    """Reshards an externally-converted state onto the model runner.
+
+    Generic on purpose: a converter is expected to return weights already keyed
+    like `transformer_state`, so this knows nothing about any particular model
+    family. Anything the converter did not supply keeps its current value --
+    coverage is the converter's contract to enforce, not this engine's.
+    """
+    state = self.transformer_state
+    state_dict = (
+        (state.to_pure_dict() if hasattr(state, "to_pure_dict") else dict(state))
+        if isinstance(state, nnx.State)
+        else state
+    )
+    spec_flat = traverse_util.flatten_dict(state_dict)
+    src_flat = {
+        k: v
+        for k, v in traverse_util.flatten_dict(converted).items()
+        if k in spec_flat
+    }
+    if not src_flat:
+      raise ValueError(
+          f"{type(self.converter).__name__}.convert() returned no weights "
+          "matching the vLLM model-runner state; the rollout would keep its "
+          "randomly-initialized dummy weights."
+      )
+
+    debug = getattr(self.converter, "debug", False)
+    if debug:
+      missing = [k for k in spec_flat if k not in src_flat]
+      logging.info(
+          "weight_sync_debug: resharding %d/%d params; %d target params keep "
+          "their current value%s",
+          len(src_flat), len(spec_flat), len(missing),
+          (" (first 10: %s)" % [".".join(map(str, k)) for k in missing[:10]])
+          if missing else "",
+      )
+
+    resharded_flat = utils._reshard_in_chunks(  # pylint: disable=protected-access
+        src_flat,
+        spec_flat,
+        reshard.reshard_pytree,
+        self.config.reshard_chunk_size or len(src_flat),
+        self.config.delete_dst_buffers,
+    )
+
+    if debug:
+      utils.log_reshard_placement(resharded_flat, spec_flat)
+
+    resharded = traverse_util.unflatten_dict(resharded_flat)
+    if isinstance(state, nnx.State):
+      nnx.update(state, resharded)
+    elif hasattr(state, "update"):
+      state.update(resharded)
+    else:
+      self._model_runner.state = resharded
+
   # TODO(b/434969743): Optimize weight sharing between trainer and vllm sampler.
   def update_params(
       self,
@@ -199,7 +259,17 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     # Synchronization point before weight sync
     jax.effects_barrier()
 
-    if self.to_hf_key_mappings:
+    if self.converter is not None:
+      # Conversion is owned by the integrator (MaxText), not by this engine:
+      # it returns weights already shaped for `transformer_state`, and all we
+      # do here is reshard them onto the runner's shardings and assign.
+      logging.info("Weight sync via converter %s.", type(self.converter).__name__)
+      self._assign_converted_state(
+          self.converter.convert(
+              updated_weights, target_state=self.transformer_state
+          )
+      )
+    elif self.to_hf_key_mappings:
       preprocess_fn = self.config.mapping_config.preprocess_src_state
       if preprocess_fn:
         updated_weights = preprocess_fn(updated_weights)
