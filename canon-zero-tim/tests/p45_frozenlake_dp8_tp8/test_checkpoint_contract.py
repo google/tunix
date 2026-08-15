@@ -172,6 +172,20 @@ class FrozenLakeCheckpointContractTest(unittest.TestCase):
     self.assertIn("_sync_weights_without_advancing_step()", resume_body)
     self.assertNotIn("global_steps += 1", resume_body)
 
+  def test_recipe_wires_signed_checkpoint_contract_into_g6_trainer(self):
+    recipe = _RECIPE.read_text()
+    self.assertIn(
+        "precomputed_gradient_checkpointing_contract=(", recipe
+    )
+    self.assertIn(
+        "frozenlake_checkpoint.SCHEMA if P45_CHECKPOINT.enabled", recipe
+    )
+
+    trainer = (_ROOT / "tunix/sft/peft_trainer.py").read_text()
+    self.assertIn("_p45_precomputed_checkpointing_admitted", trainer)
+    self.assertIn("committed ", trainer)
+    self.assertIn("P45 checkpoint contract is admitted", trainer)
+
 
 if __name__ == "__main__":
   unittest.main()

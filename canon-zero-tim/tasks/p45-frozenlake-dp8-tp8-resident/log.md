@@ -169,3 +169,26 @@
 - Root Cause: `PeftTrainer._validate_precomputed_gradient_contract()` retained the legacy canary-only assertion forbidding `checkpoint_root_directory`, which conflicts with the newly added P45 GCS checkpointing feature (`CANON_FROZENLAKE_CKPT_ROOT`).
 - Raw log archived: `canon-zero-tim/debug_logs/p45_p45r6_checkpoint_contract_error.raw.log`.
 - Next: relax the assertion in `peft_trainer.py` to allow checkpointing when `CANON_FROZENLAKE_CKPT_ROOT` is set.
+
+## 2026-08-15 UTC — isolate and locally admit the G6 checkpoint integration
+
+- Type: corrective implementation; no target launch
+- Fact: P45r6 proved that the legacy G6 assertion rejected every non-null
+  checkpoint directory before the first gradient microbatch, even though the
+  complete P45 checkpoint contract had already passed its workload and GCS
+  preflight.
+- Action: retained checkpoint-disabled G6 as the default and added one narrow
+  `p45-frozenlake-checkpoint-v1` trainer-config admission. The validator also
+  requires the exact P45 workload, committed full stage, resident optimizer,
+  GCS root/tag-derived actor directory, interval 10, retention 1, and Pathways
+  persistence. The FrozenLake recipe supplies the token only after
+  `frozenlake_checkpoint.from_env()` and `require_p45()` succeed.
+- Result: P45 pure contract/renderer tests passed 24/24. Exact pinned image
+  `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`
+  passed the 103-test P45 gate and both targeted PeftTrainer tests: signed P45
+  checkpointing is admitted, while the legacy checkpoint-disabled four-step G6
+  transaction remains valid. No 64-chip run or GCS checkpoint write occurred.
+- Rollback: remove the config admission token and restore the unconditional
+  checkpoint-directory rejection; this returns to the P45r6 failure mode.
+- Next: publish the fix, render from that immutable source, then run fresh mode
+  through committed step 10/11 and verify one durable actor checkpoint.

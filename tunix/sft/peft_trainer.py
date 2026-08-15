@@ -52,6 +52,10 @@ _ModelInputT = Dict[str, ArrayLike]
 P = ParamSpec("P")
 MetricsLogger = sft_metrics_logger.MetricsLogger
 MetricsLoggerOptions = sft_metrics_logger.MetricsLoggerOptions
+_P45_PRECOMPUTED_CHECKPOINT_CONTRACT = "p45-frozenlake-checkpoint-v1"
+_P45_CHECKPOINT_ROOT = (
+    "gs://yuxzhang-tunix-models/canon-zero-tim/checkpoints/frozenlake"
+)
 
 
 @dataclasses.dataclass(slots=True, kw_only=True)
@@ -67,6 +71,9 @@ class TrainingConfig:
   checkpoint_root_directory: str | None = None
   # Checkpoint configurations. If None, the default options will be used.
   checkpointing_options: checkpoint_options.CheckpointingOptions | None = None
+  # Explicit admission token for checkpointing around a precomputed-gradient
+  # transaction.  The default remains fail-closed for isolated G6 canaries.
+  precomputed_gradient_checkpointing_contract: str | None = None
 
   # Configs for the metrics logger.
   metrics_logging_options: MetricsLoggerOptions | None = None
@@ -378,6 +385,35 @@ def _requires_precomputed_gradient_accumulator(environ) -> bool:
       environ.get("CANON_P28_SEGMENTED_TRAIN", "") == "1"
       and environ.get("CANON_P28_G6_UPDATE", "") == "1"
   )
+
+
+def _p45_precomputed_checkpointing_admitted(config, environ) -> bool:
+  """Admits checkpoints only for the signed committed P45 transaction."""
+  if (
+      config.precomputed_gradient_checkpointing_contract
+      != _P45_PRECOMPUTED_CHECKPOINT_CONTRACT
+  ):
+    return False
+  tag = environ.get("CANON_FROZENLAKE_CKPT_TAG", "")
+  mode = environ.get("CANON_FROZENLAKE_CKPT_MODE", "")
+  required = {
+      "CANON_P33_WORKLOAD_LAUNCH_ADMITTED": "1",
+      "CANON_P32_WORKLOAD": "frozenlake-dp8-tp8",
+      "CANON_P33_RUN_STAGE": "full",
+      "CANON_P33_NO_COMMIT": "0",
+      "CANON_OPT_STATE_RESIDENT": "1",
+      "CANON_P30_OPT_STATE_OFFLOAD": "0",
+      "CANON_FROZENLAKE_CKPT_ROOT": _P45_CHECKPOINT_ROOT,
+      "CANON_FROZENLAKE_CKPT_INTERVAL": "10",
+      "CANON_FROZENLAKE_CKPT_MAX_TO_KEEP": "1",
+      "ENABLE_PATHWAYS_PERSISTENCE": "1",
+  }
+  if mode not in ("new", "resume") or not tag:
+    return False
+  if any(environ.get(key, "") != value for key, value in required.items()):
+    return False
+  expected_directory = f"{_P45_CHECKPOINT_ROOT}/{tag}/actor"
+  return config.checkpoint_root_directory == expected_directory
 
 
 def _deepswe_onehost_no_commit(environ) -> bool:
@@ -852,8 +888,22 @@ class PeftTrainer:
           "segmented update accumulation changed: "
           f"{steps} != {expected_steps}"
       )
-    if self.config.checkpoint_root_directory is not None:
-      raise ValueError("P28 G6 canary requires checkpointing disabled")
+    checkpointing_enabled = self.config.checkpoint_root_directory is not None
+    checkpoint_contract = (
+        self.config.precomputed_gradient_checkpointing_contract
+    )
+    if checkpointing_enabled and not _p45_precomputed_checkpointing_admitted(
+        self.config, os.environ
+    ):
+      raise ValueError(
+          "P28 G6 canary requires checkpointing disabled unless the committed "
+          "P45 checkpoint contract is admitted"
+      )
+    if not checkpointing_enabled and checkpoint_contract is not None:
+      raise ValueError(
+          "precomputed-gradient checkpoint contract requires a checkpoint "
+          "directory"
+      )
 
   def accumulate_precomputed_gradient_microbatch(
       self, gradients: Any, *, microbatch_index: int

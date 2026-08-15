@@ -6,6 +6,12 @@ diagnosis and historical comparison. Current branch defaults may place the
 optimizer on device in both routes; topology and model overlay, not only
 optimizer placement, distinguish P45.
 
+Do not use source `9a834574` for checkpoint-enabled training. P45r6 reached
+the first gradient microbatch and then hit the legacy unconditional G6
+checkpoint rejection. Use a later source containing the narrow
+`p45-frozenlake-checkpoint-v1` admission, and require the exact-image gate to
+pass its signed-P45 and legacy-G6 regression tests before rendering.
+
 P45 runs Qwen3-8B on one 4x4x4 v5p slice with:
 
 ```text

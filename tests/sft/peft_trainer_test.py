@@ -1108,6 +1108,58 @@ class PeftTrainerTest(parameterized.TestCase):
             gradient_microbatches
         )
 
+  def test_p28_g6_checkpointing_is_isolated_to_signed_p45(self):
+    checkpoint_directory = (
+        "gs://yuxzhang-tunix-models/canon-zero-tim/checkpoints/"
+        "frozenlake/fl-test/actor"
+    )
+    p45_contract = getattr(
+        peft_trainer, "_P45_PRECOMPUTED_CHECKPOINT_CONTRACT"
+    )
+    env = {
+        "CANON_ALIGNMENT_GATE": "1",
+        "CANON_ALIGNMENT_GATE_ONLY": "0",
+        "CANON_ALIGNMENT_TRAIN": "1",
+        "CANON_P28_SEGMENTED_TRAIN": "1",
+        "CANON_P28_G5C_ONLY": "0",
+        "CANON_P28_G6_UPDATE": "1",
+        "CANON_P33_WORKLOAD_LAUNCH_ADMITTED": "1",
+        "CANON_LOCAL_TRAJECTORIES": "32",
+        "CANON_P32_WORKLOAD": "frozenlake-dp8-tp8",
+        "CANON_P33_RUN_STAGE": "full",
+        "CANON_P33_NO_COMMIT": "0",
+        "CANON_OPT_STATE_RESIDENT": "1",
+        "CANON_P30_OPT_STATE_OFFLOAD": "0",
+        "CANON_FROZENLAKE_CKPT_MODE": "new",
+        "CANON_FROZENLAKE_CKPT_ROOT": (
+            "gs://yuxzhang-tunix-models/canon-zero-tim/checkpoints/frozenlake"
+        ),
+        "CANON_FROZENLAKE_CKPT_TAG": "fl-test",
+        "CANON_FROZENLAKE_CKPT_INTERVAL": "10",
+        "CANON_FROZENLAKE_CKPT_MAX_TO_KEEP": "1",
+        "ENABLE_PATHWAYS_PERSISTENCE": "1",
+    }
+
+    def make_trainer(contract):
+      trainer = object.__new__(peft_trainer.PeftTrainer)
+      trainer.config = peft_trainer.TrainingConfig(
+          eval_every_n_steps=10,
+          gradient_accumulation_steps=32,
+          checkpoint_root_directory=checkpoint_directory,
+          precomputed_gradient_checkpointing_contract=contract,
+      )
+      return trainer
+
+    with mock.patch.dict(os.environ, env, clear=True):
+      with self.assertRaisesRegex(ValueError, "checkpointing disabled"):
+        make_trainer(None)._validate_precomputed_gradient_contract()
+      make_trainer(p45_contract)._validate_precomputed_gradient_contract()
+
+    drifted = {**env, "CANON_FROZENLAKE_CKPT_INTERVAL": "11"}
+    with mock.patch.dict(os.environ, drifted, clear=True):
+      with self.assertRaisesRegex(ValueError, "checkpointing disabled"):
+        make_trainer(p45_contract)._validate_precomputed_gradient_contract()
+
   def test_p31_precomputed_sixteen_microstep_update(self):
     config = peft_trainer.TrainingConfig(
         eval_every_n_steps=100,

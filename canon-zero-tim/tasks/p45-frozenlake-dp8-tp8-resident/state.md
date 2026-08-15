@@ -19,12 +19,18 @@
   and committed-step GC. The P45 profile enables only the P32-grouped
   `CANON_P28_BATCHED_REPORT=1` optimization; the two unported grouped flags
   remain absent. Checkpoint/resume was published in `2cb5112f`; host-memory
-  and grouped-report hardening was published in `fbfb4bd8`.
-- Next action: render one `new` attempt with a stable campaign tag and run
+  and grouped-report hardening was published in `fbfb4bd8`. The P45r6 G6
+  checkpoint-contract collision has now been fixed locally with a narrow,
+  default-off trainer admission; the pinned-image P45 gate passed 103 tests
+  plus both targeted G6 checkpoint regressions. Target proof remains pending.
+- Next action: publish the local G6/checkpoint fix, then render one `new` attempt
+  from that immutable source with a stable campaign tag and run
   through committed step 10/11, measure host-memory behavior, and verify exactly
   one durable checkpoint. A separate `resume` render using the same immutable
   source/tag is admitted only after a step-10 checkpoint exists.
-- Blockers: `p45r6` failed at Step 0 due to `ValueError: P28 G6 canary requires checkpointing disabled` in `peft_trainer.py:856` when GCS checkpointing is enabled. This assertion requires relaxation for `CANON_FROZENLAKE_CKPT_ROOT`.
+- Blockers: no remaining local code blocker. `p45r6` source `9a834574` is
+  permanently invalid for checkpoint-enabled training; the local correction
+  must be published and then proven through step 10/11 on 64 chips.
 - Key artifacts: `../../debug_logs/p45_p45r6_checkpoint_contract_error.raw.log`;
   `../../debug_logs/p45_p45r5_frozenlake_resident.raw.log`;
   `../../cluster/P45_FROZENLAKE_RESIDENT_RUNBOOK.md`; `HANDOFF.md`; `plan.md`;

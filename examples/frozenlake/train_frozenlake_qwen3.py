@@ -1058,6 +1058,9 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         metrics_logging_options=metrics_logging_options,
         checkpoint_root_directory=CKPT_DIR,
         checkpointing_options=checkpointing_options,
+        precomputed_gradient_checkpointing_contract=(
+            frozenlake_checkpoint.SCHEMA if P45_CHECKPOINT.enabled else None
+        ),
     ),
     rollout_config=rollout_engine_config,
 )

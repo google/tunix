@@ -7,6 +7,12 @@ for a new P45 DP8xTP8 launch. Optimizer defaults have changed over time, so do
 not identify the carrier from placement alone; require the P45 profile,
 DP8xTP8, and `model_dir=qwen8b_tp8` together.
 
+Do not relaunch checkpoint-enabled training from `9a834574`: P45r6 proved that
+source still contains the legacy unconditional G6 checkpoint rejection. The
+next source must include the narrow `p45-frozenlake-checkpoint-v1` trainer
+admission and must pass the two targeted PeftTrainer tests in the exact-image
+gate before rendering.
+
 ## Purpose and claim boundary
 
 P45 is the fast 64-chip FrozenLake production carrier requested for training:
