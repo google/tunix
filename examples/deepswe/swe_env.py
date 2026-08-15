@@ -3,15 +3,9 @@ import os
 from typing import Any, Optional, cast
 import numpy as np
 
-try:
-  import r2egym  # pytype: disable=import-error
-  from r2egym.agenthub.action import Action  # pytype: disable=import-error
-  from r2egym.agenthub.environment.env import EnvArgs, RepoEnv  # pytype: disable=import-error
-except ImportError:
-  r2egym = cast(Any, None)
-  EnvArgs = cast(Any, None)
-  RepoEnv = cast(Any, None)
-  Action = cast(Any, None)
+import r2egym
+from r2egym.agenthub.action.action import Action
+from r2egym.agenthub.environment.env import EnvArgs, RepoEnv
 
 from tunix.rl.agentic.environments.base_environment import BaseTaskEnv, EnvStepResult
 
