@@ -101,6 +101,9 @@ class PageManagerConfig:
             elements *= dim_size
             
         page_size_across_blocks += elements * item_size
+    
+    if page_size_across_blocks == 0:
+      return 0
 
     pages_per_block = self.max_bytes // page_size_across_blocks
 
@@ -150,12 +153,46 @@ class PageManagerConfig:
         )
       physical_sharding.append(mapping[axis])
     return physical_sharding 
+
+  def _is_valid_shape(self, subshape) -> bool:
+    for dim in subshape:
+      if dim <= 0:
+        return False
+
+    return True
       
   def init(self) -> "PageManager":
     """Initializes physical page tensors for a pool of page blocks."""
     blocks: dict[str, jax.Array] = {}
+    
+    if not self.block_specs:
+      raise ValueError(
+          'Cannot initialize PageManager: `block_specs` is empty.'
+          'At least one block specification must be provided.'
+      )
+
+    if self.num_pages_per_block == 0:
+      raise ValueError(
+          'Cannot initialize PageManager with 0 pages per block. '
+          'This occurs if `max_bytes` is too small to fit a page.'
+      )
+    
+    if self.num_pages_per_block < self.max_num_pages_per_seq:
+      raise ValueError(
+          f'Cannot initialize PageManager. Block capacity is too small'
+          f'Each block is allocated {self.num_pages_per_block}, but a '
+          f'sequence may require up to {self.max_num_pages_per_seq} pages. '
+          f'A block must be able to fit at least one maximum-length sequence. '
+          f'This occurs if `max_bytes` is too small or `max_seq_len` is too large.'
+      )
 
     for spec in self.block_specs:
+      if not self._is_valid_shape(spec.subshape):
+        raise ValueError(
+            f'Cannot initialize PageManager. Block shapes may not have 0 or negative '
+            f'dimension. But block {spec.name} has an invalid subshape of {spec.subshape}.'
+        )
+   
       shape = (self.num_pages_per_block, self.page_size) + spec.subshape
       block = jax.lax.empty(shape, dtype=spec.dtype)
       sharding = self.get_block_spec_sharding(spec)
@@ -333,21 +370,21 @@ class PageManager:
     )
 
   def load_values(
-      self, prompt_tokens: jax.Array, lens: jax.Array, block_id: str = "tokens"
+      self, values: jax.Array, lens: jax.Array, block_id: str = "tokens"
   ) -> "PageManager":
     """Loads packed 1D array of values into allocated paged memory of block."""
-    token_ragged = RaggedArray(data=prompt_tokens, lens=lens)
-    seq_idxs = token_ragged.row_idxs
-    token_offsets = token_ragged.intra_offsets
+    values_ragged = RaggedArray(data=values, lens=lens)
+    seq_idxs = values_ragged.row_idxs
+    value_offsets = values_ragged.intra_offsets
 
-    local_page_cols = (token_offsets // self.page_size) 
-    page_offsets = token_offsets % self.page_size
+    local_page_cols = (value_offsets // self.page_size) 
+    page_offsets = value_offsets % self.page_size
     phys_page_ids = self.page_indices[seq_idxs, local_page_cols]
     
-    updated_layer_pages = self.pages[block_id].at[phys_page_ids, page_offsets].set(
-        prompt_tokens
+    updated_block_pages = self.pages[block_id].at[phys_page_ids, page_offsets].set(
+       values 
     )
-    new_pages = {**self.pages, block_id: updated_layer_pages}
+    new_pages = {**self.pages, block_id: updated_block_pages}
 
     return dataclasses.replace(
           self, 
@@ -385,22 +422,22 @@ class PageManager:
 
   def to_array(
       self,
-      total_num_tokens: int,
+      total_num_elements: int,
       block_id: str = "tokens",
   ) -> jax.Array:
     """Extracts array of token IDs from paged memory."""
-    token_ragged = RaggedArray(
-        data=jnp.zeros((total_num_tokens,), dtype=jnp.int32),
+    elements_ragged = RaggedArray(
+        data=jnp.zeros((total_num_elements,), dtype=jnp.int32),
         lens=self.seq_lens,
     )
-    seq_idxs = token_ragged.row_idxs
-    token_offsets = token_ragged.intra_offsets
+    seq_idxs = elements_ragged.row_idxs
+    element_offsets = elements_ragged.intra_offsets
 
-    local_page_cols = (token_offsets // self.page_size)
-    page_offsets = token_offsets % self.page_size
+    local_page_cols = (element_offsets // self.page_size)
+    page_offsets = element_offsets % self.page_size
     phys_page_ids = self.page_indices[seq_idxs, local_page_cols]
 
-    # Gather exact valid tokens per sequence
+    # Gather exact valid elemnts per sequence
     packed_tokens = self.pages[block_id][phys_page_ids, page_offsets]
     return packed_tokens
 

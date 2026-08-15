@@ -54,7 +54,7 @@ class SamplingConfig:
   forbidden_tokens: Tuple[int, ...] | None = None
   eos_tokens: Sequence[int] | None = None
   include_logits: bool = False
-  include_logprobs: bool = True 
+  include_logprobs: bool = False 
   pad_output: bool = False
   max_audio_length: int | None = None
   max_audio_clips: int | None = None
@@ -90,10 +90,10 @@ class _SamplingState:
   sampling_mode: str = flax.struct.field(
       default="greedy", pytree_node=False
   )
-  return_logprobs: bool = flax.struct.field(
+  include_logprobs: bool = flax.struct.field(
       default=False, pytree_node=False
   )
-  return_logits: bool = flax.struct.field(
+  include_logits: bool = flax.struct.field(
       default=False, pytree_node=False
   )
   max_prompt_length: int = flax.struct.field(
@@ -141,7 +141,7 @@ def sample_top_p(
     temperature: float,
     top_p: float,
     top_k: int | None,
-    return_logprobs: bool = False,
+    include_logprobs: bool = False,
 ) -> tuple[jnp.ndarray, jnp.ndarray | None]:
   """Sample a token using top-p sampling."""
   # Upcast to float32 for numerical stability of softmax and subsequent cumsum.
@@ -152,7 +152,7 @@ def sample_top_p(
   # Skip softmax and sorting if top_p is 1.0 and top_k is full vocab.
   if top_p >= 1.0 and _no_topk:
     next_token = jax.random.categorical(key, logits=next_token_logits)
-    if not return_logprobs:
+    if not include_logprobs:
       return next_token, None
     logp = jax.nn.log_softmax(next_token_logits, axis=-1)
     logp_sampled = jnp.take_along_axis(logp, next_token[..., None], axis=-1)
@@ -171,7 +171,7 @@ def sample_top_p(
   next_token = jnp.take_along_axis(indices, next_token_idx[..., None], axis=-1)
   next_token = jnp.squeeze(next_token, axis=-1)
 
-  if return_logprobs:
+  if include_logprobs:
     logp = jax.nn.log_softmax(next_token_logits, axis=-1)
     logp_sampled = jnp.take_along_axis(logp, next_token[..., None], axis=-1)
     logp_sampled = jnp.squeeze(logp_sampled, axis=-1)
@@ -182,11 +182,11 @@ def sample_top_p(
 
 
 def sample_best(
-    logits, return_logprobs: bool = False
+    logits, include_logprobs: bool = False
 ) -> tuple[jnp.ndarray, jnp.ndarray | None]:
   next_token = jnp.argmax(logits[:, -1], axis=-1, keepdims=True)
   next_token = next_token[:, 0]
-  if not return_logprobs:
+  if not include_logprobs:
     return next_token, None
   logp = jax.nn.log_softmax(logits[:, -1].astype(jnp.float32), axis=-1)
   logp_sampled = jnp.take_along_axis(logp, next_token[..., None], axis=-1)
@@ -376,7 +376,8 @@ class Sampler:
           logical_subsharding=("tp_axis", None, None)
       )
       block_specs.append(layer_spec)
- 
+    
+    print(block_specs) 
     return block_specs
 
   def _init_cache(self, sampling_config):
@@ -384,6 +385,8 @@ class Sampler:
     page_size = self.cache_config.page_size
     max_num_seqs = sampling_config.batch_size 
     max_seq_len = sampling_config.max_prompt_length + sampling_config.max_generation_steps
+    page_size = min(page_size, max_seq_len)
+
     block_specs = self._form_cache_block_specs(sampling_config)
     shd_config = getattr(getattr(self.transformer, "config", None), "shd_config", None)
 
@@ -472,8 +475,8 @@ class Sampler:
         decoding_steps=jnp.zeros((batch_size,), dtype=jnp.int32),
         # logits_buffer=logits_buffer,
         # logprobs_buffer=logprobs_buffer,
-        return_logits=sampling_config.include_logits,
-        return_logprobs=sampling_config.include_logprobs,
+        include_logits=sampling_config.include_logits,
+        include_logprobs=sampling_config.include_logprobs,
         forbidden_token_ids=sampling_config.forbidden_tokens,
         eos_token_ids=eos_ids,
         seed=seed,
@@ -518,7 +521,7 @@ class Sampler:
     else:
       if sampling_state.sampling_mode == 'greedy':
         next_token_candidate, logp = sample_best(
-            logits, return_logprobs=(sampling_state.return_logprobs)
+            logits, include_logprobs=(sampling_state.include_logprobs)
         )
       elif sampling_state.sampling_mode == 'top_p':
         jax.debug.print("KEY: {i}", i=jax.device_get(sampling_state.global_decoding_step))
@@ -532,26 +535,30 @@ class Sampler:
             temperature=sampling_state.temperature,
             top_p=sampling_state.sampling_parameters['top_p'],
             top_k=sampling_state.sampling_parameters['top_k'],  # pyrefly: ignore[bad-argument-type]
-            return_logprobs=(sampling_state.return_logprobs),
+            include_logprobs=(sampling_state.include_logprobs),
         )
       else:
         raise ValueError(
             'Unsupported sampling mode: %s' % sampling_state.sampling_mode
         )
       
-      new_logps = ~done 
+      is_new_logp = ~done 
       done = done | jnp.isin(next_token_candidate, eos)
       not_done = ~done 
+    
       cache = cache.allocate(q_lens=not_done)
+
       cache = cache.insert_values(next_token_candidate, valid_mask=not_done, block_id="tokens")
-      if sampling_state.return_logprobs:
-        cache = cache.insert_values(logp, valid_mask=new_logps, block_id="logits")
+      
+      if sampling_state.include_logprobs:
+        cache = cache.insert_values(logp, valid_mask=is_new_logp, block_id="logits")
 
         # logprobs_buffer = logprobs_buffer.at[:, sampling_state.decoding_steps].set(logp)
 
       decoding_steps = sampling_state.decoding_steps + not_done
     trunc = decoding_steps >= sampling_state.max_generation_steps 
     done = done | trunc
+    jax.debug.print("Dones: {done}", done=jax.device_get(done))
 
     return dataclasses.replace(
         sampling_state,
@@ -585,8 +592,8 @@ class Sampler:
     cache = sampling_state.hbm_cache
     batch_size = cache.batch_size
     max_prompt_length = sampling_state.max_prompt_length 
-    return_logits = sampling_state.return_logits
-    return_logprobs = sampling_state.return_logprobs
+    include_logits = sampling_state.include_logits
+    include_logprobs = sampling_state.include_logprobs
     # logits_buffer = sampling_state.logits_buffer
     # logprobs_buffer = sampling_state.logprobs_buffer
     soft_cap = sampling_state.attn_logits_soft_cap
@@ -610,7 +617,11 @@ class Sampler:
     ]
     
     distribution = jnp.array([0, 0, batch_size])
-    
+    jax.debug.print("Tokens {tokens}", tokens=jax.device_get(tokens)) 
+
+
+    # jax.debug.print("Tokens {tokens}", tokens=jax.device_get(tokens)) 
+
     logits, cache = transformer(
         tokens,
         positions.reshape(-1), 
@@ -632,10 +643,12 @@ class Sampler:
       sampling_state=sampling_state,
     )
 
-    if not return_logits:
+    if not include_logits:
       return updated_sampling_state 
     
     batch_idxs = jnp.arange(batch_size)
+    cache = updated_sampling_state.hbm_cache
+
     if decode_only_last_token:
       cache = cache.insert_values(last_token_logits[batch_idxs, 0, :], block_id="logits")
     else: 
@@ -676,7 +689,7 @@ class Sampler:
     cache = sampling_state.hbm_cache
     batch_size = cache.batch_size
     max_prompt_length = sampling_state.max_prompt_length 
-    return_logits = sampling_state.return_logits
+    include_logits = sampling_state.include_logits
     # logits_buffer = sampling_state.logits_buffer
     # logprobs_buffer = sampling_state.logprobs_buffer
     soft_cap = sampling_state.attn_logits_soft_cap
@@ -702,6 +715,8 @@ class Sampler:
     ]
 
     distribution = jnp.array([batch_size, batch_size, batch_size], dtype=jnp.int32)
+    jax.debug.print("Tokens {tokens}", tokens=jax.device_get(tokens)) 
+
     logits, cache = transformer(
         tokens,
         positions, 
@@ -711,7 +726,7 @@ class Sampler:
         soft_cap=soft_cap,
     )
 
-    last_token_idxs = jnp.cumsum(cache.seq_lens) - 1
+    last_token_idxs = jnp.cumsum(active_seq_lens) - 1
     last_token_logits = logits[last_token_idxs]
     last_token_logits = jnp.expand_dims(last_token_logits, axis=1)
 
@@ -722,7 +737,7 @@ class Sampler:
         sampling_state=sampling_state,
     )
     
-    if not return_logits:
+    if not include_logits:
       return updated_sampling_state 
     
     end_idxs = cache.seq_lens - 1 
@@ -870,13 +885,11 @@ class Sampler:
     out_logprobs = []
     out_logits = []
     
-    return_logprobs = sampling_state.return_logprobs
-    if return_logprobs is not None:
+    if return_logprobs:
       ragged_logprobs_buffer = sampling_state.hbm_cache.to_array(total_len, block_id="logprobs")
       ragged_logprobs_buffer = jax.device_get(ragged_logprobs_buffer)
 
-    return_logits = sampling_state.return_logits
-    if return_logits is not None:
+    if return_logits:
       ragged_logits_buffer = sampling_state.hbm_cache.to_array(total_len, block_id="logits")
       ragged_logits_buffer = jax.device_get(ragged_logits_buffer)
 
@@ -903,7 +916,7 @@ class Sampler:
             generated_len = len(res_tokens)
             out_logprobs.append(ragged_logprobs_buffer[total_len_idx: total_len_idx + generated_len])
 
-        if return_logprobs:
+        if return_logits:
             generated_len = len(res_tokens)
             out_logprobs.append(ragged_logits_buffer[total_len_idx: total_len_idx + generated_len])
 

@@ -541,11 +541,12 @@ class SamplerTest(parameterized.TestCase):
     total_sampling_steps = max_prompt_length + max_generation_steps
 
     sampling_config = sampler_lib.SamplingConfig(
+        batch_size=batch_size,
         eos_tokens=jnp.array([vocab.eos_id()]),
         max_generation_steps=max_generation_steps,
         max_prompt_length=max_prompt_length,
         temperature=0,
-    )   
+    )  
     
     sampling_state = sampler.init_sample_state(
         sampling_config=sampling_config,
@@ -710,13 +711,11 @@ class SamplerTest(parameterized.TestCase):
         top_p=1.0,
         seed=0,
     )
-    print(result.text)
-    print(result.tokens)
 
     np.testing.assert_equal(
         result.tokens, [np.array([14]), np.array([])]
     )
-
+    
   def test_forbidden_token_ids(self):
     vocab = tc.MockVocab()
     transformer = tc.ToyTransformer(
