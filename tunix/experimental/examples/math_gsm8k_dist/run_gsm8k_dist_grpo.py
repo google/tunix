@@ -28,10 +28,11 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Iterator, Sequence
+import dataclasses
 import functools
+import json
 import logging
 import os
-import re
 import sys
 from types import SimpleNamespace
 from typing import Any
@@ -48,6 +49,7 @@ if REPO_ROOT not in sys.path:
   sys.path.insert(0, REPO_ROOT)
 
 from tunix.experimental.common import datatypes  # pylint: disable=g-import-not-at-top
+from tunix.experimental.examples.math_gsm8k_dist import gsm8k  # pylint: disable=g-import-not-at-top
 from tunix.experimental.orchestrator import algorithm_adapter  # pylint: disable=g-import-not-at-top
 from tunix.experimental.orchestrator import batch_assembly  # pylint: disable=g-import-not-at-top
 from tunix.experimental.orchestrator import orchestrator  # pylint: disable=g-import-not-at-top
@@ -55,15 +57,7 @@ from tunix.experimental.orchestrator import rl_program  # pylint: disable=g-impo
 from tunix.experimental.worker import remote_execution  # pylint: disable=g-import-not-at-top
 
 
-PROMPT_TEMPLATE = """Solve the following math problem.
-First, put your detailed step-by-step reasoning process inside <reasoning>...</reasoning> tags.
-Then, put your final numerical answer inside <answer>\\boxed{{}}</answer> tags.
-
-Problem: {question}
-<reasoning>
-"""
-
-DEMO_TASKS = (
+BUILTIN_TASKS = (
     (
         "Natalia sold clips to 48 friends in April, and then she sold half as "
         "many clips in May. How many clips did Natalia sell altogether in "
@@ -87,6 +81,17 @@ DEMO_TASKS = (
     ),
 )
 
+# PeftTrainer V2 does not yet export rollout-ready weight-sync payloads, so this
+# demo intentionally keeps rollout weights fixed while validating the E2E loop.
+ENABLE_WEIGHT_SYNC = False
+
+
+@dataclasses.dataclass(frozen=True)
+class GSM8KExample:
+  prompt: str
+  question: str
+  answer: str
+
 
 def _parse_args() -> argparse.Namespace:
   parser = argparse.ArgumentParser(
@@ -98,8 +103,8 @@ def _parse_args() -> argparse.Namespace:
       default=2,
       help="Number of prompt groups per step.",
   )
-  parser.add_argument("--num_generations", type=int, default=2)
-  parser.add_argument("--max_steps", type=int, default=1)
+  parser.add_argument("--num_generations", type=int, default=4)
+  parser.add_argument("--max_steps", type=int, default=10)
   parser.add_argument("--max_prompt_length", type=int, default=512)
   parser.add_argument("--max_response_length", type=int, default=128)
   parser.add_argument("--train_micro_batch_size", type=int, default=1)
@@ -122,10 +127,29 @@ def _parse_args() -> argparse.Namespace:
   parser.add_argument("--beta", type=float, default=0.0)
   parser.add_argument("--epsilon", type=float, default=0.2)
   parser.add_argument(
+      "--dataset_source",
+      choices=("huggingface", "local_jsonl", "builtin"),
+      default="huggingface",
+      help=(
+          "Where to load GSM8K prompts from. 'huggingface' matches the math "
+          "agent recipe; 'builtin' is only for offline smoke tests."
+      ),
+  )
+  parser.add_argument("--dataset_name", type=str, default="openai/gsm8k:main")
+  parser.add_argument("--dataset_split", type=str, default="train")
+  parser.add_argument("--dataset_path", type=str, default="")
+  parser.add_argument("--dataset_seed", type=int, default=42)
+  parser.add_argument("--prompt_key", type=str, default="question")
+  parser.add_argument("--answer_key", type=str, default="answer")
+  parser.add_argument(
       "--reward_mode",
-      choices=("synthetic", "exact"),
-      default="synthetic",
-      help="synthetic proves the distributed chain without relying on quality.",
+      choices=("env", "math_gsm8k", "exact", "synthetic"),
+      default="env",
+      help=(
+          "'env' uses the registered GSM8KEnv reward; 'math_gsm8k' "
+          "recomputes the same math GSM8K reward in the orchestrator; "
+          "'synthetic' is debug-only."
+      ),
   )
   parser.add_argument("--rpc_timeout_s", type=float, default=1800.0)
   parser.add_argument("--stop_workers_on_exit", action="store_true")
@@ -138,24 +162,128 @@ def _connect(addr: str, timeout_s: float) -> remote_execution.ActorHandle:
   )
 
 
-def _build_prompt_groups(batch_size: int) -> tuple[list[str], list[str]]:
-  prompts = []
-  gold_answers = []
-  for i in range(batch_size):
-    question, answer = DEMO_TASKS[i % len(DEMO_TASKS)]
-    prompts.append(PROMPT_TEMPLATE.format(question=question))
-    gold_answers.append(answer)
-  return prompts, gold_answers
+def _parse_hf_dataset_name(dataset_name: str) -> tuple[str, str | None]:
+  if ":" in dataset_name:
+    name, config_name = dataset_name.split(":", maxsplit=1)
+    return name, config_name or None
+  if "/" in dataset_name:
+    return dataset_name, "default"
+  return dataset_name, None
 
 
-def _extract_answer(text: str) -> str | None:
-  answer_blocks = re.findall(r"<answer>(.*?)</answer>", text, re.DOTALL)
-  content = answer_blocks[-1] if answer_blocks else text
-  boxed = re.search(r"\\boxed\s*\{([^{}]+)\}", content)
-  if boxed:
-    return boxed.group(1).strip().replace(",", "")
-  numeric = re.findall(r"-?\d+(?:\.\d+)?", content)
-  return numeric[-1].replace(",", "") if numeric else None
+def _to_text(value: Any) -> str:
+  if isinstance(value, bytes):
+    return value.decode("utf-8")
+  return str(value)
+
+
+def _extract_dataset_answer(answer_value: Any) -> str:
+  answer_text = _to_text(answer_value)
+  answer = gsm8k.extract_hash_answer(answer_text)
+  if answer is not None:
+    return answer
+  normalized = gsm8k.normalize_answer(answer_text)
+  return normalized or answer_text
+
+
+def _load_builtin_examples() -> list[GSM8KExample]:
+  return [
+      GSM8KExample(
+          prompt=gsm8k.build_prompt(question),
+          question=question,
+          answer=answer,
+      )
+      for question, answer in BUILTIN_TASKS
+  ]
+
+
+def _load_local_jsonl_examples(args: argparse.Namespace) -> list[GSM8KExample]:
+  if not args.dataset_path:
+    raise ValueError("--dataset_path is required for --dataset_source=local_jsonl")
+  examples = []
+  with open(args.dataset_path, "r", encoding="utf-8") as f:
+    for line in f:
+      if not line.strip():
+        continue
+      row = json.loads(line)
+      question = _to_text(row[args.prompt_key])
+      answer = _extract_dataset_answer(row[args.answer_key])
+      examples.append(
+          GSM8KExample(
+              prompt=gsm8k.build_prompt(question),
+              question=question,
+              answer=answer,
+          )
+      )
+  return examples
+
+
+def _load_huggingface_examples(args: argparse.Namespace) -> list[GSM8KExample]:
+  import datasets as hf_datasets  # pylint: disable=g-import-not-at-top
+
+  dataset_name, config_name = _parse_hf_dataset_name(args.dataset_name)
+  logging.info(
+      "Loading GSM8K dataset from Hugging Face: name=%s config=%s split=%s",
+      dataset_name,
+      config_name,
+      args.dataset_split,
+  )
+  dataset = hf_datasets.load_dataset(
+      dataset_name,
+      config_name,
+      split=args.dataset_split,
+  )
+  dataset = dataset.shuffle(seed=args.dataset_seed)
+  examples = []
+  for row in dataset:
+    question = _to_text(row[args.prompt_key])
+    answer = _extract_dataset_answer(row[args.answer_key])
+    examples.append(
+        GSM8KExample(
+            prompt=gsm8k.build_prompt(question),
+            question=question,
+            answer=answer,
+        )
+    )
+  return examples
+
+
+def _load_examples(args: argparse.Namespace) -> list[GSM8KExample]:
+  if args.dataset_source == "builtin":
+    examples = _load_builtin_examples()
+  elif args.dataset_source == "local_jsonl":
+    examples = _load_local_jsonl_examples(args)
+  elif args.dataset_source == "huggingface":
+    examples = _load_huggingface_examples(args)
+  else:
+    raise ValueError(f"Unsupported dataset_source: {args.dataset_source}")
+  if not examples:
+    raise ValueError("GSM8K demo dataset is empty.")
+  logging.info(
+      "Loaded %d GSM8K examples from %s; first answer=%s",
+      len(examples),
+      args.dataset_source,
+      examples[0].answer,
+  )
+  return examples
+
+
+def _select_step_examples(
+    examples: Sequence[GSM8KExample],
+    *,
+    step: int,
+    batch_size: int,
+) -> list[GSM8KExample]:
+  start = step * batch_size
+  return [examples[(start + i) % len(examples)] for i in range(batch_size)]
+
+
+def _item_env_reward(item: datatypes.TrajectoryItem) -> float:
+  traj = getattr(item, "traj", None)
+  reward = getattr(traj, "reward", None)
+  if reward is None and item.metadata:
+    reward = item.metadata.get("reward")
+  return float(reward or 0.0)
 
 
 def _make_reward_fn(mode: str, num_generations: int):
@@ -166,10 +294,15 @@ def _make_reward_fn(mode: str, num_generations: int):
     if mode == "synthetic":
       pair_index = int(metadata.get("pair_index", item.pair_index))
       return pair_index / max(num_generations - 1, 1)
+    if mode == "env":
+      return _item_env_reward(item)
 
     text = str(metadata.get("text", ""))
     gold_answer = metadata.get("gold_answer")
-    return 1.0 if gold_answer and _extract_answer(text) == gold_answer else 0.0
+    score, _, answer_ok, _ = gsm8k.score_completion(text, gold_answer)
+    if mode == "exact":
+      return 1.0 if answer_ok else 0.0
+    return score
 
   return reward_fn
 
@@ -193,7 +326,7 @@ def _grpo_model_input(
 def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:
   algo = algorithm_adapter.GRPOAdapter(
       group_size=args.num_generations,
-      mini_batch_size=args.batch_size,
+      mini_batch_size=args.batch_size * args.num_generations,
       max_packed_len=args.max_prompt_length + args.max_response_length,
       clip_epsilon=args.epsilon,
       beta_kl=args.beta,
@@ -267,22 +400,21 @@ def _register_workers(
 def _build_step_requests(
     *,
     step: int,
-    batch_size: int,
+    examples: Sequence[GSM8KExample],
     num_generations: int,
     max_response_length: int,
     temperature: float,
     top_p: float,
     top_k: int | None,
 ) -> list[datatypes.RolloutRequest]:
-  prompts, gold_answers = _build_prompt_groups(batch_size)
   requests = []
-  for prompt_idx, (prompt, gold_answer) in enumerate(zip(prompts, gold_answers)):
+  for prompt_idx, example in enumerate(examples):
     prompt_id = f"step_{step}_prompt_{prompt_idx}"
     for generation_idx in range(num_generations):
       requests.append(
           datatypes.RolloutRequest(
               request_id=f"{prompt_id}_gen_{generation_idx}",
-              prompt=prompt,
+              prompt=example.prompt,
               prompt_id=prompt_id,
               group_offset_id=str(generation_idx),
               target_policy_version=step,
@@ -296,11 +428,12 @@ def _build_step_requests(
               metadata={
                   "group_id": prompt_id,
                   "pair_index": generation_idx,
-                  "gold_answer": gold_answer,
+                  "gold_answer": example.answer,
+                  "question": example.question,
                   "prefix_hash": prompt_id,
                   "env_config": {
-                      "prompt": prompt,
-                      "gold_answer": gold_answer,
+                      "prompt": example.prompt,
+                      "gold_answer": example.answer,
                       "group_id": prompt_id,
                       "pair_index": generation_idx,
                       "policy_version": step,
@@ -314,12 +447,16 @@ def _build_step_requests(
 
 def _iter_request_batches(
     args: argparse.Namespace,
+    examples: Sequence[GSM8KExample],
 ) -> Iterator[list[datatypes.RolloutRequest]]:
   top_k = None if args.top_k < 0 else args.top_k
   for step in range(args.max_steps):
+    step_examples = _select_step_examples(
+        examples, step=step, batch_size=args.batch_size
+    )
     yield _build_step_requests(
         step=step,
-        batch_size=args.batch_size,
+        examples=step_examples,
         num_generations=args.num_generations,
         max_response_length=args.max_response_length,
         temperature=args.temperature,
@@ -334,6 +471,8 @@ def main() -> None:
     raise ValueError("num_generations must be greater than 1 for GRPO.")
   if args.train_micro_batch_size <= 0:
     raise ValueError("train_micro_batch_size must be positive.")
+  if args.batch_size <= 0:
+    raise ValueError("batch_size must be positive.")
   if args.beta != 0.0 and not args.inference_addr:
     raise ValueError(
         "--inference_addr is required when --beta is non-zero because "
@@ -344,6 +483,16 @@ def main() -> None:
       level=logging.INFO, format="%(asctime)s - [OrchestratorV2] %(message)s"
   )
   logging.info("Control-plane JAX backend: %s", jax.default_backend())
+  logging.info("Weight sync enabled: %s", ENABLE_WEIGHT_SYNC)
+  logging.info(
+      "Demo training plan: steps=%d prompt_groups_per_step=%d "
+      "num_generations=%d trajectories_per_step=%d reward_mode=%s",
+      args.max_steps,
+      args.batch_size,
+      args.num_generations,
+      args.batch_size * args.num_generations,
+      args.reward_mode,
+  )
 
   tokenizer_path = args.tokenizer_path or os.getenv("MODEL_DIR") or args.model_id
   tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
@@ -362,6 +511,7 @@ def main() -> None:
 
   algo = _build_algo(args)
   grpo_config = _build_grpo_config(args)
+  examples = _load_examples(args)
   _configure_trainer_loss(
       trainer_handle,
       algo=algo,
@@ -389,7 +539,7 @@ def main() -> None:
           max_response_length=args.max_response_length,
           pad_id=pad_id,
       ),
-      sync_weights=False,
+      sync_weights=ENABLE_WEIGHT_SYNC,
       on_step_begin=lambda step: logging.info("GRPO step %d starting.", step),
       on_step_end=lambda step, result: logging.info(
           "GRPO advanced to policy_version=%d train_result=%s.", step, result
@@ -402,7 +552,7 @@ def main() -> None:
     logging.info("Running SyncRLProgram through ClusterOrchestrator.run_program.")
     cluster.run_program(
         program=program,
-        train_dataset=_iter_request_batches(args),
+        train_dataset=_iter_request_batches(args, examples),
         num_steps=args.max_steps,
         bring_up=False,
     )
