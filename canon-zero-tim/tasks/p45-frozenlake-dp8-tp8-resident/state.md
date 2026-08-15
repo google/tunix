@@ -18,7 +18,8 @@
   350G `jax-tpu` limit and the learner emits cgroup/RSS evidence around eval
   and committed-step GC. The P45 profile enables only the P32-grouped
   `CANON_P28_BATCHED_REPORT=1` optimization; the two unported grouped flags
-  remain absent.
+  remain absent. Checkpoint/resume was published in `2cb5112f`; host-memory
+  and grouped-report hardening was published in `fbfb4bd8`.
 - Next action: render one `new` attempt with a stable campaign tag and run
   through committed step 10/11, measure host-memory behavior, and verify exactly
   one durable checkpoint. A separate `resume` render using the same immutable

@@ -147,3 +147,16 @@
 - Next: publish the locally admitted P45 source, then launch fresh mode through
   step 10/11 and collect memory, checkpoint, numerical, and grouped timing
   evidence.
+
+## 2026-08-15 UTC — publish the P45 full-training launch source
+
+- Type: publication
+- Action: fast-forward pushed checkpoint/resume commit `2cb5112f` and
+  host-memory/grouped-report commit `fbfb4bd8` to
+  `yuxzhang/canon-zero-tim` using the workspace `.env` credential without
+  printing its value.
+- Result: remote advanced `7900b451..fbfb4bd8`; no target JobSet was launched.
+  Untracked `.frozen_*` scratch scripts were not staged or published.
+- Next: render the immutable published head in `new` mode, select the eval
+  manifest for the requested full training plus held-out evaluation, and run
+  through step 10/11 before exercising explicit resume.
