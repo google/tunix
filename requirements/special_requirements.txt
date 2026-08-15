@@ -3,3 +3,4 @@
 # --pre
 
 tpu-inference @ git+https://github.com/vllm-project/tpu-inference.git@8dd3107ac1d50b823c2a4edd036dd181775b1c94
+

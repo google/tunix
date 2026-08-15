@@ -7,7 +7,7 @@ ENV TZ=Etc/UTC
 
 # Install system dependencies, including Python 3 and pip
 RUN apt-get update && \
-    apt-get install -y build-essential git python3 python3-pip && \
+    apt-get install -y build-essential curl git python3 python3-pip && \
     rm -rf /var/lib/apt/lists/*
 
 # Upgrade pip
@@ -36,6 +36,17 @@ COPY . .
 RUN pip install -e .
 
 RUN bash /app/scripts/install_tunix_vllm_requirement.sh
+
+# Build argument to conditionally install DeepSWE evaluation dependencies
+ARG INSTALL_DEEPSWE_DEPS=false
+
+# Install DeepSWE specific dependencies and apply runtime patches conditionally
+RUN if [ "$INSTALL_DEEPSWE_DEPS" = "true" ]; then \
+      pip install kubernetes gym swebench==3.0.2 && \
+      pip install --no-deps git+https://github.com/r2e-gym/r2e-gym.git@0d94c4eb9431cd195c55a7ea3abd54006c9a1735 && \
+      sed -i 's/create_repo, upload_folder, HfFolder/create_repo, upload_folder/' /opt/venv/lib/python3.12/site-packages/r2egym/agenthub/utils/utils.py && \
+      sed -i 's/self.commit = ParsedCommit(\*\*json.loads(self.commit_json))/self.commit = ParsedCommit(\*\*(json.loads(self.commit_json) if isinstance(self.commit_json, str) else self.commit_json))/' /opt/venv/lib/python3.12/site-packages/r2egym/agenthub/runtime/docker.py; \
+    fi
 
 # Set the default command to bash
 CMD ["bash"]

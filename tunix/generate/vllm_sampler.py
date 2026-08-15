@@ -356,7 +356,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       args["additional_config"]["lora_config"] = config.lora_config
 
     tp, dp, ep = utils.resolve_parallelism_sizes(
-        mesh=config.mesh,
+        mesh=config.mesh,  # pyrefly: ignore[bad-argument-type]
         tensor_parallel_size=config.tensor_parallel_size,
         data_parallel_size=config.data_parallel_size,
         expert_parallel_size=config.expert_parallel_size,
@@ -443,14 +443,14 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         # trainer-side concatenation miss `<|im_end|>` at every turn boundary
         # and produced 30+ nat sampler-trainer logp diffs.
 
-        # Snapshot once: vLLM types `token_ids` as `Sequence[int]` and does not
-        # always hand back a plain list, so every consumer below gets the same
-        # concrete, non-live copy.
-        token_ids = list(single_output.token_ids)
-        out_tokens[idx].append(np.array(token_ids, dtype=np.int32))
-        decoded_outputs[idx].append(self.tokenizer.decode(token_ids))
+        out_tokens[idx].append(
+            np.array(single_output.token_ids, dtype=np.int32)
+        )
+        decoded_outputs[idx].append(
+            self.tokenizer.decode(single_output.token_ids)  # pyrefly: ignore[bad-argument-type]
+        )
         logprobs = utils.get_logprobs_from_vllm_output(
-            token_ids, single_output.logprobs
+            list(single_output.token_ids), single_output.logprobs  # pyrefly: ignore[bad-argument-type]
         )
         out_logprobs[idx].append(logprobs)
         logging.debug(
@@ -540,17 +540,17 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         else:
           sampling_params = SamplingParams()
       else:
-        sampling_params = self.llm.get_default_sampling_params()
+        sampling_params = self.llm.get_default_sampling_params()  # pyrefly: ignore[missing-attribute]
       sampling_params.detokenize = False
       sampling_params.max_tokens = max_generation_steps
       sampling_params.n = multi_sampling
       sampling_params.temperature = temperature
       if self.config.return_logprobs:
         sampling_params.logprobs = 1  # b/428730696
-        sampling_params.prompt_logprobs = 0  # b/428730696
+        sampling_params.prompt_logprobs = None  # b/428730696
       else:
         sampling_params.logprobs = 0
-        sampling_params.prompt_logprobs = 0
+        sampling_params.prompt_logprobs = None
       sampling_params.stop_token_ids = [self.tokenizer.eos_id()]
       sampling_params.skip_special_tokens = True
       # Keep the stop token in the returned ``token_ids`` so multi-turn
@@ -602,7 +602,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     if self._driver is not None:
       outputs = self._generate_server_mode(prompt_objects, sampling_params)
     else:
-      outputs = self.llm.generate(
+      outputs = self.llm.generate(  # pyrefly: ignore[missing-attribute]
           prompts=prompt_objects,
           sampling_params=sampling_params,
           use_tqdm=True,
@@ -636,5 +636,5 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         logits=None,
         tokens=out_tokens[0],
         padded_prompt_tokens=all_input_ids,
-        logprobs=out_logprobs[0] if self.config.return_logprobs else None,
+        logprobs=out_logprobs[0] if self.config.return_logprobs else None,  # pyrefly: ignore[bad-argument-type]
     )

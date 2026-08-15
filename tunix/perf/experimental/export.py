@@ -23,7 +23,7 @@ from absl import logging
 from tunix.perf import metrics
 from tunix.perf.experimental import trace_writer as trace_writer_lib
 from tunix.perf.experimental import tracer
-from tunix.rl import rl_cluster
+from tunix.rl import rl_cluster as rl_engine_lib
 
 MetricsT = metrics.MetricsT
 Timeline = tracer.Timeline
@@ -46,7 +46,7 @@ class PerfMetricsExport:
   @classmethod
   def from_cluster_config(
       cls,
-      cluster_config: rl_cluster.ClusterConfig,
+      cluster_config: rl_engine_lib.ClusterConfig,
       enable_trace_writer: bool = True,
       trace_dir: str | None = None,
   ) -> PerfMetricsExport:

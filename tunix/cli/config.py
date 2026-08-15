@@ -31,8 +31,8 @@ import dotenv
 import jax
 import omegaconf
 import optax
-import orbax.checkpoint as ocp
 from tunix.perf import metrics as perf_metrics
+from tunix.sft import checkpoint_options
 from tunix.sft import metrics_logger
 from tunix.sft import profiler
 from tunix.utils import mesh as mesh_lib
@@ -184,6 +184,8 @@ class HyperParameters:
   a command-line argument or override file.
   """
 
+  config: collections.OrderedDict[str, Any]
+
   def __init__(self, argv: list[str], **kwargs):
     # Use omegaconf.OmegaConf.from_cli to capture CLI arguments.
 
@@ -245,10 +247,11 @@ class HyperParameters:
     current_model_config = self.config.get("model_config", {})
     for config_key in [
         "actor_model_config",
+        "critic_model_config",
         "reference_model_config",
         "rollout_model_config",
     ]:
-      if config_key in self.config:
+      if config_key in self.config and self.config[config_key] is not None:
         for k, v in current_model_config.items():
           if k not in self.config[config_key] or self.config[config_key][
               k
@@ -280,7 +283,7 @@ class HyperParameters:
           f" {type(value).__name__}."
       )
     if isinstance(value, omegaconf.DictConfig):
-      return omegaconf.OmegaConf.to_container(value, resolve=True)
+      return omegaconf.OmegaConf.to_container(value, resolve=True)  # pyrefly: ignore[bad-return]
     return dict(value)
 
   def _mutable_config_mapping(self, key: str) -> MutableMapping[str, Any]:
@@ -472,13 +475,13 @@ class HyperParameters:
     supported_sources = collections.defaultdict(
         lambda: ["huggingface", "internal", "maxtext"]
     )
-    # TODO(b/467448875): Add support for other sources, such as kaggle for other
+    # TODO: b/467448875 - Add support for other sources, such as kaggle for other
     # models.
     supported_sources["gemma"] = ["kaggle", "internal", "maxtext"]
     supported_sources["gemma2"] = ["kaggle", "internal", "maxtext"]
     supported_sources["gemma3"] = ["gcs", "internal", "maxtext"]
-    # TODO: support gcs, internal and maxtext for gemma4.
-    supported_sources["gemma4"] = ["kaggle", "huggingface"]
+    # TODO: support maxtext for gemma4.
+    supported_sources["gemma4"] = ["kaggle", "huggingface", "gcs", "internal"]
 
     if model_name.startswith(("gemma4", "gemma-4")):
       model_family = "gemma4"
@@ -806,9 +809,14 @@ class HyperParameters:
     constructed_training_config = collections.defaultdict()
     for key, value in training_config.items():
       if key == "checkpointing_options" and value:
+        if not isinstance(value, collections.abc.Mapping):
+          raise ValueError(
+              "Expected dictionary for checkpointing_options, but got"
+              f" {type(value).__name__}"
+          )
         try:
-          constructed_training_config[key] = ocp.CheckpointManagerOptions(
-              **value
+          constructed_training_config[key] = (
+              checkpoint_options.checkpointing_options_from_dict(value)
           )
         except ValueError as e:
           raise ValueError(f"Invalid checkpointing options: {value}") from e

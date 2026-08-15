@@ -185,7 +185,7 @@ constructs a `RolloutConfig` with the vLLM fields set.
 Pseudocode (simplified):
 
 ```python
-from tunix.rl import rl_cluster as rl_cluster_lib
+from tunix.rl import rl_cluster as rl_engine_lib
 from tunix.rl.rollout import base_rollout
 
 rollout_config = base_rollout.RolloutConfig(
@@ -204,7 +204,7 @@ rollout_config = base_rollout.RolloutConfig(
     rollout_vllm_server_mode_submission_timeout_s=0.0,
 )
 
-cluster_config = rl_cluster_lib.ClusterConfig(
+cluster_config = rl_engine_lib.ClusterConfig(
     role_to_mesh=role_to_mesh,
     rollout_engine="vllm",
     offload_to_cpu=False,
@@ -212,7 +212,7 @@ cluster_config = rl_cluster_lib.ClusterConfig(
     rollout_config=rollout_config,
 )
 
-rl_cluster = rl_cluster_lib.RLCluster(
+rl_engine = rl_engine_lib.RLEngine(
     actor=actor_model,
     reference=reference_model,
     tokenizer=tokenizer,
@@ -361,7 +361,7 @@ Tunix ship SGLang-Jax mappings.
 Pseudocode (simplified):
 
 ```python
-from tunix.rl import rl_cluster as rl_cluster_lib
+from tunix.rl import rl_cluster as rl_engine_lib
 from tunix.rl.rollout import base_rollout
 
 rollout_config = base_rollout.RolloutConfig(
@@ -382,7 +382,7 @@ rollout_config = base_rollout.RolloutConfig(
     rollout_sglang_jax_page_size=64,
 )
 
-cluster_config = rl_cluster_lib.ClusterConfig(
+cluster_config = rl_engine_lib.ClusterConfig(
     role_to_mesh=role_to_mesh,
     rollout_engine="sglang_jax",
     offload_to_cpu=False,
@@ -491,7 +491,7 @@ Vanilla rollout uses:
 Pseudocode (simplified):
 
 ```python
-from tunix.rl import rl_cluster as rl_cluster_lib
+from tunix.rl import rl_cluster as rl_engine_lib
 from tunix.rl.rollout import base_rollout
 
 max_prompt_length = 256
@@ -507,7 +507,7 @@ rollout_config = base_rollout.RolloutConfig(
     # eos_tokens=[...],  # optional
 )
 
-cluster_config = rl_cluster_lib.ClusterConfig(
+cluster_config = rl_engine_lib.ClusterConfig(
     role_to_mesh=role_to_mesh,
     rollout_engine="vanilla",
     offload_to_cpu=False,
@@ -574,13 +574,17 @@ In addition to common sampling parameters in `RolloutConfig`, you can pass these
 - `length_mean`: Optional float to override the default mean for the distribution.
 - `length_std`: Optional float to override the default standard deviation for the distribution.
 
-Note: While `MockRollout` itself can operate without a full `RolloutConfig`, the `RLCluster` requires a `rollout_config` to be present in `ClusterConfig`. Essential fields like `max_tokens_to_generate` and `max_prompt_length` from `RolloutConfig` are used by `MockRollout` to determine the size of generated outputs.
+Note: While `MockRollout` itself can operate without a full `RolloutConfig`, the
+`RLEngine` requires a `rollout_config` to be present in `ClusterConfig`.
+Essential fields like `max_tokens_to_generate` and `max_prompt_length` from
+`RolloutConfig` are used by `MockRollout` to determine the size of generated
+outputs.
 
 ### Example: using mock rollout in a Python entrypoint
 
 ```python
 import functools
-from tunix.rl import rl_cluster as rl_cluster_lib
+from tunix.rl import rl_cluster as rl_engine_lib
 from tunix.rl.rollout import base_rollout
 from tunix.rl.rollout import mock_rollout
 
@@ -599,14 +603,14 @@ rollout_config = base_rollout.RolloutConfig(
     # but are not strictly used by MockRollout beyond length constraints.
 )
 
-cluster_config = rl_cluster_lib.ClusterConfig(
+cluster_config = rl_engine_lib.ClusterConfig(
     role_to_mesh=role_to_mesh,
     rollout_engine=mock_engine_cls,
     training_config=training_config,
     rollout_config=rollout_config,
 )
 
-rl_cluster = rl_cluster_lib.RLCluster(
+rl_engine = rl_engine_lib.RLEngine(
     actor=actor_model,
     reference=reference_model,
     tokenizer=tokenizer,

@@ -78,8 +78,8 @@ configurations.
 [Mini batch size](https://github.com/google/tunix/blob/04f17e0b842901c13339874a25db77ba920adbc5/tunix/rl/rl_cluster.py#L102)
 determines how frequently the model is updated within a global step (commonly
 known as mini-batch gradient update), which is used to reduce memory pressure on
-the trainer for a large global batch and stabilize training. For a global batch size
-of 1024 and mini batch size of 256, the model will be updated 4 times in a
+the trainer for a large global batch and stabilize training. For a global batch
+size of 1024 and mini batch size of 256, the model will be updated 4 times in a
 global step. **NOTE**: Global batch size needs to be divisible by mini batch
 size; if not specified, mini batch size defaults to global batch size.
 
@@ -147,23 +147,24 @@ inference, and trainer) throughout the workflow.
 
 ![collocated execution](./images/collocated_mode.png)
 
-This setup is ideal for resource-constrained scenarios where the
-model must be sharded across every available chip to fit into memory. In
-collocated mode, each component will be executed in sequential order, which
-means the cluster will finish rollout generation before shifting to inference
-and training. To further maximize the hardware utility, you can consider enabling
-[host_offloading](https://github.com/google/tunix/blob/main/rl/rl_cluster.py?q=offload_to_cpu) with `offload_to_cpu`, which saves HBM by moving
-non-active models to CPU RAM when a
-different component is occupying the TPU.
+This setup is ideal for resource-constrained scenarios where the model must be
+sharded across every available chip to fit into memory. In collocated mode, each
+component will be executed in sequential order, which means the cluster will
+finish rollout generation before shifting to inference and training. To further
+maximize the hardware utility, you can consider enabling
+[host_offloading](https://github.com/google/tunix/blob/main/rl/rl_cluster.py?q=offload_to_cpu)
+with `offload_to_cpu`, which saves HBM by moving non-active models to CPU RAM
+when a different component is occupying the TPU.
 
 Enabling collocated mode is straightforward; you simply provide the same mesh to
-every component when configuring the `role_to_mesh` mapping for your `rl_cluster`.
+every component when configuring the `role_to_mesh` mapping for your
+`rl_engine`.
 
 ```python
 import numpy as np
 import jax
 from jax.sharding import Mesh
-from tunix.rl.rl_cluster import ClusterConfig, Role
+from tunix.rl.rl_engine import ClusterConfig, Role
 
 devices = jax.devices()
 devices_mesh = np.array(devices).reshape(len(devices), 1)
@@ -194,13 +195,13 @@ produced. This is the preferred mode for large-scale runs where maximizing
 global throughput is more critical.
 
 To enable disaggregated mode, simply assign distinct meshes to each component
-when defining the role_to_mesh mapping in your rl_cluster configuration.
+when defining the role_to_mesh mapping in your rl_engine configuration.
 
 ```python
 import numpy as np
 import jax
 from jax.sharding import Mesh
-from tunix.rl.rl_cluster import ClusterConfig, Role
+from tunix.rl.rl_engine import ClusterConfig, Role
 
 devices = jax.devices()
 split = int(len(devices) / 2)
@@ -222,7 +223,7 @@ ClusterConfig(
 ## Weight transfer/sync
 
 Weight transfer and sync is critical to keeping rollout models up-to-date with
-the policy model. This process is controlled by RLCluster regardless of which
+the policy model. This process is controlled by RLEngine regardless of which
 rollout engine is used (vanilla, vllm, or sglang-jax), and requires no user
 intervention.
 

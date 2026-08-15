@@ -33,8 +33,7 @@ import optax
 import orbax.checkpoint as ocp
 from tunix.perf import trace as trace_lib
 from tunix.perf.experimental import tracer as perf_tracer_v2
-from tunix.rl import algo_core as grpo_core
-from tunix.rl import rl_cluster as rl_cluster_lib
+from tunix.rl import rl_cluster as rl_engine_lib
 from tunix.rl.grpo import grpo_learner as grpo_lib
 from tunix.rl.queue import data_queue as queue_lib
 from tunix.rl.rollout import base_rollout
@@ -97,36 +96,39 @@ def setup(kwargs: Optional[Dict[str, Any]] = None):
   )
 
   mesh = pxla.thread_resources.env.physical_mesh
-  cluster_config = rl_cluster_lib.ClusterConfig(
+  cluster_config = rl_engine_lib.ClusterConfig(
       role_to_mesh={
-          rl_cluster_lib.Role.ACTOR: mesh,
-          rl_cluster_lib.Role.REFERENCE: mesh,
-          rl_cluster_lib.Role.ROLLOUT: mesh,
+          rl_engine_lib.Role.ACTOR: mesh,
+          rl_engine_lib.Role.REFERENCE: mesh,
+          rl_engine_lib.Role.ROLLOUT: mesh,
       },
       rollout_engine='vanilla',
       offload_to_cpu=False,
-      training_config=rl_cluster_lib.RLTrainingConfig(
+      training_config=rl_engine_lib.RLTrainingConfig(
           actor_optimizer=optax.sgd(1e-3),
           eval_every_n_steps=kwargs.get('eval_every_n_steps', 2),
           max_steps=10,
-          gradient_accumulation_steps=kwargs.get(
-              'gradient_accumulation_steps', None
-          ),
+          mini_batch_size=kwargs.get('gradient_accumulation_steps', None),
+          train_micro_batch_size=1
+          if kwargs.get('gradient_accumulation_steps', None)
+          else None,
           max_seq_token_per_tpu=kwargs.get('max_seq_token_per_tpu', None),
+          rollout_micro_batch_size=kwargs.get('rollout_micro_batch_size', None),
       ),
       rollout_config=base_rollout.RolloutConfig(
           max_tokens_to_generate=10,
           max_prompt_length=256,
           kv_cache_size=1024,
+          return_logprobs=kwargs.get('return_logprobs', False),
       ),
   )
-  rl_cluster = rl_cluster_lib.RLCluster(
+  rl_engine = rl_engine_lib.RLEngine(
       actor=model,
       reference=ref_model,
       tokenizer=vocab,
       cluster_config=cluster_config,
   )
-  return rl_cluster, model, original_variables
+  return rl_engine, model, original_variables
 
 
 class GRPOLearnerTest(parameterized.TestCase):
@@ -148,7 +150,7 @@ class GRPOLearnerTest(parameterized.TestCase):
         self._last_iter_step = 0
         self.algo_config = grpo_config
         self._data_shuffle_seed = None
-        self.rl_cluster = types.SimpleNamespace(  # pyrefly: ignore[bad-assignment]
+        self.rl_engine = types.SimpleNamespace(  # pyrefly: ignore[bad-assignment]
             global_steps=0,
             cluster_config=types.SimpleNamespace(
                 training_config=types.SimpleNamespace(
@@ -264,15 +266,15 @@ class GRPOLearnerTest(parameterized.TestCase):
   def test_grpo_learner(self, reward_fns, loss_algo):
 
     kwargs = {'eval_every_n_steps': 2}
-    rl_cluster, model, original_variables = setup(kwargs)
-    rl_cluster.with_external_metrics_logger(print)
+    rl_engine, model, original_variables = setup(kwargs)
+    rl_engine.with_external_metrics_logger(print)
     grpo_config = grpo_lib.GRPOConfig(
         num_generations=2,
         num_iterations=1,
         loss_algo=loss_algo,
     )
     grpo_learner = grpo_lib.GRPOLearner(
-        rl_cluster=rl_cluster,
+        rl_engine=rl_engine,
         reward_fns=reward_fns,
         algo_config=grpo_config,
         metric_fns=[lambda **kwargs: {'test_metric': (1.0, np.mean)}],
@@ -301,7 +303,7 @@ class GRPOLearnerTest(parameterized.TestCase):
     self.assertEqual(grpo_learner._iter_steps, 10)  # max_steps
     self.assertEqual(grpo_learner._eval_iter_steps, 4)  # num eval batches
     self.assertEqual(
-        grpo_learner.rl_cluster.actor_trainer.iter_steps,
+        grpo_learner.rl_engine.actor_trainer.iter_steps,
         grpo_learner._iter_steps,
     )
     expected_prepare_data_call_at_step = {
@@ -313,10 +315,10 @@ class GRPOLearnerTest(parameterized.TestCase):
         expected_prepare_data_call_at_step,
     )
     self.assertEqual(
-        grpo_learner.rl_cluster.global_steps,
+        grpo_learner.rl_engine.global_steps,
         10,  # max_steps / num_iterations
     )
-    rl_metric_logger = grpo_learner.rl_cluster._rl_metrics_logger
+    rl_metric_logger = grpo_learner.rl_engine._rl_metrics_logger
     rewards_metrics = (
         ('rewards/' + f.__name__ for f in reward_fns)
         if isinstance(reward_fns, list)
@@ -336,28 +338,165 @@ class GRPOLearnerTest(parameterized.TestCase):
       prefix, metric_name = metric_name.split('/', maxsplit=1)
       self.assertLen(
           rl_metric_logger.get_metric_history(prefix, metric_name, 'train'),
-          grpo_learner.rl_cluster.global_steps,
+          grpo_learner.rl_engine.global_steps,
           msg=f'metric_name: {metric_name}',
       )
       self.assertLen(
           rl_metric_logger.get_metric_history(prefix, metric_name, 'eval'),
-          grpo_learner.rl_cluster.actor_trainer.train_steps
+          grpo_learner.rl_engine.actor_trainer.train_steps
           / kwargs['eval_every_n_steps'],
           msg=f'metric_name: {metric_name}',
       )
-    metric_logger = grpo_learner.rl_cluster.actor_trainer.metrics_logger
+    metric_logger = grpo_learner.rl_engine.actor_trainer.metrics_logger
     for metric_name in ['loss', 'kl']:
       self.assertLen(
           metric_logger.get_metric_history('actor', metric_name, 'train'),  # pyrefly: ignore[missing-attribute]
-          grpo_learner.rl_cluster.actor_trainer.train_steps,
+          grpo_learner.rl_engine.actor_trainer.train_steps,
           msg=f'metric_name: {metric_name}',
       )
       self.assertLen(
           metric_logger.get_metric_history('actor', metric_name, 'eval'),  # pyrefly: ignore[missing-attribute]
-          grpo_learner.rl_cluster.actor_trainer.train_steps
+          grpo_learner.rl_engine.actor_trainer.train_steps
           / kwargs['eval_every_n_steps'],
           msg=f'metric_name: {metric_name}',
       )
+
+  def test_use_rollout_logps_false_uses_trainer_recomputed_old_logps(self):
+    rl_engine, _, _ = setup({'rollout_micro_batch_size': 1})
+    actor_logps_calls = []
+    def fake_get_actor_per_token_logps(
+        prompt_tokens, completion_tokens, pad_id, eos_id, micro_batch_size
+    ):
+      del pad_id, eos_id, micro_batch_size
+      actor_logps_calls.append((prompt_tokens.shape, completion_tokens.shape))
+      return jnp.full(completion_tokens.shape, -7.0, dtype=jnp.float32)
+    rl_engine.get_actor_per_token_logps = fake_get_actor_per_token_logps
+    grpo_config = grpo_lib.GRPOConfig(
+        num_generations=2,
+        num_iterations=1,
+        beta=0.0,
+        use_rollout_logps=False,
+    )
+    grpo_learner = grpo_lib.GRPOLearner(
+        rl_engine=rl_engine,
+        reward_fns=reward_1,
+        algo_config=grpo_config,
+    )
+    train_example = grpo_learner._generate_and_compute_advantage({
+        'prompts': np.array(['input string', 'input string']),
+        'answer': np.array(['answer', 'answer']),
+    })
+    self.assertLen(actor_logps_calls, 1)
+    np.testing.assert_allclose(
+        np.asarray(train_example.old_per_token_logps),
+        np.full(train_example.completion_ids.shape, -7.0, dtype=np.float32),
+    )
+    self.assertIsNone(train_example.sampler_is_weights)
+
+  def test_sampler_is_token_uses_trainer_logps_and_sets_weights(self):
+    rl_engine, _, _ = setup(
+        {'return_logprobs': True, 'rollout_micro_batch_size': 1}
+    )
+    actor_logps_calls = []
+
+    def fake_get_actor_per_token_logps(
+        prompt_tokens, completion_tokens, pad_id, eos_id, micro_batch_size
+    ):
+      del pad_id, eos_id, micro_batch_size
+      actor_logps_calls.append((prompt_tokens.shape, completion_tokens.shape))
+      return jnp.full(completion_tokens.shape, -3.0, dtype=jnp.float32)
+
+    rl_engine.get_actor_per_token_logps = fake_get_actor_per_token_logps
+    grpo_config = grpo_lib.GRPOConfig(
+        num_generations=2,
+        num_iterations=1,
+        beta=0.0,
+        sampler_is='token',
+    )
+    grpo_learner = grpo_lib.GRPOLearner(
+        rl_engine=rl_engine,
+        reward_fns=reward_1,
+        algo_config=grpo_config,
+    )
+    train_example = grpo_learner._generate_and_compute_advantage({
+        'prompts': np.array(['input string', 'input string']),
+        'answer': np.array(['answer', 'answer']),
+    })
+    self.assertLen(actor_logps_calls, 1)
+    np.testing.assert_allclose(
+        np.asarray(train_example.old_per_token_logps),
+        np.full(train_example.completion_ids.shape, -3.0, dtype=np.float32),
+    )
+    assert train_example.sampler_is_weights is not None
+    self.assertEqual(
+        train_example.sampler_is_weights.shape,
+        train_example.completion_ids.shape,
+    )
+
+  def test_recompute_ignores_returned_rollout_logps_like_agentic(self):
+    rl_engine, _, _ = setup(
+        {'return_logprobs': True, 'rollout_micro_batch_size': 1}
+    )
+    actor_logps_calls = []
+    def fake_get_actor_per_token_logps(
+        prompt_tokens, completion_tokens, pad_id, eos_id, micro_batch_size
+    ):
+      del pad_id, eos_id, micro_batch_size
+      actor_logps_calls.append((prompt_tokens.shape, completion_tokens.shape))
+      return jnp.full(completion_tokens.shape, -5.0, dtype=jnp.float32)
+    rl_engine.get_actor_per_token_logps = fake_get_actor_per_token_logps
+    grpo_config = grpo_lib.GRPOConfig(
+        num_generations=2,
+        num_iterations=1,
+        beta=0.0,
+        use_rollout_logps=False,
+        sampler_is='token',
+    )
+    grpo_learner = grpo_lib.GRPOLearner(
+        rl_engine=rl_engine,
+        reward_fns=reward_1,
+        algo_config=grpo_config,
+    )
+    train_example = grpo_learner._generate_and_compute_advantage({
+        'prompts': np.array(['input string', 'input string']),
+        'answer': np.array(['answer', 'answer']),
+    })
+    self.assertLen(actor_logps_calls, 1)
+    np.testing.assert_allclose(
+        np.asarray(train_example.old_per_token_logps),
+        np.full(train_example.completion_ids.shape, -5.0, dtype=np.float32),
+    )
+    self.assertIsNone(train_example.sampler_is_weights)
+
+  def test_vllm_missing_rollout_logps_does_not_recompute_on_rollout(self):
+    rl_engine, _, _ = setup(
+        {'return_logprobs': False, 'rollout_micro_batch_size': 1}
+    )
+    rollout_logps_calls = []
+    def fake_get_old_per_token_logps(*args, **kwargs):
+      del args, kwargs
+      rollout_logps_calls.append(True)
+      raise AssertionError('vLLM should not use rollout-side logp recompute.')
+    rl_engine.get_old_per_token_logps = fake_get_old_per_token_logps
+    grpo_config = grpo_lib.GRPOConfig(
+        num_generations=2,
+        beta=0.0,
+        num_iterations=2,
+    )
+    grpo_learner = grpo_lib.GRPOLearner(
+        rl_engine=rl_engine,
+        reward_fns=reward_1,
+        algo_config=grpo_config,
+    )
+    with self.assertRaisesRegex(
+        RuntimeError,
+        'old_per_token_logps is not available',
+    ):
+      grpo_learner._generate_and_compute_advantage({
+          'prompts': np.array(['input string', 'input string']),
+          'answer': np.array(['answer', 'answer']),
+      })
+    self.assertEmpty(rollout_logps_calls)
 
   @parameterized.named_parameters(
       dict(
@@ -368,7 +507,7 @@ class GRPOLearnerTest(parameterized.TestCase):
           gradient_accumulation_steps=None,
           expected_gen_fn_call_at_step=[0, 2, 4, 6, 8],
           expected_inference_worker_logps_fn_call_at_step=[0, 2, 4, 6, 8],
-          expected_rollout_worker_logps_fn_call_at_step=[0, 2, 4, 6, 8],
+          expected_rollout_worker_logps_fn_call_at_step=[],
       ),
       dict(
           testcase_name='multi_iter_with_gradient_accumulation',
@@ -387,16 +526,7 @@ class GRPOLearnerTest(parameterized.TestCase):
               12,
               12,
           ],
-          expected_rollout_worker_logps_fn_call_at_step=[
-              0,
-              0,
-              0,
-              6,
-              6,
-              6,
-              12,
-              12,
-          ],
+          expected_rollout_worker_logps_fn_call_at_step=[],
       ),
       dict(
           testcase_name='multi_iter_without_kl',
@@ -406,16 +536,7 @@ class GRPOLearnerTest(parameterized.TestCase):
           gradient_accumulation_steps=3,
           expected_gen_fn_call_at_step=[0, 0, 0, 6, 6, 6, 12, 12],
           expected_inference_worker_logps_fn_call_at_step=[],
-          expected_rollout_worker_logps_fn_call_at_step=[
-              0,
-              0,
-              0,
-              6,
-              6,
-              6,
-              12,
-              12,
-          ],
+          expected_rollout_worker_logps_fn_call_at_step=[],
       ),
       dict(
           testcase_name='singler_iter_with_gradient_accumulation',
@@ -499,33 +620,34 @@ class GRPOLearnerTest(parameterized.TestCase):
     kwargs = {
         'eval_every_n_steps': 12,
         'gradient_accumulation_steps': gradient_accumulation_steps,
+        'return_logprobs': num_iterations > 1,
     }
-    rl_cluster, model, original_variables = setup(kwargs)
+    rl_engine, model, original_variables = setup(kwargs)
     grpo_config = grpo_lib.GRPOConfig(
         num_generations=2,
         num_iterations=num_iterations,
         beta=beta,
     )
     grpo_learner = grpo_lib.GRPOLearner(
-        rl_cluster=rl_cluster,
+        rl_engine=rl_engine,
         reward_fns=reward_1,
         algo_config=grpo_config,
     )
-    self.assertEqual(grpo_learner.rl_cluster.global_steps, 0)
+    self.assertEqual(grpo_learner.rl_engine.global_steps, 0)
     grpo_learner._generate_and_compute_advantage = wrap_fn(
         grpo_learner._generate_and_compute_advantage,
         gen_fn_call_at_step,
-        grpo_learner.rl_cluster.actor_trainer,
+        grpo_learner.rl_engine.actor_trainer,
     )
-    rl_cluster.rollout.get_per_token_logps = wrap_fn(
-        rl_cluster.rollout.get_per_token_logps,
+    rl_engine.rollout.get_per_token_logps = wrap_fn(
+        rl_engine.rollout.get_per_token_logps,
         rollout_worker_logps_fn_call_at_step,
-        grpo_learner.rl_cluster.actor_trainer,
+        grpo_learner.rl_engine.actor_trainer,
     )
-    rl_cluster.inference_worker.get_ref_per_token_logps = wrap_fn(
-        rl_cluster.inference_worker.get_ref_per_token_logps,
+    rl_engine.inference_worker.get_ref_per_token_logps = wrap_fn(
+        rl_engine.inference_worker.get_ref_per_token_logps,
         inference_worker_logps_fn_call_at_step,
-        grpo_learner.rl_cluster.actor_trainer,
+        grpo_learner.rl_engine.actor_trainer,
     )
     train_ds = _dummy_dataset(_DUMMY_DATA * 2, batch_size=1)
     grpo_learner.train(train_ds, None)
@@ -541,15 +663,15 @@ class GRPOLearnerTest(parameterized.TestCase):
         expected_rollout_worker_logps_fn_call_at_step,
     )
     self.assertEqual(
-        grpo_learner.rl_cluster.actor_trainer.train_steps,
-        grpo_learner.rl_cluster.actor_trainer.iter_steps
+        grpo_learner.rl_engine.actor_trainer.train_steps,
+        grpo_learner.rl_engine.actor_trainer.iter_steps
         // (kwargs.get('gradient_accumulation_steps') or 1),
     )
     self.assertLen(
-        grpo_learner.rl_cluster.actor_trainer.metrics_logger.get_metric_history(  # pyrefly: ignore[missing-attribute]
+        grpo_learner.rl_engine.actor_trainer.metrics_logger.get_metric_history(  # pyrefly: ignore[missing-attribute]
             'actor', 'kl', 'train'
         ),
-        grpo_learner.rl_cluster.actor_trainer.train_steps,
+        grpo_learner.rl_engine.actor_trainer.train_steps,
     )
 
   def test_grpo_with_lora_model(self):
@@ -581,15 +703,15 @@ class GRPOLearnerTest(parameterized.TestCase):
     original_lora_variables = jax.tree.map(
         jnp.copy, nnx.state(actor_model, nnx.LoRAParam)
     )
-    cluster_config = rl_cluster_lib.ClusterConfig(
+    cluster_config = rl_engine_lib.ClusterConfig(
         role_to_mesh={
-            rl_cluster_lib.Role.ACTOR: mesh1,
-            rl_cluster_lib.Role.REFERENCE: mesh1,
-            rl_cluster_lib.Role.ROLLOUT: mesh2,
+            rl_engine_lib.Role.ACTOR: mesh1,
+            rl_engine_lib.Role.REFERENCE: mesh1,
+            rl_engine_lib.Role.ROLLOUT: mesh2,
         },
         rollout_engine='vanilla',
         offload_to_cpu=False,
-        training_config=rl_cluster_lib.RLTrainingConfig(
+        training_config=rl_engine_lib.RLTrainingConfig(
             actor_optimizer=optax.sgd(1e-3),
             eval_every_n_steps=10,
             max_steps=10,
@@ -600,7 +722,7 @@ class GRPOLearnerTest(parameterized.TestCase):
             kv_cache_size=1024,
         ),
     )
-    rl_cluster = rl_cluster_lib.RLCluster(
+    rl_engine = rl_engine_lib.RLEngine(
         actor=actor_model,
         reference=ref_model,
         tokenizer=vocab,
@@ -611,7 +733,7 @@ class GRPOLearnerTest(parameterized.TestCase):
         num_iterations=1,
     )
     grpo_learner = grpo_lib.GRPOLearner(
-        rl_cluster=rl_cluster,
+        rl_engine=rl_engine,
         reward_fns=reward_1,
         algo_config=grpo_config,
     )
@@ -620,11 +742,11 @@ class GRPOLearnerTest(parameterized.TestCase):
     train_ds = _dummy_dataset(batch_size=2)
     grpo_learner.train(train_ds, None)
     base_params = nnx.state(
-        rl_cluster.actor_trainer.model, filterlib.Not(nnx.LoRAParam)
+        rl_engine.actor_trainer.model, filterlib.Not(nnx.LoRAParam)
     )
-    lora_params = nnx.state(rl_cluster.actor_trainer.model, nnx.LoRAParam)
+    lora_params = nnx.state(rl_engine.actor_trainer.model, nnx.LoRAParam)
     lora_params_from_sampler = nnx.state(
-        grpo_learner.rl_cluster.rollout.model(), nnx.LoRAParam
+        grpo_learner.rl_engine.rollout.model(), nnx.LoRAParam
     )
     jax.tree.map_with_path(
         tc.assert_not_equal, original_lora_variables, lora_params
@@ -656,13 +778,13 @@ class GRPOLearnerTest(parameterized.TestCase):
     kwargs = {'eval_every_n_steps': 2}
 
     # Train without sequence packing
-    rl_cluster_unpacked, model_unpacked, original_variables = setup(kwargs)
+    rl_engine_unpacked, model_unpacked, original_variables = setup(kwargs)
     grpo_config_unpacked = grpo_lib.GRPOConfig(
         num_generations=2,
         num_iterations=1,
     )
     learner_unpacked = grpo_lib.GRPOLearner(
-        rl_cluster=rl_cluster_unpacked,
+        rl_engine=rl_engine_unpacked,
         reward_fns=reward_1,
         algo_config=grpo_config_unpacked,
     )
@@ -676,13 +798,13 @@ class GRPOLearnerTest(parameterized.TestCase):
         'eval_every_n_steps': 2,
         'max_seq_token_per_tpu': max_token_len,
     }
-    rl_cluster_packed, model_packed, _ = setup(kwargs_packed)
+    rl_engine_packed, model_packed, _ = setup(kwargs_packed)
     grpo_config_packed = grpo_lib.GRPOConfig(
         num_generations=2,
         num_iterations=1,
     )
     learner_packed = grpo_lib.GRPOLearner(
-        rl_cluster=rl_cluster_packed,
+        rl_engine=rl_engine_packed,
         reward_fns=reward_1,
         algo_config=grpo_config_packed,
     )
@@ -712,13 +834,13 @@ class GRPOLearnerTest(parameterized.TestCase):
       @override
       def _generate_and_compute_advantage(self, example, mode='train'):
         raise ValueError('test exception')
-    rl_cluster, _, _ = setup()
+    rl_engine, _, _ = setup()
     grpo_config = grpo_lib.GRPOConfig(
         num_generations=2,
         num_iterations=1,
     )
     grpo_learner = _TrainerWithException(
-        rl_cluster=rl_cluster,
+        rl_engine=rl_engine,
         reward_fns=reward_1,
         algo_config=grpo_config,
     )
@@ -735,15 +857,15 @@ class GRPOLearnerTest(parameterized.TestCase):
         config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
     )
     mesh = pxla.thread_resources.env.physical_mesh
-    cluster_config = rl_cluster_lib.ClusterConfig(
+    cluster_config = rl_engine_lib.ClusterConfig(
         role_to_mesh={
-            rl_cluster_lib.Role.ACTOR: mesh,
-            rl_cluster_lib.Role.REFERENCE: mesh,
-            rl_cluster_lib.Role.ROLLOUT: mesh,
+            rl_engine_lib.Role.ACTOR: mesh,
+            rl_engine_lib.Role.REFERENCE: mesh,
+            rl_engine_lib.Role.ROLLOUT: mesh,
         },
         rollout_engine='vanilla',
         offload_to_cpu=False,
-        training_config=rl_cluster_lib.RLTrainingConfig(
+        training_config=rl_engine_lib.RLTrainingConfig(
             actor_optimizer=optax.sgd(1e-3),
             eval_every_n_steps=10,
             max_steps=10,
@@ -754,7 +876,7 @@ class GRPOLearnerTest(parameterized.TestCase):
             kv_cache_size=1024,
         ),
     )
-    rl_cluster = rl_cluster_lib.RLCluster(
+    rl_engine = rl_engine_lib.RLEngine(
         actor=model,
         reference=ref_model,
         tokenizer=vocab,
@@ -765,14 +887,14 @@ class GRPOLearnerTest(parameterized.TestCase):
         num_iterations=1,
     )
     grpo_learner = grpo_lib.GRPOLearner(
-        rl_cluster=rl_cluster,
+        rl_engine=rl_engine,
         reward_fns=reward_1,
         algo_config=grpo_config,
     )
-    self.assertEqual(grpo_learner.rl_cluster.global_steps, 0)
+    self.assertEqual(grpo_learner.rl_engine.global_steps, 0)
     train_ds_full = _dummy_dataset(batch_size=2)
     grpo_learner.train(train_ds_full, None)
-    self.assertEqual(grpo_learner.rl_cluster.global_steps, 2)
+    self.assertEqual(grpo_learner.rl_engine.global_steps, 2)
     try:
       temp_path = self.create_tempdir().full_path
     except Exception:
@@ -780,15 +902,15 @@ class GRPOLearnerTest(parameterized.TestCase):
     model2 = tc.ToyTransformer(
         config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
     )
-    cluster_config2 = rl_cluster_lib.ClusterConfig(
+    cluster_config2 = rl_engine_lib.ClusterConfig(
         role_to_mesh={
-            rl_cluster_lib.Role.ACTOR: mesh,
-            rl_cluster_lib.Role.REFERENCE: mesh,
-            rl_cluster_lib.Role.ROLLOUT: mesh,
+            rl_engine_lib.Role.ACTOR: mesh,
+            rl_engine_lib.Role.REFERENCE: mesh,
+            rl_engine_lib.Role.ROLLOUT: mesh,
         },
         rollout_engine='vanilla',
         offload_to_cpu=False,
-        training_config=rl_cluster_lib.RLTrainingConfig(
+        training_config=rl_engine_lib.RLTrainingConfig(
             actor_optimizer=optax.sgd(1e-3),
             eval_every_n_steps=10,
             max_steps=10,
@@ -804,33 +926,33 @@ class GRPOLearnerTest(parameterized.TestCase):
             kv_cache_size=1024,
         ),
     )
-    rl_cluster2 = rl_cluster_lib.RLCluster(
+    rl_engine2 = rl_engine_lib.RLEngine(
         actor=model2,
         reference=ref_model,
         tokenizer=vocab,
         cluster_config=cluster_config2,
     )
     grpo_learner2 = grpo_lib.GRPOLearner(
-        rl_cluster=rl_cluster2,
+        rl_engine=rl_engine2,
         reward_fns=reward_1,
         algo_config=grpo_config,
     )
     grpo_learner2.train(train_ds_full[0:1], None)
-    rl_cluster2 = rl_cluster_lib.RLCluster(
+    rl_engine2 = rl_engine_lib.RLEngine(
         actor=model2,
         reference=ref_model,
         tokenizer=vocab,
         cluster_config=cluster_config2,
     )
     grpo_learner2 = grpo_lib.GRPOLearner(
-        rl_cluster=rl_cluster2,
+        rl_engine=rl_engine2,
         reward_fns=reward_1,
         algo_config=grpo_config,
     )
-    self.assertEqual(grpo_learner2.rl_cluster.global_steps, 1)
+    self.assertEqual(grpo_learner2.rl_engine.global_steps, 1)
     assert grpo_learner2._last_iter_step == 1
     grpo_learner2.train(train_ds_full, None)
-    self.assertEqual(grpo_learner2.rl_cluster.global_steps, 2)
+    self.assertEqual(grpo_learner2.rl_engine.global_steps, 2)
     variables1 = nnx.state(model, nnx.Param)
     variables2 = nnx.state(model2, nnx.Param)
     jax.tree.map_with_path(tc.assert_equal, variables1, variables2)
@@ -848,16 +970,16 @@ class GRPOLearnerTest(parameterized.TestCase):
         config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()), rngs=nnx.Rngs(0)
     )
     mesh = pxla.thread_resources.env.physical_mesh
-    def create_rl_cluster(grad_accu_steps, mini_batch_size):
-      cluster_config = rl_cluster_lib.ClusterConfig(
+    def create_rl_engine(grad_accu_steps, mini_batch_size):
+      cluster_config = rl_engine_lib.ClusterConfig(
           role_to_mesh={
-              rl_cluster_lib.Role.ACTOR: mesh,
-              rl_cluster_lib.Role.REFERENCE: mesh,
-              rl_cluster_lib.Role.ROLLOUT: mesh,
+              rl_engine_lib.Role.ACTOR: mesh,
+              rl_engine_lib.Role.REFERENCE: mesh,
+              rl_engine_lib.Role.ROLLOUT: mesh,
           },
           rollout_engine='vanilla',
           offload_to_cpu=False,
-          training_config=rl_cluster_lib.RLTrainingConfig(
+          training_config=rl_engine_lib.RLTrainingConfig(
               actor_optimizer=optax.sgd(1e-3),
               eval_every_n_steps=grad_accu_steps * 2,
               max_steps=10,
@@ -872,20 +994,21 @@ class GRPOLearnerTest(parameterized.TestCase):
               kv_cache_size=1024,
           ),
       )
-      rl_cluster = rl_cluster_lib.RLCluster(
+      rl_engine = rl_engine_lib.RLEngine(
           actor=model,
           reference=ref_model,
           tokenizer=vocab,
           cluster_config=cluster_config,
       )
-      return rl_cluster.with_external_metrics_logger(print)
+      return rl_engine.with_external_metrics_logger(print)
+
     grpo_config = grpo_lib.GRPOConfig(
         num_generations=2,
         num_iterations=1,
     )
     first_trajectories = {'train': {}, 'eval': {}}
     grpo_learner = grpo_lib.GRPOLearner(
-        rl_cluster=create_rl_cluster(1, 4),
+        rl_engine=create_rl_engine(1, 4),
         reward_fns=lambda **kwargs: my_reward_fn(
             trajectories=first_trajectories, **kwargs
         ),
@@ -898,7 +1021,7 @@ class GRPOLearnerTest(parameterized.TestCase):
     # Execute with different batch size and gradient accumulation steps.
     second_trajectories = {'train': {}, 'eval': {}}
     grpo_learner = grpo_lib.GRPOLearner(
-        rl_cluster=create_rl_cluster(4, 8),
+        rl_engine=create_rl_engine(4, 8),
         reward_fns=lambda **kwargs: my_reward_fn(
             trajectories=second_trajectories, **kwargs
         ),
@@ -987,15 +1110,15 @@ class GRPOLearnerTest(parameterized.TestCase):
           rngs=nnx.Rngs(0),
       )
       mesh = pxla.thread_resources.env.physical_mesh
-      cluster_config = rl_cluster_lib.ClusterConfig(
+      cluster_config = rl_engine_lib.ClusterConfig(
           role_to_mesh={
-              rl_cluster_lib.Role.ACTOR: mesh,
-              rl_cluster_lib.Role.REFERENCE: mesh,
-              rl_cluster_lib.Role.ROLLOUT: mesh,
+              rl_engine_lib.Role.ACTOR: mesh,
+              rl_engine_lib.Role.REFERENCE: mesh,
+              rl_engine_lib.Role.ROLLOUT: mesh,
           },
           rollout_engine='vanilla',
           offload_to_cpu=False,
-          training_config=rl_cluster_lib.RLTrainingConfig(
+          training_config=rl_engine_lib.RLTrainingConfig(
               actor_optimizer=optax.sgd(1e-3),
               eval_every_n_steps=2,
               max_steps=20,
@@ -1016,7 +1139,7 @@ class GRPOLearnerTest(parameterized.TestCase):
               temperature=0.5,
           ),
       )
-      rl_cluster = rl_cluster_lib.RLCluster(
+      rl_engine = rl_engine_lib.RLEngine(
           actor=model,
           reference=ref_model,
           tokenizer=vocab,
@@ -1027,7 +1150,7 @@ class GRPOLearnerTest(parameterized.TestCase):
           num_iterations=1,
       )
       grpo_learner = grpo_lib.GRPOLearner(
-          rl_cluster=rl_cluster,
+          rl_engine=rl_engine,
           reward_fns=lambda **kwargs: my_reward_fn(
               trajectories=trajectories, **kwargs
           ),
@@ -1049,7 +1172,7 @@ class GRPOLearnerTest(parameterized.TestCase):
     original_variables = jax.tree.map(jnp.copy, nnx.state(model, nnx.Param))
     grpo_learner.train(train_ds, eval_ds)
     self.assertEqual(
-        80 // batch_size, grpo_learner.rl_cluster.actor_trainer.train_steps
+        80 // batch_size, grpo_learner.rl_engine.actor_trainer.train_steps
     )
     base_variables = nnx.state(model, nnx.Param)
     jax.tree.map_with_path(
@@ -1072,7 +1195,7 @@ class GRPOLearnerTest(parameterized.TestCase):
     self.assertEqual(base_trajectories, micro_batch_trajectories)
     self.assertEqual(
         80 // (mini_batch_size or batch_size),
-        grpo_learner.rl_cluster.actor_trainer.train_steps,
+        grpo_learner.rl_engine.actor_trainer.train_steps,
     )
   @parameterized.named_parameters(
       dict(
@@ -1109,15 +1232,15 @@ class GRPOLearnerTest(parameterized.TestCase):
           rngs=nnx.Rngs(0),
       )
       mesh = pxla.thread_resources.env.physical_mesh
-      cluster_config = rl_cluster_lib.ClusterConfig(
+      cluster_config = rl_engine_lib.ClusterConfig(
           role_to_mesh={
-              rl_cluster_lib.Role.ACTOR: mesh,
-              rl_cluster_lib.Role.REFERENCE: mesh,
-              rl_cluster_lib.Role.ROLLOUT: mesh,
+              rl_engine_lib.Role.ACTOR: mesh,
+              rl_engine_lib.Role.REFERENCE: mesh,
+              rl_engine_lib.Role.ROLLOUT: mesh,
           },
           rollout_engine='vanilla',
           offload_to_cpu=False,
-          training_config=rl_cluster_lib.RLTrainingConfig(
+          training_config=rl_engine_lib.RLTrainingConfig(
               actor_optimizer=optax.sgd(1e-3),
               eval_every_n_steps=2,
               max_steps=max_steps,
@@ -1137,7 +1260,7 @@ class GRPOLearnerTest(parameterized.TestCase):
               temperature=0.5,
           ),
       )
-      rl_cluster = rl_cluster_lib.RLCluster(
+      rl_engine = rl_engine_lib.RLEngine(
           actor=model,
           reference=ref_model,
           tokenizer=vocab,
@@ -1148,7 +1271,7 @@ class GRPOLearnerTest(parameterized.TestCase):
           num_iterations=1,
       )
       grpo_learner = grpo_lib.GRPOLearner(
-          rl_cluster=rl_cluster,
+          rl_engine=rl_engine,
           reward_fns=reward_1,
           algo_config=grpo_config,
       )
@@ -1156,23 +1279,23 @@ class GRPOLearnerTest(parameterized.TestCase):
     # make sure we have enough rows
     train_ds = _dummy_dataset(MySource(repeat=100), batch_size=batch_size)
     grpo_learner = create_learner(ckpt_dir, max_steps=max_steps)
-    self.assertEqual(grpo_learner.rl_cluster.global_steps, 0)
+    self.assertEqual(grpo_learner.rl_engine.global_steps, 0)
     grpo_learner.train(train_ds, None)
     self.assertEqual(
-        grpo_learner.rl_cluster.global_steps,
+        grpo_learner.rl_engine.global_steps,
         max_steps * mini_batch_size / batch_size,
     )
     # Increase max_steps and so we continue training from checkpoint.
     grpo_learner2 = create_learner(ckpt_dir, max_steps=max_steps * 2)
     self.assertEqual(
-        grpo_learner2.rl_cluster.global_steps,
-        grpo_learner.rl_cluster.global_steps,
+        grpo_learner2.rl_engine.global_steps,
+        grpo_learner.rl_engine.global_steps,
     )
     self.assertEqual(
-        grpo_learner2.rl_cluster.actor_trainer._restored_custom_metadata,
+        grpo_learner2.rl_engine.actor_trainer._restored_custom_metadata,
         {
-            'global_step': grpo_learner.rl_cluster.global_steps,
-            'role': rl_cluster_lib.Role.ACTOR.value,
+            'global_step': grpo_learner.rl_engine.global_steps,
+            'role': rl_engine_lib.Role.ACTOR.value,
         },
     )
     # double the batch size it should also work with checkpoint resumption.
@@ -1180,8 +1303,8 @@ class GRPOLearnerTest(parameterized.TestCase):
     train_ds = _dummy_dataset(MySource(repeat=100), batch_size=batch_size)
     grpo_learner2.train(train_ds, None)
     self.assertEqual(
-        grpo_learner2.rl_cluster.global_steps,
-        grpo_learner.rl_cluster.global_steps
+        grpo_learner2.rl_engine.global_steps,
+        grpo_learner.rl_engine.global_steps
         + max_steps * mini_batch_size / batch_size,
     )
   @parameterized.named_parameters(
@@ -1203,15 +1326,15 @@ class GRPOLearnerTest(parameterized.TestCase):
   )
 
   def test_compute_rewards_shape(self, reward_fns):
-    rl_cluster, _, _ = setup()
-    rl_cluster.with_external_metrics_logger(print)
+    rl_engine, _, _ = setup()
+    rl_engine.with_external_metrics_logger(print)
     grpo_config = grpo_lib.GRPOConfig(
         num_generations=2,
         num_iterations=1,
         loss_algo='grpo',
     )
     grpo_learner = grpo_lib.GRPOLearner(
-        rl_cluster=rl_cluster,
+        rl_engine=rl_engine,
         reward_fns=reward_fns,
         algo_config=grpo_config,
         metric_fns=[lambda **kwargs: {'test_metric': (1.0, np.mean)}],
@@ -1223,7 +1346,7 @@ class GRPOLearnerTest(parameterized.TestCase):
         prompts=prompts,
         completions=completions,
         answer=answers,
-        mode=rl_cluster_lib.Mode.TRAIN,
+        mode=rl_engine_lib.Mode.TRAIN,
     )
     self.assertLen(rewards, len(prompts))
 

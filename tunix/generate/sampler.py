@@ -32,12 +32,15 @@ import jax
 import jax.numpy as jnp
 import jaxtyping
 import numpy as np
+from tunix.common import configs
 from tunix.generate import base_sampler
 from tunix.generate import utils
 import tunix.generate.beam_search as beam_search_lib
 import tunix.generate.tokenizer_adapter as tok_adapter
 from tunix.processors import audio_processor
 from tunix.processors import image_processor
+
+CacheConfig = configs.CacheConfig
 
 LayerCache = dict[str, jaxtyping.Array]
 Cache = dict[str, LayerCache]
@@ -97,16 +100,6 @@ class _SamplingState:
   beam_search_sampling_state: (
       beam_search_lib._BeamSearchSamplingState | None
   ) = None
-
-
-@dataclasses.dataclass(frozen=True)
-class CacheConfig:
-  """Configuration for the KV cache."""
-
-  cache_size: int
-  num_layers: int
-  num_kv_heads: int
-  head_dim: int
 
 
 def sample_top_p(
@@ -691,7 +684,7 @@ class Sampler(base_sampler.BaseSampler):
 
     def cond_fn(sampler_state: _SamplingState):
       return (
-          sampler_state.decoding_step < sampler_state.total_sampling_steps
+          sampler_state.decoding_step < sampler_state.total_sampling_steps - 1
       ) & jnp.any(jnp.logical_not(sampler_state.done))
 
     return jax.lax.while_loop(cond_fn, sample_with_params, sampling_state)

@@ -12,72 +12,125 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Manages queues of trajectory items, grouping them by group_id and episode_id."""
+"""Manages queues of items with pluggable grouping and filtering."""
 
 from __future__ import annotations
 
 import asyncio
 import collections
 from collections.abc import Hashable
-import dataclasses
-from typing import Deque, Dict, List, Optional
+from typing import Callable, Deque, Dict, Generic, List, Optional, Tuple, TypeVar, Union
 
-from tunix.rl.agentic.agents import agent_types
+_T = TypeVar("_T")
 
-TrajectoryItem = agent_types.TrajectoryItem
-field = dataclasses.field
-dataclass = dataclasses.dataclass
+# GroupFn takes the internal buckets dictionary and an incoming item,
+# returning a ready group of items if formed, else None.
+GroupFn = Callable[[Dict[Hashable, List[_T]], _T], Optional[List[_T]]]
+
+# FilterFn takes a candidate group and returns valid items (or tuple of (valid, filtered_out)).
+FilterFn = Callable[
+    [List[_T]],
+    Union[List[_T], Tuple[List[_T], List[_T]]],
+]
 
 
-class GroupQueueManager:
-  """Manages queues of trajectory items, grouping them by group_id.
+class GroupQueueManager(Generic[_T]):
+  """Manages queues of items with pluggable grouping and filtering.
 
-  This class collects `TrajectoryItem` instances into buckets based on their
-  `group_id`. Once a bucket reaches `group_size`, it becomes a
-  "ready group" and can be retrieved in batches. It also handles managing the
-  number of open buckets and provides mechanisms for clearing and handling
-  exceptions.
+  This class collects instances into buckets based on a pluggable grouping
+  strategy (defaulting to grouping by `item.group_id` / `item.prompt_id`).
+  Once a candidate group reaches completion, it passes through an optional
+  `filter_fn` before being made available for retrieval in batches.
   """
 
   def __init__(
       self,
       *,
-      group_size: int,
+      group_size: Optional[int] = None,
+      group_fn: Optional[GroupFn[_T]] = None,
+      filter_fn: Optional[FilterFn[_T]] = None,
   ):
+    """Initializes GroupQueueManager.
+
+    Args:
+      group_size: Optional target size for default grouping.
+      group_fn: Optional custom grouping function `Callable[[buckets, item],
+        Optional[List[_T]]]`. If None, `group_size` must be provided.
+      filter_fn: Optional filtering function `Callable[[candidate_group],
+        valid_items]`.
+    """
+    if group_fn is None:
+      if group_size is None:
+        raise ValueError(
+            "Must specify either group_size or a custom group_fn for"
+            " GroupQueueManager."
+        )
+
+      def default_group_fn(
+          buckets: Dict[Hashable, List[_T]],
+          item: _T,
+      ) -> Optional[List[_T]]:
+        group_id = getattr(item, "group_id", None)
+        prompt_id = getattr(item, "prompt_id", None)
+        if group_id is not None and group_id != "":
+          key = group_id
+        elif prompt_id is not None and prompt_id != "":
+          key = prompt_id
+        else:
+          key = id(item)
+        bucket = buckets[key]
+        bucket.append(item)
+        if len(bucket) == group_size:
+          del buckets[key]
+          return bucket
+        return None
+
+      group_fn = default_group_fn
+
     self.group_size = group_size
-    self._buckets: Dict[Hashable, List[TrajectoryItem]] = {}
-    self._ready_groups: Deque[List[TrajectoryItem]] = collections.deque()
+    self.group_fn = group_fn
+    self.filter_fn = filter_fn
+
+    self._buckets: Dict[Hashable, List[_T]] = collections.defaultdict(list)
+    self._ready_groups: Deque[List[_T]] = collections.deque()
+    self._filtered_groups: Deque[List[_T]] = collections.deque()
     self._clearing = False
     self._exc: Optional[Exception] = None
     self._lock = asyncio.Lock()
     self._have_ready = asyncio.Event()
-    self._batch_buf: List[TrajectoryItem] = []
 
   async def put_exception(self, exc: Exception):
+    """Sets an exception on the queue, failing future and pending operations."""
     self._exc = exc
     self._have_ready.set()
 
   async def prepare_clear(self):
+    """Flags the queue manager as clearing."""
     self._clearing = True
     self._have_ready.set()
 
   async def clear(self):
+    """Clears all internal buckets and ready groups."""
     async with self._lock:
       self._buckets.clear()
       self._ready_groups.clear()
-      self._batch_buf.clear()
+      self._filtered_groups.clear()
       self._exc = None
       self._clearing = False
-      self._have_ready = asyncio.Event()
+      self._have_ready.clear()
 
-  async def put(self, item: TrajectoryItem):
-    """Adds an item, grouping by `group_id`.
+  async def get_filtered_groups(self) -> List[List[_T]]:
+    """Returns and clears all candidate groups/items that were filtered out."""
+    async with self._lock:
+      filtered = list(self._filtered_groups)
+      self._filtered_groups.clear()
+      return filtered
 
-    Items are grouped in buckets. When a bucket reaches `self.group_size`, it's
-    moved to `_ready_groups`.
+  async def put(self, item: _T):
+    """Adds an item, executing pluggable grouping and filtering.
 
     Args:
-      item: The TrajectoryItem to add.
+      item: The item to add.
 
     Raises:
       Exception: If an exception has been set via `put_exception`.
@@ -86,57 +139,69 @@ class GroupQueueManager:
       return
     if self._exc:
       raise self._exc
-    key = item.group_id
+
     async with self._lock:
       if self._clearing:
         return
       if self._exc:
         raise self._exc
-      bucket = self._buckets.setdefault(key, [])
-      bucket.append(item)
-      if len(bucket) == self.group_size:
-        self._ready_groups.append(bucket.copy())
-        del self._buckets[key]
-        self._have_ready.set()
 
-  async def _get_one_ready_group(self) -> List[TrajectoryItem]:
+      candidate_group = self.group_fn(self._buckets, item)
+
+      if candidate_group is not None:
+        valid_group = candidate_group
+        filtered_out = []
+
+        if self.filter_fn is not None:
+          filter_res = self.filter_fn(candidate_group)
+          if isinstance(filter_res, tuple) and len(filter_res) == 2:
+            valid_group, filtered_out = filter_res
+          elif isinstance(filter_res, list):
+            valid_group = filter_res
+            valid_set = set(id(x) for x in valid_group)
+            filtered_out = [
+                x for x in candidate_group if id(x) not in valid_set
+            ]
+
+        if filtered_out:
+          self._filtered_groups.append(filtered_out)
+
+        if valid_group:
+          self._ready_groups.append(valid_group)
+          self._have_ready.set()
+
+  async def _get_one_ready_group(self) -> List[_T]:
     while True:
       if self._exc:
         raise self._exc
       if self._clearing:
         return []
-      if self._ready_groups:
-        return self._ready_groups.popleft()
+      async with self._lock:
+        if self._ready_groups:
+          return self._ready_groups.popleft()
       await self._have_ready.wait()
       self._have_ready.clear()
 
-  async def get_batch(self, batch_size: int) -> List[TrajectoryItem]:
-    """Retrieves a batch of TrajectoryItems, waiting until enough are ready.
-
-    Items are taken from `_batch_buf` and then from `_ready_groups`. Excess
-    items from groups are buffered in `_batch_buf`.
+  async def get_batch(self, batch_size: int) -> List[_T]:
+    """Retrieves a batch of items, waiting until enough are ready.
 
     Args:
-      batch_size: The desired number of TrajectoryItems.
+      batch_size: The desired number of items.
 
     Returns:
-      A list of `TrajectoryItem` instances, up to `batch_size`.
+      A list of items up to `batch_size`.
     """
     out = []
-    if self._batch_buf:
-      take = min(batch_size, len(self._batch_buf))
-      out.extend(self._batch_buf[:take])
-      self._batch_buf = self._batch_buf[take:]
-      if len(out) == batch_size:
-        return out
     while len(out) < batch_size:
       group = await self._get_one_ready_group()
       if not group:
         break
-      room = batch_size - len(out)
-      if len(group) <= room:
-        out.extend(group)
-      else:
-        out.extend(group[:room])
-        self._batch_buf.extend(group[room:])
+      async with self._lock:
+        room = batch_size - len(out)
+        if len(group) <= room:
+          out.extend(group)
+        else:
+          out.extend(group[:room])
+          self._ready_groups.appendleft(group[room:])
+          self._have_ready.set()
     return out

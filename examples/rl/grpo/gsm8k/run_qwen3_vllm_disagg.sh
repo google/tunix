@@ -86,7 +86,7 @@ python3 -m tunix.cli.grpo_main \
   rollout_config.top_p=1.0 \
   rollout_config.top_k=50 \
   rollout_engine="vllm" \
-  vllm_config.async_scheduling=false \
+  vllm_config.async_scheduling=true \
   offload_to_cpu=false \
   grpo_config.num_generations=4 \
   grpo_config.num_iterations=1 \

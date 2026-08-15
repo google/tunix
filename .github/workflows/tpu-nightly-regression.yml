@@ -41,7 +41,7 @@ env:
 
 jobs:
   run_prod:
-    runs-on: [linux-x86-ct5lp-224-8tpu]
+    runs-on: [linux-x86-ct6e-180-8tpu]
     environment: testing
     container:
       image: vllm/vllm-tpu:nightly-20260406-581c4d4-f6983f0
@@ -53,7 +53,7 @@ jobs:
 
     # Cache Hugging Face hub
     - name: Cache HF hub
-      uses: actions/cache@v4
+      uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
       with:
         path: ~/.cache/huggingface
         key: hf-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'requirements*.txt', 'constraints*.txt') }}
@@ -61,7 +61,7 @@ jobs:
           hf-${{ runner.os }}-
 
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       with:
         fetch-depth: 0
 
@@ -118,6 +118,7 @@ jobs:
 
         echo "🔍 Finding scripts in $SCRIPT_DIR"
         FINAL_EXIT_CODE=0
+        FAILED_SCRIPTS=()
         for script in "$SCRIPT_DIR"/*.sh; do
           if [ -f "$script" ]; then
             echo "::group::📦 Executing: $script"
@@ -135,13 +136,17 @@ jobs:
               echo "❌ Failed to complete: $script (Exit Code: $exit_code)" >&2
               echo "| $script | ❌ Fail |" >> $GITHUB_STEP_SUMMARY
               FINAL_EXIT_CODE=1
+              FAILED_SCRIPTS+=("$script")
             fi
             echo "::endgroup::"
           fi
         done
 
         if [ "$FINAL_EXIT_CODE" -ne 0 ]; then
-          echo "🚫 One or more SFT scripts failed." >&2
+          echo "🚫 One or more SFT scripts failed:" >&2
+          for failed_script in "${FAILED_SCRIPTS[@]}"; do
+            echo "  - $failed_script" >&2
+          done
           exit 1
         fi
         echo "🎉 All SFT scripts completed execution."
@@ -156,52 +161,64 @@ jobs:
         KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
         KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
       run: |
-        SCRIPT_DIR="./examples/rl/grpo/gsm8k"
+        SCRIPT_DIRS=(
+          "./examples/rl/grpo/gsm8k"
+          "./examples/rl/ppo/gsm8k"
+        )
         EXCLUDE_DIR="verl_compatible"
         MAX_STEPS=5
         EVAL_EVERY_N_STEPS=1
 
-        if [ ! -d "$SCRIPT_DIR" ]; then
-          echo "Directory $SCRIPT_DIR does not exist" >&2
-          exit 1
-        fi
+        for dir in "${SCRIPT_DIRS[@]}"; do
+          if [ ! -d "$dir" ]; then
+            echo "Directory $dir does not exist" >&2
+            exit 1
+          fi
+        done
 
         echo "### RL Scripts Summary" >> $GITHUB_STEP_SUMMARY
         echo "| Script | Status |" >> $GITHUB_STEP_SUMMARY
         echo "|---|---|" >> $GITHUB_STEP_SUMMARY
 
-        echo "🔍 Finding scripts in $SCRIPT_DIR, excluding $EXCLUDE_DIR"
+        echo "🔍 Finding scripts in ${SCRIPT_DIRS[*]}, excluding $EXCLUDE_DIR"
         FINAL_EXIT_CODE=0
+        FAILED_SCRIPTS=()
 
-        while IFS= read -r script; do
-          if [ -f "$script" ]; then
-            # TODO(b/510383570)
-            if [[ "$script" == *"run_qwen3_8b"* ]]; then
-              echo "⏭️ Skipping: $script"
-              echo "| $script | ⏭️ Skipped |" >> $GITHUB_STEP_SUMMARY
-              continue
-            fi
+        for SCRIPT_DIR in "${SCRIPT_DIRS[@]}"; do
+          while IFS= read -r script; do
+            if [ -f "$script" ]; then
+              # TODO(b/510383570)
+              if [[ "$script" == *"run_qwen3_8b"* ]]; then
+                echo "⏭️ Skipping: $script"
+                echo "| $script | ⏭️ Skipped |" >> $GITHUB_STEP_SUMMARY
+                continue
+              fi
 
-            echo "::group::📦 Executing: $script"
-            echo "MAX_STEPS=$MAX_STEPS, EVAL_EVERY_N_STEPS=$EVAL_EVERY_N_STEPS"
-            chmod +x "$script"
-            if bash "$script" \
-                rl_training_config.max_steps="$MAX_STEPS" \
-                rl_training_config.eval_every_n_steps="$EVAL_EVERY_N_STEPS"; then
-              echo "✅ Successfully completed: $script"
-              echo "| $script | ✅ Pass |" >> $GITHUB_STEP_SUMMARY
-            else
-              exit_code=$?
-              echo "❌ Failed to complete: $script (Exit Code: $exit_code)" >&2
-              echo "| $script | ❌ Fail |" >> $GITHUB_STEP_SUMMARY
-              FINAL_EXIT_CODE=1
+              echo "::group::📦 Executing: $script"
+              echo "MAX_STEPS=$MAX_STEPS, EVAL_EVERY_N_STEPS=$EVAL_EVERY_N_STEPS"
+              chmod +x "$script"
+              if bash "$script" \
+                  rl_training_config.max_steps="$MAX_STEPS" \
+                  rl_training_config.eval_every_n_steps="$EVAL_EVERY_N_STEPS"; then
+                echo "✅ Successfully completed: $script"
+                echo "| $script | ✅ Pass |" >> $GITHUB_STEP_SUMMARY
+              else
+                exit_code=$?
+                echo "❌ Failed to complete: $script (Exit Code: $exit_code)" >&2
+                echo "| $script | ❌ Fail |" >> $GITHUB_STEP_SUMMARY
+                FINAL_EXIT_CODE=1
+                FAILED_SCRIPTS+=("$script")
+              fi
+              echo "::endgroup::"
             fi
-            echo "::endgroup::"
-          fi
-        done < <(find "$SCRIPT_DIR" -name "*.sh" -type f | grep -v "$SCRIPT_DIR/$EXCLUDE_DIR/" | grep -E -v "7b|8b|12b")
+          done < <(find "$SCRIPT_DIR" -name "*.sh" -type f | grep -v "$SCRIPT_DIR/$EXCLUDE_DIR/" | grep -E -v "7b|8b|12b")
+        done
 
         if [ "$FINAL_EXIT_CODE" -ne 0 ]; then
-          echo "🚫 One or more RL scripts failed." >&2
+          echo "🚫 One or more RL scripts failed:" >&2
+          for failed_script in "${FAILED_SCRIPTS[@]}"; do
+            echo "  - $failed_script" >&2
+          done
           exit 1
         fi
         echo "🎉 All RL scripts completed execution."
@@ -219,6 +236,7 @@ jobs:
         echo "|---|---|" >> $GITHUB_STEP_SUMMARY
 
         FAILED=0
+        FAILED_SCRIPTS=()
 
         function run_and_log() {
           local name="$1"
@@ -231,6 +249,7 @@ jobs:
             echo "❌ Failed to complete: $name" >&2
             echo "| $name | ❌ Fail |" >> $GITHUB_STEP_SUMMARY
             FAILED=1
+            FAILED_SCRIPTS+=("$name")
           fi
           echo "::endgroup::"
         }
@@ -272,7 +291,10 @@ jobs:
         run_and_log "sglang_jax disaggregated-3-way" bash -c "unset JAX_PLATFORMS && python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 --rollout-engine=sglang_jax --cluster-setup=disaggregated-3-way"
 
         if [ "$FAILED" -ne 0 ]; then
-          echo "🚫 One or more regression scripts failed." >&2
+          echo "🚫 One or more regression scripts failed:" >&2
+          for failed_script in "${FAILED_SCRIPTS[@]}"; do
+            echo "  - $failed_script" >&2
+          done
           exit 1
         fi
         echo "🎉 All regression scripts completed execution."
@@ -280,7 +302,7 @@ jobs:
 
 
   run_latest:
-    runs-on: [linux-x86-ct5lp-224-8tpu]
+    runs-on: [linux-x86-ct6e-180-8tpu]
     environment: testing
     container:
       image: vllm/vllm-tpu:nightly
@@ -292,7 +314,7 @@ jobs:
 
     # Cache Hugging Face hub
     - name: Cache HF hub
-      uses: actions/cache@v4
+      uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
       with:
         path: ~/.cache/huggingface
         key: hf-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'requirements*.txt', 'constraints*.txt') }}
@@ -300,7 +322,7 @@ jobs:
           hf-${{ runner.os }}-
 
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       with:
         fetch-depth: 0
 
@@ -346,10 +368,10 @@ jobs:
         print(f'TPU available: {has_tpu}')
 
         if not has_tpu:
-            print('ERROR: No TPU devices found!')
-            exit(1)
+          print('ERROR: No TPU devices found!')
+          exit(1)
         else:
-            print(f'SUCCESS: Found {len(devices)} TPU device(s)')
+          print(f'SUCCESS: Found {len(devices)} TPU device(s)')
         "
 
     - name: Run latest tests
@@ -359,28 +381,50 @@ jobs:
       run: |
         mkdir -p /tmp/grpo_test/rl/grpo/data
         FAILED=0
+        FAILED_SCRIPTS=()
 
         echo "📦 Executing Non-Agentic CLI (vLLM Batch Mode, Colocated) ..."
-        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=2 --rollout-engine=vllm || FAILED=1
+        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=2 --rollout-engine=vllm || { FAILED=1; FAILED_SCRIPTS+=("Non-Agentic CLI (vLLM Batch Mode, Colocated)"); }
 
         pkill -9 -f "vllm" || true
         sleep 5
 
         echo "📦 Executing Non-Agentic CLI (vLLM Server Mode, Disaggregated 2-way) ..."
-        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=2 --rollout-engine=vllm --rollout-server-mode=True --cluster-setup=disaggregated-2-way || FAILED=1
+        python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=2 --rollout-engine=vllm --rollout-server-mode=True --cluster-setup=disaggregated-2-way || { FAILED=1; FAILED_SCRIPTS+=("Non-Agentic CLI (vLLM Server Mode, Disaggregated 2-way)"); }
 
         pkill -9 -f "vllm" || true
         sleep 5
 
         echo "📦 Executing Agentic CLI (Qwen2.5 0.5B, vLLM Server Mode, Disaggregated 4:4) ..."
         model_name="qwen2.5-0.5b" model_id="Qwen/Qwen2.5-0.5B-Instruct" checkpoint_dir="/tmp/qwen3_ckpts_server" num_batches=2 num_train_epochs=1 total_tpus=8 train_mesh="(4,1)" rollout_mesh="(4,1)" \
-          bash examples/rl/grpo/gsm8k/run_qwen3_8b_disagg.sh || FAILED=1
-
-
+          bash examples/rl/grpo/gsm8k/run_qwen3_8b_disagg.sh || { FAILED=1; FAILED_SCRIPTS+=("Agentic CLI (Qwen2.5 0.5B, vLLM Server Mode, Disaggregated 4:4)"); }
 
         if [ "$FAILED" -ne 0 ]; then
-          echo "❌ One or more run_latest tests failed."
+          echo "❌ One or more run_latest tests failed:" >&2
+          for failed_script in "${FAILED_SCRIPTS[@]}"; do
+            echo "  - $failed_script" >&2
+          done
           exit 1
         else
           echo "✅ All run_latest tests completed successfully."
         fi
+
+    - name: Run Agentic CLI MaxText Test (Qwen2.5 0.5B, Disaggregated)
+      id: maxtext_test
+      if: success() || failure()
+      shell: bash
+      env:
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      run: |
+        # Install MaxText if not present
+        python3 -c "import maxtext" 2>/dev/null || python3 -m pip install git+https://github.com/AI-Hypercomputer/maxtext.git --no-deps
+
+        pkill -9 -f "vllm" || true
+        sleep 5
+
+        echo "📦 Executing Agentic CLI (Qwen2.5 0.5B, MaxText, vLLM Server Mode, Disaggregated 4:4) ..."
+        model_name="qwen2.5-0.5b" model_id="Qwen/Qwen2.5-0.5B-Instruct" tokenizer_path="Qwen/Qwen2.5-0.5B-Instruct" checkpoint_dir="/tmp/qwen3_maxtext_ckpts_server" num_batches=2 num_train_epochs=1 total_tpus=8 train_mesh="(4,1)" rollout_mesh="(4,1)" \
+          bash examples/rl/grpo/gsm8k/run_qwen3_8b_disagg_maxtext.sh
+
+
+
