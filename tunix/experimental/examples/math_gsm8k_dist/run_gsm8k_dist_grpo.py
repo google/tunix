@@ -480,7 +480,9 @@ def main() -> None:
     )
 
   logging.basicConfig(
-      level=logging.INFO, format="%(asctime)s - [OrchestratorV2] %(message)s"
+      level=logging.INFO,
+      format="%(asctime)s - [OrchestratorV2] %(message)s",
+      force=True,
   )
   logging.info("Control-plane JAX backend: %s", jax.default_backend())
   logging.info("Weight sync enabled: %s", ENABLE_WEIGHT_SYNC)
@@ -540,9 +542,22 @@ def main() -> None:
           pad_id=pad_id,
       ),
       sync_weights=ENABLE_WEIGHT_SYNC,
-      on_step_begin=lambda step: logging.info("GRPO step %d starting.", step),
+      on_step_begin=lambda step: logging.info(
+          "GRPO step %d/%d starting.",
+          step + 1,
+          args.max_steps,
+      ),
       on_step_end=lambda step, result: logging.info(
-          "GRPO advanced to policy_version=%d train_result=%s.", step, result
+          "GRPO step %d/%d finished: policy_version=%d rollouts=%d "
+          "microbatches=%d reward_mean=%.3f reward_std=%.3f train_result=%s.",
+          result.step + 1,
+          args.max_steps,
+          result.policy_version,
+          result.num_rollouts,
+          result.num_microbatches,
+          result.reward_mean,
+          result.reward_std,
+          result.train_result,
       ),
   )
 
