@@ -28,16 +28,14 @@ This run is a convergence/throughput experiment. It is not evidence that the
 remaining FrozenLake decode/prefill carrier is bitwise closed. The classifier
 must report `convergence-only` when warning-only alignment is enabled.
 
-Attempt `p45r3` is VOID as a capacity result: it inherited the TP4-only
-`qwen8b` overlay and failed on `CANON_QWEN3_TP_SIZE='8'` during model import,
-before rollout, evaluation, optimizer construction, or PATHTRACE. The new
-exact-image gate closes that wiring gap by installing and importing
-`qwen8b_tp8`, but no successful 64-chip P45 target result exists yet. Local
-gates do not prove HBM capacity or target throughput.
-In particular, the prior four-chip P41 FrozenLake resident test had only about
-4.52 GiB of headroom. TP8 should reduce per-chip model, gradient, and optimizer
-state relative to TP4, but that is a sizing expectation, not target evidence.
-The first committed DP8xTP8 update remains the capacity gate.
+Attempt `p45r5` from source `42139ffa` on 64 TPU (`DP8xTP8`, resident optimizer)
+successfully passed model loading, compilation, rollout, and sustained training for
+~60 hours (2.5 days), reaching `train_steps=47` and `[CANON_ALIGN] step=1535 verdict=PASS`.
+The job terminated at `Sat, 15 Aug 2026 06:03:58 UTC` due to Linux kernel host RAM
+exhaustion (`Exit Code: 137 (OOMKilled)` on container `jax-tpu`), having reached the
+Kubernetes pod memory limit of 200GiB from multi-day trajectory/logging/cache accumulation.
+TPU HBM remained fully healthy throughout. For subsequent full runs, increase the head pod
+Host memory limit to 350GiB+ and incorporate periodic host GC cycles.
 
 ## Operator: fetch and verify one immutable source
 

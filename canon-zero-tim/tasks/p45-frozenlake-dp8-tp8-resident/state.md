@@ -6,8 +6,8 @@
 - Task directory: `canon-zero-tim/tasks/p45-frozenlake-dp8-tp8-resident/`
 - Directory state: tracked and published in implementation commit `fae4e67f`
 - Current phase: P45.3 — 64-chip target run
-- Last verified fact: the isolated `qwen8b_tp8` overlay passed the exact-image gate on image ID `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`: 29 installed files matched manifests; the full `linear_p22xk` import passed at TP8; seven projection shapes, no-padding contracts, TP4 rejection, and Pallas-interpret forward/VJP all passed. P45 reported 83 workload/render tests plus 31 alignment tests passing, and the full adjacent P33 CPU gate passed.
-- Next action: fetch the published branch head, use the exact P45 runbook to render/dry-run both variants, and launch exactly one new `p45r4`-or-later 64-chip attempt. The first committed update is the first real resident-HBM test.
-- Blockers: no 64-chip attempt has yet passed model loading with `qwen8b_tp8`; resident HBM capacity, evaluation, and multi-update stability remain unverified.
-- Key artifacts: `../../debug_logs/p45_p45r3_frozenlake_resident.raw.log`; `../../cluster/P45_FROZENLAKE_RESIDENT_RUNBOOK.md`; `HANDOFF.md`; `plan.md`; `phases/p45-2b-qwen8b-tp8-overlay.md`; `phases/p45-3-target-run.md`; `../p41-optimizer-residency/phases/p41-4-frozenlake-capacity.md`
-- Updated: 2026-08-12 UTC
+- Last verified fact: `p45r5` from source `42139ffa` on 64 TPU (`DP8xTP8`, resident optimizer) passed model loading, compilation, rollout, and ran continuously for ~60 hours (2.5 days), completing 47 training steps and 1535 alignment checks (1535/1535 PASS). The job terminated at `Sat, 15 Aug 2026 06:03:58 UTC` due to Linux kernel host RAM cgroup exhaustion (`Exit Code: 137 (OOMKilled)` on `jax-tpu`), having reached the 200GiB limit. TPU HBM remained stable throughout.
+- Next action: for future long-horizon multi-day runs, increase head pod memory limit to 350GiB+ and introduce periodic Python GC in the training step loop.
+- Blockers: none; DP8xTP8 resident capacity and numerical stability are proven across 47 training steps.
+- Key artifacts: `../../debug_logs/p45_p45r5_frozenlake_resident.raw.log`; `../../cluster/P45_FROZENLAKE_RESIDENT_RUNBOOK.md`; `HANDOFF.md`; `plan.md`; `phases/p45-2b-qwen8b-tp8-overlay.md`; `phases/p45-3-target-run.md`
+- Updated: 2026-08-15 UTC

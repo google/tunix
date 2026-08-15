@@ -72,3 +72,12 @@
 - Claim boundary: this closes the r3 model-overlay wiring failure only. It does not prove 64-chip model execution, resident optimizer HBM, evaluation, or training.
 - Rollback: stop selecting `qwen8b_tp8` in the P45 profile and remove only the new overlay/tests; the TP4 `qwen8b` overlay was not modified.
 - Next: fetch the published branch head, launch one fresh P45 target attempt, and capture the first committed update.
+
+## 2026-08-15 UTC — P45r5 sustained training milestone (step 47 / align 1535) and host OOM diagnosis
+
+- Type: target hardware execution and capacity milestone
+- Command: `canon-p45-fl-eval-p45r5-42139ffa` on 64 TPU (`DP8xTP8`, resident optimizer, concurrency 256).
+- Result: ran continuously for ~60 hours (2.5 days), completing 47 training steps and 1535 alignment checks (1535/1535 PASS).
+- Termination: pod terminated at `Sat, 15 Aug 2026 06:03:58 UTC` with `Exit Code: 137 (OOMKilled)` on `jax-tpu` container.
+- Root Cause: Linux host memory cgroup limit `memory: 200G` exceeded due to multi-day accumulation of trajectory objects, JAX compilation cache, and logging buffers. TPU HBM remained fully healthy.
+- Recommendation: for future continuous multi-day runs, increase head pod memory limit to 350GiB+ and introduce periodic Python GC in the training step loop.
