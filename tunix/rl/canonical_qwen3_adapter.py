@@ -1484,6 +1484,19 @@ class _P28SegmentedEngineForward:
     self._ensure_layer_scan(engine_leaves)
     return self._layer_acc_fn(layer_grads, chunk_grads)
 
+  def zero_gradient_pack(self, final_caches):
+    """Returns the cached zero accumulators (values are literal zeros)."""
+    if getattr(self, "_p52_zero_pack", None) is None:
+      tree_zeros = lambda tree: jax.tree.map(jnp.zeros_like, tree)
+      self._p52_zero_pack = (
+          tuple(tree_zeros(leaves) for leaves in self._local_layer_leaves),
+          tree_zeros(self._embed_local_leaves),
+          tree_zeros(self._norm_local_leaves),
+          tree_zeros(self._head_local_leaves),
+          tuple(tree_zeros(cache) for cache in final_caches),
+      )
+    return self._p52_zero_pack
+
   def run_block_pullback(
       self,
       layer_index,
@@ -3114,6 +3127,14 @@ class Qwen3EngineForwardAdapter:
   def _p28_chunk_inputs(self, spec, chunk_index):
     """Constructs one real engine metadata/input tuple at fixed M."""
     chunk_index = int(chunk_index)
+    if os.environ.get("CANON_P28_BATCHED_REVERSE", "") in ("1", "verify"):
+      cache = spec.get("_p52_chunk_inputs")
+      if cache is None:
+        cache = {}
+        spec["_p52_chunk_inputs"] = cache
+      cached = cache.get(chunk_index)
+      if cached is not None:
+        return cached
     chunk_start = chunk_index * self._bucket
     q_len = min(self._bucket, spec["n_real"] - chunk_start)
     if q_len <= 0:
@@ -3138,7 +3159,7 @@ class Qwen3EngineForwardAdapter:
         ),
     )
     metadata.padded_num_reqs = self._max_num_reqs
-    return (
+    result = (
         self._engine_array(
             spec["packed_ids"][chunk_start : chunk_start + self._bucket]
         ),
@@ -3147,6 +3168,9 @@ class Qwen3EngineForwardAdapter:
         ),
         metadata,
     )
+    if os.environ.get("CANON_P28_BATCHED_REVERSE", "") in ("1", "verify"):
+      spec["_p52_chunk_inputs"][chunk_index] = result
+    return result
 
   @staticmethod
   def _p50_scan_verify(loop_hidden, scan_hidden, loop_caches, scan_caches,
@@ -3320,16 +3344,38 @@ class Qwen3EngineForwardAdapter:
     tree_add = lambda left, right: jax.tree.map(
         lambda a, b: a + b, left, right
     )
-    layer_grads = [
-        tree_zeros(leaves) for leaves in segmented._local_layer_leaves  # pylint: disable=protected-access
-    ]
-    embed_grad = tree_zeros(segmented._embed_local_leaves)  # pylint: disable=protected-access
-    norm_grad = tree_zeros(segmented._norm_local_leaves)  # pylint: disable=protected-access
-    head_grad = tree_zeros(segmented._head_local_leaves)  # pylint: disable=protected-access
-    dcache_carry = tuple(
-        tree_zeros(cache) for cache in replay["final_caches"]
-    )
+    reverse_mode = os.environ.get("CANON_P28_BATCHED_REVERSE", "")
+    if reverse_mode not in ("", "0", "1", "verify"):
+      raise FunctionalMappingError(
+          "CANON_P28_BATCHED_REVERSE must be unset/0/1/verify, "
+          f"got {reverse_mode!r}"
+      )
+    batched_reverse = reverse_mode == "1"
+    reverse_verify = reverse_mode == "verify"
+    if batched_reverse:
+      zero_layers, zero_embed, zero_norm, zero_head, zero_caches = (
+          segmented.zero_gradient_pack(replay["final_caches"])
+      )
+      layer_grads = list(zero_layers)
+      embed_grad = zero_embed
+      norm_grad = zero_norm
+      head_grad = zero_head
+      dcache_carry = zero_caches
+    else:
+      layer_grads = [
+          tree_zeros(leaves) for leaves in segmented._local_layer_leaves  # pylint: disable=protected-access
+      ]
+      embed_grad = tree_zeros(segmented._embed_local_leaves)  # pylint: disable=protected-access
+      norm_grad = tree_zeros(segmented._norm_local_leaves)  # pylint: disable=protected-access
+      head_grad = tree_zeros(segmented._head_local_leaves)  # pylint: disable=protected-access
+      dcache_carry = tuple(
+          tree_zeros(cache) for cache in replay["final_caches"]
+      )
     layer_scan_mode = segmented.layer_scan_mode()
+    if (batched_reverse or reverse_verify) and layer_scan_mode:
+      raise FunctionalMappingError(
+          "CANON_P28_BATCHED_REVERSE requires CANON_P28_LAYER_SCAN unset"
+      )
     layer_count = len(segmented._local_layer_leaves)  # pylint: disable=protected-access
     counts = dict(replay["counts"])
     counts.update({
@@ -3424,12 +3470,18 @@ class Qwen3EngineForwardAdapter:
             normalized, dlogits, state_leaves=engine_leaves
         )
         counts["head_pullback"] += 1
-        head_grad = tree_add(head_grad, local_head_grad)
+        if batched_reverse or reverse_verify:
+          acc_snapshot = (
+              tuple(layer_grads), embed_grad, norm_grad, head_grad
+          )
+        if not batched_reverse:
+          head_grad = tree_add(head_grad, local_head_grad)
         local_norm_grad, dhidden = segmented.run_norm_pullback(
             pre_norm, dnormalized, state_leaves=engine_leaves
         )
         counts["norm_pullback"] += 1
-        norm_grad = tree_add(norm_grad, local_norm_grad)
+        if not batched_reverse:
+          norm_grad = tree_add(norm_grad, local_norm_grad)
 
         if layer_scan_mode == "1":
           chunk_grads = []
@@ -3465,6 +3517,9 @@ class Qwen3EngineForwardAdapter:
             )
             verify_dhidden_in = dhidden
             verify_local_grads = []
+          chunk_layer_grads = (
+              [] if batched_reverse or reverse_verify else None
+          )
           previous_cache_carry = [None] * len(layer_tape)
           for layer_index in reversed(range(len(layer_tape))):
             cache_in, hidden_in = layer_tape[layer_index]
@@ -3477,9 +3532,12 @@ class Qwen3EngineForwardAdapter:
                 dhidden,
                 state_leaves=engine_leaves,
             )
-            layer_grads[layer_index] = tree_add(
-                layer_grads[layer_index], local_grad
-            )
+            if chunk_layer_grads is not None:
+              chunk_layer_grads.append(local_grad)
+            if not batched_reverse:
+              layer_grads[layer_index] = tree_add(
+                  layer_grads[layer_index], local_grad
+              )
             if verify_local_grads is not None:
               verify_local_grads.append(local_grad)
             previous_cache_carry[layer_index] = dcache
@@ -3529,8 +3587,31 @@ class Qwen3EngineForwardAdapter:
         local_embed_grad = segmented.run_embed_pullback(
             input_ids, dhidden, state_leaves=engine_leaves
         )
-        embed_grad = tree_add(embed_grad, local_embed_grad)
+        if not batched_reverse:
+          embed_grad = tree_add(embed_grad, local_embed_grad)
         counts["embed_pullback"] += 1
+        if batched_reverse or reverse_verify:
+          delta_pack = (
+              tuple(reversed(chunk_layer_grads)),
+              local_embed_grad,
+              local_norm_grad,
+              local_head_grad,
+          )
+          batched_acc = self._batched_report_add(acc_snapshot, delta_pack)
+          if batched_reverse:
+            layer_tuple, embed_grad, norm_grad, head_grad = batched_acc
+            layer_grads = list(layer_tuple)
+          else:
+            fault = self._p50_rev_verify(
+                "reverse accumulate",
+                chunk_index,
+                (tuple(layer_grads), embed_grad, norm_grad, head_grad),
+                batched_acc,
+            )
+            if fault is not None:
+              raise FunctionalMappingError(
+                  f"P52 batched-reverse verify mismatch: {fault}"
+              )
 
     return {
         "engine_gradients": segmented.assemble_full_state_gradient(

@@ -119,6 +119,7 @@ sudo docker run --rm --privileged --net=host --name "$container" \
   -e CANON_P30_SHARDING_PROFILE=1 -e CANON_P30_RESHARD_ACCUMULATOR=1 \
   -e CANON_BATCHED_EVIDENCE=1 \
   -e CANON_P28_BATCHED_REPORT=1 \
+  -e CANON_P28_BATCHED_REVERSE="${P51_BATCHED_REVERSE:-}" \
   -e CANON_XPROF_DIR="$xprof_dir" \
   -e CANON_XPROF_SKIP_STEPS="$xprof_skip" \
   -e CANON_XPROF_STEPS="$xprof_steps" \
