@@ -45,7 +45,9 @@ class QueueManagerTest(absltest.TestCase):
     """Tests default trajectory grouping by group_id/prompt_id up to group_size."""
 
     async def _run_test():
-      manager = trajectory_queue_manager.TrajectoryQueueManager(group_size=2)
+      manager = trajectory_queue_manager.TrajectoryQueueManager(
+          group_size=2
+      )
       item1 = _create_item("g1", pair_index=0)
       item2 = _create_item("g1", pair_index=1)
 
@@ -154,7 +156,9 @@ class QueueManagerTest(absltest.TestCase):
     """Tests batching where a group is split across get_batch calls."""
 
     async def _run_test():
-      manager = trajectory_queue_manager.TrajectoryQueueManager(group_size=3)
+      manager = trajectory_queue_manager.TrajectoryQueueManager(
+          group_size=3
+      )
       items = [_create_item("g1", pair_index=i) for i in range(3)]
       for item in items:
         await manager.put(item)
@@ -175,7 +179,9 @@ class QueueManagerTest(absltest.TestCase):
     """Tests exception propagation."""
 
     async def _run_test():
-      manager = trajectory_queue_manager.TrajectoryQueueManager(group_size=2)
+      manager = trajectory_queue_manager.TrajectoryQueueManager(
+          group_size=2
+      )
       exc = ValueError("Test Exception")
       await manager.put_exception(exc)
 
