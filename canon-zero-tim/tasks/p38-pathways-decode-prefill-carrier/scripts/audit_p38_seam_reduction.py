@@ -11,6 +11,7 @@ import sys
 from typing import Any
 
 import classify_p38_seam as seam
+import select_p38_live_snapshot as snapshot_selector
 
 
 class BundleAuditError(RuntimeError):
@@ -70,18 +71,88 @@ def audit(root: Path) -> dict[str, Any]:
   root = root.resolve()
   _require(root.is_dir(), f"bundle directory is absent: {root}")
   file_count = _verify_sha_inventory(root)
-  manifest = _load_json(root / "REDUCTION_MANIFEST.json")
   verdict = _load_json(root / "verdict.json")
-  ambiguity = _load_json(root / "AMBIGUITY_AUDIT.json")
   snapshot = _load_json(root / "SNAPSHOT_SELECTION.json")
+  _require(snapshot.get("schema") == "p38-live-snapshot-selection-v1",
+           "bundle snapshot-selection schema drifted")
+
+  if snapshot.get("selection_complete") is False:
+    expected_files = {
+        "OBJECT_LISTING.txt",
+        "PACKAGING.txt",
+        "SHA256SUMS",
+        "SNAPSHOT_SELECTION.json",
+        "selector.stderr",
+        "selector.stdout",
+        "verdict.json",
+    }
+    actual_files = {
+        path.relative_to(root).as_posix()
+        for path in root.rglob("*")
+        if path.is_file()
+    }
+    _require(actual_files == expected_files,
+             "selection-only bundle contains unexpected or missing files")
+    _require(
+        verdict.get("schema") == "p38-snapshot-inventory-verdict-v1",
+        "selection-only bundle verdict schema drifted",
+    )
+    _require(
+        verdict.get("verdict") == "INCONCLUSIVE_NO_ELIGIBLE_SNAPSHOT",
+        "selection-only bundle verdict drifted",
+    )
+    _require(verdict.get("selector_rc") == 4,
+             "selection-only bundle selector rc drifted")
+    _require(verdict.get("selection_complete") is False,
+             "selection-only verdict claims an admitted source")
+    _require(not (root / "REDUCTION_MANIFEST.json").exists(),
+             "selection-only bundle must not contain a reduction manifest")
+    _require(not (root / "AMBIGUITY_AUDIT.json").exists(),
+             "selection-only bundle must not contain an ambiguity audit")
+    _require(not (root / "classification.json").exists(),
+             "selection-only bundle must not contain a classification")
+    listing = root / "OBJECT_LISTING.txt"
+    _require(listing.is_file(), "selection-only bundle object listing is absent")
+    reproduced = snapshot_selector.select_snapshot(
+        listing,
+        str(snapshot.get("live_root")),
+        int(snapshot.get("minimum_capsule_rounds", -1)),
+    )
+    _require(reproduced == snapshot,
+             "snapshot selection differs when reproduced from bundled listing")
+    _require(snapshot.get("qualified_candidate_count") == 0,
+             "selection-only bundle contains a qualifying source")
+    for key in (
+        "candidate_count", "qualified_candidate_count", "minimum_capsule_rounds"
+    ):
+      _require(verdict.get(key) == snapshot.get(key),
+               f"selection-only verdict {key} drifted")
+    return {
+        "schema": "p38-seam-reduction-bundle-audit-v1",
+        "bundle_integrity": "PASS",
+        "scientific_verdict": "INCONCLUSIVE_NO_ELIGIBLE_SNAPSHOT",
+        "source_snapshot": None,
+        "capsule_rounds": [],
+        "red_points": 0,
+        "matched_arm_keys": 0,
+        "required_arm_keys": 0,
+        "equivalent_alias_keys": 0,
+        "payload_conflict_keys": 0,
+        "unmatched_keys": 0,
+        "classification": None,
+        "candidate_snapshots": snapshot.get("candidate_count"),
+        "qualified_snapshots": snapshot.get("qualified_candidate_count"),
+        "sha_verified_files": file_count,
+    }
+
+  manifest = _load_json(root / "REDUCTION_MANIFEST.json")
+  ambiguity = _load_json(root / "AMBIGUITY_AUDIT.json")
   _require(manifest.get("schema") == "p38-seam-reduction-v2",
            "bundle is not a v2 seam reduction")
   _require(verdict.get("schema") == "p38-seam-reduction-verdict-v2",
            "bundle verdict schema drifted")
   _require(ambiguity.get("schema") == "p38-seam-ambiguity-audit-v1",
            "bundle ambiguity-audit schema drifted")
-  _require(snapshot.get("schema") == "p38-live-snapshot-selection-v1",
-           "bundle snapshot-selection schema drifted")
   _require(snapshot.get("selection_complete") is True,
            "bundle source snapshot was not admitted")
   _require(

@@ -5,7 +5,7 @@ parallel Qwen3-32B DeepSWE workstream, read
 `../p39-deepswe-production/HANDOFF.md`. P38 evidence cannot promote P39, and
 P39 evidence cannot promote P38.
 
-## CURRENT: run the one-pass P38s18l v2 reduction; no TPU launch
+## CURRENT: seal the P38s18l no-source inventory; no TPU launch
 
 P38s18l/source `9a83457417fc` ran at DP16xTP4/concurrency 256 with zero
 backward and optimizer commits, but the committed package is not a complete
@@ -39,9 +39,16 @@ classification:
 - no official classification was produced. The phrase “confined to the tail
   normalizer” is withdrawn; the tail has not been subdivided yet.
 
+The first v2 selector execution inventoried 22 live snapshots and returned
+rc=4: `000020` contains only round 0, while `000021` contains capsule names for
+rounds 0 and 1 but lacks `LIVE.json`, `SHA256SUMS`, and paired seam NPZs. No
+snapshot satisfies the two-round source contract. Commit `e0c1aef7` recorded
+that result only as prose; it did not return `SNAPSHOT_SELECTION.json` or the
+raw object listing, so the inventory is not yet mechanical evidence.
+
 ### Next operator step: no TPU launch
 
-Run the hardened GCP-side byte-preserving reducer described in:
+Run the amended GCP-side wrapper described in:
 
 `P38S18L_GCP_REDUCTION_RUNBOOK.md`
 
@@ -49,21 +56,31 @@ The v2 wrapper inventories every snapshot and automatically requires at least
 immutable rounds 0 and 1 before downloading. It records every candidate row,
 admits duplicate records only when their position/token/checkpoint metadata and
 all layer/final fingerprints are identical, preserves conflicts fail-closed,
-and uploads a compact self-contained package. A separate bundle auditor
-verifies every SHA and re-runs the official classifier from only those returned
-files. It never modifies source objects or fabricates round 2 or terminal
-markers.
+and uploads a compact self-contained package. When no snapshot qualifies, it
+uploads a selection-only package with the raw object listing, selector
+JSON/stdout/stderr, verdict, and SHA inventory before exiting 4. A separate
+bundle auditor verifies every SHA and either re-runs the selector or the
+official classifier from only those returned files. It never modifies source
+objects or fabricates round 2 or terminal markers.
 
 The remote agent must return and prepare an append-only evidence CL containing
-the full compact bundle (`records/`, capsules, snapshot selection, ambiguity
-audit, join map, verdict, classifier output when present, and SHA manifest),
-not just audit metadata. Only after the bundle auditor reports all 47 red
-points / 94 arm keys joined may the result select the next diagnostic:
+the entire uploaded bundle, not just audit metadata. For the expected no-source
+outcome, this means `OBJECT_LISTING.txt`, selector JSON/stdout/stderr, verdict,
+packaging note, and SHA manifest, with standalone auditor PASS. If a source is
+unexpectedly admitted, only a bundle with all 47 red points / 94 arm keys joined
+may select a next diagnostic:
 
 - observed hidden/final fingerprints exact -> build one bounded tail observer;
 - any hidden checkpoint red -> withdraw the tail claim and localize the first
   measured hidden seam;
 - missing/ambiguous join -> keep P38s18l partial and do not promote it.
+
+The no-source outcome retires P38s18l and **does not** authorize a tail-only
+probe. The separately registered successor is
+`phases/p38-2r-terminal-seam-tail-acquisition.md`: one production-shape run
+captures hidden seams and bounded-tail checkpoints together and seals every
+round before continuing. It remains unlaunched and requires its one-host
+observer-neutrality gate first.
 
 ## HISTORY: completed P38s17, P38s16, P38s15, P38s14, P38s13a, P38s12f
 

@@ -44,7 +44,7 @@ else
   exit 2
 fi
 
-if gcs_exists "$derived_uri/files/REDUCTION_MANIFEST.json"; then
+if gcs_exists "$derived_uri/files/verdict.json"; then
   echo "[P38.REDUCE.GCP] REFUSING: derived evidence already exists" >&2
   exit 3
 fi
@@ -53,6 +53,8 @@ scratch="$(mktemp -d -p "$scratch_parent" p38s18l-reduce.XXXXXX)"
 trap 'rm -rf -- "$scratch"' EXIT
 listing="$scratch/object-listing.txt"
 snapshot_selection="$scratch/SNAPSHOT_SELECTION.json"
+selection_stdout="$scratch/SNAPSHOT_SELECTION.stdout"
+selection_stderr="$scratch/SNAPSHOT_SELECTION.stderr"
 source_dir="$scratch/source"
 output_dir="$scratch/output"
 mkdir -p "$source_dir"
@@ -65,13 +67,74 @@ python3 "$script_dir/select_p38_live_snapshot.py" \
   --listing "$listing" \
   --live-root "$live_root" \
   --min-capsule-rounds "$min_capsule_rounds" \
-  --output "$snapshot_selection"
+  --output "$snapshot_selection" \
+  >"$selection_stdout" 2>"$selection_stderr"
 selection_rc=$?
 set -e
+cat "$selection_stdout"
+cat "$selection_stderr" >&2
 if [ "$selection_rc" -ne 0 ]; then
-  if [ -s "$snapshot_selection" ]; then
-    cat "$snapshot_selection"
+  if [ "$selection_rc" -ne 4 ] || [ ! -s "$snapshot_selection" ]; then
+    exit "$selection_rc"
   fi
+
+  mkdir -p "$output_dir"
+  cp "$snapshot_selection" "$output_dir/SNAPSHOT_SELECTION.json"
+  cp "$listing" "$output_dir/OBJECT_LISTING.txt"
+  cp "$selection_stdout" "$output_dir/selector.stdout"
+  cp "$selection_stderr" "$output_dir/selector.stderr"
+  python3 - "$snapshot_selection" "$output_dir/verdict.json" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+selection = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+verdict = {
+    "schema": "p38-snapshot-inventory-verdict-v1",
+    "verdict": "INCONCLUSIVE_NO_ELIGIBLE_SNAPSHOT",
+    "selector_rc": 4,
+    "selection_complete": False,
+    "candidate_count": selection["candidate_count"],
+    "qualified_candidate_count": selection["qualified_candidate_count"],
+    "minimum_capsule_rounds": selection["minimum_capsule_rounds"],
+}
+Path(sys.argv[2]).write_text(
+    json.dumps(verdict, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+PY
+  printf '%s\n' \
+    'P38s18l selection-only evidence bundle.' \
+    'No source snapshot was admitted and no seam reduction was run.' \
+    'The scientific verdict is INCONCLUSIVE_NO_ELIGIBLE_SNAPSHOT.' \
+    > "$output_dir/PACKAGING.txt"
+  (
+    cd "$output_dir"
+    find . -type f ! -name SHA256SUMS -printf '%P\0' \
+      | sort -z \
+      | xargs -0 sha256sum > SHA256SUMS
+  )
+  (cd "$output_dir" && sha256sum -c SHA256SUMS --quiet)
+
+  archive_base="$(basename "$derived_uri")"
+  if command -v zstd >/dev/null 2>&1; then
+    archive="$scratch/$archive_base.tar.zst"
+    tar --zstd -cf "$archive" -C "$output_dir" .
+  else
+    archive="$scratch/$archive_base.tar.gz"
+    tar -czf "$archive" -C "$output_dir" .
+  fi
+  (cd "$(dirname "$archive")" && \
+    sha256sum "$(basename "$archive")" > "$(basename "$archive").sha256")
+
+  echo "[P38.REDUCE.GCP] UPLOAD version=$archive_base kind=snapshot-inventory"
+  gcs_sync_up "$output_dir" "$derived_uri/files"
+  gcs_cp "$archive" "$derived_uri/$(basename "$archive")"
+  gcs_cp "$archive.sha256" "$derived_uri/$(basename "$archive.sha256")"
+
+  selection_sha="$(sha256sum "$output_dir/SNAPSHOT_SELECTION.json" | awk '{print $1}')"
+  archive_sha="$(sha256sum "$archive" | awk '{print $1}')"
+  candidate_count="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["candidate_count"])' "$snapshot_selection")"
+  qualified_count="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["qualified_candidate_count"])' "$snapshot_selection")"
+  echo "[P38.REDUCE.GCP] COMPLETE verdict=INCONCLUSIVE_NO_ELIGIBLE_SNAPSHOT selector_rc=4 candidates=$candidate_count qualified=$qualified_count snapshot_selection_sha256=$selection_sha archive_sha256=$archive_sha destination=$derived_uri"
   exit "$selection_rc"
 fi
 source_uri="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["selected_source_gcs_uri"])' "$snapshot_selection")"

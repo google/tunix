@@ -11,7 +11,10 @@
   snapshot satisfies the 2-round + SHA256SUMS + paired-NPZ gate: snapshot 000020
   has only round 0, and snapshot 000021 lacks SHA256SUMS/paired-NPZs). Per
   runbook rules, the run remains partial analysis-grade without weakening the
-  minimum round contract.
+  minimum round contract. The returned commit contains only a prose summary,
+  not the selector JSON or object listing. A local wrapper amendment now seals
+  rc=4 as an auditable selection-only bundle; publication and zero-TPU rerun
+  are pending.
 - Task directory:
   `canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/`.
 
@@ -35,7 +38,9 @@
     snapshots: `000020` has only round-0 capsule (1 round < 2 required);
     `000021` has rounds [0, 1] but lacks `SHA256SUMS` and paired NPZs due to
     workload exit. Result: `INCONCLUSIVE no qualifying snapshot candidates=22`
-    (rc=4). Per runbook rules, inventory is returned without substitute.
+    (rc=4). Commit `e0c1aef7` records only the human summary; no raw inventory
+    was committed, so this is not yet an independently reproducible evidence
+    package. It does not authorize the tail branch.
 - P38s17/source `baac38bc4034` completed all 3 Frozen-Weight diagnostic rounds
   (768 trajectories total, 143,511 action tokens across 3 rounds) on 64 TPU
   (`DP16xTP4`, concurrency 256) with zero backward, zero optimizer commits, and
@@ -282,21 +287,21 @@
 
 ## Next action
 
-1. Publish the P38.2q v2 reducer only after snapshot selection, equivalent
-   alias, payload-conflict, bundle-mutation, fake-GCS wrapper, classifier,
-   syntax, and checksum gates pass.
-2. On a clean GCP checkout, follow `P38S18L_GCP_REDUCTION_RUNBOOK.md` against
-   the live root; never choose a snapshot by hand or lower the two-round gate.
-3. Return and locally audit the complete compact bundle. Require capsule rounds
-   `[0,1]`, 47 red points, 94 matched A/B keys, and zero unresolved keys. The
-   source run remains `INCONCLUSIVE_PARTIAL_RUN` even after a green reduction.
-4. Commit the exact compact files under `evidence/p38s18l/reduction-v2/` only
-   after the standalone bundle auditor passes.
-5. If every joined hidden/final fingerprint is exact, build one bounded tail
-   observer covering lm_head/raw logits, target logit, normalizer, processed
-   target, and final logprob. If a hidden seam is red, select the earliest
-   measured layer instead. Do not launch a repair from the current hand-authored
-   classification.
+1. Review and publish the P38.2q rc=4 durability amendment only after the
+   selection-only fake-GCS success, overwrite refusal, SHA mutation, semantic
+   listing mutation, existing reduction, classifier, syntax, and checksum gates
+   pass.
+2. On a clean GCP checkout, rerun `P38S18L_GCP_REDUCTION_RUNBOOK.md` against the
+   live root and a fresh versioned destination. Exit 4 is accepted only after
+   the wrapper prints COMPLETE and uploads the inventory bundle.
+3. Download and audit the complete selection-only bundle. Require 22 candidates,
+   zero qualified snapshots, exact selector reproduction, and SHA verification.
+4. Commit those exact bytes under `evidence/p38s18l/reduction-v2/`. Then retire
+   P38s18l; do not promote its hand-authored hidden/tail classification.
+5. Before any new target launch, implement and pass the one-host neutrality
+   gate registered in `phases/p38-2r-terminal-seam-tail-acquisition.md`. The
+   successor captures hidden seams and the bounded tail in one production-shape
+   run with independently sealed per-round bundles.
 
 ## Claim ceiling and blockers
 
@@ -325,7 +330,8 @@ training, evaluation, prefix cache, precision, optimizer placement, or
 canonical kernels.
 
 - Updated: 2026-08-16 UTC; P38.2p/v1 is sealed as an inconclusive one-round
-  reduction. P38.2q v2 implementation returns automatic snapshot inventory,
-  complete duplicate-row provenance, all candidate raw bytes, and a standalone
-  bundle audit. GCP v2 execution is pending publication. No new TPU run,
-  backward, or optimizer commit occurred in this worktree.
+  reduction. The first P38.2q GCP selector execution reported no eligible
+  two-round snapshot but returned no durable inventory bytes. The local rc=4
+  amendment now uploads and audits that selection-only result. P38.2r registers
+  a future single-run seam-and-tail acquisition but is unimplemented and
+  unlaunched. No TPU run, backward, or optimizer commit occurred here.

@@ -40,9 +40,21 @@ set -euo pipefail
 LIVE_ROOT="gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-p38-fl-stock-p38s18l-9a834574/attempt-0/live"
 DEST="gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-p38-fl-stock-p38s18l-9a834574/attempt-0/derived/p38s18l-seam-reduction-v2"
 
+set +e
 bash canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/run_reduce_p38s18l_on_gcp.sh \
   "$LIVE_ROOT" "$DEST"
+REDUCE_RC=$?
+set -e
+case "$REDUCE_RC" in
+  0|4) ;;
+  *) echo "unexpected P38 reducer rc=$REDUCE_RC" >&2; exit "$REDUCE_RC" ;;
+esac
 ```
+
+`0` means a source was admitted and reduced. `4` is accepted only when the
+wrapper already uploaded a sealed selection-only bundle and printed
+`COMPLETE verdict=INCONCLUSIVE_NO_ELIGIBLE_SNAPSHOT`; the remaining audit steps
+are mandatory in both cases.
 
 The wrapper performs all of the following before upload:
 
@@ -64,9 +76,11 @@ The wrapper performs all of the following before upload:
    and a self-excluding `SHA256SUMS`; and
 10. uploads both the unpacked files and one compressed archive.
 
-If no two-round snapshot exists, the script prints the complete snapshot
-inventory and exits before downloading or reducing anything. Return that JSON;
-do not weaken the minimum to one round.
+If no two-round snapshot exists, the script does not download or reduce a
+source. It still seals and uploads a selection-only evidence bundle containing
+the raw object listing, selector JSON/stdout/stderr, verdict, packaging note,
+archive, and SHA inventory. It exits 4 only after upload. Return and audit that
+bundle; do not weaken the minimum to one round.
 
 ## 3. Required returned marker and metadata
 
@@ -88,15 +102,21 @@ Then return these exact files without editing:
 ```bash
 gcloud storage cat "$DEST/files/SNAPSHOT_SELECTION.json"
 gcloud storage cat "$DEST/files/verdict.json"
-gcloud storage cat "$DEST/files/AMBIGUITY_AUDIT.json"
-gcloud storage cat "$DEST/files/REDUCTION_MANIFEST.json"
+gcloud storage cat "$DEST/files/OBJECT_LISTING.txt" || true
+gcloud storage cat "$DEST/files/selector.stdout" || true
+gcloud storage cat "$DEST/files/selector.stderr" || true
+gcloud storage cat "$DEST/files/AMBIGUITY_AUDIT.json" || true
+gcloud storage cat "$DEST/files/REDUCTION_MANIFEST.json" || true
 gcloud storage cat "$DEST/files/classification.json" || true
 gcloud storage cat "$DEST/files/SHA256SUMS"
 gcloud storage ls -l "$DEST/**"
 ```
 
-Absence of `classification.json` is valid only for
-`INCONCLUSIVE_REDUCTION_JOIN`; return stderr and the ambiguity audit instead.
+For a selection-only `INCONCLUSIVE_NO_ELIGIBLE_SNAPSHOT` bundle,
+`OBJECT_LISTING.txt` and selector stdout/stderr are required, while reduction
+manifest, ambiguity audit, records, capsules, and classification must be
+absent. For `INCONCLUSIVE_REDUCTION_JOIN`, return the reduction manifest,
+stderr, and ambiguity audit; classification must be absent.
 
 ## 4. Download and mechanically audit the complete compact bundle
 
@@ -116,16 +136,17 @@ python3 canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/audit_p
 cat /tmp/p38s18l-seam-reduction-v2.audit.json
 ```
 
-The auditor verifies the exact bundle inventory, every file SHA, snapshot and
-capsule provenance, join totals, ambiguity totals, verdict consistency, and—if
-selection completed—re-runs the official classifier and requires byte-for-byte
-equivalent JSON content.
+The auditor verifies the exact bundle inventory and every file SHA. For a
+selection-only bundle it re-runs the selector from `OBJECT_LISTING.txt` and
+requires exact JSON equality. For an admitted snapshot it verifies capsule
+provenance, join/ambiguity/verdict totals, re-runs the official classifier, and
+requires byte-for-byte equivalent JSON content.
 
 ## 5. Acceptance and decision table
 
 | Result | Meaning | Next action |
 |---|---|---|
-| No eligible two-round snapshot | GCS never persisted both completed rounds | Return snapshot inventory; do not run a one-round substitute |
+| `INCONCLUSIVE_NO_ELIGIBLE_SNAPSHOT` + auditor PASS | GCS never persisted one self-contained two-round source | Commit the inventory bundle, retire P38s18l, and do not infer a tail cause |
 | `INCONCLUSIVE_REDUCTION_JOIN` with `payload_conflict` | Same red key has numerically different candidates | Bundle already contains every conflicting record; analyze it offline, no TPU rerun |
 | `INCONCLUSIVE_PARTIAL_RUN` and classifier hidden-exact | All available red keys joined, but source run did not finish 3 rounds | Admit only analysis-grade tail-localization direction |
 | `INCONCLUSIVE_PARTIAL_RUN` and hidden seam red | All available keys joined and a measured hidden checkpoint differs | Select earliest measured seam; withdraw tail-only hypothesis |
@@ -145,6 +166,20 @@ For a successful two-round P38s18l reduction, require:
 Hidden/final fingerprint equality does **not** isolate the normalizer. It only
 authorizes a bounded tail observer spanning lm_head/raw logits, target gather,
 normalizer, processed target, and final subtraction.
+
+For the expected selection-only outcome, require:
+
+- wrapper exit code `4` after a `[P38.REDUCE.GCP] COMPLETE` line;
+- verdict `INCONCLUSIVE_NO_ELIGIBLE_SNAPSHOT`;
+- `candidate_count == 22` and `qualified_candidate_count == 0`;
+- complete `OBJECT_LISTING.txt` plus selector JSON/stdout/stderr;
+- local bundle auditor `PASS`; and
+- no reduction manifest, ambiguity audit, classifier, capsules, or records.
+
+This outcome exhausts P38s18l. It does not satisfy the prerequisite for a tail
+observer. The next target acquisition, if approved separately, follows
+`phases/p38-2r-terminal-seam-tail-acquisition.md` and captures hidden seams and
+the bounded tail together with per-round atomic persistence.
 
 ## 6. Publish the compact evidence, not the raw snapshot
 
@@ -176,7 +211,9 @@ approval before pushing the evidence CL.
 > versioned v2 destination. Return the COMPLETE line and every file listed in
 > §3. Download the entire compact `files/` hierarchy, run the bundle auditor,
 > and prepare the append-only `evidence/p38s18l/reduction-v2/` evidence CL from
-> those exact bytes. If the verdict is inconclusive, still return and preserve
-> the complete records plus ambiguity audit; they are designed to permit
-> offline diagnosis without another GCS or TPU run. Stop before push unless the
-> user explicitly approves that evidence push.
+> those exact bytes. Exit code 4 is expected when no snapshot qualifies, but it
+> is accepted only after the wrapper prints COMPLETE, the selection-only bundle
+> exists at DEST, and the standalone auditor passes. In that case return the raw
+> object listing and selector artifacts; do not fabricate reduction files and
+> do not advance to a tail-only probe. Stop before push unless the user
+> explicitly approves that evidence push.

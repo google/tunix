@@ -200,6 +200,99 @@ class ReduceP38GcpWrapperTest(unittest.TestCase):
       self.assertEqual(audit.returncode, 0, audit.stderr)
       self.assertIn("red_points=2 matched_arm_keys=4", audit.stdout)
 
+  def test_wrapper_seals_and_audits_no_eligible_snapshot_inventory(self):
+    with tempfile.TemporaryDirectory() as directory:
+      root = Path(directory)
+      gcs = root / "gcs"
+      self._write_snapshot(gcs, "000020", (0,))
+      bin_dir = root / "bin"
+      bin_dir.mkdir()
+      self._write_fake_gcloud(bin_dir)
+      derived = f"{RUN_ROOT}/derived/p38s18l-seam-reduction-v3"
+      env = dict(os.environ)
+      env["FAKE_GCS_ROOT"] = str(gcs)
+      env["PATH"] = f"{bin_dir}:{env['PATH']}"
+      command = [
+          "bash", str(WRAPPER), f"{RUN_ROOT}/live", derived, str(root)
+      ]
+      result = subprocess.run(
+          command,
+          text=True,
+          capture_output=True,
+          check=False,
+          env=env,
+      )
+      self.assertEqual(result.returncode, 4, result.stderr)
+      self.assertIn(
+          "COMPLETE verdict=INCONCLUSIVE_NO_ELIGIBLE_SNAPSHOT",
+          result.stdout,
+      )
+      bundle = _local_gcs(gcs, derived) / "files"
+      self.assertTrue((bundle / "SNAPSHOT_SELECTION.json").is_file())
+      self.assertTrue((bundle / "OBJECT_LISTING.txt").is_file())
+      self.assertTrue((bundle / "selector.stdout").is_file())
+      self.assertTrue((bundle / "selector.stderr").is_file())
+      self.assertFalse((bundle / "REDUCTION_MANIFEST.json").exists())
+      audit = subprocess.run(
+          [
+              sys.executable, str(AUDITOR),
+              "--bundle-dir", str(bundle),
+              "--output", str(root / "selection-audit.json"),
+          ],
+          text=True,
+          capture_output=True,
+          check=False,
+      )
+      self.assertEqual(audit.returncode, 0, audit.stderr)
+      self.assertIn(
+          "scientific_verdict=INCONCLUSIVE_NO_ELIGIBLE_SNAPSHOT",
+          audit.stdout,
+      )
+
+      repeated = subprocess.run(
+          command,
+          text=True,
+          capture_output=True,
+          check=False,
+          env=env,
+      )
+      self.assertEqual(repeated.returncode, 3, repeated.stderr)
+      self.assertIn("derived evidence already exists", repeated.stderr)
+
+      listing = bundle / "OBJECT_LISTING.txt"
+      listing.write_text(listing.read_text() + f"{RUN_ROOT}/live/000021/LIVE.json\n")
+      tampered = subprocess.run(
+          [
+              sys.executable, str(AUDITOR),
+              "--bundle-dir", str(bundle),
+              "--output", str(root / "tampered-audit.json"),
+          ],
+          text=True,
+          capture_output=True,
+          check=False,
+      )
+      self.assertNotEqual(tampered.returncode, 0)
+      self.assertIn("bundle SHA failed", tampered.stderr)
+
+      sha_manifest = bundle / "SHA256SUMS"
+      sha_lines = sha_manifest.read_text().splitlines()
+      sha_manifest.write_text("\n".join(
+          f"{_sha256(listing)}  OBJECT_LISTING.txt"
+          if line.endswith("  OBJECT_LISTING.txt") else line
+          for line in sha_lines) + "\n")
+      semantic_tamper = subprocess.run(
+          [
+              sys.executable, str(AUDITOR),
+              "--bundle-dir", str(bundle),
+              "--output", str(root / "semantic-tamper-audit.json"),
+          ],
+          text=True,
+          capture_output=True,
+          check=False,
+      )
+      self.assertNotEqual(semantic_tamper.returncode, 0)
+      self.assertIn("snapshot selection differs", semantic_tamper.stderr)
+
 
 if __name__ == "__main__":
   unittest.main()

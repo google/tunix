@@ -1500,3 +1500,32 @@ reclassification from the committed NPZ inputs.
   - Snapshot `000020`: Contains only capsule round 0 (1 round < 2 required).
   - Snapshot `000021`: Contains capsule rounds [0, 1], but lacks `SHA256SUMS`, `LIVE.json`, and paired NPZs due to abrupt container exit.
 - Action: Per `P38S18L_GCP_REDUCTION_RUNBOOK.md` §5 decision table row 1 (`No eligible two-round snapshot`), returned `SNAPSHOT_SELECTION.json` inventory without downloading or running a one-round substitute. P38s18l remains recorded as analysis-grade partial evidence.
+
+## 2026-08-16 UTC — P38.2q rc=4 durability correction locally complete
+
+- Reconciled commit `e0c1aef7`: it records the 22-snapshot selector result only
+  in `THREADS.md`, `state.md`, and this ledger. No `SNAPSHOT_SELECTION.json`,
+  raw object listing, selector output, verdict, or audit was committed.
+- Root cause: `run_reduce_p38s18l_on_gcp.sh` printed the selector JSON and exited
+  immediately on rc=4, before its common sealing/upload path. The derived
+  destination therefore had no durable evidence sentinel and could be retried
+  or reinterpreted from prose.
+- Changed the rc=4 path to upload a selection-only bundle before returning:
+  raw `OBJECT_LISTING.txt`, selector JSON/stdout/stderr,
+  `INCONCLUSIVE_NO_ELIGIBLE_SNAPSHOT` verdict, packaging note, archive, and
+  self-excluding `SHA256SUMS`. Destination immutability now keys on
+  `files/verdict.json`, covering both reduction and selection-only bundles.
+- Updated the operator card to capture reducer rc explicitly: `0` and sealed
+  `4` continue into download/audit, while every other code stops. This avoids
+  `set -e` aborting after a valid inconclusive bundle is uploaded.
+- Extended the standalone auditor to reproduce the selector exactly from the
+  bundled object listing. It rejects file-byte mutation and also rejects a
+  semantically changed listing after its SHA entry is recomputed.
+- Corrected the decision ledger: the no-source outcome retires P38s18l and does
+  not authorize a tail-only probe. Registered P38.2r as a future single-run,
+  production-shape acquisition that captures hidden seams and bounded-tail
+  checkpoints together and seals each round before continuing.
+- Focused gates: fake-GCS wrapper 2/2 (including no-source upload, audit, and
+  overwrite refusal); selector 3/3; reducer 6/6; classifier 4/4; seam capture
+  5/5; neutrality 3/3; P38 postflight PASS. No GCP rerun, TPU launch, backward,
+  optimizer commit, repository commit, or push occurred in this checkpoint.

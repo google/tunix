@@ -1,6 +1,9 @@
 # P38.2q — One-pass seam reduction and ambiguity audit
 
-Status: active. Implementation is local; GCP execution is pending publication.
+Status: active. The first GCP selector execution returned rc=4 because no
+eligible two-round snapshot exists. The local amendment now seals that outcome
+as an immutable, independently reproducible inventory bundle and passes its
+focused gates; publication and one zero-TPU GCP rerun are pending.
 
 ## Entering correction
 
@@ -36,6 +39,11 @@ One GCP command must produce a compact bundle with:
    self-excluding SHA manifest; and
 9. a separate bundle auditor that verifies inventory/verdict consistency and
    reproduces the official classifier from the compact bundle alone.
+
+If selection returns rc=4, the same destination instead contains the raw GCS
+object listing, selector JSON/stdout/stderr, an
+`INCONCLUSIVE_NO_ELIGIBLE_SNAPSHOT` verdict, packaging note, and self-excluding
+SHA manifest. The auditor must reproduce the selector result from those bytes.
 
 The bundle is capped at 90 MB. It is committed under a new
 `evidence/p38s18l/reduction-v2/` subdirectory only after its local audit passes.
@@ -91,7 +99,7 @@ completed third round and terminal precheck marker.
 
 | Result | Decision |
 |---|---|
-| No eligible two-round snapshot | Preserve inventory; do not substitute round 0 or launch TPU |
+| No eligible two-round snapshot | Seal and audit the selection-only inventory; do not substitute round 0 or infer a tail cause |
 | Payload conflict | Analyze returned candidate records offline; strengthen identity only if the conflict is provenance rather than numerical |
 | All keys joined, hidden/final fingerprints exact | Build a bounded tail observer; do not name its substage in advance |
 | Any hidden fingerprint red | Select the earliest measured checkpoint and withdraw tail-only localization |
@@ -102,6 +110,18 @@ This phase can make P38s18l locally reproducible and choose the next observer.
 It cannot convert an interrupted run into signed three-round evidence, prove
 full hidden tensor bytes from fingerprints, isolate the normalizer, or admit a
 repair/training run.
+
+The GCP selector reported 22 candidates with no eligible source: `000020` has
+only capsule round 0, while `000021` lacks the manifest and paired seam NPZs.
+Until the selection-only bundle is returned and audited, that inventory remains
+an execution report rather than committed mechanical evidence. Even after it
+is audited, it retires P38s18l; it does not authorize the tail branch.
+
+Local amendment gates: fake-GCS admitted-source and no-source paths 2/2;
+selector 3/3; reducer/alias/conflict/tamper 6/6; classifier 4/4; seam capture
+5/5; neutrality 3/3; P38 postflight PASS. The no-source fixture also proves
+destination overwrite refusal, byte mutation rejection, and selector-semantic
+mutation rejection after the SHA inventory is recomputed.
 
 ## Rollback
 
