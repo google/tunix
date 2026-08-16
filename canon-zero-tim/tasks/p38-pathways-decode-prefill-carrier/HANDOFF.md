@@ -5,7 +5,32 @@ parallel Qwen3-32B DeepSWE workstream, read
 `../p39-deepswe-production/HANDOFF.md`. P38 evidence cannot promote P39, and
 P39 evidence cannot promote P38.
 
-## CURRENT: seal the P38s18l no-source inventory; no TPU launch
+## CURRENT: publish P38.2r, run one-host neutrality, then one P38s18r target
+
+P38s18l/P38.2q is retired as `INCONCLUSIVE_NO_ELIGIBLE_SNAPSHOT`: no existing
+live snapshot contains two complete rounds with paired NPZs and a manifest.
+Do not reduce it again and do not infer a tail cause from its partial payload.
+
+P38.2r is implemented locally and captures the hidden layer seam and terminal
+tail in the same stock production-shape run. It also seals each frozen round
+to GCS and waits for a verified acknowledgement before the next round begins.
+This removes both P38s18l failure modes: missing terminal values and a later
+snapshot that references earlier records without containing them.
+
+The only current operator card is `P38S18R_RUNBOOK.md`. Its order is mandatory:
+
+1. review and publish one source SHA;
+2. run the local v5p `off` and `seam-tail` neutrality pair;
+3. only if endpoints are bitwise identical, render one stock `p38s18r` JobSet
+   with `--seam-mode layer --terminal-tail`;
+4. server-dry-run and apply that one YAML; and
+5. return all three immutable round bundles plus the final root markers and
+   classification, not only stdout or a hand-authored summary.
+
+Publication was explicitly approved on 2026-08-16. The one-host TPU neutrality
+run and 64-TPU target launch have not yet been performed.
+
+## HISTORY: P38s18l/P38.2q no-source inventory
 
 P38s18l/source `9a83457417fc` ran at DP16xTP4/concurrency 256 with zero
 backward and optimizer commits, but the committed package is not a complete

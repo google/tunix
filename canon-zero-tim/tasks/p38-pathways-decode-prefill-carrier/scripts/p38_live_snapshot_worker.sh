@@ -14,6 +14,8 @@ set -euo pipefail
 : "${CANON_P38_LIVE_COLLECT_ACK_FILE:?CANON_P38_LIVE_COLLECT_ACK_FILE unset}"
 : "${CANON_P38_LIVE_COMPLETE_REQUEST_FILE:?CANON_P38_LIVE_COMPLETE_REQUEST_FILE unset}"
 : "${CANON_P38_LIVE_COMPLETE_ACK_FILE:?CANON_P38_LIVE_COMPLETE_ACK_FILE unset}"
+: "${CANON_P38_ROUND_SEAL_REQUEST_DIR:?CANON_P38_ROUND_SEAL_REQUEST_DIR unset}"
+: "${CANON_P38_ROUND_SEAL_ACK_DIR:?CANON_P38_ROUND_SEAL_ACK_DIR unset}"
 : "${CANON_PKG:?CANON_PKG unset}"
 
 case "$CANON_P38_LIVE_SNAPSHOT_INTERVAL_SECONDS" in
@@ -42,6 +44,7 @@ persist="$CANON_PKG/tasks/p38-pathways-decode-prefill-carrier/scripts/persist_p3
 sequence=0
 last_signature=""
 last_observer_signature=""
+next_round_to_seal=0
 
 snapshot_if_changed() {
   local run_size=0 journal_size=0 incident_size=0 report_size=0 capsule_signature=""
@@ -67,7 +70,9 @@ snapshot_if_changed() {
         "$observer_dir"/p38_kv_observer_*.json \
         "$observer_dir"/p38_kv_observer_*.npz \
         "$observer_dir"/p38_seam_*.json \
-        "$observer_dir"/p38_seam_*.npz; do
+        "$observer_dir"/p38_seam_*.npz \
+        "$observer_dir"/p38_tail_*.json \
+        "$observer_dir"/p38_tail_*.npz; do
       observer_signature+="$(basename "$observer_path"):$(wc -c < "$observer_path" | tr -d '[:space:]'),"
     done
     shopt -u nullglob
@@ -119,14 +124,69 @@ handle_terminal_requests() {
   fi
 }
 
+handle_round_requests() {
+  local request_path request_name round_text expected_name ack_path partial
+  shopt -s nullglob
+  local requests=("$CANON_P38_ROUND_SEAL_REQUEST_DIR"/round-*.request)
+  shopt -u nullglob
+  for request_path in "${requests[@]}"; do
+    request_name="$(basename "$request_path")"
+    round_text="${request_name#round-}"
+    round_text="${round_text%.request}"
+    if [ "$((10#$round_text))" -lt "$next_round_to_seal" ] && \
+       [ -s "$CANON_P38_ROUND_SEAL_ACK_DIR/round-$round_text.ack" ]; then
+      continue
+    fi
+    printf -v expected_name 'round-%06d.request' "$next_round_to_seal"
+    if [ "$request_name" != "$expected_name" ]; then
+      echo "[P38.GCS] FATAL: round-seal request order drifted: expected=$expected_name observed=$request_name" >&2
+      return 2
+    fi
+    python3 - "$request_path" "$next_round_to_seal" <<'PY'
+import json
+import pathlib
+import sys
+
+record = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+expected = {
+    "action": "seal-round",
+    "diagnostic_round": int(sys.argv[2]),
+    "schema": "canon-p38-round-seal-request-v1",
+}
+if record != expected:
+  raise SystemExit(f"round-seal request drifted: {record!r} != {expected!r}")
+PY
+    bash "$persist" round "$round_text"
+    ack_path="$CANON_P38_ROUND_SEAL_ACK_DIR/round-$round_text.ack"
+    partial="$ack_path.partial"
+    python3 - "$partial" "$next_round_to_seal" <<'PY'
+import json
+import pathlib
+import sys
+
+pathlib.Path(sys.argv[1]).write_text(json.dumps({
+    "action": "seal-round",
+    "diagnostic_round": int(sys.argv[2]),
+    "schema": "canon-p38-round-seal-ack-v1",
+    "status": "PASS",
+}, sort_keys=True) + "\n", encoding="utf-8")
+PY
+    mv -- "$partial" "$ack_path"
+    echo "[P38.GCS] LIVE_ROUND_PASS round=$next_round_to_seal ack=$ack_path"
+    next_round_to_seal=$((next_round_to_seal + 1))
+  done
+}
+
 echo "[P38.GCS] LIVE_WORKER_START interval=$CANON_P38_LIVE_SNAPSHOT_INTERVAL_SECONDS"
 while [ ! -e "$CANON_P38_LIVE_SNAPSHOT_STOP_FILE" ]; do
   snapshot_if_changed
+  handle_round_requests
   handle_terminal_requests
   sleep "$CANON_P38_LIVE_SNAPSHOT_INTERVAL_SECONDS" &
   wait "$!" || true
 done
 snapshot_if_changed
+handle_round_requests
 handle_terminal_requests
 if [ "$sequence" -eq 0 ]; then
   echo "[P38.GCS] FATAL: live worker observed no host evidence" >&2

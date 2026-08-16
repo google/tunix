@@ -29,6 +29,8 @@ run_case() (
   export CANON_P38_CONTROLLED_EXIT=1
   export CANON_P38_DIAGNOSTIC_ROUNDS=1
   export CANON_P38_DIAGNOSTIC_ROUND_FILE="$state/p38_diagnostic_round"
+  export CANON_P38_ROUND_SEAL_REQUEST_DIR="$state/p38_round_seal_requests"
+  export CANON_P38_ROUND_SEAL_ACK_DIR="$state/p38_round_seal_acks"
   export CANON_P38_MIN_ACTION_KV=1686
   export CANON_P38_SERVING_CAPTURE_DIR="$state/capture"
   export CANON_P38_REQUEST_JOURNAL="$state/capture/p38_request_journal.jsonl"
@@ -59,7 +61,8 @@ run_case() (
   export CANON_P38_KV_OBSERVER_MAX_READ_BYTES=671088640
   export CANON_P38_KV_OBSERVER_CLASSIFICATION="$state/kv-observer.json"
   command="python3 $ROOT/tests/p38_serving/make_fixture.py --directory $state/capture --mismatch-capsule $CANON_P38_MISMATCH_CAPSULE"
-  if [ "$mode" = seam-layer ]; then
+  if [ "$mode" = seam-layer ] || [ "$mode" = tail-layer ] || \
+     [ "$mode" = tail-missing ]; then
     unset CANON_P38_KV_OBSERVER_DIR \
       CANON_P38_KV_OBSERVER_MAX_CANDIDATES \
       CANON_P38_KV_OBSERVER_MAX_PAGES \
@@ -73,6 +76,13 @@ run_case() (
     export CANON_P38_SEAM_MAX_BYTES=4294967296
     export CANON_P38_SEAM_CLASSIFICATION="$state/seam-classification.json"
     command+=" --seam"
+    if [ "$mode" = tail-layer ] || [ "$mode" = tail-missing ]; then
+      export CANON_P38_TAIL_OBSERVER=1
+      export CANON_P38_TAIL_MAX_BYTES=268435456
+      if [ "$mode" = tail-layer ]; then
+        command+=" --tail"
+      fi
+    fi
   fi
   if [ "$mode" = missing-journal ]; then
     command+=" --omit-request-journal"
@@ -91,10 +101,16 @@ run_case() (
   command+="; printf '%s\\n' '[CANON_P38_SERVING_CAPTURE_OBSERVE] {\"call\":1,\"program_path\":\"standard\",\"one_token_requests\":1}'"
   command+="; printf '%s\\n' '[CANON_P38_REQUEST_JOURNAL] record=1 request=request-0 prefix=1600 stratum=0 dp=0'"
   command+="; printf '%s\\n' '[CANON_P38_INCIDENT_LEDGER] record=1 call=1 requests=1 bytes=1'"
-  if [ "$mode" = seam-layer ]; then
+  if [ "$mode" = seam-layer ] || [ "$mode" = tail-layer ] || \
+     [ "$mode" = tail-missing ]; then
     command+="; printf '%s\\n' '[CANON_P38_SEAM_OBSERVER_INIT] mode=layer min_position=1400 max_position=3072 max_bytes=4294967296'"
     command+="; printf '%s\\n' '[CANON_P38_SEAM_OBSERVER_RECORD] arm=A record=0 rows=1 bytes=1'"
     command+="; printf '%s\\n' '[CANON_P38_SEAM_OBSERVER_RECORD] arm=B record=1 rows=1 bytes=1'"
+    if [ "$mode" = tail-layer ] || [ "$mode" = tail-missing ]; then
+      command+="; printf '%s\\n' '[CANON_P38_TAIL_OBSERVER_INIT] enabled=1 max_bytes=268435456'"
+      command+="; printf '%s\\n' '[CANON_P38_TAIL_OBSERVER_RECORD] record=0 arm=A call=1 rows=1 bytes=1'"
+      command+="; printf '%s\\n' '[CANON_P38_TAIL_OBSERVER_RECORD] record=1 arm=B call=2 rows=1 bytes=1'"
+    fi
   elif [[ "$mode" != unified-* ]]; then
     command+="; printf '%s\\n' '[CANON_P38_KV_OBSERVER_INIT] enabled=1 candidates=3 pages=16 max_output_bytes=134217728 max_read_bytes=671088640'"
     command+="; printf '%s\\n' '[CANON_P38_KV_OBSERVER_CANDIDATE] round=0 request=decode-0 call=1 prefix=1600'"
@@ -111,7 +127,8 @@ run_case() (
   command+="; printf '%s\\n' 'CANON_FIXED_AR=1 fixed-order tree'"
   command+="; printf '%s\\n' 'CANON_FIXED_AR_EMBED=1 fixed-order embed gather'"
   if [ "$mode" = exact ] || [ "$mode" = exact-stable ] || \
-     [ "$mode" = shallow ] || [ "$mode" = seam-layer ]; then
+     [ "$mode" = shallow ] || [ "$mode" = seam-layer ] || \
+     [ "$mode" = tail-layer ] || [ "$mode" = tail-missing ]; then
     command+="; printf '%s\\n' '[CANON_P38] PRECHECK_ROUND_COMPLETE round=1/1 step=0 N_action=1 verdict=PASS a_b_differing_bytes=0 backward=0 optimizer_commits=0'"
     command+="; printf '%s\\n' '[CANON_P38] PRECHECK_COMPLETE STOP_BEFORE_BACKWARD step=0 N_action=1'"
   elif [ "$mode" = stock-hit ]; then
@@ -144,7 +161,7 @@ run_case() (
     command+="; printf '%s\\n' '[CANON_P38] PRECHECK_COMPLETE STOP_BEFORE_BACKWARD step=0 N_action=1'"
   fi
   case "$mode" in
-    exact|exact-stable|shallow|seam-layer|unified-exact|capture-error|missing-coverage)
+    exact|exact-stable|shallow|seam-layer|tail-layer|tail-missing|unified-exact|capture-error|missing-coverage)
       command+="; printf '%s\\n' '[CANON_P38] CONTROLLED_EXIT code=42 backward=0 optimizer_commits=0'; exit 42"
       ;;
     *) command+="; exit 1" ;;
@@ -154,14 +171,20 @@ run_case() (
   rc=0
   bash "$ROOT/cluster/steps/90_run.sh" > "$state/driver.log" 2>&1 || rc=$?
   if [ "$mode" = exact ] || [ "$mode" = exact-stable ] || \
-     [ "$mode" = seam-layer ] || [ "$mode" = unified-exact ]; then
+     [ "$mode" = seam-layer ] || [ "$mode" = tail-layer ] || \
+     [ "$mode" = unified-exact ]; then
     [ "$rc" -eq 0 ]
     grep -q 'P38 serving controlled precheck accepted exit=42' "$state/driver.log"
     grep -q '\[CANON_P38\] DEPTH_SUFFICIENCY min=1686 observed=1700 verdict=PASS' "$state/driver.log"
     grep -q '"verdict": "PASS"' "$CANON_P38_SERVING_CAPTURE_CLASSIFICATION"
-    if [ "$mode" = seam-layer ]; then
-      grep -q '"classification": "decode_seam_first_difference_measured"' \
-        "$CANON_P38_SEAM_CLASSIFICATION"
+    if [ "$mode" = seam-layer ] || [ "$mode" = tail-layer ]; then
+      if [ "$mode" = tail-layer ]; then
+        grep -q '"classification": "decode_terminal_first_difference_measured"' \
+          "$CANON_P38_SEAM_CLASSIFICATION"
+      else
+        grep -q '"classification": "decode_seam_first_difference_measured"' \
+          "$CANON_P38_SEAM_CLASSIFICATION"
+      fi
       grep -q '^\[CANON_P38_SEAM_INPUTS\] source=immutable-rounds capsules=1 mode=layer$' \
         "$state/driver.log"
       find "$FAKE_GCS_ROOT" -name seam-classification.json -type f | grep -q .
@@ -201,6 +224,9 @@ run_case() (
       grep -q 'P38 request journal is absent: markers=1' "$state/driver.log"
     elif [ "$mode" = missing-incident ]; then
       grep -q 'P38 incident ledger is absent: markers=1' "$state/driver.log"
+    elif [ "$mode" = tail-missing ]; then
+      grep -q 'P38 seam observer contract failed' "$state/driver.log"
+      grep -q 'P38 terminal-tail observer produced no records' "$state/driver.log"
     elif [ "$mode" = shallow ]; then
       grep -q 'P38 depth sufficiency failed: min=1686 observed=1600' "$state/driver.log"
     fi
@@ -210,6 +236,8 @@ run_case() (
 run_case exact
 run_case exact-stable
 run_case seam-layer
+run_case tail-layer
+run_case tail-missing
 run_case red
 run_case stock-hit
 run_case unified-missing
@@ -219,4 +247,4 @@ run_case missing-coverage
 run_case missing-journal
 run_case missing-incident
 run_case shallow
-echo "[P38.SERVING] POSTFLIGHT_PASS controlled_exact=accepted seam_layer=classified immutable_rounds=preferred stable_fallback=accepted shallow=rejected red_stop=rejected stock_hit=rejected unified_missing=rejected unified_exact=accepted capture_error=rejected missing_coverage=rejected missing_journal=rejected missing_incident=rejected"
+echo "[P38.SERVING] POSTFLIGHT_PASS controlled_exact=accepted seam_layer=classified tail_layer=classified tail_missing=rejected immutable_rounds=preferred stable_fallback=accepted shallow=rejected red_stop=rejected stock_hit=rejected unified_missing=rejected unified_exact=accepted capture_error=rejected missing_coverage=rejected missing_journal=rejected missing_incident=rejected"

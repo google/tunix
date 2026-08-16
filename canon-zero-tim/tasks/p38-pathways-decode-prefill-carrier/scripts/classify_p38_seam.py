@@ -16,6 +16,16 @@ class SeamError(RuntimeError):
   pass
 
 
+_TAIL_CHECKPOINTS = (
+    "raw_target_logit",
+    "raw_log_normalizer",
+    "processed_target_logit",
+    "processed_log_normalizer",
+    "observer_target_logprob",
+    "production_target_logprob",
+)
+
+
 def _require(condition: bool, message: str) -> None:
   if not condition:
     raise SeamError(message)
@@ -191,6 +201,69 @@ def _load_records(
   if not allow_sparse_indices:
     _require(indices == list(range(len(indices))),
              "seam record indices are not contiguous")
+  return result
+
+
+def _load_tail_records(
+    directory: Path,
+) -> dict[tuple[int, bytes, str], dict[str, Any]]:
+  paths = sorted(directory.glob("p38_tail_*.json"))
+  _require(paths, "P38 terminal-tail observer produced no records")
+  result = {}
+  expected_keys = {
+      "row_indices", "positions", "token_ids", "request_ordinals",
+      "token_prefix_sha256", "logit_row_indices", "target_ids",
+      "tail_values",
+  }
+  for path in paths:
+    record = json.loads(path.read_text(encoding="utf-8"))
+    _require(record.get("schema") == "p38-tail-values-v1",
+             f"invalid terminal-tail schema: {path.name}")
+    index = int(record.get("record_index", -1))
+    _require(index >= 0 and path.name == f"p38_tail_{index:06d}.json",
+             f"terminal-tail record identity drifted: {path.name}")
+    npz_path = directory / f"p38_tail_{index:06d}.npz"
+    _require(npz_path.is_file(), f"terminal-tail NPZ missing: {npz_path.name}")
+    _require(_sha256(npz_path) == record.get("npz_sha256"),
+             f"terminal-tail NPZ SHA failed: {npz_path.name}")
+    with np.load(npz_path, allow_pickle=False) as archive:
+      arrays = {name: np.array(archive[name], copy=True)
+                for name in archive.files}
+    _require(set(arrays) == expected_keys,
+             f"terminal-tail array inventory drifted: {npz_path.name}")
+    rows = arrays["row_indices"].reshape(-1)
+    positions = arrays["positions"].reshape(-1)
+    source_tokens = arrays["token_ids"].reshape(-1)
+    hashes = arrays["token_prefix_sha256"].reshape(-1)
+    logit_rows = arrays["logit_row_indices"].reshape(-1)
+    target_ids = arrays["target_ids"].reshape(-1)
+    values = arrays["tail_values"]
+    _require(
+        rows.size == positions.size == source_tokens.size == hashes.size
+        == logit_rows.size == target_ids.size == values.shape[0]
+        and values.shape == (rows.size, len(_TAIL_CHECKPOINTS)),
+        f"terminal-tail row geometry drifted: {npz_path.name}",
+    )
+    _require(tuple(record.get("checkpoint_names", ())) == _TAIL_CHECKPOINTS,
+             f"terminal-tail checkpoint contract drifted: {path.name}")
+    arm = record.get("arm")
+    diagnostic_round = int(record.get("diagnostic_round", -1))
+    _require(arm in ("A", "B") and 0 <= diagnostic_round < 8,
+             f"terminal-tail provenance drifted: {path.name}")
+    for row_offset in range(rows.size):
+      key = (diagnostic_round, bytes(hashes[row_offset]), arm)
+      _require(key not in result,
+               "duplicate terminal-tail token-prefix record")
+      result[key] = {
+          "record_index": index,
+          "row_index": int(rows[row_offset]),
+          "position": int(positions[row_offset]),
+          "source_token_id": int(source_tokens[row_offset]),
+          "target_id": int(target_ids[row_offset]),
+          "logit_row_index": int(logit_rows[row_offset]),
+          "checkpoint_names": list(_TAIL_CHECKPOINTS),
+          "values": values[row_offset],
+      }
   return result
 
 
@@ -389,6 +462,9 @@ def _red_points(capsules: list[Path]) -> list[dict[str, Any]]:
             "source_row": int(source_row_raw),
             "completion_position": int(completion_position),
             "source_position": source_position,
+            "target_id": int(completion[completion_position]),
+            "decode_logprob": float(decode[completion_position]),
+            "prefill_logprob": float(prefill[completion_position]),
             "token_prefix_sha256": _prefix_sha256(
                 tokens[:source_position + 1]),
             "capsule": path.name,
@@ -428,11 +504,35 @@ def _first_difference(a: dict, b: dict) -> dict | None:
   return None
 
 
+def _tail_first_difference(a: dict, b: dict) -> dict | None:
+  _require(a["checkpoint_names"] == b["checkpoint_names"],
+           "A/B terminal-tail checkpoint metadata differs")
+  _require(a["position"] == b["position"],
+           "A/B terminal-tail positions differ")
+  _require(a["target_id"] == b["target_id"],
+           "A/B terminal-tail target IDs differ")
+  for offset, checkpoint in enumerate(a["checkpoint_names"]):
+    av = np.asarray(a["values"][offset])
+    bv = np.asarray(b["values"][offset])
+    if not np.array_equal(av, bv):
+      av_scalar = av.item()
+      bv_scalar = bv.item()
+      return {
+          "layer": None,
+          "checkpoint": checkpoint,
+          "a_value": float(av_scalar),
+          "b_value": float(bv_scalar),
+          "max_abs": float(abs(float(av_scalar) - float(bv_scalar))),
+      }
+  return None
+
+
 def classify(
     directory: Path,
     capsules: list[Path],
     mode: str,
     reduction_manifest: Path | None = None,
+    require_tail: bool = False,
 ) -> dict:
   reduction = None
   if reduction_manifest is not None:
@@ -449,6 +549,7 @@ def classify(
   else:
     records = _load_records(
         directory, mode, allow_sparse_indices=reduction is not None)
+  tail_records = _load_tail_records(directory) if require_tail else {}
   joins = []
   for point in red_points:
     base = (point["diagnostic_round"], point["token_prefix_sha256"])
@@ -459,12 +560,40 @@ def classify(
     _require(a["position"] == b["position"] == point["source_position"],
              "joined seam source position drifted")
     first = _first_difference(a, b)
+    tail_a = tail_records.get((*base, "A")) if require_tail else None
+    tail_b = tail_records.get((*base, "B")) if require_tail else None
+    if require_tail:
+      _require(tail_a is not None and tail_b is not None,
+               "not every red action joined A/B terminal-tail records")
+      _require(
+          tail_a["position"] == tail_b["position"] == point["source_position"],
+          "joined terminal-tail source position drifted",
+      )
+      _require(tail_a["target_id"] == tail_b["target_id"],
+               "joined terminal-tail target ID drifted")
+      _require(tail_a["target_id"] == point["target_id"],
+               "terminal-tail target ID differs from the mismatch capsule")
+      _require(
+          float(tail_a["values"][-1]) == point["decode_logprob"]
+          and float(tail_b["values"][-1]) == point["prefill_logprob"],
+          "terminal-tail production logprob differs from the mismatch capsule",
+      )
+      if first is None:
+        first = _tail_first_difference(tail_a, tail_b)
+      _require(first is not None,
+               "red action stayed exact through the production logprob tail")
     joins.append({
         **{key: value for key, value in point.items()
            if key != "token_prefix_sha256"},
         "token_prefix_sha256": point["token_prefix_sha256"].decode(),
         "a_record_index": a["record_index"],
         "b_record_index": b["record_index"],
+        "a_tail_record_index": (
+            tail_a["record_index"] if tail_a is not None else None
+        ),
+        "b_tail_record_index": (
+            tail_b["record_index"] if tail_b is not None else None
+        ),
         "first_difference": first,
     })
   divergent = [join for join in joins if join["first_difference"] is not None]
@@ -487,7 +616,10 @@ def classify(
       "status": "PASS",
       "classification": (
           "hidden_chain_exact_tail_localization_required"
-          if tail_required else "decode_seam_first_difference_measured"
+          if tail_required
+          else "decode_terminal_first_difference_measured"
+          if require_tail
+          else "decode_seam_first_difference_measured"
       ),
       "observer_mode": mode,
       "red_points": len(red_points),
@@ -495,6 +627,7 @@ def classify(
       "divergent_red_points": len(divergent),
       "all_observed_fingerprints_equal": tail_required,
       "tail_localization_required": tail_required,
+      "tail_observer_required_and_joined": require_tail,
       "mixed_first_difference_signatures": len(signatures) > 1,
       "selected_layer": numeric_layers[0] if numeric_layers else None,
       "first_difference_signatures": [
@@ -526,6 +659,7 @@ def main() -> None:
   parser.add_argument("--capsule", type=Path, action="append", required=True)
   parser.add_argument("--mode", choices=("layer", "full"), required=True)
   parser.add_argument("--reduction-manifest", type=Path)
+  parser.add_argument("--require-tail", action="store_true")
   parser.add_argument("--output", type=Path, required=True)
   args = parser.parse_args()
   report = classify(
@@ -533,6 +667,7 @@ def main() -> None:
       args.capsule,
       args.mode,
       reduction_manifest=args.reduction_manifest,
+      require_tail=args.require_tail,
   )
   args.output.write_text(json.dumps(report, sort_keys=True, indent=2) + "\n")
   print(json.dumps(report, sort_keys=True))

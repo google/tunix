@@ -108,7 +108,11 @@ def _write_kv_observer_pair(
 
 
 def _write_seam_pair(
-    directory: Path, token_ids: np.ndarray, source_position: int
+    directory: Path,
+    token_ids: np.ndarray,
+    source_position: int,
+    *,
+    mutate: bool = True,
 ) -> None:
   prefix_sha = hashlib.sha256(
       np.ascontiguousarray(
@@ -117,7 +121,7 @@ def _write_seam_pair(
   ).hexdigest().encode()
   for record_index, arm in enumerate(("A", "B")):
     layer = np.zeros((1, 2, 2, 8), dtype=np.uint32)
-    if arm == "B":
+    if mutate and arm == "B":
       layer[0, 1, 1, 3] = 1
     arrays = {
         "row_indices": np.asarray([255], dtype=np.int32),
@@ -147,6 +151,58 @@ def _write_seam_pair(
     )
 
 
+def _write_tail_pair(
+    directory: Path,
+    token_ids: np.ndarray,
+    source_position: int,
+    target_id: int,
+    decode_logprob: np.float32,
+    prefill_logprob: np.float32,
+) -> None:
+  prefix_sha = hashlib.sha256(
+      np.ascontiguousarray(
+          token_ids[:source_position + 1], dtype="<i8"
+      ).tobytes()
+  ).hexdigest().encode()
+  checkpoints = (
+      "raw_target_logit",
+      "raw_log_normalizer",
+      "processed_target_logit",
+      "processed_log_normalizer",
+      "observer_target_logprob",
+      "production_target_logprob",
+  )
+  for record_index, arm in enumerate(("A", "B")):
+    values = np.zeros((1, len(checkpoints)), dtype=np.float32)
+    values[0, 1] = np.float32(0.0 if arm == "A" else prefill_logprob)
+    values[0, -1] = decode_logprob if arm == "A" else prefill_logprob
+    arrays = {
+        "row_indices": np.asarray([255], dtype=np.int32),
+        "positions": np.asarray([source_position], dtype=np.int32),
+        "token_ids": np.asarray([token_ids[source_position]], dtype=np.int32),
+        "request_ordinals": np.asarray([0], dtype=np.int32),
+        "token_prefix_sha256": np.asarray([prefix_sha], dtype="S64"),
+        "logit_row_indices": np.asarray([9], dtype=np.int32),
+        "target_ids": np.asarray([target_id], dtype=np.int32),
+        "tail_values": values,
+    }
+    npz_path = directory / f"p38_tail_{record_index:06d}.npz"
+    with npz_path.open("xb") as stream:
+      np.savez(stream, **arrays)
+    record = {
+        "schema": "p38-tail-values-v1",
+        "record_index": record_index,
+        "arm": arm,
+        "diagnostic_round": 0,
+        "checkpoint_names": list(checkpoints),
+        "array_keys": sorted(arrays),
+        "npz_sha256": hashlib.sha256(npz_path.read_bytes()).hexdigest(),
+    }
+    (directory / f"p38_tail_{record_index:06d}.json").write_text(
+        json.dumps(record, sort_keys=True), encoding="utf-8"
+    )
+
+
 def main() -> int:
   parser = argparse.ArgumentParser()
   parser.add_argument("--directory", required=True, type=Path)
@@ -154,7 +210,10 @@ def main() -> int:
   parser.add_argument("--omit-request-journal", action="store_true")
   parser.add_argument("--omit-incident-ledger", action="store_true")
   parser.add_argument("--seam", action="store_true")
+  parser.add_argument("--tail", action="store_true")
   args = parser.parse_args()
+  if args.tail and not args.seam:
+    parser.error("--tail requires --seam")
   args.directory.mkdir(parents=True, exist_ok=False)
   names = {
       "input_ids",
@@ -427,8 +486,17 @@ def main() -> int:
   if args.seam:
     _write_seam_pair(
         args.directory, np.asarray(full_history, dtype=np.int32),
-        journal_prefix - 1,
+        journal_prefix - 1, mutate=not args.tail,
     )
+    if args.tail:
+      _write_tail_pair(
+          args.directory,
+          np.asarray(full_history, dtype=np.int32),
+          journal_prefix - 1,
+          int(completion_ids[0, mismatch_position]),
+          np.float32(capsule_arrays["s_decode"][0, mismatch_position]),
+          np.float32(capsule_arrays["s_prefill"][0, mismatch_position]),
+      )
   else:
     for pair_index in range(3):
       _write_kv_observer_pair(args.directory, pair_index, observer_tokens)

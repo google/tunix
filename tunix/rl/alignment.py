@@ -45,6 +45,9 @@ P38_CONTROLLED_EXIT_ENV = "CANON_P38_CONTROLLED_EXIT"
 P38_CONTROLLED_EXIT_CODE = 42
 P38_DIAGNOSTIC_ROUNDS_ENV = "CANON_P38_DIAGNOSTIC_ROUNDS"
 P38_DIAGNOSTIC_ROUND_FILE_ENV = "CANON_P38_DIAGNOSTIC_ROUND_FILE"
+P38_ROUND_SEAL_REQUEST_DIR_ENV = "CANON_P38_ROUND_SEAL_REQUEST_DIR"
+P38_ROUND_SEAL_ACK_DIR_ENV = "CANON_P38_ROUND_SEAL_ACK_DIR"
+P38_ONEHOST_REHEARSAL_ENV = "CANON_P38_ONEHOST_REHEARSAL"
 P38_MISMATCH_CAPSULE_ENV = "CANON_P38_MISMATCH_CAPSULE"
 P38_MISMATCH_CAPSULE_MAX_ROWS_ENV = "CANON_P38_MISMATCH_CAPSULE_MAX_ROWS"
 GSM8K_AB_REPORT_ONLY_ENV = "CANON_GSM8K_AB_REPORT_ONLY"
@@ -113,6 +116,84 @@ def _publish_p38_diagnostic_round(round_index: int) -> None:
     stream.flush()
     os.fsync(stream.fileno())
   os.replace(temporary, path)
+
+
+def _seal_p38_diagnostic_round(round_index: int) -> None:
+  """Block until the survivor worker durably seals one completed round."""
+  request_dir = os.environ.get(P38_ROUND_SEAL_REQUEST_DIR_ENV, "")
+  ack_dir = os.environ.get(P38_ROUND_SEAL_ACK_DIR_ENV, "")
+  if (
+      not request_dir
+      and not ack_dir
+      and os.environ.get(P38_ONEHOST_REHEARSAL_ENV, "0") == "1"
+  ):
+    print(
+        "[CANON_P38] ROUND_SEAL_SKIPPED "
+        f"round={round_index} scope=onehost-rehearsal",
+        flush=True,
+    )
+    return
+  if not request_dir or not ack_dir:
+    raise AlignmentGateError(
+        "multi-round P38 requires round-seal request and acknowledgement dirs"
+    )
+  os.makedirs(request_dir, exist_ok=True)
+  os.makedirs(ack_dir, exist_ok=True)
+  stem = f"round-{int(round_index):06d}"
+  request_path = os.path.join(request_dir, f"{stem}.request")
+  ack_path = os.path.join(ack_dir, f"{stem}.ack")
+  if os.path.exists(request_path) or os.path.exists(ack_path):
+    raise AlignmentGateError(
+        f"P38 round-seal control path already exists for round {round_index}"
+    )
+  temporary = f"{request_path}.tmp"
+  payload = {
+      "action": "seal-round",
+      "diagnostic_round": int(round_index),
+      "schema": "canon-p38-round-seal-request-v1",
+  }
+  with open(temporary, "x", encoding="utf-8") as stream:
+    json.dump(payload, stream, sort_keys=True)
+    stream.write("\n")
+    stream.flush()
+    os.fsync(stream.fileno())
+  os.replace(temporary, request_path)
+  print(
+      "[CANON_P38] ROUND_SEAL_REQUESTED "
+      f"round={round_index} request={request_path}",
+      flush=True,
+  )
+  deadline = time.monotonic() + 900.0
+  while time.monotonic() < deadline:
+    if os.path.isfile(ack_path) and os.path.getsize(ack_path) > 0:
+      try:
+        with open(ack_path, encoding="utf-8") as stream:
+          acknowledgement = json.load(stream)
+      except (OSError, json.JSONDecodeError) as exc:
+        raise AlignmentGateError(
+            f"P38 round-seal acknowledgement is invalid: {ack_path}"
+        ) from exc
+      expected = {
+          "action": "seal-round",
+          "diagnostic_round": int(round_index),
+          "schema": "canon-p38-round-seal-ack-v1",
+          "status": "PASS",
+      }
+      if acknowledgement != expected:
+        raise AlignmentGateError(
+            "P38 round-seal acknowledgement drifted: "
+            f"expected={expected} observed={acknowledgement}"
+        )
+      print(
+          "[CANON_P38] ROUND_SEAL_ACKNOWLEDGED "
+          f"round={round_index} ack={ack_path}",
+          flush=True,
+      )
+      return
+    time.sleep(1.0)
+  raise AlignmentGateError(
+      f"timed out waiting for P38 round {round_index} durability acknowledgement"
+  )
 
 
 def _finish_p38_precheck(message: str) -> None:
@@ -249,6 +330,8 @@ def stop_after_diagnostic_precheck(record: dict[str, Any]) -> None:
       "backward=0 optimizer_commits=0",
       flush=True,
   )
+  if rounds > 1:
+    _seal_p38_diagnostic_round(round_index)
   if round_index + 1 < rounds:
     _P38_DIAGNOSTIC_ROUNDS_COMPLETED += 1
     _publish_p38_diagnostic_round(_P38_DIAGNOSTIC_ROUNDS_COMPLETED)

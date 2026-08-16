@@ -1,7 +1,8 @@
 # P38.2r — Single-run terminal seam-and-tail acquisition
 
-Status: pending. Do not launch until the P38.2q no-source inventory bundle is
-sealed and audited, and the combined observer passes one-host neutrality.
+Status: implementation approved for publication; target launch remains blocked
+on the combined observer's one-host neutrality run. P38.2q remains
+retired as `INCONCLUSIVE_NO_ELIGIBLE_SNAPSHOT`; it cannot supply P38.2r data.
 
 ## Entering evidence
 
@@ -34,6 +35,27 @@ Round `n+1` may not start until round `n` is sealed. Final `COLLECTED.json`,
 postflight `COMPLETE.json`, and controlled exit remain worker-owned. No
 end-of-process shell step is the sole owner of evidence.
 
+## Implemented contract
+
+- `patches/tpu_inference/19-tpu-runner-p38-terminal-tail.patch` observes the
+  already-produced A/B logits and production logprob after the unchanged
+  sampling/scoring calls. It emits target logits, raw/processed vocabulary
+  normalizers, an independent observer subtraction, and the production
+  endpoint. It does not wrap `model_fn`, `sample`, or the production scorer in
+  a new program.
+- The layer observer still supplies every layer input/output plus the final
+  norm fingerprint. Tail records share its exact round/token-prefix join key.
+- `alignment.py` publishes a round-seal request after every frozen round and
+  blocks before the next round. The survivor worker stages, hashes, uploads,
+  downloads, and verifies that round before atomically acknowledging it.
+- `ROUND_COMPLETE.json` is the final object in each immutable round prefix.
+  Missing capsules, journals, incident records, required seam/tail pairs,
+  manifest entries, or acknowledgements fail closed.
+- The official seam classifier requires every red action to join A and B in
+  both observers. It also requires the captured production endpoints to equal
+  the mismatch capsule exactly, preventing a tail record from describing a
+  different execution.
+
 ## Local gate
 
 - combined observer off/on endpoints are bitwise identical for three one-host
@@ -46,6 +68,14 @@ end-of-process shell step is the sole owner of evidence.
   rule; and
 - a fake-GCS abrupt exit after rounds 0 and 1 leaves two independently
   auditable round bundles rather than one incomplete latest snapshot.
+
+Current local evidence (2026-08-16): pinned-image install/manifest verification
+passes for Qwen3-1.7B and Qwen3-8B; both overlays pass 32 runner tests. The full
+P38 CPU suite passes 53 tests, postflight accepts the combined seam+tail
+fixture and rejects missing tail data, and fake GCS proves two rounds survive
+abrupt exit. The remaining hardware gate is one local v5p off-versus-seam-tail
+endpoint comparison across three frozen rounds. No target run is admitted
+before that comparison is green.
 
 ## Target gate
 
@@ -88,3 +118,9 @@ before all earlier registered checkpoints are exact for every joined red key.
 
 Leave every P38 seam/tail observer variable unset. The observer is default-off
 and must never ride the P45 full-training lane.
+
+## Operator card
+
+After publication, use `P38S18R_RUNBOOK.md`. Do not reconstruct the
+launch from historical handoff sections and do not manually add environment
+variables to a rendered YAML.

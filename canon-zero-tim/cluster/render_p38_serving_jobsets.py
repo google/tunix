@@ -43,6 +43,7 @@ _SEAM_MIN_POSITION = 1400
 _SEAM_MAX_POSITION = 3072
 _SEAM_MAX_BYTES = 4 * 1024 * 1024 * 1024
 _SEAM_LAYER_COUNT = 36
+_TAIL_MAX_BYTES = 256 * 1024 * 1024
 _ADMITTED_MAX_CONCURRENCY = (32, 256)
 _ARTIFACT_BUCKET = "gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38"
 
@@ -77,6 +78,7 @@ def _main_container(document: Mapping[str, Any]) -> dict[str, Any]:
 def _capture_values(
     document: Mapping[str, Any], *, unified: bool,
     seam_mode: str = "", seam_layer: int | None = None,
+    terminal_tail: bool = False,
 ) -> dict[str, str]:
   env = p33._env_values(document)
   state = env["CANON_STATE"]
@@ -87,6 +89,8 @@ def _capture_values(
       "CANON_P38_CONTROLLED_EXIT": "1",
       "CANON_P38_DIAGNOSTIC_ROUNDS": str(_DIAGNOSTIC_ROUNDS),
       "CANON_P38_DIAGNOSTIC_ROUND_FILE": f"{state}/p38_diagnostic_round",
+      "CANON_P38_ROUND_SEAL_REQUEST_DIR": f"{state}/p38_round_seal_requests",
+      "CANON_P38_ROUND_SEAL_ACK_DIR": f"{state}/p38_round_seal_acks",
       "CANON_P38_MISMATCH_CAPSULE_MAX_ROWS": str(_CAPSULE_MAX_ROWS),
       "CANON_P38_MIN_ACTION_KV": str(_MIN_ACTION_KV),
       "CANON_P38_SERVING_CAPTURE_DIR": f"{state}/p38_serving_capture",
@@ -150,6 +154,15 @@ def _capture_values(
     })
     if seam_layer is not None:
       values["CANON_P38_SEAM_LAYER"] = str(seam_layer)
+    if terminal_tail:
+      if seam_mode != "layer":
+        raise ValueError("P38 terminal tail requires layer seam mode")
+      values.update({
+          "CANON_P38_TAIL_OBSERVER": "1",
+          "CANON_P38_TAIL_MAX_BYTES": str(_TAIL_MAX_BYTES),
+      })
+  elif terminal_tail:
+    raise ValueError("P38 terminal tail requires seam observation")
   elif not unified:
     values.update({
         "CANON_P38_KV_OBSERVER_DIR": (
@@ -175,10 +188,12 @@ def _capture_values(
 def validate_capture_jobset(
     document: Mapping[str, Any], *, unified: bool, max_concurrency: int = 256,
     seam_mode: str = "", seam_layer: int | None = None,
+    terminal_tail: bool = False,
 ) -> None:
   env = p33._env_values(document)
   expected = _capture_values(
-      document, unified=unified, seam_mode=seam_mode, seam_layer=seam_layer
+      document, unified=unified, seam_mode=seam_mode,
+      seam_layer=seam_layer, terminal_tail=terminal_tail,
   )
   expected_gcs = (
       f"{_ARTIFACT_BUCKET}/{document['metadata']['name']}/attempt-0"
@@ -212,6 +227,11 @@ def validate_capture_jobset(
         seam_mode == "full"
     ):
       raise ValueError("P38 seam layer contract drifted")
+    if terminal_tail and (
+        env.get("CANON_P38_TAIL_OBSERVER") != "1"
+        or env.get("CANON_P38_TAIL_MAX_BYTES") != str(_TAIL_MAX_BYTES)
+    ):
+      raise ValueError("P38 terminal-tail contract drifted")
   elif not unified:
     if env["CANON_P38_KV_OBSERVER_DIR"].rstrip("/") != capture_dir:
       raise ValueError("P38 KV observer must live in the capture directory")
@@ -240,6 +260,14 @@ def validate_capture_jobset(
       f"{env['CANON_STATE']}/p38_diagnostic_round"
   ):
     raise ValueError("P38 diagnostic round path drifted")
+  if env["CANON_P38_ROUND_SEAL_REQUEST_DIR"] != (
+      f"{env['CANON_STATE']}/p38_round_seal_requests"
+  ):
+    raise ValueError("P38 round-seal request directory drifted")
+  if env["CANON_P38_ROUND_SEAL_ACK_DIR"] != (
+      f"{env['CANON_STATE']}/p38_round_seal_acks"
+  ):
+    raise ValueError("P38 round-seal acknowledgement directory drifted")
   labels = document["metadata"].get("labels", {})
   if labels.get("canon.zero-tim/diagnostic") != "p38-serving-capture":
     raise ValueError("P38 serving-capture label is missing")
@@ -247,6 +275,10 @@ def validate_capture_jobset(
     raise ValueError("P38 KV-unified label drifted")
   if labels.get("canon.zero-tim/seam-observer") != (seam_mode or "0"):
     raise ValueError("P38 seam-observer label drifted")
+  if labels.get("canon.zero-tim/terminal-tail") != (
+      "1" if terminal_tail else "0"
+  ):
+    raise ValueError("P38 terminal-tail label drifted")
   if document["spec"]["failurePolicy"].get("maxRestarts") != 0:
     raise ValueError("P38 serving-capture JobSet must not restart")
   command = shlex.split(env.get("CANON_RUN_CMD", ""))
@@ -312,6 +344,7 @@ def render_jobset(
     base: Mapping[str, Any], spec: Any, source_commit: str, run_id: str,
     *, unified: bool, max_concurrency: int = 256,
     seam_mode: str = "", seam_layer: int | None = None,
+    terminal_tail: bool = False,
 ) -> dict[str, Any]:
   command = list(spec.command)
   target = "--max_concurrency=256"
@@ -327,7 +360,7 @@ def render_jobset(
   p33._set_named_env(
       main["env"], _capture_values(
           document, unified=unified, seam_mode=seam_mode,
-          seam_layer=seam_layer,
+          seam_layer=seam_layer, terminal_tail=terminal_tail,
       ), remove=()
   )
   labels = document["metadata"].setdefault("labels", {})
@@ -335,10 +368,12 @@ def render_jobset(
   labels["canon.zero-tim/kv-unified"] = "1" if unified else "0"
   labels["canon.zero-tim/max-concurrency"] = str(max_concurrency)
   labels["canon.zero-tim/seam-observer"] = seam_mode or "0"
+  labels["canon.zero-tim/terminal-tail"] = "1" if terminal_tail else "0"
   p33.validate_jobset(document, effective_spec, source_commit, run_id)
   validate_capture_jobset(
       document, unified=unified, max_concurrency=max_concurrency,
       seam_mode=seam_mode, seam_layer=seam_layer,
+      terminal_tail=terminal_tail,
   )
   return document
 
@@ -347,6 +382,7 @@ def render_all(
     *, base_path: Path, output_dir: Path, source_commit: str, run_id: str,
     stock_only: bool = False, max_concurrency: int = 256,
     seam_mode: str = "", seam_layer: int | None = None,
+    terminal_tail: bool = False,
 ) -> tuple[Path, ...]:
   base = p33.load_base(base_path)
   output_dir.mkdir(parents=True, exist_ok=True)
@@ -356,6 +392,8 @@ def render_all(
     raise ValueError("P38 seam observer requires max concurrency 256")
   if seam_layer is not None and seam_mode != "full":
     raise ValueError("P38 seam layer requires --seam-mode=full")
+  if terminal_tail and seam_mode != "layer":
+    raise ValueError("P38 terminal tail requires --seam-mode=layer")
   specs = _SPECS[:1] if stock_only else _SPECS
   outputs = tuple(
       output_dir / f"jobset-p38-serving-{'unified' if unified else 'stock'}.yaml"
@@ -373,6 +411,7 @@ def render_all(
         max_concurrency=max_concurrency,
         seam_mode=seam_mode,
         seam_layer=seam_layer,
+        terminal_tail=terminal_tail,
     )
     header = (
         "# Generated by canon-zero-tim/cluster/render_p38_serving_jobsets.py.\n"
@@ -386,6 +425,7 @@ def render_all(
         f"arm={'unified' if unified else 'stock'} path={path}"
         f" max_concurrency={max_concurrency}"
         f" seam_mode={seam_mode or 'off'}"
+        f" terminal_tail={int(terminal_tail)}"
     )
   return outputs
 
@@ -406,6 +446,10 @@ def main() -> int:
   parser.add_argument(
       "--seam-layer", type=int,
       help="global layer index required only by --seam-mode=full",
+  )
+  parser.add_argument(
+      "--terminal-tail", action="store_true",
+      help="capture the bounded terminal tail; requires --seam-mode=layer",
   )
   parser.add_argument(
       "--max-concurrency",
@@ -429,6 +473,7 @@ def main() -> int:
       max_concurrency=args.max_concurrency,
       seam_mode=args.seam_mode,
       seam_layer=args.seam_layer,
+      terminal_tail=args.terminal_tail,
   )
   print(
       "[P38.SERVING.JOBSET] VERDICT PASS "

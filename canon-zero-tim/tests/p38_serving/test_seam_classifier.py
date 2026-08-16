@@ -76,6 +76,39 @@ class SeamClassifierTest(unittest.TestCase):
     )
     return root, capsule
 
+  def _write_tail(self, root: Path, mutate_checkpoint: int | None = 1):
+    seam = np.load(root / "p38_seam_000000.npz", allow_pickle=False)
+    prefix = np.asarray(seam["token_prefix_sha256"])
+    position = np.asarray(seam["positions"])
+    source_token = np.asarray(seam["token_ids"])
+    seam.close()
+    for index, arm in enumerate(("A", "B")):
+      values = np.zeros((1, len(classifier._TAIL_CHECKPOINTS)), np.float32)
+      values[0, -1] = 1.0 if arm == "A" else 1.5
+      if mutate_checkpoint is not None and arm == "B":
+        values[0, mutate_checkpoint] = 0.25
+      arrays = {
+          "row_indices": np.asarray([7], dtype=np.int32),
+          "positions": position,
+          "token_ids": source_token,
+          "request_ordinals": np.asarray([0], dtype=np.int32),
+          "token_prefix_sha256": prefix,
+          "logit_row_indices": np.asarray([9], dtype=np.int32),
+          "target_ids": np.asarray([22], dtype=np.int32),
+          "tail_values": values,
+      }
+      npz = root / f"p38_tail_{index:06d}.npz"
+      np.savez(npz, **arrays)
+      (root / f"p38_tail_{index:06d}.json").write_text(json.dumps({
+          "schema": "p38-tail-values-v1",
+          "record_index": index,
+          "arm": arm,
+          "diagnostic_round": 0,
+          "checkpoint_names": list(classifier._TAIL_CHECKPOINTS),
+          "array_keys": sorted(arrays),
+          "npz_sha256": classifier._sha256(npz),
+      }))
+
   def test_first_layer_output_difference_is_measured(self):
     with tempfile.TemporaryDirectory() as directory:
       root, capsule = self._write_fixture(Path(directory))
@@ -98,6 +131,41 @@ class SeamClassifierTest(unittest.TestCase):
       self.assertTrue(report["tail_localization_required"])
       self.assertEqual(report["joined_red_points"], 1)
       self.assertEqual(report["divergent_red_points"], 0)
+
+  def test_exact_hidden_chain_is_localized_by_required_tail(self):
+    with tempfile.TemporaryDirectory() as directory:
+      root, capsule = self._write_fixture(Path(directory), mutate=False)
+      self._write_tail(root, mutate_checkpoint=1)
+      report = classifier.classify(
+          root, [capsule], "layer", require_tail=True)
+      self.assertEqual(
+          report["classification"],
+          "decode_terminal_first_difference_measured",
+      )
+      first = report["joins"][0]["first_difference"]
+      self.assertEqual(first["checkpoint"], "raw_log_normalizer")
+      self.assertEqual(first["layer"], None)
+      self.assertEqual(first["max_abs"], 0.25)
+      self.assertFalse(report["tail_localization_required"])
+
+  def test_required_tail_rejects_capsule_endpoint_drift(self):
+    with tempfile.TemporaryDirectory() as directory:
+      root, capsule = self._write_fixture(Path(directory), mutate=False)
+      self._write_tail(root, mutate_checkpoint=None)
+      path = root / "p38_tail_000001.npz"
+      with np.load(path, allow_pickle=False) as archive:
+        arrays = {name: np.array(archive[name], copy=True)
+                  for name in archive.files}
+      arrays["tail_values"][0, -1] = 1.0
+      np.savez(path, **arrays)
+      metadata_path = root / "p38_tail_000001.json"
+      metadata = json.loads(metadata_path.read_text())
+      metadata["npz_sha256"] = classifier._sha256(path)
+      metadata_path.write_text(json.dumps(metadata))
+      with self.assertRaisesRegex(
+          classifier.SeamError, "differs from the mismatch capsule"
+      ):
+        classifier.classify(root, [capsule], "layer", require_tail=True)
 
   def test_missing_b_record_is_rejected(self):
     with tempfile.TemporaryDirectory() as directory:

@@ -69,6 +69,14 @@ class RenderP38ServingJobsetsTest(unittest.TestCase):
             env["CANON_P38_DIAGNOSTIC_ROUND_FILE"],
             f"{env['CANON_STATE']}/p38_diagnostic_round",
         )
+        self.assertEqual(
+            env["CANON_P38_ROUND_SEAL_REQUEST_DIR"],
+            f"{env['CANON_STATE']}/p38_round_seal_requests",
+        )
+        self.assertEqual(
+            env["CANON_P38_ROUND_SEAL_ACK_DIR"],
+            f"{env['CANON_STATE']}/p38_round_seal_acks",
+        )
         self.assertEqual(env["CANON_P38_MIN_ACTION_KV"], "1686")
         self.assertEqual(
             env["CANON_P38_SERVING_CAPTURE_FREE_SPACE_MULTIPLIER"], "5"
@@ -252,6 +260,38 @@ class RenderP38ServingJobsetsTest(unittest.TestCase):
       renderer.render_jobset(
           base, spec, _SOURCE, "invalid-layer", unified=unified,
           seam_mode="full", seam_layer=36,
+      )
+
+  def test_terminal_tail_is_explicit_and_layer_only(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      paths = renderer.render_all(
+          base_path=_BASE,
+          output_dir=Path(tmp),
+          source_commit=_SOURCE,
+          run_id="p38-tail",
+          stock_only=True,
+          seam_mode="layer",
+          terminal_tail=True,
+      )
+      document = yaml.safe_load(paths[0].read_text())
+      env = _env(document)
+      self.assertEqual(env["CANON_P38_TAIL_OBSERVER"], "1")
+      self.assertEqual(env["CANON_P38_TAIL_MAX_BYTES"], "268435456")
+      self.assertEqual(
+          document["metadata"]["labels"]["canon.zero-tim/terminal-tail"],
+          "1",
+      )
+      self.assertNotIn("CANON_P38_KV_OBSERVER_DIR", env)
+    with self.assertRaisesRegex(ValueError, "requires --seam-mode=layer"):
+      renderer.render_all(
+          base_path=_BASE,
+          output_dir=Path(tempfile.mkdtemp()),
+          source_commit=_SOURCE,
+          run_id="invalid-terminal-tail",
+          stock_only=True,
+          seam_mode="full",
+          seam_layer=17,
+          terminal_tail=True,
       )
 
   def test_rejects_capture_contract_drift(self):

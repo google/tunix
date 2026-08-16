@@ -44,6 +44,8 @@ $DOCKER run --rm \
     grep -Fq '_p38_kv_observer_after_standard' "$qwen1p7b_overlay/tpu_runner_p21_l30.py"
     grep -Fq 'p38-live-kv-prefix-table-v1' "$qwen1p7b_overlay/tpu_runner_p21_l30.py"
     grep -Fq '_p38_seam_after_model' "$qwen1p7b_overlay/tpu_runner_p21_l30.py"
+    grep -Fq '_p38_tail_after_decode' "$qwen1p7b_overlay/tpu_runner_p21_l30.py"
+    grep -Fq 'p38-tail-values-v1' "$qwen1p7b_overlay/p38_tail_capture.py"
     grep -Fq 'p38-seam-fingerprint-v1' "$qwen1p7b_overlay/p38_seam_capture.py"
     grep -Fq 'CANON_P38_SEAM_OBSERVER' "$qwen1p7b_overlay/qwen3.py"
     grep -Fq "\"layer\", \"full\"" "$qwen1p7b_overlay/qwen3.py"
@@ -73,6 +75,8 @@ $DOCKER run --rm \
     grep -Fq '_p38_kv_observer_after_standard' "$qwen8b_overlay/tpu_runner_p21_l30.py"
     grep -Fq 'p38-live-kv-prefix-table-v1' "$qwen8b_overlay/tpu_runner_p21_l30.py"
     grep -Fq '_p38_seam_after_model' "$qwen8b_overlay/tpu_runner_p21_l30.py"
+    grep -Fq '_p38_tail_after_decode' "$qwen8b_overlay/tpu_runner_p21_l30.py"
+    grep -Fq 'p38-tail-values-v1' "$qwen8b_overlay/p38_tail_capture.py"
     grep -Fq 'p38-seam-fingerprint-v1' "$qwen8b_overlay/p38_seam_capture.py"
     grep -Fq 'CANON_P38_SEAM_OBSERVER' "$qwen8b_overlay/qwen3.py"
     grep -Fq "\"layer\", \"full\"" "$qwen8b_overlay/qwen3.py"
@@ -87,5 +91,5 @@ $DOCKER run --rm \
     python3 -m py_compile "$qwen8b_overlay/tpu_runner_p21_l30.py"
     python3 canon-zero-tim/tests/p33_workloads/test_decode_logprob_chunking.py \
       --overlay "$qwen8b_overlay"
-    echo "P33_EXACT_IMAGE_PASS decode_chunk_cases=5 prompt_chunk_cases=5 runner_tests_per_overlay=29 overlays=2"
+    echo "P33_EXACT_IMAGE_PASS decode_chunk_cases=5 prompt_chunk_cases=5 runner_tests_per_overlay=32 overlays=2"
   '

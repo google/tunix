@@ -6,15 +6,15 @@
 - Definition of done: one source-pinned flag-on run reports exact
   `S_decode_vs_S_prefill`, exact `S_prefill_vs_T_old`, and exact
   `T_old_vs_T_current` before a strict full workload is admitted.
-- Active phase: P38.2q one-pass seam reduction. Automated snapshot
-  selection inventoried all 22 live snapshots and returned `INCONCLUSIVE` (no
-  snapshot satisfies the 2-round + SHA256SUMS + paired-NPZ gate: snapshot 000020
-  has only round 0, and snapshot 000021 lacks SHA256SUMS/paired-NPZs). Per
-  runbook rules, the run remains partial analysis-grade without weakening the
-  minimum round contract. The returned commit contains only a prose summary,
-  not the selector JSON or object listing. A local wrapper amendment now seals
-  rc=4 as an auditable selection-only bundle; publication and zero-TPU rerun
-  are pending.
+- Active phase: P38.2r single-run terminal seam-and-tail acquisition. P38.2q
+  inventoried all 22 P38s18l snapshots and found no eligible two-round source,
+  so P38s18l is retired as `INCONCLUSIVE_NO_ELIGIBLE_SNAPSHOT` rather than
+  repeatedly reduced. P38.2r's implementation is locally complete: the same
+  stock run captures layer/final-norm fingerprints and terminal target/log-
+  normalizer values, while each frozen round blocks until a self-contained GCS
+  bundle is uploaded and downloaded back successfully. Publication is
+  approved; the combined observer's local-v5p neutrality pair is still
+  pending, and no target launch is authorized yet.
 - Task directory:
   `canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/`.
 
@@ -152,6 +152,21 @@
   be rerun as a repair candidate.
 
 ## Current local implementation
+
+- P38.2r adds a default-off terminal-tail observer beside the existing layer
+  observer. It reads only already-materialized raw/processed logits, target
+  IDs, and production logprobs and returns compact selected-row scalars.
+- Every multi-round target precheck now performs a request/ACK durability
+  handshake. Round `n+1` cannot start until the survivor worker has staged,
+  SHA-checked, uploaded, downloaded, and verified round `n` and written
+  `ROUND_COMPLETE.json` last.
+- A one-host rehearsal is explicitly exempt from remote sealing and prints
+  `ROUND_SEAL_SKIPPED`; target preflight forbids that rehearsal flag.
+- Local gates: pinned Qwen3-1.7B and Qwen3-8B overlays each pass 32 exact-image
+  runner tests; the full P38 image suite passes 53 tests; fake-GCS durability,
+  postflight (including tail-required/missing-tail), alignment, syntax,
+  manifest, and diff checks pass. The real v5p off/on endpoint comparison is
+  the remaining gate.
 
 - P38 renderings now pin a unique attempt-0 evidence prefix under
   `gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/`.

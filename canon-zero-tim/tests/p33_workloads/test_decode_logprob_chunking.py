@@ -947,6 +947,96 @@ class DecodeLogprobChunkingTest(unittest.TestCase):
           "clean-B observer must compile outside maybe_forbid_compile")
       ancestor = parents.get(ancestor)
 
+  def test_terminal_tail_maps_decode_request_slot_to_fixed_m_row(self):
+    pending = {
+        "arm": "A",
+        "requests": [{
+            "dp_rank": 1,
+            "dp_request_slot": 2,
+            "position_range": [1800, 1801],
+        }],
+        "row_arrays": {
+            "request_ordinals": np.asarray([0], dtype=np.int32),
+            "positions": np.asarray([1800], dtype=np.int32),
+        },
+    }
+    production = SimpleNamespace(
+        logprobs=jnp.zeros((6, 1), dtype=jnp.float32))
+    with (
+        mock.patch.object(self.runner, "_P38_TAIL_ENABLED", True),
+        mock.patch.object(self.runner, "_P38_TAIL_PENDING", pending),
+        mock.patch.object(
+            self.runner, "_p38_tail_gather",
+            return_value=(np.zeros((1, 6), np.float32),
+                          np.asarray([42], np.int32), 1),
+        ) as gather,
+        mock.patch.object(self.runner, "_p38_tail_write") as write,
+    ):
+      self.runner._p38_tail_after_decode(
+          SimpleNamespace(dp_size=2),
+          jnp.zeros((6, 8), dtype=jnp.float32),
+          jnp.zeros((6, 8), dtype=jnp.float32),
+          jnp.zeros((6,), dtype=jnp.int32),
+          production,
+      )
+    np.testing.assert_array_equal(
+        gather.call_args.args[-1], np.asarray([5], dtype=np.int32))
+    self.assertEqual(write.call_args.args[0], [0])
+    self.assertEqual(write.call_args.args[1], [5])
+
+  def test_terminal_tail_maps_prompt_rows_into_dp_chunks(self):
+    pending = {
+        "arm": "B",
+        "row_indices": np.asarray([2, 7], dtype=np.int32),
+    }
+    production = SimpleNamespace(
+        logprobs=jnp.zeros((4, 1), dtype=jnp.float32))
+    with (
+        mock.patch.object(self.runner, "_P38_TAIL_ENABLED", True),
+        mock.patch.object(self.runner, "_P38_TAIL_PENDING", pending),
+        mock.patch.object(
+            self.runner, "_p38_tail_gather",
+            return_value=(np.zeros((2, 6), np.float32),
+                          np.asarray([42, 43], np.int32), 2),
+        ) as gather,
+    ):
+      part = self.runner._p38_tail_prompt_chunk(
+          jnp.zeros((4, 8), dtype=jnp.float32),
+          jnp.zeros((4, 8), dtype=jnp.float32),
+          jnp.zeros((4,), dtype=jnp.int32),
+          production,
+          2,
+          4,
+          2,
+          4,
+          2,
+      )
+    self.assertEqual(part[0], [0, 1])
+    self.assertEqual(part[1], [0, 3])
+    np.testing.assert_array_equal(
+        gather.call_args.args[-1], np.asarray([0, 3], dtype=np.int32))
+
+  def test_terminal_tail_gather_decomposes_the_selected_production_row(self):
+    raw = jnp.asarray([[1.0, 2.0, 3.0], [4.0, 6.0, 5.0]], jnp.float32)
+    processed = jnp.asarray(
+        [[0.5, 2.5, 3.5], [4.5, 7.0, 5.5]], jnp.float32)
+    targets = jnp.asarray([2, 1], jnp.int32)
+    production = jnp.asarray([-0.1, -0.2], jnp.float32)
+    values, observed_targets, bucket = self.runner._p38_tail_gather(
+        raw, processed, targets, production,
+        np.asarray([1], dtype=np.int32))
+    self.assertEqual(bucket, 1)
+    np.testing.assert_array_equal(observed_targets, np.asarray([1]))
+    expected = np.asarray([
+        6.0,
+        jax.scipy.special.logsumexp(raw[1]).item(),
+        7.0,
+        jax.scipy.special.logsumexp(processed[1]).item(),
+        (processed[1, 1] - jax.scipy.special.logsumexp(processed[1])).item(),
+        -0.2,
+    ], dtype=np.float32)
+    np.testing.assert_array_equal(values[0], expected)
+
 
 if __name__ == "__main__":
   parser = argparse.ArgumentParser()

@@ -1529,3 +1529,29 @@ reclassification from the committed NPZ inputs.
   overwrite refusal); selector 3/3; reducer 6/6; classifier 4/4; seam capture
   5/5; neutrality 3/3; P38 postflight PASS. No GCP rerun, TPU launch, backward,
   optimizer commit, repository commit, or push occurred in this checkpoint.
+
+## 2026-08-16 UTC — P38.2r terminal seam/tail implementation locally complete
+
+- Retired P38s18l as `INCONCLUSIVE_NO_ELIGIBLE_SNAPSHOT`; no prior snapshot is
+  promoted to a hidden-chain or tail verdict.
+- Added a default-off terminal observer that records raw/processed target
+  logits, raw/processed vocabulary normalizers, an independent target-logprob
+  decomposition, and the unchanged production endpoint for the same exact
+  round/token-prefix keys as the layer/final-norm observer.
+- Extended the official classifier to require all red actions to join both A/B
+  observers and to prove each captured production endpoint equals its mismatch
+  capsule before naming the first measured divergent region.
+- Added a per-round durability handshake: the learner requests sealing after a
+  completed frozen round and blocks until the survivor worker stages, hashes,
+  uploads, downloads, verifies, and acknowledges an immutable round bundle.
+  `ROUND_COMPLETE.json` is uploaded last.
+- Added a `seam-tail` one-host rehearsal mode. Remote round persistence is
+  explicitly skipped only under the already target-forbidden
+  `CANON_P38_ONEHOST_REHEARSAL=1` flag.
+- Gates passed: pinned-image manifest/install for Qwen3-1.7B and Qwen3-8B;
+  32 runner tests per overlay; full P38 image suite 53/53; round-stage,
+  classifier, terminal helper, renderer, postflight, fake-GCS abrupt-exit
+  durability, alignment, Python/shell syntax, and `git diff --check`.
+  The local-v5p off/on endpoint comparison remains pending after publication.
+- Publication was approved on 2026-08-16. No one-host TPU run, target TPU
+  launch, backward, or optimizer commit occurred before publication.

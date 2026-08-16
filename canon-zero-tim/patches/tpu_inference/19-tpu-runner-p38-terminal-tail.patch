@@ -1,0 +1,324 @@
+--- tpu_runner_p21_l30.py
++++ tpu_runner_p21_l30.py
+@@ -108,6 +108,7 @@
+     select_standard_seam_rows,
+     write_seam_record,
+ )
++from p38_tail_capture import P38_TAIL_CHECKPOINTS, write_tail_record
+ 
+ # Patch to classify specific non-LoRA keys as base weights. Without this, vLLM's `add_lora`
+ # crashes with "unsupported LoRA weight" on base model parameters like `lm_head.weight`
+@@ -311,6 +312,7 @@
+     rows_per_dp = rows // dp_size
+     chunks = []
+     chunk_rows = []
++    p38_tail_parts = []
+     for start in range(0, rows_per_dp, target_rows):
+         stop = min(start + target_rows, rows_per_dp)
+         rows_in_chunk = stop - start
+@@ -333,16 +335,32 @@
+         )
+         _, processed_logits = sample(
+             step_rng, mesh, chunk_logits, chunk_metadata)
+-        chunks.append(compute_and_gather_logprobs(
+-            processed_logits, chunk_target_ids, max_logprobs))
++        chunk_logprobs = compute_and_gather_logprobs(
++            processed_logits, chunk_target_ids, max_logprobs)
++        chunks.append(chunk_logprobs)
++        p38_tail_part = _p38_tail_prompt_chunk(
++            chunk_logits,
++            processed_logits,
++            chunk_target_ids,
++            chunk_logprobs,
++            dp_size,
++            rows_per_dp,
++            start,
++            stop,
++            target_rows,
++        )
++        if p38_tail_part is not None:
++            p38_tail_parts.append(p38_tail_part)
+         chunk_rows.append(rows_in_chunk)
+ 
+-    return (
++    result = (
+         _canon_restore_prompt_logprobs(
+             chunks, dp_size, target_rows, chunk_rows),
+         rows_per_dp,
+         len(chunks),
+     )
++    _p38_tail_finish_prompt(p38_tail_parts)
++    return result
+ 
+ 
+ def _canon_snapshot_prompt_logprobs(
+@@ -1018,6 +1036,19 @@
+     str(4 * 1024 * 1024 * 1024))
+ _P38_SEAM_STATE = {"records": 0, "bytes": 0}
+ _P38_SEAM_GATHER_FNS = {}
++_P38_TAIL_OBSERVER = os.environ.get("CANON_P38_TAIL_OBSERVER", "")
++_P38_TAIL_MAX_BYTES = int(os.environ.get(
++    "CANON_P38_TAIL_MAX_BYTES", str(256 * 1024 * 1024)) or
++    str(256 * 1024 * 1024))
++_P38_TAIL_STATE = {"records": 0, "bytes": 0}
++_P38_TAIL_PENDING = None
++_P38_TAIL_GATHER_FNS = {}
++
++if _P38_TAIL_OBSERVER not in ("", "0", "1"):
++    raise RuntimeError(
++        "CANON_P38_TAIL_OBSERVER must be unset, 0, or 1, got "
++        f"{_P38_TAIL_OBSERVER!r}")
++_P38_TAIL_ENABLED = _P38_TAIL_OBSERVER == "1"
+ 
+ if _P38_SEAM_OBSERVER not in ("", "layer", "full"):
+     raise RuntimeError(
+@@ -1152,6 +1183,16 @@
+         f"max_bytes={_P38_SEAM_MAX_BYTES}",
+         flush=True,
+     )
++if _P38_TAIL_ENABLED:
++    if _P38_SEAM_OBSERVER != "layer" or not _P38_SEAM_OBSERVER_DIR:
++        raise RuntimeError("P38 tail observer requires layer seam observation")
++    if not (1024 * 1024 <= _P38_TAIL_MAX_BYTES <= 1024 * 1024 * 1024):
++        raise RuntimeError("P38 tail observer output byte bound is invalid")
++    print(
++        "[CANON_P38_TAIL_OBSERVER_INIT] "
++        f"enabled=1 max_bytes={_P38_TAIL_MAX_BYTES}",
++        flush=True,
++    )
+ 
+ 
+ def _p18_leaf(x):
+@@ -2097,8 +2138,11 @@
+         runner, scheduler_output, req_ids_dp, input_ids, input_positions,
+         aux_hidden_states, padded_rows_per_dp):
+     """Persist compact seam fingerprints for every real deep-band token."""
++    global _P38_TAIL_PENDING
+     if not _P38_SEAM_OBSERVER_DIR:
+         return
++    if _P38_TAIL_ENABLED and _P38_TAIL_PENDING is not None:
++        raise RuntimeError("P38 prior tail observation was not consumed")
+     if not isinstance(aux_hidden_states, (tuple, list)) or len(
+             aux_hidden_states) != 2:
+         raise RuntimeError(
+@@ -2202,6 +2246,205 @@
+         f"npz_sha256={npz_sha256}",
+         flush=True,
+     )
++    if _P38_TAIL_ENABLED:
++        _P38_TAIL_PENDING = {
++            "arm": arm,
++            "call_index": call_index,
++            "diagnostic_round": _p38_seam_round(),
++            "requests": requests,
++            "row_arrays": row_arrays,
++            "row_indices": row_indices,
++        }
++
++
++def _p38_tail_gather(
++        raw_logits, processed_logits, target_ids, production_logprobs,
++        row_indices):
++    count = int(row_indices.size)
++    if count <= 0:
++        raise RuntimeError("P38 tail gather received no rows")
++    bucket = _p38_seam_next_power_of_two(count)
++    padded = np.full((bucket,), int(row_indices[-1]), dtype=np.int32)
++    padded[:count] = row_indices
++    gather_fn = _P38_TAIL_GATHER_FNS.get(bucket)
++    if gather_fn is None:
++        @jax.jit
++        def gather_fn(raw, processed, targets, production, indices):
++            raw_rows = jnp.take(raw, indices, axis=0)
++            processed_rows = jnp.take(processed, indices, axis=0)
++            target_rows = jnp.take(targets.reshape((-1,)), indices, axis=0)
++            production_rows = jnp.take(production, indices, axis=0)
++            raw_target = jnp.take_along_axis(
++                raw_rows, target_rows[:, None], axis=1)[:, 0]
++            processed_target = jnp.take_along_axis(
++                processed_rows, target_rows[:, None], axis=1)[:, 0]
++            raw_normalizer = jax.scipy.special.logsumexp(raw_rows, axis=-1)
++            processed_normalizer = jax.scipy.special.logsumexp(
++                processed_rows, axis=-1)
++            observer_logprob = processed_target - processed_normalizer
++            return jnp.stack((
++                raw_target,
++                raw_normalizer,
++                processed_target,
++                processed_normalizer,
++                observer_logprob,
++                production_rows,
++            ), axis=1), target_rows
++        _P38_TAIL_GATHER_FNS[bucket] = gather_fn
++    values, observed_targets = jax.device_get(gather_fn(
++        raw_logits,
++        processed_logits,
++        target_ids,
++        production_logprobs,
++        jnp.asarray(padded, dtype=jnp.int32),
++    ))
++    return (
++        np.asarray(values)[:count],
++        np.asarray(observed_targets, dtype=np.int32)[:count],
++        bucket,
++    )
++
++
++def _p38_tail_write(selected_offsets, logit_rows, values, target_ids, bucket):
++    global _P38_TAIL_PENDING
++    pending = _P38_TAIL_PENDING
++    if pending is None:
++        raise RuntimeError("P38 tail record has no pending seam context")
++    order = np.argsort(np.asarray(selected_offsets, dtype=np.int32))
++    offsets = np.asarray(selected_offsets, dtype=np.int32)[order]
++    if offsets.size == 0 or np.unique(offsets).size != offsets.size:
++        raise RuntimeError("P38 tail selected offsets are empty or duplicated")
++    row_arrays = pending["row_arrays"]
++    arrays = {
++        name: np.asarray(value)[offsets]
++        for name, value in row_arrays.items()
++    }
++    arrays.update({
++        "logit_row_indices": np.asarray(logit_rows, dtype=np.int32)[order],
++        "target_ids": np.asarray(target_ids, dtype=np.int32)[order],
++        "tail_values": np.asarray(values)[order],
++    })
++    record_index, digest = write_tail_record(
++        _P38_SEAM_OBSERVER_DIR,
++        _P38_TAIL_STATE,
++        arrays,
++        {
++            "arm": pending["arm"],
++            "call_index": pending["call_index"],
++            "checkpoint_names": P38_TAIL_CHECKPOINTS,
++            "diagnostic_round": pending["diagnostic_round"],
++            "gather_bucket": int(bucket),
++            "program_path": "standard",
++            "selected_rows": int(offsets.size),
++        },
++        _P38_TAIL_MAX_BYTES,
++    )
++    print(
++        "[CANON_P38_TAIL_OBSERVER_RECORD] "
++        f"record={record_index} arm={pending['arm']} "
++        f"call={pending['call_index']} rows={offsets.size} "
++        f"npz_sha256={digest}",
++        flush=True,
++    )
++    _P38_TAIL_PENDING = None
++
++
++def _p38_tail_after_decode(
++        runner, raw_logits, processed_logits, target_ids,
++        production_logprobs):
++    global _P38_TAIL_PENDING
++    if not _P38_TAIL_ENABLED:
++        return
++    pending = _P38_TAIL_PENDING
++    if pending is None or pending["arm"] != "A":
++        raise RuntimeError("P38 decode tail context is absent or not arm A")
++    if int(raw_logits.shape[0]) % int(runner.dp_size):
++        raise RuntimeError("P38 decode tail logits are not DP divisible")
++    rows_per_dp = int(raw_logits.shape[0]) // int(runner.dp_size)
++    selected_offsets = []
++    logit_rows = []
++    ordinals = pending["row_arrays"]["request_ordinals"]
++    positions = pending["row_arrays"]["positions"]
++    for selected_offset, request_ordinal in enumerate(ordinals):
++        request = pending["requests"][int(request_ordinal)]
++        if int(positions[selected_offset]) != int(request["position_range"][1]) - 1:
++            continue
++        logit_row = (
++            int(request["dp_rank"]) * rows_per_dp
++            + int(request["dp_request_slot"])
++        )
++        if not 0 <= logit_row < int(raw_logits.shape[0]):
++            raise RuntimeError("P38 decode tail logit-row mapping overflowed")
++        selected_offsets.append(selected_offset)
++        logit_rows.append(logit_row)
++    if not selected_offsets:
++        _P38_TAIL_PENDING = None
++        return
++    production = production_logprobs.logprobs[:, 0]
++    values, observed_targets, bucket = _p38_tail_gather(
++        raw_logits,
++        processed_logits,
++        target_ids,
++        production,
++        np.asarray(logit_rows, dtype=np.int32),
++    )
++    _p38_tail_write(
++        selected_offsets, logit_rows, values, observed_targets, bucket)
++
++
++def _p38_tail_prompt_chunk(
++        raw_logits, processed_logits, target_ids, production_logprobs,
++        dp_size, rows_per_dp, start, stop, target_rows):
++    if not _P38_TAIL_ENABLED:
++        return None
++    pending = _P38_TAIL_PENDING
++    if pending is None or pending["arm"] != "B":
++        raise RuntimeError("P38 prompt tail context is absent or not arm B")
++    selected_offsets = []
++    chunk_rows = []
++    for selected_offset, global_row in enumerate(pending["row_indices"]):
++        dp_rank, local_row = divmod(int(global_row), int(rows_per_dp))
++        if start <= local_row < stop:
++            selected_offsets.append(selected_offset)
++            chunk_rows.append(
++                dp_rank * int(target_rows) + local_row - int(start))
++    if not selected_offsets:
++        return None
++    values, observed_targets, bucket = _p38_tail_gather(
++        raw_logits,
++        processed_logits,
++        target_ids,
++        production_logprobs.logprobs[:, 0],
++        np.asarray(chunk_rows, dtype=np.int32),
++    )
++    return selected_offsets, chunk_rows, values, observed_targets, bucket
++
++
++def _p38_tail_finish_prompt(parts):
++    global _P38_TAIL_PENDING
++    if not _P38_TAIL_ENABLED:
++        return
++    if not parts:
++        _P38_TAIL_PENDING = None
++        return
++    selected_offsets = []
++    logit_rows = []
++    values = []
++    target_ids = []
++    bucket = 0
++    for offsets, rows, part_values, part_targets, part_bucket in parts:
++        selected_offsets.extend(offsets)
++        logit_rows.extend(rows)
++        values.append(part_values)
++        target_ids.append(part_targets)
++        bucket = max(bucket, int(part_bucket))
++    _p38_tail_write(
++        selected_offsets,
++        logit_rows,
++        np.concatenate(values, axis=0),
++        np.concatenate(target_ids, axis=0),
++        bucket,
++    )
+ 
+ 
+ def _p38_observe_scheduled_prefixes(prefixes, program_path):
+@@ -4332,6 +4575,14 @@
+                             self.model_config.max_logprobs,
+                             canon_logprob_m,
+                         ))
++                    if full_logits is None:
++                        _p38_tail_after_decode(
++                            self,
++                            logits,
++                            processed_logits,
++                            next_tokens,
++                            logprobs,
++                        )
+                     global _CANON_LOGPROB_M_ANNOUNCED
+                     global _CANON_LOGPROB_MULTI_CHUNK_ANNOUNCED
+                     should_announce = (not _CANON_LOGPROB_M_ANNOUNCED or

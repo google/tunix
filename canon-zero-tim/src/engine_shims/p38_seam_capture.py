@@ -74,7 +74,7 @@ def select_standard_seam_rows(
   expected = sum(int(value) for value in scheduled_tokens.values())
   for dp_rank in range(dp_size):
     offset = 0
-    for request_id in req_ids_dp.get(dp_rank, ()):
+    for dp_request_slot, request_id in enumerate(req_ids_dp.get(dp_rank, ())):
       count = int(scheduled_tokens.get(request_id, 0))
       if count <= 0:
         continue
@@ -115,6 +115,7 @@ def select_standard_seam_rows(
           "request_id": str(request_id),
           "request_index": request_index,
           "dp_rank": int(dp_rank),
+          "dp_request_slot": int(dp_request_slot),
           "packed_row_range": [
               int(dp_rank * int(padded_rows_per_dp) + offset),
               int(dp_rank * int(padded_rows_per_dp) + offset + count),

@@ -1,0 +1,156 @@
+# P38s18r terminal seam-and-tail runbook
+
+This is the only current operator card for the P38 root-cause lane. P38s18r is
+a 64-TPU (`DP16xTP4`) FrozenLake diagnostic, not full training: three
+frozen-weight rounds, backward zero, optimizer commits zero, stock arm only.
+
+Do not launch from an uncommitted tree. Do not edit the rendered YAML or add
+environment variables by hand. Do not rerun P38s18l/P38.2q.
+
+## 1. Publication and one-host gate
+
+After review, commit and push the P38.2r implementation. Record the full SHA as
+`SOURCE_COMMIT`. On the local v5p host, run observer-off and combined-observer
+arms from the exact same published source:
+
+```bash
+set -euo pipefail
+cd /home/yuxuan/code_rl_repro/sequence_packing/p48p49_integration
+SOURCE_COMMIT="$(git rev-parse HEAD)"
+test -z "$(git status --porcelain --untracked-files=no)"
+
+bash canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/run_p38_incident_onehost.sh \
+  off p38-2r-neutral-off
+bash canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/run_p38_incident_onehost.sh \
+  seam-tail p38-2r-neutral-on
+```
+
+Both commands must end with `PASS ... rounds=3 backward=0
+optimizer_commits=0`. The `seam-tail` arm must also print
+`TERMINAL_TAIL_PASS`. Compare all three immutable capsules:
+
+```bash
+python3 - <<'PY'
+from pathlib import Path
+import numpy as np
+
+root = Path('/mnt/disks/tunix-data/logp_probe_1host')
+off = root / 'p38_incident_p38-2r-neutral-off_off'
+on = root / 'p38_incident_p38-2r-neutral-on_seam-tail'
+names = ('selected_rows', 'completion_ids', 'action_mask',
+         's_decode', 's_prefill', 't_old')
+for round_index in range(3):
+  a_path = off / f'mismatch.round-{round_index:06d}.npz'
+  b_path = on / f'mismatch.round-{round_index:06d}.npz'
+  with np.load(a_path, allow_pickle=False) as a, \
+       np.load(b_path, allow_pickle=False) as b:
+    for name in names:
+      assert np.array_equal(a[name], b[name]), (round_index, name)
+print('[P38.2R] ONEHOST_NEUTRALITY_PASS rounds=3 arrays=6')
+PY
+```
+
+Any different token stream or endpoint is a failed neutrality gate. Stop; do
+not launch merely because the observer produced files.
+
+## 2. Render exactly one target JobSet
+
+Use a fresh output directory and source SHA. The renderer is the only admitted
+way to enable the combined observer:
+
+```bash
+set -euo pipefail
+cd /home/yuxuan/code_rl_repro/sequence_packing/p48p49_integration
+SOURCE_COMMIT="$(git rev-parse HEAD)"
+RUN_ID=p38s18r
+OUT="$(mktemp -d /tmp/p38s18r.XXXXXX)"
+
+python3 canon-zero-tim/cluster/render_p38_serving_jobsets.py \
+  --source-commit "$SOURCE_COMMIT" \
+  --run-id "$RUN_ID" \
+  --output-dir "$OUT" \
+  --stock-only \
+  --seam-mode layer \
+  --terminal-tail
+
+STOCK="$OUT/jobset-p38-serving-stock.yaml"
+test -s "$STOCK"
+test ! -e "$OUT/jobset-p38-serving-unified.yaml"
+kubectl apply --dry-run=server -f "$STOCK"
+```
+
+Before apply, the manifest must show stock, concurrency 256, diagnostic rounds
+3, seam mode `layer`, terminal tail `1`, and `maxRestarts: 0`. Prefix cache
+remains disabled by the profile. There is no KV-unified arm and no
+full-training admission.
+
+## 3. Apply and observe
+
+```bash
+kubectl apply -f "$STOCK"
+```
+
+Do not delete or restart the JobSet after a numerical red; A-B red is the
+expected diagnostic carrier. The process seals each round before the next
+begins. Require, in order:
+
+```text
+[CANON_P38] PRECHECK_ROUND_COMPLETE ...       # exactly 3
+[CANON_P38] ROUND_SEAL_REQUESTED ...          # exactly 3
+[CANON_P38] ROUND_SEAL_ACKNOWLEDGED ...       # exactly 3
+[P38.GCS] ROUND_COMPLETE ...                  # exactly 3, worker log
+[CANON_P38] PRECHECK_COMPLETE STOP_BEFORE_BACKWARD rounds=3
+[CANON_P38] CONTROLLED_EXIT code=42 backward=0 optimizer_commits=0
+[P38.GCS] LIVE_ACTION_ACKNOWLEDGED action=complete
+```
+
+Postflight must report one seam init, one tail init, positive A/B record counts,
+exact B-C in every round, zero backward, and zero optimizer commits.
+
+## 4. Required returned bytes
+
+The GCS root is printed in the rendered env and has the form:
+
+```text
+gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/<jobset>/attempt-0
+```
+
+Return the complete root, not selected excerpts. It must contain:
+
+```text
+PREFLIGHT.json
+COLLECTED.json
+COMPLETE.json
+SHA256SUMS
+serving-classification.json
+seam-classification.json
+serving-capture.tar
+mismatch-capsule.round-000000.npz
+mismatch-capsule.round-000001.npz
+mismatch-capsule.round-000002.npz
+rounds/000000/ROUND_COMPLETE.json
+rounds/000001/ROUND_COMPLETE.json
+rounds/000002/ROUND_COMPLETE.json
+```
+
+Each round directory must also include its own mismatch capsule,
+pre-alignment, request journal, incident ledger, all seam/tail JSON and NPZ
+pairs, `ROUND_INVENTORY.json`, and `SHA256SUMS`. Verify every manifest after
+download. A root SHA only proves the files listed there; it does not replace
+the three round manifests.
+
+## 5. Decision
+
+- first hidden layer input/output red: localize that earliest layer;
+- all hidden/final-norm fingerprints exact and raw target logit red: lm_head;
+- raw target exact and raw normalizer red: raw vocabulary reduction;
+- raw path exact and processed target/normalizer red: logits processing;
+- all prior values exact and production endpoint red: production
+  gather/subtraction/program tail;
+- any missing key/file/round, endpoint/capsule mismatch, observer drift, or
+  incomplete marker: `INCONCLUSIVE`, no cause claim and no repair selection.
+
+## 6. Rollback
+
+Do not pass `--terminal-tail` or any seam option. All new observers are
+default-off and are not part of P45 FrozenLake full training.

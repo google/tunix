@@ -183,17 +183,23 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
   : "${CANON_P38_LIVE_COMPLETE_REQUEST_FILE:?}"
   : "${CANON_P38_LIVE_COMPLETE_ACK_FILE:?}"
   : "${CANON_P38_DIAGNOSTIC_ROUND_FILE:?}"
+  : "${CANON_P38_ROUND_SEAL_REQUEST_DIR:?}"
+  : "${CANON_P38_ROUND_SEAL_ACK_DIR:?}"
   if [ -e "$CANON_P38_LIVE_SNAPSHOT_STOP_FILE" ] || \
      [ -e "$CANON_P38_LIVE_SNAPSHOT_WORKER_LOG" ] || \
      [ -e "$CANON_P38_LIVE_COLLECT_REQUEST_FILE" ] || \
      [ -e "$CANON_P38_LIVE_COLLECT_ACK_FILE" ] || \
      [ -e "$CANON_P38_LIVE_COMPLETE_REQUEST_FILE" ] || \
      [ -e "$CANON_P38_LIVE_COMPLETE_ACK_FILE" ] || \
-     [ -e "$CANON_P38_DIAGNOSTIC_ROUND_FILE" ]; then
+     [ -e "$CANON_P38_DIAGNOSTIC_ROUND_FILE" ] || \
+     [ -e "$CANON_P38_ROUND_SEAL_REQUEST_DIR" ] || \
+     [ -e "$CANON_P38_ROUND_SEAL_ACK_DIR" ]; then
     echo "[run] FATAL: P38 live snapshot state already exists" >&2
     exit 1
   fi
   (umask 077; printf '0\n' > "$CANON_P38_DIAGNOSTIC_ROUND_FILE")
+  mkdir -m 700 "$CANON_P38_ROUND_SEAL_REQUEST_DIR" \
+    "$CANON_P38_ROUND_SEAL_ACK_DIR"
   bash "$CANON_PKG/tasks/p38-pathways-decode-prefill-carrier/scripts/p38_live_snapshot_worker.sh" \
     > "$CANON_P38_LIVE_SNAPSHOT_WORKER_LOG" 2>&1 &
   p38_live_pid=$!
@@ -354,12 +360,17 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
       [ -s "$p38_seam_capsule" ] || continue
       p38_seam_args+=(--capsule "$p38_seam_capsule")
     done
+    p38_seam_tail_args=()
+    if [ "${CANON_P38_TAIL_OBSERVER:-0}" = "1" ]; then
+      p38_seam_tail_args+=(--require-tail)
+    fi
     echo "[CANON_P38_SEAM_INPUTS] source=$p38_seam_capsule_source capsules=$((${#p38_seam_args[@]} / 2)) mode=$CANON_P38_SEAM_OBSERVER"
     JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
       python3 "$CANON_PKG/tasks/p38-pathways-decode-prefill-carrier/scripts/classify_p38_seam.py" \
         --directory "$CANON_P38_SEAM_OBSERVER_DIR" \
         "${p38_seam_args[@]}" \
         --mode "$CANON_P38_SEAM_OBSERVER" \
+        "${p38_seam_tail_args[@]}" \
         --output "$CANON_P38_SEAM_CLASSIFICATION" || \
       p38_seam_rc=$?
     if [ -s "$CANON_P38_SEAM_CLASSIFICATION" ]; then
@@ -421,10 +432,13 @@ n_p38_kv_observer_a=$(grep -ac '^\[CANON_P38_KV_OBSERVER_RECORD\] arm=A ' "$LOG"
 n_p38_kv_observer_b=$(grep -ac '^\[CANON_P38_KV_OBSERVER_RECORD\] arm=B ' "$LOG" || true)
 n_p38_seam_init=$(grep -ac '^\[CANON_P38_SEAM_OBSERVER_INIT\] ' "$LOG" || true)
 n_p38_seam_records=$(grep -ac '^\[CANON_P38_SEAM_OBSERVER_RECORD\] ' "$LOG" || true)
+n_p38_tail_init=$(grep -ac '^\[CANON_P38_TAIL_OBSERVER_INIT\] ' "$LOG" || true)
+n_p38_tail_a=$(grep -ac '^\[CANON_P38_TAIL_OBSERVER_RECORD\] .* arm=A ' "$LOG" || true)
+n_p38_tail_b=$(grep -ac '^\[CANON_P38_TAIL_OBSERVER_RECORD\] .* arm=B ' "$LOG" || true)
 n_p38_coverage=$(grep -ac '^\[CANON_P38\] DIAGNOSTIC_COVERAGE_CONTRACT .*prompt_groups=32 .*unit_prompts=4 .*units=8 .*trajectories=256 .*partial_tail=reject verdict=PASS' "$LOG" || true)
 n_p38_standard_init=$(grep -ac '^\[CANON_P38_SERVING_CAPTURE_INIT\].*expected_path=standard' "$LOG" || true)
 n_p38_standard_observe=$(grep -aEc '^\[CANON_P38_SERVING_CAPTURE_OBSERVE\].*"program_path"[[:space:]]*:[[:space:]]*"standard"' "$LOG" || true)
-echo "[run] PATHTRACE fixed_ar=$n_ar embed=$n_emb logprob_m=$n_lp wandb_online=$n_wandb p34_wandb_online=$n_wandb_p34 eval_off=$n_eval_off eval_on=$n_eval_on p35_base=$n_p35_base p35_stop=$n_p35_stop p35_replay=$n_p35_replay p35_stage_begin=$n_p35_stage_begin p35_stage_ready=$n_p35_stage_ready p35_stage_complete=$n_p35_stage_complete p38_precheck=$n_p38_precheck p38_rounds=$n_p38_rounds p38_controlled_exit=$n_p38_controlled_exit p38_kv_unified=$n_p38_kv_unified p38_capture_init=$n_p38_capture_init p38_capture_observe=$n_p38_capture_observe p38_capture_error=$n_p38_capture_error p38_request_journal=$n_p38_request_journal p38_incident_ledger=$n_p38_incident_ledger p38_kv_observer_init=$n_p38_kv_observer_init p38_kv_observer_candidate=$n_p38_kv_observer_candidate p38_kv_observer_a=$n_p38_kv_observer_a p38_kv_observer_b=$n_p38_kv_observer_b p38_seam_init=$n_p38_seam_init p38_seam_records=$n_p38_seam_records p38_coverage=$n_p38_coverage"
+echo "[run] PATHTRACE fixed_ar=$n_ar embed=$n_emb logprob_m=$n_lp wandb_online=$n_wandb p34_wandb_online=$n_wandb_p34 eval_off=$n_eval_off eval_on=$n_eval_on p35_base=$n_p35_base p35_stop=$n_p35_stop p35_replay=$n_p35_replay p35_stage_begin=$n_p35_stage_begin p35_stage_ready=$n_p35_stage_ready p35_stage_complete=$n_p35_stage_complete p38_precheck=$n_p38_precheck p38_rounds=$n_p38_rounds p38_controlled_exit=$n_p38_controlled_exit p38_kv_unified=$n_p38_kv_unified p38_capture_init=$n_p38_capture_init p38_capture_observe=$n_p38_capture_observe p38_capture_error=$n_p38_capture_error p38_request_journal=$n_p38_request_journal p38_incident_ledger=$n_p38_incident_ledger p38_kv_observer_init=$n_p38_kv_observer_init p38_kv_observer_candidate=$n_p38_kv_observer_candidate p38_kv_observer_a=$n_p38_kv_observer_a p38_kv_observer_b=$n_p38_kv_observer_b p38_seam_init=$n_p38_seam_init p38_seam_records=$n_p38_seam_records p38_tail_init=$n_p38_tail_init p38_tail_a=$n_p38_tail_a p38_tail_b=$n_p38_tail_b p38_coverage=$n_p38_coverage"
 if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
   if [ "$n_p38_capture_init" -ne 1 ] || [ "$n_p38_capture_observe" -le 0 ]; then
     echo "[run] FATAL: P38 serving capture hook was not observed: init=$n_p38_capture_init observe=$n_p38_capture_observe" >&2
@@ -454,6 +468,12 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
        [ "${p38_seam_rc:-1}" -ne 0 ] || \
        [ ! -s "${CANON_P38_SEAM_CLASSIFICATION:-}" ]; }; then
     echo "[run] FATAL: P38 seam observer contract failed: init=$n_p38_seam_init records=$n_p38_seam_records classifier=${p38_seam_rc:-unset}" >&2
+    exit 1
+  fi
+  if [ "${CANON_P38_TAIL_OBSERVER:-0}" = "1" ] && \
+     { [ "$n_p38_tail_init" -ne 1 ] || [ "$n_p38_tail_a" -le 0 ] || \
+       [ "$n_p38_tail_b" -le 0 ]; }; then
+    echo "[run] FATAL: P38 terminal-tail observer contract failed: init=$n_p38_tail_init A=$n_p38_tail_a B=$n_p38_tail_b" >&2
     exit 1
   fi
   if [ "${p38_persist_rc:-1}" -ne 0 ]; then

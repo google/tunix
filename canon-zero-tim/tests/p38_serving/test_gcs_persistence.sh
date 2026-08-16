@@ -17,7 +17,8 @@ install_fake_gcloud() {
 
 make_case() {
   local root="$1" job="$2"
-  unset CANON_P38_KV_OBSERVER_DIR CANON_P38_KV_OBSERVER_CLASSIFICATION || true
+  unset CANON_P38_KV_OBSERVER_DIR CANON_P38_KV_OBSERVER_CLASSIFICATION \
+    CANON_P38_SEAM_OBSERVER_DIR CANON_P38_TAIL_OBSERVER || true
   mkdir -p "$root/state/capture"
   printf 'run\n' > "$root/state/run.log"
   printf '{}\n' > "$root/state/pre.jsonl"
@@ -35,6 +36,10 @@ make_case() {
   export CANON_P38_REQUEST_JOURNAL="$root/state/capture/p38_request_journal.jsonl"
   export CANON_P38_INCIDENT_LEDGER="$root/state/capture/p38_incident_ledger.jsonl"
   export CANON_P38_DIAGNOSTIC_ROUND_FILE="$root/state/p38_diagnostic_round"
+  export CANON_P38_ROUND_SEAL_REQUEST_DIR="$root/state/p38_round_seal_requests"
+  export CANON_P38_ROUND_SEAL_ACK_DIR="$root/state/p38_round_seal_acks"
+  mkdir -p "$CANON_P38_ROUND_SEAL_REQUEST_DIR" \
+    "$CANON_P38_ROUND_SEAL_ACK_DIR"
   export CANON_P38_SERVING_CAPTURE_CLASSIFICATION="$root/state/classification.json"
   export CANON_P38_SERVING_CAPTURE_ARCHIVE="$root/state/capture.tar"
   export CANON_P38_GCS_PREFIX="gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/$job/attempt-0"
@@ -167,6 +172,80 @@ find "$FAKE_GCS_ROOT" -path '*/live/*/p38_kv_observer_0000_a.json' \
 find "$FAKE_GCS_ROOT" -path '*/live/*/p38_kv_observer_0000_a.npz' \
   -type f | grep -q .
 
+install_fake_gcloud "$tmp/rounds"
+make_case "$tmp/rounds" canon-p38-test-rounds
+bash "$PERSIST" probe > "$tmp/rounds/probe.log"
+unset CANON_P38_KV_OBSERVER_DIR CANON_P38_KV_OBSERVER_CLASSIFICATION || true
+export CANON_P38_SEAM_OBSERVER_DIR="$tmp/rounds/state/capture"
+for round_index in 0 1; do
+  printf '{"diagnostic_round":%s}\n' "$round_index" \
+    >> "$CANON_PRE_ALIGN_REPORT"
+  printf '{"diagnostic_round":%s,"kind":"journal"}\n' "$round_index" \
+    >> "$CANON_P38_REQUEST_JOURNAL"
+  printf '{"diagnostic_round":%s,"kind":"incident"}\n' "$round_index" \
+    >> "$CANON_P38_INCIDENT_LEDGER"
+  printf 'capsule-%s\n' "$round_index" > \
+    "${CANON_P38_MISMATCH_CAPSULE%.npz}.round-$(printf '%06d' "$round_index").npz"
+  python3 - "$CANON_P38_SEAM_OBSERVER_DIR" "$round_index" <<'PY'
+import hashlib
+import json
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1])
+round_index = int(sys.argv[2])
+stem = root / f"p38_seam_{round_index:06d}"
+npz = pathlib.Path(str(stem) + ".npz")
+npz.write_bytes(f"seam-{round_index}\n".encode())
+pathlib.Path(str(stem) + ".json").write_text(json.dumps({
+    "diagnostic_round": round_index,
+    "npz_sha256": hashlib.sha256(npz.read_bytes()).hexdigest(),
+    "schema": "p38-seam-fingerprint-v1",
+}) + "\n", encoding="utf-8")
+PY
+done
+export CANON_P38_LIVE_SNAPSHOT_INTERVAL_SECONDS=1
+export CANON_P38_LIVE_SNAPSHOT_STOP_FILE="$tmp/rounds/state/live.stop"
+export CANON_P38_LIVE_COLLECT_REQUEST_FILE="$tmp/rounds/state/collect.request"
+export CANON_P38_LIVE_COLLECT_ACK_FILE="$tmp/rounds/state/collect.ack"
+export CANON_P38_LIVE_COMPLETE_REQUEST_FILE="$tmp/rounds/state/complete.request"
+export CANON_P38_LIVE_COMPLETE_ACK_FILE="$tmp/rounds/state/complete.ack"
+round_worker_log="$tmp/rounds/state/live-worker.log"
+bash "$ROOT/tasks/p38-pathways-decode-prefill-carrier/scripts/p38_live_snapshot_worker.sh" \
+  > "$round_worker_log" 2>&1 &
+round_worker_pid=$!
+for round_index in 0 1; do
+  request="$CANON_P38_ROUND_SEAL_REQUEST_DIR/round-$(printf '%06d' "$round_index").request"
+  python3 - "$request.partial" "$round_index" <<'PY'
+import json
+import pathlib
+import sys
+
+pathlib.Path(sys.argv[1]).write_text(json.dumps({
+    "action": "seal-round",
+    "diagnostic_round": int(sys.argv[2]),
+    "schema": "canon-p38-round-seal-request-v1",
+}, sort_keys=True) + "\n", encoding="utf-8")
+PY
+  mv "$request.partial" "$request"
+  ack="$CANON_P38_ROUND_SEAL_ACK_DIR/round-$(printf '%06d' "$round_index").ack"
+  for unused in 1 2 3 4 5 6 7 8 9 10; do
+    [ ! -s "$ack" ] || break
+    sleep 1
+  done
+  grep -q '"status": "PASS"' "$ack"
+done
+# Simulate the pod disappearing after round 1.  Neither final collect nor
+# COMPLETE is allowed to be necessary for the two sealed round bundles.
+kill "$round_worker_pid"
+wait "$round_worker_pid" || true
+round_remote="$FAKE_GCS_ROOT/yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-p38-test-rounds/attempt-0/rounds"
+for sequence in 000000 000001; do
+  test -s "$round_remote/$sequence/ROUND_COMPLETE.json"
+  (cd "$round_remote/$sequence" && sha256sum -c SHA256SUMS --quiet)
+done
+test ! -e "$FAKE_GCS_ROOT/yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-p38-test-rounds/attempt-0/COLLECTED.json"
+
 install_fake_gcloud "$tmp/out-of-order"
 make_case "$tmp/out-of-order" canon-p38-test-out-of-order
 bash "$PERSIST" probe > "$tmp/out-of-order/probe.log"
@@ -194,4 +273,4 @@ grep -q 'completion requested before collection acknowledgement' \
 test ! -e "$CANON_P38_LIVE_COMPLETE_ACK_FILE"
 test ! -e "$FAKE_GCS_ROOT/yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-p38-test-out-of-order/attempt-0/COMPLETE.json"
 
-echo "[P38.GCS] PERSISTENCE_TEST_PASS probe=verified prefix_reuse=rejected live=immutable worker=durable collected=verified complete=last out_of_order=rejected missing=rejected upload_failure=rejected"
+echo "[P38.GCS] PERSISTENCE_TEST_PASS probe=verified prefix_reuse=rejected live=immutable worker=durable round_bundles=survive_abrupt_exit collected=verified complete=last out_of_order=rejected missing=rejected upload_failure=rejected"

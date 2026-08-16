@@ -6,14 +6,14 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 WORKTREE="$(cd "$ROOT/.." && pwd)"
 cd "$WORKTREE"
 
-python3 -c "import ast,pathlib; files=('tunix/rl/dp_workloads.py','tunix/rl/agentic/agentic_grpo_learner.py','tunix/rl/canonical_qwen3_adapter.py','tunix/rl/envelope_probe.py','tunix/rl/p38_frozenlake_replay.py','canon-zero-tim/src/engine_shims/p38_kv_fingerprint.py','canon-zero-tim/cluster/render_p33_jobsets.py','canon-zero-tim/cluster/render_p35_jobset.py','canon-zero-tim/cluster/render_p38_aval_jobset.py','canon-zero-tim/cluster/render_p38_serving_jobsets.py','canon-zero-tim/tests/t1_tpu/probe_logprob_aval.py','canon-zero-tim/tests/p33_workloads/validate_workload.py','canon-zero-tim/tests/p33_workloads/classify_run.py','canon-zero-tim/tests/p33_workloads/test_dp_workloads.py','canon-zero-tim/tests/p33_workloads/test_decode_logprob_chunking.py','canon-zero-tim/tests/p33_workloads/test_render_p33_jobsets.py','canon-zero-tim/tests/p33_workloads/test_classify_run.py','canon-zero-tim/tests/p33_workloads/test_sampler_is_contract.py','canon-zero-tim/tests/p35_envelope/probe_memory_space_attestation.py','canon-zero-tim/tests/p35_envelope/test_render_p35_jobset.py','canon-zero-tim/tests/p38_aval/test_render_p38_aval_jobset.py','canon-zero-tim/tests/p38_serving/make_fixture.py','canon-zero-tim/tests/p38_serving/test_kv_fingerprint.py','canon-zero-tim/tests/p38_serving/test_render_p38_serving_jobsets.py','canon-zero-tim/tests/t1_tpu/test_probe_logprob_aval.py','tests/rl/canonical_qwen3_adapter_test.py','tests/rl/envelope_probe_test.py','tests/rl/p38_frozenlake_replay_test.py','examples/math_gsm8k/qwen3_grpo_demo.py','examples/frozenlake/train_frozenlake_qwen3.py'); [ast.parse(pathlib.Path(p).read_text(), filename=p) for p in files]"
+python3 -c "import ast,pathlib; files=('tunix/rl/dp_workloads.py','tunix/rl/agentic/agentic_grpo_learner.py','tunix/rl/canonical_qwen3_adapter.py','tunix/rl/envelope_probe.py','tunix/rl/p38_frozenlake_replay.py','canon-zero-tim/src/engine_shims/p38_kv_fingerprint.py','canon-zero-tim/src/engine_shims/p38_tail_capture.py','canon-zero-tim/cluster/render_p33_jobsets.py','canon-zero-tim/cluster/render_p35_jobset.py','canon-zero-tim/cluster/render_p38_aval_jobset.py','canon-zero-tim/cluster/render_p38_serving_jobsets.py','canon-zero-tim/tests/t1_tpu/probe_logprob_aval.py','canon-zero-tim/tests/p33_workloads/validate_workload.py','canon-zero-tim/tests/p33_workloads/classify_run.py','canon-zero-tim/tests/p33_workloads/test_dp_workloads.py','canon-zero-tim/tests/p33_workloads/test_decode_logprob_chunking.py','canon-zero-tim/tests/p33_workloads/test_render_p33_jobsets.py','canon-zero-tim/tests/p33_workloads/test_classify_run.py','canon-zero-tim/tests/p33_workloads/test_sampler_is_contract.py','canon-zero-tim/tests/p35_envelope/probe_memory_space_attestation.py','canon-zero-tim/tests/p35_envelope/test_render_p35_jobset.py','canon-zero-tim/tests/p38_aval/test_render_p38_aval_jobset.py','canon-zero-tim/tests/p38_serving/make_fixture.py','canon-zero-tim/tests/p38_serving/test_kv_fingerprint.py','canon-zero-tim/tests/p38_serving/test_render_p38_serving_jobsets.py','canon-zero-tim/tests/t1_tpu/test_probe_logprob_aval.py','tests/rl/canonical_qwen3_adapter_test.py','tests/rl/envelope_probe_test.py','tests/rl/p38_frozenlake_replay_test.py','examples/math_gsm8k/qwen3_grpo_demo.py','examples/frozenlake/train_frozenlake_qwen3.py'); [ast.parse(pathlib.Path(p).read_text(), filename=p) for p in files]"
 if grep -Fq "P35 first target admits only one local-M chunk" \
   tunix/rl/agentic/agentic_grpo_learner.py; then
   echo "[P35.ENVELOPE] learner retained the rejected single-chunk gate" >&2
   exit 1
 fi
 python3 -c "import ast,pathlib; files=('tunix/rl/alignment.py','tests/rl/alignment_test.py'); [ast.parse(pathlib.Path(p).read_text(), filename=p) for p in files]"
-python3 -c "import ast,pathlib; files=('canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/extract_p38_capsule.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/test_extract_p38_capsule.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/extract_p38_serving_archive.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/test_extract_p38_serving_archive.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/prepare_p38_frozenlake_replay.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/classify_p38_frozenlake_replay.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/test_classify_p38_frozenlake_replay.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/classify_p38_serving_capture.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/test_classify_p38_serving_capture.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/classify_p38_kv_observer.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/check_p38_intent_diff.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/test_check_p38_intent_diff.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/run_p38_kv_fingerprint_onehost.py'); [ast.parse(pathlib.Path(p).read_text(), filename=p) for p in files]"
+python3 -c "import ast,pathlib; files=('canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/extract_p38_capsule.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/test_extract_p38_capsule.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/extract_p38_serving_archive.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/test_extract_p38_serving_archive.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/prepare_p38_frozenlake_replay.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/classify_p38_frozenlake_replay.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/test_classify_p38_frozenlake_replay.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/classify_p38_serving_capture.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/test_classify_p38_serving_capture.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/classify_p38_kv_observer.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/classify_p38_seam.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/stage_p38_round.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/check_p38_intent_diff.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/test_check_p38_intent_diff.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/run_p38_kv_fingerprint_onehost.py'); [ast.parse(pathlib.Path(p).read_text(), filename=p) for p in files]"
 python3 -c "import ast,pathlib; files=('canon-zero-tim/tests/p35_envelope/classify_envelope.py','canon-zero-tim/tests/p35_envelope/test_classify_envelope.py','canon-zero-tim/tests/p35_envelope/classify_exact_replay.py','canon-zero-tim/tests/p35_envelope/test_classify_exact_replay.py','canon-zero-tim/tests/p35_envelope/classify_stage_probe.py','canon-zero-tim/tests/p35_envelope/test_classify_stage_probe.py'); [ast.parse(pathlib.Path(p).read_text(), filename=p) for p in files]"
 bash -n \
   canon-zero-tim/cluster/entrypoint.sh \
@@ -300,6 +300,8 @@ validate_p38_serving_preflight() (
   export CANON_P38_REQUEST_JOURNAL="$state/serving/p38_request_journal.jsonl"
   export CANON_P38_INCIDENT_LEDGER="$state/serving/p38_incident_ledger.jsonl"
   export CANON_P38_DIAGNOSTIC_ROUND_FILE="$state/p38_diagnostic_round"
+  export CANON_P38_ROUND_SEAL_REQUEST_DIR="$state/p38_round_seal_requests"
+  export CANON_P38_ROUND_SEAL_ACK_DIR="$state/p38_round_seal_acks"
   export CANON_P38_INCIDENT_MIN_PREFIX=1400
   export CANON_P38_INCIDENT_MAX_PREFIX=3072
   export CANON_P38_INCIDENT_MAX_BYTES=134217728
@@ -333,6 +335,8 @@ validate_p38_serving_preflight() (
   grep -q 'export CANON_P38_SERVING_CAPTURE_EXPECTED_PATH=standard' "$state/env.sh"
   grep -q 'export CANON_P38_CONTROLLED_EXIT=1' "$state/env.sh"
   grep -q 'export CANON_P38_DIAGNOSTIC_ROUNDS=3' "$state/env.sh"
+  grep -Fq "export CANON_P38_ROUND_SEAL_REQUEST_DIR=$state/p38_round_seal_requests" "$state/env.sh"
+  grep -Fq "export CANON_P38_ROUND_SEAL_ACK_DIR=$state/p38_round_seal_acks" "$state/env.sh"
   grep -q 'export CANON_P38_MIN_ACTION_KV=1686' "$state/env.sh"
   grep -Fq "export CANON_P38_GCS_PREFIX=$CANON_P38_GCS_PREFIX" "$state/env.sh"
 
@@ -384,6 +388,17 @@ validate_p38_serving_preflight() (
   bash "$ROOT/cluster/steps/00_env.sh" >/dev/null
   grep -q 'export CANON_P38_SEAM_OBSERVER=layer' "$state/env.sh"
   grep -q 'export CANON_P38_SEAM_MAX_BYTES=4294967296' "$state/env.sh"
+  export CANON_P38_TAIL_OBSERVER=1
+  export CANON_P38_TAIL_MAX_BYTES=268435456
+  bash "$ROOT/cluster/steps/00_env.sh" >/dev/null
+  grep -q 'export CANON_P38_TAIL_OBSERVER=1' "$state/env.sh"
+  export CANON_P38_TAIL_MAX_BYTES=1
+  if bash "$ROOT/cluster/steps/00_env.sh" >/dev/null 2>&1; then
+    echo "[P38.SERVING] preflight accepted drifted terminal-tail bounds" >&2
+    exit 1
+  fi
+  export CANON_P38_TAIL_MAX_BYTES=268435456
+  unset CANON_P38_TAIL_OBSERVER CANON_P38_TAIL_MAX_BYTES
   export CANON_P38_SEAM_OBSERVER=full
   if bash "$ROOT/cluster/steps/00_env.sh" >/dev/null 2>&1; then
     echo "[P38.SERVING] preflight accepted full seam mode without a layer" >&2
@@ -400,7 +415,8 @@ validate_p38_serving_preflight() (
   unset CANON_P38_SEAM_OBSERVER CANON_P38_SEAM_OBSERVER_DIR \
         CANON_P38_SEAM_MIN_POSITION CANON_P38_SEAM_MAX_POSITION \
         CANON_P38_SEAM_MAX_BYTES CANON_P38_SEAM_LAYER \
-        CANON_P38_SEAM_CLASSIFICATION
+        CANON_P38_SEAM_CLASSIFICATION CANON_P38_TAIL_OBSERVER \
+        CANON_P38_TAIL_MAX_BYTES
 
   export CANON_P38_SERVING_CAPTURE_EXPECTED_PATH=continue_decode
   if bash "$ROOT/cluster/steps/00_env.sh" >/dev/null 2>&1; then

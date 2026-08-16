@@ -2,13 +2,13 @@
 # Persist the in-pod P38 evidence before a controlled diagnostic exit.
 set -euo pipefail
 
-mode="${1:?usage: persist_p38_gcs.sh probe|snapshot|collect|complete [sequence]}"
+mode="${1:?usage: persist_p38_gcs.sh probe|snapshot|round|collect|complete [sequence]}"
 case "$mode" in
-  probe|snapshot|collect|complete) ;;
+  probe|snapshot|round|collect|complete) ;;
   *) echo "[P38.GCS] REFUSING: invalid mode: $mode" >&2; exit 2 ;;
 esac
 snapshot_sequence="${2:-}"
-if [ "$mode" = snapshot ]; then
+if [ "$mode" = snapshot ] || [ "$mode" = round ]; then
   case "$snapshot_sequence" in
     [0-9][0-9][0-9][0-9][0-9][0-9]) ;;
     *)
@@ -207,6 +207,8 @@ if [ "$mode" = snapshot ]; then
       "$observer_dir"/p38_kv_observer_*.npz
       "$observer_dir"/p38_seam_*.json
       "$observer_dir"/p38_seam_*.npz
+      "$observer_dir"/p38_tail_*.json
+      "$observer_dir"/p38_tail_*.npz
     )
     shopt -u nullglob
     if [ "${#observer_sources[@]}" -eq 0 ]; then
@@ -261,6 +263,99 @@ PY
   gcs_cp "$live_prefix/LIVE.json" "$verify"
   cmp -- "$live_stage/LIVE.json" "$verify"
   echo "[P38.GCS] LIVE sequence=$snapshot_sequence prefix=$live_prefix files=${live_files[*]}"
+  exit 0
+fi
+
+if [ "$mode" = round ]; then
+  round_index=$((10#$snapshot_sequence))
+  round_prefix="$CANON_P38_GCS_PREFIX/rounds/$snapshot_sequence"
+  round_stage="$CANON_STATE/p38_gcs_rounds/$snapshot_sequence"
+  if [ -e "$round_stage" ]; then
+    echo "[P38.GCS] REFUSING: local round stage already exists: $snapshot_sequence" >&2
+    exit 1
+  fi
+  if gcs_exists "$round_prefix/ROUND_COMPLETE.json"; then
+    echo "[P38.GCS] REFUSING: remote round already exists: $snapshot_sequence" >&2
+    exit 1
+  fi
+  observer_dir="${CANON_P38_SEAM_OBSERVER_DIR:-${CANON_P38_KV_OBSERVER_DIR:-${CANON_P38_SERVING_CAPTURE_DIR:-}}}"
+  if [ -z "$observer_dir" ]; then
+    echo "[P38.GCS] REFUSING: round sealing requires an observer directory" >&2
+    exit 1
+  fi
+  round_args=()
+  if [ -n "${CANON_P38_SEAM_OBSERVER:-}" ]; then
+    round_args+=(--require-seam)
+  fi
+  if [ -n "${CANON_P38_KV_OBSERVER_DIR:-}" ]; then
+    round_args+=(--require-kv)
+  fi
+  if [ "${CANON_P38_TAIL_OBSERVER:-0}" = "1" ]; then
+    round_args+=(--require-tail)
+  fi
+  python3 "$CANON_PKG/tasks/p38-pathways-decode-prefill-carrier/scripts/stage_p38_round.py" \
+    --round "$round_index" \
+    --output "$round_stage" \
+    --run-log "${CANON_RUN_LOG:?}" \
+    --pre-alignment "${CANON_PRE_ALIGN_REPORT:?}" \
+    --capsule "${CANON_P38_MISMATCH_CAPSULE:?}" \
+    --request-journal "${CANON_P38_REQUEST_JOURNAL:?}" \
+    --incident-ledger "${CANON_P38_INCIDENT_LEDGER:?}" \
+    --observer-dir "$observer_dir" \
+    "${round_args[@]}"
+  mapfile -t round_files < <(
+    cd "$round_stage"
+    find . -maxdepth 1 -type f ! -name 'SHA256SUMS' \
+      ! -name 'ROUND_COMPLETE.json' -printf '%f\n' | LC_ALL=C sort
+  )
+  if [ "${#round_files[@]}" -eq 0 ]; then
+    echo "[P38.GCS] REFUSING: round stage is empty" >&2
+    exit 1
+  fi
+  (
+    cd "$round_stage"
+    sha256sum "${round_files[@]}" > SHA256SUMS
+    sha256sum -c SHA256SUMS --quiet
+  )
+  for name in "${round_files[@]}" SHA256SUMS; do
+    gcs_cp "$round_stage/$name" "$round_prefix/$name"
+    echo "[P38.GCS] ROUND_UPLOADED round=$round_index name=$name bytes=$(wc -c < "$round_stage/$name" | tr -d '[:space:]')"
+  done
+  verify_dir="$(mktemp -d)"
+  trap 'rm -rf "$verify_dir"' EXIT
+  gcs_cp "$round_prefix/SHA256SUMS" "$verify_dir/SHA256SUMS"
+  for name in "${round_files[@]}"; do
+    gcs_cp "$round_prefix/$name" "$verify_dir/$name"
+  done
+  (cd "$verify_dir" && sha256sum -c SHA256SUMS --quiet)
+  manifest_sha="$(sha256sum "$round_stage/SHA256SUMS" | awk '{print $1}')"
+  python3 - "$round_stage/ROUND_COMPLETE.json.partial" "$round_index" \
+    "$manifest_sha" <<'PY'
+import json
+import os
+import pathlib
+import sys
+
+target = pathlib.Path(sys.argv[1])
+record = {
+    "attempt": os.environ.get("JOBSET_RESTART_ATTEMPT", "unknown"),
+    "diagnostic_round": int(sys.argv[2]),
+    "manifest_sha256": sys.argv[3],
+    "schema": "canon-p38-round-completion-v1",
+    "source_commit": os.environ.get("CANON_EXPECT_COMMIT", "unknown"),
+    "status": "sealed-and-verified",
+}
+target.write_text(json.dumps(record, sort_keys=True) + "\n", encoding="utf-8")
+PY
+  mv -- "$round_stage/ROUND_COMPLETE.json.partial" \
+    "$round_stage/ROUND_COMPLETE.json"
+  gcs_cp "$round_stage/ROUND_COMPLETE.json" \
+    "$round_prefix/ROUND_COMPLETE.json"
+  gcs_cp "$round_prefix/ROUND_COMPLETE.json" \
+    "$verify_dir/ROUND_COMPLETE.json"
+  cmp -- "$round_stage/ROUND_COMPLETE.json" \
+    "$verify_dir/ROUND_COMPLETE.json"
+  echo "[P38.GCS] ROUND_COMPLETE round=$round_index prefix=$round_prefix manifest_sha256=$manifest_sha"
   exit 0
 fi
 

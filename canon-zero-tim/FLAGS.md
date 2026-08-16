@@ -3,7 +3,7 @@
 > 政策:**建 flag 自由但必须登记(带日落条件);删 flag 有序按日落执行。**
 > 焊死数值类 flag = 删代码路径 = 程序变更,走与开启同级认证门(verify+ALIGN+canary)。
 > 生命周期档位:试验 → 已认证 → 默认开 → 焊死(开关可删)→ 退役/否决。
-> 普查基点 a94d6c0c(285 个可设置 env flag,与 ebba4850 普查零漂移);本表分层登记,
+> 普查基点 a94d6c0c(285 个可设置 env flag,与 ebba4850 普查零漂移);当前附录 289 个;本表分层登记,
 > D 层按前缀组、语义欠账标"待考古"。
 > 全量机器清单:落地 CL 时由 `grep -rhoE` 生成为附录,条目数必须 == 普查数(排除项列明)。
 
@@ -257,6 +257,8 @@ CANON_P38_MISMATCH_CAPSULE_MAX_ROWS
 CANON_P38_ONEHOST_REHEARSAL
 CANON_P38_PRECHECK_ONLY
 CANON_P38_REQUEST_JOURNAL
+CANON_P38_ROUND_SEAL_ACK_DIR
+CANON_P38_ROUND_SEAL_REQUEST_DIR
 CANON_P38_SEAM_CLASSIFICATION
 CANON_P38_SEAM_LAYER
 CANON_P38_SEAM_MAX_BYTES
@@ -273,6 +275,8 @@ CANON_P38_SERVING_CAPTURE_FREE_SPACE_MULTIPLIER
 CANON_P38_SERVING_CAPTURE_MAX_CALLS
 CANON_P38_SERVING_CAPTURE_MIN_PREFIX
 CANON_P38_SERVING_CAPTURE_PREFIX_BOUNDS
+CANON_P38_TAIL_MAX_BYTES
+CANON_P38_TAIL_OBSERVER
 CANON_P39_64CHIP_PILOT
 CANON_P39_PILOT_ADMITTED
 CANON_P41_OPTIMIZER_BENCH
@@ -358,4 +362,4 @@ CANON_XPROF_SKIP_STEPS
 CANON_XPROF_STEPS
 ```
 
-Count: 285 settable names (regenerate with the grep in tasks/canon_system_redesign/phase0_indexes.md; exclusions: none).
+Count: 289 settable names (regenerate with the grep in tasks/canon_system_redesign/phase0_indexes.md; exclusions: none).

@@ -2,9 +2,9 @@
 # Rehearse the P38 multi-round incident hook on real Qwen3-8B DP1xTP4.
 set -euo pipefail
 
-mode="${1:?usage: run_p38_incident_onehost.sh off|on|seam-layer <unique-label>}"
-label="${2:?usage: run_p38_incident_onehost.sh off|on|seam-layer <unique-label>}"
-case "$mode" in off|on|seam-layer) ;; *) echo "invalid mode: $mode" >&2; exit 2 ;; esac
+mode="${1:?usage: run_p38_incident_onehost.sh off|on|seam-layer|seam-tail <unique-label>}"
+label="${2:?usage: run_p38_incident_onehost.sh off|on|seam-layer|seam-tail <unique-label>}"
+case "$mode" in off|on|seam-layer|seam-tail) ;; *) echo "invalid mode: $mode" >&2; exit 2 ;; esac
 case "$label" in *[!a-zA-Z0-9_-]*|'') echo "invalid label: $label" >&2; exit 2 ;; esac
 
 script_dir="$(cd "$(dirname "$0")" && pwd)"
@@ -85,7 +85,7 @@ if [ "$mode" = on ]; then
     -e CANON_P38_KV_OBSERVER_MAX_BYTES=134217728
     -e CANON_P38_KV_OBSERVER_MAX_READ_BYTES=671088640
   )
-elif [ "$mode" = seam-layer ]; then
+elif [ "$mode" = seam-layer ] || [ "$mode" = seam-tail ]; then
   capture_env+=(
     -e CANON_P38_SEAM_OBSERVER=layer
     -e CANON_P38_SEAM_OBSERVER_DIR="$capture"
@@ -93,6 +93,12 @@ elif [ "$mode" = seam-layer ]; then
     -e CANON_P38_SEAM_MAX_POSITION=1600
     -e CANON_P38_SEAM_MAX_BYTES=536870912
   )
+  if [ "$mode" = seam-tail ]; then
+    capture_env+=(
+      -e CANON_P38_TAIL_OBSERVER=1
+      -e CANON_P38_TAIL_MAX_BYTES=268435456
+    )
+  fi
 fi
 
 set +e
@@ -223,7 +229,7 @@ PY
     --output "$state/p38_kv_observer.classification.json"
   grep -q '"classification": "observer_pairs_valid_red_join_pending"' \
     "$state/p38_kv_observer.classification.json"
-elif [ "$mode" = seam-layer ]; then
+elif [ "$mode" = seam-layer ] || [ "$mode" = seam-tail ]; then
   grep -q '^\[CANON_P38_SEAM_OBSERVER_INIT\] enabled=1 mode=layer ' "$raw"
   grep -q '^\[CANON_P38_SEAM_OBSERVER_RECORD\] ' "$raw"
   python3 - "$capture" <<'PY'
@@ -252,6 +258,33 @@ print(
     f"records={len(records)} observed_rounds={sorted(rounds)} endpoint_rounds=3"
 )
 PY
+  if [ "$mode" = seam-tail ]; then
+    grep -q '^\[CANON_P38_TAIL_OBSERVER_INIT\] enabled=1 ' "$raw"
+    grep -q '^\[CANON_P38_TAIL_OBSERVER_RECORD\] ' "$raw"
+    python3 - "$capture" <<'PY'
+import hashlib, json, pathlib, sys
+import numpy as np
+
+root = pathlib.Path(sys.argv[1])
+records = [json.loads(path.read_text()) for path in sorted(
+    root.glob("p38_tail_*.json"))]
+assert records, "P38 one-host terminal-tail observer produced no records"
+assert {record["arm"] for record in records} == {"A", "B"}
+rounds = {record["diagnostic_round"] for record in records}
+assert rounds and rounds <= {0, 1, 2}, rounds
+for record in records:
+  assert record["schema"] == "p38-tail-values-v1"
+  npz = root / f"p38_tail_{record['record_index']:06d}.npz"
+  assert hashlib.sha256(npz.read_bytes()).hexdigest() == record["npz_sha256"]
+  with np.load(npz) as arrays:
+    assert set(arrays.files) == set(record["array_keys"])
+    assert arrays["tail_values"].shape[1] == 6
+print(
+    "[P38.INCIDENT.ONEHOST] TERMINAL_TAIL_PASS "
+    f"records={len(records)} observed_rounds={sorted(rounds)}"
+)
+PY
+  fi
 fi
 sha256sum "$raw" "$pre_report" "$round_file" "$0"
 echo "[P38.INCIDENT.ONEHOST] PASS mode=$mode rounds=3 backward=0 optimizer_commits=0"

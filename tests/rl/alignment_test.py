@@ -332,6 +332,8 @@ class AlignmentTest(absltest.TestCase):
         alignment, "_P38_DIAGNOSTIC_ROUNDS_COMPLETED", 0
     ), mock.patch.object(
         alignment, "_publish_p38_diagnostic_round"
+    ), mock.patch.object(
+        alignment, "_seal_p38_diagnostic_round"
     ), contextlib.redirect_stdout(stdout):
       for expected_completed in (1, 2):
         with self.assertRaises(alignment.P38DiagnosticRoundComplete):
@@ -354,6 +356,38 @@ class AlignmentTest(absltest.TestCase):
           clear=False,
       ), self.assertRaises(alignment.AlignmentGateError):
         alignment.p38_diagnostic_rounds()
+
+  def test_p38_onehost_rehearsal_explicitly_skips_remote_round_seal(self):
+    stdout = io.StringIO()
+    with mock.patch.dict(
+        os.environ,
+        {
+            alignment.P38_ONEHOST_REHEARSAL_ENV: "1",
+            alignment.P38_ROUND_SEAL_REQUEST_DIR_ENV: "",
+            alignment.P38_ROUND_SEAL_ACK_DIR_ENV: "",
+        },
+        clear=False,
+    ), contextlib.redirect_stdout(stdout):
+      alignment._seal_p38_diagnostic_round(1)
+    self.assertIn(
+        "ROUND_SEAL_SKIPPED round=1 scope=onehost-rehearsal",
+        stdout.getvalue(),
+    )
+
+  def test_p38_target_round_seal_does_not_accept_partial_configuration(self):
+    with tempfile.TemporaryDirectory() as tmpdir, mock.patch.dict(
+        os.environ,
+        {
+            alignment.P38_ONEHOST_REHEARSAL_ENV: "0",
+            alignment.P38_ROUND_SEAL_REQUEST_DIR_ENV: tmpdir,
+            alignment.P38_ROUND_SEAL_ACK_DIR_ENV: "",
+        },
+        clear=False,
+    ), self.assertRaisesRegex(
+        alignment.AlignmentGateError,
+        "requires round-seal request and acknowledgement dirs",
+    ):
+      alignment._seal_p38_diagnostic_round(0)
 
   def test_p38_diagnostic_precheck_rejects_bc_red(self):
     record = {
@@ -1191,6 +1225,8 @@ class AlignmentTest(absltest.TestCase):
         clear=False,
     ), mock.patch.object(
         alignment, "_P38_DIAGNOSTIC_ROUNDS_COMPLETED", 0
+    ), mock.patch.object(
+        alignment, "_seal_p38_diagnostic_round"
     ):
       first = alignment.check_pre_backward(
           wrapped, step=0, fail_closed=False
