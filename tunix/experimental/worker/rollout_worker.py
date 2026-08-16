@@ -74,6 +74,8 @@ class RolloutWorker(abstract_worker.Worker):
     self.worker_id = worker_id
     self.config = config
     self._policy_version = 0
+    self._state = datatypes.WorkerState.PENDING
+    self._sync_round = {"req_id": None, "uuid": 0, "phase": "idle"}
     if tokenizer is None or chat_parser is None:
       raise ValueError(
           "RolloutWorker requires valid tokenizer and chat_parser arguments"
@@ -447,29 +449,57 @@ class RolloutWorker(abstract_worker.Worker):
       yield self._to_rollout_response(res)
 
   async def pre_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
-    """Prepares the worker for an upcoming weight synchronization step."""
+    """Quiesces the worker; it stays SYNCING until post or abort."""
     if self.state == WorkerState.PENDING:
       self.initialize()
     self.state = WorkerState.SYNCING
-    try:
-      return await self.manager.pre_weight_sync(sync_request, **kwargs)
-    finally:
-      self.state = WorkerState.READY
+    self._record_round(sync_request, "idle")
+    result = await self.manager.pre_weight_sync(sync_request, **kwargs)
+    self._record_round(sync_request, "prepared")
+    return result
 
   async def weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
-    """Synchronizes the worker's internal model weights."""
+    """Materializes the received weights; the worker stays SYNCING."""
     if self.state == WorkerState.PENDING:
       self.initialize()
     self.state = WorkerState.SYNCING
-    try:
-      metadata = kwargs.pop("metadata", None)
-      request = sync_request if sync_request is not None else metadata
-      result = await self.manager.weight_sync(request, **kwargs)
-      self._policy_version += 1
-      return result
-    finally:
-      self.state = WorkerState.READY
+    metadata = kwargs.pop("metadata", None)
+    request = sync_request if sync_request is not None else metadata
+    result = await self.manager.weight_sync(request, **kwargs)
+    self._policy_version += 1
+    self._record_round(sync_request, "h2d_done")
+    return result
 
   async def post_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
-    """Finalizes policy weight update and resumes workers."""
-    return await self.manager.post_weight_sync(sync_request, **kwargs)
+    """Publishes the new weights and resumes serving."""
+    result = await self.manager.post_weight_sync(sync_request, **kwargs)
+    self.state = WorkerState.READY
+    self._record_round(sync_request, "committed")
+    return result
+
+  async def bind_weight_sync(self, **kwargs) -> Any:
+    """No-op; the sampler binds its transport at engine init."""
+    return None
+
+  async def get_weight_sync_metadata(self, **kwargs) -> Any:
+    """Returns the sampler's transport metadata via the manager."""
+    return await self.manager.get_weight_sync_metadata(**kwargs)
+
+  async def abort_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
+    """Discards the round and resumes serving the previous weights."""
+    self.manager.resume_all()
+    self.manager.reopen_admission()
+    self.state = WorkerState.READY
+    self._record_round(sync_request, "aborted")
+    return None
+
+  async def get_weight_sync_status(self, **kwargs) -> Any:
+    """Returns this worker's view of the current weight sync round."""
+    return dict(self._sync_round, policy_version=self._policy_version)
+
+  def _record_round(self, sync_request: Any, phase: str) -> None:
+    extra = getattr(sync_request, "extra_config", None) or {}
+    if extra.get("req_id") is not None:
+      self._sync_round["req_id"] = extra.get("req_id")
+      self._sync_round["uuid"] = extra.get("uuid", 0)
+    self._sync_round["phase"] = phase

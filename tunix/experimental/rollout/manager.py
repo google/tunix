@@ -22,6 +22,7 @@ from tunix.experimental.rollout import collector as collector_lib
 from tunix.experimental.rollout import sampler as sampler_lib
 from tunix.experimental.rollout import vanilla_sampler_adapter
 from tunix.experimental.trajectory import trajectory as trajectory_lib
+from tunix.experimental.worker import traffic_controller as traffic_controller_lib
 from tunix.rl.rollout import base_rollout
 
 TrajectoryOrError = Union[
@@ -45,6 +46,7 @@ class RolloutManager:
       max_concurrency: int = 64,
       tokenizer: Any = None,
       chat_parser: Any = None,
+      drain_timeout_s: float = 300.0,
   ):
     self.config = config
     if sampler is None:
@@ -89,6 +91,8 @@ class RolloutManager:
     ] = {}
     self._active_tasks: Dict[str, asyncio.Task[Any]] = {}
     self._completed_queue: asyncio.Queue[TrajectoryOrError] = asyncio.Queue()
+    self._traffic = traffic_controller_lib.TrafficController()
+    self._drain_timeout_s = drain_timeout_s
 
   async def _generate_one(
       self,
@@ -96,6 +100,8 @@ class RolloutManager:
       on_complete: Optional[Callable[[TrajectoryOrError], None]] = None,
   ) -> TrajectoryOrError:
     """Spawns an async task running the multi-turn episode loop concurrently."""
+    if not self._traffic.is_admission_open():
+      raise RuntimeError("rollout admission is closed during weight sync")
     loop = asyncio.get_running_loop()
     future: asyncio.Future[TrajectoryOrError] = loop.create_future()
 
@@ -245,10 +251,18 @@ class RolloutManager:
     for task in self._active_tasks.values():
       task.cancel()
 
+  def reopen_admission(self) -> bool:
+    """Reopens request admission after a weight sync round."""
+    return self._traffic.reopen()
+
   async def pre_weight_sync(
       self, sync_request: sampler_lib.WeightSyncRequest | Any = None, **kwargs
   ) -> Any:
-    """Phase 3 Barrier 1: Pauses active collectors and checks staging."""
+    """Phase 3 Barrier 1: Closes admission and drains in-flight work."""
+    self._traffic.transition_to_syncing()
+    tasks = list(self._active_tasks.values())
+    if tasks:
+      await asyncio.wait(tasks, timeout=self._drain_timeout_s)
     self.pause_all()
     if self.sampler:
       return await self.sampler.pre_weight_sync(sync_request, **kwargs)
@@ -273,4 +287,11 @@ class RolloutManager:
     if self.sampler:
       res = await self.sampler.post_weight_sync(sync_request, **kwargs)
     self.resume_all()
+    self._traffic.reopen()
     return res
+
+  async def get_weight_sync_metadata(self, **kwargs) -> Any:
+    """Returns the sampler's transport metadata for weight sync registration."""
+    if self.sampler:
+      return await self.sampler.get_weight_sync_metadata(**kwargs)
+    return []
