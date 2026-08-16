@@ -1250,6 +1250,7 @@ def check_pre_backward(
   record = {
       "timestamp": time.time(),
       "step": int(step),
+      "diagnostic_round": int(step),
       "verdict": verdict,
       "reds": reds,
       "blocking_reds": blocking_reds,

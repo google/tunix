@@ -26,6 +26,19 @@
 
 ## Latest target facts
 
+- P38s18r/source `6b75e3cf4942` ran on 64 TPU (`DP16xTP4`, Concurrency 256,
+  3 Frozen Rounds, Seam Mode `layer`, Terminal Tail `1`) with zero backward,
+  zero optimizer commits, and all 6 overlays verified by SHA256.
+  - Precheck Round 0 completed with full 32-prompt coverage (`N_action=46,098`):
+    - B-C boundary (`S_prefill` vs `T_old`): STRICT EXACT 0 mismatch bytes.
+    - A-B boundary (`S_decode` vs `S_prefill`): exactly 30 mismatch bytes.
+    - Seam and Tail probe data: 360+ NPZ records generated and live-uploaded.
+  - Durability seal timeout error:
+    - At end of Round 0, `stage_p38_round.py` failed with `ValueError: no round 0 records in pre_alignment.jsonl` because `pre_alignment.jsonl` contained `"step": 0` while `_filter_jsonl` strictly looked for `"diagnostic_round"`.
+    - Main thread timed out after 900s: `timed out waiting for P38 round 0 durability acknowledgement`.
+    - Fix implemented: `_filter_jsonl` in `stage_p38_round.py` updated to check `diagnostic_round` and fallback to `step`, and `tunix/rl/alignment.py` updated to write `diagnostic_round: int(step)`.
+  - Artifact report: `artifacts/p38s18r_round0_seal_error_report.md`.
+
 - P38s18l/source `9a83457417fc` ran at Concurrency 256 / DP16xTP4 with zero
   backward and zero optimizer commits, but did not complete its registered
   three-round contract.

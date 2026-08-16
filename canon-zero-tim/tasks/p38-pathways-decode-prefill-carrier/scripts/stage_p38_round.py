@@ -35,7 +35,13 @@ def _filter_jsonl(source: Path, destination: Path, round_index: int) -> int:
       raise ValueError(
           f"invalid JSONL record in {source}:{line_number}"
       ) from exc
-    if int(record.get("diagnostic_round", -1)) == round_index:
+    diag_round = record.get("diagnostic_round")
+    if diag_round is None:
+      diag_round = record.get("step")
+    if diag_round is not None:
+      if int(diag_round) == round_index:
+        selected.append(json.dumps(record, sort_keys=True))
+    else:
       selected.append(json.dumps(record, sort_keys=True))
   _require(selected, f"no round {round_index} records in {source}")
   destination.write_text("\n".join(selected) + "\n", encoding="utf-8")

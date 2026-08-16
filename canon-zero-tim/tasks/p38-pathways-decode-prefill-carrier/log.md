@@ -1595,3 +1595,19 @@ reclassification from the committed NPZ inputs.
   any non-timestamp alignment field.
 - One 64-TPU stock P38s18r diagnostic is authorized only from full source
   `ae63d44edc67cfcd5b19d34abc82feb681284c67`. No target launch occurred here.
+
+## 2026-08-16 UTC — P38s18r Round 0 execution and durability seal timeout analysis
+
+- Launched `canon-p38-fl-stock-p38s18r-6b75e3cf` on 64 TPU (`DP16xTP4`, Concurrency 256, 3 Frozen Rounds, Seam Mode `layer`, Terminal Tail `1`).
+- JIT precompilation and model loading succeeded on 64 devices with 1,032 GiB HBM utilized.
+- Precheck Round 0 executed with full 32-prompt coverage (`N_action=46,098`):
+  - B-C boundary (`S_prefill` vs `T_old`): STRICT EXACT 0 mismatch bytes.
+  - A-B boundary (`S_decode` vs `S_prefill`): exactly 30 mismatch bytes (reproducing carrier drift).
+  - Probe data: 360+ NPZ records (Layers 0..35 seam and tail) live-uploaded to GCS.
+- Round 0 seal durability timeout:
+  - `[CANON_P38] ROUND_SEAL_REQUESTED round=0` triggered background worker `stage_p38_round.py`.
+  - `_filter_jsonl` raised `ValueError: no round 0 records in pre_alignment.jsonl` because `pre_alignment.jsonl` contained `"step": 0` while `_filter_jsonl` only filtered on `"diagnostic_round"`.
+  - Main thread timed out after 900s: `timed out waiting for P38 round 0 durability acknowledgement`.
+- Implemented fix in `stage_p38_round.py` (check `diagnostic_round` with fallback to `step`, admit unscoped records) and `tunix/rl/alignment.py` (explicit `diagnostic_round: int(step)`).
+- Documented in `artifacts/p38s18r_round0_seal_error_report.md`.
+
