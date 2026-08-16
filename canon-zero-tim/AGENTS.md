@@ -35,7 +35,7 @@ from the original delivery: `START_HERE.md`.
 | Step | File | Answers |
 |---|---|---|
 | 1 | `THREADS.md` | what the six work threads are and where each one stands right now |
-| 2 | `../.claude/skills/manage-canon-zero-tim-branch/SKILL.md` (repository root) | how to operate: run contract, gate ladder, flag lifecycle, multi-agent protocol (canonical copy is this in-branch one) |
+| 2 | `.claude/skills/manage-canon-zero-tim-branch/SKILL.md` | how to operate: run contract, gate ladder, flag lifecycle, multi-agent protocol (this in-package copy is canonical) |
 | 3 | `FLAGS.md` | what every `CANON_*` switch means, its lifecycle, and what has been permanently vetoed |
 | 4 | `EVIDENCE.md` | which run proves which claim, and where the artifact + SHA lives |
 | 5 | `KNOWN_FOOTGUNS.md` | numbered incidents — the mistakes already paid for |
@@ -60,9 +60,10 @@ debug_logs/                                         frozen read-only legacy evid
 docs/                                               provenance history
 ```
 
-The operating skill lives one level up at the **repository root**:
-`../.claude/skills/manage-canon-zero-tim-branch/` (root placement is what agent harnesses
-auto-discover; it is version-controlled with this package and is NOT stray tooling).
+The operating skill is self-contained in this package at `.claude/skills/
+manage-canon-zero-tim-branch/`. Two pointer stubs redirect here and carry no content of
+their own: one at the repository root (for harness auto-discovery in worktrees) and one
+in the outer, unversioned `.claude` of the host checkout.
 
 ## The six threads (details and live status: `THREADS.md`)
 

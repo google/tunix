@@ -16,7 +16,7 @@ set -euo pipefail
 git fetch origin yuxzhang/canon-zero-tim
 git worktree add --detach /tmp/p38-reducer-v2 origin/yuxzhang/canon-zero-tim
 cd /tmp/p38-reducer-v2
-python3 .claude/skills/manage-canon-zero-tim-branch/scripts/preflight_runtime.py \
+python3 canon-zero-tim/.claude/skills/manage-canon-zero-tim-branch/scripts/preflight_runtime.py \
   --repo "$PWD"
 ```
 
