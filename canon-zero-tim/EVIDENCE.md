@@ -68,3 +68,26 @@ Flag-off and flag-on numbers must never be compared as if from one regime.
   `CLUSTER_ADMISSION.md`.
 - **The production `nnx` training forward.** The signed `C` is the engine-module differentiable
   forward. The production tunix `nnx` path still differs by `0.0267`.
+
+## Run index (2026-08 campaigns; canonical claim→run→path map)
+
+Added 2026-08-16. New runs land under a per-run directory with their own `SHA256SUMS`
+(packaging contract: `tasks/canon_system_redesign/phase1_run_contract.md` in the outer repo);
+this table is the navigation layer. Spot-verified at basis `a94d6c0c`:
+`p38s1` raw log `99166ff1…`, `p38s11` capsule `037f5b24…`, and `sha256sum -c` OK for
+p38s12f / p38s15 / p38s16.
+
+| Claim | Run | Path |
+|---|---|---|
+| At-scale stock carrier, first admitted full coverage | p38s11 | `debug_logs/p38s11_*` (log, capsule, jsonl, tar) |
+| Exact-call joins + journal first production pass | p38s12(a-semantics) | `tasks/p38-pathways-decode-prefill-carrier/evidence/p38s12b/` |
+| Concurrency-32 exclusion (still red 11/46,390) | p38s12f | `…/evidence/p38s12f/` |
+| Fingerprint revision (floor 1498, turn-0 cases) | p38s13a | `…/evidence/p38s13a/` (analysis-grade) |
+| Terminal forensics ×3 rounds, 64 joined mismatches | p38s15 | `…/evidence/p38s15/` |
+| Single-active fixed-M discriminator; golden incident call 4223 | p38s16 | `…/evidence/p38s16/` (classification absent → analysis-grade) |
+| Live-KV fingerprint EQUAL on red row (corrected; initial "differs" withdrawn) | p38s17 | `…/evidence/p38s17/` + task `log.md` 2026-08-15 correction |
+| Aborted-launch stub | p38s14 | `…/evidence/p38s14/` (INCONCLUSIVE, head log only) |
+| One-host perf ledger (8-run bitwise hash chain, decode-tax ablation) | p48/p49 T0–T5, F0–F12 | outer repo `tasks/p48*`, `tasks/p49*`; worktree `local/p48-profiling` |
+| Cross-arm A identity for prompt_logprobs=None | P47a | landed CL 10242fa1 lineage; evidence dirs `p41_optimizer_p48c_p47a_*` on probe host |
+
+Legacy flat pile `debug_logs/` is frozen read-only; anything new must use a run directory.
