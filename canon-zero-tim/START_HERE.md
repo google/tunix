@@ -1,5 +1,9 @@
 # Start here
 
+> **Agents with no background: read `AGENTS.md` first** — it is the current front door
+> (registries, rules, reading order). This page is the original delivery orientation and
+> remains valid as historical context.
+
 You have this package and no context. This page gets you to a useful action in five minutes.
 
 ---
