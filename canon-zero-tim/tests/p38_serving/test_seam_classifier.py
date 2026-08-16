@@ -22,13 +22,18 @@ SPEC.loader.exec_module(classifier)
 
 class SeamClassifierTest(unittest.TestCase):
 
-  def _write_fixture(self, root: Path, mutate: bool = True) -> tuple[Path, Path]:
+  def _write_fixture(
+      self,
+      root: Path,
+      mutate: bool = True,
+      indices: tuple[int, int] = (0, 1),
+  ) -> tuple[Path, Path]:
     prompt = np.asarray([[11, 12]], dtype=np.int32)
     completion = np.asarray([[21, 22, 23]], dtype=np.int32)
     tokens = np.concatenate((prompt[0], completion[0]))
     source_position = 2 + 1 - 1
     prefix = classifier._prefix_sha256(tokens[:source_position + 1])
-    for index, arm in enumerate(("A", "B")):
+    for index, arm in zip(indices, ("A", "B"), strict=True):
       layer = np.zeros((1, 2, 2, 8), dtype=np.uint32)
       if mutate and arm == "B":
         layer[0, 1, 1, 3] = 1
@@ -82,13 +87,17 @@ class SeamClassifierTest(unittest.TestCase):
            "differing_fingerprint_fields": [3]},
       )
 
-  def test_exact_observer_on_red_action_is_rejected(self):
+  def test_exact_hidden_observer_requires_tail_localization(self):
     with tempfile.TemporaryDirectory() as directory:
       root, capsule = self._write_fixture(Path(directory), mutate=False)
-      with self.assertRaisesRegex(
-          classifier.SeamError, "no divergent seam fingerprint"
-      ):
-        classifier.classify(root, [capsule], "layer")
+      report = classifier.classify(root, [capsule], "layer")
+      self.assertEqual(
+          report["classification"],
+          "hidden_chain_exact_tail_localization_required",
+      )
+      self.assertTrue(report["tail_localization_required"])
+      self.assertEqual(report["joined_red_points"], 1)
+      self.assertEqual(report["divergent_red_points"], 0)
 
   def test_missing_b_record_is_rejected(self):
     with tempfile.TemporaryDirectory() as directory:
@@ -98,6 +107,48 @@ class SeamClassifierTest(unittest.TestCase):
           classifier.SeamError, "not every red action joined"
       ):
         classifier.classify(root, [capsule], "layer")
+
+  def test_reduction_manifest_admits_byte_preserving_sparse_indices(self):
+    with tempfile.TemporaryDirectory() as directory:
+      root = Path(directory)
+      selected = root / "selected"
+      capsules = root / "capsules"
+      selected.mkdir()
+      capsules.mkdir()
+      _, capsule = self._write_fixture(selected, indices=(17, 42))
+      reduced_capsule = capsules / capsule.name
+      capsule.replace(reduced_capsule)
+      files = []
+      for path in sorted(selected.glob("p38_seam_*")):
+        files.append({
+            "path": f"selected/{path.name}",
+            "sha256": classifier._sha256(path),
+            "bytes": path.stat().st_size,
+        })
+      manifest = root / "REDUCTION_MANIFEST.json"
+      manifest.write_text(json.dumps({
+          "schema": "p38-seam-reduction-v1",
+          "selection_complete": True,
+          "unmatched_keys": [],
+          "ambiguous_keys": [],
+          "selected_directory": "selected",
+          "selected_files": files,
+          "capsules": [{
+              "path": f"capsules/{reduced_capsule.name}",
+              "sha256": classifier._sha256(reduced_capsule),
+              "bytes": reduced_capsule.stat().st_size,
+          }],
+          "source_gcs_uri": (
+              "gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/"
+              "job/attempt-0/live/000001"
+          ),
+          "source_snapshot_manifest_sha256": "0" * 64,
+      }))
+      report = classifier.classify(
+          selected, [reduced_capsule], "layer", reduction_manifest=manifest)
+      self.assertEqual(report["joined_red_points"], 1)
+      self.assertEqual(report["selected_layer"], 1)
+      self.assertIn("reduction_provenance", report)
 
 
 if __name__ == "__main__":

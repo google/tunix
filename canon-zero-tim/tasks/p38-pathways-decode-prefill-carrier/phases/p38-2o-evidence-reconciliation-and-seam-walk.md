@@ -1,8 +1,9 @@
 # P38.2o — Evidence reconciliation and decode seam walk
 
-Status: active. O0 and O1 are locally complete. One hierarchical production
-seam run is the next target only after review, commit, and push; this worktree
-does not authorize or launch it.
+Status: superseded by P38.2p evidence reduction. O0 and O1 are locally
+complete. The P38s18l production layer run returned only two complete rounds
+and its committed package omits the raw seam inputs required for
+reclassification.
 
 ## Goal
 
@@ -106,6 +107,13 @@ classifier is PASS, and at least one first divergent layer is measured. O2b
 exit gate: the selected-layer internal checkpoint is measured, or the result
 is explicitly inconclusive/tail-only. Only a measured checkpoint may select a
 repair.
+
+P38s18l did not pass this gate as committed. Its raw log has two completed
+rounds and 47 red actions, while the hand-authored classification reports only
+20 joins and the evidence directory contains no seam JSON/NPZ. Recover and
+reduce the GCS source under P38.2p before using the observed-hidden-exact
+branch. An observed-hidden-exact result selects a future bounded tail observer;
+it does not isolate the normalizer by itself.
 
 ## Claim ceiling
 

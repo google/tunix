@@ -6,25 +6,28 @@
 - Definition of done: one source-pinned flag-on run reports exact
   `S_decode_vs_S_prefill`, exact `S_prefill_vs_T_old`, and exact
   `T_old_vs_T_current` before a strict full workload is admitted.
-- Active phase: P38.2o layer seam classification complete. P38s18l
-  measured bitwise identical hidden representations across all 36 Transformer
-  layers and final RMSNorm. The next phase isolates the tail lm_head / log-softmax
-  normalizer reduction.
+- Active phase: P38.2p GCP-side seam evidence reduction. P38s18l returned two
+  complete red rounds and stopped during the third rollout. The committed
+  package omits the raw seam inputs, so its PASS JSON is not reproducible yet.
 - Task directory:
   `canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/`.
 
 ## Latest target facts
 
-- P38s18l/source `9a83457417fc` completed all 3 Frozen-Weight diagnostic rounds
-  (768 trajectories total, Concurrency 256, DP16xTP4) on 64 TPU with zero backward,
-  zero optimizer commits, and controlled exit 42.
-  - B-C boundary (`S_prefill` vs `T_old`): STRICT EXACT 0 DIFF on all 3 rounds.
-  - A-B boundary (`S_decode` vs `S_prefill`): 28 / 40 / 0 differing bytes in rounds 0 / 1 / 2.
-  - Layer Seam Observer: All 36 Transformer layers (`layer_input`, `layer_output`)
-    and `final_norm` are 100% bitwise identical across all joined red action positions
-    (`All-36-Layers-Equal = 20, Divergent Signatures = {}`).
-  - Classification: `hidden_chain_exact_tail_normalizer_isolated`.
-  - Evidence directory: `evidence/p38s18l/`.
+- P38s18l/source `9a83457417fc` ran at Concurrency 256 / DP16xTP4 with zero
+  backward and zero optimizer commits, but did not complete its registered
+  three-round contract.
+  - The raw log has two round-complete markers, two pre-alignment records, no
+    terminal precheck marker, and ends during round-2 rollout.
+  - The completed rounds report A-B red at 28 / 40 differing bytes and 19 / 28
+    elements. B-C is exact in both completed rounds.
+  - The committed package has two immutable round capsules and zero raw seam
+    JSON/NPZ records. The committed PASS classification says 20 / 47 red
+    points joined but cannot be reproduced from the committed inputs.
+  - No third-round zero result, full hidden-byte equality, lm_head isolation,
+    normalizer isolation, controlled exit, or terminal evidence is admitted.
+  - Evidence directory: `evidence/p38s18l/`; GCP reduction instructions:
+    `P38S18L_GCP_REDUCTION_RUNBOOK.md`.
 - P38s17/source `baac38bc4034` completed all 3 Frozen-Weight diagnostic rounds
   (768 trajectories total, 143,511 action tokens across 3 rounds) on 64 TPU
   (`DP16xTP4`, concurrency 256) with zero backward, zero optimizer commits, and
@@ -271,16 +274,18 @@
 
 ## Next action
 
-1. Review the locally complete P38.2o O0/O1 payload and gates. Do not launch
-   from this dirty worktree.
-2. After explicit commit/push approval, render O2a only: stock `layer` mode at
-   DP16xTP4/concurrency 256, three frozen rounds, prefix cache off, backward 0,
-   optimizer commits 0.
-3. Read `p38_seam.classification.json`. Only if it joins all red actions and
-   names a first divergent layer may O2b render `full` mode for that one layer.
-4. If O2b localizes an internal checkpoint, repair only that checkpoint. If
-   hidden/final norm stays exact, add a bounded tail observer. RoPE remains a
-   candidate, not a conclusion.
+1. Review and publish the P38.2p reducer only after its focused classifier,
+   reduction, syntax, and checksum gates pass.
+2. On a clean GCP checkout, follow `P38S18L_GCP_REDUCTION_RUNBOOK.md` against
+   the highest immutable p38s18l live snapshot containing seam records.
+3. Return the compact derived bundle and require every red action to join one
+   A and B record. The source run remains `INCONCLUSIVE_PARTIAL_RUN` even when
+   selection and classification succeed.
+4. If every joined hidden/final fingerprint is exact, build one bounded tail
+   observer covering lm_head/raw logits, target logit, normalizer, processed
+   target, and final logprob. If a hidden seam is red, select the earliest
+   measured layer instead. Do not launch a repair from the current hand-authored
+   classification.
 
 ## Claim ceiling and blockers
 
@@ -308,8 +313,8 @@ Leave `CANON_P38_SERVING_CAPTURE_DIR`, `CANON_P38_REQUEST_JOURNAL`,
 training, evaluation, prefix cache, precision, optimizer placement, or
 canonical kernels.
 
-- Updated: 2026-08-15 UTC; P38.2o O0/O1 are locally complete. P38s17's
-  classification is corrected to equal valid-region fingerprints; the real
-  Qwen3-8B one-host layer observer is endpoint-neutral. O2a is target-pending.
-  No new target run, backward, optimizer commit, commit, or push occurred in
-  this worktree.
+- Updated: 2026-08-16 UTC; P38s18l is corrected to an interrupted two-round
+  analysis run whose committed seam classification lacks its raw inputs.
+  P38.2p reduction code and synthetic/focused gates are locally complete; GCP
+  execution is pending review, commit, and push. No new TPU run, backward,
+  optimizer commit, commit, or push occurred in this worktree.

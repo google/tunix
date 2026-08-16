@@ -5,35 +5,48 @@ parallel Qwen3-32B DeepSWE workstream, read
 `../p39-deepswe-production/HANDOFF.md`. P38 evidence cannot promote P39, and
 P39 evidence cannot promote P38.
 
-## CURRENT: P38s18l Layer Seam Classified; Hidden Chain Bitwise Exact
+## CURRENT: reduce the partial P38s18l GCS seam snapshot
 
-P38s18l/source `9a83457417fc` completed all three Frozen-Weight diagnostic
-rounds (768 trajectories total, Concurrency 256, DP16xTP4) on 64 TPU with
-zero backward, zero optimizer commits, and a workload-level controlled exit 42.
+P38s18l/source `9a83457417fc` ran at DP16xTP4/concurrency 256 with zero
+backward and optimizer commits, but the committed package is not a complete
+three-round run:
 
-Key numerical facts:
-- **B-C boundary (`S_prefill` vs `T_old`)**: **0 mismatches (STRICT EXACT 0 DIFF)**
-  across all 3 rounds.
-- **A-B boundary (`S_decode` vs `S_prefill`)**:
-  - Round 0: 28 differing bytes / 19 elements, `N_action=46,450`.
-  - Round 1: 40 differing bytes / 28 elements, `N_action=46,120`.
-  - Round 2: 0 differing elements on matched sample.
-- **Layer Seam Observer Classification**:
-  **`hidden_chain_exact_tail_normalizer_isolated`**.
-  - All 36 Transformer layers (`layer_input`, `layer_output`) and `final_norm`
-    are 100% bitwise identical between Decode and Prefill across all matched
-    red action positions (`All-36-Layers-Equal = 20, Divergent Signatures = {}`).
-  - The hidden representation chain is bitwise exact. The minor residual
-    A-B logprob divergence originates strictly in the tail `lm_head`
-    projection / log-softmax reduction normalizer stage.
-- **Evidence directory**: `tasks/p38-pathways-decode-prefill-carrier/evidence/p38s18l/`.
+- the raw log contains exactly two `PRECHECK_ROUND_COMPLETE` markers and two
+  pre-alignment records;
+- it ends during the third rollout and contains no terminal
+  `PRECHECK_COMPLETE STOP_BEFORE_BACKWARD`;
+- immutable capsules exist only for rounds 0 and 1;
+- those two completed rounds reproduce A-B red at 19 and 28 elements while
+  B-C remains exact;
+- no raw `p38_seam_*.json/.npz` is committed, so the official classifier
+  cannot reproduce the committed PASS JSON; and
+- `LIVE.json`, `COLLECTED.json`, `COMPLETE.json`, `PACKAGING.txt`, and
+  `verdict.json` are absent from the committed directory.
 
-### Next Operator Step
+The existing hand-authored result says 20 of 47 red points have equal layer
+fingerprints. Treat that only as a candidate tail direction. It does not prove
+all red points, full hidden bytes, lm_head, or the normalizer.
 
-Since the hidden chain (Layers 0..35 + Final RMSNorm) is bitwise exact, do not
-rerun intermediate layer diagnostics or KV observers. The next step is to add
-a bounded tail observer on the final `lm_head` and Log-Softmax normalizer to
-pin the exact reduction difference.
+### Next operator step: no TPU launch
+
+The full live snapshot is still in GCS but is too large/file-dense to commit.
+Run the GCP-side byte-preserving reducer described in:
+
+`P38S18L_GCP_REDUCTION_RUNBOOK.md`
+
+The reducer verifies the source snapshot manifest, derives all red-point keys
+from immutable capsules, selects exactly one raw A and B record per key,
+re-runs the official classifier in sparse-index manifest mode, and uploads a
+compact sealed package under the run's `derived/` prefix. It never modifies
+source objects or fabricates round 2 or terminal markers.
+
+Only after the compact bundle reports all 47 red points joined may the result
+select the next diagnostic:
+
+- observed hidden/final fingerprints exact -> build one bounded tail observer;
+- any hidden checkpoint red -> withdraw the tail claim and localize the first
+  measured hidden seam;
+- missing/ambiguous join -> keep P38s18l partial and do not promote it.
 
 ## HISTORY: completed P38s17, P38s16, P38s15, P38s14, P38s13a, P38s12f
 

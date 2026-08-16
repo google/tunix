@@ -30,7 +30,94 @@ def _prefix_sha256(values: np.ndarray) -> bytes:
   return hashlib.sha256(canonical.tobytes()).hexdigest().encode()
 
 
-def _load_records(directory: Path, mode: str) -> dict[tuple[int, bytes, str], dict]:
+def _load_reduction_manifest(path: Path, directory: Path) -> dict[str, Any]:
+  _require(path.is_file(), f"reduction manifest is absent: {path}")
+  manifest = json.loads(path.read_text(encoding="utf-8"))
+  _require(manifest.get("schema") == "p38-seam-reduction-v1",
+           "invalid seam reduction schema")
+  _require(manifest.get("selection_complete") is True,
+           "seam reduction did not join every red action")
+  _require(not manifest.get("unmatched_keys"),
+           "seam reduction contains unmatched red actions")
+  _require(not manifest.get("ambiguous_keys"),
+           "seam reduction contains ambiguous red actions")
+  expected_directory = (path.parent / str(
+      manifest.get("selected_directory", "selected"))).resolve()
+  _require(directory.resolve() == expected_directory,
+           "seam reduction selected-directory provenance drifted")
+  selected = manifest.get("selected_files")
+  _require(isinstance(selected, list) and selected,
+           "seam reduction selected-file inventory is empty")
+  expected_paths = set()
+  for item in selected:
+    _require(isinstance(item, dict),
+             "seam reduction selected-file entry is invalid")
+    relative = Path(str(item.get("path", "")))
+    _require(
+        len(relative.parts) == 2
+        and relative.parts[0] == manifest.get("selected_directory", "selected")
+        and relative.name.startswith("p38_seam_")
+        and relative.suffix in (".json", ".npz"),
+        f"seam reduction selected path is invalid: {relative}",
+    )
+    target = (path.parent / relative).resolve()
+    _require(target.parent == directory.resolve(),
+             f"seam reduction selected path escaped its directory: {relative}")
+    _require(target.is_file(),
+             f"seam reduction selected file is absent: {relative}")
+    _require(_sha256(target) == item.get("sha256"),
+             f"seam reduction selected SHA failed: {relative}")
+    _require(target.stat().st_size == int(item.get("bytes", -1)),
+             f"seam reduction selected size drifted: {relative}")
+    expected_paths.add(target.name)
+  actual_paths = {
+      item.name for item in directory.iterdir()
+      if item.is_file() and item.name.startswith("p38_seam_")
+      and item.suffix in (".json", ".npz")
+  }
+  _require(actual_paths == expected_paths,
+           "seam reduction selected-file inventory drifted")
+  return manifest
+
+
+def _validate_reduced_capsules(
+    manifest_path: Path,
+    manifest: dict[str, Any],
+    capsules: list[Path],
+) -> None:
+  expected = manifest.get("capsules")
+  _require(isinstance(expected, list) and expected,
+           "seam reduction capsule inventory is empty")
+  expected_paths = set()
+  for item in expected:
+    _require(isinstance(item, dict),
+             "seam reduction capsule entry is invalid")
+    relative = Path(str(item.get("path", "")))
+    _require(
+        len(relative.parts) == 2
+        and relative.parts[0] == "capsules"
+        and relative.suffix == ".npz",
+        f"seam reduction capsule path is invalid: {relative}",
+    )
+    target = (manifest_path.parent / relative).resolve()
+    _require(target.is_file(),
+             f"seam reduction capsule is absent: {relative}")
+    _require(_sha256(target) == item.get("sha256"),
+             f"seam reduction capsule SHA failed: {relative}")
+    _require(target.stat().st_size == int(item.get("bytes", -1)),
+             f"seam reduction capsule size drifted: {relative}")
+    expected_paths.add(target)
+  actual_paths = {path.resolve() for path in capsules}
+  _require(actual_paths == expected_paths,
+           "seam reduction classifier capsule inventory drifted")
+
+
+def _load_records(
+    directory: Path,
+    mode: str,
+    *,
+    allow_sparse_indices: bool = False,
+) -> dict[tuple[int, bytes, str], dict]:
   paths = sorted(directory.glob("p38_seam_*.json"))
   _require(paths, "P38 seam observer produced no records")
   result = {}
@@ -94,8 +181,11 @@ def _load_records(directory: Path, mode: str) -> dict[tuple[int, bytes, str], di
           "checkpoint_names": checkpoint_names,
           "layer_indices": [int(value) for value in layer_indices],
       }
-  _require(indices == list(range(len(indices))),
-           "seam record indices are not contiguous")
+  _require(len(indices) == len(set(indices)),
+           "seam record indices are not unique")
+  if not allow_sparse_indices:
+    _require(indices == list(range(len(indices))),
+             "seam record indices are not contiguous")
   return result
 
 
@@ -183,8 +273,18 @@ def _first_difference(a: dict, b: dict) -> dict | None:
   return None
 
 
-def classify(directory: Path, capsules: list[Path], mode: str) -> dict:
-  records = _load_records(directory, mode)
+def classify(
+    directory: Path,
+    capsules: list[Path],
+    mode: str,
+    reduction_manifest: Path | None = None,
+) -> dict:
+  reduction = None
+  if reduction_manifest is not None:
+    reduction = _load_reduction_manifest(reduction_manifest, directory)
+    _validate_reduced_capsules(reduction_manifest, reduction, capsules)
+  records = _load_records(
+      directory, mode, allow_sparse_indices=reduction is not None)
   red_points = _red_points(capsules)
   joins = []
   for point in red_points:
@@ -205,34 +305,56 @@ def classify(directory: Path, capsules: list[Path], mode: str) -> dict:
         "first_difference": first,
     })
   divergent = [join for join in joins if join["first_difference"] is not None]
-  _require(divergent, "red actions have no divergent seam fingerprint")
   signatures = {
       (item["first_difference"]["layer"],
        item["first_difference"]["checkpoint"])
       for item in divergent
   }
-  return {
+  ordered_signatures = sorted(
+      signatures,
+      key=lambda value: (
+          10**9 if value[0] is None else value[0], value[1]),
+  )
+  numeric_layers = sorted({
+      int(layer) for layer, _ in signatures if layer is not None
+  })
+  tail_required = not divergent
+  report = {
       "schema": "p38-seam-classification-v1",
       "status": "PASS",
-      "classification": "decode_seam_first_difference_measured",
+      "classification": (
+          "hidden_chain_exact_tail_localization_required"
+          if tail_required else "decode_seam_first_difference_measured"
+      ),
       "observer_mode": mode,
       "red_points": len(red_points),
       "joined_red_points": len(joins),
       "divergent_red_points": len(divergent),
+      "all_observed_fingerprints_equal": tail_required,
+      "tail_localization_required": tail_required,
+      "mixed_first_difference_signatures": len(signatures) > 1,
+      "selected_layer": numeric_layers[0] if numeric_layers else None,
       "first_difference_signatures": [
           {"layer": layer, "checkpoint": checkpoint}
-          for layer, checkpoint in sorted(
-              signatures,
-              key=lambda value: (
-                  -1 if value[0] is None else value[0], value[1]),
-          )
+          for layer, checkpoint in ordered_signatures
       ],
       "joins": joins,
       "claim_ceiling": (
           "Exact integer diagnostic fingerprints localize the first observed "
-          "seam; they do not prove equality of every unobserved tensor byte."
+          "seam; equality through the last observed checkpoint requires a "
+          "bounded tail observer and does not prove equality of every "
+          "unobserved tensor byte."
       ),
   }
+  if reduction_manifest is not None:
+    report["reduction_provenance"] = {
+        "manifest": reduction_manifest.name,
+        "manifest_sha256": _sha256(reduction_manifest),
+        "source_gcs_uri": reduction.get("source_gcs_uri"),
+        "source_snapshot_manifest_sha256": reduction.get(
+            "source_snapshot_manifest_sha256"),
+    }
+  return report
 
 
 def main() -> None:
@@ -240,9 +362,15 @@ def main() -> None:
   parser.add_argument("--directory", type=Path, required=True)
   parser.add_argument("--capsule", type=Path, action="append", required=True)
   parser.add_argument("--mode", choices=("layer", "full"), required=True)
+  parser.add_argument("--reduction-manifest", type=Path)
   parser.add_argument("--output", type=Path, required=True)
   args = parser.parse_args()
-  report = classify(args.directory, args.capsule, args.mode)
+  report = classify(
+      args.directory,
+      args.capsule,
+      args.mode,
+      reduction_manifest=args.reduction_manifest,
+  )
   args.output.write_text(json.dumps(report, sort_keys=True, indent=2) + "\n")
   print(json.dumps(report, sort_keys=True))
 

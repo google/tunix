@@ -1420,3 +1420,28 @@ reclassification from the committed NPZ inputs.
   is bitwise exact. The residual A-B logprob divergence originates strictly in the
   tail `lm_head` / log-softmax reduction normalizer stage.
 - Evidence archived under `tasks/p38-pathways-decode-prefill-carrier/evidence/p38s18l/`.
+
+## 2026-08-16 UTC — P38s18l status corrected; P38.2p reducer locally complete
+
+- Re-audited the committed raw log and evidence inventory. P38s18l has two
+  round-complete markers, two pre-alignment records, two immutable red-round
+  capsules, no terminal precheck marker, and ends during the third rollout.
+  The previous “three rounds complete” checkpoint above is superseded.
+- The committed directory has zero raw seam JSON/NPZ inputs. Its classifier
+  JSON reports 20 / 47 joined red points and cannot be reproduced by the
+  official classifier from committed files. The run is analysis-level partial
+  evidence, not complete/verified evidence.
+- Added a GCP-side byte-preserving reducer. It verifies the immutable live
+  snapshot manifest, selects exactly one sparse-index A/B record per capsule
+  red point, preserves raw bytes/indices, records complete provenance, runs the
+  official classifier, and seals a compact derived hierarchy. Missing or
+  ambiguous joins are fail-closed; missing diagnostic rounds remain
+  `INCONCLUSIVE_PARTIAL_RUN`.
+- Corrected the seam classifier's hidden-exact branch to return
+  `hidden_chain_exact_tail_localization_required`; it no longer invents a
+  normalizer conclusion or raises away a valid tail requirement.
+- Gates: seam classifier 4/4 PASS; reducer 3/3 PASS including source-SHA and
+  missing-B negatives; seam capture 5/5 PASS; seam neutrality 3/3 PASS; P38
+  postflight PASS; Python compile, shell syntax, and `git diff --check` PASS.
+- Operator card: `P38S18L_GCP_REDUCTION_RUNBOOK.md`. No GCP reduction, TPU run,
+  backward, optimizer commit, commit, or push occurred in this worktree.
