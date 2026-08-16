@@ -29,7 +29,7 @@ an automatic runtime transition.
 - R2E-Gym subset pinned at dataset revision
   `2e8108ff942f24fcb5686badfaf7f9a8808566d5`, split `train`;
 - clean whitelist
-  `clean_data/final_filter_result/task_report_good_qwen3_128_retry_20260713_090141.jsonl`,
+  `canon-zero-tim/clean_data/final_filter_result/task_report_good_qwen3_128_retry_20260713_090141.jsonl`,
   1851 rows and 1851 unique Docker images, SHA-256
   `2f95c2e6df3526f68bd3eed3ab9aece7077ef85c74251c77f7b3474b0b307ed7`.
 

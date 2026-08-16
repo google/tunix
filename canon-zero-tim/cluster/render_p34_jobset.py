@@ -24,7 +24,7 @@ P34_DATASET_REVISION = "2e8108ff942f24fcb5686badfaf7f9a8808566d5"
 P34_DATASET_SPLIT = "train"
 P34_DATASET_ROWS = 4578
 P34_CLEAN_WHITELIST = (
-    "clean_data/final_filter_result/"
+    "canon-zero-tim/clean_data/final_filter_result/"
     "task_report_good_qwen3_128_retry_20260713_090141.jsonl"
 )
 P34_CLEAN_WHITELIST_SHA256 = (

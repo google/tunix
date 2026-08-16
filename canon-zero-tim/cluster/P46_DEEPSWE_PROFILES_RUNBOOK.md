@@ -293,7 +293,7 @@ their own gate is reviewed.
 All three families start from the reviewed clean whitelist:
 
 ```text
-clean_data/final_filter_result/task_report_good_qwen3_128_retry_20260713_090141.jsonl
+canon-zero-tim/clean_data/final_filter_result/task_report_good_qwen3_128_retry_20260713_090141.jsonl
 sha256=2f95c2e6df3526f68bd3eed3ab9aece7077ef85c74251c77f7b3474b0b307ed7
 rows=1851
 ```

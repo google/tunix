@@ -86,7 +86,7 @@ continue to train on a partial batch.
 - Exact 40-character source commit on `yuxzhang/canon-zero-tim`.
 - Client image pinned by registry SHA-256 digest. Tags such as `:latest` are rejected.
 - The checked-in clean whitelist must be present unchanged at
-  `clean_data/final_filter_result/task_report_good_qwen3_128_retry_20260713_090141.jsonl`.
+  `canon-zero-tim/clean_data/final_filter_result/task_report_good_qwen3_128_retry_20260713_090141.jsonl`.
   Its only admitted SHA-256 is
   `2f95c2e6df3526f68bd3eed3ab9aece7077ef85c74251c77f7b3474b0b307ed7`.
 - CPU and TPU node-pool names and the model/output PVC name.
@@ -124,7 +124,7 @@ python3 canon-zero-tim/cluster/render_p34_jobset.py \
   --cpu-nodepool deepswe-cpu-pool \
   --worker-nodepool mlperf-v5p-256-np-0 \
   --model-pvc haoyugao-cpu-np-pvc \
-  --whitelist clean_data/final_filter_result/task_report_good_qwen3_128_retry_20260713_090141.jsonl \
+  --whitelist canon-zero-tim/clean_data/final_filter_result/task_report_good_qwen3_128_retry_20260713_090141.jsonl \
   --whitelist-sha256 2f95c2e6df3526f68bd3eed3ab9aece7077ef85c74251c77f7b3474b0b307ed7
 ```
 

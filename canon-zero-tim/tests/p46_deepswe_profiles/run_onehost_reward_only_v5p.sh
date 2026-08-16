@@ -9,7 +9,7 @@ PYTHON="${DEEPSWE_TRAIN_PYTHON:-/mnt/disks/tunix-data/venvs/train/bin/python}"
 MODEL_PATH="${DEEPSWE_QWEN4B_MODEL_PATH:-/mnt/disks/tunix-data/hf/hub/models--Qwen--Qwen3-4B-Instruct-2507/snapshots/cdbee75f17c01a7cc42f958dc650907174af0554}"
 DATASET_CACHE="${DEEPSWE_DATASET_CACHE:-/mnt/disks/tunix-data/dataset_cache}"
 R2EGYM_ROOT="${DEEPSWE_R2EGYM_ROOT:-/home/yuxuan/tunix/submodules/R2E-Gym}"
-GOLD_JSONL="${DEEPSWE_REWARD_ONLY_WHITELIST:-$ROOT/clean_data/final_filter_result/task_report_good_qwen3_128_retry_20260713_090141.jsonl}"
+GOLD_JSONL="${DEEPSWE_REWARD_ONLY_WHITELIST:-$ROOT/canon-zero-tim/clean_data/final_filter_result/task_report_good_qwen3_128_retry_20260713_090141.jsonl}"
 RUN_ID="${CANON_RUN_ID:-reward-only-onehost-$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 ARTIFACT_DIR="${DEEPSWE_REWARD_ONLY_ARTIFACT_DIR:-/mnt/disks/tunix-data/deepswe-reward-only-evidence/$RUN_ID}"
 

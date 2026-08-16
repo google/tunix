@@ -80,7 +80,7 @@ Required inputs:
   `/mnt/disks/linchai_data/models/Qwen3-4B-Instruct-2507` on the mounted model
   PVC;
 - the reviewed clean whitelist at
-  `clean_data/final_filter_result/task_report_good_qwen3_128_retry_20260713_090141.jsonl`,
+  `canon-zero-tim/clean_data/final_filter_result/task_report_good_qwen3_128_retry_20260713_090141.jsonl`,
   SHA-256
   `2f95c2e6df3526f68bd3eed3ab9aece7077ef85c74251c77f7b3474b0b307ed7`;
 - topology-matching CPU and TPU node pools;
@@ -158,7 +158,7 @@ CLIENT_IMAGE_DIGEST=registry.example/tunix@sha256:replace-with-real-digest
 CPU_NODEPOOL=replace-with-cpu-nodepool
 TPU_NODEPOOL=replace-with-topology-matching-tpu-nodepool
 MODEL_PVC=haoyugao-cpu-np-pvc
-WHITELIST=clean_data/final_filter_result/task_report_good_qwen3_128_retry_20260713_090141.jsonl
+WHITELIST=canon-zero-tim/clean_data/final_filter_result/task_report_good_qwen3_128_retry_20260713_090141.jsonl
 WHITELIST_SHA256=2f95c2e6df3526f68bd3eed3ab9aece7077ef85c74251c77f7b3474b0b307ed7
 OUTPUT="/tmp/p44-${TOPOLOGY}-${STAGE}-${RUN_ID}.yaml"
 
