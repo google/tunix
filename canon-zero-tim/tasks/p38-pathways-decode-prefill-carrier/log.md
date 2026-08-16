@@ -1555,3 +1555,24 @@ reclassification from the committed NPZ inputs.
   The local-v5p off/on endpoint comparison remains pending after publication.
 - Publication was approved on 2026-08-16. No one-host TPU run, target TPU
   launch, backward, or optimizer commit occurred before publication.
+
+## 2026-08-16 UTC — P38.2r first one-host gate found a shallow-call bug
+
+- Published the initial P38.2r implementation as `294a4186` and ran the
+  observer-off arm successfully for three frozen rounds with zero backward and
+  zero optimizer commits.
+- The first seam-tail arm failed before round 0 with
+  `P38 decode tail context is absent or not arm A`. The triggering scheduler
+  call had only the first 256 prompt tokens and therefore correctly selected
+  no deep seam rows; the tail hook incorrectly treated that normal absence as
+  state loss.
+- Corrected decode and prompt tail hooks to no-op only when no seam context was
+  selected. A present context with the wrong arm remains fail-closed. Added
+  both no-context and wrong-arm unit tests and refreshed the installed runner
+  manifest.
+- Corrected the exact-image terminal marker to report the now-observed 34
+  runner tests per overlay. Both Qwen3-1.7B and Qwen3-8B overlays pass all 34.
+- Because the correction changes the source SHA, the earlier off arm is useful
+  diagnostic evidence but cannot satisfy the registered same-source neutrality
+  pair. Both one-host arms must rerun from the corrected publication before a
+  64-TPU launch is admitted.

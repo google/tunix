@@ -28,7 +28,11 @@ The only current operator card is `P38S18R_RUNBOOK.md`. Its order is mandatory:
    classification, not only stdout or a hand-authored summary.
 
 Publication was explicitly approved on 2026-08-16. The one-host TPU neutrality
-run and 64-TPU target launch have not yet been performed.
+gate is being rerun from the corrected publication tip; the 64-TPU target has
+not been launched. The initial `294a4186` seam-tail arm correctly failed before
+round 0 because an ineligible shallow call was mistaken for a lost tail
+context. The current tip treats only `pending=None` as a no-op and retains
+wrong-arm contexts as fail-closed errors.
 
 ## HISTORY: P38s18l/P38.2q no-source inventory
 

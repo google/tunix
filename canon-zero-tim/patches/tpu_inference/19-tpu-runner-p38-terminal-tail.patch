@@ -101,7 +101,7 @@
      if not isinstance(aux_hidden_states, (tuple, list)) or len(
              aux_hidden_states) != 2:
          raise RuntimeError(
-@@ -2202,6 +2246,205 @@
+@@ -2202,6 +2246,209 @@
          f"npz_sha256={npz_sha256}",
          flush=True,
      )
@@ -215,7 +215,9 @@
 +    if not _P38_TAIL_ENABLED:
 +        return
 +    pending = _P38_TAIL_PENDING
-+    if pending is None or pending["arm"] != "A":
++    if pending is None:
++        return
++    if pending["arm"] != "A":
 +        raise RuntimeError("P38 decode tail context is absent or not arm A")
 +    if int(raw_logits.shape[0]) % int(runner.dp_size):
 +        raise RuntimeError("P38 decode tail logits are not DP divisible")
@@ -257,7 +259,9 @@
 +    if not _P38_TAIL_ENABLED:
 +        return None
 +    pending = _P38_TAIL_PENDING
-+    if pending is None or pending["arm"] != "B":
++    if pending is None:
++        return None
++    if pending["arm"] != "B":
 +        raise RuntimeError("P38 prompt tail context is absent or not arm B")
 +    selected_offsets = []
 +    chunk_rows = []
@@ -307,7 +311,7 @@
  
  
  def _p38_observe_scheduled_prefixes(prefixes, program_path):
-@@ -4332,6 +4575,14 @@
+@@ -4332,6 +4579,14 @@
                              self.model_config.max_logprobs,
                              canon_logprob_m,
                          ))

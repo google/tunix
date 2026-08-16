@@ -984,6 +984,35 @@ class DecodeLogprobChunkingTest(unittest.TestCase):
     self.assertEqual(write.call_args.args[0], [0])
     self.assertEqual(write.call_args.args[1], [5])
 
+  def test_terminal_tail_skips_calls_without_selected_seam_rows(self):
+    with (
+        mock.patch.object(self.runner, "_P38_TAIL_ENABLED", True),
+        mock.patch.object(self.runner, "_P38_TAIL_PENDING", None),
+        mock.patch.object(self.runner, "_p38_tail_gather") as gather,
+    ):
+      self.runner._p38_tail_after_decode(
+          SimpleNamespace(dp_size=1), None, None, None, None)
+      part = self.runner._p38_tail_prompt_chunk(
+          None, None, None, None, 1, 1, 0, 1, 1)
+    self.assertIsNone(part)
+    gather.assert_not_called()
+
+  def test_terminal_tail_rejects_a_pending_context_on_the_wrong_arm(self):
+    with (
+        mock.patch.object(self.runner, "_P38_TAIL_ENABLED", True),
+        mock.patch.object(self.runner, "_P38_TAIL_PENDING", {"arm": "B"}),
+        self.assertRaisesRegex(RuntimeError, "not arm A"),
+    ):
+      self.runner._p38_tail_after_decode(
+          SimpleNamespace(dp_size=1), None, None, None, None)
+    with (
+        mock.patch.object(self.runner, "_P38_TAIL_ENABLED", True),
+        mock.patch.object(self.runner, "_P38_TAIL_PENDING", {"arm": "A"}),
+        self.assertRaisesRegex(RuntimeError, "not arm B"),
+    ):
+      self.runner._p38_tail_prompt_chunk(
+          None, None, None, None, 1, 1, 0, 1, 1)
+
   def test_terminal_tail_maps_prompt_rows_into_dp_chunks(self):
     pending = {
         "arm": "B",

@@ -70,7 +70,7 @@ end-of-process shell step is the sole owner of evidence.
   auditable round bundles rather than one incomplete latest snapshot.
 
 Current local evidence (2026-08-16): pinned-image install/manifest verification
-passes for Qwen3-1.7B and Qwen3-8B; both overlays pass 32 runner tests. The full
+passes for Qwen3-1.7B and Qwen3-8B; both overlays pass 34 runner tests. The full
 P38 CPU suite passes 53 tests, postflight accepts the combined seam+tail
 fixture and rejects missing tail data, and fake GCS proves two rounds survive
 abrupt exit. The remaining hardware gate is one local v5p off-versus-seam-tail

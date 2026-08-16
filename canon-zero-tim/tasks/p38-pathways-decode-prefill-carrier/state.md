@@ -13,8 +13,11 @@
   stock run captures layer/final-norm fingerprints and terminal target/log-
   normalizer values, while each frozen round blocks until a self-contained GCS
   bundle is uploaded and downloaded back successfully. Publication is
-  approved; the combined observer's local-v5p neutrality pair is still
-  pending, and no target launch is authorized yet.
+  approved. The first seam-tail one-host arm exposed a pre-round shallow-call
+  bug: no selected seam row was incorrectly rejected as a lost tail context.
+  The current local correction makes only the absent context a no-op while
+  preserving wrong-arm rejection. A same-tip local-v5p neutrality pair is
+  still pending, and no target launch is authorized yet.
 - Task directory:
   `canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/`.
 
