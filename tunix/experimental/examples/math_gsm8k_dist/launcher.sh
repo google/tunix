@@ -27,8 +27,8 @@ ROLLOUT_PORT=${ROLLOUT_PORT:-20001}
 INFERENCE_PORT=${INFERENCE_PORT:-20002}
 RUN_INFERENCE_NODE=${RUN_INFERENCE_NODE:-0}
 INFERENCE_ADDR=${INFERENCE_ADDR:-}
-MODEL_NAME=${MODEL_NAME:-Qwen3-1.7B}
-MODEL_ID=${MODEL_ID:-Qwen/Qwen3-1.7B}
+MODEL_NAME=${MODEL_NAME:-Qwen3-0.6B}
+MODEL_ID=${MODEL_ID:-Qwen/Qwen3-0.6B}
 ARTIFACT_ROOT=${ARTIFACT_ROOT:-"${REPO_ROOT}/artifacts/qwen3_dist_gsm8k"}
 MODEL_DIR=${MODEL_DIR:-${MODEL_DOWNLOAD_DIR:-"${ARTIFACT_ROOT}/models"}}
 TOKENIZER_PATH=${TOKENIZER_PATH:-$MODEL_DIR}
@@ -37,7 +37,6 @@ MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-128}
 BATCH_SIZE=${BATCH_SIZE:-2}
 NUM_GENERATIONS=${NUM_GENERATIONS:-2}
 MAX_STEPS=${MAX_STEPS:-1}
-TRAIN_MICRO_BATCH_SIZE=${TRAIN_MICRO_BATCH_SIZE:-1}
 MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-$((BATCH_SIZE * NUM_GENERATIONS))}
 EVAL_EVERY_N_STEPS=${EVAL_EVERY_N_STEPS:-1000000}
 LORA_RANK=${LORA_RANK:-16}
@@ -61,6 +60,21 @@ FORCE_KILL=0
 
 TRAINER_TPU_CHIPS=${TRAINER_TPU_CHIPS:-0,1}
 TRAINER_FSDP=${TRAINER_FSDP:-2}
+
+# peft runs tunix's PeftTrainer; maxtext runs MaxText's MaxTextTrainingEngine.
+TRAINER_BACKEND=${TRAINER_BACKEND:-peft}
+MAXTEXT_CKPT=${MAXTEXT_CKPT:-}
+if [[ "$TRAINER_BACKEND" == "maxtext" ]]; then
+  # MaxText shards the batch dimension of every loss input across the fsdp axis, so the
+  # microbatch has to be a multiple of it. The trainer node enforces this too.
+  TRAIN_MICRO_BATCH_SIZE=${TRAIN_MICRO_BATCH_SIZE:-$TRAINER_FSDP}
+  if [[ -z "$MAXTEXT_CKPT" ]]; then
+    echo "Error: TRAINER_BACKEND=maxtext requires MAXTEXT_CKPT (Orbax params-only checkpoint)."
+    exit 1
+  fi
+else
+  TRAIN_MICRO_BATCH_SIZE=${TRAIN_MICRO_BATCH_SIZE:-1}
+fi
 ROLLOUT_TPU_CHIPS=${ROLLOUT_TPU_CHIPS:-2,3}
 INFERENCE_TPU_CHIPS=${INFERENCE_TPU_CHIPS:-}
 TPU_CHIPS_PER_HOST_BOUNDS=${TPU_CHIPS_PER_HOST_BOUNDS:-1,2,1}
@@ -308,6 +322,8 @@ echo "  train micro:    $TRAIN_MICRO_BATCH_SIZE"
 echo "  mini batch:     $MINI_BATCH_SIZE"
 echo "  use lora:       $USE_LORA"
 echo "  sampler:        $SAMPLER"
+echo "  trainer backend:$TRAINER_BACKEND"
+echo "  maxtext ckpt:   ${MAXTEXT_CKPT:-<unset>}"
 echo "  trainer chips:  $TRAINER_TPU_CHIPS"
 echo "  rollout chips:  $ROLLOUT_TPU_CHIPS"
 echo "  inference:      $RUN_INFERENCE_NODE"
@@ -365,7 +381,11 @@ echo "Launching trainer node on TPU chips $TRAINER_TPU_CHIPS..."
     --eval_every_n_steps="$EVAL_EVERY_N_STEPS"
     --lora_rank="$LORA_RANK"
     --lora_alpha="$LORA_ALPHA"
+    --trainer_backend="$TRAINER_BACKEND"
   )
+  if [[ -n "$MAXTEXT_CKPT" ]]; then
+    TRAINER_CMD+=(--maxtext_load_parameters_path="$MAXTEXT_CKPT")
+  fi
   if [[ "$USE_LORA" == "1" || "$USE_LORA" == "true" || "$USE_LORA" == "True" ]]; then
     TRAINER_CMD+=(--use_lora)
   fi
