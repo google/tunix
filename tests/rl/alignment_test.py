@@ -144,6 +144,7 @@ class AlignmentTest(absltest.TestCase):
         result = alignment.check_pre_backward(wrapped, step=3)
       self.assertEqual(result["verdict"], "PASS")
       self.assertEqual(result["step"], 3)
+      self.assertNotIn("diagnostic_round", result)
       self.assertEqual(
           set(result["boundaries"]),
           {"S_decode_vs_S_prefill", "S_prefill_vs_T_old"},
@@ -1251,6 +1252,14 @@ class AlignmentTest(absltest.TestCase):
         metadata = json.loads(capsule["metadata_json"].tobytes())
       self.assertEqual(metadata["diagnostic_round"], 1)
       self.assertEqual(os.stat(latest).st_ino, os.stat(round_one).st_ino)
+      with open(
+          os.path.join(tmpdir, "pre.jsonl"), encoding="utf-8"
+      ) as stream:
+        pre_alignment = [json.loads(line) for line in stream]
+      self.assertEqual(
+          [record["diagnostic_round"] for record in pre_alignment], [0, 1]
+      )
+      self.assertEqual([record["step"] for record in pre_alignment], [0, 0])
 
   def test_p38_mismatch_capsule_rejects_collision(self):
     wrapped = self._wrapped(rows=1)

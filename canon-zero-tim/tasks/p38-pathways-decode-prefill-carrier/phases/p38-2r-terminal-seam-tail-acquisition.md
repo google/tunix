@@ -1,8 +1,12 @@
 # P38.2r — Single-run terminal seam-and-tail acquisition
 
-Status: implementation published and same-source local-v5p neutrality passed;
-one source-pinned target launch is authorized. P38.2q remains
-retired as `INCONCLUSIVE_NO_ELIGIBLE_SNAPSHOT`; it cannot supply P38.2r data.
+Status: P38s18r target attempt is
+`INCONCLUSIVE_DURABILITY_SEAL_TIMEOUT`. Its round-0 numerical record is
+analysis-grade only because no immutable round bundle or complete three-round
+package was returned. A strict round-scope repair passes local CPU and
+fake-GCS gates but remains uncommitted/unpublished; no replacement target is
+authorized yet. P38.2q remains retired as
+`INCONCLUSIVE_NO_ELIGIBLE_SNAPSHOT`; it cannot supply P38.2r data.
 
 ## Entering evidence
 
@@ -69,15 +73,24 @@ end-of-process shell step is the sole owner of evidence.
 - a fake-GCS abrupt exit after rounds 0 and 1 leaves two independently
   auditable round bundles rather than one incomplete latest snapshot.
 
-Current local evidence (2026-08-16): pinned-image install/manifest verification
-passes for Qwen3-1.7B and Qwen3-8B; both overlays pass 34 runner tests. The full
-P38 CPU suite passes 53 tests, postflight accepts the combined seam+tail
-fixture and rejects missing tail data, and fake GCS proves two rounds survive
-abrupt exit. Source `ae63d44e...` then passed a local v5p off-versus-seam-tail
+Observer evidence (2026-08-16): pinned-image install/manifest verification
+passes for Qwen3-1.7B and Qwen3-8B; both overlays pass 34 runner tests. Source
+`ae63d44e...` passed a local v5p off-versus-seam-tail
 comparison across three frozen rounds. Both arms completed with zero backward
 and optimizer commits; the combined arm recorded 130 seam and 130 tail rows;
-and the complete alignment contracts were equal except timestamps. The target
-must use that exact executable source.
+and the complete alignment contracts were equal except timestamps.
+
+The first target source `6b75e3cf...` reached round 0 but failed its durability
+seal. Review of the later `fbb4b278` repair found two defects: training `step`
+is not the frozen diagnostic-round counter, and admitting arbitrary unscoped
+JSONL records is fail-open. The local replacement labels diagnostic
+pre-alignment records with `p38_diagnostic_round_index()`, requires that field
+for scoped pre-alignment and incident streams, and treats only the schema-
+validated request journal as cumulative-unscoped. Focused round-stage,
+postflight, seam-neutrality, fake-GCS two-round isolation/abrupt-exit, pinned-
+image alignment, and the complete P33 CPU ladder pass. These are host evidence-
+control changes; no model executable patch or canonical kernel changed. The
+replacement source must be explicitly approved and published before launch.
 
 ## Target gate
 
@@ -123,6 +136,6 @@ and must never ride the P45 full-training lane.
 
 ## Operator card
 
-After publication, use `P38S18R_RUNBOOK.md`. Do not reconstruct the
+After the replacement publication, use `P38S18R_RUNBOOK.md`. Do not reconstruct the
 launch from historical handoff sections and do not manually add environment
 variables to a rendered YAML.

@@ -6,21 +6,19 @@
 - Definition of done: one source-pinned flag-on run reports exact
   `S_decode_vs_S_prefill`, exact `S_prefill_vs_T_old`, and exact
   `T_old_vs_T_current` before a strict full workload is admitted.
-- Active phase: P38.2r single-run terminal seam-and-tail acquisition. P38.2q
-  inventoried all 22 P38s18l snapshots and found no eligible two-round source,
-  so P38s18l is retired as `INCONCLUSIVE_NO_ELIGIBLE_SNAPSHOT` rather than
-  repeatedly reduced. P38.2r's implementation is locally complete: the same
-  stock run captures layer/final-norm fingerprints and terminal target/log-
-  normalizer values, while each frozen round blocks until a self-contained GCS
-  bundle is uploaded and downloaded back successfully. Publication is
-  approved. The first seam-tail one-host arm exposed a pre-round shallow-call
-  bug: no selected seam row was incorrectly rejected as a lost tail context.
-  The current local correction makes only the absent context a no-op while
-  preserving wrong-arm rejection. Corrected source `ae63d44e...` passed both
-  local-v5p arms for three rounds: off/on alignment contracts are identical
-  except timestamps, the observer produced 130 seam and 130 tail records, and
-  backward/optimizer commits remained zero. One source-pinned P38s18r target
-  launch is now authorized; no target has launched yet.
+- Active phase: P38.2r single-run terminal seam-and-tail acquisition. P38s18r
+  reached one numerical precheck but failed before sealing round 0, so the
+  complete target attempt is `INCONCLUSIVE_DURABILITY_SEAL_TIMEOUT`. The
+  numerical record (`N_action=46,098`, A-B 30 bytes, B-C exact) is analysis-
+  grade only; it is not a completed scientific validation. Review of remote
+  repair `fbb4b278` found that it conflated optimizer step with diagnostic
+  round and admitted arbitrary unscoped JSONL into every bundle. A local,
+  uncommitted replacement uses `p38_diagnostic_round_index()` for diagnostic
+  pre-alignment, strictly scopes pre-alignment/incident records, and explicitly
+  treats only the schema-validated request journal as cumulative. Focused
+  tests, fake-GCS two-round isolation/abrupt-exit, pinned-image alignment tests,
+  and the complete P33 CPU ladder pass. No replacement target launch is
+  authorized until the user approves publication of an exact source SHA.
 - Task directory:
   `canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/`.
 
@@ -29,14 +27,27 @@
 - P38s18r/source `6b75e3cf4942` ran on 64 TPU (`DP16xTP4`, Concurrency 256,
   3 Frozen Rounds, Seam Mode `layer`, Terminal Tail `1`) with zero backward,
   zero optimizer commits, and all 6 overlays verified by SHA256.
-  - Precheck Round 0 completed with full 32-prompt coverage (`N_action=46,098`):
+  - One round-0 precheck record reported full 32-prompt coverage
+    (`N_action=46,098`):
     - B-C boundary (`S_prefill` vs `T_old`): STRICT EXACT 0 mismatch bytes.
     - A-B boundary (`S_decode` vs `S_prefill`): exactly 30 mismatch bytes.
-    - Seam and Tail probe data: 360+ NPZ records generated and live-uploaded.
+    - The manual report says 360+ seam/tail NPZ records were live-uploaded,
+      but those raw bytes are not committed here and no immutable round bundle
+      completed; that count is not independently audited in this checkout.
   - Durability seal timeout error:
     - At end of Round 0, `stage_p38_round.py` failed with `ValueError: no round 0 records in pre_alignment.jsonl` because `pre_alignment.jsonl` contained `"step": 0` while `_filter_jsonl` strictly looked for `"diagnostic_round"`.
     - Main thread timed out after 900s: `timed out waiting for P38 round 0 durability acknowledgement`.
-    - Fix implemented: `_filter_jsonl` in `stage_p38_round.py` updated to check `diagnostic_round` and fallback to `step`, and `tunix/rl/alignment.py` updated to write `diagnostic_round: int(step)`.
+    - Remote fix `fbb4b278` added a `step` fallback and wrote
+      `diagnostic_round=int(step)`. Review found it unsafe because frozen rounds
+      may advance while step remains zero, and because unscoped incident data
+      could enter every round.
+    - Local replacement (not committed/pushed) derives diagnostic scope from
+      the frozen-round counter, rejects missing/wrong scoped records, and
+      admits only the schema-validated cumulative request journal.
+  - Overall classification:
+    `INCONCLUSIVE_DURABILITY_SEAL_TIMEOUT`. No round-complete marker,
+    three-round package, controlled exit 42, `COLLECTED`, or `COMPLETE` is
+    admitted from this attempt.
   - Artifact report: `artifacts/p38s18r_round0_seal_error_report.md`.
 
 - P38s18l/source `9a83457417fc` ran at Concurrency 256 / DP16xTP4 with zero
@@ -181,11 +192,13 @@
   `ROUND_COMPLETE.json` last.
 - A one-host rehearsal is explicitly exempt from remote sealing and prints
   `ROUND_SEAL_SKIPPED`; target preflight forbids that rehearsal flag.
-- Local gates: pinned Qwen3-1.7B and Qwen3-8B overlays each pass 32 exact-image
-  runner tests; the full P38 image suite passes 53 tests; fake-GCS durability,
-  postflight (including tail-required/missing-tail), alignment, syntax,
-  manifest, and diff checks pass. The real v5p off/on endpoint comparison is
-  the remaining gate.
+- Observer gates: corrected source `ae63d44e...` passed same-source local-v5p
+  off/on endpoint neutrality across three rounds. The later host-only round-
+  scope correction passes focused round-stage/postflight/neutrality tests,
+  fake-GCS two-round content isolation and abrupt-exit durability, pinned-image
+  alignment tests, Python/shell checks, and the complete P33 CPU ladder. It
+  does not change an overlay, runner patch, model executable, or canonical
+  kernel. Publication and a fresh target run remain pending.
 
 - P38 renderings now pin a unique attempt-0 evidence prefix under
   `gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/`.
@@ -321,21 +334,16 @@
 
 ## Next action
 
-1. Review and publish the P38.2q rc=4 durability amendment only after the
-   selection-only fake-GCS success, overwrite refusal, SHA mutation, semantic
-   listing mutation, existing reduction, classifier, syntax, and checksum gates
-   pass.
-2. On a clean GCP checkout, rerun `P38S18L_GCP_REDUCTION_RUNBOOK.md` against the
-   live root and a fresh versioned destination. Exit 4 is accepted only after
-   the wrapper prints COMPLETE and uploads the inventory bundle.
-3. Download and audit the complete selection-only bundle. Require 22 candidates,
-   zero qualified snapshots, exact selector reproduction, and SHA verification.
-4. Commit those exact bytes under `evidence/p38s18l/reduction-v2/`. Then retire
-   P38s18l; do not promote its hand-authored hidden/tail classification.
-5. Before any new target launch, implement and pass the one-host neutrality
-   gate registered in `phases/p38-2r-terminal-seam-tail-acquisition.md`. The
-   successor captures hidden seams and the bounded tail in one production-shape
-   run with independently sealed per-round bundles.
+1. Review the local P38.2r round-scope fix and its focused/full CPU gate
+   receipts. Do not commit or push it without the user's explicit approval.
+2. After publication, record the exact full source SHA. Do not use `HEAD`, do
+   not edit the rendered manifest, and do not reuse run-id `p38s18r`.
+3. Render one fresh `p38s18r2` stock target from that approved SHA by following
+   `P38S18R_RUNBOOK.md`. Preserve the failed P38s18r logs and GCS prefix.
+4. Admit the replacement only if all three distinct diagnostic rounds each
+   have an immutable round bundle and ACK, followed by controlled exit 42,
+   `COLLECTED`, `COMPLETE`, and an offline official-classifier replay from the
+   returned bytes.
 
 ## Claim ceiling and blockers
 
@@ -363,9 +371,7 @@ Leave `CANON_P38_SERVING_CAPTURE_DIR`, `CANON_P38_REQUEST_JOURNAL`,
 training, evaluation, prefix cache, precision, optimizer placement, or
 canonical kernels.
 
-- Updated: 2026-08-16 UTC; P38.2p/v1 is sealed as an inconclusive one-round
-  reduction. The first P38.2q GCP selector execution reported no eligible
-  two-round snapshot but returned no durable inventory bytes. The local rc=4
-  amendment now uploads and audits that selection-only result. P38.2r registers
-  a future single-run seam-and-tail acquisition but is unimplemented and
-  unlaunched. No TPU run, backward, or optimizer commit occurred here.
+- Updated: 2026-08-16 UTC; P38s18r is
+  `INCONCLUSIVE_DURABILITY_SEAL_TIMEOUT`. The strict round-scope replacement is
+  local only, and no replacement TPU run, backward, or optimizer commit has
+  occurred.

@@ -1,17 +1,20 @@
-# P38s18r terminal seam-and-tail runbook
+# P38s18r2 replacement terminal seam-and-tail runbook
 
-This is the only current operator card for the P38 root-cause lane. P38s18r is
-a 64-TPU (`DP16xTP4`) FrozenLake diagnostic, not full training: three
-frozen-weight rounds, backward zero, optimizer commits zero, stock arm only.
+This is the only current operator card for the P38 root-cause lane. P38s18r2
+is the fresh successor to the failed P38s18r durability-seal attempt. It is a
+64-TPU (`DP16xTP4`) FrozenLake diagnostic, not full training: three frozen-
+weight rounds, backward zero, optimizer commits zero, stock arm only.
 
 Do not launch from an uncommitted tree. Do not edit the rendered YAML or add
-environment variables by hand. Do not rerun P38s18l/P38.2q.
+environment variables by hand. Do not rerun P38s18l/P38.2q. Do not reuse
+run-id `p38s18r`, delete its GCS prefix, or cite its incomplete round as a
+completed target verdict.
 
-## 1. Publication and one-host gate
+## 1. Publication gate
 
-The admitted executable source is
-`ae63d44edc67cfcd5b19d34abc82feb681284c67`. On the local v5p host, the
-observer-off and combined-observer arms completed from that exact clean source:
+Source `ae63d44edc67cfcd5b19d34abc82feb681284c67` established the
+observer-neutrality baseline on local v5p. Both observer-off and combined-
+observer arms completed three rounds from that clean source:
 
 ```bash
 set -euo pipefail
@@ -50,6 +53,15 @@ endpoint is a failed neutrality gate. Stop; do not launch merely because the
 observer produced files. The admitted receipt is recorded in
 `artifacts/p38_2r_onehost_neutrality_0816.md`.
 
+The replacement round-scope source is not yet published. Before launch, the
+operator must receive the user's explicitly approved full commit SHA. The
+replacement changes only host evidence control: it derives frozen round scope
+from `p38_diagnostic_round_index()`, strictly filters scoped records, and
+admits only the schema-validated request journal as cumulative. Its focused
+tests, fake-GCS two-round isolation/abrupt-exit test, pinned-image alignment
+tests, and complete P33 CPU gate must be green. These receipts do not authorize
+using an arbitrary checkout tip.
+
 ## 2. Render exactly one target JobSet
 
 Use a fresh output directory and source SHA. The renderer is the only admitted
@@ -58,9 +70,12 @@ way to enable the combined observer:
 ```bash
 set -euo pipefail
 cd /home/yuxuan/code_rl_repro/sequence_packing/p48p49_integration
-SOURCE_COMMIT=ae63d44edc67cfcd5b19d34abc82feb681284c67
-RUN_ID=p38s18r
-OUT="$(mktemp -d /tmp/p38s18r.XXXXXX)"
+: "${SOURCE_COMMIT:?export the explicitly approved full P38s18r2 fix SHA}"
+test "$(git rev-parse "$SOURCE_COMMIT^{commit}")" = "$SOURCE_COMMIT"
+test -z "$(git status --porcelain --untracked-files=no)"
+RUN_ID="${RUN_ID:-p38s18r2}"
+test "$RUN_ID" != p38s18r
+OUT="$(mktemp -d /tmp/p38s18r2.XXXXXX)"
 
 python3 canon-zero-tim/cluster/render_p38_serving_jobsets.py \
   --source-commit "$SOURCE_COMMIT" \
@@ -79,7 +94,8 @@ kubectl apply --dry-run=server -f "$STOCK"
 Before apply, the manifest must show stock, concurrency 256, diagnostic rounds
 3, seam mode `layer`, terminal tail `1`, and `maxRestarts: 0`. Prefix cache
 remains disabled by the profile. There is no KV-unified arm and no
-full-training admission.
+full-training admission. The rendered source label and checkout-fetch command
+must contain the exact approved SHA.
 
 ## 3. Apply and observe
 

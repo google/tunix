@@ -1611,3 +1611,29 @@ reclassification from the committed NPZ inputs.
 - Implemented fix in `stage_p38_round.py` (check `diagnostic_round` with fallback to `step`, admit unscoped records) and `tunix/rl/alignment.py` (explicit `diagnostic_round: int(step)`).
 - Documented in `artifacts/p38s18r_round0_seal_error_report.md`.
 
+## 2026-08-16 UTC — P38s18r round-scope review and local correction
+
+- Pulled remote tip `fbb4b278` and reproduced the P38s18r seal failure from
+  the committed report: the round stager found no `diagnostic_round` in the
+  pre-alignment stream, the worker produced no round-0 ACK, and the learner
+  timed out after 900 seconds. The overall run is
+  `INCONCLUSIVE_DURABILITY_SEAL_TIMEOUT`; its one numerical precheck is only
+  analysis-grade.
+- Rejected the remote fallback as unsafe. Frozen diagnostic rounds can advance
+  while optimizer `step` remains zero, so `diagnostic_round=int(step)` aliases
+  distinct rounds. Generic unscoped admission is also fail-open and could copy
+  incident records into every bundle.
+- Local replacement (not committed/pushed): diagnostic pre-alignment records
+  use `p38_diagnostic_round_index()`; pre-alignment and incident streams require
+  strict integer round scope; only schema `p38-request-journal-v1` is admitted
+  as a cumulative-unscoped journal; round inventory records that scope.
+- Gates passed: round-stage 4/4 including step-fallback and schema negatives;
+  fake-GCS two-round content isolation plus abrupt-exit durability; P38
+  postflight and seam neutrality; Python compilation and diff check; pinned-
+  image alignment tests proving steps `[0,0]` map to rounds `[0,1]` and ordinary
+  step 3 has no diagnostic scope; complete pinned-image P33 CPU gate PASS.
+- Corrected operator policy: preserve the failed P38s18r evidence, never reuse
+  its run-id or prefix, and do not launch from `HEAD`. After explicit user
+  approval and publication, use fresh run-id `p38s18r2` plus the approved full
+  SHA. No commit, push, target launch, backward, or optimizer commit occurred
+  in this checkpoint.

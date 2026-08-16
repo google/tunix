@@ -9,7 +9,7 @@
 
 ## 1. Executive Summary
 
-1. **Scientific Validation (PASS)**:
+1. **Round-0 analysis record (not a target PASS)**:
    * Round 0 completed with full 32-prompt coverage (`N_action = 46,098`).
    * **B-C Boundary (`S_prefill` vs `T_old`)**: **0 mismatch bytes** (bitwise exact match).
    * **A-B Boundary (`S_decode` vs `S_prefill`)**: **30 mismatch bytes** (reproducing carrier drift).
@@ -68,7 +68,13 @@ Because `selected` remained empty, `_filter_jsonl` raised `ValueError`, preventi
 
 ---
 
-## 3. Verified Fix
+## 3. Superseded first repair
+
+The repair below was the first remote proposal. Subsequent review found it is
+not safe for a frozen multi-round diagnostic: optimizer `step` can remain zero
+while the diagnostic round advances, and generic unscoped admission can copy
+incident data into every round. It is retained here only as history and must
+not be launched.
 
 1. **`stage_p38_round.py`**:
    Update `_filter_jsonl` to check `record.get("diagnostic_round")`, falling back to `record.get("step")`, and admitting unscoped records:
@@ -105,23 +111,19 @@ Because `selected` remained empty, `_filter_jsonl` raised `ValueError`, preventi
 
 ---
 
-## 4. Next Step for Incoming Agent
+## 4. Corrected disposition (2026-08-16)
 
-1. Delete existing failed JobSet:
-   ```bash
-   kubectl delete jobset canon-p38-fl-stock-p38s18r-6b75e3cf
-   ```
-2. Render and launch P38s18r with the new commit:
-   ```bash
-   SOURCE_COMMIT="$(git rev-parse HEAD)"
-   OUT="$(mktemp -d /tmp/p38s18r.XXXXXX)"
-   python3 canon-zero-tim/cluster/render_p38_serving_jobsets.py \
-     --source-commit "$SOURCE_COMMIT" \
-     --run-id p38s18r \
-     --output-dir "$OUT" \
-     --stock-only \
-     --seam-mode layer \
-     --terminal-tail
-   kubectl apply -f "$OUT/jobset-p38-serving-stock.yaml"
-   ```
-3. Observe all 3 rounds completing with `ROUND_SEAL_ACKNOWLEDGED` x 3 and controlled exit 42.
+The complete P38s18r attempt is
+`INCONCLUSIVE_DURABILITY_SEAL_TIMEOUT`. Its numerical round-0 line is useful
+for analysis but lacks an immutable `ROUND_COMPLETE` bundle, two later rounds,
+controlled exit, `COLLECTED`, `COMPLETE`, and an offline classifier replay.
+The reported 360+ live-uploaded files are not committed here and are not
+independently audited by this report.
+
+The corrected local repair uses `p38_diagnostic_round_index()` for diagnostic
+pre-alignment records, requires strict integer round scope for pre-alignment
+and incident records, and explicitly admits only request-journal schema
+`p38-request-journal-v1` as cumulative-unscoped. It must be reviewed,
+committed, and pushed only after explicit user approval. The next target must
+use a fresh run-id (`p38s18r2`) and the exact approved full SHA; do not reuse
+`p38s18r`, `HEAD`, or its evidence prefix. See `P38S18R_RUNBOOK.md`.

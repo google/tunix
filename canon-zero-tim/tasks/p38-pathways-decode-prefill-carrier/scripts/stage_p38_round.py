@@ -21,7 +21,14 @@ def _copy(source: Path, destination: Path) -> None:
   shutil.copyfile(source, destination)
 
 
-def _filter_jsonl(source: Path, destination: Path, round_index: int) -> int:
+def _filter_jsonl(
+    source: Path,
+    destination: Path,
+    round_index: int,
+    *,
+    expected_schema: str | None = None,
+    cumulative_unscoped: bool = False,
+) -> int:
   _require(source.is_file(), f"round JSONL source is absent: {source}")
   selected: list[str] = []
   for line_number, line in enumerate(
@@ -35,13 +42,25 @@ def _filter_jsonl(source: Path, destination: Path, round_index: int) -> int:
       raise ValueError(
           f"invalid JSONL record in {source}:{line_number}"
       ) from exc
-    diag_round = record.get("diagnostic_round")
-    if diag_round is None:
-      diag_round = record.get("step")
-    if diag_round is not None:
-      if int(diag_round) == round_index:
-        selected.append(json.dumps(record, sort_keys=True))
-    else:
+    if expected_schema is not None:
+      _require(
+          record.get("schema") == expected_schema,
+          f"JSONL schema drifted in {source}:{line_number}",
+      )
+    if cumulative_unscoped:
+      selected.append(json.dumps(record, sort_keys=True))
+      continue
+    _require(
+        "diagnostic_round" in record,
+        f"round-scoped JSONL record has no diagnostic_round in "
+        f"{source}:{line_number}",
+    )
+    diag_round = record["diagnostic_round"]
+    _require(
+        isinstance(diag_round, int) and not isinstance(diag_round, bool),
+        f"diagnostic_round is not an integer in {source}:{line_number}",
+    )
+    if diag_round == round_index:
       selected.append(json.dumps(record, sort_keys=True))
   _require(selected, f"no round {round_index} records in {source}")
   destination.write_text("\n".join(selected) + "\n", encoding="utf-8")
@@ -85,10 +104,17 @@ def stage(args: argparse.Namespace) -> dict:
       args.pre_alignment, args.output / "pre-alignment.jsonl", args.round
   )
   journal_records = _filter_jsonl(
-      args.request_journal, args.output / "request-journal.jsonl", args.round
+      args.request_journal,
+      args.output / "request-journal.jsonl",
+      args.round,
+      expected_schema="p38-request-journal-v1",
+      cumulative_unscoped=True,
   )
   incident_records = _filter_jsonl(
-      args.incident_ledger, args.output / "incident-ledger.jsonl", args.round
+      args.incident_ledger,
+      args.output / "incident-ledger.jsonl",
+      args.round,
+      expected_schema="p38-incident-ledger-v1",
   )
   seam_records = _copy_record_pairs(
       args.observer_dir,
@@ -121,6 +147,7 @@ def stage(args: argparse.Namespace) -> dict:
   record = {
       "diagnostic_round": args.round,
       "incident_records": incident_records,
+      "journal_scope": "cumulative-unscoped",
       "journal_records": journal_records,
       "kv_records": kv_records,
       "pre_alignment_records": pre_alignment_records,

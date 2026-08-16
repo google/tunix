@@ -28,15 +28,34 @@ class RoundStageTest(unittest.TestCase):
     observer.mkdir()
     run_log = root / "run.log"
     run_log.write_text("run\n", encoding="utf-8")
-    sources = []
-    for name in ("pre.jsonl", "journal.jsonl", "incident.jsonl"):
-      path = root / name
-      path.write_text(
-          json.dumps({"diagnostic_round": 0, "name": name}) + "\n"
-          + json.dumps({"diagnostic_round": 1, "name": name}) + "\n",
-          encoding="utf-8",
-      )
-      sources.append(path)
+    pre = root / "pre.jsonl"
+    pre.write_text(
+        json.dumps({"diagnostic_round": 0, "name": "pre", "step": 0})
+        + "\n"
+        + json.dumps({"diagnostic_round": 1, "name": "pre", "step": 0})
+        + "\n",
+        encoding="utf-8",
+    )
+    journal = root / "journal.jsonl"
+    journal.write_text(
+        json.dumps({"schema": "p38-request-journal-v1", "name": "first"})
+        + "\n"
+        + json.dumps({"schema": "p38-request-journal-v1", "name": "second"})
+        + "\n",
+        encoding="utf-8",
+    )
+    incident = root / "incident.jsonl"
+    incident.write_text(
+        json.dumps({
+            "diagnostic_round": 0,
+            "schema": "p38-incident-ledger-v1",
+        }) + "\n"
+        + json.dumps({
+            "diagnostic_round": 1,
+            "schema": "p38-incident-ledger-v1",
+        }) + "\n",
+        encoding="utf-8",
+    )
     capsule = root / "capsule.npz"
     np.savez(root / "capsule.round-000000.npz", values=np.arange(4))
     self._record_pair(observer, "p38_seam_000000", "p38-seam-fingerprint-v1")
@@ -46,10 +65,10 @@ class RoundStageTest(unittest.TestCase):
         round=0,
         output=root / "round",
         run_log=run_log,
-        pre_alignment=sources[0],
+        pre_alignment=pre,
         capsule=capsule,
-        request_journal=sources[1],
-        incident_ledger=sources[2],
+        request_journal=journal,
+        incident_ledger=incident,
         observer_dir=observer,
         require_seam=True,
         require_kv=False,
@@ -86,6 +105,11 @@ class RoundStageTest(unittest.TestCase):
           (args.output / "pre-alignment.jsonl").read_text(encoding="utf-8")
       )
       self.assertEqual(record["diagnostic_round"], 0)
+      inventory = json.loads(
+          (args.output / "ROUND_INVENTORY.json").read_text(encoding="utf-8")
+      )
+      self.assertEqual(inventory["journal_records"], 2)
+      self.assertEqual(inventory["journal_scope"], "cumulative-unscoped")
 
   def test_missing_tail_and_sha_mutation_fail_closed(self):
     with tempfile.TemporaryDirectory() as directory:
@@ -97,6 +121,29 @@ class RoundStageTest(unittest.TestCase):
       seam = args.observer_dir / "p38_seam_000000.npz"
       seam.write_bytes(seam.read_bytes() + b"fault")
       with self.assertRaisesRegex(ValueError, "NPZ SHA failed"):
+        stage_module.stage(args)
+
+  def test_step_is_not_accepted_as_round_scope(self):
+    with tempfile.TemporaryDirectory() as directory:
+      args = self._fixture(Path(directory))
+      args.pre_alignment.write_text('{"step": 0}\n', encoding="utf-8")
+      with self.assertRaisesRegex(ValueError, "has no diagnostic_round"):
+        stage_module.stage(args)
+
+  def test_unscoped_incident_and_wrong_journal_schema_fail_closed(self):
+    with tempfile.TemporaryDirectory() as directory:
+      args = self._fixture(Path(directory))
+      args.incident_ledger.write_text(
+          '{"schema":"p38-incident-ledger-v1"}\n', encoding="utf-8"
+      )
+      with self.assertRaisesRegex(ValueError, "has no diagnostic_round"):
+        stage_module.stage(args)
+    with tempfile.TemporaryDirectory() as directory:
+      args = self._fixture(Path(directory))
+      args.request_journal.write_text(
+          '{"schema":"wrong"}\n', encoding="utf-8"
+      )
+      with self.assertRaisesRegex(ValueError, "JSONL schema drifted"):
         stage_module.stage(args)
 
 

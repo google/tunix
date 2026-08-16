@@ -1250,7 +1250,6 @@ def check_pre_backward(
   record = {
       "timestamp": time.time(),
       "step": int(step),
-      "diagnostic_round": int(step),
       "verdict": verdict,
       "reds": reds,
       "blocking_reds": blocking_reds,
@@ -1283,6 +1282,10 @@ def check_pre_backward(
           "run_stage": os.environ.get("CANON_P33_RUN_STAGE", ""),
       },
   }
+  if precheck_only_enabled():
+    # Frozen diagnostic rounds are a control-flow counter, not optimizer
+    # steps.  They can advance while the training step remains unchanged.
+    record["diagnostic_round"] = p38_diagnostic_round_index()
   report_path = os.environ.get(
       PRE_REPORT_ENV,
       "/mnt/disks/tunix-data/frozenlake/logs/pre_alignment_report.jsonl",

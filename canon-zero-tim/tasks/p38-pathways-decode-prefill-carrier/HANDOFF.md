@@ -5,48 +5,60 @@ parallel Qwen3-32B DeepSWE workstream, read
 `../p39-deepswe-production/HANDOFF.md`. P38 evidence cannot promote P39, and
 P39 evidence cannot promote P38.
 
-## CURRENT: P38s18r Round 0 execution and durability seal timeout fix
+## CURRENT: P38s18r is inconclusive; replacement is not published
 
-P38s18r was launched on 64 TPU (`DP16xTP4`, Concurrency 256, 3 Frozen Rounds,
-Seam Mode `layer`, Terminal Tail `1`).
+P38s18r/source `6b75e3cf4942...` ran on 64 TPU (`DP16xTP4`, concurrency
+256, three frozen rounds, seam mode `layer`, terminal tail enabled). It reached
+one precheck record, then the round-0 durability worker failed and the learner
+timed out after 900 seconds.
 
-### Target Facts & Validation:
-1. **Scientific Validation (PASS)**:
-   - Round 0 executed with full 32-prompt coverage (`N_action = 46,098`).
-   - **B-C Boundary (`S_prefill` vs `T_old`)**: **0 mismatch bytes** (bitwise exact match).
-   - **A-B Boundary (`S_decode` vs `S_prefill`)**: **30 mismatch bytes** (reproducing carrier drift).
-   - **Seam & Tail Probe Capture**: 360+ NPZ records (Layers 0..35 and terminal tail outputs) were generated and live-uploaded to GCS.
-   - `backward = 0`, `optimizer_commits = 0`.
-2. **Durability Seal Timeout Error**:
-   - At the end of Round 0, `[CANON_P38] ROUND_SEAL_REQUESTED round=0` triggered `stage_p38_round.py`.
-   - `_filter_jsonl` raised `ValueError: no round 0 records in pre_alignment.jsonl` because `pre_alignment.jsonl` contained `"step": 0` while `_filter_jsonl` strictly filtered on `"diagnostic_round"`.
-   - As a result, the background worker failed before creating `round-000000.ack`, and the main thread timed out after 900s:
-     `tunix.rl.alignment.AlignmentGateError: timed out waiting for P38 round 0 durability acknowledgement`.
-3. **Fix Implemented**:
-   - `stage_p38_round.py`: `_filter_jsonl` updated to check `diagnostic_round` with fallback to `step`, and admit unscoped records.
-   - `tunix/rl/alignment.py`: `check_pre_backward` updated to write `diagnostic_round: int(step)`.
-   - Documented in `artifacts/p38s18r_round0_seal_error_report.md`.
+### Admitted facts
 
-### Exact Next Steps for Incoming Agent:
-1. Delete old failed JobSet:
-   ```bash
-   kubectl delete jobset canon-p38-fl-stock-p38s18r-6b75e3cf
-   ```
-2. Render and relaunch `p38s18r` with the new commit:
-   ```bash
-   SOURCE_COMMIT="$(git rev-parse HEAD)"
-   OUT="$(mktemp -d /tmp/p38s18r.XXXXXX)"
-   python3 canon-zero-tim/cluster/render_p38_serving_jobsets.py \
-     --source-commit "$SOURCE_COMMIT" \
-     --run-id p38s18r \
-     --output-dir "$OUT" \
-     --stock-only \
-     --seam-mode layer \
-     --terminal-tail
-   kubectl apply -f "$OUT/jobset-p38-serving-stock.yaml"
-   ```
-3. Monitor all 3 rounds completing with `ROUND_SEAL_ACKNOWLEDGED` x 3 and controlled exit 42.
-4. Download and mechanically audit the full evidence bundle (`rounds/000000..2`, `PREFLIGHT.json`, `COLLECTED.json`, `COMPLETE.json`, `SHA256SUMS`).
+- Round-0 analysis record: `N_action=46,098`, B-C exact, A-B 30 differing
+  bytes, backward zero, optimizer commits zero.
+- The manual report says 360+ seam/tail NPZ files were live-uploaded. Those raw
+  files are not committed in this checkout and no immutable round-0 bundle
+  completed, so that count is not independently audited here.
+- Missing: round-0 ACK/`ROUND_COMPLETE`, rounds 1-2, controlled exit 42,
+  `COLLECTED`, `COMPLETE`, and an offline classifier replay from a complete
+  returned package.
+- Overall verdict: `INCONCLUSIVE_DURABILITY_SEAL_TIMEOUT`. Do not call this
+  “Scientific Validation PASS”.
+
+### Root cause and reviewed repair
+
+The producer wrote a normal training `step`, while the round stager required a
+frozen `diagnostic_round`. Remote commit `fbb4b278` attempted to fix that by
+writing `diagnostic_round=int(step)`, falling back to `step`, and admitting
+unscoped JSONL. Review found that insufficient:
+
+1. all frozen diagnostic rounds can execute at optimizer step 0, so `step` is
+   not a round key; and
+2. admitting arbitrary unscoped records lets incident data contaminate every
+   round bundle.
+
+The local replacement, still uncommitted/unpublished, does the following:
+
+- diagnostic pre-alignment records use `p38_diagnostic_round_index()`;
+- pre-alignment and incident ledgers require an integer `diagnostic_round` and
+  are filtered strictly to the requested round;
+- only request journal schema `p38-request-journal-v1` is explicitly admitted
+  as a cumulative-unscoped stream; and
+- each `ROUND_INVENTORY.json` records that journal scope.
+
+Focused stage/postflight/neutrality tests, fake-GCS two-round isolation plus
+abrupt-exit durability, pinned-image alignment tests, and the complete P33 CPU
+gate pass. No model executable patch or canonical kernel changed.
+
+### Exact next steps for the incoming agent
+
+1. Do not delete/overwrite the failed evidence and do not reuse run-id
+   `p38s18r`.
+2. Wait for the user to approve commit and push of the local repair. Record the
+   resulting full published SHA; never substitute `HEAD`.
+3. Follow `P38S18R_RUNBOOK.md` with fresh run-id `p38s18r2` and that exact SHA.
+4. Require three distinct round ACKs/bundles, controlled exit 42,
+   `COLLECTED`, `COMPLETE`, all SHA checks, and offline classifier replay.
 
 ## HISTORY: P38s18l/P38.2q no-source inventory
 

@@ -177,12 +177,15 @@ make_case "$tmp/rounds" canon-p38-test-rounds
 bash "$PERSIST" probe > "$tmp/rounds/probe.log"
 unset CANON_P38_KV_OBSERVER_DIR CANON_P38_KV_OBSERVER_CLASSIFICATION || true
 export CANON_P38_SEAM_OBSERVER_DIR="$tmp/rounds/state/capture"
+: > "$CANON_PRE_ALIGN_REPORT"
+: > "$CANON_P38_REQUEST_JOURNAL"
+: > "$CANON_P38_INCIDENT_LEDGER"
 for round_index in 0 1; do
-  printf '{"diagnostic_round":%s}\n' "$round_index" \
+  printf '{"diagnostic_round":%s,"step":0}\n' "$round_index" \
     >> "$CANON_PRE_ALIGN_REPORT"
-  printf '{"diagnostic_round":%s,"kind":"journal"}\n' "$round_index" \
+  printf '{"schema":"p38-request-journal-v1","kind":"journal","sequence":%s}\n' "$round_index" \
     >> "$CANON_P38_REQUEST_JOURNAL"
-  printf '{"diagnostic_round":%s,"kind":"incident"}\n' "$round_index" \
+  printf '{"diagnostic_round":%s,"schema":"p38-incident-ledger-v1","kind":"incident"}\n' "$round_index" \
     >> "$CANON_P38_INCIDENT_LEDGER"
   printf 'capsule-%s\n' "$round_index" > \
     "${CANON_P38_MISMATCH_CAPSULE%.npz}.round-$(printf '%06d' "$round_index").npz"
@@ -244,6 +247,35 @@ for sequence in 000000 000001; do
   test -s "$round_remote/$sequence/ROUND_COMPLETE.json"
   (cd "$round_remote/$sequence" && sha256sum -c SHA256SUMS --quiet)
 done
+python3 - "$round_remote" <<'PY'
+import json
+import pathlib
+import sys
+
+remote = pathlib.Path(sys.argv[1])
+for round_index in (0, 1):
+  bundle = remote / f"{round_index:06d}"
+  pre = [
+      json.loads(line)
+      for line in (bundle / "pre-alignment.jsonl").read_text().splitlines()
+  ]
+  incident = [
+      json.loads(line)
+      for line in (bundle / "incident-ledger.jsonl").read_text().splitlines()
+  ]
+  journal = [
+      json.loads(line)
+      for line in (bundle / "request-journal.jsonl").read_text().splitlines()
+  ]
+  inventory = json.loads((bundle / "ROUND_INVENTORY.json").read_text())
+  assert {record["diagnostic_round"] for record in pre} == {round_index}, pre
+  assert {record["diagnostic_round"] for record in incident} == {round_index}, incident
+  assert len(journal) == 2, journal
+  assert {record["schema"] for record in journal} == {
+      "p38-request-journal-v1"
+  }, journal
+  assert inventory["journal_scope"] == "cumulative-unscoped", inventory
+PY
 test ! -e "$FAKE_GCS_ROOT/yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-p38-test-rounds/attempt-0/COLLECTED.json"
 
 install_fake_gcloud "$tmp/out-of-order"
