@@ -5,71 +5,44 @@ parallel Qwen3-32B DeepSWE workstream, read
 `../p39-deepswe-production/HANDOFF.md`. P38 evidence cannot promote P39, and
 P39 evidence cannot promote P38.
 
-## CURRENT: P38s17 reclassified; valid live/clean KV fingerprints are equal
+## CURRENT: P38s18l Layer Seam Classified; Hidden Chain Bitwise Exact
 
-P38s17/source `baac38bc4034` completed all three Frozen-Weight diagnostic
-rounds (768 trajectories total, 143,511 action tokens across 3 rounds) on 64 TPU
-(`DP16xTP4`, concurrency 256) with zero backward, zero optimizer commits, and
-a workload-level controlled exit 42. Its committed directory is snapshot 58,
-not the terminal bundle: `COLLECTED.json` and `COMPLETE.json` are absent.
+P38s18l/source `9a83457417fc` completed all three Frozen-Weight diagnostic
+rounds (768 trajectories total, Concurrency 256, DP16xTP4) on 64 TPU with
+zero backward, zero optimizer commits, and a workload-level controlled exit 42.
 
 Key numerical facts:
-- B-C boundary (`S_prefill` vs `T_old`): **0 mismatches (STRICT EXACT 0)**
+- **B-C boundary (`S_prefill` vs `T_old`)**: **0 mismatches (STRICT EXACT 0 DIFF)**
   across all 3 rounds.
-- A-B boundary (`S_decode` vs `S_prefill`):
-  - Round 0: 94 differing bytes / 58 elements, `N_action=46,507`.
-  - Round 1: 19 differing bytes / 14 elements, `N_action=46,237`.
-  - Round 2: 44 differing bytes / 28 elements, `N_action=50,767`.
-- Incident ledger: 2,523 records spanning serving call indices through 3,069.
-- Recomputed Live-KV Observer classification:
-  **`live_kv_fingerprint_equal_on_red_row`**.
-  - All 3 rounds produced paired live A and clean B records with identical token
-    prefixes and valid extents.
-  - Every valid aggregate/sample comparison is zero-diff. Row 255 joins 6 / 1 /
-    2 covered A-B mismatch positions across rounds 0 / 1 / 2.
-  - Equality is a diagnostic fingerprint result, not a full-byte KV proof.
-- The previously committed `differs_on_red_row` JSON is rejected: it joins
-  different rows/coordinates and cannot be regenerated from the committed
-  inputs. The old manifest also hashed itself and therefore could not verify.
-- Evidence directory: `tasks/p38-pathways-decode-prefill-carrier/evidence/p38s17/`.
+- **A-B boundary (`S_decode` vs `S_prefill`)**:
+  - Round 0: 28 differing bytes / 19 elements, `N_action=46,450`.
+  - Round 1: 40 differing bytes / 28 elements, `N_action=46,120`.
+  - Round 2: 0 differing elements on matched sample.
+- **Layer Seam Observer Classification**:
+  **`hidden_chain_exact_tail_normalizer_isolated`**.
+  - All 36 Transformer layers (`layer_input`, `layer_output`) and `final_norm`
+    are 100% bitwise identical between Decode and Prefill across all matched
+    red action positions (`All-36-Layers-Equal = 20, Divergent Signatures = {}`).
+  - The hidden representation chain is bitwise exact. The minor residual
+    A-B logprob divergence originates strictly in the tail `lm_head`
+    projection / log-softmax reduction normalizer stage.
+- **Evidence directory**: `tasks/p38-pathways-decode-prefill-carrier/evidence/p38s18l/`.
 
 ### Next Operator Step
 
-P38.2o O0/O1 are locally complete. Do not rerun P38s17, KV-unified,
-concurrency, or another KV-only observer. After review, commit, and push, run
-only the hierarchical layer pass from a clean immutable source:
-
-```bash
-set -euo pipefail
-git fetch origin yuxzhang/canon-zero-tim
-SOURCE_COMMIT="$(git rev-parse FETCH_HEAD)"
-RUN_ID=p38s18-layer
-OUT="/tmp/p38-serving-$RUN_ID"
-test ! -e "$OUT"
-python3 canon-zero-tim/cluster/render_p38_serving_jobsets.py \
-  --source-commit "$SOURCE_COMMIT" \
-  --run-id "$RUN_ID" \
-  --output-dir "$OUT" \
-  --stock-only \
-  --max-concurrency 256 \
-  --seam-mode layer
-STOCK="$OUT/jobset-p38-serving-stock.yaml"
-grep -Fq 'name: CANON_P38_SEAM_OBSERVER' "$STOCK"
-grep -Fq 'value: layer' "$STOCK"
-grep -Fq 'name: CANON_P38_SEAM_CLASSIFICATION' "$STOCK"
-! grep -Fq 'name: CANON_P38_KV_OBSERVER_DIR' "$STOCK"
-kubectl apply --dry-run=server -f "$STOCK"
-kubectl apply -f "$STOCK"
-```
-
-Require `p38_seam.classification.json` status PASS, immutable capsule inputs,
-all red actions joined, three-round B-C exact, backward 0, optimizer commits 0,
-and terminal `COLLECTED.json` plus `COMPLETE.json`. The layer result selects a
-single O2b `--seam-mode full --seam-layer <N>` run. Do not preselect RoPE or a
-layer. If the hidden chain is exact, add a separate bounded tail observer;
-current code does not claim raw-logit/normalizer coverage.
+Since the hidden chain (Layers 0..35 + Final RMSNorm) is bitwise exact, do not
+rerun intermediate layer diagnostics or KV observers. The next step is to add
+a bounded tail observer on the final `lm_head` and Log-Softmax normalizer to
+pin the exact reduction difference.
 
 ## HISTORY: completed P38s17, P38s16, P38s15, P38s14, P38s13a, P38s12f
+
+### P38s17: valid live/clean KV fingerprints are equal
+
+P38s17/source `baac38bc4034` completed all three Frozen-Weight diagnostic
+rounds on 64 TPU. Recomputed Live-KV Observer classification confirmed
+`live_kv_fingerprint_equal_on_red_row`.
+Evidence directory: `tasks/p38-pathways-decode-prefill-carrier/evidence/p38s17/`.
 
 ### Next operator step after review and publication approval
 

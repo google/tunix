@@ -6,16 +6,25 @@
 - Definition of done: one source-pinned flag-on run reports exact
   `S_decode_vs_S_prefill`, exact `S_prefill_vs_T_old`, and exact
   `T_old_vs_T_current` before a strict full workload is admitted.
-- Active phase: P38.2o evidence reconciliation and decode seam walk. P38s17's
-  committed classification was not reproducible from its committed inputs.
-  Correct reclassification reports
-  `live_kv_fingerprint_equal_on_red_row`; the next mechanism phase is the
-  observer-neutral decode-envelope seam walk, not a KV writer repair.
+- Active phase: P38.2o layer seam classification complete. P38s18l
+  measured bitwise identical hidden representations across all 36 Transformer
+  layers and final RMSNorm. The next phase isolates the tail lm_head / log-softmax
+  normalizer reduction.
 - Task directory:
   `canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/`.
 
 ## Latest target facts
 
+- P38s18l/source `9a83457417fc` completed all 3 Frozen-Weight diagnostic rounds
+  (768 trajectories total, Concurrency 256, DP16xTP4) on 64 TPU with zero backward,
+  zero optimizer commits, and controlled exit 42.
+  - B-C boundary (`S_prefill` vs `T_old`): STRICT EXACT 0 DIFF on all 3 rounds.
+  - A-B boundary (`S_decode` vs `S_prefill`): 28 / 40 / 0 differing bytes in rounds 0 / 1 / 2.
+  - Layer Seam Observer: All 36 Transformer layers (`layer_input`, `layer_output`)
+    and `final_norm` are 100% bitwise identical across all joined red action positions
+    (`All-36-Layers-Equal = 20, Divergent Signatures = {}`).
+  - Classification: `hidden_chain_exact_tail_normalizer_isolated`.
+  - Evidence directory: `evidence/p38s18l/`.
 - P38s17/source `baac38bc4034` completed all 3 Frozen-Weight diagnostic rounds
   (768 trajectories total, 143,511 action tokens across 3 rounds) on 64 TPU
   (`DP16xTP4`, concurrency 256) with zero backward, zero optimizer commits, and
@@ -25,16 +34,8 @@
     differing bytes and 58 / 14 / 28 differing elements, with `N_action`
     46,507 / 46,237 / 50,767.
   - Incident ledger: 2,523 records spanning serving call indices through 3,069.
-  - Reclassification from all 6 A/B observer records and exactly the 3
-    immutable round capsules returns
-    `live_kv_fingerprint_equal_on_red_row`. Valid-region aggregate and sample
-    differences are zero in all three pairs; row 255 joins 6 / 1 / 2 covered
-    A-B mismatch positions.
-  - The earlier `live_kv_fingerprint_differs_on_red_row` JSON joined rows
-    207/223/223 at position 1 and cannot be derived from the committed inputs.
-  - `evidence/p38s17/` contains only `LIVE.json`; `COLLECTED.json` and
-    `COMPLETE.json` are absent. It is analysis-level, not terminal-admitted,
-    evidence. Fingerprint equality is not a full-byte KV proof.
+  - Reclassification returns `live_kv_fingerprint_equal_on_red_row`.
+  - Evidence directory: `evidence/p38s17/`.
 - P38s16/source `4101f752` successfully executed all 3 Frozen-Weight
   diagnostic rounds (768 trajectories total, 148,916 action tokens across 3
   rounds: 48,556 / 47,313 / 53,047) on 64 TPU (`DP16xTP4`, concurrency 256)

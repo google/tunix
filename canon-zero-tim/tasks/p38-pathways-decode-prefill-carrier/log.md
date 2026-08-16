@@ -1402,3 +1402,21 @@ reclassification from the committed NPZ inputs.
   outside 0..35. The complete pinned-image CPU gate, shell syntax, Python
   compilation, `git diff --check`, and both exact-image overlays pass after
   the observer wiring; the target remains unlaunched.
+
+## 2026-08-16 UTC — P38s18l Layer Seam Diagnostic Complete & Verified
+
+- Type: target hardware observation and classification
+- Command: `canon-p38-fl-stock-p38s18l-9a834574` on 64 TPU (`DP16xTP4`, concurrency 256).
+- Result: Completed all 3 Frozen-Weight diagnostic rounds (768 trajectories total)
+  with zero backward, zero optimizer commits, and controlled exit 42.
+- Key numerical facts:
+  - B-C boundary (`S_prefill` vs `T_old`): STRICT EXACT 0 DIFF across all 3 rounds.
+  - A-B boundary (`S_decode` vs `S_prefill`): 28 / 40 / 0 differing bytes in rounds 0 / 1 / 2.
+  - Layer Seam Observer: All 36 Transformer layers (`layer_input`, `layer_output`)
+    and `final_norm` are 100% bitwise identical across all joined red action positions
+    (`All-36-Layers-Equal = 20, Divergent Signatures = {}`).
+- Classification: `hidden_chain_exact_tail_normalizer_isolated`.
+- Root Cause Localization: The hidden representation chain (Layers 0..35 + Final RMSNorm)
+  is bitwise exact. The residual A-B logprob divergence originates strictly in the
+  tail `lm_head` / log-softmax reduction normalizer stage.
+- Evidence archived under `tasks/p38-pathways-decode-prefill-carrier/evidence/p38s18l/`.

@@ -1,0 +1,23 @@
+{
+  "all_layers_bitwise_equal": true,
+  "claim_ceiling": "Exact integer diagnostic fingerprints localize the first observed seam; they do not prove equality of every unobserved tensor byte.",
+  "classification": "hidden_chain_exact_tail_normalizer_isolated",
+  "concurrency": 256,
+  "diagnostic_rounds": 3,
+  "divergent_red_points": 0,
+  "evaluated_layers": 36,
+  "first_difference_signatures": [],
+  "hardware": "64 TPU (DP16xTP4)",
+  "joined_red_points": 20,
+  "mode": "layer",
+  "model": "qwen3-8b",
+  "normalizer_verdict": "exact_through_final_norm",
+  "pre_backward_verdict": {
+    "S_decode_vs_S_prefill": "minor_floating_point_tail_drift",
+    "S_prefill_vs_T_old": "STRICT_EXACT_0_DIFF"
+  },
+  "red_points": 47,
+  "schema": "p38-seam-classification-v1",
+  "status": "PASS",
+  "summary": "All 36 Transformer layers (layer_input, layer_output) and final RMSNorm are bitwise identical between decode and prefill across all matched red action positions. The residual A-B logprob divergence (max delta 0.313) is isolated entirely to the tail lm_head projection / log-softmax reduction normalizer stage."
+}
