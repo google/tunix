@@ -1,0 +1,17 @@
+{
+  "bundle_integrity": "PASS",
+  "candidate_snapshots": 22,
+  "capsule_rounds": [],
+  "classification": null,
+  "equivalent_alias_keys": 0,
+  "matched_arm_keys": 0,
+  "payload_conflict_keys": 0,
+  "qualified_snapshots": 0,
+  "red_points": 0,
+  "required_arm_keys": 0,
+  "schema": "p38-seam-reduction-bundle-audit-v1",
+  "scientific_verdict": "INCONCLUSIVE_NO_ELIGIBLE_SNAPSHOT",
+  "sha_verified_files": 6,
+  "source_snapshot": null,
+  "unmatched_keys": 0
+}

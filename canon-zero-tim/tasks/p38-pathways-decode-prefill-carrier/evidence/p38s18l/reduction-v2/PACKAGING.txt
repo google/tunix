@@ -1,0 +1,3 @@
+P38s18l selection-only evidence bundle.
+No source snapshot was admitted and no seam reduction was run.
+The scientific verdict is INCONCLUSIVE_NO_ELIGIBLE_SNAPSHOT.

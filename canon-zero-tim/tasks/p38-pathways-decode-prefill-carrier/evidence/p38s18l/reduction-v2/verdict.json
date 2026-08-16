@@ -1,0 +1,9 @@
+{
+  "candidate_count": 22,
+  "minimum_capsule_rounds": 2,
+  "qualified_candidate_count": 0,
+  "schema": "p38-snapshot-inventory-verdict-v1",
+  "selection_complete": false,
+  "selector_rc": 4,
+  "verdict": "INCONCLUSIVE_NO_ELIGIBLE_SNAPSHOT"
+}
