@@ -91,17 +91,47 @@ def _key_json(key: tuple[int, bytes, str]) -> dict[str, Any]:
   }
 
 
+def _array_sha256(value: np.ndarray) -> str:
+  array = np.ascontiguousarray(np.asarray(value))
+  digest = hashlib.sha256()
+  digest.update(array.dtype.str.encode("ascii"))
+  digest.update(json.dumps(list(array.shape)).encode("ascii"))
+  digest.update(array.tobytes())
+  return digest.hexdigest()
+
+
+def _numeric_payload_sha256(
+    *,
+    position: int,
+    token_id: int,
+    checkpoint_names: list[str],
+    layer_indices: list[int],
+    layer_fingerprints: np.ndarray,
+    final_norm_fingerprints: np.ndarray,
+) -> str:
+  digest = hashlib.sha256()
+  digest.update(json.dumps({
+      "position": int(position),
+      "token_id": int(token_id),
+      "checkpoint_names": checkpoint_names,
+      "layer_indices": layer_indices,
+  }, sort_keys=True).encode("utf-8"))
+  digest.update(_array_sha256(layer_fingerprints).encode("ascii"))
+  digest.update(_array_sha256(final_norm_fingerprints).encode("ascii"))
+  return digest.hexdigest()
+
+
 def _scan_records(
     source: Path,
     mode: str,
     required: set[tuple[int, bytes, str]],
 ) -> tuple[
-    dict[tuple[int, bytes, str], list[int]],
+    dict[tuple[int, bytes, str], list[dict[str, Any]]],
     dict[int, tuple[Path, Path]],
     int,
 ]:
   matches = {key: [] for key in required}
-  selected: dict[int, tuple[Path, Path]] = {}
+  matching_records: dict[int, tuple[Path, Path]] = {}
   json_paths = sorted(source.glob("p38_seam_*.json"))
   _require(json_paths, "source snapshot has no P38 seam JSON records")
   seen_indices = set()
@@ -130,18 +160,82 @@ def _scan_records(
     _require(_sha256(npz_path) == record.get("npz_sha256"),
              f"seam NPZ SHA failed: {npz_path.name}")
     with np.load(npz_path, allow_pickle=False) as archive:
-      _require("token_prefix_sha256" in archive.files,
-               f"seam prefix hashes are absent: {npz_path.name}")
-      hashes = np.asarray(archive["token_prefix_sha256"]).reshape(-1)
+      expected_arrays = {
+          "row_indices", "positions", "token_ids", "request_ordinals",
+          "token_prefix_sha256", "layer_fingerprints",
+          "final_norm_fingerprints",
+      }
+      _require(set(archive.files) == expected_arrays,
+               f"seam array inventory drifted: {npz_path.name}")
+      arrays = {name: np.asarray(archive[name]) for name in archive.files}
+    hashes = arrays["token_prefix_sha256"].reshape(-1)
+    rows = arrays["row_indices"].reshape(-1)
+    positions = arrays["positions"].reshape(-1)
+    token_ids = arrays["token_ids"].reshape(-1)
+    request_ordinals = arrays["request_ordinals"].reshape(-1)
+    layer_values = arrays["layer_fingerprints"]
+    final_values = arrays["final_norm_fingerprints"]
+    _require(
+        rows.size == positions.size == token_ids.size == hashes.size
+        == request_ordinals.size == layer_values.shape[0]
+        == final_values.shape[0],
+        f"seam row geometry drifted: {npz_path.name}",
+    )
+    checkpoint_names = [str(value) for value in record.get(
+        "checkpoint_names", ())]
+    layer_indices = [int(value) for value in record.get("layer_indices", ())]
+    _require(
+        layer_values.ndim == 4
+        and layer_values.shape[1] == len(layer_indices)
+        and layer_values.shape[2] == len(checkpoint_names)
+        and layer_values.shape[3] == 8
+        and final_values.shape == (rows.size, 8),
+        f"seam fingerprint geometry drifted: {npz_path.name}",
+    )
+    requests = record.get("requests", [])
+    _require(isinstance(requests, list),
+             f"seam request metadata drifted: {json_path.name}")
     hit = False
-    for prefix in hashes:
+    for row_offset, prefix in enumerate(hashes):
       candidate = _key(diagnostic_round, bytes(prefix), arm)
       if candidate in matches:
-        matches[candidate].append(index)
+        request_ordinal = int(request_ordinals[row_offset])
+        request = None
+        if requests:
+          _require(0 <= request_ordinal < len(requests),
+                   f"seam request ordinal drifted: {npz_path.name}")
+          _require(isinstance(requests[request_ordinal], dict),
+                   f"seam request entry drifted: {json_path.name}")
+          request = requests[request_ordinal]
+        layer_row = np.asarray(layer_values[row_offset])
+        final_row = np.asarray(final_values[row_offset])
+        matches[candidate].append({
+            "record_index": index,
+            "row_offset": row_offset,
+            "row_index": int(rows[row_offset]),
+            "position": int(positions[row_offset]),
+            "token_id": int(token_ids[row_offset]),
+            "request_ordinal": request_ordinal,
+            "call_index": int(record.get("call_index", -1)),
+            "program_path": record.get("program_path"),
+            "request": request,
+            "checkpoint_names": checkpoint_names,
+            "layer_indices": layer_indices,
+            "layer_fingerprint_sha256": _array_sha256(layer_row),
+            "final_norm_fingerprint_sha256": _array_sha256(final_row),
+            "numeric_payload_sha256": _numeric_payload_sha256(
+                position=int(positions[row_offset]),
+                token_id=int(token_ids[row_offset]),
+                checkpoint_names=checkpoint_names,
+                layer_indices=layer_indices,
+                layer_fingerprints=layer_row,
+                final_norm_fingerprints=final_row,
+            ),
+        })
         hit = True
     if hit:
-      selected[index] = (json_path, npz_path)
-  return matches, selected, len(json_paths)
+      matching_records[index] = (json_path, npz_path)
+  return matches, matching_records, len(json_paths)
 
 
 def _copy_file(source: Path, target: Path) -> dict[str, Any]:
@@ -195,10 +289,27 @@ def reduce(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
   )
   _require(not output.exists(), f"output directory already exists: {output}")
   output.mkdir(parents=True)
-  selected_dir = output / "selected"
+  records_dir = output / "records"
   capsules_dir = output / "capsules"
-  selected_dir.mkdir()
+  records_dir.mkdir()
   capsules_dir.mkdir()
+
+  snapshot_selection_path = args.snapshot_selection.resolve()
+  _require(snapshot_selection_path.is_file(),
+           f"snapshot selection is absent: {snapshot_selection_path}")
+  snapshot_selection = json.loads(
+      snapshot_selection_path.read_text(encoding="utf-8"))
+  _require(
+      snapshot_selection.get("schema") == "p38-live-snapshot-selection-v1"
+      and snapshot_selection.get("selection_complete") is True,
+      "snapshot selection did not admit a source snapshot",
+  )
+  _require(
+      snapshot_selection.get("selected_source_gcs_uri", "").rstrip("/")
+      == args.source_gcs_uri.rstrip("/"),
+      "selected snapshot URI differs from the reducer source URI",
+  )
+  _copy_file(snapshot_selection_path, output / "SNAPSHOT_SELECTION.json")
 
   source_manifest, source_file_count = _verify_source_manifest(source)
   source_manifest_sha = _sha256(source_manifest)
@@ -212,31 +323,64 @@ def reduce(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
       _key(point["diagnostic_round"], point["token_prefix_sha256"], arm)
       for point in red_points for arm in ("A", "B")
   }
-  matches, selected_records, source_record_count = _scan_records(
+  matches, matching_records, source_record_count = _scan_records(
       source, args.mode, required)
-  unmatched = sorted(
-      (key for key, values in matches.items() if not values),
-      key=lambda value: (value[0], value[1], value[2]),
-  )
-  ambiguous = sorted(
-      (key for key, values in matches.items() if len(values) > 1),
-      key=lambda value: (value[0], value[1], value[2]),
-  )
-  selection_complete = not unmatched and not ambiguous
+  join_entries = []
+  unmatched = []
+  conflicts = []
+  equivalent_aliases = []
+  selected_indices = set()
+  for key in sorted(matches, key=lambda value: (value[0], value[1], value[2])):
+    candidates = sorted(
+        matches[key], key=lambda value: (
+            value["record_index"], value["row_offset"]))
+    if not candidates:
+      resolution = "missing"
+      selected = None
+      unmatched.append(_key_json(key))
+    else:
+      payloads = {value["numeric_payload_sha256"] for value in candidates}
+      if len(candidates) == 1:
+        resolution = "unique"
+      elif len(payloads) == 1:
+        resolution = "equivalent_alias"
+      else:
+        resolution = "payload_conflict"
+      selected = candidates[0] if resolution in (
+          "unique", "equivalent_alias") else None
+      if selected is not None:
+        selected_indices.add(int(selected["record_index"]))
+      if resolution == "equivalent_alias":
+        equivalent_aliases.append({
+            **_key_json(key),
+            "candidate_count": len(candidates),
+            "selected": selected,
+            "aliases": candidates[1:],
+        })
+      elif resolution == "payload_conflict":
+        conflicts.append({
+            **_key_json(key),
+            "candidate_count": len(candidates),
+            "candidates": candidates,
+        })
+    join_entries.append({
+        **_key_json(key),
+        "resolution": resolution,
+        "selected": selected,
+        "candidates": candidates,
+    })
+  selection_complete = not unmatched and not conflicts
 
-  selected_files = []
-  if selection_complete:
-    selected_indices = sorted({values[0] for values in matches.values()})
-  else:
-    selected_indices = sorted(selected_records)
-  for index in selected_indices:
-    json_path, npz_path = selected_records[index]
+  record_files = []
+  candidate_indices = sorted(matching_records)
+  for index in candidate_indices:
+    json_path, npz_path = matching_records[index]
     for path in (json_path, npz_path):
-      info = _copy_file(path, selected_dir / path.name)
-      info["path"] = f"selected/{path.name}"
+      info = _copy_file(path, records_dir / path.name)
+      info["path"] = f"records/{path.name}"
       info["source_path"] = path.name
       info["record_index"] = index
-      selected_files.append(info)
+      record_files.append(info)
 
   capsule_files = []
   capsule_rounds = []
@@ -252,6 +396,17 @@ def reduce(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     info["source_path"] = path.name
     info["diagnostic_round"] = diagnostic_round
     capsule_files.append(info)
+  _require(
+      sorted(capsule_rounds)
+      == [int(value) for value in snapshot_selection.get(
+          "selected_capsule_rounds", ())],
+      "downloaded capsule rounds differ from snapshot selection",
+  )
+  _require(
+      len(capsule_rounds)
+      >= int(snapshot_selection.get("minimum_capsule_rounds", 0)),
+      "downloaded snapshot is below the minimum capsule-round contract",
+  )
 
   live_path = source / "LIVE.json"
   _require(live_path.is_file(), "source live snapshot has no LIVE.json")
@@ -260,10 +415,29 @@ def reduce(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
   completed_rounds, terminal_markers = _count_completed_rounds(source)
   run_contract_complete = (
       completed_rounds == args.expected_rounds and terminal_markers == 1)
+  ambiguity_audit = {
+      "schema": "p38-seam-ambiguity-audit-v1",
+      "required_arm_keys": len(required),
+      "unique_keys": sum(
+          entry["resolution"] == "unique" for entry in join_entries),
+      "equivalent_alias_keys": equivalent_aliases,
+      "payload_conflict_keys": conflicts,
+      "unmatched_keys": unmatched,
+      "selection_complete": selection_complete,
+      "interpretation": (
+          "Equivalent aliases have identical position, token, checkpoint "
+          "metadata, layer fingerprints, and final-norm fingerprints. "
+          "Payload conflicts remain fail-closed and retain every candidate."
+      ),
+  }
+  _write_json(output / "AMBIGUITY_AUDIT.json", ambiguity_audit)
   reduction_manifest = {
-      "schema": "p38-seam-reduction-v1",
+      "schema": "p38-seam-reduction-v2",
       "status": "selected" if selection_complete else "inconclusive",
       "source_gcs_uri": args.source_gcs_uri.rstrip("/"),
+      "snapshot_selection": "SNAPSHOT_SELECTION.json",
+      "snapshot_selection_sha256": _sha256(
+          output / "SNAPSHOT_SELECTION.json"),
       "source_snapshot_manifest_sha256": source_manifest_sha,
       "source_snapshot_files": source_file_count,
       "source_seam_records": source_record_count,
@@ -275,17 +449,19 @@ def reduce(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
       "capsule_rounds": sorted(capsule_rounds),
       "red_points": len(red_points),
       "required_arm_keys": len(required),
-      "matched_arm_keys": sum(1 for values in matches.values()
-                              if len(values) == 1),
+      "matched_arm_keys": sum(
+          entry["resolution"] in ("unique", "equivalent_alias")
+          for entry in join_entries),
       "selection_complete": selection_complete,
-      "unmatched_keys": [_key_json(key) for key in unmatched],
-      "ambiguous_keys": [
-          {**_key_json(key), "record_indices": matches[key]}
-          for key in ambiguous
-      ],
-      "selected_directory": "selected",
-      "selected_record_indices": selected_indices,
-      "selected_files": selected_files,
+      "unmatched_keys": unmatched,
+      "ambiguous_keys": conflicts,
+      "equivalent_alias_keys": equivalent_aliases,
+      "ambiguity_audit": "AMBIGUITY_AUDIT.json",
+      "join_entries": join_entries,
+      "records_directory": "records",
+      "candidate_record_indices": candidate_indices,
+      "selected_record_indices": sorted(selected_indices),
+      "record_files": record_files,
       "capsules": capsule_files,
       "claim_ceiling": (
           "This is a byte-preserving derived subset of a live snapshot. It "
@@ -299,7 +475,7 @@ def reduce(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
   if selection_complete:
     reduced_capsules = [capsules_dir / path.name for path in capsules]
     classification = seam.classify(
-        selected_dir,
+        records_dir,
         reduced_capsules,
         args.mode,
         reduction_manifest=reduction_path,
@@ -316,7 +492,7 @@ def reduce(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
     verdict = "PASS"
     exit_code = 0
   verdict_record = {
-      "schema": "p38-seam-reduction-verdict-v1",
+      "schema": "p38-seam-reduction-verdict-v2",
       "verdict": verdict,
       "selection_complete": selection_complete,
       "run_contract_complete": run_contract_complete,
@@ -329,11 +505,14 @@ def reduce(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
   _write_json(output / "verdict.json", verdict_record)
   (output / "PACKAGING.txt").write_text(
       "\n".join((
-          "p38 seam reduction 2026-08 v1",
+          "p38 seam reduction 2026-08 v2",
           f"source_gcs_uri: {args.source_gcs_uri.rstrip('/')}",
           f"source_seam_records: {source_record_count}",
+          f"candidate_records: {len(candidate_indices)}",
           f"selected_records: {len(selected_indices)}",
           f"red_points: {len(red_points)}",
+          f"equivalent_alias_keys: {len(equivalent_aliases)}",
+          f"payload_conflict_keys: {len(conflicts)}",
           f"selection_complete: {str(selection_complete).lower()}",
           f"run_contract_complete: {str(run_contract_complete).lower()}",
           f"verdict: {verdict}",
@@ -352,6 +531,7 @@ def main() -> int:
   parser = argparse.ArgumentParser()
   parser.add_argument("--source-dir", type=Path, required=True)
   parser.add_argument("--source-gcs-uri", required=True)
+  parser.add_argument("--snapshot-selection", type=Path, required=True)
   parser.add_argument("--capsule", type=Path, action="append", required=True)
   parser.add_argument("--output-dir", type=Path, required=True)
   parser.add_argument("--mode", choices=("layer", "full"), required=True)

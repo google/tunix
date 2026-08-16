@@ -1,7 +1,8 @@
 # P38.2p — GCP-side seam evidence reduction
 
-Status: active. Local implementation and synthetic gates are complete; the GCP
-reduction has not yet been executed.
+Status: complete/inconclusive. V1 verified the selected source but covered only
+round 0 and stopped on duplicate A records 319/398. P38.2q supersedes the
+operator path with automatic two-round selection and a full ambiguity audit.
 
 ## Goal
 

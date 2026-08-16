@@ -5,7 +5,7 @@ parallel Qwen3-32B DeepSWE workstream, read
 `../p39-deepswe-production/HANDOFF.md`. P38 evidence cannot promote P39, and
 P39 evidence cannot promote P38.
 
-## CURRENT: reduce the partial P38s18l GCS seam snapshot
+## CURRENT: run the one-pass P38s18l v2 reduction; no TPU launch
 
 P38s18l/source `9a83457417fc` ran at DP16xTP4/concurrency 256 with zero
 backward and optimizer commits, but the committed package is not a complete
@@ -27,21 +27,38 @@ The existing hand-authored result says 20 of 47 red points have equal layer
 fingerprints. Treat that only as a candidate tail direction. It does not prove
 all red points, full hidden bytes, lm_head, or the normalizer.
 
+The first GCP reduction (`v1`) is immutable analysis evidence, not an admitted
+classification:
+
+- it verified 2,441 source files and scanned 1,217 seam records;
+- it selected snapshot `000020`, which contains only capsule round 0 and 19
+  red points rather than the two completed rounds / 47 red points;
+- 37 of 38 round-0 A/B keys were unique under the old join;
+- one A key hit both records 319 and 398, so the reducer correctly returned
+  `INCONCLUSIVE_REDUCTION_JOIN`; and
+- no official classification was produced. The phrase “confined to the tail
+  normalizer” is withdrawn; the tail has not been subdivided yet.
+
 ### Next operator step: no TPU launch
 
-The full live snapshot is still in GCS but is too large/file-dense to commit.
-Run the GCP-side byte-preserving reducer described in:
+Run the hardened GCP-side byte-preserving reducer described in:
 
 `P38S18L_GCP_REDUCTION_RUNBOOK.md`
 
-The reducer verifies the source snapshot manifest, derives all red-point keys
-from immutable capsules, selects exactly one raw A and B record per key,
-re-runs the official classifier in sparse-index manifest mode, and uploads a
-compact sealed package under the run's `derived/` prefix. It never modifies
-source objects or fabricates round 2 or terminal markers.
+The v2 wrapper inventories every snapshot and automatically requires at least
+immutable rounds 0 and 1 before downloading. It records every candidate row,
+admits duplicate records only when their position/token/checkpoint metadata and
+all layer/final fingerprints are identical, preserves conflicts fail-closed,
+and uploads a compact self-contained package. A separate bundle auditor
+verifies every SHA and re-runs the official classifier from only those returned
+files. It never modifies source objects or fabricates round 2 or terminal
+markers.
 
-Only after the compact bundle reports all 47 red points joined may the result
-select the next diagnostic:
+The remote agent must return and prepare an append-only evidence CL containing
+the full compact bundle (`records/`, capsules, snapshot selection, ambiguity
+audit, join map, verdict, classifier output when present, and SHA manifest),
+not just audit metadata. Only after the bundle auditor reports all 47 red
+points / 94 arm keys joined may the result select the next diagnostic:
 
 - observed hidden/final fingerprints exact -> build one bounded tail observer;
 - any hidden checkpoint red -> withdraw the tail claim and localize the first

@@ -1458,3 +1458,34 @@ reclassification from the committed NPZ inputs.
   - Ambiguous join detected on Arm A round 0 (`record_indices: [319, 398]`, prefix `729d2e6ec52e...`), triggering fail-closed verdict `INCONCLUSIVE_REDUCTION_JOIN`.
   - Derived archive `p38s18l-seam-reduction-v1.tar.gz` (SHA: `90e8bb9b...`) and manifest `REDUCTION_MANIFEST.json` (SHA: `dbbfca0d...`) sealed and uploaded to GCS derived prefix.
   - Reduced audit metadata committed under `tasks/p38-pathways-decode-prefill-carrier/evidence/p38s18l/`.
+
+## 2026-08-16 UTC — P38.2q one-pass reduction hardening locally complete
+
+- Reconciled v1 before editing: snapshot `000020` contains only capsule round
+  0 / 19 red points; 37 of 38 old-style arm keys were unique, and one A key
+  matched records 319 and 398. The v1 package is a valid fail-closed reduction,
+  not a hidden-chain or tail-normalizer classification.
+- Added automatic immutable-snapshot inventory and selection. A snapshot must
+  contain contiguous capsule rounds 0 and 1, paired seam JSON/NPZ, LIVE,
+  SHA256SUMS, run log, and pre-alignment log. Coverage outranks snapshot number,
+  so a newer one-round snapshot cannot displace a two-round source.
+- Replaced record-level uniqueness with row-level numerical resolution. Every
+  candidate now records record/row identity, call/request provenance, position,
+  token, and layer/final payload SHAs. Duplicate candidates are aliases only
+  when all numerical and checkpoint inputs match; conflicts retain every raw
+  source file and remain fail-closed.
+- Added reduction schema v2 with a manifest-attested join map. The official
+  classifier loads only the selected row for each required red key, avoiding
+  false collisions from unrelated overlapping rows while retaining complete
+  byte-preserving record files.
+- Added a standalone bundle auditor. It verifies exact inventory and SHAs,
+  snapshot/capsule provenance, join/verdict/ambiguity consistency, and re-runs
+  the official classifier when selection is complete.
+- Focused gates: snapshot selector 3/3, reducer/alias/conflict/source-and-bundle
+  negatives 6/6, fake-GCS full wrapper 1/1, seam classifier 4/4, seam capture
+  5/5, neutrality 3/3, P38 postflight PASS, Python/shell syntax, secret scan,
+  and `git diff --check` PASS.
+- Operator contract moved to versioned derived `p38s18l-seam-reduction-v2` and
+  requires the entire compact records hierarchy plus a local bundle audit to
+  be prepared as an append-only evidence CL. No GCP v2 execution, TPU launch,
+  backward, or optimizer commit occurred in this checkpoint.

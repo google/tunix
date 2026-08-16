@@ -6,9 +6,10 @@
 - Definition of done: one source-pinned flag-on run reports exact
   `S_decode_vs_S_prefill`, exact `S_prefill_vs_T_old`, and exact
   `T_old_vs_T_current` before a strict full workload is admitted.
-- Active phase: P38.2p GCP-side seam evidence reduction. P38s18l returned two
-  complete red rounds and stopped during the third rollout. The committed
-  package omits the raw seam inputs, so its PASS JSON is not reproducible yet.
+- Active phase: P38.2q one-pass seam reduction. P38s18l returned two complete
+  red rounds and stopped during the third rollout. Reduction v1 verified its
+  source but selected a one-round snapshot and stopped on duplicate A records;
+  v2 must return both completed rounds plus a complete ambiguity audit.
 - Task directory:
   `canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/`.
 
@@ -29,6 +30,10 @@
   - Evidence directory: `evidence/p38s18l/`; GCP reduction sealed at
     `derived/p38s18l-seam-reduction-v1` (verdict: `INCONCLUSIVE_REDUCTION_JOIN`
     on ambiguous key `[319, 398]`).
+  - V1 scanned 1,217 seam records from 2,441 SHA-verified source files, but its
+    snapshot contained only capsule round 0: 19 red points, 38 required A/B
+    keys, 37 unique old-style joins. It produced no official classification.
+    Tail-normalizer isolation remains unproven.
 - P38s17/source `baac38bc4034` completed all 3 Frozen-Weight diagnostic rounds
   (768 trajectories total, 143,511 action tokens across 3 rounds) on 64 TPU
   (`DP16xTP4`, concurrency 256) with zero backward, zero optimizer commits, and
@@ -275,14 +280,17 @@
 
 ## Next action
 
-1. Review and publish the P38.2p reducer only after its focused classifier,
-   reduction, syntax, and checksum gates pass.
+1. Publish the P38.2q v2 reducer only after snapshot selection, equivalent
+   alias, payload-conflict, bundle-mutation, fake-GCS wrapper, classifier,
+   syntax, and checksum gates pass.
 2. On a clean GCP checkout, follow `P38S18L_GCP_REDUCTION_RUNBOOK.md` against
-   the highest immutable p38s18l live snapshot containing seam records.
-3. Return the compact derived bundle and require every red action to join one
-   A and B record. The source run remains `INCONCLUSIVE_PARTIAL_RUN` even when
-   selection and classification succeed.
-4. If every joined hidden/final fingerprint is exact, build one bounded tail
+   the live root; never choose a snapshot by hand or lower the two-round gate.
+3. Return and locally audit the complete compact bundle. Require capsule rounds
+   `[0,1]`, 47 red points, 94 matched A/B keys, and zero unresolved keys. The
+   source run remains `INCONCLUSIVE_PARTIAL_RUN` even after a green reduction.
+4. Commit the exact compact files under `evidence/p38s18l/reduction-v2/` only
+   after the standalone bundle auditor passes.
+5. If every joined hidden/final fingerprint is exact, build one bounded tail
    observer covering lm_head/raw logits, target logit, normalizer, processed
    target, and final logprob. If a hidden seam is red, select the earliest
    measured layer instead. Do not launch a repair from the current hand-authored
@@ -314,8 +322,8 @@ Leave `CANON_P38_SERVING_CAPTURE_DIR`, `CANON_P38_REQUEST_JOURNAL`,
 training, evaluation, prefix cache, precision, optimizer placement, or
 canonical kernels.
 
-- Updated: 2026-08-16 UTC; P38s18l is corrected to an interrupted two-round
-  analysis run whose committed seam classification lacks its raw inputs.
-  P38.2p reduction code and synthetic/focused gates are locally complete; GCP
-  execution is pending review, commit, and push. No new TPU run, backward,
-  optimizer commit, commit, or push occurred in this worktree.
+- Updated: 2026-08-16 UTC; P38.2p/v1 is sealed as an inconclusive one-round
+  reduction. P38.2q v2 implementation returns automatic snapshot inventory,
+  complete duplicate-row provenance, all candidate raw bytes, and a standalone
+  bundle audit. GCP v2 execution is pending publication. No new TPU run,
+  backward, or optimizer commit occurred in this worktree.

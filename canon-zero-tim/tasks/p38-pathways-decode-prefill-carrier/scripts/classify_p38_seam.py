@@ -33,7 +33,8 @@ def _prefix_sha256(values: np.ndarray) -> bytes:
 def _load_reduction_manifest(path: Path, directory: Path) -> dict[str, Any]:
   _require(path.is_file(), f"reduction manifest is absent: {path}")
   manifest = json.loads(path.read_text(encoding="utf-8"))
-  _require(manifest.get("schema") == "p38-seam-reduction-v1",
+  schema = manifest.get("schema")
+  _require(schema in ("p38-seam-reduction-v1", "p38-seam-reduction-v2"),
            "invalid seam reduction schema")
   _require(manifest.get("selection_complete") is True,
            "seam reduction did not join every red action")
@@ -41,21 +42,25 @@ def _load_reduction_manifest(path: Path, directory: Path) -> dict[str, Any]:
            "seam reduction contains unmatched red actions")
   _require(not manifest.get("ambiguous_keys"),
            "seam reduction contains ambiguous red actions")
-  expected_directory = (path.parent / str(
-      manifest.get("selected_directory", "selected"))).resolve()
+  if schema == "p38-seam-reduction-v1":
+    directory_name = str(manifest.get("selected_directory", "selected"))
+    inventory = manifest.get("selected_files")
+  else:
+    directory_name = str(manifest.get("records_directory", "records"))
+    inventory = manifest.get("record_files")
+  expected_directory = (path.parent / directory_name).resolve()
   _require(directory.resolve() == expected_directory,
            "seam reduction selected-directory provenance drifted")
-  selected = manifest.get("selected_files")
-  _require(isinstance(selected, list) and selected,
+  _require(isinstance(inventory, list) and inventory,
            "seam reduction selected-file inventory is empty")
   expected_paths = set()
-  for item in selected:
+  for item in inventory:
     _require(isinstance(item, dict),
              "seam reduction selected-file entry is invalid")
     relative = Path(str(item.get("path", "")))
     _require(
         len(relative.parts) == 2
-        and relative.parts[0] == manifest.get("selected_directory", "selected")
+        and relative.parts[0] == directory_name
         and relative.name.startswith("p38_seam_")
         and relative.suffix in (".json", ".npz"),
         f"seam reduction selected path is invalid: {relative}",
@@ -189,6 +194,156 @@ def _load_records(
   return result
 
 
+def _array_sha256(value: np.ndarray) -> str:
+  array = np.ascontiguousarray(np.asarray(value))
+  digest = hashlib.sha256()
+  digest.update(array.dtype.str.encode("ascii"))
+  digest.update(json.dumps(list(array.shape)).encode("ascii"))
+  digest.update(array.tobytes())
+  return digest.hexdigest()
+
+
+def _numeric_payload_sha256(
+    *,
+    position: int,
+    token_id: int,
+    checkpoint_names: list[str],
+    layer_indices: list[int],
+    layer_fingerprints: np.ndarray,
+    final_norm_fingerprints: np.ndarray,
+) -> str:
+  digest = hashlib.sha256()
+  digest.update(json.dumps({
+      "position": int(position),
+      "token_id": int(token_id),
+      "checkpoint_names": checkpoint_names,
+      "layer_indices": layer_indices,
+  }, sort_keys=True).encode("utf-8"))
+  digest.update(_array_sha256(layer_fingerprints).encode("ascii"))
+  digest.update(_array_sha256(final_norm_fingerprints).encode("ascii"))
+  return digest.hexdigest()
+
+
+def _load_manifest_selected_row(
+    directory: Path,
+    mode: str,
+    key: tuple[int, bytes, str],
+    selected: dict[str, Any],
+) -> dict[str, Any]:
+  index = int(selected.get("record_index", -1))
+  row_offset = int(selected.get("row_offset", -1))
+  json_path = directory / f"p38_seam_{index:06d}.json"
+  npz_path = directory / f"p38_seam_{index:06d}.npz"
+  _require(json_path.is_file() and npz_path.is_file(),
+           f"selected seam record is absent: {index}")
+  record = json.loads(json_path.read_text(encoding="utf-8"))
+  _require(
+      record.get("schema") == "p38-seam-fingerprint-v1"
+      and record.get("observer_mode") == mode
+      and int(record.get("record_index", -1)) == index
+      and int(record.get("diagnostic_round", -1)) == key[0]
+      and record.get("arm") == key[2],
+      f"selected seam record provenance drifted: {index}",
+  )
+  _require(_sha256(npz_path) == record.get("npz_sha256"),
+           f"selected seam NPZ SHA failed: {index}")
+  with np.load(npz_path, allow_pickle=False) as archive:
+    arrays = {name: np.asarray(archive[name]) for name in archive.files}
+  expected_keys = {
+      "row_indices", "positions", "token_ids", "request_ordinals",
+      "token_prefix_sha256", "layer_fingerprints",
+      "final_norm_fingerprints",
+  }
+  _require(set(arrays) == expected_keys,
+           f"selected seam array inventory drifted: {index}")
+  rows = arrays["row_indices"].reshape(-1)
+  positions = arrays["positions"].reshape(-1)
+  token_ids = arrays["token_ids"].reshape(-1)
+  hashes = arrays["token_prefix_sha256"].reshape(-1)
+  layer_values = arrays["layer_fingerprints"]
+  final_values = arrays["final_norm_fingerprints"]
+  _require(
+      0 <= row_offset < rows.size
+      and rows.size == positions.size == token_ids.size == hashes.size
+      == layer_values.shape[0] == final_values.shape[0],
+      f"selected seam row offset/geometry drifted: {index}",
+  )
+  _require(bytes(hashes[row_offset]) == key[1],
+           f"selected seam token prefix drifted: {index}")
+  checkpoint_names = [str(value) for value in record.get(
+      "checkpoint_names", ())]
+  layer_indices = [int(value) for value in record.get("layer_indices", ())]
+  layer_row = np.asarray(layer_values[row_offset])
+  final_row = np.asarray(final_values[row_offset])
+  observed = {
+      "record_index": index,
+      "row_offset": row_offset,
+      "row_index": int(rows[row_offset]),
+      "position": int(positions[row_offset]),
+      "token_id": int(token_ids[row_offset]),
+      "checkpoint_names": checkpoint_names,
+      "layer_indices": layer_indices,
+      "layer_fingerprint_sha256": _array_sha256(layer_row),
+      "final_norm_fingerprint_sha256": _array_sha256(final_row),
+      "numeric_payload_sha256": _numeric_payload_sha256(
+          position=int(positions[row_offset]),
+          token_id=int(token_ids[row_offset]),
+          checkpoint_names=checkpoint_names,
+          layer_indices=layer_indices,
+          layer_fingerprints=layer_row,
+          final_norm_fingerprints=final_row,
+      ),
+  }
+  for name, value in observed.items():
+    _require(selected.get(name) == value,
+             f"selected seam manifest field drifted: {index}/{name}")
+  return {
+      "record_index": index,
+      "row_index": observed["row_index"],
+      "position": observed["position"],
+      "layer_fingerprints": layer_row,
+      "final_norm_fingerprints": final_row,
+      "checkpoint_names": checkpoint_names,
+      "layer_indices": layer_indices,
+  }
+
+
+def _load_v2_join_records(
+    directory: Path,
+    mode: str,
+    manifest: dict[str, Any],
+    required: set[tuple[int, bytes, str]],
+) -> dict[tuple[int, bytes, str], dict[str, Any]]:
+  entries = manifest.get("join_entries")
+  _require(isinstance(entries, list) and entries,
+           "seam reduction join map is absent")
+  entry_map = {}
+  for entry in entries:
+    _require(isinstance(entry, dict), "seam reduction join entry is invalid")
+    try:
+      prefix = str(entry["token_prefix_sha256"]).encode("ascii")
+      key = (int(entry["diagnostic_round"]), prefix, str(entry["arm"]))
+    except (KeyError, UnicodeEncodeError, ValueError) as error:
+      raise SeamError("seam reduction join key is invalid") from error
+    _require(key not in entry_map, "seam reduction join key is duplicated")
+    entry_map[key] = entry
+  _require(set(entry_map) == required,
+           "seam reduction join map differs from capsule red actions")
+  records = {}
+  for key in sorted(required, key=lambda value: (value[0], value[1], value[2])):
+    entry = entry_map[key]
+    _require(entry.get("resolution") in ("unique", "equivalent_alias"),
+             "seam reduction join is not numerically resolved")
+    selected = entry.get("selected")
+    _require(isinstance(selected, dict),
+             "seam reduction selected row is absent")
+    records[key] = _load_manifest_selected_row(
+        directory, mode, key, selected)
+  _require(int(manifest.get("matched_arm_keys", -1)) == len(required),
+           "seam reduction matched-key total drifted")
+  return records
+
+
 def _red_points(capsules: list[Path]) -> list[dict[str, Any]]:
   points = []
   seen_rounds = set()
@@ -283,9 +438,17 @@ def classify(
   if reduction_manifest is not None:
     reduction = _load_reduction_manifest(reduction_manifest, directory)
     _validate_reduced_capsules(reduction_manifest, reduction, capsules)
-  records = _load_records(
-      directory, mode, allow_sparse_indices=reduction is not None)
   red_points = _red_points(capsules)
+  required = {
+      (point["diagnostic_round"], point["token_prefix_sha256"], arm)
+      for point in red_points for arm in ("A", "B")
+  }
+  if reduction is not None and reduction.get(
+      "schema") == "p38-seam-reduction-v2":
+    records = _load_v2_join_records(directory, mode, reduction, required)
+  else:
+    records = _load_records(
+        directory, mode, allow_sparse_indices=reduction is not None)
   joins = []
   for point in red_points:
     base = (point["diagnostic_round"], point["token_prefix_sha256"])

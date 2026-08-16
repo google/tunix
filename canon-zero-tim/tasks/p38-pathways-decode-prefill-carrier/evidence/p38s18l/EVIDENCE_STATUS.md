@@ -12,4 +12,9 @@
 - **Reducer Verdict**: `INCONCLUSIVE_REDUCTION_JOIN` (Ambiguous join key detected across call records [319, 398] for prefix hash `729d2e6ec52e...`).
 - **Core Findings**:
   1. **B-C Boundary (`S_prefill` vs `T_old`)**: `0` mismatches (STRICT EXACT 0 DIFF across all rounds).
-  2. **Layer Seam State**: Hidden chain through 36 layers and final RMSNorm shows no internal divergence on matched pairs; residual drift is confined to the tail normalizer.
+  2. **Layer Seam State**: no official classification was produced because
+     one round-0 A key matched both records 319 and 398. The old hand-authored
+     hidden-exact subset is a candidate direction only.
+  3. **Claim ceiling**: neither complete hidden-chain equality nor lm_head,
+     gather, normalizer, processing, or subtraction isolation is admitted.
+     P38.2q v2 must first return rounds 0 and 1 and resolve every A/B key.
