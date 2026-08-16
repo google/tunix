@@ -1489,3 +1489,14 @@ reclassification from the committed NPZ inputs.
   requires the entire compact records hierarchy plus a local bundle audit to
   be prepared as an append-only evidence CL. No GCP v2 execution, TPU launch,
   backward, or optimizer commit occurred in this checkpoint.
+
+## 2026-08-16 UTC — P38.2q v2 GCP Snapshot Selection Executed
+
+- Type: GCP-side snapshot inventory and selection execution
+- Command: `python3 canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/select_p38_live_snapshot.py --listing ... --live-root ... --min-capsule-rounds 2` via `run_reduce_p38s18l_on_gcp.sh`.
+- Result: `[P38.SNAPSHOT] INCONCLUSIVE no qualifying snapshot candidates=22 minimum_capsule_rounds=2` (rc=4).
+- Inventory findings across all 22 live snapshots:
+  - Snapshots `000000`..`000019`: No capsule rounds exported.
+  - Snapshot `000020`: Contains only capsule round 0 (1 round < 2 required).
+  - Snapshot `000021`: Contains capsule rounds [0, 1], but lacks `SHA256SUMS`, `LIVE.json`, and paired NPZs due to abrupt container exit.
+- Action: Per `P38S18L_GCP_REDUCTION_RUNBOOK.md` §5 decision table row 1 (`No eligible two-round snapshot`), returned `SNAPSHOT_SELECTION.json` inventory without downloading or running a one-round substitute. P38s18l remains recorded as analysis-grade partial evidence.

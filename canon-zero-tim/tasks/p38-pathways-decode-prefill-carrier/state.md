@@ -6,10 +6,12 @@
 - Definition of done: one source-pinned flag-on run reports exact
   `S_decode_vs_S_prefill`, exact `S_prefill_vs_T_old`, and exact
   `T_old_vs_T_current` before a strict full workload is admitted.
-- Active phase: P38.2q one-pass seam reduction. P38s18l returned two complete
-  red rounds and stopped during the third rollout. Reduction v1 verified its
-  source but selected a one-round snapshot and stopped on duplicate A records;
-  v2 must return both completed rounds plus a complete ambiguity audit.
+- Active phase: P38.2q one-pass seam reduction. Automated snapshot
+  selection inventoried all 22 live snapshots and returned `INCONCLUSIVE` (no
+  snapshot satisfies the 2-round + SHA256SUMS + paired-NPZ gate: snapshot 000020
+  has only round 0, and snapshot 000021 lacks SHA256SUMS/paired-NPZs). Per
+  runbook rules, the run remains partial analysis-grade without weakening the
+  minimum round contract.
 - Task directory:
   `canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/`.
 
@@ -27,13 +29,13 @@
     points joined but cannot be reproduced from the committed inputs.
   - No third-round zero result, full hidden-byte equality, lm_head isolation,
     normalizer isolation, controlled exit, or terminal evidence is admitted.
-  - Evidence directory: `evidence/p38s18l/`; GCP reduction sealed at
-    `derived/p38s18l-seam-reduction-v1` (verdict: `INCONCLUSIVE_REDUCTION_JOIN`
-    on ambiguous key `[319, 398]`).
-  - V1 scanned 1,217 seam records from 2,441 SHA-verified source files, but its
-    snapshot contained only capsule round 0: 19 red points, 38 required A/B
-    keys, 37 unique old-style joins. It produced no official classification.
-    Tail-normalizer isolation remains unproven.
+  - Evidence directory: `evidence/p38s18l/`; GCP reduction v1 sealed at
+    `derived/p38s18l-seam-reduction-v1` (`INCONCLUSIVE_REDUCTION_JOIN`).
+  - V2 snapshot selection (`select_p38_live_snapshot.py`) scanned all 22 live
+    snapshots: `000020` has only round-0 capsule (1 round < 2 required);
+    `000021` has rounds [0, 1] but lacks `SHA256SUMS` and paired NPZs due to
+    workload exit. Result: `INCONCLUSIVE no qualifying snapshot candidates=22`
+    (rc=4). Per runbook rules, inventory is returned without substitute.
 - P38s17/source `baac38bc4034` completed all 3 Frozen-Weight diagnostic rounds
   (768 trajectories total, 143,511 action tokens across 3 rounds) on 64 TPU
   (`DP16xTP4`, concurrency 256) with zero backward, zero optimizer commits, and
