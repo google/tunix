@@ -16,8 +16,8 @@
 COMMAND=""
 TUNIX_IMAGE="us-central1-docker.pkg.dev/cloud-tpu-multipod-dev/yangmu/tunix/tunix_base_image:trellis-demo-0813"
 
-export MODEL_NAME=${MODEL_NAME:-Qwen3-1.7B}
-export MODEL_ID=${MODEL_ID:-Qwen/Qwen3-1.7B}
+export MODEL_NAME=${MODEL_NAME:-Qwen3-0.6B}
+export MODEL_ID=${MODEL_ID:-Qwen/Qwen3-0.6B}
 export MODEL_DIR=${MODEL_DIR:-artifacts/qwen3_dist_gsm8k/models}
 export TOKENIZER_PATH=${TOKENIZER_PATH:-${MODEL_DIR}}
 
@@ -26,7 +26,22 @@ export MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-128}
 export BATCH_SIZE=${BATCH_SIZE:-2}
 export NUM_GENERATIONS=${NUM_GENERATIONS:-2}
 export MAX_STEPS=${MAX_STEPS:-1}
-export TRAIN_MICRO_BATCH_SIZE=${TRAIN_MICRO_BATCH_SIZE:-1}
+export TRAINER_FSDP=${TRAINER_FSDP:-8}
+
+# peft runs tunix's PeftTrainer; maxtext runs MaxText's MaxTextTrainingEngine.
+export TRAINER_BACKEND=${TRAINER_BACKEND:-peft}
+export MAXTEXT_CKPT=${MAXTEXT_CKPT:-}
+if [[ "$TRAINER_BACKEND" == "maxtext" ]]; then
+  # MaxText shards the batch dimension of every loss input across the fsdp axis, so the
+  # microbatch has to be a multiple of it. The trainer node enforces this too.
+  export TRAIN_MICRO_BATCH_SIZE=${TRAIN_MICRO_BATCH_SIZE:-$TRAINER_FSDP}
+  if [[ -z "$MAXTEXT_CKPT" ]]; then
+    echo "Error: TRAINER_BACKEND=maxtext requires MAXTEXT_CKPT (Orbax params-only checkpoint)."
+    exit 1
+  fi
+else
+  export TRAIN_MICRO_BATCH_SIZE=${TRAIN_MICRO_BATCH_SIZE:-1}
+fi
 export MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-$((BATCH_SIZE * NUM_GENERATIONS))}
 export EVAL_EVERY_N_STEPS=${EVAL_EVERY_N_STEPS:-1000000}
 export LORA_RANK=${LORA_RANK:-16}
@@ -89,7 +104,9 @@ start_trainer() {
         --process_main=tunix.experimental.examples.math_gsm8k_dist.run_trainer_node.main \
         --worker_id=${TRAINER_ID} \
         --port=${TRAINER_PORT} \
-        --mesh_fsdp=8 \
+        --mesh_fsdp=${TRAINER_FSDP} \
+        --trainer_backend=${TRAINER_BACKEND} \
+        --maxtext_load_parameters_path=${MAXTEXT_CKPT} \
         --model_name=${MODEL_NAME} \
         --model_id=${MODEL_ID} \
         --model_dir=${MODEL_DIR} \
