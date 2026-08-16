@@ -1,0 +1,8 @@
+p38 seam reduction 2026-08 v1
+source_gcs_uri: gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-p38-fl-stock-p38s18l-9a834574/attempt-0/live/000020
+source_seam_records: 1217
+selected_records: 22
+red_points: 19
+selection_complete: false
+run_contract_complete: false
+verdict: INCONCLUSIVE_REDUCTION_JOIN

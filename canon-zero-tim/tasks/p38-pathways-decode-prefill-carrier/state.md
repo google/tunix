@@ -26,8 +26,9 @@
     points joined but cannot be reproduced from the committed inputs.
   - No third-round zero result, full hidden-byte equality, lm_head isolation,
     normalizer isolation, controlled exit, or terminal evidence is admitted.
-  - Evidence directory: `evidence/p38s18l/`; GCP reduction instructions:
-    `P38S18L_GCP_REDUCTION_RUNBOOK.md`.
+  - Evidence directory: `evidence/p38s18l/`; GCP reduction sealed at
+    `derived/p38s18l-seam-reduction-v1` (verdict: `INCONCLUSIVE_REDUCTION_JOIN`
+    on ambiguous key `[319, 398]`).
 - P38s17/source `baac38bc4034` completed all 3 Frozen-Weight diagnostic rounds
   (768 trajectories total, 143,511 action tokens across 3 rounds) on 64 TPU
   (`DP16xTP4`, concurrency 256) with zero backward, zero optimizer commits, and

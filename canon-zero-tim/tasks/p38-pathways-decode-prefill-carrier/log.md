@@ -1445,3 +1445,16 @@ reclassification from the committed NPZ inputs.
   postflight PASS; Python compile, shell syntax, and `git diff --check` PASS.
 - Operator card: `P38S18L_GCP_REDUCTION_RUNBOOK.md`. No GCP reduction, TPU run,
   backward, optimizer commit, commit, or push occurred in this worktree.
+
+## 2026-08-16 UTC — P38s18l GCP Seam Evidence Reduction Executed
+
+- Type: GCP-side evidence reduction and packaging
+- Source: `gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-p38-fl-stock-p38s18l-9a834574/attempt-0/live/000020/` (2,441 files, manifest verified).
+- Destination: `gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-p38-fl-stock-p38s18l-9a834574/attempt-0/derived/p38s18l-seam-reduction-v1/`
+- Command: `python3 canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/reduce_p38_seam_evidence.py` via `run_reduce_p38s18l_on_gcp.sh`.
+- Result: `[P38.REDUCE.GCP] COMPLETE verdict=INCONCLUSIVE_REDUCTION_JOIN reducer_rc=4`.
+- Key facts:
+  - 44 raw JSON/NPZ records selected and preserved byte-for-byte.
+  - Ambiguous join detected on Arm A round 0 (`record_indices: [319, 398]`, prefix `729d2e6ec52e...`), triggering fail-closed verdict `INCONCLUSIVE_REDUCTION_JOIN`.
+  - Derived archive `p38s18l-seam-reduction-v1.tar.gz` (SHA: `90e8bb9b...`) and manifest `REDUCTION_MANIFEST.json` (SHA: `dbbfca0d...`) sealed and uploaded to GCS derived prefix.
+  - Reduced audit metadata committed under `tasks/p38-pathways-decode-prefill-carrier/evidence/p38s18l/`.

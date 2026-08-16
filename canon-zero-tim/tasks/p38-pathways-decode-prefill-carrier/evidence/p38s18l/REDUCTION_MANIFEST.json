@@ -1,0 +1,377 @@
+{
+  "ambiguous_keys": [
+    {
+      "arm": "A",
+      "diagnostic_round": 0,
+      "record_indices": [
+        319,
+        398
+      ],
+      "token_prefix_sha256": "729d2e6ec52e46934fa1bfea1f5458852e3b6471e9ad36f7a90a849c3178b0a7"
+    }
+  ],
+  "capsule_rounds": [
+    0
+  ],
+  "capsules": [
+    {
+      "bytes": 20841,
+      "diagnostic_round": 0,
+      "path": "capsules/p38_frozenlake_mismatch_capsule.round-000000.npz",
+      "sha256": "c88c3ca4e72c37b9b455508d618e7e7161713c059a12dd4c7fb541d28c3b6d62",
+      "source_path": "p38_frozenlake_mismatch_capsule.round-000000.npz"
+    }
+  ],
+  "claim_ceiling": "This is a byte-preserving derived subset of a live snapshot. It does not manufacture missing diagnostic rounds or terminal markers.",
+  "completed_pre_alignment_rounds": 1,
+  "expected_rounds": 3,
+  "matched_arm_keys": 37,
+  "observer_mode": "layer",
+  "red_points": 19,
+  "required_arm_keys": 38,
+  "run_contract_complete": false,
+  "schema": "p38-seam-reduction-v1",
+  "selected_directory": "selected",
+  "selected_files": [
+    {
+      "bytes": 6688,
+      "path": "selected/p38_seam_000308.json",
+      "record_index": 308,
+      "sha256": "2a5375cae98a306c72f4d28a53cbfa706aba18d2872e2a2af9e1881ba4ab1ce9",
+      "source_path": "p38_seam_000308.json"
+    },
+    {
+      "bytes": 30848,
+      "path": "selected/p38_seam_000308.npz",
+      "record_index": 308,
+      "sha256": "bca858531fbecca5df91345e7c504665ebc45c280039bb2393da334c1428457d",
+      "source_path": "p38_seam_000308.npz"
+    },
+    {
+      "bytes": 6689,
+      "path": "selected/p38_seam_000309.json",
+      "record_index": 309,
+      "sha256": "1ab6b2e1245f23e70a340dd630e34d847e355ba4bec5937424c175b137e72d5a",
+      "source_path": "p38_seam_000309.json"
+    },
+    {
+      "bytes": 30848,
+      "path": "selected/p38_seam_000309.npz",
+      "record_index": 309,
+      "sha256": "44d8c7e0c0d459b317fe6a9e1faa8b1162a526b5bca77bc32b21fed67185ff28",
+      "source_path": "p38_seam_000309.npz"
+    },
+    {
+      "bytes": 6689,
+      "path": "selected/p38_seam_000313.json",
+      "record_index": 313,
+      "sha256": "9113a9ef318954d4e8a9d0ebee0fd413168c493691e89f6f2e830e73d5f03133",
+      "source_path": "p38_seam_000313.json"
+    },
+    {
+      "bytes": 149232,
+      "path": "selected/p38_seam_000313.npz",
+      "record_index": 313,
+      "sha256": "bc2b54996a3975974d81d9def16d71a9aba23c849532f1dab7c9cf6baa89083b",
+      "source_path": "p38_seam_000313.npz"
+    },
+    {
+      "bytes": 6693,
+      "path": "selected/p38_seam_000316.json",
+      "record_index": 316,
+      "sha256": "9daa30ecdc47d79971f05a87f26bf4c95a52bba0a93ccf4386c90112f643fc90",
+      "source_path": "p38_seam_000316.json"
+    },
+    {
+      "bytes": 359424,
+      "path": "selected/p38_seam_000316.npz",
+      "record_index": 316,
+      "sha256": "2269264f343a849aa744b5a4c71f7ccb7704959b5224126d581646cacc116fc1",
+      "source_path": "p38_seam_000316.npz"
+    },
+    {
+      "bytes": 5934,
+      "path": "selected/p38_seam_000319.json",
+      "record_index": 319,
+      "sha256": "4f1fa8a8b646fd72b1446fc2583707c4535353424fa840f1d87cd621f35546f0",
+      "source_path": "p38_seam_000319.json"
+    },
+    {
+      "bytes": 28432,
+      "path": "selected/p38_seam_000319.npz",
+      "record_index": 319,
+      "sha256": "4e8b880cff57f5c3beea1cf2c20febefb000b9d6d80ef70e423f56b8af919677",
+      "source_path": "p38_seam_000319.npz"
+    },
+    {
+      "bytes": 5934,
+      "path": "selected/p38_seam_000320.json",
+      "record_index": 320,
+      "sha256": "45fb7d0b1ce70ead3fe5d546ef4bd94d6230bb7c18cd61ff98959165e4cbebc1",
+      "source_path": "p38_seam_000320.json"
+    },
+    {
+      "bytes": 28432,
+      "path": "selected/p38_seam_000320.npz",
+      "record_index": 320,
+      "sha256": "b1c66ca79bd5a767b0d77aed7e227e36d82e8d6b1020301ffb08d9f2b140ad6f",
+      "source_path": "p38_seam_000320.npz"
+    },
+    {
+      "bytes": 5934,
+      "path": "selected/p38_seam_000321.json",
+      "record_index": 321,
+      "sha256": "411f1e6be92ad9b54d8c55862a8163b52328d7bd16828223ca47c68826921f7b",
+      "source_path": "p38_seam_000321.json"
+    },
+    {
+      "bytes": 28432,
+      "path": "selected/p38_seam_000321.npz",
+      "record_index": 321,
+      "sha256": "700c3bdd305340716f1b1ef282b6781c77bbed00147e3a741666c510e2b1d9bc",
+      "source_path": "p38_seam_000321.npz"
+    },
+    {
+      "bytes": 5934,
+      "path": "selected/p38_seam_000324.json",
+      "record_index": 324,
+      "sha256": "5bad97b245ce83d8ead311f0b08d6f1feef992d9dcb33dbb3477a22e5dcedf22",
+      "source_path": "p38_seam_000324.json"
+    },
+    {
+      "bytes": 28432,
+      "path": "selected/p38_seam_000324.npz",
+      "record_index": 324,
+      "sha256": "4ba15f2871e356e85541d798fa3e9621fc22f118cd197487946f5fa0cfcece0f",
+      "source_path": "p38_seam_000324.npz"
+    },
+    {
+      "bytes": 5934,
+      "path": "selected/p38_seam_000327.json",
+      "record_index": 327,
+      "sha256": "1043650508997c356557aa53bdb76e194b77b940bdbf7be6fadf87904aac9ac4",
+      "source_path": "p38_seam_000327.json"
+    },
+    {
+      "bytes": 28432,
+      "path": "selected/p38_seam_000327.npz",
+      "record_index": 327,
+      "sha256": "381abfc597102bba076e6e5d93b5f7780bffeea99f691f3fe77287507659ec14",
+      "source_path": "p38_seam_000327.npz"
+    },
+    {
+      "bytes": 5934,
+      "path": "selected/p38_seam_000334.json",
+      "record_index": 334,
+      "sha256": "9fcc68b7c6ace2a6cdbb7895faccecbcdf94001c61178c750266730bca5b5bf4",
+      "source_path": "p38_seam_000334.json"
+    },
+    {
+      "bytes": 28432,
+      "path": "selected/p38_seam_000334.npz",
+      "record_index": 334,
+      "sha256": "1661f9b930377fd112333dfdf152a0a2e44e5410fea953f2c91a80be0cf4e156",
+      "source_path": "p38_seam_000334.npz"
+    },
+    {
+      "bytes": 5934,
+      "path": "selected/p38_seam_000336.json",
+      "record_index": 336,
+      "sha256": "fa7b66ffe4a077bc607af03618d0016f8c0d1431899926c6001f51d68f0976f2",
+      "source_path": "p38_seam_000336.json"
+    },
+    {
+      "bytes": 28432,
+      "path": "selected/p38_seam_000336.npz",
+      "record_index": 336,
+      "sha256": "633c214c46c6e785a2a7db14e0623960ec2a8fc3c993368e2aab673ef8275474",
+      "source_path": "p38_seam_000336.npz"
+    },
+    {
+      "bytes": 5558,
+      "path": "selected/p38_seam_000347.json",
+      "record_index": 347,
+      "sha256": "eb99e5b6c48c1720ea586c05d74662c53b7ce640ed357b2fa9a96adff84d487f",
+      "source_path": "p38_seam_000347.json"
+    },
+    {
+      "bytes": 26016,
+      "path": "selected/p38_seam_000347.npz",
+      "record_index": 347,
+      "sha256": "edb5adf65dcd45a7e8f19551c4d11f36bcdb5cab3dcf2900c5585cd8f432c4c2",
+      "source_path": "p38_seam_000347.npz"
+    },
+    {
+      "bytes": 5182,
+      "path": "selected/p38_seam_000351.json",
+      "record_index": 351,
+      "sha256": "97a9ee4c48732bf801126f7b4828539a36c06ac5a251d4efa646b3e77075fc57",
+      "source_path": "p38_seam_000351.json"
+    },
+    {
+      "bytes": 23600,
+      "path": "selected/p38_seam_000351.npz",
+      "record_index": 351,
+      "sha256": "40aa5fa0d27c3e6dea49117c024ad30e49228fb702bf0e0c393697a4f0c4f395",
+      "source_path": "p38_seam_000351.npz"
+    },
+    {
+      "bytes": 4060,
+      "path": "selected/p38_seam_000367.json",
+      "record_index": 367,
+      "sha256": "be3a20bdeaa0d6e57061a77273d305786f55f575df87edf5294ecca23be5d3aa",
+      "source_path": "p38_seam_000367.json"
+    },
+    {
+      "bytes": 13936,
+      "path": "selected/p38_seam_000367.npz",
+      "record_index": 367,
+      "sha256": "aa22e9ace41ae8fd1d1488cd000e5e56f5c7cfa1b61dd10cfcaf93bfdf8ec03f",
+      "source_path": "p38_seam_000367.npz"
+    },
+    {
+      "bytes": 4062,
+      "path": "selected/p38_seam_000370.json",
+      "record_index": 370,
+      "sha256": "8cc96a4de28a95d5c2f7c3e3b6a7d91982b72016edffb8461f1e927ee7b28569",
+      "source_path": "p38_seam_000370.json"
+    },
+    {
+      "bytes": 13936,
+      "path": "selected/p38_seam_000370.npz",
+      "record_index": 370,
+      "sha256": "ca30c657b45c3c3e5a2e087e03d0c1c8476ed789b1b0c59d64ee13e3d4e6e80c",
+      "source_path": "p38_seam_000370.npz"
+    },
+    {
+      "bytes": 2568,
+      "path": "selected/p38_seam_000398.json",
+      "record_index": 398,
+      "sha256": "82a2fae642aadb0febebd3030306e0d92ca30731f0ae356c0e148b232ab3fddb",
+      "source_path": "p38_seam_000398.json"
+    },
+    {
+      "bytes": 622768,
+      "path": "selected/p38_seam_000398.npz",
+      "record_index": 398,
+      "sha256": "266bd1b93e2180af2743520477e77a7a1a12c095d6fd4635421c60c3690e6298",
+      "source_path": "p38_seam_000398.npz"
+    },
+    {
+      "bytes": 2558,
+      "path": "selected/p38_seam_000448.json",
+      "record_index": 448,
+      "sha256": "82521e79e955ed7e3410a6c5b1db3ee6a92143cbcd467bd2edaa5e109651b069",
+      "source_path": "p38_seam_000448.json"
+    },
+    {
+      "bytes": 6688,
+      "path": "selected/p38_seam_000448.npz",
+      "record_index": 448,
+      "sha256": "0a3dc17abf2b43244940e4553612ce837d3d6f113c7082630e54665c4d0fce57",
+      "source_path": "p38_seam_000448.npz"
+    },
+    {
+      "bytes": 9350,
+      "path": "selected/p38_seam_000550.json",
+      "record_index": 550,
+      "sha256": "319c793457464fcd219e32a33d66d45bab76a874cb8a1dfb8289ffc6d93d694a",
+      "source_path": "p38_seam_000550.json"
+    },
+    {
+      "bytes": 2548320,
+      "path": "selected/p38_seam_000550.npz",
+      "record_index": 550,
+      "sha256": "640f54abb798b488d98d61f1e73e4a4c0ebdb9dade5894f29738c00f9eb13345",
+      "source_path": "p38_seam_000550.npz"
+    },
+    {
+      "bytes": 9330,
+      "path": "selected/p38_seam_000558.json",
+      "record_index": 558,
+      "sha256": "ac8bf90373ab3ef11358805be9f4b62119259a24102e86ae9faec281a0ff7ef9",
+      "source_path": "p38_seam_000558.json"
+    },
+    {
+      "bytes": 1335488,
+      "path": "selected/p38_seam_000558.npz",
+      "record_index": 558,
+      "sha256": "380590de0938f72bc39ee1733e4a77bf36aa462657faaaf58984acaf564e16a7",
+      "source_path": "p38_seam_000558.npz"
+    },
+    {
+      "bytes": 6714,
+      "path": "selected/p38_seam_000562.json",
+      "record_index": 562,
+      "sha256": "805d54780c1e15a4d8b9e4cf44e5101da959bf7c71cc715a5f03927c4a01526c",
+      "source_path": "p38_seam_000562.json"
+    },
+    {
+      "bytes": 765312,
+      "path": "selected/p38_seam_000562.npz",
+      "record_index": 562,
+      "sha256": "143fc7c16bcd9bb1a5de38aa6e3bd5c8b1529a5c67281060ec622e237b7f4d84",
+      "source_path": "p38_seam_000562.npz"
+    },
+    {
+      "bytes": 2197,
+      "path": "selected/p38_seam_000567.json",
+      "record_index": 567,
+      "sha256": "25736d2fdd2f89862956c1ffa724c3eca8e955cb879d286255e7f5f112e76732",
+      "source_path": "p38_seam_000567.json"
+    },
+    {
+      "bytes": 620352,
+      "path": "selected/p38_seam_000567.npz",
+      "record_index": 567,
+      "sha256": "1fb556b5fb5ed06af797f2848707684b72e46839e2488eebc23d0a46dcc1693f",
+      "source_path": "p38_seam_000567.npz"
+    },
+    {
+      "bytes": 2197,
+      "path": "selected/p38_seam_000568.json",
+      "record_index": 568,
+      "sha256": "4965624dd4fabadbd528b7005b269fec10ea5d44ccdb046a90ffc738229843ba",
+      "source_path": "p38_seam_000568.json"
+    },
+    {
+      "bytes": 342512,
+      "path": "selected/p38_seam_000568.npz",
+      "record_index": 568,
+      "sha256": "b5640eebf774a8a9aef5b4b65f18bfdde2f6b2fa6c732b2e923d4e0a40ec286e",
+      "source_path": "p38_seam_000568.npz"
+    }
+  ],
+  "selected_record_indices": [
+    308,
+    309,
+    313,
+    316,
+    319,
+    320,
+    321,
+    324,
+    327,
+    334,
+    336,
+    347,
+    351,
+    367,
+    370,
+    398,
+    448,
+    550,
+    558,
+    562,
+    567,
+    568
+  ],
+  "selection_complete": false,
+  "source_gcs_uri": "gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-p38-fl-stock-p38s18l-9a834574/attempt-0/live/000020",
+  "source_seam_records": 1217,
+  "source_snapshot_files": 2441,
+  "source_snapshot_manifest_sha256": "f901b72e629521e11c7ce26b73f89dd0938264b477d8f2ae7b9535d5591f18d2",
+  "status": "inconclusive",
+  "terminal_precheck_markers": 0,
+  "unmatched_keys": []
+}

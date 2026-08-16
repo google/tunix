@@ -1,0 +1,9 @@
+{
+  "classification": null,
+  "joined_red_points": 0,
+  "red_points": 19,
+  "run_contract_complete": false,
+  "schema": "p38-seam-reduction-verdict-v1",
+  "selection_complete": false,
+  "verdict": "INCONCLUSIVE_REDUCTION_JOIN"
+}
