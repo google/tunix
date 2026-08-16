@@ -5,7 +5,7 @@ parallel Qwen3-32B DeepSWE workstream, read
 `../p39-deepswe-production/HANDOFF.md`. P38 evidence cannot promote P39, and
 P39 evidence cannot promote P38.
 
-## CURRENT: publish P38.2r, run one-host neutrality, then one P38s18r target
+## CURRENT: launch exactly one P38s18r target from the gated source
 
 P38s18l/P38.2q is retired as `INCONCLUSIVE_NO_ELIGIBLE_SNAPSHOT`: no existing
 live snapshot contains two complete rounds with paired NPZs and a manifest.
@@ -27,12 +27,20 @@ The only current operator card is `P38S18R_RUNBOOK.md`. Its order is mandatory:
 5. return all three immutable round bundles plus the final root markers and
    classification, not only stdout or a hand-authored summary.
 
-Publication was explicitly approved on 2026-08-16. The one-host TPU neutrality
-gate is being rerun from the corrected publication tip; the 64-TPU target has
-not been launched. The initial `294a4186` seam-tail arm correctly failed before
+Publication was explicitly approved on 2026-08-16. The corrected executable
+source `ae63d44edc67cfcd5b19d34abc82feb681284c67` passed the same-source local
+v5p gate: off and seam-tail each completed three frozen rounds with zero
+backward and optimizer commits; the seam-tail arm emitted 130 seam and 130
+tail records; and the complete alignment contracts were identical except for
+timestamps in all three rounds. The 64-TPU target has not been launched. The
+initial `294a4186` seam-tail arm correctly failed before
 round 0 because an ineligible shallow call was mistaken for a lost tail
 context. The current tip treats only `pending=None` as a no-op and retains
 wrong-arm contexts as fail-closed errors.
+
+Launch only the single stock P38s18r JobSet described in
+`P38S18R_RUNBOOK.md`, with `--source-commit` pinned to the gated `ae63d44e...`
+SHA. Do not substitute the documentation-only tip or render from HEAD.
 
 ## HISTORY: P38s18l/P38.2q no-source inventory
 

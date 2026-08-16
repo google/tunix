@@ -32,6 +32,19 @@ def classify(off_path: Path, observed_path: Path) -> dict:
     for boundary in ("S_decode_vs_S_prefill", "S_prefill_vs_T_old"):
       if off["boundaries"][boundary] != observed["boundaries"][boundary]:
         raise ValueError(f"round {index}: {boundary} metric drift")
+    # A fully exact local round does not produce a mismatch capsule.  The
+    # alignment record is therefore the byte-level neutrality contract: its
+    # hashes cover the original arrays and action-masked endpoints.  Only the
+    # wall-clock timestamp is permitted to differ between the two executions.
+    off_contract = {key: value for key, value in off.items()
+                    if key != "timestamp"}
+    observed_contract = {key: value for key, value in observed.items()
+                         if key != "timestamp"}
+    if off_contract != observed_contract:
+      changed = sorted(
+          key for key in set(off_contract) | set(observed_contract)
+          if off_contract.get(key) != observed_contract.get(key))
+      raise ValueError(f"round {index}: alignment contract drift: {changed}")
     rounds.append({
         "round": index,
         "step": off["step"],
@@ -44,6 +57,7 @@ def classify(off_path: Path, observed_path: Path) -> dict:
       "schema": "p38-seam-neutrality-v1",
       "status": "PASS",
       "classification": "observer_endpoint_bitwise_neutral",
+      "contract": "complete_alignment_record_except_timestamp",
       "off_report": str(off_path),
       "off_report_sha256": hashlib.sha256(off_path.read_bytes()).hexdigest(),
       "observed_report": str(observed_path),

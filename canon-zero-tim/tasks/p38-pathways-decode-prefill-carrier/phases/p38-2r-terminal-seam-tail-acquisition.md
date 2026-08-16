@@ -1,7 +1,7 @@
 # P38.2r — Single-run terminal seam-and-tail acquisition
 
-Status: implementation approved for publication; target launch remains blocked
-on the combined observer's one-host neutrality run. P38.2q remains
+Status: implementation published and same-source local-v5p neutrality passed;
+one source-pinned target launch is authorized. P38.2q remains
 retired as `INCONCLUSIVE_NO_ELIGIBLE_SNAPSHOT`; it cannot supply P38.2r data.
 
 ## Entering evidence
@@ -73,9 +73,11 @@ Current local evidence (2026-08-16): pinned-image install/manifest verification
 passes for Qwen3-1.7B and Qwen3-8B; both overlays pass 34 runner tests. The full
 P38 CPU suite passes 53 tests, postflight accepts the combined seam+tail
 fixture and rejects missing tail data, and fake GCS proves two rounds survive
-abrupt exit. The remaining hardware gate is one local v5p off-versus-seam-tail
-endpoint comparison across three frozen rounds. No target run is admitted
-before that comparison is green.
+abrupt exit. Source `ae63d44e...` then passed a local v5p off-versus-seam-tail
+comparison across three frozen rounds. Both arms completed with zero backward
+and optimizer commits; the combined arm recorded 130 seam and 130 tail rows;
+and the complete alignment contracts were equal except timestamps. The target
+must use that exact executable source.
 
 ## Target gate
 

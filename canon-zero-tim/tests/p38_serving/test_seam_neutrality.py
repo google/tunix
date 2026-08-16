@@ -76,6 +76,19 @@ class SeamNeutralityTest(unittest.TestCase):
       with self.assertRaisesRegex(ValueError, "tokens drift"):
         neutrality.classify(full, changed_path)
 
+  def test_non_hash_contract_drift_is_rejected(self):
+    with tempfile.TemporaryDirectory() as directory:
+      root = Path(directory)
+      off_rows = [_row(index) for index in range(3)]
+      observed_rows = [_row(index) for index in range(3)]
+      for row in off_rows + observed_rows:
+        row["N_action"] = 17
+      observed_rows[1]["N_action"] = 18
+      off = self._write(root, "off.jsonl", off_rows)
+      observed = self._write(root, "observed.jsonl", observed_rows)
+      with self.assertRaisesRegex(ValueError, "alignment contract drift"):
+        neutrality.classify(off, observed)
+
 
 if __name__ == "__main__":
   unittest.main()

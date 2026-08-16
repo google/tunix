@@ -1576,3 +1576,22 @@ reclassification from the committed NPZ inputs.
   diagnostic evidence but cannot satisfy the registered same-source neutrality
   pair. Both one-host arms must rerun from the corrected publication before a
   64-TPU launch is admitted.
+
+## 2026-08-16 UTC — P38.2r corrected same-source one-host gate passed
+
+- Published the shallow-call correction as `ae63d44e` and reran both local
+  v5p arms from that exact clean source.
+- Observer off completed three frozen rounds with zero backward and zero
+  optimizer commits. Combined seam-tail also completed three rounds, emitted
+  130 seam and 130 tail records, and kept backward/optimizer commits at zero.
+- The registered neutrality classifier returned
+  `observer_endpoint_bitwise_neutral`. In all three rounds the complete
+  alignment record excluding only its timestamp was identical, including all
+  original-array and action-masked endpoint hashes, geometry, denominators,
+  metrics, and verdict.
+- Corrected the operator card: exact local A-B runs intentionally have no
+  mismatch capsule, so neutrality is judged from the alignment byte hashes
+  rather than files that cannot exist. The classifier now rejects drift in
+  any non-timestamp alignment field.
+- One 64-TPU stock P38s18r diagnostic is authorized only from full source
+  `ae63d44edc67cfcd5b19d34abc82feb681284c67`. No target launch occurred here.

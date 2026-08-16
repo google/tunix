@@ -16,8 +16,11 @@
   approved. The first seam-tail one-host arm exposed a pre-round shallow-call
   bug: no selected seam row was incorrectly rejected as a lost tail context.
   The current local correction makes only the absent context a no-op while
-  preserving wrong-arm rejection. A same-tip local-v5p neutrality pair is
-  still pending, and no target launch is authorized yet.
+  preserving wrong-arm rejection. Corrected source `ae63d44e...` passed both
+  local-v5p arms for three rounds: off/on alignment contracts are identical
+  except timestamps, the observer produced 130 seam and 130 tail records, and
+  backward/optimizer commits remained zero. One source-pinned P38s18r target
+  launch is now authorized; no target has launched yet.
 - Task directory:
   `canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/`.
 

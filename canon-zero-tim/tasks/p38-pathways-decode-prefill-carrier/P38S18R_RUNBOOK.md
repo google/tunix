@@ -9,49 +9,46 @@ environment variables by hand. Do not rerun P38s18l/P38.2q.
 
 ## 1. Publication and one-host gate
 
-After review, commit and push the P38.2r implementation. Record the full SHA as
-`SOURCE_COMMIT`. On the local v5p host, run observer-off and combined-observer
-arms from the exact same published source:
+The admitted executable source is
+`ae63d44edc67cfcd5b19d34abc82feb681284c67`. On the local v5p host, the
+observer-off and combined-observer arms completed from that exact clean source:
 
 ```bash
 set -euo pipefail
 cd /home/yuxuan/code_rl_repro/sequence_packing/p48p49_integration
-SOURCE_COMMIT="$(git rev-parse HEAD)"
+SOURCE_COMMIT=ae63d44edc67cfcd5b19d34abc82feb681284c67
+test "$(git rev-parse "$SOURCE_COMMIT^{commit}")" = "$SOURCE_COMMIT"
 test -z "$(git status --porcelain --untracked-files=no)"
 
 bash canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/run_p38_incident_onehost.sh \
-  off p38-2r-neutral-off
+  off p38-2r-ae63-off
 bash canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/run_p38_incident_onehost.sh \
-  seam-tail p38-2r-neutral-on
+  seam-tail p38-2r-ae63-on
 ```
 
 Both commands must end with `PASS ... rounds=3 backward=0
 optimizer_commits=0`. The `seam-tail` arm must also print
-`TERMINAL_TAIL_PASS`. Compare all three immutable capsules:
+`TERMINAL_TAIL_PASS`. Because all local A-B boundaries are exact, the mismatch
+writer correctly emits no mismatch capsule. Compare the three complete
+alignment records with the registered hash-based byte-level classifier:
 
 ```bash
-python3 - <<'PY'
-from pathlib import Path
-import numpy as np
-
-root = Path('/mnt/disks/tunix-data/logp_probe_1host')
-off = root / 'p38_incident_p38-2r-neutral-off_off'
-on = root / 'p38_incident_p38-2r-neutral-on_seam-tail'
-names = ('selected_rows', 'completion_ids', 'action_mask',
-         's_decode', 's_prefill', 't_old')
-for round_index in range(3):
-  a_path = off / f'mismatch.round-{round_index:06d}.npz'
-  b_path = on / f'mismatch.round-{round_index:06d}.npz'
-  with np.load(a_path, allow_pickle=False) as a, \
-       np.load(b_path, allow_pickle=False) as b:
-    for name in names:
-      assert np.array_equal(a[name], b[name]), (round_index, name)
-print('[P38.2R] ONEHOST_NEUTRALITY_PASS rounds=3 arrays=6')
-PY
+python3 canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/\
+classify_p38_seam_neutrality.py \
+  --off /mnt/disks/tunix-data/logp_probe_1host/\
+p38_incident_p38-2r-ae63-off_off/pre_alignment.jsonl \
+  --observed /mnt/disks/tunix-data/logp_probe_1host/\
+p38_incident_p38-2r-ae63-on_seam-tail/pre_alignment.jsonl \
+  --output /tmp/p38_2r_ae63_neutrality.json
+test "$(python3 -c 'import json; print(json.load(open("/tmp/p38_2r_ae63_neutrality.json"))["status"])')" = PASS
 ```
 
-Any different token stream or endpoint is a failed neutrality gate. Stop; do
-not launch merely because the observer produced files.
+The classifier compares the entire alignment contract except its wall-clock
+timestamp, including hashes of the original arrays and all action-masked
+endpoints. Any different token stream, geometry, denominator, metric, or
+endpoint is a failed neutrality gate. Stop; do not launch merely because the
+observer produced files. The admitted receipt is recorded in
+`artifacts/p38_2r_onehost_neutrality_0816.md`.
 
 ## 2. Render exactly one target JobSet
 
@@ -61,7 +58,7 @@ way to enable the combined observer:
 ```bash
 set -euo pipefail
 cd /home/yuxuan/code_rl_repro/sequence_packing/p48p49_integration
-SOURCE_COMMIT="$(git rev-parse HEAD)"
+SOURCE_COMMIT=ae63d44edc67cfcd5b19d34abc82feb681284c67
 RUN_ID=p38s18r
 OUT="$(mktemp -d /tmp/p38s18r.XXXXXX)"
 
