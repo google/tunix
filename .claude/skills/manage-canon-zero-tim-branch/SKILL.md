@@ -40,10 +40,15 @@ Reading order for any task: `THREADS.md` → the thread's `tasks/<thread>/state.
    state with read-only `git -C` commands (no remotes printed).
 2. Run `python3 .claude/skills/manage-canon-zero-tim-branch/scripts/preflight_runtime.py
    --repo <worktree> --require-clean` before editing.
-3. Worktree conventions: the parking lot is `sequence_packing/` (historical name, ignore
-   its semantics). Prefix meaning: `yuxzhang/*` = shared pushed branches; `local/*` =
-   local staging branches; `backup/*` = immutable anchors. **Multi-day work gets a named
-   `local/*` branch, not a detached HEAD** — detached commits die with their worktree.
+3. Worktree conventions: new worktrees go under `worktrees/` at the outer-repo root
+   (`sequence_packing/` is the deprecated legacy lot; the primary clone
+   `sequence_packing/tunix` stays where it is — it holds the shared object store every
+   worktree points into, and relocating it is deferred surgery). Prefix meaning:
+   `yuxzhang/*` = shared pushed branches; `local/*` = local staging branches;
+   `backup/*` = immutable anchors. **Multi-day work gets a named `local/*` branch, not a
+   detached HEAD** — detached commits die with their worktree. Integration is
+   rebase-then-fast-forward onto `yuxzhang/canon-zero-tim`; the shared history is a
+   straight line, never a merge.
 4. Fetch before editing only when remote state matters; never pull/rebase a dirty tree;
    never clean or reset another agent's worktree.
 
@@ -132,9 +137,11 @@ negative stayed green because the device flushes subnormals — flip a normal va
 
 ## 9. Multi-agent protocol
 
-Roles: **evaluator** (reviews every pull, owns `THREADS.md`, approves nothing);
-**thread executors** (own their thread's worktrees and CLs); **maintenance agent**
-(governance CLs). One writer per mutable file. Push queue: hot-thread pushes take
+Roles: **evaluator** (reviews every pull; owns the board's structure, cross-thread
+arbitration, and claim-wording demotions; approves nothing); **thread executors** (own
+their thread's worktrees and CLs, and write their own `THREADS.md` row and their own
+runs' `EVIDENCE.md` rows); **maintenance agent** (governance CLs). Row-level write
+permission on the registries; one writer per any other mutable file. Push queue: hot-thread pushes take
 priority; before any push, re-fetch and prove the remote tip equals your base — if it
 moved, rebase and re-run the focused gates; after pushing, verify local HEAD equals the
 remote-tracking SHA. Handoffs are files, not chat: a task is transferable when its

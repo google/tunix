@@ -41,4 +41,12 @@ grep -q 'missing=capsule' "$TMP/out2/PACKAGING.txt" || fail "missing piece not n
 # T3 immutability: refuse to write into a non-empty destination
 "$PKG" "$TMP/src1" "$TMP/out1" >/dev/null 2>&1 && fail "non-empty dest must be refused"
 
-echo "PACKAGE_RUN_TESTS PASS (3/3)"
+# T4 structural postflight passes on a well-formed run dir
+CHK="$HERE/../../scripts/check_run_dir.sh"
+"$CHK" "$TMP/out1" | grep -q RUN_DIR_STRUCTURE_OK || fail "structure check rejects a good dir"
+
+# T5 corruption control: flip one byte in a packaged file -> structure check must go red
+printf 'X' >> "$TMP/out1/pre_alignment.jsonl"
+"$CHK" "$TMP/out1" >/dev/null 2>&1 && fail "structure check missed a corrupted file"
+
+echo "PACKAGE_RUN_TESTS PASS (5/5)"

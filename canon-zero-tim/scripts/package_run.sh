@@ -84,4 +84,7 @@ echo "kept=$kept dropped_duplicates=$dropped" >> "$PKG"   # finalize PACKAGING b
 ( cd "$DST" && find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%P\0' | sort -z \
   | xargs -0 sha256sum > SHA256SUMS )
 
+# Self-verifying packaging: every package run ends with the structural postflight.
+"$(dirname "$0")/check_run_dir.sh" "$DST"
+
 echo "[package_run] OK dest=$DST kept=$kept dropped=$dropped missing_core=${#missing[@]}"
