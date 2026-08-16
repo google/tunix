@@ -86,6 +86,7 @@ p38s12f / p38s15 / p38s16.
 | Terminal forensics ×3 rounds, 64 joined mismatches | p38s15 | `…/evidence/p38s15/` |
 | Single-active fixed-M discriminator; golden incident call 4223 | p38s16 | `…/evidence/p38s16/` (classification absent → analysis-grade) |
 | Live-KV fingerprint EQUAL on red row (corrected; initial "differs" withdrawn) | p38s17 | `…/evidence/p38s17/` + task `log.md` 2026-08-15 correction |
+| Layer seam classified: hidden chain (L0..35 + Final RMSNorm) 100% bitwise exact | p38s18l | `tasks/p38-pathways-decode-prefill-carrier/evidence/p38s18l/` |
 | Aborted-launch stub | p38s14 | `…/evidence/p38s14/` (INCONCLUSIVE, head log only) |
 | One-host perf ledger (8-run bitwise hash chain, decode-tax ablation) | p48/p49 T0–T5, F0–F12 | outer repo `tasks/p48*`, `tasks/p49*`; worktree `local/p48-profiling` |
 | Cross-arm A identity for prompt_logprobs=None | P47a | landed CL 10242fa1 lineage; evidence dirs `p41_optimizer_p48c_p47a_*` on probe host |

@@ -5,7 +5,7 @@
 
 | # | 线程 | 状态 | 下一个门 | 等谁 | 任务目录 |
 |---|---|---|---|---|---|
-| 1 | **zero-tim-carrier** | 环境支全关;s17 判 live-KV 全等(stored 内容豁免,更正入档);两嫌疑收敛(确定缝 vs 读侧竞态);2o seam 观察器已推(ebba4850) | classifier tail/multi-signature 判读修复 → **p38s18-layer 发射**(按用户令:排整理 CL-A/B/C 之后) | P38 agent 修 classifier;整理完成后解冻 | tasks/p38-pathways-decode-prefill-carrier |
+| 1 | **zero-tim-carrier** | s18l layer 诊断完成; 36 层主干与 Final RMSNorm 100% Bitwise 全等(L0..35 0 diff); 误差源锁定在 tail lm_head / log-softmax reduction | **tail lm_head 探针 (bounded tail observer)** | 整理 tail 探针方案后发射 | tasks/p38-pathways-decode-prefill-carrier |
 | 2 | **perf** | 一宿主收官(warm 199s);flags 已 push(20a67129);2.6× 解码税=契约价 | **DP16 一发**(E 窗验证+税率表+裁 jit 整并) | 等卡 + 用户渲染 | tasks/p48-onehost-perf(分支)+ 外层 p48-p52 |
 | 3 | **frozenlake-train** | warning-only lane 可跑;p45r6 step-0 checkpoint 契约失败已归档,修复已落(a94d6c0c "Fix P45 checkpointed G6 training") | checkpointed G6 重跑;perf flags verify-first 搭常规 run;P47b 押 E0 判决后 | P45 线重跑窗口 | tasks/p45-frozenlake-dp8-tp8-resident 等 |
 | 4 | **deepswe-eval** | reward-only 已 landed;256 卡有 subshard pass;128-chip profiles 已加 | 64 卡 L3 双臂 → 晋升默认;shard 并行未做 | 用户排 L3 | tasks/p46-deepswe-256chip-reward-only-eval |
