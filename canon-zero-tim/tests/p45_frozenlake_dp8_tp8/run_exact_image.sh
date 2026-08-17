@@ -27,6 +27,10 @@ $DOCKER run --rm \
     PYTHONPATH=/workspace python3 tests/sft/peft_trainer_test.py \
       PeftTrainerTest.test_p28_g6_checkpointing_is_isolated_to_signed_p45 \
       PeftTrainerTest.test_p28_g6_precomputed_four_microstep_update
+    PYTHONPATH=/workspace python3 \
+      tests/rl/agentic/agentic_rl_learner_test.py \
+      AgenticRLLearnerTest.test_nonpositive_eval_cadence_disables_evaluation \
+      AgenticRLLearnerTest.test_p31_segmented_eval_uses_preupdate_step_exactly_once
     PYTHONPATH="$overlay" python3 \
       canon-zero-tim/src/engine_shims/models/qwen8b_tp8/p22xf_contract.py
     CANON_SHIM_ROOT="$overlay" PYTHONPATH="$overlay" python3 \

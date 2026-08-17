@@ -210,6 +210,8 @@ def _should_run_eval(
     last_eval_train_step: int,
 ) -> bool:
   """Pure exactly-once predicate for the held-out rollout schedule."""
+  if eval_every_n_steps <= 0:
+    return False
   return bool(
       prompt_count
       and schedule_step % eval_every_n_steps == 0

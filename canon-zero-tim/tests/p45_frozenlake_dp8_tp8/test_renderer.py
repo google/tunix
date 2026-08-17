@@ -115,8 +115,14 @@ class RenderP45FrozenLakeTest(unittest.TestCase):
       }
       self.assertEqual(set(by_eval), {"0", "1"})
       self.assertNotIn("--num_test_batches=4", by_eval["0"]["CANON_RUN_CMD"])
+      self.assertIn(
+          "--eval_every_n_steps=0", by_eval["0"]["CANON_RUN_CMD"]
+      )
       self.assertIn("--num_test_batches=4", by_eval["1"]["CANON_RUN_CMD"])
       self.assertIn("--eval_every_n_steps=10", by_eval["1"]["CANON_RUN_CMD"])
+      self.assertNotIn(
+          "--eval_every_n_steps=0", by_eval["1"]["CANON_RUN_CMD"]
+      )
 
       base = yaml.safe_load(_BASE_PATH.read_text())
       self.assertEqual(

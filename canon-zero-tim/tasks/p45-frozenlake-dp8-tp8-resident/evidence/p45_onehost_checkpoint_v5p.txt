@@ -1,0 +1,8 @@
+P45 one-host checkpoint mechanism gate
+date_utc=2026-08-17
+image_id=sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a
+command=bash canon-zero-tim/tests/p45_frozenlake_dp8_tp8/run_onehost_checkpoint_v5p.sh tunix_frozenlake_image:vllm-tpu0.25.0
+P45_ONEHOST_CHECKPOINT_BEGIN image_id=sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a
+P45_ONEHOST_CHECKPOINT_PASS backend=tpu devices=4 topology=DP1xTP4 step=10 model_exact=1 optimizer_exact=1 metadata_exact=1 interval=10 latest_n=1 optimizer_restored=1 memory_kinds=['device'] scope=mechanism-only
+gcs_listing=HTTP_403 local service account lacks storage.objects.get
+claim_ceiling=direct-TPU checkpoint mechanics only; no Pathways/DP8xTP8/GCS restore claim

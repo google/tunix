@@ -205,3 +205,39 @@
 - Archived raw evidence in `evidence/p45r7_eval_deadlock_evidence.log` and created analysis report `artifacts/p45r7_step10_eval_deadlock_report.md`.
 - Next: resume from Step 10 checkpoint with training eval disabled (`--eval_every_n_steps=0`) under run ID `p45r8`.
 
+## 2026-08-17 UTC — correct P45r7 root cause and admit no-eval checkpoint mechanics
+
+- Type: correction, implementation, and local hardware validation
+- Correction: the archived traceback ends in a 300-second timeout waiting for
+  the in-process driver to become idle before resetting prefix cache.
+  `eval_future.result()` propagated the inner exception; it was not itself an
+  unexplained permanent deadlock. Streaming evaluation and a driver-wide idle
+  rescore reset are the conflicting contracts. The received report's PVC
+  location is also inconsistent with the source's GCS contract and is not
+  supported by the committed evidence.
+- Action: defined nonpositive evaluation cadence as disabled; made the P45
+  FULL command explicitly pass `--eval_every_n_steps=0`; retained the cadence
+  10 EVAL manifest as a quarantined future repair target; added a pinned-image
+  one-host v5p checkpoint roundtrip gate.
+- Commands: `bash canon-zero-tim/tests/p45_frozenlake_dp8_tp8/run_exact_image.sh
+  tunix_frozenlake_image:vllm-tpu0.25.0`; `bash
+  canon-zero-tim/tests/p45_frozenlake_dp8_tp8/run_onehost_checkpoint_v5p.sh
+  tunix_frozenlake_image:vllm-tpu0.25.0`; read-only `gcloud storage ls` of the
+  P45 checkpoint root.
+- Result: exact-image gate PASS (103 P45 tests, 39 alignment tests, two
+  PeftTrainer checkpoint-contract tests, two focused agentic
+  evaluation-schedule tests, and TP8 overlay forward/VJP); real v5p PASS with
+  four TPU devices, exact model/Adam/metadata
+  restore, interval 10, `LatestN(1)`, and device memory. The GCS listing failed
+  HTTP 403 for the local VM service account, so production object existence
+  and Pathways restore remain unverified.
+- Decision: launch the next no-eval campaign with a new checkpoint tag. The
+  P45r7 checkpoint, if present, freezes source
+  `a94d6c0cd0e08b9bed418331974b8694eb49507e` and cadence 10; the new source and
+  cadence 0 do not satisfy exact restore metadata. Do not weaken this gate or
+  claim direct compatibility without a separate reviewed migration.
+- Rollback: stop selecting the no-eval FULL command and remove only the new
+  predicate/probe changes; do not alter historical P45r7 evidence.
+- Next: run a fresh 64-chip FULL campaign through step 10/11, return a
+  cluster-authorized GCS listing, then prove identical-source resume and vLLM
+  weight sync before the first rollout.

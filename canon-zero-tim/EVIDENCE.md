@@ -90,5 +90,6 @@ p38s12f / p38s15 / p38s16.
 | Aborted-launch stub | p38s14 | `…/evidence/p38s14/` (INCONCLUSIVE, head log only) |
 | One-host perf ledger (8-run bitwise hash chain, decode-tax ablation) | p48/p49 T0–T5, F0–F12 | outer repo `tasks/p48*`, `tasks/p49*`; worktree `local/p48-profiling` |
 | Cross-arm A identity for prompt_logprobs=None | P47a | landed CL 10242fa1 lineage; evidence dirs `p41_optimizer_p48c_p47a_*` on probe host |
+| Direct-TPU checkpoint mechanics: sharded model, device-resident Adam and metadata restore exactly; interval 10 and `LatestN(1)` enforced | P45.3c one-host | `tasks/p45-frozenlake-dp8-tp8-resident/evidence/p45_onehost_checkpoint_v5p.txt` (`sha256:1a84774925f311674c8eb9693889e5e6a9898d5473c529452561add168c6e1e0`; mechanism-only, Pathways/GCS target not run) |
 
 Legacy flat pile `debug_logs/` is frozen read-only; anything new must use a run directory.

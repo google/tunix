@@ -1,4 +1,4 @@
-# P45 FrozenLake DP8xTP8 resident handoff
+# P45 FrozenLake DP8xTP8 resident no-eval handoff
 
 The canonical operator entry point is
 [`../../cluster/P45_FROZENLAKE_RESIDENT_RUNBOOK.md`](../../cluster/P45_FROZENLAKE_RESIDENT_RUNBOOK.md).
@@ -36,16 +36,21 @@ must report `convergence-only` when warning-only alignment is enabled.
 
 Attempt `p45r7` from source `a94d6c0c` on 64 TPU (`DP8xTP8`, resident optimizer,
 checkpointed G6 admission, 350G memory limit) successfully passed model loading,
-compilation, rollouts, and sustained training for 21+ hours, reaching `train_steps=11`
-and persisting the Step 10 checkpoint to `/mnt/disks/tunix-data/frozenlake/checkpoints/`.
-At the Step 10 evaluation boundary (`--eval_every_n_steps=10`), the run encountered
-an evaluation coroutine deadlock: `eval_future.result()` in `agentic_rl_learner.py:2425`
-blocked synchronously after processing 20 evaluation groups due to hung producer tasks
-in `rollout_orchestrator`. Step 10 checkpoint is intact. Evidence archived in
+compilation, rollouts, and sustained training for 21+ hours, reaching
+`train_steps=11`. The committed evidence does not independently verify the
+reported Step 10 checkpoint object.
+At the Step 10 evaluation boundary (`--eval_every_n_steps=10`), canonical
+prefill rescore requested a driver-wide idle prefix-cache reset while the
+streaming evaluator still had live work. The reset timed out after 300 seconds;
+`eval_future.result()` propagated that exception. The committed evidence does
+not prove the received report's PVC checkpoint claim, and this VM cannot list
+the production bucket (HTTP 403). Evidence is archived in
 `evidence/p45r7_eval_deadlock_evidence.log` and analyzed in
-`artifacts/p45r7_step10_eval_deadlock_report.md`. The incoming agent should resume from
-Step 10 (`--restore-step 10`) with training eval disabled (`--eval_every_n_steps=0`)
-and/or add a timeout guard to `eval_future.result()`.
+`artifacts/p45r7_eval_idle_reset_correction.md`.
+
+The current operator action is a fresh no-eval FULL campaign with a new tag.
+Do not directly resume `fl-prod-001`: its exact metadata freezes the old source
+and cadence 10. A direct restore under the new source/cadence must fail closed.
 
 ## Operator: fetch and verify one immutable source
 
@@ -56,8 +61,8 @@ already exists; never overwrite a prior render/evidence directory.
 set -euo pipefail
 git fetch origin yuxzhang/canon-zero-tim
 SOURCE_COMMIT="$(git rev-parse FETCH_HEAD)"
-RUN_ID="p45r4"
-CHECKPOINT_TAG="fl-prod-001"
+RUN_ID="p45r8"
+CHECKPOINT_TAG="fl-prod-noeval-001"
 CHECKPOINT_MODE="new"
 WORKTREE="/tmp/canon-zero-tim-${RUN_ID}"
 OUT="/tmp/p45-render-${RUN_ID}"
@@ -106,7 +111,8 @@ kubectl apply --server-side --dry-run=server -f "$EVAL" | \
   tee "$EVIDENCE/dry-run-eval.txt"
 ```
 
-Both manifests must contain these resolved values before either is applied:
+Both manifests must contain these common resolved values before either is
+considered:
 
 ```text
 CANON_P32_WORKLOAD=frozenlake-dp8-tp8
@@ -122,7 +128,7 @@ CANON_P28_BATCHED_REPORT=1
 CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY=1
 CANON_FROZENLAKE_CKPT_MODE=new
 CANON_FROZENLAKE_CKPT_ROOT=gs://yuxzhang-tunix-models/canon-zero-tim/checkpoints/frozenlake
-CANON_FROZENLAKE_CKPT_TAG=fl-prod-001
+CANON_FROZENLAKE_CKPT_TAG=fl-prod-noeval-001
 CANON_FROZENLAKE_CKPT_INTERVAL=10
 CANON_FROZENLAKE_CKPT_MAX_TO_KEEP=1
 jax-tpu resources.limits.memory=350G
@@ -132,6 +138,11 @@ jax-tpu resources.limits.memory=350G
 --learning_rate=1e-6
 --max_steps=450
 ```
+
+For the FULL manifest also require `CANON_P33_ENABLE_EVAL=0`,
+`CANON_P33_DISABLE_EVAL=1`, no `--num_test_batches`, and no
+`[CANON_P33_EVAL] ENABLED` runtime marker. Do not apply the generated EVAL
+manifest in this campaign.
 
 Only the grouped report-window optimization is admitted for this source.
 `CANON_BATCHED_EVIDENCE` and `CANON_P28_BATCHED_REVERSE` remain absent because
@@ -147,27 +158,34 @@ P45_QWEN8B_TP8_FORWARD_VJP_PASS ... forward_exact=1 vjp_exact=1
 P45_EXACT_IMAGE_CPU_PASS overlay=qwen8b_tp8
 ```
 
+The one-host checkpoint mechanism was separately run on an idle local v5p and
+is archived in `evidence/p45_onehost_checkpoint_v5p.txt` with:
+
+```text
+P45_ONEHOST_CHECKPOINT_PASS ... model_exact=1 optimizer_exact=1 metadata_exact=1 interval=10 latest_n=1 optimizer_restored=1 ... scope=mechanism-only
+```
+
+Rerun `run_onehost_checkpoint_v5p.sh` only on an idle four-chip v5p host. This
+marker proves direct-TPU mechanics only; production GCS/Pathways restore still
+requires the target markers below.
+
 At runtime, before model loading, require:
 
 ```text
 [env] profile=qwen3-8b-dp8-tp8-frozenlake-resident model_dir=qwen8b_tp8
 ```
 
-## Choose exactly one launch
+## Apply only the no-eval FULL launch
 
-- Fastest throughput run: apply `$FULL`; evaluation is disabled.
-- Training plus held-out metrics: apply `$EVAL`; it evaluates 100 prompts x 8
-  generations every 10 policy steps and is expected to be slower.
-
-Do not apply both variants on the same slice. The user requested evaluation,
-so `$EVAL` is the default choice unless current priority is pure throughput.
+Apply `$FULL`; evaluation is disabled. The `$EVAL` manifest remains rendered
+for inspection but is quarantined after P45r7. Do not apply both variants.
 
 P45 remains `maxRestarts: 0`. Recovery is explicit: a fresh JobSet/run ID,
 the identical immutable source and checkpoint tag, and mode `resume`. This
 keeps infrastructure attempts auditable; do not edit the rendered YAML.
 
 ```bash
-TARGET="$EVAL"  # use "$FULL" only for the throughput-only variant
+TARGET="$FULL"
 kubectl apply -f "$TARGET" | tee "$EVIDENCE/apply.txt"
 
 JOBSET="$(python3 - "$TARGET" <<'PY'
@@ -271,13 +289,9 @@ Alignment differences may appear only as
 placement drift, transaction failure, replica mismatch, or OOM is a hard
 failure and must not be downgraded to a warning.
 
-For the evaluation variant, require exactly one
-`[CANON_P33_EVAL] ENABLED workload=frozenlake cadence=10 held_out_rows=100 generations=8`
-marker plus finite `[CANON_FROZENLAKE_P42_JSON]` summaries at policy steps
-0,10,...,440. The plain full variant must instead attest evaluation disabled.
-The eval variant must additionally emit one `phase=eval_materialized` memory
-record per scheduled policy step. The existing `_last_eval_train_step` guard
-is the exactly-once authority; do not add a second evaluation queue.
+The EVAL variant is quarantined. P45r7 showed that exactly-once scheduling did
+not solve the streaming rescore/reset conflict, so no evaluation markers or
+`phase=eval_materialized` records are expected from the current FULL run.
 
 ## Terminal evidence and return bundle
 

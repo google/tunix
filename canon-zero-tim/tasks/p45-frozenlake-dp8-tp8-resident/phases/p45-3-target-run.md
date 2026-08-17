@@ -1,12 +1,13 @@
 # P45.3 — 64-chip target run
 
-- Status: pending on P45.3a checkpoint/resume admission
+- Status: pending on P45.3c no-eval checkpoint target gate
 
 ## Objective
 
-Run exactly one P45 full or full-eval manifest on a 64-chip v5p slice and prove
-that Qwen3-8B can retain Adam state on TPU across real updates without OOM or
-placement drift.
+Run exactly the P45 no-eval FULL manifest on a 64-chip v5p slice and prove that
+Qwen3-8B can retain Adam state on TPU across real updates without OOM or
+placement drift, write step 10, continue to step 11, and resume that checkpoint
+under the identical source/configuration.
 
 ## Entry point
 
@@ -22,6 +23,8 @@ the resolved environment does not print
 
 The target manifest must also carry the reviewed P45.3a checkpoint contract.
 Do not launch the old checkpoint-disabled P45 manifest after P45.3a begins.
+It must explicitly pass `--eval_every_n_steps=0`; the EVAL manifest is
+quarantined after P45r7 and is not a valid target for this phase.
 
 ## Stop conditions
 

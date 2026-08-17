@@ -37,7 +37,10 @@ _SPECS = (
         profile=_PROFILE,
         no_commit=False,
         job_prefix="canon-p45-fl-res",
-        command=_frozenlake_command(450, dp_size=8, tp_size=8),
+        command=(
+            *_frozenlake_command(450, dp_size=8, tp_size=8),
+            "--eval_every_n_steps=0",
+        ),
         dp_size=8,
         tp_size=8,
         optimizer_resident=True,

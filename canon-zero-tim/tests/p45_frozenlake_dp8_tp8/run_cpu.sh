@@ -23,6 +23,7 @@ python3 -c "import ast,pathlib; files=(\
 'canon-zero-tim/tests/p45_frozenlake_dp8_tp8/test_host_memory.py',\
 'canon-zero-tim/tests/p45_frozenlake_dp8_tp8/test_renderer.py',\
 'canon-zero-tim/tests/p45_frozenlake_dp8_tp8/test_qwen8b_tp8.py',\
+'canon-zero-tim/tests/p45_frozenlake_dp8_tp8/probe_checkpoint_v5p.py',\
 'canon-zero-tim/tests/p45_frozenlake_dp8_tp8/probe_overlay_import.py',\
 'canon-zero-tim/tests/p45_frozenlake_dp8_tp8/probe_qwen8b_tp8.py'); \
 [ast.parse(pathlib.Path(path).read_text(), filename=path) for path in files]"
@@ -30,7 +31,8 @@ python3 -c "import ast,pathlib; files=(\
 bash -n \
   canon-zero-tim/cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-resident.env \
   canon-zero-tim/tests/p45_frozenlake_dp8_tp8/run_cpu.sh \
-  canon-zero-tim/tests/p45_frozenlake_dp8_tp8/run_exact_image.sh
+  canon-zero-tim/tests/p45_frozenlake_dp8_tp8/run_exact_image.sh \
+  canon-zero-tim/tests/p45_frozenlake_dp8_tp8/run_onehost_checkpoint_v5p.sh
 
 JAX_PLATFORMS=cpu python3 -m unittest \
   canon-zero-tim/tests/p33_workloads/test_dp_workloads.py \
@@ -59,7 +61,8 @@ validate_p45_profile() (
   export CANON_P33_SHARED_MESH=8,8
   export CANON_P33_RUN_STAGE=full
   export CANON_P33_NO_COMMIT=0
-  export CANON_P33_ENABLE_EVAL=1
+  export CANON_P33_ENABLE_EVAL=0
+  export CANON_P33_DISABLE_EVAL=1
   export CANON_OPT_STATE_RESIDENT=1
   export CANON_P30_OPT_STATE_OFFLOAD=0
   export CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY=1
@@ -83,13 +86,13 @@ validate_p45_profile() (
   [ "$CANON_DP_SIZE:$CANON_TP_SIZE" = 8:8 ]
   [ "$CANON_LOCAL_TRAJECTORIES:$MIN_TOKEN_BUCKET" = 32:2048 ]
   [ "$CANON_OPT_STATE_RESIDENT:$CANON_P30_OPT_STATE_OFFLOAD" = 1:0 ]
-  [ "$CANON_P33_ENABLE_EVAL:$CANON_P31_ENABLE_EVAL" = 1:1 ]
+  [ "$CANON_P33_ENABLE_EVAL:$CANON_P31_ENABLE_EVAL" = 0:0 ]
   [ "$CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY" = 1 ]
   [ "$CANON_FROZENLAKE_CKPT_MODE:$CANON_FROZENLAKE_CKPT_INTERVAL:$CANON_FROZENLAKE_CKPT_MAX_TO_KEEP" = new:10:1 ]
   [ "$CANON_FROZENLAKE_CKPT_TAG" = fl-local-gate ]
   [ "$CANON_P45_HOST_MEMORY_TELEMETRY:$CANON_P45_HOST_GC_INTERVAL" = 1:1 ]
   [ "$CANON_P28_BATCHED_REPORT" = 1 ]
-  echo "[P45.PROFILE] ADMITTED_PREFLIGHT_PASS topology=DP8xTP8 model_dir=qwen8b_tp8 local_trajectories=32 global_m=2048 optimizer=device-resident eval=on warning_only=on checkpoint=new/10/latest1 host_memory=telemetry+gc1 batched_report=on"
+  echo "[P45.PROFILE] ADMITTED_PREFLIGHT_PASS topology=DP8xTP8 model_dir=qwen8b_tp8 local_trajectories=32 global_m=2048 optimizer=device-resident eval=off warning_only=on checkpoint=new/10/latest1 host_memory=telemetry+gc1 batched_report=on"
 )
 
 validate_p45_profile

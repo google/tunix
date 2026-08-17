@@ -213,6 +213,18 @@ class AgenticRLLearnerTest(parameterized.TestCase):
         )
     )
 
+  def test_nonpositive_eval_cadence_disables_evaluation(self):
+    for cadence in (0, -1):
+      with self.subTest(cadence=cadence):
+        self.assertFalse(
+            agentic_rl_learner._should_run_eval(
+                prompt_count=100,
+                schedule_step=0,
+                eval_every_n_steps=cadence,
+                last_eval_train_step=-1,
+            )
+        )
+
   def test_validate_rollout_config_mismatch_max_tokens(self):
     rl_cluster = mock.Mock()
     rl_cluster.cluster_config = mock.Mock()

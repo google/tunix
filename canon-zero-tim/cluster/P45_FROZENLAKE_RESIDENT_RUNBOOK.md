@@ -1,4 +1,4 @@
-# P45 FrozenLake DP8xTP8 resident full/eval runbook
+# P45 FrozenLake DP8xTP8 resident no-eval full-training runbook
 
 This is the recommended 64-chip FrozenLake DP8xTP8 full-training route. It is
 separate from the P42/P33 DP16xTP4 carrier and preserves those manifests for
@@ -22,8 +22,11 @@ CANON_OPT_STATE_RESIDENT=1
 CANON_P30_OPT_STATE_OFFLOAD=0
 ```
 
-The evaluation variant evaluates 100 held-out prompts x 8 generations every
-10 policy steps. Finite FrozenLake alignment drift is warning-only; non-finite
+The current production route runs with in-training evaluation disabled. The
+renderer still emits an evaluation variant for a future isolated repair, but
+do not apply it: P45r7 proved that streaming evaluation conflicts with the
+driver-wide idle prefix-cache reset required by canonical prefill rescore.
+Finite FrozenLake alignment drift is warning-only; non-finite
 values, OOM, placement drift, topology drift, failed optimizer transactions,
 replica mismatch, Pathways failure, and W&B failure remain hard errors. This is
 a convergence/throughput run, not proof that strict bitwise zero-TIM is closed.
@@ -44,8 +47,8 @@ Never place HF or W&B secret values in commands, manifests, logs, or handoffs.
 set -euo pipefail
 git fetch origin yuxzhang/canon-zero-tim
 SOURCE_COMMIT="$(git rev-parse FETCH_HEAD)"
-RUN_ID="p45r4"
-CHECKPOINT_TAG="fl-prod-001"  # stable across all attempts of this campaign
+RUN_ID="p45r8"
+CHECKPOINT_TAG="fl-prod-noeval-001"  # stable for this no-eval campaign
 CHECKPOINT_MODE="new"        # change only to resume after actor/10 exists
 WORKTREE="/tmp/canon-zero-tim-${RUN_ID}"
 OUT="/mnt/disks/linchai_data/launch_manifests/${RUN_ID}"
@@ -112,7 +115,7 @@ separate P42/P33 DP16xTP4 carrier.
 
 ## 3. Verify the rendered contract
 
-Before applying either YAML, inspect it and require all of these values:
+Before applying either YAML, inspect it and require these common values:
 
 ```text
 CANON_P32_WORKLOAD=frozenlake-dp8-tp8
@@ -128,7 +131,7 @@ CANON_P28_BATCHED_REPORT=1
 CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY=1
 CANON_FROZENLAKE_CKPT_MODE=new
 CANON_FROZENLAKE_CKPT_ROOT=gs://yuxzhang-tunix-models/canon-zero-tim/checkpoints/frozenlake
-CANON_FROZENLAKE_CKPT_TAG=fl-prod-001
+CANON_FROZENLAKE_CKPT_TAG=fl-prod-noeval-001
 CANON_FROZENLAKE_CKPT_INTERVAL=10
 CANON_FROZENLAKE_CKPT_MAX_TO_KEEP=1
 jax-tpu resources.limits.memory=350G
@@ -160,14 +163,20 @@ Section 1 must pass; at runtime require this exact line before model loading:
 [env] profile=qwen3-8b-dp8-tp8-frozenlake-resident model_dir=qwen8b_tp8
 ```
 
-## 4. Choose and apply exactly one manifest
+The FULL manifest must additionally resolve
+`CANON_P33_ENABLE_EVAL=0`, `CANON_P33_DISABLE_EVAL=1`, and must not contain
+`--num_test_batches`. The EVAL manifest has cadence 10 and is not admitted for
+the current campaign.
 
-- Use `$EVAL` for full training plus held-out evaluation. This is the default.
-- Use `$FULL` only when measuring pure training throughput without evaluation.
+## 4. Apply only the FULL manifest
+
+- Use `$FULL` for the requested full training without evaluation.
+- Do not apply `$EVAL` until the streaming rescore/reset conflict has its own
+  fix and target gate.
 - Never apply both to the same slice.
 
 ```bash
-TARGET="$EVAL"
+TARGET="$FULL"
 kubectl apply -f "$TARGET" | tee "$EVIDENCE/apply.txt"
 ```
 
@@ -209,19 +218,16 @@ the live DP8 path. Archive `seconds`, `adjoint`, and `accumulate` for warm
 updates; the optimization is enabled for throughput, but its DP8 target gain
 must be measured rather than inherited from the one-host result.
 
-For `$EVAL`, require exactly one evaluation enablement marker and finite
-`[CANON_FROZENLAKE_P42_JSON]` summaries at policy steps `0,10,...,440`:
+For the current FULL run, require that this marker is absent:
 
 ```text
-[CANON_P33_EVAL] ENABLED workload=frozenlake cadence=10 held_out_rows=100 generations=8
+[CANON_P33_EVAL] ENABLED
 ```
 
-P45 must also emit one baseline, one record whenever evaluation is
-materialized, and one post-GC record per committed update:
+P45 must emit one baseline and one post-GC record per committed update:
 
 ```text
 [P45.HOST_MEMORY] {"phase":"train_start",...}
-[P45.HOST_MEMORY] {"phase":"eval_materialized",...}
 [P45.HOST_MEMORY] {"phase":"global_step_complete","gc_collected":<N>,...}
 ```
 
@@ -243,6 +249,20 @@ complete checkpoint after the newer one is durable. The trainer's forced
 close-time checkpoint is disabled, so an off-interval shutdown cannot replace
 the newest 10-step boundary. Expect a large checkpoint: full fp32 actor plus
 resident Adam state. Do not reuse a tag for an unrelated campaign.
+
+Do not reuse the old `fl-prod-001` tag for this launch. P45r7, if its object is
+present, froze source `a94d6c0cd0e08b9bed418331974b8694eb49507e` and evaluation
+cadence 10 in its exact metadata. The new source/cadence cannot directly
+restore it without a separately reviewed migration.
+
+Before the 64-chip launch, the local mechanism gate may be run on an idle v5p:
+
+```bash
+bash canon-zero-tim/tests/p45_frozenlake_dp8_tp8/run_onehost_checkpoint_v5p.sh \
+  tunix_frozenlake_image:vllm-tpu0.25.0
+```
+
+Its `scope=mechanism-only` PASS does not replace the GCS/Pathways target gate.
 
 Before claiming recovery, require a complete `actor/10`, continued execution
 into step 11, and no checkpoint OOM/timeout. To resume after an interruption,
@@ -276,8 +296,8 @@ or configuration, or an off-interval latest step.
 
 Before deleting the JobSet or Pods, preserve the complete head log, rendered
 YAML, source SHA, JobSet and Pod YAML, Pod describe/events, Pathways proxy/RM
-logs, first-update JSON, alignment JSONL, evaluation summaries, and SHA-256
-manifest. The exact commands and full return checklist are maintained in
+logs, first-update JSON, alignment JSONL, proof that evaluation stayed absent,
+and the SHA-256 manifest. The exact commands and full return checklist are maintained in
 [`../tasks/p45-frozenlake-dp8-tp8-resident/HANDOFF.md`](../tasks/p45-frozenlake-dp8-tp8-resident/HANDOFF.md).
 
 Also preserve a GCS listing of the campaign's `actor/` prefix proving that
