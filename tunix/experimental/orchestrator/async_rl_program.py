@@ -31,6 +31,7 @@ from tunix.experimental.orchestrator import algorithm_adapter
 from tunix.experimental.orchestrator import batch_assembly
 from tunix.experimental.orchestrator import rl_engine_interface
 from tunix.experimental.queue_manager import trajectory_queue_manager
+from tunix.rl import common as rl_common
 
 # _response_to_trajectory_item has been moved to distributed_rl_engine.py
 
@@ -197,6 +198,12 @@ class StandardRLProgram(AsyncRLProgram):
         if getattr(self.algo, "requires_reference_kl", False):
           scored_microbatches = []
           for batch in microbatches:
+            if not isinstance(batch, rl_common.TrainExample):
+              raise TypeError(
+                  "Reference KL requires an assembler that returns "
+                  "rl_common.TrainExample microbatches; got "
+                  f"{type(batch).__name__}."
+              )
             ref_logps = await engine.per_token_logps(
                 datatypes.Role.REFERENCE, items=batch
             )

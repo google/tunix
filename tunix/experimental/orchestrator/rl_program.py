@@ -26,6 +26,7 @@ from tunix.experimental.common import datatypes
 from tunix.experimental.orchestrator import algorithm_adapter
 from tunix.experimental.orchestrator import batch_assembly
 from tunix.experimental.orchestrator import rl_engine_interface
+from tunix.rl import common as rl_common
 
 RewardFn = Callable[[datatypes.TrajectoryItem], float]
 
@@ -188,6 +189,12 @@ class SyncRLProgram:
     if getattr(self.algo, "requires_reference_kl", False):
       scored_microbatches = []
       for batch in microbatches:
+        if not isinstance(batch, rl_common.TrainExample):
+          raise TypeError(
+              "Reference KL requires an assembler that returns "
+              "rl_common.TrainExample microbatches; got "
+              f"{type(batch).__name__}."
+          )
         ref_logps = await _await_if_needed(
             active_engine.per_token_logps(
                 datatypes.Role.REFERENCE, items=batch
