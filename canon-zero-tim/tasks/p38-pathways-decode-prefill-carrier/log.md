@@ -1674,3 +1674,29 @@ reclassification from the committed NPZ inputs.
   this checkpoint. A future rerun, if still necessary after classification,
   requires a measured single-archive round transport; increasing the timeout
   alone is not the selected repair.
+
+## 2026-08-17 UTC — P38s18r2 remote receipt audit and P38.2s registration
+
+- Pulled evidence commit `a514c3bf`. Its compact failure receipt is internally
+  SHA-consistent: 12/12 listed return files verify. The source object listing
+  has 3,896 entries; the source manifest has 3,894 entries; after excluding
+  `ROUND_COMPLETE.json` and `SHA256SUMS`, their filename sets are identical.
+- The sealed inventory reports 972 seam and 972 terminal-tail records. This
+  supersedes the stale v1 runbook expectations of 915/971; those hard-coded
+  counts must not be reused.
+- The official classifier returned rc 1 at
+  `duplicate seam token-prefix record` and wrote no `classification.json`.
+  The committed `INCONCLUSIVE_REMOTE_CLASSIFICATION` verdict is correct. No
+  first-difference signature or root-cause localization is admitted from this
+  receipt.
+- The failure is an analysis-shape mismatch: raw observer records overlap,
+  while the direct classifier requires one record per
+  `(round, token-prefix SHA, arm)`. It is not evidence of missing source
+  objects. The receipt also left `source_round_gcs_uri` empty; the replacement
+  bundle must reject that provenance defect.
+- Registered P38.2s and
+  `P38S18R2_ALIAS_REDUCTION_RUNBOOK.md`: first add reviewed seam-plus-tail alias
+  reduction and audit support, then execute it once beside GCS against the
+  immutable Round 0. Only fully byte-identical duplicate payloads may become
+  aliases; conflicts retain every candidate and stay fail-closed. No TPU
+  relaunch is authorized by this checkpoint.

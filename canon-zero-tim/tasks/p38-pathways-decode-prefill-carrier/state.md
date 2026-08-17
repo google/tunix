@@ -6,7 +6,8 @@
 - Definition of done: one source-pinned flag-on run reports exact
   `S_decode_vs_S_prefill`, exact `S_prefill_vs_T_old`, and exact
   `T_old_vs_T_current` before a strict full workload is admitted.
-- Active phase: P38.2r GCS-side Round 0 classification. P38s18r2 reached one
+- Active phase: P38.2s alias-aware GCS-side Round 0 seam-plus-tail reduction.
+  P38s18r2 reached one
   numerical round on 64 TPU (`DP16xTP4`, concurrency 256), then the learner
   timed out after 900 seconds waiting for the durability ACK. The worker took
   about 57 minutes to serially upload and read back 3,776 small objects and
@@ -14,9 +15,12 @@
   Round 0 reports exact B-C and A-B red at 45 differing bytes / 32 elements,
   `max_abs=0.10101699829101562`. The old boundary claim is rejected by the
   committed input: only 1/32 mismatch elements is at `kv_prefix % 256 == 0`.
-  The local evaluator cannot access the producer GCS bucket. Next gate is the
-  official layer-plus-tail classifier executed beside GCS and a compact
-  SHA-sealed receipt; no TPU relaunch precedes that review.
+  Commit `a514c3bf` returned a closed 3,896-object source listing and
+  3,894-entry manifest, with 972 paired seam and 972 paired tail records. The
+  direct official classifier returned rc 1 at duplicate seam token-prefix
+  records before classification. Next gate is reviewed alias-aware seam and
+  tail reduction beside GCS, followed by the unchanged official classifier
+  and standalone compact-bundle audit; no TPU relaunch precedes that review.
 - Task directory:
   `canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/`.
 
@@ -332,14 +336,14 @@
 
 ## Next action
 
-1. On a GCS-authorized machine, follow `P38S18R_RUNBOOK.md`; verify the immutable
-   Round 0 inventory/manifests and run `classify_p38_seam.py --mode layer
-   --require-tail` over the complete source directory.
-2. Return only the compact SHA-sealed receipt. The raw seam/tail NPZ corpus
-   remains in GCS; the local evaluator is not expected to access it.
-3. Require exactly 32/32 red-point joins. Missing/ambiguous inputs or a
-   nonzero classifier return are `INCONCLUSIVE_REMOTE_CLASSIFICATION`, not a
-   hand-written operator verdict.
+1. Follow Stage A of `P38S18R2_ALIAS_REDUCTION_RUNBOOK.md`: add and test
+   alias-aware seam-plus-tail reduction with `require_tail=True`, then stop for
+   review before commit/push.
+2. After publication, execute Stage B once beside GCS against the immutable
+   Round 0 and new v2 derived prefix. Do not relaunch TPU.
+3. Require 32/32 red-point joins, 64/64 seam keys, 64/64 tail keys, no payload
+   conflicts, and standalone bundle-auditor PASS. Preserve equivalent aliases
+   with full provenance; never choose first/last silently.
 4. Review the first-difference signatures before deciding whether another TPU
    run is necessary. If a fresh three-round run is still needed, first replace
    the serial per-object round trip with one immutable archive upload/readback;
@@ -372,6 +376,8 @@ training, evaluation, prefix cache, precision, optimizer placement, or
 canonical kernels.
 
 - Updated: 2026-08-17 UTC; P38s18r2 is
-  `INCONCLUSIVE_DURABILITY_SEAL_TIMEOUT`. One analysis-grade Round 0 exists;
-  no later round, backward, optimizer commit, controlled exit, root
-  `COLLECTED`, or root `COMPLETE` occurred.
+  `INCONCLUSIVE_DURABILITY_SEAL_TIMEOUT`, and its first direct remote
+  classification receipt is `INCONCLUSIVE_REMOTE_CLASSIFICATION` because raw
+  observations overlap. One analysis-grade Round 0 exists; no later round,
+  backward, optimizer commit, controlled exit, root `COLLECTED`, or root
+  `COMPLETE` occurred.

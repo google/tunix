@@ -1,7 +1,16 @@
-# P38s18r2 GCS-side Round 0 analysis runbook
+# P38s18r2 GCS-side Round 0 analysis runbook — retired direct v1 flow
 
-This is the current operator card for P38s18r2. The next action is **remote
-analysis of the existing Round 0 GCS bundle**, not another TPU launch.
+> **Do not execute the direct-classifier procedure below again.** Commit
+> `a514c3bf` completed it and returned rc 1 at
+> `duplicate seam token-prefix record`. The source inventory is closed, but
+> overlapping observer records require deterministic alias auditing before
+> classification. The current operator card is
+> `P38S18R2_ALIAS_REDUCTION_RUNBOOK.md`; the governing phase is
+> `phases/p38-2s-round0-alias-aware-seam-tail-reduction.md`. The remainder of
+> this file is retained only to reproduce the failed v1 receipt.
+
+This was the v1 operator card for P38s18r2. It remains historical provenance,
+not an executable next step.
 
 The local evaluator intentionally has no access to the producer's GCS
 credentials. The raw seam/tail NPZ corpus is also too large to use as the
@@ -11,8 +20,10 @@ bundle.
 
 Do not use `run_reduce_p38s18l_on_gcp.sh` for this run. That wrapper is tied to
 the older P38s18l `attempt-0/live/<snapshot>` layout and requires at least two
-round capsules. P38s18r2 has one immutable round directory and must be handled
-with the official classifier directly.
+round capsules. P38s18r2 has one immutable round directory. Direct
+whole-directory classification was attempted and failed on overlapping
+token-prefix records; it must now be handled by the registered seam-plus-tail
+reducer.
 
 ## 1. Current verdict and why the run stopped
 

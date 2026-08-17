@@ -5,7 +5,7 @@ parallel Qwen3-32B DeepSWE workstream, read
 `../p39-deepswe-production/HANDOFF.md`. P38 evidence cannot promote P39, and
 P39 evidence cannot promote P38.
 
-## CURRENT: P38s18r2 stopped after Round 0; classify the sealed round in GCS before any relaunch
+## CURRENT: P38s18r2 Round 0 needs alias-aware seam-plus-tail reduction; no TPU relaunch
 
 P38s18r2/source `10fe951f0186...` ran on 64 TPU (`DP16xTP4`, concurrency 256,
 three frozen rounds, seam mode `layer`, terminal tail enabled). Round 0 reached
@@ -26,12 +26,18 @@ exited. Rounds 1 and 2 never started.
   claim: only **1 of 32** mismatch elements has
   `logical_kv_prefix_length % 256 == 0`. No Pallas-boundary root cause is
   admitted.
-- **GCS Round 0 seal (remote claim, pending classifier receipt)**: the worker
+- **GCS Round 0 seal (returned manifest receipt)**: the worker
   reported `ROUND_COMPLETE` for
   `gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-p38-fl-stock-p38s18r2-10fe951f/attempt-0/rounds/000000`
-  with `manifest_sha256 = ce7df453259dd070472486e053dbb26b03dad7b6259784cde74da7fe9efe227e`
-  and a late `round-000000.ack`. The local evaluator cannot list this bucket,
-  so the returned object listing and source manifest remain mandatory.
+  with `manifest_sha256 = ce7df453259dd070472486e053dbb26b03dad7b6259784cde74da7fe9efe227e`.
+  Commit `a514c3bf` returns a 3,896-object listing and 3,894-entry source
+  manifest whose filename sets close exactly after accounting for the two
+  sealing files. It reports 972 paired seam and 972 paired tail records.
+- **Direct remote classification failed closed**: the official classifier
+  returned rc 1 at `duplicate seam token-prefix record`, before producing
+  `classification.json`. The returned verdict is
+  `INCONCLUSIVE_REMOTE_CLASSIFICATION`. This is an analysis-workflow mismatch,
+  not evidence that the source files are missing or corrupt.
 - **Overall verdict**: `INCONCLUSIVE_DURABILITY_SEAL_TIMEOUT`. There is no
   controlled exit 42, root `COLLECTED`/`COMPLETE`, or three-round target
   verdict. The Round 0 numbers are analysis-grade.
@@ -39,34 +45,35 @@ exited. Rounds 1 and 2 never started.
 ### Operational constraint
 
 Raw seam/tail NPZ files stay in GCS. Do not ask the local evaluator to list or
-download the bucket, and do not manually summarize thousands of records. A
-GCS-authorized agent must run the existing official
-`scripts/classify_p38_seam.py` against the complete Round 0 directory with
-`--mode layer --require-tail`, then return the small SHA-sealed receipt defined
-in `P38S18R_RUNBOOK.md`.
+download the bucket, and do not manually summarize thousands of records. Do
+not rerun the direct whole-directory classifier: overlapping seam observations
+violate its uniqueness precondition. A GCS-authorized agent must first use the
+alias-aware seam-plus-tail reduction registered in
+`phases/p38-2s-round0-alias-aware-seam-tail-reduction.md`, then return the
+compact byte-preserving bundle defined by
+`P38S18R2_ALIAS_REDUCTION_RUNBOOK.md`.
 
-The old `run_reduce_p38s18l_on_gcp.sh` is not compatible with this source: it
-expects a P38s18l live snapshot and at least two capsules. Do not use it for
-P38s18r2.
+Neither old path is compatible unchanged: `run_reduce_p38s18l_on_gcp.sh`
+expects a P38s18l live snapshot and at least two capsules, while the current
+reducer handles hidden seams but not required terminal-tail aliases. Stage A
+must add reviewed seam-plus-tail reduction support before remote execution.
 
 ### Exact next steps for the incoming agent
 
-1. **Do not launch TPU and do not overwrite any source object.** Follow
-   `P38S18R_RUNBOOK.md` on a GCS-authorized machine.
-2. Verify `ROUND_COMPLETE.json`, `ROUND_INVENTORY.json`, and every entry in the
-   round `SHA256SUMS` before running the classifier.
-3. Run the official layer-plus-tail classifier over the entire remote Round 0.
-   It must join exactly all 32 red points; a partial or ambiguous join is
-   `INCONCLUSIVE`.
-4. Return the compact derived directory containing object listing, source
-   manifests, classifier JSON/stdout/stderr/rc, classifier source SHA,
-   `REMOTE_ANALYSIS_MANIFEST.json`, `verdict.json`, and its own `SHA256SUMS`.
-   Raw NPZ files remain in GCS.
-5. Stop and report. Do not commit or push the returned bundle until the user
+1. **Do not launch TPU and do not overwrite any source or v1 derived object.**
+2. Follow Stage A of `P38S18R2_ALIAS_REDUCTION_RUNBOOK.md`: implement and test
+   alias-aware seam-plus-tail reduction and its standalone auditor. Stop before
+   commit/push for user review.
+3. After that code is separately approved and published, run Stage B once on
+   the immutable Round 0 from the exact implementation SHA.
+4. Require 32 red points, 64/64 seam keys, 64/64 tail keys, no payload
+   conflicts, mandatory tail join, and standalone auditor PASS. Equivalent
+   aliases are admitted only after full numerical payload identity.
+5. Return the entire compact reduced bundle, every raw candidate for the
+   required keys, capsule, classifier output, and audit JSON. Raw unrelated
+   records remain in GCS.
+6. Stop and report. Do not commit or push the returned evidence until the user
    explicitly approves that separate action.
-6. Only if remote classification still lacks the required inputs, prepare a
-   transport CL that uploads one immutable per-round archive and verifies it
-   once. A longer timeout alone is not the primary repair.
 
 ## HISTORY: P38s18l/P38.2q no-source inventory
 
