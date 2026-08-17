@@ -1,0 +1,13 @@
+{
+  "listing_sha256": "cbc13049122680694eca4da913411bc3cee9d93a3b14d7c33bd4275e7248ceba",
+  "minimum_capsule_rounds": 1,
+  "schema": "p38-immutable-round-selection-v1",
+  "selected_capsule_rounds": [
+    0
+  ],
+  "selected_snapshot": "000000",
+  "selected_source_gcs_uri": "gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-p38-fl-stock-p38s18r2-10fe951f/attempt-0/rounds/000000",
+  "selection_complete": true,
+  "source_kind": "immutable-round",
+  "source_manifest_sha256": "ce7df453259dd070472486e053dbb26b03dad7b6259784cde74da7fe9efe227e"
+}

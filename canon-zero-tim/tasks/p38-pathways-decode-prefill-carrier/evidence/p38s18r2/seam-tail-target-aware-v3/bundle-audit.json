@@ -1,0 +1,20 @@
+{
+  "analysis_source_commit": "f29ddf8f20b98f2c535b2f167840747aa9810402",
+  "bundle_integrity": "PASS",
+  "classification": "decode_terminal_first_difference_measured",
+  "classifier_rc": 0,
+  "joined_red_points": 32,
+  "matched_seam_keys": 64,
+  "matched_tail_keys": 64,
+  "red_points": 32,
+  "required_arm_keys": 64,
+  "schema": "p38-seam-tail-reduction-bundle-audit-v1",
+  "scientific_verdict": "INCONCLUSIVE_PARTIAL_RUN",
+  "seam_equivalent_alias_keys": 14,
+  "seam_payload_conflict_keys": 0,
+  "sha_verified_files": 374,
+  "source_gcs_uri": "gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-p38-fl-stock-p38s18r2-10fe951f/attempt-0/rounds/000000",
+  "tail_equivalent_alias_keys": 1,
+  "tail_payload_conflict_keys": 0,
+  "tail_target_mismatch_rows": 1
+}

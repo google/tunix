@@ -1,0 +1,413 @@
+{
+  "arm": "B",
+  "array_keys": [
+    "final_norm_fingerprints",
+    "layer_fingerprints",
+    "positions",
+    "request_ordinals",
+    "row_indices",
+    "token_ids",
+    "token_prefix_sha256"
+  ],
+  "call_index": 1110,
+  "checkpoint_names": [
+    "layer_input",
+    "layer_output"
+  ],
+  "claim": "diagnostic_non_cryptographic_fingerprint",
+  "diagnostic_round": 0,
+  "final_fingerprint_shape": [
+    4096,
+    8
+  ],
+  "final_fingerprint_sharding": "NamedSharding(mesh=Mesh('data': 16, 'attn_dp': 1, 'attn_dp_expert': 1, 'expert': 1, 'model': 4, 'dcp': 1, axis_types=(Auto, Auto, Auto, Auto, Auto, Auto)), spec=P(('data', 'attn_dp', 'attn_dp_expert'), None), memory_kind=device)",
+  "fingerprint_fields": [
+    "xor",
+    "sum",
+    "weighted_sum",
+    "sample_first",
+    "sample_quarter",
+    "sample_middle",
+    "sample_three_quarters",
+    "sample_last"
+  ],
+  "gather_bucket": 1024,
+  "layer_count": 36,
+  "layer_fingerprint_shape": [
+    4096,
+    36,
+    2,
+    8
+  ],
+  "layer_fingerprint_sharding": "NamedSharding(mesh=Mesh('data': 16, 'attn_dp': 1, 'attn_dp_expert': 1, 'expert': 1, 'model': 4, 'dcp': 1, axis_types=(Auto, Auto, Auto, Auto, Auto, Auto)), spec=P(('data', 'attn_dp', 'attn_dp_expert'), None), memory_kind=device)",
+  "layer_indices": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19,
+    20,
+    21,
+    22,
+    23,
+    24,
+    25,
+    26,
+    27,
+    28,
+    29,
+    30,
+    31,
+    32,
+    33,
+    34,
+    35
+  ],
+  "npz_sha256": "bb3b121d22a0395d24cfda885ecc80555bbac9d5c2b079e94b45f153e91a9846",
+  "observed_layer": null,
+  "observer_mode": "layer",
+  "program_path": "standard",
+  "record_index": 953,
+  "requests": [
+    {
+      "dp_rank": 0,
+      "dp_request_slot": 0,
+      "packed_row_range": [
+        0,
+        256
+      ],
+      "position_range": [
+        565,
+        821
+      ],
+      "request_id": "863-b6f429b1",
+      "request_index": 12,
+      "scheduled_tokens": 256,
+      "selected_tokens": 0,
+      "token_history_sha256": "d21412076d841591338ebab751a8a9472b5f03f360f9d581e1fe74658ca8fc42"
+    },
+    {
+      "dp_rank": 1,
+      "dp_request_slot": 0,
+      "packed_row_range": [
+        256,
+        512
+      ],
+      "position_range": [
+        592,
+        848
+      ],
+      "request_id": "862-aae4274d",
+      "request_index": 15,
+      "scheduled_tokens": 256,
+      "selected_tokens": 0,
+      "token_history_sha256": "d01b54d50ffa42e012eaca78b8048226c890f5ea597a3b70360725774b75f295"
+    },
+    {
+      "dp_rank": 2,
+      "dp_request_slot": 0,
+      "packed_row_range": [
+        512,
+        768
+      ],
+      "position_range": [
+        63,
+        319
+      ],
+      "request_id": "868-b38ebdda",
+      "request_index": 8,
+      "scheduled_tokens": 256,
+      "selected_tokens": 0,
+      "token_history_sha256": "11ffa951279f0c4ee6fd31d409016234652fbe1fdf1df11dad39051186fb2b4d"
+    },
+    {
+      "dp_rank": 3,
+      "dp_request_slot": 0,
+      "packed_row_range": [
+        768,
+        1024
+      ],
+      "position_range": [
+        1286,
+        1542
+      ],
+      "request_id": "856-a444236b",
+      "request_index": 6,
+      "scheduled_tokens": 256,
+      "selected_tokens": 142,
+      "token_history_sha256": "b901237d0b56e10ccb43fe7810feb15f590dd2325b3600981f996531e518ef1d"
+    },
+    {
+      "dp_rank": 4,
+      "dp_request_slot": 0,
+      "packed_row_range": [
+        1024,
+        1280
+      ],
+      "position_range": [
+        95,
+        351
+      ],
+      "request_id": "866-ac8b25f9",
+      "request_index": 17,
+      "scheduled_tokens": 256,
+      "selected_tokens": 0,
+      "token_history_sha256": "e66c98a90e48899c94e73e2b144b5226e8874111e8ca17a6e9f094bb53d521cd"
+    },
+    {
+      "dp_rank": 5,
+      "dp_request_slot": 0,
+      "packed_row_range": [
+        1280,
+        1512
+      ],
+      "position_range": [
+        1700,
+        1932
+      ],
+      "request_id": "850-96429bfb",
+      "request_index": 2,
+      "scheduled_tokens": 232,
+      "selected_tokens": 232,
+      "token_history_sha256": "3ef35127e4f0bcf2f4b2c9c4071627c3c50bab1ade236e499218e98fc9c502c7"
+    },
+    {
+      "dp_rank": 5,
+      "dp_request_slot": 1,
+      "packed_row_range": [
+        1512,
+        1536
+      ],
+      "position_range": [
+        0,
+        24
+      ],
+      "request_id": "872-98d90f54",
+      "request_index": 4,
+      "scheduled_tokens": 24,
+      "selected_tokens": 0,
+      "token_history_sha256": "d0dc348de088c44e44de6482293c1cbfc2ca53603807dd194ae706fe44206f89"
+    },
+    {
+      "dp_rank": 6,
+      "dp_request_slot": 0,
+      "packed_row_range": [
+        1536,
+        1792
+      ],
+      "position_range": [
+        1270,
+        1526
+      ],
+      "request_id": "857-bf59df99",
+      "request_index": 1,
+      "scheduled_tokens": 256,
+      "selected_tokens": 126,
+      "token_history_sha256": "8d6c97808e494392bc2ce27dc90bf5c1b0ac2a239b5e2b6e5fb919fb306e55ce"
+    },
+    {
+      "dp_rank": 7,
+      "dp_request_slot": 0,
+      "packed_row_range": [
+        1792,
+        2048
+      ],
+      "position_range": [
+        1329,
+        1585
+      ],
+      "request_id": "855-bbf58dda",
+      "request_index": 14,
+      "scheduled_tokens": 256,
+      "selected_tokens": 185,
+      "token_history_sha256": "84be67de039da2db02a519f45a4c178aa29574ffaf3fe08d97750c1f8f71556c"
+    },
+    {
+      "dp_rank": 8,
+      "dp_request_slot": 0,
+      "packed_row_range": [
+        2048,
+        2304
+      ],
+      "position_range": [
+        89,
+        345
+      ],
+      "request_id": "867-af6bfc6c",
+      "request_index": 18,
+      "scheduled_tokens": 256,
+      "selected_tokens": 0,
+      "token_history_sha256": "31628d4dec28d831abd16cc7fe951f529ec86e9bb79e841b63939e2258ff67d7"
+    },
+    {
+      "dp_rank": 9,
+      "dp_request_slot": 0,
+      "packed_row_range": [
+        2304,
+        2560
+      ],
+      "position_range": [
+        836,
+        1092
+      ],
+      "request_id": "861-bddbf623",
+      "request_index": 0,
+      "scheduled_tokens": 256,
+      "selected_tokens": 0,
+      "token_history_sha256": "34f68893a952aac362ae3f6f7fc967d6cefe96b5f4f0f88a9feed4ae46c36322"
+    },
+    {
+      "dp_rank": 10,
+      "dp_request_slot": 0,
+      "packed_row_range": [
+        2560,
+        2816
+      ],
+      "position_range": [
+        14,
+        270
+      ],
+      "request_id": "869-aeec6b63",
+      "request_index": 13,
+      "scheduled_tokens": 256,
+      "selected_tokens": 0,
+      "token_history_sha256": "c756bb17bae2cd91872da15bfb0921609e59a22960f66509f2b52b521e01085c"
+    },
+    {
+      "dp_rank": 11,
+      "dp_request_slot": 0,
+      "packed_row_range": [
+        2816,
+        3072
+      ],
+      "position_range": [
+        1205,
+        1461
+      ],
+      "request_id": "858-aa38574c",
+      "request_index": 11,
+      "scheduled_tokens": 256,
+      "selected_tokens": 61,
+      "token_history_sha256": "bb435e911bb156e39a85d161a4e37df9620293a252824aa9ed2e1a791482da0e"
+    },
+    {
+      "dp_rank": 12,
+      "dp_request_slot": 0,
+      "packed_row_range": [
+        3072,
+        3328
+      ],
+      "position_range": [
+        437,
+        693
+      ],
+      "request_id": "864-b35168b4",
+      "request_index": 5,
+      "scheduled_tokens": 256,
+      "selected_tokens": 0,
+      "token_history_sha256": "7999625539aac13f32f43c016c47b33a4352b7c02006a0bf757160cec5f6127f"
+    },
+    {
+      "dp_rank": 13,
+      "dp_request_slot": 0,
+      "packed_row_range": [
+        3328,
+        3584
+      ],
+      "position_range": [
+        200,
+        456
+      ],
+      "request_id": "865-b184d5f1",
+      "request_index": 10,
+      "scheduled_tokens": 256,
+      "selected_tokens": 0,
+      "token_history_sha256": "8a2ef33a83d7f1ea27da88d2ae47c9ab8e9a7659882d672f39b469d36d2eb774"
+    },
+    {
+      "dp_rank": 14,
+      "dp_request_slot": 0,
+      "packed_row_range": [
+        3584,
+        3709
+      ],
+      "position_range": [
+        0,
+        125
+      ],
+      "request_id": "870-92c68696",
+      "request_index": 7,
+      "scheduled_tokens": 125,
+      "selected_tokens": 0,
+      "token_history_sha256": "8e952c46a7559ae0fb4ef77cf2b87d1b97834ffa5bc1d1d854802cd5b4e72622"
+    },
+    {
+      "dp_rank": 14,
+      "dp_request_slot": 1,
+      "packed_row_range": [
+        3709,
+        3840
+      ],
+      "position_range": [
+        1748,
+        1879
+      ],
+      "request_id": "849-84322310",
+      "request_index": 16,
+      "scheduled_tokens": 131,
+      "selected_tokens": 131,
+      "token_history_sha256": "e95c2e98eaf640686dbc55101ac6b901de51a0804e6188c7be80e0ad5580e669"
+    },
+    {
+      "dp_rank": 15,
+      "dp_request_slot": 0,
+      "packed_row_range": [
+        3840,
+        4033
+      ],
+      "position_range": [
+        999,
+        1192
+      ],
+      "request_id": "860-84ba9d78",
+      "request_index": 3,
+      "scheduled_tokens": 193,
+      "selected_tokens": 0,
+      "token_history_sha256": "630169e7493192f2fdf45fae1753c150d61b0a76003edb0a8b0f7391517298c3"
+    },
+    {
+      "dp_rank": 15,
+      "dp_request_slot": 1,
+      "packed_row_range": [
+        4033,
+        4096
+      ],
+      "position_range": [
+        0,
+        63
+      ],
+      "request_id": "871-841066b6",
+      "request_index": 9,
+      "scheduled_tokens": 63,
+      "selected_tokens": 0,
+      "token_history_sha256": "75e8f750601562eb4fd92f40ee4fa4558f92cc4a1d837002abba4fb12638b5f7"
+    }
+  ],
+  "schema": "p38-seam-fingerprint-v1",
+  "selected_rows": 877
+}
