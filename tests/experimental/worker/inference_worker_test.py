@@ -14,8 +14,6 @@
 
 """Tests for the frozen-model InferenceWorker wrapper."""
 
-from types import SimpleNamespace
-
 from absl.testing import absltest
 import cloudpickle
 import jax.numpy as jnp
@@ -23,6 +21,7 @@ import numpy as np
 from tunix.experimental.common import datatypes
 from tunix.experimental.common import rpc_utils
 from tunix.experimental.worker import inference_worker as inference_lib
+from tunix.rl import common as rl_common
 
 WorkerState = datatypes.WorkerState
 
@@ -108,9 +107,14 @@ class InferenceWorkerTest(absltest.TestCase):
 
   def test_per_token_logps_uses_padded_batch_without_repadding(self):
     core = _StubCore()
-    batch = SimpleNamespace(
+    batch = rl_common.TrainExample(
         prompt_ids=np.array([[0, 0, 5, 6], [0, 7, 8, 9]], dtype=np.int32),
+        prompt_mask=np.array([[0, 0, 1, 1], [0, 1, 1, 1]], dtype=np.float32),
         completion_ids=np.array([[10, 11, 0], [12, 0, 0]], dtype=np.int32),
+        completion_mask=np.array([[1, 1, 0], [1, 0, 0]], dtype=np.float32),
+        advantages=np.ones((2, 3), dtype=np.float32),
+        ref_per_token_logps=None,
+        old_per_token_logps=None,
     )
 
     result = _worker(core).per_token_logps(batch, temperature=2.0)

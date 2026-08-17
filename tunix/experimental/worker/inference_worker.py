@@ -29,6 +29,7 @@ import numpy as np
 from tunix.experimental.common import batch_utils
 from tunix.experimental.common import datatypes
 from tunix.experimental.worker import abstract_worker
+from tunix.rl import common as rl_common
 
 WorkerState = datatypes.WorkerState
 
@@ -150,7 +151,9 @@ class InferenceWorker(abstract_worker.Worker):
       if req.temperature <= 1e-5:
         raise ValueError("Temperature must be strictly positive.")
 
-      def _score(prompt_chunk: np.ndarray, completion_chunk: np.ndarray) -> Any:
+      def _score(
+          prompt_chunk: np.ndarray, completion_chunk: np.ndarray
+      ) -> jax.Array:
         return self._core.get_ref_per_token_logps(
             prompt_tokens=jnp.asarray(prompt_chunk, dtype=jnp.int32),
             completion_tokens=jnp.asarray(completion_chunk, dtype=jnp.int32),
@@ -179,36 +182,31 @@ class InferenceWorker(abstract_worker.Worker):
 
   def per_token_logps(
       self,
-      items: Any,
-      **kwargs: Any,
+      items: rl_common.TrainExample,
+      request_id: str = "reference_logps",
+      temperature: float | None = None,
+      model_role: str = "reference",
   ) -> np.ndarray:
     """Scores reference log-probs for an already padded batch."""
-    if isinstance(items, datatypes.LogprobsRequest):
-      resp = self.compute_logps(items)
-      if resp.error is not None:
-        raise RuntimeError(resp.error.message)
-      return np.asarray(resp.per_token_logps, dtype=np.float32)
-
-    prompt_ids = getattr(items, "prompt_ids", None)
-    completion_ids = getattr(items, "completion_ids", None)
-    if prompt_ids is not None and completion_ids is not None:
-      req = datatypes.LogprobsRequest(
-          request_id=str(kwargs.get("request_id", "reference_logps")),
-          prompt_tokens=np.asarray(prompt_ids, dtype=np.int32),
-          completion_tokens=np.asarray(completion_ids, dtype=np.int32),
-          temperature=float(kwargs.get("temperature", self._temperature)),
-          model_role=str(kwargs.get("model_role", "reference")),
+    if not isinstance(items, rl_common.TrainExample):
+      raise TypeError(
+          "InferenceWorker.per_token_logps expects a padded TrainExample. "
+          "Pad trajectory items in BatchAssembler before scoring."
       )
-      resp = self.compute_logps(req)
-      if resp.error is not None:
-        raise RuntimeError(resp.error.message)
-      return np.asarray(resp.per_token_logps, dtype=np.float32)
 
-    raise TypeError(
-        "InferenceWorker.per_token_logps expects a padded batch with "
-        "prompt_ids and completion_ids, or an explicit LogprobsRequest. "
-        "Pad trajectory items in BatchAssembler before scoring."
+    req = datatypes.LogprobsRequest(
+        request_id=request_id,
+        prompt_tokens=np.asarray(items.prompt_ids, dtype=np.int32),
+        completion_tokens=np.asarray(items.completion_ids, dtype=np.int32),
+        temperature=(
+            self._temperature if temperature is None else float(temperature)
+        ),
+        model_role=model_role,
     )
+    resp = self.compute_logps(req)
+    if resp.error is not None:
+      raise RuntimeError(resp.error.message)
+    return np.asarray(resp.per_token_logps, dtype=np.float32)
 
   def score(self, req: datatypes.ScoreRequest) -> datatypes.ScoreResponse:
     """Scores one scalar per row under a hosted (frozen) reward model."""
@@ -219,7 +217,9 @@ class InferenceWorker(abstract_worker.Worker):
             f"model_role={req.model_role!r}."
         )
 
-      def _score(prompt_chunk: np.ndarray, completion_chunk: np.ndarray) -> Any:
+      def _score(
+          prompt_chunk: np.ndarray, completion_chunk: np.ndarray
+      ) -> jax.Array:
         return self._core.get_rewards(
             prompt_tokens=jnp.asarray(prompt_chunk, dtype=jnp.int32),
             completion_tokens=jnp.asarray(completion_chunk, dtype=jnp.int32),
