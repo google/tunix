@@ -26,7 +26,13 @@ dependencies = [
   "hf_transfer",  # Huggingface caching in CI
   "huggingface_hub",
   "importlib_resources",
-  "jax[tpu]>=0.6.0,!=0.7.2", # Jax 0.7.2 has performance regression on OSS. The <0.11.0 cap was for vLLM of nightly-20260406-581c4d4-f6983f0; nightly-20260731-df7d1ff-a7a204c ships jax 0.11.0.
+  # Jax 0.7.2 has performance regression on OSS. The old <0.11.0 cap was for
+  # vLLM of nightly-20260406-581c4d4-f6983f0; nightly-20260731-df7d1ff-a7a204c
+  # ships jax 0.11.0, so that cap is gone. The new <0.11.1 cap is for flax:
+  # jax 0.11.1 removed jax.experimental.hijax.MutableHiType, which flax
+  # (through 0.12.8, the newest release) still subclasses, so `from flax
+  # import nnx` fails on it.
+  "jax[tpu]>=0.6.0,!=0.7.2,<0.11.1",
   "jaxtyping",
   "jinja2",  # Huggingface chat template
   "kagglehub",

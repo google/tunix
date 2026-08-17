@@ -192,6 +192,12 @@ jobs:
           while read -r test; do
             python3 -m pytest -s "$test" -v --tb=short
           done < test_collections.txt
+          # vLLM + backend-agnostic engine tests. They must run before
+          # sglang-jax is installed: sglang-jax pins transformers~=4.57.1,
+          # while vLLM >=0.24 requires transformers v5, so vllm_rollout stops
+          # importing afterwards. The sglang-jax cases are excluded here
+          # because sgl_jax is not installed yet.
+          python3 -m pytest tests/rl/rl_cluster_test.py -v --tb=short -k "not sglang"
 
       - name: Run install sglang-jax && test
         env:
@@ -205,6 +211,20 @@ jobs:
           git clone https://github.com/sgl-project/sglang-jax.git && cd sglang-jax/python && python3 -m pip install -e . --force-reinstall && cd ../..
           # SGLang Jax removed qwix dependency in https://github.com/sgl-project/sglang-jax/pull/734
           python3 -m pip install qwix --force-reinstall
+          # The two --force-reinstall runs above re-resolve the whole
+          # environment: jax lands on 0.11.1 and numpy goes back above the 2.3
+          # that tpu-inference/Numba needs. Pin both back.
+          #
+          # jax is pinned to 0.10.2 -- the version sglang-jax itself declares in
+          # its [tpu] extra, which this job does not install. sglang-jax's
+          # flash-attention backend passes explicit in_specs to jax.shard_map
+          # that no longer match the inputs' sharding on jax 0.11.x, so
+          # sglang_jax_sampler_test dies with a ValueError -> sigquit there.
+          # Nothing in this step needs the image's jax 0.11.0: the vLLM tests
+          # ran in the step above, before sglang-jax was installed.
+          # flax is held at 0.12.8 rather than >=0.12.5 so a future release
+          # cannot silently re-break this step the way 0.11.1 did.
+          python3 -m pip install 'jax[tpu]==0.10.2' 'jaxlib==0.10.2' 'flax==0.12.8' 'numpy==2.3.5'
           # TODO(b/470113586): Remove this test once the bug is fixed.
           python3 -m pip list | egrep 'jax|flax|libtpu'
 
@@ -216,8 +236,14 @@ jobs:
           EOF
           apt-get update; apt-get install -y less
 
-          cd tunix && python3 tests/generate/sglang_jax_sampler_test.py && python3 tests/generate/sglang_jax_lora_test.py
-          python3 tests/rl/rl_cluster_test.py
+          # One command per line, not `a && b && c`: GitHub runs this under
+          # `bash -e`, which ignores a failure anywhere but the last command of
+          # an AND-list, so a sampler_test failure used to be swallowed as long
+          # as the final command passed.
+          cd tunix
+          python3 tests/generate/sglang_jax_sampler_test.py
+          python3 tests/generate/sglang_jax_lora_test.py
+          python3 -m pytest tests/rl/rl_cluster_test.py -v --tb=short -k "not vllm"
       - name: Run tunix SFT integration tests
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
