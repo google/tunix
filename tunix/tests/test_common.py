@@ -104,9 +104,9 @@ class Decoder(nnx.Module):
             nnx.initializers.zeros_init(), ('fsdp',)
         ),
     )
-
-  def __call__(self, x):
-    x = self.attn(x) + x
+  
+  def __call__(self, x, mask=None):
+    x = self.attn(x, mask=mask) + x
     h = nnx.relu(self.w1(x))
     h = self.w2(h) + x
     return h
@@ -154,13 +154,16 @@ class ToyTransformer(nnx.Module):
     )
 
     self.head_dim = 16
-
+  
   def __call__(
       self,
       x,
       positions,
       cache=None,
       attention_mask=None,
+      seq_lens=None,
+      distribution=None,
+      soft_cap=None,
       output_hidden_states=False,
       images=None,
       segment_ids: jax.Array | None = None,
@@ -186,15 +189,42 @@ class ToyTransformer(nnx.Module):
           vision_embeddings=vision_embs,
           mask=tokens == self.config.vision_config.soft_token_placeholder,  # pytype: disable=attribute-error
       )
+    
+    if attention_mask is not None: 
+      N = x.shape[1]
+      mask = attention_mask[..., :N]
+    elif seq_lens is not None: # Handle RPA Case
+      B = seq_lens.shape[0]
+      N = x.shape[0]
 
+      if N == B: # Decode
+        mask = jnp.eye(x.shape[0], dtype=jnp.bool_)[None, :, :]
+      else: # Prefill
+        batch_idxs = jnp.repeat(jnp.arange(B), seq_lens, total_repeat_length=N)
+        
+        n_valid = jnp.sum(seq_lens)
+        is_valid = jnp.arange(N) < n_valid
+        block_mask = (batch_idxs[:, None] == batch_idxs[None, :]) & is_valid[:, None] & is_valid[None, :]
+
+        idx = jnp.arange(N)
+        causal_mask = idx[:, None] >= idx[None, :]
+
+        mask = (block_mask & causal_mask)[None, :, :]
+    else:
+      raise ValueError("Attention mask and sequence lengths cannot both be None")
+
+    mask = jnp.expand_dims(mask, axis=1)
+    
     for layer in self.layers:
-      x = layer(x)
+      x = layer(x, mask=mask)
+
     if output_hidden_states:
       self.sow(
           nnx.Intermediate,
           'all_hidden_states',
           x,
       )
+
     if skip_lm_head:
       return x, cache
     logits = self.compute_final_logits(x)

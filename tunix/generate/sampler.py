@@ -26,6 +26,9 @@ import sys
 
 import flax
 from flax import nnx
+from flax.nnx import filterlib
+from flax.nnx import graph
+from flax.nnx import statelib
 import jax
 import jax.numpy as jnp
 from jax.interpreters import pxla
@@ -226,16 +229,12 @@ class Sampler:
     # We separate out state and graph def so that the state can be passed as an
     # argument to _decode_fn, resulting in it not being treated as a static
     # arg. This greatly reduces the size of the HLO and reduces compile time.
-    """
     self._compiled_decode_fn = jax.jit(
       self._decode_fn
     )
     self._compiled_prefill_fn = jax.jit(
       self._prefill_fn, static_argnames=("echo",)
     )
-    """
-    self._compiled_decode_fn = self._decode_fn
-    self._compiled_prefill_fn = self._prefill_fn
     self._supports_decode_only_last_token = (
         'decode_only_last_token'
         in inspect.signature(transformer.__call__).parameters
@@ -259,7 +258,13 @@ class Sampler:
   def transformer_state(self, state: Any) -> None:
 
     def get_all_param_types(tree):
-      return [] # Dummy
+      param_types = set()
+      jax.tree_util.tree_map(
+          lambda x: param_types.add(type(x)),
+          tree,
+          is_leaf=lambda x: isinstance(x, nnx.Variable),
+      )
+      return param_types
 
     def check_tree_structure(tree1, tree2):
       if jax.tree_util.tree_structure(tree1) != jax.tree_util.tree_structure(
@@ -314,18 +319,30 @@ class Sampler:
 
     param_types = get_all_param_types(state)
 
-    if True: # Dummy
+    if nnx.Param in param_types:
       # Full state replacement.
       check_tree_structure(self._transformer_state, state)
       self._transformer_state = state
     else:
-      pass
+      # LoRA state replacement.
+      if not (len(param_types) == 1 and nnx.LoRAParam in param_types):
+        raise ValueError(
+            'Only LoRAParam is supported. Received invalid `param_types`: '
+            f'{param_types}'
+        )
+      original_lora_params = statelib.filter_state(
+          self._transformer_state, nnx.LoRAParam
+      )
+      check_tree_structure(original_lora_params, state)
+      base_state = statelib.filter_state(
+          self._transformer_state, filterlib.Not(nnx.LoRAParam)
+      )
+      self._transformer_state = statelib.merge_state(base_state, state)
 
     self._flattened_transformer_state = jax.tree.leaves(
         self._transformer_state,
         is_leaf=lambda x: isinstance(x, nnx.Variable),
     )
-
 
   @property
   def dtype(self) -> jnp.dtype:
@@ -377,7 +394,6 @@ class Sampler:
       )
       block_specs.append(layer_spec)
     
-    print(block_specs) 
     return block_specs
 
   def _init_cache(self, sampling_config):
@@ -515,7 +531,7 @@ class Sampler:
     # logprobs_buffer = sampling_state.logprobs_buffer
     if sampling_state.forbidden_token_ids:
       logits = logits.at[:, :, sampling_state.forbidden_token_ids].set(-jnp.inf)
-
+    
     if sampling_state.sampling_mode == 'beam_search':
       raise ValueError("Beam search is not yet supported")
     else:
@@ -524,10 +540,6 @@ class Sampler:
             logits, include_logprobs=(sampling_state.include_logprobs)
         )
       elif sampling_state.sampling_mode == 'top_p':
-        jax.debug.print("KEY: {i}", i=jax.device_get(sampling_state.global_decoding_step))
-        jax.debug.print("Seed: {i}", i=jax.device_get(sampling_state.seed))
-        jax.debug.print("Logits: {i}", i=logits)
-
         key = jax.random.fold_in(sampling_state.seed, sampling_state.global_decoding_step)
         next_token_candidate, logp = sample_top_p(
             logits=logits,
@@ -547,24 +559,19 @@ class Sampler:
       not_done = ~done 
     
       cache = cache.allocate(q_lens=not_done)
-
       cache = cache.insert_values(next_token_candidate, valid_mask=not_done, block_id="tokens")
       
       if sampling_state.include_logprobs:
-        cache = cache.insert_values(logp, valid_mask=is_new_logp, block_id="logits")
-
-        # logprobs_buffer = logprobs_buffer.at[:, sampling_state.decoding_steps].set(logp)
+        cache = cache.insert_values(logp, valid_mask=is_new_logp, block_id="logprobs")
 
       decoding_steps = sampling_state.decoding_steps + not_done
     trunc = decoding_steps >= sampling_state.max_generation_steps 
     done = done | trunc
-    jax.debug.print("Dones: {done}", done=jax.device_get(done))
 
     return dataclasses.replace(
         sampling_state,
         decoding_steps=decoding_steps,
         global_decoding_step=sampling_state.global_decoding_step+1,
-        # logprobs_buffer=logprobs_buffer,
         hbm_cache=cache,
         done=done,
     )
@@ -594,8 +601,6 @@ class Sampler:
     max_prompt_length = sampling_state.max_prompt_length 
     include_logits = sampling_state.include_logits
     include_logprobs = sampling_state.include_logprobs
-    # logits_buffer = sampling_state.logits_buffer
-    # logprobs_buffer = sampling_state.logprobs_buffer
     soft_cap = sampling_state.attn_logits_soft_cap
     done = sampling_state.done
     
@@ -617,10 +622,6 @@ class Sampler:
     ]
     
     distribution = jnp.array([0, 0, batch_size])
-    jax.debug.print("Tokens {tokens}", tokens=jax.device_get(tokens)) 
-
-
-    # jax.debug.print("Tokens {tokens}", tokens=jax.device_get(tokens)) 
 
     logits, cache = transformer(
         tokens,
@@ -648,11 +649,20 @@ class Sampler:
     
     batch_idxs = jnp.arange(batch_size)
     cache = updated_sampling_state.hbm_cache
-
+  
     if decode_only_last_token:
-      cache = cache.insert_values(last_token_logits[batch_idxs, 0, :], block_id="logits")
+      logits_idxs = cache.seq_lens - 2
+      cache = cache.insert_values(
+          last_token_logits[:, 0, :], 
+          idxs=logits_idxs, 
+          block_id="logits"
+    )
     else: 
-      cache = cache.load_values(logits, lens=cache.seq_lens, block_id="logits")
+      cache = cache.load_values(
+          logits, 
+          lens=cache.seq_lens - 1, 
+          block_id="logits"
+      )
   
     return dataclasses.replace(
         updated_sampling_state,
@@ -672,10 +682,6 @@ class Sampler:
     def cond_fn(sampling_state: _SamplingState):
       return jnp.any(jnp.logical_not(sampling_state.done))
       
-    while cond_fn(sampling_state):
-      sampling_state = sample_with_params(sampling_state)
-
-    return sampling_state
     return jax.lax.while_loop(cond_fn, sample_with_params, sampling_state)
 
   def _sample_step(
@@ -690,8 +696,6 @@ class Sampler:
     batch_size = cache.batch_size
     max_prompt_length = sampling_state.max_prompt_length 
     include_logits = sampling_state.include_logits
-    # logits_buffer = sampling_state.logits_buffer
-    # logprobs_buffer = sampling_state.logprobs_buffer
     soft_cap = sampling_state.attn_logits_soft_cap
 
     static_token_capacity = batch_size 
@@ -715,7 +719,6 @@ class Sampler:
     ]
 
     distribution = jnp.array([batch_size, batch_size, batch_size], dtype=jnp.int32)
-    jax.debug.print("Tokens {tokens}", tokens=jax.device_get(tokens)) 
 
     logits, cache = transformer(
         tokens,
@@ -729,7 +732,8 @@ class Sampler:
     last_token_idxs = jnp.cumsum(active_seq_lens) - 1
     last_token_logits = logits[last_token_idxs]
     last_token_logits = jnp.expand_dims(last_token_logits, axis=1)
-
+    
+    has_new_logits = ~sampling_state.done
     updated_sampling_state = self._sample(
         logits=last_token_logits,
         cache=cache,
@@ -740,12 +744,19 @@ class Sampler:
     if not include_logits:
       return updated_sampling_state 
     
-    end_idxs = cache.seq_lens - 1 
-    batch_idxs = jnp.arange(batch_size)
-    cache = cache.insert_values(last_token_logits[batch_idxs, 0, :], block_id="logits")
+    cache = updated_sampling_state.hbm_cache 
+    not_done = ~updated_sampling_state.done
 
-    # logits_buffer = logits_buffer.at[batch_idxs, end_idxs, :].set(last_token_logits[batch_idxs, 0, :])
-  
+    logits_idxs = cache.seq_lens - 2
+    batch_idxs = jnp.arange(batch_size)
+
+    cache = cache.insert_values(
+        last_token_logits[last_token_idxs, 0, :], 
+        idxs=logits_idxs, 
+        valid_mask=has_new_logits, 
+        block_id="logits"
+    )
+
     return dataclasses.replace(
         updated_sampling_state,
         hbm_cache=cache
@@ -897,29 +908,27 @@ class Sampler:
     batch_size = len(tokens)
     for idx in range(batch_size):
         seq_len = seq_lens_cpu[idx]
-        tokens_val = ragged_token_buffer[total_len_idx : total_len_idx + seq_len]
-        total_len_idx += seq_len
+        prompt_len = lens[idx]
+
+        offset = 0 if echo else prompt_len
+        start_idx = total_len_idx + offset
+        end_idx = total_len_idx + seq_len
+        res_tokens = ragged_token_buffer[start_idx: end_idx]
         
-        if echo:
-          res_tokens = tokens_val 
-        else:
-          prompt_len = int(lens[idx])
-          res_tokens = tokens_val[prompt_len:]
-         
-        # if res_tokens[-1] not in self.eos_ids:
-        #    res_tokens.append(self.eos_ids[0])
-                    
         out_tokens.append(np.array(res_tokens))
         decoded_outputs.append(self.tokenizer.decode(res_tokens.tolist()))
         
         if return_logprobs:
-            generated_len = len(res_tokens)
-            out_logprobs.append(ragged_logprobs_buffer[total_len_idx: total_len_idx + generated_len])
+            res_logprobs = ragged_logprobs_buffer[start_idx: end_idx] 
+            out_logprobs.append(res_logprobs)
 
         if return_logits:
-            generated_len = len(res_tokens)
-            out_logprobs.append(ragged_logits_buffer[total_len_idx: total_len_idx + generated_len])
+            logits_start_idx = start_idx if echo else start_idx - 1
+            logits_end_idx = end_idx if echo else end_idx - 1
+            res_logits = ragged_logits_buffer[logits_start_idx: logits_end_idx] 
+            out_logits.append(res_logits)
 
+        total_len_idx += seq_len
 
     result = base_sampler.SamplerOutput(
         text=decoded_outputs,

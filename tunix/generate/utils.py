@@ -30,6 +30,16 @@ from jax import lax
 import jax.numpy as jnp
 import numpy as np
 
+def cdiv(a: int | jax.Array, b: int | jax.Array) -> int | jax.Array:
+  return (a + b - 1) // b
+
+def shard(x: jnp.ndarray, s: tuple[str | None, ...]):
+  mesh = jax.interpreters.pxla.thread_resources.env.physical_mesh
+  if mesh.empty or jax.devices()[0].platform == 'cpu':
+    return x
+  return jax.lax.with_sharding_constraint(
+      x, jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(*s))
+  )
 
 def compute_attention_masks(
     time_step: int, seq_len: int, input_mask: jax.Array

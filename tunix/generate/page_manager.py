@@ -64,7 +64,7 @@ class BlockSpec:
   name: str
   dtype: jnp.dtype
   subshape: tuple[int, ...] = () 
-  logical_subsharding: Optional[tuple] = None  
+  logical_subsharding: tuple = () 
   device: Optional[Any] = None
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
@@ -94,12 +94,12 @@ class PageManagerConfig:
         # Shape and sharding for a single page (ignoring the 0th dim: num_pages)
         page_shape = (self.page_size,) + spec.subshape
         page_sharding = self.get_logical_block_spec_sharding(spec)[1:]
-        
+
         elements = 1
         for dim, shard in zip(page_shape, page_sharding):
             dim_size = (dim * self.dp_size) if shard == "dp_axis" else dim
             elements *= dim_size
-            
+
         page_size_across_blocks += elements * item_size
     
     if page_size_across_blocks == 0:
@@ -111,11 +111,12 @@ class PageManagerConfig:
     if self.logical_page_sharding == "dp_axis":
       pages_per_block = (pages_per_block // self.dp_size) * self.dp_size
 
+
     return pages_per_block
 
   @property
   def max_num_pages_per_seq(self) -> int:
-    return self.max_seq_len // self.page_size
+    return utils.cdiv(self.max_seq_len, self.page_size)
   
   @property
   def logical_shard_to_physical(self) -> dict:
@@ -128,10 +129,25 @@ class PageManagerConfig:
   def get_logical_block_spec_sharding(self, spec: BlockSpec):
     logical_page_sharding = self.logical_page_sharding
     logical_subsharding = spec.logical_subsharding
+
+    logical_prefix_sharding = (logical_page_sharding, None)
     
-    page_prefix = (logical_page_sharding, None)
-    sub_suffix = logical_subsharding if logical_subsharding is not None else ()
-    logical_sharding = page_prefix + sub_suffix 
+    l_subsharding = len(logical_subsharding)
+    l_subshape = len(spec.subshape)
+
+    if l_subsharding > l_subshape:
+      raise ValueError(
+        f'Cannot initialize BlockSpec {spec.name}. '
+        f'Block subsharding `{spec.logical_subsharding}` '
+        f'cannot have length greater than block subshape '
+        f'`{spec.subshape}`'
+      ) 
+
+    if l_subsharding < l_subshape:
+      l_pad = l_subshape - l_subsharding
+      logical_subsharding += (None,) * l_pad 
+
+    logical_sharding = logical_prefix_sharding + logical_subsharding
     
     return logical_sharding
 
@@ -206,6 +222,13 @@ class PageManagerConfig:
       blocks[spec.name] = block
 
     page_indices = jnp.zeros((self.max_num_seqs, self.max_num_pages_per_seq), dtype=jnp.int32)
+    """
+    page_indices = jnp.full(
+        (self.max_num_seqs, self.max_num_pages_per_seq),
+        fill_value=100*self.max_num_seqs,
+        dtype=jnp.int32
+    )
+    """
     available_page_indices = jnp.arange(self.num_pages_per_block, dtype=jnp.int32)
     num_available_pages = jnp.array(self.num_pages_per_block, dtype=jnp.int32)
     seq_lens = jnp.zeros((self.max_num_seqs,), dtype=jnp.int32)
@@ -253,7 +276,7 @@ class PageManager:
 
   @property
   def max_num_pages_per_seq(self) -> int:
-    return self.max_seq_len // self.page_size
+    return utils.cdiv(self.max_seq_len, self.page_size)
 
   @property
   def total_num_pages(self) -> int:
@@ -268,7 +291,7 @@ class PageManager:
     return self.seq_lens
 
   @functools.cached_property
-  def num_pages(self) -> jax.Array:
+  def num_seq_pages(self) -> jax.Array:
     return utils.cdiv(self.seq_lens, self.page_size)
 
   @jax.named_call
@@ -276,14 +299,14 @@ class PageManager:
     """Allocates pages for new tokens."""
     pages_required = utils.cdiv(self.seq_lens + q_lens, self.page_size)
 
-    num_pages_to_allocate = pages_required - self.num_pages
+    num_pages_to_allocate = pages_required - self.num_seq_pages
 
     page_indices_to_allocate = RaggedArray(
         data=self.available_page_indices, lens=num_pages_to_allocate
     )
     page_indices_rows = page_indices_to_allocate.row_idxs
     page_indices_cols = (
-        self.num_pages[page_indices_rows]
+        self.num_seq_pages[page_indices_rows]
         + page_indices_to_allocate.intra_offsets
     )
 
@@ -313,7 +336,7 @@ class PageManager:
 
     page_indices_to_release = RaggedArray(
         data=jax.lax.empty((self.total_num_pages,), dtype=jnp.int32),
-        lens=jnp.where(should_release, self.num_pages, 0),
+        lens=jnp.where(should_release, self.num_seq_pages, 0),
     )
     page_indices_irows = page_indices_to_release.row_idxs
     page_indices_icols = page_indices_to_release.intra_offsets
@@ -381,8 +404,16 @@ class PageManager:
     page_offsets = value_offsets % self.page_size
     phys_page_ids = self.page_indices[seq_idxs, local_page_cols]
     
-    updated_block_pages = self.pages[block_id].at[phys_page_ids, page_offsets].set(
-       values 
+    max_n_pages = self.pages[block_id].shape[0]
+    safe_page_indices = jnp.where(
+        jnp.arange(values_ragged.capacity) < values_ragged.total_length,
+        phys_page_ids,
+        self.batch_size,
+    )
+
+    updated_block_pages = self.pages[block_id].at[safe_page_indices, page_offsets].set(
+        values,
+        mode='drop', 
     )
     new_pages = {**self.pages, block_id: updated_block_pages}
 
@@ -393,23 +424,37 @@ class PageManager:
 
 
   def insert_values(
-      self, values: jax.Array, valid_mask: jax.Array | None = None, block_id: str = "tokens"
+      self, values: jax.Array, idxs: jax.Array | None = None, valid_mask: jax.Array | None = None, block_id: str = "tokens"
   ) -> "PageManager":
     """Insert 1 new token per sequence to the last allocated idx in paged memory."""
     if valid_mask is None:
-      valid_mask = jnp.ones(self.batch_size, dtype=jnp.int32)
+      valid_mask = jnp.ones(self.batch_size, dtype=jnp.bool_)
+    
+    if idxs is None:
+      idxs = self.seq_lens - 1
       
-    value_offsets = self.seq_lens - 1  # position of new value 
-    local_page_cols = (value_offsets // self.page_size)
-    page_offsets = value_offsets % self.page_size
+    local_page_cols = idxs // self.page_size
+    page_offsets = idxs % self.page_size
     seq_idxs = jnp.arange(self.batch_size)
     phys_page_ids = self.page_indices[seq_idxs, local_page_cols]
     
     # Point invalid sequences to out-of-bounds
-    max_n_pages = self.max_num_pages_per_seq
-    phys_page_ids = jnp.where(valid_mask, phys_page_ids, max_n_pages)
+    max_n_pages = self.pages[block_id].shape[0]
+    safe_phys_page_ids = jnp.where(valid_mask, phys_page_ids, max_n_pages)
+    
+    """
+    if block_id == "logits":
+      jax.debug.print("Lens: {i}", i=jax.device_get(self.seq_lens))
+      jax.debug.print("Max Seq Len: {i}", i=jax.device_get(self.max_seq_len))
+      jax.debug.print("Page Indices Shape: {i}", i=jax.device_get(self.page_indices.shape))
+      jax.debug.print("Page Indices: {i}", i=jax.device_get(self.page_indices))
+      jax.debug.print("Reg idxs: {i}", i=jax.device_get(phys_page_ids))
+      jax.debug.print("Safe idxs: {i}", i=jax.device_get(safe_phys_page_ids))
+      jax.debug.print("Cols: {i}", i=jax.device_get(local_page_cols))
+      jax.debug.print("Offsets {i}", i=jax.device_get(page_offsets))
+    """
  
-    updated_layer_pages = self.pages[block_id].at[phys_page_ids, page_offsets].set(
+    updated_layer_pages = self.pages[block_id].at[safe_phys_page_ids, page_offsets].set(
       values,
       mode="drop" 
     )
