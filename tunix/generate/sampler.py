@@ -67,14 +67,14 @@ class SamplingConfig:
 @flax.struct.dataclass(kw_only=True)
 class _SamplingState:
   """Internal sampling state for Continuous Batching."""
-  # Decoding steps: ith entry contains the decoding step of the ith HBM sequence
+  # Decoding steps: ith entry contains the decoding step of the ith HBM sequence.
   decoding_steps: jnp.ndarray  # i32[max_num_sequences]
-  # Global Decoding Step (Used to maintain backwards compatability for seed)
+  # Global Decoding Step (Used to maintain backwards compatability when sampling tokens).
   global_decoding_step: jnp.ndarray  # i32
   # (i, j, k) represents that sequences[0:i] are decode-only,
   # sequences[i:j] are chunked-prefill-only, and sequences[j:k] are mixed.
   distribution: jnp.ndarray  # i32[3]
-  # Sharded TPU HBM cache storing tokens and KV values for active sequences on TPU
+  # Sharded TPU HBM cache storing tokens and KV values for active sequences on TPU.
   hbm_cache: page_manager_lib.PageManager
   # Is decoding done on the given sequence?
   done: jnp.ndarray  # bool[max_num_sequences]
@@ -135,8 +135,6 @@ class CacheConfig:
   num_layers: int = 0
   num_kv_heads: int = 0
   head_dim: int = 0
-
-
 
 def sample_top_p(
     logits: jnp.ndarray,
@@ -489,8 +487,6 @@ class Sampler:
         done=jnp.zeros((batch_size,), dtype=jnp.bool_),
         global_decoding_step=jnp.max(q_lens) - 1,
         decoding_steps=jnp.zeros((batch_size,), dtype=jnp.int32),
-        # logits_buffer=logits_buffer,
-        # logprobs_buffer=logprobs_buffer,
         include_logits=sampling_config.include_logits,
         include_logprobs=sampling_config.include_logprobs,
         forbidden_token_ids=sampling_config.forbidden_tokens,
@@ -651,16 +647,17 @@ class Sampler:
     cache = updated_sampling_state.hbm_cache
   
     if decode_only_last_token:
-      logits_idxs = cache.seq_lens - 2
+      last_input_idxs = cache.seq_lens - 2
       cache = cache.insert_values(
           last_token_logits[:, 0, :], 
-          idxs=logits_idxs, 
+          idxs=last_input_idxs, 
           block_id="logits"
     )
     else: 
+      input_lens = cache.seq_lens - 1
       cache = cache.load_values(
           logits, 
-          lens=cache.seq_lens - 1, 
+          lens=input_lens, 
           block_id="logits"
       )
   
@@ -835,7 +832,10 @@ class Sampler:
         q_lens=jnp.array(lens, dtype=jnp.int32),
     )
     
-    # Maintain same random keys as original Vanilla Sampler
+    # TODO: Remove global_decoding_step 
+    # Set global decoding step to maintain same random keys 
+    # as original Vanilla Sampler (used to test that 
+    # behaivor is identical) 
     sampling_state = dataclasses.replace(
         sampling_state,
         global_decoding_step=all_input_ids.shape[1] - 1
@@ -844,34 +844,12 @@ class Sampler:
     is_gemma4 = self.transformer.__class__.__name__ == 'Gemma4'
 
     processed_images = None
-    if is_gemma4 and images is not None:
-      assert hasattr(self.transformer, 'vision_encoder')
-      assert self.transformer.vision_encoder is not None
-      processed_images, tokens = image_processor.process_gemma4_inputs(
-          images,
-          tokens,  # pyrefly: ignore[bad-argument-type]
-          self.transformer.vision_encoder,
-          self.tokenizer.pad_id(),
-      )
-
-    elif images is not None and self.image_processor is not None:
-      processed_images = self.image_processor(images)  # pyrefly: ignore[bad-argument-type]
-      processed_images = jnp.array(processed_images)
-
     processed_audios = None
-    if audios is not None:
-      if is_gemma4:
-        assert hasattr(self.transformer, 'audio_encoder')
-        assert self.transformer.audio_encoder is not None
-        processed_audios, tokens = audio_processor.process_gemma4_inputs(
-            audios=audios,  # pyrefly: ignore[bad-argument-type]
-            tokens=tokens,  # pyrefly: ignore[bad-argument-type]
-            audio_encoder=self.transformer.audio_encoder,
-            max_audio_length=max_audio_length,
-            max_audio_clips=max_audio_clips,
-        )
-      else:
-        raise NotImplementedError('Audio support only implemented for Gemma4.')
+    if is_gemma4 and images is not None:
+      raise NotImplementedError('Images are not implemeted')
+
+    if is_gemma4 and audios is not None:
+      raise NotImplementedError('Audios are not implemeted')
 
     sampling_state = self._compiled_prefill_fn(
         self._flattened_transformer_state,
