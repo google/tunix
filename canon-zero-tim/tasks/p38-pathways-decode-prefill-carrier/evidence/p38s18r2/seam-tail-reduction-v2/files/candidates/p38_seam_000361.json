@@ -1,0 +1,277 @@
+{
+  "arm": "A",
+  "array_keys": [
+    "final_norm_fingerprints",
+    "layer_fingerprints",
+    "positions",
+    "request_ordinals",
+    "row_indices",
+    "token_ids",
+    "token_prefix_sha256"
+  ],
+  "call_index": 478,
+  "checkpoint_names": [
+    "layer_input",
+    "layer_output"
+  ],
+  "claim": "diagnostic_non_cryptographic_fingerprint",
+  "diagnostic_round": 0,
+  "final_fingerprint_shape": [
+    4096,
+    8
+  ],
+  "final_fingerprint_sharding": "NamedSharding(mesh=Mesh('data': 16, 'attn_dp': 1, 'attn_dp_expert': 1, 'expert': 1, 'model': 4, 'dcp': 1, axis_types=(Auto, Auto, Auto, Auto, Auto, Auto)), spec=P(('data', 'attn_dp', 'attn_dp_expert'), None), memory_kind=device)",
+  "fingerprint_fields": [
+    "xor",
+    "sum",
+    "weighted_sum",
+    "sample_first",
+    "sample_quarter",
+    "sample_middle",
+    "sample_three_quarters",
+    "sample_last"
+  ],
+  "gather_bucket": 16,
+  "layer_count": 36,
+  "layer_fingerprint_shape": [
+    4096,
+    36,
+    2,
+    8
+  ],
+  "layer_fingerprint_sharding": "NamedSharding(mesh=Mesh('data': 16, 'attn_dp': 1, 'attn_dp_expert': 1, 'expert': 1, 'model': 4, 'dcp': 1, axis_types=(Auto, Auto, Auto, Auto, Auto, Auto)), spec=P(('data', 'attn_dp', 'attn_dp_expert'), None), memory_kind=device)",
+  "layer_indices": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19,
+    20,
+    21,
+    22,
+    23,
+    24,
+    25,
+    26,
+    27,
+    28,
+    29,
+    30,
+    31,
+    32,
+    33,
+    34,
+    35
+  ],
+  "npz_sha256": "567e3a6c3e40505cd58b252965682710081bf45cc90b825dfc7109065162e5db",
+  "observed_layer": null,
+  "observer_mode": "layer",
+  "program_path": "standard",
+  "record_index": 361,
+  "requests": [
+    {
+      "dp_rank": 0,
+      "dp_request_slot": 0,
+      "packed_row_range": [
+        0,
+        1
+      ],
+      "position_range": [
+        1642,
+        1643
+      ],
+      "request_id": "622-9ad3efdd",
+      "request_index": 0,
+      "scheduled_tokens": 1,
+      "selected_tokens": 1,
+      "token_history_sha256": "04f9f4aa16e3dddd1d2d00f49283acfd873e422648ab62cbbf73258193096070"
+    },
+    {
+      "dp_rank": 2,
+      "dp_request_slot": 0,
+      "packed_row_range": [
+        512,
+        513
+      ],
+      "position_range": [
+        1781,
+        1782
+      ],
+      "request_id": "623-880c0823",
+      "request_index": 4,
+      "scheduled_tokens": 1,
+      "selected_tokens": 1,
+      "token_history_sha256": "ab32ee71b8ca1b0ae312149b957148d6a65db6ff418c89d8705c30579b12d5b9"
+    },
+    {
+      "dp_rank": 3,
+      "dp_request_slot": 0,
+      "packed_row_range": [
+        768,
+        769
+      ],
+      "position_range": [
+        1831,
+        1832
+      ],
+      "request_id": "624-8c9bb297",
+      "request_index": 2,
+      "scheduled_tokens": 1,
+      "selected_tokens": 1,
+      "token_history_sha256": "6bbdc7e52a26d8f802346129febc0acea682e95605342423f4a7e36d0634f733"
+    },
+    {
+      "dp_rank": 4,
+      "dp_request_slot": 0,
+      "packed_row_range": [
+        1024,
+        1025
+      ],
+      "position_range": [
+        1781,
+        1782
+      ],
+      "request_id": "620-8ffaf7da",
+      "request_index": 1,
+      "scheduled_tokens": 1,
+      "selected_tokens": 1,
+      "token_history_sha256": "8bbcbb2409d0fc5e49948e07e5f4490ea7c31f7ca9e16ef745f0548bb65c284e"
+    },
+    {
+      "dp_rank": 5,
+      "dp_request_slot": 0,
+      "packed_row_range": [
+        1280,
+        1281
+      ],
+      "position_range": [
+        1627,
+        1628
+      ],
+      "request_id": "610-83f8526c",
+      "request_index": 8,
+      "scheduled_tokens": 1,
+      "selected_tokens": 1,
+      "token_history_sha256": "f01a8be2e5548be45b498a70e922b87a115fbdc2b236b650fe4d83f9556ef6fb"
+    },
+    {
+      "dp_rank": 6,
+      "dp_request_slot": 0,
+      "packed_row_range": [
+        1536,
+        1537
+      ],
+      "position_range": [
+        1883,
+        1884
+      ],
+      "request_id": "625-821a4c56",
+      "request_index": 7,
+      "scheduled_tokens": 1,
+      "selected_tokens": 1,
+      "token_history_sha256": "412b05275a3960350200179b7f914802cdb4362b386449ff8fd19d169de011b9"
+    },
+    {
+      "dp_rank": 7,
+      "dp_request_slot": 0,
+      "packed_row_range": [
+        1792,
+        1793
+      ],
+      "position_range": [
+        1750,
+        1751
+      ],
+      "request_id": "621-9c34acbe",
+      "request_index": 9,
+      "scheduled_tokens": 1,
+      "selected_tokens": 1,
+      "token_history_sha256": "edfa855c1a26b098ea2802cff5d77b8c84632a7f5c0aaabda846aba19cd4309b"
+    },
+    {
+      "dp_rank": 8,
+      "dp_request_slot": 0,
+      "packed_row_range": [
+        2048,
+        2049
+      ],
+      "position_range": [
+        1883,
+        1884
+      ],
+      "request_id": "626-97e755eb",
+      "request_index": 10,
+      "scheduled_tokens": 1,
+      "selected_tokens": 1,
+      "token_history_sha256": "d7570f65b0cffa829b1fa8e69fecc08cd12f8eabb0acad002df063cd686877ba"
+    },
+    {
+      "dp_rank": 13,
+      "dp_request_slot": 0,
+      "packed_row_range": [
+        3328,
+        3329
+      ],
+      "position_range": [
+        1743,
+        1744
+      ],
+      "request_id": "617-9e3df4ec",
+      "request_index": 6,
+      "scheduled_tokens": 1,
+      "selected_tokens": 1,
+      "token_history_sha256": "8fbd71fb874c8d9d07d22da3406b2170b39f14cf939eacad5053b4105d570403"
+    },
+    {
+      "dp_rank": 14,
+      "dp_request_slot": 0,
+      "packed_row_range": [
+        3584,
+        3585
+      ],
+      "position_range": [
+        1608,
+        1609
+      ],
+      "request_id": "618-91c12447",
+      "request_index": 5,
+      "scheduled_tokens": 1,
+      "selected_tokens": 1,
+      "token_history_sha256": "84fa804d6afc20d85ea2eaf795785a8f5554049c9cdac5010cf34a1e2ddfbae9"
+    },
+    {
+      "dp_rank": 15,
+      "dp_request_slot": 0,
+      "packed_row_range": [
+        3840,
+        3841
+      ],
+      "position_range": [
+        1909,
+        1910
+      ],
+      "request_id": "619-96a88d14",
+      "request_index": 3,
+      "scheduled_tokens": 1,
+      "selected_tokens": 1,
+      "token_history_sha256": "e07ca560b6e5996f5c15c6139f53e8d000839c14072c6505713823ad0ca6de4d"
+    }
+  ],
+  "schema": "p38-seam-fingerprint-v1",
+  "selected_rows": 11
+}

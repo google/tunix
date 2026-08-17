@@ -1,0 +1,107 @@
+{
+  "arm": "A",
+  "array_keys": [
+    "final_norm_fingerprints",
+    "layer_fingerprints",
+    "positions",
+    "request_ordinals",
+    "row_indices",
+    "token_ids",
+    "token_prefix_sha256"
+  ],
+  "call_index": 847,
+  "checkpoint_names": [
+    "layer_input",
+    "layer_output"
+  ],
+  "claim": "diagnostic_non_cryptographic_fingerprint",
+  "diagnostic_round": 0,
+  "final_fingerprint_shape": [
+    4096,
+    8
+  ],
+  "final_fingerprint_sharding": "NamedSharding(mesh=Mesh('data': 16, 'attn_dp': 1, 'attn_dp_expert': 1, 'expert': 1, 'model': 4, 'dcp': 1, axis_types=(Auto, Auto, Auto, Auto, Auto, Auto)), spec=P(('data', 'attn_dp', 'attn_dp_expert'), None), memory_kind=device)",
+  "fingerprint_fields": [
+    "xor",
+    "sum",
+    "weighted_sum",
+    "sample_first",
+    "sample_quarter",
+    "sample_middle",
+    "sample_three_quarters",
+    "sample_last"
+  ],
+  "gather_bucket": 256,
+  "layer_count": 36,
+  "layer_fingerprint_shape": [
+    4096,
+    36,
+    2,
+    8
+  ],
+  "layer_fingerprint_sharding": "NamedSharding(mesh=Mesh('data': 16, 'attn_dp': 1, 'attn_dp_expert': 1, 'expert': 1, 'model': 4, 'dcp': 1, axis_types=(Auto, Auto, Auto, Auto, Auto, Auto)), spec=P(('data', 'attn_dp', 'attn_dp_expert'), None), memory_kind=device)",
+  "layer_indices": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19,
+    20,
+    21,
+    22,
+    23,
+    24,
+    25,
+    26,
+    27,
+    28,
+    29,
+    30,
+    31,
+    32,
+    33,
+    34,
+    35
+  ],
+  "npz_sha256": "601286e2c1364f6b63ad4f7a79bd30ee3cc994568de6e9cea19cad20e859de8d",
+  "observed_layer": null,
+  "observer_mode": "layer",
+  "program_path": "standard",
+  "record_index": 725,
+  "requests": [
+    {
+      "dp_rank": 0,
+      "dp_request_slot": 0,
+      "packed_row_range": [
+        0,
+        166
+      ],
+      "position_range": [
+        2048,
+        2214
+      ],
+      "request_id": "634-975569ee",
+      "request_index": 0,
+      "scheduled_tokens": 166,
+      "selected_tokens": 166,
+      "token_history_sha256": "6d2797cd0b5c455cda9763b59df6f31fb5947622a569565589348ba7ee7138aa"
+    }
+  ],
+  "schema": "p38-seam-fingerprint-v1",
+  "selected_rows": 166
+}

@@ -1,0 +1,13 @@
+P38s18r2 Round 0 alias-aware seam-tail reduction v2.
+source_gcs_uri: gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-p38-fl-stock-p38s18r2-10fe951f/attempt-0/rounds/000000
+source_seam_records: 972
+source_tail_records: 972
+candidate_files: 190
+red_points: 32
+matched_seam_keys: 64
+matched_tail_keys: 63
+seam_alias_keys: 14
+tail_alias_keys: 0
+payload_conflict_keys: 1
+classifier_rc: 4
+verdict: INCONCLUSIVE_REDUCTION_JOIN

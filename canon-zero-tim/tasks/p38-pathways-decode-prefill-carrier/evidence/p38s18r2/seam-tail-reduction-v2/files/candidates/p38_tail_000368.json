@@ -1,0 +1,29 @@
+{
+  "arm": "A",
+  "array_keys": [
+    "logit_row_indices",
+    "positions",
+    "request_ordinals",
+    "row_indices",
+    "tail_values",
+    "target_ids",
+    "token_ids",
+    "token_prefix_sha256"
+  ],
+  "call_index": 485,
+  "checkpoint_names": [
+    "raw_target_logit",
+    "raw_log_normalizer",
+    "processed_target_logit",
+    "processed_log_normalizer",
+    "observer_target_logprob",
+    "production_target_logprob"
+  ],
+  "diagnostic_round": 0,
+  "gather_bucket": 16,
+  "npz_sha256": "59707f35a3b00c8fe7a20150435f4e88c3042b274dbfcb448bd4871e8ed47602",
+  "program_path": "standard",
+  "record_index": 368,
+  "schema": "p38-tail-values-v1",
+  "selected_rows": 11
+}

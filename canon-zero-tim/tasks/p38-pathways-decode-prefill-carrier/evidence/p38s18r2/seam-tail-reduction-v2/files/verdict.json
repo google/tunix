@@ -1,0 +1,12 @@
+{
+  "classification": null,
+  "classifier_rc": 4,
+  "joined_red_points": 0,
+  "matched_seam_keys": 64,
+  "matched_tail_keys": 63,
+  "red_points": 32,
+  "run_contract_complete": false,
+  "schema": "p38-seam-tail-reduction-verdict-v1",
+  "selection_complete": false,
+  "verdict": "INCONCLUSIVE_REDUCTION_JOIN"
+}

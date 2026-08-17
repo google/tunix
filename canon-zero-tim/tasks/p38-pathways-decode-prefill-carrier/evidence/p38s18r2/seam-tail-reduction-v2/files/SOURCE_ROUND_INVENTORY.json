@@ -1,0 +1,11 @@
+{
+  "diagnostic_round": 0,
+  "incident_records": 910,
+  "journal_records": 151,
+  "journal_scope": "cumulative-unscoped",
+  "kv_records": 0,
+  "pre_alignment_records": 1,
+  "schema": "canon-p38-round-stage-v1",
+  "seam_records": 972,
+  "tail_records": 972
+}
