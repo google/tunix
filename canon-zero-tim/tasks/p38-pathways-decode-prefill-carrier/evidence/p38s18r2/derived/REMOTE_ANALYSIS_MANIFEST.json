@@ -1,0 +1,14 @@
+{
+  "analysis_source_commit": "a0a8a90f61541c65058c9d6b26eafe19741e78c4",
+  "claim_grade": "analysis-grade",
+  "classification_sha256": null,
+  "classifier_rc": 1,
+  "classifier_source_sha256": "f4d93ebde14ebcce721a44c62f3fcac27216a16fa28f426f3efb90762953de09",
+  "object_listing_sha256": "cbc13049122680694eca4da913411bc3cee9d93a3b14d7c33bd4275e7248ceba",
+  "raw_observer_npz_transport": "remote-only",
+  "schema": "p38s18r2-remote-analysis-manifest-v1",
+  "source_round_complete_sha256": "e9eb6034b639e3711fefdba3514a5e7990bf2257e0db603265ba86e51eb025b8",
+  "source_round_gcs_uri": "",
+  "source_round_inventory_sha256": "8051beae682e5b258493848ed0b8f543c5caff0f58e4e937ac6ae74b00dafda6",
+  "source_round_manifest_sha256": "ce7df453259dd070472486e053dbb26b03dad7b6259784cde74da7fe9efe227e"
+}

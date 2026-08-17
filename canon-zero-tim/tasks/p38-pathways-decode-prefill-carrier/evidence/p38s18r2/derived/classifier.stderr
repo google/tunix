@@ -1,0 +1,14 @@
+Traceback (most recent call last):
+  File "/app/canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/classify_p38_seam.py", line 677, in <module>
+    main()
+  File "/app/canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/classify_p38_seam.py", line 665, in main
+    report = classify(
+             ^^^^^^^^^
+  File "/app/canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/classify_p38_seam.py", line 550, in classify
+    records = _load_records(
+              ^^^^^^^^^^^^^^
+  File "/app/canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/classify_p38_seam.py", line 189, in _load_records
+    _require(key not in result, "duplicate seam token-prefix record")
+  File "/app/canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/classify_p38_seam.py", line 31, in _require
+    raise SeamError(message)
+SeamError: duplicate seam token-prefix record

@@ -1,0 +1,3 @@
+P38s18r2 Round 0 remote-classifier receipt.
+Raw observer NPZ files remain under the source Round 0 GCS prefix.
+This receipt is analysis-grade because the full three-round run did not complete.

@@ -1,0 +1,9 @@
+{
+  "classification": null,
+  "classifier_rc": 1,
+  "joined_red_points": null,
+  "red_points": null,
+  "run_contract_complete": false,
+  "schema": "p38s18r2-remote-analysis-verdict-v1",
+  "verdict": "INCONCLUSIVE_REMOTE_CLASSIFICATION"
+}
