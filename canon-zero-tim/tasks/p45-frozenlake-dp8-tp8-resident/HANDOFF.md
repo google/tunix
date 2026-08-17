@@ -34,16 +34,18 @@ This run is a convergence/throughput experiment. It is not evidence that the
 remaining FrozenLake decode/prefill carrier is bitwise closed. The classifier
 must report `convergence-only` when warning-only alignment is enabled.
 
-Attempt `p45r5` from source `42139ffa` on 64 TPU (`DP8xTP8`, resident optimizer)
-successfully passed model loading, compilation, rollout, and sustained training for
-~60 hours (2.5 days), reaching `train_steps=47` and `[CANON_ALIGN] step=1535 verdict=PASS`.
-The job terminated at `Sat, 15 Aug 2026 06:03:58 UTC` with `Exit Code: 137
-(OOMKilled)` on `jax-tpu` at the 200G Kubernetes memory limit. TPU HBM remained
-healthy. The archived log does not contain a complete cgroup/RSS timeline, so
-trajectory, logging, and compilation-cache accumulation remain hypotheses.
-The next source raises only the P45 `jax-tpu` limit to 350G, releases completed
-eval/rollout references, runs cyclic GC once per committed step, and emits
-host-memory evidence; the larger limit by itself is not a root-cause fix.
+Attempt `p45r7` from source `a94d6c0c` on 64 TPU (`DP8xTP8`, resident optimizer,
+checkpointed G6 admission, 350G memory limit) successfully passed model loading,
+compilation, rollouts, and sustained training for 21+ hours, reaching `train_steps=11`
+and persisting the Step 10 checkpoint to `/mnt/disks/tunix-data/frozenlake/checkpoints/`.
+At the Step 10 evaluation boundary (`--eval_every_n_steps=10`), the run encountered
+an evaluation coroutine deadlock: `eval_future.result()` in `agentic_rl_learner.py:2425`
+blocked synchronously after processing 20 evaluation groups due to hung producer tasks
+in `rollout_orchestrator`. Step 10 checkpoint is intact. Evidence archived in
+`evidence/p45r7_eval_deadlock_evidence.log` and analyzed in
+`artifacts/p45r7_step10_eval_deadlock_report.md`. The incoming agent should resume from
+Step 10 (`--restore-step 10`) with training eval disabled (`--eval_every_n_steps=0`)
+and/or add a timeout guard to `eval_future.result()`.
 
 ## Operator: fetch and verify one immutable source
 

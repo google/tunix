@@ -192,3 +192,16 @@
   checkpoint-directory rejection; this returns to the P45r6 failure mode.
 - Next: publish the fix, render from that immutable source, then run fresh mode
   through committed step 10/11 and verify one durable actor checkpoint.
+
+## 2026-08-17 UTC — P45r7 Step 10 checkpoint verification and eval deadlock report
+
+- Launched `canon-p45-fl-eval-p45r7-a94d6c0c` on 64 TPU (`DP8xTP8`, Concurrency 256, resident optimizer, 350G jax-tpu limit).
+- Model loading, JIT compilation, rollouts, and training ran stably for 21+ hours.
+- Verified checkpointed G6 admission: Step 10 checkpoint successfully written to PVC `/mnt/disks/tunix-data/frozenlake/checkpoints/` (`train_steps_after: 11`).
+- Evaluation deadlock at Step 10:
+  - At Step 10 boundary with `--eval_every_n_steps=10`, trainer entered evaluation on 100 held-out prompts.
+  - Processed 20 evaluation groups, after which `eval_future.result()` in `agentic_rl_learner.py:2425` blocked indefinitely because background producer tasks in `rollout_orchestrator` hung.
+  - No new steps executed since `2026-08-16 14:07:21 UTC`.
+- Archived raw evidence in `evidence/p45r7_eval_deadlock_evidence.log` and created analysis report `artifacts/p45r7_step10_eval_deadlock_report.md`.
+- Next: resume from Step 10 checkpoint with training eval disabled (`--eval_every_n_steps=0`) under run ID `p45r8`.
+

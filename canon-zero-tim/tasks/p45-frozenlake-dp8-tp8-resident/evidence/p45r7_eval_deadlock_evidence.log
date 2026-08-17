@@ -1,0 +1,194 @@
+=== PROCESS SNAPSHOT (wchan) ===
+PID 1: bash canon-zero-tim/cluster/entrypoint.sh 
+  wchan: do_wait
+PID 1294: /usr/local/lib/python3.12/site-packages/wandb/bin/wandb-core --port-filename /tmp/tmpcl680dqa/port-355.txt --pid 355 
+  wchan: futex_wait_queue
+PID 1314: /usr/local/lib/python3.12/site-packages/wandb/bin/wandb-xpu --portfile /tmp/wandb-xpu-portfile-1293905622 --parent-pid 1294 
+  wchan: futex_wait_queue
+PID 1958: python3 -u examples/frozenlake/train_frozenlake_qwen3.py --mesh_dp=8 --mesh_tp=8 --batch_size=32 --mini_batch_size=32 --train_trajectory_micro_batch_size=8 --max_steps=450 --num_generations=8 --max_prompt_length=4096 --max_response_length=2048 --max_concurrency=256 --vllm_max_num_seqs=32 --vllm_max_num_batched_tokens=256 --env_max_steps=5 --num_batches=150 --learning_rate=1e-6 --b1=0.9 --b2=0.95 --weight_decay=0 --beta=0 --epsilon=0.003 --epsilon_high=0.005 --loss_algo=gspo-token --advantage_estimator=rloo --temperature=0.7 --top_k=0 --top_p=1.0 --num_test_batches=4 --eval_every_n_steps=10 
+  wchan: unix_stream_read_generic
+PID 1959: python3 -u examples/frozenlake/train_frozenlake_qwen3.py --mesh_dp=8 --mesh_tp=8 --batch_size=32 --mini_batch_size=32 --train_trajectory_micro_batch_size=8 --max_steps=450 --num_generations=8 --max_prompt_length=4096 --max_response_length=2048 --max_concurrency=256 --vllm_max_num_seqs=32 --vllm_max_num_batched_tokens=256 --env_max_steps=5 --num_batches=150 --learning_rate=1e-6 --b1=0.9 --b2=0.95 --weight_decay=0 --beta=0 --epsilon=0.003 --epsilon_high=0.005 --loss_algo=gspo-token --advantage_estimator=rloo --temperature=0.7 --top_k=0 --top_p=1.0 --num_test_batches=4 --eval_every_n_steps=10 
+  wchan: unix_stream_read_generic
+PID 1960: python3 -u examples/frozenlake/train_frozenlake_qwen3.py --mesh_dp=8 --mesh_tp=8 --batch_size=32 --mini_batch_size=32 --train_trajectory_micro_batch_size=8 --max_steps=450 --num_generations=8 --max_prompt_length=4096 --max_response_length=2048 --max_concurrency=256 --vllm_max_num_seqs=32 --vllm_max_num_batched_tokens=256 --env_max_steps=5 --num_batches=150 --learning_rate=1e-6 --b1=0.9 --b2=0.95 --weight_decay=0 --beta=0 --epsilon=0.003 --epsilon_high=0.005 --loss_algo=gspo-token --advantage_estimator=rloo --temperature=0.7 --top_k=0 --top_p=1.0 --num_test_batches=4 --eval_every_n_steps=10 
+  wchan: unix_stream_read_generic
+PID 1961: python3 -u examples/frozenlake/train_frozenlake_qwen3.py --mesh_dp=8 --mesh_tp=8 --batch_size=32 --mini_batch_size=32 --train_trajectory_micro_batch_size=8 --max_steps=450 --num_generations=8 --max_prompt_length=4096 --max_response_length=2048 --max_concurrency=256 --vllm_max_num_seqs=32 --vllm_max_num_batched_tokens=256 --env_max_steps=5 --num_batches=150 --learning_rate=1e-6 --b1=0.9 --b2=0.95 --weight_decay=0 --beta=0 --epsilon=0.003 --epsilon_high=0.005 --loss_algo=gspo-token --advantage_estimator=rloo --temperature=0.7 --top_k=0 --top_p=1.0 --num_test_batches=4 --eval_every_n_steps=10 
+  wchan: unix_stream_read_generic
+PID 1962: python3 -u examples/frozenlake/train_frozenlake_qwen3.py --mesh_dp=8 --mesh_tp=8 --batch_size=32 --mini_batch_size=32 --train_trajectory_micro_batch_size=8 --max_steps=450 --num_generations=8 --max_prompt_length=4096 --max_response_length=2048 --max_concurrency=256 --vllm_max_num_seqs=32 --vllm_max_num_batched_tokens=256 --env_max_steps=5 --num_batches=150 --learning_rate=1e-6 --b1=0.9 --b2=0.95 --weight_decay=0 --beta=0 --epsilon=0.003 --epsilon_high=0.005 --loss_algo=gspo-token --advantage_estimator=rloo --temperature=0.7 --top_k=0 --top_p=1.0 --num_test_batches=4 --eval_every_n_steps=10 
+  wchan: unix_stream_read_generic
+PID 1963: python3 -u examples/frozenlake/train_frozenlake_qwen3.py --mesh_dp=8 --mesh_tp=8 --batch_size=32 --mini_batch_size=32 --train_trajectory_micro_batch_size=8 --max_steps=450 --num_generations=8 --max_prompt_length=4096 --max_response_length=2048 --max_concurrency=256 --vllm_max_num_seqs=32 --vllm_max_num_batched_tokens=256 --env_max_steps=5 --num_batches=150 --learning_rate=1e-6 --b1=0.9 --b2=0.95 --weight_decay=0 --beta=0 --epsilon=0.003 --epsilon_high=0.005 --loss_algo=gspo-token --advantage_estimator=rloo --temperature=0.7 --top_k=0 --top_p=1.0 --num_test_batches=4 --eval_every_n_steps=10 
+  wchan: unix_stream_read_generic
+PID 1964: python3 -u examples/frozenlake/train_frozenlake_qwen3.py --mesh_dp=8 --mesh_tp=8 --batch_size=32 --mini_batch_size=32 --train_trajectory_micro_batch_size=8 --max_steps=450 --num_generations=8 --max_prompt_length=4096 --max_response_length=2048 --max_concurrency=256 --vllm_max_num_seqs=32 --vllm_max_num_batched_tokens=256 --env_max_steps=5 --num_batches=150 --learning_rate=1e-6 --b1=0.9 --b2=0.95 --weight_decay=0 --beta=0 --epsilon=0.003 --epsilon_high=0.005 --loss_algo=gspo-token --advantage_estimator=rloo --temperature=0.7 --top_k=0 --top_p=1.0 --num_test_batches=4 --eval_every_n_steps=10 
+  wchan: unix_stream_read_generic
+PID 1965: python3 -u examples/frozenlake/train_frozenlake_qwen3.py --mesh_dp=8 --mesh_tp=8 --batch_size=32 --mini_batch_size=32 --train_trajectory_micro_batch_size=8 --max_steps=450 --num_generations=8 --max_prompt_length=4096 --max_response_length=2048 --max_concurrency=256 --vllm_max_num_seqs=32 --vllm_max_num_batched_tokens=256 --env_max_steps=5 --num_batches=150 --learning_rate=1e-6 --b1=0.9 --b2=0.95 --weight_decay=0 --beta=0 --epsilon=0.003 --epsilon_high=0.005 --loss_algo=gspo-token --advantage_estimator=rloo --temperature=0.7 --top_k=0 --top_p=1.0 --num_test_batches=4 --eval_every_n_steps=10 
+  wchan: unix_stream_read_generic
+PID 338: bash /app/canon-zero-tim/cluster/steps/90_run.sh 
+  wchan: do_wait
+PID 355: python3 -u examples/frozenlake/train_frozenlake_qwen3.py --mesh_dp=8 --mesh_tp=8 --batch_size=32 --mini_batch_size=32 --train_trajectory_micro_batch_size=8 --max_steps=450 --num_generations=8 --max_prompt_length=4096 --max_response_length=2048 --max_concurrency=256 --vllm_max_num_seqs=32 --vllm_max_num_batched_tokens=256 --env_max_steps=5 --num_batches=150 --learning_rate=1e-6 --b1=0.9 --b2=0.95 --weight_decay=0 --beta=0 --epsilon=0.003 --epsilon_high=0.005 --loss_algo=gspo-token --advantage_estimator=rloo --temperature=0.7 --top_k=0 --top_p=1.0 --num_test_batches=4 --eval_every_n_steps=10 
+  wchan: futex_wait_queue
+PID 356: tee /tmp/canon-state/canon-p45-fl-eval-p45r7-a94d6c0c/run.log 
+  wchan: pipe_read
+PID 3984: bash -c 
+echo "=== PROCESS SNAPSHOT (wchan) ==="
+for p in /proc/[0-9]*; do
+  [ -e "$p/cmdline" ] || continue
+  echo "PID ${p##*/}: $(tr "\0" " " < "$p/cmdline")"
+  [ -e "$p/wchan" ] && echo "  wchan: $(cat "$p/wchan")"
+done
+
+echo ""
+echo "=== LAST 150 LINES OF RUN.LOG ==="
+tail -n 150 /tmp/canon-state/canon-p45-fl-eval-p45r7-a94d6c0c/run.log
+ 
+  wchan: pipe_read
+
+=== LAST 150 LINES OF RUN.LOG ===
+[PERF] stage=rollout_generate seconds=33.802 rows=1[PERF] stage=rollout_generate seconds=33.884 rows=1
+
+[PERF] stage=rollout_generate seconds=35.953 rows=1
+[PERF] stage=rollout_generate seconds=36.989 rows=1
+[PERF] stage=rollout_generate seconds=37.395 rows=1
+[PERF] stage=rollout_generate seconds=37.771 rows=1
+[PERF] stage=rollout_generate seconds=37.708 rows=1
+[PERF] stage=rollout_generate seconds=38.121 rows=1
+[PERF] stage=rollout_generate seconds=38.426 rows=1
+[PERF] stage=rollout_generate seconds=38.805 rows=1
+[PERF] stage=rollout_generate seconds=39.097 rows=1
+[PERF] stage=rollout_generate seconds=39.863 rows=1[PERF] stage=rollout_generate seconds=39.800 rows=1
+
+[PERF] stage=rollout_generate seconds=40.295 rows=1
+INFO 08-16 13:58:39 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 79.3 tokens/s, Running: 18 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.5%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=40.897 rows=1
+[PERF] stage=rollout_generate seconds=40.983 rows=1
+[PERF] stage=rollout_generate seconds=41.926 rows=1
+INFO 08-16 13:58:41 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 45.1 tokens/s, Running: 15 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.4%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=44.020 rows=1
+[PERF] stage=rollout_generate seconds=44.365 rows=1
+[PERF] stage=rollout_generate seconds=45.908 rows=1
+[PERF] stage=rollout_generate seconds=50.459 rows=1
+[PERF] stage=rollout_generate seconds=50.464 rows=1
+INFO 08-16 13:58:49 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 36.3 tokens/s, Running: 10 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.3%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=51.155 rows=1[PERF] stage=rollout_generate seconds=51.064 rows=1
+
+[PERF] stage=rollout_generate seconds=51.776 rows=1
+[PERF] stage=rollout_generate seconds=52.450 rows=1
+INFO 08-16 13:58:51 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 20.5 tokens/s, Running: 6 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.2%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=54.889 rows=1
+[PERF] stage=rollout_generate seconds=56.777 rows=1
+[PERF] stage=rollout_generate seconds=59.576 rows=1
+INFO 08-16 13:58:59 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 13.5 tokens/s, Running: 3 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.1%, Prefix cache hit rate: 0.0%
+INFO 08-16 13:59:01 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 8.4 tokens/s, Running: 3 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.1%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=62.969 rows=1
+[PERF] stage=rollout_generate seconds=68.916 rows=1
+INFO 08-16 13:59:09 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 5.2 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
+INFO 08-16 13:59:11 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2.4 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
+INFO 08-16 13:59:19 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 3.0 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
+INFO 08-16 13:59:21 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2.6 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
+INFO 08-16 13:59:29 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2.9 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
+INFO 08-16 13:59:31 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2.9 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
+INFO 08-16 13:59:40 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2.9 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
+INFO 08-16 13:59:41 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2.4 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
+INFO 08-16 13:59:50 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2.9 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
+INFO 08-16 13:59:51 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2.6 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:00:00 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2.9 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:00:01 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 1.9 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:00:10 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 3.0 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:00:11 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2.2 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:00:20 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2.9 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:00:21 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2.5 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:00:30 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2.9 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:00:31 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 1.4 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:00:40 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 3.0 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:00:41 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 1.7 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:00:50 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2.9 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:00:51 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2.2 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:01:00 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2.9 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:01:01 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:01:11 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 3.0 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:01:11 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:01:21 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2.9 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:01:21 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:01:31 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2.8 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:01:31 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 23.2 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:01:41 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2.8 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:01:41 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 6.1 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:01:51 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2.8 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:01:51 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 3.6 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:02:01 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2.8 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:02:01 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 5.0 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:02:11 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2.8 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:02:11 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 3.9 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:02:21 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2.8 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:02:21 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 3.1 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:02:31 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2.8 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:02:32 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 4.0 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:02:41 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2.8 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:02:42 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 3.5 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:02:51 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2.8 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.1%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:02:52 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 3.1 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.1%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:03:01 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2.8 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.1%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:03:02 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 3.6 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.1%, Prefix cache hit rate: 0.0%
+[PERF] step=10 stage=rescore_b seconds=300.320 rows=8
+WARNING 08-16 14:03:03 [dp_scheduler.py:580] Long wait time (0.02s) for rank 0/8 response to 'get_num_unfinished_requests' command at step 21518 (pipe_wait=0.02s, deserialize=0.0000s, gc_re_enable=0.0000s, 5 bytes).
+[rank0]: Traceback (most recent call last):
+[rank0]:   File "/app/examples/frozenlake/train_frozenlake_qwen3.py", line 1302, in <module>
+[rank0]:     grpo_trainer.train(
+[rank0]:   File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 2425, in train
+[rank0]:     eval_examples = eval_future.result()
+[rank0]:                     ^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/usr/local/lib/python3.12/concurrent/futures/_base.py", line 456, in result
+[rank0]:     return self.__get_result()
+[rank0]:            ^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/usr/local/lib/python3.12/concurrent/futures/_base.py", line 401, in __get_result
+[rank0]:     raise self._exception
+[rank0]: TimeoutError: timed out waiting for the in-process driver to become idle before resetting prefix cache
+INFO 08-16 14:03:11 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2.8 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.1%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:03:12 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 3.2 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.1%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:03:21 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2.9 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.1%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:03:22 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2.9 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.1%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:03:31 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2.8 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.1%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:03:32 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 3.3 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.1%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:03:41 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2.8 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.1%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:03:42 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 3.1 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.1%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:03:51 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2.7 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.1%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:03:53 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 3.4 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.1%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:04:01 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2.8 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.1%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:04:03 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 3.2 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.1%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:04:11 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2.8 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.1%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:04:13 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 3.0 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.1%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:04:21 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2.7 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.1%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:04:23 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 3.3 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.1%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:04:31 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2.8 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.1%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:04:33 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 3.1 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.1%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:04:41 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2.8 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.1%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:04:43 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 3.0 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.1%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:04:51 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2.7 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.1%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:04:53 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 3.3 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.1%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:05:01 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2.8 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.1%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:05:03 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 3.1 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.1%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:05:11 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2.8 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.1%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:05:14 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 3.0 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.1%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:05:21 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2.7 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.1%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:05:24 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 3.2 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.1%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:05:31 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2.8 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.1%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:05:34 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 3.0 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.1%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:05:41 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2.8 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.1%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:05:44 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2.9 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.1%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:05:51 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2.7 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.1%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:05:54 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 3.1 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.1%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:06:01 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2.8 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.1%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:06:04 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 3.0 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.1%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:06:11 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2.8 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.1%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:06:14 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2.9 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.1%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:06:21 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2.7 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.1%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:06:24 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 3.1 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.1%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:06:31 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2.8 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.1%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:06:35 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 3.0 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.1%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:06:41 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2.8 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.1%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:06:45 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2.9 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.1%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:06:51 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2.7 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.1%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:06:55 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 3.1 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.1%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:07:01 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2.8 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.1%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:07:05 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 3.0 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.1%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=550.253 rows=1
+INFO 08-16 14:07:11 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 1.7 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
+INFO 08-16 14:07:21 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
