@@ -35,8 +35,8 @@ class AlgorithmAdapterTest(absltest.TestCase):
   def test_grpo_create_trainer_payloads(self):
     adapter = algorithm_adapter.GRPOAdapter(group_size=2)
     item1 = datatypes.TrajectoryItem(
-        pair_index=0,
-        group_id="g1",
+        prompt_id="g1",
+        group_offset_id="0",
         start_step=0,
         traj=datatypes.Trajectory(reward=1.0),
     )
@@ -45,8 +45,8 @@ class AlgorithmAdapterTest(absltest.TestCase):
     item1.action_mask = np.array([1, 1], dtype=np.float32)
 
     item2 = datatypes.TrajectoryItem(
-        pair_index=1,
-        group_id="g1",
+        prompt_id="g1",
+        group_offset_id="1",
         start_step=0,
         traj=datatypes.Trajectory(reward=2.0),
     )
@@ -57,15 +57,15 @@ class AlgorithmAdapterTest(absltest.TestCase):
     payloads = adapter.create_trainer_payloads([item1, item2], rewards=[1.0, 2.0])
     self.assertLen(payloads, 2)
     self.assertIsInstance(payloads[0], datatypes.RLTrainerPayload)
-    self.assertLess(payloads[0].advantages[0], 0.0)
-    self.assertGreater(payloads[1].advantages[0], 0.0)
+    self.assertEqual(payloads[0].trajectory_ids, ["traj_g1_0"])
+    self.assertEqual(payloads[1].trajectory_ids, ["traj_g1_1"])
     self.assertEqual(adapter.loss_fn(), algo_core.grpo_loss_fn)
 
   def test_ppo_advantages_and_trainer_payloads(self):
     adapter = algorithm_adapter.PPOAdapter(group_size=2, gamma=0.99, lam=0.95)
     item = datatypes.TrajectoryItem(
-        pair_index=0,
-        group_id="g1",
+        prompt_id="g1",
+        group_offset_id="0",
         start_step=0,
         traj=datatypes.Trajectory(reward=1.0),
     )

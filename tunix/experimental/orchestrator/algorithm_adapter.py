@@ -137,6 +137,15 @@ class GRPOAdapter(AlgorithmAdapter):
       seq_loss_mask = np.concatenate([np.zeros(len(p_arr), dtype=np.float32), act_arr])
       seq_adv = np.full(len(seq_tokens), adv_val, dtype=np.float32)
 
+      traj_id = (
+          getattr(item, "trajectory_id", "")
+          or (
+              f"traj_{item.prompt_id}_{item.group_offset_id}"
+              if getattr(item, "prompt_id", "") and getattr(item, "group_offset_id", "")
+              else (f"traj_{item.prompt_id}" if getattr(item, "prompt_id", "") else f"traj_{i}")
+          )
+      )
+
       payload = datatypes.RLTrainerPayload(
           token_ids=seq_tokens,
           token_mask=np.ones_like(seq_tokens, dtype=np.float32),
@@ -148,6 +157,7 @@ class GRPOAdapter(AlgorithmAdapter):
           completion_ids=c_arr,
           completion_mask=act_arr,
           ref_per_token_logps=np.asarray(ref_lp, dtype=np.float32) if ref_lp is not None else None,
+          trajectory_ids=[traj_id],
       )
       payloads.append(payload)
     return payloads
@@ -238,6 +248,15 @@ class PPOAdapter(AlgorithmAdapter):
       seq_loss_mask = np.concatenate([np.zeros(len(p_arr), dtype=np.float32), act_arr])
       seq_adv = np.full(len(seq_tokens), adv_val, dtype=np.float32)
 
+      traj_id = (
+          getattr(item, "trajectory_id", "")
+          or (
+              f"traj_{getattr(item, 'prompt_id', '')}_{getattr(item, 'group_offset_id', str(i))}"
+              if getattr(item, "prompt_id", "") and getattr(item, "group_offset_id", "")
+              else (f"traj_{getattr(item, 'prompt_id', '')}" if getattr(item, 'prompt_id', '') else f"traj_{i}")
+          )
+      )
+
       payload = datatypes.RLTrainerPayload(
           token_ids=seq_tokens,
           token_mask=np.ones_like(seq_tokens, dtype=np.float32),
@@ -251,6 +270,7 @@ class PPOAdapter(AlgorithmAdapter):
           old_per_token_logps=np.asarray(old_lp, dtype=np.float32) if old_lp is not None else None,
           ref_per_token_logps=np.asarray(ref_lp, dtype=np.float32) if ref_lp is not None else None,
           returns=np.full(len(seq_tokens), vt_val, dtype=np.float32),
+          trajectory_ids=[traj_id],
       )
       payloads.append(payload)
     return payloads

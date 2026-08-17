@@ -97,22 +97,22 @@ class StandardRLProgram(AsyncRLProgram):
     for prompt_idx, prompt_item in enumerate(self.dataset):
       # TODO: Extract prompt_id and group_id from standard tunix data structures
       # rather than assuming dictionaries or falling back to index strings.
-      # TODO: the logic of creating group id and prompt id is incorrect and should be fixed.
       prompt_id = getattr(prompt_item, "prompt_id", f"prompt_{prompt_idx}")
-      group_id = getattr(prompt_item, "group_id", f"group_{prompt_idx}")
       if isinstance(prompt_item, dict):
         prompt_id = prompt_item.get("prompt_id", prompt_id)
-        group_id = prompt_item.get("group_id", group_id)
 
       for g_idx in range(self.group_size):
+        traj_id = f"traj_{prompt_id}_{g_idx}"
         await engine.dispatch_rollouts(
             [prompt_item],
-            request_id=f"req_{prompt_idx}_{g_idx}",
+            request_id=traj_id,
             policy_version=self.policy_version,
             prompt_ids=[prompt_id],
             metadata={
-                "group_id": group_id,
+                "group_id": prompt_id,
                 "pair_index": g_idx,
+                "group_offset_id": str(g_idx),
+                "trajectory_id": traj_id,
             },
         )
 
@@ -129,9 +129,6 @@ class StandardRLProgram(AsyncRLProgram):
 
       except asyncio.CancelledError:
         break
-      except Exception as exc:  # pylint: disable=broad-exception-caught
-        logging.warning("Error in polling_stage: %s", exc)
-        await asyncio.sleep(0.01)
 
   async def critique_stage(
       self, engine: rl_engine_interface.AbstractRLEngine
@@ -162,6 +159,7 @@ class StandardRLProgram(AsyncRLProgram):
       trainer_payloads = self.algo.create_trainer_payloads(
           group, rewards=rewards, ref_logps=ref_logps
       )
+
       for idx, payload in enumerate(trainer_payloads):
         adv = payload.advantages
         reward_val = (
@@ -169,11 +167,17 @@ class StandardRLProgram(AsyncRLProgram):
             if hasattr(adv, "__len__") and len(adv) > 0  # pyrefly: ignore[bad-argument-type]
             else float(adv)  # pyrefly: ignore[bad-argument-type]
         )
+        traj_id = (
+            payload.metadata.get("trajectory_id", "")
+            or (payload.trajectory_ids[0] if payload.trajectory_ids else "")
+            or f"traj_{getattr(group[0], 'prompt_id', 'p')}_{idx}"
+        )
         item = datatypes.TrajectoryItem(
-            pair_index=idx,
-            group_id=getattr(group[0], "group_id", "default"),
+            prompt_id=getattr(group[0], "prompt_id", "default"),
+            group_offset_id=str(idx),
+            trajectory_id=traj_id,
             start_step=0,
-            traj=datatypes.Trajectory(reward=reward_val),
+            traj=datatypes.Trajectory(trajectory_id=traj_id, reward=reward_val),
             # TODO: Stream RLTrainerPayload directly instead of re-wrapping in TrajectoryItem.
         )
         item.payload = payload  # pyrefly: ignore[missing-attribute]

@@ -31,8 +31,8 @@ def _create_item(
   """Helper to create a TrajectoryItem for testing."""
   traj = datatypes.Trajectory(reward=reward)
   return datatypes.TrajectoryItem(
-      pair_index=pair_index,
-      group_id=group_id,
+      prompt_id=group_id,
+      group_offset_id=str(pair_index),
       start_step=0,
       traj=traj,
       metadata={"task_id": task_id},

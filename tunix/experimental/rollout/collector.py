@@ -129,10 +129,17 @@ class TrajectoryCollectorEngine:
         for step in getattr(rl_traj, "steps", [])
         if getattr(step, "model_response", "")
     )
+    try:
+      pair_index = int(self.request.group_offset_id) if self.request.group_offset_id else 0
+    except (ValueError, TypeError):
+      pair_index = 0
+
     metadata.setdefault("text", assistant_text)
-    metadata.setdefault("prompt_id", self.request.prompt_id)
-    metadata.setdefault("group_id", self.request.prompt_id)
-    metadata.setdefault("pair_index", self.request.group_offset_id or 0)
+    metadata.setdefault("prompt_id", str(self.request.prompt_id or ""))
+    metadata.setdefault("group_id", str(self.request.prompt_id or ""))
+    metadata.setdefault("pair_index", pair_index)
+    metadata.setdefault("group_offset_id", str(self.request.group_offset_id or ""))
+    metadata.setdefault("trajectory_id", str(self.traj_id))
     metadata["prompt_tokens"] = np.asarray(
         getattr(rl_traj, "prompt_tokens", np.zeros(0, dtype=np.int32)),
         dtype=np.int32,

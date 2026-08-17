@@ -75,6 +75,8 @@ class RLStepResult:
   reward_mean: float
   reward_std: float
   train_result: Any
+  global_batch_id: str = ""
+  trajectory_ids: tuple[str, ...] = ()
 
 
 def _default_reward(item: datatypes.TrajectoryItem) -> float:
@@ -216,9 +218,17 @@ class SyncRLProgram:
     else:
       self.policy_version = current_step + 1
 
+    global_batch_id = f"batch_{current_step:06d}"
+    all_step_trajectory_ids = tuple(
+        getattr(r, "trajectory_id", "") or f"traj_{idx}"
+        for idx, r in enumerate(rollouts)
+    )
+
     self.last_step_result = RLStepResult(
         step=current_step,
         policy_version=self.policy_version,
+        global_batch_id=global_batch_id,
+        trajectory_ids=all_step_trajectory_ids,
         num_rollouts=len(rollouts),
         num_microbatches=len(microbatches),
         reward_mean=float(np.mean(rewards)) if rewards else 0.0,

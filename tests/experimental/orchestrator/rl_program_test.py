@@ -36,8 +36,8 @@ class RLProgramTest(absltest.TestCase):
         prompt="prompt1",
     )
     mock_item = datatypes.TrajectoryItem(
-        pair_index=0,
-        group_id="prompt1",
+        prompt_id="prompt1",
+        group_offset_id="0",
         start_step=0,
         traj=datatypes.Trajectory(
             reward=1.0,
@@ -97,6 +97,8 @@ class RLProgramTest(absltest.TestCase):
     self.assertIsNotNone(program.last_step_result)
     self.assertEqual(program.last_step_result.num_rollouts, 1)
     self.assertEqual(program.last_step_result.num_microbatches, 1)
+    self.assertEqual(program.last_step_result.global_batch_id, "batch_000000")
+    self.assertEqual(program.last_step_result.trajectory_ids, ("traj_prompt1_0",))
 
   def test_step_once_can_skip_weight_sync(self):
     program = rl_program.SyncRLProgram(

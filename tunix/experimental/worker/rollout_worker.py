@@ -304,6 +304,8 @@ class RolloutWorker(abstract_worker.Worker):
           traj=item,  # pyrefly: ignore[bad-argument-type]
           prompt_tokens=prompt_tokens,
           policy_version=policy_version,
+          prompt_id=getattr(item, "task", "") or "",
+          trajectory_id=getattr(item, "trajectory_id", "") or req_id,
       )
       response.prompt_id = str(extra.get("prompt_id", response.prompt_id))
       response.env_reward = float(extra.get("reward", response.env_reward))
@@ -344,6 +346,8 @@ class RolloutWorker(abstract_worker.Worker):
     return datatypes.RolloutResponse(
         request_id=request.request_id or request.traj_id,
         prompt_id=request.prompt_id,
+        group_offset_id=request.group_offset_id,
+        trajectory_id=request.traj_id,
         status="COMPLETED",
         prompt_tokens=prompt_token_arr,
         segments=[
