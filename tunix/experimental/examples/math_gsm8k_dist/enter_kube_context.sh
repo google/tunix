@@ -1,9 +1,9 @@
 #!/bin/bash
 
 PROJECT=${PROJECT:-cloud-tpu-multipod-dev}
-REGION=${REGION:-us-central1}
-ZONE=${ZONE:-us-central1-a}
-CLUSTER=${CLUSTER:-trellis-demo-0810}
+REGION=${REGION:-europe-west4}
+ZONE=${ZONE:-europe-west4-a}
+CLUSTER=${CLUSTER:-auto-v5p-8-bodaborg}
 
 export KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config.$PROJECT.$REGION.$CLUSTER}"
 gcloud container clusters get-credentials $CLUSTER --region=$REGION --project=$PROJECT --dns-endpoint &>/dev/null || { echo "gcloud get-credentials failed"; exit 1; }

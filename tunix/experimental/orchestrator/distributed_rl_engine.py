@@ -22,13 +22,19 @@ Contains:
 import asyncio
 import collections
 from collections.abc import Mapping, Sequence
+import functools
 import inspect
 from typing import Any
 import uuid
+from absl import logging
 
 import numpy as np
 from tunix.experimental.common import datatypes
+from tunix.experimental.orchestrator import raiden_handler
 from tunix.experimental.orchestrator import rl_engine_interface
+from tunix.experimental.orchestrator import weight_sync
+from tunix.experimental.orchestrator import weight_sync_coordinator
+from tunix.experimental.orchestrator import worker_registry
 from tunix.experimental.worker import remote_execution
 
 
@@ -94,23 +100,143 @@ def _response_to_trajectory_item(resp: Any) -> datatypes.TrajectoryItem:
   )
 
 
+class _ActorHandleSourceAdapter(weight_sync.WeightSyncSource):
+  """Adapts an ActorHandle to satisfy WeightSyncSource protocol."""
+
+  def __init__(self, handle: Any, worker_id: str = "trainer"):
+    self._handle = handle
+    self._info = datatypes.WorkerInfo(
+        worker_id=worker_id, roles=frozenset({"trainer"})
+    )
+
+  def info(self) -> datatypes.WorkerInfo:
+    return self._info
+
+  async def prepare_weight_sync(
+      self, sync_request: Any = None, **kwargs: Any
+  ) -> Sequence[weight_sync.WorkUnitMetadata]:
+    res = self._handle.asubmit("prepare_weight_sync", sync_request=sync_request, **kwargs)
+    if inspect.isawaitable(res):
+      res = await res
+    if isinstance(res, (list, tuple)):
+      return [m for m in res if isinstance(m, weight_sync.WorkUnitMetadata)]
+    if isinstance(res, weight_sync.WorkUnitMetadata):
+      return [res]
+    return []
+
+  async def release_weight_sync(
+      self, sync_request: Any = None, **kwargs: Any
+  ) -> Any:
+    res = self._handle.asubmit("release_weight_sync", sync_request=sync_request, **kwargs)
+    if inspect.isawaitable(res):
+      res = await res
+    return res
+
+
+class _ActorHandleDestinationAdapter(weight_sync.WeightSyncDestination):
+  """Adapts an ActorHandle to satisfy WeightSyncDestination protocol."""
+
+  def __init__(self, handle: Any, worker_id: str = "rollout"):
+    self._handle = handle
+    self._info = datatypes.WorkerInfo(
+        worker_id=worker_id, roles=frozenset({"rollout"})
+    )
+
+  def info(self) -> datatypes.WorkerInfo:
+    return self._info
+
+  async def bind_weight_sync(self, **kwargs: Any) -> None:
+    res = self._handle.asubmit("bind_weight_sync", **kwargs)
+    if inspect.isawaitable(res):
+      await res
+
+  async def get_weight_sync_metadata(
+      self, **kwargs: Any
+  ) -> Sequence[weight_sync.WorkUnitMetadata]:
+    res = self._handle.asubmit("get_weight_sync_metadata", **kwargs)
+    if inspect.isawaitable(res):
+      res = await res
+    if isinstance(res, (list, tuple)):
+      return [m for m in res if isinstance(m, weight_sync.WorkUnitMetadata)]
+    if isinstance(res, weight_sync.WorkUnitMetadata):
+      return [res]
+    return []
+
+  async def pre_weight_sync(
+      self, sync_request: Any = None, **kwargs: Any
+  ) -> Any:
+    res = self._handle.asubmit("pre_weight_sync", sync_request=sync_request, **kwargs)
+    if inspect.isawaitable(res):
+      res = await res
+    return res
+
+  async def weight_sync(
+      self, sync_request: Any = None, **kwargs: Any
+  ) -> Any:
+    res = self._handle.asubmit("weight_sync", sync_request=sync_request, **kwargs)
+    if inspect.isawaitable(res):
+      res = await res
+    return res
+
+  async def post_weight_sync(
+      self, sync_request: Any = None, **kwargs: Any
+  ) -> Any:
+    res = self._handle.asubmit("post_weight_sync", sync_request=sync_request, **kwargs)
+    if inspect.isawaitable(res):
+      res = await res
+    return res
+
+  async def abort_weight_sync(
+      self, sync_request: Any = None, **kwargs: Any
+  ) -> Any:
+    res = self._handle.asubmit("abort_weight_sync", sync_request=sync_request, **kwargs)
+    if inspect.isawaitable(res):
+      res = await res
+    return res
+
+  async def get_weight_sync_status(self) -> Mapping[str, Any]:
+    res = self._handle.asubmit("get_weight_sync_status")
+    if inspect.isawaitable(res):
+      res = await res
+    return dict(res) if isinstance(res, dict) else {}
+
+
 class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
   """Worker-backed compute router dispatching RPCs across role pools."""
 
   def __init__(
       self,
-      rollout_workers: Sequence[remote_execution.ActorHandle],
-      trainer_workers: Mapping[datatypes.Role, remote_execution.ActorHandle],
+      rollout_workers: Sequence[Any],
+      trainer_workers: Mapping[datatypes.Role, Any],
       inference_workers: (
-          Mapping[datatypes.Role, remote_execution.ActorHandle] | None
+          Mapping[datatypes.Role, Any] | None
       ) = None,
+      weight_sync_handler: weight_sync.WeightSyncHandler | None = None,
   ):
-    self._rollout_workers = list(rollout_workers)
+    def _wrap_actor(w: Any) -> Any:
+      if isinstance(w, (str, remote_execution.ActorHandle)):
+        return w
+      return remote_execution.InProcessActorHandle(
+          remote_execution.InProcessRemoteExecutionServer(instance=w)
+      )
+
+    self._rollout_workers = [_wrap_actor(w) for w in rollout_workers]
     self._rollout_pool = remote_execution.RoutingActorPool(
         self._rollout_workers
     )
-    self._trainer_workers = dict(trainer_workers)
-    self._inference_workers = dict(inference_workers or {})
+    self._trainer_workers = {
+        k: _wrap_actor(v) for k, v in trainer_workers.items()
+    }
+    self._inference_workers = {
+        k: _wrap_actor(v) for k, v in (inference_workers or {}).items()
+    }
+    self._weight_sync_handler = weight_sync_handler
+    self._policy_version: int = 0
+
+  @property
+  def policy_version(self) -> int:
+    """Returns the current policy version number."""
+    return self._policy_version
 
   async def _invoke_worker(
       self,
@@ -344,23 +470,68 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       role: datatypes.Role = datatypes.Role.ACTOR,
       target_roles: Sequence[datatypes.Role] | None = None,
   ) -> int:
-    """Executes accelerator-to-accelerator collective weight broadcast."""
-    # TODO: integrate with raiden controller instead
+    """Executes accelerator-to-accelerator collective weight broadcast via Raiden."""
     del target_roles
     trainer = self._trainer_workers.get(role)
     if trainer is None:
-      return 0
-    sync_metadata = await self._invoke_worker(trainer, "prepare_weight_sync")
-    if not isinstance(sync_metadata, datatypes.WeightSyncMetadata):
-      raise RuntimeError(
-          "prepare_weight_sync must return WeightSyncMetadata; got "
-          f"{type(sync_metadata).__name__}."
+      logging.warning("sync_weights called but no trainer found for role %s", role)
+      return self._policy_version
+
+    handler = self._weight_sync_handler
+    if handler is None:
+      try:
+        handler = raiden_handler.RaidenHandler()
+        self._weight_sync_handler = handler
+      except Exception as exc:
+        logging.warning("RaidenHandler initialization fallback: %r", exc)
+        handler = None
+
+    # Construct registry with adapted source and destinations
+    registry = worker_registry.WorkerRegistry()
+    src_member = (
+        trainer
+        if isinstance(trainer, weight_sync.WeightSyncSource)
+        else _ActorHandleSourceAdapter(trainer, worker_id="trainer-0")
+    )
+    registry.register(src_member)
+
+    for idx, w in enumerate(self._rollout_workers):
+      dst_member = (
+          w
+          if isinstance(w, weight_sync.WeightSyncDestination)
+          else _ActorHandleDestinationAdapter(w, worker_id=f"rollout-{idx}")
       )
-    tasks = [
-        self._invoke_worker(w, "weight_sync", metadata=sync_metadata)
-        for w in self._rollout_workers
-        if hasattr(w, "weight_sync") or hasattr(w, "asubmit")
-    ]
-    if tasks:
-      await asyncio.gather(*tasks)
-    return getattr(sync_metadata, "new_policy_version", 1)
+      registry.register(dst_member)
+
+    next_version = self._policy_version + 1
+
+    if handler is not None:
+      coordinator = weight_sync_coordinator.WeightSyncCoordinator(
+          registry=registry,
+          handler=handler,
+          source_role="trainer",
+          destination_role="rollout",
+      )
+      result = await coordinator.sync(policy_version=next_version)
+      if result.state == weight_sync_coordinator.RoundState.COMMITTED:
+        self._policy_version = result.policy_version
+        return self._policy_version
+      raise weight_sync_coordinator.WeightSyncError(
+          f"Weight sync failed ending in state {result.state.name}: {result.failure_reason}",
+          result,
+      )
+
+    # In-memory fallback if handler is not available
+    sync_metadata = await self._invoke_worker(trainer, "prepare_weight_sync")
+    if isinstance(sync_metadata, datatypes.WeightSyncMetadata):
+      tasks = [
+          self._invoke_worker(w, "weight_sync", metadata=sync_metadata)
+          for w in self._rollout_workers
+      ]
+      if tasks:
+        await asyncio.gather(*tasks)
+      self._policy_version = getattr(sync_metadata, "new_policy_version", next_version)
+      return self._policy_version
+
+    self._policy_version = next_version
+    return self._policy_version

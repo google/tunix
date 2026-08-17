@@ -14,12 +14,16 @@
 # limitations under the License.
 
 COMMAND=""
-TUNIX_IMAGE="us-central1-docker.pkg.dev/cloud-tpu-multipod-dev/yangmu/tunix/tunix_base_image:trellis-demo-0813"
+TUNIX_IMAGE=${TUNIX_IMAGE:-"gcr.io/tpu-prod-env-multipod/mohitkhatwani-trellis:raiden-0815"}
 
 export MODEL_NAME=${MODEL_NAME:-Qwen3-1.7B}
 export MODEL_ID=${MODEL_ID:-Qwen/Qwen3-1.7B}
-export MODEL_DIR=${MODEL_DIR:-artifacts/qwen3_dist_gsm8k/models}
-export TOKENIZER_PATH=${TOKENIZER_PATH:-${MODEL_DIR}}
+export MODEL_DIR=${MODEL_DIR:-""}
+export TOKENIZER_PATH=${TOKENIZER_PATH:-${MODEL_ID}}
+
+export TPU_SLICE=${TPU_SLICE:-tpuv5:2x2x1}
+export CPU_MACHINE=${CPU_MACHINE:-n2-standard-16}
+export MESH_FSDP=${MESH_FSDP:-4}
 
 export MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-512}
 export MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-128}
@@ -43,14 +47,14 @@ export TRAINER_ID=$USER-train
 export TRAINER_PORT=20002
 
 stop_orchestrator() {
-  kubectl delete jobset "${ORCHESTRATOR_ID}"
+  kubectl delete jobset "${ORCHESTRATOR_ID}" 2>/dev/null || true
 }
 
 start_orchestrator() {
-  python tunix/experimental/distributed/deployment/yaml_generator.py \
+  python3 tunix/experimental/distributed/deployment/yaml_generator.py \
     tunix/experimental/distributed/deployment/yamls/jobset.cpu.yaml \
     --jobset_name="${ORCHESTRATOR_ID}" \
-    --cpu_machine=n2-standard-64 \
+    --cpu_machine="${CPU_MACHINE}" \
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${ORCHESTRATOR_PORT}" \
     --worker_startup_command=" \
@@ -72,14 +76,19 @@ start_orchestrator() {
 }
 
 stop_trainer() {
-  kubectl delete jobset "${TRAINER_ID}"
+  kubectl delete jobset "${TRAINER_ID}" 2>/dev/null || true
 }
 
 start_trainer() {
-  python tunix/experimental/distributed/deployment/yaml_generator.py \
+  USE_LORA_FLAG=""
+  if [[ "${USE_LORA}" == "1" || "${USE_LORA}" == "true" ]]; then
+    USE_LORA_FLAG="--use_lora"
+  fi
+
+  python3 tunix/experimental/distributed/deployment/yaml_generator.py \
     tunix/experimental/distributed/deployment/yamls/jobset.pathways.yaml \
     --jobset_name="${TRAINER_ID}" \
-    --tpu_slice=tpuv5:2x2x2 \
+    --tpu_slice="${TPU_SLICE}" \
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${TRAINER_PORT}" \
     --worker_startup_command=" \
@@ -89,7 +98,7 @@ start_trainer() {
         --process_main=tunix.experimental.examples.math_gsm8k_dist.run_trainer_node.main \
         --worker_id=${TRAINER_ID} \
         --port=${TRAINER_PORT} \
-        --mesh_fsdp=8 \
+        --mesh_fsdp=${MESH_FSDP} \
         --model_name=${MODEL_NAME} \
         --model_id=${MODEL_ID} \
         --model_dir=${MODEL_DIR} \
@@ -101,20 +110,26 @@ start_trainer() {
         --eval_every_n_steps=${EVAL_EVERY_N_STEPS} \
         --lora_rank=${LORA_RANK} \
         --lora_alpha=${LORA_ALPHA} \
+        ${USE_LORA_FLAG} \
     " \
     | kubectl apply -f -
 
 }
 
 stop_rollout() {
-  kubectl delete jobset "${ROLLOUT_ID}"
+  kubectl delete jobset "${ROLLOUT_ID}" 2>/dev/null || true
 }
 
 start_rollout() {
-  python tunix/experimental/distributed/deployment/yaml_generator.py \
-    tunix/experimental/distributed/deployment/yamls/jobset.tpu.yaml \
+  USE_LORA_FLAG=""
+  if [[ "${USE_LORA}" == "1" || "${USE_LORA}" == "true" ]]; then
+    USE_LORA_FLAG="--use_lora"
+  fi
+
+  python3 tunix/experimental/distributed/deployment/yaml_generator.py \
+    tunix/experimental/distributed/deployment/yamls/jobset.pathways.yaml \
     --jobset_name="${ROLLOUT_ID}" \
-    --tpu_slice=tpuv5:2x2x1 \
+    --tpu_slice="${TPU_SLICE}" \
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${ROLLOUT_PORT}" \
     --worker_startup_command=" \
@@ -131,6 +146,7 @@ start_rollout() {
         --max_response_length=${MAX_RESPONSE_LENGTH} \
         --lora_rank=${LORA_RANK} \
         --lora_alpha=${LORA_ALPHA} \
+        ${USE_LORA_FLAG} \
     " \
     | kubectl apply -f -
 }

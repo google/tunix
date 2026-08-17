@@ -167,16 +167,29 @@ class AbstractTrainer(abc.ABC):
     )
 
   @abc.abstractmethod
-  def prepare_weight_sync(self, **kwargs) -> None:
-    """Stages weights for transfer and returns coordinates/metadata for Rollouts to pull.
+  def prepare_weight_sync(
+      self, sync_request: Any = None, **kwargs: Any
+  ) -> Any:
+    """Stages weights for transfer and returns coordinates/metadata.
 
-    For a Raiden based implementation, trigger the d2h weight transfer here.
+    For a Raiden based implementation, triggers D2H weight transfer and returns
+    WorkUnitMetadata for registration.
     Args:
+      sync_request: Request containing round metadata.
       **kwargs: Implementation-specific options.
+
+    Returns:
+      Sequence of WorkUnitMetadata or WeightSyncMetadata describing staged weights.
     """
     raise NotImplementedError(
         f"{type(self).__name__} does not implement prepare_weight_sync."
     )
+
+  def release_weight_sync(
+      self, sync_request: Any = None, **kwargs: Any
+  ) -> None:
+    """Releases resources held for weight synchronization staging. Default: no-op."""
+    pass
 
   @abc.abstractmethod
   def get_metrics(self) -> metrics.MetricsBuffer:

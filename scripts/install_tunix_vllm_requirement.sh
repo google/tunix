@@ -40,3 +40,4 @@ pip install keyring keyrings.google-artifactregistry-auth
 VLLM_TARGET_DEVICE="tpu" uv pip install -r "${REQ_FILE}" --torch-backend=cpu
 uv pip install -r "${SPECIAL_REQ_FILE}" --force-reinstall --torch-backend=cpu
 uv pip install --no-deps "qwix>=0.1.6"
+uv pip install "jax==0.11.0" "jaxlib==0.11.0" "flax>=0.12.5"
