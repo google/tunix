@@ -702,7 +702,6 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       train_dataset: Iterable[TrainingInputT],
       eval_dataset: Iterable[TrainingInputT] | None = None,
       skip_jit: bool = False,
-      eval_callback: Callable[[int, float, Optional[float]], Optional[bool]] | None = None,
   ) -> None:
     """Main training loop for the AgenticRLLearner."""
     full_batch_iterator = iter(train_dataset)
@@ -983,12 +982,10 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
               eval_examples.extend(eval_example)
             return eval_examples
 
-          eval_start_time = time.time()
           eval_future = asyncio.run_coroutine_threadsafe(
               _eval_runner_async(eval_orchestrator), self.loop
           )
           eval_examples = eval_future.result()
-          self._last_eval_duration = time.time() - eval_start_time
           self._eval_iter_steps += 1
           current_eval_dataset = eval_examples
           did_eval_this_global_step = True
@@ -1066,7 +1063,6 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             if train_rewards.size
             else float("nan")
         )
-        is_early_stop = False
         if eval_rewards.size and did_eval_this_global_step:
           eval_r_mean = float(eval_rewards.mean())
           eval_solve = float((eval_rewards > 0.1).mean())
@@ -1075,14 +1071,6 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
               f" eval_solve={eval_solve:.3f}"
               f" eval_n={eval_rewards.size}"
           )
-          if eval_callback is not None:
-            is_early_stop = bool(
-                eval_callback(
-                    self.rl_engine.global_steps,
-                    eval_solve,
-                    getattr(self, "_last_eval_duration", None),
-                )
-            )
         else:
           eval_str = ""
         # Best-effort read of trainer-side per-step metrics (grad_norm,
@@ -1141,13 +1129,6 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             mode=rl_engine_lib.Mode.TRAIN,
             step=self.rl_engine.global_steps,
         )
-        if is_early_stop:
-          logging.info(
-              "Early stopping target achieved at global step %d. Terminating training.",
-              self.rl_engine.global_steps,
-          )
-          prompt_queue.put(None)
-          break
         if self.should_sync_weights:
           logging.info("Requesting sync lock to sync weights...")
           self._rollout_sync_lock.acquire_weight_sync()

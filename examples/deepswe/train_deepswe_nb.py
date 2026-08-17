@@ -57,7 +57,6 @@ parser.add_argument("--seed", type=int, default=42)
 parser.add_argument("--model_version", type=str, default="Qwen/Qwen3-32B")
 parser.add_argument("--node_selector_val", type=str, default="deepswe-cpu-pool")
 parser.add_argument("--dataset_path", type=str, default=None)
-parser.add_argument("--eval_dataset_path", type=str, default=None)
 
 parser.add_argument("--tpu_topology", type=str, default=None)
 
@@ -585,44 +584,16 @@ chat_parser = template_parser.QwenChatTemplateParser(tokenizer)
 
 print("Loading Dataset...")
 
-eval_raw = None
 if args.dataset_path:
-  loaded_dataset = datasets_lib.load_from_disk(args.dataset_path)
-  if isinstance(loaded_dataset, datasets_lib.DatasetDict):
-    dataset = loaded_dataset["train"]
-    eval_raw = (
-        loaded_dataset.get("test")
-        or loaded_dataset.get("validation")
-        or loaded_dataset.get("eval")
-    )
-  else:
-    dataset = loaded_dataset
+  dataset = datasets_lib.load_from_disk(args.dataset_path)
+  if isinstance(dataset, datasets_lib.DatasetDict):
+    dataset = dataset["train"]
 else:
   dataset = datasets_lib.load_dataset(
       "R2E-Gym/R2E-Gym-Subset",
       split="train",
       cache_dir=DATASET_CACHE,
-      trust_remote_code=True,
   )
-  try:
-    eval_raw = datasets_lib.load_dataset(
-        "R2E-Gym/R2E-Gym-Subset",
-        split="test",
-        cache_dir=DATASET_CACHE,
-        trust_remote_code=True,
-    )
-  except Exception:
-    eval_raw = None
-
-if args.eval_dataset_path:
-  eval_raw = datasets_lib.load_from_disk(args.eval_dataset_path)
-  if isinstance(eval_raw, datasets_lib.DatasetDict):
-    eval_raw = (
-        eval_raw.get("test")
-        or eval_raw.get("validation")
-        or eval_raw.get("eval")
-        or eval_raw["train"]
-    )
 
 
 def transform(entry):
@@ -689,25 +660,6 @@ train_dataset, _ = data_lib.post_init_dataset(
     prompt_key="problem_statement",
     custom_batch_fn=mixed_type_batch_fn,
 )
-
-eval_dataset = None
-if eval_raw is not None:
-  eval_raw = eval_raw.map(
-      transform,
-      keep_in_memory=True,  # pyrefly: ignore[unexpected-keyword]
-  )
-  eval_grain_dataset = grain.MapDataset.source(eval_raw)  # pyrefly: ignore[bad-argument-type]
-  eval_dataset, _ = data_lib.post_init_dataset(
-      eval_grain_dataset,
-      tokenizer,  # pyrefly: ignore[bad-argument-type]
-      batch_size=BATCH_SIZE,
-      num_batches=None,
-      max_prompt_length=MAX_PROMPT_LENGTH,
-      fraction=1.0,
-      num_epochs=1,
-      prompt_key="problem_statement",
-      custom_batch_fn=mixed_type_batch_fn,
-  )
 
 
 # %%
@@ -1136,24 +1088,10 @@ except Exception as e:
   print(f"W&B initialization failed with error: {e}")
 
 
-def eval_callback(
-    step: int, eval_accuracy: float, eval_duration: float | None = None
-) -> bool:
-  if RCP_LOGGING:
-    return mllog_utils.check_eval(
-        args,
-        step=step,
-        eval_accuracy=eval_accuracy,
-        validation_time=eval_duration,
-    )
-  return False
-
-
 if RCP_LOGGING:
   mllog_utils.init_print(
       args,
       train_dataset=dataset,
-      val_dataset=eval_raw,
       rollout_mesh=rollout_mesh,
       train_mesh=train_mesh,
       total_devices=total_devices,
@@ -1163,11 +1101,7 @@ if RCP_LOGGING:
   mllog_utils.block_start(args)
 
 print("Starting training...", flush=True)
-agentic_grpo_learner.train(
-    train_dataset=train_dataset,
-    eval_dataset=eval_dataset,
-    eval_callback=eval_callback,
-)
+agentic_grpo_learner.train(train_dataset=train_dataset)
 
 if RCP_LOGGING:
   mllog_utils.run_stop(
