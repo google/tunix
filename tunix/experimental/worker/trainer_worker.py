@@ -235,17 +235,37 @@ class TrainerWorker(abstract_worker.Worker):
     """Restore state from latest checkpoint and return the metadata pytree."""
     return self._trainer.restore_checkpoint(**kwargs)
 
-  def prepare_weight_sync(self, **kwargs) -> Any:
+  def prepare_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
     """Stages weights for transfer and returns coordinates/metadata."""
     self._ensure_ready()
     self.state = WorkerState.SYNCING
     try:
-      metadata = self._trainer.prepare_weight_sync(**kwargs)
-      self.state = WorkerState.READY
+      kwargs_to_pass = dict(kwargs)
+      kwargs_to_pass.setdefault("job_name", self._worker_id)
+      metadata = self._trainer.prepare_weight_sync(
+          sync_request=sync_request, **kwargs_to_pass
+      )
       self._last_error = None
       if metadata is not None:
         return metadata
       return self._response(weight_sync_ready=True)
+    except Exception as exc:
+      self._last_error = str(exc)
+      self.state = WorkerState.ERROR
+      raise
+
+  def release_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
+    """Releases resources held for weight synchronization staging."""
+    if self.state == WorkerState.STOPPED:
+      return self._response(weight_sync_released=True, already_stopped=True)
+    try:
+      release_fn = getattr(self._trainer, "release_weight_sync", None)
+      if callable(release_fn):
+        release_fn(sync_request=sync_request, **kwargs)
+      if self.state == WorkerState.SYNCING:
+        self.state = WorkerState.READY
+      self._last_error = None
+      return self._response(weight_sync_released=True)
     except Exception as exc:
       self._last_error = str(exc)
       self.state = WorkerState.ERROR

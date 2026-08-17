@@ -220,6 +220,7 @@ class ClusterOrchestrator:
         rollout_workers=rollout_workers,
         trainer_workers=trainer_workers,
         inference_workers=inference_workers,
+        weight_sync_handler=getattr(self.config, "weight_sync_handler", None),
     )
 
   def run_program(

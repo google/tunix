@@ -38,9 +38,24 @@ import logging
 import threading
 from typing import Any, Mapping, Optional, Sequence
 
-from GOOGLE_INTERNAL_PACKAGE_PATH.third_party.tpu_raiden.tpu_sync.rpc import controller_service_pb2
-from GOOGLE_INTERNAL_PACKAGE_PATH.third_party.tpu_raiden.tpu_sync.rpc import raiden_controller
-from GOOGLE_INTERNAL_PACKAGE_PATH.third_party.tpu_raiden.tpu_sync.rpc import raiden_service_pb2
+try:
+  from tpu_raiden.rpc import controller_service_pb2
+  from tpu_raiden.rpc import raiden_controller
+  from tpu_raiden.rpc import raiden_service_pb2
+except (ImportError, ModuleNotFoundError):
+  try:
+    from tpu_raiden.tpu_sync.rpc import controller_service_pb2
+    from tpu_raiden.tpu_sync.rpc import raiden_controller
+    from tpu_raiden.tpu_sync.rpc import raiden_service_pb2
+  except (ImportError, ModuleNotFoundError):
+    try:
+      from GOOGLE_INTERNAL_PACKAGE_PATH.third_party.tpu_raiden.tpu_sync.rpc import controller_service_pb2
+      from GOOGLE_INTERNAL_PACKAGE_PATH.third_party.tpu_raiden.tpu_sync.rpc import raiden_controller
+      from GOOGLE_INTERNAL_PACKAGE_PATH.third_party.tpu_raiden.tpu_sync.rpc import raiden_service_pb2
+    except (ImportError, ModuleNotFoundError):
+      controller_service_pb2 = None
+      raiden_controller = None
+      raiden_service_pb2 = None
 
 from tunix.experimental.orchestrator import weight_sync
 
@@ -110,6 +125,11 @@ class _RaidenTransport:
       raise ValueError(
           "set transfer parallelism either through transfer_options or"
           " transfer_parallelism, not both"
+      )
+    if raiden_controller is None:
+      raise RuntimeError(
+          "Raiden controller RPC libraries are not available. Please install"
+          " tpu_raiden or execute on a supported platform."
       )
     worker_rpc_client = None
     if name_resolver is not None:

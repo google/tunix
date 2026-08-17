@@ -15,6 +15,7 @@
 """Rollout Manager concurrency controller and Raiden KV migration orchestrator."""
 
 import asyncio
+import inspect
 from typing import Any, AsyncIterator, Callable, Dict, Optional, Sequence, Union
 from tunix.experimental.common import datatypes
 from tunix.experimental.rl.agentic import registry
@@ -245,11 +246,26 @@ class RolloutManager:
     for task in self._active_tasks.values():
       task.cancel()
 
+  async def bind_weight_sync(self, **kwargs) -> Any:
+    """Binds destination-side transport resources."""
+    if self.sampler and hasattr(self.sampler, "bind_weight_sync"):
+      return await self.sampler.bind_weight_sync(**kwargs)
+    return None
+
+  async def get_weight_sync_metadata(self, **kwargs) -> Any:
+    """Returns transport metadata from the underlying sampler."""
+    if self.sampler and hasattr(self.sampler, "get_weight_sync_metadata"):
+      return await self.sampler.get_weight_sync_metadata(**kwargs)
+    return []
+
   async def pre_weight_sync(
       self, sync_request: sampler_lib.WeightSyncRequest | Any = None, **kwargs
   ) -> Any:
     """Phase 3 Barrier 1: Pauses active collectors and checks staging."""
     self.pause_all()
+    active_tasks = [t for t in self._active_tasks.values() if not t.done()]
+    if active_tasks:
+      await asyncio.gather(*active_tasks, return_exceptions=True)
     if self.sampler:
       return await self.sampler.pre_weight_sync(sync_request, **kwargs)
     return None
@@ -261,7 +277,7 @@ class RolloutManager:
     completed_version = getattr(sync_request, "policy_version", 0)
     if self.sampler:
       res = await self.sampler.weight_sync(sync_request, **kwargs)
-      if res is not None:
+      if isinstance(res, int) and not isinstance(res, bool):
         completed_version = res
     return completed_version
 
@@ -270,7 +286,30 @@ class RolloutManager:
   ) -> Any:
     """Phase 3 Barrier 3: Finalizes policy weight update and resumes collectors."""
     res = None
-    if self.sampler:
-      res = await self.sampler.post_weight_sync(sync_request, **kwargs)
-    self.resume_all()
-    return res
+    try:
+      if self.sampler:
+        res = await self.sampler.post_weight_sync(sync_request, **kwargs)
+      return res
+    finally:
+      self.resume_all()
+
+  async def abort_weight_sync(
+      self, sync_request: sampler_lib.WeightSyncRequest | Any = None, **kwargs
+  ) -> Any:
+    """Rolls back staging and resumes collectors with prior weights."""
+    res = None
+    try:
+      if self.sampler and hasattr(self.sampler, "abort_weight_sync"):
+        res = await self.sampler.abort_weight_sync(sync_request, **kwargs)
+      return res
+    finally:
+      self.resume_all()
+
+  async def get_weight_sync_status(self) -> dict[str, Any]:
+    """Queries current worker round tracker status report."""
+    if self.sampler and hasattr(self.sampler, "get_weight_sync_status"):
+      res = self.sampler.get_weight_sync_status()
+      if inspect.isawaitable(res):
+        return await res
+      return dict(res)
+    return {}

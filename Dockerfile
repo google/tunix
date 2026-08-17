@@ -37,6 +37,9 @@ RUN pip install -e .
 
 RUN bash /app/scripts/install_tunix_vllm_requirement.sh
 
+# Install Raiden wheel
+RUN pip install /app/tpu_raiden_jax-0.0.1.dev20260811205702-cp312-cp312-manylinux_2_31_x86_64.whl --no-deps || pip install /app/tpu_raiden_jax-0.0.1.dev20260811205702-cp312-cp312-manylinux_2_31_x86_64.whl
+
 # Build argument to conditionally install DeepSWE evaluation dependencies
 ARG INSTALL_DEEPSWE_DEPS=false
 

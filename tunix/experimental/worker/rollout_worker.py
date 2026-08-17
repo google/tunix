@@ -446,30 +446,60 @@ class RolloutWorker(abstract_worker.Worker):
     async for res in self.manager.as_completed_stream():
       yield self._to_rollout_response(res)
 
+  async def bind_weight_sync(self, **kwargs) -> Any:
+    """Binds destination-side transport resources."""
+    if self.state == WorkerState.PENDING:
+      self.initialize()
+    if hasattr(self.manager, "bind_weight_sync"):
+      return await self.manager.bind_weight_sync(**kwargs)
+    return None
+
+  async def get_weight_sync_metadata(self, **kwargs) -> Any:
+    """Returns transport metadata from the underlying manager."""
+    if self.state == WorkerState.PENDING:
+      self.initialize()
+    if hasattr(self.manager, "get_weight_sync_metadata"):
+      return await self.manager.get_weight_sync_metadata(**kwargs)
+    return []
+
   async def pre_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
     """Prepares the worker for an upcoming weight synchronization step."""
     if self.state == WorkerState.PENDING:
       self.initialize()
     self.state = WorkerState.SYNCING
-    try:
-      return await self.manager.pre_weight_sync(sync_request, **kwargs)
-    finally:
-      self.state = WorkerState.READY
+    return await self.manager.pre_weight_sync(sync_request, **kwargs)
 
   async def weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
     """Synchronizes the worker's internal model weights."""
     if self.state == WorkerState.PENDING:
       self.initialize()
     self.state = WorkerState.SYNCING
-    try:
-      metadata = kwargs.pop("metadata", None)
-      request = sync_request if sync_request is not None else metadata
-      result = await self.manager.weight_sync(request, **kwargs)
-      self._policy_version += 1
-      return result
-    finally:
-      self.state = WorkerState.READY
+    metadata = kwargs.pop("metadata", None)
+    request = sync_request if sync_request is not None else metadata
+    return await self.manager.weight_sync(request, **kwargs)
 
   async def post_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
     """Finalizes policy weight update and resumes workers."""
-    return await self.manager.post_weight_sync(sync_request, **kwargs)
+    try:
+      res = await self.manager.post_weight_sync(sync_request, **kwargs)
+      self._policy_version = getattr(
+          sync_request, "policy_version", self._policy_version + 1
+      )
+      return res
+    finally:
+      self.state = WorkerState.READY
+
+  async def abort_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
+    """Rolls back staging and resumes workers with prior weights."""
+    try:
+      if hasattr(self.manager, "abort_weight_sync"):
+        return await self.manager.abort_weight_sync(sync_request, **kwargs)
+      return None
+    finally:
+      self.state = WorkerState.READY
+
+  async def get_weight_sync_status(self) -> dict[str, Any]:
+    """Returns current worker round tracker status report."""
+    if hasattr(self.manager, "get_weight_sync_status"):
+      return await self.manager.get_weight_sync_status()
+    return {}

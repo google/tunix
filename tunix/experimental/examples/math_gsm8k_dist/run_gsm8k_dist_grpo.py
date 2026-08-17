@@ -108,7 +108,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument("--train_micro_batch_size", type=int, default=1)
   parser.add_argument("--model_id", type=str, default="Qwen/Qwen3-1.7B")
   parser.add_argument("--tokenizer_path", type=str, default="")
-  parser.add_argument("--temperature", type=float, default=1.0)
+  parser.add_argument("--temperature", type=float, default=0.0)
   parser.add_argument("--top_p", type=float, default=1.0)
   parser.add_argument("--top_k", type=int, default=-1)
   parser.add_argument("--beta", type=float, default=0.0)
@@ -118,6 +118,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       choices=("synthetic", "exact"),
       default="synthetic",
       help="synthetic proves the distributed chain without relying on quality.",
+  )
+  parser.add_argument(
+      "--sync_weights",
+      action=argparse.BooleanOptionalAction,
+      default=True,
+      help="Whether to synchronize weights between trainer and rollouts.",
   )
   parser.add_argument("--rpc_timeout_s", type=float, default=1800.0)
   parser.add_argument("--stop_workers_on_exit", action="store_true")
@@ -286,7 +292,7 @@ def _build_step_requests(
                   "temperature": temperature,
                   "top_p": top_p,
                   "top_k": top_k,
-                  "return_logprobs": True,
+                  "return_logprobs": False,
               },
               metadata={
                   "group_id": prompt_id,
@@ -349,6 +355,8 @@ def main(argv: list[str], context: Any = None) -> None:
   logging.info("Control-plane JAX backend: %s", jax.default_backend())
 
   tokenizer_path = args.tokenizer_path or os.getenv("MODEL_DIR") or args.model_id
+  if not os.path.exists(tokenizer_path):
+    tokenizer_path = args.model_id
   tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
   if tokenizer.pad_token_id is None and tokenizer.eos_token is not None:
     tokenizer.pad_token = tokenizer.eos_token
@@ -429,7 +437,7 @@ def main(argv: list[str], context: Any = None) -> None:
           max_response_length=args.max_response_length,
           pad_id=pad_id,
       ),
-      sync_weights=False,
+      sync_weights=args.sync_weights,
       on_step_begin=lambda step: logging.info("GRPO step %d starting.", step),
       on_step_end=lambda step, result: logging.info(
           "GRPO advanced to policy_version=%d train_result=%s.", step, result
