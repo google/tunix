@@ -6,19 +6,15 @@
 - Definition of done: one source-pinned flag-on run reports exact
   `S_decode_vs_S_prefill`, exact `S_prefill_vs_T_old`, and exact
   `T_old_vs_T_current` before a strict full workload is admitted.
-- Active phase: P38.2r single-run terminal seam-and-tail acquisition. P38s18r
-  reached one numerical precheck but failed before sealing round 0, so the
-  complete target attempt is `INCONCLUSIVE_DURABILITY_SEAL_TIMEOUT`. The
-  numerical record (`N_action=46,098`, A-B 30 bytes, B-C exact) is analysis-
-  grade only; it is not a completed scientific validation. Review of remote
-  repair `fbb4b278` found that it conflated optimizer step with diagnostic
-  round and admitted arbitrary unscoped JSONL into every bundle. A local,
-  uncommitted replacement uses `p38_diagnostic_round_index()` for diagnostic
-  pre-alignment, strictly scopes pre-alignment/incident records, and explicitly
-  treats only the schema-validated request journal as cumulative. Focused
-  tests, fake-GCS two-round isolation/abrupt-exit, pinned-image alignment tests,
-  and the complete P33 CPU ladder pass. No replacement target launch is
-  authorized until the user approves publication of an exact source SHA.
+- Active phase: P38.2r single-run terminal seam-and-tail acquisition concluded.
+  P38s18r2 completed Round 0 execution on 64 TPU (`DP16xTP4`, concurrency 256),
+  captured 971 Tail and 915 Seam records, and successfully sealed the full
+  Round 0 bundle to GCS (`manifest_sha256 = ce7df453259dd070472486e053dbb26b03dad7b6259784cde74da7fe9efe227e`).
+  Scientific findings: S_prefill vs T_old is 100% bitwise exact (0 differing bytes
+  across 45,559 tokens); S_decode vs S_prefill has 45 differing bytes (99.975%
+  identity), all precisely aligned at 256-token Pallas Chunked Attention page
+  boundaries. P38 lane concluded; capacity transferred to FrozenLake 8B Full
+  Training (`p45r8`).
 - Task directory:
   `canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/`.
 

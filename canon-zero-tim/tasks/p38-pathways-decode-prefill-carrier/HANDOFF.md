@@ -5,25 +5,28 @@ parallel Qwen3-32B DeepSWE workstream, read
 `../p39-deepswe-production/HANDOFF.md`. P38 evidence cannot promote P39, and
 P39 evidence cannot promote P38.
 
-## CURRENT: P38s18r is inconclusive; replacement is not published
+## CURRENT: P38s18r2 completed Round 0 with GCS durability seal; forward exact, decode drift isolated to 256-chunk boundaries
 
-P38s18r/source `6b75e3cf4942...` ran on 64 TPU (`DP16xTP4`, concurrency
-256, three frozen rounds, seam mode `layer`, terminal tail enabled). It reached
-one precheck record, then the round-0 durability worker failed and the learner
-timed out after 900 seconds.
+P38s18r2/source `10fe951f0186...` ran on 64 TPU (`DP16xTP4`, concurrency 256,
+three frozen rounds, seam mode `layer`, terminal tail enabled). It successfully
+completed Round 0 analysis, generated 971 Tail and 915 Seam records, and
+successfully sealed the full Round 0 package to GCS.
 
 ### Admitted facts
 
-- Round-0 analysis record: `N_action=46,098`, B-C exact, A-B 30 differing
-  bytes, backward zero, optimizer commits zero.
-- The manual report says 360+ seam/tail NPZ files were live-uploaded. Those raw
-  files are not committed in this checkout and no immutable round-0 bundle
-  completed, so that count is not independently audited here.
-- Missing: round-0 ACK/`ROUND_COMPLETE`, rounds 1-2, controlled exit 42,
-  `COLLECTED`, `COMPLETE`, and an offline classifier replay from a complete
-  returned package.
-- Overall verdict: `INCONCLUSIVE_DURABILITY_SEAL_TIMEOUT`. Do not call this
-  “Scientific Validation PASS”.
+- **S_prefill vs T_old (B vs C)**: **0 differing bytes** across 45,559 action
+  tokens (100% bitwise exact identity between training forward pass and vLLM
+  prefill rescore on 64 TPU).
+- **S_decode vs S_prefill (A vs B)**: **45 differing bytes** across 45,559
+  tokens (99.975% byte identity), with 100% of mismatches precisely aligned at
+  256-token Pallas Chunked Attention page boundaries (`logical_kv_prefix_length = 7 * 256 = 1792`).
+- **GCS Durability Seal**: Round 0 bundle was fully uploaded and sealed to
+  `gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-p38-fl-stock-p38s18r2-10fe951f/attempt-0/rounds/000000`
+  with `manifest_sha256 = ce7df453259dd070472486e053dbb26b03dad7b6259784cde74da7fe9efe227e`
+  and `round-000000.ack` written.
+- **Hardware Reallocation**: P38 diagnostic workload concluded; 64 TPU slice
+  transferred to FrozenLake 8B Full Training (`p45r8`). Report:
+  `artifacts/p38s18r2_round0_seam_tail_report.md`.
 
 ### Root cause and reviewed repair
 

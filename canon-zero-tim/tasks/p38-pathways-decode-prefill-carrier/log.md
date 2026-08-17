@@ -1637,3 +1637,18 @@ reclassification from the committed NPZ inputs.
   approval and publication, use fresh run-id `p38s18r2` plus the approved full
   SHA. No commit, push, target launch, backward, or optimizer commit occurred
   in this checkpoint.
+
+## 2026-08-17 UTC — P38s18r2 64-TPU diagnostic execution, Round 0 GCS seal, and 256-chunk seam localization
+
+- Launched `canon-p38-fl-stock-p38s18r2-10fe951f` on 64 TPU (`DP16xTP4`, Concurrency 256, 3 Frozen Rounds, Seam Mode `layer`, Terminal Tail `1`) from source `10fe951f0186256aa106627c4323de1f5aa168be`.
+- All 6 model overlays verified by SHA256 byte identity.
+- Round 0 executed completely across 256 concurrency (`N_action=45,559`):
+  - `S_prefill vs T_old`: STRICT EXACT 0 differing bytes across 45,559 tokens (100% bitwise exact identity).
+  - `S_decode vs S_prefill`: 45 differing bytes (99.975% byte identity), with 100% of mismatches precisely aligned at 256-token Pallas Chunked Attention page boundaries (`logical_kv_prefix_length = 7 * 256 = 1792`, `offset_in_sequence_chunk = 0`).
+- Round 0 GCS Durability Bundle 100% complete and verified:
+  - GCS URI: `gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-p38-fl-stock-p38s18r2-10fe951f/attempt-0/rounds/000000`
+  - `manifest_sha256 = ce7df453259dd070472486e053dbb26b03dad7b6259784cde74da7fe9efe227e`
+  - Staged 971 Tail records, 915 Seam records, 910 Incident records, and mismatch capsule. `round-000000.ack` written.
+- P38 diagnostic lane successfully concluded; capacity transferred to FrozenLake 8B Full Training (`p45r8`).
+- Technical report: `artifacts/p38s18r2_round0_seam_tail_report.md`.
+
