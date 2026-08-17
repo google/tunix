@@ -1,0 +1,232 @@
+--- tpu_runner_p21_l30.py
++++ tpu_runner_p21_l30.py
+@@ -111,0 +112,7 @@
++from p38_terminal_capture import (
++    P38_TERMINAL_BLOCK_SIZE,
++    P38_TERMINAL_ROW_BUCKET,
++    P38_TERMINAL_SIGNATURE_FIELDS,
++    fingerprint_terminal_pair,
++    write_terminal_record,
++)
+@@ -1045,0 +1053,8 @@
++_P38_TERMINAL_DISCRIMINATOR = os.environ.get(
++    "CANON_P38_TERMINAL_DISCRIMINATOR", "")
++_P38_TERMINAL_MAX_BYTES = int(os.environ.get(
++    "CANON_P38_TERMINAL_MAX_BYTES", str(1024 * 1024 * 1024)) or
++    str(1024 * 1024 * 1024))
++_P38_TERMINAL_STATE = {"records": 0, "bytes": 0}
++_P38_TERMINAL_ROW_GATHER_FNS = {}
++_P38_TERMINAL_FINGERPRINT_FN = jax.jit(fingerprint_terminal_pair)
+@@ -1051,0 +1067,5 @@
++if _P38_TERMINAL_DISCRIMINATOR not in ("", "0", "1"):
++    raise RuntimeError(
++        "CANON_P38_TERMINAL_DISCRIMINATOR must be unset, 0, or 1, got "
++        f"{_P38_TERMINAL_DISCRIMINATOR!r}")
++_P38_TERMINAL_ENABLED = _P38_TERMINAL_DISCRIMINATOR == "1"
+@@ -1195,0 +1216,13 @@
++if _P38_TERMINAL_ENABLED:
++    if not _P38_TAIL_ENABLED:
++        raise RuntimeError(
++            "P38 terminal discriminator requires the terminal-tail observer")
++    if not (16 * 1024 * 1024 <= _P38_TERMINAL_MAX_BYTES <= 4 * 1024**3):
++        raise RuntimeError("P38 terminal discriminator byte bound is invalid")
++    print(
++        "[CANON_P38_TERMINAL_DISCRIMINATOR_INIT] "
++        f"enabled=1 block_size={P38_TERMINAL_BLOCK_SIZE} "
++        f"row_bucket={P38_TERMINAL_ROW_BUCKET} "
++        f"max_bytes={_P38_TERMINAL_MAX_BYTES}",
++        flush=True,
++    )
+@@ -2110 +2143,3 @@
+-def _p38_seam_gather(layer_fingerprints, final_fingerprints, row_indices):
++def _p38_seam_gather(
++        layer_fingerprints, final_fingerprints, final_hidden_states,
++        row_indices):
+@@ -2120 +2155,2 @@
+-    gather_fn = _P38_SEAM_GATHER_FNS.get(bucket)
++    gather_key = (bucket, bool(_P38_TERMINAL_ENABLED))
++    gather_fn = _P38_SEAM_GATHER_FNS.get(gather_key)
+@@ -2122,8 +2158,19 @@
+-        @jax.jit
+-        def gather_fn(layer_values, final_values, indices):
+-            return (
+-                jnp.take(layer_values, indices, axis=0),
+-                jnp.take(final_values, indices, axis=0),
+-            )
+-        _P38_SEAM_GATHER_FNS[bucket] = gather_fn
+-    layer_rows, final_rows = jax.device_get(gather_fn(
++        if _P38_TERMINAL_ENABLED:
++            @jax.jit
++            def gather_fn(layer_values, final_values, hidden_values, indices):
++                return (
++                    jnp.take(layer_values, indices, axis=0),
++                    jnp.take(final_values, indices, axis=0),
++                    jnp.take(hidden_values, indices, axis=0),
++                )
++        else:
++            @jax.jit
++            def gather_fn(layer_values, final_values, hidden_values, indices):
++                del hidden_values
++                return (
++                    jnp.take(layer_values, indices, axis=0),
++                    jnp.take(final_values, indices, axis=0),
++                    jnp.zeros((indices.shape[0], 0), dtype=jnp.bfloat16),
++                )
++        _P38_SEAM_GATHER_FNS[gather_key] = gather_fn
++    layer_rows, final_rows, hidden_rows = jax.device_get(gather_fn(
+@@ -2131,0 +2179 @@
++        final_hidden_states,
+@@ -2134 +2182,6 @@
+-    return np.asarray(layer_rows)[:count], np.asarray(final_rows)[:count], bucket
++    return (
++        np.asarray(layer_rows)[:count],
++        np.asarray(final_rows)[:count],
++        np.asarray(hidden_rows)[:count],
++        bucket,
++    )
+@@ -2139 +2192 @@
+-        aux_hidden_states, padded_rows_per_dp):
++        final_hidden_states, aux_hidden_states, padded_rows_per_dp):
+@@ -2197,2 +2250,3 @@
+-    layer_rows, final_rows, gather_bucket = _p38_seam_gather(
+-        layer_fingerprints, final_fingerprints, row_indices)
++    layer_rows, final_rows, hidden_rows, gather_bucket = _p38_seam_gather(
++        layer_fingerprints, final_fingerprints, final_hidden_states,
++        row_indices)
+@@ -2256,0 +2311 @@
++            "final_hidden_rows": hidden_rows,
+@@ -2308 +2363,52 @@
+-def _p38_tail_write(selected_offsets, logit_rows, values, target_ids, bucket):
++def _p38_terminal_gather(raw_logits, processed_logits, row_indices):
++    count = int(row_indices.size)
++    if not _P38_TERMINAL_ENABLED:
++        return None
++    if count <= 0:
++        raise RuntimeError("P38 terminal gather received no rows")
++    checkpoint_names = (
++        "logit_signatures",
++        "block_max",
++        "block_exp_sum",
++        "row_max",
++        "block_observer_log_normalizer",
++    )
++    names = tuple(
++        f"{prefix}_{name}"
++        for prefix in ("raw", "processed")
++        for name in checkpoint_names
++    )
++    gathered_results = []
++    source_rows = int(raw_logits.shape[0])
++    gather_fn = _P38_TERMINAL_ROW_GATHER_FNS.get(source_rows)
++    if gather_fn is None:
++        @jax.jit
++        def gather_fn(raw, processed, indices):
++            return (
++                jnp.take(raw, indices, axis=0),
++                jnp.take(processed, indices, axis=0),
++            )
++        _P38_TERMINAL_ROW_GATHER_FNS[source_rows] = gather_fn
++    for start in range(0, count, P38_TERMINAL_ROW_BUCKET):
++        stop = min(start + P38_TERMINAL_ROW_BUCKET, count)
++        indices = np.full(
++            (P38_TERMINAL_ROW_BUCKET,), int(row_indices[stop - 1]),
++            dtype=np.int32)
++        indices[:stop - start] = row_indices[start:stop]
++        raw_rows, processed_rows = gather_fn(
++            raw_logits, processed_logits,
++            jnp.asarray(indices, dtype=jnp.int32))
++        gathered_results.append(
++            _P38_TERMINAL_FINGERPRINT_FN(raw_rows, processed_rows))
++    host_results = jax.device_get(gathered_results)
++    return {
++        name: np.concatenate(
++            [np.asarray(result[field]) for result in host_results], axis=0
++        )[:count]
++        for field, name in enumerate(names)
++    }
++
++
++def _p38_tail_write(
++        selected_offsets, logit_rows, values, target_ids, bucket,
++        terminal_values=None):
+@@ -2348,0 +2455,42 @@
++    if _P38_TERMINAL_ENABLED:
++        if terminal_values is None:
++            raise RuntimeError("P38 terminal values are absent")
++        terminal_arrays = {
++            **arrays,
++            "final_hidden_rows": np.asarray(
++                pending["final_hidden_rows"])[offsets],
++            **{
++                name: np.asarray(value)[order]
++                for name, value in terminal_values.items()
++            },
++        }
++        terminal_record, terminal_digest = write_terminal_record(
++            _P38_SEAM_OBSERVER_DIR,
++            _P38_TERMINAL_STATE,
++            terminal_arrays,
++            {
++                "arm": pending["arm"],
++                "call_index": pending["call_index"],
++                "checkpoint_names": P38_TAIL_CHECKPOINTS,
++                "diagnostic_round": pending["diagnostic_round"],
++                "gather_bucket": int(bucket),
++                "hidden_claim": "exact_selected_row_bytes",
++                "logit_claim": (
++                    "diagnostic_multiword_block_fingerprint_not_full_"
++                    "logits_byte_equality"
++                ),
++                "program_path": "standard",
++                "reduction_program": "shared-fixed-four-row-v1",
++                "selected_rows": int(offsets.size),
++                "signature_fields": P38_TERMINAL_SIGNATURE_FIELDS,
++                "tail_record_index": int(record_index),
++            },
++            _P38_TERMINAL_MAX_BYTES,
++        )
++        print(
++            "[CANON_P38_TERMINAL_DISCRIMINATOR_RECORD] "
++            f"record={terminal_record} arm={pending['arm']} "
++            f"call={pending['call_index']} rows={offsets.size} "
++            f"npz_sha256={terminal_digest}",
++            flush=True,
++        )
+@@ -2392,0 +2541,2 @@
++    terminal_values = _p38_terminal_gather(
++        raw_logits, processed_logits, np.asarray(logit_rows, dtype=np.int32))
+@@ -2394 +2544,2 @@
+-        selected_offsets, logit_rows, values, observed_targets, bucket)
++        selected_offsets, logit_rows, values, observed_targets, bucket,
++        terminal_values)
+@@ -2424 +2575,6 @@
+-    return selected_offsets, chunk_rows, values, observed_targets, bucket
++    terminal_values = _p38_terminal_gather(
++        raw_logits, processed_logits, np.asarray(chunk_rows, dtype=np.int32))
++    return (
++        selected_offsets, chunk_rows, values, observed_targets, bucket,
++        terminal_values,
++    )
+@@ -2437,0 +2594 @@
++    terminal_parts = []
+@@ -2439 +2596,2 @@
+-    for offsets, rows, part_values, part_targets, part_bucket in parts:
++    for (offsets, rows, part_values, part_targets, part_bucket,
++         part_terminal) in parts:
+@@ -2443,0 +2602,2 @@
++        if part_terminal is not None:
++            terminal_parts.append(part_terminal)
+@@ -2444,0 +2605,9 @@
++    terminal_values = None
++    if _P38_TERMINAL_ENABLED:
++        if len(terminal_parts) != len(parts):
++            raise RuntimeError("P38 prompt terminal parts are incomplete")
++        terminal_values = {
++            name: np.concatenate(
++                [part[name] for part in terminal_parts], axis=0)
++            for name in terminal_parts[0]
++        }
+@@ -2450,0 +2620 @@
++        terminal_values,
+@@ -4015,0 +4186 @@
++            hidden_states,

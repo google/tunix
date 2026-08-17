@@ -1,5 +1,16 @@
 # P38s18r2 64-TPU Diagnostic Seam & Tail Analysis Report
 
+> **SUPERSEDED — do not use the chunk-boundary/root-cause claims below.**
+> The immutable target-aware v3 audit proves that only 1/32 red actions is at
+> `logical_kv_prefix_length % 256 == 0`. The admitted result is 26
+> `raw_log_normalizer`-first and 6 `raw_target_logit`-first observations with
+> equal recorded layer/final-norm fingerprints, under the claim ceiling that
+> fingerprints are not full tensor bytes. The run completed only round 0/3
+> and remains `INCONCLUSIVE_PARTIAL_RUN`. See
+> `phases/p38-2t-target-aware-tail-join.md` and
+> `phases/p38-2u-terminal-discriminator.md`. Historical text is retained only
+> to document the withdrawn interpretation.
+
 ## Executive Summary
 
 - **Run ID**: `p38s18r2`

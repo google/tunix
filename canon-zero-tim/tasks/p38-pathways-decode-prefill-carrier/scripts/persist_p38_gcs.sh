@@ -209,6 +209,8 @@ if [ "$mode" = snapshot ]; then
       "$observer_dir"/p38_seam_*.npz
       "$observer_dir"/p38_tail_*.json
       "$observer_dir"/p38_tail_*.npz
+      "$observer_dir"/p38_terminal_*.json
+      "$observer_dir"/p38_terminal_*.npz
     )
     shopt -u nullglob
     if [ "${#observer_sources[@]}" -eq 0 ]; then
@@ -292,6 +294,9 @@ if [ "$mode" = round ]; then
   fi
   if [ "${CANON_P38_TAIL_OBSERVER:-0}" = "1" ]; then
     round_args+=(--require-tail)
+  fi
+  if [ "${CANON_P38_TERMINAL_DISCRIMINATOR:-0}" = "1" ]; then
+    round_args+=(--require-terminal)
   fi
   python3 "$CANON_PKG/tasks/p38-pathways-decode-prefill-carrier/scripts/stage_p38_round.py" \
     --round "$round_index" \
@@ -388,6 +393,11 @@ if [ "$mode" = collect ]; then
     copy_required "$CANON_P38_SEAM_CLASSIFICATION" \
       seam-classification.json
     collected_files+=(seam-classification.json)
+  fi
+  if [ -n "${CANON_P38_TERMINAL_CLASSIFICATION:-}" ]; then
+    copy_required "$CANON_P38_TERMINAL_CLASSIFICATION" \
+      terminal-classification.json
+    collected_files+=(terminal-classification.json)
   fi
   shopt -s nullglob
   round_capsules=("${CANON_P38_MISMATCH_CAPSULE%.npz}".round-*.npz)

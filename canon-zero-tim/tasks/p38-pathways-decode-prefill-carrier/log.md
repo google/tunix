@@ -1765,3 +1765,29 @@ reclassification from the committed NPZ inputs.
   19/19, importable P38 63/63, all four shell suites, Python/shell/JSON syntax,
   credential scan, and `git diff --check`. The next gate is one zero-TPU v3
   GCS reduction from the clean published branch.
+
+## 2026-08-17 UTC — P38.2u terminal discriminator local admission
+
+- Added a default-off terminal discriminator that records exact selected
+  final-hidden rows and bounded blockwise raw/processed-logit evidence. The
+  shape-dependent gather is separated from one fixed-four-row shared
+  executable so A and B cannot acquire different observer reduction programs.
+- Real v5p rejected the first fused gather/reduction prototype: local
+  production A-B was exact while the observer falsely reported 148 reduction
+  differences. A second rehearsal showed two legacy tail-intermediate drifts
+  despite exact shared evidence and exact production endpoints. The final
+  classifier preserves those legacy rows as diagnostics but cannot use them
+  as the first authoritative stage.
+- The final Qwen3-8B DP1xTP4 run completed three frozen rounds with 0 backward
+  and 0 optimizer commits. It wrote 130 terminal pairs and joined 155 A rows;
+  every row classified exact through hidden, raw logits, processed logits,
+  both shared reductions, and the production endpoint.
+- The matched observer-off arm used the same source and diff. The three full
+  alignment records, excluding timestamps, were bitwise identical and
+  classified `observer_endpoint_bitwise_neutral`. The real-TPU one-bit
+  negative ran 3/3, both pinned overlays matched 33/33 manifest entries and
+  passed 34/34 runner tests, and the complete CPU gate passed.
+- Receipt:
+  `artifacts/p38_2u_terminal_discriminator_onehost_0817.md`. No target launch,
+  commit, or push occurred. The next gate is explicit user-reviewed
+  publication followed by exactly one P38s19 64-TPU stock diagnostic.

@@ -162,6 +162,11 @@ patch -s --no-backup-if-mismatch "$OUT/tpu_runner_p21_l30.py" \
   echo "      PATCH FAILED: 19-tpu-runner-p38-terminal-tail.patch" >&2
   exit 1
 }
+patch -s --no-backup-if-mismatch "$OUT/tpu_runner_p21_l30.py" \
+  "$PKG/patches/tpu_inference/20-tpu-runner-p38-terminal-discriminator.patch" || {
+  echo "      PATCH FAILED: 20-tpu-runner-p38-terminal-discriminator.patch" >&2
+  exit 1
+}
 
 echo "[3/4] laying down the shim chain (model=$MODEL)"
 cp "$PKG"/src/engine_shims/*.py "$OUT/"

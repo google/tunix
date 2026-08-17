@@ -46,6 +46,8 @@ $DOCKER run --rm \
     grep -Fq '_p38_seam_after_model' "$qwen1p7b_overlay/tpu_runner_p21_l30.py"
     grep -Fq '_p38_tail_after_decode' "$qwen1p7b_overlay/tpu_runner_p21_l30.py"
     grep -Fq 'p38-tail-values-v1' "$qwen1p7b_overlay/p38_tail_capture.py"
+    grep -Fq 'p38-terminal-discriminator-v1' "$qwen1p7b_overlay/p38_terminal_capture.py"
+    grep -Fq '_p38_terminal_gather' "$qwen1p7b_overlay/tpu_runner_p21_l30.py"
     grep -Fq 'p38-seam-fingerprint-v1' "$qwen1p7b_overlay/p38_seam_capture.py"
     grep -Fq 'CANON_P38_SEAM_OBSERVER' "$qwen1p7b_overlay/qwen3.py"
     grep -Fq "\"layer\", \"full\"" "$qwen1p7b_overlay/qwen3.py"
@@ -57,6 +59,7 @@ $DOCKER run --rm \
     test -f "$qwen1p7b_overlay/p38_seam_capture.py"
     python3 -m py_compile "$qwen1p7b_overlay/p38_kv_fingerprint.py"
     python3 -m py_compile "$qwen1p7b_overlay/p38_seam_capture.py"
+    python3 -m py_compile "$qwen1p7b_overlay/p38_terminal_capture.py"
     python3 -m py_compile "$qwen1p7b_overlay/tpu_runner_p21_l30.py"
     python3 canon-zero-tim/tests/p33_workloads/test_decode_logprob_chunking.py \
       --overlay "$qwen1p7b_overlay"
@@ -77,6 +80,8 @@ $DOCKER run --rm \
     grep -Fq '_p38_seam_after_model' "$qwen8b_overlay/tpu_runner_p21_l30.py"
     grep -Fq '_p38_tail_after_decode' "$qwen8b_overlay/tpu_runner_p21_l30.py"
     grep -Fq 'p38-tail-values-v1' "$qwen8b_overlay/p38_tail_capture.py"
+    grep -Fq 'p38-terminal-discriminator-v1' "$qwen8b_overlay/p38_terminal_capture.py"
+    grep -Fq '_p38_terminal_gather' "$qwen8b_overlay/tpu_runner_p21_l30.py"
     grep -Fq 'p38-seam-fingerprint-v1' "$qwen8b_overlay/p38_seam_capture.py"
     grep -Fq 'CANON_P38_SEAM_OBSERVER' "$qwen8b_overlay/qwen3.py"
     grep -Fq "\"layer\", \"full\"" "$qwen8b_overlay/qwen3.py"
@@ -88,6 +93,7 @@ $DOCKER run --rm \
     test -f "$qwen8b_overlay/p38_seam_capture.py"
     python3 -m py_compile "$qwen8b_overlay/p38_kv_fingerprint.py"
     python3 -m py_compile "$qwen8b_overlay/p38_seam_capture.py"
+    python3 -m py_compile "$qwen8b_overlay/p38_terminal_capture.py"
     python3 -m py_compile "$qwen8b_overlay/tpu_runner_p21_l30.py"
     python3 canon-zero-tim/tests/p33_workloads/test_decode_logprob_chunking.py \
       --overlay "$qwen8b_overlay"

@@ -143,6 +143,18 @@ def stage(args: argparse.Namespace) -> dict:
   )
   if args.require_tail:
     _require(tail_records > 0, f"round {args.round} has no tail records")
+  terminal_records = _copy_record_pairs(
+      args.observer_dir,
+      args.output,
+      "p38_terminal",
+      args.round,
+      "p38-terminal-discriminator-v1",
+  )
+  if args.require_terminal:
+    _require(
+        terminal_records > 0,
+        f"round {args.round} has no terminal discriminator records",
+    )
 
   record = {
       "diagnostic_round": args.round,
@@ -154,6 +166,7 @@ def stage(args: argparse.Namespace) -> dict:
       "schema": "canon-p38-round-stage-v1",
       "seam_records": seam_records,
       "tail_records": tail_records,
+      "terminal_records": terminal_records,
   }
   (args.output / "ROUND_INVENTORY.json").write_text(
       json.dumps(record, sort_keys=True, indent=2) + "\n", encoding="utf-8"
@@ -174,6 +187,7 @@ def main() -> int:
   parser.add_argument("--require-seam", action="store_true")
   parser.add_argument("--require-kv", action="store_true")
   parser.add_argument("--require-tail", action="store_true")
+  parser.add_argument("--require-terminal", action="store_true")
   args = parser.parse_args()
   result = stage(args)
   print(

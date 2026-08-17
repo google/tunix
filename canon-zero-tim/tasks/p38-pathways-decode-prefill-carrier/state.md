@@ -6,8 +6,24 @@
 - Definition of done: one source-pinned flag-on run reports exact
   `S_decode_vs_S_prefill`, exact `S_prefill_vs_T_old`, and exact
   `T_old_vs_T_current` before a strict full workload is admitted.
-- Active phase: P38.2t target-aware Round-0 tail join and terminal split.
-  P38s18r2 reached one
+- Active phase: P38.2u one-pass terminal discriminator. P38.2t admitted the
+  immutable target-aware v3 analysis bundle: 32/32 red points join, 26 first
+  measured at `raw_log_normalizer`, 6 at `raw_target_logit`, and its overall
+  verdict remains `INCONCLUSIVE_PARTIAL_RUN`. P38.2u now distinguishes exact
+  selected final-hidden rows, lm_head raw-logit blocks, block reduction, the
+  existing tail observer, and the production endpoint in one default-off run.
+  The first real-v5p prototype correctly exposed an observer design bug: a
+  fused shape-dependent gather/reduction falsely reported reduction drift on
+  a locally exact A-B run. The corrected design separates gather and uses one
+  fixed-four-row raw/processed reduction executable. The fresh v5p gate is
+  complete: 155/155 joined rows are exact, the real-TPU one-bit negative
+  detects mutation, and observer-off/on production endpoints are bitwise
+  neutral across all three frozen rounds. See
+  `artifacts/p38_2u_terminal_discriminator_onehost_0817.md`. No 64-TPU launch
+  is authorized before explicit user-reviewed publication.
+- Task directory:
+  `canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/`.
+- P38.2t execution history: P38s18r2 reached one
   numerical round on 64 TPU (`DP16xTP4`, concurrency 256), then the learner
   timed out after 900 seconds waiting for the durability ACK. The worker took
   about 57 minutes to serially upload and read back 3,776 small objects and
@@ -24,10 +40,8 @@
   controls, and real-v5p same-input canonical-tail construction gate are
   complete and passed final pre-publication review. The user approved the
   publication CL on 2026-08-17. The next gate is one zero-TPU GCS-side v3
-  reduction from the clean published branch. No training or P38 target
-  relaunch precedes it.
-- Task directory:
-  `canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/`.
+  reduction from the clean published branch. That reduction is now admitted;
+  P38.2u supersedes its old no-relaunch instruction.
 
 ## Latest target facts
 

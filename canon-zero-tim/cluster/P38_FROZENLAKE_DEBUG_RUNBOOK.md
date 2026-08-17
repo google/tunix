@@ -1,4 +1,38 @@
-# P38 FrozenLake: P38.2o decode seam localization
+# P38 FrozenLake debug runbook
+
+## Current operator card: P38s19 / P38.2u terminal discriminator
+
+The current target is one 64-chip stock diagnostic, not FrozenLake full
+training. Its purpose is to split the remaining A-B carrier among exact final
+hidden rows, lm_head logits, vocabulary reduction, the production tail, and
+the final gather/subtract. It keeps prefix cache off, freezes weights, performs
+zero backward and zero optimizer commits, and uses concurrency 256.
+
+The authoritative design and claim ceiling are in
+`tasks/p38-pathways-decode-prefill-carrier/phases/p38-2u-terminal-discriminator.md`.
+The copy/paste render/apply command and return-file contract are at the top of
+`tasks/p38-pathways-decode-prefill-carrier/HANDOFF.md`. Do not reuse an old
+P38 YAML or add env values by hand.
+
+Mandatory render flags:
+
+```text
+--stock-only --max-concurrency 256 --seam-mode layer
+--terminal-tail --terminal-discriminator
+```
+
+The 2026-08-17 one-host receipt now says `terminal_rows_exact` plus
+`observer_endpoint_bitwise_neutral`; it is linked from the phase document.
+Before applying, the clean source must still have the user-approved full SHA.
+On target, the classifier is valid only
+when `selection_scope=capsule_red_points` and `joined_red_points` equals the
+complete capsule mismatch count. An all-clean-row classification is not a
+substitute.
+
+Rollback is omission of `--terminal-discriminator`; all three terminal env
+flags then remain unset. No production/full-training default changes.
+
+## History: P38.2o decode seam localization
 
 This runbook is diagnostic-only. It never launches FrozenLake full training,
 evaluation, backward, optimizer commit, prefix cache, or unified KV. P48 is a

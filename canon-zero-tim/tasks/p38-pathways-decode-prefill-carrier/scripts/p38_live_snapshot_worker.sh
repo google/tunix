@@ -72,7 +72,9 @@ snapshot_if_changed() {
         "$observer_dir"/p38_seam_*.json \
         "$observer_dir"/p38_seam_*.npz \
         "$observer_dir"/p38_tail_*.json \
-        "$observer_dir"/p38_tail_*.npz; do
+        "$observer_dir"/p38_tail_*.npz \
+        "$observer_dir"/p38_terminal_*.json \
+        "$observer_dir"/p38_terminal_*.npz; do
       observer_signature+="$(basename "$observer_path"):$(wc -c < "$observer_path" | tr -d '[:space:]'),"
     done
     shopt -u nullglob

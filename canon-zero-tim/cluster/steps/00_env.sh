@@ -331,6 +331,21 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
       echo "[env] P38 terminal-tail byte bound is set without the observer" >&2
       fail=1
     fi
+    if [ -n "${CANON_P38_TERMINAL_DISCRIMINATOR:-}" ]; then
+      req CANON_P38_TERMINAL_MAX_BYTES
+      req CANON_P38_TERMINAL_CLASSIFICATION
+      [ "${CANON_P38_TERMINAL_DISCRIMINATOR:-}" = "1" ] && \
+      [ "${CANON_P38_TAIL_OBSERVER:-}" = "1" ] && \
+      [ "${CANON_P38_TERMINAL_MAX_BYTES:-}" = "1073741824" ] && \
+      [ "${CANON_P38_TERMINAL_CLASSIFICATION:-}" = \
+          "${CANON_STATE%/}/p38_terminal.classification.json" ] || {
+        echo "[env] P38 terminal discriminator contract drifted" >&2
+        fail=1
+      }
+    elif [ -n "${CANON_P38_TERMINAL_MAX_BYTES:-}${CANON_P38_TERMINAL_CLASSIFICATION:-}" ]; then
+      echo "[env] P38 terminal discriminator fields are set without the observer" >&2
+      fail=1
+    fi
   elif [ "${CANON_KV_UNIFIED:-0}" = "0" ]; then
     for k in CANON_P38_KV_OBSERVER_DIR \
              CANON_P38_KV_OBSERVER_MAX_CANDIDATES \

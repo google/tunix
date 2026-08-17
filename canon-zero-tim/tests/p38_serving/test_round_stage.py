@@ -23,7 +23,9 @@ SPEC.loader.exec_module(stage_module)
 
 class RoundStageTest(unittest.TestCase):
 
-  def _fixture(self, root: Path, *, tail: bool = True) -> argparse.Namespace:
+  def _fixture(
+      self, root: Path, *, tail: bool = True, terminal: bool = True,
+  ) -> argparse.Namespace:
     observer = root / "observer"
     observer.mkdir()
     run_log = root / "run.log"
@@ -61,6 +63,12 @@ class RoundStageTest(unittest.TestCase):
     self._record_pair(observer, "p38_seam_000000", "p38-seam-fingerprint-v1")
     if tail:
       self._record_pair(observer, "p38_tail_000000", "p38-tail-values-v1")
+    if terminal:
+      self._record_pair(
+          observer,
+          "p38_terminal_000000",
+          "p38-terminal-discriminator-v1",
+      )
     return argparse.Namespace(
         round=0,
         output=root / "round",
@@ -73,6 +81,7 @@ class RoundStageTest(unittest.TestCase):
         require_seam=True,
         require_kv=False,
         require_tail=True,
+        require_terminal=True,
     )
 
   def _record_pair(self, root: Path, stem: str, schema: str) -> None:
@@ -93,11 +102,13 @@ class RoundStageTest(unittest.TestCase):
       result = stage_module.stage(args)
       self.assertEqual(result["seam_records"], 1)
       self.assertEqual(result["tail_records"], 1)
+      self.assertEqual(result["terminal_records"], 1)
       for name in (
           "mismatch-capsule.npz", "pre-alignment.jsonl",
           "request-journal.jsonl", "incident-ledger.jsonl",
           "p38_seam_000000.json", "p38_seam_000000.npz",
           "p38_tail_000000.json", "p38_tail_000000.npz",
+          "p38_terminal_000000.json", "p38_terminal_000000.npz",
           "ROUND_INVENTORY.json",
       ):
         self.assertTrue((args.output / name).is_file(), name)
@@ -115,6 +126,11 @@ class RoundStageTest(unittest.TestCase):
     with tempfile.TemporaryDirectory() as directory:
       args = self._fixture(Path(directory), tail=False)
       with self.assertRaisesRegex(ValueError, "has no tail records"):
+        stage_module.stage(args)
+    with tempfile.TemporaryDirectory() as directory:
+      args = self._fixture(Path(directory), terminal=False)
+      with self.assertRaisesRegex(
+          ValueError, "has no terminal discriminator records"):
         stage_module.stage(args)
     with tempfile.TemporaryDirectory() as directory:
       args = self._fixture(Path(directory))

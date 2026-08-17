@@ -5,7 +5,97 @@ parallel Qwen3-32B DeepSWE workstream, read
 `../p39-deepswe-production/HANDOFF.md`. P38 evidence cannot promote P39, and
 P39 evidence cannot promote P38.
 
-## CURRENT: P38s18r2 Round 0 needs target-aware tail reduction; no TPU relaunch
+## CURRENT: prepare one P38.2u terminal-discriminator launch
+
+P38.2t is closed as analysis evidence. Its immutable v3 bundle joins all 32
+P38s18r2 red actions: 26 first measured at the raw normalizer and 6 at the raw
+target logit, while the recorded layer/final-norm fingerprints are equal. This
+does not prove full hidden or logits bytes. P38.2u is the next and only target
+diagnostic: exact selected final-hidden rows, bounded raw-logit block evidence,
+block reduction, existing tail values, and production logprob in one run.
+
+Read `phases/p38-2u-terminal-discriminator.md` before operating. The feature is
+default-off and does not enable prefix cache, backward, optimizer commit,
+evaluation, full training, or unified KV.
+
+### Publication/admission gate
+
+Do not launch while the worktree is dirty. The local gates below passed on
+2026-08-17 and are recorded in
+`artifacts/p38_2u_terminal_discriminator_onehost_0817.md`:
+
+```text
+P33_EXACT_IMAGE_PASS ... runner_tests_per_overlay=34 overlays=2
+real v5p: PASS mode=terminal-discriminator rounds=3 backward=0 optimizer_commits=0
+real v5p terminal classification: terminal_rows_exact
+real v5p off/on neutrality: observer_endpoint_bitwise_neutral
+classifier one-bit/missing-red/conflicting-alias negatives: PASS
+```
+
+The first prototype is intentionally not admissible: it fused the
+shape-dependent gather with block reduction and produced false observer reds
+on an exact local A-B run. The published source must contain
+`reduction_program=shared-fixed-four-row-v1` and the classifier must reject any
+older record.
+
+The final source is still uncommitted and unpublished. A passing local receipt
+does not authorize rendering from the dirty worktree; wait for the user's
+explicit commit/push approval and substitute that full SHA below.
+
+### Exact 64-chip operator sequence after user-approved publication
+
+Use a fresh run id (registered name `p38s19`) and the full approved SHA. Do not
+edit the rendered YAML.
+
+```bash
+set -euo pipefail
+git fetch origin yuxzhang/canon-zero-tim
+SOURCE_COMMIT="<APPROVED_FULL_SHA>"
+test "$(git rev-parse FETCH_HEAD)" = "$SOURCE_COMMIT"
+RUN_ID=p38s19
+OUT="/tmp/p38-serving-$RUN_ID"
+test ! -e "$OUT"
+
+python3 canon-zero-tim/cluster/render_p38_serving_jobsets.py \
+  --source-commit "$SOURCE_COMMIT" \
+  --run-id "$RUN_ID" \
+  --output-dir "$OUT" \
+  --stock-only \
+  --max-concurrency 256 \
+  --seam-mode layer \
+  --terminal-tail \
+  --terminal-discriminator
+
+YAML="$OUT/jobset-p38-serving-stock.yaml"
+grep -Fq 'name: CANON_P38_TERMINAL_DISCRIMINATOR' "$YAML"
+grep -Fq 'name: CANON_P38_TERMINAL_MAX_BYTES' "$YAML"
+grep -Fq 'name: CANON_P38_TERMINAL_CLASSIFICATION' "$YAML"
+grep -Fq 'value: "1"' "$YAML"
+kubectl apply --dry-run=server -f "$YAML"
+kubectl apply -f "$YAML"
+```
+
+Return the complete GCS attempt-0 package, not screenshots or a hand summary.
+Admission requires three immutable round capsules, all red points joined in
+both A and B, `p38_terminal.classification.json`, source/log/classifier SHA,
+controlled exit 42, `COLLECTED.json`, `COMPLETE.json`, and a verifying
+`SHA256SUMS`. If a pod dies, return the newest live snapshot too.
+
+Interpret only the capsule-scoped classifier:
+
+- `pre_lm_head_hidden`: reopen the upstream seam;
+- `lm_head_logits`: lm_head/program envelope;
+- `vocab_block_reduction`: raw fixed block exp-sum/merge;
+- `logits_processing`: raw-to-processed sampling/logits transform;
+- `processed_vocab_block_reduction`: processed fixed block exp-sum/merge;
+- `production_tail_only`: production gather/subtract wiring;
+- mixed: retain every signature;
+- any missing/ambiguous red join: `INCONCLUSIVE`.
+
+This one run should name the first divergent terminal subprogram. It does not
+claim that the repair itself is complete.
+
+## HISTORY: P38s18r2 target-aware tail reduction
 
 P38s18r2/source `10fe951f0186...` ran on 64 TPU (`DP16xTP4`, concurrency 256,
 three frozen rounds, seam mode `layer`, terminal tail enabled). Round 0 reached

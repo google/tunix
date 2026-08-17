@@ -294,6 +294,39 @@ class RenderP38ServingJobsetsTest(unittest.TestCase):
           terminal_tail=True,
       )
 
+  def test_terminal_discriminator_is_explicit_and_fail_closed(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      paths = renderer.render_all(
+          base_path=_BASE,
+          output_dir=Path(tmp),
+          source_commit=_SOURCE,
+          run_id="p38-term-disc",
+          stock_only=True,
+          seam_mode="layer",
+          terminal_tail=True,
+          terminal_discriminator=True,
+      )
+      document = yaml.safe_load(paths[0].read_text())
+      env = _env(document)
+      self.assertEqual(env["CANON_P38_TERMINAL_DISCRIMINATOR"], "1")
+      self.assertEqual(env["CANON_P38_TERMINAL_MAX_BYTES"], "1073741824")
+      self.assertEqual(
+          document["metadata"]["labels"][
+              "canon.zero-tim/terminal-discriminator"
+          ],
+          "1",
+      )
+    with self.assertRaisesRegex(ValueError, "requires --terminal-tail"):
+      renderer.render_all(
+          base_path=_BASE,
+          output_dir=Path(tempfile.mkdtemp()),
+          source_commit=_SOURCE,
+          run_id="invalid-terminal-discriminator",
+          stock_only=True,
+          seam_mode="layer",
+          terminal_discriminator=True,
+      )
+
   def test_rejects_capture_contract_drift(self):
     base = renderer.p33.load_base(_BASE)
     spec, unified = renderer._SPECS[0]

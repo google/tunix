@@ -2,9 +2,9 @@
 # Rehearse the P38 multi-round incident hook on real Qwen3-8B DP1xTP4.
 set -euo pipefail
 
-mode="${1:?usage: run_p38_incident_onehost.sh off|on|seam-layer|seam-tail <unique-label>}"
-label="${2:?usage: run_p38_incident_onehost.sh off|on|seam-layer|seam-tail <unique-label>}"
-case "$mode" in off|on|seam-layer|seam-tail) ;; *) echo "invalid mode: $mode" >&2; exit 2 ;; esac
+mode="${1:?usage: run_p38_incident_onehost.sh off|on|seam-layer|seam-tail|terminal-discriminator <unique-label>}"
+label="${2:?usage: run_p38_incident_onehost.sh off|on|seam-layer|seam-tail|terminal-discriminator <unique-label>}"
+case "$mode" in off|on|seam-layer|seam-tail|terminal-discriminator) ;; *) echo "invalid mode: $mode" >&2; exit 2 ;; esac
 case "$label" in *[!a-zA-Z0-9_-]*|'') echo "invalid label: $label" >&2; exit 2 ;; esac
 
 script_dir="$(cd "$(dirname "$0")" && pwd)"
@@ -85,7 +85,8 @@ if [ "$mode" = on ]; then
     -e CANON_P38_KV_OBSERVER_MAX_BYTES=134217728
     -e CANON_P38_KV_OBSERVER_MAX_READ_BYTES=671088640
   )
-elif [ "$mode" = seam-layer ] || [ "$mode" = seam-tail ]; then
+elif [ "$mode" = seam-layer ] || [ "$mode" = seam-tail ] || \
+     [ "$mode" = terminal-discriminator ]; then
   capture_env+=(
     -e CANON_P38_SEAM_OBSERVER=layer
     -e CANON_P38_SEAM_OBSERVER_DIR="$capture"
@@ -93,10 +94,16 @@ elif [ "$mode" = seam-layer ] || [ "$mode" = seam-tail ]; then
     -e CANON_P38_SEAM_MAX_POSITION=1600
     -e CANON_P38_SEAM_MAX_BYTES=536870912
   )
-  if [ "$mode" = seam-tail ]; then
+  if [ "$mode" = seam-tail ] || [ "$mode" = terminal-discriminator ]; then
     capture_env+=(
       -e CANON_P38_TAIL_OBSERVER=1
       -e CANON_P38_TAIL_MAX_BYTES=268435456
+    )
+  fi
+  if [ "$mode" = terminal-discriminator ]; then
+    capture_env+=(
+      -e CANON_P38_TERMINAL_DISCRIMINATOR=1
+      -e CANON_P38_TERMINAL_MAX_BYTES=1073741824
     )
   fi
 fi
@@ -229,7 +236,8 @@ PY
     --output "$state/p38_kv_observer.classification.json"
   grep -q '"classification": "observer_pairs_valid_red_join_pending"' \
     "$state/p38_kv_observer.classification.json"
-elif [ "$mode" = seam-layer ] || [ "$mode" = seam-tail ]; then
+elif [ "$mode" = seam-layer ] || [ "$mode" = seam-tail ] || \
+     [ "$mode" = terminal-discriminator ]; then
   grep -q '^\[CANON_P38_SEAM_OBSERVER_INIT\] enabled=1 mode=layer ' "$raw"
   grep -q '^\[CANON_P38_SEAM_OBSERVER_RECORD\] ' "$raw"
   python3 - "$capture" <<'PY'
@@ -258,7 +266,7 @@ print(
     f"records={len(records)} observed_rounds={sorted(rounds)} endpoint_rounds=3"
 )
 PY
-  if [ "$mode" = seam-tail ]; then
+  if [ "$mode" = seam-tail ] || [ "$mode" = terminal-discriminator ]; then
     grep -q '^\[CANON_P38_TAIL_OBSERVER_INIT\] enabled=1 ' "$raw"
     grep -q '^\[CANON_P38_TAIL_OBSERVER_RECORD\] ' "$raw"
     python3 - "$capture" <<'PY'
@@ -282,6 +290,44 @@ for record in records:
 print(
     "[P38.INCIDENT.ONEHOST] TERMINAL_TAIL_PASS "
     f"records={len(records)} observed_rounds={sorted(rounds)}"
+)
+PY
+  fi
+  if [ "$mode" = terminal-discriminator ]; then
+    grep -q '^\[CANON_P38_TERMINAL_DISCRIMINATOR_INIT\] enabled=1 ' "$raw"
+    grep -q '^\[CANON_P38_TERMINAL_DISCRIMINATOR_RECORD\] ' "$raw"
+    classification="$evidence/p38_terminal_${label}.classification.json"
+    python3 "$script_dir/classify_p38_terminal_discriminator.py" \
+      --input "$capture" --output "$classification"
+    python3 - "$capture" "$classification" <<'PY'
+import hashlib, json, pathlib, sys
+import numpy as np
+
+root = pathlib.Path(sys.argv[1])
+classification = json.loads(pathlib.Path(sys.argv[2]).read_text())
+assert classification["records"] > 0
+assert classification["joined_rows"] > 0
+assert classification["classification"] == "terminal_rows_exact", classification
+assert classification["missing_b_rows"] == 0, classification
+assert classification["red_rows"] == [], classification
+records = [json.loads(path.read_text()) for path in sorted(
+    root.glob("p38_terminal_*.json"))]
+assert {record["arm"] for record in records} == {"A", "B"}
+for record in records:
+  assert record["schema"] == "p38-terminal-discriminator-v1"
+  assert record["reduction_program"] == "shared-fixed-four-row-v1"
+  npz = root / f"p38_terminal_{record['record_index']:06d}.npz"
+  assert hashlib.sha256(npz.read_bytes()).hexdigest() == record["npz_sha256"]
+  with np.load(npz) as arrays:
+    assert arrays["final_hidden_rows"].ndim == 2
+    assert arrays["raw_logit_signatures"].shape[-1] == 6
+    assert arrays["raw_block_exp_sum"].shape == arrays["raw_block_max"].shape
+    assert arrays["processed_logit_signatures"].shape[-1] == 6
+    assert arrays["processed_block_exp_sum"].shape == arrays["processed_block_max"].shape
+print(
+    "[P38.INCIDENT.ONEHOST] TERMINAL_DISCRIMINATOR_PASS "
+    f"records={len(records)} joins={classification['joined_rows']} "
+    f"classification={classification['classification']}"
 )
 PY
   fi

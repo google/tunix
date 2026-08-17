@@ -380,6 +380,22 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
         "$CANON_P38_SEAM_CLASSIFICATION"
     fi
   fi
+  p38_terminal_rc=0
+  if [ "${CANON_P38_TERMINAL_DISCRIMINATOR:-0}" = "1" ]; then
+    JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
+      python3 "$CANON_PKG/tasks/p38-pathways-decode-prefill-carrier/scripts/classify_p38_terminal_discriminator.py" \
+        --input "$CANON_P38_SEAM_OBSERVER_DIR" \
+        "${p38_seam_args[@]}" \
+        --require-red-join \
+        --output "$CANON_P38_TERMINAL_CLASSIFICATION" || \
+      p38_terminal_rc=$?
+    if [ -s "$CANON_P38_TERMINAL_CLASSIFICATION" ]; then
+      p38_terminal_sha="$(sha256sum "$CANON_P38_TERMINAL_CLASSIFICATION" | awk '{print $1}')"
+      echo "[CANON_P38_TERMINAL_CLASSIFICATION] path=$CANON_P38_TERMINAL_CLASSIFICATION sha256=$p38_terminal_sha"
+      sed 's/^/[CANON_P38_TERMINAL_CLASSIFICATION_JSON] /' \
+        "$CANON_P38_TERMINAL_CLASSIFICATION"
+    fi
+  fi
   if [ -d "$CANON_P38_SERVING_CAPTURE_DIR" ]; then
     tar --sort=name --mtime=@0 --owner=0 --group=0 \
       -C "$CANON_P38_SERVING_CAPTURE_DIR" \
@@ -399,6 +415,9 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
     rc=2
   fi
   if [ "${p38_seam_rc:-0}" -ne 0 ] && [ "$rc" -eq 0 ]; then
+    rc=2
+  fi
+  if [ "${p38_terminal_rc:-0}" -ne 0 ] && [ "$rc" -eq 0 ]; then
     rc=2
   fi
 fi
@@ -435,10 +454,13 @@ n_p38_seam_records=$(grep -ac '^\[CANON_P38_SEAM_OBSERVER_RECORD\] ' "$LOG" || t
 n_p38_tail_init=$(grep -ac '^\[CANON_P38_TAIL_OBSERVER_INIT\] ' "$LOG" || true)
 n_p38_tail_a=$(grep -ac '^\[CANON_P38_TAIL_OBSERVER_RECORD\] .* arm=A ' "$LOG" || true)
 n_p38_tail_b=$(grep -ac '^\[CANON_P38_TAIL_OBSERVER_RECORD\] .* arm=B ' "$LOG" || true)
+n_p38_terminal_init=$(grep -ac '^\[CANON_P38_TERMINAL_DISCRIMINATOR_INIT\] ' "$LOG" || true)
+n_p38_terminal_a=$(grep -ac '^\[CANON_P38_TERMINAL_DISCRIMINATOR_RECORD\] .* arm=A ' "$LOG" || true)
+n_p38_terminal_b=$(grep -ac '^\[CANON_P38_TERMINAL_DISCRIMINATOR_RECORD\] .* arm=B ' "$LOG" || true)
 n_p38_coverage=$(grep -ac '^\[CANON_P38\] DIAGNOSTIC_COVERAGE_CONTRACT .*prompt_groups=32 .*unit_prompts=4 .*units=8 .*trajectories=256 .*partial_tail=reject verdict=PASS' "$LOG" || true)
 n_p38_standard_init=$(grep -ac '^\[CANON_P38_SERVING_CAPTURE_INIT\].*expected_path=standard' "$LOG" || true)
 n_p38_standard_observe=$(grep -aEc '^\[CANON_P38_SERVING_CAPTURE_OBSERVE\].*"program_path"[[:space:]]*:[[:space:]]*"standard"' "$LOG" || true)
-echo "[run] PATHTRACE fixed_ar=$n_ar embed=$n_emb logprob_m=$n_lp wandb_online=$n_wandb p34_wandb_online=$n_wandb_p34 eval_off=$n_eval_off eval_on=$n_eval_on p35_base=$n_p35_base p35_stop=$n_p35_stop p35_replay=$n_p35_replay p35_stage_begin=$n_p35_stage_begin p35_stage_ready=$n_p35_stage_ready p35_stage_complete=$n_p35_stage_complete p38_precheck=$n_p38_precheck p38_rounds=$n_p38_rounds p38_controlled_exit=$n_p38_controlled_exit p38_kv_unified=$n_p38_kv_unified p38_capture_init=$n_p38_capture_init p38_capture_observe=$n_p38_capture_observe p38_capture_error=$n_p38_capture_error p38_request_journal=$n_p38_request_journal p38_incident_ledger=$n_p38_incident_ledger p38_kv_observer_init=$n_p38_kv_observer_init p38_kv_observer_candidate=$n_p38_kv_observer_candidate p38_kv_observer_a=$n_p38_kv_observer_a p38_kv_observer_b=$n_p38_kv_observer_b p38_seam_init=$n_p38_seam_init p38_seam_records=$n_p38_seam_records p38_tail_init=$n_p38_tail_init p38_tail_a=$n_p38_tail_a p38_tail_b=$n_p38_tail_b p38_coverage=$n_p38_coverage"
+echo "[run] PATHTRACE fixed_ar=$n_ar embed=$n_emb logprob_m=$n_lp wandb_online=$n_wandb p34_wandb_online=$n_wandb_p34 eval_off=$n_eval_off eval_on=$n_eval_on p35_base=$n_p35_base p35_stop=$n_p35_stop p35_replay=$n_p35_replay p35_stage_begin=$n_p35_stage_begin p35_stage_ready=$n_p35_stage_ready p35_stage_complete=$n_p35_stage_complete p38_precheck=$n_p38_precheck p38_rounds=$n_p38_rounds p38_controlled_exit=$n_p38_controlled_exit p38_kv_unified=$n_p38_kv_unified p38_capture_init=$n_p38_capture_init p38_capture_observe=$n_p38_capture_observe p38_capture_error=$n_p38_capture_error p38_request_journal=$n_p38_request_journal p38_incident_ledger=$n_p38_incident_ledger p38_kv_observer_init=$n_p38_kv_observer_init p38_kv_observer_candidate=$n_p38_kv_observer_candidate p38_kv_observer_a=$n_p38_kv_observer_a p38_kv_observer_b=$n_p38_kv_observer_b p38_seam_init=$n_p38_seam_init p38_seam_records=$n_p38_seam_records p38_tail_init=$n_p38_tail_init p38_tail_a=$n_p38_tail_a p38_tail_b=$n_p38_tail_b p38_terminal_init=$n_p38_terminal_init p38_terminal_a=$n_p38_terminal_a p38_terminal_b=$n_p38_terminal_b p38_coverage=$n_p38_coverage"
 if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
   if [ "$n_p38_capture_init" -ne 1 ] || [ "$n_p38_capture_observe" -le 0 ]; then
     echo "[run] FATAL: P38 serving capture hook was not observed: init=$n_p38_capture_init observe=$n_p38_capture_observe" >&2
@@ -474,6 +496,14 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
      { [ "$n_p38_tail_init" -ne 1 ] || [ "$n_p38_tail_a" -le 0 ] || \
        [ "$n_p38_tail_b" -le 0 ]; }; then
     echo "[run] FATAL: P38 terminal-tail observer contract failed: init=$n_p38_tail_init A=$n_p38_tail_a B=$n_p38_tail_b" >&2
+    exit 1
+  fi
+  if [ "${CANON_P38_TERMINAL_DISCRIMINATOR:-0}" = "1" ] && \
+     { [ "$n_p38_terminal_init" -ne 1 ] || \
+       [ "$n_p38_terminal_a" -le 0 ] || [ "$n_p38_terminal_b" -le 0 ] || \
+       [ "${p38_terminal_rc:-1}" -ne 0 ] || \
+       [ ! -s "${CANON_P38_TERMINAL_CLASSIFICATION:-}" ]; }; then
+    echo "[run] FATAL: P38 terminal discriminator contract failed: init=$n_p38_terminal_init A=$n_p38_terminal_a B=$n_p38_terminal_b classifier=${p38_terminal_rc:-unset}" >&2
     exit 1
   fi
   if [ "${p38_persist_rc:-1}" -ne 0 ]; then
@@ -697,8 +727,9 @@ PY
   if [ "$rc" -ne "$p38_expected_rc" ] || [ "$n_p38_precheck" -ne 1 ] || \
      [ "${p38_capture_rc:-1}" -ne 0 ] || \
      [ "${p38_kv_observer_rc:-0}" -ne 0 ] || \
-     [ "${p38_seam_rc:-0}" -ne 0 ]; then
-    echo "[run] FATAL: P38 serving precheck is incomplete: rc=$rc expected_rc=$p38_expected_rc markers=$n_p38_precheck capture_rc=${p38_capture_rc:-unset} kv_observer_rc=${p38_kv_observer_rc:-unset} seam_rc=${p38_seam_rc:-unset}" >&2
+     [ "${p38_seam_rc:-0}" -ne 0 ] || \
+     [ "${p38_terminal_rc:-0}" -ne 0 ]; then
+    echo "[run] FATAL: P38 serving precheck is incomplete: rc=$rc expected_rc=$p38_expected_rc markers=$n_p38_precheck capture_rc=${p38_capture_rc:-unset} kv_observer_rc=${p38_kv_observer_rc:-unset} seam_rc=${p38_seam_rc:-unset} terminal_rc=${p38_terminal_rc:-unset}" >&2
     exit 1
   fi
   p38_request_live_action complete || {
