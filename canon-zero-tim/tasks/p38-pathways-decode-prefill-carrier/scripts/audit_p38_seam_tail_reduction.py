@@ -20,6 +20,14 @@ class SeamTailBundleAuditError(RuntimeError):
   pass
 
 
+_LEGACY_CLASSIFIER_COMPATIBILITY = {
+    (
+        "1cd458a09d792d558b3d107689643be377ab7cfb6d3fe13a434cd6163b210c1a",
+        "08bc4ed3e0e8651a58aced44749163ed598ca4d395b73e0cd110bc0647c808ce",
+    ),
+}
+
+
 def _require(condition: bool, message: str) -> None:
   if not condition:
     raise SeamTailBundleAuditError(message)
@@ -131,6 +139,8 @@ def audit(root: Path) -> dict[str, Any]:
   _require(root.is_dir(), f"bundle directory is absent: {root}")
   file_count = _verify_sha_inventory(root)
   manifest = _load_json(root / "REDUCTION_MANIFEST.json")
+  target_identity_required = (
+      manifest.get("tail_target_identity_required") is True)
   ambiguity = _load_json(root / "AMBIGUITY_AUDIT.json")
   selection = _load_json(root / "SNAPSHOT_SELECTION.json")
   verdict = _load_json(root / "verdict.json")
@@ -200,8 +210,17 @@ def audit(root: Path) -> dict[str, Any]:
            and classifier_line[0]
            == manifest.get("classifier_source_sha256"),
            "bundle classifier source SHA drifted")
-  _require(classifier_line[0] == _sha256(Path(seam.__file__).resolve()),
-           "auditor classifier source differs from the bundle classifier")
+  active_classifier_sha = _sha256(Path(seam.__file__).resolve())
+  if target_identity_required:
+    _require(classifier_line[0] == active_classifier_sha,
+             "auditor classifier source differs from the bundle classifier")
+  else:
+    _require(
+        classifier_line[0] == active_classifier_sha
+        or (classifier_line[0], active_classifier_sha)
+        in _LEGACY_CLASSIFIER_COMPATIBILITY,
+        "auditor classifier source differs from the legacy-compatible set",
+    )
   source_manifest_entries = base._manifest_entries(
       root / "SOURCE_SHA256SUMS")
   source_names = {relative for _, relative in source_manifest_entries}
@@ -241,7 +260,14 @@ def audit(root: Path) -> dict[str, Any]:
       candidate_dir, str(manifest.get("observer_mode")), required)
   tail_matches, _, _ = reducer._scan_tail_records(candidate_dir, required)
   seam_resolution = reducer._resolve_matches(seam_matches)
-  tail_resolution = reducer._resolve_matches(tail_matches)
+  required_tail = (
+      reducer._required_tail_keys(points, required)
+      if target_identity_required else None)
+  tail_resolution = (
+      reducer._resolve_tail_matches(tail_matches, required_tail)
+      if required_tail is not None
+      else reducer._resolve_matches(tail_matches)
+  )
   _require(manifest.get("join_entries") == seam_resolution["join_entries"],
            "seam alias decisions differ when independently reproduced")
   _require(manifest.get("tail_join_entries")
@@ -251,6 +277,14 @@ def audit(root: Path) -> dict[str, Any]:
            "seam ambiguity audit differs when independently reproduced")
   _require(ambiguity.get("tail") == tail_resolution,
            "tail ambiguity audit differs when independently reproduced")
+  if target_identity_required:
+    _require(manifest.get("required_tail_keys") == len(required_tail),
+             "target-aware required-tail total drifted")
+    _require(
+        manifest.get("tail_target_mismatch_candidates")
+        == tail_resolution["target_mismatch_candidates"],
+        "tail target-mismatch audit differs when independently reproduced",
+    )
   combined_unmatched = [
       {"observer": "seam", **entry}
       for entry in seam_resolution["unmatched_keys"]
@@ -362,7 +396,7 @@ def audit(root: Path) -> dict[str, Any]:
            == (classification.get("joined_red_points") if classification else 0),
            "bundle joined-red-point total drifted")
 
-  return {
+  report = {
       "schema": "p38-seam-tail-reduction-bundle-audit-v1",
       "bundle_integrity": "PASS",
       "scientific_verdict": expected_verdict,
@@ -387,6 +421,11 @@ def audit(root: Path) -> dict[str, Any]:
       "classifier_rc": classifier_rc,
       "sha_verified_files": file_count,
   }
+  if target_identity_required:
+    report["tail_target_mismatch_rows"] = sum(
+        entry["candidate_count"]
+        for entry in tail_resolution["target_mismatch_candidates"])
+  return report
 
 
 def main() -> int:

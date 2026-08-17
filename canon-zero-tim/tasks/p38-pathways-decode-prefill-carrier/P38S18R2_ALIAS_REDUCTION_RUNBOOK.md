@@ -1,9 +1,8 @@
-# P38s18r2 alias-aware seam-and-tail reduction runbook
+# P38s18r2 target-aware seam-and-tail reduction runbook
 
 This is the current operator card for P38s18r2. Read
-`phases/p38-2s-round0-alias-aware-seam-tail-reduction.md` first. The task is a
-zero-TPU analysis of the already sealed Round 0; do not launch or relaunch a
-JobSet.
+`phases/p38-2t-target-aware-tail-join.md` first. The task is a zero-TPU
+analysis of the already sealed Round 0; do not launch or relaunch a JobSet.
 
 ## Why the old command is retired
 
@@ -21,21 +20,34 @@ against the 3,896-object listing after adding the two sealing files. The raw
 observer records overlap; a whole-directory classifier requires uniqueness
 and therefore stops before joining the 32 red points.
 
-Do not rerun the same direct classifier. Do not pick the first or last
-duplicate. Do not hand-write a classification.
+The immutable v2 reduction subsequently proved that its one remaining tail
+conflict mixed different scored targets under one source-prefix key. Do not
+rerun either old command. Do not pick the first or last duplicate. Do not
+hand-write a classification.
 
-## Stage A — review and publish the completed offline reducer
+## Stage A — published target-aware reducer amendment
 
-The implementation is complete in the review worktree. It adds:
+The implementation and final pre-publication gates are complete, and the user
+approved publication on 2026-08-17. This CL adds:
 
+- a target-aware path in `classify_p38_seam.py`, keyed by source prefix and
+  scored target while retaining legacy-manifest behavior;
 - `reduce_p38_seam_tail_evidence.py`, the immutable-round seam-plus-tail
   reducer;
 - `audit_p38_seam_tail_reduction.py`, an independent auditor that rescans every
   candidate, recomputes both alias maps, and reruns the official classifier;
-- `p38s18r2_round0_contract.json`, the only admitted production contract;
+- `p38s18r2_round0_target_join_contract.json`, the new immutable v3 output
+  contract;
 - `run_reduce_p38s18r2_round0_on_gcp.sh`, the one-command GCS wrapper; and
-- `test_reduce_p38_seam_tail_evidence.py`, including fake-GCS end-to-end and
-  32-red-point/64-key fixtures.
+- `test_reduce_p38_seam_tail_evidence.py`, including fake-GCS end-to-end,
+  32-red-point/64-key, different-target, missing-target, and same-target
+  conflict fixtures.
+
+The amendment keeps all same-prefix candidates, but tail alias/conflict
+resolution considers only candidates whose `target_id` equals the capsule
+target. Wrong-target candidates remain auditable under `candidates/`; absence
+of the capsule target and same-target numerical disagreement both remain
+fail-closed. The legacy v2 auditor output must remain byte-identical.
 
 Before publication, review the diff and require:
 
@@ -51,7 +63,8 @@ Before publication, review the diff and require:
    - revert command; and
    - confirmation that no TPU, source GCS mutation, commit, or push occurred.
 
-Stop for user approval. Do not commit or push automatically.
+This approval applies only to the Stage A code publication. The returned Stage
+B evidence remains a separate CL and still requires separate user approval.
 
 The existing reducer is not sufficient unchanged: it reduces hidden seam
 records only and invokes the classifier without `require_tail=True`.
@@ -64,11 +77,11 @@ command by hand. From the clean published checkout run exactly:
 
 ```bash
 TASK="canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier"
-RETURN="$TASK/evidence/p38s18r2/seam-tail-reduction-v2"
+RETURN="$TASK/evidence/p38s18r2/seam-tail-target-aware-v3"
 
 test -z "$(git status --short)"
 bash "$TASK/scripts/run_reduce_p38s18r2_round0_on_gcp.sh" \
-  "$TASK/scripts/p38s18r2_round0_contract.json" \
+  "$TASK/scripts/p38s18r2_round0_target_join_contract.json" \
   /tmp \
   "$RETURN"
 ```
@@ -81,11 +94,11 @@ Fixed source and destination:
 
 ```bash
 ROUND_URI="gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-p38-fl-stock-p38s18r2-10fe951f/attempt-0/rounds/000000"
-DEST="gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-p38-fl-stock-p38s18r2-10fe951f/attempt-0/derived/p38s18r2-round0-seam-tail-reduction-v2"
+DEST="gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-p38-fl-stock-p38s18r2-10fe951f/attempt-0/derived/p38s18r2-round0-seam-tail-target-aware-v3"
 ```
 
 Fail before downloading if `$DEST/files/SHA256SUMS` already exists. Never
-overwrite v1, v2, or source objects.
+overwrite source, v1, or v2 objects.
 
 The wrapper performs, in order:
 
@@ -95,7 +108,8 @@ The wrapper performs, in order:
    exact manifest inventory, and every file SHA;
 4. require actual counts `seam_records=972`, `tail_records=972`, object listing
    3,896, source manifest 3,894, and capsule red points 32;
-5. run alias-aware seam-plus-tail reduction for all 64 A/B keys;
+5. run alias-aware seam reduction and target-aware tail reduction for all 64
+   A/B keys;
 6. run the official classifier with `--mode layer --require-tail` over only
    the byte-preserved selected records when and only when no key is missing or
    conflicting;
@@ -146,10 +160,11 @@ action.
 ## Acceptance
 
 A usable scientific classification requires 32/32 joined red points, 64/64
-matched seam keys, 64/64 matched tail keys, no payload conflicts, mandatory
-tail join, and standalone auditor PASS. The scientific verdict still reads
-`INCONCLUSIVE_PARTIAL_RUN`, because the original three-round run stopped after
-Round 0.
+matched seam keys, 64/64 matched tail keys, target identity enabled, no
+same-target payload conflicts, mandatory tail join, and standalone auditor
+PASS. Wrong-target candidates must remain listed in the ambiguity audit. The
+scientific verdict still reads `INCONCLUSIVE_PARTIAL_RUN`, because the
+original three-round run stopped after Round 0.
 
 Missing keys, seam conflicts, tail conflicts, classifier failure, or auditor
 failure stay `INCONCLUSIVE`; they do not authorize a new TPU run until the
@@ -162,14 +177,14 @@ scientific receipt, not permission to rerun or overwrite the destination.
 
 > Work only on P38s18r2 offline evidence. First read
 > `canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/HANDOFF.md`, then
-> `canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/phases/p38-2s-round0-alias-aware-seam-tail-reduction.md`, then
+> `canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/phases/p38-2t-target-aware-tail-join.md`, then
 > `canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/P38S18R2_ALIAS_REDUCTION_RUNBOOK.md`
 > completely. Do not launch TPU work and do not rerun the old direct
 > whole-directory classifier. After Stage A is approved and published, do not
 > rewrite its reducer/auditor/wrapper. Verify a clean checkout at the approved
-> full SHA, run the exact Stage B command with the checked-in contract and
+> full SHA, run the exact Stage B command with the target-aware contract and
 > return directory, and return the entire generated compact result plus the
 > terminal COMPLETE line and `git status --short`—not a prose summary. Never
 > overwrite source/v1/v2 objects, fabricate missing rounds, manually choose a
-> duplicate, or call this one-round result signed evidence. Stop before commit
-> or push until the user explicitly approves that separate act.
+> duplicate or target, or call this one-round result signed evidence. Stop
+> before commit or push until the user explicitly approves that separate act.

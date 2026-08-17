@@ -4,7 +4,7 @@
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "$0")" && pwd)"
-contract="${1:-$script_dir/p38s18r2_round0_contract.json}"
+contract="${1:-$script_dir/p38s18r2_round0_target_join_contract.json}"
 scratch_parent="${2:-/tmp}"
 return_dir="${3:-}"
 
@@ -37,10 +37,13 @@ expected_red="$(contract_value expected_red_points)"
 expected_rounds="$(contract_value expected_rounds)"
 mode="$(contract_value mode)"
 require_tail="$(contract_value require_tail)"
+tail_target_identity_required="false"
+if [ "$schema" = "p38s18r2-round0-reduction-contract-v2" ]; then
+  tail_target_identity_required="$(contract_value tail_target_identity_required)"
+fi
 max_output_bytes="$(contract_value max_output_bytes)"
 
-if [ "$schema" != "p38s18r2-round0-reduction-contract-v1" ] \
-  || [ "$mode" != "layer" ] || [ "$require_tail" != "true" ]; then
+if [ "$mode" != "layer" ] || [ "$require_tail" != "true" ]; then
   echo "[P38S18R2.REDUCE.GCP] REFUSING: contract schema/mode/tail drifted" >&2
   exit 2
 fi
@@ -50,9 +53,10 @@ case "$source_uri" in
   *) echo "[P38S18R2.REDUCE.GCP] REFUSING: invalid immutable round URI" >&2; exit 2 ;;
 esac
 attempt_root="${source_uri%/rounds/*}"
-case "$destination_uri" in
-  "$attempt_root"/derived/p38s18r2-round0-seam-tail-reduction-v2) ;;
-  *) echo "[P38S18R2.REDUCE.GCP] REFUSING: invalid v2 destination URI" >&2; exit 2 ;;
+case "$schema:$tail_target_identity_required:$destination_uri" in
+  "p38s18r2-round0-reduction-contract-v1:false:$attempt_root"/derived/p38s18r2-round0-seam-tail-reduction-v2) ;;
+  "p38s18r2-round0-reduction-contract-v2:true:$attempt_root"/derived/p38s18r2-round0-seam-tail-target-aware-v3) ;;
+  *) echo "[P38S18R2.REDUCE.GCP] REFUSING: invalid schema/target/destination contract" >&2; exit 2 ;;
 esac
 
 if command -v gcloud >/dev/null 2>&1; then
@@ -73,7 +77,7 @@ else
 fi
 
 if gcs_exists "$destination_uri/files/SHA256SUMS"; then
-  echo "[P38S18R2.REDUCE.GCP] REFUSING: immutable v2 destination already exists" >&2
+  echo "[P38S18R2.REDUCE.GCP] REFUSING: immutable destination already exists" >&2
   exit 3
 fi
 
@@ -137,6 +141,17 @@ if [ ! -s "$output_dir/SHA256SUMS" ]; then
   exit 2
 fi
 (cd "$output_dir" && sha256sum -c SHA256SUMS --quiet)
+if [ "$tail_target_identity_required" = "true" ]; then
+  python3 - "$output_dir/REDUCTION_MANIFEST.json" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+manifest = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+if manifest.get("tail_target_identity_required") is not True:
+  raise SystemExit("target-aware contract produced a legacy manifest")
+PY
+fi
 
 python3 "$script_dir/audit_p38_seam_tail_reduction.py" \
   --bundle-dir "$output_dir" \

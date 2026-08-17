@@ -5,7 +5,7 @@ parallel Qwen3-32B DeepSWE workstream, read
 `../p39-deepswe-production/HANDOFF.md`. P38 evidence cannot promote P39, and
 P39 evidence cannot promote P38.
 
-## CURRENT: P38s18r2 Round 0 needs alias-aware seam-plus-tail reduction; no TPU relaunch
+## CURRENT: P38s18r2 Round 0 needs target-aware tail reduction; no TPU relaunch
 
 P38s18r2/source `10fe951f0186...` ran on 64 TPU (`DP16xTP4`, concurrency 256,
 three frozen rounds, seam mode `layer`, terminal tail enabled). Round 0 reached
@@ -38,6 +38,22 @@ exited. Rounds 1 and 2 never started.
   `classification.json`. The returned verdict is
   `INCONCLUSIVE_REMOTE_CLASSIFICATION`. This is an analysis-workflow mismatch,
   not evidence that the source files are missing or corrupt.
+- **The committed v2 compact bundle is complete but scientifically
+  inconclusive**: 371/371 SHA entries and its independent audit pass. It joins
+  64/64 seam keys and 63/64 tail keys. The sole tail conflict shares one
+  source-prefix SHA but mixes target 54852 (required by the capsule; two
+  byte-identical aliases) with unrelated target 13598. Tail identity was
+  under-specified; source bytes are not contradictory.
+- **Exploratory target-aware reclassification, not yet admitted evidence**:
+  all 32 red points join. The first measured difference is
+  `raw_log_normalizer` for 26 points and `raw_target_logit` for 6 points; all
+  recorded layer/final-norm fingerprints remain equal. This must be reproduced
+  by the immutable v3 wrapper before it enters the evidence ledger.
+- **Real one-host construction control**: identical `[256,151936]` float32
+  logits passed through two outer TPU programs and the same canonical
+  log-softmax with 0/38,895,616 different elements; a one-bit negative reported
+  exactly one. Therefore a same-input canonical-reducer construction bug is
+  not sufficient to explain production.
 - **Overall verdict**: `INCONCLUSIVE_DURABILITY_SEAL_TIMEOUT`. There is no
   controlled exit 42, root `COLLECTED`/`COMPLETE`, or three-round target
   verdict. The Round 0 numbers are analysis-grade.
@@ -46,36 +62,31 @@ exited. Rounds 1 and 2 never started.
 
 Raw seam/tail NPZ files stay in GCS. Do not ask the local evaluator to list or
 download the bucket, and do not manually summarize thousands of records. Do
-not rerun the direct whole-directory classifier: overlapping seam observations
-violate its uniqueness precondition. A GCS-authorized agent must first use the
-alias-aware seam-plus-tail reduction registered in
-`phases/p38-2s-round0-alias-aware-seam-tail-reduction.md`, then return the
-compact byte-preserving bundle defined by
+not rerun the direct whole-directory classifier or immutable v2 reducer. A
+GCS-authorized agent must use the target-aware seam-plus-tail reduction
+registered in `phases/p38-2t-target-aware-tail-join.md`, then return the
+new compact byte-preserving bundle defined by
 `P38S18R2_ALIAS_REDUCTION_RUNBOOK.md`.
 
-Neither old path is compatible unchanged: `run_reduce_p38s18l_on_gcp.sh`
-expects a P38s18l live snapshot and at least two capsules. The replacement
-implementation is complete locally: dedicated seam-plus-tail reducer,
-independent auditor, fixed Round-0 contract, one-command GCS wrapper, and
-focused/fake-GCS tests. It is not published yet; remote execution waits for
-review plus explicit commit/push approval.
+The target-aware amendment is complete: reducer, independent auditor, new
+immutable v3 contract, one-command GCS wrapper, and focused/fake-GCS positive
+and negative controls. Publication was explicitly approved on 2026-08-17.
+Remote execution waits only for a clean checkout containing this CL.
 
 ### Exact next steps for the incoming agent
 
 1. **Do not launch TPU and do not overwrite any source or v1 derived object.**
-2. Review the completed Stage A implementation and gates in
-   `P38S18R2_ALIAS_REDUCTION_RUNBOOK.md`. Stop before commit/push for user
-   approval.
-3. After that code is separately approved and published, run the exact Stage B
-   wrapper command once from a clean checkout. Do not hand-build arguments;
-   use `scripts/p38s18r2_round0_contract.json`.
-4. Require 32 red points, 64/64 seam keys, 64/64 tail keys, no payload
-   conflicts, mandatory tail join, and standalone auditor PASS. Equivalent
-   aliases are admitted only after full numerical payload identity.
+2. Confirm the clean checkout contains the published target-aware Stage A CL
+   and read `P38S18R2_ALIAS_REDUCTION_RUNBOOK.md`.
+3. Run the exact Stage B wrapper command once. Do not hand-build arguments;
+   use `scripts/p38s18r2_round0_target_join_contract.json`.
+4. Require 32 red points, 64/64 seam keys, 64/64 tail keys, no same-target
+   payload conflicts, mandatory target-aware tail join, and standalone auditor
+   PASS. Wrong-target candidates remain preserved as provenance.
 5. Return the wrapper-created
-   `evidence/p38s18r2/seam-tail-reduction-v2/` directory, which contains every
-   raw candidate for the required keys, capsule, classifier output, and audit
-   JSON. Raw unrelated records remain in GCS.
+   `evidence/p38s18r2/seam-tail-target-aware-v3/` directory, which contains
+   every raw candidate for the required keys, capsule, classifier output, and
+   audit JSON. Raw unrelated records remain in GCS.
 6. Stop and report. Do not commit or push the returned evidence until the user
    explicitly approves that separate action.
 

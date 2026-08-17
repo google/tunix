@@ -239,7 +239,7 @@ def _load_records(
 
 def _load_tail_records(
     directory: Path,
-) -> dict[tuple[int, bytes, str], dict[str, Any]]:
+) -> dict[tuple[int, bytes, str, int], dict[str, Any]]:
   paths = sorted(directory.glob("p38_tail_*.json"))
   _require(paths, "P38 terminal-tail observer produced no records")
   result = {}
@@ -284,9 +284,14 @@ def _load_tail_records(
     _require(arm in ("A", "B") and 0 <= diagnostic_round < 8,
              f"terminal-tail provenance drifted: {path.name}")
     for row_offset in range(rows.size):
-      key = (diagnostic_round, bytes(hashes[row_offset]), arm)
+      key = (
+          diagnostic_round,
+          bytes(hashes[row_offset]),
+          arm,
+          int(target_ids[row_offset]),
+      )
       _require(key not in result,
-               "duplicate terminal-tail token-prefix record")
+               "duplicate terminal-tail token-prefix/target record")
       result[key] = {
           "record_index": index,
           "row_index": int(rows[row_offset]),
@@ -473,7 +478,7 @@ def _tail_numeric_payload_sha256(
 
 def _load_manifest_selected_tail_row(
     directory: Path,
-    key: tuple[int, bytes, str],
+    key: tuple[int, bytes, str] | tuple[int, bytes, str, int],
     selected: dict[str, Any],
 ) -> dict[str, Any]:
   index = int(selected.get("record_index", -1))
@@ -517,6 +522,9 @@ def _load_manifest_selected_tail_row(
   )
   _require(bytes(hashes[row_offset]) == key[1],
            f"selected terminal-tail token prefix drifted: {index}")
+  if len(key) == 4:
+    _require(int(target_ids[row_offset]) == key[3],
+             f"selected terminal-tail target drifted: {index}")
   checkpoint_names = [str(value) for value in record.get(
       "checkpoint_names", ())]
   _require(tuple(checkpoint_names) == _TAIL_CHECKPOINTS,
@@ -559,8 +567,10 @@ def _load_manifest_selected_tail_row(
 def _load_v2_tail_join_records(
     directory: Path,
     manifest: dict[str, Any],
-    required: set[tuple[int, bytes, str]],
-) -> dict[tuple[int, bytes, str], dict[str, Any]]:
+    required: set[tuple[int, bytes, str]]
+    | set[tuple[int, bytes, str, int]],
+) -> dict[tuple[int, bytes, str] | tuple[int, bytes, str, int],
+          dict[str, Any]]:
   entries = manifest.get("tail_join_entries")
   _require(isinstance(entries, list) and entries,
            "seam reduction terminal-tail join map is absent")
@@ -571,6 +581,8 @@ def _load_v2_tail_join_records(
     try:
       prefix = str(entry["token_prefix_sha256"]).encode("ascii")
       key = (int(entry["diagnostic_round"]), prefix, str(entry["arm"]))
+      if manifest.get("tail_target_identity_required") is True:
+        key = (*key, int(entry["expected_target_id"]))
     except (KeyError, UnicodeEncodeError, ValueError) as error:
       raise SeamError("seam reduction terminal-tail join key is invalid") from error
     _require(key not in entry_map,
@@ -579,7 +591,7 @@ def _load_v2_tail_join_records(
   _require(set(entry_map) == required,
            "seam reduction terminal-tail join map differs from red actions")
   records = {}
-  for key in sorted(required, key=lambda value: (value[0], value[1], value[2])):
+  for key in sorted(required, key=lambda value: tuple(value)):
     entry = entry_map[key]
     _require(entry.get("resolution") in ("unique", "equivalent_alias"),
              "seam reduction terminal-tail join is not numerically resolved")
@@ -718,6 +730,15 @@ def classify(
       (point["diagnostic_round"], point["token_prefix_sha256"], arm)
       for point in red_points for arm in ("A", "B")
   }
+  required_tail = {
+      (
+          point["diagnostic_round"],
+          point["token_prefix_sha256"],
+          arm,
+          int(point["target_id"]),
+      )
+      for point in red_points for arm in ("A", "B")
+  }
   if reduction is not None and reduction.get(
       "schema") == "p38-seam-reduction-v2":
     records = _load_v2_join_records(directory, mode, reduction, required)
@@ -728,9 +749,15 @@ def classify(
       "schema") == "p38-seam-reduction-v2":
     _require(reduction.get("require_tail") is True,
              "seam reduction did not register terminal-tail evidence")
+    tail_target_identity = (
+        reduction.get("tail_target_identity_required") is True)
     tail_records = _load_v2_tail_join_records(
-        directory, reduction, required)
+        directory,
+        reduction,
+        required_tail if tail_target_identity else required,
+    )
   else:
+    tail_target_identity = require_tail
     tail_records = _load_tail_records(directory) if require_tail else {}
   joins = []
   for point in red_points:
@@ -742,8 +769,13 @@ def classify(
     _require(a["position"] == b["position"] == point["source_position"],
              "joined seam source position drifted")
     first = _first_difference(a, b)
-    tail_a = tail_records.get((*base, "A")) if require_tail else None
-    tail_b = tail_records.get((*base, "B")) if require_tail else None
+    tail_target = int(point["target_id"])
+    tail_a_key = (*base, "A", tail_target) if tail_target_identity else (
+        *base, "A")
+    tail_b_key = (*base, "B", tail_target) if tail_target_identity else (
+        *base, "B")
+    tail_a = tail_records.get(tail_a_key) if require_tail else None
+    tail_b = tail_records.get(tail_b_key) if require_tail else None
     if require_tail:
       _require(tail_a is not None and tail_b is not None,
                "not every red action joined A/B terminal-tail records")

@@ -6,7 +6,7 @@
 - Definition of done: one source-pinned flag-on run reports exact
   `S_decode_vs_S_prefill`, exact `S_prefill_vs_T_old`, and exact
   `T_old_vs_T_current` before a strict full workload is admitted.
-- Active phase: P38.2s alias-aware GCS-side Round 0 seam-plus-tail reduction.
+- Active phase: P38.2t target-aware Round-0 tail join and terminal split.
   P38s18r2 reached one
   numerical round on 64 TPU (`DP16xTP4`, concurrency 256), then the learner
   timed out after 900 seconds waiting for the durability ACK. The worker took
@@ -17,12 +17,15 @@
   committed input: only 1/32 mismatch elements is at `kv_prefix % 256 == 0`.
   Commit `a514c3bf` returned a closed 3,896-object source listing and
   3,894-entry manifest, with 972 paired seam and 972 paired tail records. The
-  direct official classifier returned rc 1 at duplicate seam token-prefix
-  records before classification. The alias-aware reducer, independent auditor,
-  fixed Round-0 contract, one-command GCS wrapper, and focused/fake-GCS tests
-  are complete in an isolated local review worktree and remain unpublished.
-  Next gate is diff review plus explicit publication approval, followed by one
-  immutable GCS-side execution; no TPU relaunch precedes that review.
+  v2 compact-bundle auditor now reproduces 64/64 seam and 63/64 tail joins.
+  Its sole tail conflict mixed target token 54852, required by the capsule,
+  with an unrelated target token 13598 under the same source-prefix SHA.
+  The target-aware reducer/auditor amendment, immutable v3 contract, negative
+  controls, and real-v5p same-input canonical-tail construction gate are
+  complete and passed final pre-publication review. The user approved the
+  publication CL on 2026-08-17. The next gate is one zero-TPU GCS-side v3
+  reduction from the clean published branch. No training or P38 target
+  relaunch precedes it.
 - Task directory:
   `canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/`.
 
@@ -338,19 +341,20 @@
 
 ## Next action
 
-1. Review the completed Stage A diff and gates in
-   `P38S18R2_ALIAS_REDUCTION_RUNBOOK.md`; stop before commit/push until the user
-   explicitly approves publication.
-2. After publication, execute the checked-in Stage B wrapper and contract once
-   beside GCS. The wrapper returns the compact audited bundle directly into
-   the task evidence tree. Do not relaunch TPU.
-3. Require 32/32 red-point joins, 64/64 seam keys, 64/64 tail keys, no payload
-   conflicts, and standalone bundle-auditor PASS. Preserve equivalent aliases
-   with full provenance; never choose first/last silently.
-4. Review the first-difference signatures before deciding whether another TPU
-   run is necessary. If a fresh three-round run is still needed, first replace
-   the serial per-object round trip with one immutable archive upload/readback;
-   do not rely on a longer timeout alone and do not reuse `p38s18r2`.
+1. Review the P38.2t target-aware reducer/auditor/wrapper diff and local gates
+   in `P38S18R2_ALIAS_REDUCTION_RUNBOOK.md`. Stop before commit/push until the
+   user explicitly approves publication.
+2. After publication, execute the checked-in target-aware contract once beside
+   GCS. It writes a new immutable v3 destination and returns the compact
+   audited bundle. Do not relaunch TPU.
+3. Require 32/32 red-point joins, 64/64 seam keys, 64/64 tail keys, no
+   same-target payload conflicts, explicit wrong-target provenance, and
+   standalone bundle-auditor PASS.
+4. If the official v3 result reproduces the exploratory terminal split, build
+   one observer-neutral terminal discriminator that separates pre-lm-head
+   hidden bytes, full logits, target-dot output, row max, exp-sum, and log
+   normalizer. Do not call the reducer causal before proving equal full logits
+   enter unequal normalizers.
 
 ## Claim ceiling and blockers
 
@@ -366,6 +370,10 @@
 - Exact production-envelope reproduction, or an in-situ first-divergence
   observer with neutrality evidence, remains the hard gate before a RoPE/RPA/
   residual/logits repair claim.
+- The real-v5p same-input canonical log-softmax construction is exact across
+  38,895,616 float32 elements with a live one-bit negative control. This
+  rejects only a bounded one-host reducer construction bug; it does not prove
+  equal production full-logit inputs or a 64-chip Pathways executable.
 - P38 capture is diagnostic-only and must not be injected into P45 committed
   training. GSM8K/DeepSWE warning-only campaigns are separate workstreams and
   do not promote P38.

@@ -1730,3 +1730,38 @@ reclassification from the committed NPZ inputs.
 - No TPU launch, GCS access/mutation, commit, or push occurred. Next gate is
   user review and explicit publication approval, then one remote wrapper
   execution from the approved full SHA.
+
+## 2026-08-17 UTC — P38.2t target-aware tail identity
+
+- Independently re-audited the committed P38s18r2 v2 bundle: all 371 SHA
+  entries verify and the old audit reproduces byte-for-byte. Its only failed
+  tail key is source-prefix SHA `e7427e60...`: records 510/723 score capsule
+  target 54852 with identical payloads, while record 539 scores target 13598.
+- Amended only the offline reducer/auditor contract. Tail candidates are now
+  filtered by the capsule target before alias/conflict resolution. Every
+  same-prefix candidate remains under `candidates/`; a missing target and a
+  same-target payload conflict remain fail-closed.
+- Added an immutable v3 contract/destination and wrapper guard. The old v1/v2
+  contract and derived bundle remain readable and cannot be overwritten.
+- Focused reducer/auditor/wrapper suite passes 19/19, including a regression
+  over the committed compact candidates that reproduces 32/32 joins, a true
+  same-prefix/two-target end-to-end fixture, different-
+  target admission, missing-target rejection, same-target conflict rejection,
+  fake-GCS completion-last upload, and legacy-v2 byte-identical audit. The
+  importable P38 suite has 63 passing tests; the renderer module is `TARGET NOT
+  RUN` in the host interpreter because `metrax` is absent. Four P38 shell
+  suites pass.
+- Exploratory local reclassification of the committed compact candidates joins
+  32/32 red points: 26 first differ at `raw_log_normalizer`, 6 at
+  `raw_target_logit`. This is a hypothesis-shaping result, not admitted v3
+  evidence until the checked-in wrapper reproduces it from immutable GCS.
+- Ran the existing bounded real-v5p canonical-tail construction control at
+  `[256,151936]`: two outer programs using the same canonical log-softmax are
+  exact at 0/38,895,616 elements, while the one-bit negative reports 1. This
+  rejects a same-input one-host reducer construction failure only.
+- No training path, model overlay, serving runtime default, prefix-cache
+  setting, source GCS object, or TPU job changed. The user explicitly approved
+  the publication CL on 2026-08-17. Final pre-publication reruns passed focused
+  19/19, importable P38 63/63, all four shell suites, Python/shell/JSON syntax,
+  credential scan, and `git diff --check`. The next gate is one zero-TPU v3
+  GCS reduction from the clean published branch.

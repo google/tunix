@@ -284,6 +284,24 @@ def _scan_tail_records(
   return matches, matching_records, len(json_paths)
 
 
+def _required_tail_keys(
+    red_points: list[dict[str, Any]],
+    required: set[tuple[int, bytes, str]],
+) -> set[tuple[int, bytes, str, int]]:
+  keys = set()
+  for point in red_points:
+    for arm in ("A", "B"):
+      keys.add((
+          int(point["diagnostic_round"]),
+          bytes(point["token_prefix_sha256"]),
+          arm,
+          int(point["target_id"]),
+      ))
+  _require({key[:3] for key in keys} == required,
+           "capsule tail keys differ from required seam arm keys")
+  return keys
+
+
 def _resolve_matches(
     matches: dict[tuple[int, bytes, str], list[dict[str, Any]]],
 ) -> dict[str, Any]:
@@ -343,6 +361,90 @@ def _resolve_matches(
   }
 
 
+def _resolve_tail_matches(
+    matches: dict[tuple[int, bytes, str], list[dict[str, Any]]],
+    required: set[tuple[int, bytes, str, int]],
+) -> dict[str, Any]:
+  entries = []
+  unmatched = []
+  conflicts = []
+  aliases = []
+  target_mismatches = []
+  selected_indices = set()
+  for key in sorted(required, key=lambda value: (
+      value[0], value[1], value[2], value[3])):
+    base_key = key[:3]
+    expected_target_id = int(key[3])
+    all_candidates = sorted(matches.get(base_key, ()), key=lambda value: (
+        value["record_index"], value["row_offset"]))
+    candidates = [
+        value for value in all_candidates
+        if int(value["target_id"]) == expected_target_id
+    ]
+    excluded = [
+        value for value in all_candidates
+        if int(value["target_id"]) != expected_target_id
+    ]
+    key_json = {
+        **base._key_json(base_key),
+        "expected_target_id": expected_target_id,
+    }
+    if excluded:
+      target_mismatches.append({
+          **key_json,
+          "candidate_count": len(excluded),
+          "candidates": excluded,
+      })
+    if not candidates:
+      resolution = "missing"
+      selected = None
+      unmatched.append(key_json)
+    else:
+      payloads = {value["numeric_payload_sha256"] for value in candidates}
+      if len(candidates) == 1:
+        resolution = "unique"
+      elif len(payloads) == 1:
+        resolution = "equivalent_alias"
+      else:
+        resolution = "payload_conflict"
+      selected = candidates[0] if resolution in (
+          "unique", "equivalent_alias") else None
+      if selected is not None:
+        selected_indices.add(int(selected["record_index"]))
+      if resolution == "equivalent_alias":
+        aliases.append({
+            **key_json,
+            "candidate_count": len(candidates),
+            "selected": selected,
+            "aliases": candidates[1:],
+        })
+      elif resolution == "payload_conflict":
+        conflicts.append({
+            **key_json,
+            "candidate_count": len(candidates),
+            "candidates": candidates,
+        })
+    entries.append({
+        **key_json,
+        "resolution": resolution,
+        "selected": selected,
+        "candidates": candidates,
+        "target_mismatch_candidates": excluded,
+    })
+  return {
+      "join_entries": entries,
+      "unmatched_keys": unmatched,
+      "payload_conflict_keys": conflicts,
+      "equivalent_alias_keys": aliases,
+      "target_mismatch_candidates": target_mismatches,
+      "selected_record_indices": sorted(selected_indices),
+      "matched_keys": sum(
+          entry["resolution"] in ("unique", "equivalent_alias")
+          for entry in entries),
+      "selection_complete": not unmatched and not conflicts,
+  }
+
+
 def _copy_record_set(
     records: dict[int, tuple[Path, Path]],
     destination: Path,
@@ -389,6 +491,7 @@ def reduce(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
       base._key(point["diagnostic_round"], point["token_prefix_sha256"], arm)
       for point in red_points for arm in ("A", "B")
   }
+  required_tail = _required_tail_keys(red_points, required)
   _require({key[0] for key in required} == {source_fact["diagnostic_round"]},
            "capsule diagnostic round differs from the source round")
 
@@ -401,7 +504,10 @@ def reduce(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
   _require(source_tail_count == source_fact["tail_records"],
            "scanned tail-record count differs from source inventory")
   seam_resolution = _resolve_matches(seam_matches)
-  tail_resolution = _resolve_matches(tail_matches)
+  tail_resolution = _resolve_tail_matches(tail_matches, required_tail)
+  tail_target_mismatch_rows = sum(
+      entry["candidate_count"]
+      for entry in tail_resolution["target_mismatch_candidates"])
   selection_complete = (
       seam_resolution["selection_complete"]
       and tail_resolution["selection_complete"])
@@ -466,15 +572,18 @@ def reduce(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
   ambiguity = {
       "schema": "p38-seam-tail-ambiguity-audit-v1",
       "required_arm_keys": len(required),
+      "required_tail_keys": len(required_tail),
       "selection_complete": selection_complete,
       "seam": seam_resolution,
       "tail": tail_resolution,
       "unmatched_keys": combined_unmatched,
       "payload_conflict_keys": combined_conflicts,
       "interpretation": (
+          "Tail candidates are first restricted to the capsule target ID. "
           "Aliases are admitted only when every registered provenance field "
-          "and numerical payload byte is identical. Conflicts retain all "
-          "candidate source files and remain fail-closed."
+          "and numerical payload byte is identical. Wrong-target candidates "
+          "and conflicts retain all source files; missing capsule targets and "
+          "same-target conflicts remain fail-closed."
       ),
   }
   _write_json(output / "AMBIGUITY_AUDIT.json", ambiguity)
@@ -486,6 +595,7 @@ def reduce(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
       "schema": "p38-seam-reduction-v2",
       "status": "selected" if selection_complete else "inconclusive",
       "require_tail": True,
+      "tail_target_identity_required": True,
       "source_gcs_uri": args.source_gcs_uri.rstrip("/"),
       "source_commit": source_fact["complete"]["source_commit"],
       "analysis_source_commit": args.analysis_source_commit,
@@ -511,6 +621,7 @@ def reduce(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
       "capsule_rounds": [source_fact["diagnostic_round"]],
       "red_points": len(red_points),
       "required_arm_keys": len(required),
+      "required_tail_keys": len(required_tail),
       "matched_arm_keys": seam_resolution["matched_keys"],
       "matched_seam_keys": seam_resolution["matched_keys"],
       "matched_tail_keys": tail_resolution["matched_keys"],
@@ -520,6 +631,8 @@ def reduce(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
       "equivalent_alias_keys": seam_resolution["equivalent_alias_keys"],
       "tail_equivalent_alias_keys": tail_resolution[
           "equivalent_alias_keys"],
+      "tail_target_mismatch_candidates": tail_resolution[
+          "target_mismatch_candidates"],
       "ambiguity_audit": "AMBIGUITY_AUDIT.json",
       "join_entries": seam_resolution["join_entries"],
       "tail_join_entries": tail_resolution["join_entries"],
@@ -598,7 +711,7 @@ def reduce(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
   _write_json(output / "verdict.json", verdict_record)
   (output / "PACKAGING.txt").write_text(
       "\n".join((
-          "P38s18r2 Round 0 alias-aware seam-tail reduction v2.",
+          "P38s18r2 Round 0 target-aware seam-tail reduction.",
           f"source_gcs_uri: {args.source_gcs_uri.rstrip('/')}",
           f"source_seam_records: {source_seam_count}",
           f"source_tail_records: {source_tail_count}",
@@ -608,6 +721,7 @@ def reduce(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
           f"matched_tail_keys: {tail_resolution['matched_keys']}",
           f"seam_alias_keys: {len(seam_resolution['equivalent_alias_keys'])}",
           f"tail_alias_keys: {len(tail_resolution['equivalent_alias_keys'])}",
+          f"tail_target_mismatch_rows: {tail_target_mismatch_rows}",
           f"payload_conflict_keys: {len(combined_conflicts)}",
           f"classifier_rc: {classifier_rc}",
           f"verdict: {verdict}",

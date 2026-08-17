@@ -1,10 +1,17 @@
 # P38.2s — Round-0 alias-aware seam-and-tail reduction
 
-Status: active; Deliverable A is implemented and locally gated in an isolated
-uncommitted review worktree. This is a zero-TPU, GCS-side analysis phase. It
+Status: complete as a fail-closed diagnosis; continued by P38.2t. The immutable
+v2 bundle passed its independent audit with 64/64 seam and 63/64 tail keys.
+Its sole apparent payload conflict mixed different scored target tokens under
+one source-prefix identity. This is a zero-TPU, GCS-side analysis phase. It
 supersedes the direct whole-directory classifier command in
 `P38S18R_RUNBOOK.md`; it does not supersede or modify any immutable P38s18r2
 source object.
+
+The target-aware correction is specified in
+`p38-2t-target-aware-tail-join.md`. Do not overwrite or reinterpret the v2
+bundle; it remains the reproducible receipt that exposed the missing identity
+field.
 
 ## Entering evidence
 

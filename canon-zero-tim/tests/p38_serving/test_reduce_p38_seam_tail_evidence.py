@@ -16,6 +16,10 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = ROOT / "tasks/p38-pathways-decode-prefill-carrier/scripts"
+sys.path.insert(0, str(SCRIPTS))
+import classify_p38_seam as seam_classifier  # pylint: disable=wrong-import-position
+import reduce_p38_seam_tail_evidence as reducer  # pylint: disable=wrong-import-position
+
 REDUCER = SCRIPTS / "reduce_p38_seam_tail_evidence.py"
 AUDITOR = SCRIPTS / "audit_p38_seam_tail_reduction.py"
 CLASSIFIER = SCRIPTS / "classify_p38_seam.py"
@@ -271,6 +275,8 @@ class ReduceP38SeamTailEvidenceTest(unittest.TestCase):
       seam_conflict: bool = False,
       tail_alias: bool = False,
       tail_conflict: bool = False,
+      tail_other_target: bool = False,
+      tail_target_missing: bool = False,
       omit_seam_b: bool = False,
       omit_tail_b: bool = False,
   ) -> tuple[Path, Path, dict]:
@@ -288,9 +294,12 @@ class ReduceP38SeamTailEvidenceTest(unittest.TestCase):
       self._write_seam(
           source, 11, "A", data["prefixes"], data["positions"],
           data["source_tokens"], mutate_row=0 if seam_conflict else None)
+    target_ids = list(data["target_ids"])
+    if tail_target_missing:
+      target_ids[0] += 1000
     self._write_tail(
         source, 30, "A", data["prefixes"], data["positions"],
-        data["source_tokens"], data["target_ids"], data["decode"])
+        data["source_tokens"], target_ids, data["decode"])
     if not omit_tail_b:
       self._write_tail(
           source, 40, "B", data["prefixes"], data["positions"],
@@ -300,8 +309,53 @@ class ReduceP38SeamTailEvidenceTest(unittest.TestCase):
           source, 31, "A", data["prefixes"], data["positions"],
           data["source_tokens"], data["target_ids"], data["decode"],
           mutate_row=0 if tail_conflict else None)
+    if tail_other_target:
+      self._write_tail(
+          source, 32, "A", data["prefixes"][:1], data["positions"][:1],
+          data["source_tokens"][:1], [data["target_ids"][0] + 1000],
+          [data["decode"][0] + 9.0])
     listing, contract = self._seal(source)
     contract["capsule"] = capsule
+    return source, listing, contract
+
+  def _branching_fixture(self, root: Path) -> tuple[Path, Path, dict]:
+    source = root / "source"
+    source.mkdir()
+    prompt = np.asarray([[11], [11]], dtype=np.int32)
+    completion = np.asarray([[21], [22]], dtype=np.int32)
+    decode = np.zeros((2, 1), dtype=np.float32)
+    prefill = np.full((2, 1), np.float32(0.5), dtype=np.float32)
+    capsule = source / "mismatch-capsule.npz"
+    np.savez(
+        capsule,
+        metadata_json=np.frombuffer(
+            json.dumps({"diagnostic_round": 0}).encode(), dtype=np.uint8),
+        selected_rows=np.asarray([254, 255], dtype=np.int32),
+        prompt_ids=prompt,
+        prompt_mask=np.ones_like(prompt, dtype=np.bool_),
+        completion_ids=completion,
+        completion_valid_mask=np.ones_like(completion, dtype=np.bool_),
+        action_mask=np.ones_like(completion, dtype=np.bool_),
+        s_decode=decode,
+        s_prefill=prefill,
+    )
+    prefix = _prefix(prompt[0])
+    self._write_seam(source, 10, "A", [prefix], [0], [11])
+    self._write_seam(source, 20, "B", [prefix], [0], [11])
+    for index, arm, values in ((30, "A", [0.0, 0.0]),
+                               (40, "B", [0.5, 0.5])):
+      self._write_tail(
+          source,
+          index,
+          arm,
+          [prefix, prefix],
+          [0, 0],
+          [11, 11],
+          [21, 22],
+          values,
+      )
+    listing, contract = self._seal(source)
+    contract.update({"capsule": capsule, "red_points": 2})
     return source, listing, contract
 
   def _run(self, source: Path, listing: Path, contract: dict, output: Path):
@@ -351,6 +405,7 @@ class ReduceP38SeamTailEvidenceTest(unittest.TestCase):
       self.assertTrue(report["tail_observer_required_and_joined"])
       self.assertEqual(report["joined_red_points"], 1)
       manifest = json.loads((output / "REDUCTION_MANIFEST.json").read_text())
+      self.assertTrue(manifest["tail_target_identity_required"])
       self.assertEqual(manifest["matched_seam_keys"], 2)
       self.assertEqual(manifest["matched_tail_keys"], 2)
       audit = self._audit(output, root / "audit.json")
@@ -390,6 +445,93 @@ class ReduceP38SeamTailEvidenceTest(unittest.TestCase):
       output = root / "output"
       result = self._run(source, listing, contract, output)
       self.assertEqual(result.returncode, 4, result.stderr)
+      audit = self._audit(output, root / "audit.json")
+      self.assertEqual(audit.returncode, 0, audit.stderr)
+
+  def test_same_prefix_different_tail_target_is_not_a_payload_conflict(self):
+    with tempfile.TemporaryDirectory() as directory:
+      root = Path(directory)
+      source, listing, contract = self._fixture(
+          root, tail_other_target=True)
+      output = root / "output"
+      result = self._run(source, listing, contract, output)
+      self.assertEqual(result.returncode, 0, result.stderr)
+      manifest = json.loads((output / "REDUCTION_MANIFEST.json").read_text())
+      self.assertEqual(manifest["matched_tail_keys"], 2)
+      self.assertEqual(len(manifest["ambiguous_keys"]), 0)
+      mismatches = manifest["tail_target_mismatch_candidates"]
+      self.assertEqual(len(mismatches), 1)
+      self.assertEqual(mismatches[0]["expected_target_id"], 21)
+      self.assertEqual(mismatches[0]["candidate_count"], 1)
+      self.assertTrue((output / "candidates/p38_tail_000032.npz").is_file())
+      self.assertFalse((output / "records/p38_tail_000032.npz").exists())
+      audit_path = root / "audit.json"
+      audit = self._audit(output, audit_path)
+      self.assertEqual(audit.returncode, 0, audit.stderr)
+      audit_report = json.loads(audit_path.read_text())
+      self.assertEqual(audit_report["tail_target_mismatch_rows"], 1)
+
+  def test_missing_capsule_tail_target_remains_fail_closed(self):
+    with tempfile.TemporaryDirectory() as directory:
+      root = Path(directory)
+      source, listing, contract = self._fixture(
+          root, tail_target_missing=True)
+      output = root / "output"
+      result = self._run(source, listing, contract, output)
+      self.assertEqual(result.returncode, 4, result.stderr)
+      self.assertFalse((output / "classification.json").exists())
+      manifest = json.loads((output / "REDUCTION_MANIFEST.json").read_text())
+      self.assertEqual(manifest["matched_tail_keys"], 1)
+      self.assertEqual(len(manifest["tail_target_mismatch_candidates"]), 1)
+      self.assertTrue((output / "candidates/p38_tail_000030.npz").is_file())
+      self.assertFalse((output / "records/p38_tail_000030.npz").exists())
+      audit = self._audit(output, root / "audit.json")
+      self.assertEqual(audit.returncode, 0, audit.stderr)
+
+  def test_one_prefix_can_resolve_two_required_tail_targets(self):
+    prefix = b"a" * 64
+    base_key = (0, prefix, "A")
+    matches = {base_key: [
+        {
+            "record_index": 10,
+            "row_offset": 0,
+            "target_id": 111,
+            "numeric_payload_sha256": "1" * 64,
+        },
+        {
+            "record_index": 11,
+            "row_offset": 0,
+            "target_id": 222,
+            "numeric_payload_sha256": "2" * 64,
+        },
+    ]}
+    resolution = reducer._resolve_tail_matches(
+        matches,
+        {(0, prefix, "A", 111), (0, prefix, "A", 222)},
+    )
+    self.assertTrue(resolution["selection_complete"])
+    self.assertEqual(resolution["matched_keys"], 2)
+    self.assertEqual(resolution["selected_record_indices"], [10, 11])
+    self.assertEqual(
+        [entry["expected_target_id"] for entry in resolution["join_entries"]],
+        [111, 222],
+    )
+
+  def test_one_prefix_two_capsule_targets_reclassify_end_to_end(self):
+    with tempfile.TemporaryDirectory() as directory:
+      root = Path(directory)
+      source, listing, contract = self._branching_fixture(root)
+      output = root / "output"
+      result = self._run(source, listing, contract, output)
+      self.assertEqual(result.returncode, 0, result.stderr)
+      manifest = json.loads((output / "REDUCTION_MANIFEST.json").read_text())
+      report = json.loads((output / "classification.json").read_text())
+      self.assertEqual(manifest["required_arm_keys"], 2)
+      self.assertEqual(manifest["required_tail_keys"], 4)
+      self.assertEqual(manifest["matched_tail_keys"], 4)
+      self.assertEqual(report["joined_red_points"], 2)
+      self.assertEqual(
+          {item["target_id"] for item in report["joins"]}, {21, 22})
       audit = self._audit(output, root / "audit.json")
       self.assertEqual(audit.returncode, 0, audit.stderr)
 
@@ -439,6 +581,116 @@ class ReduceP38SeamTailEvidenceTest(unittest.TestCase):
       self.assertEqual(manifest["matched_seam_keys"], 64)
       self.assertEqual(manifest["matched_tail_keys"], 64)
       self.assertEqual(report["joined_red_points"], 32)
+
+  def test_committed_round0_candidates_reclassify_32_of_32_by_target(self):
+    bundle = (
+        SCRIPTS.parent
+        / "evidence/p38s18r2/seam-tail-reduction-v2/files"
+    )
+    candidate_dir = bundle / "candidates"
+    capsule_source = bundle / "capsules/mismatch-capsule.npz"
+    old_manifest = json.loads(
+        (bundle / "REDUCTION_MANIFEST.json").read_text())
+    points = seam_classifier._red_points([capsule_source])
+    required = {
+        reducer.base._key(
+            point["diagnostic_round"], point["token_prefix_sha256"], arm)
+        for point in points for arm in ("A", "B")
+    }
+    required_tail = reducer._required_tail_keys(points, required)
+    seam_matches, seam_records, _ = reducer.base._scan_records(
+        candidate_dir, "layer", required)
+    tail_matches, tail_records, _ = reducer._scan_tail_records(
+        candidate_dir, required)
+    seam_resolution = reducer._resolve_matches(seam_matches)
+    tail_resolution = reducer._resolve_tail_matches(
+        tail_matches, required_tail)
+    self.assertTrue(seam_resolution["selection_complete"])
+    self.assertTrue(tail_resolution["selection_complete"])
+    self.assertEqual(seam_resolution["matched_keys"], 64)
+    self.assertEqual(tail_resolution["matched_keys"], 64)
+    mismatch_rows = tail_resolution["target_mismatch_candidates"]
+    self.assertEqual(len(mismatch_rows), 1)
+    self.assertEqual(mismatch_rows[0]["expected_target_id"], 54852)
+    self.assertEqual(
+        [item["record_index"] for item in mismatch_rows[0]["candidates"]],
+        [539],
+    )
+
+    with tempfile.TemporaryDirectory() as directory:
+      root = Path(directory)
+      records_dir = root / "records"
+      capsules_dir = root / "capsules"
+      records_dir.mkdir()
+      capsules_dir.mkdir()
+      record_files = reducer._copy_record_set(
+          seam_records,
+          records_dir,
+          kind="seam",
+          selected_indices=set(seam_resolution["selected_record_indices"]),
+      )
+      tail_record_files = reducer._copy_record_set(
+          tail_records,
+          records_dir,
+          kind="tail",
+          selected_indices=set(tail_resolution["selected_record_indices"]),
+      )
+      capsule = capsules_dir / capsule_source.name
+      shutil.copy2(capsule_source, capsule)
+      manifest = dict(old_manifest)
+      manifest.update({
+          "status": "selected",
+          "tail_target_identity_required": True,
+          "selection_complete": True,
+          "unmatched_keys": [],
+          "ambiguous_keys": [],
+          "join_entries": seam_resolution["join_entries"],
+          "tail_join_entries": tail_resolution["join_entries"],
+          "record_files": record_files,
+          "tail_record_files": tail_record_files,
+          "selected_record_indices": seam_resolution[
+              "selected_record_indices"],
+          "selected_tail_record_indices": tail_resolution[
+              "selected_record_indices"],
+          "matched_seam_keys": 64,
+          "matched_tail_keys": 64,
+          "tail_target_mismatch_candidates": mismatch_rows,
+      })
+      manifest_path = root / "REDUCTION_MANIFEST.json"
+      manifest_path.write_text(
+          json.dumps(manifest, sort_keys=True, indent=2) + "\n")
+      report = seam_classifier.classify(
+          records_dir,
+          [capsule],
+          "layer",
+          reduction_manifest=manifest_path,
+          require_tail=True,
+      )
+      self.assertEqual(report["joined_red_points"], 32)
+      self.assertEqual(
+          report["classification"],
+          "decode_terminal_first_difference_measured",
+      )
+      signatures = {}
+      for item in report["joins"]:
+        checkpoint = item["first_difference"]["checkpoint"]
+        signatures[checkpoint] = signatures.get(checkpoint, 0) + 1
+      self.assertEqual(signatures, {
+          "raw_log_normalizer": 26,
+          "raw_target_logit": 6,
+      })
+
+  def test_committed_legacy_bundle_audit_remains_byte_identical(self):
+    bundle = (
+        SCRIPTS.parent
+        / "evidence/p38s18r2/seam-tail-reduction-v2"
+    )
+    with tempfile.TemporaryDirectory() as directory:
+      audit_path = Path(directory) / "bundle-audit.json"
+      result = self._audit(bundle / "files", audit_path)
+      self.assertEqual(result.returncode, 0, result.stderr)
+      self.assertEqual(audit_path.read_bytes(), (
+          bundle / "bundle-audit.json").read_bytes())
 
   def test_empty_source_uri_and_bundle_tamper_are_rejected(self):
     with tempfile.TemporaryDirectory() as directory:
@@ -539,11 +791,11 @@ class ReduceP38SeamTailEvidenceTest(unittest.TestCase):
       destination = (
           "gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/"
           "canon-p38-test/attempt-0/derived/"
-          "p38s18r2-round0-seam-tail-reduction-v2"
+          "p38s18r2-round0-seam-tail-target-aware-v3"
       )
       contract = root / "contract.json"
       contract.write_text(json.dumps({
-          "schema": "p38s18r2-round0-reduction-contract-v1",
+          "schema": "p38s18r2-round0-reduction-contract-v2",
           "source_gcs_uri": SOURCE_URI,
           "destination_gcs_uri": destination,
           "expected_source_commit": SOURCE_COMMIT,
@@ -557,6 +809,7 @@ class ReduceP38SeamTailEvidenceTest(unittest.TestCase):
           "expected_rounds": 3,
           "mode": "layer",
           "require_tail": True,
+          "tail_target_identity_required": True,
           "max_output_bytes": 180000000,
       }))
       bin_dir = root / "bin"
