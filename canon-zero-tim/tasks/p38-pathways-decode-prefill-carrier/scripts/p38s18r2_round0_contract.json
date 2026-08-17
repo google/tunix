@@ -1,0 +1,17 @@
+{
+  "schema": "p38s18r2-round0-reduction-contract-v1",
+  "source_gcs_uri": "gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-p38-fl-stock-p38s18r2-10fe951f/attempt-0/rounds/000000",
+  "destination_gcs_uri": "gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-p38-fl-stock-p38s18r2-10fe951f/attempt-0/derived/p38s18r2-round0-seam-tail-reduction-v2",
+  "expected_source_commit": "10fe951f0186256aa106627c4323de1f5aa168be",
+  "expected_source_manifest_sha256": "ce7df453259dd070472486e053dbb26b03dad7b6259784cde74da7fe9efe227e",
+  "expected_diagnostic_round": 0,
+  "expected_seam_records": 972,
+  "expected_tail_records": 972,
+  "expected_object_count": 3896,
+  "expected_manifest_files": 3894,
+  "expected_red_points": 32,
+  "expected_rounds": 3,
+  "mode": "layer",
+  "require_tail": true,
+  "max_output_bytes": 180000000
+}

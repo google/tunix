@@ -24,23 +24,34 @@ and therefore stops before joining the 32 red points.
 Do not rerun the same direct classifier. Do not pick the first or last
 duplicate. Do not hand-write a classification.
 
-## Stage A — implement and review the offline reducer
+## Stage A — review and publish the completed offline reducer
 
-1. Start from a clean detached worktree at the current
-   `origin/yuxzhang/canon-zero-tim` tip.
-2. Read the P38.2s phase completely.
-3. Extend the existing reduction and audit machinery with
-   `--require-tail`, including independent alias/conflict accounting for seam
-   and tail payloads.
-4. Add all focused positive, alias, conflict, missing-record, tamper, empty-URI,
-   and direct-classifier negative controls registered by P38.2s.
-5. Run the focused gates and provide:
+The implementation is complete in the review worktree. It adds:
+
+- `reduce_p38_seam_tail_evidence.py`, the immutable-round seam-plus-tail
+  reducer;
+- `audit_p38_seam_tail_reduction.py`, an independent auditor that rescans every
+  candidate, recomputes both alias maps, and reruns the official classifier;
+- `p38s18r2_round0_contract.json`, the only admitted production contract;
+- `run_reduce_p38s18r2_round0_on_gcp.sh`, the one-command GCS wrapper; and
+- `test_reduce_p38_seam_tail_evidence.py`, including fake-GCS end-to-end and
+  32-red-point/64-key fixtures.
+
+Before publication, review the diff and require:
+
+1. all registered positive, alias, conflict, missing-record, tamper, empty-URI,
+   direct-classifier-negative, 32-red-point, and fake-GCS gates to pass;
+2. the existing seam classifier/reducer/wrapper and tail tests to stay green;
+3. Python compilation, shell syntax, JSON parsing, credential scan, and
+   `git diff --check` to pass; and
+4. the review handoff to provide:
    - diff summary;
    - exact test commands and terminal output;
    - proposed commit message;
    - revert command; and
    - confirmation that no TPU, source GCS mutation, commit, or push occurred.
-6. Stop for user approval. Do not commit or push automatically.
+
+Stop for user approval. Do not commit or push automatically.
 
 The existing reducer is not sufficient unchanged: it reduces hidden seam
 records only and invokes the classifier without `require_tail=True`.
@@ -48,7 +59,23 @@ records only and invokes the classifier without `require_tail=True`.
 ## Stage B — execute one immutable remote reduction
 
 Only after Stage A is reviewed and published, use its exact clean full SHA on
-a machine with access to `yuxzhang-tunix-models`.
+a machine with access to `yuxzhang-tunix-models`. Do not reconstruct the
+command by hand. From the clean published checkout run exactly:
+
+```bash
+TASK="canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier"
+RETURN="$TASK/evidence/p38s18r2/seam-tail-reduction-v2"
+
+test -z "$(git status --short)"
+bash "$TASK/scripts/run_reduce_p38s18r2_round0_on_gcp.sh" \
+  "$TASK/scripts/p38s18r2_round0_contract.json" \
+  /tmp \
+  "$RETURN"
+```
+
+The wrapper reads every source/destination URI, SHA, count, mode, and byte
+ceiling from the checked-in contract. No `.env` or manual override is part of
+this execution.
 
 Fixed source and destination:
 
@@ -60,7 +87,7 @@ DEST="gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-p38-fl-stock-
 Fail before downloading if `$DEST/files/SHA256SUMS` already exists. Never
 overwrite v1, v2, or source objects.
 
-The remote wrapper must perform, in order:
+The wrapper performs, in order:
 
 1. list the complete source prefix;
 2. download to a new `mktemp` directory;
@@ -75,8 +102,10 @@ The remote wrapper must perform, in order:
 7. write the compact bundle defined by P38.2s and a self-excluding
    `SHA256SUMS`;
 8. run the standalone auditor from that compact bundle alone;
-9. upload the immutable bundle only after the local audit passes; and
-10. print one terminal line containing verdict, red points, matched seam/tail
+9. upload the immutable bundle only after the local audit passes;
+   `files/SHA256SUMS` is uploaded last and is the remote completion marker;
+10. copy the same audited compact result to `$RETURN` for an evidence CL; and
+11. print one terminal line containing verdict, red points, matched seam/tail
     keys, aliases, conflicts, classifier rc, manifest SHA, audit SHA,
     destination, and analysis source commit.
 
@@ -86,6 +115,7 @@ for both successful and failed classification.
 
 ## Required return to the reviewing agent
 
+The wrapper writes `$RETURN/files/`, `$RETURN/bundle-audit.json`, and its SHA.
 Return all of the following; a prose summary alone is insufficient:
 
 1. the terminal COMPLETE line;
@@ -99,8 +129,19 @@ Return all of the following; a prose summary alone is insufficient:
 6. the full analysis source commit and classifier SHA; and
 7. `git status --short` from the clean execution checkout.
 
-Prepare an append-only evidence CL only after the local audit passes. Stop
-before commit or push unless the user explicitly approves each action.
+After the command, rerun the auditor from the returned directory:
+
+```bash
+python3 "$TASK/scripts/audit_p38_seam_tail_reduction.py" \
+  --bundle-dir "$RETURN/files" \
+  --output /tmp/p38s18r2-return-audit.json
+cmp /tmp/p38s18r2-return-audit.json "$RETURN/bundle-audit.json"
+git status --short
+```
+
+Prepare an append-only evidence CL containing `$RETURN` only after both audits
+pass. Stop before commit or push unless the user explicitly approves each
+action.
 
 ## Acceptance
 
@@ -114,6 +155,9 @@ Missing keys, seam conflicts, tail conflicts, classifier failure, or auditor
 failure stay `INCONCLUSIVE`; they do not authorize a new TPU run until the
 returned compact candidates have been reviewed.
 
+Reducer rc 4 or 5 after a printed COMPLETE line is an intentional fail-closed
+scientific receipt, not permission to rerun or overwrite the destination.
+
 ## Prompt for a background-free remote agent
 
 > Work only on P38s18r2 offline evidence. First read
@@ -121,13 +165,11 @@ returned compact candidates have been reviewed.
 > `canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/phases/p38-2s-round0-alias-aware-seam-tail-reduction.md`, then
 > `canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/P38S18R2_ALIAS_REDUCTION_RUNBOOK.md`
 > completely. Do not launch TPU work and do not rerun the old direct
-> whole-directory classifier. Stage A is to implement and test alias-aware
-> seam-plus-tail reduction with `require_tail=True`; stop before commit/push
-> for user review. After that implementation is separately approved and
-> published, Stage B runs once against the fixed immutable Round 0 URI and a
-> new v2 destination. Verify all source SHA/inventory contracts, resolve only
-> byte-identical duplicates as aliases, preserve conflicts fail-closed, run
-> the official classifier and standalone auditor, and return the entire small
-> reduced bundle plus audit—not a prose summary. Never overwrite source/v1/v2
-> objects, never fabricate missing rounds, and never call this one-round result
-> signed evidence.
+> whole-directory classifier. After Stage A is approved and published, do not
+> rewrite its reducer/auditor/wrapper. Verify a clean checkout at the approved
+> full SHA, run the exact Stage B command with the checked-in contract and
+> return directory, and return the entire generated compact result plus the
+> terminal COMPLETE line and `git status --short`—not a prose summary. Never
+> overwrite source/v1/v2 objects, fabricate missing rounds, manually choose a
+> duplicate, or call this one-round result signed evidence. Stop before commit
+> or push until the user explicitly approves that separate act.

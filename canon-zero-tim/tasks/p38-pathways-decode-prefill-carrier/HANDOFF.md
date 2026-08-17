@@ -54,24 +54,28 @@ compact byte-preserving bundle defined by
 `P38S18R2_ALIAS_REDUCTION_RUNBOOK.md`.
 
 Neither old path is compatible unchanged: `run_reduce_p38s18l_on_gcp.sh`
-expects a P38s18l live snapshot and at least two capsules, while the current
-reducer handles hidden seams but not required terminal-tail aliases. Stage A
-must add reviewed seam-plus-tail reduction support before remote execution.
+expects a P38s18l live snapshot and at least two capsules. The replacement
+implementation is complete locally: dedicated seam-plus-tail reducer,
+independent auditor, fixed Round-0 contract, one-command GCS wrapper, and
+focused/fake-GCS tests. It is not published yet; remote execution waits for
+review plus explicit commit/push approval.
 
 ### Exact next steps for the incoming agent
 
 1. **Do not launch TPU and do not overwrite any source or v1 derived object.**
-2. Follow Stage A of `P38S18R2_ALIAS_REDUCTION_RUNBOOK.md`: implement and test
-   alias-aware seam-plus-tail reduction and its standalone auditor. Stop before
-   commit/push for user review.
-3. After that code is separately approved and published, run Stage B once on
-   the immutable Round 0 from the exact implementation SHA.
+2. Review the completed Stage A implementation and gates in
+   `P38S18R2_ALIAS_REDUCTION_RUNBOOK.md`. Stop before commit/push for user
+   approval.
+3. After that code is separately approved and published, run the exact Stage B
+   wrapper command once from a clean checkout. Do not hand-build arguments;
+   use `scripts/p38s18r2_round0_contract.json`.
 4. Require 32 red points, 64/64 seam keys, 64/64 tail keys, no payload
    conflicts, mandatory tail join, and standalone auditor PASS. Equivalent
    aliases are admitted only after full numerical payload identity.
-5. Return the entire compact reduced bundle, every raw candidate for the
-   required keys, capsule, classifier output, and audit JSON. Raw unrelated
-   records remain in GCS.
+5. Return the wrapper-created
+   `evidence/p38s18r2/seam-tail-reduction-v2/` directory, which contains every
+   raw candidate for the required keys, capsule, classifier output, and audit
+   JSON. Raw unrelated records remain in GCS.
 6. Stop and report. Do not commit or push the returned evidence until the user
    explicitly approves that separate action.
 

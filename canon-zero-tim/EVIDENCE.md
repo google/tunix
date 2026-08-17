@@ -87,6 +87,7 @@ p38s12f / p38s15 / p38s16.
 | Single-active fixed-M discriminator; golden incident call 4223 | p38s16 | `…/evidence/p38s16/` (classification absent → analysis-grade) |
 | Live-KV fingerprint EQUAL on red row (corrected; initial "differs" withdrawn) | p38s17 | `…/evidence/p38s17/` + task `log.md` 2026-08-15 correction |
 | Layer seam reduction sealed; ambiguous join on red row (analysis-grade partial) | p38s18l | `tasks/p38-pathways-decode-prefill-carrier/evidence/p38s18l/` + GCS derived |
+| Round-0 seam+tail corpus sealed but direct classifier rejects duplicate seam keys; B-C exact, A-B 45 bytes / 32 elements (analysis-grade) | p38s18r2 | `tasks/p38-pathways-decode-prefill-carrier/evidence/p38s18r2/` + `artifacts/p38s18r2_round0_seam_tail_report.md`; immutable GCS reduction pending P38.2s publication |
 | Aborted-launch stub | p38s14 | `…/evidence/p38s14/` (INCONCLUSIVE, head log only) |
 | One-host perf ledger (8-run bitwise hash chain, decode-tax ablation) | p48/p49 T0–T5, F0–F12 | outer repo `tasks/p48*`, `tasks/p49*`; worktree `local/p48-profiling` |
 | Cross-arm A identity for prompt_logprobs=None | P47a | landed CL 10242fa1 lineage; evidence dirs `p41_optimizer_p48c_p47a_*` on probe host |

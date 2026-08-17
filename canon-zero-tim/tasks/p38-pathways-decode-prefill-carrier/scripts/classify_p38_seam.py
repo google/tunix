@@ -92,6 +92,39 @@ def _load_reduction_manifest(path: Path, directory: Path) -> dict[str, Any]:
   }
   _require(actual_paths == expected_paths,
            "seam reduction selected-file inventory drifted")
+  if manifest.get("require_tail") is True:
+    tail_inventory = manifest.get("tail_record_files")
+    _require(isinstance(tail_inventory, list) and tail_inventory,
+             "seam reduction selected-tail inventory is empty")
+    expected_tail_paths = set()
+    for item in tail_inventory:
+      _require(isinstance(item, dict),
+               "seam reduction selected-tail entry is invalid")
+      relative = Path(str(item.get("path", "")))
+      _require(
+          len(relative.parts) == 2
+          and relative.parts[0] == directory_name
+          and relative.name.startswith("p38_tail_")
+          and relative.suffix in (".json", ".npz"),
+          f"seam reduction selected-tail path is invalid: {relative}",
+      )
+      target = (path.parent / relative).resolve()
+      _require(target.parent == directory.resolve(),
+               f"seam reduction selected-tail path escaped: {relative}")
+      _require(target.is_file(),
+               f"seam reduction selected-tail file is absent: {relative}")
+      _require(_sha256(target) == item.get("sha256"),
+               f"seam reduction selected-tail SHA failed: {relative}")
+      _require(target.stat().st_size == int(item.get("bytes", -1)),
+               f"seam reduction selected-tail size drifted: {relative}")
+      expected_tail_paths.add(target.name)
+    actual_tail_paths = {
+        item.name for item in directory.iterdir()
+        if item.is_file() and item.name.startswith("p38_tail_")
+        and item.suffix in (".json", ".npz")
+    }
+    _require(actual_tail_paths == expected_tail_paths,
+             "seam reduction selected-tail inventory drifted")
   return manifest
 
 
@@ -417,6 +450,148 @@ def _load_v2_join_records(
   return records
 
 
+def _tail_numeric_payload_sha256(
+    *,
+    position: int,
+    source_token_id: int,
+    target_id: int,
+    logit_row_index: int,
+    checkpoint_names: list[str],
+    values: np.ndarray,
+) -> str:
+  digest = hashlib.sha256()
+  digest.update(json.dumps({
+      "position": int(position),
+      "source_token_id": int(source_token_id),
+      "target_id": int(target_id),
+      "logit_row_index": int(logit_row_index),
+      "checkpoint_names": checkpoint_names,
+  }, sort_keys=True).encode("utf-8"))
+  digest.update(_array_sha256(values).encode("ascii"))
+  return digest.hexdigest()
+
+
+def _load_manifest_selected_tail_row(
+    directory: Path,
+    key: tuple[int, bytes, str],
+    selected: dict[str, Any],
+) -> dict[str, Any]:
+  index = int(selected.get("record_index", -1))
+  row_offset = int(selected.get("row_offset", -1))
+  json_path = directory / f"p38_tail_{index:06d}.json"
+  npz_path = directory / f"p38_tail_{index:06d}.npz"
+  _require(json_path.is_file() and npz_path.is_file(),
+           f"selected terminal-tail record is absent: {index}")
+  record = json.loads(json_path.read_text(encoding="utf-8"))
+  _require(
+      record.get("schema") == "p38-tail-values-v1"
+      and int(record.get("record_index", -1)) == index
+      and int(record.get("diagnostic_round", -1)) == key[0]
+      and record.get("arm") == key[2],
+      f"selected terminal-tail provenance drifted: {index}",
+  )
+  _require(_sha256(npz_path) == record.get("npz_sha256"),
+           f"selected terminal-tail NPZ SHA failed: {index}")
+  with np.load(npz_path, allow_pickle=False) as archive:
+    arrays = {name: np.asarray(archive[name]) for name in archive.files}
+  expected_keys = {
+      "row_indices", "positions", "token_ids", "request_ordinals",
+      "token_prefix_sha256", "logit_row_indices", "target_ids",
+      "tail_values",
+  }
+  _require(set(arrays) == expected_keys,
+           f"selected terminal-tail array inventory drifted: {index}")
+  rows = arrays["row_indices"].reshape(-1)
+  positions = arrays["positions"].reshape(-1)
+  source_tokens = arrays["token_ids"].reshape(-1)
+  hashes = arrays["token_prefix_sha256"].reshape(-1)
+  logit_rows = arrays["logit_row_indices"].reshape(-1)
+  target_ids = arrays["target_ids"].reshape(-1)
+  values = arrays["tail_values"]
+  _require(
+      0 <= row_offset < rows.size
+      and rows.size == positions.size == source_tokens.size == hashes.size
+      == logit_rows.size == target_ids.size == values.shape[0]
+      and values.shape[1:] == (len(_TAIL_CHECKPOINTS),),
+      f"selected terminal-tail row offset/geometry drifted: {index}",
+  )
+  _require(bytes(hashes[row_offset]) == key[1],
+           f"selected terminal-tail token prefix drifted: {index}")
+  checkpoint_names = [str(value) for value in record.get(
+      "checkpoint_names", ())]
+  _require(tuple(checkpoint_names) == _TAIL_CHECKPOINTS,
+           f"selected terminal-tail checkpoints drifted: {index}")
+  value_row = np.asarray(values[row_offset])
+  observed = {
+      "record_index": index,
+      "row_offset": row_offset,
+      "row_index": int(rows[row_offset]),
+      "position": int(positions[row_offset]),
+      "source_token_id": int(source_tokens[row_offset]),
+      "target_id": int(target_ids[row_offset]),
+      "logit_row_index": int(logit_rows[row_offset]),
+      "checkpoint_names": checkpoint_names,
+      "tail_value_sha256": _array_sha256(value_row),
+      "numeric_payload_sha256": _tail_numeric_payload_sha256(
+          position=int(positions[row_offset]),
+          source_token_id=int(source_tokens[row_offset]),
+          target_id=int(target_ids[row_offset]),
+          logit_row_index=int(logit_rows[row_offset]),
+          checkpoint_names=checkpoint_names,
+          values=value_row,
+      ),
+  }
+  for name, value in observed.items():
+    _require(selected.get(name) == value,
+             f"selected terminal-tail manifest field drifted: {index}/{name}")
+  return {
+      "record_index": index,
+      "row_index": observed["row_index"],
+      "position": observed["position"],
+      "source_token_id": observed["source_token_id"],
+      "target_id": observed["target_id"],
+      "logit_row_index": observed["logit_row_index"],
+      "checkpoint_names": checkpoint_names,
+      "values": value_row,
+  }
+
+
+def _load_v2_tail_join_records(
+    directory: Path,
+    manifest: dict[str, Any],
+    required: set[tuple[int, bytes, str]],
+) -> dict[tuple[int, bytes, str], dict[str, Any]]:
+  entries = manifest.get("tail_join_entries")
+  _require(isinstance(entries, list) and entries,
+           "seam reduction terminal-tail join map is absent")
+  entry_map = {}
+  for entry in entries:
+    _require(isinstance(entry, dict),
+             "seam reduction terminal-tail join entry is invalid")
+    try:
+      prefix = str(entry["token_prefix_sha256"]).encode("ascii")
+      key = (int(entry["diagnostic_round"]), prefix, str(entry["arm"]))
+    except (KeyError, UnicodeEncodeError, ValueError) as error:
+      raise SeamError("seam reduction terminal-tail join key is invalid") from error
+    _require(key not in entry_map,
+             "seam reduction terminal-tail join key is duplicated")
+    entry_map[key] = entry
+  _require(set(entry_map) == required,
+           "seam reduction terminal-tail join map differs from red actions")
+  records = {}
+  for key in sorted(required, key=lambda value: (value[0], value[1], value[2])):
+    entry = entry_map[key]
+    _require(entry.get("resolution") in ("unique", "equivalent_alias"),
+             "seam reduction terminal-tail join is not numerically resolved")
+    selected = entry.get("selected")
+    _require(isinstance(selected, dict),
+             "seam reduction selected terminal-tail row is absent")
+    records[key] = _load_manifest_selected_tail_row(directory, key, selected)
+  _require(int(manifest.get("matched_tail_keys", -1)) == len(required),
+           "seam reduction matched-tail total drifted")
+  return records
+
+
 def _red_points(capsules: list[Path]) -> list[dict[str, Any]]:
   points = []
   seen_rounds = set()
@@ -549,7 +724,14 @@ def classify(
   else:
     records = _load_records(
         directory, mode, allow_sparse_indices=reduction is not None)
-  tail_records = _load_tail_records(directory) if require_tail else {}
+  if require_tail and reduction is not None and reduction.get(
+      "schema") == "p38-seam-reduction-v2":
+    _require(reduction.get("require_tail") is True,
+             "seam reduction did not register terminal-tail evidence")
+    tail_records = _load_v2_tail_join_records(
+        directory, reduction, required)
+  else:
+    tail_records = _load_tail_records(directory) if require_tail else {}
   joins = []
   for point in red_points:
     base = (point["diagnostic_round"], point["token_prefix_sha256"])

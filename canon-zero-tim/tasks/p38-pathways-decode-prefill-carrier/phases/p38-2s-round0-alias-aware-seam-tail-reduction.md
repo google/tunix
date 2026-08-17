@@ -1,8 +1,10 @@
 # P38.2s — Round-0 alias-aware seam-and-tail reduction
 
-Status: active. This is a zero-TPU, GCS-side analysis phase. It supersedes the
-direct whole-directory classifier command in `P38S18R_RUNBOOK.md`; it does not
-supersede or modify any immutable P38s18r2 source object.
+Status: active; Deliverable A is implemented and locally gated in an isolated
+uncommitted review worktree. This is a zero-TPU, GCS-side analysis phase. It
+supersedes the direct whole-directory classifier command in
+`P38S18R_RUNBOOK.md`; it does not supersede or modify any immutable P38s18r2
+source object.
 
 ## Entering evidence
 
@@ -46,6 +48,14 @@ the hidden seam, final norm, or one of the bounded terminal-tail checkpoints?
 
 ## Deliverable A — reviewed reducer support
 
+Implementation inventory (pending review/publication):
+
+- `scripts/reduce_p38_seam_tail_evidence.py`
+- `scripts/audit_p38_seam_tail_reduction.py`
+- `scripts/p38s18r2_round0_contract.json`
+- `scripts/run_reduce_p38s18r2_round0_on_gcp.sh`
+- `tests/p38_serving/test_reduce_p38_seam_tail_evidence.py`
+
 Extend the existing v2 reduction/audit path, or add a narrowly scoped sibling,
 with all of these properties:
 
@@ -65,8 +75,9 @@ with all of these properties:
    proven; never use filesystem order as scientific evidence;
 8. retain every conflicting candidate and return
    `INCONCLUSIVE_REDUCTION_JOIN` when either seam or tail payload conflicts;
-9. retain every matching source JSON/NPZ byte-for-byte under `records/`, plus
-   the capsule and source provenance;
+9. retain every matching source JSON/NPZ byte-for-byte under `candidates/`,
+   retain the deterministically selected source records under `records/`, and
+   include the capsule plus source provenance;
 10. invoke `classify_p38_seam.py` with both the reduction manifest and
     `require_tail=True` only after all 64 keys have unambiguous seam and tail
     selections; and
@@ -129,7 +140,8 @@ SNAPSHOT_SELECTION.json
 REDUCTION_MANIFEST.json
 AMBIGUITY_AUDIT.json
 capsules/mismatch-capsule.npz
-records/<every candidate source JSON/NPZ for the required keys>
+candidates/<every candidate source JSON/NPZ for the required keys>
+records/<selected source JSON/NPZ used by the classifier>
 classifier.stdout
 classifier.stderr
 classifier.rc

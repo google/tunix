@@ -18,9 +18,11 @@
   Commit `a514c3bf` returned a closed 3,896-object source listing and
   3,894-entry manifest, with 972 paired seam and 972 paired tail records. The
   direct official classifier returned rc 1 at duplicate seam token-prefix
-  records before classification. Next gate is reviewed alias-aware seam and
-  tail reduction beside GCS, followed by the unchanged official classifier
-  and standalone compact-bundle audit; no TPU relaunch precedes that review.
+  records before classification. The alias-aware reducer, independent auditor,
+  fixed Round-0 contract, one-command GCS wrapper, and focused/fake-GCS tests
+  are complete in an isolated local review worktree and remain unpublished.
+  Next gate is diff review plus explicit publication approval, followed by one
+  immutable GCS-side execution; no TPU relaunch precedes that review.
 - Task directory:
   `canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/`.
 
@@ -336,11 +338,12 @@
 
 ## Next action
 
-1. Follow Stage A of `P38S18R2_ALIAS_REDUCTION_RUNBOOK.md`: add and test
-   alias-aware seam-plus-tail reduction with `require_tail=True`, then stop for
-   review before commit/push.
-2. After publication, execute Stage B once beside GCS against the immutable
-   Round 0 and new v2 derived prefix. Do not relaunch TPU.
+1. Review the completed Stage A diff and gates in
+   `P38S18R2_ALIAS_REDUCTION_RUNBOOK.md`; stop before commit/push until the user
+   explicitly approves publication.
+2. After publication, execute the checked-in Stage B wrapper and contract once
+   beside GCS. The wrapper returns the compact audited bundle directly into
+   the task evidence tree. Do not relaunch TPU.
 3. Require 32/32 red-point joins, 64/64 seam keys, 64/64 tail keys, no payload
    conflicts, and standalone bundle-auditor PASS. Preserve equivalent aliases
    with full provenance; never choose first/last silently.

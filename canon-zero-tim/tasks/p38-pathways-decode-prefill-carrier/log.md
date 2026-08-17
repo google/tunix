@@ -1700,3 +1700,33 @@ reclassification from the committed NPZ inputs.
   immutable Round 0. Only fully byte-identical duplicate payloads may become
   aliases; conflicts retain every candidate and stay fail-closed. No TPU
   relaunch is authorized by this checkpoint.
+
+## 2026-08-17 UTC — P38.2s local seam-plus-tail reducer implementation
+
+- Implemented the zero-TPU P38s18r2 Round-0 analysis path in an isolated clean
+  worktree: alias-aware seam-plus-tail reducer, independent compact-bundle
+  auditor, fixed source/count contract, one-command GCS wrapper, and focused
+  plus fake-GCS tests.
+- The reducer verifies the immutable source manifest and every source SHA,
+  derives red keys from the capsule, admits duplicate rows only when every
+  registered seam or tail payload byte is identical, preserves every
+  conflicting candidate, and invokes the official classifier with mandatory
+  tail evidence only after both joins are complete.
+- The auditor distrusts the reducer's decisions: it verifies the self-excluding
+  bundle manifest, rescans all returned candidates, independently recomputes
+  seam and tail alias/conflict maps, and reruns the official classifier from
+  the compact bundle alone.
+- The wrapper is contract-driven and immutable-destination-only. It downloads
+  the fixed Round 0, reduces and audits locally, uploads only after audit PASS,
+  and copies the same compact result into the task evidence tree for handoff.
+- Local gates at this checkpoint: new focused suite 13/13; existing seam
+  classifier 6/6; existing seam reducer 6/6; existing GCS wrapper 2/2; tail
+  capture 1/1; all 11 importable P38 Python test files 57/57; four shell
+  evidence/persistence/package/postflight suites PASS; Python compilation,
+  shell syntax, JSON parsing, secret scan, executable ASCII scan, and diff
+  check PASS. The unrelated render test is `TARGET NOT RUN` in this host
+  interpreter because `metrax` is absent; it failed during import, before any
+  test body.
+- No TPU launch, GCS access/mutation, commit, or push occurred. Next gate is
+  user review and explicit publication approval, then one remote wrapper
+  execution from the approved full SHA.
