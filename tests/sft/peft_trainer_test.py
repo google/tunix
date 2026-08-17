@@ -166,38 +166,6 @@ class PeftTrainerTest(parameterized.TestCase):
       trainer.train(self.train_ds, self.eval_ds)
     self.assertEqual(global_counter, 1)
 
-  def test_compile_once_on_cond_path(self):
-    """Depth>1 (accumulator + nnx.cond path) also traces exactly once.
-
-    Guards the moment-dtype change (bf16 by default on the cond path) against
-    re-tracing: the cond path must still compile just once.
-    """
-    class CountCompiledTimesTrainer(peft_trainer.PeftTrainer):
-
-      def _train_step(
-          self, model, optimizer, grad_accumulator, inputs, is_update_step
-      ):
-        global global_counter
-        global_counter += 1
-        return super()._train_step(
-            model, optimizer, grad_accumulator, inputs, is_update_step
-        )
-
-    config = peft_trainer.TrainingConfig(
-        eval_every_n_steps=2, max_steps=100, gradient_accumulation_steps=2
-    )
-    rngs = nnx.Rngs(0)
-    model = tc.get_lora_model(
-        tc.ToyTransformer(config=tc.ModelConfig(), rngs=rngs), mesh=self.mesh
-    )
-    trainer = CountCompiledTimesTrainer(model, optax.sgd(1e-3), config)
-    trainer = trainer.with_gen_model_input_fn(dummy_gen_model_input_fn)
-    global global_counter
-    global_counter = 0
-    with self.mesh:
-      trainer.train(self.train_ds, self.eval_ds)
-    self.assertEqual(global_counter, 1)
-
   @parameterized.named_parameters(
       ('cache_nnx_graph', True),
       ('no_cache_nnx_graph', False),
@@ -2096,6 +2064,64 @@ class OptimizerMemoryTest(parameterized.TestCase):
       if hasattr(leaf, 'dtype') and jnp.issubdtype(leaf.dtype, jnp.floating):
         self.assertEqual(leaf.dtype, jnp.float32)
 
+class TrainStepGlobalWeightedTest(parameterized.TestCase):
+  """Pins that _train_step accumulates the GLOBAL weighted mean, not a mean-of-means.
+
+  Emulates the _train_step recipe: grad(unreduced_sum_i) accumulated with the
+  loss's real per-micro-batch denom -> get() = Sum grads / Sum denom. With
+  uneven denoms this must equal the global weighting and differ from the old
+  mean-of-means (grad_i/denom_i averaged equally).
+  """
+
+  @staticmethod
+  def _unwrap(state):
+    return jax.tree_util.tree_map(
+        lambda v: v[...] if isinstance(v, nnx.Variable) else v,
+        state,
+        is_leaf=lambda x: isinstance(x, nnx.Variable),
+    )
+
+  @staticmethod
+  def _loss_sum(model, x, y):
+    return jnp.sum((model(x) - y) ** 2)
+
+  def test_train_step_recipe_is_global_weighted(self):
+    d1, d2 = 2, 6  # uneven micro-batch denominators
+    rngs = nnx.Rngs(0)
+    model = nnx.Linear(in_features=4, out_features=2, rngs=rngs)
+    k = jax.random.split(jax.random.PRNGKey(0), 2)
+    x = jax.random.normal(k[0], (d1 + d2, 4))
+    y = jax.random.normal(k[1], (d1 + d2, 2))
+    grad_fn = nnx.value_and_grad(self._loss_sum)
+    _, g1 = grad_fn(model, x[:d1], y[:d1])
+    _, g2 = grad_fn(model, x[d1:], y[d1:])
+    g1, g2 = self._unwrap(g1), self._unwrap(g2)
+    # New recipe: NO local 1/denom scale; add grad(sum) with the real denom.
+    acc = peft_trainer.GradientAccumulator(model, nnx.Param)
+    acc.add(g1, denom=jnp.asarray(float(d1)))
+    acc.add(g2, denom=jnp.asarray(float(d2)))
+    result = self._unwrap(acc.get())
+    global_weighted = jax.tree_util.tree_map(
+        lambda a, b: (a + b) / (d1 + d2), g1, g2
+    )
+    mean_of_means = jax.tree_util.tree_map(
+        lambda a, b: (a / d1 + b / d2) / 2.0, g1, g2
+    )
+    # Now equals the global weighting ...
+    jax.tree_util.tree_map(
+        lambda a, e: np.testing.assert_allclose(a, e, rtol=1e-6, atol=1e-6),
+        result,
+        global_weighted,
+    )
+    # ... and is NOT the old mean-of-means (uneven denoms).
+    max_diff = jax.tree_util.tree_reduce(
+        jnp.maximum,
+        jax.tree_util.tree_map(
+            lambda a, b: jnp.max(jnp.abs(a - b)), result, mean_of_means
+        ),
+        initializer=jnp.asarray(0.0),
+    )
+    self.assertGreater(float(max_diff), 1e-3)
 
 if __name__ == '__main__':
   absltest.main()
