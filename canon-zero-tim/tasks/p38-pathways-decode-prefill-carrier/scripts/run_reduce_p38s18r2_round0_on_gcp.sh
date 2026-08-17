@@ -99,7 +99,7 @@ gcs_list_recursive "$source_uri" > "$listing"
 gcs_sync_down "$source_uri" "$source_dir"
 
 mapfile -t capsules < <(find "$source_dir" -maxdepth 1 -type f \
-  -name 'p38_frozenlake_mismatch_capsule*.npz' | sort)
+  \( -name 'mismatch-capsule.npz' -o -name 'p38_frozenlake_mismatch_capsule*.npz' \) | sort)
 if [ "${#capsules[@]}" -ne 1 ]; then
   echo "[P38S18R2.REDUCE.GCP] REFUSING: expected exactly one Round-0 capsule" >&2
   exit 2
