@@ -6,15 +6,17 @@
 - Definition of done: one source-pinned flag-on run reports exact
   `S_decode_vs_S_prefill`, exact `S_prefill_vs_T_old`, and exact
   `T_old_vs_T_current` before a strict full workload is admitted.
-- Active phase: P38.2r single-run terminal seam-and-tail acquisition concluded.
-  P38s18r2 completed Round 0 execution on 64 TPU (`DP16xTP4`, concurrency 256),
-  captured 971 Tail and 915 Seam records, and successfully sealed the full
-  Round 0 bundle to GCS (`manifest_sha256 = ce7df453259dd070472486e053dbb26b03dad7b6259784cde74da7fe9efe227e`).
-  Scientific findings: S_prefill vs T_old is 100% bitwise exact (0 differing bytes
-  across 45,559 tokens); S_decode vs S_prefill has 45 differing bytes (99.975%
-  identity), all precisely aligned at 256-token Pallas Chunked Attention page
-  boundaries. P38 lane concluded; capacity transferred to FrozenLake 8B Full
-  Training (`p45r8`).
+- Active phase: P38.2r GCS-side Round 0 classification. P38s18r2 reached one
+  numerical round on 64 TPU (`DP16xTP4`, concurrency 256), then the learner
+  timed out after 900 seconds waiting for the durability ACK. The worker took
+  about 57 minutes to serially upload and read back 3,776 small objects and
+  wrote the ACK only after the learner exited, so rounds 1 and 2 never ran.
+  Round 0 reports exact B-C and A-B red at 45 differing bytes / 32 elements,
+  `max_abs=0.10101699829101562`. The old boundary claim is rejected by the
+  committed input: only 1/32 mismatch elements is at `kv_prefix % 256 == 0`.
+  The local evaluator cannot access the producer GCS bucket. Next gate is the
+  official layer-plus-tail classifier executed beside GCS and a compact
+  SHA-sealed receipt; no TPU relaunch precedes that review.
 - Task directory:
   `canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/`.
 
@@ -330,16 +332,18 @@
 
 ## Next action
 
-1. Review the local P38.2r round-scope fix and its focused/full CPU gate
-   receipts. Do not commit or push it without the user's explicit approval.
-2. After publication, record the exact full source SHA. Do not use `HEAD`, do
-   not edit the rendered manifest, and do not reuse run-id `p38s18r`.
-3. Render one fresh `p38s18r2` stock target from that approved SHA by following
-   `P38S18R_RUNBOOK.md`. Preserve the failed P38s18r logs and GCS prefix.
-4. Admit the replacement only if all three distinct diagnostic rounds each
-   have an immutable round bundle and ACK, followed by controlled exit 42,
-   `COLLECTED`, `COMPLETE`, and an offline official-classifier replay from the
-   returned bytes.
+1. On a GCS-authorized machine, follow `P38S18R_RUNBOOK.md`; verify the immutable
+   Round 0 inventory/manifests and run `classify_p38_seam.py --mode layer
+   --require-tail` over the complete source directory.
+2. Return only the compact SHA-sealed receipt. The raw seam/tail NPZ corpus
+   remains in GCS; the local evaluator is not expected to access it.
+3. Require exactly 32/32 red-point joins. Missing/ambiguous inputs or a
+   nonzero classifier return are `INCONCLUSIVE_REMOTE_CLASSIFICATION`, not a
+   hand-written operator verdict.
+4. Review the first-difference signatures before deciding whether another TPU
+   run is necessary. If a fresh three-round run is still needed, first replace
+   the serial per-object round trip with one immutable archive upload/readback;
+   do not rely on a longer timeout alone and do not reuse `p38s18r2`.
 
 ## Claim ceiling and blockers
 
@@ -367,7 +371,7 @@ Leave `CANON_P38_SERVING_CAPTURE_DIR`, `CANON_P38_REQUEST_JOURNAL`,
 training, evaluation, prefix cache, precision, optimizer placement, or
 canonical kernels.
 
-- Updated: 2026-08-16 UTC; P38s18r is
-  `INCONCLUSIVE_DURABILITY_SEAL_TIMEOUT`. The strict round-scope replacement is
-  local only, and no replacement TPU run, backward, or optimizer commit has
-  occurred.
+- Updated: 2026-08-17 UTC; P38s18r2 is
+  `INCONCLUSIVE_DURABILITY_SEAL_TIMEOUT`. One analysis-grade Round 0 exists;
+  no later round, backward, optimizer commit, controlled exit, root
+  `COLLECTED`, or root `COMPLETE` occurred.

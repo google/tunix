@@ -5,63 +5,68 @@ parallel Qwen3-32B DeepSWE workstream, read
 `../p39-deepswe-production/HANDOFF.md`. P38 evidence cannot promote P39, and
 P39 evidence cannot promote P38.
 
-## CURRENT: P38s18r2 completed Round 0 with GCS durability seal; forward exact, decode drift isolated to 256-chunk boundaries
+## CURRENT: P38s18r2 stopped after Round 0; classify the sealed round in GCS before any relaunch
 
 P38s18r2/source `10fe951f0186...` ran on 64 TPU (`DP16xTP4`, concurrency 256,
-three frozen rounds, seam mode `layer`, terminal tail enabled). It successfully
-completed Round 0 analysis, generated 971 Tail and 915 Seam records, and
-successfully sealed the full Round 0 package to GCS.
+three frozen rounds, seam mode `layer`, terminal tail enabled). Round 0 reached
+the numerical precheck, but the learner timed out after 900 seconds waiting for
+the durability ACK. The worker took about 57 minutes to serially upload and
+download/verify 3,776 small objects and wrote the ACK only after the learner had
+exited. Rounds 1 and 2 never started.
 
 ### Admitted facts
 
 - **S_prefill vs T_old (B vs C)**: **0 differing bytes** across 45,559 action
   tokens (100% bitwise exact identity between training forward pass and vLLM
   prefill rescore on 64 TPU).
-- **S_decode vs S_prefill (A vs B)**: **45 differing bytes** across 45,559
-  tokens (99.975% byte identity), with 100% of mismatches precisely aligned at
-  256-token Pallas Chunked Attention page boundaries (`logical_kv_prefix_length = 7 * 256 = 1792`).
-- **GCS Durability Seal**: Round 0 bundle was fully uploaded and sealed to
+- **S_decode vs S_prefill (A vs B)**: **45 differing bytes / 32 differing
+  elements** across 45,559 tokens, with
+  `max_abs=0.10101699829101562`.
+- The committed pre-alignment input rejects the old hand-written boundary
+  claim: only **1 of 32** mismatch elements has
+  `logical_kv_prefix_length % 256 == 0`. No Pallas-boundary root cause is
+  admitted.
+- **GCS Round 0 seal (remote claim, pending classifier receipt)**: the worker
+  reported `ROUND_COMPLETE` for
   `gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-p38-fl-stock-p38s18r2-10fe951f/attempt-0/rounds/000000`
   with `manifest_sha256 = ce7df453259dd070472486e053dbb26b03dad7b6259784cde74da7fe9efe227e`
-  and `round-000000.ack` written.
-- **Hardware Reallocation**: P38 diagnostic workload concluded; 64 TPU slice
-  transferred to FrozenLake 8B Full Training (`p45r8`). Report:
-  `artifacts/p38s18r2_round0_seam_tail_report.md`.
+  and a late `round-000000.ack`. The local evaluator cannot list this bucket,
+  so the returned object listing and source manifest remain mandatory.
+- **Overall verdict**: `INCONCLUSIVE_DURABILITY_SEAL_TIMEOUT`. There is no
+  controlled exit 42, root `COLLECTED`/`COMPLETE`, or three-round target
+  verdict. The Round 0 numbers are analysis-grade.
 
-### Root cause and reviewed repair
+### Operational constraint
 
-The producer wrote a normal training `step`, while the round stager required a
-frozen `diagnostic_round`. Remote commit `fbb4b278` attempted to fix that by
-writing `diagnostic_round=int(step)`, falling back to `step`, and admitting
-unscoped JSONL. Review found that insufficient:
+Raw seam/tail NPZ files stay in GCS. Do not ask the local evaluator to list or
+download the bucket, and do not manually summarize thousands of records. A
+GCS-authorized agent must run the existing official
+`scripts/classify_p38_seam.py` against the complete Round 0 directory with
+`--mode layer --require-tail`, then return the small SHA-sealed receipt defined
+in `P38S18R_RUNBOOK.md`.
 
-1. all frozen diagnostic rounds can execute at optimizer step 0, so `step` is
-   not a round key; and
-2. admitting arbitrary unscoped records lets incident data contaminate every
-   round bundle.
-
-The local replacement, still uncommitted/unpublished, does the following:
-
-- diagnostic pre-alignment records use `p38_diagnostic_round_index()`;
-- pre-alignment and incident ledgers require an integer `diagnostic_round` and
-  are filtered strictly to the requested round;
-- only request journal schema `p38-request-journal-v1` is explicitly admitted
-  as a cumulative-unscoped stream; and
-- each `ROUND_INVENTORY.json` records that journal scope.
-
-Focused stage/postflight/neutrality tests, fake-GCS two-round isolation plus
-abrupt-exit durability, pinned-image alignment tests, and the complete P33 CPU
-gate pass. No model executable patch or canonical kernel changed.
+The old `run_reduce_p38s18l_on_gcp.sh` is not compatible with this source: it
+expects a P38s18l live snapshot and at least two capsules. Do not use it for
+P38s18r2.
 
 ### Exact next steps for the incoming agent
 
-1. Do not delete/overwrite the failed evidence and do not reuse run-id
-   `p38s18r`.
-2. Wait for the user to approve commit and push of the local repair. Record the
-   resulting full published SHA; never substitute `HEAD`.
-3. Follow `P38S18R_RUNBOOK.md` with fresh run-id `p38s18r2` and that exact SHA.
-4. Require three distinct round ACKs/bundles, controlled exit 42,
-   `COLLECTED`, `COMPLETE`, all SHA checks, and offline classifier replay.
+1. **Do not launch TPU and do not overwrite any source object.** Follow
+   `P38S18R_RUNBOOK.md` on a GCS-authorized machine.
+2. Verify `ROUND_COMPLETE.json`, `ROUND_INVENTORY.json`, and every entry in the
+   round `SHA256SUMS` before running the classifier.
+3. Run the official layer-plus-tail classifier over the entire remote Round 0.
+   It must join exactly all 32 red points; a partial or ambiguous join is
+   `INCONCLUSIVE`.
+4. Return the compact derived directory containing object listing, source
+   manifests, classifier JSON/stdout/stderr/rc, classifier source SHA,
+   `REMOTE_ANALYSIS_MANIFEST.json`, `verdict.json`, and its own `SHA256SUMS`.
+   Raw NPZ files remain in GCS.
+5. Stop and report. Do not commit or push the returned bundle until the user
+   explicitly approves that separate action.
+6. Only if remote classification still lacks the required inputs, prepare a
+   transport CL that uploads one immutable per-round archive and verifies it
+   once. A longer timeout alone is not the primary repair.
 
 ## HISTORY: P38s18l/P38.2q no-source inventory
 

@@ -1652,3 +1652,25 @@ reclassification from the committed NPZ inputs.
 - P38 diagnostic lane successfully concluded; capacity transferred to FrozenLake 8B Full Training (`p45r8`).
 - Technical report: `artifacts/p38s18r2_round0_seam_tail_report.md`.
 
+## 2026-08-17 UTC — P38s18r2 correction: durability timeout and remote-only classifier handoff
+
+- Pulled the committed timeout trace at `d0d96030`. Round 0 requested sealing,
+  but the learner's fixed 900-second ACK wait expired before the worker's
+  serial upload and readback of 3,776 files completed. The worker reported a
+  late `ROUND_COMPLETE` and ACK after about 57 minutes; rounds 1 and 2 never
+  started. The run is `INCONCLUSIVE_DURABILITY_SEAL_TIMEOUT`, not a completed
+  three-round diagnostic.
+- Rechecked the committed `round0_pre_alignment.jsonl`: B-C is exact; A-B is
+  red at 45 bytes / 32 elements with max absolute difference 0.1010169983.
+  Only 1/32 mismatch elements is at `logical_kv_prefix_length % 256 == 0`.
+  The earlier “100% 256-token boundary” and Pallas-boundary cause claims are
+  superseded and not admitted.
+- The local evaluator cannot access the producer's GCS bucket, and the raw NPZ
+  corpus is not a required local handoff. The next gate is remote execution of
+  the existing official layer-plus-tail classifier over immutable Round 0,
+  followed by a small SHA-sealed receipt. The old P38s18l live-snapshot wrapper
+  is explicitly incompatible with this one-round directory.
+- No code, model executable, kernel, TPU launch, commit, or push occurred in
+  this checkpoint. A future rerun, if still necessary after classification,
+  requires a measured single-archive round transport; increasing the timeout
+  alone is not the selected repair.
