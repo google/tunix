@@ -309,7 +309,7 @@ class RenderP38ServingJobsetsTest(unittest.TestCase):
       document = yaml.safe_load(paths[0].read_text())
       env = _env(document)
       self.assertEqual(env["CANON_P38_TERMINAL_DISCRIMINATOR"], "1")
-      self.assertEqual(env["CANON_P38_TERMINAL_MAX_BYTES"], "1073741824")
+      self.assertEqual(env["CANON_P38_TERMINAL_MAX_BYTES"], "4294967296")
       self.assertEqual(
           document["metadata"]["labels"][
               "canon.zero-tim/terminal-discriminator"

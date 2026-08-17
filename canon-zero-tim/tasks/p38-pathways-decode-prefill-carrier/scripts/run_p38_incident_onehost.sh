@@ -103,7 +103,7 @@ elif [ "$mode" = seam-layer ] || [ "$mode" = seam-tail ] || \
   if [ "$mode" = terminal-discriminator ]; then
     capture_env+=(
       -e CANON_P38_TERMINAL_DISCRIMINATOR=1
-      -e CANON_P38_TERMINAL_MAX_BYTES=1073741824
+      -e CANON_P38_TERMINAL_MAX_BYTES=4294967296
     )
   fi
 fi

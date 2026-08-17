@@ -336,7 +336,7 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
       req CANON_P38_TERMINAL_CLASSIFICATION
       [ "${CANON_P38_TERMINAL_DISCRIMINATOR:-}" = "1" ] && \
       [ "${CANON_P38_TAIL_OBSERVER:-}" = "1" ] && \
-      [ "${CANON_P38_TERMINAL_MAX_BYTES:-}" = "1073741824" ] && \
+      [ "${CANON_P38_TERMINAL_MAX_BYTES:-}" = "4294967296" ] && \
       [ "${CANON_P38_TERMINAL_CLASSIFICATION:-}" = \
           "${CANON_STATE%/}/p38_terminal.classification.json" ] || {
         echo "[env] P38 terminal discriminator contract drifted" >&2
