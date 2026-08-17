@@ -241,6 +241,7 @@ class RolloutWorkerTest(parameterized.TestCase):
       await handle.asubmit("pre_weight_sync", metadata)
       v = await handle.asubmit("weight_sync", metadata)
       self.assertEqual(v, 333)
+      await handle.asubmit("post_weight_sync", metadata)
 
       # Direct coroutine execution of generate over handle
       req = datatypes.RolloutRequest(
