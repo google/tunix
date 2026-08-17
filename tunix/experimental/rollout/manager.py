@@ -274,3 +274,9 @@ class RolloutManager:
       res = await self.sampler.post_weight_sync(sync_request, **kwargs)
     self.resume_all()
     return res
+
+  async def get_weight_sync_metadata(self, **kwargs) -> Any:
+    """Returns the sampler's transport metadata for weight sync registration."""
+    if self.sampler:
+      return await self.sampler.get_weight_sync_metadata(**kwargs)
+    return []
