@@ -132,27 +132,27 @@ class ShardingConfig:
     )
 
   @staticmethod
-  def get_data_parallel_sharding(data_axis: str = 'dp'):
+  def get_data_parallel_sharding(data_axis: str = 'dp', tp_axis: str = 'tp'):
     """Returns TP-sharded weights with activations sharded over DP."""
-    if not data_axis or data_axis in ('fsdp', 'tp'):
+    if not data_axis or data_axis in ('fsdp', tp_axis):
       raise ValueError(
           'data_axis must name a dedicated data-parallel mesh axis'
       )
     return ShardingConfig(
-        emb_vd=P('tp', None),
-        emb_dv=P(None, 'tp'),
-        q_weight_dnh=P(None, 'tp', None),
-        kv_weight_dnh=P(None, 'tp', None),
-        o_weight_nhd=P('tp', None, None),
-        ffw_weight_df=P(None, 'tp'),
-        ffw_weight_fd=P('tp', None),
-        rms_norm_weight=P('tp',),
-        act_btd=P(data_axis, None, 'tp'),
-        act_btf=P(data_axis, None, 'tp'),
-        act_btnh=P(data_axis, None, 'tp', None),
+        emb_vd=P(tp_axis, None),
+        emb_dv=P(None, tp_axis),
+        q_weight_dnh=P(None, tp_axis, None),
+        kv_weight_dnh=P(None, tp_axis, None),
+        o_weight_nhd=P(tp_axis, None, None),
+        ffw_weight_df=P(None, tp_axis),
+        ffw_weight_fd=P(tp_axis, None),
+        rms_norm_weight=P(None,),
+        act_btd=P(data_axis, None, tp_axis),
+        act_btf=P(data_axis, None, tp_axis),
+        act_btnh=P(data_axis, None, tp_axis, None),
         score_weight_d1=P(None, None),
-        exp_weight_edf=P(None, None, 'tp'),
-        exp_weight_efd=P(None, 'tp', None),
+        exp_weight_edf=P(None, None, tp_axis),
+        exp_weight_efd=P(None, tp_axis, None),
     )
 
 

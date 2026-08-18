@@ -5,7 +5,25 @@ parallel Qwen3-32B DeepSWE workstream, read
 `../p39-deepswe-production/HANDOFF.md`. P38 evidence cannot promote P39, and
 P39 evidence cannot promote P38.
 
-## CURRENT: P38.2w lm-head program discriminator
+## CURRENT: P38.2x dedicated fixed-tile Pallas lm_head
+
+P38s22/source `ee0154b38ab81b2b4ee3eac35c65ed380aa744f6` ran on 64 TPU
+(`DP16xTP4`, concurrency 256, `--lm-head-algo`, DotAlgorithmPreset `BF16_BF16_F32`).
+It completed all 3 diagnostic rounds and exited with controlled code 42
+(0 backward, 0 optimizer commits).
+
+### Admitted P38s22 facts
+
+1. B-C is 100% bitwise exact (0 differing bytes, max_abs=0.0) in all 3 completed rounds.
+2. A-B remains sparse red (15 differing bytes / 8 differing tokens across 53,617 actions in Round 2, max_abs=0.289223).
+3. The `BF16_BF16_F32` dot algorithm preset does not close the A-B decode vs prefill carrier.
+4. Per the decision table, `CANON_MM_ALGO` is rejected as a causal repair. Do not tune more generic precision flags.
+5. The next step is a dedicated fixed-tile Pallas `lm_head` kernel.
+
+Receipt:
+`artifacts/p38s22_analysis_0818.md`.
+
+## HISTORY: P38s21 partial 2-of-3 diagnostic
 
 P38s21/source `f7f9fee6256f1f31f99c2794c4f346e9196b010c` ran on 64 TPU
 (`DP16xTP4`, concurrency 256). It sealed rounds 0 and 1, then Round 2 exceeded
@@ -29,32 +47,6 @@ exit, root `COLLECTED`, or root `COMPLETE`. The run-level status is
 
 Receipt:
 `artifacts/p38s21_analysis_0818.md`.
-
-### Exact next work
-
-Read `phases/p38-2w-lm-head-program-discriminator.md` before doing anything.
-The implementation is default-off and must pass:
-
-1. focused CPU renderer/verdict tests;
-2. a real Qwen3-8B-weight one-host v5p M=16/M=256 screen with four seeds and
-   a live one-bit negative; and
-3. review of the uncommitted diff.
-
-The one-host screen is now complete with
-`BOTH_EXACT_OPERATOR_SCREEN_INCONCLUSIVE`: both arms are cross-M exact and
-mutually exact for 4/4 seeds, their StableHLO algorithm attributes differ, and
-the negative reports one. Read
-`artifacts/p38_2w_lm_head_onehost_0818.md`. This is neutral screening evidence,
-not a repair claim.
-
-Only after separate user approval to commit/push may an operator render one
-P38s22 target using `--stock-only --max-concurrency 256 --lm-head-algo`.
-P38s22 deliberately omits seam/tail/terminal recapture. It asks one causal
-question: does the existing `BF16_BF16_F32` dot preset close A-B while B-C
-stays exact? If A-B remains red, retire this preset for P38 and move directly
-to a dedicated fixed-tile Pallas lm_head. Do not tune broad precision flags.
-
-No target run, commit, or push is currently admitted by this handoff.
 
 ## HISTORY: P38s20 bounded-object transport timeout
 

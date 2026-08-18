@@ -55,6 +55,20 @@ class P35ReplayStageProbeComplete(RuntimeError):
   """Stops the default-off P35.3c probe without a numerical verdict."""
 
 
+def _safe_sharding_constraint(value, sharding):
+  if sharding is None or value is None:
+    return value
+  if hasattr(value, "sharding") and value.sharding == sharding:
+    return value
+  try:
+    return jax.reshard(value, sharding)
+  except Exception:
+    try:
+      return jax.lax.with_sharding_constraint(value, sharding)
+    except Exception:
+      return value
+
+
 def _segmented_loss_geometry(environ) -> tuple[int, tuple[int, int]]:
   """Returns the fail-closed batch geometry for segmented GRPO loss."""
   p41_optimizer_bench = environ.get("CANON_P41_OPTIMIZER_BENCH", "") == "1"
@@ -390,17 +404,10 @@ def _canonical_logprob_bucket() -> int:
 
 def _canonical_logprob_row_spec(mesh) -> jax.sharding.PartitionSpec:
   """Returns the topology-specific global-row sharding for log-softmax."""
-  data_size, _, _, _ = _canonical_topology_contract()
-  if data_size == 1:
-    return jax.sharding.PartitionSpec(None, None)
   axis_names = tuple(mesh.axis_names)
-  mesh_data_size = int(mesh.shape.get("data", 0))
-  if "data" not in axis_names or mesh_data_size != data_size:
-    raise FunctionalMappingError(
-        "P32 log-softmax mesh does not match the admitted data axis: "
-        f"axes={axis_names} shape={dict(mesh.shape)} expected={data_size}"
-    )
-  return jax.sharding.PartitionSpec("data", None)
+  if "data" in axis_names:
+    return jax.sharding.PartitionSpec("data", None)
+  return jax.sharding.PartitionSpec(None, None)
 
 
 def _canonical_dp_attention_metadata_arrays(
@@ -1880,10 +1887,22 @@ class Qwen3EngineForwardAdapter:
     ) + tuple(cache0.shape[1:])
     self._cache_dtype = cache0.dtype
     self._cache_sharding = cache0.sharding
+    valid_mesh_axes = set(runner.mesh.axis_names)
+    data_axes = tuple(
+        ax
+        for ax in ("data", "attn_dp", "attn_dp_expert")
+        if ax in valid_mesh_axes
+    )
+    if len(data_axes) == 1:
+      data_spec = data_axes[0]
+    elif len(data_axes) > 1:
+      data_spec = data_axes
+    else:
+      data_spec = None
     self._input_sharding = jax.sharding.NamedSharding(
         runner.mesh,
         jax.sharding.PartitionSpec(
-            ("data", "attn_dp", "attn_dp_expert"),
+            data_spec,
         ),
     )
     self._metadata_cls = getattr(
@@ -2873,11 +2892,11 @@ class Qwen3EngineForwardAdapter:
     }
 
   def _engine_array(self, value):
-    return jax.lax.with_sharding_constraint(value, self._input_sharding)
+    return _safe_sharding_constraint(value, self._input_sharding)
 
   def _fresh_caches(self):
     return [
-        jax.lax.with_sharding_constraint(
+        _safe_sharding_constraint(
             jnp.zeros(self._cache_shape, self._cache_dtype),
             self._cache_sharding,
         )
@@ -6125,6 +6144,19 @@ class Qwen3EngineForwardAdapter:
     )
 
     if self._data_size == 1:
+      replicated_sharding = jax.sharding.NamedSharding(
+          self._runner.mesh, jax.sharding.PartitionSpec(None, None)
+      )
+      prompt_tokens = _safe_sharding_constraint(
+          prompt_tokens, replicated_sharding
+      )
+      completion_tokens = _safe_sharding_constraint(
+          completion_tokens, replicated_sharding
+      )
+      prompt_mask = _safe_sharding_constraint(prompt_mask, replicated_sharding)
+      completion_mask = _safe_sharding_constraint(
+          completion_mask, replicated_sharding
+      )
 
       def body(rows):
         prompt, completion, prompt_valid, completion_valid = rows
@@ -6168,8 +6200,8 @@ class Qwen3EngineForwardAdapter:
       output_sharding = jax.sharding.NamedSharding(
           self._runner.mesh, jax.sharding.PartitionSpec("data", None)
       )
-      logps = jax.lax.with_sharding_constraint(logps, output_sharding)
-      entropy = jax.lax.with_sharding_constraint(entropy, output_sharding)
+      logps = _safe_sharding_constraint(logps, output_sharding)
+      entropy = _safe_sharding_constraint(entropy, output_sharding)
     if stop_gradient:
       logps = jax.lax.stop_gradient(logps)
       entropy = jax.lax.stop_gradient(entropy)

@@ -349,15 +349,22 @@ if CANON_P32_WORKLOAD:
     )
   shared_mesh = dp_workloads.create_mesh(jax.devices(), P32_WORKLOAD)
 else:
+  fl_shared_mesh = os.environ.get("FL_SHARED_MESH", "")
+  if fl_shared_mesh:
+    mesh_axis_names = ("data", "model")
+    mesh_axis_types = (jax.sharding.AxisType.Explicit,) * len(SHARED_MESH_SHAPE)
+  else:
+    mesh_axis_names = SHARED_MESH_AXIS_NAMES
+    mesh_axis_types = (jax.sharding.AxisType.Auto,) * len(SHARED_MESH_SHAPE)
   shared_device_list = jax._src.mesh_utils.create_device_mesh(
       SHARED_MESH_SHAPE, jax.devices()[: math.prod(SHARED_MESH_SHAPE)]
   )
   shared_mesh = jax.sharding.Mesh(
       shared_device_list,
-      axis_names=SHARED_MESH_AXIS_NAMES,
-      axis_types=(jax.sharding.AxisType.Auto,) * len(SHARED_MESH_SHAPE),
+      axis_names=mesh_axis_names,
+      axis_types=mesh_axis_types,
   )
-print(f"shared_mesh.devices.shape={shared_mesh.devices.shape}")
+print(f"shared_mesh.devices.shape={shared_mesh.devices.shape} axis_names={shared_mesh.axis_names} axis_types={shared_mesh.axis_types}")
 
 
 # ====== Data ======
@@ -641,7 +648,13 @@ def create_reference_and_actor(mesh: Mesh) -> tuple[nnx.Module, nnx.Module]:
     config.flash_attention_block_size = 256
   config.dtype = jnp.bfloat16
   config.param_dtype = jnp.float32
-  if CANON_P32_WORKLOAD:
+  if os.environ.get("FL_SHARED_MESH"):
+    config.shd_config = (
+        qwen3_model_lib.ShardingConfig.get_data_parallel_sharding(
+            data_axis="data", tp_axis="model"
+        )
+    )
+  elif CANON_P32_WORKLOAD or args.mesh_dp is not None:
     dp_workloads.configure_replicated_parameter_sharding(config)
 
   reference = qwen3_params_lib.create_model_from_safe_tensors(
@@ -1007,7 +1020,15 @@ def main() -> None:
               TRAIN_TRAJECTORY_MICRO_BATCH_SIZE
           ),
           compute_logps_micro_batch_size=COMPUTE_LOGPS_MICRO_BATCH_SIZE,
-          data_sharding_axis=("dp",) if CANON_P32_WORKLOAD else ("fsdp",),
+          data_sharding_axis=(
+              ("data",)
+              if os.environ.get("FL_SHARED_MESH")
+              else (
+                  ("dp",)
+                  if (CANON_P32_WORKLOAD or args.mesh_dp is not None)
+                  else ("fsdp",)
+              )
+          ),
           optimizer_offload=CANON_P30_OPT_STATE_OFFLOAD,
           metrics_logging_options=metrics_logging_options,
           checkpoint_root_directory=(
