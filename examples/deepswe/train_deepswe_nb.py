@@ -1033,6 +1033,7 @@ config_kwargs = {
     "loss_agg_mode": LOSS_AGG_MODE,
     "advantage_estimator": ADVANTAGE_ESTIMATOR,
     "use_rollout_logps": USE_ROLLOUT_LOGPS,
+    "rcp_logging": args.rcp_logging,
 }
 
 grpo_config = agentic_grpo_learner.GRPOConfig(**config_kwargs)
