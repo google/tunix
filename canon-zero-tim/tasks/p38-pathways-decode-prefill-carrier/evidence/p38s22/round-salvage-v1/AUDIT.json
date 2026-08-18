@@ -1,0 +1,110 @@
+{
+  "analysis_source_commit": "f036a13aa517ce650a11bce34a724cd753db6752",
+  "claim_ceiling": "P38s22_three_round_forward_discriminator_only;_root_postflight,_terminal_localization,_backward,_and_optimizer_completion_unadmitted",
+  "contract_sha256": "9548761835bfccb6749a0967be6ae68b6f3bfe762129e4b0afc3a6cd94fe0ae9",
+  "next_gate": "dedicated_fixed_tile_Pallas_lm_head_onehost_then_P38s23",
+  "root_postflight": {
+    "admitted": false,
+    "collected_present": false,
+    "complete_present": false,
+    "preflight_present": true,
+    "reason": "round_salvage_does_not_authenticate_root_manifest_members",
+    "receipts_present": false,
+    "root_manifest_present": false
+  },
+  "rounds": [
+    {
+      "a_b_differing_bytes": 82,
+      "a_b_differing_elements": 48,
+      "a_b_max_abs": 0.2631568908691406,
+      "archive_sha256": "dd78f5a55ade0b94451b62f3a171e5ca9bab05e7fd370317cef1d403a7e7b592",
+      "b_c_differing_bytes": 0,
+      "b_c_differing_elements": 0,
+      "b_c_max_abs": 0.0,
+      "capsule_sha256": "071e3469a2747a960feb8997de6ee01056b8e451d86ca7ae78309923092eb835",
+      "diagnostic_round": 0,
+      "logical_file_count": 10,
+      "manifest_sha256": "af533864458d6846ebbf4ee51908c4d1a2dbf73da5e37c741a44582876464b46",
+      "n_action": 45865,
+      "observer_counts": {
+        "kv_records": 2,
+        "seam_records": 0,
+        "tail_records": 0,
+        "terminal_records": 0
+      },
+      "run_log_counts": {
+        "precheck_round_complete_markers": 1,
+        "prior_frozen_update_skips": 0
+      }
+    },
+    {
+      "a_b_differing_bytes": 14,
+      "a_b_differing_elements": 10,
+      "a_b_max_abs": 0.016010284423828125,
+      "archive_sha256": "6241e8a2d20b5f3f561a495c549b937d1f252bb31ff0366435ca4ac973b1441a",
+      "b_c_differing_bytes": 0,
+      "b_c_differing_elements": 0,
+      "b_c_max_abs": 0.0,
+      "capsule_sha256": "7f878712fe8e11f8ebb054ec21996318a2d87ba09d43ba9c15831b8ab7db5965",
+      "diagnostic_round": 1,
+      "logical_file_count": 10,
+      "manifest_sha256": "25765b6b72ac8ef628615af97de35afefbde475d6ab15d48c5588b02d62f21c9",
+      "n_action": 43982,
+      "observer_counts": {
+        "kv_records": 2,
+        "seam_records": 0,
+        "tail_records": 0,
+        "terminal_records": 0
+      },
+      "run_log_counts": {
+        "precheck_round_complete_markers": 2,
+        "prior_frozen_update_skips": 1
+      }
+    },
+    {
+      "a_b_differing_bytes": 15,
+      "a_b_differing_elements": 8,
+      "a_b_max_abs": 0.28922271728515625,
+      "archive_sha256": "ba4e9a3e4624d7876b17d5b61a76d6de2ab1c9b77307fd41efb928d202220d84",
+      "b_c_differing_bytes": 0,
+      "b_c_differing_elements": 0,
+      "b_c_max_abs": 0.0,
+      "capsule_sha256": "2e9a8765997920b8e134dd6d098ebe55faf2114851d89dc9adf25852446df135",
+      "diagnostic_round": 2,
+      "logical_file_count": 10,
+      "manifest_sha256": "d961ff515598b8bfbb77ad0a475a76ede3b42f3e3c3cc75fab5897b5e0b22e3f",
+      "n_action": 53617,
+      "observer_counts": {
+        "kv_records": 2,
+        "seam_records": 0,
+        "tail_records": 0,
+        "terminal_records": 0
+      },
+      "run_log_counts": {
+        "precheck_round_complete_markers": 3,
+        "prior_frozen_update_skips": 2
+      }
+    }
+  ],
+  "schema": "p38s22-round-salvage-audit-v1",
+  "source_uri_sha256": "6459276f1eefb7d355950e95e3708a40ca558b081c4dc56f424f45543e2ae1cb",
+  "status": "PASS",
+  "terminal_classification": {
+    "admitted": false,
+    "reason": "P38s22_forbade_terminal_observer"
+  },
+  "tool_sha256": {
+    "archive": "89bdb64d51e8a1f3494f4820aabbf7dc424c2a5353edd135e76cafbfe173b69d",
+    "auditor": "92cf3c7e1e9c740d1f35f7359a1aa5fb089925ed7a4461fef1ac0b3061373391",
+    "base_auditor": "4695b921a016f13be55e20989c2727842577ebfe8900833b8cdf5467ba15862f",
+    "wrapper": "84c49247034fec5cb1bf4fa58b0646a868189057756f3ed6aae4e29e34e3174a"
+  },
+  "totals": {
+    "a_b_differing_bytes": 111,
+    "a_b_differing_elements": 66,
+    "b_c_differing_bytes": 0,
+    "b_c_differing_elements": 0,
+    "n_action": 143464
+  },
+  "verdict": "ROUND_SEALED_GENERIC_LM_HEAD_ALGORITHM_PRESET_REJECTED"
+}

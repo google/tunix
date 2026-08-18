@@ -1,0 +1,7 @@
+{
+  "claim_ceiling": "P38s22_three_round_forward_discriminator_only;_root_postflight,_terminal_localization,_backward,_and_optimizer_completion_unadmitted",
+  "next_gate": "dedicated_fixed_tile_Pallas_lm_head_onehost_then_P38s23",
+  "schema": "p38s22-round-salvage-verdict-v1",
+  "status": "PASS",
+  "verdict": "ROUND_SEALED_GENERIC_LM_HEAD_ALGORITHM_PRESET_REJECTED"
+}

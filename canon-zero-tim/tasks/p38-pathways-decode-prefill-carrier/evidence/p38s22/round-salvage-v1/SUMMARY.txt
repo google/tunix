@@ -1,0 +1,10 @@
+status=PASS
+verdict=ROUND_SEALED_GENERIC_LM_HEAD_ALGORITHM_PRESET_REJECTED
+n_action=143464
+a_b_differing_elements=66
+a_b_differing_bytes=111
+b_c_differing_elements=0
+b_c_differing_bytes=0
+root_postflight_receipts_present=False
+root_postflight_admitted=False
+next_gate=dedicated_fixed_tile_Pallas_lm_head_onehost_then_P38s23

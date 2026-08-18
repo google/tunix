@@ -1,0 +1,13 @@
+{"label": "root/PREFLIGHT.json", "required": true, "schema": "p38s22-round-salvage-acquisition-v1", "sha256": "57f6cb48bfc1249e06dc5e807656c743fda75dda15ed0b4a901fd15e1d135be9", "size_bytes": 253, "status": "downloaded"}
+{"label": "root/COLLECTED.json", "required": false, "schema": "p38s22-round-salvage-acquisition-v1", "status": "missing_or_unreadable"}
+{"label": "root/COMPLETE.json", "required": false, "schema": "p38s22-round-salvage-acquisition-v1", "status": "missing_or_unreadable"}
+{"label": "root/SHA256SUMS", "required": false, "schema": "p38s22-round-salvage-acquisition-v1", "status": "missing_or_unreadable"}
+{"label": "rounds/000000/ROUND_ARCHIVE.tar", "required": true, "schema": "p38s22-round-salvage-acquisition-v1", "sha256": "dd78f5a55ade0b94451b62f3a171e5ca9bab05e7fd370317cef1d403a7e7b592", "size_bytes": 38635520, "status": "downloaded"}
+{"label": "rounds/000000/SHA256SUMS", "required": true, "schema": "p38s22-round-salvage-acquisition-v1", "sha256": "af533864458d6846ebbf4ee51908c4d1a2dbf73da5e37c741a44582876464b46", "size_bytes": 884, "status": "downloaded"}
+{"label": "rounds/000000/ROUND_COMPLETE.json", "required": true, "schema": "p38s22-round-salvage-acquisition-v1", "sha256": "ecfecb9c183333b35e0487f772f43a385942a94031809cee6028923f481f4665", "size_bytes": 457, "status": "downloaded"}
+{"label": "rounds/000001/ROUND_ARCHIVE.tar", "required": true, "schema": "p38s22-round-salvage-acquisition-v1", "sha256": "6241e8a2d20b5f3f561a495c549b937d1f252bb31ff0366435ca4ac973b1441a", "size_bytes": 40519680, "status": "downloaded"}
+{"label": "rounds/000001/SHA256SUMS", "required": true, "schema": "p38s22-round-salvage-acquisition-v1", "sha256": "25765b6b72ac8ef628615af97de35afefbde475d6ab15d48c5588b02d62f21c9", "size_bytes": 884, "status": "downloaded"}
+{"label": "rounds/000001/ROUND_COMPLETE.json", "required": true, "schema": "p38s22-round-salvage-acquisition-v1", "sha256": "a10e3319d42ffc08e50ef364eaaaf5494cc15c75a8698608bee34554b9b62b66", "size_bytes": 457, "status": "downloaded"}
+{"label": "rounds/000002/ROUND_ARCHIVE.tar", "required": true, "schema": "p38s22-round-salvage-acquisition-v1", "sha256": "ba4e9a3e4624d7876b17d5b61a76d6de2ab1c9b77307fd41efb928d202220d84", "size_bytes": 51343360, "status": "downloaded"}
+{"label": "rounds/000002/SHA256SUMS", "required": true, "schema": "p38s22-round-salvage-acquisition-v1", "sha256": "d961ff515598b8bfbb77ad0a475a76ede3b42f3e3c3cc75fab5897b5e0b22e3f", "size_bytes": 884, "status": "downloaded"}
+{"label": "rounds/000002/ROUND_COMPLETE.json", "required": true, "schema": "p38s22-round-salvage-acquisition-v1", "sha256": "b8d6be54d9de18f0d3e0b35df98e1e663fc5ce1945e18faa0a2964064c913452", "size_bytes": 457, "status": "downloaded"}
