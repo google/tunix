@@ -15,7 +15,7 @@
 """Common configuration classes for Tunix."""
 
 import dataclasses
-from typing import Any, List, Optional, Tuple
+from typing import Any, List, Optional, TYPE_CHECKING, Tuple
 
 import flax
 import jax
@@ -29,6 +29,9 @@ from tunix.perf import metrics as perf_metrics
 from tunix.sft import checkpoint_options
 from tunix.sft import metrics_logger as sft_metrics_logger
 from tunix.sft import profiler
+
+if TYPE_CHECKING:
+  from tunix.rl.rollout import base_rollout  # pytype: disable=import-error
 
 # For rl_utils calls inside RLTrainingConfig
 # For base_rollout typing inside ClusterConfig
@@ -397,7 +400,7 @@ class ClusterConfig:
 
   role_to_mesh: dict[Role, Mesh]
   role_to_logical_axis_rule: dict[Role, flax.typing.LogicalRules] | None = None
-  rollout_engine: str | type[Any] = "vanilla"
+  rollout_engine: str | type["base_rollout.BaseRollout"] = "vanilla"
   offload_to_cpu: bool = False
 
   training_config: RLTrainingConfig
