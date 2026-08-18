@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PERSIST="$ROOT/tasks/p38-pathways-decode-prefill-carrier/scripts/persist_p38_gcs.sh"
+ARCHIVE_TOOL="$ROOT/tasks/p38-pathways-decode-prefill-carrier/scripts/p38_evidence_archive.py"
 tmp="$(mktemp -d)"
 trap 'rm -r "$tmp"' EXIT
 
@@ -60,14 +61,21 @@ grep -q 'remote marker already exists: PREFLIGHT.json' \
 printf 'round-0\n' > "${CANON_P38_MISMATCH_CAPSULE%.npz}.round-000000.npz"
 bash "$PERSIST" snapshot 000000 > "$tmp/pass/snapshot.log"
 live="$FAKE_GCS_ROOT/yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-p38-test-pass/attempt-0/live/000000"
-for name in run.log request-journal.jsonl incident-ledger.jsonl \
-    diagnostic-round.txt pre-alignment.jsonl capsule.npz \
-    capsule.round-000000.npz \
-    SHA256SUMS LIVE.json; do
+for name in LIVE_ARCHIVE.tar SHA256SUMS LIVE.json; do
   test -s "$live/$name"
 done
-(cd "$live" && sha256sum -c SHA256SUMS --quiet)
+test "$(find "$live" -maxdepth 1 -type f | wc -l)" -eq 3
+python3 "$ARCHIVE_TOOL" extract \
+  --archive "$live/LIVE_ARCHIVE.tar" \
+  --output "$tmp/pass/live-extracted" > "$tmp/pass/live-extract.log"
+(cd "$tmp/pass/live-extracted" && sha256sum -c SHA256SUMS --quiet)
+for name in run.log request-journal.jsonl incident-ledger.jsonl \
+    diagnostic-round.txt pre-alignment.jsonl capsule.npz \
+    capsule.round-000000.npz; do
+  test -s "$tmp/pass/live-extracted/$name"
+done
 grep -q '"schema": "canon-p38-gcs-live-v1"' "$live/LIVE.json"
+grep -q '"transport": "single-deterministic-tar-v1"' "$live/LIVE.json"
 if bash "$PERSIST" snapshot 000000 > "$tmp/pass/reused-live.log" 2>&1; then
   echo "[P38.GCS] repeated live snapshot was accepted" >&2
   exit 1
@@ -112,7 +120,7 @@ install_fake_gcloud "$tmp/worker"
 make_case "$tmp/worker" canon-p38-test-worker
 bash "$PERSIST" probe > "$tmp/worker/probe.log"
 export CANON_P38_KV_OBSERVER_DIR="$tmp/worker/state/capture"
-printf '{"arm":"A"}\n' > \
+printf '{"arm":"A","diagnostic_round":0}\n' > \
   "$CANON_P38_KV_OBSERVER_DIR/p38_kv_observer_0000_a.json"
 printf 'observer-npz\n' > \
   "$CANON_P38_KV_OBSERVER_DIR/p38_kv_observer_0000_a.npz"
@@ -166,11 +174,13 @@ grep -q 'LIVE_WORKER_COMPLETE snapshots=' "$worker_log"
 worker_live="$(find "$FAKE_GCS_ROOT" -path '*/live/*/LIVE.json' -type f | head -n 1)"
 test -s "$worker_live"
 worker_live_dir="$(dirname "$worker_live")"
-(cd "$worker_live_dir" && sha256sum -c SHA256SUMS --quiet)
-find "$FAKE_GCS_ROOT" -path '*/live/*/p38_kv_observer_0000_a.json' \
-  -type f | grep -q .
-find "$FAKE_GCS_ROOT" -path '*/live/*/p38_kv_observer_0000_a.npz' \
-  -type f | grep -q .
+test "$(find "$worker_live_dir" -maxdepth 1 -type f | wc -l)" -eq 3
+python3 "$ARCHIVE_TOOL" extract \
+  --archive "$worker_live_dir/LIVE_ARCHIVE.tar" \
+  --output "$tmp/worker/live-extracted" > "$tmp/worker/live-extract.log"
+(cd "$tmp/worker/live-extracted" && sha256sum -c SHA256SUMS --quiet)
+test -s "$tmp/worker/live-extracted/p38_kv_observer_0000_a.json"
+test -s "$tmp/worker/live-extracted/p38_kv_observer_0000_a.npz"
 
 install_fake_gcloud "$tmp/rounds"
 make_case "$tmp/rounds" canon-p38-test-rounds
@@ -213,11 +223,8 @@ export CANON_P38_LIVE_COLLECT_REQUEST_FILE="$tmp/rounds/state/collect.request"
 export CANON_P38_LIVE_COLLECT_ACK_FILE="$tmp/rounds/state/collect.ack"
 export CANON_P38_LIVE_COMPLETE_REQUEST_FILE="$tmp/rounds/state/complete.request"
 export CANON_P38_LIVE_COMPLETE_ACK_FILE="$tmp/rounds/state/complete.ack"
-round_worker_log="$tmp/rounds/state/live-worker.log"
-bash "$ROOT/tasks/p38-pathways-decode-prefill-carrier/scripts/p38_live_snapshot_worker.sh" \
-  > "$round_worker_log" 2>&1 &
-round_worker_pid=$!
-for round_index in 0 1; do
+make_round_request() {
+  local round_index="$1" request
   request="$CANON_P38_ROUND_SEAL_REQUEST_DIR/round-$(printf '%06d' "$round_index").request"
   python3 - "$request.partial" "$round_index" <<'PY'
 import json
@@ -231,6 +238,18 @@ pathlib.Path(sys.argv[1]).write_text(json.dumps({
 }, sort_keys=True) + "\n", encoding="utf-8")
 PY
   mv "$request.partial" "$request"
+}
+# Publish round 0 before worker startup.  The critical-path request must be
+# serviced before the first periodic live snapshot.
+make_round_request 0
+round_worker_log="$tmp/rounds/state/live-worker.log"
+bash "$ROOT/tasks/p38-pathways-decode-prefill-carrier/scripts/p38_live_snapshot_worker.sh" \
+  > "$round_worker_log" 2>&1 &
+round_worker_pid=$!
+for round_index in 0 1; do
+  if [ "$round_index" -ne 0 ]; then
+    make_round_request "$round_index"
+  fi
   ack="$CANON_P38_ROUND_SEAL_ACK_DIR/round-$(printf '%06d' "$round_index").ack"
   for unused in 1 2 3 4 5 6 7 8 9 10; do
     [ ! -s "$ack" ] || break
@@ -238,6 +257,15 @@ PY
   done
   grep -q '"status": "PASS"' "$ack"
 done
+python3 - "$round_worker_log" <<'PY'
+import pathlib
+import sys
+
+lines = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
+round_pass = next(i for i, line in enumerate(lines) if "LIVE_ROUND_PASS round=0" in line)
+live_snapshot = next(i for i, line in enumerate(lines) if "[P38.GCS] LIVE sequence=" in line)
+assert round_pass < live_snapshot, (round_pass, live_snapshot)
+PY
 # Simulate the pod disappearing after round 1.  Neither final collect nor
 # COMPLETE is allowed to be necessary for the two sealed round bundles.
 kill "$round_worker_pid"
@@ -245,16 +273,24 @@ wait "$round_worker_pid" || true
 round_remote="$FAKE_GCS_ROOT/yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-p38-test-rounds/attempt-0/rounds"
 for sequence in 000000 000001; do
   test -s "$round_remote/$sequence/ROUND_COMPLETE.json"
-  (cd "$round_remote/$sequence" && sha256sum -c SHA256SUMS --quiet)
+  test -s "$round_remote/$sequence/ROUND_ARCHIVE.tar"
+  test -s "$round_remote/$sequence/SHA256SUMS"
+  test "$(find "$round_remote/$sequence" -maxdepth 1 -type f | wc -l)" -eq 3
+  python3 "$ARCHIVE_TOOL" extract \
+    --archive "$round_remote/$sequence/ROUND_ARCHIVE.tar" \
+    --output "$tmp/rounds/extracted-$sequence" \
+    > "$tmp/rounds/extract-$sequence.log"
+  (cd "$tmp/rounds/extracted-$sequence" && sha256sum -c SHA256SUMS --quiet)
 done
-python3 - "$round_remote" <<'PY'
+python3 - "$tmp/rounds" "$round_remote" <<'PY'
 import json
 import pathlib
 import sys
 
-remote = pathlib.Path(sys.argv[1])
+root = pathlib.Path(sys.argv[1])
+remote = pathlib.Path(sys.argv[2])
 for round_index in (0, 1):
-  bundle = remote / f"{round_index:06d}"
+  bundle = root / f"extracted-{round_index:06d}"
   pre = [
       json.loads(line)
       for line in (bundle / "pre-alignment.jsonl").read_text().splitlines()
@@ -275,6 +311,13 @@ for round_index in (0, 1):
       "p38-request-journal-v1"
   }, journal
   assert inventory["journal_scope"] == "cumulative-unscoped", inventory
+  completion = json.loads(
+      (remote / f"{round_index:06d}" / "ROUND_COMPLETE.json").read_text()
+  )
+  assert completion["logical_file_count"] == len(
+      (bundle / "SHA256SUMS").read_text().splitlines()
+  ), completion
+  assert completion["transport"] == "single-deterministic-tar-v1", completion
 PY
 test ! -e "$FAKE_GCS_ROOT/yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-p38-test-rounds/attempt-0/COLLECTED.json"
 
@@ -305,4 +348,4 @@ grep -q 'completion requested before collection acknowledgement' \
 test ! -e "$CANON_P38_LIVE_COMPLETE_ACK_FILE"
 test ! -e "$FAKE_GCS_ROOT/yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-p38-test-out-of-order/attempt-0/COMPLETE.json"
 
-echo "[P38.GCS] PERSISTENCE_TEST_PASS probe=verified prefix_reuse=rejected live=immutable worker=durable round_bundles=survive_abrupt_exit collected=verified complete=last out_of_order=rejected missing=rejected upload_failure=rejected"
+echo "[P38.GCS] PERSISTENCE_TEST_PASS probe=verified prefix_reuse=rejected live=immutable bounded_objects=3 round_request=priority worker=durable round_bundles=survive_abrupt_exit collected=verified complete=last out_of_order=rejected missing=rejected upload_failure=rejected"

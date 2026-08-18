@@ -5,95 +5,52 @@ parallel Qwen3-32B DeepSWE workstream, read
 `../p39-deepswe-production/HANDOFF.md`. P38 evidence cannot promote P39, and
 P39 evidence cannot promote P38.
 
-## CURRENT: prepare one P38.2u terminal-discriminator launch
+## CURRENT: publish bounded-object transport, then run P38s21 once
 
-P38.2t is closed as analysis evidence. Its immutable v3 bundle joins all 32
-P38s18r2 red actions: 26 first measured at the raw normalizer and 6 at the raw
-target logit, while the recorded layer/final-norm fingerprints are equal. This
-does not prove full hidden or logits bytes. P38.2u is the next and only target
-diagnostic: exact selected final-hidden rows, bounded raw-logit block evidence,
-block reduction, existing tail values, and production logprob in one run.
+P38.2u's numerical observer is locally admitted and unchanged. P38s20/source
+`bea31f36...` proved the 4-GiB bound reaches all three observer streams: Round
+0 produced 873 seam, 873 tail, and 873 terminal records. Its numerical result
+was A-B red at 63 bytes / 41 elements (`max_abs=0.08359146118164062`) and B-C
+exact across 49,451 actions.
 
-Read `phases/p38-2u-terminal-discriminator.md` before operating. The feature is
-default-off and does not enable prefix cache, backward, optimizer commit,
-evaluation, full training, or unified KV.
+P38s20 did **not** answer the terminal question. The live worker tried to
+serially upload about 5,246 accumulated observer files before servicing the
+round-seal request. The learner timed out after 900 seconds, so rounds 1/2,
+terminal classification, controlled exit, `COLLECTED`, and `COMPLETE` are
+absent. Verdict: `INCONCLUSIVE_DURABILITY_SEAL_TIMEOUT`.
 
-### Publication/admission gate
+The current work is P38.2v. It changes host evidence transport only:
 
-Do not launch while the worktree is dirty. The local gates below passed on
-2026-08-17 and are recorded in
-`artifacts/p38_2u_terminal_discriminator_onehost_0817.md`:
+- one deterministic tar plus one manifest per live snapshot or round;
+- one read-back archive verification;
+- completion marker written last;
+- exactly three remote objects instead of thousands; and
+- round/terminal requests processed before periodic snapshots.
 
-```text
-P33_EXACT_IMAGE_PASS ... runner_tests_per_overlay=34 overlays=2
-real v5p: PASS mode=terminal-discriminator rounds=3 backward=0 optimizer_commits=0
-real v5p terminal classification: terminal_rows_exact
-real v5p off/on neutrality: observer_endpoint_bitwise_neutral
-classifier one-bit/missing-red/conflicting-alias negatives: PASS
-```
+Read these documents in order:
 
-The first prototype is intentionally not admissible: it fused the
-shape-dependent gather with block reduction and produced false observer reds
-on an exact local A-B run. The published source must contain
-`reduction_program=shared-fixed-four-row-v1` and the classifier must reject any
-older record.
+1. `phases/p38-2u-terminal-discriminator.md`;
+2. `phases/p38-2v-bounded-object-durability.md`;
+3. `P38S21_RUNBOOK.md`.
 
-The final source is still uncommitted and unpublished. A passing local receipt
-does not authorize rendering from the dirty worktree; wait for the user's
-explicit commit/push approval and substitute that full SHA below.
+Do not relaunch P38s20, do not use the historical P38s18r2 runbook, and do not
+increase the timeout as the primary repair. The new source is not launchable
+until its local gates pass and the user separately approves commit and push.
 
-### Exact 64-chip operator sequence after user-approved publication
+After publication, the only target action is one fresh P38s21 run, using the
+exact command in `P38S21_RUNBOOK.md`. It keeps DP16xTP4, concurrency 256,
+prefix cache off, three frozen rounds, no backward, no optimizer commit, layer
+seam, terminal tail, terminal discriminator, and the 4-GiB bound.
 
-Use a fresh run id (registered name `p38s19`) and the full approved SHA. Do not
-edit the rendered YAML.
+The remote operator must return small receipts rather than committing raw
+multi-gigabyte archives: full source/YAML SHA, attempt-0 log, three
+pre-alignment records, terminal classification, three `ROUND_COMPLETE`
+records, root `COLLECTED`/`COMPLETE`/`SHA256SUMS`, and per-round archive verify
+receipts. Raw `ROUND_ARCHIVE.tar` objects remain at the immutable GCS prefix.
 
-```bash
-set -euo pipefail
-git fetch origin yuxzhang/canon-zero-tim
-SOURCE_COMMIT="<APPROVED_FULL_SHA>"
-test "$(git rev-parse FETCH_HEAD)" = "$SOURCE_COMMIT"
-RUN_ID=p38s19
-OUT="/tmp/p38-serving-$RUN_ID"
-test ! -e "$OUT"
-
-python3 canon-zero-tim/cluster/render_p38_serving_jobsets.py \
-  --source-commit "$SOURCE_COMMIT" \
-  --run-id "$RUN_ID" \
-  --output-dir "$OUT" \
-  --stock-only \
-  --max-concurrency 256 \
-  --seam-mode layer \
-  --terminal-tail \
-  --terminal-discriminator
-
-YAML="$OUT/jobset-p38-serving-stock.yaml"
-grep -Fq 'name: CANON_P38_TERMINAL_DISCRIMINATOR' "$YAML"
-grep -Fq 'name: CANON_P38_TERMINAL_MAX_BYTES' "$YAML"
-grep -Fq 'name: CANON_P38_TERMINAL_CLASSIFICATION' "$YAML"
-grep -Fq 'value: "1"' "$YAML"
-kubectl apply --dry-run=server -f "$YAML"
-kubectl apply -f "$YAML"
-```
-
-Return the complete GCS attempt-0 package, not screenshots or a hand summary.
-Admission requires three immutable round capsules, all red points joined in
-both A and B, `p38_terminal.classification.json`, source/log/classifier SHA,
-controlled exit 42, `COLLECTED.json`, `COMPLETE.json`, and a verifying
-`SHA256SUMS`. If a pod dies, return the newest live snapshot too.
-
-Interpret only the capsule-scoped classifier:
-
-- `pre_lm_head_hidden`: reopen the upstream seam;
-- `lm_head_logits`: lm_head/program envelope;
-- `vocab_block_reduction`: raw fixed block exp-sum/merge;
-- `logits_processing`: raw-to-processed sampling/logits transform;
-- `processed_vocab_block_reduction`: processed fixed block exp-sum/merge;
-- `production_tail_only`: production gather/subtract wiring;
-- mixed: retain every signature;
-- any missing/ambiguous red join: `INCONCLUSIVE`.
-
-This one run should name the first divergent terminal subprogram. It does not
-claim that the repair itself is complete.
+Only the capsule-scoped terminal classifier may name the first differing
+stage. Any missing round, marker, SHA, red join, or ambiguous signature remains
+`INCONCLUSIVE`.
 
 ## HISTORY: P38s18r2 target-aware tail reduction
 

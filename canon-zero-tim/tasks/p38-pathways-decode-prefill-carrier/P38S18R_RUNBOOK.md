@@ -4,13 +4,14 @@
 > `a514c3bf` completed it and returned rc 1 at
 > `duplicate seam token-prefix record`. The source inventory is closed, but
 > overlapping observer records require deterministic alias auditing before
-> classification. The current operator card is
-> `P38S18R2_ALIAS_REDUCTION_RUNBOOK.md`; the governing phase is
-> `phases/p38-2s-round0-alias-aware-seam-tail-reduction.md`. The remainder of
-> this file is retained only to reproduce the failed v1 receipt.
+> classification. The old Round-0 analysis card is
+> `P38S18R2_ALIAS_REDUCTION_RUNBOOK.md`; the current launch card is
+> `P38S21_RUNBOOK.md`. The remainder of this file is retained only to
+> reproduce the failed v1 receipt.
 
 This was the v1 operator card for P38s18r2. It remains historical provenance,
-not an executable next step.
+not an executable next step. The current launch card is `P38S21_RUNBOOK.md`;
+it must not be reconstructed from the commands retained below.
 
 The local evaluator intentionally has no access to the producer's GCS
 credentials. The raw seam/tail NPZ corpus is also too large to use as the

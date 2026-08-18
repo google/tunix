@@ -6,23 +6,31 @@
 - Definition of done: one source-pinned flag-on run reports exact
   `S_decode_vs_S_prefill`, exact `S_prefill_vs_T_old`, and exact
   `T_old_vs_T_current` before a strict full workload is admitted.
-- Active phase: P38.2u one-pass terminal discriminator. P38.2t admitted the
-  immutable target-aware v3 analysis bundle: 32/32 red points join, 26 first
-  measured at `raw_log_normalizer`, 6 at `raw_target_logit`, and its overall
-  verdict remains `INCONCLUSIVE_PARTIAL_RUN`. P38.2u now distinguishes exact
-  selected final-hidden rows, lm_head raw-logit blocks, block reduction, the
-  existing tail observer, and the production endpoint in one default-off run.
-  The first real-v5p prototype correctly exposed an observer design bug: a
-  fused shape-dependent gather/reduction falsely reported reduction drift on
-  a locally exact A-B run. The corrected design separates gather and uses one
-  fixed-four-row raw/processed reduction executable. The fresh v5p gate is
-  complete: 155/155 joined rows are exact, the real-TPU one-bit negative
-  detects mutation, and observer-off/on production endpoints are bitwise
-  neutral across all three frozen rounds. See
-  `artifacts/p38_2u_terminal_discriminator_onehost_0817.md`. No 64-TPU launch
-  is authorized before explicit user-reviewed publication.
+- Active phase: P38.2v bounded-object diagnostic durability. P38.2u's
+  terminal observer remains locally admitted: 155/155 real-v5p joins are
+  exact, its one-bit negative detects mutation, and observer-off/on production
+  endpoints are bitwise neutral across three frozen rounds. P38s20 reached
+  one production numerical round with 873 seam, 873 tail, and 873 terminal
+  records, but the live worker serially uploaded about 5,246 accumulated files
+  before servicing the round request. The learner timed out after 900 seconds.
+  P38.2v preserves the logical files and their SHA inventory in one
+  deterministic archive per live snapshot/round, verifies one read-back
+  archive, writes completion last, and processes seal requests before periodic
+  snapshots. The host implementation and local gates are complete; commit,
+  push, and P38s21 require separate user approval.
 - Task directory:
   `canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/`.
+- P38s20/source `bea31f36655b137d7ab47ba94095cadda5b586ba` execution
+  history: the 4-GiB terminal bound succeeded. Round 0 covered 49,451 actions;
+  A-B was red at 63 bytes / 41 elements with
+  `max_abs=0.08359146118164062`, while B-C was bitwise exact. Backward and
+  optimizer commits remained zero. The worker was still in cumulative live
+  snapshot sequence 15 when `_seal_p38_diagnostic_round` timed out, so no
+  rounds 1/2, terminal classification, controlled exit, `COLLECTED`, or
+  `COMPLETE` is admitted. Verdict:
+  `INCONCLUSIVE_DURABILITY_SEAL_TIMEOUT`. The five committed evidence payloads
+  verify against their manifest, but they are summaries rather than the raw
+  terminal corpus. See `evidence/p38s20/`.
 - P38.2t execution history: P38s18r2 reached one
   numerical round on 64 TPU (`DP16xTP4`, concurrency 256), then the learner
   timed out after 900 seconds waiting for the durability ACK. The worker took

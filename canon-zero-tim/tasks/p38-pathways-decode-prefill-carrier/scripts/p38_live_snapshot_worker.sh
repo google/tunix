@@ -46,6 +46,35 @@ last_signature=""
 last_observer_signature=""
 next_round_to_seal=0
 
+observer_signature_for_round() {
+  local observer_dir="$1" round_value="$2"
+  python3 - "$observer_dir" "$round_value" <<'PY'
+import json
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1])
+round_index = int(sys.argv[2])
+paths = []
+for pattern in (
+    "p38_kv_observer_*.json",
+    "p38_seam_*.json",
+    "p38_tail_*.json",
+    "p38_terminal_*.json",
+):
+  for json_path in root.glob(pattern):
+    record = json.loads(json_path.read_text(encoding="utf-8"))
+    if int(record.get("diagnostic_round", -1)) != round_index:
+      continue
+    npz_path = json_path.with_suffix(".npz")
+    if not npz_path.is_file():
+      raise SystemExit(f"paired observer NPZ is absent: {npz_path}")
+    paths.extend((json_path, npz_path))
+for path in sorted(paths, key=lambda item: item.name):
+  print(f"{path.name}:{path.stat().st_size}")
+PY
+}
+
 snapshot_if_changed() {
   local run_size=0 journal_size=0 incident_size=0 report_size=0 capsule_signature=""
   local signature sequence_text rc capsule_path observer_path observer_dir
@@ -64,20 +93,10 @@ snapshot_if_changed() {
   done
   shopt -u nullglob
   observer_dir="${CANON_P38_SEAM_OBSERVER_DIR:-${CANON_P38_KV_OBSERVER_DIR:-}}"
-  if [ -n "$observer_dir" ] && [ -d "$observer_dir" ]; then
-    shopt -s nullglob
-    for observer_path in \
-        "$observer_dir"/p38_kv_observer_*.json \
-        "$observer_dir"/p38_kv_observer_*.npz \
-        "$observer_dir"/p38_seam_*.json \
-        "$observer_dir"/p38_seam_*.npz \
-        "$observer_dir"/p38_tail_*.json \
-        "$observer_dir"/p38_tail_*.npz \
-        "$observer_dir"/p38_terminal_*.json \
-        "$observer_dir"/p38_terminal_*.npz; do
-      observer_signature+="$(basename "$observer_path"):$(wc -c < "$observer_path" | tr -d '[:space:]'),"
-    done
-    shopt -u nullglob
+  if [ -n "$observer_dir" ] && [ -d "$observer_dir" ] && \
+     [ "$round_value" != missing ]; then
+    observer_signature="$(observer_signature_for_round \
+      "$observer_dir" "$round_value" | tr '\n' ',')"
   fi
   if [ -n "$observer_signature" ] && \
      [ "$observer_signature" != "$last_observer_signature" ]; then
@@ -91,6 +110,7 @@ snapshot_if_changed() {
   printf -v sequence_text '%06d' "$sequence"
   rc=0
   CANON_P38_LIVE_INCLUDE_OBSERVER="$observer_changed" \
+    CANON_P38_LIVE_OBSERVER_ROUND="$round_value" \
     bash "$persist" snapshot "$sequence_text" || rc=$?
   if [ "$rc" -ne 0 ]; then
     echo "[P38.GCS] FATAL: live snapshot failed sequence=$sequence_text rc=$rc" >&2
@@ -159,6 +179,15 @@ if record != expected:
   raise SystemExit(f"round-seal request drifted: {record!r} != {expected!r}")
 PY
     bash "$persist" round "$round_text"
+    # The learner is still blocked here, so every record for this round is
+    # already inside the verified round archive.  Mark that observer state as
+    # durable before publishing the ACK; the next periodic snapshot then does
+    # not redundantly archive the just-sealed round.
+    observer_dir="${CANON_P38_SEAM_OBSERVER_DIR:-${CANON_P38_KV_OBSERVER_DIR:-}}"
+    if [ -n "$observer_dir" ] && [ -d "$observer_dir" ]; then
+      last_observer_signature="$(observer_signature_for_round \
+        "$observer_dir" "$next_round_to_seal" | tr '\n' ',')"
+    fi
     ack_path="$CANON_P38_ROUND_SEAL_ACK_DIR/round-$round_text.ack"
     partial="$ack_path.partial"
     python3 - "$partial" "$next_round_to_seal" <<'PY'
@@ -181,15 +210,17 @@ PY
 
 echo "[P38.GCS] LIVE_WORKER_START interval=$CANON_P38_LIVE_SNAPSHOT_INTERVAL_SECONDS"
 while [ ! -e "$CANON_P38_LIVE_SNAPSHOT_STOP_FILE" ]; do
-  snapshot_if_changed
+  # Round durability is on the learner's critical path.  Never put a periodic
+  # live snapshot ahead of an already-published seal or terminal request.
   handle_round_requests
   handle_terminal_requests
+  snapshot_if_changed
   sleep "$CANON_P38_LIVE_SNAPSHOT_INTERVAL_SECONDS" &
   wait "$!" || true
 done
-snapshot_if_changed
 handle_round_requests
 handle_terminal_requests
+snapshot_if_changed
 if [ "$sequence" -eq 0 ]; then
   echo "[P38.GCS] FATAL: live worker observed no host evidence" >&2
   exit 1

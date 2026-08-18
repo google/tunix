@@ -96,6 +96,11 @@ fi
 
 stage="$CANON_STATE/p38_gcs_stage"
 mkdir -p "$stage"
+archive_tool="$CANON_PKG/tasks/p38-pathways-decode-prefill-carrier/scripts/p38_evidence_archive.py"
+if [ ! -f "$archive_tool" ]; then
+  echo "[P38.GCS] REFUSING: evidence archive tool is absent: $archive_tool" >&2
+  exit 1
+fi
 
 copy_required() {
   local source="$1" name="$2" partial
@@ -197,22 +202,48 @@ if [ "$mode" = snapshot ]; then
   fi
   if [ "${CANON_P38_LIVE_INCLUDE_OBSERVER:-0}" = "1" ]; then
     observer_dir="${CANON_P38_SEAM_OBSERVER_DIR:-${CANON_P38_KV_OBSERVER_DIR:-}}"
+    observer_round="${CANON_P38_LIVE_OBSERVER_ROUND:?live observer round unset}"
+    case "$observer_round" in
+      ''|*[!0-9]*)
+        echo "[P38.GCS] REFUSING: live observer round must be a nonnegative integer" >&2
+        exit 1
+        ;;
+    esac
     if [ -z "$observer_dir" ] || [ ! -d "$observer_dir" ]; then
       echo "[P38.GCS] REFUSING: observer snapshot requested without a directory" >&2
       exit 1
     fi
-    shopt -s nullglob
-    observer_sources=(
-      "$observer_dir"/p38_kv_observer_*.json
-      "$observer_dir"/p38_kv_observer_*.npz
-      "$observer_dir"/p38_seam_*.json
-      "$observer_dir"/p38_seam_*.npz
-      "$observer_dir"/p38_tail_*.json
-      "$observer_dir"/p38_tail_*.npz
-      "$observer_dir"/p38_terminal_*.json
-      "$observer_dir"/p38_terminal_*.npz
-    )
-    shopt -u nullglob
+    observer_listing="$(
+      python3 - "$observer_dir" "$observer_round" <<'PY'
+import json
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1])
+round_index = int(sys.argv[2])
+paths = []
+for pattern in (
+    "p38_kv_observer_*.json",
+    "p38_seam_*.json",
+    "p38_tail_*.json",
+    "p38_terminal_*.json",
+):
+  for json_path in root.glob(pattern):
+    record = json.loads(json_path.read_text(encoding="utf-8"))
+    if int(record.get("diagnostic_round", -1)) != round_index:
+      continue
+    npz_path = json_path.with_suffix(".npz")
+    if not npz_path.is_file():
+      raise SystemExit(f"paired observer NPZ is absent: {npz_path}")
+    paths.extend((json_path, npz_path))
+for path in sorted(paths, key=lambda item: item.name):
+  print(path)
+PY
+    )"
+    observer_sources=()
+    if [ -n "$observer_listing" ]; then
+      mapfile -t observer_sources <<< "$observer_listing"
+    fi
     if [ "${#observer_sources[@]}" -eq 0 ]; then
       echo "[P38.GCS] REFUSING: observer snapshot requested without records" >&2
       exit 1
@@ -228,13 +259,23 @@ if [ "$mode" = snapshot ]; then
     rmdir "$live_stage"
     exit 3
   fi
+  mapfile -t live_files < <(
+    printf '%s\n' "${live_files[@]}" | LC_ALL=C sort -u
+  )
   (
     cd "$live_stage"
     sha256sum "${live_files[@]}" > SHA256SUMS
     sha256sum -c SHA256SUMS --quiet
   )
+  live_archive="$CANON_STATE/p38_gcs_live/$snapshot_sequence.tar"
+  python3 "$archive_tool" create \
+    --root "$live_stage" \
+    --manifest "$live_stage/SHA256SUMS" \
+    --output "$live_archive"
+  live_archive_sha="$(sha256sum "$live_archive" | awk '{print $1}')"
+  live_manifest_sha="$(sha256sum "$live_stage/SHA256SUMS" | awk '{print $1}')"
   python3 - "$live_stage/LIVE.json.partial" "$snapshot_sequence" \
-    "${live_files[@]}" <<'PY'
+    "$live_archive_sha" "$live_manifest_sha" "${live_files[@]}" <<'PY'
 import json
 import os
 import pathlib
@@ -242,29 +283,38 @@ import sys
 
 target = pathlib.Path(sys.argv[1])
 record = {
+    "archive_name": "LIVE_ARCHIVE.tar",
+    "archive_sha256": sys.argv[3],
     "attempt": os.environ.get("JOBSET_RESTART_ATTEMPT", "unknown"),
-    "files": sys.argv[3:],
+    "files": sys.argv[5:],
     "jobset": os.environ["CANON_P38_GCS_PREFIX"].split("/")[-2],
+    "logical_file_count": len(sys.argv[5:]),
+    "manifest_sha256": sys.argv[4],
     "pod": os.environ.get("CANON_POD_NAME", "unknown"),
     "prefix": os.environ["CANON_P38_GCS_PREFIX"],
     "schema": "canon-p38-gcs-live-v1",
     "sequence": int(sys.argv[2]),
     "source_commit": os.environ.get("CANON_EXPECT_COMMIT", "unknown"),
     "status": "live-snapshot",
+    "transport": "single-deterministic-tar-v1",
 }
 target.write_text(json.dumps(record, sort_keys=True) + "\n", encoding="utf-8")
 PY
   mv -- "$live_stage/LIVE.json.partial" "$live_stage/LIVE.json"
-  for name in "${live_files[@]}" SHA256SUMS; do
-    gcs_cp "$live_stage/$name" "$live_prefix/$name"
-    echo "[P38.GCS] LIVE_UPLOADED sequence=$snapshot_sequence name=$name bytes=$(wc -c < "$live_stage/$name" | tr -d '[:space:]')"
-  done
+  gcs_cp "$live_archive" "$live_prefix/LIVE_ARCHIVE.tar"
+  gcs_cp "$live_stage/SHA256SUMS" "$live_prefix/SHA256SUMS"
+  verify_dir="$(mktemp -d)"
+  trap 'rm -rf "$verify_dir"' EXIT
+  gcs_cp "$live_prefix/LIVE_ARCHIVE.tar" "$verify_dir/LIVE_ARCHIVE.tar"
+  gcs_cp "$live_prefix/SHA256SUMS" "$verify_dir/SHA256SUMS"
+  python3 "$archive_tool" verify \
+    --archive "$verify_dir/LIVE_ARCHIVE.tar" \
+    --expected-sha256 "$live_archive_sha"
+  cmp -- "$live_stage/SHA256SUMS" "$verify_dir/SHA256SUMS"
   gcs_cp "$live_stage/LIVE.json" "$live_prefix/LIVE.json"
-  verify="$(mktemp)"
-  trap 'rm -f "$verify"' EXIT
-  gcs_cp "$live_prefix/LIVE.json" "$verify"
-  cmp -- "$live_stage/LIVE.json" "$verify"
-  echo "[P38.GCS] LIVE sequence=$snapshot_sequence prefix=$live_prefix files=${live_files[*]}"
+  gcs_cp "$live_prefix/LIVE.json" "$verify_dir/LIVE.json"
+  cmp -- "$live_stage/LIVE.json" "$verify_dir/LIVE.json"
+  echo "[P38.GCS] LIVE sequence=$snapshot_sequence prefix=$live_prefix logical_files=${#live_files[@]} remote_objects=3 archive_sha256=$live_archive_sha"
   exit 0
 fi
 
@@ -322,20 +372,25 @@ if [ "$mode" = round ]; then
     sha256sum "${round_files[@]}" > SHA256SUMS
     sha256sum -c SHA256SUMS --quiet
   )
-  for name in "${round_files[@]}" SHA256SUMS; do
-    gcs_cp "$round_stage/$name" "$round_prefix/$name"
-    echo "[P38.GCS] ROUND_UPLOADED round=$round_index name=$name bytes=$(wc -c < "$round_stage/$name" | tr -d '[:space:]')"
-  done
+  round_archive="$CANON_STATE/p38_gcs_rounds/$snapshot_sequence.tar"
+  python3 "$archive_tool" create \
+    --root "$round_stage" \
+    --manifest "$round_stage/SHA256SUMS" \
+    --output "$round_archive"
+  round_archive_sha="$(sha256sum "$round_archive" | awk '{print $1}')"
   verify_dir="$(mktemp -d)"
   trap 'rm -rf "$verify_dir"' EXIT
+  gcs_cp "$round_archive" "$round_prefix/ROUND_ARCHIVE.tar"
+  gcs_cp "$round_stage/SHA256SUMS" "$round_prefix/SHA256SUMS"
+  gcs_cp "$round_prefix/ROUND_ARCHIVE.tar" "$verify_dir/ROUND_ARCHIVE.tar"
   gcs_cp "$round_prefix/SHA256SUMS" "$verify_dir/SHA256SUMS"
-  for name in "${round_files[@]}"; do
-    gcs_cp "$round_prefix/$name" "$verify_dir/$name"
-  done
-  (cd "$verify_dir" && sha256sum -c SHA256SUMS --quiet)
+  python3 "$archive_tool" verify \
+    --archive "$verify_dir/ROUND_ARCHIVE.tar" \
+    --expected-sha256 "$round_archive_sha"
+  cmp -- "$round_stage/SHA256SUMS" "$verify_dir/SHA256SUMS"
   manifest_sha="$(sha256sum "$round_stage/SHA256SUMS" | awk '{print $1}')"
   python3 - "$round_stage/ROUND_COMPLETE.json.partial" "$round_index" \
-    "$manifest_sha" <<'PY'
+    "$manifest_sha" "$round_archive_sha" "${#round_files[@]}" <<'PY'
 import json
 import os
 import pathlib
@@ -343,12 +398,16 @@ import sys
 
 target = pathlib.Path(sys.argv[1])
 record = {
+    "archive_name": "ROUND_ARCHIVE.tar",
+    "archive_sha256": sys.argv[4],
     "attempt": os.environ.get("JOBSET_RESTART_ATTEMPT", "unknown"),
     "diagnostic_round": int(sys.argv[2]),
+    "logical_file_count": int(sys.argv[5]),
     "manifest_sha256": sys.argv[3],
     "schema": "canon-p38-round-completion-v1",
     "source_commit": os.environ.get("CANON_EXPECT_COMMIT", "unknown"),
     "status": "sealed-and-verified",
+    "transport": "single-deterministic-tar-v1",
 }
 target.write_text(json.dumps(record, sort_keys=True) + "\n", encoding="utf-8")
 PY
@@ -360,7 +419,7 @@ PY
     "$verify_dir/ROUND_COMPLETE.json"
   cmp -- "$round_stage/ROUND_COMPLETE.json" \
     "$verify_dir/ROUND_COMPLETE.json"
-  echo "[P38.GCS] ROUND_COMPLETE round=$round_index prefix=$round_prefix manifest_sha256=$manifest_sha"
+  echo "[P38.GCS] ROUND_COMPLETE round=$round_index prefix=$round_prefix logical_files=${#round_files[@]} remote_objects=3 manifest_sha256=$manifest_sha archive_sha256=$round_archive_sha"
   exit 0
 fi
 

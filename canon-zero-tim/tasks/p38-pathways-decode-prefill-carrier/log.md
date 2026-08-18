@@ -1791,3 +1791,38 @@ reclassification from the committed NPZ inputs.
   `artifacts/p38_2u_terminal_discriminator_onehost_0817.md`. No target launch,
   commit, or push occurred. The next gate is explicit user-reviewed
   publication followed by exactly one P38s19 64-TPU stock diagnostic.
+
+## 2026-08-18 UTC — P38s20 durability timeout and P38.2v transport repair
+
+- Pulled evidence commit `3f3ae92d`. Its five manifested payloads verify.
+  P38s20/source `bea31f36...` completed Round 0 with 873 seam, 873 tail, and
+  873 terminal records. Across 49,451 actions, A-B reported 63 differing bytes
+  / 41 elements (`max_abs=0.08359146118164062`) and B-C was exact. Backward and
+  optimizer commits remained zero.
+- The 4-GiB output-bound change worked. The failure was host durability: live
+  snapshot sequence 15 was serially uploading the cumulative observer corpus
+  before the worker could service `round-000000.request`. The current live and
+  round paths both used one GCS copy per logical file; the round path would
+  additionally read every object back. About 5,246 logical files therefore
+  exhausted the learner's 900-second ACK window. Verdict remains
+  `INCONCLUSIVE_DURABILITY_SEAL_TIMEOUT`; no terminal root cause is admitted.
+- Added P38.2v host-only transport. Every snapshot/round now has a sorted
+  logical-file manifest inside one deterministic flat tar. The worker uploads
+  the archive and manifest, downloads and verifies the archive once, then
+  writes `LIVE.json` or `ROUND_COMPLETE.json` last. Each remote prefix has
+  exactly three objects. Periodic observer payload is diagnostic-round scoped,
+  and already-published seal/terminal requests run before a periodic snapshot.
+- Added a reusable verifier/extractor and a 5,246-file regression. Two archive
+  builds are byte-identical; extraction reproduces the manifest; a one-bit
+  archive mutation and a missing member fail closed. Fake-GCS persistence
+  proves three-object live/round transport, read-back verification,
+  completion-last ordering, and independently sealed rounds surviving abrupt
+  worker exit.
+- Current local gates: archive unit tests 4/4 PASS; fake-GCS persistence PASS;
+  77/77 importable P38 Python tests PASS; postflight, evidence seal, and package
+  suites PASS; Python compile, Bash syntax, and diff check PASS. The renderer
+  test is `TARGET NOT RUN` in this interpreter because `metrax` is absent; no
+  renderer code changed. No TPU path, observer values, model, prefix cache,
+  backward, optimizer, commit, push, or remote GCS state changed. Next target
+  after user-approved publication is exactly one P38s21 run using
+  `P38S21_RUNBOOK.md`.
