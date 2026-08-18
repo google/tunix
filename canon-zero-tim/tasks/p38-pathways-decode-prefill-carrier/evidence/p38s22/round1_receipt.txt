@@ -1,0 +1,9 @@
+Round: 000001
+GCS Prefix: gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-p38-fl-stock-p38s22-ee0154b3/attempt-0/rounds/000001
+ROUND_ARCHIVE.tar: gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-p38-fl-stock-p38s22-ee0154b3/attempt-0/rounds/000001/ROUND_ARCHIVE.tar
+ROUND_COMPLETE.json: gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-p38-fl-stock-p38s22-ee0154b3/attempt-0/rounds/000001/ROUND_COMPLETE.json
+Archive SHA256: 7f878712fe8e11f8ebb054ec21996318a2d87ba09d43ba9c15831b8ab7db5965
+Manifest SHA256: fecfc5d31effcfcea35e434f1d430df992214ad4d159e84672e7aeabdb9668d3
+Logical Files Count: 1
+Verification Output: [P38.ARCHIVE] VERIFIED path=/tmp/p38s22_analysis/000001/ROUND_ARCHIVE.tar logical_files=1 sha256=7f878712fe8e11f8ebb054ec21996318a2d87ba09d43ba9c15831b8ab7db5965
+Verification Status: PASS
