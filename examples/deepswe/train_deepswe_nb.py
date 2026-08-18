@@ -247,6 +247,8 @@ parser.add_argument(
 
 parser.add_argument("--use_flash_attention", type=bool, default=True)
 parser.add_argument("--flash_attention_block_size", type=int, default=1024)
+parser.add_argument("--target_accuracy", type=float, default=0.69)
+parser.add_argument("--rcp_logging", type=bool, default=False)
 parser.add_argument("--metric_logger_dir", type=str, default=None)
 parser.add_argument(
     "--logging_level",
@@ -385,6 +387,10 @@ from tunix.perf.experimental.export import PerfMetricsExport
 from tunix.rl.agentic.rewards.reward_types import RewardOutput
 from examples.deepswe import swe_agent
 from examples.deepswe import swe_env
+from examples.deepswe import mllog_utils
+
+if args.rcp_logging:
+  mllog_utils.init_start(args)
 
 # %%
 # ==========================================
@@ -556,6 +562,7 @@ FILTER_STATUSES = (
 LOSS_AGG_MODE = args.loss_agg_mode
 ADVANTAGE_ESTIMATOR = args.advantage_estimator
 USE_ROLLOUT_LOGPS = args.use_rollout_logps
+RCP_LOGGING = args.rcp_logging
 
 
 # %%
@@ -586,7 +593,6 @@ else:
       "R2E-Gym/R2E-Gym-Subset",
       split="train",
       cache_dir=DATASET_CACHE,
-      trust_remote_code=True,
   )
 
 
@@ -1027,6 +1033,7 @@ config_kwargs = {
     "loss_agg_mode": LOSS_AGG_MODE,
     "advantage_estimator": ADVANTAGE_ESTIMATOR,
     "use_rollout_logps": USE_ROLLOUT_LOGPS,
+    "rcp_logging": args.rcp_logging,
 }
 
 grpo_config = agentic_grpo_learner.GRPOConfig(**config_kwargs)
@@ -1082,8 +1089,26 @@ except Exception as e:
   print(f"W&B initialization failed with error: {e}")
 
 
+if RCP_LOGGING:
+  mllog_utils.init_print(
+      args,
+      train_dataset=dataset,
+      rollout_mesh=rollout_mesh,
+      train_mesh=train_mesh,
+      total_devices=total_devices,
+  )
+  mllog_utils.init_stop()
+  mllog_utils.run_start()
+  mllog_utils.block_start(args)
+
 print("Starting training...", flush=True)
 agentic_grpo_learner.train(train_dataset=train_dataset)
+
+if RCP_LOGGING:
+  mllog_utils.run_stop(
+      status="success",
+      samples_count=MAX_STEPS * BATCH_SIZE * NUM_GENERATIONS,
+  )
 
 
 # %%
