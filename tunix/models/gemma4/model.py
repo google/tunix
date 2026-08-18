@@ -999,7 +999,11 @@ class Attention(nnx.Module):
     b, _, qh, _ = query_proj.shape
     _, _, kh, _ = key_proj.shape
 
-    if self.config.use_flash_attention and seq_len > 1:
+    if (
+        self.config.use_flash_attention
+        and seq_len >= self.config.flash_attention_block_size
+        and seq_len % self.config.flash_attention_block_size == 0
+    ):
       query_proj = query_proj.transpose(0, 2, 1, 3)
       key_proj = key_proj.transpose(0, 2, 1, 3)
       value_proj = value_proj.transpose(0, 2, 1, 3)
