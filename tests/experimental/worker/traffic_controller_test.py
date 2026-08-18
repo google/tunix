@@ -28,6 +28,8 @@ class TrafficControllerTest(unittest.IsolatedAsyncioTestCase):
 
   def setUp(self):
     super().setUp()
+
+  async def asyncSetUp(self):
     self.controller = traffic_controller.TrafficController()
 
   def test_initial_state(self):

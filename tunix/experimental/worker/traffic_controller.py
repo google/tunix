@@ -35,11 +35,23 @@ class TrafficController:
   """
 
   def __init__(self):
+    self._loop = asyncio.get_running_loop()
     self._lock = threading.RLock()
     self._state = WorkerState.READY
     self._admission_open = asyncio.Event()
-    self._admission_open.set()
+    self._run_threadsafe(self._loop, self._admission_open.set)
     self._active_tasks: set[asyncio.Task[Any]] = set()
+
+  def _run_threadsafe(self, loop: asyncio.AbstractEventLoop, callback) -> None:
+    try:
+      current_loop = asyncio.get_running_loop()
+    except RuntimeError:
+      current_loop = None
+    if current_loop is loop:
+      callback()
+    else:
+      loop.call_soon_threadsafe(callback)
+
 
   @property
   def state(self) -> WorkerState:
@@ -69,8 +81,8 @@ class TrafficController:
       True if admitted, False if rejected.
     """
     with self._lock:
-      if not self._admission_open.is_set() or self._state != WorkerState.READY:
-        task.cancel()
+      if self._state != WorkerState.READY:
+        self._run_threadsafe(task.get_loop(), task.cancel)
         return False
       self.track(task)
       return True
@@ -109,7 +121,7 @@ class TrafficController:
             f"Cannot transition to SYNCING from {self._state.value}"
         )
       self._state = WorkerState.SYNCING
-      self._admission_open.clear()
+      self._run_threadsafe(self._loop, self._admission_open.clear)
 
   def reopen(self) -> bool:
     """Reopens admission and sets state to READY.
@@ -121,7 +133,7 @@ class TrafficController:
       if self._state == WorkerState.STOPPED:
         return False
       self._state = WorkerState.READY
-      self._admission_open.set()
+      self._run_threadsafe(self._loop, self._admission_open.set)
       return True
 
   def stop_and_cancel_all(self) -> list[asyncio.Task[Any]]:
@@ -132,10 +144,10 @@ class TrafficController:
     """
     with self._lock:
       self._state = WorkerState.STOPPED
-      self._admission_open.clear()
+      self._run_threadsafe(self._loop, self._admission_open.clear)
       tasks = list(self._active_tasks)
 
     # Cancel outside the lock to avoid reentrancy if callbacks are invoked immediately
     for task in tasks:
-      task.cancel()
+      self._run_threadsafe(task.get_loop(), task.cancel)
     return tasks
