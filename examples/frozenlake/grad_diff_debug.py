@@ -668,45 +668,45 @@ def phase_of(trainer, tag):
   return denom
 
 
-with mesh:
-  # v1
-  optimizer_v1 = optax.inject_hyperparams(optax.sgd)(
-      learning_rate=optax.constant_schedule(_LEARNING_RATE)
-  )
-  config_v1 = peft_trainer.TrainingConfig(
-      eval_every_n_steps=20000,
-      max_steps=_MAX_STEPS,
-      gradient_accumulation_steps=_ACCUM_STEPS,
-  )
-  trainer_v1 = peft_trainer.PeftTrainer(gemma, optimizer_v1, config_v1)
-  trainer_v1 = trainer_v1.with_gen_model_input_fn(gen_model_input_fn)
-  with jax.profiler.trace(log_dir="gs://linchai-bucket-dev/xprof/grad_diff"):
-    trainer_v1.train(_run_dataset, skip_jit=False)
-    jax.effects_barrier()
+# with mesh:
+#   # v1
+#   optimizer_v1 = optax.inject_hyperparams(optax.sgd)(
+#       learning_rate=optax.constant_schedule(_LEARNING_RATE)
+#   )
+#   config_v1 = peft_trainer.TrainingConfig(
+#       eval_every_n_steps=20000,
+#       max_steps=_MAX_STEPS,
+#       gradient_accumulation_steps=_ACCUM_STEPS,
+#   )
+#   trainer_v1 = peft_trainer.PeftTrainer(gemma, optimizer_v1, config_v1)
+#   trainer_v1 = trainer_v1.with_gen_model_input_fn(gen_model_input_fn)
+#   with jax.profiler.trace(log_dir="gs://linchai-bucket-dev/xprof/grad_diff"):
+#     trainer_v1.train(_run_dataset, skip_jit=False)
+#     jax.effects_barrier()
 
-  model_state_v1 = nnx.state(gemma)
-  opt_state_v1 = nnx.state(trainer_v1.optimizer)
-  # Empty at depth 1 (the fast path never touches the accumulator); holds the
-  # accumulated gradients when gradient_accumulation_steps > 1, and v1's depth-1
-  # branch never calls reset() -- the only reset() lives in `apply_updates`,
-  # which runs on the accumulating nnx.cond path.
-  grads_v1_host = jax.device_get(trainer_v1.grad_accumulator.grads)
-  denom_v1 = phase_of(trainer_v1, "v1")
-  if jax.tree_util.tree_leaves(grads_v1_host):
-    describe_grads("v1", grads_v1_host)
-  # loss_v1 = trainer_v1.metrics_logger.get_metric("", "loss", "train")
-  del gemma, trainer_v1, optimizer_v1
-  gc.collect()
+#   model_state_v1 = nnx.state(gemma)
+#   opt_state_v1 = nnx.state(trainer_v1.optimizer)
+#   # Empty at depth 1 (the fast path never touches the accumulator); holds the
+#   # accumulated gradients when gradient_accumulation_steps > 1, and v1's depth-1
+#   # branch never calls reset() -- the only reset() lives in `apply_updates`,
+#   # which runs on the accumulating nnx.cond path.
+#   grads_v1_host = jax.device_get(trainer_v1.grad_accumulator.grads)
+#   denom_v1 = phase_of(trainer_v1, "v1")
+#   if jax.tree_util.tree_leaves(grads_v1_host):
+#     describe_grads("v1", grads_v1_host)
+#   # loss_v1 = trainer_v1.metrics_logger.get_metric("", "loss", "train")
+#   del gemma, trainer_v1, optimizer_v1
+#   gc.collect()
 
-# `nnx.state()` returns a pytree that holds the device buffers themselves, so
-# `del gemma` above frees nothing while model_state_v1 is alive -- v1's whole
-# parameter tree would stay resident for all of v2's run and show up in v2's
-# peak. Snapshot to host if the post-v1 weights are still wanted, then drop the
-# device copies before v2 allocates anything.
-model_state_v1_host = jax.device_get(model_state_v1)
-opt_state_v1_host = jax.device_get(opt_state_v1)
-del model_state_v1, opt_state_v1
-gc.collect()
+# # `nnx.state()` returns a pytree that holds the device buffers themselves, so
+# # `del gemma` above frees nothing while model_state_v1 is alive -- v1's whole
+# # parameter tree would stay resident for all of v2's run and show up in v2's
+# # peak. Snapshot to host if the post-v1 weights are still wanted, then drop the
+# # device copies before v2 allocates anything.
+# model_state_v1_host = jax.device_get(model_state_v1)
+# opt_state_v1_host = jax.device_get(opt_state_v1)
+# del model_state_v1, opt_state_v1
+# gc.collect()
 
 print(f"live device arrays after v1 teardown: {_live_device_gib():.2f} GiB "
       "(global, unsharded-equivalent)")
@@ -751,70 +751,70 @@ with mesh:
   if jax.tree_util.tree_leaves(grads_v2_host):
     describe_grads("v2", grads_v2_host)
 
-  # Gate the gradient comparison on the phase. Two accumulators holding
-  # different micro-batches produce similar norms and 100%-different elements,
-  # which is indistinguishable from a catastrophic divergence unless you check.
-  if denom_v1 != denom_v2:
-    print(
-        f"[cmp] grads: SKIPPED -- different accumulation phase"
-        f" (v1 denom={denom_v1:g}, v2 denom={denom_v2:g}). The two accumulators"
-        " hold different micro-batches, so an elementwise comparison is"
-        " meaningless. Make both runs stop at the same point before comparing."
-    )
-  elif denom_v1 == 0:
-    print(
-        "[cmp] grads: SKIPPED -- both accumulators were reset by the final"
-        " update(), so there are no gradients left to compare. Read them"
-        " between the last fwd_bwd and update()."
-    )
-  elif jax.tree_util.tree_leaves(grads_v1_host) and jax.tree_util.tree_leaves(
-      grads_v2_host
-  ):
-    compare("grads", grads_v1_host, grads_v2_host, max_ulp=_GRAD_MAX_ULP)
+  # # Gate the gradient comparison on the phase. Two accumulators holding
+  # # different micro-batches produce similar norms and 100%-different elements,
+  # # which is indistinguishable from a catastrophic divergence unless you check.
+  # if denom_v1 != denom_v2:
+  #   print(
+  #       f"[cmp] grads: SKIPPED -- different accumulation phase"
+  #       f" (v1 denom={denom_v1:g}, v2 denom={denom_v2:g}). The two accumulators"
+  #       " hold different micro-batches, so an elementwise comparison is"
+  #       " meaningless. Make both runs stop at the same point before comparing."
+  #   )
+  # elif denom_v1 == 0:
+  #   print(
+  #       "[cmp] grads: SKIPPED -- both accumulators were reset by the final"
+  #       " update(), so there are no gradients left to compare. Read them"
+  #       " between the last fwd_bwd and update()."
+  #   )
+  # elif jax.tree_util.tree_leaves(grads_v1_host) and jax.tree_util.tree_leaves(
+  #     grads_v2_host
+  # ):
+  #   compare("grads", grads_v1_host, grads_v2_host, max_ulp=_GRAD_MAX_ULP)
 
-  # Did the step move the weights at all? An SGD update smaller than half a ULP
-  # of the weight rounds straight back, so the comparison below would report
-  # "identical" while comparing two untrained models. At lr=1e-5 the update is
-  # ~520 ULP in fp32 but only ~0.008 ULP in bfloat16, i.e. a no-op -- raise the
-  # learning rate to ~1e-2 before drawing any conclusion from a bf16 run.
-  _final_ck_v1 = tc.tree_bit_checksum(model_state_v1_host)
-  _final_ck_v2 = tc.tree_bit_checksum(jax.device_get(nnx.state(gemma_v2)))
-  print(
-      f"[move] weights changed?  v1={_final_ck_v1 != _init_ck}"
-      f"  v2={_final_ck_v2 != _init_ck}"
-      + (
-          "   <-- NOTHING MOVED: the update is below one ULP, so any comparison"
-          " below is vacuous"
-          if _final_ck_v1 == _init_ck and _final_ck_v2 == _init_ck
-          else ""
-      )
-  )
+  # # Did the step move the weights at all? An SGD update smaller than half a ULP
+  # # of the weight rounds straight back, so the comparison below would report
+  # # "identical" while comparing two untrained models. At lr=1e-5 the update is
+  # # ~520 ULP in fp32 but only ~0.008 ULP in bfloat16, i.e. a no-op -- raise the
+  # # learning rate to ~1e-2 before drawing any conclusion from a bf16 run.
+  # _final_ck_v1 = tc.tree_bit_checksum(model_state_v1_host)
+  # _final_ck_v2 = tc.tree_bit_checksum(jax.device_get(nnx.state(gemma_v2)))
+  # print(
+  #     f"[move] weights changed?  v1={_final_ck_v1 != _init_ck}"
+  #     f"  v2={_final_ck_v2 != _init_ck}"
+  #     + (
+  #         "   <-- NOTHING MOVED: the update is below one ULP, so any comparison"
+  #         " below is vacuous"
+  #         if _final_ck_v1 == _init_ck and _final_ck_v2 == _init_ck
+  #         else ""
+  #     )
+  # )
 
-  # Weights are observable without any hook, so this comparison is valid in
-  # memory-benchmark state. Expect ~1e-8 of tensor scale in the KV-sharing
-  # layers on the split path, and bit-identity on the fused path.
-  weights_v2_host = jax.device_get(nnx.state(gemma_v2))
-  compare(
-      "weights after training",
-      model_state_v1_host,
-      weights_v2_host,
-      max_rel=_WEIGHT_MAX_REL,
-  )
+  # # Weights are observable without any hook, so this comparison is valid in
+  # # memory-benchmark state. Expect ~1e-8 of tensor scale in the KV-sharing
+  # # layers on the split path, and bit-identity on the fused path.
+  # weights_v2_host = jax.device_get(nnx.state(gemma_v2))
+  # compare(
+  #     "weights after training",
+  #     model_state_v1_host,
+  #     weights_v2_host,
+  #     max_rel=_WEIGHT_MAX_REL,
+  # )
 
-  attribute_weight_gap(
-      model_state_v1_host,
-      weights_v2_host,
-      grads_v1_host,
-      grads_v2_host,
-      lr=_LEARNING_RATE,
-      denom=denom_v1 if denom_v1 == denom_v2 else None,
-  )
+  # attribute_weight_gap(
+  #     model_state_v1_host,
+  #     weights_v2_host,
+  #     grads_v1_host,
+  #     grads_v2_host,
+  #     lr=_LEARNING_RATE,
+  #     denom=denom_v1 if denom_v1 == denom_v2 else None,
+  # )
 
-  model_state_v2 = nnx.state(gemma_v2)
-  opt_state_v2 = nnx.state(trainer_v2.optimizer)
-  # loss_v2 = trainer_v2.metrics_logger.get_metric("", "loss", "train")
-  del gemma_v2, trainer_v2, optimizer_v2
-  gc.collect()
+  # model_state_v2 = nnx.state(gemma_v2)
+  # opt_state_v2 = nnx.state(trainer_v2.optimizer)
+  # # loss_v2 = trainer_v2.metrics_logger.get_metric("", "loss", "train")
+  # del gemma_v2, trainer_v2, optimizer_v2
+  # gc.collect()
 
 # # Tolerate typical bfloat16 XLA computation graph re-association on TPUs
 # assert_fn = lambda path, x, y: tc.assert_close(
