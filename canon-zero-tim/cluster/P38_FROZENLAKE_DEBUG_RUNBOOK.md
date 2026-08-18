@@ -1,36 +1,34 @@
 # P38 FrozenLake debug runbook
 
-## Current operator card: P38s19 / P38.2u terminal discriminator
+## Current operator card: P38s23 / P38.2x fixed lm-head
 
 The current target is one 64-chip stock diagnostic, not FrozenLake full
-training. Its purpose is to split the remaining A-B carrier among exact final
-hidden rows, lm_head logits, vocabulary reduction, the production tail, and
-the final gather/subtract. It keeps prefix cache off, freezes weights, performs
-zero backward and zero optimizer commits, and uses concurrency 256.
+training. P38s21 localized the first measured red interval to `lm_head_logits`;
+P38s22 rejected the generic BF16/FP32 algorithm preset. P38s23 tests the first
+constructive repair: both local M16 and M256 lm-head calls use one fixed
+M256/K4096/N38144 Pallas tile geometry. It keeps prefix cache off, freezes
+weights, performs zero backward and zero optimizer commits, and uses
+concurrency 256.
 
 The authoritative design and claim ceiling are in
-`tasks/p38-pathways-decode-prefill-carrier/phases/p38-2u-terminal-discriminator.md`.
-The copy/paste render/apply command and return-file contract are at the top of
-`tasks/p38-pathways-decode-prefill-carrier/HANDOFF.md`. Do not reuse an old
-P38 YAML or add env values by hand.
+`tasks/p38-pathways-decode-prefill-carrier/phases/p38-2x-fixed-tile-pallas-lm-head.md`.
+The only copy/paste render/apply/return contract is
+`tasks/p38-pathways-decode-prefill-carrier/P38S23_RUNBOOK.md`. Do not reuse an
+old P38 YAML or add env values by hand.
 
 Mandatory render flags:
 
 ```text
---stock-only --max-concurrency 256 --seam-mode layer
---terminal-tail --terminal-discriminator
+--stock-only --max-concurrency 256 --fixed-lm-head
 ```
 
-The 2026-08-17 one-host receipt now says `terminal_rows_exact` plus
-`observer_endpoint_bitwise_neutral`; it is linked from the phase document.
-Before applying, the clean source must still have the user-approved full SHA.
-On target, the classifier is valid only
-when `selection_scope=capsule_red_points` and `joined_red_points` equals the
-complete capsule mismatch count. An all-clean-row classification is not a
-substitute.
+The 2026-08-18 real-weight one-host receipt is construction-only: 4/4 fixed-M
+comparisons exact and negative=1. Before applying, the clean source must have
+the user-approved full SHA. On target, interpret only three independently
+sealed endpoint rounds; missing round/root evidence is inconclusive.
 
-Rollback is omission of `--terminal-discriminator`; all three terminal env
-flags then remain unset. No production/full-training default changes.
+Rollback is omission of `--fixed-lm-head`; the numerical flag then remains
+unset. No production/full-training default changes.
 
 ## History: P38.2o decode seam localization
 

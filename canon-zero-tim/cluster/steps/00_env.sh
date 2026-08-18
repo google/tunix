@@ -207,6 +207,37 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
     echo "[env] P38 one-host rehearsal flag is forbidden on target" >&2
     fail=1
   }
+  case "${CANON_P38_FIXED_LM_HEAD:-0}" in
+    0|1) ;;
+    *)
+      echo "[env] CANON_P38_FIXED_LM_HEAD must be unset, 0, or 1" >&2
+      fail=1
+      ;;
+  esac
+  if [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "1" ]; then
+    [ "${CANON_KV_UNIFIED:-}" = "0" ] || {
+      echo "[env] P38 fixed lm-head is admitted only on the stock arm" >&2
+      fail=1
+    }
+    [ "${CANON_PROFILE_FILE:-}" = \
+        "cluster/profiles/qwen3-8b-dp16-tp4-frozenlake.env" ] || {
+      echo "[env] P38 fixed lm-head requires the Qwen3-8B TP4 profile" >&2
+      fail=1
+    }
+    [ -z "${CANON_MM_ALGO:-}" ] || {
+      echo "[env] P38 fixed lm-head conflicts with CANON_MM_ALGO" >&2
+      fail=1
+    }
+    for k in CANON_FIXED_AR CANON_FIXED_AR_EMBED \
+             CANON_PALLAS_ALL_PROJ CANON_PALLAS_ALL_RMSNORM \
+             CANON_PALLAS_SWIGLU CANON_PALLAS_MPAD \
+             CANON_PALLAS_SWIGLU_MPAD CANON_PALLAS_CANONICAL_VJP; do
+      [ "${!k:-}" = "1" ] || {
+        echo "[env] P38 fixed lm-head requires $k=1" >&2
+        fail=1
+      }
+    done
+  fi
   [ "${CANON_P38_DIAGNOSTIC_ROUND_FILE:-}" = \
       "${CANON_STATE%/}/p38_diagnostic_round" ] || {
     echo "[env] P38 diagnostic round path drifted" >&2

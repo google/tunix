@@ -143,8 +143,13 @@ class RenderP38ServingJobsetsTest(unittest.TestCase):
         self.assertEqual(renderer._COVERED_PROMPTS, 32)
         self.assertNotIn("CANON_MM_ALGO", env)
         self.assertNotIn("CANON_MM_ALGO_PRESET", env)
+        self.assertNotIn("CANON_P38_FIXED_LM_HEAD", env)
         self.assertEqual(
             document["metadata"]["labels"]["canon.zero-tim/lm-head-algo"],
+            "0",
+        )
+        self.assertEqual(
+            document["metadata"]["labels"]["canon.zero-tim/fixed-lm-head"],
             "0",
         )
         if env["CANON_KV_UNIFIED"] == "0":
@@ -393,6 +398,70 @@ class RenderP38ServingJobsetsTest(unittest.TestCase):
     with self.assertRaisesRegex(ValueError, "canonical Qwen3-8B profile"):
       renderer.validate_capture_jobset(
           document, unified=unified, lm_head_algo=True
+      )
+
+  def test_fixed_lm_head_arm_is_explicit_and_slim(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      paths = renderer.render_all(
+          base_path=_BASE,
+          output_dir=Path(tmp),
+          source_commit=_SOURCE,
+          run_id="p38-fixed-lmh",
+          stock_only=True,
+          max_concurrency=256,
+          fixed_lm_head=True,
+      )
+      self.assertEqual(len(paths), 1)
+      document = yaml.safe_load(paths[0].read_text())
+      env = _env(document)
+      self.assertEqual(env["CANON_P38_FIXED_LM_HEAD"], "1")
+      self.assertNotIn("CANON_MM_ALGO", env)
+      self.assertNotIn("CANON_MM_ALGO_PRESET", env)
+      self.assertNotIn("CANON_P38_SEAM_OBSERVER", env)
+      self.assertNotIn("CANON_P38_TAIL_OBSERVER", env)
+      self.assertNotIn("CANON_P38_TERMINAL_DISCRIMINATOR", env)
+      self.assertEqual(
+          env["CANON_PROFILE_FILE"],
+          "cluster/profiles/qwen3-8b-dp16-tp4-frozenlake.env",
+      )
+      self.assertEqual(
+          document["metadata"]["labels"]["canon.zero-tim/fixed-lm-head"],
+          "1",
+      )
+    for kwargs in (
+        {},
+        {"stock_only": True, "max_concurrency": 32},
+        {"stock_only": True, "seam_mode": "layer"},
+        {"stock_only": True, "lm_head_algo": True},
+    ):
+      with self.subTest(kwargs=kwargs), self.assertRaisesRegex(
+          ValueError, "fixed lm-head arm requires"
+      ):
+        renderer.render_all(
+            base_path=_BASE,
+            output_dir=Path(tempfile.mkdtemp()),
+            source_commit=_SOURCE,
+            run_id="invalid-fixed-lm-head",
+            fixed_lm_head=True,
+            **kwargs,
+        )
+
+  def test_fixed_lm_head_arm_rejects_noncanonical_profile(self):
+    base = renderer.p33.load_base(_BASE)
+    spec, unified = renderer._SPECS[0]
+    document = renderer.render_jobset(
+        base, spec, _SOURCE, "p38-fixed-lmh", unified=unified,
+        fixed_lm_head=True,
+    )
+    main = renderer._main_container(document)
+    entry = next(
+        item for item in main["env"]
+        if item["name"] == "CANON_PROFILE_FILE"
+    )
+    entry["value"] = "cluster/profiles/qwen3-1p7b-dp16-tp4-gsm8k.env"
+    with self.assertRaisesRegex(ValueError, "canonical Qwen3-8B profile"):
+      renderer.validate_capture_jobset(
+          document, unified=unified, fixed_lm_head=True
       )
 
   def test_rejects_capture_contract_drift(self):

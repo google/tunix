@@ -13,7 +13,7 @@ if grep -Fq "P35 first target admits only one local-M chunk" \
   exit 1
 fi
 python3 -c "import ast,pathlib; files=('tunix/rl/alignment.py','tests/rl/alignment_test.py'); [ast.parse(pathlib.Path(p).read_text(), filename=p) for p in files]"
-python3 -c "import ast,pathlib; files=('canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/extract_p38_capsule.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/test_extract_p38_capsule.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/extract_p38_serving_archive.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/test_extract_p38_serving_archive.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/prepare_p38_frozenlake_replay.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/classify_p38_frozenlake_replay.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/test_classify_p38_frozenlake_replay.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/classify_p38_serving_capture.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/test_classify_p38_serving_capture.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/classify_p38_kv_observer.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/classify_p38_seam.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/classify_p38_terminal_discriminator.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/probe_p38_lm_head.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/stage_p38_round.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/check_p38_intent_diff.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/test_check_p38_intent_diff.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/run_p38_kv_fingerprint_onehost.py'); [ast.parse(pathlib.Path(p).read_text(), filename=p) for p in files]"
+python3 -c "import ast,pathlib; files=('canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/extract_p38_capsule.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/test_extract_p38_capsule.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/extract_p38_serving_archive.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/test_extract_p38_serving_archive.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/prepare_p38_frozenlake_replay.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/classify_p38_frozenlake_replay.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/test_classify_p38_frozenlake_replay.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/classify_p38_serving_capture.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/test_classify_p38_serving_capture.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/classify_p38_kv_observer.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/classify_p38_seam.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/classify_p38_terminal_discriminator.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/probe_p38_lm_head.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/probe_p38_fixed_lm_head.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/stage_p38_round.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/check_p38_intent_diff.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/test_check_p38_intent_diff.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/run_p38_kv_fingerprint_onehost.py','canon-zero-tim/src/engine_shims/p38_fixed_lm_head.py'); [ast.parse(pathlib.Path(p).read_text(), filename=p) for p in files]"
 python3 -c "import ast,pathlib; files=('canon-zero-tim/tests/p35_envelope/classify_envelope.py','canon-zero-tim/tests/p35_envelope/test_classify_envelope.py','canon-zero-tim/tests/p35_envelope/classify_exact_replay.py','canon-zero-tim/tests/p35_envelope/test_classify_exact_replay.py','canon-zero-tim/tests/p35_envelope/classify_stage_probe.py','canon-zero-tim/tests/p35_envelope/test_classify_stage_probe.py'); [ast.parse(pathlib.Path(p).read_text(), filename=p) for p in files]"
 bash -n \
   canon-zero-tim/cluster/entrypoint.sh \
@@ -24,6 +24,7 @@ bash -n \
   canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/run_p38_frozenlake_replay.sh \
   canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/run_p38_incident_onehost.sh \
   canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/run_p38_lm_head_onehost.sh \
+  canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/run_p38_fixed_lm_head_onehost.sh \
   canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/p38_live_snapshot_worker.sh \
   canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/persist_p38_gcs.sh \
   canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/seal_p38_evidence.sh \
@@ -373,6 +374,28 @@ validate_p38_serving_preflight() (
     exit 1
   fi
   export CANON_P38_KV_OBSERVER_MAX_PAGES=16
+
+  export CANON_P38_FIXED_LM_HEAD=1
+  bash "$ROOT/cluster/steps/00_env.sh" >/dev/null
+  grep -q 'export CANON_P38_FIXED_LM_HEAD=1' "$state/env.sh"
+  export CANON_KV_UNIFIED=1
+  if bash "$ROOT/cluster/steps/00_env.sh" >/dev/null 2>&1; then
+    echo "[P38.SERVING] preflight accepted fixed lm-head on unified KV" >&2
+    exit 1
+  fi
+  export CANON_KV_UNIFIED=0
+  export CANON_MM_ALGO=1
+  if bash "$ROOT/cluster/steps/00_env.sh" >/dev/null 2>&1; then
+    echo "[P38.SERVING] preflight accepted fixed lm-head with MM_ALGO" >&2
+    exit 1
+  fi
+  unset CANON_MM_ALGO
+  export CANON_P38_FIXED_LM_HEAD=invalid
+  if bash "$ROOT/cluster/steps/00_env.sh" >/dev/null 2>&1; then
+    echo "[P38.SERVING] preflight accepted invalid fixed lm-head value" >&2
+    exit 1
+  fi
+  unset CANON_P38_FIXED_LM_HEAD
 
   unset CANON_P38_KV_OBSERVER_DIR \
         CANON_P38_KV_OBSERVER_MAX_CANDIDATES \

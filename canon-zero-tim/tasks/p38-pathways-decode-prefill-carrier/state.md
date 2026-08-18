@@ -6,27 +6,27 @@
 - Definition of done: one source-pinned flag-on run reports exact
   `S_decode_vs_S_prefill`, exact `S_prefill_vs_T_old`, and exact
   `T_old_vs_T_current` before a strict full workload is admitted.
-- Active phase: P38.2w2 P38s22 independent-round seal salvage. P38s22/source
+- Active phase: P38.2x dedicated fixed-tile Pallas lm-head. P38s22/source
   `ee0154b38ab81b2b4ee3eac35c65ed380aa744f6` completed three frozen 64-TPU
   rounds with exact B-C and A-B red in every round: 66 elements / 111 bytes
   across 143,464 actions. The `BF16_BF16_F32` algorithm preset is rejected as
-  a causal repair at analysis grade. The latest returned durability bundle is
-  not yet signed. P38.2w1 produced a complete sealed rc=4 receipt: root
+  a causal repair at analysis grade. The original run root still lacks a
+  complete run-level postflight. P38.2w1 produced a complete sealed rc=4 receipt: root
   `SHA256SUMS`, `COLLECTED.json`, and `COMPLETE.json` were unavailable, while
   all three round markers/manifests survived and name the preregistered capsule
   SHAs. Because the v1 auditor was root-first, it did not verify the actual tar
-  bytes. P38.2w2 adds a round-first, read-only GCS audit with a URI-free
-  acquisition ledger. It admits only the three-round forward discriminator;
-  root postflight and terminal/backward/optimizer claims remain excluded. No
-  TPU relaunch is allowed. The focused suite passes 16/16 and all 90 runnable
-  tests in the broader P38 serving discovery pass. Renderer collection is
-  `TARGET NOT RUN` in this host interpreter because optional dependency
-  `metrax` is absent; no renderer code changed. Python compilation, Bash
-  syntax, contract parsing, and diff checks pass. Remote execution remains
-  `TARGET NOT RUN`. After a PASS receipt, move to P38.2x dedicated fixed-tile
-  Pallas lm-head. See
+  bytes. P38.2w2's round-first audit now verifies 3/3 actual archives, 30/30
+  logical members, and all sealed capsule endpoints. It is a PASS only for the
+  three-round forward discriminator; root postflight and
+  terminal/backward/optimizer claims remain excluded. The generic algorithm
+  preset is rejected. P38.2x now removes the remaining local M16/M256 lm-head
+  program freedom with a default-off M256/K4096/N38144 fixed-tile Pallas
+  construction. CPU/static, exact-image, and real-weight one-host gates pass:
+  4/4 fixed-M cross-shape comparisons are exact and the one-bit negative is 1.
+  The next gate is one separately approved P38s23 64-TPU launch; it is not yet
+  run. See
   `phases/p38-2w2-p38s22-round-seal-salvage.md` and
-  `P38S22_ROUND_SALVAGE_RUNBOOK.md`.
+  `phases/p38-2x-fixed-tile-pallas-lm-head.md`.
 - Task directory:
   `canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/`.
 - P38s20/source `bea31f36655b137d7ab47ba94095cadda5b586ba` execution

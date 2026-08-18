@@ -81,7 +81,7 @@ def _capture_values(
     document: Mapping[str, Any], *, unified: bool,
     seam_mode: str = "", seam_layer: int | None = None,
     terminal_tail: bool = False, terminal_discriminator: bool = False,
-    lm_head_algo: bool = False,
+    lm_head_algo: bool = False, fixed_lm_head: bool = False,
 ) -> dict[str, str]:
   env = p33._env_values(document)
   state = env["CANON_STATE"]
@@ -203,6 +203,12 @@ def _capture_values(
         "CANON_MM_ALGO": "1",
         "CANON_MM_ALGO_PRESET": _LM_HEAD_ALGO_PRESET,
     })
+  if fixed_lm_head:
+    if unified:
+      raise ValueError("P38 fixed lm-head arm is admitted only on stock")
+    if lm_head_algo:
+      raise ValueError("P38 fixed lm-head and algorithm arms are exclusive")
+    values["CANON_P38_FIXED_LM_HEAD"] = "1"
   return values
 
 
@@ -210,14 +216,14 @@ def validate_capture_jobset(
     document: Mapping[str, Any], *, unified: bool, max_concurrency: int = 256,
     seam_mode: str = "", seam_layer: int | None = None,
     terminal_tail: bool = False, terminal_discriminator: bool = False,
-    lm_head_algo: bool = False,
+    lm_head_algo: bool = False, fixed_lm_head: bool = False,
 ) -> None:
   env = p33._env_values(document)
   expected = _capture_values(
       document, unified=unified, seam_mode=seam_mode,
       seam_layer=seam_layer, terminal_tail=terminal_tail,
       terminal_discriminator=terminal_discriminator,
-      lm_head_algo=lm_head_algo,
+      lm_head_algo=lm_head_algo, fixed_lm_head=fixed_lm_head,
   )
   expected_gcs = (
       f"{_ARTIFACT_BUCKET}/{document['metadata']['name']}/attempt-0"
@@ -231,11 +237,19 @@ def validate_capture_jobset(
       "CANON_MM_ALGO" in env or "CANON_MM_ALGO_PRESET" in env
   ):
     raise ValueError("P38 stock baseline must leave the matmul algorithm unset")
+  if not fixed_lm_head and "CANON_P38_FIXED_LM_HEAD" in env:
+    raise ValueError("P38 stock baseline must leave fixed lm-head unset")
   if lm_head_algo and env.get("CANON_PROFILE_FILE") != (
       "cluster/profiles/qwen3-8b-dp16-tp4-frozenlake.env"
   ):
     raise ValueError(
         "P38 lm-head algorithm isolation requires the canonical Qwen3-8B profile"
+    )
+  if fixed_lm_head and env.get("CANON_PROFILE_FILE") != (
+      "cluster/profiles/qwen3-8b-dp16-tp4-frozenlake.env"
+  ):
+    raise ValueError(
+        "P38 fixed lm-head isolation requires the canonical Qwen3-8B profile"
     )
   if not env.get("CANON_P38_MISMATCH_CAPSULE", "").endswith(".npz"):
     raise ValueError("P38 serving capture requires a mismatch capsule path")
@@ -329,6 +343,10 @@ def validate_capture_jobset(
       "1" if lm_head_algo else "0"
   ):
     raise ValueError("P38 lm-head-algo label drifted")
+  if labels.get("canon.zero-tim/fixed-lm-head") != (
+      "1" if fixed_lm_head else "0"
+  ):
+    raise ValueError("P38 fixed-lm-head label drifted")
   if document["spec"]["failurePolicy"].get("maxRestarts") != 0:
     raise ValueError("P38 serving-capture JobSet must not restart")
   command = shlex.split(env.get("CANON_RUN_CMD", ""))
@@ -395,7 +413,7 @@ def render_jobset(
     *, unified: bool, max_concurrency: int = 256,
     seam_mode: str = "", seam_layer: int | None = None,
     terminal_tail: bool = False, terminal_discriminator: bool = False,
-    lm_head_algo: bool = False,
+    lm_head_algo: bool = False, fixed_lm_head: bool = False,
 ) -> dict[str, Any]:
   command = list(spec.command)
   target = "--max_concurrency=256"
@@ -413,7 +431,7 @@ def render_jobset(
           document, unified=unified, seam_mode=seam_mode,
           seam_layer=seam_layer, terminal_tail=terminal_tail,
           terminal_discriminator=terminal_discriminator,
-          lm_head_algo=lm_head_algo,
+          lm_head_algo=lm_head_algo, fixed_lm_head=fixed_lm_head,
       ), remove=()
   )
   labels = document["metadata"].setdefault("labels", {})
@@ -426,13 +444,14 @@ def render_jobset(
       "1" if terminal_discriminator else "0"
   )
   labels["canon.zero-tim/lm-head-algo"] = "1" if lm_head_algo else "0"
+  labels["canon.zero-tim/fixed-lm-head"] = "1" if fixed_lm_head else "0"
   p33.validate_jobset(document, effective_spec, source_commit, run_id)
   validate_capture_jobset(
       document, unified=unified, max_concurrency=max_concurrency,
       seam_mode=seam_mode, seam_layer=seam_layer,
       terminal_tail=terminal_tail,
       terminal_discriminator=terminal_discriminator,
-      lm_head_algo=lm_head_algo,
+      lm_head_algo=lm_head_algo, fixed_lm_head=fixed_lm_head,
   )
   return document
 
@@ -442,7 +461,7 @@ def render_all(
     stock_only: bool = False, max_concurrency: int = 256,
     seam_mode: str = "", seam_layer: int | None = None,
     terminal_tail: bool = False, terminal_discriminator: bool = False,
-    lm_head_algo: bool = False,
+    lm_head_algo: bool = False, fixed_lm_head: bool = False,
 ) -> tuple[Path, ...]:
   base = p33.load_base(base_path)
   output_dir.mkdir(parents=True, exist_ok=True)
@@ -467,6 +486,16 @@ def render_all(
         "P38 lm-head algorithm arm requires the slim stock concurrency-256 "
         "contract without seam/terminal observers"
     )
+  if fixed_lm_head and not stock_only:
+    raise ValueError("P38 fixed lm-head arm requires --stock-only")
+  if fixed_lm_head and (
+      max_concurrency != 256 or seam_mode or terminal_tail
+      or terminal_discriminator or lm_head_algo
+  ):
+    raise ValueError(
+        "P38 fixed lm-head arm requires the slim stock-only concurrency-256 "
+        "contract without algorithm/seam/terminal observers"
+    )
   specs = _SPECS[:1] if stock_only else _SPECS
   outputs = tuple(
       output_dir / f"jobset-p38-serving-{'unified' if unified else 'stock'}.yaml"
@@ -486,7 +515,7 @@ def render_all(
         seam_layer=seam_layer,
         terminal_tail=terminal_tail,
         terminal_discriminator=terminal_discriminator,
-        lm_head_algo=lm_head_algo,
+        lm_head_algo=lm_head_algo, fixed_lm_head=fixed_lm_head,
     )
     header = (
         "# Generated by canon-zero-tim/cluster/render_p38_serving_jobsets.py.\n"
@@ -503,6 +532,7 @@ def render_all(
         f" terminal_tail={int(terminal_tail)}"
         f" terminal_discriminator={int(terminal_discriminator)}"
         f" lm_head_algo={int(lm_head_algo)}"
+        f" fixed_lm_head={int(fixed_lm_head)}"
     )
   return outputs
 
@@ -540,6 +570,13 @@ def main() -> int:
       ),
   )
   parser.add_argument(
+      "--fixed-lm-head", action="store_true",
+      help=(
+          "enable the P38.2x fixed-tile Pallas lm-head candidate; requires "
+          "the slim stock-only concurrency-256 contract"
+      ),
+  )
+  parser.add_argument(
       "--max-concurrency",
       type=int,
       choices=_ADMITTED_MAX_CONCURRENCY,
@@ -564,6 +601,7 @@ def main() -> int:
       terminal_tail=args.terminal_tail,
       terminal_discriminator=args.terminal_discriminator,
       lm_head_algo=args.lm_head_algo,
+      fixed_lm_head=args.fixed_lm_head,
   )
   print(
       "[P38.SERVING.JOBSET] VERDICT PASS "

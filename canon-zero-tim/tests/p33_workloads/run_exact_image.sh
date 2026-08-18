@@ -91,10 +91,15 @@ $DOCKER run --rm \
     grep -Eq program_path=.standard. "$qwen8b_overlay/tpu_runner_p21_l30.py"
     test -f "$qwen8b_overlay/p38_kv_fingerprint.py"
     test -f "$qwen8b_overlay/p38_seam_capture.py"
+    test -f "$qwen8b_overlay/p38_fixed_lm_head.py"
+    grep -Fq "CANON_P38_FIXED_LM_HEAD" "$qwen8b_overlay/linear_p22xk.py"
     python3 -m py_compile "$qwen8b_overlay/p38_kv_fingerprint.py"
     python3 -m py_compile "$qwen8b_overlay/p38_seam_capture.py"
+    python3 -m py_compile "$qwen8b_overlay/p38_fixed_lm_head.py"
     python3 -m py_compile "$qwen8b_overlay/p38_terminal_capture.py"
     python3 -m py_compile "$qwen8b_overlay/tpu_runner_p21_l30.py"
+    PYTHONPATH="$qwen8b_overlay" python3 \
+      canon-zero-tim/tests/p38_serving/probe_fixed_lm_head_overlay.py
     python3 canon-zero-tim/tests/p33_workloads/test_decode_logprob_chunking.py \
       --overlay "$qwen8b_overlay"
     echo "P33_EXACT_IMAGE_PASS decode_chunk_cases=5 prompt_chunk_cases=5 runner_tests_per_overlay=34 overlays=2"

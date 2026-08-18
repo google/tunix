@@ -82,9 +82,44 @@ def _p22xk_einsum_with_mesh(self, inputs):
 _p22xk_linear_module.JaxEinsum.__call__ = _p22xk_einsum_with_mesh
 JaxEinsum = _p22xk_linear_module.JaxEinsum
 
+_p38_fixed_lm_head_value = os.environ.get("CANON_P38_FIXED_LM_HEAD", "")
+if _p38_fixed_lm_head_value not in ("", "0", "1"):
+    raise RuntimeError(
+        "CANON_P38_FIXED_LM_HEAD must be unset, 0, or 1, got "
+        f"{_p38_fixed_lm_head_value!r}"
+    )
+
+if _p38_fixed_lm_head_value == "1":
+    from p38_fixed_lm_head import fixed_lm_head as _p38_fixed_lm_head
+    from p38_fixed_lm_head import preflight as _p38_fixed_lm_head_preflight
+
+    _p38_fixed_lm_head_preflight(require_enabled=True)
+    _p38_original_lm_head_call = _p22xk_linear_module.JaxLmHead.__call__
+
+    def _p38_fixed_lm_head_call(self, inputs):
+        if self.einsum_str != "TD,DV->TV":
+            raise RuntimeError(
+                f"P38 fixed lm_head equation mismatch: {self.einsum_str!r}"
+            )
+        if not str(self.prefix).endswith("lm_head"):
+            raise RuntimeError(
+                f"P38 fixed lm_head prefix mismatch: {self.prefix!r}"
+            )
+        return _p38_fixed_lm_head(
+            inputs,
+            self.weight.value,
+            mesh=_CANON_MESH,
+            tp_axis=_CANON_TP_AXIS,
+            local_matmul=traced_canonical_vjp_matmul,
+        )
+
+    _p22xk_linear_module.JaxLmHead.__call__ = _p38_fixed_lm_head_call
+    JaxLmHead = _p22xk_linear_module.JaxLmHead
+
 P22XK_LINEAR_BASE = _p22xk_linear_module
 P22XK_MATMUL_FORWARD = _forward
 P22XK_LAYER_OVERRIDE_BRIDGED = _p22xk_layer_override is not None
 P22XK_MATMUL_ACTIVE = (
     _p22xk_linear_module.P22XI_XF_MODULE.pallas_matmul is traced_canonical_vjp_matmul
 )
+P38_FIXED_LM_HEAD_ACTIVE = _p38_fixed_lm_head_value == "1"

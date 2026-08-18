@@ -1926,3 +1926,37 @@ reclassification from the committed NPZ inputs.
   contract parsing, and `git diff --check` pass. No GCS read, TPU launch, Git
   commit, or push occurred; the only remaining phase action is the documented
   zero-TPU remote command after publication from a user-approved full SHA.
+
+## 2026-08-18 UTC — P38.2w2 PASS reviewed; P38.2x opened
+
+- Reviewed the committed `round-salvage-v1` return. Its 11-file self-manifest
+  verifies, tool/contract hashes match the approved source, all three actual
+  deterministic tar archives verify, and all 30 logical round members pass.
+- Recomputed totals are 143,464 actions, 66 A-B differing elements, 111 A-B
+  differing bytes, and exact B-C in all three rounds. Verdict:
+  `ROUND_SEALED_GENERIC_LM_HEAD_ALGORITHM_PRESET_REJECTED`.
+- The claim ceiling is unchanged: root `SHA256SUMS`, `COLLECTED`, and
+  `COMPLETE`, returned terminal localization, backward, and optimizer are not
+  admitted. No synthetic root success was inferred from round seals.
+- Opened P38.2x. The registered shape construction pads local decode M16 and
+  prefill M256 to the same M256, keeps K4096, pads TP4-local vocab N37984 to
+  N38144, and invokes fixed BM128/BN256/BK256 Pallas tiles. The intervention is
+  default-off and must pass real-weight one-host construction and negative
+  gates before any P38s23 target launch.
+
+## 2026-08-18 UTC — P38.2x one-host construction PASS
+
+- Added a default-off Qwen3-8B TP4 `JaxLmHead` hook. Local decode M16 and
+  prefill M256 both enter fixed M256/K4096/N38144 BM128/BN256/BK256 Pallas
+  calls, then slice back to semantic M and real N. Flag-off leaves the original
+  class method untouched.
+- CPU/static contract tests pass 6/6. The broader P38 suite has 96 runnable
+  tests passing; renderer collection remains `TARGET NOT RUN` in the host
+  interpreter because optional `metrax` is absent. The pinned-image install
+  and import gate passes for both qwen1p7b and qwen8b overlays.
+- Real Qwen3-8B weight on the local four-device v5p passes 4/4 deterministic
+  seeds: fixed M16 versus fixed M256 shared rows are exact, `max_abs=0.0`, and
+  the one-bit negative reports 1. Fixed versus stock differs at
+  249/211/268/219 selected elements, proving the intervention is active.
+- Added the P38s23 renderer flag, target preflight, single-variable tests, and
+  background-free operator runbook. No 64-TPU run, commit, or push occurred.

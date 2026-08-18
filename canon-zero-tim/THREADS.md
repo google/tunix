@@ -2,11 +2,11 @@
 
 > 看板类文档,行级写权:线程执行者更新**自己线程的行**(及自己 run 的 EVIDENCE 行);
 > 评估者拥有板面结构、跨线仲裁与措辞降格权。只写"现在",历史看各线程 log.md。
-> 更新:2026-08-18 @ 82cd2bd0 base + local P38.2w1 offsite audit;perf 行 2026-08-18(P51/P52 收官 + xprof 载具)
+> 更新:2026-08-18 @ c04013bd;perf 行 2026-08-18(P51/P52 收官 + xprof 载具)
 
 | # | 线程 | 状态 | 下一个门 | 等谁 | 任务目录 |
 |---|---|---|---|---|---|
-| 1 | **zero-tim-carrier** | P38s22 三轮数值完成：A-B 合计 66 elements / 111 bytes / 143,464 actions，B-C exact。offsite v1 自封 rc=4：根 manifest/COLLECTED/COMPLETE 不可用，但 3/3 round marker+manifest 幸存；实际 tar 尚未审 | **P38.2w2：round-first 只读 salvage，验证三轮 tar 并从 capsule 重算；根 postflight 单独保持未准入；PASS 后转 fixed-tile Pallas lm_head** | 等用户审阅本地 CL、批准发布；随后远端零 TPU 只执行 runbook | tasks/p38-pathways-decode-prefill-carrier |
+| 1 | **zero-tim-carrier** | P38.2w2 forward discriminator PASS；generic preset 否决。P38.2x fixed lm-head 本地 CPU/exact-image/real-weight v5p 全绿：4/4 cross-M exact，negative=1，fixed 确实改变 stock bits | **P38s23：唯一一发 slim stock DP16xTP4 三冻结轮，fixed lm-head 为单一数值变量** | 等用户审阅本地 diff 并逐项批准 commit、push、64 TPU launch | tasks/p38-pathways-decode-prefill-carrier |
 | 2 | **perf** | 一宿主两战线收官:FL 199s 线 + GSM8K 真几何线(94.3→81.8s,-13.3%,P52);xprof/perfetto 载具入仓且 device plane 已解(python_tracer=0);flags+载具已 push | **DP16 一发**(读 p32_vag_reverse 的 adjoint= 验 E;给 P52 grouped 移植定量) | 等卡 + 用户渲染 | tasks/p48-onehost-perf(分支 state.md)+ 外层 p48-p52 |
 | 3 | **frozenlake-train** | p45r8（DP8xTP8 resident 路径，无评测模式 `--eval_every_n_steps=0`，`fl-prod-noeval-001`）已成功在 64 TPU 上线运行，JIT 编译通过，Step 0 反向传播（40ms/microstep）与 DP8 规约正常进行中 | **持续推进 Step 1~450 迭代，Step 10 自动持久化新 GCS 检查点** | 训练中 | tasks/p45-frozenlake-dp8-tp8-resident |
 | 4 | **deepswe-eval** | p46e12808 修复了 Kueue 工作负载冲突注解与 cpu-np 节点池亲和性，Kueue 准入通过（`Admitted: True`），绑定 `--resume-tag p46e12806` 严格从 Wave 27 续跑（复用 6460+ 轨迹） | **等待集群 128 TPU 拓扑释放后自动调度点火** | 排队中 | tasks/p46-deepswe-eval-training-profiles |

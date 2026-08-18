@@ -1,7 +1,8 @@
 # P38.2w2 — P38s22 independent-round seal salvage
 
-Status: active. Implementation and local fake-GCS gates are complete; remote
-execution is `TARGET NOT RUN`.
+Status: complete. The returned round-first audit is `PASS` for the scoped
+three-round forward discriminator. Root run-level postflight remains
+unadmitted.
 
 ## Entering evidence
 
@@ -91,7 +92,9 @@ promotion. It does not authorize a TPU relaunch automatically.
 
 ## Next phase
 
-After the returned bundle and its SHA inventory are reviewed, begin P38.2x:
-dedicated fixed-tile/fixed-order Pallas lm-head, first with real Qwen3-8B
-weights on one v5p, then one three-round P38s23 target only if the one-host
-construction and negative gates pass.
+The returned bundle and SHA inventory passed review at source `c04013bd`:
+three actual archives and all 30 logical members verify, and the sealed
+capsules recompute 143,464 actions, 66 A-B elements, 111 A-B bytes, and exact
+B-C. Begin P38.2x: dedicated fixed-tile/fixed-order Pallas lm-head, first with
+real Qwen3-8B weights on one v5p, then one three-round P38s23 target only if
+the one-host construction and negative gates pass.

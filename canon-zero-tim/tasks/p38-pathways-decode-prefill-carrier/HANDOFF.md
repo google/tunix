@@ -5,7 +5,7 @@ parallel Qwen3-32B DeepSWE workstream, read
 `../p39-deepswe-production/HANDOFF.md`. P38 evidence cannot promote P39, and
 P39 evidence cannot promote P38.
 
-## CURRENT: P38.2w2 independent-round salvage, then P38.2x fixed-tile lm_head
+## CURRENT: P38.2x local gates PASS; P38s23 awaits approval
 
 P38s22/source `ee0154b38ab81b2b4ee3eac35c65ed380aa744f6` ran on 64 TPU
 (`DP16xTP4`, concurrency 256, `--lm-head-algo`, DotAlgorithmPreset `BF16_BF16_F32`).
@@ -19,12 +19,15 @@ preserved three valid-looking round marker/manifest pairs but exited before
 verifying the actual tar objects. Receipt:
 `artifacts/p38s22_offsite_audit_v1_0818.md`.
 
-Do not relaunch P38s22 and do not fabricate root postflight. The immediate next
-action remains zero-TPU and operator-only: publish P38.2w2, then follow
-`P38S22_ROUND_SALVAGE_RUNBOOK.md`. That command verifies the three independent
-round archives first, recomputes the endpoint values from sealed capsules, and
-returns `evidence/p38s22/round-salvage-v1/`. Missing root receipts remain an
-explicitly unadmitted run-level claim and do not suppress round verification.
+Do not relaunch P38s22 and do not fabricate root postflight. P38.2w2 is now
+complete: `evidence/p38s22/round-salvage-v1/` mechanically verifies the three
+independent archives, all 30 logical members, and the sealed capsule endpoint
+values. Missing root receipts remain an explicitly unadmitted run-level claim.
+P38.2x CPU/static, pinned-image, and real-weight one-host gates now pass. The
+fixed construction is exact across M16/M256 for 4/4 seeds, the negative is 1,
+and the intervention changes stock bits. The only next target is the P38s23
+single-variable arm in `P38S23_RUNBOOK.md`. Do not launch it until the user
+approves the local diff, commit, push, and launch as separate actions.
 
 ### Admitted P38s22 facts
 
@@ -35,8 +38,9 @@ explicitly unadmitted run-level claim and do not suppress round verification.
    - Round 2: 8 elements / 15 bytes across 53,617 actions; max_abs 0.289223.
 3. The `BF16_BF16_F32` dot algorithm preset does not close the A-B decode vs prefill carrier.
 4. Per the decision table, `CANON_MM_ALGO` is rejected as a causal repair. Do not tune more generic precision flags.
-5. After the independent-round salvage audit passes, the next scientific step is a
-   dedicated fixed-tile Pallas `lm_head` kernel.
+5. The independent-round salvage audit passed. The current scientific step is
+   the default-off fixed-tile Pallas `lm_head` described in
+   `phases/p38-2x-fixed-tile-pallas-lm-head.md`.
 
 Receipt:
 `artifacts/p38s22_analysis_0818.md`.

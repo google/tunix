@@ -23,6 +23,8 @@ CONFLICTS = (
 BM = 128
 BN = 256
 BK = 256
+MATMUL_K_PADDING = {}
+MATMUL_N_PADDING = {37984: 38144}
 SWIGLU_FEATURE_PADDING = {}
 
 HIDDEN_SIZE = 4096
@@ -107,6 +109,10 @@ def validate_manifest(sites) -> None:
     local_feature = INTERMEDIATE_SIZE // TP_SIZE
     if local_feature % 256 or SWIGLU_FEATURE_PADDING:
         raise ValueError("Qwen3-8B SwiGLU must remain on the unpadded BF256 path")
+    if MATMUL_K_PADDING or MATMUL_N_PADDING != {37984: 38144}:
+        raise ValueError(
+            "Qwen3-8B TP4 must admit only lm_head N37984->38144 padding"
+        )
 
 
 def preflight(*, require_enabled: bool) -> None:
