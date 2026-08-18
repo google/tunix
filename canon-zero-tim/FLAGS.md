@@ -3,8 +3,8 @@
 > 政策:**建 flag 自由但必须登记(带日落条件);删 flag 有序按日落执行。**
 > 焊死数值类 flag = 删代码路径 = 程序变更,走与开启同级认证门(verify+ALIGN+canary)。
 > 生命周期档位:试验 → 已认证 → 默认开 → 焊死(开关可删)→ 退役/否决。
-> 普查基点 a94d6c0c(285 个可设置 env flag,与 ebba4850 普查零漂移);当前附录 289 个;本表分层登记,
-> D 层按前缀组、语义欠账标"待考古"。
+> 普查基点 a94d6c0c(285 个可设置 env flag,与 ebba4850 普查零漂移);普查后续现役附录
+> 当前 296 个;本表分层登记,D 层按前缀组、语义欠账标"待考古"。
 > 全量机器清单:落地 CL 时由 `grep -rhoE` 生成为附录,条目数必须 == 普查数(排除项列明)。
 
 ## A 层 · 数值语义类(动它 = 动程序身份;焊死走认证门)
@@ -15,6 +15,7 @@
 | CANON_FIXED_AR_EMBED | R3 补漏:vocab 分片 embedding gather 固定序 | off | 已认证 | 同上,与 FIXED_AR 同批 |
 | CANON_RPA_VJP2(+VJP2_MAX_SEQS) | R4:cache-aware 认证反向 | off | 已认证(fp64 oracle+20/20+21/21) | 转正焊死;MAX_SEQS>1 需归约序审计先行 |
 | CANON_LOGPROB_M / CANON_PROMPT_PROCESSED_LOGPROBS | R5:三臂共享 logprob callable,M=256 | off | 已认证(G9 4/4+负控) | 转正焊死 |
+| CANON_MM_ALGO / CANON_MM_ALGO_PRESET | P19/P38:非 Pallas einsum 的 dot-algorithm 判别器;P38 仅允许 fixed `BF16_BF16_F32` 单变量臂 | off / BF16_BF16_F32 | 试验;旧 M16/M2048 e2e 负结果保留,P38 M16/M256 待 target | P38 target 红则退役入否决区;绿则全负载严格门后决定转正或专用 lm_head 替代 |
 | CANON_PROMPT_DIRECT_LOGPROBS / ABSOLUTE_TARGET_IDS | R5 同族实现细节开关 | off | 已认证 | 随 R5 同批焊死 |
 | CANON_PALLAS_{CANONICAL_VJP,ALL_PROJ,ALL_RMSNORM,MPAD,SWIGLU,SWIGLU_MPAD} | canonical Pallas 内核族选通 | off | 已认证 | 转正焊死(P22.XI 部分已无条件) |
 | CANON_P28_SEGMENTED_TRAIN | 分段 fixed-M 训练前向 | off | 已认证 | 转正焊死 |
@@ -141,6 +142,8 @@ CANON_LOGPROB_M
 CANON_MAX_BATCHED
 CANON_MESH_SHAPE
 CANON_MINREPRO_N
+CANON_MM_ALGO
+CANON_MM_ALGO_PRESET
 CANON_MODE
 CANON_MODEL_DIR_NAME
 CANON_NUM_GENERATIONS

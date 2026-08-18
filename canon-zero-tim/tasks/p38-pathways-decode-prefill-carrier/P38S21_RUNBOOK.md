@@ -1,8 +1,11 @@
-# P38s21 terminal-discriminator operator runbook
+# P38s21 terminal-discriminator operator runbook (historical; do not relaunch)
 
-This is the current P38 operator card. P38s20 is retired as
-`INCONCLUSIVE_DURABILITY_SEAL_TIMEOUT`; do not relaunch it and do not use the
-historical P38s18r2 runbook.
+P38s21 completed only two of three rounds and is recorded as
+`ANALYSIS_GRADE_PARTIAL_2_OF_3`. Do not relaunch it: its 54 joined red points
+already localized the first measured red interval to lm_head, while the third
+round failed only because the terminal corpus exceeded the 4-GiB local bound.
+The current operator card is `P38S22_RUNBOOK.md` after P38.2w local admission
+and separate user approval to publish.
 
 Read, in order:
 

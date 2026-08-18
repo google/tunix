@@ -6,18 +6,22 @@
 - Definition of done: one source-pinned flag-on run reports exact
   `S_decode_vs_S_prefill`, exact `S_prefill_vs_T_old`, and exact
   `T_old_vs_T_current` before a strict full workload is admitted.
-- Active phase: P38.2v bounded-object diagnostic durability. P38.2u's
-  terminal observer remains locally admitted: 155/155 real-v5p joins are
-  exact, its one-bit negative detects mutation, and observer-off/on production
-  endpoints are bitwise neutral across three frozen rounds. P38s20 reached
-  one production numerical round with 873 seam, 873 tail, and 873 terminal
-  records, but the live worker serially uploaded about 5,246 accumulated files
-  before servicing the round request. The learner timed out after 900 seconds.
-  P38.2v preserves the logical files and their SHA inventory in one
-  deterministic archive per live snapshot/round, verifies one read-back
-  archive, writes completion last, and processes seal requests before periodic
-  snapshots. The host implementation and local gates are complete; commit,
-  push, and P38s21 require separate user approval.
+- Active phase: P38.2w lm-head program discriminator. P38s21 sealed two of
+  three requested diagnostic rounds, then Round 2 exceeded the 4-GiB local
+  terminal-evidence bound. The committed 12-file bundle verifies and joins
+  54/54 red points. For those selected points, complete final-hidden rows are
+  byte-exact and the first measured red interval is `lm_head_logits`; B-C is
+  exact in both completed rounds. The run is
+  `ANALYSIS_GRADE_PARTIAL_2_OF_3`, not complete. P38.2w screens the real
+  Qwen3-8B lm_head weight at current local M=16/M=256 on one v5p host and then
+  admits one slim, stock-only `BF16_BF16_F32` target discriminator. It does
+  not recapture the multi-gigabyte terminal corpus or change production
+  defaults. The real-weight one-host screen is complete: default and preset
+  are each M16/M256 exact for 4/4 seeds and numerically equal to one another,
+  while their StableHLO dot attributes differ and the one-bit negative reports
+  one. Verdict: `BOTH_EXACT_OPERATOR_SCREEN_INCONCLUSIVE`. See
+  `phases/p38-2w-lm-head-program-discriminator.md` and
+  `artifacts/p38_2w_lm_head_onehost_0818.md`.
 - Task directory:
   `canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/`.
 - P38s20/source `bea31f36655b137d7ab47ba94095cadda5b586ba` execution

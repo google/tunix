@@ -45,6 +45,7 @@ _SEAM_MAX_BYTES = 4 * 1024 * 1024 * 1024
 _SEAM_LAYER_COUNT = 36
 _TAIL_MAX_BYTES = 256 * 1024 * 1024
 _TERMINAL_MAX_BYTES = 4 * 1024 * 1024 * 1024
+_LM_HEAD_ALGO_PRESET = "BF16_BF16_F32"
 _ADMITTED_MAX_CONCURRENCY = (32, 256)
 _ARTIFACT_BUCKET = "gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38"
 
@@ -80,6 +81,7 @@ def _capture_values(
     document: Mapping[str, Any], *, unified: bool,
     seam_mode: str = "", seam_layer: int | None = None,
     terminal_tail: bool = False, terminal_discriminator: bool = False,
+    lm_head_algo: bool = False,
 ) -> dict[str, str]:
   env = p33._env_values(document)
   state = env["CANON_STATE"]
@@ -194,6 +196,13 @@ def _capture_values(
             f"{state}/p38_terminal.classification.json"
         ),
     })
+  if lm_head_algo:
+    if unified:
+      raise ValueError("P38 lm-head algorithm arm is admitted only on stock")
+    values.update({
+        "CANON_MM_ALGO": "1",
+        "CANON_MM_ALGO_PRESET": _LM_HEAD_ALGO_PRESET,
+    })
   return values
 
 
@@ -201,12 +210,14 @@ def validate_capture_jobset(
     document: Mapping[str, Any], *, unified: bool, max_concurrency: int = 256,
     seam_mode: str = "", seam_layer: int | None = None,
     terminal_tail: bool = False, terminal_discriminator: bool = False,
+    lm_head_algo: bool = False,
 ) -> None:
   env = p33._env_values(document)
   expected = _capture_values(
       document, unified=unified, seam_mode=seam_mode,
       seam_layer=seam_layer, terminal_tail=terminal_tail,
       terminal_discriminator=terminal_discriminator,
+      lm_head_algo=lm_head_algo,
   )
   expected_gcs = (
       f"{_ARTIFACT_BUCKET}/{document['metadata']['name']}/attempt-0"
@@ -216,6 +227,16 @@ def validate_capture_jobset(
   wrong = {name: env.get(name) for name, value in expected.items() if env.get(name) != value}
   if wrong:
     raise ValueError(f"P38 serving-capture environment drifted: {wrong}")
+  if not lm_head_algo and (
+      "CANON_MM_ALGO" in env or "CANON_MM_ALGO_PRESET" in env
+  ):
+    raise ValueError("P38 stock baseline must leave the matmul algorithm unset")
+  if lm_head_algo and env.get("CANON_PROFILE_FILE") != (
+      "cluster/profiles/qwen3-8b-dp16-tp4-frozenlake.env"
+  ):
+    raise ValueError(
+        "P38 lm-head algorithm isolation requires the canonical Qwen3-8B profile"
+    )
   if not env.get("CANON_P38_MISMATCH_CAPSULE", "").endswith(".npz"):
     raise ValueError("P38 serving capture requires a mismatch capsule path")
   capture_dir = env["CANON_P38_SERVING_CAPTURE_DIR"].rstrip("/")
@@ -304,6 +325,10 @@ def validate_capture_jobset(
       "1" if terminal_discriminator else "0"
   ):
     raise ValueError("P38 terminal-discriminator label drifted")
+  if labels.get("canon.zero-tim/lm-head-algo") != (
+      "1" if lm_head_algo else "0"
+  ):
+    raise ValueError("P38 lm-head-algo label drifted")
   if document["spec"]["failurePolicy"].get("maxRestarts") != 0:
     raise ValueError("P38 serving-capture JobSet must not restart")
   command = shlex.split(env.get("CANON_RUN_CMD", ""))
@@ -370,6 +395,7 @@ def render_jobset(
     *, unified: bool, max_concurrency: int = 256,
     seam_mode: str = "", seam_layer: int | None = None,
     terminal_tail: bool = False, terminal_discriminator: bool = False,
+    lm_head_algo: bool = False,
 ) -> dict[str, Any]:
   command = list(spec.command)
   target = "--max_concurrency=256"
@@ -387,6 +413,7 @@ def render_jobset(
           document, unified=unified, seam_mode=seam_mode,
           seam_layer=seam_layer, terminal_tail=terminal_tail,
           terminal_discriminator=terminal_discriminator,
+          lm_head_algo=lm_head_algo,
       ), remove=()
   )
   labels = document["metadata"].setdefault("labels", {})
@@ -398,12 +425,14 @@ def render_jobset(
   labels["canon.zero-tim/terminal-discriminator"] = (
       "1" if terminal_discriminator else "0"
   )
+  labels["canon.zero-tim/lm-head-algo"] = "1" if lm_head_algo else "0"
   p33.validate_jobset(document, effective_spec, source_commit, run_id)
   validate_capture_jobset(
       document, unified=unified, max_concurrency=max_concurrency,
       seam_mode=seam_mode, seam_layer=seam_layer,
       terminal_tail=terminal_tail,
       terminal_discriminator=terminal_discriminator,
+      lm_head_algo=lm_head_algo,
   )
   return document
 
@@ -413,6 +442,7 @@ def render_all(
     stock_only: bool = False, max_concurrency: int = 256,
     seam_mode: str = "", seam_layer: int | None = None,
     terminal_tail: bool = False, terminal_discriminator: bool = False,
+    lm_head_algo: bool = False,
 ) -> tuple[Path, ...]:
   base = p33.load_base(base_path)
   output_dir.mkdir(parents=True, exist_ok=True)
@@ -427,6 +457,16 @@ def render_all(
   if terminal_discriminator and not terminal_tail:
     raise ValueError(
         "P38 terminal discriminator requires --terminal-tail")
+  if lm_head_algo and not stock_only:
+    raise ValueError("P38 lm-head algorithm arm requires --stock-only")
+  if lm_head_algo and (
+      max_concurrency != 256 or seam_mode or terminal_tail
+      or terminal_discriminator
+  ):
+    raise ValueError(
+        "P38 lm-head algorithm arm requires the slim stock concurrency-256 "
+        "contract without seam/terminal observers"
+    )
   specs = _SPECS[:1] if stock_only else _SPECS
   outputs = tuple(
       output_dir / f"jobset-p38-serving-{'unified' if unified else 'stock'}.yaml"
@@ -446,6 +486,7 @@ def render_all(
         seam_layer=seam_layer,
         terminal_tail=terminal_tail,
         terminal_discriminator=terminal_discriminator,
+        lm_head_algo=lm_head_algo,
     )
     header = (
         "# Generated by canon-zero-tim/cluster/render_p38_serving_jobsets.py.\n"
@@ -461,6 +502,7 @@ def render_all(
         f" seam_mode={seam_mode or 'off'}"
         f" terminal_tail={int(terminal_tail)}"
         f" terminal_discriminator={int(terminal_discriminator)}"
+        f" lm_head_algo={int(lm_head_algo)}"
     )
   return outputs
 
@@ -491,6 +533,13 @@ def main() -> int:
       help="capture exact hidden rows and bounded logit-block signatures",
   )
   parser.add_argument(
+      "--lm-head-algo", action="store_true",
+      help=(
+          "enable the preregistered BF16_BF16_F32 lm-head discriminator; "
+          "requires the slim stock-only concurrency-256 contract"
+      ),
+  )
+  parser.add_argument(
       "--max-concurrency",
       type=int,
       choices=_ADMITTED_MAX_CONCURRENCY,
@@ -514,6 +563,7 @@ def main() -> int:
       seam_layer=args.seam_layer,
       terminal_tail=args.terminal_tail,
       terminal_discriminator=args.terminal_discriminator,
+      lm_head_algo=args.lm_head_algo,
   )
   print(
       "[P38.SERVING.JOBSET] VERDICT PASS "

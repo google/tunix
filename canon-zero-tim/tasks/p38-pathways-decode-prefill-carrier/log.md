@@ -1826,3 +1826,47 @@ reclassification from the committed NPZ inputs.
   backward, optimizer, commit, push, or remote GCS state changed. Next target
   after user-approved publication is exactly one P38s21 run using
   `P38S21_RUNBOOK.md`.
+
+## 2026-08-18 UTC — P38s21 partial terminal localization and P38.2w opened
+
+- The committed P38s21 bundle verifies 12/12 listed files and contains sealed
+  receipts for rounds 0 and 1. Round 2 exceeded the 4-GiB local observer bound;
+  controlled exit, root `COLLECTED`, and root `COMPLETE` are absent. The run is
+  `ANALYSIS_GRADE_PARTIAL_2_OF_3`, not a complete target PASS.
+- Round 0 reports A-B 47 elements / 76 bytes over 45,276 actions with exact
+  B-C. Round 1 reports A-B 7 elements / 9 bytes over 44,695 actions with exact
+  B-C. All 54 selected red points join.
+- The captured complete final-hidden rows are exact for those 54 points and
+  the first measured red interval is `lm_head_logits`. This localizes an
+  interval; it does not prove a specific GEMM reduction order or full-vocab
+  equality. In `TD,DV->TV`, hidden K=4096 is reduced and vocab V=151,936 is an
+  output axis.
+- Code archaeology confirms the seven transformer projections use registered
+  Pallas sites while `JaxLmHead` remains a separate einsum. Current local
+  lm-head shapes are decode M=16 and prefill M=256; `CANON_LOGPROB_M=256`
+  starts after logits.
+- Opened P38.2w. It reuses the existing default-off `CANON_MM_ALGO` only as a
+  preregistered discriminator, retaining the P19 negative: the old real
+  M=16/M=2048 arm fired and had zero effect. The new local gate uses the real
+  checkpoint weight at M=16/M=256 and a one-bit negative; the only target arm
+  is slim stock concurrency-256 with no seam/terminal recapture.
+- No TPU target run, commit, push, production default, prefix cache, backward,
+  optimizer, or source GCS object changed in this step.
+
+## 2026-08-18 UTC — P38.2w real-weight one-host screen complete
+
+- On the local four-device v5p, loaded the real Qwen3-8B lm-head BF16 weight
+  `[4096,151936]` with TP4 vocab sharding. Four deterministic BF16 hidden-input
+  seeds compared identical selected rows under M=16 and M=256.
+- Default and explicit `BF16_BF16_F32` were both cross-M exact for 4/4 seeds.
+  The two arms were also numerically identical to each other for every tested
+  value. The one-bit negative reported exactly one.
+- StableHLO proves the intervention exists: the explicit arm carries BF16,
+  BF16, FP32-accumulation algorithm attributes and has different lowering SHA
+  values from default at both M shapes. The one-host verdict is therefore
+  `BOTH_EXACT_OPERATOR_SCREEN_INCONCLUSIVE`, not a repair.
+- Pinned-image focused tests pass 16/16 and the complete P38 serving suite
+  passes 93/93. Shell syntax and Python compilation pass. Receipt:
+  `artifacts/p38_2w_lm_head_onehost_0818.md`.
+- The next possible target is one slim P38s22 single-variable arm. It remains
+  NOT RUN and requires separate user approval after review/publication.

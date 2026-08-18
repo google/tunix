@@ -5,34 +5,56 @@ parallel Qwen3-32B DeepSWE workstream, read
 `../p39-deepswe-production/HANDOFF.md`. P38 evidence cannot promote P39, and
 P39 evidence cannot promote P38.
 
-## CURRENT: P38s21 terminal discriminator complete — lm_head_logits (100.0% exact hidden)
+## CURRENT: P38.2w lm-head program discriminator
 
-P38s21/source `f7f9fee6256f1f31f99c2794c4f346e9196b010c` ran on 64 TPU (`DP16xTP4`,
-concurrency 256, three frozen rounds, seam mode `layer`, terminal tail enabled,
-terminal discriminator enabled, 4-GiB bound enabled). P38.2v deterministic Tar
-durability archive transport succeeded completely: Round 0 (2.06 GB, 6,474 files)
-and Round 1 (2.27 GB, 3,708 files) were sealed to GCS in seconds with 0 timeouts.
+P38s21/source `f7f9fee6256f1f31f99c2794c4f346e9196b010c` ran on 64 TPU
+(`DP16xTP4`, concurrency 256). It sealed rounds 0 and 1, then Round 2 exceeded
+the 4-GiB local terminal-evidence bound. There is no third round, controlled
+exit, root `COLLECTED`, or root `COMPLETE`. The run-level status is
+`ANALYSIS_GRADE_PARTIAL_2_OF_3`, not `CLASSIFICATION_COMPLETE`.
 
-### Admitted facts and definitive terminal verdict
+### Admitted P38s21 facts
 
-1. **S_prefill vs T_old (B vs C)**: **0 differing bytes** across all actions
-   (100% bitwise exact identity between training forward pass and vLLM prefill
-   rescore on 64 TPU).
-2. **S_decode vs S_prefill (A vs B)**:
-   - Round 0: 76 differing bytes / 47 differing elements across 45,276 actions;
-   - Round 1: 9 differing bytes / 7 differing elements across 44,695 actions;
-   - Total red points joined: **54 / 54 (100.0%)**.
-3. **Pre-LM-Head Final Hidden State Equality**:
-   - **54 of 54 red points (100.0%) have 100% bitwise exact `final_hidden_rows`**.
-   - The entire Transformer Backbone (Attention, RoPE, KV Cache, MLP) is
-     **100% bitwise exact** between Decode and Prefill on Pathways/TPU.
-4. **First Differing Stage**:
-   - **54 of 54 red points (100.0%) localize to `lm_head_logits`**.
-   - Root Cause: Floating-point summation order differences in the 152,064-vocab
-     LM Head projection GEMM on TPU matrix units during single-token vector decode
-     vs chunked matrix prefill.
-5. **Verdict**: **`CLASSIFICATION_COMPLETE (lm_head_logits)`**.
-   - Evidence bundle committed at `tasks/p38-pathways-decode-prefill-carrier/evidence/p38s21/`.
+1. B-C is byte-exact in both completed rounds.
+2. A-B remains sparse red:
+   - Round 0: 47 elements / 76 bytes across 45,276 actions;
+   - Round 1: 7 elements / 9 bytes across 44,695 actions.
+3. All 54 selected red points join. Their captured complete final-hidden rows
+   are byte-exact, and the first measured red interval is `lm_head_logits`.
+4. The exact-hidden statement applies to those 54 selected points. The bundle
+   does not prove every token or every internal backbone checkpoint.
+5. `lm_head_logits` is interval localization, not a root mechanism. In the
+   lm-head equation `TD,DV->TV`, hidden K=4096 is reduced; vocabulary V=151,936
+   is an output axis. Summation over vocabulary is not the operation measured.
+
+Receipt:
+`artifacts/p38s21_analysis_0818.md`.
+
+### Exact next work
+
+Read `phases/p38-2w-lm-head-program-discriminator.md` before doing anything.
+The implementation is default-off and must pass:
+
+1. focused CPU renderer/verdict tests;
+2. a real Qwen3-8B-weight one-host v5p M=16/M=256 screen with four seeds and
+   a live one-bit negative; and
+3. review of the uncommitted diff.
+
+The one-host screen is now complete with
+`BOTH_EXACT_OPERATOR_SCREEN_INCONCLUSIVE`: both arms are cross-M exact and
+mutually exact for 4/4 seeds, their StableHLO algorithm attributes differ, and
+the negative reports one. Read
+`artifacts/p38_2w_lm_head_onehost_0818.md`. This is neutral screening evidence,
+not a repair claim.
+
+Only after separate user approval to commit/push may an operator render one
+P38s22 target using `--stock-only --max-concurrency 256 --lm-head-algo`.
+P38s22 deliberately omits seam/tail/terminal recapture. It asks one causal
+question: does the existing `BF16_BF16_F32` dot preset close A-B while B-C
+stays exact? If A-B remains red, retire this preset for P38 and move directly
+to a dedicated fixed-tile Pallas lm_head. Do not tune broad precision flags.
+
+No target run, commit, or push is currently admitted by this handoff.
 
 ## HISTORY: P38s20 bounded-object transport timeout
 

@@ -56,3 +56,12 @@ DP1, batch-size-one local replay changes DP geometry and input avals, so it
 cannot establish production program identity. Record the padded shape, dtype,
 sharding, and canonical-M contract at the incident call; label shape-changing
 replays as counterfactuals rather than strict reproduction.
+
+## 2026-08-18 — A first-red interval is not an operator mechanism
+
+Exact values at checkpoint X and a diagnostic mismatch at checkpoint Y
+localize the carrier to `(X,Y]`; they do not identify the internal reduction,
+tiling, fusion, cast, or collective that caused it. Preserve the classifier's
+actual claim ceiling and use a single-variable causal arm before naming a root
+cause. Also name matrix axes correctly: an lm-head `TD,DV->TV` dot reduces
+hidden K, while vocabulary is an output axis.
