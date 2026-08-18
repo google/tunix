@@ -1,7 +1,13 @@
-# P38s22 offsite evidence-audit runbook
+# P38s22 offsite evidence-audit runbook — historical v1
 
-This is the only current P38s22 operator card. It is a zero-TPU, read-only
-audit of the immutable Attempt-0 objects already stored in GCS. Do not relaunch
+Historical result: executed at evidence commit `0b86ef5c` and returned a valid
+sealed rc=4 because root `SHA256SUMS` was unavailable. Do not rerun this
+root-first wrapper. The current operator card is
+`P38S22_ROUND_SALVAGE_RUNBOOK.md`.
+
+The material below is retained only to reproduce the historical v1 receipt.
+It is not the current operator card and must not be rerun. The v1 command was a
+zero-TPU, read-only audit of immutable Attempt-0 objects in GCS. Do not relaunch
 P38s22, run a classifier by hand, edit a receipt, or reconstruct a missing
 number from prose. Read
 `phases/p38-2w1-p38s22-offsite-evidence-audit.md` first.

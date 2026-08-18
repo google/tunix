@@ -1901,3 +1901,28 @@ reclassification from the committed NPZ inputs.
   backward, optimizer commit, Git commit, or push occurred. The next gate is
   user review and explicit commit/push approval, followed by exactly one
   zero-TPU remote invocation from the approved full SHA.
+
+## 2026-08-18 UTC — P38.2w1 rc=4 reviewed; P38.2w2 round-first salvage opened
+
+- Evidence commit `0b86ef5c` contains a complete 10-member self-sealed audit
+  return. Tool and contract SHAs match analysis source `180fc2ff`.
+- The mechanical verdict is `INCONCLUSIVE`: root `SHA256SUMS` was unavailable;
+  root `COLLECTED.json` and `COMPLETE.json` were not returned. No totals were
+  recomputed by v1.
+- All three round markers/manifests survived. Each marker is
+  `sealed-and-verified`, each manifest SHA/count matches its marker, each has
+  10 sorted logical members, and each names its preregistered capsule SHA. The
+  actual tar bytes remain unverified because the v1 auditor failed before its
+  round loop.
+- Opened P38.2w2: immutable archive/manifest/capsule SHA contract, round-first
+  auditor, URI-free acquisition ledger, read-only one-command wrapper,
+  fake-GCS controls, and background-free operator runbook. Root postflight is
+  an independent unadmitted claim; no TPU relaunch is allowed.
+- Local implementation is complete. The focused round-salvage/offsite/archive
+  suite passes 16/16; all 90 runnable tests in the broader P38 serving
+  discovery pass. Renderer collection is `TARGET NOT RUN` in this host
+  interpreter because optional dependency `metrax` is absent, and this phase
+  does not touch renderer code. Python compilation, Bash syntax, immutable
+  contract parsing, and `git diff --check` pass. No GCS read, TPU launch, Git
+  commit, or push occurred; the only remaining phase action is the documented
+  zero-TPU remote command after publication from a user-approved full SHA.

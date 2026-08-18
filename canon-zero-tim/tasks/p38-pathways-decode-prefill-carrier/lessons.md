@@ -1,5 +1,15 @@
 # Lessons
 
+## Independent round seals must be audited before optional root postflight
+
+- Trigger: P38s22 offsite audit v1 found the root manifest absent and exited
+  before checking three surviving `sealed-and-verified` round archives.
+- Rule: when per-round seals are the registered crash-survival boundary, audit
+  their tar/manifest/capsule bytes first. Report root postflight separately;
+  never let an absent optional aggregate erase independently durable evidence.
+- Scope: task-only; candidate durability policy.
+- Evidence: `artifacts/p38s22_offsite_audit_v1_0818.md` and P38.2w2.
+
 ## 2026-08-10 — A plausible numerical signature is not a gate
 
 A clean mechanism story must be registered as a decision table, not phrased as

@@ -118,7 +118,8 @@ class P38s22OffsiteAuditTest(unittest.TestCase):
       stage = temp / f"stage-{round_index}"
       stage.mkdir()
       shutil.copyfile(capsule, stage / "mismatch-capsule.npz")
-      (stage / "run.log").write_text("round\n", encoding="utf-8")
+      (stage / "run.log").write_text(
+          "\n".join(run_lines) + "\n", encoding="utf-8")
       staged_pre_alignment = dict(pre_records[-1])
       if staged_pre_alignment_drift and round_index == 1:
         staged_pre_alignment["staged_only_drift"] = True
@@ -189,6 +190,12 @@ class P38s22OffsiteAuditTest(unittest.TestCase):
       root_payloads[round_name] = capsule.read_bytes()
       if round_index == 2:
         root_payloads["mismatch-capsule.npz"] = capsule.read_bytes()
+      else:
+        run_lines.append(
+            "[CANON_P38] DIAGNOSTIC_ROUND_SKIPPED_UPDATE "
+            f"completed={round_index + 1}/3 backward=0 optimizer_commits=0 "
+            "weights=frozen next_round=queued"
+        )
 
     run_lines.append(
         "[CANON_P38] CONTROLLED_EXIT code=42 backward=0 optimizer_commits=0")

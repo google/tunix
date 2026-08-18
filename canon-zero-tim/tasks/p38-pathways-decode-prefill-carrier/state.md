@@ -6,25 +6,27 @@
 - Definition of done: one source-pinned flag-on run reports exact
   `S_decode_vs_S_prefill`, exact `S_prefill_vs_T_old`, and exact
   `T_old_vs_T_current` before a strict full workload is admitted.
-- Active phase: P38.2w1 P38s22 offsite evidence audit. P38s22/source
+- Active phase: P38.2w2 P38s22 independent-round seal salvage. P38s22/source
   `ee0154b38ab81b2b4ee3eac35c65ed380aa744f6` completed three frozen 64-TPU
   rounds with exact B-C and A-B red in every round: 66 elements / 111 bytes
   across 143,464 actions. The `BF16_BF16_F32` algorithm preset is rejected as
   a causal repair at analysis grade. The latest returned durability bundle is
-  not signed: each claimed tar SHA equals its capsule SHA, the prose receipt
-  copied two P38s21 action counts, and the returned 66-point terminal
-  classification has no raw terminal input even though P38s22 disabled that
-  observer. P38.2w1 adds one read-only, contract-driven GCS audit that returns
-  a small sealed receipt; the remote agent only runs it. No TPU relaunch is
-  allowed. The local wrapper/auditor contract and seven offsite scenarios plus
-  the four deterministic-archive tests pass 11/11; all 85 runnable tests in
-  the broader P38 discovery pass. The renderer module is `TARGET NOT RUN` in
-  this interpreter because optional dependency `metrax` is absent; no renderer
-  code changed. Remote execution remains
+  not yet signed. P38.2w1 produced a complete sealed rc=4 receipt: root
+  `SHA256SUMS`, `COLLECTED.json`, and `COMPLETE.json` were unavailable, while
+  all three round markers/manifests survived and name the preregistered capsule
+  SHAs. Because the v1 auditor was root-first, it did not verify the actual tar
+  bytes. P38.2w2 adds a round-first, read-only GCS audit with a URI-free
+  acquisition ledger. It admits only the three-round forward discriminator;
+  root postflight and terminal/backward/optimizer claims remain excluded. No
+  TPU relaunch is allowed. The focused suite passes 16/16 and all 90 runnable
+  tests in the broader P38 serving discovery pass. Renderer collection is
+  `TARGET NOT RUN` in this host interpreter because optional dependency
+  `metrax` is absent; no renderer code changed. Python compilation, Bash
+  syntax, contract parsing, and diff checks pass. Remote execution remains
   `TARGET NOT RUN`. After a PASS receipt, move to P38.2x dedicated fixed-tile
   Pallas lm-head. See
-  `phases/p38-2w1-p38s22-offsite-evidence-audit.md` and
-  `P38S22_OFFSITE_AUDIT_RUNBOOK.md`.
+  `phases/p38-2w2-p38s22-round-seal-salvage.md` and
+  `P38S22_ROUND_SALVAGE_RUNBOOK.md`.
 - Task directory:
   `canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/`.
 - P38s20/source `bea31f36655b137d7ab47ba94095cadda5b586ba` execution

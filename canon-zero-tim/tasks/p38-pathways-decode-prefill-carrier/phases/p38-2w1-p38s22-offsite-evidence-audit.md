@@ -1,8 +1,8 @@
 # P38.2w1 — P38s22 offsite evidence audit
 
-Status: implementation and local/fake-GCS gates complete; remote audit not
-run. No commit, push, TPU launch, backward, optimizer work, or GCS mutation
-has occurred.
+Status: complete as a valid sealed remote rc=4. Evidence commit `0b86ef5c`
+reports root `SHA256SUMS` unavailable and did not enter the round audit loop.
+Continued by P38.2w2; no TPU relaunch is authorized.
 
 ## Entering evidence
 
@@ -94,6 +94,15 @@ This phase may establish only that the P38s22 immutable source is complete and
 that the generic lm-head algorithm preset failed its registered causal test.
 It cannot turn the P38s22 no-observer arm into new terminal evidence and cannot
 prove that a dedicated fixed-tile kernel will repair A-B.
+
+## Result
+
+The returned 10-member SHA inventory verifies. Tool and contract SHAs match
+the published audit source. Root `SHA256SUMS`, `COLLECTED.json`, and
+`COMPLETE.json` were unavailable. Three round marker/manifest pairs survived,
+but v1 did not authenticate their tar bytes or recompute totals. Verdict:
+`INCONCLUSIVE / OFFSITE_EVIDENCE_AUDIT_FAILED`. See
+`artifacts/p38s22_offsite_audit_v1_0818.md`.
 
 ## Rollback
 
