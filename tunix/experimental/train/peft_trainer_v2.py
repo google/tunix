@@ -477,6 +477,9 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     # a buffer. We should delete this once the metrics logging implementations
     # are updated according to the new design.
     self._written_metrics: exp_metrics.MetricsBuffer | None = None
+    # Host copy of the learning rate, refreshed just before each update is
+    # dispatched. See `_refresh_learning_rate`.
+    self._learning_rate_host: float | None = None
     self.training_hooks = None
     self.data_hooks = None
     self._jit_cache = set()
@@ -872,6 +875,29 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
           return chainpart.hyperparams["learning_rate"].value
       return None
 
+  def _refresh_learning_rate(self) -> None:
+    """Copies the learning rate to the host, ahead of the update dispatch.
+
+    Under `optax.inject_hyperparams` the learning rate lives inside
+    `optimizer.opt_state`, and `optimizer` is donated to the update step. So
+    fetching it *after* dispatching that step -- which is what logging from
+    `_record_update` used to do -- blocks on the executable that was just
+    enqueued and drains the inflight pipeline on every update step.
+
+    Called before the dispatch instead, the array being read is an output of the
+    *previous* update, which the throttler has long since allowed to complete,
+    so the transfer costs nothing. It also lines the logged value up better:
+    metrics are written one update behind, so the pre-update read corresponds to
+    the step being logged, whereas the post-update read was one step ahead of it.
+
+    Must run before the update is dispatched for a second reason: donation
+    invalidates the old buffers, so the array cannot be read afterwards at all.
+    """
+    learning_rate = self._try_get_learning_rate()
+    self._learning_rate_host = (
+        None if learning_rate is None else jax.device_get(learning_rate)
+    )
+
   def _log_metrics(
       self,
       loss: ArrayLike,
@@ -884,12 +910,13 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     self.metrics_logger.log(  # pyrefly: ignore[missing-attribute]
         self.metrics_prefix, "perplexity", perplexity, self._mode, step
     )
-    learning_rate = self._try_get_learning_rate()
-    if learning_rate is not None:
+    # Already on the host (see `_refresh_learning_rate`); reading it off the
+    # optimizer state here would block on the update step just dispatched.
+    if self._learning_rate_host is not None:
       self.metrics_logger.log(  # pyrefly: ignore[missing-attribute]
           self.metrics_prefix,
           "learning_rate",
-          jax.device_get(learning_rate),
+          self._learning_rate_host,
           self._mode,
           step,
       )
@@ -1045,6 +1072,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
   def update(self, **kwargs) -> int:
     """Applies the accumulated gradients."""
     _, update_step, _ = self.jit_fwd_bwd_update_and_eval_step()
+    self._refresh_learning_rate()
     return self._record_update(update_step())
 
   def train_step(
@@ -1065,6 +1093,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
           " fwd_bwd() followed by update() when gradient_accumulation_steps > 1"
           " or sequence packing is enabled."
       )
+    self._refresh_learning_rate()
     train_loss, aux, grad_norm = self._jitted_train_step_fn(
         self._prepare_payload(payload)
     )
@@ -1180,6 +1209,9 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     fwd_bwd_step, _, _ = self.jit_fwd_bwd_update_and_eval_step(
         skip_jit, cache_nnx_graph
     )
+    # Seed the host copy while nothing is in flight, so that eval or an early
+    # metrics write before the first update still has a value to log.
+    self._refresh_learning_rate()
     if not skip_jit:
       # Report the step function this loop will actually drive: in the fused
       # regime `fwd_bwd_step`'s executable is never compiled, so its cache size
