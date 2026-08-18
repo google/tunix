@@ -1,0 +1,7 @@
+{
+  "claim_ceiling": "none",
+  "next_gate": "repair_or_return_the_named_GCS_artifact_without_TPU_relaunch",
+  "schema": "p38s22-offsite-verdict-v1",
+  "status": "INCONCLUSIVE",
+  "verdict": "OFFSITE_EVIDENCE_AUDIT_FAILED"
+}

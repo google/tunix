@@ -1,0 +1,15 @@
+{
+  "analysis_source_commit": "180fc2ff048c2225392581f5adef9539ac98202b",
+  "claim_ceiling": "none",
+  "contract_sha256": "9b53bcf40e0e4b1e9375e7a9f3112e05d076bc2e95fec329478e665e10fe973d",
+  "failure": "SHA256SUMS is absent: /tmp/p38s22-offsite.TSoghs/source-root/files/SHA256SUMS",
+  "next_gate": "repair_or_return_the_named_GCS_artifact_without_TPU_relaunch",
+  "schema": "p38s22-offsite-audit-v1",
+  "status": "INCONCLUSIVE",
+  "tool_sha256": {
+    "archive": "89bdb64d51e8a1f3494f4820aabbf7dc424c2a5353edd135e76cafbfe173b69d",
+    "auditor": "4695b921a016f13be55e20989c2727842577ebfe8900833b8cdf5467ba15862f",
+    "wrapper": "9660f66d91f6d7ad18190eb3855543b696f785c5fae546ba7c0df07dd4d31464"
+  },
+  "verdict": "OFFSITE_EVIDENCE_AUDIT_FAILED"
+}
