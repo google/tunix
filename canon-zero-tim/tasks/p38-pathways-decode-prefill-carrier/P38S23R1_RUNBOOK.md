@@ -1,13 +1,14 @@
-# P38s23 fixed-tile lm-head target runbook
+# P38s23r1 fixed-tile lm-head target runbook
 
-> **HISTORICAL / DO NOT EXECUTE.** Source `32caa773` stopped during vLLM
-> warmup because this version admitted only M16/M256 and omitted request bucket
-> M32. It produced no numerical round. Use `P38S23R1_RUNBOOK.md` instead.
-
-This is the only operator card for P38s23. It launches one 64-TPU FrozenLake
-diagnostic (`DP16xTP4`, concurrency 256, three frozen rounds) with
+This is the only current operator card for P38.2x. It launches one 64-TPU
+FrozenLake diagnostic (`DP16xTP4`, concurrency 256, three frozen rounds) with
 `CANON_P38_FIXED_LM_HEAD=1` as the only numerical change from the known-red
 stock envelope. It performs zero backward and zero optimizer commits.
+
+P38s23/source `32caa773` is historical and must not be resumed or reused: it
+stopped before rollout when vLLM warmup requested M32. P38s23r1 requires the
+repaired exact request-bucket contract M8/16/32/64/128/256, each normalized to
+one internal M256 Pallas program.
 
 Read `phases/p38-2x-fixed-tile-pallas-lm-head.md` first. Do not add env values
 by hand, enable the old algorithm arm, attach seam/terminal observers, enable
@@ -15,14 +16,14 @@ prefix cache, or reuse a rendered YAML.
 
 ## Precondition
 
-Use the exact user-approved published full SHA. The current local one-host
-receipt is `artifacts/p38_2x_fixed_lm_head_onehost_0818.md`; if executable
-files change during publication review, rerun that gate before launch.
+Use the exact user-approved published full SHA. The current local receipt is
+`artifacts/p38_2x1_fixed_lm_head_bucket_onehost_0818.md`; if any executable
+file changes during publication review, rerun that gate before launch.
 
 ```bash
 set -euo pipefail
-SOURCE_COMMIT="<USER_APPROVED_FULL_SHA_CONTAINING_P38_2X>"
-RUN_ID=p38s23
+SOURCE_COMMIT="<USER_APPROVED_FULL_SHA_CONTAINING_P38_2X1>"
+RUN_ID=p38s23r1
 WORKTREE="/tmp/canon-zero-tim-$RUN_ID-${SOURCE_COMMIT:0:12}"
 OUT="/tmp/p38-serving-$RUN_ID-${SOURCE_COMMIT:0:12}"
 RETURN="/tmp/p38-return-$RUN_ID-${SOURCE_COMMIT:0:12}"
@@ -71,7 +72,7 @@ assert env.get("CANON_P38_FIXED_LM_HEAD") == "1", env.get("CANON_P38_FIXED_LM_HE
 assert "CANON_MM_ALGO" not in env
 assert all(not name.startswith(("CANON_P38_SEAM", "CANON_P38_TAIL", "CANON_P38_TERMINAL")) for name in env)
 assert any("--max_concurrency=256" in arg for arg in args), args
-print("P38S23_RENDER_SEMANTIC_PASS")
+print("P38S23R1_RENDER_SEMANTIC_PASS")
 PY
 
 kubectl apply --dry-run=server -f "$STOCK" | tee "$RETURN/dry-run.txt"
@@ -80,20 +81,25 @@ kubectl apply -f "$STOCK" | tee "$RETURN/apply.txt"
 
 ## Live admission markers
 
-Before waiting for rollout, require the source/overlay preflight and both
-fixed-shape compile receipts. Copy the complete attempt-0 head log to
-`$RETURN/head.full.log`; do not return only grep snippets.
+This retry is admitted only if vLLM warmup reaches all six registered buckets
+and rollout then seals three numerical rounds. Copy the complete attempt-0 head
+log to `$RETURN/head.full.log`; grep snippets are not a substitute.
 
 ```text
 [sync] HEAD=<SOURCE_COMMIT>
+[PATHTRACE] CANON_P38_FIXED_LM_HEAD=1 semantic_M=8 fixed_M=256 K=4096 local_N=37984 fixed_N=38144 BM=128 BN=256 BK=256
 [PATHTRACE] CANON_P38_FIXED_LM_HEAD=1 semantic_M=16 fixed_M=256 K=4096 local_N=37984 fixed_N=38144 BM=128 BN=256 BK=256
+[PATHTRACE] CANON_P38_FIXED_LM_HEAD=1 semantic_M=32 fixed_M=256 K=4096 local_N=37984 fixed_N=38144 BM=128 BN=256 BK=256
+[PATHTRACE] CANON_P38_FIXED_LM_HEAD=1 semantic_M=64 fixed_M=256 K=4096 local_N=37984 fixed_N=38144 BM=128 BN=256 BK=256
+[PATHTRACE] CANON_P38_FIXED_LM_HEAD=1 semantic_M=128 fixed_M=256 K=4096 local_N=37984 fixed_N=38144 BM=128 BN=256 BK=256
 [PATHTRACE] CANON_P38_FIXED_LM_HEAD=1 semantic_M=256 fixed_M=256 K=4096 local_N=37984 fixed_N=38144 BM=128 BN=256 BK=256
 [CANON_P38] PRECHECK_ROUND_COMPLETE ... exactly three times
 backward=0 optimizer_commits=0 in every round
 ```
 
-Any absent receipt, wrong shape, retry attempt, connection loss, incomplete
-round, or missing archive is `INCONCLUSIVE`, not a numerical failure or pass.
+Any absent bucket receipt, non-bucket compile, wrong shape, retry attempt,
+connection loss, incomplete round, or missing archive is `INCONCLUSIVE`, not a
+numerical failure or pass.
 
 ## Decision table
 
@@ -108,17 +114,18 @@ round, or missing archive is `INCONCLUSIVE`, not a numerical failure or pass.
 Return the complete `$RETURN` directory plus the complete attempt-0 GCS root
 bundle or the immutable three round bundles if root postflight is unavailable.
 At minimum the return must contain the rendered YAML, render/dry-run/apply
-receipts, full attempt-0 head log, source SHA, three round completion markers,
-three round manifests, and their deterministic archives. Run `sha256sum` over
-every returned regular file and write `RETURN_SHA256SUMS` last. Do not infer or
-hand-write a verdict; the branch-side auditor will recompute it.
+receipts, full attempt-0 head log, source SHA, six bucket PATHTRACEs, three
+round completion markers, three round manifests, and their deterministic
+archives. Run `sha256sum` over every returned regular file and write
+`RETURN_SHA256SUMS` last. Do not infer or hand-write a verdict; the branch-side
+auditor will recompute it.
 
 Stop before commit or push. The operator does not edit code, flags, YAML, GCS
 objects, classification, or documentation.
 
 ## Background-free operator prompt
 
-> Read `canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/P38S23_RUNBOOK.md`
+> Read `canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/P38S23R1_RUNBOOK.md`
 > completely and execute it from the exact full SHA supplied by the user. You
 > are an operator only: do not edit code/YAML/env, do not enable other arms,
 > and do not interpret the numbers. Return the exact directory and artifacts

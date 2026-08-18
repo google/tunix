@@ -8,7 +8,10 @@ from collections.abc import Callable
 
 
 ENV = "CANON_P38_FIXED_LM_HEAD"
-SEMANTIC_M = (16, 256)
+# Pinned tpu_inference request buckets for this max-concurrency-256 target.
+# Every admitted outer shape is normalized to FIXED_M before entering Pallas;
+# non-bucket row counts remain fail-closed instead of silently retracing.
+SEMANTIC_M = (8, 16, 32, 64, 128, 256)
 FIXED_M = 256
 HIDDEN = 4096
 VOCAB = 151936
@@ -118,7 +121,7 @@ def fixed_lm_head(
     tp_axis: str,
     local_matmul: Callable,
 ):
-    """Run M16/M256 callers through one M256/K4096/N38144 Pallas shape."""
+    """Run every registered request bucket through one fixed Pallas shape."""
     import jax.numpy as jnp
     from jax.experimental.shard_map import shard_map
     from jax.sharding import PartitionSpec as P

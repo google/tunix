@@ -1,19 +1,20 @@
 # P38 FrozenLake debug runbook
 
-## Current operator card: P38s23 / P38.2x fixed lm-head
+## Current operator card: P38s23r1 / P38.2x1 fixed lm-head
 
 The current target is one 64-chip stock diagnostic, not FrozenLake full
 training. P38s21 localized the first measured red interval to `lm_head_logits`;
-P38s22 rejected the generic BF16/FP32 algorithm preset. P38s23 tests the first
-constructive repair: both local M16 and M256 lm-head calls use one fixed
-M256/K4096/N38144 Pallas tile geometry. It keeps prefix cache off, freezes
-weights, performs zero backward and zero optimizer commits, and uses
-concurrency 256.
+P38s22 rejected the generic BF16/FP32 algorithm preset. P38s23 then stopped
+before rollout because its first contract omitted vLLM warmup bucket M32; it
+has no numerical verdict. P38s23r1 tests the repaired construction: exact
+request buckets M8/16/32/64/128/256 all use one fixed M256/K4096/N38144 Pallas
+tile geometry. It keeps prefix cache off, freezes weights, performs zero
+backward and zero optimizer commits, and uses concurrency 256.
 
 The authoritative design and claim ceiling are in
 `tasks/p38-pathways-decode-prefill-carrier/phases/p38-2x-fixed-tile-pallas-lm-head.md`.
 The only copy/paste render/apply/return contract is
-`tasks/p38-pathways-decode-prefill-carrier/P38S23_RUNBOOK.md`. Do not reuse an
+`tasks/p38-pathways-decode-prefill-carrier/P38S23R1_RUNBOOK.md`. Do not reuse an
 old P38 YAML or add env values by hand.
 
 Mandatory render flags:
@@ -22,10 +23,11 @@ Mandatory render flags:
 --stock-only --max-concurrency 256 --fixed-lm-head
 ```
 
-The 2026-08-18 real-weight one-host receipt is construction-only: 4/4 fixed-M
-comparisons exact and negative=1. Before applying, the clean source must have
-the user-approved full SHA. On target, interpret only three independently
-sealed endpoint rounds; missing round/root evidence is inconclusive.
+The 2026-08-18 repaired real-weight one-host receipt is construction-only:
+24/24 bucket comparisons exact and negative=1. Before applying, the clean
+source must have the user-approved full SHA. On target, interpret only three
+independently sealed endpoint rounds; missing bucket/round/root evidence is
+inconclusive.
 
 Rollback is omission of `--fixed-lm-head`; the numerical flag then remains
 unset. No production/full-training default changes.

@@ -30,6 +30,7 @@ os.environ.update({
 
 import linear_p22xk as linear  # noqa: E402
 import p22xf_contract as model  # noqa: E402
+import p38_fixed_lm_head as fixed  # noqa: E402
 
 
 if not linear.P22XK_MATMUL_ACTIVE:
@@ -40,11 +41,13 @@ if linear.JaxLmHead.__call__.__name__ != "_p38_fixed_lm_head_call":
   raise AssertionError("JaxLmHead does not point at the P38 hook")
 if model.TP_SIZE != 4 or model.MATMUL_N_PADDING != {37984: 38144}:
   raise AssertionError("Qwen3-8B TP4 lm_head padding contract is absent")
+if fixed.SEMANTIC_M != (8, 16, 32, 64, 128, 256):
+  raise AssertionError(f"fixed lm_head request buckets drifted: {fixed.SEMANTIC_M}")
 model.preflight(require_enabled=True)
 
 print(
     "P38_FIXED_LM_HEAD_EXACT_IMAGE_PASS "
-    "chain=linear_p22xk model=qwen8b tp=4 M=16,256 fixed_M=256 "
+    "chain=linear_p22xk model=qwen8b tp=4 M=8,16,32,64,128,256 fixed_M=256 "
     "local_N=37984 fixed_N=38144",
     flush=True,
 )

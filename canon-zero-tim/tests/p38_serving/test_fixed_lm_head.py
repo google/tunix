@@ -37,21 +37,18 @@ def _load(path: Path, name: str):
 class FixedLmHeadContractTest(unittest.TestCase):
 
   def test_registered_production_shape(self):
-    self.assertEqual(
-        fixed.validate_global_contract(
-            (16, 4096), (4096, 151936), "bfloat16", "bfloat16", tp_size=4
-        ),
-        16,
-    )
-    self.assertEqual(
-        fixed.validate_global_contract(
-            (256, 4096), (4096, 151936), "bfloat16", "bfloat16", tp_size=4
-        ),
-        256,
-    )
-    self.assertEqual(
-        fixed.validate_local_contract((16, 4096), (4096, 37984)), 16
-    )
+    self.assertEqual(fixed.SEMANTIC_M, (8, 16, 32, 64, 128, 256))
+    for m in fixed.SEMANTIC_M:
+      with self.subTest(m=m):
+        self.assertEqual(
+            fixed.validate_global_contract(
+                (m, 4096), (4096, 151936), "bfloat16", "bfloat16", tp_size=4
+            ),
+            m,
+        )
+        self.assertEqual(
+            fixed.validate_local_contract((m, 4096), (4096, 37984)), m
+        )
     self.assertEqual((fixed.BM, fixed.BN, fixed.BK), (128, 256, 256))
     self.assertEqual(fixed.PADDED_LOCAL_VOCAB, 38144)
 
@@ -59,6 +56,9 @@ class FixedLmHeadContractTest(unittest.TestCase):
     base = ((16, 4096), (4096, 151936), "bfloat16", "bfloat16")
     cases = (
         ((1, 4096), base[1], base[2], base[3], 4),
+        ((7, 4096), base[1], base[2], base[3], 4),
+        ((24, 4096), base[1], base[2], base[3], 4),
+        ((257, 4096), base[1], base[2], base[3], 4),
         ((16, 2048), base[1], base[2], base[3], 4),
         (base[0], (4096, 152064), base[2], base[3], 4),
         (base[0], base[1], "float32", base[3], 4),

@@ -25,14 +25,13 @@ from p38_fixed_lm_head import (
     HIDDEN,
     LOCAL_VOCAB,
     PADDED_LOCAL_VOCAB,
+    SEMANTIC_M,
     TP_SIZE,
     VOCAB,
     fixed_lm_head,
     preflight,
 )
 from probe_p38_lm_head import (
-    DECODE_M,
-    PREFILL_M,
     _different_elements,
     _flip_one_bit,
     _load_weight,
@@ -113,40 +112,48 @@ def main() -> None:
     last_fixed = None
     for seed in range(args.seeds):
         key = jax.random.PRNGKey(seed + 3802)
-        hidden = jax.random.normal(key, (PREFILL_M, HIDDEN), dtype=jnp.float32)
+        hidden = jax.random.normal(key, (FIXED_M, HIDDEN), dtype=jnp.float32)
         hidden = jax.device_put(hidden.astype(jnp.bfloat16), replicated)
-        decode_hidden = hidden[:DECODE_M]
+        bucket_hidden = {m: hidden[:m] for m in SEMANTIC_M}
         if not lowerings:
             lowerings = {
-                "fixed_decode": _lowering_receipt(
-                    fixed_head.lower(decode_hidden, weight)
-                ),
-                "fixed_prefill": _lowering_receipt(
-                    fixed_head.lower(hidden, weight)
-                ),
+                f"fixed_m{m}": _lowering_receipt(
+                    fixed_head.lower(bucket_hidden[m], weight)
+                )
+                for m in SEMANTIC_M
             }
 
-        fixed_decode = fixed_head(decode_hidden, weight)
-        fixed_prefill = fixed_head(hidden, weight)
-        stock_decode = stock_head(decode_hidden, weight)
+        fixed_outputs = {
+            m: fixed_head(bucket_hidden[m], weight) for m in SEMANTIC_M
+        }
+        stock_decode = stock_head(bucket_hidden[16], weight)
         stock_prefill = stock_head(hidden, weight)
-        for value in (fixed_decode, fixed_prefill, stock_decode, stock_prefill):
+        for value in (*fixed_outputs.values(), stock_decode, stock_prefill):
             value.block_until_ready()
 
-        fixed_prefill_rows = fixed_prefill[:DECODE_M]
-        stock_prefill_rows = stock_prefill[:DECODE_M]
+        fixed_reference = fixed_outputs[FIXED_M]
+        fixed_bucket_differences = {
+            str(m): int(compare(fixed_outputs[m], fixed_reference[:m]))
+            for m in SEMANTIC_M
+        }
+        fixed_bucket_max_abs = {
+            str(m): float(max_abs(fixed_outputs[m], fixed_reference[:m]))
+            for m in SEMANTIC_M
+        }
+        fixed_prefill_rows = fixed_reference[:16]
+        stock_prefill_rows = stock_prefill[:16]
         row = {
             "seed": seed,
-            "fixed_differing_elements": int(
-                compare(fixed_decode, fixed_prefill_rows)
-            ),
-            "fixed_max_abs": float(max_abs(fixed_decode, fixed_prefill_rows)),
+            "fixed_bucket_differing_elements": fixed_bucket_differences,
+            "fixed_bucket_max_abs": fixed_bucket_max_abs,
+            "fixed_differing_elements": sum(fixed_bucket_differences.values()),
+            "fixed_max_abs": max(fixed_bucket_max_abs.values()),
             "stock_differing_elements": int(
                 compare(stock_decode, stock_prefill_rows)
             ),
             "stock_max_abs": float(max_abs(stock_decode, stock_prefill_rows)),
             "decode_intervention_differing_elements": int(
-                compare(stock_decode, fixed_decode)
+                compare(stock_decode, fixed_outputs[16])
             ),
             "prefill_intervention_differing_elements": int(
                 compare(stock_prefill_rows, fixed_prefill_rows)
@@ -171,7 +178,7 @@ def main() -> None:
         "claim_scope": "onehost-real-weight-fixed-lm-head-construction-only",
         "backend": jax.default_backend(),
         "device_count": len(devices),
-        "semantic_m": [DECODE_M, PREFILL_M],
+        "semantic_m": list(SEMANTIC_M),
         "fixed_shape": [FIXED_M, HIDDEN, PADDED_LOCAL_VOCAB],
         "weight_shape": [HIDDEN, VOCAB],
         "local_vocab": LOCAL_VOCAB,

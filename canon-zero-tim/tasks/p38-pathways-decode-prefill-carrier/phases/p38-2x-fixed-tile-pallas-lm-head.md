@@ -1,7 +1,9 @@
 # P38.2x — dedicated fixed-tile Pallas lm-head
 
-Status: active. Implementation, CPU/static, exact-image, and real-weight
-one-host construction gates pass. P38s23 is prepared but not launched.
+Status: active. P38s23 stopped during vLLM warmup because the first contract
+omitted M32 and produced no numerical round. P38.2x1 exact-bucket repair,
+CPU/static, exact-image, and real-weight one-host construction gates pass.
+P38s23r1 is prepared but not launched.
 
 ## Entering evidence
 
@@ -13,14 +15,15 @@ selected final-hidden rows remain exact. P38s22 then rejects the generic
 Code archaeology shows why this freedom remains. The seven transformer
 projections are registered Pallas sites, but `JaxLmHead` intentionally does
 not inherit `JaxEinsum` and still calls a separate `TD,DV->TV` einsum. The
-current local serving shapes are decode M16 and prefill M256.
+the live request-count compiler uses a power-of-two bucket ladder while the
+canonical prefill/rescore endpoint uses M256.
 
 ## Shape ledger
 
 These row counts are deliberately distinct:
 
-- caller-local semantic rows: decode M16; prefill M256;
-- fixed lm-head kernel rows: M256 for both paths;
+- admitted caller rows: exact request buckets M8/16/32/64/128/256;
+- fixed lm-head kernel rows: M256 for every admitted caller;
 - hidden reduction width: K4096;
 - global vocabulary width: V151936;
 - TP4-local vocabulary width: N37984;
@@ -39,7 +42,7 @@ separate downstream contract and is not renamed or reused here.
    method remains the inherited original without a wrapper.
 3. Fail closed on any model, TP width, dtype, equation, M, K, N, missing mesh,
    missing canonical dependency, or conflicting diagnostic outside the ledger.
-4. Reuse the promoted P22.XK primal/custom-VJP stack. Both M16 and M256 enter
+4. Reuse the promoted P22.XK primal/custom-VJP stack. Every registered M enters
    the same Pallas shape `[256,4096] @ [4096,38144]`.
 5. Emit a compile-time PATHTRACE containing semantic and fixed shapes.
 
@@ -50,16 +53,23 @@ separate downstream contract and is not renamed or reused here.
 2. Exact image: install the Qwen3-8B TP4 overlay and attest the new module and
    flag-on lm-head hook without changing the default profile.
 3. Real v5p: load real Qwen3-8B BF16 lm-head weight, run four deterministic
-   seeds at M16 and M256 through the fixed construction, require shared rows to
-   be bitwise exact, require production tile/path receipts, and require the
-   injected one-bit negative to report exactly one.
-4. Only after 1-3 pass and a separate user launch approval: P38s23, one slim
+   seeds at M8/16/32/64/128/256 through the fixed construction, require every
+   bucket to equal the corresponding M256 reference rows bitwise, require all
+   production tile/path receipts, and require the injected one-bit negative to
+   report exactly one.
+4. Only after 1-3 pass and a separate user launch approval: P38s23r1, one slim
    three-round 64-TPU stock arm with this flag as the single numerical change.
 
-Current gate result: 4/4 seeds are fixed-M cross-shape exact, the one-bit
-negative reports exactly one, and fixed-versus-stock differs at 211--268
-selected elements per seed. Receipt:
-`../artifacts/p38_2x_fixed_lm_head_onehost_0818.md`.
+The first P38s23 never passed item 4: `capture_model()` invoked compute_logits
+at M32, and the deliberately narrow M16/M256 validator raised before rollout.
+P38.2x1 corrects the test envelope without admitting arbitrary row counts:
+only `(8,16,32,64,128,256)` is legal, while M1/M7/M24/M257 remain red.
+
+Current repaired gate result: 24/24 bucket comparisons are exact,
+`max_abs=0`, the one-bit negative reports exactly one, all six lowerings carry
+custom calls, and fixed-versus-stock differs at 211--268 selected elements per
+seed. Receipt:
+`../artifacts/p38_2x1_fixed_lm_head_bucket_onehost_0818.md`.
 
 ## Target decision table
 
@@ -73,9 +83,10 @@ selected elements per seed. Receipt:
 ## Claim ceiling and rollback
 
 One-host exactness is construction evidence only and cannot prove Pathways
-repair. P38s23 is forward-only and cannot admit backward, optimizer, training,
-or production performance. The known decode cost is up to 16x lm-head row work
-locally; performance is measured but never traded against bitwise admission.
+repair. P38s23r1 is forward-only and cannot admit backward, optimizer,
+training, or production performance. The registered M8 bucket makes the
+worst-case lm-head row-work multiplier 32x; performance is measured but never
+traded against bitwise admission.
 
 Rollback is `CANON_P38_FIXED_LM_HEAD=0` or unset. No existing canonical default,
 prefix-cache setting, runner geometry, checkpoint, or source evidence object is

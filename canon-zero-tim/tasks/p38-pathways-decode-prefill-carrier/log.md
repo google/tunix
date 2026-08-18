@@ -1960,3 +1960,36 @@ reclassification from the committed NPZ inputs.
   249/211/268/219 selected elements, proving the intervention is active.
 - Added the P38s23 renderer flag, target preflight, single-variable tests, and
   background-free operator runbook. No 64-TPU run, commit, or push occurred.
+
+## 2026-08-18 UTC — P38s23 warmup shape contract failed closed
+
+- Source `32caa773a057ccc2604ee6c1c5ce845f63346bbd` started the registered
+  64-TPU target but stopped inside vLLM `CompilationManager.capture_model()`
+  before rollout, alignment, backward, or optimizer work.
+- `run_compute_logits` invoked `lm_head` with hidden shape `[32,4096]`. The
+  first P38.2x validator admitted only M16/M256 and raised
+  `P38 fixed lm_head requires semantic M in (16, 256)`.
+- Verdict: `INCONCLUSIVE_WARMUP_SHAPE_CONTRACT`. This is neither A-B repair nor
+  a fixed-lm-head numerical rejection. No P38s23 numerical round exists.
+- Pinned code archaeology shows request-count warmup uses power-of-two buckets;
+  the repair must register the exact max-concurrency-256 ladder rather than
+  admit arbitrary `1 <= M <= 256` or bypass warmup.
+- The committed hand report's full source SHA is mistyped after the correct
+  eight-character prefix and is not source-authenticating evidence. Its
+  traceback and current code are nevertheless sufficient to diagnose this
+  contract omission.
+
+## 2026-08-18 UTC — P38.2x1 exact-bucket repair one-host PASS
+
+- Registered only M8/16/32/64/128/256; every bucket zero-pads to the unchanged
+  internal M256/K4096/N38144 BM128/BN256/BK256 Pallas construction. M1/M7/M24/
+  M257 remain fail-closed.
+- Real Qwen3-8B BF16 weight on the local four-device v5p passes 24/24
+  bucket-versus-M256 comparisons across four deterministic seeds. Every
+  `max_abs=0`, all six lowering receipts contain custom calls, and the one-bit
+  negative reports 1.
+- Fixed versus stock M16 remains different at 249/211/268/219 selected
+  elements, so the repair did not turn the intervention into a no-op.
+- P38s23 is frozen as historical. The next separately approved target is
+  P38s23r1 under `P38S23R1_RUNBOOK.md`. No 64-TPU retry, backward, optimizer,
+  commit, or push occurred in this step.
