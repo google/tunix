@@ -5,7 +5,7 @@ parallel Qwen3-32B DeepSWE workstream, read
 `../p39-deepswe-production/HANDOFF.md`. P38 evidence cannot promote P39, and
 P39 evidence cannot promote P38.
 
-## CURRENT: P38.2x1 bucket repair PASS; P38s23r1 awaits approval
+## CURRENT: P38.2x2 learner-shape repair; real-v5p gate pending
 
 P38s22/source `ee0154b38ab81b2b4ee3eac35c65ed380aa744f6` ran on 64 TPU
 (`DP16xTP4`, concurrency 256, `--lm-head-algo`, DotAlgorithmPreset `BF16_BF16_F32`).
@@ -29,13 +29,20 @@ the original P38.2x contract admitted only M16/M256. It is
 report spells the full source SHA incorrectly after the valid eight-character
 prefix; do not use it as source authentication.
 
-P38.2x1 now registers only the pinned request buckets
-M8/16/32/64/128/256, all normalized to internal M256. CPU/static,
-pinned-image, and real-weight one-host gates pass: 24/24 bucket comparisons
-are exact, max_abs=0, the negative is 1, and the intervention changes stock
-bits. The only next target is the P38s23r1 single-variable arm in
-`P38S23R1_RUNBOOK.md`. Do not launch it until the user approves the local diff,
-commit, push, and launch as separate actions.
+P38.2x1 registered the pinned request buckets M8/16/32/64/128/256, all
+normalized to internal M256; its local gates passed. P38s23r1/source
+`575ef92e4208654e69730854846c9aefe2e77a3e` then passed all six warmups and
+covered all 256 rollout trajectories, proving that repair. It stopped before
+the numerical precheck when learner rescore invoked `lm_head` at M4096. No
+A-B/B-C round exists; verdict `INCONCLUSIVE_LEARNER_SHAPE_CONTRACT`.
+
+P38.2x2 admits only that exact learner M4096 and maps it to 16 calls of the
+same internal M256/K4096/N38144 Pallas body. It does not fall back to stock or
+admit arbitrary large M. CPU/static and pinned-image gates pass. The real-v5p
+M4096 gate is pending because an unrelated P51 container owns the local TPU;
+do not launch P38s23r2 until that gate passes and its receipt is committed.
+The eventual operator card is `P38S23R2_RUNBOOK.md`. Commit, push, and 64-TPU
+launch each still require separate user approval.
 
 ### Admitted P38s22 facts
 

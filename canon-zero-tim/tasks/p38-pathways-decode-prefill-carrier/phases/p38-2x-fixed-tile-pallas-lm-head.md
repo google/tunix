@@ -1,9 +1,9 @@
 # P38.2x — dedicated fixed-tile Pallas lm-head
 
-Status: active. P38s23 stopped during vLLM warmup because the first contract
-omitted M32 and produced no numerical round. P38.2x1 exact-bucket repair,
-CPU/static, exact-image, and real-weight one-host construction gates pass.
-P38s23r1 is prepared but not launched.
+Status: active. P38s23 stopped during warmup at omitted M32. P38.2x1 repaired
+all request buckets; P38s23r1 passed warmup and rollout, then stopped before a
+numerical round at omitted learner-rescore M4096. P38.2x2 CPU/static and
+exact-image gates pass; real-v5p M4096 construction is pending.
 
 ## Entering evidence
 
@@ -22,8 +22,10 @@ canonical prefill/rescore endpoint uses M256.
 
 These row counts are deliberately distinct:
 
-- admitted caller rows: exact request buckets M8/16/32/64/128/256;
-- fixed lm-head kernel rows: M256 for every admitted caller;
+- admitted caller rows: exact request buckets M8/16/32/64/128/256 and exact
+  learner-rescore M4096;
+- fixed lm-head kernel rows: M256 for every request bucket; M4096 is mapped to
+  exactly 16 independent M256 calls;
 - hidden reduction width: K4096;
 - global vocabulary width: V151936;
 - TP4-local vocabulary width: N37984;
@@ -55,9 +57,9 @@ separate downstream contract and is not renamed or reused here.
 3. Real v5p: load real Qwen3-8B BF16 lm-head weight, run four deterministic
    seeds at M8/16/32/64/128/256 through the fixed construction, require every
    bucket to equal the corresponding M256 reference rows bitwise, require all
-   production tile/path receipts, and require the injected one-bit negative to
-   report exactly one.
-4. Only after 1-3 pass and a separate user launch approval: P38s23r1, one slim
+   production tile/path receipts, then run M4096 and require all 16 chunks to
+   equal direct M256 reference calls. Require the one-bit negative to report 1.
+4. Only after 1-3 pass and a separate user launch approval: P38s23r2, one slim
    three-round 64-TPU stock arm with this flag as the single numerical change.
 
 The first P38s23 never passed item 4: `capture_model()` invoked compute_logits
@@ -71,6 +73,13 @@ custom calls, and fixed-versus-stock differs at 211--268 selected elements per
 seed. Receipt:
 `../artifacts/p38_2x1_fixed_lm_head_bucket_onehost_0818.md`.
 
+P38s23r1 subsequently reached the learner and exposed exact M4096. Falling
+back to stock there is forbidden because it would give B/M256 and C/M4096
+different lm-head programs and confound B-C. P38.2x2 instead uses `lax.map`
+over 16 M256 chunks. CPU/static and pinned-image gates pass. Its real-v5p gate
+has not run because `/dev/vfio/0` is occupied by an unrelated P51 workload;
+that infrastructure result is not evidence for or against the construction.
+
 ## Target decision table
 
 - A-B becomes zero in all rounds and B-C stays exact: candidate causal repair;
@@ -83,7 +92,7 @@ seed. Receipt:
 ## Claim ceiling and rollback
 
 One-host exactness is construction evidence only and cannot prove Pathways
-repair. P38s23r1 is forward-only and cannot admit backward, optimizer,
+repair. P38s23r2 is forward-only and cannot admit backward, optimizer,
 training, or production performance. The registered M8 bucket makes the
 worst-case lm-head row-work multiplier 32x; performance is measured but never
 traded against bitwise admission.

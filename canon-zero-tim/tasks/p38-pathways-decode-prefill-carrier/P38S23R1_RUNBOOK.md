@@ -1,6 +1,11 @@
 # P38s23r1 fixed-tile lm-head target runbook
 
-This is the only current operator card for P38.2x. It launches one 64-TPU
+> **HISTORICAL / DO NOT EXECUTE.** Source `575ef92e` passed all six request
+> warmup buckets and generated all 256 trajectories, then stopped before the
+> numerical precheck when learner rescore invoked lm_head at M4096. It produced
+> no A-B/B-C round. Use `P38S23R2_RUNBOOK.md` instead.
+
+This is the historical operator card for P38.2x1. It launched one 64-TPU
 FrozenLake diagnostic (`DP16xTP4`, concurrency 256, three frozen rounds) with
 `CANON_P38_FIXED_LM_HEAD=1` as the only numerical change from the known-red
 stock envelope. It performs zero backward and zero optimizer commits.

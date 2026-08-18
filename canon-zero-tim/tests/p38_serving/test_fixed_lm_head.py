@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[3]
 SHIM = ROOT / "canon-zero-tim/src/engine_shims"
 MODEL_CONTRACT = SHIM / "models/qwen8b/p22xf_contract.py"
 SOURCE = SHIM / "linear_p22xk.py"
+FIXED_SOURCE = SHIM / "p38_fixed_lm_head.py"
 PROBE = (
     ROOT
     / "canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts"
@@ -37,7 +38,9 @@ def _load(path: Path, name: str):
 class FixedLmHeadContractTest(unittest.TestCase):
 
   def test_registered_production_shape(self):
-    self.assertEqual(fixed.SEMANTIC_M, (8, 16, 32, 64, 128, 256))
+    self.assertEqual(fixed.REQUEST_M, (8, 16, 32, 64, 128, 256))
+    self.assertEqual(fixed.LEARNER_M, (4096,))
+    self.assertEqual(fixed.SEMANTIC_M, (8, 16, 32, 64, 128, 256, 4096))
     for m in fixed.SEMANTIC_M:
       with self.subTest(m=m):
         self.assertEqual(
@@ -59,6 +62,9 @@ class FixedLmHeadContractTest(unittest.TestCase):
         ((7, 4096), base[1], base[2], base[3], 4),
         ((24, 4096), base[1], base[2], base[3], 4),
         ((257, 4096), base[1], base[2], base[3], 4),
+        ((512, 4096), base[1], base[2], base[3], 4),
+        ((2048, 4096), base[1], base[2], base[3], 4),
+        ((8192, 4096), base[1], base[2], base[3], 4),
         ((16, 2048), base[1], base[2], base[3], 4),
         (base[0], (4096, 152064), base[2], base[3], 4),
         (base[0], base[1], "float32", base[3], 4),
@@ -100,6 +106,12 @@ class FixedLmHeadContractTest(unittest.TestCase):
     self.assertIn("P38_FIXED_LM_HEAD_ACTIVE", text)
     self.assertNotIn("CANON_P38_FIXED_LM_HEAD", text.split("JaxEinsum =", 1)[0])
 
+  def test_learner_uses_fixed_chunks_without_stock_fallback(self):
+    text = FIXED_SOURCE.read_text()
+    self.assertIn("a_local.reshape((chunks, FIXED_M, HIDDEN))", text)
+    self.assertIn("lax.map(run_fixed, a_chunks)", text)
+    self.assertNotIn("original_lm_head", text)
+
   def test_probe_verdict_and_negative(self):
     # Stub heavy JAX/shim imports so the host-only classifier is testable.
     modules = {
@@ -123,6 +135,10 @@ class FixedLmHeadContractTest(unittest.TestCase):
     )
     self.assertEqual(probe.classify(red, 1), "FIXED_LM_HEAD_NOT_INVARIANT")
     self.assertEqual(probe.classify(exact, 0), "FAIL_NEGATIVE_CONTROL")
+    self.assertEqual(
+        probe.classify(exact, 1, [{"differing_elements": 1}]),
+        "FIXED_LM_HEAD_LEARNER_CHUNK_NOT_INVARIANT",
+    )
 
 
 if __name__ == "__main__":

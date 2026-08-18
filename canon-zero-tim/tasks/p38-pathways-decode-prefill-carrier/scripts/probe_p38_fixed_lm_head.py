@@ -23,9 +23,10 @@ from p38_fixed_lm_head import (
     BN,
     FIXED_M,
     HIDDEN,
+    LEARNER_M,
     LOCAL_VOCAB,
     PADDED_LOCAL_VOCAB,
-    SEMANTIC_M,
+    REQUEST_M,
     TP_SIZE,
     VOCAB,
     fixed_lm_head,
@@ -39,11 +40,17 @@ from probe_p38_lm_head import (
 )
 
 
-def classify(rows: list[dict[str, Any]], negative_differing: int) -> str:
+def classify(
+    rows: list[dict[str, Any]],
+    negative_differing: int,
+    learner_rows: list[dict[str, Any]] | None = None,
+) -> str:
     if negative_differing != 1:
         return "FAIL_NEGATIVE_CONTROL"
     if any(row["fixed_differing_elements"] for row in rows):
         return "FIXED_LM_HEAD_NOT_INVARIANT"
+    if any(row["differing_elements"] for row in (learner_rows or [])):
+        return "FIXED_LM_HEAD_LEARNER_CHUNK_NOT_INVARIANT"
     return "FIXED_LM_HEAD_ONEHOST_CONSTRUCTION_PASS"
 
 
@@ -68,9 +75,10 @@ def main() -> None:
     parser.add_argument("--model", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--seeds", type=int, default=4)
+    parser.add_argument("--learner-seeds", type=int, default=1)
     args = parser.parse_args()
-    if args.seeds < 1:
-        raise RuntimeError("--seeds must be positive")
+    if args.seeds < 1 or args.learner_seeds < 1:
+        raise RuntimeError("--seeds and --learner-seeds must be positive")
 
     preflight(require_enabled=True)
     devices = jax.devices()
@@ -114,17 +122,17 @@ def main() -> None:
         key = jax.random.PRNGKey(seed + 3802)
         hidden = jax.random.normal(key, (FIXED_M, HIDDEN), dtype=jnp.float32)
         hidden = jax.device_put(hidden.astype(jnp.bfloat16), replicated)
-        bucket_hidden = {m: hidden[:m] for m in SEMANTIC_M}
+        bucket_hidden = {m: hidden[:m] for m in REQUEST_M}
         if not lowerings:
             lowerings = {
                 f"fixed_m{m}": _lowering_receipt(
                     fixed_head.lower(bucket_hidden[m], weight)
                 )
-                for m in SEMANTIC_M
+                for m in REQUEST_M
             }
 
         fixed_outputs = {
-            m: fixed_head(bucket_hidden[m], weight) for m in SEMANTIC_M
+            m: fixed_head(bucket_hidden[m], weight) for m in REQUEST_M
         }
         stock_decode = stock_head(bucket_hidden[16], weight)
         stock_prefill = stock_head(hidden, weight)
@@ -134,11 +142,11 @@ def main() -> None:
         fixed_reference = fixed_outputs[FIXED_M]
         fixed_bucket_differences = {
             str(m): int(compare(fixed_outputs[m], fixed_reference[:m]))
-            for m in SEMANTIC_M
+            for m in REQUEST_M
         }
         fixed_bucket_max_abs = {
             str(m): float(max_abs(fixed_outputs[m], fixed_reference[:m]))
-            for m in SEMANTIC_M
+            for m in REQUEST_M
         }
         fixed_prefill_rows = fixed_reference[:16]
         stock_prefill_rows = stock_prefill[:16]
@@ -167,18 +175,57 @@ def main() -> None:
         )
         last_fixed = fixed_prefill_rows
 
+    learner_rows: list[dict[str, Any]] = []
+    learner_m = LEARNER_M[0]
+    for seed in range(args.learner_seeds):
+        key = jax.random.PRNGKey(seed + 3817)
+        hidden = jax.random.normal(key, (learner_m, HIDDEN), dtype=jnp.float32)
+        hidden = jax.device_put(hidden.astype(jnp.bfloat16), replicated)
+        if "fixed_m4096" not in lowerings:
+            lowerings["fixed_m4096"] = _lowering_receipt(
+                fixed_head.lower(hidden, weight)
+            )
+        learner_output = fixed_head(hidden, weight)
+        learner_output.block_until_ready()
+        differing = 0
+        largest = 0.0
+        for chunk in range(learner_m // FIXED_M):
+            start = chunk * FIXED_M
+            stop = start + FIXED_M
+            reference = fixed_head(hidden[start:stop], weight)
+            reference.block_until_ready()
+            differing += int(compare(learner_output[start:stop], reference))
+            largest = max(
+                largest,
+                float(max_abs(learner_output[start:stop], reference)),
+            )
+        row = {
+            "seed": seed,
+            "semantic_m": learner_m,
+            "chunks": learner_m // FIXED_M,
+            "differing_elements": differing,
+            "max_abs": largest,
+        }
+        learner_rows.append(row)
+        print(
+            f"[P38.FIXED_LM_HEAD] learner_seed={seed} "
+            f"{json.dumps(row, sort_keys=True)}",
+            flush=True,
+        )
+
     assert last_fixed is not None
     negative = jax.jit(_flip_one_bit)(last_fixed)
     negative.block_until_ready()
     negative_differing = int(compare(last_fixed, negative))
-    verdict = classify(rows, negative_differing)
+    verdict = classify(rows, negative_differing, learner_rows)
     report = {
-        "schema_version": 1,
+        "schema_version": 2,
         "verdict": verdict,
         "claim_scope": "onehost-real-weight-fixed-lm-head-construction-only",
         "backend": jax.default_backend(),
         "device_count": len(devices),
-        "semantic_m": list(SEMANTIC_M),
+        "request_m": list(REQUEST_M),
+        "learner_m": list(LEARNER_M),
         "fixed_shape": [FIXED_M, HIDDEN, PADDED_LOCAL_VOCAB],
         "weight_shape": [HIDDEN, VOCAB],
         "local_vocab": LOCAL_VOCAB,
@@ -188,6 +235,7 @@ def main() -> None:
         "negative_control_differing_elements": negative_differing,
         "lowerings": lowerings,
         "seeds": rows,
+        "learner_seeds": learner_rows,
     }
     args.output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
     print(f"[P38.FIXED_LM_HEAD] {json.dumps(report, sort_keys=True)}", flush=True)

@@ -16,7 +16,7 @@
 | CANON_RPA_VJP2(+VJP2_MAX_SEQS) | R4:cache-aware 认证反向 | off | 已认证(fp64 oracle+20/20+21/21) | 转正焊死;MAX_SEQS>1 需归约序审计先行 |
 | CANON_LOGPROB_M / CANON_PROMPT_PROCESSED_LOGPROBS | R5:三臂共享 logprob callable,M=256 | off | 已认证(G9 4/4+负控) | 转正焊死 |
 | CANON_MM_ALGO / CANON_MM_ALGO_PRESET | P19/P38:非 Pallas einsum 的 dot-algorithm 判别器;P38 仅允许 fixed `BF16_BF16_F32` 单变量臂 | off / BF16_BF16_F32 | **否决区**:旧 M16/M2048 e2e 无效;P38s22 三轮 A-B 仍红 | 可删,判决记录永存 |
-| CANON_P38_FIXED_LM_HEAD | P38.2x:Qwen3-8B TP4 lm_head 的 M8/16/32/64/128/256 request buckets 均 pad 到 M256,K4096,N38144 后走固定 Pallas tiles | off | 试验;全 bucket real-weight one-host 已过,P38s23r1 待验 | carrier 结案后:绿则经 backward/full-load 门转正,红则退役入否决区 |
+| CANON_P38_FIXED_LM_HEAD | P38.2x:Qwen3-8B TP4 lm_head 的 M8/16/32/64/128/256 request buckets 均 pad 到 M256；learner M4096 映射为 16xM256；共享 K4096/N38144 固定 Pallas tiles | off | 试验;request one-host 已过,M4096 real-v5p 待验,P38s23r2 禁止提前发射 | carrier 结案后:绿则经 backward/full-load 门转正,红则退役入否决区 |
 | CANON_PROMPT_DIRECT_LOGPROBS / ABSOLUTE_TARGET_IDS | R5 同族实现细节开关 | off | 已认证 | 随 R5 同批焊死 |
 | CANON_PALLAS_{CANONICAL_VJP,ALL_PROJ,ALL_RMSNORM,MPAD,SWIGLU,SWIGLU_MPAD} | canonical Pallas 内核族选通 | off | 已认证 | 转正焊死(P22.XI 部分已无条件) |
 | CANON_P28_SEGMENTED_TRAIN | 分段 fixed-M 训练前向 | off | 已认证 | 转正焊死 |

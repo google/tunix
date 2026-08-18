@@ -2,9 +2,9 @@
 
 > **HISTORICAL / DO NOT EXECUTE.** Source `32caa773` stopped during vLLM
 > warmup because this version admitted only M16/M256 and omitted request bucket
-> M32. It produced no numerical round. Use `P38S23R1_RUNBOOK.md` instead.
+> M32. It produced no numerical round. Use `P38S23R2_RUNBOOK.md` instead.
 
-This is the only operator card for P38s23. It launches one 64-TPU FrozenLake
+This is the historical operator card for P38s23. It launched one 64-TPU FrozenLake
 diagnostic (`DP16xTP4`, concurrency 256, three frozen rounds) with
 `CANON_P38_FIXED_LM_HEAD=1` as the only numerical change from the known-red
 stock envelope. It performs zero backward and zero optimizer commits.

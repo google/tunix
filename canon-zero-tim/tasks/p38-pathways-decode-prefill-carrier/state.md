@@ -22,14 +22,17 @@
   preset is rejected. P38.2x removes request-bucket lm-head program freedom
   with a default-off M256/K4096/N38144 fixed-tile Pallas construction. The
   first P38s23 attempt stopped before rollout because its contract omitted
-  warmup M32; no numerical boundary was measured. P38.2x1 now admits exactly
-  M8/16/32/64/128/256. CPU/static and real-weight one-host gates pass: all
-  24/24 bucket comparisons are exact and the one-bit negative is 1. The next
-  gate is one separately approved P38s23r1 64-TPU launch; it is not yet run.
+  warmup M32; no numerical boundary was measured. P38.2x1 admitted exactly
+  M8/16/32/64/128/256 and passed its local gates. P38s23r1 then passed all six
+  warmups and all rollout generation, but learner rescore invoked exact M4096
+  and failed the deliberately narrow contract before any A-B/B-C round.
+  P38.2x2 maps only M4096 to 16 invocations of the same M256 body. CPU/static
+  and exact-image gates pass; real-v5p M4096 validation is pending while P51
+  owns the host TPU. P38s23r2 is forbidden until that local gate is sealed.
   See
   `phases/p38-2w2-p38s22-round-seal-salvage.md` and
   `phases/p38-2x-fixed-tile-pallas-lm-head.md` and
-  `P38S23R1_RUNBOOK.md`.
+  `P38S23R2_RUNBOOK.md`.
 - Task directory:
   `canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/`.
 - P38s20/source `bea31f36655b137d7ab47ba94095cadda5b586ba` execution

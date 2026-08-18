@@ -8,10 +8,13 @@ from collections.abc import Callable
 
 
 ENV = "CANON_P38_FIXED_LM_HEAD"
-# Pinned tpu_inference request buckets for this max-concurrency-256 target.
-# Every admitted outer shape is normalized to FIXED_M before entering Pallas;
-# non-bucket row counts remain fail-closed instead of silently retracing.
-SEMANTIC_M = (8, 16, 32, 64, 128, 256)
+# Pinned tpu_inference request buckets for this max-concurrency-256 target plus
+# the one learner chunk shape exercised by canonical_qwen3_adapter. Request
+# buckets are padded to FIXED_M; the learner shape is mapped as exact FIXED_M
+# chunks. Non-registered row counts remain fail-closed instead of retracing.
+REQUEST_M = (8, 16, 32, 64, 128, 256)
+LEARNER_M = (4096,)
+SEMANTIC_M = REQUEST_M + LEARNER_M
 FIXED_M = 256
 HIDDEN = 4096
 VOCAB = 151936
@@ -121,7 +124,8 @@ def fixed_lm_head(
     tp_axis: str,
     local_matmul: Callable,
 ):
-    """Run every registered request bucket through one fixed Pallas shape."""
+    """Run every registered outer shape through one fixed Pallas shape."""
+    from jax import lax
     import jax.numpy as jnp
     from jax.experimental.shard_map import shard_map
     from jax.sharding import PartitionSpec as P
@@ -149,34 +153,45 @@ def fixed_lm_head(
                 "P38 fixed lm_head local dtype mismatch: "
                 f"{a_local.dtype}/{w_local.dtype}"
             )
+        def run_fixed(a_fixed):
+            return local_matmul(
+                a_fixed,
+                w_local,
+                block_m=BM,
+                block_n=BN,
+                block_k=BK,
+                shape_invariant_numerics=True,
+            )
+
         if local_m < FIXED_M:
             a_fixed = jnp.pad(
                 a_local,
                 ((0, FIXED_M - local_m), (0, 0)),
                 constant_values=0,
             )
+            chunks = 1
+            out = run_fixed(a_fixed)[:local_m, :]
+        elif local_m == FIXED_M:
+            chunks = 1
+            out = run_fixed(a_local)
         else:
-            a_fixed = a_local
+            chunks = local_m // FIXED_M
+            a_chunks = a_local.reshape((chunks, FIXED_M, HIDDEN))
+            out = lax.map(run_fixed, a_chunks).reshape(
+                (local_m, LOCAL_VOCAB)
+            )
         print(
             "[PATHTRACE] CANON_P38_FIXED_LM_HEAD=1 "
             f"semantic_M={local_m} fixed_M={FIXED_M} K={HIDDEN} "
             f"local_N={LOCAL_VOCAB} fixed_N={PADDED_LOCAL_VOCAB} "
-            f"BM={BM} BN={BN} BK={BK}",
+            f"BM={BM} BN={BN} BK={BK} chunks={chunks}",
             flush=True,
         )
-        out = local_matmul(
-            a_fixed,
-            w_local,
-            block_m=BM,
-            block_n=BN,
-            block_k=BK,
-            shape_invariant_numerics=True,
-        )
-        if tuple(map(int, out.shape)) != (FIXED_M, LOCAL_VOCAB):
+        if tuple(map(int, out.shape)) != (local_m, LOCAL_VOCAB):
             raise RuntimeError(
                 f"P38 fixed lm_head output shape mismatch: {out.shape}"
             )
-        return out[:local_m, :]
+        return out
 
     try:
         mapped = shard_map(

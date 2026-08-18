@@ -40,7 +40,7 @@ done
 {
   echo "[P38.FIXED_LM_HEAD] source=$(git -C "$repo" rev-parse HEAD) image=$image"
   echo "[P38.FIXED_LM_HEAD] snapshot=$snapshot_sha scope=construction-only"
-  echo "[P38.FIXED_LM_HEAD] semantic_M=8,16,32,64,128,256 fixed_M=256 K=4096 local_N=37984 fixed_N=38144 tiles=128,256,256 topology=TP4"
+  echo "[P38.FIXED_LM_HEAD] request_M=8,16,32,64,128,256 learner_M=4096 fixed_M=256 K=4096 local_N=37984 fixed_N=38144 tiles=128,256,256 topology=TP4"
   sha256sum "$0" "$script_dir/probe_p38_fixed_lm_head.py" \
     "$shim_dir/p38_fixed_lm_head.py" "$shim_dir/p22_pallas_matmul.py" \
     "$shim_dir/p22xi_padded_matmul.py" "$shim_dir/p22xk_vjp_ops.py" \
@@ -68,7 +68,7 @@ sudo docker run --rm --privileged --net=host --name "$container" \
   -e CANON_PALLAS_CANONICAL_VJP=1 \
   -w "$repo" "$image" \
   python3 -u "$script_dir/probe_p38_fixed_lm_head.py" \
-    --model "$model" --output "$report" --seeds 4 \
+    --model "$model" --output "$report" --seeds 4 --learner-seeds 1 \
   >>"$raw" 2>&1
 docker_rc=$?
 set -e
@@ -77,23 +77,31 @@ echo "[P38.FIXED_LM_HEAD] docker_exit=$docker_rc" >>"$raw"
 test "$docker_rc" -eq 0
 test -s "$report"
 for m in 8 16 32 64 128 256; do
-  grep -Fq "semantic_M=$m fixed_M=256 K=4096 local_N=37984 fixed_N=38144" "$raw"
+  grep -Fq "semantic_M=$m fixed_M=256 K=4096 local_N=37984 fixed_N=38144 BM=128 BN=256 BK=256 chunks=1" "$raw"
 done
+grep -Fq "semantic_M=4096 fixed_M=256 K=4096 local_N=37984 fixed_N=38144 BM=128 BN=256 BK=256 chunks=16" "$raw"
 python3 - "$report" <<'PY'
 import json, pathlib, sys
 r = json.loads(pathlib.Path(sys.argv[1]).read_text())
 assert r["claim_scope"] == "onehost-real-weight-fixed-lm-head-construction-only"
 assert r["verdict"] == "FIXED_LM_HEAD_ONEHOST_CONSTRUCTION_PASS"
 assert r["negative_control_differing_elements"] == 1
-assert r["semantic_m"] == [8, 16, 32, 64, 128, 256]
+assert r["request_m"] == [8, 16, 32, 64, 128, 256]
+assert r["learner_m"] == [4096]
 assert r["fixed_shape"] == [256, 4096, 38144]
 assert r["local_vocab"] == 37984
 assert r["tiles"] == {"BM": 128, "BN": 256, "BK": 256}
 assert len(r["seeds"]) == 4
 assert all(x["fixed_differing_elements"] == 0 for x in r["seeds"])
-expected = {str(m): 0 for m in r["semantic_m"]}
+expected = {str(m): 0 for m in r["request_m"]}
 assert all(x["fixed_bucket_differing_elements"] == expected for x in r["seeds"])
-assert set(r["lowerings"]) == {f"fixed_m{m}" for m in r["semantic_m"]}
+assert len(r["learner_seeds"]) == 1
+assert r["learner_seeds"][0]["chunks"] == 16
+assert r["learner_seeds"][0]["differing_elements"] == 0
+assert r["learner_seeds"][0]["max_abs"] == 0.0
+assert set(r["lowerings"]) == {
+    *(f"fixed_m{m}" for m in r["request_m"]), "fixed_m4096"
+}
 assert all(x["has_custom_call"] for x in r["lowerings"].values())
 print(f"[P38.FIXED_LM_HEAD] ONEHOST_PASS verdict={r['verdict']}")
 PY

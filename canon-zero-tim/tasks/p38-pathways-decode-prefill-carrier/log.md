@@ -1993,3 +1993,31 @@ reclassification from the committed NPZ inputs.
 - P38s23 is frozen as historical. The next separately approved target is
   P38s23r1 under `P38S23R1_RUNBOOK.md`. No 64-TPU retry, backward, optimizer,
   commit, or push occurred in this step.
+
+## 2026-08-18 UTC — P38s23r1 learner M4096 failed closed
+
+- Source `575ef92e4208654e69730854846c9aefe2e77a3e` passed every registered
+  request warmup bucket M8/16/32/64/128/256 and completed all 256 rollout
+  trajectories. This validates the P38.2x1 request-bucket repair.
+- Learner rescore then called the globally installed `JaxLmHead` hook with
+  hidden shape `[4096,4096]`. The exact request-only contract rejected M4096
+  before any A-B/B-C precheck, backward, or optimizer work.
+- Verdict: `INCONCLUSIVE_LEARNER_SHAPE_CONTRACT`; there is no P38s23r1
+  numerical round and no repair/rejection claim.
+- Stock fallback for M4096 is rejected as a fix because it would give B/M256
+  and C/M4096 different lm-head programs and could manufacture B-C drift.
+
+## 2026-08-18 UTC — P38.2x2 exact learner mapping implemented locally
+
+- Added only exact learner M4096 and map it as 16 independent invocations of
+  the unchanged M256/K4096/N38144 BM128/BN256/BK256 Pallas body. Request
+  buckets still pad to one M256 call; M512/M2048/M8192 remain fail-closed.
+- CPU/static and pinned-image gates pass. The pinned image attests request
+  M8/16/32/64/128/256 plus learner M4096, with both overlays at 34/34 tests.
+- A four-device CPU structural `eval_shape` in the pinned image passes the
+  complete shard_map/lax.map wrapper and returns BF16 `[4096,151936]`; its
+  PATHTRACE records `chunks=16`. This is a shape/wiring gate, not numerics.
+- The first real-v5p attempt never initialized JAX because an unrelated
+  `p51_gsm8k_xprof_p53fixed_20260818` container owns `/dev/vfio/0`. This is an
+  infrastructure-busy result, not evidence about the M4096 construction. Do
+  not launch P38s23r2 until the real-v5p gate is rerun and sealed.
