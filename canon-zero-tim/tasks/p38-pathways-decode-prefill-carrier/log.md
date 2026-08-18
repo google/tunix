@@ -1870,3 +1870,34 @@ reclassification from the committed NPZ inputs.
   `artifacts/p38_2w_lm_head_onehost_0818.md`.
 - The next possible target is one slim P38s22 single-variable arm. It remains
   NOT RUN and requires separate user approval after review/publication.
+
+## 2026-08-18 UTC — P38s22 receipt correction and P38.2w1 offsite audit implementation
+
+- Pulled evidence commit `82cd2bd0`. The returned root/capsule bytes reproduce
+  the three endpoint rounds: 45,865 / 43,982 / 53,617 actions; A-B 48/10/8
+  elements and 82/14/15 bytes; B-C exact in every round. The generic
+  `BF16_BF16_F32` preset is rejected at analysis grade.
+- The new durability receipt is not source-authenticated. All three claimed
+  round-archive SHAs equal their corresponding capsule NPZ SHAs, which cannot
+  satisfy the checked-in deterministic tar format. The prose receipt copied
+  P38s21 action counts for rounds 0/1. The returned 66-point terminal
+  classification is unadmitted because P38s22 disabled that observer and no
+  raw terminal JSON/NPZ or invocation provenance was returned.
+- Added P38.2w1: one immutable contract, a read-only GCS wrapper, an independent
+  root/round/archive/capsule auditor, a background-free operator runbook, and
+  a compact return contract. The remote agent only runs the checked-in command;
+  it cannot enter an URI, expected number, classifier choice, or conclusion.
+- The wrapper preserves both successful and failed acquisition as a small
+  self-sealed return. Focused fake-GCS cases cover a valid bundle, capsule SHA
+  copied into the archive receipt, NPZ mislabeled as a tar, missing root
+  completion, staged/root pre-alignment drift, and a cross-round incident
+  record, plus an orphan observer NPZ. Together with the deterministic archive
+  suite, 11/11 tests pass. The broader P38 discovery has 85 runnable tests
+  passing; renderer collection
+  is `TARGET NOT RUN` here because optional dependency `metrax` is absent, and
+  this phase does not touch renderer code. Python compile, Bash syntax,
+  contract JSON parse, and `git diff --check` pass.
+- No remote GCS read or mutation, TPU/Kubernetes launch, model execution,
+  backward, optimizer commit, Git commit, or push occurred. The next gate is
+  user review and explicit commit/push approval, followed by exactly one
+  zero-TPU remote invocation from the approved full SHA.

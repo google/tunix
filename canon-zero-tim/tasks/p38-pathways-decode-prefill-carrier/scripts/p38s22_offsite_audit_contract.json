@@ -1,0 +1,50 @@
+{
+  "schema": "p38s22-offsite-audit-contract-v1",
+  "source_gcs_uri": "gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-p38-fl-stock-p38s22-ee0154b3/attempt-0",
+  "expected_source_commit": "ee0154b38ab81b2b4ee3eac35c65ed380aa744f6",
+  "expected_jobset": "canon-p38-fl-stock-p38s22-ee0154b3",
+  "expected_attempt": "0",
+  "expected_root_manifest_sha256": "48e65b0e7a6a0aa24aa1628ff6d080e24590c2f71e973e9daeb45ee1eec9090e",
+  "expected_mm_algo_preset": "BF16_BF16_F32",
+  "expected_rounds": [
+    {
+      "diagnostic_round": 0,
+      "n_action": 45865,
+      "a_b_differing_elements": 48,
+      "a_b_differing_bytes": 82,
+      "a_b_max_abs": 0.2631568908691406,
+      "b_c_differing_elements": 0,
+      "b_c_differing_bytes": 0,
+      "capsule_sha256": "071e3469a2747a960feb8997de6ee01056b8e451d86ca7ae78309923092eb835"
+    },
+    {
+      "diagnostic_round": 1,
+      "n_action": 43982,
+      "a_b_differing_elements": 10,
+      "a_b_differing_bytes": 14,
+      "a_b_max_abs": 0.016010284423828125,
+      "b_c_differing_elements": 0,
+      "b_c_differing_bytes": 0,
+      "capsule_sha256": "7f878712fe8e11f8ebb054ec21996318a2d87ba09d43ba9c15831b8ab7db5965"
+    },
+    {
+      "diagnostic_round": 2,
+      "n_action": 53617,
+      "a_b_differing_elements": 8,
+      "a_b_differing_bytes": 15,
+      "a_b_max_abs": 0.28922271728515625,
+      "b_c_differing_elements": 0,
+      "b_c_differing_bytes": 0,
+      "capsule_sha256": "2e9a8765997920b8e134dd6d098ebe55faf2114851d89dc9adf25852446df135"
+    }
+  ],
+  "required_round_members": [
+    "ROUND_INVENTORY.json",
+    "incident-ledger.jsonl",
+    "mismatch-capsule.npz",
+    "pre-alignment.jsonl",
+    "request-journal.jsonl",
+    "run.log"
+  ],
+  "forbid_terminal_observer": true
+}

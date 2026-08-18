@@ -5,23 +5,46 @@ parallel Qwen3-32B DeepSWE workstream, read
 `../p39-deepswe-production/HANDOFF.md`. P38 evidence cannot promote P39, and
 P39 evidence cannot promote P38.
 
-## CURRENT: P38.2x dedicated fixed-tile Pallas lm_head
+## CURRENT: P38.2w1 offsite evidence audit, then P38.2x fixed-tile lm_head
 
 P38s22/source `ee0154b38ab81b2b4ee3eac35c65ed380aa744f6` ran on 64 TPU
 (`DP16xTP4`, concurrency 256, `--lm-head-algo`, DotAlgorithmPreset `BF16_BF16_F32`).
 It completed all 3 diagnostic rounds and exited with controlled code 42
 (0 backward, 0 optimizer commits).
 
+The endpoint result is analysis-grade and already answers the discriminator,
+but the latest returned durability receipts are not yet admissible. Each
+claimed round-archive SHA equals the corresponding capsule SHA, the prose
+receipt copied two P38s21 action counts, and the returned 66-point terminal
+classification has no raw terminal input even though this arm disabled that
+observer. Do not relaunch P38s22 and do not hand-repair those files.
+
+The immediate next action is zero-TPU and operator-only. From the exact
+user-approved SHA, follow `P38S22_OFFSITE_AUDIT_RUNBOOK.md`. Its one command
+reads the immutable GCS source, verifies every root and round object, recomputes
+the endpoint decision, and produces only
+`evidence/p38s22/offsite-audit-v1/`. The remote agent returns that entire
+directory and stops before commit/push. It performs no analysis.
+
 ### Admitted P38s22 facts
 
 1. B-C is 100% bitwise exact (0 differing bytes, max_abs=0.0) in all 3 completed rounds.
-2. A-B remains sparse red (15 differing bytes / 8 differing tokens across 53,617 actions in Round 2, max_abs=0.289223).
+2. A-B remains sparse red in all three rounds:
+   - Round 0: 48 elements / 82 bytes across 45,865 actions; max_abs 0.263157;
+   - Round 1: 10 elements / 14 bytes across 43,982 actions; max_abs 0.0160103;
+   - Round 2: 8 elements / 15 bytes across 53,617 actions; max_abs 0.289223.
 3. The `BF16_BF16_F32` dot algorithm preset does not close the A-B decode vs prefill carrier.
 4. Per the decision table, `CANON_MM_ALGO` is rejected as a causal repair. Do not tune more generic precision flags.
-5. The next step is a dedicated fixed-tile Pallas `lm_head` kernel.
+5. After the offsite durability audit passes, the next scientific step is a
+   dedicated fixed-tile Pallas `lm_head` kernel.
 
 Receipt:
 `artifacts/p38s22_analysis_0818.md`.
+
+Do not cite `evidence/p38s22/p38_terminal.classification.json` as P38s22
+evidence unless a future mechanical receipt returns the missing raw terminal
+inputs and provenance. Under the current no-observer contract it is
+unadmitted; P38s21 remains the admitted lm-head interval localization.
 
 ## HISTORY: P38s21 partial 2-of-3 diagnostic
 

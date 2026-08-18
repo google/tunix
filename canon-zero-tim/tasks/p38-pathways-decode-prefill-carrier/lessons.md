@@ -65,3 +65,14 @@ tiling, fusion, cast, or collective that caused it. Preserve the classifier's
 actual claim ceiling and use a single-variable causal arm before naming a root
 cause. Also name matrix axes correctly: an lm-head `TD,DV->TV` dot reduces
 hidden K, while vocabulary is an output axis.
+
+## 2026-08-18 — A sealed returned manifest does not authenticate its source receipt
+
+An 18-file Git bundle passed its own `SHA256SUMS`, yet three reported tar
+digests were copied from the capsule NPZs and therefore could not have been
+produced by the registered deterministic-tar transport. A self-manifest proves
+only that returned bytes are unchanged. Source durability requires reading the
+immutable completion marker, manifest, and archive together, verifying the
+archive structure, and deriving the compact receipt mechanically beside the
+source. Remote operators run that audited command; they do not transcribe
+hashes or scientific numbers.

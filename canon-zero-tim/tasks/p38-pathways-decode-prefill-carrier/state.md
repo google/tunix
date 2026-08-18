@@ -6,22 +6,25 @@
 - Definition of done: one source-pinned flag-on run reports exact
   `S_decode_vs_S_prefill`, exact `S_prefill_vs_T_old`, and exact
   `T_old_vs_T_current` before a strict full workload is admitted.
-- Active phase: P38.2w lm-head program discriminator. P38s21 sealed two of
-  three requested diagnostic rounds, then Round 2 exceeded the 4-GiB local
-  terminal-evidence bound. The committed 12-file bundle verifies and joins
-  54/54 red points. For those selected points, complete final-hidden rows are
-  byte-exact and the first measured red interval is `lm_head_logits`; B-C is
-  exact in both completed rounds. The run is
-  `ANALYSIS_GRADE_PARTIAL_2_OF_3`, not complete. P38.2w screens the real
-  Qwen3-8B lm_head weight at current local M=16/M=256 on one v5p host and then
-  admits one slim, stock-only `BF16_BF16_F32` target discriminator. It does
-  not recapture the multi-gigabyte terminal corpus or change production
-  defaults. The real-weight one-host screen is complete: default and preset
-  are each M16/M256 exact for 4/4 seeds and numerically equal to one another,
-  while their StableHLO dot attributes differ and the one-bit negative reports
-  one. Verdict: `BOTH_EXACT_OPERATOR_SCREEN_INCONCLUSIVE`. See
-  `phases/p38-2w-lm-head-program-discriminator.md` and
-  `artifacts/p38_2w_lm_head_onehost_0818.md`.
+- Active phase: P38.2w1 P38s22 offsite evidence audit. P38s22/source
+  `ee0154b38ab81b2b4ee3eac35c65ed380aa744f6` completed three frozen 64-TPU
+  rounds with exact B-C and A-B red in every round: 66 elements / 111 bytes
+  across 143,464 actions. The `BF16_BF16_F32` algorithm preset is rejected as
+  a causal repair at analysis grade. The latest returned durability bundle is
+  not signed: each claimed tar SHA equals its capsule SHA, the prose receipt
+  copied two P38s21 action counts, and the returned 66-point terminal
+  classification has no raw terminal input even though P38s22 disabled that
+  observer. P38.2w1 adds one read-only, contract-driven GCS audit that returns
+  a small sealed receipt; the remote agent only runs it. No TPU relaunch is
+  allowed. The local wrapper/auditor contract and seven offsite scenarios plus
+  the four deterministic-archive tests pass 11/11; all 85 runnable tests in
+  the broader P38 discovery pass. The renderer module is `TARGET NOT RUN` in
+  this interpreter because optional dependency `metrax` is absent; no renderer
+  code changed. Remote execution remains
+  `TARGET NOT RUN`. After a PASS receipt, move to P38.2x dedicated fixed-tile
+  Pallas lm-head. See
+  `phases/p38-2w1-p38s22-offsite-evidence-audit.md` and
+  `P38S22_OFFSITE_AUDIT_RUNBOOK.md`.
 - Task directory:
   `canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/`.
 - P38s20/source `bea31f36655b137d7ab47ba94095cadda5b586ba` execution

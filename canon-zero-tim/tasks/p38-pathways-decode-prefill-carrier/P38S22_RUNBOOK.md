@@ -1,4 +1,8 @@
-# P38s22 lm-head algorithm discriminator runbook
+# P38s22 lm-head algorithm discriminator runbook (historical; do not relaunch)
+
+P38s22 has run. The current operator card is
+`P38S22_OFFSITE_AUDIT_RUNBOOK.md`, which performs a zero-TPU read-only audit of
+the immutable source. Do not execute the launch instructions below again.
 
 This is a 64-TPU (`DP16xTP4`) FrozenLake diagnostic. It is not a full training
 run and it is not P38s21 terminal recapture. Read

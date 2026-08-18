@@ -2,11 +2,11 @@
 
 > 看板类文档,行级写权:线程执行者更新**自己线程的行**(及自己 run 的 EVIDENCE 行);
 > 评估者拥有板面结构、跨线仲裁与措辞降格权。只写"现在",历史看各线程 log.md。
-> 更新:2026-08-18 @ 4b2fda0c base + local P38.2w lm-head discriminator;perf 行 2026-08-18(P51/P52 收官 + xprof 载具)
+> 更新:2026-08-18 @ 82cd2bd0 base + local P38.2w1 offsite audit;perf 行 2026-08-18(P51/P52 收官 + xprof 载具)
 
 | # | 线程 | 状态 | 下一个门 | 等谁 | 任务目录 |
 |---|---|---|---|---|---|
-| 1 | **zero-tim-carrier** | P38s21 按 2/3 轮 analysis-grade 入账；两轮 B-C=0，A-B 共 54 红点全部 join，所选点完整 final-hidden bytes 相等，首个实测红区间为 lm_head logits。P38.2w one-host 已完成：真实 8B weight、TP4、M16/M256 下 default/preset 都 4/4 exact 且互相 exact；lowering 干预存在，negative=1，判 `BOTH_EXACT_OPERATOR_SCREEN_INCONCLUSIVE` | **评审未提交 diff；若获逐次批准则发布并只跑一发 slim P38s22 `--lm-head-algo`。target 仍红即否决旧 preset，转专用 fixed-tile Pallas lm_head** | 等用户逐次批准 commit/push/target | tasks/p38-pathways-decode-prefill-carrier |
+| 1 | **zero-tim-carrier** | P38s22 三轮数值完成：A-B 每轮红，合计 66 elements / 111 bytes / 143,464 actions；B-C 三轮 exact，故 `BF16_BF16_F32` preset 按分析级证据被否决。最新回传 receipt 有 tar-SHA=NPZ-SHA、旧 action count、无原始输入 terminal classification 三个缺口，尚非 signed durability | **P38.2w1：发布一键只读 offsite audit，让远端 agent 只运行并回传小型 SHA bundle；PASS 后转 P38.2x 专用 fixed-tile Pallas lm_head，一宿主后才发 P38s23** | 等用户审阅本地 CL，再逐次批准 commit/push；随后远端零 TPU 执行 | tasks/p38-pathways-decode-prefill-carrier |
 | 2 | **perf** | 一宿主两战线收官:FL 199s 线 + GSM8K 真几何线(94.3→81.8s,-13.3%,P52);xprof/perfetto 载具入仓且 device plane 已解(python_tracer=0);flags+载具已 push | **DP16 一发**(读 p32_vag_reverse 的 adjoint= 验 E;给 P52 grouped 移植定量) | 等卡 + 用户渲染 | tasks/p48-onehost-perf(分支 state.md)+ 外层 p48-p52 |
 | 3 | **frozenlake-train** | p45r8（DP8xTP8 resident 路径，无评测模式 `--eval_every_n_steps=0`，`fl-prod-noeval-001`）已成功在 64 TPU 上线运行，JIT 编译通过，Step 0 反向传播（40ms/microstep）与 DP8 规约正常进行中 | **持续推进 Step 1~450 迭代，Step 10 自动持久化新 GCS 检查点** | 训练中 | tasks/p45-frozenlake-dp8-tp8-resident |
 | 4 | **deepswe-eval** | p46e12808 修复了 Kueue 工作负载冲突注解与 cpu-np 节点池亲和性，Kueue 准入通过（`Admitted: True`），绑定 `--resume-tag p46e12806` 严格从 Wave 27 续跑（复用 6460+ 轨迹） | **等待集群 128 TPU 拓扑释放后自动调度点火** | 排队中 | tasks/p46-deepswe-eval-training-profiles |
