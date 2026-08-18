@@ -176,26 +176,6 @@ def _calculate_global_batch_size(train_example: Any) -> int:
   )
 
 
-def _zeros_like_sharded(x, sharding, dtype=None):
-  """`jnp.zeros_like`, but pinned to `sharding` when one is known.
-
-  `jnp.zeros_like` carries over shape and dtype only. The result lowers to a
-  broadcast of a scalar constant, whose layout XLA is free to choose, and it
-  reliably chooses fully replicated. That is wrong twice over for a gradient
-  buffer: on a `tp`-sharded mesh a replicated tensor occupies a whole device
-  instead of a slice, and a buffer whose sharding changes across an executable
-  boundary changes the input signature of the next executable, forcing a
-  recompile.
-
-  Works both eagerly and under trace: outside `jit`,
-  `jax.lax.with_sharding_constraint` performs the placement directly.
-  """
-  zeros = jnp.zeros_like(x, dtype=dtype)
-  if sharding is None:
-    return zeros
-  return jax.lax.with_sharding_constraint(zeros, sharding)
-
-
 class GradientAccumulator(nnx.Module):
   """Accumulates gradients over multiple micro-steps.
 
@@ -277,44 +257,14 @@ class GradientAccumulator(nnx.Module):
             is_leaf=lambda x: isinstance(x, nnx.Variable),
         )
     )
-    # Captured so that every buffer this class creates can be pinned to the
-    # parameter's sharding. `jnp.zeros_like` copies shape and dtype but *not*
-    # sharding, so an unconstrained zero tree lowers to a broadcast of a scalar
-    # constant and XLA is free to pick its layout -- in practice fully
-    # replicated. Inside `reset()` that turns the accumulator replicated on the
-    # way out of the update executable, which both costs HBM (a `P('tp')` tensor
-    # is half a device, `P()` is a whole one) and changes the input sharding of
-    # the next forward/backward step, forcing a recompile. v1 never hits this
-    # because its reset runs inside the same program, so the accumulator never
-    # crosses a boundary where XLA gets to choose.
-    self._grad_shardings = nnx.data(
-        jax.tree_util.tree_map(
-            lambda x: getattr(
-                getattr(x, "value", x), "sharding", None
-            ),
-            state,
-            is_leaf=lambda x: isinstance(x, nnx.Variable),
-        )
-    )
     self.persistent = allocate_grads
     if allocate_grads:
-      # `is_leaf` stops the traversal at the `nnx.Variable` rather than at the
-      # array inside it -- necessary to line this tree up with
-      # `_grad_shardings`, which has one entry per Variable -- so the Variable
-      # wrapper has to be rebuilt by hand, the same way `get()` does it. Without
-      # the rebuild `self.grads` becomes a tree of bare arrays and `add()` fails
-      # with "DynamicJaxprTracer has no attribute set_value".
-      def _alloc(x, sharding):
-        raw = x[...] if isinstance(x, nnx.Variable) else x
-        zeros = _zeros_like_sharded(raw, sharding, dtype=accumulator_dtype)
-        return type(x)(zeros) if isinstance(x, nnx.Variable) else zeros
-
+      # Called eagerly on committed arrays, `jnp.zeros_like` carries the
+      # parameter's sharding over to the buffer, so no constraint is needed
+      # here. (Inside `jit` it does not -- see `reset`.)
       self.grads = nnx.data(
           jax.tree_util.tree_map(
-              _alloc,
-              state,
-              self._grad_shardings,
-              is_leaf=lambda x: isinstance(x, nnx.Variable),
+              lambda x: jnp.zeros_like(x, dtype=accumulator_dtype), state
           )
       )
     else:
@@ -324,7 +274,6 @@ class GradientAccumulator(nnx.Module):
       # tree (~3.5 GiB per device for gemma4-e2b at 12 layers in fp32).
       self.grads = nnx.data({})
       self._param_dtypes = nnx.data({})
-      self._grad_shardings = nnx.data({})
     self.denom = nnx.Variable(jnp.zeros((), dtype=jnp.float32))
 
   def add(self, grads: Any, denom: jax.Array | None = None):
@@ -398,14 +347,33 @@ class GradientAccumulator(nnx.Module):
     gradients.
     """
     if self.persistent:
-      def _zero_in_place(v, sharding):
-        # Pinned to the parameter's sharding; an unconstrained zero tree comes
-        # back replicated. See `_grad_shardings`.
-        v.set_value(_zeros_like_sharded(v[...], sharding))
+      def _zero_in_place(v):
+        # `x * 0` rather than `jnp.zeros_like(x)`, to preserve the buffer's
+        # sharding. Inside `jit`, `zeros_like` lowers to a broadcast of a scalar
+        # constant: it keeps shape and dtype but carries no sharding, so XLA
+        # picks one and picks fully replicated. The accumulator then leaves the
+        # update executable replicated, which costs HBM (a `P('tp')` tensor is
+        # half a device, `P()` is a whole one) and changes the input signature
+        # of the next forward/backward step, forcing a recompile. v1 never sees
+        # this because its reset runs in the same program as the rest of the
+        # step, so the buffer never crosses a boundary where XLA gets to choose.
+        #
+        # Multiplication is elementwise, so the result's sharding is inferred
+        # from `x` and reset becomes sharding-*preserving*. That matters:
+        # gradients do not in general share their parameter's sharding (a
+        # [1536,256] parameter split on dim 0 has a gradient that the backward
+        # pass naturally splits on dim 1), so imposing the parameter shardings
+        # here would fight `add()` and reintroduce the recompile it was meant to
+        # remove.
+        #
+        # The cost is one extra read of the tree, and `0 * nan` is `nan` rather
+        # than 0. The latter is not a new failure mode: a non-finite accumulator
+        # means `optimizer.update` already wrote non-finite parameters in the
+        # same step.
+        v.set_value(v[...] * 0)
       jax.tree_util.tree_map(
           _zero_in_place,
           self.grads,
-          self._grad_shardings,
           is_leaf=lambda x: isinstance(x, nnx.Variable),
       )
     else:
