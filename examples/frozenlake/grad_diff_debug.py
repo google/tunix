@@ -83,7 +83,7 @@ def _make_dataset(
 
 dataset = _make_dataset(
     peft_trainer.TrainingInput,
-    num_steps=10,
+    num_steps=200,
     batch_size=_BATCH_SIZE,
     seq_len=_SEQ_LEN,
     )
@@ -636,8 +636,8 @@ def attribute_weight_gap(w_a, w_b, g_a, g_b, lr, denom=None):
 #                divergence from earlier steps.
 _MODE = "weights"
 _ACCUM_STEPS = 8
-_MAX_STEPS = 1
-_N_BATCHES = _ACCUM_STEPS - 1 if _MODE == "grads" else _ACCUM_STEPS
+_MAX_STEPS = 5
+_N_BATCHES = _ACCUM_STEPS - 1 if _MODE == "grads" else _ACCUM_STEPS * _MAX_STEPS
 _run_dataset = dataset[:_N_BATCHES]
 assert len(_run_dataset) == _N_BATCHES, (
     f"need at least {_N_BATCHES} batches, dataset has {len(dataset)}"
@@ -674,7 +674,7 @@ with mesh:
       learning_rate=optax.constant_schedule(_LEARNING_RATE)
   )
   config_v1 = peft_trainer.TrainingConfig(
-      eval_every_n_steps=2,
+      eval_every_n_steps=20000,
       max_steps=_MAX_STEPS,
       gradient_accumulation_steps=_ACCUM_STEPS,
   )
@@ -730,7 +730,7 @@ with mesh:
       learning_rate=optax.constant_schedule(_LEARNING_RATE)
   )
   config_v2 = peft_trainer_v2.TrainingConfig(
-      eval_every_n_steps=2,
+      eval_every_n_steps=20000,
       max_steps=_MAX_STEPS,
       gradient_accumulation_steps=_ACCUM_STEPS,
   )
@@ -741,7 +741,7 @@ with mesh:
   # single-executable step -- the configuration whose HBM profile we want. To
   # exercise the split path instead, call fwd_bwd(dataset[0]) then update().
   with jax.profiler.trace(log_dir="gs://linchai-bucket-dev/xprof/grad_diff"):
-    trainer_v2.train(_run_dataset, skip_jit=False, cache_nnx_graph=False)
+    trainer_v2.train(_run_dataset, skip_jit=False)
     jax.effects_barrier()
 
   # Populated only at gradient_accumulation_steps > 1; see the note above the
