@@ -298,11 +298,20 @@ class GradientAccumulator(nnx.Module):
     )
     self.persistent = allocate_grads
     if allocate_grads:
+      # `is_leaf` stops the traversal at the `nnx.Variable` rather than at the
+      # array inside it -- necessary to line this tree up with
+      # `_grad_shardings`, which has one entry per Variable -- so the Variable
+      # wrapper has to be rebuilt by hand, the same way `get()` does it. Without
+      # the rebuild `self.grads` becomes a tree of bare arrays and `add()` fails
+      # with "DynamicJaxprTracer has no attribute set_value".
+      def _alloc(x, sharding):
+        raw = x[...] if isinstance(x, nnx.Variable) else x
+        zeros = _zeros_like_sharded(raw, sharding, dtype=accumulator_dtype)
+        return type(x)(zeros) if isinstance(x, nnx.Variable) else zeros
+
       self.grads = nnx.data(
           jax.tree_util.tree_map(
-              lambda x, s: _zeros_like_sharded(
-                  x, s, dtype=accumulator_dtype
-              ),
+              _alloc,
               state,
               self._grad_shardings,
               is_leaf=lambda x: isinstance(x, nnx.Variable),
