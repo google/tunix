@@ -1,5 +1,9 @@
 # P51 一宿主 GSM8K xprof/perfetto 画像 Runbook(2026-08-18)
 
+> perf 线程(THREADS #2)载具文档。状态看 `state.md`,开关语义看 `../../FLAGS.md`,
+> 产出证据登记在 `../../EVIDENCE.md` 的 run index。Rule zero(`../../AGENTS.md`)照旧:
+> 失败 run 目录一律保留,基建失败记 INCONCLUSIVE,不删不改。
+
 一条命令,在授权 v5p-8(`t1v-n-4a77ebd0-w-0`)上跑真几何 GSM8K 训练若干步,
 捕获其中的 warm step,产出 XProf xplane + perfetto 双产物(含 device 轨)。
 

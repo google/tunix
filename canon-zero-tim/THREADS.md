@@ -2,12 +2,12 @@
 
 > 看板类文档,行级写权:线程执行者更新**自己线程的行**(及自己 run 的 EVIDENCE 行);
 > 评估者拥有板面结构、跨线仲裁与措辞降格权。只写"现在",历史看各线程 log.md。
-> 更新:2026-08-17 @ 0eb7049e base + local P38.2t target-aware amendment
+> 更新:2026-08-17 @ 0eb7049e base + local P38.2t target-aware amendment;perf 行 2026-08-18(P51/P52 收官 + xprof 载具)
 
 | # | 线程 | 状态 | 下一个门 | 等谁 | 任务目录 |
 |---|---|---|---|---|---|
 | 1 | **zero-tim-carrier** | P38s18r2 v2 bundle 的 371 SHA 与独立 audit 全绿；唯一 tail 冲突实为同 prefix 下 target 54852（capsule 所需）与 13598 混入。P38.2t target-aware reducer/auditor/v3 contract 本地 19/19；现有 compact candidates 32/32 join 指向 26 normalizer + 6 raw-target-logit 首红。一宿主 same-input canonical log-softmax 0/38,895,616，负控 1。P38.2t 发布已获用户批准 | **GCS 端只运行 target-aware v3 wrapper。若正式复证 terminal split，再造 lm_head/full-logits/max/exp-sum 判别器；不重跑当前 TPU 诊断** | 等 GCS agent 零 TPU 执行并返回 v3 compact bundle | tasks/p38-pathways-decode-prefill-carrier |
-| 2 | **perf** | 一宿主收官(warm 199s);flags 已 push(20a67129);2.6× 解码税=契约价 | **DP16 一发**(E 窗验证+税率表+裁 jit 整并) | 等卡 + 用户渲染 | tasks/p48-onehost-perf(分支)+ 外层 p48-p52 |
+| 2 | **perf** | 一宿主两战线收官:FL 199s 线 + GSM8K 真几何线(94.3→81.8s,-13.3%,P52);xprof/perfetto 载具入仓且 device plane 已解(python_tracer=0);flags+载具已 push | **DP16 一发**(读 p32_vag_reverse 的 adjoint= 验 E;给 P52 grouped 移植定量) | 等卡 + 用户渲染 | tasks/p48-onehost-perf(分支 state.md)+ 外层 p48-p52 |
 | 3 | **frozenlake-train** | p45r8（DP8xTP8 resident 路径，无评测模式 `--eval_every_n_steps=0`，`fl-prod-noeval-001`）已成功在 64 TPU 上线运行，JIT 编译通过，Step 0 反向传播（40ms/microstep）与 DP8 规约正常进行中 | **持续推进 Step 1~450 迭代，Step 10 自动持久化新 GCS 检查点** | 训练中 | tasks/p45-frozenlake-dp8-tp8-resident |
 | 4 | **deepswe-eval** | p46e12808 修复了 Kueue 工作负载冲突注解与 cpu-np 节点池亲和性，Kueue 准入通过（`Admitted: True`），绑定 `--resume-tag p46e12806` 严格从 Wave 27 续跑（复用 6460+ 轨迹） | **等待集群 128 TPU 拓扑释放后自动调度点火** | 排队中 | tasks/p46-deepswe-eval-training-profiles |
 | 5 | **deepswe-train** | 依赖 #4 干净数据;Q4 parity 任务在册(p44) | Q4 3-step debug 配置定稿 | 排 #2#3 绿后 | tasks/p44-deepswe-qwen4b-parity |

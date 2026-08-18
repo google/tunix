@@ -91,6 +91,10 @@ p38s12f / p38s15 / p38s16.
 | Aborted-launch stub | p38s14 | `…/evidence/p38s14/` (INCONCLUSIVE, head log only) |
 | One-host perf ledger (8-run bitwise hash chain, decode-tax ablation) | p48/p49 T0–T5, F0–F12 | outer repo `tasks/p48*`, `tasks/p49*`; worktree `local/p48-profiling` |
 | Cross-arm A identity for prompt_logprobs=None | P47a | landed CL 10242fa1 lineage; evidence dirs `p41_optimizer_p48c_p47a_*` on probe host |
+| One-host GSM8K dispatch fabric (Execute 228k/step, add 105k, layer jits only 6.7s) | p51r6 | probe host `p51_gsm8k_xprof_p51r6_20260815/` (host-only capture; superseded for device planes) |
+| Same capture with device planes (8 planes, ~23M device events; python_tracer=0) | p51rx | probe host `p51_gsm8k_xprof_p51rx_devplane_20260818/` |
+| P52 reverse-scaffold consolidation on GSM8K one host | p52ab_{off,on} | probe host `p51_gsm8k_xprof_p52ab_{off,on}_20260815/` — warm 94.34±6.9 → 81.80±5.6s, issue 22.6→12.4s, 102/102 ALIGN zero |
+| P52 byte gates | p52rv + pair | `…p52rv_20260815/` (verify, 0 mismatch) + `p41_optimizer_p52_neutral_20260815/` (103/103 fingerprints identical to the certified pair) |
 | Direct-TPU checkpoint mechanics: sharded model, device-resident Adam and metadata restore exactly; interval 10 and `LatestN(1)` enforced | P45.3c one-host | `tasks/p45-frozenlake-dp8-tp8-resident/evidence/p45_onehost_checkpoint_v5p.txt` (`sha256:1a84774925f311674c8eb9693889e5e6a9898d5473c529452561add168c6e1e0`; mechanism-only, Pathways/GCS target not run) |
 | Same-input canonical log-softmax across two outer TPU programs is exact at production tail shape; injected bit flip is observed | P38.2t one-host | `tasks/p38-pathways-decode-prefill-carrier/artifacts/p38_2t_onehost_tail_construction_0817.md` (`0/38,895,616` elements; negative `1`; construction-only, not 64-chip Pathways evidence) |
 
