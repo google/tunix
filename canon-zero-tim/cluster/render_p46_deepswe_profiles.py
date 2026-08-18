@@ -75,7 +75,10 @@ def _configure_topology(
   worker["parallelism"] = spec["workers"]
   worker_pod = worker["template"]["spec"]
   worker_pod["restartPolicy"] = "Never"
-  worker_pod["nodeSelector"]["cloud.google.com/gke-nodepool"] = worker_nodepool
+  if worker_nodepool and worker_nodepool not in ("auto", "none", "tpu-v5p-slice", "any"):
+    worker_pod["nodeSelector"]["cloud.google.com/gke-nodepool"] = worker_nodepool
+  else:
+    worker_pod["nodeSelector"].pop("cloud.google.com/gke-nodepool", None)
   worker_pod["nodeSelector"]["cloud.google.com/gke-tpu-topology"] = spec[
       "instance"
   ]
