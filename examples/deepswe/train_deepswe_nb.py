@@ -390,7 +390,7 @@ from examples.deepswe import swe_env
 from examples.deepswe import mllog_utils
 
 if args.rcp_logging:
-  mllog_utils.init_start()
+  mllog_utils.init_start(args)
 
 # %%
 # ==========================================

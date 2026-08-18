@@ -14,6 +14,7 @@
 
 """MLPerf RCP Logging Utilities for Post-Training (GRPO)."""
 
+import logging
 import os
 from typing import Any, Mapping, Optional
 import jax
@@ -26,6 +27,37 @@ except ImportError:
   mllog = None
   constants = None
   mllogger = None
+
+
+def configure_logger(
+    metric_logger_dir: Optional[str] = None,
+    seed: Optional[int] = None,
+    filename: Optional[str] = None,
+):
+  """Configures mllog output file if metric_logger_dir or filename is provided."""
+  if not (_is_master_process() and mllog is not None and mllogger is not None):
+    return
+
+  if filename is None and metric_logger_dir is not None:
+    if metric_logger_dir.endswith(".out") or metric_logger_dir.endswith(".log"):
+      filename = metric_logger_dir
+    else:
+      seed_val = seed if seed is not None else 1
+      filename = os.path.join(metric_logger_dir, f"seed_{seed_val}.out")
+
+  if filename is not None:
+    abs_filename = os.path.abspath(filename)
+    os.makedirs(os.path.dirname(abs_filename), exist_ok=True)
+    existing_files = [
+        os.path.abspath(getattr(h, "baseFilename", ""))
+        for h in getattr(mllogger.logger, "handlers", [])
+        if isinstance(h, logging.FileHandler)
+    ]
+    if abs_filename not in existing_files:
+      try:
+        mllog.config(filename=filename)
+      except TypeError:
+        mllog.config(filename=filename, root_dir=os.getcwd())
 
 
 def _is_master_process() -> bool:
@@ -57,9 +89,23 @@ def _log_end(key: str, metadata: Optional[dict[str, Any]] = None):
     mllogger.end(key=key, metadata=metadata or {})
 
 
-def init_start():
+def init_start(
+    args: Any = None,
+    metric_logger_dir: Optional[str] = None,
+    seed: Optional[int] = None,
+    filename: Optional[str] = None,
+):
   """Logs CACHE_CLEAR and marks the beginning of the initialization phase."""
   if _is_master_process() and mllogger is not None:
+    if args is not None:
+      if metric_logger_dir is None:
+        metric_logger_dir = getattr(args, "metric_logger_dir", None)
+      if seed is None:
+        seed = getattr(args, "seed", 1)
+    if metric_logger_dir is not None or filename is not None:
+      configure_logger(
+          metric_logger_dir=metric_logger_dir, seed=seed, filename=filename
+      )
     cache_clear_key = getattr(constants, "CACHE_CLEAR", "cache_clear")
     init_start_key = getattr(constants, "INIT_START", "init_start")
     mllogger.event(key=cache_clear_key, value=True)
@@ -288,6 +334,12 @@ def init_print(
   """Logs initial MLPerf submission metadata and hyperparameters for compliance."""
   if not (_is_master_process() and mllogger is not None):
     return
+
+  if getattr(args, "metric_logger_dir", None) is not None:
+    configure_logger(
+        metric_logger_dir=args.metric_logger_dir,
+        seed=getattr(args, "seed", 1),
+    )
 
   # Extract batch & step configs
   batch_size = getattr(args, "batch_size", 8)
