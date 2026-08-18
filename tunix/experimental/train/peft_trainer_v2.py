@@ -783,7 +783,9 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     if skip_jit:
       self._jitted_train_step_fn = None
       return (
-          functools.partial(fwd_bwd_step, self.model, self.grad_accumulator),
+          # Bind only `model`, matching the jitted path so that callers pass
+          # `grad_accumulator` the same way with and without `skip_jit`.
+          functools.partial(fwd_bwd_step, self.model),
           functools.partial(
               update_step, self.model, self.optimizer, self.grad_accumulator
           ),
@@ -812,8 +814,22 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
         else:
           return functools.partial(f, *args)
 
+      # Bind `model` so `cache_nnx_graph` actually covers the step that runs
+      # most often. Passing it as a call-time argument instead -- which is what
+      # an empty bind list amounts to -- makes `nnx.jit` re-split the whole
+      # module graph on the host on every micro-step, and that host time lands
+      # between the optimizer update and the next forward/backward dispatch.
+      #
+      # `grad_accumulator` is deliberately left unbound: at depth 1 `add()`
+      # adopts the incoming gradient tree and `reset()` drops it, so the
+      # accumulator's pytree structure differs between entry and exit and
+      # `nnx.cached_partial`'s frozen graphdef would silently discard the
+      # gradients on the way out ("Mismatch custom node data: ('embedder', ...)
+      # != (); value: State({})"). `model` has no such problem -- the update
+      # step only ever writes its parameters in place.
       self._jitted_fwd_bwd_step_fn = maybe_cache_and_partial(
           self._jitted_fwd_bwd_step_fn,
+          self.model,
       )
       self._jitted_update_step_fn = maybe_cache_and_partial(
           self._jitted_update_step_fn,
@@ -1066,7 +1082,14 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
   def fwd_bwd(self, payload: datatypes.TrainerPayload | Any, **kwargs) -> None:
     """Executes forward and backward passes."""
     fwd_bwd_step, _, _ = self.jit_fwd_bwd_update_and_eval_step()
-    self._record_fwd_bwd(*fwd_bwd_step(inputs=self._prepare_payload(payload), model=self.model, grad_accumulator=self.grad_accumulator))
+    # `model` is bound into the cached graph; only the accumulator and the data
+    # are passed per call. See `jit_fwd_bwd_update_and_eval_step`.
+    self._record_fwd_bwd(
+        *fwd_bwd_step(
+            grad_accumulator=self.grad_accumulator,
+            inputs=self._prepare_payload(payload),
+        )
+    )
 
   @override
   def update(self, **kwargs) -> int:
