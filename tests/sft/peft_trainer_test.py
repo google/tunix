@@ -47,6 +47,7 @@ os.environ['XLA_FLAGS'] = '--xla_force_host_platform_device_count=4'
 # Set Precision to highest for numeric stability across different hardware.
 jax.config.update('jax_default_matmul_precision', 'highest')
 
+
 def create_sharded_model(model_ctor, rngs, mesh):
   @nnx.jit(static_argnums=(0,))
   def _create_sharded_model(model_ctor, rngs):
@@ -140,6 +141,7 @@ class PeftTrainerTest(parameterized.TestCase):
     Guards the moment-dtype change (bf16 by default on the cond path) against
     re-tracing: the cond path must still compile just once.
     """
+
     class CountCompiledTimesTrainer(peft_trainer.PeftTrainer):
 
       def _train_step(
@@ -913,7 +915,11 @@ class PeftTrainerTest(parameterized.TestCase):
 
     def make_reduced_loss_fn(denominator):
       def reduced_loss_fn(
-          model, input_tokens, input_mask, positions, attention_mask,
+          model,
+          input_tokens,
+          input_mask,
+          positions,
+          attention_mask,
           images=None,
       ):
         del input_mask, attention_mask, images
@@ -2009,9 +2015,7 @@ class OptimizerMemoryTest(parameterized.TestCase):
         eval_every_n_steps=100, max_steps=1
     )  # gradient_accumulation_steps=None -> depth 1
     trainer = peft_trainer.PeftTrainer(model, optax.sgd(1e-3), config)
-    self.assertEmpty(
-        jax.tree_util.tree_leaves(trainer.grad_accumulator.grads)
-    )
+    self.assertEmpty(jax.tree_util.tree_leaves(trainer.grad_accumulator.grads))
 
   @parameterized.named_parameters(
       ('depth2', 2, None),
@@ -2092,6 +2096,130 @@ class TrainStepGlobalWeightedTest(parameterized.TestCase):
         initializer=jnp.asarray(0.0),
     )
     self.assertGreater(float(max_diff), 1e-3)
+
+
+class AlignOptStateDtypesTest(parameterized.TestCase):
+
+  def test_align_opt_state_dtypes_casts_variables(self):
+    rngs = nnx.Rngs(0)
+    model = nnx.Linear(
+        in_features=4, out_features=2, rngs=rngs, param_dtype=jnp.bfloat16
+    )
+
+    def custom_tx():
+      def init_fn(params):
+        return jax.tree.map(
+            lambda p: jnp.zeros_like(p, dtype=jnp.float32), params
+        )
+
+      def update_fn(updates, state, params=None):
+        del params
+        new_state = jax.tree.map(
+            lambda s, u: s.astype(u.dtype) + u, state, updates
+        )
+        return updates, new_state
+
+      return optax.GradientTransformation(init_fn, update_fn)
+
+    config = peft_trainer.TrainingConfig(eval_every_n_steps=100, max_steps=1)
+    trainer = peft_trainer.PeftTrainer(model, custom_tx(), config)
+
+    opt_state_leaves = jax.tree_util.tree_leaves(
+        jax.tree_util.tree_map(
+            lambda v: v[...].dtype
+            if isinstance(v, nnx.Variable)
+            else getattr(v, 'dtype', None),
+            nnx.state(trainer.optimizer, nnx.optimizer.OptState),
+            is_leaf=lambda x: isinstance(x, nnx.Variable),
+        )
+    )
+    for dtype in opt_state_leaves:
+      if dtype is not None and jnp.issubdtype(dtype, jnp.floating):
+        self.assertEqual(dtype, jnp.bfloat16)
+
+  def test_align_opt_state_dtypes_with_lora(self):
+    rngs = nnx.Rngs(0)
+    base_model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=rngs)
+    bf16_state = jax.tree.map(
+        lambda x: x.astype(jnp.bfloat16)
+        if jnp.issubdtype(x.dtype, jnp.floating)
+        else x,
+        nnx.state(base_model, nnx.Param),
+    )
+    nnx.update(base_model, bf16_state)
+    lora_model = tc.get_lora_model(base_model)
+
+    def custom_tx():
+      def init_fn(params):
+        return jax.tree.map(
+            lambda p: jnp.zeros_like(p, dtype=jnp.float32), params
+        )
+
+      def update_fn(updates, state, params=None):
+        del params
+        new_state = jax.tree.map(
+            lambda s, u: s.astype(u.dtype) + u, state, updates
+        )
+        return updates, new_state
+
+      return optax.GradientTransformation(init_fn, update_fn)
+
+    config = peft_trainer.TrainingConfig(eval_every_n_steps=100, max_steps=1)
+    trainer = peft_trainer.PeftTrainer(lora_model, custom_tx(), config)
+
+    opt_state_leaves = jax.tree_util.tree_leaves(
+        jax.tree_util.tree_map(
+            lambda v: v[...].dtype
+            if isinstance(v, nnx.Variable)
+            else getattr(v, 'dtype', None),
+            nnx.state(trainer.optimizer, nnx.optimizer.OptState),
+            is_leaf=lambda x: isinstance(x, nnx.Variable),
+        )
+    )
+    for dtype in opt_state_leaves:
+      if dtype is not None and jnp.issubdtype(dtype, jnp.floating):
+        self.assertEqual(dtype, jnp.bfloat16)
+
+  def test_align_opt_state_dtypes_handles_eval_shape_exception(self):
+    rngs = nnx.Rngs(0)
+    model = nnx.Linear(in_features=4, out_features=2, rngs=rngs)
+
+    def broken_tx():
+      def init_fn(params):
+        return jax.tree.map(
+            lambda p: jnp.zeros_like(p, dtype=jnp.float32), params
+        )
+
+      def update_fn(updates, state, params=None):
+        del updates, state, params
+        raise TypeError('Simulated update error')
+
+      return optax.GradientTransformation(init_fn, update_fn)
+
+    config = peft_trainer.TrainingConfig(eval_every_n_steps=100, max_steps=1)
+    trainer = peft_trainer.PeftTrainer(model, broken_tx(), config)
+    self.assertIsNotNone(trainer.optimizer)
+
+  def test_align_opt_state_dtypes_handles_structure_mismatch(self):
+    rngs = nnx.Rngs(0)
+    model = nnx.Linear(in_features=4, out_features=2, rngs=rngs)
+
+    def mismatched_tx():
+      def init_fn(params):
+        return {'a': jax.tree.map(jnp.zeros_like, params)}
+
+      def update_fn(updates, state, params=None):
+        del state, params
+        return updates, {
+            'a': jax.tree.map(jnp.zeros_like, updates),
+            'b': jnp.asarray(1.0),
+        }
+
+      return optax.GradientTransformation(init_fn, update_fn)
+
+    config = peft_trainer.TrainingConfig(eval_every_n_steps=100, max_steps=1)
+    trainer = peft_trainer.PeftTrainer(model, mismatched_tx(), config)
+    self.assertIsNotNone(trainer.optimizer)
 
 
 if __name__ == '__main__':
