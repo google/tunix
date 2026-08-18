@@ -1,0 +1,47 @@
+[P51.LAUNCH] label=p51_gsm8k_20260818_074802 run_dir=/mnt/workspace/xprof_out/p51_gsm8k_20260818_074802 gcs_dest=gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p51/p51_gsm8k_20260818_074802
+[rank0]: Traceback (most recent call last):
+[rank0]:   File "/mnt/workspace/tunix_code_rl/examples/math_gsm8k/qwen3_grpo_demo.py", line 872, in <module>
+[rank0]:     trainer.train(
+[rank0]:   File "/mnt/workspace/tunix_code_rl/tunix/rl/agentic/agentic_rl_learner.py", line 2202, in train
+[rank0]:     train_examples = self._batch_to_train_example(
+[rank0]:                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/mnt/workspace/tunix_code_rl/tunix/rl/agentic/agentic_rl_learner.py", line 1871, in _batch_to_train_example
+[rank0]:     return self._process_results(
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/mnt/workspace/tunix_code_rl/tunix/rl/agentic/agentic_grpo_learner.py", line 1447, in _process_results
+[rank0]:     self.rl_cluster.get_ref_per_token_logps(
+[rank0]:   File "/mnt/workspace/tunix_code_rl/tunix/rl/rl_cluster.py", line 1097, in get_ref_per_token_logps
+[rank0]:     self.inference_worker.get_ref_per_token_logps(
+[rank0]:   File "/mnt/workspace/tunix_code_rl/tunix/rl/inference/inference_worker.py", line 65, in get_ref_per_token_logps
+[rank0]:     return common.compute_per_token_logps(
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/mnt/workspace/tunix_code_rl/tunix/rl/common.py", line 455, in compute_per_token_logps
+[rank0]:     outputs, _ = model(input_tokens, **model_kwargs)
+[rank0]:                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/mnt/workspace/tunix_code_rl/tunix/models/qwen3/model.py", line 1267, in __call__
+[rank0]:     x = self.embedder.encode(input_tokens)
+[rank0]:         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/mnt/workspace/tunix_code_rl/tunix/models/qwen3/model.py", line 383, in encode
+[rank0]:     x = self.input_embedding[(x,)]
+[rank0]:         ~~~~~~~~~~~~~~~~~~~~^^^^^^
+[rank0]:   File "/usr/local/lib/python3.12/site-packages/flax/nnx/variablelib.py", line 1942, in __getitem__
+[rank0]:     return self.get_value(index=key)
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/usr/local/lib/python3.12/site-packages/flax/nnx/variablelib.py", line 1720, in get_value
+[rank0]:     value = value[index]
+[rank0]:             ~~~~~^^^^^^^
+[rank0]:   File "/usr/local/lib/python3.12/site-packages/jax/_src/numpy/array_methods.py", line 1532, in op
+[rank0]:     return getattr(self.aval, f"_{name}")(self, *args)
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/usr/local/lib/python3.12/site-packages/jax/_src/numpy/array_methods.py", line 1032, in _getitem
+[rank0]:     return indexing.rewriting_take(self, item)
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/usr/local/lib/python3.12/site-packages/jax/_src/numpy/indexing.py", line 1151, in rewriting_take
+[rank0]:     return internal_gather(arr, dynamic_idx)
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/usr/local/lib/python3.12/site-packages/jax/_src/numpy/indexing.py", line 1227, in _gather
+[rank0]:     y = slicing.gather(
+[rank0]:         ^^^^^^^^^^^^^^^
+[rank0]: jax._src.core.ShardingTypeError: Use `.at[...].get(out_sharding=)` to provide output PartitionSpec for the gather indexing as out sharding could not be resolved unambiguously (or would require collectives on inputs). Got operand=ShapedArray(bfloat16[151936@model,2048]), indices=ShapedArray(int32[32@data,2048,1])
+[rank0]: --------------------
+[rank0]: For simplicity, JAX has removed its internal frames from the traceback of the following exception. Set JAX_TRACEBACK_FILTERING=off to include these.
