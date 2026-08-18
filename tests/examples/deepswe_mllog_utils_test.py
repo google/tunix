@@ -16,10 +16,12 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import tempfile
 import types
+from unittest import mock
 
 from absl.testing import absltest
 from examples.deepswe import mllog_utils
@@ -173,6 +175,141 @@ class MllogUtilsTest(absltest.TestCase):
     self.assertIn('"key": "run_stop"', content)
     self.assertIn('"status": "success"', content)
     self.assertIn('"key": "train_samples"', content)
+
+  def test_end_to_end_mlperf_logging_with_train_configs(self):
+    args = types.SimpleNamespace(
+        model_version="Qwen3.5-35B-A3B",
+        model_source="maxtext",
+        model_absolute_path="gs://sanbao-europe/qwen3.5-35b-a3b/scanned/0/items",
+        scan_layers=True,
+        vllm_utilization=0.4,
+        max_response_length=4096,
+        max_prompt_length=8192,
+        metric_logger_dir=self.test_dir,
+        ckpt_dir="none",
+        rollout_micro_batch_size=8,
+        vllm_reshard_chunk_size=1,
+        rollout_mesh_fsdp=8,
+        rollout_mesh_tp=4,
+        train_mesh_fsdp=16,
+        train_mesh_tp=2,
+        node_selector_val="cpu-np",
+        max_steps=5,
+        overlong_filter=False,
+        batch_size=64,
+        mini_batch_size=64,
+        compute_logps_micro_batch_size=16,
+        train_micro_batch_size=16,
+        temperature=0.7,
+        num_generations=2,
+        max_turns=20,
+        beta=0.001,
+        weight_decay=0.1,
+        max_grad_norm=0.1,
+        logging_level="INFO",
+        rcp_logging=True,
+        target_accuracy=0.69,
+        seed=1,
+        learning_rate=1e-6,
+        eval_every_n_steps=5,
+    )
+
+    mock_train_dataset = [None] * 5480
+    rollout_mesh = mock.MagicMock()
+    rollout_mesh.shape = {"fsdp": 8, "tp": 4}
+    train_mesh = mock.MagicMock()
+    train_mesh.shape = {"fsdp": 16, "tp": 2}
+    total_devices = 32
+
+    # 1. Initialization phase
+    mllog_utils.init_start(args)
+    mllog_utils.init_print(
+        args,
+        train_dataset=mock_train_dataset,
+        rollout_mesh=rollout_mesh,
+        train_mesh=train_mesh,
+        total_devices=total_devices,
+    )
+    mllog_utils.init_stop()
+
+    # 2. Run and block start
+    mllog_utils.run_start()
+    mllog_utils.block_start(args, step=0)
+
+    # 3. Training steps with tracked stats
+    for step in range(1, args.max_steps + 1):
+      samples_count = step * args.batch_size * args.num_generations
+      mllog_utils.log_tracked_stats(
+          stats={
+              "reduced_train_loss": -0.08 + step * 0.01,
+              "reward": 0.33 + step * 0.02,
+              "grad_norm": 0.04,
+              "train_step_time": 100.0,
+              "policy_training_time": 25.0,
+              "exposed_generation_time": 70.0,
+              "weight_sync_time": 2.0,
+              "valid_tokens_per_sec_per_gpu": 22.0,
+          },
+          step=step,
+          samples_count=samples_count,
+      )
+
+    # 4. Mock evaluation phase with eval_accuracy = 0.70703125
+    is_early_stop = mllog_utils.check_eval(
+        args,
+        step=args.max_steps,
+        eval_accuracy=0.70703125,
+        validation_time=986.35,
+    )
+    self.assertTrue(is_early_stop)
+
+    # 5. Validate the generated log file
+    expected_log_file = os.path.join(self.test_dir, "seed_1.out")
+    self.assertTrue(os.path.exists(expected_log_file))
+
+    with open(expected_log_file, "r") as f:
+      log_lines = [line.strip() for line in f if line.strip()]
+
+    events = []
+    for line in log_lines:
+      self.assertTrue(line.startswith(":::MLLOG "))
+      json_str = line[len(":::MLLOG ") :]
+      events.append(json.loads(json_str))
+
+    event_map = {e["key"]: e for e in events}
+
+    # Verify lifecycle events
+    self.assertEqual(event_map["cache_clear"]["value"], True)
+    self.assertIn("init_start", event_map)
+    self.assertIn("init_stop", event_map)
+    self.assertIn("run_start", event_map)
+    self.assertIn("block_start", event_map)
+    self.assertIn("block_stop", event_map)
+    self.assertIn("eval_start", event_map)
+    self.assertIn("eval_stop", event_map)
+    self.assertIn("run_stop", event_map)
+    self.assertEqual(event_map["run_stop"]["metadata"]["status"], "success")
+
+    # Verify hyperparameters and metadata
+    self.assertEqual(event_map["submission_benchmark"]["value"], "qwen35_397b_grpo")
+    self.assertEqual(event_map["submission_org"]["value"], "Google")
+    self.assertEqual(event_map["submission_division"]["value"], "closed")
+    self.assertEqual(event_map["submission_status"]["value"], "cloud")
+    self.assertEqual(event_map["seed"]["value"], 1)
+    self.assertEqual(event_map["max_steps"]["value"], 5)
+    self.assertEqual(event_map["global_batch_size"]["value"], 128)
+    self.assertEqual(event_map["micro_batch_size"]["value"], 16)
+    self.assertEqual(event_map["max_sequence_length"]["value"], 12288)
+    self.assertEqual(event_map["train_samples"]["value"], 640)
+    self.assertEqual(event_map["tensor_parallelism"]["value"], 2)
+    self.assertEqual(event_map["generation_tensor_parallelism"]["value"], 4)
+    self.assertEqual(
+        event_map["generation_training_rollout_temperature"]["value"], 0.7
+    )
+    self.assertEqual(event_map["num_prompts_per_step"]["value"], 64)
+    self.assertEqual(event_map["num_generations_per_prompt"]["value"], 2)
+    self.assertEqual(event_map["target_accuracy"]["value"], 0.69)
+    self.assertEqual(event_map["eval_accuracy"]["value"], 0.70703125)
 
 
 if __name__ == "__main__":
