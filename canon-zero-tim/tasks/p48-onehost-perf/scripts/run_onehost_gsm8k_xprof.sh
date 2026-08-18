@@ -123,7 +123,7 @@ sudo docker run --rm --privileged --net=host --name "$container" \
   -e CANON_XPROF_DIR="$xprof_dir" \
   -e CANON_XPROF_SKIP_STEPS="$xprof_skip" \
   -e CANON_XPROF_STEPS="$xprof_steps" \
-  -e CANON_XPROF_PYTHON_TRACER="${P51_XPROF_PYTHON_TRACER:-}" \
+  -e CANON_XPROF_PYTHON_TRACER="${P51_XPROF_PYTHON_TRACER:-0}" \
   -e CANON_XPROF_HOST_TRACER="${P51_XPROF_HOST_TRACER:-}" \
   -e CANON_DP_SIZE=1 -e CANON_TP_SIZE=4 -e FL_SHARED_MESH=1,4 \
   -e XLA_FLAGS="$XTRA_XLA" \
