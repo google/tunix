@@ -251,17 +251,15 @@ class Tokenizer(TokenizerAdapter):
       )
     elif tokenizer_type == 'sentencepiece':
       model_proto = epath.Path(tokenizer_path).read_bytes()
-      tokenizer = spm.SentencePieceProcessor()
-      tokenizer.LoadFromSerializedProto(model_proto)
-      options = []
-      if add_bos:
-        options.append('bos')
-      if add_eos:
-        options.append('eos')
-
-      extra_options_str = ':'.join(options)
-      if extra_options_str:
-        tokenizer.SetEncodeExtraOptions(extra_options_str)
+      # bos/eos are requested through the constructor rather than through
+      # SetEncodeExtraOptions('bos:eos'), which sentencepiece removed in 0.2.2.
+      # The constructor has accepted these since 0.1.9x, so this works on both
+      # sides of that release and produces identical ids.
+      tokenizer = spm.SentencePieceProcessor(
+          model_proto=model_proto,
+          add_bos=bool(add_bos),
+          add_eos=bool(add_eos),
+      )
     else:
       raise ValueError(f'Unsupported tokenizer_type: {tokenizer_type}')
     super().__init__(tokenizer)
