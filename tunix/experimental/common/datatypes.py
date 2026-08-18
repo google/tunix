@@ -510,6 +510,8 @@ class RLTrainerPayload(TrainerPayload):
   advantages: ArrayLike
   loss_mask: ArrayLike
   action_mask: ArrayLike | None = None
+  # TODO(tunix-dev): remove prompt_ids, prompt_mask, completion_ids,
+  # and completion_mask; instead, rely on token_ids and token_mask.
   prompt_ids: ArrayLike | None = None
   prompt_mask: ArrayLike | None = None
   completion_ids: ArrayLike | None = None

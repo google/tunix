@@ -407,17 +407,51 @@ class SequencePackedBatchAssembler(Generic[T]):
     return self._pack_1d_buffers(items, self.max_packed_len)
 
 
-class PaddedBatchAssembler(Generic[T]):
-  """Simple 2D Rectangular Batching: Pads sequences to standard [batch_size, max_seq_len] tensors."""
-  def __init__(self, batch_size: int = 4, max_seq_len: int = 2048, pad_id: int = 0):
-    self.batch_size = batch_size
-    self.max_seq_len = max_seq_len
-    self.pad_id = pad_id
+class PaddedBatchAssembler:
+  """Simple 2D Rectangular Batching: pads into standard [batch_size, P + C] tensors.
 
-  def pack(self, items: Sequence[T]) -> list[datatypes.RLTrainerPayload]:
-    """Pads items into rectangular 2D batches [B, max_seq_len]."""
-    return self._pad_2d_batches(items, self.batch_size, self.max_seq_len)
+  Row layout follows the `TrainerPayload` contract: a LEFT-padded prompt of
+  width `max_prompt_length` concatenated with a RIGHT-padded completion of
+  width `max_response_length`. Because the boundary is identical on every row,
+  completion-aligned tensors stay in completion space `[B, C]` and remain in
+  register with `completion_ids`.
+
+  NOTE: v1 is concrete on `RLTrainerPayload` rather than `Generic[T]`. A generic
+  version needs a field-extractor callback (T -> token/mask/advantage arrays);
+  that is deferred until SFT/DPO paths actually land.
+  """
+  def __init__(
+      self,
+      *,
+      batch_size: int = 4,
+      max_prompt_length: int = 512,
+      max_response_length: int = 1536,
+      pad_id: int = 0,
+  ):
+    ...
+
+  def pack(
+      self, items: Sequence[datatypes.RLTrainerPayload]
+  ) -> list[datatypes.RLTrainerPayload]:
+    """Pads items into rectangular 2D batches [B, P + C]."""
+    ...
 ```
+
+#### `PaddedBatchAssembler` output field shapes
+
+| Field | Shape | Semantics |
+| --- | --- | --- |
+| `token_ids` | `[B, P + C]` | left-padded prompt ++ right-padded completion |
+| `token_mask` | `[B, P + C]` | 1 on real (non-pad) tokens — **attention**, not loss |
+| `loss_mask` | `[B, P + C]` | 0 over the prompt, action mask over the completion |
+| `action_mask` | `[B, P + C]` | same as `loss_mask` |
+| `prompt_ids` / `prompt_mask` | `[B, P]` | |
+| `completion_ids` / `completion_mask` | `[B, C]` | `completion_mask` excludes tool-observation tokens |
+| `advantages` | `[B, C]` | scalar advantages are broadcast over the completion |
+| `ref_/old_per_token_logps`, `returns`, `old_values`, `sampler_is_weights` | `[B, C]` | emitted for the whole batch as soon as **any** row carries them; rows that do not are zero-filled so row `b` always describes item `b` |
+| `metadata["num_real_rows"]` | `int` | rows before trailing zero padding |
+
+`segment_ids` / `segment_positions` stay `None`: they describe 1D packing segments and carry no meaning for rectangular batches.
 
 #### Reusing `BatchAssembler` Across Different Paradigms:
 ```python
@@ -429,9 +463,12 @@ rl_microbatches = rl_assembler.pack(train_examples)
 sft_assembler = SequencePackedBatchAssembler[SFTExample](max_packed_len=8192)
 sft_microbatches = sft_assembler.pack(sft_examples)
 
-# 3. Direct Preference Optimization (DPO / Simple 2D Batching)
-dpo_assembler = PaddedBatchAssembler[DPOPair](batch_size=8, max_seq_len=2048)
-dpo_batches = dpo_assembler.pack(dpo_pairs)
+# 3. Simple 2D Rectangular Batching (RL payloads)
+padded_assembler = PaddedBatchAssembler(
+    batch_size=8, max_prompt_length=512, max_response_length=1536
+)
+padded_batches = padded_assembler.pack(trainer_payloads)
+# DPO / SFT reuse of PaddedBatchAssembler awaits the field-extractor API above.
 ```
 
 ---
@@ -813,4 +850,3 @@ graph LR
 | **CL 2** | **Universal Batch Assembly** | • Introduce `batch_assembly.py` (`BatchAssembler[T]` protocol, `SequencePackedBatchAssembler[T]` for 1D token packing, and `PaddedBatchAssembler[T]` for 2D rectangular padding).<br/>• Support universal packing across RL (`TrainExample`), Supervised (`SFTExample`), and Preference (`DPOPair`) dataclasses.<br/>• Add block-diagonal attention mask generation and tool observation loss masking (`action_mask = 0`). | `test //third_party/py/tunix/experimental/orchestrator:all` |
 | **CL 3** | **Streaming & Queue ACK** | • Implement streaming gradient accumulation in `StandardRLProgram` with `TrainExample` pipeline.<br/>• Add uncommitted in-flight buffer and `queue.commit()` to `TrajectoryQueueManager`. | `test //third_party/py/tunix/experimental/orchestrator:all` |
 | **CL 4** | **Isolated Recovery** | • Implement Orbax `CompositeCheckpointHandler` (`manifest.json` with step, model weights, queue offsets).<br/>• Wire `LifecycleDriver.restart_worker(role=Role.ACTOR)` and queue seek on failure. | `test //third_party/py/tunix/experimental/orchestrator:all` |
-

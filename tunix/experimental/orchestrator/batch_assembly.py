@@ -22,6 +22,7 @@ custom objects with token arrays). Supports:
 # TODO: Align SequencePackedBatchAssembler with the rest of the ecosystem and potentially move to a common library.
 """
 
+from absl import logging
 from typing import Any, Generic, Protocol, Sequence, TypeVar
 import numpy as np
 from jax import numpy as jnp
@@ -85,19 +86,18 @@ def _completion_aligned(
     arr = np.asarray(values, dtype=np.float32).reshape(-1)
     if arr.size == 1:
       arr = np.full(completion_len, float(arr[0]), dtype=np.float32)
-    elif (
-        prompt_len is not None
-        and full_completion_len is not None
-        and arr.size == prompt_len + full_completion_len
+    elif prompt_len is not None and arr.size in (
+        prompt_len + (full_completion_len or 0),
+        prompt_len + completion_len,
     ):
-      arr = arr[prompt_len : prompt_len + full_completion_len]
-    elif full_completion_len is not None and arr.size >= full_completion_len:
-      arr = arr[:full_completion_len]
-    elif arr.size >= completion_len:
+      # Sequence-aligned `[P + C]` source: slice out the completion span.
+      arr = arr[prompt_len:]
+    if arr.size >= completion_len:
       arr = arr[:completion_len]
     else:
-      arr = np.pad(arr, (0, completion_len - arr.size), constant_values=0.0)
-    arr = arr[:completion_len]
+      arr = np.pad(
+          arr, (0, completion_len - arr.size), constant_values=0.0
+      )
   out, _ = _right_pad(
       arr,
       max_response_length,
@@ -239,6 +239,7 @@ class SequencePackedBatchAssembler:
     return payloads
 
 
+# TODO(tunix-dev): Remove GRPOTrainExampleAssembler.
 class GRPOTrainExampleAssembler:
   """Pads GRPO payloads into `TrainExample` microbatches.
 
@@ -381,93 +382,192 @@ class GRPOTrainExampleAssembler:
 
 
 class PaddedBatchAssembler:
-  """Simple 2D Rectangular Batching: Pads sequences to standard [batch_size, max_seq_len] tensors."""
+  """Simple 2D rectangular batching into fixed `[B, max_seq_len]` trainer payloads."""
 
-  def __init__(self, batch_size: int = 4, max_seq_len: int = 2048, pad_id: int = 0):
+  def __init__(
+      self,
+      *,
+      batch_size: int = 4,
+      max_seq_len: int = 2048,
+      pad_id: int = 0,
+  ):
+    if batch_size <= 0:
+      raise ValueError(f"batch_size must be positive, got {batch_size}.")
+    if max_seq_len <= 0:
+      raise ValueError(
+          f"max_seq_len must be positive, got {max_seq_len}."
+      )
     self.batch_size = batch_size
     self.max_seq_len = max_seq_len
     self.pad_id = pad_id
 
-  def pack(self, items: Sequence[datatypes.RLTrainerPayload]) -> list[datatypes.RLTrainerPayload]:
-    """Pads items into rectangular 2D batches [B, max_seq_len]."""
-    if not items:
+  def pack(
+      self, items: Sequence[datatypes.RLTrainerPayload]
+  ) -> list[datatypes.RLTrainerPayload]:
+    """Pads items into rectangular 2D batches `[B, max_seq_len]`."""
+    item_list = list(items)
+    if not item_list:
       return []
 
-    item_list = list(items)
     payloads: list[datatypes.RLTrainerPayload] = []
-
     for i in range(0, len(item_list), self.batch_size):
-      chunk = item_list[i : i + self.batch_size]
-
-      b_tokens = []
-      b_loss_masks = []
-      b_action_masks = []
-      b_advs = []
-      b_old_lps = []
-      b_ref_lps = []
-
-      for it in chunk:
-        toks = (
-            np.asarray(it.token_ids, dtype=np.int32).reshape(-1)
-            if it.token_ids is not None
-            else np.zeros(0, dtype=np.int32)
-        )
-        seq_len = len(toks)
-
-        loss_mask = (
-            np.asarray(it.loss_mask, dtype=np.float32).reshape(-1)
-            if it.loss_mask is not None
-            else np.zeros(seq_len, dtype=np.float32)
-        )
-        action_mask = (
-            np.asarray(it.action_mask, dtype=np.float32).reshape(-1)
-            if it.action_mask is not None
-            else np.zeros(seq_len, dtype=np.float32)
-        )
-        adv_arr = (
-            np.asarray(it.advantages, dtype=np.float32).reshape(-1)
-            if it.advantages is not None
-            else np.zeros(seq_len, dtype=np.float32)
-        )
-
-        pad_len = max(0, self.max_seq_len - seq_len)
-        b_tokens.append(np.pad(toks[: self.max_seq_len], (0, pad_len), constant_values=self.pad_id))
-        b_loss_masks.append(np.pad(loss_mask[: self.max_seq_len], (0, pad_len), constant_values=0.0))
-        b_action_masks.append(np.pad(action_mask[: self.max_seq_len], (0, pad_len), constant_values=0.0))
-        b_advs.append(np.pad(adv_arr[: self.max_seq_len], (0, pad_len), constant_values=0.0))
-
-        if it.old_per_token_logps is not None:
-          old_arr = np.asarray(it.old_per_token_logps, dtype=np.float32).reshape(-1)
-          b_old_lps.append(
-              np.pad(old_arr[: self.max_seq_len], (0, pad_len), constant_values=0.0)
-          )
-
-        if it.ref_per_token_logps is not None:
-          ref_arr = np.asarray(it.ref_per_token_logps, dtype=np.float32).reshape(-1)
-          b_ref_lps.append(
-              np.pad(ref_arr[: self.max_seq_len], (0, pad_len), constant_values=0.0)
-          )
-
-      # Pad rows up to batch_size
-      while len(b_tokens) < self.batch_size:
-        b_tokens.append(np.full(self.max_seq_len, self.pad_id, dtype=np.int32))
-        b_loss_masks.append(np.zeros(self.max_seq_len, dtype=np.float32))
-        b_action_masks.append(np.zeros(self.max_seq_len, dtype=np.float32))
-        b_advs.append(np.zeros(self.max_seq_len, dtype=np.float32))
-        if b_old_lps:
-          b_old_lps.append(np.zeros(self.max_seq_len, dtype=np.float32))
-        if b_ref_lps:
-          b_ref_lps.append(np.zeros(self.max_seq_len, dtype=np.float32))
-
-      payload = datatypes.RLTrainerPayload(
-          token_ids=np.stack(b_tokens),
-          token_mask=np.stack(b_loss_masks),
-          loss_mask=np.stack(b_loss_masks),
-          advantages=np.stack(b_advs),
-          action_mask=np.stack(b_action_masks),
-          old_per_token_logps=np.stack(b_old_lps) if b_old_lps else None,
-          ref_per_token_logps=np.stack(b_ref_lps) if b_ref_lps else None,
-      )
-      payloads.append(payload)
-
+      payloads.append(self._pack_chunk(item_list[i : i + self.batch_size]))
     return payloads
+
+  def _pack_chunk(
+      self, chunk: Sequence[datatypes.RLTrainerPayload]
+  ) -> datatypes.RLTrainerPayload:
+    """Pads a single `<= batch_size` chunk into one rectangular payload."""
+    # Optional per-token fields are emitted for the whole batch only when all
+    # rows carry them.
+    optional_fields = (
+        "ref_per_token_logps",
+        "old_per_token_logps",
+        "returns",
+        "old_values",
+        "sampler_is_weights",
+    )
+    present_fields = []
+    partially_present_fields = []
+    for name in optional_fields:
+      num_present = sum(getattr(it, name) is not None for it in chunk)
+      if num_present == len(chunk):
+        present_fields.append(name)
+      elif num_present > 0:
+        partially_present_fields.append(name)
+
+    if partially_present_fields:
+      logging.warning(
+          "Partially present optional fields: %s",
+          partially_present_fields,
+      )
+
+    optional_rows: dict[str, list[np.ndarray]] = {
+        name: [] for name in present_fields
+    }
+    truncated_sequences = 0
+
+    batched_token_ids = []
+    batched_token_mask = []
+    batched_loss_mask = []
+    batched_action_mask = []
+    batched_advantages = []
+
+    for item in chunk:
+      token_ids = (
+          np.asarray(item.token_ids, dtype=np.int32).reshape(-1)
+          if item.token_ids is not None
+          else np.zeros(0, dtype=np.int32)
+      )
+      truncated_sequences += token_ids.size > self.max_seq_len
+      token_ids = token_ids[: self.max_seq_len]
+
+      token_ids, default_token_mask = _right_pad(
+          token_ids, self.max_seq_len, pad_value=self.pad_id, dtype=np.int32
+      )
+      if item.token_mask is not None:
+        tm = np.asarray(item.token_mask, dtype=np.float32).reshape(-1)[
+            : self.max_seq_len
+        ]
+        token_mask, _ = _right_pad(
+            tm, self.max_seq_len, pad_value=0.0, dtype=np.float32
+        )
+      else:
+        token_mask = default_token_mask
+
+      batched_token_ids.append(token_ids)
+      batched_token_mask.append(token_mask)
+
+      loss_mask = (
+          np.asarray(item.loss_mask, dtype=np.float32).reshape(-1)
+          if item.loss_mask is not None
+          else np.zeros(0, dtype=np.float32)
+      )
+      loss_mask, _ = _right_pad(
+          loss_mask, self.max_seq_len, pad_value=0.0, dtype=np.float32
+      )
+      batched_loss_mask.append(loss_mask)
+
+      action_mask = (
+          np.asarray(item.action_mask, dtype=np.float32).reshape(-1)
+          if item.action_mask is not None
+          else np.zeros(0, dtype=np.float32)
+      )
+      action_mask, _ = _right_pad(
+          action_mask, self.max_seq_len, pad_value=0.0, dtype=np.float32
+      )
+      batched_action_mask.append(action_mask)
+
+      if item.advantages is None:
+        adv = np.zeros(self.max_seq_len, dtype=np.float32)
+      else:
+        adv = np.asarray(item.advantages, dtype=np.float32).reshape(-1)
+        if adv.size == 1:
+          adv = (
+              np.full(self.max_seq_len, float(adv[0]), dtype=np.float32)
+              * token_mask
+          )
+        else:
+          adv, _ = _right_pad(
+              adv, self.max_seq_len, pad_value=0.0, dtype=np.float32
+          )
+      batched_advantages.append(adv)
+
+      for name in optional_rows:
+        val = getattr(item, name)
+        if val is None:
+          arr = np.zeros(self.max_seq_len, dtype=np.float32)
+        else:
+          arr = np.asarray(val, dtype=np.float32).reshape(-1)
+          if arr.size == 1:
+            arr = (
+                np.full(self.max_seq_len, float(arr[0]), dtype=np.float32)
+                * token_mask
+            )
+          else:
+            arr, _ = _right_pad(
+                arr, self.max_seq_len, pad_value=0.0, dtype=np.float32
+            )
+        optional_rows[name].append(arr)
+
+    if truncated_sequences:
+      logging.warning(
+          "PaddedBatchAssembler truncated %d sequence(s) to %d tokens; raise "
+          "max_seq_len to avoid dropping training signal.",
+          truncated_sequences,
+          self.max_seq_len,
+      )
+
+    # Zero-pad trailing rows so every chunk yields a static [B, ...] shape.
+    while len(batched_token_ids) < self.batch_size:
+      batched_token_ids.append(
+          np.full(self.max_seq_len, self.pad_id, dtype=np.int32)
+      )
+      batched_token_mask.append(np.zeros(self.max_seq_len, dtype=np.float32))
+      batched_loss_mask.append(np.zeros(self.max_seq_len, dtype=np.float32))
+      batched_action_mask.append(np.zeros(self.max_seq_len, dtype=np.float32))
+      batched_advantages.append(np.zeros(self.max_seq_len, dtype=np.float32))
+      for rows in optional_rows.values():
+        rows.append(np.zeros(self.max_seq_len, dtype=np.float32))
+
+    batched_token_ids = np.stack(batched_token_ids)
+    batched_token_mask = np.stack(batched_token_mask)
+    batched_loss_mask = np.stack(batched_loss_mask)
+    batched_action_mask = np.stack(batched_action_mask)
+    batched_advantages = np.stack(batched_advantages)
+
+    stacked_optional = {
+        name: np.stack(rows) for name, rows in optional_rows.items()
+    }
+    return datatypes.RLTrainerPayload(
+        token_ids=batched_token_ids,
+        token_mask=batched_token_mask,
+        loss_mask=batched_loss_mask,
+        action_mask=batched_action_mask,
+        advantages=batched_advantages,
+        ref_per_token_logps=stacked_optional.get("ref_per_token_logps"),
+        old_per_token_logps=stacked_optional.get("old_per_token_logps"),
+        returns=stacked_optional.get("returns"),
+        old_values=stacked_optional.get("old_values"),
+        sampler_is_weights=stacked_optional.get("sampler_is_weights"),
+    )
