@@ -9,11 +9,46 @@ from absl.testing import parameterized
 from flax import nnx
 import jax
 import jax.numpy as jnp
+import ml_dtypes
 import numpy as np
 from safetensors import numpy as stnp
 from tunix.models import safetensors_loader
 from tunix.tests import test_common
 from tunix.utils import env_utils
+import concurrent.futures
+
+class DummyExecutor:
+  def __init__(self, *args, **kwargs):
+    pass
+  def __enter__(self):
+    return self
+  def __exit__(self, *args):
+    pass
+  def submit(self, fn, *args, **kwargs):
+    fut = concurrent.futures.Future()
+    try:
+      fut.set_result(fn(*args, **kwargs))
+    except Exception as e:
+      fut.set_exception(e)
+    return fut
+
+
+class MockTorchTensor:
+  def __init__(self):
+    self.shape = (256, 16)
+    self.dtype = type(
+        'MockDtype', (), {'__str__': lambda self: 'torch.float16'}
+    )()
+
+  def detach(self):
+    return self
+
+  def cpu(self):
+    return self
+
+  def numpy(self):
+    return np.zeros(self.shape, dtype=np.float16)
+
 
 
 def key_mapping(config):
@@ -87,6 +122,11 @@ class SafetensorsLoaderTest(parameterized.TestCase):
           np.array(layer_state['w2']['bias'].value),
       )
 
+  def setUp(self):
+    super().setUp()
+    self.st_dir = tempfile.TemporaryDirectory().name
+    os.makedirs(self.st_dir, exist_ok=True)
+
   @parameterized.named_parameters(
       *(([dict(testcase_name='opt_loader_enabled', mode='optimized')] 
          if not env_utils.is_internal_env() else []) + [
@@ -99,26 +139,21 @@ class SafetensorsLoaderTest(parameterized.TestCase):
   def test_load_and_create_model(
       self, path_type='abs', mode='auto'
   ):
-    try:
-      st_dir_abs = self.create_tempdir().full_path
-    except Exception:  # pylint: disable=broad-except
-      st_dir_abs = tempfile.TemporaryDirectory().name
-      os.makedirs(st_dir_abs, exist_ok=True)
 
     origin_dir = os.getcwd()
     self.addCleanup(os.chdir, origin_dir)
     if path_type == 'abs':
-      load_dir = st_dir_abs
+      load_dir = self.st_dir
     elif path_type == 'rel':
-      os.chdir(os.path.dirname(st_dir_abs))
-      load_dir = os.path.basename(st_dir_abs)
+      os.chdir(os.path.dirname(self.st_dir))
+      load_dir = os.path.basename(self.st_dir)
     elif path_type == 'rel_dot':
-      os.chdir(os.path.dirname(st_dir_abs))
-      load_dir = f'./{os.path.basename(st_dir_abs)}'
+      os.chdir(os.path.dirname(self.st_dir))
+      load_dir = f'./{os.path.basename(self.st_dir)}'
     else:
       raise ValueError(f'Unknown path_type: {path_type}')
 
-    filename = os.path.join(st_dir_abs, 'model.safetensors')
+    filename = os.path.join(self.st_dir, 'model.safetensors')
     stnp.save_file(self.tensors, filename)
 
     loaded_model = safetensors_loader.load_and_create_model(
@@ -139,19 +174,14 @@ class SafetensorsLoaderTest(parameterized.TestCase):
   def test_load_and_create_model_from_gcs(self):
     if env_utils.is_internal_env():
       self.skipTest('GCS is not supported in GOOGLE_INTERNAL_PACKAGE_PATH')
-    try:
-      st_dir_abs = self.create_tempdir().full_path
-    except Exception:  # pylint: disable=broad-except
-      st_dir_abs = tempfile.TemporaryDirectory().name
-      os.makedirs(st_dir_abs, exist_ok=True)
 
-    filename = os.path.join(st_dir_abs, 'model.safetensors')
+    filename = os.path.join(self.st_dir, 'model.safetensors')
     stnp.save_file(self.tensors, filename)
 
     with mock.patch.object(
         safetensors_loader, 'load_file_from_gcs'
     ) as mock_load:
-      mock_load.return_value = st_dir_abs
+      mock_load.return_value = self.st_dir
       loaded_model = safetensors_loader.load_and_create_model(
           'gs://bucket/model',
           test_common.ToyTransformer,
@@ -174,17 +204,12 @@ class SafetensorsLoaderTest(parameterized.TestCase):
     # lock around the duplicate-key check and write the second write can
     # silently overwrite the first (issue #1259). With the lock the duplicate
     # is always detected.
-    try:
-      st_dir = self.create_tempdir().full_path
-    except Exception:  # pylint: disable=broad-except
-      st_dir = tempfile.TemporaryDirectory().name
-      os.makedirs(st_dir, exist_ok=True)
 
     tensors = {
         'lm_head.kernel': np.zeros((2, 2), dtype=np.float32),
         'lm_head.weight': np.zeros((2, 2), dtype=np.float32),
     }
-    filename = os.path.join(st_dir, 'model.safetensors')
+    filename = os.path.join(self.st_dir, 'model.safetensors')
     stnp.save_file(tensors, filename)
 
     def duplicate_key_mapping(config):
@@ -199,13 +224,107 @@ class SafetensorsLoaderTest(parameterized.TestCase):
     # default optimized path is single-threaded and does not run this check.
     with self.assertRaisesRegex(RuntimeError, 'Duplicate key'):
       safetensors_loader.load_and_create_model(
-          st_dir,
+          self.st_dir,
           test_common.ToyTransformer,
           self.model.config,
           duplicate_key_mapping,
           dtype=jnp.float32,
           mode='original',
       )
+
+  def test_load_bfloat16_custom_dtype_avoids_ml_dtypes(self):
+    bf16_data = np.random.rand(256, 16).astype(ml_dtypes.bfloat16)
+    tensors = {'emb.embedding': bf16_data}
+    filename = os.path.join(self.st_dir, 'model.safetensors')
+    stnp.save_file(tensors, filename)
+
+    def simple_mapping(config):
+      del config
+      return {r'^emb\.embedding$': ('emb.embedding', None)}
+
+    result = safetensors_loader.load_and_create_model(
+        self.st_dir,
+        test_common.ToyTransformer,
+        self.model.config,
+        simple_mapping,
+        dtype=jnp.bfloat16,
+        mode='original',
+    )
+    state = nnx.state(result)
+    self.assertEqual(state['emb']['embedding'].value.dtype, jnp.bfloat16)
+    self.assertEqual(
+        state['emb']['embedding'].value.aval.dtype,
+        jnp.bfloat16,
+    )
+    np.testing.assert_allclose(
+        state['emb']['embedding'].value,
+        bf16_data
+    )
+
+  @mock.patch('concurrent.futures.ThreadPoolExecutor', DummyExecutor)
+  def test_load_float16_safetensors_without_bfloat16_conversion(self):
+    f16_data = np.zeros((256, 16), dtype=np.float16)
+    tensors = {'emb.embedding': f16_data}
+    filename = os.path.join(self.st_dir, 'model.safetensors')
+    stnp.save_file(tensors, filename)
+
+    def simple_mapping(config):
+      del config
+      return {r'^emb\.embedding$': ('emb.embedding', None)}
+
+    result = safetensors_loader.load_and_create_model(
+        self.st_dir, test_common.ToyTransformer, self.model.config,
+        simple_mapping, dtype=jnp.float16, mode='original'
+    )
+    self.assertEqual(
+        nnx.state(result)['emb']['embedding'].value.dtype, jnp.float16
+    )
+
+  @mock.patch('concurrent.futures.ThreadPoolExecutor', DummyExecutor)
+  @mock.patch.object(safetensors_loader.safetensors, 'safe_open')
+  def test_load_torch_bfloat16_safetensors(self, mock_safe_open):
+    with open(os.path.join(self.st_dir, 'model.safetensors'), 'w') as f:
+      f.write('dummy')
+
+    mock_file = mock.MagicMock()
+    mock_file.keys.return_value = ['emb.embedding']
+    mock_file.get_tensor.return_value = MockTorchTensor()
+    mock_safe_open.return_value.__enter__.return_value = mock_file
+
+    def simple_mapping(config):
+      del config
+      return {r'^emb\.embedding$': ('emb.embedding', None)}
+
+    result = safetensors_loader.load_and_create_model(
+        self.st_dir, test_common.ToyTransformer, self.model.config,
+        simple_mapping, dtype=jnp.bfloat16, mode='original'
+    )
+    self.assertEqual(
+        nnx.state(result)['emb']['embedding'].value.dtype, jnp.bfloat16
+        )
+
+  @mock.patch('concurrent.futures.ThreadPoolExecutor', DummyExecutor)
+  @mock.patch.object(safetensors_loader.safetensors, 'safe_open')
+  def test_load_torch_float16_safetensors(self, mock_safe_open):
+    with open(os.path.join(self.st_dir, 'model.safetensors'), 'w') as f:
+      f.write('dummy')
+
+    mock_file = mock.MagicMock()
+    mock_file.keys.return_value = ['emb.embedding']
+    mock_file.get_tensor.return_value = MockTorchTensor()
+    mock_safe_open.return_value.__enter__.return_value = mock_file
+
+    def simple_mapping(config):
+      del config
+      return {r'^emb\.embedding$': ('emb.embedding', None)}
+
+    result = safetensors_loader.load_and_create_model(
+        self.st_dir, test_common.ToyTransformer, self.model.config,
+        simple_mapping, dtype=jnp.float16, mode='original'
+    )
+    self.assertEqual(
+        nnx.state(result)['emb']['embedding'].value.dtype, jnp.float16
+    )
 
 
 if __name__ == '__main__':

@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""vLLM JAX backend mappings for Qwen2 models."""
+"""vLLM JAX backend mappings for Qwen3 models."""
 
 from __future__ import annotations
 

@@ -138,6 +138,28 @@ def load_safetensors_with_offsets(filepath):
   return contiguous_array, tensor_metadata, mm, f
 
 
+def _normalize_tensor(v: Any):
+  """Normalizes a tensor to a numpy array."""
+  if hasattr(v, 'numpy'):
+    if str(getattr(v, 'dtype', '')) == 'torch.bfloat16':
+      return v.detach().float().cpu().numpy().astype(ml_dtypes.bfloat16)
+    else:
+      return v.detach().cpu().numpy()
+
+  elif all(hasattr(v, attr) for attr in ('tobytes', 'shape', 'dtype')):
+    is_explicit_bf16 = str(v.dtype) in ('bfloat16', 'BF16')
+
+    is_unknown_16bit = (
+        getattr(v.dtype, 'itemsize', None) == 2
+        and v.dtype not in (np.float16, np.int16, np.uint16)
+    )
+
+    if is_explicit_bf16 or is_unknown_16bit:
+      return v.view(ml_dtypes.bfloat16)
+
+  return np.asarray(v)
+
+
 def load_and_create_model_orig(
     file_dir: str,
     model_class,
@@ -215,6 +237,7 @@ def load_and_create_model_orig(
             skipped_keys.append(k_name)
             return
 
+          v = _normalize_tensor(v)
           if transform is not None:
             permute, reshape = transform
             if permute:
