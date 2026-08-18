@@ -1,0 +1,28 @@
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/linchai_google_com/tunix/examples/frozenlake/grad_diff_debug.py", line 744, in <module>
+    trainer_v2.train(_run_dataset, skip_jit=False)
+  File "/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py", line 1412, in train
+    self.fwd_bwd(train_example)
+  File "/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py", line 1136, in fwd_bwd
+    *fwd_bwd_step(
+     ^^^^^^^^^^^^^
+  File "/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/graphlib.py", line 1693, in cache_args_wrapper
+    return f(*cached_args, *args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/transforms/compilation.py", line 1023, in __call__
+    pure_args_out, pure_kwargs_out, pure_out = self.jitted_fn(
+                                               ^^^^^^^^^^^^^^^
+  File "/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/transforms/compilation.py", line 138, in __call__
+    out = self.f(*args, **kwargs)
+          ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py", line 672, in _fwd_bwd_step
+    grad_accumulator.add(grads, denom=jnp.asarray(1.0, dtype=jnp.float32))
+  File "/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py", line 330, in add
+    jax.tree_util.tree_map(
+  File "/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py", line 327, in _add
+    acc_var.set_value(acc_var[...] + g)
+    ^^^^^^^^^^^^^^^^^
+AttributeError: DynamicJaxprTracer has no attribute set_value
