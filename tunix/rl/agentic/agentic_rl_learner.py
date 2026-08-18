@@ -3005,7 +3005,17 @@ def _canon_xprof_step_boundary():
   steps = int(os.environ.get("CANON_XPROF_STEPS", "") or "1")
   _CANON_XPROF["calls"] += 1
   if not _CANON_XPROF["active"] and _CANON_XPROF["calls"] == skip:
-    jax.profiler.start_trace(directory, create_perfetto_trace=True)
+    options = jax.profiler.ProfileOptions()
+    options.raise_error_on_start_failure = True
+    python_tracer = os.environ.get("CANON_XPROF_PYTHON_TRACER", "")
+    if python_tracer:
+      options.python_tracer_level = int(python_tracer)
+    host_tracer = os.environ.get("CANON_XPROF_HOST_TRACER", "")
+    if host_tracer:
+      options.host_tracer_level = int(host_tracer)
+    jax.profiler.start_trace(
+        directory, create_perfetto_trace=True, profiler_options=options
+    )
     _CANON_XPROF["active"] = True
     print(
         f"[P51.XPROF] start dir={directory} after_completed_steps={skip}",
