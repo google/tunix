@@ -193,7 +193,8 @@ class StandardRLProgram(AsyncRLProgram):
         uncommitted_groups.append(scored_items)
 
         payloads = [getattr(item, "payload", None) for item in scored_items]
-        # TODO: Implement streaming microbatch assembly to overlap packing with trainer execution.
+        # TODO: Stream payloads through a microbatch buffer so partial groups do
+        # not force per-group padding before the step-final flush.
         microbatches = self.assembler.pack(payloads)  # pyrefly: ignore[bad-argument-type]
         if getattr(self.algo, "requires_reference_kl", False):
           scored_microbatches = []

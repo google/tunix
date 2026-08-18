@@ -112,6 +112,8 @@ def with_ref_per_token_logps(
     ref_logps: datatypes.LogprobsResponse | np.ndarray,
 ) -> rl_common.TrainExample:
   """Returns a trainer batch carrying ref logps aligned to completion_ids."""
+  # TODO: Return an experimental-native trainer batch once GRPO loss no longer
+  # depends on the legacy rl_common.TrainExample structure.
   if not isinstance(batch, rl_common.TrainExample):
     raise TypeError(
         "with_ref_per_token_logps expects a padded TrainExample from "
