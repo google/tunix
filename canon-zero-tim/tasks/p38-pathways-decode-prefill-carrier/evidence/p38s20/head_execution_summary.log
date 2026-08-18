@@ -1,0 +1,8 @@
+[P38.INCIDENT_REPORT] run_id=p38s20 source_commit=bea31f36655b137d7ab47ba94095cadda5b586ba
+[P38.INCIDENT_REPORT] hardware=64 TPU v5p (DP16xTP4) mesh=16,4
+[P38.INCIDENT_REPORT] memory_expansion=4 GiB (_TERMINAL_MAX_BYTES=4294967296)
+[P38.INCIDENT_REPORT] round_0_records=873 terminal, 873 seam, 873 tail pairs
+[P38.INCIDENT_REPORT] round_0_precheck: S_prefill_vs_T_old=0 (100% bitwise exact identity)
+[P38.INCIDENT_REPORT] round_0_mismatches: S_decode_vs_S_prefill=63 differing bytes across 32 red points
+[P38.INCIDENT_REPORT] root_cause_timeout: GCS serial upload worker took >900s for 5,246 files triggering AlignmentGateError in Python learner
+[P38.INCIDENT_REPORT] verdict=ROUND_0_DATA_PRESERVED_ON_HOST_POD
