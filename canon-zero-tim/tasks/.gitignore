@@ -1,0 +1,4 @@
+# Frozen launch copies: a runner is cp-ed to .frozen_<label>.sh before each
+# launch so an edit mid-run cannot corrupt the executing script (footgun #11).
+# They are ephemeral run scaffolding, never delivery content.
+.frozen_*
