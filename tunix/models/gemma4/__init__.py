@@ -15,11 +15,9 @@
 """Gemma4 API."""
 
 from tunix.models.gemma4 import mapping_vllm_jax
-from tunix.models.gemma4 import model
-from tunix.models.gemma4 import params_safetensors
 
 BACKEND_MAPPINGS = {
     'vllm_jax': mapping_vllm_jax.VLLM_JAX_MAPPING,
 }
 
-__all__ = ['BACKEND_MAPPINGS', 'model', 'params_safetensors']
+__all__ = ['BACKEND_MAPPINGS']
