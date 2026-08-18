@@ -23,7 +23,8 @@ from tunix.sft import peft_trainer
 from typing_extensions import override
 from tunix.perf import trace as perf_trace
 from tunix.perf.experimental import tracer as perf_tracer_lib
-from tunix.sft.metrics_logger import MetricsLogger  # pylint: disable=unused-import
+from tunix.sft.metrics_logger import MetricsLogger
+# from tunix.experimental.train import peft_trainer_v2  # pylint: disable=unused-import
 
 
 class Trainer(peft_trainer.PeftTrainer):
