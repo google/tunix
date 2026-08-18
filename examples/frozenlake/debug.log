@@ -1,67 +1,22 @@
-<<<<<<< HEAD
-v1:
-
-Train step 1 training loss: 4.093186  - training perplexity: 59.930550
-[1] /train/loss=4.093186378479004
-[1] /train/perplexity=59.93054962158203
-[1] /train/grad_norm=222.35650634765625
-Train step 2 training loss: 2.723777  - training perplexity: 15.237767
-[2] /train/loss=2.7237770557403564
-[2] /train/perplexity=15.237767219543457
-[2] /train/grad_norm=190.40914916992188
-[3] /train/loss=2.5299196243286133
-Train step 3 training loss: 2.529920  - training perplexity: 12.552497
-[3] /train/perplexity=12.552496910095215
-[3] /train/grad_norm=45.529598236083984
-
-v2 fused_step:
-Train step 1 training loss: 4.086659  - training perplexity: 59.540630
-[1] /train/loss=4.086658954620361
-[1] /train/perplexity=59.54063034057617
-[1] /train/grad_norm=222.31106567382812
-Train step 2 training loss: 2.736073  - training perplexity: 15.426291
-[2] /train/loss=2.7360732555389404
-[2] /train/perplexity=15.426290512084961
-[2] /train/grad_norm=190.1228485107422
-is_update_step_val:  True
-self._jitted_fused_step_fn:  functools.partial(<function PeftTrainer._fused_step at 0x320fb7abe8e0>)
-is_update_step_val:  True
-self._jitted_fused_step_fn:  functools.partial(<function PeftTrainer._fused_step at 0x320fb7abe8e0>)
-Train step 3 training loss: 2.530935  - training perplexity: 12.565244
-[3] /train/loss=2.5309345722198486
-[3] /train/perplexity=12.5652437210083
-[3] /train/grad_norm=42.264217376708984
-Train step 4 training loss: 1.854100  - training perplexity: 6.385952
-[4] /train/loss=1.8541004657745361
-[4] /train/perplexity=6.385951519012451
-[4] /train/grad_norm=124.44063568115234
-=======
-
-Traceback (most recent call last):
-  File "/home/linchai_google_com/tunix/examples/frozenlake/grad_diff_debug.py", line 513, in <module>
-    trainer_v2.train(dataset, skip_jit=False, cache_nnx_graph=False)
-  File "/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py", line 1241, in train
-    self.train_step(train_example)
-  File "/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py", line 1002, in train_step
-    train_loss, aux, grad_norm = self._jitted_fused_step_fn(
-                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/transforms/compilation.py", line 1023, in __call__
-    pure_args_out, pure_kwargs_out, pure_out = self.jitted_fn(
-                                               ^^^^^^^^^^^^^^^
-  File "/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/transforms/compilation.py", line 138, in __call__
-    out = self.f(*args, **kwargs)
-          ^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py", line 603, in _fused_step
-    return loss, aux, self._update_step(model, optimizer, grad_accumulator)
-                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py", line 569, in _update_step
-    acc_grads = grad_accumulator.get()
-                ^^^^^^^^^^^^^^^^^^^^^^
-  File "/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py", line 273, in get
-    return jax.tree_util.tree_map(
-           ^^^^^^^^^^^^^^^^^^^^^^^
-ValueError: Custom node type mismatch: expected type: <class 'flax.nnx.statelib.State'>, value: {}.
---------------------
-For simplicity, JAX has removed its internal frames from the traceback of the following exception. Set JAX_TRACEBACK_FILTERING=off to include these.
-sys:1: DeprecationWarning: builtin type swigvarlink has no __module__ attribute
->>>>>>> f21ec478 (snapshot)
+[phase] v2: denom=0  micro-steps=40  updates=5
+[grads] v2: leaves=197 nonzero=0 finite=197 max|g|=0 norm=0.000000
+[cmp] grads: SKIPPED -- both accumulators were reset by the final update(), so there are no gradients left to compare. Read them between the last fwd_bwd and update().
+[move] weights changed?  v1=True  v2=True
+[cmp] weights after training: XOR v1=1102399029486164979 v2=10250655934169873121 DIFFER
+[cmp] weights after training: EXCEEDS max|dw|/max|w| = 1e-06  (worst leaf ['embedder']['input_embedding'].value: 2.43e-03, 47/197 leaves over)
+[diag] ['embedder']['input_embedding'].value: shape=(262144, 1536) dtype=float32
+        max ULP=1891095621 violating=874328/402653184  sorted-identical=False
+        tensor scale max|g|=0.0541998
+        max |x-y|=0.000131722  (= 2.430e-03 of scale)  at |x|=0.0132239
+        largest |x| among differing entries=0.0497597  (= 9.181e-01 of scale)
+[diag] ['layers'][0]['attn']['kv_einsum']['w'].value: shape=(2, 1, 1536, 256) dtype=float32
+        max ULP=1869387524 violating=786396/786432  sorted-identical=False
+        tensor scale max|g|=0.0481111
+        max |x-y|=6.49956e-05  (= 1.351e-03 of scale)  at |x|=0.0071499
+        largest |x| among differing entries=0.0481111  (= 1.000e+00 of scale)
+[diag] ['layers'][0]['attn']['q_einsum']['w'].value: shape=(8, 1536, 256) dtype=float32
+        max ULP=1846848946 violating=3145554/3145728  sorted-identical=False
+        tensor scale max|g|=0.0542073
+        max |x-y|=2.63043e-05  (= 4.853e-04 of scale)  at |x|=0.0323704
+        largest |x| among differing entries=0.0542073  (= 1.000e+00 of scale)
+[attr] NOT APPLICABLE: both accumulators were reset by the update, so the gradients that produced these weights are gone. Attribution needs the "grads" mode, where the update never fires and the accumulator still holds them.
