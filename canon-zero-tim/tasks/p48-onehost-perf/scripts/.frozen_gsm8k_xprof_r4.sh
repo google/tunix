@@ -119,12 +119,9 @@ sudo docker run --rm --privileged --net=host --name "$container" \
   -e CANON_P30_SHARDING_PROFILE=1 -e CANON_P30_RESHARD_ACCUMULATOR=1 \
   -e CANON_BATCHED_EVIDENCE=1 \
   -e CANON_P28_BATCHED_REPORT=1 \
-  -e CANON_P28_BATCHED_REVERSE="${P51_BATCHED_REVERSE:-}" \
   -e CANON_XPROF_DIR="$xprof_dir" \
   -e CANON_XPROF_SKIP_STEPS="$xprof_skip" \
   -e CANON_XPROF_STEPS="$xprof_steps" \
-  -e CANON_XPROF_PYTHON_TRACER="${P51_XPROF_PYTHON_TRACER:-0}" \
-  -e CANON_XPROF_HOST_TRACER="${P51_XPROF_HOST_TRACER:-}" \
   -e CANON_DP_SIZE=1 -e CANON_TP_SIZE=4 -e FL_SHARED_MESH=1,4 \
   -e XLA_FLAGS="$XTRA_XLA" \
   -e CANON_RPA_D=128,512,128,512 -e CANON_RPA_P=128,512,128,512 \
@@ -151,8 +148,8 @@ if len(devices) != 4 or jax.default_backend() != 'tpu':
   raise SystemExit('P51 one-host profiling requires exactly four TPU devices')
 PY
     exec python3 -u examples/math_gsm8k/qwen3_grpo_demo.py \
-      --mesh_fsdp=1 --mesh_tp=4 --batch_size=4 --mini_batch_size=4 \
-      --train_micro_batch_size=4 --compute_logps_micro_batch_size=4 \
+      --mesh_fsdp=1 --mesh_tp=4 --batch_size=4 --mini_batch_size=1 \
+      --train_micro_batch_size=1 --compute_logps_micro_batch_size=1 \
       --train_trajectory_micro_batch_size=2 \
       --max_steps=$max_steps --num_generations=8 --max_prompt_length=1024 \
       --max_response_length=1024 --max_concurrency=8 \
@@ -208,15 +205,3 @@ if [ "$docker_rc" -ne 0 ] || [ "${xplane_count}" -eq 0 ] || [ "${perfetto_count}
   exit 1
 fi
 echo "[P51.XPROF] GREEN artifacts under $xprof_dir" | tee -a "$driver"
-
-# Optional GCS export (P51_GCS_EXPORT=1). The upload is evidence handling,
-# not part of the capture gate: a failure here is reported and non-fatal so
-# the local artifacts stay usable.
-if [ "${P51_GCS_EXPORT:-0}" = "1" ]; then
-  if bash "$script_dir/persist_p51_xprof_gcs.sh" "$root" 2>&1 \
-      | tee -a "$driver"; then
-    echo "[P51.XPROF] gcs_export ok" | tee -a "$driver"
-  else
-    echo "[P51.XPROF] gcs_export FAILED (local artifacts intact)" | tee -a "$driver"
-  fi
-fi

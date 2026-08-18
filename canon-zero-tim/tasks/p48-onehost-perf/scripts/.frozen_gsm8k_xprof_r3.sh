@@ -80,7 +80,7 @@ mkdir -p "$state/wandb" "$state/logs" "$xprof_dir"
 
 set +e
 started="$(date +%s)"
-timeout --signal=TERM --kill-after=120s "${timeout_seconds}s" \
+timeout --foreground --signal=TERM --kill-after=120s "${timeout_seconds}s" \
 sudo docker run --rm --privileged --net=host --name "$container" \
   -v /mnt/disks/tunix-data:/mnt/disks/tunix-data \
   -v "$model":"$hf_snapshot":ro \
@@ -119,12 +119,9 @@ sudo docker run --rm --privileged --net=host --name "$container" \
   -e CANON_P30_SHARDING_PROFILE=1 -e CANON_P30_RESHARD_ACCUMULATOR=1 \
   -e CANON_BATCHED_EVIDENCE=1 \
   -e CANON_P28_BATCHED_REPORT=1 \
-  -e CANON_P28_BATCHED_REVERSE="${P51_BATCHED_REVERSE:-}" \
   -e CANON_XPROF_DIR="$xprof_dir" \
   -e CANON_XPROF_SKIP_STEPS="$xprof_skip" \
   -e CANON_XPROF_STEPS="$xprof_steps" \
-  -e CANON_XPROF_PYTHON_TRACER="${P51_XPROF_PYTHON_TRACER:-0}" \
-  -e CANON_XPROF_HOST_TRACER="${P51_XPROF_HOST_TRACER:-}" \
   -e CANON_DP_SIZE=1 -e CANON_TP_SIZE=4 -e FL_SHARED_MESH=1,4 \
   -e XLA_FLAGS="$XTRA_XLA" \
   -e CANON_RPA_D=128,512,128,512 -e CANON_RPA_P=128,512,128,512 \
@@ -159,29 +156,8 @@ PY
       --rollout_vllm_hbm_utilization=0.30 \
       --rollout_vllm_max_num_seqs=32 \
       --rollout_vllm_max_num_batched_tokens=256
-  " >>"$raw" 2>&1 &
-docker_wait_pid=$!
-# Crash watchdog (same rationale as the FL runner): an uncaught main-thread
-# exception leaves non-daemon engine threads holding the container until the
-# outer timeout. A [rank0] traceback is terminal on this stack; give teardown
-# 180s of grace, then stop the container.
-(
-  while kill -0 "$docker_wait_pid" 2>/dev/null; do
-    sleep 60
-    if grep -aq '^\[rank0\]: Traceback (most recent call last)' "$raw"; then
-      sleep 180
-      if kill -0 "$docker_wait_pid" 2>/dev/null; then
-        echo "[P51.XPROF] crash_watchdog stopping lingering container" >>"$raw"
-        sudo docker stop "$container" >/dev/null 2>&1 || true
-      fi
-      break
-    fi
-  done
-) &
-crash_watchdog_pid=$!
-wait "$docker_wait_pid"
+  " >>"$raw" 2>&1
 docker_rc=$?
-kill "$crash_watchdog_pid" 2>/dev/null || true
 set -e
 if sudo docker ps --format '{{.Names}}' | grep -q "^${container}\$"; then
   echo "[P51.XPROF] post_run_cleanup stopping lingering container" >>"$raw"
@@ -208,15 +184,3 @@ if [ "$docker_rc" -ne 0 ] || [ "${xplane_count}" -eq 0 ] || [ "${perfetto_count}
   exit 1
 fi
 echo "[P51.XPROF] GREEN artifacts under $xprof_dir" | tee -a "$driver"
-
-# Optional GCS export (P51_GCS_EXPORT=1). The upload is evidence handling,
-# not part of the capture gate: a failure here is reported and non-fatal so
-# the local artifacts stay usable.
-if [ "${P51_GCS_EXPORT:-0}" = "1" ]; then
-  if bash "$script_dir/persist_p51_xprof_gcs.sh" "$root" 2>&1 \
-      | tee -a "$driver"; then
-    echo "[P51.XPROF] gcs_export ok" | tee -a "$driver"
-  else
-    echo "[P51.XPROF] gcs_export FAILED (local artifacts intact)" | tee -a "$driver"
-  fi
-fi

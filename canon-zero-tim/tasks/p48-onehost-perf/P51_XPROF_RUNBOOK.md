@@ -60,6 +60,37 @@ pip install --user xprof   # 一次性;解析/服务不需要 TPU
 ```
 或 perfetto_trace.json.gz 拖 ui.perfetto.dev(零安装)。
 
+## 导出到 GCS(另一台机器/另一个 agent 消费)
+
+```bash
+# 随 run 自动导出(推荐):
+P51_GCS_EXPORT=1 P51_MAX_STEPS=6 P51_XPROF_SKIP_STEPS=4 \
+bash canon-zero-tim/tasks/p48-onehost-perf/scripts/run_onehost_gsm8k_xprof.sh <label>
+
+# 或对已完成的 run 单独导出:
+bash canon-zero-tim/tasks/p48-onehost-perf/scripts/persist_p51_xprof_gcs.sh \
+  /mnt/disks/tunix-data/logp_probe_1host/p51_gsm8k_xprof_<label>
+```
+
+抄自 P38 的持久化模式(`tasks/p38-…/scripts/persist_p38_gcs.sh`):
+gcloud→gsutil→google-cloud-storage 三级 fallback、SHA256SUMS 清单、
+**上传后下载回读 cmp 校验**、`COMPLETE.json` 完成标记(已存在即拒绝重传)。
+目的地:`gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p51/<label>/<session>/`
+(`P51_GCS_PREFIX` 可覆盖,但必须留在该 bucket 根下)。
+上传内容:`*.xplane.pb`(含 device 轨)、`perfetto_trace.json.gz`、
+`*.trace.json.gz`、`driver.log`、`raw.log`、`SHA256SUMS`。
+
+导出是证据处理,**不是捕获判据**:上传失败只报不炸,本地产物照旧可用。
+**未在本机验证**(此宿主无 GCS 凭据/网络路径);首次在有凭据的机器上跑时,
+先看 `[P51.GCS] UPLOADED`/`COMPLETE` 行与回读 cmp 是否通过。
+
+消费端(另一台机器):
+```bash
+gcloud storage cp -r gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p51/<label> .
+cd <label> && sha256sum -c <session>/SHA256SUMS
+pip install --user xprof && ~/.local/bin/xprof <session> --port 8791
+```
+
 **脚本化读数**(host 织物聚合,产出 P52 那种 top-op 表):
 `xprof.profile_data.ProfileData.from_file(<xplane>)` 逐 plane/line/event
 聚合;host C++ 事件过滤 `$` 前缀(python tracer 行);device 轨看
