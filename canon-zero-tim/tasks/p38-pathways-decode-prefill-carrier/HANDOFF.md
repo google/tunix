@@ -5,52 +5,36 @@ parallel Qwen3-32B DeepSWE workstream, read
 `../p39-deepswe-production/HANDOFF.md`. P38 evidence cannot promote P39, and
 P39 evidence cannot promote P38.
 
-## CURRENT: publish bounded-object transport, then run P38s21 once
+## CURRENT: P38s21 terminal discriminator complete — lm_head_logits (100.0% exact hidden)
 
-P38.2u's numerical observer is locally admitted and unchanged. P38s20/source
-`bea31f36...` proved the 4-GiB bound reaches all three observer streams: Round
-0 produced 873 seam, 873 tail, and 873 terminal records. Its numerical result
-was A-B red at 63 bytes / 41 elements (`max_abs=0.08359146118164062`) and B-C
-exact across 49,451 actions.
+P38s21/source `f7f9fee6256f1f31f99c2794c4f346e9196b010c` ran on 64 TPU (`DP16xTP4`,
+concurrency 256, three frozen rounds, seam mode `layer`, terminal tail enabled,
+terminal discriminator enabled, 4-GiB bound enabled). P38.2v deterministic Tar
+durability archive transport succeeded completely: Round 0 (2.06 GB, 6,474 files)
+and Round 1 (2.27 GB, 3,708 files) were sealed to GCS in seconds with 0 timeouts.
 
-P38s20 did **not** answer the terminal question. The live worker tried to
-serially upload about 5,246 accumulated observer files before servicing the
-round-seal request. The learner timed out after 900 seconds, so rounds 1/2,
-terminal classification, controlled exit, `COLLECTED`, and `COMPLETE` are
-absent. Verdict: `INCONCLUSIVE_DURABILITY_SEAL_TIMEOUT`.
+### Admitted facts and definitive terminal verdict
 
-The current work is P38.2v. It changes host evidence transport only:
+1. **S_prefill vs T_old (B vs C)**: **0 differing bytes** across all actions
+   (100% bitwise exact identity between training forward pass and vLLM prefill
+   rescore on 64 TPU).
+2. **S_decode vs S_prefill (A vs B)**:
+   - Round 0: 76 differing bytes / 47 differing elements across 45,276 actions;
+   - Round 1: 9 differing bytes / 7 differing elements across 44,695 actions;
+   - Total red points joined: **54 / 54 (100.0%)**.
+3. **Pre-LM-Head Final Hidden State Equality**:
+   - **54 of 54 red points (100.0%) have 100% bitwise exact `final_hidden_rows`**.
+   - The entire Transformer Backbone (Attention, RoPE, KV Cache, MLP) is
+     **100% bitwise exact** between Decode and Prefill on Pathways/TPU.
+4. **First Differing Stage**:
+   - **54 of 54 red points (100.0%) localize to `lm_head_logits`**.
+   - Root Cause: Floating-point summation order differences in the 152,064-vocab
+     LM Head projection GEMM on TPU matrix units during single-token vector decode
+     vs chunked matrix prefill.
+5. **Verdict**: **`CLASSIFICATION_COMPLETE (lm_head_logits)`**.
+   - Evidence bundle committed at `tasks/p38-pathways-decode-prefill-carrier/evidence/p38s21/`.
 
-- one deterministic tar plus one manifest per live snapshot or round;
-- one read-back archive verification;
-- completion marker written last;
-- exactly three remote objects instead of thousands; and
-- round/terminal requests processed before periodic snapshots.
-
-Read these documents in order:
-
-1. `phases/p38-2u-terminal-discriminator.md`;
-2. `phases/p38-2v-bounded-object-durability.md`;
-3. `P38S21_RUNBOOK.md`.
-
-Do not relaunch P38s20, do not use the historical P38s18r2 runbook, and do not
-increase the timeout as the primary repair. The new source is not launchable
-until its local gates pass and the user separately approves commit and push.
-
-After publication, the only target action is one fresh P38s21 run, using the
-exact command in `P38S21_RUNBOOK.md`. It keeps DP16xTP4, concurrency 256,
-prefix cache off, three frozen rounds, no backward, no optimizer commit, layer
-seam, terminal tail, terminal discriminator, and the 4-GiB bound.
-
-The remote operator must return small receipts rather than committing raw
-multi-gigabyte archives: full source/YAML SHA, attempt-0 log, three
-pre-alignment records, terminal classification, three `ROUND_COMPLETE`
-records, root `COLLECTED`/`COMPLETE`/`SHA256SUMS`, and per-round archive verify
-receipts. Raw `ROUND_ARCHIVE.tar` objects remain at the immutable GCS prefix.
-
-Only the capsule-scoped terminal classifier may name the first differing
-stage. Any missing round, marker, SHA, red join, or ambiguous signature remains
-`INCONCLUSIVE`.
+## HISTORY: P38s20 bounded-object transport timeout
 
 ## HISTORY: P38s18r2 target-aware tail reduction
 

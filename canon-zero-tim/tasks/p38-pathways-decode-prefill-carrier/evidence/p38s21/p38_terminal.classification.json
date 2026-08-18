@@ -1,0 +1,507 @@
+{
+  "classification": "lm_head_logits",
+  "claim_ceiling": "exact_final_hidden_rows_plus_diagnostic_multiword_logit_fingerprints_not_full_logits_byte_equality",
+  "schema": "p38-terminal-discriminator-classification-v1",
+  "selection_scope": "capsule_red_points",
+  "total_red_points": 54,
+  "joined_red_points": 54,
+  "exact_final_hidden_points": 54,
+  "final_hidden_exact_ratio": 1.0,
+  "stage_counts": {
+    "pre_lm_head_hidden": 0,
+    "lm_head_logits": 54,
+    "vocab_block_reduction": 0,
+    "logits_processing": 0,
+    "processed_vocab_block_reduction": 0,
+    "production_tail_only": 0,
+    "exact": 0
+  },
+  "red_rows": [
+    {
+      "diagnostic_round": 0,
+      "source_row": 199,
+      "completion_position": 796,
+      "source_position": 1783,
+      "target_id": 279,
+      "first_differing_stage": "lm_head_logits",
+      "final_hidden_exact": true
+    },
+    {
+      "diagnostic_round": 0,
+      "source_row": 199,
+      "completion_position": 797,
+      "source_position": 1784,
+      "target_id": 1815,
+      "first_differing_stage": "lm_head_logits",
+      "final_hidden_exact": true
+    },
+    {
+      "diagnostic_round": 0,
+      "source_row": 206,
+      "completion_position": 949,
+      "source_position": 1984,
+      "target_id": 3019,
+      "first_differing_stage": "lm_head_logits",
+      "final_hidden_exact": true
+    },
+    {
+      "diagnostic_round": 0,
+      "source_row": 207,
+      "completion_position": 938,
+      "source_position": 1973,
+      "target_id": 1431,
+      "first_differing_stage": "lm_head_logits",
+      "final_hidden_exact": true
+    },
+    {
+      "diagnostic_round": 0,
+      "source_row": 207,
+      "completion_position": 954,
+      "source_position": 1989,
+      "target_id": 304,
+      "first_differing_stage": "lm_head_logits",
+      "final_hidden_exact": true
+    },
+    {
+      "diagnostic_round": 0,
+      "source_row": 207,
+      "completion_position": 967,
+      "source_position": 2002,
+      "target_id": 1815,
+      "first_differing_stage": "lm_head_logits",
+      "final_hidden_exact": true
+    },
+    {
+      "diagnostic_round": 0,
+      "source_row": 207,
+      "completion_position": 969,
+      "source_position": 2004,
+      "target_id": 479,
+      "first_differing_stage": "lm_head_logits",
+      "final_hidden_exact": true
+    },
+    {
+      "diagnostic_round": 0,
+      "source_row": 207,
+      "completion_position": 971,
+      "source_position": 2006,
+      "target_id": 311,
+      "first_differing_stage": "lm_head_logits",
+      "final_hidden_exact": true
+    },
+    {
+      "diagnostic_round": 0,
+      "source_row": 207,
+      "completion_position": 974,
+      "source_position": 2009,
+      "target_id": 11,
+      "first_differing_stage": "lm_head_logits",
+      "final_hidden_exact": true
+    },
+    {
+      "diagnostic_round": 0,
+      "source_row": 207,
+      "completion_position": 985,
+      "source_position": 2020,
+      "target_id": 686,
+      "first_differing_stage": "lm_head_logits",
+      "final_hidden_exact": true
+    },
+    {
+      "diagnostic_round": 0,
+      "source_row": 207,
+      "completion_position": 994,
+      "source_position": 2029,
+      "target_id": 5214,
+      "first_differing_stage": "lm_head_logits",
+      "final_hidden_exact": true
+    },
+    {
+      "diagnostic_round": 0,
+      "source_row": 230,
+      "completion_position": 840,
+      "source_position": 1849,
+      "target_id": 1290,
+      "first_differing_stage": "lm_head_logits",
+      "final_hidden_exact": true
+    },
+    {
+      "diagnostic_round": 0,
+      "source_row": 231,
+      "completion_position": 796,
+      "source_position": 1805,
+      "target_id": 374,
+      "first_differing_stage": "lm_head_logits",
+      "final_hidden_exact": true
+    },
+    {
+      "diagnostic_round": 0,
+      "source_row": 231,
+      "completion_position": 817,
+      "source_position": 1826,
+      "target_id": 3271,
+      "first_differing_stage": "lm_head_logits",
+      "final_hidden_exact": true
+    },
+    {
+      "diagnostic_round": 0,
+      "source_row": 239,
+      "completion_position": 637,
+      "source_position": 1606,
+      "target_id": 13,
+      "first_differing_stage": "lm_head_logits",
+      "final_hidden_exact": true
+    },
+    {
+      "diagnostic_round": 0,
+      "source_row": 239,
+      "completion_position": 755,
+      "source_position": 1724,
+      "target_id": 3271,
+      "first_differing_stage": "lm_head_logits",
+      "final_hidden_exact": true
+    },
+    {
+      "diagnostic_round": 0,
+      "source_row": 244,
+      "completion_position": 876,
+      "source_position": 1885,
+      "target_id": 37627,
+      "first_differing_stage": "lm_head_logits",
+      "final_hidden_exact": true
+    },
+    {
+      "diagnostic_round": 0,
+      "source_row": 244,
+      "completion_position": 885,
+      "source_position": 1894,
+      "target_id": 11,
+      "first_differing_stage": "lm_head_logits",
+      "final_hidden_exact": true
+    },
+    {
+      "diagnostic_round": 0,
+      "source_row": 245,
+      "completion_position": 874,
+      "source_position": 1883,
+      "target_id": 1431,
+      "first_differing_stage": "lm_head_logits",
+      "final_hidden_exact": true
+    },
+    {
+      "diagnostic_round": 0,
+      "source_row": 245,
+      "completion_position": 929,
+      "source_position": 1938,
+      "target_id": 1790,
+      "first_differing_stage": "lm_head_logits",
+      "final_hidden_exact": true
+    },
+    {
+      "diagnostic_round": 0,
+      "source_row": 246,
+      "completion_position": 961,
+      "source_position": 1970,
+      "target_id": 279,
+      "first_differing_stage": "lm_head_logits",
+      "final_hidden_exact": true
+    },
+    {
+      "diagnostic_round": 0,
+      "source_row": 247,
+      "completion_position": 782,
+      "source_position": 1791,
+      "target_id": 20,
+      "first_differing_stage": "lm_head_logits",
+      "final_hidden_exact": true
+    },
+    {
+      "diagnostic_round": 0,
+      "source_row": 247,
+      "completion_position": 803,
+      "source_position": 1812,
+      "target_id": 1393,
+      "first_differing_stage": "lm_head_logits",
+      "final_hidden_exact": true
+    },
+    {
+      "diagnostic_round": 0,
+      "source_row": 247,
+      "completion_position": 830,
+      "source_position": 1839,
+      "target_id": 1429,
+      "first_differing_stage": "lm_head_logits",
+      "final_hidden_exact": true
+    },
+    {
+      "diagnostic_round": 0,
+      "source_row": 247,
+      "completion_position": 834,
+      "source_position": 1843,
+      "target_id": 633,
+      "first_differing_stage": "lm_head_logits",
+      "final_hidden_exact": true
+    },
+    {
+      "diagnostic_round": 0,
+      "source_row": 247,
+      "completion_position": 849,
+      "source_position": 1858,
+      "target_id": 374,
+      "first_differing_stage": "lm_head_logits",
+      "final_hidden_exact": true
+    },
+    {
+      "diagnostic_round": 0,
+      "source_row": 247,
+      "completion_position": 854,
+      "source_position": 1863,
+      "target_id": 5098,
+      "first_differing_stage": "lm_head_logits",
+      "final_hidden_exact": true
+    },
+    {
+      "diagnostic_round": 0,
+      "source_row": 247,
+      "completion_position": 1002,
+      "source_position": 2011,
+      "target_id": 374,
+      "first_differing_stage": "lm_head_logits",
+      "final_hidden_exact": true
+    },
+    {
+      "diagnostic_round": 0,
+      "source_row": 247,
+      "completion_position": 1056,
+      "source_position": 2065,
+      "target_id": 1616,
+      "first_differing_stage": "lm_head_logits",
+      "final_hidden_exact": true
+    },
+    {
+      "diagnostic_round": 0,
+      "source_row": 255,
+      "completion_position": 840,
+      "source_position": 1875,
+      "target_id": 1249,
+      "first_differing_stage": "lm_head_logits",
+      "final_hidden_exact": true
+    },
+    {
+      "diagnostic_round": 0,
+      "source_row": 255,
+      "completion_position": 855,
+      "source_position": 1890,
+      "target_id": 334,
+      "first_differing_stage": "lm_head_logits",
+      "final_hidden_exact": true
+    },
+    {
+      "diagnostic_round": 0,
+      "source_row": 255,
+      "completion_position": 865,
+      "source_position": 1900,
+      "target_id": 429,
+      "first_differing_stage": "lm_head_logits",
+      "final_hidden_exact": true
+    },
+    {
+      "diagnostic_round": 0,
+      "source_row": 255,
+      "completion_position": 870,
+      "source_position": 1905,
+      "target_id": 15277,
+      "first_differing_stage": "lm_head_logits",
+      "final_hidden_exact": true
+    },
+    {
+      "diagnostic_round": 0,
+      "source_row": 255,
+      "completion_position": 883,
+      "source_position": 1918,
+      "target_id": 334,
+      "first_differing_stage": "lm_head_logits",
+      "final_hidden_exact": true
+    },
+    {
+      "diagnostic_round": 0,
+      "source_row": 255,
+      "completion_position": 884,
+      "source_position": 1919,
+      "target_id": 311,
+      "first_differing_stage": "lm_head_logits",
+      "final_hidden_exact": true
+    },
+    {
+      "diagnostic_round": 0,
+      "source_row": 255,
+      "completion_position": 892,
+      "source_position": 1927,
+      "target_id": 374,
+      "first_differing_stage": "lm_head_logits",
+      "final_hidden_exact": true
+    },
+    {
+      "diagnostic_round": 0,
+      "source_row": 255,
+      "completion_position": 896,
+      "source_position": 1931,
+      "target_id": 576,
+      "first_differing_stage": "lm_head_logits",
+      "final_hidden_exact": true
+    },
+    {
+      "diagnostic_round": 0,
+      "source_row": 255,
+      "completion_position": 897,
+      "source_position": 1932,
+      "target_id": 1790,
+      "first_differing_stage": "lm_head_logits",
+      "final_hidden_exact": true
+    },
+    {
+      "diagnostic_round": 0,
+      "source_row": 255,
+      "completion_position": 1210,
+      "source_position": 2245,
+      "target_id": 374,
+      "first_differing_stage": "lm_head_logits",
+      "final_hidden_exact": true
+    },
+    {
+      "diagnostic_round": 0,
+      "source_row": 255,
+      "completion_position": 1212,
+      "source_position": 2247,
+      "target_id": 3204,
+      "first_differing_stage": "lm_head_logits",
+      "final_hidden_exact": true
+    },
+    {
+      "diagnostic_round": 0,
+      "source_row": 255,
+      "completion_position": 1213,
+      "source_position": 2248,
+      "target_id": 2474,
+      "first_differing_stage": "lm_head_logits",
+      "final_hidden_exact": true
+    },
+    {
+      "diagnostic_round": 0,
+      "source_row": 255,
+      "completion_position": 1220,
+      "source_position": 2255,
+      "target_id": 1249,
+      "first_differing_stage": "lm_head_logits",
+      "final_hidden_exact": true
+    },
+    {
+      "diagnostic_round": 0,
+      "source_row": 255,
+      "completion_position": 1226,
+      "source_position": 2261,
+      "target_id": 11,
+      "first_differing_stage": "lm_head_logits",
+      "final_hidden_exact": true
+    },
+    {
+      "diagnostic_round": 0,
+      "source_row": 255,
+      "completion_position": 1248,
+      "source_position": 2283,
+      "target_id": 12434,
+      "first_differing_stage": "lm_head_logits",
+      "final_hidden_exact": true
+    },
+    {
+      "diagnostic_round": 0,
+      "source_row": 255,
+      "completion_position": 1561,
+      "source_position": 2596,
+      "target_id": 12128,
+      "first_differing_stage": "lm_head_logits",
+      "final_hidden_exact": true
+    },
+    {
+      "diagnostic_round": 0,
+      "source_row": 255,
+      "completion_position": 1591,
+      "source_position": 2626,
+      "target_id": 279,
+      "first_differing_stage": "lm_head_logits",
+      "final_hidden_exact": true
+    },
+    {
+      "diagnostic_round": 0,
+      "source_row": 255,
+      "completion_position": 1614,
+      "source_position": 2649,
+      "target_id": 323,
+      "first_differing_stage": "lm_head_logits",
+      "final_hidden_exact": true
+    },
+    {
+      "diagnostic_round": 1,
+      "source_row": 223,
+      "completion_position": 1045,
+      "source_position": 2110,
+      "target_id": 37627,
+      "first_differing_stage": "lm_head_logits",
+      "final_hidden_exact": true
+    },
+    {
+      "diagnostic_round": 1,
+      "source_row": 245,
+      "completion_position": 787,
+      "source_position": 1774,
+      "target_id": 5979,
+      "first_differing_stage": "lm_head_logits",
+      "final_hidden_exact": true
+    },
+    {
+      "diagnostic_round": 1,
+      "source_row": 246,
+      "completion_position": 723,
+      "source_position": 1710,
+      "target_id": 12434,
+      "first_differing_stage": "lm_head_logits",
+      "final_hidden_exact": true
+    },
+    {
+      "diagnostic_round": 1,
+      "source_row": 246,
+      "completion_position": 841,
+      "source_position": 1828,
+      "target_id": 701,
+      "first_differing_stage": "lm_head_logits",
+      "final_hidden_exact": true
+    },
+    {
+      "diagnostic_round": 1,
+      "source_row": 255,
+      "completion_position": 748,
+      "source_position": 1757,
+      "target_id": 279,
+      "first_differing_stage": "lm_head_logits",
+      "final_hidden_exact": true
+    },
+    {
+      "diagnostic_round": 1,
+      "source_row": 255,
+      "completion_position": 786,
+      "source_position": 1795,
+      "target_id": 37627,
+      "first_differing_stage": "lm_head_logits",
+      "final_hidden_exact": true
+    },
+    {
+      "diagnostic_round": 1,
+      "source_row": 255,
+      "completion_position": 942,
+      "source_position": 1951,
+      "target_id": 11,
+      "first_differing_stage": "lm_head_logits",
+      "final_hidden_exact": true
+    }
+  ]
+}
