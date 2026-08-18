@@ -218,10 +218,23 @@ def load_and_create_model_orig(
           if transform is not None:
             permute, reshape = transform
             if permute:
-              v = v.transpose(permute)
+              v = (
+                  v.permute(*permute)
+                  if hasattr(v, 'permute')
+                  else v.transpose(permute)
+              )
             if reshape:
               v = v.reshape(reshape)
 
+          if hasattr(v, 'numpy'):
+            if str(getattr(v, 'dtype', '')) == 'torch.bfloat16':
+              v = v.float().cpu().numpy().astype(ml_dtypes.bfloat16)
+            else:
+              v = v.detach().cpu().numpy()
+          if hasattr(v, 'tobytes') and hasattr(v, 'shape') and hasattr(v, 'dtype'):
+            if v.dtype not in (np.float32, np.float16, np.float64, np.int32, np.int64, np.int16, np.int8, np.uint32, np.uint8, np.bool_) or str(v.dtype) in ('bfloat16', 'BF16'):
+              if getattr(v.dtype, 'itemsize', 2) == 2:
+                v = np.frombuffer(v.tobytes(), dtype=ml_dtypes.bfloat16).reshape(v.shape)
           current_arr = jnp.array(v)
           if dtype and current_arr.dtype != dtype:
             current_arr = current_arr.astype(dtype)
@@ -395,7 +408,11 @@ def load_and_create_model_opt(
       if transform is not None:
         permute, reshape = transform
         if permute:
-          parameter = parameter.transpose(permute)
+          parameter = (
+              parameter.permute(*permute)
+              if hasattr(parameter, 'permute')
+              else parameter.transpose(permute)
+          )
         if reshape:
           parameter = parameter.reshape(reshape)
       state_dict[jax_key_mapped] = parameter
