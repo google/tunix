@@ -23,9 +23,33 @@ from typing import Any
 from absl import logging
 from flax import nnx
 import jax
+import numpy as np
 from orbax.checkpoint import pathways as ocp_pathways
+from orbax.checkpoint import utils as ocp_utils
 from orbax.checkpoint import v1 as ocp
 from tunix.sft import checkpoint_options
+
+
+def _convert_host_local_array(x: Any) -> Any:
+  """Converts host-local arrays to global arrays in multi-device/multi-host settings."""
+  if (
+      isinstance(x, jax.Array)
+      and len(x.devices()) == 1
+      and len(jax.devices()) > 1
+  ):
+    mesh = jax.sharding.Mesh(np.array(jax.devices()), axis_names=('x',))
+    replicated_sharding = jax.sharding.NamedSharding(
+        mesh, jax.sharding.PartitionSpec()
+    )
+    if not x.shape:
+      val = x.item()
+      return jax.device_put(val, replicated_sharding)
+    else:
+      try:
+        return ocp_utils.fully_replicated_host_local_array_to_global_array(x)
+      except ValueError:
+        return jax.device_put(np.asarray(x), replicated_sharding)
+  return x
 
 
 def _fix_sharding(state: Any) -> Any:
@@ -199,9 +223,12 @@ class CheckpointManager:
       params = nnx.state(model)
 
     if optimizer is not None:
+      optimizer_state = nnx.state(optimizer, nnx.optimizer.OptState)
+      # Convert host-local arrays in state PyTree to global arrays.
+      optimizer_state = jax.tree.map(_convert_host_local_array, optimizer_state)
       checkpointables = {
           'model_params': params,
-          'optimizer_state': nnx.state(optimizer, nnx.optimizer.OptState),
+          'optimizer_state': optimizer_state,
       }
     else:
       checkpointables = {

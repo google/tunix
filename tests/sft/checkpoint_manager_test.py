@@ -640,6 +640,35 @@ class CheckpointManagerTest(parameterized.TestCase):
         mock_sync.assert_called_once()
         mock_async.assert_not_called()
 
+  def test_convert_host_local_scalar_array(self):
+    scalar = jax.device_put(jnp.array(42), jax.devices()[0])
+    self.assertEqual(len(scalar.devices()), 1)
+    self.assertEqual(scalar.shape, ())
+    converted = checkpoint_manager._convert_host_local_array(scalar)
+    self.assertIsInstance(converted.sharding, jax.sharding.NamedSharding)
+    self.assertEqual(int(converted), 42)
+
+  def test_convert_host_local_1d_array(self):
+    arr = jax.device_put(jnp.array([1.0, 2.0, 3.0]), jax.devices()[0])
+    self.assertEqual(len(arr.devices()), 1)
+    converted = checkpoint_manager._convert_host_local_array(arr)
+    self.assertIsInstance(converted, jax.Array)
+    np.testing.assert_allclose(converted, np.array([1.0, 2.0, 3.0]))
+
+  def test_save_with_host_local_optimizer_state(self):
+    cp_path = f'{self.temp_path}/{self.id()}'
+    cp_manager = checkpoint_manager.CheckpointManager(cp_path)
+    model, _ = create_sharded_model(TestModel, nnx.Rngs(0), self.mesh)
+    optimizer = nnx.Optimizer(
+        model,
+        optax.inject_hyperparams(optax.adamw)(learning_rate=1e-3),
+        wrt=nnx.Param,
+    )
+    self.assertTrue(cp_manager.save(1, model, optimizer=optimizer))
+    assert cp_manager._checkpointer is not None
+    cp_manager._checkpointer.wait()
+    self.assertEqual(cp_manager.latest_step(), 1)
+
 
 if __name__ == '__main__':
   absltest.main()
