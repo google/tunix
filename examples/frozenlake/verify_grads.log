@@ -15,29 +15,29 @@ INIT weight checksum: 10256206509410191469
 [compile] v1: _jitted_train_step_fn=2
 live device arrays after v1 teardown: 0.00 GiB (global, unsharded-equivalent)
 v2 start weight checksum: 10256206509410191469 OK
-[phase] v2: denom=7  micro-steps=7  updates=0
-[grads] v2: leaves=197 nonzero=123 finite=197 max|g|=6.95797 norm=745.546951
+[phase] v2: denom=14280  micro-steps=7  updates=0
+[grads] v2: leaves=197 nonzero=123 finite=197 max|g|=6.95094 norm=745.533810
 [compile] v2: _jitted_fwd_bwd_step_fn=2  _jitted_update_step_fn=0
-[cmp] grads: comparing get() output (v1 denom=14280 tokens, v2 denom=7 micro-steps; raw buffers differ by that ratio by construction)
-[cmp] grads: XOR v1=16195207927714427338 v2=9023658942194578182 DIFFER
+[cmp] grads: comparing get() output (v1 denom=14280 tokens, v2 denom=14280 micro-steps; raw buffers differ by that ratio by construction)
+[cmp] grads: XOR v1=16195207927714427338 v2=2062404665179697004 DIFFER
 [cmp] grads: EXCEEDS 0 ULP
 Mismatch at path: (DictKey(key='embedder'), DictKey(key='input_embedding'), GetAttrKey(name='value'))
   dtype        : float32
-  max ULP      : 1992866812 (allowed 0)
-  violating    : 279502964/402653184 (69.4153%)
-  ULP histogram: 0:123150220, 1:183374223, 2:66971086, 3:15472919, 4:4194473, 5:1976497, 6:1235530, 7:865747, >=8:5412489
+  max ULP      : 2005932571 (allowed 0)
+  violating    : 195069/402653184 (0.0484%)
+  ULP histogram: 0:402458115, 1:1, 2:6, 3:3, 4:6, 5:3, 6:2, 7:4, >=8:195044
 [diag] ['embedder']['input_embedding'].value: shape=(262144, 1536) dtype=float32
-        max ULP=1992866812 violating=279502964/402653184  sorted-identical=False
+        max ULP=2005932571 violating=195069/402653184  sorted-identical=False
         tensor scale max|g|=6.95045
-        max |x-y|=0.0127695  (= 1.837e-03 of scale)  at |x|=0.0268453
+        max |x-y|=0.0173491  (= 2.496e-03 of scale)  at |x|=0.399045
         largest |x| among differing entries=6.95045  (= 1.000e+00 of scale)
 [diag] ['layers'][0]['attn']['kv_einsum']['w'].value: shape=(2, 1, 1536, 256) dtype=float32
-        max ULP=1974014741 violating=786420/786432  sorted-identical=False
+        max ULP=1985945441 violating=786426/786432  sorted-identical=False
         tensor scale max|g|=2.92696
-        max |x-y|=0.00530446  (= 1.812e-03 of scale)  at |x|=0.520162
+        max |x-y|=0.00776501  (= 2.653e-03 of scale)  at |x|=0.055678
         largest |x| among differing entries=2.92696  (= 1.000e+00 of scale)
 [diag] ['layers'][0]['attn']['q_einsum']['w'].value: shape=(8, 1536, 256) dtype=float32
-        max ULP=1956448704 violating=3145683/3145728  sorted-identical=False
+        max ULP=1966173514 violating=3145683/3145728  sorted-identical=False
         tensor scale max|g|=1.10209
-        max |x-y|=0.00290857  (= 2.639e-03 of scale)  at |x|=0.167889
+        max |x-y|=0.00372283  (= 3.378e-03 of scale)  at |x|=0.167889
         largest |x| among differing entries=1.10209  (= 1.000e+00 of scale)

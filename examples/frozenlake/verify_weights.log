@@ -22,21 +22,21 @@ v2 start weight checksum: 10256206509410191469 OK
 [compile] v2: _jitted_fwd_bwd_step_fn=2  _jitted_update_step_fn=1
 [cmp] grads: SKIPPED -- the accumulator was reset by the final update(), so there are no gradients left to compare. Read them between the last fwd_bwd and update(), i.e. run GDD_MODE=grads.
 [move] weights changed?  v1=True  v2=True
-[cmp] weights after training: XOR v1=30463507427531631 v2=9614866861619871272 DIFFER
-[cmp] weights after training: EXCEEDS max|dw|/max|w| = 1e-06  (worst leaf ['embedder']['input_embedding'].value: 2.36e-06, 2/197 leaves over)
+[cmp] weights after training: XOR v1=30463507427531631 v2=2203364752886052312 DIFFER
+[cmp] weights after training: EXCEEDS max|dw|/max|w| = 1e-06  (worst leaf ['embedder']['input_embedding'].value: 3.54e-06, 2/197 leaves over)
 [diag] ['embedder']['input_embedding'].value: shape=(262144, 1536) dtype=float32
-        max ULP=3858304 violating=191723/402653184  sorted-identical=False
+        max ULP=17396416 violating=193270/402653184  sorted-identical=False
         tensor scale max|g|=0.0541998
-        max |x-y|=1.28057e-07  (= 2.363e-06 of scale)  at |x|=0.00216108
+        max |x-y|=1.91678e-07  (= 3.537e-06 of scale)  at |x|=0.000139123
         largest |x| among differing entries=0.0497485  (= 9.179e-01 of scale)
 [diag] ['layers'][0]['attn']['kv_einsum']['w'].value: shape=(2, 1, 1536, 256) dtype=float32
-        max ULP=4357056 violating=733774/786432  sorted-identical=False
+        max ULP=4668160 violating=753934/786432  sorted-identical=False
         tensor scale max|g|=0.0481231
-        max |x-y|=5.05242e-08  (= 1.050e-06 of scale)  at |x|=0.0022263
+        max |x-y|=7.91624e-08  (= 1.645e-06 of scale)  at |x|=0.0111475
         largest |x| among differing entries=0.0481231  (= 1.000e+00 of scale)
 [diag] ['layers'][0]['attn']['q_einsum']['w'].value: shape=(8, 1536, 256) dtype=float32
-        max ULP=1657441024 violating=2864569/3145728  sorted-identical=False
+        max ULP=11937280 violating=2973977/3145728  sorted-identical=False
         tensor scale max|g|=0.0542015
-        max |x-y|=2.6077e-08  (= 4.811e-07 of scale)  at |x|=0.0085866
-        largest |x| among differing entries=0.0542015  (= 1.000e+00 of scale)
+        max |x-y|=3.46918e-08  (= 6.401e-07 of scale)  at |x|=0.0024949
+        largest |x| among differing entries=0.0512502  (= 9.456e-01 of scale)
 [attr] NOT APPLICABLE: both accumulators were reset by the update, so the gradients that produced these weights are gone. Attribution needs the "grads" mode, where the update never fires and the accumulator still holds them.
