@@ -20,12 +20,12 @@ from absl.testing import absltest
 from absl.testing import parameterized
 import numpy as np
 from tunix.experimental.trajectory import converter
-from tunix.experimental.trajectory import store_testing
 from tunix.experimental.trajectory import trajectory as trajectory_lib
+from tunix.experimental.trajectory import trajectory_testing
 from tunix.rl.agentic.agents import agent_types
 
 
-class CreateAgentStepTest(parameterized.TestCase):
+class CreateAgentStepTest(trajectory_testing.TrajectoryTestCase):
 
   def test_create_agent_step_none_returns_none(self):
     step = converter.create_agent_step(None, tunix_step_id=0)
@@ -73,7 +73,7 @@ class CreateAgentStepTest(parameterized.TestCase):
             "raw_action": {"name": "bash", "arguments": {"command": "ls -la"}},
         },
     )
-    store_testing.assert_step_equal(self, agent_step, expected_step)
+    self.assertStepEqual(agent_step, expected_step)
 
   def test_create_agent_step_step_id_mapping(self):
     mock_agent_step = agent_types.Step(model_response="resp")
@@ -121,7 +121,7 @@ class CreateAgentStepTest(parameterized.TestCase):
     self.assertEqual(agent_step.tool_calls[1].arguments, {"code": "print(42)"})
 
 
-class CreateEnvStepTest(parameterized.TestCase):
+class CreateEnvStepTest(trajectory_testing.TrajectoryTestCase):
 
   def test_create_env_step_none_returns_none(self):
     step = converter.create_env_step(None, tunix_step_id=0)
@@ -154,7 +154,7 @@ class CreateEnvStepTest(parameterized.TestCase):
         env_masks=mock_env_step.env_masks,
         extra={"env_meta": "test_env"},
     )
-    store_testing.assert_step_equal(self, env_step, expected_step)
+    self.assertStepEqual(env_step, expected_step)
 
   def test_create_env_step_step_id_mapping(self):
     mock_env_step = agent_types.Step(observation="obs")
@@ -184,7 +184,7 @@ class CreateEnvStepTest(parameterized.TestCase):
         reward=1.0,
         done=False,
     )
-    store_testing.assert_step_equal(self, env_step, expected_step)
+    self.assertStepEqual(env_step, expected_step)
 
   def test_create_env_step_none_observation(self):
     mock_env_step = agent_types.Step(
@@ -203,7 +203,7 @@ class CreateEnvStepTest(parameterized.TestCase):
         reward=0.5,
         done=True,
     )
-    store_testing.assert_step_equal(self, env_step, expected_step)
+    self.assertStepEqual(env_step, expected_step)
 
 
 class CreateTaskStepTest(parameterized.TestCase):
@@ -242,11 +242,11 @@ class CreateTaskStepTest(parameterized.TestCase):
     self.assertIsNone(step)
 
 
-class ToTunixStepTest(parameterized.TestCase):
+class ToTunixStepTest(trajectory_testing.TrajectoryTestCase):
 
   def test_to_tunix_step_none_returns_empty_step(self):
     dto_step = converter.to_tunix_step(None, None)
-    store_testing.assert_step_equal(self, dto_step, agent_types.Step())
+    self.assertStepEqual(dto_step, agent_types.Step())
 
   def test_to_tunix_step_only_agent_step_passed(self):
     agent_traj_step = trajectory_lib.TunixAgentStep(
@@ -289,7 +289,7 @@ class ToTunixStepTest(parameterized.TestCase):
         mc_return=2.0,
         info={"trace_id": "agent_only_trace"},
     )
-    store_testing.assert_step_equal(self, dto_step, expected_step)
+    self.assertStepEqual(dto_step, expected_step)
 
   def test_to_tunix_step_only_env_step_passed(self):
     env_traj_step = trajectory_lib.TunixEnvStep(
@@ -320,7 +320,7 @@ class ToTunixStepTest(parameterized.TestCase):
         env_masks=np.array([1, 1]),
         info={"env_meta": "meta_val"},
     )
-    store_testing.assert_step_equal(self, dto_step, expected_step)
+    self.assertStepEqual(dto_step, expected_step)
 
   def test_to_tunix_step_both_passed(self):
     agent_traj_step = trajectory_lib.TunixAgentStep(
@@ -376,7 +376,7 @@ class ToTunixStepTest(parameterized.TestCase):
         env_tokens=np.array([99]),
         info={"session_id": "sess_1"},
     )
-    store_testing.assert_step_equal(self, dto_step, expected_step)
+    self.assertStepEqual(dto_step, expected_step)
 
   def test_roundtrip_step_conversion(self):
     mock_agent_step = agent_types.Step(
@@ -403,7 +403,9 @@ class ToTunixStepTest(parameterized.TestCase):
         env_masks=np.array([1]),
     )
 
-    agent_traj_step = converter.create_agent_step(mock_agent_step, tunix_step_id=0)
+    agent_traj_step = converter.create_agent_step(
+        mock_agent_step, tunix_step_id=0
+    )
     env_traj_step = converter.create_env_step(mock_env_step, tunix_step_id=0)
 
     restored_step = converter.to_tunix_step(
@@ -431,7 +433,7 @@ class ToTunixStepTest(parameterized.TestCase):
         env_masks=np.array([1]),
         info={"session_id": "sess_123"},
     )
-    store_testing.assert_step_equal(self, restored_step, expected_step)
+    self.assertStepEqual(restored_step, expected_step)
 
   def test_to_tunix_step_multiple_tool_calls(self):
     agent_traj_step = trajectory_lib.TunixAgentStep(
@@ -471,7 +473,7 @@ class ToTunixStepTest(parameterized.TestCase):
             ]
         ),
     )
-    store_testing.assert_step_equal(self, dto_step, expected_step)
+    self.assertStepEqual(dto_step, expected_step)
 
   def test_roundtrip_step_conversion_multiple_tool_calls(self):
     mock_agent_step = agent_types.Step(
@@ -493,10 +495,12 @@ class ToTunixStepTest(parameterized.TestCase):
         ),
     )
 
-    agent_traj_step = converter.create_agent_step(mock_agent_step, tunix_step_id=0)
+    agent_traj_step = converter.create_agent_step(
+        mock_agent_step, tunix_step_id=0
+    )
     restored_step = converter.to_tunix_step(agent_step=agent_traj_step)
 
-    store_testing.assert_step_equal(self, restored_step, mock_agent_step)
+    self.assertStepEqual(restored_step, mock_agent_step)
 
   def test_roundtrip_openai_format(self):
     raw_action = {
@@ -511,7 +515,9 @@ class ToTunixStepTest(parameterized.TestCase):
         model_response="Calling search",
         action=agent_types.Action(action=raw_action),
     )
-    agent_traj_step = converter.create_agent_step(mock_agent_step, tunix_step_id=0)
+    agent_traj_step = converter.create_agent_step(
+        mock_agent_step, tunix_step_id=0
+    )
     self.assertIsNotNone(agent_traj_step.tool_calls)
     self.assertEqual(agent_traj_step.tool_calls[0].tool_call_id, "call_1")
     self.assertEqual(agent_traj_step.tool_calls[0].function_name, "search")
@@ -520,7 +526,7 @@ class ToTunixStepTest(parameterized.TestCase):
     )
     self.assertEqual(agent_traj_step.extra["raw_action"], raw_action)
     restored_step = converter.to_tunix_step(agent_step=agent_traj_step)
-    store_testing.assert_step_equal(self, restored_step, mock_agent_step)
+    self.assertStepEqual(restored_step, mock_agent_step)
 
   def test_roundtrip_anthropic_format(self):
     raw_action = {
@@ -533,14 +539,16 @@ class ToTunixStepTest(parameterized.TestCase):
         model_response="Calling weather",
         action=agent_types.Action(action=raw_action),
     )
-    agent_traj_step = converter.create_agent_step(mock_agent_step, tunix_step_id=0)
+    agent_traj_step = converter.create_agent_step(
+        mock_agent_step, tunix_step_id=0
+    )
     self.assertIsNotNone(agent_traj_step.tool_calls)
     self.assertEqual(agent_traj_step.tool_calls[0].tool_call_id, "toolu_1")
     self.assertEqual(agent_traj_step.tool_calls[0].function_name, "weather")
     self.assertEqual(agent_traj_step.tool_calls[0].arguments, {"city": "Paris"})
     self.assertEqual(agent_traj_step.extra["raw_action"], raw_action)
     restored_step = converter.to_tunix_step(agent_step=agent_traj_step)
-    store_testing.assert_step_equal(self, restored_step, mock_agent_step)
+    self.assertStepEqual(restored_step, mock_agent_step)
 
   def test_roundtrip_xml_action(self):
     raw_action = (
@@ -553,7 +561,9 @@ class ToTunixStepTest(parameterized.TestCase):
         model_response="Calling editor",
         action=agent_types.Action(action=raw_action),
     )
-    agent_traj_step = converter.create_agent_step(mock_agent_step, tunix_step_id=0)
+    agent_traj_step = converter.create_agent_step(
+        mock_agent_step, tunix_step_id=0
+    )
     self.assertIsNotNone(agent_traj_step.tool_calls)
     self.assertEqual(agent_traj_step.tool_calls[0].function_name, "file_editor")
     self.assertEqual(
@@ -562,7 +572,7 @@ class ToTunixStepTest(parameterized.TestCase):
     )
     self.assertEqual(agent_traj_step.extra["raw_action"], raw_action)
     restored_step = converter.to_tunix_step(agent_step=agent_traj_step)
-    store_testing.assert_step_equal(self, restored_step, mock_agent_step)
+    self.assertStepEqual(restored_step, mock_agent_step)
 
   def test_roundtrip_non_tool_actions(self):
     non_tool_payloads = [
@@ -588,25 +598,32 @@ class ToTunixStepTest(parameterized.TestCase):
         np.testing.assert_array_equal(restored_step.action.action, raw_action)
         self.assertEqual(restored_step.model_response, mock_step.model_response)
       else:
-        store_testing.assert_step_equal(self, restored_step, mock_step)
+        self.assertStepEqual(restored_step, mock_step)
 
   def test_roundtrip_custom_dataclass_action(self):
     @dataclasses.dataclass
     class CustomCommand:
       tool: str
       payload: dict[str, Any]
+
       def __eq__(self, other):
-        return isinstance(other, CustomCommand) and self.tool == other.tool and self.payload == other.payload
+        return (
+            isinstance(other, CustomCommand)
+            and self.tool == other.tool
+            and self.payload == other.payload
+        )
 
     cmd = CustomCommand(tool="shell", payload={"cmd": "whoami"})
     mock_agent_step = agent_types.Step(
         model_response="Run command",
         action=agent_types.Action(action=cmd),
     )
-    agent_traj_step = converter.create_agent_step(mock_agent_step, tunix_step_id=0)
+    agent_traj_step = converter.create_agent_step(
+        mock_agent_step, tunix_step_id=0
+    )
     self.assertIs(agent_traj_step.extra["raw_action"], cmd)
     restored_step = converter.to_tunix_step(agent_step=agent_traj_step)
-    store_testing.assert_step_equal(self, restored_step, mock_agent_step)
+    self.assertStepEqual(restored_step, mock_agent_step)
     self.assertIsInstance(restored_step.action.action, CustomCommand)
 
   def test_to_tunix_step_fallback_to_tool_calls_when_raw_action_absent(self):
@@ -701,10 +718,10 @@ class ToTunixStepTest(parameterized.TestCase):
       self.assertIn("raw_action", agent_step.extra)
       self.assertEqual(agent_step.extra["raw_action"], falsy)
       restored = converter.to_tunix_step(agent_step=agent_step)
-      store_testing.assert_step_equal(self, restored, orig_step)
+      self.assertStepEqual(restored, orig_step)
 
 
-class ToTunixTrajectoryTest(parameterized.TestCase):
+class ToTunixTrajectoryTest(trajectory_testing.TrajectoryTestCase):
 
   def test_to_tunix_trajectory_empty(self):
     traj = trajectory_lib.TunixTrajectory(
@@ -815,9 +832,7 @@ class ToTunixTrajectoryTest(parameterized.TestCase):
 
     self.assertEqual(restored_tunix_traj.task, {"prompts": ["Find users"]})
     self.assertLen(restored_tunix_traj.steps, 1)
-    store_testing.assert_step_equal(
-        self, restored_tunix_traj.steps[0], orig_rl_step
-    )
+    self.assertStepEqual(restored_tunix_traj.steps[0], orig_rl_step)
 
   def test_deepswe_guarded_env_steps(self):
     guard_obs = (
@@ -844,7 +859,7 @@ class ToTunixTrajectoryTest(parameterized.TestCase):
     self.assertEqual(env_step.extra, guard_info)
 
     restored_env_step = converter.to_tunix_step(env_step=env_step)
-    store_testing.assert_step_equal(self, restored_env_step, mock_env_step)
+    self.assertStepEqual(restored_env_step, mock_env_step)
 
   def test_deepswe_token_warning_injection_step(self):
     token_warning_obs = (
@@ -870,7 +885,7 @@ class ToTunixTrajectoryTest(parameterized.TestCase):
     self.assertEqual(env_traj_step.extra["cur_tokens"], 28500)
 
     restored = converter.to_tunix_step(env_step=env_traj_step)
-    store_testing.assert_step_equal(self, restored, mock_env_step)
+    self.assertStepEqual(restored, mock_env_step)
 
   def test_deepswe_full_multi_turn_trajectory_roundtrip_lossless(self):
     task_prompt = (
@@ -1011,9 +1026,15 @@ class ToTunixTrajectoryTest(parameterized.TestCase):
 
     # Verify tool calls are cleanly populated in every agent step
     self.assertEqual(converted_steps[1].tool_calls[0].function_name, "search")
-    self.assertEqual(converted_steps[3].tool_calls[0].function_name, "file_editor")
-    self.assertEqual(converted_steps[5].tool_calls[0].function_name, "file_editor")
-    self.assertEqual(converted_steps[7].tool_calls[0].function_name, "execute_bash")
+    self.assertEqual(
+        converted_steps[3].tool_calls[0].function_name, "file_editor"
+    )
+    self.assertEqual(
+        converted_steps[5].tool_calls[0].function_name, "file_editor"
+    )
+    self.assertEqual(
+        converted_steps[7].tool_calls[0].function_name, "execute_bash"
+    )
     self.assertEqual(converted_steps[9].tool_calls[0].function_name, "finish")
 
     # Serialize to JSON dict and deserialize
@@ -1031,8 +1052,8 @@ class ToTunixTrajectoryTest(parameterized.TestCase):
     self.assertLen(restored_tunix_traj.steps, len(original_trajectory.steps))
 
     for i in range(len(original_trajectory.steps)):
-      store_testing.assert_step_equal(
-          self, restored_tunix_traj.steps[i], original_trajectory.steps[i]
+      self.assertStepEqual(
+          restored_tunix_traj.steps[i], original_trajectory.steps[i]
       )
 
 

@@ -5,8 +5,8 @@ from absl.testing import absltest
 from absl.testing import parameterized
 import numpy as np
 from tunix.experimental.trajectory import converter
-from tunix.experimental.trajectory import store_testing
 from tunix.experimental.trajectory import trajectory
+from tunix.experimental.trajectory import trajectory_testing
 from tunix.rl.agentic.agents import agent_types
 
 _SAMPLE_ATIF_PATH = os.path.join(
@@ -32,7 +32,7 @@ class SubagentTrajectoryRefTest(parameterized.TestCase):
       trajectory.SubagentTrajectoryRef(session_id="session-1")
 
 
-class StepTest(parameterized.TestCase):
+class StepTest(trajectory_testing.TrajectoryTestCase):
 
   @parameterized.named_parameters(
       ("metrics", "metrics", trajectory.Metrics(prompt_tokens=10)),
@@ -100,7 +100,7 @@ class StepTest(parameterized.TestCase):
     self.assertEqual(restored_step, step)
 
 
-class TrajectoryTest(parameterized.TestCase):
+class TrajectoryTest(trajectory_testing.TrajectoryTestCase):
   sample_atif_trajectory: trajectory.Trajectory
 
   @classmethod
@@ -121,7 +121,7 @@ class TrajectoryTest(parameterized.TestCase):
 
     serialized = traj.to_json_dict()
     reloaded = trajectory.Trajectory.from_json_dict(serialized)
-    store_testing.assert_trajectory_equal(self, reloaded, traj)
+    self.assertTrajectoryEqual(reloaded, traj)
 
   def test_dynamic_step_logging(self):
     traj = trajectory.TunixTrajectory(
@@ -443,7 +443,7 @@ class TrajectoryTest(parameterized.TestCase):
         message="msg",
         assistant_tokens=np.array([1, 3]),
     )
-    store_testing.assert_step_equal(self, step1, step2)
+    self.assertStepEqual(step1, step2)
     self.assertNotEqual(step1.model_dump(), step3.model_dump())
 
   def test_step_equality_with_extra_numpy_arrays(self):
@@ -486,7 +486,7 @@ class TrajectoryTest(parameterized.TestCase):
         message="msg",
         extra=None,
     )
-    store_testing.assert_step_equal(self, step1, step2)
+    self.assertStepEqual(step1, step2)
     self.assertNotEqual(step1.model_dump(), step3.model_dump())
     self.assertNotEqual(step1.model_dump(), step4.model_dump())
     self.assertNotEqual(step1.model_dump(), step5.model_dump())
@@ -555,7 +555,7 @@ class TrajectoryTest(parameterized.TestCase):
             ]
         ),
     )
-    store_testing.assert_step_equal(self, step1, step2)
+    self.assertStepEqual(step1, step2)
     self.assertNotEqual(step1.model_dump(), step3.model_dump())
 
   def test_trajectory_metadata_first_class_fields(self):
@@ -800,9 +800,7 @@ class TrajectoryTest(parameterized.TestCase):
     expected_step_0 = converter.to_tunix_step(
         agent_step=step_1, env_step=step_2
     )
-    store_testing.assert_step_equal(
-        self, converted_traj.steps[0], expected_step_0
-    )
+    self.assertStepEqual(converted_traj.steps[0], expected_step_0)
     self.assertEqual(
         converted_traj.steps[0].model_response, "Action 1 response"
     )
@@ -847,9 +845,7 @@ class TrajectoryTest(parameterized.TestCase):
     expected_step_1 = converter.to_tunix_step(
         agent_step=step_3, env_step=step_4
     )
-    store_testing.assert_step_equal(
-        self, converted_traj.steps[1], expected_step_1
-    )
+    self.assertStepEqual(converted_traj.steps[1], expected_step_1)
     self.assertEqual(
         converted_traj.steps[1].model_response, "Action 2 response"
     )
@@ -894,9 +890,7 @@ class TrajectoryTest(parameterized.TestCase):
     expected_step_2 = converter.to_tunix_step(
         agent_step=step_5, env_step=step_6
     )
-    store_testing.assert_step_equal(
-        self, converted_traj.steps[2], expected_step_2
-    )
+    self.assertStepEqual(converted_traj.steps[2], expected_step_2)
     self.assertEqual(
         converted_traj.steps[2].model_response, "Action 3 response"
     )
