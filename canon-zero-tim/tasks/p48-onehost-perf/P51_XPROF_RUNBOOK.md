@@ -29,8 +29,9 @@ label 只允许 `[a-zA-Z0-9_-]`;同 label 不可复用(run dir 已存在即拒�
 | env | 默认 | 说明 |
 |---|---|---|
 | `P51_MAX_STEPS` | 3 | 总步数(step0 付编译 ~370s,此后 ~80-105s/步) |
-| `P51_XPROF_SKIP_STEPS` | 2 | 完成 N 步后开始捕获(即捕 stepN 起) |
+| `P51_XPROF_SKIP_STEPS` | 2 | 完成 N 步后开始捕获(即捕 stepN 起)。**最小值 1**:窗口开在"步完成"边界上,step0(编译步)够不着;设 0 会 fail-closed 抛错,而不是静默留下空目录 |
 | `P51_XPROF_STEPS` | 1 | 捕获跨越的步数(1 步 xplane ≈1.9GB;2 步 ≈4GB) |
+| `P51_CAPTURE` | 1 | 设 0 = 只训练不采集(**显式声明**)。窗口放到 run 之外不再被当作"不想采":`skip>=1 && steps>=1 && skip+steps<=MAX_STEPS` 不成立即 REFUSING,拼错参数不会被判绿 |
 | `P51_XPROF_PYTHON_TRACER` | **0** | **保持 0**:开 python tracer 会把 device 轨挤掉(host-only 936MB 教训);要 python 栈时才临时开,并接受丢 device |
 | `P51_XPROF_HOST_TRACER` | **1** | 与 python tracer 同理:jax 默认的 2 会用 host 事件把 device 采集挤掉。三发实测:python 开+host 2 → 纯 host 936MB;python 0+host 1 → 8 个 device plane / 2300 万事件;python 0+host 2 → 纯 host 32MB。要 host 细节时才调 2,并接受丢 device 轨 |
 | `P51_BATCHED_REVERSE` | (关) | P52 优化;profile 当前最优配置时置 1 |
@@ -42,6 +43,27 @@ prompt/response=1024/1024、batch4×gen8(32 轨迹)、mini/micro/logps=4
 `max_num_seqs=32`、`batched_tokens=256`、beta=0.04(TRAIN 自动)。
 发货 perf envs(`CANON_BATCHED_EVIDENCE=1`、`CANON_P28_BATCHED_REPORT=1`)
 已内置。
+
+## 采集窗口语义(先读这段再定档位)
+
+钩子挂在学习器 `Global step N completed` 之后计数:
+
+```
+step0 完成 → 不动(step0 ≈366s,几乎全是编译)
+step1 完成 → 计数==SKIP → 开窗
+step2 全程 → 被采集
+step2 完成 → 计数>=SKIP+STEPS → 关窗
+```
+
+- **默认跳 2 步**:跳过编译步,也跳过第一暖步(实测 step1 93-94s、step2 起
+  86-87s——首暖步仍带一次性 jit、数据/分词器预热、分配器扩张);
+- 更稳态用 `MAX_STEPS=6 SKIP=4 STEPS=1`;看步间方差用 `STEPS=2`
+  (≈4GB,perfetto JSON 会偏大);
+- **两个 tracer 都压低后,采集对步时的扰动 ≤0.5s**(实测 86.3s 采集 vs
+  86.8s 不采集),trace 形状可当生产步读;python tracer 开着时是 +14s;
+- 窗口由步完成点切分,而 rollout 由后台 producer 预取,窗口内可能混入邻步的
+  少量流水工作:窗口级归因不受影响,逐步精确记账以 [PERF] 行为准;
+- step0 采不到(要采得另做一个在 main 入口开窗的开关,trace 会被编译事件淹没)。
 
 ## 产物与判读
 

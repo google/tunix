@@ -3003,6 +3003,15 @@ def _canon_xprof_step_boundary():
     return
   skip = int(os.environ.get("CANON_XPROF_SKIP_STEPS", "") or "2")
   steps = int(os.environ.get("CANON_XPROF_STEPS", "") or "1")
+  # The window opens at a completed-step boundary, so step 0 -- the compiling
+  # one -- is not reachable from here and a skip of 0 would arm a capture that
+  # never starts. Say so instead of writing an empty profile directory.
+  if skip < 1 or steps < 1:
+    raise ValueError(
+        "CANON_XPROF_SKIP_STEPS and CANON_XPROF_STEPS must be >= 1; the "
+        "capture window starts after a completed step, so the first "
+        f"capturable step is step 1 (got skip={skip}, steps={steps})"
+    )
   _CANON_XPROF["calls"] += 1
   if not _CANON_XPROF["active"] and _CANON_XPROF["calls"] == skip:
     options = jax.profiler.ProfileOptions()
