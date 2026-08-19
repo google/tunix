@@ -14,6 +14,12 @@ train-step state did not change. Read
 Do not hand-edit the rendered YAML, environment, run ID, topology, workload
 command, or evidence records.
 
+The historical `p38h1` Attempt 0 at source `957876b3` is not reusable: it
+completed the reverse groups but stopped before the compact return because its
+post-backward checker misclassified the intentional optimizer skip. Use only a
+new user-approved source SHA that contains the no-commit attestation repair and
+its focused regression test.
+
 ## Operator input
 
 The user supplies one published 40-character `SOURCE_COMMIT` containing this

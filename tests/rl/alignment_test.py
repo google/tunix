@@ -521,6 +521,62 @@ class AlignmentTest(absltest.TestCase):
             step=0,
         )
 
+  def test_train_no_commit_requires_optimizer_skip_attestation(self):
+    wrapped = self._wrapped()
+    with tempfile.TemporaryDirectory() as tmpdir:
+      report = os.path.join(tmpdir, "report.jsonl")
+      train_env = {
+          alignment.GATE_ONLY_ENV: "0",
+          alignment.UPDATE_CANARY_ENV: "0",
+          alignment.TRAIN_ENV: "1",
+          "CANON_P33_NO_COMMIT": "1",
+          alignment.REPORT_ENV: report,
+      }
+      with mock.patch.dict(os.environ, train_env, clear=False):
+        result = alignment.check_batch(
+            wrapped,
+            t_current=wrapped.t_old,
+            gradient_norm=np.asarray(2.0, np.float32),
+            optimizer_skipped=np.asarray(1, np.int32),
+            step=0,
+        )
+        self.assertEqual(result["execution_mode"], "train")
+        self.assertEqual(result["optimizer_skipped"], 1)
+        with self.assertRaisesRegex(
+            alignment.AlignmentGateError,
+            r"optimizer_skipped=0 expected=1",
+        ):
+          alignment.check_batch(
+              wrapped,
+              t_current=wrapped.t_old,
+              gradient_norm=np.asarray(2.0, np.float32),
+              optimizer_skipped=np.asarray(0, np.int32),
+              step=0,
+          )
+
+      train_env["CANON_P33_NO_COMMIT"] = "0"
+      with mock.patch.dict(os.environ, train_env, clear=False):
+        result = alignment.check_batch(
+            wrapped,
+            t_current=wrapped.t_old,
+            gradient_norm=np.asarray(2.0, np.float32),
+            optimizer_skipped=np.asarray(0, np.int32),
+            step=0,
+        )
+        self.assertEqual(result["execution_mode"], "train")
+        self.assertEqual(result["optimizer_skipped"], 0)
+        with self.assertRaisesRegex(
+            alignment.AlignmentGateError,
+            r"optimizer_skipped=1 expected=0",
+        ):
+          alignment.check_batch(
+              wrapped,
+              t_current=wrapped.t_old,
+              gradient_norm=np.asarray(2.0, np.float32),
+              optimizer_skipped=np.asarray(1, np.int32),
+              step=0,
+          )
+
   def test_train_mode_allows_real_zero_signal_but_not_numerical_drift(self):
     wrapped = self._wrapped()
     with tempfile.TemporaryDirectory() as tmpdir, mock.patch.dict(

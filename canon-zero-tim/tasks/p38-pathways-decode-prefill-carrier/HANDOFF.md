@@ -18,10 +18,13 @@ reduction on 64 chips (`gradient_nonzero=7569363085`). At the terminal step boun
 `check_batch` threw `AlignmentGateError` because `expected_skipped` was 0 in `train`
 mode while `CANON_P33_NO_COMMIT=1` caused `optimizer_skipped=1`.
 
-The fix (`expected_skipped = 1 if (mode == "gate-only" or no_commit) else 0`) has
-been applied to `tunix/rl/alignment.py`. Attempt-0 evidence is preserved in
-`tasks/p38-pathways-decode-prefill-carrier/evidence/p38h1/`. Next step is to publish
-this commit and launch the rerun under `P38H_BACKWARD_RUNBOOK.md`.
+The fix (`expected_skipped = 1 if (mode == "gate-only" or no_commit) else 0`) is
+published at `06f0228e`. Attempt-0 evidence is preserved in
+`tasks/p38-pathways-decode-prefill-carrier/evidence/p38h1/`. It is a complete
+failure log but not a successful return: there is no terminal no-commit PASS,
+no mutation record, and no compact artifacts/classifier verdict. The next step
+is to publish the focused attestation regression, then launch exactly one rerun
+under `P38H_BACKWARD_RUNBOOK.md` from that new clean source SHA.
 
 
 ## HISTORY: P38s23r3 64-TPU Three-Round Zero-Error Exact Pass (`P38S23R3_FORWARD_EXACT_PASS`)

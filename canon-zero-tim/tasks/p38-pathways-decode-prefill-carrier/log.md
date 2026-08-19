@@ -2086,4 +2086,9 @@ reclassification from the committed NPZ inputs.
 - Final step boundary check raised `AlignmentGateError` due to `check_batch` expecting `optimizer_skipped=0` in `train` mode when `CANON_P33_NO_COMMIT=1`.
 - Evidence preserved under `tasks/p38-pathways-decode-prefill-carrier/evidence/p38h1/`.
 - Repaired `tunix/rl/alignment.py` to allow `optimizer_skipped=1` when `CANON_P33_NO_COMMIT=1`.
-
+- Evidence classification: complete SHA-sealed Attempt-0 failure log, but not a
+  successful P38h return. The exception preceded the terminal no-commit marker,
+  mutation report, three compact artifacts, and official classifier verdict.
+- Rerun gate: publish a focused train/no-commit optimizer-attestation truth-table
+  regression, then launch one clean source-pinned P38h rerun. No lm-head, VJP,
+  reducer, topology, evaluation, prefix-cache, or warning-policy change is admitted.

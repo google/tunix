@@ -1,9 +1,12 @@
 # P38.2h — fixed lm-head backward-no-commit admission
 
-Status: locally complete and ready for review. The real-v5p VJP gate, complete
-P33/P38 CPU gate, pinned exact-image gate, renderer tests, and operator return
-positive/negative controls pass. Commit, push, and the 64-TPU launch each
-require separate user approval.
+Status: Attempt 0 reached the terminal post-backward check after all 16 reverse
+groups, but was rejected by a no-commit optimizer-attestation contract bug.
+The failure log is SHA-sealed analysis-grade evidence, not a target PASS: the
+terminal no-commit verdict, mutation record, compact artifacts, and classifier
+verdict were never emitted. The expectation repair is published at `06f0228e`;
+its focused truth-table regression and the rerun each require separate user
+approval.
 
 ## Entering evidence
 
@@ -93,6 +96,14 @@ Admission requires:
   reference paths;
 - no evaluation, prefix cache, warning-only policy, checkpoint write, or
   optimizer commit.
+
+Attempt 0 (`p38h1`, source `957876b3`) established exact pre-backward A-B/B-C,
+all 16 reverse groups, replica-exact DP reductions, and nonzero gradients. It
+did not establish post-backward alignment or zero mutation because
+`check_batch` rejected the correct `optimizer_skipped=1` attestation before
+those records were written. The rerun must use a new clean source SHA and must
+return the complete compact classifier package; the Attempt-0 log cannot be
+promoted retroactively.
 
 ## Claim ceiling and rollback
 

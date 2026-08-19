@@ -1,7 +1,9 @@
 # State
 
-- Status: P38.2h implementation is locally complete and awaiting review;
-  nothing is committed, pushed, or launched.
+- Status: P38.2h Attempt 0 is preserved as analysis-grade failure evidence.
+  The actual-model backward completed, then a no-commit optimizer-attestation
+  contract bug stopped the run before the compact success return. The narrow
+  attestation repair is published at `06f0228e`; one source-pinned rerun remains.
 - Objective: localize and remove the Pathways serving decode-versus-prefill
   carrier without weakening the strict zero-TIM release contract.
 - Definition of done: one source-pinned flag-on run reports exact
@@ -16,9 +18,14 @@
   exact. The local repair preserves forward and uses a custom outer VJP with
   loop-carried ascending `lax.scan` accumulation. Its real-Qwen3-8B TP4 rerun
   is exact for `dHidden`, `dWeight`, and repeat determinism, with finite/nonzero
-  gradients and a one-element normal-value negative. One strict P38h
-  DP16xTP4 target is prepared but not launched; commit, push, and launch remain
-  separately user-gated. See
+  gradients and a one-element normal-value negative. Attempt 0 then executed
+  all 16 forward and reverse groups on DP16xTP4 with exact pre-backward A-B/B-C,
+  replica-exact DP reductions, and nonzero gradients. It stopped only because
+  `check_batch` expected `optimizer_skipped=0` despite
+  `CANON_P33_NO_COMMIT=1`; consequently no terminal no-commit verdict or compact
+  artifacts were emitted. Commit `06f0228e` repairs that expectation. The next
+  gate is one separately user-approved rerun from a clean SHA containing the
+  focused attestation regression. See
   `phases/p38-2h-fixed-lm-head-backward-no-commit.md`,
   `artifacts/p38_2h_fixed_lm_head_vjp_onehost_0819.md`, and
   `P38H_BACKWARD_RUNBOOK.md`.
@@ -367,12 +374,12 @@
 
 ## Next action
 
-1. Review the uncommitted P38.2h fixed-order VJP, target renderer, operator
-   scripts, runbook, and gate receipts. Do not commit or push without explicit
-   user approval.
-2. After a separately approved publication, the remote operator follows only
+1. Review and publish the focused no-commit attestation regression plus these
+   registry corrections. Do not commit or push without explicit user approval.
+2. After separately approved publication, the remote operator follows only
    `P38H_BACKWARD_RUNBOOK.md`: launch once from the exact clean SHA, preserve
-   the complete attempt-0 head log, and run the checked-in collector.
+   the complete attempt-0 head log, and run the checked-in collector. Do not
+   reuse the failed `957876b3` source SHA.
 3. Return the complete compact directory. Only
    `P38H_FIXED_LM_HEAD_BACKWARD_NO_COMMIT_PASS` opens a separately reviewed
    full-training candidate.

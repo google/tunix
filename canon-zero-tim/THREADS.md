@@ -6,7 +6,7 @@
 
 | # | 线程 | 状态 | 下一个门 | 等谁 | 任务目录 |
 |---|---|---|---|---|---|
-| 1 | **zero-tim-carrier** | P38s23r3 三轮共 146,042 action 的 A=B=C forward exact；P38.2h 首个 real-v5p VJP 抓到 M4096 外层 `dWeight` 累加序错误（11,950 elements），固定升序 custom VJP 后 `dHidden/dWeight` 对 oracle 与 repeat 均逐位 exact | **审查 P38.2h；批准发布后只跑一次 DP16xTP4 actual-model backward-no-commit** | commit/push/64 TPU launch 均待逐项批准 | tasks/p38-pathways-decode-prefill-carrier |
+| 1 | **zero-tim-carrier** | P38s23r3 三轮共 146,042 action 的 A=B=C forward exact；P38.2h Attempt 0 又完成 16/16 actual-model reverse groups、replica-exact DP reduction 与非零梯度，但被 no-commit optimizer attestation 假红挡在终态包之前；核心修复已在 `06f0228e` | **发布 focused attestation regression 后，只重跑一次 DP16xTP4 backward-no-commit，并要求完整 compact PASS 包** | regression commit/push 与 64 TPU rerun 均待逐项批准 | tasks/p38-pathways-decode-prefill-carrier |
 | 2 | **perf** | 一宿主两战线收官:FL 199s 线 + GSM8K 真几何线(94.3→81.8s,-13.3%,P52);xprof/perfetto 载具入仓且 device plane 已解(python_tracer=0);flags+载具已 push | **DP16 一发**(读 p32_vag_reverse 的 adjoint= 验 E;给 P52 grouped 移植定量) | 等卡 + 用户渲染 | tasks/p48-onehost-perf(分支 state.md)+ 外层 p48-p52 |
 | 3 | **frozenlake-train** | p45r8（DP8xTP8 resident 路径，无评测模式 `--eval_every_n_steps=0`，`fl-prod-noeval-001`）已成功在 64 TPU 上线运行，JIT 编译通过，Step 0 反向传播（40ms/microstep）与 DP8 规约正常进行中 | **持续推进 Step 1~450 迭代，Step 10 自动持久化新 GCS 检查点** | 训练中 | tasks/p45-frozenlake-dp8-tp8-resident |
 | 4 | **deepswe-eval** | p46e12808 修复了 Kueue 工作负载冲突注解与 cpu-np 节点池亲和性，Kueue 准入通过（`Admitted: True`），绑定 `--resume-tag p46e12806` 严格从 Wave 27 续跑（复用 6460+ 轨迹） | **等待集群 128 TPU 拓扑释放后自动调度点火** | 排队中 | tasks/p46-deepswe-eval-training-profiles |
