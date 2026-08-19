@@ -171,6 +171,33 @@ def _zero_safe_reciprocal(denom: jax.Array) -> jax.Array:
   return jnp.where(denom == 0, jnp.zeros_like(denom), 1.0 / denom)
 
 
+def _opt_state_dtypes(optimizer: nnx.Optimizer) -> Any:
+  """Returns the array dtype of every optimizer-state variable."""
+  return jax.tree_util.tree_map(
+      lambda value: value.get_value().dtype,
+      nnx.state(optimizer, nnx.optimizer.OptState),
+      is_leaf=lambda value: isinstance(value, nnx.Variable),
+  )
+
+
+def _restore_opt_state_float_dtypes(
+    optimizer: nnx.Optimizer, dtypes: Any
+) -> None:
+  """Restores floating optimizer-state leaves to their pre-update dtypes."""
+
+  def _restore(value, dtype):
+    array = value.get_value()
+    if jnp.issubdtype(array.dtype, jnp.floating) and array.dtype != dtype:
+      value.set_value(array.astype(dtype))
+
+  jax.tree_util.tree_map(
+      _restore,
+      nnx.state(optimizer, nnx.optimizer.OptState),
+      dtypes,
+      is_leaf=lambda value: isinstance(value, nnx.Variable),
+  )
+
+
 class GradientAccumulator(nnx.Module):
   """Accumulates gradients over multiple micro-steps.
 
@@ -340,7 +367,6 @@ class PeftTrainer:
     self._lora_enabled = utils.is_lora_enabled(self.model)
     wrt_target = nnx.LoRAParam if self._lora_enabled else nnx.Param
     self.optimizer = nnx.Optimizer(self.model, optimizer, wrt=wrt_target)
-    self._align_opt_state_dtypes(wrt_target)
     # Adam moments follow the param dtype by default (optax inits them as
     # zeros_like(params)).
     # Depth-1 non-packing fast path never reads the accumulator; skip its
@@ -415,39 +441,6 @@ class PeftTrainer:
     self.data_hooks = None
     self._jit_cache = set()
     self._mini_batch_size = None
-
-  def _align_opt_state_dtypes(self, wrt: type[nnx.Variable]) -> None:
-    """Aligns the dtypes of the optimizer state to the model parameters.
-
-    Args:
-      wrt: The target variable type (e.g., `nnx.Param` or `nnx.LoRAParam`).
-    """
-    is_var = lambda x: isinstance(x, nnx.Variable)
-    unwrap = lambda t: jax.tree.map(
-        lambda x: x[...] if is_var(x) else x, t, is_leaf=is_var
-    )
-    pure_params = unwrap(nnx.state(self.model, wrt))
-    pure_opt_state = unwrap(self.optimizer.opt_state)
-    try:
-      _, probed = jax.eval_shape(
-          self.optimizer.tx.update, pure_params, pure_opt_state, pure_params
-      )
-    except (TypeError, ValueError, AttributeError):
-      return
-    if jax.tree.structure(probed) != jax.tree.structure(pure_opt_state):
-      return
-
-    def _maybe_cast(var, probe_leaf):
-      if is_var(var) and var[...].dtype != probe_leaf.dtype:
-        var.set_value(var[...].astype(probe_leaf.dtype))
-      return var
-
-    jax.tree.map(
-        _maybe_cast,
-        self.optimizer.opt_state,
-        probed,
-        is_leaf=is_var,
-    )
 
   def with_training_hooks(self, training_hooks: hooks.TrainingHooks):
     self.training_hooks = training_hooks
@@ -551,7 +544,9 @@ class PeftTrainer:
       norm = optax.global_norm(
           jax.tree_util.tree_map(lambda x: x.astype(jnp.float32), acc_grads)
       )
+      opt_state_dtypes = _opt_state_dtypes(optimizer)
       optimizer.update(model, acc_grads)
+      _restore_opt_state_float_dtypes(optimizer, opt_state_dtypes)
       grad_accumulator.reset()
       return norm
 
@@ -575,7 +570,9 @@ class PeftTrainer:
       grad_norm = optax.global_norm(
           jax.tree_util.tree_map(lambda x: x.astype(jnp.float32), grads)
       )
+      opt_state_dtypes = _opt_state_dtypes(optimizer)
       optimizer.update(model, grads)
+      _restore_opt_state_float_dtypes(optimizer, opt_state_dtypes)
     else:
       if isinstance(aux, utils.LossOutput):
         # Accumulate the UNREDUCED gradients (d/dparam of the sum) weighted by the

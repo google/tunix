@@ -767,6 +767,166 @@ class PeftTrainerTest(parameterized.TestCase):
     )
 
 
+class OptimizerMemoryTest(parameterized.TestCase):
+  """Optimizer-state dtype preservation across v2 update paths."""
+
+  def _bf16_model(self):
+    return nnx.Linear(
+        in_features=4,
+        out_features=2,
+        rngs=nnx.Rngs(0),
+        param_dtype=jnp.bfloat16,
+    )
+
+  def _opt_state_dtypes(self, trainer):
+    return jax.tree_util.tree_map(
+        lambda value: value[...].dtype,
+        nnx.state(trainer.optimizer, nnx.optimizer.OptState),
+        is_leaf=lambda value: isinstance(value, nnx.Variable),
+    )
+
+  def _get_mu_nu_dtypes(self, trainer):
+    dtypes = self._opt_state_dtypes(trainer)
+    mu_dtypes = []
+    nu_dtypes = []
+
+    def _find(tree):
+      if isinstance(tree, (dict, nnx.State)):
+        if 'mu' in tree and 'nu' in tree:
+          mu_dtypes.extend(jax.tree_util.tree_leaves(tree['mu']))
+          nu_dtypes.extend(jax.tree_util.tree_leaves(tree['nu']))
+        else:
+          for v in tree.values():
+            _find(v)
+      elif isinstance(tree, (list, tuple)):
+        for v in tree:
+          _find(v)
+
+    _find(dtypes)
+    return mu_dtypes, nu_dtypes
+
+  def _run_update(self, trainer, inputs, gradient_accumulation_steps):
+    if gradient_accumulation_steps == 1:
+      trainer.train_step(inputs)
+      return
+
+    for _ in range(gradient_accumulation_steps):
+      trainer.fwd_bwd(inputs)
+    trainer.update()
+
+  @parameterized.product(
+      optimizer_kind=('direct', 'injected'),
+      gradient_accumulation_steps=(1, 2),
+  )
+  def test_preserves_bf16_optimizer_state_dtypes_under_jit(
+      self, optimizer_kind, gradient_accumulation_steps
+  ):
+    """Jitted fused and split updates preserve optimizer-state dtypes."""
+    model = self._bf16_model()
+    if optimizer_kind == 'direct':
+      tx = optax.adamw(
+          lambda _: jnp.asarray(0.1, dtype=jnp.float32),
+          mu_dtype=jnp.bfloat16,
+      )
+    else:
+      tx = optax.inject_hyperparams(optax.adamw, hyperparam_dtype=jnp.float32)(
+          learning_rate=0.1
+      )
+    config = peft_trainer_v2.TrainingConfig(
+        eval_every_n_steps=100,
+        max_steps=1,
+        gradient_accumulation_steps=gradient_accumulation_steps,
+    )
+    trainer = peft_trainer_v2.PeftTrainer(model, tx, config)
+    trainer.with_loss_fn(lambda m, x, y: jnp.sum((m(x) - y) ** 2))
+
+    initial_opt_state_dtypes = self._opt_state_dtypes(trainer)
+    initial_mu_dtypes, initial_nu_dtypes = self._get_mu_nu_dtypes(trainer)
+    self.assertNotEmpty(initial_mu_dtypes)
+    self.assertNotEmpty(initial_nu_dtypes)
+    self.assertEqual(set(initial_mu_dtypes), {jnp.dtype(jnp.bfloat16)})
+    self.assertEqual(set(initial_nu_dtypes), {jnp.dtype(jnp.bfloat16)})
+
+    initial_params = jax.tree_util.tree_map(
+        lambda value: jnp.copy(value[...]),
+        nnx.state(model, nnx.Param),
+        is_leaf=lambda value: isinstance(value, nnx.Variable),
+    )
+    inputs = {
+        'x': jnp.ones((2, 4), dtype=jnp.bfloat16),
+        'y': jnp.ones((2, 2), dtype=jnp.bfloat16),
+    }
+
+    self._run_update(trainer, inputs, gradient_accumulation_steps)
+
+    self.assertEqual(self._opt_state_dtypes(trainer), initial_opt_state_dtypes)
+    final_mu_dtypes, final_nu_dtypes = self._get_mu_nu_dtypes(trainer)
+    self.assertEqual(set(final_mu_dtypes), {jnp.dtype(jnp.bfloat16)})
+    self.assertEqual(set(final_nu_dtypes), {jnp.dtype(jnp.bfloat16)})
+
+    updated_params = nnx.state(model, nnx.Param)
+    self.assertTrue(
+        any(
+            not np.array_equal(before, after[...])
+            for before, after in zip(
+                jax.tree_util.tree_leaves(initial_params),
+                jax.tree_util.tree_leaves(
+                    updated_params,
+                    is_leaf=lambda value: isinstance(value, nnx.Variable),
+                ),
+            )
+        )
+    )
+    self.assertEqual(
+        trainer._last_update_grad_norm.dtype,  # pylint: disable=protected-access # pyrefly: ignore[missing-attribute,union-attr]
+        jnp.float32,
+    )
+    self.assertEqual(float(trainer.grad_accumulator.denom[...]), 0.0)
+
+  def test_preserves_default_fp32_optimizer_state_dtypes_under_jit(self):
+    """The default f32 optimizer state remains f32."""
+    model = nnx.Linear(
+        in_features=4,
+        out_features=2,
+        rngs=nnx.Rngs(0),
+        param_dtype=jnp.float32,
+    )
+    config = peft_trainer_v2.TrainingConfig(eval_every_n_steps=100, max_steps=1)
+    trainer = peft_trainer_v2.PeftTrainer(
+        model,
+        optax.adamw(0.1),
+        config,
+    )
+    trainer.with_loss_fn(lambda m, x, y: jnp.sum((m(x) - y) ** 2))
+    initial_opt_state_dtypes = self._opt_state_dtypes(trainer)
+    initial_mu_dtypes, initial_nu_dtypes = self._get_mu_nu_dtypes(trainer)
+    self.assertNotEmpty(initial_mu_dtypes)
+    self.assertNotEmpty(initial_nu_dtypes)
+    self.assertEqual(set(initial_mu_dtypes), {jnp.dtype(jnp.float32)})
+    self.assertEqual(set(initial_nu_dtypes), {jnp.dtype(jnp.float32)})
+
+    self._run_update(
+        trainer,
+        {
+            'x': jnp.ones((2, 4), dtype=jnp.float32),
+            'y': jnp.ones((2, 2), dtype=jnp.float32),
+        },
+        gradient_accumulation_steps=1,
+    )
+
+    self.assertEqual(self._opt_state_dtypes(trainer), initial_opt_state_dtypes)
+    final_mu_dtypes, final_nu_dtypes = self._get_mu_nu_dtypes(trainer)
+    self.assertEqual(set(final_mu_dtypes), {jnp.dtype(jnp.float32)})
+    self.assertEqual(set(final_nu_dtypes), {jnp.dtype(jnp.float32)})
+
+    floating_dtypes = {
+        dtype
+        for dtype in jax.tree_util.tree_leaves(initial_opt_state_dtypes)
+        if jnp.issubdtype(dtype, jnp.floating)
+    }
+    self.assertEqual(floating_dtypes, {jnp.dtype(jnp.float32)})
+
+
 class V1ParityTest(parameterized.TestCase):
   """Parity tests for PeftTrainerV2 against PeftTrainer before the migration to v2 is fully done."""
 
@@ -915,136 +1075,7 @@ class V1ParityTest(parameterized.TestCase):
     split.assert_not_called()
 
 
-class AlignOptStateDtypesTest(parameterized.TestCase):
-
-  def test_align_opt_state_dtypes_casts_variables(self):
-    rngs = nnx.Rngs(0)
-    model = nnx.Linear(
-        in_features=4, out_features=2, rngs=rngs, param_dtype=jnp.bfloat16
-    )
-
-    def custom_tx():
-      def init_fn(params):
-        return jax.tree.map(
-            lambda p: jnp.zeros_like(p, dtype=jnp.float32), params
-        )
-
-      def update_fn(updates, state, params=None):
-        del params
-        new_state = jax.tree.map(
-            lambda s, u: s.astype(u.dtype) + u, state, updates
-        )
-        return updates, new_state
-
-      return optax.GradientTransformation(init_fn, update_fn)
-
-    config = peft_trainer_v2.TrainingConfig(
-        eval_every_n_steps=100, max_steps=1
-    )
-    trainer = peft_trainer_v2.PeftTrainer(model, custom_tx(), config)
-
-    opt_state_leaves = jax.tree_util.tree_leaves(
-        jax.tree_util.tree_map(
-            lambda v: v[...].dtype
-            if isinstance(v, nnx.Variable)
-            else getattr(v, 'dtype', None),
-            nnx.state(trainer.optimizer, nnx.optimizer.OptState),
-            is_leaf=lambda x: isinstance(x, nnx.Variable),
-        )
-    )
-    for dtype in opt_state_leaves:
-      if dtype is not None and jnp.issubdtype(dtype, jnp.floating):
-        self.assertEqual(dtype, jnp.bfloat16)
-
-  def test_align_opt_state_dtypes_with_lora(self):
-    rngs = nnx.Rngs(0)
-    base_model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=rngs)
-    bf16_state = jax.tree.map(
-        lambda x: x.astype(jnp.bfloat16)
-        if jnp.issubdtype(x.dtype, jnp.floating)
-        else x,
-        nnx.state(base_model, nnx.Param),
-    )
-    nnx.update(base_model, bf16_state)
-    lora_model = tc.get_lora_model(base_model)
-
-    def custom_tx():
-      def init_fn(params):
-        return jax.tree.map(
-            lambda p: jnp.zeros_like(p, dtype=jnp.float32), params
-        )
-
-      def update_fn(updates, state, params=None):
-        del params
-        new_state = jax.tree.map(
-            lambda s, u: s.astype(u.dtype) + u, state, updates
-        )
-        return updates, new_state
-
-      return optax.GradientTransformation(init_fn, update_fn)
-
-    config = peft_trainer_v2.TrainingConfig(
-        eval_every_n_steps=100, max_steps=1
-    )
-    trainer = peft_trainer_v2.PeftTrainer(lora_model, custom_tx(), config)
-
-    opt_state_leaves = jax.tree_util.tree_leaves(
-        jax.tree_util.tree_map(
-            lambda v: v[...].dtype
-            if isinstance(v, nnx.Variable)
-            else getattr(v, 'dtype', None),
-            nnx.state(trainer.optimizer, nnx.optimizer.OptState),
-            is_leaf=lambda x: isinstance(x, nnx.Variable),
-        )
-    )
-    for dtype in opt_state_leaves:
-      if dtype is not None and jnp.issubdtype(dtype, jnp.floating):
-        self.assertEqual(dtype, jnp.bfloat16)
-
-  def test_align_opt_state_dtypes_handles_eval_shape_exception(self):
-    rngs = nnx.Rngs(0)
-    model = nnx.Linear(in_features=4, out_features=2, rngs=rngs)
-
-    def broken_tx():
-      def init_fn(params):
-        return jax.tree.map(
-            lambda p: jnp.zeros_like(p, dtype=jnp.float32), params
-        )
-
-      def update_fn(updates, state, params=None):
-        del updates, state, params
-        raise TypeError('Simulated update error')
-
-      return optax.GradientTransformation(init_fn, update_fn)
-
-    config = peft_trainer_v2.TrainingConfig(
-        eval_every_n_steps=100, max_steps=1
-    )
-    trainer = peft_trainer_v2.PeftTrainer(model, broken_tx(), config)
-    self.assertIsNotNone(trainer.optimizer)
-
-  def test_align_opt_state_dtypes_handles_structure_mismatch(self):
-    rngs = nnx.Rngs(0)
-    model = nnx.Linear(in_features=4, out_features=2, rngs=rngs)
-
-    def mismatched_tx():
-      def init_fn(params):
-        return {'a': jax.tree.map(jnp.zeros_like, params)}
-
-      def update_fn(updates, state, params=None):
-        del state, params
-        return updates, {
-            'a': jax.tree.map(jnp.zeros_like, updates),
-            'b': jnp.asarray(1.0),
-        }
-
-      return optax.GradientTransformation(init_fn, update_fn)
-
-    config = peft_trainer_v2.TrainingConfig(
-        eval_every_n_steps=100, max_steps=1
-    )
-    trainer = peft_trainer_v2.PeftTrainer(model, mismatched_tx(), config)
-    self.assertIsNotNone(trainer.optimizer)
+class GradientAccumulatorTest(parameterized.TestCase):
 
   def test_gradient_accumulator_param_dtypes_resolution(self):
     rngs = nnx.Rngs(0)
