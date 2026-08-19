@@ -83,7 +83,7 @@ import yaml
 path, source = sys.argv[1:]
 document = yaml.safe_load(open(path, encoding="utf-8"))
 pod = document["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]
-labels = pod["metadata"]["labels"]
+labels = document["metadata"].get("labels", {})
 container = next(
     item for item in pod["spec"]["containers"] if item["name"] == "jax-tpu"
 )
