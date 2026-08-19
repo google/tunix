@@ -12,8 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for RolloutManager.get_weight_sync_metadata."""
-
+import asyncio
 import unittest
 
 from absl.testing import absltest
@@ -54,6 +53,70 @@ class GetWeightSyncMetadataTest(unittest.IsolatedAsyncioTestCase):
     manager = manager_lib.RolloutManager(tokenizer="mock", chat_parser="mock")
     with self.assertRaises(NotImplementedError):
       await manager.get_weight_sync_metadata()
+
+
+class _FakeSyncSampler(_FakeSampler):
+
+  async def pre_weight_sync(self, sync_request=None, **kwargs):
+    return "ok"
+
+  async def post_weight_sync(self, sync_request=None, **kwargs):
+    return "ok"
+
+
+class AdmissionGateTest(unittest.IsolatedAsyncioTestCase):
+
+  def _manager(self, **kwargs):
+    return manager_lib.RolloutManager(
+        sampler=_FakeSyncSampler([]),
+        tokenizer="mock",
+        chat_parser="mock",
+        **kwargs,
+    )
+
+  async def test_pre_closes_admission(self):
+    manager = self._manager()
+    await manager.pre_weight_sync()
+    self.assertFalse(manager._traffic.is_admission_open())
+
+  async def test_post_reopens_admission(self):
+    manager = self._manager()
+    await manager.pre_weight_sync()
+    await manager.post_weight_sync()
+    self.assertTrue(manager._traffic.is_admission_open())
+
+  async def test_repeated_pre_is_allowed(self):
+    manager = self._manager()
+    await manager.pre_weight_sync()
+    await manager.pre_weight_sync()
+    self.assertFalse(manager._traffic.is_admission_open())
+
+  async def test_pre_waits_for_inflight_work(self):
+    manager = self._manager()
+    done = asyncio.Event()
+
+    async def work():
+      await done.wait()
+
+    task = asyncio.create_task(work())
+    manager._active_tasks["t0"] = task
+    manager._traffic.track(task)
+    pre = asyncio.create_task(manager.pre_weight_sync())
+    await asyncio.sleep(0.01)
+    self.assertFalse(pre.done())
+    done.set()
+    await task
+    manager._active_tasks.pop("t0", None)
+    await pre
+
+  async def test_drain_timeout_returns(self):
+    manager = self._manager(drain_timeout_s=0.05)
+    task = asyncio.create_task(asyncio.Event().wait())
+    manager._active_tasks["t0"] = task
+    manager._traffic.track(task)
+    await manager.pre_weight_sync()
+    task.cancel()
+    manager._active_tasks.pop("t0", None)
 
 
 if __name__ == "__main__":
