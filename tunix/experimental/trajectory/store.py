@@ -71,11 +71,11 @@ class TrajectoryWriter(Protocol):
       step: trajectory_lib.Step,
       metadata: trajectory_lib.TrajectoryMetadata,
   ) -> None:
-    """Atomically logs a turn step and its trajectory metadata.
+    """Logs a turn step and its trajectory metadata.
 
-    This operation is atomic: the step and accompanying trajectory metadata
-    are written together atomically so that readers never observe partially
-    written or inconsistent state.
+    Depending on the backend implementation, writes may be queued
+    asynchronously. Readers never observe partially written or inconsistent
+    state.
 
     Args:
       step: Step object to log.
@@ -95,5 +95,9 @@ class TrajectoryWriter(Protocol):
     ...
 
   def flush(self) -> None:
-    """Flushes any pending or asynchronous writes to persistent storage."""
+    """Flushes any pending or asynchronous writes to persistent storage.
+
+    Users do not need to call flush() in normal usage; it is primarily for
+    testing.
+    """
     ...

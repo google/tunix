@@ -1,4 +1,5 @@
 import tempfile
+import threading
 from unittest import mock
 
 from absl.testing import absltest
@@ -181,6 +182,34 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
     )
     self.assertEqual(recovered_traj, expected_traj)
 
+  def test_add_step_is_non_blocking(self) -> None:
+    """Verifies that add_step returns immediately without waiting for disk I/O."""
+    block_event = threading.Event()
+    original_process_task = self.file_s._writer._process_task
+
+    def blocking_process_task(task):
+      block_event.wait()
+      original_process_task(task)
+
+    step_path = self.file_s.get_step_path(
+        trajectory_testing.TRAJECTORY_ID_1,
+        trajectory_testing.STEP_1_1.step_id,
+    )
+
+    with mock.patch.object(
+        self.file_s._writer, "_process_task", side_effect=blocking_process_task
+    ):
+      # add_step should enqueue task and return immediately while worker loop is blocked.
+      self.file_s.add_step(
+          trajectory_testing.STEP_1_1, trajectory_testing.METADATA_1
+      )
+      self.assertFalse(step_path.exists())
+
+      # Unblock worker thread and flush pending task.
+      block_event.set()
+      self.file_s.flush()
+      self.assertTrue(step_path.exists())
+
   def test_store_recovery_and_persistence_across_instances(self) -> None:
     """Simulates process restart by initializing a new FileTrajectoryStore instance on existing directory."""
     run_id = "persistent_run_42"
@@ -283,13 +312,13 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
       ]
       self.assertLen(traj_2_calls, 1)
 
-    self.assertIn(
-        trajectory_testing.TRAJECTORY_ID_1,
-        self.file_s._metadata_hash_by_trajectory_id,
-    )
-    self.assertIn(
-        trajectory_testing.TRAJECTORY_ID_2,
-        self.file_s._metadata_hash_by_trajectory_id,
+    metas = self.file_s.get_trajectories_metadata()
+    self.assertEqual(
+        {m.trajectory_id for m in metas},
+        {
+            trajectory_testing.TRAJECTORY_ID_1,
+            trajectory_testing.TRAJECTORY_ID_2,
+        },
     )
 
   def test_metadata_written_on_first_step_and_skipped_when_unchanged(
