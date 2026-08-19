@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
 # One-host Qwen3-1.7B GSM8K profiling run through the official tunix.perf
-# stack: CANON_GSM8K_TRAIN steps with the shipping perf envs on, the official
-# tunix.sft Profiler capturing one warm step (xplane + trace.json.gz), and the
-# tunix.perf v2 spans writing a semantic perfetto_trace_v2_<ts>.pb timeline.
+# stack: CANON_GSM8K_TRAIN steps with the shipping perf envs on, a device
+# capture of one warm step (xplane + trace.json.gz), and the tunix.perf v2
+# spans writing a semantic perfetto_trace_v2_<ts>.pb timeline.
+# P51_XPROF_PHASE picks what the device capture retains: step (default,
+# official Profiler at step boundaries -- the device trace buffer truncates
+# this to the first ~25s of engine decode, so it profiles the rollout
+# fabric) or update (window anchored at the G6 update call, so the buffer
+# holds the full forward+backward+commit instead).
 # Derived from tasks/p41-optimizer-residency/scripts/run_onehost_pair.sh; one
 # arm, resident optimizer placement. Profile-run numbers are for shape only,
 # never for A/B deltas.
@@ -37,11 +42,22 @@ timeout_seconds="${P51_ONEHOST_TIMEOUT_SECONDS:-2700}"
 max_steps="${P51_MAX_STEPS:-3}"
 xprof_skip="${P51_XPROF_SKIP_STEPS:-2}"
 xprof_steps="${P51_XPROF_STEPS:-1}"
+xprof_phase="${P51_XPROF_PHASE:-step}"
 capture="${P51_CAPTURE:-1}"
 
 case "$capture" in
   0|1) ;;
   *) echo "[P51.XPROF] REFUSING: P51_CAPTURE must be 0 or 1: $capture" >&2; exit 2 ;;
+esac
+# step profiles the rollout fabric (the device trace buffer truncates a
+# whole-step window to the first ~25s of engine decode); update anchors at
+# the G6 update call so the buffer retains the whole backward instead.
+case "$xprof_phase" in
+  step|update) ;;
+  *)
+    echo "[P51.XPROF] REFUSING: P51_XPROF_PHASE must be step or update: $xprof_phase" >&2
+    exit 2
+    ;;
 esac
 for name in max_steps xprof_skip xprof_steps; do
   eval "value=\$$name"
@@ -64,6 +80,14 @@ if [ "$capture" = 1 ]; then
       "skip+steps<=max_steps)" >&2
     exit 2
   fi
+  # update => exactly one step: the window closes at the next boundary; a
+  # longer window would run across the following step's rollout and refill
+  # the device trace buffer with decode, violating the mode's contract.
+  if [ "$xprof_phase" = update ] && [ "$xprof_steps" != 1 ]; then
+    echo "[P51.XPROF] REFUSING: P51_XPROF_PHASE=update requires" \
+      "P51_XPROF_STEPS=1 (got $xprof_steps)" >&2
+    exit 2
+  fi
 fi
 
 # shellcheck disable=SC1090
@@ -82,7 +106,8 @@ mkdir -p "$root"
 {
   echo "[P51.XPROF] source=$source_sha diff_sha256=$diff_sha image=$image"
   echo "[P51.XPROF] topology=DP1xTP4 batch=4 generations=8 traj_micro=2"
-  echo "[P51.XPROF] max_steps=$max_steps capture=step$xprof_skip x$xprof_steps"
+  echo "[P51.XPROF] max_steps=$max_steps capture=step$xprof_skip x$xprof_steps" \
+    "phase=$xprof_phase"
   echo "[P51.XPROF] perf_envs=CANON_BATCHED_EVIDENCE=1,CANON_P28_BATCHED_REPORT=1"
   echo "[P51.XPROF] mesh=fsdp1xtp4 auto_axes (no FL_SHARED_MESH) capture=$capture"
 } >"$driver"
@@ -157,6 +182,7 @@ sudo docker run --rm --privileged --net=host --name "$container" \
   -e CANON_XPROF_STEPS="$xprof_steps" \
   -e CANON_XPROF_PYTHON_TRACER="${P51_XPROF_PYTHON_TRACER:-0}" \
   -e CANON_XPROF_HOST_TRACER="${P51_XPROF_HOST_TRACER:-1}" \
+  -e CANON_XPROF_PHASE="$xprof_phase" \
   -e CANON_DP_SIZE=1 -e CANON_TP_SIZE=4 \
   -e XLA_FLAGS="$XTRA_XLA" \
   -e CANON_RPA_D=128,512,128,512 -e CANON_RPA_P=128,512,128,512 \
@@ -239,14 +265,26 @@ canon_postflight "$raw" 2>&1 | sed 's/^/[P51.XPROF.POSTFLIGHT] /' >>"$raw" || tr
 
 steps_done="$(grep -ac 'Global step .* completed in' "$raw" || true)"
 align_pass="$(grep -ac 'verdict=PASS' "$raw" || true)"
-# The official tunix.sft Profiler logs through absl; these are its lines,
-# not ours. The step numbers are checked, not just the presence: a window
-# that opened at the wrong step would otherwise pass on marker counts alone.
-xprof_started="$(grep -ac 'Starting JAX profiler at step' "$raw" || true)"
-xprof_stopped="$(grep -ac 'Stopping JAX profiler at step' "$raw" || true)"
-xprof_start_step="$(grep -a 'Starting JAX profiler at step' "$raw" | sed -n 's/.*at step \([0-9]*\).*/\1/p' | head -1 || true)"
-xprof_stop_step="$(grep -a 'Stopping JAX profiler at step' "$raw" | sed -n 's/.*at step \([0-9]*\).*/\1/p' | head -1 || true)"
+# The step numbers are checked, not just the presence: a window that opened
+# at the wrong step would otherwise pass on marker counts alone. In step mode
+# the official tunix.sft Profiler logs through absl, so those are its lines;
+# in update mode the sub-step anchors are ours and print their own
+# attestation, absl lines do not exist.
+xprof_armed_step=""
+if [ "$xprof_phase" = step ]; then
+  xprof_started="$(grep -ac 'Starting JAX profiler at step' "$raw" || true)"
+  xprof_stopped="$(grep -ac 'Stopping JAX profiler at step' "$raw" || true)"
+  xprof_start_step="$(grep -a 'Starting JAX profiler at step' "$raw" | sed -n 's/.*at step \([0-9]*\).*/\1/p' | head -1 || true)"
+  xprof_stop_step="$(grep -a 'Stopping JAX profiler at step' "$raw" | sed -n 's/.*at step \([0-9]*\).*/\1/p' | head -1 || true)"
+else
+  xprof_started="$(grep -ac 'phase=update started ' "$raw" || true)"
+  xprof_stopped="$(grep -ac 'phase=update stopped ' "$raw" || true)"
+  xprof_start_step="$(grep -a 'phase=update started ' "$raw" | sed -n 's/.*step=\([0-9]*\).*/\1/p' | head -1 || true)"
+  xprof_stop_step="$(grep -a 'phase=update stopped ' "$raw" | sed -n 's/.*step=\([0-9]*\).*/\1/p' | head -1 || true)"
+  xprof_armed_step="$(grep -a 'phase=update armed ' "$raw" | sed -n 's/.*step=\([0-9]*\).*/\1/p' | head -1 || true)"
+fi
 xplane_count="$(find "$xprof_dir" -name '*.xplane.pb' 2>/dev/null | wc -l)"
+xplane_bytes="$(find "$xprof_dir" -name '*.xplane.pb' -printf '%s\n' 2>/dev/null | awk '{s+=$1} END {print s+0}')"
 perfetto_count="$(find "$xprof_dir" \( -name '*perfetto*' -o -name '*.trace.json.gz' \) 2>/dev/null | wc -l)"
 perf_v2_count="$(find "$perf_dir" -name 'perfetto_trace_v2_*.pb' 2>/dev/null | wc -l)"
 # The program reports its own mesh, so the gate reads that instead of trusting
@@ -259,8 +297,9 @@ case "$mesh_line" in
 esac
 {
   echo "[P51.XPROF] SUMMARY steps_done=${steps_done:-0} align_pass=${align_pass:-0}" \
-    "xprof_started=${xprof_started:-0} xprof_stopped=${xprof_stopped:-0}" \
-    "xplane_files=${xplane_count} perfetto_files=${perfetto_count}" \
+    "phase=$xprof_phase xprof_started=${xprof_started:-0}" \
+    "xprof_stopped=${xprof_stopped:-0} xplane_files=${xplane_count}" \
+    "xplane_bytes=${xplane_bytes:-0} perfetto_files=${perfetto_count}" \
     "perf_v2_traces=${perf_v2_count}"
   find "$xprof_dir" -type f -printf '%s %p\n' 2>/dev/null | sort -rn | head -10
 } | tee -a "$driver" >>"$raw"
@@ -276,6 +315,10 @@ if [ "$capture" = 1 ]; then
     || red="$red start_step=${xprof_start_step:-none}!=$xprof_skip"
   [ "${xprof_stop_step:-none}" = "$((xprof_skip + xprof_steps))" ] \
     || red="$red stop_step=${xprof_stop_step:-none}!=$((xprof_skip + xprof_steps))"
+  if [ "$xprof_phase" = update ]; then
+    [ "${xprof_armed_step:-none}" = "$xprof_skip" ] \
+      || red="$red armed_step=${xprof_armed_step:-none}!=$xprof_skip"
+  fi
   [ "$xplane_count" -gt 0 ] || red="$red xplane=$xplane_count"
   [ "$perfetto_count" -gt 0 ] || red="$red perfetto=$perfetto_count"
 fi
@@ -284,7 +327,8 @@ if [ -n "$red" ]; then
   exit 1
 fi
 if [ "$capture" = 1 ]; then
-  echo "[P51.XPROF] GREEN steps=$steps_done/$max_steps mesh=fsdp,tp/Auto artifacts under $xprof_dir" \
+  echo "[P51.XPROF] GREEN steps=$steps_done/$max_steps mesh=fsdp,tp/Auto" \
+    "phase=$xprof_phase xplane_bytes=${xplane_bytes:-0} artifacts under $xprof_dir" \
     | tee -a "$driver"
 else
   echo "[P51.XPROF] GREEN steps=$steps_done/$max_steps mesh=fsdp,tp/Auto (P51_CAPTURE=0)" \

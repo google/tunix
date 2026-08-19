@@ -12,7 +12,7 @@
 | 仪器 | 实现 | 产物 | 体积 | 看什么 |
 |---|---|---|---|---|
 | **语义时间线**(seqpack 同款,官方 docs 的 Metrics/Perfetto) | `tunix/perf` v2 spans(learner 内建 + G6 训练段补装)+ `PerfMetricsExport.from_cluster_config` | `train/perf/perfetto_trace_v2_<ts>.pb` | ~20KB | 阶段结构:rollout / environment / reference_inference / weight_sync / data_loading / **peft_train(G6 update 整段,内嵌 segmented_value_and_grad 与 gradient_commit)**,ui.perfetto.dev 直接拖。训练段 span 是本分支补的:官方内建训练 span 长在 `PeftTrainer.train()`,G6 segmented 路径不进去 |
-| **器件织物**(XProf) | `tunix/sft/profiler.Profiler`(官方类,learner 在全局步边界驱动) | `train/xprof/plugins/profile/<ts>/{*.xplane.pb, *.trace.json.gz}` | ~1.85GB / ~39MB | device plane(TPU 忙闲、每 XLA op)、host 事件;xplane 进 XProf UI,trace.json.gz 也可拖 ui.perfetto.dev |
+| **器件织物**(XProf) | `P51_XPROF_PHASE=step`:官方 `tunix/sft/profiler.Profiler` 步边界窗;`=update`:learner 在 G6 update 入口起窗 | `train/xprof/plugins/profile/<ts>/{*.xplane.pb, *.trace.json.gz}` | step ~1.9GB(缓冲上限)/ update 远小 | **step 模式的 device 轨只有 engine 前 ~25s decode**(缓冲截断,见"窗口语义");看 trainer forward/backward/commit 用 `update` 模式。xplane 进 XProf UI,trace.json.gz 拖 ui.perfetto.dev(注意它也只含缓冲保住的部分) |
 
 与旧版(≤2026-08-18)的差别:自制 start/stop 钩子退役,窗口由官方
 `Profiler` 管(日志行变为 absl 的 `Starting/Stopping JAX profiler at step N`);
@@ -29,6 +29,10 @@ bash canon-zero-tim/tasks/p48-onehost-perf/scripts/run_onehost_gsm8k_xprof.sh <f
 # 推荐口径(更稳态、发货优化全开):
 P51_MAX_STEPS=6 P51_XPROF_SKIP_STEPS=4 P51_XPROF_STEPS=1 P51_BATCHED_REVERSE=1 \
 bash canon-zero-tim/tasks/p48-onehost-perf/scripts/run_onehost_gsm8k_xprof.sh <fresh-label>
+
+# 看 trainer backward(forward+16 dispatch+reverse+commit,rollout 不入镜):
+P51_XPROF_PHASE=update \
+bash canon-zero-tim/tasks/p48-onehost-perf/scripts/run_onehost_gsm8k_xprof.sh <fresh-label>
 ```
 
 label 只允许 `[a-zA-Z0-9_-]`,不可复用;发射前先 `cp` 冻结副本(#11)。
@@ -39,10 +43,11 @@ label 只允许 `[a-zA-Z0-9_-]`,不可复用;发射前先 `cp` 冻结副本(#11)
 |---|---|---|
 | `P51_MAX_STEPS` | 3 | 总步数(step0 编译 ~366s,warm ~86-94s/步) |
 | `P51_XPROF_SKIP_STEPS` | 2 | 完成 N 步后开窗(捕 stepN 起)。**≥1**:窗口开在"步完成"边界,step0 够不着;0/非法值发射前 REFUSING |
-| `P51_XPROF_STEPS` | 1 | 窗口跨步数;须 `skip+steps<=MAX_STEPS`,否则 REFUSING(拼错≠"不想采") |
+| `P51_XPROF_STEPS` | 1 | 窗口跨步数;须 `skip+steps<=MAX_STEPS`,否则 REFUSING(拼错≠"不想采")。**`update` 模式强制 =1**(>1 会跨进下一步 rollout,decode 重新灌满缓冲;载具与 learner 双层 REFUSING) |
 | `P51_CAPTURE` | 1 | 0=只训练不采 xprof(**显式声明**;此时不传 `CANON_XPROF_DIR`)。语义 trace 不受此开关影响,恒开 |
 | `P51_XPROF_PYTHON_TRACER` | **0** | 经 ProfilerOptions 传入。**本 image 上开高任一 tracer 都会把 device plane 挤掉**,三发对照:python1/host2→936MB 纯 host;python0/host1→1.85GB 满血 8 planes;python0/host2→32MB 纯 host |
 | `P51_XPROF_HOST_TRACER` | **1** | 同上;要 host 细节调 2 需接受丢 device 轨 |
+| `P51_XPROF_PHASE` | step | `step`=整步窗(device 内容被缓冲截断为 engine 前 ~25s,**profile rollout 用它**);`update`=G6 update 入口→步完成(**profile backward 用它**,rollout 不进镜头) |
 | `P51_ONEHOST_TIMEOUT_SECONDS` | 2700 | 6 步 ≈17 分钟,余量足 |
 
 合同钉死项(fail-closed 强制,错即秒红,不用背):prompt/response=1024/1024、
@@ -68,12 +73,39 @@ step2 完成 → 计数3==SKIP+STEPS → absl "Stopping JAX profiler at step 3"
 切分,rollout 由后台 producer 预取,窗口内可能混入邻步少量流水工作:
 窗口级归因不受影响,逐步精确记账以 `[PERF]` 行为准。
 
+### device 缓冲截断(step 窗的真实内容,必读)
+
+**窗口时间跨度 ≠ device 轨内容**。TPU device trace 缓冲每核 ~283 万 op
+事件;engine decode ~11 万 op/s/核,**~25 秒填满,之后静默丢弃**。
+p54final 1.9GB xplane 解剖实证:每核 XLA Modules 行 13 种模块全是
+decode 家族(`jit_run_model`/`jit_sample`/`jit_compute_and_gather`…),
+跨度 24.9s,XLA Ops 283 万/核——**整步窗里 rescore、vag forward、
+backward、adam 全部被 drop**。这也是 xplane 恒 ~1.9GB 的原因(缓冲
+上限指纹;95/94/66s 三种窗长实测 1941/1995/1887MB 不变)。
+TPU 侧无文档化的缓冲加大键(advanced_configuration 只有
+tpu_trace_mode 等,收下未知键≠生效,不可赌)。
+
+### `update` 窗(profile backward 的正解)
+
+start 锚在 `_run_p28_g6_update` 调用前(=语义 `peft_train` span 打开处,
+device 窗≡语义 span),stop 在步完成点;decode 不入镜,缓冲全花在
+update 上:vag_forward + 16 个异步 dispatch + 流水化 reverse + adam
+commit 完整保留。自证行(gate 逐一断言步号;此模式无 absl 行):
+
+```
+[P51.XPROF] phase=update armed step=<SKIP>
+[P51.XPROF] phase=update started step=<SKIP> anchor=update_entry
+[P51.XPROF] phase=update stopped step=<SKIP+STEPS> anchor=step_completed
+```
+
 ## 绿判据(任一不成立打印 `RED` 并非零退出)
 
 `docker_exit=0` · `steps_done==MAX_STEPS` · **mesh 自证行**(程序自打印的
 `axis_names=('fsdp', 'tp') axis_types=(Auto, Auto)`)· `perf_v2_traces>=1`
-(语义 trace 静默消失=红)· `P51_CAPTURE=1` 时:absl Starting/Stopping
-各 1 次 + xplane>0 + trace.json.gz>0。数值门照旧:[CANON_ALIGN] 一红即停。
+(语义 trace 静默消失=红)· `P51_CAPTURE=1` 时按 phase 分支:`step` 读
+absl Starting/Stopping 行,`update` 读三条自证行(armed/started==SKIP、
+stopped==SKIP+STEPS,**精确步号**),另 xplane>0 + trace.json.gz>0。
+数值门照旧:[CANON_ALIGN] 一红即停。
 
 ## 看图
 
@@ -109,9 +141,13 @@ tracer/窗口 pin **只活在本载具**。直接跑 `qwen3_grpo_demo.py` 想拿
 ```bash
 CANON_XPROF_DIR=<dir> CANON_XPROF_SKIP_STEPS=2 CANON_XPROF_STEPS=1 \
 CANON_XPROF_HOST_TRACER=1 CANON_XPROF_PYTHON_TRACER=0 \
+CANON_XPROF_PHASE=update \
 CANON_PERF_TRACE_DIR=<dir2> \
 python3 examples/math_gsm8k/qwen3_grpo_demo.py …
 ```
+
+(`CANON_XPROF_PHASE` 省略=step 整步窗——记住那是 engine 前 25s 织物;
+要 backward 必须 `update`。)
 
 mesh 制式按宿主定(勿互抄):本宿主 **不设** `FL_SHARED_MESH`
 (engine 兼容 `(fsdp,tp)+Auto`);engine 为 `(data,model)+Explicit` 的宿主
@@ -129,4 +165,9 @@ out-sharding——但**该组修法已 land-and-revert**(`6daec65e`→`e26b70b3`
 - 其余一宿主载具(pair / FL P31 / P35 / P38 onehost / resident)仍传
   `FL_SHARED_MESH`,统一处理挂起中;
 - device plane 被高档 tracer 挤掉的机理未根除(五探针阶梯已档,
-  外层 tasks/p51_onehost_gsm8k_xprof/phase1.md),操作配方已实证。
+  外层 tasks/p51_onehost_gsm8k_xprof/phase1.md),操作配方已实证;
+- **缩窗死路(已实证否决)**:壁钟 delay 子步窗(rollout_update,
+  land-and-revert)不缩 xplane——95/94/66s 窗 → 1941/1995/1887MB,
+  trace.json.gz 恒 ~41MB;根因即上文缓冲截断:decode 25s 就把缓冲
+  填满,窗再长再短文件都 ~1.9GB。要小文件/要 backward 都走
+  `P51_XPROF_PHASE=update`,不要再试时间平移。

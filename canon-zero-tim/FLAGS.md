@@ -36,6 +36,7 @@
 | CANON_XPROF_DIR/_SKIP_STEPS/_STEPS | XProf+perfetto 捕获(一次出双产物) | 仪器 | 长期保留 |
 | CANON_PERF_TRACE_DIR | 官方 tunix.perf v2 语义时间线导出目录(learner 内建 span → perfetto_trace_v2_<ts>.pb;空=NoopTracer 零开销) | 仪器;P51 载具恒开 | 长期保留(官方 Metrics 契约) |
 | CANON_XPROF_PYTHON_TRACER/_HOST_TRACER | tracer 档位;**python=0 是 device plane 的前提**(开着它训练捕获退化为 host-only) | 仪器;载具默认 python=0 | 长期保留 |
+| CANON_XPROF_PHASE | 捕获窗模式:step=整步(device 缓冲 ~283 万事件/核,decode ~25s 填满,实为 engine 前 25s 织物)/ update=G6 update 入口→步完成(rollout 不入镜,缓冲装下完整 backward) | 仪器;载具旋钮 P51_XPROF_PHASE | 长期保留 |
 | CANON_UPDATE_REPORT / CANON_PRE_ALIGN_REPORT / CANON_ALIGN_REPORT | 对齐/更新报告选通 | 默认开(监控契约) | 长期保留;A−B 哨兵不可撤(用户裁决 2026-08-15) |
 | JAX_COMPILATION_CACHE_DIR(非 CANON) | 持久编译缓存(-72s/重启) | 一宿主认证;**Pathways 未验** | 集群验证后进 lane/perf.env |
 
@@ -371,9 +372,10 @@ CANON_WAYCOUNT_DEPTHS
 CANON_WAYCOUNT_WIDTHS
 CANON_XPROF_DIR
 CANON_XPROF_HOST_TRACER
+CANON_XPROF_PHASE
 CANON_XPROF_PYTHON_TRACER
 CANON_XPROF_SKIP_STEPS
 CANON_XPROF_STEPS
 ```
 
-Count: 299 settable names (regenerate with the grep in tasks/canon_system_redesign/phase0_indexes.md; exclusions: none).
+Count: 300 settable names (regenerate with the grep in tasks/canon_system_redesign/phase0_indexes.md; exclusions: none).

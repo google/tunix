@@ -2316,6 +2316,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             f"grad_acc={expected_grad_acc} segmented=1",
             flush=True,
         )
+        _canon_xprof_update_entry()
         with self.rl_cluster.perf_v2.span(
             perf_constants.PEFT_TRAIN,
             self.rl_cluster.perf_v2.all_devices,
@@ -3003,23 +3004,80 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     return filtered_train_micro_batch
 
 
-_CANON_XPROF = {"profiler": None, "completed_steps": 0}
+_CANON_XPROF = {
+    "completed_steps": 0,
+    "configured": False,
+    "profiler": None,
+    "mode": "step",
+    "skip": 0,
+    "steps": 0,
+    "directory": "",
+    "host_tracer": 1,
+    "python_tracer": 0,
+    "armed": False,
+    "started": False,
+}
+
+
+def _canon_xprof_update_entry():
+  """Update-entry anchor: opens the phase=update trace window when armed.
+
+  The G6 update call passes through here once per global step, in the
+  trainer thread, at the same spot the semantic peft_train span opens, so
+  the device window and the semantic span cover the same region. Opening
+  here instead of at the step boundary keeps the rollout out of the
+  capture entirely: the engine decode loop emits ~110k device ops per
+  second per core and fills the device trace buffer (~2.8M events/core)
+  in ~25s, silently dropping everything after -- which is how a whole-step
+  window ends up with no backward in it. Anchored here, the buffer is
+  spent on the update: forward, the sixteen accumulation dispatches, the
+  pipelined reverse, and the optimizer commit.
+  """
+  if not _CANON_XPROF["armed"]:
+    return
+  _CANON_XPROF["armed"] = False
+  options = jax.profiler.ProfileOptions()
+  options.host_tracer_level = _CANON_XPROF["host_tracer"]
+  options.python_tracer_level = _CANON_XPROF["python_tracer"]
+  jax.profiler.start_trace(
+      log_dir=_CANON_XPROF["directory"], profiler_options=options
+  )
+  _CANON_XPROF["started"] = True
+  print(
+      "[P51.XPROF] phase=update started "
+      f"step={_CANON_XPROF['skip']} anchor=update_entry",
+      flush=True,
+  )
 
 
 def _canon_xprof_step_boundary():
-  """Drives the official tunix.sft Profiler at global-step boundaries.
+  """Drives the xprof capture window at global-step boundaries.
 
   CANON_XPROF_DIR arms it (empty or unset stays off, so the docker -e K=""
-  idiom is inert). The window covers whole global steps -- rollout included --
-  because the G6 segmented update path never enters PeftTrainer.train(),
-  where the trainer-level activation lives. Counting starts after the first
-  completed step, so a skip below one could never fire; that is rejected
-  loudly instead of leaving an empty profile directory behind.
+  idiom is inert). Both window modes hang off this hook because the G6
+  segmented update path never enters PeftTrainer.train(), where the
+  trainer-level activation lives:
+
+  - step (default): the official tunix.sft Profiler opens and closes at
+    step boundaries. The window spans the whole global step, but the
+    device planes only retain what fits the device trace buffer -- at the
+    certified geometry that is the first ~25s of engine decode -- so this
+    mode profiles the rollout fabric, not the trainer.
+  - update: this hook arms at completed==skip; the update-entry hook opens
+    the window at the G6 update call and completed==skip+steps closes it.
+    The rollout never enters the capture, so the buffer retains the whole
+    backward.
+
+  Counting starts after the first completed step, so a skip below one
+  could never fire; that is rejected loudly instead of leaving an empty
+  profile directory behind. An update window still unopened at its stop
+  boundary (the armed step never reached the G6 update call) is a hard
+  error for the same reason.
   """
   directory = os.environ.get("CANON_XPROF_DIR", "")
   if not directory:
     return
-  if _CANON_XPROF["profiler"] is None:
+  if not _CANON_XPROF["configured"]:
     skip = int(os.environ.get("CANON_XPROF_SKIP_STEPS", "") or "2")
     steps = int(os.environ.get("CANON_XPROF_STEPS", "") or "1")
     if skip < 1 or steps < 1:
@@ -3028,20 +3086,66 @@ def _canon_xprof_step_boundary():
           "window opens after a completed step, so the first capturable "
           f"step is step 1 (got skip={skip}, steps={steps})"
       )
+    mode = os.environ.get("CANON_XPROF_PHASE", "") or "step"
+    if mode not in ("step", "update"):
+      raise ValueError(
+          f"CANON_XPROF_PHASE must be 'step' or 'update': {mode!r}"
+      )
+    if mode == "update" and steps != 1:
+      raise ValueError(
+          "CANON_XPROF_PHASE=update requires CANON_XPROF_STEPS=1: the "
+          "window closes at the next step boundary, and a longer window "
+          "would run across the following step's rollout and refill the "
+          f"device trace buffer with decode (got steps={steps})"
+      )
     host_tracer = int(os.environ.get("CANON_XPROF_HOST_TRACER", "") or "1")
-    python_tracer = int(os.environ.get("CANON_XPROF_PYTHON_TRACER", "") or "0")
-    _CANON_XPROF["profiler"] = sft_profiler.Profiler(
-        initial_step=0,
-        max_step=None,
-        profiler_options=sft_profiler.ProfilerOptions(
-            log_dir=directory,
-            skip_first_n_steps=skip,
-            profiler_steps=steps,
-            host_tracer_level=host_tracer,
-            python_tracer_level=python_tracer,
-        ),
+    python_tracer = int(
+        os.environ.get("CANON_XPROF_PYTHON_TRACER", "") or "0"
     )
+    _CANON_XPROF.update(
+        configured=True,
+        mode=mode,
+        skip=skip,
+        steps=steps,
+        directory=directory,
+        host_tracer=host_tracer,
+        python_tracer=python_tracer,
+    )
+    if mode == "step":
+      _CANON_XPROF["profiler"] = sft_profiler.Profiler(
+          initial_step=0,
+          max_step=None,
+          profiler_options=sft_profiler.ProfilerOptions(
+              log_dir=directory,
+              skip_first_n_steps=skip,
+              profiler_steps=steps,
+              host_tracer_level=host_tracer,
+              python_tracer_level=python_tracer,
+          ),
+      )
   _CANON_XPROF["completed_steps"] += 1
   completed = _CANON_XPROF["completed_steps"]
-  _CANON_XPROF["profiler"].maybe_activate(completed)
-  _CANON_XPROF["profiler"].maybe_deactivate(completed)
+  if _CANON_XPROF["mode"] == "step":
+    _CANON_XPROF["profiler"].maybe_activate(completed)
+    _CANON_XPROF["profiler"].maybe_deactivate(completed)
+    return
+  if completed == _CANON_XPROF["skip"]:
+    _CANON_XPROF["armed"] = True
+    print(
+        f"[P51.XPROF] phase=update armed step={completed}",
+        flush=True,
+    )
+    return
+  if completed == _CANON_XPROF["skip"] + _CANON_XPROF["steps"]:
+    if not _CANON_XPROF["started"]:
+      raise RuntimeError(
+          "phase=update capture window never started before its stop "
+          "boundary; the armed step never reached the G6 update call"
+      )
+    jax.profiler.stop_trace()
+    _CANON_XPROF["started"] = False
+    print(
+        "[P51.XPROF] phase=update stopped "
+        f"step={completed} anchor=step_completed",
+        flush=True,
+    )
