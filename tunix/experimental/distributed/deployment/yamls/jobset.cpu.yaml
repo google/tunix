@@ -102,6 +102,19 @@ spec:
                 valueFrom:
                   fieldRef:
                     fieldPath: metadata.labels['batch.kubernetes.io/job-completion-index']
+              # OpenTelemetry Telemetry Configuration
+              - name: NODE_IP
+                valueFrom:
+                  fieldRef:
+                    fieldPath: status.hostIP
+              - name: OTEL_EXPORTER_OTLP_ENDPOINT
+                value: "${OTEL_EXPORTER_OTLP_ENDPOINT}"
+              - name: OTEL_EXPORTER_OTLP_PROTOCOL
+                value: "${OTEL_EXPORTER_OTLP_PROTOCOL}"
+              - name: OTEL_SERVICE_NAME
+                value: "${JOBSET_NAME}-orchestrator"
+              - name: OTEL_RESOURCE_ATTRIBUTES
+                value: "service.namespace=tunix,jobset.name=${JOBSET_NAME},container.name=${USER_CONTAINER}"
               ports:
               - containerPort: ${USER_CONTAINER_PORT}
                 name: grpc # Naming it 'grpc' tells GKE to optimize for HTTP/2

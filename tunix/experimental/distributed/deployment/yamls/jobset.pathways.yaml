@@ -90,6 +90,19 @@ spec:
                     fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
               - name: TPU_SKIP_MDS_QUERY
                 value: "true"
+              # OpenTelemetry Configuration
+              - name: NODE_IP
+                valueFrom:
+                  fieldRef:
+                    fieldPath: status.hostIP
+              - name: OTEL_EXPORTER_OTLP_ENDPOINT
+                value: "${OTEL_EXPORTER_OTLP_ENDPOINT}"
+              - name: OTEL_EXPORTER_OTLP_PROTOCOL
+                value: "${OTEL_EXPORTER_OTLP_PROTOCOL}"
+              - name: OTEL_SERVICE_NAME
+                value: "${JOBSET_NAME}-pathways-rm"
+              - name: OTEL_RESOURCE_ATTRIBUTES
+                value: "service.namespace=tunix,jobset.name=${JOBSET_NAME},container.name=pathways-rm"
               ports:
               - containerPort: 29001
                 protocol: TCP
@@ -113,6 +126,19 @@ spec:
                 valueFrom:
                   fieldRef:
                     fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
+              # OpenTelemetry Configuration
+              - name: NODE_IP
+                valueFrom:
+                  fieldRef:
+                    fieldPath: status.hostIP
+              - name: OTEL_EXPORTER_OTLP_ENDPOINT
+                value: "${OTEL_EXPORTER_OTLP_ENDPOINT}"
+              - name: OTEL_EXPORTER_OTLP_PROTOCOL
+                value: "${OTEL_EXPORTER_OTLP_PROTOCOL}"
+              - name: OTEL_SERVICE_NAME
+                value: "${JOBSET_NAME}-pathways-proxy"
+              - name: OTEL_RESOURCE_ATTRIBUTES
+                value: "service.namespace=tunix,jobset.name=${JOBSET_NAME},container.name=pathways-proxy"
               ports:
               - containerPort: 29000
                 protocol: TCP
@@ -177,6 +203,19 @@ spec:
                 value: "grpc://localhost:29000"
               - name: VLLM_ENABLE_V1_MULTIPROCESSING
                 value: "0"
+              # OpenTelemetry Configuration
+              - name: NODE_IP
+                valueFrom:
+                  fieldRef:
+                    fieldPath: status.hostIP
+              - name: OTEL_EXPORTER_OTLP_ENDPOINT
+                value: "${OTEL_EXPORTER_OTLP_ENDPOINT}"
+              - name: OTEL_EXPORTER_OTLP_PROTOCOL
+                value: "${OTEL_EXPORTER_OTLP_PROTOCOL}"
+              - name: OTEL_SERVICE_NAME
+                value: "${JOBSET_NAME}-${USER_CONTAINER}"
+              - name: OTEL_RESOURCE_ATTRIBUTES
+                value: "service.namespace=tunix,jobset.name=${JOBSET_NAME},container.name=${USER_CONTAINER}"
               ports:
               - containerPort: ${USER_CONTAINER_PORT}
                 name: grpc # Naming it 'grpc' tells GKE to optimize for HTTP/2
@@ -279,6 +318,19 @@ spec:
                 valueFrom:
                   fieldRef:
                     fieldPath: metadata.labels['jobset.sigs.k8s.io/coordinator']
+              # OpenTelemetry Configuration
+              - name: NODE_IP
+                valueFrom:
+                  fieldRef:
+                    fieldPath: status.hostIP
+              - name: OTEL_EXPORTER_OTLP_ENDPOINT
+                value: "${OTEL_EXPORTER_OTLP_ENDPOINT}"
+              - name: OTEL_EXPORTER_OTLP_PROTOCOL
+                value: "${OTEL_EXPORTER_OTLP_PROTOCOL}"
+              - name: OTEL_SERVICE_NAME
+                value: "${JOBSET_NAME}-pathways-worker"
+              - name: OTEL_RESOURCE_ATTRIBUTES
+                value: "service.namespace=tunix,jobset.name=${JOBSET_NAME},container.name=pathways-worker"
               ports:
               - containerPort: 29005
                 protocol: TCP
