@@ -26,6 +26,7 @@ from tunix.experimental.common import datatypes
 from tunix.experimental.orchestrator import algorithm_adapter
 from tunix.experimental.orchestrator import batch_assembly
 from tunix.experimental.orchestrator import rl_engine_interface
+from tunix.rl import common as rl_common
 
 RewardFn = Callable[[datatypes.TrajectoryItem], float]
 
@@ -175,13 +176,8 @@ class SyncRLProgram:
       rewards.append(float(r))
 
     # 3. Create RLTrainerPayloads via AlgorithmAdapter
-    ref_logps = None
-    if getattr(self.algo, "requires_reference_kl", False):
-      ref_logps = await _await_if_needed(
-          active_engine.per_token_logps(datatypes.Role.REFERENCE, items=rollouts)
-      )
     trainer_payloads = self.algo.create_trainer_payloads(
-        rollouts, rewards=rewards, ref_logps=ref_logps
+        rollouts, rewards=rewards
     )
 
     # 4. Pack into microbatches
@@ -189,7 +185,27 @@ class SyncRLProgram:
     if not microbatches:
       raise RuntimeError("No trainer microbatches were assembled.")
 
-    # 5. Execute gradient updates
+    # 5. Score reference logps on the same padded microbatches used for training.
+    if getattr(self.algo, "requires_reference_kl", False):
+      scored_microbatches = []
+      for batch in microbatches:
+        if not isinstance(batch, rl_common.TrainExample):
+          raise TypeError(
+              "Reference KL requires an assembler that returns "
+              "rl_common.TrainExample microbatches; got "
+              f"{type(batch).__name__}."
+          )
+        ref_logps = await _await_if_needed(
+            active_engine.per_token_logps(
+                datatypes.Role.REFERENCE, items=batch
+            )
+        )
+        scored_microbatches.append(
+            batch_assembly.with_ref_per_token_logps(batch, ref_logps)
+        )
+      microbatches = scored_microbatches
+
+    # 6. Execute gradient updates
     step_result = None
     for index, batch in enumerate(microbatches):
       is_last = index == len(microbatches) - 1
@@ -202,7 +218,7 @@ class SyncRLProgram:
           )
       )
 
-    # 6. Sync weights to rollout replicas
+    # 7. Sync weights to rollout replicas
     if self.sync_weights:
       new_version = await _await_if_needed(
           active_engine.sync_weights(role=datatypes.Role.ACTOR)

@@ -35,7 +35,7 @@ T = TypeVar("T")
 class BatchAssembler(Generic[T], Protocol):
   """Universal batch assembly protocol for microbatch packing."""
 
-  def pack(self, items: Sequence[T]) -> list[datatypes.RLTrainerPayload]:
+  def pack(self, items: Sequence[T]) -> list[Any]:
     """Packs items into hardware-sized microbatch trainer payloads."""
     ...
 
@@ -105,6 +105,34 @@ def _completion_aligned(
       dtype=np.float32,
   )
   return out
+
+
+def with_ref_per_token_logps(
+    batch: rl_common.TrainExample,
+    ref_logps: datatypes.LogprobsResponse | np.ndarray,
+) -> rl_common.TrainExample:
+  """Returns a trainer batch carrying ref logps aligned to completion_ids."""
+  # TODO: Return an experimental-native trainer batch once GRPO loss no longer
+  # depends on the legacy rl_common.TrainExample structure.
+  if not isinstance(batch, rl_common.TrainExample):
+    raise TypeError(
+        "with_ref_per_token_logps expects a padded TrainExample from "
+        f"BatchAssembler; got {type(batch).__name__}."
+    )
+  if isinstance(ref_logps, datatypes.LogprobsResponse):
+    if ref_logps.error is not None:
+      raise RuntimeError(ref_logps.error.message)
+    ref_logps = ref_logps.per_token_logps
+  ref_logps_arr = np.asarray(ref_logps, dtype=np.float32)
+  completion_shape = np.asarray(batch.completion_ids).shape
+  if ref_logps_arr.shape != completion_shape:
+    raise ValueError(
+        "Reference logps shape must match padded completion_ids shape: "
+        f"got {ref_logps_arr.shape}, expected {completion_shape}."
+    )
+  return batch.replace(  # pyrefly: ignore[missing-attribute]
+      ref_per_token_logps=ref_logps_arr
+  )
 
 
 class SequencePackedBatchAssembler:

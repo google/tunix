@@ -181,6 +181,96 @@ class RLProgramTest(absltest.TestCase):
     self.assertEqual(program.step, 2)
     self.assertLen(set(loop_ids), 1)
 
+  def test_reference_logps_are_scored_from_padded_microbatch(self):
+    item = datatypes.TrajectoryItem(
+        pair_index=0,
+        group_id="prompt1",
+        start_step=0,
+        traj=datatypes.Trajectory(
+            reward=1.0,
+            status=datatypes.TrajectoryStatus.SUCCEEDED,
+        ),
+        prompt_tokens=np.array([1, 2], dtype=np.int32),
+        completion_tokens=np.array([3, 4], dtype=np.int32),
+        action_mask=np.array([1, 1], dtype=np.float32),
+    )
+    trainer_payload = datatypes.RLTrainerPayload(
+        token_ids=np.array([1, 2, 3, 4], dtype=np.int32),
+        token_mask=np.ones(4, dtype=np.float32),
+        loss_mask=np.array([0, 0, 1, 1], dtype=np.float32),
+        advantages=np.ones(4, dtype=np.float32),
+        action_mask=np.array([0, 0, 1, 1], dtype=np.float32),
+        prompt_ids=np.array([1, 2], dtype=np.int32),
+        prompt_mask=np.ones(2, dtype=np.float32),
+        completion_ids=np.array([3, 4], dtype=np.int32),
+        completion_mask=np.ones(2, dtype=np.float32),
+    )
+    algo = mock.MagicMock(spec=algorithm_adapter.AlgorithmAdapter)
+    algo.create_trainer_payloads.return_value = [trainer_payload]
+    algo.requires_reference_kl = True
+    engine = mock.MagicMock(spec=rl_engine_interface.AbstractRLEngine)
+    engine.generate = mock.AsyncMock(return_value=[item])
+    engine.sync_weights = mock.AsyncMock(return_value=1)
+
+    seen_logps_batches = []
+    seen_train_batches = []
+
+    async def _per_token_logps(role, items, **kwargs):
+      del kwargs
+      self.assertEqual(role, datatypes.Role.REFERENCE)
+      seen_logps_batches.append(items)
+      np.testing.assert_array_equal(
+          np.asarray(items.prompt_ids),
+          np.array([[0, 0, 1, 2]], dtype=np.int32),
+      )
+      np.testing.assert_array_equal(
+          np.asarray(items.completion_ids),
+          np.array([[3, 4, 0]], dtype=np.int32),
+      )
+      return np.full(np.asarray(items.completion_ids).shape, 0.25, dtype=np.float32)
+
+    async def _train_step(payload, **kwargs):
+      del kwargs
+      seen_train_batches.append(payload)
+      np.testing.assert_array_equal(
+          np.asarray(payload.prompt_ids),
+          np.asarray(seen_logps_batches[0].prompt_ids),
+      )
+      np.testing.assert_array_equal(
+          np.asarray(payload.completion_ids),
+          np.asarray(seen_logps_batches[0].completion_ids),
+      )
+      np.testing.assert_allclose(
+          np.asarray(payload.ref_per_token_logps),
+          np.full((1, 3), 0.25, dtype=np.float32),
+      )
+      return "mock_train_result"
+
+    engine.per_token_logps = mock.AsyncMock(side_effect=_per_token_logps)
+    engine.train_step = mock.AsyncMock(side_effect=_train_step)
+
+    program = rl_program.SyncRLProgram(
+        engine=engine,
+        algo=algo,
+        reward_fns=[lambda _: 1.0],
+        assembler=batch_assembly.GRPOTrainExampleAssembler(
+            batch_size=1,
+            max_prompt_length=4,
+            max_response_length=3,
+            pad_id=0,
+        ),
+    )
+
+    res = program.step_once(prompts=[self.mock_request])
+    self.assertEqual(res, "mock_train_result")
+    algo.create_trainer_payloads.assert_called_once_with(
+        [item], rewards=[1.0]
+    )
+    engine.per_token_logps.assert_awaited_once()
+    engine.train_step.assert_awaited_once()
+    self.assertLen(seen_logps_batches, 1)
+    self.assertLen(seen_train_batches, 1)
+
   def test_eval_step_once_flow(self):
     program = rl_program.SyncRLProgram(
         engine=self.mock_engine,

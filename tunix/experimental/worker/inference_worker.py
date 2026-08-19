@@ -30,34 +30,9 @@ import numpy as np
 from tunix.experimental.common import batch_utils
 from tunix.experimental.common import datatypes
 from tunix.experimental.worker import abstract_worker
+from tunix.rl import common as rl_common
 
 WorkerState = datatypes.WorkerState
-
-
-def _left_pad_tokens(
-    values: Any,
-    length: int,
-    *,
-    pad_id: int,
-) -> np.ndarray:
-  arr = np.asarray(values, dtype=np.int32).reshape(-1)[-length:]
-  out = np.full(length, pad_id, dtype=np.int32)
-  if arr.size:
-    out[-arr.size:] = arr
-  return out
-
-
-def _right_pad_tokens(
-    values: Any,
-    length: int,
-    *,
-    pad_id: int,
-) -> np.ndarray:
-  arr = np.asarray(values, dtype=np.int32).reshape(-1)[:length]
-  out = np.full(length, pad_id, dtype=np.int32)
-  if arr.size:
-    out[:arr.size] = arr
-  return out
 
 
 class ReferenceScoringCore(Protocol):
@@ -116,10 +91,10 @@ class InferenceWorker(abstract_worker.Worker):
       eos_id: End-of-sequence token id.
       model_version: Version tag for the hosted weights; constant while frozen.
       chunk_size: Optional maximum batch size for scoring to reduce peak memory.
-      max_prompt_length: Optional fixed prompt length for role-oriented
-        per-token log-prob requests.
-      max_response_length: Optional fixed completion length for role-oriented
-        per-token log-prob requests.
+      max_prompt_length: Retained for launcher/config compatibility. Padding is
+        owned by the orchestrator BatchAssembler, not this worker.
+      max_response_length: Retained for launcher/config compatibility. Padding
+        is owned by the orchestrator BatchAssembler, not this worker.
       temperature: Default sampling temperature used for reference log-probs.
     """
     self._worker_id = worker_id
@@ -177,7 +152,9 @@ class InferenceWorker(abstract_worker.Worker):
       if req.temperature <= 1e-5:
         raise ValueError("Temperature must be strictly positive.")
 
-      def _score(prompt_chunk: np.ndarray, completion_chunk: np.ndarray) -> Any:
+      def _score(
+          prompt_chunk: np.ndarray, completion_chunk: np.ndarray
+      ) -> jax.Array:
         return self._core.get_ref_per_token_logps(
             prompt_tokens=jnp.asarray(prompt_chunk, dtype=jnp.int32),
             completion_tokens=jnp.asarray(completion_chunk, dtype=jnp.int32),
@@ -206,74 +183,26 @@ class InferenceWorker(abstract_worker.Worker):
 
   def per_token_logps(
       self,
-      items: Sequence[datatypes.TrajectoryItem],
-      **kwargs: Any,
+      items: rl_common.TrainExample,
+      request_id: str = "reference_logps",
+      temperature: float | None = None,
+      model_role: str = "reference",
   ) -> np.ndarray:
-    """Scores reference log-probs for trajectory items.
-
-    TrajectoryItem token arrays are produced by rollout and can be ragged. This
-    method pads them into the fixed-shape LogprobsRequest expected by
-    compute_logps().
-    """
-    item_list = list(items)
-    if not item_list:
-      response_len = kwargs.get(
-          "max_response_length", self._max_response_length or 0
-      )
-      return np.zeros((0, response_len), dtype=np.float32)
-
-    max_prompt_length = kwargs.get(
-        "max_prompt_length", self._max_prompt_length
-    )
-    if max_prompt_length is None:
-      max_prompt_length = max(
-          1,
-          max(
-              len(item.prompt_tokens)
-              if item.prompt_tokens is not None
-              else 0
-              for item in item_list
-          ),
-      )
-
-    max_response_length = kwargs.get(
-        "max_response_length", self._max_response_length
-    )
-    if max_response_length is None:
-      max_response_length = max(
-          1,
-          max(
-              len(item.completion_tokens)
-              if item.completion_tokens is not None
-              else 0
-              for item in item_list
-          ),
+    """Scores reference log-probs for an already padded batch."""
+    if not isinstance(items, rl_common.TrainExample):
+      raise TypeError(
+          "InferenceWorker.per_token_logps expects a padded TrainExample. "
+          "Pad trajectory items in BatchAssembler before scoring."
       )
 
     req = datatypes.LogprobsRequest(
-        request_id="reference_logps",
-        prompt_tokens=np.stack([
-            _left_pad_tokens(
-                item.prompt_tokens if item.prompt_tokens is not None else [],
-                int(max_prompt_length),
-                pad_id=self._pad_id,
-            )
-            for item in item_list
-        ]),
-        completion_tokens=np.stack([
-            _right_pad_tokens(
-                (
-                    item.completion_tokens
-                    if item.completion_tokens is not None
-                    else []
-                ),
-                int(max_response_length),
-                pad_id=self._pad_id,
-            )
-            for item in item_list
-        ]),
-        temperature=float(kwargs.get("temperature", self._temperature)),
-        model_role="reference",
+        request_id=request_id,
+        prompt_tokens=np.asarray(items.prompt_ids, dtype=np.int32),
+        completion_tokens=np.asarray(items.completion_ids, dtype=np.int32),
+        temperature=(
+            self._temperature if temperature is None else float(temperature)
+        ),
+        model_role=model_role,
     )
     resp = self.compute_logps(req)
     if resp.error is not None:
@@ -289,7 +218,9 @@ class InferenceWorker(abstract_worker.Worker):
             f"model_role={req.model_role!r}."
         )
 
-      def _score(prompt_chunk: np.ndarray, completion_chunk: np.ndarray) -> Any:
+      def _score(
+          prompt_chunk: np.ndarray, completion_chunk: np.ndarray
+      ) -> jax.Array:
         return self._core.get_rewards(
             prompt_tokens=jnp.asarray(prompt_chunk, dtype=jnp.int32),
             completion_tokens=jnp.asarray(completion_chunk, dtype=jnp.int32),

@@ -294,10 +294,10 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
   async def per_token_logps(
       self,
       role: datatypes.Role,
-      items: Sequence[Any],
+      items: Any,
       **kwargs: Any,
   ) -> Any:
-    """Evaluates reference model or actor per-token logprobs."""
+    """Evaluates reference model or actor logprobs on a padded batch/request."""
     worker = self._inference_workers.get(role) or self._trainer_workers.get(
         role
     )
