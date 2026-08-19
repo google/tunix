@@ -30,6 +30,18 @@ scripts/extract_perf.py                  [PERF] 行 → JSON 画像
 evidence/p48g7/                          64 卡 GSM8K 性能日志 + 提取 JSON
 ```
 
+## P54:画像栈已切官方 tunix/perf(2026-08-19)
+
+| 件 | 实现 | 产物 |
+|---|---|---|
+| 语义时间线 | `CANON_PERF_TRACE_DIR` → PerfMetricsConfig(deepscaler 样板)→ learner 内建 v2 span | `perf/perfetto_trace_v2_<ts>.pb`(~20KB,503 packets/480 events) |
+| 器件织物 | 官方 `tunix.sft.profiler.Profiler`,learner 全局步边界驱动(G6 不入 PeftTrainer.train()) | xplane 1852MB(8 device plane)+ trace.json.gz 39MB |
+
+终门 `p54final_20260819`:3/3 步、51/51 全零、窗口步号精确 2→3、
+产物 SHA 见 EVIDENCE.md run index。tracer 钉 python=0/host=1
+(官方默认 2/1 在本 image 实测丢 device 轨)。运行方法唯一权威:
+`P51_XPROF_RUNBOOK.md`(2026-08-19 重写版)。
+
 ## 下一个门
 
 **DP16 一发**(等卡 + 用户渲染):用新 tip 渲染 64 卡 GSM8K,读

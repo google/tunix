@@ -34,6 +34,7 @@
 | CANON_P28_BATCHED_REVERSE(=1/=verify) | P52 反向脚手架合并(-13.3%) | 一宿主认证;DP16 等 grouped 移植 | 同上 |
 | CANON_P28_LAYER_SCAN | =verify 恒等仪器/=verify_rev THIRDPROG 演示 | **=1 否决(净负 -5%)** | 仪器保留;=1 进否决区 |
 | CANON_XPROF_DIR/_SKIP_STEPS/_STEPS | XProf+perfetto 捕获(一次出双产物) | 仪器 | 长期保留 |
+| CANON_PERF_TRACE_DIR | 官方 tunix.perf v2 语义时间线导出目录(learner 内建 span → perfetto_trace_v2_<ts>.pb;空=NoopTracer 零开销) | 仪器;P51 载具恒开 | 长期保留(官方 Metrics 契约) |
 | CANON_XPROF_PYTHON_TRACER/_HOST_TRACER | tracer 档位;**python=0 是 device plane 的前提**(开着它训练捕获退化为 host-only) | 仪器;载具默认 python=0 | 长期保留 |
 | CANON_UPDATE_REPORT / CANON_PRE_ALIGN_REPORT / CANON_ALIGN_REPORT | 对齐/更新报告选通 | 默认开(监控契约) | 长期保留;A−B 哨兵不可撤(用户裁决 2026-08-15) |
 | JAX_COMPILATION_CACHE_DIR(非 CANON) | 持久编译缓存(-72s/重启) | 一宿主认证;**Pathways 未验** | 集群验证后进 lane/perf.env |
@@ -318,6 +319,7 @@ CANON_PALLAS_MPAD
 CANON_PALLAS_SWIGLU
 CANON_PALLAS_SWIGLU_MPAD
 CANON_PERF_LOG
+CANON_PERF_TRACE_DIR
 CANON_PKG
 CANON_POD_NAME
 CANON_POSTRPA_M
@@ -374,4 +376,4 @@ CANON_XPROF_SKIP_STEPS
 CANON_XPROF_STEPS
 ```
 
-Count: 298 settable names (regenerate with the grep in tasks/canon_system_redesign/phase0_indexes.md; exclusions: none).
+Count: 299 settable names (regenerate with the grep in tasks/canon_system_redesign/phase0_indexes.md; exclusions: none).
