@@ -1,0 +1,105 @@
+=== ATTEMPT 0 FATAL ERROR LOG (p38y6 on 64-TPU v5p slice nap-ct5p-hightp-4t-1hldcb5c) ===
+
+[env] preflight mode: JAX_PLATFORMS=cpu (Pathways connection deferred to Step 70)
+[env] P38.2y fixed lm-head GSM8K full enabled
+[env] GSM8K full alignment policy: finite numerical drift is warning-only; claim=convergence-only
+[env] P32 train mesh pin DISCOVERY: no release placement assertion
+[env] P32 admission arithmetic OK: DP16xTP4, 16 local / 256 global trajectories, global M=4096
+[env] profile=qwen3-1p7b-dp16-tp4-gsm8k model_dir=qwen1p7b
+[entrypoint] <-- 00_env.sh ok
+[entrypoint] --> 10_sync_repo.sh
+[sync] HEAD=ba47ff311fd0c3f498bad049e2b9db8209b8e0b3
+[sync] describe=ba47ff31 Record the P55 training-phase observability work in the registries
+[sync] tracked_dirty=0
+[sync] package_untracked=0
+[sync] external_untracked=5
+[sync] provenance ok
+[entrypoint] <-- 10_sync_repo.sh ok
+[entrypoint] --> 20_probe_image.sh
+[probe] SUMMARY same=6 drift=0 missing=0
+[probe] image matches the patch anchor exactly
+[entrypoint] <-- 20_probe_image.sh ok
+[entrypoint] --> 25_rope_fix.sh
+[rope] ROPE_FIX=not_needed
+[entrypoint] <-- 25_rope_fix.sh ok
+[entrypoint] --> 28_sync_cache.sh
+[entrypoint] <-- 28_sync_cache.sh ok
+[entrypoint] --> 30_install_canon.sh
+[install] installed to /tmp/canon-state/canon-p33-gsm8k-full-p38y6-ba47ff31/canon (34 files)
+[entrypoint] <-- 30_install_canon.sh ok
+[entrypoint] --> 35_install_r2egym.sh
+[entrypoint] <-- 35_install_r2egym.sh ok
+[entrypoint] --> 40_overlay_engine.sh
+[entrypoint] <-- 40_overlay_engine.sh ok
+[entrypoint] --> 50_verify_overlay.sh
+[verify] OVERLAY VERIFIED -- the canonical chain is installed and live.
+[entrypoint] <-- 50_verify_overlay.sh ok
+[entrypoint] --> 60_wait_workers.sh
+[wait] 180s quiet period for worker boot/registration (configured per-role device expectation: 64)...
+[wait] quiet period completed. Device assertion runs in step 65 (when the profile opts in) or step 70; this step alone proves nothing.
+[entrypoint] <-- 60_wait_workers.sh ok
+[entrypoint] --> 65_probe_devices.sh
+[probe] CANON_EXPECTED_SLICE_DEVICES unset -- skipping the device admission probe
+[entrypoint] <-- 65_probe_devices.sh ok
+[entrypoint] --> 90_run.sh
+
+shared_mesh.devices.shape=(16, 4) axis_names=('dp', 'tp') axis_types=(AxisType.Auto, AxisType.Auto)
+
+Traceback (most recent call last):
+  File "/workspace/examples/math_gsm8k/qwen3_grpo_demo.py", line 790, in <module>
+    reference, actor = create_reference_and_actor(shared_mesh)
+  File "/workspace/examples/math_gsm8k/qwen3_grpo_demo.py", line 660, in create_reference_and_actor
+    reference = qwen3_params_lib.create_model_from_safe_tensors(
+        MODEL_DOWNLOAD_DIR, config, mesh, dtype=MODEL_DTYPE
+    )
+  File "/workspace/tunix/models/qwen3/params.py", line 122, in create_model_from_safe_tensors
+    return safetensors_loader.load_and_create_model(
+  File "/workspace/tunix/models/safetensors_loader.py", line 486, in load_and_create_model
+    return load_and_create_model_orig(
+  File "/workspace/tunix/models/safetensors_loader.py", line 190, in load_and_create_model_orig
+    sharding_dict = nnx.get_named_sharding(abs_state, mesh).to_pure_dict()
+  File "/usr/local/lib/python3.12/site-packages/flax/nnx/spmd.py", line 135, in get_named_sharding
+    return jax.tree.map(
+  File "/usr/local/lib/python3.12/site-packages/jax/_src/named_sharding.py", line 47, in __init__
+    check_pspec(mesh, spec)
+  File "/usr/local/lib/python3.12/site-packages/jax/_src/named_sharding.py", line 40, in check_pspec
+    raise ValueError(
+ValueError: Resource axis: model of P('model', None) is not found in mesh: ('dp', 'tp').
+
+=== ATTEMPT 1 FATAL ERROR LOG (JobSet restart on same CPU head node) ===
+
+[entrypoint] JOBSET_ATTEMPT 1  pod=canon-p33-gsm8k-full-p38y6-ba47ff31-pathways-head-0-0-zrnlm  -- THIS IS A RETRY.
+[entrypoint] --> 00_env.sh
+[env] resolved configuration written to /tmp/canon-state/canon-p33-gsm8k-full-p38y6-ba47ff31/env.sh (133 lines)
+[entrypoint] <-- 00_env.sh ok
+[entrypoint] --> 10_sync_repo.sh
+[sync] provenance ok
+[entrypoint] <-- 10_sync_repo.sh ok
+[entrypoint] --> 20_probe_image.sh
+[probe] image matches the patch anchor exactly
+[entrypoint] <-- 20_probe_image.sh ok
+[entrypoint] --> 25_rope_fix.sh
+[rope] ROPE_FIX=not_needed
+[entrypoint] <-- 25_rope_fix.sh ok
+[entrypoint] --> 28_sync_cache.sh
+[entrypoint] <-- 28_sync_cache.sh ok
+[entrypoint] --> 30_install_canon.sh
+[install] installed to /tmp/canon-state/canon-p33-gsm8k-full-p38y6-ba47ff31/canon (34 files)
+[entrypoint] <-- 30_install_canon.sh ok
+[entrypoint] --> 35_install_r2egym.sh
+[entrypoint] <-- 35_install_r2egym.sh ok
+[entrypoint] --> 40_overlay_engine.sh
+[entrypoint] <-- 40_overlay_engine.sh ok
+[entrypoint] --> 50_verify_overlay.sh
+[verify] OVERLAY VERIFIED -- the canonical chain is installed and live.
+[entrypoint] <-- 50_verify_overlay.sh ok
+[entrypoint] --> 60_wait_workers.sh
+[wait] 180s quiet period for worker boot/registration (configured per-role device expectation: 64)...
+[wait] quiet period completed. Device assertion runs in step 65 (when the profile opts in) or step 70; this step alone proves nothing.
+[entrypoint] <-- 60_wait_workers.sh ok
+[entrypoint] --> 65_probe_devices.sh
+[probe] CANON_EXPECTED_SLICE_DEVICES unset -- skipping the device admission probe
+[entrypoint] <-- 65_probe_devices.sh ok
+[entrypoint] --> 90_run.sh
+[run] FATAL: admitted P33 evidence path already exists: CANON_RUN_LOG=/tmp/canon-state/canon-p33-gsm8k-full-p38y6-ba47ff31/run.log
+[entrypoint] FATAL: 90_run.sh exited 1
