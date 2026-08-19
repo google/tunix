@@ -47,7 +47,7 @@ class CreateAgentStepTest(parameterized.TestCase):
 
     agent_step = converter.create_agent_step(mock_agent_step, tunix_step_id=0)
 
-    expected_step = trajectory_lib.TunixStep(
+    expected_step = trajectory_lib.TunixAgentStep(
         step_id=1,
         source=trajectory_lib.Source.AGENT,
         message="Calling bash tool",
@@ -139,7 +139,7 @@ class CreateEnvStepTest(parameterized.TestCase):
 
     env_step = converter.create_env_step(mock_env_step, tunix_step_id=0)
 
-    expected_step = trajectory_lib.TunixStep(
+    expected_step = trajectory_lib.TunixEnvStep(
         step_id=2,
         source=trajectory_lib.Source.SYSTEM,
         message="file1.txt\nfile2.txt",
@@ -171,7 +171,7 @@ class CreateEnvStepTest(parameterized.TestCase):
 
     env_step = converter.create_env_step(mock_env_step, tunix_step_id=0)
 
-    expected_step = trajectory_lib.TunixStep(
+    expected_step = trajectory_lib.TunixEnvStep(
         step_id=2,
         source=trajectory_lib.Source.SYSTEM,
         message="['file1.txt', 'file2.txt']",
@@ -195,7 +195,7 @@ class CreateEnvStepTest(parameterized.TestCase):
 
     env_step = converter.create_env_step(mock_env_step, tunix_step_id=0)
 
-    expected_step = trajectory_lib.TunixStep(
+    expected_step = trajectory_lib.TunixEnvStep(
         step_id=2,
         source=trajectory_lib.Source.SYSTEM,
         message="",
@@ -249,7 +249,7 @@ class ToTunixStepTest(parameterized.TestCase):
     store_testing.assert_step_equal(self, dto_step, agent_types.Step())
 
   def test_to_tunix_step_only_agent_step_passed(self):
-    agent_traj_step = trajectory_lib.Step(
+    agent_traj_step = trajectory_lib.TunixAgentStep(
         step_id=1,
         source=trajectory_lib.Source.AGENT,
         message="Calling search",
@@ -292,7 +292,7 @@ class ToTunixStepTest(parameterized.TestCase):
     store_testing.assert_step_equal(self, dto_step, expected_step)
 
   def test_to_tunix_step_only_env_step_passed(self):
-    env_traj_step = trajectory_lib.TunixStep(
+    env_traj_step = trajectory_lib.TunixEnvStep(
         step_id=2,
         source=trajectory_lib.Source.SYSTEM,
         message="Search completed successfully",
@@ -323,7 +323,7 @@ class ToTunixStepTest(parameterized.TestCase):
     store_testing.assert_step_equal(self, dto_step, expected_step)
 
   def test_to_tunix_step_both_passed(self):
-    agent_traj_step = trajectory_lib.Step(
+    agent_traj_step = trajectory_lib.TunixAgentStep(
         step_id=1,
         source=trajectory_lib.Source.AGENT,
         message="Calling search",
@@ -342,7 +342,7 @@ class ToTunixStepTest(parameterized.TestCase):
         ),
         extra={"session_id": "sess_1"},
     )
-    env_traj_step = trajectory_lib.TunixStep(
+    env_traj_step = trajectory_lib.TunixEnvStep(
         step_id=2,
         source=trajectory_lib.Source.SYSTEM,
         message="search result",
@@ -434,7 +434,7 @@ class ToTunixStepTest(parameterized.TestCase):
     store_testing.assert_step_equal(self, restored_step, expected_step)
 
   def test_to_tunix_step_multiple_tool_calls(self):
-    agent_traj_step = trajectory_lib.Step(
+    agent_traj_step = trajectory_lib.TunixAgentStep(
         step_id=1,
         source=trajectory_lib.Source.AGENT,
         message="Calling multiple tools",
@@ -610,7 +610,7 @@ class ToTunixStepTest(parameterized.TestCase):
     self.assertIsInstance(restored_step.action.action, CustomCommand)
 
   def test_to_tunix_step_fallback_to_tool_calls_when_raw_action_absent(self):
-    agent_traj_step = trajectory_lib.Step(
+    agent_traj_step = trajectory_lib.TunixAgentStep(
         step_id=1,
         source=trajectory_lib.Source.AGENT,
         message="Calling search",
@@ -640,7 +640,7 @@ class ToTunixStepTest(parameterized.TestCase):
   def test_to_tunix_step_fallback_multiple_tool_calls_when_raw_action_absent(
       self,
   ):
-    agent_traj_step = trajectory_lib.Step(
+    agent_traj_step = trajectory_lib.TunixAgentStep(
         step_id=1,
         source=trajectory_lib.Source.AGENT,
         message="Calling tools",
@@ -670,13 +670,13 @@ class ToTunixStepTest(parameterized.TestCase):
     )
 
   def test_to_tunix_step_env_step_raw_action_excluded_from_info(self):
-    agent_step = trajectory_lib.Step(
+    agent_step = trajectory_lib.TunixAgentStep(
         step_id=1,
         source=trajectory_lib.Source.AGENT,
         message="agent msg",
         extra={"raw_action": "agent_action", "other_agent_info": "ok"},
     )
-    env_step = trajectory_lib.Step(
+    env_step = trajectory_lib.TunixEnvStep(
         step_id=2,
         source=trajectory_lib.Source.SYSTEM,
         message="env msg",
@@ -707,7 +707,7 @@ class ToTunixStepTest(parameterized.TestCase):
 class ToTunixTrajectoryTest(parameterized.TestCase):
 
   def test_to_tunix_trajectory_empty(self):
-    traj = trajectory_lib.Trajectory(
+    traj = trajectory_lib.TunixTrajectory(
         trajectory_id="empty_t",
         agent=trajectory_lib.Agent(name="test_agent", version="1.0"),
         steps=[],
@@ -725,18 +725,18 @@ class ToTunixTrajectoryTest(parameterized.TestCase):
         total_reward=2.5,
         status="SUCCEEDED",
         steps=[
-            trajectory_lib.TunixStep(
+            trajectory_lib.TunixEnvStep(
                 step_id=0,
                 source=trajectory_lib.Source.USER,
                 message="Calculate 3+4",
             ),
-            trajectory_lib.TunixStep(
+            trajectory_lib.TunixAgentStep(
                 step_id=1,
                 source=trajectory_lib.Source.AGENT,
                 message="7",
                 reasoning_content="Simple addition",
             ),
-            trajectory_lib.TunixStep(
+            trajectory_lib.TunixEnvStep(
                 step_id=2,
                 source=trajectory_lib.Source.SYSTEM,
                 message="Correct",

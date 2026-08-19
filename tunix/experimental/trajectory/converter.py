@@ -14,7 +14,9 @@
 
 """Converter for translating between Tunix RL Step and Trajectory Step representations."""
 
+import typing
 from typing import Any
+
 import numpy as np
 from tunix.experimental.trajectory import action_converter
 from tunix.experimental.trajectory import trajectory as trajectory_lib
@@ -71,7 +73,7 @@ def _extract_observation(obs_val: Any) -> trajectory_lib.Observation | None:
 
 def create_task_step(
     task: Any,
-) -> trajectory_lib.TunixStep | None:
+) -> trajectory_lib.TunixEnvStep | None:
   """Creates an initial user task Step from a task prompt or object.
 
   Args:
@@ -97,7 +99,7 @@ def create_task_step(
   if not prompt_str:
     return None
 
-  return trajectory_lib.TunixStep(
+  return trajectory_lib.TunixEnvStep(
       step_id=0,
       source=trajectory_lib.Source.USER,
       message=prompt_str,
@@ -107,7 +109,7 @@ def create_task_step(
 def create_agent_step(
     step: agent_types.Step | None,
     tunix_step_id: int,
-) -> trajectory_lib.TunixStep | None:
+) -> trajectory_lib.TunixAgentStep | None:
   """Converts a Tunix agent_types.Step into an agent turn Step.
 
   Maps the 0-based Tunix interaction turn index (`tunix_step_id`) to the
@@ -139,7 +141,7 @@ def create_agent_step(
       extra["raw_action"] = raw_action
 
   converted_step_id = 2 * tunix_step_id + 1
-  return trajectory_lib.TunixStep(
+  return trajectory_lib.TunixAgentStep(
       step_id=converted_step_id,
       source=trajectory_lib.Source.AGENT,
       message=step.model_response,
@@ -157,7 +159,7 @@ def create_agent_step(
 def create_env_step(
     step: agent_types.Step | None,
     tunix_step_id: int,
-) -> trajectory_lib.TunixStep | None:
+) -> trajectory_lib.TunixEnvStep | None:
   """Converts a Tunix agent_types.Step into an environment turn Step.
 
   Maps the 0-based Tunix interaction turn index (`tunix_step_id`) to the
@@ -177,7 +179,7 @@ def create_env_step(
 
   obs_str = str(step.observation) if step.observation is not None else ""
   converted_step_id = 2 * tunix_step_id + 2
-  return trajectory_lib.TunixStep(
+  return trajectory_lib.TunixEnvStep(
       step_id=converted_step_id,
       source=trajectory_lib.Source.SYSTEM,
       message=obs_str,
@@ -203,8 +205,8 @@ def _to_numpy_or_none(arr: Any) -> np.ndarray | None:
 
 
 def to_tunix_step(
-    agent_step: trajectory_lib.Step | None = None,
-    env_step: trajectory_lib.Step | None = None,
+    agent_step: trajectory_lib.TunixAgentStep | None = None,
+    env_step: trajectory_lib.TunixEnvStep | None = None,
 ) -> agent_types.Step:
   """Converts Trajectory agent and/or env steps into a single Tunix Step.
 
@@ -247,9 +249,9 @@ def to_tunix_step(
       ]
       action = agent_types.Action(action=calls[0] if len(calls) == 1 else calls)
 
-    assistant_tokens = getattr(agent_step, "assistant_tokens", None)
-    assistant_masks = getattr(agent_step, "assistant_masks", None)
-    logprobs = getattr(agent_step, "logprobs", None)
+    assistant_tokens = agent_step.assistant_tokens
+    assistant_masks = agent_step.assistant_masks
+    logprobs = agent_step.logprobs
     if agent_step.mc_return is not None:
       mc_return = float(agent_step.mc_return)
 
@@ -285,8 +287,8 @@ def to_tunix_step(
       reward = float(env_step.reward)
     if env_step.done is not None:
       done = bool(env_step.done)
-    env_tokens = getattr(env_step, "env_tokens", None)
-    env_masks = getattr(env_step, "env_masks", None)
+    env_tokens = env_step.env_tokens
+    env_masks = env_step.env_masks
     info.update(_filter_extra_info(env_step.extra))
 
   return agent_types.Step(
@@ -307,7 +309,7 @@ def to_tunix_step(
 
 
 def to_tunix_trajectory(
-    traj: trajectory_lib.Trajectory | dict[str, Any],
+    traj: trajectory_lib.TunixTrajectory | dict[str, Any],
 ) -> agent_types.Trajectory:
   """Converts a Trajectory into a Tunix agent_types.Trajectory.
 
@@ -344,33 +346,38 @@ def to_tunix_trajectory(
   while converted_step_idx < num_converted_steps:
     curr_step = traj_obj.steps[converted_step_idx]
     if curr_step.source == trajectory_lib.Source.AGENT:
-      next_step = None
+      curr_step = typing.cast(trajectory_lib.TunixAgentStep, curr_step)
+      next_step: trajectory_lib.TunixEnvStep | None = None
       if (
           converted_step_idx + 1 < num_converted_steps
           and traj_obj.steps[converted_step_idx + 1].source
           != trajectory_lib.Source.AGENT
       ):
-        next_step = traj_obj.steps[converted_step_idx + 1]
+        next_step = typing.cast(
+            trajectory_lib.TunixEnvStep,
+            traj_obj.steps[converted_step_idx + 1],
+        )
       dto_step = to_tunix_step(agent_step=curr_step, env_step=next_step)
       dto_steps.append(dto_step)
       converted_step_idx += 2 if next_step is not None else 1
     else:
+      curr_step = typing.cast(trajectory_lib.TunixEnvStep, curr_step)
       dto_step = to_tunix_step(agent_step=None, env_step=curr_step)
       dto_steps.append(dto_step)
       converted_step_idx += 1
 
-  total_reward = getattr(traj_obj, "total_reward", None)
+  total_reward = traj_obj.total_reward
   reward = float(total_reward) if total_reward is not None else 0.0
 
   status_enum = agent_types.TrajectoryStatus.RUNNING
-  traj_obj_status = getattr(traj_obj, "status", None)
+  traj_obj_status = traj_obj.status
   if traj_obj_status is not None and hasattr(
       agent_types.TrajectoryStatus, str(traj_obj_status)
   ):
     status_enum = getattr(agent_types.TrajectoryStatus, str(traj_obj_status))
 
-  env_time = getattr(traj_obj, "env_time", None) or {}
-  reward_time = getattr(traj_obj, "reward_time", None) or {}
+  env_time = traj_obj.env_time or {}
+  reward_time = traj_obj.reward_time or {}
 
   return agent_types.Trajectory(
       task=task_val,

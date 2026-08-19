@@ -87,7 +87,7 @@ class StepTest(parameterized.TestCase):
     self.assertEqual(step.llm_call_count, 0)
 
   def test_step_policy_version_agent_step_success(self):
-    step = trajectory.TunixStep(
+    step = trajectory.TunixAgentStep(
         step_id=1,
         source=trajectory.Source.AGENT,
         message="Agent turn",
@@ -96,7 +96,7 @@ class StepTest(parameterized.TestCase):
     self.assertEqual(step.policy_version, 42)
     step_dict = step.model_dump()
     self.assertEqual(step_dict["policy_version"], 42)
-    restored_step = trajectory.TunixStep(**step_dict)
+    restored_step = trajectory.TunixAgentStep(**step_dict)
     self.assertEqual(restored_step, step)
 
 
@@ -368,7 +368,7 @@ class TrajectoryTest(parameterized.TestCase):
     self.assertFalse(hasattr(meta, "subagent_trajectories"))
 
   def test_step_initialization_with_rl_fields(self):
-    step = trajectory.TunixStep(
+    step = trajectory.TunixAgentStep(
         step_id=1,
         source=trajectory.Source.AGENT,
         message="Running bash command",
@@ -388,11 +388,9 @@ class TrajectoryTest(parameterized.TestCase):
     np.testing.assert_array_equal(step.logprobs, np.array([-0.1, -0.2]))
     self.assertEqual(step.mc_return, 1.5)
     self.assertEqual(step.extra, {"custom_key": "custom_val"})
-    self.assertIsNone(step.reward)
-    self.assertIsNone(step.done)
 
   def test_step_env_fields(self):
-    step = trajectory.TunixStep(
+    step = trajectory.TunixEnvStep(
         step_id=2,
         source=trajectory.Source.SYSTEM,
         message="Observation result",
@@ -405,11 +403,9 @@ class TrajectoryTest(parameterized.TestCase):
     self.assertTrue(step.done)
     np.testing.assert_array_equal(step.env_tokens, np.array([100]))
     np.testing.assert_array_equal(step.env_masks, np.array([1]))
-    self.assertIsNone(step.assistant_tokens)
-    self.assertIsNone(step.mc_return)
 
   def test_step_json_serialization_and_deserialization(self):
-    step = trajectory.TunixStep(
+    step = trajectory.TunixAgentStep(
         step_id=1,
         source=trajectory.Source.AGENT,
         message="Thinking",
@@ -423,25 +419,25 @@ class TrajectoryTest(parameterized.TestCase):
     self.assertEqual(loaded_dict["logprobs"], [-0.5, -0.3])
     self.assertEqual(loaded_dict["mc_return"], 2.0)
 
-    reloaded_step = trajectory.TunixStep.model_validate_json(json_str)
+    reloaded_step = trajectory.TunixAgentStep.model_validate_json(json_str)
     self.assertEqual(reloaded_step.assistant_tokens, [10, 20])
     self.assertEqual(reloaded_step.logprobs, [-0.5, -0.3])
     self.assertEqual(reloaded_step.mc_return, 2.0)
 
   def test_step_equality(self):
-    step1 = trajectory.TunixStep(
+    step1 = trajectory.TunixAgentStep(
         step_id=1,
         source=trajectory.Source.AGENT,
         message="msg",
         assistant_tokens=np.array([1, 2]),
     )
-    step2 = trajectory.TunixStep(
+    step2 = trajectory.TunixAgentStep(
         step_id=1,
         source=trajectory.Source.AGENT,
         message="msg",
         assistant_tokens=np.array([1, 2]),
     )
-    step3 = trajectory.TunixStep(
+    step3 = trajectory.TunixAgentStep(
         step_id=1,
         source=trajectory.Source.AGENT,
         message="msg",
@@ -600,7 +596,7 @@ class TrajectoryTest(parameterized.TestCase):
         reward_time={"eval": 0.2},
         extra={"custom": "field"},
         steps=[
-            trajectory.TunixStep(
+            trajectory.TunixAgentStep(
                 step_id=0,
                 source=trajectory.Source.AGENT,
                 message="hello",
@@ -635,7 +631,7 @@ class TrajectoryTest(parameterized.TestCase):
         reward_time={"reward": 0.01},
         extra={"meta": "data"},
         steps=[
-            trajectory.TunixStep(
+            trajectory.TunixAgentStep(
                 step_id=0,
                 source=trajectory.Source.AGENT,
                 message="action message",
