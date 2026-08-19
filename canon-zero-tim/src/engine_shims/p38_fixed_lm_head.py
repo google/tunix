@@ -43,6 +43,31 @@ CONFLICTS = (
     "CANON_CUT",
     "CANON_TAIL",
 )
+VJP_PASS = "FIXED_LM_HEAD_ONEHOST_VJP_PASS"
+
+
+def classify_vjp(
+    *,
+    hidden_differing: int,
+    weight_differing: int,
+    repeat_hidden_differing: int,
+    repeat_weight_differing: int,
+    gradients_finite: bool,
+    gradients_nonzero: bool,
+    negative_differing: int,
+) -> str:
+    """Return one fail-closed verdict from compact fixed-lm-head VJP metrics."""
+    if negative_differing != 1:
+        return "FAIL_NEGATIVE_CONTROL"
+    if not gradients_finite:
+        return "FAIL_NONFINITE_GRADIENT"
+    if not gradients_nonzero:
+        return "INCONCLUSIVE_NO_GRADIENT_SIGNAL"
+    if repeat_hidden_differing or repeat_weight_differing:
+        return "FIXED_LM_HEAD_VJP_NOT_DETERMINISTIC"
+    if hidden_differing or weight_differing:
+        return "FIXED_LM_HEAD_CHUNK_VJP_NOT_INVARIANT"
+    return VJP_PASS
 
 
 def preflight(*, require_enabled: bool) -> None:
@@ -125,6 +150,7 @@ def fixed_lm_head(
     local_matmul: Callable,
 ):
     """Run every registered outer shape through one fixed Pallas shape."""
+    import jax
     from jax import lax
     import jax.numpy as jnp
     from jax.experimental.shard_map import shard_map
@@ -153,15 +179,70 @@ def fixed_lm_head(
                 "P38 fixed lm_head local dtype mismatch: "
                 f"{a_local.dtype}/{w_local.dtype}"
             )
-        def run_fixed(a_fixed):
+        def run_fixed_with_weight(a_fixed, weight_local):
             return local_matmul(
                 a_fixed,
-                w_local,
+                weight_local,
                 block_m=BM,
                 block_n=BN,
                 block_k=BK,
                 shape_invariant_numerics=True,
             )
+
+        def run_fixed(a_fixed):
+            return run_fixed_with_weight(a_fixed, w_local)
+
+        def learner_forward(a_learner, weight_local):
+            a_chunks = a_learner.reshape((-1, FIXED_M, HIDDEN))
+            return lax.map(
+                lambda a_chunk: run_fixed_with_weight(a_chunk, weight_local),
+                a_chunks,
+            ).reshape((a_learner.shape[0], LOCAL_VOCAB))
+
+        @jax.custom_vjp
+        def learner_fixed_vjp(a_learner, weight_local):
+            return learner_forward(a_learner, weight_local)
+
+        def learner_fwd(a_learner, weight_local):
+            output = learner_forward(a_learner, weight_local)
+            return output, (a_learner, weight_local)
+
+        def learner_bwd(residual, cotangent):
+            print(
+                "[PATHTRACE] CANON_P38_FIXED_LM_HEAD_VJP=1 "
+                "semantic_M=4096 fixed_M=256 chunks=16 "
+                "accumulation=lax.scan order=ascending",
+                flush=True,
+            )
+            a_learner, weight_local = residual
+            a_chunks = a_learner.reshape((-1, FIXED_M, HIDDEN))
+            cotangent_chunks = cotangent.reshape(
+                (-1, FIXED_M, LOCAL_VOCAB)
+            )
+
+            def accumulate(weight_cotangent, values):
+                a_chunk, output_cotangent = values
+                _, pullback = jax.vjp(
+                    run_fixed_with_weight, a_chunk, weight_local
+                )
+                a_cotangent, chunk_weight_cotangent = pullback(
+                    output_cotangent
+                )
+                # The loop-carried dependency is the backward contract: chunk
+                # q is added only after chunks [0, q) have completed.
+                return weight_cotangent + chunk_weight_cotangent, a_cotangent
+
+            weight_cotangent, a_cotangent_chunks = lax.scan(
+                accumulate,
+                jnp.zeros_like(weight_local),
+                (a_chunks, cotangent_chunks),
+            )
+            return (
+                a_cotangent_chunks.reshape(a_learner.shape),
+                weight_cotangent,
+            )
+
+        learner_fixed_vjp.defvjp(learner_fwd, learner_bwd)
 
         if local_m < FIXED_M:
             a_fixed = jnp.pad(
@@ -176,10 +257,7 @@ def fixed_lm_head(
             out = run_fixed(a_local)
         else:
             chunks = local_m // FIXED_M
-            a_chunks = a_local.reshape((chunks, FIXED_M, HIDDEN))
-            out = lax.map(run_fixed, a_chunks).reshape(
-                (local_m, LOCAL_VOCAB)
-            )
+            out = learner_fixed_vjp(a_local, w_local)
         print(
             "[PATHTRACE] CANON_P38_FIXED_LM_HEAD=1 "
             f"semantic_M={local_m} fixed_M={FIXED_M} K={HIDDEN} "

@@ -109,8 +109,11 @@ class FixedLmHeadContractTest(unittest.TestCase):
 
   def test_learner_uses_fixed_chunks_without_stock_fallback(self):
     text = FIXED_SOURCE.read_text()
-    self.assertIn("a_local.reshape((chunks, FIXED_M, HIDDEN))", text)
-    self.assertIn("lax.map(run_fixed, a_chunks)", text)
+    self.assertIn("@jax.custom_vjp", text)
+    self.assertIn("learner_fixed_vjp.defvjp(learner_fwd, learner_bwd)", text)
+    self.assertIn("weight_cotangent + chunk_weight_cotangent", text)
+    self.assertIn("lax.scan(", text)
+    self.assertIn("out = learner_fixed_vjp(a_local, w_local)", text)
     self.assertNotIn("original_lm_head", text)
 
   def test_exact_target_does_not_require_a_mismatch_join(self):
@@ -147,6 +150,36 @@ class FixedLmHeadContractTest(unittest.TestCase):
         probe.classify(exact, 1, [{"differing_elements": 1}]),
         "FIXED_LM_HEAD_LEARNER_CHUNK_NOT_INVARIANT",
     )
+
+  def test_vjp_probe_verdicts_are_fail_closed(self):
+    exact = dict(
+        hidden_differing=0,
+        weight_differing=0,
+        repeat_hidden_differing=0,
+        repeat_weight_differing=0,
+        gradients_finite=True,
+        gradients_nonzero=True,
+        negative_differing=1,
+    )
+    self.assertEqual(fixed.classify_vjp(**exact), fixed.VJP_PASS)
+    for key, verdict in (
+        ("hidden_differing", "FIXED_LM_HEAD_CHUNK_VJP_NOT_INVARIANT"),
+        ("weight_differing", "FIXED_LM_HEAD_CHUNK_VJP_NOT_INVARIANT"),
+        ("repeat_hidden_differing", "FIXED_LM_HEAD_VJP_NOT_DETERMINISTIC"),
+        ("repeat_weight_differing", "FIXED_LM_HEAD_VJP_NOT_DETERMINISTIC"),
+    ):
+      with self.subTest(key=key):
+        values = dict(exact)
+        values[key] = 1
+        self.assertEqual(fixed.classify_vjp(**values), verdict)
+    values = dict(exact, gradients_finite=False)
+    self.assertEqual(fixed.classify_vjp(**values), "FAIL_NONFINITE_GRADIENT")
+    values = dict(exact, gradients_nonzero=False)
+    self.assertEqual(
+        fixed.classify_vjp(**values), "INCONCLUSIVE_NO_GRADIENT_SIGNAL"
+    )
+    values = dict(exact, negative_differing=0)
+    self.assertEqual(fixed.classify_vjp(**values), "FAIL_NEGATIVE_CONTROL")
 
 
 if __name__ == "__main__":
