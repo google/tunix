@@ -819,11 +819,20 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
 
     if getattr(self, "_jitted_fwd_bwd_step_fn", None) is None:
       self._shard_optimizer(pxla.thread_resources.env.physical_mesh)
+      # `model` is donated even though the forward/backward pass never writes a
+      # parameter: `nnx.jit` treats a module as both an input and an output, so
+      # the parameter state comes back out of the call. Without an alias that
+      # output needs a second buffer -- a full parameter tree holding a
+      # bit-identical copy of the input. Donating lets it alias instead.
+      #
+      # The update step deliberately does not donate `model`: there the
+      # parameters really are rewritten, and the pre-update buffers have to stay
+      # valid for checkpointing and weight sync.
       if self._is_single_microstep():
         # No grad_accumulator is created in this case.
-        donate_argnames = None
+        donate_argnames = ("model",)
       else:
-        donate_argnames = ("grad_accumulator",)
+        donate_argnames = ("model", "grad_accumulator")
       self._jitted_fwd_bwd_step_fn = nnx.jit(
           fwd_bwd_step, donate_argnames=donate_argnames,
       )

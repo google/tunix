@@ -252,6 +252,25 @@ config.num_layers = 12
 # elements, which reads exactly like a catastrophic divergence. `[phase]` and
 # the denom gate exist to make that impossible to miss.
 #
+#
+# CAVEAT 6: v2's fwd_bwd donates `model`, so the harness cannot hold weights
+# across a training call. Donation is what closed v2's HBM gap -- without it
+# `nnx.jit` returns the parameter state as a second, unaliased buffer, a full
+# parameter tree (measured: heap 20.98 -> 14.05 GB). The cost is that any pytree
+# captured before `train()` refers to arrays that have since been freed. All
+# snapshots here therefore go through `_host()`, which copies to host at a
+# quiescent point and raises a readable error otherwise. If a run must hold
+# weights mid-training, drop "model" from fwd_bwd's donate_argnames for that run
+# rather than working around it here.
+#
+# Related: `GradientAccumulator.reset()` zeroes with `buffer * 0` rather than
+# `jnp.zeros_like`, because inside jit the latter carries no sharding and comes
+# back replicated -- which changed the next step's input signature and made XLA
+# compile a second variant of every program. The consequence for this harness is
+# that `0 * nan` is `nan`, so a non-finite gradient survives the reset instead of
+# being scrubbed. `assert_accumulator_cleared()` checks finiteness as well as
+# zeroness for that reason.
+#
 # config.param_dtype = jnp.bfloat16
 # config.dtype = jnp.bfloat16
 
@@ -272,6 +291,33 @@ def _snapshot_sharding(x):
 
 def _restore_to_device(host_value, sharding):
   return host_value if sharding is None else jax.device_put(host_value, sharding)
+
+
+def _host(tree, what):
+  """Copies a device pytree to host, with a readable error if it is already gone.
+
+  v2's `fwd_bwd` donates `model` and `grad_accumulator`. Donation invalidates
+  the caller's buffers: nnx rebinds the module to the aliased outputs, so the
+  live objects are fine, but any pytree captured BEFORE the call and read AFTER
+  it refers to deleted arrays. Raw jax raises "Array has been deleted" from deep
+  inside a tree_map, which looks nothing like the actual mistake.
+
+  The rule this enforces: snapshot only at a quiescent point (before any
+  training, or after `train()` has returned), and move to host immediately.
+  Never hold a device pytree across a training call.
+  """
+  try:
+    return jax.device_get(tree)
+  except RuntimeError as e:
+    if "deleted" not in str(e).lower():
+      raise
+    raise RuntimeError(
+        f"{what}: these buffers were donated and freed before they were read."
+        " v2's fwd_bwd donates `model` and `grad_accumulator`, so a snapshot"
+        " taken before a training call cannot be read after it. Move the"
+        " snapshot to a quiescent point, or drop 'model' from fwd_bwd's"
+        " donate_argnames for this run."
+    ) from e
 
 
 # NOTE: an earlier version of this script tried to print XLA's own
@@ -636,8 +682,21 @@ def attribute_weight_gap(w_a, w_b, g_a, g_b, lr, denom=None):
 #                divergence from earlier steps.
 _MODE = "weights"
 _ACCUM_STEPS = 8
-_MAX_STEPS = 5
+# One update. CAVEAT 5: the trainers' trajectories diverge chaotically once they
+# start feeding back into each other (~27x per update, measured), so a run with
+# several updates cannot distinguish "not equivalent" from "equivalent, and the
+# difference has been amplified". Raise this only to *observe* the amplification,
+# never to pass/fail equivalence.
+_MAX_STEPS = 1
 _N_BATCHES = _ACCUM_STEPS - 1 if _MODE == "grads" else _ACCUM_STEPS * _MAX_STEPS
+
+# The memory/latency work needs a v2-only run under the profiler; the
+# equivalence check needs both trainers and no profiler (tracing both legs
+# perturbs timing and writes a second, confusing trace to the bucket). These are
+# separate runs, not one run that does both.
+#   _PROFILE = True   -> v2 only, wrapped in jax.profiler.trace
+#   _PROFILE = False  -> v1 then v2, with the comparisons at the end
+_PROFILE = False
 _run_dataset = dataset[:_N_BATCHES]
 assert len(_run_dataset) == _N_BATCHES, (
     f"need at least {_N_BATCHES} batches, dataset has {len(dataset)}"
@@ -668,45 +727,109 @@ def phase_of(trainer, tag):
   return denom
 
 
-# with mesh:
-#   # v1
-#   optimizer_v1 = optax.inject_hyperparams(optax.sgd)(
-#       learning_rate=optax.constant_schedule(_LEARNING_RATE)
-#   )
-#   config_v1 = peft_trainer.TrainingConfig(
-#       eval_every_n_steps=20000,
-#       max_steps=_MAX_STEPS,
-#       gradient_accumulation_steps=_ACCUM_STEPS,
-#   )
-#   trainer_v1 = peft_trainer.PeftTrainer(gemma, optimizer_v1, config_v1)
-#   trainer_v1 = trainer_v1.with_gen_model_input_fn(gen_model_input_fn)
-#   with jax.profiler.trace(log_dir="gs://linchai-bucket-dev/xprof/grad_diff"):
-#     trainer_v1.train(_run_dataset, skip_jit=False)
-#     jax.effects_barrier()
+def compiled_variants(trainer, tag):
+  """Reports how many executables each step function ended up with.
 
-#   model_state_v1 = nnx.state(gemma)
-#   opt_state_v1 = nnx.state(trainer_v1.optimizer)
-#   # Empty at depth 1 (the fast path never touches the accumulator); holds the
-#   # accumulated gradients when gradient_accumulation_steps > 1, and v1's depth-1
-#   # branch never calls reset() -- the only reset() lives in `apply_updates`,
-#   # which runs on the accumulating nnx.cond path.
-#   grads_v1_host = jax.device_get(trainer_v1.grad_accumulator.grads)
-#   denom_v1 = phase_of(trainer_v1, "v1")
-#   if jax.tree_util.tree_leaves(grads_v1_host):
-#     describe_grads("v1", grads_v1_host)
-#   # loss_v1 = trainer_v1.metrics_logger.get_metric("", "loss", "train")
-#   del gemma, trainer_v1, optimizer_v1
-#   gc.collect()
+  This is the observable form of the sharding bugs that cost a day: a buffer
+  whose sharding changes across an executable boundary changes the next
+  executable's input signature, and XLA silently compiles a second variant.
+  Nothing fails, HBM and per-step latency just get worse. Steady state is one
+  variant per program; more than one means something in the loop is still
+  handing a differently-sharded buffer to the next step.
 
-# # `nnx.state()` returns a pytree that holds the device buffers themselves, so
-# # `del gemma` above frees nothing while model_state_v1 is alive -- v1's whole
-# # parameter tree would stay resident for all of v2's run and show up in v2's
-# # peak. Snapshot to host if the post-v1 weights are still wanted, then drop the
-# # device copies before v2 allocates anything.
-# model_state_v1_host = jax.device_get(model_state_v1)
-# opt_state_v1_host = jax.device_get(opt_state_v1)
-# del model_state_v1, opt_state_v1
-# gc.collect()
+  Two known-benign causes, if this ever fires again: a mesh axis of size 1 named
+  in a parameter's sharding annotation (`P('fsdp','tp')` with fsdp=1 canonicalises
+  to `P('tp')` after the first program runs), and `gemma4/model.py`'s hardcoded
+  `(None, None, 'fsdp', None)` for num_kv_heads == 1.
+  """
+  counts = {}
+  for name in ("_jitted_fwd_bwd_step_fn", "_jitted_update_step_fn",
+               "_jitted_train_step_fn"):
+    fn = getattr(trainer, name, None)
+    if fn is None:
+      continue
+    try:
+      counts[name] = fn.func.jitted_fn._cache_size()  # pylint: disable=protected-access
+    except AttributeError:
+      pass
+  print(f"[compile] {tag}: " + "  ".join(f"{k}={v}" for k, v in counts.items()))
+  return counts
+
+
+def assert_accumulator_cleared(trainer, tag):
+  """After an update the accumulator must be exactly zero, and finite.
+
+  `reset()` zeroes by multiplying the buffer by 0 rather than by writing a fresh
+  `jnp.zeros_like`, because inside jit `zeros_like` carries no sharding and
+  comes back replicated. The cost of that choice is that `0 * nan` is `nan`, so
+  a non-finite gradient would survive the reset instead of being scrubbed. Check
+  both properties rather than assuming.
+  """
+  leaves = [np.asarray(l) for l in
+            jax.tree_util.tree_leaves(_host(trainer.grad_accumulator.grads, tag))]
+  if not leaves:
+    print(f"[reset] {tag}: accumulator holds no buffer (depth-1 fast path)")
+    return
+  nonzero = sum(1 for l in leaves if np.any(l))
+  nonfinite = sum(1 for l in leaves if not np.all(np.isfinite(l)))
+  print(f"[reset] {tag}: leaves={len(leaves)} nonzero={nonzero}"
+        f" nonfinite={nonfinite}")
+  assert nonfinite == 0, (
+      f"{tag}: {nonfinite} accumulator leaves are non-finite after reset."
+      " `reset()` multiplies by zero, so a nan/inf gradient survives it."
+  )
+  assert nonzero == 0, (
+      f"{tag}: {nonzero} accumulator leaves are non-zero after the update;"
+      " reset() did not take effect."
+  )
+
+
+if not _PROFILE:
+  with mesh:
+    # v1
+    optimizer_v1 = optax.inject_hyperparams(optax.sgd)(
+        learning_rate=optax.constant_schedule(_LEARNING_RATE)
+    )
+    config_v1 = peft_trainer.TrainingConfig(
+        eval_every_n_steps=20000,
+        max_steps=_MAX_STEPS,
+        gradient_accumulation_steps=_ACCUM_STEPS,
+    )
+    trainer_v1 = peft_trainer.PeftTrainer(gemma, optimizer_v1, config_v1)
+    trainer_v1 = trainer_v1.with_gen_model_input_fn(gen_model_input_fn)
+    trainer_v1.train(_run_dataset, skip_jit=False)
+    jax.effects_barrier()
+
+    model_state_v1 = nnx.state(gemma)
+    opt_state_v1 = nnx.state(trainer_v1.optimizer)
+    # Empty at depth 1 (the fast path never touches the accumulator); holds the
+    # accumulated gradients when gradient_accumulation_steps > 1, and v1's depth-1
+    # branch never calls reset() -- the only reset() lives in `apply_updates`,
+    # which runs on the accumulating nnx.cond path.
+    grads_v1_host = _host(trainer_v1.grad_accumulator.grads, "v1 grads")
+    denom_v1 = phase_of(trainer_v1, "v1")
+    if jax.tree_util.tree_leaves(grads_v1_host):
+      describe_grads("v1", grads_v1_host)
+    if _MODE == "weights":
+      assert_accumulator_cleared(trainer_v1, "v1")
+    compiled_variants(trainer_v1, "v1")
+    # loss_v1 = trainer_v1.metrics_logger.get_metric("", "loss", "train")
+
+  # `nnx.state()` returns a pytree that holds the device buffers themselves, so
+  # `del gemma` below frees nothing while model_state_v1 is alive -- v1's whole
+  # parameter tree would stay resident for all of v2's run and show up in v2's
+  # peak. Snapshot to host first, then drop the device copies before v2
+  # allocates anything.
+  model_state_v1_host = _host(model_state_v1, "v1 weights")
+  opt_state_v1_host = _host(opt_state_v1, "v1 optimizer")
+  del model_state_v1, opt_state_v1
+  del gemma, trainer_v1, optimizer_v1
+  gc.collect()
+else:
+  # Same hygiene on the profiling path: v1 never runs, but `gemma` is still a
+  # full device-resident parameter tree and would land in v2's HBM peak.
+  del gemma
+  gc.collect()
 
 print(f"live device arrays after v1 teardown: {_live_device_gib():.2f} GiB "
       "(global, unsharded-equivalent)")
@@ -740,81 +863,93 @@ with mesh:
   # Memory-benchmark state: `train()`, which at depth 1 routes through the fused
   # single-executable step -- the configuration whose HBM profile we want. To
   # exercise the split path instead, call fwd_bwd(dataset[0]) then update().
-  with jax.profiler.trace(log_dir="gs://linchai-bucket-dev/xprof/grad_diff"):
+  if _PROFILE:
+    with jax.profiler.trace(log_dir="gs://linchai-bucket-dev/xprof/grad_diff"):
+      trainer_v2.train(_run_dataset, skip_jit=False)
+      jax.effects_barrier()
+  else:
     trainer_v2.train(_run_dataset, skip_jit=False)
     jax.effects_barrier()
 
   # Populated only at gradient_accumulation_steps > 1; see the note above the
   # comparison helpers for why depth 1 has no gradient hook.
-  grads_v2_host = jax.device_get(trainer_v2.grad_accumulator.grads)
+  grads_v2_host = _host(trainer_v2.grad_accumulator.grads, "v2 grads")
   denom_v2 = phase_of(trainer_v2, "v2")
   if jax.tree_util.tree_leaves(grads_v2_host):
     describe_grads("v2", grads_v2_host)
+  if _MODE == "weights":
+    assert_accumulator_cleared(trainer_v2, "v2")
+  compiled_variants(trainer_v2, "v2")
 
-  # # Gate the gradient comparison on the phase. Two accumulators holding
-  # # different micro-batches produce similar norms and 100%-different elements,
-  # # which is indistinguishable from a catastrophic divergence unless you check.
-  # if denom_v1 != denom_v2:
-  #   print(
-  #       f"[cmp] grads: SKIPPED -- different accumulation phase"
-  #       f" (v1 denom={denom_v1:g}, v2 denom={denom_v2:g}). The two accumulators"
-  #       " hold different micro-batches, so an elementwise comparison is"
-  #       " meaningless. Make both runs stop at the same point before comparing."
-  #   )
-  # elif denom_v1 == 0:
-  #   print(
-  #       "[cmp] grads: SKIPPED -- both accumulators were reset by the final"
-  #       " update(), so there are no gradients left to compare. Read them"
-  #       " between the last fwd_bwd and update()."
-  #   )
-  # elif jax.tree_util.tree_leaves(grads_v1_host) and jax.tree_util.tree_leaves(
-  #     grads_v2_host
-  # ):
-  #   compare("grads", grads_v1_host, grads_v2_host, max_ulp=_GRAD_MAX_ULP)
+  if _PROFILE:
+    print("[cmp] SKIPPED -- _PROFILE run has no v1 leg. Set _PROFILE=False.")
+  else:
+    # Gate the gradient comparison on the phase. Two accumulators holding
+    # different micro-batches produce similar norms and 100%-different elements,
+    # which is indistinguishable from a catastrophic divergence unless you check.
+    if denom_v1 != denom_v2:
+      print(
+          f"[cmp] grads: SKIPPED -- different accumulation phase"
+          f" (v1 denom={denom_v1:g}, v2 denom={denom_v2:g}). The two accumulators"
+          " hold different micro-batches, so an elementwise comparison is"
+          " meaningless. Make both runs stop at the same point before comparing."
+      )
+    elif denom_v1 == 0:
+      print(
+          "[cmp] grads: SKIPPED -- both accumulators were reset by the final"
+          " update(), so there are no gradients left to compare. Read them"
+          " between the last fwd_bwd and update(), i.e. run _MODE='grads'."
+      )
+    elif jax.tree_util.tree_leaves(grads_v1_host) and jax.tree_util.tree_leaves(
+        grads_v2_host
+    ):
+      compare("grads", grads_v1_host, grads_v2_host, max_ulp=_GRAD_MAX_ULP)
 
-  # # Did the step move the weights at all? An SGD update smaller than half a ULP
-  # # of the weight rounds straight back, so the comparison below would report
-  # # "identical" while comparing two untrained models. At lr=1e-5 the update is
-  # # ~520 ULP in fp32 but only ~0.008 ULP in bfloat16, i.e. a no-op -- raise the
-  # # learning rate to ~1e-2 before drawing any conclusion from a bf16 run.
-  # _final_ck_v1 = tc.tree_bit_checksum(model_state_v1_host)
-  # _final_ck_v2 = tc.tree_bit_checksum(jax.device_get(nnx.state(gemma_v2)))
-  # print(
-  #     f"[move] weights changed?  v1={_final_ck_v1 != _init_ck}"
-  #     f"  v2={_final_ck_v2 != _init_ck}"
-  #     + (
-  #         "   <-- NOTHING MOVED: the update is below one ULP, so any comparison"
-  #         " below is vacuous"
-  #         if _final_ck_v1 == _init_ck and _final_ck_v2 == _init_ck
-  #         else ""
-  #     )
-  # )
+    # Snapshot v2's weights once, at a quiescent point: training has returned,
+    # so the donated buffers have settled and nnx has rebound the module. Taking
+    # this before `train()` would read freed arrays -- see `_host`.
+    weights_v2_host = _host(nnx.state(gemma_v2), "v2 weights")
 
-  # # Weights are observable without any hook, so this comparison is valid in
-  # # memory-benchmark state. Expect ~1e-8 of tensor scale in the KV-sharing
-  # # layers on the split path, and bit-identity on the fused path.
-  # weights_v2_host = jax.device_get(nnx.state(gemma_v2))
-  # compare(
-  #     "weights after training",
-  #     model_state_v1_host,
-  #     weights_v2_host,
-  #     max_rel=_WEIGHT_MAX_REL,
-  # )
+    # Did the step move the weights at all? An SGD update smaller than half a ULP
+    # of the weight rounds straight back, so the comparison below would report
+    # "identical" while comparing two untrained models. At lr=1e-5 the update is
+    # ~520 ULP in fp32 but only ~0.008 ULP in bfloat16, i.e. a no-op -- raise the
+    # learning rate to ~1e-2 before drawing any conclusion from a bf16 run.
+    _final_ck_v1 = tc.tree_bit_checksum(model_state_v1_host)
+    _final_ck_v2 = tc.tree_bit_checksum(weights_v2_host)
+    print(
+        f"[move] weights changed?  v1={_final_ck_v1 != _init_ck}"
+        f"  v2={_final_ck_v2 != _init_ck}"
+        + (
+            "   <-- NOTHING MOVED: the update is below one ULP, so any comparison"
+            " below is vacuous"
+            if _final_ck_v1 == _init_ck and _final_ck_v2 == _init_ck
+            else ""
+        )
+    )
+    assert _final_ck_v1 != _init_ck or _final_ck_v2 != _init_ck, (
+        "neither trainer moved its weights; the comparison below would pass"
+        " trivially. Raise _LEARNING_RATE or switch to fp32."
+    )
 
-  # attribute_weight_gap(
-  #     model_state_v1_host,
-  #     weights_v2_host,
-  #     grads_v1_host,
-  #     grads_v2_host,
-  #     lr=_LEARNING_RATE,
-  #     denom=denom_v1 if denom_v1 == denom_v2 else None,
-  # )
+    # Weights are observable without any hook, so this comparison is valid in
+    # memory-benchmark state. Expect ~1e-8 of tensor scale in the KV-sharing
+    # layers on the split path, and bit-identity on the fused path.
+    compare(
+        "weights after training",
+        model_state_v1_host,
+        weights_v2_host,
+        max_rel=_WEIGHT_MAX_REL,
+    )
 
-  # model_state_v2 = nnx.state(gemma_v2)
-  # opt_state_v2 = nnx.state(trainer_v2.optimizer)
-  # # loss_v2 = trainer_v2.metrics_logger.get_metric("", "loss", "train")
-  # del gemma_v2, trainer_v2, optimizer_v2
-  # gc.collect()
+    attribute_weight_gap(
+        model_state_v1_host,
+        weights_v2_host,
+        grads_v1_host,
+        grads_v2_host,
+        lr=_LEARNING_RATE,
+        denom=denom_v1 if denom_v1 == denom_v2 else None,
+    )
 
 # # Tolerate typical bfloat16 XLA computation graph re-association on TPUs
 # assert_fn = lambda path, x, y: tc.assert_close(
