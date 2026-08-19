@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# One-host Qwen3-1.7B GSM8K profiling run: 3 training steps in CANON_GSM8K_TRAIN
-# mode with the shipping perf envs on, capturing one warm step (step 2) as an
-# XProf xplane + perfetto_trace.json.gz via the CANON_XPROF_* learner hook.
+# One-host Qwen3-1.7B GSM8K profiling run through the official tunix.perf
+# stack: CANON_GSM8K_TRAIN steps with the shipping perf envs on, the official
+# tunix.sft Profiler capturing one warm step (xplane + trace.json.gz), and the
+# tunix.perf v2 spans writing a semantic perfetto_trace_v2_<ts>.pb timeline.
 # Derived from tasks/p41-optimizer-residency/scripts/run_onehost_pair.sh; one
 # arm, resident optimizer placement. Profile-run numbers are for shape only,
-# never for A/B deltas (the python tracer perturbs step time).
+# never for A/B deltas.
 set -euo pipefail
 
 label="${1:?usage: run_onehost_gsm8k_xprof.sh <unique-label>}"
@@ -94,8 +95,9 @@ raw="$state/raw.log"
 align="$state/alignment.jsonl"
 update="$state/update.json"
 xprof_dir="$state/xprof"
+perf_dir="$state/perf"
 container="p51_gsm8k_xprof_${label}"
-mkdir -p "$state/wandb" "$state/logs" "$xprof_dir"
+mkdir -p "$state/wandb" "$state/logs" "$xprof_dir" "$perf_dir"
 {
   echo "[P51.XPROF] RUN_BEGIN"
   sha256sum \
@@ -150,6 +152,7 @@ sudo docker run --rm --privileged --net=host --name "$container" \
   -e CANON_P28_BATCHED_REPORT=1 \
   -e CANON_P28_BATCHED_REVERSE="${P51_BATCHED_REVERSE:-}" \
   -e CANON_XPROF_DIR="$([ "$capture" = 1 ] && echo "$xprof_dir")" \
+  -e CANON_PERF_TRACE_DIR="$perf_dir" \
   -e CANON_XPROF_SKIP_STEPS="$xprof_skip" \
   -e CANON_XPROF_STEPS="$xprof_steps" \
   -e CANON_XPROF_PYTHON_TRACER="${P51_XPROF_PYTHON_TRACER:-0}" \
@@ -236,10 +239,16 @@ canon_postflight "$raw" 2>&1 | sed 's/^/[P51.XPROF.POSTFLIGHT] /' >>"$raw" || tr
 
 steps_done="$(grep -ac 'Global step .* completed in' "$raw" || true)"
 align_pass="$(grep -ac 'verdict=PASS' "$raw" || true)"
-xprof_started="$(grep -ac '\[P51.XPROF\] start dir=' "$raw" || true)"
-xprof_stopped="$(grep -ac '\[P51.XPROF\] stop captured_steps=' "$raw" || true)"
+# The official tunix.sft Profiler logs through absl; these are its lines,
+# not ours. The step numbers are checked, not just the presence: a window
+# that opened at the wrong step would otherwise pass on marker counts alone.
+xprof_started="$(grep -ac 'Starting JAX profiler at step' "$raw" || true)"
+xprof_stopped="$(grep -ac 'Stopping JAX profiler at step' "$raw" || true)"
+xprof_start_step="$(grep -a 'Starting JAX profiler at step' "$raw" | sed -n 's/.*at step \([0-9]*\).*/\1/p' | head -1)"
+xprof_stop_step="$(grep -a 'Stopping JAX profiler at step' "$raw" | sed -n 's/.*at step \([0-9]*\).*/\1/p' | head -1)"
 xplane_count="$(find "$xprof_dir" -name '*.xplane.pb' 2>/dev/null | wc -l)"
 perfetto_count="$(find "$xprof_dir" \( -name '*perfetto*' -o -name '*.trace.json.gz' \) 2>/dev/null | wc -l)"
+perf_v2_count="$(find "$perf_dir" -name 'perfetto_trace_v2_*.pb' 2>/dev/null | wc -l)"
 # The program reports its own mesh, so the gate reads that instead of trusting
 # the launch line: the axis names and Auto types are what separate the
 # certified regime from the explicit-mesh one.
@@ -251,16 +260,22 @@ esac
 {
   echo "[P51.XPROF] SUMMARY steps_done=${steps_done:-0} align_pass=${align_pass:-0}" \
     "xprof_started=${xprof_started:-0} xprof_stopped=${xprof_stopped:-0}" \
-    "xplane_files=${xplane_count} perfetto_files=${perfetto_count}"
+    "xplane_files=${xplane_count} perfetto_files=${perfetto_count}" \
+    "perf_v2_traces=${perf_v2_count}"
   find "$xprof_dir" -type f -printf '%s %p\n' 2>/dev/null | sort -rn | head -10
 } | tee -a "$driver" >>"$raw"
 red=""
 [ "$docker_rc" -eq 0 ] || red="$red docker_exit=$docker_rc"
 [ "$steps_done" -eq "$max_steps" ] || red="$red steps=$steps_done/$max_steps"
 [ "$mesh_ok" -eq 1 ] || red="$red mesh_line=${mesh_line:-absent}"
+[ "$perf_v2_count" -gt 0 ] || red="$red perf_v2_trace=$perf_v2_count"
 if [ "$capture" = 1 ]; then
   [ "$xprof_started" -eq 1 ] || red="$red xprof_started=$xprof_started"
   [ "$xprof_stopped" -eq 1 ] || red="$red xprof_stopped=$xprof_stopped"
+  [ "${xprof_start_step:-none}" = "$xprof_skip" ] \
+    || red="$red start_step=${xprof_start_step:-none}!=$xprof_skip"
+  [ "${xprof_stop_step:-none}" = "$((xprof_skip + xprof_steps))" ] \
+    || red="$red stop_step=${xprof_stop_step:-none}!=$((xprof_skip + xprof_steps))"
   [ "$xplane_count" -gt 0 ] || red="$red xplane=$xplane_count"
   [ "$perfetto_count" -gt 0 ] || red="$red perfetto=$perfetto_count"
 fi

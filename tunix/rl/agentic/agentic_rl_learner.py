@@ -32,6 +32,7 @@ from typing import Any, AsyncIterator, Callable, Dict, Generic, Iterable, Iterat
 from absl import logging
 import flax
 import jax
+from tunix.sft import profiler as sft_profiler
 from jax import typing
 import jax.numpy as jnp
 import numpy as np
@@ -2986,52 +2987,45 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     return filtered_train_micro_batch
 
 
-_CANON_XPROF = {"calls": 0, "active": False, "done": False}
+_CANON_XPROF = {"profiler": None, "completed_steps": 0}
 
 
 def _canon_xprof_step_boundary():
-  """Env-gated jax.profiler window keyed on completed global steps.
+  """Drives the official tunix.sft Profiler at global-step boundaries.
 
-  CANON_XPROF_DIR enables the capture (empty or unset means off, so the
-  docker -e K="" idiom stays inert). The trace starts once
-  CANON_XPROF_SKIP_STEPS global steps have completed and stops
-  CANON_XPROF_STEPS completed steps later, writing an XProf xplane plus
-  perfetto_trace.json.gz into the directory in one capture.
+  CANON_XPROF_DIR arms it (empty or unset stays off, so the docker -e K=""
+  idiom is inert). The window covers whole global steps -- rollout included --
+  because the G6 segmented update path never enters PeftTrainer.train(),
+  where the trainer-level activation lives. Counting starts after the first
+  completed step, so a skip below one could never fire; that is rejected
+  loudly instead of leaving an empty profile directory behind.
   """
   directory = os.environ.get("CANON_XPROF_DIR", "")
-  if not directory or _CANON_XPROF["done"]:
+  if not directory:
     return
-  skip = int(os.environ.get("CANON_XPROF_SKIP_STEPS", "") or "2")
-  steps = int(os.environ.get("CANON_XPROF_STEPS", "") or "1")
-  # The window opens at a completed-step boundary, so step 0 -- the compiling
-  # one -- is not reachable from here and a skip of 0 would arm a capture that
-  # never starts. Say so instead of writing an empty profile directory.
-  if skip < 1 or steps < 1:
-    raise ValueError(
-        "CANON_XPROF_SKIP_STEPS and CANON_XPROF_STEPS must be >= 1; the "
-        "capture window starts after a completed step, so the first "
-        f"capturable step is step 1 (got skip={skip}, steps={steps})"
+  if _CANON_XPROF["profiler"] is None:
+    skip = int(os.environ.get("CANON_XPROF_SKIP_STEPS", "") or "2")
+    steps = int(os.environ.get("CANON_XPROF_STEPS", "") or "1")
+    if skip < 1 or steps < 1:
+      raise ValueError(
+          "CANON_XPROF_SKIP_STEPS and CANON_XPROF_STEPS must be >= 1; the "
+          "window opens after a completed step, so the first capturable "
+          f"step is step 1 (got skip={skip}, steps={steps})"
+      )
+    host_tracer = int(os.environ.get("CANON_XPROF_HOST_TRACER", "") or "1")
+    python_tracer = int(os.environ.get("CANON_XPROF_PYTHON_TRACER", "") or "0")
+    _CANON_XPROF["profiler"] = sft_profiler.Profiler(
+        initial_step=0,
+        max_step=None,
+        profiler_options=sft_profiler.ProfilerOptions(
+            log_dir=directory,
+            skip_first_n_steps=skip,
+            profiler_steps=steps,
+            host_tracer_level=host_tracer,
+            python_tracer_level=python_tracer,
+        ),
     )
-  _CANON_XPROF["calls"] += 1
-  if not _CANON_XPROF["active"] and _CANON_XPROF["calls"] == skip:
-    options = jax.profiler.ProfileOptions()
-    options.raise_error_on_start_failure = True
-    python_tracer = os.environ.get("CANON_XPROF_PYTHON_TRACER", "")
-    if python_tracer:
-      options.python_tracer_level = int(python_tracer)
-    host_tracer = os.environ.get("CANON_XPROF_HOST_TRACER", "")
-    if host_tracer:
-      options.host_tracer_level = int(host_tracer)
-    jax.profiler.start_trace(
-        directory, create_perfetto_trace=True, profiler_options=options
-    )
-    _CANON_XPROF["active"] = True
-    print(
-        f"[P51.XPROF] start dir={directory} after_completed_steps={skip}",
-        flush=True,
-    )
-  elif _CANON_XPROF["active"] and _CANON_XPROF["calls"] >= skip + steps:
-    jax.profiler.stop_trace()
-    _CANON_XPROF["active"] = False
-    _CANON_XPROF["done"] = True
-    print(f"[P51.XPROF] stop captured_steps={steps}", flush=True)
+  _CANON_XPROF["completed_steps"] += 1
+  completed = _CANON_XPROF["completed_steps"]
+  _CANON_XPROF["profiler"].maybe_activate(completed)
+  _CANON_XPROF["profiler"].maybe_deactivate(completed)

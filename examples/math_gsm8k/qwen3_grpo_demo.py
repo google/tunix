@@ -1079,11 +1079,28 @@ def main() -> None:
         flush=True,
     )
 
+  perf_config = None
+  canon_perf_trace_dir = os.environ.get("CANON_PERF_TRACE_DIR", "")
+  if canon_perf_trace_dir:
+    # The official tunix.perf v2 tracer: the agentic learner already carries
+    # the spans and exports once per global step; all it needs is a real
+    # export function instead of the NoopTracer. Writes
+    # perfetto_trace_v2_<ts>.pb under the given directory.
+    from tunix.perf import metrics as perf_metrics_lib  # pylint: disable=g-import-not-at-top
+    from tunix.perf.experimental import export as perf_export_lib  # pylint: disable=g-import-not-at-top
+
+    perf_config = perf_metrics_lib.PerfMetricsConfig(
+        custom_export_fn_v2=perf_export_lib.PerfMetricsExport.from_cluster_config(
+            cluster_config=cluster_config,
+            trace_dir=canon_perf_trace_dir,
+        ).export_metrics
+    )
   rl_cluster = rl_cluster_lib.RLCluster(
       actor=actor,
       reference=reference,
       tokenizer=tokenizer,
       cluster_config=cluster_config,
+      perf_config=perf_config,
   )
   rl_cluster.actor_trainer.register_learning_rate_schedule(
       learning_rate_schedule
