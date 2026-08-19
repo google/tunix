@@ -20,11 +20,16 @@ import jax
 from jax import numpy as jnp
 from jax.interpreters import pxla
 import jax.sharding as shd
+import numpy as np
 
 
 # TODO(abheesht17): Use this function for all models and unify with the fn in
 # sft/sharding_utils.py.
-def shard(x: jnp.ndarray, s: Tuple[str, ...], eager: bool = False):
+def shard(
+    x: jnp.ndarray | np.ndarray,
+    s: Tuple[str | None, ...] | shd.PartitionSpec,
+    eager: bool = False,
+):
   """Shards a JAX array.
 
   Args:
