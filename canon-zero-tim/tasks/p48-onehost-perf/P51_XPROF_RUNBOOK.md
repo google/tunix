@@ -124,6 +124,26 @@ pip install --user xprof
 plane/line/event 聚合(host C++ 事件滤 `$` 前缀);语义 pb 用
 `perfetto.protos...perfetto_trace_pb2.Trace` 解析 track_event。
 
+### 验证"backward 在场"(update 模式跑完必做)
+
+```bash
+pip install --user xprof   # 仅解析,不需要 TPU
+python3 canon-zero-tim/tasks/p48-onehost-perf/scripts/census_xplane_modules.py <run_root>
+# 期望:全部 8 个 TensorCore plane 逐一 backward=present + decode=absent
+#       → CENSUS_GREEN rc=0;任一 plane 不满足 → CENSUS_RED rc=1
+# step 模式跑同一脚本必 CENSUS_RED(decode only)——那不是坏,是该模式的定义
+# 语义脚本同样口径:缺任一训练段 span → CENSUS_RED rc=1
+
+# 语义 span 普查(peft_train/segmented_value_and_grad/gradient_commit 各 2×步数):
+sudo docker run --rm -v /mnt/disks/tunix-data:/mnt/disks/tunix-data \
+  -v "$PWD":"$PWD" --entrypoint python3 tunix_frozenlake_image:vllm-tpu0.25.0 \
+  "$PWD/canon-zero-tim/tasks/p48-onehost-perf/scripts/census_semantic_trace.py" <run_root>
+```
+
+注意:**别用 `grep -a` 在 xplane 二进制里搜模块名当判据**——host plane
+不受 device 缓冲限制,任何模式下都提到 trainer 名字(p54final 负控:
+grep 命中 7-8 处但 device Modules 行为零)。必须用上面的逐 plane 普查。
+
 ## 导出到 GCS(另一台机器/agent 消费)
 
 `P51_GCS_EXPORT=1` 随 run 自动导出,或事后
