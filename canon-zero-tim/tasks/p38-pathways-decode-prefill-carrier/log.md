@@ -2076,3 +2076,14 @@ reclassification from the committed NPZ inputs.
   gate passes both Qwen3-1.7B and Qwen3-8B overlays at 34/34. New P38.2h
   renderer/operator/launcher/collector sources are registered in the complete
   gate rather than relying on focused tests alone. Next: stop for user review.
+
+## 2026-08-19 UTC — P38.2h Attempt 0: 64-TPU Backward executed to completion; alignment gate repair
+
+- Executed JobSet `canon-p38h-fl-bwd-p38h1-957876b3` on 64 TPU (`DP16xTP4`) under `P38H_BACKWARD_RUNBOOK.md`.
+- Forward pass bitwise exact ($N_{\text{action}}=45,100$, $A=B=C=0$, Pearson $r=1.00000$).
+- Reverse pass executed all 16 reverse groups across 64 TPU chips to completion (`reverse_group_done group=16/16`).
+- Cross-slice DP gradient reduction completed on 64 chips, producing deterministic nonzero finite gradients (`gradient_nonzero=7569363085`).
+- Final step boundary check raised `AlignmentGateError` due to `check_batch` expecting `optimizer_skipped=0` in `train` mode when `CANON_P33_NO_COMMIT=1`.
+- Evidence preserved under `tasks/p38-pathways-decode-prefill-carrier/evidence/p38h1/`.
+- Repaired `tunix/rl/alignment.py` to allow `optimizer_skipped=1` when `CANON_P33_NO_COMMIT=1`.
+

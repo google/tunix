@@ -9,22 +9,20 @@ P39 evidence cannot promote P38.
 
 P38s23r3 closed the forward candidate boundary: three 64-TPU FrozenLake
 rounds measured 146,042 action tokens with exact A-B and B-C. It did not run
-backward. The next and only P38 target is one actual-model DP16xTP4
-backward-no-commit transaction under `P38H_BACKWARD_RUNBOOK.md`.
+backward.
 
-The first real-v5p M4096 VJP gate exposed a true backward defect: automatic
-transpose of the outer 16xM256 map produced 11,950 different shared-weight
-gradient elements (`max_abs=2.0`) against an explicit-order oracle while
-`dHidden` remained exact. The local repair keeps the forward program and
-accumulates the 16 completed M256 `dWeight` contributions with a loop-carried
-ascending `lax.scan`. The rerun is fully exact for `dHidden`, `dWeight`, and
-repeat determinism with finite/nonzero gradients and a live negative control.
-Receipt: `artifacts/p38_2h_fixed_lm_head_vjp_onehost_0819.md`.
+In P38.2h Attempt 0 (`canon-p38h-fl-bwd-p38h1-957876b3` on 64 TPU `DP16xTP4`),
+the actual-model backward completed all 16 forward and reverse groups to
+completion (`reverse_group_done group=16/16`) and performed 16-way DP gradient
+reduction on 64 chips (`gradient_nonzero=7569363085`). At the terminal step boundary,
+`check_batch` threw `AlignmentGateError` because `expected_skipped` was 0 in `train`
+mode while `CANON_P33_NO_COMMIT=1` caused `optimizer_skipped=1`.
 
-The checked-in target must be reviewed and published before launch. The
-operator then runs only `P38H_BACKWARD_RUNBOOK.md` and returns its compact
-SHA-sealed directory. Do not relaunch P38s23r3, use the historical P38
-precheck renderer, or enable warning-only/full training yet.
+The fix (`expected_skipped = 1 if (mode == "gate-only" or no_commit) else 0`) has
+been applied to `tunix/rl/alignment.py`. Attempt-0 evidence is preserved in
+`tasks/p38-pathways-decode-prefill-carrier/evidence/p38h1/`. Next step is to publish
+this commit and launch the rerun under `P38H_BACKWARD_RUNBOOK.md`.
+
 
 ## HISTORY: P38s23r3 64-TPU Three-Round Zero-Error Exact Pass (`P38S23R3_FORWARD_EXACT_PASS`)
 

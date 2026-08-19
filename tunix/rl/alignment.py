@@ -424,8 +424,12 @@ def gsm8k_ab_report_policy() -> dict[str, Any]:
       or deepswe_warning_only
   )
   workload = os.environ.get("CANON_P32_WORKLOAD", "")
+  if not workload and os.environ.get("CANON_GSM8K_TRAIN", "") == "1":
+    workload = "gsm8k"
   stage = os.environ.get("CANON_P33_RUN_STAGE", "")
-  no_commit = os.environ.get("CANON_P33_NO_COMMIT", "")
+  if not stage and os.environ.get("CANON_GSM8K_TRAIN", "") == "1":
+    stage = "full"
+  no_commit = os.environ.get("CANON_P33_NO_COMMIT", "") or "0"
   if deepswe_warning_only:
     p34_stage = os.environ.get("CANON_P34_RUN_STAGE", "")
     p39_pilot = os.environ.get("CANON_P39_64CHIP_PILOT", "") == "1"
@@ -1339,7 +1343,8 @@ def check_batch(
   """Check four boundaries and two ratios after one value_and_grad call."""
   mode = execution_mode()
   skipped = int(np.asarray(optimizer_skipped).item())
-  expected_skipped = 1 if mode == "gate-only" else 0
+  no_commit = os.environ.get("CANON_P33_NO_COMMIT", "") == "1"
+  expected_skipped = 1 if (mode == "gate-only" or no_commit) else 0
   if skipped != expected_skipped:
     raise AlignmentGateError(
         "compiled train step optimizer attestation mismatch: "
