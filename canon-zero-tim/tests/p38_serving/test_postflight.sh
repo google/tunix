@@ -28,6 +28,7 @@ run_case() (
   export CANON_P38_PRECHECK_ONLY=1
   export CANON_P38_CONTROLLED_EXIT=1
   export CANON_P38_DIAGNOSTIC_ROUNDS=1
+  export CANON_P38_DURABILITY_PROFILE=full-v1
   export CANON_P38_DIAGNOSTIC_ROUND_FILE="$state/p38_diagnostic_round"
   export CANON_P38_ROUND_SEAL_REQUEST_DIR="$state/p38_round_seal_requests"
   export CANON_P38_ROUND_SEAL_ACK_DIR="$state/p38_round_seal_acks"

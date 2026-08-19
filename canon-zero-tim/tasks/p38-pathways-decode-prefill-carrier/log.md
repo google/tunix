@@ -2048,3 +2048,31 @@ reclassification from the committed NPZ inputs.
   serving-classifier (36), and complete P33 adjacent CPU gates pass. No TPU
   launch, GCS mutation, commit, or push occurred. Next: review before
   requesting publication approval.
+
+## 2026-08-19 UTC — P38.2h M4096 backward defect measured and repaired locally
+
+- P38s23r3 is admitted as the fixed-lm-head forward candidate: three 64-TPU
+  frozen rounds, 146,042 action tokens, exact A-B and B-C, no backward or
+  optimizer commits. It opens but does not satisfy backward admission.
+- Added a real-Qwen3-8B TP4 gate for the semantic-M4096 outer VJP. The original
+  automatic transpose of `lax.map(16xM256)` produced exact `dHidden` and
+  deterministic repeats, but 11,950 shared-weight gradient elements differed
+  from 16 completed M256 pullbacks accumulated in explicit ascending order;
+  `max_abs=2.0`. Verdict: `FIXED_LM_HEAD_CHUNK_VJP_NOT_INVARIANT`.
+- Repaired only the M4096 outer backward. Forward remains the same 16 fixed
+  M256 Pallas calls; a custom VJP accumulates completed chunk `dWeight`
+  contributions through loop-carried ascending `lax.scan` state.
+- The real-v5p rerun reports `FIXED_LM_HEAD_ONEHOST_VJP_PASS`: zero differing
+  `dHidden`/`dWeight`, zero repeat differences, finite/nonzero gradients, and
+  one detected normal-value negative. Receipt:
+  `artifacts/p38_2h_fixed_lm_head_vjp_onehost_0819.md`.
+- Prepared one strict P38h DP16xTP4 actual-model backward-no-commit renderer,
+  launch script, compact stdout evidence transport, official-classifier
+  collector, and runbook. The operator test passes one complete positive and
+  rejects missing-VJP, SHA-corrupt, and state-mutating negatives. No cluster
+  launch, Git commit, or push occurred.
+- The complete adjacent P33/P38 CPU gate now passes, including 121 P38 serving
+  tests and the final `[P33.WORKLOAD] CPU_GATE PASS`; the pinned exact-image
+  gate passes both Qwen3-1.7B and Qwen3-8B overlays at 34/34. New P38.2h
+  renderer/operator/launcher/collector sources are registered in the complete
+  gate rather than relying on focused tests alone. Next: stop for user review.

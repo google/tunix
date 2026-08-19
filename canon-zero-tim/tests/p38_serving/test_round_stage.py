@@ -71,6 +71,7 @@ class RoundStageTest(unittest.TestCase):
       )
     return argparse.Namespace(
         round=0,
+        profile="full",
         output=root / "round",
         run_log=run_log,
         pre_alignment=pre,

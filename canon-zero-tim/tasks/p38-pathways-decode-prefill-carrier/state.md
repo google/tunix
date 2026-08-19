@@ -1,31 +1,27 @@
 # State
 
-- Status: active.
+- Status: P38.2h implementation is locally complete and awaiting review;
+  nothing is committed, pushed, or launched.
 - Objective: localize and remove the Pathways serving decode-versus-prefill
   carrier without weakening the strict zero-TIM release contract.
 - Definition of done: one source-pinned flag-on run reports exact
   `S_decode_vs_S_prefill`, exact `S_prefill_vs_T_old`, and exact
   `T_old_vs_T_current` before a strict full workload is admitted.
-- Active phase: P38.2x dedicated fixed-tile Pallas lm-head. The generic
-  `BF16_BF16_F32` algorithm arm is rejected by P38s22. P38.2x maps exact
-  request buckets M8/16/32/64/128/256 to one fixed M256 body and exact learner
-  M4096 to 16 calls of that same M256/K4096/N38144 body. Its CPU, exact-image,
-  and real-v5p construction gates passed. P38s23r2/source
-  `6814774eef70aa0c67610eab9f355d964d420378` then emitted all seven receipts
-  and measured one exact 64-TPU round: 49,177 actions, A-B `0` bytes/elements,
-  B-C `0`, `max_abs=0.0`. It timed out waiting 900 seconds for durability ACK
-  because the shared worker was already inside a full periodic snapshot. It
-  is `INCONCLUSIVE_DURABILITY_SEAL_TIMEOUT`, not a three-round repair claim.
-  P38s23r3 keeps the numerical arm unchanged and introduces the exclusive
-  `round-alignment-v1` evidence profile: no periodic snapshots or unrelated
-  observers, round seals first, exact-round capsules optional, and no
-  mismatch-join requirement for the exact success path. Local fake-GCS,
-  operator-return, pinned-image renderer/classifier, and complete P33 adjacent
-  CPU gates pass. Publication remains user-gated; the 64-TPU launch requires a
-  separate approval after publication. See
-  `phases/p38-2w2-p38s22-round-seal-salvage.md` and
-  `phases/p38-2x-fixed-tile-pallas-lm-head.md` and
-  `P38S23R3_RUNBOOK.md`.
+- Active phase: P38.2h fixed-lm-head actual-model backward-no-commit. P38s23r3
+  completed the forward candidate gate: three DP16xTP4 FrozenLake rounds,
+  146,042 action tokens, exact A-B and B-C, and zero backward/commits. The
+  initial real-v5p M4096 VJP gate then found that automatic transpose of the
+  outer 16xM256 map changed the shared `dWeight` accumulation: 11,950 elements
+  differed from the ascending-chunk oracle (`max_abs=2.0`) while `dHidden` was
+  exact. The local repair preserves forward and uses a custom outer VJP with
+  loop-carried ascending `lax.scan` accumulation. Its real-Qwen3-8B TP4 rerun
+  is exact for `dHidden`, `dWeight`, and repeat determinism, with finite/nonzero
+  gradients and a one-element normal-value negative. One strict P38h
+  DP16xTP4 target is prepared but not launched; commit, push, and launch remain
+  separately user-gated. See
+  `phases/p38-2h-fixed-lm-head-backward-no-commit.md`,
+  `artifacts/p38_2h_fixed_lm_head_vjp_onehost_0819.md`, and
+  `P38H_BACKWARD_RUNBOOK.md`.
 - Task directory:
   `canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/`.
 - P38s20/source `bea31f36655b137d7ab47ba94095cadda5b586ba` execution
@@ -371,16 +367,17 @@
 
 ## Next action
 
-1. Review the checked-in P38s23r3 diff and gate receipts. Do not commit or push
-   without explicit user approval.
+1. Review the uncommitted P38.2h fixed-order VJP, target renderer, operator
+   scripts, runbook, and gate receipts. Do not commit or push without explicit
+   user approval.
 2. After a separately approved publication, the remote operator follows only
-   `P38S23R3_RUNBOOK.md`: run the launch script once from the exact clean SHA,
-   preserve the complete attempt-0 head log, then run the collector.
-3. Return the compact mechanically verified directory. Three exact A-B/B-C
-   rounds admit only a candidate forward repair and open backward-no-commit;
-   any finite A-B red with exact B-C rejects fixed lm-head as sufficient.
-4. Do not relaunch P38s23r2, attach old observers, enable prefix cache, or use
-   hand-edited YAML/env.
+   `P38H_BACKWARD_RUNBOOK.md`: launch once from the exact clean SHA, preserve
+   the complete attempt-0 head log, and run the checked-in collector.
+3. Return the complete compact directory. Only
+   `P38H_FIXED_LM_HEAD_BACKWARD_NO_COMMIT_PASS` opens a separately reviewed
+   full-training candidate.
+4. Do not relaunch P38s23, attach diagnostic observers, enable prefix cache,
+   warning-only alignment, evaluation, checkpointing, or hand-edit YAML/env.
 
 ## Claim ceiling and blockers
 

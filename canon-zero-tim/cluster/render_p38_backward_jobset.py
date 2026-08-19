@@ -1,0 +1,155 @@
+#!/usr/bin/env python3
+"""Render the single-variable P38.2h fixed-lm-head backward target."""
+
+from __future__ import annotations
+
+import argparse
+import dataclasses
+import importlib.util
+from pathlib import Path
+import sys
+from typing import Any, Mapping
+
+import yaml
+
+
+_P33_PATH = Path(__file__).with_name("render_p33_jobsets.py")
+_P33_SPEC = importlib.util.spec_from_file_location(
+    "render_p33_jobsets_p38h", _P33_PATH
+)
+assert _P33_SPEC and _P33_SPEC.loader
+p33 = importlib.util.module_from_spec(_P33_SPEC)
+sys.modules[_P33_SPEC.name] = p33
+_P33_SPEC.loader.exec_module(p33)
+
+_KEY = "p38-fixed-lm-head-backward"
+_PREFIX = "canon-p38h-fl-bwd"
+_FILENAME = "jobset-p38h-fixed-lm-head-backward.yaml"
+_FORBIDDEN_ENV = (
+    "CANON_P38_PRECHECK_ONLY",
+    "CANON_P38_CONTROLLED_EXIT",
+    "CANON_P38_DIAGNOSTIC_ROUNDS",
+    "CANON_P38_DIAGNOSTIC_ROUND_FILE",
+    "CANON_P38_SERVING_CAPTURE_DIR",
+    "CANON_P38_KV_OBSERVER_DIR",
+    "CANON_P38_SEAM_OBSERVER",
+    "CANON_P38_TAIL_OBSERVER",
+    "CANON_P38_TERMINAL_DISCRIMINATOR",
+    "CANON_MM_ALGO",
+    "CANON_MM_ALGO_PRESET",
+)
+
+
+def _base_spec() -> Any:
+    matches = [
+        spec for spec in p33._SPECS
+        if spec.key == "frozenlake-backward-no-commit"
+    ]
+    if len(matches) != 1:
+        raise ValueError("P33 FrozenLake backward-no-commit spec drifted")
+    return dataclasses.replace(
+        matches[0], key=_KEY, job_prefix=_PREFIX
+    )
+
+
+def _main(document: Mapping[str, Any]) -> dict[str, Any]:
+    return p33._container(p33._head_pod(document)["containers"], "jax-tpu")
+
+
+def validate(document: Mapping[str, Any], source_commit: str, run_id: str) -> None:
+    spec = _base_spec()
+    p33.validate_jobset(document, spec, source_commit, run_id)
+    env = p33._env_values(document)
+    labels = document.get("metadata", {}).get("labels", {})
+    expected = {
+        "CANON_P38_FIXED_LM_HEAD": "1",
+        "CANON_P33_RUN_STAGE": "backward-no-commit",
+        "CANON_P33_NO_COMMIT": "1",
+        "CANON_P33_ENABLE_EVAL": "0",
+        "CANON_P33_DISABLE_EVAL": "1",
+        "CANON_P31_ENABLE_EVAL": "0",
+        "CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY": "0",
+        "CANON_OPT_STATE_RESIDENT": "1",
+        "CANON_P30_OPT_STATE_OFFLOAD": "0",
+    }
+    wrong = {key: env.get(key) for key, value in expected.items()
+             if env.get(key) != value}
+    if wrong:
+        raise ValueError(f"P38.2h environment drifted: {wrong}")
+    leaked = [name for name in _FORBIDDEN_ENV if name in env]
+    if leaked:
+        raise ValueError(f"P38.2h inherited precheck/observer env: {leaked}")
+    if labels.get("canon.zero-tim/diagnostic") != "p38-fixed-lm-head-backward":
+        raise ValueError("P38.2h diagnostic label drifted")
+    if labels.get("canon.zero-tim/fixed-lm-head") != "1":
+        raise ValueError("P38.2h fixed-lm-head label drifted")
+    if labels.get("canon.zero-tim/mutation") != "backward-no-commit":
+        raise ValueError("P38.2h mutation label drifted")
+    command = env.get("CANON_RUN_CMD", "")
+    for argument in (
+        "--max_steps=1",
+        "--max_concurrency=256",
+        "--max_response_length=2048",
+        "--env_max_steps=5",
+    ):
+        if argument not in command:
+            raise ValueError(f"P38.2h command lost {argument}")
+    if "--num_test_batches" in command or "--eval_every_n_steps" in command:
+        raise ValueError("P38.2h command unexpectedly enables evaluation")
+    if document["spec"]["failurePolicy"].get("maxRestarts") != 0:
+        raise ValueError("P38.2h diagnostic must not restart")
+
+
+def render(
+    *, base_path: Path, source_commit: str, run_id: str
+) -> dict[str, Any]:
+    base = p33.load_base(base_path)
+    spec = _base_spec()
+    document = p33.render_jobset(base, spec, source_commit, run_id)
+    p33._set_named_env(
+        _main(document)["env"], {"CANON_P38_FIXED_LM_HEAD": "1"}, remove=()
+    )
+    labels = document["metadata"].setdefault("labels", {})
+    labels.update({
+        "canon.zero-tim/diagnostic": "p38-fixed-lm-head-backward",
+        "canon.zero-tim/fixed-lm-head": "1",
+        "canon.zero-tim/mutation": "backward-no-commit",
+    })
+    validate(document, source_commit, run_id)
+    return document
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--source-commit", required=True)
+    parser.add_argument("--run-id", required=True)
+    parser.add_argument("--output-dir", required=True, type=Path)
+    parser.add_argument(
+        "--base",
+        type=Path,
+        default=Path(__file__).with_name("jobset-64chip.yaml"),
+    )
+    args = parser.parse_args()
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    output = args.output_dir / _FILENAME
+    if output.exists():
+        raise FileExistsError(f"refusing to overwrite P38.2h JobSet: {output}")
+    document = render(
+        base_path=args.base,
+        source_commit=args.source_commit,
+        run_id=args.run_id,
+    )
+    output.write_text(
+        "# Generated by render_p38_backward_jobset.py; do not edit.\n"
+        + yaml.safe_dump(document, sort_keys=False),
+        encoding="utf-8",
+    )
+    print(
+        "[P38.2H.JOBSET] VERDICT PASS "
+        f"source={args.source_commit} run_id={args.run_id} path={output}"
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

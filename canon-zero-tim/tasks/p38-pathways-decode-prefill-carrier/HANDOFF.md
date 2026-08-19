@@ -5,7 +5,28 @@ parallel Qwen3-32B DeepSWE workstream, read
 `../p39-deepswe-production/HANDOFF.md`. P38 evidence cannot promote P39, and
 P39 evidence cannot promote P38.
 
-## CURRENT: P38s23r3 64-TPU Three-Round Zero-Error Exact Pass (`P38S23R3_FORWARD_EXACT_PASS`)
+## CURRENT: P38.2h fixed-lm-head backward-no-commit
+
+P38s23r3 closed the forward candidate boundary: three 64-TPU FrozenLake
+rounds measured 146,042 action tokens with exact A-B and B-C. It did not run
+backward. The next and only P38 target is one actual-model DP16xTP4
+backward-no-commit transaction under `P38H_BACKWARD_RUNBOOK.md`.
+
+The first real-v5p M4096 VJP gate exposed a true backward defect: automatic
+transpose of the outer 16xM256 map produced 11,950 different shared-weight
+gradient elements (`max_abs=2.0`) against an explicit-order oracle while
+`dHidden` remained exact. The local repair keeps the forward program and
+accumulates the 16 completed M256 `dWeight` contributions with a loop-carried
+ascending `lax.scan`. The rerun is fully exact for `dHidden`, `dWeight`, and
+repeat determinism with finite/nonzero gradients and a live negative control.
+Receipt: `artifacts/p38_2h_fixed_lm_head_vjp_onehost_0819.md`.
+
+The checked-in target must be reviewed and published before launch. The
+operator then runs only `P38H_BACKWARD_RUNBOOK.md` and returns its compact
+SHA-sealed directory. Do not relaunch P38s23r3, use the historical P38
+precheck renderer, or enable warning-only/full training yet.
+
+## HISTORY: P38s23r3 64-TPU Three-Round Zero-Error Exact Pass (`P38S23R3_FORWARD_EXACT_PASS`)
 
 P38s23r3 ran on 64 TPU (`canon-p38-fl-stock-p38s23r3-7c852e76`, `DP16xTP4`, concurrency 256, source `7c852e7660d165d2b4731f4e37ffa016f58db428`) under the `round-alignment-v1` lightweight durability profile.
 

@@ -13,7 +13,7 @@ if grep -Fq "P35 first target admits only one local-M chunk" \
   exit 1
 fi
 python3 -c "import ast,pathlib; files=('tunix/rl/alignment.py','tests/rl/alignment_test.py'); [ast.parse(pathlib.Path(p).read_text(), filename=p) for p in files]"
-python3 -c "import ast,pathlib; files=('canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/extract_p38_capsule.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/test_extract_p38_capsule.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/extract_p38_serving_archive.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/test_extract_p38_serving_archive.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/prepare_p38_frozenlake_replay.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/classify_p38_frozenlake_replay.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/test_classify_p38_frozenlake_replay.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/classify_p38_serving_capture.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/test_classify_p38_serving_capture.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/classify_p38_kv_observer.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/classify_p38_seam.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/classify_p38_terminal_discriminator.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/probe_p38_lm_head.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/probe_p38_fixed_lm_head.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/stage_p38_round.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/check_p38_intent_diff.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/test_check_p38_intent_diff.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/run_p38_kv_fingerprint_onehost.py','canon-zero-tim/src/engine_shims/p38_fixed_lm_head.py'); [ast.parse(pathlib.Path(p).read_text(), filename=p) for p in files]"
+python3 -c "import ast,pathlib; files=('canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/extract_p38_capsule.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/test_extract_p38_capsule.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/extract_p38_serving_archive.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/test_extract_p38_serving_archive.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/prepare_p38_frozenlake_replay.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/classify_p38_frozenlake_replay.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/test_classify_p38_frozenlake_replay.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/classify_p38_serving_capture.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/test_classify_p38_serving_capture.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/classify_p38_kv_observer.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/classify_p38_seam.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/classify_p38_terminal_discriminator.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/probe_p38_lm_head.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/probe_p38_fixed_lm_head.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/probe_p38_fixed_lm_head_vjp.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/stage_p38_round.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/check_p38_intent_diff.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/test_check_p38_intent_diff.py','canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/run_p38_kv_fingerprint_onehost.py','canon-zero-tim/cluster/render_p38_backward_jobset.py','canon-zero-tim/tests/p38_serving/test_render_p38_backward_jobset.py','canon-zero-tim/src/engine_shims/p38_fixed_lm_head.py'); [ast.parse(pathlib.Path(p).read_text(), filename=p) for p in files]"
 python3 -c "import ast,pathlib; files=('canon-zero-tim/tests/p35_envelope/classify_envelope.py','canon-zero-tim/tests/p35_envelope/test_classify_envelope.py','canon-zero-tim/tests/p35_envelope/classify_exact_replay.py','canon-zero-tim/tests/p35_envelope/test_classify_exact_replay.py','canon-zero-tim/tests/p35_envelope/classify_stage_probe.py','canon-zero-tim/tests/p35_envelope/test_classify_stage_probe.py'); [ast.parse(pathlib.Path(p).read_text(), filename=p) for p in files]"
 bash -n \
   canon-zero-tim/cluster/entrypoint.sh \
@@ -25,12 +25,16 @@ bash -n \
   canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/run_p38_incident_onehost.sh \
   canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/run_p38_lm_head_onehost.sh \
   canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/run_p38_fixed_lm_head_onehost.sh \
+  canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/run_p38_fixed_lm_head_vjp_onehost.sh \
+  canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/launch_p38h_backward.sh \
+  canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/collect_p38h_backward_return.sh \
   canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/p38_live_snapshot_worker.sh \
   canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/persist_p38_gcs.sh \
   canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/seal_p38_evidence.sh \
   canon-zero-tim/tests/p38_serving/fake_gcloud.sh \
   canon-zero-tim/tests/p38_serving/test_evidence_seal.sh \
   canon-zero-tim/tests/p38_serving/test_gcs_persistence.sh \
+  canon-zero-tim/tests/p38_serving/test_p38h_backward_operator_scripts.sh \
   canon-zero-tim/tests/p38_serving/test_postflight.sh \
   canon-zero-tim/cluster/profiles/qwen3-8b-dp16-tp4-frozenlake.env \
   canon-zero-tim/cluster/profiles/qwen3-1p7b-dp16-tp4-gsm8k.env \
@@ -81,6 +85,7 @@ JAX_PLATFORMS=cpu python3 -m unittest discover \
   -s canon-zero-tim/tests/p38_serving \
   -p 'test_*.py'
 bash canon-zero-tim/tests/p38_serving/test_postflight.sh
+bash canon-zero-tim/tests/p38_serving/test_p38h_backward_operator_scripts.sh
 bash canon-zero-tim/tests/p38_serving/test_gcs_persistence.sh
 python3 canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/test_extract_p38_capsule.py
 python3 canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/test_extract_p38_serving_archive.py
