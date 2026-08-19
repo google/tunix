@@ -1,0 +1,33 @@
+INIT weight checksum: 10256206509410191469
+[mode] weights: accum_steps=8 max_steps=1 batches=8 -> expect 1 update(s), final denom=0
+[phase] v1: denom=0  micro-steps=8  updates=1
+[grads] v1: leaves=197 nonzero=0 finite=197 max|g|=0 norm=0.000000
+[reset] v1: leaves=197 nonzero=0 nonfinite=0
+[compile] v1: _jitted_train_step_fn=2
+live device arrays after v1 teardown: 0.00 GiB (global, unsharded-equivalent)
+v2 start weight checksum: 10256206509410191469 OK
+[phase] v2: denom=0  micro-steps=8  updates=1
+[grads] v2: leaves=197 nonzero=0 finite=197 max|g|=0 norm=0.000000
+[reset] v2: leaves=197 nonzero=0 nonfinite=0
+[compile] v2: _jitted_fwd_bwd_step_fn=2  _jitted_update_step_fn=1
+[cmp] grads: SKIPPED -- both accumulators were reset by the final update(), so there are no gradients left to compare. Read them between the last fwd_bwd and update(), i.e. run _MODE='grads'.
+[move] weights changed?  v1=True  v2=True
+[cmp] weights after training: XOR v1=1158273407557975109 v2=1161711640547618549 DIFFER
+[cmp] weights after training: within max|dw|/max|w| = 1e-06  (worst leaf ['layers'][0]['per_layer_input_gate']['w'].value: 4.03e-08, 0/197 leaves over)
+[diag] ['layers'][0]['per_layer_input_gate']['w'].value: shape=(1536, 256) dtype=float32
+        max ULP=12 violating=207/393216  sorted-identical=False
+        tensor scale max|g|=0.0461793
+        max |x-y|=1.86265e-09  (= 4.034e-08 of scale)  at |x|=0.0188546
+        largest |x| among differing entries=0.0219804  (= 4.760e-01 of scale)
+[diag] ['layers'][0]['attn']['kv_einsum']['w'].value: shape=(2, 1, 1536, 256) dtype=float32
+        max ULP=512 violating=1226/786432  sorted-identical=False
+        tensor scale max|g|=0.0481126
+        max |x-y|=1.86265e-09  (= 3.871e-08 of scale)  at |x|=0.0197257
+        largest |x| among differing entries=0.031002  (= 6.444e-01 of scale)
+[diag] ['layers'][1]['attn']['q_einsum']['w'].value: shape=(8, 1536, 256) dtype=float32
+        max ULP=192 violating=617/3145728  sorted-identical=False
+        tensor scale max|g|=0.0494165
+        max |x-y|=1.86265e-09  (= 3.769e-08 of scale)  at |x|=0.0163163
+        largest |x| among differing entries=0.0176564  (= 3.573e-01 of scale)
+[attr] NOT APPLICABLE: both accumulators were reset by the update, so the gradients that produced these weights are gone. Attribution needs the "grads" mode, where the update never fires and the accumulator still holds them.
+sys:1: DeprecationWarning: builtin type swigvarlink has no __module__ attribute
