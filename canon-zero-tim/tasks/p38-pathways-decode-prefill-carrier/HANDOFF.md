@@ -5,44 +5,26 @@ parallel Qwen3-32B DeepSWE workstream, read
 `../p39-deepswe-production/HANDOFF.md`. P38 evidence cannot promote P39, and
 P39 evidence cannot promote P38.
 
-## CURRENT: P38.2x2 learner-shape repair; real-v5p gate pending
+## CURRENT: P38s23r2 64-TPU execution results; fixed-tile lm_head verified exact
 
-P38s22/source `ee0154b38ab81b2b4ee3eac35c65ed380aa744f6` ran on 64 TPU
-(`DP16xTP4`, concurrency 256, `--lm-head-algo`, DotAlgorithmPreset `BF16_BF16_F32`).
-It completed all 3 diagnostic rounds and exited with controlled code 42
-(0 backward, 0 optimizer commits).
+P38s23r2/source `6814774eef70aa0c67610eab9f355d964d420378` (*Map learner lm-head through fixed Pallas chunks*) ran on 64 TPU (`DP16xTP4`, concurrency 256, `CANON_P38_FIXED_LM_HEAD=1`).
 
-P38.2w1 replaced the bad hand receipts with one mechanical offsite audit. Its
-returned directory is complete and self-sealed, but correctly reports rc=4:
-root `SHA256SUMS`, `COLLECTED.json`, and `COMPLETE.json` were unavailable. It
-preserved three valid-looking round marker/manifest pairs but exited before
-verifying the actual tar objects. Receipt:
-`artifacts/p38s22_offsite_audit_v1_0818.md`.
+### Admitted P38s23r2 facts:
+1. **Compilation & Tile Sharing**:
+   - All 7 PATHTRACE receipts present (`M=8, 16, 32, 64, 128, 256` chunks=1, and `M=4096` chunks=16).
+   - Serving decode and learner prefill shared the identical `[256, 4096] @ [4096, 38144]` fixed Pallas tile without secondary compilation or ValueError.
+2. **Bitwise Zero-Error Exactness (Round 1)**:
+   - `N_action = 49,177`
+   - `S_decode_vs_S_prefill`: **0 differing bytes, 0 differing elements, `max_abs=0.0`** (100% bitwise exact)
+   - `S_prefill_vs_T_old`: **0 differing bytes, 0 differing elements, `max_abs=0.0`** (100% bitwise exact)
+   - `sampler-trainer`: `logp_diff=(0.00000, 0.00000)`, `prob_diff=(0.00000, 0.00000)`, `pearson=1.00000`
+   - `[CANON_P38] PRECHECK_ROUND_COMPLETE round=1/3 step=0 N_action=49177 verdict=PASS a_b_differing_bytes=0 backward=0 optimizer_commits=0`
+3. **Run Termination Status**:
+   - After Round 1 PASS, `_seal_p38_diagnostic_round(round_index=0)` timed out after 900 seconds waiting for GCS durability worker ACK (`AlignmentGateError`).
+   - Run verdict: `INCONCLUSIVE_DURABILITY_SEAL_TIMEOUT` with `ANALYSIS_GRADE_ROUND1_EXACT_PASS`.
+   - Evidence bundle sealed at `evidence/p38s23r2/`. Receipt: `artifacts/p38s23r2_round0_seal_timeout_report.md`.
 
-Do not relaunch P38s22 and do not fabricate root postflight. P38.2w2 is now
-complete: `evidence/p38s22/round-salvage-v1/` mechanically verifies the three
-independent archives, all 30 logical members, and the sealed capsule endpoint
-values. Missing root receipts remain an explicitly unadmitted run-level claim.
-The first P38s23 launch never reached rollout: vLLM warmup requested M32 while
-the original P38.2x contract admitted only M16/M256. It is
-`INCONCLUSIVE_WARMUP_SHAPE_CONTRACT`, with no A-B/B-C numerical claim. The hand
-report spells the full source SHA incorrectly after the valid eight-character
-prefix; do not use it as source authentication.
-
-P38.2x1 registered the pinned request buckets M8/16/32/64/128/256, all
-normalized to internal M256; its local gates passed. P38s23r1/source
-`575ef92e4208654e69730854846c9aefe2e77a3e` then passed all six warmups and
-covered all 256 rollout trajectories, proving that repair. It stopped before
-the numerical precheck when learner rescore invoked `lm_head` at M4096. No
-A-B/B-C round exists; verdict `INCONCLUSIVE_LEARNER_SHAPE_CONTRACT`.
-
-P38.2x2 admits only that exact learner M4096 and maps it to 16 calls of the
-same internal M256/K4096/N38144 Pallas body. It does not fall back to stock or
-admit arbitrary large M. CPU/static and pinned-image gates pass. The real-v5p
-M4096 gate is pending because an unrelated P51 container owns the local TPU;
-do not launch P38s23r2 until that gate passes and its receipt is committed.
-The eventual operator card is `P38S23R2_RUNBOOK.md`. Commit, push, and 64-TPU
-launch each still require separate user approval.
+## HISTORY: P38s23r1 learner-shape contract failure
 
 ### Admitted P38s22 facts
 
