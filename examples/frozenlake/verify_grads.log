@@ -1,33 +1,4760 @@
+<frozen importlib._bootstrap>:488: DeprecationWarning: builtin type SwigPyPacked has no __module__ attribute
+<frozen importlib._bootstrap>:488: DeprecationWarning: builtin type SwigPyObject has no __module__ attribute
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:28: DeprecationWarning: jax.experimental.shard_map is deprecated in v0.8.0. Used jax.shard_map instead.
+  from jax.experimental.shard_map import shard_map
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+WARNING:huggingface_hub.utils._http:Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+/home/linchai_google_com/tunix/examples/frozenlake/grad_diff_debug.py:109: DeprecationWarning: `with mesh:` context manager has been deprecated. Please use `with jax.set_mesh(mesh):` instead.
+  with mesh:
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/miniconda3/envs/tunix/lib/python3.12/site-packages/flax/nnx/variablelib.py:1170: DeprecationWarning: 'sharding' is deprecated, use 'out_sharding' instead.
+  variable = super().__call__(*args, **kwargs)
+/home/linchai_google_com/tunix/examples/frozenlake/grad_diff_debug.py:789: DeprecationWarning: `with mesh:` context manager has been deprecated. Please use `with jax.set_mesh(mesh):` instead.
+  with mesh:
+/home/linchai_google_com/tunix/tunix/sft/peft_trainer.py:957: DeprecationWarning: jax.interpreters.pxla.thread_resources is deprecated as of JAX v0.8.2. Please switch to using `with jax.set_mesh(mesh)` instead of `with mesh:` and then use `jax.sharding.get_abstract_mesh()` to get the current mesh.
+  f"Training with mesh: {pxla.thread_resources.env.physical_mesh}",
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:498: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  y = self.per_layer_input_embedding.value[t]
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:1490: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  ffw = ffw * self.skip_scale.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:1490: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  ffw = ffw * self.skip_scale.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:1490: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  ffw = ffw * self.skip_scale.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:1490: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  ffw = ffw * self.skip_scale.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:1490: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  ffw = ffw * self.skip_scale.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:1490: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  ffw = ffw * self.skip_scale.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:1490: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  ffw = ffw * self.skip_scale.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:1490: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  ffw = ffw * self.skip_scale.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:1490: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  ffw = ffw * self.skip_scale.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:1490: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  ffw = ffw * self.skip_scale.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:1490: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  ffw = ffw * self.skip_scale.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:1490: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  ffw = ffw * self.skip_scale.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:512: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = jnp.astype(self.input_embedding.value, self.config.dtype)
+/home/linchai_google_com/tunix/examples/frozenlake/grad_diff_debug.py:838: DeprecationWarning: `with mesh:` context manager has been deprecated. Please use `with jax.set_mesh(mesh):` instead.
+  with mesh:
+/home/linchai_google_com/tunix/examples/frozenlake/grad_diff_debug.py:851: DeprecationWarning: `with mesh:` context manager has been deprecated. Please use `with jax.set_mesh(mesh):` instead.
+  with mesh:
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:254: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  x, "dtype", getattr(getattr(x, "value", None), "dtype", None)
+/home/linchai_google_com/tunix/tunix/experimental/train/peft_trainer_v2.py:919: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  return self.optimizer.opt_state.hyperparams["learning_rate"].value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:498: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  y = self.per_layer_input_embedding.value[t]
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:1490: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  ffw = ffw * self.skip_scale.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:1490: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  ffw = ffw * self.skip_scale.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:1490: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  ffw = ffw * self.skip_scale.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:1490: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  ffw = ffw * self.skip_scale.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:1490: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  ffw = ffw * self.skip_scale.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:1490: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  ffw = ffw * self.skip_scale.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:1490: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  ffw = ffw * self.skip_scale.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:1490: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  ffw = ffw * self.skip_scale.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:1490: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  ffw = ffw * self.skip_scale.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:1490: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  ffw = ffw * self.skip_scale.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:1490: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  ffw = ffw * self.skip_scale.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:613: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = self.w.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:1490: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  ffw = ffw * self.skip_scale.value
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:695: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  scale = jnp.expand_dims(self.scale.value, axis=range(len(x.shape) - 1))
+/home/linchai_google_com/tunix/tunix/models/gemma4/model.py:512: DeprecationWarning: '.value' access is now deprecated. For Variable[Array] instances use:
+
+  variable[...]
+
+For other Variable types use:
+
+  variable.get_value()
+
+  w = jnp.astype(self.input_embedding.value, self.config.dtype)
 INIT weight checksum: 10256206509410191469
-[mode] weights: accum_steps=8 max_steps=1 batches=8 -> expect 1 update(s), final denom=0
-[phase] v1: denom=0  micro-steps=8  updates=1
-[grads] v1: leaves=197 nonzero=0 finite=197 max|g|=0 norm=0.000000
-[reset] v1: leaves=197 nonzero=0 nonfinite=0
+[mode] grads: accum_steps=8 max_steps=1 batches=7 -> expect 0 update(s), final denom=7
+[phase] v1: denom=14280  micro-steps=7  updates=0
+[grads] v1: leaves=197 nonzero=123 finite=197 max|g|=99252.5 norm=10646195.227527
 [compile] v1: _jitted_train_step_fn=2
 live device arrays after v1 teardown: 0.00 GiB (global, unsharded-equivalent)
 v2 start weight checksum: 10256206509410191469 OK
-[phase] v2: denom=0  micro-steps=8  updates=1
-[grads] v2: leaves=197 nonzero=0 finite=197 max|g|=0 norm=0.000000
-[reset] v2: leaves=197 nonzero=0 nonfinite=0
-[compile] v2: _jitted_fwd_bwd_step_fn=2  _jitted_update_step_fn=1
-[cmp] grads: SKIPPED -- both accumulators were reset by the final update(), so there are no gradients left to compare. Read them between the last fwd_bwd and update(), i.e. run _MODE='grads'.
-[move] weights changed?  v1=True  v2=True
-[cmp] weights after training: XOR v1=1158273407557975109 v2=1161711640547618549 DIFFER
-[cmp] weights after training: within max|dw|/max|w| = 1e-06  (worst leaf ['layers'][0]['per_layer_input_gate']['w'].value: 4.03e-08, 0/197 leaves over)
-[diag] ['layers'][0]['per_layer_input_gate']['w'].value: shape=(1536, 256) dtype=float32
-        max ULP=12 violating=207/393216  sorted-identical=False
-        tensor scale max|g|=0.0461793
-        max |x-y|=1.86265e-09  (= 4.034e-08 of scale)  at |x|=0.0188546
-        largest |x| among differing entries=0.0219804  (= 4.760e-01 of scale)
-[diag] ['layers'][0]['attn']['kv_einsum']['w'].value: shape=(2, 1, 1536, 256) dtype=float32
-        max ULP=512 violating=1226/786432  sorted-identical=False
-        tensor scale max|g|=0.0481126
-        max |x-y|=1.86265e-09  (= 3.871e-08 of scale)  at |x|=0.0197257
-        largest |x| among differing entries=0.031002  (= 6.444e-01 of scale)
-[diag] ['layers'][1]['attn']['q_einsum']['w'].value: shape=(8, 1536, 256) dtype=float32
-        max ULP=192 violating=617/3145728  sorted-identical=False
-        tensor scale max|g|=0.0494165
-        max |x-y|=1.86265e-09  (= 3.769e-08 of scale)  at |x|=0.0163163
-        largest |x| among differing entries=0.0176564  (= 3.573e-01 of scale)
-[attr] NOT APPLICABLE: both accumulators were reset by the update, so the gradients that produced these weights are gone. Attribution needs the "grads" mode, where the update never fires and the accumulator still holds them.
+[phase] v2: denom=7  micro-steps=7  updates=0
+[grads] v2: leaves=197 nonzero=123 finite=197 max|g|=48.7058 norm=5218.828425
+[compile] v2: _jitted_fwd_bwd_step_fn=2  _jitted_update_step_fn=0
+[cmp] grads: SKIPPED -- different accumulation phase (v1 denom=14280, v2 denom=7). The two accumulators hold different micro-batches, so an elementwise comparison is meaningless. Make both runs stop at the same point before comparing.
+[move] weights changed?  v1=False  v2=False   <-- NOTHING MOVED: the update is below one ULP, so any comparison below is vacuous
+Traceback (most recent call last):
+  File "/home/linchai_google_com/tunix/examples/frozenlake/grad_diff_debug.py", line 931, in <module>
+    assert _final_ck_v1 != _init_ck or _final_ck_v2 != _init_ck, (
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: neither trainer moved its weights; the comparison below would pass trivially. Raise _LEARNING_RATE or switch to fp32.
 sys:1: DeprecationWarning: builtin type swigvarlink has no __module__ attribute
