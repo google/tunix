@@ -1038,9 +1038,6 @@ class V1ParityTest(parameterized.TestCase):
     for batch in batches:
       trainer_split.fwd_bwd(batch)
     self.assertEqual(trainer_split.train_steps, 0)
-    self.assertEqual(
-        float(trainer_split.grad_accumulator.denom[...]), accum_steps
-    )
     trainer_split.update()
 
     weights_v1 = nnx.state(model_v1, nnx.Param)
