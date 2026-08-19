@@ -638,15 +638,24 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     (loss_val, aux), grads = grad_fn(model, **inputs)
 
     if isinstance(aux, utils.LossOutput):
-      # Scale the unreduced gradients using the metric's scale computation
-      scale = aux.primary_loss.compute_scale()
-      grads = jax.tree.map(lambda g: g * scale, grads)
-
       # Compute exactly equivalent legacy loss val
       loss_val = aux.primary_loss.compute()
 
-    # TODO(b/491970038): update denom for sequence packing.
-    grad_accumulator.add(grads, denom=jnp.asarray(1.0, dtype=jnp.float32))
+      # Accumulate the UNREDUCED gradients (d/dparam of the sum) weighted by the
+      # loss's real denominator, so the optimizer step sees the GLOBAL weighted
+      # mean (sum of grads / sum of denoms) across micro-batches rather than a
+      # mean-of-means. This matches v1 and the contract documented on
+      # `GradientAccumulator`.
+      #
+      # The two agree exactly when every micro-batch carries the same number of
+      # valid items, which is why this went unnoticed: fixed-length batches make
+      # `sum(Sᵢ)/sum(nᵢ)` and `mean(Sᵢ/nᵢ)` algebraically identical. They diverge
+      # as soon as the sizes differ -- sequence packing, or ragged batches with
+      # unequal padding -- because a mean-of-means gives every micro-batch the
+      # same weight regardless of how many tokens it contributed.
+      grad_accumulator.add(grads, denom=aux.primary_loss.denominator)
+    else:
+      grad_accumulator.add(grads, denom=jnp.asarray(1.0, dtype=jnp.float32))
 
     if isinstance(aux, utils.LossOutput):
       return loss_val, aux.aux_metrics
