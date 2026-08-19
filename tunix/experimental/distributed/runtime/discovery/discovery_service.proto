@@ -35,8 +35,53 @@ message RegisterRequest {
 // Response returned by the discovery service after successful registration.
 message RegisterResponse {}
 
+// Request message sent by client nodes when establishing a persistent
+// connection session.
+message ConnectRequest {
+  // Unique client identifier (e.g. 'hostname:port' or UUID).
+  string client_id = 1;
+  // Hostname or reachable FQDN of the registering worker node.
+  string hostname = 2;
+  // Network port on which the registering node is listening.
+  uint32 port = 3;
+  // Custom serialized metadata bytes describing this node.
+  bytes metadata = 4;
+  // Optional requested heartbeat interval hint in seconds.
+  uint32 requested_heartbeat_sec = 5;
+}
+
+// Response returned by the discovery service after successful connection.
+message ConnectResponse {
+  // Unique server boot instance ID.
+  string server_epoch = 1;
+  // Authoritative heartbeat interval dictated by the server.
+  uint32 heartbeat_sec = 2;
+}
+
+// Action returned by discovery service in response to a client heartbeat.
+enum HeartbeatAction {
+  HEARTBEAT_ACTION_UNSPECIFIED = 0;
+  HEARTBEAT_ACTION_OK = 1;
+  HEARTBEAT_ACTION_RE_REGISTER = 2;
+}
+
+message HeartbeatRequest {
+  string client_id = 1;
+  string server_epoch = 2;
+}
+
+message HeartbeatResponse {
+  HeartbeatAction action = 1;
+  string server_epoch = 2;
+  uint32 heartbeat_sec = 3;
+}
+
 // Discovery service used by distributed workers to register their coordinates.
 service DiscoveryService {
-  // Registers a worker node with the discovery service.
+  // Registers a worker node with the discovery service (one-shot).
   rpc Register(RegisterRequest) returns (RegisterResponse);
+  // Establishes a persistent connection session with heartbeats.
+  rpc Connect(ConnectRequest) returns (ConnectResponse);
+  // Sends periodic heartbeats from worker node to discovery service.
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
 }
