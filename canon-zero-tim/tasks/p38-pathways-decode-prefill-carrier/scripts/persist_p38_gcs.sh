@@ -23,6 +23,14 @@ fi
 
 : "${CANON_STATE:?CANON_STATE unset}"
 : "${CANON_P38_GCS_PREFIX:?CANON_P38_GCS_PREFIX unset}"
+: "${CANON_P38_DURABILITY_PROFILE:?CANON_P38_DURABILITY_PROFILE unset}"
+case "$CANON_P38_DURABILITY_PROFILE" in
+  full-v1|round-alignment-v1) ;;
+  *)
+    echo "[P38.GCS] REFUSING: invalid durability profile: $CANON_P38_DURABILITY_PROFILE" >&2
+    exit 2
+    ;;
+esac
 
 bucket_root="gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/"
 case "$CANON_P38_GCS_PREFIX" in
@@ -331,25 +339,36 @@ if [ "$mode" = round ]; then
     exit 1
   fi
   observer_dir="${CANON_P38_SEAM_OBSERVER_DIR:-${CANON_P38_KV_OBSERVER_DIR:-${CANON_P38_SERVING_CAPTURE_DIR:-}}}"
-  if [ -z "$observer_dir" ]; then
+  if [ "$CANON_P38_DURABILITY_PROFILE" = full-v1 ] && \
+     [ -z "$observer_dir" ]; then
     echo "[P38.GCS] REFUSING: round sealing requires an observer directory" >&2
     exit 1
   fi
+  stage_profile=full
   round_args=()
-  if [ -n "${CANON_P38_SEAM_OBSERVER:-}" ]; then
-    round_args+=(--require-seam)
-  fi
-  if [ -n "${CANON_P38_KV_OBSERVER_DIR:-}" ]; then
-    round_args+=(--require-kv)
-  fi
-  if [ "${CANON_P38_TAIL_OBSERVER:-0}" = "1" ]; then
-    round_args+=(--require-tail)
-  fi
-  if [ "${CANON_P38_TERMINAL_DISCRIMINATOR:-0}" = "1" ]; then
-    round_args+=(--require-terminal)
+  if [ "$CANON_P38_DURABILITY_PROFILE" = round-alignment-v1 ]; then
+    [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "1" ] || {
+      echo "[P38.GCS] REFUSING: round-alignment-v1 requires fixed lm-head" >&2
+      exit 2
+    }
+    stage_profile=alignment-only
+  else
+    if [ -n "${CANON_P38_SEAM_OBSERVER:-}" ]; then
+      round_args+=(--require-seam)
+    fi
+    if [ -n "${CANON_P38_KV_OBSERVER_DIR:-}" ]; then
+      round_args+=(--require-kv)
+    fi
+    if [ "${CANON_P38_TAIL_OBSERVER:-0}" = "1" ]; then
+      round_args+=(--require-tail)
+    fi
+    if [ "${CANON_P38_TERMINAL_DISCRIMINATOR:-0}" = "1" ]; then
+      round_args+=(--require-terminal)
+    fi
   fi
   python3 "$CANON_PKG/tasks/p38-pathways-decode-prefill-carrier/scripts/stage_p38_round.py" \
     --round "$round_index" \
+    --profile "$stage_profile" \
     --output "$round_stage" \
     --run-log "${CANON_RUN_LOG:?}" \
     --pre-alignment "${CANON_PRE_ALIGN_REPORT:?}" \
@@ -390,7 +409,8 @@ if [ "$mode" = round ]; then
   cmp -- "$round_stage/SHA256SUMS" "$verify_dir/SHA256SUMS"
   manifest_sha="$(sha256sum "$round_stage/SHA256SUMS" | awk '{print $1}')"
   python3 - "$round_stage/ROUND_COMPLETE.json.partial" "$round_index" \
-    "$manifest_sha" "$round_archive_sha" "${#round_files[@]}" <<'PY'
+    "$manifest_sha" "$round_archive_sha" "${#round_files[@]}" \
+    "$CANON_P38_DURABILITY_PROFILE" <<'PY'
 import json
 import os
 import pathlib
@@ -402,6 +422,7 @@ record = {
     "archive_sha256": sys.argv[4],
     "attempt": os.environ.get("JOBSET_RESTART_ATTEMPT", "unknown"),
     "diagnostic_round": int(sys.argv[2]),
+    "durability_profile": sys.argv[6],
     "logical_file_count": int(sys.argv[5]),
     "manifest_sha256": sys.argv[3],
     "schema": "canon-p38-round-completion-v1",
@@ -435,14 +456,20 @@ if [ "$mode" = collect ]; then
 
   copy_required "${CANON_RUN_LOG:?}" run.log
   copy_required "${CANON_PRE_ALIGN_REPORT:?}" pre-alignment.jsonl
-  copy_required "${CANON_P38_MISMATCH_CAPSULE:?}" mismatch-capsule.npz
+  if [ "$CANON_P38_DURABILITY_PROFILE" = full-v1 ]; then
+    copy_required "${CANON_P38_MISMATCH_CAPSULE:?}" mismatch-capsule.npz
+  elif [ -s "${CANON_P38_MISMATCH_CAPSULE:?}" ]; then
+    copy_required "$CANON_P38_MISMATCH_CAPSULE" mismatch-capsule.npz
+  fi
   copy_required "${CANON_P38_SERVING_CAPTURE_CLASSIFICATION:?}" serving-classification.json
   copy_required "${CANON_P38_SERVING_CAPTURE_ARCHIVE:?}" serving-capture.tar
 
   collected_files=(
-    run.log pre-alignment.jsonl mismatch-capsule.npz
-    serving-classification.json serving-capture.tar
+    run.log pre-alignment.jsonl serving-classification.json serving-capture.tar
   )
+  if [ -s "$stage/mismatch-capsule.npz" ]; then
+    collected_files+=(mismatch-capsule.npz)
+  fi
   if [ -n "${CANON_P38_KV_OBSERVER_CLASSIFICATION:-}" ]; then
     copy_required "$CANON_P38_KV_OBSERVER_CLASSIFICATION" \
       kv-observer-classification.json

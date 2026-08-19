@@ -16,7 +16,16 @@ set -euo pipefail
 : "${CANON_P38_LIVE_COMPLETE_ACK_FILE:?CANON_P38_LIVE_COMPLETE_ACK_FILE unset}"
 : "${CANON_P38_ROUND_SEAL_REQUEST_DIR:?CANON_P38_ROUND_SEAL_REQUEST_DIR unset}"
 : "${CANON_P38_ROUND_SEAL_ACK_DIR:?CANON_P38_ROUND_SEAL_ACK_DIR unset}"
+: "${CANON_P38_DURABILITY_PROFILE:?CANON_P38_DURABILITY_PROFILE unset}"
 : "${CANON_PKG:?CANON_PKG unset}"
+
+case "$CANON_P38_DURABILITY_PROFILE" in
+  full-v1|round-alignment-v1) ;;
+  *)
+    echo "[P38.GCS] REFUSING: invalid durability profile: $CANON_P38_DURABILITY_PROFILE" >&2
+    exit 2
+    ;;
+esac
 
 case "$CANON_P38_LIVE_SNAPSHOT_INTERVAL_SECONDS" in
   ''|*[!0-9]*)
@@ -79,6 +88,13 @@ snapshot_if_changed() {
   local run_size=0 journal_size=0 incident_size=0 report_size=0 capsule_signature=""
   local signature sequence_text rc capsule_path observer_path observer_dir
   local observer_signature="" observer_changed=0 round_value=missing
+  # The fixed-lm-head causal arm seals a compact, independently verified
+  # alignment bundle at every round.  Periodic snapshots use the same worker
+  # and cannot be preempted once a GCS transfer starts, so running them here
+  # can starve a later round request past the learner's 900-second deadline.
+  if [ "$CANON_P38_DURABILITY_PROFILE" = round-alignment-v1 ]; then
+    return 0
+  fi
   [ ! -e "$CANON_RUN_LOG" ] || run_size="$(wc -c < "$CANON_RUN_LOG" | tr -d '[:space:]')"
   [ ! -e "$CANON_P38_REQUEST_JOURNAL" ] || journal_size="$(wc -c < "$CANON_P38_REQUEST_JOURNAL" | tr -d '[:space:]')"
   [ ! -e "$CANON_P38_INCIDENT_LEDGER" ] || incident_size="$(wc -c < "$CANON_P38_INCIDENT_LEDGER" | tr -d '[:space:]')"
@@ -208,7 +224,7 @@ PY
   done
 }
 
-echo "[P38.GCS] LIVE_WORKER_START interval=$CANON_P38_LIVE_SNAPSHOT_INTERVAL_SECONDS"
+echo "[P38.GCS] LIVE_WORKER_START interval=$CANON_P38_LIVE_SNAPSHOT_INTERVAL_SECONDS profile=$CANON_P38_DURABILITY_PROFILE"
 while [ ! -e "$CANON_P38_LIVE_SNAPSHOT_STOP_FILE" ]; do
   # Round durability is on the learner's critical path.  Never put a periodic
   # live snapshot ahead of an already-published seal or terminal request.
@@ -221,8 +237,13 @@ done
 handle_round_requests
 handle_terminal_requests
 snapshot_if_changed
-if [ "$sequence" -eq 0 ]; then
-  echo "[P38.GCS] FATAL: live worker observed no host evidence" >&2
+if [ "$CANON_P38_DURABILITY_PROFILE" = full-v1 ]; then
+  if [ "$sequence" -eq 0 ]; then
+    echo "[P38.GCS] FATAL: live worker observed no host evidence" >&2
+    exit 1
+  fi
+elif [ "$next_round_to_seal" -eq 0 ]; then
+  echo "[P38.GCS] FATAL: round-alignment worker sealed no rounds" >&2
   exit 1
 fi
-echo "[P38.GCS] LIVE_WORKER_COMPLETE snapshots=$sequence"
+echo "[P38.GCS] LIVE_WORKER_COMPLETE snapshots=$sequence rounds=$next_round_to_seal profile=$CANON_P38_DURABILITY_PROFILE"

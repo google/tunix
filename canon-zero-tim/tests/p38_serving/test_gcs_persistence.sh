@@ -19,7 +19,8 @@ install_fake_gcloud() {
 make_case() {
   local root="$1" job="$2"
   unset CANON_P38_KV_OBSERVER_DIR CANON_P38_KV_OBSERVER_CLASSIFICATION \
-    CANON_P38_SEAM_OBSERVER_DIR CANON_P38_TAIL_OBSERVER || true
+    CANON_P38_SEAM_OBSERVER_DIR CANON_P38_TAIL_OBSERVER \
+    CANON_P38_FIXED_LM_HEAD || true
   mkdir -p "$root/state/capture"
   printf 'run\n' > "$root/state/run.log"
   printf '{}\n' > "$root/state/pre.jsonl"
@@ -44,6 +45,7 @@ make_case() {
   export CANON_P38_SERVING_CAPTURE_CLASSIFICATION="$root/state/classification.json"
   export CANON_P38_SERVING_CAPTURE_ARCHIVE="$root/state/capture.tar"
   export CANON_P38_GCS_PREFIX="gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/$job/attempt-0"
+  export CANON_P38_DURABILITY_PROFILE=full-v1
   export CANON_EXPECT_COMMIT="$(printf 'a%.0s' {1..40})"
   export CANON_POD_NAME="$job-head"
   export JOBSET_RESTART_ATTEMPT=0
@@ -311,6 +313,7 @@ for round_index in (0, 1):
       "p38-request-journal-v1"
   }, journal
   assert inventory["journal_scope"] == "cumulative-unscoped", inventory
+  assert inventory["profile"] == "full", inventory
   completion = json.loads(
       (remote / f"{round_index:06d}" / "ROUND_COMPLETE.json").read_text()
   )
@@ -320,6 +323,83 @@ for round_index in (0, 1):
   assert completion["transport"] == "single-deterministic-tar-v1", completion
 PY
 test ! -e "$FAKE_GCS_ROOT/yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-p38-test-rounds/attempt-0/COLLECTED.json"
+
+# The fixed-lm-head discriminator has no use for the old KV/seam evidence.
+# Its durability profile must seal one bounded alignment archive without
+# starting a periodic live snapshot that could starve the round request.
+install_fake_gcloud "$tmp/alignment-round"
+make_case "$tmp/alignment-round" canon-p38-test-alignment-round
+bash "$PERSIST" probe > "$tmp/alignment-round/probe.log"
+export CANON_P38_DURABILITY_PROFILE=round-alignment-v1
+export CANON_P38_FIXED_LM_HEAD=1
+: > "$CANON_PRE_ALIGN_REPORT"
+printf '{"diagnostic_round":0,"step":0}\n' > "$CANON_PRE_ALIGN_REPORT"
+# Exact P38s23r3 rounds intentionally produce no mismatch capsule.  The
+# durability path must still seal and acknowledge the alignment record.
+rm "$CANON_P38_MISMATCH_CAPSULE"
+# These full-forensics inputs are deliberately absent.  The alignment-only
+# round must neither read nor silently recreate them.
+rm "$CANON_P38_REQUEST_JOURNAL" "$CANON_P38_INCIDENT_LEDGER"
+export CANON_P38_LIVE_SNAPSHOT_INTERVAL_SECONDS=1
+export CANON_P38_LIVE_SNAPSHOT_STOP_FILE="$tmp/alignment-round/state/live.stop"
+export CANON_P38_LIVE_COLLECT_REQUEST_FILE="$tmp/alignment-round/state/collect.request"
+export CANON_P38_LIVE_COLLECT_ACK_FILE="$tmp/alignment-round/state/collect.ack"
+export CANON_P38_LIVE_COMPLETE_REQUEST_FILE="$tmp/alignment-round/state/complete.request"
+export CANON_P38_LIVE_COMPLETE_ACK_FILE="$tmp/alignment-round/state/complete.ack"
+make_round_request 0
+alignment_worker_log="$tmp/alignment-round/state/live-worker.log"
+bash "$ROOT/tasks/p38-pathways-decode-prefill-carrier/scripts/p38_live_snapshot_worker.sh" \
+  > "$alignment_worker_log" 2>&1 &
+alignment_worker_pid=$!
+alignment_ack="$CANON_P38_ROUND_SEAL_ACK_DIR/round-000000.ack"
+for unused in 1 2 3 4 5 6 7 8 9 10; do
+  [ ! -s "$alignment_ack" ] || break
+  sleep 1
+done
+grep -q '"status": "PASS"' "$alignment_ack"
+touch "$CANON_P38_LIVE_SNAPSHOT_STOP_FILE"
+wait "$alignment_worker_pid"
+grep -q 'LIVE_WORKER_START .*profile=round-alignment-v1' \
+  "$alignment_worker_log"
+grep -q 'LIVE_WORKER_COMPLETE snapshots=0 rounds=1 profile=round-alignment-v1' \
+  "$alignment_worker_log"
+alignment_remote="$FAKE_GCS_ROOT/yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-p38-test-alignment-round/attempt-0"
+test ! -e "$alignment_remote/live"
+test "$(find "$alignment_remote/rounds/000000" -maxdepth 1 -type f | wc -l)" -eq 3
+python3 "$ARCHIVE_TOOL" extract \
+  --archive "$alignment_remote/rounds/000000/ROUND_ARCHIVE.tar" \
+  --output "$tmp/alignment-round/extracted" \
+  > "$tmp/alignment-round/extract.log"
+(cd "$tmp/alignment-round/extracted" && sha256sum -c SHA256SUMS --quiet)
+for name in pre-alignment.jsonl run.log ROUND_INVENTORY.json; do
+  test -s "$tmp/alignment-round/extracted/$name"
+done
+for name in mismatch-capsule.npz request-journal.jsonl incident-ledger.jsonl; do
+  test ! -e "$tmp/alignment-round/extracted/$name"
+done
+python3 - "$tmp/alignment-round/extracted/ROUND_INVENTORY.json" \
+  "$alignment_remote/rounds/000000/ROUND_COMPLETE.json" <<'PY'
+import json
+import pathlib
+import sys
+
+inventory = json.loads(pathlib.Path(sys.argv[1]).read_text())
+completion = json.loads(pathlib.Path(sys.argv[2]).read_text())
+assert inventory["profile"] == "alignment-only", inventory
+assert inventory["journal_scope"] == "omitted-by-alignment-only-profile", inventory
+assert inventory["journal_records"] == 0, inventory
+assert inventory["incident_records"] == 0, inventory
+assert inventory["kv_records"] == 0, inventory
+assert inventory["capsule_present"] is False, inventory
+assert completion["durability_profile"] == "round-alignment-v1", completion
+assert completion["logical_file_count"] == 3, completion
+PY
+bash "$PERSIST" collect > "$tmp/alignment-round/collect.log"
+bash "$PERSIST" complete > "$tmp/alignment-round/complete.log"
+test -s "$alignment_remote/COLLECTED.json"
+test -s "$alignment_remote/COMPLETE.json"
+test ! -e "$alignment_remote/mismatch-capsule.npz"
+(cd "$alignment_remote" && sha256sum -c SHA256SUMS --quiet)
 
 install_fake_gcloud "$tmp/out-of-order"
 make_case "$tmp/out-of-order" canon-p38-test-out-of-order
@@ -348,4 +428,4 @@ grep -q 'completion requested before collection acknowledgement' \
 test ! -e "$CANON_P38_LIVE_COMPLETE_ACK_FILE"
 test ! -e "$FAKE_GCS_ROOT/yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-p38-test-out-of-order/attempt-0/COMPLETE.json"
 
-echo "[P38.GCS] PERSISTENCE_TEST_PASS probe=verified prefix_reuse=rejected live=immutable bounded_objects=3 round_request=priority worker=durable round_bundles=survive_abrupt_exit collected=verified complete=last out_of_order=rejected missing=rejected upload_failure=rejected"
+echo "[P38.GCS] PERSISTENCE_TEST_PASS probe=verified prefix_reuse=rejected live=immutable bounded_objects=3 round_request=priority alignment_round=periodic_snapshot_disabled minimal_payload=verified worker=durable round_bundles=survive_abrupt_exit collected=verified complete=last out_of_order=rejected missing=rejected upload_failure=rejected"

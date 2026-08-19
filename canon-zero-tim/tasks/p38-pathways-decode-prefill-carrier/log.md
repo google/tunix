@@ -2021,3 +2021,30 @@ reclassification from the committed NPZ inputs.
   `p51_gsm8k_xprof_p53fixed_20260818` container owns `/dev/vfio/0`. This is an
   infrastructure-busy result, not evidence about the M4096 construction. Do
   not launch P38s23r2 until the real-v5p gate is rerun and sealed.
+
+## 2026-08-19 UTC — P38s23r2 exact first round; P38s23r3 durability repair prepared
+
+- P38s23r2/source `6814774eef70aa0c67610eab9f355d964d420378`
+  emitted every registered fixed-lm-head receipt and measured 49,177 action
+  tokens with exact A-B, exact B-C, and `max_abs=0.0` in round 0.
+- It then timed out after 900 seconds waiting for the round-seal ACK. The
+  shared synchronous worker was already inside a periodic full-forensics
+  snapshot; checking requests first in the next loop cannot preempt an
+  in-flight transfer. No later round, controlled exit, backward, or optimizer
+  result is admitted.
+- Review found two additional exact-success-path defects before relaunch: an
+  exact round intentionally creates no mismatch capsule, but round/root
+  persistence required one; stock postflight also required a mismatch join
+  even for the fixed-lm-head exact arm.
+- Prepared P38s23r3 locally. `round-alignment-v1` is exclusive to fixed lm-head,
+  disables periodic snapshots and unrelated observers, makes a red-only
+  capsule optional, and keeps round ACKs plus terminal root markers mandatory.
+  Added checked-in launch and compact-return scripts plus a background-free
+  runbook.
+- Local fake-GCS persistence and operator-return tests pass, including an
+  exact round with no capsule, root collect/complete, three immutable round
+  objects, complete return verification, both scientific outcomes, and
+  truncated-head rejection. Pinned-image renderer (18), fixed-lm-head (8),
+  serving-classifier (36), and complete P33 adjacent CPU gates pass. No TPU
+  launch, GCS mutation, commit, or push occurred. Next: review before
+  requesting publication approval.

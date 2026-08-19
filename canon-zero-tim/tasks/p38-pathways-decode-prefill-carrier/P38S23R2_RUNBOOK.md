@@ -1,5 +1,10 @@
 # P38s23r2 fixed-tile lm-head target runbook
 
+> **HISTORICAL — DO NOT RELAUNCH.** P38s23r2 produced one exact forward round
+> and then timed out in the old full-forensics durability path. The current
+> operator card is `P38S23R3_RUNBOOK.md`; it uses a round-priority minimal
+> durability profile and checked-in launch/return scripts.
+
 This is the only current operator card for P38.2x2. It launches one 64-TPU
 FrozenLake diagnostic (`DP16xTP4`, concurrency 256, three frozen rounds) with
 `CANON_P38_FIXED_LM_HEAD=1` as the only numerical change from the known-red

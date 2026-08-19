@@ -94,75 +94,108 @@ def _copy_record_pairs(
 
 def stage(args: argparse.Namespace) -> dict:
   _require(0 <= args.round < 8, "diagnostic round must be in [0, 8)")
+  _require(
+      args.profile in ("full", "alignment-only"),
+      f"unsupported round stage profile: {args.profile}",
+  )
   _require(not args.output.exists(), f"round stage already exists: {args.output}")
   args.output.mkdir(parents=True, mode=0o700)
 
   capsule = Path(f"{args.capsule.with_suffix('')}.round-{args.round:06d}.npz")
-  _copy(capsule, args.output / "mismatch-capsule.npz")
+  capsule_present = capsule.is_file() and capsule.stat().st_size > 0
+  if args.profile == "full":
+    _copy(capsule, args.output / "mismatch-capsule.npz")
+    capsule_present = True
+  elif capsule_present:
+    # Exact rounds intentionally have no mismatch capsule.  A red round may
+    # still carry one, but the alignment record is the authoritative result
+    # for this forward-only discriminator.
+    _copy(capsule, args.output / "mismatch-capsule.npz")
   _copy(args.run_log, args.output / "run.log")
   pre_alignment_records = _filter_jsonl(
       args.pre_alignment, args.output / "pre-alignment.jsonl", args.round
   )
-  journal_records = _filter_jsonl(
-      args.request_journal,
-      args.output / "request-journal.jsonl",
-      args.round,
-      expected_schema="p38-request-journal-v1",
-      cumulative_unscoped=True,
-  )
-  incident_records = _filter_jsonl(
-      args.incident_ledger,
-      args.output / "incident-ledger.jsonl",
-      args.round,
-      expected_schema="p38-incident-ledger-v1",
-  )
-  seam_records = _copy_record_pairs(
-      args.observer_dir,
-      args.output,
-      "p38_seam",
-      args.round,
-      "p38-seam-fingerprint-v1",
-  )
-  if args.require_seam:
-    _require(seam_records > 0, f"round {args.round} has no seam records")
-  kv_records = _copy_record_pairs(
-      args.observer_dir,
-      args.output,
-      "p38_kv_observer",
-      args.round,
-      "p38-live-kv-prefix-table-v1",
-  )
-  if args.require_kv:
-    _require(kv_records > 0, f"round {args.round} has no KV observer records")
-  tail_records = _copy_record_pairs(
-      args.observer_dir,
-      args.output,
-      "p38_tail",
-      args.round,
-      "p38-tail-values-v1",
-  )
-  if args.require_tail:
-    _require(tail_records > 0, f"round {args.round} has no tail records")
-  terminal_records = _copy_record_pairs(
-      args.observer_dir,
-      args.output,
-      "p38_terminal",
-      args.round,
-      "p38-terminal-discriminator-v1",
-  )
-  if args.require_terminal:
+  journal_records = 0
+  incident_records = 0
+  seam_records = 0
+  kv_records = 0
+  tail_records = 0
+  terminal_records = 0
+  journal_scope = "omitted-by-alignment-only-profile"
+  if args.profile == "full":
+    journal_records = _filter_jsonl(
+        args.request_journal,
+        args.output / "request-journal.jsonl",
+        args.round,
+        expected_schema="p38-request-journal-v1",
+        cumulative_unscoped=True,
+    )
+    incident_records = _filter_jsonl(
+        args.incident_ledger,
+        args.output / "incident-ledger.jsonl",
+        args.round,
+        expected_schema="p38-incident-ledger-v1",
+    )
+    seam_records = _copy_record_pairs(
+        args.observer_dir,
+        args.output,
+        "p38_seam",
+        args.round,
+        "p38-seam-fingerprint-v1",
+    )
+    if args.require_seam:
+      _require(seam_records > 0, f"round {args.round} has no seam records")
+    kv_records = _copy_record_pairs(
+        args.observer_dir,
+        args.output,
+        "p38_kv_observer",
+        args.round,
+        "p38-live-kv-prefix-table-v1",
+    )
+    if args.require_kv:
+      _require(kv_records > 0, f"round {args.round} has no KV observer records")
+    tail_records = _copy_record_pairs(
+        args.observer_dir,
+        args.output,
+        "p38_tail",
+        args.round,
+        "p38-tail-values-v1",
+    )
+    if args.require_tail:
+      _require(tail_records > 0, f"round {args.round} has no tail records")
+    terminal_records = _copy_record_pairs(
+        args.observer_dir,
+        args.output,
+        "p38_terminal",
+        args.round,
+        "p38-terminal-discriminator-v1",
+    )
+    if args.require_terminal:
+      _require(
+          terminal_records > 0,
+          f"round {args.round} has no terminal discriminator records",
+      )
+    journal_scope = "cumulative-unscoped"
+  else:
     _require(
-        terminal_records > 0,
-        f"round {args.round} has no terminal discriminator records",
+        not any((
+            args.require_seam,
+            args.require_kv,
+            args.require_tail,
+            args.require_terminal,
+        )),
+        "alignment-only profile cannot require observer records",
     )
 
   record = {
+      "capsule_present": capsule_present,
       "diagnostic_round": args.round,
       "incident_records": incident_records,
-      "journal_scope": "cumulative-unscoped",
+      "journal_scope": journal_scope,
       "journal_records": journal_records,
       "kv_records": kv_records,
       "pre_alignment_records": pre_alignment_records,
+      "profile": args.profile,
       "schema": "canon-p38-round-stage-v1",
       "seam_records": seam_records,
       "tail_records": tail_records,
@@ -177,6 +210,9 @@ def stage(args: argparse.Namespace) -> dict:
 def main() -> int:
   parser = argparse.ArgumentParser()
   parser.add_argument("--round", required=True, type=int)
+  parser.add_argument(
+      "--profile", choices=("full", "alignment-only"), default="full"
+  )
   parser.add_argument("--output", required=True, type=Path)
   parser.add_argument("--run-log", required=True, type=Path)
   parser.add_argument("--pre-alignment", required=True, type=Path)

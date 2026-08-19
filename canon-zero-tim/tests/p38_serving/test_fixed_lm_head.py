@@ -21,6 +21,7 @@ PROBE = (
     / "canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts"
     / "probe_p38_fixed_lm_head.py"
 )
+RUN_STEP = ROOT / "canon-zero-tim/cluster/steps/90_run.sh"
 
 sys.path.insert(0, str(SHIM))
 import p38_fixed_lm_head as fixed  # noqa: E402
@@ -111,6 +112,13 @@ class FixedLmHeadContractTest(unittest.TestCase):
     self.assertIn("a_local.reshape((chunks, FIXED_M, HIDDEN))", text)
     self.assertIn("lax.map(run_fixed, a_chunks)", text)
     self.assertNotIn("original_lm_head", text)
+
+  def test_exact_target_does_not_require_a_mismatch_join(self):
+    text = RUN_STEP.read_text()
+    self.assertIn(
+        '[ "${CANON_P38_FIXED_LM_HEAD:-0}" != "1" ]', text
+    )
+    self.assertIn("p38_join_args+=(--require-mismatch-join)", text)
 
   def test_probe_verdict_and_negative(self):
     # Stub heavy JAX/shim imports so the host-only classifier is testable.

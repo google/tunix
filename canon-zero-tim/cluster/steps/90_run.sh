@@ -283,7 +283,8 @@ if [ "$rc" -ne 0 ] && [ -s "${CANON_P38_MISMATCH_CAPSULE:-}" ]; then
 fi
 if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
   p38_join_args=()
-  if [ "${CANON_KV_UNIFIED:-0}" = "0" ]; then
+  if [ "${CANON_KV_UNIFIED:-0}" = "0" ] && \
+     [ "${CANON_P38_FIXED_LM_HEAD:-0}" != "1" ]; then
     p38_join_args+=(--require-mismatch-join)
   fi
   JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \

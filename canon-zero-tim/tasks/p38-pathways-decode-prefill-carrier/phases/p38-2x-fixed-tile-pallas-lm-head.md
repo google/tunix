@@ -1,9 +1,11 @@
 # P38.2x — dedicated fixed-tile Pallas lm-head
 
-Status: active. P38s23 stopped during warmup at omitted M32. P38.2x1 repaired
-all request buckets; P38s23r1 passed warmup and rollout, then stopped before a
-numerical round at omitted learner-rescore M4096. P38.2x2 CPU/static and
-exact-image gates pass; real-v5p M4096 construction is pending.
+Status: active. P38.2x2 passed the one-host construction gate and P38s23r2
+measured one exact 64-TPU forward round (`A-B=0`, `B-C=0`, 49,177 actions).
+That run is analysis-grade only because the shared full-forensics snapshot
+worker starved the critical round seal beyond 900 seconds. P38s23r3 is the
+registered durability-only retry: identical numerical arm, three frozen
+rounds, and a round-priority minimal alignment evidence profile.
 
 ## Entering evidence
 
@@ -59,7 +61,7 @@ separate downstream contract and is not renamed or reused here.
    bucket to equal the corresponding M256 reference rows bitwise, require all
    production tile/path receipts, then run M4096 and require all 16 chunks to
    equal direct M256 reference calls. Require the one-bit negative to report 1.
-4. Only after 1-3 pass and a separate user launch approval: P38s23r2, one slim
+4. Only after 1-3 pass and a separate user launch approval: one slim
    three-round 64-TPU stock arm with this flag as the single numerical change.
 
 The first P38s23 never passed item 4: `capture_model()` invoked compute_logits
@@ -77,8 +79,41 @@ P38s23r1 subsequently reached the learner and exposed exact M4096. Falling
 back to stock there is forbidden because it would give B/M256 and C/M4096
 different lm-head programs and confound B-C. P38.2x2 instead uses `lax.map`
 over 16 M256 chunks. CPU/static and pinned-image gates pass. Its real-v5p gate
-has not run because `/dev/vfio/0` is occupied by an unrelated P51 workload;
-that infrastructure result is not evidence for or against the construction.
+then passed its real-v5p gate. P38s23r2 reached the numerical discriminator.
+
+## P38s23r2 result and P38s23r3 durability amendment
+
+P38s23r2/source `6814774eef70aa0c67610eab9f355d964d420378`
+emitted all seven fixed-lm-head receipts and measured one exact round:
+`N_action=49,177`, A-B differing bytes/elements `0/0`, B-C `0/0`, and
+`max_abs=0.0`. It then published `round-000000.request` and timed out after
+900 seconds without an ACK. No rounds 1/2, controlled exit, backward, or
+optimizer result is admitted.
+
+The timeout was not numerical. The only worker was already inside a periodic
+full-forensics snapshot and shell priority cannot preempt an in-flight GCS
+transfer. A second success-path defect was also present: exact rounds do not
+create mismatch capsules, while the old round staging and root collection
+required one. Finally, stock postflight required a mismatch join even though
+the fixed-lm-head success case is exact by definition.
+
+P38s23r3 fixes only this evidence/control plane:
+
+- `CANON_P38_DURABILITY_PROFILE=round-alignment-v1` is exclusive to the
+  fixed-lm-head arm;
+- periodic live snapshots and KV/seam/tail/terminal observers are absent;
+- the worker services only ordered round seals and terminal requests;
+- each round archive contains `run.log`, one scoped `pre-alignment.jsonl`, an
+  inventory, and a mismatch capsule only when the round is red;
+- exact fixed-lm-head postflight does not require a mismatch join or capsule;
+- three immutable round archives and root terminal markers remain mandatory.
+
+Local fake-GCS gates cover round priority, exact-round capsule absence,
+three-object archives, root collect/complete, manifest verification, both
+scientific outcomes, and a truncated-head negative. Pinned-image renderer
+(18), fixed-lm-head (8), serving-classifier (36), and complete P33 adjacent
+CPU gates pass. The target launch remains separate and requires explicit user
+approval after publication.
 
 ## Target decision table
 
@@ -92,7 +127,7 @@ that infrastructure result is not evidence for or against the construction.
 ## Claim ceiling and rollback
 
 One-host exactness is construction evidence only and cannot prove Pathways
-repair. P38s23r2 is forward-only and cannot admit backward, optimizer,
+repair. P38s23r3 is forward-only and cannot admit backward, optimizer,
 training, or production performance. The registered M8 bucket makes the
 worst-case lm-head row-work multiplier 32x; performance is measured but never
 traded against bitwise admission.

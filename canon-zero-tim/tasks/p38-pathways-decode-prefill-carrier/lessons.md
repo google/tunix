@@ -86,3 +86,13 @@ immutable completion marker, manifest, and archive together, verifying the
 archive structure, and deriving the compact receipt mechanically beside the
 source. Remote operators run that audited command; they do not transcribe
 hashes or scientific numbers.
+
+## 2026-08-19 — Source-order priority cannot preempt an in-flight upload
+
+A worker may check round-seal requests before periodic snapshots and still
+miss a 900-second deadline when the request arrives after one synchronous
+snapshot has begun. Critical evidence needs an execution lane that cannot
+start unrelated long work, not merely an earlier branch in the next loop.
+Success-path artifacts must also match semantics: an exact comparison has no
+mismatch capsule, so requiring one converts the desired result into a
+durability failure. Test the exact/no-capsule path explicitly.

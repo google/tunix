@@ -32,6 +32,8 @@ _CAPSULE_MAX_ROWS = 256
 _MIN_ACTION_KV = 1686
 _DIAGNOSTIC_ROUNDS = 3
 _LIVE_SNAPSHOT_INTERVAL_SECONDS = 30
+_DURABILITY_PROFILE_FULL = "full-v1"
+_DURABILITY_PROFILE_ALIGNMENT = "round-alignment-v1"
 _INCIDENT_MIN_PREFIX = 1400
 _INCIDENT_MAX_PREFIX = 3072
 _INCIDENT_MAX_BYTES = 128 * 1024 * 1024
@@ -109,6 +111,7 @@ def _capture_values(
       "CANON_P38_LIVE_SNAPSHOT_INTERVAL_SECONDS": str(
           _LIVE_SNAPSHOT_INTERVAL_SECONDS
       ),
+      "CANON_P38_DURABILITY_PROFILE": _DURABILITY_PROFILE_FULL,
       "CANON_P38_LIVE_SNAPSHOT_STOP_FILE": f"{state}/p38_live.stop",
       "CANON_P38_LIVE_SNAPSHOT_WORKER_LOG": f"{state}/p38_live_worker.log",
       "CANON_P38_LIVE_COLLECT_REQUEST_FILE": f"{state}/p38_collect.request",
@@ -166,7 +169,7 @@ def _capture_values(
       })
   elif terminal_tail:
     raise ValueError("P38 terminal tail requires seam observation")
-  elif not unified:
+  elif not unified and not fixed_lm_head:
     values.update({
         "CANON_P38_KV_OBSERVER_DIR": (
             f"{state}/p38_serving_capture"
@@ -209,6 +212,13 @@ def _capture_values(
     if lm_head_algo:
       raise ValueError("P38 fixed lm-head and algorithm arms are exclusive")
     values["CANON_P38_FIXED_LM_HEAD"] = "1"
+    # The fixed-lm-head discriminator needs only the round alignment receipt.
+    # Periodic live snapshots and the already-adjudicated KV observer can keep
+    # the single durability worker busy past the learner's 900-second seal
+    # deadline without adding evidence to this decision.
+    values["CANON_P38_DURABILITY_PROFILE"] = (
+        _DURABILITY_PROFILE_ALIGNMENT
+    )
   return values
 
 
@@ -251,6 +261,14 @@ def validate_capture_jobset(
     raise ValueError(
         "P38 fixed lm-head isolation requires the canonical Qwen3-8B profile"
     )
+  expected_durability_profile = (
+      _DURABILITY_PROFILE_ALIGNMENT
+      if fixed_lm_head else _DURABILITY_PROFILE_FULL
+  )
+  if env.get("CANON_P38_DURABILITY_PROFILE") != (
+      expected_durability_profile
+  ):
+    raise ValueError("P38 durability profile drifted")
   if not env.get("CANON_P38_MISMATCH_CAPSULE", "").endswith(".npz"):
     raise ValueError("P38 serving capture requires a mismatch capsule path")
   capture_dir = env["CANON_P38_SERVING_CAPTURE_DIR"].rstrip("/")
@@ -288,13 +306,23 @@ def validate_capture_jobset(
             "p38_terminal.classification.json")
     ):
       raise ValueError("P38 terminal-discriminator contract drifted")
-  elif not unified:
+  elif not unified and not fixed_lm_head:
     if env["CANON_P38_KV_OBSERVER_DIR"].rstrip("/") != capture_dir:
       raise ValueError("P38 KV observer must live in the capture directory")
     if not env["CANON_P38_KV_OBSERVER_CLASSIFICATION"].endswith(
         "p38_kv_observer.classification.json"
     ):
       raise ValueError("P38 KV observer classification path drifted")
+  elif fixed_lm_head and any(
+      name.startswith((
+          "CANON_P38_KV_OBSERVER",
+          "CANON_P38_SEAM",
+          "CANON_P38_TAIL",
+          "CANON_P38_TERMINAL",
+      ))
+      for name in env
+  ):
+    raise ValueError("P38 fixed lm-head arm must not attach diagnostic observers")
   if env["CANON_P38_LIVE_SNAPSHOT_STOP_FILE"] != (
       f"{env['CANON_STATE']}/p38_live.stop"
   ):
@@ -347,6 +375,10 @@ def validate_capture_jobset(
       "1" if fixed_lm_head else "0"
   ):
     raise ValueError("P38 fixed-lm-head label drifted")
+  if labels.get("canon.zero-tim/durability-profile") != (
+      expected_durability_profile
+  ):
+    raise ValueError("P38 durability-profile label drifted")
   if document["spec"]["failurePolicy"].get("maxRestarts") != 0:
     raise ValueError("P38 serving-capture JobSet must not restart")
   command = shlex.split(env.get("CANON_RUN_CMD", ""))
@@ -445,6 +477,10 @@ def render_jobset(
   )
   labels["canon.zero-tim/lm-head-algo"] = "1" if lm_head_algo else "0"
   labels["canon.zero-tim/fixed-lm-head"] = "1" if fixed_lm_head else "0"
+  labels["canon.zero-tim/durability-profile"] = (
+      _DURABILITY_PROFILE_ALIGNMENT
+      if fixed_lm_head else _DURABILITY_PROFILE_FULL
+  )
   p33.validate_jobset(document, effective_spec, source_commit, run_id)
   validate_capture_jobset(
       document, unified=unified, max_concurrency=max_concurrency,

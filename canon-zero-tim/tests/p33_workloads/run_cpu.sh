@@ -307,6 +307,7 @@ validate_p38_serving_preflight() (
   export CANON_P38_INCIDENT_MIN_PREFIX=1400
   export CANON_P38_INCIDENT_MAX_PREFIX=3072
   export CANON_P38_INCIDENT_MAX_BYTES=134217728
+  export CANON_P38_DURABILITY_PROFILE=full-v1
   export CANON_P38_LIVE_SNAPSHOT_INTERVAL_SECONDS=30
   export CANON_P38_LIVE_SNAPSHOT_STOP_FILE="$state/p38_live.stop"
   export CANON_P38_LIVE_SNAPSHOT_WORKER_LOG="$state/p38_live_worker.log"
@@ -340,6 +341,7 @@ validate_p38_serving_preflight() (
   grep -Fq "export CANON_P38_ROUND_SEAL_REQUEST_DIR=$state/p38_round_seal_requests" "$state/env.sh"
   grep -Fq "export CANON_P38_ROUND_SEAL_ACK_DIR=$state/p38_round_seal_acks" "$state/env.sh"
   grep -q 'export CANON_P38_MIN_ACTION_KV=1686' "$state/env.sh"
+  grep -q 'export CANON_P38_DURABILITY_PROFILE=full-v1' "$state/env.sh"
   grep -Fq "export CANON_P38_GCS_PREFIX=$CANON_P38_GCS_PREFIX" "$state/env.sh"
 
   valid_p38_gcs_prefix="$CANON_P38_GCS_PREFIX"
@@ -375,9 +377,29 @@ validate_p38_serving_preflight() (
   fi
   export CANON_P38_KV_OBSERVER_MAX_PAGES=16
 
+  unset CANON_P38_KV_OBSERVER_DIR \
+        CANON_P38_KV_OBSERVER_MAX_CANDIDATES \
+        CANON_P38_KV_OBSERVER_MAX_PAGES \
+        CANON_P38_KV_OBSERVER_MAX_BYTES \
+        CANON_P38_KV_OBSERVER_MAX_READ_BYTES \
+        CANON_P38_KV_OBSERVER_CLASSIFICATION
+  export CANON_P38_DURABILITY_PROFILE=round-alignment-v1
   export CANON_P38_FIXED_LM_HEAD=1
   bash "$ROOT/cluster/steps/00_env.sh" >/dev/null
   grep -q 'export CANON_P38_FIXED_LM_HEAD=1' "$state/env.sh"
+  grep -q 'export CANON_P38_DURABILITY_PROFILE=round-alignment-v1' "$state/env.sh"
+  export CANON_P38_KV_OBSERVER_DIR="$state/serving"
+  if bash "$ROOT/cluster/steps/00_env.sh" >/dev/null 2>&1; then
+    echo "[P38.SERVING] preflight accepted fixed lm-head with KV observer" >&2
+    exit 1
+  fi
+  unset CANON_P38_KV_OBSERVER_DIR
+  export CANON_P38_DURABILITY_PROFILE=full-v1
+  if bash "$ROOT/cluster/steps/00_env.sh" >/dev/null 2>&1; then
+    echo "[P38.SERVING] preflight accepted fixed lm-head with full durability" >&2
+    exit 1
+  fi
+  export CANON_P38_DURABILITY_PROFILE=round-alignment-v1
   export CANON_KV_UNIFIED=1
   if bash "$ROOT/cluster/steps/00_env.sh" >/dev/null 2>&1; then
     echo "[P38.SERVING] preflight accepted fixed lm-head on unified KV" >&2
@@ -396,13 +418,8 @@ validate_p38_serving_preflight() (
     exit 1
   fi
   unset CANON_P38_FIXED_LM_HEAD
+  export CANON_P38_DURABILITY_PROFILE=full-v1
 
-  unset CANON_P38_KV_OBSERVER_DIR \
-        CANON_P38_KV_OBSERVER_MAX_CANDIDATES \
-        CANON_P38_KV_OBSERVER_MAX_PAGES \
-        CANON_P38_KV_OBSERVER_MAX_BYTES \
-        CANON_P38_KV_OBSERVER_MAX_READ_BYTES \
-        CANON_P38_KV_OBSERVER_CLASSIFICATION
   export CANON_P38_SEAM_OBSERVER=layer
   export CANON_P38_SEAM_OBSERVER_DIR="$state/serving"
   export CANON_P38_SEAM_MIN_POSITION=1400

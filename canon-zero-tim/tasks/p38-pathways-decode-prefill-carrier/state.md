@@ -6,33 +6,26 @@
 - Definition of done: one source-pinned flag-on run reports exact
   `S_decode_vs_S_prefill`, exact `S_prefill_vs_T_old`, and exact
   `T_old_vs_T_current` before a strict full workload is admitted.
-- Active phase: P38.2x dedicated fixed-tile Pallas lm-head. P38s22/source
-  `ee0154b38ab81b2b4ee3eac35c65ed380aa744f6` completed three frozen 64-TPU
-  rounds with exact B-C and A-B red in every round: 66 elements / 111 bytes
-  across 143,464 actions. The `BF16_BF16_F32` algorithm preset is rejected as
-  a causal repair at analysis grade. The original run root still lacks a
-  complete run-level postflight. P38.2w1 produced a complete sealed rc=4 receipt: root
-  `SHA256SUMS`, `COLLECTED.json`, and `COMPLETE.json` were unavailable, while
-  all three round markers/manifests survived and name the preregistered capsule
-  SHAs. Because the v1 auditor was root-first, it did not verify the actual tar
-  bytes. P38.2w2's round-first audit now verifies 3/3 actual archives, 30/30
-  logical members, and all sealed capsule endpoints. It is a PASS only for the
-  three-round forward discriminator; root postflight and
-  terminal/backward/optimizer claims remain excluded. The generic algorithm
-  preset is rejected. P38.2x removes request-bucket lm-head program freedom
-  with a default-off M256/K4096/N38144 fixed-tile Pallas construction. The
-  first P38s23 attempt stopped before rollout because its contract omitted
-  warmup M32; no numerical boundary was measured. P38.2x1 admitted exactly
-  M8/16/32/64/128/256 and passed its local gates. P38s23r1 then passed all six
-  warmups and all rollout generation, but learner rescore invoked exact M4096
-  and failed the deliberately narrow contract before any A-B/B-C round.
-  P38.2x2 maps only M4096 to 16 invocations of the same M256 body. CPU/static
-  and exact-image gates pass; real-v5p M4096 validation is pending while P51
-  owns the host TPU. P38s23r2 is forbidden until that local gate is sealed.
-  See
+- Active phase: P38.2x dedicated fixed-tile Pallas lm-head. The generic
+  `BF16_BF16_F32` algorithm arm is rejected by P38s22. P38.2x maps exact
+  request buckets M8/16/32/64/128/256 to one fixed M256 body and exact learner
+  M4096 to 16 calls of that same M256/K4096/N38144 body. Its CPU, exact-image,
+  and real-v5p construction gates passed. P38s23r2/source
+  `6814774eef70aa0c67610eab9f355d964d420378` then emitted all seven receipts
+  and measured one exact 64-TPU round: 49,177 actions, A-B `0` bytes/elements,
+  B-C `0`, `max_abs=0.0`. It timed out waiting 900 seconds for durability ACK
+  because the shared worker was already inside a full periodic snapshot. It
+  is `INCONCLUSIVE_DURABILITY_SEAL_TIMEOUT`, not a three-round repair claim.
+  P38s23r3 keeps the numerical arm unchanged and introduces the exclusive
+  `round-alignment-v1` evidence profile: no periodic snapshots or unrelated
+  observers, round seals first, exact-round capsules optional, and no
+  mismatch-join requirement for the exact success path. Local fake-GCS,
+  operator-return, pinned-image renderer/classifier, and complete P33 adjacent
+  CPU gates pass. Publication remains user-gated; the 64-TPU launch requires a
+  separate approval after publication. See
   `phases/p38-2w2-p38s22-round-seal-salvage.md` and
   `phases/p38-2x-fixed-tile-pallas-lm-head.md` and
-  `P38S23R2_RUNBOOK.md`.
+  `P38S23R3_RUNBOOK.md`.
 - Task directory:
   `canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/`.
 - P38s20/source `bea31f36655b137d7ab47ba94095cadda5b586ba` execution
@@ -378,20 +371,16 @@
 
 ## Next action
 
-1. Review the P38.2t target-aware reducer/auditor/wrapper diff and local gates
-   in `P38S18R2_ALIAS_REDUCTION_RUNBOOK.md`. Stop before commit/push until the
-   user explicitly approves publication.
-2. After publication, execute the checked-in target-aware contract once beside
-   GCS. It writes a new immutable v3 destination and returns the compact
-   audited bundle. Do not relaunch TPU.
-3. Require 32/32 red-point joins, 64/64 seam keys, 64/64 tail keys, no
-   same-target payload conflicts, explicit wrong-target provenance, and
-   standalone bundle-auditor PASS.
-4. If the official v3 result reproduces the exploratory terminal split, build
-   one observer-neutral terminal discriminator that separates pre-lm-head
-   hidden bytes, full logits, target-dot output, row max, exp-sum, and log
-   normalizer. Do not call the reducer causal before proving equal full logits
-   enter unequal normalizers.
+1. Review the checked-in P38s23r3 diff and gate receipts. Do not commit or push
+   without explicit user approval.
+2. After a separately approved publication, the remote operator follows only
+   `P38S23R3_RUNBOOK.md`: run the launch script once from the exact clean SHA,
+   preserve the complete attempt-0 head log, then run the collector.
+3. Return the compact mechanically verified directory. Three exact A-B/B-C
+   rounds admit only a candidate forward repair and open backward-no-commit;
+   any finite A-B red with exact B-C rejects fixed lm-head as sufficient.
+4. Do not relaunch P38s23r2, attach old observers, enable prefix cache, or use
+   hand-edited YAML/env.
 
 ## Claim ceiling and blockers
 

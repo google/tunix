@@ -4,7 +4,7 @@
 > 焊死数值类 flag = 删代码路径 = 程序变更,走与开启同级认证门(verify+ALIGN+canary)。
 > 生命周期档位:试验 → 已认证 → 默认开 → 焊死(开关可删)→ 退役/否决。
 > 普查基点 a94d6c0c(285 个可设置 env flag,与 ebba4850 普查零漂移);普查后续现役附录
-> 当前 297 个;本表分层登记,D 层按前缀组、语义欠账标"待考古"。
+> 当前 298 个;本表分层登记,D 层按前缀组、语义欠账标"待考古"。
 > 全量机器清单:落地 CL 时由 `grep -rhoE` 生成为附录,条目数必须 == 普查数(排除项列明)。
 
 ## A 层 · 数值语义类(动它 = 动程序身份;焊死走认证门)
@@ -42,7 +42,7 @@
 
 | 组 | 代表 | 日落条件(一条覆盖全家) |
 |---|---|---|
-| capture/journal/ledger/capsule/GCS/replay | SERVING_CAPTURE_*、REQUEST_JOURNAL、INCIDENT_LEDGER、MISMATCH_CAPSULE、GCS_PREFIX、FROZENLAKE_REPLAY、PRECHECK_ONLY… | **carrier 结案(strict 复验全绿)→ 全家整体退役**;判决类结论(U 臂、slot bug、co-batch、shape-1)迁 FOOTGUNS 后删 |
+| capture/journal/ledger/capsule/GCS/replay | SERVING_CAPTURE_*、REQUEST_JOURNAL、INCIDENT_LEDGER、MISMATCH_CAPSULE、GCS_PREFIX、DURABILITY_PROFILE、FROZENLAKE_REPLAY、PRECHECK_ONLY… | **carrier 结案(strict 复验全绿)→ 全家整体退役**;判决类结论(U 臂、slot bug、co-batch、shape-1)迁 FOOTGUNS 后删 |
 
 ## D 层 · 发射/基建管道(~230,按前缀组;逐条语义允许"待考古")
 
@@ -235,6 +235,7 @@ CANON_P38_AVAL_REPORT
 CANON_P38_CONTROLLED_EXIT
 CANON_P38_DIAGNOSTIC_ROUNDS
 CANON_P38_DIAGNOSTIC_ROUND_FILE
+CANON_P38_DURABILITY_PROFILE
 CANON_P38_EXPECTED_POLICY_VERSION
 CANON_P38_FROZENLAKE_REPLAY
 CANON_P38_FIXED_LM_HEAD
@@ -373,4 +374,4 @@ CANON_XPROF_SKIP_STEPS
 CANON_XPROF_STEPS
 ```
 
-Count: 291 settable names (regenerate with the grep in tasks/canon_system_redesign/phase0_indexes.md; exclusions: none).
+Count: 298 settable names (regenerate with the grep in tasks/canon_system_redesign/phase0_indexes.md; exclusions: none).

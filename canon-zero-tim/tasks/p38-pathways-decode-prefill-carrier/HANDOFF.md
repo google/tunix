@@ -5,7 +5,43 @@ parallel Qwen3-32B DeepSWE workstream, read
 `../p39-deepswe-production/HANDOFF.md`. P38 evidence cannot promote P39, and
 P39 evidence cannot promote P38.
 
-## CURRENT: P38s23r2 64-TPU execution results; fixed-tile lm_head verified exact
+## CURRENT: P38s23r3 implementation ready for review; no launch yet
+
+P38s23r2 supplied a strong but incomplete result: its first 64-TPU frozen
+round covered 49,177 actions and made both A-B and B-C bitwise exact, then the
+learner timed out waiting for durability ACK. The full-forensics periodic
+snapshot and critical round seal shared one synchronous worker; a shell-level
+priority check cannot preempt an upload already in flight. The old success
+path also incorrectly treated a mismatch capsule as mandatory even though an
+exact round intentionally creates none.
+
+The local P38s23r3 amendment leaves the fixed Pallas lm-head and all numerical
+settings unchanged. It adds an exclusive `round-alignment-v1` durability
+profile for this arm:
+
+- no periodic live snapshot and no KV/seam/tail/terminal observers;
+- ordered round seals are the worker's critical work;
+- each round is three remote objects containing the run log, one scoped
+  alignment record, inventory, and an optional capsule only for red rounds;
+- exact fixed-lm-head postflight does not demand a mismatch join;
+- three round ACKs, controlled exit, root COLLECTED/COMPLETE, all seven
+  lm-head receipts, and exact source identity remain mandatory.
+
+Checked-in operator interfaces:
+
+- launch: `scripts/launch_p38s23r3.sh`;
+- download/classify: `scripts/collect_p38s23r3_return.sh`;
+- execution card: `P38S23R3_RUNBOOK.md`.
+
+Local fake-GCS gates prove the exact-round/no-capsule path, three-object round
+archive, ACK, root collect/complete, manifest verification, compact return,
+both scientific outcomes, and truncated-head rejection. Pinned-image renderer
+(18), fixed-lm-head (8), serving-classifier (36), and complete P33 adjacent
+CPU gates pass. This worktree is not yet a publication or a target result. Do
+not launch until the user approves commit/push and separately approves the
+64-TPU launch.
+
+## HISTORY: P38s23r2 64-TPU first round exact; durability timeout
 
 P38s23r2/source `6814774eef70aa0c67610eab9f355d964d420378` (*Map learner lm-head through fixed Pallas chunks*) ran on 64 TPU (`DP16xTP4`, concurrency 256, `CANON_P38_FIXED_LM_HEAD=1`).
 

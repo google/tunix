@@ -100,6 +100,13 @@ class RenderP38ServingJobsetsTest(unittest.TestCase):
         self.assertEqual(
             env["CANON_P38_LIVE_SNAPSHOT_INTERVAL_SECONDS"], "30"
         )
+        self.assertEqual(env["CANON_P38_DURABILITY_PROFILE"], "full-v1")
+        self.assertEqual(
+            document["metadata"]["labels"][
+                "canon.zero-tim/durability-profile"
+            ],
+            "full-v1",
+        )
         self.assertEqual(
             env["CANON_P38_LIVE_SNAPSHOT_STOP_FILE"],
             env["CANON_STATE"] + "/p38_live.stop",
@@ -418,8 +425,13 @@ class RenderP38ServingJobsetsTest(unittest.TestCase):
       self.assertNotIn("CANON_MM_ALGO", env)
       self.assertNotIn("CANON_MM_ALGO_PRESET", env)
       self.assertNotIn("CANON_P38_SEAM_OBSERVER", env)
+      self.assertNotIn("CANON_P38_KV_OBSERVER_DIR", env)
+      self.assertNotIn("CANON_P38_KV_OBSERVER_CLASSIFICATION", env)
       self.assertNotIn("CANON_P38_TAIL_OBSERVER", env)
       self.assertNotIn("CANON_P38_TERMINAL_DISCRIMINATOR", env)
+      self.assertEqual(
+          env["CANON_P38_DURABILITY_PROFILE"], "round-alignment-v1"
+      )
       self.assertEqual(
           env["CANON_PROFILE_FILE"],
           "cluster/profiles/qwen3-8b-dp16-tp4-frozenlake.env",
@@ -427,6 +439,12 @@ class RenderP38ServingJobsetsTest(unittest.TestCase):
       self.assertEqual(
           document["metadata"]["labels"]["canon.zero-tim/fixed-lm-head"],
           "1",
+      )
+      self.assertEqual(
+          document["metadata"]["labels"][
+              "canon.zero-tim/durability-profile"
+          ],
+          "round-alignment-v1",
       )
     for kwargs in (
         {},
@@ -463,6 +481,36 @@ class RenderP38ServingJobsetsTest(unittest.TestCase):
       renderer.validate_capture_jobset(
           document, unified=unified, fixed_lm_head=True
       )
+
+  def test_fixed_lm_head_arm_rejects_durability_or_observer_drift(self):
+    base = renderer.p33.load_base(_BASE)
+    spec, unified = renderer._SPECS[0]
+    for drift in ("profile", "observer"):
+      with self.subTest(drift=drift):
+        document = renderer.render_jobset(
+            base, spec, _SOURCE,
+            "p38-fix-prof" if drift == "profile" else "p38-fix-obs",
+            unified=unified,
+            fixed_lm_head=True,
+        )
+        main = renderer._main_container(document)
+        if drift == "profile":
+          entry = next(
+              item for item in main["env"]
+              if item["name"] == "CANON_P38_DURABILITY_PROFILE"
+          )
+          entry["value"] = "full-v1"
+          error = "environment drifted"
+        else:
+          main["env"].append({
+              "name": "CANON_P38_KV_OBSERVER_DIR",
+              "value": "/tmp/forbidden",
+          })
+          error = "must not attach diagnostic observers"
+        with self.assertRaisesRegex(ValueError, error):
+          renderer.validate_capture_jobset(
+              document, unified=unified, fixed_lm_head=True
+          )
 
   def test_rejects_capture_contract_drift(self):
     base = renderer.p33.load_base(_BASE)
