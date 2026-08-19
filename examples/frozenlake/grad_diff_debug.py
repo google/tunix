@@ -89,7 +89,7 @@ dataset = _make_dataset(
     )
 
 if len(jax.devices()) == 8:
-  mesh = jax.make_mesh((1, 2), ('fsdp', 'tp'), axis_types=(jax.sharding.AxisType.Auto,) * 2, devices=np.asarray(jax.devices())[:2])
+  mesh = jax.make_mesh((2, 1), ('fsdp', 'tp'), axis_types=(jax.sharding.AxisType.Auto,) * 2, devices=np.asarray(jax.devices())[:2])
 else:
   mesh = jax.make_mesh((1,), ('fsdp',), axis_types=(jax.sharding.AxisType.Auto,))
 
@@ -680,7 +680,8 @@ def attribute_weight_gap(w_a, w_b, g_a, g_b, lr, denom=None):
 #                reset afterwards so gradients are not observable, but the
 #                weights reflect one clean update and carry no accumulated
 #                divergence from earlier steps.
-_MODE = "weights"
+_MODE = os.environ.get("GDD_MODE", "weights")
+assert _MODE in ("weights", "grads"), f"GDD_MODE must be weights|grads, got {_MODE!r}"
 _ACCUM_STEPS = 8
 # One update. CAVEAT 5: the trainers' trajectories diverge chaotically once they
 # start feeding back into each other (~27x per update, measured), so a run with
@@ -694,9 +695,9 @@ _N_BATCHES = _ACCUM_STEPS - 1 if _MODE == "grads" else _ACCUM_STEPS * _MAX_STEPS
 # equivalence check needs both trainers and no profiler (tracing both legs
 # perturbs timing and writes a second, confusing trace to the bucket). These are
 # separate runs, not one run that does both.
-#   _PROFILE = True   -> v2 only, wrapped in jax.profiler.trace
-#   _PROFILE = False  -> v1 then v2, with the comparisons at the end
-_PROFILE = False
+#   GDD_PROFILE=1  -> v2 only, wrapped in jax.profiler.trace
+#   GDD_PROFILE=0  -> v1 then v2, with the comparisons at the end (default)
+_PROFILE = os.environ.get("GDD_PROFILE", "0") == "1"
 _run_dataset = dataset[:_N_BATCHES]
 assert len(_run_dataset) == _N_BATCHES, (
     f"need at least {_N_BATCHES} batches, dataset has {len(dataset)}"
