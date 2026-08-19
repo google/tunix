@@ -380,7 +380,17 @@ class Embedder(nnx.Module):
 
   @jax.named_scope('embedder_encode')
   def encode(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
-    x = self.input_embedding[(x,)]
+    if hasattr(self.input_embedding, 'value'):
+      w = self.input_embedding.value
+    else:
+      w = self.input_embedding
+    if hasattr(w, 'at'):
+      try:
+        x = w.at[(x,)].get(out_sharding=self.shd_config.act_btd)
+      except Exception:
+        x = self.input_embedding[(x,)]
+    else:
+      x = self.input_embedding[(x,)]
     x = jnp.astype(x, self.dtype)
     x = shard(x, self.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
     return x
