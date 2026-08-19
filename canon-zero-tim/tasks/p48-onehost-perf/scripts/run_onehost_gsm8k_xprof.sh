@@ -36,7 +36,6 @@ timeout_seconds="${P51_ONEHOST_TIMEOUT_SECONDS:-2700}"
 max_steps="${P51_MAX_STEPS:-3}"
 xprof_skip="${P51_XPROF_SKIP_STEPS:-2}"
 xprof_steps="${P51_XPROF_STEPS:-1}"
-
 # shellcheck disable=SC1090
 source "$canon_env"
 canon_preflight
@@ -55,6 +54,7 @@ mkdir -p "$root"
   echo "[P51.XPROF] topology=DP1xTP4 batch=4 generations=8 traj_micro=2"
   echo "[P51.XPROF] max_steps=$max_steps capture=step$xprof_skip x$xprof_steps"
   echo "[P51.XPROF] perf_envs=CANON_BATCHED_EVIDENCE=1,CANON_P28_BATCHED_REPORT=1"
+  echo "[P51.XPROF] mesh=fsdp1xtp4 auto_axes (no FL_SHARED_MESH)"
 } >"$driver"
 
 bash "$pkg/install.sh" "$canon_out" --from-image "$image" --model qwen1p7b \
@@ -125,7 +125,7 @@ sudo docker run --rm --privileged --net=host --name "$container" \
   -e CANON_XPROF_STEPS="$xprof_steps" \
   -e CANON_XPROF_PYTHON_TRACER="${P51_XPROF_PYTHON_TRACER:-0}" \
   -e CANON_XPROF_HOST_TRACER="${P51_XPROF_HOST_TRACER:-}" \
-  -e CANON_DP_SIZE=1 -e CANON_TP_SIZE=4 -e FL_SHARED_MESH=1,4 \
+  -e CANON_DP_SIZE=1 -e CANON_TP_SIZE=4 \
   -e XLA_FLAGS="$XTRA_XLA" \
   -e CANON_RPA_D=128,512,128,512 -e CANON_RPA_P=128,512,128,512 \
   -e CANON_RPA_M=128,512,128,512 -e MIN_TOKEN_BUCKET=256 \
@@ -143,6 +143,20 @@ sudo docker run --rm --privileged --net=host --name "$container" \
   -w "$repo" "$image" bash -lc "
     set -e
     echo '[P51.XPROF] container_start'
+    # The 1x4 shape comes from --mesh_fsdp/--mesh_tp. FL_SHARED_MESH is not a
+    # shape: it selects a different mesh program -- axes renamed to
+    # (data, model), Explicit axis types, a vocabulary-sharded reference model
+    # -- which the certified one-host runs are not signed on and which dies in
+    # the lm-head matmul here. The escape matters: unescaped, the host shell
+    # expands this before docker ever sees it and the test is vacuous.
+    # No inner double quotes: this block lives inside the outer bash -lc
+    # "..." string, so a bare quote would end it. The x-prefix comparison and
+    # single-quoted message keep the container-side expansion intact.
+    if [ x\${FL_SHARED_MESH:-} != x ]; then
+      echo '[P51.XPROF] REFUSING: FL_SHARED_MESH reached the container:' \${FL_SHARED_MESH} >&2
+      exit 2
+    fi
+    echo '[P51.XPROF] mesh_regime=fsdp,tp axis_types=Auto'
     python3 - <<'PY'
 import jax
 devices = jax.devices()
@@ -197,17 +211,25 @@ xprof_started="$(grep -ac '\[P51.XPROF\] start dir=' "$raw" || true)"
 xprof_stopped="$(grep -ac '\[P51.XPROF\] stop captured_steps=' "$raw" || true)"
 xplane_count="$(find "$xprof_dir" -name '*.xplane.pb' 2>/dev/null | wc -l)"
 perfetto_count="$(find "$xprof_dir" \( -name '*perfetto*' -o -name '*.trace.json.gz' \) 2>/dev/null | wc -l)"
+# The program reports its own mesh, so the gate reads that instead of trusting
+# the launch line: the axis names and Auto types are what separate the
+# certified regime from the explicit-mesh one.
+mesh_line="$(grep -a 'shared_mesh.devices.shape' "$raw" | head -1 || true)"
+mesh_ok=0
+case "$mesh_line" in
+  *"axis_names=('fsdp', 'tp')"*"axis_types=(Auto, Auto)"*) mesh_ok=1 ;;
+esac
 {
   echo "[P51.XPROF] SUMMARY steps_done=${steps_done:-0} align_pass=${align_pass:-0}" \
     "xprof_started=${xprof_started:-0} xprof_stopped=${xprof_stopped:-0}" \
     "xplane_files=${xplane_count} perfetto_files=${perfetto_count}"
   find "$xprof_dir" -type f -printf '%s %p\n' 2>/dev/null | sort -rn | head -10
 } | tee -a "$driver" >>"$raw"
-if [ "$docker_rc" -ne 0 ] || [ "${xplane_count}" -eq 0 ] || [ "${perfetto_count}" -eq 0 ]; then
-  echo "[P51.XPROF] RED docker_exit=$docker_rc xplane=$xplane_count perfetto=$perfetto_count" | tee -a "$driver"
+if [ "$docker_rc" -ne 0 ] || [ "$mesh_ok" -ne 1 ] || [ "${xplane_count}" -eq 0 ] || [ "${perfetto_count}" -eq 0 ]; then
+  echo "[P51.XPROF] RED docker_exit=$docker_rc mesh_ok=$mesh_ok xplane=$xplane_count perfetto=$perfetto_count" | tee -a "$driver"
   exit 1
 fi
-echo "[P51.XPROF] GREEN artifacts under $xprof_dir" | tee -a "$driver"
+echo "[P51.XPROF] GREEN mesh=fsdp,tp/Auto artifacts under $xprof_dir" | tee -a "$driver"
 
 # Optional GCS export (P51_GCS_EXPORT=1). The upload is evidence handling,
 # not part of the capture gate: a failure here is reported and non-fatal so

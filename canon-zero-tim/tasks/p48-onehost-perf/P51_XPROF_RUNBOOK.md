@@ -30,7 +30,7 @@ label 只允许 `[a-zA-Z0-9_-]`;同 label 不可复用(run dir 已存在即拒�
 |---|---|---|
 | `P51_MAX_STEPS` | 3 | 总步数(step0 付编译 ~370s,此后 ~80-105s/步) |
 | `P51_XPROF_SKIP_STEPS` | 2 | 完成 N 步后开始捕获(即捕 stepN 起) |
-| `P51_XPROF_STEPS` | 1 | 捕获跨越的步数(1 步 xplane ≈2GB;2 步 ≈4GB) |
+| `P51_XPROF_STEPS` | 1 | 捕获跨越的步数(1 步 xplane ≈1.9GB;2 步 ≈4GB) |
 | `P51_XPROF_PYTHON_TRACER` | **0** | **保持 0**:开 python tracer 会把 device 轨挤掉(host-only 936MB 教训);要 python 栈时才临时开,并接受丢 device |
 | `P51_XPROF_HOST_TRACER` | (jax 默认) | 1=精简 host 事件;2=含更多(默认足够) |
 | `P51_BATCHED_REVERSE` | (关) | P52 优化;profile 当前最优配置时置 1 |
@@ -52,9 +52,15 @@ prompt/response=1024/1024、batch4×gen8(32 轨迹)、mini/micro/logps=4
 └── *.trace.json.gz          # Chrome trace 格式
 ```
 
-绿判据(driver.log 尾部):`SUMMARY steps_done=N align_pass=…
-xprof_started=1 xprof_stopped=1 xplane_files>=1 perfetto_files>=1` +
-`GREEN artifacts under …`。数值门照旧:[CANON_ALIGN] 任何一红即停。
+绿判据(全部必须成立,任一不成立打印 `RED` 并非零退出):
+`docker_exit=0`、`steps_done == MAX_STEPS`、**mesh 自证行**
+(程序自己打印的 `axis_names=('fsdp', 'tp') axis_types=(Auto, Auto)`)、
+以及 `P51_CAPTURE=1` 时的 `xprof_started=1 xprof_stopped=1 xplane>0 perfetto>0`。
+数值门照旧:[CANON_ALIGN] 任何一红即停。
+
+**为什么读程序自报的 mesh 而不是读 env**:env 断言写在 `bash -lc "..."` 里若不转义,
+会被宿主 shell 提前展开成恒真(实测:容器里 `FL_SHARED_MESH=1,4` 时未转义断言仍
+看到空串)。容器内断言已转义并会打印实际值,gate 再用程序自报的 mesh 行复核。
 
 **看图**:
 ```bash
@@ -108,6 +114,20 @@ pip install --user xprof && ~/.local/bin/xprof <session> --port 8791
 - 训练捕获曾五探针排查(体积/env/引擎/补丁全洗清)——档案见
   外层 tasks/p51_onehost_gsm8k_xprof/phase1.md。
 - 本载具钉授权宿主 `t1v-n-4a77ebd0-w-0`(脚本 preflight 断言)。
+- **本载具不传 `FL_SHARED_MESH`**(2026-08-19 起):1×4 形状由
+  `--mesh_fsdp/--mesh_tp` 给定,而该 env 在当前 tip 上不是"形状"——它切换整套
+  mesh 程序(轴名 `(data,model)`、Explicit 轴类型、参考模型换 vocab 分片、
+  `data_sharding_axis` 换轴),一宿主会死在 lm-head 的
+  `Mesh for all inputs should be equal`。容器启动前有
+  `test -z "${FL_SHARED_MESH:-}"` 自证,日志有
+  `mesh_regime=fsdp,tp axis_types=Auto` 一行。
+  **副作用**:alignment 报告 JSON 的 `context.mesh` 字段会是空串
+  (`tunix/rl/alignment.py` 拿该 env 当标签),无判据读它。
+  **其余一宿主载具(pair / FL P31 / P35 / P38 onehost / resident)仍在传该
+  env**,在当前 tip 上会撞同一堵墙——尚未验证,见下方"未决"。
+- **未决**:L3 pair 中立性门(`p41-optimizer-residency/scripts/run_onehost_pair.sh`)
+  是否已被上述 mesh 制式改动打断,只有实跑能定;它是 perf 开关字节中立性的
+  签字载具,建议在 TPU 空闲时跑一发确认。
 
 ## DP16/Pathways 注意
 
