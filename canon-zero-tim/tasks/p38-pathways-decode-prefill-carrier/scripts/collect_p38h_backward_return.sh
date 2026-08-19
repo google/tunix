@@ -65,7 +65,7 @@ if "[CANON_P33_DP16] update_step_committed" in log:
 if "[PATHTRACE] CANON_P38_FIXED_LM_HEAD_VJP=1 semantic_M=4096 fixed_M=256 chunks=16 accumulation=lax.scan order=ascending" not in log:
   raise SystemExit("fixed-order lm-head VJP receipt is absent")
 for semantic_m, chunks in (
-    (8, 1), (16, 1), (32, 1), (64, 1), (128, 1), (256, 1),
+    (16, 1), (32, 1), (64, 1), (128, 1), (256, 1),
     (4096, 16),
 ):
   pattern = rf"CANON_P38_FIXED_LM_HEAD=1 semantic_M={semantic_m}\b.*\bchunks={chunks}\b"

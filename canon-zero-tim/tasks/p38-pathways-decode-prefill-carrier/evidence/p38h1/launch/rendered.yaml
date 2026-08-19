@@ -2,13 +2,13 @@
 apiVersion: jobset.x-k8s.io/v1alpha2
 kind: JobSet
 metadata:
-  name: canon-p38h-fl-bwd-p38h1-957876b3
+  name: canon-p38h-fl-bwd-p38h1-1c6fb309
   namespace: default
   labels:
     kueue.x-k8s.io/queue-name: multislice-queue
     canon.zero-tim/workload: frozenlake
     canon.zero-tim/stage: backward-no-commit
-    canon.zero-tim/source: 957876b3
+    canon.zero-tim/source: 1c6fb309
     canon.zero-tim/diagnostic: p38-fixed-lm-head-backward
     canon.zero-tim/fixed-lm-head: '1'
     canon.zero-tim/mutation: backward-no-commit
@@ -46,7 +46,7 @@ spec:
               args:
               - --server_port=29000
               - --resource_manager_address=localhost:29001
-              - --gcs_scratch_location=gs://yuxzhang-tunix-models/tmp/canon-zero-tim/p33/canon-p38h-fl-bwd-p38h1-957876b3
+              - --gcs_scratch_location=gs://yuxzhang-tunix-models/tmp/canon-zero-tim/p33/canon-p38h-fl-bwd-p38h1-1c6fb309
               env:
               - name: PATHWAYS_HEAD
                 value: localhost
@@ -64,7 +64,7 @@ spec:
               image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server@sha256:3d9a6523f2262e6881c700542a9d89a4032103a79ee2851a72ca353d24ad5f95
               args:
               - --server_port=29001
-              - --gcs_scratch_location=gs://yuxzhang-tunix-models/tmp/canon-zero-tim/p33/canon-p38h-fl-bwd-p38h1-957876b3
+              - --gcs_scratch_location=gs://yuxzhang-tunix-models/tmp/canon-zero-tim/p33/canon-p38h-fl-bwd-p38h1-1c6fb309
               - --node_type=resource_manager
               - --instance_count=1
               - --instance_type=tpuv5:4x4x4
@@ -115,7 +115,7 @@ spec:
               - name: CANON_PROFILE_FILE
                 value: cluster/profiles/qwen3-8b-dp16-tp4-frozenlake.env
               - name: CANON_STATE
-                value: /tmp/canon-state/canon-p38h-fl-bwd-p38h1-957876b3
+                value: /tmp/canon-state/canon-p38h-fl-bwd-p38h1-1c6fb309
               - name: CANON_P32_EXPECT_MODEL_MESH_IDS
                 value: ''
               - name: CANON_EXPECT_TRAIN_MESH_IDS
@@ -153,7 +153,7 @@ spec:
               - name: HF_HOME
                 value: /tmp/huggingface
               - name: CANON_EXPECT_COMMIT
-                value: 957876b3f09342cbef39a23187be12e1edbf2872
+                value: 1c6fb3098d59a61e13ff71d7df80ae5af4c2cf22
               - name: CANON_P32_TRAIN_ADMITTED
                 value: '1'
               - name: CANON_P32_DP_REDUCTION_ADMITTED
@@ -190,19 +190,19 @@ spec:
                   --loss_algo=gspo-token --advantage_estimator=rloo --temperature=0.7
                   --top_k=0 --top_p=1.0
               - name: CANON_RUN_LOG
-                value: /tmp/canon-state/canon-p38h-fl-bwd-p38h1-957876b3/run.log
+                value: /tmp/canon-state/canon-p38h-fl-bwd-p38h1-1c6fb309/run.log
               - name: CANON_PRE_ALIGN_REPORT
-                value: /tmp/canon-state/canon-p38h-fl-bwd-p38h1-957876b3/pre_alignment.jsonl
+                value: /tmp/canon-state/canon-p38h-fl-bwd-p38h1-1c6fb309/pre_alignment.jsonl
               - name: CANON_ALIGN_REPORT
-                value: /tmp/canon-state/canon-p38h-fl-bwd-p38h1-957876b3/alignment.jsonl
+                value: /tmp/canon-state/canon-p38h-fl-bwd-p38h1-1c6fb309/alignment.jsonl
               - name: CANON_UPDATE_REPORT
-                value: /tmp/canon-state/canon-p38h-fl-bwd-p38h1-957876b3/updates.jsonl
+                value: /tmp/canon-state/canon-p38h-fl-bwd-p38h1-1c6fb309/updates.jsonl
               - name: CANON_P38_MISMATCH_CAPSULE
-                value: /tmp/canon-state/canon-p38h-fl-bwd-p38h1-957876b3/p38_frozenlake_mismatch_capsule.npz
+                value: /tmp/canon-state/canon-p38h-fl-bwd-p38h1-1c6fb309/p38_frozenlake_mismatch_capsule.npz
               - name: CANON_P38_MISMATCH_CAPSULE_MAX_ROWS
                 value: '2'
               - name: CANON_WANDB_RUN_NAME
-                value: canon-p38h-fl-bwd-p38h1-957876b3
+                value: canon-p38h-fl-bwd-p38h1-1c6fb309
               - name: JAX_COMPILATION_CACHE_DIR
                 value: /tmp/jax_compilation_cache
               - name: JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS
@@ -262,12 +262,12 @@ spec:
               image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server@sha256:3d9a6523f2262e6881c700542a9d89a4032103a79ee2851a72ca353d24ad5f95
               args:
               - --server_port=29000
-              - --resource_manager_address=canon-p38h-fl-bwd-p38h1-957876b3-pathways-head-0-0.canon-p38h-fl-bwd-p38h1-957876b3:29001
+              - --resource_manager_address=canon-p38h-fl-bwd-p38h1-1c6fb309-pathways-head-0-0.canon-p38h-fl-bwd-p38h1-1c6fb309:29001
               - --node_type=worker
               - --instance_type=tpuv5:4x4x4
               env:
               - name: PATHWAYS_HEAD
-                value: canon-p38h-fl-bwd-p38h1-957876b3-pathways-head-0-0.canon-p38h-fl-bwd-p38h1-957876b3
+                value: canon-p38h-fl-bwd-p38h1-1c6fb309-pathways-head-0-0.canon-p38h-fl-bwd-p38h1-1c6fb309
               - name: TPU_MIN_LOG_LEVEL
                 value: '0'
               - name: TF_CPP_MIN_LOG_LEVEL

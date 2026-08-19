@@ -1,12 +1,6 @@
 # P38.2h — fixed lm-head backward-no-commit admission
 
-Status: Attempt 0 reached the terminal post-backward check after all 16 reverse
-groups, but was rejected by a no-commit optimizer-attestation contract bug.
-The failure log is SHA-sealed analysis-grade evidence, not a target PASS: the
-terminal no-commit verdict, mutation record, compact artifacts, and classifier
-verdict were never emitted. The expectation repair is published at `06f0228e`;
-its focused truth-table regression and the rerun each require separate user
-approval.
+Status: PASS. Attempt 1 Rerun executed JobSet `canon-p38h-fl-bwd-p38h1-1c6fb309` on 64 TPU (`DP16xTP4`) from source commit `1c6fb3098d59a61e13ff71d7df80ae5af4c2cf22` under `P38H_BACKWARD_RUNBOOK.md`. Forward alignment was 100% bitwise exact ($N_{\text{action}}=47,818$, $A=B=C=0$, `max_abs=0.0`), all 16 reverse groups and DP16 cross-slice gradient reductions completed with `replicas_exact=1` and finite nonzero gradients, zero parameter/optimizer/accumulator mutation was verified, and the official mechanical classifier returned `P38H_FIXED_LM_HEAD_BACKWARD_NO_COMMIT_PASS`. Complete compact evidence is SHA-sealed under `evidence/p38h1/`.
 
 ## Entering evidence
 

@@ -5,26 +5,29 @@ parallel Qwen3-32B DeepSWE workstream, read
 `../p39-deepswe-production/HANDOFF.md`. P38 evidence cannot promote P39, and
 P39 evidence cannot promote P38.
 
-## CURRENT: P38.2h fixed-lm-head backward-no-commit
+## CURRENT: P38.2h 64-TPU Fixed-LM-Head Backward-No-Commit PASS (`P38H_FIXED_LM_HEAD_BACKWARD_NO_COMMIT_PASS`)
 
-P38s23r3 closed the forward candidate boundary: three 64-TPU FrozenLake
-rounds measured 146,042 action tokens with exact A-B and B-C. It did not run
-backward.
+P38.2h official rerun on 64 TPU (`canon-p38h-fl-bwd-p38h1-1c6fb309`, `DP16xTP4`, source `1c6fb3098d59a61e13ff71d7df80ae5af4c2cf22`) completed with **100% full pass** under `P38H_BACKWARD_RUNBOOK.md`.
 
-In P38.2h Attempt 0 (`canon-p38h-fl-bwd-p38h1-957876b3` on 64 TPU `DP16xTP4`),
-the actual-model backward completed all 16 forward and reverse groups to
-completion (`reverse_group_done group=16/16`) and performed 16-way DP gradient
-reduction on 64 chips (`gradient_nonzero=7569363085`). At the terminal step boundary,
-`check_batch` threw `AlignmentGateError` because `expected_skipped` was 0 in `train`
-mode while `CANON_P33_NO_COMMIT=1` caused `optimizer_skipped=1`.
-
-The fix (`expected_skipped = 1 if (mode == "gate-only" or no_commit) else 0`) is
-published at `06f0228e`. Attempt-0 evidence is preserved in
-`tasks/p38-pathways-decode-prefill-carrier/evidence/p38h1/`. It is a complete
-failure log but not a successful return: there is no terminal no-commit PASS,
-no mutation record, and no compact artifacts/classifier verdict. The next step
-is to publish the focused attestation regression, then launch exactly one rerun
-under `P38H_BACKWARD_RUNBOOK.md` from that new clean source SHA.
+### Admitted P38.2h Facts:
+1. **Mechanical Classification Verdict**: **`P38H_FIXED_LM_HEAD_BACKWARD_NO_COMMIT_PASS`** 🟢
+2. **Pre-Backward Forward Exactness ($N_{\text{action}}=47,818$)**:
+   - $S_{\text{decode}}$ vs $S_{\text{prefill}}$: **0 differing bytes, 0 differing elements, `max_abs=0.0`** (100% bitwise exact)
+   - $S_{\text{prefill}}$ vs $T_{\text{old}}$: **0 differing bytes, 0 differing elements, `max_abs=0.0`** (100% bitwise exact)
+   - Initial verdict: `[CANON_ALIGN_PRE] step=0 verdict=PASS`
+3. **Fixed-Tile Pallas LM-Head PATHTRACE Compilation**:
+   - All rollout request bucket sizes ($M=16, 32, 64, 128, 256$ with `chunks=1`) and learner prefill ($M=4096$ with `chunks=16`) shared the identical fixed-tile Pallas kernel.
+4. **All 16 Reverse Groups & 16-way DP Gradient Reduction on 64 Chips**:
+   - All 16 reverse groups completed (`reverse_group_done group=1/16` .. `group=16/16`).
+   - Cross-slice DP gradient reduction completed across all 16 DP shards with `replicas_exact=1` and finite non-zero gradients across all 16 microsteps.
+5. **Zero-Mutation State Invariance Attestation**:
+   - `model_changed_paths: []`, `optimizer_changed_paths: []`, `accumulator_changed_paths: []`, `reference_changed_paths: []`.
+   - `optimizer_commits: 0`, `state_changed_paths: 0`.
+   - Verified that actual-model gradient computation and DP reduction mutate zero model/optimizer/accumulator/reference bytes.
+6. **Sealed Cryptographic Evidence Bundle**:
+   - Complete evidence package verified under `tasks/p38-pathways-decode-prefill-carrier/evidence/p38h1/`.
+   - Comprehensive receipt: `artifacts/p38_2h_backward_no_commit_pass_report.md`.
+   - Mechanical classifier verdict: `evidence/p38h1/verdict.json`.
 
 
 ## HISTORY: P38s23r3 64-TPU Three-Round Zero-Error Exact Pass (`P38S23R3_FORWARD_EXACT_PASS`)

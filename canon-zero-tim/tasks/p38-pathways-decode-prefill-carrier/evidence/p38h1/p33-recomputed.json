@@ -1,0 +1,29 @@
+{
+  "alignment_warning_policy_enabled": false,
+  "alignment_warning_records": 0,
+  "claim_level": "strict-zero-tim",
+  "diagnostic_only": false,
+  "evaluation_enabled": false,
+  "evidence_sha256": {
+    "alignment_report": "7a8ac3e1f803f6baac67b32703e47798befd3e8a2b33a720af50ef23609c3662",
+    "pre_alignment_report": "19b04cdb28a8f60a49de431a9d91f1a45194c535fd0c0252239456dd3f8cdb48",
+    "run_log": "7c91f0d20c97101da11067607bc961b45af583f4cf30f8e3cf7d5956222815df",
+    "update_report": "22f2c38cb56713327bbd6ad80ff88b152936c5e8c4e2a9fd4bf9b04674dbc229"
+  },
+  "expected_alignments": 16,
+  "expected_pre_alignments": 1,
+  "expected_updates": 1,
+  "local_gradient_groups": 16,
+  "observed_alignments": 16,
+  "observed_pre_alignments": 1,
+  "observed_updates": 1,
+  "pre_alignment_warning_records": 0,
+  "reasons": [],
+  "stage": "backward-no-commit",
+  "topology": {
+    "dp": 16,
+    "tp": 4
+  },
+  "verdict": "PASS",
+  "workload": "frozenlake"
+}

@@ -1,0 +1,53 @@
+{
+  "claim_scope": "actual-model-backward-no-commit-only",
+  "evidence_sha256": {
+    "alignment.jsonl": "7a8ac3e1f803f6baac67b32703e47798befd3e8a2b33a720af50ef23609c3662",
+    "classifier.txt": "b75395549df54f231648d9b06d8168dbf35d1255f41963637a750f4582453f37",
+    "head.full.log": "7c91f0d20c97101da11067607bc961b45af583f4cf30f8e3cf7d5956222815df",
+    "p33-recomputed.json": "673f863c18e45f297cfce870386c7370bcd86f0ef6a9420d5ba61ab536afc769",
+    "pre_alignment.jsonl": "19b04cdb28a8f60a49de431a9d91f1a45194c535fd0c0252239456dd3f8cdb48",
+    "updates.json": "22f2c38cb56713327bbd6ad80ff88b152936c5e8c4e2a9fd4bf9b04674dbc229"
+  },
+  "gradient_activity": [
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true,
+    true
+  ],
+  "gradient_microsteps": 16,
+  "micro_gradient_norms": [
+    3.8064019680023193,
+    4.368659496307373,
+    2.04288649559021,
+    2.748420238494873,
+    2.1279168128967285,
+    2.425719738006592,
+    1.752234697341919,
+    2.6610560417175293,
+    1.8871577978134155,
+    1.6409275531768799,
+    1.4994171857833862,
+    1.6400586366653442,
+    1.716803789138794,
+    2.410752058029175,
+    1.3674201965332031,
+    2.5552098751068115
+  ],
+  "optimizer_commits": 0,
+  "schema": "canon-p38h-backward-return-v1",
+  "source_commit": "1c6fb3098d59a61e13ff71d7df80ae5af4c2cf22",
+  "state_changed_paths": 0,
+  "status": "P38H_FIXED_LM_HEAD_BACKWARD_NO_COMMIT_PASS"
+}

@@ -2092,3 +2092,14 @@ reclassification from the committed NPZ inputs.
 - Rerun gate: publish a focused train/no-commit optimizer-attestation truth-table
   regression, then launch one clean source-pinned P38h rerun. No lm-head, VJP,
   reducer, topology, evaluation, prefix-cache, or warning-policy change is admitted.
+
+## 2026-08-19 UTC — P38.2h Attempt 1 Rerun: 64-TPU Backward-No-Commit 100% Full Pass
+
+- Executed JobSet `canon-p38h-fl-bwd-p38h1-1c6fb309` on 64 TPU (`DP16xTP4`) from source commit `1c6fb3098d59a61e13ff71d7df80ae5af4c2cf22` under `P38H_BACKWARD_RUNBOOK.md`.
+- Pre-backward forward alignment 100% bitwise exact: $N_{\text{action}}=47,818$, $S_{\text{decode}}$ vs $S_{\text{prefill}}$ = 0 differing bytes (`max_abs=0.0`), $S_{\text{prefill}}$ vs $T_{\text{old}}$ = 0 differing bytes (`max_abs=0.0`), Pearson $r=1.00000$.
+- All 16 reverse groups and 16-way DP cross-slice gradient reductions completed on 64 TPU chips with exact replica consensus (`replicas_exact=1`).
+- Finite, non-zero gradients verified across all 16 microsteps (`micro_gradient_norms`: [3.806, 4.369, 2.043, 2.748, 2.128, 2.426, 1.752, 2.661, 1.887, 1.641, 1.499, 1.640, 1.717, 2.411, 1.367, 2.555]).
+- Zero parameter mutation verified: `model_changed_paths: []`, `optimizer_changed_paths: []`, `accumulator_changed_paths: []`, `reference_changed_paths: []`, `optimizer_commits: 0`, `state_changed_paths: 0`.
+- Official mechanical classifier returned `P38H_FIXED_LM_HEAD_BACKWARD_NO_COMMIT_PASS` (`updates=1/1`, `alignments=16/16`, `reasons=[]`).
+- Compact return package SHA-sealed under `canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/evidence/p38h1/`.
+- Full verification report: `artifacts/p38_2h_backward_no_commit_pass_report.md`.
