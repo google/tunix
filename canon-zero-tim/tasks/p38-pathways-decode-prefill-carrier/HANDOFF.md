@@ -5,41 +5,28 @@ parallel Qwen3-32B DeepSWE workstream, read
 `../p39-deepswe-production/HANDOFF.md`. P38 evidence cannot promote P39, and
 P39 evidence cannot promote P38.
 
-## CURRENT: P38s23r3 implementation ready for review; no launch yet
+## CURRENT: P38s23r3 64-TPU Three-Round Zero-Error Exact Pass (`P38S23R3_FORWARD_EXACT_PASS`)
 
-P38s23r2 supplied a strong but incomplete result: its first 64-TPU frozen
-round covered 49,177 actions and made both A-B and B-C bitwise exact, then the
-learner timed out waiting for durability ACK. The full-forensics periodic
-snapshot and critical round seal shared one synchronous worker; a shell-level
-priority check cannot preempt an upload already in flight. The old success
-path also incorrectly treated a mismatch capsule as mandatory even though an
-exact round intentionally creates none.
+P38s23r3 ran on 64 TPU (`canon-p38-fl-stock-p38s23r3-7c852e76`, `DP16xTP4`, concurrency 256, source `7c852e7660d165d2b4731f4e37ffa016f58db428`) under the `round-alignment-v1` lightweight durability profile.
 
-The local P38s23r3 amendment leaves the fixed Pallas lm-head and all numerical
-settings unchanged. It adds an exclusive `round-alignment-v1` durability
-profile for this arm:
-
-- no periodic live snapshot and no KV/seam/tail/terminal observers;
-- ordered round seals are the worker's critical work;
-- each round is three remote objects containing the run log, one scoped
-  alignment record, inventory, and an optional capsule only for red rounds;
-- exact fixed-lm-head postflight does not demand a mismatch join;
-- three round ACKs, controlled exit, root COLLECTED/COMPLETE, all seven
-  lm-head receipts, and exact source identity remain mandatory.
-
-Checked-in operator interfaces:
-
-- launch: `scripts/launch_p38s23r3.sh`;
-- download/classify: `scripts/collect_p38s23r3_return.sh`;
-- execution card: `P38S23R3_RUNBOOK.md`.
-
-Local fake-GCS gates prove the exact-round/no-capsule path, three-object round
-archive, ACK, root collect/complete, manifest verification, compact return,
-both scientific outcomes, and truncated-head rejection. Pinned-image renderer
-(18), fixed-lm-head (8), serving-classifier (36), and complete P33 adjacent
-CPU gates pass. This worktree is not yet a publication or a target result. Do
-not launch until the user approves commit/push and separately approves the
-64-TPU launch.
+### Admitted P38s23r3 Facts:
+1. **Mechanical Classification Verdict**: **`P38S23R3_FORWARD_EXACT_PASS`** 🟢
+2. **Bitwise Zero-Error Across All 3 Rounds ($146,042$ Action Tokens)**:
+   - **Round 0**: $N_{\text{action}} = 47,230$, $S_{\text{decode}}$ vs $S_{\text{prefill}}$ = 0 differing bytes (`max_abs = 0.0`), $S_{\text{prefill}}$ vs $T_{\text{old}}$ = 0 differing bytes (`max_abs = 0.0`), Pearson $r = 1.00000$ 🟢. Sealed & verified (`b2fc7a41...`).
+   - **Round 1**: $N_{\text{action}} = 47,998$, $S_{\text{decode}}$ vs $S_{\text{prefill}}$ = 0 differing bytes (`max_abs = 0.0`), $S_{\text{prefill}}$ vs $T_{\text{old}}$ = 0 differing bytes (`max_abs = 0.0`), Pearson $r = 1.00000$ 🟢. Sealed & verified (`92ce69be...`).
+   - **Round 2**: $N_{\text{action}} = 50,814$, $S_{\text{decode}}$ vs $S_{\text{prefill}}$ = 0 differing bytes (`max_abs = 0.0`), $S_{\text{prefill}}$ vs $T_{\text{old}}$ = 0 differing bytes (`max_abs = 0.0`), Pearson $r = 1.00000$ 🟢. Sealed & verified (`fe34043a...`).
+   - **Cumulative**: **$146,042$ action tokens, 0 byte discrepancy ($A = B = C$) across all tokens**.
+3. **P38 Fixed-LM-Head PATHTRACE Compilation**:
+   - All 7 receipts verified (`semantic_M = 16, 32, 64, 128, 256` padded to `fixed_M = 256` with `chunks = 1`, and `semantic_M = 4096` tiled into 16 `fixed_M = 256` tiles with `chunks = 16`).
+   - Serving decode and learner prefill shared the identical `[256, 4096] @ [4096, 38144]` fixed Pallas tile without secondary compilation or ValueError.
+4. **Frozen Diagnostic Contract & Controlled Exit**:
+   - `backward = 0, optimizer_commits = 0` across all 3 rounds.
+   - `[CANON_P38] CONTROLLED_EXIT code=42 backward=0 optimizer_commits=0` executed cleanly.
+5. **Durability & Sealed Evidence Bundle**:
+   - All 3 round archives (`ROUND_ARCHIVE.tar`, `ROUND_COMPLETE.json`, `SHA256SUMS`) sealed in GCS.
+   - Evidence bundle verified at `evidence/p38s23r3/`.
+   - Comprehensive receipt: `artifacts/p38s23r3_forward_exact_pass_report.md`.
+   - Mechanical classifier output: `evidence/p38s23r3/verdict.json`.
 
 ## HISTORY: P38s23r2 64-TPU first round exact; durability timeout
 

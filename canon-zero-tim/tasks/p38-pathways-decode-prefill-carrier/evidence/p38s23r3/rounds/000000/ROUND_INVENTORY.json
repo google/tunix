@@ -1,0 +1,14 @@
+{
+  "capsule_present": false,
+  "diagnostic_round": 0,
+  "incident_records": 0,
+  "journal_records": 0,
+  "journal_scope": "omitted-by-alignment-only-profile",
+  "kv_records": 0,
+  "pre_alignment_records": 1,
+  "profile": "alignment-only",
+  "schema": "canon-p38-round-stage-v1",
+  "seam_records": 0,
+  "tail_records": 0,
+  "terminal_records": 0
+}

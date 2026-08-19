@@ -1,0 +1,35 @@
+{
+  "claim_ceiling": "three-round forward causal-repair candidate only; backward and optimizer untested",
+  "rounds": [
+    {
+      "N_action": 47230,
+      "a_b_differing_bytes": 0,
+      "a_b_differing_elements": 0,
+      "a_b_max_abs": 0.0,
+      "archive_sha256": "b2fc7a410557d55be19a0725ff914ce3f254b39a40f5ecf34e9e84c22a995f41",
+      "b_c_differing_bytes": 0,
+      "diagnostic_round": 0
+    },
+    {
+      "N_action": 47998,
+      "a_b_differing_bytes": 0,
+      "a_b_differing_elements": 0,
+      "a_b_max_abs": 0.0,
+      "archive_sha256": "92ce69be2dce64ff495ccbc8a1087933fa3b8b00a27cfb93cfa98a27c85db310",
+      "b_c_differing_bytes": 0,
+      "diagnostic_round": 1
+    },
+    {
+      "N_action": 50814,
+      "a_b_differing_bytes": 0,
+      "a_b_differing_elements": 0,
+      "a_b_max_abs": 0.0,
+      "archive_sha256": "fe34043a2519f958b9ece84d16c812374c8c4feb2d3a4c8628ea36786c2768c8",
+      "b_c_differing_bytes": 0,
+      "diagnostic_round": 2
+    }
+  ],
+  "schema": "canon-p38s23r3-return-v1",
+  "source_commit": "7c852e7660d165d2b4731f4e37ffa016f58db428",
+  "status": "P38S23R3_FORWARD_EXACT_PASS"
+}
