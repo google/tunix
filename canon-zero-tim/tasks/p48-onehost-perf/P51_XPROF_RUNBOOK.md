@@ -32,7 +32,7 @@ label 只允许 `[a-zA-Z0-9_-]`;同 label 不可复用(run dir 已存在即拒�
 | `P51_XPROF_SKIP_STEPS` | 2 | 完成 N 步后开始捕获(即捕 stepN 起) |
 | `P51_XPROF_STEPS` | 1 | 捕获跨越的步数(1 步 xplane ≈1.9GB;2 步 ≈4GB) |
 | `P51_XPROF_PYTHON_TRACER` | **0** | **保持 0**:开 python tracer 会把 device 轨挤掉(host-only 936MB 教训);要 python 栈时才临时开,并接受丢 device |
-| `P51_XPROF_HOST_TRACER` | (jax 默认) | 1=精简 host 事件;2=含更多(默认足够) |
+| `P51_XPROF_HOST_TRACER` | **1** | 与 python tracer 同理:jax 默认的 2 会用 host 事件把 device 采集挤掉。三发实测:python 开+host 2 → 纯 host 936MB;python 0+host 1 → 8 个 device plane / 2300 万事件;python 0+host 2 → 纯 host 32MB。要 host 细节时才调 2,并接受丢 device 轨 |
 | `P51_BATCHED_REVERSE` | (关) | P52 优化;profile 当前最优配置时置 1 |
 | `P51_ONEHOST_TIMEOUT_SECONDS` | 2700 | 6 步 ≈17 分钟,余量足;加步数需同步加 |
 
