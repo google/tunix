@@ -1,2 +1,2 @@
-vllm @ git+https://github.com/vllm-project/vllm.git@a7a204cc6ec99b375985e564f4f271e68ee8f5b8
+vllm @ git+https://github.com/vllm-project/vllm.git@9842d701450214d4b78cd9aefb8eee0c616bce33
 
