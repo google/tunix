@@ -843,7 +843,11 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         )
 
     start = time.perf_counter()
-    with self.rl_cluster._get_mesh_and_logical_axis_rules_cm(  # pylint: disable=protected-access
+    with self.rl_cluster.perf_v2.span(
+        "segmented_value_and_grad",
+        self.rl_cluster.perf_v2.all_devices,
+        tags={perf_constants.STEP: self.rl_cluster.global_steps},
+    ), self.rl_cluster._get_mesh_and_logical_axis_rules_cm(  # pylint: disable=protected-access
         rl_cluster_lib.Role.ACTOR
     ):
       common = {
@@ -1064,7 +1068,11 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         )
       return no_commit_record
 
-    with self.rl_cluster._get_mesh_and_logical_axis_rules_cm(  # pylint: disable=protected-access
+    with self.rl_cluster.perf_v2.span(
+        "gradient_commit",
+        self.rl_cluster.perf_v2.all_devices,
+        tags={perf_constants.STEP: self.rl_cluster.global_steps},
+    ), self.rl_cluster._get_mesh_and_logical_axis_rules_cm(  # pylint: disable=protected-access
         rl_cluster_lib.Role.ACTOR
     ):
       commit_norm = actor_trainer.commit_precomputed_gradients()
@@ -2308,9 +2316,17 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             f"grad_acc={expected_grad_acc} segmented=1",
             flush=True,
         )
-        segmented_result = self._run_p28_g6_update(
-            merged_train_micro_batch
-        )
+        with self.rl_cluster.perf_v2.span(
+            perf_constants.PEFT_TRAIN,
+            self.rl_cluster.perf_v2.all_devices,
+            tags={
+                perf_constants.STEP: self.rl_cluster.global_steps,
+                perf_constants.ROLE: "actor",
+            },
+        ):
+          segmented_result = self._run_p28_g6_update(
+              merged_train_micro_batch
+          )
         if (
             canonical_workload
             and (
