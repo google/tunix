@@ -30,17 +30,20 @@ scripts/extract_perf.py                  [PERF] 行 → JSON 画像
 evidence/p48g7/                          64 卡 GSM8K 性能日志 + 提取 JSON
 ```
 
-## P54:画像栈已切官方 tunix/perf(2026-08-19)
+## P54/P55:官方 tunix/perf 栈 + 训练段 span + update 捕获窗(2026-08-19)
 
 | 件 | 实现 | 产物 |
 |---|---|---|
-| 语义时间线 | `CANON_PERF_TRACE_DIR` → PerfMetricsConfig(deepscaler 样板)→ learner 内建 v2 span | `perf/perfetto_trace_v2_<ts>.pb`(~20KB,503 packets/480 events) |
-| 器件织物 | 官方 `tunix.sft.profiler.Profiler`,learner 全局步边界驱动(G6 不入 PeftTrainer.train()) | xplane 1852MB(8 device plane)+ trace.json.gz 39MB |
+| 语义时间线 | `CANON_PERF_TRACE_DIR` → PerfMetricsConfig → learner 内建 v2 span + **P55 补装 G6 训练段**(peft_train 内嵌 segmented_value_and_grad/gradient_commit) | `perf/perfetto_trace_v2_<ts>.pb`(~20KB) |
+| 器件织物 step 窗 | 官方 `tunix.sft.profiler.Profiler` 步边界驱动 | xplane ~1.9GB——**实为 engine 前 ~25s decode**(device 缓冲 ~283 万事件/核填满即丢,p54final 解剖实证;backward 不在其中) |
+| 器件织物 update 窗 | `CANON_XPROF_PHASE=update`:G6 update 入口起窗(=peft_train span 打开处)→ 步完成点 | xplane ~1.5GB,**完整 backward**(census: block_pullback×1758/adjoint×17/optimizer 事务;decode 零) |
+| 普查件 | `scripts/census_xplane_modules.py`(device 侧,pip xprof)/ `census_semantic_trace.py`(span 侧,容器内跑) | CENSUS_GREEN/RED 判词 |
 
-终门 `p54final_20260819`:3/3 步、51/51 全零、窗口步号精确 2→3、
-产物 SHA 见 EVIDENCE.md run index。tracer 钉 python=0/host=1
-(官方默认 2/1 在本 image 实测丢 device 轨)。运行方法唯一权威:
-`P51_XPROF_RUNBOOK.md`(2026-08-19 重写版)。
+认证 run:`p54final`(step 窗基线)、`p55a/p55a2`(缩窗否决证据,
+rollout_update land-and-revert)、`p55b`(CL5 默认路径回归)、`p55c`
+(update 窗认证,自证行 2/2/3)——全部 3/3 步、51/51 全零,SHA 见
+EVIDENCE run index。tracer 钉 python=0/host=1。运行方法唯一权威:
+`P51_XPROF_RUNBOOK.md`(2026-08-19 P55 版:含缓冲截断必读节)。
 
 ## 下一个门
 

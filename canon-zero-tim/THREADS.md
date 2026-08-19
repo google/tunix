@@ -2,12 +2,12 @@
 
 > 看板类文档,行级写权:线程执行者更新**自己线程的行**(及自己 run 的 EVIDENCE 行);
 > 评估者拥有板面结构、跨线仲裁与措辞降格权。只写"现在",历史看各线程 log.md。
-> 更新:2026-08-18 @ c04013bd;perf 行 2026-08-18(P51/P52 收官 + xprof 载具)
+> 更新:2026-08-18 @ c04013bd;perf 行 2026-08-19(P54/P55:官方栈 + 训练段 span + update 捕获窗)
 
 | # | 线程 | 状态 | 下一个门 | 等谁 | 任务目录 |
 |---|---|---|---|---|---|
 | 1 | **zero-tim-carrier** | P38s23r3 三轮共 146,042 action 的 A=B=C forward exact；P38.2h Attempt 0 又完成 16/16 actual-model reverse groups、replica-exact DP reduction 与非零梯度，但被 no-commit optimizer attestation 假红挡在终态包之前；核心修复已在 `06f0228e` | **发布 focused attestation regression 后，只重跑一次 DP16xTP4 backward-no-commit，并要求完整 compact PASS 包** | regression commit/push 与 64 TPU rerun 均待逐项批准 | tasks/p38-pathways-decode-prefill-carrier |
-| 2 | **perf** | 画像栈切换官方 tunix/perf(P54):demo 接 PerfMetricsConfig、learner 用官方 Profiler 窗、一发 run 出语义 v2 时间线+xplane(8 device plane)+trace.json;p54final 3/3 步 51/51 全零,窗口 2→3 步号精确;tracer 钉 python0/host1(默认 2/1 在本 image 丢 device 轨) | **DP16 一发**(读 p32_vag_reverse 的 adjoint= 验 E;P52 grouped 移植定量) | 等卡 + 用户渲染 | tasks/p48-onehost-perf(state.md)+ 外层 p48-p54 |
+| 2 | **perf** | P55 收官:语义线补 G6 训练段 span(peft_train+vag/commit);查明整步 xplane 实为 engine 前 ~25s(device 缓冲 ~283 万事件/核填满即丢,backward 从未入镜),缩窗 land-and-revert 否决;`CANON_XPROF_PHASE=update` 在 G6 入口起窗→backward 完整(p55c census: block_pullback×1758/adjoint×17,decode 零);p55a/a2/b/c 全 3/3 步 51/51 全零 | **DP16 一发**(读 p32_vag_reverse 的 adjoint= 验 E;P52 grouped 移植定量) | 等卡 + 用户渲染;P55 包待批推 | tasks/p48-onehost-perf(state.md)+ 外层 p48-p55 |
 | 3 | **frozenlake-train** | p45r8（DP8xTP8 resident 路径，无评测模式 `--eval_every_n_steps=0`，`fl-prod-noeval-001`）已成功在 64 TPU 上线运行，JIT 编译通过，Step 0 反向传播（40ms/microstep）与 DP8 规约正常进行中 | **持续推进 Step 1~450 迭代，Step 10 自动持久化新 GCS 检查点** | 训练中 | tasks/p45-frozenlake-dp8-tp8-resident |
 | 4 | **deepswe-eval** | p46e12808 修复了 Kueue 工作负载冲突注解与 cpu-np 节点池亲和性，Kueue 准入通过（`Admitted: True`），绑定 `--resume-tag p46e12806` 严格从 Wave 27 续跑（复用 6460+ 轨迹） | **等待集群 128 TPU 拓扑释放后自动调度点火** | 排队中 | tasks/p46-deepswe-eval-training-profiles |
 | 5 | **deepswe-train** | 依赖 #4 干净数据;Q4 parity 任务在册(p44) | Q4 3-step debug 配置定稿 | 排 #2#3 绿后 | tasks/p44-deepswe-qwen4b-parity |
