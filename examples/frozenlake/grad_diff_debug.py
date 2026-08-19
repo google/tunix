@@ -9,7 +9,12 @@ import warnings
 # JAX reports failed buffer donation as "Some donated buffers were not usable",
 # once per location. Python dedupes repeated warnings by default, so a warning
 # raised during the first step would be invisible if you only skim later output.
-warnings.simplefilter("always")
+#
+# Scoped to donation messages on purpose: a blanket `simplefilter("always")`
+# un-dedupes flax's and jax's per-call DeprecationWarnings too, which buried the
+# 17 lines that matter under 4,700 lines of ".value access is now deprecated".
+warnings.filterwarnings("always", message=".*donat.*")
+warnings.filterwarnings("always", message=".*not usable.*")
 
 
 import os
@@ -757,6 +762,29 @@ def compiled_variants(trainer, tag):
   return counts
 
 
+def accumulated_grads_host(trainer, tag):
+  """The NORMALISED accumulated gradient, i.e. what `optimizer.update` consumes.
+
+  Do not compare `grad_accumulator.grads` between the two trainers: they store
+  different intermediates. v1 accumulates the unreduced-sum gradient and passes
+  the token count as the denominator (`add(grads, denom=primary_loss.denominator)`),
+  v2 pre-scales the gradient to a mean and passes `denom=1.0` -- there is a
+  standing TODO(b/491970038) to make v2 packing-aware. Both define
+  `get() = sum(grads) / sum(denom)`, so with equal-sized micro-batches the two
+  conventions agree exactly, but the raw buffers differ by the token count.
+  Measured here: v1 norm 1.06e7 vs v2 norm 5.22e3, ratio 2040.0 = 8 seqs x 255
+  targets. That is a bookkeeping difference, not a divergence.
+
+  (They would genuinely disagree under sequence packing, where micro-batches
+  hold different numbers of items: v1 gives the token-weighted mean, v2 the
+  unweighted mean of per-batch means. Out of scope for this harness, which feeds
+  fixed-size batches, but it is the reason the TODO exists.)
+  """
+  if not jax.tree_util.tree_leaves(trainer.grad_accumulator.grads):
+    return None
+  return _host(trainer.grad_accumulator.get(), f"{tag} normalised grads")
+
+
 def assert_accumulator_cleared(trainer, tag):
   """After an update the accumulator must be exactly zero, and finite.
 
@@ -807,9 +835,10 @@ if not _PROFILE:
     # accumulated gradients when gradient_accumulation_steps > 1, and v1's depth-1
     # branch never calls reset() -- the only reset() lives in `apply_updates`,
     # which runs on the accumulating nnx.cond path.
-    grads_v1_host = _host(trainer_v1.grad_accumulator.grads, "v1 grads")
+    grads_v1_host = accumulated_grads_host(trainer_v1, "v1")
     denom_v1 = phase_of(trainer_v1, "v1")
-    if jax.tree_util.tree_leaves(grads_v1_host):
+    micro_v1 = trainer_v1._iter_steps  # pylint: disable=protected-access
+    if grads_v1_host is not None:
       describe_grads("v1", grads_v1_host)
     if _MODE == "weights":
       assert_accumulator_cleared(trainer_v1, "v1")
@@ -874,9 +903,10 @@ with mesh:
 
   # Populated only at gradient_accumulation_steps > 1; see the note above the
   # comparison helpers for why depth 1 has no gradient hook.
-  grads_v2_host = _host(trainer_v2.grad_accumulator.grads, "v2 grads")
+  grads_v2_host = accumulated_grads_host(trainer_v2, "v2")
   denom_v2 = phase_of(trainer_v2, "v2")
-  if jax.tree_util.tree_leaves(grads_v2_host):
+  micro_v2 = trainer_v2._iter_steps  # pylint: disable=protected-access
+  if grads_v2_host is not None:
     describe_grads("v2", grads_v2_host)
   if _MODE == "weights":
     assert_accumulator_cleared(trainer_v2, "v2")
@@ -885,27 +915,40 @@ with mesh:
   if _PROFILE:
     print("[cmp] SKIPPED -- _PROFILE run has no v1 leg. Set _PROFILE=False.")
   else:
-    # Gate the gradient comparison on the phase. Two accumulators holding
+    # Gate the gradient comparison on the phase: two accumulators holding
     # different micro-batches produce similar norms and 100%-different elements,
     # which is indistinguishable from a catastrophic divergence unless you check.
-    if denom_v1 != denom_v2:
+    #
+    # The gate keys on the micro-step count, NOT on denom. denom no longer means
+    # the same thing in the two trainers -- v1 counts tokens, v2 counts
+    # micro-steps -- so comparing denoms reports a phase mismatch on runs that
+    # are perfectly in phase. See `accumulated_grads_host`.
+    if micro_v1 != micro_v2:
       print(
           f"[cmp] grads: SKIPPED -- different accumulation phase"
-          f" (v1 denom={denom_v1:g}, v2 denom={denom_v2:g}). The two accumulators"
-          " hold different micro-batches, so an elementwise comparison is"
-          " meaningless. Make both runs stop at the same point before comparing."
+          f" (v1 fed {micro_v1} micro-steps, v2 fed {micro_v2}). The two"
+          " accumulators hold different micro-batches, so an elementwise"
+          " comparison is meaningless."
       )
-    elif denom_v1 == 0:
+    elif denom_v1 == 0 or denom_v2 == 0:
       print(
-          "[cmp] grads: SKIPPED -- both accumulators were reset by the final"
+          "[cmp] grads: SKIPPED -- the accumulator was reset by the final"
           " update(), so there are no gradients left to compare. Read them"
-          " between the last fwd_bwd and update(), i.e. run _MODE='grads'."
+          " between the last fwd_bwd and update(), i.e. run GDD_MODE=grads."
       )
-    elif jax.tree_util.tree_leaves(grads_v1_host) and jax.tree_util.tree_leaves(
-        grads_v2_host
-    ):
+    elif grads_v1_host is not None and grads_v2_host is not None:
+      print(
+          f"[cmp] grads: comparing get() output"
+          f" (v1 denom={denom_v1:g} tokens, v2 denom={denom_v2:g} micro-steps;"
+          f" raw buffers differ by that ratio by construction)"
+      )
       compare("grads", grads_v1_host, grads_v2_host, max_ulp=_GRAD_MAX_ULP)
 
+  # The weight comparison only means something in "weights" mode. "grads" mode
+  # deliberately feeds ACCUM-1 batches so the update never fires -- the weights
+  # are then bit-identical to the initial ones in BOTH trainers, and comparing
+  # them (or asserting that they moved) tests nothing.
+  if not _PROFILE and _MODE == "weights":
     # Snapshot v2's weights once, at a quiescent point: training has returned,
     # so the donated buffers have settled and nnx has rebound the module. Taking
     # this before `train()` would read freed arrays -- see `_host`.
@@ -943,13 +986,17 @@ with mesh:
         max_rel=_WEIGHT_MAX_REL,
     )
 
+    # denom=None: `accumulated_grads_host` already returns get() output, which
+    # is divided by the denominator. Passing denom here would divide twice --
+    # and v1's denom (tokens) and v2's (micro-steps) are not even the same
+    # quantity, so there is no single value that would be correct for both.
     attribute_weight_gap(
         model_state_v1_host,
         weights_v2_host,
         grads_v1_host,
         grads_v2_host,
         lr=_LEARNING_RATE,
-        denom=denom_v1 if denom_v1 == denom_v2 else None,
+        denom=None,
     )
 
 # # Tolerate typical bfloat16 XLA computation graph re-association on TPUs
