@@ -48,7 +48,7 @@ _WARMUP_STEPS = 3
 _BENCHMARK_STEPS = 20
 # Toy transformer vocab is >= 128 (see peft_trainer_v2_test.py), so token ids
 # are drawn from [0, 128).
-_VOCAB_UPPER_BOUND = 128
+_VOCAB_UPPER_BOUND = 200000
 
 tokenizer = AutoTokenizer.from_pretrained("google/gemma-4-E2B-it")
 
