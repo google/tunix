@@ -32,6 +32,29 @@ def _dump_json(model: pydantic.BaseModel) -> str:
   return model.model_dump_json(indent=2, exclude_none=True)
 
 
+def _validate_trajectory_id(trajectory_id: str | None) -> str:
+  """Validates that trajectory_id is non-empty and contains supported characters.
+
+  Args:
+    trajectory_id: The trajectory identifier to validate.
+
+  Returns:
+    The validated trajectory_id string.
+
+  Raises:
+    ValueError: If trajectory_id is None, empty, or contains characters that
+      cannot be encoded in a trajectory directory name.
+  """
+  if not trajectory_id:
+    raise ValueError("TrajectoryMetadata must have a non-empty trajectory_id.")
+  if not _TRAJECTORY_ID_REGEX.match(trajectory_id):
+    raise ValueError(
+        f"trajectory_id {trajectory_id!r} contains unsupported characters; only"
+        " letters, digits, underscores, and hyphens are allowed."
+    )
+  return trajectory_id
+
+
 class FileTrajectoryStore(store.TrajectoryReader, store.TrajectoryWriter):
   """File-based implementation satisfying TrajectoryReader and TrajectoryWriter.
 
@@ -170,16 +193,25 @@ class FileTrajectoryStore(store.TrajectoryReader, store.TrajectoryWriter):
       ValueError: If metadata.trajectory_id is empty, None, or contains
         characters that cannot be encoded in a trajectory directory name.
     """
-    traj_id = metadata.trajectory_id
-    if not traj_id:
-      raise ValueError(
-          "TrajectoryMetadata must have a non-empty trajectory_id."
-      )
-    if not _TRAJECTORY_ID_REGEX.match(traj_id):
-      raise ValueError(
-          f"trajectory_id {traj_id!r} contains unsupported characters; only "
-          "letters, digits, underscores, and hyphens are allowed."
-      )
+    traj_id = _validate_trajectory_id(metadata.trajectory_id)
+    self.update_metadata(metadata)
+    step_path = self.get_step_path(traj_id, step.step_id)
+    step_path.write_text(_dump_json(step))
+
+  def update_metadata(
+      self,
+      metadata: trajectory_lib.TrajectoryMetadata,
+  ) -> None:
+    """Updates (or creates) trajectory metadata.
+
+    Args:
+      metadata: TrajectoryMetadata containing trajectory_id and run metadata.
+
+    Raises:
+      ValueError: If metadata.trajectory_id is empty, None, or contains
+        characters that cannot be encoded in a trajectory directory name.
+    """
+    traj_id = _validate_trajectory_id(metadata.trajectory_id)
 
     traj_dir = self.get_trajectory_dir(traj_id)
     # Ensure the trajectory directory already exists.
@@ -193,9 +225,6 @@ class FileTrajectoryStore(store.TrajectoryReader, store.TrajectoryWriter):
       meta_path = self.get_trajectory_metadata_path(traj_id)
       meta_path.write_text(meta_json)
       self._metadata_hash_by_trajectory_id[traj_id] = meta_hash
-
-    step_path = self.get_step_path(traj_id, step.step_id)
-    step_path.write_text(_dump_json(step))
 
   def flush(self) -> None:
     """Flushes any pending or asynchronous writes to persistent storage."""

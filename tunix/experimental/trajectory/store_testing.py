@@ -229,10 +229,16 @@ class TrajectoryWriterTestCase(
     trajs = self.reader.get_trajectories([TRAJECTORY_ID_2])
     self.assertEqual(trajs, [TRAJECTORY_2])
 
-  def test_add_step_empty_trajectory_id(self) -> None:
-    """Tests that logging a step with an empty trajectory ID raises ValueError."""
+  @parameterized.named_parameters(
+      ("empty", ""),
+      ("none", None),
+  )
+  def test_add_step_invalid_trajectory_id(
+      self, trajectory_id: str | None
+  ) -> None:
+    """Tests that logging a step with an empty or None trajectory ID raises ValueError."""
     meta = trajectory_lib.TrajectoryMetadata(
-        trajectory_id="",
+        trajectory_id=trajectory_id,
         agent=trajectory_lib.Agent(name="writer_agent", version="2.0"),
     )
     with self.assertRaises(ValueError):
@@ -282,3 +288,56 @@ class TrajectoryWriterTestCase(
 
     trajs = self.reader.get_trajectories([TRAJECTORY_ID_1])
     self.assertEqual(trajs, [TRAJECTORY_1])
+
+  def test_update_metadata(self) -> None:
+    """Tests updating metadata for a trajectory."""
+    self.writer.add_step(STEP_1_1, METADATA_1)
+    self.writer.flush()
+
+    updated_meta = trajectory_lib.TrajectoryMetadata(
+        trajectory_id=TRAJECTORY_ID_1,
+        agent=METADATA_1.agent,
+        notes="Updated notes",
+    )
+    self.writer.update_metadata(updated_meta)
+    self.writer.flush()
+
+    metas = self.reader.get_trajectories_metadata()
+    self.assertEqual(metas, [updated_meta])
+
+    (traj_1,) = self.reader.get_trajectories([TRAJECTORY_ID_1])
+    expected_traj_1 = trajectory_lib.Trajectory(
+        **updated_meta.model_dump(),
+        steps=[STEP_1_1],
+    )
+    self.assertEqual(traj_1, expected_traj_1)
+
+  def test_update_metadata_standalone(self) -> None:
+    """Tests updating metadata prior to adding any steps."""
+    self.writer.update_metadata(METADATA_1)
+    self.writer.flush()
+
+    metas = self.reader.get_trajectories_metadata()
+    self.assertEqual(metas, [METADATA_1])
+
+    (traj_1,) = self.reader.get_trajectories([TRAJECTORY_ID_1])
+    expected_traj_1 = trajectory_lib.Trajectory(
+        **METADATA_1.model_dump(),
+        steps=[],
+    )
+    self.assertEqual(traj_1, expected_traj_1)
+
+  @parameterized.named_parameters(
+      ("empty", ""),
+      ("none", None),
+  )
+  def test_update_metadata_invalid_trajectory_id(
+      self, trajectory_id: str | None
+  ) -> None:
+    """Tests that updating metadata with an empty or None trajectory ID raises ValueError."""
+    meta = trajectory_lib.TrajectoryMetadata(
+        trajectory_id=trajectory_id,
+        agent=trajectory_lib.Agent(name="writer_agent", version="2.0"),
+    )
+    with self.assertRaises(ValueError):
+      self.writer.update_metadata(meta)

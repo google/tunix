@@ -6,6 +6,23 @@ from tunix.experimental.trajectory import store
 from tunix.experimental.trajectory import trajectory as trajectory_lib
 
 
+def _validate_trajectory_id(trajectory_id: str | None) -> str:
+  """Validates that trajectory_id is non-empty.
+
+  Args:
+    trajectory_id: The trajectory identifier to validate.
+
+  Returns:
+    The validated trajectory_id string.
+
+  Raises:
+    ValueError: If trajectory_id is None or empty.
+  """
+  if not trajectory_id:
+    raise ValueError("TrajectoryMetadata must have a non-empty trajectory_id.")
+  return trajectory_id
+
+
 class InMemoryTrajectoryStore(store.TrajectoryReader, store.TrajectoryWriter):
   """In-memory implementation satisfying TrajectoryReader and TrajectoryWriter."""
 
@@ -64,13 +81,24 @@ class InMemoryTrajectoryStore(store.TrajectoryReader, store.TrajectoryWriter):
     Raises:
       ValueError: If metadata.trajectory_id is empty or None.
     """
-    traj_id = metadata.trajectory_id
-    if not traj_id:
-      raise ValueError(
-          "TrajectoryMetadata must have a non-empty trajectory_id."
-      )
-    self._metadata_by_trajectory_id[traj_id] = metadata
+    traj_id = _validate_trajectory_id(metadata.trajectory_id)
+    self.update_metadata(metadata)
     self._steps_by_trajectory_id[traj_id].append(step)
+
+  def update_metadata(
+      self,
+      metadata: trajectory_lib.TrajectoryMetadata,
+  ) -> None:
+    """Updates (or creates) trajectory metadata.
+
+    Args:
+      metadata: TrajectoryMetadata containing trajectory_id and run metadata.
+
+    Raises:
+      ValueError: If metadata.trajectory_id is empty or None.
+    """
+    traj_id = _validate_trajectory_id(metadata.trajectory_id)
+    self._metadata_by_trajectory_id[traj_id] = metadata
 
   def flush(self) -> None:
     """Flushes any pending or asynchronous writes to persistent storage."""

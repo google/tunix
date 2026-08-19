@@ -83,6 +83,17 @@ class TrajectoryWriter(Protocol):
     """
     ...
 
+  def update_metadata(
+      self,
+      metadata: trajectory_lib.TrajectoryMetadata,
+  ) -> None:
+    """Updates (or creates) trajectory metadata.
+
+    Args:
+      metadata: TrajectoryMetadata containing trajectory_id and run metadata.
+    """
+    ...
+
   def flush(self) -> None:
     """Flushes any pending or asynchronous writes to persistent storage."""
     ...

@@ -125,18 +125,35 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
       ("with_dot", "traj.1001"),
       ("with_space", "traj 1001"),
       ("with_colon", "traj:1001"),
+      ("empty", ""),
+      ("none", None),
   )
-  def test_add_step_rejects_invalid_trajectory_id(
-      self, bad_trajectory_id: str
+  def test_rejects_invalid_trajectory_id(
+      self, bad_trajectory_id: str | None
   ) -> None:
-    """Verifies add_step rejects trajectory_ids that would not round-trip."""
+    """Verifies add_step, update_metadata, and helper reject invalid trajectory_ids."""
     meta = trajectory_lib.TrajectoryMetadata(
         trajectory_id=bad_trajectory_id,
         agent=trajectory_lib.Agent(name="agent", version="1.0"),
     )
 
-    with self.assertRaises(ValueError):
-      self.file_s.add_step(store_testing.STEP_1_1, meta)
+    with self.subTest("add_step"):
+      with self.assertRaises(ValueError):
+        self.file_s.add_step(store_testing.STEP_1_1, meta)
+
+    with self.subTest("update_metadata"):
+      with self.assertRaises(ValueError):
+        self.file_s.update_metadata(meta)
+
+    with self.subTest("_validate_trajectory_id"):
+      with self.assertRaises(ValueError):
+        file_store._validate_trajectory_id(bad_trajectory_id)
+
+  def test_validate_trajectory_id_valid(self) -> None:
+    """Verifies _validate_trajectory_id returns valid trajectory_ids unchanged."""
+    self.assertEqual(
+        file_store._validate_trajectory_id("traj-100_A1"), "traj-100_A1"
+    )
 
   def test_add_step_and_get_trajectory_id_with_allowed_characters(self) -> None:
     """Verifies ids with hyphens/underscores are written and read back."""
