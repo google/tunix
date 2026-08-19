@@ -69,3 +69,30 @@
      ```
    - Python slice indexing `self.input_embedding[(x,)]` does not declare the expected output sharding during the gather operation across the `model` and `data` axes.
    - JAX requires either `.at[x].get(out_sharding=self.shd_config.act_btd)` or explicit gather sharding annotations.
+
+---
+
+## 4. Host dependence (2026-08-19; supersedes the resolutions this file carried earlier)
+
+The remedies proposed for this report went through a full land-and-revert
+cycle: the `.at[...].get(out_sharding=...)` embedder change and the advice to
+run with `FL_SHARED_MESH=1,4` landed as `6daec65e` and were reverted in
+`e26b70b3`. This branch's encode is the plain-indexing expression again, and
+nothing in this section endorses the reverted change.
+
+What the two incidents (this report and the certified host's own lm-head
+failure) actually established is that the setting is host-specific, because
+the two engines build different meshes on identical v5p-8 hardware:
+
+| host | engine mesh (from its own error avals) | FL_SHARED_MESH |
+|---|---|---|
+| probe host `t1v-n-4a77ebd0-w-0` (pinned image `vllm-tpu0.25.0`; all certified runs) | six-axis, Auto types | must be ABSENT — the P51 vehicle asserts this in-container; passing it selects a different mesh program and dies in the lm-head matmul |
+| `maxtext-single-host-1-v5p-8` (bare-metal newer tpu_inference; different checkout) | `('data','model')`, Explicit types | needed `1,4` there, plus an embedder that states its gather out-sharding |
+
+Consequence for the explicit-mesh host: this branch, as pushed, cannot run
+the reference-model encode on that engine regime. Supporting it properly is
+open work — a mesh-aware gather helper (selects the indexing form from
+`jax.sharding.get_abstract_mesh().explicit_axes`, keeps the certified Auto
+path byte-identical, gated tests on four CPU devices) exists on the unpushed
+local branch `local/p50-delivery` (`32011d4d`, `d4ea82e1`) if that support is
+ever wanted; landing it is a decision for then, with its own gates.
