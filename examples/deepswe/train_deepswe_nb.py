@@ -146,6 +146,11 @@ parser.add_argument("--episode_timeout_secs", type=int, default=3 * 60 * 60)
 parser.add_argument("--step_timeout_secs", type=int, default=30 * 60)
 parser.add_argument("--reward_timeout_secs", type=int, default=30 * 60)
 parser.add_argument("--max_concurrency", type=int, default=200)
+parser.add_argument(
+    "--use_agent_sandbox",
+    action="store_true",
+    help="Whether to use Kubernetes Agent Sandbox runtime instead of local Docker socket.",
+)
 
 parser.add_argument(
     "--overlong_filter",
@@ -383,8 +388,12 @@ from tunix.rl.agentic.parser.chat_template_parser import parser as template_pars
 from tunix import PerfMetricsConfig
 from tunix.perf.experimental.export import PerfMetricsExport
 from tunix.rl.agentic.rewards.reward_types import RewardOutput
-from examples.deepswe import swe_agent
-from examples.deepswe import swe_env
+try:
+  from examples.deepswe import swe_agent
+  from examples.deepswe import swe_env
+except ImportError:
+  from examples.deepswe import swe_agent  # pytype: disable=import-error
+  from examples.deepswe import swe_env  # pytype: disable=import-error
 
 # %%
 # ==========================================
@@ -437,8 +446,13 @@ else:
     os.makedirs(MODEL_PATH, exist_ok=True)
 
     # Requires full HF repository ID (e.g. "Qwen/Qwen3-32B").
+    hf_repo_id = (
+        f"Qwen/{MODEL_VERSION}"
+        if "qwen" in MODEL_VERSION.lower() and "/" not in MODEL_VERSION
+        else MODEL_VERSION
+    )
     snapshot_download(  # pyrefly: ignore[no-matching-overload]
-        repo_id=MODEL_VERSION,
+        repo_id=hf_repo_id,
         local_dir=MODEL_PATH,
         local_dir_use_symlinks=False,
     )
@@ -512,6 +526,7 @@ STEP_TIMEOUT_SECS = args.step_timeout_secs
 REWARD_TIMEOUT_SECS = args.reward_timeout_secs
 
 MAX_CONCURRENCY = args.max_concurrency
+USE_AGENT_SANDBOX = args.use_agent_sandbox
 KV_CACHE_SIZE = MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH + 128
 print(f"kv_cache_size (Capped): {KV_CACHE_SIZE}")
 # === AdamW, warmup, cosine scheduler ===
@@ -654,6 +669,21 @@ train_dataset, _ = data_lib.post_init_dataset(
     prompt_key="problem_statement",
     custom_batch_fn=mixed_type_batch_fn,
 )
+
+fleet = None
+if USE_AGENT_SANDBOX:
+  fleet = swe_env._init_global_fleet(
+      tasks=dataset,
+      max_concurrency=MAX_CONCURRENCY,
+      num_generations=NUM_GENERATIONS,
+      batch_size=MINI_BATCH_SIZE,
+  )
+  train_dataset = swe_env.PrewarmDatasetIterator(
+      train_dataset,
+      fleet=fleet,
+      num_generations=NUM_GENERATIONS,
+      batch_size=MINI_BATCH_SIZE,
+  )
 
 
 # %%
@@ -999,7 +1029,10 @@ cluster_config = rl_engine_lib.ClusterConfig(
 )
 sft_utils.show_hbm_usage()
 
-rl_engine = rl_engine_lib.RLEngine(
+RLClusterCls = getattr(
+    rl_engine_lib, "RLCluster", getattr(rl_engine_lib, "RLEngine", None)
+)
+rl_engine = RLClusterCls(  # pytype: disable=not-callable
     actor=qwen_actor,
     reference=qwen_reference,
     tokenizer=tokenizer,
@@ -1031,9 +1064,8 @@ config_kwargs = {
 
 grpo_config = agentic_grpo_learner.GRPOConfig(**config_kwargs)
 
-
 agentic_grpo_learner = agentic_grpo_learner.GRPOLearner(
-    rl_engine=rl_engine,
+    rl_engine,
     reward_fns=None,
     agent_class=swe_agent.SWEAgent,
     agent_kwargs={},
@@ -1042,6 +1074,8 @@ agentic_grpo_learner = agentic_grpo_learner.GRPOLearner(
         "max_steps": MAX_TURNS,
         "step_timeout": STEP_TIMEOUT_SECS,
         "reward_timeout": REWARD_TIMEOUT_SECS,
+        "use_agent_sandbox": USE_AGENT_SANDBOX,
+        "fleet": fleet,
     },
     algo_config=grpo_config,
     chat_parser=chat_parser,
