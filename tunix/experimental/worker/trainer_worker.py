@@ -235,13 +235,14 @@ class TrainerWorker(abstract_worker.Worker):
     """Restore state from latest checkpoint and return the metadata pytree."""
     return self._trainer.restore_checkpoint(**kwargs)
 
-  def prepare_weight_sync(self, **kwargs) -> Any:
-    """Stages weights for transfer and returns coordinates/metadata."""
+  def prepare_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
+    """Stages weights for transfer and returns their metadata."""
     self._ensure_ready()
     self.state = WorkerState.SYNCING
     try:
+      if sync_request is not None:
+        kwargs["sync_request"] = sync_request
       metadata = self._trainer.prepare_weight_sync(**kwargs)
-      self.state = WorkerState.READY
       self._last_error = None
       if metadata is not None:
         return metadata
@@ -250,6 +251,14 @@ class TrainerWorker(abstract_worker.Worker):
       self._last_error = str(exc)
       self.state = WorkerState.ERROR
       raise
+
+  def release_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
+    """Releases this round's staging and restores READY."""
+    release = getattr(self._trainer, "release_weight_sync", None)
+    result = release(**kwargs) if release else None
+    if self.state == WorkerState.SYNCING:
+      self.state = WorkerState.READY
+    return result
 
   def get_metrics(self) -> Any:
     """Returns and clears the recently collected step metric records."""
