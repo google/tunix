@@ -57,10 +57,16 @@ $DOCKER run --rm \
     grep -Eq program_path=.standard. "$qwen1p7b_overlay/tpu_runner_p21_l30.py"
     test -f "$qwen1p7b_overlay/p38_kv_fingerprint.py"
     test -f "$qwen1p7b_overlay/p38_seam_capture.py"
+    test -f "$qwen1p7b_overlay/p38_fixed_lm_head.py"
+    grep -Fq "CANON_P38_FIXED_LM_HEAD" "$qwen1p7b_overlay/linear_p22xk.py"
     python3 -m py_compile "$qwen1p7b_overlay/p38_kv_fingerprint.py"
     python3 -m py_compile "$qwen1p7b_overlay/p38_seam_capture.py"
+    python3 -m py_compile "$qwen1p7b_overlay/p38_fixed_lm_head.py"
     python3 -m py_compile "$qwen1p7b_overlay/p38_terminal_capture.py"
     python3 -m py_compile "$qwen1p7b_overlay/tpu_runner_p21_l30.py"
+    PYTHONPATH="$qwen1p7b_overlay" python3 \
+      canon-zero-tim/tests/p38_serving/probe_fixed_lm_head_overlay.py \
+      --hidden-size 2048
     python3 canon-zero-tim/tests/p33_workloads/test_decode_logprob_chunking.py \
       --overlay "$qwen1p7b_overlay"
     bash canon-zero-tim/install.sh "$qwen8b_overlay" \

@@ -28,6 +28,8 @@ bash -n \
   canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/run_p38_fixed_lm_head_vjp_onehost.sh \
   canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/launch_p38h_backward.sh \
   canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/collect_p38h_backward_return.sh \
+  canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/run_gsm8k_fixed_lm_head_onehost.sh \
+  canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/launch_p38y_gsm8k_full.sh \
   canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/p38_live_snapshot_worker.sh \
   canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/persist_p38_gcs.sh \
   canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/seal_p38_evidence.sh \
@@ -191,6 +193,7 @@ validate_gsm8k_alignment_warning_policy_preflight() (
   export CANON_P33_NO_COMMIT=0
   export CANON_GSM8K_AB_REPORT_ONLY=0
   export CANON_GSM8K_ALIGNMENT_WARN_ONLY=1
+  export CANON_P38_FIXED_LM_HEAD=1
   export CANON_RUN_CMD="printf alignment-warning-policy-preflight-only"
   export CANON_RUN_LOG="$state/run.log"
   export CANON_PRE_ALIGN_REPORT="$state/pre_alignment.jsonl"
@@ -199,6 +202,7 @@ validate_gsm8k_alignment_warning_policy_preflight() (
   export INJECTED_WANDB_API_KEY=test-key-not-a-credential
   bash "$ROOT/cluster/steps/00_env.sh" >/dev/null
   grep -q 'export CANON_GSM8K_ALIGNMENT_WARN_ONLY=1' "$state/env.sh"
+  grep -q 'export CANON_P38_FIXED_LM_HEAD=1' "$state/env.sh"
 
   export CANON_PROFILE_FILE=cluster/profiles/qwen3-8b-dp16-tp4-frozenlake.env
   if bash "$ROOT/cluster/steps/00_env.sh" >/dev/null 2>&1; then

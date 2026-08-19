@@ -5,6 +5,19 @@ parallel Qwen3-32B DeepSWE workstream, read
 `../p39-deepswe-production/HANDOFF.md`. P38 evidence cannot promote P39, and
 P39 evidence cannot promote P38.
 
+## CURRENT ACTION: P38.2y GSM8K full training (locally gated; target not run)
+
+The Qwen3-1.7B extension of the fixed-tile lm-head has passed unit, renderer,
+pinned-image Qwen1.7/Qwen8 overlay, and real one-host v5p forward+VJP gates.
+The target is now one 200-step `DP16xTP4` GSM8K full run combining the repair
+with resident optimizer, P47a, batched evidence, and batched report. P52
+batched reverse remains off because its DP16 grouped path is not certified.
+
+An execution-only operator must follow `P38Y_GSM8K_FULL_RUNBOOK.md` and the
+checked-in `scripts/launch_p38y_gsm8k_full.sh`; do not hand-edit the YAML or
+reuse a diagnostic P38 serving renderer. The target remains NOT RUN until a
+separately approved commit is published and launched.
+
 ## CURRENT: P38.2h 64-TPU Fixed-LM-Head Backward-No-Commit PASS (`P38H_FIXED_LM_HEAD_BACKWARD_NO_COMMIT_PASS`)
 
 P38.2h official rerun on 64 TPU (`canon-p38h-fl-bwd-p38h1-1c6fb309`, `DP16xTP4`, source `1c6fb3098d59a61e13ff71d7df80ae5af4c2cf22`) completed with **100% full pass** under `P38H_BACKWARD_RUNBOOK.md`.

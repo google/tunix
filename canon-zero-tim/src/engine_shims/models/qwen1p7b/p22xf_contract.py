@@ -18,6 +18,9 @@ CONFLICTS = (
 BM = 128
 BN = 256
 BK = 256
+MATMUL_K_PADDING = {}
+MATMUL_N_PADDING = {37984: 38144}
+SWIGLU_FEATURE_PADDING = {}
 
 HIDDEN_SIZE = 2048
 INTERMEDIATE_SIZE = 6144
@@ -94,6 +97,12 @@ def validate_manifest(sites) -> None:
           f"{site.family} local shape {(site.k_local, site.n_local)} "
           f"does not divide BK/BN={BK}/{BN}"
       )
+  if MATMUL_K_PADDING or MATMUL_N_PADDING != {37984: 38144}:
+    raise ValueError(
+        "Qwen3-1.7B TP4 must admit only lm_head N37984->38144 padding"
+    )
+  if SWIGLU_FEATURE_PADDING:
+    raise ValueError("Qwen3-1.7B SwiGLU must remain unpadded")
 
 
 def preflight(*, require_enabled: bool) -> None:

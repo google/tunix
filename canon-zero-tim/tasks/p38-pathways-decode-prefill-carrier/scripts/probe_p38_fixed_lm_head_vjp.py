@@ -71,6 +71,7 @@ def main() -> None:
     parser.add_argument("--model", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--seed", type=int, default=3821)
+    parser.add_argument("--hidden-size", type=int, default=HIDDEN)
     args = parser.parse_args()
 
     preflight(require_enabled=True)
@@ -88,10 +89,13 @@ def main() -> None:
     replicated = NamedSharding(mesh, P(None, None))
     rows_replicated = NamedSharding(mesh, P(None))
     vocab_sharded = NamedSharding(mesh, P(None, "model"))
-    weight = _load_weight(args.model, vocab_sharded)
+    hidden_size = int(args.hidden_size)
+    weight = _load_weight(args.model, vocab_sharded, hidden_size)
 
     key = jax.random.PRNGKey(args.seed)
-    hidden = jax.random.normal(key, (learner_m, HIDDEN), dtype=jnp.float32)
+    hidden = jax.random.normal(
+        key, (learner_m, hidden_size), dtype=jnp.float32
+    )
     hidden = jax.device_put(hidden.astype(jnp.bfloat16), replicated)
     # Exercise one repeated selected-token column on every TP shard. Repeating
     # each column across 1024 rows makes the shared dWeight accumulation across
@@ -209,7 +213,7 @@ def main() -> None:
         "hidden_gradient_nonzero": hidden_nonzero,
         "weight_gradient_nonzero": weight_nonzero,
         "negative_control_differing_elements": negative_differing,
-        "weight_shape": [HIDDEN, VOCAB],
+        "weight_shape": [hidden_size, VOCAB],
         "weight_dtype": str(weight.dtype),
         "weight_sharding": str(weight.sharding),
     }

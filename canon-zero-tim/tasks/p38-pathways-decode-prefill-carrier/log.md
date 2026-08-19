@@ -2103,3 +2103,19 @@ reclassification from the committed NPZ inputs.
 - Official mechanical classifier returned `P38H_FIXED_LM_HEAD_BACKWARD_NO_COMMIT_PASS` (`updates=1/1`, `alignments=16/16`, `reasons=[]`).
 - Compact return package SHA-sealed under `canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/evidence/p38h1/`.
 - Full verification report: `artifacts/p38_2h_backward_no_commit_pass_report.md`.
+
+## 2026-08-19 UTC — P38.2y GSM8K fixed-lm-head integration locally gated
+
+- Extended the fixed-tile lm-head contract from Qwen3-8B K4096 to the exact
+  Qwen3-1.7B K2048 geometry without changing fixed M256, N38144, or
+  BM/BN/BK=128/256/256. The learner still uses 16 ascending M256 chunks and
+  the custom VJP still accumulates shared dWeight in explicit ascending order.
+- Renderer admission is limited to committed `gsm8k-full`. It carries
+  resident optimizer state, P47a, `CANON_BATCHED_EVIDENCE=1`, and
+  `CANON_P28_BATCHED_REPORT=1`; uncertified DP16 batched reverse is excluded.
+- Unit, renderer, Qwen1.7/Qwen8 pinned-image overlays, and the real-v5p
+  Qwen3-1.7B forward/VJP construction gate pass. The accepted one-host label
+  is `p38y3_20260819`; two prior attempts never entered the numerical program.
+- Added one source-pinned launcher and one background-free full-training
+  runbook. Target status remains NOT RUN. No commit, push, cluster apply, or
+  external mutation occurred.

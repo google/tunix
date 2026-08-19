@@ -481,7 +481,13 @@ def render_jobset(
       _DURABILITY_PROFILE_ALIGNMENT
       if fixed_lm_head else _DURABILITY_PROFILE_FULL
   )
-  p33.validate_jobset(document, effective_spec, source_commit, run_id)
+  p33.validate_jobset(
+      document,
+      effective_spec,
+      source_commit,
+      run_id,
+      fixed_lm_head=fixed_lm_head,
+  )
   validate_capture_jobset(
       document, unified=unified, max_concurrency=max_concurrency,
       seam_mode=seam_mode, seam_layer=seam_layer,

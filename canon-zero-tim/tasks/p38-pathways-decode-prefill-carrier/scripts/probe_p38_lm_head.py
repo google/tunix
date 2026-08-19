@@ -48,7 +48,11 @@ def _bf16_numpy(tensor: Any) -> np.ndarray:
   return bits.view(ml_dtypes.bfloat16)
 
 
-def _load_weight(model: Path, sharding: NamedSharding) -> jax.Array:
+def _load_weight(
+    model: Path,
+    sharding: NamedSharding,
+    hidden_size: int = HIDDEN,
+) -> jax.Array:
   from safetensors import safe_open
 
   index = json.loads((model / "model.safetensors.index.json").read_text())
@@ -59,9 +63,11 @@ def _load_weight(model: Path, sharding: NamedSharding) -> jax.Array:
 
   with safe_open(shard_path, framework="pt", device="cpu") as handle:
     source_shape = tuple(handle.get_slice("lm_head.weight").get_shape())
-  if source_shape != (VOCAB, HIDDEN):
+  hidden_size = int(hidden_size)
+  if source_shape != (VOCAB, hidden_size):
     raise RuntimeError(
-        f"unexpected lm_head.weight shape: {source_shape} != {(VOCAB, HIDDEN)}"
+        "unexpected lm_head.weight shape: "
+        f"{source_shape} != {(VOCAB, hidden_size)}"
     )
 
   def callback(index: tuple[slice, ...]) -> np.ndarray:
@@ -72,7 +78,7 @@ def _load_weight(model: Path, sharding: NamedSharding) -> jax.Array:
     return _bf16_numpy(source).T
 
   weight = jax.make_array_from_callback(
-      (HIDDEN, VOCAB), sharding, callback
+      (hidden_size, VOCAB), sharding, callback
   )
   weight.block_until_ready()
   if weight.dtype != jnp.bfloat16:

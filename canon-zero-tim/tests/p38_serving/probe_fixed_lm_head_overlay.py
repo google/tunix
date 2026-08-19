@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
-"""Attest the installed Qwen3-8B TP4 fixed-lm-head hook in the pinned image."""
+"""Attest an installed Qwen3 TP4 fixed-lm-head hook in the pinned image."""
 
 from __future__ import annotations
 
+import argparse
 import os
+
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--hidden-size", type=int, choices=(2048, 4096), default=4096)
+args = parser.parse_args()
 
 
 for name in (
@@ -19,10 +25,15 @@ for name in (
 ):
   os.environ[name] = "1"
 
+model_env = {
+    2048: (6144, 16, "qwen1p7b"),
+    4096: (12288, 32, "qwen8b"),
+}
+intermediate_size, attention_heads, model_name = model_env[args.hidden_size]
 os.environ.update({
-    "CANON_QWEN3_HIDDEN_SIZE": "4096",
-    "CANON_QWEN3_INTERMEDIATE_SIZE": "12288",
-    "CANON_QWEN3_NUM_ATTENTION_HEADS": "32",
+    "CANON_QWEN3_HIDDEN_SIZE": str(args.hidden_size),
+    "CANON_QWEN3_INTERMEDIATE_SIZE": str(intermediate_size),
+    "CANON_QWEN3_NUM_ATTENTION_HEADS": str(attention_heads),
     "CANON_QWEN3_NUM_KV_HEADS": "8",
     "CANON_QWEN3_HEAD_DIM": "128",
     "CANON_QWEN3_TP_SIZE": "4",
@@ -40,16 +51,24 @@ if not linear.P38_FIXED_LM_HEAD_ACTIVE:
 if linear.JaxLmHead.__call__.__name__ != "_p38_fixed_lm_head_call":
   raise AssertionError("JaxLmHead does not point at the P38 hook")
 if model.TP_SIZE != 4 or model.MATMUL_N_PADDING != {37984: 38144}:
-  raise AssertionError("Qwen3-8B TP4 lm_head padding contract is absent")
+  raise AssertionError("Qwen3 TP4 lm_head padding contract is absent")
 if fixed.REQUEST_M != (8, 16, 32, 64, 128, 256):
   raise AssertionError(f"fixed lm_head request buckets drifted: {fixed.REQUEST_M}")
 if fixed.LEARNER_M != (4096,):
   raise AssertionError(f"fixed lm_head learner rows drifted: {fixed.LEARNER_M}")
 model.preflight(require_enabled=True)
+fixed.validate_global_contract(
+    (16, args.hidden_size),
+    (args.hidden_size, fixed.VOCAB),
+    "bfloat16",
+    "bfloat16",
+    tp_size=4,
+)
 
 print(
     "P38_FIXED_LM_HEAD_EXACT_IMAGE_PASS "
-    "chain=linear_p22xk model=qwen8b tp=4 request_M=8,16,32,64,128,256 "
+    f"chain=linear_p22xk model={model_name} tp=4 K={args.hidden_size} "
+    "request_M=8,16,32,64,128,256 "
     "learner_M=4096 fixed_M=256 "
     "local_N=37984 fixed_N=38144",
     flush=True,

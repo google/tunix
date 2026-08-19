@@ -56,6 +56,20 @@ class FixedLmHeadContractTest(unittest.TestCase):
     self.assertEqual((fixed.BM, fixed.BN, fixed.BK), (128, 256, 256))
     self.assertEqual(fixed.PADDED_LOCAL_VOCAB, 38144)
 
+  def test_qwen1p7b_production_shape(self):
+    for m in fixed.SEMANTIC_M:
+      with self.subTest(m=m):
+        self.assertEqual(
+            fixed.validate_global_contract(
+                (m, 2048), (2048, 151936), "bfloat16", "bfloat16",
+                tp_size=4,
+            ),
+            m,
+        )
+        self.assertEqual(
+            fixed.validate_local_contract((m, 2048), (2048, 37984)), m
+        )
+
   def test_shape_dtype_and_topology_negatives(self):
     base = ((16, 4096), (4096, 151936), "bfloat16", "bfloat16")
     cases = (
@@ -67,6 +81,7 @@ class FixedLmHeadContractTest(unittest.TestCase):
         ((2048, 4096), base[1], base[2], base[3], 4),
         ((8192, 4096), base[1], base[2], base[3], 4),
         ((16, 2048), base[1], base[2], base[3], 4),
+        ((16, 3072), (3072, 151936), base[2], base[3], 4),
         (base[0], (4096, 152064), base[2], base[3], 4),
         (base[0], base[1], "float32", base[3], 4),
         (base[0], base[1], base[2], "float32", 4),
@@ -96,6 +111,15 @@ class FixedLmHeadContractTest(unittest.TestCase):
 
   def test_model_contract_has_only_lm_head_n_padding(self):
     model = _load(MODEL_CONTRACT, "p38_fixed_lm_head_qwen8b_contract")
+    self.assertEqual(model.MATMUL_K_PADDING, {})
+    self.assertEqual(model.MATMUL_N_PADDING, {37984: 38144})
+    model.validate_manifest(model.SITES)
+
+  def test_qwen1p7b_contract_has_only_lm_head_n_padding(self):
+    model = _load(
+        SHIM / "models/qwen1p7b/p22xf_contract.py",
+        "p38_fixed_lm_head_qwen1p7b_contract",
+    )
     self.assertEqual(model.MATMUL_K_PADDING, {})
     self.assertEqual(model.MATMUL_N_PADDING, {37984: 38144})
     model.validate_manifest(model.SITES)

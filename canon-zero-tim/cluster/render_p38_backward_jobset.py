@@ -58,7 +58,9 @@ def _main(document: Mapping[str, Any]) -> dict[str, Any]:
 
 def validate(document: Mapping[str, Any], source_commit: str, run_id: str) -> None:
     spec = _base_spec()
-    p33.validate_jobset(document, spec, source_commit, run_id)
+    p33.validate_jobset(
+        document, spec, source_commit, run_id, fixed_lm_head=True
+    )
     env = p33._env_values(document)
     labels = document.get("metadata", {}).get("labels", {})
     expected = {

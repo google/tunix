@@ -194,11 +194,16 @@ class RenderP33JobSetsTest(unittest.TestCase):
           by_key["gsm8k-full"]["CANON_GSM8K_ALIGNMENT_WARN_ONLY"],
           "1",
       )
+      self.assertEqual(
+          by_key["gsm8k-full"]["CANON_P38_FIXED_LM_HEAD"],
+          "1",
+      )
       for key in (
           "gsm8k-alignment-short",
           "frozenlake-alignment-short",
           "frozenlake-backward-no-commit",
           "frozenlake-full",
+          "frozenlake-full-eval",
       ):
         self.assertEqual(
             by_key[key]["CANON_GSM8K_AB_REPORT_ONLY"],
@@ -208,12 +213,32 @@ class RenderP33JobSetsTest(unittest.TestCase):
             by_key[key]["CANON_GSM8K_ALIGNMENT_WARN_ONLY"],
             "0",
         )
+        self.assertNotIn("CANON_P38_FIXED_LM_HEAD", by_key[key])
       eval_env = by_key["frozenlake-full-eval"]
       self.assertEqual(eval_env["CANON_P33_ENABLE_EVAL"], "1")
       self.assertEqual(eval_env["CANON_P33_DISABLE_EVAL"], "0")
       self.assertEqual(eval_env["CANON_P31_ENABLE_EVAL"], "1")
       self.assertIn("--num_test_batches=4", eval_env["CANON_RUN_CMD"])
       self.assertIn("--eval_every_n_steps=10", eval_env["CANON_RUN_CMD"])
+
+  def test_rejects_fixed_lm_head_outside_gsm8k_full(self):
+    base = renderer.load_base(_BASE_PATH)
+    spec = next(
+        item for item in renderer._SPECS
+        if item.key == "gsm8k-alignment-short"
+    )
+    document = renderer.render_jobset(base, spec, _SOURCE_COMMIT, _RUN_ID)
+    pod = document["spec"]["replicatedJobs"][0]["template"]["spec"][
+        "template"
+    ]["spec"]
+    main = next(
+        item for item in pod["containers"] if item["name"] == "jax-tpu"
+    )
+    main["env"].append({
+        "name": "CANON_P38_FIXED_LM_HEAD", "value": "1"
+    })
+    with self.assertRaisesRegex(ValueError, "unexpectedly enabled"):
+      renderer.validate_jobset(document, spec, _SOURCE_COMMIT, _RUN_ID)
 
   def test_rejects_warning_policy_outside_gsm8k_full(self):
     base = renderer.load_base(_BASE_PATH)

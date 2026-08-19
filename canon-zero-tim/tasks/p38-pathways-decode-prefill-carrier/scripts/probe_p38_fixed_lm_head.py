@@ -76,6 +76,7 @@ def main() -> None:
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--seeds", type=int, default=4)
     parser.add_argument("--learner-seeds", type=int, default=1)
+    parser.add_argument("--hidden-size", type=int, default=HIDDEN)
     args = parser.parse_args()
     if args.seeds < 1 or args.learner_seeds < 1:
         raise RuntimeError("--seeds and --learner-seeds must be positive")
@@ -89,7 +90,8 @@ def main() -> None:
     mesh = Mesh(np.asarray(devices), ("model",))
     replicated = NamedSharding(mesh, P(None, None))
     vocab_sharded = NamedSharding(mesh, P(None, "model"))
-    weight = _load_weight(args.model, vocab_sharded)
+    hidden_size = int(args.hidden_size)
+    weight = _load_weight(args.model, vocab_sharded, hidden_size)
 
     @partial(
         jax.jit,
@@ -120,7 +122,9 @@ def main() -> None:
     last_fixed = None
     for seed in range(args.seeds):
         key = jax.random.PRNGKey(seed + 3802)
-        hidden = jax.random.normal(key, (FIXED_M, HIDDEN), dtype=jnp.float32)
+        hidden = jax.random.normal(
+            key, (FIXED_M, hidden_size), dtype=jnp.float32
+        )
         hidden = jax.device_put(hidden.astype(jnp.bfloat16), replicated)
         bucket_hidden = {m: hidden[:m] for m in REQUEST_M}
         if not lowerings:
@@ -179,7 +183,9 @@ def main() -> None:
     learner_m = LEARNER_M[0]
     for seed in range(args.learner_seeds):
         key = jax.random.PRNGKey(seed + 3817)
-        hidden = jax.random.normal(key, (learner_m, HIDDEN), dtype=jnp.float32)
+        hidden = jax.random.normal(
+            key, (learner_m, hidden_size), dtype=jnp.float32
+        )
         hidden = jax.device_put(hidden.astype(jnp.bfloat16), replicated)
         if "fixed_m4096" not in lowerings:
             lowerings["fixed_m4096"] = _lowering_receipt(
@@ -226,8 +232,8 @@ def main() -> None:
         "device_count": len(devices),
         "request_m": list(REQUEST_M),
         "learner_m": list(LEARNER_M),
-        "fixed_shape": [FIXED_M, HIDDEN, PADDED_LOCAL_VOCAB],
-        "weight_shape": [HIDDEN, VOCAB],
+        "fixed_shape": [FIXED_M, hidden_size, PADDED_LOCAL_VOCAB],
+        "weight_shape": [hidden_size, VOCAB],
         "local_vocab": LOCAL_VOCAB,
         "tiles": {"BM": BM, "BN": BN, "BK": BK},
         "weight_dtype": str(weight.dtype),

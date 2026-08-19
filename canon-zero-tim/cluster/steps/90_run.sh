@@ -564,7 +564,7 @@ fi
 if [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "1" ] && \
    [ -z "${CANON_P38_SERVING_CAPTURE_DIR:-}" ] && \
    [ "$n_p38_fixed_vjp" -le 0 ]; then
-  echo "[run] FATAL: P38.2h fixed lm-head backward VJP did not execute" >&2
+  echo "[run] FATAL: P38.2h fixed lm-head backward VJP did not execute (or GSM8K full equivalent)" >&2
   exit 1
 fi
 if [ "${CANON_P35_EXACT_REPLAY:-0}" = "1" ] && \
@@ -831,7 +831,9 @@ elif [ "$rc" -eq 0 ] && [ "${CANON_P33_WORKLOAD_LAUNCH_ADMITTED:-0}" = "1" ]; th
       --output "$classification" || exit 1
 fi
 if [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "1" ] && \
-   [ -z "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
+   [ -z "${CANON_P38_SERVING_CAPTURE_DIR:-}" ] && \
+   [ "${CANON_P32_WORKLOAD:-}" = "frozenlake" ] && \
+   [ "${CANON_P33_RUN_STAGE:-}" = "backward-no-commit" ]; then
   for p38h_artifact in \
       "pre-alignment:$CANON_PRE_ALIGN_REPORT" \
       "alignment:$CANON_ALIGN_REPORT" \

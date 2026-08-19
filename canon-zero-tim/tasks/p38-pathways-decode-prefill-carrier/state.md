@@ -1,34 +1,21 @@
 # State
 
-- Status: P38.2h Attempt 0 is preserved as analysis-grade failure evidence.
-  The actual-model backward completed, then a no-commit optimizer-attestation
-  contract bug stopped the run before the compact success return. The narrow
-  attestation repair is published at `06f0228e`; one source-pinned rerun remains.
+- Status: P38.2h forward and backward-no-commit gates are admitted. P38.2y
+  extends the fixed-tile lm-head to Qwen3-1.7B GSM8K and is locally gated;
+  its 200-step DP16xTP4 full-training target is NOT RUN.
 - Objective: localize and remove the Pathways serving decode-versus-prefill
   carrier without weakening the strict zero-TIM release contract.
 - Definition of done: one source-pinned flag-on run reports exact
   `S_decode_vs_S_prefill`, exact `S_prefill_vs_T_old`, and exact
   `T_old_vs_T_current` before a strict full workload is admitted.
-- Active phase: P38.2h fixed-lm-head actual-model backward-no-commit. P38s23r3
-  completed the forward candidate gate: three DP16xTP4 FrozenLake rounds,
-  146,042 action tokens, exact A-B and B-C, and zero backward/commits. The
-  initial real-v5p M4096 VJP gate then found that automatic transpose of the
-  outer 16xM256 map changed the shared `dWeight` accumulation: 11,950 elements
-  differed from the ascending-chunk oracle (`max_abs=2.0`) while `dHidden` was
-  exact. The local repair preserves forward and uses a custom outer VJP with
-  loop-carried ascending `lax.scan` accumulation. Its real-Qwen3-8B TP4 rerun
-  is exact for `dHidden`, `dWeight`, and repeat determinism, with finite/nonzero
-  gradients and a one-element normal-value negative. Attempt 0 then executed
-  all 16 forward and reverse groups on DP16xTP4 with exact pre-backward A-B/B-C,
-  replica-exact DP reductions, and nonzero gradients. It stopped only because
-  `check_batch` expected `optimizer_skipped=0` despite
-  `CANON_P33_NO_COMMIT=1`; consequently no terminal no-commit verdict or compact
-  artifacts were emitted. Commit `06f0228e` repairs that expectation. The next
-  gate is one separately user-approved rerun from a clean SHA containing the
-  focused attestation regression. See
-  `phases/p38-2h-fixed-lm-head-backward-no-commit.md`,
-  `artifacts/p38_2h_fixed_lm_head_vjp_onehost_0819.md`, and
-  `P38H_BACKWARD_RUNBOOK.md`.
+- Active phase: P38.2y Qwen3-1.7B fixed-lm-head full-training integration.
+  Unit and renderer gates pass, both exact-image model overlays pass, and the
+  real-v5p Qwen3-1.7B TP4 construction gate is exact for request and learner
+  forward plus dHidden/dWeight VJP. The target combines the repair with the
+  already admitted resident optimizer, P47a prompt-logprob removal, batched
+  evidence, and batched report. P52 batched reverse stays off. Next: review,
+  then separately approve commit/push; an execution-only operator follows
+  `P38Y_GSM8K_FULL_RUNBOOK.md` for one 200-step source-pinned run.
 - Task directory:
   `canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/`.
 - P38s20/source `bea31f36655b137d7ab47ba94095cadda5b586ba` execution

@@ -468,28 +468,32 @@ case "${CANON_P38_FIXED_LM_HEAD:-0}" in
 esac
 if [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "1" ] && \
    [ -z "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
-  [ "${CANON_P32_WORKLOAD:-}" = "frozenlake" ] && \
-  [ "${CANON_P33_RUN_STAGE:-}" = "backward-no-commit" ] && \
-  [ "${CANON_P33_NO_COMMIT:-}" = "1" ] || {
-    echo "[env] fixed lm-head outside capture requires FrozenLake backward-no-commit" >&2
-    fail=1
-  }
-  [ "${CANON_PROFILE_FILE:-}" = \
-      "cluster/profiles/qwen3-8b-dp16-tp4-frozenlake.env" ] || {
-    echo "[env] fixed lm-head backward requires the Qwen3-8B TP4 profile" >&2
-    fail=1
-  }
-  [ "${CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY:-0}" = "0" ] && \
-  [ "${CANON_P33_ENABLE_EVAL:-0}" = "0" ] && \
-  [ "${CANON_P33_DISABLE_EVAL:-}" = "1" ] || {
-    echo "[env] fixed lm-head backward requires strict alignment and evaluation off" >&2
-    fail=1
-  }
+  case "${CANON_P32_WORKLOAD:-}:${CANON_P33_RUN_STAGE:-}:${CANON_P33_NO_COMMIT:-}:${CANON_PROFILE_FILE:-}" in
+    frozenlake:backward-no-commit:1:cluster/profiles/qwen3-8b-dp16-tp4-frozenlake.env)
+      [ "${CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY:-0}" = "0" ] && \
+      [ "${CANON_P33_ENABLE_EVAL:-0}" = "0" ] && \
+      [ "${CANON_P33_DISABLE_EVAL:-}" = "1" ] || {
+        echo "[env] fixed lm-head backward requires strict alignment and evaluation off" >&2
+        fail=1
+      }
+      echo "[env] P38.2h fixed lm-head backward-no-commit enabled"
+      ;;
+    gsm8k:full:0:cluster/profiles/qwen3-1p7b-dp16-tp4-gsm8k.env)
+      [ "${CANON_GSM8K_ALIGNMENT_WARN_ONLY:-0}" = "1" ] || {
+        echo "[env] fixed lm-head GSM8K full requires warning-only A-B reporting" >&2
+        fail=1
+      }
+      echo "[env] P38.2y fixed lm-head GSM8K full enabled"
+      ;;
+    *)
+      echo "[env] fixed lm-head is not admitted for this workload/stage/profile" >&2
+      fail=1
+      ;;
+  esac
   [ -z "${CANON_MM_ALGO:-}${CANON_P38_PRECHECK_ONLY:-}${CANON_P38_CONTROLLED_EXIT:-}${CANON_P38_DIAGNOSTIC_ROUNDS:-}${CANON_P38_KV_OBSERVER_DIR:-}${CANON_P38_SEAM_OBSERVER:-}${CANON_P38_TAIL_OBSERVER:-}${CANON_P38_TERMINAL_DISCRIMINATOR:-}" ] || {
     echo "[env] fixed lm-head backward conflicts with diagnostic/algorithm env" >&2
     fail=1
   }
-  echo "[env] P38.2h fixed lm-head backward-no-commit enabled"
 fi
 
 if [ "${CANON_P35_ENVELOPE:-0}" = "1" ]; then

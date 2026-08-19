@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""P38.2x fixed-shape Pallas construction for Qwen3-8B TP4 lm_head."""
+"""Fixed-shape Pallas construction for admitted Qwen3 TP4 lm-heads."""
 
 from __future__ import annotations
 
@@ -16,7 +16,8 @@ REQUEST_M = (8, 16, 32, 64, 128, 256)
 LEARNER_M = (4096,)
 SEMANTIC_M = REQUEST_M + LEARNER_M
 FIXED_M = 256
-HIDDEN = 4096
+HIDDEN = 4096  # Historical Qwen3-8B default retained for old probes.
+SUPPORTED_HIDDEN = (2048, 4096)
 VOCAB = 151936
 TP_SIZE = 4
 LOCAL_VOCAB = VOCAB // TP_SIZE
@@ -44,6 +45,30 @@ CONFLICTS = (
     "CANON_TAIL",
 )
 VJP_PASS = "FIXED_LM_HEAD_ONEHOST_VJP_PASS"
+
+
+def _validate_hidden(hidden: int) -> int:
+    hidden = int(hidden)
+    if hidden not in SUPPORTED_HIDDEN:
+        raise ValueError(
+            "P38 fixed lm_head requires hidden size in "
+            f"{SUPPORTED_HIDDEN}, got {hidden}"
+        )
+    configured = os.environ.get("CANON_QWEN3_HIDDEN_SIZE", "")
+    if configured:
+        try:
+            configured_hidden = int(configured)
+        except ValueError as error:
+            raise ValueError(
+                "P38 fixed lm_head requires an integer "
+                f"CANON_QWEN3_HIDDEN_SIZE, got {configured!r}"
+            ) from error
+        if configured_hidden != hidden:
+            raise ValueError(
+                "P38 fixed lm_head hidden size disagrees with the profile: "
+                f"shape={hidden} env={configured_hidden}"
+            )
+    return hidden
 
 
 def classify_vjp(
@@ -102,17 +127,18 @@ def validate_global_contract(
     *,
     tp_size: int,
 ) -> int:
-    """Validate the caller-global Qwen3-8B contract and return semantic M."""
+    """Validate the caller-global Qwen3 TP4 contract and return semantic M."""
     input_shape = tuple(map(int, input_shape))
     weight_shape = tuple(map(int, weight_shape))
     if len(input_shape) != 2 or input_shape[0] not in SEMANTIC_M:
         raise ValueError(
             f"P38 fixed lm_head requires semantic M in {SEMANTIC_M}, got {input_shape}"
         )
-    if input_shape[1] != HIDDEN or weight_shape != (HIDDEN, VOCAB):
+    hidden = _validate_hidden(input_shape[1])
+    if weight_shape != (hidden, VOCAB):
         raise ValueError(
             "P38 fixed lm_head requires input/weight "
-            f"[(M,{HIDDEN}),({HIDDEN},{VOCAB})], got {input_shape}/{weight_shape}"
+            f"[(M,{hidden}),({hidden},{VOCAB})], got {input_shape}/{weight_shape}"
         )
     if str(input_dtype) != "bfloat16" or str(weight_dtype) != "bfloat16":
         raise ValueError(
@@ -132,11 +158,12 @@ def validate_local_contract(input_shape, weight_shape) -> int:
     weight_shape = tuple(map(int, weight_shape))
     if len(input_shape) != 2 or input_shape[0] not in SEMANTIC_M:
         raise ValueError(f"P38 fixed lm_head local M invalid: {input_shape}")
-    if input_shape[1] != HIDDEN or weight_shape != (HIDDEN, LOCAL_VOCAB):
+    hidden = _validate_hidden(input_shape[1])
+    if weight_shape != (hidden, LOCAL_VOCAB):
         raise ValueError(
             "P38 fixed lm_head local shape mismatch: "
-            f"{input_shape}/{weight_shape}, expected (M,{HIDDEN})/"
-            f"({HIDDEN},{LOCAL_VOCAB})"
+            f"{input_shape}/{weight_shape}, expected (M,{hidden})/"
+            f"({hidden},{LOCAL_VOCAB})"
         )
     return input_shape[0]
 
@@ -171,6 +198,7 @@ def fixed_lm_head(
         weight.dtype,
         tp_size=tp_size,
     )
+    hidden_size = _validate_hidden(inputs.shape[1])
 
     def local(a_local, w_local):
         local_m = validate_local_contract(a_local.shape, w_local.shape)
@@ -193,7 +221,7 @@ def fixed_lm_head(
             return run_fixed_with_weight(a_fixed, w_local)
 
         def learner_forward(a_learner, weight_local):
-            a_chunks = a_learner.reshape((-1, FIXED_M, HIDDEN))
+            a_chunks = a_learner.reshape((-1, FIXED_M, hidden_size))
             return lax.map(
                 lambda a_chunk: run_fixed_with_weight(a_chunk, weight_local),
                 a_chunks,
@@ -211,11 +239,12 @@ def fixed_lm_head(
             print(
                 "[PATHTRACE] CANON_P38_FIXED_LM_HEAD_VJP=1 "
                 "semantic_M=4096 fixed_M=256 chunks=16 "
-                "accumulation=lax.scan order=ascending",
+                "accumulation=lax.scan order=ascending "
+                f"K={hidden_size}",
                 flush=True,
             )
             a_learner, weight_local = residual
-            a_chunks = a_learner.reshape((-1, FIXED_M, HIDDEN))
+            a_chunks = a_learner.reshape((-1, FIXED_M, hidden_size))
             cotangent_chunks = cotangent.reshape(
                 (-1, FIXED_M, LOCAL_VOCAB)
             )
@@ -260,7 +289,7 @@ def fixed_lm_head(
             out = learner_fixed_vjp(a_local, w_local)
         print(
             "[PATHTRACE] CANON_P38_FIXED_LM_HEAD=1 "
-            f"semantic_M={local_m} fixed_M={FIXED_M} K={HIDDEN} "
+            f"semantic_M={local_m} fixed_M={FIXED_M} K={hidden_size} "
             f"local_N={LOCAL_VOCAB} fixed_N={PADDED_LOCAL_VOCAB} "
             f"BM={BM} BN={BN} BK={BK} chunks={chunks}",
             flush=True,

@@ -386,6 +386,10 @@ def render_jobset(
       },
       remove=("CANON_P32_RC_STAGE",),
   )
+  if spec.key == "gsm8k-full":
+    _set_named_env(
+        main["env"], {"CANON_P38_FIXED_LM_HEAD": "1"}, remove=()
+    )
   if spec.workload == "frozenlake":
     _set_named_env(
         main["env"],
@@ -434,6 +438,8 @@ def validate_jobset(
     spec: JobSpec,
     source_commit: str,
     run_id: str,
+    *,
+    fixed_lm_head: bool | None = None,
 ) -> None:
   """Rejects a generated manifest whose launch or isolation contract drifted."""
   name = _job_name(spec, source_commit, run_id)
@@ -477,6 +483,8 @@ def validate_jobset(
       == "p38-serving-capture"
   )
   expected_capsule_rows = "256" if is_p38_capture else "2"
+  if fixed_lm_head is None:
+    fixed_lm_head = spec.key == "gsm8k-full"
   expected = {
       "CANON_MODE": "run",
       "CANON_PROFILE_FILE": spec.profile,
@@ -526,6 +534,11 @@ def validate_jobset(
   }
   if wrong:
     raise ValueError(f"generated P33 environment drifted: {wrong}")
+  if fixed_lm_head:
+    if env.get("CANON_P38_FIXED_LM_HEAD") != "1":
+      raise ValueError("generated P33 fixed lm-head intent drifted")
+  elif "CANON_P38_FIXED_LM_HEAD" in env:
+    raise ValueError("generated P33 unexpectedly enabled fixed lm-head")
   if "CANON_P32_RC_STAGE" in env:
     raise ValueError("P33 JobSet retained a P32 release-candidate stage")
   if env.get("CANON_P32_EXPECT_MODEL_MESH_IDS") != "":
