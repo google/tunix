@@ -176,6 +176,33 @@ def _calculate_global_batch_size(train_example: Any) -> int:
   )
 
 
+def _opt_state_dtypes(optimizer: nnx.Optimizer) -> Any:
+  """Returns the array dtype of every optimizer-state variable."""
+  return jax.tree_util.tree_map(
+      lambda value: value.get_value().dtype,
+      nnx.state(optimizer, nnx.optimizer.OptState),
+      is_leaf=lambda value: isinstance(value, nnx.Variable),
+  )
+
+
+def _restore_opt_state_float_dtypes(
+    optimizer: nnx.Optimizer, dtypes: Any
+) -> None:
+  """Restores floating optimizer-state leaves to their pre-update dtypes."""
+
+  def _restore(value, dtype):
+    array = value.get_value()
+    if jnp.issubdtype(array.dtype, jnp.floating) and array.dtype != dtype:
+      value.set_value(array.astype(dtype))
+
+  jax.tree_util.tree_map(
+      _restore,
+      nnx.state(optimizer, nnx.optimizer.OptState),
+      dtypes,
+      is_leaf=lambda value: isinstance(value, nnx.Variable),
+  )
+
+
 class GradientAccumulator(nnx.Module):
   """Accumulates gradients over multiple micro-steps.
 
@@ -259,9 +286,6 @@ class GradientAccumulator(nnx.Module):
     )
     self.persistent = allocate_grads
     if allocate_grads:
-      # Called eagerly on committed arrays, `jnp.zeros_like` carries the
-      # parameter's sharding over to the buffer, so no constraint is needed
-      # here. (Inside `jit` it does not -- see `reset`.)
       self.grads = nnx.data(
           jax.tree_util.tree_map(
               lambda x: jnp.zeros_like(x, dtype=accumulator_dtype), state
@@ -349,27 +373,7 @@ class GradientAccumulator(nnx.Module):
     if self.persistent:
       def _zero_in_place(v):
         # `x * 0` rather than `jnp.zeros_like(x)`, to preserve the buffer's
-        # sharding. Inside `jit`, `zeros_like` lowers to a broadcast of a scalar
-        # constant: it keeps shape and dtype but carries no sharding, so XLA
-        # picks one and picks fully replicated. The accumulator then leaves the
-        # update executable replicated, which costs HBM (a `P('tp')` tensor is
-        # half a device, `P()` is a whole one) and changes the input signature
-        # of the next forward/backward step, forcing a recompile. v1 never sees
-        # this because its reset runs in the same program as the rest of the
-        # step, so the buffer never crosses a boundary where XLA gets to choose.
-        #
-        # Multiplication is elementwise, so the result's sharding is inferred
-        # from `x` and reset becomes sharding-*preserving*. That matters:
-        # gradients do not in general share their parameter's sharding (a
-        # [1536,256] parameter split on dim 0 has a gradient that the backward
-        # pass naturally splits on dim 1), so imposing the parameter shardings
-        # here would fight `add()` and reintroduce the recompile it was meant to
-        # remove.
-        #
-        # The cost is one extra read of the tree, and `0 * nan` is `nan` rather
-        # than 0. The latter is not a new failure mode: a non-finite accumulator
-        # means `optimizer.update` already wrote non-finite parameters in the
-        # same step.
+        # sharding.
         v.set_value(v[...] * 0)
       jax.tree_util.tree_map(
           _zero_in_place,
@@ -430,7 +434,6 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     self._lora_enabled = utils.is_lora_enabled(self.model)
     wrt_target = nnx.LoRAParam if self._lora_enabled else nnx.Param
     self.optimizer = nnx.Optimizer(self.model, optimizer, wrt=wrt_target)
-    self._align_opt_state_dtypes(wrt_target)
     self.grad_accumulator = GradientAccumulator(
         self.model, wrt_target, allocate_grads=not self._is_single_microstep()
     )
@@ -466,7 +469,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     self._mode: sft_metrics_logger.Mode = sft_metrics_logger.Mode.TRAIN
     self._has_aux = False
     self._pbar = None
-    self._last_update_grad_norm = None
+    self._last_update_grad_norm: ArrayLike | None = None
 
     self._train_steps, self._restored_custom_metadata = (
         self.checkpoint_manager.maybe_restore(
@@ -502,9 +505,6 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     # a buffer. We should delete this once the metrics logging implementations
     # are updated according to the new design.
     self._written_metrics: exp_metrics.MetricsBuffer | None = None
-    # Host copy of the learning rate, refreshed just before each update is
-    # dispatched. See `_refresh_learning_rate`.
-    self._learning_rate_host: float | None = None
     self.training_hooks = None
     self.data_hooks = None
     self._jit_cache = set()
@@ -817,8 +817,6 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     if skip_jit:
       self._jitted_train_step_fn = None
       return (
-          # Bind only `model`, matching the jitted path so that callers pass
-          # `grad_accumulator` the same way with and without `skip_jit`.
           functools.partial(fwd_bwd_step, self.model),
           functools.partial(
               update_step, self.model, self.optimizer, self.grad_accumulator
@@ -828,15 +826,6 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
 
     if getattr(self, "_jitted_fwd_bwd_step_fn", None) is None:
       self._shard_optimizer(pxla.thread_resources.env.physical_mesh)
-      # `model` is donated even though the forward/backward pass never writes a
-      # parameter: `nnx.jit` treats a module as both an input and an output, so
-      # the parameter state comes back out of the call. Without an alias that
-      # output needs a second buffer -- a full parameter tree holding a
-      # bit-identical copy of the input. Donating lets it alias instead.
-      #
-      # The update step deliberately does not donate `model`: there the
-      # parameters really are rewritten, and the pre-update buffers have to stay
-      # valid for checkpointing and weight sync.
       if self._is_single_microstep():
         # No grad_accumulator is created in this case.
         donate_argnames = ("model",)
@@ -857,19 +846,6 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
         else:
           return functools.partial(f, *args)
 
-      # Bind `model` so `cache_nnx_graph` actually covers the step that runs
-      # most often. Passing it as a call-time argument instead -- which is what
-      # an empty bind list amounts to -- makes `nnx.jit` re-split the whole
-      # module graph on the host on every micro-step, and that host time lands
-      # between the optimizer update and the next forward/backward dispatch.
-      #
-      # `grad_accumulator` is deliberately left unbound: at depth 1 `add()`
-      # adopts the incoming gradient tree and `reset()` drops it, so the
-      # accumulator's pytree structure differs between entry and exit and
-      # `nnx.cached_partial`'s frozen graphdef would silently discard the
-      # gradients on the way out ("Mismatch custom node data: ('embedder', ...)
-      # != (); value: State({})"). `model` has no such problem -- the update
-      # step only ever writes its parameters in place.
       self._jitted_fwd_bwd_step_fn = maybe_cache_and_partial(
           self._jitted_fwd_bwd_step_fn,
           self.model,
@@ -879,7 +855,6 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
           self.model,
           self.optimizer,
           self.grad_accumulator,
-
       )
       self._jitted_eval_step_fn = maybe_cache_and_partial(
           self._jitted_eval_step_fn, self.model
@@ -934,29 +909,6 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
           return chainpart.hyperparams["learning_rate"].value
       return None
 
-  def _refresh_learning_rate(self) -> None:
-    """Copies the learning rate to the host, ahead of the update dispatch.
-
-    Under `optax.inject_hyperparams` the learning rate lives inside
-    `optimizer.opt_state`, and `optimizer` is donated to the update step. So
-    fetching it *after* dispatching that step -- which is what logging from
-    `_record_update` used to do -- blocks on the executable that was just
-    enqueued and drains the inflight pipeline on every update step.
-
-    Called before the dispatch instead, the array being read is an output of the
-    *previous* update, which the throttler has long since allowed to complete,
-    so the transfer costs nothing. It also lines the logged value up better:
-    metrics are written one update behind, so the pre-update read corresponds to
-    the step being logged, whereas the post-update read was one step ahead of it.
-
-    Must run before the update is dispatched for a second reason: donation
-    invalidates the old buffers, so the array cannot be read afterwards at all.
-    """
-    learning_rate = self._try_get_learning_rate()
-    self._learning_rate_host = (
-        None if learning_rate is None else jax.device_get(learning_rate)
-    )
-
   def _log_metrics(
       self,
       loss: ArrayLike,
@@ -969,13 +921,12 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     self.metrics_logger.log(  # pyrefly: ignore[missing-attribute]
         self.metrics_prefix, "perplexity", perplexity, self._mode, step
     )
-    # Already on the host (see `_refresh_learning_rate`); reading it off the
-    # optimizer state here would block on the update step just dispatched.
-    if self._learning_rate_host is not None:
+    learning_rate = self._try_get_learning_rate()
+    if learning_rate is not None:
       self.metrics_logger.log(  # pyrefly: ignore[missing-attribute]
           self.metrics_prefix,
           "learning_rate",
-          self._learning_rate_host,
+          jax.device_get(learning_rate),
           self._mode,
           step,
       )
@@ -1125,8 +1076,6 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
   def fwd_bwd(self, payload: datatypes.TrainerPayload | Any, **kwargs) -> None:
     """Executes forward and backward passes."""
     fwd_bwd_step, _, _ = self.jit_fwd_bwd_update_and_eval_step()
-    # `model` is bound into the cached graph; only the accumulator and the data
-    # are passed per call. See `jit_fwd_bwd_update_and_eval_step`.
     self._record_fwd_bwd(
         *fwd_bwd_step(
             grad_accumulator=self.grad_accumulator,
@@ -1138,7 +1087,6 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
   def update(self, **kwargs) -> int:
     """Applies the accumulated gradients."""
     _, update_step, _ = self.jit_fwd_bwd_update_and_eval_step()
-    self._refresh_learning_rate()
     return self._record_update(update_step())
 
   def train_step(
@@ -1159,7 +1107,6 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
           " fwd_bwd() followed by update() when gradient_accumulation_steps > 1"
           " or sequence packing is enabled."
       )
-    self._refresh_learning_rate()
     train_loss, aux, grad_norm = self._jitted_train_step_fn(
         self._prepare_payload(payload)
     )
@@ -1275,9 +1222,6 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     fwd_bwd_step, _, _ = self.jit_fwd_bwd_update_and_eval_step(
         skip_jit, cache_nnx_graph
     )
-    # Seed the host copy while nothing is in flight, so that eval or an early
-    # metrics write before the first update still has a value to log.
-    self._refresh_learning_rate()
     if not skip_jit:
       # Report the step function this loop will actually drive: in the fused
       # regime `fwd_bwd_step`'s executable is never compiled, so its cache size
