@@ -22,6 +22,13 @@ from tunix.experimental.trajectory import trajectory as trajectory_lib
 from tunix.rl.agentic.trajectory import trajectory_collect_engine as rl_collect_engine
 from tunix.rl.rollout import base_rollout
 
+def _build_prompt(chat_parser: Any, chat_completions: Any) -> Any:
+  """Vanilla samplers take a string; parse chat messages when needed."""
+  if chat_parser and not isinstance(chat_completions, str):
+    return chat_parser.parse(
+        chat_completions, add_generation_prompt=True, is_first_msg=True
+    )
+  return chat_completions
 
 class TrajectoryCollectorEngine:
   """Wrapper around TrajectoryCollectEngine providing lifecycle controls and Trajectory conversion."""
@@ -81,7 +88,7 @@ class TrajectoryCollectorEngine:
       )
       sampling_req = sampler_lib.SamplingRequest(
           request_id=self.traj_id,
-          prompt=chat_completions,
+          prompt=_build_prompt(self.chat_parser, chat_completions),
           sampling_params=sampling_params,
       )
       res = await self.sampler.sample(sampling_req, **generation_kwargs)
