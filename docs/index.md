@@ -8,6 +8,7 @@
 quickstart.md
 design.md
 agentic_rl.md
+agentic_rl_design.md
 performance.md
 reliability.md
 launching.md
