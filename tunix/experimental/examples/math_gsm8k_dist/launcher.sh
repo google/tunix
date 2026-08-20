@@ -69,6 +69,9 @@ TRAINER_LOG="${LOG_ROOT}/trainer.log"
 ROLLOUT_LOG="${LOG_ROOT}/rollout.log"
 INFERENCE_LOG="${LOG_ROOT}/inference.log"
 ORCHESTRATOR_LOG="${LOG_ROOT}/orchestrator.log"
+TRAINER_PID=""
+ROLLOUT_PID=""
+INFERENCE_PID=""
 
 print_section() {
   echo
@@ -236,7 +239,13 @@ check_process_alive() {
   local process_state
   process_state="$(ps -o stat= -p "$pid" 2>/dev/null || true)"
   if [[ -z "$process_state" || "$process_state" == Z* ]]; then
-    echo "Error: $name process exited before gRPC port became ready (pid=$pid)."
+    local exit_code="unknown"
+    if wait "$pid" 2>/dev/null; then
+      exit_code=0
+    else
+      exit_code="$?"
+    fi
+    echo "Error: $name process exited before gRPC port became ready (pid=$pid, exit_code=$exit_code)."
     print_file_debug "$name" "$log_file"
     dump_debug_snapshot
     exit 1
@@ -324,6 +333,31 @@ mkdir -p "${LOG_ROOT}"
 : > "$INFERENCE_LOG"
 : > "$ORCHESTRATOR_LOG"
 
+cleanup() {
+  echo "Cleaning up worker processes (PIDs: ${TRAINER_PID:-}, ${ROLLOUT_PID:-}, ${INFERENCE_PID:-})..."
+  if [[ -n "${TRAINER_PID:-}" ]]; then
+    kill "$TRAINER_PID" 2>/dev/null || true
+  fi
+  if [[ -n "${ROLLOUT_PID:-}" ]]; then
+    kill "$ROLLOUT_PID" 2>/dev/null || true
+  fi
+  if [[ -n "${INFERENCE_PID:-}" ]]; then
+    kill "$INFERENCE_PID" 2>/dev/null || true
+  fi
+  if [[ -n "${TRAINER_PID:-}" ]]; then
+    wait "$TRAINER_PID" 2>/dev/null || true
+  fi
+  if [[ -n "${ROLLOUT_PID:-}" ]]; then
+    wait "$ROLLOUT_PID" 2>/dev/null || true
+  fi
+  if [[ -n "${INFERENCE_PID:-}" ]]; then
+    wait "$INFERENCE_PID" 2>/dev/null || true
+  fi
+  echo "Workers stopped."
+}
+trap on_error ERR
+trap cleanup EXIT
+
 print_section "runtime context"
 date
 pwd
@@ -370,13 +404,16 @@ echo "Launching trainer node on TPU chips $TRAINER_TPU_CHIPS..."
   export TPU_HOST_BOUNDS=${TPU_HOST_BOUNDS}
   export LIBTPU_INIT_ARGS=deepsea_chips_per_host_bounds=${TPU_CHIPS_PER_HOST_BOUNDS},deepsea_host_bounds=${TPU_HOST_BOUNDS}
   export PYTHONUNBUFFERED=1
+  export PYTHONFAULTHANDLER=1
   env | egrep 'JAX|TPU'
   print_command "Trainer command" "${TRAINER_CMD[@]}"
-  exec "${TRAINER_CMD[@]}" > "$TRAINER_LOG" 2>&1
-) &
+  exec "${TRAINER_CMD[@]}"
+) > "$TRAINER_LOG" 2>&1 &
 TRAINER_PID=$!
 echo "Trainer pid=$TRAINER_PID log=$TRAINER_LOG"
 print_process_debug "trainer" "$TRAINER_PID"
+echo "Waiting for trainer gRPC server to bind before starting rollout..."
+wait_for_port "trainer" "$TRAINER_PORT" "$TRAINER_PID" "$TRAINER_LOG"
 
 echo "Launching vLLM rollout node on TPU chips $ROLLOUT_TPU_CHIPS..."
 (
@@ -406,22 +443,16 @@ echo "Launching vLLM rollout node on TPU chips $ROLLOUT_TPU_CHIPS..."
   export TPU_HOST_BOUNDS=${TPU_HOST_BOUNDS}
   export LIBTPU_INIT_ARGS=deepsea_chips_per_host_bounds=${TPU_CHIPS_PER_HOST_BOUNDS},deepsea_host_bounds=${TPU_HOST_BOUNDS}
   export PYTHONUNBUFFERED=1
+  export PYTHONFAULTHANDLER=1
   env | egrep 'JAX|TPU'
   print_command "Rollout command" "${ROLLOUT_CMD[@]}"
-  exec "${ROLLOUT_CMD[@]}" > "$ROLLOUT_LOG" 2>&1
-) &
+  exec "${ROLLOUT_CMD[@]}"
+) > "$ROLLOUT_LOG" 2>&1 &
 ROLLOUT_PID=$!
 echo "Rollout pid=$ROLLOUT_PID log=$ROLLOUT_LOG"
 print_process_debug "rollout" "$ROLLOUT_PID"
-
-cleanup() {
-  echo "Cleaning up worker processes (PIDs: $TRAINER_PID, $ROLLOUT_PID, ${INFERENCE_PID:-})..."
-  kill "$TRAINER_PID" "$ROLLOUT_PID" "${INFERENCE_PID:-}" 2>/dev/null || true
-  wait "$TRAINER_PID" "$ROLLOUT_PID" "${INFERENCE_PID:-}" 2>/dev/null || true
-  echo "Workers stopped."
-}
-trap on_error ERR
-trap cleanup EXIT
+echo "Waiting for rollout gRPC server to bind..."
+wait_for_port "rollout" "$ROLLOUT_PORT" "$ROLLOUT_PID" "$ROLLOUT_LOG"
 
 if [[ "$RUN_INFERENCE_NODE" == "1" || "$RUN_INFERENCE_NODE" == "true" || "$RUN_INFERENCE_NODE" == "True" ]]; then
   if [[ -z "$INFERENCE_TPU_CHIPS" ]]; then
@@ -452,22 +483,19 @@ if [[ "$RUN_INFERENCE_NODE" == "1" || "$RUN_INFERENCE_NODE" == "true" || "$RUN_I
     export TPU_HOST_BOUNDS=${TPU_HOST_BOUNDS}
     export LIBTPU_INIT_ARGS=deepsea_chips_per_host_bounds=${TPU_CHIPS_PER_HOST_BOUNDS},deepsea_host_bounds=${TPU_HOST_BOUNDS}
     export PYTHONUNBUFFERED=1
+    export PYTHONFAULTHANDLER=1
     env | egrep 'JAX|TPU'
     print_command "Inference command" "${INFERENCE_CMD[@]}"
-    exec "${INFERENCE_CMD[@]}" > "$INFERENCE_LOG" 2>&1
-  ) &
+    exec "${INFERENCE_CMD[@]}"
+  ) > "$INFERENCE_LOG" 2>&1 &
   INFERENCE_PID=$!
   INFERENCE_ADDR="localhost:$INFERENCE_PORT"
   echo "Inference pid=$INFERENCE_PID log=$INFERENCE_LOG"
   print_process_debug "inference" "$INFERENCE_PID"
-fi
-
-echo "Waiting for gRPC servers to bind..."
-wait_for_port "trainer" "$TRAINER_PORT" "$TRAINER_PID" "$TRAINER_LOG"
-wait_for_port "rollout" "$ROLLOUT_PORT" "$ROLLOUT_PID" "$ROLLOUT_LOG"
-if [[ -n "${INFERENCE_PID:-}" ]]; then
+  echo "Waiting for inference gRPC server to bind..."
   wait_for_port "inference" "$INFERENCE_PORT" "$INFERENCE_PID" "$INFERENCE_LOG"
 fi
+
 dump_debug_snapshot
 
 echo "Launching CPU orchestrator..."
