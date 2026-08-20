@@ -1,0 +1,74 @@
+{
+  "total_trajectories": 22918,
+  "golden_positive_trajectories": 2280,
+  "pass_at_1_accuracy": 0.09948512086569508,
+  "total_unique_tasks": 1136,
+  "unique_solved_tasks": 612,
+  "pass_at_k_coverage": 0.5387323943661971,
+  "repo_breakdown": {
+    "aiohttp_final": {
+      "total": 3385,
+      "solved": 364,
+      "pass_at_1": 0.10753323485967503
+    },
+    "coveragepy_final": {
+      "total": 1120,
+      "solved": 133,
+      "pass_at_1": 0.11875
+    },
+    "numpy_final": {
+      "total": 3308,
+      "solved": 264,
+      "pass_at_1": 0.07980652962515115
+    },
+    "orange3_final": {
+      "total": 2619,
+      "solved": 238,
+      "pass_at_1": 0.09087437953417335
+    },
+    "pandas_final": {
+      "total": 5773,
+      "solved": 428,
+      "pass_at_1": 0.07413822968993591
+    },
+    "pillow_final": {
+      "total": 2944,
+      "solved": 320,
+      "pass_at_1": 0.10869565217391304
+    },
+    "pyramid_final": {
+      "total": 1376,
+      "solved": 150,
+      "pass_at_1": 0.10901162790697674
+    },
+    "scrapy_final": {
+      "total": 1850,
+      "solved": 339,
+      "pass_at_1": 0.18324324324324323
+    },
+    "tornado_final": {
+      "total": 543,
+      "solved": 44,
+      "pass_at_1": 0.08103130755064457
+    }
+  },
+  "status_distribution": {
+    "SUCCEEDED": 17789,
+    "MAX_CONTEXT_LIMIT_REACHED": 5068,
+    "MODEL_TIMEOUT": 29,
+    "FAILED": 32
+  },
+  "tool_call_distribution": {
+    "file_editor": 284177,
+    "search": 89476,
+    "execute_bash": 42642,
+    "finish": 17695,
+    "create": 185,
+    "exec_bash": 15,
+    "one_search": 2,
+    "exit": 1,
+    "submit": 1,
+    "exec": 1
+  },
+  "dpo_pairs_count": 4560
+}
