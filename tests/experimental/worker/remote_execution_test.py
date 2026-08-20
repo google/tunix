@@ -906,6 +906,13 @@ class RemoteExecutionTest(absltest.TestCase):
       finally:
         asyncio.run(handle.close())  # tears down the persistent submit loop
 
+  def test_grpc_options_tolerate_client_keepalive_pings(self):
+    options = dict(remote_lib._grpc_options())
+    self.assertEqual(
+        options["grpc.http2.min_recv_ping_interval_without_data_ms"], 10000
+    )
+    self.assertEqual(options["grpc.http2.max_ping_strikes"], 0)
+
   def test_grpc_sync_start_serving_actually_serves(self):
     port = portpicker.pick_unused_port()
     server = remote_lib.GrpcRemoteExecutionServer(
