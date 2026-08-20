@@ -86,7 +86,7 @@ class FeedForward(nnx.Module):
         rngs=rngs,
         kernel_init=nnx.with_partitioning(
             nnx.initializers.zeros_init(),
-            config.shd_config.ffw_weight_df,
+            tuple(config.shd_config.ffw_weight_df),
         ),
         dtype=config.dtype,
         param_dtype=config.param_dtype,
@@ -99,7 +99,7 @@ class FeedForward(nnx.Module):
         rngs=rngs,
         kernel_init=nnx.with_partitioning(
             nnx.initializers.zeros_init(),
-            config.shd_config.ffw_weight_df,
+            tuple(config.shd_config.ffw_weight_df),
         ),
         dtype=config.dtype,
         param_dtype=config.param_dtype,
@@ -110,7 +110,8 @@ class FeedForward(nnx.Module):
         use_bias=False,
         rngs=rngs,
         kernel_init=nnx.with_partitioning(
-            nnx.initializers.zeros_init(), config.shd_config.ffw_weight_fd
+            nnx.initializers.zeros_init(),
+            tuple(config.shd_config.ffw_weight_fd),
         ),
         dtype=config.dtype,
         param_dtype=config.param_dtype,
@@ -244,14 +245,18 @@ class DecoderLayer(nnx.Module):
 
   def block(
       self,
-      x,
-      segment_pos,
-      cache,
-      attn_mask,
-      per_layer_input=None,
-      kv_shared_cache=None,
-      segment_ids=None,
-  ):
+      x: jaxtyping.Array,
+      segment_pos: jaxtyping.Array,
+      cache: LayerCache | None,
+      attn_mask: jaxtyping.Array,
+      per_layer_input: jaxtyping.Array | None = None,
+      kv_shared_cache: LayerCache | None = None,
+      segment_ids: jaxtyping.Array | None = None,
+  ) -> tuple[
+      LayerCache | None,
+      jaxtyping.Array,
+      tuple[jaxtyping.Array, jaxtyping.Array],
+  ]:
     norm = self.pre_attention_norm(x)
     cache, attn, kv = self.attn(
         norm,
@@ -289,14 +294,18 @@ class DecoderLayer(nnx.Module):
 
   def __call__(
       self,
-      x,
-      segment_pos,
-      cache,
-      attn_mask,
-      per_layer_input=None,
-      kv_shared_cache=None,
-      segment_ids=None,
-  ):
+      x: jaxtyping.Array,
+      segment_pos: jaxtyping.Array,
+      cache: LayerCache | None,
+      attn_mask: jaxtyping.Array,
+      per_layer_input: jaxtyping.Array | None = None,
+      kv_shared_cache: LayerCache | None = None,
+      segment_ids: jaxtyping.Array | None = None,
+  ) -> tuple[
+      LayerCache | None,
+      jaxtyping.Array,
+      tuple[jaxtyping.Array, jaxtyping.Array],
+  ]:
     remat_config = getattr(self.config, 'remat_config', RematConfig.NONE)
     if (
         remat_config == RematConfig.DECODER
@@ -409,16 +418,16 @@ class Gemma4(BackendMappingMixin, nnx.Module):
 
   def __call__(
       self,
-      tokens,
-      positions=None,
-      cache=None,
-      attention_mask=None,
-      segment_ids=None,
+      tokens: jaxtyping.Array,
+      positions: jaxtyping.Array | None = None,
+      cache: Cache | None = None,
+      attention_mask: jaxtyping.Array | None = None,
+      segment_ids: jaxtyping.Array | None = None,
       decode_only_last_token: bool = False,
       images: PreprocessedVisionInput | None = None,
       audios: PreprocessedAudioInput | None = None,
       skip_lm_head: bool = False,
-  ):
+  ) -> tuple[jaxtyping.Array, Cache | None]:
     if positions is None:
       B, T = tokens.shape  # pylint: disable=invalid-name
       positions = jnp.tile(jnp.arange(T)[None, :], (B, 1))
@@ -522,7 +531,7 @@ class Gemma4(BackendMappingMixin, nnx.Module):
 
     logits = self.compute_final_logits(x)
 
-    return logits, (new_cache if return_cache else None)  # pytype: disable=container-type-mismatch
+    return logits, (new_cache if return_cache else None)
 
   def _encode_vision(self, vision_input: PreprocessedVisionInput):
     """Encode images into the same space as the text embeddings."""
