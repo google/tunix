@@ -87,8 +87,7 @@ tpu_trace_mode 等,收下未知键≠生效,不可赌)。
 
 ### `update` 窗(profile backward 的正解)
 
-start 锚在 `_run_p28_g6_update` 调用前(=语义 `peft_train` span 打开处,
-device 窗≡语义 span),stop 在步完成点;decode 不入镜,缓冲全花在
+start 锚在 `_run_p28_g6_update` 调用前,stop 在步完成点;decode 不入镜,缓冲全花在
 update 上:vag_forward + 16 个异步 dispatch + 流水化 reverse + adam
 commit 完整保留。自证行(gate 逐一断言步号;此模式无 absl 行):
 
@@ -132,12 +131,7 @@ python3 canon-zero-tim/tasks/p48-onehost-perf/scripts/census_xplane_modules.py <
 # 期望:全部 8 个 TensorCore plane 逐一 backward=present + decode=absent
 #       → CENSUS_GREEN rc=0;任一 plane 不满足 → CENSUS_RED rc=1
 # step 模式跑同一脚本必 CENSUS_RED(decode only)——那不是坏,是该模式的定义
-# 语义脚本同样口径:缺任一训练段 span → CENSUS_RED rc=1
 
-# 语义 span 普查(peft_train/segmented_value_and_grad/gradient_commit 各 2×步数):
-sudo docker run --rm -v /mnt/disks/tunix-data:/mnt/disks/tunix-data \
-  -v "$PWD":"$PWD" --entrypoint python3 tunix_frozenlake_image:vllm-tpu0.25.0 \
-  "$PWD/canon-zero-tim/tasks/p48-onehost-perf/scripts/census_semantic_trace.py" <run_root>
 ```
 
 注意:**别用 `grep -a` 在 xplane 二进制里搜模块名当判据**——host plane
