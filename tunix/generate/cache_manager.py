@@ -138,15 +138,19 @@ class CacheManager:
                 del self._page_id_to_idx[pid]
 
         if cpu_idxs_to_evict and self.offload_page_manager:
+            padded_cpu = np.zeros((self.offload_page_manager.total_num_pages,), dtype=np.int32)
+            padded_cpu[:len(cpu_idxs_to_evict)] = cpu_idxs_to_evict
             self.offload_page_manager = self.offload_page_manager.evict_pages(
-                jnp.array(cpu_idxs_to_evict), 
+                jnp.array(padded_cpu), 
                 jnp.array(len(cpu_idxs_to_evict))
             )
             self.available_cpu_pages += len(cpu_idxs_to_evict)
             
         if tpu_idxs_to_evict:
+            padded_tpu = np.zeros((self.hbm_page_manager.total_num_pages,), dtype=np.int32)
+            padded_tpu[:len(tpu_idxs_to_evict)] = tpu_idxs_to_evict
             self.hbm_page_manager = self.hbm_page_manager.evict_pages(
-                jnp.array(tpu_idxs_to_evict), 
+                jnp.array(padded_tpu), 
                 jnp.array(len(tpu_idxs_to_evict))
             )
             self.available_hbm_pages += len(tpu_idxs_to_evict)
