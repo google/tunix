@@ -33,6 +33,7 @@ from jax.typing import DTypeLike  # pylint: disable=g-importing-member
 import numpy as np
 import optax
 import orbax.checkpoint as ocp
+import os
 from tunix.experimental.common import datatypes
 from tunix.experimental.metrics import metrics as exp_metrics
 from tunix.experimental.train import abstract_trainer
@@ -385,6 +386,15 @@ class GradientAccumulator(nnx.Module):
     self.denom.set_value(jnp.zeros_like(self.denom[...]))
 
 
+def _default_weight_sync_worker() -> Any:
+  from tunix.experimental.worker import raiden_synchronizer  # pylint: disable=g-import-not-at-top
+
+  return raiden_synchronizer.RaidenSynchronizer(
+      "trainer",
+      host_stage="proxy" in os.environ.get("JAX_PLATFORMS", ""),
+  )
+
+
 class PeftTrainer(abstract_trainer.AbstractTrainer):
   """PEFT trainer for LoRA. Only LoRA parameters are updated.
 
@@ -419,6 +429,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
       metrics_logger: MetricsLogger | None = None,
       perf_tracer: perf_trace.Tracer | None = None,
       perf_tracer_v2: perf_tracer_lib.Tracer | None = None,
+      weight_sync_worker_factory: Callable[[], Any] | None = None,
   ):
     # TODO(noghabi): Implement sequence packing for SFT and remove this check.
     if (
@@ -509,6 +520,8 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     self.data_hooks = None
     self._jit_cache = set()
     self._mini_batch_size = None
+    self._weight_sync_worker: Any = None
+    self._weight_sync_worker_factory = weight_sync_worker_factory
 
   def with_training_hooks(self, training_hooks: hooks.TrainingHooks):
     self.training_hooks = training_hooks
@@ -1150,12 +1163,26 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     return {}
 
   @override
-  def prepare_weight_sync(self, **kwargs) -> None:
-    if kwargs:
-      raise ValueError(f"Unexpected prepare_weight_sync kwargs: {sorted(kwargs)}")
-    raise NotImplementedError(
-        "PeftTrainer V2 weight sync is not implemented yet."
-    )
+  def prepare_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
+    """Stages this round's weights on the raiden transport, returns metadata."""
+    del sync_request, kwargs
+    if self._weight_sync_worker is None:
+      factory = self._weight_sync_worker_factory or _default_weight_sync_worker
+      self._weight_sync_worker = factory()
+    worker = self._weight_sync_worker
+    worker.bind(nnx.state(self.model))
+    worker.d2h()
+    if os.environ.get("VERIFY_WEIGHTS", "").lower() == "true":
+      logging.info("source checksums: %s", worker.checksums())
+    return [worker.work_unit_metadata()]
+
+  def release_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
+    """Ends this round's staging hold."""
+    del sync_request, kwargs
+    worker = self._weight_sync_worker
+    if worker is not None and worker.bound:
+      logging.vlog(1, "raiden metrics: %s", worker.metrics())
+    return True
 
   @override
   def get_metrics(self) -> exp_metrics.MetricsBuffer:

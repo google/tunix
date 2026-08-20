@@ -69,6 +69,12 @@ class RolloutManager:
         sampler = vanilla_sampler_adapter.VanillaSamplerAdapter(  # pyrefly: ignore[bad-instantiation]
             server_id="vanilla_sampler",
         )
+      elif sampler_type == "raiden_vanilla":
+        from tunix.experimental.rollout import raiden_sampler_adapter  # pylint: disable=g-import-not-at-top
+
+        sampler = raiden_sampler_adapter.RaidenSamplerAdapter(  # pyrefly: ignore[bad-instantiation]
+            server_id="raiden_vanilla_sampler",
+        )
       else:
         raise ValueError(f"Unknown sampler_type: {sampler_type}")
       sampler.initialize()
