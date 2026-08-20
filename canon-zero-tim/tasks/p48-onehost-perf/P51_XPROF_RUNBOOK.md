@@ -11,7 +11,7 @@
 
 | 仪器 | 实现 | 产物 | 体积 | 看什么 |
 |---|---|---|---|---|
-| **语义时间线**(seqpack 同款,官方 docs 的 Metrics/Perfetto) | `tunix/perf` v2 spans(learner 内建)+ `PerfMetricsExport.from_cluster_config` | `train/perf/perfetto_trace_v2_<ts>.pb` | ~20KB | 阶段结构:Rollout 线程 / Main 线程 / weight_sync / data_loading 等轨道,ui.perfetto.dev 直接拖 |
+| **语义时间线**(seqpack 同款,官方 docs 的 Metrics/Perfetto) | `tunix/perf` v2 spans(learner 内建)+ `PerfMetricsExport.from_cluster_config`;G6 训练段=**每步一条扁平官方 `peft_train` span**(照 peft_trainer 官方样式:官方词表、不嵌套、不造名——首版三嵌套 span 画面不可读已 revert,e8d4caaf) | `train/perf/perfetto_trace_v2_<ts>.pb` | ~20KB | 阶段结构:Rollout 线程 / Main 线程 / cluster 轨上 `data_loading → reference_inference → advantage_computation → peft_train → weight_sync`,ui.perfetto.dev 直接拖 |
 | **器件织物**(XProf) | `P51_XPROF_PHASE=step`:官方 `tunix/sft/profiler.Profiler` 步边界窗;`=update`:learner 在 G6 update 入口起窗 | `train/xprof/plugins/profile/<ts>/{*.xplane.pb, *.trace.json.gz}` | step ~1.9GB(缓冲上限)/ update 远小 | **step 模式的 device 轨只有 engine 前 ~25s decode**(缓冲截断,见"窗口语义");看 trainer forward/backward/commit 用 `update` 模式。xplane 进 XProf UI,trace.json.gz 拖 ui.perfetto.dev(注意它也只含缓冲保住的部分) |
 
 与旧版(≤2026-08-18)的差别:自制 start/stop 钩子退役,窗口由官方
@@ -87,7 +87,8 @@ tpu_trace_mode 等,收下未知键≠生效,不可赌)。
 
 ### `update` 窗(profile backward 的正解)
 
-start 锚在 `_run_p28_g6_update` 调用前,stop 在步完成点;decode 不入镜,缓冲全花在
+start 锚在 `_run_p28_g6_update` 调用前(=语义 `peft_train` span 打开处,
+device 窗≡语义 span),stop 在步完成点;decode 不入镜,缓冲全花在
 update 上:vag_forward + 16 个异步 dispatch + 流水化 reverse + adam
 commit 完整保留。自证行(gate 逐一断言步号;此模式无 absl 行):
 
@@ -119,6 +120,12 @@ pip install --user xprof
 #   <run_root>/train/xprof/.../t1v-…trace.json.gz        ← 器件+host 全量
 ```
 
+语义 trace 预期画面(19 条轨=认证载具形状):Rollout 线程轨 ×10 +
+8 条 device 轨 + cluster 轨;cluster 轨上每步依次
+`data_loading → reference_inference → advantage_computation →
+peft_train(~26s)→ weight_sync`(peft_train 与 weight_sync 同落位,
+双写在 cluster+一条 device 轨是 writer 基线行为,不是 bug)。
+
 脚本化读数:`xprof.profile_data.ProfileData.from_file(<xplane>)` 逐
 plane/line/event 聚合(host C++ 事件滤 `$` 前缀);语义 pb 用
 `perfetto.protos...perfetto_trace_pb2.Trace` 解析 track_event。
@@ -132,6 +139,10 @@ python3 canon-zero-tim/tasks/p48-onehost-perf/scripts/census_xplane_modules.py <
 #       → CENSUS_GREEN rc=0;任一 plane 不满足 → CENSUS_RED rc=1
 # step 模式跑同一脚本必 CENSUS_RED(decode only)——那不是坏,是该模式的定义
 
+# 语义 span 普查(每步一条 peft_train;缺 → CENSUS_RED rc=1):
+sudo docker run --rm -v /mnt/disks/tunix-data:/mnt/disks/tunix-data \
+  -v "$PWD":"$PWD" --entrypoint python3 tunix_frozenlake_image:vllm-tpu0.25.0 \
+  "$PWD/canon-zero-tim/tasks/p48-onehost-perf/scripts/census_semantic_trace.py" <run_root>
 ```
 
 注意:**别用 `grep -a` 在 xplane 二进制里搜模块名当判据**——host plane

@@ -2309,9 +2309,24 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             flush=True,
         )
         _canon_xprof_update_entry()
-        segmented_result = self._run_p28_g6_update(
-            merged_train_micro_batch
-        )
+        # One flat PEFT_TRAIN span for the whole G6 update, mirroring the
+        # official peft_trainer usage: official vocabulary, no nesting, no
+        # custom names. The official call ends with async_end([train_loss])
+        # because its train_step returns before the device finishes; this
+        # call blocks through loss and commit_norm block_until_ready
+        # internally, so the span already closes at device completion and
+        # there is nothing asynchronous left to register.
+        with self.rl_cluster.perf_v2.span(
+            perf_constants.PEFT_TRAIN,
+            self.rl_cluster.perf_v2.all_devices,
+            tags={
+                perf_constants.STEP: self.rl_cluster.global_steps,
+                perf_constants.ROLE: "actor",
+            },
+        ):
+          segmented_result = self._run_p28_g6_update(
+              merged_train_micro_batch
+          )
         if (
             canonical_workload
             and (
