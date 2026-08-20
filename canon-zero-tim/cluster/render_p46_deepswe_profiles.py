@@ -128,6 +128,7 @@ def _base_render(
     model_pvc: str,
     whitelist: str,
     whitelist_sha256: str,
+    fixed_lm_head: bool = False,
 ) -> dict[str, Any]:
   return p34.render(
       base,
@@ -141,6 +142,7 @@ def _base_render(
       model_pvc=model_pvc,
       whitelist=whitelist,
       whitelist_sha256=whitelist_sha256,
+      fixed_lm_head=fixed_lm_head,
   )
 
 
@@ -157,6 +159,7 @@ def render_q4_debug(
     model_pvc: str,
     whitelist: str,
     whitelist_sha256: str,
+    fixed_lm_head: bool = False,
 ) -> dict[str, Any]:
   document = p44.render(
       base,
@@ -171,6 +174,7 @@ def render_q4_debug(
       model_pvc=model_pvc,
       whitelist=whitelist,
       whitelist_sha256=whitelist_sha256,
+      fixed_lm_head=fixed_lm_head,
   )
   document["metadata"]["labels"]["canon.zero-tim/profile-family"] = "q4-debug"
   return document
@@ -189,6 +193,7 @@ def render_q32_train(
     model_pvc: str,
     whitelist: str,
     whitelist_sha256: str,
+    fixed_lm_head: bool = False,
 ) -> dict[str, Any]:
   document = _base_render(
       base,
@@ -201,6 +206,7 @@ def render_q32_train(
       model_pvc=model_pvc,
       whitelist=whitelist,
       whitelist_sha256=whitelist_sha256,
+      fixed_lm_head=fixed_lm_head,
   )
   name = f"canon-p46-q32-{topology}-{run_id}"
   run_root = f"/mnt/disks/linchai_data/deepswe_zero_tim/{name}"
@@ -257,6 +263,7 @@ def render_q32_train(
       source_commit=source_commit,
       client_image=client_image,
       topology=topology,
+      fixed_lm_head=fixed_lm_head,
   )
   return document
 
@@ -478,7 +485,8 @@ def _validate_topology(document: Mapping[str, Any], topology: str) -> None:
 
 
 def validate_q32(
-    document: Mapping[str, Any], *, source_commit: str, client_image: str, topology: str
+    document: Mapping[str, Any], *, source_commit: str, client_image: str,
+    topology: str, fixed_lm_head: bool = False,
 ) -> None:
   _validate_topology(document, topology)
   env = p34._env(document)
@@ -494,6 +502,7 @@ def validate_q32(
       "CANON_DEEPSWE_ROLLOUT_BATCH_TIMEOUT_SECS": "5400",
       "CANON_OPT_STATE_RESIDENT": "1",
       "CANON_P30_OPT_STATE_OFFLOAD": "0",
+      "CANON_P38_FIXED_LM_HEAD": "1" if fixed_lm_head else "0",
       "MIN_TOKEN_BUCKET": str(TOPOLOGIES[topology]["global_m"]),
   }
   wrong = {
@@ -597,6 +606,7 @@ def render(
     evaluation_mode: str = "reward_only",
     parity_canary: bool = False,
     full_campaign: bool = False,
+    fixed_lm_head: bool = False,
 ) -> dict[str, Any]:
   if workload not in WORKLOADS:
     raise ValueError(f"unknown P46 workload: {workload}")
@@ -613,6 +623,8 @@ def render(
     raise ValueError("evaluation-only controls cannot modify a training workload")
   if workload == "q4-clean-eval" and full_campaign and resume_tag is None:
     raise ValueError("P46 full campaign requires an explicit resume tag")
+  if workload == "q4-clean-eval" and fixed_lm_head:
+    raise ValueError("fixed lm-head is restricted to P46 training workloads")
   common = dict(
       source_commit=source_commit,
       source_branch=source_branch,
@@ -626,9 +638,9 @@ def render(
       whitelist_sha256=whitelist_sha256,
   )
   if workload == "q4-debug":
-    return render_q4_debug(base, **common)
+    return render_q4_debug(base, fixed_lm_head=fixed_lm_head, **common)
   if workload == "q32-train":
-    return render_q32_train(base, **common)
+    return render_q32_train(base, fixed_lm_head=fixed_lm_head, **common)
   return render_q4_eval(
       base,
       resume_tag=resume_tag or run_id,
@@ -687,6 +699,11 @@ def main() -> None:
   )
   parser.add_argument("--parity-canary", action="store_true")
   parser.add_argument("--full-campaign", action="store_true")
+  parser.add_argument(
+      "--fixed-lm-head",
+      action="store_true",
+      help="enable the default-off fixed-tile Pallas output head",
+  )
   args = parser.parse_args()
   if args.output.exists():
     raise FileExistsError(f"refusing to overwrite JobSet: {args.output}")
@@ -711,6 +728,7 @@ def main() -> None:
       evaluation_mode=args.evaluation_mode,
       parity_canary=args.parity_canary,
       full_campaign=args.full_campaign,
+      fixed_lm_head=args.fixed_lm_head,
   )
   args.output.write_text(p34.dump_jobset(document), encoding="utf-8")
   print(

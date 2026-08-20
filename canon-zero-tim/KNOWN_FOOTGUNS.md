@@ -230,3 +230,12 @@ evidence. For P38 fixed head, GSM8K must report `endpoint=tied_embed` for all
 request buckets and learner M4096 plus its fixed-order VJP; FrozenLake's
 untied lane must report `endpoint=untied_lm_head`. Missing or foreign endpoint
 receipts void the experiment regardless of exit code.
+
+### 22. A fixed output-head proof does not transfer across model, TP, or endpoint
+
+The Pallas body may share `BM/BN/BK`, but its reduction K, local vocabulary N,
+TP width, and callable endpoint are part of the executable identity. Qwen3-4B
+is tied K2560/TP8 while Qwen3-32B is untied K5120/TP8; neither inherits the
+Qwen3-1.7B/8B TP4 evidence. Register the exact `(hidden, TP, endpoint)` tuple,
+validate its local-N padding, and require its own primal+VJP receipts. A green
+overlay import is construction evidence, not TPU numerical certification.

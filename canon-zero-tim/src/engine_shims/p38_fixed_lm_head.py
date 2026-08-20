@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Fixed-shape Pallas construction for admitted Qwen3 TP4 lm-heads."""
+"""Fixed-shape Pallas construction for registered Qwen3 output heads."""
 
 from __future__ import annotations
 
 import os
 from collections.abc import Callable
+from dataclasses import dataclass
 
 
 ENV = "CANON_P38_FIXED_LM_HEAD"
@@ -17,14 +18,51 @@ LEARNER_M = (4096,)
 SEMANTIC_M = REQUEST_M + LEARNER_M
 FIXED_M = 256
 HIDDEN = 4096  # Historical Qwen3-8B default retained for old probes.
-SUPPORTED_HIDDEN = (2048, 4096)
 VOCAB = 151936
-TP_SIZE = 4
-LOCAL_VOCAB = VOCAB // TP_SIZE
-PADDED_LOCAL_VOCAB = 38144
 BM = 128
 BN = 256
 BK = 256
+
+
+@dataclass(frozen=True)
+class Geometry:
+    """One model/topology/output-endpoint executable contract."""
+
+    model: str
+    hidden: int
+    tp_size: int
+    endpoint: str
+    local_vocab: int
+    padded_local_vocab: int
+
+
+def _geometry(
+    model: str, hidden: int, tp_size: int, endpoint: str
+) -> Geometry:
+    local_vocab = VOCAB // tp_size
+    padded_local_vocab = ((local_vocab + BN - 1) // BN) * BN
+    return Geometry(
+        model=model,
+        hidden=hidden,
+        tp_size=tp_size,
+        endpoint=endpoint,
+        local_vocab=local_vocab,
+        padded_local_vocab=padded_local_vocab,
+    )
+
+
+GEOMETRIES = {
+    (2048, 4): _geometry("qwen3-1p7b", 2048, 4, "tied_embed"),
+    (4096, 4): _geometry("qwen3-8b", 4096, 4, "untied_lm_head"),
+    (2560, 8): _geometry("qwen3-4b", 2560, 8, "tied_embed"),
+    (5120, 8): _geometry("qwen3-32b", 5120, 8, "untied_lm_head"),
+}
+SUPPORTED_HIDDEN = tuple(sorted({hidden for hidden, _tp in GEOMETRIES}))
+# Historical aliases retained for the TP4 probes and evidence readers. New
+# code must resolve a registered Geometry instead of consulting these aliases.
+TP_SIZE = 4
+LOCAL_VOCAB = VOCAB // TP_SIZE
+PADDED_LOCAL_VOCAB = ((LOCAL_VOCAB + BN - 1) // BN) * BN
 
 REQUIRED = {
     "CANON_FIXED_AR": "1",
@@ -70,6 +108,45 @@ def _validate_hidden(hidden: int) -> int:
                 f"shape={hidden} env={configured_hidden}"
             )
     return hidden
+
+
+def resolve_geometry(
+    hidden: int, tp_size: int, *, endpoint: str | None = None
+) -> Geometry:
+    """Return one registered geometry and reject model/topology drift."""
+    hidden = _validate_hidden(hidden)
+    tp_size = int(tp_size)
+    try:
+        geometry = GEOMETRIES[(hidden, tp_size)]
+    except KeyError as error:
+        registered = ", ".join(
+            f"K{item.hidden}/TP{item.tp_size}/{item.endpoint}"
+            for item in GEOMETRIES.values()
+        )
+        raise ValueError(
+            "P38 fixed lm_head model/topology is not registered: "
+            f"K{hidden}/TP{tp_size}; registered={registered}"
+        ) from error
+    configured_tp = os.environ.get("CANON_QWEN3_TP_SIZE", "")
+    if configured_tp:
+        try:
+            parsed_tp = int(configured_tp)
+        except ValueError as error:
+            raise ValueError(
+                "P38 fixed lm_head requires an integer "
+                f"CANON_QWEN3_TP_SIZE, got {configured_tp!r}"
+            ) from error
+        if parsed_tp != geometry.tp_size:
+            raise ValueError(
+                "P38 fixed lm_head TP size disagrees with the profile: "
+                f"mesh={geometry.tp_size} env={parsed_tp}"
+            )
+    if endpoint is not None and endpoint not in (geometry.endpoint, "direct_probe"):
+        raise ValueError(
+            "P38 fixed lm_head endpoint disagrees with the registered model: "
+            f"model={geometry.model} expected={geometry.endpoint} got={endpoint}"
+        )
+    return geometry
 
 
 def classify_vjp(
@@ -128,7 +205,7 @@ def validate_global_contract(
     *,
     tp_size: int,
 ) -> int:
-    """Validate the caller-global Qwen3 TP4 contract and return semantic M."""
+    """Validate one caller-global Qwen3 contract and return semantic M."""
     input_shape = tuple(map(int, input_shape))
     weight_shape = tuple(map(int, weight_shape))
     if len(input_shape) != 2 or input_shape[0] not in SEMANTIC_M:
@@ -146,25 +223,23 @@ def validate_global_contract(
             "P38 fixed lm_head requires bf16 input/weight, got "
             f"{input_dtype}/{weight_dtype}"
         )
-    if int(tp_size) != TP_SIZE:
-        raise ValueError(
-            f"P38 fixed lm_head requires TP{TP_SIZE}, got TP{int(tp_size)}"
-        )
+    resolve_geometry(hidden, tp_size)
     return input_shape[0]
 
 
-def validate_local_contract(input_shape, weight_shape) -> int:
+def validate_local_contract(input_shape, weight_shape, *, tp_size: int = TP_SIZE) -> int:
     """Validate one shard_map local shard and return semantic M."""
     input_shape = tuple(map(int, input_shape))
     weight_shape = tuple(map(int, weight_shape))
     if len(input_shape) != 2 or input_shape[0] not in SEMANTIC_M:
         raise ValueError(f"P38 fixed lm_head local M invalid: {input_shape}")
     hidden = _validate_hidden(input_shape[1])
-    if weight_shape != (hidden, LOCAL_VOCAB):
+    geometry = resolve_geometry(hidden, tp_size)
+    if weight_shape != (hidden, geometry.local_vocab):
         raise ValueError(
             "P38 fixed lm_head local shape mismatch: "
             f"{input_shape}/{weight_shape}, expected (M,{hidden})/"
-            f"({hidden},{LOCAL_VOCAB})"
+            f"({hidden},{geometry.local_vocab})"
         )
     return input_shape[0]
 
@@ -206,9 +281,12 @@ def fixed_lm_head(
         tp_size=tp_size,
     )
     hidden_size = _validate_hidden(inputs.shape[1])
+    geometry = resolve_geometry(hidden_size, tp_size, endpoint=endpoint)
 
     def local(a_local, w_local):
-        local_m = validate_local_contract(a_local.shape, w_local.shape)
+        local_m = validate_local_contract(
+            a_local.shape, w_local.shape, tp_size=tp_size
+        )
         if a_local.dtype != jnp.bfloat16 or w_local.dtype != jnp.bfloat16:
             raise ValueError(
                 "P38 fixed lm_head local dtype mismatch: "
@@ -232,7 +310,7 @@ def fixed_lm_head(
             return lax.map(
                 lambda a_chunk: run_fixed_with_weight(a_chunk, weight_local),
                 a_chunks,
-            ).reshape((a_learner.shape[0], LOCAL_VOCAB))
+            ).reshape((a_learner.shape[0], geometry.local_vocab))
 
         @jax.custom_vjp
         def learner_fixed_vjp(a_learner, weight_local):
@@ -247,13 +325,15 @@ def fixed_lm_head(
                 "[PATHTRACE] CANON_P38_FIXED_LM_HEAD_VJP=1 "
                 "semantic_M=4096 fixed_M=256 chunks=16 "
                 "accumulation=lax.scan order=ascending "
-                f"K={hidden_size} endpoint={endpoint}",
+                f"K={hidden_size} TP={tp_size} "
+                f"local_N={geometry.local_vocab} "
+                f"fixed_N={geometry.padded_local_vocab} endpoint={endpoint}",
                 flush=True,
             )
             a_learner, weight_local = residual
             a_chunks = a_learner.reshape((-1, FIXED_M, hidden_size))
             cotangent_chunks = cotangent.reshape(
-                (-1, FIXED_M, LOCAL_VOCAB)
+                (-1, FIXED_M, geometry.local_vocab)
             )
 
             def accumulate(weight_cotangent, values):
@@ -297,12 +377,13 @@ def fixed_lm_head(
         print(
             "[PATHTRACE] CANON_P38_FIXED_LM_HEAD=1 "
             f"semantic_M={local_m} fixed_M={FIXED_M} K={hidden_size} "
-            f"local_N={LOCAL_VOCAB} fixed_N={PADDED_LOCAL_VOCAB} "
+            f"TP={tp_size} local_N={geometry.local_vocab} "
+            f"fixed_N={geometry.padded_local_vocab} "
             f"BM={BM} BN={BN} BK={BK} chunks={chunks} "
             f"endpoint={endpoint}",
             flush=True,
         )
-        if tuple(map(int, out.shape)) != (local_m, LOCAL_VOCAB):
+        if tuple(map(int, out.shape)) != (local_m, geometry.local_vocab):
             raise RuntimeError(
                 f"P38 fixed lm_head output shape mismatch: {out.shape}"
             )

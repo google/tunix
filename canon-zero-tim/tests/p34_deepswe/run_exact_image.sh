@@ -23,6 +23,9 @@ $DOCKER run --rm \
     PYTHONPATH=/workspace python3 canon-zero-tim/tests/p34_deepswe/test_qwen32b_tp8.py
     PYTHONPATH=/workspace/canon-zero-tim/src/engine_shims/models/qwen32b \
       python3 canon-zero-tim/src/engine_shims/models/qwen32b/p22xf_contract.py
+    PYTHONPATH=/tmp/p34-overlay python3 \
+      canon-zero-tim/tests/p38_serving/probe_fixed_lm_head_overlay.py \
+      --hidden-size 5120
     PYTHONPATH=/workspace python3 canon-zero-tim/tests/p34_deepswe/test_trajectory.py
     PYTHONPATH=/workspace python3 canon-zero-tim/tests/p34_deepswe/test_update.py
     PYTHONPATH=/workspace python3 canon-zero-tim/tests/p34_deepswe/test_render_p34_jobset.py
@@ -35,5 +38,5 @@ $DOCKER run --rm \
     PYTHONPATH=/tmp/p34-overlay python3 \
       canon-zero-tim/tests/p44_deepswe_qwen4b_parity/probe_swiglu_feature_padding.py \
       --feature 3200 --padded-feature 3328 --model qwen3-32b-tp8
-    echo "P34_EXACT_IMAGE_CPU_PASS unit_cases=55 alignment_cases=3 pallas_cases=2 contract_cases=5 scheduler_cases=1 overlay=qwen32b"
+    echo "P34_EXACT_IMAGE_CPU_PASS unit_cases=55 alignment_cases=3 pallas_cases=2 contract_cases=5 scheduler_cases=1 fixed_lm_head=1 overlay=qwen32b"
   '

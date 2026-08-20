@@ -583,14 +583,27 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
   fi
 fi
 if [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "1" ]; then
-  case "${CANON_P32_WORKLOAD:-}:${CANON_P33_RUN_STAGE:-}:${CANON_PROFILE_FILE:-}" in
-    gsm8k:full:cluster/profiles/qwen3-1p7b-dp16-tp4-gsm8k.env)
+  case "${CANON_PROFILE_FILE:-}" in
+    cluster/profiles/qwen3-1p7b-dp16-tp4-gsm8k.env)
       p38_fixed_endpoint=tied_embed
       p38_fixed_hidden=2048
+      p38_fixed_tp=4
       ;;
-    frozenlake:backward-no-commit:cluster/profiles/qwen3-8b.env)
+    cluster/profiles/qwen3-8b.env)
       p38_fixed_endpoint=untied_lm_head
       p38_fixed_hidden=4096
+      p38_fixed_tp=4
+      ;;
+    cluster/profiles/qwen3-4b-dp-parity-deepswe-debug.env)
+      p38_fixed_endpoint=tied_embed
+      p38_fixed_hidden=2560
+      p38_fixed_tp=8
+      ;;
+    cluster/profiles/qwen3-32b-dp16-tp8-deepswe.env|\
+    cluster/profiles/qwen3-32b-dp-parity-deepswe-full.env)
+      p38_fixed_endpoint=untied_lm_head
+      p38_fixed_hidden=5120
+      p38_fixed_tp=8
       ;;
     *)
       echo "[run] FATAL: fixed lm-head receipt classifier has no admitted workload/stage/profile contract" >&2
@@ -601,6 +614,7 @@ if [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "1" ]; then
     --log "$LOG"
     --endpoint "$p38_fixed_endpoint"
     --hidden "$p38_fixed_hidden"
+    --tp-size "$p38_fixed_tp"
     --output "$CANON_STATE/p38_fixed_lm_head_receipts.json"
   )
   if [ -z "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then

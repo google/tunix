@@ -5,6 +5,16 @@ parallel Qwen3-32B DeepSWE workstream, read
 `../p39-deepswe-production/HANDOFF.md`. P38 evidence cannot promote P39, and
 P39 evidence cannot promote P38.
 
+## Prepared, not certified: Qwen3-4B/32B TP8 output heads
+
+P38.2y2 extends the same default-off fixed output-head implementation to the
+actual DeepSWE TP8 geometries: 4B tied K2560 and 32B untied K5120, local
+N18992 padded to N19200. Focused CPU and pinned-image overlay gates pass; no
+TPU run has occurred. Operators must use `--fixed-lm-head`, return the
+model-specific primal/VJP receipt artifact, and follow
+`P38_TP8_FIXED_LM_HEAD_RUNBOOK.md`. Do not infer certification from the 1.7B
+or 8B result.
+
 ## CURRENT ACTION: certify the tied-head repair, then launch P38y8
 
 P38s23r3 and P38h1 remain admitted zero-byte evidence for Qwen3-8B's untied

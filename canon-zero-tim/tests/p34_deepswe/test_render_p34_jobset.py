@@ -122,6 +122,7 @@ class RenderP34JobSetTest(unittest.TestCase):
     self.assertTrue(env["CANON_PRE_ALIGN_REPORT"].endswith("pre_alignment.jsonl"))
     self.assertEqual(env["CANON_P34_WHITELIST_SHA256"], "3" * 64)
     self.assertEqual(env["CANON_EXPECT_MODEL_MESH_IDS"], "")
+    self.assertEqual(env["CANON_P38_FIXED_LM_HEAD"], "0")
     command = env["CANON_RUN_CMD"]
     for value in (
         "--batch_size=8",
@@ -195,6 +196,22 @@ class RenderP34JobSetTest(unittest.TestCase):
   def test_full_stage_rejects_any_other_whitelist(self):
     with self.assertRaisesRegex(ValueError, "1851-image clean whitelist"):
       _render(stage="full")
+
+  def test_fixed_lm_head_is_explicit_and_preserved(self):
+    document = _render(fixed_lm_head=True)
+    env = renderer._env(document)
+    self.assertEqual(env["CANON_P38_FIXED_LM_HEAD"], "1")
+    self.assertEqual(
+        document["metadata"]["labels"]["canon.zero-tim/fixed-lm-head"],
+        "1",
+    )
+    renderer.validate(
+        document,
+        source_commit="1" * 40,
+        client_image="registry.example/tunix@sha256:" + "2" * 64,
+        stage="three-update",
+        fixed_lm_head=True,
+    )
 
   def test_secret_refs_and_pvc_survive_render(self):
     document = _render()

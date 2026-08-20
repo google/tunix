@@ -377,3 +377,10 @@ fixed budget and produces an advisory curriculum list. It does not prove
 Qwen3-32B training, training/rollout alignment, optimizer correctness, or
 production zero-TIM. Q32 remains a separate explicitly approved launch after
 the washed list and its digests are reviewed.
+# Optional P38.2y2 fixed output head (not yet TPU-certified)
+
+Qwen3-4B debug and Qwen3-32B training renders accept the explicit
+`--fixed-lm-head` option. It is default-off, forbidden for `q4-clean-eval`,
+and must not be hand-added to YAML. The pinned-image construction gates pass,
+but no 4B/32B TPU target has run. Launch and return requirements are in
+`../p38-pathways-decode-prefill-carrier/P38_TP8_FIXED_LM_HEAD_RUNBOOK.md`.

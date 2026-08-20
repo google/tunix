@@ -54,6 +54,7 @@ definition of done. FrozenLake and every root-cause/repair gate remain strict.
 | P38.2h | Fixed-lm-head actual-model backward-no-commit | Repair and certify M4096 outer VJP order locally, then execute all DP16 gradient groups/reducer gates with zero optimizer commits and byte-unchanged state | complete: official `P38H_FIXED_LM_HEAD_BACKWARD_NO_COMMIT_PASS` |
 | P38.2y | Qwen3-1.7B GSM8K fixed-lm-head full training | Real one-host forward/VJP gate, then one 200-step DP16xTP4 run with resident optimizer and certified P47/P50 performance bundle | P38y6 bootstrap inconclusive; P38y7 ran but bypassed the tied output endpoint, so numerical target superseded by P38.2y1 |
 | P38.2y1 | Qwen3-1.7B tied output-head integration and executable receipts | `JaxEmbed.decode` runs the same fixed head; endpoint-scoped M16/32/64/128/256/M4096/VJP receipts fail closed; then one P38y8 full run | implementation and pinned-image gate complete; real-v5p gate blocked by an occupied device; P38y8 not run |
+| P38.2y2 | Qwen3-4B/32B TP8 output-head extension | Exact hidden/TP/endpoint registry, N18992→19200 padding, explicit renderer opt-in, model-scoped primal/VJP receipts, pinned-image gates, then independent bounded target runs | implementation and pinned-image CPU gates complete; no TPU target run |
 
 ## Decisions
 

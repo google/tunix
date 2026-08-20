@@ -19,7 +19,7 @@ BM = 128
 BN = 128
 BK = 128
 MATMUL_K_PADDING = {1216: 1280}
-MATMUL_N_PADDING = {1216: 1280}
+MATMUL_N_PADDING = {1216: 1280, 18992: 19200}
 SWIGLU_FEATURE_PADDING = {1216: 1280}
 
 HIDDEN_SIZE = 2560
@@ -104,8 +104,11 @@ def validate_manifest(sites) -> None:
       )
   if MATMUL_K_PADDING != {1216: 1280}:
     raise ValueError("Qwen3-4B matmul K padding must be exactly 1216->1280")
-  if MATMUL_N_PADDING != {1216: 1280}:
-    raise ValueError("Qwen3-4B matmul N padding must be exactly 1216->1280")
+  if MATMUL_N_PADDING != {1216: 1280, 18992: 19200}:
+    raise ValueError(
+        "Qwen3-4B matmul N padding must cover MLP 1216->1280 and "
+        "TP8 lm-head 18992->19200"
+    )
   local_feature = INTERMEDIATE_SIZE // TP_SIZE
   if SWIGLU_FEATURE_PADDING != {local_feature: 1280}:
     raise ValueError(
@@ -160,7 +163,7 @@ def self_test() -> None:
     ).k_local == 1216
     assert (BM, BN, BK) == (128, 128, 128)
     assert MATMUL_K_PADDING == {1216: 1280}
-    assert MATMUL_N_PADDING == {1216: 1280}
+    assert MATMUL_N_PADDING == {1216: 1280, 18992: 19200}
     assert SWIGLU_FEATURE_PADDING == {1216: 1280}
     os.environ["CANON_QWEN3_TP_SIZE"] = "4"
     try:

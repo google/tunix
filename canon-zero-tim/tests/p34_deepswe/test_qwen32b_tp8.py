@@ -55,6 +55,12 @@ class Qwen32BTP8Test(unittest.TestCase):
     self.assertNotEqual(3200 % 256, 0)
     self.assertEqual(3328 % 256, 0)
 
+  def test_lm_head_local_vocab_padding_is_model_pinned(self):
+    contract = _contract()
+    self.assertEqual(contract.MATMUL_N_PADDING, {18992: 19200})
+    self.assertEqual(151936 // contract.TP_SIZE, 18992)
+    self.assertEqual(19200 % 256, 0)
+
   def test_projection_wrapper_forwards_model_tiles(self):
     linear = (ROOT / "canon-zero-tim/src/engine_shims/linear_p22xf.py").read_text()
     matmul = (

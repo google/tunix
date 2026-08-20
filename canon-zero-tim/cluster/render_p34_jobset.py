@@ -220,6 +220,7 @@ def render(
     model_pvc: str,
     whitelist: str,
     whitelist_sha256: str,
+    fixed_lm_head: bool = False,
 ) -> dict[str, Any]:
   """Returns a fail-closed P34 JobSet without mutating the base mapping."""
   if not _SHA.fullmatch(source_commit):
@@ -263,6 +264,7 @@ def render(
       # A prefix such as 022893e2 is accepted as a number by some YAML 1.1
       # consumers.  Force an explicit string tag in the serialized manifest.
       "canon.zero-tim/source": _QuotedString(source_commit[:8]),
+      "canon.zero-tim/fixed-lm-head": "1" if fixed_lm_head else "0",
   })
   document["spec"]["failurePolicy"]["maxRestarts"] = 0
   document["spec"]["failurePolicy"]["restartStrategy"] = "Recreate"
@@ -338,6 +340,7 @@ exec bash canon-zero-tim/cluster/entrypoint.sh
       "CANON_OPT_STATE_RESIDENT": "1",
       "CANON_P30_OPT_STATE_OFFLOAD": "0",
       "CANON_DEEPSWE_ALIGNMENT_WARN_ONLY": "1",
+      "CANON_P38_FIXED_LM_HEAD": "1" if fixed_lm_head else "0",
       "CANON_DEEPSWE_CLEANUP_TIMEOUT_SECS": "300",
       "CANON_DEEPSWE_ROLLOUT_BATCH_TIMEOUT_SECS": "5400",
       "CANON_DEEPSWE_PER_TURN_TIMEOUT_SECS": "300",
@@ -391,7 +394,13 @@ exec bash canon-zero-tim/cluster/entrypoint.sh
       "--resource_manager_address=",
       f"--resource_manager_address={address}:29001",
   )
-  validate(document, source_commit=source_commit, client_image=client_image, stage=stage)
+  validate(
+      document,
+      source_commit=source_commit,
+      client_image=client_image,
+      stage=stage,
+      fixed_lm_head=fixed_lm_head,
+  )
   return document
 
 
@@ -400,12 +409,23 @@ def _env(document: Mapping[str, Any]) -> dict[str, str]:
   return {item["name"]: item["value"] for item in main["env"] if "value" in item}
 
 
-def validate(document: Mapping[str, Any], *, source_commit: str, client_image: str, stage: str) -> None:
+def validate(
+    document: Mapping[str, Any],
+    *,
+    source_commit: str,
+    client_image: str,
+    stage: str,
+    fixed_lm_head: bool = False,
+) -> None:
   """Rejects any rendered object that weakens the P34 attempt-zero contract."""
   head = _head(document)
   worker = _worker(document)
   main = _container(head["containers"], "jax-tpu")
   env = _env(document)
+  if document["metadata"]["labels"].get(
+      "canon.zero-tim/fixed-lm-head"
+  ) != ("1" if fixed_lm_head else "0"):
+    raise ValueError("P34 fixed lm-head label drifted")
   if document["spec"]["failurePolicy"]["maxRestarts"] != 0:
     raise ValueError("P34 JobSet must disable restarts")
   if worker["backoffLimit"] != 0 or worker["completions"] != 64 or worker["parallelism"] != 64:
@@ -441,6 +461,7 @@ def validate(document: Mapping[str, Any], *, source_commit: str, client_image: s
       "CANON_OPT_STATE_RESIDENT": "1",
       "CANON_P30_OPT_STATE_OFFLOAD": "0",
       "CANON_DEEPSWE_ALIGNMENT_WARN_ONLY": "1",
+      "CANON_P38_FIXED_LM_HEAD": "1" if fixed_lm_head else "0",
       "CANON_P34_DATASET_NAME": P34_DATASET_NAME,
       "CANON_P34_DATASET_REVISION": P34_DATASET_REVISION,
       "CANON_P34_DATASET_SPLIT": P34_DATASET_SPLIT,
@@ -536,6 +557,11 @@ def main() -> None:
   parser.add_argument("--model-pvc", default="haoyugao-cpu-np-pvc")
   parser.add_argument("--whitelist", required=True)
   parser.add_argument("--whitelist-sha256", required=True)
+  parser.add_argument(
+      "--fixed-lm-head",
+      action="store_true",
+      help="experimental Qwen3-32B TP8 fixed-output-head construction",
+  )
   args = parser.parse_args()
   if args.output.exists():
     raise FileExistsError(f"refusing to overwrite JobSet: {args.output}")
@@ -551,6 +577,7 @@ def main() -> None:
       model_pvc=args.model_pvc,
       whitelist=args.whitelist,
       whitelist_sha256=args.whitelist_sha256,
+      fixed_lm_head=args.fixed_lm_head,
   )
   args.output.write_text(dump_jobset(document))
   print(f"P34_JOBSET_RENDER_PASS output={args.output}")

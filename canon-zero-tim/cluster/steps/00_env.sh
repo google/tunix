@@ -468,7 +468,32 @@ case "${CANON_P38_FIXED_LM_HEAD:-0}" in
 esac
 if [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "1" ] && \
    [ -z "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
-  case "${CANON_P32_WORKLOAD:-}:${CANON_P33_RUN_STAGE:-}:${CANON_P33_NO_COMMIT:-}:${CANON_PROFILE_FILE:-}" in
+  if [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
+    case "${CANON_P34_RUN_STAGE:-}:${CANON_PROFILE_FILE:-}" in
+      backward-no-commit:cluster/profiles/qwen3-32b-dp16-tp8-deepswe.env|\
+      one-update:cluster/profiles/qwen3-32b-dp16-tp8-deepswe.env|\
+      three-update:cluster/profiles/qwen3-32b-dp16-tp8-deepswe.env|\
+      full:cluster/profiles/qwen3-32b-dp16-tp8-deepswe.env|\
+      full:cluster/profiles/qwen3-32b-dp-parity-deepswe-full.env|\
+      one-update:cluster/profiles/qwen3-4b-dp-parity-deepswe-debug.env|\
+      three-update:cluster/profiles/qwen3-4b-dp-parity-deepswe-debug.env)
+        [ "${CANON_DEEPSWE_ALIGNMENT_WARN_ONLY:-0}" = "1" ] || {
+          echo "[env] fixed lm-head DeepSWE training requires warning-only A-B reporting" >&2
+          fail=1
+        }
+        [ "${CANON_P46_EVALUATION:-0}" = "0" ] || {
+          echo "[env] fixed lm-head is forbidden in the P46 evaluation lane" >&2
+          fail=1
+        }
+        echo "[env] P38.2y2 fixed lm-head DeepSWE training enabled"
+        ;;
+      *)
+        echo "[env] fixed lm-head is not admitted for this DeepSWE stage/profile" >&2
+        fail=1
+        ;;
+    esac
+  else
+    case "${CANON_P32_WORKLOAD:-}:${CANON_P33_RUN_STAGE:-}:${CANON_P33_NO_COMMIT:-}:${CANON_PROFILE_FILE:-}" in
     frozenlake:backward-no-commit:1:cluster/profiles/qwen3-8b-dp16-tp4-frozenlake.env)
       [ "${CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY:-0}" = "0" ] && \
       [ "${CANON_P33_ENABLE_EVAL:-0}" = "0" ] && \
@@ -485,11 +510,12 @@ if [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "1" ] && \
       }
       echo "[env] P38.2y fixed lm-head GSM8K full enabled"
       ;;
-    *)
-      echo "[env] fixed lm-head is not admitted for this workload/stage/profile" >&2
-      fail=1
-      ;;
-  esac
+      *)
+        echo "[env] fixed lm-head is not admitted for this workload/stage/profile" >&2
+        fail=1
+        ;;
+    esac
+  fi
   [ -z "${CANON_MM_ALGO:-}${CANON_P38_PRECHECK_ONLY:-}${CANON_P38_CONTROLLED_EXIT:-}${CANON_P38_DIAGNOSTIC_ROUNDS:-}${CANON_P38_KV_OBSERVER_DIR:-}${CANON_P38_SEAM_OBSERVER:-}${CANON_P38_TAIL_OBSERVER:-}${CANON_P38_TERMINAL_DISCRIMINATOR:-}" ] || {
     echo "[env] fixed lm-head backward conflicts with diagnostic/algorithm env" >&2
     fail=1

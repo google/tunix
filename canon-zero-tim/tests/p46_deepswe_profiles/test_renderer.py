@@ -98,6 +98,22 @@ class P46RendererTest(unittest.TestCase):
       ):
         self.assertIn(expected, args)
 
+  def test_fixed_lm_head_is_explicit_for_training_and_forbidden_for_eval(self):
+    for workload, topology in (("q4-debug", "64"), ("q32-train", "64")):
+      with self.subTest(workload=workload):
+        self.assertEqual(
+            p34._env(self._render(workload, topology))["CANON_P38_FIXED_LM_HEAD"],
+            "0",
+        )
+        self.assertEqual(
+            p34._env(self._render(
+                workload, topology, fixed_lm_head=True
+            ))["CANON_P38_FIXED_LM_HEAD"],
+            "1",
+        )
+    with self.assertRaisesRegex(ValueError, "restricted to P46 training"):
+      self._render("q4-clean-eval", "64", fixed_lm_head=True)
+
   def test_eval_is_not_a_training_job(self):
     for topology in renderer.WORKLOAD_TOPOLOGIES["q4-clean-eval"]:
       env = p34._env(self._render("q4-clean-eval", topology))

@@ -18,6 +18,7 @@ CONFLICTS = (
 BM = 128
 BN = 128
 BK = 128
+MATMUL_N_PADDING = {18992: 19200}
 SWIGLU_FEATURE_PADDING = {3200: 3328}
 
 HIDDEN_SIZE = 5120
@@ -94,6 +95,10 @@ def validate_manifest(sites) -> None:
           f"does not divide BK/BN={BK}/{BN}"
       )
   local_feature = INTERMEDIATE_SIZE // TP_SIZE
+  if MATMUL_N_PADDING != {18992: 19200}:
+    raise ValueError(
+        "Qwen3-32B matmul N padding must cover TP8 lm-head 18992->19200"
+    )
   if SWIGLU_FEATURE_PADDING != {local_feature: 3328}:
     raise ValueError(
         "Qwen3-32B SwiGLU padding contract must be exactly 3200->3328"
@@ -142,6 +147,7 @@ def self_test() -> None:
     assert match_site("model.layers.0.self_attn.q_proj", "TD,DNH->TNH").n_local == 1024
     assert match_site("model.layers.0.mlp.down_proj", "mn,np->mp").k_local == 3200
     assert (BM, BN, BK) == (128, 128, 128)
+    assert MATMUL_N_PADDING == {18992: 19200}
     assert SWIGLU_FEATURE_PADDING == {3200: 3328}
     os.environ["CANON_QWEN3_TP_SIZE"] = "4"
     try:

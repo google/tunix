@@ -7,6 +7,11 @@
   is `JaxEmbed.decode`, so P38y7 did not execute the P38s23 repair and cannot
   adjudicate it. P38.2y1 patches the tied endpoint and adds endpoint-scoped
   fail-closed receipts. The 200-step target remains unsatisfied.
+- TP8 extension: P38.2y2 now registers Qwen3-4B tied K2560/TP8 and
+  Qwen3-32B untied K5120/TP8, both at local N18992 padded to N19200 with the
+  same M256/BM128/BN256/BK256 fixed body. Focused CPU and pinned-image overlay
+  gates pass for both models. No TPU execution or target numerical claim has
+  been made; both remain default-off and independently gated.
 - Objective: localize and remove the Pathways serving decode-versus-prefill
   carrier without weakening the strict zero-TIM release contract.
 - Definition of done: one source-pinned flag-on run reports exact

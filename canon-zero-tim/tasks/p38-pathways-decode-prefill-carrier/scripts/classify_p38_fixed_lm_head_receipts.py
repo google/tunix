@@ -13,6 +13,12 @@ import sys
 REQUEST_M = (16, 32, 64, 128, 256)
 LEARNER_M = 4096
 ENDPOINTS = ("untied_lm_head", "tied_embed")
+GEOMETRIES = {
+    ("tied_embed", 2048, 4): (37984, 38144),
+    ("untied_lm_head", 4096, 4): (37984, 38144),
+    ("tied_embed", 2560, 8): (18992, 19200),
+    ("untied_lm_head", 5120, 8): (18992, 19200),
+}
 
 
 def _fields(line: str) -> dict[str, str]:
@@ -26,15 +32,23 @@ def _fields(line: str) -> dict[str, str]:
 
 
 def _matches_primal(
-    record: dict[str, str], *, semantic_m: int, hidden: int, endpoint: str
+    record: dict[str, str],
+    *,
+    semantic_m: int,
+    hidden: int,
+    tp_size: int,
+    endpoint: str,
+    local_vocab: int,
+    padded_local_vocab: int,
 ) -> bool:
   chunks = 16 if semantic_m == LEARNER_M else 1
   expected = {
       "semantic_M": str(semantic_m),
       "fixed_M": "256",
       "K": str(hidden),
-      "local_N": "37984",
-      "fixed_N": "38144",
+      "TP": str(tp_size),
+      "local_N": str(local_vocab),
+      "fixed_N": str(padded_local_vocab),
       "BM": "128",
       "BN": "256",
       "BK": "256",
@@ -45,7 +59,13 @@ def _matches_primal(
 
 
 def _matches_vjp(
-    record: dict[str, str], *, hidden: int, endpoint: str
+    record: dict[str, str],
+    *,
+    hidden: int,
+    tp_size: int,
+    endpoint: str,
+    local_vocab: int,
+    padded_local_vocab: int,
 ) -> bool:
   expected = {
       "semantic_M": "4096",
@@ -54,18 +74,26 @@ def _matches_vjp(
       "accumulation": "lax.scan",
       "order": "ascending",
       "K": str(hidden),
+      "TP": str(tp_size),
+      "local_N": str(local_vocab),
+      "fixed_N": str(padded_local_vocab),
       "endpoint": endpoint,
   }
   return all(record.get(name) == value for name, value in expected.items())
 
 
 def classify(
-    text: str, *, endpoint: str, hidden: int, require_vjp: bool
+    text: str, *, endpoint: str, hidden: int, tp_size: int, require_vjp: bool
 ) -> dict[str, object]:
   if endpoint not in ENDPOINTS:
     raise ValueError(f"unsupported fixed-head endpoint: {endpoint!r}")
-  if hidden not in (2048, 4096):
-    raise ValueError(f"unsupported fixed-head hidden width: {hidden}")
+  try:
+    local_vocab, padded_local_vocab = GEOMETRIES[(endpoint, hidden, tp_size)]
+  except KeyError as error:
+    raise ValueError(
+        "unsupported fixed-head geometry: "
+        f"endpoint={endpoint} hidden={hidden} tp={tp_size}"
+    ) from error
 
   primal = []
   vjp = []
@@ -83,7 +111,10 @@ def classify(
               record,
               semantic_m=semantic_m,
               hidden=hidden,
+              tp_size=tp_size,
               endpoint=endpoint,
+              local_vocab=local_vocab,
+              padded_local_vocab=padded_local_vocab,
           )
           for record in primal
       )
@@ -95,7 +126,14 @@ def classify(
       and record.get("endpoint") != endpoint
   })
   vjp_count = sum(
-      _matches_vjp(record, hidden=hidden, endpoint=endpoint)
+      _matches_vjp(
+          record,
+          hidden=hidden,
+          tp_size=tp_size,
+          endpoint=endpoint,
+          local_vocab=local_vocab,
+          padded_local_vocab=padded_local_vocab,
+      )
       for record in vjp
   )
   tied_marker_count = text.count("[P28.G5C] TIED_EMBEDDING_HEAD on")
@@ -122,6 +160,9 @@ def classify(
       "verdict": verdict,
       "endpoint": endpoint,
       "hidden": hidden,
+      "tp_size": tp_size,
+      "local_vocab": local_vocab,
+      "padded_local_vocab": padded_local_vocab,
       "request_M": list(REQUEST_M),
       "learner_M": LEARNER_M,
       "require_vjp": require_vjp,
@@ -139,7 +180,10 @@ def main() -> int:
   parser = argparse.ArgumentParser()
   parser.add_argument("--log", required=True, type=Path)
   parser.add_argument("--endpoint", required=True, choices=ENDPOINTS)
-  parser.add_argument("--hidden", required=True, type=int, choices=(2048, 4096))
+  parser.add_argument(
+      "--hidden", required=True, type=int, choices=(2048, 2560, 4096, 5120)
+  )
+  parser.add_argument("--tp-size", required=True, type=int, choices=(4, 8))
   parser.add_argument("--require-vjp", action="store_true")
   parser.add_argument("--output", required=True, type=Path)
   args = parser.parse_args()
@@ -149,6 +193,7 @@ def main() -> int:
       text,
       endpoint=args.endpoint,
       hidden=args.hidden,
+      tp_size=args.tp_size,
       require_vjp=args.require_vjp,
   )
   report["log_sha256"] = hashlib.sha256(args.log.read_bytes()).hexdigest()
@@ -160,7 +205,7 @@ def main() -> int:
   marker = (
       "[P38.FIXED_LM_HEAD] RECEIPTS_"
       + ("PASS" if not report["reasons"] else "FAIL")
-      + f" endpoint={args.endpoint} K={args.hidden} "
+      + f" endpoint={args.endpoint} K={args.hidden} TP={args.tp_size} "
       + "request_M="
       + ",".join(map(str, REQUEST_M))
       + f" learner_M={LEARNER_M} vjp={report['matching_vjp_records']}"

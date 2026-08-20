@@ -52,7 +52,7 @@ class Qwen4BTP8Test(unittest.TestCase):
     self.assertNotIn("from p22_pallas_matmul import BK", source)
     self.assertNotEqual(1216 % model.BK, 0)
     self.assertEqual(model.MATMUL_K_PADDING, {1216: 1280})
-    self.assertEqual(model.MATMUL_N_PADDING, {1216: 1280})
+    self.assertEqual(model.MATMUL_N_PADDING, {1216: 1280, 18992: 19200})
     self.assertEqual(model.MATMUL_K_PADDING[1216] % model.BK, 0)
     self.assertEqual(model.MATMUL_N_PADDING[1216] % model.BN, 0)
 
@@ -68,6 +68,9 @@ class Qwen4BTP8Test(unittest.TestCase):
         (model.MATMUL_K_PADDING[down.k_local], down.n_local),
         (1280, 2560),
     )
+    self.assertEqual(model.MATMUL_N_PADDING[18992], 19200)
+    self.assertEqual(151936 // model.TP_SIZE, 18992)
+    self.assertEqual(19200 % 256, 0)
     wrapper = (
         ROOT / "canon-zero-tim/src/engine_shims/p22xi_padded_matmul.py"
     ).read_text()

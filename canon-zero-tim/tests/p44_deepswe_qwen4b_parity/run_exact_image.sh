@@ -27,6 +27,9 @@ $DOCKER run --rm \
     PYTHONPATH=/workspace/canon-zero-tim/src/engine_shims/models/qwen4b \
       python3 canon-zero-tim/src/engine_shims/models/qwen4b/p22xf_contract.py
     PYTHONPATH=/tmp/p44-overlay python3 \
+      canon-zero-tim/tests/p38_serving/probe_fixed_lm_head_overlay.py \
+      --hidden-size 2560
+    PYTHONPATH=/tmp/p44-overlay python3 \
       canon-zero-tim/tests/p44_deepswe_qwen4b_parity/probe_swiglu_feature_padding.py \
       --feature 1216 --padded-feature 1280 --model qwen3-4b-tp8
     PYTHONPATH=/tmp/p44-overlay python3 \

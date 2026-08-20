@@ -103,6 +103,20 @@ class P46EnvironmentContractTest(unittest.TestCase):
             result.stdout,
         )
 
+  def test_fixed_lm_head_training_preflight_passes_for_q4_and_q32(self):
+    for workload, topology in (("q4-debug", "64"), ("q32-train", "64")):
+      with self.subTest(workload=workload):
+        result = self._run(
+            workload,
+            topology,
+            render_overrides={"fixed_lm_head": True},
+        )
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn(
+            "P38.2y2 fixed lm-head DeepSWE training enabled",
+            result.stdout,
+        )
+
   def test_clean_evaluation_preflight_passes_without_trainer(self):
     for topology in ("64", "128"):
       with self.subTest(topology=topology):

@@ -2170,3 +2170,24 @@ reclassification from the committed NPZ inputs.
 - No commit, push, cluster apply, or external workload mutation occurred.
   Next: run the one-host construction gate when the device is free, review,
   separately approve publication, then launch only P38y8.
+
+## 2026-08-20 UTC — P38.2y2 Qwen3-4B/32B TP8 output-head extension locally gated
+
+- Parameterized the existing fixed Pallas output head by an exact
+  `(hidden, TP, endpoint)` registry. Added Qwen3-4B tied K2560/TP8 and
+  Qwen3-32B untied K5120/TP8. Both use local vocabulary N18992 padded to
+  N19200 and retain M256/BM128/BN256/BK256 plus the existing 16-chunk M4096
+  fixed-order VJP.
+- Extended Qwen4B/Qwen32B overlay manifests with only the output-axis padding
+  entry. Cross-hidden, cross-TP, and wrong-endpoint combinations fail closed.
+- Added default-off `--fixed-lm-head` plumbing to P34/P44/P46 training
+  renderers. The rendered env and label attest the choice; P46 evaluation and
+  P44 rollout-only reject it. `00_env.sh` admits only reviewed update stages,
+  and `90_run.sh` requires model-specific primal/VJP receipts.
+- Focused unit/renderer/env tests pass 60/60. P34 static and P46 CPU suites
+  pass. Pinned image `sha256:418dc632...` passes exact overlay installation and
+  endpoint probes for Qwen3-4B and Qwen3-32B; the Qwen3-1.7B/8B pinned-image
+  regression also exits zero.
+- No TPU program, commit, push, JobSet apply, or target numerical claim was
+  made. The local diff is awaiting user review and explicit publication
+  approval.

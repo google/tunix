@@ -111,11 +111,16 @@ def render(
     model_pvc: str,
     whitelist: str,
     whitelist_sha256: str,
+    fixed_lm_head: bool = False,
 ) -> dict[str, Any]:
   """Returns one immutable, attempt-zero P44 parity JobSet."""
   if stage not in _STAGE_STEPS:
     raise ValueError(
         "P44 parity admits only rollout-only, one-update, or three-update"
+    )
+  if fixed_lm_head and stage == "rollout-only":
+    raise ValueError(
+        "fixed lm-head requires a P44 update stage with VJP receipts"
     )
   try:
     topology_spec = _TOPOLOGIES[topology]
@@ -142,6 +147,7 @@ def render(
       model_pvc=model_pvc,
       whitelist=whitelist,
       whitelist_sha256=whitelist_sha256,
+      fixed_lm_head=fixed_lm_head,
   )
 
   short_stage = {
@@ -266,6 +272,7 @@ def render(
       client_image=client_image,
       stage=stage,
       topology=topology,
+      fixed_lm_head=fixed_lm_head,
   )
   return document
 
@@ -293,6 +300,7 @@ def recipe_signature(document: Mapping[str, Any]) -> dict[str, Any]:
       "optimizer_resident": env["CANON_OPT_STATE_RESIDENT"],
       "optimizer_offload": env["CANON_P30_OPT_STATE_OFFLOAD"],
       "alignment_warning_only": env["CANON_DEEPSWE_ALIGNMENT_WARN_ONLY"],
+      "fixed_lm_head": env["CANON_P38_FIXED_LM_HEAD"],
       "source_commit": env["CANON_EXPECT_COMMIT"],
       "whitelist_sha256": env["CANON_P34_WHITELIST_SHA256"],
   }
@@ -305,6 +313,7 @@ def validate(
     client_image: str,
     stage: str,
     topology: str,
+    fixed_lm_head: bool = False,
 ) -> None:
   """Rejects topology, model, batch, artifact, or stage drift."""
   if stage not in _STAGE_STEPS:
@@ -352,6 +361,7 @@ def validate(
       "R2E_ACTIVE_DEADLINE_SECONDS": "3300",
       "MIN_TOKEN_BUCKET": str(topology_spec["global_m"]),
       "CANON_LOGPROB_M": "256",
+      "CANON_P38_FIXED_LM_HEAD": "1" if fixed_lm_head else "0",
   }
   wrong = {
       key: env.get(key)
@@ -424,6 +434,11 @@ def main() -> None:
   parser.add_argument("--model-pvc", required=True)
   parser.add_argument("--whitelist", required=True)
   parser.add_argument("--whitelist-sha256", required=True)
+  parser.add_argument(
+      "--fixed-lm-head",
+      action="store_true",
+      help="experimental Qwen3-4B TP8 fixed-output-head construction",
+  )
   args = parser.parse_args()
   if args.output.exists():
     raise FileExistsError(f"refusing to overwrite JobSet: {args.output}")
@@ -440,6 +455,7 @@ def main() -> None:
       model_pvc=args.model_pvc,
       whitelist=args.whitelist,
       whitelist_sha256=args.whitelist_sha256,
+      fixed_lm_head=args.fixed_lm_head,
   )
   args.output.write_text(p34.dump_jobset(document))
   print(

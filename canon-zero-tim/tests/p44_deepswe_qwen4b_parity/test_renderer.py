@@ -25,7 +25,9 @@ SPEC.loader.exec_module(renderer)
 
 class P44RendererTest(unittest.TestCase):
 
-  def _render(self, topology: str, stage: str = "three-update"):
+  def _render(
+      self, topology: str, stage: str = "three-update", **overrides
+  ):
     base = yaml.safe_load((PKG / "cluster/jobset-64chip.yaml").read_text())
     return renderer.render(
         base,
@@ -40,6 +42,7 @@ class P44RendererTest(unittest.TestCase):
         model_pvc="model-pvc",
         whitelist=renderer.p34.P34_CLEAN_WHITELIST,
         whitelist_sha256=renderer.p34.P34_CLEAN_WHITELIST_SHA256,
+        **overrides,
     )
 
   def test_all_six_bounded_jobsets_render(self):
@@ -74,6 +77,20 @@ class P44RendererTest(unittest.TestCase):
               "--expected_filtered_rows=1851", env["CANON_RUN_CMD"]
           )
           self.assertEqual(env["R2E_ACTIVE_DEADLINE_SECONDS"], "3300")
+          self.assertEqual(env["CANON_P38_FIXED_LM_HEAD"], "0")
+
+  def test_fixed_lm_head_is_explicit_and_part_of_recipe_signature(self):
+    for topology in ("64", "128"):
+      document = self._render(topology, fixed_lm_head=True)
+      self.assertEqual(
+          renderer.p34._env(document)["CANON_P38_FIXED_LM_HEAD"], "1"
+      )
+    self.assertNotEqual(
+        renderer.recipe_signature(self._render("64")),
+        renderer.recipe_signature(self._render("64", fixed_lm_head=True)),
+    )
+    with self.assertRaisesRegex(ValueError, "requires a P44 update stage"):
+      self._render("64", "rollout-only", fixed_lm_head=True)
 
   def test_normalized_rendered_recipes_are_identical(self):
     for stage in ("rollout-only", "one-update", "three-update"):

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Attest an installed Qwen3 TP4 fixed-lm-head hook in the pinned image."""
+"""Attest one installed Qwen3 fixed-lm-head hook in the pinned image."""
 
 from __future__ import annotations
 
@@ -9,7 +9,9 @@ import types
 
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--hidden-size", type=int, choices=(2048, 4096), default=4096)
+parser.add_argument(
+    "--hidden-size", type=int, choices=(2048, 2560, 4096, 5120), default=4096
+)
 args = parser.parse_args()
 
 
@@ -27,17 +29,27 @@ for name in (
   os.environ[name] = "1"
 
 model_env = {
-    2048: (6144, 16, "qwen1p7b"),
-    4096: (12288, 32, "qwen8b"),
+    2048: (6144, 16, 4, "qwen1p7b", "tied_embed", 37984, 38144),
+    4096: (12288, 32, 4, "qwen8b", "untied_lm_head", 37984, 38144),
+    2560: (9728, 32, 8, "qwen4b", "tied_embed", 18992, 19200),
+    5120: (25600, 64, 8, "qwen32b", "untied_lm_head", 18992, 19200),
 }
-intermediate_size, attention_heads, model_name = model_env[args.hidden_size]
+(
+    intermediate_size,
+    attention_heads,
+    tp_size,
+    model_name,
+    endpoint,
+    local_vocab,
+    padded_local_vocab,
+) = model_env[args.hidden_size]
 os.environ.update({
     "CANON_QWEN3_HIDDEN_SIZE": str(args.hidden_size),
     "CANON_QWEN3_INTERMEDIATE_SIZE": str(intermediate_size),
     "CANON_QWEN3_NUM_ATTENTION_HEADS": str(attention_heads),
     "CANON_QWEN3_NUM_KV_HEADS": "8",
     "CANON_QWEN3_HEAD_DIM": "128",
-    "CANON_QWEN3_TP_SIZE": "4",
+    "CANON_QWEN3_TP_SIZE": str(tp_size),
 })
 
 import linear_p22xk as linear  # noqa: E402
@@ -75,23 +87,39 @@ def _fake_fixed(inputs, weight, **kwargs):
 linear._p38_fixed_lm_head = _fake_fixed
 linear._CANON_MESH = "test-mesh"
 linear._CANON_TP_AXIS = "model"
-fake_embed = types.SimpleNamespace(
-    weight=types.SimpleNamespace(value=_FakeWeight())
-)
 fake_inputs = object()
-if embed_module.JaxEmbed.decode(fake_embed, fake_inputs) != "fixed-tied-output":
-  raise AssertionError("P38 tied hook did not return the fixed-head result")
+if endpoint == "tied_embed":
+  fake_endpoint = types.SimpleNamespace(
+      weight=types.SimpleNamespace(value=_FakeWeight())
+  )
+  result = embed_module.JaxEmbed.decode(fake_endpoint, fake_inputs)
+  expected_weight = "transposed-embed-weight"
+else:
+  fake_endpoint = types.SimpleNamespace(
+      einsum_str="TD,DV->TV",
+      prefix="model.lm_head",
+      weight=types.SimpleNamespace(value="untied-lm-head-weight"),
+  )
+  result = linear.JaxLmHead.__call__(fake_endpoint, fake_inputs)
+  expected_weight = "untied-lm-head-weight"
+if result != "fixed-tied-output":
+  raise AssertionError(f"P38 {endpoint} hook did not return the fixed-head result")
 if captured != {
     "inputs": fake_inputs,
-    "weight": "transposed-embed-weight",
+    "weight": expected_weight,
     "mesh": "test-mesh",
     "tp_axis": "model",
     "local_matmul": linear.traced_canonical_vjp_matmul,
-    "endpoint": "tied_embed",
+    "endpoint": endpoint,
 }:
-  raise AssertionError(f"P38 tied hook contract drifted: {captured!r}")
-if model.TP_SIZE != 4 or model.MATMUL_N_PADDING != {37984: 38144}:
-  raise AssertionError("Qwen3 TP4 lm_head padding contract is absent")
+  raise AssertionError(f"P38 {endpoint} hook contract drifted: {captured!r}")
+if model.TP_SIZE != tp_size:
+  raise AssertionError(f"Qwen3 {model_name} TP width drifted: {model.TP_SIZE}")
+if model.MATMUL_N_PADDING.get(local_vocab) != padded_local_vocab:
+  raise AssertionError(
+      f"Qwen3 {model_name} lm_head padding contract is absent: "
+      f"{model.MATMUL_N_PADDING}"
+  )
 if fixed.REQUEST_M != (8, 16, 32, 64, 128, 256):
   raise AssertionError(f"fixed lm_head request buckets drifted: {fixed.REQUEST_M}")
 if fixed.LEARNER_M != (4096,):
@@ -102,14 +130,20 @@ fixed.validate_global_contract(
     (args.hidden_size, fixed.VOCAB),
     "bfloat16",
     "bfloat16",
-    tp_size=4,
+    tp_size=tp_size,
 )
+geometry = fixed.resolve_geometry(args.hidden_size, tp_size, endpoint=endpoint)
+if (
+    geometry.local_vocab != local_vocab
+    or geometry.padded_local_vocab != padded_local_vocab
+):
+  raise AssertionError(f"fixed lm_head geometry drifted: {geometry}")
 
 print(
     "P38_FIXED_LM_HEAD_EXACT_IMAGE_PASS "
-    f"chain=linear_p22xk model={model_name} tp=4 K={args.hidden_size} "
+    f"chain=linear_p22xk model={model_name} tp={tp_size} K={args.hidden_size} "
     "request_M=8,16,32,64,128,256 "
     "learner_M=4096 fixed_M=256 "
-    "local_N=37984 fixed_N=38144 endpoints=untied_lm_head,tied_embed",
+    f"local_N={local_vocab} fixed_N={padded_local_vocab} endpoint={endpoint}",
     flush=True,
 )

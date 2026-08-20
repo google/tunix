@@ -42,33 +42,39 @@ class FixedLmHeadContractTest(unittest.TestCase):
     self.assertEqual(fixed.REQUEST_M, (8, 16, 32, 64, 128, 256))
     self.assertEqual(fixed.LEARNER_M, (4096,))
     self.assertEqual(fixed.SEMANTIC_M, (8, 16, 32, 64, 128, 256, 4096))
-    for m in fixed.SEMANTIC_M:
-      with self.subTest(m=m):
-        self.assertEqual(
-            fixed.validate_global_contract(
-                (m, 4096), (4096, 151936), "bfloat16", "bfloat16", tp_size=4
-            ),
-            m,
-        )
-        self.assertEqual(
-            fixed.validate_local_contract((m, 4096), (4096, 37984)), m
-        )
+    expected = {
+        (2048, 4): ("qwen3-1p7b", "tied_embed", 37984, 38144),
+        (4096, 4): ("qwen3-8b", "untied_lm_head", 37984, 38144),
+        (2560, 8): ("qwen3-4b", "tied_embed", 18992, 19200),
+        (5120, 8): ("qwen3-32b", "untied_lm_head", 18992, 19200),
+    }
+    for (hidden, tp_size), values in expected.items():
+      model, endpoint, local_vocab, padded_local_vocab = values
+      geometry = fixed.resolve_geometry(hidden, tp_size, endpoint=endpoint)
+      self.assertEqual(
+          (geometry.model, geometry.local_vocab, geometry.padded_local_vocab),
+          (model, local_vocab, padded_local_vocab),
+      )
+      for m in fixed.SEMANTIC_M:
+        with self.subTest(hidden=hidden, tp=tp_size, m=m):
+          self.assertEqual(
+              fixed.validate_global_contract(
+                  (m, hidden),
+                  (hidden, 151936),
+                  "bfloat16",
+                  "bfloat16",
+                  tp_size=tp_size,
+              ),
+              m,
+          )
+          self.assertEqual(
+              fixed.validate_local_contract(
+                  (m, hidden), (hidden, local_vocab), tp_size=tp_size
+              ),
+              m,
+          )
     self.assertEqual((fixed.BM, fixed.BN, fixed.BK), (128, 256, 256))
     self.assertEqual(fixed.PADDED_LOCAL_VOCAB, 38144)
-
-  def test_qwen1p7b_production_shape(self):
-    for m in fixed.SEMANTIC_M:
-      with self.subTest(m=m):
-        self.assertEqual(
-            fixed.validate_global_contract(
-                (m, 2048), (2048, 151936), "bfloat16", "bfloat16",
-                tp_size=4,
-            ),
-            m,
-        )
-        self.assertEqual(
-            fixed.validate_local_contract((m, 2048), (2048, 37984)), m
-        )
 
   def test_shape_dtype_and_topology_negatives(self):
     base = ((16, 4096), (4096, 151936), "bfloat16", "bfloat16")
@@ -86,6 +92,8 @@ class FixedLmHeadContractTest(unittest.TestCase):
         (base[0], base[1], "float32", base[3], 4),
         (base[0], base[1], base[2], "float32", 4),
         (base[0], base[1], base[2], base[3], 8),
+        ((16, 2560), (2560, 151936), base[2], base[3], 4),
+        ((16, 5120), (5120, 151936), base[2], base[3], 4),
     )
     for xshape, wshape, xdtype, wdtype, tp in cases:
       with self.subTest(case=(xshape, wshape, xdtype, wdtype, tp)):
@@ -124,6 +132,25 @@ class FixedLmHeadContractTest(unittest.TestCase):
     self.assertEqual(model.MATMUL_N_PADDING, {37984: 38144})
     model.validate_manifest(model.SITES)
 
+  def test_tp8_contracts_register_only_lm_head_n_padding(self):
+    qwen4b = _load(
+        SHIM / "models/qwen4b/p22xf_contract.py",
+        "p38_fixed_lm_head_qwen4b_contract",
+    )
+    self.assertEqual(qwen4b.MATMUL_K_PADDING, {1216: 1280})
+    self.assertEqual(
+        qwen4b.MATMUL_N_PADDING, {1216: 1280, 18992: 19200}
+    )
+    qwen4b.validate_manifest(qwen4b.SITES)
+
+    qwen32b = _load(
+        SHIM / "models/qwen32b/p22xf_contract.py",
+        "p38_fixed_lm_head_qwen32b_contract",
+    )
+    self.assertFalse(hasattr(qwen32b, "MATMUL_K_PADDING"))
+    self.assertEqual(qwen32b.MATMUL_N_PADDING, {18992: 19200})
+    qwen32b.validate_manifest(qwen32b.SITES)
+
   def test_hook_is_default_off_and_flag_scoped(self):
     text = SOURCE.read_text()
     self.assertIn('_p38_fixed_lm_head_value == "1"', text)
@@ -142,8 +169,18 @@ class FixedLmHeadContractTest(unittest.TestCase):
     )
     text = FIXED_SOURCE.read_text()
     self.assertIn("endpoint must be one of", text)
-    self.assertIn("f\"K={hidden_size} endpoint={endpoint}\"", text)
+    self.assertIn("f\"K={hidden_size} TP={tp_size} \"", text)
     self.assertIn("f\"endpoint={endpoint}\"", text)
+
+  def test_registered_endpoint_is_model_specific(self):
+    with self.assertRaisesRegex(ValueError, "endpoint disagrees"):
+      fixed.resolve_geometry(2560, 8, endpoint="untied_lm_head")
+    with self.assertRaisesRegex(ValueError, "endpoint disagrees"):
+      fixed.resolve_geometry(5120, 8, endpoint="tied_embed")
+    self.assertEqual(
+        fixed.resolve_geometry(2560, 8, endpoint="direct_probe").model,
+        "qwen3-4b",
+    )
 
   def test_learner_uses_fixed_chunks_without_stock_fallback(self):
     text = FIXED_SOURCE.read_text()
