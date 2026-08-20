@@ -177,7 +177,7 @@ def sample_best(
 from tunix.generate.cache_manager import CacheManager
 from tunix.generate.scheduler import Scheduler, Request
 
-class VanillaSampler:
+class ContinuousSampler:
   def __init__(
       self,
       transformer: nnx.Module,

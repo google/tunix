@@ -6,7 +6,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from tunix.generate import continous_sampler as sampler_lib
+from tunix.generate import continuous_sampler as sampler_lib
 from tunix.generate import scheduler
 from tunix.tests import test_common as tc
 
@@ -23,7 +23,7 @@ class ContinuousSamplerTest(absltest.TestCase):
     self.cache_config = sampler_lib.CacheConfig(page_size=2, max_num_seqs=8)
     
   def test_initialization(self):
-    sampler = sampler_lib.VanillaSampler(
+    sampler = sampler_lib.ContinuousSampler(
         transformer=self.transformer,
         tokenizer=self.vocab,
         cache_config=self.cache_config,
@@ -35,7 +35,7 @@ class ContinuousSamplerTest(absltest.TestCase):
     self.assertEqual(sampler.cache_manager.available_hbm_pages, sampler.hbm_pm.num_available_pages)
 
   def test_unified_step_creates_valid_arrays(self):
-    sampler = sampler_lib.VanillaSampler(
+    sampler = sampler_lib.ContinuousSampler(
         transformer=self.transformer,
         tokenizer=self.vocab,
         cache_config=self.cache_config,
@@ -68,7 +68,7 @@ class ContinuousSamplerTest(absltest.TestCase):
     self.assertEqual(sampler.generated_tokens["req_2"], [5])
 
   def test_end_to_end_mocked_generation_loop(self):
-    sampler = sampler_lib.VanillaSampler(
+    sampler = sampler_lib.ContinuousSampler(
         transformer=self.transformer,
         tokenizer=self.vocab,
         cache_config=self.cache_config,
@@ -106,7 +106,7 @@ class ContinuousSamplerTest(absltest.TestCase):
     
   def test_simultaneous_decode_and_prefill_distribution(self):
     """Verify that decodes and prefills are batched simultaneously into distribution bounds."""
-    sampler = sampler_lib.VanillaSampler(
+    sampler = sampler_lib.ContinuousSampler(
         transformer=self.transformer,
         tokenizer=self.vocab,
         cache_config=self.cache_config,
