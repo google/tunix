@@ -559,3 +559,119 @@
 - Next: after terminal-state and no-producer proof, make a copied,
   digest-sealed, read-only legacy snapshot; never move or import the live
   directory. Require `LEGACY_IMPORT_PASS` before any resumed TPU model init.
+
+## 2026-08-20T21:03:17Z — P46.6 returned campaign extraction audit
+
+- Type: read-only latest-operator-branch evidence review. No Kubernetes,
+  JobSet, pod, PVC, cloud, commit, push, or `main` mutation occurred.
+- Baseline: clean review worktree at exact operator HEAD
+  `eae3d6d47e07bbb631106284da40a5e90763faee`. Existing uncommitted P46 ledger
+  edits in the older `p46_deepswe_32b_full` worktree were preserved and not
+  rebased, stashed, reset, or overwritten.
+- Returned package: commit `7fcae26e5a75dca14abdcfefc2796f2759b5cd2d`
+  adds `p46r01a0_128chip_campaign_report.md`, one ad-hoc metrics JSON and files
+  named full-RL, golden-SFT and DPO. All JSON lines parse and all 1,136 task
+  identities join to the signed 1,851-row clean source at SHA-256
+  `2f95c2e6df3526f68bd3eed3ab9aece7077ef85c74251c77f7b3474b0b307ed7`.
+- Completion verdict: **INCOMPLETE**. The extraction contains 22,918 rows and
+  1,136 tasks, versus the signed completion gate of 29,616 valid identities
+  and 1,851 tasks. It has no global PASS marker, no 58 immutable logical
+  summaries and no referenced digest manifest. The official finalizer rejects
+  it with `campaign requires every logical summary: expected=58 actual=1`.
+- Identity audit: the 22,918 rows collapse to 18,121 unique
+  `(task_id, sample_idx)` identities; 4,797 rows are duplicate copies of an
+  identity. At summary level, 1,123 tasks have indices 0-15, 13 represented
+  tasks are incomplete, and 715 clean-source tasks are absent. Thirty-two
+  distinct identities across four coveragepy tasks have invalid `FAILED`
+  status and require retry under the signed classifier.
+- Provisional curriculum audit: after deterministic identity deduplication and
+  status-only classification, the 1,851-source view is 609 mixed 1/16-15/16,
+  514 all-fail, zero all-pass and 728 incomplete. These are diagnostic counts,
+  not publishable manifests, because raw trajectory validity/provenance and
+  exact report digests are unavailable.
+- Trajectory verdict: **INCONCLUSIVE**. Every row in the file named
+  `deepswe_full_rl_22918.jsonl` has exactly five fields:
+  `task_id`, `repo`, `sample_idx`, `status`, and `reward`. There are no turns,
+  model responses, canonical actions, observations, patches, elapsed times,
+  attempt indices, logprob-null evidence, action-compat diagnostics, source
+  commit, config fingerprint, or cleanup evidence. The golden-SFT file is the
+  same five-field summary restricted to reward one; the DPO file pairs two
+  such summaries. They are not directly usable RL, SFT, or DPO examples.
+- Internal consistency defects: the report states 4,374 DPO pairs while the
+  metrics JSON and file contain 4,560; 865 DPO rows duplicate an exact pair.
+  The 2,280 golden rows contain 432 duplicate identities, leaving 1,848 unique
+  solved identities. The raw-row solve ratio 2,280/22,918 is therefore not the
+  exact-N campaign metric; deduplicated valid summary rows give 1,848/18,089.
+- Positive evidence and claim ceiling: outcome values are finite binary
+  rewards; sample indices stay in 0-15; represented tasks all come from the
+  clean source; the status mix is plausible. None of this proves full
+  trajectory correctness, reward execution, Q4 sampler/model provenance,
+  exact N16 washing, sandbox cleanup, or training-data readiness.
+- Next: retrieve and seal the raw persistent campaign tree, resume every
+  missing/invalid identity under the immutable tag, run all 58 logical report
+  gates and the official finalizer, and only then publish digest-bearing
+  `q4_learnable`, `q32_candidates`, `all_pass`, and `all_fail` manifests.
+
+## 2026-08-20T21:26:42Z — P46.7 breadth-first census and frozen-v6 migration
+
+- Type: local implementation under the user-approved phase workflow. No
+  Kubernetes, JobSet, pod, PVC, cloud, commit, push, credential, or `main`
+  mutation occurred.
+- Trigger: strict resume prioritizes repeated retryable-invalid identities in
+  the current wave and can delay coverage of the remaining clean prompts. The
+  requested first pass instead needs every never-attempted identity sampled
+  once; model timeout, context limit, max-step and signed trajectory timeout
+  stay valid unsolved outcomes, while `FAILED`/environment/reward failures may
+  be repaired later.
+- Action: added default-off `--first-pass-census` /
+  `CANON_P46_CENSUS_FIRST_PASS=1`. It is restricted to full reward-only Q4
+  evaluation, is not part of the sampling fingerprint, skips any identity
+  with a durable attempt, continues to later waves after a bounded timeout,
+  and writes immutable coverage-only census summaries plus explicit deferred
+  and unattempted identity lists below `outputs/census/`.
+- Safety: strict mode, retry validity, exact-N aggregation and the official
+  campaign finalizer are unchanged. Census invalids are neither solved nor
+  coerced to reward zero. `CENSUS_PASS` requires all 1,851 tasks and 29,616
+  identities attempted at least once but does not claim washed data.
+- Migration: a new harness cannot append to old config-v4 evidence in place.
+  Added an explicit frozen-v6 importer that requires a copied terminal
+  `resume_contract.json`, all trajectory JSONLs and an exact `SHA256SUMS`,
+  verifies every old contract/row/attempt, permits only harness SHA and fresh
+  resume-tag changes, preserves `sampled_by=stock@<old source SHA>` and raw
+  payloads, and emits immutable per-row migration provenance plus a receipt.
+- Local evidence so far: relevant Python modules compile; 42 artifact,
+  renderer and environment-contract tests pass, including idempotent
+  invalid-to-valid v6 migration, sampling drift/fresh-tag rejection, and
+  mutually exclusive import controls. Complete P46 and adjacent gates remain
+  to be run after documentation synchronization.
+- Next: synchronize HANDOFF/runbook and current gate markers; run complete P46
+  CPU, adjacent P34/P44, static/diff checks; then await separate commit/push
+  approval. A remote executor must not use this mode until an exact published
+  SHA is read back from `origin/yuxzhang/canon-zero-tim`.
+
+## 2026-08-20T21:29:50Z — P46.7 local release gates and execution handoff
+
+- Synchronized `HANDOFF.md`, `P46_DEEPSWE_PROFILES_RUNBOOK.md`, state, plan,
+  phase ledger and flag registry with an executable freeze/import/census/strict
+  sequence. The handoff records the live-lineage boundary: a pre-P46.7
+  `p46e12808`/`p46e12806` manifest does not acquire census behavior; its raw
+  v6 tree may be copied only after a terminal/no-producer proof, or after a
+  separately authorized operator stop.
+- `bash canon-zero-tim/tests/p46_deepswe_profiles/run_cpu.sh` passes 75 tests
+  and emits `P46_DEEPSWE_PROFILES_CPU_PASS cases=75`. Covered cases include
+  29,616-identity strict orchestration, breadth-first invalid deferral,
+  timeout-then-unattempted resume, census postflight, immutable census
+  snapshots, frozen-v6 idempotence/provenance, fresh-tag and sampling-drift
+  rejection, renderer/preflight controls and the unchanged strict finalizer.
+- Adjacent gates pass:
+  `P34_STATIC_PASS suites=10`, `P34_TRAJECTORY_CPU_PASS tests=5`,
+  `P34_UPDATE_CPU_PASS tests=5`, and
+  `P44_DEEPSWE_QWEN4B_PARITY_CPU_PASS`. `git diff --check` passes.
+- Claim ceiling: these are CPU contract gates only. No old snapshot was copied,
+  no TPU/vLLM/R2E workload ran, no trajectory was migrated on target, no
+  census/strict campaign completed, and no commit/push/main/cloud mutation
+  occurred.
+- Next: wait for separate commit/push approval. After publication, the remote
+  agent must read back the exact operator SHA, rerun `cases=75`, prove the old
+  producer terminal/absent, seal the copied v6 snapshot, and require
+  `FROZEN_V6_IMPORT_PASS` before the first census runtime starts.

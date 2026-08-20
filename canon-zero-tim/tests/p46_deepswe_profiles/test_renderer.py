@@ -125,12 +125,14 @@ class P46RendererTest(unittest.TestCase):
       self.assertEqual(env["CANON_P46_EVALUATION_MODE"], "reward_only")
       self.assertEqual(env["CANON_P46_SAMPLING_SOURCE_COMMIT"], SOURCE)
       self.assertEqual(env["CANON_P46_LEGACY_IMPORT_ID"], "")
+      self.assertEqual(env["CANON_P46_FROZEN_V6_IMPORT_ID"], "")
       self.assertEqual(env["CANON_P46_DEEPSWE_TRAIN"], "0")
       self.assertEqual(env["CANON_P32_TRAIN_ADMITTED"], "0")
       self.assertEqual(env["CANON_P33_WORKLOAD_LAUNCH_ADMITTED"], "0")
       self.assertEqual(env["CANON_P46_LOGICAL_SHARD_INDEX"], "0")
       self.assertEqual(env["CANON_P46_PHYSICAL_SHARD_INDEX"], "0")
       self.assertEqual(env["CANON_P46_FULL_CAMPAIGN"], "0")
+      self.assertEqual(env["CANON_P46_CENSUS_FIRST_PASS"], "0")
       for key in (
           "CANON_PROMPT_PROCESSED_LOGPROBS",
           "CANON_PALLAS_LOGSOFTMAX",
@@ -218,6 +220,41 @@ class P46RendererTest(unittest.TestCase):
           "wash-q4-001",
       )
 
+  def test_first_pass_census_is_explicit_full_eval_only(self):
+    document = self._render(
+        "q4-clean-eval",
+        "128",
+        full_campaign=True,
+        first_pass_census=True,
+    )
+    env = p34._env(document)
+    self.assertEqual(env["CANON_P46_CENSUS_FIRST_PASS"], "1")
+    self.assertEqual(env["CANON_P46_FULL_CAMPAIGN"], "1")
+    self.assertEqual(env["CANON_P46_EVALUATION_MODE"], "reward_only")
+    self.assertEqual(
+        document["metadata"]["labels"][
+            "canon.zero-tim/census-first-pass"
+        ],
+        "1",
+    )
+    repair = self._render(
+        "q4-clean-eval",
+        "128",
+        full_campaign=True,
+        resume_tag="t128",
+    )
+    self.assertEqual(
+        p34._env(repair)["CANON_P46_CENSUS_FIRST_PASS"], "0"
+    )
+    with self.assertRaisesRegex(ValueError, "requires a full campaign"):
+      self._render(
+          "q4-clean-eval", "128", first_pass_census=True
+      )
+    with self.assertRaisesRegex(ValueError, "evaluation-only controls"):
+      self._render(
+          "q4-debug", "64", first_pass_census=True
+      )
+
   def test_frozen_legacy_snapshot_is_explicit_and_full_campaign_only(self):
     document = self._render(
         "q4-clean-eval",
@@ -247,6 +284,35 @@ class P46RendererTest(unittest.TestCase):
           "128",
           full_campaign=True,
           legacy_import_id="../old-run",
+      )
+
+  def test_frozen_v6_snapshot_is_explicit_and_mutually_exclusive(self):
+    document = self._render(
+        "q4-clean-eval",
+        "128",
+        full_campaign=True,
+        resume_tag="wash-q4-v6",
+        sampling_source_commit="5" * 40,
+        frozen_v6_import_id="sealed-old-v6",
+    )
+    env = p34._env(document)
+    self.assertEqual(env["CANON_P46_FROZEN_V6_IMPORT_ID"], "sealed-old-v6")
+    self.assertEqual(
+        document["metadata"]["labels"]["canon.zero-tim/frozen-v6-import-id"],
+        "sealed-old-v6",
+    )
+    with self.assertRaisesRegex(ValueError, "requires a full campaign"):
+      self._render(
+          "q4-clean-eval", "128", frozen_v6_import_id="sealed-old-v6"
+      )
+    with self.assertRaisesRegex(ValueError, "only one frozen resume import"):
+      self._render(
+          "q4-clean-eval",
+          "128",
+          full_campaign=True,
+          resume_tag="wash-q4-v6-both",
+          legacy_import_id="legacy-v5",
+          frozen_v6_import_id="sealed-old-v6",
       )
 
   def test_resume_tag_rejects_unsafe_paths(self):

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import collections
 import dataclasses
 import hashlib
 import json
@@ -303,6 +304,18 @@ class EvalArtifactsTest(unittest.TestCase):
     remaining = artifacts.remaining_samples([entry], loaded, config=self.config)
     self.assertEqual(len(remaining), 16)
     self.assertEqual(remaining[0][1:], (0, 1))
+    unattempted = artifacts.unattempted_samples(
+        [entry], loaded, config=self.config
+    )
+    self.assertEqual(len(unattempted), 15)
+    self.assertNotIn(0, {sample_index for _, sample_index, _ in unattempted})
+    deferred = artifacts.deferred_samples(
+        [entry], loaded, config=self.config
+    )
+    self.assertEqual(
+        collections.Counter(item["state"] for item in deferred),
+        {"invalid": 1, "unattempted": 15},
+    )
 
     valid_retry = artifacts.trajectory_record(
         self.config,
@@ -581,6 +594,131 @@ class EvalArtifactsTest(unittest.TestCase):
       )
       self.assertEqual(len(loaded), 1)
 
+  def test_frozen_v6_snapshot_migrates_to_fresh_harness_and_resume_tag(self):
+    old_config = dataclasses.replace(
+        self.config,
+        source_commit="5" * 40,
+        harness_commit="6" * 40,
+        resume_tag="old-v6-run",
+    )
+    new_config = dataclasses.replace(
+        old_config,
+        harness_commit="7" * 40,
+        resume_tag="new-v6-run",
+    )
+    entry = {"docker_image": "img-a", "instance_id": "task-a"}
+    records = [
+        artifacts.trajectory_record(
+            old_config,
+            entry=entry,
+            sample_index=3,
+            attempt_index=0,
+            trajectory={"status": "FAILED", "reward": 0.0, "steps": []},
+            elapsed_secs=1.0,
+        ),
+        artifacts.trajectory_record(
+            old_config,
+            entry=entry,
+            sample_index=3,
+            attempt_index=1,
+            trajectory={"status": "SUCCEEDED", "reward": 1.0, "steps": []},
+            elapsed_secs=2.0,
+        ),
+    ]
+    source_root = Path(self.temporary.name) / "source-v6"
+    artifacts.ensure_resume_contract(source_root, config=old_config)
+    snapshot = Path(self.temporary.name) / "imports" / "sealed-old-v6"
+    trajectory = snapshot / "trajectories" / "wave.jsonl"
+    trajectory.parent.mkdir(parents=True)
+    payload = b"".join(
+        (json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n").encode()
+        for record in records
+    )
+    trajectory.write_bytes(payload)
+    contract_payload = (source_root / "resume_contract.json").read_bytes()
+    (snapshot / "resume_contract.json").write_bytes(contract_payload)
+    (snapshot / "SHA256SUMS").write_text(
+        f"{hashlib.sha256(contract_payload).hexdigest()}  resume_contract.json\n"
+        f"{hashlib.sha256(payload).hexdigest()}  trajectories/wave.jsonl\n",
+        encoding="utf-8",
+    )
+
+    output = Path(self.temporary.name) / "new-v6" / "outputs"
+    first = artifacts.import_frozen_v6_snapshot(
+        snapshot, output, config=new_config, allowed_task_keys={"img-a"}
+    )
+    second = artifacts.import_frozen_v6_snapshot(
+        snapshot, output, config=new_config, allowed_task_keys={"img-a"}
+    )
+    self.assertEqual(first["outputs"], second["outputs"])
+    self.assertEqual(first["records"], 2)
+    self.assertEqual(first["valid_records"], 1)
+    self.assertEqual(first["source_resume_tag"], "old-v6-run")
+    loaded = artifacts.load_records(
+        [first["outputs"][0]["path"]],
+        config=new_config,
+        allowed_task_keys={"img-a"},
+    )
+    self.assertEqual([item["attempt_index"] for item in loaded], [0, 1])
+    self.assertEqual(loaded[0]["sampled_by"], f"stock@{'5' * 40}")
+    self.assertEqual(loaded[0]["harness_commit"], "7" * 40)
+    self.assertEqual(
+        loaded[0]["migrated_from"]["source_harness_commit"], "6" * 40
+    )
+    self.assertEqual(
+        loaded[0]["migrated_from"]["source_resume_tag"], "old-v6-run"
+    )
+
+    with self.assertRaisesRegex(ValueError, "fresh resume tag"):
+      artifacts.import_frozen_v6_snapshot(
+          snapshot,
+          Path(self.temporary.name) / "same-v6" / "outputs",
+          config=old_config,
+          allowed_task_keys={"img-a"},
+      )
+
+  def test_frozen_v6_snapshot_rejects_sampling_contract_drift(self):
+    old_config = dataclasses.replace(
+        self.config,
+        source_commit="5" * 40,
+        harness_commit="6" * 40,
+        resume_tag="old-v6-drift",
+    )
+    source_root = Path(self.temporary.name) / "source-v6-drift"
+    artifacts.ensure_resume_contract(source_root, config=old_config)
+    record = artifacts.trajectory_record(
+        old_config,
+        entry={"docker_image": "img-a"},
+        sample_index=0,
+        trajectory={"status": "SUCCEEDED", "reward": 0.0, "steps": []},
+        elapsed_secs=1.0,
+    )
+    snapshot = Path(self.temporary.name) / "imports" / "sealed-v6-drift"
+    trajectory = snapshot / "trajectories" / "wave.jsonl"
+    trajectory.parent.mkdir(parents=True)
+    payload = (json.dumps(record) + "\n").encode()
+    trajectory.write_bytes(payload)
+    contract_payload = (source_root / "resume_contract.json").read_bytes()
+    (snapshot / "resume_contract.json").write_bytes(contract_payload)
+    (snapshot / "SHA256SUMS").write_text(
+        f"{hashlib.sha256(contract_payload).hexdigest()}  resume_contract.json\n"
+        f"{hashlib.sha256(payload).hexdigest()}  trajectories/wave.jsonl\n",
+        encoding="utf-8",
+    )
+    drifted = dataclasses.replace(
+        old_config,
+        source_commit="4" * 40,
+        harness_commit="7" * 40,
+        resume_tag="new-v6-drift",
+    )
+    with self.assertRaisesRegex(ValueError, "sampling contract drift"):
+      artifacts.import_frozen_v6_snapshot(
+          snapshot,
+          Path(self.temporary.name) / "new-v6-drift" / "outputs",
+          config=drifted,
+          allowed_task_keys={"img-a"},
+      )
+
   def test_exact_n_classification_and_q32_hard_tier(self):
     entries = [
         {"docker_image": "partial"},
@@ -630,6 +768,24 @@ class EvalArtifactsTest(unittest.TestCase):
     }
     self.assertEqual(q32_keys, {"partial", "all-fail"})
     self.assertEqual(summary["category_counts"]["incomplete"], 1)
+
+    census = artifacts.write_census(
+        Path(self.temporary.name) / "census",
+        reports,
+        artifacts.deferred_samples(entries, records, config=self.config),
+        config=self.config,
+        launch_id="census-test",
+    )
+    self.assertEqual(census["scheduled_identities"], 80)
+    self.assertEqual(census["attempted_identities"], 64)
+    self.assertEqual(census["valid_identities"], 48)
+    self.assertEqual(census["deferred_invalid_identities"], 16)
+    self.assertEqual(census["unattempted_identities"], 16)
+    self.assertEqual(census["q4_learnable_provisional"], 1)
+    self.assertFalse(census["first_pass_complete"])
+    self.assertFalse(census["strict_campaign_complete"])
+    self.assertTrue(Path(census["summary_path"]).is_file())
+    self.assertTrue(Path(census["paths"]["mixed_complete"]).is_file())
 
   def test_identical_report_writers_converge_but_drift_is_rejected(self):
     entry = {"docker_image": "partial"}

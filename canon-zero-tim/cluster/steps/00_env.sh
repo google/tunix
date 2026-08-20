@@ -1051,7 +1051,8 @@ case "${CANON_P46_EVALUATION:-0}" in
              CANON_P46_GOLD_JSONL CANON_P46_GOLD_JSONL_SHA256 \
              CANON_P46_MODEL_BASE_DIR CANON_P46_LOGICAL_SHARD_INDEX \
              CANON_P46_PHYSICAL_SHARD_INDEX CANON_P46_EVALUATION_MODE \
-             CANON_P46_PARITY_CANARY CANON_P46_FULL_CAMPAIGN; do
+             CANON_P46_PARITY_CANARY CANON_P46_FULL_CAMPAIGN \
+             CANON_P46_CENSUS_FIRST_PASS; do
       req "$k"
     done
     [ "${CANON_MODE:-}" = "run" ] && \
@@ -1084,6 +1085,10 @@ case "${CANON_P46_EVALUATION:-0}" in
       echo "[env] CANON_P46_FULL_CAMPAIGN must be exactly 0 or 1" >&2
       fail=1 ;;
     esac
+    case "${CANON_P46_CENSUS_FIRST_PASS:-}" in 0|1) ;; *)
+      echo "[env] CANON_P46_CENSUS_FIRST_PASS must be exactly 0 or 1" >&2
+      fail=1 ;;
+    esac
     [[ "${CANON_P46_RESUME_TAG:-}" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]] || {
       echo "[env] CANON_P46_RESUME_TAG must be lowercase and Kubernetes-safe" >&2
       fail=1
@@ -1107,11 +1112,40 @@ case "${CANON_P46_EVALUATION:-0}" in
         fail=1
       }
     fi
+    if [ -n "${CANON_P46_FROZEN_V6_IMPORT_ID:-}" ]; then
+      [[ "${CANON_P46_FROZEN_V6_IMPORT_ID}" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]] || {
+        echo "[env] CANON_P46_FROZEN_V6_IMPORT_ID must be lowercase and Kubernetes-safe" >&2
+        fail=1
+      }
+      [ "${CANON_P46_FULL_CAMPAIGN:-0}" = "1" ] || {
+        echo "[env] P46 frozen v6 import requires a full campaign" >&2
+        fail=1
+      }
+      p46_v6_import_root="${CANON_P46_OUTPUT_DIR%/outputs}/imports/${CANON_P46_FROZEN_V6_IMPORT_ID}"
+      [ -f "$p46_v6_import_root/SHA256SUMS" ] && \
+      [ -f "$p46_v6_import_root/resume_contract.json" ] || {
+        echo "[env] P46 frozen v6 snapshot is missing SHA256SUMS or resume_contract.json: $p46_v6_import_root" >&2
+        fail=1
+      }
+    fi
+    if [ -n "${CANON_P46_LEGACY_IMPORT_ID:-}" ] && \
+       [ -n "${CANON_P46_FROZEN_V6_IMPORT_ID:-}" ]; then
+      echo "[env] P46 permits only one frozen resume import" >&2
+      fail=1
+    fi
     if [ "${CANON_P46_FULL_CAMPAIGN:-0}" = "1" ]; then
       [ "${CANON_P46_PARITY_CANARY:-0}" = "0" ] && \
       [ "${CANON_P46_LOGICAL_SHARD_INDEX:-}" = "0" ] && \
       [ "${CANON_P46_PHYSICAL_SHARD_INDEX:-}" = "0" ] || {
         echo "[env] P46 full campaign owns all shards and rejects parity" >&2
+        fail=1
+      }
+    fi
+    if [ "${CANON_P46_CENSUS_FIRST_PASS:-0}" = "1" ]; then
+      [ "${CANON_P46_FULL_CAMPAIGN:-0}" = "1" ] && \
+      [ "${CANON_P46_PARITY_CANARY:-0}" = "0" ] && \
+      [ "${CANON_P46_EVALUATION_MODE:-}" = "reward_only" ] || {
+        echo "[env] P46 first-pass census requires a full reward-only campaign" >&2
         fail=1
       }
     fi
@@ -1149,7 +1183,7 @@ case "${CANON_P46_EVALUATION:-0}" in
       *" examples/deepswe/eval_deepswe.py "*) ;;
       *) echo "[env] P46 evaluation command drifted" >&2; fail=1 ;;
     esac
-    echo "[env] P46 evaluation contract OK: topology=${CANON_P46_TOPOLOGY} logical=${CANON_P46_LOGICAL_SHARD_INDEX} physical=${CANON_P46_PHYSICAL_SHARD_INDEX} mode=${CANON_P46_EVALUATION_MODE} parity=${CANON_P46_PARITY_CANARY} campaign=${CANON_P46_FULL_CAMPAIGN} resume_tag=${CANON_P46_RESUME_TAG} sampled_by=stock@${CANON_P46_SAMPLING_SOURCE_COMMIT} harness=${CANON_EXPECT_COMMIT}"
+    echo "[env] P46 evaluation contract OK: topology=${CANON_P46_TOPOLOGY} logical=${CANON_P46_LOGICAL_SHARD_INDEX} physical=${CANON_P46_PHYSICAL_SHARD_INDEX} mode=${CANON_P46_EVALUATION_MODE} parity=${CANON_P46_PARITY_CANARY} campaign=${CANON_P46_FULL_CAMPAIGN} census=${CANON_P46_CENSUS_FIRST_PASS} resume_tag=${CANON_P46_RESUME_TAG} sampled_by=stock@${CANON_P46_SAMPLING_SOURCE_COMMIT} harness=${CANON_EXPECT_COMMIT}"
     ;;
   *)
     echo "[env] CANON_P46_EVALUATION must be exactly 0 or 1" >&2

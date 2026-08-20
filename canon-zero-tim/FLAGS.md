@@ -54,6 +54,8 @@
 | CANON_WANDB_* | 观测账号面(用户所有,凭据纪律) | 保留,不动 |
 | CANON_QWEN3_*(8 个几何) | 模型几何契约 | 保留;属 workload profile 层 |
 | CANON_P3x/P4x_*_ADMITTED / NO_COMMIT / RUN_STAGE / 工作负载选通 | 各任务 admission 门 | 任务结案随任务退役(C 层同规) |
+| CANON_P46_CENSUS_FIRST_PASS | P46 reward-only full campaign 的 breadth-first 调度：每个尚无 durable attempt 的 identity 只跑一次，invalid 留证后延后；不进入采样 fingerprint，也不放宽 strict finalizer | 试验、默认关；P46 完成一次 exact 1851 x N16 strict campaign 后退役 |
+| CANON_P46_FROZEN_V6_IMPORT_ID | 显式选择已封存的 v6 resume snapshot；只允许在新 resume tag 内迁移原始轨迹与 sampler provenance，并逐条留迁移来源 | 迁移期、默认空；旧 campaign 全部升级至当前 harness 后退役 |
 | CANON_ALIGN*/EXPECT_*/DP_SIZE/TP_SIZE/TRAJECTORIES 族 | 对齐门与拓扑断言 | 监控契约,长期保留 |
 
 ## MARKERS(日志 marker 契约,非开关;~60 个)
@@ -304,6 +306,8 @@ CANON_P45_HOST_MEMORY_TELEMETRY
 CANON_P46_DEEPSWE_TRAIN
 CANON_P46_EVALUATION
 CANON_P46_EVALUATION_MODE
+CANON_P46_CENSUS_FIRST_PASS
+CANON_P46_FROZEN_V6_IMPORT_ID
 CANON_P46_LOGICAL_SHARD_INDEX
 CANON_P46_ONEHOST_PROBE
 CANON_P46_PARITY_CANARY
@@ -378,4 +382,4 @@ CANON_XPROF_SKIP_STEPS
 CANON_XPROF_STEPS
 ```
 
-Count: 300 settable names (regenerate with the grep in tasks/canon_system_redesign/phase0_indexes.md; exclusions: none).
+Count: 302 settable names (regenerate with the grep in tasks/canon_system_redesign/phase0_indexes.md; exclusions: none).

@@ -26,13 +26,17 @@ from deepswe_eval_artifacts import EvalConfig
 from deepswe_eval_artifacts import aggregate_tasks
 from deepswe_eval_artifacts import append_record
 from deepswe_eval_artifacts import campaign_lease
+from deepswe_eval_artifacts import deferred_samples
 from deepswe_eval_artifacts import finalize_campaign
 from deepswe_eval_artifacts import import_legacy_v5_snapshot
+from deepswe_eval_artifacts import import_frozen_v6_snapshot
 from deepswe_eval_artifacts import load_records
 from deepswe_eval_artifacts import remaining_samples
 from deepswe_eval_artifacts import sha256_file
 from deepswe_eval_artifacts import task_key
 from deepswe_eval_artifacts import trajectory_record
+from deepswe_eval_artifacts import unattempted_samples
+from deepswe_eval_artifacts import write_census
 from deepswe_eval_artifacts import write_reports
 
 
@@ -171,6 +175,15 @@ def _full_campaign_requested() -> bool:
       or _bool01("CANON_P46_PARITY_CANARY")
   ):
     raise ValueError("full campaign is incompatible with probe/parity modes")
+  return requested
+
+
+def _census_first_pass_requested(*, full_campaign: bool) -> bool:
+  requested = _bool01("CANON_P46_CENSUS_FIRST_PASS")
+  if requested and not full_campaign:
+    raise ValueError("P46 census first pass requires a full campaign")
+  if requested and _required("CANON_P46_EVALUATION_MODE") != "reward_only":
+    raise ValueError("P46 census first pass requires reward_only evaluation")
   return requested
 
 
@@ -627,8 +640,13 @@ async def _run_full_campaign(
     base_config: EvalConfig,
     all_entries: Sequence[Mapping[str, Any]],
     output_dir: Path,
+    *,
+    first_pass_census: bool = False,
+    launch_id: str | None = None,
 ) -> int:
   """Runs every clean-data wave while keeping one TPU runtime resident."""
+  if first_pass_census and not launch_id:
+    raise ValueError("P46 census first pass requires a launch id")
   trajectory_dir = output_dir / "trajectories"
   report_dir = output_dir / "reports"
   trajectory_dir.mkdir(parents=True, exist_ok=True)
@@ -637,6 +655,8 @@ async def _run_full_campaign(
   ) // base_config.logical_tasks
   runtime = _Runtime(base_config)
   summary_paths: list[str] = []
+  census_reports: list[dict[str, Any]] = []
+  census_deferred: list[dict[str, Any]] = []
 
   for logical_index in range(logical_shards):
     config = dataclasses.replace(base_config, shard_index=logical_index)
@@ -653,6 +673,61 @@ async def _run_full_campaign(
       physical_entries = logical_entries[
           physical_start : physical_start + config.shard_tasks
       ]
+      if first_pass_census:
+        existing = _load_logical_records(
+            config, logical_entries, trajectory_dir
+        )
+        pending = unattempted_samples(
+            physical_entries, existing, config=config
+        )
+        timed_out = False
+        if pending:
+          output_path = _trajectory_output_path(
+              trajectory_dir,
+              config=config,
+              physical_shard=physical_shard,
+          )
+          logger.info(
+              "P46_EVAL_CENSUS_WAVE_START logical_shard=%d/%d "
+              "physical_shard=%d/%d unattempted=%d runtime_reused=1",
+              logical_index,
+              logical_shards,
+              physical_shard,
+              physical_shards,
+              len(pending),
+          )
+          _, timed_out = await _run_evaluation(
+              config,
+              physical_entries,
+              pending,
+              output_path,
+              runtime=runtime,
+              timeout_secs=config.shard_timeout_secs,
+          )
+        accumulated_wave = _load_logical_records(
+            config, logical_entries, trajectory_dir
+        )
+        wave_deferred = deferred_samples(
+            physical_entries, accumulated_wave, config=config
+        )
+        wave_unattempted = sum(
+            item["state"] == "unattempted" for item in wave_deferred
+        )
+        wave_invalid = len(wave_deferred) - wave_unattempted
+        wave_scheduled = len(physical_entries) * config.n_sample
+        print(
+            "P46_EVAL_CENSUS_WAVE_COMPLETE "
+            f"logical_shard={logical_index} "
+            f"physical_shard={physical_shard} "
+            f"scheduled={wave_scheduled} "
+            f"attempted={wave_scheduled - wave_unattempted} "
+            f"valid={wave_scheduled - len(wave_deferred)} "
+            f"deferred_invalid={wave_invalid} "
+            f"unattempted={wave_unattempted} timed_out={int(timed_out)} "
+            "runtime_reused=1",
+            flush=True,
+        )
+        continue
       wave_started = time.monotonic()
       while True:
         existing = _load_logical_records(
@@ -712,6 +787,28 @@ async def _run_full_campaign(
         config, logical_entries, trajectory_dir
     )
     reports = aggregate_tasks(logical_entries, accumulated, config=config)
+    if first_pass_census:
+      logical_deferred = deferred_samples(
+          logical_entries, accumulated, config=config
+      )
+      census_reports.extend(reports)
+      census_deferred.extend(logical_deferred)
+      logical_unattempted = sum(
+          item["state"] == "unattempted" for item in logical_deferred
+      )
+      logical_invalid = len(logical_deferred) - logical_unattempted
+      logical_scheduled = len(logical_entries) * config.n_sample
+      print(
+          "P46_EVAL_CENSUS_LOGICAL_COMPLETE "
+          f"logical_shard={logical_index} tasks={len(logical_entries)} "
+          f"scheduled={logical_scheduled} "
+          f"attempted={logical_scheduled - logical_unattempted} "
+          f"valid={logical_scheduled - len(logical_deferred)} "
+          f"deferred_invalid={logical_invalid} "
+          f"unattempted={logical_unattempted} runtime_reused=1",
+          flush=True,
+      )
+      continue
     if any(item["category"] in ("incomplete", "broken") for item in reports):
       print(
           "P46_EVAL_CAMPAIGN_LOGICAL_INCOMPLETE "
@@ -728,6 +825,34 @@ async def _run_full_campaign(
         f"runtime_reused=1",
         flush=True,
     )
+
+  if first_pass_census:
+    census = write_census(
+        output_dir / "census",
+        census_reports,
+        census_deferred,
+        config=base_config,
+        launch_id=str(launch_id),
+    )
+    marker = (
+        "P46_EVAL_CENSUS_PASS"
+        if census["first_pass_complete"]
+        else "P46_EVAL_CENSUS_INCOMPLETE"
+    )
+    print(
+        f"{marker} tasks={census['tasks']} "
+        f"scheduled_identities={census['scheduled_identities']} "
+        f"attempted_identities={census['attempted_identities']} "
+        f"valid_identities={census['valid_identities']} "
+        f"deferred_invalid={census['deferred_invalid_identities']} "
+        f"unattempted={census['unattempted_identities']} "
+        f"q4_learnable={census['q4_learnable_provisional']} "
+        f"logical_shards={logical_shards} "
+        f"summary_sha256={census['summary_sha256']} "
+        f"summary={census['summary_path']}",
+        flush=True,
+    )
+    return 0 if census["first_pass_complete"] else 2
 
   campaign = finalize_campaign(summary_paths, output_dir / "campaign")
   print(
@@ -749,6 +874,9 @@ def main() -> int:
   )
   config, physical_shard, output_dir = _build_config()
   full_campaign = _full_campaign_requested()
+  census_first_pass = _census_first_pass_requested(
+      full_campaign=full_campaign
+  )
   if full_campaign:
     launch_id = _required("CANON_RUN_ID")
     with campaign_lease(
@@ -762,6 +890,11 @@ def main() -> int:
       )
       all_entries = _load_clean_entries(config)
       legacy_import_id = os.environ.get("CANON_P46_LEGACY_IMPORT_ID", "")
+      frozen_v6_import_id = os.environ.get(
+          "CANON_P46_FROZEN_V6_IMPORT_ID", ""
+      )
+      if legacy_import_id and frozen_v6_import_id:
+        raise ValueError("P46 permits only one frozen resume import")
       if legacy_import_id:
         snapshot = output_dir.parent / "imports" / legacy_import_id
         receipt = import_legacy_v5_snapshot(
@@ -778,8 +911,31 @@ def main() -> int:
             f"receipt={receipt['receipt_path']}",
             flush=True,
         )
+      if frozen_v6_import_id:
+        snapshot = output_dir.parent / "imports" / frozen_v6_import_id
+        receipt = import_frozen_v6_snapshot(
+            snapshot,
+            output_dir,
+            config=config,
+            allowed_task_keys=(task_key(entry) for entry in all_entries),
+        )
+        print(
+            "[P46.RESUME] FROZEN_V6_IMPORT_PASS "
+            f"import_id={frozen_v6_import_id} records={receipt['records']} "
+            f"valid_records={receipt['valid_records']} "
+            f"source_resume_tag={receipt['source_resume_tag']} "
+            f"manifest_sha256={receipt['snapshot_manifest_sha256']} "
+            f"receipt={receipt['receipt_path']}",
+            flush=True,
+        )
       _prepare_r2egym_runtime(config, cleanup_orphans=True)
-      return asyncio.run(_run_full_campaign(config, all_entries, output_dir))
+      return asyncio.run(_run_full_campaign(
+          config,
+          all_entries,
+          output_dir,
+          first_pass_census=census_first_pass,
+          launch_id=launch_id,
+      ))
   _prepare_r2egym_runtime(config, cleanup_orphans=False)
   all_entries = _load_clean_entries(config)
   logical_entries, physical_entries = _select_shards(

@@ -1,6 +1,7 @@
 """Static L1 contracts for P46 stock reward-only evaluation."""
 
 import asyncio
+import json
 from pathlib import Path
 import sys
 import tempfile
@@ -332,6 +333,187 @@ class RewardOnlyContractTest(unittest.TestCase):
       self.assertEqual(wave_sizes, [64, 47])
       self.assertEqual(len(durable), 64)
       self.assertEqual(len(runtime_instances), 2)
+
+  def test_census_defers_invalid_identity_and_covers_later_work(self):
+    with tempfile.TemporaryDirectory() as root_text:
+      root = Path(root_text)
+      config = artifacts.EvalConfig(
+          model_id="Qwen/Qwen3-4B-Instruct-2507",
+          model_path=str(root / "model"),
+          dataset_name="R2E-Gym/R2E-Gym-Subset",
+          dataset_revision="2e8108ff942f24fcb5686badfaf7f9a8808566d5",
+          dataset_split="train",
+          dataset_rows=4578,
+          whitelist_path=str(root / "clean.jsonl"),
+          whitelist_sha256="2f95c2e6df3526f68bd3eed3ab9aece7077ef85c74251c77f7b3474b0b307ed7",
+          whitelist_rows=1851,
+          source_commit="6" * 40,
+          harness_commit="6" * 40,
+          client_image="example.invalid/tunix@sha256:" + "7" * 64,
+          topology="64",
+          resume_tag="census-wave-test",
+      )
+      entries = [{"docker_image": f"image-{index}"} for index in range(4)]
+      durable = []
+      wave_sizes = []
+      runtime_instances = []
+
+      def fake_runtime(_):
+        runtime = object()
+        runtime_instances.append(runtime)
+        return runtime
+
+      def fake_load(unused_config, unused_entries, unused_dir):
+        del unused_config, unused_entries, unused_dir
+        return list(durable)
+
+      async def fake_run(
+          unused_config,
+          unused_entries,
+          pending,
+          unused_path,
+          *,
+          runtime,
+          timeout_secs,
+      ):
+        del unused_config, unused_entries, unused_path
+        self.assertIs(runtime, runtime_instances[-1])
+        self.assertEqual(timeout_secs, 3600)
+        wave_sizes.append(len(pending))
+        for entry, sample_index, attempt_index in pending:
+          invalid = entry["docker_image"] == "image-0" and sample_index == 0
+          durable.append({
+              "task_key": entry["docker_image"],
+              "sample_index": sample_index,
+              "attempt_index": attempt_index,
+              "valid": not invalid,
+              "validity_reason": (
+                  "retryable_runtime_failure"
+                  if invalid
+                  else "completed_under_signed_budget"
+              ),
+              "solved": False,
+              "status": "FAILED" if invalid else "SUCCEEDED",
+          })
+        return len(pending), False
+
+      with (
+          mock.patch.object(eval_deepswe, "_Runtime", side_effect=fake_runtime),
+          mock.patch.object(
+              eval_deepswe, "_load_logical_records", side_effect=fake_load
+          ),
+          mock.patch.object(
+              eval_deepswe, "_run_evaluation", side_effect=fake_run
+          ),
+      ):
+        first = asyncio.run(eval_deepswe._run_full_campaign(
+            config,
+            entries,
+            root / "out",
+            first_pass_census=True,
+            launch_id="census-a",
+        ))
+        second = asyncio.run(eval_deepswe._run_full_campaign(
+            config,
+            entries,
+            root / "out",
+            first_pass_census=True,
+            launch_id="census-b",
+        ))
+      self.assertEqual(first, 0)
+      self.assertEqual(second, 0)
+      self.assertEqual(wave_sizes, [64])
+      self.assertEqual(len(durable), 64)
+      self.assertEqual(len(runtime_instances), 2)
+      summaries = sorted((root / "out" / "census").glob("*.summary.json"))
+      self.assertEqual(len(summaries), 2)
+      latest = json.loads(summaries[-1].read_text(encoding="utf-8"))
+      self.assertEqual(latest["attempted_identities"], 64)
+      self.assertEqual(latest["valid_identities"], 63)
+      self.assertEqual(latest["deferred_invalid_identities"], 1)
+      self.assertEqual(latest["unattempted_identities"], 0)
+      self.assertTrue(latest["first_pass_complete"])
+      self.assertFalse(latest["strict_campaign_complete"])
+
+  def test_census_continues_after_wave_timeout_then_resumes_unattempted(self):
+    with tempfile.TemporaryDirectory() as root_text:
+      root = Path(root_text)
+      config = artifacts.EvalConfig(
+          model_id="Qwen/Qwen3-4B-Instruct-2507",
+          model_path=str(root / "model"),
+          dataset_name="R2E-Gym/R2E-Gym-Subset",
+          dataset_revision="2e8108ff942f24fcb5686badfaf7f9a8808566d5",
+          dataset_split="train",
+          dataset_rows=4578,
+          whitelist_path=str(root / "clean.jsonl"),
+          whitelist_sha256="2f95c2e6df3526f68bd3eed3ab9aece7077ef85c74251c77f7b3474b0b307ed7",
+          whitelist_rows=1851,
+          source_commit="6" * 40,
+          harness_commit="6" * 40,
+          client_image="example.invalid/tunix@sha256:" + "7" * 64,
+          topology="64",
+          resume_tag="census-timeout-test",
+      )
+      entries = [{"docker_image": f"image-{index}"} for index in range(8)]
+      durable = []
+      wave_sizes = []
+
+      def fake_load(unused_config, unused_entries, unused_dir):
+        del unused_config, unused_entries, unused_dir
+        return list(durable)
+
+      async def fake_run(
+          unused_config,
+          unused_entries,
+          pending,
+          unused_path,
+          *,
+          runtime,
+          timeout_secs,
+      ):
+        del unused_config, unused_entries, unused_path, runtime, timeout_secs
+        wave_sizes.append(len(pending))
+        timed_out = len(wave_sizes) == 1
+        selected = pending[:-1] if timed_out else pending
+        for entry, sample_index, attempt_index in selected:
+          durable.append({
+              "task_key": entry["docker_image"],
+              "sample_index": sample_index,
+              "attempt_index": attempt_index,
+              "valid": True,
+              "validity_reason": "completed_under_signed_budget",
+              "solved": False,
+              "status": "SUCCEEDED",
+          })
+        return len(selected), timed_out
+
+      with (
+          mock.patch.object(eval_deepswe, "_Runtime", return_value=object()),
+          mock.patch.object(
+              eval_deepswe, "_load_logical_records", side_effect=fake_load
+          ),
+          mock.patch.object(
+              eval_deepswe, "_run_evaluation", side_effect=fake_run
+          ),
+      ):
+        first = asyncio.run(eval_deepswe._run_full_campaign(
+            config,
+            entries,
+            root / "out",
+            first_pass_census=True,
+            launch_id="timeout-a",
+        ))
+        second = asyncio.run(eval_deepswe._run_full_campaign(
+            config,
+            entries,
+            root / "out",
+            first_pass_census=True,
+            launch_id="timeout-b",
+        ))
+      self.assertEqual(first, 2)
+      self.assertEqual(second, 0)
+      self.assertEqual(wave_sizes, [64, 64, 1])
+      self.assertEqual(len(durable), 128)
 
   def test_entrypoint_skips_only_canonical_overlay_not_lifecycle(self):
     entrypoint = (ROOT / "canon-zero-tim/cluster/entrypoint.sh").read_text(

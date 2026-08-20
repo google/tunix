@@ -16,7 +16,13 @@ RUN = PKG / "cluster" / "steps" / "90_run.sh"
 
 class P46PostflightTest(unittest.TestCase):
 
-  def _run(self, *, full_campaign: bool, lines: list[str]):
+  def _run(
+      self,
+      *,
+      full_campaign: bool,
+      lines: list[str],
+      first_pass_census: bool = False,
+  ):
     temporary = tempfile.TemporaryDirectory()
     self.addCleanup(temporary.cleanup)
     root = Path(temporary.name)
@@ -38,6 +44,7 @@ class P46PostflightTest(unittest.TestCase):
             f"export CANON_RUN_LOG={str(base_log)!r}",
             "export CANON_P46_EVALUATION=1",
             f"export CANON_P46_FULL_CAMPAIGN={int(full_campaign)}",
+            f"export CANON_P46_CENSUS_FIRST_PASS={int(first_pass_census)}",
             "export CANON_P46_RESUME_TAG=resume-test",
             "export CANON_RUN_ID=launch-test",
             "",
@@ -88,6 +95,43 @@ class P46PostflightTest(unittest.TestCase):
     result, _ = self._run(full_campaign=True, lines=lines)
     self.assertNotEqual(result.returncode, 0)
     self.assertIn("full-campaign completion marker contract failed", result.stdout)
+
+  def test_census_accepts_deferred_invalid_and_bounded_wave_timeout(self):
+    lines = [
+        f"P46_EVAL_CENSUS_LOGICAL_COMPLETE logical_shard={index}"
+        for index in range(58)
+    ]
+    lines.extend((
+        "P46_EVAL_SHARD_TIMEOUT completed=63/64 deadline=3600s",
+        "P46_EVAL_CENSUS_PASS tasks=1851 scheduled_identities=29616 "
+        "attempted_identities=29616 valid_identities=29584 "
+        "deferred_invalid=32 unattempted=0 q4_learnable=609 "
+        "logical_shards=58 summary_sha256=" + "c" * 64,
+    ))
+    result, _ = self._run(
+        full_campaign=True,
+        first_pass_census=True,
+        lines=lines,
+    )
+    self.assertEqual(result.returncode, 0, result.stdout)
+    self.assertIn("[P46.EVAL.POSTFLIGHT] PASS mode=census", result.stdout)
+
+  def test_census_incomplete_marker_is_not_a_pass(self):
+    lines = [
+        f"P46_EVAL_CENSUS_LOGICAL_COMPLETE logical_shard={index}"
+        for index in range(58)
+    ]
+    lines.append(
+        "P46_EVAL_CENSUS_INCOMPLETE tasks=1851 "
+        "scheduled_identities=29616 attempted_identities=29615"
+    )
+    result, _ = self._run(
+        full_campaign=True,
+        first_pass_census=True,
+        lines=lines,
+    )
+    self.assertNotEqual(result.returncode, 0)
+    self.assertIn("census completion marker contract failed", result.stdout)
 
   def test_legacy_single_wave_marker_remains_supported(self):
     result, base_log = self._run(

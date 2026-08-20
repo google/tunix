@@ -278,6 +278,7 @@ def render_q4_eval(
     resume_tag: str,
     sampling_source_commit: str,
     legacy_import_id: str | None,
+    frozen_v6_import_id: str | None,
     topology: str,
     cpu_nodepool: str,
     worker_nodepool: str,
@@ -289,6 +290,7 @@ def render_q4_eval(
     evaluation_mode: str,
     parity_canary: bool,
     full_campaign: bool,
+    first_pass_census: bool,
 ) -> dict[str, Any]:
   if evaluation_mode not in EVALUATION_MODES:
     raise ValueError("unsupported P46 evaluation mode")
@@ -300,6 +302,10 @@ def render_q4_eval(
     raise ValueError("P46 full campaign cannot be a parity canary")
   if full_campaign and (logical_shard_index or physical_shard_index):
     raise ValueError("P46 full campaign owns all shard indices")
+  if first_pass_census and not full_campaign:
+    raise ValueError("P46 first-pass census requires a full campaign")
+  if first_pass_census and evaluation_mode != "reward_only":
+    raise ValueError("P46 first-pass census requires reward_only evaluation")
   if not _RESUME_TAG.fullmatch(run_id):
     raise ValueError(
         "P46 launch run id must be lowercase and Kubernetes-safe"
@@ -318,6 +324,15 @@ def render_q4_eval(
       raise ValueError(
           "P46 legacy import id must be lowercase and Kubernetes-safe"
       )
+  if frozen_v6_import_id is not None:
+    if not full_campaign:
+      raise ValueError("P46 frozen v6 import requires a full campaign")
+    if not _RESUME_TAG.fullmatch(frozen_v6_import_id):
+      raise ValueError(
+          "P46 frozen v6 import id must be lowercase and Kubernetes-safe"
+      )
+  if legacy_import_id is not None and frozen_v6_import_id is not None:
+    raise ValueError("P46 permits only one frozen resume import")
   document = _base_render(
       base,
       source_commit=source_commit,
@@ -347,7 +362,11 @@ def render_q4_eval(
   lane = (
       f"parity-{'obs' if evaluation_mode == 'logprob_observer' else 'reward'}"
       if parity_canary
-      else ("eval-camp" if full_campaign else "eval")
+      else (
+          "eval-census"
+          if first_pass_census
+          else ("eval-camp" if full_campaign else "eval")
+      )
   )
   name = f"canon-p46-{lane}-{topology}-{run_id}"
   if not full_campaign:
@@ -368,12 +387,19 @@ def render_q4_eval(
       "canon.zero-tim/evaluation-mode": evaluation_mode,
       "canon.zero-tim/parity-canary": "1" if parity_canary else "0",
       "canon.zero-tim/full-campaign": "1" if full_campaign else "0",
+      "canon.zero-tim/census-first-pass": (
+          "1" if first_pass_census else "0"
+      ),
       "canon.zero-tim/resume-tag": resume_tag,
   })
   if legacy_import_id is not None:
     document["metadata"]["labels"][
         "canon.zero-tim/legacy-import-id"
     ] = legacy_import_id
+  if frozen_v6_import_id is not None:
+    document["metadata"]["labels"][
+        "canon.zero-tim/frozen-v6-import-id"
+    ] = frozen_v6_import_id
   _configure_topology(
       document,
       name=name,
@@ -396,12 +422,14 @@ def render_q4_eval(
       "CANON_P46_RESUME_TAG": resume_tag,
       "CANON_P46_SAMPLING_SOURCE_COMMIT": sampling_source_commit,
       "CANON_P46_LEGACY_IMPORT_ID": legacy_import_id or "",
+      "CANON_P46_FROZEN_V6_IMPORT_ID": frozen_v6_import_id or "",
       "CANON_CLIENT_IMAGE": client_image,
       "CANON_P46_DEEPSWE_TRAIN": "0",
       "CANON_P46_EVALUATION": "1",
       "CANON_P46_EVALUATION_MODE": evaluation_mode,
       "CANON_P46_PARITY_CANARY": "1" if parity_canary else "0",
       "CANON_P46_FULL_CAMPAIGN": "1" if full_campaign else "0",
+      "CANON_P46_CENSUS_FIRST_PASS": "1" if first_pass_census else "0",
       "CANON_P46_TOPOLOGY": topology,
       "CANON_P34_TOPOLOGY_ADMITTED": "0",
       "CANON_P34_TP8_ADMITTED": "0",
@@ -457,9 +485,11 @@ def render_q4_eval(
       resume_tag=resume_tag,
       sampling_source_commit=sampling_source_commit,
       legacy_import_id=legacy_import_id,
+      frozen_v6_import_id=frozen_v6_import_id,
       evaluation_mode=evaluation_mode,
       parity_canary=parity_canary,
       full_campaign=full_campaign,
+      first_pass_census=first_pass_census,
   )
   return document
 
@@ -540,9 +570,11 @@ def validate_eval(
     resume_tag: str,
     sampling_source_commit: str,
     legacy_import_id: str | None,
+    frozen_v6_import_id: str | None,
     evaluation_mode: str,
     parity_canary: bool,
     full_campaign: bool,
+    first_pass_census: bool,
 ) -> None:
   _validate_topology(document, topology)
   env = p34._env(document)
@@ -556,9 +588,11 @@ def validate_eval(
       "CANON_P46_RESUME_TAG": resume_tag,
       "CANON_P46_SAMPLING_SOURCE_COMMIT": sampling_source_commit,
       "CANON_P46_LEGACY_IMPORT_ID": legacy_import_id or "",
+      "CANON_P46_FROZEN_V6_IMPORT_ID": frozen_v6_import_id or "",
       "CANON_P46_EVALUATION_MODE": evaluation_mode,
       "CANON_P46_PARITY_CANARY": "1" if parity_canary else "0",
       "CANON_P46_FULL_CAMPAIGN": "1" if full_campaign else "0",
+      "CANON_P46_CENSUS_FIRST_PASS": "1" if first_pass_census else "0",
       "CANON_P32_TRAIN_ADMITTED": "0",
       "CANON_P33_WORKLOAD_LAUNCH_ADMITTED": "0",
       "CANON_P34_TRAJECTORY_CAPTURE": "0",
@@ -601,11 +635,13 @@ def render(
     resume_tag: str | None = None,
     sampling_source_commit: str | None = None,
     legacy_import_id: str | None = None,
+    frozen_v6_import_id: str | None = None,
     logical_shard_index: int = 0,
     physical_shard_index: int = 0,
     evaluation_mode: str = "reward_only",
     parity_canary: bool = False,
     full_campaign: bool = False,
+    first_pass_census: bool = False,
     fixed_lm_head: bool = False,
 ) -> dict[str, Any]:
   if workload not in WORKLOADS:
@@ -618,7 +654,9 @@ def render(
   if workload != "q4-clean-eval" and (
       evaluation_mode != "reward_only" or parity_canary
       or full_campaign or resume_tag is not None
-      or sampling_source_commit is not None or legacy_import_id is not None
+      or first_pass_census or sampling_source_commit is not None
+      or legacy_import_id is not None
+      or frozen_v6_import_id is not None
   ):
     raise ValueError("evaluation-only controls cannot modify a training workload")
   if workload == "q4-clean-eval" and full_campaign and resume_tag is None:
@@ -646,11 +684,13 @@ def render(
       resume_tag=resume_tag or run_id,
       sampling_source_commit=sampling_source_commit or source_commit,
       legacy_import_id=legacy_import_id,
+      frozen_v6_import_id=frozen_v6_import_id,
       logical_shard_index=logical_shard_index,
       physical_shard_index=physical_shard_index,
       evaluation_mode=evaluation_mode,
       parity_canary=parity_canary,
       full_campaign=full_campaign,
+      first_pass_census=first_pass_census,
       **common,
   )
 
@@ -685,6 +725,13 @@ def main() -> None:
           "frozen snapshot under <resume-root>/imports/<id>; full campaign only"
       ),
   )
+  parser.add_argument(
+      "--frozen-v6-import-id",
+      help=(
+          "sealed v6 snapshot under <resume-root>/imports/<id>; migrates "
+          "exact sampling evidence into a fresh full-campaign resume tag"
+      ),
+  )
   parser.add_argument("--cpu-nodepool", required=True)
   parser.add_argument("--worker-nodepool", required=True)
   parser.add_argument("--model-pvc", required=True)
@@ -699,6 +746,14 @@ def main() -> None:
   )
   parser.add_argument("--parity-canary", action="store_true")
   parser.add_argument("--full-campaign", action="store_true")
+  parser.add_argument(
+      "--first-pass-census",
+      action="store_true",
+      help=(
+          "cover each identity once and defer invalid retries; full reward-only "
+          "campaign only"
+      ),
+  )
   parser.add_argument(
       "--fixed-lm-head",
       action="store_true",
@@ -718,6 +773,7 @@ def main() -> None:
       resume_tag=args.resume_tag,
       sampling_source_commit=args.sampling_source_commit,
       legacy_import_id=args.legacy_import_id,
+      frozen_v6_import_id=args.frozen_v6_import_id,
       cpu_nodepool=args.cpu_nodepool,
       worker_nodepool=args.worker_nodepool,
       model_pvc=args.model_pvc,
@@ -728,6 +784,7 @@ def main() -> None:
       evaluation_mode=args.evaluation_mode,
       parity_canary=args.parity_canary,
       full_campaign=args.full_campaign,
+      first_pass_census=args.first_pass_census,
       fixed_lm_head=args.fixed_lm_head,
   )
   args.output.write_text(p34.dump_jobset(document), encoding="utf-8")

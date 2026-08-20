@@ -27,6 +27,7 @@ import math
 import os
 from pathlib import Path
 import re
+import time
 from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
@@ -44,9 +45,11 @@ TRAJECTORY_SCHEMA = "canon.p46.deepswe-eval.trajectory.v6"
 REPORT_SCHEMA = "canon.p46.deepswe-eval.task-report.v4"
 SUMMARY_SCHEMA = "canon.p46.deepswe-eval.summary.v4"
 CAMPAIGN_SCHEMA = "canon.p46.deepswe-eval.campaign-summary.v2"
+CENSUS_SCHEMA = "canon.p46.deepswe-eval.census-summary.v1"
 RESUME_SCHEMA = "canon.p46.deepswe-eval.resume-contract.v1"
 LEASE_SCHEMA = "canon.p46.deepswe-eval.resume-lease.v1"
 IMPORT_SCHEMA = "canon.p46.deepswe-eval.resume-import.v1"
+FROZEN_V6_IMPORT_SCHEMA = "canon.p46.deepswe-eval.frozen-v6-import.v1"
 LEGACY_CONFIG_SCHEMA = "canon.p46.deepswe-eval.config.v3"
 LEGACY_TRAJECTORY_SCHEMA = "canon.p46.deepswe-eval.trajectory.v5"
 REWARD_ONLY = "reward_only"
@@ -423,6 +426,307 @@ def _snapshot_manifest(snapshot_dir: Path) -> tuple[list[tuple[Path, str]], str]
         "legacy snapshot manifest must cover every trajectory JSONL exactly"
     )
   return entries, manifest_sha256
+
+
+def _v6_snapshot_manifest(
+    snapshot_dir: Path,
+) -> tuple[list[tuple[Path, str]], Path, str]:
+  """Validates one sealed v6 campaign snapshot and its resume contract."""
+  if not snapshot_dir.is_absolute():
+    raise ValueError("frozen v6 import snapshot must be absolute")
+  manifest_path = snapshot_dir / "SHA256SUMS"
+  if manifest_path.is_symlink() or not manifest_path.is_file():
+    raise ValueError("frozen v6 snapshot requires a regular SHA256SUMS file")
+  manifest = manifest_path.read_bytes()
+  manifest_sha256 = hashlib.sha256(manifest).hexdigest()
+  trajectory_root = (snapshot_dir / "trajectories").resolve()
+  trajectories: list[tuple[Path, str]] = []
+  contract_path: Path | None = None
+  seen: set[str] = set()
+  for line_number, raw_line in enumerate(
+      manifest.decode("utf-8").splitlines(), 1
+  ):
+    if not raw_line:
+      continue
+    match = re.fullmatch(
+        r"([0-9a-f]{64})  (resume_contract\.json|trajectories/.+\.jsonl)",
+        raw_line,
+    )
+    if match is None:
+      raise ValueError(f"malformed frozen v6 SHA256SUMS line {line_number}")
+    expected_digest, relative = match.groups()
+    if ".." in Path(relative).parts or relative in seen:
+      raise ValueError(f"unsafe or duplicate frozen v6 path: {relative}")
+    seen.add(relative)
+    path = snapshot_dir / relative
+    if path.is_symlink() or not path.is_file():
+      raise ValueError(f"frozen v6 input is not a regular file: {relative}")
+    if sha256_file(path) != expected_digest:
+      raise ValueError(f"frozen v6 snapshot digest mismatch: {relative}")
+    if relative == "resume_contract.json":
+      contract_path = path
+      continue
+    try:
+      path.resolve().relative_to(trajectory_root)
+    except ValueError as error:
+      raise ValueError(
+          "frozen v6 trajectory must remain below trajectories/"
+      ) from error
+    trajectories.append((path, expected_digest))
+  discovered = {
+      str(path.relative_to(snapshot_dir))
+      for path in (snapshot_dir / "trajectories").rglob("*.jsonl")
+      if path.is_file()
+  }
+  if (
+      contract_path is None
+      or not trajectories
+      or discovered != seen - {"resume_contract.json"}
+  ):
+    raise ValueError(
+        "frozen v6 manifest must cover resume_contract.json and every "
+        "trajectory JSONL exactly"
+    )
+  return sorted(trajectories), contract_path, manifest_sha256
+
+
+def _config_from_resume_contract(path: Path) -> EvalConfig:
+  try:
+    contract = json.loads(path.read_text(encoding="utf-8"))
+  except (json.JSONDecodeError, UnicodeDecodeError) as error:
+    raise ValueError("frozen v6 resume contract is not valid JSON") from error
+  if not isinstance(contract, Mapping) or contract.get("schema") != RESUME_SCHEMA:
+    raise ValueError("frozen v6 resume contract schema mismatch")
+  record = contract.get("config")
+  if not isinstance(record, Mapping) or record.get("schema") != CONFIG_SCHEMA:
+    raise ValueError("frozen v6 config record schema mismatch")
+  field_names = {field.name for field in dataclasses.fields(EvalConfig)}
+  if not field_names.issubset(record):
+    raise ValueError("frozen v6 config record is incomplete")
+  old_config = EvalConfig(**{name: record[name] for name in field_names})
+  old_config.validate()
+  expected = {
+      "schema": RESUME_SCHEMA,
+      "resume_tag": old_config.resume_tag,
+      "config": old_config.canonical_record(),
+      "config_fingerprint": old_config.fingerprint,
+      "expected_tasks": old_config.whitelist_rows,
+      "expected_samples_per_task": old_config.n_sample,
+      "expected_sample_identities": (
+          old_config.whitelist_rows * old_config.n_sample
+      ),
+  }
+  if dict(contract) != expected:
+    raise ValueError("frozen v6 resume contract is internally inconsistent")
+  if old_config.shard_index != 0:
+    raise ValueError("frozen v6 campaign contract must use base shard_index=0")
+  return old_config
+
+
+def import_frozen_v6_snapshot(
+    snapshot_dir: str | os.PathLike[str],
+    output_dir: str | os.PathLike[str],
+    *,
+    config: EvalConfig,
+    allowed_task_keys: Iterable[str],
+) -> dict[str, Any]:
+  """Migrates a sealed v6 campaign into a fresh resume tag.
+
+  Sampling and data fields must remain exact. Only the destination resume tag
+  and harness checkout may change. Raw trajectory payloads and sampler
+  provenance are preserved, while every copied row records its sealed source.
+  """
+  config.validate()
+  snapshot = Path(snapshot_dir).resolve()
+  import_id = snapshot.name
+  if not _RESUME_TAG.fullmatch(import_id):
+    raise ValueError("frozen v6 import id must be lowercase and Kubernetes-safe")
+  entries, contract_path, manifest_sha256 = _v6_snapshot_manifest(snapshot)
+  old_config = _config_from_resume_contract(contract_path)
+  if old_config.resume_tag == config.resume_tag:
+    raise ValueError("frozen v6 migration requires a fresh resume tag")
+  old_record = old_config.canonical_record()
+  new_record = config.canonical_record()
+  allowed_differences = {"resume_tag", "harness_commit"}
+  drift = {
+      key: {"source": old_record.get(key), "destination": new_record.get(key)}
+      for key in sorted(set(old_record) | set(new_record))
+      if key not in allowed_differences and old_record.get(key) != new_record.get(key)
+  }
+  if drift:
+    raise ValueError(f"frozen v6 sampling contract drift: {drift}")
+
+  target_root = Path(output_dir).resolve()
+  trajectory_dir = target_root / "trajectories"
+  receipt_path = target_root / "imports" / f"{import_id}.v6.receipt.json"
+  ordered_keys = list(allowed_task_keys)
+  if len(ordered_keys) != len(set(ordered_keys)):
+    raise ValueError("frozen v6 task order contains duplicate identities")
+  task_index = {key: index for index, key in enumerate(ordered_keys)}
+  attempts: dict[tuple[str, int], list[dict[str, Any]]] = (
+      collections.defaultdict(list)
+  )
+  migrated: dict[int, list[dict[str, Any]]] = collections.defaultdict(list)
+  input_evidence = [{
+      "path": "resume_contract.json",
+      "sha256": sha256_file(contract_path),
+  }]
+  for path, digest in entries:
+    relative = str(path.relative_to(snapshot))
+    input_evidence.append({"path": relative, "sha256": digest})
+    lines = path.read_text(encoding="utf-8").splitlines()
+    for line_number, line in enumerate(lines, 1):
+      if not line.strip():
+        continue
+      try:
+        record = json.loads(line)
+      except json.JSONDecodeError:
+        if line_number == len(lines):
+          continue
+        raise ValueError(f"invalid JSON before trailing line in {path}")
+      if not isinstance(record, dict):
+        raise ValueError(f"frozen v6 trajectory is not an object: {path}")
+      key = record.get("task_key")
+      sample_index = record.get("sample_index")
+      attempt_index = record.get("attempt_index", 0)
+      if (
+          not isinstance(key, str)
+          or key not in task_index
+          or not isinstance(sample_index, int)
+          or not 0 <= sample_index < config.n_sample
+          or record.get("sample_nonce")
+          != old_config.sample_nonce(key, sample_index)
+      ):
+        raise ValueError(f"frozen v6 trajectory identity mismatch in {path}")
+      logical_index = task_index[key] // config.logical_tasks
+      old_logical = dataclasses.replace(old_config, shard_index=logical_index)
+      new_logical = dataclasses.replace(config, shard_index=logical_index)
+      expected_fields = {
+          "schema": TRAJECTORY_SCHEMA,
+          "config_fingerprint": old_logical.fingerprint,
+          "run_tag": old_logical.run_tag,
+          "resume_tag": old_logical.resume_tag,
+          "harness_commit": old_logical.harness_commit,
+          "trajectory_mode": old_logical.trajectory_mode,
+          "action_compat_mode": old_logical.action_compat_mode,
+          "sampled_by": old_logical.sampled_by,
+          "sampling_rng_mode": old_logical.sampling_rng_mode,
+          "engine_seed": old_logical.seed_base,
+      }
+      wrong = {
+          field: record.get(field)
+          for field, value in expected_fields.items()
+          if record.get(field) != value
+      }
+      if wrong:
+        raise ValueError(f"frozen v6 trajectory contract mismatch in {path}: {wrong}")
+      identity = (key, sample_index)
+      prior = attempts[identity]
+      if (
+          not isinstance(attempt_index, int)
+          or attempt_index != len(prior)
+          or (prior and prior[-1].get("valid") is True)
+      ):
+        raise ValueError(f"frozen v6 attempt sequence is ambiguous: {identity}")
+      trajectory = record.get("trajectory")
+      if not isinstance(trajectory, Mapping):
+        raise ValueError(f"frozen v6 trajectory payload is malformed in {path}")
+      if config.evaluation_mode == REWARD_ONLY:
+        reward_only_trajectory(trajectory)
+      reward = record.get("reward")
+      valid = record.get("valid")
+      if (
+          isinstance(reward, bool)
+          or not isinstance(reward, (int, float))
+          or not math.isfinite(float(reward))
+          or not isinstance(valid, bool)
+          or record.get("solved") is not (valid and float(reward) == 1.0)
+      ):
+        raise ValueError(f"frozen v6 trajectory outcome is malformed in {path}")
+      migrated_record = dict(record)
+      migrated_record.update({
+          "config_fingerprint": new_logical.fingerprint,
+          "run_tag": new_logical.run_tag,
+          "resume_tag": new_logical.resume_tag,
+          "harness_commit": new_logical.harness_commit,
+          "migrated_from": {
+              "schema": FROZEN_V6_IMPORT_SCHEMA,
+              "source_resume_tag": old_logical.resume_tag,
+              "source_harness_commit": old_logical.harness_commit,
+              "source_config_fingerprint": old_logical.fingerprint,
+              "snapshot_manifest_sha256": manifest_sha256,
+              "path": relative,
+              "line": line_number,
+              "record_sha256": hashlib.sha256(line.encode("utf-8")).hexdigest(),
+          },
+      })
+      prior.append(migrated_record)
+      migrated[logical_index].append(migrated_record)
+
+  if not migrated:
+    raise ValueError("frozen v6 snapshot contains no complete trajectory records")
+  outputs = []
+  output_payloads: list[tuple[Path, bytes]] = []
+  for logical_index in sorted(migrated):
+    logical_config = dataclasses.replace(config, shard_index=logical_index)
+    payload = b"".join(
+        (json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n").encode(
+            "utf-8"
+        )
+        for record in migrated[logical_index]
+    )
+    output_path = trajectory_dir / (
+        f"{logical_config.run_tag}.frozen-v6-{import_id}-"
+        f"{manifest_sha256[:16]}.jsonl"
+    )
+    output_payloads.append((output_path, payload))
+    outputs.append({
+        "logical_shard_index": logical_index,
+        "path": str(output_path),
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "records": len(migrated[logical_index]),
+    })
+  migrated_records = sum(len(records) for records in migrated.values())
+  receipt = {
+      "schema": FROZEN_V6_IMPORT_SCHEMA,
+      "resume_tag": config.resume_tag,
+      "import_id": import_id,
+      "source_resume_tag": old_config.resume_tag,
+      "source_commit": config.source_commit,
+      "source_harness_commit": old_config.harness_commit,
+      "harness_commit": config.harness_commit,
+      "source_base_config_fingerprint": old_config.fingerprint,
+      "base_config_fingerprint": config.fingerprint,
+      "snapshot_manifest_sha256": manifest_sha256,
+      "input_evidence": input_evidence,
+      "records": migrated_records,
+      "valid_records": sum(
+          item.get("valid") is True
+          for records in migrated.values()
+          for item in records
+      ),
+      "outputs": outputs,
+  }
+  receipt_payload = (json.dumps(receipt, indent=2, sort_keys=True) + "\n").encode(
+      "utf-8"
+  )
+  expected_paths = {path for path, _ in output_payloads}
+  if receipt_path.exists() or any(path.exists() for path in expected_paths):
+    for output_path, payload in output_payloads:
+      _write_exact_file(output_path, payload)
+    _write_exact_file(receipt_path, receipt_payload)
+    receipt["receipt_path"] = str(receipt_path)
+    return receipt
+  existing = list(trajectory_dir.glob("*.jsonl")) if trajectory_dir.exists() else []
+  if any(path not in expected_paths for path in existing):
+    raise ValueError(
+        "frozen v6 import must be the first trajectory evidence in a resume tag"
+    )
+  for output_path, payload in output_payloads:
+    _write_exact_file(output_path, payload)
+  _write_exact_file(receipt_path, receipt_payload)
+  receipt["receipt_path"] = str(receipt_path)
+  return receipt
 
 
 def import_legacy_v5_snapshot(
@@ -990,6 +1294,69 @@ def remaining_samples(
   return result
 
 
+def unattempted_samples(
+    entries: Sequence[Mapping[str, Any]],
+    records: Sequence[Mapping[str, Any]],
+    *,
+    config: EvalConfig,
+) -> list[tuple[Mapping[str, Any], int, int]]:
+  """Returns identities with no durable attempt, regardless of validity.
+
+  This is the breadth-first census scheduler.  Unlike ``remaining_samples``,
+  an invalid durable attempt suppresses another attempt during the census so
+  the campaign can cover later prompts before entering strict repair mode.
+  """
+  attempts = collections.Counter(
+      (str(record["task_key"]), int(record["sample_index"]))
+      for record in records
+  )
+  result = []
+  for entry in entries:
+    key = task_key(entry)
+    for sample_index in range(config.n_sample):
+      identity = (key, sample_index)
+      if attempts[identity] == 0:
+        result.append((entry, sample_index, 0))
+  return result
+
+
+def deferred_samples(
+    entries: Sequence[Mapping[str, Any]],
+    records: Sequence[Mapping[str, Any]],
+    *,
+    config: EvalConfig,
+) -> list[dict[str, Any]]:
+  """Describes every identity that still lacks a valid terminal record."""
+  by_identity: dict[tuple[str, int], list[Mapping[str, Any]]] = (
+      collections.defaultdict(list)
+  )
+  for record in records:
+    identity = (
+        str(record["task_key"]), int(record["sample_index"])
+    )
+    by_identity[identity].append(record)
+  result = []
+  for entry in entries:
+    key = task_key(entry)
+    for sample_index in range(config.n_sample):
+      attempts = by_identity[(key, sample_index)]
+      if any(item.get("valid") is True for item in attempts):
+        continue
+      latest = attempts[-1] if attempts else {}
+      result.append({
+          "task_key": key,
+          "instance_id": entry.get("instance_id"),
+          "docker_image": key,
+          "sample_index": sample_index,
+          "state": "invalid" if attempts else "unattempted",
+          "attempts": len(attempts),
+          "latest_attempt_index": latest.get("attempt_index"),
+          "latest_status": latest.get("status"),
+          "latest_validity_reason": latest.get("validity_reason"),
+      })
+  return result
+
+
 def aggregate_tasks(
     entries: Sequence[Mapping[str, Any]],
     records: Sequence[Mapping[str, Any]],
@@ -1146,6 +1513,106 @@ def write_reports(
           "existing evaluation summary differs from exact payload: "
           f"{summary_path}"
       )
+  summary["summary_path"] = str(summary_path)
+  summary["summary_sha256"] = hashlib.sha256(payload).hexdigest()
+  return summary
+
+
+def write_census(
+    output_dir: str | os.PathLike[str],
+    reports: Sequence[Mapping[str, Any]],
+    deferred: Sequence[Mapping[str, Any]],
+    *,
+    config: EvalConfig,
+    launch_id: str,
+) -> dict[str, Any]:
+  """Writes one immutable breadth-first snapshot without claiming a wash."""
+  if not _RESUME_TAG.fullmatch(launch_id):
+    raise ValueError("census launch_id must be lowercase and Kubernetes-safe")
+  expected_identities = len(reports) * config.n_sample
+  valid_identities = sum(int(item["valid_n"]) for item in reports)
+  if valid_identities + len(deferred) != expected_identities:
+    raise ValueError("census identity accounting does not close")
+  unattempted = sum(item.get("state") == "unattempted" for item in deferred)
+  invalid = sum(item.get("state") == "invalid" for item in deferred)
+  if unattempted + invalid != len(deferred):
+    raise ValueError("census deferred identity state is malformed")
+  category_counts = collections.Counter(
+      str(item["category"]) for item in reports
+  )
+  snapshot_id = (
+      f"{launch_id}.{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}."
+      f"{time.time_ns()}.{os.getpid()}"
+  )
+  sets = {
+      "complete": [
+          item
+          for item in reports
+          if item["category"] in ("partial", "all_fail", "all_pass")
+      ],
+      "mixed_complete": [
+          item for item in reports if item["category"] == "partial"
+      ],
+      "all_fail_complete": [
+          item for item in reports if item["category"] == "all_fail"
+      ],
+      "all_pass_complete": [
+          item for item in reports if item["category"] == "all_pass"
+      ],
+      "deferred_tasks": [
+          item
+          for item in reports
+          if item["category"] in ("broken", "incomplete")
+      ],
+      "deferred_identities": list(deferred),
+  }
+  root = Path(output_dir)
+  paths = {}
+  digests = {}
+  for name, items in sets.items():
+    path = root / f"{snapshot_id}.{name}.jsonl"
+    paths[name] = str(path)
+    digests[name] = _write_jsonl(path, items)
+  config_without_shard = config.canonical_record()
+  config_without_shard.pop("shard_index")
+  attempted_identities = expected_identities - unattempted
+  summary = {
+      "schema": CENSUS_SCHEMA,
+      "claim": "breadth_first_coverage_only_not_final_washing",
+      "resume_tag": config.resume_tag,
+      "launch_id": launch_id,
+      "snapshot_id": snapshot_id,
+      "config_without_logical_shard_index": config_without_shard,
+      "trajectory_mode": config.trajectory_mode,
+      "sampled_by": config.sampled_by,
+      "harness_commit": config.harness_commit,
+      "tasks": len(reports),
+      "n_sample": config.n_sample,
+      "scheduled_identities": expected_identities,
+      "attempted_identities": attempted_identities,
+      "valid_identities": valid_identities,
+      "deferred_invalid_identities": invalid,
+      "unattempted_identities": unattempted,
+      "first_pass_complete": unattempted == 0,
+      "strict_campaign_complete": len(deferred) == 0,
+      "category_counts": dict(sorted(category_counts.items())),
+      "q4_learnable_provisional": len(sets["mixed_complete"]),
+      "paths": paths,
+      "sha256": digests,
+  }
+  summary_path = root / f"{snapshot_id}.summary.json"
+  payload = (json.dumps(summary, indent=2, sort_keys=True) + "\n").encode(
+      "utf-8"
+  )
+  summary_path.parent.mkdir(parents=True, exist_ok=True)
+  try:
+    with summary_path.open("xb") as output:
+      output.write(payload)
+      output.flush()
+      os.fsync(output.fileno())
+  except FileExistsError:
+    if summary_path.read_bytes() != payload:
+      raise ValueError("existing census evidence differs from exact payload")
   summary["summary_path"] = str(summary_path)
   summary["summary_sha256"] = hashlib.sha256(payload).hexdigest()
   return summary

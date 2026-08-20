@@ -14,6 +14,151 @@ gate before rendering. Never modify or push `main`.
 No cluster launch is authorized by this handoff alone. Render/dry-run/apply only
 within the operator's explicit instruction.
 
+## P46.7 next execution: census first, strict repair second
+
+The next **new-code** launch is a breadth-first census, not the old strict
+retry loop and not a one-wave smoke. Existing `p46e12808`/resume lineage
+`p46e12806` was rendered before this local change and does not gain census
+semantics automatically. Do not modify that live/queued producer from this
+handoff. After it is terminal and no producer/sandbox pod remains, freeze its
+raw v6 evidence and migrate it into a fresh resume tag as described below.
+
+This P46.7 implementation is currently unpublished. A remote agent must stop
+unless the exact read-back operator SHA contains all of:
+
+```text
+CANON_P46_CENSUS_FIRST_PASS
+P46_EVAL_CENSUS_PASS
+FROZEN_V6_IMPORT_PASS
+canon.p46.deepswe-eval.census-summary.v1
+canon.p46.deepswe-eval.frozen-v6-import.v1
+```
+
+The two stages have different gates:
+
+| Stage | Scheduler | Success marker | Meaning |
+|---|---|---|---|
+| Census | only identities with no durable attempt; one attempt each | `P46_EVAL_CENSUS_PASS tasks=1851 scheduled_identities=29616 unattempted=0` | all identities have evidence; invalids may remain |
+| Strict repair | every identity without a valid result; consecutive retries | `P46_EVAL_CAMPAIGN_PASS tasks=1851 n_sample=16 valid_trajectories=29616 logical_shards=58` | exact-N wash and final manifests complete |
+
+`P46_EVAL_CENSUS_INCOMPLETE` is a resumable nonzero staging result. Relaunch
+with the same new resume tag, exact harness/sampling source and
+`--first-pass-census`; it samples only identities still lacking any durable
+row. Model/context/max-step/signed trajectory timeouts already count as valid
+unsolved. Invalid `FAILED`, environment, reward, and malformed outcomes are
+durable but deferred until strict repair; they are never rewritten as reward
+zero.
+
+### Freeze the old v6 evidence
+
+Do this only after the old JobSet is terminal and read-only checks prove no
+producer or R2E sandbox remains. Copy; never move, delete, or edit the old
+tree. Use a fresh destination tag that has no trajectory evidence:
+
+```bash
+OLD_RESUME_TAG=p46e12806
+NEW_RESUME_TAG=p46q4census01
+IMPORT_ID=p46e12806-v6-final
+OLD_ROOT="/mnt/disks/linchai_data/deepswe_eval/${OLD_RESUME_TAG}"
+NEW_ROOT="/mnt/disks/linchai_data/deepswe_eval/${NEW_RESUME_TAG}"
+SNAPSHOT="${NEW_ROOT}/imports/${IMPORT_ID}"
+
+test -f "${OLD_ROOT}/outputs/resume_contract.json"
+test -d "${OLD_ROOT}/outputs/trajectories"
+test ! -e "$SNAPSHOT"
+mkdir -p "$SNAPSHOT"
+cp --archive "${OLD_ROOT}/outputs/resume_contract.json" \
+  "${SNAPSHOT}/resume_contract.json"
+cp --archive "${OLD_ROOT}/outputs/trajectories" \
+  "${SNAPSHOT}/trajectories"
+(
+  cd "$SNAPSHOT"
+  sha256sum resume_contract.json
+  find trajectories -type f -name '*.jsonl' -print0 | sort -z | \
+    xargs -0 sha256sum
+) > "${SNAPSHOT}/SHA256SUMS"
+chmod -R a-w "$SNAPSHOT"
+
+SAMPLING_SOURCE_SHA="$(jq -r '.config.source_commit' \
+  "${SNAPSHOT}/resume_contract.json")"
+OLD_HARNESS_SHA="$(jq -r '.config.harness_commit' \
+  "${SNAPSHOT}/resume_contract.json")"
+test "${#SAMPLING_SOURCE_SHA}" -eq 40
+test "${#OLD_HARNESS_SHA}" -eq 40
+(cd "$SNAPSHOT" && sha256sum -c SHA256SUMS)
+```
+
+The manifest must contain exactly one `resume_contract.json` line and every
+trajectory JSONL under `trajectories/`. The importer rejects a live/unsealed
+snapshot, same destination tag, missing file, digest drift, duplicate or
+out-of-order attempt, task drift, sampling/data/topology drift, logprobs, or a
+non-reward-only row.
+
+### Render the first census launch
+
+After publication/read-back, `SOURCE_SHA` is the new census-capable harness;
+`SAMPLING_SOURCE_SHA` comes from the frozen old resume contract. They are
+intentionally different and both remain in provenance:
+
+```bash
+TOPOLOGY=128
+BASE=canon-zero-tim/cluster/jobset-256cluster-64chip.yaml
+RUN_ID=p46c128a0
+CPU_NODEPOOL=deepswe-cpu-pool
+TPU_NODEPOOL=<actual-4x4x8-nodepool>
+MODEL_PVC=haoyugao-cpu-np-pvc
+
+python3 canon-zero-tim/cluster/render_p46_deepswe_profiles.py \
+  --base "$BASE" \
+  --output "/tmp/p46-census-${TOPOLOGY}-${RUN_ID}.yaml" \
+  --workload q4-clean-eval \
+  --topology "$TOPOLOGY" \
+  --source-commit "$SOURCE_SHA" \
+  --sampling-source-commit "$SAMPLING_SOURCE_SHA" \
+  --source-branch yuxzhang/canon-zero-tim \
+  --client-image "$CLIENT_IMAGE_DIGEST" \
+  --run-id "$RUN_ID" \
+  --resume-tag "$NEW_RESUME_TAG" \
+  --frozen-v6-import-id "$IMPORT_ID" \
+  --cpu-nodepool "$CPU_NODEPOOL" \
+  --worker-nodepool "$TPU_NODEPOOL" \
+  --model-pvc "$MODEL_PVC" \
+  --full-campaign \
+  --first-pass-census
+```
+
+Before any apply, require `CANON_P46_FULL_CAMPAIGN=1`,
+`CANON_P46_CENSUS_FIRST_PASS=1`, the new/fresh resume tag, the old sampling
+source SHA, exact new harness SHA, reward-only mode, 128-chip `4x4x8`, 32
+workers, DP16 x TP8, and no trainer/alignment/logprob flags. The first migrated
+launch must print:
+
+```text
+[P46.RESUME] FROZEN_V6_IMPORT_PASS import_id=p46e12806-v6-final records=<n> valid_records=<n> source_resume_tag=p46e12806 ...
+```
+
+Later census relaunches use a new `RUN_ID` and the same values but omit
+`--frozen-v6-import-id`; keep `--first-pass-census`. After census PASS, render
+strict repair from the same `SOURCE_SHA`, `SAMPLING_SOURCE_SHA`, topology,
+image and `NEW_RESUME_TAG`, but omit both `--first-pass-census` and
+`--frozen-v6-import-id`. Do not create another tag between stages.
+
+Census artifacts are immutable snapshots under:
+
+```text
+outputs/census/<launch>.<utc>.<ns>.<pid>.summary.json
+outputs/census/<snapshot>.complete.jsonl
+outputs/census/<snapshot>.mixed_complete.jsonl
+outputs/census/<snapshot>.all_fail_complete.jsonl
+outputs/census/<snapshot>.all_pass_complete.jsonl
+outputs/census/<snapshot>.deferred_tasks.jsonl
+outputs/census/<snapshot>.deferred_identities.jsonl
+```
+
+They carry claim `breadth_first_coverage_only_not_final_washing`. The
+`mixed_complete` list is provisional; only strict `outputs/campaign/` is a
+washed list.
+
 ## What the returned run proved
 
 Evidence `p46e12804` ran source
@@ -160,7 +305,7 @@ bash canon-zero-tim/tests/p46_deepswe_profiles/run_cpu.sh
 Required CPU marker:
 
 ```text
-P46_DEEPSWE_PROFILES_CPU_PASS cases=65
+P46_DEEPSWE_PROFILES_CPU_PASS cases=75
 ```
 
 The suite includes complete-scale orchestration, torn-tail recovery,
@@ -209,12 +354,13 @@ files; it writes immutable v6 copies with per-row `imported_from` provenance
 and a receipt. Later relaunches omit `--legacy-import-id` but keep both exact
 source SHAs, the resume tag, topology, image, model, data and sampling fields.
 
-## Render the next full 128-chip washing JobSet
+## Strict full-campaign render reference (after census)
 
 For a from-scratch config-v4/trajectory-v6 campaign, use a new resume tag and
 keep it stable for the whole washing campaign; a launch run id may change
-after interruption. To preserve `p46e12805`, use the transition procedure
-above instead of this from-scratch command:
+after interruption. In the P46.7 path, reuse the census destination tag and
+omit the census/import flags. To preserve legacy `p46e12805`, use the v5
+transition procedure above instead of this from-scratch command:
 
 ```bash
 TOPOLOGY=128
@@ -340,7 +486,10 @@ Persistent root:
 /mnt/disks/linchai_data/deepswe_eval/<resume-tag>/outputs/resume_lease.json
 /mnt/disks/linchai_data/deepswe_eval/<resume-tag>/imports/<legacy-run-id>/
 /mnt/disks/linchai_data/deepswe_eval/<resume-tag>/outputs/imports/<legacy-run-id>.receipt.json
+/mnt/disks/linchai_data/deepswe_eval/<resume-tag>/imports/<frozen-v6-import-id>/
+/mnt/disks/linchai_data/deepswe_eval/<resume-tag>/outputs/imports/<frozen-v6-import-id>.v6.receipt.json
 /mnt/disks/linchai_data/deepswe_eval/<resume-tag>/outputs/trajectories/
+/mnt/disks/linchai_data/deepswe_eval/<resume-tag>/outputs/census/
 /mnt/disks/linchai_data/deepswe_eval/<resume-tag>/outputs/reports/
 /mnt/disks/linchai_data/deepswe_eval/<resume-tag>/outputs/campaign/
 /mnt/disks/linchai_data/deepswe_eval/<resume-tag>/logs/campaign.attempt-*.log

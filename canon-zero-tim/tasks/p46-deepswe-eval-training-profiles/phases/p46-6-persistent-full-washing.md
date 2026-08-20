@@ -45,6 +45,16 @@ and one model initialization/JIT cycle was paid for only 64 trajectories.
    per-logical v3 fingerprint, clean task/sample identity, attempt sequence and
    provenance; preserve the legacy sampler SHA, pin the new harness SHA, and
    emit immutable v6 rows plus a receipt before TPU initialization.
+8. Add a default-off breadth-first census mode for the returned campaign:
+   schedule only identities with no durable attempt, run each at most once in
+   this phase, persist invalid outcomes for later strict repair, continue past
+   bounded wave timeout, and write coverage-only artifacts under
+   `outputs/census/` without weakening the canonical finalizer.
+9. When the sampler-compatible evidence already uses trajectory-v6 but the
+   harness must advance, require a terminal copied snapshot containing its
+   original `resume_contract.json`, every trajectory JSONL and exact
+   `SHA256SUMS`. Migrate into a fresh resume tag only, preserving sampler/data
+   fields and raw payloads and attaching per-row source provenance.
 
 ## Exit gate
 
@@ -65,6 +75,11 @@ and one model initialization/JIT cycle was paid for only 64 trajectories.
 - Target: one full campaign emits
   `P46_EVAL_CAMPAIGN_PASS tasks=1851 n_sample=16 valid_trajectories=29616
   logical_shards=58`, with postflight cleanup and immutable campaign digests.
+- Census staging: before strict repair, one or more launches may emit
+  `P46_EVAL_CENSUS_INCOMPLETE` while durable coverage is still missing. The
+  staging gate is exact `P46_EVAL_CENSUS_PASS tasks=1851
+  scheduled_identities=29616 unattempted=0`; deferred invalid identities are
+  expected and do not satisfy the strict target gate.
 
 No target campaign has run. CPU PASS is not TPU, Kubernetes, throughput, or
 data-washing completion evidence.

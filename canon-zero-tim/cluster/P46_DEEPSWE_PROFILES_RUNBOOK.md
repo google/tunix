@@ -7,11 +7,97 @@ Qwen3-32B training renders on 64-chip `4x4x4` or 256-chip `4x8x8`. The renderer
 writes the signed parameters directly into the JobSet; do not add a second
 shell override layer.
 
-## P46.6 current launch path
+## P46.7 breadth-first census and v6 handoff
+
+This is the current next-run procedure once the implementation has been
+explicitly published and read back. It supersedes the strict-first launch
+ordering below but does not replace the strict completion gate.
+
+The returned campaign should first cover every still-never-attempted
+task/sample identity once. Render Q4 evaluation with all three controls:
+
+```text
+--full-campaign
+--first-pass-census
+--resume-tag <fresh-v6-migration-tag>
+```
+
+On the first launch only, add
+`--frozen-v6-import-id <sealed-old-v6-snapshot-id>` and pass the old
+`resume_contract.json` source SHA through `--sampling-source-commit`. A newer
+census-capable `--source-commit` is the harness SHA. They must not be silently
+collapsed.
+
+### Why the old v6 tag cannot be resumed in place
+
+Trajectory-v6 fingerprints bind both `resume_tag` and `harness_commit`.
+Checking out the old SHA lacks census code; checking out the new SHA against
+the old tag correctly causes a contract mismatch. Therefore:
+
+1. Wait until every old producer is terminal and no sandbox pod remains.
+2. Copy old `outputs/resume_contract.json` and the entire
+   `outputs/trajectories/` tree into
+   `<fresh-root>/imports/<import-id>/`; never move or edit the old evidence.
+3. From inside that snapshot, write `SHA256SUMS` containing the relative path
+   `resume_contract.json` and every relative `trajectories/*.jsonl` path, then
+   make the snapshot read-only.
+4. Use a fresh destination tag with no trajectory JSONL. Require
+   `[P46.RESUME] FROZEN_V6_IMPORT_PASS` before TPU runtime preparation.
+
+The importer validates old resume contract self-consistency, all digests,
+every per-logical fingerprint/run tag, clean identity/nonce, consecutive
+attempt sequence, reward/validity fields, reward-only logprob absence and
+sampler provenance. Only destination harness SHA and resume tag may differ.
+Raw trajectories and `sampled_by=stock@<old-source-sha>` are retained; copied
+rows add source tag/harness/fingerprint/path/line/record-digest provenance.
+
+### Census runtime and result interpretation
+
+The signed workload remains Qwen3-4B-Instruct-2507, 1,851 clean prompts, N16,
+16,384 response tokens, 50 steps, reward-only, prefix cache off, concurrency
+64, and one 3,600-second physical-wave budget. Census only changes retry
+ordering and is deliberately outside the sampling fingerprint:
+
+- any durable attempt, valid or invalid, suppresses another census attempt;
+- model/context/max-step/signed trajectory timeouts remain valid unsolved;
+- `FAILED`, environment/reward timeout and malformed results remain invalid,
+  are persisted, and appear in `deferred_identities.jsonl`;
+- a bounded wave timeout does not stop later-wave traversal; and
+- an interrupted census relaunch runs only identities with no durable row.
+
+`P46_EVAL_CENSUS_INCOMPLETE` is expected while unattempted identities remain
+and exits nonzero. Census is done only at:
+
+```text
+P46_EVAL_CENSUS_PASS tasks=1851 scheduled_identities=29616 unattempted=0
+```
+
+This marker proves breadth coverage, not exact-N washing. Immutable snapshots
+under `outputs/census/` explicitly claim
+`breadth_first_coverage_only_not_final_washing`; provisional mixed/all-fail/
+all-pass files must not be used as final training data.
+
+After census PASS, use the same destination tag, new harness SHA, old sampling
+source SHA, topology, model/image/data and sampling fields. Omit
+`--first-pass-census` and `--frozen-v6-import-id`. Strict mode then retries all
+identities lacking a valid result and retains its unchanged completion gate:
+
+```text
+P46_EVAL_CAMPAIGN_PASS tasks=1851 n_sample=16 valid_trajectories=29616 logical_shards=58
+```
+
+The executable freeze and render commands are maintained in
+`tasks/p46-deepswe-eval-training-profiles/HANDOFF.md`. Existing
+`p46e12808`/`p46e12806` registry state predates P46.7; do not assume its
+rendered manifest contains this mode, and do not mutate it without separate
+operator authority.
+
+## P46.6 strict campaign baseline (used after P46.7 census)
 
 This section supersedes the legacy shard-by-shard promotion sequence later in
-this document. The next Q4 run is full clean-data washing through one
-persistent runtime, not another standalone `l0/p0` test. Returned 128-chip run
+this document and remains the strict-repair stage after census. Q4 full
+clean-data washing uses one persistent runtime, not another standalone
+`l0/p0` test. Returned 128-chip run
 `p46e12804` exposed the old greedy action-tag bug and the cost of repeating
 model init/JIT. The later legacy-v5 campaign `p46e12805` ran the fixed action
 adapter at sampler source `18d5d2ac1603a26a221af9d5fc430b084ec002df`.
@@ -78,7 +164,7 @@ finalizer are published by
 `a642ab267425a5b08b0cebb6e12c607f50f71831`. A remote agent must stop unless
 the exact read-back operator SHA contains that commit and all of
 `attempt_index`, `P46_EVAL_PHYSICAL_INCOMPLETE`, and
-`P46_DEEPSWE_PROFILES_CPU_PASS cases=65`, plus
+`P46_DEEPSWE_PROFILES_CPU_PASS cases=75`, plus
 `finalize_deepswe_eval.py`. Do not invent or substitute a repair SHA in
 advance.
 
@@ -377,6 +463,7 @@ failure. Durable output is under the mounted disk at:
 /mnt/disks/linchai_data/deepswe_eval/<resume-tag>/imports/<legacy-run-id>/
 /mnt/disks/linchai_data/deepswe_eval/<resume-tag>/outputs/imports/*.receipt.json
 /mnt/disks/linchai_data/deepswe_eval/<resume-tag>/outputs/trajectories/
+/mnt/disks/linchai_data/deepswe_eval/<resume-tag>/outputs/census/
 /mnt/disks/linchai_data/deepswe_eval/<resume-tag>/outputs/reports/
 /mnt/disks/linchai_data/deepswe_eval/<resume-tag>/logs/campaign.attempt-*.log
 ```
@@ -441,7 +528,7 @@ in the P34/P44 runbooks with the actual registry-digest client image. Do not
 print or modify `HF_TOKEN`, `WANDB_API_KEY`, or `.env`.
 
 For evaluation execution after the `p46e25609` action-adapter correction, the
-marker must be exactly `P46_DEEPSWE_PROFILES_CPU_PASS cases=65`, and this
+marker must be exactly `P46_DEEPSWE_PROFILES_CPU_PASS cases=75`, and this
 source audit must
 pass before rendering:
 
@@ -513,8 +600,9 @@ python3 canon-zero-tim/cluster/render_p46_deepswe_profiles.py \
   --model-pvc "$MODEL_PVC"
 ```
 
-Render the production Qwen3-4B full washing campaign. This is the next launch
-path. Choose the campaign resume tag once and keep it unchanged; run id names
+Render the production Qwen3-4B strict washing campaign. Under P46.7 this is
+used after census PASS. Choose the campaign resume tag once and keep it
+unchanged; run id names
 this Kubernetes attempt and may change on a later resume. Do not also pass
 shard indices:
 

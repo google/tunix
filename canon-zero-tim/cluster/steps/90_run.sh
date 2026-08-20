@@ -255,8 +255,11 @@ if [ "${CANON_P46_EVALUATION:-0}" = "1" ]; then
   n_eval_report=$(grep -ac '^P46_EVAL_LOGICAL_REPORT_PASS ' "$LOG" || true)
   n_eval_campaign=$(grep -ac '^P46_EVAL_CAMPAIGN_PASS tasks=1851 n_sample=16 valid_trajectories=29616 logical_shards=58 ' "$LOG" || true)
   n_eval_campaign_logical=$(grep -ac '^P46_EVAL_CAMPAIGN_LOGICAL_PASS ' "$LOG" || true)
+  n_eval_census=$(grep -ac '^P46_EVAL_CENSUS_PASS tasks=1851 scheduled_identities=29616 attempted_identities=29616 ' "$LOG" || true)
+  n_eval_census_logical=$(grep -ac '^P46_EVAL_CENSUS_LOGICAL_COMPLETE ' "$LOG" || true)
+  n_eval_census_incomplete=$(grep -ac '^P46_EVAL_CENSUS_INCOMPLETE ' "$LOG" || true)
   n_eval_timeout=$(grep -aEc 'P46_EVAL_(SHARD|CAMPAIGN_WAVE)_TIMEOUT' "$LOG" || true)
-  echo "[P46.EVAL.POSTFLIGHT] rc=$rc transport_rc=$tee_rc subshard=$n_eval_subshard report=$n_eval_report campaign=$n_eval_campaign campaign_logical=$n_eval_campaign_logical timeout=$n_eval_timeout log=$LOG"
+  echo "[P46.EVAL.POSTFLIGHT] rc=$rc transport_rc=$tee_rc subshard=$n_eval_subshard report=$n_eval_report campaign=$n_eval_campaign campaign_logical=$n_eval_campaign_logical census=$n_eval_census census_logical=$n_eval_census_logical census_incomplete=$n_eval_census_incomplete timeout=$n_eval_timeout log=$LOG"
   if [ "$rc" -ne 0 ]; then
     exit "$rc"
   fi
@@ -265,19 +268,39 @@ if [ "${CANON_P46_EVALUATION:-0}" = "1" ]; then
     exit 1
   fi
   if [ "${CANON_P46_FULL_CAMPAIGN:-0}" = "1" ]; then
-    if [ "$n_eval_campaign" -ne 1 ] || \
-       [ "$n_eval_campaign_logical" -ne 58 ] || \
-       [ "$n_eval_subshard" -ne 0 ] || [ "$n_eval_report" -ne 0 ] || \
-       [ "$n_eval_timeout" -ne 0 ]; then
+    if [ "${CANON_P46_CENSUS_FIRST_PASS:-0}" = "1" ]; then
+      if [ "$n_eval_census" -ne 1 ] || \
+         [ "$n_eval_census_logical" -ne 58 ] || \
+         [ "$n_eval_census_incomplete" -ne 0 ] || \
+         [ "$n_eval_campaign" -ne 0 ] || \
+         [ "$n_eval_campaign_logical" -ne 0 ] || \
+         [ "$n_eval_subshard" -ne 0 ] || [ "$n_eval_report" -ne 0 ]; then
+        echo "[run] FATAL: P46 census completion marker contract failed" >&2
+        exit 1
+      fi
+    elif [ "$n_eval_campaign" -ne 1 ] || \
+         [ "$n_eval_campaign_logical" -ne 58 ] || \
+         [ "$n_eval_census" -ne 0 ] || \
+         [ "$n_eval_census_logical" -ne 0 ] || \
+         [ "$n_eval_census_incomplete" -ne 0 ] || \
+         [ "$n_eval_subshard" -ne 0 ] || [ "$n_eval_report" -ne 0 ] || \
+         [ "$n_eval_timeout" -ne 0 ]; then
       echo "[run] FATAL: P46 full-campaign completion marker contract failed" >&2
       exit 1
     fi
   elif [ "$((n_eval_subshard + n_eval_report))" -ne 1 ] || \
-       [ "$n_eval_campaign" -ne 0 ] || [ "$n_eval_timeout" -ne 0 ]; then
-      echo "[run] FATAL: P46 evaluation completion marker contract failed" >&2
-      exit 1
+       [ "$n_eval_campaign" -ne 0 ] || [ "$n_eval_census" -ne 0 ] || \
+       [ "$n_eval_census_logical" -ne 0 ] || \
+       [ "$n_eval_census_incomplete" -ne 0 ] || \
+       [ "$n_eval_timeout" -ne 0 ]; then
+    echo "[run] FATAL: P46 evaluation completion marker contract failed" >&2
+    exit 1
   fi
-  echo "[P46.EVAL.POSTFLIGHT] PASS"
+  if [ "${CANON_P46_CENSUS_FIRST_PASS:-0}" = "1" ]; then
+    echo "[P46.EVAL.POSTFLIGHT] PASS mode=census"
+  else
+    echo "[P46.EVAL.POSTFLIGHT] PASS mode=strict"
+  fi
   exit 0
 fi
 # A fail-closed numerical gate exits before the normal P33 classifier runs.  Preserve the
