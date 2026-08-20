@@ -27,7 +27,7 @@ and executes StandardRLProgram through ClusterOrchestrator.run_program().
 from __future__ import annotations
 
 import argparse
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator
 from concurrent import futures
 import functools
 import logging
@@ -41,7 +41,6 @@ from typing import Any
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
 import jax  # pylint: disable=g-import-not-at-top
-import numpy as np  # pylint: disable=g-import-not-at-top
 from transformers import AutoTokenizer  # pylint: disable=g-import-not-at-top
 
 REPO_ROOT = os.path.abspath(
@@ -84,7 +83,7 @@ DEMO_TASKS = (
         "3",
     ),
     (
-            "Betty is saving money for a wallet which costs $100. She has $15 "
+        "Betty is saving money for a wallet which costs $100. She has $15 "
         "saved. How much more does she need?",
         "85",
     ),
@@ -114,6 +113,25 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument("--beta", type=float, default=0.0)
   parser.add_argument("--epsilon", type=float, default=0.2)
   parser.add_argument(
+      "--offpolicy",
+      "--max_staleness",
+      dest="max_staleness",
+      type=int,
+      default=0,
+      help=(
+          "Maximum policy-version lag accepted by the async rollout queue. "
+          "0 means queue-level on-policy training."
+      ),
+  )
+  parser.add_argument(
+      "--sync_weights",
+      action="store_true",
+      help=(
+          "Enable real post-update weight sync. The local GSM8K demo leaves "
+          "this off until a weight-sync coordinator is provided."
+      ),
+  )
+  parser.add_argument(
       "--reward_mode",
       choices=("synthetic", "exact"),
       default="synthetic",
@@ -128,16 +146,6 @@ def _connect(addr: str, timeout_s: float) -> remote_execution.ActorHandle:
   return remote_execution.ActorHandle.from_address(
       f"grpc://{addr}", rpc_timeout_s=timeout_s
   )
-
-
-def _build_prompt_groups(batch_size: int) -> tuple[list[str], list[str]]:
-  prompts = []
-  gold_answers = []
-  for i in range(batch_size):
-    question, answer = DEMO_TASKS[i % len(DEMO_TASKS)]
-    prompts.append(PROMPT_TEMPLATE.format(question=question))
-    gold_answers.append(answer)
-  return prompts, gold_answers
 
 
 def _extract_answer(text: str) -> str | None:
@@ -259,63 +267,49 @@ def _register_workers(
     )
 
 
-def _build_step_requests(
+def _build_prompt_request(
     *,
-    step: int,
-    batch_size: int,
-    num_generations: int,
+    prompt_idx: int,
     max_response_length: int,
     temperature: float,
     top_p: float,
     top_k: int | None,
-) -> list[datatypes.RolloutRequest]:
-  prompts, gold_answers = _build_prompt_groups(batch_size)
-  requests = []
-  for prompt_idx, (prompt, gold_answer) in enumerate(zip(prompts, gold_answers)):
-    prompt_id = f"step_{step}_prompt_{prompt_idx}"
-    for generation_idx in range(num_generations):
-      requests.append(
-          datatypes.RolloutRequest(
-              request_id=f"{prompt_id}_gen_{generation_idx}",
-              prompt=prompt,
-              prompt_id=prompt_id,
-              group_offset_id=str(generation_idx),
-              target_policy_version=step,
-              generation_kwargs={
-                  "max_generation_steps": max_response_length,
-                  "temperature": temperature,
-                  "top_p": top_p,
-                  "top_k": top_k,
-                  "return_logprobs": True,
-              },
-              metadata={
-                  "group_id": prompt_id,
-                  "pair_index": generation_idx,
-                  "gold_answer": gold_answer,
-                  "prefix_hash": prompt_id,
-                  "env_config": {
-                      "prompt": prompt,
-                      "gold_answer": gold_answer,
-                      "group_id": prompt_id,
-                      "pair_index": generation_idx,
-                      "policy_version": step,
-                      "max_steps": 1,
-                  },
-              },
-          )
-      )
-  return requests
+) -> datatypes.RolloutRequest:
+  question, gold_answer = DEMO_TASKS[prompt_idx % len(DEMO_TASKS)]
+  prompt = PROMPT_TEMPLATE.format(question=question)
+  prompt_id = f"prompt_{prompt_idx}"
+  return datatypes.RolloutRequest(
+      request_id=prompt_id,
+      prompt=prompt,
+      prompt_id=prompt_id,
+      generation_kwargs={
+          "max_generation_steps": max_response_length,
+          "temperature": temperature,
+          "top_p": top_p,
+          "top_k": top_k,
+          "return_logprobs": True,
+      },
+      metadata={
+          "group_id": prompt_id,
+          "gold_answer": gold_answer,
+          "prefix_hash": prompt_id,
+          "env_config": {
+              "prompt": prompt,
+              "gold_answer": gold_answer,
+              "group_id": prompt_id,
+              "max_steps": 1,
+          },
+      },
+  )
 
 
-def _iter_request_batches(
+def _iter_prompt_requests(
     args: argparse.Namespace,
-) -> Iterator[list[datatypes.RolloutRequest]]:
+) -> Iterator[datatypes.RolloutRequest]:
   top_k = None if args.top_k < 0 else args.top_k
-  for step in range(args.max_steps):
-    yield _build_step_requests(
-        step=step,
-        batch_size=args.batch_size,
-        num_generations=args.num_generations,
+  for prompt_idx in range(args.max_steps * args.batch_size):
+    yield _build_prompt_request(
+        prompt_idx=prompt_idx,
         max_response_length=args.max_response_length,
         temperature=args.temperature,
         top_p=args.top_p,
@@ -342,11 +336,18 @@ def main(argv: list[str], context: Any = None) -> None:
     raise ValueError("num_generations must be greater than 1 for GRPO.")
   if args.train_micro_batch_size <= 0:
     raise ValueError("train_micro_batch_size must be positive.")
+  if args.max_staleness < 0:
+    raise ValueError("offpolicy/max_staleness must be non-negative.")
 
   logging.basicConfig(
       level=logging.INFO, format="%(asctime)s - [OrchestratorV2] %(message)s"
   )
   logging.info("Control-plane JAX backend: %s", jax.default_backend())
+  logging.info(
+      "Async rollout max_staleness=%d (0 means queue-level on-policy).",
+      args.max_staleness,
+  )
+  logging.info("Weight sync enabled: %s", args.sync_weights)
 
   tokenizer_path = args.tokenizer_path or os.getenv("MODEL_DIR") or args.model_id
   tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
@@ -422,6 +423,7 @@ def main(argv: list[str], context: Any = None) -> None:
 
   program = rl_program.StandardRLProgram(
       algo=algo,
+      dataset=_iter_prompt_requests(args),
       reward_fns=[_make_reward_fn(args.reward_mode, args.num_generations)],
       assembler=batch_assembly.GRPOTrainExampleAssembler(
           batch_size=args.train_micro_batch_size,
@@ -429,10 +431,13 @@ def main(argv: list[str], context: Any = None) -> None:
           max_response_length=args.max_response_length,
           pad_id=pad_id,
       ),
-      sync_weights=False,
-      on_step_begin=lambda step: logging.info("GRPO step %d starting.", step),
+      max_staleness=args.max_staleness,
+      sync_weights=args.sync_weights,
+      on_step_begin=lambda step: logging.info("Async GRPO step %d starting.", step),
       on_step_end=lambda step, result: logging.info(
-          "GRPO advanced to policy_version=%d train_result=%s.", step, result
+          "Async GRPO advanced to policy_version=%d train_result=%s.",
+          step,
+          result,
       ),
   )
 
@@ -444,7 +449,6 @@ def main(argv: list[str], context: Any = None) -> None:
     )
     cluster.run_program(
         program=program,
-        train_dataset=_iter_request_batches(args),
         num_steps=args.max_steps,
         bring_up=False,
     )
