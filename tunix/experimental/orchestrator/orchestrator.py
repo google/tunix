@@ -49,6 +49,7 @@ class ClusterOrchestrator:
       registry: worker_registry.WorkerRegistry | None = None,
       lifecycle_driver: lifecycle.LifecycleDriver | None = None,
       monitor: health_monitor.HealthMonitor | None = None,
+      weight_sync_coordinator: Any = None,
   ):
     """Initializes ClusterOrchestrator."""
     self.config = config
@@ -65,6 +66,7 @@ class ClusterOrchestrator:
     ] = {}
     self._remote_worker_infos: dict[str, datatypes.WorkerInfo] = {}
     self.engine: distributed_rl_engine.DistributedRLEngine | None = None
+    self._weight_sync_coordinator = weight_sync_coordinator
 
   def __enter__(self) -> "ClusterOrchestrator":
     """Interactive context manager bring-up."""
@@ -230,6 +232,7 @@ class ClusterOrchestrator:
         rollout_workers=rollout_workers,
         trainer_workers=trainer_workers,
         inference_workers=inference_workers,
+        weight_sync_coordinator=self._weight_sync_coordinator,
     )
 
   def run_program(

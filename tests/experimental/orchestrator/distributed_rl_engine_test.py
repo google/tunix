@@ -40,6 +40,10 @@ class MockActorHandle(mock.MagicMock):
     self.fwd_bwd = mock.AsyncMock()
     self.update = mock.AsyncMock()
     self.prepare_weight_sync = mock.AsyncMock()
+    self.release_weight_sync = mock.AsyncMock()
+    self.pre_weight_sync = mock.AsyncMock()
+    self.post_weight_sync = mock.AsyncMock()
+    self.abort_weight_sync = mock.AsyncMock()
     self.score = mock.AsyncMock()
     self.per_token_logps = mock.AsyncMock()
 
@@ -219,31 +223,38 @@ class DistributedRLEngineTest(absltest.TestCase):
 
     asyncio.run(_run())
 
-  def test_sync_weights_coordination(self):
+  def test_sync_weights_delegates_to_coordinator(self):
     async def _run():
-      mock_meta = datatypes.WeightSyncMetadata(
-          new_policy_version=42,
-          transfer_mode="p2p",
+      class _FakeResult:
+        policy_version = 7
+
+      class _FakeCoordinator:
+
+        def __init__(self):
+          self.calls = []
+
+        async def sync(self, policy_version=0, **kwargs):
+          self.calls.append(policy_version)
+          _FakeResult.policy_version = policy_version
+          return _FakeResult
+
+      coordinator = _FakeCoordinator()
+      engine = distributed_rl_engine.DistributedRLEngine(
+          rollout_workers=[self.mock_rollout_1, self.mock_rollout_2],
+          trainer_workers={datatypes.Role.ACTOR: self.mock_actor},
+          inference_workers={datatypes.Role.REFERENCE: self.mock_ref},
+          weight_sync_coordinator=coordinator,
       )
-      self.mock_actor.prepare_weight_sync.return_value = mock_meta
-      self.mock_rollout_1.weight_sync.return_value = None
-      self.mock_rollout_2.weight_sync.return_value = None
-
-      ver = await self.engine.sync_weights(role=datatypes.Role.ACTOR)
-      self.assertEqual(ver, 42)
-
-      self.mock_actor.prepare_weight_sync.assert_called_once()
-      self.mock_rollout_1.weight_sync.assert_called_once_with(metadata=mock_meta)
-      self.mock_rollout_2.weight_sync.assert_called_once_with(metadata=mock_meta)
+      self.assertEqual(await engine.sync_weights(), 1)
+      self.assertEqual(await engine.sync_weights(), 2)
+      self.assertEqual(coordinator.calls, [1, 2])
 
     asyncio.run(_run())
 
-  def test_sync_weights_requires_weight_sync_metadata(self):
+  def test_sync_weights_requires_a_coordinator(self):
     async def _run():
-      self.mock_actor.prepare_weight_sync.return_value = datatypes.Response()
-
-      with self.assertRaisesRegex(RuntimeError, "WeightSyncMetadata"):
-        await self.engine.sync_weights(role=datatypes.Role.ACTOR)
+      with self.assertRaises(RuntimeError):
+        await self.engine.sync_weights()
 
     asyncio.run(_run())
 
