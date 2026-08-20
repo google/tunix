@@ -26,6 +26,8 @@ from jax import numpy as jnp
 from jax.experimental.pallas.ops.tpu import megablox
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_kernel as splash
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask as mask_lib
+from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_kernel as tokamax_splash
+from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_mask as tokamax_mask_lib
 from jax.experimental.shard_map import shard_map
 from jax.interpreters import pxla
 import jax.sharding as shd
@@ -87,6 +89,17 @@ class RematConfig(enum.Enum):
   NONE = enum.auto()  # No remat, all activations will be stored in HBM.
   BLOCK = enum.auto()  # Remat the entire attn block.
   DECODER = enum.auto()  # Remat the entire decoder layer (attn + ffw).
+
+
+class SplashAttentionImpl(enum.Enum):
+  """Backend implementation to use for splash (flash) attention.
+
+  JAX: `jax.experimental.pallas.ops.tpu.splash_attention`.
+  TOKAMAX: `tokamax._src.ops.experimental.tpu.splash_attention`.
+  """
+
+  JAX = 'jax'
+  TOKAMAX = 'tokamax'
 
 
 @dataclasses.dataclass(slots=True, frozen=True)
@@ -156,6 +169,9 @@ class ModelConfig:
   param_dtype: jnp.dtype = jnp.float32
   use_flash_attention: bool = False
   flash_attention_block_size: int = 1024
+  # Backend implementation for splash (flash) attention when
+  # `use_flash_attention` is True.
+  splash_attention_impl: SplashAttentionImpl = SplashAttentionImpl.JAX
 
   @classmethod
   def qwen3_0p6b(cls):  # qwen3-0.6B
@@ -582,39 +598,98 @@ class Attention(nnx.Module):
       query_proj = query_proj * self.scale
 
       mesh = pxla.thread_resources.env.physical_mesh
-      causal_mask = mask_lib.CausalMask((seq_len, seq_len))
-      multi_head_mask = mask_lib.MultiHeadMask([causal_mask for _ in range(qh)])
-
-      block_sizes = splash.BlockSizes(
-          block_q=self.config.flash_attention_block_size,
-          block_kv=self.config.flash_attention_block_size,
-          block_q_dkv=self.config.flash_attention_block_size,
-          block_kv_dkv=self.config.flash_attention_block_size,
-          block_kv_dkv_compute=self.config.flash_attention_block_size,
-          block_q_dq=self.config.flash_attention_block_size,
-          block_kv_dq=self.config.flash_attention_block_size,
-      )
+      if mesh.empty:
+        try:
+          abs_mesh = jax.sharding.get_abstract_mesh()
+          if abs_mesh is not None and not abs_mesh.empty:
+            mesh = abs_mesh
+          else:
+            ctx_mesh = jax.sharding.get_mesh()
+            if ctx_mesh is not None and not ctx_mesh.empty:
+              mesh = ctx_mesh
+        except Exception:
+          pass
 
       shd_b, shd_t, shd_n, shd_h = self.shd_config.act_btnh
+      if mesh is None or not mesh.shape:
+        shd_b = shd_t = shd_n = shd_h = None
+      else:
+        if shd_b is not None and (shd_b not in mesh.shape or b % mesh.shape[shd_b] != 0):
+          shd_b = None
+        if shd_t is not None and shd_t not in mesh.shape:
+          shd_t = None
+        if shd_n is not None and shd_n not in mesh.shape:
+          shd_n = None
+        if shd_h is not None and shd_h not in mesh.shape:
+          shd_h = None
+
       head_shards = (
-          mesh.shape[shd_n] if shd_n is not None and shd_n in mesh.shape else 1
+          mesh.shape[shd_n] if mesh is not None and shd_n is not None and shd_n in mesh.shape else 1
       )
       q_seq_shards = (
-          mesh.shape[shd_t] if shd_t is not None and shd_t in mesh.shape else 1
+          mesh.shape[shd_t] if mesh is not None and shd_t is not None and shd_t in mesh.shape else 1
       )
 
-      splash_attn_kernel = splash.make_splash_mha(
-          multi_head_mask,
-          block_sizes=block_sizes,
-          head_shards=head_shards,
-          q_seq_shards=q_seq_shards,
-      )
+      bs = self.config.flash_attention_block_size
+      if self.config.splash_attention_impl == SplashAttentionImpl.TOKAMAX:
+        # Tokamax splash attention takes a single 2D mask (shared across heads),
+        # a `SplashConfig` for the tile sizes, and only supports sharding over
+        # the query sequence dimension.
+        tokamax_mask = tokamax_mask_lib.make_causal_mask((seq_len, seq_len))
+        splash_config = tokamax_splash.SplashConfig(
+            block_q=bs,
+            block_kv=bs,
+            block_kv_compute=bs,
+            block_q_dkv=bs,
+            block_kv_dkv=bs,
+            block_kv_dkv_compute=bs,
+            # use_base2 can improve performance but reduce numeric precision.
+            use_base2_exp=False,
+        )
+        splash_attn_kernel = tokamax_splash.make_splash_mha(
+            tokamax_mask,
+            config=splash_config,
+            q_seq_shards=q_seq_shards,
+        )
+        kernel_spec = splash_attn_kernel.manual_sharding_spec(
+            shd.NamedSharding(mesh, P(shd_t))
+        )
+        segment_ids_cls = tokamax_splash.SegmentIds
+      else:
+        causal_mask = mask_lib.CausalMask((seq_len, seq_len))
+        multi_head_mask = mask_lib.MultiHeadMask([causal_mask for _ in range(qh)])
+
+        block_sizes = splash.BlockSizes(
+            block_q=bs,
+            block_kv=bs,
+            block_q_dkv=bs,
+            block_kv_dkv=bs,
+            block_kv_dkv_compute=bs,
+            block_q_dq=bs,
+            block_kv_dq=bs,
+        )
+
+        splash_attn_kernel = splash.make_splash_mha(
+            multi_head_mask,
+            block_sizes=block_sizes,
+            head_shards=head_shards,
+            q_seq_shards=q_seq_shards,
+        )
+        kernel_spec = splash_attn_kernel.manual_sharding_spec(
+            shd.NamedSharding(mesh, P(shd_n, shd_t))
+        )
+        segment_ids_cls = splash.SegmentIds
 
       shd_spec = P(shd_b, shd_n, shd_t, shd_h)
-      unsharded_seq = P(shd_b, shd_n, None, shd_h)
-      kernel_spec = splash_attn_kernel.manual_sharding_spec(
-          shd.NamedSharding(mesh, P(shd_n, shd_t))
+      shd_n_kv = (
+          shd_n
+          if mesh is not None
+          and shd_n is not None
+          and shd_n in mesh.shape
+          and kh % mesh.shape[shd_n] == 0
+          else None
       )
+      unsharded_seq_kv = P(shd_b, shd_n_kv, None, shd_h)
 
       # Per-position segment ids let splash suppress cross-segment attention
       # (e.g. real-token to pad-token, or sequence-packing cross-boundary).
@@ -630,8 +705,8 @@ class Attention(nnx.Module):
             in_specs=(
                 kernel_spec,
                 shd_spec,
-                unsharded_seq,
-                unsharded_seq,
+                unsharded_seq_kv,
+                unsharded_seq_kv,
                 seg_spec,
                 unsharded_seg_spec,
             ),
@@ -641,7 +716,7 @@ class Attention(nnx.Module):
         def sharded_splash_attn(
             kernel, q_block, k_block, v_block, q_seg_block, kv_seg_block
         ):
-          seg_ids = splash.SegmentIds(q=q_seg_block, kv=kv_seg_block)
+          seg_ids = segment_ids_cls(q=q_seg_block, kv=kv_seg_block)
           return jax.vmap(kernel)(
               q_block, k_block, v_block, segment_ids=seg_ids
           )
@@ -659,7 +734,12 @@ class Attention(nnx.Module):
         @partial(
             shard_map,
             mesh=mesh,
-            in_specs=(kernel_spec, shd_spec, unsharded_seq, unsharded_seq),
+            in_specs=(
+                kernel_spec,
+                shd_spec,
+                unsharded_seq_kv,
+                unsharded_seq_kv,
+            ),
             out_specs=shd_spec,
             check_rep=False,
         )
