@@ -182,6 +182,8 @@ class AutoModelTest(parameterized.TestCase):
             use_flash_attention=True,
             tunix_fake_arg_that_should_be_dropped=False,
             skip_jax_distributed_system=False,
+            checkpoint_storage_use_ocdbt=False,
+            checkpoint_storage_use_zarr3=False,
         )
 
       m_maxtext_configs_pyconfig.initialize.assert_called_once()
@@ -196,6 +198,8 @@ class AutoModelTest(parameterized.TestCase):
       self.assertIn("hf_access_token=mock_token", called_argv)
 
       self.assertIn("skip_jax_distributed_system=false", called_argv)
+      self.assertIn("checkpoint_storage_use_ocdbt=false", called_argv)
+      self.assertIn("checkpoint_storage_use_zarr3=false", called_argv)
 
       self.assertNotIn("use_flash_attention=true", called_argv)
 
