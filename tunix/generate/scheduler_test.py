@@ -74,7 +74,7 @@ class SchedulerTest(unittest.TestCase):
         allocs = self.cache_mgr.allocate(3)
         self.scheduler._distribute_allocated_pages(allocs)
         
-        self.assertEqual(len(self.scheduler.prefix_hash_to_page_id), 3, "Prefix cache should track 3 chunks.")
+        self.assertEqual(len(self.scheduler.prefix_hash_to_page_id), 2, "Prefix cache should track exactly 2 chunks (the 3rd block is an empty decode buffer and unhashable).")
         
         # Send identical request mapping over same hashes
         r2 = Request("req-2", prompt_tokens=[10, 20, 30, 40])
@@ -82,8 +82,8 @@ class SchedulerTest(unittest.TestCase):
         self.scheduler._drain_pending_queue()
         
         self.assertEqual(len(self.scheduler.running_requests), 2)
-        # We shouldn't need ANY new pages for req 2's prompt! It hit 100% caching!
-        self.assertEqual(self.scheduler._calculate_new_pages_needed(), 0)
+        # It matches the 2 prompt blocks precisely, but still strictly needs 1 fresh block for its own independent decode boundary!
+        self.assertEqual(self.scheduler._calculate_new_pages_needed(), 1)
 
     def test_preemption_due_to_hbm_limits(self):
         """Ensures that when running requests outweigh physical boundary constraints,
