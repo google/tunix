@@ -270,6 +270,13 @@ class ModelConfig:
     )
 
   @classmethod
+  def gemma4_e4b_it(
+      cls,
+      sharding_config: ShardingConfig = ShardingConfig.get_default_sharding(),
+  ) -> 'ModelConfig':
+    return cls.gemma4_e4b(sharding_config=sharding_config)
+
+  @classmethod
   def gemma4_12b(
       cls,
       sharding_config: ShardingConfig = ShardingConfig.get_default_sharding(),
@@ -1538,6 +1545,7 @@ class DecoderLayer(nnx.Module):
 
 class Gemma4(BackendMappingMixin, nnx.Module):
   """Gemma4 model."""
+  BACKEND_PACKAGE_PATH = __name__
 
   def __init__(
       self, config: ModelConfig, *, rngs: nnx.Rngs, text_only: bool = True
