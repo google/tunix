@@ -7,6 +7,7 @@ class MockPageManager:
         self.total_num_pages = num_pages
         self.batch_size = batch_size
         self.max_num_pages_per_seq = max_seq_pages
+        self.max_num_seqs = batch_size * 2
         self.calls = []
 
     def allocate(self, num_pages):
