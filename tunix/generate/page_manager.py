@@ -295,24 +295,11 @@ class PageManager:
     return utils.cdiv(self.seq_lens, self.page_size)
 
   @jax.named_call
-  def allocate(self, q_lens: jax.Array) -> "PageManager":
-    """Allocates pages for new tokens."""
-    pages_required = utils.cdiv(self.seq_lens + q_lens, self.page_size)
-
-    num_pages_to_allocate = pages_required - self.num_seq_pages
-
+  def allocate(self, num_pages_to_allocate: jax.Array) -> tuple["PageManager", jax.Array]:
+    """Allocates pages from the free pool."""
     page_indices_to_allocate = RaggedArray(
         data=self.available_page_indices, lens=num_pages_to_allocate
     )
-    page_indices_rows = page_indices_to_allocate.row_idxs
-    page_indices_cols = (
-        self.num_seq_pages[page_indices_rows]
-        + page_indices_to_allocate.intra_offsets
-    )
-
-    updated_page_indices = self.page_indices.at[
-        page_indices_rows, page_indices_cols
-    ].set(page_indices_to_allocate.data)
 
     updated_num_available_pages = (
         self.num_available_pages - page_indices_to_allocate.total_length
@@ -323,34 +310,52 @@ class PageManager:
 
     return dataclasses.replace(
         self,
-        seq_lens=self.seq_lens + q_lens,
-        page_indices=updated_page_indices,
         available_page_indices=updated_available_page_indices,
         num_available_pages=updated_num_available_pages,
-    )
+    ), page_indices_to_allocate.data
 
   @jax.named_call
   def release(self, should_release: jax.Array) -> "PageManager":
-    """Releases pages for completed sequences."""
+    """Releases pages for completed sequences without freeing physical pages."""
     updated_lens = jnp.where(should_release, 0, self.seq_lens)
+    return dataclasses.replace(self, seq_lens=updated_lens)
 
-    page_indices_to_release = RaggedArray(
-        data=jax.lax.empty((self.total_num_pages,), dtype=jnp.int32),
-        lens=jnp.where(should_release, self.num_seq_pages, 0),
-    )
-    page_indices_irows = page_indices_to_release.row_idxs
-    page_indices_icols = page_indices_to_release.intra_offsets
+  @jax.named_call
+  def assign(self, seq_idxs: jax.Array, page_indices: jax.Array, lens: jax.Array) -> "PageManager":
+    """Assigns physical page indices to sequences."""
+    ragged = RaggedArray(data=page_indices, lens=lens)
+    
+    target_rows = seq_idxs[ragged.row_idxs]
+    target_cols = ragged.intra_offsets
+    
+    updated_page_indices = self.page_indices.at[
+        target_rows, target_cols
+    ].set(ragged.data, mode='drop')
 
-    updated_available_page_indices = self.available_page_indices.at[
-        jnp.arange(self.total_num_pages) + self.num_available_pages
-    ].set(self.page_indices[page_indices_irows, page_indices_icols])
+    updated_lens = self.seq_lens.at[seq_idxs].set(lens * self.page_size, mode='drop')
 
-    updated_num_available_pages = (
-        self.num_available_pages + page_indices_to_release.total_length
-    )
     return dataclasses.replace(
         self,
-        seq_lens=updated_lens,
+        page_indices=updated_page_indices,
+        seq_lens=updated_lens
+    )
+
+  @jax.named_call
+  def evict_pages(self, page_indices_to_evict: jax.Array, num_evicted: jax.Array) -> "PageManager":
+    """Releases specific physical pages back to the free pool."""
+    target_indices = jnp.arange(page_indices_to_evict.shape[0])
+    target_indices = jnp.where(
+        target_indices < num_evicted,
+        target_indices + self.num_available_pages,
+        self.total_num_pages  # Out of bounds
+    )
+    updated_available_page_indices = self.available_page_indices.at[
+        target_indices
+    ].set(page_indices_to_evict, mode='drop')
+
+    updated_num_available_pages = self.num_available_pages + num_evicted
+    return dataclasses.replace(
+        self,
         available_page_indices=updated_available_page_indices,
         num_available_pages=updated_num_available_pages,
     )
