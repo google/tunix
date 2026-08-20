@@ -65,16 +65,16 @@ class SchedulerTest(unittest.TestCase):
         self.scheduler._queue_new_requests([r1])
         self.scheduler._drain_pending_queue()
         
-        # req-1 should be able to run immediately (requires 2 blocks)
+        # req-1 should be able to run immediately (requires 3 blocks since it evaluates 4 tokens + space for 1 decode token)
         self.assertEqual(len(self.scheduler.running_requests), 1)
-        # Needs 2 pages to be physically sourced
-        self.assertEqual(self.scheduler._calculate_new_pages_needed(), 2)
+        # Needs 3 pages to be physically sourced
+        self.assertEqual(self.scheduler._calculate_new_pages_needed(), 3)
         
         # Manually distribute allocations as if step progressed
-        allocs = self.cache_mgr.allocate(2)
+        allocs = self.cache_mgr.allocate(3)
         self.scheduler._distribute_allocated_pages(allocs)
         
-        self.assertEqual(len(self.scheduler.prefix_hash_to_page_id), 2, "Prefix cache should track 2 chunks.")
+        self.assertEqual(len(self.scheduler.prefix_hash_to_page_id), 3, "Prefix cache should track 3 chunks.")
         
         # Send identical request mapping over same hashes
         r2 = Request("req-2", prompt_tokens=[10, 20, 30, 40])
@@ -108,8 +108,8 @@ class SchedulerTest(unittest.TestCase):
         
         self.assertEqual(len(self.scheduler.running_requests), 0)
         self.assertEqual(len(self.scheduler.pending_requests), 4)
-        # Verify it prioritized popping the newest off the back of the queue
-        self.assertEqual(self.scheduler.pending_requests[0].req_id, "req-3")
+        # Verify that appending preempted seqs back kept original arrival priority
+        self.assertEqual(self.scheduler.pending_requests[0].req_id, "req-0")
 
 if __name__ == '__main__':
     unittest.main()
