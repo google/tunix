@@ -11,7 +11,7 @@
 
 | 仪器 | 实现 | 产物 | 体积 | 看什么 |
 |---|---|---|---|---|
-| **语义时间线**(seqpack 同款,官方 docs 的 Metrics/Perfetto) | `tunix/perf` v2 spans(learner 内建 + G6 训练段补装)+ `PerfMetricsExport.from_cluster_config` | `train/perf/perfetto_trace_v2_<ts>.pb` | ~20KB | 阶段结构:rollout / environment / reference_inference / weight_sync / data_loading / **peft_train(G6 update 整段,内嵌 segmented_value_and_grad 与 gradient_commit)**,ui.perfetto.dev 直接拖。训练段 span 是本分支补的:官方内建训练 span 长在 `PeftTrainer.train()`,G6 segmented 路径不进去 |
+| **语义时间线**(seqpack 同款,官方 docs 的 Metrics/Perfetto) | `tunix/perf` v2 spans(learner 内建)+ `PerfMetricsExport.from_cluster_config` | `train/perf/perfetto_trace_v2_<ts>.pb` | ~20KB | 阶段结构:Rollout 线程 / Main 线程 / weight_sync / data_loading 等轨道,ui.perfetto.dev 直接拖 |
 | **器件织物**(XProf) | `P51_XPROF_PHASE=step`:官方 `tunix/sft/profiler.Profiler` 步边界窗;`=update`:learner 在 G6 update 入口起窗 | `train/xprof/plugins/profile/<ts>/{*.xplane.pb, *.trace.json.gz}` | step ~1.9GB(缓冲上限)/ update 远小 | **step 模式的 device 轨只有 engine 前 ~25s decode**(缓冲截断,见"窗口语义");看 trainer forward/backward/commit 用 `update` 模式。xplane 进 XProf UI,trace.json.gz 拖 ui.perfetto.dev(注意它也只含缓冲保住的部分) |
 
 与旧版(≤2026-08-18)的差别:自制 start/stop 钩子退役,窗口由官方
