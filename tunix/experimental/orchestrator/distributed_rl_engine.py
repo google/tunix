@@ -178,7 +178,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     return [r.request_id for r in rollout_reqs]
 
   async def poll_rollouts(
-      self, timeout_s: float = 0.1
+      self, timeout_s: float = remote_execution.LONG_POLL_TIMEOUT_S
   ) -> list[datatypes.TrajectoryItem]:
     """Concurrently long-polls completed rollout responses across all workers."""
     if not self._rollout_workers:

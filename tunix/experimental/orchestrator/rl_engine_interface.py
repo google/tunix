@@ -17,7 +17,7 @@
 from collections.abc import Mapping, Sequence
 from typing import Any, Protocol, runtime_checkable
 from tunix.experimental.common import datatypes
-
+from tunix.experimental.worker import remote_execution
 
 @runtime_checkable
 class AbstractRLEngine(Protocol):
@@ -30,7 +30,7 @@ class AbstractRLEngine(Protocol):
     ...
 
   async def poll_rollouts(
-      self, timeout_s: float = 0.1
+      self, timeout_s: float = remote_execution.LONG_POLL_TIMEOUT_S
   ) -> list[datatypes.TrajectoryItem]:
     """Retrieves completed rollout responses from workers via long-polling."""
     ...

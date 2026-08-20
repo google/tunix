@@ -123,7 +123,7 @@ class StandardRLProgram(AsyncRLProgram):
     """Stage 1B: Long-polls completed worker rollout responses into the queue."""
     while True:
       try:
-        completed = await engine.poll_rollouts(timeout_s=0.1)
+        completed = await engine.poll_rollouts()
         if isinstance(completed, list) and completed:
           for item in completed:
             await self.raw_q.put(item)
