@@ -32,6 +32,7 @@ from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 from jax.typing import DTypeLike  # pylint: disable=g-importing-member
 import numpy as np
 import optax
+from tunix.common import configs
 from tunix.perf import metrics as perf_metrics
 from tunix.perf import trace as perf_trace
 from tunix.perf.experimental import constants as perf_constants
@@ -46,59 +47,14 @@ from tunix.sft import progress_bar
 from tunix.sft import sharding_utils
 from tunix.sft import utils
 
+TrainingConfig = configs.TrainingConfig
+
 _ModelInputT = Dict[str, ArrayLike]
 P = ParamSpec("P")
 MetricsLogger = sft_metrics_logger.MetricsLogger
 MetricsLoggerOptions = sft_metrics_logger.MetricsLoggerOptions
 _MetricValue = ArrayLike | utils.WeightedMetric
 _MetricReducer = Callable[[Any], Any]
-
-
-@dataclasses.dataclass(slots=True, kw_only=True)
-class TrainingConfig:
-  """Configuration for the trainer."""
-
-  eval_every_n_steps: int
-  max_steps: int | None = None
-  gradient_accumulation_steps: int | None = None
-
-  # If set, the checkpoints will be saved to this path. Checkpoints
-  # contains the model params and the train data iterator state.
-  checkpoint_root_directory: str | None = None
-  # Checkpoint configurations. If None, the default options will be used.
-  checkpointing_options: checkpoint_options.CheckpointingOptions | None = None
-
-  # Configs for the metrics logger.
-  metrics_logging_options: MetricsLoggerOptions | None = None
-
-  # Configs for the profiler.
-  profiler_options: profiler.ProfilerOptions | None = None
-
-  # Configs for performance metrics.
-  perf_metrics_options: perf_metrics.PerfMetricsOptions | None = None
-
-  data_sharding_axis: Tuple[str, ...] = ("fsdp",)
-
-  # Controls how many train_steps can be scheduled ahead of time.
-  max_inflight_computations: int = 2
-
-  # Prefix for metric names for logging. Not sticking it in
-  # `metrics_logging_options` because the latter is optional.
-  metrics_prefix: str = ""
-
-  # Progress bar description.
-  pbar_description: str | None = "Training"
-
-  # Sequence packing configuration.
-  max_seq_token_per_tpu: int | None = None
-  max_segments_per_packed_row: int | None = None
-
-
-  def get_with_default(self, key: str, default: Any) -> Any:
-    val = getattr(self, key)
-    if val is None:
-      return default
-    return val
 
 
 @flax.struct.dataclass(frozen=True)
@@ -215,6 +171,33 @@ def _zero_safe_reciprocal(denom: jax.Array) -> jax.Array:
   return jnp.where(denom == 0, jnp.zeros_like(denom), 1.0 / denom)
 
 
+def _opt_state_dtypes(optimizer: nnx.Optimizer) -> Any:
+  """Returns the array dtype of every optimizer-state variable."""
+  return jax.tree_util.tree_map(
+      lambda value: value.get_value().dtype,
+      nnx.state(optimizer, nnx.optimizer.OptState),
+      is_leaf=lambda value: isinstance(value, nnx.Variable),
+  )
+
+
+def _restore_opt_state_float_dtypes(
+    optimizer: nnx.Optimizer, dtypes: Any
+) -> None:
+  """Restores floating optimizer-state leaves to their pre-update dtypes."""
+
+  def _restore(value, dtype):
+    array = value.get_value()
+    if jnp.issubdtype(array.dtype, jnp.floating) and array.dtype != dtype:
+      value.set_value(array.astype(dtype))
+
+  jax.tree_util.tree_map(
+      _restore,
+      nnx.state(optimizer, nnx.optimizer.OptState),
+      dtypes,
+      is_leaf=lambda value: isinstance(value, nnx.Variable),
+  )
+
+
 class GradientAccumulator(nnx.Module):
   """Accumulates gradients over multiple micro-steps.
 
@@ -268,7 +251,7 @@ class GradientAccumulator(nnx.Module):
     state = nnx.state(model, wrt)
     self._param_dtypes = nnx.data(
         jax.tree_util.tree_map(
-            lambda x: getattr(x, "dtype", None),
+            lambda x: getattr(getattr(x, "value", x), "dtype", None),
             state,
             is_leaf=lambda x: isinstance(x, nnx.Variable),
         )
@@ -384,7 +367,7 @@ class PeftTrainer:
     self._lora_enabled = utils.is_lora_enabled(self.model)
     wrt_target = nnx.LoRAParam if self._lora_enabled else nnx.Param
     self.optimizer = nnx.Optimizer(self.model, optimizer, wrt=wrt_target)
-    # Adam moments follow the param dtype by default (optax inits them as
+     # Adam moments follow the param dtype by default (optax inits them as
     # zeros_like(params)).
     # Depth-1 non-packing fast path never reads the accumulator; skip its
     # model-sized grad-tree allocation there.
@@ -561,7 +544,9 @@ class PeftTrainer:
       norm = optax.global_norm(
           jax.tree_util.tree_map(lambda x: x.astype(jnp.float32), acc_grads)
       )
+      opt_state_dtypes = _opt_state_dtypes(optimizer)
       optimizer.update(model, acc_grads)
+      _restore_opt_state_float_dtypes(optimizer, opt_state_dtypes)
       grad_accumulator.reset()
       return norm
 
@@ -585,7 +570,9 @@ class PeftTrainer:
       grad_norm = optax.global_norm(
           jax.tree_util.tree_map(lambda x: x.astype(jnp.float32), grads)
       )
+      opt_state_dtypes = _opt_state_dtypes(optimizer)
       optimizer.update(model, grads)
+      _restore_opt_state_float_dtypes(optimizer, opt_state_dtypes)
     else:
       if isinstance(aux, utils.LossOutput):
         # Accumulate the UNREDUCED gradients (d/dparam of the sum) weighted by the

@@ -108,9 +108,10 @@ def setup(kwargs: Optional[Dict[str, Any]] = None):
           actor_optimizer=optax.sgd(1e-3),
           eval_every_n_steps=kwargs.get('eval_every_n_steps', 2),
           max_steps=10,
-          gradient_accumulation_steps=kwargs.get(
-              'gradient_accumulation_steps', None
-          ),
+          mini_batch_size=kwargs.get('gradient_accumulation_steps', None),
+          train_micro_batch_size=1
+          if kwargs.get('gradient_accumulation_steps', None)
+          else None,
           max_seq_token_per_tpu=kwargs.get('max_seq_token_per_tpu', None),
           rollout_micro_batch_size=kwargs.get('rollout_micro_batch_size', None),
       ),

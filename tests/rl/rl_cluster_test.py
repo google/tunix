@@ -231,34 +231,6 @@ class RlEngineTest(parameterized.TestCase):
     self.assertIsInstance(rl_engine.perf, expected_perf_type)
     self.assertIsInstance(rl_engine.perf_v2, expected_perf_v2_type)
 
-  def test_batch_size_config(self):
-    cfg = rl_engine_lib.RLTrainingConfig(
-        actor_optimizer=optax.sgd(1e-3),
-        critic_optimizer=None,
-        mini_batch_size=8,
-        train_micro_batch_size=4,
-        eval_every_n_steps=1,
-    )
-    self.assertEqual(cfg.gradient_accumulation_steps, 2)
-
-    cfg = rl_engine_lib.RLTrainingConfig(
-        actor_optimizer=optax.sgd(1e-3),
-        eval_every_n_steps=1,
-    )
-    self.assertEqual(cfg.gradient_accumulation_steps, None)
-
-    for mini_batch_size, train_micro_batch_size in zip(
-        [8, -8, None], [3, 4, 4]
-    ):
-      with self.assertRaises(ValueError):
-        rl_engine_lib.RLTrainingConfig(
-            actor_optimizer=optax.sgd(1e-3),
-            critic_optimizer=None,
-            mini_batch_size=mini_batch_size,
-            train_micro_batch_size=train_micro_batch_size,
-            eval_every_n_steps=1,
-        )
-
   def test_generate_with_chat_template(self):  # pylint: disable=g-doc-args
     mesh = Mesh(
         np.array(jax.devices()).reshape(self.device_count, 1), ('fsdp', 'tp')

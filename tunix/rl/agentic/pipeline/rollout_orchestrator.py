@@ -249,7 +249,10 @@ class RolloutOrchestrator:
     if self._group_queue_manager:
       raise RuntimeError("Orchestrator is already running.")
 
-    self._group_queue_manager = GroupQueueManager(group_size=group_size)
+    self._group_queue_manager = GroupQueueManager(
+        key_fn=lambda x: getattr(x, "group_id", getattr(x, "prompt_id", id(x))),
+        group_size=group_size,
+    )
     self._stop.clear()
     self._tasks.clear()
 

@@ -208,10 +208,10 @@ class RLProgramTest(absltest.TestCase):
     algo = mock.MagicMock(spec=algorithm_adapter.AlgorithmAdapter)
     algo.create_trainer_payloads.return_value = [trainer_payload]
     algo.requires_reference_kl = True
-
     engine = mock.MagicMock(spec=rl_engine_interface.AbstractRLEngine)
     engine.generate = mock.AsyncMock(return_value=[item])
     engine.sync_weights = mock.AsyncMock(return_value=1)
+
     seen_logps_batches = []
     seen_train_batches = []
 
@@ -248,6 +248,7 @@ class RLProgramTest(absltest.TestCase):
 
     engine.per_token_logps = mock.AsyncMock(side_effect=_per_token_logps)
     engine.train_step = mock.AsyncMock(side_effect=_train_step)
+
     program = rl_program.SyncRLProgram(
         engine=engine,
         algo=algo,
@@ -261,7 +262,6 @@ class RLProgramTest(absltest.TestCase):
     )
 
     res = program.step_once(prompts=[self.mock_request])
-
     self.assertEqual(res, "mock_train_result")
     algo.create_trainer_payloads.assert_called_once_with(
         [item], rewards=[1.0]

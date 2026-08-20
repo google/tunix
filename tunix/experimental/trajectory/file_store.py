@@ -1,12 +1,11 @@
 """File-based implementation for Trajectory Store."""
 
-import collections
 import functools
 import re
 from typing import Final
 
 from etils import epath
-import pydantic
+from tunix.experimental.trajectory import async_writer
 from tunix.experimental.trajectory import store
 from tunix.experimental.trajectory import trajectory as trajectory_lib
 
@@ -27,13 +26,43 @@ _STEP_FILENAME_TEMPLATE: Final[str] = "step_{step_id:06d}.json"
 _STEP_FILENAME_REGEX: Final[re.Pattern[str]] = re.compile(r"^step_\d+\.json$")
 
 
-def _dump_json(model: pydantic.BaseModel) -> str:
-  """Serializes a Pydantic model to indented, human-readable JSON excluding None values."""
-  return model.model_dump_json(indent=2, exclude_none=True)
+def _validate_trajectory_id(trajectory_id: str | None) -> str:
+  """Validates that trajectory_id is non-empty and contains supported characters.
+
+  Args:
+    trajectory_id: The trajectory identifier to validate.
+
+  Returns:
+    The validated trajectory_id string.
+
+  Raises:
+    ValueError: If trajectory_id is None, empty, or contains characters that
+      cannot be encoded in a trajectory directory name.
+  """
+  if not trajectory_id:
+    raise ValueError("TrajectoryMetadata must have a non-empty trajectory_id.")
+  if not _TRAJECTORY_ID_REGEX.match(trajectory_id):
+    raise ValueError(
+        f"trajectory_id {trajectory_id!r} contains unsupported characters; only"
+        " letters, digits, underscores, and hyphens are allowed."
+    )
+  return trajectory_id
 
 
 class FileTrajectoryStore(store.TrajectoryReader, store.TrajectoryWriter):
   """File-based implementation satisfying TrajectoryReader and TrajectoryWriter.
+
+  Architectural Separation of Responsibilities:
+    `FileTrajectoryStore` acts as a lightweight frontend responsible for:
+    1. Filesystem path layout, directory hierarchy, and naming conventions.
+    2. Frontend input validation (trajectory ID format and presence).
+    3. Synchronous trajectory reading and metadata queries (`get_trajectories`,
+       `get_trajectories_metadata`).
+    4. Forwarding step write tasks and flush barriers to `AsyncFileWriter`.
+
+    All asynchronous queuing, background worker thread lifecycle, error
+    suppression for rollout resilience, and physical disk I/O are handled
+    by `AsyncFileWriter`.
 
   Directory Structure:
     <root_dir>/[<run_id>/]/
@@ -59,24 +88,16 @@ class FileTrajectoryStore(store.TrajectoryReader, store.TrajectoryWriter):
     """
     self._raw_root_dir = epath.Path(root_dir)
     self._run_id = run_id
-    # Tracks the hash of the last written metadata per trajectory ID. The
-    # trajectory directory is created and metadata.json is written on the first
-    # step of a trajectory; subsequent calls rewrite metadata.json only when
-    # metadata content changes.
-    self._metadata_hash_by_trajectory_id: dict[str, int] = (
-        collections.defaultdict(int)
-    )
+    self._writer = async_writer.AsyncFileWriter()
 
   @functools.cached_property
   def root_dir(self) -> epath.Path:
-    """Returns the effective root directory path, creating it if needed."""
-    root_dir = (
+    """Returns the effective root directory path."""
+    return (
         self._raw_root_dir / self._run_id
         if self._run_id
         else self._raw_root_dir
     )
-    root_dir.mkdir(parents=True, exist_ok=True)
-    return root_dir
 
   def get_trajectory_dir(self, trajectory_id: str) -> epath.Path:
     """Returns the directory path for a given trajectory ID."""
@@ -96,6 +117,8 @@ class FileTrajectoryStore(store.TrajectoryReader, store.TrajectoryWriter):
   ) -> list[trajectory_lib.TrajectoryMetadata]:
     """Retrieves metadata for each trajectory in the run."""
     metas: list[trajectory_lib.TrajectoryMetadata] = []
+    if not self.root_dir.exists():
+      return metas
 
     for entry in self.root_dir.iterdir():
       if not entry.is_dir():
@@ -160,7 +183,12 @@ class FileTrajectoryStore(store.TrajectoryReader, store.TrajectoryWriter):
       step: trajectory_lib.Step,
       metadata: trajectory_lib.TrajectoryMetadata,
   ) -> None:
-    """Atomically logs a turn step and its trajectory metadata.
+    """Asynchronously logs a turn step and its trajectory metadata.
+
+    Performs synchronous frontend validation of the trajectory ID on the
+    calling thread so invalid IDs fail fast with actionable errors, then
+    delegates asynchronous queuing and non-blocking background I/O to the
+    `AsyncFileWriter`.
 
     Args:
       step: Step object to log.
@@ -170,33 +198,47 @@ class FileTrajectoryStore(store.TrajectoryReader, store.TrajectoryWriter):
       ValueError: If metadata.trajectory_id is empty, None, or contains
         characters that cannot be encoded in a trajectory directory name.
     """
-    traj_id = metadata.trajectory_id
-    if not traj_id:
-      raise ValueError(
-          "TrajectoryMetadata must have a non-empty trajectory_id."
-      )
-    if not _TRAJECTORY_ID_REGEX.match(traj_id):
-      raise ValueError(
-          f"trajectory_id {traj_id!r} contains unsupported characters; only "
-          "letters, digits, underscores, and hyphens are allowed."
-      )
+    self.update_metadata(metadata, step=step)
 
+  def update_metadata(
+      self,
+      metadata: trajectory_lib.TrajectoryMetadata,
+      step: trajectory_lib.Step | None = None,
+  ) -> None:
+    """Updates (or creates) trajectory metadata asynchronously, optionally writing a step.
+
+    Performs synchronous frontend validation of the trajectory ID on the
+    calling thread so invalid IDs fail fast with actionable errors, then
+    delegates asynchronous queuing and non-blocking background I/O to the
+    `AsyncFileWriter`.
+
+    Args:
+      metadata: TrajectoryMetadata containing trajectory_id and run metadata.
+      step: Optional Step object to write alongside metadata.
+
+    Raises:
+      ValueError: If metadata.trajectory_id is empty, None, or contains
+        characters that cannot be encoded in a trajectory directory name.
+    """
+    traj_id = _validate_trajectory_id(metadata.trajectory_id)
     traj_dir = self.get_trajectory_dir(traj_id)
-    # Ensure the trajectory directory already exists.
-    if traj_id not in self._metadata_hash_by_trajectory_id:
-      traj_dir.mkdir(parents=True, exist_ok=True)
-
-    meta_json = _dump_json(metadata)
-    meta_hash = hash(meta_json)
-    # Only write metadata.json if metadata content has changed.
-    if meta_hash != self._metadata_hash_by_trajectory_id[traj_id]:
-      meta_path = self.get_trajectory_metadata_path(traj_id)
-      meta_path.write_text(meta_json)
-      self._metadata_hash_by_trajectory_id[traj_id] = meta_hash
-
-    step_path = self.get_step_path(traj_id, step.step_id)
-    step_path.write_text(_dump_json(step))
+    meta_path = self.get_trajectory_metadata_path(traj_id)
+    step_path = self.get_step_path(traj_id, step.step_id) if step else None
+    self._writer.write_step(
+        traj_dir=traj_dir,
+        meta_path=meta_path,
+        step_path=step_path,
+        metadata=metadata,
+        step=step,
+    )
 
   def flush(self) -> None:
-    """Flushes any pending or asynchronous writes to persistent storage."""
-    pass
+    """Flushes any pending or asynchronous writes to persistent storage.
+
+    Users do not need to call `flush()` in normal usage; it is primarily for
+    testing.
+
+    Delegates directly to `AsyncFileWriter.flush()` to provide strict barrier
+    synchronization.
+    """
+    self._writer.flush()

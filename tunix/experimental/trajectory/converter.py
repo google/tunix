@@ -14,81 +14,42 @@
 
 """Converter for translating between Tunix RL Step and Trajectory Step representations."""
 
+import typing
 from typing import Any
+
 import numpy as np
+from tunix.experimental.trajectory import action_converter
 from tunix.experimental.trajectory import trajectory as trajectory_lib
 from tunix.rl.agentic.agents import agent_types
 
 
-def _extract_tool_calls(
-    action: agent_types.Action | None,
-) -> list[trajectory_lib.ToolCall] | None:
-  """Extracts ATIF ToolCalls from an RL Action."""
-  if action is None or action.action is None:
-    return None
-  payload = action.action
-  if isinstance(payload, list):
-    calls = []
-    for idx, item in enumerate(payload, 1):
-      if isinstance(item, dict):
-        args = item.get("arguments")
-        if args is None:
-          args = item.get("args", item)
-        if not isinstance(args, dict):
-          args = {}
-        calls.append(
-            trajectory_lib.ToolCall(
-                tool_call_id=str(
-                    item.get("id", item.get("tool_call_id", f"call_{idx}"))
-                ),
-                function_name=str(
-                    item.get("name", item.get("function_name", "action"))
-                ),
-                arguments=args,
-            )
-        )
-    return calls or None
-  if isinstance(payload, dict):
-    args = payload.get("arguments")
-    if args is None:
-      args = payload.get("args", payload)
-    if not isinstance(args, dict):
-      args = {}
-    return [
-        trajectory_lib.ToolCall(
-            tool_call_id=str(
-                payload.get("id", payload.get("tool_call_id", "call_1"))
-            ),
-            function_name=str(
-                payload.get("name", payload.get("function_name", "action"))
-            ),
-            arguments=args,
-        )
-    ]
-  return None
-
-
 def _extract_metrics(
-    assistant_tokens: np.ndarray | None,
-    logprobs: np.ndarray | None,
+    assistant_tokens: Any,
+    logprobs: Any,
 ) -> trajectory_lib.Metrics | None:
-  """Extracts metrics, validating token/logprob lengths."""
-  if assistant_tokens is not None and logprobs is not None:
-    if len(assistant_tokens) != len(logprobs):
-      raise ValueError(
-          "Length mismatch: assistant_tokens has length"
-          f" {len(assistant_tokens)}, but logprobs has length {len(logprobs)}"
-      )
-
+  """Builds a Metrics object from assistant_tokens and logprobs if present."""
   completion_tokens = None
   completion_token_ids = None
-  if assistant_tokens is not None:
-    completion_tokens = len(assistant_tokens)
-    completion_token_ids = assistant_tokens.tolist()
-
   logprobs_list = None
-  if logprobs is not None:
-    logprobs_list = logprobs.tolist()
+
+  if assistant_tokens is not None and isinstance(
+      assistant_tokens, (list, tuple, np.ndarray)
+  ):
+    completion_tokens = len(assistant_tokens)
+    completion_token_ids = [int(t) for t in assistant_tokens]
+
+  if logprobs is not None and isinstance(logprobs, (list, tuple, np.ndarray)):
+    logprobs_list = [float(lp) for lp in logprobs]
+
+  if (
+      completion_token_ids is not None
+      and logprobs_list is not None
+      and len(completion_token_ids) != len(logprobs_list)
+  ):
+    raise ValueError(
+        f"Length of assistant_tokens ({len(completion_token_ids)}) must match"
+        f" length of logprobs ({len(logprobs_list)})."
+    )
 
   if completion_tokens is None and logprobs_list is None:
     return None
@@ -101,30 +62,25 @@ def _extract_metrics(
 
 
 def _extract_observation(obs_val: Any) -> trajectory_lib.Observation | None:
-  """Extracts an ATIF Observation container from an observation value."""
+  """Extracts an Observation container from an observation value."""
   if obs_val is None:
     return None
-  if isinstance(obs_val, list):
-    return trajectory_lib.Observation(
-        results=[
-            trajectory_lib.ObservationResult(content=str(x)) for x in obs_val
-        ]
-    )
+  items = obs_val if isinstance(obs_val, list) else [obs_val]
   return trajectory_lib.Observation(
-      results=[trajectory_lib.ObservationResult(content=str(obs_val))]
+      results=[trajectory_lib.ObservationResult(content=str(x)) for x in items]
   )
 
 
 def create_task_step(
     task: Any,
-) -> trajectory_lib.Step | None:
-  """Creates an initial ATIF user task Step from a task prompt or object.
+) -> trajectory_lib.TunixEnvStep | None:
+  """Creates an initial user task Step from a task prompt or object.
 
   Args:
     task: The task prompt string, dictionary with 'prompts', or None.
 
   Returns:
-    An ATIF Step with step_id=0 and source=USER containing the task prompt,
+    A Tunix Step with step_id=0 and source=USER containing the task prompt,
     or None if task is None or empty.
   """
   if task is None:
@@ -143,7 +99,7 @@ def create_task_step(
   if not prompt_str:
     return None
 
-  return trajectory_lib.Step(
+  return trajectory_lib.TunixEnvStep(
       step_id=0,
       source=trajectory_lib.Source.USER,
       message=prompt_str,
@@ -152,17 +108,21 @@ def create_task_step(
 
 def create_agent_step(
     step: agent_types.Step | None,
-    step_id: int = 0,
-) -> trajectory_lib.Step | None:
-  """Converts a Tunix agent_types.Step into an ATIF agent turn Step.
+    tunix_step_id: int,
+) -> trajectory_lib.TunixAgentStep | None:
+  """Converts a Tunix agent_types.Step into an agent turn Step.
+
+  Maps the 0-based Tunix interaction turn index (`tunix_step_id`) to the
+  converted step ID: `converted_step_id = 2 * tunix_step_id + 1`.
+  (e.g., Tunix turn 0 -> step 1, Tunix turn 1 -> step 3).
 
   Args:
     step: The Tunix RL step to convert, or None.
-    step_id: 0-based index of the step.
+    tunix_step_id: 0-based turn index of the step in the Tunix trajectory.
 
   Returns:
-    The converted Trajectory Step (with 1-based step_id), or None if step is
-    None.
+    The converted Step (with step_id = 2 * tunix_step_id + 1), or None if step
+    is None.
 
   Raises:
     ValueError: If assistant_tokens and logprobs lengths do not match.
@@ -170,43 +130,57 @@ def create_agent_step(
   if step is None:
     return None
 
-  trajectory_step_id = step_id + 1  # offset the task step
-  return trajectory_lib.Step(
-      step_id=trajectory_step_id,
+  extra = dict(step.info) if step.info else {}
+  if step.action is not None:
+    raw_action = (
+        step.action.action
+        if isinstance(step.action, agent_types.Action)
+        else step.action
+    )
+    if raw_action is not None:
+      extra["raw_action"] = raw_action
+
+  converted_step_id = 2 * tunix_step_id + 1
+  return trajectory_lib.TunixAgentStep(
+      step_id=converted_step_id,
       source=trajectory_lib.Source.AGENT,
       message=step.model_response,
       reasoning_content=step.thought or None,
-      tool_calls=_extract_tool_calls(step.action),
+      tool_calls=action_converter.extract_tool_calls(step.action),
       metrics=_extract_metrics(step.assistant_tokens, step.logprobs),
       assistant_tokens=step.assistant_tokens,
       assistant_masks=step.assistant_masks,
       logprobs=step.logprobs,
       mc_return=step.mc_return or None,
-      extra=step.info or None,
+      extra=extra or None,
   )
 
 
 def create_env_step(
     step: agent_types.Step | None,
-    step_id: int = 0,
-) -> trajectory_lib.Step | None:
-  """Converts a Tunix agent_types.Step into an ATIF environment turn Step.
+    tunix_step_id: int,
+) -> trajectory_lib.TunixEnvStep | None:
+  """Converts a Tunix agent_types.Step into an environment turn Step.
+
+  Maps the 0-based Tunix interaction turn index (`tunix_step_id`) to the
+  converted step ID: `converted_step_id = 2 * tunix_step_id + 2`.
+  (e.g., Tunix turn 0 -> step 2, Tunix turn 1 -> step 4).
 
   Args:
     step: The Tunix RL step to convert, or None.
-    step_id: 0-based index of the step.
+    tunix_step_id: 0-based turn index of the step in the Tunix trajectory.
 
   Returns:
-    The converted Trajectory Step (with 1-based step_id), or None if step is
-    None.
+    The converted Step (with step_id = 2 * tunix_step_id + 2), or None if step
+    is None.
   """
   if step is None:
     return None
 
-  trajectory_step_id = step_id + 1  # offset the task step
   obs_str = str(step.observation) if step.observation is not None else ""
-  return trajectory_lib.Step(
-      step_id=trajectory_step_id,
+  converted_step_id = 2 * tunix_step_id + 2
+  return trajectory_lib.TunixEnvStep(
+      step_id=converted_step_id,
       source=trajectory_lib.Source.SYSTEM,
       message=obs_str,
       observation=_extract_observation(step.observation),
@@ -218,9 +192,21 @@ def create_env_step(
   )
 
 
+def _filter_extra_info(extra: dict[str, Any] | None) -> dict[str, Any]:
+  """Filters action keys out of step extra metadata."""
+  if not extra:
+    return {}
+  return {k: v for k, v in extra.items() if k not in ("raw_action", "action")}
+
+
+def _to_numpy_or_none(arr: Any) -> np.ndarray | None:
+  """Converts an array-like object to a numpy array if not None."""
+  return np.asarray(arr) if arr is not None else None
+
+
 def to_tunix_step(
-    agent_step: trajectory_lib.Step | None = None,
-    env_step: trajectory_lib.Step | None = None,
+    agent_step: trajectory_lib.TunixAgentStep | None = None,
+    env_step: trajectory_lib.TunixEnvStep | None = None,
 ) -> agent_types.Step:
   """Converts Trajectory agent and/or env steps into a single Tunix Step.
 
@@ -246,27 +232,22 @@ def to_tunix_step(
   if agent_step is not None:
     thought = agent_step.reasoning_content or ""
     model_response = agent_step.message or ""
-    if agent_step.tool_calls:
-      if len(agent_step.tool_calls) == 1:
-        tc = agent_step.tool_calls[0]
-        action = agent_types.Action(
-            action={
-                "id": tc.tool_call_id,
-                "name": tc.function_name,
-                "arguments": tc.arguments,
-            }
-        )
-      else:
-        action = agent_types.Action(
-            action=[
-                {
-                    "id": tc.tool_call_id,
-                    "name": tc.function_name,
-                    "arguments": tc.arguments,
-                }
-                for tc in agent_step.tool_calls
-            ]
-        )
+
+    # Restore action
+    if agent_step.extra and "raw_action" in agent_step.extra:
+      action = agent_types.Action(action=agent_step.extra["raw_action"])
+    elif agent_step.extra and "action" in agent_step.extra:
+      action = agent_types.Action(action=agent_step.extra["action"])
+    elif agent_step.tool_calls:
+      calls = [
+          {
+              "id": tc.tool_call_id,
+              "name": tc.function_name,
+              "arguments": tc.arguments,
+          }
+          for tc in agent_step.tool_calls
+      ]
+      action = agent_types.Action(action=calls[0] if len(calls) == 1 else calls)
 
     assistant_tokens = agent_step.assistant_tokens
     assistant_masks = agent_step.assistant_masks
@@ -283,8 +264,7 @@ def to_tunix_step(
       if logprobs is None and agent_step.metrics.logprobs is not None:
         logprobs = np.asarray(agent_step.metrics.logprobs)
 
-    if agent_step.extra:
-      info.update(agent_step.extra)
+    info.update(_filter_extra_info(agent_step.extra))
 
   observation = None
   reward = 0.0
@@ -295,10 +275,11 @@ def to_tunix_step(
   if env_step is not None:
     if env_step.observation is not None and env_step.observation.results:
       results = env_step.observation.results
-      if len(results) == 1:
-        observation = results[0].content
-      else:
-        observation = [r.content for r in results]
+      observation = (
+          results[0].content
+          if len(results) == 1
+          else [r.content for r in results]
+      )
     elif env_step.message:
       observation = env_step.message
 
@@ -308,23 +289,7 @@ def to_tunix_step(
       done = bool(env_step.done)
     env_tokens = env_step.env_tokens
     env_masks = env_step.env_masks
-    if env_step.extra:
-      info.update(env_step.extra)
-
-  if assistant_tokens is not None and not isinstance(
-      assistant_tokens, np.ndarray
-  ):
-    assistant_tokens = np.asarray(assistant_tokens)
-  if assistant_masks is not None and not isinstance(
-      assistant_masks, np.ndarray
-  ):
-    assistant_masks = np.asarray(assistant_masks)
-  if env_tokens is not None and not isinstance(env_tokens, np.ndarray):
-    env_tokens = np.asarray(env_tokens)
-  if env_masks is not None and not isinstance(env_masks, np.ndarray):
-    env_masks = np.asarray(env_masks)
-  if logprobs is not None and not isinstance(logprobs, np.ndarray):
-    logprobs = np.asarray(logprobs)
+    info.update(_filter_extra_info(env_step.extra))
 
   return agent_types.Step(
       model_response=model_response,
@@ -334,10 +299,128 @@ def to_tunix_step(
       reward=reward,
       done=done,
       mc_return=mc_return,
-      assistant_tokens=assistant_tokens,
-      assistant_masks=assistant_masks,
-      env_tokens=env_tokens,
-      env_masks=env_masks,
-      logprobs=logprobs,
+      assistant_tokens=_to_numpy_or_none(assistant_tokens),
+      assistant_masks=_to_numpy_or_none(assistant_masks),
+      env_tokens=_to_numpy_or_none(env_tokens),
+      env_masks=_to_numpy_or_none(env_masks),
+      logprobs=_to_numpy_or_none(logprobs),
       info=info,
+  )
+
+
+def to_tunix_trajectory(
+    traj: trajectory_lib.TunixTrajectory | dict[str, Any],
+) -> agent_types.Trajectory:
+  """Converts a Trajectory into a Tunix agent_types.Trajectory.
+
+  Reconstructs Tunix RL interaction steps from sequential converted steps:
+  - Step 0 (source USER or SYSTEM) -> Tunix task prompt dictionary.
+  - Subsequent steps (Agent step at 2i+1, Env step at 2i+2) -> Paired into
+    Tunix `agent_types.Step` instances for turn i.
+
+  Args:
+    traj: Trajectory or dictionary representation.
+
+  Returns:
+    A reconstructed Tunix agent_types.Trajectory instance.
+  """
+  if isinstance(traj, dict):
+    traj_obj = trajectory_lib.TunixTrajectory.from_json_dict(traj)
+  else:
+    traj_obj = traj
+
+  dto_steps: list[agent_types.Step] = []
+  converted_step_idx = 0
+  num_converted_steps = len(traj_obj.steps)
+
+  task_val = None
+  # If step 0 is the initial prompt (source USER or SYSTEM), extract it.
+  if num_converted_steps > 0 and traj_obj.steps[0].source in (
+      trajectory_lib.Source.USER,
+      trajectory_lib.Source.SYSTEM,
+  ):
+    task_val = {"prompts": [traj_obj.steps[0].message]}
+    converted_step_idx = 1
+
+  # Iterate through steps and pair AGENT + ENV steps into Tunix turns.
+  while converted_step_idx < num_converted_steps:
+    curr_step = traj_obj.steps[converted_step_idx]
+    if curr_step.source == trajectory_lib.Source.AGENT:
+      curr_step = typing.cast(trajectory_lib.TunixAgentStep, curr_step)
+      next_step: trajectory_lib.TunixEnvStep | None = None
+      if (
+          converted_step_idx + 1 < num_converted_steps
+          and traj_obj.steps[converted_step_idx + 1].source
+          != trajectory_lib.Source.AGENT
+      ):
+        next_step = typing.cast(
+            trajectory_lib.TunixEnvStep,
+            traj_obj.steps[converted_step_idx + 1],
+        )
+      dto_step = to_tunix_step(agent_step=curr_step, env_step=next_step)
+      dto_steps.append(dto_step)
+      converted_step_idx += 2 if next_step is not None else 1
+    else:
+      curr_step = typing.cast(trajectory_lib.TunixEnvStep, curr_step)
+      dto_step = to_tunix_step(agent_step=None, env_step=curr_step)
+      dto_steps.append(dto_step)
+      converted_step_idx += 1
+
+  total_reward = traj_obj.total_reward
+  reward = float(total_reward) if total_reward is not None else 0.0
+
+  status_enum = agent_types.TrajectoryStatus.RUNNING
+  traj_obj_status = traj_obj.status
+  if traj_obj_status is not None and hasattr(
+      agent_types.TrajectoryStatus, str(traj_obj_status)
+  ):
+    status_enum = getattr(agent_types.TrajectoryStatus, str(traj_obj_status))
+
+  env_time = traj_obj.env_time or {}
+  reward_time = traj_obj.reward_time or {}
+
+  return agent_types.Trajectory(
+      task=task_val,
+      steps=dto_steps,
+      reward=reward,
+      status=status_enum,
+      env_time=env_time,
+      reward_time=reward_time,
+  )
+
+
+def create_trajectory_metadata(
+    traj_id: str,
+    request: Any = None,
+    agent: Any = None,
+    target_policy_versions: list[int] | None = None,
+    status: str = "RUNNING",
+    extra: dict[str, Any] | None = None,
+) -> trajectory_lib.TunixTrajectoryMetadata:
+  """Constructs TunixTrajectoryMetadata from rollout request and agent state."""
+  meta_extra = dict(getattr(request, "metadata", None) or {})
+  if extra:
+    meta_extra.update(extra)
+
+  if isinstance(agent, trajectory_lib.Agent):
+    agent_obj = agent
+  else:
+    agent_obj = trajectory_lib.Agent(
+        name=getattr(agent, "name", "agent"),
+        version=getattr(agent, "version", "1.0"),
+    )
+  traj_obj = getattr(agent, "trajectory", None)
+
+  return trajectory_lib.TunixTrajectoryMetadata(
+      trajectory_id=traj_id,
+      agent=agent_obj,
+      prompt_id=getattr(request, "prompt_id", None),
+      group_offset_id=getattr(request, "group_offset_id", None),
+      target_policy_versions=target_policy_versions,
+      status=status,
+      total_reward=getattr(traj_obj, "reward", None),
+      hyperparams=getattr(request, "generation_kwargs", None),
+      env_time=getattr(traj_obj, "env_time", None),
+      reward_time=getattr(traj_obj, "reward_time", None),
+      extra=meta_extra or None,
   )

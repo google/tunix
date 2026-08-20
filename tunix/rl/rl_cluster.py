@@ -38,6 +38,8 @@ from jax.sharding import Mesh  # pylint: disable=g-importing-member
 import jaxtyping
 import numpy as np
 import optax
+from tunix.common import configs
+from tunix.common import datatypes
 from tunix.generate import tokenizer_adapter
 # Internal placeholder for sglang_jax rollout worker stub, don't change this line.
 from tunix.perf import metrics as perf_metrics
@@ -56,136 +58,16 @@ from tunix.sft import peft_trainer
 from tunix.sft import sharding_utils
 from tunix.sft import utils as sft_utils
 
+Mode = datatypes.Mode
+Role = datatypes.Role
+
+
+RLTrainingConfig = configs.RLTrainingConfig
+ClusterConfig = configs.ClusterConfig
+
 ModelOrPath = nnx.Module | str
 MetricsT = perf_metrics.MetricsT
 MetricsBuffer = perf_metrics.MetricsBuffer
-
-
-class Mode(enum.Enum):
-  """Mode of RolloutConfig."""
-
-  TRAIN = "train"
-  EVAL = "eval"
-
-  def __str__(self):
-    return self.value
-
-
-class Role(enum.Enum):
-  """Role of the model."""
-
-  ACTOR = "actor"  # policy model
-  CRITIC = "critic"  # value model (only for PPO-style algos, not for GRPO)
-  REFERENCE = "reference"  # kept fixed during training
-  REWARD = "reward"
-  ROLLOUT = "rollout"
-
-
-@dataclasses.dataclass(slots=True, kw_only=True)
-class RLTrainingConfig(peft_trainer.TrainingConfig):
-  """RLTraining config.
-
-  Attributes:
-    actor_optimizer: Optimizer for the actor model.
-    critic_optimizer: Optimizer for the critic model. If None, the critic model
-      will be trained in the same optimizer as the actor model.
-    mini_batch_size: The mini-batch size used for policy weight updates. One
-      mini-batch corresponds to one optimizer update. `mini_batch_size` must be
-      divisible by the global batch size.
-    train_micro_batch_size: The micro-batch size used for gradient accumulation
-      at training time. `train_micro_batch_size` must be divisible by
-      `mini_batch_size`.
-    rollout_micro_batch_size: The micro-batch size used for model rollouts.
-    compute_logps_micro_batch_size: The micro-batch size used for computing log
-      probabilities (e.g. for reference and old policy models).
-    compute_logps_chunk_size: The chunk size used for computing log
-      probabilities. Instead of using final logits from model, where size is [B,
-      T, V], this will use the last hidden output with size [B, T, D] from model
-      and compute logps in a chunked manner. Good values to pick are like 256,
-      512, etc. When value is 0, it means this feature is disabled. This also
-      requires model to support `skip_lm_head` in its `__call__` method and have
-      a `compute_final_logits` method.
-  """
-
-  actor_optimizer: optax.GradientTransformation
-  critic_optimizer: optax.GradientTransformation | None = None
-  mini_batch_size: int | None = None
-  train_micro_batch_size: int | None = None
-  rollout_micro_batch_size: int | None = None
-  compute_logps_micro_batch_size: int | None = None
-  compute_logps_chunk_size: int = 0
-
-  def __post_init__(self):
-    """Validates the configuration after initialization."""
-    for name in [
-        "mini_batch_size",
-        "train_micro_batch_size",
-        "rollout_micro_batch_size",
-        "compute_logps_micro_batch_size",
-        "max_segments_per_packed_row",
-    ]:
-      rl_utils.is_positive_integer(getattr(self, name, None), name)
-
-    if self.gradient_accumulation_steps is not None:
-      raise ValueError(
-          "For RL training, gradient_accumulation_steps should be None. It is "
-          "automatically derived from: "
-          "`mini_batch_size // train_micro_batch_size`."
-      )
-
-    if self.train_micro_batch_size is not None:
-      if self.mini_batch_size is None:
-        raise ValueError(
-            "For RL training, `mini_batch_size` must be set when"
-            " `train_micro_batch_size` is set."
-        )
-      rl_utils.check_divisibility(
-          self.train_micro_batch_size,
-          self.mini_batch_size,
-          f"{self.train_micro_batch_size=}",
-          f"{self.mini_batch_size=}",
-      )
-      self.gradient_accumulation_steps = (
-          self.mini_batch_size // self.train_micro_batch_size
-      )
-
-
-@dataclasses.dataclass(kw_only=True, frozen=True)
-class ClusterConfig:
-  """Cluster config.
-
-  Attributes:
-    role_to_mesh: Mapping from model role to mesh. Key config for colocated vs
-      disaggregated setup.
-    role_to_logical_axis_rule: Mapping from model role to logical axis rule.
-      This is used when models are sharded with logical axis and expects a
-      logical to physical axis mapping at runtime.
-    rollout_engine: Rollout engine to use. E.g. "vanilla", "vllm", "sglang_jax".
-      Alternatively, if a subclass of `base_rollout.BaseRollout` is provided, it
-      will be used as the rollout engine.
-    offload_to_cpu: Whether to offload models to CPU at each step..
-    training_config: RL training config.
-    rollout_config: Rollout config. It may be different for different modes,
-      e.g. TRAIN vs EVAL.
-    rollout_vllm_model_version: Model version for vllm rollout engine.
-    rollout_vllm_lora_config: LoRA config for vllm rollout engine.
-    rollout_vllm_hbm_utilization: The percentage of TPU/GPU HBM allocated the
-      vllm rollout engine.
-    rollout_vllm_init_with_random_weights: Init the vllm TPU backend model with
-      random weights instead of loading from the given path.
-    rollout_vllm_tpu_backend_type: The TPU Jax backend type for vllm rollout
-      engine, E.g. "jax", "torchax" or "pytorch_xla".
-  """
-
-  role_to_mesh: dict[Role, Mesh]
-  role_to_logical_axis_rule: dict[Role, flax.typing.LogicalRules] | None = None
-  rollout_engine: str | type[base_rollout.BaseRollout] = "vanilla"
-  offload_to_cpu: bool = False
-
-  training_config: RLTrainingConfig
-  rollout_config: (
-      dict[Mode, base_rollout.RolloutConfig] | base_rollout.RolloutConfig
-  )
 
 
 class RLEngine:

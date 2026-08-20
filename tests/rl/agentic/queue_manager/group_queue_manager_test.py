@@ -33,13 +33,21 @@ def _create_item(
   )
 
 
+def _create_manager(group_size: int) -> group_queue_manager.GroupQueueManager:
+  """Helper to create a GroupQueueManager with the default test key_fn."""
+  return group_queue_manager.GroupQueueManager(
+      key_fn=lambda x: getattr(x, "group_id", getattr(x, "prompt_id", id(x))),
+      group_size=group_size,
+  )
+
+
 class GroupQueueManagerTest(absltest.TestCase):
 
   def test_put_and_get_simple_batch(self):
     """Tests basic put and get functionality."""
 
     async def _run_test():
-      manager = group_queue_manager.GroupQueueManager(group_size=2)
+      manager = _create_manager(group_size=2)
       item1 = _create_item("g1", 0)
       item2 = _create_item("g1", 1)
 
@@ -59,7 +67,7 @@ class GroupQueueManagerTest(absltest.TestCase):
     """Tests that group_id=0 (integer zero) is correctly grouped and not treated as falsy fallback."""
 
     async def _run_test():
-      manager = group_queue_manager.GroupQueueManager(group_size=2)
+      manager = _create_manager(group_size=2)
       item1 = _create_item(group_id=0, pair_index=0)
       item2 = _create_item(group_id=0, pair_index=1)
 
@@ -79,7 +87,7 @@ class GroupQueueManagerTest(absltest.TestCase):
     """Tests that get_batch waits until a group is ready."""
 
     async def _run_test():
-      manager = group_queue_manager.GroupQueueManager(group_size=2)
+      manager = _create_manager(group_size=2)
       item1 = _create_item("g1", 0)
       item2 = _create_item("g1", 1)
 
@@ -101,7 +109,7 @@ class GroupQueueManagerTest(absltest.TestCase):
     """Tests batching where a group is split across two get_batch calls."""
 
     async def _run_test():
-      manager = group_queue_manager.GroupQueueManager(group_size=3)
+      manager = _create_manager(group_size=3)
       items = [_create_item("g1", i) for i in range(3)]
       for item in items:
         await manager.put(item)
@@ -122,7 +130,7 @@ class GroupQueueManagerTest(absltest.TestCase):
     """Tests that an exception is propagated to put and get calls."""
 
     async def _run_test():
-      manager = group_queue_manager.GroupQueueManager(group_size=2)
+      manager = _create_manager(group_size=2)
       exc = ValueError("Test Exception")
       await manager.put_exception(exc)
 
@@ -143,7 +151,7 @@ class GroupQueueManagerTest(absltest.TestCase):
     """Tests that leftover items notify concurrent consumers via _have_ready."""
 
     async def _run_test():
-      manager = group_queue_manager.GroupQueueManager(group_size=4)
+      manager = _create_manager(group_size=4)
       items = [_create_item("g1", i) for i in range(4)]
 
       # Consumer 2 waits for 1 item
@@ -169,7 +177,7 @@ class GroupQueueManagerTest(absltest.TestCase):
     """Tests prepare_clear interrupts operations and clear resets state."""
 
     async def _run_test():
-      manager = group_queue_manager.GroupQueueManager(group_size=2)
+      manager = _create_manager(group_size=2)
       item1 = _create_item("g1", 0)
 
       # Start a consumer waiting for a batch
@@ -189,6 +197,41 @@ class GroupQueueManagerTest(absltest.TestCase):
       await manager.clear()
       self.assertFalse(manager._clearing)
       self.assertEmpty(manager._buckets)
+
+    asyncio.run(_run_test())
+
+  def test_custom_key_fn(self):
+    """Tests that a custom key_fn correctly groups items."""
+
+    async def _run_test():
+      def my_key_fn(item):
+        return getattr(item, "custom_id", id(item))
+
+      manager = group_queue_manager.GroupQueueManager(
+          group_size=2, key_fn=my_key_fn
+      )
+
+      class MockItem:
+
+        def __init__(self, custom_id):
+          self.custom_id = custom_id
+
+      item1 = MockItem("group_A")
+      item2 = MockItem("group_A")
+      item3 = MockItem("group_B")
+
+      await manager.put(item1)
+      self.assertEmpty(manager._ready_groups)
+
+      await manager.put(item3)
+      self.assertEmpty(manager._ready_groups)
+
+      await manager.put(item2)
+      self.assertLen(manager._ready_groups, 1)
+
+      batch = await manager.get_batch(2)
+      self.assertLen(batch, 2)
+      self.assertCountEqual([item1, item2], batch)
 
     asyncio.run(_run_test())
 

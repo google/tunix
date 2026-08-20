@@ -47,6 +47,7 @@ class GroupQueueManager(Generic[_T]):
       self,
       *,
       group_size: Optional[int] = None,
+      key_fn: Optional[Callable[[_T], Hashable]] = None,
       group_fn: Optional[GroupFn[_T]] = None,
       filter_fn: Optional[FilterFn[_T]] = None,
   ):
@@ -54,6 +55,7 @@ class GroupQueueManager(Generic[_T]):
 
     Args:
       group_size: Optional target size for default grouping.
+      key_fn: Optional function to extract a grouping key from an item. Defaults to id(item).
       group_fn: Optional custom grouping function `Callable[[buckets, item],
         Optional[List[_T]]]`. If None, `group_size` must be provided.
       filter_fn: Optional filtering function `Callable[[candidate_group],
@@ -66,18 +68,14 @@ class GroupQueueManager(Generic[_T]):
             " GroupQueueManager."
         )
 
+      if key_fn is None:
+        key_fn = id
+
       def default_group_fn(
           buckets: Dict[Hashable, List[_T]],
           item: _T,
       ) -> Optional[List[_T]]:
-        group_id = getattr(item, "group_id", None)
-        prompt_id = getattr(item, "prompt_id", None)
-        if group_id is not None and group_id != "":
-          key = group_id
-        elif prompt_id is not None and prompt_id != "":
-          key = prompt_id
-        else:
-          key = id(item)
+        key = key_fn(item)
         bucket = buckets[key]
         bucket.append(item)
         if len(bucket) == group_size:

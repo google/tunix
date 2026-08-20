@@ -14,7 +14,7 @@
 
 """TrajectoryQueueManager specialization of GroupQueueManager for TrajectoryItem."""
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Hashable, Sequence
 from typing import Any, Optional
 from tunix.experimental.common import datatypes
 from tunix.rl.agentic.queue_manager import group_queue_manager
@@ -22,6 +22,7 @@ from tunix.rl.agentic.queue_manager import group_queue_manager
 TrajectoryItem = datatypes.TrajectoryItem
 GroupFn = group_queue_manager.GroupFn[TrajectoryItem]
 FilterFn = group_queue_manager.FilterFn[TrajectoryItem]
+
 
 class TrajectoryQueueManager(group_queue_manager.GroupQueueManager):
   """Specialized GroupQueueManager holding TrajectoryItems with ACK and abort support."""
@@ -32,6 +33,7 @@ class TrajectoryQueueManager(group_queue_manager.GroupQueueManager):
       group_size: Optional[int] = None,
       group_fn: Optional[GroupFn] = None,
       filter_fn: Optional[FilterFn] = None,
+      key_fn: Optional[Callable[[datatypes.TrajectoryItem], Hashable]] = None,
   ):
     """Initializes TrajectoryQueueManager.
 
@@ -41,9 +43,27 @@ class TrajectoryQueueManager(group_queue_manager.GroupQueueManager):
       group_fn: Optional custom grouping function. If None, `group_size` must be
         provided.
       filter_fn: Optional pluggable function to filter candidate groups.
+      key_fn: Optional function to extract grouping key. Defaults to
+        group_id/prompt_id fallback.
     """
+    if key_fn is None and group_fn is None:
+
+      def _default_key_fn(item: datatypes.TrajectoryItem) -> Hashable:
+        group_id = getattr(item, "group_id", None)
+        if group_id is not None and group_id != "":
+          return group_id
+        prompt_id = getattr(item, "prompt_id", None)
+        if prompt_id is not None and prompt_id != "":
+          return prompt_id
+        return id(item)
+
+      key_fn = _default_key_fn
+
     super().__init__(
-        group_size=group_size, group_fn=group_fn, filter_fn=filter_fn
+        group_size=group_size,
+        group_fn=group_fn,
+        filter_fn=filter_fn,
+        key_fn=key_fn,
     )
 
   @classmethod
@@ -57,14 +77,17 @@ class TrajectoryQueueManager(group_queue_manager.GroupQueueManager):
     """Creates a grouped trajectory queue with optional policy staleness filtering."""
     combined_filter = filter_fn
     if max_staleness is not None and current_policy_version is not None:
+
       def _staleness_filter(group: Sequence[Any]) -> Any:
         min_allowed = current_policy_version() - max_staleness
         valid = [
-            item for item in group
+            item
+            for item in group
             if getattr(item, "policy_version", 0) >= min_allowed
         ]
         filtered = [
-            item for item in group
+            item
+            for item in group
             if getattr(item, "policy_version", 0) < min_allowed
         ]
         if filter_fn is not None:
@@ -73,11 +96,12 @@ class TrajectoryQueueManager(group_queue_manager.GroupQueueManager):
             return res[0], list(res[1]) + filtered
           return res, filtered
         return valid, filtered
+
       combined_filter = _staleness_filter
 
     return cls(
         group_size=group_size,
-        filter_fn=combined_filter,
+        filter_fn=combined_filter,  # pyrefly: ignore[bad-argument-type]
     )
 
   def __aiter__(self) -> "TrajectoryQueueManager":
@@ -109,7 +133,9 @@ class TrajectoryQueueManager(group_queue_manager.GroupQueueManager):
           break
         out.extend(g)
       return out
-    actual_batch_size = batch_size if batch_size is not None else self.group_size
+    actual_batch_size = (
+        batch_size if batch_size is not None else self.group_size
+    )
     return await super().get_batch(batch_size=actual_batch_size)  # pyrefly: ignore[bad-argument-type]
 
   def commit(self, step: int, groups: Sequence[Any] | None = None) -> None:

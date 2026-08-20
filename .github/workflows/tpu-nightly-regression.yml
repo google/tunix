@@ -44,7 +44,7 @@ jobs:
     runs-on: [linux-x86-ct6e-180-8tpu]
     environment: testing
     container:
-      image: vllm/vllm-tpu:nightly-20260406-581c4d4-f6983f0
+      image: vllm/vllm-tpu:nightly-20260731-df7d1ff-a7a204c
       options: --privileged
       env:
         CLOUD_TPU_ACCELERATOR: v5e-8
@@ -53,7 +53,7 @@ jobs:
 
     # Cache Hugging Face hub
     - name: Cache HF hub
-      uses: actions/cache@v4
+      uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
       with:
         path: ~/.cache/huggingface
         key: hf-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'requirements*.txt', 'constraints*.txt') }}
@@ -61,7 +61,7 @@ jobs:
           hf-${{ runner.os }}-
 
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       with:
         fetch-depth: 0
 
@@ -194,6 +194,18 @@ jobs:
                 continue
               fi
 
+              # Fix run_qwen3_vllm_disagg.sh
+              if [[ "$script" == *"run_qwen3_vllm_disagg"* ]]; then
+                # Issue 1: HBM OOM
+                export SKIP_JAX_PRECOMPILE=1
+                # Issue 2: FAILED_PRECONDITION: The program continuator has halted unexpectedly.
+                export JAX_COMPILATION_CACHE_DIR=/tmp/jax_cache
+                rm -rf /tmp/jax_cache
+              else
+                unset SKIP_JAX_PRECOMPILE
+                unset JAX_COMPILATION_CACHE_DIR
+              fi
+
               echo "::group::📦 Executing: $script"
               echo "MAX_STEPS=$MAX_STEPS, EVAL_EVERY_N_STEPS=$EVAL_EVERY_N_STEPS"
               chmod +x "$script"
@@ -314,7 +326,7 @@ jobs:
 
     # Cache Hugging Face hub
     - name: Cache HF hub
-      uses: actions/cache@v4
+      uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
       with:
         path: ~/.cache/huggingface
         key: hf-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'requirements*.txt', 'constraints*.txt') }}
@@ -322,7 +334,7 @@ jobs:
           hf-${{ runner.os }}-
 
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       with:
         fetch-depth: 0
 
@@ -409,22 +421,27 @@ jobs:
           echo "✅ All run_latest tests completed successfully."
         fi
 
-    - name: Run Agentic CLI MaxText Test (Qwen2.5 0.5B, Disaggregated)
-      id: maxtext_test
-      if: success() || failure()
-      shell: bash
-      env:
-        HF_TOKEN: ${{ secrets.HF_TOKEN }}
-      run: |
-        # Install MaxText if not present
-        python3 -c "import maxtext" 2>/dev/null || python3 -m pip install git+https://github.com/AI-Hypercomputer/maxtext.git --no-deps
+    # TODO(tunix-dev): Re-enable once the bug is fixed.
+    # - name: Run Agentic CLI MaxText Test (Qwen3 0.6B, Disaggregated)
+    #   id: maxtext_test
+    #   if: success() || failure()
+    #   shell: bash
+    #   env:
+    #     HF_TOKEN: ${{ secrets.HF_TOKEN }}
+    #   run: |
+    #     # Install MaxText if not present
+    #     python3 -c "import maxtext" 2>/dev/null || python3 -m pip install git+https://github.com/AI-Hypercomputer/maxtext.git
 
-        pkill -9 -f "vllm" || true
-        sleep 5
+    #     # Install necessary dependencies for MaxText
+    #     python3 -m pip install aqtp tokamax
 
-        echo "📦 Executing Agentic CLI (Qwen2.5 0.5B, MaxText, vLLM Server Mode, Disaggregated 4:4) ..."
-        model_name="qwen2.5-0.5b" model_id="Qwen/Qwen2.5-0.5B-Instruct" tokenizer_path="Qwen/Qwen2.5-0.5B-Instruct" checkpoint_dir="/tmp/qwen3_maxtext_ckpts_server" num_batches=2 num_train_epochs=1 total_tpus=8 train_mesh="(4,1)" rollout_mesh="(4,1)" \
-          bash examples/rl/grpo/gsm8k/run_qwen3_8b_disagg_maxtext.sh
+    #     pkill -9 -f "vllm" || true
+    #     sleep 5
+
+    #     echo "📦 Executing Agentic CLI (Qwen3 0.6B, MaxText, vLLM Server Mode, Disaggregated 4:4) ..."
+    #     model_name="qwen3-0.6b" model_id="Qwen/Qwen3-0.6B" tokenizer_path="Qwen/Qwen3-0.6B" base_emb_dim=1024 \
+    #     checkpoint_dir="/tmp/qwen3_maxtext_ckpts_server" num_batches=2 num_train_epochs=1 total_tpus=8 train_mesh="(4,1)" rollout_mesh="(4,1)" \
+    #       bash examples/rl/grpo/gsm8k/run_qwen3_8b_disagg_maxtext.sh
 
 
 

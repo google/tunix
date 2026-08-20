@@ -140,7 +140,6 @@ class InferenceWorkerTest(absltest.TestCase):
         completion_tokens=np.array([7, 8], dtype=np.int32),
         action_mask=np.array([1, 1], dtype=np.float32),
     )
-
     with self.assertRaisesRegex(TypeError, "BatchAssembler"):
       _worker().per_token_logps([item])
 

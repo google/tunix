@@ -21,7 +21,7 @@ import gc
 from absl import logging
 import math
 import re
-from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Tuple, Union
 
 from flax import nnx
 from flax import traverse_util
@@ -384,7 +384,7 @@ def build_flat_dict(
   unmapped_paths = []
   for keys, v in flat_state:
     # Convert key tuple ('model', 'layers', '0') to string 'model.layers.0'
-    path = '.'.join(str(key) for key in keys)
+    path = keys if isinstance(keys, str) else '.'.join(str(key) for key in keys)
     mapped = False
     for src, regex, sharding in compiled_mappings:
       matched = regex.match(path)
@@ -478,8 +478,19 @@ def _unroll_scanned_layers(
 
   unscanned_flat = {}
 
-  for src_keys, src_val in src_state.flat_state():
-    src_key = '.'.join(str(k) for k in src_keys)
+  if hasattr(src_state, 'flat_state'):
+    src_items = src_state.flat_state()
+  elif isinstance(src_state, dict):
+    src_items = src_state.items()
+  else:
+    src_items = nnx.to_flat_state(src_state)
+
+  for src_keys, src_val in src_items:
+    src_key = (
+        src_keys
+        if isinstance(src_keys, str)
+        else '.'.join(str(k) for k in src_keys)
+    )
 
     # Skip RNG parameters silently
     if 'rng' in src_key:
@@ -496,18 +507,19 @@ def _unroll_scanned_layers(
     # Check if this is a scanned layer that needs unrolling
     layer_axis = _get_layer_axis_from_sharding_spec(sharding_spec)
 
+    val = src_val.value if hasattr(src_val, 'value') else src_val
     if layer_axis is not None:
       # Unroll the scanned layer dimension
-      num_layers = src_val.value.shape[layer_axis]
+      num_layers = val.shape[layer_axis]
       for i in range(num_layers):
-        idx = [slice(None)] * src_val.value.ndim
+        idx = [slice(None)] * val.ndim
         idx[layer_axis] = i
-        layer_val = src_val.value[tuple(idx)]
+        layer_val = val[tuple(idx)]
         layer_key = tgt_path[i]
         unscanned_flat[(src_key, layer_key)] = (layer_val, tgt_param[i])
     else:
       # No unrolling needed
-      unscanned_flat[(src_key, tgt_path)] = (src_val.value, tgt_param)
+      unscanned_flat[(src_key, tgt_path)] = (val, tgt_param)
 
   return unscanned_flat
 
@@ -618,7 +630,9 @@ def _align_shape(
         val = jnp.reshape(val, (kwargs['num_kv_heads'], kwargs['head_dim']))
         new_tgt_shape = tgt_shape
 
-    elif re.compile(r'layers\..*\.attn\.(q|k|v|o)_proj').match(src_key):
+    elif re.compile(
+        r'layers\..*\.attn\.(q|k|v|o)_proj|layers\..*\.attn\..*einsum.*'
+    ).match(src_key):
       if math.prod(tgt_shape) == math.prod(val.shape):
         logging.debug(
             'Reshaping attention proj on %s: %s -> %s',
@@ -637,7 +651,7 @@ def _align_shape(
             f'Unexpected attention proj shape: {val.shape} and target shape:'
             f' {tgt_shape}'
         )
-        if 'o_proj' in src_key:
+        if 'o_proj' in src_key or 'attn_vec_einsum' in src_key:
           # for output proj, head dim is dim(-2)
           padded_dim = (val.shape[-2] + 127) // 128 * 128
           repeated_dim = tgt_shape[-1] // padded_dim
@@ -688,8 +702,9 @@ def _align_shape(
     return jnp.reshape(val_2d, tgt_shape)
 
   attention_patterns = [
-      r'.*(q|k|v|o)_proj.*',
-      r'.*(q|k|v|o)_bias.*',
+      r'.*(q|k|v|o|qkv)_proj.*',
+      r'.*(q|k|v|o|qkv)_bias.*',
+      r'.*attn.*einsum.*',
       r'.*(key|query|value|output).*',
   ]
   if not any(re.match(pattern, src_key) for pattern in attention_patterns):
@@ -787,7 +802,11 @@ def _sync_tied_lm_head_if_needed(
   embed_param = None
   lm_head_param = None
   for flat_key, tgt_param in tgt_flat_list:
-    path = '.'.join(str(k) for k in flat_key)
+    path = (
+        flat_key
+        if isinstance(flat_key, str)
+        else '.'.join(str(k) for k in flat_key)
+    )
     if path.endswith(('embedding', 'embed_tokens.weight')):
       embed_param = tgt_param
     elif path.endswith(('lm_head', 'lm_head.weight')):
@@ -834,7 +853,11 @@ def transfer_state_with_mappings(
     The target state with the transferred values.
   """
   # Get flat target state
-  tgt_flat_list = dst_state.flat_state()
+  tgt_flat_list = (
+      dst_state.flat_state()
+      if hasattr(dst_state, 'flat_state')
+      else list(dst_state.items())
+  )
 
   # Build sharding dictionary if resharding is needed
   sharding_dict = None
@@ -850,7 +873,7 @@ def transfer_state_with_mappings(
     }
 
   # Build source-to-target mapping
-  src_to_tgt_map = build_flat_dict(tgt_flat_list, key_mappings)
+  src_to_tgt_map = build_flat_dict(tgt_flat_list, key_mappings)  # type: ignore
 
   # Unroll scanned layers and flatten source state
   unscanned_src_to_tgt_flat = _unroll_scanned_layers(src_state, src_to_tgt_map)
@@ -869,15 +892,22 @@ def transfer_state_with_mappings(
       val = key_mapping_hook_fns[flat_src_key](val)
 
     # Align shapes (padding/repeating as needed)
+    tgt_val = tgt_param.value if hasattr(tgt_param, 'value') else tgt_param
     val = _align_shape(
-        val, tgt_param.value.shape, flat_src_key, rollout_engine, **kwargs
+        val, tgt_val.shape, flat_src_key, rollout_engine, **kwargs
     )
 
     # Cast to target dtype
-    val = _apply_dtype_cast(val, tgt_param.value.dtype, flat_src_key)
+    val = _apply_dtype_cast(val, tgt_val.dtype, flat_src_key)
 
     # Assign transformed value
-    tgt_param.value = val
+    if hasattr(tgt_param, 'value'):
+      tgt_param.value = val
+    else:
+      for idx, (tk, _) in enumerate(tgt_flat_list):
+        if tk == flat_tgt_key:
+          tgt_flat_list[idx] = (tk, val)
+          break
     transferred_target_keys.add(flat_tgt_key)
 
   # Target rollout engine might have different implementation and have materialized lm_head
@@ -906,16 +936,32 @@ def transfer_state_with_mappings(
         _delete_target_buffers(sharding_dict, tgt_flat_dict)  # pyrefly: ignore[bad-argument-type]
       resharded_values_flat_dict = reshard_fn(tgt_flat_dict, sharding_dict)
 
-    for tgt_key, tgt_param in tgt_flat_list:
-      assert (
-          tgt_key in resharded_values_flat_dict
-      ), f'Key {tgt_key} not in resharded values'
+    for idx, (tgt_key, tgt_param) in enumerate(tgt_flat_list):
+      val = resharded_values_flat_dict.get(tgt_key)
+      if val is None:
+        alt_keys = (
+            [tuple(tgt_key.split('.')), (tgt_key,)]
+            if isinstance(tgt_key, str)
+            else ['.'.join(str(k) for k in tgt_key)]
+        )
+        for alt_key in alt_keys:
+          if (val := resharded_values_flat_dict.get(alt_key)) is not None:
+            break
+      assert val is not None, f'Key {tgt_key} not in resharded values'
       if hasattr(tgt_param, 'value'):
-        tgt_param.value = resharded_values_flat_dict[tgt_key]
+        tgt_param.value = val
       else:
-        tgt_param = resharded_values_flat_dict[tgt_key]
+        tgt_flat_list[idx] = (tgt_key, val)
 
-  return dst_state.from_flat_path(tgt_flat_list)
+  if hasattr(dst_state, 'from_flat_path'):
+    return dst_state.from_flat_path(tgt_flat_list)
+  elif isinstance(dst_state, dict):
+    return {
+        ('.'.join(str(k) for k in key) if isinstance(key, (tuple, list)) else key): val
+        for key, val in tgt_flat_list
+    }
+  else:
+    return nnx.State.from_flat_path(tgt_flat_list)
 
 
 def _shapes_are_repeatable(
@@ -973,7 +1019,7 @@ def _unstack_scanned_param(
         if _shapes_are_repeatable(candidate, tgt_shape):
           scan_axis = i
           break
-    
+
     if scan_axis is not None:
       # Transpose the scanned axis to the 0th position
       if scan_axis != 0:
@@ -1460,12 +1506,12 @@ def _snapshot_dst_sharding(
 
 
 def _reshard_in_chunks(
-    src_flat: Dict[Tuple[str, ...], jax.Array | np.ndarray],
-    spec_flat: Dict[Tuple[str, ...], jax.Array | np.ndarray | nnx.Variable],
+    src_flat: Dict[Union[str, Tuple[str, ...]], jax.Array | np.ndarray],
+    spec_flat: Dict[Union[str, Tuple[str, ...]], jax.Array | np.ndarray | nnx.Variable],
     reshard_fn: Callable[..., Mapping[str, Any]],
     chunk_size: int,
     delete_spec_buffers: bool = False,
-) -> Dict[Tuple[str, ...], jax.Array | np.ndarray]:
+) -> Dict[Union[str, Tuple[str, ...]], jax.Array | np.ndarray]:
   """Reshards a flat weight dict in sequential chunks to reduce peak HBM pressure.
 
   Instead of issuing one large jax.device_put for the entire model, this helper
@@ -1489,7 +1535,7 @@ def _reshard_in_chunks(
     A flat dict with the same keys as src_flat, containing resharded arrays.
   """
   keys = list(src_flat.keys())
-  resharded: Dict[Tuple[str, ...], jax.Array | np.ndarray] = {}
+  resharded: Dict[Any, jax.Array | np.ndarray] = {}
   for start in range(0, len(keys), chunk_size):
     chunk_keys = keys[start : start + chunk_size]
     chunk_src_flat = {}
@@ -1506,11 +1552,20 @@ def _reshard_in_chunks(
     if delete_spec_buffers:
       _delete_target_buffers(chunk_spec_flat, chunk_src_flat)
 
-    chunk_src = traverse_util.unflatten_dict(chunk_src_flat)
-    chunk_dst_shardings = traverse_util.unflatten_dict(chunk_dst_shardings_flat)
+    def _to_tuple_key(k):
+      return tuple(k.split('.')) if isinstance(k, str) else k
+
+    chunk_src_tuples = {_to_tuple_key(k): v for k, v in chunk_src_flat.items()}
+    chunk_spec_tuples = {
+        _to_tuple_key(k): v for k, v in chunk_dst_shardings_flat.items()
+    }
+    chunk_src = traverse_util.unflatten_dict(chunk_src_tuples)
+    chunk_dst_shardings = traverse_util.unflatten_dict(chunk_spec_tuples)
     chunk_resharded = reshard_fn(source=chunk_src, target=chunk_dst_shardings)
     jax.block_until_ready(chunk_resharded)
-    resharded.update(traverse_util.flatten_dict(chunk_resharded))
+    for k, v in traverse_util.flatten_dict(chunk_resharded).items():
+      resharded[k] = v
+      resharded['.'.join(str(p) for p in k)] = v
 
     del (  # pyrefly: ignore[unsupported-delete]
         chunk_src,
@@ -1782,7 +1837,10 @@ def transfer_state_directly(
         reshard_chunk_size,
         delete_dst_buffers,
     )
-    resharded_weights = traverse_util.unflatten_dict(resharded_flat)
+    resharded_flat_tuples = {
+        k: v for k, v in resharded_flat.items() if isinstance(k, tuple)
+    }
+    resharded_weights = traverse_util.unflatten_dict(resharded_flat_tuples)
   else:
     src_flat = traverse_util.flatten_dict(final_source)
     spec_flat = traverse_util.flatten_dict(final_spec)
