@@ -1,13 +1,16 @@
 # P38.2y — GSM8K fixed-lm-head full-training integration
 
-Status: TARGET NOT SATISFIED. The Qwen3-8B TP4 fixed-tile lm-head passed the
+Status: SUPERSEDED FOR EXECUTION BY P38.2y1; TARGET NOT SATISFIED. The Qwen3-8B TP4 fixed-tile lm-head passed the
 P38s23r3 forward target and P38.2h actual-model backward-no-commit target. The
 first Qwen3-1.7B full-training launch, P38y6, stopped during model bootstrap
 because `data,model` PartitionSpecs were paired with the actual `dp,tp` mesh;
 its retries then collided with Attempt-0 evidence. It is classified
 `INCONCLUSIVE_BOOTSTRAP_SHARDING_AXIS`, not as a numerical target run. The
-actual-mesh sharding and attempt-evidence repairs are locally gated; P38y7 is
-the next valid target.
+actual-mesh sharding and attempt-evidence repairs were exercised by P38y7.
+That run exposed a separate integration gap: Qwen3-1.7B's tied
+`JaxEmbed.decode` endpoint bypassed the `JaxLmHead` hook and emitted no
+fixed-head receipts. See `p38-2y1-tied-output-head-receipts.md`; P38y8 is the
+next valid target.
 
 ## Objective
 

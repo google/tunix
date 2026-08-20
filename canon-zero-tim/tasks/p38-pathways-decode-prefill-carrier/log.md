@@ -2142,3 +2142,31 @@ reclassification from the committed NPZ inputs.
   a read-only mount. No TPU target rerun, commit, or push occurred.
 - Next: review and separately approve publication, then launch only fresh
   P38y7 through the checked-in runbook/launcher.
+
+## 2026-08-20 UTC — P38y7 tied-endpoint bypass found; P38.2y1 locally repaired
+
+- P38y7 completed steps 0--4 with exact B-C. A-B was exact at step 0 and red
+  thereafter; the largest observed event was step 3 at 41 elements / 74 bytes
+  / `max_abs=0.10463905334472656`. The prior progress report understated this
+  maximum and is now explicitly corrected.
+- The complete log sets `CANON_P38_FIXED_LM_HEAD=1` and contains the P28.G5C
+  tied-embedding marker, but contains zero fixed-head primal or VJP receipts.
+  Qwen3-1.7B's `compute_logits` uses `JaxEmbed.decode`; the P38s23 hook covered
+  only Qwen3-8B's untied `JaxLmHead`. P38y7 is therefore not a fixed-head
+  causal test. The admitted P38s23r3/P38h1 zero-byte evidence remains valid
+  within its Qwen3-8B untied endpoint scope.
+- Added the tied `JaxEmbed.decode` hook, transposing `[V,D]` to the same fixed
+  `[D,V]` Pallas head, and tagged all primal/VJP receipts by endpoint. Added a
+  production classifier that requires the exact admitted endpoint and all
+  request/learner/VJP geometries; it mechanically rejects the old P38y7 log.
+- Focused unit tests pass (22), the P38.2h operator regression passes, and the
+  pinned exact-image gate passes both Qwen3-1.7B and Qwen3-8B at 34/34. The
+  complete pinned-image CPU suite passes in two mechanically equivalent
+  stages: the main run passed every test except 12 offsite-Git cases blocked
+  by the read-only worktree metadata mount; those exact 12 passed after the
+  same Git common-dir was mounted read-only and `/workspace` was registered as
+  safe inside the disposable container. The local TPU is occupied by another
+  container, so the real-weight one-host rerun was not started.
+- No commit, push, cluster apply, or external workload mutation occurred.
+  Next: run the one-host construction gate when the device is free, review,
+  separately approve publication, then launch only P38y8.

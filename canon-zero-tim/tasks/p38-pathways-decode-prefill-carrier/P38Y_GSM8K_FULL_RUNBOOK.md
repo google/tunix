@@ -17,16 +17,25 @@ and hand-edited YAML are also out of scope.
 P38y6 is a closed bootstrap incident. It paired `data,model` sharding with an
 actual `dp,tp` mesh, never loaded the model, and then exhausted retries because
 Attempt-0 evidence paths were reused. Do not resume, clone, or reclassify it.
-The next valid label is P38y7 from a source SHA containing both the
-actual-mesh sharding repair and attempt-scoped GSM8K-full evidence.
+P38y7 is a closed endpoint-integration incident: it ran full training but the
+Qwen3-1.7B tied `JaxEmbed.decode` path bypassed the old `JaxLmHead` hook, so
+there were zero fixed-head execution receipts. Its numerical records remain
+valid alignment evidence, but it is not a fixed-head causal test. The next
+valid label is P38y8 from a source SHA containing the tied endpoint hook and
+the endpoint-scoped receipt classifier.
 
 ## Prerequisite already satisfied
 
-The checked-in one-host gate ran against real Qwen3-1.7B weights on four v5p
-chips. Request M=8/16/32/64/128/256 and learner M=4096 all used fixed M256,
-K2048, N38144 and were exact. The custom VJP produced exact, repeat-exact,
-finite and nonzero dHidden/dWeight, and its negative control fired. This is a
-construction gate, not the 64-chip target.
+The original checked-in one-host gate ran the fixed core against real
+Qwen3-1.7B weights on four v5p chips. It did not prove that the production tied
+endpoint invoked that core. P38.2y1 therefore requires two distinct gates:
+
+1. pinned exact-image overlay invokes and inspects the patched
+   `JaxEmbed.decode` endpoint (complete: Qwen1.7B and Qwen8B, 34/34 each);
+2. the same real-weight one-host forward+VJP gate is rerun after the endpoint
+   hook lands (pending while the local v5p is occupied).
+
+These are construction gates, not the 64-chip target.
 
 ## Operator procedure
 
@@ -36,7 +45,7 @@ detached checkout of exactly that SHA:
 ```bash
 set -euo pipefail
 SOURCE_COMMIT="<USER_APPROVED_40_HEX_REPAIR_SHA>"
-RUN_ID="p38y7"
+RUN_ID="p38y8"
 WORKTREE="/tmp/canon-zero-tim-p38y-${SOURCE_COMMIT:0:12}"
 OUT="/tmp/p38y-render-${SOURCE_COMMIT:0:12}"
 LAUNCH_RETURN="/tmp/p38y-launch-${SOURCE_COMMIT:0:12}"
@@ -59,7 +68,7 @@ Before `apply`, the script must print all three:
 
 ```text
 P38Y_PROFILE_PREFLIGHT_PASS resident=1 evidence=1 batched_report=1 batched_reverse=0
-P38Y_SHARDING_PREFLIGHT_PASS model_axes=actual_mesh data_axis=actual_mesh restart_evidence=attempt_scoped
+P38Y_SHARDING_PREFLIGHT_PASS model_axes=actual_mesh data_axis=actual_mesh restart_evidence=attempt_scoped tied_endpoint=static receipt_gate=terminal
 P38Y_SEMANTIC_PREFLIGHT_PASS steps=200 topology=DP16xTP4 fixed_lm_head=1 warning_only_ab=1
 ```
 
@@ -93,6 +102,21 @@ The bootstrap log must report
 `Resource axis: model ... not found in mesh` error is a hard bootstrap failure,
 not a retryable numerical result. Finally seal the launch directory:
 
+Before accepting any numerical result, the complete head log must also contain
+the endpoint-scoped terminal receipt:
+
+```text
+[P38.FIXED_LM_HEAD] RECEIPTS_PASS endpoint=tied_embed K=2048 request_M=16,32,64,128,256 learner_M=4096 vjp=<positive>
+```
+
+`CANON_P38_FIXED_LM_HEAD=1` in the environment is not proof of execution.
+Missing, unscoped, `untied_lm_head`, or zero-VJP receipts void the fixed-head
+experiment even if the workload exits zero.
+The same postflight writes
+`attempt-N/p38_fixed_lm_head_receipts.json`, prints its SHA, and embeds the
+complete JSON in the head log. Return that JSON when it survives; the full log
+plus printed SHA/JSON remains the required fallback.
+
 ```bash
 (cd "$LAUNCH_RETURN" && find . -maxdepth 1 -type f ! -name RETURN_SHA256SUMS \
   -printf '%f\n' | LC_ALL=C sort | xargs -r sha256sum >RETURN_SHA256SUMS)
@@ -106,12 +130,14 @@ Return the complete `LAUNCH_RETURN` directory or its GCS location plus
 
 The target is a full-training gate, not another diagnostic-only round:
 
-- 200 completed steps, fixed-lm-head request and M4096 VJP receipts, resident
+- 200 completed steps, tied-endpoint fixed-lm-head request and M4096 VJP
+  receipts, resident
   optimizer receipt, finite/nonzero gradients, replica-exact reduction, and
   valid optimizer commits are required;
 - all steps A=B=C proves the Qwen3-1.7B full-training target;
 - finite A-B warnings with exact B-C allow an `alignment-degraded` convergence
-  result, not a zero-TIM completion claim;
+  result and prove that fixed lm-head is insufficient for this endpoint, not a
+  zero-TIM completion claim;
 - B-C, nonfinite, reducer, optimizer, or state-transition red is FAIL;
 - eviction or exhausted restarts is INCONCLUSIVE.
 

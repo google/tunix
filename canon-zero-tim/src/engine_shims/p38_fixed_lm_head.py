@@ -45,6 +45,7 @@ CONFLICTS = (
     "CANON_TAIL",
 )
 VJP_PASS = "FIXED_LM_HEAD_ONEHOST_VJP_PASS"
+ENDPOINTS = ("untied_lm_head", "tied_embed", "direct_probe")
 
 
 def _validate_hidden(hidden: int) -> int:
@@ -175,6 +176,7 @@ def fixed_lm_head(
     mesh,
     tp_axis: str,
     local_matmul: Callable,
+    endpoint: str,
 ):
     """Run every registered outer shape through one fixed Pallas shape."""
     import jax
@@ -184,6 +186,11 @@ def fixed_lm_head(
     from jax.sharding import PartitionSpec as P
 
     preflight(require_enabled=True)
+    if endpoint not in ENDPOINTS:
+        raise ValueError(
+            f"P38 fixed lm_head endpoint must be one of {ENDPOINTS}, got "
+            f"{endpoint!r}"
+        )
     if mesh is None:
         raise RuntimeError("P38 fixed lm_head requires the live model mesh")
     if tp_axis not in mesh.shape:
@@ -240,7 +247,7 @@ def fixed_lm_head(
                 "[PATHTRACE] CANON_P38_FIXED_LM_HEAD_VJP=1 "
                 "semantic_M=4096 fixed_M=256 chunks=16 "
                 "accumulation=lax.scan order=ascending "
-                f"K={hidden_size}",
+                f"K={hidden_size} endpoint={endpoint}",
                 flush=True,
             )
             a_learner, weight_local = residual
@@ -291,7 +298,8 @@ def fixed_lm_head(
             "[PATHTRACE] CANON_P38_FIXED_LM_HEAD=1 "
             f"semantic_M={local_m} fixed_M={FIXED_M} K={hidden_size} "
             f"local_N={LOCAL_VOCAB} fixed_N={PADDED_LOCAL_VOCAB} "
-            f"BM={BM} BN={BN} BK={BK} chunks={chunks}",
+            f"BM={BM} BN={BN} BK={BK} chunks={chunks} "
+            f"endpoint={endpoint}",
             flush=True,
         )
         if tuple(map(int, out.shape)) != (local_m, LOCAL_VOCAB):

@@ -84,8 +84,11 @@ class RenderP38BackwardJobsetTest(unittest.TestCase):
     env_script = (ROOT / "canon-zero-tim/cluster/steps/00_env.sh").read_text()
     run_script = (ROOT / "canon-zero-tim/cluster/steps/90_run.sh").read_text()
     self.assertIn("P38.2h fixed lm-head backward-no-commit enabled", env_script)
-    self.assertIn("P38.2h fixed lm-head backward VJP did not execute", run_script)
-    self.assertIn("CANON_P38_FIXED_LM_HEAD_VJP=1", run_script)
+    self.assertIn("classify_p38_fixed_lm_head_receipts.py", run_script)
+    self.assertIn("p38_fixed_receipt_args+=(--require-vjp)", run_script)
+    self.assertIn("fixed lm-head executable receipt contract failed", run_script)
+    self.assertIn("[P38.FIXED_LM_HEAD] RECEIPT_ARTIFACT", run_script)
+    self.assertIn("p38_fixed_lm_head_receipts.json", run_script)
 
 
 if __name__ == "__main__":

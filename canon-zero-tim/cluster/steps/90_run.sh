@@ -460,6 +460,7 @@ n_p35_stage_complete=$(grep -ac '^\[CANON_P35.3C\] STAGE_PROBE_COMPLETE .*NO_NUM
 n_p38_precheck=$(grep -ac '^\[CANON_P38\] PRECHECK_COMPLETE STOP_BEFORE_BACKWARD' "$LOG" || true)
 n_p38_rounds=$(grep -ac '^\[CANON_P38\] PRECHECK_ROUND_COMPLETE ' "$LOG" || true)
 n_p38_controlled_exit=$(grep -ac '^\[CANON_P38\] CONTROLLED_EXIT code=42 backward=0 optimizer_commits=0' "$LOG" || true)
+n_p38_fixed_primal=$(grep -ac '^\[PATHTRACE\] CANON_P38_FIXED_LM_HEAD=1 ' "$LOG" || true)
 n_p38_fixed_vjp=$(grep -ac '^\[PATHTRACE\] CANON_P38_FIXED_LM_HEAD_VJP=1 semantic_M=4096 fixed_M=256 chunks=16 accumulation=lax.scan order=ascending' "$LOG" || true)
 n_p38_kv_unified=$(grep -ac 'KV_UNIFIED_two_pass' "$LOG" || true)
 n_p38_capture_init=$(grep -ac '^\[CANON_P38_SERVING_CAPTURE_INIT\]' "$LOG" || true)
@@ -482,7 +483,7 @@ n_p38_terminal_b=$(grep -ac '^\[CANON_P38_TERMINAL_DISCRIMINATOR_RECORD\] .* arm
 n_p38_coverage=$(grep -ac '^\[CANON_P38\] DIAGNOSTIC_COVERAGE_CONTRACT .*prompt_groups=32 .*unit_prompts=4 .*units=8 .*trajectories=256 .*partial_tail=reject verdict=PASS' "$LOG" || true)
 n_p38_standard_init=$(grep -ac '^\[CANON_P38_SERVING_CAPTURE_INIT\].*expected_path=standard' "$LOG" || true)
 n_p38_standard_observe=$(grep -aEc '^\[CANON_P38_SERVING_CAPTURE_OBSERVE\].*"program_path"[[:space:]]*:[[:space:]]*"standard"' "$LOG" || true)
-echo "[run] PATHTRACE fixed_ar=$n_ar embed=$n_emb logprob_m=$n_lp wandb_online=$n_wandb p34_wandb_online=$n_wandb_p34 eval_off=$n_eval_off eval_on=$n_eval_on p35_base=$n_p35_base p35_stop=$n_p35_stop p35_replay=$n_p35_replay p35_stage_begin=$n_p35_stage_begin p35_stage_ready=$n_p35_stage_ready p35_stage_complete=$n_p35_stage_complete p38_precheck=$n_p38_precheck p38_rounds=$n_p38_rounds p38_controlled_exit=$n_p38_controlled_exit p38_fixed_vjp=$n_p38_fixed_vjp p38_kv_unified=$n_p38_kv_unified p38_capture_init=$n_p38_capture_init p38_capture_observe=$n_p38_capture_observe p38_capture_error=$n_p38_capture_error p38_request_journal=$n_p38_request_journal p38_incident_ledger=$n_p38_incident_ledger p38_kv_observer_init=$n_p38_kv_observer_init p38_kv_observer_candidate=$n_p38_kv_observer_candidate p38_kv_observer_a=$n_p38_kv_observer_a p38_kv_observer_b=$n_p38_kv_observer_b p38_seam_init=$n_p38_seam_init p38_seam_records=$n_p38_seam_records p38_tail_init=$n_p38_tail_init p38_tail_a=$n_p38_tail_a p38_tail_b=$n_p38_tail_b p38_terminal_init=$n_p38_terminal_init p38_terminal_a=$n_p38_terminal_a p38_terminal_b=$n_p38_terminal_b p38_coverage=$n_p38_coverage"
+echo "[run] PATHTRACE fixed_ar=$n_ar embed=$n_emb logprob_m=$n_lp wandb_online=$n_wandb p34_wandb_online=$n_wandb_p34 eval_off=$n_eval_off eval_on=$n_eval_on p35_base=$n_p35_base p35_stop=$n_p35_stop p35_replay=$n_p35_replay p35_stage_begin=$n_p35_stage_begin p35_stage_ready=$n_p35_stage_ready p35_stage_complete=$n_p35_stage_complete p38_precheck=$n_p38_precheck p38_rounds=$n_p38_rounds p38_controlled_exit=$n_p38_controlled_exit p38_fixed_primal=$n_p38_fixed_primal p38_fixed_vjp=$n_p38_fixed_vjp p38_kv_unified=$n_p38_kv_unified p38_capture_init=$n_p38_capture_init p38_capture_observe=$n_p38_capture_observe p38_capture_error=$n_p38_capture_error p38_request_journal=$n_p38_request_journal p38_incident_ledger=$n_p38_incident_ledger p38_kv_observer_init=$n_p38_kv_observer_init p38_kv_observer_candidate=$n_p38_kv_observer_candidate p38_kv_observer_a=$n_p38_kv_observer_a p38_kv_observer_b=$n_p38_kv_observer_b p38_seam_init=$n_p38_seam_init p38_seam_records=$n_p38_seam_records p38_tail_init=$n_p38_tail_init p38_tail_a=$n_p38_tail_a p38_tail_b=$n_p38_tail_b p38_terminal_init=$n_p38_terminal_init p38_terminal_a=$n_p38_terminal_a p38_terminal_b=$n_p38_terminal_b p38_coverage=$n_p38_coverage"
 if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
   if [ "$n_p38_capture_init" -ne 1 ] || [ "$n_p38_capture_observe" -le 0 ]; then
     echo "[run] FATAL: P38 serving capture hook was not observed: init=$n_p38_capture_init observe=$n_p38_capture_observe" >&2
@@ -581,11 +582,44 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
     exit 1
   fi
 fi
-if [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "1" ] && \
-   [ -z "${CANON_P38_SERVING_CAPTURE_DIR:-}" ] && \
-   [ "$n_p38_fixed_vjp" -le 0 ]; then
-  echo "[run] FATAL: P38.2h fixed lm-head backward VJP did not execute (or GSM8K full equivalent)" >&2
-  exit 1
+if [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "1" ]; then
+  case "${CANON_P32_WORKLOAD:-}:${CANON_P33_RUN_STAGE:-}:${CANON_PROFILE_FILE:-}" in
+    gsm8k:full:cluster/profiles/qwen3-1p7b-dp16-tp4-gsm8k.env)
+      p38_fixed_endpoint=tied_embed
+      p38_fixed_hidden=2048
+      ;;
+    frozenlake:backward-no-commit:cluster/profiles/qwen3-8b.env)
+      p38_fixed_endpoint=untied_lm_head
+      p38_fixed_hidden=4096
+      ;;
+    *)
+      echo "[run] FATAL: fixed lm-head receipt classifier has no admitted workload/stage/profile contract" >&2
+      exit 1
+      ;;
+  esac
+  p38_fixed_receipt_args=(
+    --log "$LOG"
+    --endpoint "$p38_fixed_endpoint"
+    --hidden "$p38_fixed_hidden"
+    --output "$CANON_STATE/p38_fixed_lm_head_receipts.json"
+  )
+  if [ -z "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
+    p38_fixed_receipt_args+=(--require-vjp)
+  fi
+  if ! JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
+      python3 "$CANON_PKG/tasks/p38-pathways-decode-prefill-carrier/scripts/classify_p38_fixed_lm_head_receipts.py" \
+        "${p38_fixed_receipt_args[@]}"; then
+    echo "[run] FATAL: fixed lm-head executable receipt contract failed" >&2
+    exit 1
+  fi
+  p38_fixed_receipt_report="$CANON_STATE/p38_fixed_lm_head_receipts.json"
+  p38_fixed_receipt_sha="$(sha256sum "$p38_fixed_receipt_report" | awk '{print $1}')"
+  echo "[P38.FIXED_LM_HEAD] RECEIPT_ARTIFACT path=$p38_fixed_receipt_report sha256=$p38_fixed_receipt_sha"
+  sed 's/^/[P38.FIXED_LM_HEAD_RECEIPTS_JSON] /' "$p38_fixed_receipt_report"
+  if [ -n "${attempt_evidence_dir:-}" ]; then
+    cp -- "$p38_fixed_receipt_report" \
+      "$attempt_evidence_dir/p38_fixed_lm_head_receipts.json"
+  fi
 fi
 if [ "${CANON_P35_EXACT_REPLAY:-0}" = "1" ] && \
    [ -s "${CANON_P35_PRE_REPLAY_REPORT:-}" ]; then

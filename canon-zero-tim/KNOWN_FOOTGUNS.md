@@ -213,3 +213,20 @@ envs UNSET still does not execute those branches (defaults off), so
 default-off neutrality certification via the pair stands; in-run
 dual-compute verify modes remain the byte gates of choice because they
 also dodge step-0 sampling nondeterminism.
+
+### 21. An enabled output-head flag does not prove the model used the patched endpoint
+
+P38y7 set `CANON_P38_FIXED_LM_HEAD=1`, passed renderer/overlay preflight, and
+still emitted zero fixed-head receipts. The reason was architectural rather
+than stochastic: Qwen3-1.7B has tied word embeddings, so `compute_logits`
+calls `JaxEmbed.decode`; the original intervention patched only the untied
+`JaxLmHead.__call__` endpoint. Qwen3-8B's admitted zero-byte evidence therefore
+did not cover the 1.7B program.
+
+Any endpoint-sensitive intervention must carry an execution identity in every
+runtime receipt and a workload/model-specific postflight classifier. An env
+flag, installed module, or green direct-core probe is only construction
+evidence. For P38 fixed head, GSM8K must report `endpoint=tied_embed` for all
+request buckets and learner M4096 plus its fixed-order VJP; FrozenLake's
+untied lane must report `endpoint=untied_lm_head`. Missing or foreign endpoint
+receipts void the experiment regardless of exit code.

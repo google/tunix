@@ -90,6 +90,7 @@ if _p38_fixed_lm_head_value not in ("", "0", "1"):
     )
 
 if _p38_fixed_lm_head_value == "1":
+    from tpu_inference.layers.jax import embed as _p38_embed_module
     from p38_fixed_lm_head import fixed_lm_head as _p38_fixed_lm_head
     from p38_fixed_lm_head import preflight as _p38_fixed_lm_head_preflight
 
@@ -111,10 +112,31 @@ if _p38_fixed_lm_head_value == "1":
             mesh=_CANON_MESH,
             tp_axis=_CANON_TP_AXIS,
             local_matmul=traced_canonical_vjp_matmul,
+            endpoint="untied_lm_head",
         )
 
     _p22xk_linear_module.JaxLmHead.__call__ = _p38_fixed_lm_head_call
     JaxLmHead = _p22xk_linear_module.JaxLmHead
+
+    # Qwen3-1.7B ties the output projection to model.embed_tokens.  Its
+    # compute_logits path therefore calls JaxEmbed.decode and never constructs
+    # JaxLmHead.  Feed the transposed [V,D] embedding table through the same
+    # fixed [D,V] head.  AD through the transpose returns the output-head
+    # cotangent in embedding orientation; P28.G5C already combines that value
+    # with the input-embedding cotangent in its certified fixed order.
+    _p38_original_tied_head_decode = _p38_embed_module.JaxEmbed.decode
+
+    def _p38_fixed_tied_head_decode(self, inputs):
+        return _p38_fixed_lm_head(
+            inputs,
+            self.weight.value.T,
+            mesh=_CANON_MESH,
+            tp_axis=_CANON_TP_AXIS,
+            local_matmul=traced_canonical_vjp_matmul,
+            endpoint="tied_embed",
+        )
+
+    _p38_embed_module.JaxEmbed.decode = _p38_fixed_tied_head_decode
 
 P22XK_LINEAR_BASE = _p22xk_linear_module
 P22XK_MATMUL_FORWARD = _forward
@@ -123,3 +145,7 @@ P22XK_MATMUL_ACTIVE = (
     _p22xk_linear_module.P22XI_XF_MODULE.pallas_matmul is traced_canonical_vjp_matmul
 )
 P38_FIXED_LM_HEAD_ACTIVE = _p38_fixed_lm_head_value == "1"
+P38_FIXED_TIED_HEAD_ACTIVE = (
+    _p38_fixed_lm_head_value == "1"
+    and _p38_embed_module.JaxEmbed.decode is _p38_fixed_tied_head_decode
+)

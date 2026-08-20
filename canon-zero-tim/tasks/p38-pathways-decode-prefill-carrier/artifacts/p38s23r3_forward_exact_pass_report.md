@@ -1,5 +1,10 @@
 # P38s23r3 Fixed LM-Head Prefill Verification: Three-Round Zero-Error Exact Pass Report
 
+> Scope clarification (2026-08-20): this is admitted evidence for the
+> Qwen3-8B untied `JaxLmHead` endpoint only. It does not cover Qwen3-1.7B's
+> tied `JaxEmbed.decode` endpoint. The 146,042-token zero-byte measurement
+> remains valid within that scope.
+
 ## 1. Executive Summary & Verified Facts
 
 - **Workload**: `canon-p38-fl-stock-p38s23r3-7c852e76` (64 TPU `DP16xTP4`, Concurrency 256, 3 Frozen Diagnostic Rounds)

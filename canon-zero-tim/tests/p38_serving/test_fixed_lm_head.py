@@ -128,8 +128,22 @@ class FixedLmHeadContractTest(unittest.TestCase):
     text = SOURCE.read_text()
     self.assertIn('_p38_fixed_lm_head_value == "1"', text)
     self.assertIn("_p22xk_linear_module.JaxLmHead.__call__ =", text)
+    self.assertIn("_p38_embed_module.JaxEmbed.decode =", text)
+    self.assertIn("self.weight.value.T", text)
+    self.assertIn('endpoint="untied_lm_head"', text)
+    self.assertIn('endpoint="tied_embed"', text)
     self.assertIn("P38_FIXED_LM_HEAD_ACTIVE", text)
+    self.assertIn("P38_FIXED_TIED_HEAD_ACTIVE", text)
     self.assertNotIn("CANON_P38_FIXED_LM_HEAD", text.split("JaxEinsum =", 1)[0])
+
+  def test_fixed_head_requires_a_registered_endpoint(self):
+    self.assertEqual(
+        fixed.ENDPOINTS, ("untied_lm_head", "tied_embed", "direct_probe")
+    )
+    text = FIXED_SOURCE.read_text()
+    self.assertIn("endpoint must be one of", text)
+    self.assertIn("f\"K={hidden_size} endpoint={endpoint}\"", text)
+    self.assertIn("f\"endpoint={endpoint}\"", text)
 
   def test_learner_uses_fixed_chunks_without_stock_fallback(self):
     text = FIXED_SOURCE.read_text()

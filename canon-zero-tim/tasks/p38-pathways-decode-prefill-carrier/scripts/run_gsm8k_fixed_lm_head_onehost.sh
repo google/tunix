@@ -107,10 +107,10 @@ set -e
 echo "[P38.GSM8K.FIXED_LM_HEAD] vjp_docker_exit=$vjp_rc" >>"$raw"
 test "$vjp_rc" -eq 0
 
-grep -Fq "semantic_M=16 fixed_M=256 K=2048 local_N=37984 fixed_N=38144" "$raw"
-grep -Fq "semantic_M=256 fixed_M=256 K=2048 local_N=37984 fixed_N=38144" "$raw"
-grep -Fq "semantic_M=4096 fixed_M=256 K=2048 local_N=37984 fixed_N=38144" "$raw"
-grep -Fq "semantic_M=4096 fixed_M=256 chunks=16 accumulation=lax.scan order=ascending K=2048" "$raw"
+grep -Eq "semantic_M=16 fixed_M=256 K=2048 local_N=37984 fixed_N=38144 .*endpoint=direct_probe" "$raw"
+grep -Eq "semantic_M=256 fixed_M=256 K=2048 local_N=37984 fixed_N=38144 .*endpoint=direct_probe" "$raw"
+grep -Eq "semantic_M=4096 fixed_M=256 K=2048 local_N=37984 fixed_N=38144 .*endpoint=direct_probe" "$raw"
+grep -Eq "semantic_M=4096 fixed_M=256 chunks=16 accumulation=lax.scan order=ascending K=2048 endpoint=direct_probe" "$raw"
 
 python3 - "$forward_report" "$vjp_report" <<'PY'
 import json
@@ -122,11 +122,13 @@ vjp = json.loads(pathlib.Path(sys.argv[2]).read_text())
 assert forward["verdict"] == "FIXED_LM_HEAD_ONEHOST_CONSTRUCTION_PASS"
 assert forward["fixed_shape"] == [256, 2048, 38144]
 assert forward["weight_shape"] == [2048, 151936]
+assert forward["weight_source"] == "model.embed_tokens.weight"
 assert all(row["fixed_differing_elements"] == 0 for row in forward["seeds"])
 assert all(row["differing_elements"] == 0 for row in forward["learner_seeds"])
 assert forward["negative_control_differing_elements"] == 1
 assert vjp["verdict"] == "FIXED_LM_HEAD_ONEHOST_VJP_PASS"
 assert vjp["weight_shape"] == [2048, 151936]
+assert vjp["weight_source"] == "model.embed_tokens.weight"
 for key in ("hidden", "weight", "repeat_hidden", "repeat_weight"):
   assert vjp[key] == {"differing_elements": 0, "max_abs": 0.0}
 assert vjp["gradient_finite"] is True

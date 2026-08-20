@@ -16,7 +16,7 @@
 | CANON_RPA_VJP2(+VJP2_MAX_SEQS) | R4:cache-aware 认证反向 | off | 已认证(fp64 oracle+20/20+21/21) | 转正焊死;MAX_SEQS>1 需归约序审计先行 |
 | CANON_LOGPROB_M / CANON_PROMPT_PROCESSED_LOGPROBS | R5:三臂共享 logprob callable,M=256 | off | 已认证(G9 4/4+负控) | 转正焊死 |
 | CANON_MM_ALGO / CANON_MM_ALGO_PRESET | P19/P38:非 Pallas einsum 的 dot-algorithm 判别器;P38 仅允许 fixed `BF16_BF16_F32` 单变量臂 | off / BF16_BF16_F32 | **否决区**:旧 M16/M2048 e2e 无效;P38s22 三轮 A-B 仍红 | 可删,判决记录永存 |
-| CANON_P38_FIXED_LM_HEAD | P38.2x/2y:Qwen3 TP4 lm_head 的 M8/16/32/64/128/256 request buckets 均 pad 到 M256；learner M4096 映射为 16xM256；Qwen3-1.7B/8B 分别钉 K2048/K4096，共享 N37984→38144 与固定 Pallas tiles | off；GSM8K full 显式 opt-in | Qwen3-8B DP16xTP4 forward+backward-no-commit 已认证；Qwen3-1.7B real-v5p forward+VJP 已本地过门、200-step target 未跑 | Qwen3-1.7B 200-step full 与 Qwen3-8B full-load 均绿后改名转正；任一红则按模型退役 |
+| CANON_P38_FIXED_LM_HEAD | P38.2x/2y/2y1:Qwen3 TP4 output head 的 M8/16/32/64/128/256 request buckets 均 pad 到 M256；learner M4096 映射为 16xM256；untied `JaxLmHead` 与 tied `JaxEmbed.decode` 均接入同一 Pallas body，并用 endpoint-scoped receipts 证明实际执行；Qwen3-1.7B/8B 分别钉 K2048/K4096，共享 N37984→38144 与固定 tiles | off；GSM8K full 显式 opt-in | Qwen3-8B untied DP16xTP4 forward+backward-no-commit 已认证；Qwen3-1.7B tied exact-image 已过门、real-v5p rerun 与 200-step target 未跑 | Qwen3-1.7B tied 200-step full 与 Qwen3-8B full-load 均绿后改名转正；任一红则按 endpoint/model 退役 |
 | CANON_PROMPT_DIRECT_LOGPROBS / ABSOLUTE_TARGET_IDS | R5 同族实现细节开关 | off | 已认证 | 随 R5 同批焊死 |
 | CANON_PALLAS_{CANONICAL_VJP,ALL_PROJ,ALL_RMSNORM,MPAD,SWIGLU,SWIGLU_MPAD} | canonical Pallas 内核族选通 | off | 已认证 | 转正焊死(P22.XI 部分已无条件) |
 | CANON_P28_SEGMENTED_TRAIN | 分段 fixed-M 训练前向 | off | 已认证 | 转正焊死 |

@@ -94,15 +94,27 @@ repo = Path(sys.argv[1])
 demo = (repo / "examples/math_gsm8k/qwen3_grpo_demo.py").read_text()
 workloads = (repo / "tunix/rl/dp_workloads.py").read_text()
 runner = (repo / "canon-zero-tim/cluster/steps/90_run.sh").read_text()
+linear = (repo / "canon-zero-tim/src/engine_shims/linear_p22xk.py").read_text()
+classifier = (
+    repo
+    / "canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/"
+    "classify_p38_fixed_lm_head_receipts.py"
+).read_text()
 assert "configure_model_sharding_for_mesh(config, mesh.axis_names)" in demo
 assert "data_sharding_axis_for_mesh(\n              shared_mesh.axis_names" in demo
 assert "def configure_model_sharding_for_mesh(" in workloads
 assert '("dp", "tp"), ("data", "model")' in workloads
 assert "GSM8K_FULL_ATTEMPT_EVIDENCE" in runner
 assert 'attempt_evidence_dir="${CANON_STATE%/}/attempt-$JOBSET_RESTART_ATTEMPT"' in runner
+assert "_p38_embed_module.JaxEmbed.decode = _p38_fixed_tied_head_decode" in linear
+assert 'endpoint="tied_embed"' in linear
+assert "gsm8k:full:cluster/profiles/qwen3-1p7b-dp16-tp4-gsm8k.env" in runner
+assert "classify_p38_fixed_lm_head_receipts.py" in runner
+assert "P38_FIXED_LM_HEAD_RECEIPTS_PASS" in classifier
 print(
     "P38Y_SHARDING_PREFLIGHT_PASS "
-    "model_axes=actual_mesh data_axis=actual_mesh restart_evidence=attempt_scoped"
+    "model_axes=actual_mesh data_axis=actual_mesh restart_evidence=attempt_scoped "
+    "tied_endpoint=static receipt_gate=terminal"
 )
 PY
 

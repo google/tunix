@@ -77,11 +77,13 @@ for semantic_m, chunks in (
   lines.append(
       "[PATHTRACE] CANON_P38_FIXED_LM_HEAD=1 "
       f"semantic_M={semantic_m} fixed_M=256 K=4096 local_N=37984 "
-      f"fixed_N=38144 BM=128 BN=256 BK=256 chunks={chunks}"
+      f"fixed_N=38144 BM=128 BN=256 BK=256 chunks={chunks} "
+      "endpoint=untied_lm_head"
   )
 lines.extend([
     "[PATHTRACE] CANON_P38_FIXED_LM_HEAD_VJP=1 semantic_M=4096 "
-    "fixed_M=256 chunks=16 accumulation=lax.scan order=ascending",
+    "fixed_M=256 chunks=16 accumulation=lax.scan order=ascending "
+    "K=4096 endpoint=untied_lm_head",
     "[CANON_P33_DP16] backward_no_commit verdict=PASS commits=0 microsteps=16",
 ])
 for name, payload in (

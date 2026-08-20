@@ -5,28 +5,34 @@ parallel Qwen3-32B DeepSWE workstream, read
 `../p39-deepswe-production/HANDOFF.md`. P38 evidence cannot promote P39, and
 P39 evidence cannot promote P38.
 
-## CURRENT ACTION: publish the P38y repair, then launch fresh P38y7
+## CURRENT ACTION: certify the tied-head repair, then launch P38y8
 
-The Qwen3-1.7B extension of the fixed-tile lm-head passed unit, renderer,
-pinned-image Qwen1.7/Qwen8 overlay, and real one-host v5p forward+VJP gates.
-P38y6 did not test it: model bootstrap paired `data,model` PartitionSpecs with
-the actual `dp,tp` mesh and failed before model load; later JobSet attempts
-then refused stale Attempt-0 evidence paths. Its verdict is
-`INCONCLUSIVE_BOOTSTRAP_SHARDING_AXIS`.
+P38s23r3 and P38h1 remain admitted zero-byte evidence for Qwen3-8B's untied
+`JaxLmHead` endpoint. P38y7 did not invalidate that evidence: Qwen3-1.7B ties
+its output head to `model.embed_tokens`, so its actual logits path is
+`JaxEmbed.decode`. The old hook patched only `JaxLmHead`. P38y7 set the flag
+but emitted zero fixed-head primal/VJP receipts and therefore never executed
+the P38s23 intervention.
 
-The repair derives model and learner sharding names from the materialized mesh
-and isolates GSM8K-full evidence per `JOBSET_RESTART_ATTEMPT`. Local compile
-and pinned-image 55-test sharding/restart gates pass. After a
-separately approved commit/push, the target is one fresh 200-step P38y7
-`DP16xTP4` run with resident optimizer, P47a, batched evidence, and batched
-report. P52 batched reverse remains off because its DP16 grouped path is not
-certified.
+P38y7's returned log is still useful full-training evidence: step 0 was exact;
+steps 1--4 had exact B-C and sparse A-B red, including step 3 at 41 elements /
+74 bytes / `max_abs=0.10463905334472656`. The checked-in progress report's
+smaller aggregate maximum is superseded by the raw-log correction recorded in
+`phases/p38-2y1-tied-output-head-receipts.md`.
 
-An execution-only operator must follow `P38Y_GSM8K_FULL_RUNBOOK.md` and the
-checked-in `scripts/launch_p38y_gsm8k_full.sh`; do not hand-edit YAML, reuse a
-diagnostic renderer, or relaunch P38y6. All three preflight receipts must
-appear before apply. The target remains unsatisfied until a separately
-approved repair SHA is published and P38y7 completes.
+The local P38.2y1 repair patches tied `JaxEmbed.decode` with the same fixed
+Pallas body, labels every primal/VJP receipt by endpoint, and makes production
+postflight fail closed unless the admitted endpoint emits all request buckets,
+learner M4096, and fixed-order VJP receipts. Focused unit tests and both
+pinned-image overlays pass; a real-weight one-host rerun is pending because
+the local TPU is occupied.
+
+After that gate and separately approved commit/push, an execution-only
+operator follows `P38Y_GSM8K_FULL_RUNBOOK.md` to launch one fresh P38y8
+200-step `DP16xTP4` run. Do not hand-edit YAML or reuse P38y7. P52 batched
+reverse, prefix cache, and evaluation remain off. The target is unsatisfied
+until the tied receipt classifier passes and the P38y8 numerical result is
+classified.
 
 ## CURRENT: P38.2h 64-TPU Fixed-LM-Head Backward-No-Commit PASS (`P38H_FIXED_LM_HEAD_BACKWARD_NO_COMMIT_PASS`)
 

@@ -90,7 +90,14 @@ def main() -> None:
     rows_replicated = NamedSharding(mesh, P(None))
     vocab_sharded = NamedSharding(mesh, P(None, "model"))
     hidden_size = int(args.hidden_size)
-    weight = _load_weight(args.model, vocab_sharded, hidden_size)
+    weight_source = (
+        "model.embed_tokens.weight"
+        if hidden_size == 2048
+        else "lm_head.weight"
+    )
+    weight = _load_weight(
+        args.model, vocab_sharded, hidden_size, weight_source
+    )
 
     key = jax.random.PRNGKey(args.seed)
     hidden = jax.random.normal(
@@ -112,6 +119,7 @@ def main() -> None:
             mesh=mesh,
             tp_axis="model",
             local_matmul=_promoted_matmul,
+            endpoint="direct_probe",
         )
         selected = jnp.take_along_axis(
             logits, target_arg[:, None], axis=1
@@ -214,6 +222,7 @@ def main() -> None:
         "weight_gradient_nonzero": weight_nonzero,
         "negative_control_differing_elements": negative_differing,
         "weight_shape": [hidden_size, VOCAB],
+        "weight_source": weight_source,
         "weight_dtype": str(weight.dtype),
         "weight_sharding": str(weight.sharding),
     }

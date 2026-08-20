@@ -91,7 +91,14 @@ def main() -> None:
     replicated = NamedSharding(mesh, P(None, None))
     vocab_sharded = NamedSharding(mesh, P(None, "model"))
     hidden_size = int(args.hidden_size)
-    weight = _load_weight(args.model, vocab_sharded, hidden_size)
+    weight_source = (
+        "model.embed_tokens.weight"
+        if hidden_size == 2048
+        else "lm_head.weight"
+    )
+    weight = _load_weight(
+        args.model, vocab_sharded, hidden_size, weight_source
+    )
 
     @partial(
         jax.jit,
@@ -105,6 +112,7 @@ def main() -> None:
             mesh=mesh,
             tp_axis="model",
             local_matmul=_promoted_matmul,
+            endpoint="direct_probe",
         )
 
     @partial(
@@ -234,6 +242,7 @@ def main() -> None:
         "learner_m": list(LEARNER_M),
         "fixed_shape": [FIXED_M, hidden_size, PADDED_LOCAL_VOCAB],
         "weight_shape": [hidden_size, VOCAB],
+        "weight_source": weight_source,
         "local_vocab": LOCAL_VOCAB,
         "tiles": {"BM": BM, "BN": BN, "BK": BK},
         "weight_dtype": str(weight.dtype),

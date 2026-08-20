@@ -1,22 +1,24 @@
 # State
 
-- Status: P38.2h forward and backward-no-commit gates are admitted. P38.2y
-  extends the fixed-tile lm-head to Qwen3-1.7B GSM8K. P38y6 is
-  `INCONCLUSIVE_BOOTSTRAP_SHARDING_AXIS`: it failed before model load and has
-  no numerical claim. The actual-mesh sharding and attempt-evidence repairs
-  are locally gated; the 200-step DP16xTP4 target remains unsatisfied.
+- Status: P38.2h forward and backward-no-commit gates are admitted for the
+  Qwen3-8B untied `JaxLmHead` endpoint. P38y7 reached five GSM8K full-training
+  steps, with exact B-C and sparse A-B red after step 0, but emitted zero
+  fixed-head primal/VJP receipts. Qwen3-1.7B is tied and its real output path
+  is `JaxEmbed.decode`, so P38y7 did not execute the P38s23 repair and cannot
+  adjudicate it. P38.2y1 patches the tied endpoint and adds endpoint-scoped
+  fail-closed receipts. The 200-step target remains unsatisfied.
 - Objective: localize and remove the Pathways serving decode-versus-prefill
   carrier without weakening the strict zero-TIM release contract.
 - Definition of done: one source-pinned flag-on run reports exact
   `S_decode_vs_S_prefill`, exact `S_prefill_vs_T_old`, and exact
   `T_old_vs_T_current` before a strict full workload is admitted.
-- Active phase: P38.2y Qwen3-1.7B fixed-lm-head full-training integration.
-  Unit and renderer gates, both exact-image model overlays, and the real-v5p
-  Qwen3-1.7B TP4 construction gate are exact for request/learner forward and
-  dHidden/dWeight VJP. The P38y6 bootstrap bug is repaired by deriving
-  sharding from actual mesh axes and separating evidence by restart attempt.
-  P52 batched reverse stays off. Next: review, separately approve commit/push,
-  then an execution-only operator launches fresh P38y7 from that exact SHA.
+- Active phase: P38.2y1 tied output-head integration and executable receipts.
+  Focused unit gates and both pinned-image overlays pass. The old P38y7 log is
+  mechanically rejected for missing tied endpoint receipts. The local v5p is
+  currently occupied, so the real-weight one-host rerun is pending. P52
+  batched reverse stays off. Next: free-device one-host gate, review, separate
+  commit/push approval, then an execution-only operator launches P38y8 from
+  that exact SHA.
 - Task directory:
   `canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/`.
 - P38s20/source `bea31f36655b137d7ab47ba94095cadda5b586ba` execution

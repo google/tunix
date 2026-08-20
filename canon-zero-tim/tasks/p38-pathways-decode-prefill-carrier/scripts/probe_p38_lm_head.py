@@ -52,17 +52,18 @@ def _load_weight(
     model: Path,
     sharding: NamedSharding,
     hidden_size: int = HIDDEN,
+    weight_key: str = "lm_head.weight",
 ) -> jax.Array:
   from safetensors import safe_open
 
   index = json.loads((model / "model.safetensors.index.json").read_text())
-  shard_name = index["weight_map"].get("lm_head.weight")
+  shard_name = index["weight_map"].get(weight_key)
   if not shard_name:
-    raise RuntimeError("checkpoint has no lm_head.weight")
+    raise RuntimeError(f"checkpoint has no {weight_key}")
   shard_path = model / shard_name
 
   with safe_open(shard_path, framework="pt", device="cpu") as handle:
-    source_shape = tuple(handle.get_slice("lm_head.weight").get_shape())
+    source_shape = tuple(handle.get_slice(weight_key).get_shape())
   hidden_size = int(hidden_size)
   if source_shape != (VOCAB, hidden_size):
     raise RuntimeError(
@@ -73,7 +74,7 @@ def _load_weight(
   def callback(index: tuple[slice, ...]) -> np.ndarray:
     hidden_slice, vocab_slice = index
     with safe_open(shard_path, framework="pt", device="cpu") as handle:
-      source = handle.get_slice("lm_head.weight")[vocab_slice, hidden_slice]
+      source = handle.get_slice(weight_key)[vocab_slice, hidden_slice]
     # Safetensors stores [V,D]; JaxLmHead consumes [D,V].
     return _bf16_numpy(source).T
 
