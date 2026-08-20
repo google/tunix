@@ -121,7 +121,7 @@ class Scheduler:
 
         while free_tpu + len(self.unreferenced_tpu_pages) < required_pages and self.running_requests:
             preempted = self.running_requests.pop()
-            for pid in preempted.page_ids:
+            for pid in reversed(preempted.page_ids):
                 self.release_page(pid)
             self.pending_requests.appendleft(preempted)
             required_pages -= 1
@@ -154,7 +154,12 @@ class Scheduler:
             matched_page_ids = []
             for h in req_hashes:
                 if h in self.prefix_hash_to_page_id:
-                    matched_page_ids.append(self.prefix_hash_to_page_id[h])
+                    pid = self.prefix_hash_to_page_id[h]
+                    if self.page_location.get(pid) is None:
+                        # Page was physically wiped completely due to memory pressure down to CPU
+                        del self.prefix_hash_to_page_id[h]
+                        break
+                    matched_page_ids.append(pid)
                 else:
                     break
             
@@ -193,6 +198,9 @@ class Scheduler:
             if len(pages_to_load) > physically_free:
                 self._free_up_tpu_space(len(pages_to_load) - physically_free)
             self.cache_manager.load(pages_to_load)
+            
+            for pid in pages_to_load:
+                self.page_location[pid] = "tpu"
 
     def _calculate_new_pages_needed(self) -> int:
         """Sums up the missing boundary pages for all sequences in `running_requests`."""
@@ -223,6 +231,7 @@ class Scheduler:
                 
                 for _ in range(needed):
                     new_pid = allocated_queue.popleft()
+                    self.page_location[new_pid] = "tpu"  # Track newly allocated blocks physically here
                     
                     # Associate this new block ID with its prefix chunk hash
                     chunk_idx = len(req.page_ids)
