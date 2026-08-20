@@ -295,6 +295,14 @@ class RolloutManager:
     self.resume_all()
     self._traffic.reopen()
     return res
+  
+  def reopen_admission(self) -> bool:
+    """Reopens rollout admission after an aborted round."""
+    return self._traffic.reopen()
+
+  async def bind_weight_sync(self, **kwargs) -> Any:
+    """Binds the sampler's destination-side transport for this round."""
+    return await self.sampler.bind_weight_sync(**kwargs)
 
   async def get_weight_sync_metadata(self, **kwargs) -> Any:
     """Returns the sampler's transport metadata for weight sync registration."""

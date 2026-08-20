@@ -40,6 +40,10 @@ class _FakeManager:
   async def post_weight_sync(self, sync_request=None, **kwargs):
     self.calls.append("post")
     return "ok"
+  
+  async def bind_weight_sync(self, **kwargs):
+    self.calls.append("bind")
+    return None
 
   async def get_weight_sync_metadata(self, **kwargs):
     self.calls.append("metadata")
@@ -117,7 +121,20 @@ class WeightSyncPhasesTest(unittest.IsolatedAsyncioTestCase):
     await worker.pre_weight_sync(req)
     await worker.weight_sync(req)
     await worker.post_weight_sync(req)
-    self.assertEqual(worker.manager.calls, ["metadata", "pre", "sync", "post"])
+    self.assertEqual(worker.manager.calls, ["bind", "metadata", "pre", "sync", "post"])
+
+  async def test_bind_delegates_to_manager(self):
+    worker = self._worker()
+    await worker.bind_weight_sync()
+    self.assertIn("bind", worker.manager.calls)
+
+  async def test_abort_reopens_admission(self):
+    worker = self._worker()
+    await worker.pre_weight_sync(_Request("r1", 1))
+    worker.manager.admission_open = False
+    await worker.abort_weight_sync(_Request("r1", 1))
+    self.assertTrue(worker.manager.admission_open)
+    self.assertEqual(worker.state, WorkerState.READY)
 
 
 if __name__ == "__main__":

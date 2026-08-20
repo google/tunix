@@ -174,6 +174,10 @@ class Sampler(Protocol):
   ) -> list[SamplingResponse] | Any:
     """Generates completions for a batch of prompt conversations concurrently."""
     ...
+    
+  async def bind_weight_sync(self, **kwargs) -> Any:
+    """Binds destination-side transport resources. Idempotent per round."""
+    ...
 
   # --- Weight Synchronization ---
   async def get_weight_sync_metadata(self, **kwargs) -> Any:

@@ -30,6 +30,13 @@ class _FakeSampler(sampler_lib.Sampler):
     self.calls.append(kwargs)
     return self._metadata
 
+  async def bind_weight_sync(self, **kwargs):
+    self.calls.append("bind")
+    return None
+
+  async def pre_weight_sync(self, sync_request=None, **kwargs):
+    return "ok"
+
 
 class GetWeightSyncMetadataTest(unittest.IsolatedAsyncioTestCase):
 
@@ -84,6 +91,18 @@ class AdmissionGateTest(unittest.IsolatedAsyncioTestCase):
     await manager.pre_weight_sync()
     await manager.post_weight_sync()
     self.assertTrue(manager._traffic.is_admission_open())
+    
+  async def test_reopen_admission_after_abort(self):
+    manager = self._manager()
+    await manager.pre_weight_sync()
+    self.assertTrue(manager.reopen_admission())
+    self.assertTrue(manager._traffic.is_admission_open())
+
+  async def test_bind_delegates_to_sampler(self):
+    sampler = _FakeSyncSampler([])
+    manager = manager_lib.RolloutManager(
+        sampler=sampler, tokenizer="mock", chat_parser="mock")
+    await manager.bind_weight_sync()
 
   async def test_repeated_pre_is_allowed(self):
     manager = self._manager()
@@ -117,7 +136,6 @@ class AdmissionGateTest(unittest.IsolatedAsyncioTestCase):
     await manager.pre_weight_sync()
     task.cancel()
     manager._active_tasks.pop("t0", None)
-
 
 if __name__ == "__main__":
   absltest.main()

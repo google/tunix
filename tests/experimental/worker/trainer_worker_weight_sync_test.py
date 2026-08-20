@@ -35,8 +35,8 @@ class _ReleasingTrainer(_FakeTrainer):
 
   def release_weight_sync(self, **kwargs):
     self.calls.append("release")
+    self.release_kwargs = kwargs
     return "released"
-
 
 class _FailingTrainer(_FakeTrainer):
 
@@ -82,6 +82,14 @@ class WeightSyncStagingTest(absltest.TestCase):
     worker.prepare_weight_sync()
     self.assertIsNone(worker.release_weight_sync())
     self.assertEqual(worker.state, WorkerState.READY)
+
+  def test_release_forwards_sync_request(self):
+    trainer = _ReleasingTrainer()
+    worker = self._worker(trainer)
+    request = object()
+    worker.prepare_weight_sync()
+    worker.release_weight_sync(request)
+    self.assertIs(trainer.release_kwargs["sync_request"], request)
 
 
 if __name__ == "__main__":

@@ -301,6 +301,10 @@ class VanillaSamplerAdapter(Sampler, abc.ABC):
         "get_weight_sync_metadata() not implemented for this SamplerServer."
     )
 
+  async def bind_weight_sync(self, **kwargs) -> Any:
+    del kwargs
+    return None
+
   async def pre_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
     """Prepares staging handshake prior to policy weight update."""
     del sync_request, kwargs

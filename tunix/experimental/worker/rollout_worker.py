@@ -478,8 +478,8 @@ class RolloutWorker(abstract_worker.Worker):
     return result
 
   async def bind_weight_sync(self, **kwargs) -> Any:
-    """No-op; the sampler binds its transport at engine init."""
-    return None
+    """Binds the destination-side transport via the manager."""
+    return await self.manager.bind_weight_sync(**kwargs)
 
   async def get_weight_sync_metadata(self, **kwargs) -> Any:
     """Returns the sampler's transport metadata via the manager."""
@@ -488,6 +488,7 @@ class RolloutWorker(abstract_worker.Worker):
   async def abort_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
     """Discards the round and resumes serving the previous weights."""
     self.manager.resume_all()
+    self.manager.reopen_admission()
     self.state = WorkerState.READY
     self._record_round(sync_request, "aborted")
     return None
