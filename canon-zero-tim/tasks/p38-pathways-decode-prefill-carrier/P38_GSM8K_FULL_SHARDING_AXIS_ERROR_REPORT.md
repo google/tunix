@@ -55,7 +55,11 @@ ValueError: Resource axis: model of P('model', None) is not found in mesh: ('dp'
    $$\text{mesh.axis\_names} = (\mathbf{"dp"}, \mathbf{"tp"})$$
 
 2. **Profile Export (`cluster/profiles/qwen3-1p7b-dp16-tp4-gsm8k.env:31`)**:
-   The GSM8K cluster profile exports `FL_SHARED_MESH="${CANON_P33_SHARED_MESH:-1,4}"` to satisfy the canonical env admission check.
+   The GSM8K cluster profile exports
+   `FL_SHARED_MESH="${CANON_P33_SHARED_MESH:-1,4}"`. The renderer injects
+   `CANON_P33_SHARED_MESH=16,4`, so the effective target value is `16,4`;
+   `1,4` is only the direct one-host fallback. This variable describes mesh
+   *sizes*, not the JAX mesh axis namespace.
 
 3. **Condition Inversion in Model Sharding Configuration (`qwen3_grpo_demo.py:651-658`)**:
    ```python
@@ -105,33 +109,40 @@ When Attempt 0 failed:
 
 ---
 
-## 5. Required Fix
+## 5. Implemented Repair
 
-In `examples/math_gsm8k/qwen3_grpo_demo.py`:
+Reordering the two environment branches would repair this one profile but
+would preserve the underlying footgun: an environment variable describing
+mesh *shape* would still select the axis *namespace*. The repair instead makes
+the materialized JAX mesh authoritative.
 
-1. **Lines 651-659**:
-   ```python
-   # Fix: Check CANON_P32_WORKLOAD / mesh_dp BEFORE FL_SHARED_MESH
-   if CANON_P32_WORKLOAD or args.mesh_dp is not None:
-     dp_workloads.configure_replicated_parameter_sharding(config)
-   elif os.environ.get("FL_SHARED_MESH"):
-     config.shd_config = (
-         qwen3_model_lib.ShardingConfig.get_data_parallel_sharding(
-             data_axis="data", tp_axis="model"
-         )
-     )
-   ```
+1. `tunix/rl/dp_workloads.py` registers exactly three supported axis pairs:
+   `('fsdp','tp')`, `('dp','tp')`, and `('data','model')`. It derives both the
+   model `PartitionSpec`s and learner data axis from the actual
+   `mesh.axis_names`; any other pair fails closed.
+2. `examples/math_gsm8k/qwen3_grpo_demo.py` calls those helpers after the mesh
+   exists. `FL_SHARED_MESH` remains an admission/size contract and no longer
+   chooses sharding names.
+3. `cluster/steps/90_run.sh` scopes all four GSM8K-full evidence files under
+   `attempt-${JOBSET_RESTART_ATTEMPT}`. Fail-closed no-overwrite semantics are
+   retained inside one attempt, while an Attempt-0 artifact cannot make
+   Attempts 1--3 fail before the command starts. Invalid nonempty attempt
+   values are rejected; the P38y7 operator receipt verifies that the production
+   JobSet actually supplies the Downward API value.
+4. The P38y launcher statically verifies both repair paths before rendering or
+   applying a JobSet.
 
-2. **Lines 1023-1031**:
-   ```python
-   # Fix: Match data_sharding_axis priority
-   data_sharding_axis=(
-       ("dp",)
-       if (CANON_P32_WORKLOAD or args.mesh_dp is not None)
-       else (
-           ("data",)
-           if os.environ.get("FL_SHARED_MESH")
-           else ("fsdp",)
-       )
-   ),
-   ```
+## 6. Verification and Claim Ceiling
+
+- Python compilation and shell syntax: PASS.
+- Pinned-image focused `test_dp_workloads.py`: 55/55 PASS with explicit CPU
+  backend. The matrix covers all three registered mesh namespaces and an
+  unregistered-axis negative.
+- The focused suite's restart positive/negative control proves Attempt 1
+  reaches the command with four attempt-scoped paths while stale base files
+  remain untouched, and rejects a non-integer attempt.
+- P38y6 remains `INCONCLUSIVE_BOOTSTRAP_SHARDING_AXIS`. It entered neither
+  model loading nor the fixed-lm-head numerical program and proves nothing
+  about alignment, gradients, optimizer residency, or convergence.
+- The repair is locally gated only. A fresh source-pinned P38y7 target is
+  required; P38y6 must not be resumed or reclassified.

@@ -14,6 +14,12 @@ P52 `CANON_P28_BATCHED_REVERSE` is intentionally off: its DP16 grouped path is
 not implemented and certified. Prefix cache, evaluation, serving observers,
 and hand-edited YAML are also out of scope.
 
+P38y6 is a closed bootstrap incident. It paired `data,model` sharding with an
+actual `dp,tp` mesh, never loaded the model, and then exhausted retries because
+Attempt-0 evidence paths were reused. Do not resume, clone, or reclassify it.
+The next valid label is P38y7 from a source SHA containing both the
+actual-mesh sharding repair and attempt-scoped GSM8K-full evidence.
+
 ## Prerequisite already satisfied
 
 The checked-in one-host gate ran against real Qwen3-1.7B weights on four v5p
@@ -29,8 +35,8 @@ detached checkout of exactly that SHA:
 
 ```bash
 set -euo pipefail
-SOURCE_COMMIT="<USER_APPROVED_40_HEX_SHA>"
-RUN_ID="p38y1"
+SOURCE_COMMIT="<USER_APPROVED_40_HEX_REPAIR_SHA>"
+RUN_ID="p38y7"
 WORKTREE="/tmp/canon-zero-tim-p38y-${SOURCE_COMMIT:0:12}"
 OUT="/tmp/p38y-render-${SOURCE_COMMIT:0:12}"
 LAUNCH_RETURN="/tmp/p38y-launch-${SOURCE_COMMIT:0:12}"
@@ -49,10 +55,11 @@ bash canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/launch_p38
   --apply
 ```
 
-Before `apply`, the script must print both:
+Before `apply`, the script must print all three:
 
 ```text
 P38Y_PROFILE_PREFLIGHT_PASS resident=1 evidence=1 batched_report=1 batched_reverse=0
+P38Y_SHARDING_PREFLIGHT_PASS model_axes=actual_mesh data_axis=actual_mesh restart_evidence=attempt_scoped
 P38Y_SEMANTIC_PREFLIGHT_PASS steps=200 topology=DP16xTP4 fixed_lm_head=1 warning_only_ab=1
 ```
 
@@ -75,7 +82,16 @@ kubectl get pods -l "jobset.sigs.k8s.io/jobset-name=$JOBSET" -o wide \
 
 For every `pathways-head` pod listed, save the complete `jax-tpu` log from
 byte zero as `head-attempt-N.full.log`. Do not return grep excerpts in place
-of the full log. Finally seal the launch directory:
+of the full log. Each attempt must contain exactly one matching receipt:
+
+```text
+[run] GSM8K_FULL_ATTEMPT_EVIDENCE attempt=N dir=.../attempt-N
+```
+
+The bootstrap log must report
+`shared_mesh.devices.shape=(16, 4) axis_names=('dp', 'tp')`. Any
+`Resource axis: model ... not found in mesh` error is a hard bootstrap failure,
+not a retryable numerical result. Finally seal the launch directory:
 
 ```bash
 (cd "$LAUNCH_RETURN" && find . -maxdepth 1 -type f ! -name RETURN_SHA256SUMS \

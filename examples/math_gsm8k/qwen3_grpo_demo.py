@@ -648,14 +648,7 @@ def create_reference_and_actor(mesh: Mesh) -> tuple[nnx.Module, nnx.Module]:
     config.flash_attention_block_size = 256
   config.dtype = jnp.bfloat16
   config.param_dtype = jnp.float32
-  if os.environ.get("FL_SHARED_MESH"):
-    config.shd_config = (
-        qwen3_model_lib.ShardingConfig.get_data_parallel_sharding(
-            data_axis="data", tp_axis="model"
-        )
-    )
-  elif CANON_P32_WORKLOAD or args.mesh_dp is not None:
-    dp_workloads.configure_replicated_parameter_sharding(config)
+  dp_workloads.configure_model_sharding_for_mesh(config, mesh.axis_names)
 
   reference = qwen3_params_lib.create_model_from_safe_tensors(
       MODEL_DOWNLOAD_DIR, config, mesh, dtype=MODEL_DTYPE
@@ -1020,14 +1013,8 @@ def main() -> None:
               TRAIN_TRAJECTORY_MICRO_BATCH_SIZE
           ),
           compute_logps_micro_batch_size=COMPUTE_LOGPS_MICRO_BATCH_SIZE,
-          data_sharding_axis=(
-              ("data",)
-              if os.environ.get("FL_SHARED_MESH")
-              else (
-                  ("dp",)
-                  if (CANON_P32_WORKLOAD or args.mesh_dp is not None)
-                  else ("fsdp",)
-              )
+          data_sharding_axis=dp_workloads.data_sharding_axis_for_mesh(
+              shared_mesh.axis_names
           ),
           optimizer_offload=CANON_P30_OPT_STATE_OFFLOAD,
           metrics_logging_options=metrics_logging_options,

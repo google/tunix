@@ -1,21 +1,22 @@
 # State
 
 - Status: P38.2h forward and backward-no-commit gates are admitted. P38.2y
-  extends the fixed-tile lm-head to Qwen3-1.7B GSM8K and is locally gated;
-  its 200-step DP16xTP4 full-training target is NOT RUN.
+  extends the fixed-tile lm-head to Qwen3-1.7B GSM8K. P38y6 is
+  `INCONCLUSIVE_BOOTSTRAP_SHARDING_AXIS`: it failed before model load and has
+  no numerical claim. The actual-mesh sharding and attempt-evidence repairs
+  are locally gated; the 200-step DP16xTP4 target remains unsatisfied.
 - Objective: localize and remove the Pathways serving decode-versus-prefill
   carrier without weakening the strict zero-TIM release contract.
 - Definition of done: one source-pinned flag-on run reports exact
   `S_decode_vs_S_prefill`, exact `S_prefill_vs_T_old`, and exact
   `T_old_vs_T_current` before a strict full workload is admitted.
 - Active phase: P38.2y Qwen3-1.7B fixed-lm-head full-training integration.
-  Unit and renderer gates pass, both exact-image model overlays pass, and the
-  real-v5p Qwen3-1.7B TP4 construction gate is exact for request and learner
-  forward plus dHidden/dWeight VJP. The target combines the repair with the
-  already admitted resident optimizer, P47a prompt-logprob removal, batched
-  evidence, and batched report. P52 batched reverse stays off. Next: review,
-  then separately approve commit/push; an execution-only operator follows
-  `P38Y_GSM8K_FULL_RUNBOOK.md` for one 200-step source-pinned run.
+  Unit and renderer gates, both exact-image model overlays, and the real-v5p
+  Qwen3-1.7B TP4 construction gate are exact for request/learner forward and
+  dHidden/dWeight VJP. The P38y6 bootstrap bug is repaired by deriving
+  sharding from actual mesh axes and separating evidence by restart attempt.
+  P52 batched reverse stays off. Next: review, separately approve commit/push,
+  then an execution-only operator launches fresh P38y7 from that exact SHA.
 - Task directory:
   `canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/`.
 - P38s20/source `bea31f36655b137d7ab47ba94095cadda5b586ba` execution
@@ -361,17 +362,16 @@
 
 ## Next action
 
-1. Review and publish the focused no-commit attestation regression plus these
-   registry corrections. Do not commit or push without explicit user approval.
-2. After separately approved publication, the remote operator follows only
-   `P38H_BACKWARD_RUNBOOK.md`: launch once from the exact clean SHA, preserve
-   the complete attempt-0 head log, and run the checked-in collector. Do not
-   reuse the failed `957876b3` source SHA.
-3. Return the complete compact directory. Only
-   `P38H_FIXED_LM_HEAD_BACKWARD_NO_COMMIT_PASS` opens a separately reviewed
-   full-training candidate.
-4. Do not relaunch P38s23, attach diagnostic observers, enable prefix cache,
-   warning-only alignment, evaluation, checkpointing, or hand-edit YAML/env.
+1. Review the P38y mesh-authoritative sharding and attempt-evidence repair.
+   Do not commit or push without explicit user approval.
+2. After separately approved publication, follow only
+   `P38Y_GSM8K_FULL_RUNBOOK.md` and its checked-in launcher. Require the
+   profile, sharding, and semantic preflight receipts before apply.
+3. Launch fresh P38y7 from the exact clean repair SHA. Preserve every complete
+   head-attempt log and seal the returned directory. Do not reuse P38y6.
+4. Do not attach diagnostic observers, enable prefix cache/evaluation/P52
+   batched reverse, or hand-edit YAML/env. P38y7 is the production full-train
+   target, not a P38 serving diagnostic.
 
 ## Claim ceiling and blockers
 

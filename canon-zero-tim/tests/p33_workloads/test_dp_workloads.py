@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import subprocess
+import tempfile
 import types
 import unittest
 from unittest import mock
@@ -714,6 +716,115 @@ class DPWorkloadsTest(unittest.TestCase):
     dp_workloads.configure_replicated_parameter_sharding(config)
     self.assertNotIn("fsdp", repr(config.shd_config))
     self.assertIn("dp", repr(config.shd_config.act_btd))
+
+  def test_qwen3_model_sharding_follows_actual_mesh_axes(self):
+    expected_data_axis = {
+        ("fsdp", "tp"): "fsdp",
+        ("dp", "tp"): "dp",
+        ("data", "model"): "data",
+    }
+    for mesh_axes, data_axis in expected_data_axis.items():
+      with self.subTest(mesh_axes=mesh_axes):
+        config = qwen3_model.ModelConfig.qwen3_1p7b()
+        dp_workloads.configure_model_sharding_for_mesh(config, mesh_axes)
+        sharding = repr(config.shd_config)
+        for axis in mesh_axes:
+          self.assertIn(axis, sharding)
+        for absent_axis in {"fsdp", "dp", "data", "model", "tp"} - set(
+            mesh_axes
+        ):
+          self.assertNotIn(f"'{absent_axis}'", sharding)
+        self.assertEqual(
+            dp_workloads.data_sharding_axis_for_mesh(mesh_axes),
+            (data_axis,),
+        )
+
+  def test_model_sharding_rejects_unregistered_mesh_axes(self):
+    config = qwen3_model.ModelConfig.qwen3_1p7b()
+    with self.assertRaisesRegex(ValueError, "unsupported training mesh axes"):
+      dp_workloads.configure_model_sharding_for_mesh(
+          config, ("data", "tp")
+      )
+    with self.assertRaisesRegex(ValueError, "unsupported training mesh axes"):
+      dp_workloads.data_sharding_axis_for_mesh(("dp", "model"))
+
+  def test_gsm8k_demo_derives_sharding_from_materialized_mesh(self):
+    source = (
+        Path(__file__).parents[3]
+        / "examples/math_gsm8k/qwen3_grpo_demo.py"
+    ).read_text(encoding="utf-8")
+    self.assertIn(
+        "configure_model_sharding_for_mesh(config, mesh.axis_names)", source
+    )
+    self.assertIn(
+        "data_sharding_axis_for_mesh(\n              shared_mesh.axis_names",
+        source,
+    )
+
+  def test_gsm8k_full_restart_uses_attempt_scoped_evidence(self):
+    worktree = Path(__file__).parents[3]
+    package = worktree / "canon-zero-tim"
+    runner = package / "cluster/steps/90_run.sh"
+    with tempfile.TemporaryDirectory() as temp_dir:
+      state = Path(temp_dir)
+      command = state / "check-attempt-paths.sh"
+      expected = state / "attempt-1"
+      command.write_text(
+          "#!/usr/bin/env bash\n"
+          "set -euo pipefail\n"
+          f'test "$CANON_RUN_LOG" = "{expected / "run.log"}"\n'
+          f'test "$CANON_PRE_ALIGN_REPORT" = "{expected / "pre_alignment.jsonl"}"\n'
+          f'test "$CANON_ALIGN_REPORT" = "{expected / "alignment.jsonl"}"\n'
+          f'test "$CANON_UPDATE_REPORT" = "{expected / "updates.jsonl"}"\n'
+          "printf '%s\\n' 'CANON_FIXED_AR=1 fixed-order tree' "
+          "'CANON_FIXED_AR_EMBED=1 fixed-order embed gather' "
+          "'GSM8K_ATTEMPT_COMMAND_REACHED'\n"
+          "exit 17\n",
+          encoding="utf-8",
+      )
+      command.chmod(0o700)
+      (state / "env.sh").write_text(
+          "export CANON_P32_TRAIN_ADMITTED=0\n"
+          "export CANON_P33_WORKLOAD_LAUNCH_ADMITTED=1\n"
+          "export CANON_P32_WORKLOAD=gsm8k\n"
+          "export CANON_P33_RUN_STAGE=full\n"
+          "export CANON_P33_NO_COMMIT=0\n"
+          f"export CANON_RUN_LOG={state / 'run.log'}\n"
+          f"export CANON_PRE_ALIGN_REPORT={state / 'pre.jsonl'}\n"
+          f"export CANON_ALIGN_REPORT={state / 'align.jsonl'}\n"
+          f"export CANON_UPDATE_REPORT={state / 'updates.jsonl'}\n"
+          f"export CANON_RUN_CMD='bash {command}'\n",
+          encoding="utf-8",
+      )
+      base_names = ("run.log", "pre.jsonl", "align.jsonl", "updates.jsonl")
+      for name in base_names:
+        (state / name).touch()
+      env = os.environ | {
+          "CANON_STATE": str(state),
+          "CANON_PKG": str(package),
+          "CANON_RUN_CWD": str(worktree),
+          "JOBSET_RESTART_ATTEMPT": "1",
+      }
+      result = subprocess.run(
+          ["bash", str(runner)], env=env, capture_output=True, text=True
+      )
+      self.assertEqual(result.returncode, 17, result.stdout + result.stderr)
+      self.assertIn("GSM8K_FULL_ATTEMPT_EVIDENCE attempt=1", result.stdout)
+      self.assertIn(
+          "GSM8K_ATTEMPT_COMMAND_REACHED",
+          (expected / "run.log").read_text(encoding="utf-8"),
+      )
+      self.assertTrue(all((state / name).is_file() for name in base_names))
+
+      env["JOBSET_RESTART_ATTEMPT"] = "not-an-integer"
+      invalid = subprocess.run(
+          ["bash", str(runner)], env=env, capture_output=True, text=True
+      )
+      self.assertNotEqual(invalid.returncode, 0)
+      self.assertIn(
+          "restart attempt must be a non-negative integer",
+          invalid.stdout + invalid.stderr,
+      )
 
   def test_unknown_workload_is_rejected(self):
     with self.assertRaisesRegex(ValueError, "unknown canonical workload"):

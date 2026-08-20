@@ -5,18 +5,28 @@ parallel Qwen3-32B DeepSWE workstream, read
 `../p39-deepswe-production/HANDOFF.md`. P38 evidence cannot promote P39, and
 P39 evidence cannot promote P38.
 
-## CURRENT ACTION: P38.2y GSM8K full training (locally gated; target not run)
+## CURRENT ACTION: publish the P38y repair, then launch fresh P38y7
 
-The Qwen3-1.7B extension of the fixed-tile lm-head has passed unit, renderer,
+The Qwen3-1.7B extension of the fixed-tile lm-head passed unit, renderer,
 pinned-image Qwen1.7/Qwen8 overlay, and real one-host v5p forward+VJP gates.
-The target is now one 200-step `DP16xTP4` GSM8K full run combining the repair
-with resident optimizer, P47a, batched evidence, and batched report. P52
-batched reverse remains off because its DP16 grouped path is not certified.
+P38y6 did not test it: model bootstrap paired `data,model` PartitionSpecs with
+the actual `dp,tp` mesh and failed before model load; later JobSet attempts
+then refused stale Attempt-0 evidence paths. Its verdict is
+`INCONCLUSIVE_BOOTSTRAP_SHARDING_AXIS`.
+
+The repair derives model and learner sharding names from the materialized mesh
+and isolates GSM8K-full evidence per `JOBSET_RESTART_ATTEMPT`. Local compile
+and pinned-image 55-test sharding/restart gates pass. After a
+separately approved commit/push, the target is one fresh 200-step P38y7
+`DP16xTP4` run with resident optimizer, P47a, batched evidence, and batched
+report. P52 batched reverse remains off because its DP16 grouped path is not
+certified.
 
 An execution-only operator must follow `P38Y_GSM8K_FULL_RUNBOOK.md` and the
-checked-in `scripts/launch_p38y_gsm8k_full.sh`; do not hand-edit the YAML or
-reuse a diagnostic P38 serving renderer. The target remains NOT RUN until a
-separately approved commit is published and launched.
+checked-in `scripts/launch_p38y_gsm8k_full.sh`; do not hand-edit YAML, reuse a
+diagnostic renderer, or relaunch P38y6. All three preflight receipts must
+appear before apply. The target remains unsatisfied until a separately
+approved repair SHA is published and P38y7 completes.
 
 ## CURRENT: P38.2h 64-TPU Fixed-LM-Head Backward-No-Commit PASS (`P38H_FIXED_LM_HEAD_BACKWARD_NO_COMMIT_PASS`)
 

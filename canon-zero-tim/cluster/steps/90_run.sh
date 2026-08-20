@@ -6,6 +6,26 @@
 # checked afterwards: an intervention that never fired produces a perfectly green run.
 set -uo pipefail
 source "$CANON_STATE/env.sh"
+
+# A full GSM8K JobSet may be recreated after an eviction or node loss. Preserve
+# fail-closed no-overwrite semantics within each attempt without letting an
+# Attempt-0 run.log make all later infrastructure retries fail immediately.
+# Diagnostics and other workloads retain their historical paths unchanged.
+if [ "${CANON_P32_WORKLOAD:-}" = "gsm8k" ] && \
+   [ "${CANON_P33_RUN_STAGE:-}" = "full" ] && \
+   [ "${CANON_P33_NO_COMMIT:-0}" = "0" ] && \
+   [ -n "${JOBSET_RESTART_ATTEMPT:-}" ]; then
+  if [[ ! "$JOBSET_RESTART_ATTEMPT" =~ ^[0-9]+$ ]]; then
+    echo "[run] FATAL: GSM8K full restart attempt must be a non-negative integer" >&2
+    exit 1
+  fi
+  attempt_evidence_dir="${CANON_STATE%/}/attempt-$JOBSET_RESTART_ATTEMPT"
+  export CANON_RUN_LOG="$attempt_evidence_dir/run.log"
+  export CANON_PRE_ALIGN_REPORT="$attempt_evidence_dir/pre_alignment.jsonl"
+  export CANON_ALIGN_REPORT="$attempt_evidence_dir/alignment.jsonl"
+  export CANON_UPDATE_REPORT="$attempt_evidence_dir/updates.jsonl"
+  echo "[run] GSM8K_FULL_ATTEMPT_EVIDENCE attempt=$JOBSET_RESTART_ATTEMPT dir=$attempt_evidence_dir"
+fi
 for k in HF_TOKEN WANDB_API_KEY; do
   inj="INJECTED_$k"
   if [ -n "${!inj:-}" ]; then

@@ -86,6 +86,26 @@ env -i PATH="$PATH" HOME="${HOME:-/tmp}" bash -c '
 echo "P38Y_PROFILE_PREFLIGHT_PASS resident=1 evidence=1 batched_report=1 batched_reverse=0" \
   | tee "$return_dir/profile-preflight.txt"
 
+python3 - "$repo" <<'PY' | tee "$return_dir/sharding-preflight.txt"
+from pathlib import Path
+import sys
+
+repo = Path(sys.argv[1])
+demo = (repo / "examples/math_gsm8k/qwen3_grpo_demo.py").read_text()
+workloads = (repo / "tunix/rl/dp_workloads.py").read_text()
+runner = (repo / "canon-zero-tim/cluster/steps/90_run.sh").read_text()
+assert "configure_model_sharding_for_mesh(config, mesh.axis_names)" in demo
+assert "data_sharding_axis_for_mesh(\n              shared_mesh.axis_names" in demo
+assert "def configure_model_sharding_for_mesh(" in workloads
+assert '("dp", "tp"), ("data", "model")' in workloads
+assert "GSM8K_FULL_ATTEMPT_EVIDENCE" in runner
+assert 'attempt_evidence_dir="${CANON_STATE%/}/attempt-$JOBSET_RESTART_ATTEMPT"' in runner
+print(
+    "P38Y_SHARDING_PREFLIGHT_PASS "
+    "model_axes=actual_mesh data_axis=actual_mesh restart_evidence=attempt_scoped"
+)
+PY
+
 python3 "$pkg/cluster/render_p33_jobsets.py" \
   --source-commit "$source_commit" \
   --run-id "$run_id" \

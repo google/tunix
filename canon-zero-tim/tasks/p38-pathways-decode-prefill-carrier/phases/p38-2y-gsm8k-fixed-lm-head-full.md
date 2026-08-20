@@ -1,9 +1,13 @@
 # P38.2y — GSM8K fixed-lm-head full-training integration
 
-Status: LOCALLY GATED; TARGET NOT RUN. The Qwen3-8B TP4 fixed-tile lm-head has
-passed the P38s23r3 forward target and the P38.2h actual-model
-backward-no-commit target. This phase promotes the same construction to the
-Qwen3-1.7B TP4 GSM8K full-training lane. No target GSM8K run has executed yet.
+Status: TARGET NOT SATISFIED. The Qwen3-8B TP4 fixed-tile lm-head passed the
+P38s23r3 forward target and P38.2h actual-model backward-no-commit target. The
+first Qwen3-1.7B full-training launch, P38y6, stopped during model bootstrap
+because `data,model` PartitionSpecs were paired with the actual `dp,tp` mesh;
+its retries then collided with Attempt-0 evidence. It is classified
+`INCONCLUSIVE_BOOTSTRAP_SHARDING_AXIS`, not as a numerical target run. The
+actual-mesh sharding and attempt-evidence repairs are locally gated; P38y7 is
+the next valid target.
 
 ## Objective
 
@@ -71,8 +75,23 @@ the ascending learner dWeight accumulation order remain unchanged.
    - dHidden and dWeight equal the ascending chunk oracle;
    - repeat gradients are exact, finite, nonzero;
    - a normal-value negative changes exactly one element;
-4. target: one 200-step DP16xTP4 GSM8K full run. This is TARGET NOT RUN until
-   separately launched from a committed source SHA.
+4. target: one 200-step DP16xTP4 GSM8K full run. P38y6 did not reach model
+   loading and is inadmissible; the target remains unsatisfied until P38y7 is
+   separately launched from a committed repair SHA.
+
+## P38y6 bootstrap incident and P38y7 repair gate
+
+- Actual mesh: `axis_names=('dp','tp')`, shape `(16,4)`.
+- Erroneous model sharding: `P('model', None)` selected from the truthiness of
+  `FL_SHARED_MESH=16,4`.
+- Repair: derive model and learner sharding names only from the materialized
+  mesh; registered pairs are `fsdp,tp`, `dp,tp`, and `data,model`; all others
+  fail closed.
+- Retry repair: GSM8K-full evidence is isolated under the JobSet restart
+  attempt, preserving no-overwrite within an attempt.
+- Local gates: compile/syntax PASS and pinned-image focused tests 55/55 PASS,
+  including restart-path positive plus invalid-attempt negative. This does
+  not replace the 64-chip target.
 
 The one-host evidence was written under `/tmp` because the persistent evidence
 disk was full before TPU execution. Its sealed SHA-256 values are:

@@ -2119,3 +2119,26 @@ reclassification from the committed NPZ inputs.
 - Added one source-pinned launcher and one background-free full-training
   runbook. Target status remains NOT RUN. No commit, push, cluster apply, or
   external mutation occurred.
+
+## 2026-08-20 UTC — P38y6 bootstrap failure localized and repaired locally
+
+- P38y6 launched the intended 64-TPU `DP16xTP4` GSM8K full profile but stopped
+  before model load with `Resource axis: model ... not found in mesh:
+  ('dp','tp')`. It entered no fixed-lm-head, alignment, gradient, reducer, or
+  optimizer program and is classified `INCONCLUSIVE_BOOTSTRAP_SHARDING_AXIS`.
+- The renderer correctly supplied mesh size `16,4`; the demo incorrectly used
+  the truthiness of `FL_SHARED_MESH` to choose the unrelated axis names
+  `data,model`. Later JobSet attempts then collided with Attempt-0 report paths
+  and failed before the workload command.
+- Repaired model and learner sharding to derive names only from the actual
+  materialized mesh. Registered namespaces are `fsdp,tp`, `dp,tp`, and
+  `data,model`; unknown pairs fail closed. GSM8K-full report paths are now
+  scoped by `JOBSET_RESTART_ATTEMPT`, preserving per-attempt no-overwrite.
+- Local gates: compile/syntax and diff checks pass; pinned-image focused tests
+  pass 55/55, including attempt-1 stale-base positive and invalid-attempt
+  negative coverage.
+  The broad pinned-image CPU suite remains unclaimed because its historical
+  offsite Git tests cannot resolve this worktree's host-only `.git` gitfile in
+  a read-only mount. No TPU target rerun, commit, or push occurred.
+- Next: review and separately approve publication, then launch only fresh
+  P38y7 through the checked-in runbook/launcher.

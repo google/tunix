@@ -293,7 +293,7 @@ def requires_alignment_train_mode(
 
 
 def configure_replicated_parameter_sharding(
-    config: Any, *, data_axis: str = "dp"
+    config: Any, *, data_axis: str = "dp", tp_axis: str = "tp"
 ) -> None:
   """Uses TP-sharded parameters and DP-sharded activations on a DP/TP mesh."""
   sharding_type = type(config.shd_config)
@@ -303,7 +303,39 @@ def configure_replicated_parameter_sharding(
         "model sharding config does not support replicated-parameter data "
         "parallelism"
     )
-  config.shd_config = factory(data_axis)
+  config.shd_config = factory(data_axis=data_axis, tp_axis=tp_axis)
+
+
+def configure_model_sharding_for_mesh(
+    config: Any, mesh_axis_names: Sequence[str]
+) -> None:
+  """Makes model PartitionSpecs match one registered training mesh exactly."""
+  axes = tuple(mesh_axis_names)
+  if axes == ("fsdp", "tp"):
+    return
+  if axes in (("dp", "tp"), ("data", "model")):
+    configure_replicated_parameter_sharding(
+        config, data_axis=axes[0], tp_axis=axes[1]
+    )
+    return
+  raise ValueError(
+      "unsupported training mesh axes for model sharding: "
+      f"{axes!r}; expected ('fsdp', 'tp'), ('dp', 'tp'), or "
+      "('data', 'model')"
+  )
+
+
+def data_sharding_axis_for_mesh(
+    mesh_axis_names: Sequence[str],
+) -> tuple[str]:
+  """Returns the registered data axis for the actual training mesh."""
+  axes = tuple(mesh_axis_names)
+  if axes not in (("fsdp", "tp"), ("dp", "tp"), ("data", "model")):
+    raise ValueError(
+        "unsupported training mesh axes for data sharding: "
+        f"{axes!r}"
+    )
+  return (axes[0],)
 
 
 def requested_max_steps(
