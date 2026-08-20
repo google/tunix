@@ -27,7 +27,6 @@ from typing import Any
 from absl import logging
 from tunix.experimental.common import datatypes
 from tunix.experimental.orchestrator import algorithm_adapter
-from tunix.experimental.orchestrator import async_rl_program
 from tunix.experimental.orchestrator import batch_assembly
 from tunix.experimental.orchestrator import distributed_rl_engine
 from tunix.experimental.orchestrator import health_monitor
@@ -252,7 +251,12 @@ class ClusterOrchestrator:
     logging.info("ClusterOrchestrator executing program...")
     engine = self.engine or self._create_engine()
 
-    program.run(engine=engine, train_dataset=train_dataset, num_steps=num_steps, **kwargs)
+    program.run(
+        engine=engine,
+        train_dataset=train_dataset,
+        num_steps=num_steps,
+        **kwargs,
+    )
 
   def run(
       self,
@@ -260,7 +264,7 @@ class ClusterOrchestrator:
       dataset: Any,
       reward_fns: Sequence[Callable[..., Any]] | None = None,
       assembler: batch_assembly.BatchAssembler | None = None,
-      program: async_rl_program.AsyncRLProgram | None = None,
+      program: rl_program.RLProgram | None = None,
       num_steps: int = 1000,
   ) -> None:
     """Managed Program Submission: auto-wires Engine, Assembler, Queues & StandardRLProgram."""
@@ -270,14 +274,14 @@ class ClusterOrchestrator:
     active_assembler = assembler or batch_assembly.SequencePackedBatchAssembler(
         max_packed_len=getattr(algo, "max_packed_len", 8192)
     )
-    active_program = program or async_rl_program.StandardRLProgram(
+    active_program = program or rl_program.StandardRLProgram(
         dataset=dataset,
         algo=algo,
         reward_fns=reward_fns,
         assembler=active_assembler,
     )
     self.run_program(
-        program=active_program,  # pyrefly: ignore[bad-argument-type]
+        program=active_program,
         train_dataset=dataset,
         num_steps=num_steps,
         bring_up=False,
