@@ -62,7 +62,7 @@ class SchedulerTest(unittest.TestCase):
     def test_prefix_caching(self):
         """Tests that common prefixes natively assign matching blocks."""
         r1 = Request("req-1", prompt_tokens=[10, 20, 30, 40])
-        self.scheduler.queue_new_requests([r1])
+        self.scheduler._queue_new_requests([r1])
         self.scheduler._drain_pending_queue()
         
         # req-1 should be able to run immediately (requires 2 blocks)
@@ -78,7 +78,7 @@ class SchedulerTest(unittest.TestCase):
         
         # Send identical request mapping over same hashes
         r2 = Request("req-2", prompt_tokens=[10, 20, 30, 40])
-        self.scheduler.queue_new_requests([r2])
+        self.scheduler._queue_new_requests([r2])
         self.scheduler._drain_pending_queue()
         
         self.assertEqual(len(self.scheduler.running_requests), 2)
@@ -95,7 +95,7 @@ class SchedulerTest(unittest.TestCase):
         for i in range(4):
             reqs.append(Request(f"req-{i}", prompt_tokens=[10]))
             
-        self.scheduler.queue_new_requests(reqs)
+        self.scheduler._queue_new_requests(reqs)
         self.scheduler._drain_pending_queue() # all 4 can fit in TPU initially (requires 4 x 1 pages)
         self.assertEqual(len(self.scheduler.running_requests), 4)
         
