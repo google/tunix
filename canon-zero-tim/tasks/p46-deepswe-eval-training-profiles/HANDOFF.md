@@ -23,8 +23,11 @@ semantics automatically. Do not modify that live/queued producer from this
 handoff. After it is terminal and no producer/sandbox pod remains, freeze its
 raw v6 evidence and migrate it into a fresh resume tag as described below.
 
-This P46.7 implementation is currently unpublished. A remote agent must stop
-unless the exact read-back operator SHA contains all of:
+P46.7 implementation commit
+`365b46c1cd150839e3be1fd50adb33325fe3189f` is published to
+`yuxzhang/canon-zero-tim` and exact read-back matched it with divergence `0/0`.
+A remote agent must still fetch the current operator branch, prove this commit
+is in its ancestry, and stop unless the checkout contains all of:
 
 ```text
 CANON_P46_CENSUS_FIRST_PASS
@@ -294,6 +297,8 @@ SOURCE_SHA="$(git rev-parse HEAD)"
 test "$(git status --porcelain)" = ""
 git merge-base --is-ancestor \
   c3a960acdc94173440144559bb95f1de36d31537 "$SOURCE_SHA"
+git merge-base --is-ancestor \
+  365b46c1cd150839e3be1fd50adb33325fe3189f "$SOURCE_SHA"
 
 rg -n 'q4_r2egym_xml_v2|strict_xml|CANON_P46_FULL_CAMPAIGN' \
   examples/deepswe canon-zero-tim/cluster

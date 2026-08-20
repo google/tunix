@@ -675,3 +675,21 @@
   agent must read back the exact operator SHA, rerun `cases=75`, prove the old
   producer terminal/absent, seal the copied v6 snapshot, and require
   `FROZEN_V6_IMPORT_PASS` before the first census runtime starts.
+
+## 2026-08-20T21:33:54Z — P46.7 implementation publication/read-back
+
+- Under explicit user commit/push approval, committed the census scheduler,
+  frozen-v6 migration, tests and synchronized execution documents as
+  `365b46c1cd150839e3be1fd50adb33325fe3189f` and pushed only to
+  `origin/yuxzhang/canon-zero-tim`.
+- Pre-push fetch proved the operator remote and local base were exactly
+  `eae3d6d47e07bbb631106284da40a5e90763faee` with divergence `0/0`; no
+  conflict reconciliation or history rewrite was needed.
+- Post-push fetch/read-back resolved both local HEAD and the operator remote to
+  exact `365b46c1cd150839e3be1fd50adb33325fe3189f`, divergence `0/0`, with the
+  implementation ancestry gate passing.
+- `main` was never checked out, targeted, merged, rebased, or pushed. No
+  Kubernetes, JobSet, pod, PVC, cloud resource or credential was touched.
+- Next: publish this read-back ledger checkpoint, then the execution agent may
+  follow HANDOFF P46.7 only after fresh branch ancestry, old-producer terminal
+  and sealed-snapshot gates pass.

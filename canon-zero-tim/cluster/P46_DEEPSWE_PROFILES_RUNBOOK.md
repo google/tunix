@@ -9,8 +9,10 @@ shell override layer.
 
 ## P46.7 breadth-first census and v6 handoff
 
-This is the current next-run procedure once the implementation has been
-explicitly published and read back. It supersedes the strict-first launch
+This is the current next-run procedure. Implementation
+`365b46c1cd150839e3be1fd50adb33325fe3189f` is published and was read back
+exactly from `yuxzhang/canon-zero-tim`; executors still repeat the fresh
+ancestry/read-back gate before launch. It supersedes the strict-first launch
 ordering below but does not replace the strict completion gate.
 
 The returned campaign should first cover every still-never-attempted
@@ -148,6 +150,7 @@ e1b4009394c49ea015919bda0cfdb97c12c221b5
 a4d165e854cc4c2320d8120e89aed185eaf61465
 a642ab267425a5b08b0cebb6e12c607f50f71831
 c3a960acdc94173440144559bb95f1de36d31537
+365b46c1cd150839e3be1fd50adb33325fe3189f
 ```
 
 P46.5 true reward-only evaluation is published by `a4d165e8`; do not infer its

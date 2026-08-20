@@ -1,6 +1,6 @@
 # P46.7 — breadth-first census before strict repair
 
-- Status: local implementation/gates complete; unpublished and not target-run
+- Status: implementation published as `365b46c1cd150839e3be1fd50adb33325fe3189f`; not target-run
 
 ## Trigger
 

@@ -20,7 +20,7 @@ Training keeps TPU-resident optimizer state. The reviewed 1851-row source whitel
 | P46.4 | Remote execution campaign | Q4 evaluation smoke, Q4 three-update training, clean-data promotion, and Q32 training each return durable target evidence | pending |
 | P46.5 | True reward-only Q4 evaluation | L1 local and one-host gates prove real logprob-request/extraction bypass and artifact provenance; 64-chip paired N16 supplies L3 and trajectories/hour | deferred by operator; L3 remains unproven |
 | P46.6 | Persistent full clean-data washing | One Q4 runtime completes 463 bounded waves, 29,616 exact identities, 58 logical summaries, and the global learnable list; an explicit resume tag recovers missing identities from fsynced v6 artifacts under one immutable contract and exclusive lease | active |
-| P46.7 | Breadth-first census before strict repair | A default-off full reward-only census gives every never-attempted identity one durable attempt, defers invalid retries without reclassifying them, survives bounded wave timeouts, and emits separate coverage-only artifacts; a sealed v6 migration preserves prior sampler evidence under a fresh harness/tag before the unchanged strict finalizer runs | local gates complete; unpublished and not target-run |
+| P46.7 | Breadth-first census before strict repair | A default-off full reward-only census gives every never-attempted identity one durable attempt, defers invalid retries without reclassifying them, survives bounded wave timeouts, and emits separate coverage-only artifacts; a sealed v6 migration preserves prior sampler evidence under a fresh harness/tag before the unchanged strict finalizer runs | published as `365b46c1`; not target-run |
 
 ## Decisions
 
@@ -104,3 +104,8 @@ Training keeps TPU-resident optimizer state. The reviewed 1851-row source whitel
   `dc6b5b32a90ad0e12b1b9ae50ef7cc060b450abf` was read back with both the
   implementation and synchronized handoff in its ancestry. Executors still
   resolve the current branch HEAD dynamically and repeat the ancestry gate.
+- Publication status: P46.7 breadth-first census and frozen-v6 migration are
+  published as `365b46c1cd150839e3be1fd50adb33325fe3189f` on base
+  `eae3d6d47e07bbb631106284da40a5e90763faee`. Exact operator-branch read-back
+  resolved the same SHA with local/remote divergence `0/0`; target execution
+  still requires a fresh read-back and explicit launch authority.
