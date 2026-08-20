@@ -24,6 +24,7 @@ from jax import sharding
 import jax.numpy as jnp
 import numpy as np
 from tunix.rl import common
+from tunix.rl import reshard
 from tunix.rl import utils
 from tunix.tests import test_common as tc
 
@@ -718,6 +719,39 @@ class UtilsTest(absltest.TestCase):
     self.assertLen(packed, 2)
     for batch in packed:
       self.assertTrue(bool(np.asarray(batch[0].is_update_step)))
+
+  def test_reshard_pytree_with_prng_key_fry(self):
+    tp_size = 2 if self.device_count >= 2 else 1
+    fsdp_size = self.device_count // tp_size
+    mesh = sharding.Mesh(
+        np.array(jax.devices()[: (fsdp_size * tp_size)]).reshape(
+            fsdp_size, tp_size
+        ),
+        ('fsdp', 'tp'),
+    )
+
+    source_tree = {
+        'weight': jnp.ones((fsdp_size, tp_size), dtype=jnp.bfloat16),
+        'key': jax.random.key(42),
+    }
+    target_shardings = {
+        'weight': sharding.NamedSharding(
+            mesh, sharding.PartitionSpec('fsdp', 'tp')
+        ),
+        'key': sharding.NamedSharding(mesh, sharding.PartitionSpec()),
+    }
+    resharded = reshard.reshard_pytree(
+        source_tree, target_shardings, cache_plan=False
+    )
+    self.assertEqual(resharded['weight'].shape, (fsdp_size, tp_size))
+    self.assertEqual(str(resharded['weight'].dtype), 'bfloat16')
+    self.assertTrue(
+        jax.dtypes.issubdtype(resharded['key'].dtype, jax.dtypes.prng_key)
+    )
+    self.assertEqual(
+        jax.random.key_impl(resharded['key']),
+        jax.random.key_impl(source_tree['key']),
+    )
 
 
 class IsPositiveIntegerTest(absltest.TestCase):

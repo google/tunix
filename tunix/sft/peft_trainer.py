@@ -251,7 +251,7 @@ class GradientAccumulator(nnx.Module):
     state = nnx.state(model, wrt)
     self._param_dtypes = nnx.data(
         jax.tree_util.tree_map(
-            lambda x: getattr(x, "dtype", None),
+            lambda x: getattr(getattr(x, "value", x), "dtype", None),
             state,
             is_leaf=lambda x: isinstance(x, nnx.Variable),
         )
@@ -367,7 +367,7 @@ class PeftTrainer:
     self._lora_enabled = utils.is_lora_enabled(self.model)
     wrt_target = nnx.LoRAParam if self._lora_enabled else nnx.Param
     self.optimizer = nnx.Optimizer(self.model, optimizer, wrt=wrt_target)
-    # Adam moments follow the param dtype by default (optax inits them as
+     # Adam moments follow the param dtype by default (optax inits them as
     # zeros_like(params)).
     # Depth-1 non-packing fast path never reads the accumulator; skip its
     # model-sized grad-tree allocation there.
