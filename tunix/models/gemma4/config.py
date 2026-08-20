@@ -75,58 +75,58 @@ class RematConfig(enum.Enum):
 class ShardingConfig:
   """Sharding configuration for gemma transformer."""
 
-  emb_vd: Tuple[str | None, ...]
-  q_weight_ndh: Tuple[str | None, ...]
-  kv_weight_cndh: Tuple[str | None, ...]
-  qkv_weight_cndh: Tuple[str | None, ...]
-  o_weight_nhd: Tuple[str | None, ...]
-  ffw_weight_df: Tuple[str | None, ...]
-  ffw_weight_fd: Tuple[str | None, ...]
-  rms_norm_weight: Tuple[str | None, ...]
-  act_btd: Tuple[str | None, ...]
-  act_btf: Tuple[str | None, ...]
-  act_btnh: Tuple[str | None, ...]
-  vision_proj: Tuple[str | None, ...]
-  vision_soft_emb_norm_weight: Tuple[str | None, ...]
-  audio_proj: Tuple[str | None, ...]
+  emb_vd: Tuple[str | None, ...] | P
+  q_weight_ndh: Tuple[str | None, ...] | P
+  kv_weight_cndh: Tuple[str | None, ...] | P
+  qkv_weight_cndh: Tuple[str | None, ...] | P
+  o_weight_nhd: Tuple[str | None, ...] | P
+  ffw_weight_df: Tuple[str | None, ...] | P
+  ffw_weight_fd: Tuple[str | None, ...] | P
+  rms_norm_weight: Tuple[str | None, ...] | P
+  act_btd: Tuple[str | None, ...] | P
+  act_btf: Tuple[str | None, ...] | P
+  act_btnh: Tuple[str | None, ...] | P
+  vision_proj: Tuple[str | None, ...] | P
+  vision_soft_emb_norm_weight: Tuple[str | None, ...] | P
+  audio_proj: Tuple[str | None, ...] | P
   # MoE sharding
-  exp_weight_edf: Tuple[str | None, ...]
-  exp_weight_efd: Tuple[str | None, ...]
+  exp_weight_edf: Tuple[str | None, ...] | P
+  exp_weight_efd: Tuple[str | None, ...] | P
   # PLE sharding
-  per_layer_model_projection: Tuple[str | None, ...]
-  per_layer_input_gate: Tuple[str | None, ...]
-  per_layer_projection: Tuple[str | None, ...]
-  per_layer_input_embedding: Tuple[str | None, ...]
+  per_layer_model_projection: Tuple[str | None, ...] | P
+  per_layer_input_gate: Tuple[str | None, ...] | P
+  per_layer_projection: Tuple[str | None, ...] | P
+  per_layer_input_embedding: Tuple[str | None, ...] | P
   vision_shd: vision.VisionShardingConfig | None = None
   # Critic score sharding
-  score_weight_d1: Tuple[str | None, ...] | None = None
+  score_weight_d1: Tuple[str | None, ...] | P | None = None
 
   @staticmethod
   def get_default_sharding(is_sampling: bool = False):
     fsdp = 'fsdp' if not is_sampling else None
 
     return ShardingConfig(
-        emb_vd=P('tp', fsdp),  # pyrefly: ignore[bad-argument-type]
-        q_weight_ndh=P('tp', fsdp, None),  # pyrefly: ignore[bad-argument-type]
-        kv_weight_cndh=P(None, 'tp', fsdp, None),  # pyrefly: ignore[bad-argument-type]
-        qkv_weight_cndh=P(None, 'tp', fsdp, None),  # pyrefly: ignore[bad-argument-type]
-        o_weight_nhd=P('tp', None, fsdp),  # pyrefly: ignore[bad-argument-type]
-        ffw_weight_df=P(fsdp, 'tp'),  # pyrefly: ignore[bad-argument-type]
-        ffw_weight_fd=P('tp', fsdp),  # pyrefly: ignore[bad-argument-type]
-        rms_norm_weight=P('tp'),  # pyrefly: ignore[bad-argument-type]
-        act_btd=P('fsdp', None, None if is_sampling else 'tp'),  # pyrefly: ignore[bad-argument-type]
-        act_btf=P('fsdp', None, 'tp'),  # pyrefly: ignore[bad-argument-type]
-        act_btnh=P('fsdp', None, 'tp', None),  # pyrefly: ignore[bad-argument-type]
-        score_weight_d1=P(fsdp, None),  # pyrefly: ignore[bad-argument-type]
-        vision_proj=P(fsdp, 'tp'),  # pyrefly: ignore[bad-argument-type]
-        vision_soft_emb_norm_weight=P('tp'),  # pyrefly: ignore[bad-argument-type]
-        audio_proj=P(fsdp, 'tp'),  # TODO check if good!  # pyrefly: ignore[bad-argument-type]
-        exp_weight_edf=P(fsdp, None, None, 'tp'),  # pyrefly: ignore[bad-argument-type]
-        exp_weight_efd=P(fsdp, 'tp', None),  # pyrefly: ignore[bad-argument-type]
-        per_layer_model_projection=P(fsdp, 'tp'),  # pyrefly: ignore[bad-argument-type]
-        per_layer_input_gate=P(fsdp, 'tp'),  # pyrefly: ignore[bad-argument-type]
-        per_layer_projection=P('tp', fsdp),  # pyrefly: ignore[bad-argument-type]
-        per_layer_input_embedding=P('tp', fsdp),  # pyrefly: ignore[bad-argument-type]
+        emb_vd=P('tp', fsdp),
+        q_weight_ndh=P('tp', fsdp, None),
+        kv_weight_cndh=P(None, 'tp', fsdp, None),
+        qkv_weight_cndh=P(None, 'tp', fsdp, None),
+        o_weight_nhd=P('tp', None, fsdp),
+        ffw_weight_df=P(fsdp, 'tp'),
+        ffw_weight_fd=P('tp', fsdp),
+        rms_norm_weight=P('tp'),
+        act_btd=P('fsdp', None, None if is_sampling else 'tp'),
+        act_btf=P('fsdp', None, 'tp'),
+        act_btnh=P('fsdp', None, 'tp', None),
+        score_weight_d1=P(fsdp, None),
+        vision_proj=P(fsdp, 'tp'),
+        vision_soft_emb_norm_weight=P('tp'),
+        audio_proj=P(fsdp, 'tp'),  # TODO check if good!
+        exp_weight_edf=P(fsdp, None, None, 'tp'),
+        exp_weight_efd=P(fsdp, 'tp', None),
+        per_layer_model_projection=P(fsdp, 'tp'),
+        per_layer_input_gate=P(fsdp, 'tp'),
+        per_layer_projection=P('tp', fsdp),
+        per_layer_input_embedding=P('tp', fsdp),
         vision_shd=vision.VisionShardingConfig.get_default_sharding(
             is_sampling
         ),
@@ -167,7 +167,21 @@ class ModelConfig:
   dtype: jnp.dtype = jnp.float32
   use_flash_attention: bool = False
   flash_attention_block_size: int = 1024
+  flash_attention_compute_block_size: int = 256
+  # Backward needs more VMEM/tile than forward; prod uses 256 (SPLASH_BLOCK_SIZES in
+  # //depot/GOOGLE_INTERNAL_PACKAGE_PATH/learning/gemini/prod/serving/jet_engine/gemma4/config_utils.py).
+  flash_attention_bwd_block_size: int = 256
   use_sliding_window_kv_cache: bool = False
+
+  # Remat checkpoint policy name from jax.checkpoint_policies; controls which
+  # activations are saved in fwd vs recomputed in bwd. Default recomputes
+  # everything (minimum HBM).
+  remat_policy: str = 'nothing_saveable'
+
+  # When True, the splash attention backward pass uses a single fused kernel
+  # for dQ+dKV instead of two separate passes, reducing VMEM round-trips.
+  # When enabled, block_q_dq and block_kv_dq are ignored (set to None).
+  flash_attention_use_fused_bwd: bool = False
 
   # MoE config
   enable_moe: bool = False
