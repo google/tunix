@@ -422,6 +422,8 @@ class AutoModel:
         **kwargs: Additional keyword arguments passed to the underlying model
           creation functions. - For ModelSource.KAGGLE, Gemma models:
           `intermediate_ckpt_dir` , `rng_seed`
+          - For ModelSource.MAXTEXT: `checkpoint_storage_use_ocdbt`,
+          `checkpoint_storage_use_zarr3`, `skip_jax_distributed_system`
 
     Returns:
         The loaded nnx.Module model.
@@ -479,6 +481,12 @@ class AutoModel:
         valid_keys = set(MaxTextConfig.model_fields.keys())
       elif hasattr(MaxTextConfig, '__annotations__'):
         valid_keys = set(MaxTextConfig.__annotations__.keys())
+
+      # Explicitly allow checkpoint storage format overrides if provided
+      valid_keys.update({
+          'checkpoint_storage_use_ocdbt',
+          'checkpoint_storage_use_zarr3',
+      })
 
       for k, v in kwargs.items():
         if v is not None and k in valid_keys:
