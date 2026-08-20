@@ -1,6 +1,7 @@
 import collections
 from typing import List, Dict, Tuple
 from tunix.generate.cache_manager import CacheManager
+from tunix.generate import utils
 
 class Request:
     def __init__(self, req_id: str, prompt_tokens: List[int]):
@@ -142,7 +143,6 @@ class Scheduler:
         """
         Admit sequences based on prefix matches and available HBM space.
         """
-        from tunix.generate import utils
         free_tpu = self.cache_manager.available_hbm_pages + len(self.unreferenced_tpu_pages)
         pages_to_load = []
         pages_to_load_set = set()
@@ -196,7 +196,6 @@ class Scheduler:
 
     def _calculate_new_pages_needed(self) -> int:
         """Sums up the missing boundary pages for all sequences in `running_requests`."""
-        from tunix.generate import utils
         total_missing = 0
         for req in self.running_requests:
             current_capacity = len(req.page_ids) * self.page_size
@@ -209,7 +208,6 @@ class Scheduler:
 
     def _distribute_allocated_pages(self, allocated_ids: List[int]):
         """Pops logical page IDs from batch and appends onto requests, updating prefix cache where appropriate."""
-        from tunix.generate import utils
         allocated_queue = collections.deque(allocated_ids)
         
         for req in self.running_requests:
