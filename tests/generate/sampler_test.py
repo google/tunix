@@ -20,7 +20,7 @@ class ContinuousSamplerTest(absltest.TestCase):
         config=tc.ModelConfig(vocab_size=self.vocab.GetPieceSize()),
         rngs=nnx.Rngs(42),
     )
-    self.cache_config = sampler_lib.CacheConfig(batch_size=8, page_size=2, max_num_seqs=8)
+    self.cache_config = sampler_lib.CacheConfig(page_size=2, max_num_seqs=8)
     
   def test_initialization(self):
     sampler = sampler_lib.VanillaSampler(
