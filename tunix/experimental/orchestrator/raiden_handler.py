@@ -38,9 +38,9 @@ import logging
 import threading
 from typing import Any, Mapping, Optional, Sequence
 
-from GOOGLE_INTERNAL_PACKAGE_PATH.third_party.tpu_raiden.tpu_sync.rpc import controller_service_pb2
-from GOOGLE_INTERNAL_PACKAGE_PATH.third_party.tpu_raiden.tpu_sync.rpc import raiden_controller
-from GOOGLE_INTERNAL_PACKAGE_PATH.third_party.tpu_raiden.tpu_sync.rpc import raiden_service_pb2
+from tpu_sync.rpc import controller_service_pb2
+from tpu_sync.rpc import raiden_controller
+from tpu_sync.rpc import raiden_service_pb2
 
 from tunix.experimental.orchestrator import weight_sync
 
