@@ -1,0 +1,51 @@
+# P38.2y7 GSM8K Full-Training 64-TPU Alignment Progress Report
+
+- **Workload**: GSM8K Full-Training 200-Step Campaign (`qwen3-1.7b`, `DP16xTP4`)
+- **JobSet**: `canon-p33-gsm8k-full-p38y7-b1df5f84`
+- **Topology**: 64 TPU v5p chips (`4x4x4` slice `gke-tpu-f222b66a-*`)
+- **Source Commit**: `b1df5f842cdf434d79833a04b741e732a9e3272a` (*"Repair GSM8K full mesh sharding and retries"*)
+- **Raw Log**: `canon-zero-tim/debug_logs/p38_p38y7_gsm8k_full_head.raw.log`
+
+---
+
+## 1. Executive Summary
+
+P38y7 was launched cleanly following `P38Y_GSM8K_FULL_RUNBOOK.md` on 64 TPU chips (`DP16xTP4`).
+All 3 preflight receipts passed:
+- `P38Y_PROFILE_PREFLIGHT_PASS resident=1 evidence=1 batched_report=1 batched_reverse=0`
+- `P38Y_SHARDING_PREFLIGHT_PASS model_axes=actual_mesh data_axis=actual_mesh restart_evidence=attempt_scoped`
+- `P38Y_SEMANTIC_PREFLIGHT_PASS steps=200 topology=DP16xTP4 fixed_lm_head=1 warning_only_ab=1`
+
+The mesh sharding repair in `b1df5f84` successfully resolved the prior `p38y6` bootstrap axis mismatch. Model initialization, JIT precompilation, and rollout generation executed cleanly across all 16 DP ranks / 64 TPU chips.
+
+---
+
+## 2. Step-by-Step Alignment & Bound Analysis
+
+| Step | Action Tokens ($N_{\text{action}}$) | $S_{\text{prefill}}$ vs $T_{\text{old}}$ (B vs C) | $S_{\text{decode}}$ vs $S_{\text{prefill}}$ (A vs B) | Verdict | Pearson $r$ | Gradient Non-Zero | Replicas Exact |
+| :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **0** | 190,621 | **0 differing bytes (0.0)** 🟢 | **0 differing bytes (0.0)** 🟢 | `PASS` | `1.00000` | 1,720,540,548 | `1` (16/16 DP ranks) |
+| **1** | 205,214 | **0 differing bytes (0.0)** 🟢 | 2 bytes / 2 elems ($9.7 \times 10^{-6}$) | `PASS_WITH_ALIGNMENT_WARNINGS` | `1.00000` | 1,720,512,399 | `1` (16/16 DP ranks) |
+| **2** | 205,057 | **0 differing bytes (0.0)** 🟢 | 7 bytes / 7 elems ($3.4 \times 10^{-5}$) | `PASS_WITH_ALIGNMENT_WARNINGS` | `1.00000` | 1,720,574,370 | `1` (16/16 DP ranks) |
+| **3** | 182,361 | **0 differing bytes (0.0)** 🟢 | 74 bytes / 74 elems ($4.0 \times 10^{-4}$) | `PASS_WITH_ALIGNMENT_WARNINGS` | `1.00000` | 1,720,519,044 | `1` (16/16 DP ranks) |
+| **4** | 188,667 | **0 differing bytes (0.0)** 🟢 | 1 byte / 1 elem ($5.3 \times 10^{-6}$) | `PASS_WITH_ALIGNMENT_WARNINGS` | `1.00000` | 1,720,512,737 | `1` (16/16 DP ranks) |
+
+---
+
+## 3. Discrepancy Breakdown & Semantic Soundness
+
+### A. $S_{\text{prefill}}$ vs $T_{\text{old}}$ (B vs C: Prefill Rescore vs Training Forward)
+* **Status**: **100% Bitwise Exact (0 differing bytes, 0 differing elements, `max_abs=0.0`)** across all 971,920 total action tokens.
+* **Significance**: Proves that the training-side canonical forward graph (Pallas Fixed-Tile LM-Head, Fixed-Order Tree all-reduce, RMSNorm, SwiGLU, and attention kernels) produces identical float32 activations and log-probabilities as the vLLM prefill engine on 64 TPU chips.
+
+### B. $S_{\text{decode}}$ vs $S_{\text{prefill}}$ (A vs B: Step-by-Step Auto-regressive Decode vs Prefill Chunking)
+* **Status**: Sparse single-token numerical perturbation at $10^{-6}$ precision level (`max_abs = 7.629e-06`, ulp distance 64 bits at float32 mantissa LSB).
+* **Policy Compliance**: Under `P38Y_GSM8K_FULL_RUNBOOK.md` and `HANDOFF.md`, `CANON_GSM8K_ALIGNMENT_WARN_ONLY=1` was explicitly enabled so that sparse A-B decode-vs-prefill warnings are recorded durably in `pre_alignment.jsonl` without aborting training, while strict fatal checks are maintained for B vs C, non-finite gradients, DP reducer mismatches, and optimizer transactions.
+
+---
+
+## 4. Execution Performance
+
+- **Forward Stage (`p32_vag_forward`)**: 16.1s (Step 3) -> 15.8s (Step 4) across 16 groups (~0.98s per group).
+- **Reverse Stage (`grad_accumulate`)**: JIT compilation on microstep 0/1 (~7s), followed by ~**0.030s per microstep** across microsteps 2..15.
+- **W&B Sync**: Project `zero-tim-gsm8k-dp16-tp4` / Run `canon-p33-gsm8k-full-p38y7-b1df5f84` is streaming online metrics continuously.
