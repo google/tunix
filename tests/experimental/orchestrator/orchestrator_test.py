@@ -14,6 +14,7 @@
 
 """Unit tests for ClusterOrchestrator."""
 
+import time
 from unittest import mock
 
 from absl.testing import absltest
@@ -132,6 +133,27 @@ class ClusterOrchestratorTest(absltest.TestCase):
     self.mock_lifecycle.shutdown.assert_called_once()
     mock_rollout.submit.assert_any_call("stop")
     mock_actor.submit.assert_any_call("stop")
+
+  def test_shutdown_survives_a_wedged_worker(self):
+    from tunix.experimental.worker import remote_execution
+
+    wedged = mock.MagicMock(spec=remote_execution.ActorHandle)
+    wedged.submit.side_effect = lambda *a, **kw: time.sleep(5)
+    healthy = mock.MagicMock(spec=remote_execution.ActorHandle)
+
+    registry = worker_registry.WorkerRegistry()
+    orch = orchestrator.ClusterOrchestrator(
+        registry=registry,
+        lifecycle_driver=self.mock_lifecycle,
+        monitor=self.mock_monitor,
+    )
+    orch.register_worker_handle("rollout-0", [datatypes.Role.ROLLOUT], wedged)
+    orch.register_worker_handle("actor-0", [datatypes.Role.ACTOR], healthy)
+
+    with mock.patch.object(orchestrator, "_STOP_TIMEOUT_S", 0.2):
+      orch._shutdown_remote_workers()
+
+    healthy.submit.assert_any_call("stop")
 
   def test_create_engine_wraps_local_workers_as_in_process_handles(self):
     from tunix.experimental.worker import remote_execution

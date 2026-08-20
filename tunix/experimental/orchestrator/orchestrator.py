@@ -21,6 +21,7 @@ Custom Program Execution (`run_program`).
 
 import collections
 from collections.abc import Callable, Iterable, Sequence
+from concurrent import futures
 from typing import Any
 
 from absl import logging
@@ -37,6 +38,7 @@ from tunix.experimental.orchestrator import worker_registry
 from tunix.experimental.worker import abstract_worker
 from tunix.experimental.worker import remote_execution
 
+_STOP_TIMEOUT_S = 60.0  # Timeout for stopping remote workers. 60 should not be touched for any healthy stop.
 
 class ClusterOrchestrator:
   """Supervises cluster hardware, health monitoring, and program execution."""
@@ -192,12 +194,20 @@ class ClusterOrchestrator:
       self._remote_worker_handles_by_id[worker_id].submit("start")
 
   def _shutdown_remote_workers(self) -> None:
-    """Stops remote worker handles best-effort."""
-    for worker_id in sorted(self._remote_worker_infos):
+    """Stops remote worker handles best-effort, with a hard timeout."""
+    pool = futures.ThreadPoolExecutor(max_workers=4)
+    stops = {
+        worker_id: pool.submit(
+            self._remote_worker_handles_by_id[worker_id].submit, "stop"
+        )
+        for worker_id in sorted(self._remote_worker_infos)
+    }
+    for worker_id, fut in stops.items():
       try:
-        self._remote_worker_handles_by_id[worker_id].submit("stop")
+        fut.result(timeout=_STOP_TIMEOUT_S)
       except Exception as err:  # pylint: disable=broad-except
         logging.warning("Failed to stop remote worker %s: %r", worker_id, err)
+    pool.shutdown(wait=False)
 
   def _create_engine(self) -> distributed_rl_engine.DistributedRLEngine:
     """Constructs a DistributedRLEngine from the registered role groups."""
