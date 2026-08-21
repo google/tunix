@@ -26,12 +26,18 @@ export MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-128}
 export BATCH_SIZE=${BATCH_SIZE:-2}
 export NUM_GENERATIONS=${NUM_GENERATIONS:-2}
 export MAX_STEPS=${MAX_STEPS:-1}
+export OFFPOLICY=${OFFPOLICY:-0}
 export TRAIN_MICRO_BATCH_SIZE=${TRAIN_MICRO_BATCH_SIZE:-1}
 export MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-$((BATCH_SIZE * NUM_GENERATIONS))}
 export EVAL_EVERY_N_STEPS=${EVAL_EVERY_N_STEPS:-1000000}
 export LORA_RANK=${LORA_RANK:-16}
 export LORA_ALPHA=${LORA_ALPHA:-16.0}
 export USE_LORA=${USE_LORA:-0}
+export SYNC_WEIGHTS=${SYNC_WEIGHTS:-0}
+SYNC_WEIGHTS_FLAG=""
+if [[ "$SYNC_WEIGHTS" == "1" || "$SYNC_WEIGHTS" == "true" || "$SYNC_WEIGHTS" == "True" ]]; then
+  SYNC_WEIGHTS_FLAG="--sync_weights"
+fi
 
 export ORCHESTRATOR_ID=$USER-orch
 export ORCHESTRATOR_PORT=20000
@@ -63,9 +69,11 @@ start_orchestrator() {
         --batch_size=${BATCH_SIZE} \
         --num_generations=${NUM_GENERATIONS} \
         --max_steps=${MAX_STEPS} \
+        --offpolicy=${OFFPOLICY} \
         --max_prompt_length=${MAX_PROMPT_LENGTH} \
         --max_response_length=${MAX_RESPONSE_LENGTH} \
         --train_micro_batch_size=${TRAIN_MICRO_BATCH_SIZE} \
+        ${SYNC_WEIGHTS_FLAG} \
         --stop_workers_on_exit \
     " \
     | kubectl apply -f -

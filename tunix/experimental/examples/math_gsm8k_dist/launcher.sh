@@ -37,12 +37,14 @@ MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-128}
 BATCH_SIZE=${BATCH_SIZE:-2}
 NUM_GENERATIONS=${NUM_GENERATIONS:-2}
 MAX_STEPS=${MAX_STEPS:-1}
+OFFPOLICY=${OFFPOLICY:-0}
 TRAIN_MICRO_BATCH_SIZE=${TRAIN_MICRO_BATCH_SIZE:-1}
 MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-$((BATCH_SIZE * NUM_GENERATIONS))}
 EVAL_EVERY_N_STEPS=${EVAL_EVERY_N_STEPS:-1000000}
 LORA_RANK=${LORA_RANK:-16}
 LORA_ALPHA=${LORA_ALPHA:-16.0}
 USE_LORA=${USE_LORA:-0}
+SYNC_WEIGHTS=${SYNC_WEIGHTS:-0}
 PYTHON_BIN=${PYTHON_BIN:-python3}
 WAIT_TIMEOUT_SECS=${WAIT_TIMEOUT_SECS:-1800}
 WAIT_POLL_SECS=${WAIT_POLL_SECS:-5}
@@ -67,6 +69,9 @@ TRAINER_LOG="${LOG_ROOT}/trainer.log"
 ROLLOUT_LOG="${LOG_ROOT}/rollout.log"
 INFERENCE_LOG="${LOG_ROOT}/inference.log"
 ORCHESTRATOR_LOG="${LOG_ROOT}/orchestrator.log"
+TRAINER_PID=""
+ROLLOUT_PID=""
+INFERENCE_PID=""
 
 print_section() {
   echo
@@ -234,7 +239,13 @@ check_process_alive() {
   local process_state
   process_state="$(ps -o stat= -p "$pid" 2>/dev/null || true)"
   if [[ -z "$process_state" || "$process_state" == Z* ]]; then
-    echo "Error: $name process exited before gRPC port became ready (pid=$pid)."
+    local exit_code="unknown"
+    if wait "$pid" 2>/dev/null; then
+      exit_code=0
+    else
+      exit_code="$?"
+    fi
+    echo "Error: $name process exited before gRPC port became ready (pid=$pid, exit_code=$exit_code)."
     print_file_debug "$name" "$log_file"
     dump_debug_snapshot
     exit 1
@@ -291,12 +302,14 @@ echo "  trajectories:   $((BATCH_SIZE * NUM_GENERATIONS)) per step"
 echo "  batch size:     $BATCH_SIZE"
 echo "  generations:    $NUM_GENERATIONS"
 echo "  max steps:      $MAX_STEPS"
+echo "  offpolicy:      $OFFPOLICY"
 echo "  eval interval:  $EVAL_EVERY_N_STEPS"
 echo "  prompt length:  $MAX_PROMPT_LENGTH"
 echo "  response len:   $MAX_RESPONSE_LENGTH"
 echo "  train micro:    $TRAIN_MICRO_BATCH_SIZE"
 echo "  mini batch:     $MINI_BATCH_SIZE"
 echo "  use lora:       $USE_LORA"
+echo "  sync weights:   $SYNC_WEIGHTS"
 echo "  trainer chips:  $TRAINER_TPU_CHIPS"
 echo "  rollout chips:  $ROLLOUT_TPU_CHIPS"
 echo "  inference:      $RUN_INFERENCE_NODE"
@@ -319,6 +332,31 @@ mkdir -p "${LOG_ROOT}"
 : > "$ROLLOUT_LOG"
 : > "$INFERENCE_LOG"
 : > "$ORCHESTRATOR_LOG"
+
+cleanup() {
+  echo "Cleaning up worker processes (PIDs: ${TRAINER_PID:-}, ${ROLLOUT_PID:-}, ${INFERENCE_PID:-})..."
+  if [[ -n "${TRAINER_PID:-}" ]]; then
+    kill "$TRAINER_PID" 2>/dev/null || true
+  fi
+  if [[ -n "${ROLLOUT_PID:-}" ]]; then
+    kill "$ROLLOUT_PID" 2>/dev/null || true
+  fi
+  if [[ -n "${INFERENCE_PID:-}" ]]; then
+    kill "$INFERENCE_PID" 2>/dev/null || true
+  fi
+  if [[ -n "${TRAINER_PID:-}" ]]; then
+    wait "$TRAINER_PID" 2>/dev/null || true
+  fi
+  if [[ -n "${ROLLOUT_PID:-}" ]]; then
+    wait "$ROLLOUT_PID" 2>/dev/null || true
+  fi
+  if [[ -n "${INFERENCE_PID:-}" ]]; then
+    wait "$INFERENCE_PID" 2>/dev/null || true
+  fi
+  echo "Workers stopped."
+}
+trap on_error ERR
+trap cleanup EXIT
 
 print_section "runtime context"
 date
@@ -366,13 +404,16 @@ echo "Launching trainer node on TPU chips $TRAINER_TPU_CHIPS..."
   export TPU_HOST_BOUNDS=${TPU_HOST_BOUNDS}
   export LIBTPU_INIT_ARGS=deepsea_chips_per_host_bounds=${TPU_CHIPS_PER_HOST_BOUNDS},deepsea_host_bounds=${TPU_HOST_BOUNDS}
   export PYTHONUNBUFFERED=1
+  export PYTHONFAULTHANDLER=1
   env | egrep 'JAX|TPU'
   print_command "Trainer command" "${TRAINER_CMD[@]}"
-  exec "${TRAINER_CMD[@]}" > "$TRAINER_LOG" 2>&1
-) &
+  exec "${TRAINER_CMD[@]}"
+) > "$TRAINER_LOG" 2>&1 &
 TRAINER_PID=$!
 echo "Trainer pid=$TRAINER_PID log=$TRAINER_LOG"
 print_process_debug "trainer" "$TRAINER_PID"
+echo "Waiting for trainer gRPC server to bind before starting rollout..."
+wait_for_port "trainer" "$TRAINER_PORT" "$TRAINER_PID" "$TRAINER_LOG"
 
 echo "Launching vLLM rollout node on TPU chips $ROLLOUT_TPU_CHIPS..."
 (
@@ -402,22 +443,17 @@ echo "Launching vLLM rollout node on TPU chips $ROLLOUT_TPU_CHIPS..."
   export TPU_HOST_BOUNDS=${TPU_HOST_BOUNDS}
   export LIBTPU_INIT_ARGS=deepsea_chips_per_host_bounds=${TPU_CHIPS_PER_HOST_BOUNDS},deepsea_host_bounds=${TPU_HOST_BOUNDS}
   export PYTHONUNBUFFERED=1
+  export PYTHONFAULTHANDLER=1
   env | egrep 'JAX|TPU'
   print_command "Rollout command" "${ROLLOUT_CMD[@]}"
-  exec "${ROLLOUT_CMD[@]}" > "$ROLLOUT_LOG" 2>&1
-) &
+  exec "${ROLLOUT_CMD[@]}"
+) > "$ROLLOUT_LOG" 2>&1 &
 ROLLOUT_PID=$!
 echo "Rollout pid=$ROLLOUT_PID log=$ROLLOUT_LOG"
 print_process_debug "rollout" "$ROLLOUT_PID"
 
-cleanup() {
-  echo "Cleaning up worker processes (PIDs: $TRAINER_PID, $ROLLOUT_PID, ${INFERENCE_PID:-})..."
-  kill "$TRAINER_PID" "$ROLLOUT_PID" "${INFERENCE_PID:-}" 2>/dev/null || true
-  wait "$TRAINER_PID" "$ROLLOUT_PID" "${INFERENCE_PID:-}" 2>/dev/null || true
-  echo "Workers stopped."
-}
-trap on_error ERR
-trap cleanup EXIT
+echo "Waiting for rollout gRPC server to bind..."
+wait_for_port "rollout" "$ROLLOUT_PORT" "$ROLLOUT_PID" "$ROLLOUT_LOG"
 
 if [[ "$RUN_INFERENCE_NODE" == "1" || "$RUN_INFERENCE_NODE" == "true" || "$RUN_INFERENCE_NODE" == "True" ]]; then
   if [[ -z "$INFERENCE_TPU_CHIPS" ]]; then
@@ -448,20 +484,19 @@ if [[ "$RUN_INFERENCE_NODE" == "1" || "$RUN_INFERENCE_NODE" == "true" || "$RUN_I
     export TPU_HOST_BOUNDS=${TPU_HOST_BOUNDS}
     export LIBTPU_INIT_ARGS=deepsea_chips_per_host_bounds=${TPU_CHIPS_PER_HOST_BOUNDS},deepsea_host_bounds=${TPU_HOST_BOUNDS}
     export PYTHONUNBUFFERED=1
+    export PYTHONFAULTHANDLER=1
     env | egrep 'JAX|TPU'
     print_command "Inference command" "${INFERENCE_CMD[@]}"
-    exec "${INFERENCE_CMD[@]}" > "$INFERENCE_LOG" 2>&1
-  ) &
+    exec "${INFERENCE_CMD[@]}"
+  ) > "$INFERENCE_LOG" 2>&1 &
   INFERENCE_PID=$!
   INFERENCE_ADDR="localhost:$INFERENCE_PORT"
   echo "Inference pid=$INFERENCE_PID log=$INFERENCE_LOG"
   print_process_debug "inference" "$INFERENCE_PID"
 fi
 
-echo "Waiting for gRPC servers to bind..."
-wait_for_port "trainer" "$TRAINER_PORT" "$TRAINER_PID" "$TRAINER_LOG"
-wait_for_port "rollout" "$ROLLOUT_PORT" "$ROLLOUT_PID" "$ROLLOUT_LOG"
 if [[ -n "${INFERENCE_PID:-}" ]]; then
+  echo "Waiting for inference gRPC server to bind..."
   wait_for_port "inference" "$INFERENCE_PORT" "$INFERENCE_PID" "$INFERENCE_LOG"
 fi
 dump_debug_snapshot
@@ -478,10 +513,14 @@ ORCHESTRATOR_CMD=(
   --batch_size="$BATCH_SIZE"
   --num_generations="$NUM_GENERATIONS"
   --max_steps="$MAX_STEPS"
+  --offpolicy="$OFFPOLICY"
   --max_prompt_length="$MAX_PROMPT_LENGTH"
   --max_response_length="$MAX_RESPONSE_LENGTH"
   --train_micro_batch_size="$TRAIN_MICRO_BATCH_SIZE"
 )
+if [[ "$SYNC_WEIGHTS" == "1" || "$SYNC_WEIGHTS" == "true" || "$SYNC_WEIGHTS" == "True" ]]; then
+  ORCHESTRATOR_CMD+=(--sync_weights)
+fi
 if [[ -n "$INFERENCE_ADDR" ]]; then
   ORCHESTRATOR_CMD+=(--inference_addr="$INFERENCE_ADDR")
 fi

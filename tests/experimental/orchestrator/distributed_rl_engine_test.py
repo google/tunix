@@ -160,6 +160,16 @@ class DistributedRLEngineTest(absltest.TestCase):
       )
       self.mock_rollout_1.poll_responses.return_value = [resp1]
       self.mock_rollout_2.poll_responses.return_value = []
+      self.mock_rollout_1.asubmit = mock.AsyncMock(
+          side_effect=AssertionError(
+              "polling must use ActorHandle.poll_responses"
+          )
+      )
+      self.mock_rollout_2.asubmit = mock.AsyncMock(
+          side_effect=AssertionError(
+              "polling must use ActorHandle.poll_responses"
+          )
+      )
 
       results = await self.engine.poll_rollouts(timeout_s=0.1)
       self.assertEqual(len(results), 1)
@@ -167,6 +177,8 @@ class DistributedRLEngineTest(absltest.TestCase):
 
       self.mock_rollout_1.poll_responses.assert_called_once_with(timeout_s=0.1)
       self.mock_rollout_2.poll_responses.assert_called_once_with(timeout_s=0.1)
+      self.mock_rollout_1.asubmit.assert_not_called()
+      self.mock_rollout_2.asubmit.assert_not_called()
 
     asyncio.run(_run())
 
@@ -291,16 +303,79 @@ class DistributedRLEngineTest(absltest.TestCase):
 
     asyncio.run(_run())
 
-  def test_dispatch_rollouts_requires_strict_kwargs(self):
+  def test_dispatch_rollouts_expands_group_size(self):
     async def _run():
-      with self.assertRaisesRegex(ValueError, "prompt_ids' must be provided"):
-        await self.engine.dispatch_rollouts(["p1", "p2"], policy_version=0)
+      req_ids = await self.engine.dispatch_rollouts(
+          ["p1", "p2"], group_size=3, policy_version=5
+      )
+      self.assertLen(req_ids, 6)
 
-      with self.assertRaisesRegex(ValueError, "match the length of prompts"):
-        await self.engine.dispatch_rollouts(["p1", "p2"], prompt_ids=["id1"], policy_version=0)
+      total_dispatched = 0
+      for mock_worker in (self.mock_rollout_1, self.mock_rollout_2):
+        for call in mock_worker.generate.call_args_list:
+          reqs = call.kwargs["requests"]
+          total_dispatched += len(reqs)
+          for req in reqs:
+            self.assertEqual(req.target_policy_version, 5)
+            self.assertIn(req.metadata["pair_index"], (0, 1, 2))
 
-      with self.assertRaisesRegex(ValueError, "policy_version' must be provided"):
-        await self.engine.dispatch_rollouts(["p1", "p2"], prompt_ids=["id1", "id2"])
+      self.assertEqual(total_dispatched, 6)
+
+    asyncio.run(_run())
+
+  def test_dispatch_rollouts_auto_extracts_prompt_and_group_ids(self):
+    async def _run():
+      dict_item = {
+          "prompt": "Solve math",
+          "prompt_id": "math_1",
+          "metadata": {"group_id": "grp_1", "pair_index": 99},
+      }
+      req_ids = await self.engine.dispatch_rollouts(
+          [dict_item], group_size=2, policy_version=1
+      )
+      self.assertLen(req_ids, 2)
+
+      all_dispatched = []
+      for mock_worker in (self.mock_rollout_1, self.mock_rollout_2):
+        for call in mock_worker.generate.call_args_list:
+          all_dispatched.extend(call.kwargs["requests"])
+
+      self.assertLen(all_dispatched, 2)
+      pair_indices = {req.metadata["pair_index"] for req in all_dispatched}
+      self.assertEqual(pair_indices, {0, 1})
+      self.assertTrue(all(req.prompt == "Solve math" for req in all_dispatched))
+      self.assertTrue(
+          all(req.prompt_id == "math_1" for req in all_dispatched)
+      )
+      self.assertTrue(
+          all(req.metadata["group_id"] == "grp_1" for req in all_dispatched)
+      )
+
+    asyncio.run(_run())
+
+  def test_dispatch_rollouts_passes_generation_args_and_route_metadata(self):
+    async def _run():
+      gen_args = datatypes.GenerationArgs(
+          temperature=0.7, max_generation_steps=128
+      )
+      req_ids = await self.engine.dispatch_rollouts(
+          ["p1"],
+          group_size=1,
+          generation_args=gen_args,
+          route_metadata={"prefix_hash": "cache_key_1"},
+      )
+      self.assertLen(req_ids, 1)
+
+      mock_call = (
+          self.mock_rollout_1.generate.call_args
+          or self.mock_rollout_2.generate.call_args
+      )
+      dispatched = mock_call.kwargs["requests"][0]
+      self.assertEqual(
+          dispatched.generation_kwargs,
+          {"temperature": 0.7, "max_generation_steps": 128},
+      )
+      self.assertEqual(dispatched.metadata["prefix_hash"], "cache_key_1")
 
     asyncio.run(_run())
 
