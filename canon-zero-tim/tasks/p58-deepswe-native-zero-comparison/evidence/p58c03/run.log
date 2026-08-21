@@ -1,0 +1,39 @@
+WARNING:absl:Type handler registry type "<class 'jax.Array'>" overriding jax.Array
+[P34.PATHWAYS] initialized_once=1 before_jax=1
+INFO 08-21 09:02:59 [__init__.py:43] Running vLLM on TPU via Pathways proxy.
+INFO 08-21 09:02:59 [__init__.py:53] Module pathwaysutils is imported.
+INFO 08-21 09:02:59 [__init__.py:59] Eagerly resolving vLLM current_platform for Pathways.
+INFO 08-21 09:02:59 [__init__.py:65] vLLM platform resolved to: TpuPlatform
+WARNING 08-21 09:02:59 [tpu_platform.py:408] Pin memory is not supported on TPU.
+✅ tunix pathways-utils, r2egym are successfully mapped.
+Gym has been unmaintained since 2022 and does not support NumPy 2.0 amongst other critical functionality.
+Please upgrade to Gymnasium, the maintained drop-in replacement of Gym, or contact the authors of your software and request that they upgrade.
+Users of this version of Gym should be able to simply replace 'import gym' with 'import gymnasium as gym' in the vast majority of cases.
+See the migration guide at https://gymnasium.farama.org/introduction/migration_guide/ for additional information.
+/mnt/disks/linchai_data/deepswe_zero_tim/canon-p58-ds4b-native-three-p58c03/r2egym-src/src/r2egym/swesmith/constants.py:460: SyntaxWarning: invalid escape sequence '\/'
+  "sed -i '/^git+https:\/\/github.com\/Project-MONAI\//d' requirements-dev.txt",
+Using Kubernetes node selector: cloud.google.com/gke-nodepool=deepswe-cpu-pool
+Warning: Kubernetes config loading failed: Invalid kube-config file. No configuration found.
+2026-08-21 09:03:02,782 - root - INFO - Applied bounded R2E-Gym Kubernetes patch at /mnt/disks/linchai_data/deepswe_zero_tim/canon-p58-ds4b-native-three-p58c03/r2egym-src/src/r2egym/agenthub/runtime/docker.py
+[P34.R2E] BOUNDED_KUBERNETES_PATCH_PASS path=/mnt/disks/linchai_data/deepswe_zero_tim/canon-p58-ds4b-native-three-p58c03/r2egym-src/src/r2egym/agenthub/runtime/docker.py cleanup_method=close
+Looking for local model at: /mnt/disks/linchai_data/models/Qwen3-4B-Instruct-2507...
+✅ Found existing local model at /mnt/disks/linchai_data/models/Qwen3-4B-Instruct-2507
+kv_cache_size (Capped): 20608
+vllm_max_batched_tokens: 256
+Traceback (most recent call last):
+  File "/app/examples/deepswe/canonical_entrypoint.py", line 36, in <module>
+    main()
+  File "/app/examples/deepswe/canonical_entrypoint.py", line 32, in main
+    runpy.run_module("examples.deepswe.train_deepswe_nb", run_name="__main__")
+  File "<frozen runpy>", line 229, in run_module
+  File "<frozen runpy>", line 88, in _run_code
+  File "/app/examples/deepswe/train_deepswe_nb.py", line 670, in <module>
+    deepswe_contract.validate_environment(os.environ)
+  File "/app/tunix/rl/deepswe_contract.py", line 897, in validate_environment
+    raise ValueError(f"P34 environment mismatch: {wrong}")
+ValueError: P34 environment mismatch: {'CANON_LOGPROB_M': '256'}
+[run] exit=1
+[run] transport_rc=0
+[run] PATHTRACE fixed_ar=0 embed=0 logprob_m=0 wandb_online=0 p34_wandb_online=0 eval_off=0 eval_on=0 p35_base=0 p35_stop=0 p35_replay=0 p35_stage_begin=0 p35_stage_ready=0 p35_stage_complete=0 p38_precheck=0 p38_rounds=0 p38_controlled_exit=0 p38_fixed_primal=0 p38_fixed_vjp=0 p38_kv_unified=0 p38_capture_init=0 p38_capture_observe=0 p38_capture_error=0 p38_request_journal=0 p38_incident_ledger=0 p38_kv_observer_init=0 p38_kv_observer_candidate=0 p38_kv_observer_a=0 p38_kv_observer_b=0 p38_seam_init=0 p38_seam_records=0 p38_tail_init=0 p38_tail_a=0 p38_tail_b=0 p38_terminal_init=0 p38_terminal_a=0 p38_terminal_b=0 p38_coverage=0 p57_stock_sync=0
+[run] FATAL: P58 native did not attest exactly one W&B run
+[entrypoint] FATAL: 90_run.sh exited 1
