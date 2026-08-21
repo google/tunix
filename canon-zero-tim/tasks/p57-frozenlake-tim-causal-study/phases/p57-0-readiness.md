@@ -15,13 +15,16 @@ main campaign.
    no canonical excess-precision XLA pin.
 3. Add independent gates at render, resolved-container, training-entrypoint,
    receipt, and offline-classifier layers. Fixed lm-head off alone is rejected.
-4. Preserve the registered Qwen3-8B K4096/TP8 fixed-lm-head geometry as a later
+4. Run every P57 workload through the repository-safe module entrypoint. The
+   exact stock route installs only its missing nonnumerical runtime packages
+   and imports the full workload before any model allocation.
+5. Preserve the registered Qwen3-8B K4096/TP8 fixed-lm-head geometry as a later
    zero-arm prerequisite, but do not use or inspect it during discovery.
-5. Add a separate checkpoint evaluator. It must not share the training engine's
+6. Add a separate checkpoint evaluator. It must not share the training engine's
    prefix-cache state and must not re-enable P45 in-training evaluation.
-6. Keep checkpoint cadence at 10 updates with LatestN(1) for bounded readiness
+7. Keep checkpoint cadence at 10 updates with LatestN(1) for bounded readiness
    runs, unless a later phase explicitly changes the retention contract.
-7. Defer the complete paired training treatment contract to P57.2. Calibration
+8. Defer the complete paired training treatment contract to P57.2. Calibration
    readiness must not be misread as paired-campaign readiness.
 
 ## Local gates
@@ -29,7 +32,8 @@ main campaign.
 - Registry unit tests cover K4096/TP8 positive dispatch, exact logical-vocab
   slicing, forward/VJP behavior, and wrong-geometry negatives.
 - Renderer/profile tests prove stock-fast intent, resolve the inherited profile,
-  and reject any canonical switch or admission leak.
+  require the module entrypoint, and reject any canonical switch, file-path
+  entrypoint, or admission leak.
 - Calibration classifier rejects a missing or altered 37-switch zero-TIM-off
   attestation, malformed coverage, state mutation, and context-cap violations.
 - Checkpoint evaluator can load a bounded P45-format checkpoint and evaluate an
@@ -37,6 +41,8 @@ main campaign.
   base weights in checkpoint `new` mode; positive boundaries use exact GCS
   `resume`. Both explicitly sync actor weights into the rollout engine.
 - `git diff --check`, syntax/compile checks, and exact-image gates pass.
+- The pinned-image gate proves stock runtime imports, full workload import,
+  stock-engine drift rejection, and historical file-entrypoint rejection.
 
 ## Target gate timing
 

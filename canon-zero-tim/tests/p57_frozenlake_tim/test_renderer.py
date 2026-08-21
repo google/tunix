@@ -78,6 +78,15 @@ class P57RendererTest(unittest.TestCase):
       ):
         self.assertEqual(env[name], "0")
       self.assertEqual(env["CANON_P57_CALIBRATION_RECIPES"], "m10,m15,m20")
+      self.assertEqual(
+          env["CANON_RUN_CMD"].split()[:4],
+          [
+              "python3",
+              "-u",
+              "-m",
+              "examples.frozenlake.train_frozenlake_qwen3",
+          ],
+      )
       self.assertIn("--evaluation_only", env["CANON_RUN_CMD"])
       self.assertIn("--num_generations=8", env["CANON_RUN_CMD"])
       self.assertIn("--temperature=0.7", env["CANON_RUN_CMD"])
@@ -149,6 +158,13 @@ class P57RendererTest(unittest.TestCase):
         ("CANON_P57_CALIBRATION_MODE", "greedy"),
         ("CANON_P57_CALIBRATION_RECIPES", "l0,m10,m15,m20"),
         ("CANON_P57_INFERENCE_REGIME", "canonical"),
+        (
+            "CANON_RUN_CMD",
+            env["CANON_RUN_CMD"].replace(
+                "-m examples.frozenlake.train_frozenlake_qwen3",
+                "examples/frozenlake/train_frozenlake_qwen3.py",
+            ),
+        ),
     ):
       with self.subTest(name=name):
         bad_env = {**env, name: value}
@@ -245,6 +261,28 @@ class P57RendererTest(unittest.TestCase):
       with self.assertRaisesRegex(ValueError, "manifest drifted"):
         manifest_preflight.verify(bad)
 
+  def test_manifest_preflight_rejects_file_path_entrypoint(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      root = Path(tmp)
+      path = calibration.render_all(
+          base_path=BASE,
+          output_dir=root / "good",
+          source_commit="a" * 40,
+          run_id="p57cal",
+          campaign_tag="p57-calibration",
+      )[0]
+      document = yaml.safe_load(path.read_text())
+      for item in _container_env(document):
+        if item["name"] == "CANON_RUN_CMD":
+          item["value"] = item["value"].replace(
+              "-m examples.frozenlake.train_frozenlake_qwen3",
+              "examples/frozenlake/train_frozenlake_qwen3.py",
+          )
+      bad = root / "bad-entrypoint.yaml"
+      bad.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+      with self.assertRaisesRegex(ValueError, "manifest drifted"):
+        manifest_preflight.verify(bad)
+
   def test_selected_main_recipe_can_render_stock_or_paired_training(self):
     for stock_only, expected_count in ((True, 1), (False, 2)):
       with self.subTest(stock_only=stock_only), tempfile.TemporaryDirectory() as tmp:
@@ -266,6 +304,15 @@ class P57RendererTest(unittest.TestCase):
           env = _env(yaml.safe_load(path.read_text()))
           self.assertEqual(env["CANON_P57_WORKLOAD_CANDIDATE"], "m15")
           self.assertEqual(env["CANON_P57_DATA_SPLIT"], data_split)
+          self.assertEqual(
+              env["CANON_RUN_CMD"].split()[:4],
+              [
+                  "python3",
+                  "-u",
+                  "-m",
+                  "examples.frozenlake.train_frozenlake_qwen3",
+              ],
+          )
           self.assertIn("--env_max_steps=15", env["CANON_RUN_CMD"])
 
   def test_paired_renderer_rejects_calibration_split(self):

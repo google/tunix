@@ -108,6 +108,7 @@ elif p57_is_stock_fast_calibration; then
   # install, but leave all six tpu_inference targets byte-identical to the
   # pinned image established by Step 20.
   step 35_install_r2egym.sh
+  step 37_install_stock_runtime.sh
   step 38_verify_stock_engine.sh
   log "P57_STOCK_FAST_PATH run_kind=calibration regime=stock-fast source=$CANON_EXPECT_COMMIT canonical_overlay=skipped"
 else

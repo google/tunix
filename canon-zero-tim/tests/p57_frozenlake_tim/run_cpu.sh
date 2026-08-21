@@ -31,6 +31,7 @@ python3 -m py_compile \
 bash -n \
   canon-zero-tim/cluster/steps/00_env.sh \
   canon-zero-tim/cluster/entrypoint.sh \
+  canon-zero-tim/cluster/steps/37_install_stock_runtime.sh \
   canon-zero-tim/cluster/steps/38_verify_stock_engine.sh \
   canon-zero-tim/cluster/steps/p57_runtime_contract.sh \
   canon-zero-tim/cluster/steps/90_run.sh \

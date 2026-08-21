@@ -98,3 +98,14 @@
 - Files/artifacts: `evidence/p57cal2/run.log`; `cluster/entrypoint.sh`; `cluster/steps/p57_runtime_contract.sh`; `cluster/steps/90_run.sh`; P57 host/exact-image tests; `RUNBOOK.md`; `HANDOFF.md`.
 - Rollback: revert the local stock-route concern; published history remains unchanged.
 - Next: review the validated diff, then seek separate commit and push approval before any target rerun.
+
+## 2026-08-21 UTC — p57cal3 proved stock routing and exposed a package-entrypoint dependency
+
+- Type: target failure/correction
+- Fact: `p57cal3` used immutable source `e4179511e6594d476460d355bd62086a6408ce54`. It passed `ZERO_TIM_OFF_PASS`, all six stock file hashes and imports, the stock route marker, and the zero-canonical-marker postflight. The workload command then failed before the first `RECIPE_START` with `ModuleNotFoundError: No module named 'examples'`. The complete 146-line log is SHA-256 `b6068e56bbf7452b9fce7b5a6630bdc4d94d5ba634252144610a8d30f2ca20da`.
+- Cause: invoking `examples/frozenlake/train_frozenlake_qwen3.py` by file path made the script directory, rather than the repository root, the package import root. Canonical runs accidentally hid that defect because their overlay `PYTHONPATH` ended in an empty path component. The stock route correctly removed that incidental behavior. The same route also skipped three nonnumerical packages that canonical Step 30 had historically installed as a side effect.
+- Action: render every P57 calibration/train/eval command as `python3 -u -m examples.frozenlake.train_frozenlake_qwen3`; reject file-path commands in the profile and manifest verifier; add a stock-only runtime step for pinned `gymnasium`, `sentencepiece`, and `tiktoken`; and extend the stock preflight to import the complete workload before model load.
+- Result: dependency-light P57 tests passed `80/80`. The pinned image installed/imported all six required runtime packages, verified the six untouched engine modules, imported the full module entrypoint, rejected a deliberately modified stock engine, rejected the historical file-path entrypoint, accepted the module entrypoint, and completed with `P45_EXACT_IMAGE_CPU_PASS overlay=qwen8b_tp8` and exit 0. No TPU was launched and no commit or push was performed.
+- Files/artifacts: `evidence/p57cal3/run.log`; P57 calibration/paired renderers; P57 profile and manifest verifier; `cluster/steps/37_install_stock_runtime.sh`; stock preflight; host/exact-image tests; `RUNBOOK.md`; `HANDOFF.md`; `state.md`.
+- Rollback: discard the local entrypoint/runtime concern; published history remains unchanged.
+- Next: review the validated diff, then seek separate commit and push approval. Only after publication may a separately approved `p57cal4` target run be rendered; it must reach `RECIPE_START` before startup readiness is considered closed.

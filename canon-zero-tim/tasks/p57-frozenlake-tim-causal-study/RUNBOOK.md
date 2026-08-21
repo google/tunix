@@ -26,8 +26,8 @@ applies each recipe's smaller logical cap to observed lengths.
 ## What `stock-fast` means
 
 `CANON_P57_INFERENCE_REGIME=stock-fast` is a mechanical contract, not a label.
-The topology, pinned image, Qwen3-8B TP8 model overlay, vLLM server, resident
-HBM placement, and rollout sampling configuration remain shared. All numerical
+The topology, pinned image, Qwen3-8B weights/TP8 geometry, vLLM server,
+resident HBM placement, and rollout sampling configuration remain shared. All numerical
 zero-TIM paths inherited from `_canonical_engine.env` are disabled before the
 engine starts:
 
@@ -41,9 +41,16 @@ engine starts:
 
 The entrypoint recognizes this exact profile/run-kind/regime tuple and skips
 canonical install, overlay, and overlay verification. The six engine modules
-therefore remain the pinned image's stock bytes; only the independent R2E gym
-install remains. Merely installing the overlay and unsetting flags is invalid:
+therefore remain the pinned image's stock bytes. A stock-only preparation step
+installs the missing nonnumerical workload dependencies (`gymnasium`,
+`sentencepiece`, and `tiktoken`) without building or exposing a canonical
+overlay. The independent R2E step remains in the sequence but is a no-op for
+this workload. Merely installing the overlay and unsetting flags is invalid:
 some overlay shims enforce canonical dependencies at import time.
+Every P57 command uses the package-safe entrypoint
+`python3 -u -m examples.frozenlake.train_frozenlake_qwen3`; file-path execution
+is invalid because it does not place the repository root on Python's import
+path in the stock environment.
 `return_logprobs=True` still requests sampled-token rollout logprobs; it does
 not run trainer rescore. Prefix caching remains off. No trainer logprob
 recomputation, backward, optimizer commit, checkpoint write, or in-process
@@ -55,10 +62,13 @@ The container preflight must emit exactly:
 [P57.STOCK_FAST] ZERO_TIM_OFF_PASS absent=12 zero=25
 ~~~
 
-The full pod log must also contain exactly one of each of these three markers:
+The full pod log must also contain exactly one of each of these startup/runtime
+markers:
 
 ~~~text
 [entrypoint] P57_STOCK_FAST_PATH run_kind=calibration regime=stock-fast ... canonical_overlay=skipped
+[P57.STOCK_FAST] RUNTIME_DEPS_PASS packages=6
+[P57.STOCK_FAST] WORKLOAD_IMPORT_PASS entrypoint=module
 [P57.STOCK_FAST] PREFLIGHT_PASS files=6 import=pass overlay=absent
 [P57.STOCK_FAST] RUNTIME_PATH_PASS canonical_markers=0 overlay=skipped
 ~~~
@@ -81,6 +91,9 @@ Required terminal markers:
 
 - `P57_FROZENLAKE_TIM_CPU_PASS`;
 - `P45_EXACT_IMAGE_CPU_PASS overlay=qwen8b_tp8`;
+- `P57_FILE_ENTRYPOINT_NEGATIVE_PASS script_mode=rejected` and
+  `P57_MODULE_ENTRYPOINT_PASS workload_import=complete` occur in the
+  exact-image output;
 - no traceback, syntax error, manifest mismatch, or flag-census mismatch.
 
 Do not substitute a dirty-tree SHA. Commit and push are separate user-approved
@@ -104,6 +117,8 @@ the complete log from byte zero for all of the following:
 - the resolved topology is DP8xTP8 and all workers join once;
 - `[P57.STOCK_FAST] ZERO_TIM_OFF_PASS absent=12 zero=25` appears once;
 - `P57_STOCK_FAST_PATH ... canonical_overlay=skipped` appears once;
+- `[P57.STOCK_FAST] RUNTIME_DEPS_PASS packages=6` appears once;
+- `[P57.STOCK_FAST] WORKLOAD_IMPORT_PASS entrypoint=module` appears once;
 - `[P57.STOCK_FAST] PREFLIGHT_PASS files=6 import=pass overlay=absent` appears once before model load;
 - vLLM/Pathways initialization completes without OOM, KV-block-capacity error,
   restart, or IFRT disconnect;
@@ -143,7 +158,8 @@ Both terminal markers are required:
 [P57.CALIBRATION.PREFLIGHT] PASS ... regime=stock-fast recipes=m10,m15,m20
 ~~~
 
-The manifest verifier proves the signed intent: one mismatch arm, stock-fast
+The manifest verifier proves the signed intent: the exact module entrypoint,
+one mismatch arm, stock-fast
 regime, fixed head off, train/reduction/launch/alignment admissions all zero,
 stochastic M10/M15/M20 inventory, and the exact physical envelope. It does not
 replace the resolved-container marker, which proves the sourced profile really
@@ -169,7 +185,8 @@ p57-calibration-stochastic.raw.log
 A valid log contains:
 
 - one `[P57.STOCK_FAST] ZERO_TIM_OFF_PASS absent=12 zero=25`;
-- one stock-path routing marker and one zero-canonical-marker postflight;
+- one runtime-dependency marker, one module-workload-import marker, one
+  stock-path routing marker, and one zero-canonical-marker postflight;
 - three dataset attestation records;
 - three `RECIPE_START` and three `RECIPE_COMPLETE` records;
 - one `CANON_P57_CALIBRATION_JSON` v2 record whose

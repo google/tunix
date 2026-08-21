@@ -30,6 +30,12 @@ _TAG_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,50}[a-z0-9])?")
 _ALLOWED_UPDATES = (1, 3, 20, 50, 100, 150, 200, 450)
 _BASE_MEMORY = "200G"
 _P57_MEMORY = "350G"
+_SCRIPT_ENTRYPOINT = (
+    "python3", "-u", "examples/frozenlake/train_frozenlake_qwen3.py"
+)
+_MODULE_ENTRYPOINT = (
+    "python3", "-u", "-m", "examples.frozenlake.train_frozenlake_qwen3"
+)
 _TRAIN_ARM_ENV_DIFFERENCES = {
     "CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY",
     "CANON_FROZENLAKE_CKPT_TAG",
@@ -97,6 +103,12 @@ def _replace_command_arg(
   command[matches[0]] = replacement
 
 
+def _use_module_entrypoint(command: list[str]) -> None:
+  if tuple(command[:3]) != _SCRIPT_ENTRYPOINT:
+    raise ValueError("P57 base entrypoint drifted")
+  command[:3] = _MODULE_ENTRYPOINT
+
+
 def _spec(
     arm: Arm,
     expected_updates: int,
@@ -111,6 +123,7 @@ def _spec(
           expected_updates, dp_size=8, tp_size=8
       )
   )
+  _use_module_entrypoint(command)
   if workload_candidate:
     candidate = p57_workloads.candidate(workload_candidate)
     p57_workloads.validate_split(data_split)

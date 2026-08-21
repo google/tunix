@@ -21,12 +21,16 @@ The runbook is authoritative and contains exact commands. Ask the user before
 ## Honest validation status
 
 The dependency-light host suite and pinned-image CPU/overlay suite are green.
-No real DP8xTP8 / 64-chip target run has yet proved distributed startup,
-vLLM/Pathways initialization, or live HBM/KV capacity for the 16,384-token
-physical envelope. Do not report “target tested” from the local gates and do
-not substitute a DP1 one-host run for this missing evidence. The first approved
-calibration launch closes that boundary if it reaches real rollout progress
-under the unchanged signed manifest.
+`p57cal3` proved the target stock-engine route and zero-canonical-marker
+postflight, then failed before the first recipe because the old file-path
+entrypoint could not import the repository package. The corrected module
+entrypoint plus stock runtime dependency step is locally and in the pinned
+image validated, but has not run on the 64-chip target. No target run has yet
+proved live HBM/KV capacity for the 16,384-token physical envelope. Do not
+report “target tested” from the local gates and do not substitute a DP1
+one-host run for this missing evidence. The next approved calibration launch
+closes that boundary only if it reaches real rollout progress under the
+unchanged signed manifest.
 
 ## Execute exactly this workflow
 
@@ -47,6 +51,11 @@ under the unchanged signed manifest.
 - `CANON_P57_INFERENCE_REGIME=stock-fast`;
 - exact resolved marker `ZERO_TIM_OFF_PASS absent=12 zero=25`;
 - exact startup route `P57_STOCK_FAST_PATH ... canonical_overlay=skipped`;
+- exact command prefix
+  `python3 -u -m examples.frozenlake.train_frozenlake_qwen3`;
+- stock runtime proof `[P57.STOCK_FAST] RUNTIME_DEPS_PASS packages=6`;
+- full workload-import proof
+  `[P57.STOCK_FAST] WORKLOAD_IMPORT_PASS entrypoint=module`;
 - pre-model stock proof `[P57.STOCK_FAST] PREFLIGHT_PASS files=6 import=pass overlay=absent`;
 - exact postflight `RUNTIME_PATH_PASS canonical_markers=0 overlay=skipped`;
 - fixed AR, pinned RPA, canonical Pallas trunk/VJP, and fixed logprob M absent;
@@ -68,7 +77,8 @@ under the unchanged signed manifest.
 - renderer `VERDICT PASS count=1`;
 - manifest preflight `PASS regime=stock-fast`;
 - resolved-container `ZERO_TIM_OFF_PASS absent=12 zero=25`;
-- stock engine route and zero-canonical-runtime-marker postflight;
+- stock runtime dependencies, module workload import, stock engine route, and
+  zero-canonical-runtime-marker postflight;
 - 3 dataset attestations, starts, and completes;
 - one JSON v2 receipt with complete zero-TIM-off attestation;
 - one terminal complete record with all mutation counters zero;
@@ -96,6 +106,8 @@ yaml_path/sha256: <...>
 renderer_stdout: <path>
 manifest_preflight_stdout: <path>
 zero_tim_off_marker: <exact line>
+runtime_deps_marker: <exact line>
+workload_import_marker: <exact line>
 raw_log: <complete path>
 receipt_v2_json/sha256: <...>
 dataset_attestations: <three lines or path>

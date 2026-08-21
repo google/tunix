@@ -98,6 +98,7 @@ class P57RuntimeContractTest(unittest.TestCase):
     end = text.index("\nelse\n", start)
     branch = text[start:end]
     self.assertIn("step 35_install_r2egym.sh", branch)
+    self.assertIn("step 37_install_stock_runtime.sh", branch)
     self.assertIn("step 38_verify_stock_engine.sh", branch)
     self.assertIn("canonical_overlay=skipped", branch)
     self.assertNotIn("30_install_canon", branch)

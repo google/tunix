@@ -39,6 +39,9 @@ _EXPECTED_ARGS = {
     "--p57_calibration_mode=stochastic",
     "--p57_calibration_recipes=m10,m15,m20",
 }
+_EXPECTED_ENTRYPOINT = (
+    "python3", "-u", "-m", "examples.frozenlake.train_frozenlake_qwen3"
+)
 
 
 def _container(document):
@@ -79,12 +82,15 @@ def verify(path: Path) -> dict[str, str]:
       for key, value in _EXPECTED_ENV.items()
       if env.get(key) != value
   }
-  command = set(shlex.split(env.get("CANON_RUN_CMD", "")))
+  command_tokens = shlex.split(env.get("CANON_RUN_CMD", ""))
+  command = set(command_tokens)
   missing_args = sorted(_EXPECTED_ARGS - command)
-  if wrong_labels or wrong_env or missing_args:
+  wrong_entrypoint = tuple(command_tokens[:4]) != _EXPECTED_ENTRYPOINT
+  if wrong_labels or wrong_env or missing_args or wrong_entrypoint:
     raise ValueError(
         "P57 calibration manifest drifted: "
-        f"labels={wrong_labels} env={wrong_env} args={missing_args}"
+        f"labels={wrong_labels} env={wrong_env} args={missing_args} "
+        f"entrypoint={command_tokens[:4]}"
     )
   return {
       "name": document["metadata"]["name"],

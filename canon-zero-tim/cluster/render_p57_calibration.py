@@ -32,6 +32,12 @@ _RECIPES = ("m10", "m15", "m20")
 _MODE = "stochastic"
 _GENERATIONS = 8
 _TEMPERATURE = "0.7"
+_SCRIPT_ENTRYPOINT = (
+    "python3", "-u", "examples/frozenlake/train_frozenlake_qwen3.py"
+)
+_MODULE_ENTRYPOINT = (
+    "python3", "-u", "-m", "examples.frozenlake.train_frozenlake_qwen3"
+)
 
 
 def _container(document):
@@ -67,8 +73,15 @@ def _replace_arg(command: list[str], prefix: str, value: str) -> None:
   command[matches[0]] = value
 
 
+def _use_module_entrypoint(command: list[str]) -> None:
+  if tuple(command[:3]) != _SCRIPT_ENTRYPOINT:
+    raise ValueError("P57 calibration base entrypoint drifted")
+  command[:3] = _MODULE_ENTRYPOINT
+
+
 def _spec() -> p33.JobSpec:
   command = list(p33._frozenlake_command(1, dp_size=8, tp_size=8))
+  _use_module_entrypoint(command)
   replacements = {
       "--num_generations=": f"--num_generations={_GENERATIONS}",
       "--max_prompt_length=": f"--max_prompt_length={_PHYSICAL_CONTEXT}",
@@ -199,6 +212,8 @@ def render_all(
   if wrong:
     raise ValueError(f"P57 calibration rendered contract drifted: {wrong}")
   run_command = values["CANON_RUN_CMD"]
+  if tuple(run_command.split()[:4]) != _MODULE_ENTRYPOINT:
+    raise ValueError("P57 calibration must use the module entrypoint")
   for expected_arg in (
         f"--num_generations={_GENERATIONS}",
         f"--temperature={_TEMPERATURE}",

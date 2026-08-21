@@ -44,6 +44,8 @@ EOF
     printf "%s\n" /usr/local/lib/python3.12/site-packages/tpu_inference \
       > "$stock_state/tpu_inference_path"
     CANON_STATE="$stock_state" CANON_PKG=/workspace/canon-zero-tim \
+      bash canon-zero-tim/cluster/steps/37_install_stock_runtime.sh
+    CANON_STATE="$stock_state" CANON_PKG=/workspace/canon-zero-tim \
       bash canon-zero-tim/cluster/steps/38_verify_stock_engine.sh
     bad_package="$(mktemp -d /tmp/p57-stock-negative.XXXXXX)/tpu_inference"
     while read -r _ relative; do
@@ -61,6 +63,18 @@ EOF
     echo "P57_STOCK_ENGINE_NEGATIVE_PASS drift=rejected"
     rm -r "$(dirname "$bad_package")"
     rm -r "$stock_state"
+    script_log="$(mktemp /tmp/p57-script-mode-negative.XXXXXX)"
+    if env -u PYTHONPATH JAX_PLATFORMS=cpu python3 -u \
+        examples/frozenlake/train_frozenlake_qwen3.py --helpshort \
+        > "$script_log" 2>&1; then
+      echo "P57 file-path entrypoint negative control unexpectedly passed" >&2
+      exit 1
+    fi
+    rm -f "$script_log"
+    echo "P57_FILE_ENTRYPOINT_NEGATIVE_PASS script_mode=rejected"
+    env -u PYTHONPATH JAX_PLATFORMS=cpu python3 -u -m \
+      examples.frozenlake.train_frozenlake_qwen3 --help > /dev/null
+    echo "P57_MODULE_ENTRYPOINT_PASS workload_import=complete"
     PYTHONPATH="$overlay" python3 \
       canon-zero-tim/src/engine_shims/models/qwen8b_tp8/p22xf_contract.py
     CANON_SHIM_ROOT="$overlay" PYTHONPATH="$overlay" python3 \

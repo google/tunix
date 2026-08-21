@@ -45,4 +45,15 @@ env -u CANON_SHIM_ROOT -u CANON_FIXED_AR -u CANON_FIXED_AR_EMBED \
   PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
   python3 "$CANON_PKG/cluster/steps/p57_probe_stock_engine.py"
 
+(
+  cd "$CANON_PKG/.."
+  # argparse's --help exits only after all module imports succeed, but before
+  # the P57 top-level run-kind/CLI agreement checks.  Abseil's --helpshort is
+  # not recognized by this argparse entrypoint and must not be used here.
+  env -u PYTHONPATH PATHWAYS_HEAD="" JAX_BACKEND_TARGET="" JAX_PLATFORMS=cpu \
+    python3 -u -m examples.frozenlake.train_frozenlake_qwen3 --help \
+    > /dev/null
+)
+echo "[P57.STOCK_FAST] WORKLOAD_IMPORT_PASS entrypoint=module"
+
 echo "[P57.STOCK_FAST] PREFLIGHT_PASS files=$checked import=pass overlay=absent"
