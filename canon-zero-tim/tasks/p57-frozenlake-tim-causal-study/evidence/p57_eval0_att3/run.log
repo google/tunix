@@ -1,0 +1,76 @@
+Logging configured at INFO level.
+2026-08-21 17:01:39 - INFO - [datasets] JAX version 0.10.2 available.
+2026-08-21 17:01:40 - WARNING - [absl] Type handler registry type "<class 'jax.Array'>" overriding jax.Array
+I0821 17:01:40.378049     833 registry.cc:82] Attempting to create IFRT proxy client with transport name grpc to address 'localhost:29000' and with global client flags xla::ifrt::proxy::GlobalClientFlags{grpc_max_ongoing_host_buffer_stores=0,grpc_max_ongoing_host_buffer_lookups=0,grpc_large_transfer_optimization_threshold_bytes=9223372036854775807,crash_on_disconnect=false}
+I0821 17:01:40.378113     833 grpc_client.cc:171] Connecting to IFRT proxy server (grpc version '1.78.0') at localhost:29000, attempt #0...
+I0821 17:01:40.378127     833 grpc_credentials.cc:52] Using ALTS client credentials for gRPC.
+I0821 17:01:40.379942     833 grpc_client_session.cc:264]   Established channel.
+I0821 17:01:40.379985     833 grpc_client_session.cc:269]   Created stub.
+I0821 17:01:40.395104     833 grpc_client.cc:142] Sending InitRequest and waiting for response (attempt 0).
+I0821 17:01:40.471207     833 grpc_credentials.cc:52] Using ALTS client credentials for gRPC.
+I0821 17:01:40.471392     833 grpc_client_session.cc:264]   Established channel.
+I0821 17:01:40.471413     833 grpc_client_session.cc:269]   Created stub.
+I0821 17:01:40.472830     833 grpc_client.cc:176] Connected to IFRT proxy server on attempt #0.
+I0821 17:01:40.502605     833 pjrt_client.cc:579] PjRt-IFRT device count: total=1, addressable=1
+I0821 17:01:40.502673     833 pjrt_client.cc:583] Addressable PjRt-IFRT device: CpuDevice(id=0)
+jax devices:  [device(0,TPU_DEVICE,coords=[0,0,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3), device(1,TPU_DEVICE,coords=[1,0,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3), device(2,TPU_DEVICE,coords=[2,0,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3), device(3,TPU_DEVICE,coords=[3,0,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3), device(4,TPU_DEVICE,coords=[0,1,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3), device(5,TPU_DEVICE,coords=[1,1,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3), device(6,TPU_DEVICE,coords=[2,1,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3), device(7,TPU_DEVICE,coords=[3,1,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3), device(8,TPU_DEVICE,coords=[0,2,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3), device(9,TPU_DEVICE,coords=[1,2,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3), device(10,TPU_DEVICE,coords=[2,2,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3), device(11,TPU_DEVICE,coords=[3,2,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3), device(12,TPU_DEVICE,coords=[0,3,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3), device(13,TPU_DEVICE,coords=[1,3,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3), device(14,TPU_DEVICE,coords=[2,3,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3), device(15,TPU_DEVICE,coords=[3,3,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3), device(16,TPU_DEVICE,coords=[0,0,1,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3), device(17,TPU_DEVICE,coords=[1,0,1,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3), device(18,TPU_DEVICE,coords=[2,0,1,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3), device(19,TPU_DEVICE,coords=[3,0,1,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3), device(20,TPU_DEVICE,coords=[0,1,1,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3), device(21,TPU_DEVICE,coords=[1,1,1,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3), device(22,TPU_DEVICE,coords=[2,1,1,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3), device(23,TPU_DEVICE,coords=[3,1,1,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3), device(24,TPU_DEVICE,coords=[0,2,1,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3), device(25,TPU_DEVICE,coords=[1,2,1,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3), device(26,TPU_DEVICE,coords=[2,2,1,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3), device(27,TPU_DEVICE,coords=[3,2,1,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3), device(28,TPU_DEVICE,coords=[0,3,1,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3), device(29,TPU_DEVICE,coords=[1,3,1,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3), device(30,TPU_DEVICE,coords=[2,3,1,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3), device(31,TPU_DEVICE,coords=[3,3,1,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3), device(32,TPU_DEVICE,coords=[0,0,2,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3), device(33,TPU_DEVICE,coords=[1,0,2,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3), device(34,TPU_DEVICE,coords=[2,0,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3), device(35,TPU_DEVICE,coords=[3,0,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3), device(36,TPU_DEVICE,coords=[0,1,2,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3), device(37,TPU_DEVICE,coords=[1,1,2,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3), device(38,TPU_DEVICE,coords=[2,1,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3), device(39,TPU_DEVICE,coords=[3,1,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3), device(40,TPU_DEVICE,coords=[0,2,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3), device(41,TPU_DEVICE,coords=[1,2,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3), device(42,TPU_DEVICE,coords=[2,2,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3), device(43,TPU_DEVICE,coords=[3,2,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3), device(44,TPU_DEVICE,coords=[0,3,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3), device(45,TPU_DEVICE,coords=[1,3,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3), device(46,TPU_DEVICE,coords=[2,3,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3), device(47,TPU_DEVICE,coords=[3,3,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3), device(48,TPU_DEVICE,coords=[0,0,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3), device(49,TPU_DEVICE,coords=[1,0,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3), device(50,TPU_DEVICE,coords=[2,0,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3), device(51,TPU_DEVICE,coords=[3,0,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3), device(52,TPU_DEVICE,coords=[0,1,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3), device(53,TPU_DEVICE,coords=[1,1,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3), device(54,TPU_DEVICE,coords=[2,1,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3), device(55,TPU_DEVICE,coords=[3,1,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3), device(56,TPU_DEVICE,coords=[0,2,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3), device(57,TPU_DEVICE,coords=[1,2,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3), device(58,TPU_DEVICE,coords=[2,2,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3), device(59,TPU_DEVICE,coords=[3,2,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3), device(60,TPU_DEVICE,coords=[0,3,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3), device(61,TPU_DEVICE,coords=[1,3,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3), device(62,TPU_DEVICE,coords=[2,3,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3), device(63,TPU_DEVICE,coords=[3,3,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3)]
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/app/examples/frozenlake/train_frozenlake_qwen3.py", line 558, in <module>
+    raise ValueError(f"P32 FrozenLake geometry mismatch: {wrong_geometry}")
+ValueError: P32 FrozenLake geometry mismatch: {'num_generations': 8}
+I0821 17:01:40.768133     833 client.cc:221] Client::~Client() starting.
+I0821 17:01:40.769266     833 rpc_helper.cc:217] RpcHelper::Batcher::Finish() starting: CANCELLED: Disconnected by client [via RpcHelper::Disconnect()]
+I0821 17:01:40.769273     833 rpc_helper.cc:231] RpcHelper::Batcher::Finish(): resetting thread_pool_.
+I0821 17:01:40.769411     833 rpc_helper.cc:233] RpcHelper::Batcher::Finish(): calling session_->Finish().
+I0821 17:01:40.769421     833 grpc_client_session.cc:198] GrpcClientSession: Finish() called with client status CANCELLED: Disconnected by client [via RpcHelper::Disconnect()]
+I0821 17:01:40.769424     833 grpc_client_session.cc:202] GrpcClientSession: Finish(): calling context_->TryCancel();
+I0821 17:01:40.769659     833 grpc_client_session.cc:205] GrpcClientSession: Waiting for reader thread to stop.
+I0821 17:01:40.769625     917 grpc_client_session.cc:176] GrpcClientSession: reader loop is exiting.
+I0821 17:01:40.769855     917 grpc_client_session.cc:198] GrpcClientSession: Finish() called with client status OK
+I0821 17:01:40.769882     833 grpc_client_session.cc:209] GrpClientSession: Attempting to call stream->Finish()
+I0821 17:01:40.769887     833 grpc_client_session.cc:213] GrpClientSession: Attempting to call stream->Finish(), mutex acquired
+I0821 17:01:40.769925     833 grpc_client_session.cc:216] GrpClientSession: stream->Finish() returned server status CANCELLED: CANCELLED
+I0821 17:01:40.769929     833 grpc_client_session.cc:237] GrpClientSession::Finish(): calling terminated cb with CANCELLED: CANCELLED
+W0821 17:01:40.769933     833 grpc_client.cc:91] IFRT proxy server disconnected: CANCELLED: CANCELLED; Stack trace: *** Begin stack trace ***
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	
+	PyGC_Collect
+	Py_FinalizeEx
+	
+	Py_BytesMain
+	
+	__libc_start_main
+	_start
+*** End stack trace ***
+
+I0821 17:01:40.771969     833 grpc_client_session.cc:241] GrpcClientSession: Finish() done.
+I0821 17:01:40.771973     833 rpc_helper.cc:235] RpcHelper::Batcher::Finish(): done.
+I0821 17:01:40.771975     833 client.cc:223] Client::~Client(): rpc_helper_->Disconnect() is done.
+I0821 17:01:40.771998     917 grpc_client_session.cc:241] GrpcClientSession: Finish() done.
+I0821 17:01:40.772200     833 rpc_helper.cc:509] RpcHelper::~RpcHelper() starting.
+I0821 17:01:40.772249     833 rpc_helper.cc:217] RpcHelper::Batcher::Finish() starting: CANCELLED: Disconnected by client [via RpcHelper::Disconnect()]
+I0821 17:01:40.772253     833 rpc_helper.cc:231] RpcHelper::Batcher::Finish(): resetting thread_pool_.
+I0821 17:01:40.772255     833 rpc_helper.cc:233] RpcHelper::Batcher::Finish(): calling session_->Finish().
+I0821 17:01:40.772257     833 grpc_client_session.cc:198] GrpcClientSession: Finish() called with client status CANCELLED: Disconnected by client [via RpcHelper::Disconnect()]
+I0821 17:01:40.772259     833 grpc_client_session.cc:241] GrpcClientSession: Finish() done.
+I0821 17:01:40.772261     833 rpc_helper.cc:235] RpcHelper::Batcher::Finish(): done.
+I0821 17:01:40.772263     833 rpc_helper.cc:511] RpcHelper::~RpcHelper() done.
+I0821 17:01:40.772266     833 grpc_host_buffer.cc:92] Waiting for destruction of HostBufferStoreLookupsWorkQueue...
+I0821 17:01:40.772270     833 grpc_host_buffer.cc:94] Destructed HostBufferStoreLookupsWorkQueue.
+I0821 17:01:40.772302     833 grpc_client_session.cc:245] GrpcClientSession::~GrpcClientSession() starting.
+I0821 17:01:40.772310     833 grpc_client_session.cc:198] GrpcClientSession: Finish() called with client status CANCELLED: ~GrpcClientSession called.
+I0821 17:01:40.772312     833 grpc_client_session.cc:241] GrpcClientSession: Finish() done.
+I0821 17:01:40.772434     833 grpc_client_session.cc:248] Deleting GrpcClientSession.user_futures_work_queue_ ...
+I0821 17:01:40.772553     833 grpc_client_session.cc:250] Deleted GrpcClientSession.user_futures_work_queue_.
