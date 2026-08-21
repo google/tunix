@@ -1,0 +1,17 @@
+WARNING:absl:Type handler registry type "<class 'jax.Array'>" overriding jax.Array
+[P34.PATHWAYS] initialized_once=1 before_jax=1
+Traceback (most recent call last):
+  File "<frozen runpy>", line 131, in _get_module_details
+  File "<frozen importlib.util>", line 91, in find_spec
+ModuleNotFoundError: No module named 'examples'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/app/examples/deepswe/canonical_entrypoint.py", line 25, in <module>
+    main()
+  File "/app/examples/deepswe/canonical_entrypoint.py", line 21, in main
+    runpy.run_module("examples.deepswe.train_deepswe_nb", run_name="__main__")
+  File "<frozen runpy>", line 222, in run_module
+  File "<frozen runpy>", line 140, in _get_module_details
+ImportError: Error while finding module specification for 'examples.deepswe.train_deepswe_nb' (ModuleNotFoundError: No module named 'examples')
