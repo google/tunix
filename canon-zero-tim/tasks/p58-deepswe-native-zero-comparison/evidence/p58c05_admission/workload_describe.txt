@@ -1,0 +1,422 @@
+Name:         jobset-canon-p58-ds4b-native-three-p58c05-13f06
+Namespace:    default
+Labels:       kueue.x-k8s.io/job-uid=802de977-29db-4287-9fce-374611027097
+Annotations:  <none>
+API Version:  kueue.x-k8s.io/v1beta2
+Kind:         Workload
+Metadata:
+  Creation Timestamp:  2026-08-21T17:19:03Z
+  Finalizers:
+    kueue.x-k8s.io/resource-in-use
+  Generation:  1
+  Owner References:
+    API Version:           jobset.x-k8s.io/v1alpha2
+    Block Owner Deletion:  true
+    Controller:            true
+    Kind:                  JobSet
+    Name:                  canon-p58-ds4b-native-three-p58c05
+    UID:                   802de977-29db-4287-9fce-374611027097
+  Resource Version:        1787332743573983003
+  UID:                     1f457bc8-0b8f-436e-9bb4-7a91387b2176
+Spec:
+  Active:  true
+  Pod Sets:
+    Count:  1
+    Name:   pathways-head
+    Template:
+      Metadata:
+        Labels:
+          kueue.x-k8s.io/queue-name:  multislice-queue
+      Spec:
+        Containers:
+          Command:
+            bash
+            -c
+            set -euo pipefail
+git config --global --add safe.directory "$(pwd)"
+git init -q
+git remote set-url origin https://github.com/google/tunix.git 2>/dev/null || git remote add origin https://github.com/google/tunix.git
+git fetch -q origin "$CANON_SOURCE_BRANCH"
+# The branch is allowed to advance after a campaign starts. Resume must still
+# check out the immutable SHA recorded in the original manifest, while proving
+# that SHA belongs to the fetched branch history.
+git cat-file -e "$CANON_EXPECT_COMMIT^{commit}"
+git merge-base --is-ancestor "$CANON_EXPECT_COMMIT" FETCH_HEAD || {
+  echo "expected source commit is not an ancestor of fetched branch" >&2
+  exit 1
+}
+git reset -q --hard "$CANON_EXPECT_COMMIT"
+actual="$(git rev-parse HEAD)"
+[ "$actual" = "$CANON_EXPECT_COMMIT" ] || { echo "source commit mismatch: $actual" >&2; exit 1; }
+exec bash canon-zero-tim/cluster/entrypoint.sh
+          Env:
+            Name:  JOBSET_RESTART_ATTEMPT
+            Value From:
+              Field Ref:
+                Field Path:  metadata.annotations['jobset.sigs.k8s.io/restart-attempt']
+            Name:            CANON_POD_NAME
+            Value From:
+              Field Ref:
+                Field Path:  metadata.name
+            Name:            CANON_MODE
+            Value:           run
+            Name:            CANON_P32_RC_STAGE
+            Value:           three-update
+            Name:            CANON_PROFILE_FILE
+            Value:           cluster/profiles/qwen3-4b-dp8-tp8-deepswe-tim.env
+            Name:            CANON_STATE
+            Value:           /mnt/disks/linchai_data/deepswe_zero_tim/canon-p58-ds4b-native-three-p58c05
+            Name:            CANON_P32_EXPECT_MODEL_MESH_IDS
+            Value:           0,16,32,48,4,20,36,52,8,24,40,56,12,28,44,60,1,17,33,49,5,21,37,53,9,25,41,57,13,29,45,61,2,18,34,50,6,22,38,54,10,26,42,58,14,30,46,62,3,19,35,51,7,23,39,55,11,27,43,59,15,31,47,63
+            Name:            CANON_EXPECT_TRAIN_MESH_IDS
+            Name:            CANON_REQUIRE_TRAIN_MESH_PIN
+            Value:           0
+            Name:            CANON_WORKER_WAIT_SECONDS
+            Value:           600
+            Name:            CANON_WORKER_STABLE_PROBES
+            Value:           1
+            Name:            CANON_WAYCOUNT_WIDTHS
+            Value:           2,4
+            Name:            CANON_WAYCOUNT_DEPTHS
+            Value:           8,15
+            Name:            MIN_TOKEN_BUCKET
+            Value:           2048
+            Name:            PATHWAYS_HEAD
+            Value:           localhost
+            Name:            JAX_PLATFORMS
+            Value:           proxy
+            Name:            JAX_BACKEND_TARGET
+            Value:           grpc://$(PATHWAYS_HEAD):29000
+            Name:            INJECTED_HF_TOKEN
+            Value From:
+              Secret Key Ref:
+                Key:       HF_TOKEN
+                Name:      yuxzhang-secrets
+                Optional:  true
+            Name:          INJECTED_WANDB_API_KEY
+            Value From:
+              Secret Key Ref:
+                Key:          WANDB_API_KEY
+                Name:         yuxzhang-secrets
+                Optional:     true
+            Name:             HF_HOME
+            Value:            /tmp/huggingface
+            Name:             CANON_RUN_ID
+            Value:            p58c05
+            Name:             CANON_SOURCE_BRANCH
+            Value:            yuxzhang/canon-zero-tim
+            Name:             CANON_EXPECT_COMMIT
+            Value:            49c89ae8476ef21ec33362d2ce6ee2c3146ee855
+            Name:             CANON_P34_TOPOLOGY_ADMITTED
+            Value:            1
+            Name:             CANON_P34_TP8_ADMITTED
+            Value:            1
+            Name:             CANON_P34_TRAJECTORY_ADMITTED
+            Value:            1
+            Name:             CANON_P34_UPDATE_ADMITTED
+            Value:            1
+            Name:             CANON_P32_TRAIN_ADMITTED
+            Value:            1
+            Name:             CANON_P32_DP_REDUCTION_ADMITTED
+            Value:            1
+            Name:             CANON_P33_WORKLOAD_LAUNCH_ADMITTED
+            Value:            1
+            Name:             CANON_P34_RUN_STAGE
+            Value:            three-update
+            Name:             CANON_P34_NO_COMMIT
+            Value:            0
+            Name:             CANON_P34_TRAJECTORY_CAPTURE
+            Value:            0
+            Name:             CANON_P34_DEBUG_DIR
+            Value:            /mnt/disks/linchai_data/deepswe_zero_tim/canon-p34-three-p58c05/debug
+            Name:             CANON_P34_WHITELIST
+            Value:            canon-zero-tim/clean_data/p46_q4_learnable/p46q4census02_qwen3_4b_instruct_2507_n16_learnable_tasks.jsonl
+            Name:             CANON_P34_WHITELIST_SHA256
+            Value:            ec297c9cbc39cd67db15b0b9db6a229b15671b848df5ec3101de9ef8df7c9973
+            Name:             CANON_P34_DATASET_NAME
+            Value:            R2E-Gym/R2E-Gym-Subset
+            Name:             CANON_P34_DATASET_REVISION
+            Value:            2e8108ff942f24fcb5686badfaf7f9a8808566d5
+            Name:             CANON_P34_DATASET_SPLIT
+            Value:            train
+            Name:             CANON_P34_DATASET_ROWS
+            Value:            4578
+            Name:             CANON_P34_CLEAN_ROWS
+            Value:            1012
+            Name:             CANON_EXPECT_MODEL_MESH_IDS
+            Name:             CANON_OPT_STATE_RESIDENT
+            Value:            1
+            Name:             CANON_P30_OPT_STATE_OFFLOAD
+            Value:            0
+            Name:             CANON_DEEPSWE_ALIGNMENT_WARN_ONLY
+            Value:            1
+            Name:             CANON_P38_FIXED_LM_HEAD
+            Value:            0
+            Name:             CANON_DEEPSWE_CLEANUP_TIMEOUT_SECS
+            Value:            300
+            Name:             CANON_DEEPSWE_ROLLOUT_BATCH_TIMEOUT_SECS
+            Value:            3600
+            Name:             CANON_DEEPSWE_PER_TURN_TIMEOUT_SECS
+            Value:            300
+            Name:             CANON_DEEPSWE_TRAJECTORY_TIMEOUT_SECS
+            Value:            3000
+            Name:             CANON_DEEPSWE_STEP_TIMEOUT_SECS
+            Value:            600
+            Name:             CANON_DEEPSWE_REWARD_TIMEOUT_SECS
+            Value:            600
+            Name:             CANON_RUN_CMD
+            Value:            python3 -u examples/deepswe/canonical_entrypoint.py --model_version=Qwen3-4B-Instruct-2507 --models_base_dir=/mnt/disks/linchai_data/models --batch_size=8 --mini_batch_size=8 --train_fraction=1.0 --num_epochs=1 --enable_remat=True --remat_policy=decoder --train_micro_batch_size=8 --compute_logps_micro_batch_size=8 --rollout_micro_batch_size=1 --num_generations=16 --num_iterations=1 --beta=0.0 --epsilon=0.2 --epsilon_high=0.28 --off_policy_steps=0 --max_prompt_length=4096 --max_response_length=16384 --max_turns=50 --per_turn_timeout_secs=300 --episode_timeout_secs=3000 --step_timeout_secs=600 --reward_timeout_secs=600 --cleanup_timeout_secs=300 --rollout_batch_timeout_secs=3600 --max_steps=3 --temperature=1.0 --top_k=0 --top_p=1.0 --loss_agg_mode=sequence-mean-token-scale --advantage_estimator=rloo --use_rollout_logps --learning_rate=1e-6 --b1=0.9 --b2=0.99 --weight_decay=0.01 --max_grad_norm=1.0 --eval_every_n_steps=10 --rollout_mesh_dp=8 --rollout_mesh_tp=8 --train_mesh_dp=8 --train_mesh_tp=8 --rollout_split_fraction=0.5 --rollout_vllm_max_num_seqs=16 --max_num_batched_tokens=256 --max_concurrency=64 --vllm_utilization=0.6 --no-optimizer-offload --dataset_name=R2E-Gym/R2E-Gym-Subset --dataset_revision=2e8108ff942f24fcb5686badfaf7f9a8808566d5 --dataset_split=train --expected_source_rows=4578 --gold_whitelist=canon-zero-tim/clean_data/p46_q4_learnable/p46q4census02_qwen3_4b_instruct_2507_n16_learnable_tasks.jsonl --metric_logger_dir=/mnt/disks/linchai_data/deepswe_zero_tim/canon-p58-ds4b-native-three-p58c05/metrics --ckpt_dir=/mnt/disks/linchai_data/deepswe_zero_tim/canon-p58-ds4b-native-three-p58c05/checkpoints --save_interval_steps=8 --max_to_keep=8 --expected_filtered_rows=1012 --loss_scale_factor=16384 --loss_denominator_weighted_accumulation --overlong_filter --filter_statuses MAX_STEPS_REACHED MAX_CONTEXT_LIMIT_REACHED TIMEOUT ENV_TIMEOUT MODEL_TIMEOUT REWARD_TIMEOUT
+            Name:             CANON_RUN_LOG
+            Value:            /mnt/disks/linchai_data/deepswe_zero_tim/canon-p58-ds4b-native-three-p58c05/run.log
+            Name:             CANON_PRE_ALIGN_GATE
+            Value:            1
+            Name:             CANON_P34_WEIGHT_REPORT
+            Value:            /mnt/disks/linchai_data/deepswe_zero_tim/canon-p58-ds4b-native-three-p58c05/weight_attestation.jsonl
+            Name:             CANON_PRE_ALIGN_REPORT
+            Value:            /mnt/disks/linchai_data/deepswe_zero_tim/canon-p58-ds4b-native-three-p58c05/pre_alignment.jsonl
+            Name:             CANON_ALIGN_REPORT
+            Value:            /mnt/disks/linchai_data/deepswe_zero_tim/canon-p58-ds4b-native-three-p58c05/alignment.jsonl
+            Name:             CANON_UPDATE_REPORT
+            Value:            /mnt/disks/linchai_data/deepswe_zero_tim/canon-p58-ds4b-native-three-p58c05/updates.jsonl
+            Name:             CANON_WANDB_RUN_NAME
+            Value:            canon-p58-ds4b-native-three-p58c05
+            Name:             CANON_WANDB_PROJECT
+            Value:            zero-tim-deepswe-4b-native-zero
+            Name:             CANON_WANDB_GROUP
+            Value:            qwen3-4b-p58-three-update
+            Name:             CANON_LOGPROB_M
+            Value:            256
+            Name:             CANON_VJP2_MAX_SEQS
+            Value:            1
+            Name:             NODE_SELECTOR_VAL
+            Value:            cpu-np
+            Name:             R2E_ACTIVE_DEADLINE_SECONDS
+            Value:            3300
+            Name:             R2E_POD_START_TIMEOUT_SECONDS
+            Value:            1200
+            Name:             R2E_POD_DELETE_TIMEOUT_SECONDS
+            Value:            300
+            Name:             R2E_K8S_CPU
+            Value:            2
+            Name:             R2E_K8S_MEM
+            Value:            4Gi
+            Name:             R2E_K8S_CPU_LIMIT
+            Value:            4
+            Name:             R2E_K8S_MEM_LIMIT
+            Value:            8Gi
+            Name:             CANON_P39_64CHIP_PILOT
+            Value:            0
+            Name:             CANON_P39_PILOT_ADMITTED
+            Value:            0
+            Name:             CANON_P43_DEEPSWE_DEBUG
+            Value:            0
+            Name:             CANON_P43_DEBUG_ADMITTED
+            Value:            0
+            Name:             CANON_P43_ROLLOUT_ONLY
+            Value:            0
+            Name:             CANON_P44_DEEPSWE_PARITY
+            Value:            0
+            Name:             CANON_P44_PARITY_ADMITTED
+            Value:            0
+            Name:             CANON_P44_TOPOLOGY
+            Value:            none
+            Name:             CANON_P44_ROLLOUT_ONLY
+            Value:            0
+            Name:             CANON_P46_DEEPSWE_TRAIN
+            Value:            0
+            Name:             CANON_P46_EVALUATION
+            Value:            0
+            Name:             CANON_P46_TOPOLOGY
+            Value:            none
+            Name:             CANON_P58_DEEPSWE_TIM
+            Value:            1
+            Name:             CANON_P58_TIM_ADMITTED
+            Value:            1
+            Name:             CANON_P58_TIM_ARM
+            Value:            native
+            Name:             CANON_P58_EXPECTED_UPDATES
+            Value:            3
+            Name:             CANON_P58_DEBUG_DIR
+            Value:            /mnt/disks/linchai_data/deepswe_zero_tim/canon-p58-ds4b-native-three-p58c05/debug
+            Name:             CANON_OPTIMIZER_HBM_MIN_FREE_BYTES
+            Value:            8589934592
+          Image:              europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/yuxzhang-repo/tunix_frozenlake_image@sha256:c9f9fd34054216bc67ba386f71e8d58658676f4a878e5980087c59db0b2d7d16
+          Image Pull Policy:  IfNotPresent
+          Name:               jax-tpu
+          Resources:
+            Limits:
+              Cpu:     24
+              Memory:  200G
+            Requests:
+              Cpu:     16
+              Memory:  64Gi
+          Volume Mounts:
+            Mount Path:  /tmp
+            Name:        shared-tmp
+            Mount Path:  /mnt/disks/linchai_data
+            Name:        p34-data
+        Dns Policy:      ClusterFirstWithHostNet
+        Host Network:    true
+        Init Containers:
+          Args:
+            --server_port=29000
+            --resource_manager_address=localhost:29001
+            --gcs_scratch_location=gs://yuxzhang-tunix-models/tmp/canon-zero-tim/p58/canon-p58-ds4b-native-three-p58c05
+          Env:
+            Name:   PATHWAYS_HEAD
+            Value:  localhost
+          Image:    us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server@sha256:7bdf61492b723c970b597812a90335a87358d279f92770d3ca11fc86ad15e312
+          Name:     pathways-proxy
+          Resources:
+            Limits:
+              Cpu:     32
+              Memory:  350G
+            Requests:
+              Cpu:         32
+              Memory:      200Gi
+          Restart Policy:  Always
+          Args:
+            --server_port=29001
+            --gcs_scratch_location=gs://yuxzhang-tunix-models/tmp/canon-zero-tim/p58/canon-p58-ds4b-native-three-p58c05
+            --node_type=resource_manager
+            --instance_count=1
+            --instance_type=tpuv5:4x4x8
+          Env:
+            Name:   HOST_ADDRESS
+            Value:  localhost
+            Name:   TPU_SKIP_MDS_QUERY
+            Value:  true
+          Image:    us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server@sha256:3d9a6523f2262e6881c700542a9d89a4032103a79ee2851a72ca353d24ad5f95
+          Name:     pathways-rm
+          Resources:
+            Limits:
+              Cpu:     16
+              Memory:  150G
+            Requests:
+              Cpu:         8
+              Memory:      32Gi
+          Restart Policy:  Always
+        Node Selector:
+          cloud.google.com/gke-nodepool:  cpu-np
+        Priority Class Name:              very-high
+        Restart Policy:                   Never
+        Volumes:
+          Host Path:
+            Path:  /tmp
+            Type:  DirectoryOrCreate
+          Name:    shared-tmp
+          Name:    p34-data
+          Persistent Volume Claim:
+            Claim Name:  haoyugao-cpu-np-pvc
+    Topology Request:
+      Pod Index Label:        batch.kubernetes.io/job-completion-index
+      Sub Group Count:        1
+      Sub Group Index Label:  jobset.sigs.k8s.io/job-index
+    Count:                    32
+    Name:                     pathways-worker
+    Template:
+      Metadata:
+        Annotations:
+          alpha.jobset.sigs.k8s.io/exclusive-topology:  cloud.google.com/gke-nodepool
+        Labels:
+          kueue.x-k8s.io/queue-name:  multislice-queue
+      Spec:
+        Containers:
+          Args:
+            --server_port=29000
+            --resource_manager_address=canon-p58-ds4b-native-three-p58c05-pathways-head-0-0.canon-p58-ds4b-native-three-p58c05:29001
+            --node_type=worker
+            --instance_type=tpuv5:4x4x8
+          Env:
+            Name:   PATHWAYS_HEAD
+            Value:  canon-p58-ds4b-native-three-p58c05-pathways-head-0-0.canon-p58-ds4b-native-three-p58c05
+            Name:   TPU_MIN_LOG_LEVEL
+            Value:  0
+            Name:   TF_CPP_MIN_LOG_LEVEL
+            Value:  0
+            Name:   XCLOUD_ENVIRONMENT
+            Value:  GCP
+            Name:   MEGASCALE_GRPC_ENABLE_XOR_TRACER
+            Value:  false
+            Name:   MEGASCALE_NUM_SLICES
+            Value From:
+              Field Ref:
+                Field Path:  metadata.labels['jobset.sigs.k8s.io/replicatedjob-replicas']
+            Name:            JOBSET_NAME
+            Value From:
+              Field Ref:
+                Field Path:  metadata.annotations['jobset.sigs.k8s.io/jobset-name']
+            Name:            REPLICATED_JOB_NAME
+            Value From:
+              Field Ref:
+                Field Path:  metadata.annotations['jobset.sigs.k8s.io/replicatedjob-name']
+            Name:            MEGASCALE_SLICE_ID
+            Value From:
+              Field Ref:
+                Field Path:  metadata.labels['jobset.sigs.k8s.io/job-index']
+            Name:            MEGASCALE_COORDINATOR_ADDRESS
+            Value From:
+              Field Ref:
+                Field Path:  metadata.labels['jobset.sigs.k8s.io/coordinator']
+            Name:            XLA_PYTHON_CLIENT_PREALLOCATE
+            Value:           true
+            Name:            XLA_PYTHON_CLIENT_MEM_FRACTION
+            Value:           0.9
+            Name:            ENABLE_PATHWAYS_PERSISTENCE
+            Value:           1
+          Image:             us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server@sha256:3d9a6523f2262e6881c700542a9d89a4032103a79ee2851a72ca353d24ad5f95
+          Name:              pathways-worker
+          Resources:
+            Limits:
+              google.com/tpu:  4
+            Requests:
+              google.com/tpu:  4
+          Volume Mounts:
+            Mount Path:  /tmp
+            Name:        shared-tmp
+        Dns Policy:      ClusterFirstWithHostNet
+        Host Network:    true
+        Node Selector:
+          cloud.google.com/gke-nodepool:         tpu-v5p-slice
+          cloud.google.com/gke-tpu-accelerator:  tpu-v5p-slice
+          cloud.google.com/gke-tpu-topology:     4x4x8
+        Priority Class Name:                     very-high
+        Restart Policy:                          Never
+        Tolerations:
+          Key:       google.com/tpu
+          Operator:  Exists
+        Volumes:
+          Host Path:
+            Path:  /tmp
+            Type:  DirectoryOrCreate
+          Name:    shared-tmp
+    Topology Request:
+      Pod Index Label:        batch.kubernetes.io/job-completion-index
+      Sub Group Count:        1
+      Sub Group Index Label:  jobset.sigs.k8s.io/job-index
+  Priority:                   1000
+  Priority Class Ref:
+    Group:     scheduling.k8s.io
+    Kind:      PriorityClass
+    Name:      very-high
+  Queue Name:  multislice-queue
+Status:
+  Conditions:
+    Last Transition Time:  2026-08-21T17:19:03Z
+    Message:               couldn't assign flavors to pod set pathways-worker: flavor 0xv5p-8 doesn't match node affinity, flavor cpu-user doesn't match node affinity
+    Observed Generation:   1
+    Reason:                Pending
+    Status:                False
+    Type:                  QuotaReserved
+  Resource Requests:
+    Name:  pathways-head
+    Resources:
+      Cpu:     56
+      Memory:  296Gi
+    Name:      pathways-worker
+    Resources:
+      google.com/tpu:  128
+Events:
+  Type     Reason   Age    From             Message
+  ----     ------   ----   ----             -------
+  Warning  Pending  2m24s  kueue-admission  couldn't assign flavors to pod set pathways-worker: flavor 0xv5p-8 doesn't match node affinity, flavor cpu-user doesn't match node affinity
