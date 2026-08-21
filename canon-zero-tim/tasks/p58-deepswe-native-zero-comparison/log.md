@@ -108,3 +108,12 @@
 - One-host inventory: Qwen3-4B weights are present, but direct TPU initialization fails because `libtpu.so` is absent. A real one-host v5p test was therefore not run and is not claimed.
 - External effects: fetched/fast-forwarded the requested operator branch and ran local/container read-only validation. No commit, push, main mutation, image publication, model download, Kubernetes resource, TPU job, or credential change occurred.
 - Next: after explicit commit/push approval, publish and read back the fix, then render only native three-update run `p58c03`. P58c01 and p58c02 remain immutable and must not be resumed; zero remains deferred.
+
+## 2026-08-21 UTC — p58c02 direct-entrypoint fix published
+
+- Type: publication evidence
+- Action: committed the direct-file import bootstrap, exact native preflight, isolated subprocess regression, pinned-image gate inclusion, p58c02 classification, and p58c03 handoff as one concern; the operator tip had not moved; performed a normal non-force fast-forward push.
+- Published fix commit: `82d82f72a7220d945737d95f6266b5b7e2cfe706`.
+- Readback: local HEAD and `origin/yuxzhang/canon-zero-tim` both resolved to the published commit with ahead/behind `0/0`; the worktree was clean before this publication-only checkpoint.
+- External effects: one fix commit and one fast-forward operator-branch push. `main` was untouched. No image publication, model download, Kubernetes object, TPU job, credential change, or p58c03 run occurred.
+- Next: publish this documentation checkpoint, fetch its final readback SHA, and hand only native run-id `p58c03` to the remote executor. Zero remains deferred.

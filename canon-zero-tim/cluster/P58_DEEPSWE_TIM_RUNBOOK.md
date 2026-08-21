@@ -30,6 +30,11 @@ no resumable trajectory state. Use a final operator-branch readback SHA that
 contains the direct-entrypoint fix and fresh run-id `p58c03`. Never reuse the
 p58c01 or p58c02 YAML/root.
 
+The direct-entrypoint implementation commit is
+`82d82f72a7220d945737d95f6266b5b7e2cfe706`. Resolve the final runnable SHA by
+fetching the operator branch after the later publication checkpoint; do not
+launch from the historical p58c02 source.
+
 ## 1. Frozen recipe
 
 | Field | Value |

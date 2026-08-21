@@ -32,7 +32,9 @@ not be found. The local fix derives the repository root from `__file__`, adds
 it before the package import, and changes native stock preflight to exercise
 the identical direct-file entrypoint. The exact command now exits zero from
 `/tmp` in the pinned image, and the complete exact-image gate passes. These
-changes are local and uncommitted; they have not been pushed.
+changes were published as `82d82f72a7220d945737d95f6266b5b7e2cfe706`;
+the first post-push readback matched exactly with ahead/behind `0/0`. Fetch the
+final operator tip because this publication checkpoint advances it once more.
 
 Never modify or push `main`. The eventual publication target is
 `yuxzhang/canon-zero-tim` after reconciling the unrelated remote tip.

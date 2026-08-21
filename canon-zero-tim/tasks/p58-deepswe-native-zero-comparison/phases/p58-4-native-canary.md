@@ -71,5 +71,7 @@ The immutable raw log is `../evidence/p58c02/run.log`, SHA-256
 The local fix derives the repository root from the wrapper's own file path,
 adds it before package import, and makes the native stock preflight execute
 the same direct-file path as the JobSet. A direct `/tmp` launch and the full
-pinned-image gate pass. The next attempt is fresh run-id `p58c03`, only after
-the fix is separately approved, published, and read back.
+pinned-image gate pass. The fix was published as
+`82d82f72a7220d945737d95f6266b5b7e2cfe706` and its first readback matched
+with ahead/behind `0/0`. The next attempt is fresh run-id `p58c03` from the
+final post-checkpoint operator tip.
