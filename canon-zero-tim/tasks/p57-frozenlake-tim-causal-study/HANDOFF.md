@@ -36,10 +36,17 @@ for the stock curve. M10 and M20 are no longer candidates.
 
 `p57_eval0_att1` is not an evaluation result. Source `200b244c...` passed the
 resolved stock contract but stopped before model load because Steps 37 and 38
-still had calibration-only leaf guards. The local repair admits the exact
-calibration/train/eval stock tuples and rejects the zero arm; host `87/87` and
-the pinned-image three-mode gate pass. Do not resume attempt 1. After the repair
-is published, render a fresh eval-0 in `new` mode from that immutable SHA.
+still had calibration-only leaf guards. Commit `86112838...` repaired and
+certified those guards.
+
+`p57_eval0_att2` is also not an evaluation result. It proved the repaired stock
+runtime, loaded the model, synchronized rollout weights, and completed real
+rollouts, then failed in trainer-side EVAL rescore. The global input had shape
+`[2, ...]` while Splash Attention mapped its row axis over DP8, so JAX rejected
+the non-divisible shape before producing a receipt. The repair uses eight
+deterministic generations: caller-global M=8, shard-local M=1, semantic rows=8,
+and the same DP8xTP8 trainer program. Do not resume attempts 1 or 2. After this
+repair is published, render a fresh eval-0 in `new` mode from its immutable SHA.
 
 ## Treatment identity
 
@@ -95,6 +102,12 @@ For stock eval-0 and later stock evaluations, require:
 [CANON_P57_EVAL] COMPLETE arm=mismatch step=<boundary> ... backward=0 optimizer_commits=0 checkpoint_writes=0
 [P57.STOCK_FAST] RUNTIME_PATH_PASS canonical_markers=0 overlay=skipped
 ~~~
+
+The COMPLETE marker must report `prompts=100 generations=8 rewards=800`.
+Local admission is complete: P57 host tests pass `89/89`, and the pinned-image
+gate executes the eight-generation evaluator lifecycle plus calibration/train/
+eval stock modes and all registered negatives before ending
+`P45_EXACT_IMAGE_CPU_PASS overlay=qwen8b_tp8`. This is not target evidence.
 
 ## Stop conditions
 

@@ -23,7 +23,7 @@ SPEC.loader.exec_module(classifier)
 
 
 def _record():
-  rewards = [float(index % 2) for index in range(200)]
+  rewards = [float(group % 2) for group in range(100) for _ in range(8)]
   return {
       "schema": "p57-frozenlake-isolated-evaluation-v1",
       "arm": "zero",
@@ -40,11 +40,11 @@ def _record():
       "dataset_eval_sha256": "",
       "reward": 0.5,
       "solve": 0.5,
-      "n": 200,
+      "n": 800,
       "wall_seconds": 12.5,
       "policy_step": 20,
       "prompts": 100,
-      "generations": 2,
+      "generations": 8,
       "batches": 100,
       "rewards": rewards,
   }
@@ -63,7 +63,7 @@ class P57EvalClassifierTest(unittest.TestCase):
         "[CANON_P57_EVAL_JSON] "
         + json.dumps(record, sort_keys=True, separators=(",", ":"))
         + "\n[CANON_P57_EVAL] COMPLETE arm=zero step=20 prompts=100 "
-        "generations=2 rewards=200 solve=0.500000 backward=0 "
+        "generations=8 rewards=800 solve=0.500000 backward=0 "
         "optimizer_commits=0 checkpoint_writes=0\n"
         + suffix,
         encoding="utf-8",
@@ -100,7 +100,14 @@ class P57EvalClassifierTest(unittest.TestCase):
     result = self._classify(record)
     self.assertEqual(result["verdict"], "FAIL")
     self.assertTrue(any("contract fields" in reason for reason in result["reasons"]))
-    self.assertTrue(any("exactly 200" in reason for reason in result["reasons"]))
+    self.assertTrue(any("exactly 800" in reason for reason in result["reasons"]))
+
+  def test_rejects_divergent_deterministic_replicas(self):
+    record = _record()
+    record["rewards"][1] = 1.0
+    result = self._classify(record)
+    self.assertEqual(result["verdict"], "FAIL")
+    self.assertTrue(any("replicas diverged" in reason for reason in result["reasons"]))
 
   def test_materialized_eval_requires_matching_dataset_attestation(self):
     record = _record()
@@ -117,7 +124,7 @@ class P57EvalClassifierTest(unittest.TestCase):
         "[CANON_P57_EVAL_JSON] "
         + json.dumps(record, sort_keys=True, separators=(",", ":"))
         + "\n[CANON_P57_EVAL] COMPLETE arm=zero step=20 prompts=100 "
-        "generations=2 rewards=200 solve=0.500000 backward=0 "
+        "generations=8 rewards=800 solve=0.500000 backward=0 "
         "optimizer_commits=0 checkpoint_writes=0\n",
         encoding="utf-8",
     )

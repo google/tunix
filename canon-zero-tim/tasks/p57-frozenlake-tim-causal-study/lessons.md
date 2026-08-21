@@ -18,3 +18,7 @@
 - When a top-level router broadens a mode from calibration to train/eval, test
   every invoked leaf step under the same tuple matrix. Static proof that the
   entrypoint selects a step does not prove that the step's own guard admits it.
+- A no-update evaluator that enters trainer rescore still inherits the trainer
+  mesh contract. On DP8, a generation group of two is not a legal global row
+  shape even if GRPO itself accepts two; gate generation count against the DP
+  divisor before rendering.

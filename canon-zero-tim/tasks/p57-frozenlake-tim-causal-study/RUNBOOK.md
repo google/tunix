@@ -14,7 +14,7 @@ YAML. Every TPU launch requires explicit user approval.
 | physical prompt / response | 4,096 / 8,192 tokens |
 | signed horizon | 200 optimizer updates |
 | segment stops | 50, 100, 150, 200 |
-| held-out eval | updates 0, 50, 100, 150, 200; 100 maps, 2 deterministic generations |
+| held-out eval | updates 0, 50, 100, 150, 200; 100 maps, 8 deterministic generations |
 | rollout group | 32 prompts x 8 generations = 256 trajectories/update |
 | trajectory mini / micro | 32 / 8 |
 | objective | GSPO-token, RLOO, beta 0, epsilon 0.003/0.005 |
@@ -84,6 +84,12 @@ kubectl apply -f "$OUT/jobset-p57-frozenlake-mismatch-m15-selection-eval-0.yaml"
 ~~~
 
 Accept only an eval receipt/classification at step 0 with mutation counters 0.
+The evaluator intentionally keeps trainer-side rescore enabled. Its global
+trajectory row count is therefore 8, shard-local row count is 1 on DP8, and
+all 800 rewards must be present. Do not reduce `--num_generations`: attempt 2
+proved that a global row count of 2 cannot enter the DP8 Splash Attention
+program. The classifier requires all eight greedy rewards for each map to be
+identical and computes capability from the resulting 100 map-level values.
 
 ## First stock training segment: 0→50
 

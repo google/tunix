@@ -65,8 +65,12 @@ require the complete numerical bundle off, and runtime postflight requires
 zero canonical markers. M15 is rebuilt from immutable base weights on its
 disjoint `selection` maps and trained for 200 signed updates.
 There is no train-20 screen. Independent held-out evaluations occur at updates
-0, 50, 100, 150, and 200. LatestN(1) means pausing at each registered boundary,
-evaluating, and resuming with the original final horizon of 200.
+0, 50, 100, 150, and 200. Each evaluates 100 maps with eight deterministic
+generations. Eight is the minimum admitted global row count for trainer-side
+rescore on DP8 (global M=8, shard-local M=1); the repeated greedy generations
+are coverage replicas, not independent map samples. LatestN(1) means pausing at
+each registered boundary, evaluating, and resuming with the original final
+horizon of 200.
 
 The physical envelope is prompt 4,096 plus response 8,192. Training uses
 DP8xTP8, resident optimizer state, batch 32, eight generations, trajectory

@@ -41,7 +41,7 @@ class AgenticRLLearnerTest(parameterized.TestCase):
 
   def test_p57_evaluate_only_covers_dataset_without_train_update(self):
     learner = object.__new__(DummyLearner)
-    learner.algo_config = agentic_rl_learner.AgenticRLConfig(num_generations=2)
+    learner.algo_config = agentic_rl_learner.AgenticRLConfig(num_generations=8)
     learner._rewards_window_lock = threading.Lock()
     learner._eval_rewards_window = []
     learner._full_batch_size = 0
@@ -49,15 +49,19 @@ class AgenticRLLearnerTest(parameterized.TestCase):
 
     async def producer(orchestrator, prompt_iterator, num_generations):
       del orchestrator
-      self.assertEqual(num_generations, 2)
+      self.assertEqual(num_generations, 8)
       for _ in prompt_iterator:
-        yield [object(), object()]
+        yield [object() for _ in range(8)]
+
+    prompt_index = 0
 
     def process(batch, mode):
-      self.assertLen(batch, 2)
+      nonlocal prompt_index
+      self.assertLen(batch, 8)
       self.assertEqual(mode, rl_cluster_lib.Mode.EVAL)
       with learner._rewards_window_lock:
-        learner._eval_rewards_window.extend([0.0, 1.0])
+        learner._eval_rewards_window.extend([float(prompt_index)] * 8)
+      prompt_index += 1
       return []
 
     learner._orchestrator_producer = producer
@@ -77,9 +81,9 @@ class AgenticRLLearnerTest(parameterized.TestCase):
 
     self.assertEqual(result["policy_step"], 20)
     self.assertEqual(result["prompts"], 2)
-    self.assertEqual(result["generations"], 2)
+    self.assertEqual(result["generations"], 8)
     self.assertEqual(result["batches"], 2)
-    self.assertEqual(result["n"], 4)
+    self.assertEqual(result["n"], 16)
     self.assertEqual(result["reward"], 0.5)
     self.assertEqual(result["solve"], 0.5)
     self.assertEqual(learner._full_batch_size, 2)

@@ -13,11 +13,11 @@ Measure capability, stability, and cost under the frozen causal contract.
 - Checkpoints: every 10 updates.
 - Isolated held-out evaluations: updates 0, 20, 50, 100, 150, and 200.
 - Evaluation contract: immutable held-out maps, deterministic greedy decoding
-  (`temperature=0`), two identical-policy generations per map (the minimum
-  group accepted by GRPO), fixed map order, and no prefix state shared with
-  training. Capability statistics are map-level; duplicate deterministic
-  generations are retained as a coverage check, not treated as independent
-  samples.
+  (`temperature=0`), eight identical-policy generations per map (the minimum
+  global row count divisible by the DP8 trainer-rescore axis), fixed map order,
+  and no prefix state shared with training. Capability statistics are map-level;
+  duplicate deterministic generations are retained as a coverage check, not
+  treated as independent samples.
 - Each expensive arm launch requires explicit user approval.
 
 ## Continuation rule

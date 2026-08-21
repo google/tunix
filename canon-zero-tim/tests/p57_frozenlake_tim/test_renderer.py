@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 import yaml
 
@@ -378,6 +379,8 @@ class P57RendererTest(unittest.TestCase):
     self.assertEqual(eval_env["CANON_P57_INFERENCE_REGIME"], "stock-fast")
     self.assertEqual(eval_env["CANON_P57_EVAL_CHECKPOINT_STEP"], "0")
     self.assertIn("--evaluation_only", eval_env["CANON_RUN_CMD"])
+    self.assertIn("--num_generations=8", eval_env["CANON_RUN_CMD"])
+    self.assertNotIn("--num_generations=2", eval_env["CANON_RUN_CMD"])
     self.assertIn("--max_prompt_length=4096", eval_env["CANON_RUN_CMD"])
     self.assertIn("--max_response_length=8192", eval_env["CANON_RUN_CMD"])
     self.assertEqual(train_preflight.returncode, 0, train_preflight.stderr)
@@ -390,6 +393,19 @@ class P57RendererTest(unittest.TestCase):
         "[P57.STOCK_FAST] ZERO_TIM_OFF_PASS mode=eval absent=12 observer=off",
         eval_preflight.stdout,
     )
+
+  def test_eval_rejects_generation_count_not_divisible_by_dp(self):
+    with mock.patch.object(paired, "_EVAL_GENERATIONS", 2), self.assertRaisesRegex(
+        ValueError, "generations must be divisible by the trainer DP axis"
+    ):
+      paired._spec(
+          paired._ARMS[1],
+          200,
+          run_kind="eval",
+          checkpoint_step=0,
+          workload_candidate="m15",
+          data_split="selection",
+      )
 
   def test_stock_curve_rejects_unregistered_stop_or_recipe(self):
     common = dict(

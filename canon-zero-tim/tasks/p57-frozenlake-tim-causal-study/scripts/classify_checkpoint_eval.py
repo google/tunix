@@ -81,9 +81,9 @@ def classify(
       "seed": 42,
       "held_out_rows": 100,
       "prompts": 100,
-      "generations": 2,
+      "generations": 8,
       "batches": 100,
-      "n": 200,
+      "n": 800,
       "workload_candidate": workload_candidate,
       "data_split": data_split,
   }
@@ -96,8 +96,8 @@ def classify(
     reasons.append(f"evaluation contract fields drifted: {wrong}")
 
   rewards = record.get("rewards")
-  if not isinstance(rewards, list) or len(rewards) != 200:
-    reasons.append("evaluation rewards must contain exactly 200 values")
+  if not isinstance(rewards, list) or len(rewards) != 800:
+    reasons.append("evaluation rewards must contain exactly 800 values")
     reward_values = np.asarray([], dtype=np.float32)
   else:
     try:
@@ -107,9 +107,15 @@ def classify(
       reasons.append(f"evaluation rewards are not numeric: {exc}")
   if reward_values.size and not np.isfinite(reward_values).all():
     reasons.append("evaluation rewards contain nonfinite values")
-  if reward_values.size == 200 and np.isfinite(reward_values).all():
-    expected_reward = float(reward_values.mean())
-    expected_solve = float((reward_values > 0.1).mean())
+  if reward_values.size == 800 and np.isfinite(reward_values).all():
+    reward_groups = reward_values.reshape(100, 8)
+    if not np.array_equal(
+        reward_groups, np.repeat(reward_groups[:, :1], 8, axis=1)
+    ):
+      reasons.append("deterministic evaluation replicas diverged within a map")
+    map_rewards = reward_groups[:, 0]
+    expected_reward = float(map_rewards.mean())
+    expected_solve = float((map_rewards > 0.1).mean())
     if not _finite_number(record.get("reward")) or not math.isclose(
         float(record["reward"]), expected_reward, rel_tol=0.0, abs_tol=1e-7
     ):

@@ -30,6 +30,9 @@ _TAG_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,50}[a-z0-9])?")
 _ALLOWED_UPDATES = (1, 3, 20, 50, 100, 150, 200, 450)
 _BASE_MEMORY = "200G"
 _P57_MEMORY = "350G"
+_DP_SIZE = 8
+_TP_SIZE = 8
+_EVAL_GENERATIONS = 8
 _SCRIPT_ENTRYPOINT = (
     "python3", "-u", "examples/frozenlake/train_frozenlake_qwen3.py"
 )
@@ -121,7 +124,7 @@ def _spec(
 ) -> p33.JobSpec:
   command = list(
       p33._frozenlake_command(  # pylint: disable=protected-access
-          expected_updates, dp_size=8, tp_size=8
+          expected_updates, dp_size=_DP_SIZE, tp_size=_TP_SIZE
       )
   )
   _use_module_entrypoint(command)
@@ -150,7 +153,16 @@ def _spec(
   elif run_kind == "eval":
     if checkpoint_step is None:
       raise ValueError("P57 eval spec requires a checkpoint step")
-    _replace_command_arg(command, "--num_generations=", "--num_generations=2")
+    if _EVAL_GENERATIONS % _DP_SIZE:
+      raise ValueError(
+          "P57 eval generations must be divisible by the trainer DP axis: "
+          f"generations={_EVAL_GENERATIONS} dp={_DP_SIZE}"
+      )
+    _replace_command_arg(
+        command,
+        "--num_generations=",
+        f"--num_generations={_EVAL_GENERATIONS}",
+    )
     _replace_command_arg(command, "--temperature=", "--temperature=0")
     command.extend((
         "--num_test_batches=4",
@@ -175,8 +187,8 @@ def _spec(
       job_prefix=job_prefix,
       command=tuple(command),
       enable_evaluation=False,
-      dp_size=8,
-      tp_size=8,
+      dp_size=_DP_SIZE,
+      tp_size=_TP_SIZE,
       optimizer_resident=True,
   )
 
