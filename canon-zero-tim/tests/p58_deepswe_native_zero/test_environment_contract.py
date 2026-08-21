@@ -74,11 +74,13 @@ class P58EnvironmentContractTest(unittest.TestCase):
         if "=" in item
     }
 
-  def test_native_renderer_environment_passes_real_00_env(self):
+  def _persisted(self, arm: str, stage: str):
     supplied = os.environ.copy()
-    supplied.update(self._rendered_env("native", "three-update"))
+    supplied.update(self._rendered_env(arm, stage))
     supplied.update({
         "CANON_PKG": str(PKG),
+        "HF_TOKEN": "test-hf-runtime-token",
+        "WANDB_API_KEY": "test-wandb-runtime-key",
         "INJECTED_HF_TOKEN": "test-hf-token",
         "INJECTED_WANDB_API_KEY": "test-wandb-key",
     })
@@ -92,17 +94,55 @@ class P58EnvironmentContractTest(unittest.TestCase):
           text=True,
           capture_output=True,
       )
-      self.assertIn("[env] P34 contract OK: DP8xTP8", completed.stdout)
-      self.assertNotIn("REFUSING TO CONTINUE", completed.stderr)
       resolved = (Path(state_dir) / "env.sh").read_text()
-      self.assertIn(
-          "export CANON_P32_DP_REDUCTION_ADMITTED=0", resolved
+      reloaded = subprocess.run(
+          [
+              "bash",
+              "-c",
+              f"source {Path(state_dir) / 'env.sh'}; env -0",
+          ],
+          env=supplied,
+          check=True,
+          capture_output=True,
       )
-      self.assertIn("export CANON_FROZENLAKE_L3=0", resolved)
-      self.assertIn("export CANON_FROZENLAKE_P27=0", resolved)
-      self.assertIn(
-          "export CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY=0", resolved
-      )
+    values = {
+        item.split("=", 1)[0]: item.split("=", 1)[1]
+        for item in reloaded.stdout.decode().split("\0")
+        if "=" in item
+    }
+    return completed, resolved, values
+
+  def test_native_renderer_environment_passes_real_00_env(self):
+    completed, resolved, values = self._persisted("native", "three-update")
+    self.assertIn("[env] P34 contract OK: DP8xTP8", completed.stdout)
+    self.assertNotIn("REFUSING TO CONTINUE", completed.stderr)
+    self.assertIn("export CANON_P32_DP_REDUCTION_ADMITTED=0", resolved)
+    self.assertIn("export CANON_FROZENLAKE_L3=0", resolved)
+    self.assertIn("export CANON_FROZENLAKE_P27=0", resolved)
+    self.assertIn(
+        "export CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY=0", resolved
+    )
+    self.assertNotIn("test-hf-runtime-token", resolved)
+    self.assertNotIn("test-wandb-runtime-key", resolved)
+    # 00_env.sh is a child of the entrypoint. Exercise the actual reload
+    # boundary with the raw renderer environment still present, rather than
+    # merely inspecting the generated exports. This is the p58c03 regression:
+    # the native profile unset CANON_LOGPROB_M in the child, but a layered
+    # source left the renderer's CANON_LOGPROB_M=256 alive in the parent.
+    self.assertNotIn("CANON_LOGPROB_M", values)
+    self.assertNotIn("CANON_FIXED_AR", values)
+    self.assertEqual(values["HF_TOKEN"], "test-hf-runtime-token")
+    self.assertEqual(values["WANDB_API_KEY"], "test-wandb-runtime-key")
+    deepswe_contract.validate_environment(values)
+
+  def test_zero_renderer_environment_survives_authoritative_reload(self):
+    _, resolved, values = self._persisted("zero", "three-update")
+    self.assertIn("export CANON_LOGPROB_M=256", resolved)
+    self.assertEqual(values["CANON_LOGPROB_M"], "256")
+    self.assertEqual(values["CANON_FIXED_AR"], "1")
+    self.assertEqual(values["HF_TOKEN"], "test-hf-runtime-token")
+    self.assertEqual(values["WANDB_API_KEY"], "test-wandb-runtime-key")
+    deepswe_contract.validate_environment(values)
 
   def test_both_arms_resolve_to_the_signed_contract(self):
     for arm in ("native", "zero"):

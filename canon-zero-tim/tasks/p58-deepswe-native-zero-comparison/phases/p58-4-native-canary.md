@@ -75,3 +75,34 @@ pinned-image gate pass. The fix was published as
 `82d82f72a7220d945737d95f6266b5b7e2cfe706` and its first readback matched
 with ahead/behind `0/0`. The next attempt is fresh run-id `p58c03` from the
 final post-checkpoint operator tip.
+
+### p58c03 — resolved-environment reload bootstrap INCONCLUSIVE
+
+Attempt-0 passed `00_env.sh`, exact source sync, the pinned R2E install and
+adapter check, stock-engine preflight, Pathways initialization, the direct
+entrypoint, TPU device discovery, and bounded R2E runtime patching. It then
+stopped before model initialization when the DeepSWE Python contract found
+`CANON_LOGPROB_M=256` in the native process environment.
+
+The native profile had correctly unset that presence-sensitive zero-TIM
+switch inside `00_env.sh`. The bug was the process boundary: `00_env.sh` is a
+child, while its generated `env.sh` contained exports only. Sourcing that file
+in the parent layered resolved values over the raw renderer environment and
+could not remove its stale `CANON_LOGPROB_M`. The contract rejection was
+correct and must not be relaxed. The later one-W&B-run fatal is derivative of
+the earlier Python exit, not a second root cause.
+
+The immutable logs are `../evidence/p58c03/run.log`, SHA-256
+`15aa9968200c55a02ef47c72c5e209277397835e1752a4dbd9699fce3b2c42b4`, and
+`../evidence/p58c03/head_container.log`, SHA-256
+`d5e8b5b1941aa5632fa6267cfdac445727c175bf8d2bbcc79c1ece7cf7aba1e2`.
+No model, rollout, trajectory, forward, backward, optimizer transaction, or
+checkpoint ran.
+
+The local fix makes the generated `env.sh` clear its managed non-secret
+namespaces before exporting the exact resolved set. The p58c03 regression
+seeds the parent with the renderer's stale value, executes real `00_env.sh`,
+reloads its snapshot, asserts the native-only absences, and calls the Python
+contract. Focused P58/P34 tests, the P57 81-test adjacent suite, and the full
+pinned-image gate pass. After explicit publication approval, the next and
+only admissible run-id is fresh native `p58c04`; p58c03 is not resumable.

@@ -17,7 +17,8 @@ enough for launch and is explicitly deferred. No image publication,
 Kubernetes render output, JobSet apply, model download, or TPU run was made by
 the publishing agent.
 
-Native attempts `p58c01` and `p58c02` are bootstrap `INCONCLUSIVE` results.
+Native attempts `p58c01`, `p58c02`, and `p58c03` are bootstrap
+`INCONCLUSIVE` results.
 P58c01 failed in `00_env.sh`; its published fix preserves native
 `CANON_P32_DP_REDUCTION_ADMITTED=0`, exports three unrelated FrozenLake zeros,
 and passes the renderer-to-real-`00_env.sh` regression. The fix implementation commit
@@ -35,6 +36,25 @@ the identical direct-file entrypoint. The exact command now exits zero from
 changes were published as `82d82f72a7220d945737d95f6266b5b7e2cfe706`;
 the first post-push readback matched exactly with ahead/behind `0/0`. Fetch the
 final operator tip because this publication checkpoint advances it once more.
+
+P58c03 proved that the preceding admission, install, stock-engine, Pathways,
+and direct-entrypoint fixes work, then stopped before model initialization.
+`00_env.sh` correctly removed native-only presence-sensitive zero-TIM switches
+inside its child shell, but its generated `env.sh` contained exports only.
+When the parent entrypoint sourced it, the raw renderer value
+`CANON_LOGPROB_M=256` remained present and the DeepSWE Python contract
+correctly rejected the native environment. The W&B-run fatal printed after
+that exit is derivative, not the first failure.
+
+The local fix turns the generated `env.sh` into an authoritative snapshot of
+all managed non-secret namespaces: it clears the caller's managed values,
+then exports the exact resolved set. Secret injection variables and token
+values are neither cleared nor serialized. The exact regression seeds the
+raw parent with `CANON_LOGPROB_M=256`, executes real `00_env.sh`, sources its
+snapshot, verifies native absences, and passes the Python contract. Focused
+P58/P34 tests, the P57 81-test adjacent suite, and the full pinned-image gate
+pass. This fix is local and requires explicit commit/push approval before it
+can be used remotely.
 
 Never modify or push `main`. The eventual publication target is
 `yuxzhang/canon-zero-tim` after reconciling the unrelated remote tip.
@@ -61,6 +81,8 @@ Never modify or push `main`. The eventual publication target is
 - P58 fail-closed postflight classifier and automatic invocation from
   `90_run.sh`; and
 - negative/regression controls for P34/P44 and the shared trainer/loss paths.
+- authoritative resolved-environment reload semantics so child-shell unsets
+  remain absent in all later entrypoint steps.
 
 The exact run instructions and artifact interpretation are in
 `canon-zero-tim/cluster/P58_DEEPSWE_TIM_RUNBOOK.md`.
@@ -108,7 +130,7 @@ implementation plus CPU/exact-image validation only.
 4. Publish or select a client image by immutable registry digest and verify the
    mounted Qwen3-4B-Instruct-2507 weights and frozen clean-list digest without
    printing credentials.
-5. Render only `arm=native, stage=three-update` with fresh run-id `p58c03`;
+5. Render only `arm=native, stage=three-update` with fresh run-id `p58c04`;
    preserve its YAML and digest,
    run server-side dry-run, and apply only that JobSet under the user's
    native-first decision.
@@ -119,9 +141,13 @@ implementation plus CPU/exact-image validation only.
 7. Do not render or apply zero. Do not start 1,000 updates merely because the
    native canary passes; return evidence for a new user decision.
 
-Do not reuse either failed `p58c01` or `p58c02` YAML/run root. Neither contains
-resumable trajectory state. They remain immutable failure evidence at
-`evidence/p58c01/run.log` and `evidence/p58c02/run.log`.
+Do not reuse any failed `p58c01`, `p58c02`, or `p58c03` YAML/run root. None
+contains resumable trajectory state. They remain immutable failure evidence
+under `evidence/p58c01/`, `evidence/p58c02/`, and `evidence/p58c03/`. The
+p58c03 hashes are `15aa9968200c55a02ef47c72c5e209277397835e1752a4dbd9699fce3b2c42b4`
+for `run.log` and
+`d5e8b5b1941aa5632fa6267cfdac445727c175bf8d2bbcc79c1ece7cf7aba1e2`
+for `head_container.log`.
 
 ## Important operational semantics
 
@@ -139,6 +165,9 @@ resumable trajectory state. They remain immutable failure evidence at
 - The native arm is stock numerical training plus observation. It must not
   inherit `CANON_FIXED_AR`, `CANON_LOGPROB_M`, the canonical module, VJP2, or
   the excess-precision pin. The zero arm retains the complete bundle.
+- `env.sh` is an authoritative managed-environment snapshot, not a layered
+  override. If the parent retains a renderer variable that the profile made
+  absent, the p58c03 regression must fail before publication.
 - `CANON_P34_TRAJECTORY_CAPTURE=0` is intentional. P58 uses its own full
   trajectory journal and does not enable the older large P34 alignment-tensor
   capture mode.

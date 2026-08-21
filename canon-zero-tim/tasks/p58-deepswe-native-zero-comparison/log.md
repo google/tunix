@@ -117,3 +117,17 @@
 - Readback: local HEAD and `origin/yuxzhang/canon-zero-tim` both resolved to the published commit with ahead/behind `0/0`; the worktree was clean before this publication-only checkpoint.
 - External effects: one fix commit and one fast-forward operator-branch push. `main` was untouched. No image publication, model download, Kubernetes object, TPU job, credential change, or p58c03 run occurred.
 - Next: publish this documentation checkpoint, fetch its final readback SHA, and hand only native run-id `p58c03` to the remote executor. Zero remains deferred.
+
+## 2026-08-21 UTC — p58c03 parent-environment leak diagnosed and fixed locally
+
+- Type: target failure/implementation/validation
+- Source intake: fast-forwarded the isolated P58 worktree from `ae5e00ad5742b300d2391e004d4b908374fa1135` to operator tip `10ccdb3012e7a6bd3f0c9ae6bdf29d717cf84440`. The new tip added only the immutable p58c03 evidence. `main` was not touched.
+- Evidence: `evidence/p58c03/run.log`, SHA-256 `15aa9968200c55a02ef47c72c5e209277397835e1752a4dbd9699fce3b2c42b4`; `evidence/p58c03/head_container.log`, SHA-256 `d5e8b5b1941aa5632fa6267cfdac445727c175bf8d2bbcc79c1ece7cf7aba1e2`. JobSet attempt was explicitly `0`.
+- First failing boundary: after environment validation, exact source sync, pinned R2E install/adapter validation, native stock-engine preflight, Pathways initialization, exact direct entrypoint, device discovery, and bounded runtime patching, `deepswe_contract.validate_environment` rejected `{'CANON_LOGPROB_M': '256'}` before model initialization. The later W&B attestation fatal is derivative of that Python exit.
+- Root cause: `00_env.sh` is a child process. The native profile correctly unset `CANON_LOGPROB_M` there, but its generated export-only `env.sh` could only overlay the parent entrypoint's raw renderer environment; it could not delete the stale value. The contract was correct and was not loosened.
+- Fix: make generated `env.sh` an authoritative snapshot. When sourced, it first clears all non-secret namespaces managed by `00_env.sh`, then exports exactly the resolved set. `HF_TOKEN`, `WANDB_API_KEY`, and injected secret variables are neither serialized nor cleared.
+- Regression: extend the renderer-to-real-`00_env.sh` test through the actual parent reload boundary. It seeds raw native `CANON_LOGPROB_M=256`, sources the generated snapshot, requires both `CANON_LOGPROB_M` and `CANON_FIXED_AR` absent, and calls the Python environment contract. Native and zero contract tests pass.
+- Validation: Bash syntax and `git diff --check` pass; P58 profile 2/2, renderer 4/4, environment 3/3, P34 environment 7/7, contract 5/5, renderer 13/13, and P57 adjacent 81/81 pass. The complete pinned-image gate exits zero with `P58_EXACT_IMAGE_CPU_PASS loss_oracle=1 weighted_accumulation=1 compact_filter=1 durable_journal=1 paired_renderer=1 alignment_policy=1 regressions=1`.
+- Classification: p58c03 is bootstrap `INCONCLUSIVE`. No model initialization, rollout, trajectory, forward, backward, optimizer transaction, checkpoint, or 128-chip training evidence exists; there is no resumable state.
+- External effects: one requested fast-forward pull and local/container validation only. No commit, push, main mutation, image publication, model download, Kubernetes object, TPU job, credential change, or p58c04 render/launch occurred.
+- Next: obtain explicit commit/push approval, publish and read back the fix, then use only fresh native run-id `p58c04`. Never reuse p58c01/p58c02/p58c03; zero remains deferred.

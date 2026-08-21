@@ -25,10 +25,13 @@ Attempt history: native `p58c01` failed in `00_env.sh` before any TPU program;
 that admission fix was published as
 `acd3136267214b367a6755d0ba28d80e883d6753`. Native `p58c02` initialized
 Pathways but failed before model import because direct execution of the wrapper
-did not make the repository root importable. Both roots are immutable and have
-no resumable trajectory state. Use a final operator-branch readback SHA that
-contains the direct-entrypoint fix and fresh run-id `p58c03`. Never reuse the
-p58c01 or p58c02 YAML/root.
+did not make the repository root importable. Native `p58c03` passed those
+boundaries, then stopped before model initialization because the parent
+entrypoint retained the renderer's stale `CANON_LOGPROB_M=256` after the
+native profile had unset it in child-shell `00_env.sh`. All three roots are
+immutable and have no resumable trajectory state. Use a final operator-branch
+readback SHA containing the authoritative environment-snapshot fix and fresh
+run-id `p58c04`. Never reuse a p58c01, p58c02, or p58c03 YAML/root.
 
 The direct-entrypoint implementation commit is
 `82d82f72a7220d945737d95f6266b5b7e2cfe706`. Resolve the final runnable SHA by
@@ -126,7 +129,7 @@ CLIENT_IMAGE_DIGEST='registry.example/tunix@sha256:<64-hex-digest>'
 CPU_NODEPOOL='deepswe-cpu-pool'
 TPU_NODEPOOL='<4x4x8-v5p-nodepool>'
 MODEL_PVC='haoyugao-cpu-np-pvc'
-RUN_STEM='p58c03'
+RUN_STEM='p58c04'
 STAGE='three-update'
 
 ARM='native'
@@ -149,6 +152,13 @@ kubectl apply --server-side --dry-run=server -f "$OUTPUT"
 
 The renderer must emit
 `P58_DEEPSWE_TIM_RENDER_PASS arm=native stage=three-update`.
+
+Before apply, preserve the resolved-environment regression result. It must
+prove that a parent process seeded with the renderer's
+`CANON_LOGPROB_M=256` loses that variable after sourcing the native
+`env.sh`, while the zero arm still resolves it to `256`. Do not work around a
+failure by relaxing `deepswe_contract.validate_environment`; absence is part
+of the native treatment definition.
 
 The explicit launch boundary, only after operator approval, is:
 
