@@ -1,0 +1,985 @@
+Logging configured at INFO level.
+2026-08-21 09:52:06 - INFO - [datasets] JAX version 0.10.2 available.
+2026-08-21 09:52:06 - WARNING - [absl] Type handler registry type "<class 'jax.Array'>" overriding jax.Array
+I0821 09:52:06.966471     834 registry.cc:82] Attempting to create IFRT proxy client with transport name grpc to address 'localhost:29000' and with global client flags xla::ifrt::proxy::GlobalClientFlags{grpc_max_ongoing_host_buffer_stores=0,grpc_max_ongoing_host_buffer_lookups=0,grpc_large_transfer_optimization_threshold_bytes=9223372036854775807,crash_on_disconnect=false}
+I0821 09:52:06.966514     834 grpc_client.cc:171] Connecting to IFRT proxy server (grpc version '1.78.0') at localhost:29000, attempt #0...
+I0821 09:52:06.966526     834 grpc_credentials.cc:52] Using ALTS client credentials for gRPC.
+I0821 09:52:06.968313     834 grpc_client_session.cc:264]   Established channel.
+I0821 09:52:06.968345     834 grpc_client_session.cc:269]   Created stub.
+I0821 09:52:06.985875     834 grpc_client.cc:142] Sending InitRequest and waiting for response (attempt 0).
+I0821 09:52:07.060939     834 grpc_credentials.cc:52] Using ALTS client credentials for gRPC.
+I0821 09:52:07.061022     834 grpc_client_session.cc:264]   Established channel.
+I0821 09:52:07.061038     834 grpc_client_session.cc:269]   Created stub.
+I0821 09:52:07.062162     834 grpc_client.cc:176] Connected to IFRT proxy server on attempt #0.
+I0821 09:52:07.090864     834 pjrt_client.cc:579] PjRt-IFRT device count: total=1, addressable=1
+I0821 09:52:07.090887     834 pjrt_client.cc:583] Addressable PjRt-IFRT device: CpuDevice(id=0)
+jax devices:  [device(0,TPU_DEVICE,coords=[0,0,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3), device(1,TPU_DEVICE,coords=[1,0,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3), device(2,TPU_DEVICE,coords=[2,0,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3), device(3,TPU_DEVICE,coords=[3,0,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3), device(4,TPU_DEVICE,coords=[0,1,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3), device(5,TPU_DEVICE,coords=[1,1,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3), device(6,TPU_DEVICE,coords=[2,1,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3), device(7,TPU_DEVICE,coords=[3,1,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3), device(8,TPU_DEVICE,coords=[0,2,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3), device(9,TPU_DEVICE,coords=[1,2,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3), device(10,TPU_DEVICE,coords=[2,2,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3), device(11,TPU_DEVICE,coords=[3,2,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3), device(12,TPU_DEVICE,coords=[0,3,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3), device(13,TPU_DEVICE,coords=[1,3,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3), device(14,TPU_DEVICE,coords=[2,3,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3), device(15,TPU_DEVICE,coords=[3,3,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3), device(16,TPU_DEVICE,coords=[0,0,1,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3), device(17,TPU_DEVICE,coords=[1,0,1,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3), device(18,TPU_DEVICE,coords=[2,0,1,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3), device(19,TPU_DEVICE,coords=[3,0,1,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3), device(20,TPU_DEVICE,coords=[0,1,1,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3), device(21,TPU_DEVICE,coords=[1,1,1,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3), device(22,TPU_DEVICE,coords=[2,1,1,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3), device(23,TPU_DEVICE,coords=[3,1,1,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3), device(24,TPU_DEVICE,coords=[0,2,1,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3), device(25,TPU_DEVICE,coords=[1,2,1,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3), device(26,TPU_DEVICE,coords=[2,2,1,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3), device(27,TPU_DEVICE,coords=[3,2,1,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3), device(28,TPU_DEVICE,coords=[0,3,1,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3), device(29,TPU_DEVICE,coords=[1,3,1,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3), device(30,TPU_DEVICE,coords=[2,3,1,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3), device(31,TPU_DEVICE,coords=[3,3,1,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3), device(32,TPU_DEVICE,coords=[0,0,2,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3), device(33,TPU_DEVICE,coords=[1,0,2,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3), device(34,TPU_DEVICE,coords=[2,0,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3), device(35,TPU_DEVICE,coords=[3,0,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3), device(36,TPU_DEVICE,coords=[0,1,2,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3), device(37,TPU_DEVICE,coords=[1,1,2,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3), device(38,TPU_DEVICE,coords=[2,1,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3), device(39,TPU_DEVICE,coords=[3,1,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3), device(40,TPU_DEVICE,coords=[0,2,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3), device(41,TPU_DEVICE,coords=[1,2,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3), device(42,TPU_DEVICE,coords=[2,2,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3), device(43,TPU_DEVICE,coords=[3,2,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3), device(44,TPU_DEVICE,coords=[0,3,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3), device(45,TPU_DEVICE,coords=[1,3,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3), device(46,TPU_DEVICE,coords=[2,3,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3), device(47,TPU_DEVICE,coords=[3,3,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3), device(48,TPU_DEVICE,coords=[0,0,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3), device(49,TPU_DEVICE,coords=[1,0,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3), device(50,TPU_DEVICE,coords=[2,0,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3), device(51,TPU_DEVICE,coords=[3,0,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3), device(52,TPU_DEVICE,coords=[0,1,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3), device(53,TPU_DEVICE,coords=[1,1,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3), device(54,TPU_DEVICE,coords=[2,1,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3), device(55,TPU_DEVICE,coords=[3,1,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3), device(56,TPU_DEVICE,coords=[0,2,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3), device(57,TPU_DEVICE,coords=[1,2,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3), device(58,TPU_DEVICE,coords=[2,2,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3), device(59,TPU_DEVICE,coords=[3,2,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3), device(60,TPU_DEVICE,coords=[0,3,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3), device(61,TPU_DEVICE,coords=[1,3,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3), device(62,TPU_DEVICE,coords=[2,3,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3), device(63,TPU_DEVICE,coords=[3,3,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3)]
+2026-08-21 09:52:07 - INFO - [absl] Using persistence API for checkpointing with Pathways.
+2026-08-21 09:52:07 - INFO - [absl] [thread=MainThread] Failed to get flag value for EXPERIMENTAL_ORBAX_USE_DISTRIBUTED_PROCESS_ID.
+2026-08-21 09:52:07 - INFO - [absl] [process=0][thread=MainThread] CheckpointManager init: checkpointers=None, item_names=None, item_handlers=None, handler_registry=None
+2026-08-21 09:52:07 - INFO - [absl] Initialized registry DefaultCheckpointHandlerRegistry({('metrics', <class 'orbax.checkpoint._src.handlers.json_checkpoint_handler.JsonSaveArgs'>): <orbax.checkpoint._src.handlers.json_checkpoint_handler.JsonCheckpointHandler object at 0x7e4416456bd0>, ('metrics', <class 'orbax.checkpoint._src.handlers.json_checkpoint_handler.JsonRestoreArgs'>): <orbax.checkpoint._src.handlers.json_checkpoint_handler.JsonCheckpointHandler object at 0x7e4416456bd0>}).
+2026-08-21 09:52:07 - INFO - [absl] orbax-checkpoint version: 0.12.1
+2026-08-21 09:52:07 - INFO - [absl] [process=0][thread=MainThread] Using barrier_sync_fn: <function get_barrier_sync_fn.<locals>.<lambda> at 0x7e42e3597a60> timeout: 1200 secs and primary_host=0 for async checkpoint writes
+2026-08-21 09:52:07 - INFO - [absl] Created directory=gs://yuxzhang-tunix-models/canon-zero-tim/checkpoints/frozenlake/p57-m15-selection-mismatch/actor
+2026-08-21 09:52:07 - INFO - [absl] [process=0][thread=MainThread] CheckpointManager created,  primary_host=0, CheckpointManagerOptions=CheckpointManagerOptions(save_interval_steps=1, max_to_keep=None, keep_time_interval=None, keep_period=None, should_keep_fn=None, best_fn=None, best_mode='max', keep_checkpoints_without_metrics=True, step_prefix=None, step_format_fixed_length=None, step_name_format=<orbax.checkpoint.experimental.v1._src.path.step._StandardNameFormat object at 0x7e42f22741d0>, create=True, cleanup_tmp_directories=False, save_on_steps=frozenset(), single_host_load_and_broadcast=False, todelete_subdir=None, todelete_full_path=None, enable_background_delete=False, num_deletion_threads=None, read_only=False, enable_async_checkpointing=True, async_options=AsyncOptions(timeout_secs=1200, barrier_sync_fn=None, post_finalization_callback=None, create_directories_asynchronously=True), multiprocessing_options=MultiprocessingOptions(primary_host=0, active_processes=None, barrier_sync_key_prefix=None), should_save_fn=None, file_options=FileOptions(path_permission_mode=None), save_root_metadata=True, temporary_path_class=None, save_decision_policy=FixedIntervalPolicy(interval=10), preservation_policy=LatestN(n=1), prevent_write_metrics=True, enable_should_save_is_saving_in_progress_check=True, enable_per_process_directory_creation=False, lightweight_initialize=False), root_directory=gs://yuxzhang-tunix-models/canon-zero-tim/checkpoints/frozenlake/p57-m15-selection-mismatch/actor: <orbax.checkpoint.checkpoint_manager.CheckpointManager object at 0x7e4416456e40>
+2026-08-21 09:52:07 - INFO - [absl] [process=0][thread=MainThread][wait_until_finished] No Save Finalize thread to wait for. Returning.
+2026-08-21 09:52:07 - INFO - [absl] Closing _NonBlockingMetadataStore(enable_write=True, _write_lock=<locked _thread.RLock object owner=138833943143232 count=1 at 0x7e42e36b9b00>, _store_impl=<orbax.checkpoint._src.metadata.checkpoint._MetadataStoreImpl object at 0x7e42e3587110>, _single_thread_executor=<concurrent.futures.thread.ThreadPoolExecutor object at 0x7e42e35870e0>, _write_futures=[])
+2026-08-21 09:52:07 - INFO - [absl] Closing _NonBlockingMetadataStore(enable_write=True, _write_lock=<locked _thread.RLock object owner=138833943143232 count=1 at 0x7e42e36b9b00>, _store_impl=<orbax.checkpoint._src.metadata.checkpoint._MetadataStoreImpl object at 0x7e42e3587110>, _single_thread_executor=<concurrent.futures.thread.ThreadPoolExecutor object at 0x7e42e35870e0>, _write_futures=[])
+2026-08-21 09:52:07 - INFO - [absl] Closing _NonBlockingMetadataStore(enable_write=True, _write_lock=<locked _thread.RLock object owner=138833943143232 count=1 at 0x7e42e36b9b00>, _store_impl=<orbax.checkpoint._src.metadata.checkpoint._MetadataStoreImpl object at 0x7e42e3587110>, _single_thread_executor=<concurrent.futures.thread.ThreadPoolExecutor object at 0x7e42e35870e0>, _write_futures=[])
+[P45.CHECKPOINT] PREFLIGHT mode=new root=gs://yuxzhang-tunix-models/canon-zero-tim/checkpoints/frozenlake/p57-m15-selection-mismatch latest=none interval=10 max_to_keep=1
+shared_mesh.devices.shape=(8, 8)
+2026-08-21 09:52:13 - INFO - [httpx] HTTP Request: HEAD https://huggingface.co/Qwen/Qwen3-8B/resolve/main/config.json "HTTP/1.1 307 Temporary Redirect"
+2026-08-21 09:52:13 - INFO - [httpx] HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/Qwen/Qwen3-8B/b968826d9c46dd6066d109eabc6255188de91218/config.json "HTTP/1.1 200 OK"
+2026-08-21 09:52:14 - INFO - [httpx] HTTP Request: HEAD https://huggingface.co/Qwen/Qwen3-8B/resolve/main/tokenizer_config.json "HTTP/1.1 307 Temporary Redirect"
+2026-08-21 09:52:14 - INFO - [httpx] HTTP Request: HEAD https://huggingface.co/api/resolve-cache/models/Qwen/Qwen3-8B/b968826d9c46dd6066d109eabc6255188de91218/tokenizer_config.json "HTTP/1.1 200 OK"
+2026-08-21 09:52:14 - INFO - [httpx] HTTP Request: GET https://huggingface.co/api/models/Qwen/Qwen3-8B/tree/main/additional_chat_templates?recursive=false&expand=false "HTTP/1.1 404 Not Found"
+2026-08-21 09:52:14 - INFO - [httpx] HTTP Request: GET https://huggingface.co/api/models/Qwen/Qwen3-8B/tree/main?recursive=true&expand=false "HTTP/1.1 200 OK"
+2026-08-21 09:52:15 - INFO - [httpx] HTTP Request: GET https://huggingface.co/api/models/Qwen/Qwen3-8B "HTTP/1.1 200 OK"
+Saved 10000 entries to /tmp/data/frozenlake/p57/m15/selection/train.parquet
+Saved 100 entries to /tmp/data/frozenlake/p57/m15/selection/test.parquet
+[P57.DATASET] MATERIALIZED_PASS candidate=m15 split=selection train_rows=10000 eval_rows=100 train_sha256=bba301107d2a57ed6d208a25451e6f4731a4e92c76be1b8ee9e5a09e5ba45e27 eval_sha256=78d21b530cb171ac3041774fd29b25d90f0cb5dcb581993a08b67949137a8ddc
+[CANON_FROZENLAKE_P31] DATA_CONTRACT train_rows=10000 test_rows=100 selected_train_rows=4800 epochs=3 available_updates=450 requested_updates=200
+2026-08-21 09:52:21 - INFO - [absl] Done with loading datasets - Using Pathways compatible HBM stats collector
+2026-08-21 09:52:21 - INFO - [absl] Using 0 Bytes on device(0,TPU_DEVICE,coords=[0,0,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:52:21 - INFO - [absl] Using 0 Bytes on device(1,TPU_DEVICE,coords=[1,0,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:52:21 - INFO - [absl] Using 0 Bytes on device(2,TPU_DEVICE,coords=[2,0,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:52:21 - INFO - [absl] Using 0 Bytes on device(3,TPU_DEVICE,coords=[3,0,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:52:21 - INFO - [absl] Using 0 Bytes on device(4,TPU_DEVICE,coords=[0,1,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:52:21 - INFO - [absl] Using 0 Bytes on device(5,TPU_DEVICE,coords=[1,1,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:52:21 - INFO - [absl] Using 0 Bytes on device(6,TPU_DEVICE,coords=[2,1,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:52:21 - INFO - [absl] Using 0 Bytes on device(7,TPU_DEVICE,coords=[3,1,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:52:21 - INFO - [absl] Using 0 Bytes on device(8,TPU_DEVICE,coords=[0,2,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:52:21 - INFO - [absl] Using 0 Bytes on device(9,TPU_DEVICE,coords=[1,2,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:52:21 - INFO - [absl] Using 0 Bytes on device(10,TPU_DEVICE,coords=[2,2,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:52:21 - INFO - [absl] Using 0 Bytes on device(11,TPU_DEVICE,coords=[3,2,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:52:21 - INFO - [absl] Using 0 Bytes on device(12,TPU_DEVICE,coords=[0,3,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:52:21 - INFO - [absl] Using 0 Bytes on device(13,TPU_DEVICE,coords=[1,3,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:52:21 - INFO - [absl] Using 0 Bytes on device(14,TPU_DEVICE,coords=[2,3,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:52:21 - INFO - [absl] Using 0 Bytes on device(15,TPU_DEVICE,coords=[3,3,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:52:21 - INFO - [absl] Using 0 Bytes on device(16,TPU_DEVICE,coords=[0,0,1,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:52:21 - INFO - [absl] Using 0 Bytes on device(17,TPU_DEVICE,coords=[1,0,1,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:52:21 - INFO - [absl] Using 0 Bytes on device(18,TPU_DEVICE,coords=[2,0,1,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:52:21 - INFO - [absl] Using 0 Bytes on device(19,TPU_DEVICE,coords=[3,0,1,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:52:21 - INFO - [absl] Using 0 Bytes on device(20,TPU_DEVICE,coords=[0,1,1,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:52:21 - INFO - [absl] Using 0 Bytes on device(21,TPU_DEVICE,coords=[1,1,1,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:52:21 - INFO - [absl] Using 0 Bytes on device(22,TPU_DEVICE,coords=[2,1,1,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:52:21 - INFO - [absl] Using 0 Bytes on device(23,TPU_DEVICE,coords=[3,1,1,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:52:21 - INFO - [absl] Using 0 Bytes on device(24,TPU_DEVICE,coords=[0,2,1,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:52:21 - INFO - [absl] Using 0 Bytes on device(25,TPU_DEVICE,coords=[1,2,1,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:52:21 - INFO - [absl] Using 0 Bytes on device(26,TPU_DEVICE,coords=[2,2,1,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:52:21 - INFO - [absl] Using 0 Bytes on device(27,TPU_DEVICE,coords=[3,2,1,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:52:21 - INFO - [absl] Using 0 Bytes on device(28,TPU_DEVICE,coords=[0,3,1,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:52:21 - INFO - [absl] Using 0 Bytes on device(29,TPU_DEVICE,coords=[1,3,1,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:52:21 - INFO - [absl] Using 0 Bytes on device(30,TPU_DEVICE,coords=[2,3,1,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:52:21 - INFO - [absl] Using 0 Bytes on device(31,TPU_DEVICE,coords=[3,3,1,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:52:21 - INFO - [absl] Using 0 Bytes on device(32,TPU_DEVICE,coords=[0,0,2,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:52:21 - INFO - [absl] Using 0 Bytes on device(33,TPU_DEVICE,coords=[1,0,2,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:52:21 - INFO - [absl] Using 0 Bytes on device(34,TPU_DEVICE,coords=[2,0,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:52:21 - INFO - [absl] Using 0 Bytes on device(35,TPU_DEVICE,coords=[3,0,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:52:21 - INFO - [absl] Using 0 Bytes on device(36,TPU_DEVICE,coords=[0,1,2,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:52:21 - INFO - [absl] Using 0 Bytes on device(37,TPU_DEVICE,coords=[1,1,2,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:52:21 - INFO - [absl] Using 0 Bytes on device(38,TPU_DEVICE,coords=[2,1,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:52:21 - INFO - [absl] Using 0 Bytes on device(39,TPU_DEVICE,coords=[3,1,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:52:21 - INFO - [absl] Using 0 Bytes on device(40,TPU_DEVICE,coords=[0,2,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:52:21 - INFO - [absl] Using 0 Bytes on device(41,TPU_DEVICE,coords=[1,2,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:52:21 - INFO - [absl] Using 0 Bytes on device(42,TPU_DEVICE,coords=[2,2,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:52:21 - INFO - [absl] Using 0 Bytes on device(43,TPU_DEVICE,coords=[3,2,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:52:21 - INFO - [absl] Using 0 Bytes on device(44,TPU_DEVICE,coords=[0,3,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:52:21 - INFO - [absl] Using 0 Bytes on device(45,TPU_DEVICE,coords=[1,3,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:52:21 - INFO - [absl] Using 0 Bytes on device(46,TPU_DEVICE,coords=[2,3,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:52:21 - INFO - [absl] Using 0 Bytes on device(47,TPU_DEVICE,coords=[3,3,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:52:21 - INFO - [absl] Using 0 Bytes on device(48,TPU_DEVICE,coords=[0,0,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:52:21 - INFO - [absl] Using 0 Bytes on device(49,TPU_DEVICE,coords=[1,0,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:52:21 - INFO - [absl] Using 0 Bytes on device(50,TPU_DEVICE,coords=[2,0,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:52:21 - INFO - [absl] Using 0 Bytes on device(51,TPU_DEVICE,coords=[3,0,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:52:21 - INFO - [absl] Using 0 Bytes on device(52,TPU_DEVICE,coords=[0,1,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:52:21 - INFO - [absl] Using 0 Bytes on device(53,TPU_DEVICE,coords=[1,1,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:52:21 - INFO - [absl] Using 0 Bytes on device(54,TPU_DEVICE,coords=[2,1,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:52:21 - INFO - [absl] Using 0 Bytes on device(55,TPU_DEVICE,coords=[3,1,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:52:21 - INFO - [absl] Using 0 Bytes on device(56,TPU_DEVICE,coords=[0,2,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:52:21 - INFO - [absl] Using 0 Bytes on device(57,TPU_DEVICE,coords=[1,2,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:52:21 - INFO - [absl] Using 0 Bytes on device(58,TPU_DEVICE,coords=[2,2,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:52:21 - INFO - [absl] Using 0 Bytes on device(59,TPU_DEVICE,coords=[3,2,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:52:21 - INFO - [absl] Using 0 Bytes on device(60,TPU_DEVICE,coords=[0,3,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:52:21 - INFO - [absl] Using 0 Bytes on device(61,TPU_DEVICE,coords=[1,3,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:52:21 - INFO - [absl] Using 0 Bytes on device(62,TPU_DEVICE,coords=[2,3,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:52:21 - INFO - [absl] Using 0 Bytes on device(63,TPU_DEVICE,coords=[3,3,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:54:30 - INFO - [absl] after loading qwen_ref - Using Pathways compatible HBM stats collector
+2026-08-21 09:54:31 - INFO - [absl] Using 1.9 GiB on device(0,TPU_DEVICE,coords=[0,0,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:54:31 - INFO - [absl] Using 1.9 GiB on device(1,TPU_DEVICE,coords=[1,0,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:54:31 - INFO - [absl] Using 1.9 GiB on device(2,TPU_DEVICE,coords=[2,0,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:54:31 - INFO - [absl] Using 1.9 GiB on device(3,TPU_DEVICE,coords=[3,0,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:54:31 - INFO - [absl] Using 1.9 GiB on device(4,TPU_DEVICE,coords=[0,1,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:54:31 - INFO - [absl] Using 1.9 GiB on device(5,TPU_DEVICE,coords=[1,1,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:54:31 - INFO - [absl] Using 1.9 GiB on device(6,TPU_DEVICE,coords=[2,1,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:54:31 - INFO - [absl] Using 1.9 GiB on device(7,TPU_DEVICE,coords=[3,1,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:54:31 - INFO - [absl] Using 1.9 GiB on device(8,TPU_DEVICE,coords=[0,2,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:54:31 - INFO - [absl] Using 1.9 GiB on device(9,TPU_DEVICE,coords=[1,2,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:54:31 - INFO - [absl] Using 1.9 GiB on device(10,TPU_DEVICE,coords=[2,2,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:54:31 - INFO - [absl] Using 1.9 GiB on device(11,TPU_DEVICE,coords=[3,2,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:54:31 - INFO - [absl] Using 1.9 GiB on device(12,TPU_DEVICE,coords=[0,3,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:54:31 - INFO - [absl] Using 1.9 GiB on device(13,TPU_DEVICE,coords=[1,3,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:54:31 - INFO - [absl] Using 1.9 GiB on device(14,TPU_DEVICE,coords=[2,3,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:54:31 - INFO - [absl] Using 1.9 GiB on device(15,TPU_DEVICE,coords=[3,3,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:54:31 - INFO - [absl] Using 1.9 GiB on device(16,TPU_DEVICE,coords=[0,0,1,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:54:31 - INFO - [absl] Using 1.9 GiB on device(17,TPU_DEVICE,coords=[1,0,1,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:54:31 - INFO - [absl] Using 1.9 GiB on device(18,TPU_DEVICE,coords=[2,0,1,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:54:31 - INFO - [absl] Using 1.9 GiB on device(19,TPU_DEVICE,coords=[3,0,1,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:54:31 - INFO - [absl] Using 1.9 GiB on device(20,TPU_DEVICE,coords=[0,1,1,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:54:31 - INFO - [absl] Using 1.9 GiB on device(21,TPU_DEVICE,coords=[1,1,1,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:54:31 - INFO - [absl] Using 1.9 GiB on device(22,TPU_DEVICE,coords=[2,1,1,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:54:31 - INFO - [absl] Using 1.9 GiB on device(23,TPU_DEVICE,coords=[3,1,1,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:54:31 - INFO - [absl] Using 1.9 GiB on device(24,TPU_DEVICE,coords=[0,2,1,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:54:31 - INFO - [absl] Using 1.9 GiB on device(25,TPU_DEVICE,coords=[1,2,1,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:54:31 - INFO - [absl] Using 1.9 GiB on device(26,TPU_DEVICE,coords=[2,2,1,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:54:31 - INFO - [absl] Using 1.9 GiB on device(27,TPU_DEVICE,coords=[3,2,1,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:54:31 - INFO - [absl] Using 1.9 GiB on device(28,TPU_DEVICE,coords=[0,3,1,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:54:31 - INFO - [absl] Using 1.9 GiB on device(29,TPU_DEVICE,coords=[1,3,1,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:54:31 - INFO - [absl] Using 1.9 GiB on device(30,TPU_DEVICE,coords=[2,3,1,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:54:31 - INFO - [absl] Using 1.9 GiB on device(31,TPU_DEVICE,coords=[3,3,1,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:54:31 - INFO - [absl] Using 1.9 GiB on device(32,TPU_DEVICE,coords=[0,0,2,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:54:31 - INFO - [absl] Using 1.9 GiB on device(33,TPU_DEVICE,coords=[1,0,2,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:54:31 - INFO - [absl] Using 1.9 GiB on device(34,TPU_DEVICE,coords=[2,0,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:54:31 - INFO - [absl] Using 1.9 GiB on device(35,TPU_DEVICE,coords=[3,0,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:54:31 - INFO - [absl] Using 1.9 GiB on device(36,TPU_DEVICE,coords=[0,1,2,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:54:31 - INFO - [absl] Using 1.9 GiB on device(37,TPU_DEVICE,coords=[1,1,2,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:54:31 - INFO - [absl] Using 1.9 GiB on device(38,TPU_DEVICE,coords=[2,1,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:54:31 - INFO - [absl] Using 1.9 GiB on device(39,TPU_DEVICE,coords=[3,1,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:54:31 - INFO - [absl] Using 1.9 GiB on device(40,TPU_DEVICE,coords=[0,2,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:54:31 - INFO - [absl] Using 1.9 GiB on device(41,TPU_DEVICE,coords=[1,2,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:54:31 - INFO - [absl] Using 1.9 GiB on device(42,TPU_DEVICE,coords=[2,2,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:54:31 - INFO - [absl] Using 1.9 GiB on device(43,TPU_DEVICE,coords=[3,2,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:54:31 - INFO - [absl] Using 1.9 GiB on device(44,TPU_DEVICE,coords=[0,3,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:54:31 - INFO - [absl] Using 1.9 GiB on device(45,TPU_DEVICE,coords=[1,3,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:54:31 - INFO - [absl] Using 1.9 GiB on device(46,TPU_DEVICE,coords=[2,3,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:54:31 - INFO - [absl] Using 1.9 GiB on device(47,TPU_DEVICE,coords=[3,3,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:54:31 - INFO - [absl] Using 1.9 GiB on device(48,TPU_DEVICE,coords=[0,0,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:54:31 - INFO - [absl] Using 1.9 GiB on device(49,TPU_DEVICE,coords=[1,0,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:54:31 - INFO - [absl] Using 1.9 GiB on device(50,TPU_DEVICE,coords=[2,0,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:54:31 - INFO - [absl] Using 1.9 GiB on device(51,TPU_DEVICE,coords=[3,0,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:54:31 - INFO - [absl] Using 1.9 GiB on device(52,TPU_DEVICE,coords=[0,1,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:54:31 - INFO - [absl] Using 1.9 GiB on device(53,TPU_DEVICE,coords=[1,1,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:54:31 - INFO - [absl] Using 1.9 GiB on device(54,TPU_DEVICE,coords=[2,1,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:54:31 - INFO - [absl] Using 1.9 GiB on device(55,TPU_DEVICE,coords=[3,1,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:54:31 - INFO - [absl] Using 1.9 GiB on device(56,TPU_DEVICE,coords=[0,2,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:54:31 - INFO - [absl] Using 1.9 GiB on device(57,TPU_DEVICE,coords=[1,2,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:54:31 - INFO - [absl] Using 1.9 GiB on device(58,TPU_DEVICE,coords=[2,2,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:54:31 - INFO - [absl] Using 1.9 GiB on device(59,TPU_DEVICE,coords=[3,2,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:54:31 - INFO - [absl] Using 1.9 GiB on device(60,TPU_DEVICE,coords=[0,3,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:54:31 - INFO - [absl] Using 1.9 GiB on device(61,TPU_DEVICE,coords=[1,3,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:54:31 - INFO - [absl] Using 1.9 GiB on device(62,TPU_DEVICE,coords=[2,3,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:54:31 - INFO - [absl] Using 1.9 GiB on device(63,TPU_DEVICE,coords=[3,3,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:58:39 - INFO - [absl] after loading qwen_actor - Using Pathways compatible HBM stats collector
+2026-08-21 09:58:40 - INFO - [absl] Using 5.7 GiB on device(0,TPU_DEVICE,coords=[0,0,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:58:40 - INFO - [absl] Using 5.7 GiB on device(1,TPU_DEVICE,coords=[1,0,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:58:40 - INFO - [absl] Using 5.7 GiB on device(2,TPU_DEVICE,coords=[2,0,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:58:40 - INFO - [absl] Using 5.7 GiB on device(3,TPU_DEVICE,coords=[3,0,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:58:40 - INFO - [absl] Using 5.7 GiB on device(4,TPU_DEVICE,coords=[0,1,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:58:40 - INFO - [absl] Using 5.7 GiB on device(5,TPU_DEVICE,coords=[1,1,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:58:40 - INFO - [absl] Using 5.7 GiB on device(6,TPU_DEVICE,coords=[2,1,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:58:40 - INFO - [absl] Using 5.7 GiB on device(7,TPU_DEVICE,coords=[3,1,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:58:40 - INFO - [absl] Using 5.7 GiB on device(8,TPU_DEVICE,coords=[0,2,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:58:40 - INFO - [absl] Using 5.7 GiB on device(9,TPU_DEVICE,coords=[1,2,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:58:40 - INFO - [absl] Using 5.7 GiB on device(10,TPU_DEVICE,coords=[2,2,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:58:40 - INFO - [absl] Using 5.7 GiB on device(11,TPU_DEVICE,coords=[3,2,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:58:40 - INFO - [absl] Using 5.7 GiB on device(12,TPU_DEVICE,coords=[0,3,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:58:40 - INFO - [absl] Using 5.7 GiB on device(13,TPU_DEVICE,coords=[1,3,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:58:40 - INFO - [absl] Using 5.7 GiB on device(14,TPU_DEVICE,coords=[2,3,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:58:40 - INFO - [absl] Using 5.7 GiB on device(15,TPU_DEVICE,coords=[3,3,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:58:40 - INFO - [absl] Using 5.7 GiB on device(16,TPU_DEVICE,coords=[0,0,1,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:58:40 - INFO - [absl] Using 5.7 GiB on device(17,TPU_DEVICE,coords=[1,0,1,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:58:40 - INFO - [absl] Using 5.7 GiB on device(18,TPU_DEVICE,coords=[2,0,1,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:58:40 - INFO - [absl] Using 5.7 GiB on device(19,TPU_DEVICE,coords=[3,0,1,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:58:40 - INFO - [absl] Using 5.7 GiB on device(20,TPU_DEVICE,coords=[0,1,1,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:58:40 - INFO - [absl] Using 5.7 GiB on device(21,TPU_DEVICE,coords=[1,1,1,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:58:40 - INFO - [absl] Using 5.7 GiB on device(22,TPU_DEVICE,coords=[2,1,1,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:58:40 - INFO - [absl] Using 5.7 GiB on device(23,TPU_DEVICE,coords=[3,1,1,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:58:40 - INFO - [absl] Using 5.7 GiB on device(24,TPU_DEVICE,coords=[0,2,1,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:58:40 - INFO - [absl] Using 5.7 GiB on device(25,TPU_DEVICE,coords=[1,2,1,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:58:40 - INFO - [absl] Using 5.7 GiB on device(26,TPU_DEVICE,coords=[2,2,1,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:58:40 - INFO - [absl] Using 5.7 GiB on device(27,TPU_DEVICE,coords=[3,2,1,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:58:40 - INFO - [absl] Using 5.7 GiB on device(28,TPU_DEVICE,coords=[0,3,1,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:58:40 - INFO - [absl] Using 5.7 GiB on device(29,TPU_DEVICE,coords=[1,3,1,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:58:40 - INFO - [absl] Using 5.7 GiB on device(30,TPU_DEVICE,coords=[2,3,1,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:58:40 - INFO - [absl] Using 5.7 GiB on device(31,TPU_DEVICE,coords=[3,3,1,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:58:40 - INFO - [absl] Using 5.7 GiB on device(32,TPU_DEVICE,coords=[0,0,2,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:58:40 - INFO - [absl] Using 5.7 GiB on device(33,TPU_DEVICE,coords=[1,0,2,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:58:40 - INFO - [absl] Using 5.7 GiB on device(34,TPU_DEVICE,coords=[2,0,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:58:40 - INFO - [absl] Using 5.7 GiB on device(35,TPU_DEVICE,coords=[3,0,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:58:40 - INFO - [absl] Using 5.7 GiB on device(36,TPU_DEVICE,coords=[0,1,2,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:58:40 - INFO - [absl] Using 5.7 GiB on device(37,TPU_DEVICE,coords=[1,1,2,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:58:40 - INFO - [absl] Using 5.7 GiB on device(38,TPU_DEVICE,coords=[2,1,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:58:40 - INFO - [absl] Using 5.7 GiB on device(39,TPU_DEVICE,coords=[3,1,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:58:40 - INFO - [absl] Using 5.7 GiB on device(40,TPU_DEVICE,coords=[0,2,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:58:40 - INFO - [absl] Using 5.7 GiB on device(41,TPU_DEVICE,coords=[1,2,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:58:40 - INFO - [absl] Using 5.7 GiB on device(42,TPU_DEVICE,coords=[2,2,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:58:40 - INFO - [absl] Using 5.7 GiB on device(43,TPU_DEVICE,coords=[3,2,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:58:40 - INFO - [absl] Using 5.7 GiB on device(44,TPU_DEVICE,coords=[0,3,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:58:40 - INFO - [absl] Using 5.7 GiB on device(45,TPU_DEVICE,coords=[1,3,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:58:40 - INFO - [absl] Using 5.7 GiB on device(46,TPU_DEVICE,coords=[2,3,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:58:40 - INFO - [absl] Using 5.7 GiB on device(47,TPU_DEVICE,coords=[3,3,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:58:40 - INFO - [absl] Using 5.7 GiB on device(48,TPU_DEVICE,coords=[0,0,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:58:40 - INFO - [absl] Using 5.7 GiB on device(49,TPU_DEVICE,coords=[1,0,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:58:40 - INFO - [absl] Using 5.7 GiB on device(50,TPU_DEVICE,coords=[2,0,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:58:40 - INFO - [absl] Using 5.7 GiB on device(51,TPU_DEVICE,coords=[3,0,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:58:40 - INFO - [absl] Using 5.7 GiB on device(52,TPU_DEVICE,coords=[0,1,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:58:40 - INFO - [absl] Using 5.7 GiB on device(53,TPU_DEVICE,coords=[1,1,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:58:40 - INFO - [absl] Using 5.7 GiB on device(54,TPU_DEVICE,coords=[2,1,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:58:40 - INFO - [absl] Using 5.7 GiB on device(55,TPU_DEVICE,coords=[3,1,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:58:40 - INFO - [absl] Using 5.7 GiB on device(56,TPU_DEVICE,coords=[0,2,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:58:40 - INFO - [absl] Using 5.7 GiB on device(57,TPU_DEVICE,coords=[1,2,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:58:40 - INFO - [absl] Using 5.7 GiB on device(58,TPU_DEVICE,coords=[2,2,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:58:40 - INFO - [absl] Using 5.7 GiB on device(59,TPU_DEVICE,coords=[3,2,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:58:40 - INFO - [absl] Using 5.7 GiB on device(60,TPU_DEVICE,coords=[0,3,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:58:40 - INFO - [absl] Using 5.7 GiB on device(61,TPU_DEVICE,coords=[1,3,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:58:40 - INFO - [absl] Using 5.7 GiB on device(62,TPU_DEVICE,coords=[2,3,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 09:58:40 - INFO - [absl] Using 5.7 GiB on device(63,TPU_DEVICE,coords=[3,3,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3)
+Shared mesh: Mesh('dp': 8, 'tp': 8, axis_types=(Auto, Auto))
+wandb: WARNING The anonymous setting has no effect and will be removed in a future version.
+wandb: [wandb.login()] Loaded credentials for https://api.wandb.ai from WANDB_API_KEY.
+wandb: Currently logged in as: yuxzhang (yuxzhang-google) to https://api.wandb.ai. Use `wandb login --relogin` to force relogin
+wandb: setting up run n6n62zxh
+wandb: Tracking run with wandb version 0.28.1
+wandb: Run data is saved locally in /app/wandb/run-20260821_095842-n6n62zxh
+wandb: Run `wandb offline` to turn off syncing.
+wandb: Syncing run canon-p57-fl-ev-mism-m15-e0-86112838
+wandb: ⭐️ View project at https://wandb.ai/yuxzhang-google/zero-tim-p57-frozenlake-tim
+wandb: 🚀 View run at https://wandb.ai/yuxzhang-google/zero-tim-p57-frozenlake-tim/runs/n6n62zxh
+2026-08-21 09:58:43 - INFO - [root] W&B run URL: https://wandb.ai/yuxzhang-google/zero-tim-p57-frozenlake-tim/runs/n6n62zxh
+INFO 08-21 09:58:43 [__init__.py:43] Running vLLM on TPU via Pathways proxy.
+INFO 08-21 09:58:43 [__init__.py:53] Module pathwaysutils is imported.
+INFO 08-21 09:58:43 [__init__.py:59] Eagerly resolving vLLM current_platform for Pathways.
+INFO 08-21 09:58:43 [__init__.py:65] vLLM platform resolved to: TpuPlatform
+WARNING 08-21 09:58:43 [tpu_platform.py:408] Pin memory is not supported on TPU.
+INFO 08-21 09:58:47 [importing.py:53] Triton is installed but 0 active driver(s) found (expected 1). Disabling Triton to prevent runtime errors.
+WARNING 08-21 09:58:47 [importing.py:73] Triton is installed, but `triton.backends` could not be imported. Disabling Triton.
+INFO 08-21 09:58:47 [importing.py:88] Triton not installed or not compatible; certain GPU-related functions will not be available.
+2026-08-21 09:58:50 - INFO - [absl] Engine kwargs setting key 'model' with value 'Qwen/Qwen3-8B'.
+2026-08-21 09:58:50 - INFO - [absl] Engine kwargs setting key 'max_model_len' with value '12544'.
+2026-08-21 09:58:50 - INFO - [absl] Engine kwargs setting key 'async_scheduling' with value 'False'.
+2026-08-21 09:58:50 - INFO - [absl] Engine kwargs setting key 'max_num_batched_tokens' with value '256'.
+2026-08-21 09:58:50 - INFO - [absl] Engine kwargs setting key 'max_num_seqs' with value '32'.
+2026-08-21 09:58:50 - INFO - [absl] Engine kwargs setting key 'hf_config_path' with value 'None'.
+2026-08-21 09:58:50 - INFO - [absl] Engine kwargs setting key 'max_logprobs' with value '1'.
+2026-08-21 09:58:50 - INFO - [absl] Engine kwargs setting key 'logprobs_mode' with value 'processed_logprobs'.
+2026-08-21 09:58:50 - INFO - [absl] Engine kwargs setting key 'kv_cache_metrics' with value 'True'.
+2026-08-21 09:58:50 - INFO - [absl] Engine kwargs setting key 'disable_log_stats' with value 'False'.
+2026-08-21 09:58:50 - INFO - [absl] Engine kwargs setting key 'enable_prefix_caching' with value 'False'.
+2026-08-21 09:58:50 - INFO - [absl] Engine kwargs setting key 'dtype' with value 'bfloat16'.
+INFO 08-21 09:58:50 [attention_interface.py:56] Using default RPA kernel
+WARNING 08-21 09:58:50 [interface.py:368] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
+WARNING 08-21 09:58:50 [interface.py:368] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
+WARNING 08-21 09:58:50 [interface.py:368] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
+WARNING 08-21 09:58:50 [interface.py:368] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
+INFO 08-21 09:58:50 [__init__.py:112] Registered model loader `<class 'tpu_inference.models.jax.utils.weight_utils.JaxDummyModelLoader'>` with load format `jax_dummy`
+INFO 08-21 09:58:50 [__init__.py:112] Registered model loader `<class 'tpu_inference.models.common.pathways_dummy_loader.PathwaysDummyModelLoader'>` with load format `pathways_dummy`
+INFO 08-21 09:58:50 [__init__.py:112] Registered model loader `<class 'tpu_inference.models.vllm.vllm_model_loader.IncrementalModelLoader'>` with load format `tpu_streaming_loader`
+WARNING 08-21 09:58:50 [__init__.py:101] Load format `runai_streamer` is already registered, and will be overwritten by the new loader class `<class 'tpu_inference.models.vllm.vllm_model_loader.RunaiIncrementalModelLoader'>`.
+INFO 08-21 09:58:50 [__init__.py:112] Registered model loader `<class 'tpu_inference.models.vllm.vllm_model_loader.RunaiIncrementalModelLoader'>` with load format `runai_streamer`
+WARNING 08-21 09:58:51 [arg_utils.py:1617] The global random seed is set to 0. Since VLLM_ENABLE_V1_MULTIPROCESSING is set to False, this may affect the random state of the Python process that launched vLLM.
+INFO 08-21 09:59:10 [model.py:619] Resolved architecture: Qwen3ForCausalLM
+INFO 08-21 09:59:10 [model.py:1776] Using max model len 12544
+INFO 08-21 09:59:10 [scheduler.py:252] Chunked prefill is enabled with max_num_batched_tokens=256.
+INFO 08-21 09:59:10 [vllm.py:1089] Asynchronous scheduling is disabled.
+WARNING 08-21 09:59:10 [vllm.py:1191] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+INFO 08-21 09:59:10 [kernel.py:292] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['native'], fused_add_rms_norm=['native'])
+INFO 08-21 09:59:10 [tpu_platform.py:263] Resolved TPU_MULTIPROCESS_DP=0
+INFO 08-21 09:59:10 [tpu_platform.py:233] Initialized sharding configuration: ShardingConfigManager(total_devices=64, sharding_strategy=ShardingStrategy(tensor_parallelism=8, expert_parallelism=1, sequence_parallelism=1, data_parallelism=8, attention_data_parallelism=1, attention_data_expert_parallelism=1, decode_context_parallelism=1), mm_encoder_tp_mode=weights, device_indexes=[0, 4, 1, 5, 2, 6, 3, 7, 16, 20, 17, 21, 18, 22, 19, 23, 32, 36, 33, 37, 34, 38, 35, 39, 48, 52, 49, 53, 50, 54, 51, 55, 8, 12, 9, 13, 10, 14, 11, 15, 24, 28, 25, 29, 26, 30, 27, 31, 40, 44, 41, 45, 42, 46, 43, 47, 56, 60, 57, 61, 58, 62, 59, 63])
+INFO 08-21 09:59:10 [tpu_platform.py:320] Force using UniProcExecutor for JAX on single host without pipeline parallelism.
+WARNING 08-21 09:59:10 [vllm.py:557] Model Runner V2 requires Triton; using the V1 model runner instead.
+INFO 08-21 09:59:10 [compilation.py:312] Enabled custom fusions: norm_quant, act_quant
+INFO 08-21 09:59:14 [core.py:114] Initializing a V1 LLM engine (v0.25.0) with config: model='Qwen/Qwen3-8B', speculative_config=None, tokenizer='Qwen/Qwen3-8B', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, tokenizer_revision=None, trust_remote_code=False, dtype=torch.bfloat16, max_seq_len=12544, download_dir=None, load_format=dummy, tensor_parallel_size=8, pipeline_parallel_size=1, data_parallel_size=1, decode_context_parallel_size=1, dcp_comm_backend=ag_rs, disable_custom_all_reduce=True, quantization=None, quantization_config=None, enforce_eager=False, enable_return_routed_experts=False, kv_cache_dtype=auto, device_config=None, structured_outputs_config=StructuredOutputsConfig(backend='auto', disable_any_whitespace=False, disable_additional_properties=False, reasoning_parser='', reasoning_parser_plugin='', enable_in_reasoning=False), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None, kv_cache_metrics=True, kv_cache_metrics_sample=0.01, cudagraph_metrics=False, enable_layerwise_nvtx_tracing=False, enable_mfu_metrics=False, enable_mm_processor_stats=False, enable_logging_iteration_details=False, jit_monitor_mode='warn', jit_monitor_verbose=False), seed=0, served_model_name=Qwen/Qwen3-8B, enable_prefix_caching=False, enable_chunked_prefill=True, pooler_config=None, compilation_config={'mode': <CompilationMode.VLLM_COMPILE: 3>, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'eager', 'custom_ops': ['all'], 'ir_enable_torch_wrap': False, 'splitting_ops': ['vllm::unified_attention_with_output', 'vllm::unified_mla_attention_with_output', 'vllm::mamba_mixer2', 'vllm::mamba_mixer', 'vllm::short_conv', 'vllm::linear_attention', 'vllm::plamo2_mamba_mixer', 'vllm::qwen_gdn_attention_core', 'vllm::gdn_attention_core_xpu', 'vllm::olmo_hybrid_gdn_full_forward', 'vllm::kda_attention', 'vllm::sparse_attn_indexer', 'vllm::rocm_aiter_sparse_attn_indexer', 'vllm::deepseek_v4_attention', 'vllm::hpc_rope_norm_forward', 'vllm::unified_kv_cache_update', 'vllm::unified_mla_kv_cache_update'], 'compile_mm_encoder': False, 'cudagraph_mm_encoder': False, 'encoder_cudagraph_token_budgets': [], 'encoder_cudagraph_max_vision_items_per_batch': 0, 'encoder_cudagraph_max_frames_per_batch': None, 'compile_sizes': None, 'compile_ranges_endpoints': [256], 'inductor_compile_config': {'enable_auto_functionalized_v2': False, 'size_asserts': False, 'alignment_asserts': False, 'scalar_asserts': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.NONE: 0>, 'cudagraph_num_of_warmups': 0, 'cudagraph_capture_sizes': None, 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': False, 'pass_config': {'fuse_norm_quant': True, 'fuse_act_quant': True, 'fuse_attn_quant': False, 'enable_sp': False, 'fuse_gemm_comms': False, 'fuse_allreduce_rms': False, 'fuse_rope_kvcache_cat_mla': False, 'fuse_act_padding': False}, 'max_cudagraph_capture_size': None, 'dynamic_shapes_config': {'type': <DynamicShapesType.BACKED: 'backed'>, 'evaluate_guards': False, 'assume_32_bit_indexing': False}, 'local_cache_dir': None, 'fast_moe_cold_start': True, 'static_all_moe_layers': []}, kernel_config=KernelConfig(ir_op_priority=IrOpPriorityConfig(rms_norm=['native'], fused_add_rms_norm=['native']), enable_flashinfer_autotune=True, enable_cutedsl_warmup=True, moe_backend='auto', linear_backend='auto')
+INFO 08-21 09:59:14 [parallel_state.py:1607] world_size=1 rank=0 local_rank=0 distributed_init_method=file:///tmp/tmpa91rzlit backend=gloo
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+INFO 08-21 09:59:15 [parallel_state.py:1942] rank 0 in world size 1 is assigned as DP rank 0, PP rank 0, PCP rank 0, TP rank 0, EP rank N/A, EPLB rank N/A
+INFO 08-21 09:59:15 [tpu_runner.py:622] Creating new model mesh | devices=64, num_slices=1
+INFO 08-21 09:59:15 [tpu_runner.py:617] Init mesh | mesh=Mesh('data': 8, 'attn_dp': 1, 'attn_dp_expert': 1, 'expert': 1, 'model': 8, 'dcp': 1, axis_types=(Auto, Auto, Auto, Auto, Auto, Auto))
+INFO 08-21 09:59:15 [utils.py:210] Prepared token paddings: [2048]
+INFO 08-21 09:59:16 [utils.py:156] Prepared request paddings: [8, 16, 32, 64, 128, 256]
+INFO 08-21 09:59:16 [utils.py:175] Prepared attn request paddings: [32]
+INFO 08-21 09:59:16 [compilation_manager.py:63] Enabling JAX compile cache.
+INFO 08-21 09:59:16 [tpu_worker.py:377] Init worker | rank=0 | is_first_rank=True | is_last_rank=True | topology_order_id=0 | is_driver_worker=True | hbm=[(5.72, 95.0), (5.72, 95.0), (5.72, 95.0), (5.72, 95.0), (5.72, 95.0), (5.72, 95.0), (5.72, 95.0), (5.72, 95.0), (5.72, 95.0), (5.72, 95.0), (5.72, 95.0), (5.72, 95.0), (5.72, 95.0), (5.72, 95.0), (5.72, 95.0), (5.72, 95.0), (5.72, 95.0), (5.72, 95.0), (5.72, 95.0), (5.72, 95.0), (5.72, 95.0), (5.72, 95.0), (5.72, 95.0), (5.72, 95.0), (5.72, 95.0), (5.72, 95.0), (5.72, 95.0), (5.72, 95.0), (5.72, 95.0), (5.72, 95.0), (5.72, 95.0), (5.72, 95.0), (5.72, 95.0), (5.72, 95.0), (5.72, 95.0), (5.72, 95.0), (5.72, 95.0), (5.72, 95.0), (5.72, 95.0), (5.72, 95.0), (5.72, 95.0), (5.72, 95.0), (5.72, 95.0), (5.72, 95.0), (5.72, 95.0), (5.72, 95.0), (5.72, 95.0), (5.72, 95.0), (5.72, 95.0), (5.72, 95.0), (5.72, 95.0), (5.72, 95.0), (5.72, 95.0), (5.72, 95.0), (5.72, 95.0), (5.72, 95.0), (5.72, 95.0), (5.72, 95.0), (5.72, 95.0), (5.72, 95.0), (5.72, 95.0), (5.72, 95.0), (5.72, 95.0), (5.72, 95.0)]GiB |self.devices=[device(0,TPU_DEVICE,coords=[0,0,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3), device(4,TPU_DEVICE,coords=[0,1,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3), device(1,TPU_DEVICE,coords=[1,0,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3), device(5,TPU_DEVICE,coords=[1,1,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3), device(2,TPU_DEVICE,coords=[2,0,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3), device(6,TPU_DEVICE,coords=[2,1,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3), device(3,TPU_DEVICE,coords=[3,0,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3), device(7,TPU_DEVICE,coords=[3,1,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3), device(16,TPU_DEVICE,coords=[0,0,1,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3), device(20,TPU_DEVICE,coords=[0,1,1,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3), device(17,TPU_DEVICE,coords=[1,0,1,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3), device(21,TPU_DEVICE,coords=[1,1,1,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3), device(18,TPU_DEVICE,coords=[2,0,1,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3), device(22,TPU_DEVICE,coords=[2,1,1,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3), device(19,TPU_DEVICE,coords=[3,0,1,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3), device(23,TPU_DEVICE,coords=[3,1,1,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3), device(32,TPU_DEVICE,coords=[0,0,2,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3), device(36,TPU_DEVICE,coords=[0,1,2,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3), device(33,TPU_DEVICE,coords=[1,0,2,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3), device(37,TPU_DEVICE,coords=[1,1,2,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3), device(34,TPU_DEVICE,coords=[2,0,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3), device(38,TPU_DEVICE,coords=[2,1,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3), device(35,TPU_DEVICE,coords=[3,0,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3), device(39,TPU_DEVICE,coords=[3,1,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3), device(48,TPU_DEVICE,coords=[0,0,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3), device(52,TPU_DEVICE,coords=[0,1,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3), device(49,TPU_DEVICE,coords=[1,0,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3), device(53,TPU_DEVICE,coords=[1,1,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3), device(50,TPU_DEVICE,coords=[2,0,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3), device(54,TPU_DEVICE,coords=[2,1,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3), device(51,TPU_DEVICE,coords=[3,0,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3), device(55,TPU_DEVICE,coords=[3,1,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3), device(8,TPU_DEVICE,coords=[0,2,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3), device(12,TPU_DEVICE,coords=[0,3,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3), device(9,TPU_DEVICE,coords=[1,2,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3), device(13,TPU_DEVICE,coords=[1,3,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3), device(10,TPU_DEVICE,coords=[2,2,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3), device(14,TPU_DEVICE,coords=[2,3,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3), device(11,TPU_DEVICE,coords=[3,2,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3), device(15,TPU_DEVICE,coords=[3,3,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3), device(24,TPU_DEVICE,coords=[0,2,1,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3), device(28,TPU_DEVICE,coords=[0,3,1,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3), device(25,TPU_DEVICE,coords=[1,2,1,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3), device(29,TPU_DEVICE,coords=[1,3,1,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3), device(26,TPU_DEVICE,coords=[2,2,1,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3), device(30,TPU_DEVICE,coords=[2,3,1,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3), device(27,TPU_DEVICE,coords=[3,2,1,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3), device(31,TPU_DEVICE,coords=[3,3,1,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3), device(40,TPU_DEVICE,coords=[0,2,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3), device(44,TPU_DEVICE,coords=[0,3,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3), device(41,TPU_DEVICE,coords=[1,2,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3), device(45,TPU_DEVICE,coords=[1,3,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3), device(42,TPU_DEVICE,coords=[2,2,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3), device(46,TPU_DEVICE,coords=[2,3,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3), device(43,TPU_DEVICE,coords=[3,2,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3), device(47,TPU_DEVICE,coords=[3,3,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3), device(56,TPU_DEVICE,coords=[0,2,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3), device(60,TPU_DEVICE,coords=[0,3,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3), device(57,TPU_DEVICE,coords=[1,2,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3), device(61,TPU_DEVICE,coords=[1,3,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3), device(58,TPU_DEVICE,coords=[2,2,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3), device(62,TPU_DEVICE,coords=[2,3,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3), device(59,TPU_DEVICE,coords=[3,2,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3), device(63,TPU_DEVICE,coords=[3,3,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3)] | total devices=[device(0,TPU_DEVICE,coords=[0,0,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3), device(1,TPU_DEVICE,coords=[1,0,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3), device(2,TPU_DEVICE,coords=[2,0,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3), device(3,TPU_DEVICE,coords=[3,0,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3), device(4,TPU_DEVICE,coords=[0,1,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3), device(5,TPU_DEVICE,coords=[1,1,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3), device(6,TPU_DEVICE,coords=[2,1,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3), device(7,TPU_DEVICE,coords=[3,1,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3), device(8,TPU_DEVICE,coords=[0,2,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3), device(9,TPU_DEVICE,coords=[1,2,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3), device(10,TPU_DEVICE,coords=[2,2,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3), device(11,TPU_DEVICE,coords=[3,2,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3), device(12,TPU_DEVICE,coords=[0,3,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3), device(13,TPU_DEVICE,coords=[1,3,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3), device(14,TPU_DEVICE,coords=[2,3,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3), device(15,TPU_DEVICE,coords=[3,3,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3), device(16,TPU_DEVICE,coords=[0,0,1,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3), device(17,TPU_DEVICE,coords=[1,0,1,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3), device(18,TPU_DEVICE,coords=[2,0,1,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3), device(19,TPU_DEVICE,coords=[3,0,1,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3), device(20,TPU_DEVICE,coords=[0,1,1,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3), device(21,TPU_DEVICE,coords=[1,1,1,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3), device(22,TPU_DEVICE,coords=[2,1,1,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3), device(23,TPU_DEVICE,coords=[3,1,1,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3), device(24,TPU_DEVICE,coords=[0,2,1,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3), device(25,TPU_DEVICE,coords=[1,2,1,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3), device(26,TPU_DEVICE,coords=[2,2,1,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3), device(27,TPU_DEVICE,coords=[3,2,1,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3), device(28,TPU_DEVICE,coords=[0,3,1,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3), device(29,TPU_DEVICE,coords=[1,3,1,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3), device(30,TPU_DEVICE,coords=[2,3,1,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3), device(31,TPU_DEVICE,coords=[3,3,1,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3), device(32,TPU_DEVICE,coords=[0,0,2,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3), device(33,TPU_DEVICE,coords=[1,0,2,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3), device(34,TPU_DEVICE,coords=[2,0,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3), device(35,TPU_DEVICE,coords=[3,0,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3), device(36,TPU_DEVICE,coords=[0,1,2,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3), device(37,TPU_DEVICE,coords=[1,1,2,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3), device(38,TPU_DEVICE,coords=[2,1,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3), device(39,TPU_DEVICE,coords=[3,1,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3), device(40,TPU_DEVICE,coords=[0,2,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3), device(41,TPU_DEVICE,coords=[1,2,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3), device(42,TPU_DEVICE,coords=[2,2,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3), device(43,TPU_DEVICE,coords=[3,2,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3), device(44,TPU_DEVICE,coords=[0,3,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3), device(45,TPU_DEVICE,coords=[1,3,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3), device(46,TPU_DEVICE,coords=[2,3,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3), device(47,TPU_DEVICE,coords=[3,3,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3), device(48,TPU_DEVICE,coords=[0,0,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3), device(49,TPU_DEVICE,coords=[1,0,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3), device(50,TPU_DEVICE,coords=[2,0,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3), device(51,TPU_DEVICE,coords=[3,0,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3), device(52,TPU_DEVICE,coords=[0,1,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3), device(53,TPU_DEVICE,coords=[1,1,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3), device(54,TPU_DEVICE,coords=[2,1,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3), device(55,TPU_DEVICE,coords=[3,1,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3), device(56,TPU_DEVICE,coords=[0,2,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3), device(57,TPU_DEVICE,coords=[1,2,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3), device(58,TPU_DEVICE,coords=[2,2,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3), device(59,TPU_DEVICE,coords=[3,2,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3), device(60,TPU_DEVICE,coords=[0,3,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3), device(61,TPU_DEVICE,coords=[1,3,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3), device(62,TPU_DEVICE,coords=[2,3,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3), device(63,TPU_DEVICE,coords=[3,3,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3)] | local_devices=[device(0,TPU_DEVICE,coords=[0,0,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3), device(1,TPU_DEVICE,coords=[1,0,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3), device(2,TPU_DEVICE,coords=[2,0,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3), device(3,TPU_DEVICE,coords=[3,0,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3), device(4,TPU_DEVICE,coords=[0,1,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3), device(5,TPU_DEVICE,coords=[1,1,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3), device(6,TPU_DEVICE,coords=[2,1,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3), device(7,TPU_DEVICE,coords=[3,1,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3), device(8,TPU_DEVICE,coords=[0,2,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3), device(9,TPU_DEVICE,coords=[1,2,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3), device(10,TPU_DEVICE,coords=[2,2,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3), device(11,TPU_DEVICE,coords=[3,2,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3), device(12,TPU_DEVICE,coords=[0,3,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3), device(13,TPU_DEVICE,coords=[1,3,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3), device(14,TPU_DEVICE,coords=[2,3,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3), device(15,TPU_DEVICE,coords=[3,3,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3), device(16,TPU_DEVICE,coords=[0,0,1,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3), device(17,TPU_DEVICE,coords=[1,0,1,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3), device(18,TPU_DEVICE,coords=[2,0,1,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3), device(19,TPU_DEVICE,coords=[3,0,1,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3), device(20,TPU_DEVICE,coords=[0,1,1,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3), device(21,TPU_DEVICE,coords=[1,1,1,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3), device(22,TPU_DEVICE,coords=[2,1,1,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3), device(23,TPU_DEVICE,coords=[3,1,1,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3), device(24,TPU_DEVICE,coords=[0,2,1,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3), device(25,TPU_DEVICE,coords=[1,2,1,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3), device(26,TPU_DEVICE,coords=[2,2,1,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3), device(27,TPU_DEVICE,coords=[3,2,1,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3), device(28,TPU_DEVICE,coords=[0,3,1,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3), device(29,TPU_DEVICE,coords=[1,3,1,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3), device(30,TPU_DEVICE,coords=[2,3,1,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3), device(31,TPU_DEVICE,coords=[3,3,1,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3), device(32,TPU_DEVICE,coords=[0,0,2,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3), device(33,TPU_DEVICE,coords=[1,0,2,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3), device(34,TPU_DEVICE,coords=[2,0,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3), device(35,TPU_DEVICE,coords=[3,0,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3), device(36,TPU_DEVICE,coords=[0,1,2,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3), device(37,TPU_DEVICE,coords=[1,1,2,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3), device(38,TPU_DEVICE,coords=[2,1,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3), device(39,TPU_DEVICE,coords=[3,1,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3), device(40,TPU_DEVICE,coords=[0,2,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3), device(41,TPU_DEVICE,coords=[1,2,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3), device(42,TPU_DEVICE,coords=[2,2,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3), device(43,TPU_DEVICE,coords=[3,2,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3), device(44,TPU_DEVICE,coords=[0,3,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3), device(45,TPU_DEVICE,coords=[1,3,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3), device(46,TPU_DEVICE,coords=[2,3,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3), device(47,TPU_DEVICE,coords=[3,3,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3), device(48,TPU_DEVICE,coords=[0,0,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3), device(49,TPU_DEVICE,coords=[1,0,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3), device(50,TPU_DEVICE,coords=[2,0,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3), device(51,TPU_DEVICE,coords=[3,0,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3), device(52,TPU_DEVICE,coords=[0,1,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3), device(53,TPU_DEVICE,coords=[1,1,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3), device(54,TPU_DEVICE,coords=[2,1,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3), device(55,TPU_DEVICE,coords=[3,1,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3), device(56,TPU_DEVICE,coords=[0,2,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3), device(57,TPU_DEVICE,coords=[1,2,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3), device(58,TPU_DEVICE,coords=[2,2,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3), device(59,TPU_DEVICE,coords=[3,2,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3), device(60,TPU_DEVICE,coords=[0,3,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3), device(61,TPU_DEVICE,coords=[1,3,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3), device(62,TPU_DEVICE,coords=[2,3,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3), device(63,TPU_DEVICE,coords=[3,3,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3)]
+INFO 08-21 09:59:16 [model_loader.py:621] Loading model with MODEL_IMPL_TYPE=auto
+INFO 08-21 09:59:16 [model_loader.py:624] Resolved MODEL_IMPL_TYPE 'auto' to 'flax_nnx'
+ERROR 08-21 09:59:16 [tpu_info.py:91] Failed to detect number of TPUs: [Errno 2] No such file or directory: '/dev/vfio'
+ERROR 08-21 09:59:16 [tpu_info.py:40] Unable to poll TPU GCE Metadata. Got status code: 404 and content: <!DOCTYPE html>
+ERROR 08-21 09:59:16 [tpu_info.py:40] <html lang=en>
+ERROR 08-21 09:59:16 [tpu_info.py:40]   <meta charset=utf-8>
+ERROR 08-21 09:59:16 [tpu_info.py:40]   <meta name=viewport content="initial-scale=1, minimum-scale=1, width=device-width">
+ERROR 08-21 09:59:16 [tpu_info.py:40]   <title>Error 404 (Not Found)!!1</title>
+ERROR 08-21 09:59:16 [tpu_info.py:40]   <style>
+ERROR 08-21 09:59:16 [tpu_info.py:40]     *{margin:0;padding:0}html,code{font:15px/22px arial,sans-serif}html{background:#fff;color:#222;padding:15px}body{margin:7% auto 0;max-width:390px;min-height:180px;padding:30px 0 15px}* > body{background:url(//www.google.com/images/errors/robot.png) 100% 5px no-repeat;padding-right:205px}p{margin:11px 0 22px;overflow:hidden}ins{color:#777;text-decoration:none}a img{border:0}@media screen and (max-width:772px){body{background:none;margin-top:0;max-width:none;padding-right:0}}#logo{background:url(//www.google.com/images/branding/googlelogo/1x/googlelogo_color_150x54dp.png) no-repeat;margin-left:-5px}@media only screen and (min-resolution:192dpi){#logo{background:url(//www.google.com/images/branding/googlelogo/2x/googlelogo_color_150x54dp.png) no-repeat 0% 0%/100% 100%;-moz-border-image:url(//www.google.com/images/branding/googlelogo/2x/googlelogo_color_150x54dp.png) 0}}@media only screen and (-webkit-min-device-pixel-ratio:2){#logo{background:url(//www.google.com/images/branding/googlelogo/2x/googlelogo_color_150x54dp.png) no-repeat;-webkit-background-size:100% 100%}}#logo{display:inline-block;height:54px;width:150px}
+ERROR 08-21 09:59:16 [tpu_info.py:40]   </style>
+ERROR 08-21 09:59:16 [tpu_info.py:40]   <a href=//www.google.com/><span id=logo aria-label=Google></span></a>
+ERROR 08-21 09:59:16 [tpu_info.py:40]   <p><b>404.</b> <ins>That’s an error.</ins>
+ERROR 08-21 09:59:16 [tpu_info.py:40]   <p>The requested URL <code>/computeMetadata/v1/instance/attributes/accelerator-type</code> was not found on this server.  <ins>That’s all we know.</ins>
+ERROR 08-21 09:59:16 [tpu_info.py:40] 
+INFO 08-21 09:59:16 [qwen3.py:92] Running with attention Q-Projection laid out as DNH
+INFO 08-21 10:01:06 [pathways_dummy_loader.py:125] Pathways dummy weight loading (jax) took 107.55s
+INFO 08-21 10:01:09 [tpu_runner.py:979] Cleared JIT caches after weight loading
+INFO 08-21 10:01:09 [tpu_runner.py:981] Init model | hbm=[(8.65, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0)]GiB
+INFO 08-21 10:01:09 [tpu_platform.py:399] Using cache_config.block_size: 16 instead of overriding with _align_hybrid_block_size() since we set mamba_page_size_padded in kv_cache_manager.py
+INFO 08-21 10:01:10 [tpu_worker.py:463] Memory statistics | total_hbm_limit_gb=6080.0GiB | total_hbm_limit_cap_gb=1216.0GiB | total_hbm_used_gb=553.25GiB | total_hbm_avail_gb=662.75GiB
+INFO 08-21 10:01:10 [kv_cache_utils.py:2168] GPU KV cache size: 4,826,000 tokens
+INFO 08-21 10:01:10 [kv_cache_utils.py:2169] Maximum concurrency for 12,544 tokens per request: 384.73x
+INFO 08-21 10:01:10 [compilation_manager.py:855] Compiling sampling with different input shapes.
+INFO 08-21 10:01:11 [compilation_manager.py:133] Precompile worker0 sample --> {'num_reqs': 8, 'do_sampling': True, 'logprobs': True}
+INFO 08-21 10:01:16 [compilation_manager.py:167] Compilation of worker0 sample --> {'num_reqs': 8, 'do_sampling': True, 'logprobs': True} finished in 4.75 [secs].
+INFO 08-21 10:01:16 [compilation_manager.py:133] Precompile worker0 sample --> {'num_reqs': 8, 'do_sampling': True, 'logprobs': False}
+INFO 08-21 10:01:22 [compilation_manager.py:167] Compilation of worker0 sample --> {'num_reqs': 8, 'do_sampling': True, 'logprobs': False} finished in 5.39 [secs].
+INFO 08-21 10:01:22 [compilation_manager.py:133] Precompile worker0 sample --> {'num_reqs': 8, 'do_sampling': False, 'logprobs': True}
+INFO 08-21 10:01:22 [compilation_manager.py:167] Compilation of worker0 sample --> {'num_reqs': 8, 'do_sampling': False, 'logprobs': True} finished in 0.35 [secs].
+INFO 08-21 10:01:22 [compilation_manager.py:133] Precompile worker0 sample --> {'num_reqs': 8, 'do_sampling': False, 'logprobs': False}
+INFO 08-21 10:01:23 [compilation_manager.py:167] Compilation of worker0 sample --> {'num_reqs': 8, 'do_sampling': False, 'logprobs': False} finished in 0.32 [secs].
+INFO 08-21 10:01:23 [compilation_manager.py:133] Precompile worker0 sample --> {'num_reqs': 16, 'do_sampling': True, 'logprobs': True}
+INFO 08-21 10:01:25 [compilation_manager.py:167] Compilation of worker0 sample --> {'num_reqs': 16, 'do_sampling': True, 'logprobs': True} finished in 1.92 [secs].
+INFO 08-21 10:01:25 [compilation_manager.py:133] Precompile worker0 sample --> {'num_reqs': 16, 'do_sampling': True, 'logprobs': False}
+INFO 08-21 10:01:27 [compilation_manager.py:167] Compilation of worker0 sample --> {'num_reqs': 16, 'do_sampling': True, 'logprobs': False} finished in 1.82 [secs].
+INFO 08-21 10:01:27 [compilation_manager.py:133] Precompile worker0 sample --> {'num_reqs': 16, 'do_sampling': False, 'logprobs': True}
+INFO 08-21 10:01:28 [compilation_manager.py:167] Compilation of worker0 sample --> {'num_reqs': 16, 'do_sampling': False, 'logprobs': True} finished in 0.29 [secs].
+INFO 08-21 10:01:28 [compilation_manager.py:133] Precompile worker0 sample --> {'num_reqs': 16, 'do_sampling': False, 'logprobs': False}
+INFO 08-21 10:01:28 [compilation_manager.py:167] Compilation of worker0 sample --> {'num_reqs': 16, 'do_sampling': False, 'logprobs': False} finished in 0.28 [secs].
+INFO 08-21 10:01:29 [compilation_manager.py:133] Precompile worker0 sample --> {'num_reqs': 32, 'do_sampling': True, 'logprobs': True}
+INFO 08-21 10:01:31 [compilation_manager.py:167] Compilation of worker0 sample --> {'num_reqs': 32, 'do_sampling': True, 'logprobs': True} finished in 1.83 [secs].
+INFO 08-21 10:01:31 [compilation_manager.py:133] Precompile worker0 sample --> {'num_reqs': 32, 'do_sampling': True, 'logprobs': False}
+INFO 08-21 10:01:32 [compilation_manager.py:167] Compilation of worker0 sample --> {'num_reqs': 32, 'do_sampling': True, 'logprobs': False} finished in 1.79 [secs].
+INFO 08-21 10:01:32 [compilation_manager.py:133] Precompile worker0 sample --> {'num_reqs': 32, 'do_sampling': False, 'logprobs': True}
+INFO 08-21 10:01:33 [compilation_manager.py:167] Compilation of worker0 sample --> {'num_reqs': 32, 'do_sampling': False, 'logprobs': True} finished in 0.27 [secs].
+INFO 08-21 10:01:33 [compilation_manager.py:133] Precompile worker0 sample --> {'num_reqs': 32, 'do_sampling': False, 'logprobs': False}
+INFO 08-21 10:01:33 [compilation_manager.py:167] Compilation of worker0 sample --> {'num_reqs': 32, 'do_sampling': False, 'logprobs': False} finished in 0.29 [secs].
+INFO 08-21 10:01:34 [compilation_manager.py:133] Precompile worker0 sample --> {'num_reqs': 64, 'do_sampling': True, 'logprobs': True}
+INFO 08-21 10:01:38 [compilation_manager.py:167] Compilation of worker0 sample --> {'num_reqs': 64, 'do_sampling': True, 'logprobs': True} finished in 4.10 [secs].
+INFO 08-21 10:01:38 [compilation_manager.py:133] Precompile worker0 sample --> {'num_reqs': 64, 'do_sampling': True, 'logprobs': False}
+INFO 08-21 10:01:42 [compilation_manager.py:167] Compilation of worker0 sample --> {'num_reqs': 64, 'do_sampling': True, 'logprobs': False} finished in 3.91 [secs].
+INFO 08-21 10:01:42 [compilation_manager.py:133] Precompile worker0 sample --> {'num_reqs': 64, 'do_sampling': False, 'logprobs': True}
+INFO 08-21 10:01:42 [compilation_manager.py:167] Compilation of worker0 sample --> {'num_reqs': 64, 'do_sampling': False, 'logprobs': True} finished in 0.29 [secs].
+INFO 08-21 10:01:42 [compilation_manager.py:133] Precompile worker0 sample --> {'num_reqs': 64, 'do_sampling': False, 'logprobs': False}
+INFO 08-21 10:01:42 [compilation_manager.py:167] Compilation of worker0 sample --> {'num_reqs': 64, 'do_sampling': False, 'logprobs': False} finished in 0.26 [secs].
+INFO 08-21 10:01:43 [compilation_manager.py:133] Precompile worker0 sample --> {'num_reqs': 128, 'do_sampling': True, 'logprobs': True}
+INFO 08-21 10:01:52 [compilation_manager.py:167] Compilation of worker0 sample --> {'num_reqs': 128, 'do_sampling': True, 'logprobs': True} finished in 8.97 [secs].
+INFO 08-21 10:01:52 [compilation_manager.py:133] Precompile worker0 sample --> {'num_reqs': 128, 'do_sampling': True, 'logprobs': False}
+INFO 08-21 10:02:01 [compilation_manager.py:167] Compilation of worker0 sample --> {'num_reqs': 128, 'do_sampling': True, 'logprobs': False} finished in 9.00 [secs].
+INFO 08-21 10:02:01 [compilation_manager.py:133] Precompile worker0 sample --> {'num_reqs': 128, 'do_sampling': False, 'logprobs': True}
+INFO 08-21 10:02:02 [compilation_manager.py:167] Compilation of worker0 sample --> {'num_reqs': 128, 'do_sampling': False, 'logprobs': True} finished in 0.32 [secs].
+INFO 08-21 10:02:02 [compilation_manager.py:133] Precompile worker0 sample --> {'num_reqs': 128, 'do_sampling': False, 'logprobs': False}
+INFO 08-21 10:02:02 [compilation_manager.py:167] Compilation of worker0 sample --> {'num_reqs': 128, 'do_sampling': False, 'logprobs': False} finished in 0.37 [secs].
+INFO 08-21 10:02:03 [compilation_manager.py:133] Precompile worker0 sample --> {'num_reqs': 256, 'do_sampling': True, 'logprobs': True}
+INFO 08-21 10:02:05 [compilation_manager.py:167] Compilation of worker0 sample --> {'num_reqs': 256, 'do_sampling': True, 'logprobs': True} finished in 1.71 [secs].
+INFO 08-21 10:02:05 [compilation_manager.py:133] Precompile worker0 sample --> {'num_reqs': 256, 'do_sampling': True, 'logprobs': False}
+INFO 08-21 10:02:06 [compilation_manager.py:167] Compilation of worker0 sample --> {'num_reqs': 256, 'do_sampling': True, 'logprobs': False} finished in 1.65 [secs].
+INFO 08-21 10:02:06 [compilation_manager.py:133] Precompile worker0 sample --> {'num_reqs': 256, 'do_sampling': False, 'logprobs': True}
+INFO 08-21 10:02:07 [compilation_manager.py:167] Compilation of worker0 sample --> {'num_reqs': 256, 'do_sampling': False, 'logprobs': True} finished in 0.37 [secs].
+INFO 08-21 10:02:07 [compilation_manager.py:133] Precompile worker0 sample --> {'num_reqs': 256, 'do_sampling': False, 'logprobs': False}
+INFO 08-21 10:02:07 [compilation_manager.py:167] Compilation of worker0 sample --> {'num_reqs': 256, 'do_sampling': False, 'logprobs': False} finished in 0.36 [secs].
+INFO 08-21 10:02:07 [compilation_manager.py:944] Compiling gather_logprobs with different input shapes.
+INFO 08-21 10:02:07 [compilation_manager.py:133] Precompile worker0 gather_logprobs --> {'num_reqs': 8}
+INFO 08-21 10:02:08 [compilation_manager.py:167] Compilation of worker0 gather_logprobs --> {'num_reqs': 8} finished in 0.34 [secs].
+INFO 08-21 10:02:08 [compilation_manager.py:133] Precompile worker0 gather_logprobs --> {'num_reqs': 16}
+INFO 08-21 10:02:08 [compilation_manager.py:167] Compilation of worker0 gather_logprobs --> {'num_reqs': 16} finished in 0.35 [secs].
+INFO 08-21 10:02:08 [compilation_manager.py:133] Precompile worker0 gather_logprobs --> {'num_reqs': 32}
+INFO 08-21 10:02:09 [compilation_manager.py:167] Compilation of worker0 gather_logprobs --> {'num_reqs': 32} finished in 0.38 [secs].
+INFO 08-21 10:02:09 [compilation_manager.py:133] Precompile worker0 gather_logprobs --> {'num_reqs': 64}
+INFO 08-21 10:02:10 [compilation_manager.py:167] Compilation of worker0 gather_logprobs --> {'num_reqs': 64} finished in 0.44 [secs].
+INFO 08-21 10:02:10 [compilation_manager.py:133] Precompile worker0 gather_logprobs --> {'num_reqs': 128}
+INFO 08-21 10:02:10 [compilation_manager.py:167] Compilation of worker0 gather_logprobs --> {'num_reqs': 128} finished in 0.43 [secs].
+INFO 08-21 10:02:10 [compilation_manager.py:133] Precompile worker0 gather_logprobs --> {'num_reqs': 256}
+INFO 08-21 10:02:11 [compilation_manager.py:167] Compilation of worker0 gather_logprobs --> {'num_reqs': 256} finished in 0.39 [secs].
+INFO 08-21 10:02:11 [compilation_manager.py:993] Compiling compute_and_gather_prompt_logprobs with different input shapes.
+INFO 08-21 10:02:11 [compilation_manager.py:999] Skipping precompilation of compute_and_gather_prompt_logprobs for num_tokens=2048, as it exceeds the MAX_PRECOMPILE_PROMPT_TOKENS=1024 limit to prevent HBM exhaustion.
+INFO 08-21 10:02:59 [compilation_manager.py:207] Warm-up call pass finished in 48.56 [secs] over 30 tasks.
+INFO 08-21 10:03:00 [kv_cache_manager.py:976] Hybrid KV cache layout: num_kv_cache_groups=1, num_kv_cache_tensors=36, kv_cache_config.num_blocks=301625, duplicate_shared_layers=False
+INFO 08-21 10:03:00 [kv_cache_manager.py:1004] Init kv-cache | num_total_layers=36 | num_blocks=[301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624] | regular_attn_layers=36 | regular_attn_shape=(num_blocks, (16, 8, 2, 128)) | regular_attn_sharding=NamedSharding(mesh=Mesh('data': 8, 'attn_dp': 1, 'attn_dp_expert': 1, 'expert': 1, 'model': 8, 'dcp': 1, axis_types=(Auto, Auto, Auto, Auto, Auto, Auto)), spec=P(('data', 'attn_dp', 'attn_dp_expert'), 'dcp', ('model', 'expert')), memory_kind=device) | regular_attn_dtype=bfloat16 | hbm=[(19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0)]Gb
+INFO 08-21 10:03:00 [compilation_manager.py:215] Precompile all the subgraphs with possible input shapes.
+INFO 08-21 10:03:02 [compilation_manager.py:133] Precompile worker0 backbone --> {'num_tokens': 2048, 'num_reqs': 256}
+INFO 08-21 10:03:02 [compilation_manager.py:146] AOT lower skipped for worker0 backbone (not a jit); will compile in warmup.
+INFO 08-21 10:03:30 [compilation_manager.py:207] Warm-up call pass finished in 28.21 [secs] over 1 tasks.
+INFO 08-21 10:03:30 [compilation_manager.py:771] Compiling select_from_array with different input shapes.
+INFO 08-21 10:03:30 [compilation_manager.py:743] Compiling select_from_array for worker0 select all logits.
+INFO 08-21 10:03:31 [compilation_manager.py:133] Precompile select_from_array [worker0 select all logits] --> {'array_size': 2048, 'index_size': 8}
+INFO 08-21 10:03:31 [compilation_manager.py:167] Compilation of select_from_array [worker0 select all logits] --> {'array_size': 2048, 'index_size': 8} finished in 0.23 [secs].
+INFO 08-21 10:03:31 [compilation_manager.py:133] Precompile select_from_array [worker0 select all logits] --> {'array_size': 2048, 'index_size': 16}
+INFO 08-21 10:03:32 [compilation_manager.py:167] Compilation of select_from_array [worker0 select all logits] --> {'array_size': 2048, 'index_size': 16} finished in 0.22 [secs].
+INFO 08-21 10:03:32 [compilation_manager.py:133] Precompile select_from_array [worker0 select all logits] --> {'array_size': 2048, 'index_size': 32}
+INFO 08-21 10:03:32 [compilation_manager.py:167] Compilation of select_from_array [worker0 select all logits] --> {'array_size': 2048, 'index_size': 32} finished in 0.25 [secs].
+INFO 08-21 10:03:33 [compilation_manager.py:133] Precompile select_from_array [worker0 select all logits] --> {'array_size': 2048, 'index_size': 64}
+INFO 08-21 10:03:33 [compilation_manager.py:167] Compilation of select_from_array [worker0 select all logits] --> {'array_size': 2048, 'index_size': 64} finished in 0.23 [secs].
+INFO 08-21 10:03:33 [compilation_manager.py:133] Precompile select_from_array [worker0 select all logits] --> {'array_size': 2048, 'index_size': 128}
+INFO 08-21 10:03:33 [compilation_manager.py:167] Compilation of select_from_array [worker0 select all logits] --> {'array_size': 2048, 'index_size': 128} finished in 0.24 [secs].
+INFO 08-21 10:03:33 [compilation_manager.py:133] Precompile select_from_array [worker0 select all logits] --> {'array_size': 2048, 'index_size': 256}
+INFO 08-21 10:03:34 [compilation_manager.py:167] Compilation of select_from_array [worker0 select all logits] --> {'array_size': 2048, 'index_size': 256} finished in 0.25 [secs].
+INFO 08-21 10:03:34 [compilation_manager.py:207] Warm-up call pass finished in 0.05 [secs] over 6 tasks.
+INFO 08-21 10:03:34 [compilation_manager.py:818] Compiling compute_logits with different input shapes.
+INFO 08-21 10:03:34 [compilation_manager.py:133] Precompile worker0 compute_logits --> {'num_reqs': 8}
+INFO 08-21 10:03:35 [compilation_manager.py:167] Compilation of worker0 compute_logits --> {'num_reqs': 8} finished in 0.57 [secs].
+INFO 08-21 10:03:35 [compilation_manager.py:133] Precompile worker0 compute_logits --> {'num_reqs': 16}
+INFO 08-21 10:03:36 [compilation_manager.py:167] Compilation of worker0 compute_logits --> {'num_reqs': 16} finished in 0.70 [secs].
+INFO 08-21 10:03:36 [compilation_manager.py:133] Precompile worker0 compute_logits --> {'num_reqs': 32}
+INFO 08-21 10:03:37 [compilation_manager.py:167] Compilation of worker0 compute_logits --> {'num_reqs': 32} finished in 0.73 [secs].
+INFO 08-21 10:03:37 [compilation_manager.py:133] Precompile worker0 compute_logits --> {'num_reqs': 64}
+INFO 08-21 10:03:38 [compilation_manager.py:167] Compilation of worker0 compute_logits --> {'num_reqs': 64} finished in 0.67 [secs].
+INFO 08-21 10:03:38 [compilation_manager.py:133] Precompile worker0 compute_logits --> {'num_reqs': 128}
+INFO 08-21 10:03:39 [compilation_manager.py:167] Compilation of worker0 compute_logits --> {'num_reqs': 128} finished in 0.76 [secs].
+INFO 08-21 10:03:39 [compilation_manager.py:133] Precompile worker0 compute_logits --> {'num_reqs': 256}
+INFO 08-21 10:03:40 [compilation_manager.py:167] Compilation of worker0 compute_logits --> {'num_reqs': 256} finished in 0.89 [secs].
+INFO 08-21 10:03:40 [compilation_manager.py:207] Warm-up call pass finished in 0.04 [secs] over 6 tasks.
+INFO 08-21 10:03:40 [compilation_manager.py:1769] Compiling structured_decoding with different input shapes.
+WARNING 08-21 10:03:40 [compilation_manager.py:1772] Structured decoding precompilation skipped since structured decoding is not supported with DP.
+INFO 08-21 10:03:40 [core.py:337] init engine (profile, create kv cache, warmup model) took 150.60 s (compilation: 39.52 s)
+WARNING 08-21 10:03:40 [scheduler.py:192] Using custom scheduler class <class 'tpu_inference.core.sched.dp_scheduler.DPScheduler'>. This scheduler interface is not public and compatibility may not be maintained. If you have subclassed Scheduler instead of AsyncScheduler, you will see degraded performance due to async scheduling being disabled.
+/usr/local/lib/python3.12/multiprocessing/popen_fork.py:66: RuntimeWarning: os.fork() was called. os.fork() is incompatible with multithreaded code, and JAX is multithreaded, so this will likely lead to a deadlock.
+  self.pid = os.fork()
+INFO 08-21 10:03:40 [dp_scheduler.py:181] Scheduler worker process 0 started (PID=2364)
+INFO 08-21 10:03:41 [dp_scheduler.py:181] Scheduler worker process 1 started (PID=2365)
+INFO 08-21 10:03:41 [dp_scheduler.py:181] Scheduler worker process 2 started (PID=2366)
+INFO 08-21 10:03:41 [dp_scheduler.py:181] Scheduler worker process 3 started (PID=2367)
+INFO 08-21 10:03:41 [dp_scheduler.py:181] Scheduler worker process 4 started (PID=2368)
+INFO 08-21 10:03:41 [dp_scheduler.py:181] Scheduler worker process 5 started (PID=2369)
+INFO 08-21 10:03:42 [dp_scheduler.py:181] Scheduler worker process 6 started (PID=2370)
+INFO 08-21 10:03:42 [dp_scheduler.py:495] DPScheduler (Async = False) started 8 worker processes with cloudpickle. Per-rank limits: max_seqs=32, max_tokens=256; global max_tokens across dp=8: 2048
+INFO 08-21 10:03:42 [dp_scheduler.py:502] DPScheduler batch prefills ENABLED (threshold=8, flush when 8 pending or any rank idle).
+INFO 08-21 10:03:42 [dp_scheduler.py:181] Scheduler worker process 7 started (PID=2371)
+WARNING 08-21 10:03:42 [dp_scheduler.py:580] Long wait time (0.01s) for rank 7/8 response to 'get_num_unfinished_requests' command at step 0 (pipe_wait=0.01s, deserialize=0.0000s, gc_re_enable=0.0000s, 5 bytes).
+INFO 08-21 10:03:42 [block_pool.py:768] Successfully reset prefix cache
+INFO 08-21 10:03:42 [block_pool.py:768] Successfully reset prefix cache
+INFO 08-21 10:03:42 [block_pool.py:768] Successfully reset prefix cache
+INFO 08-21 10:03:42 [block_pool.py:768] Successfully reset prefix cache
+INFO 08-21 10:03:42 [block_pool.py:768] Successfully reset prefix cache
+INFO 08-21 10:03:42 [block_pool.py:768] Successfully reset prefix cache
+INFO 08-21 10:03:42 [block_pool.py:768] Successfully reset prefix cache
+INFO 08-21 10:03:42 [block_pool.py:768] Successfully reset prefix cache
+INFO 08-21 10:03:42 [kv_cache_manager.py:1026] Deleting kv-cache | num_layers=36 | hbm_before=[(19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0)]Gb
+INFO 08-21 10:03:43 [kv_cache_manager.py:1038] KV cache delete complete | hbm_after=[(8.65, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0)]Gb
+2026-08-21 10:03:43 - WARNING - [absl] Type mismatch on embedder.input_embedding: float32 -> bfloat16
+2026-08-21 10:03:46 - INFO - [absl] Reshard finished in 0.42s
+INFO 08-21 10:03:46 [kv_cache_manager.py:1060] Reinitializing kv-cache | hbm_before=[(8.65, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0)]Gb
+INFO 08-21 10:03:47 [kv_cache_manager.py:976] Hybrid KV cache layout: num_kv_cache_groups=1, num_kv_cache_tensors=36, kv_cache_config.num_blocks=301625, duplicate_shared_layers=False
+INFO 08-21 10:03:47 [kv_cache_manager.py:1004] Init kv-cache | num_total_layers=36 | num_blocks=[301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624] | regular_attn_layers=36 | regular_attn_shape=(num_blocks, (16, 8, 2, 128)) | regular_attn_sharding=NamedSharding(mesh=Mesh('data': 8, 'attn_dp': 1, 'attn_dp_expert': 1, 'expert': 1, 'model': 8, 'dcp': 1, axis_types=(Auto, Auto, Auto, Auto, Auto, Auto)), spec=P(('data', 'attn_dp', 'attn_dp_expert'), 'dcp', ('model', 'expert')), memory_kind=device) | regular_attn_dtype=bfloat16 | hbm=[(19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0)]Gb
+2026-08-21 10:03:57 - INFO - [absl] Using persistence API for checkpointing with Pathways.
+2026-08-21 10:03:57 - INFO - [absl] [process=0][thread=MainThread] CheckpointManager init: checkpointers=None, item_names=None, item_handlers=None, handler_registry=None
+2026-08-21 10:03:57 - INFO - [absl] Initialized registry DefaultCheckpointHandlerRegistry({('metrics', <class 'orbax.checkpoint._src.handlers.json_checkpoint_handler.JsonSaveArgs'>): <orbax.checkpoint._src.handlers.json_checkpoint_handler.JsonCheckpointHandler object at 0x7e44394535c0>, ('metrics', <class 'orbax.checkpoint._src.handlers.json_checkpoint_handler.JsonRestoreArgs'>): <orbax.checkpoint._src.handlers.json_checkpoint_handler.JsonCheckpointHandler object at 0x7e44394535c0>}).
+2026-08-21 10:03:57 - INFO - [absl] [process=0][thread=MainThread] Using barrier_sync_fn: <function get_barrier_sync_fn.<locals>.<lambda> at 0x7e3b2824f9c0> timeout: 1200 secs and primary_host=0 for async checkpoint writes
+2026-08-21 10:03:57 - INFO - [absl] Created directory=gs://yuxzhang-tunix-models/canon-zero-tim/checkpoints/frozenlake/p57-m15-selection-mismatch/actor
+2026-08-21 10:03:57 - INFO - [absl] [process=0][thread=MainThread] CheckpointManager created,  primary_host=0, CheckpointManagerOptions=CheckpointManagerOptions(save_interval_steps=1, max_to_keep=None, keep_time_interval=None, keep_period=None, should_keep_fn=None, best_fn=None, best_mode='max', keep_checkpoints_without_metrics=True, step_prefix=None, step_format_fixed_length=None, step_name_format=<orbax.checkpoint.experimental.v1._src.path.step._StandardNameFormat object at 0x7e42f22741d0>, create=True, cleanup_tmp_directories=False, save_on_steps=frozenset(), single_host_load_and_broadcast=False, todelete_subdir=None, todelete_full_path=None, enable_background_delete=False, num_deletion_threads=None, read_only=False, enable_async_checkpointing=True, async_options=AsyncOptions(timeout_secs=1200, barrier_sync_fn=None, post_finalization_callback=None, create_directories_asynchronously=True), multiprocessing_options=MultiprocessingOptions(primary_host=0, active_processes=None, barrier_sync_key_prefix=None), should_save_fn=None, file_options=FileOptions(path_permission_mode=None), save_root_metadata=True, temporary_path_class=None, save_decision_policy=FixedIntervalPolicy(interval=10), preservation_policy=LatestN(n=1), prevent_write_metrics=True, enable_should_save_is_saving_in_progress_check=True, enable_per_process_directory_creation=False, lightweight_initialize=False), root_directory=gs://yuxzhang-tunix-models/canon-zero-tim/checkpoints/frozenlake/p57-m15-selection-mismatch/actor: <orbax.checkpoint.checkpoint_manager.CheckpointManager object at 0x7e3b567e9400>
+2026-08-21 10:03:57 - INFO - [absl] after RLCluster creation - Using Pathways compatible HBM stats collector
+2026-08-21 10:03:59 - INFO - [absl] Using 34.3 GiB on device(0,TPU_DEVICE,coords=[0,0,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:03:59 - INFO - [absl] Using 34.3 GiB on device(1,TPU_DEVICE,coords=[1,0,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:03:59 - INFO - [absl] Using 34.3 GiB on device(2,TPU_DEVICE,coords=[2,0,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:03:59 - INFO - [absl] Using 34.3 GiB on device(3,TPU_DEVICE,coords=[3,0,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:03:59 - INFO - [absl] Using 34.3 GiB on device(4,TPU_DEVICE,coords=[0,1,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:03:59 - INFO - [absl] Using 34.3 GiB on device(5,TPU_DEVICE,coords=[1,1,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:03:59 - INFO - [absl] Using 34.3 GiB on device(6,TPU_DEVICE,coords=[2,1,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:03:59 - INFO - [absl] Using 34.3 GiB on device(7,TPU_DEVICE,coords=[3,1,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:03:59 - INFO - [absl] Using 34.3 GiB on device(8,TPU_DEVICE,coords=[0,2,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:03:59 - INFO - [absl] Using 34.3 GiB on device(9,TPU_DEVICE,coords=[1,2,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:03:59 - INFO - [absl] Using 34.3 GiB on device(10,TPU_DEVICE,coords=[2,2,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:03:59 - INFO - [absl] Using 34.3 GiB on device(11,TPU_DEVICE,coords=[3,2,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:03:59 - INFO - [absl] Using 34.3 GiB on device(12,TPU_DEVICE,coords=[0,3,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:03:59 - INFO - [absl] Using 34.3 GiB on device(13,TPU_DEVICE,coords=[1,3,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:03:59 - INFO - [absl] Using 34.3 GiB on device(14,TPU_DEVICE,coords=[2,3,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:03:59 - INFO - [absl] Using 34.3 GiB on device(15,TPU_DEVICE,coords=[3,3,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:03:59 - INFO - [absl] Using 34.3 GiB on device(16,TPU_DEVICE,coords=[0,0,1,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:03:59 - INFO - [absl] Using 34.3 GiB on device(17,TPU_DEVICE,coords=[1,0,1,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:03:59 - INFO - [absl] Using 34.3 GiB on device(18,TPU_DEVICE,coords=[2,0,1,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:03:59 - INFO - [absl] Using 34.3 GiB on device(19,TPU_DEVICE,coords=[3,0,1,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:03:59 - INFO - [absl] Using 34.3 GiB on device(20,TPU_DEVICE,coords=[0,1,1,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:03:59 - INFO - [absl] Using 34.3 GiB on device(21,TPU_DEVICE,coords=[1,1,1,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:03:59 - INFO - [absl] Using 34.3 GiB on device(22,TPU_DEVICE,coords=[2,1,1,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:03:59 - INFO - [absl] Using 34.3 GiB on device(23,TPU_DEVICE,coords=[3,1,1,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:03:59 - INFO - [absl] Using 34.3 GiB on device(24,TPU_DEVICE,coords=[0,2,1,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:03:59 - INFO - [absl] Using 34.3 GiB on device(25,TPU_DEVICE,coords=[1,2,1,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:03:59 - INFO - [absl] Using 34.3 GiB on device(26,TPU_DEVICE,coords=[2,2,1,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:03:59 - INFO - [absl] Using 34.3 GiB on device(27,TPU_DEVICE,coords=[3,2,1,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:03:59 - INFO - [absl] Using 34.3 GiB on device(28,TPU_DEVICE,coords=[0,3,1,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:03:59 - INFO - [absl] Using 34.3 GiB on device(29,TPU_DEVICE,coords=[1,3,1,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:03:59 - INFO - [absl] Using 34.3 GiB on device(30,TPU_DEVICE,coords=[2,3,1,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:03:59 - INFO - [absl] Using 34.3 GiB on device(31,TPU_DEVICE,coords=[3,3,1,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:03:59 - INFO - [absl] Using 34.3 GiB on device(32,TPU_DEVICE,coords=[0,0,2,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:03:59 - INFO - [absl] Using 34.3 GiB on device(33,TPU_DEVICE,coords=[1,0,2,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:03:59 - INFO - [absl] Using 34.3 GiB on device(34,TPU_DEVICE,coords=[2,0,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:03:59 - INFO - [absl] Using 34.3 GiB on device(35,TPU_DEVICE,coords=[3,0,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:03:59 - INFO - [absl] Using 34.3 GiB on device(36,TPU_DEVICE,coords=[0,1,2,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:03:59 - INFO - [absl] Using 34.3 GiB on device(37,TPU_DEVICE,coords=[1,1,2,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:03:59 - INFO - [absl] Using 34.3 GiB on device(38,TPU_DEVICE,coords=[2,1,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:03:59 - INFO - [absl] Using 34.3 GiB on device(39,TPU_DEVICE,coords=[3,1,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:03:59 - INFO - [absl] Using 34.3 GiB on device(40,TPU_DEVICE,coords=[0,2,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:03:59 - INFO - [absl] Using 34.3 GiB on device(41,TPU_DEVICE,coords=[1,2,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:03:59 - INFO - [absl] Using 34.3 GiB on device(42,TPU_DEVICE,coords=[2,2,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:03:59 - INFO - [absl] Using 34.3 GiB on device(43,TPU_DEVICE,coords=[3,2,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:03:59 - INFO - [absl] Using 34.3 GiB on device(44,TPU_DEVICE,coords=[0,3,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:03:59 - INFO - [absl] Using 34.3 GiB on device(45,TPU_DEVICE,coords=[1,3,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:03:59 - INFO - [absl] Using 34.3 GiB on device(46,TPU_DEVICE,coords=[2,3,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:03:59 - INFO - [absl] Using 34.3 GiB on device(47,TPU_DEVICE,coords=[3,3,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:03:59 - INFO - [absl] Using 34.3 GiB on device(48,TPU_DEVICE,coords=[0,0,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:03:59 - INFO - [absl] Using 34.3 GiB on device(49,TPU_DEVICE,coords=[1,0,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:03:59 - INFO - [absl] Using 34.3 GiB on device(50,TPU_DEVICE,coords=[2,0,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:03:59 - INFO - [absl] Using 34.3 GiB on device(51,TPU_DEVICE,coords=[3,0,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:03:59 - INFO - [absl] Using 34.3 GiB on device(52,TPU_DEVICE,coords=[0,1,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:03:59 - INFO - [absl] Using 34.3 GiB on device(53,TPU_DEVICE,coords=[1,1,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:03:59 - INFO - [absl] Using 34.3 GiB on device(54,TPU_DEVICE,coords=[2,1,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:03:59 - INFO - [absl] Using 34.3 GiB on device(55,TPU_DEVICE,coords=[3,1,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:03:59 - INFO - [absl] Using 34.3 GiB on device(56,TPU_DEVICE,coords=[0,2,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:03:59 - INFO - [absl] Using 34.3 GiB on device(57,TPU_DEVICE,coords=[1,2,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:03:59 - INFO - [absl] Using 34.3 GiB on device(58,TPU_DEVICE,coords=[2,2,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:03:59 - INFO - [absl] Using 34.3 GiB on device(59,TPU_DEVICE,coords=[3,2,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:03:59 - INFO - [absl] Using 34.3 GiB on device(60,TPU_DEVICE,coords=[0,3,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:03:59 - INFO - [absl] Using 34.3 GiB on device(61,TPU_DEVICE,coords=[1,3,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:03:59 - INFO - [absl] Using 34.3 GiB on device(62,TPU_DEVICE,coords=[2,3,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:03:59 - INFO - [absl] Using 34.3 GiB on device(63,TPU_DEVICE,coords=[3,3,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3)
+[P45.CHECKPOINT] NEW_PASS latest=none
+[CANON_P33_WANDB] ONLINE_RUN_PASS {'status': 'online', 'project': 'zero-tim-p57-frozenlake-tim', 'group': 'p57-mismatch-m15-selection', 'name': 'canon-p57-fl-ev-mism-m15-e0-86112838'}
+2026-08-21 10:03:59 - INFO - [absl] AgenticRLLearner init - Using Pathways compatible HBM stats collector
+2026-08-21 10:04:00 - INFO - [absl] Using 34.3 GiB on device(0,TPU_DEVICE,coords=[0,0,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:00 - INFO - [absl] Using 34.3 GiB on device(1,TPU_DEVICE,coords=[1,0,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:00 - INFO - [absl] Using 34.3 GiB on device(2,TPU_DEVICE,coords=[2,0,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:00 - INFO - [absl] Using 34.3 GiB on device(3,TPU_DEVICE,coords=[3,0,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:00 - INFO - [absl] Using 34.3 GiB on device(4,TPU_DEVICE,coords=[0,1,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:00 - INFO - [absl] Using 34.3 GiB on device(5,TPU_DEVICE,coords=[1,1,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:00 - INFO - [absl] Using 34.3 GiB on device(6,TPU_DEVICE,coords=[2,1,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:00 - INFO - [absl] Using 34.3 GiB on device(7,TPU_DEVICE,coords=[3,1,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:00 - INFO - [absl] Using 34.3 GiB on device(8,TPU_DEVICE,coords=[0,2,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:00 - INFO - [absl] Using 34.3 GiB on device(9,TPU_DEVICE,coords=[1,2,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:00 - INFO - [absl] Using 34.3 GiB on device(10,TPU_DEVICE,coords=[2,2,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:00 - INFO - [absl] Using 34.3 GiB on device(11,TPU_DEVICE,coords=[3,2,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:00 - INFO - [absl] Using 34.3 GiB on device(12,TPU_DEVICE,coords=[0,3,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:00 - INFO - [absl] Using 34.3 GiB on device(13,TPU_DEVICE,coords=[1,3,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:00 - INFO - [absl] Using 34.3 GiB on device(14,TPU_DEVICE,coords=[2,3,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:00 - INFO - [absl] Using 34.3 GiB on device(15,TPU_DEVICE,coords=[3,3,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:00 - INFO - [absl] Using 34.3 GiB on device(16,TPU_DEVICE,coords=[0,0,1,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:00 - INFO - [absl] Using 34.3 GiB on device(17,TPU_DEVICE,coords=[1,0,1,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:00 - INFO - [absl] Using 34.3 GiB on device(18,TPU_DEVICE,coords=[2,0,1,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:00 - INFO - [absl] Using 34.3 GiB on device(19,TPU_DEVICE,coords=[3,0,1,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:00 - INFO - [absl] Using 34.3 GiB on device(20,TPU_DEVICE,coords=[0,1,1,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:00 - INFO - [absl] Using 34.3 GiB on device(21,TPU_DEVICE,coords=[1,1,1,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:00 - INFO - [absl] Using 34.3 GiB on device(22,TPU_DEVICE,coords=[2,1,1,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:00 - INFO - [absl] Using 34.3 GiB on device(23,TPU_DEVICE,coords=[3,1,1,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:00 - INFO - [absl] Using 34.3 GiB on device(24,TPU_DEVICE,coords=[0,2,1,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:00 - INFO - [absl] Using 34.3 GiB on device(25,TPU_DEVICE,coords=[1,2,1,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:00 - INFO - [absl] Using 34.3 GiB on device(26,TPU_DEVICE,coords=[2,2,1,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:00 - INFO - [absl] Using 34.3 GiB on device(27,TPU_DEVICE,coords=[3,2,1,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:00 - INFO - [absl] Using 34.3 GiB on device(28,TPU_DEVICE,coords=[0,3,1,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:00 - INFO - [absl] Using 34.3 GiB on device(29,TPU_DEVICE,coords=[1,3,1,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:00 - INFO - [absl] Using 34.3 GiB on device(30,TPU_DEVICE,coords=[2,3,1,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:00 - INFO - [absl] Using 34.3 GiB on device(31,TPU_DEVICE,coords=[3,3,1,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:00 - INFO - [absl] Using 34.3 GiB on device(32,TPU_DEVICE,coords=[0,0,2,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:00 - INFO - [absl] Using 34.3 GiB on device(33,TPU_DEVICE,coords=[1,0,2,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:00 - INFO - [absl] Using 34.3 GiB on device(34,TPU_DEVICE,coords=[2,0,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:00 - INFO - [absl] Using 34.3 GiB on device(35,TPU_DEVICE,coords=[3,0,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:00 - INFO - [absl] Using 34.3 GiB on device(36,TPU_DEVICE,coords=[0,1,2,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:00 - INFO - [absl] Using 34.3 GiB on device(37,TPU_DEVICE,coords=[1,1,2,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:00 - INFO - [absl] Using 34.3 GiB on device(38,TPU_DEVICE,coords=[2,1,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:00 - INFO - [absl] Using 34.3 GiB on device(39,TPU_DEVICE,coords=[3,1,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:00 - INFO - [absl] Using 34.3 GiB on device(40,TPU_DEVICE,coords=[0,2,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:00 - INFO - [absl] Using 34.3 GiB on device(41,TPU_DEVICE,coords=[1,2,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:00 - INFO - [absl] Using 34.3 GiB on device(42,TPU_DEVICE,coords=[2,2,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:00 - INFO - [absl] Using 34.3 GiB on device(43,TPU_DEVICE,coords=[3,2,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:00 - INFO - [absl] Using 34.3 GiB on device(44,TPU_DEVICE,coords=[0,3,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:00 - INFO - [absl] Using 34.3 GiB on device(45,TPU_DEVICE,coords=[1,3,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:00 - INFO - [absl] Using 34.3 GiB on device(46,TPU_DEVICE,coords=[2,3,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:00 - INFO - [absl] Using 34.3 GiB on device(47,TPU_DEVICE,coords=[3,3,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:00 - INFO - [absl] Using 34.3 GiB on device(48,TPU_DEVICE,coords=[0,0,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:00 - INFO - [absl] Using 34.3 GiB on device(49,TPU_DEVICE,coords=[1,0,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:00 - INFO - [absl] Using 34.3 GiB on device(50,TPU_DEVICE,coords=[2,0,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:00 - INFO - [absl] Using 34.3 GiB on device(51,TPU_DEVICE,coords=[3,0,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:00 - INFO - [absl] Using 34.3 GiB on device(52,TPU_DEVICE,coords=[0,1,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:00 - INFO - [absl] Using 34.3 GiB on device(53,TPU_DEVICE,coords=[1,1,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:00 - INFO - [absl] Using 34.3 GiB on device(54,TPU_DEVICE,coords=[2,1,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:00 - INFO - [absl] Using 34.3 GiB on device(55,TPU_DEVICE,coords=[3,1,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:00 - INFO - [absl] Using 34.3 GiB on device(56,TPU_DEVICE,coords=[0,2,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:00 - INFO - [absl] Using 34.3 GiB on device(57,TPU_DEVICE,coords=[1,2,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:00 - INFO - [absl] Using 34.3 GiB on device(58,TPU_DEVICE,coords=[2,2,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:00 - INFO - [absl] Using 34.3 GiB on device(59,TPU_DEVICE,coords=[3,2,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:00 - INFO - [absl] Using 34.3 GiB on device(60,TPU_DEVICE,coords=[0,3,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:00 - INFO - [absl] Using 34.3 GiB on device(61,TPU_DEVICE,coords=[1,3,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:00 - INFO - [absl] Using 34.3 GiB on device(62,TPU_DEVICE,coords=[2,3,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:00 - INFO - [absl] Using 34.3 GiB on device(63,TPU_DEVICE,coords=[3,3,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:00 - INFO - [absl] Started trajectory logging thread.
+2026-08-21 10:04:00 - INFO - [absl] after GRPOLearner creation - Using Pathways compatible HBM stats collector
+2026-08-21 10:04:01 - INFO - [absl] Using 34.3 GiB on device(0,TPU_DEVICE,coords=[0,0,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:01 - INFO - [absl] Using 34.3 GiB on device(1,TPU_DEVICE,coords=[1,0,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:01 - INFO - [absl] Using 34.3 GiB on device(2,TPU_DEVICE,coords=[2,0,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:01 - INFO - [absl] Using 34.3 GiB on device(3,TPU_DEVICE,coords=[3,0,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:01 - INFO - [absl] Using 34.3 GiB on device(4,TPU_DEVICE,coords=[0,1,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:01 - INFO - [absl] Using 34.3 GiB on device(5,TPU_DEVICE,coords=[1,1,0,0],logical_task=0,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:01 - INFO - [absl] Using 34.3 GiB on device(6,TPU_DEVICE,coords=[2,1,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:01 - INFO - [absl] Using 34.3 GiB on device(7,TPU_DEVICE,coords=[3,1,0,0],logical_task=1,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:01 - INFO - [absl] Using 34.3 GiB on device(8,TPU_DEVICE,coords=[0,2,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:01 - INFO - [absl] Using 34.3 GiB on device(9,TPU_DEVICE,coords=[1,2,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:01 - INFO - [absl] Using 34.3 GiB on device(10,TPU_DEVICE,coords=[2,2,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:01 - INFO - [absl] Using 34.3 GiB on device(11,TPU_DEVICE,coords=[3,2,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:01 - INFO - [absl] Using 34.3 GiB on device(12,TPU_DEVICE,coords=[0,3,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:01 - INFO - [absl] Using 34.3 GiB on device(13,TPU_DEVICE,coords=[1,3,0,0],logical_task=2,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:01 - INFO - [absl] Using 34.3 GiB on device(14,TPU_DEVICE,coords=[2,3,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:01 - INFO - [absl] Using 34.3 GiB on device(15,TPU_DEVICE,coords=[3,3,0,0],logical_task=3,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:01 - INFO - [absl] Using 34.3 GiB on device(16,TPU_DEVICE,coords=[0,0,1,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:01 - INFO - [absl] Using 34.3 GiB on device(17,TPU_DEVICE,coords=[1,0,1,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:01 - INFO - [absl] Using 34.3 GiB on device(18,TPU_DEVICE,coords=[2,0,1,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:01 - INFO - [absl] Using 34.3 GiB on device(19,TPU_DEVICE,coords=[3,0,1,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:01 - INFO - [absl] Using 34.3 GiB on device(20,TPU_DEVICE,coords=[0,1,1,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:01 - INFO - [absl] Using 34.3 GiB on device(21,TPU_DEVICE,coords=[1,1,1,0],logical_task=4,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:01 - INFO - [absl] Using 34.3 GiB on device(22,TPU_DEVICE,coords=[2,1,1,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:01 - INFO - [absl] Using 34.3 GiB on device(23,TPU_DEVICE,coords=[3,1,1,0],logical_task=5,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:01 - INFO - [absl] Using 34.3 GiB on device(24,TPU_DEVICE,coords=[0,2,1,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:01 - INFO - [absl] Using 34.3 GiB on device(25,TPU_DEVICE,coords=[1,2,1,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:01 - INFO - [absl] Using 34.3 GiB on device(26,TPU_DEVICE,coords=[2,2,1,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:01 - INFO - [absl] Using 34.3 GiB on device(27,TPU_DEVICE,coords=[3,2,1,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:01 - INFO - [absl] Using 34.3 GiB on device(28,TPU_DEVICE,coords=[0,3,1,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:01 - INFO - [absl] Using 34.3 GiB on device(29,TPU_DEVICE,coords=[1,3,1,0],logical_task=6,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:01 - INFO - [absl] Using 34.3 GiB on device(30,TPU_DEVICE,coords=[2,3,1,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:01 - INFO - [absl] Using 34.3 GiB on device(31,TPU_DEVICE,coords=[3,3,1,0],logical_task=7,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:01 - INFO - [absl] Using 34.3 GiB on device(32,TPU_DEVICE,coords=[0,0,2,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:01 - INFO - [absl] Using 34.3 GiB on device(33,TPU_DEVICE,coords=[1,0,2,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:01 - INFO - [absl] Using 34.3 GiB on device(34,TPU_DEVICE,coords=[2,0,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:01 - INFO - [absl] Using 34.3 GiB on device(35,TPU_DEVICE,coords=[3,0,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:01 - INFO - [absl] Using 34.3 GiB on device(36,TPU_DEVICE,coords=[0,1,2,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:01 - INFO - [absl] Using 34.3 GiB on device(37,TPU_DEVICE,coords=[1,1,2,0],logical_task=8,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:01 - INFO - [absl] Using 34.3 GiB on device(38,TPU_DEVICE,coords=[2,1,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:01 - INFO - [absl] Using 34.3 GiB on device(39,TPU_DEVICE,coords=[3,1,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:01 - INFO - [absl] Using 34.3 GiB on device(40,TPU_DEVICE,coords=[0,2,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:01 - INFO - [absl] Using 34.3 GiB on device(41,TPU_DEVICE,coords=[1,2,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:01 - INFO - [absl] Using 34.3 GiB on device(42,TPU_DEVICE,coords=[2,2,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:01 - INFO - [absl] Using 34.3 GiB on device(43,TPU_DEVICE,coords=[3,2,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:01 - INFO - [absl] Using 34.3 GiB on device(44,TPU_DEVICE,coords=[0,3,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:01 - INFO - [absl] Using 34.3 GiB on device(45,TPU_DEVICE,coords=[1,3,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:01 - INFO - [absl] Using 34.3 GiB on device(46,TPU_DEVICE,coords=[2,3,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:01 - INFO - [absl] Using 34.3 GiB on device(47,TPU_DEVICE,coords=[3,3,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:01 - INFO - [absl] Using 34.3 GiB on device(48,TPU_DEVICE,coords=[0,0,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:01 - INFO - [absl] Using 34.3 GiB on device(49,TPU_DEVICE,coords=[1,0,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:01 - INFO - [absl] Using 34.3 GiB on device(50,TPU_DEVICE,coords=[2,0,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:01 - INFO - [absl] Using 34.3 GiB on device(51,TPU_DEVICE,coords=[3,0,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:01 - INFO - [absl] Using 34.3 GiB on device(52,TPU_DEVICE,coords=[0,1,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:01 - INFO - [absl] Using 34.3 GiB on device(53,TPU_DEVICE,coords=[1,1,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:01 - INFO - [absl] Using 34.3 GiB on device(54,TPU_DEVICE,coords=[2,1,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:01 - INFO - [absl] Using 34.3 GiB on device(55,TPU_DEVICE,coords=[3,1,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:01 - INFO - [absl] Using 34.3 GiB on device(56,TPU_DEVICE,coords=[0,2,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:01 - INFO - [absl] Using 34.3 GiB on device(57,TPU_DEVICE,coords=[1,2,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:01 - INFO - [absl] Using 34.3 GiB on device(58,TPU_DEVICE,coords=[2,2,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:01 - INFO - [absl] Using 34.3 GiB on device(59,TPU_DEVICE,coords=[3,2,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:01 - INFO - [absl] Using 34.3 GiB on device(60,TPU_DEVICE,coords=[0,3,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:01 - INFO - [absl] Using 34.3 GiB on device(61,TPU_DEVICE,coords=[1,3,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:01 - INFO - [absl] Using 34.3 GiB on device(62,TPU_DEVICE,coords=[2,3,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3)
+2026-08-21 10:04:01 - INFO - [absl] Using 34.3 GiB on device(63,TPU_DEVICE,coords=[3,3,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3)
+INFO 08-21 10:04:01 [block_pool.py:768] Successfully reset prefix cache
+INFO 08-21 10:04:01 [block_pool.py:768] Successfully reset prefix cache
+INFO 08-21 10:04:01 [block_pool.py:768] Successfully reset prefix cache
+INFO 08-21 10:04:01 [block_pool.py:768] Successfully reset prefix cache
+INFO 08-21 10:04:01 [block_pool.py:768] Successfully reset prefix cache
+INFO 08-21 10:04:01 [block_pool.py:768] Successfully reset prefix cache
+INFO 08-21 10:04:01 [block_pool.py:768] Successfully reset prefix cache
+INFO 08-21 10:04:01 [block_pool.py:768] Successfully reset prefix cache
+INFO 08-21 10:04:02 [kv_cache_manager.py:1026] Deleting kv-cache | num_layers=36 | hbm_before=[(34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0)]Gb
+INFO 08-21 10:04:03 [kv_cache_manager.py:1038] KV cache delete complete | hbm_after=[(23.91, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0)]Gb
+2026-08-21 10:04:03 - INFO - [absl] Reshard finished in 0.03s
+INFO 08-21 10:04:04 [kv_cache_manager.py:1060] Reinitializing kv-cache | hbm_before=[(23.91, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0), (23.9, 95.0)]Gb
+INFO 08-21 10:04:05 [kv_cache_manager.py:976] Hybrid KV cache layout: num_kv_cache_groups=1, num_kv_cache_tensors=36, kv_cache_config.num_blocks=301625, duplicate_shared_layers=False
+INFO 08-21 10:04:06 [kv_cache_manager.py:1004] Init kv-cache | num_total_layers=36 | num_blocks=[301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624] | regular_attn_layers=36 | regular_attn_shape=(num_blocks, (16, 8, 2, 128)) | regular_attn_sharding=NamedSharding(mesh=Mesh('data': 8, 'attn_dp': 1, 'attn_dp_expert': 1, 'expert': 1, 'model': 8, 'dcp': 1, axis_types=(Auto, Auto, Auto, Auto, Auto, Auto)), spec=P(('data', 'attn_dp', 'attn_dp_expert'), 'dcp', ('model', 'expert')), memory_kind=device) | regular_attn_dtype=bfloat16 | hbm=[(34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0), (34.26, 95.0)]Gb
+[P57.STOCK_FAST] ROLLOUT_SYNC_PASS step=0 transport=update_params exact_weight_attestation=unavailable-by-design
+[CANON_P33_EVAL] DISABLED workload=frozenlake
+2026-08-21 10:04:06 - INFO - [absl] Starting run_producers_from_stream with 256 concurrency
+WARNING 08-21 10:04:06 [model.py:1528] Default vLLM sampling parameters have been overridden by the model's `generation_config.json`: `{'temperature': 0.6, 'top_k': 20, 'top_p': 0.95}`. If this is not intended, please relaunch vLLM instance with `--generation-config vllm`.
+2026-08-21 10:04:06 - INFO - [absl] [VLLM.LOGPROB_REQUEST] return_logprobs=1 sampled=1 prompt=None host_extraction=enabled
+WARNING 08-21 10:04:06 [input_processor.py:282] Passing raw prompts to InputProcessor is deprecated and will be removed in v0.18. You should instead pass the outputs of Renderer.render_cmpl() or Renderer.render_chat().
+WARNING 08-21 10:04:06 [dp_scheduler.py:580] Long wait time (0.01s) for rank 5/8 response to 'get_min_remaining_output' command at step 0 (pipe_wait=0.01s, deserialize=0.0000s, gc_re_enable=0.0000s, 17 bytes).
+[PERF] stage=rollout_generate seconds=22.703 rows=1
+[PERF] stage=rollout_generate seconds=22.814 rows=1
+[PERF] stage=rollout_generate seconds=22.811 rows=1
+2026-08-21 10:04:29 - INFO - [absl] Logging item to /tmp/tunix-tb/frozenlake/trajectory_log_1787306640.csv
+[PERF] stage=rollout_generate seconds=22.964 rows=1
+[PERF] stage=rollout_generate seconds=22.943 rows=1
+[PERF] stage=rollout_generate seconds=23.120 rows=1
+[PERF] stage=rollout_generate seconds=23.080 rows=1
+[PERF] stage=rollout_generate seconds=23.097 rows=1
+[PERF] stage=rollout_generate seconds=23.884 rows=1
+[PERF] stage=rollout_generate seconds=23.905 rows=1
+[PERF] stage=rollout_generate seconds=24.172 rows=1
+[PERF] stage=rollout_generate seconds=24.262 rows=1
+[PERF] stage=rollout_generate seconds=24.449 rows=1
+[PERF] stage=rollout_generate seconds=24.415 rows=1
+[PERF] stage=rollout_generate seconds=24.483 rows=1[PERF] stage=rollout_generate seconds=24.398 rows=1
+
+[PERF] stage=rollout_generate seconds=24.505 rows=1
+[PERF] stage=rollout_generate seconds=24.502 rows=1
+[PERF] stage=rollout_generate seconds=24.746 rows=1
+[PERF] stage=rollout_generate seconds=24.989 rows=1
+WARNING 08-21 10:04:31 [dp_scheduler.py:580] Long wait time (0.02s) for rank 2/8 response to 'get_num_unfinished_requests' command at step 87 (pipe_wait=0.02s, deserialize=0.0000s, gc_re_enable=0.0000s, 5 bytes).
+[PERF] stage=rollout_generate seconds=24.995 rows=1[PERF] stage=rollout_generate seconds=24.468 rows=1
+
+[PERF] stage=rollout_generate seconds=25.030 rows=1
+[PERF] stage=rollout_generate seconds=24.476 rows=1
+[PERF] stage=rollout_generate seconds=25.080 rows=1
+[PERF] stage=rollout_generate seconds=24.569 rows=1
+[PERF] stage=rollout_generate seconds=25.325 rows=1
+[PERF] stage=rollout_generate seconds=25.318 rows=1
+[PERF] stage=rollout_generate seconds=25.401 rows=1
+[PERF] stage=rollout_generate seconds=25.427 rows=1
+[PERF] stage=rollout_generate seconds=25.446 rows=1
+[PERF] stage=rollout_generate seconds=24.663 rows=1
+[PERF] stage=rollout_generate seconds=25.447 rows=1
+[PERF] stage=rollout_generate seconds=25.473 rows=1
+[PERF] stage=rollout_generate seconds=25.303 rows=1
+[PERF] stage=rollout_generate seconds=25.675 rows=1
+[PERF] stage=rollout_generate seconds=24.887 rows=1
+[PERF] stage=rollout_generate seconds=25.296 rows=1[PERF] stage=rollout_generate seconds=25.647 rows=1
+
+[PERF] stage=rollout_generate seconds=25.358 rows=1
+[PERF] stage=rollout_generate seconds=25.823 rows=1
+[PERF] stage=rollout_generate seconds=25.134 rows=1[PERF] stage=rollout_generate seconds=24.988 rows=1
+
+[PERF] stage=rollout_generate seconds=25.820 rows=1
+[PERF] stage=rollout_generate seconds=25.654 rows=1
+[PERF] stage=rollout_generate seconds=25.856 rows=1[PERF] stage=rollout_generate seconds=25.795 rows=1
+
+[PERF] stage=rollout_generate seconds=26.006 rows=1
+[PERF] stage=rollout_generate seconds=25.602 rows=1
+[PERF] stage=rollout_generate seconds=25.150 rows=1
+[PERF] stage=rollout_generate seconds=25.523 rows=1[PERF] stage=rollout_generate seconds=26.057 rows=1
+[PERF] stage=rollout_generate seconds=25.266 rows=1
+
+[PERF] stage=rollout_generate seconds=25.749 rows=1
+[PERF] stage=rollout_generate seconds=25.572 rows=1
+[PERF] stage=rollout_generate seconds=26.089 rows=1
+[PERF] stage=rollout_generate seconds=25.291 rows=1
+INFO 08-21 10:04:32 [loggers.py:273] Engine 000: Avg prompt throughput: 21804.9 tokens/s, Avg generation throughput: 999.7 tokens/s, Running: 143 reqs, Waiting: 0 reqs, GPU KV cache usage: 3.4%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=26.034 rows=1
+[PERF] stage=rollout_generate seconds=25.707 rows=1
+[PERF] stage=rollout_generate seconds=25.748 rows=1
+[PERF] stage=rollout_generate seconds=25.735 rows=1
+[PERF] stage=rollout_generate seconds=24.930 rows=1
+[PERF] stage=rollout_generate seconds=26.104 rows=1
+[PERF] stage=rollout_generate seconds=25.648 rows=1
+[PERF] stage=rollout_generate seconds=25.784 rows=1
+[PERF] stage=rollout_generate seconds=25.516 rows=1
+[PERF] stage=rollout_generate seconds=26.177 rows=1
+[PERF] stage=rollout_generate seconds=25.804 rows=1
+[PERF] stage=rollout_generate seconds=25.904 rows=1
+[PERF] stage=rollout_generate seconds=25.949 rows=1[PERF] stage=rollout_generate seconds=25.771 rows=1
+[PERF] stage=rollout_generate seconds=24.991 rows=1
+
+[PERF] stage=rollout_generate seconds=26.511 rows=1
+[PERF] stage=rollout_generate seconds=25.940 rows=1
+[PERF] stage=rollout_generate seconds=25.716 rows=1
+[PERF] stage=rollout_generate seconds=25.712 rows=1
+[PERF] stage=rollout_generate seconds=25.741 rows=1
+[PERF] stage=rollout_generate seconds=26.109 rows=1
+[PERF] stage=rollout_generate seconds=25.749 rows=1
+[PERF] stage=rollout_generate seconds=25.149 rows=1
+[PERF] stage=rollout_generate seconds=25.792 rows=1
+[PERF] stage=rollout_generate seconds=26.786 rows=1
+[PERF] stage=rollout_generate seconds=24.654 rows=1
+[PERF] stage=rollout_generate seconds=24.966 rows=1
+2026-08-21 10:04:33 - INFO - [absl] Skipping forced final checkpoint; interval-only policy is active.
+2026-08-21 10:04:33 - INFO - [absl] [process=0][thread=MainThread][wait_until_finished] No Save Finalize thread to wait for. Returning.
+2026-08-21 10:04:33 - INFO - [absl] Closing _NonBlockingMetadataStore(enable_write=True, _write_lock=<locked _thread.RLock object owner=138833943143232 count=1 at 0x7e3b5c54fa00>, _store_impl=<orbax.checkpoint._src.metadata.checkpoint._MetadataStoreImpl object at 0x7e44393cb350>, _single_thread_executor=<concurrent.futures.thread.ThreadPoolExecutor object at 0x7e44393ca6c0>, _write_futures=[])
+2026-08-21 10:04:33 - INFO - [absl] Closing _NonBlockingMetadataStore(enable_write=True, _write_lock=<locked _thread.RLock object owner=138833943143232 count=1 at 0x7e3b5c54fa00>, _store_impl=<orbax.checkpoint._src.metadata.checkpoint._MetadataStoreImpl object at 0x7e44393cb350>, _single_thread_executor=<concurrent.futures.thread.ThreadPoolExecutor object at 0x7e44393ca6c0>, _write_futures=[])
+2026-08-21 10:04:33 - INFO - [absl] Closing _NonBlockingMetadataStore(enable_write=True, _write_lock=<locked _thread.RLock object owner=138833943143232 count=1 at 0x7e3b5c54fa00>, _store_impl=<orbax.checkpoint._src.metadata.checkpoint._MetadataStoreImpl object at 0x7e44393cb350>, _single_thread_executor=<concurrent.futures.thread.ThreadPoolExecutor object at 0x7e44393ca6c0>, _write_futures=[])
+[PERF] stage=rollout_generate seconds=26.136 rows=1
+[PERF] stage=rollout_generate seconds=26.013 rows=1
+[PERF] stage=rollout_generate seconds=25.284 rows=1
+[PERF] stage=rollout_generate seconds=26.044 rows=1
+[PERF] stage=rollout_generate seconds=26.645 rows=1
+[PERF] stage=rollout_generate seconds=26.256 rows=1
+[PERF] stage=rollout_generate seconds=23.508 rows=1[PERF] stage=rollout_generate seconds=26.263 rows=1
+
+[PERF] stage=rollout_generate seconds=23.555 rows=1
+[PERF] stage=rollout_generate seconds=25.159 rows=1
+wandb: updating run metadata
+[PERF] stage=rollout_generate seconds=24.628 rows=1
+[PERF] stage=rollout_generate seconds=25.063 rows=1
+[PERF] stage=rollout_generate seconds=24.603 rows=1
+[PERF] stage=rollout_generate seconds=26.119 rows=1
+[PERF] stage=rollout_generate seconds=23.531 rows=1
+[PERF] stage=rollout_generate seconds=26.104 rows=1
+[PERF] stage=rollout_generate seconds=26.948 rows=1
+[PERF] stage=rollout_generate seconds=27.017 rows=1
+[PERF] stage=rollout_generate seconds=26.539 rows=1
+[PERF] stage=rollout_generate seconds=26.964 rows=1
+[PERF] stage=rollout_generate seconds=26.889 rows=1
+[PERF] stage=rollout_generate seconds=25.770 rows=1
+[PERF] stage=rollout_generate seconds=27.169 rows=1
+[PERF] stage=rollout_generate seconds=23.405 rows=1
+[PERF] stage=rollout_generate seconds=24.470 rows=1
+[PERF] stage=rollout_generate seconds=25.488 rows=1
+[PERF] stage=rollout_generate seconds=25.878 rows=1
+[PERF] stage=rollout_generate seconds=26.964 rows=1
+[PERF] stage=rollout_generate seconds=26.493 rows=1
+[PERF] stage=rollout_generate seconds=23.671 rows=1
+[PERF] stage=rollout_generate seconds=25.634 rows=1
+[PERF] stage=rollout_generate seconds=25.960 rows=1
+[PERF] stage=rollout_generate seconds=23.665 rows=1
+[PERF] stage=rollout_generate seconds=25.637 rows=1
+[PERF] stage=rollout_generate seconds=26.985 rows=1
+[PERF] stage=rollout_generate seconds=26.807 rows=1
+wandb: uploading config.yaml; uploading output.log; uploading wandb-summary.json
+[PERF] stage=rollout_generate seconds=25.817 rows=1
+[PERF] stage=rollout_generate seconds=26.538 rows=1
+[PERF] stage=rollout_generate seconds=26.782 rows=1[PERF] stage=rollout_generate seconds=24.698 rows=1
+
+[PERF] stage=rollout_generate seconds=26.456 rows=1
+[PERF] stage=rollout_generate seconds=25.498 rows=1
+[PERF] stage=rollout_generate seconds=22.959 rows=1
+[PERF] stage=rollout_generate seconds=24.693 rows=1
+[PERF] stage=rollout_generate seconds=26.925 rows=1
+[PERF] stage=rollout_generate seconds=25.531 rows=1
+[PERF] stage=rollout_generate seconds=22.979 rows=1
+[PERF] stage=rollout_generate seconds=23.591 rows=1
+[PERF] stage=rollout_generate seconds=25.997 rows=1
+[PERF] stage=rollout_generate seconds=23.122 rows=1
+[PERF] stage=rollout_generate seconds=25.396 rows=1
+[PERF] stage=rollout_generate seconds=25.539 rows=1[PERF] stage=rollout_generate seconds=25.698 rows=1
+
+[PERF] stage=rollout_generate seconds=24.308 rows=1
+[PERF] stage=rollout_generate seconds=27.270 rows=1
+[PERF] stage=rollout_generate seconds=23.408 rows=1
+[PERF] stage=rollout_generate seconds=27.325 rows=1[PERF] stage=rollout_generate seconds=23.429 rows=1
+
+[PERF] stage=rollout_generate seconds=23.591 rows=1
+[PERF] stage=rollout_generate seconds=25.230 rows=1
+[PERF] stage=rollout_generate seconds=25.446 rows=1
+[PERF] stage=rollout_generate seconds=25.992 rows=1
+[PERF] stage=rollout_generate seconds=27.458 rows=1
+[PERF] stage=rollout_generate seconds=26.967 rows=1
+[PERF] stage=rollout_generate seconds=24.022 rows=1
+[PERF] stage=rollout_generate seconds=26.952 rows=1
+[PERF] stage=rollout_generate seconds=23.912 rows=1
+[PERF] stage=rollout_generate seconds=24.571 rows=1
+[PERF] stage=rollout_generate seconds=25.010 rows=1
+[PERF] stage=rollout_generate seconds=24.654 rows=1
+[PERF] stage=rollout_generate seconds=25.737 rows=1
+[PERF] stage=rollout_generate seconds=23.601 rows=1
+wandb: uploading config.yaml; uploading wandb-summary.json
+[PERF] stage=rollout_generate seconds=25.773 rows=1
+[PERF] stage=rollout_generate seconds=24.653 rows=1
+[PERF] stage=rollout_generate seconds=24.616 rows=1
+[PERF] stage=rollout_generate seconds=24.891 rows=1
+[PERF] stage=rollout_generate seconds=25.954 rows=1
+[PERF] stage=rollout_generate seconds=25.143 rows=1
+[PERF] stage=rollout_generate seconds=24.573 rows=1
+[PERF] stage=rollout_generate seconds=24.320 rows=1[PERF] stage=rollout_generate seconds=25.416 rows=1
+
+[PERF] stage=rollout_generate seconds=27.554 rows=1
+[PERF] stage=rollout_generate seconds=24.027 rows=1
+[PERF] stage=rollout_generate seconds=24.106 rows=1
+[PERF] stage=rollout_generate seconds=23.881 rows=1
+[PERF] stage=rollout_generate seconds=26.133 rows=1
+[PERF] stage=rollout_generate seconds=23.811 rows=1
+[PERF] stage=rollout_generate seconds=26.999 rows=1
+[PERF] stage=rollout_generate seconds=27.257 rows=1
+[PERF] stage=rollout_generate seconds=25.488 rows=1
+wandb: 🚀 View run canon-p57-fl-ev-mism-m15-e0-86112838 at: https://wandb.ai/yuxzhang-google/zero-tim-p57-frozenlake-tim/runs/n6n62zxh
+wandb: ⭐️ View project at: https://wandb.ai/yuxzhang-google/zero-tim-p57-frozenlake-tim
+wandb: Synced 5 W&B file(s), 0 media file(s), 0 artifact file(s) and 0 other file(s)
+wandb: Find logs at: ./wandb/run-20260821_095842-n6n62zxh/logs
+[CANON_P31_METRICS] monotonic_direct last_step=None events=0 regressions=0
+[rank0]: Traceback (most recent call last):
+[rank0]:   File "<frozen runpy>", line 198, in _run_module_as_main
+[rank0]:   File "<frozen runpy>", line 88, in _run_code
+[rank0]:   File "/app/examples/frozenlake/train_frozenlake_qwen3.py", line 1722, in <module>
+[rank0]:     evaluation = grpo_trainer.evaluate_only(
+[rank0]:                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 2117, in evaluate_only
+[rank0]:     batches = asyncio.run_coroutine_threadsafe(_run(), self.loop).result()
+[rank0]:               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/usr/local/lib/python3.12/concurrent/futures/_base.py", line 456, in result
+[rank0]:     return self.__get_result()
+[rank0]:            ^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/usr/local/lib/python3.12/concurrent/futures/_base.py", line 401, in __get_result
+[rank0]:     raise self._exception
+[rank0]:   File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 2113, in _run
+[rank0]:     self._batch_to_train_example(batch, rl_cluster_lib.Mode.EVAL)
+[rank0]:   File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 1976, in _batch_to_train_example
+[rank0]:     return self._process_results(
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/rl/agentic/agentic_grpo_learner.py", line 597, in _process_results
+[rank0]:     trainer_per_token_logps = self.rl_cluster.get_actor_per_token_logps(
+[rank0]:                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/rl/rl_cluster.py", line 1335, in get_actor_per_token_logps
+[rank0]:     common.compute_per_token_logps(
+[rank0]:   File "/app/tunix/rl/common.py", line 455, in compute_per_token_logps
+[rank0]:     outputs, _ = model(input_tokens, **model_kwargs)
+[rank0]:                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/models/qwen3/model.py", line 1272, in __call__
+[rank0]:     layer_cache, x = layer(
+[rank0]:                      ^^^^^^
+[rank0]:   File "/app/tunix/models/qwen3/model.py", line 1169, in __call__
+[rank0]:     return jax.checkpoint(_checkpointed_block)(
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/models/qwen3/model.py", line 1167, in _checkpointed_block
+[rank0]:     return module.block(*args, **kwargs)
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/models/qwen3/model.py", line 1137, in block
+[rank0]:     cache, attn_output = self.attn(
+[rank0]:                          ^^^^^^^^^^
+[rank0]:   File "/app/tunix/models/qwen3/model.py", line 708, in __call__
+[rank0]:     return self.block(x, segment_pos, cache, attn_mask, segment_ids=segment_ids)
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/models/qwen3/model.py", line 632, in block
+[rank0]:     qkv = sharded_splash_attn(
+[rank0]:           ^^^^^^^^^^^^^^^^^^^^
+[rank0]: ValueError: shard_map applied to the function 'sharded_splash_attn' was given argument arrays with axis sizes that are not evenly divisible by the corresponding mesh axis sizes:
+
+[rank0]: The mesh given has shape (8, 8) with corresponding axis names ('dp', 'tp').
+
+[rank0]: * the passed args[1] of shape bfloat16[2,32,12288,128], where args[1] is bound to sharded_splash_attn's parameter 'q_block', corresponds to in_specs[1] of value P('dp', 'tp', None, None), which maps array axis 0 (of size 2) to mesh axis 'dp' (of size 8), but 8 does not evenly divide 2
+
+[rank0]: * the passed args[2] of shape bfloat16[2,8,12288,128], where args[2] is bound to sharded_splash_attn's parameter 'k_block', corresponds to in_specs[2] of value P('dp', 'tp', None, None), which maps array axis 0 (of size 2) to mesh axis 'dp' (of size 8), but 8 does not evenly divide 2
+
+[rank0]: * the passed args[3] of shape bfloat16[2,8,12288,128], where args[3] is bound to sharded_splash_attn's parameter 'v_block', corresponds to in_specs[3] of value P('dp', 'tp', None, None), which maps array axis 0 (of size 2) to mesh axis 'dp' (of size 8), but 8 does not evenly divide 2
+
+[rank0]: * the passed args[4] of shape int32[2,12288], where args[4] is bound to sharded_splash_attn's parameter 'q_seg_block', corresponds to in_specs[4] of value P('dp', None), which maps array axis 0 (of size 2) to mesh axis 'dp' (of size 8), but 8 does not evenly divide 2
+
+[rank0]: * the passed args[5] of shape int32[2,12288], where args[5] is bound to sharded_splash_attn's parameter 'kv_seg_block', corresponds to in_specs[5] of value P('dp', None), which maps array axis 0 (of size 2) to mesh axis 'dp' (of size 8), but 8 does not evenly divide 2
+
+[rank0]: Array arguments' axis sizes must be evenly divisible by the mesh axis or axes indicated by the corresponding elements of the argument's in_specs entry. Consider checking that in_specs are correct, and if so consider changing the mesh axis sizes or else padding the input and adapting 'sharded_splash_attn' appropriately.
+[rank0]: --------------------
+[rank0]: For simplicity, JAX has removed its internal frames from the traceback of the following exception. Set JAX_TRACEBACK_FILTERING=off to include these.
+[PERF] stage=rollout_generate seconds=25.784 rows=1
+[PERF] stage=rollout_generate seconds=27.690 rows=1
+[PERF] stage=rollout_generate seconds=25.825 rows=1
+[PERF] stage=rollout_generate seconds=25.227 rows=1
+[PERF] stage=rollout_generate seconds=24.451 rows=1
+[PERF] stage=rollout_generate seconds=24.956 rows=1
+[PERF] stage=rollout_generate seconds=25.079 rows=1
+[PERF] stage=rollout_generate seconds=24.852 rows=1
+[PERF] stage=rollout_generate seconds=26.031 rows=1
+[PERF] stage=rollout_generate seconds=26.278 rows=1
+[PERF] stage=rollout_generate seconds=25.489 rows=1
+[PERF] stage=rollout_generate seconds=25.417 rows=1
+[PERF] stage=rollout_generate seconds=26.520 rows=1
+[PERF] stage=rollout_generate seconds=25.134 rows=1
+INFO 08-21 10:04:35 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 2155.5 tokens/s, Running: 11 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.3%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=25.099 rows=1
+[PERF] stage=rollout_generate seconds=24.805 rows=1
+[PERF] stage=rollout_generate seconds=25.775 rows=1
+[PERF] stage=rollout_generate seconds=27.104 rows=1
+[PERF] stage=rollout_generate seconds=24.546 rows=1
+[PERF] stage=rollout_generate seconds=24.615 rows=1
+[PERF] stage=rollout_generate seconds=26.385 rows=1
+[PERF] stage=rollout_generate seconds=24.966 rows=1
+[PERF] stage=rollout_generate seconds=24.830 rows=1
+[PERF] stage=rollout_generate seconds=24.801 rows=1
+[PERF] stage=rollout_generate seconds=27.015 rows=1
+[PERF] stage=rollout_generate seconds=28.288 rows=1
+2026-08-21 10:04:37 - INFO - [absl] Stopping trajectory logging thread...
+2026-08-21 10:04:37 - INFO - [absl] Stopped trajectory logging thread.
+INFO 08-21 10:04:37 [dp_scheduler.py:314] Rank 1: Shutting down
+INFO 08-21 10:04:37 [dp_scheduler.py:314] Rank 2: Shutting down
+INFO 08-21 10:04:37 [dp_scheduler.py:314] Rank 3: Shutting down
+INFO 08-21 10:04:37 [dp_scheduler.py:314] Rank 4: Shutting down
+INFO 08-21 10:04:37 [dp_scheduler.py:314] Rank 6: Shutting down
+INFO 08-21 10:04:37 [dp_scheduler.py:314] Rank 5: Shutting down
+INFO 08-21 10:04:37 [dp_scheduler.py:314] Rank 0: Shutting down
+INFO 08-21 10:04:37 [dp_scheduler.py:314] Rank 7: Shutting down
+Exception ignored in: <finalize object at 0x7e40647063c0; dead>
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.12/weakref.py", line 590, in __call__
+    return info.func(*info.args, **(info.kwargs or {}))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/vllm/v1/engine/llm_engine.py", line 441, in _cleanup_instance_caches
+    for module in model.modules():
+                  ^^^^^^^^^^^^^
+AttributeError: 'Qwen3ForCausalLM' object has no attribute 'modules'
