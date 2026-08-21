@@ -185,9 +185,10 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       return []
 
     async def _poll_worker(worker: remote_execution.ActorHandle) -> Any:
-      return await self._invoke_worker(
-          worker, "poll_responses", timeout_s=timeout_s
-      )
+      res = worker.poll_responses(timeout_s=timeout_s)
+      if inspect.isawaitable(res):
+        return await res
+      return res
 
     tasks = [_poll_worker(w) for w in self._rollout_workers]
     responses = await asyncio.gather(*tasks, return_exceptions=True)

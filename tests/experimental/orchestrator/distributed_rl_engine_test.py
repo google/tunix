@@ -160,6 +160,12 @@ class DistributedRLEngineTest(absltest.TestCase):
       )
       self.mock_rollout_1.poll_responses.return_value = [resp1]
       self.mock_rollout_2.poll_responses.return_value = []
+      self.mock_rollout_1.asubmit = mock.AsyncMock(
+          side_effect=AssertionError("polling must use ActorHandle.poll_responses")
+      )
+      self.mock_rollout_2.asubmit = mock.AsyncMock(
+          side_effect=AssertionError("polling must use ActorHandle.poll_responses")
+      )
 
       results = await self.engine.poll_rollouts(timeout_s=0.1)
       self.assertEqual(len(results), 1)
@@ -167,6 +173,8 @@ class DistributedRLEngineTest(absltest.TestCase):
 
       self.mock_rollout_1.poll_responses.assert_called_once_with(timeout_s=0.1)
       self.mock_rollout_2.poll_responses.assert_called_once_with(timeout_s=0.1)
+      self.mock_rollout_1.asubmit.assert_not_called()
+      self.mock_rollout_2.asubmit.assert_not_called()
 
     asyncio.run(_run())
 
