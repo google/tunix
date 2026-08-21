@@ -62,11 +62,13 @@ and zero cap hits.
 The stock/mismatch training and optional evaluation paths are fail-closed: the
 profile and entrypoint skip the canonical overlay, validators require the
 rollout/trainer numerical treatment bundle off, and runtime postflight requires
-zero canonical markers. Training has one observer-only exception:
-processed-B is enabled for the explicit post-rollout prefill rescore so A and B
-share temperature-0.7 semantics. It is dormant during sampling, does not supply
-`old_per_token_logps`, and is not a gradient input. Calibration/evaluation keep
-it off with their alignment observer. M15 is rebuilt from immutable base
+zero canonical markers. Training has one observer-only exception. After all
+six stock engine files are verified, a signed two-file delta changes only the
+runner's explicit prompt-logprob branch and adds its helper. Processed-B then
+applies temperature 0.7 and gathers target IDs from absolute request history,
+not a roll over the DP-packed input. This branch is dormant during rollout A,
+does not supply `old_per_token_logps`, and is not a gradient input.
+Calibration/evaluation keep the stock runner byte-identical. M15 is rebuilt from immutable base
 weights on its disjoint `selection` maps and trained for 200 signed updates.
 There is no train-20 screen. By user decision on 2026-08-21, P57.1 runs one
 uninterrupted stock/mismatch JobSet from update 0 through 200. It does not run
@@ -87,6 +89,18 @@ completed one real 256-trajectory rollout but stopped before backward/update 0
 because the observer required processed `S_prefill` while the profile forced
 the engine interface off. The repair admits processed-B only for stock
 training observation; it does not resume or reuse attempt 1.
+
+Direct-training attempt `p57_stock_full_att2` is `INCONCLUSIVE` as well. Source
+`c5cc71b5...` passed the repaired admission, completed 256 trajectories, and
+spent 27.114 seconds in a real B rescore. Before backward/update 0, target token
+304 was absent from the returned dictionary, whose only key was 5795. The
+committed 2,715-line log is SHA-256
+`f49f35f4243cbe98af6b12f9632b88224c530f415be1386c6f360604da0cb749`;
+there is no complete terminal package or checkpoint. Pinned-image inspection
+showed two coupled causes: stock prompt scoring uses
+`roll(input_ids, -1)` across the packed buffer, and it always scores raw prompt
+logits even when decode reports processed logprobs. The current observer delta
+fixes both without enabling fixed-M or any canonical training kernel.
 
 The physical envelope is prompt 4,096 plus response 8,192. Training uses
 DP8xTP8, resident optimizer state, batch 32, eight generations, trajectory

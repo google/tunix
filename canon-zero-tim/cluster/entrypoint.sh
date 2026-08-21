@@ -118,7 +118,13 @@ elif p57_is_stock_fast_runtime; then
   step 35_install_r2egym.sh
   step 37_install_stock_runtime.sh
   step 38_verify_stock_engine.sh
-  log "P57_STOCK_FAST_PATH run_kind=$CANON_P57_RUN_KIND regime=stock-fast source=$CANON_EXPECT_COMMIT canonical_overlay=skipped"
+  p57_observer_overlay=absent
+  if p57_is_stock_fast_training; then
+    step 39_install_p57_stock_observer.sh
+    p57_observer_overlay=installed
+  fi
+  log "P57_STOCK_FAST_PATH run_kind=$CANON_P57_RUN_KIND regime=stock-fast source=$CANON_EXPECT_COMMIT canonical_overlay=skipped observer_overlay=$p57_observer_overlay"
+  unset p57_observer_overlay
 else
   step 30_install_canon.sh
   step 35_install_r2egym.sh

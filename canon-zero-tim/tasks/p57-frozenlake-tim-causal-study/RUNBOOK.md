@@ -35,14 +35,17 @@ provenance fail.
 `stock-fast` removes the rollout/trainer numerical zero-TIM treatment, not only
 fixed lm-head. Twelve presence-sensitive switches are absent; canonical
 attention, fixed-shape logprob, trainer, reducer, and VJP gates are zero; the
-excess-precision XLA pin is absent; and the entrypoint leaves engine files equal
-to pinned-image bytes. Training retains non-treatment services plus the finite
-warning-only observer. That observer alone sets
+excess-precision XLA pin is absent. The entrypoint first verifies all six engine
+files equal the pinned-image bytes. For mismatch training only, it then applies
+a signed two-file observer delta to `runner/tpu_runner.py` plus one helper.
+Calibration/evaluation leave all six files unchanged. Training retains
+non-treatment services plus the finite warning-only observer. That observer sets
 `CANON_PROMPT_PROCESSED_LOGPROBS=1` so its temperature-0.7 prefill rescore has
-the same semantic transform as decode. Sampling does not request prompt
-logprobs, and the learner continues to use `S_decode`—not this observer
-`S_prefill`—as `old_per_token_logps`. Calibration/evaluation keep the switch at
-zero because their alignment observer is off.
+the same semantic transform as decode and gathers each target from absolute
+request history instead of rolling a DP-packed buffer. Sampling does not
+request prompt logprobs, and the learner continues to use `S_decode`—not this
+observer `S_prefill`—as `old_per_token_logps`. Calibration/evaluation keep the
+switch at zero because their alignment observer is off.
 
 ## Local gates
 
@@ -54,6 +57,7 @@ git diff --check
 ~~~
 
 Require `P57_FROZENLAKE_TIM_CPU_PASS` and
+`P57_STOCK_OBSERVER_EXACT_IMAGE_PASS targets=absolute values=processed` plus
 `P45_EXACT_IMAGE_CPU_PASS overlay=qwen8b_tp8`. These do not authorize launch.
 
 ## Common immutable variables
@@ -84,7 +88,11 @@ Require one manifest, `--max_steps=200`, prompt/response `4096/8192`, and
 `CANON_P57_STOP_AFTER_STEP=200`. The command must not contain
 `--evaluation_only`. The resolved preflight must include
 `observer=train processed_b=on`; a train environment with processed-B zero is
-invalid. After explicit launch approval:
+invalid. Startup must also emit
+`[P57.STOCK_OBSERVER] OVERLAY_PASS files=2 stock_runner_verified=1 treatment=observer-only`.
+The first B call must emit exactly one
+`[P57.STOCK_OBSERVER] PROCESSED_PROMPT_LOGPROBS_PASS ... targets=absolute-request-history treatment=observer-only`.
+After explicit launch approval:
 
 ~~~bash
 kubectl apply -f "$OUT/jobset-p57-frozenlake-mismatch-m15-selection-200.yaml"

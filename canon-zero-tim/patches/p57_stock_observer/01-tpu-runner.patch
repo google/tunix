@@ -1,0 +1,50 @@
+--- tpu_runner.py
++++ tpu_runner.py
+@@ -14,2 +14,3 @@
+ import functools
++import os
+ import logging
+@@ -73,6 +74,8 @@
+ from tpu_inference.models.jax.utils.weight_utils import (
+     shard_put, transfer_state_with_mappings)
+ from tpu_inference.runner import utils as runner_utils
++from tpu_inference.runner.p57_stock_prompt_observer import \
++    compute_processed_prompt_logprobs
+ from tpu_inference.runner.compilation_manager import CompilationManager
+ from tpu_inference.runner.decode_loop import TpuSamplingState, continue_decode
+ from tpu_inference.runner.input_batch import CachedRequestState, InputBatch
+@@ -1805,10 +1808,24 @@
+-            prompt_logprobs_async = compute_prompt_logprobs(
+-                full_logits,
+-                input_ids,
+-                self.input_batch.num_prompt_logprobs,
+-                self.requests,
+-                scheduler_output,
+-                req_ids_dp,
+-                self.dp_size,
+-                max_logprobs=self.model_config.max_logprobs,
+-            )
++            if (os.environ.get("CANON_PROMPT_PROCESSED_LOGPROBS", "") == "1"
++                    and full_logits is not None
++                    and self.input_batch.num_prompt_logprobs):
++                prompt_logprobs_async = compute_processed_prompt_logprobs(
++                    mesh=self.mesh,
++                    full_logits=full_logits,
++                    input_batch=self.input_batch,
++                    requests=self.requests,
++                    scheduler_output=scheduler_output,
++                    req_ids_dp=req_ids_dp,
++                    dp_size=self.dp_size,
++                    max_logprobs=self.model_config.max_logprobs,
++                )
++            else:
++                prompt_logprobs_async = compute_prompt_logprobs(
++                    full_logits,
++                    input_ids,
++                    self.input_batch.num_prompt_logprobs,
++                    self.requests,
++                    scheduler_output,
++                    req_ids_dp,
++                    self.dp_size,
++                    max_logprobs=self.model_config.max_logprobs,
++                )

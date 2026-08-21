@@ -39,10 +39,13 @@ approval. Advancing a phase requires its exit gate and a decision entry in
   numerical switches absent. Calibration/evaluation keep every numerical and
   alignment gate zero; stock training keeps launch/checkpoint/telemetry and
   warning-only observation while its rollout/trainer treatment bundle remains
-  zero. Processed-B is the sole observer-only exception: it runs only for the
-  post-rollout `S_prefill` measurement and never supplies old logprobs or a
-  gradient input.
-- “Stock-fast” means the untreated serving numerical program. Shared
+  zero. Processed-B is the sole observer-only exception: mismatch training
+  installs a signed two-file runner/helper delta that is reached only by the
+  post-rollout `S_prefill` request. It applies temperature/top-k/top-p and uses
+  absolute request-history target IDs; it never supplies old logprobs or a
+  gradient input. Calibration/evaluation retain the byte-identical stock runner.
+- “Stock-fast” means the untreated rollout-A and trainer-C numerical programs.
+  It does not mean the B measurement is absent or knowingly mislabeled. Shared
   nonnumerical infrastructure remains equal: image, model/TP overlay, DP8xTP8,
   vLLM capacity, sampling, resident placement, and datasets.
 - P57.1 may inspect stock solve rates only. It may not launch, read, or use a
@@ -83,7 +86,9 @@ approval. Advancing a phase requires its exit gate and a decision entry in
 - Processed-B observation is shared instrumentation rather than treatment. It
   must be enabled in both training arms solely to compare A and B under the
   same temperature/top-k/top-p semantics; it is dormant during sampling and
-  is not consumed by the loss.
+  is not consumed by the loss. The mismatch arm uses the minimal observer
+  runner delta; the zero arm may reach the equivalent facility through its
+  canonical runner, but both must prove the same B semantics and target IDs.
 - This design estimates the system-bundle effect. It cannot attribute a result
   to lm-head, RoPE, attention, or any individual kernel.
 - Initial checkpoint, source/image/model digests, maps and order, topology,

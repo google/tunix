@@ -25,6 +25,7 @@ python3 -m py_compile \
   canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts/derive_calibration_provenance.py \
   canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts/verify_calibration_manifest.py \
   canon-zero-tim/cluster/steps/p57_probe_stock_engine.py \
+  canon-zero-tim/src/p57_stock_prompt_observer.py \
   examples/frozenlake/p57_workloads.py \
   examples/frozenlake/train_frozenlake_qwen3.py \
   tunix/rl/agentic/agentic_rl_learner.py \
@@ -35,6 +36,7 @@ bash -n \
   canon-zero-tim/cluster/entrypoint.sh \
   canon-zero-tim/cluster/steps/37_install_stock_runtime.sh \
   canon-zero-tim/cluster/steps/38_verify_stock_engine.sh \
+  canon-zero-tim/cluster/steps/39_install_p57_stock_observer.sh \
   canon-zero-tim/cluster/steps/p57_runtime_contract.sh \
   canon-zero-tim/cluster/steps/90_run.sh \
   canon-zero-tim/cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env \

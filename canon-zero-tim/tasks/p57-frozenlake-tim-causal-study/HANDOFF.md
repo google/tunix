@@ -71,8 +71,17 @@ and the training runtime admission. Before backward or update 0, the
 warning-only observer requested processed `S_prefill` while the stock profile
 still forced `CANON_PROMPT_PROCESSED_LOGPROBS=0`; the rollout API correctly
 refused to label raw prompt logprobs as processed. No checkpoint was written.
-Do not resume this attempt. The repair makes processed-B an observer-only
-training exception and retains zero for calibration/evaluation.
+Do not resume this attempt. The first repair made processed-B an observer-only
+training exception and retained zero for calibration/evaluation.
+
+`p57_stock_full_att2` is also `INCONCLUSIVE`. Source `c5cc71b5...` proved the
+first repair reached a real B call after 256 trajectories, then failed before
+backward/update 0 because sequence target 304 was missing from the returned
+prompt-logprob dictionary and key 5795 appeared instead. The pinned stock
+runner uses `roll(input_ids, -1)` across DP-packed rows and does not process
+prompt logits at temperature 0.7. The current repair first verifies all stock
+bytes, then installs a signed observer-only runner/helper delta for mismatch
+training B. It does not enable fixed-M or any canonical model/trainer kernel.
 
 ## Treatment identity
 
@@ -82,8 +91,9 @@ The stock arm is not merely `CANON_P38_FIXED_LM_HEAD=0`. It requires:
 - all 12 presence-sensitive canonical switches absent;
 - the rollout, trainer, backward, reducer, and optimizer numerical treatment
   bundle literal zero;
-- canonical install/overlay/verify skipped, leaving the engine equal to the
-  pinned-image stock bytes;
+- canonical install/overlay/verify skipped; calibration/evaluation leave the
+  engine equal to pinned-image stock bytes, while mismatch training verifies
+  those bytes and then installs only the two-file B-observer delta;
 - training admission, checkpointing, W&B, host telemetry, and the finite
   warning-only alignment observer enabled. Its processed-B interface is on
   only for post-rollout rescore; sampling and gradients do not request prompt
@@ -111,8 +121,10 @@ For the direct new 0→200 training run, require exactly one each:
 
 ~~~text
 [P57.STOCK_FAST] ZERO_TIM_OFF_PASS mode=train absent=12 observer=train processed_b=on
-[entrypoint] P57_STOCK_FAST_PATH run_kind=train regime=stock-fast ... canonical_overlay=skipped
+[P57.STOCK_OBSERVER] OVERLAY_PASS files=2 stock_runner_verified=1 treatment=observer-only
+[entrypoint] P57_STOCK_FAST_PATH run_kind=train regime=stock-fast ... canonical_overlay=skipped observer_overlay=installed
 [P57.STOCK] TRAIN_RUNTIME_PASS regime=stock-fast arm=mismatch canonical_bundle=off observer=warning-only processed_b=observer-only
+[P57.STOCK_OBSERVER] PROCESSED_PROMPT_LOGPROBS_PASS ... targets=absolute-request-history treatment=observer-only
 [P57.STOCK] SEGMENT_PREFLIGHT restored=0 stop_after=200 horizon=200 checkpoint_interval=10 max_to_keep=1
 [P57.STOCK] SEGMENT_COMPLETE step=200 durable_checkpoint=200 horizon=200 next_action=complete
 [P57.STOCK_FAST] RUNTIME_PATH_PASS canonical_markers=0 overlay=skipped
@@ -125,7 +137,7 @@ If the user later requests an optional stock eval-200, require:
 
 ~~~text
 [P57.STOCK_FAST] ZERO_TIM_OFF_PASS mode=eval absent=12 observer=off
-[entrypoint] P57_STOCK_FAST_PATH run_kind=eval regime=stock-fast ... canonical_overlay=skipped
+[entrypoint] P57_STOCK_FAST_PATH run_kind=eval regime=stock-fast ... canonical_overlay=skipped observer_overlay=absent
 [P57.STOCK_FAST] ROLLOUT_SYNC_PASS step=200 transport=update_params exact_weight_attestation=unavailable-by-design
 [CANON_P57_EVAL] COMPLETE arm=mismatch step=200 ... backward=0 optimizer_commits=0 checkpoint_writes=0
 [P57.STOCK_FAST] RUNTIME_PATH_PASS canonical_markers=0 overlay=skipped
@@ -134,7 +146,9 @@ If the user later requests an optional stock eval-200, require:
 The COMPLETE marker must report `prompts=100 generations=8 rewards=800`.
 Local admission is complete: P57 host tests pass `91/91`, and the pinned-image
 gate executes the eight-generation evaluator lifecycle plus calibration/train/
-eval stock modes and all registered negatives before ending
+eval stock modes, installs the exact two-file observer delta, proves absolute
+targets and processed values end to end, and passes all registered negatives
+before ending
 `P45_EXACT_IMAGE_CPU_PASS overlay=qwen8b_tp8`. This is not target evidence.
 
 ## Stop conditions

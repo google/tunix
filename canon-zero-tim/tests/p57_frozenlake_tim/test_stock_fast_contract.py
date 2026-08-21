@@ -141,6 +141,43 @@ class P57StockFastContractTest(unittest.TestCase):
           {**eval_values, "CANON_PROMPT_PROCESSED_LOGPROBS": "1"},
       )
 
+  def test_stock_observer_is_train_only_and_does_not_enable_fixed_m(self):
+    entrypoint = (ROOT / "canon-zero-tim/cluster/entrypoint.sh").read_text()
+    installer = (
+        ROOT
+        / "canon-zero-tim/cluster/steps/39_install_p57_stock_observer.sh"
+    ).read_text()
+    runner_patch = (
+        ROOT
+        / "canon-zero-tim/patches/p57_stock_observer/01-tpu-runner.patch"
+    ).read_text()
+    self.assertIn("if p57_is_stock_fast_training; then", entrypoint)
+    self.assertIn("step 39_install_p57_stock_observer.sh", entrypoint)
+    self.assertIn("observer_overlay=$p57_observer_overlay", entrypoint)
+    self.assertIn("p57_is_stock_fast_training", installer)
+    self.assertIn("stock_runner_verified=1 treatment=observer-only", installer)
+    self.assertIn("compute_processed_prompt_logprobs", runner_patch)
+    self.assertIn("CANON_PROMPT_PROCESSED_LOGPROBS", runner_patch)
+    self.assertNotIn("CANON_LOGPROB_M", runner_patch)
+    postflight = (ROOT / "canon-zero-tim/cluster/steps/90_run.sh").read_text()
+    self.assertIn(
+        "observer=warning-only processed_b=observer-only$", postflight
+    )
+    self.assertIn('p57_stock_observer" -ne 1', postflight)
+
+  def test_stock_observer_manifest_is_exactly_runner_plus_helper(self):
+    manifest = (
+        ROOT / "canon-zero-tim/P57_STOCK_OBSERVER_MANIFEST.sha256"
+    ).read_text().splitlines()
+    self.assertEqual(len(manifest), 2)
+    self.assertEqual(
+        {line.split(maxsplit=1)[1] for line in manifest},
+        {
+            "runner/tpu_runner.py",
+            "runner/p57_stock_prompt_observer.py",
+        },
+    )
+
 
 if __name__ == "__main__":
   unittest.main()

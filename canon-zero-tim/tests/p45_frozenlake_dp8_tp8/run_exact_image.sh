@@ -106,5 +106,21 @@ EOF
       --hidden-size 4096 --tp-size 8
     PYTHONPATH="$overlay" python3 \
       canon-zero-tim/tests/p45_frozenlake_dp8_tp8/probe_qwen8b_tp8.py
+    observer_state="$(mktemp -d /tmp/p57-stock-observer-state.XXXXXX)"
+    cat > "$observer_state/env.sh" <<EOF
+export CANON_PROFILE_FILE=cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env
+export CANON_P57_RUN_KIND=train
+export CANON_P57_TIM_ARM=mismatch
+export CANON_P57_INFERENCE_REGIME=stock-fast
+export CANON_PROMPT_PROCESSED_LOGPROBS=1
+EOF
+    printf "%s\n" /usr/local/lib/python3.12/site-packages/tpu_inference \
+      > "$observer_state/tpu_inference_path"
+    CANON_STATE="$observer_state" CANON_PKG=/workspace/canon-zero-tim \
+      bash canon-zero-tim/cluster/steps/39_install_p57_stock_observer.sh
+    env PATHWAYS_HEAD="" JAX_BACKEND_TARGET="" JAX_PLATFORMS=cpu \
+      python3 canon-zero-tim/tests/p57_frozenlake_tim/probe_stock_prompt_observer.py
+    rm -r "$observer_state"
+    echo "P57_STOCK_OBSERVER_EXACT_IMAGE_PASS targets=absolute values=processed"
     echo "P45_EXACT_IMAGE_CPU_PASS overlay=qwen8b_tp8"
   '
