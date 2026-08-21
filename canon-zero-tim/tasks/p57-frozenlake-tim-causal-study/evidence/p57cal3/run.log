@@ -1,0 +1,146 @@
+XPK Start: 2026-08-21T05:31:33Z
+[entrypoint] start 2026-08-21T05:31:39Z  mode=run  pkg=/app/canon-zero-tim
+[entrypoint] JOBSET_ATTEMPT 0 (first attempt)  pod=canon-p57-cal-p57cal0821-e4179511-pathways-head-0-0-8zvcz
+[entrypoint] --> 00_env.sh
+[env] HF_TOKEN inherited from INJECTED_HF_TOKEN (len=37)
+[env] WANDB_API_KEY inherited from INJECTED_WANDB_API_KEY (len=86)
+[env] preflight mode: JAX_PLATFORMS=cpu (Pathways connection deferred to Step 70)
+[env] P32 train mesh pin DISCOVERY: no release placement assertion
+[env] P32 admission arithmetic OK: DP8xTP8, 32 local / 256 global trajectories, global M=2048
+[P57.STOCK_FAST] ZERO_TIM_OFF_PASS absent=12 zero=25
+[env] profile=qwen3-8b-dp8-tp8-frozenlake-tim model_dir=qwen8b_tp8
+[env] resolved configuration written to /tmp/canon-state/canon-p57-cal-p57cal0821-e4179511/env.sh (142 lines)
+[entrypoint] <-- 00_env.sh ok
+[entrypoint] --> 10_sync_repo.sh
+[sync] HEAD=e4179511e6594d476460d355bd62086a6408ce54
+[sync] describe=e4179511 Route P57 stock calibration through the untouched engine.
+[sync] tracked_dirty=0
+[sync] package_untracked=0
+[sync] external_untracked=5
+[sync] provenance ok
+[entrypoint] <-- 10_sync_repo.sh ok
+[entrypoint] --> 20_probe_image.sh
+[probe] tpu_inference=/usr/local/lib/python3.12/site-packages/tpu_inference
+[probe] SAME      layers/common/attention_interface.py
+[probe] SAME      layers/jax/embed.py
+[probe] SAME      layers/jax/linear.py
+[probe] SAME      models/jax/qwen2.py
+[probe] SAME      models/jax/qwen3.py
+[probe] SAME      runner/tpu_runner.py
+[probe] SUMMARY same=6 drift=0 missing=0
+[probe] image matches the patch anchor exactly
+[entrypoint] <-- 20_probe_image.sh ok
+[entrypoint] --> 25_rope_fix.sh
+[rope] new form already present (upstream) -- not patching
+[rope]   35:from tpu_inference.layers.jax.rope_interface import (apply_rope,
+[rope]   66:        self.rope_theta = get_rope_theta(config, default=1000000.0)
+[rope]   67:        self.rope_scaling = get_rope_scaling(config)
+[rope] ROPE_FIX=not_needed
+[entrypoint] <-- 25_rope_fix.sh ok
+[entrypoint] --> 28_sync_cache.sh
+[cache] Target GCS cache: gs://yuxzhang-tunix-models/cache/p33_compilation_cache/qwen3-8b-dp8-tp8-frozenlake-tim
+[cache] Local cache dir: /tmp/jax_compilation_cache
+[cache] Pre-warmed cache entries: 0
+[entrypoint] <-- 28_sync_cache.sh ok
+[entrypoint] --> 35_install_r2egym.sh
+[r2egym] CANON_R2EGYM_INSTALL!=1 -- skipped (workload does not use R2E-Gym)
+[entrypoint] <-- 35_install_r2egym.sh ok
+[entrypoint] --> 38_verify_stock_engine.sh
+WARNING 08-21 05:31:44 [tpu_platform.py:408] Pin memory is not supported on TPU.
+WARNING 08-21 05:31:53 [tpu_platform.py:171] Error getting device name: 'NoneType' object has no attribute 'name'
+INFO 08-21 05:31:57 [importing.py:53] Triton is installed but 0 active driver(s) found (expected 1). Disabling Triton to prevent runtime errors.
+WARNING 08-21 05:31:57 [importing.py:73] Triton is installed, but `triton.backends` could not be imported. Disabling Triton.
+INFO 08-21 05:31:57 [importing.py:88] Triton not installed or not compatible; certain GPU-related functions will not be available.
+ERROR 08-21 05:31:57 [tpu_info.py:40] Unable to poll TPU GCE Metadata. Got status code: 404 and content: <!DOCTYPE html>
+ERROR 08-21 05:31:57 [tpu_info.py:40] <html lang=en>
+ERROR 08-21 05:31:57 [tpu_info.py:40]   <meta charset=utf-8>
+ERROR 08-21 05:31:57 [tpu_info.py:40]   <meta name=viewport content="initial-scale=1, minimum-scale=1, width=device-width">
+ERROR 08-21 05:31:57 [tpu_info.py:40]   <title>Error 404 (Not Found)!!1</title>
+ERROR 08-21 05:31:57 [tpu_info.py:40]   <style>
+ERROR 08-21 05:31:57 [tpu_info.py:40]     *{margin:0;padding:0}html,code{font:15px/22px arial,sans-serif}html{background:#fff;color:#222;padding:15px}body{margin:7% auto 0;max-width:390px;min-height:180px;padding:30px 0 15px}* > body{background:url(//www.google.com/images/errors/robot.png) 100% 5px no-repeat;padding-right:205px}p{margin:11px 0 22px;overflow:hidden}ins{color:#777;text-decoration:none}a img{border:0}@media screen and (max-width:772px){body{background:none;margin-top:0;max-width:none;padding-right:0}}#logo{background:url(//www.google.com/images/branding/googlelogo/1x/googlelogo_color_150x54dp.png) no-repeat;margin-left:-5px}@media only screen and (min-resolution:192dpi){#logo{background:url(//www.google.com/images/branding/googlelogo/2x/googlelogo_color_150x54dp.png) no-repeat 0% 0%/100% 100%;-moz-border-image:url(//www.google.com/images/branding/googlelogo/2x/googlelogo_color_150x54dp.png) 0}}@media only screen and (-webkit-min-device-pixel-ratio:2){#logo{background:url(//www.google.com/images/branding/googlelogo/2x/googlelogo_color_150x54dp.png) no-repeat;-webkit-background-size:100% 100%}}#logo{display:inline-block;height:54px;width:150px}
+ERROR 08-21 05:31:57 [tpu_info.py:40]   </style>
+ERROR 08-21 05:31:57 [tpu_info.py:40]   <a href=//www.google.com/><span id=logo aria-label=Google></span></a>
+ERROR 08-21 05:31:57 [tpu_info.py:40]   <p><b>404.</b> <ins>That’s an error.</ins>
+ERROR 08-21 05:31:57 [tpu_info.py:40]   <p>The requested URL <code>/computeMetadata/v1/instance/attributes/instance-id</code> was not found on this server.  <ins>That’s all we know.</ins>
+ERROR 08-21 05:31:57 [tpu_info.py:40] 
+ERROR 08-21 05:31:57 [tpu_info.py:40] Unable to poll TPU GCE Metadata. Got status code: 404 and content: <!DOCTYPE html>
+ERROR 08-21 05:31:57 [tpu_info.py:40] <html lang=en>
+ERROR 08-21 05:31:57 [tpu_info.py:40]   <meta charset=utf-8>
+ERROR 08-21 05:31:57 [tpu_info.py:40]   <meta name=viewport content="initial-scale=1, minimum-scale=1, width=device-width">
+ERROR 08-21 05:31:57 [tpu_info.py:40]   <title>Error 404 (Not Found)!!1</title>
+ERROR 08-21 05:31:57 [tpu_info.py:40]   <style>
+ERROR 08-21 05:31:57 [tpu_info.py:40]     *{margin:0;padding:0}html,code{font:15px/22px arial,sans-serif}html{background:#fff;color:#222;padding:15px}body{margin:7% auto 0;max-width:390px;min-height:180px;padding:30px 0 15px}* > body{background:url(//www.google.com/images/errors/robot.png) 100% 5px no-repeat;padding-right:205px}p{margin:11px 0 22px;overflow:hidden}ins{color:#777;text-decoration:none}a img{border:0}@media screen and (max-width:772px){body{background:none;margin-top:0;max-width:none;padding-right:0}}#logo{background:url(//www.google.com/images/branding/googlelogo/1x/googlelogo_color_150x54dp.png) no-repeat;margin-left:-5px}@media only screen and (min-resolution:192dpi){#logo{background:url(//www.google.com/images/branding/googlelogo/2x/googlelogo_color_150x54dp.png) no-repeat 0% 0%/100% 100%;-moz-border-image:url(//www.google.com/images/branding/googlelogo/2x/googlelogo_color_150x54dp.png) 0}}@media only screen and (-webkit-min-device-pixel-ratio:2){#logo{background:url(//www.google.com/images/branding/googlelogo/2x/googlelogo_color_150x54dp.png) no-repeat;-webkit-background-size:100% 100%}}#logo{display:inline-block;height:54px;width:150px}
+ERROR 08-21 05:31:57 [tpu_info.py:40]   </style>
+ERROR 08-21 05:31:57 [tpu_info.py:40]   <a href=//www.google.com/><span id=logo aria-label=Google></span></a>
+ERROR 08-21 05:31:57 [tpu_info.py:40]   <p><b>404.</b> <ins>That’s an error.</ins>
+ERROR 08-21 05:31:57 [tpu_info.py:40]   <p>The requested URL <code>/computeMetadata/v1/instance/attributes/accelerator-type</code> was not found on this server.  <ins>That’s all we know.</ins>
+ERROR 08-21 05:31:57 [tpu_info.py:40] 
+ERROR 08-21 05:31:57 [tpu_info.py:40] Unable to poll TPU GCE Metadata. Got status code: 404 and content: <!DOCTYPE html>
+ERROR 08-21 05:31:57 [tpu_info.py:40] <html lang=en>
+ERROR 08-21 05:31:57 [tpu_info.py:40]   <meta charset=utf-8>
+ERROR 08-21 05:31:57 [tpu_info.py:40]   <meta name=viewport content="initial-scale=1, minimum-scale=1, width=device-width">
+ERROR 08-21 05:31:57 [tpu_info.py:40]   <title>Error 404 (Not Found)!!1</title>
+ERROR 08-21 05:31:57 [tpu_info.py:40]   <style>
+ERROR 08-21 05:31:57 [tpu_info.py:40]     *{margin:0;padding:0}html,code{font:15px/22px arial,sans-serif}html{background:#fff;color:#222;padding:15px}body{margin:7% auto 0;max-width:390px;min-height:180px;padding:30px 0 15px}* > body{background:url(//www.google.com/images/errors/robot.png) 100% 5px no-repeat;padding-right:205px}p{margin:11px 0 22px;overflow:hidden}ins{color:#777;text-decoration:none}a img{border:0}@media screen and (max-width:772px){body{background:none;margin-top:0;max-width:none;padding-right:0}}#logo{background:url(//www.google.com/images/branding/googlelogo/1x/googlelogo_color_150x54dp.png) no-repeat;margin-left:-5px}@media only screen and (min-resolution:192dpi){#logo{background:url(//www.google.com/images/branding/googlelogo/2x/googlelogo_color_150x54dp.png) no-repeat 0% 0%/100% 100%;-moz-border-image:url(//www.google.com/images/branding/googlelogo/2x/googlelogo_color_150x54dp.png) 0}}@media only screen and (-webkit-min-device-pixel-ratio:2){#logo{background:url(//www.google.com/images/branding/googlelogo/2x/googlelogo_color_150x54dp.png) no-repeat;-webkit-background-size:100% 100%}}#logo{display:inline-block;height:54px;width:150px}
+ERROR 08-21 05:31:57 [tpu_info.py:40]   </style>
+ERROR 08-21 05:31:57 [tpu_info.py:40]   <a href=//www.google.com/><span id=logo aria-label=Google></span></a>
+ERROR 08-21 05:31:57 [tpu_info.py:40]   <p><b>404.</b> <ins>That’s an error.</ins>
+ERROR 08-21 05:31:57 [tpu_info.py:40]   <p>The requested URL <code>/computeMetadata/v1/instance/attributes/agent-worker-number</code> was not found on this server.  <ins>That’s all we know.</ins>
+ERROR 08-21 05:31:57 [tpu_info.py:40] 
+ERROR 08-21 05:31:57 [tpu_info.py:91] Failed to detect number of TPUs: [Errno 2] No such file or directory: '/dev/vfio'
+ERROR 08-21 05:31:57 [tpu_info.py:40] Unable to poll TPU GCE Metadata. Got status code: 404 and content: <!DOCTYPE html>
+ERROR 08-21 05:31:57 [tpu_info.py:40] <html lang=en>
+ERROR 08-21 05:31:57 [tpu_info.py:40]   <meta charset=utf-8>
+ERROR 08-21 05:31:57 [tpu_info.py:40]   <meta name=viewport content="initial-scale=1, minimum-scale=1, width=device-width">
+ERROR 08-21 05:31:57 [tpu_info.py:40]   <title>Error 404 (Not Found)!!1</title>
+ERROR 08-21 05:31:57 [tpu_info.py:40]   <style>
+ERROR 08-21 05:31:57 [tpu_info.py:40]     *{margin:0;padding:0}html,code{font:15px/22px arial,sans-serif}html{background:#fff;color:#222;padding:15px}body{margin:7% auto 0;max-width:390px;min-height:180px;padding:30px 0 15px}* > body{background:url(//www.google.com/images/errors/robot.png) 100% 5px no-repeat;padding-right:205px}p{margin:11px 0 22px;overflow:hidden}ins{color:#777;text-decoration:none}a img{border:0}@media screen and (max-width:772px){body{background:none;margin-top:0;max-width:none;padding-right:0}}#logo{background:url(//www.google.com/images/branding/googlelogo/1x/googlelogo_color_150x54dp.png) no-repeat;margin-left:-5px}@media only screen and (min-resolution:192dpi){#logo{background:url(//www.google.com/images/branding/googlelogo/2x/googlelogo_color_150x54dp.png) no-repeat 0% 0%/100% 100%;-moz-border-image:url(//www.google.com/images/branding/googlelogo/2x/googlelogo_color_150x54dp.png) 0}}@media only screen and (-webkit-min-device-pixel-ratio:2){#logo{background:url(//www.google.com/images/branding/googlelogo/2x/googlelogo_color_150x54dp.png) no-repeat;-webkit-background-size:100% 100%}}#logo{display:inline-block;height:54px;width:150px}
+ERROR 08-21 05:31:57 [tpu_info.py:40]   </style>
+ERROR 08-21 05:31:57 [tpu_info.py:40]   <a href=//www.google.com/><span id=logo aria-label=Google></span></a>
+ERROR 08-21 05:31:57 [tpu_info.py:40]   <p><b>404.</b> <ins>That’s an error.</ins>
+ERROR 08-21 05:31:57 [tpu_info.py:40]   <p>The requested URL <code>/computeMetadata/v1/instance/attributes/accelerator-type</code> was not found on this server.  <ins>That’s all we know.</ins>
+ERROR 08-21 05:31:57 [tpu_info.py:40] 
+ERROR 08-21 05:31:57 [__init__.py:82] Error occurred while logging TPU info: 'NoneType' object has no attribute 'startswith'. Are you running on CPU?
+INFO 08-21 05:31:58 [attention_interface.py:56] Using default RPA kernel
+WARNING 08-21 05:31:58 [interface.py:368] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
+WARNING 08-21 05:31:59 [tpu_platform.py:171] Error getting device name: 'NoneType' object has no attribute 'name'
+WARNING 08-21 05:31:59 [tpu_platform.py:171] Error getting device name: 'NoneType' object has no attribute 'name'
+WARNING 08-21 05:31:59 [tpu_platform.py:171] Error getting device name: 'NoneType' object has no attribute 'name'
+WARNING 08-21 05:31:59 [tpu_platform.py:171] Error getting device name: 'NoneType' object has no attribute 'name'
+WARNING 08-21 05:32:00 [interface.py:368] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
+WARNING 08-21 05:32:00 [interface.py:368] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
+WARNING 08-21 05:32:00 [interface.py:368] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
+WARNING 08-21 05:32:00 [tpu_platform.py:171] Error getting device name: 'NoneType' object has no attribute 'name'
+WARNING 08-21 05:32:00 [tpu_platform.py:171] Error getting device name: 'NoneType' object has no attribute 'name'
+WARNING 08-21 05:32:00 [tpu_platform.py:171] Error getting device name: 'NoneType' object has no attribute 'name'
+WARNING 08-21 05:32:00 [tpu_platform.py:171] Error getting device name: 'NoneType' object has no attribute 'name'
+INFO 08-21 05:32:00 [__init__.py:112] Registered model loader `<class 'tpu_inference.models.jax.utils.weight_utils.JaxDummyModelLoader'>` with load format `jax_dummy`
+INFO 08-21 05:32:00 [__init__.py:112] Registered model loader `<class 'tpu_inference.models.common.pathways_dummy_loader.PathwaysDummyModelLoader'>` with load format `pathways_dummy`
+INFO 08-21 05:32:00 [__init__.py:112] Registered model loader `<class 'tpu_inference.models.vllm.vllm_model_loader.IncrementalModelLoader'>` with load format `tpu_streaming_loader`
+WARNING 08-21 05:32:00 [__init__.py:101] Load format `runai_streamer` is already registered, and will be overwritten by the new loader class `<class 'tpu_inference.models.vllm.vllm_model_loader.RunaiIncrementalModelLoader'>`.
+INFO 08-21 05:32:00 [__init__.py:112] Registered model loader `<class 'tpu_inference.models.vllm.vllm_model_loader.RunaiIncrementalModelLoader'>` with load format `runai_streamer`
+P57_STOCK_ENGINE_IMPORT_PASS modules=6 root=/usr/local/lib/python3.12/site-packages
+[P57.STOCK_FAST] PREFLIGHT_PASS files=6 import=pass overlay=absent
+[entrypoint] <-- 38_verify_stock_engine.sh ok
+[entrypoint] P57_STOCK_FAST_PATH run_kind=calibration regime=stock-fast source=e4179511e6594d476460d355bd62086a6408ce54 canonical_overlay=skipped
+[entrypoint] --> 60_wait_workers.sh
+[wait] 180s quiet period for worker boot/registration (configured per-role device expectation: 64)...
+[wait] quiet period completed. Device assertion runs in step 65 (when the profile opts in) or step 70; this step alone proves nothing.
+[entrypoint] <-- 60_wait_workers.sh ok
+[entrypoint] --> 65_probe_devices.sh
+[probe] CANON_EXPECTED_SLICE_DEVICES unset -- skipping the device admission probe
+[entrypoint] <-- 65_probe_devices.sh ok
+[entrypoint] --> 90_run.sh
+[run] cmd: python3 -u examples/frozenlake/train_frozenlake_qwen3.py --mesh_dp=8 --mesh_tp=8 --batch_size=32 --mini_batch_size=32 --train_trajectory_micro_batch_size=8 --max_steps=1 --num_generations=8 --max_prompt_length=16384 --max_response_length=16384 --max_concurrency=256 --vllm_max_num_seqs=32 --vllm_max_num_batched_tokens=256 --env_max_steps=20 --num_batches=150 --learning_rate=1e-6 --b1=0.9 --b2=0.95 --weight_decay=0 --beta=0 --epsilon=0.003 --epsilon_high=0.005 --loss_algo=gspo-token --advantage_estimator=rloo --temperature=0.7 --top_k=0 --top_p=1.0 --num_test_batches=4 --eval_every_n_steps=0 --evaluation_only --p57_calibration_mode=stochastic --p57_calibration_recipes=m10,m15,m20
+[run] log: /tmp/canon-state/canon-p57-cal-p57cal0821-e4179511/run.log
+Logging configured at INFO level.
+Traceback (most recent call last):
+  File "/app/examples/frozenlake/train_frozenlake_qwen3.py", line 69, in <module>
+    from examples.frozenlake.agent import FrozenLakeAgent
+ModuleNotFoundError: No module named 'examples'
+[run] exit=1
+[run] transport_rc=0
+[run] PATHTRACE fixed_ar=0 embed=0 logprob_m=0 wandb_online=0 p34_wandb_online=0 eval_off=0 eval_on=0 p35_base=0 p35_stop=0 p35_replay=0 p35_stage_begin=0 p35_stage_ready=0 p35_stage_complete=0 p38_precheck=0 p38_rounds=0 p38_controlled_exit=0 p38_fixed_primal=0 p38_fixed_vjp=0 p38_kv_unified=0 p38_capture_init=0 p38_capture_observe=0 p38_capture_error=0 p38_request_journal=0 p38_incident_ledger=0 p38_kv_observer_init=0 p38_kv_observer_candidate=0 p38_kv_observer_a=0 p38_kv_observer_b=0 p38_seam_init=0 p38_seam_records=0 p38_tail_init=0 p38_tail_a=0 p38_tail_b=0 p38_terminal_init=0 p38_terminal_a=0 p38_terminal_b=0 p38_coverage=0
+[P57.STOCK_FAST] RUNTIME_PATH_PASS canonical_markers=0 overlay=skipped
+[cache] Syncing persistent compilation cache back to gs://yuxzhang-tunix-models/cache/p33_compilation_cache/qwen3-8b-dp8-tp8-frozenlake-tim...
+[entrypoint] FATAL: 90_run.sh exited 1
