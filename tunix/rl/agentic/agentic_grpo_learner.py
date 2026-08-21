@@ -129,6 +129,9 @@ class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
     loss_agg_mode: Method for aggregating the loss. Supported values:
       "token-mean", "sequence-mean-token-mean", "sequence-mean-token-scale",
       "seq-mean-token-sum", "sequence-mean-token-sum-norm".
+    loss_scale_factor: Optional explicit fixed denominator for
+      `sequence-mean-token-scale`. When set, it must equal the compiled
+      response width.
     num_generations: Number of samples per prompt (G in the paper). Must be > 1.
     num_iterations: Number of GRPO iterations per batch (μ in the paper).
     beta: KL penalty coefficient.
@@ -150,6 +153,7 @@ class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
   advantage_estimator: str = "grpo"
   policy_loss_fn: str = "grpo"
   loss_agg_mode: str = "sequence-mean-token-mean"
+  loss_scale_factor: int | None = None
   loss_algo: (
       str
   ) = (  # grpo or gspo-token # TODO(sizhi): Remove this option once gspo is
@@ -199,6 +203,18 @@ class GRPOConfig(agentic_rl_learner.AgenticRLConfig):
           "loss_algo should be either grpo or gspo-token. Received: "
           f"{self.loss_algo}"
       )
+    if self.loss_scale_factor is not None:
+      if self.loss_agg_mode != "sequence-mean-token-scale":
+        raise ValueError(
+            "loss_scale_factor requires sequence-mean-token-scale"
+        )
+      if self.loss_scale_factor <= 0:
+        raise ValueError("loss_scale_factor must be positive")
+      if self.loss_scale_factor != self.max_response_length:
+        raise ValueError(
+            "loss_scale_factor must equal max_response_length: "
+            f"{self.loss_scale_factor} != {self.max_response_length}"
+        )
 
 
 TGrpoConfig = TypeVar("TGrpoConfig", bound=GRPOConfig)
@@ -780,6 +796,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     if deepswe_debug.enabled() and mode == rl_cluster_lib.Mode.TRAIN:
       if expected_step is None:
         raise ValueError("DeepSWE debug artifacts require an expected step")
+      p58_artifacts = False
       if deepswe_debug.onehost():
         artifact_model_id = "Qwen/Qwen3-4B-Instruct-2507"
       else:
@@ -791,25 +808,42 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
             "p44-qwen4b-parity-128",
             "p46-qwen32b-train-64",
             "p46-qwen32b-train-256",
+            "p58-qwen4b-tim-128",
         ):
           raise ValueError(
               "DeepSWE artifacts require P34 production, P43, or P44"
           )
         artifact_model_id = workload.model_id
+        p58_artifacts = workload.contract_name == "p58-qwen4b-tim-128"
+      artifact_step = int(expected_step)
+      optimizer_step = None
+      if p58_artifacts:
+        if not hasattr(self, "_p58_debug_batch_index"):
+          self._p58_debug_batch_index = deepswe_debug.next_batch_index(
+              deepswe_debug.artifact_directory()
+          )
+        artifact_step = self._p58_debug_batch_index
+        optimizer_step = int(expected_step)
       debug_metrics = deepswe_debug.persist_batch(
           trajectories,
           rewards,
           advantages,
-          expected_step=int(expected_step),
+          expected_step=artifact_step,
+          optimizer_step=optimizer_step,
           output_dir=deepswe_debug.artifact_directory(),
           model_id=artifact_model_id,
       )
+      if p58_artifacts:
+        self._p58_debug_batch_index += 1
       trajectory_count = debug_metrics["trajectories"]
       prompt_group_count = debug_metrics["prompt_groups"]
       self.rl_cluster.buffer_metrics_async(
           {
               "deepswe/trajectory_solve_ratio": (
                   debug_metrics["trajectory_solve_ratio"], np.mean
+              ),
+              "deepswe/solved_trajectories": (
+                  debug_metrics["solved_trajectories"], np.mean
               ),
               "deepswe/complete_trajectory_ratio": (
                   debug_metrics["complete_trajectories"] / trajectory_count,
@@ -820,27 +854,60 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
                   / prompt_group_count,
                   np.mean,
               ),
+              "deepswe/all_solved_prompt_groups": (
+                  debug_metrics["all_solved_prompt_groups"], np.mean
+              ),
               "deepswe/all_failed_prompt_ratio": (
                   debug_metrics["all_failed_prompt_groups"]
                   / prompt_group_count,
                   np.mean,
               ),
+              "deepswe/all_failed_prompt_groups": (
+                  debug_metrics["all_failed_prompt_groups"], np.mean
+              ),
               "deepswe/mixed_prompt_ratio": (
                   debug_metrics["mixed_prompt_groups"] / prompt_group_count,
                   np.mean,
+              ),
+              "deepswe/mixed_prompt_groups": (
+                  debug_metrics["mixed_prompt_groups"], np.mean
               ),
               "deepswe/incomplete_prompt_ratio": (
                   debug_metrics["incomplete_prompt_groups"]
                   / prompt_group_count,
                   np.mean,
               ),
+              "deepswe/incomplete_prompt_groups": (
+                  debug_metrics["incomplete_prompt_groups"], np.mean
+              ),
               "deepswe/effective_prompt_ratio": (
                   debug_metrics["effective_prompt_groups"]
                   / prompt_group_count,
                   np.mean,
               ),
+              "deepswe/effective_prompt_groups": (
+                  debug_metrics["effective_prompt_groups"], np.mean
+              ),
               "deepswe/nonzero_advantage_ratio": (
                   debug_metrics["nonzero_advantage_ratio"], np.mean
+              ),
+              "deepswe/raw_nonzero_advantage_ratio": (
+                  debug_metrics["raw_nonzero_advantage_ratio"], np.mean
+              ),
+              "deepswe/compact_filtered_trajectory_ratio": (
+                  debug_metrics["compact_filtered_trajectory_ratio"],
+                  np.mean,
+              ),
+              "deepswe/compact_filtered_prompt_ratio": (
+                  debug_metrics["compact_filtered_prompt_groups"]
+                  / prompt_group_count,
+                  np.mean,
+              ),
+              "deepswe/compact_filtered_trajectories": (
+                  debug_metrics["compact_filtered_trajectories"], np.mean
+              ),
+              "deepswe/compact_filtered_prompt_groups": (
+                  debug_metrics["compact_filtered_prompt_groups"], np.mean
               ),
           },
           mode=mode,

@@ -966,6 +966,108 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           "INCONCLUSIVE_NO_SIGNAL: all four G6 microgradients are zero"
       )
 
+    p58_all_filtered = (
+        p34_workload
+        and workload.contract_name == "p58-qwen4b-tim-128"
+        and float(np.asarray(
+            result["loss_output"].primary_loss.denominator
+        )) == 0.0
+    )
+    if p58_all_filtered:
+      with self.rl_cluster._get_mesh_and_logical_axis_rules_cm(  # pylint: disable=protected-access
+          rl_cluster_lib.Role.ACTOR
+      ):
+        discarded_denominator = actor_trainer.discard_precomputed_gradients()
+      if float(np.asarray(discarded_denominator)) != float(
+          expected_microbatches
+      ):
+        raise alignment.AlignmentGateError(
+            "P58 all-filtered accumulator cadence changed: "
+            f"{float(np.asarray(discarded_denominator))} != "
+            f"{expected_microbatches}"
+        )
+      after_discard = {
+          "model": fingerprint(nnx.state(actor_trainer.model, nnx.Param)),
+          "optimizer": fingerprint(
+              nnx.state(actor_trainer.optimizer, nnx.optimizer.OptState)
+          ),
+          "accumulator": fingerprint(
+              nnx.state(actor_trainer.grad_accumulator), min_elements=1
+          ),
+          "reference": (
+              fingerprint(_p28_reference_state(self.rl_cluster))
+              if ref_state is not None else None
+          ),
+          "train_steps": actor_trainer.train_steps,
+      }
+      changed = {
+          name: actor_trainer._canon_changed_paths(  # pylint: disable=protected-access
+              before[name], after_discard[name]
+          )
+          for name in ("model", "optimizer", "accumulator", "reference")
+          if before[name] is not None
+      }
+      unchanged = (
+          not any(changed.values())
+          and actor_trainer.train_steps == before["train_steps"]
+      )
+      skip_record = {
+          "contract_name": workload.contract_name,
+          "dp_size": workload.dp_size,
+          "tp_size": workload.tp_size,
+          "global_m": workload.global_m,
+          "verdict": "PASS" if unchanged else "FAIL",
+          "mode": "compact-filtered-no-commit",
+          "microsteps": expected_microbatches,
+          "commits": 0,
+          "train_steps_before": before["train_steps"],
+          "train_steps_after": actor_trainer.train_steps,
+          "loss_denominator": 0.0,
+          "gradient_activity": activity,
+          "gradient_finite": all(
+              np.isfinite(float(np.asarray(value))) for value in micro_norms
+          ),
+          "dp_replicas_exact": result["replica_equality"],
+          "dp_axis": result["dp_axis"],
+          "dp_reduction_transactions": result["dp_reduction_transactions"],
+          "dp_reduction_rounds_per_transaction": result[
+              "dp_reduction_rounds_per_transaction"
+          ],
+          "dp_rank_pullbacks_per_transaction": result[
+              "dp_rank_pullbacks_per_transaction"
+          ],
+          "micro_gradient_norms": [
+              float(np.asarray(value)) for value in micro_norms
+          ],
+          "changed_paths": changed,
+          "alignment_hashes": [record["hashes"] for record in records],
+          "hbm_before": hbm_before,
+          "hbm_after_accumulation": hbm_after_accumulation,
+          "optimizer_memory_kinds_before": list(
+              optimizer_memory_kinds_before
+          ),
+          "optimizer_memory_kinds_after": list(
+              actor_trainer.optimizer_state_memory_kinds()
+          ),
+          "optimizer_placement": optimizer_placement,
+      }
+      report_path = os.environ.get("CANON_UPDATE_REPORT", "")
+      if not report_path:
+        raise alignment.AlignmentGateError("CANON_UPDATE_REPORT is required")
+      os.makedirs(os.path.dirname(report_path) or ".", exist_ok=True)
+      with open(report_path, "a", encoding="utf-8") as update_file:
+        update_file.write(json.dumps(skip_record, sort_keys=True) + "\n")
+      print(
+          "[DEEPSWE.COMPACT_FILTER] canonical all_filtered=1 "
+          f"train_steps={actor_trainer.train_steps} optimizer_commits=0",
+          flush=True,
+      )
+      if not unchanged:
+        raise alignment.AlignmentGateError(
+            f"P58 all-filtered discard mutated state: {skip_record}"
+        )
+      return skip_record
+
     if p33_no_commit:
       after_no_commit = {
           "model": fingerprint(nnx.state(actor_trainer.model, nnx.Param)),

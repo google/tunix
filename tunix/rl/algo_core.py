@@ -31,6 +31,24 @@ registry = function_registry.default_registry
 # ==============================================================================
 
 
+def _loss_aggregation_kwargs(algo_config, completion_mask) -> dict[str, int]:
+  """Returns an explicit, shape-checked fixed loss denominator when signed."""
+  norm = getattr(algo_config, "loss_scale_factor", None)
+  if norm is None:
+    return {}
+  if algo_config.loss_agg_mode != "sequence-mean-token-scale":
+    raise ValueError(
+        "loss_scale_factor requires sequence-mean-token-scale"
+    )
+  observed_width = int(completion_mask.shape[-1])
+  if observed_width != int(norm):
+    raise ValueError(
+        "loss_scale_factor changed from compiled response width: "
+        f"{norm} != {observed_width}"
+    )
+  return {"norm": int(norm)}
+
+
 @registry.register("advantage_estimator", "gae")
 @jax.jit
 def compute_gae_advantages(
@@ -406,6 +424,9 @@ def grpo_loss_fn(
       train_example.completion_ids,
       train_example.completion_mask,
   )
+  loss_aggregation_kwargs = _loss_aggregation_kwargs(
+      algo_config, completion_mask
+  )
 
   # TODO(tsbao): split can be avoided with updated peft_trainer model handling.
   graphdef, state = nnx.split(model)
@@ -485,7 +506,10 @@ def grpo_loss_fn(
       (per_token_loss > pg_loss_3) & (adv < 0.0)
   ).astype(jnp.float32)
   pg_clipfrac_lower = common.aggregate_loss(
-      per_token_pg_clipfrac_lower, completion_mask, loss_aggregation_mode
+      per_token_pg_clipfrac_lower,
+      completion_mask,
+      loss_aggregation_mode,
+      **loss_aggregation_kwargs,
   )
 
   pg_loss_clipped_dual = jnp.minimum(pg_loss_3, per_token_loss)
@@ -504,10 +528,16 @@ def grpo_loss_fn(
   #   unreduced (sum/denom, deferred) — feeds the gradient
   #   reduced   (eager per-sequence mean, pre-CL form) — metric only
   unreduced_pg_loss = common.aggregate_loss(
-      per_token_loss, completion_mask, loss_aggregation_mode
+      per_token_loss,
+      completion_mask,
+      loss_aggregation_mode,
+      **loss_aggregation_kwargs,
   )
   reduced_pg_loss = common.reduced_loss_agg(
-      per_token_loss, completion_mask, loss_aggregation_mode
+      per_token_loss,
+      completion_mask,
+      loss_aggregation_mode,
+      **loss_aggregation_kwargs,
   )
   total_loss = unreduced_pg_loss  # KL added below when beta != 0; feeds gradient
   # Per-token diagnostics — log only over assistant tokens (completion_mask).
@@ -552,6 +582,15 @@ def grpo_loss_fn(
       "advantage/max": adv_max,
       "advantage/min": adv_min,
       "advantage/nonzero_frac": nonzero_adv_frac,
+      "loss/raw_rows": jnp.asarray(completion_mask.shape[0], jnp.float32),
+      "loss/effective_rows": jnp.sum(
+          (completion_mask.sum(axis=-1) > 0).astype(jnp.float32)
+      ),
+      "loss/valid_tokens": jnp.sum(completion_mask.astype(jnp.float32)),
+      "loss/fixed_norm": jnp.asarray(
+          loss_aggregation_kwargs.get("norm", completion_mask.shape[-1]),
+          jnp.float32,
+      ),
   }
   # P21.3 L3 gate: expose the exact logprobs returned by the real
   # value_and_grad primal.  This is default-off and is consumed only by the
@@ -581,7 +620,12 @@ def grpo_loss_fn(
     aux["kl"] = sft_utils.WeightedMetric(
         unreduced_kl, token_denom, min_denom=1.0
     )
-    kl_loss = common.aggregate_loss(kl, completion_mask, loss_aggregation_mode)
+    kl_loss = common.aggregate_loss(
+        kl,
+        completion_mask,
+        loss_aggregation_mode,
+        **loss_aggregation_kwargs,
+    )
     aux["kl_loss"] = kl_loss  # pyrefly: ignore[bad-assignment]
     if beta is not None and beta != 0.0:
       total_loss = sft_utils.WeightedMetric(
@@ -592,7 +636,10 @@ def grpo_loss_fn(
       )
 
   entropy_loss = common.aggregate_loss(
-      token_entropy, completion_mask, loss_aggregation_mode
+      token_entropy,
+      completion_mask,
+      loss_aggregation_mode,
+      **loss_aggregation_kwargs,
   )
   aux["entropy"] = entropy_loss
 
@@ -623,6 +670,9 @@ def grpo_loss_from_precomputed_logps(
   epsilon_c = getattr(algo_config, "epsilon_c", None)
   loss_aggregation_mode = algo_config.loss_agg_mode
   completion_mask = train_example.completion_mask
+  loss_aggregation_kwargs = _loss_aggregation_kwargs(
+      algo_config, completion_mask
+  )
   per_token_logps = jnp.astype(per_token_logps, jnp.float32)
   token_entropy = jnp.astype(token_entropy, jnp.float32)
   advantages = jnp.astype(train_example.advantages, jnp.float32)
@@ -664,7 +714,10 @@ def grpo_loss_from_precomputed_logps(
       (per_token_loss > pg_loss_3) & (adv < 0.0)
   ).astype(jnp.float32)
   pg_clipfrac_lower = common.aggregate_loss(
-      per_token_pg_clipfrac_lower, completion_mask, loss_aggregation_mode
+      per_token_pg_clipfrac_lower,
+      completion_mask,
+      loss_aggregation_mode,
+      **loss_aggregation_kwargs,
   )
   pg_loss_clipped_dual = jnp.minimum(pg_loss_3, per_token_loss)
   per_token_loss = jnp.where(adv < 0.0, pg_loss_clipped_dual, per_token_loss)
@@ -674,10 +727,16 @@ def grpo_loss_from_precomputed_logps(
     per_token_loss = per_token_loss * sampler_is_weights.astype(jnp.float32)
 
   unreduced_pg_loss = common.aggregate_loss(
-      per_token_loss, completion_mask, loss_aggregation_mode
+      per_token_loss,
+      completion_mask,
+      loss_aggregation_mode,
+      **loss_aggregation_kwargs,
   )
   reduced_pg_loss = common.reduced_loss_agg(
-      per_token_loss, completion_mask, loss_aggregation_mode
+      per_token_loss,
+      completion_mask,
+      loss_aggregation_mode,
+      **loss_aggregation_kwargs,
   )
   total_loss = unreduced_pg_loss
   aux = {
@@ -704,6 +763,15 @@ def grpo_loss_from_precomputed_logps(
       ),
       "pg_loss/unclipped_mean": masked_mean(pg_loss_1, completion_mask),
       "pg_loss/clipped_mean": masked_mean(pg_loss_2, completion_mask),
+      "loss/raw_rows": jnp.asarray(completion_mask.shape[0], jnp.float32),
+      "loss/effective_rows": jnp.sum(
+          (completion_mask.sum(axis=-1) > 0).astype(jnp.float32)
+      ),
+      "loss/valid_tokens": jnp.sum(completion_mask.astype(jnp.float32)),
+      "loss/fixed_norm": jnp.asarray(
+          loss_aggregation_kwargs.get("norm", completion_mask.shape[-1]),
+          jnp.float32,
+      ),
   }
   adv_broadcast = jnp.broadcast_to(adv, completion_mask.shape)
   aux.update({
@@ -744,7 +812,12 @@ def grpo_loss_from_precomputed_logps(
     aux["kl"] = sft_utils.WeightedMetric(
         unreduced_kl, token_denom, min_denom=1.0
     )
-    kl_loss = common.aggregate_loss(kl, completion_mask, loss_aggregation_mode)
+    kl_loss = common.aggregate_loss(
+        kl,
+        completion_mask,
+        loss_aggregation_mode,
+        **loss_aggregation_kwargs,
+    )
     aux["kl_loss"] = kl_loss
     if beta is not None and beta != 0.0:
       total_loss = sft_utils.WeightedMetric(
@@ -755,7 +828,10 @@ def grpo_loss_from_precomputed_logps(
       )
 
   aux["entropy"] = common.aggregate_loss(
-      token_entropy, completion_mask, loss_aggregation_mode
+      token_entropy,
+      completion_mask,
+      loss_aggregation_mode,
+      **loss_aggregation_kwargs,
   )
   return sft_utils.LossOutput(primary_loss=total_loss, aux_metrics=aux)
 

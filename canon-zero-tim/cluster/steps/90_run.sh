@@ -112,6 +112,8 @@ if [ "${CANON_P33_WORKLOAD_LAUNCH_ADMITTED:-0}" = "1" ]; then
     report_keys+=(CANON_P34_WEIGHT_REPORT)
     if [ "${CANON_P44_DEEPSWE_PARITY:-0}" = "1" ]; then
       report_keys+=(CANON_P44_DEBUG_DIR)
+    elif [ "${CANON_P58_DEEPSWE_TIM:-0}" = "1" ]; then
+      report_keys+=(CANON_P58_DEBUG_DIR)
     elif [ "${CANON_P43_DEEPSWE_DEBUG:-0}" = "1" ]; then
       report_keys+=(CANON_P43_DEBUG_DIR)
     elif [ "${CANON_P34_TRAJECTORY_CAPTURE:-0}" = "1" ]; then
@@ -681,7 +683,21 @@ if [ "${CANON_P35_EXACT_REPLAY:-0}" = "1" ] && \
   p35_base_sha="$(sha256sum "$CANON_P35_PRE_REPLAY_REPORT" | awk '{print $1}')"
   echo "[CANON_P35.3] PRE_REPLAY_EVIDENCE path=$CANON_P35_PRE_REPLAY_REPORT sha256=$p35_base_sha"
 fi
-if p57_is_stock_fast_calibration; then
+if [ "${CANON_P58_DEEPSWE_TIM:-0}" = "1" ] && \
+   [ "${CANON_P58_TIM_ARM:-}" = "native" ]; then
+  for marker_count in "$n_ar" "$n_emb" "$n_lp" "$n_p38_fixed_primal" \
+                      "$n_p38_fixed_vjp" "$n_p38_kv_unified"; do
+    if [ "$marker_count" -ne 0 ]; then
+      echo "[run] FATAL: canonical runtime marker leaked into P58 native" >&2
+      exit 1
+    fi
+  done
+  [ "$n_wandb_p34" -eq 1 ] || {
+    echo "[run] FATAL: P58 native did not attest exactly one W&B run" >&2
+    exit 1
+  }
+  echo "[P58.NATIVE] RUNTIME_PATH_PASS canonical_markers=0 overlay=skipped"
+elif p57_is_stock_fast_calibration; then
   if [ "$n_p57_stock_sync" -ne 1 ]; then
     echo "[run] FATAL: P57 stock rollout weight sync marker contract failed: $n_p57_stock_sync" >&2
     exit 1
@@ -870,7 +886,20 @@ PY
   echo "[run] P38 serving controlled precheck accepted exit=$p38_expected_rc; backward=0 optimizer_commits=0"
   rc=0
 elif [ "$rc" -eq 0 ] && [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
-  if [ "${CANON_P46_DEEPSWE_TRAIN:-0}" = "1" ]; then
+  if [ "${CANON_P58_DEEPSWE_TIM:-0}" = "1" ]; then
+    classification="$CANON_STATE/p58_deepswe_${CANON_P58_TIM_ARM}_${CANON_P34_RUN_STAGE}.classification.json"
+    JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
+      python3 "$CANON_PKG/tests/p58_deepswe_native_zero/classify_run.py" \
+        --arm "$CANON_P58_TIM_ARM" \
+        --stage "$CANON_P34_RUN_STAGE" \
+        --run-log "$LOG" \
+        --debug-dir "$CANON_P58_DEBUG_DIR" \
+        --weight-report "$CANON_P34_WEIGHT_REPORT" \
+        --pre-alignment-report "$CANON_PRE_ALIGN_REPORT" \
+        --update-report "$CANON_UPDATE_REPORT" \
+        --alignment-report "$CANON_ALIGN_REPORT" \
+        --output "$classification" || exit 1
+  elif [ "${CANON_P46_DEEPSWE_TRAIN:-0}" = "1" ]; then
     classification="$CANON_STATE/p46_deepswe_q32_${CANON_P46_TOPOLOGY}_full.classification.json"
     JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
       python3 "$CANON_PKG/tests/p34_deepswe/classify_run.py" \

@@ -126,7 +126,16 @@ class Trainer(peft_trainer.PeftTrainer):
       return input_data
     mode = alignment.execution_mode()
     p27 = os.environ.get("CANON_FROZENLAKE_P27", "") == "1"
-    if mode == "update-canary" or (mode == "gate-only" and p27):
+    p58_native_train = (
+        mode == "train"
+        and os.environ.get("CANON_P58_DEEPSWE_TIM", "") == "1"
+        and os.environ.get("CANON_P58_TIM_ARM", "") == "native"
+    )
+    if (
+        mode == "update-canary"
+        or (mode == "gate-only" and p27)
+        or p58_native_train
+    ):
       if self._canon_update_before is None:
         self._canon_update_before = {
             "model": self._canon_fingerprint_state(
@@ -137,13 +146,15 @@ class Trainer(peft_trainer.PeftTrainer):
             ),
             "train_steps": self.train_steps,
         }
-        if p27:
+        if p27 or p58_native_train:
           self._canon_update_before["accumulator"] = (
               self._canon_fingerprint_state(nnx.state(self.grad_accumulator))
           )
         print(
             "[CANON_FROZENLAKE_P27] pre_state_snapshot "
             if p27
+            else "[P58.NATIVE] pre_update_snapshot "
+            if p58_native_train
             else "[CANON_GSM8K_UPDATE] pre_update_snapshot ",
             end="",
             flush=True,
@@ -299,6 +310,112 @@ class Trainer(peft_trainer.PeftTrainer):
             )
           else:
             entry[0].append(value)
+        p58_native = (
+            os.environ.get("CANON_P58_DEEPSWE_TIM", "") == "1"
+            and os.environ.get("CANON_P58_TIM_ARM", "") == "native"
+        )
+        if p58_native:
+          is_update_step = bool(
+              np.asarray(jax.device_get(aux["canon/is_update_step"])).item()
+          )
+          if is_update_step:
+            before = self._canon_update_before
+            if before is None:
+              raise alignment.AlignmentGateError(
+                  "P58 native update snapshot is missing"
+              )
+            self._canon_update_before = None
+            try:
+              optimizer_committed = bool(np.asarray(jax.device_get(
+                  aux["loss/optimizer_committed"]
+              )).item())
+              loss_denominator = float(np.asarray(jax.device_get(
+                  aux["loss/accumulated_denominator"]
+              )).item())
+            except (AttributeError, KeyError, TypeError, ValueError) as exc:
+              raise alignment.AlignmentGateError(
+                  "P58 native optimizer receipt is missing"
+              ) from exc
+            after = {
+                "model": self._canon_fingerprint_state(
+                    nnx.state(self.model, nnx.Param)
+                ),
+                "optimizer": self._canon_fingerprint_state(
+                    nnx.state(self.optimizer, nnx.optimizer.OptState)
+                ),
+                "accumulator": self._canon_fingerprint_state(
+                    nnx.state(self.grad_accumulator)
+                ),
+            }
+            changed = {
+                name: self._canon_changed_paths(before[name], after[name])
+                for name in ("model", "optimizer", "accumulator")
+            }
+            unchanged_skip = (
+                not optimizer_committed
+                and loss_denominator == 0.0
+                and not any(changed.values())
+            )
+            committed_valid = (
+                optimizer_committed
+                and loss_denominator > 0.0
+                and not changed["accumulator"]
+            )
+            update_record = {
+                "contract_name": "p58-qwen4b-tim-128",
+                "tim_arm": "native",
+                "dp_size": 8,
+                "tp_size": 8,
+                "global_m": 2048,
+                "verdict": (
+                    "PASS" if committed_valid or unchanged_skip else "FAIL"
+                ),
+                "mode": (
+                    "stock-jax-sharded-trainer"
+                    if optimizer_committed
+                    else "compact-filtered-no-commit"
+                ),
+                "commits": int(optimizer_committed),
+                "train_steps_before": before["train_steps"],
+                "train_steps_after": (
+                    before["train_steps"] + int(optimizer_committed)
+                ),
+                "loss_denominator": loss_denominator,
+                "gradient_finite": record["gradient"]["finite"],
+                "gradient_nonzero": record["gradient"]["nonzero"],
+                "changed_paths": changed,
+                "alignment_hashes": record["hashes"],
+                "dp_reduction_mode": "stock-jax-sharded-trainer",
+                "optimizer_placement": (
+                    "pinned-host-offload"
+                    if self.config.optimizer_offload
+                    else "device-resident"
+                ),
+                "optimizer_memory_kinds_after": list(
+                    self.optimizer_state_memory_kinds()
+                ),
+            }
+            update_path = os.environ.get("CANON_UPDATE_REPORT", "")
+            if not update_path:
+              raise alignment.AlignmentGateError(
+                  "CANON_UPDATE_REPORT is required"
+              )
+            os.makedirs(os.path.dirname(update_path) or ".", exist_ok=True)
+            with open(update_path, "a", encoding="utf-8") as update_file:
+              update_file.write(
+                  json.dumps(update_record, sort_keys=True) + "\n"
+              )
+            print(
+                "[P58.NATIVE] optimizer_transaction "
+                f"verdict={update_record['verdict']} "
+                f"commits={update_record['commits']} "
+                f"train_steps_after={update_record['train_steps_after']}",
+                flush=True,
+            )
+            if update_record["verdict"] != "PASS":
+              raise alignment.AlignmentGateError(
+                  f"P58 native optimizer transaction invalid: {update_record}"
+              )
       if (
           record["execution_mode"] == "gate-only"
           and os.environ.get("CANON_FROZENLAKE_P27", "") == "1"

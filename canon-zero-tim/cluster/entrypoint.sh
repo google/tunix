@@ -101,6 +101,14 @@ if [ "${CANON_P46_EVALUATION:-0}" = "1" ]; then
   # the differentiable canonical chain used for training/alignment.
   step 35_install_r2egym.sh
   log "P46_EVALUATION_STOCK_PATH mode=$CANON_P46_EVALUATION_MODE source=$CANON_EXPECT_COMMIT canonical_overlay=skipped"
+elif [ "${CANON_P58_DEEPSWE_TIM:-0}" = "1" ] && \
+     [ "${CANON_P58_TIM_ARM:-}" = "native" ]; then
+  # P58 native is the untreated numerical baseline.  Keep the shared Tunix
+  # trainer/observer code from the pinned source, but leave every signed
+  # tpu_inference target byte-identical to the digest-pinned client image.
+  step 35_install_r2egym.sh
+  step p58_verify_stock_engine.sh
+  log "P58_NATIVE_STOCK_PATH source=$CANON_EXPECT_COMMIT canonical_overlay=skipped"
 elif p57_is_stock_fast_calibration; then
   # P57.1 measures the untreated pinned-image serving program.  Installing the
   # canonical chain and merely unsetting its flags is not stock: several shims

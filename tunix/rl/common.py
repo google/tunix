@@ -781,9 +781,10 @@ def aggregate_loss(
     seq_loss = (per_token_loss * completion_mask).sum(axis=-1) / jnp.clip(
         norm, min=1e-6
     )
-    unreduced_sum = seq_loss.sum()
-    denominator = per_token_loss.shape[0]
-    min_denom = 1.0
+    seq_mask = (completion_mask.sum(axis=-1) > 0).astype(jnp.float32)
+    unreduced_sum = (seq_loss * seq_mask).sum()
+    denominator = seq_mask.sum()
+    min_denom = 1e-6
   elif loss_agg_mode == "seq-mean-token-sum":
     # 1) sum token losses within each sequence
     # 2) average only across sequences that have at least one valid token
@@ -856,7 +857,10 @@ def reduced_loss_agg(
     seq_loss = (per_token_loss * completion_mask).sum(axis=-1) / jnp.clip(
         norm, min=1e-6
     )
-    return seq_loss.mean()
+    seq_mask = (completion_mask.sum(axis=-1) > 0).astype(jnp.float32)
+    return (seq_loss * seq_mask).sum() / jnp.clip(
+        seq_mask.sum(), min=1e-6
+    )
   elif loss_agg_mode == "seq-mean-token-sum":
     seq_loss = (per_token_loss * completion_mask).sum(axis=-1)
     seq_mask = (completion_mask.sum(axis=-1) > 0).astype(jnp.float32)

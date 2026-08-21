@@ -55,6 +55,9 @@ class GRPOConfig(algo_config_lib.AlgorithmConfig):
       include `token-mean`, `sequence-mean-token-mean`,
       `sequence-mean-token-scale`, `seq-mean-token-sum`, and
       `sequence-mean-token-sum-norm`. Default: `sequence-mean-token-mean`.
+    loss_scale_factor: Optional explicit fixed denominator for
+      `sequence-mean-token-scale`. When unset, the tensor width remains the
+      backward-compatible default.
     reward_manager: The reward manager to use. Default: `sequence-level`.
     loss_algo: The loss algorithm to use. To be deprecated.
     num_generations: The number of times the policy generates multiple responses
@@ -91,6 +94,7 @@ class GRPOConfig(algo_config_lib.AlgorithmConfig):
   advantage_estimator: str = "grpo"
   policy_loss_fn: str = "grpo"
   loss_agg_mode: str = "sequence-mean-token-mean"
+  loss_scale_factor: int | None = None
   reward_manager: str = "sequence-level"
   loss_algo: (
       str
@@ -124,6 +128,13 @@ class GRPOConfig(algo_config_lib.AlgorithmConfig):
           "sampler_is should be either None or 'token'. Received: "
           f"{self.sampler_is}"
       )
+    if self.loss_scale_factor is not None:
+      if self.loss_agg_mode != "sequence-mean-token-scale":
+        raise ValueError(
+            "loss_scale_factor requires sequence-mean-token-scale"
+        )
+      if self.loss_scale_factor <= 0:
+        raise ValueError("loss_scale_factor must be positive")
 
 
 TGrpoConfig = TypeVar("TGrpoConfig", bound=GRPOConfig)

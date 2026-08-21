@@ -108,6 +108,12 @@ class TrainingConfig:
   # HBM on the accumulation path.
   gradient_accumulator_dtype: DTypeLike | None = None
 
+  # Accumulate gradients of WeightedMetric.unreduced_sum and divide once by
+  # the sum of the corresponding denominators. This is required when valid-row
+  # counts can differ across otherwise equal-size micro-batches. Disabled by
+  # default so existing unpacked mean-of-means recipes retain their program.
+  loss_denominator_weighted_accumulation: bool = False
+
   # Keep optimizer state in pinned host memory between updates. The state is
   # moved to device only for optimizer.update and returned to pinned host after
   # the update completes. This does not change optimizer-state dtype or update
@@ -565,10 +571,12 @@ class PeftTrainer:
     self._jitted_precomputed_gradient_scaled_step_impl = None
     self._jitted_precomputed_gradient_pair_step_impl = None
     self._jitted_precomputed_gradient_commit_impl = None
+    self._jitted_precomputed_gradient_discard_impl = None
     self._jitted_precomputed_gradient_step_fn = None
     self._jitted_precomputed_gradient_scaled_step_fn = None
     self._jitted_precomputed_gradient_pair_step_fn = None
     self._jitted_precomputed_gradient_commit_fn = None
+    self._jitted_precomputed_gradient_discard_fn = None
     self._registered_learning_rate_schedule = None
     self._last_precomputed_commit_evidence = None
     self._p28_precomputed_microstep = 0
@@ -638,10 +646,12 @@ class PeftTrainer:
     self._jitted_precomputed_gradient_scaled_step_impl = None
     self._jitted_precomputed_gradient_pair_step_impl = None
     self._jitted_precomputed_gradient_commit_impl = None
+    self._jitted_precomputed_gradient_discard_impl = None
     self._jitted_precomputed_gradient_step_fn = None
     self._jitted_precomputed_gradient_scaled_step_fn = None
     self._jitted_precomputed_gradient_pair_step_fn = None
     self._jitted_precomputed_gradient_commit_fn = None
+    self._jitted_precomputed_gradient_discard_fn = None
 
   def _precomputed_gradient_step(
       self,
@@ -751,6 +761,14 @@ class PeftTrainer:
     }
     grad_accumulator.reset()
     return norm, commit_evidence
+
+  def _precomputed_gradient_discard(
+      self, grad_accumulator: GradientAccumulator
+  ) -> ArrayLike:
+    """Clears one complete streamed transaction without optimizer mutation."""
+    denominator = grad_accumulator.denom[...]
+    grad_accumulator.reset()
+    return denominator
 
   def _put_optimizer_state_on_memory_kind(self, memory_kind: str) -> None:
     """Moves only OptState and verifies that the requested placement landed."""
@@ -1211,6 +1229,42 @@ class PeftTrainer:
     self._p28_precomputed_microstep = 0
     return norm
 
+  def discard_precomputed_gradients(self) -> ArrayLike:
+    """Discards an all-filtered P58 transaction without committing it."""
+    if os.environ.get("CANON_P58_DEEPSWE_TIM", "") != "1":
+      raise ValueError("precomputed discard is reserved for P58 DeepSWE")
+    self._last_precomputed_commit_evidence = None
+    self._validate_precomputed_gradient_contract()
+    expected_microsteps = _precomputed_expected_microbatches(os.environ)
+    if self._p28_precomputed_microstep != expected_microsteps:
+      raise ValueError(
+          "segmented discard cadence mismatch: "
+          f"{self._p28_precomputed_microstep} != {expected_microsteps}"
+      )
+    if self._jitted_precomputed_gradient_discard_impl is None:
+      self._jitted_precomputed_gradient_discard_impl = nnx.jit(
+          self._precomputed_gradient_discard,
+          donate_argnames=("grad_accumulator",),
+      )
+    if self._jitted_precomputed_gradient_discard_fn is None:
+      self._jitted_precomputed_gradient_discard_fn = functools.partial(
+          nnx.cached_partial(
+              self._jitted_precomputed_gradient_discard_impl,
+              self.grad_accumulator,
+          )
+      )
+    denominator = self._jitted_precomputed_gradient_discard_fn()
+    denominator.block_until_ready()
+    # The accumulator buffer was donated. Rebind it on the next transaction;
+    # the transformed implementation and executable cache remain reusable.
+    self._jitted_precomputed_gradient_step_fn = None
+    self._jitted_precomputed_gradient_scaled_step_fn = None
+    self._jitted_precomputed_gradient_pair_step_fn = None
+    self._jitted_precomputed_gradient_commit_fn = None
+    self._jitted_precomputed_gradient_discard_fn = None
+    self._p28_precomputed_microstep = 0
+    return denominator
+
   def with_loss_fn(
       self,
       loss_fn: Callable[
@@ -1284,13 +1338,30 @@ class PeftTrainer:
     )
     (loss_val, aux), grads = grad_fn(model, **inputs)
 
+    denominator_weighted = self.config.loss_denominator_weighted_accumulation
+    loss_denominator = jnp.asarray(1.0, dtype=jnp.float32)
     if isinstance(aux, utils.LossOutput):
-      # Scale the unreduced gradients using the metric's scale computation
+      loss_denominator = aux.primary_loss.denominator.astype(jnp.float32)
+      # The default path preserves the historical mean-of-local-means
+      # behavior. Denominator-weighted accumulation keeps gradients of the
+      # unreduced sum and divides once after all micro-batches have arrived.
       scale = aux.primary_loss.compute_scale()
-      grads = jax.tree.map(lambda g: g * scale, grads)
+      if not denominator_weighted:
+        grads = jax.tree.map(lambda g: g * scale, grads)
 
       # Compute exactly equivalent legacy loss val
       loss_val = aux.primary_loss.compute()
+    elif denominator_weighted:
+      raise ValueError(
+          "loss_denominator_weighted_accumulation requires LossOutput"
+      )
+
+    def normalized_grads():
+      if denominator_weighted:
+        return jax.tree.map(
+            lambda g: g * aux.primary_loss.compute_scale(), grads
+        )
+      return grads
 
     def apply_updates(model, optimizer, grad_accumulator):
       acc_grads = grad_accumulator.get()
@@ -1317,6 +1388,34 @@ class PeftTrainer:
       return norm
 
     def skip_updates(model, optimizer, grad_accumulator):
+      return jnp.array(0.0, dtype=jnp.float32)
+
+    def discard_empty_update(model, optimizer, grad_accumulator):
+      grad_accumulator.reset()
+      return jnp.array(0.0, dtype=jnp.float32)
+
+    def finish_denominator_weighted_update(
+        model, optimizer, grad_accumulator
+    ):
+      return nnx.cond(
+          grad_accumulator.denom[...] > 0.0,
+          apply_updates,
+          discard_empty_update,
+          model,
+          optimizer,
+          grad_accumulator,
+      )
+
+    def apply_direct_update(model, optimizer, direct_grads):
+      norm = optax.global_norm(
+          jax.tree_util.tree_map(
+              lambda x: x.astype(jnp.float32), direct_grads
+          )
+      )
+      optimizer.update(model, direct_grads)
+      return norm
+
+    def skip_direct_update(model, optimizer, direct_grads):
       return jnp.array(0.0, dtype=jnp.float32)
 
     # P21.3 L3 gate-only mode must return the real value_and_grad primal and a
@@ -1359,9 +1458,14 @@ class PeftTrainer:
       )
     canon_gate_only = canon_alignment and canon_gate_only_requested
     deepswe_onehost_no_commit = _deepswe_onehost_no_commit(os.environ)
+    optimizer_committed = jnp.asarray(False, dtype=jnp.bool_)
+    accumulated_loss_denominator = loss_denominator
     if canon_gate_only or deepswe_onehost_no_commit:
+      update_grads = normalized_grads()
       grad_norm = optax.global_norm(
-          jax.tree_util.tree_map(lambda x: x.astype(jnp.float32), grads)
+          jax.tree_util.tree_map(
+              lambda x: x.astype(jnp.float32), update_grads
+          )
       )
     # At depth 1 the accumulator is a no-op and the cond predicate is always
     # True, so update directly from `grads` (no per-leaf accumulator writes,
@@ -1371,13 +1475,29 @@ class PeftTrainer:
         self.config.get_with_default("gradient_accumulation_steps", 1) == 1
         and self.config.max_seq_token_per_tpu is None
     ):
-      grad_norm = optax.global_norm(
-          jax.tree_util.tree_map(lambda x: x.astype(jnp.float32), grads)
-      )
-      optimizer.update(model, grads)
+      update_grads = normalized_grads()
+      if denominator_weighted:
+        optimizer_committed = loss_denominator > 0.0
+        grad_norm = nnx.cond(
+            optimizer_committed,
+            apply_direct_update,
+            skip_direct_update,
+            model,
+            optimizer,
+            update_grads,
+        )
+      else:
+        grad_norm = apply_direct_update(model, optimizer, update_grads)
     else:
-      # TODO(b/491970038): update denom for sequence packing.
-      grad_accumulator.add(grads, denom=jnp.asarray(1.0, dtype=jnp.float32))
+      grad_accumulator.add(
+          grads,
+          denom=(
+              loss_denominator
+              if denominator_weighted
+              else jnp.asarray(1.0, dtype=jnp.float32)
+          ),
+      )
+      accumulated_loss_denominator = grad_accumulator.denom[...]
 
       # If the mesh is not empty, then we need to replicate the is_update_step
       # across all devices to avoid deadlock so that all devices see the same
@@ -1388,16 +1508,34 @@ class PeftTrainer:
             is_update_step, jax.sharding.PartitionSpec()
         )
 
-      grad_norm = nnx.cond(
-          is_update_step,
-          apply_updates,
-          skip_updates,
-          model,
-          optimizer,
-          grad_accumulator,
-      )
+      if denominator_weighted:
+        optimizer_committed = jnp.logical_and(
+            is_update_step, accumulated_loss_denominator > 0.0
+        )
+        grad_norm = nnx.cond(
+            is_update_step,
+            finish_denominator_weighted_update,
+            skip_updates,
+            model,
+            optimizer,
+            grad_accumulator,
+        )
+      else:
+        grad_norm = nnx.cond(
+            is_update_step,
+            apply_updates,
+            skip_updates,
+            model,
+            optimizer,
+            grad_accumulator,
+        )
 
     if isinstance(aux, utils.LossOutput):
+      if denominator_weighted:
+        aux.aux_metrics["loss/accumulated_denominator"] = (
+            accumulated_loss_denominator
+        )
+        aux.aux_metrics["loss/optimizer_committed"] = optimizer_committed
       if canon_alignment:
         aux.aux_metrics["canon/gradient_norm"] = grad_norm
         aux.aux_metrics["canon/optimizer_skipped"] = jnp.asarray(
@@ -1857,10 +1995,33 @@ class PeftTrainer:
         # NB: put this after self._buffer_metrics is important
         self._post_process_train_step(aux)
 
+        denominator_weighted_commit = True
+        if (
+            is_update_step_val
+            and self.config.loss_denominator_weighted_accumulation
+        ):
+          try:
+            denominator_weighted_commit = bool(
+                np.asarray(
+                    jax.device_get(aux["loss/optimizer_committed"])
+                ).item()
+            )
+          except (AttributeError, KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError(
+                "denominator-weighted optimizer receipt is missing"
+            ) from exc
+
         if is_update_step_val and _deepswe_onehost_no_commit(os.environ):
           print(
               "[DEEPSWE.ONEHOST] optimizer_boundary_skipped commits=0 "
               f"train_steps={self._train_steps}",
+              flush=True,
+          )
+          self._write_train_metrics()
+        elif is_update_step_val and not denominator_weighted_commit:
+          print(
+              "[DEEPSWE.COMPACT_FILTER] optimizer_boundary_skipped "
+              f"effective_rows=0 train_steps={self._train_steps}",
               flush=True,
           )
           self._write_train_metrics()

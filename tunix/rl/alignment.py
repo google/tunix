@@ -27,7 +27,7 @@ import json
 import os
 import sys
 import time
-from typing import Any
+from typing import Any, Mapping
 
 import flax
 import numpy as np
@@ -404,6 +404,15 @@ def gsm8k_ab_report_policy() -> dict[str, Any]:
         f"got {deepswe_warn_raw!r}"
     )
   deepswe_warning_only = deepswe_warn_raw == "1"
+  p58_active = os.environ.get("CANON_P58_DEEPSWE_TIM", "") == "1"
+  p58_arm = os.environ.get("CANON_P58_TIM_ARM", "") if p58_active else ""
+  if p58_active and p58_arm not in ("native", "zero"):
+    raise AlignmentGateError("P58 alignment arm must be native or zero")
+  if p58_active and (deepswe_warning_only != (p58_arm == "native")):
+    raise AlignmentGateError(
+        "P58 native requires observer-only A-B warnings and zero requires "
+        "strict alignment"
+    )
   warning_policies = sum(
       (warning_only, frozenlake_warning_only, deepswe_warning_only)
   )
@@ -435,8 +444,9 @@ def gsm8k_ab_report_policy() -> dict[str, Any]:
     p39_pilot = os.environ.get("CANON_P39_64CHIP_PILOT", "") == "1"
     p43_debug = os.environ.get("CANON_P43_DEEPSWE_DEBUG", "") == "1"
     p44_parity = os.environ.get("CANON_P44_DEEPSWE_PARITY", "") == "1"
+    p58_tim = os.environ.get("CANON_P58_DEEPSWE_TIM", "") == "1"
     production_full = (
-        not any((p39_pilot, p43_debug, p44_parity))
+        not any((p39_pilot, p43_debug, p44_parity, p58_tim))
         and p34_stage == "full"
     )
     admitted = (
@@ -444,7 +454,7 @@ def gsm8k_ab_report_policy() -> dict[str, Any]:
         and (
             production_full
             or (
-                sum((p39_pilot, p43_debug, p44_parity)) == 1
+                sum((p39_pilot, p43_debug, p44_parity, p58_tim)) == 1
                 and p34_stage in ("one-update", "three-update")
             )
         )
@@ -500,6 +510,9 @@ def gsm8k_ab_report_policy() -> dict[str, Any]:
       "warning_only": (
           warning_only or frozenlake_warning_only or deepswe_warning_only
       ),
+      "warning_boundaries": (
+          ("S_decode_vs_S_prefill",) if p58_arm == "native" else None
+      ),
       "bounded_ab_only": bounded_ab,
       "workload": workload,
       "stage": stage,
@@ -521,6 +534,20 @@ def gsm8k_ab_report_policy() -> dict[str, Any]:
           else "strict-zero-tim"
       ),
   }
+
+
+def _policy_warns(policy: Mapping[str, Any], item: str) -> bool:
+  """Returns whether a finite mismatch is observer-only for this boundary."""
+  if not policy.get("warning_only", False):
+    return False
+  boundaries = policy.get("warning_boundaries")
+  if boundaries is None:
+    return True
+  if item in boundaries:
+    return True
+  # w and w*r include the registered native A-B treatment.  r is B-C and
+  # therefore remains exact/fail-closed.
+  return item in ("w_all_exactly_1", "wr_all_exactly_1", "clip_hits", "tis_hits")
 
 
 def _masked_pair_is_finite(a: Any, b: Any, mask: Any) -> bool:
@@ -1233,7 +1260,7 @@ def check_pre_backward(
     if difference["valid"] is not True or not finite:
       blocking_reds.append(name)
     elif difference["differing_bytes"] != 0:
-      if policy["warning_only"]:
+      if _policy_warns(policy, name):
         warning_reds.append(name)
       elif name == "S_decode_vs_S_prefill" and _ab_drift_is_reportable(
           difference, max_abs=max_abs, finite=finite, policy=policy
@@ -1365,7 +1392,16 @@ def check_batch(
   if n_action == 0:
     blocking_reds.append("N_action=0")
   canonical_c = None
-  if os.environ.get("CANON_ENGINE_MODULE_C", "") != "1":
+  p58_native = (
+      os.environ.get("CANON_P58_DEEPSWE_TIM", "") == "1"
+      and os.environ.get("CANON_P58_TIM_ARM", "") == "native"
+  )
+  if p58_native:
+    canonical_c = {
+        "mode": "native-stock-trainer",
+        "canonical_engine_registered": False,
+    }
+  elif os.environ.get("CANON_ENGINE_MODULE_C", "") != "1":
     blocking_reds.append("CANON_ENGINE_MODULE_C!=1")
   else:
     from tunix.rl import canonical_forward  # pylint: disable=g-import-not-at-top
@@ -1405,7 +1441,7 @@ def check_batch(
     if difference["valid"] is not True or not finite:
       blocking_reds.append(name)
     elif difference["differing_bytes"] != 0:
-      if policy["warning_only"]:
+      if _policy_warns(policy, name):
         warning_reds.append(name)
       elif name == "S_decode_vs_S_prefill" and _ab_drift_is_reportable(
           difference, max_abs=max_abs, finite=finite, policy=policy
@@ -1441,7 +1477,7 @@ def check_batch(
   for key, ok in exact.items():
     if ok:
       continue
-    if policy["warning_only"]:
+    if _policy_warns(policy, key):
       warning_reds.append(key)
     elif ab_reported and key in ("w_all_exactly_1", "wr_all_exactly_1"):
       reported_reds.append(key)
@@ -1453,10 +1489,10 @@ def check_batch(
   clip_hits = int(np.sum((wr[mask] < 0.8) | (wr[mask] > 1.28)))
   tis_hits = int(np.sum(w[mask] > 2.0))
   if clip_hits:
-    target = warning_reds if policy["warning_only"] else blocking_reds
+    target = warning_reds if _policy_warns(policy, "clip_hits") else blocking_reds
     target.append(f"clip_hits={clip_hits}")
   if tis_hits:
-    target = warning_reds if policy["warning_only"] else blocking_reds
+    target = warning_reds if _policy_warns(policy, "tis_hits") else blocking_reds
     target.append(f"tis_hits={tis_hits}")
 
   grad_norm = float(np.asarray(gradient_norm))

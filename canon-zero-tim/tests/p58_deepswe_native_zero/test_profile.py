@@ -1,0 +1,72 @@
+#!/usr/bin/env python3
+"""Shell-profile contracts for the P58 native and zero numerical arms."""
+
+from __future__ import annotations
+
+from pathlib import Path
+import subprocess
+import unittest
+
+
+ROOT = Path(__file__).resolve().parents[3]
+PKG = ROOT / "canon-zero-tim"
+PROFILE = PKG / "cluster/profiles/qwen3-4b-dp8-tp8-deepswe-tim.env"
+CANON = PKG / "cluster/profiles/_canonical_engine.env"
+
+
+def _source(arm: str) -> str:
+  script = f"""
+set -euo pipefail
+source {CANON}
+export CANON_P58_TIM_ARM={arm}
+export CANON_P34_RUN_STAGE=three-update
+export CANON_P58_EXPECTED_UPDATES=3
+export CANON_P32_TRAIN_ADMITTED=1
+export CANON_P32_DP_REDUCTION_ADMITTED=1
+export CANON_P33_WORKLOAD_LAUNCH_ADMITTED=1
+source {PROFILE}
+printf 'arm=%s dp=%s gen=%s local=%s global=%s warn=%s engine=%s vjp=%s p32=%s launch=%s\\n' \
+  "$CANON_P58_TIM_ARM" "$CANON_DP_SIZE" "$CANON_NUM_GENERATIONS" \
+  "$CANON_LOCAL_TRAJECTORIES" "$CANON_GLOBAL_TRAJECTORIES" \
+  "$CANON_DEEPSWE_ALIGNMENT_WARN_ONLY" "$CANON_ENGINE_MODULE_C" \
+  "$CANON_RPA_VJP2" "$CANON_P32_TRAIN_ADMITTED" \
+  "$CANON_P33_WORKLOAD_LAUNCH_ADMITTED"
+if [[ -v CANON_FIXED_AR ]]; then printf 'fixed=present\\n'; else printf 'fixed=absent\\n'; fi
+if [[ -v CANON_LOGPROB_M ]]; then printf 'logm=present\\n'; else printf 'logm=absent\\n'; fi
+printf 'xla=%s\\n' "$XLA_FLAGS"
+"""
+  return subprocess.run(
+      ["bash", "-c", script],
+      check=True,
+      text=True,
+      capture_output=True,
+  ).stdout
+
+
+class P58ProfileTest(unittest.TestCase):
+
+  def test_native_removes_complete_numerical_bundle(self):
+    output = _source("native")
+    self.assertIn(
+        "arm=native dp=8 gen=16 local=16 global=128 warn=1 "
+        "engine=0 vjp=0 p32=1 launch=1",
+        output,
+    )
+    self.assertIn("fixed=absent", output)
+    self.assertIn("logm=absent", output)
+    self.assertIn("xla=--xla_cpu_max_isa=AVX2", output)
+
+  def test_zero_retains_complete_numerical_bundle(self):
+    output = _source("zero")
+    self.assertIn(
+        "arm=zero dp=8 gen=16 local=16 global=128 warn=0 "
+        "engine=1 vjp=1 p32=1 launch=1",
+        output,
+    )
+    self.assertIn("fixed=present", output)
+    self.assertIn("logm=present", output)
+    self.assertIn("--xla_allow_excess_precision=false", output)
+
+
+if __name__ == "__main__":
+  unittest.main()

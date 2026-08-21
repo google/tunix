@@ -1,0 +1,66 @@
+# Log
+
+## 2026-08-21 UTC — P58 task bound and loss ambiguity preregistered
+
+- Type: decision/research
+- Fact: the user approved a two-arm Qwen3-4B-Instruct B8 x G16 comparison and asked to verify `sequence-mean-token-scale` before implementation. The current local DeepSWE notebook and contract, the pinned quality-fix notebook, and the official DeepSWE algorithm description all select fixed maximum-context normalization. The public rLLM launcher instead selects `seq-mean-token-sum`, and an open-source issue records the inconsistency without resolution.
+- Fact: current Tunix computes `sequence-mean-token-scale` as masked token sum divided by response width, averaged across rows. The operator branch counts empty rows in that average; pinned quality-fix and current `origin/main` exclude them. The trainer scales each micro-batch gradient before an equal-step gradient accumulator average, so B8 x G16 requires an explicit equal-eight-microbatch invariant.
+- Action: created an independent P58 workflow rather than rewriting the historical P44 or P46 ledgers. Preregistered the shared recipe, treatment boundary, algorithm-neutral switches, claim ceiling, fixed-16K loss formula, empty-row policy, and pre-launch tests.
+- Source: local HEAD `a8716c27d8d6c65bbce827140ab37464424ce20c`; observed operator remote `762152dc3395f59ec4eace10f927f2e27f7fc90d`; pinned workload reference `023978b976dd6d94e7a42948c3f3a68e34d73744`.
+- Result: P58.1 is active. No implementation code, existing task document, manifest, TPU resource, commit, push, branch, image, credential, or external state was changed. Existing dirty P46 work remains untouched.
+- Files/artifacts: `state.md`; `plan.md`; `phases/p58-1-loss-aggregation-contract.md`.
+- Rollback: remove only the untracked `canon-zero-tim/tasks/p58-deepswe-native-zero-comparison/` directory.
+- Next: user reviews the recommended loss contract. Implementation begins only after that decision; hardware launch remains a later explicit approval.
+
+## 2026-08-21 UTC — host loss-test attempt was inconclusive
+
+- Type: validation
+- Action: attempted the existing loss suite with `python3 -m unittest tests.rl.common_test` after the source audit.
+- Result: the suite did not import because the bare host lacks `metrax`; zero tests executed. This is `INCONCLUSIVE`, not PASS, and does not change the code-reading findings. The P58.1 implementation must run its formula and gradient gates in the pinned exact image or another declared environment with the full dependency set.
+- External effects: none; no model, TPU, cluster, optimizer, commit, or push was used.
+- Next: keep P58.1 active until the future exact-image loss oracle and reduction tests pass.
+
+## 2026-08-21 UTC — fixed-B empty-row policy tightened (superseded)
+
+- Type: correction/decision
+- Fact: excluding empty rows would silently change the effective batch and gradient scale, while counting them would silently dilute the update. Neither is desirable in the signed no-filter B8 x G16 comparison.
+- Action: require exactly 128 non-empty completion rows before every P58 optimizer commit. Any empty row is logged and rejects the batch without resampling or committing. This makes the current and pinned denominator implementations equal on every admitted batch.
+- Result: no common loss implementation was copied from `main`; the P58.1 gate now treats empty rows as an upstream trajectory/admission failure rather than an alternate loss-normalization policy.
+
+## 2026-08-21 UTC — compact-filter policy correction and isolated worktree
+
+- Type: correction/decision
+- Correction: the preceding fixed-B policy incorrectly collapsed a legitimate DeepSWE compact-filtered all-zero loss mask with a malformed trajectory. P58 preserves the official and pinned quality-fix compact filter. Exactly 128 raw trajectory records are required, but `B_eff` is the number of rows with nonzero policy masks. Signed filtered rows remain journaled and are excluded from policy loss; structurally invalid rows remain fatal.
+- Math: `sequence-mean-token-scale` is frozen as `sum(mask * token_loss) / (B_eff * 16384)`. Eight raw-equal microbatches must be accumulated by effective-row weight, not by an unweighted mean of local means. `B_eff=0` produces no optimizer commit and no resampling.
+- Action: fetched the latest operator tip and created named branch/worktree `local/p58-deepswe-native-zero-0821` at `7a77b32f2cd2dc08078e175fa0c407ca1cf33539`. Mechanically migrated only the untracked P58 workflow documents; the dirty P46 review worktree remains unchanged.
+- Validation: repository preflight passes for branch, required package paths, credential-free remote, and runtime-config scan. The clean-state check passed before P58 document migration; current dirtiness is the P58 task directory itself.
+- External effects: one read-only remote fetch occurred before the worktree was created. No main mutation, merge, commit, push, image, model download, TPU, Kubernetes resource, credential, or other external state was changed.
+- Next: implement P58.1 only, stop at its first failed gate, and leave P58.2 pending until the numerical contract passes.
+
+## 2026-08-21 UTC — P58.1/P58.2 implementation and exact-image gates passed
+
+- Type: implementation/validation
+- Action: implemented the additive P58 Qwen3-4B B8 x G16 DP8 x TP8 per-role contract, paired renderer/profile, explicit fixed-16K effective-row loss, denominator-weighted stock-trainer accumulation, canonical global-denominator path, full trajectory journal, W&B signal counts/ratios, native/zero alignment policies, transaction receipts, and arm-aware classifier. Compact-filtered rows retain raw advantages for audit but are excluded from the effective/nonzero-policy-signal metrics. Copied the reviewed 1,012-task clean JSONL byte-for-byte into `canon-zero-tim/clean_data/p46_q4_learnable/` and verified its frozen digest.
+- Correction found during integration: the inherited P34 `full` rule incorrectly demanded old large-tensor trajectory capture for P58. P58 has a separate full-trajectory journal, so it is now excluded from that P34-only capture condition. Native/zero x canary/full environment resolution passes.
+- Correction found during artifact testing: all-filtered batches do not increment optimizer step, so using optimizer step as the trajectory filename would collide on the next batch. P58 now persists monotonically increasing `batch_index` separately from `optimizer_step`, validates continuity and digests on resume, and refuses partial journals.
+- Correction found during paired-path review: the stock native trainer lacked a durable update report, while the zero path already had an explicit segmented transaction report. P58 now records the native stock JAX-sharded transaction without claiming fixed-tree DP reduction. Zero retains explicit DP8 reduction evidence. The classifier understands the two truthful receipt types.
+- Correction found during no-signal review: the canonical segmented zero arm would commit a zero gradient when all 128 rows were compact-filtered. It now discards the complete streamed accumulator without changing model, optimizer, or train step, matching the stock path and the preregistered no-commit rule.
+- Validation: syntax and shell parsing passed; `git diff --check` passed; P58 loss 5/5, renderer 4/4, profile 2/2, alignment policy 2/2, environment 1/1, durable journal 2/2, classifier 2/2, full alignment 40/40, P34 contract 5/5, P34 environment 7/7, P34 renderer 13/13, P44 renderer 6/6, common loss 60/60, selected real trainer tests 3/3, and compact-filter trajectory test 1/1 passed in the pinned image.
+- Terminal marker: `P58_EXACT_IMAGE_CPU_PASS loss_oracle=1 weighted_accumulation=1 compact_filter=1 durable_journal=1 paired_renderer=1 alignment_policy=1 regressions=1`.
+- Claim: implementation plus CPU/pinned-image validation only. No model/R2E one-host run, Pathways run, 128-chip target, HBM measurement, native mismatch dose, zero exactness, convergence, image publication, commit, push, or launch exists.
+- Next: P58.3 is active. Reconcile the unrelated moving operator tip, then request the appropriate separate approvals for publication and either one-host sanity or direct paired canaries.
+
+## 2026-08-21 UTC — legacy full static wrapper device probe was inconclusive
+
+- Type: validation limitation
+- Action: an expanded early gate invoked the complete historical P34 static wrapper. Its first nine suites passed; the final device-probe subprocess reached its own 120-second timeout on this non-TPU host.
+- Result: `INCONCLUSIVE`, not FAIL and not TPU PASS. The final P58 exact-image gate directly runs the relevant P34 contract, environment, and renderer regression suites and records their passing counts. The absent TPU probe is retained as a blocker for target claims.
+
+## 2026-08-21 UTC — execution order changed to native-first
+
+- Type: user decision/handoff
+- Decision: waive the optional P58.3 one-host sanity without claiming PASS, publish the shared implementation, and activate only the 128-chip native three-update canary. The zero arm remains implemented and covered by CPU regression tests but is explicitly deferred because its optimization work is incomplete.
+- Scope: the remote executor may render and launch `arm=native, stage=three-update` from the exact post-push readback SHA and a digest-pinned image. It must not render or apply zero under this decision. A native PASS is an integration/training result only; it cannot establish the paired treatment effect or zero-TIM.
+- Gate: exactly three native optimizer commits, complete durable trajectories, finite nonzero A-B dose, exact B-C, TPU-resident optimizer, valid cleanup/checkpoint transactions, and native classifier `PASS`.
+- Publication: the user explicitly approved commit and push to `yuxzhang/canon-zero-tim`. `main` remains untouched. The final remote SHA must be obtained and reported by readback after push rather than embedded self-referentially in this commit.
+- Next: publish after reconciling the unrelated P57 tip and rerunning focused plus pinned-image gates; the remote executor then follows `cluster/P58_DEEPSWE_TIM_RUNBOOK.md` section 3N.

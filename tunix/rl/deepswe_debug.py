@@ -41,11 +41,22 @@ P34_MANIFEST_SCHEMA = "canon.p34.deepswe.run-manifest.v1"
 P44_TRAJECTORY_SCHEMA = "canon.p44.deepswe.trajectory.v1"
 P44_METRICS_SCHEMA = "canon.p44.deepswe.batch-metrics.v1"
 P44_MANIFEST_SCHEMA = "canon.p44.deepswe.run-manifest.v1"
+P58_TRAJECTORY_SCHEMA = "canon.p58.deepswe.trajectory.v1"
+P58_METRICS_SCHEMA = "canon.p58.deepswe.batch-metrics.v1"
+P58_MANIFEST_SCHEMA = "canon.p58.deepswe.run-manifest.v1"
 ONEHOST_TRAJECTORY_SCHEMA = "canon.local.deepswe.trajectory.v1"
 ONEHOST_METRICS_SCHEMA = "canon.local.deepswe.batch-metrics.v1"
 ONEHOST_MANIFEST_SCHEMA = "canon.local.deepswe.run-manifest.v1"
 SOLVE_DEFINITION = "r2egym_final_reward_eq_1"
 _COMPLETE_STATUS = "SUCCEEDED"
+_COMPACT_FILTER_STATUSES = frozenset({
+    "MAX_STEPS_REACHED",
+    "MAX_CONTEXT_LIMIT_REACHED",
+    "TIMEOUT",
+    "ENV_TIMEOUT",
+    "MODEL_TIMEOUT",
+    "REWARD_TIMEOUT",
+})
 _SENSITIVE_KEY = re.compile(
     r"(?:api[_-]?key|auth|credential|password|secret|token)$", re.I
 )
@@ -59,6 +70,7 @@ def _mode(values: Mapping[str, str]) -> str:
   p44 = values.get("CANON_P44_DEEPSWE_PARITY", "0")
   onehost = values.get("CANON_DEEPSWE_ONEHOST_SMOKE", "0")
   p34 = values.get("CANON_P34_TRAJECTORY_CAPTURE", "0")
+  p58 = values.get("CANON_P58_DEEPSWE_TIM", "0")
   if p43 not in ("0", "1"):
     raise ValueError("CANON_P43_DEEPSWE_DEBUG must be exactly 0 or 1")
   if p44 not in ("0", "1"):
@@ -67,14 +79,18 @@ def _mode(values: Mapping[str, str]) -> str:
     raise ValueError("CANON_DEEPSWE_ONEHOST_SMOKE must be exactly 0 or 1")
   if p34 not in ("0", "1"):
     raise ValueError("CANON_P34_TRAJECTORY_CAPTURE must be exactly 0 or 1")
-  if sum(raw == "1" for raw in (p34, p43, p44, onehost)) > 1:
+  if p58 not in ("0", "1"):
+    raise ValueError("CANON_P58_DEEPSWE_TIM must be exactly 0 or 1")
+  if sum(raw == "1" for raw in (p34, p43, p44, p58, onehost)) > 1:
     raise ValueError(
-        "P34, P43, P44, and one-host artifacts are mutually exclusive"
+        "P34, P43, P44, P58, and one-host artifacts are mutually exclusive"
     )
   if onehost == "1":
     return "onehost"
   if p34 == "1":
     return "p34"
+  if p58 == "1":
+    return "p58"
   return "p44" if p44 == "1" else "p43"
 
 
@@ -85,6 +101,7 @@ def enabled(values: Mapping[str, str] | None = None) -> bool:
       "onehost": "CANON_DEEPSWE_ONEHOST_SMOKE",
       "p34": "CANON_P34_TRAJECTORY_CAPTURE",
       "p44": "CANON_P44_DEEPSWE_PARITY",
+      "p58": "CANON_P58_DEEPSWE_TIM",
       "p43": "CANON_P43_DEEPSWE_DEBUG",
   }[mode]
   return environ.get(key, "0") == "1"
@@ -115,6 +132,7 @@ def artifact_directory(values: Mapping[str, str] | None = None) -> str:
       "onehost": "CANON_DEEPSWE_ONEHOST_DEBUG_DIR",
       "p34": "CANON_P34_DEBUG_DIR",
       "p44": "CANON_P44_DEBUG_DIR",
+      "p58": "CANON_P58_DEBUG_DIR",
       "p43": "CANON_P43_DEBUG_DIR",
   }[_mode(environ)]
   return environ.get(key, "")
@@ -123,6 +141,8 @@ def artifact_directory(values: Mapping[str, str] | None = None) -> str:
 def rollout_only(values: Mapping[str, str] | None = None) -> bool:
   environ = os.environ if values is None else values
   if _mode(environ) == "p34":
+    return False
+  if _mode(environ) == "p58":
     return False
   key = {
       "onehost": "CANON_DEEPSWE_ONEHOST_ROLLOUT_ONLY",
@@ -141,6 +161,7 @@ def marker_prefix(values: Mapping[str, str] | None = None) -> str:
       "onehost": "DEEPSWE.ONEHOST",
       "p34": "P34",
       "p44": "P44",
+      "p58": "P58",
       "p43": "P43",
   }[_mode(environ)]
 
@@ -157,6 +178,8 @@ def _schemas(values: Mapping[str, str]) -> tuple[str, str, str]:
     return P34_TRAJECTORY_SCHEMA, P34_METRICS_SCHEMA, P34_MANIFEST_SCHEMA
   if mode == "p44":
     return P44_TRAJECTORY_SCHEMA, P44_METRICS_SCHEMA, P44_MANIFEST_SCHEMA
+  if mode == "p58":
+    return P58_TRAJECTORY_SCHEMA, P58_METRICS_SCHEMA, P58_MANIFEST_SCHEMA
   return TRAJECTORY_SCHEMA, METRICS_SCHEMA, MANIFEST_SCHEMA
 
 
@@ -258,6 +281,54 @@ def _append_fsync(path: Path, record: Mapping[str, Any]) -> None:
     os.fsync(output.fileno())
 
 
+def next_batch_index(output_dir: str | os.PathLike[str]) -> int:
+  """Returns the next durable batch index, rejecting partial journals."""
+  root = Path(output_dir)
+  trajectory_paths = sorted(root.glob("batch-*.trajectories.jsonl.gz"))
+  observed_indices = []
+  for path in trajectory_paths:
+    match = re.fullmatch(r"batch-(\d{6})\.trajectories\.jsonl\.gz", path.name)
+    if match is None:
+      raise ValueError(f"unexpected DeepSWE trajectory artifact: {path}")
+    observed_indices.append(int(match.group(1)))
+  expected_indices = list(range(len(trajectory_paths)))
+  if observed_indices != expected_indices:
+    raise ValueError(
+        "DeepSWE trajectory journal is not contiguous: "
+        f"expected={expected_indices} actual={observed_indices}"
+    )
+
+  metrics_path = root / "batch_metrics.jsonl"
+  metrics = []
+  if metrics_path.exists():
+    for line_number, line in enumerate(
+        metrics_path.read_text(encoding="utf-8").splitlines(), start=1
+    ):
+      if not line.strip():
+        continue
+      try:
+        record = json.loads(line)
+      except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"invalid DeepSWE metrics JSON at {metrics_path}:{line_number}"
+        ) from exc
+      metrics.append(record)
+  metric_indices = [record.get("step") for record in metrics]
+  if metric_indices != expected_indices or len(metrics) != len(trajectory_paths):
+    raise ValueError(
+        "DeepSWE trajectory/metrics journal is partial: "
+        f"trajectories={observed_indices} metrics={metric_indices}"
+    )
+  for record, path in zip(metrics, trajectory_paths):
+    if (
+        Path(str(record.get("trajectory_path", ""))).name != path.name
+        or record.get("trajectory_sha256")
+        != hashlib.sha256(path.read_bytes()).hexdigest()
+    ):
+      raise ValueError(f"DeepSWE journal digest mismatch for {path}")
+  return len(trajectory_paths)
+
+
 def _manifest(
     values: Mapping[str, str], *, model_id: str, output_dir: Path
 ) -> dict[str, Any]:
@@ -303,6 +374,22 @@ def _manifest(
     stage = values.get("CANON_P34_RUN_STAGE", "")
     if stage != "full":
       raise ValueError("P34 production artifacts require the full stage")
+  elif mode == "p58":
+    if model_id != "Qwen/Qwen3-4B-Instruct-2507":
+      raise ValueError(
+          "P58 artifacts require Qwen/Qwen3-4B-Instruct-2507"
+      )
+    arm = values.get("CANON_P58_TIM_ARM", "")
+    if arm not in ("native", "zero"):
+      raise ValueError("P58 artifact arm must be native or zero")
+    contract_name = "p58-qwen4b-tim-128"
+    slice_topology = "4x4x8"
+    role_topology = {"dp": 8, "tp": 8, "devices": 64}
+    global_prompts = 8
+    generations = 16
+    max_turns = 50
+    max_response_length = 16384
+    stage = values.get("CANON_P34_RUN_STAGE", "")
   elif mode == "p44":
     topology = values.get("CANON_P44_TOPOLOGY", "")
     if topology == "64":
@@ -344,6 +431,7 @@ def _manifest(
       "stage": stage,
       "model_id": model_id,
       "contract_name": contract_name,
+      "tim_arm": values.get("CANON_P58_TIM_ARM", "none"),
       "slice_topology": slice_topology,
       "role_topology": role_topology,
       "global_prompts": global_prompts,
@@ -424,6 +512,7 @@ def persist_batch(
     advantages: Sequence[Any],
     *,
     expected_step: int,
+    optimizer_step: int | None = None,
     output_dir: str | os.PathLike[str],
     model_id: str,
     values: Mapping[str, str] | None = None,
@@ -431,6 +520,8 @@ def persist_batch(
   """Persists one contract-sized real DeepSWE rollout batch and metrics."""
   if expected_step < 0:
     raise ValueError("P43 expected_step must be nonnegative")
+  if optimizer_step is not None and optimizer_step < 0:
+    raise ValueError("DeepSWE optimizer_step must be nonnegative")
   environ = os.environ if values is None else values
   root = Path(output_dir)
   manifest = ensure_manifest(root, model_id=model_id, values=environ)
@@ -471,6 +562,7 @@ def persist_batch(
     advantage = _finite_float(advantage_value, label="advantage")
     status = _status_name(trajectory)
     complete = status == _COMPLETE_STATUS
+    compact_filtered = status in _COMPACT_FILTER_STATUSES
     solved = complete and raw_reward == 1.0
     status_histogram[status] += 1
     reward_histogram[format(raw_reward, ".12g")] += 1
@@ -481,17 +573,25 @@ def persist_batch(
         "pair_index": pair_index,
         "status": status,
         "complete": complete,
+        "compact_filtered": compact_filtered,
         "solve_definition": SOLVE_DEFINITION,
         "solved": solved,
         "raw_final_reward": raw_reward,
         "training_reward": training_reward,
         "advantage": advantage,
-        "advantage_nonzero": advantage != 0.0,
+        # Compact-filtered rows retain their raw advantage for audit but have
+        # an all-zero policy mask, so they do not constitute training signal.
+        "advantage_nonzero": advantage != 0.0 and not compact_filtered,
+        "raw_advantage_nonzero": advantage != 0.0,
         "task_identity": _serializable(
             getattr(item, "metadata", {}).get("task_identity", {})
         ),
         "trajectory": trajectory,
     }
+    if _mode(environ) == "p58":
+      record["optimizer_step"] = (
+          expected_step if optimizer_step is None else optimizer_step
+      )
     records.append(record)
     groups[group_id].append(record)
 
@@ -516,6 +616,9 @@ def persist_batch(
   category_counts: collections.Counter[str] = collections.Counter()
   for group_id, group in sorted(groups.items()):
     complete_count = sum(record["complete"] for record in group)
+    compact_filtered_count = sum(
+        record["compact_filtered"] for record in group
+    )
     solved_count = sum(record["solved"] for record in group)
     if complete_count != expected_generations:
       category = "incomplete"
@@ -530,16 +633,26 @@ def persist_batch(
         "group_id": group_id,
         "category": category,
         "complete_trajectories": complete_count,
+        "compact_filtered_trajectories": compact_filtered_count,
         "solved_trajectories": solved_count,
         "nonzero_advantages": sum(
             record["advantage_nonzero"] for record in group
+        ),
+        "raw_nonzero_advantages": sum(
+            record["raw_advantage_nonzero"] for record in group
         ),
         "raw_rewards": [record["raw_final_reward"] for record in group],
     })
 
   solved_trajectories = sum(record["solved"] for record in records)
   complete_trajectories = sum(record["complete"] for record in records)
+  compact_filtered_trajectories = sum(
+      record["compact_filtered"] for record in records
+  )
   nonzero_advantages = sum(record["advantage_nonzero"] for record in records)
+  raw_nonzero_advantages = sum(
+      record["raw_advantage_nonzero"] for record in records
+  )
   metrics = {
       "schema": metrics_schema,
       "step": expected_step,
@@ -547,6 +660,13 @@ def persist_batch(
       "trajectories": expected_trajectories,
       "complete_trajectories": complete_trajectories,
       "incomplete_trajectories": expected_trajectories - complete_trajectories,
+      "compact_filtered_trajectories": compact_filtered_trajectories,
+      "compact_filtered_trajectory_ratio": (
+          compact_filtered_trajectories / expected_trajectories
+      ),
+      "compact_filtered_prompt_groups": sum(
+          item["compact_filtered_trajectories"] > 0 for item in group_records
+      ),
       "solved_trajectories": solved_trajectories,
       "trajectory_solve_ratio": solved_trajectories / expected_trajectories,
       "complete_trajectory_solve_ratio": (
@@ -564,6 +684,10 @@ def persist_batch(
       ),
       "nonzero_advantages": nonzero_advantages,
       "nonzero_advantage_ratio": nonzero_advantages / expected_trajectories,
+      "raw_nonzero_advantages": raw_nonzero_advantages,
+      "raw_nonzero_advantage_ratio": (
+          raw_nonzero_advantages / expected_trajectories
+      ),
       "nonbinary_final_rewards": sum(
           record["raw_final_reward"] not in (0.0, 1.0) for record in records
       ),
@@ -571,6 +695,10 @@ def persist_batch(
       "raw_final_reward_histogram": dict(sorted(reward_histogram.items())),
       "groups": group_records,
   }
+  if _mode(environ) == "p58":
+    metrics["optimizer_step"] = (
+        expected_step if optimizer_step is None else optimizer_step
+    )
 
   records.sort(key=lambda record: (record["group_id"], record["pair_index"]))
   trajectory_path = root / f"batch-{expected_step:06d}.trajectories.jsonl.gz"

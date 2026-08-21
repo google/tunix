@@ -119,6 +119,10 @@ class DeepSWEWorkload:
             "Qwen/Qwen3-32B", 8, 8, 16, 8, 128, 4, 4096, 4, 16384, 50,
             1000,
         ),
+        "p58-qwen4b-tim-128": (
+            "Qwen/Qwen3-4B-Instruct-2507", 8, 16, 8, 8, 64, 16, 2048, 16,
+            16384, 50, 1000,
+        ),
     }
     try:
       (
@@ -192,9 +196,10 @@ class DeepSWEWorkload:
           f"{self.contract_name} signed optimization campaign changed"
       )
     parity = self.contract_name.startswith("p44-qwen4b-parity-")
+    bounded_q4 = parity or self.contract_name == "p58-qwen4b-tim-128"
     expected_timeouts = (
         (300, 3000, 600, 600, 300, 3600, 3300)
-        if parity
+        if bounded_q4
         else (300, 4800, 1800, 1800, 300, 5400, 5100)
     )
     if (
@@ -331,6 +336,14 @@ P46_Q32_256_WORKLOAD = dataclasses.replace(
     P34_WORKLOAD,
     contract_name="p46-qwen32b-train-256",
 )
+P58_Q4_TIM_128_WORKLOAD = dataclasses.replace(
+    P44_PARITY_128_WORKLOAD,
+    contract_name="p58-qwen4b-tim-128",
+    global_prompts=8,
+    generations=16,
+    max_steps=1000,
+    max_num_seqs_per_dp=16,
+)
 
 
 def p44_workload(topology: str) -> DeepSWEWorkload:
@@ -375,6 +388,7 @@ def active_workload(
   debug_raw = environ.get("CANON_P43_DEEPSWE_DEBUG", "0")
   parity_raw = environ.get("CANON_P44_DEEPSWE_PARITY", "0")
   p46_raw = environ.get("CANON_P46_DEEPSWE_TRAIN", "0")
+  p58_raw = environ.get("CANON_P58_DEEPSWE_TIM", "0")
   if pilot_raw not in ("0", "1"):
     raise ValueError("CANON_P39_64CHIP_PILOT must be exactly 0 or 1")
   if debug_raw not in ("0", "1"):
@@ -383,14 +397,19 @@ def active_workload(
     raise ValueError("CANON_P44_DEEPSWE_PARITY must be exactly 0 or 1")
   if p46_raw not in ("0", "1"):
     raise ValueError("CANON_P46_DEEPSWE_TRAIN must be exactly 0 or 1")
+  if p58_raw not in ("0", "1"):
+    raise ValueError("CANON_P58_DEEPSWE_TIM must be exactly 0 or 1")
   selected = sum(
-      raw == "1" for raw in (pilot_raw, debug_raw, parity_raw, p46_raw)
+      raw == "1"
+      for raw in (pilot_raw, debug_raw, parity_raw, p46_raw, p58_raw)
   )
   if selected > 1:
     raise ValueError(
-        "P39, P43, P44, and P46 DeepSWE modes are mutually exclusive"
+        "P39, P43, P44, P46, and P58 DeepSWE modes are mutually exclusive"
     )
-  if p46_raw == "1":
+  if p58_raw == "1":
+    workload = P58_Q4_TIM_128_WORKLOAD
+  elif p46_raw == "1":
     workload = p46_q32_workload(environ.get("CANON_P46_TOPOLOGY", ""))
   elif parity_raw == "1":
     workload = p44_workload(environ.get("CANON_P44_TOPOLOGY", ""))
@@ -737,27 +756,33 @@ def validate_environment(values: Mapping[str, str]) -> None:
       "p46-qwen32b-train-64",
       "p46-qwen32b-train-256",
   )
+  p58_tim = workload.contract_name == "p58-qwen4b-tim-128"
+  p58_arm = values.get("CANON_P58_TIM_ARM", "")
+  if p58_tim and p58_arm not in ("native", "zero"):
+    raise ValueError("CANON_P58_TIM_ARM must be native or zero")
   parity_topology = str(workload.devices_per_role * 2) if parity else "none"
   production_capture = bool(
       not pilot
       and not debug
       and not parity
+      and not p58_tim
       and values.get("CANON_P34_RUN_STAGE") == "full"
   )
+  numerical_bundle = not p58_tim or p58_arm == "zero"
   expected = {
       "CANON_P34_DEEPSWE": "1",
       "CANON_P34_TOPOLOGY_ADMITTED": "1",
       "CANON_P34_TP8_ADMITTED": "1",
       "CANON_P34_TRAJECTORY_ADMITTED": "1",
       "CANON_P34_UPDATE_ADMITTED": "1",
-      "CANON_FIXED_AR": "1",
-      "CANON_FIXED_AR_EMBED": "1",
-      "CANON_RPA_VJP2": "1",
+      "CANON_FIXED_AR": "1" if numerical_bundle else None,
+      "CANON_FIXED_AR_EMBED": "1" if numerical_bundle else None,
+      "CANON_RPA_VJP2": "1" if numerical_bundle else "0",
       # Each segmented model_fn call activates one request per DP shard.  The
       # scheduler may reserve four request slots per shard, but unrolling four
       # VJPs would differentiate inactive capacity rather than the call.
-      "CANON_VJP2_MAX_SEQS": "1",
-      "CANON_LOGPROB_M": "256",
+      "CANON_VJP2_MAX_SEQS": "1" if numerical_bundle else "0",
+      "CANON_LOGPROB_M": "256" if numerical_bundle else None,
       "MIN_TOKEN_BUCKET": str(workload.global_m),
       "CANON_P34_ABCPROD": "256",
       "CANON_QWEN3_TP_SIZE": "8",
@@ -776,7 +801,9 @@ def validate_environment(values: Mapping[str, str]) -> None:
       "CANON_P34_DATASET_SPLIT": "train",
       "CANON_P34_DATASET_ROWS": "4578",
       "CANON_P34_CLEAN_ROWS": (
-          "1851" if production_capture or parity else "0"
+          "1012" if p58_tim else (
+              "1851" if production_capture or parity else "0"
+          )
       ),
       "CANON_DEEPSWE_CLEANUP_TIMEOUT_SECS": str(
           workload.cleanup_timeout_secs
@@ -826,6 +853,12 @@ def validate_environment(values: Mapping[str, str]) -> None:
       "CANON_P46_TOPOLOGY": (
           str(workload.devices_per_role * 2) if p46_train else "none"
       ),
+      "CANON_P58_DEEPSWE_TIM": "1" if p58_tim else "0",
+      "CANON_P58_TIM_ADMITTED": "1" if p58_tim else "0",
+      "CANON_P58_TIM_ARM": p58_arm if p58_tim else "none",
+      "CANON_P58_EXPECTED_UPDATES": (
+          str(requested_max_steps(values)) if p58_tim else "0"
+      ),
       "CANON_DP_SIZE": str(workload.dp_size),
       "CANON_TP_SIZE": str(workload.tp_size),
       "CANON_TOTAL_DEVICES": str(workload.devices_per_role),
@@ -836,13 +869,15 @@ def validate_environment(values: Mapping[str, str]) -> None:
       "CANON_GLOBAL_TRAJECTORIES": str(workload.global_trajectories),
       "FL_SHARED_MESH": f"{workload.dp_size},{workload.tp_size}",
   }
-  if pilot or debug or parity:
+  if pilot or debug or parity or p58_tim:
     expected.update({
         "CANON_OPT_STATE_RESIDENT": "1",
         "CANON_P30_OPT_STATE_OFFLOAD": "0",
-        "CANON_DEEPSWE_ALIGNMENT_WARN_ONLY": (
-            "1" if parity or production_capture else "0"
-        ),
+      "CANON_DEEPSWE_ALIGNMENT_WARN_ONLY": (
+          ("1" if p58_arm == "native" else "0") if p58_tim else (
+              "1" if parity or production_capture else "0"
+          )
+      ),
     })
   else:
     # Production full training is convergence-first: finite alignment drift is
@@ -861,8 +896,11 @@ def validate_environment(values: Mapping[str, str]) -> None:
   if wrong:
     raise ValueError(f"P34 environment mismatch: {wrong}")
   flags = values.get("XLA_FLAGS", "")
-  if "--xla_allow_excess_precision=false" not in flags:
+  has_precision_pin = "--xla_allow_excess_precision=false" in flags
+  if numerical_bundle and not has_precision_pin:
     raise ValueError("P34 XLA_FLAGS lost the excess-precision contract")
+  if not numerical_bundle and has_precision_pin:
+    raise ValueError("P58 native XLA_FLAGS leaked the zero-TIM precision pin")
   weight_report = values.get("CANON_P34_WEIGHT_REPORT", "")
   if not weight_report or not os.path.isabs(weight_report):
     raise ValueError("P34 weight attestation report path is missing")
@@ -874,6 +912,10 @@ def validate_environment(values: Mapping[str, str]) -> None:
     debug_dir = values.get("CANON_P44_DEBUG_DIR", "")
     if not debug_dir or not os.path.isabs(debug_dir):
       raise ValueError("P44 parity artifact directory is missing")
+  if p58_tim:
+    debug_dir = values.get("CANON_P58_DEBUG_DIR", "")
+    if not debug_dir or not os.path.isabs(debug_dir):
+      raise ValueError("P58 trajectory artifact directory is missing")
   if production_capture:
     debug_dir = values.get("CANON_P34_DEBUG_DIR", "")
     if not debug_dir or not os.path.isabs(debug_dir):
@@ -936,8 +978,13 @@ def requested_max_steps(values: Mapping[str, str]) -> int:
   ):
     raise ValueError(
         "P44 Qwen3-4B parity admits only rollout-only, one-update, or "
-        "three-update"
+      "three-update"
     )
+  if workload.contract_name == "p58-qwen4b-tim-128" and stage not in (
+      "three-update",
+      "full",
+  ):
+    raise ValueError("P58 admits only three-update or full")
   return steps
 
 

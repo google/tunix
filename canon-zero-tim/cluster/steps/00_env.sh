@@ -54,6 +54,13 @@ if [ "${CANON_PROFILE_FILE:-}" = \
    [ "${CANON_P57_INFERENCE_REGIME:-}" = "stock-fast" ]; then
   P57_STOCK_FAST=1
 fi
+P58_NATIVE=0
+if [ "${CANON_PROFILE_FILE:-}" = \
+     "cluster/profiles/qwen3-4b-dp8-tp8-deepswe-tim.env" ] && \
+   [ "${CANON_P58_DEEPSWE_TIM:-}" = "1" ] && \
+   [ "${CANON_P58_TIM_ARM:-}" = "native" ]; then
+  P58_NATIVE=1
+fi
 
 # Secrets: keep out of the env file on disk; strip whitespace; never echo the value.
 for k in HF_TOKEN WANDB_API_KEY; do
@@ -123,14 +130,16 @@ validate_train_mesh_pin() {
 for k in MIN_TOKEN_BUCKET NEW_MODEL_DESIGN XLA_FLAGS CANON_PROFILE \
          CANON_MODEL_DIR_NAME CANON_QWEN3_HIDDEN_SIZE \
          CANON_QWEN3_TP_SIZE; do req "$k"; done
-if [ "$P57_STOCK_FAST" = "1" ]; then
+if [ "$P57_STOCK_FAST" = "1" ] || [ "$P58_NATIVE" = "1" ]; then
+  stock_label="P57 stock-fast"
+  [ "$P58_NATIVE" = "0" ] || stock_label="P58 native"
   for k in CANON_FIXED_AR CANON_FIXED_AR_EMBED \
            CANON_RPA_D CANON_RPA_P CANON_RPA_M CANON_LOGPROB_M \
            CANON_PALLAS_ALL_PROJ CANON_PALLAS_ALL_RMSNORM \
            CANON_PALLAS_SWIGLU CANON_PALLAS_MPAD \
            CANON_PALLAS_SWIGLU_MPAD CANON_PALLAS_CANONICAL_VJP; do
     if [[ -v "$k" ]]; then
-      echo "[env] P57 stock-fast requires $k absent, got ${!k@Q}" >&2
+      echo "[env] $stock_label requires $k absent, got ${!k@Q}" >&2
       fail=1
     fi
   done
@@ -147,17 +156,27 @@ if [ "$P57_STOCK_FAST" = "1" ]; then
            CANON_ALIGNMENT_UPDATE_CANARY CANON_ALIGNMENT_TRAIN \
            CANON_PRE_ALIGN_GATE CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY \
            CANON_P38_FIXED_LM_HEAD; do
-    if [ "${!k:-}" != "0" ]; then
-      echo "[env] P57 stock-fast requires $k=0, got ${!k:-unset}" >&2
+    stock_expected=0
+    if [ "$P58_NATIVE" = "1" ]; then
+      case "$k" in
+        CANON_P32_TRAIN_ADMITTED|CANON_P33_WORKLOAD_LAUNCH_ADMITTED|CANON_ALIGNMENT_GATE|CANON_ALIGNMENT_TRAIN|CANON_PRE_ALIGN_GATE)
+          stock_expected=1
+          ;;
+      esac
+    fi
+    if [ "${!k:-}" != "$stock_expected" ]; then
+      echo "[env] $stock_label requires $k=$stock_expected, got ${!k:-unset}" >&2
       fail=1
     fi
   done
+  unset stock_expected
   case "${XLA_FLAGS:-}" in
     *--xla_allow_excess_precision=false*)
-      echo "[env] P57 stock-fast forbids the canonical excess-precision pin" >&2
+      echo "[env] $stock_label forbids the canonical excess-precision pin" >&2
       fail=1
       ;;
   esac
+  unset stock_label
 else
   for k in CANON_FIXED_AR CANON_FIXED_AR_EMBED CANON_RPA_D CANON_RPA_P \
            CANON_RPA_M CANON_RPA_VJP2 CANON_VJP2_MAX_SEQS \
@@ -760,7 +779,9 @@ if [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
            CANON_P44_DEEPSWE_PARITY CANON_P44_PARITY_ADMITTED \
            CANON_P44_TOPOLOGY CANON_P44_ROLLOUT_ONLY \
            CANON_P46_DEEPSWE_TRAIN CANON_P46_EVALUATION \
-           CANON_P46_TOPOLOGY \
+           CANON_P46_TOPOLOGY CANON_P58_DEEPSWE_TIM \
+           CANON_P58_TIM_ADMITTED CANON_P58_TIM_ARM \
+           CANON_P58_EXPECTED_UPDATES \
            CANON_OPT_STATE_RESIDENT CANON_P30_OPT_STATE_OFFLOAD \
            CANON_DEEPSWE_ALIGNMENT_WARN_ONLY \
            CANON_TRAIN_DP_SHARDING FL_SHARED_MESH \
@@ -798,6 +819,13 @@ if [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
       fail=1
       ;;
   esac
+  case "${CANON_P58_DEEPSWE_TIM:-}" in
+    0|1) ;;
+    *)
+      echo "[env] CANON_P58_DEEPSWE_TIM must be exactly 0 or 1" >&2
+      fail=1
+      ;;
+  esac
   if [ "${CANON_P44_DEEPSWE_PARITY:-}" != "1" ]; then
     [ "${CANON_P44_PARITY_ADMITTED:-}" = "0" ] || {
       echo "[env] non-P44 runs require CANON_P44_PARITY_ADMITTED=0" >&2
@@ -812,7 +840,52 @@ if [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
       fail=1
     }
   fi
-  if [ "${CANON_P46_DEEPSWE_TRAIN:-}" = "1" ]; then
+  if [ "${CANON_P58_DEEPSWE_TIM:-}" = "1" ]; then
+    [ "${CANON_P39_64CHIP_PILOT:-}:${CANON_P39_PILOT_ADMITTED:-}" = "0:0" ] && \
+    [ "${CANON_P43_DEEPSWE_DEBUG:-}:${CANON_P43_DEBUG_ADMITTED:-}" = "0:0" ] && \
+    [ "${CANON_P44_DEEPSWE_PARITY:-}:${CANON_P44_PARITY_ADMITTED:-}" = "0:0" ] && \
+    [ "${CANON_P46_DEEPSWE_TRAIN:-}" = "0" ] || {
+      echo "[env] P58 cannot overlap P39/P43/P44/P46" >&2
+      fail=1
+    }
+    [ "${CANON_P58_TIM_ADMITTED:-}" = "1" ] && \
+    [ "${CANON_P34_TRAJECTORY_CAPTURE:-}" = "0" ] && \
+    [ "${CANON_P34_CLEAN_ROWS:-}" = "1012" ] || {
+      echo "[env] P58 requires admission, its own journal, and 1012 clean rows" >&2
+      fail=1
+    }
+    case "${CANON_P34_RUN_STAGE:-}:${CANON_P58_EXPECTED_UPDATES:-}" in
+      three-update:3|full:1000) ;;
+      *)
+        echo "[env] P58 stage/update horizon mismatch" >&2
+        fail=1
+        ;;
+    esac
+    p34_expected_dp=8
+    p34_expected_devices=64
+    p34_expected_prompts=8
+    p34_expected_generations=16
+    p34_expected_global_trajectories=128
+    p34_expected_local_trajectories=16
+    p34_expected_global_m=2048
+    p34_expected_max_seqs=16
+    p34_expected_mesh=8,8
+    [ "${CANON_OPT_STATE_RESIDENT:-}:${CANON_P30_OPT_STATE_OFFLOAD:-}" = "1:0" ] || {
+      echo "[env] P58 requires a TPU-resident optimizer" >&2
+      fail=1
+    }
+    case "${CANON_P58_TIM_ARM:-}:${CANON_DEEPSWE_ALIGNMENT_WARN_ONLY:-}" in
+      native:1|zero:0) ;;
+      *)
+        echo "[env] P58 arm/alignment treatment drifted" >&2
+        fail=1
+        ;;
+    esac
+    case "${CANON_P58_DEBUG_DIR:-}" in
+      /*) ;;
+      *) echo "[env] P58 trajectory directory must be absolute" >&2; fail=1 ;;
+    esac
+  elif [ "${CANON_P46_DEEPSWE_TRAIN:-}" = "1" ]; then
     [ "${CANON_P39_64CHIP_PILOT:-}:${CANON_P39_PILOT_ADMITTED:-}" = "0:0" ] && \
     [ "${CANON_P43_DEEPSWE_DEBUG:-}:${CANON_P43_DEBUG_ADMITTED:-}" = "0:0" ] && \
     [ "${CANON_P44_DEEPSWE_PARITY:-}:${CANON_P44_PARITY_ADMITTED:-}" = "0:0" ] || {
@@ -1061,19 +1134,37 @@ if [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
       "$CANON_GLOBAL_TRAJECTORIES" ] || {
     echo "[env] P34 trajectory arithmetic does not close" >&2; fail=1;
   }
-  [ "${CANON_LOGPROB_M:-}" = "256" ] && \
-  [ "${CANON_TARGET_M:-}" = "256" ] && \
-  [ "${CANON_P34_ABCPROD:-}" = "256" ] && \
-  [ "${MIN_TOKEN_BUCKET:-}" = "$p34_expected_global_m" ] || {
-    echo "[env] P34 local/global M does not match the selected contract" >&2
-    fail=1
-  }
-  [ "$MIN_TOKEN_BUCKET" -eq "$((CANON_DP_SIZE * CANON_LOGPROB_M))" ] || {
-    echo "[env] P34 bucket FAIL: global M != dp*local M" >&2; fail=1;
-  }
-  [ "${CANON_VJP2_MAX_SEQS:-}" = "1" ] || {
-    echo "[env] P34 grouped model_fn requires CANON_VJP2_MAX_SEQS=1" >&2; fail=1;
-  }
+  if [ "$P58_NATIVE" = "1" ]; then
+    [ ! -v CANON_LOGPROB_M ] && \
+    [ "${CANON_TARGET_M:-}" = "256" ] && \
+    [ "${CANON_P34_ABCPROD:-}" = "256" ] && \
+    [ "${MIN_TOKEN_BUCKET:-}" = "$p34_expected_global_m" ] || {
+      echo "[env] P58 native local/global capacity contract changed" >&2
+      fail=1
+    }
+    [ "$MIN_TOKEN_BUCKET" -eq "$((CANON_DP_SIZE * CANON_TARGET_M))" ] || {
+      echo "[env] P58 native bucket FAIL: global M != dp*target M" >&2
+      fail=1
+    }
+    [ "${CANON_VJP2_MAX_SEQS:-}" = "0" ] || {
+      echo "[env] P58 native forbids the canonical grouped VJP" >&2
+      fail=1
+    }
+  else
+    [ "${CANON_LOGPROB_M:-}" = "256" ] && \
+    [ "${CANON_TARGET_M:-}" = "256" ] && \
+    [ "${CANON_P34_ABCPROD:-}" = "256" ] && \
+    [ "${MIN_TOKEN_BUCKET:-}" = "$p34_expected_global_m" ] || {
+      echo "[env] P34 local/global M does not match the selected contract" >&2
+      fail=1
+    }
+    [ "$MIN_TOKEN_BUCKET" -eq "$((CANON_DP_SIZE * CANON_LOGPROB_M))" ] || {
+      echo "[env] P34 bucket FAIL: global M != dp*local M" >&2; fail=1;
+    }
+    [ "${CANON_VJP2_MAX_SEQS:-}" = "1" ] || {
+      echo "[env] P34 grouped model_fn requires CANON_VJP2_MAX_SEQS=1" >&2; fail=1;
+    }
+  fi
   [ "${CANON_P34_PREFIX_CACHE:-}" = "0" ] && \
   [ "${CANON_P34_MAX_NUM_SEQS:-}" = "$p34_expected_max_seqs" ] && \
   [ "${CANON_P34_MAX_BATCHED_TOKENS:-}" = "256" ] || {

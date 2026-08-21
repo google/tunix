@@ -875,6 +875,144 @@ class PeftTrainerTest(parameterized.TestCase):
     # the scale is applied.
     self.assertGreater(max_abs_diff(params_a, params_b1), 1e-6)
 
+  def test_denominator_weighted_accumulation_matches_concatenated_batch(self):
+    """Unequal effective rows divide once by their global denominator."""
+
+    def loss_fn(
+        model, input_tokens, input_mask, positions, attention_mask, images=None
+    ):
+      del attention_mask, images
+      logits, _ = model(input_tokens, positions)
+      row_mask = (input_mask.sum(axis=-1) > 0).astype(jnp.float32)
+      unreduced = jnp.sum(logits * row_mask[:, None, None])
+      return utils.LossOutput(
+          primary_loss=utils.WeightedMetric(
+              unreduced, row_mask.sum(), min_denom=1e-6
+          ),
+          aux_metrics={},
+      )
+
+    def make_example(offset, rows, effective_rows):
+      tokens = jnp.arange(offset, offset + rows * 16).reshape(rows, 16)
+      mask = jnp.zeros((rows, 16), dtype=jnp.int32)
+      mask = mask.at[:effective_rows, 0].set(1)
+      return peft_trainer.TrainingInput(
+          input_tokens=tokens, input_mask=mask
+      )
+
+    first = make_example(0, 4, 1)
+    second = make_example(64, 4, 3)
+    combined = peft_trainer.TrainingInput(
+        input_tokens=jnp.concatenate(
+            [first.input_tokens, second.input_tokens], axis=0
+        ),
+        input_mask=jnp.concatenate(
+            [first.input_mask, second.input_mask], axis=0
+        ),
+    )
+
+    accumulated_model = tc.ToyTransformer(
+        config=tc.ModelConfig(), rngs=nnx.Rngs(0)
+    )
+    accumulated_config = peft_trainer.TrainingConfig(
+        eval_every_n_steps=100,
+        max_steps=1,
+        gradient_accumulation_steps=2,
+        loss_denominator_weighted_accumulation=True,
+    )
+    accumulated = peft_trainer.PeftTrainer(
+        accumulated_model, optax.sgd(1e-3), accumulated_config
+    ).with_gen_model_input_fn(dummy_gen_model_input_fn).with_loss_fn(loss_fn)
+    accumulated._train_step(
+        accumulated.model,
+        accumulated.optimizer,
+        accumulated.grad_accumulator,
+        first,
+        jnp.asarray(False),
+    )
+    _, accumulated_aux, _ = accumulated._train_step(
+        accumulated.model,
+        accumulated.optimizer,
+        accumulated.grad_accumulator,
+        second,
+        jnp.asarray(True),
+    )
+
+    full_model = tc.ToyTransformer(
+        config=tc.ModelConfig(), rngs=nnx.Rngs(0)
+    )
+    full_config = peft_trainer.TrainingConfig(
+        eval_every_n_steps=100,
+        max_steps=1,
+        loss_denominator_weighted_accumulation=True,
+    )
+    full = peft_trainer.PeftTrainer(
+        full_model, optax.sgd(1e-3), full_config
+    ).with_gen_model_input_fn(dummy_gen_model_input_fn).with_loss_fn(loss_fn)
+    _, full_aux, _ = full._train_step(
+        full.model,
+        full.optimizer,
+        full.grad_accumulator,
+        combined,
+        jnp.asarray(True),
+    )
+
+    chex.assert_trees_all_close(
+        nnx.state(accumulated.model, nnx.Param),
+        nnx.state(full.model, nnx.Param),
+        atol=1e-6,
+    )
+    self.assertEqual(
+        float(accumulated_aux['loss/accumulated_denominator']), 4.0
+    )
+    self.assertTrue(bool(accumulated_aux['loss/optimizer_committed']))
+    self.assertTrue(bool(full_aux['loss/optimizer_committed']))
+
+  def test_denominator_weighted_all_empty_skips_optimizer(self):
+    """A zero global denominator does not execute an optimizer transaction."""
+
+    def loss_fn(
+        model, input_tokens, input_mask, positions, attention_mask, images=None
+    ):
+      del input_mask, attention_mask, images
+      logits, _ = model(input_tokens, positions)
+      return utils.LossOutput(
+          primary_loss=utils.WeightedMetric(
+              jnp.sum(logits * 0.0),
+              jnp.asarray(0.0),
+              min_denom=1e-6,
+          ),
+          aux_metrics={},
+      )
+
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    config = peft_trainer.TrainingConfig(
+        eval_every_n_steps=100,
+        max_steps=1,
+        loss_denominator_weighted_accumulation=True,
+    )
+    trainer = peft_trainer.PeftTrainer(
+        model, optax.adam(1e-3), config
+    ).with_gen_model_input_fn(dummy_gen_model_input_fn).with_loss_fn(loss_fn)
+    model_before = jax.tree.map(
+        lambda x: np.asarray(x).copy(), nnx.state(trainer.model, nnx.Param)
+    )
+    optimizer_before = jax.tree.map(
+        lambda x: np.asarray(x).copy(), nnx.state(trainer.optimizer)
+    )
+    _, aux, _ = trainer._train_step(
+        trainer.model,
+        trainer.optimizer,
+        trainer.grad_accumulator,
+        self.train_ds[0],
+        jnp.asarray(True),
+    )
+    chex.assert_trees_all_equal(
+        model_before, nnx.state(trainer.model, nnx.Param)
+    )
+    chex.assert_trees_all_equal(optimizer_before, nnx.state(trainer.optimizer))
+    self.assertFalse(bool(aux['loss/optimizer_committed']))
+
   def test_stream_train_step_returns_raw_weighted_metric_aux(self):
     # Since _compute_legacy_aux was dropped, the (stream) _train_step returns
     # the raw aux with WeightedMetric preserved, so the metric ops can reduce
@@ -1107,6 +1245,56 @@ class PeftTrainerTest(parameterized.TestCase):
         trainer.apply_precomputed_gradient_microbatches(
             gradient_microbatches
         )
+
+  def test_p58_precomputed_all_filtered_discard_resets_without_commit(self):
+    config = peft_trainer.TrainingConfig(
+        eval_every_n_steps=100,
+        max_steps=1,
+        gradient_accumulation_steps=4,
+        checkpoint_root_directory=None,
+    )
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    trainer = peft_trainer.PeftTrainer(model, optax.sgd(1e-3), config)
+    gradients = tuple(
+        jax.tree.map(
+            lambda value: type(value)(jnp.zeros_like(value[...])),
+            nnx.state(trainer.model, nnx.Param),
+            is_leaf=lambda value: isinstance(value, nnx.VariableState),
+        )
+        for _ in range(4)
+    )
+    before = jax.tree.map(
+        lambda value: np.asarray(value).copy(),
+        nnx.state(trainer.model, nnx.Param),
+    )
+    env = {
+        "CANON_ALIGNMENT_GATE": "1",
+        "CANON_ALIGNMENT_UPDATE_CANARY": "1",
+        "CANON_ALIGNMENT_GATE_ONLY": "0",
+        "CANON_ALIGNMENT_TRAIN": "0",
+        "CANON_P28_SEGMENTED_TRAIN": "1",
+        "CANON_P28_G5C_ONLY": "0",
+        "CANON_P28_G6_UPDATE": "1",
+        "CANON_P58_DEEPSWE_TIM": "1",
+    }
+    with mock.patch.dict(os.environ, env, clear=False):
+      for index, gradient in enumerate(gradients):
+        trainer.accumulate_precomputed_gradient_microbatch(
+            gradient, microbatch_index=index
+        )
+      denominator = trainer.discard_precomputed_gradients()
+
+    self.assertEqual(float(denominator), 4.0)
+    self.assertEqual(trainer.train_steps, 0)
+    self.assertEqual(trainer._p28_precomputed_microstep, 0)
+    for actual, expected in zip(
+        jax.tree.leaves(nnx.state(trainer.model, nnx.Param)),
+        jax.tree.leaves(before),
+        strict=True,
+    ):
+      np.testing.assert_array_equal(np.asarray(actual), np.asarray(expected))
+    for value in jax.tree.leaves(nnx.state(trainer.grad_accumulator)):
+      np.testing.assert_array_equal(np.asarray(value), np.zeros_like(value))
 
   def test_p28_g6_checkpointing_is_isolated_to_signed_p45(self):
     checkpoint_directory = (

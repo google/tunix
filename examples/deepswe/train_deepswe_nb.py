@@ -160,7 +160,7 @@ parser.add_argument("--max_concurrency", type=int, default=200)
 
 parser.add_argument(
     "--overlong_filter",
-    type=bool,
+    action=argparse.BooleanOptionalAction,
     default=True,
     help="Whether to filter out trajectories that exceed length limits",
 )
@@ -236,6 +236,24 @@ parser.add_argument(
 
 parser.add_argument(
     "--loss_agg_mode", type=str, default="sequence-mean-token-scale"
+)
+parser.add_argument(
+    "--loss_scale_factor",
+    type=int,
+    default=None,
+    help=(
+        "Optional explicit fixed denominator for "
+        "sequence-mean-token-scale. Must equal max_response_length."
+    ),
+)
+parser.add_argument(
+    "--loss_denominator_weighted_accumulation",
+    action=argparse.BooleanOptionalAction,
+    default=False,
+    help=(
+        "Accumulate unreduced gradients and divide once by the summed loss "
+        "denominator. Required when compact filtering changes effective rows."
+    ),
 )
 parser.add_argument("--advantage_estimator", type=str, default="rloo")
 parser.add_argument(
@@ -640,6 +658,10 @@ FILTER_STATUSES = (
     else None
 )
 LOSS_AGG_MODE = args.loss_agg_mode
+LOSS_SCALE_FACTOR = args.loss_scale_factor
+LOSS_DENOMINATOR_WEIGHTED_ACCUMULATION = (
+    args.loss_denominator_weighted_accumulation
+)
 ADVANTAGE_ESTIMATOR = args.advantage_estimator
 USE_ROLLOUT_LOGPS = args.use_rollout_logps
 
@@ -649,6 +671,15 @@ if P34_DEEPSWE:
   p34 = deepswe_contract.active_workload(os.environ)
   p34_stage = os.environ.get("CANON_P34_RUN_STAGE", "")
   p34_full = p34.contract_name == "p34-production" and p34_stage == "full"
+  p58_tim = p34.contract_name == "p58-qwen4b-tim-128"
+  p58_filter_statuses = {
+      agent_types.TrajectoryStatus.MAX_STEPS_REACHED,
+      agent_types.TrajectoryStatus.MAX_CONTEXT_LIMIT_REACHED,
+      agent_types.TrajectoryStatus.TIMEOUT,
+      agent_types.TrajectoryStatus.ENV_TIMEOUT,
+      agent_types.TrajectoryStatus.MODEL_TIMEOUT,
+      agent_types.TrajectoryStatus.REWARD_TIMEOUT,
+  }
   expected_model_version = p34.model_id.removeprefix("Qwen/")
   exact = {
       "model_version": MODEL_VERSION in (
@@ -695,6 +726,21 @@ if P34_DEEPSWE:
       "weight_decay": WEIGHT_DECAY == p34.weight_decay,
       "max_grad_norm": MAX_GRAD_NORM == p34.max_grad_norm,
       "loss_agg_mode": LOSS_AGG_MODE == p34.loss_agg_mode,
+      "loss_scale_factor": (
+          LOSS_SCALE_FACTOR == p34.max_response_length
+          if p58_tim
+          else LOSS_SCALE_FACTOR is None
+      ),
+      "loss_denominator_weighted_accumulation": (
+          LOSS_DENOMINATOR_WEIGHTED_ACCUMULATION
+          if p58_tim
+          else not LOSS_DENOMINATOR_WEIGHTED_ACCUMULATION
+      ),
+      "compact_filter": (
+          OVERLONG_FILTER and FILTER_STATUSES == p58_filter_statuses
+          if p58_tim
+          else True
+      ),
       "advantage_estimator": (
           ADVANTAGE_ESTIMATOR == p34.advantage_estimator
       ),
@@ -716,8 +762,8 @@ if P34_DEEPSWE:
       "dataset_split": args.dataset_split == "train",
       "dataset_source_rows": args.expected_source_rows == 4578,
       "clean_filtered_rows": (
-          args.expected_filtered_rows == 1851
-          if p34_full or p34.contract_name.startswith("p44-")
+          args.expected_filtered_rows == (1012 if p58_tim else 1851)
+          if p34_full or p34.contract_name.startswith("p44-") or p58_tim
           else args.expected_filtered_rows is None
       ),
       "rollout_max_num_seqs": (
@@ -1402,6 +1448,9 @@ cluster_config = rl_cluster_lib.ClusterConfig(
             p34.local_trajectories if P34_DEEPSWE else None
         ),
         optimizer_offload=OPTIMIZER_OFFLOAD,
+        loss_denominator_weighted_accumulation=(
+            LOSS_DENOMINATOR_WEIGHTED_ACCUMULATION
+        ),
         data_sharding_axis=training_data_sharding_axis,
         metrics_logging_options=metrics_logging_options,
         checkpoint_root_directory=CKPT_DIR,
@@ -1441,6 +1490,7 @@ config_kwargs = {
     "overlong_filter": OVERLONG_FILTER,
     "filter_statuses": FILTER_STATUSES,
     "loss_agg_mode": LOSS_AGG_MODE,
+    "loss_scale_factor": LOSS_SCALE_FACTOR,
     "advantage_estimator": ADVANTAGE_ESTIMATOR,
     "use_rollout_logps": USE_ROLLOUT_LOGPS,
 }
