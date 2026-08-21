@@ -91,7 +91,7 @@ def _spec() -> p33.JobSpec:
       stage="full",
       profile=_PROFILE,
       no_commit=False,
-      job_prefix="canon-p57-cal-stochastic",
+      job_prefix="canon-p57-cal",
       command=tuple(command),
       enable_evaluation=False,
       dp_size=8,
