@@ -1,7 +1,10 @@
 """Static L1 contracts for P46 stock reward-only evaluation."""
 
 import asyncio
+import dataclasses
+import hashlib
 import json
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -19,6 +22,210 @@ import r2egym_runtime_patch  # pylint: disable=wrong-import-position
 
 
 class RewardOnlyContractTest(unittest.TestCase):
+
+  def test_imported_v5_identities_are_skipped_by_census_resume(self):
+    with tempfile.TemporaryDirectory() as root_text:
+      root = Path(root_text)
+      output_dir = root / "fresh-resume" / "outputs"
+      entries = [
+          {"docker_image": f"image-{index}"} for index in range(4)
+      ]
+      config = artifacts.EvalConfig(
+          model_id="Qwen/Qwen3-4B-Instruct-2507",
+          model_path=str(root / "model"),
+          dataset_name="R2E-Gym/R2E-Gym-Subset",
+          dataset_revision="2e8108ff942f24fcb5686badfaf7f9a8808566d5",
+          dataset_split="train",
+          dataset_rows=4578,
+          whitelist_path=str(root / "clean.jsonl"),
+          whitelist_sha256="2" * 64,
+          whitelist_rows=1851,
+          source_commit="5" * 40,
+          harness_commit="6" * 40,
+          client_image="example.invalid/tunix@sha256:" + "7" * 64,
+          topology="128",
+          resume_tag="fresh-resume",
+      )
+      legacy_records = []
+      for entry in entries:
+        for sample_index in range(config.n_sample):
+          record = artifacts.trajectory_record(
+              config,
+              entry=entry,
+              sample_index=sample_index,
+              trajectory={
+                  "status": "SUCCEEDED",
+                  "reward": 0.0,
+                  "steps": [],
+              },
+              elapsed_secs=1.0,
+          )
+          record.update({
+              "schema": artifacts.LEGACY_TRAJECTORY_SCHEMA,
+              "config_fingerprint": artifacts.legacy_v5_fingerprint(config),
+              "run_tag": artifacts.legacy_v5_run_tag(config),
+          })
+          record.pop("resume_tag")
+          record.pop("harness_commit")
+          legacy_records.append(record)
+      legacy_records = legacy_records[:17]
+      snapshot = output_dir.parent / "imports" / "old-v5"
+      trajectory = snapshot / "trajectories" / "wave.jsonl"
+      trajectory.parent.mkdir(parents=True)
+      payload = b"".join(
+          (json.dumps(record, sort_keys=True) + "\n").encode()
+          for record in legacy_records
+      )
+      trajectory.write_bytes(payload)
+      (snapshot / "SHA256SUMS").write_text(
+          f"{hashlib.sha256(payload).hexdigest()}  trajectories/wave.jsonl\n",
+          encoding="utf-8",
+      )
+      validation = artifacts.validate_legacy_v5_snapshot_contract(
+          snapshot,
+          config=config,
+          allowed_task_keys=(artifacts.task_key(entry) for entry in entries),
+      )
+      receipt = artifacts.import_legacy_v5_snapshot(
+          snapshot,
+          output_dir,
+          config=config,
+          allowed_task_keys=(artifacts.task_key(entry) for entry in entries),
+          validated_snapshot_manifest_sha256=validation[
+              "snapshot_manifest_sha256"
+          ],
+      )
+      self.assertEqual(receipt["records"], 17)
+      wave_sizes = []
+
+      async def fake_run(
+          logical_config,
+          unused_entries,
+          pending,
+          output_path,
+          *,
+          runtime,
+          timeout_secs,
+      ):
+        del unused_entries, runtime
+        self.assertEqual(timeout_secs, 3600)
+        wave_sizes.append(len(pending))
+        for entry, sample_index, attempt_index in pending:
+          artifacts.append_record(
+              output_path,
+              artifacts.trajectory_record(
+                  logical_config,
+                  entry=entry,
+                  sample_index=sample_index,
+                  attempt_index=attempt_index,
+                  trajectory={
+                      "status": "SUCCEEDED",
+                      "reward": 0.0,
+                      "steps": [],
+                  },
+                  elapsed_secs=1.0,
+              ),
+          )
+        return len(pending), False
+
+      with (
+          mock.patch.object(eval_deepswe, "_Runtime", return_value=object()),
+          mock.patch.object(
+              eval_deepswe, "_run_evaluation", side_effect=fake_run
+          ),
+      ):
+        result = asyncio.run(eval_deepswe._run_full_campaign(
+            config,
+            entries,
+            output_dir,
+            first_pass_census=True,
+            launch_id="resume-census",
+        ))
+      self.assertEqual(result, 0)
+      self.assertEqual(wave_sizes, [47])
+      loaded = artifacts.load_records(
+          list((output_dir / "trajectories").glob("*.jsonl")),
+          config=config,
+          allowed_task_keys=(artifacts.task_key(entry) for entry in entries),
+      )
+      self.assertEqual(len(loaded), 64)
+
+  def test_wrong_legacy_sampler_fails_before_target_resume_tag_is_claimed(self):
+    with tempfile.TemporaryDirectory() as root_text:
+      root = Path(root_text)
+      output_dir = root / "fresh-resume" / "outputs"
+      entry = {"docker_image": "image-a"}
+      source_config = artifacts.EvalConfig(
+          model_id="Qwen/Qwen3-4B-Instruct-2507",
+          model_path=str(root / "model"),
+          dataset_name="R2E-Gym/R2E-Gym-Subset",
+          dataset_revision="2e8108ff942f24fcb5686badfaf7f9a8808566d5",
+          dataset_split="train",
+          dataset_rows=4578,
+          whitelist_path=str(root / "clean.jsonl"),
+          whitelist_sha256="2" * 64,
+          whitelist_rows=1851,
+          source_commit="5" * 40,
+          harness_commit="6" * 40,
+          client_image="example.invalid/tunix@sha256:" + "7" * 64,
+          topology="128",
+          resume_tag="source-resume",
+      )
+      destination_config = dataclasses.replace(
+          source_config,
+          source_commit="6" * 40,
+          resume_tag="fresh-resume",
+      )
+      record = artifacts.trajectory_record(
+          source_config,
+          entry=entry,
+          sample_index=0,
+          trajectory={"status": "SUCCEEDED", "reward": 0.0, "steps": []},
+          elapsed_secs=1.0,
+      )
+      record.update({
+          "schema": artifacts.LEGACY_TRAJECTORY_SCHEMA,
+          "config_fingerprint": artifacts.legacy_v5_fingerprint(source_config),
+          "run_tag": artifacts.legacy_v5_run_tag(source_config),
+      })
+      record.pop("resume_tag")
+      record.pop("harness_commit")
+      snapshot = output_dir.parent / "imports" / "source-v5"
+      trajectory = snapshot / "trajectories" / "wave.jsonl"
+      trajectory.parent.mkdir(parents=True)
+      payload = (json.dumps(record, sort_keys=True) + "\n").encode()
+      trajectory.write_bytes(payload)
+      (snapshot / "SHA256SUMS").write_text(
+          f"{hashlib.sha256(payload).hexdigest()}  trajectories/wave.jsonl\n",
+          encoding="utf-8",
+      )
+
+      environment = {
+          "CANON_P46_FULL_CAMPAIGN": "1",
+          "CANON_P46_CENSUS_FIRST_PASS": "1",
+          "CANON_P46_ONEHOST_PROBE": "0",
+          "CANON_P46_PARITY_CANARY": "0",
+          "CANON_P46_EVALUATION_MODE": "reward_only",
+          "CANON_P46_LEGACY_IMPORT_ID": "source-v5",
+          "CANON_P46_FROZEN_V6_IMPORT_ID": "",
+          "CANON_RUN_ID": "wrong-sampler-test",
+      }
+      with (
+          mock.patch.dict(os.environ, environment, clear=False),
+          mock.patch.object(
+              eval_deepswe,
+              "_build_config",
+              return_value=(destination_config, 0, output_dir),
+          ),
+          mock.patch.object(
+              eval_deepswe, "_load_clean_entries", return_value=[entry]
+          ),
+      ):
+        with self.assertRaisesRegex(
+            ValueError, "sampling contract mismatch before resume lease"
+        ):
+          eval_deepswe.main()
+      self.assertFalse((output_dir / "resume_contract.json").exists())
 
   def test_vllm_false_path_is_none_none_and_skips_extraction(self):
     sampler = (ROOT / "tunix/generate/vllm_sampler.py").read_text(

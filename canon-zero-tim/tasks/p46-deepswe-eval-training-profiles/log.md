@@ -693,3 +693,46 @@
 - Next: publish this read-back ledger checkpoint, then the execution agent may
   follow HANDOFF P46.7 only after fresh branch ancestry, old-producer terminal
   and sealed-snapshot gates pass.
+
+## 2026-08-21T01:08:25Z — P46.7 returned v5 snapshot incident repair
+
+- Fast-forwarded the clean review worktree from
+  `5f2d016147a55c032ea7b89b156a583d3b4ca7e8` to exact operator HEAD
+  `91844a412cc288e18574e0812726263930726b12`. The only returned change was the
+  incident report; no local changes were discarded and `main` was untouched.
+- Exact returned failure: 128 TPU chips reached Running, but coordinator
+  `p46c128a0` failed before model/runtime initialization while legacy import
+  expected a fingerprint derived from the live harness SHA. The actual rows
+  are trajectory-v5 with
+  `sampled_by=stock@ac2c31bc7f6f82d33b3a62d62e1c390c8338b60e`; the launch
+  omitted that explicit historical sampling SHA.
+- The directory name `p46e12806-v6-final` was misleading. Import mode is now
+  selected from actual row schema. A legacy-v5 snapshot must contain only raw
+  trajectory JSONLs plus `SHA256SUMS`; a real frozen-v6 snapshot must also
+  contain the matching immutable resume contract.
+- `p46q4census01` is non-reusable incident evidence because old code wrote its
+  incorrect immutable resume contract before import validation. Recovery uses
+  a fresh tag such as `p46q4census02`; it never deletes, overwrites or repairs
+  the failed tag.
+- Local repair: renderer requires explicit `--sampling-source-commit` for
+  either import mode; environment preflight rejects a v5 staging directory
+  containing `resume_contract.json`; and the evaluator validates every sealed
+  source row before acquiring the campaign lease or writing the destination
+  resume contract. Wrong sampler, mixed schema and wrong importer fail before
+  claiming the new tag.
+- Resume semantics: a successful `LEGACY_IMPORT_PASS records=<actual>` adopts
+  all validated durable identities, and census runs only identities absent
+  from that imported set. The incident reports 510 raw records; a greater
+  reusable count requires a greater sealed raw tree. The 22,918 five-field
+  derived table cannot seed resume.
+- Release evidence: `P46_DEEPSWE_PROFILES_CPU_PASS cases=77`,
+  `P34_STATIC_PASS suites=10`, `P34_TRAJECTORY_CPU_PASS tests=5`,
+  `P34_UPDATE_CPU_PASS tests=5`, and
+  `P44_DEEPSWE_QWEN4B_PARITY_CPU_PASS`; Python/shell compilation and
+  `git diff --check` pass. Regressions prove a wrong sampler does not create
+  target `resume_contract.json`, a snapshot change after pre-lease validation
+  is rejected, all legacy rows are checked, and 17 imported identities cause
+  census to execute exactly the remaining 47 of a 64-identity wave.
+- Claim ceiling: this proves CPU resume orchestration, not target PVC I/O,
+  Pathways, R2E cleanup, 128-chip throughput or actual imported cardinality.
+  No cluster, PVC, commit, push or credential mutation occurred.

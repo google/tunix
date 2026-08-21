@@ -7,9 +7,37 @@ Qwen3-32B training renders on 64-chip `4x4x4` or 256-chip `4x8x8`. The renderer
 writes the signed parameters directly into the JobSet; do not add a second
 shell override layer.
 
-## P46.7 breadth-first census and v6 handoff
+## 2026-08-21 returned-snapshot correction
 
-This is the current next-run procedure. Implementation
+The current operator path is **legacy-v5 adoption into a fresh census tag**,
+not the generic frozen-v6 path below. Attempt
+`canon-p46-eval-census-128-p46c128a0` selected a directory named
+`p46e12806-v6-final`, but its rows are
+`canon.p46.deepswe-eval.trajectory.v5` with sampler
+`stock@ac2c31bc7f6f82d33b3a62d62e1c390c8338b60e`. Omitting the explicit
+historical sampling SHA caused the correct fingerprint failure before model
+runtime.
+
+Do not reuse `p46q4census01`: the old code wrote its incorrect immutable
+resume contract before import validation. Preserve it as incident evidence.
+Use a fresh destination such as `p46q4census02`; make a sealed v5-only copy
+containing trajectory JSONLs plus `SHA256SUMS` and no
+`resume_contract.json`; then render `--legacy-import-id` with explicit
+`--sampling-source-commit ac2c31bc7f6f82d33b3a62d62e1c390c8338b60e`.
+Require `LEGACY_IMPORT_PASS records=<actual>` before runtime. Imported durable
+identities are skipped, so this does not restart washing from zero.
+
+The fixed entrypoint validates all legacy-v5 rows before writing the new resume
+contract, and the renderer refuses either import mode without an explicit
+sampling-source SHA. This repair must be published and read back exactly
+before a remote launch. Full commands, exact error evidence and cardinality
+limits are in `P46_CENSUS_SNAPSHOT_RESUME_INCIDENT.md`.
+
+## P46.7 breadth-first census and generic v6 handoff
+
+This section applies only when inspection proves the source records are real
+trajectory-v6 and a matching sealed `resume_contract.json` exists. Directory
+names do not determine schema. Implementation
 `365b46c1cd150839e3be1fd50adb33325fe3189f` is published and was read back
 exactly from `yuxzhang/canon-zero-tim`; executors still repeat the fresh
 ancestry/read-back gate before launch. It supersedes the strict-first launch
@@ -24,7 +52,7 @@ task/sample identity once. Render Q4 evaluation with all three controls:
 --resume-tag <fresh-v6-migration-tag>
 ```
 
-On the first launch only, add
+For a genuine v6 source only, on the first launch add
 `--frozen-v6-import-id <sealed-old-v6-snapshot-id>` and pass the old
 `resume_contract.json` source SHA through `--sampling-source-commit`. A newer
 census-capable `--source-commit` is the harness SHA. They must not be silently
@@ -167,7 +195,7 @@ finalizer are published by
 `a642ab267425a5b08b0cebb6e12c607f50f71831`. A remote agent must stop unless
 the exact read-back operator SHA contains that commit and all of
 `attempt_index`, `P46_EVAL_PHYSICAL_INCOMPLETE`, and
-`P46_DEEPSWE_PROFILES_CPU_PASS cases=75`, plus
+`P46_DEEPSWE_PROFILES_CPU_PASS cases=77`, plus
 `finalize_deepswe_eval.py`. Do not invent or substitute a repair SHA in
 advance.
 
@@ -531,7 +559,7 @@ in the P34/P44 runbooks with the actual registry-digest client image. Do not
 print or modify `HF_TOKEN`, `WANDB_API_KEY`, or `.env`.
 
 For evaluation execution after the `p46e25609` action-adapter correction, the
-marker must be exactly `P46_DEEPSWE_PROFILES_CPU_PASS cases=75`, and this
+marker must be exactly `P46_DEEPSWE_PROFILES_CPU_PASS cases=77`, and this
 source audit must
 pass before rendering:
 

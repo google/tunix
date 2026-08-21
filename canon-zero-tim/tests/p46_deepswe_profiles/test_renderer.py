@@ -276,14 +276,26 @@ class P46RendererTest(unittest.TestCase):
     self.assertIn("/wash-q4-import/outputs", env["CANON_P46_OUTPUT_DIR"])
     with self.assertRaisesRegex(ValueError, "requires a full campaign"):
       self._render(
-          "q4-clean-eval", "128", legacy_import_id="old-run"
+          "q4-clean-eval",
+          "128",
+          sampling_source_commit="5" * 40,
+          legacy_import_id="old-run",
       )
     with self.assertRaisesRegex(ValueError, "legacy import id"):
       self._render(
           "q4-clean-eval",
           "128",
           full_campaign=True,
+          sampling_source_commit="5" * 40,
           legacy_import_id="../old-run",
+      )
+    with self.assertRaisesRegex(ValueError, "explicit --sampling-source-commit"):
+      self._render(
+          "q4-clean-eval",
+          "128",
+          full_campaign=True,
+          resume_tag="wash-q4-import-missing-source",
+          legacy_import_id="old-run",
       )
 
   def test_frozen_v6_snapshot_is_explicit_and_mutually_exclusive(self):
@@ -303,7 +315,10 @@ class P46RendererTest(unittest.TestCase):
     )
     with self.assertRaisesRegex(ValueError, "requires a full campaign"):
       self._render(
-          "q4-clean-eval", "128", frozen_v6_import_id="sealed-old-v6"
+          "q4-clean-eval",
+          "128",
+          sampling_source_commit="5" * 40,
+          frozen_v6_import_id="sealed-old-v6",
       )
     with self.assertRaisesRegex(ValueError, "only one frozen resume import"):
       self._render(
@@ -311,7 +326,16 @@ class P46RendererTest(unittest.TestCase):
           "128",
           full_campaign=True,
           resume_tag="wash-q4-v6-both",
+          sampling_source_commit="5" * 40,
           legacy_import_id="legacy-v5",
+          frozen_v6_import_id="sealed-old-v6",
+      )
+    with self.assertRaisesRegex(ValueError, "explicit --sampling-source-commit"):
+      self._render(
+          "q4-clean-eval",
+          "128",
+          full_campaign=True,
+          resume_tag="wash-q4-v6-missing-source",
           frozen_v6_import_id="sealed-old-v6",
       )
 

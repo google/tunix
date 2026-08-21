@@ -428,6 +428,132 @@ def _snapshot_manifest(snapshot_dir: Path) -> tuple[list[tuple[Path, str]], str]
   return entries, manifest_sha256
 
 
+def validate_legacy_v5_snapshot_contract(
+    snapshot_dir: str | os.PathLike[str],
+    *,
+    config: EvalConfig,
+    allowed_task_keys: Iterable[str],
+) -> dict[str, Any]:
+  """Rejects a wrong snapshot kind or sampling SHA before claiming a tag."""
+  config.validate()
+  snapshot = Path(snapshot_dir).resolve()
+  if (snapshot / "resume_contract.json").exists():
+    raise ValueError(
+        "legacy-v5 import snapshot must not contain resume_contract.json; "
+        "use a v5-only sealed staging copy or --frozen-v6-import-id for "
+        "trajectory-v6 evidence"
+    )
+  entries, manifest_sha256 = _snapshot_manifest(snapshot)
+  ordered_keys = list(allowed_task_keys)
+  if len(ordered_keys) != len(set(ordered_keys)):
+    raise ValueError("legacy import task order contains duplicate identities")
+  task_index = {key: index for index, key in enumerate(ordered_keys)}
+  first_record_path: str | None = None
+  sampled_by: str | None = None
+  records = 0
+  attempts: dict[tuple[str, int], list[Mapping[str, Any]]] = (
+      collections.defaultdict(list)
+  )
+  for path, _ in entries:
+    lines = path.read_text(encoding="utf-8").splitlines()
+    for line_number, line in enumerate(lines, 1):
+      if not line.strip():
+        continue
+      try:
+        record = json.loads(line)
+      except json.JSONDecodeError:
+        if line_number == len(lines):
+          continue
+        raise ValueError(f"invalid JSON before trailing line in {path}")
+      if not isinstance(record, Mapping):
+        raise ValueError(f"legacy trajectory is not an object: {path}")
+      if record.get("schema") == TRAJECTORY_SCHEMA:
+        raise ValueError(
+            "trajectory-v6 snapshot was selected with --legacy-import-id; "
+            "use --frozen-v6-import-id and its resume_contract.json"
+        )
+      if record.get("schema") != LEGACY_TRAJECTORY_SCHEMA:
+        raise ValueError(f"unsupported legacy snapshot schema in {path}")
+      key = record.get("task_key")
+      sample_index = record.get("sample_index")
+      attempt_index = record.get("attempt_index", 0)
+      if (
+          not isinstance(key, str)
+          or key not in task_index
+          or not isinstance(sample_index, int)
+          or not 0 <= sample_index < config.n_sample
+          or record.get("sample_nonce")
+          != config.sample_nonce(key, sample_index)
+      ):
+        raise ValueError(f"legacy trajectory identity mismatch in {path}")
+      logical_index = task_index[key] // config.logical_tasks
+      logical_config = dataclasses.replace(config, shard_index=logical_index)
+      expected_fields = {
+          "config_fingerprint": legacy_v5_fingerprint(logical_config),
+          "run_tag": legacy_v5_run_tag(logical_config),
+          "trajectory_mode": logical_config.trajectory_mode,
+          "action_compat_mode": logical_config.action_compat_mode,
+          "sampled_by": logical_config.sampled_by,
+          "sampling_rng_mode": logical_config.sampling_rng_mode,
+          "engine_seed": logical_config.seed_base,
+      }
+      wrong = {
+          field: record.get(field)
+          for field, value in expected_fields.items()
+          if record.get(field) != value
+      }
+      if wrong:
+        raise ValueError(
+            "legacy-v5 snapshot sampling contract mismatch before resume "
+            f"lease in {path}: {wrong}; pass the exact explicit "
+            "--sampling-source-commit used by sampled_by"
+        )
+      identity = (key, sample_index)
+      prior = attempts[identity]
+      if (
+          not isinstance(attempt_index, int)
+          or attempt_index != len(prior)
+          or (prior and prior[-1].get("valid") is True)
+      ):
+        raise ValueError(
+            "legacy-v5 snapshot attempt sequence mismatch before resume "
+            f"lease: {identity}"
+        )
+      trajectory = record.get("trajectory")
+      if not isinstance(trajectory, Mapping):
+        raise ValueError(
+            f"legacy-v5 snapshot trajectory is malformed in {path}"
+        )
+      if config.evaluation_mode == REWARD_ONLY:
+        reward_only_trajectory(trajectory)
+      reward = record.get("reward")
+      valid = record.get("valid")
+      if (
+          isinstance(reward, bool)
+          or not isinstance(reward, (int, float))
+          or not math.isfinite(float(reward))
+          or not isinstance(valid, bool)
+          or record.get("solved") is not (valid and float(reward) == 1.0)
+      ):
+        raise ValueError(
+            f"legacy-v5 snapshot outcome is malformed in {path}"
+        )
+      prior.append(record)
+      if first_record_path is None:
+        first_record_path = str(path)
+        sampled_by = logical_config.sampled_by
+      records += 1
+  if first_record_path is None:
+    raise ValueError("legacy snapshot contains no complete trajectory records")
+  return {
+      "schema": LEGACY_TRAJECTORY_SCHEMA,
+      "snapshot_manifest_sha256": manifest_sha256,
+      "sampled_by": sampled_by,
+      "first_record_path": first_record_path,
+      "records": records,
+  }
+
+
 def _v6_snapshot_manifest(
     snapshot_dir: Path,
 ) -> tuple[list[tuple[Path, str]], Path, str]:
@@ -523,6 +649,44 @@ def _config_from_resume_contract(path: Path) -> EvalConfig:
   return old_config
 
 
+def _validated_frozen_v6_inputs(
+    snapshot: Path, config: EvalConfig
+) -> tuple[list[tuple[Path, str]], Path, str, EvalConfig]:
+  entries, contract_path, manifest_sha256 = _v6_snapshot_manifest(snapshot)
+  old_config = _config_from_resume_contract(contract_path)
+  if old_config.resume_tag == config.resume_tag:
+    raise ValueError("frozen v6 migration requires a fresh resume tag")
+  old_record = old_config.canonical_record()
+  new_record = config.canonical_record()
+  allowed_differences = {"resume_tag", "harness_commit"}
+  drift = {
+      key: {"source": old_record.get(key), "destination": new_record.get(key)}
+      for key in sorted(set(old_record) | set(new_record))
+      if key not in allowed_differences and old_record.get(key) != new_record.get(key)
+  }
+  if drift:
+    raise ValueError(f"frozen v6 sampling contract drift: {drift}")
+  return entries, contract_path, manifest_sha256, old_config
+
+
+def validate_frozen_v6_snapshot_contract(
+    snapshot_dir: str | os.PathLike[str], *, config: EvalConfig
+) -> dict[str, Any]:
+  """Validates v6 source/destination contracts before writing a target tag."""
+  config.validate()
+  snapshot = Path(snapshot_dir).resolve()
+  entries, _, manifest_sha256, old_config = _validated_frozen_v6_inputs(
+      snapshot, config
+  )
+  return {
+      "schema": TRAJECTORY_SCHEMA,
+      "snapshot_manifest_sha256": manifest_sha256,
+      "source_resume_tag": old_config.resume_tag,
+      "sampled_by": old_config.sampled_by,
+      "trajectory_files": len(entries),
+  }
+
+
 def import_frozen_v6_snapshot(
     snapshot_dir: str | os.PathLike[str],
     output_dir: str | os.PathLike[str],
@@ -541,20 +705,9 @@ def import_frozen_v6_snapshot(
   import_id = snapshot.name
   if not _RESUME_TAG.fullmatch(import_id):
     raise ValueError("frozen v6 import id must be lowercase and Kubernetes-safe")
-  entries, contract_path, manifest_sha256 = _v6_snapshot_manifest(snapshot)
-  old_config = _config_from_resume_contract(contract_path)
-  if old_config.resume_tag == config.resume_tag:
-    raise ValueError("frozen v6 migration requires a fresh resume tag")
-  old_record = old_config.canonical_record()
-  new_record = config.canonical_record()
-  allowed_differences = {"resume_tag", "harness_commit"}
-  drift = {
-      key: {"source": old_record.get(key), "destination": new_record.get(key)}
-      for key in sorted(set(old_record) | set(new_record))
-      if key not in allowed_differences and old_record.get(key) != new_record.get(key)
-  }
-  if drift:
-    raise ValueError(f"frozen v6 sampling contract drift: {drift}")
+  entries, contract_path, manifest_sha256, old_config = (
+      _validated_frozen_v6_inputs(snapshot, config)
+  )
 
   target_root = Path(output_dir).resolve()
   trajectory_dir = target_root / "trajectories"
@@ -735,6 +888,7 @@ def import_legacy_v5_snapshot(
     *,
     config: EvalConfig,
     allowed_task_keys: Iterable[str],
+    validated_snapshot_manifest_sha256: str | None = None,
 ) -> dict[str, Any]:
   """Adopts a frozen exact-contract v5 snapshot into a new v6 resume tag.
 
@@ -748,12 +902,23 @@ def import_legacy_v5_snapshot(
   import_id = snapshot.name
   if not _RESUME_TAG.fullmatch(import_id):
     raise ValueError("legacy import id must be lowercase and Kubernetes-safe")
+  ordered_keys = list(allowed_task_keys)
+  if validated_snapshot_manifest_sha256 is None:
+    validate_legacy_v5_snapshot_contract(
+        snapshot,
+        config=config,
+        allowed_task_keys=ordered_keys,
+    )
   entries, manifest_sha256 = _snapshot_manifest(snapshot)
+  if (
+      validated_snapshot_manifest_sha256 is not None
+      and validated_snapshot_manifest_sha256 != manifest_sha256
+  ):
+    raise ValueError("legacy snapshot changed after pre-lease validation")
   target_root = Path(output_dir).resolve()
   trajectory_dir = target_root / "trajectories"
   receipt_path = target_root / "imports" / f"{import_id}.receipt.json"
 
-  ordered_keys = list(allowed_task_keys)
   if len(ordered_keys) != len(set(ordered_keys)):
     raise ValueError("legacy import task order contains duplicate identities")
   task_index = {key: index for index, key in enumerate(ordered_keys)}

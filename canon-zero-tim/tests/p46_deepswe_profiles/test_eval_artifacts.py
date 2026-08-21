@@ -459,8 +459,25 @@ class EvalArtifactsTest(unittest.TestCase):
     )
 
     output = Path(self.temporary.name) / "resume" / "outputs"
+    validation = artifacts.validate_legacy_v5_snapshot_contract(
+        snapshot, config=config, allowed_task_keys={"img-a"}
+    )
+    with self.assertRaisesRegex(ValueError, "changed after pre-lease"):
+      artifacts.import_legacy_v5_snapshot(
+          snapshot,
+          output,
+          config=config,
+          allowed_task_keys={"img-a"},
+          validated_snapshot_manifest_sha256="0" * 64,
+      )
     first = artifacts.import_legacy_v5_snapshot(
-        snapshot, output, config=config, allowed_task_keys={"img-a"}
+        snapshot,
+        output,
+        config=config,
+        allowed_task_keys={"img-a"},
+        validated_snapshot_manifest_sha256=validation[
+            "snapshot_manifest_sha256"
+        ],
     )
     second = artifacts.import_legacy_v5_snapshot(
         snapshot, output, config=config, allowed_task_keys={"img-a"}
@@ -526,13 +543,42 @@ class EvalArtifactsTest(unittest.TestCase):
     (snapshot / "SHA256SUMS").write_text(
         f"{digest}  trajectories/wave.jsonl\n", encoding="utf-8"
     )
+    validation = artifacts.validate_legacy_v5_snapshot_contract(
+        snapshot, config=config, allowed_task_keys={"img-a"}
+    )
+    self.assertEqual(validation["schema"], artifacts.LEGACY_TRAJECTORY_SCHEMA)
+    self.assertEqual(validation["sampled_by"], f"stock@{'5' * 40}")
+    later_drift = dict(record)
+    later_drift["sampled_by"] = f"stock@{'4' * 40}"
+    two_record_payload = payload + (
+        json.dumps(later_drift, sort_keys=True) + "\n"
+    ).encode()
+    trajectory.write_bytes(two_record_payload)
+    (snapshot / "SHA256SUMS").write_text(
+        f"{hashlib.sha256(two_record_payload).hexdigest()}  "
+        "trajectories/wave.jsonl\n",
+        encoding="utf-8",
+    )
+    with self.assertRaisesRegex(ValueError, "sampling contract mismatch"):
+      artifacts.validate_legacy_v5_snapshot_contract(
+          snapshot, config=config, allowed_task_keys={"img-a"}
+      )
+    trajectory.write_bytes(payload)
+    (snapshot / "SHA256SUMS").write_text(
+        f"{digest}  trajectories/wave.jsonl\n", encoding="utf-8"
+    )
     drifted = dataclasses.replace(config, source_commit="4" * 40)
-    with self.assertRaisesRegex(ValueError, "contract mismatch"):
+    with self.assertRaisesRegex(ValueError, "sampling contract mismatch"):
       artifacts.import_legacy_v5_snapshot(
           snapshot,
           Path(self.temporary.name) / "resume-drift" / "outputs",
           config=drifted,
           allowed_task_keys={"img-a"},
+      )
+    (snapshot / "resume_contract.json").write_text("{}\n", encoding="utf-8")
+    with self.assertRaisesRegex(ValueError, "must not contain resume_contract"):
+      artifacts.validate_legacy_v5_snapshot_contract(
+          snapshot, config=config, allowed_task_keys={"img-a"}
       )
 
   def test_legacy_import_preserves_per_logical_shard_fingerprints(self):

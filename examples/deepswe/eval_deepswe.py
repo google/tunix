@@ -36,6 +36,8 @@ from deepswe_eval_artifacts import sha256_file
 from deepswe_eval_artifacts import task_key
 from deepswe_eval_artifacts import trajectory_record
 from deepswe_eval_artifacts import unattempted_samples
+from deepswe_eval_artifacts import validate_frozen_v6_snapshot_contract
+from deepswe_eval_artifacts import validate_legacy_v5_snapshot_contract
 from deepswe_eval_artifacts import write_census
 from deepswe_eval_artifacts import write_reports
 
@@ -879,6 +881,26 @@ def main() -> int:
   )
   if full_campaign:
     launch_id = _required("CANON_RUN_ID")
+    all_entries = _load_clean_entries(config)
+    allowed_task_keys = [task_key(entry) for entry in all_entries]
+    legacy_import_id = os.environ.get("CANON_P46_LEGACY_IMPORT_ID", "")
+    frozen_v6_import_id = os.environ.get(
+        "CANON_P46_FROZEN_V6_IMPORT_ID", ""
+    )
+    if legacy_import_id and frozen_v6_import_id:
+      raise ValueError("P46 permits only one frozen resume import")
+    legacy_validation = None
+    if legacy_import_id:
+      legacy_validation = validate_legacy_v5_snapshot_contract(
+          output_dir.parent / "imports" / legacy_import_id,
+          config=config,
+          allowed_task_keys=allowed_task_keys,
+      )
+    if frozen_v6_import_id:
+      validate_frozen_v6_snapshot_contract(
+          output_dir.parent / "imports" / frozen_v6_import_id,
+          config=config,
+      )
     with campaign_lease(
         output_dir, config=config, launch_id=launch_id
     ) as lease:
@@ -888,20 +910,16 @@ def main() -> int:
           f"contract_sha256={lease['contract']['sha256']}",
           flush=True,
       )
-      all_entries = _load_clean_entries(config)
-      legacy_import_id = os.environ.get("CANON_P46_LEGACY_IMPORT_ID", "")
-      frozen_v6_import_id = os.environ.get(
-          "CANON_P46_FROZEN_V6_IMPORT_ID", ""
-      )
-      if legacy_import_id and frozen_v6_import_id:
-        raise ValueError("P46 permits only one frozen resume import")
       if legacy_import_id:
         snapshot = output_dir.parent / "imports" / legacy_import_id
         receipt = import_legacy_v5_snapshot(
             snapshot,
             output_dir,
             config=config,
-            allowed_task_keys=(task_key(entry) for entry in all_entries),
+            allowed_task_keys=allowed_task_keys,
+            validated_snapshot_manifest_sha256=legacy_validation[
+                "snapshot_manifest_sha256"
+            ],
         )
         print(
             "[P46.RESUME] LEGACY_IMPORT_PASS "
@@ -917,7 +935,7 @@ def main() -> int:
             snapshot,
             output_dir,
             config=config,
-            allowed_task_keys=(task_key(entry) for entry in all_entries),
+            allowed_task_keys=allowed_task_keys,
         )
         print(
             "[P46.RESUME] FROZEN_V6_IMPORT_PASS "

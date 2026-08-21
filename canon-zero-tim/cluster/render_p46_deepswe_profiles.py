@@ -661,6 +661,15 @@ def render(
     raise ValueError("evaluation-only controls cannot modify a training workload")
   if workload == "q4-clean-eval" and full_campaign and resume_tag is None:
     raise ValueError("P46 full campaign requires an explicit resume tag")
+  if (
+      workload == "q4-clean-eval"
+      and (legacy_import_id is not None or frozen_v6_import_id is not None)
+      and sampling_source_commit is None
+  ):
+    raise ValueError(
+        "P46 resume import requires an explicit --sampling-source-commit; "
+        "never infer historical sampler lineage from --source-commit"
+    )
   if workload == "q4-clean-eval" and fixed_lm_head:
     raise ValueError("fixed lm-head is restricted to P46 training workloads")
   common = dict(

@@ -1,6 +1,6 @@
 # P46.7 — breadth-first census before strict repair
 
-- Status: implementation published as `365b46c1cd150839e3be1fd50adb33325fe3189f`; not target-run
+- Status: census base published as `365b46c1cd150839e3be1fd50adb33325fe3189f`; returned legacy-v5 import incident reproduced; pre-lease repair passes local release gates and is not published
 
 ## Trigger
 
@@ -48,6 +48,32 @@ producer is terminal and absent:
 5. Preserve the source `sampled_by` SHA and raw trajectory payload. Only the
    destination harness SHA and fresh resume tag change, and every copied row
    contains record-level migration provenance.
+
+The steps above apply only to records whose actual schema is trajectory-v6.
+Directory names are not schema evidence.
+
+## 2026-08-21 legacy-v5 incident repair gate
+
+Attempt `p46c128a0` selected a directory suffixed `-v6-final`, but the actual
+rows are trajectory-v5 from sampler source
+`ac2c31bc7f6f82d33b3a62d62e1c390c8338b60e`. The launch omitted that explicit
+source, failed legacy fingerprint validation before runtime, and left
+destination tag `p46q4census01` claimed under the wrong immutable contract.
+
+- Preserve `p46q4census01`; never repair or reuse it.
+- Make a fresh v5-only sealed copy under `p46q4census02/imports/`; include raw
+  trajectory JSONLs and `SHA256SUMS`, but no `resume_contract.json`.
+- Render `--legacy-import-id` and the exact explicit historical
+  `--sampling-source-commit`; never infer sampler lineage from the new harness
+  SHA.
+- Preflight must validate every row before creating the destination resume
+  contract. Wrong source, mixed schema, v6-via-legacy, or v5-with-contract
+  staging must fail without claiming the fresh tag.
+- Require `LEGACY_IMPORT_PASS records=<actual>`. Imported durable identities
+  suppress census work; only absent identities are sampled.
+- The incident reports 510 raw rows. A larger count is reusable only if the
+  complete terminal raw tree and receipt prove it. Five-field derived outcome
+  tables are not resume inputs.
 
 ## Exit gate
 
