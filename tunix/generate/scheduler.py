@@ -19,8 +19,8 @@ class Request:
 
 class Scheduler:
   """Python-based continuous batching scheduler."""
-  def __init__(self, kv_cache_manager: CacheManager, page_size: int, max_num_seqs: int, max_num_batch_tokens):
-    self.kv_cache_manager = kv_cache_manager
+  def __init__(self, cache_manager: CacheManager, page_size: int, max_num_seqs: int, max_num_batch_tokens):
+    self.cache_manager = cache_manager
     self.page_size = page_size
     self.max_num_seqs = max_num_seqs
     self.max_num_batch_tokens = max_num_batch_tokens
@@ -112,12 +112,12 @@ class Scheduler:
     are loaded on the TPU.
     """
     
-    self.token_budget = self.max_num_batched_tokens
+    self.token_budget = self.max_num_batch_tokens
     self._queue_new_requests(new_requests)
     self._make_room_for_step()
     self._drain_pending_queue()
     
-    total_new_pages_needed = self._total_new_pages_needed
+    total_new_pages_needed = self._calculate_new_pages_needed()
     if total_new_pages_needed > 0:
         assigned_page_ids = self.cache_manager.allocate(total_new_pages_needed)
         self._distribute_allocated_pages(assigned_page_ids)
@@ -131,7 +131,7 @@ class Scheduler:
     
     # TODO TEST: decode sequences are always at front of batch
     # TODO TEST: len(running_requests) < max_num_reqs
-    # TODO TEST: n_decode + len([p.tokens for p in prefill]) < num_batch_tokens
+    # TODO TEST: n_decode + len([p.token_ids for p in prefill]) < num_batch_tokens
     # TODO TEST: first in, first scheduled
     return self.running_requests 
 
@@ -177,17 +177,17 @@ class Scheduler:
       )
       n_tokens_to_compute = min(self.token_budget, max_n_tokens_to_compute)
         
-      n_pages_required = utils.cdiv(n_tokens_to_compute, self.page_size)
-      n_pages_allocated = len(candidate_req.page_ids)
-      n_new_pages_required = n_pages_required - n_pages_allocated 
+      seq_n_pages_required = utils.cdiv(n_tokens_to_compute, self.page_size)
+      seq_n_pages_allocated = len(candidate_req.page_ids)
+      seq_n_new_pages_required = seq_n_pages_required - seq_n_pages_allocated 
       
-      if n_new_pages_required > n_pages_available:
+      if seq_n_new_pages_required > n_pages_available:
         self._preempt() 
         continue
       
-      candidate_req.num_tokens_in_flight = n_tokens_to_compute
-      n_pages_available -= n_new_pages_required
-      n_new_pages_required += n_new_pages_required
+      candidate_req.num_in_flight_tokens = n_tokens_to_compute
+      n_pages_available -= seq_n_new_pages_required
+      n_new_pages_required += seq_n_new_pages_required
       self.token_budget -= n_tokens_to_compute
       n_running_admitted += 1      
     
@@ -210,7 +210,7 @@ class Scheduler:
 
 
   def _get_matched_pages(self, request: Request):
-    req_hashes = self._chunk_and_hash(request.tokens)
+    req_hashes = self._chunk_and_hash(request.token_ids)
     
     # TODO TEST: test full prefix matches
     # TODO TEST: test partial prefix matches
@@ -274,7 +274,7 @@ class Scheduler:
 
         self.pending_requests.popleft()
         
-        req.num_inflight_tokens = n_tokens_to_load 
+        req.num_in_flight_tokens = n_tokens_to_load 
         req.page_ids = []
         for pid in matched_page_ids:
             if self.page_location.get(pid) == "cpu":
@@ -290,7 +290,7 @@ class Scheduler:
     if len(pages_to_load) > physically_free:
         self._free_up_unreferenced_tpu_space(len(pages_to_load) - physically_free)
 
-    self.cache_manager.load(pages_to_load)
+    self.cache_manager.load(list(pages_to_load))
     # TODO TEST: loaded page locations should be tpu    
     for pid in pages_to_load:
         self.page_location[pid] = "tpu"
@@ -315,7 +315,7 @@ class Scheduler:
     # TODO test: partially full pages aren't hashed 
     for req in self.running_requests:
         current_capacity = len(req.page_ids) * self.page_size
-        total_desired = req.num_inflight_tokens
+        total_desired = req.num_in_flight_tokens
           
         if total_desired <= current_capacity:
           continue
@@ -323,7 +323,7 @@ class Scheduler:
         needed = utils.cdiv(total_desired - current_capacity, self.page_size)
         
         # Retrieve the full hash chain to identify what hashes these new blocks represent
-        full_tokens = req.tokens
+        full_tokens = req.token_ids
         req_hashes = self._chunk_and_hash(full_tokens)
         n_full_pages = len(full_tokens) // self.page_size
         
