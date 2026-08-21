@@ -4,9 +4,12 @@
 
 P58 was developed in isolated worktree
 `/home/yuxuan/code_rl_repro/worktrees/p58_deepswe_native_zero_0821` and approved
-for publication to `yuxzhang/canon-zero-tim`. Always obtain the runnable
+for publication to `yuxzhang/canon-zero-tim`. The implementation commit is
+`c5bdc9d993dfaf1a6956335609fbf259f9ed95f7`; its first post-push readback
+matched exactly with ahead/behind `0/0`. Always obtain the runnable
 40-character source SHA by fetching and reading back that branch after push;
-do not infer it from the historical base or a mutable tag.
+the latest branch may contain this later publication-evidence-only commit. Do
+not infer the runnable SHA from the historical base or a mutable tag.
 
 The user changed the execution order: waive the optional one-host sanity and
 run only the native 128-chip three-update canary first. Zero is not optimized

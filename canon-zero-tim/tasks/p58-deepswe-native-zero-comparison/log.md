@@ -64,3 +64,13 @@
 - Gate: exactly three native optimizer commits, complete durable trajectories, finite nonzero A-B dose, exact B-C, TPU-resident optimizer, valid cleanup/checkpoint transactions, and native classifier `PASS`.
 - Publication: the user explicitly approved commit and push to `yuxzhang/canon-zero-tim`. `main` remains untouched. The final remote SHA must be obtained and reported by readback after push rather than embedded self-referentially in this commit.
 - Next: publish after reconciling the unrelated P57 tip and rerunning focused plus pinned-image gates; the remote executor then follows `cluster/P58_DEEPSWE_TIM_RUNBOOK.md` section 3N.
+
+## 2026-08-21 UTC — P58 implementation published
+
+- Type: publication evidence
+- Action: committed the complete P58 native-first concern, rebased it without conflict over operator commits `39e77bdd` and `874ef342`, reran the focused gates and pinned exact-image suite, and performed a normal non-force fast-forward push to `yuxzhang/canon-zero-tim`.
+- Published implementation commit: `c5bdc9d993dfaf1a6956335609fbf259f9ed95f7`.
+- Validation after rebase: renderer 4/4, profile 2/2, environment 1/1, clean diff, and terminal marker `P58_EXACT_IMAGE_CPU_PASS loss_oracle=1 weighted_accumulation=1 compact_filter=1 durable_journal=1 paired_renderer=1 alignment_policy=1 regressions=1`.
+- Readback: local HEAD and the remote-tracking operator branch both resolved to `c5bdc9d993dfaf1a6956335609fbf259f9ed95f7`; ahead/behind was `0/0`; the worktree was clean.
+- External effects: one implementation commit and one fast-forward operator-branch push. `main` was untouched. No image, model, credential, YAML render, Kubernetes object, TPU job, or run artifact was created.
+- Next: this documentation-only publication checkpoint will advance the branch once more. The executor must fetch and use the final post-checkpoint remote SHA, then follow section 3N for native only.
