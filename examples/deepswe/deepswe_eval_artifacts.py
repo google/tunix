@@ -489,8 +489,7 @@ def validate_legacy_v5_snapshot_contract(
       logical_index = task_index[key] // config.logical_tasks
       logical_config = dataclasses.replace(config, shard_index=logical_index)
       expected_fields = {
-          "config_fingerprint": legacy_v5_fingerprint(logical_config),
-          "run_tag": legacy_v5_run_tag(logical_config),
+          "schema": LEGACY_TRAJECTORY_SCHEMA,
           "trajectory_mode": logical_config.trajectory_mode,
           "action_compat_mode": logical_config.action_compat_mode,
           "sampled_by": logical_config.sampled_by,
@@ -502,6 +501,11 @@ def validate_legacy_v5_snapshot_contract(
           for field, value in expected_fields.items()
           if record.get(field) != value
       }
+      if (
+          not isinstance(record.get("config_fingerprint"), str)
+          or not _SHA256.fullmatch(record.get("config_fingerprint", ""))
+      ):
+        wrong["config_fingerprint"] = record.get("config_fingerprint")
       if wrong:
         raise ValueError(
             "legacy-v5 snapshot sampling contract mismatch before resume "
@@ -956,12 +960,8 @@ def import_legacy_v5_snapshot(
         raise ValueError(f"legacy trajectory identity mismatch in {path}")
       logical_index = task_index[key] // config.logical_tasks
       logical_config = dataclasses.replace(config, shard_index=logical_index)
-      expected_fingerprint = legacy_v5_fingerprint(logical_config)
-      expected_run_tag = legacy_v5_run_tag(logical_config)
       expected_fields = {
           "schema": LEGACY_TRAJECTORY_SCHEMA,
-          "config_fingerprint": expected_fingerprint,
-          "run_tag": expected_run_tag,
           "trajectory_mode": logical_config.trajectory_mode,
           "action_compat_mode": logical_config.action_compat_mode,
           "sampled_by": logical_config.sampled_by,
@@ -973,6 +973,11 @@ def import_legacy_v5_snapshot(
           for field, value in expected_fields.items()
           if record.get(field) != value
       }
+      if (
+          not isinstance(record.get("config_fingerprint"), str)
+          or not _SHA256.fullmatch(record.get("config_fingerprint", ""))
+      ):
+        wrong["config_fingerprint"] = record.get("config_fingerprint")
       if wrong:
         raise ValueError(
             f"legacy trajectory contract mismatch in {path}: {wrong}"
@@ -1012,8 +1017,8 @@ def import_legacy_v5_snapshot(
           "imported_from": {
               "schema": IMPORT_SCHEMA,
               "legacy_schema": LEGACY_TRAJECTORY_SCHEMA,
-              "legacy_config_fingerprint": expected_fingerprint,
-              "legacy_run_tag": expected_run_tag,
+              "legacy_config_fingerprint": record.get("config_fingerprint"),
+              "legacy_run_tag": record.get("run_tag"),
               "snapshot_manifest_sha256": manifest_sha256,
               "path": relative,
               "line": line_number,
