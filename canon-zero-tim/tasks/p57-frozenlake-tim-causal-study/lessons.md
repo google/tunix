@@ -15,3 +15,6 @@
 - A workload-only target log can diagnose a traceback but cannot certify a
   run. Require wrapper markers from byte zero through terminal exit before
   classifying calibration evidence as complete.
+- When a top-level router broadens a mode from calibration to train/eval, test
+  every invoked leaf step under the same tuple matrix. Static proof that the
+  entrypoint selects a step does not prove that the step's own guard admits it.

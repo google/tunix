@@ -36,17 +36,39 @@ $DOCKER run --rm \
     PYTHONPATH=/workspace python3 \
       canon-zero-tim/tests/p57_frozenlake_tim/test_stock_fast_contract.py
     stock_state="$(mktemp -d /tmp/p57-stock-state.XXXXXX)"
-    cat > "$stock_state/env.sh" <<EOF
-export CANON_PROFILE_FILE=cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env
-export CANON_P57_RUN_KIND=calibration
-export CANON_P57_INFERENCE_REGIME=stock-fast
-EOF
     printf "%s\n" /usr/local/lib/python3.12/site-packages/tpu_inference \
       > "$stock_state/tpu_inference_path"
-    CANON_STATE="$stock_state" CANON_PKG=/workspace/canon-zero-tim \
-      bash canon-zero-tim/cluster/steps/37_install_stock_runtime.sh
-    CANON_STATE="$stock_state" CANON_PKG=/workspace/canon-zero-tim \
-      bash canon-zero-tim/cluster/steps/38_verify_stock_engine.sh
+    for stock_kind in calibration train eval; do
+      cat > "$stock_state/env.sh" <<EOF
+export CANON_PROFILE_FILE=cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env
+export CANON_P57_RUN_KIND=$stock_kind
+export CANON_P57_TIM_ARM=mismatch
+export CANON_P57_INFERENCE_REGIME=stock-fast
+EOF
+      CANON_STATE="$stock_state" CANON_PKG=/workspace/canon-zero-tim \
+        bash canon-zero-tim/cluster/steps/37_install_stock_runtime.sh
+      CANON_STATE="$stock_state" CANON_PKG=/workspace/canon-zero-tim \
+        bash canon-zero-tim/cluster/steps/38_verify_stock_engine.sh
+      echo "P57_STOCK_RUNTIME_MODE_PASS run_kind=$stock_kind"
+    done
+    cat > "$stock_state/env.sh" <<EOF
+export CANON_PROFILE_FILE=cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env
+export CANON_P57_RUN_KIND=train
+export CANON_P57_TIM_ARM=zero
+export CANON_P57_INFERENCE_REGIME=stock-fast
+EOF
+    if CANON_STATE="$stock_state" CANON_PKG=/workspace/canon-zero-tim \
+        bash canon-zero-tim/cluster/steps/37_install_stock_runtime.sh; then
+      echo "P57 stock-runtime negative admitted the zero arm" >&2
+      exit 1
+    fi
+    echo "P57_STOCK_RUNTIME_NEGATIVE_PASS arm=zero rejected=1"
+    cat > "$stock_state/env.sh" <<EOF
+export CANON_PROFILE_FILE=cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env
+export CANON_P57_RUN_KIND=eval
+export CANON_P57_TIM_ARM=mismatch
+export CANON_P57_INFERENCE_REGIME=stock-fast
+EOF
     bad_package="$(mktemp -d /tmp/p57-stock-negative.XXXXXX)/tpu_inference"
     while read -r _ relative; do
       mkdir -p "$bad_package/$(dirname "$relative")"

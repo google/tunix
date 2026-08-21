@@ -9,8 +9,8 @@ source "$CANON_STATE/env.sh"
 # shellcheck disable=SC1091
 source "$CANON_PKG/cluster/steps/p57_runtime_contract.sh"
 
-if ! p57_is_stock_fast_calibration; then
-  echo "[P57.STOCK_FAST] FATAL: stock runtime install used outside calibration" >&2
+if ! p57_is_stock_fast_runtime; then
+  echo "[P57.STOCK_FAST] FATAL: stock runtime install used outside exact stock-fast runtime" >&2
   exit 2
 fi
 

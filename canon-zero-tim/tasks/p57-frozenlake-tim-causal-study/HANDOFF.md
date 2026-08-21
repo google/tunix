@@ -34,6 +34,13 @@ M15 starts at 24.625% solve, has 56% mixed groups, reaches 7,403 context tokens
 and 6,223 completion tokens, and had no physical/logical cap hit. M15 is frozen
 for the stock curve. M10 and M20 are no longer candidates.
 
+`p57_eval0_att1` is not an evaluation result. Source `200b244c...` passed the
+resolved stock contract but stopped before model load because Steps 37 and 38
+still had calibration-only leaf guards. The local repair admits the exact
+calibration/train/eval stock tuples and rejects the zero arm; host `87/87` and
+the pinned-image three-mode gate pass. Do not resume attempt 1. After the repair
+is published, render a fresh eval-0 in `new` mode from that immutable SHA.
+
 ## Treatment identity
 
 The stock arm is not merely `CANON_P38_FIXED_LM_HEAD=0`. It requires:

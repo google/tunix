@@ -13,6 +13,8 @@ ROOT = Path(__file__).resolve().parents[3]
 LIB = ROOT / "canon-zero-tim/cluster/steps/p57_runtime_contract.sh"
 ENTRYPOINT = ROOT / "canon-zero-tim/cluster/entrypoint.sh"
 RUNNER = ROOT / "canon-zero-tim/cluster/steps/90_run.sh"
+INSTALL_STOCK = ROOT / "canon-zero-tim/cluster/steps/37_install_stock_runtime.sh"
+VERIFY_STOCK = ROOT / "canon-zero-tim/cluster/steps/38_verify_stock_engine.sh"
 PROFILE = "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env"
 
 
@@ -142,6 +144,13 @@ class P57RuntimeContractTest(unittest.TestCase):
     self.assertNotIn("30_install_canon", branch)
     self.assertNotIn("40_overlay_engine", branch)
     self.assertNotIn("50_verify_overlay", branch)
+
+  def test_stock_install_and_verify_admit_the_complete_runtime_tuple(self):
+    for path in (INSTALL_STOCK, VERIFY_STOCK):
+      with self.subTest(path=path.name):
+        text = path.read_text(encoding="utf-8")
+        self.assertIn("if ! p57_is_stock_fast_runtime; then", text)
+        self.assertNotIn("if ! p57_is_stock_fast_calibration; then", text)
 
   def test_runner_keeps_distinct_stock_and_canonical_postflights(self):
     text = RUNNER.read_text(encoding="utf-8")
