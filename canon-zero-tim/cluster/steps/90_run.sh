@@ -94,7 +94,9 @@ p38_request_live_action() {
   return 2
 }
 if [ "${CANON_P32_DP_ADMISSION:-0}" = "1" ] && \
-   [ "${CANON_P32_TRAIN_ADMITTED:-0}" != "1" ]; then
+   [ "${CANON_P32_TRAIN_ADMITTED:-0}" != "1" ] && \
+   [ "${CANON_P57_RUN_KIND:-}" != "calibration" ] && \
+   [ "${CANON_P57_RUN_KIND:-}" != "eval" ]; then
   echo "[run] REFUSING: P32 profile is admission-only." >&2
   echo "[run] A real (dp,tp) replicated-parameter segmented VJP has not passed remote gates;" >&2
   echo "[run] set all three P33 admissions only after the rank-local reducer gate passes." >&2
