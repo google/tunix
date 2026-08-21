@@ -1,0 +1,32 @@
+INFO:absl:[DEEPSWE.ROLLOUT_DEADLINE] batch_complete prompt_groups=8 elapsed_secs=557.2 deadline_secs=3600
+INFO:absl:Logging item to /mnt/disks/linchai_data/deepswe_zero_tim/canon-p58-ds4b-native-full-p58f04/metrics/trajectory_log_1787355219.csv
+[P58.LOGPS_BATCH] configured_prompts=8 generations=16 execution_trajectories=128 observed_trajectories=128
+[P58.TRAJECTORY_BATCH] step=0 path=/mnt/disks/linchai_data/deepswe_zero_tim/canon-p58-ds4b-native-full-p58f04/debug/batch-000000.trajectories.jsonl.gz sha256=e39caf5df63ba54406a36427a413dea562e5771f4c52b30c840229d3178c1f3b
+[P58.BATCH_METRICS_JSON] {"all_env_timeout_batch":false,"all_failed_prompt_groups":5,"all_sandbox_start_timeout_batch":false,"all_solved_prompt_groups":0,"compact_filtered_prompt_groups":2,"compact_filtered_trajectories":3,"compact_filtered_trajectory_ratio":0.0234375,"complete_trajectories":125,"complete_trajectory_solve_ratio":0.048,"effective_prompt_groups":1,"env_timeout_trajectories":0,"env_timeout_trajectory_ratio":0.0,"incomplete_prompt_groups":2,"incomplete_trajectories":3,"insufficient_cpu_trajectories":0,"insufficient_memory_trajectories":0,"mixed_prompt_groups":1,"nonbinary_final_rewards":0,"nonzero_advantage_ratio":0.125,"nonzero_advantages":16,"optimizer_step":0,"prompt_groups":8,"raw_final_reward_histogram":{"0":122,"1":6},"raw_nonzero_advantage_ratio":0.125,"raw_nonzero_advantages":16,"sandbox_start_timeout_trajectories":0,"sandbox_start_timeout_trajectory_ratio":0.0,"scheduling_gated_trajectories":0,"schema":"canon.p58.deepswe.batch-metrics.v1","solve_definition":"r2egym_final_reward_eq_1","solved_trajectories":6,"status_histogram":{"MAX_CONTEXT_LIMIT_REACHED":3,"SUCCEEDED":125},"step":0,"timeout_resource_histogram":{},"timeout_scheduler_reason_histogram":{},"timeout_stage_histogram":{},"timeout_trajectories":0,"timeout_trajectory_ratio":0.0,"trajectories":128,"trajectory_path":"/mnt/disks/linchai_data/deepswe_zero_tim/canon-p58-ds4b-native-full-p58f04/debug/batch-000000.trajectories.jsonl.gz","trajectory_sha256":"e39caf5df63ba54406a36427a413dea562e5771f4c52b30c840229d3178c1f3b","trajectory_solve_ratio":0.046875,"unschedulable_trajectories":0}
+INFO:absl:sampler-trainer: logp_diff=(0.12410,36.81114) prob_diff=(0.03970,1.00000) pearson=0.95197
+[P34.WEIGHTS_JSON] {"equal":true,"live_leaves":398,"mapped_leaves":398,"mesh_device_ids":[0,4,8,12,1,5,9,13,16,20,24,28,17,21,25,29,32,36,40,44,33,37,41,45,48,52,56,60,49,53,57,61,64,68,72,76,65,69,73,77,80,84,88,92,81,85,89,93,96,100,104,108,97,101,105,109,112,116,120,124,113,117,121,125],"mesh_shape":{"dp":8,"tp":8},"mismatch_indices":[],"normalized_memory_leaves":398,"schema":"canon.p34.deepswe.weight-attestation.v1","step":0,"total_elements":4022468096,"verdict":"PASS"}
+[P34.WEIGHTS] EXACT step=0 leaves=398 elements=4022468096 devices=64
+[PERF] step=0 stage=rescore_b seconds=0.000 rows=128
+[rank0]: Traceback (most recent call last):
+[rank0]:   File "/app/examples/deepswe/canonical_entrypoint.py", line 36, in <module>
+[rank0]:     main()
+[rank0]:   File "/app/examples/deepswe/canonical_entrypoint.py", line 32, in main
+[rank0]:     runpy.run_module("examples.deepswe.train_deepswe_nb", run_name="__main__")
+[rank0]:   File "<frozen runpy>", line 229, in run_module
+[rank0]:   File "<frozen runpy>", line 88, in _run_code
+[rank0]:   File "/app/examples/deepswe/train_deepswe_nb.py", line 1582, in <module>
+[rank0]:     agentic_grpo_learner.train(train_dataset=train_dataset)
+[rank0]:   File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 2530, in train
+[rank0]:     train_examples = self._batch_to_train_example(
+[rank0]:                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 1981, in _batch_to_train_example
+[rank0]:     return self._process_results(
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/rl/agentic/agentic_grpo_learner.py", line 1192, in _process_results
+[rank0]:     s_prefill = self.rl_cluster.get_prefill_rescore_logps(
+[rank0]:                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/rl/rl_cluster.py", line 1164, in get_prefill_rescore_logps
+[rank0]:     source(
+[rank0]:   File "/app/tunix/rl/rollout/vllm_rollout.py", line 254, in get_prefill_rescore_logps
+[rank0]:     raise RuntimeError(
+[rank0]: RuntimeError: processed S_prefill requires CANON_PROMPT_PROCESSED_LOGPROBS=1 in the engine process; refusing to label raw prompt logprobs as processed
