@@ -104,6 +104,9 @@ Required terminal markers:
 - `P57_FILE_ENTRYPOINT_NEGATIVE_PASS script_mode=rejected` and
   `P57_MODULE_ENTRYPOINT_PASS workload_import=complete` occur in the
   exact-image output;
+- the checkpoint contract test models the production ownership boundary:
+  admission is read from `GRPOLearner`, while sync and exact comparison are
+  invoked through `GRPOLearner.rl_cluster`;
 - no traceback, syntax error, manifest mismatch, or flag-census mismatch.
 
 Do not substitute a dirty-tree SHA. Commit and push are separate user-approved

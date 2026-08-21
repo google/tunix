@@ -162,6 +162,8 @@ class FrozenLakeCheckpointContractTest(unittest.TestCase):
     sync = recipe.index("frozenlake_checkpoint.sync_rollout_for_no_update(")
     train = recipe.index("grpo_trainer.train(")
     self.assertLess(sync, train)
+    sync_call = recipe[sync:train]
+    self.assertIn("sync_rollout_for_no_update(\n      grpo_trainer,", sync_call)
 
     cluster = _RL_CLUSTER.read_text()
     resume_start = cluster.index("def sync_weights_for_resume")
@@ -172,8 +174,6 @@ class FrozenLakeCheckpointContractTest(unittest.TestCase):
 
   def test_no_update_sync_uses_honest_stock_and_exact_canonical_gates(self):
     class FakeCluster:
-      should_sync_weights = True
-
       def __init__(self, *, equal=True):
         self.equal = equal
         self.sync_calls = 0
@@ -186,35 +186,47 @@ class FrozenLakeCheckpointContractTest(unittest.TestCase):
         self.attest_calls += 1
         return {"equal": self.equal}
 
-    stock = FakeCluster()
+    class FakeLearner:
+      def __init__(self, *, should_sync_weights=True, equal=True):
+        self.should_sync_weights = should_sync_weights
+        self.rl_cluster = FakeCluster(equal=equal)
+
+    stock = FakeLearner()
     stock_receipt = frozenlake_checkpoint.sync_rollout_for_no_update(
         stock, stock_fast=True
     )
     self.assertEqual(
         stock_receipt, frozenlake_checkpoint.P57_STOCK_SYNC_RECEIPT
     )
-    self.assertEqual((stock.sync_calls, stock.attest_calls), (1, 0))
+    self.assertEqual(
+        (stock.rl_cluster.sync_calls, stock.rl_cluster.attest_calls), (1, 0)
+    )
 
-    canonical = FakeCluster()
+    canonical = FakeLearner()
     canonical_receipt = frozenlake_checkpoint.sync_rollout_for_no_update(
         canonical, stock_fast=False
     )
     self.assertEqual(canonical_receipt["exact_weight_attestation"], "pass")
-    self.assertEqual((canonical.sync_calls, canonical.attest_calls), (1, 1))
+    self.assertEqual(
+        (canonical.rl_cluster.sync_calls, canonical.rl_cluster.attest_calls),
+        (1, 1),
+    )
 
-    mismatch = FakeCluster(equal=False)
+    mismatch = FakeLearner(equal=False)
     with self.assertRaisesRegex(ValueError, "did not match"):
       frozenlake_checkpoint.sync_rollout_for_no_update(
           mismatch, stock_fast=False
       )
 
-    disabled = FakeCluster()
-    disabled.should_sync_weights = False
+    disabled = FakeLearner(should_sync_weights=False)
     with self.assertRaisesRegex(ValueError, "requires an explicit"):
       frozenlake_checkpoint.sync_rollout_for_no_update(
           disabled, stock_fast=True
       )
-    self.assertEqual((disabled.sync_calls, disabled.attest_calls), (0, 0))
+    self.assertEqual(
+        (disabled.rl_cluster.sync_calls, disabled.rl_cluster.attest_calls),
+        (0, 0),
+    )
 
   def test_recipe_wires_signed_checkpoint_contract_into_g6_trainer(self):
     recipe = _RECIPE.read_text()

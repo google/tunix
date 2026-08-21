@@ -21,15 +21,17 @@ The runbook is authoritative and contains exact commands. Ask the user before
 ## Honest validation status
 
 The dependency-light host suite and pinned-image CPU/overlay suite are green.
-`p57cal4` proved 64-chip connection, all three dataset materializations, model
+`p57cal5` proved 64-chip connection, all three dataset materializations, model
 load, KV-cache initialization, and approximately 34.3/95 GiB HBM use per
-device. It then stopped before the first recipe because the shared no-update
-path tried to run canonical adapter-backed exact weight attestation on the
-untreated stock engine, which intentionally has no such adapter. The repair
-keeps the real `update_params` rollout sync, records exact stock attestation as
+device. It then stopped before the first recipe because the previous helper
+looked for `should_sync_weights` on `RLCluster`; that admission flag belongs to
+`GRPOLearner`, while transport and attestation belong to
+`GRPOLearner.rl_cluster`. The repaired helper now accepts the learner and
+traverses the same ownership topology as production. It keeps the real
+`update_params` rollout sync, records exact stock attestation as
 `unavailable-by-design`, and retains fail-closed exact attestation for
 canonical resume/evaluation. It is host- and pinned-image-tested but has not
-yet run on the 64-chip target. The committed `p57cal4` file is a workload-only
+yet run on the 64-chip target. The committed `p57cal5` file is a workload-only
 log rather than the complete wrapper log, so it is analysis-grade evidence,
 not a complete campaign artifact. The next approved calibration launch closes
 startup readiness only if it reaches real rollout progress under the unchanged

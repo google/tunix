@@ -63,7 +63,7 @@ class Config:
 
 
 def sync_rollout_for_no_update(
-    rl_cluster: Any, *, stock_fast: bool
+    learner: Any, *, stock_fast: bool
 ) -> dict[str, Any]:
   """Synchronizes rollout weights and applies the available proof contract.
 
@@ -72,10 +72,14 @@ def sync_rollout_for_no_update(
   Successful ``update_params`` completion is the strongest honest stock
   receipt.  Canonical callers retain the exact live-weight gate.
   """
-  if not rl_cluster.should_sync_weights:
+  # Admission belongs to RLLearner/GRPOLearner, while the transport and exact
+  # comparison belong to RLCluster.  Accept the learner so this ownership
+  # topology cannot be flattened into a fake cluster-only interface.
+  if not learner.should_sync_weights:
     raise ValueError(
         "P45 resume/P57 no-update run requires an explicit rollout weight sync"
     )
+  rl_cluster = learner.rl_cluster
   rl_cluster.sync_weights_for_resume()
   if stock_fast:
     return dict(P57_STOCK_SYNC_RECEIPT)

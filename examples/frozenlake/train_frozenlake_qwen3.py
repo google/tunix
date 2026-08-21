@@ -1497,7 +1497,7 @@ if P45_CHECKPOINT.mode == "resume" or CANON_P57_NO_UPDATE:
         f"restored={restored_checkpoint_step}"
     )
   rollout_weight_sync = frozenlake_checkpoint.sync_rollout_for_no_update(
-      rl_cluster,
+      grpo_trainer,
       stock_fast=P57_STOCK_FAST_ATTESTATION is not None,
   )
   if P57_STOCK_FAST_ATTESTATION is not None:

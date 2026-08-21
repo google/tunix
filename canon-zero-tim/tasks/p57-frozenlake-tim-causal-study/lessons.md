@@ -9,6 +9,9 @@
 - Every stock-fast startup fix needs one behavioral test that runs the complete
   no-update sync branch in both regimes: stock must sync without attesting,
   canonical must sync and attest, and canonical inequality must fail closed.
+- Behavioral fakes must preserve production ownership boundaries. Do not put a
+  learner admission field on a fake cluster merely to simplify a test;
+  represent `learner.should_sync_weights` and `learner.rl_cluster` separately.
 - A workload-only target log can diagnose a traceback but cannot certify a
   run. Require wrapper markers from byte zero through terminal exit before
   classifying calibration evidence as complete.

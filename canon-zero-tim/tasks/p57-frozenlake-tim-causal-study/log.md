@@ -121,3 +121,15 @@
 - Files/artifacts: `evidence/p57cal4/run.log`; `tunix/rl/frozenlake_checkpoint.py`; FrozenLake entrypoint; stock runtime postflight/classifier/tests; `RUNBOOK.md`; `HANDOFF.md`; `state.md`; readiness phase.
 - Rollback: revert this change set; the prior published behavior is the p57cal4 failure at `225bd6ad`.
 - Next: render `p57cal5` only from the published immutable repair SHA, then obtain separate launch approval; acceptance requires the complete wrapper log and real rollout progress.
+
+## 2026-08-21 UTC — p57cal5 exposed a learner/cluster API ownership error
+
+- Type: target failure/correction
+- Fact: `p57cal5` used source `7a77b32f2cd2dc08078e175fa0c407ca1cf33539`, again connected 64 TPU devices, materialized all three recipes, initialized model and KV cache, and held approximately 34.3/95 GiB HBM per device. Before `RECIPE_START`, the new helper raised `AttributeError: 'RLCluster' object has no attribute 'should_sync_weights'`. The committed 697-line workload-only log has SHA-256 `41c43de99606effe05029fff5572c82413e236c5a0d8d59cab040e6b78d61067`; wrapper start/postflight/exit markers are absent, so the artifact is analysis-grade only.
+- Cause: the local behavioral fake incorrectly put `should_sync_weights` on `FakeCluster`, masking that production owns the field on `GRPOLearner`; only synchronization and attestation methods live on `RLCluster`.
+- Action: changed `sync_rollout_for_no_update()` to accept the learner, read `learner.should_sync_weights`, and invoke transport/proof through `learner.rl_cluster`. Rebuilt the behavioral test with separate `FakeLearner` and `FakeCluster` roles and added a static wiring assertion that the workload passes `grpo_trainer`.
+- Command: focused 24-test contract suite; `bash canon-zero-tim/tests/p57_frozenlake_tim/run_cpu.sh`; `bash canon-zero-tim/tests/p45_frozenlake_dp8_tp8/run_exact_image.sh`; syntax and `git diff --check`.
+- Result: focused `24/24` PASS; P57 host suite `81/81` PASS with `P57_FROZENLAKE_TIM_CPU_PASS`; pinned-image base `110/110`, P45 `40/40`, PEFT `2/2`, Agentic `4/4`, stock route/import negatives, fixed-head and TP8 forward/VJP probes all pass; terminal `P45_EXACT_IMAGE_CPU_PASS overlay=qwen8b_tp8` with exit 0. No new TPU launch was performed.
+- Files/artifacts: `evidence/p57cal5/run.log`; `tunix/rl/frozenlake_checkpoint.py`; FrozenLake entrypoint; P45 checkpoint contract test; P57 state/handoff/runbook/lessons.
+- Rollback: revert this ownership-repair change set; the prior published behavior is the p57cal5 failure at `39e77bdd`.
+- Next: after publication, render `p57cal6` from the immutable repair SHA and obtain separate launch approval. Accept only real rollout progress plus the complete wrapper evidence contract.
