@@ -795,3 +795,29 @@
   ancestry while using the exact read-back branch HEAD as launch source SHA.
 - Publication targets only `yuxzhang/canon-zero-tim`. No cluster, PVC,
   credential or `main` mutation is authorized or performed by this checkpoint.
+
+## 2026-08-21T03:01:49Z — current HEAD review and minimal repair handoff
+
+- Fast-forward/read-back resolved local and
+  `origin/yuxzhang/canon-zero-tim` to exact
+  `d1646526c37b642ece5c7318a4c39ab3a43d30ac`. Its only source diff attempts
+  multi-cohort legacy snapshot sealing/adoption.
+- Confirmed blocker: `_legacy_contract_cohorts` now keys expected cohorts by
+  `(logical_shard_index, config_fingerprint)`, but validation still increments
+  `cohort_records[logical_shard_index]`. The complete P46 CPU gate ran 79 tests
+  and returned six errors, all before runtime with
+  `legacy source contract cardinality mismatch`.
+- Confirmed boundary regression: the same diff admits trajectory-v6 rows and a
+  v6 `trajectory_schema` through the legacy-v5 importer even though the
+  dedicated frozen-v6 path requires a sealed source `resume_contract.json`.
+- Decision: keep the intended recovery small. Legacy adoption remains v5-only;
+  enumerate every observed opaque v5 fingerprint/run-tag cohort; use
+  `(logical_shard_index, config_fingerprint)` consistently for lookup, count,
+  and comparison; retain global attempt-sequence checks; and add exact
+  multi-cohort/cardinality/ambiguous-identity/v6-rejection regressions.
+- Updated HANDOFF, runbook, incident note, state, plan and active P46.7 phase so
+  another agent cannot mistake `d1646526` for a launch pin. No implementation,
+  cluster, PVC, credential, commit, push, or `main` mutation occurred.
+- Next: implement the documented minimal repair, run complete P46 plus adjacent
+  P34/P44 and `git diff --check`, then stop for review and separate
+  commit/push/launch authority.

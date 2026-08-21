@@ -51,10 +51,19 @@ evidence; use a fresh tag such as `p46q4census02`.
 
 The final repair requires a SHA-sealed `legacy_source_contract.json` before it
 validates any legacy-v5 import. That contract binds stable model/data/sampling/
-topology facts and exactly one opaque fingerprint/run-tag cohort per observed
-logical shard. This avoids falsely reconstructing historical absolute paths while
-still rejecting mixed cohorts. The renderer also rejects every import that
-omits an explicit `--sampling-source-commit`.
+topology facts and enumerates every observed opaque v5
+`(logical_shard_index, config_fingerprint, run_tag)` cohort with exact
+cardinality. It does not reconstruct historical absolute paths, and it retains
+global consecutive-attempt/no-attempt-after-valid checks across cohorts. The
+renderer also rejects every import that omits an explicit
+`--sampling-source-commit`.
+
+Current operator HEAD `d1646526c37b642ece5c7318a4c39ab3a43d30ac` is not an
+execution pin: its partial multi-cohort refactor fails six P46 CPU tests because
+observed cardinality uses integer shard keys while expected cardinality uses
+`(shard, fingerprint)` keys. It also incorrectly admits trajectory-v6 through
+the legacy-v5 path. Repair must keep legacy adoption v5-only and use the tuple
+key consistently before any launch.
 
 ## Recovery without rerunning completed trajectories
 
@@ -104,17 +113,22 @@ stock@ac2c31bc7f6f82d33b3a62d62e1c390c8338b60e
 ```
 
 The old `f823bb6a` pin is superseded. Sealed-contract implementation
-`9cebe0d1671f6da1748bc53ed0da07a5f970fb37` is the mandatory ancestry gate.
-Use the exact freshly read-back operator-branch HEAD as the source SHA. The
-concrete node-pool and image digest still come from the current allocation:
+`9cebe0d1671f6da1748bc53ed0da07a5f970fb37` remains an ancestry floor, but
+neither it nor blocked HEAD `d1646526` is the final launch pin. Only after the
+minimal repair is approved, published, and read back may the exact repaired
+operator-branch HEAD be used as the source SHA. The concrete node-pool and
+image digest still come from the current allocation:
 
 ```bash
-IMPLEMENTATION_SHA=9cebe0d1671f6da1748bc53ed0da07a5f970fb37
+SEALED_CONTRACT_BASE_SHA=9cebe0d1671f6da1748bc53ed0da07a5f970fb37
+REPAIR_SHA=REPLACE_WITH_APPROVED_40_CHARACTER_REPAIR_SHA
 RUN_ID=p46c128a1
 BASE=canon-zero-tim/cluster/jobset-256cluster-64chip.yaml
 
+[[ "$REPAIR_SHA" =~ ^[0-9a-f]{40}$ ]]
 git fetch origin yuxzhang/canon-zero-tim
-git merge-base --is-ancestor "$IMPLEMENTATION_SHA" FETCH_HEAD
+git merge-base --is-ancestor "$SEALED_CONTRACT_BASE_SHA" FETCH_HEAD
+git merge-base --is-ancestor "$REPAIR_SHA" FETCH_HEAD
 SOURCE_SHA=$(git rev-parse FETCH_HEAD)
 [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
 

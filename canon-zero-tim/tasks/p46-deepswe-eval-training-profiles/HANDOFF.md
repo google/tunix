@@ -2,16 +2,77 @@
 
 ## Current status
 
-The next Q4 target run is the complete data-washing campaign, not another
-standalone `l0/p0` smoke. Sealed legacy-source-contract implementation commit
-`9cebe0d1671f6da1748bc53ed0da07a5f970fb37` is the mandatory ancestry gate.
-A remote executor must fetch `origin/yuxzhang/canon-zero-tim`, require that
-commit in `FETCH_HEAD` ancestry, and use the exact freshly read-back branch
-HEAD as the launch `--source-commit`. Never substitute the older `f823bb6a` or
-`6c3ab1f2`, and never modify or push `main`.
+**Do not launch from the current operator-branch HEAD.** Fresh read-back on
+2026-08-21 resolved
+`d1646526c37b642ece5c7318a4c39ab3a43d30ac`. That commit attempted to admit
+multiple historical v5 fingerprint/run-tag cohorts, but changed the cohort
+dictionary key only in part of the validator. The complete P46 CPU gate ran 79
+tests and returned six errors: observed counts are still keyed by integer
+`logical_shard_index`, while sealed counts are now keyed by
+`(logical_shard_index, config_fingerprint)`. Consequently every legacy-v5
+seal/adoption fails with `legacy source contract cardinality mismatch`.
+
+The same commit also admits trajectory-v6 rows through the legacy-v5 importer.
+That is outside the repair and must be removed: genuine v6 evidence continues
+to require the dedicated frozen-v6 path and its sealed `resume_contract.json`.
+No trajectory, TPU runtime, model, sampler, or R2E failure is implicated; this
+is a source-adoption bookkeeping regression.
+
+The next agent must make the minimal repair below and pass its gates before any
+launch pin is proposed. `9cebe0d1671f6da1748bc53ed0da07a5f970fb37`
+remains the last locally verified single-cohort implementation, but it is not a
+fallback launch pin for a source snapshot that actually contains multiple
+cohorts. Never substitute `f823bb6a` or `6c3ab1f2`, and never modify or push
+`main`.
 
 No cluster launch is authorized by this handoff alone. Render/dry-run/apply only
 within the operator's explicit instruction.
+
+## Immediate repair for the next agent
+
+Keep this change narrow. Do not touch DeepSWE training, rollout generation,
+reward, sampling, action repair, deadlines, topology, optimizer placement, or
+the final washed-list classifier.
+
+1. Keep the legacy importer v5-only. Require both
+   `legacy_source_contract.json.trajectory_schema` and every imported row's
+   `schema` to equal `canon.p46.deepswe-eval.trajectory.v5`. A v6 row selected
+   with `--legacy-import-id` must fail closed and direct the operator to
+   `--frozen-v6-import-id`.
+2. Admit multiple historical v5 cohorts only by enumerating every observed
+   `(logical_shard_index, config_fingerprint, run_tag)` in the sealed source
+   contract. `run_tag` must still be the deterministic legacy run tag for that
+   fingerprint; stable model/data/sampling/topology semantics remain exact.
+3. Use one key consistently during discovery, contract lookup, validation, and
+   cardinality accounting. The validator/importer lookup and count key is
+   `(logical_shard_index, config_fingerprint)`; increment that exact key, then
+   compare it with the exact per-cohort `records` map from the seal.
+4. Preserve the existing global `(task_key, sample_index)` attempt-sequence
+   checks across all cohorts: attempts must be consecutive and no row may
+   follow a valid result. Multiple cohorts do not authorize duplicate or
+   ambiguous identities.
+5. Keep imported provenance truthful. Because this path is v5-only,
+   `imported_from.legacy_schema` remains v5. Do not relabel or silently consume
+   v6 evidence.
+
+Required regressions:
+
+- one historical cohort with path drift seals and imports;
+- two valid v5 cohorts in one logical shard seal and import with exact
+  per-cohort counts;
+- tampered per-cohort cardinality fails;
+- ambiguous/nonconsecutive duplicate identities across cohorts fail;
+- a v6 row and a staging directory containing `resume_contract.json` both fail
+  through `--legacy-import-id`;
+- the dedicated frozen-v6 importer remains unchanged and passes its existing
+  contract-drift tests.
+
+Run the complete P46 CPU suite and adjacent P34/P44 gates, not only a new
+targeted test. Require zero failures/errors, the suite's final PASS marker, and
+`git diff --check`. Update the expected case count only if a real new test is
+added. Record the exact commands and output markers in the task log. Stop for
+review; do not commit, push, render a launch pin, or touch a cluster without
+the user's separate explicit approval.
 
 ## P46.7 next execution: recover old v5 rows, then census
 
@@ -27,18 +88,21 @@ The final repair validates every sealed legacy-v5 row before claiming a target
 tag and makes any resume import without explicit `--sampling-source-commit`
 a renderer error. It does not reconstruct unstable historical absolute paths.
 Instead, `legacy_source_contract.json` binds the stable Q4 model/data/sampling/
-topology facts and exactly one opaque `(config_fingerprint, run_tag)` cohort
-per observed logical shard. The contract and every JSONL are covered by `SHA256SUMS`.
-Missing/tampered contracts, wrong semantics, mixed cohorts, changed files or
-cardinality drift fail before the destination resume contract and TPU runtime.
+topology facts and enumerates every observed opaque
+`(logical_shard_index, config_fingerprint, run_tag)` v5 cohort with exact
+cardinality. The contract and every JSONL are covered by `SHA256SUMS`.
+Missing/tampered contracts, wrong semantics, unenumerated cohorts, ambiguous
+identity attempts, changed files or cardinality drift fail before the
+destination resume contract and TPU runtime.
 
 The recovery procedure and exact observed stack are in
 `../../cluster/P46_CENSUS_SNAPSHOT_RESUME_INCIDENT.md`. The required facts are:
 
 1. Fetch `origin/yuxzhang/canon-zero-tim`. Require the published repair SHA in
    `FETCH_HEAD` ancestry, check it out exactly, and run
-   `bash canon-zero-tim/tests/p46_deepswe_profiles/run_cpu.sh`; require
-   `P46_DEEPSWE_PROFILES_CPU_PASS cases=79`.
+   `bash canon-zero-tim/tests/p46_deepswe_profiles/run_cpu.sh`; require its
+   final `P46_DEEPSWE_PROFILES_CPU_PASS cases=<reviewed-count>` marker and zero
+   failures/errors. Current blocked HEAD emits no PASS marker.
 2. Prove the source producer is terminal and the copied files are stable.
 3. Copy only `trajectories/*.jsonl` into a fresh staging directory. Do not put
    `resume_contract.json`, `legacy_source_contract.json`, or `SHA256SUMS` in it
@@ -235,18 +299,22 @@ rg -n 'trajectory.v6|config.v4|resume_tag|model_action_errors' \
 bash canon-zero-tim/tests/p46_deepswe_profiles/run_cpu.sh
 ```
 
-Required CPU marker:
+Required CPU marker after the repair (the exact count must match the reviewed
+suite and runner):
 
 ```text
-P46_DEEPSWE_PROFILES_CPU_PASS cases=79
+P46_DEEPSWE_PROFILES_CPU_PASS cases=<reviewed-count>
 ```
 
-The suite includes complete-scale orchestration, torn-tail recovery,
+After the repair, the suite must include complete-scale orchestration,
+torn-tail recovery,
 17-of-64 interruption followed by a 47-identity resume, immutable contract,
 single-writer lease, attempt-log, full-campaign postflight, and digest/fingerprint
-checked v5-to-v6 adoption across logical shards. It also proves path-drift
-acceptance, missing-contract rejection and mixed-cohort rejection. CPU PASS is not
-TPU/Kubernetes or campaign-completion evidence.
+checked v5-to-v6 adoption across logical shards. It must also prove path-drift
+acceptance, exact multi-cohort accounting, ambiguous-identity rejection,
+missing-contract rejection, and v6-via-legacy rejection. CPU PASS is not
+TPU/Kubernetes or campaign-completion evidence. At current HEAD `d1646526`,
+this gate is red with six errors and therefore blocks execution.
 
 ## Transition `p46e12805` without stopping it
 

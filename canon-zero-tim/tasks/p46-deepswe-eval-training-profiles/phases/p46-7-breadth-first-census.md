@@ -1,6 +1,6 @@
 # P46.7 — breadth-first census before strict repair
 
-- Status: census base published as `365b46c1cd150839e3be1fd50adb33325fe3189f`; returned legacy-v5 import incident reproduced; sealed legacy-source-contract implementation is `9cebe0d1671f6da1748bc53ed0da07a5f970fb37` and passes 79 P46 CPU cases plus adjacent gates; target census pending
+- Status: blocked at operator HEAD `d1646526c37b642ece5c7318a4c39ab3a43d30ac`; its partial multi-cohort refactor fails six of 79 P46 tests on cardinality-key mismatch and weakens the v5/v6 boundary; minimal v5-only repair is the active gate before target census
 
 ## Trigger
 
@@ -63,17 +63,18 @@ destination tag `p46q4census01` claimed under the wrong immutable contract.
 - Preserve `p46q4census01`; never repair or reuse it.
 - Make a fresh v5-only staging copy under `p46q4census02/imports/`; include raw
   trajectory JSONLs but no `resume_contract.json` or hand-authored seal files.
-- Run `seal_p46_legacy_v5_snapshot.py`. Require
+- Run the repaired `seal_p46_legacy_v5_snapshot.py`. Require
   `P46_LEGACY_V5_SEAL_PASS`; the resulting `legacy_source_contract.json` and
-  every JSONL must be covered by `SHA256SUMS`. Stable source semantics and one
-  opaque fingerprint/run-tag cohort per observed logical shard are mandatory.
+  every JSONL must be covered by `SHA256SUMS`. Stable source semantics and an
+  exact enumeration/cardinality for every observed opaque v5
+  fingerprint/run-tag cohort are mandatory.
 - Render `--legacy-import-id` and the exact explicit historical
   `--sampling-source-commit`; never infer sampler lineage from the new harness
   SHA.
 - Preflight must validate every row before creating the destination resume
-  contract. Wrong source, mixed schema/cohort, missing/tampered source
-  contract, v6-via-legacy, or v5-with-resume-contract staging must fail without
-  claiming the fresh tag.
+  contract. Wrong source, unenumerated cohort, ambiguous identity attempts,
+  missing/tampered source contract, v6-via-legacy, or
+  v5-with-resume-contract staging must fail without claiming the fresh tag.
 - Require `LEGACY_IMPORT_PASS records=<actual>`. Imported durable identities
   suppress census work; only absent identities are sampled.
 - The incident reports 510 raw rows. A larger count is reusable only if the

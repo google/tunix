@@ -9,6 +9,41 @@ shell override layer.
 
 ## 2026-08-21 sealed legacy-v5 source contract (current operator path)
 
+### Current HEAD is blocked; repair before launch
+
+Fresh operator-branch read-back resolved
+`d1646526c37b642ece5c7318a4c39ab3a43d30ac`. Do not render or launch it. Its
+multi-cohort refactor is incomplete: the validator increments
+`cohort_records[logical_shard_index]`, but compares that integer-keyed map with
+contract cohorts keyed by `(logical_shard_index, config_fingerprint)`. The
+complete P46 CPU suite ran 79 tests and returned six errors, all on legacy-v5
+seal/adoption cardinality mismatch.
+
+This is not a DeepSWE rollout, model, TPU, R2E, or trajectory-quality failure.
+It is bookkeeping in the frozen-source adoption layer. The commit also
+incorrectly allows trajectory-v6 through the legacy-v5 path. Genuine v6 must
+remain isolated behind `--frozen-v6-import-id` and a sealed source
+`resume_contract.json`.
+
+The repair agent must:
+
+1. restore strict v5-only checks for the legacy contract and every legacy row;
+2. enumerate all observed v5
+   `(logical_shard_index, config_fingerprint, run_tag)` cohorts while keeping
+   stable model/data/sampling/topology semantics exact;
+3. use `(logical_shard_index, config_fingerprint)` consistently for cohort
+   lookup, record counting, and expected-cardinality comparison;
+4. retain global consecutive-attempt/no-attempt-after-valid checks across
+   cohorts; and
+5. add real regressions for two cohorts in one shard, cardinality tampering,
+   ambiguous identities, and v6-via-legacy rejection.
+
+Run the full P46 suite plus adjacent P34/P44 gates and `git diff --check`.
+Zero failures/errors and the final PASS markers are required. Do not commit,
+push, or launch until the operator separately approves each action. The
+code-level checklist is mirrored in
+`tasks/p46-deepswe-eval-training-profiles/HANDOFF.md`.
+
 The current operator path is **legacy-v5 adoption into a fresh census tag**,
 not the generic frozen-v6 path below. Attempt
 `canon-p46-eval-census-128-p46c128a0` selected a directory named
@@ -29,21 +64,25 @@ valid snapshot contains all three of: `trajectories/*.jsonl`,
 Require `LEGACY_IMPORT_PASS records=<actual>` before runtime. Imported durable
 identities are skipped, so this does not restart washing from zero.
 
-The source contract binds the stable model/data/sampling/topology facts plus
-exactly one opaque `(config_fingerprint, run_tag)` cohort per observed logical
-shard.
+The repaired source contract binds the stable model/data/sampling/topology
+facts and enumerates every opaque
+`(logical_shard_index, config_fingerprint, run_tag)` v5 cohort observed in the
+frozen source.
 Old absolute model/whitelist paths and the unrecorded source client image are
-not reconstructed. Mixed cohorts, a missing/tampered contract, wrong sampler,
-wrong topology/data, cardinality drift, or any changed trajectory digest fail
-before the destination resume contract and before TPU initialization.
+not reconstructed. Unenumerated cohorts, ambiguous task/sample attempts, a
+missing/tampered contract, wrong sampler, wrong topology/data, cardinality
+drift, any changed trajectory digest, or any v6 row in this path fail before
+the destination resume contract and before TPU initialization.
 
 The earlier `6c3ab1f2d2ffeaf47667c07fc4151532574e6279` compatibility change is not
 an execution pin: it accepted arbitrary well-formed fingerprints and did not
 bind run tags. Sealed-contract implementation
-`9cebe0d1671f6da1748bc53ed0da07a5f970fb37` is the mandatory ancestry gate.
-A remote executor must freshly fetch `yuxzhang/canon-zero-tim`, require that
-implementation in `FETCH_HEAD` ancestry, and use the exact read-back branch
-HEAD as `HARNESS_SHA`; never fall back to `f823bb6a` or `6c3ab1f2`.
+`9cebe0d1671f6da1748bc53ed0da07a5f970fb37` remains an ancestry floor, not a
+sufficient launch pin. After the minimal repair is separately approved and
+published, a remote executor must freshly fetch `yuxzhang/canon-zero-tim`,
+require both `9cebe0d1` and the new repair commit in `FETCH_HEAD` ancestry, and
+use that exact read-back HEAD as `HARNESS_SHA`; never launch `d1646526` and
+never fall back to `f823bb6a` or `6c3ab1f2`.
 Full commands, exact error evidence and cardinality limits are in
 `P46_CENSUS_SNAPSHOT_RESUME_INCIDENT.md`.
 
@@ -209,7 +248,7 @@ finalizer are published by
 `a642ab267425a5b08b0cebb6e12c607f50f71831`. A remote agent must stop unless
 the exact read-back operator SHA contains that commit and all of
 `attempt_index`, `P46_EVAL_PHYSICAL_INCOMPLETE`, and
-`P46_DEEPSWE_PROFILES_CPU_PASS cases=79`, plus
+the complete suite's reviewed `P46_DEEPSWE_PROFILES_CPU_PASS` marker, plus
 `finalize_deepswe_eval.py`. Do not invent or substitute a repair SHA in
 advance.
 
@@ -576,10 +615,11 @@ Require `P46_DEEPSWE_PROFILES_CPU_PASS`. Also run the pinned-image gates named
 in the P34/P44 runbooks with the actual registry-digest client image. Do not
 print or modify `HF_TOKEN`, `WANDB_API_KEY`, or `.env`.
 
-For evaluation execution after the `p46e25609` action-adapter correction, the
-marker must be exactly `P46_DEEPSWE_PROFILES_CPU_PASS cases=79`, and this
-source audit must
-pass before rendering:
+For evaluation execution after the `p46e25609` action-adapter correction and
+the current legacy-adoption repair, the marker count must match the reviewed
+suite/runner and the run must have zero failures/errors. Current HEAD
+`d1646526` does not emit the PASS marker. This source audit must pass before
+rendering:
 
 ```bash
 rg -n 'attempt_index|P46_EVAL_PHYSICAL_INCOMPLETE|physical_pending|validity_reason' \
@@ -720,10 +760,11 @@ test -f "$SNAPSHOT_ROOT/SHA256SUMS"
 chmod -R a-w "$SNAPSHOT_ROOT"
 ```
 
-The sealer must print `P46_LEGACY_V5_SEAL_PASS`. It derives the clean task
-order from the exact reviewed 1,851-row whitelist, verifies the stable Q4
-N16/16K/50-step contract, and refuses two fingerprint/run-tag cohorts in one
-observed logical shard. Do not hand-author `legacy_source_contract.json`, do not create
+After the blocked HEAD is repaired, the sealer must print
+`P46_LEGACY_V5_SEAL_PASS`. It derives the clean task order from the exact
+reviewed 1,851-row whitelist, verifies the stable Q4 N16/16K/50-step contract,
+and records every observed v5 fingerprint/run-tag cohort with exact
+per-cohort cardinality. Do not hand-author `legacy_source_contract.json`, do not create
 a trajectory-only `SHA256SUMS` first, and do not edit a sealed snapshot. If
 the sealer fails, preserve the old producer evidence and use a new staging
 copy after resolving the cause.
