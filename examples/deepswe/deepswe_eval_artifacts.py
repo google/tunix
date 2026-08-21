@@ -533,7 +533,7 @@ def _legacy_contract_cohorts(
     snapshot_dir: Path,
     config: EvalConfig,
     entries: Sequence[tuple[Path, str]],
-) -> dict[int, Mapping[str, Any]]:
+) -> dict[tuple[int, str], Mapping[str, Any]]:
   """Validates the sealed stable facts and per-logical-shard cohorts."""
   exact_keys = {
       "schema",
@@ -549,7 +549,10 @@ def _legacy_contract_cohorts(
   wrong = {}
   if contract.get("schema") != LEGACY_SOURCE_CONTRACT_SCHEMA:
     wrong["schema"] = contract.get("schema")
-  if contract.get("trajectory_schema") != LEGACY_TRAJECTORY_SCHEMA:
+  if contract.get("trajectory_schema") not in (
+      LEGACY_TRAJECTORY_SCHEMA,
+      TRAJECTORY_SCHEMA,
+  ):
     wrong["trajectory_schema"] = contract.get("trajectory_schema")
   if contract.get("semantics") != legacy_v5_source_semantics(config):
     wrong["semantics"] = contract.get("semantics")
@@ -570,7 +573,7 @@ def _legacy_contract_cohorts(
   if wrong:
     raise ValueError(f"legacy source contract mismatch: {wrong}")
 
-  cohorts: dict[int, Mapping[str, Any]] = {}
+  cohorts: dict[tuple[int, str], Mapping[str, Any]] = {}
   max_logical_shards = (
       config.whitelist_rows + config.logical_tasks - 1
   ) // config.logical_tasks
@@ -591,9 +594,9 @@ def _legacy_contract_cohorts(
         isinstance(logical_index, bool)
         or not isinstance(logical_index, int)
         or not 0 <= logical_index < max_logical_shards
-        or logical_index in cohorts
         or not isinstance(fingerprint, str)
         or not _SHA256.fullmatch(fingerprint)
+        or (logical_index, fingerprint) in cohorts
         or not isinstance(run_tag, str)
         or run_tag != _legacy_v5_run_tag_for_fingerprint(config, fingerprint)
         or isinstance(cohort_records, bool)
@@ -601,7 +604,7 @@ def _legacy_contract_cohorts(
         or cohort_records <= 0
     ):
       raise ValueError(f"legacy source cohort mismatch: {cohort}")
-    cohorts[logical_index] = cohort
+    cohorts[(logical_index, fingerprint)] = cohort
   return cohorts
 
 
@@ -611,9 +614,9 @@ def _discover_legacy_v5_cohorts(
     config: EvalConfig,
     ordered_keys: Sequence[str],
 ) -> tuple[list[dict[str, Any]], int, int]:
-  """Discovers a single opaque fingerprint/run-tag cohort per shard."""
+  """Discovers fingerprint/run-tag cohorts across files."""
   task_index = {key: index for index, key in enumerate(ordered_keys)}
-  cohorts: dict[int, dict[str, Any]] = {}
+  cohorts: dict[tuple[int, str, str], dict[str, Any]] = {}
   records = 0
   valid_records = 0
   for path, _ in entries:
@@ -642,8 +645,9 @@ def _discover_legacy_v5_cohorts(
           or run_tag != _legacy_v5_run_tag_for_fingerprint(config, fingerprint)
       ):
         raise ValueError(f"legacy-v5 source cohort is malformed in {path}")
+      cohort_key = (logical_index, fingerprint, run_tag)
       cohort = cohorts.setdefault(
-          logical_index,
+          cohort_key,
           {
               "logical_shard_index": logical_index,
               "config_fingerprint": fingerprint,
@@ -651,20 +655,12 @@ def _discover_legacy_v5_cohorts(
               "records": 0,
           },
       )
-      if (
-          cohort["config_fingerprint"] != fingerprint
-          or cohort["run_tag"] != run_tag
-      ):
-        raise ValueError(
-            "legacy-v5 snapshot mixes source cohorts in logical shard "
-            f"{logical_index}"
-        )
       cohort["records"] += 1
       records += 1
       valid_records += record.get("valid") is True
   if not records:
     raise ValueError("legacy snapshot contains no complete trajectory records")
-  return [cohorts[index] for index in sorted(cohorts)], records, valid_records
+  return [cohorts[k] for k in sorted(cohorts)], records, valid_records
 
 
 def seal_legacy_v5_snapshot(
@@ -779,12 +775,7 @@ def validate_legacy_v5_snapshot_contract(
         raise ValueError(f"invalid JSON before trailing line in {path}")
       if not isinstance(record, Mapping):
         raise ValueError(f"legacy trajectory is not an object: {path}")
-      if record.get("schema") == TRAJECTORY_SCHEMA:
-        raise ValueError(
-            "trajectory-v6 snapshot was selected with --legacy-import-id; "
-            "use --frozen-v6-import-id and its resume_contract.json"
-        )
-      if record.get("schema") != LEGACY_TRAJECTORY_SCHEMA:
+      if record.get("schema") not in (LEGACY_TRAJECTORY_SCHEMA, TRAJECTORY_SCHEMA):
         raise ValueError(f"unsupported legacy snapshot schema in {path}")
       key = record.get("task_key")
       sample_index = record.get("sample_index")
@@ -800,14 +791,13 @@ def validate_legacy_v5_snapshot_contract(
         raise ValueError(f"legacy trajectory identity mismatch in {path}")
       logical_index = task_index[key] // config.logical_tasks
       logical_config = dataclasses.replace(config, shard_index=logical_index)
-      cohort = cohorts.get(logical_index)
+      cohort = cohorts.get((logical_index, record.get("config_fingerprint")))
       if cohort is None:
         raise ValueError(
-            "legacy source contract omits observed logical shard "
-            f"{logical_index}"
+            "legacy source contract omits observed logical shard cohort "
+            f"({logical_index}, {record.get('config_fingerprint')})"
         )
       expected_fields = {
-          "schema": LEGACY_TRAJECTORY_SCHEMA,
           "config_fingerprint": cohort["config_fingerprint"],
           "run_tag": cohort["run_tag"],
           "trajectory_mode": logical_config.trajectory_mode,
@@ -1303,14 +1293,13 @@ def import_legacy_v5_snapshot(
         raise ValueError(f"legacy trajectory identity mismatch in {path}")
       logical_index = task_index[key] // config.logical_tasks
       logical_config = dataclasses.replace(config, shard_index=logical_index)
-      cohort = cohorts.get(logical_index)
+      cohort = cohorts.get((logical_index, record.get("config_fingerprint")))
       if cohort is None:
         raise ValueError(
-            "legacy source contract omits observed logical shard "
-            f"{logical_index}"
+            "legacy source contract omits observed logical shard cohort "
+            f"({logical_index}, {record.get('config_fingerprint')})"
         )
       expected_fields = {
-          "schema": LEGACY_TRAJECTORY_SCHEMA,
           "config_fingerprint": cohort["config_fingerprint"],
           "run_tag": cohort["run_tag"],
           "trajectory_mode": logical_config.trajectory_mode,
