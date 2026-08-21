@@ -304,5 +304,89 @@ class DistributedRLEngineTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_health_monitor_integration(self):
+    mock_monitor = mock.MagicMock()
+    report = datatypes.HealthReport(
+        state=datatypes.WorkerState.READY,
+        load_info=datatypes.LoadInfo(
+            num_requests_waiting=4,
+            num_requests_running=2,
+            kv_cache_usage_perc=0.75,
+        ),
+    )
+    mock_monitor.latest_reports = {"worker_1": report}
+
+    engine = distributed_rl_engine.DistributedRLEngine(
+        rollout_workers=[self.mock_rollout_1, self.mock_rollout_2],
+        trainer_workers={datatypes.Role.ACTOR: self.mock_actor},
+        health_monitor=mock_monitor,
+    )
+    self.assertEqual(engine.health_monitor, mock_monitor)
+    self.assertEqual(engine.get_health_reports(), {"worker_1": report})
+
+  def test_custom_router_with_health_reports(self):
+    mock_monitor = mock.MagicMock()
+    report1 = datatypes.HealthReport(
+        state=datatypes.WorkerState.READY,
+        load_info=datatypes.LoadInfo(
+            num_requests_waiting=10,
+            num_requests_running=5,
+            kv_cache_usage_perc=0.95,
+        ),
+    )
+    report2 = datatypes.HealthReport(
+        state=datatypes.WorkerState.READY,
+        load_info=datatypes.LoadInfo(
+            num_requests_waiting=0,
+            num_requests_running=1,
+            kv_cache_usage_perc=0.15,
+        ),
+    )
+    # Map mock actor handles to worker IDs for routing
+    actor_to_id = {
+        self.mock_rollout_1: "worker_1",
+        self.mock_rollout_2: "worker_2",
+    }
+    mock_monitor.latest_reports = {"worker_1": report1, "worker_2": report2}
+
+    # Custom least-loaded router based on kv_cache_usage_perc and num_requests_waiting
+    def least_loaded_router(actors, method_name, args, kwargs):
+      reports = kwargs.get("health_reports", {})
+      best_actor = actors[0]
+      best_score = float("inf")
+      for a in actors:
+        wid = actor_to_id.get(a)
+        rep = reports.get(wid)
+        score = (
+            (rep.load_info.num_requests_waiting + rep.load_info.kv_cache_usage_perc)
+            if rep and rep.load_info
+            else 0.0
+        )
+        if score < best_score:
+          best_score = score
+          best_actor = a
+      return best_actor
+
+    engine = distributed_rl_engine.DistributedRLEngine(
+        rollout_workers=[self.mock_rollout_1, self.mock_rollout_2],
+        trainer_workers={datatypes.Role.ACTOR: self.mock_actor},
+        health_monitor=mock_monitor,
+        router=least_loaded_router,
+    )
+
+    async def _run():
+      req = datatypes.RolloutRequest(
+          request_id="req_load_aware",
+          prompt="test prompt",
+          prompt_id="p1",
+      )
+      await engine.dispatch_rollouts([req])
+      # Since worker_2 has much lower load, least_loaded_router must route to mock_rollout_2
+      self.mock_rollout_2.generate.assert_called_once()
+      self.mock_rollout_1.generate.assert_not_called()
+
+    asyncio.run(_run())
+
+
 if __name__ == "__main__":
   absltest.main()

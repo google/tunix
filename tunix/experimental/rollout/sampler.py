@@ -124,12 +124,7 @@ class WeightSyncRequest(datatypes.Request):
   extra_config: dict[str, Any] = dataclasses.field(default_factory=dict)
 
 
-@dataclasses.dataclass(kw_only=True)
-class LoadInfo(datatypes.Response):
-  """Load information for a Sampler."""
-  num_requests_waiting: int = 0
-  num_requests_running: int = 0
-  kv_cache_usage_perc: float = 0.0
+LoadInfo = datatypes.LoadInfo
 
 
 @runtime_checkable

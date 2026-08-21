@@ -152,5 +152,52 @@ class HealthMonitorTest(absltest.TestCase):
     )
 
 
+  def test_latest_reports_and_get_report(self):
+    worker0 = mock_worker.MockWorker("w0", roles={"rollout"})
+    worker1 = mock_worker.MockWorker("w1", roles={"rollout"})
+    registry = worker_registry.WorkerRegistry()
+    registry.register(worker0)
+    registry.register(worker1)
+    monitor = health_monitor.HealthMonitor(registry)
+
+    # Before poll, latest_reports is empty
+    self.assertEmpty(monitor.latest_reports)
+    self.assertIsNone(monitor.get_report("w0"))
+
+    report_w0 = datatypes.HealthReport(
+        state=WorkerState.READY,
+        load_info=datatypes.LoadInfo(
+            num_requests_waiting=2,
+            num_requests_running=1,
+            kv_cache_usage_perc=0.5,
+        ),
+    )
+    report_w1 = datatypes.HealthReport(
+        state=WorkerState.READY,
+        load_info=datatypes.LoadInfo(
+            num_requests_waiting=0,
+            num_requests_running=3,
+            kv_cache_usage_perc=0.8,
+        ),
+    )
+    with mock.patch.object(worker0, "heartbeat", return_value=report_w0):
+      with mock.patch.object(worker1, "heartbeat", return_value=report_w1):
+        reports = monitor.poll()
+        self.assertEqual(reports["w0"], report_w0)
+        self.assertEqual(reports["w1"], report_w1)
+
+    self.assertEqual(monitor.latest_reports, {"w0": report_w0, "w1": report_w1})
+    self.assertEqual(monitor.get_report("w0"), report_w0)
+    self.assertEqual(monitor.get_report("w1"), report_w1)
+
+    # When a worker is unregistered, next poll removes it from latest_reports
+    registry.unregister("w1")
+    with mock.patch.object(worker0, "heartbeat", return_value=report_w0):
+      monitor.poll()
+    self.assertEqual(monitor.latest_reports, {"w0": report_w0})
+    self.assertIsNone(monitor.get_report("w1"))
+    monitor.close()
+
+
 if __name__ == "__main__":
   absltest.main()

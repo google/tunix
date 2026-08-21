@@ -232,6 +232,7 @@ class ClusterOrchestrator:
         rollout_workers=rollout_workers,
         trainer_workers=trainer_workers,
         inference_workers=inference_workers,
+        health_monitor=self.monitor,
         weight_sync_coordinator=self._weight_sync_coordinator,
     )
 

@@ -197,6 +197,27 @@ class WireSerializationTest(absltest.TestCase):
     after = time.time()
     self.assertGreaterEqual(report.heartbeat_unix_s, before)
     self.assertLessEqual(report.heartbeat_unix_s, after)
+    self.assertIsNone(report.load_info)
+
+  def test_load_info_defaults_and_custom(self):
+    default_load = datatypes.LoadInfo()
+    self.assertEqual(default_load.num_requests_waiting, 0)
+    self.assertEqual(default_load.num_requests_running, 0)
+    self.assertEqual(default_load.kv_cache_usage_perc, 0.0)
+
+    custom_load = datatypes.LoadInfo(
+        num_requests_waiting=5,
+        num_requests_running=2,
+        kv_cache_usage_perc=0.65,
+    )
+    report = datatypes.HealthReport(
+        state=WorkerState.READY,
+        load_info=custom_load,
+    )
+    self.assertIsNotNone(report.load_info)
+    self.assertEqual(report.load_info.num_requests_waiting, 5)
+    self.assertEqual(report.load_info.num_requests_running, 2)
+    self.assertEqual(report.load_info.kv_cache_usage_perc, 0.65)
 
 
 if __name__ == "__main__":

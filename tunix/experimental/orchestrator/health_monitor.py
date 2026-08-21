@@ -81,6 +81,7 @@ class HealthMonitor:
     self._clock = clock
     # worker_id -> (state, timestamp it entered that state).
     self._state_since: dict[str, tuple[str, float]] = {}
+    self._latest_reports: dict[str, datatypes.HealthReport] = {}
     if executor is not None:
       self._executor = executor
       self._owns_executor = False
@@ -101,6 +102,15 @@ class HealthMonitor:
   def __exit__(self, exc_type, exc_val, exc_tb):
     self.close()
     return False
+
+  @property
+  def latest_reports(self) -> dict[str, datatypes.HealthReport]:
+    """Returns a snapshot of the latest health reports from the last poll."""
+    return dict(self._latest_reports)
+
+  def get_report(self, worker_id: str) -> datatypes.HealthReport | None:
+    """Returns the latest health report for a specific worker if available."""
+    return self._latest_reports.get(worker_id)
 
   def poll(self) -> dict[str, datatypes.HealthReport]:
     """Polls every worker once, updating state-entry timestamps.
@@ -138,7 +148,13 @@ class HealthMonitor:
       for future in futures:
         future.cancel()
 
+    # Update latest cached reports
+    self._latest_reports.update(reports)
+
     # Forget workers that have left the registry.
+    for worker_id in list(self._latest_reports.keys()):
+      if worker_id not in live_ids:
+        del self._latest_reports[worker_id]
     for worker_id in self._state_since.keys() - live_ids:
       del self._state_since[worker_id]
     return reports

@@ -402,6 +402,38 @@ class VLLMInProcessDriver:
   def last_error(self) -> Optional[Exception]:
     return self._last_error
 
+  def get_load_info(self) -> dict[str, Any]:
+    """Returns current load and KV cache usage statistics."""
+    num_waiting = 0
+    num_running = 0
+    kv_cache_usage = 0.0
+
+    with self._engine_lock:
+      num_waiting += len(self._submission_queue)
+
+    try:
+      engine_core = getattr(self._llm_engine, "engine_core", None)
+      scheduler = getattr(engine_core, "scheduler", None)
+      make_stats_fn = getattr(scheduler, "make_stats", None)
+      if callable(make_stats_fn):
+        stats = make_stats_fn()
+        if stats is not None:
+          num_running += getattr(stats, "num_running_reqs", 0)
+          num_waiting += getattr(stats, "num_waiting_reqs", 0) + getattr(
+              stats, "num_skipped_waiting_reqs", 0
+          )
+          kv_cache_usage = float(getattr(stats, "kv_cache_usage", 0.0))
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+      logging.debug(
+          "Failed to retrieve scheduler stats from vLLM engine: %s", exc
+      )
+
+    return {
+        "num_requests_waiting": num_waiting,
+        "num_requests_running": num_running,
+        "kv_cache_usage_perc": kv_cache_usage,
+    }
+
   def __enter__(self) -> "VLLMInProcessDriver":
     return self
 

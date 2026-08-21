@@ -15,6 +15,7 @@
 """Top-level RolloutWorker abstractions (Service vs Client Driver)."""
 
 import dataclasses
+import inspect
 from typing import Any, AsyncIterator, Callable, List, Optional, Sequence, Union
 import numpy as np
 from tunix.experimental.common import datatypes
@@ -163,11 +164,45 @@ class RolloutWorker(abstract_worker.Worker):
     pass
 
   def heartbeat(self) -> datatypes.HealthReport:
+    load_info = None
+    if hasattr(self.sampler, "get_load_info_sync"):
+      load_info = self.sampler.get_load_info_sync()
+    elif hasattr(self.sampler, "get_load_info"):
+      try:
+        res = self.sampler.get_load_info()
+        if not inspect.isawaitable(res):
+          load_info = res
+      except Exception:  # pylint: disable=broad-exception-caught
+        pass
+
+    num_requests_waiting = (
+        getattr(load_info, "num_requests_waiting", 0)
+        if not isinstance(load_info, dict)
+        else load_info.get("num_requests_waiting", 0)
+    ) if load_info else 0
+    num_requests_running = (
+        getattr(load_info, "num_requests_running", 0)
+        if not isinstance(load_info, dict)
+        else load_info.get("num_requests_running", 0)
+    ) if load_info else 0
+    kv_cache_usage_perc = (
+        float(getattr(load_info, "kv_cache_usage_perc", 0.0))
+        if not isinstance(load_info, dict)
+        else float(load_info.get("kv_cache_usage_perc", 0.0))
+    ) if load_info else 0.0
+
+    report_load_info = datatypes.LoadInfo(
+        num_requests_waiting=num_requests_waiting,
+        num_requests_running=num_requests_running,
+        kv_cache_usage_perc=kv_cache_usage_perc,
+    )
+
     return datatypes.HealthReport(
         state=self.state,
         policy_version=self._policy_version,
         inflight=len(self.manager._active_tasks),  # pylint: disable=protected-access
         queue_depth=self.manager._completed_queue.qsize(),  # pylint: disable=protected-access
+        load_info=report_load_info,
     )
 
   def _left_pad_prompt_token_ids(

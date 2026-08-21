@@ -305,10 +305,26 @@ class LegacyVllmSamplerAdapter(Sampler, abc.ABC):
     del req_id, kwargs
     return "SUCCESS"
 
+  def get_load_info_sync(self) -> base_sampler_lib.LoadInfo:
+    """Returns best-effort vLLM queue/cache load information synchronously."""
+    if self.vllm_sampler is not None and hasattr(
+        self.vllm_sampler, "get_load_info"
+    ):
+      info = self.vllm_sampler.get_load_info()
+      if isinstance(info, base_sampler_lib.LoadInfo):
+        return info
+      if isinstance(info, dict):
+        return base_sampler_lib.LoadInfo(
+            num_requests_waiting=info.get("num_requests_waiting", 0),
+            num_requests_running=info.get("num_requests_running", 0),
+            kv_cache_usage_perc=float(info.get("kv_cache_usage_perc", 0.0)),
+        )
+    return base_sampler_lib.LoadInfo()
+
   async def get_load_info(self, **kwargs) -> base_sampler_lib.LoadInfo:
     """Returns best-effort vLLM queue/cache load information."""
     del kwargs
-    return base_sampler_lib.LoadInfo()
+    return self.get_load_info_sync()
 
   async def post_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
     """Finalizes and switches active policy weights after transfer completion."""

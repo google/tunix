@@ -92,6 +92,7 @@ class ClusterOrchestratorTest(absltest.TestCase):
         mock_critic,
     )
     self.assertIs(engine._inference_workers[datatypes.Role.REFERENCE], mock_ref)
+    self.assertIs(engine.health_monitor, self.mock_monitor)
     self.assertSequenceEqual(
         orch.worker_infos(), [actor_info, critic_info, ref_info, rollout_info]
     )
