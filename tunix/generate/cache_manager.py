@@ -72,9 +72,7 @@ class CacheManager:
         if num_pages > self.available_hbm_pages:
             raise RuntimeError(f"Cannot allocate {num_pages} pages. Only {self.available_hbm_pages} available.")
         
-        new_block, allocated_indices = self.hbm_page_manager.block.allocate(jnp.array(num_pages))
-        import dataclasses
-        self.hbm_page_manager = dataclasses.replace(self.hbm_page_manager, block=new_block)
+        self.hbm_page_manager, allocated_indices = self.hbm_page_manager.allocate(jnp.array(num_pages))
         physical_indices = np.array(allocated_indices).tolist()
         self.available_hbm_pages -= num_pages
         
@@ -170,12 +168,10 @@ class CacheManager:
         )
 
         # 4. Evict the old TPU physical pages
-        import dataclasses
-        new_block = self.hbm_page_manager.block.release(
-            page_indices_to_evict=jnp.array(physical_tpu_idxs),
-            num_evicted=jnp.array(len(physical_tpu_idxs))
+        self.hbm_page_manager = self.hbm_page_manager.evict_pages(
+            page_indices=jnp.array(physical_tpu_idxs),
+            count=jnp.array(len(physical_tpu_idxs))
         )
-        self.hbm_page_manager = dataclasses.replace(self.hbm_page_manager, block=new_block)
         self.available_hbm_pages += len(physical_tpu_idxs)
         
         # 5. Re-map logical tracking
@@ -210,12 +206,10 @@ class CacheManager:
         if tpu_idxs_to_evict:
             padded_tpu = np.zeros((self.hbm_page_manager.block.total_num_pages,), dtype=np.int32)
             padded_tpu[:len(tpu_idxs_to_evict)] = tpu_idxs_to_evict
-            import dataclasses
-            new_block = self.hbm_page_manager.block.release(
+            self.hbm_page_manager = self.hbm_page_manager.evict_pages(
                 jnp.array(padded_tpu), 
                 jnp.array(len(tpu_idxs_to_evict))
             )
-            self.hbm_page_manager = dataclasses.replace(self.hbm_page_manager, block=new_block)
             self.available_hbm_pages += len(tpu_idxs_to_evict)
 
     def tree_flatten(self):

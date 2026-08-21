@@ -56,7 +56,9 @@ class LLMEngine:
         self.hbm_pm = batch_page_manager_lib.BatchPageManager(
             block=hbm_block,
             page_indices=jnp.full((self.cache_config.max_num_seqs, max_num_pages_per_seq), -1, dtype=jnp.int32),
-            seq_lens=jnp.zeros((self.cache_config.max_num_seqs,), dtype=jnp.int32)
+            seq_lens=jnp.zeros((self.cache_config.max_num_seqs,), dtype=jnp.int32),
+            max_seq_len=self.max_seq_len,
+            window_size=None
         )
         
         if getattr(self.cache_config, "cpu_offload_bytes", 0) > 0:
