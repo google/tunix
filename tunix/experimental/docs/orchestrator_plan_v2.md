@@ -2,7 +2,7 @@
 
 > [!NOTE]
 > This document defines the definitive **Version 2 (V2) Architectural Specification** for the Tunix Distributed RL stack. Based on architectural review and gap analysis of the initial prototype, V2 streamlines the previous 5-layer proposal into a high-performance, boilerplate-free **3-Layer Compositional Architecture**:
-> 1. **Layer 3: Workflow & Program Layer** (`async_rl_program.py` / `rl_program.py`)
+> 1. **Layer 3: Workflow & Program Layer** (`rl_program.py`)
 > 2. **Layer 2: Algorithm Math & Batch Assembly Layer** (`algorithm_adapter.py` & `batch_assembly.py`)
 > 3. **Layer 1: Cluster Compute & Infrastructure Layer** (`distributed_rl_engine.py` & `orchestrator.py` with `trajectory_queue_manager.py`)
 > 
@@ -34,7 +34,7 @@ graph TD
     end
 
     subgraph V2_STREAMLINED ["3. Streamlined 3-Layer Architecture (V2 Target)"]
-        V2_P["Layer 3: Workflow & Program<br/>(async_rl_program.py / rl_program.py)<br/>• StandardRLProgram covers 95% of use cases (GRPO, PPO, PRM, Agentic)<br/>• Subclass AsyncRLProgram for novel research (MCTS, Self-Play)"]
+        V2_P["Layer 3: Workflow & Program<br/>(rl_program.py)<br/>• StandardRLProgram covers 95% of use cases (GRPO, PPO, PRM, Agentic)<br/>• Subclass RLProgram for novel research (MCTS, Self-Play)"]
         V2_A["Layer 2: Algorithm Math & Batch Assembly<br/>(algorithm_adapter.py & batch_assembly.py)<br/>• Pure functional advantage math (GRPO, GAE, PPO)<br/>• Standalone 1D sequence packing (>90% MXU density)"]
         V2_E["Layer 1: Cluster Compute & Infrastructure<br/>(distributed_rl_engine.py & orchestrator.py)<br/>• Worker registry, health heartbeats, lifecycle & Orbax manifest recovery<br/>• Stateless compute primitives: generate_async, train_step_async, sync_weights_async"]
         
@@ -54,7 +54,7 @@ Every call required 4–6 hops across files. **In V2, `RLDriver` is completely d
 - **Compute & RPC Routing** lives in `DistributedRLEngine` (`distributed_rl_engine.py`).
 - **Math & Loss Wiring** lives in `AlgorithmAdapter` (`algorithm_adapter.py`).
 - **1D Sequence Packing & 2D Padding** lives in `BatchAssembler` (`batch_assembly.py`).
-- **Workflow & Stage Cadence** lives in `RLProgram` (`async_rl_program.py`).
+- **Workflow & Stage Cadence** lives in `RLProgram` (`rl_program.py`).
 
 ---
 
@@ -62,8 +62,8 @@ Every call required 4–6 hops across files. **In V2, `RLDriver` is completely d
 
 ```mermaid
 graph TD
-    subgraph L3 ["Layer 3: Workflow & Program (async_rl_program.py)"]
-        PROG["StandardRLProgram (Off-the-shelf for 95% of runs)<br/>• Stages: rollout_dispatch -> polling -> critique -> train<br/>• Streaming gradient accumulation: streams 1 group at a time<br/>• Extensible base: AsyncRLProgram for custom DAGs"]
+    subgraph L3 ["Layer 3: Workflow & Program (rl_program.py)"]
+        PROG["StandardRLProgram (Off-the-shelf for 95% of runs)<br/>• Stages: rollout_dispatch -> polling -> critique -> train<br/>• Streaming gradient accumulation: streams 1 group at a time<br/>• Extensible base: RLProgram for custom DAGs"]
     end
 
     subgraph L2 ["Layer 2: Algorithm Math & Batch Assembly"]
@@ -116,7 +116,7 @@ graph TD
     end
 
     subgraph T3 ["Tier 3: Novel Paradigm Researcher (Custom Program)"]
-        E3["orchestrator.run_program(MyMCTSProgram(...), algo=GRPO(...))<br/>• Custom AsyncRLProgram when inventing new DAG workflows"]
+        E3["orchestrator.run_program(MyMCTSProgram(...), algo=GRPO(...))<br/>• Custom RLProgram when inventing new DAG workflows"]
     end
 ```
 
@@ -137,7 +137,7 @@ sequenceDiagram
     autonumber
     participant RW as RolloutWorkers (vLLM)
     participant Q as TrajectoryQueue (GroupQueue)
-    participant Prog as AsyncRLProgram (Stages)
+    participant Prog as RLProgram (Stages)
     participant TW as TrainerWorker (TPU)
 
     Note over Prog,RW: Phase 1: Fire-and-Forget Dispatch
@@ -579,7 +579,7 @@ class PPOAdapter(AlgorithmAdapter):
 
 ---
 
-### 5.4. Layer 3: `StandardRLProgram` & `AsyncRLProgram` ([async_rl_program.py](https://github.com/google/tunix/blob/main/experimental/orchestrator/async_rl_program.py))
+### 5.4. Layer 3: `StandardRLProgram` & `RLProgram` ([rl_program.py](https://github.com/google/tunix/blob/main/experimental/orchestrator/rl_program.py))
 
 ```python
 """Off-the-shelf StandardRLProgram with long-polling rollout collector and TrainExample pipeline."""
@@ -592,7 +592,7 @@ from tunix.experimental.orchestrator import algorithm_adapter
 from tunix.experimental.orchestrator import batch_assembly
 from tunix.experimental.orchestrator import distributed_rl_engine
 
-class AsyncRLProgram:
+class RLProgram:
   """Base class for asynchronous multi-stage DAG workflows."""
 
   def __init__(self):
@@ -603,7 +603,7 @@ class AsyncRLProgram:
     return TrajectoryQueueManager(group_size=group_size)
 
 
-class StandardRLProgram(AsyncRLProgram):
+class StandardRLProgram(RLProgram):
   """Single standard program handling 95% of use cases with long-polling rollouts."""
 
   def __init__(
@@ -763,7 +763,7 @@ class ClusterOrchestrator:
       dataset: Any,
       reward_fns: list[Callable[..., Any]],
       assembler: batch_assembly.BatchAssembler | None = None,
-      program: AsyncRLProgram | None = None,
+      program: RLProgram | None = None,
       num_steps: int = 1000,
   ) -> None:
     """Managed Program Submission: auto-wires Engine, Assembler, Queues & StandardProgram."""
@@ -846,7 +846,7 @@ graph LR
 
 | CL Number | Phase | Scope & Key Actions | Verification Target |
 | :---: | :---: | :--- | :--- |
-| **CL 1** | **Streamlined Core** | • Delete `rl_driver.py` and pass-through shims.<br/>• Update `RLProgram` and `AsyncRLProgram` to take `(engine, algo)`.<br/>• Fix `RolloutRequest.group_id` pytype error in `datatypes.py` / `async_rl_program.py`.<br/>• Wire `TrainerWorker.per_token_logps` in `DistributedRLEngine`. | `test //third_party/py/tunix/experimental/orchestrator:all` |
+| **CL 1** | **Streamlined Core** | • Delete `rl_driver.py` and pass-through shims.<br/>• Update `RLProgram` to take `(engine, algo)`.<br/>• Fix `RolloutRequest.group_id` pytype error in `datatypes.py` / `rl_program.py`.<br/>• Wire `TrainerWorker.per_token_logps` in `DistributedRLEngine`. | `test //third_party/py/tunix/experimental/orchestrator:all` |
 | **CL 2** | **Universal Batch Assembly** | • Introduce `batch_assembly.py` (`BatchAssembler[T]` protocol, `SequencePackedBatchAssembler[T]` for 1D token packing, and `PaddedBatchAssembler[T]` for 2D rectangular padding).<br/>• Support universal packing across RL (`TrainExample`), Supervised (`SFTExample`), and Preference (`DPOPair`) dataclasses.<br/>• Add block-diagonal attention mask generation and tool observation loss masking (`action_mask = 0`). | `test //third_party/py/tunix/experimental/orchestrator:all` |
 | **CL 3** | **Streaming & Queue ACK** | • Implement streaming gradient accumulation in `StandardRLProgram` with `TrainExample` pipeline.<br/>• Add uncommitted in-flight buffer and `queue.commit()` to `TrajectoryQueueManager`. | `test //third_party/py/tunix/experimental/orchestrator:all` |
 | **CL 4** | **Isolated Recovery** | • Implement Orbax `CompositeCheckpointHandler` (`manifest.json` with step, model weights, queue offsets).<br/>• Wire `LifecycleDriver.restart_worker(role=Role.ACTOR)` and queue seek on failure. | `test //third_party/py/tunix/experimental/orchestrator:all` |

@@ -12,62 +12,32 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Synchronous RL Program (rl_program.py) coordinating Engine, Algo, and Assembler."""
+"""Multi-stage reinforcement learning programs.
 
+Provides modular program abstractions for orchestrating  RL training
+pipelines.
+"""
+
+import abc
 import asyncio
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Sequence
 import dataclasses
-import inspect
-from typing import Any, Protocol
+from typing import Any
 
 from absl import logging
 import numpy as np
+
 from tunix.experimental.common import datatypes
 from tunix.experimental.orchestrator import algorithm_adapter
 from tunix.experimental.orchestrator import batch_assembly
 from tunix.experimental.orchestrator import rl_engine_interface
+from tunix.experimental.queue_manager import trajectory_queue_manager
 from tunix.rl import common as rl_common
 
-RewardFn = Callable[[datatypes.TrajectoryItem], float]
 
-
-class RLProgram(Protocol):
-  """Standard contract for RL training programs running on ClusterOrchestrator."""
-
-  def run(
-      self,
-      engine: rl_engine_interface.AbstractRLEngine | None = None,
-      train_dataset: Iterable[Sequence[datatypes.RolloutRequest]] | None = None,
-      num_steps: int | None = None,
-      **kwargs: Any,
-  ) -> Any:
-    ...
-
-
-def _sync_or_async(coro: Any) -> Any:
-  """Executes coroutine synchronously if no loop is running, else returns coro."""
-  if inspect.iscoroutine(coro):
-    try:
-      loop = asyncio.get_running_loop()
-    except RuntimeError:
-      loop = None
-
-    if loop and loop.is_running():
-      return coro
-    return asyncio.run(coro)
-  return coro
-
-
-async def _await_if_needed(value: Any) -> Any:
-  """Awaits async engine calls while still tolerating sync test doubles."""
-  if inspect.isawaitable(value):
-    return await value
-  return value
-
-
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(kw_only=True)
 class RLStepResult:
-  """Summary for the most recent synchronous RL step."""
+  """Summary of a completed RL training step."""
 
   step: int
   policy_version: int
@@ -75,253 +45,325 @@ class RLStepResult:
   num_microbatches: int
   reward_mean: float
   reward_std: float
-  train_result: Any
+  train_result: Any = None
 
 
-def _default_reward(item: datatypes.TrajectoryItem) -> float:
-  if hasattr(item, "env_reward"):
-    return float(getattr(item, "env_reward", 0.0))
-  return 0.0
+class RLProgram(abc.ABC):
+  """Base class for multi-stage DAG workflows."""
 
-
-class SyncRLProgram:
-  """Synchronous RL Program coordinating an iterative RL training loop."""
-
-  def __init__(
-      self,
-      algo: algorithm_adapter.AlgorithmAdapter,
-      engine: rl_engine_interface.AbstractRLEngine | None = None,
-      reward_fns: Sequence[RewardFn] | None = None,
-      assembler: batch_assembly.BatchAssembler | None = None,
-      on_step_begin: Callable[[int], None] | None = None,
-      on_step_end: Callable[[int, Any], None] | None = None,
-      sync_weights: bool = True,
-  ):
-    self.engine = engine
-    self.algo = algo
-    self.reward_fns = list(reward_fns) if reward_fns else []
-    self.assembler = assembler or batch_assembly.SequencePackedBatchAssembler(
-        max_packed_len=getattr(algo, "max_packed_len", 8192)
-    )
-    self.on_step_begin = on_step_begin
-    self.on_step_end = on_step_end
-    self.sync_weights = sync_weights
+  def __init__(self):
+    self._is_running = False
     self.policy_version = 0
-    # Debug/observability hook for examples and tests; not training state.
     self.last_step_result: RLStepResult | None = None
 
   @property
   def step(self) -> int:
     return self.policy_version
 
-  def _resolve_engine(
-      self, engine: rl_engine_interface.AbstractRLEngine | None = None
-  ) -> rl_engine_interface.AbstractRLEngine:
-    active_engine = engine or self.engine
-    if active_engine is None:
+  @abc.abstractmethod
+  def run(
+      self,
+      engine: rl_engine_interface.AbstractRLEngine,
+      train_dataset: Iterable[Any] | None = None,
+      num_steps: int | None = None,
+      **kwargs: Any,
+  ) -> None:
+    """Entry point running all stages on an event loop."""
+    raise NotImplementedError("Subclasses must implement run.")
+
+
+class StandardRLProgram(RLProgram):
+  """Standard RL program handling common multi-stage training workflows asynchronously.
+
+  Runs 4 concurrent stages:
+  1. Rollout dispatch stage: Fire-and-forget requests across worker pool.
+  2. Polling stage: Long-polls completed rollout responses into grouping queue.
+  3. Critique stage: Scores rewards, PRMs, and reference KL logprobs.
+  4. Train stage: Streaming gradient accumulation over microbatches.
+  """
+
+  def __init__(
+      self,
+      algo: algorithm_adapter.AlgorithmAdapter,
+      dataset: Iterable[Any] | None = None,
+      reward_fns: Sequence[Callable[..., Any]] | None = None,
+      assembler: batch_assembly.BatchAssembler | None = None,
+      group_size: int = 8,
+      mini_batch_size: int = 4,
+      max_staleness: int | None = None,
+      sync_weights: bool = True,
+      on_step_begin: Callable[[int], None] | None = None,
+      on_step_end: Callable[[int, Any], None] | None = None,
+  ):
+    super().__init__()
+    self.dataset = dataset
+    self.algo = algo
+    self.reward_fns = list(reward_fns) if reward_fns else []
+    self.group_size = getattr(algo, "group_size", group_size)
+    self.mini_batch_size = getattr(algo, "mini_batch_size", mini_batch_size)
+    self.assembler = assembler or batch_assembly.SequencePackedBatchAssembler(
+        max_packed_len=getattr(algo, "max_packed_len", 8192)
+    )
+    self.sync_weights = sync_weights
+    self.on_step_begin = on_step_begin
+    self.on_step_end = on_step_end
+
+    self.raw_q = trajectory_queue_manager.TrajectoryQueueManager.create(
+        group_size=self.group_size,
+        max_staleness=max_staleness,
+        current_policy_version=lambda: self.policy_version,
+    )
+    self.scored_q = trajectory_queue_manager.TrajectoryQueueManager.create(
+        group_size=self.group_size
+    )
+
+  async def rollout_dispatch_stage(
+      self,
+      engine: rl_engine_interface.AbstractRLEngine,
+      train_dataset: Iterable[Any] | None = None,
+  ) -> None:
+    """Stage 1A: Dispatches rollout requests across workers asynchronously."""
+    active_dataset = (
+        train_dataset if train_dataset is not None else self.dataset
+    )
+    if active_dataset is None:
       raise ValueError(
-          "SyncRLProgram requires an engine either at construction time or via "
-          "ClusterOrchestrator.run_program(engine=...)."
+          "StandardRLProgram requires a dataset either at init or in run()."
       )
-    return active_engine
+    for prompt_idx, prompt_item in enumerate(active_dataset):
+      # TODO: Extract prompt_id and group_id from standard tunix data
+      # structures rather than assuming dictionaries or falling back to index
+      # strings.
+      # TODO: the logic of creating group id and prompt id is incorrect and
+      # should be fixed.
+      prompt_id = getattr(prompt_item, "prompt_id", f"prompt_{prompt_idx}")
+      group_id = getattr(prompt_item, "group_id", f"group_{prompt_idx}")
+      if isinstance(prompt_item, dict):
+        prompt_id = prompt_item.get("prompt_id", prompt_id)
+        group_id = prompt_item.get("group_id", group_id)
 
-  def step_once(
-      self,
-      prompts: Sequence[datatypes.RolloutRequest],
-      generation_args: datatypes.GenerationArgs | None = None,
-      route_metadata: Mapping[str, Any] | None = None,
-      **kwargs: Any,
-  ) -> Any:
-    """Executes a single end-to-end RL training step."""
-    return _sync_or_async(
-        self.astep_once(
-            prompts=prompts,
-            generation_args=generation_args,
-            route_metadata=route_metadata,
-            **kwargs,
+      for g_idx in range(self.group_size):
+        await engine.dispatch_rollouts(
+            [prompt_item],
+            request_id=f"req_{prompt_idx}_{g_idx}",
+            policy_version=self.policy_version,
+            prompt_ids=[prompt_id],
+            metadata={
+                "group_id": group_id,
+                "pair_index": g_idx,
+            },
         )
-    )
 
-  async def astep_once(
-      self,
-      prompts: Sequence[datatypes.RolloutRequest],
-      generation_args: datatypes.GenerationArgs | None = None,
-      route_metadata: Mapping[str, Any] | None = None,
-      **kwargs: Any,
-  ) -> Any:
-    """Async implementation of one end-to-end RL training step."""
-    active_engine = self._resolve_engine()
-    current_step = self.policy_version
-    if self.on_step_begin:
-      self.on_step_begin(current_step)
+  async def polling_stage(
+      self, engine: rl_engine_interface.AbstractRLEngine
+  ) -> None:
+    """Stage 1B: Long-polls completed worker rollout responses into the queue."""
+    while True:
+      try:
+        completed = await engine.poll_rollouts()
+        if isinstance(completed, list) and completed:
+          for item in completed:
+            await self.raw_q.put(item)
 
-    # 1. Generate rollouts
-    engine_call_kwargs = dict(kwargs)
-    if generation_args is not None:
-      engine_call_kwargs["generation_args"] = generation_args
-    if route_metadata is not None:
-      engine_call_kwargs["route_metadata"] = route_metadata
-    rollouts = await _await_if_needed(
-        active_engine.generate(prompts=prompts, **engine_call_kwargs)
-    )
+      except asyncio.CancelledError:
+        break
+      except Exception as exc:  # pylint: disable=broad-exception-caught
+        logging.warning("Error in polling_stage: %s", exc)
+        await asyncio.sleep(0.01)
 
-    # 2. Evaluate rewards
-    rewards = []
-    for item in rollouts:
-      r = (
-          sum(fn(item) for fn in self.reward_fns)
-          if self.reward_fns
-          else _default_reward(item)
+  async def critique_stage(
+      self, engine: rl_engine_interface.AbstractRLEngine
+  ) -> None:
+    """Stage 2: Scores rewards, PRMs, and reference KL logprobs."""
+    del engine
+    while True:
+      try:
+        group = await self.raw_q.get_group()
+      except asyncio.CancelledError:
+        break
+      except Exception:
+        break
+
+      rewards = []
+      for item in group:
+        if self.reward_fns:
+          r = sum(fn(item) for fn in self.reward_fns)
+        else:
+          r = getattr(item.traj, "reward", 0.0)
+        rewards.append(float(r))
+
+      trainer_payloads = self.algo.create_trainer_payloads(
+          group, rewards=rewards
       )
-      rewards.append(float(r))
+      for idx, payload in enumerate(trainer_payloads):
+        adv = payload.advantages
+        reward_val = (
+            float(adv[0])  # pyrefly: ignore[bad-index]
+            if hasattr(adv, "__len__") and len(adv) > 0  # pyrefly: ignore[bad-argument-type]
+            else float(adv)  # pyrefly: ignore[bad-argument-type]
+        )
+        item = datatypes.TrajectoryItem(
+            pair_index=idx,
+            group_id=getattr(group[0], "group_id", "default"),
+            start_step=0,
+            traj=datatypes.Trajectory(reward=reward_val),
+            # TODO: Stream RLTrainerPayload directly instead of
+            # re-wrapping in TrajectoryItem.
+        )
+        item.payload = payload  # pyrefly: ignore[missing-attribute]
+        await self.scored_q.put(item)
 
-    # 3. Create RLTrainerPayloads via AlgorithmAdapter
-    trainer_payloads = self.algo.create_trainer_payloads(
-        rollouts, rewards=rewards
-    )
+  async def train_stage(
+      self,
+      engine: rl_engine_interface.AbstractRLEngine,
+      num_steps: int | None = None,
+  ) -> None:
+    """Stage 3: Streaming gradient accumulation with RLTrainerPayloads."""
+    step = 0
+    while num_steps is None or step < num_steps:
+      if self.on_step_begin:
+        self.on_step_begin(self.step)
 
-    # 4. Pack into microbatches
-    microbatches = self.assembler.pack(trainer_payloads)
-    if not microbatches:
-      raise RuntimeError("No trainer microbatches were assembled.")
+      uncommitted_groups = []
+      step_result = None
+      step_rewards = []
+      num_microbatches = 0
+      num_rollouts = 0
 
-    # 5. Score reference logps on the same padded microbatches used for training.
-    if getattr(self.algo, "requires_reference_kl", False):
-      scored_microbatches = []
-      for batch in microbatches:
-        if not isinstance(batch, rl_common.TrainExample):
-          raise TypeError(
-              "Reference KL requires an assembler that returns "
-              "rl_common.TrainExample microbatches; got "
-              f"{type(batch).__name__}."
-          )
-        ref_logps = await _await_if_needed(
-            active_engine.per_token_logps(
+      for group_idx in range(self.mini_batch_size):
+        scored_items = await self.scored_q.get_batch(num_groups=1)
+        if not scored_items:
+          break
+        uncommitted_groups.append(scored_items)
+        num_rollouts += len(scored_items)
+        for item in scored_items:
+          step_rewards.append(float(getattr(item.traj, "reward", 0.0)))
+
+        payloads = [getattr(item, "payload", None) for item in scored_items]
+        # TODO: Implement streaming microbatch assembly to overlap packing
+        # with trainer execution.
+        microbatches = self.assembler.pack(payloads)  # pyrefly: ignore[bad-argument-type]
+        if getattr(self.algo, "requires_reference_kl", False):
+          scored_microbatches = []
+          for batch in microbatches:
+            if not isinstance(batch, rl_common.TrainExample):
+              raise TypeError(
+                  "Reference KL requires an assembler that returns "
+                  "rl_common.TrainExample microbatches; got "
+                  f"{type(batch).__name__}."
+              )
+            ref_logps = await engine.per_token_logps(
                 datatypes.Role.REFERENCE, items=batch
             )
-        )
-        scored_microbatches.append(
-            batch_assembly.with_ref_per_token_logps(batch, ref_logps)
-        )
-      microbatches = scored_microbatches
+            scored_microbatches.append(
+                batch_assembly.with_ref_per_token_logps(batch, ref_logps)
+            )
+          microbatches = scored_microbatches
 
-    # 6. Execute gradient updates
-    step_result = None
-    for index, batch in enumerate(microbatches):
-      is_last = index == len(microbatches) - 1
-      step_result = await _await_if_needed(
-          active_engine.train_step(
+        num_microbatches += len(microbatches)
+        is_final = group_idx == self.mini_batch_size - 1
+        for batch in microbatches:
+          step_result = await engine.train_step(
               batch,
               role=datatypes.Role.ACTOR,
-              accumulate_gradients=len(microbatches) > 1,
-              apply_optimizer=is_last,
+              accumulate_gradients=True,
+              apply_optimizer=is_final,
           )
+
+      if self.sync_weights:
+        new_version = await engine.sync_weights(role=datatypes.Role.ACTOR)
+        self.policy_version = new_version if new_version else self.step + 1
+      else:
+        self.policy_version = self.step + 1
+
+      self.scored_q.commit(step, groups=uncommitted_groups)
+
+      self.last_step_result = RLStepResult(
+          step=step,
+          policy_version=self.policy_version,
+          num_rollouts=num_rollouts,
+          num_microbatches=num_microbatches,
+          reward_mean=float(np.mean(step_rewards)) if step_rewards else 0.0,
+          reward_std=float(np.std(step_rewards)) if step_rewards else 0.0,
+          train_result=step_result,
       )
 
-    # 7. Sync weights to rollout replicas
-    if self.sync_weights:
-      new_version = await _await_if_needed(
-          active_engine.sync_weights(role=datatypes.Role.ACTOR)
-      )
-      if not isinstance(new_version, int) or new_version <= current_step:
-        raise RuntimeError(
-            "sync_weights must return a monotonically increasing int policy "
-            f"version; got {new_version!r} at step {current_step}."
-        )
-      self.policy_version = new_version
-    else:
-      self.policy_version = current_step + 1
+      if self.on_step_end:
+        self.on_step_end(self.step, step_result)
+      step += 1
 
-    self.last_step_result = RLStepResult(
-        step=current_step,
-        policy_version=self.policy_version,
-        num_rollouts=len(rollouts),
-        num_microbatches=len(microbatches),
-        reward_mean=float(np.mean(rewards)) if rewards else 0.0,
-        reward_std=float(np.std(rewards)) if rewards else 0.0,
-        train_result=step_result,
-    )
-
-    if self.on_step_end:
-      self.on_step_end(self.policy_version, step_result)
-
-    return step_result
-
-  def eval_step_once(
+  async def run_async(
       self,
-      prompts: Sequence[datatypes.RolloutRequest],
-      generation_args: datatypes.GenerationArgs | None = None,
-      route_metadata: Mapping[str, Any] | None = None,
+      engine: rl_engine_interface.AbstractRLEngine,
+      train_dataset: Iterable[Any] | None = None,
+      num_steps: int | None = None,
       **kwargs: Any,
-  ) -> list[datatypes.RLTrainerPayload]:
-    """Executes evaluation step without updating weights."""
-    return _sync_or_async(
-        self.aeval_step_once(
-            prompts=prompts,
-            generation_args=generation_args,
-            route_metadata=route_metadata,
-            **kwargs,
-        )
-    )
+  ) -> None:
+    """Launches all stages concurrently on event loop."""
+    del kwargs
+    logging.info("Starting StandardRLProgram concurrent stages...")
 
-  async def aeval_step_once(
-      self,
-      prompts: Sequence[datatypes.RolloutRequest],
-      generation_args: datatypes.GenerationArgs | None = None,
-      route_metadata: Mapping[str, Any] | None = None,
-      **kwargs: Any,
-  ) -> list[datatypes.RLTrainerPayload]:
-    """Async implementation of evaluation without updating weights."""
-    active_engine = self._resolve_engine()
-    engine_call_kwargs = dict(kwargs)
-    if generation_args is not None:
-      engine_call_kwargs["generation_args"] = generation_args
-    if route_metadata is not None:
-      engine_call_kwargs["route_metadata"] = route_metadata
-    rollouts = await _await_if_needed(
-        active_engine.generate(prompts=prompts, **engine_call_kwargs)
-    )
-    rewards = [
-        (
-            sum(fn(item) for fn in self.reward_fns)
-            if self.reward_fns
-            else _default_reward(item)
-        )
-        for item in rollouts
+    train_task = asyncio.create_task(self.train_stage(engine, num_steps))
+    tasks = [
+        asyncio.create_task(
+            self.rollout_dispatch_stage(engine, train_dataset=train_dataset)
+        ),
+        asyncio.create_task(self.polling_stage(engine)),
+        asyncio.create_task(self.critique_stage(engine)),
+        train_task,
     ]
-    return self.algo.create_trainer_payloads(rollouts, rewards=rewards)
+
+    try:
+      while not train_task.done():
+        done, _ = await asyncio.wait(
+            tasks, return_when=asyncio.FIRST_COMPLETED, timeout=0.05
+        )
+        for task in done:
+          if task.exception():
+            raise task.exception()  # pyrefly: ignore[bad-raise]
+      if train_task.exception():
+        raise train_task.exception()  # pyrefly: ignore[bad-raise]
+    except Exception as exc:
+      logging.error("Exception in StandardRLProgram execution: %s", exc)
+      await self.raw_q.abort(exc)
+      await self.scored_q.abort(exc)
+      raise
+    finally:
+      for task in tasks:
+        if not task.done():
+          task.cancel()
 
   def run(
       self,
-      engine: rl_engine_interface.AbstractRLEngine | None = None,
-      train_dataset: Iterable[Sequence[datatypes.RolloutRequest]] | None = None,
+      engine: rl_engine_interface.AbstractRLEngine,
+      train_dataset: Iterable[Any] | None = None,
       num_steps: int | None = None,
       **kwargs: Any,
   ) -> None:
-    """Runs the RL program training loop over the dataset."""
-    return _sync_or_async(
-        self.arun(
-            engine=engine,
-            train_dataset=train_dataset,
-            num_steps=num_steps,
-            **kwargs,
-        )
-    )
+    """Synchronous entry point running all stages on an event loop."""
+    try:
+      loop = asyncio.get_running_loop()
+    except RuntimeError:
+      loop = None
 
-  async def arun(
-      self,
-      engine: rl_engine_interface.AbstractRLEngine | None = None,
-      train_dataset: Iterable[Sequence[datatypes.RolloutRequest]] | None = None,
-      num_steps: int | None = None,
-      **kwargs: Any,
-  ) -> None:
-    """Async implementation of the RL program training loop."""
-    active_engine = self._resolve_engine(engine)
-    self.engine = active_engine
-    if train_dataset is None:
-      raise ValueError("SyncRLProgram.run requires a train_dataset.")
-    for idx, prompt_batch in enumerate(train_dataset):
-      if num_steps is not None and idx >= num_steps:
-        break
-      logging.info("RLProgram starting step %d", self.step)
-      await self.astep_once(prompts=prompt_batch, **kwargs)
+    def _retrieve_task_exception(t: asyncio.Task[Any]) -> None:
+      try:
+        t.result()
+      except Exception:  # pylint: disable=broad-except
+        # Exception is already logged inside run_async, we just need to
+        # retrieve it so asyncio doesn't complain about unretrieved exceptions.
+        pass
+
+    if loop and loop.is_running():
+      self._bg_task = asyncio.create_task(
+          self.run_async(
+              engine, train_dataset=train_dataset, num_steps=num_steps, **kwargs
+          )
+      )
+      self._bg_task.add_done_callback(_retrieve_task_exception)
+    else:
+      asyncio.run(
+          self.run_async(
+              engine, train_dataset=train_dataset, num_steps=num_steps, **kwargs
+          )
+      )

@@ -22,6 +22,7 @@ from tunix.experimental.common import datatypes
 from tunix.experimental.orchestrator import algorithm_adapter
 from tunix.experimental.orchestrator import batch_assembly
 from tunix.experimental.orchestrator import orchestrator
+from tunix.experimental.orchestrator import rl_program
 from tunix.experimental.orchestrator import worker_registry
 from tunix.experimental.worker import abstract_worker
 
@@ -215,6 +216,46 @@ class ClusterOrchestratorTest(absltest.TestCase):
       self.mock_lifecycle.bring_up.assert_called_once()
       self.mock_monitor.poll.assert_called_once()
       mock_asyncio_run.assert_called_once()
+
+  def test_run_program_with_bring_up_and_train_dataset(self):
+    mock_program = mock.MagicMock(spec=rl_program.RLProgram)
+    mock_engine = mock.MagicMock()
+
+    with mock.patch.object(self.orch, "_create_engine", return_value=mock_engine):
+      self.orch.run_program(
+          program=mock_program,
+          train_dataset=["batch1", "batch2"],
+          num_steps=10,
+          bring_up=True,
+          dummy_data="dummy_init",
+      )
+
+    self.mock_lifecycle.bring_up.assert_called_once_with("dummy_init")
+    self.mock_monitor.poll.assert_called_once()
+    mock_program.run.assert_called_once_with(
+        engine=mock_engine,
+        train_dataset=["batch1", "batch2"],
+        num_steps=10,
+    )
+
+  def test_run_program_without_bring_up(self):
+    mock_program = mock.MagicMock(spec=rl_program.RLProgram)
+    mock_engine = mock.MagicMock()
+    self.orch.engine = mock_engine
+
+    self.orch.run_program(
+        program=mock_program,
+        num_steps=2,
+        bring_up=False,
+    )
+
+    self.mock_lifecycle.bring_up.assert_not_called()
+    self.mock_monitor.poll.assert_called_once()
+    mock_program.run.assert_called_once_with(
+        engine=mock_engine,
+        train_dataset=None,
+        num_steps=2,
+    )
 
 
 if __name__ == "__main__":

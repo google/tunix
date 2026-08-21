@@ -21,7 +21,7 @@ The TPU worker processes host the expensive pieces:
 
 This process only owns Orchestrator V2 control flow. It registers remote worker
 handles with ClusterOrchestrator, configures the GRPO loss on the trainer worker,
-and executes SyncRLProgram through ClusterOrchestrator.run_program().
+and executes StandardRLProgram through ClusterOrchestrator.run_program().
 """
 
 from __future__ import annotations
@@ -151,7 +151,7 @@ def _extract_answer(text: str) -> str | None:
 
 
 def _make_reward_fn(mode: str, num_generations: int):
-  """Creates the per-trajectory reward function used by SyncRLProgram."""
+  """Creates the per-trajectory reward function used by StandardRLProgram."""
 
   def reward_fn(item: datatypes.TrajectoryItem) -> float:
     metadata = dict(item.metadata or {})
@@ -420,7 +420,7 @@ def main(argv: list[str], context: Any = None) -> None:
   )
   logging.info("Registered Orchestrator V2 workers: %s", cluster.worker_infos())
 
-  program = rl_program.SyncRLProgram(
+  program = rl_program.StandardRLProgram(
       algo=algo,
       reward_fns=[_make_reward_fn(args.reward_mode, args.num_generations)],
       assembler=batch_assembly.GRPOTrainExampleAssembler(
@@ -439,7 +439,9 @@ def main(argv: list[str], context: Any = None) -> None:
   try:
     logging.info("Bringing up remote workers through ClusterOrchestrator.")
     cluster.bring_up_workers(dummy_data=None)
-    logging.info("Running SyncRLProgram through ClusterOrchestrator.run_program.")
+    logging.info(
+        "Running StandardRLProgram through ClusterOrchestrator.run_program."
+    )
     cluster.run_program(
         program=program,
         train_dataset=_iter_request_batches(args),
