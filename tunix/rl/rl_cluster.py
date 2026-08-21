@@ -1200,12 +1200,12 @@ class RLCluster:
       )
 
   def attest_actor_anchor_matches_engine(self) -> dict[str, Any]:
-    """Runs the P35 exact mapped-anchor versus live-engine weight gate."""
+    """Runs the exact mapped-anchor versus selected live-engine weight gate."""
     if self._anchor_policy_state is None:
       raise RuntimeError("P35 weight attestation requires an anchor policy state")
-    source = getattr(self.rollout, "attest_canonical_engine_weights", None)
+    source = getattr(self.rollout, "attest_exact_engine_weights", None)
     if source is None:
-      raise RuntimeError("rollout has no exact canonical weight attestation")
+      raise RuntimeError("rollout has no exact live-engine weight attestation")
     with self._get_mesh_and_logical_axis_rules_cm(Role.ROLLOUT):
       return dict(source(self._anchor_policy_state))
 

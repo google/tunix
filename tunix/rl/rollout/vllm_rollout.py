@@ -492,6 +492,41 @@ class VllmRollout(base_rollout.BaseRollout):
         trainer_state
     )
 
+  def attest_exact_engine_weights(self, trainer_state) -> dict[str, Any]:
+    """Attests live weights without changing the selected numerical arm."""
+    p58_native_requested = (
+        os.environ.get("CANON_P58_TIM_ARM", "") == "native"
+    )
+    p58_native_signed = (
+        os.environ.get("CANON_P34_DEEPSWE", "") == "1"
+        and p58_native_requested
+        and os.environ.get("CANON_P58_DEEPSWE_TIM", "") == "1"
+        and os.environ.get("CANON_P58_TIM_ADMITTED", "") == "1"
+        and os.environ.get("CANON_ENGINE_MODULE_C", "") == "0"
+    )
+    if p58_native_requested:
+      if not p58_native_signed or self._canonical_engine_adapter is not None:
+        raise RuntimeError(
+            "signed P58 native stock weight attestation forbids a registered "
+            "canonical adapter and requires the exact admitted environment"
+        )
+      from tunix.rl import (  # pylint: disable=g-import-not-at-top
+          canonical_qwen3_adapter,
+      )
+
+      return canonical_qwen3_adapter.attest_exact_live_engine_weights(
+          sampler=self._sampler,
+          trainer_state=trainer_state,
+      )
+    if self._canonical_engine_adapter is not None:
+      return self._canonical_engine_adapter.attest_exact_live_weights(
+          trainer_state
+      )
+    raise RuntimeError(
+        "exact stock-engine weight attestation is admitted only for the "
+        "signed P58 native arm"
+    )
+
   def canonical_p35_adapter_contract(self) -> dict[str, Any]:
     """Returns the registered adapter's runtime P35 envelope contract."""
     if self._canonical_engine_adapter is None:

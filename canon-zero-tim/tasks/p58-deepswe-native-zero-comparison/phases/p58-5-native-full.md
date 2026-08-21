@@ -24,7 +24,7 @@ validate the deferred zero arm and cannot establish a paired treatment effect.
 - recipe: B8 x G16, response 16,384, 50 turns, RLOO, fixed-context
   `sequence-mean-token-scale`, TPU-resident optimizer, optional interventions
   off, prefix cache off;
-- stage/run: `full`, fresh run-id `p58f02`, exactly 1,000 optimizer commits;
+- stage/run: `full`, fresh run-id `p58f04`, exactly 1,000 optimizer commits;
 - arm: `native` only. Rendering or applying `zero` is outside this phase.
 
 ## Admission gate
@@ -65,11 +65,19 @@ batches exceed 1,000. Partial/tampered evidence, exact native A-B
 
 ## Attempt boundary
 
-P58c05 and p58f01 are immutable `INCONCLUSIVE` evidence. P58f01 proved the
-128-device Pathways/model initialization path, but its standalone R2E Pods
-lacked a LocalQueue label and remained `SchedulingGated`; the subsequent
-all-timeout batch crashed before journal persistence on missing
-`policy_version`. It has no resumable journal or checkpoint. Do not reuse
-either YAML or root. The next attempt is fresh native `p58f02` after the
-sandbox queue and reset-time provenance repairs are published. Zero remains
-deferred.
+P58c05 and p58f01 through p58f03 are immutable `INCONCLUSIVE` evidence.
+P58f01 exposed sandbox LocalQueue and reset-time provenance faults. P58f02
+exposed a CPU-flavor/node-pool mismatch; moving the head and sandboxes to
+`cpu-np` was the correct repair. P58f03 then completed 128 real trajectories
+in 616.3 seconds and durably journaled them, proving that rollout and sandbox
+throughput are no longer the first failure. It stopped before trainer forward,
+backward, or update because native was routed to a canonical-adapter-only
+weight gate.
+
+The repaired gate uses an exact read-only live-weight observer for signed P58
+native and keeps the canonical registered-adapter path for zero. Native still
+has no numerical hook. Any mismatch, invalid mesh, missing signature, or
+leaked adapter remains fatal. P58f03 has no optimizer checkpoint and is not a
+resumable training root; preserve its trajectory journal as diagnostic
+evidence only. The next attempt is fresh native `p58f04` after publication and
+readback. Zero remains deferred.

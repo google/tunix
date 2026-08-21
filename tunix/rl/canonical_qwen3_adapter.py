@@ -1744,6 +1744,152 @@ def build_p28_segmented_engine_forward(runner):
   return _P28SegmentedEngineForward(runner)
 
 
+def _weight_attestation_mesh_shape(runner: Any) -> tuple[tuple[str, int], ...]:
+  """Returns the public logical mesh while validating the live engine mesh."""
+  engine_shape = {
+      str(name): int(size) for name, size in runner.mesh.shape.items()
+  }
+  if os.environ.get("CANON_P34_DEEPSWE", "") != "1":
+    return tuple(engine_shape.items())
+
+  workload = deepswe_contract.active_workload(os.environ)
+  if (
+      engine_shape.get("data") != workload.dp_size
+      or engine_shape.get("model") != workload.tp_size
+  ):
+    raise FunctionalMappingError(
+        "live engine mesh differs from the signed DeepSWE logical mesh: "
+        f"engine={engine_shape} expected_dp={workload.dp_size} "
+        f"expected_tp={workload.tp_size}"
+    )
+  unexpected_nontrivial = {
+      name: size
+      for name, size in engine_shape.items()
+      if name not in ("data", "model") and size != 1
+  }
+  if unexpected_nontrivial:
+    raise FunctionalMappingError(
+        "live engine has an unregistered nontrivial mesh axis: "
+        f"{unexpected_nontrivial}"
+    )
+  return (("dp", workload.dp_size), ("tp", workload.tp_size))
+
+
+def attest_exact_live_engine_weights(
+    *,
+    sampler: Any | None,
+    trainer_state: Any,
+    runner: Any | None = None,
+    engine_state_contract: Any | None = None,
+    key_mappings: Mapping[str, tuple[str, tuple[str | None, ...]]] | None = None,
+    transpose_keys: Mapping[str, tuple[int, ...]] | None = None,
+    key_mapping_hook_fns: Mapping[str, Any] | None = None,
+    tp_size: int | None = None,
+) -> dict[str, Any]:
+  """Bitwise-compares a trainer anchor with an unmodified live engine.
+
+  This is an observer only. It neither constructs/registers the canonical
+  forward adapter nor replaces any serving function. The optional explicit
+  arguments let the registered adapter reuse the exact same comparison.
+  """
+  if runner is None:
+    if sampler is None:
+      raise FunctionalMappingError(
+          "exact live-engine weight attestation requires a sampler or runner"
+      )
+    try:
+      runner = sampler._model_runner  # pylint: disable=protected-access
+    except (AttributeError, RuntimeError) as exc:
+      raise FunctionalMappingError("rollout has no live model runner") from exc
+  required = ("state", "state_leaves", "mesh", "model_config")
+  missing = [name for name in required if not hasattr(runner, name)]
+  if missing:
+    raise FunctionalMappingError(
+        f"live engine is missing weight-attestation attributes: {missing}"
+    )
+  if engine_state_contract is None:
+    engine_state_contract = runner.state
+  if key_mappings is None:
+    key_mappings = (
+        getattr(sampler, "to_hf_key_mappings", None) or {}
+        if sampler is not None
+        else {}
+    )
+  if transpose_keys is None and sampler is not None:
+    transpose_keys = getattr(sampler, "to_hf_transpose_keys", None)
+  if key_mapping_hook_fns is None and sampler is not None:
+    key_mapping_hook_fns = getattr(sampler, "to_hf_hook_fns", None)
+  if tp_size is None:
+    tp_size = int(
+        getattr(sampler, "args", {}).get("tensor_parallel_size", 1)
+        if sampler is not None
+        else 1
+    )
+
+  model_config = runner.model_config
+  mapped = map_trainer_state_to_engine_leaves(
+      trainer_state=trainer_state,
+      engine_state_contract=engine_state_contract,
+      key_mappings=key_mappings,
+      transpose_keys=transpose_keys,
+      key_mapping_hook_fns=key_mapping_hook_fns,
+      num_kv_heads=model_config.get_total_num_kv_heads(),
+      head_dim=model_config.get_head_size(),
+      tp_size=tp_size,
+  )
+  mapped_leaves = tuple(mapped.leaves)
+  live_leaves = tuple(runner.state_leaves)
+  if len(mapped_leaves) != len(live_leaves):
+    raise FunctionalMappingError(
+        "mapped/live engine leaf counts differ: "
+        f"{len(mapped_leaves)} != {len(live_leaves)}"
+    )
+
+  mismatches = []
+  total_elements = 0
+  normalized_memory_leaves = 0
+  memory_kind_pairs: dict[str, int] = {}
+  for index, (mapped_leaf, live_leaf) in enumerate(
+      zip(mapped_leaves, live_leaves)
+  ):
+    mapped_value = getattr(mapped_leaf, "value", mapped_leaf)
+    live_value = getattr(live_leaf, "value", live_leaf)
+    mapped_memory = getattr(
+        getattr(mapped_value, "sharding", None), "memory_kind", None
+    )
+    live_memory = getattr(
+        getattr(live_value, "sharding", None), "memory_kind", None
+    )
+    memory_pair = (
+        f"{mapped_memory or 'unspecified'}->"
+        f"{live_memory or 'unspecified'}"
+    )
+    memory_kind_pairs[memory_pair] = memory_kind_pairs.get(memory_pair, 0) + 1
+    if mapped_memory != live_memory and "device" in (
+        mapped_memory,
+        live_memory,
+    ):
+      normalized_memory_leaves += 1
+    exact = _bitwise_arrays_equal(mapped_value, live_value)
+    if not exact:
+      mismatches.append(index)
+    if tuple(mapped_value.shape) == tuple(live_value.shape):
+      total_elements += int(mapped_value.size)
+
+  mesh_devices = tuple(int(device.id) for device in runner.mesh.devices.flat)
+  return {
+      "equal": not mismatches,
+      "mapped_leaves": len(mapped_leaves),
+      "live_leaves": len(live_leaves),
+      "total_elements": total_elements,
+      "mismatch_indices": tuple(mismatches),
+      "normalized_memory_leaves": normalized_memory_leaves,
+      "memory_kind_pairs": memory_kind_pairs,
+      "mesh_shape": _weight_attestation_mesh_shape(runner),
+      "mesh_device_ids": mesh_devices,
+  }
+
+
 class Qwen3EngineForwardAdapter:
   """Differentiable fixed-M Qwen3 forward backed by the live engine module."""
 
@@ -2001,71 +2147,16 @@ class Qwen3EngineForwardAdapter:
     This diagnostic never substitutes a checksum for equality. Each comparison
     reduces on device to one boolean; model leaves are not copied to the host.
     """
-    model_config = self._runner.model_config
-    mapped = map_trainer_state_to_engine_leaves(
+    return attest_exact_live_engine_weights(
+        sampler=None,
         trainer_state=trainer_state,
+        runner=self._runner,
         engine_state_contract=self._engine_state_contract,
         key_mappings=self._key_mappings,
         transpose_keys=self._transpose_keys,
         key_mapping_hook_fns=self._hook_fns,
-        num_kv_heads=model_config.get_total_num_kv_heads(),
-        head_dim=model_config.get_head_size(),
         tp_size=self._tp_size,
     )
-    mapped_leaves = tuple(mapped.leaves)
-    live_leaves = tuple(self._runner.state_leaves)
-    if len(mapped_leaves) != len(live_leaves):
-      raise FunctionalMappingError(
-          "mapped/live engine leaf counts differ: "
-          f"{len(mapped_leaves)} != {len(live_leaves)}"
-      )
-
-    mismatches = []
-    total_elements = 0
-    normalized_memory_leaves = 0
-    memory_kind_pairs: dict[str, int] = {}
-    for index, (mapped_leaf, live_leaf) in enumerate(
-        zip(mapped_leaves, live_leaves)
-    ):
-      mapped_value = getattr(mapped_leaf, "value", mapped_leaf)
-      live_value = getattr(live_leaf, "value", live_leaf)
-      mapped_memory = getattr(
-          getattr(mapped_value, "sharding", None), "memory_kind", None
-      )
-      live_memory = getattr(
-          getattr(live_value, "sharding", None), "memory_kind", None
-      )
-      memory_pair = (
-          f"{mapped_memory or 'unspecified'}->"
-          f"{live_memory or 'unspecified'}"
-      )
-      memory_kind_pairs[memory_pair] = memory_kind_pairs.get(memory_pair, 0) + 1
-      if mapped_memory != live_memory and "device" in (
-          mapped_memory,
-          live_memory,
-      ):
-        normalized_memory_leaves += 1
-      exact = _bitwise_arrays_equal(mapped_value, live_value)
-      if not exact:
-        mismatches.append(index)
-      if tuple(mapped_value.shape) == tuple(live_value.shape):
-        total_elements += int(mapped_value.size)
-
-    mesh_devices = tuple(int(device.id) for device in self._runner.mesh.devices.flat)
-    return {
-        "equal": not mismatches,
-        "mapped_leaves": len(mapped_leaves),
-        "live_leaves": len(live_leaves),
-        "total_elements": total_elements,
-        "mismatch_indices": tuple(mismatches),
-        "normalized_memory_leaves": normalized_memory_leaves,
-        "memory_kind_pairs": memory_kind_pairs,
-        "mesh_shape": tuple(
-            (str(name), int(size))
-            for name, size in self._runner.mesh.shape.items()
-        ),
-        "mesh_device_ids": mesh_devices,
-    }
 
   def p35_envelope_contract_attestation(self) -> dict[str, Any]:
     """Returns runtime facts needed to admit the adapter C arm."""

@@ -48,12 +48,16 @@ before any workload pod or update existed. P58.5N is the only active phase.
 Both zero phases remain deferred even though the renderer and CPU tests cover
 that arm.
 
-P58.5N attempt `p58f01` is also `INCONCLUSIVE`: the TPU/Pathways/model path
-started, but every standalone R2E Pod was held by a Kueue scheduling gate
-because it lacked the parent LocalQueue label. The all-timeout batch then
-failed before journaling because reset-time trajectories had not yet been
-seeded with their policy version. The phase remains active; the next fresh
-attempt is `p58f02` after both repairs are published and read back.
+P58.5N attempts `p58f01` through `p58f03` remain `INCONCLUSIVE`. P58f01 exposed
+missing sandbox LocalQueue inheritance and reset-time policy provenance;
+p58f02 showed that the chosen CPU flavor required `cpu-np`; and p58f03 proved
+that the CPU routing repair works by completing 128 real trajectories in
+616.3 seconds. P58f03 stopped after durable journaling but before trainer
+forward because the native arm was incorrectly sent through a
+canonical-adapter-only weight-attestation method. The local repair provides a
+shared exact-live-weight observer while preserving native numerical
+untreatedness. The phase remains active; after publication/readback the next
+fresh attempt is `p58f04`.
 
 ## Frozen shared recipe
 
@@ -142,6 +146,12 @@ throughput is considered only when sandbox-start timeout metrics are zero and
 - Observers may not change token selection, reward, advantages, loss masks,
   optimizer math, or commit count. A one-host test only checks this neutrality;
   it cannot prove the 128-chip treatment.
+- Exact rollout/trainer weight attestation is arm-aware but equally strict.
+  Zero delegates to its registered canonical adapter. Native uses the same pure
+  trainer-to-engine leaf mapping and bitwise comparison as an observer only;
+  it must neither register the canonical adapter nor replace serving functions.
+  Missing/mismatched weights, mesh drift, an unsigned route, or a leaked native
+  canonical adapter are fatal before A/B/C.
 - Every rollout batch must contain exactly 128 raw trajectory records. A
   signed compact-filter status may produce a zero policy mask and is not a
   malformed row. Missing, duplicated, structurally empty, or parser-invalid

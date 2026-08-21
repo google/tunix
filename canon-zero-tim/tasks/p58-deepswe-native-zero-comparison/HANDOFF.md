@@ -138,6 +138,40 @@ exactly with ahead/behind `0/0`. This publication checkpoint advances the
 branch once more, so the executor must fetch and use the final operator tip
 rather than pinning the implementation commit directly.
 
+P58f02 then reached Step 0 but the sandboxes stayed `SchedulingGated`: the
+cluster's `cpu-user` flavor requires `nodeSelector: cpu-np`, while the job was
+requesting `deepswe-cpu-pool`. The user confirmed that moving the CPU head and
+sandboxes to `cpu-np` resolves this; a general in-process CPU fallback is not
+part of the solution. That routing repair was published in source
+`7208d7b330759ac7dc31493ece65d32a6c355308`.
+
+P58f03 used that source and completed the first real rollout batch in 616.3
+seconds. Its durable journal has 128 rows: 126 `SUCCEEDED`, two
+`MAX_CONTEXT_LIMIT_REACHED`, three solved trajectories, two mixed/effective
+groups, and 32 nonzero advantages. No sandbox-start timeouts occurred. The raw
+log is `evidence/p58f03/run.log`, SHA-256
+`fdb958d5e1db8bafa25b6df8c3223a3c6a642d00c6a1915bb34a8e17b5bcf600`.
+The journal is
+`/mnt/disks/linchai_data/deepswe_zero_tim/canon-p58-ds4b-native-full-p58f03/debug/batch-000000.trajectories.jsonl.gz`,
+SHA-256
+`26c92d2153865cc14296303fcb97afd98f857744e50574032b6eba8631f23a9e`.
+
+P58f03 then stopped before trainer forward/backward/update. The generic P34
+weight gate called `attest_canonical_engine_weights`, which intentionally
+requires a registered canonical adapter, while native correctly runs with
+`CANON_ENGINE_MODULE_C=0`. The first failure was therefore a routing/contract
+bug, not rollout throughput or weight drift. The local repair exposes a shared
+exact-live-weight interface: zero still delegates to its registered canonical
+adapter; signed P58 native performs only the same pure leaf mapping and
+bitwise live-weight comparison. It neither registers an adapter nor changes
+serving math. Missing/mismatched weights, invalid DP8 x TP8 mesh, unsigned
+native routing, and a leaked native adapter remain fatal. Focused routes, all
+15 rollout canonical tests, and the full pinned P58 exact-image gate pass.
+These changes are local and uncommitted at base
+`5dd865294560899b0438228f458a84acbe61cdb4`; publish/read back only after
+explicit approval. The next run is fresh native `p58f04`, not a resume of
+p58f03. Zero remains deferred.
+
 Never modify or push `main`. The publication target is exclusively
 `yuxzhang/canon-zero-tim`; the implementation is present there.
 
@@ -213,7 +247,7 @@ implementation plus CPU/exact-image validation only.
 4. Publish or select a client image by immutable registry digest and verify the
    mounted Qwen3-4B-Instruct-2507 weights and frozen clean-list digest without
    printing credentials.
-5. Render only `arm=native, stage=full` with fresh run-id `p58f02` and worker
+5. Render only `arm=native, stage=full` with fresh run-id `p58f04` and worker
    sentinel `tpu-v5p-slice`. Require exact `4x4x8` topology and no literal
    `cloud.google.com/gke-nodepool: tpu-v5p-slice`; preserve the YAML/digest and
    run server-side dry-run before the separately approved apply.
@@ -225,8 +259,10 @@ implementation plus CPU/exact-image validation only.
    journal, cleanup, evaluation, checkpoint, and transaction receipts.
 8. Do not render or apply zero.
 
-Do not reuse any failed `p58c01` through `p58c05` or `p58f01` YAML/run root. None
-contains resumable trajectory state. They remain immutable failure evidence
+Do not reuse any failed `p58c01` through `p58c05` or `p58f01` through `p58f03`
+YAML/run root. P58f03 has a valid diagnostic trajectory journal but no trainer
+update or optimizer checkpoint, so it is not resumable training state. The
+attempts remain immutable failure evidence
 under `evidence/p58c01/`, `evidence/p58c02/`, `evidence/p58c03/`, and
 `evidence/p58c04/`. The
 p58c03 hashes are `15aa9968200c55a02ef47c72c5e209277397835e1752a4dbd9699fce3b2c42b4`
@@ -256,7 +292,7 @@ for `workload_describe.txt`.
 - A Kubernetes sandbox start exception must propagate after deletion is
   confirmed. `ENV_TIMEOUT` is an admitted compact-filter status; a
   half-created RepoEnv with `container=None` is forbidden. If an entire
-  p58f02 batch has zero confirmed Running pods, classify infrastructure
+  p58f04 batch has zero confirmed Running pods, classify infrastructure
   capacity/scheduling before another launch instead of patching websocket
   decode or inventing a successful trajectory.
 - Read `deepswe/all_sandbox_start_timeout_batch` first. Value `1` means the
@@ -272,6 +308,10 @@ for `workload_describe.txt`.
 - The native arm is stock numerical training plus observation. It must not
   inherit `CANON_FIXED_AR`, `CANON_LOGPROB_M`, the canonical module, VJP2, or
   the excess-precision pin. The zero arm retains the complete bundle.
+- Exact live-weight attestation is shared evidence, not a native numerical
+  treatment. Native may use only the observer interface and must keep the
+  canonical adapter absent; zero uses the registered adapter. Require exact
+  leaf equality and public DP8 x TP8 mesh provenance before A/B/C.
 - `env.sh` is an authoritative managed-environment snapshot, not a layered
   override. If the parent retains a renderer variable that the profile made
   absent, the p58c03 regression must fail before publication.

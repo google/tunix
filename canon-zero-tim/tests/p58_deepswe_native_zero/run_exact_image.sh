@@ -36,6 +36,20 @@ $DOCKER run --rm \
       cd tests/rl
       PYTHONPATH=/workspace python3 -m unittest alignment_test
     )
+    (
+      cd tests/rl/rollout
+      PYTHONPATH=/workspace python3 -m unittest \
+        vllm_rollout_canonical_test.VllmRolloutCanonicalTest.test_selected_engine_weight_attestation_uses_registered_adapter \
+        vllm_rollout_canonical_test.VllmRolloutCanonicalTest.test_p58_native_uses_observer_without_registering_adapter \
+        vllm_rollout_canonical_test.VllmRolloutCanonicalTest.test_stock_weight_observer_rejects_unsigned_or_zero_arm \
+        vllm_rollout_canonical_test.VllmRolloutCanonicalTest.test_p58_native_rejects_registered_canonical_adapter
+    )
+    (
+      cd tests/rl
+      PYTHONPATH=/workspace python3 -m unittest \
+        canonical_qwen3_adapter_test.CanonicalQwen3AdapterTest.test_observer_only_attestation_compares_stock_live_state_exactly \
+        canonical_qwen3_adapter_test.CanonicalQwen3AdapterTest.test_deepswe_weight_report_normalizes_and_validates_logical_mesh
+    )
     PYTHONPATH=/workspace python3 \
       canon-zero-tim/tests/p34_deepswe/test_contract.py
     PYTHONPATH=/workspace python3 \

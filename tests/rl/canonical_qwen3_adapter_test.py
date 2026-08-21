@@ -1277,6 +1277,86 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
         transpose_keys={"w": (1, 0)},
     )
 
+  def test_observer_only_attestation_compares_stock_live_state_exactly(self):
+    source = _state({
+        "trainer": {
+            "w": jnp.arange(6, dtype=jnp.float32).reshape(2, 3),
+            "n": jnp.asarray([4, 5], jnp.float32),
+        }
+    })
+    live_state = _state({
+        "engine": {
+            "a": jnp.arange(6, dtype=jnp.float32)
+            .reshape(2, 3)
+            .T.astype(jnp.bfloat16),
+            "b": jnp.asarray([4, 5], jnp.bfloat16),
+        }
+    })
+    mesh = types.SimpleNamespace(
+        shape={"data": 1, "model": 1},
+        devices=np.asarray([types.SimpleNamespace(id=7)], dtype=object),
+    )
+    runner = types.SimpleNamespace(
+        state=live_state,
+        state_leaves=tuple(jax.tree.leaves(live_state)),
+        mesh=mesh,
+        model_config=_ModelConfig(),
+    )
+    sampler = _Sampler(runner, self.mapping)
+
+    with mock.patch.dict(os.environ, {}, clear=True):
+      report = canonical_qwen3_adapter.attest_exact_live_engine_weights(
+          sampler=sampler, trainer_state=source
+      )
+    self.assertTrue(report["equal"])
+    self.assertEqual(report["mapped_leaves"], 2)
+    self.assertEqual(report["live_leaves"], 2)
+    self.assertEqual(report["mismatch_indices"], ())
+    self.assertEqual(report["mesh_device_ids"], (7,))
+
+    runner.state_leaves = (
+        runner.state_leaves[0],
+        jnp.asarray([4, 6], jnp.bfloat16),
+    )
+    with mock.patch.dict(os.environ, {}, clear=True):
+      mismatch = canonical_qwen3_adapter.attest_exact_live_engine_weights(
+          sampler=sampler, trainer_state=source
+      )
+    self.assertFalse(mismatch["equal"])
+    self.assertEqual(mismatch["mismatch_indices"], (1,))
+
+  def test_deepswe_weight_report_normalizes_and_validates_logical_mesh(self):
+    runner = types.SimpleNamespace(
+        mesh=types.SimpleNamespace(
+            shape={
+                "data": 8,
+                "attn_dp": 1,
+                "attn_dp_expert": 1,
+                "expert": 1,
+                "model": 8,
+                "dcp": 1,
+            }
+        )
+    )
+    workload = types.SimpleNamespace(dp_size=8, tp_size=8)
+    with mock.patch.dict(
+        os.environ, {"CANON_P34_DEEPSWE": "1"}, clear=True
+    ), mock.patch.object(
+        canonical_qwen3_adapter.deepswe_contract,
+        "active_workload",
+        return_value=workload,
+    ):
+      self.assertEqual(
+          canonical_qwen3_adapter._weight_attestation_mesh_shape(runner),  # pylint: disable=protected-access
+          (("dp", 8), ("tp", 8)),
+      )
+      runner.mesh.shape["data"] = 4
+      with self.assertRaisesRegex(
+          canonical_qwen3_adapter.FunctionalMappingError,
+          "signed DeepSWE logical mesh",
+      ):
+        canonical_qwen3_adapter._weight_attestation_mesh_shape(runner)  # pylint: disable=protected-access
+
   def test_mapping_is_ordered_cast_and_non_mutating(self):
     target_before = [np.asarray(x).copy() for x in jax.tree.leaves(self.target)]
     mapped = self._map(

@@ -278,6 +278,85 @@ class VllmRolloutCanonicalTest(absltest.TestCase):
         state
     )
 
+  def test_selected_engine_weight_attestation_uses_registered_adapter(self):
+    rollout = object.__new__(vllm_rollout.VllmRollout)
+    rollout._canonical_engine_adapter = mock.Mock()
+    rollout._canonical_engine_adapter.attest_exact_live_weights.return_value = {
+        "equal": True
+    }
+    state = object()
+
+    self.assertEqual(
+        rollout.attest_exact_engine_weights(state), {"equal": True}
+    )
+    rollout._canonical_engine_adapter.attest_exact_live_weights.assert_called_once_with(
+        state
+    )
+
+  def test_p58_native_uses_observer_without_registering_adapter(self):
+    rollout = object.__new__(vllm_rollout.VllmRollout)
+    rollout._canonical_engine_adapter = None
+    rollout._sampler = object()
+    state = object()
+    signed_native = {
+        "CANON_P34_DEEPSWE": "1",
+        "CANON_P58_DEEPSWE_TIM": "1",
+        "CANON_P58_TIM_ADMITTED": "1",
+        "CANON_P58_TIM_ARM": "native",
+        "CANON_ENGINE_MODULE_C": "0",
+    }
+    with mock.patch.dict(os.environ, signed_native, clear=True), mock.patch(
+        "tunix.rl.canonical_qwen3_adapter.attest_exact_live_engine_weights",
+        return_value={"equal": True},
+    ) as observer:
+      self.assertEqual(
+          rollout.attest_exact_engine_weights(state), {"equal": True}
+      )
+
+    observer.assert_called_once_with(
+        sampler=rollout._sampler, trainer_state=state
+    )
+    self.assertIsNone(rollout._canonical_engine_adapter)
+
+  def test_stock_weight_observer_rejects_unsigned_or_zero_arm(self):
+    rollout = object.__new__(vllm_rollout.VllmRollout)
+    rollout._canonical_engine_adapter = None
+    rollout._sampler = object()
+    base = {
+        "CANON_P34_DEEPSWE": "1",
+        "CANON_P58_DEEPSWE_TIM": "1",
+        "CANON_P58_TIM_ADMITTED": "1",
+        "CANON_P58_TIM_ARM": "native",
+        "CANON_ENGINE_MODULE_C": "0",
+    }
+    for changed in (
+        {"CANON_P58_DEEPSWE_TIM": "0"},
+        {"CANON_P58_TIM_ADMITTED": "0"},
+        {"CANON_P58_TIM_ARM": "zero"},
+        {"CANON_ENGINE_MODULE_C": "1"},
+    ):
+      with self.subTest(changed=changed), mock.patch.dict(
+          os.environ, {**base, **changed}, clear=True
+      ):
+        with self.assertRaisesRegex(RuntimeError, "signed P58 native"):
+          rollout.attest_exact_engine_weights(object())
+
+  def test_p58_native_rejects_registered_canonical_adapter(self):
+    rollout = object.__new__(vllm_rollout.VllmRollout)
+    rollout._canonical_engine_adapter = mock.Mock()
+    rollout._sampler = object()
+    signed_native = {
+        "CANON_P34_DEEPSWE": "1",
+        "CANON_P58_DEEPSWE_TIM": "1",
+        "CANON_P58_TIM_ADMITTED": "1",
+        "CANON_P58_TIM_ARM": "native",
+        "CANON_ENGINE_MODULE_C": "0",
+    }
+    with mock.patch.dict(os.environ, signed_native, clear=True):
+      with self.assertRaisesRegex(RuntimeError, "forbids a registered"):
+        rollout.attest_exact_engine_weights(object())
+    rollout._canonical_engine_adapter.attest_exact_live_weights.assert_not_called()
+
   def test_p35_adapter_contract_is_forwarded(self):
     rollout = object.__new__(vllm_rollout.VllmRollout)
     rollout._canonical_engine_adapter = mock.Mock()

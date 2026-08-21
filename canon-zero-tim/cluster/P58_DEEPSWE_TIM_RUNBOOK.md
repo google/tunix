@@ -66,6 +66,26 @@ The fix routes sandboxes and head pod to `cpu-np` (`NODE_SELECTOR_VAL=cpu-np`).
 P58f02 is immutable, `INCONCLUSIVE`, and has no resumable state. Use fresh
 full-stage run-id `p58f03`; never reuse its YAML/root.
 
+Native `p58f03` proved that CPU routing repair. It completed the first real
+rollout batch in 616.3 seconds and wrote 128 durable rows: 126 `SUCCEEDED`, two
+`MAX_CONTEXT_LIMIT_REACHED`, three solved trajectories, two mixed/effective
+prompt groups, and 32 nonzero advantages. Sandbox-start timeout count was
+zero. The run then stopped before trainer forward, backward, or update because
+the shared P34 weight gate called a canonical-adapter-only method even though
+native correctly had `CANON_ENGINE_MODULE_C=0`. P58f03 is immutable and
+`INCONCLUSIVE`; it has a useful trajectory journal but no optimizer checkpoint
+and is not a resumable training root.
+
+The repaired gate is arm-aware and remains fail-closed. Zero delegates exact
+live-weight comparison to its registered canonical adapter. Signed P58 native
+uses the same pure trainer-to-engine leaf mapping and bitwise comparison as a
+read-only observer; it does not construct/register that adapter or replace a
+serving function. Missing or unequal leaves, DP8 x TP8 mesh drift, an unsigned
+route, or a leaked canonical adapter in native is fatal. The receipt exposes
+contract axis names `dp/tp` even though vLLM internally names them `data/model`.
+Use fresh full-stage run-id `p58f04` after the repair is published and read
+back; never reuse p58f03 YAML/root.
+
 The direct-entrypoint implementation commit is
 `82d82f72a7220d945737d95f6266b5b7e2cfe706`. Resolve the final runnable SHA by
 fetching the operator branch after the later publication checkpoint; do not
@@ -181,7 +201,7 @@ CLIENT_IMAGE_DIGEST='registry.example/tunix@sha256:<64-hex-digest>'
 CPU_NODEPOOL='cpu-np'
 TPU_NODEPOOL='tpu-v5p-slice'
 MODEL_PVC='haoyugao-cpu-np-pvc'
-RUN_STEM='p58f03'
+RUN_STEM='p58f04'
 STAGE='full'
 
 ARM='native'
@@ -266,6 +286,13 @@ debug/run_manifest.json
 debug/batch_metrics.jsonl
 debug/batch-<batch_index>.trajectories.jsonl.gz
 ```
+
+Before interpreting A/B/C, require one exact weight receipt for the active
+arm. Zero obtains it through the registered canonical adapter. Native obtains
+the same bitwise trainer-to-live-engine proof through an observer-only route;
+the adapter must remain absent. The log must contain `[P34.WEIGHTS] EXACT`.
+Missing/mismatched leaves, invalid mesh, or native adapter leakage is a hard
+failure and must not be converted to warning-only.
 
 The gzip files contain the complete redacted conversation/tool trajectory,
 raw final reward, training reward, advantage, status, task identity,
