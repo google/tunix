@@ -15,7 +15,6 @@ class ContinuousSamplerTest(absltest.TestCase):
 
   def setUp(self):
     self.vocab = tc.MockVocab()
-    
     self.transformer = tc.ToyTransformer(
         config=tc.ModelConfig(vocab_size=self.vocab.GetPieceSize()),
         rngs=nnx.Rngs(42),
@@ -23,12 +22,11 @@ class ContinuousSamplerTest(absltest.TestCase):
     self.cache_config = sampler_lib.CacheConfig(page_size=2, max_num_seqs=8)
     
   def test_initialization(self):
-    sampler = sampler_lib.ContinuousSampler(
+    engine = engine_lib.LLMEngine(
         transformer=self.transformer,
         tokenizer=self.vocab,
         cache_config=self.cache_config,
     )
-    engine = engine_lib.LLMEngine(sampler, self.cache_config)
     
     self.assertIsNotNone(engine.scheduler)
     self.assertIsNotNone(engine.cache_manager)
@@ -36,18 +34,17 @@ class ContinuousSamplerTest(absltest.TestCase):
     self.assertEqual(engine.cache_manager.available_hbm_pages, engine.cache_manager.hbm_page_manager.total_num_pages)
 
   def test_unified_step_creates_valid_arrays(self):
-    sampler = sampler_lib.ContinuousSampler(
+    engine = engine_lib.LLMEngine(
         transformer=self.transformer,
         tokenizer=self.vocab,
         cache_config=self.cache_config,
     )
-    engine = engine_lib.LLMEngine(sampler, self.cache_config)
     
     # We mock _compiled_step_fn to intercept the arrays and verify the continuous structure
     mock_step_fn = mock.MagicMock()
     # Mock return matches: next_tokens, hbm_pm
-    mock_step_fn.return_value = (jnp.array([4, 5], dtype=jnp.int32), sampler.hbm_pm)
-    sampler._compiled_step_fn = mock_step_fn
+    mock_step_fn.return_value = (jnp.array([4, 5], dtype=jnp.int32), engine.sampler.hbm_pm if hasattr(engine.sampler, 'hbm_pm') else engine.hbm_pm)
+    engine.sampler._compiled_step_fn = mock_step_fn
     
     engine.add_request("req_1", [1, 2, 3])
     engine.add_request("req_2", [7, 8])
@@ -70,12 +67,11 @@ class ContinuousSamplerTest(absltest.TestCase):
     self.assertEqual(engine.generated_tokens["req_2"], [5])
 
   def test_end_to_end_mocked_generation_loop(self):
-    sampler = sampler_lib.ContinuousSampler(
+    engine = engine_lib.LLMEngine(
         transformer=self.transformer,
         tokenizer=self.vocab,
         cache_config=self.cache_config,
     )
-    engine = engine_lib.LLMEngine(sampler, self.cache_config)
     
     engine.add_request("req_1", [1, 2])
     
@@ -95,7 +91,7 @@ class ContinuousSamplerTest(absltest.TestCase):
             self.calls += 1
             return out, cache
             
-    sampler._compiled_step_fn = FakeStepFn()
+    engine.sampler._compiled_step_fn = FakeStepFn()
     
     steps = 0
     while engine.has_unfinished_requests() and steps < 10:
@@ -106,25 +102,24 @@ class ContinuousSamplerTest(absltest.TestCase):
     self.assertEqual(engine.generated_tokens["req_1"], [10, 11, eos])
     
   def test_simultaneous_decode_and_prefill_distribution(self):
-    sampler = sampler_lib.ContinuousSampler(
+    engine = engine_lib.LLMEngine(
         transformer=self.transformer,
         tokenizer=self.vocab,
         cache_config=self.cache_config,
     )
-    engine = engine_lib.LLMEngine(sampler, self.cache_config)
     
     engine.add_request("req_old", [1, 2])
     
     mock_step_fn = mock.MagicMock()
-    mock_step_fn.return_value = (jnp.array([3], dtype=jnp.int32), sampler.hbm_pm)
-    sampler._compiled_step_fn = mock_step_fn
+    mock_step_fn.return_value = (jnp.array([3], dtype=jnp.int32), engine.hbm_pm)
+    engine.sampler._compiled_step_fn = mock_step_fn
     
     engine.step()
     
     engine.add_request("req_new", [4, 5, 6])
     
     mock_step_fn.reset_mock()
-    mock_step_fn.return_value = (jnp.array([9, 10], dtype=jnp.int32), sampler.hbm_pm)
+    mock_step_fn.return_value = (jnp.array([9, 10], dtype=jnp.int32), engine.hbm_pm)
     
     engine.step()
     

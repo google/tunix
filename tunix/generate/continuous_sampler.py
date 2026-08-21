@@ -204,30 +204,6 @@ class ContinuousSampler:
         'decode_only_last_token'
         in inspect.signature(transformer.__call__).parameters
     )
-    
-    # Initialize native Continuous Server Engine state
-    self.max_seq_len = max_seq_len
-    dtype = transformer.config.dtype if hasattr(transformer, 'config') else self._flattened_transformer_state[0].dtype
-    
-    num_kv_heads = transformer.config.num_kv_heads
-    head_dim = transformer.config.head_dim
-    num_layers = transformer.config.num_layers
-    
-    hbm_pm_config = page_manager_lib.PageManagerConfig(
-        page_size=self.cache_config.page_size,
-        max_seq_len=self.max_seq_len,
-        max_bytes=self.cache_config.hbm_cache_max_bytes,
-        num_kv_heads=num_kv_heads,
-        max_num_seqs=self.cache_config.max_num_seqs,
-        head_dim=head_dim,
-        dtype=dtype,
-        num_layers=num_layers,
-    )
-    
-    self.hbm_pm = hbm_pm_config.init()
-    self.cpu_pm = None
-
-    self.eos_ids = [self.tokenizer.eos_id()]
 
   def _model_step_fn(
       self,
