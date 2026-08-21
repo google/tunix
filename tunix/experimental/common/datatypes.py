@@ -466,7 +466,28 @@ class WeightSyncMetadata:
 
 @dataclasses.dataclass(kw_only=True)
 class TrainerPayload:
-  """Generic trainer payload.
+  """Base class for generic trainer payloads.
+
+  Attributes:
+    token_ids: [B, T] token IDs for a batched trainer payload. By default,
+      each row is structured as left-padded prompt tokens concatenated with
+      right-padded completion tokens.
+    token_mask: [B, T] token mask to differentiate padding tokens from valid
+      tokens.
+    segment_ids: Optional [B, T] packing segment ids.
+    segment_positions: Optional [B, T] position indices within each segment.
+  """
+  # TODO(tunix-dev): We need to remove the dependency on token_ids and
+  # token_mask as they are not used in RL training.
+  token_ids: ArrayLike | None = None
+  token_mask: ArrayLike | None = None
+  segment_ids: ArrayLike | None = None
+  segment_positions: ArrayLike | None = None
+
+
+@dataclasses.dataclass(kw_only=True)
+class SFTTrainerPayload(TrainerPayload):
+  """Supervised Fine-Tuning (SFT) trainer payload.
 
   Attributes:
     token_ids: [B, T] token IDs for a batched trainer payload. By default,
@@ -480,8 +501,6 @@ class TrainerPayload:
 
   token_ids: ArrayLike
   token_mask: ArrayLike
-  segment_ids: ArrayLike | None = None
-  segment_positions: ArrayLike | None = None
 
 
 # TODO: Introduce PPOTrainerPayload to replace generic RLTrainerPayload when PPO specific fields are needed.
@@ -510,8 +529,7 @@ class RLTrainerPayload(TrainerPayload):
   advantages: ArrayLike
   loss_mask: ArrayLike
   action_mask: ArrayLike | None = None
-  # TODO(tunix-dev): remove prompt_ids, prompt_mask, completion_ids,
-  # and completion_mask; instead, rely on token_ids and token_mask.
+  # TODO(tunix-dev): make prompt_ids/mask and completion_ids/mask required after SequencePackedBatchAssembler refactor is done.
   prompt_ids: ArrayLike | None = None
   prompt_mask: ArrayLike | None = None
   completion_ids: ArrayLike | None = None

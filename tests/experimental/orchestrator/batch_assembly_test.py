@@ -404,11 +404,17 @@ def _make_payload(
     sampler_is_weights=None,
     action_mask=None,
 ):
-  """Builds an unbatched payload shaped like `AlgorithmAdapter` output."""
+  """Builds an unbatched payload shaped like `AlgorithmAdapter` output.
+
+  Note: The `action_mask` argument represents the completion-aligned `[C]` mask
+  (e.g., from `TrajectoryItem.action_mask`). In `AlgorithmAdapter`,
+  `RLTrainerPayload.action_mask` is full sequence-aligned `[P + C]` (concatenated
+  with zeros for the prompt), while `RLTrainerPayload.completion_mask` carries
+  the completion-aligned `[C]` mask.
+  """
   prompt = np.arange(1, prompt_len + 1, dtype=np.int32)
   completion = np.arange(101, 101 + completion_len, dtype=np.int32)
-  token_ids = np.concatenate([prompt, completion])
-  token_mask = np.ones_like(token_ids, dtype=np.float32)
+  total_seq_len = prompt_len + completion_len
   completion_action_mask = (
       action_mask
       if action_mask is not None
@@ -417,13 +423,8 @@ def _make_payload(
   seq_loss_mask = np.concatenate(
       [np.zeros(prompt_len, dtype=np.float32), completion_action_mask]
   )
-  seq_adv = (
-      np.full(len(token_ids), float(advantage), dtype=np.float32)
-      if np.ndim(advantage) == 0
-      else np.asarray(advantage, dtype=np.float32)
-  )
   seq_returns = (
-      np.full(len(token_ids), float(returns), dtype=np.float32)
+      np.full(total_seq_len, float(returns), dtype=np.float32)
       if returns is not None and np.ndim(returns) == 0
       else (
           np.asarray(returns, dtype=np.float32)
@@ -432,7 +433,7 @@ def _make_payload(
       )
   )
   seq_old_values = (
-      np.full(len(token_ids), float(old_values), dtype=np.float32)
+      np.full(total_seq_len, float(old_values), dtype=np.float32)
       if old_values is not None and np.ndim(old_values) == 0
       else (
           np.asarray(old_values, dtype=np.float32)
@@ -441,7 +442,7 @@ def _make_payload(
       )
   )
   seq_sampler_is = (
-      np.full(len(token_ids), float(sampler_is_weights), dtype=np.float32)
+      np.full(total_seq_len, float(sampler_is_weights), dtype=np.float32)
       if sampler_is_weights is not None and np.ndim(sampler_is_weights) == 0
       else (
           np.asarray(sampler_is_weights, dtype=np.float32)
@@ -450,11 +451,9 @@ def _make_payload(
       )
   )
   return datatypes.RLTrainerPayload(
-      token_ids=token_ids,
-      token_mask=token_mask,
       loss_mask=seq_loss_mask,
       action_mask=seq_loss_mask,
-      advantages=seq_adv,
+      advantages=advantage,
       prompt_ids=prompt,
       prompt_mask=np.ones(prompt_len, dtype=np.float32),
       completion_ids=completion,
@@ -468,52 +467,55 @@ def _make_payload(
 
 
 class PaddedBatchAssemblerTest(absltest.TestCase):
-
   def _assembler(self, **kwargs):
-    defaults = dict(batch_size=2, max_seq_len=9, pad_id=0)
+    defaults = dict(
+        batch_size=2, max_prompt_length=4, max_response_length=5, pad_id=0
+    )
     defaults.update(kwargs)
     return batch_assembly.PaddedBatchAssembler(**defaults)
 
   def test_rejects_non_positive_dimensions(self):
     for bad in (
         dict(batch_size=0),
-        dict(max_seq_len=0),
-        dict(max_seq_len=-1),
+        dict(max_prompt_length=0),
+        dict(max_response_length=-1),
     ):
       with self.assertRaises(ValueError):
-        batch_assembly.PaddedBatchAssembler(**bad)
+        self._assembler(**bad)
 
-  def test_max_seq_len_attribute(self):
-    assembler = batch_assembly.PaddedBatchAssembler(max_seq_len=384)
+  def test_max_seq_len_is_sum_of_prompt_and_response_lengths(self):
+    assembler = self._assembler(
+        max_prompt_length=128, max_response_length=256
+    )
     self.assertEqual(assembler.max_seq_len, 384)
 
   def test_empty_input_returns_empty_list(self):
     self.assertEmpty(self._assembler().pack([]))
 
-  def test_row_layout_is_right_padded_into_max_seq_len(self):
+  def test_row_layout_is_left_padded_prompt_and_right_padded_completion(self):
     payload = self._assembler().pack([_make_payload(2, 3)])[0]
 
-    self.assertEqual(payload.token_ids.shape, (2, 9))
-    self.assertEqual(payload.token_mask.shape, (2, 9))
+    self.assertEqual(payload.prompt_ids.shape, (2, 4))
+    self.assertEqual(payload.prompt_mask.shape, (2, 4))
+    self.assertEqual(payload.completion_ids.shape, (2, 5))
+    self.assertEqual(payload.completion_mask.shape, (2, 5))
     self.assertEqual(payload.loss_mask.shape, (2, 9))
     self.assertEqual(payload.action_mask.shape, (2, 9))
-    self.assertEqual(payload.advantages.shape, (2, 9))
+    self.assertEqual(payload.advantages.shape, (2, 5))
 
+    np.testing.assert_array_equal(payload.prompt_ids[0], [0, 0, 1, 2])
+    np.testing.assert_array_equal(payload.prompt_mask[0], [0, 0, 1, 1])
     np.testing.assert_array_equal(
-        payload.token_ids[0], [1, 2, 101, 102, 103, 0, 0, 0, 0]
+        payload.completion_ids[0], [101, 102, 103, 0, 0]
+    )
+    np.testing.assert_array_equal(payload.completion_mask[0], [1, 1, 1, 0, 0])
+    np.testing.assert_array_equal(
+        payload.loss_mask[0], [0, 0, 0, 0, 1, 1, 1, 0, 0]
     )
     np.testing.assert_array_equal(
-        payload.token_mask[0], [1, 1, 1, 1, 1, 0, 0, 0, 0]
+        payload.action_mask[0], [0, 0, 0, 0, 1, 1, 1, 0, 0]
     )
-    np.testing.assert_array_equal(
-        payload.loss_mask[0], [0, 0, 1, 1, 1, 0, 0, 0, 0]
-    )
-    np.testing.assert_array_equal(
-        payload.action_mask[0], [0, 0, 1, 1, 1, 0, 0, 0, 0]
-    )
-    np.testing.assert_allclose(
-        payload.advantages[0], [1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0]
-    )
+    np.testing.assert_allclose(payload.advantages[0], [1.0, 1.0, 1.0, 0.0, 0.0])
 
   def test_action_mask_excludes_tool_observation_tokens(self):
     # Middle completion token is a tool observation: attended, but not trained.
@@ -522,26 +524,34 @@ class PaddedBatchAssemblerTest(absltest.TestCase):
     )
     payload = self._assembler().pack([item])[0]
 
+    np.testing.assert_array_equal(payload.completion_mask[0], [1, 0, 1, 0, 0])
     np.testing.assert_array_equal(
-        payload.loss_mask[0], [0, 0, 1, 0, 1, 0, 0, 0, 0]
-    )
-    np.testing.assert_array_equal(
-        payload.action_mask[0], [0, 0, 1, 0, 1, 0, 0, 0, 0]
+        payload.loss_mask[0], [0, 0, 0, 0, 1, 0, 1, 0, 0]
     )
 
-  def test_ignores_prompt_and_completion_fields(self):
-    item = _make_payload(2, 3)
-    payload = self._assembler().pack([item])[0]
+  def test_completion_aligned_logps_do_not_crash_on_length_mismatch(self):
+    # Regression: ref logps are [C] while token_ids are [P + C]; a single
+    # shared pad length used to produce ragged rows and fail np.stack.
+    items = [
+        _make_payload(2, 3, ref_logps=np.full(3, -0.1, dtype=np.float32)),
+        _make_payload(4, 2, ref_logps=np.full(2, -0.2, dtype=np.float32)),
+    ]
+    payload = self._assembler().pack(items)[0]
 
-    self.assertIsNone(payload.prompt_ids)
-    self.assertIsNone(payload.prompt_mask)
-    self.assertIsNone(payload.completion_ids)
-    self.assertIsNone(payload.completion_mask)
+    self.assertEqual(payload.ref_per_token_logps.shape, (2, 5))
+    np.testing.assert_allclose(
+        payload.ref_per_token_logps[0], [-0.1, -0.1, -0.1, 0.0, 0.0]
+    )
+    np.testing.assert_allclose(
+        payload.ref_per_token_logps[1], [-0.2, -0.2, 0.0, 0.0, 0.0]
+    )
 
   def test_partially_present_optional_fields_stay_row_aligned(self):
+    # Regression: appending only for items that carried the field shifted the
+    # surviving rows onto the wrong sequences.
     items = [
         _make_payload(2, 3),
-        _make_payload(2, 3, old_logps=np.full(5, -0.7, dtype=np.float32)),
+        _make_payload(2, 3, old_logps=np.full(3, -0.7, dtype=np.float32)),
     ]
     with self.assertLogs(level="WARNING") as logs:
       payload = self._assembler().pack(items)[0]
@@ -559,106 +569,187 @@ class PaddedBatchAssemblerTest(absltest.TestCase):
   def test_returns_field_is_propagated(self):
     payload = self._assembler().pack([_make_payload(2, 3, returns=4.0)])[0]
 
-    self.assertEqual(payload.returns.shape, (2, 9))
-    np.testing.assert_allclose(payload.returns[0], [4, 4, 4, 4, 4, 0, 0, 0, 0])
+    self.assertEqual(payload.returns.shape, (2, 5))
+    np.testing.assert_allclose(payload.returns[0], [4, 4, 4, 0, 0])
 
-  def test_scalar_advantage_broadcasts_over_valid_tokens(self):
+  def test_scalar_advantage_broadcasts_over_completion(self):
     payload = self._assembler().pack([_make_payload(2, 3, advantage=2.5)])[0]
 
-    self.assertEqual(payload.advantages.shape, (2, 9))
-    np.testing.assert_allclose(
-        payload.advantages[0], [2.5, 2.5, 2.5, 2.5, 2.5, 0, 0, 0, 0]
+    self.assertEqual(payload.advantages.shape, (2, 5))
+    np.testing.assert_allclose(payload.advantages[0], [2.5, 2.5, 2.5, 0, 0])
+
+  def test_sequence_aligned_advantage_is_sliced_to_completion(self):
+    item = _make_payload(2, 3)
+    item.advantages = np.array([0, 0, 2, 2, 2], dtype=np.float32)
+    payload = self._assembler().pack([item])[0]
+
+    np.testing.assert_allclose(payload.advantages[0], [2, 2, 2, 0, 0])
+
+  def test_truncates_overlong_prompt_from_the_left(self):
+    payload = self._assembler().pack([_make_payload(6, 8)])[0]
+
+    self.assertEqual(payload.loss_mask.shape, (2, 9))
+    # Keeps the most recent prompt tokens.
+    np.testing.assert_array_equal(payload.prompt_ids[0], [3, 4, 5, 6])
+    # Keeps the earliest completion tokens.
+    np.testing.assert_array_equal(
+        payload.completion_ids[0], [101, 102, 103, 104, 105]
     )
-
-  def test_truncates_overlong_sequences(self):
-    payload = self._assembler(batch_size=2, max_seq_len=6).pack(
-        [_make_payload(4, 4)]
-    )[0]
-
-    self.assertEqual(payload.token_ids.shape, (2, 6))
-    self.assertEqual(payload.loss_mask.shape, (2, 6))
-    np.testing.assert_array_equal(payload.token_ids[0], [1, 2, 3, 4, 101, 102])
-    np.testing.assert_array_equal(payload.token_mask[0], [1, 1, 1, 1, 1, 1])
-    np.testing.assert_array_equal(payload.loss_mask[0], [0, 0, 0, 0, 1, 1])
+    np.testing.assert_array_equal(payload.completion_mask[0], np.ones(5))
 
   def test_trailing_rows_are_masked_out(self):
-    payload = self._assembler(batch_size=3, max_seq_len=9).pack(
-        [_make_payload(2, 3)]
-    )[0]
+    payload = self._assembler(batch_size=3).pack([_make_payload(2, 3)])[0]
 
     self.assertEqual(payload.loss_mask.shape, (3, 9))
     for row in (1, 2):
-      np.testing.assert_array_equal(payload.token_ids[row], np.zeros(9))
-      np.testing.assert_array_equal(payload.token_mask[row], np.zeros(9))
       np.testing.assert_array_equal(payload.loss_mask[row], np.zeros(9))
-      np.testing.assert_array_equal(payload.action_mask[row], np.zeros(9))
-      np.testing.assert_array_equal(payload.advantages[row], np.zeros(9))
+      np.testing.assert_array_equal(payload.advantages[row], np.zeros(5))
 
   def test_chunks_into_multiple_microbatches(self):
-    payloads = self._assembler(batch_size=2, max_seq_len=9).pack(
+    payloads = self._assembler(batch_size=2).pack(
         [_make_payload(2, 3) for _ in range(5)]
     )
 
     self.assertLen(payloads, 3)
     for p in payloads:
-      self.assertEqual(p.token_ids.shape, (2, 9))
-      self.assertEqual(p.token_mask.shape, (2, 9))
+      self.assertEqual(p.prompt_ids.shape, (2, 4))
+      self.assertEqual(p.completion_ids.shape, (2, 5))
+
+  def test_sequence_aligned_fields_are_sliced_to_completion(self):
+    item = datatypes.RLTrainerPayload(
+        loss_mask=np.array([0, 0, 1], dtype=np.float32),
+        action_mask=np.array([0, 0, 1], dtype=np.float32),
+        advantages=np.full(3, 2.0, dtype=np.float32),
+        prompt_ids=np.array([1, 2], dtype=np.int32),
+        completion_ids=np.array([3], dtype=np.int32),
+    )
+    payload = self._assembler().pack([item])[0]
+
+    self.assertEqual(payload.prompt_ids.shape, (2, 4))
+    self.assertEqual(payload.prompt_mask.shape, (2, 4))
+    self.assertEqual(payload.completion_ids.shape, (2, 5))
+    self.assertEqual(payload.completion_mask.shape, (2, 5))
+    self.assertEqual(payload.loss_mask.shape, (2, 9))
+    self.assertEqual(payload.action_mask.shape, (2, 9))
+    self.assertEqual(payload.advantages.shape, (2, 5))
+
+    np.testing.assert_array_equal(payload.prompt_ids[0], [0, 0, 1, 2])
+    np.testing.assert_array_equal(payload.prompt_mask[0], [0, 0, 1, 1])
+    np.testing.assert_array_equal(payload.completion_ids[0], [3, 0, 0, 0, 0])
+    np.testing.assert_array_equal(payload.completion_mask[0], [1, 0, 0, 0, 0])
+    np.testing.assert_array_equal(
+        payload.loss_mask[0], [0, 0, 0, 0, 1, 0, 0, 0, 0]
+    )
+    np.testing.assert_array_equal(
+        payload.action_mask[0], [0, 0, 0, 0, 1, 0, 0, 0, 0]
+    )
+    np.testing.assert_allclose(payload.advantages[0], [2, 0, 0, 0, 0])
+
+  def test_action_mask_defaults_to_validity_when_masks_are_none(self):
+    item = datatypes.RLTrainerPayload(
+        prompt_ids=np.array([1, 2], dtype=np.int32),
+        completion_ids=np.array([101, 102, 103], dtype=np.int32),
+        loss_mask=np.array([0, 0, 1, 1, 1], dtype=np.float32),
+        action_mask=None,
+        completion_mask=None,
+        advantages=np.full(3, 1.5, dtype=np.float32),
+    )
+    payload = self._assembler().pack([item])[0]
+
+    self.assertEqual(payload.completion_mask.shape, (2, 5))
+    self.assertEqual(payload.loss_mask.shape, (2, 9))
+    self.assertEqual(payload.action_mask.shape, (2, 9))
+    np.testing.assert_array_equal(payload.completion_mask[0], [1, 1, 1, 0, 0])
+    np.testing.assert_array_equal(
+        payload.loss_mask[0], [0, 0, 0, 0, 1, 1, 1, 0, 0]
+    )
+    np.testing.assert_array_equal(
+        payload.action_mask[0], [0, 0, 0, 0, 1, 1, 1, 0, 0]
+    )
+
+  def test_action_mask_falls_back_to_completion_mask_when_action_mask_is_none(
+      self,
+  ):
+    item = datatypes.RLTrainerPayload(
+        prompt_ids=np.array([1, 2], dtype=np.int32),
+        completion_ids=np.array([101, 102, 103], dtype=np.int32),
+        loss_mask=np.array([0, 0, 1, 0, 1], dtype=np.float32),
+        action_mask=None,
+        completion_mask=np.array([1, 0, 1], dtype=np.float32),
+        advantages=np.full(3, 1.5, dtype=np.float32),
+    )
+    payload = self._assembler().pack([item])[0]
+
+    np.testing.assert_array_equal(payload.completion_mask[0], [1, 0, 1, 0, 0])
+    np.testing.assert_array_equal(
+        payload.loss_mask[0], [0, 0, 0, 0, 1, 0, 1, 0, 0]
+    )
+    np.testing.assert_array_equal(
+        payload.action_mask[0], [0, 0, 0, 0, 1, 0, 1, 0, 0]
+    )
+
+  def test_prompt_mask_with_mismatched_length_falls_back_to_default_mask(self):
+    item = datatypes.RLTrainerPayload(
+        prompt_ids=np.array([1, 2], dtype=np.int32),
+        prompt_mask=np.array([1, 1, 1], dtype=np.float32),
+        completion_ids=np.array([101, 102], dtype=np.int32),
+        loss_mask=np.array([0, 0, 1, 1], dtype=np.float32),
+        advantages=1.0,
+    )
+    payload = self._assembler().pack([item])[0]
+
+    np.testing.assert_array_equal(payload.prompt_mask[0], [0, 0, 1, 1])
 
   def test_all_optional_fields_are_propagated(self):
     item = datatypes.RLTrainerPayload(
-        token_ids=np.array([1, 2, 101, 102, 103], dtype=np.int32),
-        token_mask=np.ones(5, dtype=np.float32),
+        prompt_ids=np.array([1, 2], dtype=np.int32),
+        completion_ids=np.array([101, 102, 103], dtype=np.int32),
         loss_mask=np.array([0, 0, 1, 1, 1], dtype=np.float32),
-        action_mask=np.array([0, 0, 1, 1, 1], dtype=np.float32),
-        advantages=np.full(5, 1.5, dtype=np.float32),
-        ref_per_token_logps=np.full(5, -0.1, dtype=np.float32),
-        old_per_token_logps=np.full(5, -0.2, dtype=np.float32),
-        returns=np.full(5, 2.0, dtype=np.float32),
-        old_values=np.full(5, 0.5, dtype=np.float32),
-        sampler_is_weights=np.full(5, 1.0, dtype=np.float32),
+        advantages=np.full(3, 1.5, dtype=np.float32),
+        ref_per_token_logps=np.full(3, -0.1, dtype=np.float32),
+        old_per_token_logps=np.full(3, -0.2, dtype=np.float32),
+        returns=np.full(3, 2.0, dtype=np.float32),
+        old_values=np.full(3, 0.5, dtype=np.float32),
+        sampler_is_weights=np.full(3, 1.0, dtype=np.float32),
     )
-    payload = self._assembler(batch_size=2, max_seq_len=9).pack([item])[0]
+    payload = self._assembler().pack([item])[0]
 
-    self.assertEqual(payload.old_values.shape, (2, 9))
-    self.assertEqual(payload.sampler_is_weights.shape, (2, 9))
+    self.assertEqual(payload.old_values.shape, (2, 5))
+    self.assertEqual(payload.sampler_is_weights.shape, (2, 5))
+    np.testing.assert_allclose(payload.old_values[0], [0.5, 0.5, 0.5, 0.0, 0.0])
     np.testing.assert_allclose(
-        payload.old_values[0], [0.5, 0.5, 0.5, 0.5, 0.5, 0.0, 0.0, 0.0, 0.0]
-    )
-    np.testing.assert_allclose(
-        payload.sampler_is_weights[0],
-        [1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0],
+        payload.sampler_is_weights[0], [1.0, 1.0, 1.0, 0.0, 0.0]
     )
 
-  def test_underlength_field_is_padded(self):
+  def test_underlength_completion_aligned_field_is_padded(self):
     item = _make_payload(
         prompt_len=2,
         completion_len=4,
         advantage=np.array([1.5, 2.5], dtype=np.float32),
         ref_logps=np.array([-0.5, -0.2], dtype=np.float32),
     )
-    payload = self._assembler(batch_size=2, max_seq_len=9).pack([item])[0]
+    payload = self._assembler().pack([item])[0]
 
-    self.assertEqual(payload.advantages.shape, (2, 9))
-    self.assertEqual(payload.ref_per_token_logps.shape, (2, 9))
+    self.assertEqual(payload.advantages.shape, (2, 5))
+    self.assertEqual(payload.ref_per_token_logps.shape, (2, 5))
     np.testing.assert_allclose(
-        payload.advantages[0], [1.5, 2.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        payload.advantages[0], [1.5, 2.5, 0.0, 0.0, 0.0]
     )
     np.testing.assert_allclose(
-        payload.ref_per_token_logps[0],
-        [-0.5, -0.2, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        payload.ref_per_token_logps[0], [-0.5, -0.2, 0.0, 0.0, 0.0]
     )
 
   def test_none_advantages_defaults_to_zeros(self):
     item = datatypes.RLTrainerPayload(
-        token_ids=np.array([1, 2, 101, 102, 103], dtype=np.int32),
-        token_mask=np.ones(5, dtype=np.float32),
+        prompt_ids=np.array([1, 2], dtype=np.int32),
+        completion_ids=np.array([101, 102, 103], dtype=np.int32),
         loss_mask=np.array([0, 0, 1, 1, 1], dtype=np.float32),
         advantages=None,
     )
-    payload = self._assembler(batch_size=2, max_seq_len=9).pack([item])[0]
+    payload = self._assembler().pack([item])[0]
 
-    self.assertEqual(payload.advantages.shape, (2, 9))
-    np.testing.assert_allclose(payload.advantages[0], np.zeros(9))
+    self.assertEqual(payload.advantages.shape, (2, 5))
+    np.testing.assert_allclose(payload.advantages[0], [0.0, 0.0, 0.0, 0.0, 0.0])
 
 
 if __name__ == "__main__":
