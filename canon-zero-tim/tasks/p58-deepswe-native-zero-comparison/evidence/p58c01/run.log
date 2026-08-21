@@ -1,0 +1,14 @@
+[entrypoint] start 2026-08-21T08:07:34Z  mode=run  pkg=/app/canon-zero-tim
+[entrypoint] JOBSET_ATTEMPT 0 (first attempt)  pod=canon-p58-ds4b-native-three-p58c01-pathways-head-0-0-tgnrl
+[entrypoint] --> 00_env.sh
+[env] HF_TOKEN inherited from INJECTED_HF_TOKEN (len=37)
+[env] WANDB_API_KEY inherited from INJECTED_WANDB_API_KEY (len=86)
+[env] preflight mode: JAX_PLATFORMS=cpu (Pathways connection deferred to Step 70)
+[env] P58 native requires CANON_FROZENLAKE_L3=0, got unset
+[env] P58 native requires CANON_FROZENLAKE_P27=0, got unset
+[env] P58 native requires CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY=0, got unset
+[env] P34 whitelist SHA256 OK: ec297c9cbc39cd67db15b0b9db6a229b15671b848df5ec3101de9ef8df7c9973
+[env] P34 inherited admission mismatch: CANON_P32_DP_REDUCTION_ADMITTED must equal 1
+[env] P34 contract OK: DP8xTP8 per role, local M256, global M2048
+[env] REFUSING TO CONTINUE: canonical set incomplete
+[entrypoint] FATAL: 00_env.sh exited 1
