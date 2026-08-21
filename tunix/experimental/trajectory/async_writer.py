@@ -1,8 +1,10 @@
 """Asynchronous file writer for Trajectory Store."""
 
+import atexit
 import dataclasses
 import queue
 import threading
+import weakref
 
 from absl import logging
 from etils import epath
@@ -30,6 +32,33 @@ class _WriteTask:
   step_path: epath.Path | None
   metadata: trajectory_lib.TrajectoryMetadata
   step: trajectory_lib.Step | None
+
+
+# Every live (i.e. not garbage collected) AsyncFileWriter, so that
+# `_close_live_writers` can drain them at interpreter shutdown. Weak references
+# are used so registration does not keep writers alive.
+_LIVE_WRITERS: "weakref.WeakSet[AsyncFileWriter]" = weakref.WeakSet()
+
+
+def _close_live_writers() -> None:
+  """Closes every live AsyncFileWriter, draining its pending writes.
+
+  Registered with `atexit`, which runs while daemon threads are still alive but
+  before the interpreter kills them. Without this, steps still sitting in a
+  writer's queue when the process ends are silently lost, because the worker is
+  a daemon thread and `__del__` is not guaranteed to run for objects that are
+  still referenced at shutdown.
+  """
+  for writer in list(_LIVE_WRITERS):
+    try:
+      writer.close()
+    except Exception:  # pylint: disable=broad-exception-caught
+      # Best-effort, consistent with the writer's error handling: a failure to
+      # persist diagnostic data must not turn into a non-zero exit status.
+      logging.exception("Failed to close AsyncFileWriter at interpreter exit.")
+
+
+atexit.register(_close_live_writers)
 
 
 class AsyncFileWriter:
@@ -80,12 +109,16 @@ class AsyncFileWriter:
        caller that keeps updating a step or trajectory after logging it cannot
        corrupt the file that is about to be written.
 
-    6. Daemon Thread Lifecycle & Destructor:
+    6. Daemon Thread Lifecycle, Destructor & Shutdown Hook:
        The background worker thread is marked as a daemon (`daemon=True`) so it
        never blocks Python process termination if an unhandled signal or exit
        occurs. The `__del__` destructor provides a best-effort graceful shutdown
        signal and joins the worker with a short timeout during garbage
-       collection.
+       collection. Because a writer that is still referenced at process exit is
+       never garbage collected, and because daemon threads are killed outright
+       once the interpreter shuts down, every instance also registers itself in
+       `_LIVE_WRITERS`; the `atexit` hook `_close_live_writers` drains them all
+       so queued steps are not lost when a rollout worker exits normally.
   """
 
   def __init__(self) -> None:
@@ -102,6 +135,8 @@ class AsyncFileWriter:
     # lifecycle is managed automatically.
     self._closed: bool = False
     self._worker_thread: threading.Thread | None = None
+    # Drained by `_close_live_writers` at interpreter exit.
+    _LIVE_WRITERS.add(self)
 
   def write_step(
       self,
@@ -255,10 +290,13 @@ class AsyncFileWriter:
     The timeout is a hard limit that discards any remaining unfinished tasks if
     the worker thread fails to complete within the specified duration.
 
+    Calling `close()` more than once is safe; subsequent calls are no-ops.
+
     Args:
       timeout: Maximum time in seconds to wait for the worker thread to
         terminate. Defaults to 5.0 seconds.
     """
+    _LIVE_WRITERS.discard(self)
     with self._lock:
       if not self._closed:
         self._closed = True

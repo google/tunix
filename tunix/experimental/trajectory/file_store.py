@@ -2,6 +2,7 @@
 
 import functools
 import re
+import types
 from typing import Final
 
 from etils import epath
@@ -242,3 +243,27 @@ class FileTrajectoryStore(store.TrajectoryReader, store.TrajectoryWriter):
     synchronization.
     """
     self._writer.flush()
+
+  def close(self) -> None:
+    """Flushes pending writes and shuts down the background writer thread.
+
+    Calling `close()` is optional: the underlying `AsyncFileWriter` also drains
+    itself at interpreter exit. It is worth calling explicitly for a store that
+    becomes garbage well before the process ends, so its worker thread is
+    released promptly. Closing is idempotent, but the store must not be written
+    to afterwards; reads remain available.
+    """
+    self._writer.close()
+
+  def __enter__(self) -> "FileTrajectoryStore":
+    """Returns this store, for use as a context manager."""
+    return self
+
+  def __exit__(
+      self,
+      exc_type: type[BaseException] | None,
+      exc_value: BaseException | None,
+      traceback: types.TracebackType | None,
+  ) -> None:
+    """Closes the store on exiting the context manager."""
+    self.close()

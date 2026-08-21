@@ -107,3 +107,13 @@ class TrajectoryWriter(Protocol):
     testing.
     """
     ...
+
+  def close(self) -> None:
+    """Flushes pending writes and releases the writer's resources.
+
+    Implementations must be idempotent, and must not be used for writing after
+    being closed. Backends that write asynchronously also close themselves at
+    interpreter exit, so calling `close()` is only required to release
+    resources earlier, e.g. for a writer created inside a loop.
+    """
+    ...
