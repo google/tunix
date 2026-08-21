@@ -16,10 +16,10 @@ class CacheManager:
         max_num_seqs: int,
         max_num_pages_per_seq: int,
         page_size: int,
-        offload_page_manager: Optional[batch_page_manager_lib.BatchPageManager] = None
+        cpu_block: Optional[jax.Array] = None
     ):
         self.hbm_page_manager = hbm_page_manager
-        self.offload_page_manager = offload_page_manager
+        self.cpu_block = cpu_block
         
         self.max_num_seqs = max_num_seqs
         self.max_num_pages_per_seq = max_num_pages_per_seq
@@ -33,7 +33,7 @@ class CacheManager:
         self._page_id_to_idx: Dict[int, int] = {}
         self._page_location: Dict[int, str] = {}
         
-        self.available_hbm_pages = int(self.hbm_page_manager.num_available_pages)
+        self.available_hbm_pages = int(self.hbm_page_manager.block.num_available_pages)
         self.cpu_free_indices = list(range(cpu_block.shape[0])) if cpu_block is not None else []
         self.available_cpu_pages = len(self.cpu_free_indices)
 
@@ -83,7 +83,7 @@ class CacheManager:
 
     def load(self, page_ids: List[int]):
         """Moves logical pages from CPU to TPU."""
-        if not self.offload_page_manager:
+        if self.cpu_block is None:
             raise RuntimeError("No offload cache configured to load from.")
         
         if len(page_ids) > self.available_hbm_pages:
@@ -105,21 +105,25 @@ class CacheManager:
             physical_cpu_idxs.append(self._page_id_to_idx[pid])
 
         # 3. Issue batch copy CPU -> HBM
-        block_ids = list(self.hbm_page_manager.pages.keys())
-        self.hbm_page_manager = batch_page_manager_lib.copy_physical_pages(
-            src_pool=self.cpu_block,
-            dst_pool=self.hbm_page_manager,
+        new_pages = batch_page_manager_lib.copy_physical_pages(
+            src_pages=self.cpu_block,
+            dst_pages=self.hbm_page_manager.block.pages,
             src_idxs=jnp.array(physical_cpu_idxs),
-            dst_idxs=jnp.array(physical_hbm_idxs),
-            block_ids=block_ids
+            dst_idxs=jnp.array(physical_hbm_idxs)
+        )
+        # Note: replace needs dataclasses
+        import dataclasses
+        new_block = dataclasses.replace(
+            self.hbm_page_manager.block, pages=new_pages
+        )
+        self.hbm_page_manager = dataclasses.replace(
+            self.hbm_page_manager, block=new_block
         )
 
         # 4. Evict the old CPU physical pages
-        self.offload_page_manager = self.offload_page_manager.evict_pages(
-            page_indices_to_evict=jnp.array(physical_cpu_idxs),
-            num_evicted=jnp.array(len(physical_cpu_idxs))
-        )
-        self.available_cpu_pages += len(physical_cpu_idxs)
+        for cpu_idx in physical_cpu_idxs:
+            self.cpu_free_indices.append(cpu_idx)
+            self.available_cpu_pages += 1
 
         # 5. Re-map logical tracking
         for pid, p_idx in zip(page_ids, physical_hbm_idxs):
@@ -128,7 +132,7 @@ class CacheManager:
 
     def offload(self, page_ids: List[int]):
         """Moves logical pages from TPU to CPU."""
-        if not self.offload_page_manager:
+        if self.cpu_block is None:
             raise RuntimeError("No offload cache configured to offload to.")
             
         if len(page_ids) > self.available_cpu_pages:
@@ -137,10 +141,11 @@ class CacheManager:
         if not page_ids:
             return
 
-        # 1. Allocate equivalent physical CPU pages
-        self.cpu_block, allocated_cpu_idxs = self.offload_page_manager.allocate(jnp.array(len(page_ids)))
-        self.available_cpu_pages -= len(page_ids)
-        physical_cpu_idxs = np.array(allocated_cpu_idxs).tolist()
+        # 1. Allocate equivalent physical CPU pages from python array
+        physical_cpu_idxs = []
+        for _ in range(len(page_ids)):
+            physical_cpu_idxs.append(self.cpu_free_indices.pop())
+            self.available_cpu_pages -= 1
         
         # 2. Gather source TPU physical indices
         physical_tpu_idxs = []
@@ -150,13 +155,11 @@ class CacheManager:
             physical_tpu_idxs.append(self._page_id_to_idx[pid])
 
         # 3. Issue batch copy HBM -> CPU
-        block_ids = list(self.hbm_page_manager.pages.keys())
-        self.offload_page_manager = batch_page_manager_lib.copy_physical_pages(
-            src_pool=self.hbm_page_manager,
-            dst_pool=self.cpu_block,
+        self.cpu_block = batch_page_manager_lib.copy_physical_pages(
+            src_pages=self.hbm_page_manager.block.pages,
+            dst_pages=self.cpu_block,
             src_idxs=jnp.array(physical_tpu_idxs),
-            dst_idxs=jnp.array(physical_cpu_idxs),
-            block_ids=block_ids
+            dst_idxs=jnp.array(physical_cpu_idxs)
         )
 
         # 4. Evict the old TPU physical pages
@@ -196,7 +199,7 @@ class CacheManager:
                 self.available_cpu_pages += 1
             
         if tpu_idxs_to_evict:
-            padded_tpu = np.zeros((self.hbm_page_manager.total_num_pages,), dtype=np.int32)
+            padded_tpu = np.zeros((self.hbm_page_manager.block.total_num_pages,), dtype=np.int32)
             padded_tpu[:len(tpu_idxs_to_evict)] = tpu_idxs_to_evict
             self.hbm_page_manager = self.hbm_page_manager.evict_pages(
                 jnp.array(padded_tpu), 
@@ -219,6 +222,7 @@ class CacheManager:
             '_page_id_to_idx': self._page_id_to_idx,
             '_page_location': self._page_location,
             'available_hbm_pages': self.available_hbm_pages,
+            'cpu_free_indices': self.cpu_free_indices,
             'available_cpu_pages': self.available_cpu_pages,
         }
         return (children, aux_data)

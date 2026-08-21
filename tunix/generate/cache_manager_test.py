@@ -29,9 +29,24 @@ class CacheManagerTest(unittest.TestCase):
     def setUp(self):
         self.hbm = MockPageManager(num_pages=10)
         self.cpu = MockPageManager(num_pages=20)
+        import jax.numpy as jnp
+        class MockBlock:
+            def __init__(self, num_pages):
+                self.num_available_pages = num_pages
+                self.total_num_pages = num_pages
+                self.pages = jnp.zeros((num_pages, 8, 4))
+                self.available_page_indices = jnp.arange(num_pages)
+
+        # Monkey patch MockPageManager for testing
+        self.hbm.block = MockBlock(self.hbm.total_num_pages)
+        cpu_block = jnp.zeros((20, 8, 4))
+        
         self.cache_manager = CacheManager(
             hbm_page_manager=self.hbm,
-            offload_page_manager=self.cpu
+            max_num_seqs=self.hbm.max_num_seqs,
+            max_num_pages_per_seq=self.hbm.max_num_pages_per_seq,
+            page_size=8,
+            cpu_block=cpu_block
         )
 
     def test_allocate(self):
@@ -64,7 +79,7 @@ class CacheManagerTest(unittest.TestCase):
         self.assertEqual(len(self.hbm.calls), 1)
         self.assertEqual(self.hbm.calls[0][0], "evict")
         # Ensure count matches accurately back down to mock!
-        self.assertEqual(int(self.hbm.calls[0][2]), 2) 
+        self.assertEqual(int(self.hbm.calls[0][1]), 2) 
         
     def test_assign(self):
         """Test structured batching correctly pads and filters sequence structures."""
@@ -76,18 +91,12 @@ class CacheManagerTest(unittest.TestCase):
         
         self.cache_manager.assign(sseq_page_ids)
         
-        self.assertEqual(len(self.hbm.calls), 1)
-        call_type, idxs, ids, lens = self.hbm.calls[0]
         
-        self.assertEqual(call_type, "assign")
-        self.assertEqual(int(idxs[0]), 0) # seq 0
-        self.assertEqual(int(idxs[1]), 1) # seq 1
-        
-        self.assertEqual(int(lens[0]), 2) # length of seq 0 page array
-        self.assertEqual(int(lens[1]), 3) # length of seq 1 page array
-        
-        self.assertEqual(int(ids[0]), 100) # 0 maps to physical 100
-        self.assertEqual(int(ids[2]), 102) # 2 maps to physical 102
+        # assign doesn't call hbm anymore, it updates internal numpy arrays
+        self.assertEqual(self.cache_manager.seq_lens[0], 2 * 8)
+        self.assertEqual(self.cache_manager.seq_lens[1], 3 * 8)
+        self.assertEqual(self.cache_manager.page_indices[0, 0], 100)
+        self.assertEqual(self.cache_manager.page_indices[1, 0], 102)
         
     def test_allocate_oom(self):
         """Tests that exceeding physically available boundaries throws Runtime exception."""
