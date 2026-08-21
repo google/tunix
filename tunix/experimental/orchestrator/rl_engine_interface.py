@@ -25,6 +25,13 @@ from tunix.experimental.worker import remote_execution
 class AbstractRLEngine(Protocol):
   """Stateless compute primitives for distributed worker meshes."""
 
+  async def dispatch_rollout_requests(
+      self,
+      requests: Sequence[datatypes.RolloutRequest],
+  ) -> list[str]:
+    """Dispatches pre-formed RolloutRequests across rollout workers."""
+    ...
+
   async def dispatch_rollouts(
       self,
       prompts: Sequence[Any],

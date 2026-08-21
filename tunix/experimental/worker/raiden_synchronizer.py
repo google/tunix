@@ -27,7 +27,7 @@ from tunix.experimental.orchestrator import weight_sync
 
 _ws_lib: Any = None
 try:
-  from GOOGLE_INTERNAL_PACKAGE_PATH.third_party.tpu_raiden.tpu_sync.api.jax import weight_synchronizer as _ws_lib  # pylint: disable=g-import-not-at-top
+  from tpu_sync.api.jax import weight_synchronizer as _ws_lib  # pylint: disable=g-import-not-at-top
 except ImportError:
   _ws_lib = None
 

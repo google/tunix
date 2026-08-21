@@ -73,14 +73,18 @@ class DistributedRLEngineTest(absltest.TestCase):
 
   def test_generate_load_balances_across_rollout_workers(self):
     async def _run():
-      resp1 = datatypes.RolloutResponse(request_id="r1", status="COMPLETED", env_reward=1.0)
-      resp2 = datatypes.RolloutResponse(request_id="r2", status="COMPLETED", env_reward=2.0)
+      resp1 = datatypes.RolloutResponse(
+          request_id="r1", status="COMPLETED", env_reward=1.0
+      )
+      resp2 = datatypes.RolloutResponse(
+          request_id="r2", status="COMPLETED", env_reward=2.0
+      )
 
       self.mock_rollout_1.generate.return_value = [resp1]
       self.mock_rollout_2.generate.return_value = [resp2]
 
       results = await self.engine.generate(["p1", "p2"])
-      self.assertEqual(len(results), 2)
+      self.assertLen(results, 2)
       rewards = {res.traj.reward for res in results}
       self.assertEqual(rewards, {1.0, 2.0})
 
@@ -266,8 +270,7 @@ class DistributedRLEngineTest(absltest.TestCase):
 
     asyncio.run(_run())
 
-  def test_balancer_prefix_routing(self):
-
+  def test_dispatch_rollout_requests_with_prefix_routing(self):
     async def _run():
       req1 = datatypes.RolloutRequest(
           request_id="1",
@@ -282,9 +285,10 @@ class DistributedRLEngineTest(absltest.TestCase):
           metadata={"prefix_hash": 1},
       )
 
-      await self.engine.dispatch_rollouts([req1, req2])
+      req_ids = await self.engine.dispatch_rollout_requests([req1, req2])
+      self.assertEqual(req_ids, ["1", "2"])
 
-      # Due to deterministic round-robin / hash logic, req1 goes to rollout_1 and req2 goes to rollout_2
+      # Due to deterministic hash logic, req1 -> rollout_1 and req2 -> rollout_2
       self.mock_rollout_1.generate.assert_called_once()
       dispatched_req1 = self.mock_rollout_1.generate.call_args.kwargs[
           "requests"
@@ -296,6 +300,29 @@ class DistributedRLEngineTest(absltest.TestCase):
           "requests"
       ][0]
       self.assertEqual(dispatched_req2.request_id, "2")
+
+    asyncio.run(_run())
+
+  def test_dispatch_rollouts_delegates_to_dispatch_rollout_requests(self):
+    async def _run():
+      req1 = datatypes.RolloutRequest(
+          request_id="1",
+          prompt="p1",
+          prompt_id="1",
+          metadata={"prefix_hash": 0},
+      )
+      req2 = datatypes.RolloutRequest(
+          request_id="2",
+          prompt="p2",
+          prompt_id="2",
+          metadata={"prefix_hash": 1},
+      )
+
+      req_ids = await self.engine.dispatch_rollouts([req1, req2])
+      self.assertEqual(req_ids, ["1", "2"])
+
+      self.mock_rollout_1.generate.assert_called_once()
+      self.mock_rollout_2.generate.assert_called_once()
 
     asyncio.run(_run())
 
@@ -354,7 +381,7 @@ class DistributedRLEngineTest(absltest.TestCase):
           temperature=0.7, max_generation_steps=128
       )
       req_ids = await self.engine.dispatch_rollouts(
-          ["p1"],
+          [{"prompt": "p1", "prompt_id": "p1"}],
           group_size=1,
           generation_args=gen_args,
           route_metadata={"prefix_hash": "cache_key_1"},
@@ -373,6 +400,19 @@ class DistributedRLEngineTest(absltest.TestCase):
       self.assertEqual(dispatched.metadata["prefix_hash"], "cache_key_1")
 
     asyncio.run(_run())
+
+  def test_dispatch_rollouts_handles_none_metadata(self):
+    async def _run():
+      req_ids = await self.engine.dispatch_rollouts(
+          [{"prompt": "p1", "prompt_id": "p1"}],
+          group_size=1,
+          metadata=None,
+          route_metadata=None,
+      )
+      self.assertLen(req_ids, 1)
+
+    asyncio.run(_run())
+
 
 if __name__ == "__main__":
   absltest.main()

@@ -16,7 +16,6 @@
 
 
 from absl.testing import absltest
-import jax.numpy as jnp
 import numpy as np
 from tunix.experimental.common import datatypes
 from tunix.experimental.orchestrator import batch_assembly
@@ -107,11 +106,11 @@ class WithRefPerTokenLogpsTest(absltest.TestCase):
 
   def _make_train_example(self, b=2, p=3, c=4):
     return rl_common.TrainExample(
-        prompt_ids=jnp.ones((b, p), dtype=jnp.int32),
-        prompt_mask=jnp.ones((b, p), dtype=jnp.float32),
-        completion_ids=jnp.ones((b, c), dtype=jnp.int32),
-        completion_mask=jnp.ones((b, c), dtype=jnp.float32),
-        advantages=jnp.ones((b, c), dtype=jnp.float32),
+        prompt_ids=np.ones((b, p), dtype=np.int32),
+        prompt_mask=np.ones((b, p), dtype=np.float32),
+        completion_ids=np.ones((b, c), dtype=np.int32),
+        completion_mask=np.ones((b, c), dtype=np.float32),
+        advantages=np.ones((b, c), dtype=np.float32),
         ref_per_token_logps=None,
         old_per_token_logps=None,
     )

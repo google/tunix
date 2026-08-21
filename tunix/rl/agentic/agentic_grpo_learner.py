@@ -396,31 +396,45 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     micro = (
         self.rl_engine.cluster_config.training_config.compute_logps_micro_batch_size
     )
+
+    prompt_tokens = jnp.asarray(example.prompt_ids)
+    completion_tokens = jnp.asarray(example.completion_ids)
+    segment_ids = (
+        jnp.asarray(example.segment_ids)
+        if example.segment_ids is not None
+        else None
+    )
+    segment_positions = (
+        jnp.asarray(example.segment_positions)
+        if example.segment_positions is not None
+        else None
+    )
+
     updates = {}
     if (
         example.old_per_token_logps is None
         and not self.algo_config.use_rollout_logps
     ):
       updates["old_per_token_logps"] = self.rl_engine.get_actor_per_token_logps(
-          prompt_tokens=example.prompt_ids,
-          completion_tokens=example.completion_ids,
+          prompt_tokens=prompt_tokens,
+          completion_tokens=completion_tokens,
           pad_id=pad_value,
           eos_id=eos_value,
           micro_batch_size=micro,
-          segment_ids=example.segment_ids,
-          segment_positions=example.segment_positions,
+          segment_ids=segment_ids,
+          segment_positions=segment_positions,
       )
     if example.ref_per_token_logps is None and (
         self.algo_config.force_compute_kl or self.algo_config.beta != 0.0
     ):
       updates["ref_per_token_logps"] = self.rl_engine.get_ref_per_token_logps(
-          prompt_tokens=example.prompt_ids,
-          completion_tokens=example.completion_ids,
+          prompt_tokens=prompt_tokens,
+          completion_tokens=completion_tokens,
           pad_id=pad_value,
           eos_id=eos_value,
           micro_batch_size=micro,
-          segment_ids=example.segment_ids,
-          segment_positions=example.segment_positions,
+          segment_ids=segment_ids,
+          segment_positions=segment_positions,
       )
     # The rollout-logps path defers its trainer recompute here too. Not just
     # diagnostics: sampler_is="token" consumes it as old_per_token_logps.
@@ -432,13 +446,13 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     if need_trainer_logps:
       rollout_logps = example.old_per_token_logps
       trainer_logps = self.rl_engine.get_actor_per_token_logps(
-          prompt_tokens=example.prompt_ids,
-          completion_tokens=example.completion_ids,
+          prompt_tokens=prompt_tokens,
+          completion_tokens=completion_tokens,
           pad_id=pad_value,
           eos_id=eos_value,
           micro_batch_size=micro,
-          segment_ids=example.segment_ids,
-          segment_positions=example.segment_positions,
+          segment_ids=segment_ids,
+          segment_positions=segment_positions,
       )
       metrics, sampler_is_weights = self._sampler_trainer_agreement(
           rollout_logps, trainer_logps, example.completion_mask

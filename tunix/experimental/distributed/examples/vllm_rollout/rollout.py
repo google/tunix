@@ -24,7 +24,7 @@ from transformers import AutoTokenizer  # pylint: disable=g-importing-member
 from tunix.experimental.common import test_utils as mocks
 from tunix.experimental.distributed.runtime.context import ProcessContext  # pylint: disable=g-importing-member
 from tunix.experimental.rl.agentic import registry
-from tunix.experimental.rollout import legacy_vllm_sampler_adapter as legacy_sampler_lib
+from tunix.experimental.rollout import inprocess_vllm_sampler_adapter as inprocess_sampler_lib
 from tunix.experimental.worker import remote_execution
 from tunix.experimental.worker import rollout_worker
 from tunix.generate import vllm_sampler
@@ -64,7 +64,7 @@ def main(argv: Sequence[str], context: ProcessContext | None) -> None:
 
   tokenizer = AutoTokenizer.from_pretrained(args.model_name)
   config = vllm_sampler.VllmConfig(engine_kwargs={"model": args.model_name})
-  sampler_server = legacy_sampler_lib.LegacyVllmSamplerAdapter(  # pyrefly: ignore[bad-instantiation]
+  sampler_server = inprocess_sampler_lib.InprocessVllmSamplerAdapter(  # pyrefly: ignore[bad-instantiation]
       server_id="vllm-0",
       tokenizer=tokenizer,
       config=config,

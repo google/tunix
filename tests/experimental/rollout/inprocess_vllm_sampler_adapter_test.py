@@ -12,19 +12,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for LegacyVllmSamplerAdapter with Tunix VllmSampler."""
+"""Tests for InprocessVllmSamplerAdapter with Tunix VllmSampler."""
 
 import asyncio
 from unittest import mock
 from absl.testing import absltest
 import numpy as np
 
-from tunix.experimental.rollout import legacy_vllm_sampler_adapter
+from tunix.experimental.rollout import inprocess_vllm_sampler_adapter
 from tunix.experimental.rollout import sampler as base_sampler_lib
 from tunix.generate import base_sampler
 
 
-class LegacyVllmSamplerAdapterTest(absltest.TestCase):
+class InprocessVllmSamplerAdapterTest(absltest.TestCase):
 
   def setUp(self):
     super().setUp()
@@ -40,7 +40,7 @@ class LegacyVllmSamplerAdapterTest(absltest.TestCase):
     self.mock_vllm_lib.VllmSampler.return_value = self.mock_vllm_sampler
 
     self.patcher = mock.patch.object(
-        legacy_vllm_sampler_adapter,
+        inprocess_vllm_sampler_adapter,
         "_get_vllm_sampler_cls",
         return_value=self.mock_vllm_lib,
     )
@@ -49,10 +49,12 @@ class LegacyVllmSamplerAdapterTest(absltest.TestCase):
     self.mock_tokenizer = mock.MagicMock()
     self.mock_config = mock.MagicMock()
 
-    self.sampler_adapter = legacy_vllm_sampler_adapter.LegacyVllmSamplerAdapter(
-        server_id="vllm_slice_01",
-        tokenizer=self.mock_tokenizer,
-        config=self.mock_config,
+    self.sampler_adapter = (
+        inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
+            server_id="vllm_slice_01",
+            tokenizer=self.mock_tokenizer,
+            config=self.mock_config,
+        )
     )
 
   def tearDown(self):
@@ -112,7 +114,7 @@ class LegacyVllmSamplerAdapterTest(absltest.TestCase):
     self.mock_vllm_sampler.update_params.assert_called_once_with(mock_weights)
 
   def test_uninitialized_sampler_raises(self):
-    uninit = legacy_vllm_sampler_adapter.LegacyVllmSamplerAdapter(
+    uninit = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
         server_id="empty"
     )
     with self.assertRaises(RuntimeError):

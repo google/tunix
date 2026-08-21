@@ -127,6 +127,22 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       return await res
     return res
 
+  async def dispatch_rollout_requests(
+      self,
+      requests: Sequence[datatypes.RolloutRequest],
+  ) -> list[str]:
+    """Dispatches pre-formed RolloutRequests across rollout workers using prefix routing."""
+    for req in requests:
+      route_key = (req.metadata or {}).get("prefix_hash", req.prompt_id)
+      worker = self._rollout_pool._get_next_actor(
+          kwargs={"route_key": route_key}
+      )
+      res = worker.dispatch_task(method_name="generate", requests=[req])
+      if inspect.isawaitable(res):
+        await res
+
+    return [r.request_id for r in requests]
+
   async def dispatch_rollouts(
       self,
       prompts: Sequence[Any],
@@ -137,12 +153,12 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       route_metadata: Mapping[str, Any] | None = None,
       **kwargs: Any,
   ) -> list[str]:
-    """Dispatches rollout requests, expanding prompt groups inside the engine."""
+    """Expands prompt groups into RolloutRequests and dispatches them."""
     if group_size <= 0:
       raise ValueError(f"group_size must be positive, got {group_size}.")
     rollout_reqs: list[datatypes.RolloutRequest] = []
     base_metadata = dict(route_metadata or {})
-    if "metadata" in kwargs:
+    if "metadata" in kwargs and kwargs["metadata"] is not None:
       base_metadata.update(dict(kwargs["metadata"]))
     base_generation_kwargs = (
         generation_args.as_kwargs() if generation_args is not None else {}
@@ -207,20 +223,7 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
             )
         )
 
-    for req in rollout_reqs:
-      metadata = req.metadata or {}
-      route_key = metadata.get("prefix_hash")
-      if route_key is None:
-        route_key = req.prompt_id
-      worker = self._rollout_pool._get_next_actor(
-          kwargs={"route_key": route_key}
-      )
-
-      res = worker.dispatch_task(method_name="generate", requests=[req])
-      if inspect.isawaitable(res):
-        await res
-
-    return [r.request_id for r in rollout_reqs]
+    return await self.dispatch_rollout_requests(rollout_reqs)
 
   async def poll_rollouts(
       self, timeout_s: float = remote_execution.LONG_POLL_TIMEOUT_S

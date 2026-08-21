@@ -31,7 +31,7 @@ class RolloutConfig(base_rollout.RolloutConfig):
 
   Attributes:
     sampler_type: Type of sampler adapter to construct ("vanilla",
-      "legacy_vllm", "vllm").
+      "inprocess_vllm", "vllm").
     env_name: Registered name of environment class in ENV_REGISTRY.
     agent_name: Registered name of agent class in AGENT_REGISTRY.
     env_config: Configuration dictionary passed to environment constructor.
