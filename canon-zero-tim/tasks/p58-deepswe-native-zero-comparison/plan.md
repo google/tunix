@@ -17,11 +17,12 @@ DeepSWE-32B run: the model, generation count, clean-data selector, and context
 length differ deliberately. The compact trajectory-filtering rule does match
 the published DeepSWE recipe and the pinned Tunix quality-fix reference.
 
-The execution order changed by user decision on 2026-08-21: publish the shared
-implementation, waive the optional one-host gate, and run only the native
-three-update canary first. The zero implementation remains available for
-review and regression testing but is not launch-authorized until its
-optimization work is complete and the user explicitly reactivates it. A
+The execution order changed again by user decision on 2026-08-21: waive the
+optional one-host gate and the separate three-update stop, then run the native
+full 1,000-update campaign directly. Commits 1–3 remain mandatory online
+monitoring boundaries inside the same job. The zero implementation remains
+available for review and regression testing but is not launch-authorized until
+its optimization work is complete and the user explicitly reactivates it. A
 native-only result is an integration/training result, not a causal comparison.
 
 ## Phases
@@ -31,9 +32,10 @@ native-only result is an integration/training result, not a causal comparison.
 | P58.1 | Frozen shared recipe and loss-aggregation contract | Fixed-16K formula oracle, compact-filter mask policy, effective-row-weighted accumulation, and DP8 invariance are specified and locally tested; public-source discrepancy is recorded | completed |
 | P58.2 | Default-off paired profiles, renderer, metrics, trajectory journal, and negative controls | Host tests and pinned-image tests prove that the two rendered arms differ only in the registered numerical treatment bundle | completed |
 | P58.3 | One-host observer and artifact sanity | Full redacted trajectory schema, W&B metric schema, logprob/alignment observers, checkpoint transactions, and no-update neutrality pass without a production claim | waived — not PASS |
-| P58.4N | Native 128-chip three-update canary | Native completes exactly three optimizer commits on rollout DP8 x TP8 plus trainer DP8 x TP8, records finite nonzero A-B, keeps B-C exact, and emits a signed classifier PASS | active |
+| P58.4N | Native 128-chip three-update canary | Native completes exactly three optimizer commits on rollout DP8 x TP8 plus trainer DP8 x TP8, records finite nonzero A-B, keeps B-C exact, and emits a signed classifier PASS | superseded — p58c05 failed before execution; not PASS |
 | P58.4Z | Zero 128-chip three-update canary | Zero completes exactly three commits on the identical recipe with strict A=B=C and a signed classifier PASS | deferred — do not launch |
-| P58.5 | Full campaign or paired comparison | Activated only after the native canary is reviewed and the user chooses native full training, a repaired zero canary, or the paired campaign | pending |
+| P58.5N | Native 128-chip full campaign | Native completes exactly 1,000 optimizer commits; the first three are monitored without stopping; durable trajectory, evaluation, checkpoint, alignment, optimizer, and classifier evidence passes | active |
+| P58.5Z | Zero full or paired comparison | Activated only after zero optimization and a new explicit user decision | deferred — do not launch |
 
 Exactly one phase may be active. Commit, push, image publication, Kubernetes
 render/application, and TPU execution each remain separately user-gated.
@@ -41,8 +43,10 @@ render/application, and TPU execution each remain separately user-gated.
 P58.1 and P58.2 are closed by the pinned-image marker recorded in `state.md`.
 P58.3 has CPU coverage for journal continuity and observer/classifier logic but
 no real Qwen/R2E one-host evidence; the user explicitly waived it rather than
-calling it PASS. P58.4N is the only active phase. P58.4Z must remain deferred
-even though the renderer and CPU tests support it.
+calling it PASS. P58.4N was superseded after p58c05 failed Kueue admission
+before any workload pod or update existed. P58.5N is the only active phase.
+Both zero phases remain deferred even though the renderer and CPU tests cover
+that arm.
 
 ## Frozen shared recipe
 
@@ -62,7 +66,7 @@ even though the renderer and CPU tests support it.
 | Policy iterations | one; no off-policy replay |
 | Deadlines | batch 3,600 s; episode 3,000 s; sandbox active 3,300 s; turn 300 s; step/reward 600 s; cleanup 300 s |
 | Prefix cache | off |
-| Horizon | three-update canary, then separately admitted 1,000 updates |
+| Horizon | direct full campaign: exactly 1,000 committed updates; updates 1–3 are monitoring milestones, not a separate job |
 
 The implementation must not set `mini_batch_size=128`: that CLI is counted in
 prompts. The 128 count belongs to the trajectory-level fields.

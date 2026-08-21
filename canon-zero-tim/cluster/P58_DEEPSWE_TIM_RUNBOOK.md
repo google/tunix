@@ -16,10 +16,12 @@ P58 does not modify `main`. Rendering and local validation do not authorize a
 Kubernetes apply. An operator must separately approve image publication and
 each launch.
 
-Current execution decision (2026-08-21): run only the native three-update
-canary. The optional one-host phase was explicitly waived, not passed. Zero is
-deferred while its optimization work continues and must not be rendered or
-applied. A native result cannot be reported as a paired comparison.
+Current execution decision (2026-08-21): run only the native full 1,000-update
+campaign. The optional one-host phase was explicitly waived, not passed, and
+the user superseded the separate three-update stop. Updates 1–3 are monitored
+inside the same full job and do not terminate a healthy run. Zero is deferred
+while its optimization work continues and must not be rendered or applied. A
+native result cannot be reported as a paired comparison.
 
 Attempt history: native `p58c01` failed in `00_env.sh` before any TPU program;
 that admission fix was published as
@@ -37,8 +39,14 @@ remained unconfirmed Running until their 1,200-second start deadline. Pinned
 R2E swallowed those timeouts, then attempted setup against deleted pods; the
 real Kubernetes 404 was obscured by the client's `None.decode` error. P58c04
 is also immutable and has no resumable trajectory state. Use a final
-operator-branch readback SHA containing the fail-closed start repair and fresh
-run-id `p58c05`. Never reuse a p58c01, p58c02, p58c03, or p58c04 YAML/root.
+operator-branch readback SHA containing the fail-closed start repair. Native
+`p58c05` then failed even earlier: its Workload remained
+`QuotaReserved=False` because the rendered worker treated the Kueue sentinel
+`tpu-v5p-slice` as literal node-pool affinity, so flavor `0xv5p-8` could not
+match. No workload pod or training process started. The renderer repair
+delegates concrete node-pool selection to Kueue for registered sentinels while
+retaining exact `4x4x8` topology. Use fresh full-stage run-id `p58f01`. Never
+reuse a p58c01 through p58c05 YAML/root.
 
 The direct-entrypoint implementation commit is
 `82d82f72a7220d945737d95f6266b5b7e2cfe706`. Resolve the final runnable SHA by
@@ -70,7 +78,7 @@ implementation commit directly.
 | Update geometry | prompt mini-batch 8; 128 trajectory mini-batch; trajectory micro-batch 16; accumulation depth 8 |
 | Optional interventions | sampler-IS off; group clip/filter off; degenerate masking off; flat-group resampling off |
 | Prefix cache | off |
-| Canary / campaign | exactly 3 commits / exactly 1,000 commits |
+| Active horizon | full campaign, exactly 1,000 commits; commits 1–3 are monitoring milestones |
 
 Compact filtering is part of the shared recipe. These terminal statuses are
 journaled but get an all-zero policy mask:
@@ -144,18 +152,19 @@ Before rendering, verify read-only that the mounted PVC contains
 `Qwen3-4B-Instruct-2507`, the R2E dependency imports, the clean JSONL has 1,012
 lines, and its digest matches the frozen value. Never print secret values.
 
-## 3N. Render and launch the native three-update canary
+## 3N. Render and launch the native full campaign
 
-Use the exact source SHA, image digest, CPU pool, TPU pool, PVC, and a unique
-run id. Never hand-edit rendered YAML. This phase permits only `native`.
+Use the exact source SHA, image digest, CPU pool, Kueue worker sentinel, PVC,
+and a unique run id. Never hand-edit rendered YAML. This phase permits only
+`native`.
 
 ```bash
 CLIENT_IMAGE_DIGEST='registry.example/tunix@sha256:<64-hex-digest>'
 CPU_NODEPOOL='deepswe-cpu-pool'
-TPU_NODEPOOL='<4x4x8-v5p-nodepool>'
+TPU_NODEPOOL='tpu-v5p-slice'
 MODEL_PVC='haoyugao-cpu-np-pvc'
-RUN_STEM='p58c05'
-STAGE='three-update'
+RUN_STEM='p58f01'
+STAGE='full'
 
 ARM='native'
 OUTPUT="/tmp/p58-${ARM}-${STAGE}-${RUN_STEM}.yaml"
@@ -176,7 +185,22 @@ kubectl apply --server-side --dry-run=server -f "$OUTPUT"
 ```
 
 The renderer must emit
-`P58_DEEPSWE_TIM_RENDER_PASS arm=native stage=three-update`.
+`P58_DEEPSWE_TIM_RENDER_PASS arm=native stage=full`.
+
+`tpu-v5p-slice` is a Kueue-managed sentinel, not a concrete node-pool name.
+Before server-side dry-run, inspect the rendered worker and require all of the
+following:
+
+```text
+google.com/tpu: 128
+cloud.google.com/gke-tpu-accelerator: tpu-v5p-slice
+cloud.google.com/gke-tpu-topology: 4x4x8
+no cloud.google.com/gke-nodepool: tpu-v5p-slice
+```
+
+Kueue's selected ResourceFlavor supplies the concrete pool affinity. If the
+literal sentinel appears as node-pool affinity, stop before apply; that is the
+p58c05 admission bug.
 
 Before apply, preserve the resolved-environment regression result. It must
 prove that a parent process seeded with the renderer's
@@ -188,13 +212,13 @@ of the native treatment definition.
 The explicit launch boundary, only after operator approval, is:
 
 ```bash
-kubectl apply -f /tmp/p58-native-three-update-${RUN_STEM}.yaml
+kubectl apply -f /tmp/p58-native-full-${RUN_STEM}.yaml
 ```
 
 Do not produce or apply a zero YAML in this phase. Preserve the exact native
 YAML and digest with the returned run.
 
-## 4. Evidence and canary interpretation
+## 4. Evidence and full-campaign interpretation
 
 Each run root is:
 
@@ -257,12 +281,25 @@ gzip -cd "$RUN_ROOT/debug/batch-000000.trajectories.jsonl.gz" \
 jq . "$RUN_ROOT/p58_deepswe_<arm>_<stage>.classification.json"
 ```
 
-Canary PASS requires exactly three committed update records. There may be more
-than three trajectory batches if an entire batch was compact-filtered; every
-such extra batch must have a zero-commit receipt, unchanged state, and the
-same optimizer step as its successor. Any partial journal, missing digest,
+Full-stage PASS requires exactly 1,000 committed update records. There may be
+more than 1,000 trajectory batches if an entire batch was compact-filtered;
+every such extra batch must have a zero-commit receipt, unchanged state, and
+the same optimizer step as its successor. Any partial journal, missing digest,
 duplicate/missing trajectory, wrong task identity, or non-signed filtered
 status is fatal.
+
+Monitor without stopping the healthy job:
+
+| Milestone | Required evidence |
+|---|---|
+| Kueue admission | `QuotaReserved=True`, selected TPU flavor, 32 four-chip worker pods, 128 Pathways devices |
+| first completed batch | 128 journal rows; timeout split; cleanup; solve, all-zero/all-one/mixed/effective-group metrics |
+| commits 1–3 | finite forward/backward; finite nonzero A-B; exact B-C; TPU optimizer; monotonic transaction/journal state |
+| commit 8 | first expected checkpoint artifact and digest |
+| commits 32, 100, then each 100 | continued finite training, checkpoint/evaluation cadence, no journal or cleanup drift |
+
+Crossing commit 3 is not a stop condition. The classifier cannot say full
+`PASS` until commit 1,000 and complete postflight evidence exist.
 
 The native classifier also requires at least one finite, nonzero
 `S_decode_vs_S_prefill` mismatch. Exact native A-B is `NO_TREATMENT`, not a
@@ -281,23 +318,13 @@ The run may not be promoted merely because Python exits zero. Require the
 classification JSON verdict `PASS` and preserve its digest with the rendered
 manifest and raw log.
 
-## 5. Follow-up decision after the native canary
+## 5. Completion and follow-up
 
-Return the packaged native canary and classifier before proposing another
-launch. A native PASS does not itself authorize either full native training or
-a zero canary. The user may separately choose one of those paths after review.
-
-```bash
-STAGE='full'
-RUN_STEM='p58f01'
-# Use section 3N only after a new explicit full-native approval.
-```
-
-Full-native classification requires exactly 1,000 optimizer commits.
-Checkpoint cadence, evaluation cadence, artifact capacity, and analysis
-sampling must be reviewed before apply. A later zero canary must restore the
-paired invariants and pass its own strict classifier before any comparison.
-P58 does not claim Qwen3-32B or 256-chip production readiness.
+At update 1,000, preserve the full native classifier, raw log, run manifest,
+all journal/checkpoint/evaluation digests, rendered YAML, source SHA, and image
+digest before declaring the campaign complete. A later zero canary or paired
+campaign still requires a separate user decision and must restore the paired
+invariants. P58 does not claim Qwen3-32B or 256-chip production readiness.
 
 ## 6. Stop and escalation rules
 

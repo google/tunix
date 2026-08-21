@@ -1,6 +1,6 @@
 # P58.4N — Native 128-chip three-update canary
 
-Status: active.
+Status: superseded on 2026-08-21; not PASS.
 
 ## Purpose
 
@@ -35,11 +35,12 @@ commit. It must have a zero-commit receipt and unchanged state. Interrupted
 infrastructure, missing evidence, exact native A-B (`NO_TREATMENT`), or any
 B-C drift is `INCONCLUSIVE`/failure under the classifier, never PASS.
 
-## After the gate
+## Supersession
 
-Preserve and package the immutable run before proposing another launch. A
-native canary PASS does not authorize a 1,000-update run and does not reactivate
-zero; either decision requires a new user instruction.
+P58c05 did not reach this gate: Kueue never reserved quota and no workload pod
+started. The user then chose to skip a separate three-update stop and run a
+fresh native full-stage job. This phase is therefore closed as superseded,
+without claiming its exit gate passed. Zero remains deferred.
 
 ## Attempt history
 
@@ -148,3 +149,26 @@ without exporting raw scheduler text. The implementation was published as
 `174fcf3a42af3e9cd465307843a1c19a08098c99` after a conflict-free rebase over a
 P57-only evidence commit and complete gate rerun. The next admissible run-id is
 fresh native `p58c05`; zero remains deferred.
+
+### p58c05 — Kueue admission INCONCLUSIVE
+
+The requested Workload remained `QuotaReserved=False`; Kueue reported
+`couldn't assign flavors to pod set pathways-worker: flavor 0xv5p-8 doesn't
+match node affinity, flavor cpu-user doesn't match node affinity`. The worker
+requested 128 TPU devices and exact `4x4x8` topology, but also carried literal
+node-pool affinity `tpu-v5p-slice`. That string is a Kueue-managed sentinel,
+not a concrete node pool, and contradicted the selected `0xv5p-8`
+ResourceFlavor. No JobSet pod, Pathways process, model, sandbox, trajectory,
+forward, backward, optimizer transaction, or checkpoint started.
+
+The immutable evidence is
+`../evidence/p58c05_admission/workload.yaml`, SHA-256
+`d0845e3da4fc106afa3e0f8aa4af387cf44335f21ba696713fd382bbc32b4cf5`,
+and `../evidence/p58c05_admission/workload_describe.txt`, SHA-256
+`cbcf60c467c758601f42221ce050f5dac329ab1f696ba735c60ac809b33fec05`.
+There is no resumable training state.
+
+The local renderer repair removes only the literal node-pool selector for
+registered Kueue sentinels (`auto`, `none`, `tpu-v5p-slice`, `any`) while
+retaining the TPU accelerator and exact topology. A concrete node-pool value
+still renders and validates exact affinity. P58.5N owns the next launch.

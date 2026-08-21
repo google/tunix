@@ -98,6 +98,31 @@ class P58RendererTest(unittest.TestCase):
           tuple(args[index + 1:index + 7]), renderer._FILTER_STATUSES
       )
 
+  def test_kueue_managed_worker_pool_does_not_become_literal_affinity(self):
+    for worker_nodepool in ("auto", "none", "tpu-v5p-slice", "any"):
+      with self.subTest(worker_nodepool=worker_nodepool):
+        document = self._render(
+            "native", "full", worker_nodepool=worker_nodepool
+        )
+        worker_pod = renderer.p34._worker(document)["template"]["spec"]
+        self.assertNotIn(
+            "cloud.google.com/gke-nodepool", worker_pod["nodeSelector"]
+        )
+        self.assertEqual(
+            worker_pod["nodeSelector"]["cloud.google.com/gke-tpu-topology"],
+            "4x4x8",
+        )
+
+  def test_explicit_worker_pool_remains_exact(self):
+    document = self._render(
+        "native", "full", worker_nodepool="mlperf-v5p-128-np-0"
+    )
+    worker_pod = renderer.p34._worker(document)["template"]["spec"]
+    self.assertEqual(
+        worker_pod["nodeSelector"]["cloud.google.com/gke-nodepool"],
+        "mlperf-v5p-128-np-0",
+    )
+
   def test_unregistered_data_arm_and_stage_are_rejected(self):
     with self.assertRaisesRegex(ValueError, "native or zero"):
       self._render("mystery")

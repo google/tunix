@@ -11,11 +11,12 @@ matched exactly with ahead/behind `0/0`. Always obtain the runnable
 the latest branch may contain this later publication-evidence-only commit. Do
 not infer the runnable SHA from the historical base or a mutable tag.
 
-The user changed the execution order: waive the optional one-host sanity and
-run only the native 128-chip three-update canary first. Zero is not optimized
-enough for launch and is explicitly deferred. No image publication,
-Kubernetes render output, JobSet apply, model download, or TPU run was made by
-the publishing agent.
+The user changed the execution order again: waive the optional one-host sanity
+and the separate three-update stop, then run only the native 128-chip full
+1,000-update stage. Updates 1–3 are live monitoring milestones in the same job,
+not an early-stop condition. Zero is not optimized enough for launch and is
+explicitly deferred. No Kubernetes apply or TPU launch is authorized by this
+handoff alone.
 
 Native attempts `p58c01`, `p58c02`, and `p58c03` are bootstrap
 `INCONCLUSIVE` results.
@@ -89,6 +90,20 @@ messages stay in the run log. These changes were published as
 with ahead/behind `0/0`. Fetch the final operator tip after the publication
 checkpoint rather than pinning this implementation commit directly.
 
+P58c05 never reached the runtime. Its Workload remained
+`QuotaReserved=False`; Kueue reported that flavor `0xv5p-8` did not match the
+worker node affinity. The rendered worker combined exact `4x4x8` topology with
+literal node-pool selector `tpu-v5p-slice`. That value is a Kueue sentinel, not
+a concrete node pool, so it contradicted ResourceFlavor admission. No JobSet
+pod, Pathways process, model, sandbox, trajectory, optimizer action, or
+checkpoint started. The evidence under `evidence/p58c05_admission/` is
+immutable and there is no resumable state.
+
+The local repair makes all registered Kueue sentinels delegate concrete pool
+affinity to ResourceFlavor while retaining the TPU accelerator and exact
+topology. Explicit real node-pool names remain exact. The next run is fresh
+native full-stage `p58f01`, not a retry or resume of p58c05.
+
 Never modify or push `main`. The publication target is exclusively
 `yuxzhang/canon-zero-tim`; the implementation is present there.
 
@@ -146,14 +161,15 @@ preceding P34 suites passed. That device-probe result is `INCONCLUSIVE` and is
 not represented as TPU evidence; the final P58 image gate runs the directly
 relevant P34 contract/environment/renderer regressions instead.
 
-No one-host real Qwen/R2E rollout and no 128-chip target canary has run. A
+No one-host real Qwen/R2E rollout and no 128-chip target training update has run. A
 fresh inventory found Qwen3-4B weights but no `libtpu.so`, so this host cannot
 run the requested direct-attached v5p validation. The current claim is
 implementation plus CPU/exact-image validation only.
 
 ## Next executor sequence — native only
 
-1. Read `state.md`, `plan.md`, this handoff, the P58.4N phase file, and
+1. Read `state.md`, `plan.md`, this handoff, the superseded P58.4N phase file,
+   the active `phases/p58-5-native-full.md`, and
    `cluster/P58_DEEPSWE_TIM_RUNBOOK.md` completely.
 2. Fetch `yuxzhang/canon-zero-tim`, detach at its exact remote-tracking SHA,
    prove a second remote readback matches, and require a clean tree. Never use
@@ -163,18 +179,19 @@ implementation plus CPU/exact-image validation only.
 4. Publish or select a client image by immutable registry digest and verify the
    mounted Qwen3-4B-Instruct-2507 weights and frozen clean-list digest without
    printing credentials.
-5. Render only `arm=native, stage=three-update` with fresh run-id `p58c05`;
-   preserve its YAML and digest,
-   run server-side dry-run, and apply only that JobSet under the user's
-   native-first decision.
-6. Require the native classifier JSON to say `PASS`, including finite nonzero
-   A-B, exact B-C, exactly three commits, device optimizer, complete journal,
-   cleanup, and checkpoint/transaction receipts. Package the run before any
-   follow-up decision.
-7. Do not render or apply zero. Do not start 1,000 updates merely because the
-   native canary passes; return evidence for a new user decision.
+5. Render only `arm=native, stage=full` with fresh run-id `p58f01` and worker
+   sentinel `tpu-v5p-slice`. Require exact `4x4x8` topology and no literal
+   `cloud.google.com/gke-nodepool: tpu-v5p-slice`; preserve the YAML/digest and
+   run server-side dry-run before the separately approved apply.
+6. Monitor Kueue admission, the first completed trajectory batch, and commits
+   1–3 without stopping a healthy job. Continue through checkpoint 8, updates
+   32 and 100, then every 100 updates.
+7. Require the full native classifier JSON to say `PASS`, including finite
+   nonzero A-B, exact B-C, exactly 1,000 commits, device optimizer, complete
+   journal, cleanup, evaluation, checkpoint, and transaction receipts.
+8. Do not render or apply zero.
 
-Do not reuse any failed `p58c01`, `p58c02`, `p58c03`, or `p58c04` YAML/run root. None
+Do not reuse any failed `p58c01` through `p58c05` YAML/run root. None
 contains resumable trajectory state. They remain immutable failure evidence
 under `evidence/p58c01/`, `evidence/p58c02/`, `evidence/p58c03/`, and
 `evidence/p58c04/`. The
@@ -187,6 +204,11 @@ P58c04 hashes are
 for `run.log` and
 `a311eb64ee30b1fa0a168b68d9f17661756ed9cb3b272dd19d9bdddbc7f34666`
 for `env.sh`.
+P58c05 admission hashes are
+`d0845e3da4fc106afa3e0f8aa4af387cf44335f21ba696713fd382bbc32b4cf5`
+for `workload.yaml` and
+`cbcf60c467c758601f42221ce050f5dac329ab1f696ba735c60ac809b33fec05`
+for `workload_describe.txt`.
 
 ## Important operational semantics
 
@@ -200,7 +222,7 @@ for `env.sh`.
 - A Kubernetes sandbox start exception must propagate after deletion is
   confirmed. `ENV_TIMEOUT` is an admitted compact-filter status; a
   half-created RepoEnv with `container=None` is forbidden. If an entire
-  p58c05 batch again has zero confirmed Running pods, classify infrastructure
+  p58f01 batch has zero confirmed Running pods, classify infrastructure
   capacity/scheduling before another launch instead of patching websocket
   decode or inventing a successful trajectory.
 - Read `deepswe/all_sandbox_start_timeout_batch` first. Value `1` means the
@@ -228,7 +250,7 @@ for `env.sh`.
 ## Claim ceiling
 
 A native 128-chip PASS proves only that the untreated Qwen3-4B clean-data
-training path completed the signed three-update integration gate. It does not
+training path completed the signed 1,000-update full campaign. It does not
 estimate a native-versus-zero effect, prove zero-TIM, isolate one kernel,
 reproduce DeepSWE-32B, prove packing, or establish 256-chip production
 behavior. Native exact A-B is `NO_TREATMENT`; missing evidence or interrupted

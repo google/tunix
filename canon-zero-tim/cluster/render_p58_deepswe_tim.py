@@ -29,6 +29,12 @@ ROLE_DP = 8
 ROLE_TP = 8
 _STAGE_STEPS = {"three-update": 3, "full": 1000}
 _ARMS = ("native", "zero")
+_KUEUE_MANAGED_WORKER_POOLS = frozenset({
+    "auto",
+    "none",
+    "tpu-v5p-slice",
+    "any",
+})
 _FILTER_STATUSES = (
     "MAX_STEPS_REACHED",
     "MAX_CONTEXT_LIMIT_REACHED",
@@ -206,6 +212,11 @@ def render(
   worker["completions"] = WORKERS
   worker["parallelism"] = WORKERS
   worker_pod = worker["template"]["spec"]
+  if worker_nodepool in _KUEUE_MANAGED_WORKER_POOLS:
+    # These values mean that Kueue's selected ResourceFlavor owns the concrete
+    # node-pool affinity.  Serializing the sentinel as a literal nodeSelector
+    # made p58c05 incompatible with every available flavor.
+    worker_pod["nodeSelector"].pop("cloud.google.com/gke-nodepool", None)
   worker_pod["nodeSelector"]["cloud.google.com/gke-tpu-topology"] = TOPOLOGY
   worker_container = p34._container(worker_pod["containers"], "pathways-worker")
   p34._replace_arg(
@@ -229,6 +240,7 @@ def render(
       client_image=client_image,
       stage=stage,
       arm=arm,
+      worker_nodepool=worker_nodepool,
   )
   return document
 
@@ -280,6 +292,7 @@ def validate(
     client_image: str,
     stage: str,
     arm: str,
+    worker_nodepool: str,
 ) -> None:
   if stage not in _STAGE_STEPS or arm not in _ARMS:
     raise ValueError("invalid P58 stage or arm")
@@ -374,6 +387,16 @@ def validate(
   worker_pod = worker["template"]["spec"]
   if worker_pod["nodeSelector"].get("cloud.google.com/gke-tpu-topology") != TOPOLOGY:
     raise ValueError("P58 worker topology drifted")
+  actual_worker_pool = worker_pod["nodeSelector"].get(
+      "cloud.google.com/gke-nodepool"
+  )
+  expected_worker_pool = (
+      None
+      if worker_nodepool in _KUEUE_MANAGED_WORKER_POOLS
+      else worker_nodepool
+  )
+  if actual_worker_pool != expected_worker_pool:
+    raise ValueError("P58 worker node-pool affinity drifted")
 
 
 def main() -> None:
