@@ -188,3 +188,13 @@
 - External effects: one requested fast-forward pull and local source/test/documentation edits only. No commit, push, main mutation, image publication, rendered launch YAML, Kubernetes apply, model download, TPU job, or credential change occurred.
 - Reconciliation: while validation and publication preparation ran, the operator branch advanced through two non-overlapping P57-only commits. The P58 edits were preserved, the worktree fast-forwarded twice without conflict, and publication validation uses final base `7e608682ea21c501b8ed737b58ffe5591125d6eb`.
 - Next: rerun focused checks on the final tip, then await separate commit/push approval. After publication/readback, the remote executor follows the active P58.5N runbook with fresh `p58f01`.
+
+## 2026-08-21 UTC — P58 Kueue admission repair and native full phase published
+
+- Type: publication evidence
+- Action: after explicit user approval, committed the Kueue-managed worker-affinity repair, sentinel/explicit-pool regressions, p58c05 evidence interpretation, and P58.5N direct-full runbook/handoff. The branch had advanced through a non-overlapping P57 full-horizon commit; P58 was fast-forwarded and restored without conflict before final validation.
+- Published implementation commit: `abbc76008e0a7fcb63562c27d5cf4608fb4f4e90`.
+- Final-base validation: P58 focused 13/13 with two dependency skips; current P57 adjacency 17/17; Python/Bash syntax and `git diff --check`; real full-stage CLI rendering with 32 four-chip workers, 128 TPU, exact `4x4x8`, and absent literal Kueue sentinel nodepool; complete pinned-image terminal marker `P58_EXACT_IMAGE_CPU_PASS loss_oracle=1 weighted_accumulation=1 compact_filter=1 durable_journal=1 paired_renderer=1 alignment_policy=1 regressions=1`.
+- Readback: local HEAD and `origin/yuxzhang/canon-zero-tim` both resolved to `abbc76008e0a7fcb63562c27d5cf4608fb4f4e90` with ahead/behind `0/0` before this documentation checkpoint.
+- External effects: one normal fast-forward push to `yuxzhang/canon-zero-tim`. `main` was untouched. No image publication, model download, Kubernetes apply, TPU job, credential change, or `p58f01` run occurred.
+- Next: publish this documentation checkpoint, fetch its final readback SHA, and hand fresh native full run-id `p58f01` to the remote executor. Zero remains deferred.

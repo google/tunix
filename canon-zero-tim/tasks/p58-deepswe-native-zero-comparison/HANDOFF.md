@@ -11,6 +11,12 @@ matched exactly with ahead/behind `0/0`. Always obtain the runnable
 the latest branch may contain this later publication-evidence-only commit. Do
 not infer the runnable SHA from the historical base or a mutable tag.
 
+The latest P58 admission repair and direct-full phase implementation commit is
+`abbc76008e0a7fcb63562c27d5cf4608fb4f4e90`. Its first post-push readback
+matched exactly with ahead/behind `0/0`. This documentation checkpoint advances
+the branch once more, so the executor must still fetch and use the final
+operator-branch SHA rather than pinning the implementation commit directly.
+
 The user changed the execution order again: waive the optional one-host sanity
 and the separate three-update stop, then run only the native 128-chip full
 1,000-update stage. Updates 1–3 are live monitoring milestones in the same job,
