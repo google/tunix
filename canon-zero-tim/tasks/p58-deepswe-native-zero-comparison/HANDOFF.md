@@ -46,15 +46,17 @@ When the parent entrypoint sourced it, the raw renderer value
 correctly rejected the native environment. The W&B-run fatal printed after
 that exit is derivative, not the first failure.
 
-The local fix turns the generated `env.sh` into an authoritative snapshot of
+The fix turns the generated `env.sh` into an authoritative snapshot of
 all managed non-secret namespaces: it clears the caller's managed values,
 then exports the exact resolved set. Secret injection variables and token
 values are neither cleared nor serialized. The exact regression seeds the
 raw parent with `CANON_LOGPROB_M=256`, executes real `00_env.sh`, sources its
 snapshot, verifies native absences, and passes the Python contract. Focused
 P58/P34 tests, the P57 81-test adjacent suite, and the full pinned-image gate
-pass. This fix is local and requires explicit commit/push approval before it
-can be used remotely.
+pass. It was published as `c0ca41805bd65a4fdede4825ed2835cdce6e13ed`;
+the first post-push remote readback matched exactly with ahead/behind `0/0`.
+Fetch the final operator tip because this publication-evidence checkpoint
+advances the branch once more.
 
 Never modify or push `main`. The eventual publication target is
 `yuxzhang/canon-zero-tim` after reconciling the unrelated remote tip.

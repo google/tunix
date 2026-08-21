@@ -38,6 +38,12 @@ The direct-entrypoint implementation commit is
 fetching the operator branch after the later publication checkpoint; do not
 launch from the historical p58c02 source.
 
+The authoritative resolved-environment snapshot implementation commit is
+`c0ca41805bd65a4fdede4825ed2835cdce6e13ed`. Its first post-push readback
+matched exactly with ahead/behind `0/0`; still fetch the final branch tip after
+the publication-evidence checkpoint rather than pinning this historical
+implementation commit directly.
+
 ## 1. Frozen recipe
 
 | Field | Value |

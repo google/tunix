@@ -99,10 +99,12 @@ The immutable logs are `../evidence/p58c03/run.log`, SHA-256
 No model, rollout, trajectory, forward, backward, optimizer transaction, or
 checkpoint ran.
 
-The local fix makes the generated `env.sh` clear its managed non-secret
+The fix makes the generated `env.sh` clear its managed non-secret
 namespaces before exporting the exact resolved set. The p58c03 regression
 seeds the parent with the renderer's stale value, executes real `00_env.sh`,
 reloads its snapshot, asserts the native-only absences, and calls the Python
 contract. Focused P58/P34 tests, the P57 81-test adjacent suite, and the full
-pinned-image gate pass. After explicit publication approval, the next and
-only admissible run-id is fresh native `p58c04`; p58c03 is not resumable.
+pinned-image gate pass. The fix was published as
+`c0ca41805bd65a4fdede4825ed2835cdce6e13ed`, and its first remote readback
+matched exactly with ahead/behind `0/0`. The next and only admissible run-id is
+fresh native `p58c04`; p58c03 is not resumable.

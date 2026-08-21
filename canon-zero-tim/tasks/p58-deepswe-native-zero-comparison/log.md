@@ -131,3 +131,13 @@
 - Classification: p58c03 is bootstrap `INCONCLUSIVE`. No model initialization, rollout, trajectory, forward, backward, optimizer transaction, checkpoint, or 128-chip training evidence exists; there is no resumable state.
 - External effects: one requested fast-forward pull and local/container validation only. No commit, push, main mutation, image publication, model download, Kubernetes object, TPU job, credential change, or p58c04 render/launch occurred.
 - Next: obtain explicit commit/push approval, publish and read back the fix, then use only fresh native run-id `p58c04`. Never reuse p58c01/p58c02/p58c03; zero remains deferred.
+
+## 2026-08-21 UTC — p58c03 environment-snapshot fix published
+
+- Type: publication evidence
+- Action: committed the authoritative managed-environment snapshot, symmetric native/zero parent-reload regression, p58c03 immutable classification, and p58c04 handoff as one concern; the operator tip had not moved; performed a normal non-force fast-forward push.
+- Published implementation commit: `c0ca41805bd65a4fdede4825ed2835cdce6e13ed`.
+- Gates on the published tree: `git diff --check`, Bash syntax, P58 environment 3/3, focused P58/P34 regressions, P57 adjacent 81/81, and terminal marker `P58_EXACT_IMAGE_CPU_PASS loss_oracle=1 weighted_accumulation=1 compact_filter=1 durable_journal=1 paired_renderer=1 alignment_policy=1 regressions=1`.
+- Readback: local HEAD and `origin/yuxzhang/canon-zero-tim` both resolved to the published implementation commit with ahead/behind `0/0`; the worktree was clean before this publication-only checkpoint.
+- External effects: one implementation commit and one fast-forward operator-branch push. `main` was untouched. No image publication, model download, YAML render, Kubernetes object, TPU job, credential change, or p58c04 run occurred.
+- Next: publish this documentation-only checkpoint, fetch its final readback SHA, and hand only native run-id `p58c04` to the remote executor. Zero remains deferred.
