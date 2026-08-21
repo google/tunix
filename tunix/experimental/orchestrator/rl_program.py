@@ -131,28 +131,20 @@ class StandardRLProgram(RLProgram):
           "StandardRLProgram requires a dataset either at init or in run()."
       )
     for prompt_idx, prompt_item in enumerate(active_dataset):
-      # TODO: Extract prompt_id and group_id from standard tunix data
-      # structures rather than assuming dictionaries or falling back to index
-      # strings.
-      # TODO: the logic of creating group id and prompt id is incorrect and
-      # should be fixed.
-      prompt_id = getattr(prompt_item, "prompt_id", f"prompt_{prompt_idx}")
-      group_id = getattr(prompt_item, "group_id", f"group_{prompt_idx}")
       if isinstance(prompt_item, dict):
-        prompt_id = prompt_item.get("prompt_id", prompt_id)
-        group_id = prompt_item.get("group_id", group_id)
+        prompt_item = dict(prompt_item)
+        prompt_item.setdefault("prompt_id", f"prompt_{prompt_idx}")
+      elif not hasattr(prompt_item, "prompt_id"):
+        prompt_item = {
+            "prompt": prompt_item,
+            "prompt_id": f"prompt_{prompt_idx}",
+        }
 
-      for g_idx in range(self.group_size):
-        await engine.dispatch_rollouts(
-            [prompt_item],
-            request_id=f"req_{prompt_idx}_{g_idx}",
-            policy_version=self.policy_version,
-            prompt_ids=[prompt_id],
-            metadata={
-                "group_id": group_id,
-                "pair_index": g_idx,
-            },
-        )
+      await engine.dispatch_rollouts(
+          [prompt_item],
+          group_size=self.group_size,
+          policy_version=self.policy_version,
+      )
 
   async def polling_stage(
       self, engine: rl_engine_interface.AbstractRLEngine
