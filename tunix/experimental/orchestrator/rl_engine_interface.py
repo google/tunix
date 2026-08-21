@@ -16,17 +16,26 @@
 
 from collections.abc import Mapping, Sequence
 from typing import Any, Protocol, runtime_checkable
+
 from tunix.experimental.common import datatypes
 from tunix.experimental.worker import remote_execution
+
 
 @runtime_checkable
 class AbstractRLEngine(Protocol):
   """Stateless compute primitives for distributed worker meshes."""
 
   async def dispatch_rollouts(
-      self, prompts: Sequence[Any], **kwargs: Any
+      self,
+      prompts: Sequence[Any],
+      *,
+      group_size: int = 1,
+      policy_version: int = 0,
+      generation_args: datatypes.GenerationArgs | None = None,
+      route_metadata: Mapping[str, Any] | None = None,
+      **kwargs: Any,
   ) -> list[str]:
-    """Dispatches rollout requests across workers (constructing RolloutRequests internally)."""
+    """Dispatches rollout requests, expanding prompt groups inside the engine."""
     ...
 
   async def poll_rollouts(

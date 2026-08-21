@@ -128,37 +128,82 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     return res
 
   async def dispatch_rollouts(
-      self, prompts: Sequence[Any], **kwargs: Any
+      self,
+      prompts: Sequence[Any],
+      *,
+      group_size: int = 1,
+      policy_version: int = 0,
+      generation_args: datatypes.GenerationArgs | None = None,
+      route_metadata: Mapping[str, Any] | None = None,
+      **kwargs: Any,
   ) -> list[str]:
-    """Dispatches rollout requests across workers, constructing RolloutRequests internally if needed."""
+    """Dispatches rollout requests, expanding prompt groups inside the engine."""
+    if group_size <= 0:
+      raise ValueError(f"group_size must be positive, got {group_size}.")
     rollout_reqs: list[datatypes.RolloutRequest] = []
+    base_metadata = dict(route_metadata or {})
+    if "metadata" in kwargs:
+      base_metadata.update(dict(kwargs["metadata"]))
+    base_generation_kwargs = (
+        generation_args.as_kwargs() if generation_args is not None else {}
+    )
+
     for idx, p in enumerate(prompts):
-      # TODO: why do we support sending rollout requests directly? shouldn't this be the engine resposibility?
       if isinstance(p, datatypes.RolloutRequest):
         rollout_reqs.append(p)
-      else:
-        prompt_ids = kwargs.get("prompt_ids")
-        if not prompt_ids or len(prompt_ids) != len(prompts):
-          raise ValueError(
-              "When passing raw prompts, 'prompt_ids' must be provided in"
-              " kwargs and match the length of prompts."
-          )
-        if "policy_version" not in kwargs:
-          raise ValueError(
-              "When passing raw prompts, 'policy_version' must be provided in"
-              " kwargs."
-          )
-        # TODO: should we autogenerate request_id?
-        req_id = (
-            kwargs.get("request_id") or f"req_{idx}_{uuid.uuid4().hex[:8]}"
+        continue
+
+      prompt = getattr(p, "prompt", p)
+      prompt_id = getattr(p, "prompt_id", None)
+      group_id = getattr(p, "group_id", None)
+      max_turns = getattr(p, "max_turns", 10)
+      item_metadata = dict(getattr(p, "metadata", {}) or {})
+      item_generation_kwargs = dict(getattr(p, "generation_kwargs", {}) or {})
+      if isinstance(p, Mapping):
+        prompt = p.get("prompt", prompt)
+        prompt_id = p.get("prompt_id", prompt_id)
+        group_id = p.get("group_id", group_id)
+        max_turns = p.get("max_turns", max_turns)
+        item_metadata.update(dict(p.get("metadata", {}) or {}))
+        item_generation_kwargs.update(
+            dict(p.get("generation_kwargs", {}) or {})
         )
+
+      prompt_id = str(prompt_id) if prompt_id is not None else f"prompt_{idx}"
+      if group_id is None:
+        group_id = item_metadata.get("group_id")
+      group_id = str(group_id) if group_id is not None else prompt_id
+
+      for g_idx in range(group_size):
+        req_id = (
+            kwargs.get("request_id")
+            if group_size == 1 and "request_id" in kwargs
+            else f"req_{idx}_{g_idx}_{uuid.uuid4().hex[:8]}"
+        )
+        req_metadata = dict(base_metadata)
+        req_metadata.update(item_metadata)
+        req_metadata["group_id"] = group_id
+        req_metadata["pair_index"] = g_idx
+        req_metadata.setdefault("prefix_hash", group_id)
+        if isinstance(req_metadata.get("env_config"), Mapping):
+          env_config = dict(req_metadata["env_config"])
+          env_config.setdefault("group_id", group_id)
+          env_config["pair_index"] = g_idx
+          env_config["policy_version"] = policy_version
+          req_metadata["env_config"] = env_config
+
+        req_generation_kwargs = dict(base_generation_kwargs)
+        req_generation_kwargs.update(item_generation_kwargs)
         rollout_reqs.append(
             datatypes.RolloutRequest(
                 request_id=req_id,
-                prompt=p,
-                prompt_id=prompt_ids[idx],
-                target_policy_version=kwargs["policy_version"],
-                metadata=dict(kwargs.get("metadata", {})),
+                prompt=prompt,
+                prompt_id=prompt_id,
+                group_offset_id=str(g_idx),
+                generation_kwargs=req_generation_kwargs,
+                max_turns=max_turns,
+                target_policy_version=policy_version,
+                metadata=req_metadata,
             )
         )
 

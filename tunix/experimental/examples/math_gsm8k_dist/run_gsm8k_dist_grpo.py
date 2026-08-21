@@ -267,30 +267,29 @@ def _register_workers(
     )
 
 
-def _build_prompt_request(
+def _build_prompt_item(
     *,
     prompt_idx: int,
     max_response_length: int,
     temperature: float,
     top_p: float,
     top_k: int | None,
-) -> datatypes.RolloutRequest:
+) -> dict[str, Any]:
   question, gold_answer = DEMO_TASKS[prompt_idx % len(DEMO_TASKS)]
   prompt = PROMPT_TEMPLATE.format(question=question)
   prompt_id = f"prompt_{prompt_idx}"
-  return datatypes.RolloutRequest(
-      request_id=prompt_id,
-      prompt=prompt,
-      prompt_id=prompt_id,
-      generation_kwargs={
+  return {
+      "prompt": prompt,
+      "prompt_id": prompt_id,
+      "group_id": prompt_id,
+      "generation_kwargs": {
           "max_generation_steps": max_response_length,
           "temperature": temperature,
           "top_p": top_p,
           "top_k": top_k,
           "return_logprobs": True,
       },
-      metadata={
-          "group_id": prompt_id,
+      "metadata": {
           "gold_answer": gold_answer,
           "prefix_hash": prompt_id,
           "env_config": {
@@ -300,15 +299,15 @@ def _build_prompt_request(
               "max_steps": 1,
           },
       },
-  )
+  }
 
 
-def _iter_prompt_requests(
+def _iter_prompt_items(
     args: argparse.Namespace,
-) -> Iterator[datatypes.RolloutRequest]:
+) -> Iterator[dict[str, Any]]:
   top_k = None if args.top_k < 0 else args.top_k
   for prompt_idx in range(args.max_steps * args.batch_size):
-    yield _build_prompt_request(
+    yield _build_prompt_item(
         prompt_idx=prompt_idx,
         max_response_length=args.max_response_length,
         temperature=args.temperature,
@@ -423,7 +422,7 @@ def main(argv: list[str], context: Any = None) -> None:
 
   program = rl_program.StandardRLProgram(
       algo=algo,
-      dataset=_iter_prompt_requests(args),
+      dataset=_iter_prompt_items(args),
       reward_fns=[_make_reward_fn(args.reward_mode, args.num_generations)],
       assembler=batch_assembly.GRPOTrainExampleAssembler(
           batch_size=args.train_micro_batch_size,

@@ -120,77 +120,6 @@ class StandardRLProgram(RLProgram):
         group_size=self.group_size
     )
 
-  def _build_rollout_request(
-      self,
-      prompt_item: Any,
-      *,
-      prompt_idx: int,
-      generation_idx: int,
-  ) -> datatypes.RolloutRequest:
-    """Builds one generation request from a prompt-level dataset item."""
-    default_prompt_id = f"prompt_{prompt_idx}"
-    default_group_id = f"group_{prompt_idx}"
-
-    if isinstance(prompt_item, datatypes.RolloutRequest):
-      metadata = dict(prompt_item.metadata or {})
-      prompt_id = prompt_item.prompt_id or default_prompt_id
-      group_id = metadata.get("group_id", prompt_id)
-      metadata["group_id"] = group_id
-      metadata["pair_index"] = generation_idx
-      metadata.setdefault("prefix_hash", group_id)
-      if isinstance(metadata.get("env_config"), dict):
-        env_config = dict(metadata["env_config"])
-        env_config["pair_index"] = generation_idx
-        env_config["policy_version"] = self.policy_version
-        metadata["env_config"] = env_config
-      return dataclasses.replace(
-          prompt_item,
-          request_id=(
-              prompt_item.request_id or f"req_{prompt_idx}"
-          ) + f"_{generation_idx}",
-          prompt_id=prompt_id,
-          group_offset_id=str(generation_idx),
-          target_policy_version=self.policy_version,
-          metadata=metadata,
-      )
-
-    prompt = prompt_item
-    prompt_id = default_prompt_id
-    group_id = default_group_id
-    metadata: dict[str, Any] = {}
-    generation_kwargs: dict[str, Any] = {}
-    max_turns = 10
-    if isinstance(prompt_item, dict):
-      prompt = prompt_item.get("prompt", prompt_item)
-      metadata = dict(prompt_item.get("metadata", {}))
-      prompt_id = prompt_item.get("prompt_id", prompt_id)
-      group_id = prompt_item.get("group_id", metadata.get("group_id", group_id))
-      generation_kwargs = dict(prompt_item.get("generation_kwargs", {}))
-      max_turns = prompt_item.get("max_turns", max_turns)
-    else:
-      prompt = getattr(prompt_item, "prompt", prompt_item)
-      prompt_id = getattr(prompt_item, "prompt_id", prompt_id)
-      group_id = getattr(prompt_item, "group_id", group_id)
-      metadata = dict(getattr(prompt_item, "metadata", {}) or {})
-      generation_kwargs = dict(
-          getattr(prompt_item, "generation_kwargs", {}) or {}
-      )
-      max_turns = getattr(prompt_item, "max_turns", max_turns)
-
-    metadata["group_id"] = group_id
-    metadata["pair_index"] = generation_idx
-    metadata.setdefault("prefix_hash", group_id)
-    return datatypes.RolloutRequest(
-        request_id=f"req_{prompt_idx}_{generation_idx}",
-        prompt=prompt,
-        prompt_id=prompt_id,
-        group_offset_id=str(generation_idx),
-        generation_kwargs=generation_kwargs,
-        max_turns=max_turns,
-        target_policy_version=self.policy_version,
-        metadata=metadata,
-    )
-
   async def _wait_for_dispatch_window(self, prompt_idx: int) -> None:
     """Applies policy-staleness backpressure before dispatching a prompt group."""
     if self.max_staleness is None:
@@ -217,11 +146,11 @@ class StandardRLProgram(RLProgram):
       )
     for prompt_idx, prompt_item in enumerate(active_dataset):
       await self._wait_for_dispatch_window(prompt_idx)
-      for g_idx in range(self.group_size):
-        request = self._build_rollout_request(
-            prompt_item, prompt_idx=prompt_idx, generation_idx=g_idx
-        )
-        await engine.dispatch_rollouts([request])
+      await engine.dispatch_rollouts(
+          [prompt_item],
+          group_size=self.group_size,
+          policy_version=self.policy_version,
+      )
 
   async def polling_stage(
       self, engine: rl_engine_interface.AbstractRLEngine

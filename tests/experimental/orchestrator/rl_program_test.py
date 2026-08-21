@@ -162,7 +162,11 @@ class RLProgramTest(absltest.TestCase):
       self.assertEqual(program.step, 1)
       self.assertEqual(begin_steps, [0])
       self.assertEqual(end_steps, [(1, "step_done")])
-      self.assertEqual(self.mock_engine.dispatch_rollouts.call_count, 2)
+      self.mock_engine.dispatch_rollouts.assert_called_once_with(
+          ["prompt_data_0"],
+          group_size=2,
+          policy_version=0,
+      )
       self.mock_engine.train_step.assert_called_once()
       self.mock_engine.sync_weights.assert_called_once_with(
           role=datatypes.Role.ACTOR
@@ -228,24 +232,13 @@ class RLProgramTest(absltest.TestCase):
     async def _run():
       dispatched = []
 
-      async def mock_dispatch(prompts):
-        dispatched.append(prompts[0])
-        return [prompts[0].request_id]
+      async def mock_dispatch(prompts, **kwargs):
+        dispatched.append((prompts[0], kwargs["policy_version"]))
+        return [f"{prompts[0]}_{kwargs['policy_version']}"]
 
       self.mock_engine.dispatch_rollouts.side_effect = mock_dispatch
       program = rl_program.StandardRLProgram(
-          dataset=[
-              datatypes.RolloutRequest(
-                  request_id="prompt_0",
-                  prompt="prompt_0",
-                  prompt_id="prompt_0",
-              ),
-              datatypes.RolloutRequest(
-                  request_id="prompt_1",
-                  prompt="prompt_1",
-                  prompt_id="prompt_1",
-              ),
-          ],
+          dataset=["prompt_0", "prompt_1"],
           algo=self.mock_algo,
           reward_fns=[lambda x: 1.0],
           assembler=self.assembler,
@@ -257,24 +250,19 @@ class RLProgramTest(absltest.TestCase):
       )
 
       for _ in range(50):
-        if len(dispatched) >= 2:
+        if dispatched:
           break
         await asyncio.sleep(0.01)
-      self.assertLen(dispatched, 2)
-      self.assertEqual(
-          [req.target_policy_version for req in dispatched],
-          [0, 0],
-      )
+      self.assertEqual(dispatched, [("prompt_0", 0)])
 
       await asyncio.sleep(0.1)
-      self.assertLen(dispatched, 2)
+      self.assertEqual(dispatched, [("prompt_0", 0)])
 
       program.policy_version = 1
       await asyncio.wait_for(dispatch_task, timeout=1.0)
-      self.assertLen(dispatched, 4)
       self.assertEqual(
-          [req.target_policy_version for req in dispatched],
-          [0, 0, 1, 1],
+          dispatched,
+          [("prompt_0", 0), ("prompt_1", 1)],
       )
 
     asyncio.run(_run())
@@ -440,7 +428,7 @@ class RLProgramTest(absltest.TestCase):
 
     asyncio.run(_run())
 
-  def test_prompt_dictionary_id_and_group_extraction(self):
+  def test_prompt_dictionary_is_forwarded_to_engine(self):
     async def _run():
       poll_results = [
           [
@@ -485,16 +473,10 @@ class RLProgramTest(absltest.TestCase):
           self.mock_engine, train_dataset=[dict_item], num_steps=1
       )
 
-      first_request = self.mock_engine.dispatch_rollouts.call_args_list[0].args[
-          0
-      ][0]
-      self.assertIsInstance(first_request, datatypes.RolloutRequest)
-      self.assertEqual(first_request.request_id, "req_0_0")
-      self.assertEqual(first_request.prompt_id, "custom_p0")
-      self.assertEqual(first_request.group_offset_id, "0")
-      self.assertEqual(first_request.target_policy_version, 0)
-      self.assertEqual(
-          first_request.metadata, {"group_id": "custom_g0", "pair_index": 0}
+      self.mock_engine.dispatch_rollouts.assert_called_once_with(
+          [dict_item],
+          group_size=2,
+          policy_version=0,
       )
 
     asyncio.run(_run())
