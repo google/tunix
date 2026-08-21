@@ -16,8 +16,10 @@
 
 from collections.abc import Mapping, Sequence
 from typing import Any, Protocol, runtime_checkable
+
 from tunix.experimental.common import datatypes
 from tunix.experimental.worker import remote_execution
+
 
 @runtime_checkable
 class AbstractRLEngine(Protocol):
@@ -40,7 +42,7 @@ class AbstractRLEngine(Protocol):
       route_metadata: Mapping[str, Any] | None = None,
       **kwargs: Any,
   ) -> list[str]:
-    """Dispatches rollout requests across workers (expanding group_size and constructing RolloutRequests internally if needed)."""
+    """Expands prompt groups into RolloutRequests and dispatches them."""
     ...
 
   async def poll_rollouts(

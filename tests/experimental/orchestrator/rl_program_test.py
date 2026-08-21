@@ -228,6 +228,95 @@ class RLProgramTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_zero_staleness_dispatches_only_one_minibatch_ahead(self):
+    async def _run():
+      dispatched = []
+
+      async def mock_dispatch(prompts, **kwargs):
+        dispatched.append((prompts[0], kwargs["policy_version"]))
+        return [f"{prompts[0]}_{kwargs['policy_version']}"]
+
+      self.mock_engine.dispatch_rollouts.side_effect = mock_dispatch
+      program = rl_program.StandardRLProgram(
+          dataset=["prompt_0", "prompt_1"],
+          algo=self.mock_algo,
+          reward_fns=[lambda x: 1.0],
+          assembler=self.assembler,
+          max_staleness=0,
+      )
+
+      dispatch_task = asyncio.create_task(
+          program.rollout_dispatch_stage(self.mock_engine)
+      )
+
+      for _ in range(50):
+        if dispatched:
+          break
+        await asyncio.sleep(0.01)
+      self.assertEqual(
+          dispatched,
+          [({"prompt": "prompt_0", "prompt_id": "prompt_0"}, 0)],
+      )
+
+      await asyncio.sleep(0.1)
+      self.assertEqual(
+          dispatched,
+          [({"prompt": "prompt_0", "prompt_id": "prompt_0"}, 0)],
+      )
+
+      program.policy_version = 1
+      await asyncio.wait_for(dispatch_task, timeout=1.0)
+      self.assertEqual(
+          dispatched,
+          [
+              ({"prompt": "prompt_0", "prompt_id": "prompt_0"}, 0),
+              ({"prompt": "prompt_1", "prompt_id": "prompt_1"}, 1),
+          ],
+      )
+
+    asyncio.run(_run())
+
+  def test_train_stage_updates_only_on_last_microbatch(self):
+    class TwoMicrobatchAssembler:
+
+      def pack(self, items):
+        del items
+        return ["microbatch_0", "microbatch_1"]
+
+    async def _run():
+      program = rl_program.StandardRLProgram(
+          dataset=[],
+          algo=self.mock_algo,
+          reward_fns=[lambda x: 1.0],
+          assembler=TwoMicrobatchAssembler(),
+          sync_weights=False,
+      )
+      for pair_index in range(2):
+        item = datatypes.TrajectoryItem(
+            pair_index=pair_index,
+            group_id="group_0",
+            start_step=0,
+            traj=datatypes.Trajectory(reward=1.0),
+        )
+        item.payload = self.mock_algo.create_trainer_payloads.return_value[
+            pair_index
+        ]
+        await program.scored_q.put(item)
+
+      await program.train_stage(self.mock_engine, num_steps=1)
+
+      self.assertEqual(self.mock_engine.train_step.call_count, 2)
+      self.assertEqual(
+          [
+              call.kwargs["apply_optimizer"]
+              for call in self.mock_engine.train_step.call_args_list
+          ],
+          [False, True],
+      )
+      self.mock_engine.sync_weights.assert_not_called()
+
+    asyncio.run(_run())
+
   def test_stage_exception_aborts_queue_and_propagates(self):
     class FailingProgram(rl_program.StandardRLProgram):
 
@@ -349,7 +438,7 @@ class RLProgramTest(absltest.TestCase):
 
     asyncio.run(_run())
 
-  def test_prompt_dictionary_id_and_group_extraction(self):
+  def test_prompt_dictionary_is_forwarded_to_engine(self):
     async def _run():
       poll_results = [
           [

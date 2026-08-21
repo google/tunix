@@ -164,6 +164,12 @@ class DistributedRLEngineTest(absltest.TestCase):
       )
       self.mock_rollout_1.poll_responses.return_value = [resp1]
       self.mock_rollout_2.poll_responses.return_value = []
+      self.mock_rollout_1.asubmit = mock.AsyncMock(
+          side_effect=AssertionError("polling must use ActorHandle.poll_responses")
+      )
+      self.mock_rollout_2.asubmit = mock.AsyncMock(
+          side_effect=AssertionError("polling must use ActorHandle.poll_responses")
+      )
 
       results = await self.engine.poll_rollouts(timeout_s=0.1)
       self.assertEqual(len(results), 1)
@@ -171,6 +177,8 @@ class DistributedRLEngineTest(absltest.TestCase):
 
       self.mock_rollout_1.poll_responses.assert_called_once_with(timeout_s=0.1)
       self.mock_rollout_2.poll_responses.assert_called_once_with(timeout_s=0.1)
+      self.mock_rollout_1.asubmit.assert_not_called()
+      self.mock_rollout_2.asubmit.assert_not_called()
 
     asyncio.run(_run())
 
@@ -348,7 +356,12 @@ class DistributedRLEngineTest(absltest.TestCase):
       dict_item = {
           "prompt": "Solve math",
           "prompt_id": "math_1",
-          "group_id": "grp_1",
+          "generation_kwargs": {"max_generation_steps": 32},
+          "metadata": {
+              "group_id": "grp_1",
+              "pair_index": 99,
+              "env_config": {"gold_answer": "42"},
+          },
       }
       req_ids = await self.engine.dispatch_rollouts(
           [dict_item], group_size=2, policy_version=1
@@ -364,8 +377,25 @@ class DistributedRLEngineTest(absltest.TestCase):
       pair_indices = {r.metadata["pair_index"] for r in all_dispatched}
       self.assertEqual(pair_indices, {0, 1})
       self.assertTrue(all(r.prompt_id == "math_1" for r in all_dispatched))
+      self.assertTrue(all(r.prompt == "Solve math" for r in all_dispatched))
+      self.assertTrue(
+          all(
+              r.generation_kwargs == {"max_generation_steps": 32}
+              for r in all_dispatched
+          )
+      )
       self.assertTrue(
           all(r.metadata["group_id"] == "grp_1" for r in all_dispatched)
+      )
+      self.assertEqual(
+          {r.metadata["env_config"]["pair_index"] for r in all_dispatched},
+          {0, 1},
+      )
+      self.assertTrue(
+          all(
+              r.metadata["env_config"]["policy_version"] == 1
+              for r in all_dispatched
+          )
       )
 
     asyncio.run(_run())
