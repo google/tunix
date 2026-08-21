@@ -1,0 +1,479 @@
+{
+  "attempts": 29616,
+  "category_counts": {
+    "all_fail": 839,
+    "partial": 1012
+  },
+  "config_without_logical_shard_index": {
+    "action_compat_mode": "q4_r2egym_xml_v2",
+    "cleanup_timeout_secs": 300,
+    "client_image": "europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/yuxzhang-repo/tunix_frozenlake_image@sha256:c9f9fd34054216bc67ba386f71e8d58658676f4a878e5980087c59db0b2d7d16",
+    "dataset_name": "R2E-Gym/R2E-Gym-Subset",
+    "dataset_revision": "2e8108ff942f24fcb5686badfaf7f9a8808566d5",
+    "dataset_rows": 4578,
+    "dataset_split": "train",
+    "evaluation_mode": "reward_only",
+    "harness_commit": "87793e07c330f75365f7a6082b20acc733618d12",
+    "logical_tasks": 32,
+    "max_concurrency": 64,
+    "max_model_len": 20480,
+    "max_response_length": 16384,
+    "max_steps": 50,
+    "model_id": "Qwen/Qwen3-4B-Instruct-2507",
+    "model_path": "/mnt/disks/linchai_data/models/Qwen3-4B-Instruct-2507",
+    "n_sample": 16,
+    "onehost_probe": false,
+    "parity_canary": false,
+    "per_turn_timeout_secs": 300,
+    "prefix_cache": false,
+    "resume_tag": "p46q4census02",
+    "reward_timeout_secs": 600,
+    "sampled_by": "stock@ac2c31bc7f6f82d33b3a62d62e1c390c8338b60e",
+    "sampling_rng_mode": "engine_global_sequential",
+    "schema": "canon.p46.deepswe-eval.config.v4",
+    "seed_base": 42,
+    "shard_tasks": 4,
+    "shard_timeout_secs": 3600,
+    "source_commit": "ac2c31bc7f6f82d33b3a62d62e1c390c8338b60e",
+    "step_timeout_secs": 600,
+    "temperature": 1.0,
+    "top_k": 0,
+    "top_p": 1.0,
+    "topology": "128",
+    "trajectory_mode": "reward_only_no_logprobs",
+    "trajectory_timeout_secs": 3000,
+    "whitelist_path": "/app/canon-zero-tim/clean_data/final_filter_result/task_report_good_qwen3_128_retry_20260713_090141.jsonl",
+    "whitelist_rows": 1851,
+    "whitelist_sha256": "2f95c2e6df3526f68bd3eed3ab9aece7077ef85c74251c77f7b3474b0b307ed7"
+  },
+  "input_summaries": [
+    {
+      "complete_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-966a7596254eb4b4.complete.jsonl",
+      "complete_sha256": "4a207ac305f4d39924243ef0c64102f058dfe931f5e9933cdbf0eca98c168efa",
+      "logical_shard_index": 0,
+      "summary_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-966a7596254eb4b4.summary.json",
+      "summary_sha256": "98a89dd8ebc75a5e5377c8d8a3a8b3ca401e6020536368ed2daf173af51d217f"
+    },
+    {
+      "complete_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-9acb0d90b3906f75.complete.jsonl",
+      "complete_sha256": "80082eb342a615843359aa02832f771ff0feb950d3e6716e591169ba2343364d",
+      "logical_shard_index": 1,
+      "summary_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-9acb0d90b3906f75.summary.json",
+      "summary_sha256": "0e9ea3ec67b052716cbc85fb9bb7ec0a0c342d65b79c541304e5fc58fa6a527c"
+    },
+    {
+      "complete_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-b7b1a5d4f274aead.complete.jsonl",
+      "complete_sha256": "1f89c8a2c0de05dce3050a66fd10e94bbb0a7e43cd6023c16a816a38e9a55454",
+      "logical_shard_index": 2,
+      "summary_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-b7b1a5d4f274aead.summary.json",
+      "summary_sha256": "9325adcf0ead3e74739567eb66beb63f307add0524e15b24f0d45219a6f45d71"
+    },
+    {
+      "complete_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-83744f55df7f9abb.complete.jsonl",
+      "complete_sha256": "2ce0d65b0d82f8acd5b13770820d6ba092e878631caefeeaae1882e55b38dd66",
+      "logical_shard_index": 3,
+      "summary_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-83744f55df7f9abb.summary.json",
+      "summary_sha256": "c6082a69786ce459e2f99a6e2db1377779f3a3657726c6f8f941c6a1b035dbdb"
+    },
+    {
+      "complete_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-4429db73fd15b8e1.complete.jsonl",
+      "complete_sha256": "418e7e8aca606f8c20b1f64a9bb2f5fbf956a1d3b315ac874ab2a2c4c0420944",
+      "logical_shard_index": 4,
+      "summary_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-4429db73fd15b8e1.summary.json",
+      "summary_sha256": "50ed2f95a80fada376a92c2cf15958f739752ffa88c42d3ff15eb796515d2595"
+    },
+    {
+      "complete_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-d01305155ecb7e44.complete.jsonl",
+      "complete_sha256": "ef7de5e4647891655103cd5c07ac26ad745a3a760d36a7ca13819b571b7ee6e0",
+      "logical_shard_index": 5,
+      "summary_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-d01305155ecb7e44.summary.json",
+      "summary_sha256": "b7350b064f515440416dd046421b82c5a1d61cff52935e2c199f16d0e02af8f6"
+    },
+    {
+      "complete_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-3beaa4c0aa82e151.complete.jsonl",
+      "complete_sha256": "8cd32ad3fd3b463297009e445d3c513e18329adaba9bc2b0ad71986c88e6a136",
+      "logical_shard_index": 6,
+      "summary_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-3beaa4c0aa82e151.summary.json",
+      "summary_sha256": "b2f62c510ee724c9b057f0b50cf0389ff0db5420b478419a3389755e3e61cc04"
+    },
+    {
+      "complete_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-f02e5b9fae446714.complete.jsonl",
+      "complete_sha256": "d2e2550ca697842493bfeb1175a42affcbeeddbb6f612cdaf1f2f479e21177cb",
+      "logical_shard_index": 7,
+      "summary_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-f02e5b9fae446714.summary.json",
+      "summary_sha256": "91c2f8a9cc450855253f6b1838fe9431b5fd4eff981b9c5ee30c6c2c2ec987e2"
+    },
+    {
+      "complete_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-38ecff63bcb0a042.complete.jsonl",
+      "complete_sha256": "e5e6487b047bcbb50edadf5ed6805c40f4863dd0e3f671517a0f5b772c4699d6",
+      "logical_shard_index": 8,
+      "summary_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-38ecff63bcb0a042.summary.json",
+      "summary_sha256": "3734f9960c9f55587973596e2fc39d5636c2197e9ac55fd880bd7473769c9996"
+    },
+    {
+      "complete_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-e46bdaa81f05f957.complete.jsonl",
+      "complete_sha256": "2b18f87ea6f75db585ae7a119f55cb80418e109237848ce1fe646ec33478925f",
+      "logical_shard_index": 9,
+      "summary_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-e46bdaa81f05f957.summary.json",
+      "summary_sha256": "31ed09be1de0fac7e8de0f66d97d74b3ba552ab118bd7a4c957ae0d7aea0e822"
+    },
+    {
+      "complete_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-eadc987306ad0947.complete.jsonl",
+      "complete_sha256": "5940a1ef1e296e5990313dd0f0831480dda34f322b564c2eaf5042995d4fb0c5",
+      "logical_shard_index": 10,
+      "summary_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-eadc987306ad0947.summary.json",
+      "summary_sha256": "dd73430d406e05c72d407801e5315f825a137bac613f55f09f114c9b6483f2b8"
+    },
+    {
+      "complete_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-64bab049d075ad4e.complete.jsonl",
+      "complete_sha256": "42be6f474c10dca412b6556d368301ed8dbb204b001872c9178d538a87e1d2b8",
+      "logical_shard_index": 11,
+      "summary_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-64bab049d075ad4e.summary.json",
+      "summary_sha256": "5ff7d77f1f7538ada530f15638336ab713020c08447ef370f4a6d4f0688decd9"
+    },
+    {
+      "complete_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-fb4bebe2f1e3d2ce.complete.jsonl",
+      "complete_sha256": "60fda10acf2748b3e9d740fa59e16c7f04f1a6d088afc5ec1cf198a09b1182f7",
+      "logical_shard_index": 12,
+      "summary_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-fb4bebe2f1e3d2ce.summary.json",
+      "summary_sha256": "848709ce2f433cb3431b97e99da76d0abc2ec25d418bcb5c3a380b2adaad55f2"
+    },
+    {
+      "complete_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-200020d37387ac3d.complete.jsonl",
+      "complete_sha256": "153527c607172f8058090354f7563c94f90a075bcbfa0c52248c5434ad8c4c7d",
+      "logical_shard_index": 13,
+      "summary_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-200020d37387ac3d.summary.json",
+      "summary_sha256": "594fdfc9654eb9a036d396b94d070fbea20226bef94a0bbbe61838a595dcb33a"
+    },
+    {
+      "complete_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-95e89f780985f6ec.complete.jsonl",
+      "complete_sha256": "93f5e05562f570b8c8c1eab6d46eb458853a6b0f31dbc932ab3ae097584d6a9e",
+      "logical_shard_index": 14,
+      "summary_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-95e89f780985f6ec.summary.json",
+      "summary_sha256": "379ebf61f0754be9483551f4e9f2d53f96eac1a959e8473860a36431eb32eec9"
+    },
+    {
+      "complete_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-38cc87ac79b431db.complete.jsonl",
+      "complete_sha256": "983623dc3fa1e10abd3c2815e4adff78d01092e838b3d7a9873f86d58e7cf020",
+      "logical_shard_index": 15,
+      "summary_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-38cc87ac79b431db.summary.json",
+      "summary_sha256": "f41d2c386892dde1560d437e2a03d50150b501d4521b39e4e233bd2806019f5d"
+    },
+    {
+      "complete_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-e7bf157b69b344c6.complete.jsonl",
+      "complete_sha256": "218941b334e0fcff52d11468161684259df95f0ce69c4e90629e7dfac421d2ff",
+      "logical_shard_index": 16,
+      "summary_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-e7bf157b69b344c6.summary.json",
+      "summary_sha256": "a8766e4558450b9724e5ff615d33bca4e754e3d75eb4c010654ea577a2284fd5"
+    },
+    {
+      "complete_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-5d0e740e95d4c31b.complete.jsonl",
+      "complete_sha256": "4141e06d89321004a979393747d1983b99b7961d4dbc3d06fcc28d544a885bf2",
+      "logical_shard_index": 17,
+      "summary_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-5d0e740e95d4c31b.summary.json",
+      "summary_sha256": "0f8bd63618f11144de5f2251c93b140abd5a6ef46dd583aabb91c985e0549f0c"
+    },
+    {
+      "complete_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-639f393ca6ba4d44.complete.jsonl",
+      "complete_sha256": "19c3a4d71b0221be1c9cfb94eba07a9e96f287a69615c5bdd9676d8a1e264aaa",
+      "logical_shard_index": 18,
+      "summary_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-639f393ca6ba4d44.summary.json",
+      "summary_sha256": "1375f58e4845661292b904dbd88ec75a654f64c4b014106a87f76910d67f6471"
+    },
+    {
+      "complete_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-9de2bc156aad5239.complete.jsonl",
+      "complete_sha256": "402eca53210f6db1c4d12360ea25819d2d4b7a0e4d0053af54f7c7650a71f44c",
+      "logical_shard_index": 19,
+      "summary_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-9de2bc156aad5239.summary.json",
+      "summary_sha256": "ee95f6925002166fa2f7e7510f0282f4f2bf0c6d9f0c1ae042abe40585963a66"
+    },
+    {
+      "complete_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-53f778164784941b.complete.jsonl",
+      "complete_sha256": "8e05b0edc2ed78ea5a6c7fb76bec68abc8869d1ceb4c0588604adef4a2807fa5",
+      "logical_shard_index": 20,
+      "summary_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-53f778164784941b.summary.json",
+      "summary_sha256": "4ca08a9bebfaa68a48cda3378b6e2922f17e0eff2ea83b90ca86794c99efc485"
+    },
+    {
+      "complete_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-33335af827c1121b.complete.jsonl",
+      "complete_sha256": "c7311c8ccbda830c795162112186fbe97d809c3e028c0d27f1f08be819045fc3",
+      "logical_shard_index": 21,
+      "summary_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-33335af827c1121b.summary.json",
+      "summary_sha256": "09317ad2c78adac8d3e63538e64fd42d9318d50ac9aa9ae5f90eee505e43db8f"
+    },
+    {
+      "complete_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-796ddd8cd746f48d.complete.jsonl",
+      "complete_sha256": "e3930210fe66ddbf8a4a4fcb44d11dbeef6c153a9e163da1d95a76a2770ca428",
+      "logical_shard_index": 22,
+      "summary_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-796ddd8cd746f48d.summary.json",
+      "summary_sha256": "7bc29541d053b1bff2904709d669d1503c91ba029acfbf75f9661cf8ea80e31b"
+    },
+    {
+      "complete_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-21c1bb0b0e312d24.complete.jsonl",
+      "complete_sha256": "b0bc85d9732d6ec70e8a46cbbb93879929fa2ce058069e5978d83bee531f9a70",
+      "logical_shard_index": 23,
+      "summary_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-21c1bb0b0e312d24.summary.json",
+      "summary_sha256": "020fd1e1866cc8f235467e711723dceae26626251834cff5dc0d65906734f693"
+    },
+    {
+      "complete_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-56c0e513996a17a9.complete.jsonl",
+      "complete_sha256": "a269277e64edb5cf62803fa50220c59d0a2bb12505e1eaac880c363cfefd2104",
+      "logical_shard_index": 24,
+      "summary_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-56c0e513996a17a9.summary.json",
+      "summary_sha256": "37b149c9905a3972cede35585956a4e58acb2b832d60789660427fc5ad600363"
+    },
+    {
+      "complete_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-81b711d1e1b5188e.complete.jsonl",
+      "complete_sha256": "797c8768304a1d7b2645953577c7468428d16be26a084acefd10b4c760d873d8",
+      "logical_shard_index": 25,
+      "summary_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-81b711d1e1b5188e.summary.json",
+      "summary_sha256": "5a56670a2173abcd1d36932b2c1842c4e43e8ff7d618377ed80ff6553ccdc656"
+    },
+    {
+      "complete_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-5e88ec36ca5dd8bf.complete.jsonl",
+      "complete_sha256": "2003cee75669032564863593908273e65347f28c7d63c5b7bb14c539a5430608",
+      "logical_shard_index": 26,
+      "summary_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-5e88ec36ca5dd8bf.summary.json",
+      "summary_sha256": "f44dfb237063fb545941c31b37f9a56f456691c473d1f87e20cb8dd070e63aa8"
+    },
+    {
+      "complete_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-6976b7eed331c83b.complete.jsonl",
+      "complete_sha256": "d431969386af40b13078cb3e72bdb8d115de9e145a5866eb80c23f77607b6f2f",
+      "logical_shard_index": 27,
+      "summary_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-6976b7eed331c83b.summary.json",
+      "summary_sha256": "7044adb446bbc9b8aaa1e792c290b58e0a4a327f1e4cb1c8ddd5fa52499e9086"
+    },
+    {
+      "complete_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-0a85d9a59adc81c6.complete.jsonl",
+      "complete_sha256": "d30556a00e83ba5b4fdd1158e7f6701cf57278223f5e35c761f0ceb3a909cc67",
+      "logical_shard_index": 28,
+      "summary_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-0a85d9a59adc81c6.summary.json",
+      "summary_sha256": "430a8d5c82e57b41327700daff4de95bbabb7c9f81e2b125ad34dc3be400e6ab"
+    },
+    {
+      "complete_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-7358e0881cb2de69.complete.jsonl",
+      "complete_sha256": "e0df62531de25d190391c321dac17e76dddbb43e8a20796ca88348456625644e",
+      "logical_shard_index": 29,
+      "summary_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-7358e0881cb2de69.summary.json",
+      "summary_sha256": "4f48d7986ffee42ce0883099b7a313d65a4464a99ef14282b82eeb2e06db35ae"
+    },
+    {
+      "complete_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-eb931336b1aaa160.complete.jsonl",
+      "complete_sha256": "0f8a9b00a280ba1076a5690531d1420787bc24f12da2c4dfa46218f91192bcdc",
+      "logical_shard_index": 30,
+      "summary_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-eb931336b1aaa160.summary.json",
+      "summary_sha256": "a1221364ae46a40ab60440a2cfa9055fc5cc6ef3e42d85ed6aa989aab785d06b"
+    },
+    {
+      "complete_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-197276b6f6f85203.complete.jsonl",
+      "complete_sha256": "cac3fc1299c5704251d1cc4428c510b081b2884903b04d881081ed1ac25a9e54",
+      "logical_shard_index": 31,
+      "summary_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-197276b6f6f85203.summary.json",
+      "summary_sha256": "fa68528fa1cd9152b9e923ff637ebfecb3a3e4e6ad340c8c46aed57f9b751c91"
+    },
+    {
+      "complete_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-ca983673a46d1a55.complete.jsonl",
+      "complete_sha256": "eec365d2c8df092d5098e9a7545f1f4e34f7720a35f523fc4440c27996e25685",
+      "logical_shard_index": 32,
+      "summary_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-ca983673a46d1a55.summary.json",
+      "summary_sha256": "eb2095fc863de197296be02bd0fac9e046c4b8eec6ce7ba1291c945cee22984d"
+    },
+    {
+      "complete_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-0ea3eabf3dfe33d7.complete.jsonl",
+      "complete_sha256": "d25fcef53e0ab7c2355727f7e0544bf574efd4f7ee8303f4423a5321b6945587",
+      "logical_shard_index": 33,
+      "summary_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-0ea3eabf3dfe33d7.summary.json",
+      "summary_sha256": "fb223fc17b8abb18cf59413bd361b2a4cea527655d72686a65140619746685d1"
+    },
+    {
+      "complete_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-52e8b3b2500a97c5.complete.jsonl",
+      "complete_sha256": "339e1bf2c12582e7e3ffc8e542eff4f0ffa0b3738505b5420b5f8d7808e52d15",
+      "logical_shard_index": 34,
+      "summary_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-52e8b3b2500a97c5.summary.json",
+      "summary_sha256": "e6359d4bb6e5be3e84d9e134f9a1de8b680cdde91034e6a617fb7da79651d8ce"
+    },
+    {
+      "complete_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-0654f7401c53fa24.complete.jsonl",
+      "complete_sha256": "ce6100c9517d229e381d18f7d3ee5fc107bd7db4a535c218ef656c695646ba00",
+      "logical_shard_index": 35,
+      "summary_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-0654f7401c53fa24.summary.json",
+      "summary_sha256": "2e86b9af6f95ea413babceb195ad1b903e5a5bd484270e0e1b136340142ad3dc"
+    },
+    {
+      "complete_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-2f2d52690a318084.complete.jsonl",
+      "complete_sha256": "1e256e8d6daffdc18a1859d3405fe252b08502d493bf6b39abb0ceb9d0c757b3",
+      "logical_shard_index": 36,
+      "summary_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-2f2d52690a318084.summary.json",
+      "summary_sha256": "9e674f1ab7d9a4ac81df25cabfd1d3733b9285bb6fc47e69ff818d1729389647"
+    },
+    {
+      "complete_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-5d4e66ff2c67e268.complete.jsonl",
+      "complete_sha256": "51c5c7706dd2fb09853333b3ad7d30078aeee0c100f816d023746530060cca99",
+      "logical_shard_index": 37,
+      "summary_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-5d4e66ff2c67e268.summary.json",
+      "summary_sha256": "3c8b9efefdf4995a019700aad2db1ef45c8db7c4939e4f01f68c1571040e25c9"
+    },
+    {
+      "complete_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-06ac87ffc19937c7.complete.jsonl",
+      "complete_sha256": "011b3f718e26b4a1cc4d21985f59c8a7bb7831656e9e3b816f4748e365c51f5c",
+      "logical_shard_index": 38,
+      "summary_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-06ac87ffc19937c7.summary.json",
+      "summary_sha256": "126927699f7d2eafc8053780fe69eb15c7b4d27830cdc02147538a101847c360"
+    },
+    {
+      "complete_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-57271bba4a239bfc.complete.jsonl",
+      "complete_sha256": "7aa6ca722b7334622a791681a0fc13efa3202a0be8493ea53a4491ee43e8c8bd",
+      "logical_shard_index": 39,
+      "summary_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-57271bba4a239bfc.summary.json",
+      "summary_sha256": "d2d47e9a50424a998fb97e41caf2b371dab94c77ef78f7ea727087b7da4ffc13"
+    },
+    {
+      "complete_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-6d285315660321ac.complete.jsonl",
+      "complete_sha256": "d29ec6f677e6155010dd3d08e14fa60b451c025d8ba8a90e9b5801482e8af417",
+      "logical_shard_index": 40,
+      "summary_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-6d285315660321ac.summary.json",
+      "summary_sha256": "f705c0e2ec7b19a73931ce8c426c125169e34afcc4135839e266bd7385d49c0f"
+    },
+    {
+      "complete_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-ab8f57e42cdca5d2.complete.jsonl",
+      "complete_sha256": "02bc7d5fbd59e50e37abbc6f7b2c8b0d3a6eb7fc503e8ffd49601ce30d3cde41",
+      "logical_shard_index": 41,
+      "summary_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-ab8f57e42cdca5d2.summary.json",
+      "summary_sha256": "d8e0fd9c6ac47a6a444c2bb9c6e363fee82eda52a767ecbe3dadf6763eec9e65"
+    },
+    {
+      "complete_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-fe9022388c438e7a.complete.jsonl",
+      "complete_sha256": "a0169e01f90328b5629eeef86881395b38836b22a1dca4d3511f32ac15949441",
+      "logical_shard_index": 42,
+      "summary_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-fe9022388c438e7a.summary.json",
+      "summary_sha256": "f67987ee41ce1737c5229b7dc1597fd41aafcaed661606160e3ee1a433cbb907"
+    },
+    {
+      "complete_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-0b85453951e4e0f4.complete.jsonl",
+      "complete_sha256": "e44c62fce8f5deeca2043f9a937ec100dcd956baa303f70d9db4b68954b29cd1",
+      "logical_shard_index": 43,
+      "summary_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-0b85453951e4e0f4.summary.json",
+      "summary_sha256": "5ec1ff1267279b3e301f2d55f273738b749918c6a966c2acb8a33a365e6c5073"
+    },
+    {
+      "complete_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-ff2ae2c026c2e49e.complete.jsonl",
+      "complete_sha256": "fc0f8a7fca97d0ed5254c630aa14aa6b3dea9e7f90c65f64a64f4827d54a14f7",
+      "logical_shard_index": 44,
+      "summary_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-ff2ae2c026c2e49e.summary.json",
+      "summary_sha256": "24429ed8a449573c928001da350fdd2971d73e29c217efaa2f7e9ec5150f38c3"
+    },
+    {
+      "complete_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-09c84214c1f423e6.complete.jsonl",
+      "complete_sha256": "6cc843285da5e66d6ad44862a358ee0b818b168f702c85e3225a7c0549e2baef",
+      "logical_shard_index": 45,
+      "summary_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-09c84214c1f423e6.summary.json",
+      "summary_sha256": "3ccc09235f60f9be6609354bb9cc48bbb94df279e342216560293cf6a18596f8"
+    },
+    {
+      "complete_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-ccbdbc059cea7692.complete.jsonl",
+      "complete_sha256": "741bd6cb4bd8be8ec110a55a484786fede8024f2fabeeb1bae56fc58a6f8565a",
+      "logical_shard_index": 46,
+      "summary_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-ccbdbc059cea7692.summary.json",
+      "summary_sha256": "1d739225a005b27f36da8364395b2e16f6d08de653c967c5ff82cf5d590d07ea"
+    },
+    {
+      "complete_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-53829301a442c710.complete.jsonl",
+      "complete_sha256": "62d365ec301db044976ec443b2037949983be6ad38ef2a76dc7661240f11022e",
+      "logical_shard_index": 47,
+      "summary_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-53829301a442c710.summary.json",
+      "summary_sha256": "b92649cb4c4823df4c7cb97742e94544a03d4650c496e361688506a93bfb2b08"
+    },
+    {
+      "complete_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-f76c950f98c03084.complete.jsonl",
+      "complete_sha256": "8a11b55feeeea8f8129a61becadec235ad462589d21a017a08ba6fbe1343e507",
+      "logical_shard_index": 48,
+      "summary_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-f76c950f98c03084.summary.json",
+      "summary_sha256": "fb9ca6fd7e78027a7d9e9b6cf19e5ab6db89f6c8251b2aaf94e5c668ddedcbc2"
+    },
+    {
+      "complete_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-714f6f1c951dc43d.complete.jsonl",
+      "complete_sha256": "909f3ed505cdbdd71e50c4c976840d1530ed51115ccc32cfab14d10f7a511d93",
+      "logical_shard_index": 49,
+      "summary_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-714f6f1c951dc43d.summary.json",
+      "summary_sha256": "66358b2245a274053d375b02c68ef757a6e23077ae471b7c31f4c3c27d215f19"
+    },
+    {
+      "complete_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-df184e80fae70296.complete.jsonl",
+      "complete_sha256": "99650714cdd4f398405844b5e2cfd8bd5916a8f6ba1a60cd16ea790fe20596bc",
+      "logical_shard_index": 50,
+      "summary_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-df184e80fae70296.summary.json",
+      "summary_sha256": "9c74c5a80bee952404281642683a3538fbc322cfccb96343af99401f28aeaded"
+    },
+    {
+      "complete_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-125916aacce2be02.complete.jsonl",
+      "complete_sha256": "91e9802fd07f87ed1f884c61128d049c5dd35e006b64e27cd487cccb46694a3d",
+      "logical_shard_index": 51,
+      "summary_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-125916aacce2be02.summary.json",
+      "summary_sha256": "3ae86bdc03130f47b62d4f79d9bc3ac90bb66d8f024c47aee18abcdb77eaf604"
+    },
+    {
+      "complete_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-dfc1ac9a31b5c703.complete.jsonl",
+      "complete_sha256": "35efef69a3740edae9d588d4e92fa62abd0b4693058b8204b68a5450d6ae5de1",
+      "logical_shard_index": 52,
+      "summary_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-dfc1ac9a31b5c703.summary.json",
+      "summary_sha256": "fea4a20886e86c909c3897dd3175678d0e39ae3929ef2c9bafa5ba6978e9cd16"
+    },
+    {
+      "complete_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-68c95e833a6ffeb4.complete.jsonl",
+      "complete_sha256": "3e84493abc9be10c841957d2432661d0640c639bbd3ee54e363fab3184bd5a99",
+      "logical_shard_index": 53,
+      "summary_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-68c95e833a6ffeb4.summary.json",
+      "summary_sha256": "d829a998aa2326b313379f61cdbb97a9c7404e3b7c4d4baf87fd161da29094a1"
+    },
+    {
+      "complete_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-d1ddb3330adee5f7.complete.jsonl",
+      "complete_sha256": "9b74dea5b468fea8293e4c322fcbf08c154e09bf028d5cf8d1132bfc0dc8f240",
+      "logical_shard_index": 54,
+      "summary_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-d1ddb3330adee5f7.summary.json",
+      "summary_sha256": "3523b87c433e1049fc9a4c800aaeb265eb886ad2ecb170f7fd436f5ba9cc5710"
+    },
+    {
+      "complete_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-0d03436fc71d2dc6.complete.jsonl",
+      "complete_sha256": "cbeaba494e852d781b7c36aab755b0a84993e20e549a5b4ce054a963c912120a",
+      "logical_shard_index": 55,
+      "summary_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-0d03436fc71d2dc6.summary.json",
+      "summary_sha256": "c9b6e152d7a0b450b11404ec7d8f4b15c31c4d3e48f7574fd9e62336e023a14e"
+    },
+    {
+      "complete_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-1e03e69caa067a5d.complete.jsonl",
+      "complete_sha256": "719c9191fc223ebae1e7a382585bfe034f53402b01ca3dd759894854af5fe653",
+      "logical_shard_index": 56,
+      "summary_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-1e03e69caa067a5d.summary.json",
+      "summary_sha256": "09a585e2441d031785ea367f7504e8759498de7b1a1495e18aa7a079edc6b630"
+    },
+    {
+      "complete_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-aa13867ceeb40bbf.complete.jsonl",
+      "complete_sha256": "4974bbaf247853a2b1bb3c6353bcafc28fc03ff625107a715415ec544da57268",
+      "logical_shard_index": 57,
+      "summary_path": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/reports/q4i16k-n16-128-aa13867ceeb40bbf.summary.json",
+      "summary_sha256": "7728962a999c12cfc3166199bce58f22b444bcb0cfced18a82b54350627fb500"
+    }
+  ],
+  "invalid_attempts": 0,
+  "logical_shards": 58,
+  "n_sample": 16,
+  "paths": {
+    "all_fail": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/campaign/p46-campaign.all_fail.jsonl",
+    "all_pass": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/campaign/p46-campaign.all_pass.jsonl",
+    "complete": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/campaign/p46-campaign.complete.jsonl",
+    "q32_candidates": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/campaign/p46-campaign.q32_candidates.jsonl",
+    "q4_learnable": "/mnt/disks/linchai_data/deepswe_eval/p46q4census02/outputs/campaign/p46-campaign.q4_learnable.jsonl"
+  },
+  "schema": "canon.p46.deepswe-eval.campaign-summary.v2",
+  "sha256": {
+    "all_fail": "325a7627f99bc8a627004220a338de217a64f8911baf85de7b6b151933e1a04f",
+    "all_pass": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "complete": "38299afc5ca49990a8d5d568b52f06c887a6ed5423fd3300f9ab683cbcafe0bb",
+    "q32_candidates": "38299afc5ca49990a8d5d568b52f06c887a6ed5423fd3300f9ab683cbcafe0bb",
+    "q4_learnable": "ec297c9cbc39cd67db15b0b9db6a229b15671b848df5ec3101de9ef8df7c9973"
+  },
+  "solve_ratio": 0.1025796866558617,
+  "solved_trajectories": 3038,
+  "tasks": 1851,
+  "valid_trajectories": 29616
+}
