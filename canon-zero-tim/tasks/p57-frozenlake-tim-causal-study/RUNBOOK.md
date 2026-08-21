@@ -39,11 +39,15 @@ engine starts:
   all alignment gates, and all P32 training/reduction/launch admissions;
 - `XLA_FLAGS` does not contain `--xla_allow_excess_precision=false`.
 
-The registered overlay remains installed but falls through to vendor/native
-implementations because its opt-in flags are absent. `return_logprobs=True`
-still requests sampled-token rollout logprobs; it does not run trainer rescore.
-Prefix caching remains off. No trainer logprob recomputation, backward,
-optimizer commit, checkpoint write, or in-process train evaluation is allowed.
+The entrypoint recognizes this exact profile/run-kind/regime tuple and skips
+canonical install, overlay, and overlay verification. The six engine modules
+therefore remain the pinned image's stock bytes; only the independent R2E gym
+install remains. Merely installing the overlay and unsetting flags is invalid:
+some overlay shims enforce canonical dependencies at import time.
+`return_logprobs=True` still requests sampled-token rollout logprobs; it does
+not run trainer rescore. Prefix caching remains off. No trainer logprob
+recomputation, backward, optimizer commit, checkpoint write, or in-process
+train evaluation is allowed.
 
 The container preflight must emit exactly:
 
@@ -51,7 +55,15 @@ The container preflight must emit exactly:
 [P57.STOCK_FAST] ZERO_TIM_OFF_PASS absent=12 zero=25
 ~~~
 
-Absence of this marker is a hard stop. `CANON_P38_FIXED_LM_HEAD=0` alone is not
+The full pod log must also contain exactly one of each of these three markers:
+
+~~~text
+[entrypoint] P57_STOCK_FAST_PATH run_kind=calibration regime=stock-fast ... canonical_overlay=skipped
+[P57.STOCK_FAST] PREFLIGHT_PASS files=6 import=pass overlay=absent
+[P57.STOCK_FAST] RUNTIME_PATH_PASS canonical_markers=0 overlay=skipped
+~~~
+
+Absence of any marker is a hard stop. `CANON_P38_FIXED_LM_HEAD=0` alone is not
 sufficient and must never be described as stock-fast.
 
 ## Local preflight
@@ -91,6 +103,8 @@ the complete log from byte zero for all of the following:
 - source and pinned-image identity match the rendered manifest;
 - the resolved topology is DP8xTP8 and all workers join once;
 - `[P57.STOCK_FAST] ZERO_TIM_OFF_PASS absent=12 zero=25` appears once;
+- `P57_STOCK_FAST_PATH ... canonical_overlay=skipped` appears once;
+- `[P57.STOCK_FAST] PREFLIGHT_PASS files=6 import=pass overlay=absent` appears once before model load;
 - vLLM/Pathways initialization completes without OOM, KV-block-capacity error,
   restart, or IFRT disconnect;
 - the first `RECIPE_START` is followed by actual rollout progress;
@@ -155,6 +169,7 @@ p57-calibration-stochastic.raw.log
 A valid log contains:
 
 - one `[P57.STOCK_FAST] ZERO_TIM_OFF_PASS absent=12 zero=25`;
+- one stock-path routing marker and one zero-canonical-marker postflight;
 - three dataset attestation records;
 - three `RECIPE_START` and three `RECIPE_COMPLETE` records;
 - one `CANON_P57_CALIBRATION_JSON` v2 record whose

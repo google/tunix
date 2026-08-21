@@ -46,6 +46,9 @@ under the unchanged signed manifest.
 - `CANON_P57_TIM_ARM=mismatch`;
 - `CANON_P57_INFERENCE_REGIME=stock-fast`;
 - exact resolved marker `ZERO_TIM_OFF_PASS absent=12 zero=25`;
+- exact startup route `P57_STOCK_FAST_PATH ... canonical_overlay=skipped`;
+- pre-model stock proof `[P57.STOCK_FAST] PREFLIGHT_PASS files=6 import=pass overlay=absent`;
+- exact postflight `RUNTIME_PATH_PASS canonical_markers=0 overlay=skipped`;
 - fixed AR, pinned RPA, canonical Pallas trunk/VJP, and fixed logprob M absent;
 - RPA VJP2, processed logprobs, log-softmax, module C, KV unified, fixed
   lm-head, segmented training/update, and all alignment/training admissions 0;
@@ -65,6 +68,7 @@ under the unchanged signed manifest.
 - renderer `VERDICT PASS count=1`;
 - manifest preflight `PASS regime=stock-fast`;
 - resolved-container `ZERO_TIM_OFF_PASS absent=12 zero=25`;
+- stock engine route and zero-canonical-runtime-marker postflight;
 - 3 dataset attestations, starts, and completes;
 - one JSON v2 receipt with complete zero-TIM-off attestation;
 - one terminal complete record with all mutation counters zero;

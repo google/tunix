@@ -35,6 +35,32 @@ $DOCKER run --rm \
       AgenticRLLearnerTest.test_p57_rollout_only_evaluate_skips_trainer_recompute
     PYTHONPATH=/workspace python3 \
       canon-zero-tim/tests/p57_frozenlake_tim/test_stock_fast_contract.py
+    stock_state="$(mktemp -d /tmp/p57-stock-state.XXXXXX)"
+    cat > "$stock_state/env.sh" <<EOF
+export CANON_PROFILE_FILE=cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env
+export CANON_P57_RUN_KIND=calibration
+export CANON_P57_INFERENCE_REGIME=stock-fast
+EOF
+    printf "%s\n" /usr/local/lib/python3.12/site-packages/tpu_inference \
+      > "$stock_state/tpu_inference_path"
+    CANON_STATE="$stock_state" CANON_PKG=/workspace/canon-zero-tim \
+      bash canon-zero-tim/cluster/steps/38_verify_stock_engine.sh
+    bad_package="$(mktemp -d /tmp/p57-stock-negative.XXXXXX)/tpu_inference"
+    while read -r _ relative; do
+      mkdir -p "$bad_package/$(dirname "$relative")"
+      cp "/usr/local/lib/python3.12/site-packages/tpu_inference/$relative" \
+        "$bad_package/$relative"
+    done < canon-zero-tim/STOCK_MANIFEST.sha256
+    printf "\n# deliberate stock drift\n" >> "$bad_package/layers/jax/linear.py"
+    printf "%s\n" "$bad_package" > "$stock_state/tpu_inference_path"
+    if CANON_STATE="$stock_state" CANON_PKG=/workspace/canon-zero-tim \
+        bash canon-zero-tim/cluster/steps/38_verify_stock_engine.sh; then
+      echo "P57 stock-engine negative control failed to reject drift" >&2
+      exit 1
+    fi
+    echo "P57_STOCK_ENGINE_NEGATIVE_PASS drift=rejected"
+    rm -r "$(dirname "$bad_package")"
+    rm -r "$stock_state"
     PYTHONPATH="$overlay" python3 \
       canon-zero-tim/src/engine_shims/models/qwen8b_tp8/p22xf_contract.py
     CANON_SHIM_ROOT="$overlay" PYTHONPATH="$overlay" python3 \

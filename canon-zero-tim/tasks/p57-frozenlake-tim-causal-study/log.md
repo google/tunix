@@ -87,3 +87,14 @@
 - Files/artifacts: P57 calibration renderer/profile; `cluster/steps/00_env.sh`; `examples/frozenlake/train_frozenlake_qwen3.py`; `tunix/rl/dp_workloads.py`; manifest verifier; receipt classifier/tests; `FLAGS.md`; `plan.md`; phases 0–3; `RUNBOOK.md`; `HANDOFF.md`; `state.md`.
 - Rollback: discard the uncommitted P57 concern. Ordinary P45 and all non-P57 paths retain their existing contracts.
 - Next: user reviews the diff and separately approves an immutable commit. Then render one stock-fast calibration manifest, pass its mechanical verifier, and separately approve the 64-chip launch. Stop after offline classification.
+
+## 2026-08-21 UTC — p57cal2 exposed import-time canonical overlay dependency
+
+- Type: target failure/correction
+- Fact: the 64-chip attempt connected all devices, materialized all three 100-row datasets, and reached vLLM model loading. It then failed importing the overlaid `linear_p22xi.py`: `RuntimeError: P22.XI: CANON_PALLAS_MPAD=1 required`. The committed run log has 393 lines, SHA-256 `a14d460b1e0954e5ec39a7e126611bf9f0bdca453d9cb28f0925739a00dbc2ef`.
+- Correction: the prior claim that an installed canonical overlay would fall through to vendor/native code when its flags were absent was false. Several shims validate dependencies at import time.
+- Action: route the exact P57 stock-fast calibration around canonical install/overlay/verify while retaining the pinned-image probe, RoPE compatibility decision, and R2E gym install. Add the opposite postflight contract: stock-fast requires all counted canonical runtime markers to be zero; canonical runs still require fixed-order markers. Add host routing/negative controls and a pinned-image import of all six untouched stock engine modules.
+- Result: local gates pass. P57 host contracts passed `79/79`; the production stock preflight verified six stock SHA-256 entries and imported all six untouched modules from the pinned image; a deliberate `linear.py` drift negative was rejected; the exact-image suite retained base `109/109`, P45 `40/40`, PEFT `2/2`, Agentic `4/4`, fixed-head/TP8 forward+VJP probes, terminal `P45_EXACT_IMAGE_CPU_PASS`, and exit 0. `p57cal2` remains `INCONCLUSIVE` and contains no completed rollout recipe. No commit or push was performed.
+- Files/artifacts: `evidence/p57cal2/run.log`; `cluster/entrypoint.sh`; `cluster/steps/p57_runtime_contract.sh`; `cluster/steps/90_run.sh`; P57 host/exact-image tests; `RUNBOOK.md`; `HANDOFF.md`.
+- Rollback: revert the local stock-route concern; published history remains unchanged.
+- Next: review the validated diff, then seek separate commit and push approval before any target rerun.

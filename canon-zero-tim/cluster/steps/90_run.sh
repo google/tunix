@@ -6,6 +6,8 @@
 # checked afterwards: an intervention that never fired produces a perfectly green run.
 set -uo pipefail
 source "$CANON_STATE/env.sh"
+# shellcheck disable=SC1091
+source "$CANON_PKG/cluster/steps/p57_runtime_contract.sh"
 
 # A full GSM8K JobSet may be recreated after an eviction or node loss. Preserve
 # fail-closed no-overwrite semantics within each attempt without letting an
@@ -94,13 +96,13 @@ p38_request_live_action() {
   return 2
 }
 if [ "${CANON_P32_DP_ADMISSION:-0}" = "1" ] && \
-   [ "${CANON_P32_TRAIN_ADMITTED:-0}" != "1" ] && \
-   [ "${CANON_P57_RUN_KIND:-}" != "calibration" ] && \
-   [ "${CANON_P57_RUN_KIND:-}" != "eval" ]; then
-  echo "[run] REFUSING: P32 profile is admission-only." >&2
-  echo "[run] A real (dp,tp) replicated-parameter segmented VJP has not passed remote gates;" >&2
-  echo "[run] set all three P33 admissions only after the rank-local reducer gate passes." >&2
-  exit 2
+   [ "${CANON_P32_TRAIN_ADMITTED:-0}" != "1" ]; then
+  if ! p57_is_nontraining_runtime; then
+    echo "[run] REFUSING: P32 profile is admission-only." >&2
+    echo "[run] A real (dp,tp) replicated-parameter segmented VJP has not passed remote gates;" >&2
+    echo "[run] set all three P33 admissions only after the rank-local reducer gate passes." >&2
+    exit 2
+  fi
 fi
 : "${CANON_RUN_CMD:?CANON_RUN_CMD unset -- nothing to run}"
 LOG="${CANON_RUN_LOG:-$CANON_STATE/run.log}"
@@ -678,7 +680,11 @@ if [ "${CANON_P35_EXACT_REPLAY:-0}" = "1" ] && \
   p35_base_sha="$(sha256sum "$CANON_P35_PRE_REPLAY_REPORT" | awk '{print $1}')"
   echo "[CANON_P35.3] PRE_REPLAY_EVIDENCE path=$CANON_P35_PRE_REPLAY_REPORT sha256=$p35_base_sha"
 fi
-if [ "$n_ar" -eq 0 ] || [ "$n_emb" -eq 0 ]; then
+if p57_is_stock_fast_calibration; then
+  p57_validate_stock_fast_runtime_markers \
+    "$n_ar" "$n_emb" "$n_lp" "$n_p38_fixed_primal" \
+    "$n_p38_fixed_vjp" "$n_p38_kv_unified" || exit 1
+elif [ "$n_ar" -eq 0 ] || [ "$n_emb" -eq 0 ]; then
   echo "[run] FATAL: no PATHTRACE for the fixed-order reductions -- the intervention did not" >&2
   echo "[run]        execute.  Any result from this run is void regardless of its exit code." >&2
   exit 1

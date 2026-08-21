@@ -9,6 +9,7 @@ python3 -m unittest \
   canon-zero-tim/tests/p57_frozenlake_tim/test_checkpoint_eval.py \
   canon-zero-tim/tests/p57_frozenlake_tim/test_eval_classifier.py \
   canon-zero-tim/tests/p57_frozenlake_tim/test_stock_classifier.py \
+  canon-zero-tim/tests/p57_frozenlake_tim/test_runtime_contract.py \
   canon-zero-tim/tests/p57_frozenlake_tim/test_workloads.py \
   canon-zero-tim/tests/p33_workloads/test_classify_run.py \
   canon-zero-tim/tests/p38_serving/test_fixed_lm_head.py \
@@ -21,6 +22,7 @@ python3 -m py_compile \
   canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts/classify_checkpoint_eval.py \
   canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts/classify_stock_discovery.py \
   canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts/verify_calibration_manifest.py \
+  canon-zero-tim/cluster/steps/p57_probe_stock_engine.py \
   examples/frozenlake/p57_workloads.py \
   examples/frozenlake/train_frozenlake_qwen3.py \
   tunix/rl/agentic/agentic_rl_learner.py \
@@ -28,6 +30,9 @@ python3 -m py_compile \
   tunix/rl/frozenlake_checkpoint.py
 bash -n \
   canon-zero-tim/cluster/steps/00_env.sh \
+  canon-zero-tim/cluster/entrypoint.sh \
+  canon-zero-tim/cluster/steps/38_verify_stock_engine.sh \
+  canon-zero-tim/cluster/steps/p57_runtime_contract.sh \
   canon-zero-tim/cluster/steps/90_run.sh \
   canon-zero-tim/cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env \
   canon-zero-tim/tests/p57_frozenlake_tim/run_cpu.sh

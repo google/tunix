@@ -83,6 +83,8 @@ step 00_env.sh
 # from this file by 00_env.sh.
 # shellcheck disable=SC1090
 source "$CANON_STATE/env.sh"
+# shellcheck disable=SC1091
+source "$HERE/steps/p57_runtime_contract.sh"
 step 10_sync_repo.sh
 step 20_probe_image.sh
 step 25_rope_fix.sh
@@ -99,6 +101,15 @@ if [ "${CANON_P46_EVALUATION:-0}" = "1" ]; then
   # the differentiable canonical chain used for training/alignment.
   step 35_install_r2egym.sh
   log "P46_EVALUATION_STOCK_PATH mode=$CANON_P46_EVALUATION_MODE source=$CANON_EXPECT_COMMIT canonical_overlay=skipped"
+elif p57_is_stock_fast_calibration; then
+  # P57.1 measures the untreated pinned-image serving program.  Installing the
+  # canonical chain and merely unsetting its flags is not stock: several shims
+  # enforce their dependencies at import time.  Keep the independent R2E gym
+  # install, but leave all six tpu_inference targets byte-identical to the
+  # pinned image established by Step 20.
+  step 35_install_r2egym.sh
+  step 38_verify_stock_engine.sh
+  log "P57_STOCK_FAST_PATH run_kind=calibration regime=stock-fast source=$CANON_EXPECT_COMMIT canonical_overlay=skipped"
 else
   step 30_install_canon.sh
   step 35_install_r2egym.sh
