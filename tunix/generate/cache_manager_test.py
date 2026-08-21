@@ -74,7 +74,7 @@ class CacheManagerTest(unittest.TestCase):
         sseq_ids = [0, 1]
         sseq_page_ids = [[0, 1], [2, 3, 4]]
         
-        self.cache_manager.assign(sseq_ids, sseq_page_ids)
+        self.cache_manager.assign(sseq_page_ids)
         
         self.assertEqual(len(self.hbm.calls), 1)
         call_type, idxs, ids, lens = self.hbm.calls[0]

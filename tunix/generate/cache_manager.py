@@ -26,12 +26,12 @@ class CacheManager:
         self.available_hbm_pages = int(self.hbm_page_manager.num_available_pages)
         self.available_cpu_pages = int(self.offload_page_manager.num_available_pages) if offload_page_manager else 0
 
-    def assign(self, sseq_ids: List[int], sseq_page_ids: List[List[int]]):
+    def assign(self, sseq_page_ids: List[List[int]]):
         """
         Maps logical page_ids to physical page_idxs and calls the underlying 
         JAX PageManager.assign method directly.
         """
-        num_seqs = len(sseq_ids)
+        num_seqs = len(sseq_page_ids)
         if num_seqs == 0:
             return
 
@@ -49,7 +49,7 @@ class CacheManager:
             hbm_lens.append(seq_hbm_count)
 
         padded_seq_idxs = np.full((self.hbm_page_manager.batch_size,), fill_value=self.hbm_page_manager.max_num_seqs, dtype=np.int32) 
-        padded_seq_idxs[:num_seqs] = sseq_ids
+        padded_seq_idxs[:num_seqs] = list(range(num_seqs))
         
         padded_lens = np.zeros((self.hbm_page_manager.batch_size,), dtype=np.int32)
         padded_lens[:num_seqs] = hbm_lens

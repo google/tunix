@@ -126,7 +126,7 @@ class Scheduler:
 
     req_ids = [req.req_id for req in self.running_requests]
     n_new_pages = [len(req.page_ids) - utils.cdiv(req.num_completed_tokens, self.page_size) for req in self.running_requests]
-    new_page_ids = [req.page_ids[:n_new_pages[i] for (i, req) in enumerate(self.running_requests)]
+    new_page_ids = [req.page_ids[-n_new_pages[i]:] if n_new_pages[i] > 0 else [] for (i, req) in enumerate(self.running_requests)]
     self.cache_manager.assign(new_page_ids)
     
     # TODO TEST: decode sequences are always at front of batch
@@ -173,7 +173,7 @@ class Scheduler:
       
       # TODO Test: chunked_prefill has clipped n_tokens_to_compute
       max_n_tokens_to_compute = (
-          1 + len(candidate_req.token_ids) - candidate_req.num_computed_tokens
+          1 + len(candidate_req.token_ids) - candidate_req.num_completed_tokens
       )
       n_tokens_to_compute = min(self.token_budget, max_n_tokens_to_compute)
         
@@ -245,7 +245,7 @@ class Scheduler:
 
     while self.token_budget > 0 and self.pending_requests:
         req = self.pending_requests[0]
-        matched_page_ids = self._get_matched_pages(request)
+        matched_page_ids = self._get_matched_pages(req)
 
         n_tokens = len(req.token_ids)
         n_matched_tokens = len(matched_page_ids) * self.page_size
@@ -256,7 +256,7 @@ class Scheduler:
         n_tokens_to_load = n_tokens_to_compute + n_matched_tokens
         total_pages_needed = utils.cdiv(n_tokens_to_load, self.page_size)
 
-        matched_page_ids = self._get_matched_pages(request)
+        matched_page_ids = self._get_matched_pages(req)
         new_pages_needed = total_pages_needed - len(matched_page_ids)
         
         # TODO test: test cpu pages incur budget (i.e. set small cache size, verify right pages are loaded)  
