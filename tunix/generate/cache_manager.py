@@ -2,7 +2,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from typing import List, Dict, Optional
-from tunix.generate import page_manager as page_manager_lib
+from tunix.generate import batch_page_manager as batch_page_manager_lib
 
 class CacheManager:
     """
@@ -12,11 +12,11 @@ class CacheManager:
     """
     def __init__(
         self, 
-        hbm_page_manager: page_manager_lib.BlockPool,
+        hbm_page_manager: batch_page_manager_lib.BatchPageManager,
         max_num_seqs: int,
         max_num_pages_per_seq: int,
         page_size: int,
-        offload_page_manager: Optional[page_manager_lib.BlockPool] = None
+        offload_page_manager: Optional[batch_page_manager_lib.BatchPageManager] = None
     ):
         self.hbm_page_manager = hbm_page_manager
         self.offload_page_manager = offload_page_manager
@@ -34,7 +34,8 @@ class CacheManager:
         self._page_location: Dict[int, str] = {}
         
         self.available_hbm_pages = int(self.hbm_page_manager.num_available_pages)
-        self.available_cpu_pages = int(self.offload_page_manager.num_available_pages) if offload_page_manager else 0
+        self.cpu_free_indices = list(range(cpu_block.shape[0])) if cpu_block is not None else []
+        self.available_cpu_pages = len(self.cpu_free_indices)
 
     def assign(self, sseq_page_ids: List[List[int]]):
         """
@@ -105,8 +106,8 @@ class CacheManager:
 
         # 3. Issue batch copy CPU -> HBM
         block_ids = list(self.hbm_page_manager.pages.keys())
-        self.hbm_page_manager = page_manager_lib.copy_physical_pages(
-            src_pool=self.offload_page_manager,
+        self.hbm_page_manager = batch_page_manager_lib.copy_physical_pages(
+            src_pool=self.cpu_block,
             dst_pool=self.hbm_page_manager,
             src_idxs=jnp.array(physical_cpu_idxs),
             dst_idxs=jnp.array(physical_hbm_idxs),
@@ -137,7 +138,7 @@ class CacheManager:
             return
 
         # 1. Allocate equivalent physical CPU pages
-        self.offload_page_manager, allocated_cpu_idxs = self.offload_page_manager.allocate(jnp.array(len(page_ids)))
+        self.cpu_block, allocated_cpu_idxs = self.offload_page_manager.allocate(jnp.array(len(page_ids)))
         self.available_cpu_pages -= len(page_ids)
         physical_cpu_idxs = np.array(allocated_cpu_idxs).tolist()
         
@@ -150,9 +151,9 @@ class CacheManager:
 
         # 3. Issue batch copy HBM -> CPU
         block_ids = list(self.hbm_page_manager.pages.keys())
-        self.offload_page_manager = page_manager_lib.copy_physical_pages(
+        self.offload_page_manager = batch_page_manager_lib.copy_physical_pages(
             src_pool=self.hbm_page_manager,
-            dst_pool=self.offload_page_manager,
+            dst_pool=self.cpu_block,
             src_idxs=jnp.array(physical_tpu_idxs),
             dst_idxs=jnp.array(physical_cpu_idxs),
             block_ids=block_ids
@@ -189,14 +190,10 @@ class CacheManager:
             if pid in self._page_id_to_idx:
                 del self._page_id_to_idx[pid]
 
-        if cpu_idxs_to_evict and self.offload_page_manager:
-            padded_cpu = np.zeros((self.offload_page_manager.total_num_pages,), dtype=np.int32)
-            padded_cpu[:len(cpu_idxs_to_evict)] = cpu_idxs_to_evict
-            self.offload_page_manager = self.offload_page_manager.evict_pages(
-                jnp.array(padded_cpu), 
-                jnp.array(len(cpu_idxs_to_evict))
-            )
-            self.available_cpu_pages += len(cpu_idxs_to_evict)
+        if cpu_idxs_to_evict and self.cpu_block is not None:
+            for idx in cpu_idxs_to_evict:
+                self.cpu_free_indices.append(idx)
+                self.available_cpu_pages += 1
             
         if tpu_idxs_to_evict:
             padded_tpu = np.zeros((self.hbm_page_manager.total_num_pages,), dtype=np.int32)
@@ -210,7 +207,7 @@ class CacheManager:
     def tree_flatten(self):
         children = (
             self.hbm_page_manager,
-            self.offload_page_manager,
+            self.cpu_block,
             self.page_indices,
             self.seq_lens
         )
@@ -230,7 +227,7 @@ class CacheManager:
     def tree_unflatten(cls, aux_data, children):
         obj = cls.__new__(cls)
         obj.hbm_page_manager = children[0]
-        obj.offload_page_manager = children[1]
+        obj.cpu_block = children[1]
         obj.page_indices = children[2]
         obj.seq_lens = children[3]
         for k, v in aux_data.items():

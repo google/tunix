@@ -36,7 +36,7 @@ import jaxtyping
 import numpy as np
 import tunix.generate.tokenizer_adapter as tok_adapter
 from tunix.generate import base_sampler
-from tunix.generate import page_manager as page_manager_lib 
+from tunix.generate import batch_page_manager as batch_page_manager_lib 
 from tunix.generate import utils
 import logging
 

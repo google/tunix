@@ -4,7 +4,7 @@ from flax import nnx
 from tunix.generate import scheduler
 from tunix.generate import cache_manager as cache_manager_lib
 from tunix.generate import continuous_sampler as sampler_lib
-from tunix.generate import page_manager as page_manager_lib
+from tunix.generate import batch_page_manager as batch_page_manager_lib
 from tunix.tests import test_common as tc
 
 class LLMEngine:
@@ -37,18 +37,26 @@ class LLMEngine:
             head_dim = 1
             num_layers = 1
             
-        hbm_pm_config = page_manager_lib.PageManagerConfig(
+        import jax.numpy as jnp
+        block_spec = batch_page_manager_lib.BlockSpec(name="kv_cache", dtype=dtype, subshape=(num_kv_heads, head_dim))
+        
+        # Assume roughly some logic to get num pages from max_bytes, since we removed PageManagerConfig
+        item_size = jnp.dtype(dtype).itemsize
+        page_bytes = item_size * self.cache_config.page_size * num_kv_heads * head_dim
+        num_hbm_pages = getattr(self.cache_config, "hbm_cache_max_bytes", 1) // page_bytes
+        self.hbm_pm = batch_page_manager_lib.BatchPageManager.init(
+            num_pages=num_hbm_pages,
             page_size=self.cache_config.page_size,
-            max_seq_len=self.max_seq_len,
-            max_bytes=self.cache_config.hbm_cache_max_bytes,
-            num_kv_heads=num_kv_heads,
-            max_num_seqs=self.cache_config.max_num_seqs,
-            head_dim=head_dim,
-            dtype=dtype,
-            num_layers=num_layers,
+            block_spec=block_spec,
+            device=None # Optional, but JAX handles default nicely
         )
-        self.hbm_pm = hbm_pm_config.init()
-        self.cpu_pm = None
+        
+        if getattr(self.cache_config, "cpu_offload_bytes", 0) > 0:
+            num_cpu_pages = self.cache_config.cpu_offload_bytes // page_bytes
+            shape = (num_cpu_pages, self.cache_config.page_size) + block_spec.subshape
+            self.cpu_block = jax.device_put(jnp.zeros(shape, dtype=dtype), jax.devices("cpu")[0])
+        else:
+            self.cpu_block = None
         
         # 2. Own and Initialize the Sampler!
         self.sampler = sampler_lib.ContinuousSampler(
@@ -65,7 +73,7 @@ class LLMEngine:
             max_num_seqs=cache_config.max_num_seqs,
             max_num_pages_per_seq=utils.cdiv(self.max_seq_len, cache_config.page_size),
             page_size=cache_config.page_size,
-            offload_page_manager=self.cpu_pm
+            cpu_block=self.cpu_block
         )
         
         self.scheduler = scheduler.Scheduler(
