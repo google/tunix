@@ -64,17 +64,30 @@ remain preserved as `INCONCLUSIVE` evidence, but no fourth eval-0 attempt is
 required. Isolated evaluation code remains available for an optional final
 step-200 measurement and for the later paired causal campaign.
 
+`p57_stock_full_att1` is the first direct-training attempt and is also
+`INCONCLUSIVE`. Source `7e608682...` passed stock routing, data materialization,
+checkpoint preflight, model/engine startup, one complete 256-trajectory rollout,
+and the training runtime admission. Before backward or update 0, the
+warning-only observer requested processed `S_prefill` while the stock profile
+still forced `CANON_PROMPT_PROCESSED_LOGPROBS=0`; the rollout API correctly
+refused to label raw prompt logprobs as processed. No checkpoint was written.
+Do not resume this attempt. The repair makes processed-B an observer-only
+training exception and retains zero for calibration/evaluation.
+
 ## Treatment identity
 
 The stock arm is not merely `CANON_P38_FIXED_LM_HEAD=0`. It requires:
 
 - `CANON_P57_TIM_ARM=mismatch` and `CANON_P57_INFERENCE_REGIME=stock-fast`;
 - all 12 presence-sensitive canonical switches absent;
-- the complete numerical trainer/serving bundle literal zero;
+- the rollout, trainer, backward, reducer, and optimizer numerical treatment
+  bundle literal zero;
 - canonical install/overlay/verify skipped, leaving the engine equal to the
   pinned-image stock bytes;
 - training admission, checkpointing, W&B, host telemetry, and the finite
-  warning-only alignment observer enabled;
+  warning-only alignment observer enabled. Its processed-B interface is on
+  only for post-rollout rescore; sampling and gradients do not request prompt
+  logprobs;
 - evaluation on the same untreated engine with training/alignment gates off.
 
 The profile, entrypoint, workload validator, and postflight independently
@@ -97,9 +110,9 @@ enforce this contract.
 For the direct new 0→200 training run, require exactly one each:
 
 ~~~text
-[P57.STOCK_FAST] ZERO_TIM_OFF_PASS mode=train absent=12 observer=train
+[P57.STOCK_FAST] ZERO_TIM_OFF_PASS mode=train absent=12 observer=train processed_b=on
 [entrypoint] P57_STOCK_FAST_PATH run_kind=train regime=stock-fast ... canonical_overlay=skipped
-[P57.STOCK] TRAIN_RUNTIME_PASS regime=stock-fast arm=mismatch canonical_bundle=off observer=warning-only
+[P57.STOCK] TRAIN_RUNTIME_PASS regime=stock-fast arm=mismatch canonical_bundle=off observer=warning-only processed_b=observer-only
 [P57.STOCK] SEGMENT_PREFLIGHT restored=0 stop_after=200 horizon=200 checkpoint_interval=10 max_to_keep=1
 [P57.STOCK] SEGMENT_COMPLETE step=200 durable_checkpoint=200 horizon=200 next_action=complete
 [P57.STOCK_FAST] RUNTIME_PATH_PASS canonical_markers=0 overlay=skipped
@@ -119,7 +132,7 @@ If the user later requests an optional stock eval-200, require:
 ~~~
 
 The COMPLETE marker must report `prompts=100 generations=8 rewards=800`.
-Local admission is complete: P57 host tests pass `90/90`, and the pinned-image
+Local admission is complete: P57 host tests pass `91/91`, and the pinned-image
 gate executes the eight-generation evaluator lifecycle plus calibration/train/
 eval stock modes and all registered negatives before ending
 `P45_EXACT_IMAGE_CPU_PASS overlay=qwen8b_tp8`. This is not target evidence.

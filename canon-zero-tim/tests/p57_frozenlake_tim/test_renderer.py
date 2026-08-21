@@ -386,7 +386,8 @@ class P57RendererTest(unittest.TestCase):
     self.assertEqual(train_preflight.returncode, 0, train_preflight.stderr)
     self.assertEqual(eval_preflight.returncode, 0, eval_preflight.stderr)
     self.assertIn(
-        "[P57.STOCK_FAST] ZERO_TIM_OFF_PASS mode=train absent=12 observer=train",
+        "[P57.STOCK_FAST] ZERO_TIM_OFF_PASS mode=train absent=12 "
+        "observer=train processed_b=on",
         train_preflight.stdout,
     )
     self.assertIn(
@@ -416,7 +417,8 @@ class P57RendererTest(unittest.TestCase):
     self.assertNotIn("--evaluation_only", env["CANON_RUN_CMD"])
     self.assertEqual(preflight.returncode, 0, preflight.stderr)
     self.assertIn(
-        "[P57.STOCK_FAST] ZERO_TIM_OFF_PASS mode=train absent=12 observer=train",
+        "[P57.STOCK_FAST] ZERO_TIM_OFF_PASS mode=train absent=12 "
+        "observer=train processed_b=on",
         preflight.stdout,
     )
 

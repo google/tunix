@@ -113,14 +113,32 @@ class P57StockFastContractTest(unittest.TestCase):
     )
     self.assertEqual(train_attestation["arm"], "mismatch")
     self.assertEqual(eval_attestation["arm"], "mismatch")
+    self.assertIn(
+        "CANON_PROMPT_PROCESSED_LOGPROBS", train_attestation["one_switches"]
+    )
+    self.assertNotIn(
+        "CANON_PROMPT_PROCESSED_LOGPROBS", train_attestation["zero_switches"]
+    )
+    self.assertIn(
+        "CANON_PROMPT_PROCESSED_LOGPROBS", eval_attestation["zero_switches"]
+    )
 
     with self.assertRaisesRegex(ValueError, "stock-train environment"):
       dp_workloads.validate_p57_stock_train_environment(
           workload, {**train, "CANON_P28_SEGMENTED_TRAIN": "1"}
       )
+    with self.assertRaisesRegex(ValueError, "stock-train environment"):
+      dp_workloads.validate_p57_stock_train_environment(
+          workload, {**train, "CANON_PROMPT_PROCESSED_LOGPROBS": "0"}
+      )
     with self.assertRaisesRegex(ValueError, "stock-eval environment"):
       dp_workloads.validate_p57_stock_eval_environment(
           workload, {**eval_values, "CANON_P33_WORKLOAD_LAUNCH_ADMITTED": "0"}
+      )
+    with self.assertRaisesRegex(ValueError, "stock-eval environment"):
+      dp_workloads.validate_p57_stock_eval_environment(
+          workload,
+          {**eval_values, "CANON_PROMPT_PROCESSED_LOGPROBS": "1"},
       )
 
 

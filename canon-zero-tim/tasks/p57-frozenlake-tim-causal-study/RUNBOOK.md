@@ -32,13 +32,17 @@ provenance fail.
 
 ## Original-arm contract
 
-`stock-fast` removes the full numerical zero-TIM bundle, not only fixed
-lm-head. Twelve presence-sensitive switches are absent; the canonical
-attention/logprob/trainer/reducer/VJP gates are zero; the excess-precision XLA
-pin is absent; and the entrypoint leaves engine files equal to pinned-image
-bytes. Training retains only non-treatment services plus the finite
-warning-only observer. Evaluation uses the same stock engine with no training
-or alignment admission.
+`stock-fast` removes the rollout/trainer numerical zero-TIM treatment, not only
+fixed lm-head. Twelve presence-sensitive switches are absent; canonical
+attention, fixed-shape logprob, trainer, reducer, and VJP gates are zero; the
+excess-precision XLA pin is absent; and the entrypoint leaves engine files equal
+to pinned-image bytes. Training retains non-treatment services plus the finite
+warning-only observer. That observer alone sets
+`CANON_PROMPT_PROCESSED_LOGPROBS=1` so its temperature-0.7 prefill rescore has
+the same semantic transform as decode. Sampling does not request prompt
+logprobs, and the learner continues to use `S_decode`—not this observer
+`S_prefill`—as `old_per_token_logps`. Calibration/evaluation keep the switch at
+zero because their alignment observer is off.
 
 ## Local gates
 
@@ -78,7 +82,9 @@ sha256sum "$OUT"/jobset-*.yaml
 
 Require one manifest, `--max_steps=200`, prompt/response `4096/8192`, and
 `CANON_P57_STOP_AFTER_STEP=200`. The command must not contain
-`--evaluation_only`. After explicit launch approval:
+`--evaluation_only`. The resolved preflight must include
+`observer=train processed_b=on`; a train environment with processed-B zero is
+invalid. After explicit launch approval:
 
 ~~~bash
 kubectl apply -f "$OUT/jobset-p57-frozenlake-mismatch-m15-selection-200.yaml"

@@ -59,11 +59,15 @@ unchanged classifier returned `PASS / FREEZE_M15`. M15 measured 24.625% solve,
 56% mixed/nonzero-advantage groups, context max 7,403, completion max 6,223,
 and zero cap hits.
 
-The full-bundle stock/mismatch training and optional evaluation paths are now
-fail-closed: the profile and entrypoint skip the canonical overlay, validators
-require the complete numerical bundle off, and runtime postflight requires
-zero canonical markers. M15 is rebuilt from immutable base weights on its
-disjoint `selection` maps and trained for 200 signed updates.
+The stock/mismatch training and optional evaluation paths are fail-closed: the
+profile and entrypoint skip the canonical overlay, validators require the
+rollout/trainer numerical treatment bundle off, and runtime postflight requires
+zero canonical markers. Training has one observer-only exception:
+processed-B is enabled for the explicit post-rollout prefill rescore so A and B
+share temperature-0.7 semantics. It is dormant during sampling, does not supply
+`old_per_token_logps`, and is not a gradient input. Calibration/evaluation keep
+it off with their alignment observer. M15 is rebuilt from immutable base
+weights on its disjoint `selection` maps and trained for 200 signed updates.
 There is no train-20 screen. By user decision on 2026-08-21, P57.1 runs one
 uninterrupted stock/mismatch JobSet from update 0 through 200. It does not run
 eval-0 and does not pause at updates 50/100/150. Checkpoints remain every 10
@@ -77,6 +81,12 @@ stopped before a complete receipt. The current repair makes the renderer and
 real entrypoint share `GENERATIONS_PER_PROMPT=8`; no target result is inferred
 from the local admission gates. They are preserved but no fourth attempt is
 required under the direct-run decision.
+
+Direct-training attempt `p57_stock_full_att1` is also `INCONCLUSIVE`. It
+completed one real 256-trajectory rollout but stopped before backward/update 0
+because the observer required processed `S_prefill` while the profile forced
+the engine interface off. The repair admits processed-B only for stock
+training observation; it does not resume or reuse attempt 1.
 
 The physical envelope is prompt 4,096 plus response 8,192. Training uses
 DP8xTP8, resident optimizer state, batch 32, eight generations, trajectory

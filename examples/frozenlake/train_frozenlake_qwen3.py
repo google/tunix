@@ -1562,7 +1562,7 @@ if CANON_P57_STOCK_TRAIN:
   print(
       "[P57.STOCK] TRAIN_RUNTIME_PASS "
       "regime=stock-fast arm=mismatch canonical_bundle=off "
-      "observer=warning-only",
+      "observer=warning-only processed_b=observer-only",
       flush=True,
   )
 

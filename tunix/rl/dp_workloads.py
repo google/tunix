@@ -90,7 +90,6 @@ P57_STOCK_FAST_ZERO_SWITCHES = (
 P57_STOCK_TRAIN_ZERO_SWITCHES = (
     "CANON_RPA_VJP2",
     "CANON_VJP2_MAX_SEQS",
-    "CANON_PROMPT_PROCESSED_LOGPROBS",
     "CANON_PALLAS_LOGSOFTMAX",
     "CANON_ENGINE_MODULE_C",
     "CANON_KV_UNIFIED",
@@ -117,6 +116,11 @@ P57_STOCK_TRAIN_ZERO_SWITCHES = (
     "CANON_P38_FIXED_LM_HEAD",
 )
 P57_STOCK_TRAIN_ONE_SWITCHES = (
+    # Observer-only: sampling does not request prompt logprobs, while the
+    # post-rollout S_prefill measurement must apply the same temperature/top-k/
+    # top-p transform as S_decode.  This value does not select the old-logprob,
+    # loss, backward, or optimizer path.
+    "CANON_PROMPT_PROCESSED_LOGPROBS",
     "CANON_P32_TRAIN_ADMITTED",
     "CANON_P33_WORKLOAD_LAUNCH_ADMITTED",
     "CANON_ALIGNMENT_GATE",
@@ -130,6 +134,7 @@ P57_STOCK_TRAIN_ONE_SWITCHES = (
 )
 P57_STOCK_EVAL_ZERO_SWITCHES = (
     *P57_STOCK_TRAIN_ZERO_SWITCHES,
+    "CANON_PROMPT_PROCESSED_LOGPROBS",
     "CANON_P32_TRAIN_ADMITTED",
     "CANON_ALIGNMENT_GATE",
     "CANON_ALIGNMENT_TRAIN",

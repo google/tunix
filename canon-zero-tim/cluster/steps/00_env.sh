@@ -175,7 +175,7 @@ if [ "$P57_STOCK_FAST" = "1" ] || [ "$P58_NATIVE" = "1" ]; then
     stock_expected=0
     if [ "$P57_STOCK_TRAIN" = "1" ]; then
       case "$k" in
-        CANON_P32_TRAIN_ADMITTED|CANON_P33_WORKLOAD_LAUNCH_ADMITTED|CANON_ALIGNMENT_GATE|CANON_ALIGNMENT_TRAIN|CANON_PRE_ALIGN_GATE|CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY)
+        CANON_PROMPT_PROCESSED_LOGPROBS|CANON_P32_TRAIN_ADMITTED|CANON_P33_WORKLOAD_LAUNCH_ADMITTED|CANON_ALIGNMENT_GATE|CANON_ALIGNMENT_TRAIN|CANON_PRE_ALIGN_GATE|CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY)
           stock_expected=1
           ;;
       esac
@@ -1885,7 +1885,7 @@ fi
 [ "$fail" = 0 ] || { echo "[env] REFUSING TO CONTINUE: canonical set incomplete" >&2; exit 1; }
 if [ "$P57_STOCK_FAST" = "1" ]; then
   if [ "$P57_STOCK_TRAIN" = "1" ]; then
-    echo "[P57.STOCK_FAST] ZERO_TIM_OFF_PASS mode=train absent=12 observer=train"
+    echo "[P57.STOCK_FAST] ZERO_TIM_OFF_PASS mode=train absent=12 observer=train processed_b=on"
   elif [ "$P57_STOCK_EVAL" = "1" ]; then
     echo "[P57.STOCK_FAST] ZERO_TIM_OFF_PASS mode=eval absent=12 observer=off"
   else

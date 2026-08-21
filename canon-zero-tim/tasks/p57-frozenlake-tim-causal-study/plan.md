@@ -37,8 +37,11 @@ approval. Advancing a phase requires its exit gate and a decision entry in
 - P57.1 renders exactly one arm: `mismatch`, with
   `CANON_P57_INFERENCE_REGIME=stock-fast` and the 12 presence-sensitive
   numerical switches absent. Calibration/evaluation keep every numerical and
-  alignment gate zero; stock training keeps only launch/checkpoint/telemetry
-  and warning-only observation while its numerical bundle remains zero.
+  alignment gate zero; stock training keeps launch/checkpoint/telemetry and
+  warning-only observation while its rollout/trainer treatment bundle remains
+  zero. Processed-B is the sole observer-only exception: it runs only for the
+  post-rollout `S_prefill` measurement and never supplies old logprobs or a
+  gradient input.
 - “Stock-fast” means the untreated serving numerical program. Shared
   nonnumerical infrastructure remains equal: image, model/TP overlay, DP8xTP8,
   vLLM capacity, sampling, resident placement, and datasets.
@@ -77,6 +80,10 @@ approval. Advancing a phase requires its exit gate and a decision entry in
     trainer numerical paths;
   - zero: the fully registered canonical forward/backward/serving bundle,
     including the fixed lm-head.
+- Processed-B observation is shared instrumentation rather than treatment. It
+  must be enabled in both training arms solely to compare A and B under the
+  same temperature/top-k/top-p semantics; it is dormant during sampling and
+  is not consumed by the loss.
 - This design estimates the system-bundle effect. It cannot attribute a result
   to lm-head, RoPE, attention, or any individual kernel.
 - Initial checkpoint, source/image/model digests, maps and order, topology,
