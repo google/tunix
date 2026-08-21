@@ -49,8 +49,11 @@ sampling source. A corrected launch against the same tag will correctly fail
 with an existing-contract mismatch. Preserve that tag and its log as incident
 evidence; use a fresh tag such as `p46q4census02`.
 
-The repaired entrypoint validates every sealed legacy-v5 row before it writes
-a destination resume contract. The renderer also rejects every import that
+The final repair requires a SHA-sealed `legacy_source_contract.json` before it
+validates any legacy-v5 import. That contract binds stable model/data/sampling/
+topology facts and exactly one opaque fingerprint/run-tag cohort per observed
+logical shard. This avoids falsely reconstructing historical absolute paths while
+still rejecting mixed cohorts. The renderer also rejects every import that
 omits an explicit `--sampling-source-commit`.
 
 ## Recovery without rerunning completed trajectories
@@ -65,23 +68,26 @@ NEW_RESUME_TAG=p46q4census02
 IMPORT_ID=p46e12806-v5-final
 NEW_ROOT=/mnt/disks/linchai_data/deepswe_eval/$NEW_RESUME_TAG
 SNAPSHOT=$NEW_ROOT/imports/$IMPORT_ID
+SAMPLING_SOURCE_SHA=ac2c31bc7f6f82d33b3a62d62e1c390c8338b60e
 
 test -d "$SOURCE_SNAPSHOT/trajectories"
 test ! -e "$SNAPSHOT"
 install -d "$SNAPSHOT/trajectories"
 cp -a "$SOURCE_SNAPSHOT/trajectories/." "$SNAPSHOT/trajectories/"
-(
-  cd "$SNAPSHOT"
-  find trajectories -type f -name '*.jsonl' -print0 \
-    | LC_ALL=C sort -z \
-    | xargs -0 -r sha256sum > SHA256SUMS.tmp
-  test -s SHA256SUMS.tmp
-  mv SHA256SUMS.tmp SHA256SUMS
-  sha256sum -c SHA256SUMS
-)
 test ! -e "$SNAPSHOT/resume_contract.json"
+python3 canon-zero-tim/cluster/seal_p46_legacy_v5_snapshot.py \
+  --snapshot-dir "$SNAPSHOT" \
+  --sampling-source-commit "$SAMPLING_SOURCE_SHA" \
+  --topology 128
+test -f "$SNAPSHOT/legacy_source_contract.json"
+test -f "$SNAPSHOT/SHA256SUMS"
+(cd "$SNAPSHOT" && sha256sum -c SHA256SUMS)
 chmod -R a-w "$SNAPSHOT"
 ```
+
+Require `P46_LEGACY_V5_SEAL_PASS`. Never hand-author the source contract or
+reuse a partial/failed staging seal. The sealer rejects a mixed fingerprint/
+run-tag cohort even when every individual value is syntactically valid.
 
 Inspect at least the schema and sampler provenance before rendering:
 
@@ -97,16 +103,21 @@ canon.p46.deepswe-eval.trajectory.v5
 stock@ac2c31bc7f6f82d33b3a62d62e1c390c8338b60e
 ```
 
-Render from implementation commit
-`f823bb6a9aabf023e651788452d94ff656c827e1` only after a fresh fetch proves it
-is in `origin/yuxzhang/canon-zero-tim`. The concrete node-pool and image digest
-still come from the current allocation:
+The old `f823bb6a` pin is superseded. The sealed-contract repair is currently an
+uncommitted local candidate based on `6c3ab1f2`; do not launch either SHA.
+After explicit publication, substitute the exact 40-character read-back
+operator-branch SHA below. The concrete node-pool and image digest still come
+from the current allocation:
 
 ```bash
-SOURCE_SHA=f823bb6a9aabf023e651788452d94ff656c827e1
-SAMPLING_SOURCE_SHA=ac2c31bc7f6f82d33b3a62d62e1c390c8338b60e
+SOURCE_SHA=replace-with-published-sealed-contract-repair-sha
 RUN_ID=p46c128a1
 BASE=canon-zero-tim/cluster/jobset-256cluster-64chip.yaml
+
+[[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+git fetch origin yuxzhang/canon-zero-tim
+git merge-base --is-ancestor "$SOURCE_SHA" FETCH_HEAD
+test "$(git rev-parse "$SOURCE_SHA^{commit}")" = "$SOURCE_SHA"
 
 python3 canon-zero-tim/cluster/render_p46_deepswe_profiles.py \
   --base "$BASE" \
@@ -136,7 +147,7 @@ reward-only mode, N16, 16,384 response tokens, 50 steps, concurrency 64 and a
 The first corrected launch must print this marker before runtime setup:
 
 ```text
-[P46.RESUME] LEGACY_IMPORT_PASS import_id=p46e12806-v5-final records=<actual> valid_records=<actual-valid> ...
+[P46.RESUME] LEGACY_IMPORT_PASS import_id=p46e12806-v5-final records=<actual> valid_records=<actual-valid> manifest_sha256=<sha256> source_contract_sha256=<sha256> ...
 ```
 
 Imported durable identities are then skipped by census. Only identities with

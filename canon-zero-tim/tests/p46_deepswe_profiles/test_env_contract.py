@@ -199,6 +199,10 @@ class P46EnvironmentContractTest(unittest.TestCase):
     )
     self.assertNotEqual(result.returncode, 0, result.stdout)
     self.assertIn("frozen legacy snapshot is missing SHA256SUMS", result.stdout)
+    self.assertIn(
+        "frozen legacy snapshot is missing legacy_source_contract.json",
+        result.stdout,
+    )
 
     result = self._run(
         "q4-clean-eval",

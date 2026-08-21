@@ -1111,6 +1111,10 @@ case "${CANON_P46_EVALUATION:-0}" in
         echo "[env] P46 frozen legacy snapshot is missing SHA256SUMS: $p46_import_root" >&2
         fail=1
       }
+      [ -f "$p46_import_root/legacy_source_contract.json" ] || {
+        echo "[env] P46 frozen legacy snapshot is missing legacy_source_contract.json: $p46_import_root" >&2
+        fail=1
+      }
       [ ! -e "$p46_import_root/resume_contract.json" ] || {
         echo "[env] P46 legacy-v5 snapshot must not contain resume_contract.json; use a fresh v5-only staging copy or the frozen-v6 import path" >&2
         fail=1

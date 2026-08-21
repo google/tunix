@@ -2,7 +2,6 @@
 
 import asyncio
 import dataclasses
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -77,9 +76,10 @@ class RewardOnlyContractTest(unittest.TestCase):
           for record in legacy_records
       )
       trajectory.write_bytes(payload)
-      (snapshot / "SHA256SUMS").write_text(
-          f"{hashlib.sha256(payload).hexdigest()}  trajectories/wave.jsonl\n",
-          encoding="utf-8",
+      artifacts.seal_legacy_v5_snapshot(
+          snapshot,
+          config=config,
+          allowed_task_keys=(artifacts.task_key(entry) for entry in entries),
       )
       validation = artifacts.validate_legacy_v5_snapshot_contract(
           snapshot,
@@ -195,9 +195,10 @@ class RewardOnlyContractTest(unittest.TestCase):
       trajectory.parent.mkdir(parents=True)
       payload = (json.dumps(record, sort_keys=True) + "\n").encode()
       trajectory.write_bytes(payload)
-      (snapshot / "SHA256SUMS").write_text(
-          f"{hashlib.sha256(payload).hexdigest()}  trajectories/wave.jsonl\n",
-          encoding="utf-8",
+      artifacts.seal_legacy_v5_snapshot(
+          snapshot,
+          config=source_config,
+          allowed_task_keys=[artifacts.task_key(entry)],
       )
 
       environment = {
@@ -222,7 +223,7 @@ class RewardOnlyContractTest(unittest.TestCase):
           ),
       ):
         with self.assertRaisesRegex(
-            ValueError, "sampling contract mismatch before resume lease"
+            ValueError, "legacy source contract mismatch"
         ):
           eval_deepswe.main()
       self.assertFalse((output_dir / "resume_contract.json").exists())

@@ -16,6 +16,7 @@ python3 -m py_compile \
   examples/deepswe/deepswe_reward_only_parity.py \
   examples/deepswe/probe_reward_only_v5p.py \
   tunix/generate/vllm_sampler.py \
+  canon-zero-tim/cluster/seal_p46_legacy_v5_snapshot.py \
   canon-zero-tim/cluster/render_p46_deepswe_profiles.py \
   canon-zero-tim/tests/p34_deepswe/classify_run.py
 python3 -m unittest discover \
@@ -23,4 +24,4 @@ python3 -m unittest discover \
   -p 'test_*.py' \
   -v
 
-echo "P46_DEEPSWE_PROFILES_CPU_PASS cases=77"
+echo "P46_DEEPSWE_PROFILES_CPU_PASS cases=79"

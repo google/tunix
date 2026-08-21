@@ -1,6 +1,6 @@
 # P46.7 — breadth-first census before strict repair
 
-- Status: census base published as `365b46c1cd150839e3be1fd50adb33325fe3189f`; returned legacy-v5 import incident reproduced; pre-lease repair committed as `f823bb6a9aabf023e651788452d94ff656c827e1` and passes local release gates
+- Status: census base published as `365b46c1cd150839e3be1fd50adb33325fe3189f`; returned legacy-v5 import incident reproduced; sealed legacy-source-contract repair is an uncommitted candidate on `6c3ab1f2d2ffeaf47667c07fc4151532574e6279` and passes 79 P46 CPU cases
 
 ## Trigger
 
@@ -61,14 +61,19 @@ source, failed legacy fingerprint validation before runtime, and left
 destination tag `p46q4census01` claimed under the wrong immutable contract.
 
 - Preserve `p46q4census01`; never repair or reuse it.
-- Make a fresh v5-only sealed copy under `p46q4census02/imports/`; include raw
-  trajectory JSONLs and `SHA256SUMS`, but no `resume_contract.json`.
+- Make a fresh v5-only staging copy under `p46q4census02/imports/`; include raw
+  trajectory JSONLs but no `resume_contract.json` or hand-authored seal files.
+- Run `seal_p46_legacy_v5_snapshot.py`. Require
+  `P46_LEGACY_V5_SEAL_PASS`; the resulting `legacy_source_contract.json` and
+  every JSONL must be covered by `SHA256SUMS`. Stable source semantics and one
+  opaque fingerprint/run-tag cohort per observed logical shard are mandatory.
 - Render `--legacy-import-id` and the exact explicit historical
   `--sampling-source-commit`; never infer sampler lineage from the new harness
   SHA.
 - Preflight must validate every row before creating the destination resume
-  contract. Wrong source, mixed schema, v6-via-legacy, or v5-with-contract
-  staging must fail without claiming the fresh tag.
+  contract. Wrong source, mixed schema/cohort, missing/tampered source
+  contract, v6-via-legacy, or v5-with-resume-contract staging must fail without
+  claiming the fresh tag.
 - Require `LEGACY_IMPORT_PASS records=<actual>`. Imported durable identities
   suppress census work; only absent identities are sampled.
 - The incident reports 510 raw rows. A larger count is reusable only if the

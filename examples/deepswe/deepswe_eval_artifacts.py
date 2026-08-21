@@ -48,8 +48,12 @@ CAMPAIGN_SCHEMA = "canon.p46.deepswe-eval.campaign-summary.v2"
 CENSUS_SCHEMA = "canon.p46.deepswe-eval.census-summary.v1"
 RESUME_SCHEMA = "canon.p46.deepswe-eval.resume-contract.v1"
 LEASE_SCHEMA = "canon.p46.deepswe-eval.resume-lease.v1"
-IMPORT_SCHEMA = "canon.p46.deepswe-eval.resume-import.v1"
+IMPORT_SCHEMA = "canon.p46.deepswe-eval.resume-import.v2"
 FROZEN_V6_IMPORT_SCHEMA = "canon.p46.deepswe-eval.frozen-v6-import.v1"
+LEGACY_SOURCE_CONTRACT_SCHEMA = (
+    "canon.p46.deepswe-eval.legacy-source-contract.v1"
+)
+LEGACY_SOURCE_CONTRACT_NAME = "legacy_source_contract.json"
 LEGACY_CONFIG_SCHEMA = "canon.p46.deepswe-eval.config.v3"
 LEGACY_TRAJECTORY_SCHEMA = "canon.p46.deepswe-eval.trajectory.v5"
 REWARD_ONLY = "reward_only"
@@ -352,6 +356,70 @@ def legacy_v5_run_tag(config: EvalConfig) -> str:
   return f"{prefix}-{config.topology}-{fingerprint[:16]}"
 
 
+def _legacy_v5_run_tag_for_fingerprint(
+    config: EvalConfig, fingerprint: str
+) -> str:
+  if config.onehost_probe:
+    prefix = "q4i512-n1-onehost"
+  elif config.parity_canary:
+    prefix = f"q4i16k-n16-parity-{config.evaluation_mode}"
+  else:
+    prefix = "q4i16k-n16"
+  return f"{prefix}-{config.topology}-{fingerprint[:16]}"
+
+
+def legacy_v5_source_semantics(config: EvalConfig) -> dict[str, Any]:
+  """Returns stable sampling facts for a reviewed legacy-v5 adoption.
+
+  Absolute model/whitelist paths, the destination harness/tag and the client
+  image are deliberately excluded. They made exact reconstruction of old v5
+  fingerprints brittle even when the model, data and sampler contract were
+  unchanged. The original opaque fingerprint and run tag remain sealed per
+  logical shard in ``legacy_source_contract.json``.
+  """
+  config.validate()
+  fields = (
+      "model_id",
+      "dataset_name",
+      "dataset_revision",
+      "dataset_split",
+      "dataset_rows",
+      "whitelist_sha256",
+      "whitelist_rows",
+      "source_commit",
+      "topology",
+      "evaluation_mode",
+      "onehost_probe",
+      "parity_canary",
+      "max_model_len",
+      "max_response_length",
+      "max_steps",
+      "temperature",
+      "top_p",
+      "top_k",
+      "n_sample",
+      "logical_tasks",
+      "shard_tasks",
+      "max_concurrency",
+      "trajectory_timeout_secs",
+      "per_turn_timeout_secs",
+      "step_timeout_secs",
+      "reward_timeout_secs",
+      "cleanup_timeout_secs",
+      "shard_timeout_secs",
+      "seed_base",
+      "prefix_cache",
+      "action_compat_mode",
+  )
+  actual = dataclasses.asdict(config)
+  return {
+      **{field: actual[field] for field in fields},
+      "trajectory_mode": config.trajectory_mode,
+      "sampled_by": config.sampled_by,
+      "sampling_rng_mode": config.sampling_rng_mode,
+  }
+
+
 def _fsync_directory(path: Path) -> None:
   descriptor = os.open(path, os.O_RDONLY)
   try:
@@ -376,8 +444,21 @@ def _write_exact_file(path: Path, payload: bytes) -> None:
       )
 
 
-def _snapshot_manifest(snapshot_dir: Path) -> tuple[list[tuple[Path, str]], str]:
-  """Validates one frozen legacy snapshot and returns its exact input files."""
+def _trajectory_manifest_payload(
+    snapshot_dir: Path, entries: Sequence[tuple[Path, str]]
+) -> bytes:
+  return "".join(
+      f"{digest}  {path.relative_to(snapshot_dir)}\n"
+      for path, digest in sorted(
+          entries, key=lambda item: str(item[0].relative_to(snapshot_dir))
+      )
+  ).encode("utf-8")
+
+
+def _snapshot_manifest(
+    snapshot_dir: Path,
+) -> tuple[list[tuple[Path, str]], Mapping[str, Any], str, str]:
+  """Validates a sealed legacy snapshot, source contract and exact inputs."""
   if not snapshot_dir.is_absolute():
     raise ValueError("legacy import snapshot must be absolute")
   manifest_path = snapshot_dir / "SHA256SUMS"
@@ -388,12 +469,17 @@ def _snapshot_manifest(snapshot_dir: Path) -> tuple[list[tuple[Path, str]], str]
   trajectory_root = (snapshot_dir / "trajectories").resolve()
   entries: list[tuple[Path, str]] = []
   seen: set[str] = set()
+  contract_digest: str | None = None
   for line_number, raw_line in enumerate(
       manifest.decode("utf-8").splitlines(), 1
   ):
     if not raw_line:
       continue
-    match = re.fullmatch(r"([0-9a-f]{64})  (trajectories/.+\.jsonl)", raw_line)
+    match = re.fullmatch(
+        r"([0-9a-f]{64})  (legacy_source_contract\.json|"
+        r"trajectories/.+\.jsonl)",
+        raw_line,
+    )
     if match is None:
       raise ValueError(
           f"malformed legacy SHA256SUMS line {line_number}"
@@ -407,25 +493,241 @@ def _snapshot_manifest(snapshot_dir: Path) -> tuple[list[tuple[Path, str]], str]
     path = snapshot_dir / relative
     if path.is_symlink() or not path.is_file():
       raise ValueError(f"legacy snapshot input is not a regular file: {relative}")
-    try:
-      path.resolve().relative_to(trajectory_root)
-    except ValueError as error:
-      raise ValueError(
-          "legacy trajectory must remain below trajectories/"
-      ) from error
+    if relative == LEGACY_SOURCE_CONTRACT_NAME:
+      contract_digest = expected_digest
+    else:
+      try:
+        path.resolve().relative_to(trajectory_root)
+      except ValueError as error:
+        raise ValueError(
+            "legacy trajectory must remain below trajectories/"
+        ) from error
     if sha256_file(path) != expected_digest:
       raise ValueError(f"legacy snapshot digest mismatch: {relative}")
-    entries.append((path, expected_digest))
+    if relative != LEGACY_SOURCE_CONTRACT_NAME:
+      entries.append((path, expected_digest))
   discovered = {
       str(path.relative_to(snapshot_dir))
       for path in (snapshot_dir / "trajectories").rglob("*.jsonl")
       if path.is_file()
   }
-  if not entries or discovered != seen:
+  expected_paths = discovered | {LEGACY_SOURCE_CONTRACT_NAME}
+  if not entries or contract_digest is None or expected_paths != seen:
     raise ValueError(
-        "legacy snapshot manifest must cover every trajectory JSONL exactly"
+        "legacy snapshot manifest must cover legacy_source_contract.json and "
+        "every trajectory JSONL exactly"
     )
-  return entries, manifest_sha256
+  contract_path = snapshot_dir / LEGACY_SOURCE_CONTRACT_NAME
+  try:
+    contract = json.loads(contract_path.read_text(encoding="utf-8"))
+  except (json.JSONDecodeError, UnicodeDecodeError) as error:
+    raise ValueError("legacy source contract is not valid JSON") from error
+  if not isinstance(contract, Mapping):
+    raise ValueError("legacy source contract must be a JSON object")
+  return entries, contract, contract_digest, manifest_sha256
+
+
+def _legacy_contract_cohorts(
+    contract: Mapping[str, Any],
+    *,
+    snapshot_dir: Path,
+    config: EvalConfig,
+    entries: Sequence[tuple[Path, str]],
+) -> dict[int, Mapping[str, Any]]:
+  """Validates the sealed stable facts and per-logical-shard cohorts."""
+  exact_keys = {
+      "schema",
+      "trajectory_schema",
+      "semantics",
+      "trajectory_manifest_sha256",
+      "records",
+      "valid_records",
+      "cohorts",
+  }
+  if set(contract) != exact_keys:
+    raise ValueError("legacy source contract has unexpected or missing fields")
+  wrong = {}
+  if contract.get("schema") != LEGACY_SOURCE_CONTRACT_SCHEMA:
+    wrong["schema"] = contract.get("schema")
+  if contract.get("trajectory_schema") != LEGACY_TRAJECTORY_SCHEMA:
+    wrong["trajectory_schema"] = contract.get("trajectory_schema")
+  if contract.get("semantics") != legacy_v5_source_semantics(config):
+    wrong["semantics"] = contract.get("semantics")
+  trajectory_manifest_sha256 = hashlib.sha256(
+      _trajectory_manifest_payload(snapshot_dir, entries)
+  ).hexdigest()
+  if contract.get("trajectory_manifest_sha256") != trajectory_manifest_sha256:
+    wrong["trajectory_manifest_sha256"] = contract.get(
+        "trajectory_manifest_sha256"
+    )
+  for field in ("records", "valid_records"):
+    value = contract.get(field)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+      wrong[field] = value
+  raw_cohorts = contract.get("cohorts")
+  if not isinstance(raw_cohorts, list) or not raw_cohorts:
+    wrong["cohorts"] = raw_cohorts
+  if wrong:
+    raise ValueError(f"legacy source contract mismatch: {wrong}")
+
+  cohorts: dict[int, Mapping[str, Any]] = {}
+  max_logical_shards = (
+      config.whitelist_rows + config.logical_tasks - 1
+  ) // config.logical_tasks
+  assert isinstance(raw_cohorts, list)
+  for cohort in raw_cohorts:
+    if not isinstance(cohort, Mapping) or set(cohort) != {
+        "logical_shard_index",
+        "config_fingerprint",
+        "run_tag",
+        "records",
+    }:
+      raise ValueError("legacy source cohort is malformed")
+    logical_index = cohort.get("logical_shard_index")
+    fingerprint = cohort.get("config_fingerprint")
+    run_tag = cohort.get("run_tag")
+    cohort_records = cohort.get("records")
+    if (
+        isinstance(logical_index, bool)
+        or not isinstance(logical_index, int)
+        or not 0 <= logical_index < max_logical_shards
+        or logical_index in cohorts
+        or not isinstance(fingerprint, str)
+        or not _SHA256.fullmatch(fingerprint)
+        or not isinstance(run_tag, str)
+        or run_tag != _legacy_v5_run_tag_for_fingerprint(config, fingerprint)
+        or isinstance(cohort_records, bool)
+        or not isinstance(cohort_records, int)
+        or cohort_records <= 0
+    ):
+      raise ValueError(f"legacy source cohort mismatch: {cohort}")
+    cohorts[logical_index] = cohort
+  return cohorts
+
+
+def _discover_legacy_v5_cohorts(
+    entries: Sequence[tuple[Path, str]],
+    *,
+    config: EvalConfig,
+    ordered_keys: Sequence[str],
+) -> tuple[list[dict[str, Any]], int, int]:
+  """Discovers a single opaque fingerprint/run-tag cohort per shard."""
+  task_index = {key: index for index, key in enumerate(ordered_keys)}
+  cohorts: dict[int, dict[str, Any]] = {}
+  records = 0
+  valid_records = 0
+  for path, _ in entries:
+    lines = path.read_text(encoding="utf-8").splitlines()
+    for line_number, line in enumerate(lines, 1):
+      if not line.strip():
+        continue
+      try:
+        record = json.loads(line)
+      except json.JSONDecodeError:
+        if line_number == len(lines):
+          continue
+        raise ValueError(f"invalid JSON before trailing line in {path}")
+      if not isinstance(record, Mapping):
+        raise ValueError(f"legacy trajectory is not an object: {path}")
+      key = record.get("task_key")
+      if not isinstance(key, str) or key not in task_index:
+        raise ValueError(f"legacy trajectory identity mismatch in {path}")
+      logical_index = task_index[key] // config.logical_tasks
+      fingerprint = record.get("config_fingerprint")
+      run_tag = record.get("run_tag")
+      if (
+          not isinstance(fingerprint, str)
+          or not _SHA256.fullmatch(fingerprint)
+          or not isinstance(run_tag, str)
+          or run_tag != _legacy_v5_run_tag_for_fingerprint(config, fingerprint)
+      ):
+        raise ValueError(f"legacy-v5 source cohort is malformed in {path}")
+      cohort = cohorts.setdefault(
+          logical_index,
+          {
+              "logical_shard_index": logical_index,
+              "config_fingerprint": fingerprint,
+              "run_tag": run_tag,
+              "records": 0,
+          },
+      )
+      if (
+          cohort["config_fingerprint"] != fingerprint
+          or cohort["run_tag"] != run_tag
+      ):
+        raise ValueError(
+            "legacy-v5 snapshot mixes source cohorts in logical shard "
+            f"{logical_index}"
+        )
+      cohort["records"] += 1
+      records += 1
+      valid_records += record.get("valid") is True
+  if not records:
+    raise ValueError("legacy snapshot contains no complete trajectory records")
+  return [cohorts[index] for index in sorted(cohorts)], records, valid_records
+
+
+def seal_legacy_v5_snapshot(
+    snapshot_dir: str | os.PathLike[str],
+    *,
+    config: EvalConfig,
+    allowed_task_keys: Iterable[str],
+) -> dict[str, Any]:
+  """Seals a fresh v5-only staging copy with a reviewed source contract."""
+  config.validate()
+  snapshot = Path(snapshot_dir).resolve()
+  if (snapshot / "resume_contract.json").exists():
+    raise ValueError("legacy-v5 staging copy must not contain resume_contract.json")
+  ordered_keys = list(allowed_task_keys)
+  if len(ordered_keys) != len(set(ordered_keys)):
+    raise ValueError("legacy import task order contains duplicate identities")
+  manifest_path = snapshot / "SHA256SUMS"
+  contract_path = snapshot / LEGACY_SOURCE_CONTRACT_NAME
+  if manifest_path.exists() or contract_path.exists():
+    if manifest_path.is_file() and contract_path.is_file():
+      return validate_legacy_v5_snapshot_contract(
+          snapshot, config=config, allowed_task_keys=ordered_keys
+      )
+    raise ValueError("legacy snapshot has a partial pre-existing seal")
+  trajectory_root = snapshot / "trajectories"
+  paths = sorted(trajectory_root.rglob("*.jsonl"))
+  if not paths:
+    raise ValueError("legacy snapshot contains no trajectory JSONL")
+  entries = []
+  for path in paths:
+    if path.is_symlink() or not path.is_file():
+      raise ValueError(f"legacy snapshot input is not a regular file: {path}")
+    entries.append((path, sha256_file(path)))
+  cohorts, records, valid_records = _discover_legacy_v5_cohorts(
+      entries, config=config, ordered_keys=ordered_keys
+  )
+  trajectory_manifest = _trajectory_manifest_payload(snapshot, entries)
+  contract = {
+      "schema": LEGACY_SOURCE_CONTRACT_SCHEMA,
+      "trajectory_schema": LEGACY_TRAJECTORY_SCHEMA,
+      "semantics": legacy_v5_source_semantics(config),
+      "trajectory_manifest_sha256": hashlib.sha256(
+          trajectory_manifest
+      ).hexdigest(),
+      "records": records,
+      "valid_records": valid_records,
+      "cohorts": cohorts,
+  }
+  _legacy_contract_cohorts(
+      contract, snapshot_dir=snapshot, config=config, entries=entries
+  )
+  contract_payload = (
+      json.dumps(contract, sort_keys=True, indent=2) + "\n"
+  ).encode("utf-8")
+  manifest_payload = (
+      f"{hashlib.sha256(contract_payload).hexdigest()}  "
+      f"{LEGACY_SOURCE_CONTRACT_NAME}\n"
+  ).encode("utf-8") + trajectory_manifest
+  _write_exact_file(contract_path, contract_payload)
+  _write_exact_file(manifest_path, manifest_payload)
+  return validate_legacy_v5_snapshot_contract(
+      snapshot, config=config, allowed_task_keys=ordered_keys
+  )
 
 
 def validate_legacy_v5_snapshot_contract(
@@ -443,7 +745,15 @@ def validate_legacy_v5_snapshot_contract(
         "use a v5-only sealed staging copy or --frozen-v6-import-id for "
         "trajectory-v6 evidence"
     )
-  entries, manifest_sha256 = _snapshot_manifest(snapshot)
+  entries, source_contract, source_contract_sha256, manifest_sha256 = (
+      _snapshot_manifest(snapshot)
+  )
+  cohorts = _legacy_contract_cohorts(
+      source_contract,
+      snapshot_dir=snapshot,
+      config=config,
+      entries=entries,
+  )
   ordered_keys = list(allowed_task_keys)
   if len(ordered_keys) != len(set(ordered_keys)):
     raise ValueError("legacy import task order contains duplicate identities")
@@ -451,6 +761,8 @@ def validate_legacy_v5_snapshot_contract(
   first_record_path: str | None = None
   sampled_by: str | None = None
   records = 0
+  valid_records = 0
+  cohort_records: dict[int, int] = collections.defaultdict(int)
   attempts: dict[tuple[str, int], list[Mapping[str, Any]]] = (
       collections.defaultdict(list)
   )
@@ -488,8 +800,16 @@ def validate_legacy_v5_snapshot_contract(
         raise ValueError(f"legacy trajectory identity mismatch in {path}")
       logical_index = task_index[key] // config.logical_tasks
       logical_config = dataclasses.replace(config, shard_index=logical_index)
+      cohort = cohorts.get(logical_index)
+      if cohort is None:
+        raise ValueError(
+            "legacy source contract omits observed logical shard "
+            f"{logical_index}"
+        )
       expected_fields = {
           "schema": LEGACY_TRAJECTORY_SCHEMA,
+          "config_fingerprint": cohort["config_fingerprint"],
+          "run_tag": cohort["run_tag"],
           "trajectory_mode": logical_config.trajectory_mode,
           "action_compat_mode": logical_config.action_compat_mode,
           "sampled_by": logical_config.sampled_by,
@@ -501,11 +821,6 @@ def validate_legacy_v5_snapshot_contract(
           for field, value in expected_fields.items()
           if record.get(field) != value
       }
-      if (
-          not isinstance(record.get("config_fingerprint"), str)
-          or not _SHA256.fullmatch(record.get("config_fingerprint", ""))
-      ):
-        wrong["config_fingerprint"] = record.get("config_fingerprint")
       if wrong:
         raise ValueError(
             "legacy-v5 snapshot sampling contract mismatch before resume "
@@ -543,15 +858,32 @@ def validate_legacy_v5_snapshot_contract(
             f"legacy-v5 snapshot outcome is malformed in {path}"
         )
       prior.append(record)
+      cohort_records[logical_index] += 1
+      valid_records += valid is True
       if first_record_path is None:
         first_record_path = str(path)
         sampled_by = logical_config.sampled_by
       records += 1
   if first_record_path is None:
     raise ValueError("legacy snapshot contains no complete trajectory records")
+  expected_cohort_records = {
+      index: int(cohort["records"]) for index, cohort in cohorts.items()
+  }
+  cardinality_wrong = {}
+  if records != source_contract["records"]:
+    cardinality_wrong["records"] = records
+  if valid_records != source_contract["valid_records"]:
+    cardinality_wrong["valid_records"] = valid_records
+  if dict(cohort_records) != expected_cohort_records:
+    cardinality_wrong["cohort_records"] = dict(cohort_records)
+  if cardinality_wrong:
+    raise ValueError(
+        f"legacy source contract cardinality mismatch: {cardinality_wrong}"
+    )
   return {
       "schema": LEGACY_TRAJECTORY_SCHEMA,
       "snapshot_manifest_sha256": manifest_sha256,
+      "legacy_source_contract_sha256": source_contract_sha256,
       "sampled_by": sampled_by,
       "first_record_path": first_record_path,
       "records": records,
@@ -913,7 +1245,15 @@ def import_legacy_v5_snapshot(
         config=config,
         allowed_task_keys=ordered_keys,
     )
-  entries, manifest_sha256 = _snapshot_manifest(snapshot)
+  entries, source_contract, source_contract_sha256, manifest_sha256 = (
+      _snapshot_manifest(snapshot)
+  )
+  cohorts = _legacy_contract_cohorts(
+      source_contract,
+      snapshot_dir=snapshot,
+      config=config,
+      entries=entries,
+  )
   if (
       validated_snapshot_manifest_sha256 is not None
       and validated_snapshot_manifest_sha256 != manifest_sha256
@@ -930,7 +1270,10 @@ def import_legacy_v5_snapshot(
       collections.defaultdict(list)
   )
   imported: dict[int, list[dict[str, Any]]] = collections.defaultdict(list)
-  input_evidence = []
+  input_evidence = [{
+      "path": LEGACY_SOURCE_CONTRACT_NAME,
+      "sha256": source_contract_sha256,
+  }]
   for path, digest in entries:
     relative = str(path.relative_to(snapshot))
     input_evidence.append({"path": relative, "sha256": digest})
@@ -960,8 +1303,16 @@ def import_legacy_v5_snapshot(
         raise ValueError(f"legacy trajectory identity mismatch in {path}")
       logical_index = task_index[key] // config.logical_tasks
       logical_config = dataclasses.replace(config, shard_index=logical_index)
+      cohort = cohorts.get(logical_index)
+      if cohort is None:
+        raise ValueError(
+            "legacy source contract omits observed logical shard "
+            f"{logical_index}"
+        )
       expected_fields = {
           "schema": LEGACY_TRAJECTORY_SCHEMA,
+          "config_fingerprint": cohort["config_fingerprint"],
+          "run_tag": cohort["run_tag"],
           "trajectory_mode": logical_config.trajectory_mode,
           "action_compat_mode": logical_config.action_compat_mode,
           "sampled_by": logical_config.sampled_by,
@@ -973,11 +1324,6 @@ def import_legacy_v5_snapshot(
           for field, value in expected_fields.items()
           if record.get(field) != value
       }
-      if (
-          not isinstance(record.get("config_fingerprint"), str)
-          or not _SHA256.fullmatch(record.get("config_fingerprint", ""))
-      ):
-        wrong["config_fingerprint"] = record.get("config_fingerprint")
       if wrong:
         raise ValueError(
             f"legacy trajectory contract mismatch in {path}: {wrong}"
@@ -1019,6 +1365,7 @@ def import_legacy_v5_snapshot(
               "legacy_schema": LEGACY_TRAJECTORY_SCHEMA,
               "legacy_config_fingerprint": record.get("config_fingerprint"),
               "legacy_run_tag": record.get("run_tag"),
+              "legacy_source_contract_sha256": source_contract_sha256,
               "snapshot_manifest_sha256": manifest_sha256,
               "path": relative,
               "line": line_number,
@@ -1057,8 +1404,9 @@ def import_legacy_v5_snapshot(
       "import_id": import_id,
       "source_commit": config.source_commit,
       "harness_commit": config.harness_commit,
-      "base_legacy_config_fingerprint": legacy_v5_fingerprint(config),
       "base_config_fingerprint": config.fingerprint,
+      "legacy_source_contract_sha256": source_contract_sha256,
+      "legacy_cohorts": source_contract["cohorts"],
       "snapshot_manifest_sha256": manifest_sha256,
       "input_evidence": input_evidence,
       "records": imported_records,

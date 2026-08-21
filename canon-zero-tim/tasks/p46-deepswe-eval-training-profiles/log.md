@@ -749,3 +749,38 @@
 - `main` was neither checked out nor targeted. No cluster, PVC or credential
   mutation occurred. Remote execution still requires fresh operator-branch
   ancestry/read-back and separate launch authority.
+
+## 2026-08-21T02:39:05Z — P46.7 sealed legacy source contract hardening
+
+- Clean preflight passed on local branch `local/p46-results-review-0820` at
+  exact base `6c3ab1f2d2ffeaf47667c07fc4151532574e6279`. Review found that this
+  base accepted any syntactically valid legacy fingerprint and did not bind
+  `run_tag`, while the execution docs still pinned older `f823bb6a`.
+- Replaced that broad relaxation with
+  `canon.p46.deepswe-eval.legacy-source-contract.v1`. Stable Q4 model, exact
+  dataset/whitelist, N16/16K/50-step sampling, timeout, action, RNG and topology
+  facts must match. Each observed logical shard has one opaque historical
+  fingerprint/run-tag cohort and exact cardinality. Absolute historical paths,
+  destination harness/tag and the unrecorded old client image are deliberately
+  outside stable semantics.
+- Added `seal_p46_legacy_v5_snapshot.py`. It reads the reviewed 1,851-task
+  order, rejects mixed cohorts, writes deterministic
+  `legacy_source_contract.json`, and seals it plus every JSONL in
+  `SHA256SUMS`. Environment preflight now requires both seal files.
+- Import provenance/receipt schema advances to v2 and records the source
+  contract digest and sealed cohorts. Missing/tampered contracts, semantic
+  drift, mixed cohort, file/cardinality drift and wrong sampler all fail before
+  target resume-tag creation/runtime.
+- `bash canon-zero-tim/tests/p46_deepswe_profiles/run_cpu.sh` ran 79 tests and
+  passed. New regressions prove historical path drift is admitted, mixed
+  fingerprint/run-tag cohorts are rejected, and an old trajectory-only
+  `SHA256SUMS` is not a valid import seal. The terminal marker in the runner is
+  updated to `P46_DEEPSWE_PROFILES_CPU_PASS cases=79`.
+- Adjacent release gates pass:
+  `P34_STATIC_PASS suites=10`, `P34_TRAJECTORY_CPU_PASS tests=5`,
+  `P34_UPDATE_CPU_PASS tests=5`, and
+  `P44_DEEPSWE_QWEN4B_PARITY_CPU_PASS`.
+- Synchronized the runbook, incident recovery, HANDOFF, state, plan and active
+  phase. Remote execution is explicitly blocked until this candidate is
+  committed/pushed under separate authority and read back by exact operator
+  SHA. No commit, push, cluster, PVC, credential or `main` mutation occurred.

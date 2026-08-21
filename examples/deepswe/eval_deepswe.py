@@ -926,6 +926,8 @@ def main() -> int:
             f"import_id={legacy_import_id} records={receipt['records']} "
             f"valid_records={receipt['valid_records']} "
             f"manifest_sha256={receipt['snapshot_manifest_sha256']} "
+            "source_contract_sha256="
+            f"{receipt['legacy_source_contract_sha256']} "
             f"receipt={receipt['receipt_path']}",
             flush=True,
         )

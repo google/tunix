@@ -453,9 +453,8 @@ class EvalArtifactsTest(unittest.TestCase):
         json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
     ).encode("utf-8")
     trajectory.write_bytes(payload)
-    digest = hashlib.sha256(payload).hexdigest()
-    (snapshot / "SHA256SUMS").write_text(
-        f"{digest}  trajectories/wave.jsonl\n", encoding="utf-8"
+    artifacts.seal_legacy_v5_snapshot(
+        snapshot, config=config, allowed_task_keys=["img-a"]
     )
 
     output = Path(self.temporary.name) / "resume" / "outputs"
@@ -528,9 +527,10 @@ class EvalArtifactsTest(unittest.TestCase):
     trajectory.parent.mkdir(parents=True)
     payload = (json.dumps(record) + "\n").encode()
     trajectory.write_bytes(payload)
-    (snapshot / "SHA256SUMS").write_text(
-        f"{'0' * 64}  trajectories/wave.jsonl\n", encoding="utf-8"
+    artifacts.seal_legacy_v5_snapshot(
+        snapshot, config=config, allowed_task_keys=["img-a"]
     )
+    trajectory.write_bytes(payload + b" ")
     with self.assertRaisesRegex(ValueError, "digest mismatch"):
       artifacts.import_legacy_v5_snapshot(
           snapshot,
@@ -538,11 +538,7 @@ class EvalArtifactsTest(unittest.TestCase):
           config=config,
           allowed_task_keys={"img-a"},
       )
-
-    digest = hashlib.sha256(payload).hexdigest()
-    (snapshot / "SHA256SUMS").write_text(
-        f"{digest}  trajectories/wave.jsonl\n", encoding="utf-8"
-    )
+    trajectory.write_bytes(payload)
     validation = artifacts.validate_legacy_v5_snapshot_contract(
         snapshot, config=config, allowed_task_keys={"img-a"}
     )
@@ -554,21 +550,13 @@ class EvalArtifactsTest(unittest.TestCase):
         json.dumps(later_drift, sort_keys=True) + "\n"
     ).encode()
     trajectory.write_bytes(two_record_payload)
-    (snapshot / "SHA256SUMS").write_text(
-        f"{hashlib.sha256(two_record_payload).hexdigest()}  "
-        "trajectories/wave.jsonl\n",
-        encoding="utf-8",
-    )
-    with self.assertRaisesRegex(ValueError, "sampling contract mismatch"):
+    with self.assertRaisesRegex(ValueError, "digest mismatch"):
       artifacts.validate_legacy_v5_snapshot_contract(
           snapshot, config=config, allowed_task_keys={"img-a"}
       )
     trajectory.write_bytes(payload)
-    (snapshot / "SHA256SUMS").write_text(
-        f"{digest}  trajectories/wave.jsonl\n", encoding="utf-8"
-    )
     drifted = dataclasses.replace(config, source_commit="4" * 40)
-    with self.assertRaisesRegex(ValueError, "sampling contract mismatch"):
+    with self.assertRaisesRegex(ValueError, "legacy source contract mismatch"):
       artifacts.import_legacy_v5_snapshot(
           snapshot,
           Path(self.temporary.name) / "resume-drift" / "outputs",
@@ -579,6 +567,99 @@ class EvalArtifactsTest(unittest.TestCase):
     with self.assertRaisesRegex(ValueError, "must not contain resume_contract"):
       artifacts.validate_legacy_v5_snapshot_contract(
           snapshot, config=config, allowed_task_keys={"img-a"}
+      )
+
+  def test_legacy_seal_accepts_path_drift_but_rejects_mixed_cohort(self):
+    destination = dataclasses.replace(
+        self.config,
+        source_commit="5" * 40,
+        harness_commit="6" * 40,
+        resume_tag="sealed-path-drift",
+    )
+    historical = dataclasses.replace(
+        destination,
+        model_path="/historical/model/path",
+        whitelist_path="/historical/whitelist.jsonl",
+        client_image="historical.invalid/tunix@sha256:" + "8" * 64,
+    )
+    records = []
+    for sample_index in (0, 1):
+      record = artifacts.trajectory_record(
+          historical,
+          entry={"docker_image": "img-a"},
+          sample_index=sample_index,
+          trajectory={"status": "SUCCEEDED", "reward": 0.0, "steps": []},
+          elapsed_secs=1.0,
+      )
+      record.update({
+          "schema": artifacts.LEGACY_TRAJECTORY_SCHEMA,
+          "config_fingerprint": artifacts.legacy_v5_fingerprint(historical),
+          "run_tag": artifacts.legacy_v5_run_tag(historical),
+      })
+      record.pop("resume_tag")
+      record.pop("harness_commit")
+      records.append(record)
+
+    accepted = Path(self.temporary.name) / "imports" / "path-drift"
+    trajectory = accepted / "trajectories" / "wave.jsonl"
+    trajectory.parent.mkdir(parents=True)
+    trajectory.write_text(
+        "".join(json.dumps(record) + "\n" for record in records),
+        encoding="utf-8",
+    )
+    validation = artifacts.seal_legacy_v5_snapshot(
+        accepted, config=destination, allowed_task_keys=["img-a"]
+    )
+    self.assertEqual(validation["records"], 2)
+
+    mixed = Path(self.temporary.name) / "imports" / "mixed-cohort"
+    mixed_trajectory = mixed / "trajectories" / "wave.jsonl"
+    mixed_trajectory.parent.mkdir(parents=True)
+    drifted = dict(records[1])
+    drifted["config_fingerprint"] = "9" * 64
+    drifted["run_tag"] = "q4i16k-n16-64-" + "9" * 16
+    mixed_trajectory.write_text(
+        json.dumps(records[0]) + "\n" + json.dumps(drifted) + "\n",
+        encoding="utf-8",
+    )
+    with self.assertRaisesRegex(ValueError, "mixes source cohorts"):
+      artifacts.seal_legacy_v5_snapshot(
+          mixed, config=destination, allowed_task_keys=["img-a"]
+      )
+
+  def test_legacy_import_rejects_manifest_without_source_contract(self):
+    config = dataclasses.replace(
+        self.config,
+        source_commit="5" * 40,
+        harness_commit="6" * 40,
+        resume_tag="missing-source-contract",
+    )
+    record = artifacts.trajectory_record(
+        config,
+        entry={"docker_image": "img-a"},
+        sample_index=0,
+        trajectory={"status": "SUCCEEDED", "reward": 0.0, "steps": []},
+        elapsed_secs=1.0,
+    )
+    record.update({
+        "schema": artifacts.LEGACY_TRAJECTORY_SCHEMA,
+        "config_fingerprint": artifacts.legacy_v5_fingerprint(config),
+        "run_tag": artifacts.legacy_v5_run_tag(config),
+    })
+    record.pop("resume_tag")
+    record.pop("harness_commit")
+    snapshot = Path(self.temporary.name) / "imports" / "unsealed"
+    trajectory = snapshot / "trajectories" / "wave.jsonl"
+    trajectory.parent.mkdir(parents=True)
+    payload = (json.dumps(record) + "\n").encode()
+    trajectory.write_bytes(payload)
+    (snapshot / "SHA256SUMS").write_text(
+        f"{hashlib.sha256(payload).hexdigest()}  trajectories/wave.jsonl\n",
+        encoding="utf-8",
+    )
+    with self.assertRaisesRegex(ValueError, "legacy_source_contract"):
+      artifacts.validate_legacy_v5_snapshot_contract(
+          snapshot, config=config, allowed_task_keys=["img-a"]
       )
 
   def test_legacy_import_preserves_per_logical_shard_fingerprints(self):
@@ -617,9 +698,8 @@ class EvalArtifactsTest(unittest.TestCase):
         for record in legacy_records
     )
     trajectory.write_bytes(payload)
-    (snapshot / "SHA256SUMS").write_text(
-        f"{hashlib.sha256(payload).hexdigest()}  trajectories/waves.jsonl\n",
-        encoding="utf-8",
+    artifacts.seal_legacy_v5_snapshot(
+        snapshot, config=config, allowed_task_keys=keys
     )
     receipt = artifacts.import_legacy_v5_snapshot(
         snapshot,

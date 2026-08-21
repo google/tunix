@@ -3,13 +3,14 @@
 ## Current status
 
 The next Q4 target run is the complete data-washing campaign, not another
-standalone `l0/p0` smoke. Resume-tag hardening and frozen legacy-v5 adoption
-are published as implementation commit
-`c3a960acdc94173440144559bb95f1de36d31537`. Publication checkpoint
-`dc6b5b32a90ad0e12b1b9ae50ef7cc060b450abf` was read back from
-`origin/yuxzhang/canon-zero-tim` with that commit in its ancestry. A remote
-executor must resolve the exact current branch HEAD and repeat the ancestry
-gate before rendering. Never modify or push `main`.
+standalone `l0/p0` smoke. The current local candidate adds a SHA-sealed
+`legacy_source_contract.json` on top of
+`6c3ab1f2d2ffeaf47667c07fc4151532574e6279`. It is not committed or published
+yet. Therefore a remote executor may inspect the terminal source and prepare a
+fresh staging copy, but must not render/apply until the operator branch
+contains the final repair and its exact 40-character SHA has been fetched and
+read back. Never substitute the older `f823bb6a` or `6c3ab1f2` as the launch
+pin, and never modify or push `main`.
 
 No cluster launch is authorized by this handoff alone. Render/dry-run/apply only
 within the operator's explicit instruction.
@@ -24,27 +25,49 @@ omitted that historical sampling SHA, so legacy fingerprint validation failed.
 The old entrypoint had already written the wrong destination contract;
 `p46q4census01` is incident evidence and must never be repaired or reused.
 
-The local repair validates every sealed legacy-v5 row before claiming a target
+The final repair validates every sealed legacy-v5 row before claiming a target
 tag and makes any resume import without explicit `--sampling-source-commit`
-a renderer error. Its implementation commit is
-`f823bb6a9aabf023e651788452d94ff656c827e1`. A remote executor must fetch exact
-`origin/yuxzhang/canon-zero-tim`, prove that commit is in its ancestry, and
-use the exact implementation SHA shown below. Never launch from this worktree
-or push/modify `main`.
+a renderer error. It does not reconstruct unstable historical absolute paths.
+Instead, `legacy_source_contract.json` binds the stable Q4 model/data/sampling/
+topology facts and exactly one opaque `(config_fingerprint, run_tag)` cohort
+per observed logical shard. The contract and every JSONL are covered by `SHA256SUMS`.
+Missing/tampered contracts, wrong semantics, mixed cohorts, changed files or
+cardinality drift fail before the destination resume contract and TPU runtime.
 
 The recovery procedure and exact observed stack are in
 `../../cluster/P46_CENSUS_SNAPSHOT_RESUME_INCIDENT.md`. The required facts are:
 
-1. Prove the source producer is terminal and the copied files are stable.
-2. Copy only `trajectories/*.jsonl` into a new sealed v5 snapshot. Do not put
-   `resume_contract.json` in a legacy-v5 staging directory.
-3. Use fresh destination tag `p46q4census02`, import id
+1. Fetch `origin/yuxzhang/canon-zero-tim`. Require the published repair SHA in
+   `FETCH_HEAD` ancestry, check it out exactly, and run
+   `bash canon-zero-tim/tests/p46_deepswe_profiles/run_cpu.sh`; require
+   `P46_DEEPSWE_PROFILES_CPU_PASS cases=79`.
+2. Prove the source producer is terminal and the copied files are stable.
+3. Copy only `trajectories/*.jsonl` into a fresh staging directory. Do not put
+   `resume_contract.json`, `legacy_source_contract.json`, or `SHA256SUMS` in it
+   by hand.
+4. Seal that copy with:
+
+   ```bash
+   python3 canon-zero-tim/cluster/seal_p46_legacy_v5_snapshot.py \
+     --snapshot-dir "$SNAPSHOT" \
+     --sampling-source-commit ac2c31bc7f6f82d33b3a62d62e1c390c8338b60e \
+     --topology 128
+   (cd "$SNAPSHOT" && sha256sum -c SHA256SUMS)
+   chmod -R a-w "$SNAPSHOT"
+   ```
+
+   Require `P46_LEGACY_V5_SEAL_PASS`; inspect
+   `legacy_source_contract.json`, including its sampler/topology and per-shard
+   cohort list. A sealer failure is a hard stop; use a new staging copy rather
+   than editing the failed/old evidence.
+5. Use fresh destination tag `p46q4census02`, import id
    `p46e12806-v5-final`, `--legacy-import-id`, and explicit
    `--sampling-source-commit ac2c31bc7f6f82d33b3a62d62e1c390c8338b60e`.
-4. Render from `canon-zero-tim/cluster/jobset-256cluster-64chip.yaml` with
+6. Render from `canon-zero-tim/cluster/jobset-256cluster-64chip.yaml` with
    workload `q4-clean-eval`, topology 128, `--full-campaign`, and
    `--first-pass-census`.
-5. Require `[P46.RESUME] LEGACY_IMPORT_PASS records=<actual>` before runtime.
+7. Do not apply without separate launch authority. If authorized, require
+   `[P46.RESUME] LEGACY_IMPORT_PASS records=<actual>` before runtime.
    The incident report observed 510 raw rows; only the marker/receipt states
    the imported count. If a complete terminal source has more rows, seal that
    complete raw tree instead.
@@ -217,13 +240,14 @@ bash canon-zero-tim/tests/p46_deepswe_profiles/run_cpu.sh
 Required CPU marker:
 
 ```text
-P46_DEEPSWE_PROFILES_CPU_PASS cases=77
+P46_DEEPSWE_PROFILES_CPU_PASS cases=79
 ```
 
 The suite includes complete-scale orchestration, torn-tail recovery,
 17-of-64 interruption followed by a 47-identity resume, immutable contract,
 single-writer lease, attempt-log, full-campaign postflight, and digest/fingerprint
-checked v5-to-v6 adoption across logical shards. CPU PASS is not
+checked v5-to-v6 adoption across logical shards. It also proves path-drift
+acceptance, missing-contract rejection and mixed-cohort rejection. CPU PASS is not
 TPU/Kubernetes or campaign-completion evidence.
 
 ## Transition `p46e12805` without stopping it
@@ -235,6 +259,7 @@ staging path below under a **fresh** resume tag:
 
 ```text
 /mnt/disks/linchai_data/deepswe_eval/<resume-tag>/imports/p46e12805/trajectories/
+/mnt/disks/linchai_data/deepswe_eval/<resume-tag>/imports/p46e12805/legacy_source_contract.json
 /mnt/disks/linchai_data/deepswe_eval/<resume-tag>/imports/p46e12805/SHA256SUMS
 ```
 
@@ -247,7 +272,7 @@ v6 trajectory evidence.
 The first adoption manifest must use exactly:
 
 ```text
---source-commit c3a960acdc94173440144559bb95f1de36d31537
+--source-commit <exact published sealed-contract repair SHA>
 --sampling-source-commit 18d5d2ac1603a26a221af9d5fc430b084ec002df
 --legacy-import-id p46e12805
 --resume-tag <fresh stable tag>
@@ -257,7 +282,7 @@ The first adoption manifest must use exactly:
 Before TPU initialization it must emit:
 
 ```text
-[P46.RESUME] LEGACY_IMPORT_PASS import_id=p46e12805 records=<n> valid_records=<n> manifest_sha256=<sha256> receipt=<absolute-path>
+[P46.RESUME] LEGACY_IMPORT_PASS import_id=p46e12805 records=<n> valid_records=<n> manifest_sha256=<sha256> source_contract_sha256=<sha256> receipt=<absolute-path>
 ```
 
 Any manifest, fingerprint, task-order, identity, attempt, logprob or provenance

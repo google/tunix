@@ -7,7 +7,7 @@ Qwen3-32B training renders on 64-chip `4x4x4` or 256-chip `4x8x8`. The renderer
 writes the signed parameters directly into the JobSet; do not add a second
 shell override layer.
 
-## 2026-08-21 returned-snapshot correction
+## 2026-08-21 sealed legacy-v5 source contract (current operator path)
 
 The current operator path is **legacy-v5 adoption into a fresh census tag**,
 not the generic frozen-v6 path below. Attempt
@@ -20,19 +20,32 @@ runtime.
 
 Do not reuse `p46q4census01`: the old code wrote its incorrect immutable
 resume contract before import validation. Preserve it as incident evidence.
-Use a fresh destination such as `p46q4census02`; make a sealed v5-only copy
-containing trajectory JSONLs plus `SHA256SUMS` and no
-`resume_contract.json`; then render `--legacy-import-id` with explicit
+Use a fresh destination such as `p46q4census02`; make a v5-only copy with no
+`resume_contract.json`, then seal it with the repository command below. A
+valid snapshot contains all three of: `trajectories/*.jsonl`,
+`legacy_source_contract.json`, and `SHA256SUMS`. Then render
+`--legacy-import-id` with explicit
 `--sampling-source-commit ac2c31bc7f6f82d33b3a62d62e1c390c8338b60e`.
 Require `LEGACY_IMPORT_PASS records=<actual>` before runtime. Imported durable
 identities are skipped, so this does not restart washing from zero.
 
-The fixed entrypoint validates all legacy-v5 rows before writing the new resume
-contract, and the renderer refuses either import mode without an explicit
-sampling-source SHA. Repair implementation
-`f823bb6a9aabf023e651788452d94ff656c827e1` must be present in the freshly
-read-back operator-branch ancestry before a remote launch. Full commands,
-exact error evidence and cardinality limits are in
+The source contract binds the stable model/data/sampling/topology facts plus
+exactly one opaque `(config_fingerprint, run_tag)` cohort per observed logical
+shard.
+Old absolute model/whitelist paths and the unrecorded source client image are
+not reconstructed. Mixed cohorts, a missing/tampered contract, wrong sampler,
+wrong topology/data, cardinality drift, or any changed trajectory digest fail
+before the destination resume contract and before TPU initialization.
+
+The earlier `6c3ab1f2d2ffeaf47667c07fc4151532574e6279` compatibility change is not
+an execution pin: it accepted arbitrary well-formed fingerprints and did not
+bind run tags. The sealed-contract repair is currently an uncommitted local
+candidate based on that HEAD. A remote executor may prepare and inspect a
+staging copy now, but must not render/apply from this paragraph until the
+repair is committed, pushed only to `yuxzhang/canon-zero-tim`, and read back as
+an exact 40-character operator-branch SHA. Substitute that published SHA for
+`HARNESS_SHA` in the command below; never fall back to `f823bb6a` or `6c3ab1f2`.
+Full commands, exact error evidence and cardinality limits are in
 `P46_CENSUS_SNAPSHOT_RESUME_INCIDENT.md`.
 
 ## P46.7 breadth-first census and generic v6 handoff
@@ -197,7 +210,7 @@ finalizer are published by
 `a642ab267425a5b08b0cebb6e12c607f50f71831`. A remote agent must stop unless
 the exact read-back operator SHA contains that commit and all of
 `attempt_index`, `P46_EVAL_PHYSICAL_INCOMPLETE`, and
-`P46_DEEPSWE_PROFILES_CPU_PASS cases=77`, plus
+`P46_DEEPSWE_PROFILES_CPU_PASS cases=79`, plus
 `finalize_deepswe_eval.py`. Do not invent or substitute a repair SHA in
 advance.
 
@@ -476,13 +489,16 @@ timeout remains available but cannot poison the current postflight grep.
 A legacy config-v3/trajectory-v5 campaign is never read from its live output
 directory. After that JobSet reaches a natural terminal state and no producer
 pod remains, an operator may copy its trajectory tree once into
-`<resume-root>/imports/<legacy-run-id>/trajectories/` and seal the copy with
-`SHA256SUMS`. Under the new campaign lease, the importer verifies every file
-digest, exact derived v5 fingerprint, ordered clean task, sample nonce,
-attempt sequence, outcome, reward-only logprob absence, and per-logical-shard
-provenance. It then emits immutable v6 rows plus an import receipt before TPU
-initialization. The old sampler SHA remains `sampled_by`; the new checkout SHA
-is recorded separately as `harness_commit`. Directly copying v5 rows into
+`<resume-root>/imports/<legacy-run-id>/trajectories/` and run
+`seal_p46_legacy_v5_snapshot.py`. The sealer writes an immutable
+`legacy_source_contract.json` and a `SHA256SUMS` that covers both the contract
+and every JSONL. Under the new campaign lease, the importer verifies every
+file digest, stable source semantics, exactly one sealed opaque fingerprint/run
+tag cohort per observed logical shard, ordered clean task, sample nonce, attempt
+sequence, outcome and reward-only logprob absence. It then emits immutable v6
+rows plus an import receipt before TPU initialization. The old sampler SHA
+remains `sampled_by`; the new checkout SHA is recorded separately as
+`harness_commit`. Directly copying v5 rows into
 `outputs/trajectories/`, importing a live directory, or changing any signed
 model/data/sampling/topology field is forbidden and fails closed.
 
@@ -494,6 +510,7 @@ failure. Durable output is under the mounted disk at:
 /mnt/disks/linchai_data/deepswe_eval/<resume-tag>/outputs/resume_contract.json
 /mnt/disks/linchai_data/deepswe_eval/<resume-tag>/outputs/resume_lease.json
 /mnt/disks/linchai_data/deepswe_eval/<resume-tag>/imports/<legacy-run-id>/
+/mnt/disks/linchai_data/deepswe_eval/<resume-tag>/imports/<legacy-run-id>/legacy_source_contract.json
 /mnt/disks/linchai_data/deepswe_eval/<resume-tag>/outputs/imports/*.receipt.json
 /mnt/disks/linchai_data/deepswe_eval/<resume-tag>/outputs/trajectories/
 /mnt/disks/linchai_data/deepswe_eval/<resume-tag>/outputs/census/
@@ -561,7 +578,7 @@ in the P34/P44 runbooks with the actual registry-digest client image. Do not
 print or modify `HF_TOKEN`, `WANDB_API_KEY`, or `.env`.
 
 For evaluation execution after the `p46e25609` action-adapter correction, the
-marker must be exactly `P46_DEEPSWE_PROFILES_CPU_PASS cases=77`, and this
+marker must be exactly `P46_DEEPSWE_PROFILES_CPU_PASS cases=79`, and this
 source audit must
 pass before rendering:
 
@@ -685,31 +702,45 @@ LEGACY_ROOT=/mnt/disks/linchai_data/deepswe_eval/$LEGACY_RUN_ID
 RESUME_TAG=p46q4wash01
 RESUME_ROOT=/mnt/disks/linchai_data/deepswe_eval/$RESUME_TAG
 SNAPSHOT_ROOT=$RESUME_ROOT/imports/$LEGACY_RUN_ID
+SAMPLING_SOURCE_SHA=18d5d2ac1603a26a221af9d5fc430b084ec002df
+TOPOLOGY=128
 
 test -d "$LEGACY_ROOT/outputs/trajectories"
 test ! -e "$SNAPSHOT_ROOT"
 test -z "$(find "$LEGACY_ROOT/outputs/trajectories" -type l -print -quit)"
 install -d "$SNAPSHOT_ROOT/trajectories"
 cp -a "$LEGACY_ROOT/outputs/trajectories/." "$SNAPSHOT_ROOT/trajectories/"
-(
-  cd "$SNAPSHOT_ROOT"
-  find trajectories -type f -name '*.jsonl' -print0 \
-    | LC_ALL=C sort -z \
-    | xargs -0 -r sha256sum > SHA256SUMS.tmp
-  test -s SHA256SUMS.tmp
-  mv SHA256SUMS.tmp SHA256SUMS
-)
+test ! -e "$SNAPSHOT_ROOT/resume_contract.json"
+python3 canon-zero-tim/cluster/seal_p46_legacy_v5_snapshot.py \
+  --snapshot-dir "$SNAPSHOT_ROOT" \
+  --sampling-source-commit "$SAMPLING_SOURCE_SHA" \
+  --topology "$TOPOLOGY"
+test -f "$SNAPSHOT_ROOT/legacy_source_contract.json"
+test -f "$SNAPSHOT_ROOT/SHA256SUMS"
+(cd "$SNAPSHOT_ROOT" && sha256sum -c SHA256SUMS)
 chmod -R a-w "$SNAPSHOT_ROOT"
 ```
+
+The sealer must print `P46_LEGACY_V5_SEAL_PASS`. It derives the clean task
+order from the exact reviewed 1,851-row whitelist, verifies the stable Q4
+N16/16K/50-step contract, and refuses two fingerprint/run-tag cohorts in one
+observed logical shard. Do not hand-author `legacy_source_contract.json`, do not create
+a trajectory-only `SHA256SUMS` first, and do not edit a sealed snapshot. If
+the sealer fails, preserve the old producer evidence and use a new staging
+copy after resolving the cause.
 
 Use a fresh resume tag with no existing target trajectory files. The first
 resume-capable launch pins the new harness commit separately from the old
 sampling lineage and performs the import before model initialization:
 
 ```bash
-HARNESS_SHA=c3a960acdc94173440144559bb95f1de36d31537
-SAMPLING_SOURCE_SHA=18d5d2ac1603a26a221af9d5fc430b084ec002df
+HARNESS_SHA=replace-with-published-sealed-contract-repair-sha
 RUN_ID=p46r01a0
+
+[[ "$HARNESS_SHA" =~ ^[0-9a-f]{40}$ ]]
+git fetch origin yuxzhang/canon-zero-tim
+git merge-base --is-ancestor "$HARNESS_SHA" FETCH_HEAD
+test "$(git rev-parse "$HARNESS_SHA^{commit}")" = "$HARNESS_SHA"
 
 python3 canon-zero-tim/cluster/render_p46_deepswe_profiles.py \
   --base "$BASE" \
@@ -732,7 +763,7 @@ python3 canon-zero-tim/cluster/render_p46_deepswe_profiles.py \
 Required pre-TPU marker:
 
 ```text
-[P46.RESUME] LEGACY_IMPORT_PASS import_id=p46e12805 records=<n> valid_records=<n> manifest_sha256=<sha256> receipt=<absolute-path>
+[P46.RESUME] LEGACY_IMPORT_PASS import_id=p46e12805 records=<n> valid_records=<n> manifest_sha256=<sha256> source_contract_sha256=<sha256> receipt=<absolute-path>
 ```
 
 The exact receipt is
