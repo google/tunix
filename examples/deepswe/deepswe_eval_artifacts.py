@@ -549,10 +549,7 @@ def _legacy_contract_cohorts(
   wrong = {}
   if contract.get("schema") != LEGACY_SOURCE_CONTRACT_SCHEMA:
     wrong["schema"] = contract.get("schema")
-  if contract.get("trajectory_schema") not in (
-      LEGACY_TRAJECTORY_SCHEMA,
-      TRAJECTORY_SCHEMA,
-  ):
+  if contract.get("trajectory_schema") != LEGACY_TRAJECTORY_SCHEMA:
     wrong["trajectory_schema"] = contract.get("trajectory_schema")
   if contract.get("semantics") != legacy_v5_source_semantics(config):
     wrong["semantics"] = contract.get("semantics")
@@ -632,6 +629,13 @@ def _discover_legacy_v5_cohorts(
         raise ValueError(f"invalid JSON before trailing line in {path}")
       if not isinstance(record, Mapping):
         raise ValueError(f"legacy trajectory is not an object: {path}")
+      if record.get("schema") == TRAJECTORY_SCHEMA:
+        raise ValueError(
+            "trajectory-v6 snapshot was selected with --legacy-import-id; "
+            "use --frozen-v6-import-id and its resume_contract.json"
+        )
+      if record.get("schema") != LEGACY_TRAJECTORY_SCHEMA:
+        raise ValueError(f"unsupported legacy snapshot schema in {path}")
       key = record.get("task_key")
       if not isinstance(key, str) or key not in task_index:
         raise ValueError(f"legacy trajectory identity mismatch in {path}")
@@ -758,7 +762,7 @@ def validate_legacy_v5_snapshot_contract(
   sampled_by: str | None = None
   records = 0
   valid_records = 0
-  cohort_records: dict[int, int] = collections.defaultdict(int)
+  cohort_records: dict[tuple[int, str], int] = collections.defaultdict(int)
   attempts: dict[tuple[str, int], list[Mapping[str, Any]]] = (
       collections.defaultdict(list)
   )
@@ -775,7 +779,12 @@ def validate_legacy_v5_snapshot_contract(
         raise ValueError(f"invalid JSON before trailing line in {path}")
       if not isinstance(record, Mapping):
         raise ValueError(f"legacy trajectory is not an object: {path}")
-      if record.get("schema") not in (LEGACY_TRAJECTORY_SCHEMA, TRAJECTORY_SCHEMA):
+      if record.get("schema") == TRAJECTORY_SCHEMA:
+        raise ValueError(
+            "trajectory-v6 snapshot was selected with --legacy-import-id; "
+            "use --frozen-v6-import-id and its resume_contract.json"
+        )
+      if record.get("schema") != LEGACY_TRAJECTORY_SCHEMA:
         raise ValueError(f"unsupported legacy snapshot schema in {path}")
       key = record.get("task_key")
       sample_index = record.get("sample_index")
@@ -848,7 +857,7 @@ def validate_legacy_v5_snapshot_contract(
             f"legacy-v5 snapshot outcome is malformed in {path}"
         )
       prior.append(record)
-      cohort_records[logical_index] += 1
+      cohort_records[(logical_index, cohort["config_fingerprint"])] += 1
       valid_records += valid is True
       if first_record_path is None:
         first_record_path = str(path)
@@ -857,7 +866,8 @@ def validate_legacy_v5_snapshot_contract(
   if first_record_path is None:
     raise ValueError("legacy snapshot contains no complete trajectory records")
   expected_cohort_records = {
-      index: int(cohort["records"]) for index, cohort in cohorts.items()
+      cohort_key: int(cohort["records"])
+      for cohort_key, cohort in cohorts.items()
   }
   cardinality_wrong = {}
   if records != source_contract["records"]:
@@ -1279,6 +1289,13 @@ def import_legacy_v5_snapshot(
         raise ValueError(f"invalid JSON before trailing line in {path}")
       if not isinstance(record, dict):
         raise ValueError(f"legacy trajectory is not an object: {path}")
+      if record.get("schema") == TRAJECTORY_SCHEMA:
+        raise ValueError(
+            "trajectory-v6 snapshot was selected with --legacy-import-id; "
+            "use --frozen-v6-import-id and its resume_contract.json"
+        )
+      if record.get("schema") != LEGACY_TRAJECTORY_SCHEMA:
+        raise ValueError(f"unsupported legacy snapshot schema in {path}")
       key = record.get("task_key")
       sample_index = record.get("sample_index")
       attempt_index = record.get("attempt_index", 0)

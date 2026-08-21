@@ -569,7 +569,7 @@ class EvalArtifactsTest(unittest.TestCase):
           snapshot, config=config, allowed_task_keys={"img-a"}
       )
 
-  def test_legacy_seal_accepts_path_drift_but_rejects_mixed_cohort(self):
+  def test_legacy_seal_accepts_path_drift_and_multi_cohort_in_one_logical_shard(self):
     destination = dataclasses.replace(
         self.config,
         source_commit="5" * 40,
@@ -622,9 +622,50 @@ class EvalArtifactsTest(unittest.TestCase):
         json.dumps(records[0]) + "\n" + json.dumps(drifted) + "\n",
         encoding="utf-8",
     )
-    with self.assertRaisesRegex(ValueError, "mixes source cohorts"):
+    mixed_validation = artifacts.seal_legacy_v5_snapshot(
+        mixed, config=destination, allowed_task_keys=["img-a"]
+    )
+    self.assertEqual(mixed_validation["records"], 2)
+    contract = json.loads(
+        (mixed / artifacts.LEGACY_SOURCE_CONTRACT_NAME).read_text(
+            encoding="utf-8"
+        )
+    )
+    self.assertEqual(len(contract["cohorts"]), 2)
+    receipt = artifacts.import_legacy_v5_snapshot(
+        mixed,
+        Path(self.temporary.name) / "mixed-resume" / "outputs",
+        config=destination,
+        allowed_task_keys=["img-a"],
+    )
+    self.assertEqual(receipt["records"], 2)
+
+    bad_tag = Path(self.temporary.name) / "imports" / "bad-tag"
+    bad_trajectory = bad_tag / "trajectories" / "wave.jsonl"
+    bad_trajectory.parent.mkdir(parents=True)
+    drifted_bad_tag = dict(drifted)
+    drifted_bad_tag["run_tag"] = "wrong-run-tag"
+    bad_trajectory.write_text(
+        json.dumps(records[0]) + "\n" + json.dumps(drifted_bad_tag) + "\n",
+        encoding="utf-8",
+    )
+    with self.assertRaisesRegex(ValueError, "malformed"):
       artifacts.seal_legacy_v5_snapshot(
-          mixed, config=destination, allowed_task_keys=["img-a"]
+          bad_tag, config=destination, allowed_task_keys=["img-a"]
+      )
+
+    v6_import = Path(self.temporary.name) / "imports" / "v6-row"
+    v6_trajectory = v6_import / "trajectories" / "wave.jsonl"
+    v6_trajectory.parent.mkdir(parents=True)
+    v6_record = dict(records[0])
+    v6_record["schema"] = artifacts.TRAJECTORY_SCHEMA
+    v6_trajectory.write_text(
+        json.dumps(v6_record) + "\n",
+        encoding="utf-8",
+    )
+    with self.assertRaisesRegex(ValueError, "trajectory-v6 snapshot was selected with --legacy-import-id"):
+      artifacts.seal_legacy_v5_snapshot(
+          v6_import, config=destination, allowed_task_keys=["img-a"]
       )
 
   def test_legacy_import_rejects_manifest_without_source_contract(self):
