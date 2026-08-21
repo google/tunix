@@ -210,14 +210,14 @@ class ContinuousSampler:
       params: statelib.State,
       tokens: jnp.ndarray,
       positions: jnp.ndarray,
-      cache: page_manager_lib.PageManager,
+      cache: CacheManager,
       distribution: jnp.ndarray,
       seq_lens: jnp.ndarray,
       soft_cap: float | None = None,
       images: jnp.ndarray | None = None,
       audios: Any = None,
       echo: bool = False,
-  ) -> Tuple[jnp.ndarray, page_manager_lib.PageManager]:
+  ) -> Tuple[jnp.ndarray, CacheManager]:
     """Unified forward pass invoking transformer with explicit distribution."""
     transformer = nnx.merge(self._transformer_graphdef, params)
     
@@ -250,7 +250,7 @@ class ContinuousSampler:
     
     return next_tokens, cache
     
-  def sample(self, all_active, prefills, hbm_pm):
+  def sample(self, all_active, prefills, cache: CacheManager):
       """One map execution of the sampler mapping python active arrays to JAX primitives."""
       num_decodes = len(all_active) - len(prefills)
       total_active = len(all_active)
@@ -284,15 +284,15 @@ class ContinuousSampler:
       
       # Pad arrays to static loop block capacities if necessary (Optional, nnx handles ragged lengths)
       # Then execute JIT wrapper
-      next_tokens, next_hbm_pm = self._compiled_step_fn(
+      next_tokens, next_cache = self._compiled_step_fn(
           self._flattened_transformer_state,
           tokens=tokens_np,
           positions=positions_np,
-          cache=hbm_pm,
+          cache=cache,
           distribution=distribution_arr,
           seq_lens=seq_lens_np,
           soft_cap=None,
       )
       
       next_tokens_cpu = jax.device_get(next_tokens)
-      return next_tokens_cpu, next_hbm_pm
+      return next_tokens_cpu, next_cache

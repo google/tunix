@@ -12,11 +12,21 @@ class CacheManager:
     """
     def __init__(
         self, 
-        hbm_page_manager: page_manager_lib.PageManager,
+        hbm_page_manager: page_manager_lib.BlockPool,
+        max_num_seqs: int,
+        max_num_pages_per_seq: int,
+        page_size: int,
         offload_page_manager: Optional[page_manager_lib.BlockPool] = None
     ):
         self.hbm_page_manager = hbm_page_manager
         self.offload_page_manager = offload_page_manager
+        
+        self.max_num_seqs = max_num_seqs
+        self.max_num_pages_per_seq = max_num_pages_per_seq
+        self.page_size = page_size
+        
+        self.page_indices = np.full((max_num_seqs, max_num_pages_per_seq), -1, dtype=np.int32)
+        self.seq_lens = np.zeros((max_num_seqs,), dtype=np.int32)
         
         self._next_page_id: int = 0
         
@@ -28,43 +38,25 @@ class CacheManager:
 
     def assign(self, sseq_page_ids: List[List[int]]):
         """
-        Maps logical page_ids to physical page_idxs and calls the underlying 
-        JAX PageManager.assign method directly.
+        Maps logical page_ids to physical page_idxs and natively populates the python 
+        sequence arrays for PageManager.
         """
         num_seqs = len(sseq_page_ids)
-        if num_seqs == 0:
-            return
-
-        packed_hbm_idxs = []
-        hbm_lens = []
+        if num_seqs > self.max_num_seqs:
+            raise RuntimeError("Exceeded max_num_seqs")
+            
+        self.page_indices = np.full((self.max_num_seqs, self.max_num_pages_per_seq), -1, dtype=np.int32)
+        self.seq_lens = np.zeros((self.max_num_seqs,), dtype=np.int32)
         
-        for page_ids in sseq_page_ids:
+        for req_idx, page_ids in enumerate(sseq_page_ids):
             seq_hbm_count = 0
-            for pid in page_ids:
+            for i, pid in enumerate(page_ids):
                 if self._page_location.get(pid) == "tpu":
-                    packed_hbm_idxs.append(self._page_id_to_idx[pid])
+                    self.page_indices[req_idx, i] = self._page_id_to_idx[pid]
                     seq_hbm_count += 1
                 else:
                     raise RuntimeError(f"Page {pid} is not strictly in HBM, cannot assign!")
-            hbm_lens.append(seq_hbm_count)
-
-        padded_seq_idxs = np.full((self.hbm_page_manager.batch_size,), fill_value=self.hbm_page_manager.max_num_seqs, dtype=np.int32) 
-        padded_seq_idxs[:num_seqs] = list(range(num_seqs))
-        
-        padded_lens = np.zeros((self.hbm_page_manager.batch_size,), dtype=np.int32)
-        padded_lens[:num_seqs] = hbm_lens
-        
-        max_packed_capacity = self.hbm_page_manager.batch_size * self.hbm_page_manager.max_num_pages_per_seq
-        padded_hbm_idxs = np.full((max_packed_capacity,), fill_value=-1, dtype=np.int32)
-        
-        actual_packed_len = len(packed_hbm_idxs)
-        padded_hbm_idxs[:actual_packed_len] = packed_hbm_idxs
-
-        self.hbm_page_manager = self.hbm_page_manager.assign(
-            jnp.array(padded_seq_idxs),
-            jnp.array(padded_hbm_idxs), 
-            jnp.array(padded_lens)
-        )
+            self.seq_lens[req_idx] = seq_hbm_count * self.page_size
 
     def allocate(self, num_pages: int) -> List[int]:
         """Allocates logical pages backing them immediately with HBM physical pages."""
@@ -214,3 +206,35 @@ class CacheManager:
                 jnp.array(len(tpu_idxs_to_evict))
             )
             self.available_hbm_pages += len(tpu_idxs_to_evict)
+
+    def tree_flatten(self):
+        children = (
+            self.hbm_page_manager,
+            self.offload_page_manager,
+            self.page_indices,
+            self.seq_lens
+        )
+        aux_data = {
+            'max_num_seqs': self.max_num_seqs,
+            'max_num_pages_per_seq': self.max_num_pages_per_seq,
+            'page_size': self.page_size,
+            '_next_page_id': self._next_page_id,
+            '_page_id_to_idx': self._page_id_to_idx,
+            '_page_location': self._page_location,
+            'available_hbm_pages': self.available_hbm_pages,
+            'available_cpu_pages': self.available_cpu_pages,
+        }
+        return (children, aux_data)
+
+    @classmethod
+    def tree_unflatten(cls, aux_data, children):
+        obj = cls.__new__(cls)
+        obj.hbm_page_manager = children[0]
+        obj.offload_page_manager = children[1]
+        obj.page_indices = children[2]
+        obj.seq_lens = children[3]
+        for k, v in aux_data.items():
+            setattr(obj, k, v)
+        return obj
+
+jax.tree_util.register_pytree_node(CacheManager, CacheManager.tree_flatten, CacheManager.tree_unflatten)

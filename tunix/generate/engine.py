@@ -62,6 +62,9 @@ class LLMEngine:
         # Initialize scheduling and physical memory allocators
         self.cache_manager = cache_manager_lib.CacheManager(
             hbm_page_manager=self.hbm_pm,
+            max_num_seqs=cache_config.max_num_seqs,
+            max_num_pages_per_seq=utils.cdiv(self.max_seq_len, cache_config.page_size),
+            page_size=cache_config.page_size,
             offload_page_manager=self.cpu_pm
         )
         
@@ -69,6 +72,7 @@ class LLMEngine:
             cache_manager=self.cache_manager,
             page_size=cache_config.page_size,
             max_num_seqs=cache_config.max_num_seqs,
+            max_num_batch_tokens=getattr(cache_config, "max_num_batch_tokens", 1024),
         )
         
     def add_request(self, req_id: str, prompt_tokens: List[int]):
@@ -89,9 +93,9 @@ class LLMEngine:
         if not all_active:
             return
             
-        hbm_pm = self.cache_manager.hbm_page_manager
-        next_tokens_cpu, next_hbm_pm = self.sampler.sample(all_active, prefills, hbm_pm)
-        self.cache_manager.hbm_page_manager = next_hbm_pm 
+        cache = self.cache_manager
+        next_tokens_cpu, next_cache = self.sampler.sample(all_active, prefills, cache)
+        self.cache_manager = next_cache 
         
         for i, r in enumerate(all_active):
             tok = int(next_tokens_cpu[i])
