@@ -95,17 +95,20 @@ class RepeatIterable(Iterable[Any]):
         yield from self._shuffle_and_slice_one_batch(rollout_batch)
 
 
+ArrayType = jax.Array | np.ndarray
+
+
 @flax.struct.dataclass(frozen=True)
 class TrainExample:
-  prompt_ids: jax.Array
-  prompt_mask: jax.Array
-  completion_ids: jax.Array
-  completion_mask: jax.Array
-  advantages: jax.Array
-  ref_per_token_logps: jax.Array | None
-  old_per_token_logps: jax.Array | None
-  segment_ids: jax.Array | None = None
-  segment_positions: jax.Array | None = None
+  prompt_ids: ArrayType
+  prompt_mask: ArrayType
+  completion_ids: ArrayType
+  completion_mask: ArrayType
+  advantages: ArrayType
+  ref_per_token_logps: ArrayType | None
+  old_per_token_logps: ArrayType | None
+  segment_ids: ArrayType | None = None
+  segment_positions: ArrayType | None = None
   # Static (JIT-compile-time) upper bound on segments per packed row, including
   # the padding bucket (segment 0). Set by `pack_sequences` to
   # ``max_token_budget + 1`` -- a pack of ``budget`` tokens holds at most
@@ -113,13 +116,20 @@ class TrainExample:
   # ``pytree_node=False`` so it is a static Python int (a fixed value every
   # step -> the segment-aware loss compiles once, no per-step recompilation).
   num_segments: int | None = flax.struct.field(default=None, pytree_node=False)
-  is_update_step: jax.Array | None = None
+  is_update_step: ArrayType | None = None
   # Truncated importance-sampling correction weights for off-policy
   # correction between the rollout sampler and the trainer. Per-token,
   # detached, multiplied into the policy-gradient loss BEFORE aggregation
   # to dampen positions where the trainer's recomputed log-probability
   # diverges from the rollout sampler's. ``None`` disables the correction.
-  sampler_is_weights: jax.Array | None = None
+  sampler_is_weights: ArrayType | None = None
+
+  def to_jax_array(self) -> "TrainExample":
+    """Returns a copy of the batch with all array fields moved to JAX array."""
+    return jax.tree.map(
+        lambda x: jnp.asarray(x) if isinstance(x, np.ndarray) else x,
+        self,
+    )
 
 
 def compute_kl_divergence(
@@ -358,7 +368,8 @@ def compute_per_token_logps(
       probs for the full packed sequence padded out (since prompts and
       completions of multiple sequences are concatenated), with shape `[B,
       FullSeqLen]`.
-    entropy: optional per-token entropy jax.Array of shape matches per_token_logps,
+    entropy: optional per-token entropy jax.Array of shape matches
+    per_token_logps,
       returned if return_entropy is True.
   """
   model = nnx.merge(graphdef, state)
@@ -1120,6 +1131,7 @@ def global_weighted_mean(values: Iterable[utils.WeightedMetric]) -> float:
   total_sum = sum(float(v.unreduced_sum) for v in values)
   total_denom = sum(float(v.denominator) for v in values)
   return total_sum / total_denom if total_denom != 0 else 0.0
+
 
 def compute_entropy_from_logits(logits: jax.Array) -> jax.Array:
   """Computes the entropy of a distribution given its logits.
