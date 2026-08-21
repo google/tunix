@@ -21,7 +21,8 @@ class _WriteTask:
 
   Encapsulates all necessary data transferred across the thread boundary from
   the frontend calling thread (e.g. rollout worker) to the background worker
-  thread executing disk I/O.
+  thread executing disk I/O. `metadata` and `step` are private deep copies
+  owned by the task, never the caller's live objects; see `write_step`.
   """
 
   traj_dir: epath.Path
@@ -72,7 +73,14 @@ class AsyncFileWriter:
        This enables deterministic testing, reliable step inspection, and clean
        synchronization at episode or checkpoint boundaries.
 
-    5. Daemon Thread Lifecycle & Destructor:
+    5. Snapshot-on-Enqueue Ownership:
+       Because writes are serialized on the worker thread rather than on the
+       caller thread, `write_step()` deep copies the metadata and step it is
+       given. The queued task then owns data no other thread can mutate, so a
+       caller that keeps updating a step or trajectory after logging it cannot
+       corrupt the file that is about to be written.
+
+    6. Daemon Thread Lifecycle & Destructor:
        The background worker thread is marked as a daemon (`daemon=True`) so it
        never blocks Python process termination if an unhandled signal or exit
        occurs. The `__del__` destructor provides a best-effort graceful shutdown
@@ -105,9 +113,21 @@ class AsyncFileWriter:
   ) -> None:
     """Enqueues a step and/or trajectory metadata for asynchronous writing.
 
-    This operation is non-blocking and executes in O(1) time on the caller
-    thread. The worker thread is lazily spawned on the first invocation if not
-    already running.
+    This operation is non-blocking and returns on the caller thread without
+    waiting for any disk I/O. The worker thread is lazily spawned on the first
+    invocation if not already running.
+
+    `metadata` and `step` are deep copied before being enqueued, so what lands
+    on disk is exactly what the caller passed in. Serialization happens on the
+    worker thread, possibly long after this call returns, and callers routinely
+    keep mutating the objects they hand over (a rollout worker appending tokens
+    to the step it just logged, or flipping trajectory status from RUNNING to
+    COMPLETED). Without the copy, those later mutations would leak into the
+    already enqueued write, producing files that never matched any state the
+    trajectory actually had. The copy makes the caller-side cost proportional
+    to the payload size rather than O(1), which is a deliberate trade for
+    correctness; the expensive part, serialization and I/O, remains off the
+    caller thread.
 
     Args:
       traj_dir: Directory path for the trajectory.
@@ -123,8 +143,8 @@ class AsyncFileWriter:
         traj_dir=traj_dir,
         meta_path=meta_path,
         step_path=step_path,
-        metadata=metadata,
-        step=step,
+        metadata=metadata.model_copy(deep=True),
+        step=step.model_copy(deep=True) if step is not None else None,
     )
     with self._lock:
       if self._closed:

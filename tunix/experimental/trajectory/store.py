@@ -77,6 +77,9 @@ class TrajectoryWriter(Protocol):
     asynchronously. Readers never observe partially written or inconsistent
     state.
 
+    Implementations snapshot `step` and `metadata` at call time, so callers may
+    keep mutating those objects afterwards without affecting what was logged.
+
     Args:
       step: Step object to log.
       metadata: TrajectoryMetadata containing trajectory_id and run metadata.
@@ -88,6 +91,9 @@ class TrajectoryWriter(Protocol):
       metadata: trajectory_lib.TrajectoryMetadata,
   ) -> None:
     """Updates (or creates) trajectory metadata.
+
+    Implementations snapshot `metadata` at call time, so callers may keep
+    mutating it afterwards without affecting what was logged.
 
     Args:
       metadata: TrajectoryMetadata containing trajectory_id and run metadata.

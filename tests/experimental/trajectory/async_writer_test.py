@@ -117,6 +117,102 @@ class AsyncFileWriterTest(parameterized.TestCase):
       self.assertEqual(saved_step, step)
 
   # ============================================================================
+  # Snapshot-on-Enqueue Ownership
+  # ============================================================================
+
+  def test_mutating_step_after_write_step_does_not_affect_file(self) -> None:
+    """Verifies an enqueued step is snapshotted, not shared with the caller."""
+    traj_dir, meta_path, step_path = self._get_traj_paths(
+        trajectory_testing.TRAJECTORY_ID_1, trajectory_testing.STEP_1_1.step_id
+    )
+    meta = trajectory_testing.METADATA_1.model_copy(deep=True)
+    step = trajectory_testing.STEP_1_1.model_copy(deep=True)
+
+    block_event = threading.Event()
+    worker_thread = None
+    original_process_task = self.writer._process_task
+
+    def blocking_process_task(task):
+      block_event.wait()
+      original_process_task(task)
+
+    try:
+      with mock.patch.object(
+          self.writer, "_process_task", side_effect=blocking_process_task
+      ):
+        self.writer.write_step(
+            traj_dir=traj_dir,
+            meta_path=meta_path,
+            step_path=step_path,
+            metadata=meta,
+            step=step,
+        )
+        worker_thread = self.writer._worker_thread
+
+        # Mutate while the task is still queued: the worker has not serialized
+        # anything yet, so an unsnapshotted task would pick these up.
+        step.message = "mutated after enqueueing"
+        meta.notes = "mutated after enqueueing"
+
+        block_event.set()
+        self.writer.flush()
+    finally:
+      block_event.set()
+      if worker_thread is not None:
+        worker_thread.join(timeout=5.0)
+
+    saved_step = trajectory_lib.Step.model_validate_json(step_path.read_text())
+    self.assertEqual(saved_step, trajectory_testing.STEP_1_1)
+    saved_meta = trajectory_lib.TrajectoryMetadata.model_validate_json(
+        meta_path.read_text()
+    )
+    self.assertEqual(saved_meta, trajectory_testing.METADATA_1)
+
+  def test_mutating_step_after_write_step_does_not_affect_later_step(
+      self,
+  ) -> None:
+    """Verifies a caller can reuse one mutable step object across writes."""
+    step = trajectory_testing.STEP_2_1.model_copy(deep=True)
+    traj_dir, meta_path, step_path = self._get_traj_paths(
+        trajectory_testing.TRAJECTORY_ID_2, step.step_id
+    )
+    self.writer.write_step(
+        traj_dir=traj_dir,
+        meta_path=meta_path,
+        step_path=step_path,
+        metadata=trajectory_testing.METADATA_2,
+        step=step,
+    )
+
+    # Reuse the same object for the next step, as a rollout loop might.
+    step.step_id = trajectory_testing.STEP_2_2.step_id
+    step.source = trajectory_testing.STEP_2_2.source
+    step.message = trajectory_testing.STEP_2_2.message
+    _, _, next_step_path = self._get_traj_paths(
+        trajectory_testing.TRAJECTORY_ID_2, step.step_id
+    )
+    self.writer.write_step(
+        traj_dir=traj_dir,
+        meta_path=meta_path,
+        step_path=next_step_path,
+        metadata=trajectory_testing.METADATA_2,
+        step=step,
+    )
+    self.writer.flush()
+
+    for expected_step in (
+        trajectory_testing.STEP_2_1,
+        trajectory_testing.STEP_2_2,
+    ):
+      _, _, step_path = self._get_traj_paths(
+          trajectory_testing.TRAJECTORY_ID_2, expected_step.step_id
+      )
+      saved_step = trajectory_lib.Step.model_validate_json(
+          step_path.read_text()
+      )
+      self.assertEqual(saved_step, expected_step)
+
+  # ============================================================================
   # Lazy Worker Thread Initialization
   # ============================================================================
 

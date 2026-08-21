@@ -74,6 +74,11 @@ class InMemoryTrajectoryStore(store.TrajectoryReader, store.TrajectoryWriter):
   ) -> None:
     """Atomically logs a turn step and its trajectory metadata.
 
+    The step is deep copied, so the stored trajectory reflects the step as it
+    was at call time and is unaffected by later mutations of the caller's
+    object. This matches the file-backed store, whose asynchronous writer
+    snapshots for the same reason.
+
     Args:
       step: Step object to log.
       metadata: TrajectoryMetadata containing trajectory_id and run metadata.
@@ -83,13 +88,16 @@ class InMemoryTrajectoryStore(store.TrajectoryReader, store.TrajectoryWriter):
     """
     traj_id = _validate_trajectory_id(metadata.trajectory_id)
     self.update_metadata(metadata)
-    self._steps_by_trajectory_id[traj_id].append(step)
+    self._steps_by_trajectory_id[traj_id].append(step.model_copy(deep=True))
 
   def update_metadata(
       self,
       metadata: trajectory_lib.TrajectoryMetadata,
   ) -> None:
     """Updates (or creates) trajectory metadata.
+
+    The metadata is deep copied, so later mutations of the caller's object do
+    not retroactively change what this store reports.
 
     Args:
       metadata: TrajectoryMetadata containing trajectory_id and run metadata.
@@ -98,7 +106,7 @@ class InMemoryTrajectoryStore(store.TrajectoryReader, store.TrajectoryWriter):
       ValueError: If metadata.trajectory_id is empty or None.
     """
     traj_id = _validate_trajectory_id(metadata.trajectory_id)
-    self._metadata_by_trajectory_id[traj_id] = metadata
+    self._metadata_by_trajectory_id[traj_id] = metadata.model_copy(deep=True)
 
   def flush(self) -> None:
     """Flushes any pending or asynchronous writes to persistent storage."""

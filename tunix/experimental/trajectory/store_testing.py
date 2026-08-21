@@ -261,6 +261,33 @@ class TrajectoryWriterTestCase(
     )
     self.assertEqual(traj_1, expected_traj_1)
 
+  def test_add_step_snapshots_step_and_metadata(self) -> None:
+    """Tests that mutating a step or metadata after logging does not alter the store."""
+    meta = trajectory_testing.METADATA_1.model_copy(deep=True)
+    step = trajectory_testing.STEP_1_1.model_copy(deep=True)
+    self.writer.add_step(step, meta)
+
+    step.message = "mutated after logging"
+    meta.notes = "mutated after logging"
+    self.writer.flush()
+
+    metas = self.reader.get_trajectories_metadata()
+    self.assertEqual(metas, [trajectory_testing.METADATA_1])
+
+    trajs = self.reader.get_trajectories([trajectory_testing.TRAJECTORY_ID_1])
+    self.assertEqual(trajs, [trajectory_testing.TRAJECTORY_1])
+
+  def test_update_metadata_snapshots_metadata(self) -> None:
+    """Tests that mutating metadata after update_metadata does not alter the store."""
+    meta = trajectory_testing.METADATA_1.model_copy(deep=True)
+    self.writer.update_metadata(meta)
+
+    meta.notes = "mutated after logging"
+    self.writer.flush()
+
+    metas = self.reader.get_trajectories_metadata()
+    self.assertEqual(metas, [trajectory_testing.METADATA_1])
+
   def test_update_metadata_standalone(self) -> None:
     """Tests updating metadata prior to adding any steps."""
     self.writer.update_metadata(trajectory_testing.METADATA_1)
