@@ -165,3 +165,13 @@
 - Regression: syntax, host P58 environment 3/3, renderer 4/4, optional R2E contract 4/4 with two dependency skips, timeout artifact controls, and the complete pinned-image suite pass. Terminal marker: `P58_EXACT_IMAGE_CPU_PASS loss_oracle=1 weighted_accumulation=1 compact_filter=1 durable_journal=1 paired_renderer=1 alignment_policy=1 regressions=1`.
 - External effects: local source/tests/documentation only. No commit, push, main mutation, image publication, model download, rendered YAML, Kubernetes object, TPU job, or credential change occurred.
 - Next: publish only after explicit user approval, then use fresh native run-id `p58c05` and read the sandbox-start metrics before changing any training or serving hyperparameter.
+
+## 2026-08-21 UTC — p58c04 sandbox repair published
+
+- Type: publication evidence
+- Action: committed the fail-closed Kubernetes sandbox start path, 64-concurrency P58 orchestration, bounded timeout trajectory/W&B telemetry, adjacent native-profile zeros, exact regression controls, and p58c05 handoff. The first normal push was safely rejected because the operator branch advanced after pre-push fetch. Fetched the new tip, confirmed it added only P57 attempt evidence, rebased without conflict, and reran focused plus complete pinned-image gates before a normal non-force push.
+- Published implementation commit: `174fcf3a42af3e9cd465307843a1c19a08098c99`.
+- Validation after rebase: renderer 4/4, environment 3/3, optional R2E contract 4/4 with two dependency skips, syntax/diff checks, and terminal marker `P58_EXACT_IMAGE_CPU_PASS loss_oracle=1 weighted_accumulation=1 compact_filter=1 durable_journal=1 paired_renderer=1 alignment_policy=1 regressions=1`.
+- Readback: local HEAD and the remote-tracking operator branch both resolved to the published implementation commit with ahead/behind `0/0` before this documentation checkpoint.
+- External effects: one P58 implementation commit and one normal fast-forward push to `yuxzhang/canon-zero-tim`. `main` was untouched. No image publication, model download, rendered YAML, Kubernetes object, TPU job, credential change, or p58c05 run occurred.
+- Next: publish this documentation-only checkpoint, fetch its final readback SHA, and hand only native run-id `p58c05` to the remote executor. Zero remains deferred.

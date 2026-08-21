@@ -84,10 +84,13 @@ that is compatibility hardening, not a new treatment. Focused tests and the
 full pinned-image gate pass. The trajectory journal and W&B now retain bounded
 timeout provenance: status; sandbox/model/environment/reward/deadline stage;
 unschedulable; and insufficient CPU/memory counts and ratios. Raw scheduler
-messages stay in the run log. These changes are uncommitted and unpushed.
+messages stay in the run log. These changes were published as
+`174fcf3a42af3e9cd465307843a1c19a08098c99`; its first remote readback matched
+with ahead/behind `0/0`. Fetch the final operator tip after the publication
+checkpoint rather than pinning this implementation commit directly.
 
-Never modify or push `main`. The eventual publication target is
-`yuxzhang/canon-zero-tim` after reconciling the unrelated remote tip.
+Never modify or push `main`. The publication target is exclusively
+`yuxzhang/canon-zero-tim`; the implementation is present there.
 
 ## What was implemented
 

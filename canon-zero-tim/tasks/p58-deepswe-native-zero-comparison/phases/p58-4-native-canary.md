@@ -144,6 +144,7 @@ tests and the complete pinned-image P58 gate pass. Each persisted batch also
 records a bounded timeout stage and fixed scheduler/resource dimensions, and
 forwards counts, ratios, and all-timeout batch flags to W&B. This distinguishes
 zero sandbox admission from post-admission model or environment slowness
-without exporting raw scheduler text. After explicit publication
-approval, the next admissible run-id is fresh native `p58c05`; zero remains
-deferred.
+without exporting raw scheduler text. The implementation was published as
+`174fcf3a42af3e9cd465307843a1c19a08098c99` after a conflict-free rebase over a
+P57-only evidence commit and complete gate rerun. The next admissible run-id is
+fresh native `p58c05`; zero remains deferred.
