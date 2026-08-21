@@ -19,7 +19,9 @@ class RolloutServer:
   def __init__(self) -> None:
     self._server: grpc.Server | None = None
 
-  def start(self, port: int, on_generate: Callable[[str], str]) -> None:
+  def start(
+      self, port: int, on_generate: Callable[[str], tuple[str, dict[str, float]]]
+  ) -> None:
     if self._server is not None:
       raise RuntimeError("server already started")
 
@@ -31,7 +33,8 @@ class RolloutServer:
       def Generate(
           self, request: pb2.GenerateRequest, context: grpc.ServicerContext
       ):
-        return pb2.GenerateResponse(completion=on_generate(request.prompt))
+        completion, metrics = on_generate(request.prompt)
+        return pb2.GenerateResponse(completion=completion, metrics=metrics)
 
     pb2_grpc.add_RolloutServiceServicer_to_server(_handler(), server)
 
@@ -64,13 +67,25 @@ def main(argv, context: ProcessContext | None) -> None:
   # context.jax.initialize()
   # logging.info(f"jax initialized: {jax.devices()}")
 
-  def on_generate(prompt: str) -> str:
+  def on_generate(prompt: str) -> tuple[str, dict[str, float]]:
+    start_time = time.time()
     x, op, y = prompt.split(" ")
     expr = f"{x} {op} {y}"
     random_error = random.randint(0, 2) - 1
     completion = f"= {eval(expr) + random_error}"
-    logging.info(f"[{args.server_id}] generate({prompt}) -> {completion}")
-    return completion
+    latency = time.time() - start_time
+
+    # Simulate worker-local metrics per design doc
+    reward = 1.0 if random_error == 0 else 0.0
+    reward_calc_time = random.uniform(0.001, 0.005)
+    rollout_time = latency + random.uniform(0.01, 0.05)
+    metrics = {
+        "reward": float(reward),
+        "rollout_time": float(rollout_time),
+        "reward_calc_time": float(reward_calc_time),
+    }
+    logging.info(f"[{args.server_id}] generate({prompt}) -> {completion} (reward={reward})")
+    return completion, metrics
 
   server = RolloutServer()
   server.start(args.server_port, on_generate=on_generate)
