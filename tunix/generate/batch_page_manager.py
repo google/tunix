@@ -39,6 +39,27 @@ class BlockSpec:
   logical_subsharding: tuple = () 
   device: Optional[Any] = None
 
+  def init(self, num_pages: int, page_size: int, device: Any = None) -> "Block":
+      dtype = self.dtype
+      subshape = self.subshape
+      shape = (num_pages, page_size) + subshape
+      pages = jnp.zeros(shape, dtype=dtype)
+      
+      available_page_indices = jnp.arange(num_pages, dtype=jnp.int32)
+      num_available_pages = jnp.array(num_pages, dtype=jnp.int32)
+      
+      if device is not None:
+          pages = jax.device_put(pages, device)
+          available_page_indices = jax.device_put(available_page_indices, device)
+          num_available_pages = jax.device_put(num_available_pages, device)
+          
+      return Block(
+          pages=pages,
+          available_page_indices=available_page_indices,
+          num_available_pages=num_available_pages,
+          page_size=page_size
+      )
+
 @jax.tree_util.register_dataclass
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class Block:
@@ -52,28 +73,6 @@ class Block:
   @property
   def total_num_pages(self) -> int:
     return self.available_page_indices.shape[0]
-
-  @classmethod
-  def init(cls, num_pages: int, page_size: int, block_spec: BlockSpec, device: Any = None) -> "Block":
-      dtype = block_spec.dtype
-      subshape = block_spec.subshape
-      shape = (num_pages, page_size) + subshape
-      pages = jnp.zeros(shape, dtype=dtype)
-      
-      available_page_indices = jnp.arange(num_pages, dtype=jnp.int32)
-      num_available_pages = jnp.array(num_pages, dtype=jnp.int32)
-      
-      if device is not None:
-          pages = jax.device_put(pages, device)
-          available_page_indices = jax.device_put(available_page_indices, device)
-          num_available_pages = jax.device_put(num_available_pages, device)
-          
-      return cls(
-          pages=pages,
-          available_page_indices=available_page_indices,
-          num_available_pages=num_available_pages,
-          page_size=page_size
-      )
 
   def allocate(self, num_pages_to_allocate: jax.Array) -> tuple["Block", jax.Array]:
     """Allocates pages from the free pool."""

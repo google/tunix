@@ -46,10 +46,9 @@ class LLMEngine:
         item_size = jnp.dtype(dtype).itemsize
         page_bytes = item_size * self.cache_config.page_size * num_kv_heads * head_dim
         num_hbm_pages = getattr(self.cache_config, "hbm_cache_max_bytes", 1) // page_bytes
-        hbm_block = batch_page_manager_lib.Block.init(
+        hbm_block = block_spec.init(
             num_pages=num_hbm_pages,
             page_size=self.cache_config.page_size,
-            block_spec=block_spec,
             device=None
         )
         max_num_pages_per_seq = (self.max_seq_len + self.cache_config.page_size - 1) // self.cache_config.page_size
