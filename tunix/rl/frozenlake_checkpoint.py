@@ -34,6 +34,11 @@ _ENV_KEYS = (
     "CANON_FROZENLAKE_CKPT_INTERVAL",
     "CANON_FROZENLAKE_CKPT_MAX_TO_KEEP",
 )
+P57_STOCK_SYNC_RECEIPT = {
+    "completed": True,
+    "transport": "update_params",
+    "exact_weight_attestation": "unavailable-by-design",
+}
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -55,6 +60,38 @@ class Config:
     if not self.enabled:
       return None
     return f"{self.root}/{self.tag}"
+
+
+def sync_rollout_for_no_update(
+    rl_cluster: Any, *, stock_fast: bool
+) -> dict[str, Any]:
+  """Synchronizes rollout weights and applies the available proof contract.
+
+  The untreated stock engine deliberately has no canonical engine adapter, so
+  it cannot expose the live-leaf comparison used by canonical resume/eval.
+  Successful ``update_params`` completion is the strongest honest stock
+  receipt.  Canonical callers retain the exact live-weight gate.
+  """
+  if not rl_cluster.should_sync_weights:
+    raise ValueError(
+        "P45 resume/P57 no-update run requires an explicit rollout weight sync"
+    )
+  rl_cluster.sync_weights_for_resume()
+  if stock_fast:
+    return dict(P57_STOCK_SYNC_RECEIPT)
+
+  exact = dict(rl_cluster.attest_actor_anchor_matches_engine())
+  if exact.get("equal") is not True:
+    raise ValueError(
+        "P45 restored actor did not match vLLM after resume sync: "
+        f"{exact}"
+    )
+  return {
+      "completed": True,
+      "transport": "update_params",
+      "exact_weight_attestation": "pass",
+      "attestation": exact,
+  }
 
 
 def from_env(env: Mapping[str, str]) -> Config:

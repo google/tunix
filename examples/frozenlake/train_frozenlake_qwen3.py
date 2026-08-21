@@ -1488,6 +1488,7 @@ grpo_trainer = GRPOLearner(
 )
 show_hbm_usage("after GRPOLearner creation")
 
+rollout_weight_sync = None
 if P45_CHECKPOINT.mode == "resume" or CANON_P57_NO_UPDATE:
   if grpo_trainer.rl_cluster.global_steps != restored_checkpoint_step:
     raise ValueError(
@@ -1495,23 +1496,24 @@ if P45_CHECKPOINT.mode == "resume" or CANON_P57_NO_UPDATE:
         f"learner={grpo_trainer.rl_cluster.global_steps} "
         f"restored={restored_checkpoint_step}"
     )
-  if not grpo_trainer.should_sync_weights:
-    raise ValueError(
-      "P45 resume/P57 no-update run requires an explicit rollout weight sync"
-    )
-  rl_cluster.sync_weights_for_resume()
-  resume_weight_attestation = rl_cluster.attest_actor_anchor_matches_engine()
-  if resume_weight_attestation.get("equal") is not True:
-    raise ValueError(
-        "P45 restored actor did not match vLLM after resume sync: "
-        f"{resume_weight_attestation}"
-    )
-  print(
-      "[P45.CHECKPOINT] ROLLOUT_SYNC_PASS "
-      f"step={restored_checkpoint_step} weights_equal=1 "
-      f"reason={'calibration' if CANON_P57_CALIBRATION else 'evaluation' if CANON_P57_EVALUATION else 'resume'}",
-      flush=True,
+  rollout_weight_sync = frozenlake_checkpoint.sync_rollout_for_no_update(
+      rl_cluster,
+      stock_fast=P57_STOCK_FAST_ATTESTATION is not None,
   )
+  if P57_STOCK_FAST_ATTESTATION is not None:
+    print(
+        "[P57.STOCK_FAST] ROLLOUT_SYNC_PASS "
+        f"step={restored_checkpoint_step} transport=update_params "
+        "exact_weight_attestation=unavailable-by-design",
+        flush=True,
+    )
+  else:
+    print(
+        "[P45.CHECKPOINT] ROLLOUT_SYNC_PASS "
+        f"step={restored_checkpoint_step} weights_equal=1 "
+        f"reason={'evaluation' if CANON_P57_EVALUATION else 'resume'}",
+        flush=True,
+    )
 
 if CANON_P32_WORKLOAD:
   if CANON_P33_ENABLE_EVAL:
@@ -1592,6 +1594,7 @@ if CANON_P57_CALIBRATION:
         "arm": "mismatch",
         "inference_regime": CANON_P57_INFERENCE_REGIME,
         "zero_tim_off_attestation": P57_STOCK_FAST_ATTESTATION,
+        "rollout_weight_sync": rollout_weight_sync,
         "fixed_lm_head": os.getenv("CANON_P38_FIXED_LM_HEAD", "0"),
         "source_commit": os.getenv("CANON_EXPECT_COMMIT", ""),
         "mode": CANON_P57_CALIBRATION_MODE,

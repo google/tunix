@@ -21,16 +21,19 @@ The runbook is authoritative and contains exact commands. Ask the user before
 ## Honest validation status
 
 The dependency-light host suite and pinned-image CPU/overlay suite are green.
-`p57cal3` proved the target stock-engine route and zero-canonical-marker
-postflight, then failed before the first recipe because the old file-path
-entrypoint could not import the repository package. The corrected module
-entrypoint plus stock runtime dependency step is locally and in the pinned
-image validated, but has not run on the 64-chip target. No target run has yet
-proved live HBM/KV capacity for the 16,384-token physical envelope. Do not
-report “target tested” from the local gates and do not substitute a DP1
-one-host run for this missing evidence. The next approved calibration launch
-closes that boundary only if it reaches real rollout progress under the
-unchanged signed manifest.
+`p57cal4` proved 64-chip connection, all three dataset materializations, model
+load, KV-cache initialization, and approximately 34.3/95 GiB HBM use per
+device. It then stopped before the first recipe because the shared no-update
+path tried to run canonical adapter-backed exact weight attestation on the
+untreated stock engine, which intentionally has no such adapter. The repair
+keeps the real `update_params` rollout sync, records exact stock attestation as
+`unavailable-by-design`, and retains fail-closed exact attestation for
+canonical resume/evaluation. It is host- and pinned-image-tested but has not
+yet run on the 64-chip target. The committed `p57cal4` file is a workload-only
+log rather than the complete wrapper log, so it is analysis-grade evidence,
+not a complete campaign artifact. The next approved calibration launch closes
+startup readiness only if it reaches real rollout progress under the unchanged
+signed manifest and returns the complete wrapper log from byte zero.
 
 ## Execute exactly this workflow
 
@@ -57,6 +60,8 @@ unchanged signed manifest.
 - full workload-import proof
   `[P57.STOCK_FAST] WORKLOAD_IMPORT_PASS entrypoint=module`;
 - pre-model stock proof `[P57.STOCK_FAST] PREFLIGHT_PASS files=6 import=pass overlay=absent`;
+- one exact stock sync proof
+  `[P57.STOCK_FAST] ROLLOUT_SYNC_PASS step=0 transport=update_params exact_weight_attestation=unavailable-by-design`;
 - exact postflight `RUNTIME_PATH_PASS canonical_markers=0 overlay=skipped`;
 - fixed AR, pinned RPA, canonical Pallas trunk/VJP, and fixed logprob M absent;
 - RPA VJP2, processed logprobs, log-softmax, module C, KV unified, fixed
@@ -81,6 +86,8 @@ unchanged signed manifest.
   zero-canonical-runtime-marker postflight;
 - 3 dataset attestations, starts, and completes;
 - one JSON v2 receipt with complete zero-TIM-off attestation;
+- that receipt's `rollout_weight_sync` equals the registered transport-only
+  stock receipt; missing or fabricated exact equality is a hard failure;
 - one terminal complete record with all mutation counters zero;
 - offline classifier `verdict=PASS`.
 
@@ -108,6 +115,7 @@ manifest_preflight_stdout: <path>
 zero_tim_off_marker: <exact line>
 runtime_deps_marker: <exact line>
 workload_import_marker: <exact line>
+rollout_sync_marker: <exact line>
 raw_log: <complete path>
 receipt_v2_json/sha256: <...>
 dataset_attestations: <three lines or path>

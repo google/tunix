@@ -86,6 +86,7 @@ def _receipt(*, solve_rates=None):
       "arm": "mismatch",
       "inference_regime": "stock-fast",
       "zero_tim_off_attestation": classifier._ZERO_TIM_OFF_ATTESTATION,
+      "rollout_weight_sync": classifier._STOCK_SYNC_RECEIPT,
       "fixed_lm_head": "0",
       "source_commit": "a" * 40,
       "mode": "stochastic",
@@ -153,6 +154,7 @@ class P57StockClassifierTest(unittest.TestCase):
     receipt["inference_regime"] = "canonical"
     result = classifier.classify(self._write(receipt))
     self.assertEqual(result["verdict"], "FAIL")
+
     receipt = _receipt()
     receipt["zero_tim_off_attestation"] = {
         **classifier._ZERO_TIM_OFF_ATTESTATION,
@@ -160,6 +162,21 @@ class P57StockClassifierTest(unittest.TestCase):
     }
     result = classifier.classify(self._write(receipt))
     self.assertEqual(result["verdict"], "FAIL")
+
+  def test_rejects_missing_or_fabricated_stock_weight_sync(self):
+    receipt = _receipt()
+    del receipt["rollout_weight_sync"]
+    self.assertEqual(
+        classifier.classify(self._write(receipt))["verdict"], "FAIL"
+    )
+    receipt = _receipt()
+    receipt["rollout_weight_sync"] = {
+        **classifier._STOCK_SYNC_RECEIPT,
+        "exact_weight_attestation": "pass",
+    }
+    self.assertEqual(
+        classifier.classify(self._write(receipt))["verdict"], "FAIL"
+    )
 
   def test_context_cap_excess_makes_recipe_ineligible(self):
     receipt = _receipt()

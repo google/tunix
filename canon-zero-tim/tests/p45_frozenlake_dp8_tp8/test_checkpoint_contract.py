@@ -159,11 +159,9 @@ class FrozenLakeCheckpointContractTest(unittest.TestCase):
 
   def test_resume_sync_is_before_train_and_does_not_advance_step(self):
     recipe = _RECIPE.read_text()
-    sync = recipe.index("rl_cluster.sync_weights_for_resume()")
-    attest = recipe.index("rl_cluster.attest_actor_anchor_matches_engine()", sync)
+    sync = recipe.index("frozenlake_checkpoint.sync_rollout_for_no_update(")
     train = recipe.index("grpo_trainer.train(")
-    self.assertLess(sync, attest)
-    self.assertLess(attest, train)
+    self.assertLess(sync, train)
 
     cluster = _RL_CLUSTER.read_text()
     resume_start = cluster.index("def sync_weights_for_resume")
@@ -171,6 +169,52 @@ class FrozenLakeCheckpointContractTest(unittest.TestCase):
     resume_body = cluster[resume_start:normal_start]
     self.assertIn("_sync_weights_without_advancing_step()", resume_body)
     self.assertNotIn("global_steps += 1", resume_body)
+
+  def test_no_update_sync_uses_honest_stock_and_exact_canonical_gates(self):
+    class FakeCluster:
+      should_sync_weights = True
+
+      def __init__(self, *, equal=True):
+        self.equal = equal
+        self.sync_calls = 0
+        self.attest_calls = 0
+
+      def sync_weights_for_resume(self):
+        self.sync_calls += 1
+
+      def attest_actor_anchor_matches_engine(self):
+        self.attest_calls += 1
+        return {"equal": self.equal}
+
+    stock = FakeCluster()
+    stock_receipt = frozenlake_checkpoint.sync_rollout_for_no_update(
+        stock, stock_fast=True
+    )
+    self.assertEqual(
+        stock_receipt, frozenlake_checkpoint.P57_STOCK_SYNC_RECEIPT
+    )
+    self.assertEqual((stock.sync_calls, stock.attest_calls), (1, 0))
+
+    canonical = FakeCluster()
+    canonical_receipt = frozenlake_checkpoint.sync_rollout_for_no_update(
+        canonical, stock_fast=False
+    )
+    self.assertEqual(canonical_receipt["exact_weight_attestation"], "pass")
+    self.assertEqual((canonical.sync_calls, canonical.attest_calls), (1, 1))
+
+    mismatch = FakeCluster(equal=False)
+    with self.assertRaisesRegex(ValueError, "did not match"):
+      frozenlake_checkpoint.sync_rollout_for_no_update(
+          mismatch, stock_fast=False
+      )
+
+    disabled = FakeCluster()
+    disabled.should_sync_weights = False
+    with self.assertRaisesRegex(ValueError, "requires an explicit"):
+      frozenlake_checkpoint.sync_rollout_for_no_update(
+          disabled, stock_fast=True
+      )
+    self.assertEqual((disabled.sync_calls, disabled.attest_calls), (0, 0))
 
   def test_recipe_wires_signed_checkpoint_contract_into_g6_trainer(self):
     recipe = _RECIPE.read_text()

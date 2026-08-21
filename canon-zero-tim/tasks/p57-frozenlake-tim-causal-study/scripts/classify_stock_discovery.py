@@ -55,6 +55,11 @@ _ZERO_TIM_OFF_ATTESTATION = {
     "zero_switches": list(_ZERO_SWITCHES),
     "canonical_excess_precision_pin": False,
 }
+_STOCK_SYNC_RECEIPT = {
+    "completed": True,
+    "transport": "update_params",
+    "exact_weight_attestation": "unavailable-by-design",
+}
 
 
 def _load(path: Path) -> dict[str, Any]:
@@ -278,6 +283,7 @@ def classify(stochastic_path: Path) -> dict[str, Any]:
       "arm": "mismatch",
       "inference_regime": "stock-fast",
       "zero_tim_off_attestation": _ZERO_TIM_OFF_ATTESTATION,
+      "rollout_weight_sync": _STOCK_SYNC_RECEIPT,
       "fixed_lm_head": "0",
       "mode": _MODE,
       "temperature": _TEMPERATURE,

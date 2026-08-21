@@ -26,6 +26,10 @@ main campaign.
    runs, unless a later phase explicitly changes the retention contract.
 8. Defer the complete paired training treatment contract to P57.2. Calibration
    readiness must not be misread as paired-campaign readiness.
+9. At every no-update boundary, perform the real rollout `update_params` sync.
+   Stock-fast records transport completion and explicitly marks exact
+   adapter-backed attestation unavailable; canonical resume/evaluation retains
+   exact live-weight equality as a fail-closed gate.
 
 ## Local gates
 
@@ -35,14 +39,16 @@ main campaign.
   require the module entrypoint, and reject any canonical switch, file-path
   entrypoint, or admission leak.
 - Calibration classifier rejects a missing or altered 37-switch zero-TIM-off
-  attestation, malformed coverage, state mutation, and context-cap violations.
+  attestation, a missing or fabricated stock rollout-sync receipt, malformed
+  coverage, state mutation, and context-cap violations.
 - Checkpoint evaluator can load a bounded P45-format checkpoint and evaluate an
   immutable map set without touching training state. Step 0 uses immutable
   base weights in checkpoint `new` mode; positive boundaries use exact GCS
   `resume`. Both explicitly sync actor weights into the rollout engine.
 - `git diff --check`, syntax/compile checks, and exact-image gates pass.
 - The pinned-image gate proves stock runtime imports, full workload import,
-  stock-engine drift rejection, and historical file-entrypoint rejection.
+  stock-engine drift rejection, historical file-entrypoint rejection, and the
+  behavioral split between transport-only stock sync and exact canonical sync.
 
 ## Target gate timing
 

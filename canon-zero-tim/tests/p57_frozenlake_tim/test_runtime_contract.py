@@ -108,6 +108,7 @@ class P57RuntimeContractTest(unittest.TestCase):
   def test_runner_keeps_distinct_stock_and_canonical_postflights(self):
     text = RUNNER.read_text(encoding="utf-8")
     self.assertIn("p57_validate_stock_fast_runtime_markers", text)
+    self.assertIn('n_p57_stock_sync" -ne 1', text)
     self.assertIn('elif [ "$n_ar" -eq 0 ] || [ "$n_emb" -eq 0 ]', text)
 
 

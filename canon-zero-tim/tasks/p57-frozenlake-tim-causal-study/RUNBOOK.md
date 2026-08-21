@@ -56,6 +56,15 @@ not run trainer rescore. Prefix caching remains off. No trainer logprob
 recomputation, backward, optimizer commit, checkpoint write, or in-process
 train evaluation is allowed.
 
+The rollout engine still has to receive the immutable actor weights before
+sampling. Stock-fast therefore calls the same `update_params` transport used
+by canonical resume/evaluation, but the untreated engine intentionally lacks
+the canonical adapter needed for a live-leaf equality proof. Its honest
+receipt is `completed=true`, `transport=update_params`, and
+`exact_weight_attestation=unavailable-by-design`. Canonical resume/evaluation
+continues to require exact adapter-backed equality and fails closed on a
+mismatch. Never claim exact stock weight equality from transport completion.
+
 The container preflight must emit exactly:
 
 ~~~text
@@ -70,6 +79,7 @@ markers:
 [P57.STOCK_FAST] RUNTIME_DEPS_PASS packages=6
 [P57.STOCK_FAST] WORKLOAD_IMPORT_PASS entrypoint=module
 [P57.STOCK_FAST] PREFLIGHT_PASS files=6 import=pass overlay=absent
+[P57.STOCK_FAST] ROLLOUT_SYNC_PASS step=0 transport=update_params exact_weight_attestation=unavailable-by-design
 [P57.STOCK_FAST] RUNTIME_PATH_PASS canonical_markers=0 overlay=skipped
 ~~~
 
@@ -122,6 +132,8 @@ the complete log from byte zero for all of the following:
 - `[P57.STOCK_FAST] PREFLIGHT_PASS files=6 import=pass overlay=absent` appears once before model load;
 - vLLM/Pathways initialization completes without OOM, KV-block-capacity error,
   restart, or IFRT disconnect;
+- the stock rollout-sync marker appears exactly once after `update_params` and
+  before the first `RECIPE_START`;
 - the first `RECIPE_START` is followed by actual rollout progress;
 - no trainer-rescore, backward, optimizer-commit, checkpoint-write, or
   alignment-admission marker appears.
@@ -186,12 +198,14 @@ A valid log contains:
 
 - one `[P57.STOCK_FAST] ZERO_TIM_OFF_PASS absent=12 zero=25`;
 - one runtime-dependency marker, one module-workload-import marker, one
-  stock-path routing marker, and one zero-canonical-marker postflight;
+  stock-path routing marker, one transport-only rollout-sync marker, and one
+  zero-canonical-marker postflight;
 - three dataset attestation records;
 - three `RECIPE_START` and three `RECIPE_COMPLETE` records;
 - one `CANON_P57_CALIBRATION_JSON` v2 record whose
   `inference_regime=stock-fast` and `zero_tim_off_attestation` lists all 37
-  switches (12 absent plus 25 zero);
+  switches (12 absent plus 25 zero), while `rollout_weight_sync` exactly records
+  `update_params` completion and `unavailable-by-design` exact attestation;
 - one terminal record:
 
 ~~~text
@@ -240,9 +254,10 @@ Return all of the following to the analysis agent:
 2. renderer and manifest-preflight stdout plus YAML SHA-256;
 3. complete raw chief log from byte zero through terminal exit;
 4. extracted calibration JSON v2 receipt;
-5. all three dataset attestation records;
-6. classifier JSON, stdout, exit code, and SHA-256;
-7. exact infrastructure events, retries, OOMs, or truncation markers.
+5. exact stock rollout-sync marker;
+6. all three dataset attestation records;
+7. classifier JSON, stdout, exit code, and SHA-256;
+8. exact infrastructure events, retries, OOMs, or truncation markers.
 
 Do not return only W&B metrics, screenshots, `tail`, or selected solve rates.
 Missing items make the campaign `INCONCLUSIVE`.
