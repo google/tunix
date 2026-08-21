@@ -127,55 +127,80 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       return await res
     return res
 
-  async def dispatch_rollouts(
-      self, prompts: Sequence[Any], **kwargs: Any
+  async def dispatch_rollout_requests(
+      self,
+      requests: Sequence[datatypes.RolloutRequest],
   ) -> list[str]:
-    """Dispatches rollout requests across workers, constructing RolloutRequests internally if needed."""
-    rollout_reqs: list[datatypes.RolloutRequest] = []
-    for idx, p in enumerate(prompts):
-      # TODO: why do we support sending rollout requests directly? shouldn't this be the engine resposibility?
-      if isinstance(p, datatypes.RolloutRequest):
-        rollout_reqs.append(p)
-      else:
-        prompt_ids = kwargs.get("prompt_ids")
-        if not prompt_ids or len(prompt_ids) != len(prompts):
-          raise ValueError(
-              "When passing raw prompts, 'prompt_ids' must be provided in"
-              " kwargs and match the length of prompts."
-          )
-        if "policy_version" not in kwargs:
-          raise ValueError(
-              "When passing raw prompts, 'policy_version' must be provided in"
-              " kwargs."
-          )
-        # TODO: should we autogenerate request_id?
-        req_id = (
-            kwargs.get("request_id") or f"req_{idx}_{uuid.uuid4().hex[:8]}"
-        )
-        rollout_reqs.append(
-            datatypes.RolloutRequest(
-                request_id=req_id,
-                prompt=p,
-                prompt_id=prompt_ids[idx],
-                target_policy_version=kwargs["policy_version"],
-                metadata=dict(kwargs.get("metadata", {})),
-            )
-        )
-
-    for req in rollout_reqs:
-      metadata = req.metadata or {}
-      route_key = metadata.get("prefix_hash")
-      if route_key is None:
-        route_key = req.prompt_id
+    """Dispatches pre-formed RolloutRequests across rollout workers using prefix routing."""
+    for req in requests:
+      route_key = (req.metadata or {}).get("prefix_hash", req.prompt_id)
       worker = self._rollout_pool._get_next_actor(
           kwargs={"route_key": route_key}
       )
-
       res = worker.dispatch_task(method_name="generate", requests=[req])
       if inspect.isawaitable(res):
         await res
 
-    return [r.request_id for r in rollout_reqs]
+    return [r.request_id for r in requests]
+
+  async def dispatch_rollouts(
+      self,
+      prompts: Sequence[Any],
+      *,
+      group_size: int = 1,
+      policy_version: int = 0,
+      generation_args: datatypes.GenerationArgs | None = None,
+      route_metadata: Mapping[str, Any] | None = None,
+      **kwargs: Any,
+  ) -> list[str]:
+    """Dispatches rollout requests across workers, constructing RolloutRequests internally if needed."""
+    base_metadata = {
+        **(route_metadata or {}),
+        **(kwargs.get("metadata") or {}),
+    }
+    gen_kwargs = generation_args.as_kwargs() if generation_args else {}
+    version = kwargs.get("policy_version", policy_version)
+
+    rollout_reqs: list[datatypes.RolloutRequest] = []
+    for idx, p in enumerate(prompts):
+      if isinstance(p, datatypes.RolloutRequest):
+        rollout_reqs.append(p)
+        continue
+
+      prompt_id = getattr(p, "prompt_id", None) or (
+          p.get("prompt_id") if isinstance(p, dict) else None
+      )
+      if not prompt_id:
+        raise ValueError(
+            f"Prompt at index {idx} lacks 'prompt_id'. Every prompt item "
+            "must provide a 'prompt_id' attribute or dict key."
+        )
+
+      prompt_id = str(prompt_id)
+      group_id = str(
+          getattr(p, "group_id", None)
+          or (p.get("group_id") if isinstance(p, dict) else None)
+          or prompt_id
+      )
+      raw_prompt = p.get("prompt", p) if isinstance(p, dict) else p
+
+      for g_idx in range(group_size):
+        rollout_reqs.append(
+            datatypes.RolloutRequest(
+                request_id=f"req_{prompt_id}_{g_idx}_v{version}",
+                prompt=raw_prompt,
+                prompt_id=prompt_id,
+                target_policy_version=version,
+                generation_kwargs=gen_kwargs,
+                metadata={
+                    **base_metadata,
+                    "group_id": group_id,
+                    "pair_index": g_idx,
+                },
+            )
+        )
+
+    return await self.dispatch_rollout_requests(rollout_reqs)
 
   async def poll_rollouts(
       self, timeout_s: float = remote_execution.LONG_POLL_TIMEOUT_S

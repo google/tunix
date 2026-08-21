@@ -23,10 +23,24 @@ from tunix.experimental.worker import remote_execution
 class AbstractRLEngine(Protocol):
   """Stateless compute primitives for distributed worker meshes."""
 
-  async def dispatch_rollouts(
-      self, prompts: Sequence[Any], **kwargs: Any
+  async def dispatch_rollout_requests(
+      self,
+      requests: Sequence[datatypes.RolloutRequest],
   ) -> list[str]:
-    """Dispatches rollout requests across workers (constructing RolloutRequests internally)."""
+    """Dispatches pre-formed RolloutRequests across rollout workers using prefix routing."""
+    ...
+
+  async def dispatch_rollouts(
+      self,
+      prompts: Sequence[Any],
+      *,
+      group_size: int = 1,
+      policy_version: int = 0,
+      generation_args: datatypes.GenerationArgs | None = None,
+      route_metadata: Mapping[str, Any] | None = None,
+      **kwargs: Any,
+  ) -> list[str]:
+    """Dispatches rollout requests across workers (expanding group_size and constructing RolloutRequests internally if needed)."""
     ...
 
   async def poll_rollouts(
