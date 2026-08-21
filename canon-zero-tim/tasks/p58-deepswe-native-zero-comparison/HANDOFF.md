@@ -167,10 +167,12 @@ bitwise live-weight comparison. It neither registers an adapter nor changes
 serving math. Missing/mismatched weights, invalid DP8 x TP8 mesh, unsigned
 native routing, and a leaked native adapter remain fatal. Focused routes, all
 15 rollout canonical tests, and the full pinned P58 exact-image gate pass.
-These changes are local and uncommitted at base
-`5dd865294560899b0438228f458a84acbe61cdb4`; publish/read back only after
-explicit approval. The next run is fresh native `p58f04`, not a resume of
-p58f03. Zero remains deferred.
+The implementation was published as
+`234eaddb8e3543083927aa10effe101abef18a91`; its first remote readback matched
+exactly with ahead/behind `0/0`. This publication-evidence checkpoint advances
+the branch once more, so fetch and pin the final remote tip rather than the
+implementation commit directly. The next run is fresh native `p58f04`, not a
+resume of p58f03. Zero remains deferred.
 
 Never modify or push `main`. The publication target is exclusively
 `yuxzhang/canon-zero-tim`; the implementation is present there.

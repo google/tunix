@@ -54,9 +54,9 @@ p58f02 showed that the chosen CPU flavor required `cpu-np`; and p58f03 proved
 that the CPU routing repair works by completing 128 real trajectories in
 616.3 seconds. P58f03 stopped after durable journaling but before trainer
 forward because the native arm was incorrectly sent through a
-canonical-adapter-only weight-attestation method. The local repair provides a
+canonical-adapter-only weight-attestation method. The published repair provides a
 shared exact-live-weight observer while preserving native numerical
-untreatedness. The phase remains active; after publication/readback the next
+untreatedness. The phase remains active; after final branch readback the next
 fresh attempt is `p58f04`.
 
 ## Frozen shared recipe

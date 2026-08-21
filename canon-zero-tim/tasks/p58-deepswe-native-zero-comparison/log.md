@@ -239,3 +239,13 @@
 - Regression: Python compilation passes; four native/zero/negative rollout routing tests pass; two exact observer/mesh tests pass; the full rollout canonical module passes 15/15; and the complete pinned P58 exact-image gate exits zero with `P58_EXACT_IMAGE_CPU_PASS loss_oracle=1 weighted_accumulation=1 compact_filter=1 durable_journal=1 paired_renderer=1 alignment_policy=1 regressions=1`. A separate broad legacy adapter test invocation had three unrelated environment/device setup errors (missing active-workload environment in two cases and only one available device where four were required), so that invocation is not represented as a whole-suite PASS.
 - External effects: one requested fast-forward pull, one local stash preserving the superseded fallback, local source/tests/documentation edits, and local/pinned-container tests only. No commit, push, `main` mutation, image publication, rendered launch YAML, Kubernetes apply, TPU job, model download, or credential change occurred.
 - Next: after explicit commit/push approval, publish and read back the repair, then use fresh native full run-id `p58f04`. Require `[P34.WEIGHTS] EXACT` before A/B/C and continue the same full 1,000-commit job; do not render zero.
+
+## 2026-08-21 UTC — p58f03 native weight-gate repair published
+
+- Type: publication evidence.
+- Action: after explicit user approval, committed the arm-aware exact-live-weight interface, signed native observer route, canonical/negative regressions, exact-image coverage, and p58f04 runbook/handoff. The pre-publication fetch proved the operator branch had not advanced; the push was normal and non-force.
+- Published implementation commit: `234eaddb8e3543083927aa10effe101abef18a91`.
+- Validation on the published tree: Python compilation and `git diff --check` pass; native/zero/unsigned/leaked-adapter routes pass; the full rollout canonical module passes 15/15; and the complete pinned-image P58 gate exits zero with `P58_EXACT_IMAGE_CPU_PASS loss_oracle=1 weighted_accumulation=1 compact_filter=1 durable_journal=1 paired_renderer=1 alignment_policy=1 regressions=1`.
+- Readback: local HEAD, `FETCH_HEAD`, and `origin/yuxzhang/canon-zero-tim` all resolved to the implementation commit with ahead/behind `0/0` before this documentation checkpoint.
+- External effects: one implementation commit and one normal fast-forward push to `yuxzhang/canon-zero-tim`. `main` was untouched. No image publication, Kubernetes apply, TPU job, model download, or credential change occurred.
+- Next: publish this documentation checkpoint, fetch its final remote SHA, and hand only fresh native full run-id `p58f04` to the executor. Require `[P34.WEIGHTS] EXACT` before A/B/C; zero remains deferred.
