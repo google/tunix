@@ -434,6 +434,35 @@ class FileTrajectoryStoreTest(parameterized.TestCase):
     )
     self.assertEqual(saved_meta, meta_failed)
 
+  def test_close_shuts_down_writer_and_rejects_further_writes(self) -> None:
+    """Verifies close() drains the background writer and seals the store."""
+    self.file_s.add_step(
+        trajectory_testing.STEP_1_1, trajectory_testing.METADATA_1
+    )
+    self.file_s.close()
+
+    step_path = self.file_s.get_step_path(
+        trajectory_testing.TRAJECTORY_ID_1, trajectory_testing.STEP_1_1.step_id
+    )
+    self.assertTrue(step_path.exists())
+    with self.assertRaises(RuntimeError):
+      self.file_s.add_step(
+          trajectory_testing.STEP_1_1, trajectory_testing.METADATA_1
+      )
+
+  def test_context_manager_closes_store_on_exit(self) -> None:
+    """Verifies the store persists pending writes when used as a context manager."""
+    with file_store.FileTrajectoryStore(root_dir=self.tmp_dir) as file_s:
+      file_s.add_step(
+          trajectory_testing.STEP_1_1, trajectory_testing.METADATA_1
+      )
+      step_path = file_s.get_step_path(
+          trajectory_testing.TRAJECTORY_ID_1,
+          trajectory_testing.STEP_1_1.step_id,
+      )
+
+    self.assertTrue(step_path.exists())
+
 
 if __name__ == "__main__":
   absltest.main()

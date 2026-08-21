@@ -1,5 +1,6 @@
 """Tests for AsyncFileWriter."""
 
+import atexit
 import concurrent.futures
 import tempfile
 import threading
@@ -858,6 +859,73 @@ class AsyncFileWriterTest(parameterized.TestCase):
     fresh_writer.__del__()
     self.assertFalse(worker_thread.is_alive())
     self.assertTrue(step_path.exists())
+
+
+class AsyncFileWriterShutdownHookTest(parameterized.TestCase):
+  """Tests the atexit hook that drains writers still live at process exit."""
+
+  def setUp(self) -> None:
+    super().setUp()
+    self.tmp_dir = epath.Path(self.enter_context(tempfile.TemporaryDirectory()))
+
+  def _write_one_step(
+      self, writer: async_writer.AsyncFileWriter
+  ) -> epath.Path:
+    """Enqueues a single step without flushing, returning its file path."""
+    traj_dir = self.tmp_dir / f"traj_{trajectory_testing.TRAJECTORY_ID_1}"
+    step_path = (
+        traj_dir / f"step_{trajectory_testing.STEP_1_1.step_id:06d}.json"
+    )
+    writer.write_step(
+        traj_dir=traj_dir,
+        meta_path=traj_dir / "metadata.json",
+        step_path=step_path,
+        metadata=trajectory_testing.METADATA_1,
+        step=trajectory_testing.STEP_1_1,
+    )
+    return step_path
+
+  def test_hook_is_registered_with_atexit(self) -> None:
+    """Verifies the module registers its shutdown hook on import."""
+    callbacks_before = atexit._ncallbacks()
+    atexit.unregister(async_writer._close_live_writers)
+    self.addCleanup(atexit.register, async_writer._close_live_writers)
+
+    self.assertEqual(atexit._ncallbacks(), callbacks_before - 1)
+
+  def test_live_writer_is_registered_and_unregistered_on_close(self) -> None:
+    """Verifies writers track their liveness for the shutdown hook."""
+    writer = async_writer.AsyncFileWriter()
+    self.assertIn(writer, async_writer._LIVE_WRITERS)
+
+    writer.close()
+    self.assertNotIn(writer, async_writer._LIVE_WRITERS)
+
+  def test_pending_writes_persisted_by_shutdown_hook(self) -> None:
+    """Verifies queued steps reach disk when the hook runs, without a flush()."""
+    writer = async_writer.AsyncFileWriter()
+    step_path = self._write_one_step(writer)
+
+    async_writer._close_live_writers()
+
+    self.assertTrue(step_path.exists())
+    self.assertTrue(writer._closed)
+
+  def test_shutdown_hook_suppresses_close_errors(self) -> None:
+    """Verifies one failing writer neither propagates nor blocks the others."""
+    failing_writer = async_writer.AsyncFileWriter()
+    healthy_writer = async_writer.AsyncFileWriter()
+    step_path = self._write_one_step(healthy_writer)
+
+    with mock.patch.object(
+        failing_writer, "close", side_effect=RuntimeError("close failed")
+    ):
+      with mock.patch.object(logging, "exception") as mock_log_exception:
+        async_writer._close_live_writers()
+
+    mock_log_exception.assert_called_once()
+    self.assertTrue(step_path.exists())
+    self.assertTrue(healthy_writer._closed)
 
 
 if __name__ == "__main__":

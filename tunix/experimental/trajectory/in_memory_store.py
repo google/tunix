@@ -111,3 +111,11 @@ class InMemoryTrajectoryStore(store.TrajectoryReader, store.TrajectoryWriter):
   def flush(self) -> None:
     """Flushes any pending or asynchronous writes to persistent storage."""
     pass
+
+  def close(self) -> None:
+    """No-op: this store holds no background thread or file handle.
+
+    Provided so that callers can treat every TrajectoryWriter uniformly. Data
+    stays readable after closing.
+    """
+    pass
