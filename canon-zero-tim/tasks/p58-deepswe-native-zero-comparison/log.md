@@ -86,3 +86,13 @@
 - Pinned-image result: `P58_EXACT_IMAGE_CPU_PASS loss_oracle=1 weighted_accumulation=1 compact_filter=1 durable_journal=1 paired_renderer=1 alignment_policy=1 regressions=1`.
 - Publication/rollback: fix is uncommitted and unpushed; `main` is untouched. Reverting the four local source/test changes removes the fix, but no rollback was executed.
 - Next: request commit/push approval, then use a new immutable native run-id `p58c02`; never reuse p58c01 and never launch zero under the current decision.
+
+## 2026-08-21 UTC — p58c01 bootstrap fix published
+
+- Type: publication evidence
+- Action: committed the admission/profile fix, real `00_env.sh` regression, p58c01 classification, and p58c02 handoff as one concern; the operator tip had not moved, so no rebase was required; performed a normal non-force fast-forward push.
+- Fix implementation commit: `acd3136267214b367a6755d0ba28d80e883d6753`.
+- Gates on the published tree: `git diff --check`, shell syntax, profile 2/2, environment 2/2, and the previously recorded pinned-image terminal marker all pass.
+- Readback: local HEAD and `origin/yuxzhang/canon-zero-tim` both resolved to `acd3136267214b367a6755d0ba28d80e883d6753`; ahead/behind was `0/0`; the worktree was clean.
+- External effects: one fix commit and one fast-forward operator-branch push. `main` was untouched. No image, model, secret, YAML render, Kubernetes object, TPU program, or p58c02 run was created.
+- Next: publish this documentation-only checkpoint, then the remote executor fetches the final readback SHA and renders only fresh native p58c02.

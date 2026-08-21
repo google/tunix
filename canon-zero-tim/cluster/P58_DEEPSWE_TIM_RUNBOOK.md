@@ -24,8 +24,10 @@ applied. A native result cannot be reported as a paired comparison.
 Attempt history: native `p58c01` Attempt-0 failed in `00_env.sh` before any
 TPU program because the stock reduction admission was checked as canonical and
 three FrozenLake-only zeros were unset. The failed root is immutable and has no
-resumable trajectory state. Use only a published fix SHA and fresh run-id
-`p58c02`; never reuse the p58c01 YAML or root.
+resumable trajectory state. The fix implementation commit is
+`acd3136267214b367a6755d0ba28d80e883d6753`; use the final operator-branch
+readback SHA that contains it and fresh run-id `p58c02`. Never reuse the
+p58c01 YAML or root.
 
 ## 1. Frozen recipe
 

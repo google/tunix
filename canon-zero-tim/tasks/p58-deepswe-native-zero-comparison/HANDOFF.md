@@ -23,7 +23,10 @@ admission from the intentionally stock native trainer and the P58 profile left
 three FrozenLake-only zeros unset. No TPU program or training path ran. A local
 fix preserves native `CANON_P32_DP_REDUCTION_ADMITTED=0`, exports the three
 zeros, and passes the renderer-to-real-`00_env.sh` regression plus the pinned
-exact-image gate. The fix is not committed or pushed.
+exact-image gate. The fix implementation commit
+`acd3136267214b367a6755d0ba28d80e883d6753` was pushed and its first remote
+readback matched exactly with ahead/behind `0/0`. Fetch again and use the
+final operator-branch SHA because this publication note is a later docs commit.
 
 Never modify or push `main`. The eventual publication target is
 `yuxzhang/canon-zero-tim` after reconciling the unrelated remote tip.
@@ -95,8 +98,8 @@ current claim is implementation plus CPU/exact-image validation only.
 4. Publish or select a client image by immutable registry digest and verify the
    mounted Qwen3-4B-Instruct-2507 weights and frozen clean-list digest without
    printing credentials.
-5. After the fix is published, render only `arm=native, stage=three-update`
-   with fresh run-id `p58c02`; preserve its YAML and digest,
+5. Render only `arm=native, stage=three-update` with fresh run-id `p58c02`;
+   preserve its YAML and digest,
    run server-side dry-run, and apply only that JobSet under the user's
    native-first decision.
 6. Require the native classifier JSON to say `PASS`, including finite nonzero
