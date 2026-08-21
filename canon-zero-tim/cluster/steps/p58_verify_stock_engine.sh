@@ -43,9 +43,9 @@ env -u CANON_SHIM_ROOT -u CANON_FIXED_AR -u CANON_FIXED_AR_EMBED \
   python3 "$CANON_PKG/cluster/steps/p57_probe_stock_engine.py"
 
 (
-  cd "$CANON_PKG/.."
   env -u PYTHONPATH PATHWAYS_HEAD="" JAX_BACKEND_TARGET="" \
     JAX_PLATFORMS=cpu \
-    python3 -u -m examples.deepswe.train_deepswe_nb --help > /dev/null
+    python3 -u "$CANON_PKG/../examples/deepswe/canonical_entrypoint.py" \
+      --help > /dev/null
 )
-echo "[P58.NATIVE] STOCK_PREFLIGHT_PASS files=$checked import=pass overlay=absent"
+echo "[P58.NATIVE] STOCK_PREFLIGHT_PASS files=$checked direct_entrypoint=pass overlay=absent"

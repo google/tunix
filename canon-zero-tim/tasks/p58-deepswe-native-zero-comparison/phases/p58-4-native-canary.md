@@ -54,5 +54,22 @@ required three FrozenLake-only zeros that the DeepSWE profile left unset.
 The failed run root is immutable and must not be resumed or reused. Its raw log
 is `../evidence/p58c01/run.log`, SHA-256
 `f551712696c9c36dbf4f1f2fb713a4c975ff49f2184cf62e887341679341d0bc`.
-The next attempt is `p58c02` from a newly published fix SHA. This phase remains
-active; p58c01 closed no target gate.
+The next attempt was `p58c02` from the published admission fix SHA. This phase
+remains active; p58c01 closed no target gate.
+
+### p58c02 — direct-entrypoint bootstrap INCONCLUSIVE
+
+Pathways initialized exactly once, but the DeepSWE program did not import.
+The JobSet executes `/app/examples/deepswe/canonical_entrypoint.py` as a file;
+Python consequently exposed `/app/examples/deepswe`, not `/app`, on
+`sys.path`. The wrapper's package-qualified
+`examples.deepswe.train_deepswe_nb` target was undiscoverable. No model,
+rollout, trajectory, forward, backward, optimizer, or checkpoint action ran.
+
+The immutable raw log is `../evidence/p58c02/run.log`, SHA-256
+`8983ab0a61355a32c9992e09f33f3e42d3bf673463cf0ca500e54b749fba56de`.
+The local fix derives the repository root from the wrapper's own file path,
+adds it before package import, and makes the native stock preflight execute
+the same direct-file path as the JobSet. A direct `/tmp` launch and the full
+pinned-image gate pass. The next attempt is fresh run-id `p58c03`, only after
+the fix is separately approved, published, and read back.

@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
+import subprocess
+import sys
+import textwrap
 import unittest
 
 
@@ -15,6 +19,44 @@ class DeepSWEScriptContractTest(unittest.TestCase):
     text = (ROOT / "examples/deepswe/canonical_entrypoint.py").read_text()
     self.assertLess(text.index("pathwaysutils.initialize()"), text.index("runpy.run_module"))
     self.assertNotIn("import jax", text)
+
+  def test_canonical_entrypoint_file_launch_bootstraps_repository_root(self):
+    entrypoint = ROOT / "examples/deepswe/canonical_entrypoint.py"
+    probe = textwrap.dedent(
+        """
+        import pathlib
+        import runpy
+        import sys
+
+        entrypoint = pathlib.Path(sys.argv[1]).resolve()
+        repository_root = str(entrypoint.parents[2])
+        namespace = runpy.run_path(str(entrypoint), run_name="p34_entrypoint_probe")
+        calls = []
+        namespace["runpy"].run_module = (
+            lambda name, run_name: calls.append((name, run_name))
+        )
+        namespace["main"]()
+        assert sys.path[0] == repository_root, sys.path
+        assert calls == [
+            ("examples.deepswe.train_deepswe_nb", "__main__")
+        ], calls
+        """
+    )
+    env = os.environ.copy()
+    env.update({"CANON_P34_DEEPSWE": "1", "JAX_PLATFORMS": "cpu"})
+    env.pop("CANON_PATHWAYS_INITIALIZED", None)
+    completed = subprocess.run(
+        [sys.executable, "-I", "-c", probe, str(entrypoint)],
+        cwd="/tmp",
+        env=env,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    self.assertIn(
+        "[P34.PATHWAYS] initialized_once=1 before_jax=1",
+        completed.stdout,
+    )
 
   def test_strict_mode_registers_scheduler_flags(self):
     text = (ROOT / "examples/deepswe/train_deepswe_nb.py").read_text()

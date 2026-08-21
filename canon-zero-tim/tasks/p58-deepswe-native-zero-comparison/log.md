@@ -96,3 +96,15 @@
 - Readback: local HEAD and `origin/yuxzhang/canon-zero-tim` both resolved to `acd3136267214b367a6755d0ba28d80e883d6753`; ahead/behind was `0/0`; the worktree was clean.
 - External effects: one fix commit and one fast-forward operator-branch push. `main` was untouched. No image, model, secret, YAML render, Kubernetes object, TPU program, or p58c02 run was created.
 - Next: publish this documentation-only checkpoint, then the remote executor fetches the final readback SHA and renders only fresh native p58c02.
+
+## 2026-08-21 UTC — p58c02 direct-entrypoint failure diagnosed and fixed locally
+
+- Type: target failure/implementation/validation
+- Evidence: `evidence/p58c02/run.log`, SHA-256 `8983ab0a61355a32c9992e09f33f3e42d3bf673463cf0ca500e54b749fba56de`.
+- First failing boundary: the canonical wrapper initialized Pathways, then `runpy.run_module("examples.deepswe.train_deepswe_nb")` raised `ModuleNotFoundError: No module named 'examples'`. The signed JobSet invokes the wrapper as `/app/examples/deepswe/canonical_entrypoint.py`; file execution places only its containing directory on `sys.path`, not repository root `/app`.
+- Classification: bootstrap `INCONCLUSIVE`. No model initialization, rollout, trajectory, forward, backward, optimizer transaction, checkpoint, or 128-chip training evidence exists.
+- Fix: derive repository root from `canonical_entrypoint.py`'s own resolved path and prepend it before the package-qualified import. Keep the renderer and every training hyperparameter unchanged. Change the native stock preflight from the easier module launch to the exact direct-file entrypoint so this failure blocks before the expensive run boundary.
+- Regression: the entrypoint isolated-subprocess contract passes 9/9; Python/Bash syntax, `git diff --check`, native environment 2/2, P58 renderer 4/4, P34 renderer 13/13, and P58 profile 2/2 pass. From `/tmp` with a cleared external `PYTHONPATH`, the exact direct-file command reaches the trainer on the bare host (then stops only because that host lacks `datasets`) and exits zero with full DeepSWE CLI help in the pinned image. The complete pinned-image terminal marker is `P58_EXACT_IMAGE_CPU_PASS loss_oracle=1 weighted_accumulation=1 compact_filter=1 durable_journal=1 paired_renderer=1 alignment_policy=1 regressions=1`.
+- One-host inventory: Qwen3-4B weights are present, but direct TPU initialization fails because `libtpu.so` is absent. A real one-host v5p test was therefore not run and is not claimed.
+- External effects: fetched/fast-forwarded the requested operator branch and ran local/container read-only validation. No commit, push, main mutation, image publication, model download, Kubernetes resource, TPU job, or credential change occurred.
+- Next: after explicit commit/push approval, publish and read back the fix, then render only native three-update run `p58c03`. P58c01 and p58c02 remain immutable and must not be resumed; zero remains deferred.

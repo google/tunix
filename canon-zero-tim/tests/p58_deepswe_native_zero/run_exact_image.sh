@@ -43,6 +43,8 @@ $DOCKER run --rm \
     PYTHONPATH=/workspace python3 \
       canon-zero-tim/tests/p34_deepswe/test_render_p34_jobset.py
     PYTHONPATH=/workspace python3 \
+      canon-zero-tim/tests/p34_deepswe/test_script_contract.py
+    PYTHONPATH=/workspace python3 \
       canon-zero-tim/tests/p44_deepswe_qwen4b_parity/test_renderer.py
     (
       cd tests/rl

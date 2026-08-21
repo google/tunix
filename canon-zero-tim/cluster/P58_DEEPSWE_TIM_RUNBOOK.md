@@ -21,13 +21,14 @@ canary. The optional one-host phase was explicitly waived, not passed. Zero is
 deferred while its optimization work continues and must not be rendered or
 applied. A native result cannot be reported as a paired comparison.
 
-Attempt history: native `p58c01` Attempt-0 failed in `00_env.sh` before any
-TPU program because the stock reduction admission was checked as canonical and
-three FrozenLake-only zeros were unset. The failed root is immutable and has no
-resumable trajectory state. The fix implementation commit is
-`acd3136267214b367a6755d0ba28d80e883d6753`; use the final operator-branch
-readback SHA that contains it and fresh run-id `p58c02`. Never reuse the
-p58c01 YAML or root.
+Attempt history: native `p58c01` failed in `00_env.sh` before any TPU program;
+that admission fix was published as
+`acd3136267214b367a6755d0ba28d80e883d6753`. Native `p58c02` initialized
+Pathways but failed before model import because direct execution of the wrapper
+did not make the repository root importable. Both roots are immutable and have
+no resumable trajectory state. Use a final operator-branch readback SHA that
+contains the direct-entrypoint fix and fresh run-id `p58c03`. Never reuse the
+p58c01 or p58c02 YAML/root.
 
 ## 1. Frozen recipe
 
@@ -120,7 +121,7 @@ CLIENT_IMAGE_DIGEST='registry.example/tunix@sha256:<64-hex-digest>'
 CPU_NODEPOOL='deepswe-cpu-pool'
 TPU_NODEPOOL='<4x4x8-v5p-nodepool>'
 MODEL_PVC='haoyugao-cpu-np-pvc'
-RUN_STEM='p58c02'
+RUN_STEM='p58c03'
 STAGE='three-update'
 
 ARM='native'

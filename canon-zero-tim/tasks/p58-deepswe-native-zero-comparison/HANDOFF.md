@@ -17,16 +17,22 @@ enough for launch and is explicitly deferred. No image publication,
 Kubernetes render output, JobSet apply, model download, or TPU run was made by
 the publishing agent.
 
-Native attempt `p58c01` is a bootstrap `INCONCLUSIVE`: Attempt-0 failed in
-`00_env.sh` because the inherited P34 check demanded canonical DP-reduction
-admission from the intentionally stock native trainer and the P58 profile left
-three FrozenLake-only zeros unset. No TPU program or training path ran. A local
-fix preserves native `CANON_P32_DP_REDUCTION_ADMITTED=0`, exports the three
-zeros, and passes the renderer-to-real-`00_env.sh` regression plus the pinned
-exact-image gate. The fix implementation commit
+Native attempts `p58c01` and `p58c02` are bootstrap `INCONCLUSIVE` results.
+P58c01 failed in `00_env.sh`; its published fix preserves native
+`CANON_P32_DP_REDUCTION_ADMITTED=0`, exports three unrelated FrozenLake zeros,
+and passes the renderer-to-real-`00_env.sh` regression. The fix implementation commit
 `acd3136267214b367a6755d0ba28d80e883d6753` was pushed and its first remote
 readback matched exactly with ahead/behind `0/0`. Fetch again and use the
 final operator-branch SHA because this publication note is a later docs commit.
+
+P58c02 then initialized Pathways and stopped before importing the model: direct
+file execution of `/app/examples/deepswe/canonical_entrypoint.py` did not put
+`/app` on `sys.path`, so its package-qualified `examples.deepswe` target could
+not be found. The local fix derives the repository root from `__file__`, adds
+it before the package import, and changes native stock preflight to exercise
+the identical direct-file entrypoint. The exact command now exits zero from
+`/tmp` in the pinned image, and the complete exact-image gate passes. These
+changes are local and uncommitted; they have not been pushed.
 
 Never modify or push `main`. The eventual publication target is
 `yuxzhang/canon-zero-tim` after reconciling the unrelated remote tip.
@@ -83,8 +89,10 @@ preceding P34 suites passed. That device-probe result is `INCONCLUSIVE` and is
 not represented as TPU evidence; the final P58 image gate runs the directly
 relevant P34 contract/environment/renderer regressions instead.
 
-No one-host real Qwen/R2E rollout and no 128-chip target canary has run. The
-current claim is implementation plus CPU/exact-image validation only.
+No one-host real Qwen/R2E rollout and no 128-chip target canary has run. A
+fresh inventory found Qwen3-4B weights but no `libtpu.so`, so this host cannot
+run the requested direct-attached v5p validation. The current claim is
+implementation plus CPU/exact-image validation only.
 
 ## Next executor sequence — native only
 
@@ -98,7 +106,7 @@ current claim is implementation plus CPU/exact-image validation only.
 4. Publish or select a client image by immutable registry digest and verify the
    mounted Qwen3-4B-Instruct-2507 weights and frozen clean-list digest without
    printing credentials.
-5. Render only `arm=native, stage=three-update` with fresh run-id `p58c02`;
+5. Render only `arm=native, stage=three-update` with fresh run-id `p58c03`;
    preserve its YAML and digest,
    run server-side dry-run, and apply only that JobSet under the user's
    native-first decision.
@@ -109,9 +117,9 @@ current claim is implementation plus CPU/exact-image validation only.
 7. Do not render or apply zero. Do not start 1,000 updates merely because the
    native canary passes; return evidence for a new user decision.
 
-Do not reuse the failed `p58c01` YAML or run root. It contains no resumable
-trajectory state and remains immutable failure evidence at
-`evidence/p58c01/run.log`.
+Do not reuse either failed `p58c01` or `p58c02` YAML/run root. Neither contains
+resumable trajectory state. They remain immutable failure evidence at
+`evidence/p58c01/run.log` and `evidence/p58c02/run.log`.
 
 ## Important operational semantics
 
