@@ -30,11 +30,18 @@ $DOCKER run --rm \
     PYTHONPATH=/workspace python3 \
       tests/rl/agentic/agentic_rl_learner_test.py \
       AgenticRLLearnerTest.test_nonpositive_eval_cadence_disables_evaluation \
-      AgenticRLLearnerTest.test_p31_segmented_eval_uses_preupdate_step_exactly_once
+      AgenticRLLearnerTest.test_p31_segmented_eval_uses_preupdate_step_exactly_once \
+      AgenticRLLearnerTest.test_p57_evaluate_only_covers_dataset_without_train_update \
+      AgenticRLLearnerTest.test_p57_rollout_only_evaluate_skips_trainer_recompute
+    PYTHONPATH=/workspace python3 \
+      canon-zero-tim/tests/p57_frozenlake_tim/test_stock_fast_contract.py
     PYTHONPATH="$overlay" python3 \
       canon-zero-tim/src/engine_shims/models/qwen8b_tp8/p22xf_contract.py
     CANON_SHIM_ROOT="$overlay" PYTHONPATH="$overlay" python3 \
       canon-zero-tim/tests/p45_frozenlake_dp8_tp8/probe_overlay_import.py
+    PYTHONPATH="$overlay" python3 \
+      canon-zero-tim/tests/p38_serving/probe_fixed_lm_head_overlay.py \
+      --hidden-size 4096 --tp-size 8
     PYTHONPATH="$overlay" python3 \
       canon-zero-tim/tests/p45_frozenlake_dp8_tp8/probe_qwen8b_tp8.py
     echo "P45_EXACT_IMAGE_CPU_PASS overlay=qwen8b_tp8"

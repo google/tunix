@@ -60,7 +60,15 @@ def _sha256(path: Path) -> str:
   return digest.hexdigest()
 
 
-def _expected_updates(workload: str, stage: str) -> int:
+def _expected_updates(
+    workload: str, stage: str, override: int | None = None
+) -> int:
+  if override is not None:
+    if stage != "full" or override <= 0:
+      raise ValueError(
+          "expected-update override requires a positive full-training horizon"
+      )
+    return override
   if stage in ("alignment-short", "backward-no-commit"):
     return 1
   if stage == "one-update":
@@ -77,7 +85,13 @@ def _require(condition: bool, reason: str, reasons: list[str]) -> None:
     reasons.append(reason)
 
 
-def _warning_policy_expected(workload: str, stage: str) -> bool:
+def _warning_policy_expected(
+    workload: str, stage: str, override: bool | None = None
+) -> bool:
+  if override is not None:
+    if stage != "full" and override:
+      raise ValueError("warning-policy override is valid only for full training")
+    return override
   return (
       workload == "gsm8k" or workload.startswith("frozenlake")
   ) and stage == "full"
@@ -175,11 +189,15 @@ def _validate_alignment_records(
     optimizer_skipped: bool,
     workload: str,
     stage: str,
+    alignment_warning_only: bool | None = None,
+    p57_ab_only: bool = False,
     reasons: list[str],
 ) -> tuple[int, int]:
   rows = list(records)
   warning_count = 0
-  policy_expected = _warning_policy_expected(workload, stage)
+  policy_expected = _warning_policy_expected(
+      workload, stage, alignment_warning_only
+  )
   _require(
       len(rows) == expected_count,
       f"alignment_count={len(rows)} expected={expected_count}",
@@ -203,6 +221,23 @@ def _validate_alignment_records(
     _require(isinstance(warnings, list), f"{prefix}.warning_reds", reasons)
     _require(record.get("reds", []) == warnings, f"{prefix}.reds", reasons)
     _require(bool(warnings) == warned, f"{prefix}.warning_verdict", reasons)
+    if p57_ab_only:
+      allowed_warnings = {
+          "S_decode_vs_S_prefill",
+          "w_all_exactly_1",
+          "wr_all_exactly_1",
+      }
+      unexpected = [
+          warning
+          for warning in warnings
+          if warning not in allowed_warnings
+          and not str(warning).startswith(("clip_hits=", "tis_hits="))
+      ]
+      _require(
+          not unexpected,
+          f"{prefix}.p57_non_ab_warnings={unexpected}",
+          reasons,
+      )
     _require(record.get("execution_mode") == "train", f"{prefix}.mode", reasons)
     _require(record.get("step") == index, f"{prefix}.step", reasons)
     boundaries = record.get("boundaries", {})
@@ -265,11 +300,15 @@ def _validate_pre_alignment_records(
     expected_count: int,
     workload: str,
     stage: str,
+    alignment_warning_only: bool | None = None,
+    p57_ab_only: bool = False,
     reasons: list[str],
 ) -> tuple[int, int]:
   rows = list(records)
   warning_count = 0
-  policy_expected = _warning_policy_expected(workload, stage)
+  policy_expected = _warning_policy_expected(
+      workload, stage, alignment_warning_only
+  )
   _require(
       len(rows) == expected_count,
       f"pre_alignment_count={len(rows)} expected={expected_count}",
@@ -293,6 +332,17 @@ def _validate_pre_alignment_records(
     _require(isinstance(warnings, list), f"{prefix}.warning_reds", reasons)
     _require(record.get("reds", []) == warnings, f"{prefix}.reds", reasons)
     _require(bool(warnings) == warned, f"{prefix}.warning_verdict", reasons)
+    if p57_ab_only:
+      unexpected = [
+          warning
+          for warning in warnings
+          if warning != "S_decode_vs_S_prefill"
+      ]
+      _require(
+          not unexpected,
+          f"{prefix}.p57_non_ab_warnings={unexpected}",
+          reasons,
+      )
     _require(record.get("step") == index, f"{prefix}.step", reasons)
     boundaries = record.get("boundaries", {})
     _require(set(boundaries) == _PRE_BOUNDARIES, f"{prefix}.boundaries", reasons)
@@ -324,6 +374,9 @@ def classify(
     alignment_report: Path,
     dp_size: int = 16,
     tp_size: int = 4,
+    expected_updates_override: int | None = None,
+    alignment_warning_only: bool | None = None,
+    p57_ab_only: bool = False,
 ) -> dict[str, Any]:
   if workload not in _FULL_STEPS:
     raise ValueError(f"unknown P33 workload: {workload!r}")
@@ -333,7 +386,17 @@ def classify(
         f"DP{dp_size}xTP{tp_size}"
     )
   local_gradient_groups = 256 // dp_size
-  expected_updates = _expected_updates(workload, stage)
+  if p57_ab_only and (
+      workload != "frozenlake-dp8-tp8"
+      or stage != "full"
+      or alignment_warning_only is not True
+  ):
+    raise ValueError(
+        "P57 A-B-only classification requires DP8xTP8 full warning-only training"
+    )
+  expected_updates = _expected_updates(
+      workload, stage, expected_updates_override
+  )
   expected_alignments = expected_updates * local_gradient_groups
   reasons: list[str] = []
 
@@ -461,6 +524,8 @@ def classify(
       expected_count=expected_updates,
       workload=workload,
       stage=stage,
+      alignment_warning_only=alignment_warning_only,
+      p57_ab_only=p57_ab_only,
       reasons=reasons,
   )
   alignment_count, alignment_warning_count = _validate_alignment_records(
@@ -469,6 +534,8 @@ def classify(
       optimizer_skipped=stage in ("alignment-short", "backward-no-commit"),
       workload=workload,
       stage=stage,
+      alignment_warning_only=alignment_warning_only,
+      p57_ab_only=p57_ab_only,
       reasons=reasons,
   )
 
@@ -700,7 +767,9 @@ def classify(
       reasons,
   )
 
-  policy_expected = _warning_policy_expected(workload, stage)
+  policy_expected = _warning_policy_expected(
+      workload, stage, alignment_warning_only
+  )
   verdict = (
       "FAIL"
       if reasons
@@ -743,6 +812,11 @@ def main() -> int:
   parser.add_argument("--workload", required=True, choices=tuple(_FULL_STEPS))
   parser.add_argument("--dp-size", type=int, default=16)
   parser.add_argument("--tp-size", type=int, default=4)
+  parser.add_argument("--expected-updates", type=int)
+  parser.add_argument(
+      "--alignment-warning-only", choices=("auto", "0", "1"), default="auto"
+  )
+  parser.add_argument("--p57-ab-only", choices=("0", "1"), default="0")
   parser.add_argument(
       "--stage",
       required=True,
@@ -772,6 +846,13 @@ def main() -> int:
       alignment_report=args.alignment_report,
       dp_size=args.dp_size,
       tp_size=args.tp_size,
+      expected_updates_override=args.expected_updates,
+      alignment_warning_only=(
+          None
+          if args.alignment_warning_only == "auto"
+          else args.alignment_warning_only == "1"
+      ),
+      p57_ab_only=args.p57_ab_only == "1",
   )
   args.output.parent.mkdir(parents=True, exist_ok=True)
   args.output.write_text(

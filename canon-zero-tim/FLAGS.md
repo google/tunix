@@ -4,7 +4,7 @@
 > 焊死数值类 flag = 删代码路径 = 程序变更,走与开启同级认证门(verify+ALIGN+canary)。
 > 生命周期档位:试验 → 已认证 → 默认开 → 焊死(开关可删)→ 退役/否决。
 > 普查基点 a94d6c0c(285 个可设置 env flag,与 ebba4850 普查零漂移);普查后续现役附录
-> 当前 298 个;本表分层登记,D 层按前缀组、语义欠账标"待考古"。
+> 当前 309 个;本表分层登记,D 层按前缀组、语义欠账标"待考古"。
 > 全量机器清单:落地 CL 时由 `grep -rhoE` 生成为附录,条目数必须 == 普查数(排除项列明)。
 
 ## A 层 · 数值语义类(动它 = 动程序身份;焊死走认证门)
@@ -56,6 +56,7 @@
 | CANON_P3x/P4x_*_ADMITTED / NO_COMMIT / RUN_STAGE / 工作负载选通 | 各任务 admission 门 | 任务结案随任务退役(C 层同规) |
 | CANON_P46_CENSUS_FIRST_PASS | P46 reward-only full campaign 的 breadth-first 调度：每个尚无 durable attempt 的 identity 只跑一次，invalid 留证后延后；不进入采样 fingerprint，也不放宽 strict finalizer | 试验、默认关；P46 完成一次 exact 1851 x N16 strict campaign 后退役 |
 | CANON_P46_FROZEN_V6_IMPORT_ID | 显式选择已封存的 v6 resume snapshot；只允许在新 resume tag 内迁移原始轨迹与 sampler provenance，并逐条留迁移来源 | 迁移期、默认空；旧 campaign 全部升级至当前 harness 后退役 |
+| CANON_P57_TIM_ARM / RUN_KIND / INFERENCE_REGIME / EXPECTED_UPDATES / EVAL_* / WORKLOAD_CANDIDATE / DATA_SPLIT / CALIBRATION_* | P57 FrozenLake TIM 因果实验身份与耐久产物；P57.1 calibration 只接受 `INFERENCE_REGIME=stock-fast`、全 zero-TIM 数值包关闭、固定 `m10,m15,m20` 顺序及 temperature-0.7 stochastic 模式；materialized split 为 calibration/selection/main；训练与独立评估沿用固定 horizon/checkpoint provenance | 试验、默认空；P57 完成并归档最终因果报告后整体退役 |
 | CANON_ALIGN*/EXPECT_*/DP_SIZE/TP_SIZE/TRAJECTORIES 族 | 对齐门与拓扑断言 | 监控契约,长期保留 |
 
 ## MARKERS(日志 marker 契约,非开关;~60 个)
@@ -314,6 +315,17 @@ CANON_P46_PARITY_CANARY
 CANON_P46_PHYSICAL_SHARD_INDEX
 CANON_P46_RESUME_TAG
 CANON_P46_TOPOLOGY
+CANON_P57_DATA_SPLIT
+CANON_P57_INFERENCE_REGIME
+CANON_P57_CALIBRATION_MODE
+CANON_P57_CALIBRATION_OUTPUT
+CANON_P57_CALIBRATION_RECIPES
+CANON_P57_EVAL_CHECKPOINT_STEP
+CANON_P57_EVAL_OUTPUT
+CANON_P57_EXPECTED_UPDATES
+CANON_P57_RUN_KIND
+CANON_P57_TIM_ARM
+CANON_P57_WORKLOAD_CANDIDATE
 CANON_PALLAS_ALL_PROJ
 CANON_PALLAS_ALL_RMSNORM
 CANON_PALLAS_CANONICAL_VJP
@@ -382,4 +394,4 @@ CANON_XPROF_SKIP_STEPS
 CANON_XPROF_STEPS
 ```
 
-Count: 302 settable names (regenerate with the grep in tasks/canon_system_redesign/phase0_indexes.md; exclusions: none).
+Count: 313 settable names (regenerate with the grep in tasks/canon_system_redesign/phase0_indexes.md; exclusions: none).

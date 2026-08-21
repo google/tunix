@@ -47,6 +47,14 @@ source "$CANON_PKG/cluster/profiles/_canonical_engine.env"
 source "$PROFILE_ABS"
 set +a
 
+P57_STOCK_FAST=0
+if [ "${CANON_PROFILE_FILE:-}" = \
+     "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env" ] && \
+   [ "${CANON_P57_RUN_KIND:-}" = "calibration" ] && \
+   [ "${CANON_P57_INFERENCE_REGIME:-}" = "stock-fast" ]; then
+  P57_STOCK_FAST=1
+fi
+
 # Secrets: keep out of the env file on disk; strip whitespace; never echo the value.
 for k in HF_TOKEN WANDB_API_KEY; do
   inj="INJECTED_$k"
@@ -112,14 +120,53 @@ validate_train_mesh_pin() {
   fi
   echo "[env] P32 train mesh pin OK: $unique_count unique ids"
 }
-for k in CANON_FIXED_AR CANON_FIXED_AR_EMBED CANON_RPA_D CANON_RPA_P CANON_RPA_M \
-         CANON_RPA_VJP2 CANON_VJP2_MAX_SEQS CANON_LOGPROB_M CANON_PROMPT_PROCESSED_LOGPROBS \
-         MIN_TOKEN_BUCKET NEW_MODEL_DESIGN XLA_FLAGS CANON_PROFILE CANON_MODEL_DIR_NAME \
-         CANON_QWEN3_HIDDEN_SIZE CANON_QWEN3_TP_SIZE; do req "$k"; done
-case "${XLA_FLAGS:-}" in
-  *--xla_allow_excess_precision=false*) ;;
-  *) echo "[env] MISSING: XLA_FLAGS lacks --xla_allow_excess_precision=false" >&2; fail=1;;
-esac
+for k in MIN_TOKEN_BUCKET NEW_MODEL_DESIGN XLA_FLAGS CANON_PROFILE \
+         CANON_MODEL_DIR_NAME CANON_QWEN3_HIDDEN_SIZE \
+         CANON_QWEN3_TP_SIZE; do req "$k"; done
+if [ "$P57_STOCK_FAST" = "1" ]; then
+  for k in CANON_FIXED_AR CANON_FIXED_AR_EMBED \
+           CANON_RPA_D CANON_RPA_P CANON_RPA_M CANON_LOGPROB_M \
+           CANON_PALLAS_ALL_PROJ CANON_PALLAS_ALL_RMSNORM \
+           CANON_PALLAS_SWIGLU CANON_PALLAS_MPAD \
+           CANON_PALLAS_SWIGLU_MPAD CANON_PALLAS_CANONICAL_VJP; do
+    if [[ -v "$k" ]]; then
+      echo "[env] P57 stock-fast requires $k absent, got ${!k@Q}" >&2
+      fail=1
+    fi
+  done
+  for k in CANON_RPA_VJP2 CANON_VJP2_MAX_SEQS \
+           CANON_PROMPT_PROCESSED_LOGPROBS CANON_PALLAS_LOGSOFTMAX \
+           CANON_ENGINE_MODULE_C CANON_KV_UNIFIED \
+           CANON_P32_TRAIN_ADMITTED CANON_P32_DP_REDUCTION_ADMITTED \
+           CANON_P33_WORKLOAD_LAUNCH_ADMITTED CANON_P32_DP16_SEGMENTED \
+           CANON_FROZENLAKE_L3 CANON_FROZENLAKE_P27 \
+           CANON_P28_SEGMENTED_FORWARD CANON_P28_SEGMENTED_VJP \
+           CANON_P28_SEGMENTED_TRAIN CANON_P28_G6_UPDATE \
+           CANON_P28_BATCHED_REPORT CANON_P29_FULL_TRAIN \
+           CANON_ALIGNMENT_GATE CANON_ALIGNMENT_GATE_ONLY \
+           CANON_ALIGNMENT_UPDATE_CANARY CANON_ALIGNMENT_TRAIN \
+           CANON_PRE_ALIGN_GATE CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY \
+           CANON_P38_FIXED_LM_HEAD; do
+    if [ "${!k:-}" != "0" ]; then
+      echo "[env] P57 stock-fast requires $k=0, got ${!k:-unset}" >&2
+      fail=1
+    fi
+  done
+  case "${XLA_FLAGS:-}" in
+    *--xla_allow_excess_precision=false*)
+      echo "[env] P57 stock-fast forbids the canonical excess-precision pin" >&2
+      fail=1
+      ;;
+  esac
+else
+  for k in CANON_FIXED_AR CANON_FIXED_AR_EMBED CANON_RPA_D CANON_RPA_P \
+           CANON_RPA_M CANON_RPA_VJP2 CANON_VJP2_MAX_SEQS \
+           CANON_LOGPROB_M CANON_PROMPT_PROCESSED_LOGPROBS; do req "$k"; done
+  case "${XLA_FLAGS:-}" in
+    *--xla_allow_excess_precision=false*) ;;
+    *) echo "[env] MISSING: XLA_FLAGS lacks --xla_allow_excess_precision=false" >&2; fail=1;;
+  esac
+fi
 
 case "${CANON_RUN_P38_AVAL:-0}" in
   0) ;;
@@ -466,6 +513,96 @@ case "${CANON_P38_FIXED_LM_HEAD:-0}" in
     fail=1
     ;;
 esac
+if [ "${CANON_PROFILE_FILE:-}" = \
+     "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env" ]; then
+  [[ "${CANON_P57_EXPECTED_UPDATES:-}" =~ ^[1-9][0-9]*$ ]] || {
+    echo "[env] P57 requires a positive expected-update horizon" >&2
+    fail=1
+  }
+  if [ -n "${CANON_P57_WORKLOAD_CANDIDATE:-}" ] || \
+     [ -n "${CANON_P57_DATA_SPLIT:-}" ]; then
+    case "${CANON_P57_WORKLOAD_CANDIDATE:-}:${CANON_P57_DATA_SPLIT:-}" in
+      l0:calibration|l0:selection|l0:main|\
+      m10:calibration|m10:selection|m10:main|\
+      m15:calibration|m15:selection|m15:main|\
+      m20:calibration|m20:selection|m20:main) ;;
+      *)
+        echo "[env] P57 materialized workload fields drifted" >&2
+        fail=1
+        ;;
+    esac
+    if [ "${CANON_P57_DATA_SPLIT:-}" != "main" ] && \
+       [ "${CANON_P57_TIM_ARM:-}" != "mismatch" ]; then
+      echo "[env] P57 calibration/selection workloads are stock-only" >&2
+      fail=1
+    fi
+  fi
+  case "${CANON_P57_RUN_KIND:-}:${CANON_P57_TIM_ARM:-}" in
+    calibration:mismatch)
+      [ "$P57_STOCK_FAST" = "1" ] && \
+      [ "${CANON_P57_INFERENCE_REGIME:-}" = "stock-fast" ] && \
+      [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "0" ] && \
+      [ "${CANON_P57_CALIBRATION_MODE:-}" = "stochastic" ] && \
+      [ "${CANON_P57_CALIBRATION_RECIPES:-}" = "m10,m15,m20" ] && \
+      [ -z "${CANON_P57_WORKLOAD_CANDIDATE:-}${CANON_P57_DATA_SPLIT:-}" ] && \
+      [ -z "${CANON_P57_EVAL_CHECKPOINT_STEP:-}${CANON_P57_EVAL_OUTPUT:-}" ] && \
+      [[ "${CANON_P57_CALIBRATION_OUTPUT:-}" = /* ]] || {
+        echo "[env] P57 stock-fast calibration contract drifted" >&2
+        fail=1
+      }
+      ;;
+    train:zero)
+      [ -z "${CANON_P57_INFERENCE_REGIME:-}" ] && \
+      [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "1" ] && \
+      [ "${CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY:-0}" = "0" ] && \
+      [ -z "${CANON_P57_EVAL_CHECKPOINT_STEP:-}${CANON_P57_EVAL_OUTPUT:-}" ] || {
+        echo "[env] P57 zero training contract drifted" >&2
+        fail=1
+      }
+      ;;
+    train:mismatch)
+      [ -z "${CANON_P57_INFERENCE_REGIME:-}" ] && \
+      [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "0" ] && \
+      [ "${CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY:-0}" = "1" ] && \
+      [ -z "${CANON_P57_EVAL_CHECKPOINT_STEP:-}${CANON_P57_EVAL_OUTPUT:-}" ] || {
+        echo "[env] P57 mismatch training contract drifted" >&2
+        fail=1
+      }
+      ;;
+    eval:zero|eval:mismatch)
+      [ -z "${CANON_P57_INFERENCE_REGIME:-}" ] || {
+        echo "[env] P57 legacy eval does not admit an inference-regime override" >&2
+        fail=1
+      }
+      p57_expected_fixed=0
+      [ "${CANON_P57_TIM_ARM}" = "zero" ] && p57_expected_fixed=1
+      [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "$p57_expected_fixed" ] && \
+      [ "${CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY:-0}" = "0" ] && \
+      [[ "${CANON_P57_EVAL_CHECKPOINT_STEP:-}" =~ ^(0|[1-9][0-9]*)$ ]] && \
+      [ $((CANON_P57_EVAL_CHECKPOINT_STEP % 10)) -eq 0 ] && \
+      [ "$CANON_P57_EVAL_CHECKPOINT_STEP" -le "$CANON_P57_EXPECTED_UPDATES" ] && \
+      [[ "${CANON_P57_EVAL_OUTPUT:-}" = /* ]] || {
+        echo "[env] P57 isolated evaluation contract drifted" >&2
+        fail=1
+      }
+      p57_expected_mode=resume
+      [ "${CANON_P57_EVAL_CHECKPOINT_STEP:-}" = "0" ] && p57_expected_mode=new
+      [ "${CANON_FROZENLAKE_CKPT_MODE:-}" = "$p57_expected_mode" ] || {
+        echo "[env] P57 evaluation checkpoint mode drifted" >&2
+        fail=1
+      }
+      unset p57_expected_fixed
+      unset p57_expected_mode
+      ;;
+    *)
+      echo "[env] P57 run kind/arm contract is invalid" >&2
+      fail=1
+      ;;
+  esac
+elif [ -n "${CANON_P57_TIM_ARM:-}${CANON_P57_RUN_KIND:-}${CANON_P57_INFERENCE_REGIME:-}${CANON_P57_EXPECTED_UPDATES:-}${CANON_P57_EVAL_CHECKPOINT_STEP:-}${CANON_P57_EVAL_OUTPUT:-}${CANON_P57_CALIBRATION_MODE:-}${CANON_P57_CALIBRATION_OUTPUT:-}${CANON_P57_CALIBRATION_RECIPES:-}${CANON_P57_WORKLOAD_CANDIDATE:-}${CANON_P57_DATA_SPLIT:-}" ]; then
+  echo "[env] P57 fields require the P57 profile" >&2
+  fail=1
+fi
 if [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "1" ] && \
    [ -z "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
   if [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
@@ -502,6 +639,32 @@ if [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "1" ] && \
         fail=1
       }
       echo "[env] P38.2h fixed lm-head backward-no-commit enabled"
+      ;;
+    frozenlake-dp8-tp8:full:0:cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env)
+      case "${CANON_P57_RUN_KIND:-}:${CANON_P57_TIM_ARM:-}" in
+        train:zero)
+          [ "${CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY:-0}" = "0" ] && \
+          [ "${CANON_P33_ENABLE_EVAL:-0}" = "0" ] && \
+          [ "${CANON_P33_DISABLE_EVAL:-}" = "1" ] || {
+            echo "[env] P57 zero arm requires strict no-eval full training" >&2
+            fail=1
+          }
+          echo "[env] P57 zero-TIM fixed lm-head training enabled"
+          ;;
+        eval:zero)
+          [ "${CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY:-0}" = "0" ] && \
+          [ "${CANON_P33_ENABLE_EVAL:-0}" = "0" ] && \
+          [ "${CANON_P33_DISABLE_EVAL:-}" = "1" ] || {
+            echo "[env] P57 zero evaluation requires strict isolated resume" >&2
+            fail=1
+          }
+          echo "[env] P57 zero-TIM fixed lm-head evaluation enabled"
+          ;;
+        *)
+          echo "[env] P57 fixed lm-head is admitted only for the zero arm" >&2
+          fail=1
+          ;;
+      esac
       ;;
     gsm8k:full:0:cluster/profiles/qwen3-1p7b-dp16-tp4-gsm8k.env)
       [ "${CANON_GSM8K_ALIGNMENT_WARN_ONLY:-0}" = "1" ] || {
@@ -1241,9 +1404,15 @@ if [ "${CANON_P32_DP_ADMISSION:-0}" = "1" ]; then
   [ "$CANON_DP_PROBE_LOCAL_SAMPLES" -eq "$CANON_LOCAL_TRAJECTORIES" ] || {
     echo "[env] P32 probe must measure one local trajectory batch" >&2; fail=1;
   }
-  [ "$MIN_TOKEN_BUCKET" -eq "$((CANON_DP_SIZE * CANON_LOGPROB_M))" ] || {
-    echo "[env] P32 bucket FAIL: MIN_TOKEN_BUCKET must equal dp*CANON_LOGPROB_M" >&2; fail=1;
-  }
+  if [ "$P57_STOCK_FAST" = "1" ]; then
+    [ "$MIN_TOKEN_BUCKET" -eq "$((CANON_DP_SIZE * CANON_TARGET_M))" ] || {
+      echo "[env] P57 stock-fast bucket FAIL: MIN_TOKEN_BUCKET must equal dp*CANON_TARGET_M" >&2; fail=1;
+    }
+  else
+    [ "$MIN_TOKEN_BUCKET" -eq "$((CANON_DP_SIZE * CANON_LOGPROB_M))" ] || {
+      echo "[env] P32 bucket FAIL: MIN_TOKEN_BUCKET must equal dp*CANON_LOGPROB_M" >&2; fail=1;
+    }
+  fi
   [ "$CANON_CANONICAL_DEPTHS" = "1,2,4,8" ] || {
     echo "[env] P32 canonical-op depths must remain 1,2,4,8" >&2
     fail=1
@@ -1451,10 +1620,17 @@ if [ "${CANON_P32_DP_ADMISSION:-0}" = "1" ]; then
       fail=1
     }
   else
-    [ "${FL_SHARED_MESH:-}" = "1,4" ] || {
-      echo "[env] unadmitted P32 modes must keep the legacy trainer at TP4-only" >&2
-      fail=1
-    }
+    if [ "$P57_STOCK_FAST" = "1" ]; then
+      [ "${FL_SHARED_MESH:-}" = "8,8" ] || {
+        echo "[env] P57 stock-fast calibration requires the DP8xTP8 carrier mesh" >&2
+        fail=1
+      }
+    else
+      [ "${FL_SHARED_MESH:-}" = "1,4" ] || {
+        echo "[env] unadmitted P32 modes must keep the legacy trainer at TP4-only" >&2
+        fail=1
+      }
+    fi
   fi
   if [ "${CANON_REQUIRE_TRAIN_MESH_PIN:-0}" = "1" ]; then
     req CANON_EXPECT_TRAIN_MESH_IDS
@@ -1564,6 +1740,9 @@ if [ "${CANON_MODE:-}" = "workload-contract-only" ]; then
   echo "[env] P33 workload contract OK: workload=${CANON_P32_WORKLOAD} launch=refused"
 fi
 [ "$fail" = 0 ] || { echo "[env] REFUSING TO CONTINUE: canonical set incomplete" >&2; exit 1; }
+if [ "$P57_STOCK_FAST" = "1" ]; then
+  echo "[P57.STOCK_FAST] ZERO_TIM_OFF_PASS absent=12 zero=25"
+fi
 
 # Emit the resolved configuration.  Secrets are re-exported by later steps from the process
 # environment, never written here.

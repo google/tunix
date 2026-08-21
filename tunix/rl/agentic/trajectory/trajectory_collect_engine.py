@@ -371,6 +371,16 @@ class TrajectoryCollectEngine:
           "conversation_masks": final_masks,
           "status": self.agent.trajectory.status.name,
           "trajectory_reward": self.agent.trajectory.reward,
+          "invalid_action_count": sum(
+              1
+              for step in self.agent.trajectory.steps
+              if getattr(getattr(step, "action", None), "action", None) == 0
+          ),
+          "ineffective_action_count": sum(
+              1
+              for step in self.agent.trajectory.steps
+              if getattr(step, "info", {}).get("action_is_effective") is False
+          ),
           "env_time": self.env_time,
           "reward_time": self.reward_time,
           "old_logprobs": (

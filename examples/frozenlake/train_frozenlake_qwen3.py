@@ -69,6 +69,7 @@ if not _CANON_PRELEARNER_ONLY:
   from examples.frozenlake.agent import FrozenLakeAgent
   from examples.frozenlake.env import FrozenLakeEnv
   from examples.frozenlake import data as frozenlake_data
+  from examples.frozenlake import p57_workloads
 else:
   FrozenLakeAgent = None
   FrozenLakeEnv = None
@@ -151,6 +152,19 @@ arg_parser.add_argument("--vllm_max_num_batched_tokens", type=int, default=None)
 arg_parser.add_argument("--env_max_steps", type=int, default=8)
 arg_parser.add_argument("--num_test_batches", type=int, default=2)
 arg_parser.add_argument("--eval_every_n_steps", type=int, default=10)
+arg_parser.add_argument(
+    "--evaluation_only",
+    action="store_true",
+    help="Restore one P57 checkpoint and run held-out rollout without training.",
+)
+arg_parser.add_argument("--p57_workload_candidate", type=str, default="")
+arg_parser.add_argument("--p57_data_split", type=str, default="")
+arg_parser.add_argument(
+    "--p57_calibration_mode", choices=("", "stochastic"), default=""
+)
+arg_parser.add_argument(
+    "--p57_calibration_recipes", type=str, default=""
+)
 arg_parser.add_argument("--shuffle_data", type=bool, default=True)
 arg_parser.add_argument("--seed", type=int, default=42)
 arg_parser.add_argument(
@@ -167,6 +181,71 @@ arg_parser.add_argument(
     help="'grpo' (z-score) or 'rloo' (leave-one-out baseline).",
 )
 args, _ = arg_parser.parse_known_args()
+
+CANON_P57_RUN_KIND = os.getenv("CANON_P57_RUN_KIND", "")
+CANON_P57_INFERENCE_REGIME = os.getenv("CANON_P57_INFERENCE_REGIME", "")
+CANON_P57_EVALUATION = CANON_P57_RUN_KIND == "eval"
+CANON_P57_CALIBRATION = CANON_P57_RUN_KIND == "calibration"
+CANON_P57_NO_UPDATE = CANON_P57_EVALUATION or CANON_P57_CALIBRATION
+CANON_P57_WORKLOAD_CANDIDATE = os.getenv(
+    "CANON_P57_WORKLOAD_CANDIDATE", ""
+)
+CANON_P57_DATA_SPLIT = os.getenv("CANON_P57_DATA_SPLIT", "")
+CANON_P57_CALIBRATION_MODE = os.getenv("CANON_P57_CALIBRATION_MODE", "")
+CANON_P57_CALIBRATION_RECIPES = tuple(
+    value for value in os.getenv(
+        "CANON_P57_CALIBRATION_RECIPES", ""
+    ).split(",") if value
+)
+if args.evaluation_only != CANON_P57_NO_UPDATE:
+  raise ValueError(
+      "--evaluation_only must agree with P57 eval/calibration run kinds"
+  )
+if CANON_P57_NO_UPDATE and os.getenv("CANON_PROFILE_FILE", "") != (
+    "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env"
+):
+  raise ValueError("isolated FrozenLake evaluation/calibration requires P57")
+if (
+    args.p57_workload_candidate != CANON_P57_WORKLOAD_CANDIDATE
+    or args.p57_data_split != CANON_P57_DATA_SPLIT
+):
+  raise ValueError("P57 workload CLI arguments must match their signed env fields")
+if bool(CANON_P57_WORKLOAD_CANDIDATE) != bool(CANON_P57_DATA_SPLIT):
+  raise ValueError("P57 workload candidate and data split must be set together")
+if CANON_P57_CALIBRATION:
+  expected_recipes = ("m10", "m15", "m20")
+  if (
+      CANON_P57_WORKLOAD_CANDIDATE
+      or CANON_P57_DATA_SPLIT
+      or CANON_P57_CALIBRATION_MODE != "stochastic"
+      or CANON_P57_CALIBRATION_RECIPES != expected_recipes
+      or args.p57_calibration_mode != CANON_P57_CALIBRATION_MODE
+      or tuple(value for value in args.p57_calibration_recipes.split(",") if value)
+      != expected_recipes
+  ):
+    raise ValueError(
+        "P57 calibration requires the exact signed "
+        "m10,m15,m20 stochastic inventory and no single candidate"
+    )
+elif args.p57_calibration_mode or args.p57_calibration_recipes:
+  raise ValueError("P57 calibration CLI arguments require run kind calibration")
+if CANON_P57_WORKLOAD_CANDIDATE:
+  if os.getenv("CANON_PROFILE_FILE", "") != (
+      "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env"
+  ):
+    raise ValueError("materialized P57 workloads require the P57 profile")
+  p57_workload_spec = p57_workloads.candidate(
+      CANON_P57_WORKLOAD_CANDIDATE
+  )
+  p57_workloads.validate_split(CANON_P57_DATA_SPLIT)
+  if args.env_max_steps != p57_workload_spec.max_turns:
+    raise ValueError(
+        "P57 candidate max-turn contract drifted: "
+        f"candidate={p57_workload_spec.name} "
+        f"expected={p57_workload_spec.max_turns} got={args.env_max_steps}"
+    )
+else:
+  p57_workload_spec = None
 
 CANON_L3 = os.getenv("CANON_FROZENLAKE_L3", "") == "1"
 CANON_P27 = os.getenv("CANON_FROZENLAKE_P27", "") == "1"
@@ -200,15 +279,26 @@ CANON_ALIGNMENT_TRAIN_MODE = dp_workloads.requires_alignment_train_mode(
 )
 CANON_P33_DISABLE_EVAL = os.getenv("CANON_P33_DISABLE_EVAL", "") == "1"
 P32_WORKLOAD = dp_workloads.active_workload() if CANON_P32_WORKLOAD else None
+P57_STOCK_FAST_ATTESTATION = None
 if CANON_P32_WORKLOAD:
-  dp_workloads.validate_environment(
-      P32_WORKLOAD, require_reduction_admission=True
-  )
-  if not CANON_L3:
-    raise ValueError("canonical DP FrozenLake requires CANON_FROZENLAKE_L3=1")
-  CANON_P33_ENABLE_EVAL = dp_workloads.frozenlake_evaluation_enabled(
-      os.environ
-  )
+  if CANON_P57_CALIBRATION:
+    P57_STOCK_FAST_ATTESTATION = (
+        dp_workloads.validate_p57_stock_fast_environment(
+            P32_WORKLOAD, os.environ
+        )
+    )
+    if CANON_L3:
+      raise ValueError("P57 stock-fast calibration forbids canonical L3")
+    CANON_P33_ENABLE_EVAL = False
+  else:
+    dp_workloads.validate_environment(
+        P32_WORKLOAD, require_reduction_admission=True
+    )
+    if not CANON_L3:
+      raise ValueError("canonical DP FrozenLake requires CANON_FROZENLAKE_L3=1")
+    CANON_P33_ENABLE_EVAL = dp_workloads.frozenlake_evaluation_enabled(
+        os.environ
+    )
 else:
   CANON_P33_ENABLE_EVAL = False
 CANON_OPTIMIZER_PLACEMENT = dp_workloads.canonical_optimizer_placement(
@@ -350,8 +440,27 @@ MINI_BATCH_SIZE = args.mini_batch_size
 NUM_BATCHES = args.num_batches
 if CANON_P32_WORKLOAD:
   assert P32_WORKLOAD is not None
-  expected_response_length = 512 if CANON_P33_SHORT_ALIGNMENT else 2048
-  expected_env_steps = 2 if CANON_P33_SHORT_ALIGNMENT else 5
+  if CANON_P57_CALIBRATION:
+    # All recipes share one physical envelope. Their smaller preregistered
+    # context caps are applied by the offline classifier to observed lengths,
+    # so an engine-side truncation cannot make a recipe look artificially easy.
+    expected_prompt_length = 16_384
+    expected_response_length = 16_384
+    expected_env_steps = max(
+        spec.max_turns for spec in p57_workloads.RECIPES.values()
+    )
+    expected_generations = 8
+    expected_temperature = 0.7
+  else:
+    expected_prompt_length = 4096
+    expected_response_length = 512 if CANON_P33_SHORT_ALIGNMENT else 2048
+    expected_env_steps = (
+        p57_workload_spec.max_turns
+        if p57_workload_spec is not None
+        else (2 if CANON_P33_SHORT_ALIGNMENT else 5)
+    )
+    expected_generations = 2 if CANON_P57_EVALUATION else 8
+    expected_temperature = 0.0 if CANON_P57_EVALUATION else 0.7
   # The P38 serving-capture job is a pre-backward diagnostic. It consumes four
   # prompt groups so the first diagnostic batch is 4 x 8 = 32 trajectories,
   # exactly divisible by DP16. The dataset/global batch remains 32 prompts and
@@ -364,8 +473,11 @@ if CANON_P32_WORKLOAD:
       "batch_size": (BATCH_SIZE, 32),
       "mini_batch_size": (MINI_BATCH_SIZE, expected_mini_batch_size),
       "num_batches": (NUM_BATCHES, 150),
-      "num_generations": (NUM_GENERATIONS, 8),
-      "max_prompt_length": (MAX_PROMPT_LENGTH, 4096),
+      "num_generations": (
+          NUM_GENERATIONS,
+          expected_generations,
+      ),
+      "max_prompt_length": (MAX_PROMPT_LENGTH, expected_prompt_length),
       "max_response_length": (
           MAX_RESPONSE_LENGTH,
           expected_response_length,
@@ -386,7 +498,10 @@ if CANON_P32_WORKLOAD:
       "beta": (args.beta, 0.0),
       "epsilon": (args.epsilon, 0.003),
       "epsilon_high": (args.epsilon_high, 0.005),
-      "temperature": (args.temperature, 0.7),
+      "temperature": (
+          args.temperature,
+          expected_temperature,
+      ),
       "top_p": (args.top_p, 1.0),
       "top_k": (args.top_k, 0),
       "loss_algo": (args.loss_algo, "gspo-token"),
@@ -516,7 +631,17 @@ NUM_EPOCHS = 3
 # P21.3 L3 is a one-batch, no-update release gate, not a convergence run.
 # Keeping this decision inside the default-off L3 branch prevents the three
 # dataset epochs from silently producing three alignment records.
-if CANON_P32_WORKLOAD:
+if CANON_P57_RUN_KIND:
+  try:
+    MAX_STEPS = int(os.environ["CANON_P57_EXPECTED_UPDATES"])
+  except (KeyError, ValueError) as exc:
+    raise ValueError("P57 expected-update horizon must be an integer") from exc
+  if MAX_STEPS <= 0 or args.max_steps != MAX_STEPS:
+    raise ValueError(
+        "P57 command/horizon mismatch: "
+        f"signed={MAX_STEPS} command={args.max_steps}"
+    )
+elif CANON_P32_WORKLOAD:
   MAX_STEPS = dp_workloads.requested_max_steps(P32_WORKLOAD)
   if args.max_steps != MAX_STEPS:
     raise ValueError(
@@ -612,6 +737,10 @@ if P45_CHECKPOINT.enabled:
           "eval_every_n_steps": EVAL_EVERY_N_STEPS,
           "max_steps": MAX_STEPS,
           "optimizer_placement": CANON_OPTIMIZER_PLACEMENT,
+          "p57_tim_arm": os.getenv("CANON_P57_TIM_ARM", ""),
+          "p57_fixed_lm_head": os.getenv("CANON_P38_FIXED_LM_HEAD", "0"),
+          "p57_workload_candidate": CANON_P57_WORKLOAD_CANDIDATE,
+          "p57_data_split": CANON_P57_DATA_SPLIT,
       },
   )
   os.environ["CANON_CHECKPOINT_CONTRACT_JSON"] = (
@@ -687,6 +816,7 @@ if CANON_L3:
 MODEL_VERSION = "Qwen/Qwen3-8B"
 MODEL_DOWNLOAD_DIR = os.getenv("MODEL_DOWNLOAD_DIR", "/tmp/models/Qwen3-8B")
 DATA_DIR = os.getenv("FROZENLAKE_DATA_DIR", "/tmp/data/frozenlake")
+P57_BASE_DATA_DIR = DATA_DIR
 
 # P45 uses a stable GCS campaign path. Other FrozenLake carriers retain the
 # historical checkpoint-disabled default.
@@ -769,31 +899,49 @@ import fsspec
 Dataset = datasets_lib.Dataset
 AutoTokenizer = transformers.AutoTokenizer
 
+if CANON_P57_WORKLOAD_CANDIDATE:
+  DATA_DIR = os.path.join(
+      DATA_DIR,
+      "p57",
+      CANON_P57_WORKLOAD_CANDIDATE,
+      CANON_P57_DATA_SPLIT,
+  )
 TRAIN_DATA_PATH = os.path.join(DATA_DIR, "train.parquet")
 TEST_DATA_PATH = os.path.join(DATA_DIR, "test.parquet")
+P57_DATASET_ATTESTATION: dict[str, str] = {}
+P57_CALIBRATION_ATTESTATION: dict[str, str] = {}
 
 
 def create_datasets(
     train_ds_path: str = TRAIN_DATA_PATH,
     test_ds_path: str = TEST_DATA_PATH,
 ):
+  global P57_DATASET_ATTESTATION
   data_dir = os.path.dirname(train_ds_path)
   os.makedirs(data_dir, exist_ok=True)
   if not os.path.exists(train_ds_path) or not os.path.exists(test_ds_path):
-    train_seeds, train_sizes, train_ps = frozenlake_data.generate_dataset_parameters(
-        10000, random_seed=42
-    )
-    train_data = [
-        frozenlake_data.get_frozenlake_dict(s, sz, p)
-        for s, sz, p in zip(train_seeds, train_sizes, train_ps)
-    ]
-    test_seeds, test_sizes, test_ps = frozenlake_data.generate_dataset_parameters(
-        100, random_seed=123
-    )
-    test_data = [
-        frozenlake_data.get_frozenlake_dict(s, sz, p)
-        for s, sz, p in zip(test_seeds, test_sizes, test_ps)
-    ]
+    if CANON_P57_WORKLOAD_CANDIDATE:
+      train_data, test_data = p57_workloads.materialize_dataset_pair(
+          CANON_P57_WORKLOAD_CANDIDATE,
+          CANON_P57_DATA_SPLIT,
+          train_count=10_000,
+          eval_count=100,
+      )
+    else:
+      train_seeds, train_sizes, train_ps = frozenlake_data.generate_dataset_parameters(
+          10000, random_seed=42
+      )
+      train_data = [
+          frozenlake_data.get_frozenlake_dict(s, sz, p)
+          for s, sz, p in zip(train_seeds, train_sizes, train_ps)
+      ]
+      test_seeds, test_sizes, test_ps = frozenlake_data.generate_dataset_parameters(
+          100, random_seed=123
+      )
+      test_data = [
+          frozenlake_data.get_frozenlake_dict(s, sz, p)
+          for s, sz, p in zip(test_seeds, test_sizes, test_ps)
+      ]
     frozenlake_data.save_dataset(train_data, train_ds_path)
     frozenlake_data.save_dataset(test_data, test_ds_path)
 
@@ -802,6 +950,32 @@ def create_datasets(
   ) as test_f:
     train_df = pd.read_parquet(train_f)
     test_df = pd.read_parquet(test_f)
+
+  if CANON_P57_WORKLOAD_CANDIDATE:
+    P57_DATASET_ATTESTATION = {
+        "train_sha256": p57_workloads.attest_records(
+            train_df.to_dict("records"),
+            CANON_P57_WORKLOAD_CANDIDATE,
+            CANON_P57_DATA_SPLIT,
+            "train",
+            expected_count=10_000,
+        ),
+        "eval_sha256": p57_workloads.attest_records(
+            test_df.to_dict("records"),
+            CANON_P57_WORKLOAD_CANDIDATE,
+            CANON_P57_DATA_SPLIT,
+            "eval",
+            expected_count=100,
+        ),
+    }
+    print(
+        "[P57.DATASET] MATERIALIZED_PASS "
+        f"candidate={CANON_P57_WORKLOAD_CANDIDATE} "
+        f"split={CANON_P57_DATA_SPLIT} train_rows=10000 eval_rows=100 "
+        f"train_sha256={P57_DATASET_ATTESTATION['train_sha256']} "
+        f"eval_sha256={P57_DATASET_ATTESTATION['eval_sha256']}",
+        flush=True,
+    )
 
   train_ds = grain.MapDataset.source(
       frozenlake_data.add_empty_prompt_column(Dataset.from_pandas(train_df))
@@ -815,6 +989,42 @@ def create_datasets(
   return train_ds, test_ds
 
 
+def create_calibration_datasets():
+  """Loads the three frozen held-out inventories without creating train data."""
+  global P57_CALIBRATION_ATTESTATION
+  result = {}
+  for recipe_name in CANON_P57_CALIBRATION_RECIPES:
+    eval_path = os.path.join(
+        P57_BASE_DATA_DIR, "p57", recipe_name, "calibration", "test.parquet"
+    )
+    os.makedirs(os.path.dirname(eval_path), exist_ok=True)
+    if not os.path.exists(eval_path):
+      rows = p57_workloads.materialize_records(
+          recipe_name, "calibration", "eval", 100
+      )
+      frozenlake_data.save_dataset(rows, eval_path)
+    with fsspec.open(eval_path, "rb") as eval_file:
+      frame = pd.read_parquet(eval_file)
+    rows = frame.to_dict("records")
+    dataset_sha = p57_workloads.attest_records(
+        rows,
+        recipe_name,
+        "calibration",
+        "eval",
+        expected_count=100,
+    )
+    P57_CALIBRATION_ATTESTATION[recipe_name] = dataset_sha
+    result[recipe_name] = grain.MapDataset.source(
+        frozenlake_data.add_empty_prompt_column(Dataset.from_pandas(frame))
+    )
+    print(
+        "[P57.CALIBRATION.DATASET] MATERIALIZED_PASS "
+        f"recipe={recipe_name} rows=100 eval_sha256={dataset_sha}",
+        flush=True,
+    )
+  return result
+
+
 tokenizer = AutoTokenizer.from_pretrained(MODEL_VERSION)
 # Disable Qwen3 thinking mode. The agent prompt already requests explicit
 # step-by-step reasoning; with thinking enabled the model writes hundreds of
@@ -826,8 +1036,23 @@ if CANON_CONTRACT_ONLY or CANON_A3_ONLY or CANON_P38_FROZENLAKE_REPLAY:
   # A1b/A2 inventory needs the real model and rollout runner, not an RL batch.
   # Skipping dataset I/O keeps this preflight independent of FrozenLake data.
   train_dataset = test_dataset = None
+  calibration_datasets = {}
   print("[CANON_L3] contract-only: dataset I/O skipped", flush=True)
+elif CANON_P57_CALIBRATION:
+  train_dataset = test_dataset = None
+  calibration_datasets = create_calibration_datasets()
+  calibration_datasets = {
+      recipe_name: data_lib.post_init_dataset(
+          dataset,
+          tokenizer,
+          batch_size=BATCH_SIZE,
+          num_batches=NUM_TEST_BATCHES,
+          max_prompt_length=MAX_PROMPT_LENGTH,
+      )[0]
+      for recipe_name, dataset in calibration_datasets.items()
+  }
 else:
+  calibration_datasets = {}
   train_dataset, test_dataset = create_datasets()
   if CANON_P31_CONVERGENCE or CANON_P32_WORKLOAD:
     train_rows = len(train_dataset)
@@ -862,7 +1087,11 @@ else:
       fraction=TRAIN_FRACTION,
       num_epochs=NUM_EPOCHS,
   )
-  if not CANON_P32_WORKLOAD or CANON_P33_ENABLE_EVAL:
+  if (
+      not CANON_P32_WORKLOAD
+      or CANON_P33_ENABLE_EVAL
+      or CANON_P57_EVALUATION
+  ):
     test_dataset, _ = data_lib.post_init_dataset(
         test_dataset,
         tokenizer,
@@ -1107,13 +1336,21 @@ if P45_CHECKPOINT.enabled:
       rl_cluster.actor_trainer.checkpoint_manager.last_restore_had_optimizer
   )
   restored_metadata = rl_cluster.actor_trainer._restored_custom_metadata
-  frozenlake_checkpoint.validate_restored(
-      P45_CHECKPOINT,
-      restored_step=restored_checkpoint_step,
-      optimizer_restored=restored_optimizer,
-      metadata=restored_metadata,
-      expected_contract=P45_CHECKPOINT_CONTRACT,
-  )
+  if CANON_P57_EVALUATION:
+    frozenlake_checkpoint.validate_p57_evaluation_restored(
+        P45_CHECKPOINT,
+        restored_step=restored_checkpoint_step,
+        metadata=restored_metadata,
+        env=os.environ,
+    )
+  else:
+    frozenlake_checkpoint.validate_restored(
+        P45_CHECKPOINT,
+        restored_step=restored_checkpoint_step,
+        optimizer_restored=restored_optimizer,
+        metadata=restored_metadata,
+        expected_contract=P45_CHECKPOINT_CONTRACT,
+    )
   if rl_cluster.actor_trainer.train_steps != restored_checkpoint_step:
     raise ValueError(
         "P45 trainer/global checkpoint step mismatch: "
@@ -1251,7 +1488,7 @@ grpo_trainer = GRPOLearner(
 )
 show_hbm_usage("after GRPOLearner creation")
 
-if P45_CHECKPOINT.mode == "resume":
+if P45_CHECKPOINT.mode == "resume" or CANON_P57_NO_UPDATE:
   if grpo_trainer.rl_cluster.global_steps != restored_checkpoint_step:
     raise ValueError(
         "P45 learner did not adopt the restored global step: "
@@ -1259,7 +1496,9 @@ if P45_CHECKPOINT.mode == "resume":
         f"restored={restored_checkpoint_step}"
     )
   if not grpo_trainer.should_sync_weights:
-    raise ValueError("P45 vLLM resume requires an explicit rollout weight sync")
+    raise ValueError(
+      "P45 resume/P57 no-update run requires an explicit rollout weight sync"
+    )
   rl_cluster.sync_weights_for_resume()
   resume_weight_attestation = rl_cluster.attest_actor_anchor_matches_engine()
   if resume_weight_attestation.get("equal") is not True:
@@ -1269,7 +1508,8 @@ if P45_CHECKPOINT.mode == "resume":
     )
   print(
       "[P45.CHECKPOINT] ROLLOUT_SYNC_PASS "
-      f"step={restored_checkpoint_step} weights_equal=1",
+      f"step={restored_checkpoint_step} weights_equal=1 "
+      f"reason={'calibration' if CANON_P57_CALIBRATION else 'evaluation' if CANON_P57_EVALUATION else 'resume'}",
       flush=True,
   )
 
@@ -1298,6 +1538,155 @@ elif CANON_L3:
   training_eval_dataset = None
 else:
   training_eval_dataset = test_dataset
+
+if CANON_P57_CALIBRATION:
+  output_path = os.getenv("CANON_P57_CALIBRATION_OUTPUT", "")
+  if not output_path or not os.path.isabs(output_path):
+    raise ValueError("P57 calibration output must be an absolute path")
+  if os.path.exists(output_path):
+    raise FileExistsError(
+        f"refusing to overwrite P57 calibration output: {output_path}"
+    )
+  starting_train_steps = rl_cluster.actor_trainer.train_steps
+  starting_global_steps = rl_cluster.global_steps
+  results = {}
+  try:
+    for recipe_name in CANON_P57_CALIBRATION_RECIPES:
+      spec = p57_workloads.recipe(recipe_name)
+      grpo_trainer.env_kwargs["max_steps"] = spec.max_turns
+      print(
+          "[CANON_P57_CALIBRATION] RECIPE_START "
+          f"mode={CANON_P57_CALIBRATION_MODE} recipe={recipe_name} "
+          f"max_turns={spec.max_turns} context_cap={spec.context_hard_cap}",
+          flush=True,
+      )
+      results[recipe_name] = {
+          "recipe": {
+              "name": spec.name,
+              "min_grid_side": spec.min_grid_side,
+              "max_grid_side": spec.max_grid_side,
+              "max_turns": spec.max_turns,
+              "context_hard_cap": spec.context_hard_cap,
+              "frozen_probability": spec.frozen_probability,
+              "eligible": spec.eligible,
+          },
+          "dataset_eval_sha256": P57_CALIBRATION_ATTESTATION[recipe_name],
+          **grpo_trainer.rollout_only_evaluate(
+              calibration_datasets[recipe_name], policy_step=0
+          ),
+      }
+      print(
+          "[CANON_P57_CALIBRATION] RECIPE_COMPLETE "
+          f"mode={CANON_P57_CALIBRATION_MODE} recipe={recipe_name} "
+          f"trajectories={results[recipe_name]['trajectories']} "
+          f"wall_seconds={results[recipe_name]['wall_seconds']:.3f}",
+          flush=True,
+      )
+    if (
+        rl_cluster.actor_trainer.train_steps != starting_train_steps
+        or rl_cluster.global_steps != starting_global_steps
+    ):
+      raise RuntimeError("P57 calibration mutated training state")
+    record = {
+        "schema": "p57-frozenlake-stock-rollout-calibration-v2",
+        "arm": "mismatch",
+        "inference_regime": CANON_P57_INFERENCE_REGIME,
+        "zero_tim_off_attestation": P57_STOCK_FAST_ATTESTATION,
+        "fixed_lm_head": os.getenv("CANON_P38_FIXED_LM_HEAD", "0"),
+        "source_commit": os.getenv("CANON_EXPECT_COMMIT", ""),
+        "mode": CANON_P57_CALIBRATION_MODE,
+        "temperature": TEMPERATURE,
+        "generations": NUM_GENERATIONS,
+        "seed": SEED,
+        "recipe_order": list(CANON_P57_CALIBRATION_RECIPES),
+        "physical_max_prompt_length": MAX_PROMPT_LENGTH,
+        "physical_max_response_length": MAX_RESPONSE_LENGTH,
+        "train_steps_before": starting_train_steps,
+        "train_steps_after": rl_cluster.actor_trainer.train_steps,
+        "global_steps_before": starting_global_steps,
+        "global_steps_after": rl_cluster.global_steps,
+        "backward_calls": 0,
+        "optimizer_commits": 0,
+        "checkpoint_writes": 0,
+        "results": results,
+    }
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    with open(output_path, "x", encoding="utf-8") as output_file:
+      json.dump(record, output_file, indent=2, sort_keys=True)
+      output_file.write("\n")
+    print(
+        "[CANON_P57_CALIBRATION_JSON] "
+        + json.dumps(record, sort_keys=True, separators=(",", ":")),
+        flush=True,
+    )
+    print(
+        "[CANON_P57_CALIBRATION] COMPLETE "
+        f"mode={CANON_P57_CALIBRATION_MODE} "
+        f"inference_regime={CANON_P57_INFERENCE_REGIME} "
+        f"recipes={len(CANON_P57_CALIBRATION_RECIPES)} "
+        f"trajectories={sum(value['trajectories'] for value in results.values())} "
+        "backward=0 optimizer_commits=0 checkpoint_writes=0",
+        flush=True,
+    )
+  finally:
+    rl_cluster.close()
+  raise SystemExit(0)
+
+if CANON_P57_EVALUATION:
+  if test_dataset is None:
+    raise ValueError("P57 isolated evaluation dataset is missing")
+  output_path = os.getenv("CANON_P57_EVAL_OUTPUT", "")
+  if not output_path or not os.path.isabs(output_path):
+    raise ValueError("P57 isolated evaluation output must be an absolute path")
+  if os.path.exists(output_path):
+    raise FileExistsError(
+        f"refusing to overwrite P57 evaluation output: {output_path}"
+    )
+  try:
+    evaluation = grpo_trainer.evaluate_only(
+        test_dataset,
+        policy_step=restored_checkpoint_step,
+    )
+    record = {
+        "schema": "p57-frozenlake-isolated-evaluation-v1",
+        "arm": os.getenv("CANON_P57_TIM_ARM", ""),
+        "fixed_lm_head": os.getenv("CANON_P38_FIXED_LM_HEAD", "0"),
+        "source_commit": os.getenv("CANON_EXPECT_COMMIT", ""),
+        "expected_updates": int(os.environ["CANON_P57_EXPECTED_UPDATES"]),
+        "checkpoint_step": int(
+            os.environ["CANON_P57_EVAL_CHECKPOINT_STEP"]
+        ),
+        "checkpoint_tag": P45_CHECKPOINT.tag,
+        "temperature": TEMPERATURE,
+        "seed": SEED,
+        "held_out_rows": 100,
+        "workload_candidate": CANON_P57_WORKLOAD_CANDIDATE,
+        "data_split": CANON_P57_DATA_SPLIT,
+        "dataset_eval_sha256": P57_DATASET_ATTESTATION.get(
+            "eval_sha256", ""
+        ),
+        **evaluation,
+    }
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    with open(output_path, "x", encoding="utf-8") as output_file:
+      json.dump(record, output_file, indent=2, sort_keys=True)
+      output_file.write("\n")
+    print(
+        "[CANON_P57_EVAL_JSON] "
+        + json.dumps(record, sort_keys=True, separators=(",", ":")),
+        flush=True,
+    )
+    print(
+        "[CANON_P57_EVAL] COMPLETE "
+        f"arm={record['arm']} step={record['policy_step']} "
+        f"prompts={record['prompts']} generations={record['generations']} "
+        f"rewards={record['n']} solve={record['solve']:.6f} "
+        "backward=0 optimizer_commits=0 checkpoint_writes=0",
+        flush=True,
+    )
+  finally:
+    rl_cluster.close()
+  raise SystemExit(0)
 
 grpo_trainer.train(
     train_dataset,

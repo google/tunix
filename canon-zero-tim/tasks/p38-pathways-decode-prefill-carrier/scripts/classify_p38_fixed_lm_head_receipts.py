@@ -16,6 +16,7 @@ ENDPOINTS = ("untied_lm_head", "tied_embed")
 GEOMETRIES = {
     ("tied_embed", 2048, 4): (37984, 38144),
     ("untied_lm_head", 4096, 4): (37984, 38144),
+    ("untied_lm_head", 4096, 8): (18992, 19200),
     ("tied_embed", 2560, 8): (18992, 19200),
     ("untied_lm_head", 5120, 8): (18992, 19200),
 }
@@ -83,7 +84,13 @@ def _matches_vjp(
 
 
 def classify(
-    text: str, *, endpoint: str, hidden: int, tp_size: int, require_vjp: bool
+    text: str,
+    *,
+    endpoint: str,
+    hidden: int,
+    tp_size: int,
+    require_vjp: bool,
+    include_learner: bool = True,
 ) -> dict[str, object]:
   if endpoint not in ENDPOINTS:
     raise ValueError(f"unsupported fixed-head endpoint: {endpoint!r}")
@@ -105,7 +112,7 @@ def classify(
 
   missing_m = [
       semantic_m
-      for semantic_m in (*REQUEST_M, LEARNER_M)
+      for semantic_m in (*REQUEST_M, *((LEARNER_M,) if include_learner else ()))
       if not any(
           _matches_primal(
               record,
@@ -164,7 +171,8 @@ def classify(
       "local_vocab": local_vocab,
       "padded_local_vocab": padded_local_vocab,
       "request_M": list(REQUEST_M),
-      "learner_M": LEARNER_M,
+      "learner_M": LEARNER_M if include_learner else None,
+      "include_learner": include_learner,
       "require_vjp": require_vjp,
       "primal_records": len(primal),
       "vjp_records": len(vjp),
@@ -185,6 +193,11 @@ def main() -> int:
   )
   parser.add_argument("--tp-size", required=True, type=int, choices=(4, 8))
   parser.add_argument("--require-vjp", action="store_true")
+  parser.add_argument(
+      "--request-only",
+      action="store_true",
+      help="Require serving request buckets but not learner M4096/VJP receipts.",
+  )
   parser.add_argument("--output", required=True, type=Path)
   args = parser.parse_args()
 
@@ -195,6 +208,7 @@ def main() -> int:
       hidden=args.hidden,
       tp_size=args.tp_size,
       require_vjp=args.require_vjp,
+      include_learner=not args.request_only,
   )
   report["log_sha256"] = hashlib.sha256(args.log.read_bytes()).hexdigest()
   args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -208,7 +222,7 @@ def main() -> int:
       + f" endpoint={args.endpoint} K={args.hidden} TP={args.tp_size} "
       + "request_M="
       + ",".join(map(str, REQUEST_M))
-      + f" learner_M={LEARNER_M} vjp={report['matching_vjp_records']}"
+      + f" learner_M={report['learner_M']} vjp={report['matching_vjp_records']}"
   )
   if report["reasons"]:
     marker += " reasons=" + ";".join(report["reasons"])

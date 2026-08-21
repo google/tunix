@@ -65,9 +65,9 @@ class Qwen8BTP8Test(unittest.TestCase):
         },
     )
 
-  def test_tp8_requires_no_matmul_or_swiglu_padding(self):
+  def test_tp8_pads_only_the_fixed_lm_head(self):
     self.assertEqual(tp8.MATMUL_K_PADDING, {})
-    self.assertEqual(tp8.MATMUL_N_PADDING, {})
+    self.assertEqual(tp8.MATMUL_N_PADDING, {18992: 19200})
     self.assertEqual(tp8.SWIGLU_FEATURE_PADDING, {})
     self.assertEqual(tp8.INTERMEDIATE_SIZE // tp8.TP_SIZE, 1536)
     self.assertEqual(1536 % tp8.BK, 0)

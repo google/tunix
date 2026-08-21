@@ -10,6 +10,7 @@ https://github.com/RAGEN-AI/RAGEN/blob/main/ragen/env/frozen_lake/env.py
 """
 
 import copy
+import json
 from typing import Any, Dict
 from absl import logging
 import gymnasium as gym
@@ -175,6 +176,14 @@ class FrozenLakeEnv(BaseTaskEnv, GymFrozenLakeEnv):
     MAX_STEPS = max_steps
 
     desc = kwargs.pop("desc", None)
+    if desc is None and "desc_json" in entry:
+      desc_json = entry["desc_json"]
+      if hasattr(desc_json, "item"):
+        desc_json = desc_json.item()
+      try:
+        desc = json.loads(str(desc_json))
+      except (TypeError, json.JSONDecodeError) as exc:
+        raise ValueError("materialized FrozenLake desc_json is invalid") from exc
     is_slippery = kwargs.pop("is_slippery", False)
     self.seed = entry["seed"].item() if "seed" in entry else 42
     self.size = entry["size"].item() if "size" in entry else 8

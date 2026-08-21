@@ -19,7 +19,10 @@ BM = 128
 BN = 128
 BK = 128
 MATMUL_K_PADDING = {}
-MATMUL_N_PADDING = {}
+# The seven decoder projections remain exact and unpadded.  The only padded
+# N is the TP8-local output head: 151936 / 8 = 18992 logical vocabulary rows,
+# padded to the registered fixed-head BN256 geometry.
+MATMUL_N_PADDING = {18992: 19200}
 SWIGLU_FEATURE_PADDING = {}
 
 HIDDEN_SIZE = 4096
@@ -105,8 +108,11 @@ def validate_manifest(sites) -> None:
                 f"{site.family} local shape {actual} does not divide "
                 f"BK/BN={BK}/{BN}"
             )
-    if MATMUL_K_PADDING or MATMUL_N_PADDING:
-        raise ValueError("Qwen3-8B TP8 matmul shapes must not use padding")
+    if MATMUL_K_PADDING or MATMUL_N_PADDING != {18992: 19200}:
+        raise ValueError(
+            "Qwen3-8B TP8 permits padding only for the fixed lm_head: "
+            "N18992->19200"
+        )
     local_feature = INTERMEDIATE_SIZE // TP_SIZE
     if local_feature != 1536 or local_feature % 256 or SWIGLU_FEATURE_PADDING:
         raise ValueError(
@@ -162,7 +168,8 @@ def self_test() -> None:
         assert match_site(
             "model.layers.0.mlp.down_proj", "mn,np->mp"
         ).k_local == 1536
-        assert MATMUL_K_PADDING == MATMUL_N_PADDING == {}
+        assert MATMUL_K_PADDING == {}
+        assert MATMUL_N_PADDING == {18992: 19200}
         assert SWIGLU_FEATURE_PADDING == {}
         os.environ["CANON_QWEN3_TP_SIZE"] = "4"
         try:

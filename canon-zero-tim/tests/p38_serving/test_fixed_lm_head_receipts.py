@@ -156,6 +156,35 @@ class FixedLmHeadReceiptTest(unittest.TestCase):
     )
     self.assertEqual(report["verdict"], "P38_FIXED_LM_HEAD_RECEIPTS_PASS")
 
+  def test_tp8_untied_qwen8b_contract_passes(self):
+    report = receipts.classify(
+        _log("untied_lm_head", hidden=4096, tp_size=8),
+        endpoint="untied_lm_head",
+        hidden=4096,
+        tp_size=8,
+        require_vjp=True,
+    )
+    self.assertEqual(report["verdict"], "P38_FIXED_LM_HEAD_RECEIPTS_PASS")
+    self.assertEqual(report["local_vocab"], 18992)
+    self.assertEqual(report["padded_local_vocab"], 19200)
+
+  def test_request_only_eval_does_not_require_learner_or_vjp(self):
+    text = "\n".join(
+        line
+        for line in _log("untied_lm_head", hidden=4096, tp_size=8).splitlines()
+        if "semantic_M=4096 " not in line
+    )
+    report = receipts.classify(
+        text,
+        endpoint="untied_lm_head",
+        hidden=4096,
+        tp_size=8,
+        require_vjp=False,
+        include_learner=False,
+    )
+    self.assertEqual(report["verdict"], "P38_FIXED_LM_HEAD_RECEIPTS_PASS")
+    self.assertIsNone(report["learner_M"])
+
   def test_unregistered_endpoint_geometry_fails(self):
     with self.assertRaisesRegex(ValueError, "unsupported fixed-head geometry"):
       receipts.classify(

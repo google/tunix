@@ -1974,6 +1974,196 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         )
       yield batch
 
+  def evaluate_only(
+      self,
+      eval_dataset: Iterable[TrainingInputT],
+      *,
+      policy_step: int,
+  ) -> dict[str, Any]:
+    """Runs one isolated held-out rollout without training or checkpoint writes."""
+    all_eval_prompts = list(
+        self._create_micro_batch_iterator(iter(eval_dataset), 1)
+    )
+    if not all_eval_prompts:
+      raise ValueError("P57 isolated evaluation dataset is empty")
+    if policy_step < 0:
+      raise ValueError("P57 isolated evaluation policy step must be nonnegative")
+    # ``train`` normally initializes this from its first dataset batch.  The
+    # isolated path never enters ``train``, so bind the full evaluation
+    # inventory explicitly before group ids and watchdog accounting use it.
+    self._full_batch_size = len(all_eval_prompts)
+    with self._rewards_window_lock:
+      self._eval_rewards_window.clear()
+    self._eval_iter_steps = 0
+    eval_orchestrator = self._build_orchestrator()
+    started = time.perf_counter()
+
+    async def _run():
+      batches = 0
+      async for batch in self._orchestrator_producer(
+          eval_orchestrator,
+          all_eval_prompts,
+          num_generations=self._num_generations(),
+      ):
+        # Converting through the ordinary EVAL path computes the authoritative
+        # environment rewards and metrics without constructing an optimizer
+        # update. Do not retain the full trajectories after each batch.
+        self._batch_to_train_example(batch, rl_cluster_lib.Mode.EVAL)
+        batches += 1
+      return batches
+
+    batches = asyncio.run_coroutine_threadsafe(_run(), self.loop).result()
+    with self._rewards_window_lock:
+      rewards = np.asarray(self._eval_rewards_window, dtype=np.float32)
+      self._eval_rewards_window.clear()
+    expected_rewards = len(all_eval_prompts) * self._num_generations()
+    if rewards.size != expected_rewards:
+      raise RuntimeError(
+          "P57 isolated evaluation coverage mismatch: "
+          f"prompts={len(all_eval_prompts)} "
+          f"generations={self._num_generations()} rewards={rewards.size} "
+          f"expected={expected_rewards}"
+      )
+    metrics = _frozenlake_evaluation_metrics(
+        rewards,
+        wall_seconds=time.perf_counter() - started,
+        policy_step=policy_step,
+    )
+    return {
+        **metrics,
+        "prompts": len(all_eval_prompts),
+        "generations": self._num_generations(),
+        "batches": batches,
+      "rewards": rewards.tolist(),
+    }
+
+  def rollout_only_evaluate(
+      self,
+      eval_dataset: Iterable[TrainingInputT],
+      *,
+      policy_step: int,
+  ) -> dict[str, Any]:
+    """Collects raw held-out trajectories without trainer-side recomputation.
+
+    This is the P57 workload-calibration path.  It intentionally does not call
+    ``_batch_to_train_example``: that ordinary EVAL conversion recomputes
+    trainer log-probabilities and pads full training tensors, neither of which
+    is needed to choose a FrozenLake workload.  The returned receipt contains
+    only scalar trajectory facts and identifiers; no token contents are
+    retained.
+    """
+    all_eval_prompts = list(
+        self._create_micro_batch_iterator(iter(eval_dataset), 1)
+    )
+    if not all_eval_prompts:
+      raise ValueError("P57 rollout-only evaluation dataset is empty")
+    if policy_step < 0:
+      raise ValueError("P57 rollout-only policy step must be nonnegative")
+    self._full_batch_size = len(all_eval_prompts)
+    before_train_steps = self.rl_cluster.actor_trainer.train_steps
+    before_global_steps = self.rl_cluster.global_steps
+    orchestrator = self._build_orchestrator()
+    started = time.perf_counter()
+
+    async def _run():
+      batches = 0
+      records = []
+      async for batch in self._orchestrator_producer(
+          orchestrator,
+          all_eval_prompts,
+          num_generations=self._num_generations(),
+      ):
+        if len(batch) != self._num_generations():
+          raise RuntimeError(
+              "P57 rollout-only group coverage mismatch: "
+              f"got={len(batch)} expected={self._num_generations()}"
+          )
+        for item in batch:
+          traj = item.traj
+          prompt_tokens = np.asarray(traj.get("prompt_tokens", []))
+          completion_tokens = np.asarray(
+              traj.get("conversation_tokens", [])
+          )
+          completion_masks = np.asarray(
+              traj.get("conversation_masks", [])
+          )
+          if completion_tokens.size != completion_masks.size:
+            raise RuntimeError(
+                "P57 rollout-only token/mask lengths diverged: "
+                f"tokens={completion_tokens.size} masks={completion_masks.size}"
+            )
+          prompt_length = traj.get("prompt_length")
+          prompt_length = (
+              int(prompt_tokens.size)
+              if prompt_length is None
+              else int(prompt_length)
+          )
+          conversation = traj.get("conversation_text") or []
+          turns = sum(
+              1
+              for message in conversation
+              if isinstance(message, dict)
+              and message.get("role") == "assistant"
+          )
+          original = traj.get("original_input") or {}
+          reward_value = float(traj.get("trajectory_reward", 0.0))
+          if not np.isfinite(reward_value):
+            raise RuntimeError("P57 rollout-only trajectory reward is not finite")
+          records.append({
+              "group_id": int(item.group_id),
+              "pair_index": int(item.pair_index),
+              "policy_version": int(traj.get("policy_version", policy_step)),
+              "status": str(traj.get("status", "")),
+              "reward": reward_value,
+              "invalid_actions": int(traj.get("invalid_action_count", 0)),
+              "ineffective_actions": int(
+                  traj.get("ineffective_action_count", 0)
+              ),
+              "turns": turns,
+              "prompt_tokens": prompt_length,
+              "completion_tokens": int(completion_tokens.size),
+              "assistant_tokens": int(np.count_nonzero(completion_masks)),
+              "context_tokens": prompt_length + int(completion_tokens.size),
+              "p57_index": int(np.asarray(original.get("p57_index", -1))),
+              "grid_side": int(np.asarray(original.get("size", -1))),
+              "shortest_path": int(
+                  np.asarray(original.get("shortest_path", -1))
+              ),
+              "map_sha256": str(
+                  np.asarray(original.get("map_sha256", "")).item()
+              ),
+          })
+        batches += 1
+      return batches, records
+
+    batches, records = asyncio.run_coroutine_threadsafe(
+        _run(), self.loop
+    ).result()
+    expected_records = len(all_eval_prompts) * self._num_generations()
+    if len(records) != expected_records:
+      raise RuntimeError(
+          "P57 rollout-only coverage mismatch: "
+          f"prompts={len(all_eval_prompts)} "
+          f"generations={self._num_generations()} records={len(records)} "
+          f"expected={expected_records}"
+      )
+    if (
+        self.rl_cluster.actor_trainer.train_steps != before_train_steps
+        or self.rl_cluster.global_steps != before_global_steps
+    ):
+      raise RuntimeError("P57 rollout-only evaluation mutated training steps")
+    return {
+        "policy_step": policy_step,
+        "prompts": len(all_eval_prompts),
+        "generations": self._num_generations(),
+        "batches": batches,
+        "trajectories": len(records),
+        "wall_seconds": time.perf_counter() - started,
+        "train_steps_before": before_train_steps,
+        "train_steps_after": self.rl_cluster.actor_trainer.train_steps,
+        "records": records,
+    }
+
   def train(
       self,
       train_dataset: Iterable[TrainingInputT],

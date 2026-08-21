@@ -440,6 +440,12 @@ def validate_jobset(
     run_id: str,
     *,
     fixed_lm_head: bool | None = None,
+    fixed_lm_head_explicit_off: bool = False,
+    alignment_warning_only: bool | None = None,
+    train_admitted: bool = True,
+    dp_reduction_admitted: bool = True,
+    workload_launch_admitted: bool = True,
+    pre_align_gate: bool = True,
 ) -> None:
   """Rejects a generated manifest whose launch or isolation contract drifted."""
   name = _job_name(spec, source_commit, run_id)
@@ -485,13 +491,19 @@ def validate_jobset(
   expected_capsule_rows = "256" if is_p38_capture else "2"
   if fixed_lm_head is None:
     fixed_lm_head = spec.key == "gsm8k-full"
+  if alignment_warning_only is None:
+    alignment_warning_only = spec.stage == "full"
   expected = {
       "CANON_MODE": "run",
       "CANON_PROFILE_FILE": spec.profile,
       "CANON_EXPECT_COMMIT": source_commit,
-      "CANON_P32_TRAIN_ADMITTED": "1",
-      "CANON_P32_DP_REDUCTION_ADMITTED": "1",
-      "CANON_P33_WORKLOAD_LAUNCH_ADMITTED": "1",
+      "CANON_P32_TRAIN_ADMITTED": "1" if train_admitted else "0",
+      "CANON_P32_DP_REDUCTION_ADMITTED": (
+          "1" if dp_reduction_admitted else "0"
+      ),
+      "CANON_P33_WORKLOAD_LAUNCH_ADMITTED": (
+          "1" if workload_launch_admitted else "0"
+      ),
       "CANON_P33_SHARED_MESH": f"{spec.dp_size},{spec.tp_size}",
       "CANON_P33_RUN_STAGE": spec.stage,
       "CANON_P33_NO_COMMIT": "1" if spec.no_commit else "0",
@@ -508,14 +520,12 @@ def validate_jobset(
           else "0"
       ),
       "CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY": (
-          "1"
-          if spec.workload == "frozenlake" and spec.stage == "full"
-          else "0"
+          "1" if spec.workload == "frozenlake" and alignment_warning_only else "0"
       ),
       "CANON_P33_SHORT_ALIGNMENT": (
           "1" if spec.stage == "alignment-short" else "0"
       ),
-      "CANON_PRE_ALIGN_GATE": "1",
+      "CANON_PRE_ALIGN_GATE": "1" if pre_align_gate else "0",
       "CANON_RUN_CMD": shlex.join(spec.command),
       "CANON_WANDB_RUN_NAME": name,
       "MIN_TOKEN_BUCKET": str(spec.dp_size * 256),
@@ -537,6 +547,9 @@ def validate_jobset(
   if fixed_lm_head:
     if env.get("CANON_P38_FIXED_LM_HEAD") != "1":
       raise ValueError("generated P33 fixed lm-head intent drifted")
+  elif fixed_lm_head_explicit_off:
+    if env.get("CANON_P38_FIXED_LM_HEAD") != "0":
+      raise ValueError("generated P33 fixed lm-head off intent drifted")
   elif "CANON_P38_FIXED_LM_HEAD" in env:
     raise ValueError("generated P33 unexpectedly enabled fixed lm-head")
   if "CANON_P32_RC_STAGE" in env:

@@ -15,9 +15,13 @@
 """Tests for agentic_rl_learner."""
 
 import asyncio
+import threading
 import queue
+from types import SimpleNamespace
 from typing import Any
 from unittest import mock
+
+import numpy as np
 
 from absl import logging
 from absl.testing import absltest
@@ -34,6 +38,120 @@ class DummyLearner(agentic_rl_learner.AgenticRLLearner):
 
 
 class AgenticRLLearnerTest(parameterized.TestCase):
+
+  def test_p57_evaluate_only_covers_dataset_without_train_update(self):
+    learner = object.__new__(DummyLearner)
+    learner.algo_config = agentic_rl_learner.AgenticRLConfig(num_generations=2)
+    learner._rewards_window_lock = threading.Lock()
+    learner._eval_rewards_window = []
+    learner._full_batch_size = 0
+    learner._build_orchestrator = mock.Mock(return_value=object())
+
+    async def producer(orchestrator, prompt_iterator, num_generations):
+      del orchestrator
+      self.assertEqual(num_generations, 2)
+      for _ in prompt_iterator:
+        yield [object(), object()]
+
+    def process(batch, mode):
+      self.assertLen(batch, 2)
+      self.assertEqual(mode, rl_cluster_lib.Mode.EVAL)
+      with learner._rewards_window_lock:
+        learner._eval_rewards_window.extend([0.0, 1.0])
+      return []
+
+    learner._orchestrator_producer = producer
+    learner._batch_to_train_example = mock.Mock(side_effect=process)
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+    learner.loop = loop
+    try:
+      result = learner.evaluate_only(
+          [{"prompts": np.asarray(["p0", "p1"])}], policy_step=20
+      )
+    finally:
+      loop.call_soon_threadsafe(loop.stop)
+      thread.join(timeout=5)
+      loop.close()
+
+    self.assertEqual(result["policy_step"], 20)
+    self.assertEqual(result["prompts"], 2)
+    self.assertEqual(result["generations"], 2)
+    self.assertEqual(result["batches"], 2)
+    self.assertEqual(result["n"], 4)
+    self.assertEqual(result["reward"], 0.5)
+    self.assertEqual(result["solve"], 0.5)
+    self.assertEqual(learner._full_batch_size, 2)
+    self.assertEqual(learner._eval_rewards_window, [])
+    self.assertEqual(learner._batch_to_train_example.call_count, 2)
+
+  def test_p57_rollout_only_evaluate_skips_trainer_recompute(self):
+    learner = object.__new__(DummyLearner)
+    learner.algo_config = agentic_rl_learner.AgenticRLConfig(num_generations=2)
+    learner._full_batch_size = 0
+    learner._build_orchestrator = mock.Mock(return_value=object())
+    learner._batch_to_train_example = mock.Mock(
+        side_effect=AssertionError("trainer recompute must remain unreachable")
+    )
+    learner.rl_cluster = SimpleNamespace(
+        global_steps=0, actor_trainer=SimpleNamespace(train_steps=0)
+    )
+
+    async def producer(orchestrator, prompt_iterator, num_generations):
+      del orchestrator
+      for group_id, _ in enumerate(prompt_iterator):
+        yield [
+            SimpleNamespace(
+                group_id=group_id,
+                pair_index=pair_index,
+                traj={
+                    "prompt_tokens": np.arange(4),
+                    "prompt_length": 4,
+                    "conversation_tokens": np.arange(6),
+                    "conversation_masks": np.asarray([1, 1, 0, 1, 0, 0]),
+                    "conversation_text": [
+                        {"role": "assistant", "content": "Down"},
+                        {"role": "user", "content": "grid"},
+                    ],
+                    "status": "SUCCEEDED" if pair_index else "MAX_STEPS_REACHED",
+                    "trajectory_reward": float(pair_index),
+                    "invalid_action_count": 0,
+                    "ineffective_action_count": 1,
+                    "policy_version": 0,
+                    "original_input": {
+                        "p57_index": group_id,
+                        "size": 5,
+                        "shortest_path": 4,
+                        "map_sha256": "a" * 64,
+                    },
+                },
+            )
+            for pair_index in range(num_generations)
+        ]
+
+    learner._orchestrator_producer = producer
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+    learner.loop = loop
+    try:
+      result = learner.rollout_only_evaluate(
+          [{"prompts": np.asarray(["p0", "p1"])}], policy_step=0
+      )
+    finally:
+      loop.call_soon_threadsafe(loop.stop)
+      thread.join(timeout=5)
+      loop.close()
+
+    self.assertEqual(result["prompts"], 2)
+    self.assertEqual(result["trajectories"], 4)
+    self.assertEqual(result["train_steps_before"], 0)
+    self.assertEqual(result["train_steps_after"], 0)
+    self.assertEqual(result["records"][0]["context_tokens"], 10)
+    self.assertEqual(result["records"][0]["assistant_tokens"], 3)
+    self.assertEqual(result["records"][0]["ineffective_actions"], 1)
+    learner._batch_to_train_example.assert_not_called()
 
   def test_rollout_batch_watchdog_fails_waiting_for_first_group(self):
     class StalledOrchestrator:

@@ -45,6 +45,7 @@ class FixedLmHeadContractTest(unittest.TestCase):
     expected = {
         (2048, 4): ("qwen3-1p7b", "tied_embed", 37984, 38144),
         (4096, 4): ("qwen3-8b", "untied_lm_head", 37984, 38144),
+        (4096, 8): ("qwen3-8b-tp8", "untied_lm_head", 18992, 19200),
         (2560, 8): ("qwen3-4b", "tied_embed", 18992, 19200),
         (5120, 8): ("qwen3-32b", "untied_lm_head", 18992, 19200),
     }
@@ -91,7 +92,7 @@ class FixedLmHeadContractTest(unittest.TestCase):
         (base[0], (4096, 152064), base[2], base[3], 4),
         (base[0], base[1], "float32", base[3], 4),
         (base[0], base[1], base[2], "float32", 4),
-        (base[0], base[1], base[2], base[3], 8),
+        (base[0], base[1], base[2], base[3], 2),
         ((16, 2560), (2560, 151936), base[2], base[3], 4),
         ((16, 5120), (5120, 151936), base[2], base[3], 4),
     )
@@ -150,6 +151,14 @@ class FixedLmHeadContractTest(unittest.TestCase):
     self.assertFalse(hasattr(qwen32b, "MATMUL_K_PADDING"))
     self.assertEqual(qwen32b.MATMUL_N_PADDING, {18992: 19200})
     qwen32b.validate_manifest(qwen32b.SITES)
+
+    qwen8b_tp8 = _load(
+        SHIM / "models/qwen8b_tp8/p22xf_contract.py",
+        "p38_fixed_lm_head_qwen8b_tp8_contract",
+    )
+    self.assertEqual(qwen8b_tp8.MATMUL_K_PADDING, {})
+    self.assertEqual(qwen8b_tp8.MATMUL_N_PADDING, {18992: 19200})
+    qwen8b_tp8.validate_manifest(qwen8b_tp8.SITES)
 
   def test_hook_is_default_off_and_flag_scoped(self):
     text = SOURCE.read_text()

@@ -36,6 +36,53 @@ _RUN_STAGE_STEPS = {
 }
 
 
+# P57.1 deliberately measures the untreated serving stack.  These switches
+# are the complete numerical zero-TIM bundle inherited by the P45 carrier.
+# Some shims interpret presence as admission, so the contract distinguishes
+# truly absent switches from boolean gates that must be the literal string 0.
+P57_STOCK_FAST_ABSENT_SWITCHES = (
+    "CANON_FIXED_AR",
+    "CANON_FIXED_AR_EMBED",
+    "CANON_RPA_D",
+    "CANON_RPA_P",
+    "CANON_RPA_M",
+    "CANON_LOGPROB_M",
+    "CANON_PALLAS_ALL_PROJ",
+    "CANON_PALLAS_ALL_RMSNORM",
+    "CANON_PALLAS_SWIGLU",
+    "CANON_PALLAS_MPAD",
+    "CANON_PALLAS_SWIGLU_MPAD",
+    "CANON_PALLAS_CANONICAL_VJP",
+)
+P57_STOCK_FAST_ZERO_SWITCHES = (
+    "CANON_RPA_VJP2",
+    "CANON_VJP2_MAX_SEQS",
+    "CANON_PROMPT_PROCESSED_LOGPROBS",
+    "CANON_PALLAS_LOGSOFTMAX",
+    "CANON_ENGINE_MODULE_C",
+    "CANON_KV_UNIFIED",
+    "CANON_P32_TRAIN_ADMITTED",
+    "CANON_P32_DP_REDUCTION_ADMITTED",
+    "CANON_P33_WORKLOAD_LAUNCH_ADMITTED",
+    "CANON_P32_DP16_SEGMENTED",
+    "CANON_FROZENLAKE_L3",
+    "CANON_FROZENLAKE_P27",
+    "CANON_P28_SEGMENTED_FORWARD",
+    "CANON_P28_SEGMENTED_VJP",
+    "CANON_P28_SEGMENTED_TRAIN",
+    "CANON_P28_G6_UPDATE",
+    "CANON_P28_BATCHED_REPORT",
+    "CANON_P29_FULL_TRAIN",
+    "CANON_ALIGNMENT_GATE",
+    "CANON_ALIGNMENT_GATE_ONLY",
+    "CANON_ALIGNMENT_UPDATE_CANARY",
+    "CANON_ALIGNMENT_TRAIN",
+    "CANON_PRE_ALIGN_GATE",
+    "CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY",
+    "CANON_P38_FIXED_LM_HEAD",
+)
+
+
 @dataclasses.dataclass(frozen=True, slots=True)
 class DPWorkloadSpec:
   """Describes one release workload without admitting its execution."""
@@ -346,7 +393,21 @@ def requested_max_steps(
   values = os.environ if environ is None else environ
   stage = values.get("CANON_P33_RUN_STAGE", "")
   if stage == "full":
-    steps = workload.max_steps
+    if values.get("CANON_PROFILE_FILE", "") == (
+        "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env"
+    ):
+      try:
+        steps = int(values.get("CANON_P57_EXPECTED_UPDATES", ""))
+      except ValueError as exc:
+        raise ValueError(
+            "P57 expected-update horizon must be a positive integer"
+        ) from exc
+      if steps <= 0:
+        raise ValueError(
+            "P57 expected-update horizon must be a positive integer"
+        )
+    else:
+      steps = workload.max_steps
   else:
     try:
       steps = _RUN_STAGE_STEPS[stage]
@@ -625,6 +686,60 @@ def validate_environment(
         raise ValueError(
             f"canonical workload requires non-empty online W&B field {key}"
         )
+
+
+def validate_p57_stock_fast_environment(
+    workload: DPWorkloadSpec,
+    environ: Mapping[str, str] | None = None,
+) -> Mapping[str, Any]:
+  """Fails closed unless P57 calibration uses untreated serving numerics."""
+  workload.validate()
+  values = os.environ if environ is None else environ
+  expected = {
+      "CANON_P57_RUN_KIND": "calibration",
+      "CANON_P57_TIM_ARM": "mismatch",
+      "CANON_P57_INFERENCE_REGIME": "stock-fast",
+      "CANON_P32_WORKLOAD": workload.name,
+      "CANON_DP_SIZE": str(workload.dp_size),
+      "CANON_TP_SIZE": str(workload.tp_size),
+      "CANON_TOTAL_DEVICES": str(workload.total_devices),
+      "CANON_ENGINE_DP_SIZE": str(workload.dp_size),
+      "CANON_QWEN3_TP_SIZE": str(workload.tp_size),
+      "CANON_GLOBAL_PROMPTS": str(workload.global_prompts),
+      "CANON_LOCAL_PROMPTS": str(workload.local_prompts),
+      "CANON_NUM_GENERATIONS": str(workload.num_generations),
+      "CANON_LOCAL_TRAJECTORIES": str(workload.local_trajectories),
+      "CANON_GLOBAL_TRAJECTORIES": str(workload.global_trajectories),
+      "CANON_TARGET_M": str(workload.local_m),
+      "MIN_TOKEN_BUCKET": str(workload.global_m),
+  }
+  wrong = {
+      key: values.get(key)
+      for key, expected_value in expected.items()
+      if values.get(key) != expected_value
+  }
+  present = [
+      key for key in P57_STOCK_FAST_ABSENT_SWITCHES if key in values
+  ]
+  nonzero = {
+      key: values.get(key)
+      for key in P57_STOCK_FAST_ZERO_SWITCHES
+      if values.get(key) != "0"
+  }
+  xla_flags = values.get("XLA_FLAGS", "")
+  if "--xla_allow_excess_precision=false" in xla_flags.split():
+    wrong["XLA_FLAGS"] = xla_flags
+  if present or nonzero or wrong:
+    raise ValueError(
+        "P57 stock-fast environment mismatch: "
+        f"wrong={wrong} present={present} nonzero={nonzero}"
+    )
+  return {
+      "regime": "stock-fast",
+      "absent_switches": list(P57_STOCK_FAST_ABSENT_SWITCHES),
+      "zero_switches": list(P57_STOCK_FAST_ZERO_SWITCHES),
+      "canonical_excess_precision_pin": False,
+  }
 
 
 def _wandb_module() -> Any:

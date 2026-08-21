@@ -12,6 +12,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument(
     "--hidden-size", type=int, choices=(2048, 2560, 4096, 5120), default=4096
 )
+parser.add_argument("--tp-size", type=int, choices=(4, 8), default=None)
 args = parser.parse_args()
 
 
@@ -29,20 +30,21 @@ for name in (
   os.environ[name] = "1"
 
 model_env = {
-    2048: (6144, 16, 4, "qwen1p7b", "tied_embed", 37984, 38144),
-    4096: (12288, 32, 4, "qwen8b", "untied_lm_head", 37984, 38144),
-    2560: (9728, 32, 8, "qwen4b", "tied_embed", 18992, 19200),
-    5120: (25600, 64, 8, "qwen32b", "untied_lm_head", 18992, 19200),
+    (2048, 4): (6144, 16, "qwen1p7b", "tied_embed", 37984, 38144),
+    (4096, 4): (12288, 32, "qwen8b", "untied_lm_head", 37984, 38144),
+    (4096, 8): (12288, 32, "qwen8b_tp8", "untied_lm_head", 18992, 19200),
+    (2560, 8): (9728, 32, "qwen4b", "tied_embed", 18992, 19200),
+    (5120, 8): (25600, 64, "qwen32b", "untied_lm_head", 18992, 19200),
 }
+tp_size = args.tp_size or (4 if args.hidden_size in (2048, 4096) else 8)
 (
     intermediate_size,
     attention_heads,
-    tp_size,
     model_name,
     endpoint,
     local_vocab,
     padded_local_vocab,
-) = model_env[args.hidden_size]
+) = model_env[(args.hidden_size, tp_size)]
 os.environ.update({
     "CANON_QWEN3_HIDDEN_SIZE": str(args.hidden_size),
     "CANON_QWEN3_INTERMEDIATE_SIZE": str(intermediate_size),

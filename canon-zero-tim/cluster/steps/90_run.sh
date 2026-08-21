@@ -617,6 +617,11 @@ if [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "1" ]; then
       p38_fixed_hidden=4096
       p38_fixed_tp=4
       ;;
+    cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env)
+      p38_fixed_endpoint=untied_lm_head
+      p38_fixed_hidden=4096
+      p38_fixed_tp=8
+      ;;
     cluster/profiles/qwen3-4b-dp-parity-deepswe-debug.env)
       p38_fixed_endpoint=tied_embed
       p38_fixed_hidden=2560
@@ -640,7 +645,15 @@ if [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "1" ]; then
     --tp-size "$p38_fixed_tp"
     --output "$CANON_STATE/p38_fixed_lm_head_receipts.json"
   )
-  if [ -z "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
+  if [ "${CANON_PROFILE_FILE:-}" = \
+       "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env" ] && \
+     [ "${CANON_P57_RUN_KIND:-}" = "eval" ]; then
+    p38_fixed_receipt_args+=(--request-only)
+  fi
+  if [ -z "${CANON_P38_SERVING_CAPTURE_DIR:-}" ] && \
+     ! { [ "${CANON_PROFILE_FILE:-}" = \
+             "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env" ] && \
+         [ "${CANON_P57_RUN_KIND:-}" = "eval" ]; }; then
     p38_fixed_receipt_args+=(--require-vjp)
   fi
   if ! JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
@@ -908,18 +921,63 @@ elif [ "$rc" -eq 0 ] && [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
         --output "$classification" || exit 1
   fi
 elif [ "$rc" -eq 0 ] && [ "${CANON_P33_WORKLOAD_LAUNCH_ADMITTED:-0}" = "1" ]; then
-  classification="$CANON_STATE/p33_${CANON_P32_WORKLOAD}_${CANON_P33_RUN_STAGE}.classification.json"
-  JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
-    python3 "$CANON_PKG/tests/p33_workloads/classify_run.py" \
-      --workload "$CANON_P32_WORKLOAD" \
-      --dp-size "$CANON_DP_SIZE" \
-      --tp-size "$CANON_TP_SIZE" \
-      --stage "$CANON_P33_RUN_STAGE" \
-      --run-log "$LOG" \
-      --pre-alignment-report "$CANON_PRE_ALIGN_REPORT" \
-      --update-report "$CANON_UPDATE_REPORT" \
-      --alignment-report "$CANON_ALIGN_REPORT" \
-      --output "$classification" || exit 1
+  if [ "${CANON_PROFILE_FILE:-}" = \
+       "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env" ] && \
+     [ "${CANON_P57_RUN_KIND:-}" = "eval" ]; then
+    classification="$CANON_STATE/p57_${CANON_P57_TIM_ARM}_eval_${CANON_P57_EVAL_CHECKPOINT_STEP}.classification.json"
+    JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
+      python3 "$CANON_PKG/tasks/p57-frozenlake-tim-causal-study/scripts/classify_checkpoint_eval.py" \
+        --evaluation "$CANON_P57_EVAL_OUTPUT" \
+        --run-log "$LOG" \
+        --arm "$CANON_P57_TIM_ARM" \
+        --source-commit "$CANON_EXPECT_COMMIT" \
+        --checkpoint-tag "$CANON_FROZENLAKE_CKPT_TAG" \
+        --checkpoint-step "$CANON_P57_EVAL_CHECKPOINT_STEP" \
+        --expected-updates "$CANON_P57_EXPECTED_UPDATES" \
+        --workload-candidate "${CANON_P57_WORKLOAD_CANDIDATE:-}" \
+        --data-split "${CANON_P57_DATA_SPLIT:-}" \
+        --output "$classification" || exit 1
+    eval_sha="$(sha256sum "$CANON_P57_EVAL_OUTPUT" | awk '{print $1}')"
+    class_sha="$(sha256sum "$classification" | awk '{print $1}')"
+    echo "[P57.EVAL] EVIDENCE evaluation=$CANON_P57_EVAL_OUTPUT evaluation_sha256=$eval_sha classification=$classification classification_sha256=$class_sha"
+    sed 's/^/[P57.EVAL.CLASSIFICATION] /' "$classification"
+    JAX_PLATFORMS=cpu python3 -c \
+      'import json,sys; print("[P57.EVAL.CLASSIFICATION_JSON] "+json.dumps(json.load(open(sys.argv[1], encoding="utf-8")), sort_keys=True, separators=(",", ":")))' \
+      "$classification"
+  else
+    classification="$CANON_STATE/p33_${CANON_P32_WORKLOAD}_${CANON_P33_RUN_STAGE}.classification.json"
+    p57_classifier_args=()
+    if [ "${CANON_PROFILE_FILE:-}" = \
+         "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env" ]; then
+      p57_classifier_args+=(
+        --expected-updates "$CANON_P57_EXPECTED_UPDATES"
+        --alignment-warning-only \
+          "$([ "${CANON_P57_TIM_ARM:-}" = mismatch ] && printf 1 || printf 0)"
+        --p57-ab-only \
+          "$([ "${CANON_P57_TIM_ARM:-}" = mismatch ] && printf 1 || printf 0)"
+      )
+    fi
+    JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
+      python3 "$CANON_PKG/tests/p33_workloads/classify_run.py" \
+        --workload "$CANON_P32_WORKLOAD" \
+        --dp-size "$CANON_DP_SIZE" \
+        --tp-size "$CANON_TP_SIZE" \
+        --stage "$CANON_P33_RUN_STAGE" \
+        --run-log "$LOG" \
+        --pre-alignment-report "$CANON_PRE_ALIGN_REPORT" \
+        --update-report "$CANON_UPDATE_REPORT" \
+        --alignment-report "$CANON_ALIGN_REPORT" \
+        "${p57_classifier_args[@]}" \
+        --output "$classification" || exit 1
+    if [ "${CANON_PROFILE_FILE:-}" = \
+         "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env" ]; then
+      class_sha="$(sha256sum "$classification" | awk '{print $1}')"
+      echo "[P57.TRAIN] EVIDENCE classification=$classification classification_sha256=$class_sha"
+      JAX_PLATFORMS=cpu python3 -c \
+        'import json,sys; print("[P57.TRAIN.CLASSIFICATION_JSON] "+json.dumps(json.load(open(sys.argv[1], encoding="utf-8")), sort_keys=True, separators=(",", ":")))' \
+        "$classification"
+    fi
+  fi
 fi
 if [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "1" ] && \
    [ -z "${CANON_P38_SERVING_CAPTURE_DIR:-}" ] && \

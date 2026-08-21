@@ -307,6 +307,67 @@ class ClassifyP33RunTest(unittest.TestCase):
     self.assertIn("pre_alignment[0].policy", reasons)
     self.assertIn("pre_alignment[0].verdict", reasons)
 
+  def test_p57_postflight_accepts_only_ab_derived_warnings(self):
+    pre = _pre_alignment(
+        0, warning_policy=True, warned=True, policy_workload="frozenlake"
+    )
+    pre["warning_reds"] = ["S_decode_vs_S_prefill"]
+    pre["reds"] = list(pre["warning_reds"])
+    pre["boundaries"]["S_prefill_vs_T_old"] = _boundary()
+    post = _alignment(
+        0,
+        optimizer_skipped=False,
+        warning_policy=True,
+        warned=True,
+        policy_workload="frozenlake",
+    )
+    post["warning_reds"] = [
+        "S_decode_vs_S_prefill",
+        "w_all_exactly_1",
+        "wr_all_exactly_1",
+        "clip_hits=3",
+        "tis_hits=2",
+    ]
+    post["reds"] = list(post["warning_reds"])
+    post["boundaries"]["S_prefill_vs_T_old"] = _boundary()
+    post["boundaries"]["T_old_vs_T_current"] = _boundary()
+    post["exact"]["r_all_exactly_1"] = True
+    reasons = []
+    classifier._validate_pre_alignment_records(
+        [pre],
+        expected_count=1,
+        workload="frozenlake-dp8-tp8",
+        stage="full",
+        alignment_warning_only=True,
+        p57_ab_only=True,
+        reasons=reasons,
+    )
+    classifier._validate_alignment_records(
+        [post],
+        expected_count=1,
+        optimizer_skipped=False,
+        workload="frozenlake-dp8-tp8",
+        stage="full",
+        alignment_warning_only=True,
+        p57_ab_only=True,
+        reasons=reasons,
+    )
+    self.assertEqual(reasons, [])
+
+    pre["warning_reds"].append("S_prefill_vs_T_old")
+    pre["reds"] = list(pre["warning_reds"])
+    reasons = []
+    classifier._validate_pre_alignment_records(
+        [pre],
+        expected_count=1,
+        workload="frozenlake-dp8-tp8",
+        stage="full",
+        alignment_warning_only=True,
+        p57_ab_only=True,
+        reasons=reasons,
+    )
+    self.assertTrue(any("p57_non_ab_warnings" in reason for reason in reasons))
+
   def test_full_frozenlake_positive(self):
     with tempfile.TemporaryDirectory() as tmp:
       root = Path(tmp)

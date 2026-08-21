@@ -206,3 +206,69 @@ def validate_restored(
   actual_contract = metadata.get("canon_resume_contract")
   if actual_contract != dict(expected_contract):
     raise ValueError("P45 checkpoint resume contract mismatch")
+
+
+def validate_p57_evaluation_restored(
+    config: Config,
+    *,
+    restored_step: int,
+    metadata: Mapping[str, Any],
+    env: Mapping[str, str],
+) -> None:
+  """Validates an actor checkpoint consumed by an isolated P57 evaluator."""
+  try:
+    expected_step = int(env.get("CANON_P57_EVAL_CHECKPOINT_STEP", ""))
+  except ValueError as exc:
+    raise ValueError("P57 evaluation checkpoint step must be an integer") from exc
+  if expected_step < 0 or expected_step % config.interval:
+    raise ValueError(
+        "P57 evaluation checkpoint step must be zero or a checkpoint boundary"
+    )
+  if expected_step == 0:
+    if config.mode != "new":
+      raise ValueError("P57 step-0 evaluation requires checkpoint mode=new")
+    if restored_step != 0 or metadata:
+      raise ValueError(
+          "P57 step-0 evaluation unexpectedly restored checkpoint state: "
+          f"restored={restored_step} metadata={dict(metadata)}"
+      )
+    return
+  if config.mode != "resume":
+    raise ValueError("P57 checkpoint evaluation requires checkpoint mode=resume")
+  if restored_step != expected_step or metadata.get("global_step") != expected_step:
+    raise ValueError(
+        "P57 evaluation restored the wrong checkpoint: "
+        f"restored={restored_step} metadata={metadata.get('global_step')!r} "
+        f"expected={expected_step}"
+    )
+  if metadata.get("role") != "actor":
+    raise ValueError("P57 evaluation requires an actor checkpoint")
+  contract = metadata.get("canon_resume_contract")
+  if not isinstance(contract, Mapping):
+    raise ValueError("P57 evaluation checkpoint lacks its training contract")
+  required = {
+      "schema": SCHEMA,
+      "checkpoint_root": config.root,
+      "checkpoint_tag": config.tag,
+      "source_commit": env.get("CANON_EXPECT_COMMIT", ""),
+      "profile": "qwen3-8b-dp8-tp8-frozenlake-tim",
+      "workload": "frozenlake-dp8-tp8",
+      "model_version": "Qwen/Qwen3-8B",
+      "model_dir_name": "qwen8b_tp8",
+      "mesh_dp": 8,
+      "mesh_tp": 8,
+      "p57_tim_arm": env.get("CANON_P57_TIM_ARM", ""),
+      "p57_fixed_lm_head": env.get("CANON_P38_FIXED_LM_HEAD", "0"),
+      "p57_workload_candidate": env.get(
+          "CANON_P57_WORKLOAD_CANDIDATE", ""
+      ),
+      "p57_data_split": env.get("CANON_P57_DATA_SPLIT", ""),
+      "eval_enabled": False,
+  }
+  wrong = {
+      key: contract.get(key)
+      for key, expected in required.items()
+      if contract.get(key) != expected
+  }
+  if wrong:
+    raise ValueError(f"P57 evaluation checkpoint provenance drifted: {wrong}")
