@@ -9,6 +9,7 @@ from absl.testing import parameterized
 from flax import nnx
 import jax
 import jax.numpy as jnp
+import ml_dtypes
 import numpy as np
 from safetensors import numpy as stnp
 from tunix.models import safetensors_loader
@@ -206,6 +207,38 @@ class SafetensorsLoaderTest(parameterized.TestCase):
           dtype=jnp.float32,
           mode='original',
       )
+
+  def test_load_bfloat16_custom_dtype_avoids_ml_dtypes(self):
+    st_dir = self.create_tempdir().full_path
+    os.makedirs(st_dir, exist_ok=True)
+    uint16_data = np.zeros((256, 16), dtype=np.uint16)
+    bf16_data = uint16_data.view(ml_dtypes.bfloat16)
+    tensors = {'emb.embedding': bf16_data}
+    filename = os.path.join(st_dir, 'model.safetensors')
+    stnp.save_file(tensors, filename)
+
+    def simple_mapping(config):
+      del config
+      return {r'^emb\.embedding$': ('emb.embedding', None)}
+
+    result = safetensors_loader.load_and_create_model(
+        st_dir,
+        test_common.ToyTransformer,
+        self.model.config,
+        simple_mapping,
+        dtype=jnp.bfloat16,
+        mode='original',
+    )
+    state = nnx.state(result)
+    self.assertEqual(state['emb']['embedding'].value.dtype, jnp.bfloat16)
+    self.assertNotEqual(
+        getattr(
+            state['emb']['embedding'].value.aval.dtype,
+            'itemsize',
+            0,
+        ),
+        0,
+    )
 
 
 if __name__ == '__main__':
