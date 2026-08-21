@@ -1,0 +1,48 @@
+XPK Start: 2026-08-21T09:38:27Z
+[entrypoint] start 2026-08-21T09:38:34Z  mode=run  pkg=/app/canon-zero-tim
+[entrypoint] JOBSET_ATTEMPT 0 (first attempt)  pod=canon-p57-fl-ev-mism-m15-e0-200b244c-pathways-head-0-0-r8xzl
+[entrypoint] --> 00_env.sh
+[env] HF_TOKEN inherited from INJECTED_HF_TOKEN (len=37)
+[env] WANDB_API_KEY inherited from INJECTED_WANDB_API_KEY (len=86)
+[env] preflight mode: JAX_PLATFORMS=cpu (Pathways connection deferred to Step 70)
+[P57.STOCK_FAST] ZERO_TIM_OFF_PASS mode=eval absent=12 observer=off
+[env] profile=qwen3-8b-dp8-tp8-frozenlake-tim model_dir=qwen8b_tp8
+[env] resolved configuration written to /tmp/canon-state/canon-p57-fl-ev-mism-m15-e0-200b244c/env.sh (154 lines)
+[entrypoint] <-- 00_env.sh ok
+[entrypoint] --> 10_sync_repo.sh
+[sync] HEAD=200b244cc400c3bca6281cf2d7b4ed074a2ed734
+[sync] describe=200b244c fix(p57): shorten JobSet prefix to obey Kubernetes 63-character limit
+[sync] tracked_dirty=0
+[sync] package_untracked=0
+[sync] external_untracked=5
+[sync] provenance ok
+[entrypoint] <-- 10_sync_repo.sh ok
+[entrypoint] --> 20_probe_image.sh
+[probe] tpu_inference=/usr/local/lib/python3.12/site-packages/tpu_inference
+[probe] SAME      layers/common/attention_interface.py
+[probe] SAME      layers/jax/embed.py
+[probe] SAME      layers/jax/linear.py
+[probe] SAME      models/jax/qwen2.py
+[probe] SAME      models/jax/qwen3.py
+[probe] SAME      runner/tpu_runner.py
+[probe] SUMMARY same=6 drift=0 missing=0
+[probe] image matches the patch anchor exactly
+[entrypoint] <-- 20_probe_image.sh ok
+[entrypoint] --> 25_rope_fix.sh
+[rope] new form already present (upstream) -- not patching
+[rope]   35:from tpu_inference.layers.jax.rope_interface import (apply_rope,
+[rope]   66:        self.rope_theta = get_rope_theta(config, default=1000000.0)
+[rope]   67:        self.rope_scaling = get_rope_scaling(config)
+[rope] ROPE_FIX=not_needed
+[entrypoint] <-- 25_rope_fix.sh ok
+[entrypoint] --> 28_sync_cache.sh
+[cache] Target GCS cache: gs://yuxzhang-tunix-models/cache/p33_compilation_cache/qwen3-8b-dp8-tp8-frozenlake-tim
+[cache] Local cache dir: /tmp/jax_compilation_cache
+[cache] Pre-warmed cache entries: 0
+[entrypoint] <-- 28_sync_cache.sh ok
+[entrypoint] --> 35_install_r2egym.sh
+[r2egym] CANON_R2EGYM_INSTALL!=1 -- skipped (workload does not use R2E-Gym)
+[entrypoint] <-- 35_install_r2egym.sh ok
+[entrypoint] --> 37_install_stock_runtime.sh
+[P57.STOCK_FAST] FATAL: stock runtime install used outside calibration
+[entrypoint] FATAL: 37_install_stock_runtime.sh exited 2
