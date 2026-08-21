@@ -162,7 +162,11 @@ class RLProgramTest(absltest.TestCase):
       self.assertEqual(program.step, 1)
       self.assertEqual(begin_steps, [0])
       self.assertEqual(end_steps, [(1, "step_done")])
-      self.assertEqual(self.mock_engine.dispatch_rollouts.call_count, 2)
+      self.mock_engine.dispatch_rollouts.assert_called_once_with(
+          [{"prompt": "prompt_data_0", "prompt_id": "prompt_0"}],
+          group_size=2,
+          policy_version=0,
+      )
       self.mock_engine.train_step.assert_called_once()
       self.mock_engine.sync_weights.assert_called_once_with(
           role=datatypes.Role.ACTOR
@@ -390,12 +394,10 @@ class RLProgramTest(absltest.TestCase):
           self.mock_engine, train_dataset=[dict_item], num_steps=1
       )
 
-      self.mock_engine.dispatch_rollouts.assert_any_call(
+      self.mock_engine.dispatch_rollouts.assert_called_once_with(
           [dict_item],
-          request_id="req_0_0",
+          group_size=2,
           policy_version=0,
-          prompt_ids=["custom_p0"],
-          metadata={"group_id": "custom_g0", "pair_index": 0},
       )
 
     asyncio.run(_run())
