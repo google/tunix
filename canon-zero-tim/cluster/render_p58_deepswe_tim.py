@@ -64,7 +64,6 @@ def _command(stage: str, *, run_root: str, whitelist: str) -> tuple[str, ...]:
       "--rollout_mesh_dp=16": "--rollout_mesh_dp=8",
       "--train_mesh_dp=16": "--train_mesh_dp=8",
       "--rollout_vllm_max_num_seqs=4": "--rollout_vllm_max_num_seqs=16",
-      "--max_concurrency=64": "--max_concurrency=128",
       "--max_steps=3": f"--max_steps={_STAGE_STEPS[stage]}",
   }
   for old, new in replacements.items():
@@ -336,7 +335,7 @@ def validate(
       "--train_mesh_tp=8",
       "--rollout_vllm_max_num_seqs=16",
       "--max_num_batched_tokens=256",
-      "--max_concurrency=128",
+      "--max_concurrency=64",
       "--loss_agg_mode=sequence-mean-token-scale",
       "--loss_scale_factor=16384",
       "--loss_denominator_weighted_accumulation",

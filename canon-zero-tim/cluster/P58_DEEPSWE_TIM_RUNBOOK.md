@@ -30,8 +30,15 @@ boundaries, then stopped before model initialization because the parent
 entrypoint retained the renderer's stale `CANON_LOGPROB_M=256` after the
 native profile had unset it in child-shell `00_env.sh`. All three roots are
 immutable and have no resumable trajectory state. Use a final operator-branch
-readback SHA containing the authoritative environment-snapshot fix and fresh
-run-id `p58c04`. Never reuse a p58c01, p58c02, or p58c03 YAML/root.
+readback SHA containing the authoritative environment-snapshot fix. Native
+`p58c04` passed all bootstrap gates and initialized Pathways, Qwen3-4B, vLLM,
+W&B, and the rollout loop, but all 128 concurrently requested RepoEnv pods
+remained unconfirmed Running until their 1,200-second start deadline. Pinned
+R2E swallowed those timeouts, then attempted setup against deleted pods; the
+real Kubernetes 404 was obscured by the client's `None.decode` error. P58c04
+is also immutable and has no resumable trajectory state. Use a final
+operator-branch readback SHA containing the fail-closed start repair and fresh
+run-id `p58c05`. Never reuse a p58c01, p58c02, p58c03, or p58c04 YAML/root.
 
 The direct-entrypoint implementation commit is
 `82d82f72a7220d945737d95f6266b5b7e2cfe706`. Resolve the final runnable SHA by
@@ -52,6 +59,7 @@ implementation commit directly.
 | Clean data | 1,012 promoted P46 tasks |
 | Clean SHA-256 | `ec297c9cbc39cd67db15b0b9db6a229b15671b848df5ec3101de9ef8df7c9973` |
 | Prompt batch / generations | B8 x G16 = 128 raw trajectories |
+| Sandbox concurrency | 64; two waves per unchanged 128-trajectory batch |
 | Prompt / response / turns | 4,096 / 16,384 / 50 |
 | Sampling | temperature 1.0, top-p 1.0, top-k 0 |
 | Roles | rollout DP8 x TP8 + trainer DP8 x TP8 |
@@ -85,6 +93,17 @@ prevents an all-filtered batch from overwriting the preceding artifact.
 
 Timeout nesting is fixed: turn 300 s, step/reward 600 s, trajectory 3,000 s,
 sandbox 3,300 s, cleanup 300 s, and the shared rollout-batch deadline 3,600 s.
+
+Kubernetes sandbox start is fail-closed. A pod that does not become Running
+within 1,200 seconds is deleted and confirmed absent, and its original
+`TimeoutError` must reach the trajectory collector as signed `ENV_TIMEOUT`.
+R2E must never return a RepoEnv with `container=None` or continue with a
+websocket exec into a deleted pod. If a target run again reports zero Running
+pods across a batch, preserve pod scheduling/events evidence and treat it as
+CPU-pool capacity/admission work; do not patch the websocket decoder.
+The bounded marker `[P34.R2E] KUBERNETES_START_TIMEOUT` records only pod name,
+phase, and scheduler condition/reason/message; it never serializes the pod
+spec or environment.
 
 ## 2. Fetch, pin, and validate the published source
 
@@ -135,7 +154,7 @@ CLIENT_IMAGE_DIGEST='registry.example/tunix@sha256:<64-hex-digest>'
 CPU_NODEPOOL='deepswe-cpu-pool'
 TPU_NODEPOOL='<4x4x8-v5p-nodepool>'
 MODEL_PVC='haoyugao-cpu-np-pvc'
-RUN_STEM='p58c04'
+RUN_STEM='p58c05'
 STAGE='three-update'
 
 ARM='native'
@@ -208,10 +227,30 @@ compact-filtered rows retain their raw advantage in the journal but do not
 inflate these metrics. A separate `raw_nonzero_advantage_ratio` is retained for
 audit.
 
+Timeout telemetry is deliberately low-cardinality. W&B receives counts and
+ratios for all timeout statuses, `ENV_TIMEOUT`, sandbox-start timeouts,
+unschedulable sandboxes, and insufficient CPU/memory, plus the batch booleans
+`deepswe/all_env_timeout_batch` and
+`deepswe/all_sandbox_start_timeout_batch`. Full scheduler messages remain only
+in the raw `[P34.R2E] KUBERNETES_START_TIMEOUT` log marker; they are never used
+as W&B keys or values. Interpret the first completed batch as follows:
+
+| Observation | First boundary | Action |
+|---|---|---|
+| `all_sandbox_start_timeout_batch=1` | no R2E pod became Running; model rollout was not the bottleneck | preserve pod events and inspect CPU-nodepool scheduling/capacity |
+| sandbox-start ratio is nonzero but below one | partial sandbox admission/throughput | inspect scheduler reasons before tuning model concurrency |
+| sandbox-start ratio is zero and `status/model_timeout_ratio` is nonzero | sandbox ran; model generation exceeded its deadline | investigate serving throughput/model limits |
+| `timeout_stage_histogram.environment_step` is nonzero | sandbox started; repository command execution timed out | inspect R2E task/runtime behavior |
+
+The W&B batch metrics are emitted only after a 128-row trajectory batch has
+been journaled. If the process dies before that boundary, use the bounded raw
+timeout markers and Kubernetes events; absence of W&B metrics is not evidence
+that the sandboxes ran.
+
 ```bash
 RUN_ROOT='/mnt/disks/linchai_data/deepswe_zero_tim/<jobset-name>'
 jq . "$RUN_ROOT/debug/run_manifest.json"
-jq -c '{step,optimizer_step,trajectory_solve_ratio,all_solved_prompt_groups,all_failed_prompt_groups,mixed_prompt_groups,incomplete_prompt_groups,effective_prompt_groups,compact_filtered_trajectories,status_histogram}' \
+jq -c '{step,optimizer_step,trajectory_solve_ratio,all_solved_prompt_groups,all_failed_prompt_groups,mixed_prompt_groups,incomplete_prompt_groups,effective_prompt_groups,compact_filtered_trajectories,status_histogram,timeout_stage_histogram,timeout_scheduler_reason_histogram,timeout_resource_histogram,all_env_timeout_batch,all_sandbox_start_timeout_batch}' \
   "$RUN_ROOT/debug/batch_metrics.jsonl"
 gzip -cd "$RUN_ROOT/debug/batch-000000.trajectories.jsonl.gz" \
   | head -n 1 | jq .

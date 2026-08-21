@@ -108,6 +108,10 @@ class R2egymOptionalContractTest(unittest.TestCase):
 
     class FakeDockerRuntime:
 
+      def start_container(self, docker_image, command, ctr_name, **kwargs):
+        del docker_image, command, ctr_name, kwargs
+        self.original_start_calls += 1
+
       def stop(self):
         self.original_stop_calls += 1
 
@@ -168,9 +172,11 @@ class R2egymOptionalContractTest(unittest.TestCase):
       runtime = FakeDockerRuntime()
       runtime.client = FakeClient()
       runtime.logger = mock.Mock()
+      runtime.backend = "kubernetes"
       runtime.container = None
+      runtime.original_start_calls = 0
       runtime.original_stop_calls = 0
-      runtime._start_kubernetes_pod("image", "command", "pod-1")
+      runtime.start_container("image", "command", "pod-1")
       body = runtime.client.created
       self.assertEqual(body["spec"]["activeDeadlineSeconds"], 3300)
       self.assertEqual(
@@ -183,7 +189,72 @@ class R2egymOptionalContractTest(unittest.TestCase):
       )
       runtime.stop()
       self.assertTrue(runtime.client.deleted)
+      self.assertEqual(runtime.original_start_calls, 0)
       self.assertEqual(runtime.original_stop_calls, 1)
+
+      class NeverRunningClient:
+
+        def __init__(self):
+          self.created = None
+          self.deleted = False
+          self.reads = 0
+
+        def read_namespaced_pod(self, **kwargs):
+          del kwargs
+          self.reads += 1
+          if self.reads == 1 or self.deleted:
+            raise FakeApiException(404)
+          return types.SimpleNamespace(
+              metadata=types.SimpleNamespace(name="pod-timeout"),
+              status=types.SimpleNamespace(
+                  phase="Pending",
+                  conditions=[types.SimpleNamespace(
+                      type="PodScheduled",
+                      status="False",
+                      reason="Unschedulable",
+                      message="0/1 nodes available: Insufficient cpu",
+                  )],
+              ),
+          )
+
+        def create_namespaced_pod(self, **kwargs):
+          self.created = kwargs["body"]
+
+        def delete_namespaced_pod(self, **kwargs):
+          del kwargs
+          self.deleted = True
+
+      timed_out = FakeDockerRuntime()
+      timed_out.client = NeverRunningClient()
+      timed_out.logger = mock.Mock()
+      timed_out.backend = "kubernetes"
+      timed_out.container = None
+      timed_out.original_start_calls = 0
+      timed_out.original_stop_calls = 0
+      with mock.patch.dict(
+          os.environ, {"R2E_POD_START_TIMEOUT_SECONDS": "1"}, clear=False
+      ), mock.patch.object(
+          module.time,
+          "monotonic",
+          side_effect=[0, 0, 0, 2, 2, 2, 2, 2],
+      ), mock.patch.object(module.time, "sleep"):
+        with self.assertRaisesRegex(
+            TimeoutError,
+            "did not start within 1s; phase=Pending conditions="
+            "PodScheduled:False:Unschedulable:0/1 nodes available: "
+            "Insufficient cpu",
+        ):
+          timed_out.start_container("image", "command", "pod-timeout")
+      self.assertIsNotNone(timed_out.client.created)
+      self.assertTrue(timed_out.client.deleted)
+      self.assertIsNone(timed_out.container)
+      self.assertEqual(timed_out.original_start_calls, 0)
+
+      docker_runtime = FakeDockerRuntime()
+      docker_runtime.backend = "docker"
+      docker_runtime.original_start_calls = 0
+      docker_runtime.start_container("image", "command", "docker-1")
+      self.assertEqual(docker_runtime.original_start_calls, 1)
 
   def test_swe_agent_binds_action_when_r2egym_is_present(self):
     self._require_agent_import_chain()

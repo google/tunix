@@ -57,6 +57,29 @@ _COMPACT_FILTER_STATUSES = frozenset({
     "MODEL_TIMEOUT",
     "REWARD_TIMEOUT",
 })
+_TIMEOUT_STATUSES = frozenset({
+    "TIMEOUT",
+    "ENV_TIMEOUT",
+    "MODEL_TIMEOUT",
+    "REWARD_TIMEOUT",
+})
+_TIMEOUT_STAGES = frozenset({
+    "environment_unknown",
+    "sandbox_start",
+    "environment_reset",
+    "environment_step",
+    "model_generation",
+    "final_reward",
+    "trajectory_deadline",
+})
+_TIMEOUT_SCHEDULER_REASONS = frozenset({"", "unschedulable"})
+_TIMEOUT_RESOURCES = frozenset({
+    "",
+    "cpu",
+    "memory",
+    "ephemeral_storage",
+    "other",
+})
 _SENSITIVE_KEY = re.compile(
     r"(?:api[_-]?key|auth|credential|password|secret|token)$", re.I
 )
@@ -506,6 +529,76 @@ def _finite_float(value: Any, *, label: str) -> float:
   return result
 
 
+def _timeout_metadata(
+    trajectory: Mapping[str, Any], status: str
+) -> tuple[str, str, str]:
+  """Returns bounded timeout dimensions, rejecting high-cardinality values."""
+  stage = str(trajectory.get("timeout_stage", "") or "")
+  scheduler_reason = str(
+      trajectory.get("timeout_scheduler_reason", "") or ""
+  )
+  resource = str(trajectory.get("timeout_resource", "") or "")
+  if status not in _TIMEOUT_STATUSES:
+    if stage or scheduler_reason or resource:
+      raise ValueError("non-timeout trajectory contains timeout metadata")
+    return "", "", ""
+  if not stage:
+    stage = {
+        "TIMEOUT": "trajectory_deadline",
+        "ENV_TIMEOUT": "environment_unknown",
+        "MODEL_TIMEOUT": "model_generation",
+        "REWARD_TIMEOUT": "final_reward",
+    }[status]
+  if stage not in _TIMEOUT_STAGES:
+    raise ValueError(f"unsupported timeout stage: {stage!r}")
+  if scheduler_reason not in _TIMEOUT_SCHEDULER_REASONS:
+    raise ValueError(
+        f"unsupported timeout scheduler reason: {scheduler_reason!r}"
+    )
+  if resource not in _TIMEOUT_RESOURCES:
+    raise ValueError(f"unsupported timeout resource: {resource!r}")
+  if stage != "sandbox_start" and (scheduler_reason or resource):
+    raise ValueError(
+        "scheduler timeout metadata is valid only for sandbox_start"
+    )
+  return stage, scheduler_reason, resource
+
+
+def timeout_wandb_metrics(metrics: Mapping[str, Any]) -> dict[str, float]:
+  """Builds the fixed low-cardinality timeout dashboard dimensions."""
+  trajectories = int(metrics["trajectories"])
+  if trajectories <= 0:
+    raise ValueError("DeepSWE timeout metrics require trajectories > 0")
+  fields = (
+      "timeout_trajectories",
+      "env_timeout_trajectories",
+      "sandbox_start_timeout_trajectories",
+      "unschedulable_trajectories",
+      "insufficient_cpu_trajectories",
+      "insufficient_memory_trajectories",
+  )
+  result = {}
+  for field in fields:
+    count = int(metrics[field])
+    if not 0 <= count <= trajectories:
+      raise ValueError(f"invalid DeepSWE timeout count {field}={count}")
+    name = field.removesuffix("_trajectories")
+    result[f"deepswe/{field}"] = float(count)
+    result[f"deepswe/{name}_ratio"] = count / trajectories
+  result["deepswe/all_env_timeout_batch"] = float(
+      int(metrics["env_timeout_trajectories"]) == trajectories
+  )
+  result["deepswe/all_sandbox_start_timeout_batch"] = float(
+      int(metrics["sandbox_start_timeout_trajectories"]) == trajectories
+  )
+  for status in sorted(_TIMEOUT_STATUSES):
+    count = int(metrics["status_histogram"].get(status, 0))
+    key = status.lower()
+    result[f"deepswe/status/{key}_count"] = float(count)
+    result[f"deepswe/status/{key}_ratio"] = count / trajectories
+  return result
+
+
 def persist_batch(
     trajectories: Sequence[Any],
     rewards: Sequence[Any],
@@ -545,6 +638,11 @@ def persist_batch(
   groups: dict[str, list[dict[str, Any]]] = collections.defaultdict(list)
   status_histogram: collections.Counter[str] = collections.Counter()
   reward_histogram: collections.Counter[str] = collections.Counter()
+  timeout_stage_histogram: collections.Counter[str] = collections.Counter()
+  timeout_scheduler_histogram: collections.Counter[str] = (
+      collections.Counter()
+  )
+  timeout_resource_histogram: collections.Counter[str] = collections.Counter()
   for item, training_reward_value, advantage_value in zip(
       trajectories, rewards, advantages
   ):
@@ -561,10 +659,19 @@ def persist_batch(
     )
     advantage = _finite_float(advantage_value, label="advantage")
     status = _status_name(trajectory)
+    timeout_stage, timeout_scheduler_reason, timeout_resource = (
+        _timeout_metadata(trajectory, status)
+    )
     complete = status == _COMPLETE_STATUS
     compact_filtered = status in _COMPACT_FILTER_STATUSES
     solved = complete and raw_reward == 1.0
     status_histogram[status] += 1
+    if timeout_stage:
+      timeout_stage_histogram[timeout_stage] += 1
+    if timeout_scheduler_reason:
+      timeout_scheduler_histogram[timeout_scheduler_reason] += 1
+    if timeout_resource:
+      timeout_resource_histogram[timeout_resource] += 1
     reward_histogram[format(raw_reward, ".12g")] += 1
     record = {
         "schema": trajectory_schema,
@@ -572,6 +679,9 @@ def persist_batch(
         "group_id": group_id,
         "pair_index": pair_index,
         "status": status,
+        "timeout_stage": timeout_stage,
+        "timeout_scheduler_reason": timeout_scheduler_reason,
+        "timeout_resource": timeout_resource,
         "complete": complete,
         "compact_filtered": compact_filtered,
         "solve_definition": SOLVE_DEFINITION,
@@ -653,6 +763,11 @@ def persist_batch(
   raw_nonzero_advantages = sum(
       record["raw_advantage_nonzero"] for record in records
   )
+  timeout_trajectories = sum(status_histogram[s] for s in _TIMEOUT_STATUSES)
+  env_timeout_trajectories = status_histogram["ENV_TIMEOUT"]
+  sandbox_start_timeout_trajectories = timeout_stage_histogram[
+      "sandbox_start"
+  ]
   metrics = {
       "schema": metrics_schema,
       "step": expected_step,
@@ -692,6 +807,42 @@ def persist_batch(
           record["raw_final_reward"] not in (0.0, 1.0) for record in records
       ),
       "status_histogram": dict(sorted(status_histogram.items())),
+      "timeout_stage_histogram": dict(
+          sorted(timeout_stage_histogram.items())
+      ),
+      "timeout_scheduler_reason_histogram": dict(
+          sorted(timeout_scheduler_histogram.items())
+      ),
+      "timeout_resource_histogram": dict(
+          sorted(timeout_resource_histogram.items())
+      ),
+      "timeout_trajectories": timeout_trajectories,
+      "timeout_trajectory_ratio": (
+          timeout_trajectories / expected_trajectories
+      ),
+      "env_timeout_trajectories": env_timeout_trajectories,
+      "env_timeout_trajectory_ratio": (
+          env_timeout_trajectories / expected_trajectories
+      ),
+      "sandbox_start_timeout_trajectories": (
+          sandbox_start_timeout_trajectories
+      ),
+      "sandbox_start_timeout_trajectory_ratio": (
+          sandbox_start_timeout_trajectories / expected_trajectories
+      ),
+      "unschedulable_trajectories": timeout_scheduler_histogram[
+          "unschedulable"
+      ],
+      "insufficient_cpu_trajectories": timeout_resource_histogram["cpu"],
+      "insufficient_memory_trajectories": timeout_resource_histogram[
+          "memory"
+      ],
+      "all_env_timeout_batch": (
+          env_timeout_trajectories == expected_trajectories
+      ),
+      "all_sandbox_start_timeout_batch": (
+          sandbox_start_timeout_trajectories == expected_trajectories
+      ),
       "raw_final_reward_histogram": dict(sorted(reward_histogram.items())),
       "groups": group_records,
   }

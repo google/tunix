@@ -108,3 +108,42 @@ pinned-image gate pass. The fix was published as
 `c0ca41805bd65a4fdede4825ed2835cdce6e13ed`, and its first remote readback
 matched exactly with ahead/behind `0/0`. The next and only admissible run-id is
 fresh native `p58c04`; p58c03 is not resumable.
+
+### p58c04 — sandbox-start admission INCONCLUSIVE
+
+Source `d2f57e0bf9ec50a4c70c2f4c404db870dbb6ff7a` passed `00_env.sh`, exact
+source sync, pinned R2E install/adapter validation, stock-engine preflight,
+Pathways and 128-device discovery, Qwen3-4B/vLLM initialization, W&B
+initialization, and entry into the real training rollout loop. This is the
+first attempt to reach those boundaries.
+
+At 09:35:31 UTC it started producers with concurrency 128. It attempted 128
+RepoEnv creations, but the log contains no confirmed Running sandbox before
+the 1,200-second start deadline and retains at least 121 explicit timeout
+records. Pinned R2E caught and printed the start `TimeoutError`, deleted the
+pod, and returned. Its constructor therefore
+claimed creation with `container=None`; setup then attempted exec into a
+deleted pod. Kubernetes returned 404 Not Found. The Kubernetes Python client
+obscured that response with `'NoneType' object has no attribute 'decode'`.
+This is not evidence of malformed websocket JSON.
+
+The immutable evidence is `../evidence/p58c04/run.log`, SHA-256
+`f5caf2efb70bfec083a4454e441ce7f4b5b0632abbd206439ba9497bca5a6a40`,
+and `../evidence/p58c04/env.sh`, SHA-256
+`a311eb64ee30b1fa0a168b68d9f17661756ed9cb3b272dd19d9bdddbc7f34666`.
+No real environment reset completed; no model-generated trajectory, forward,
+backward, optimizer transaction, or checkpoint exists. There is no resumable
+journal state.
+
+The local fix makes Kubernetes start fail closed after confirmed deletion,
+with the original timeout mapped by the existing collector to `ENV_TIMEOUT`.
+It preserves upstream Docker behavior. P58 sandbox concurrency becomes 64,
+creating the unchanged 128 rows in two waves. Two stock-contract gates newly
+shared into P58 are explicitly zero in the native profile. Focused regression
+tests and the complete pinned-image P58 gate pass. Each persisted batch also
+records a bounded timeout stage and fixed scheduler/resource dimensions, and
+forwards counts, ratios, and all-timeout batch flags to W&B. This distinguishes
+zero sandbox admission from post-admission model or environment slowness
+without exporting raw scheduler text. After explicit publication
+approval, the next admissible run-id is fresh native `p58c05`; zero remains
+deferred.

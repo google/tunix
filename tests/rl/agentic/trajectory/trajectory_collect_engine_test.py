@@ -620,6 +620,31 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     self.assertEqual(
         result.status, agent_types.TrajectoryStatus.ENV_TIMEOUT
     )
+    self.assertEqual(result.timeout_stage, "environment_reset")
+    self.mock_model_call.assert_not_called()
+    self.mock_env.close.assert_called_once()
+
+  def test_reset_raised_timeout_is_env_timeout(self):
+    self.mock_env.reset.side_effect = TimeoutError(
+        "Kubernetes pod did not start within 1200s; phase=Pending "
+        "conditions=PodScheduled:False:Unschedulable:0/1 nodes available: "
+        "Insufficient cpu"
+    )
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=self.mock_env,
+        model_call=self.mock_model_call,
+        timeout=1.0,
+        cleanup_timeout=0.1,
+    )
+    result = asyncio.run(self._run_collect(engine, mode='Trajectory'))
+
+    self.assertEqual(
+        result.status, agent_types.TrajectoryStatus.ENV_TIMEOUT
+    )
+    self.assertEqual(result.timeout_stage, "sandbox_start")
+    self.assertEqual(result.timeout_scheduler_reason, "unschedulable")
+    self.assertEqual(result.timeout_resource, "cpu")
     self.mock_model_call.assert_not_called()
     self.mock_env.close.assert_called_once()
 

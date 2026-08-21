@@ -909,6 +909,12 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
               "deepswe/compact_filtered_prompt_groups": (
                   debug_metrics["compact_filtered_prompt_groups"], np.mean
               ),
+              **{
+                  key: (value, np.mean)
+                  for key, value in deepswe_debug.timeout_wandb_metrics(
+                      debug_metrics
+                  ).items()
+              },
           },
           mode=mode,
           step=expected_step,

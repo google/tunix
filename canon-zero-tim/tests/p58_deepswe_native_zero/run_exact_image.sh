@@ -45,6 +45,8 @@ $DOCKER run --rm \
     PYTHONPATH=/workspace python3 \
       canon-zero-tim/tests/p34_deepswe/test_script_contract.py
     PYTHONPATH=/workspace python3 \
+      canon-zero-tim/tests/p34_deepswe/test_r2egym_optional.py
+    PYTHONPATH=/workspace python3 \
       canon-zero-tim/tests/p44_deepswe_qwen4b_parity/test_renderer.py
     (
       cd tests/rl
@@ -61,7 +63,8 @@ $DOCKER run --rm \
     (
       cd tests/rl/agentic
       PYTHONPATH=/workspace python3 -m unittest \
-        trajectory.trajectory_collect_engine_test.TrajectoryCollectEngineTest.test_overlong_filter_masks_out_and_skips_reward
+        trajectory.trajectory_collect_engine_test.TrajectoryCollectEngineTest.test_overlong_filter_masks_out_and_skips_reward \
+        trajectory.trajectory_collect_engine_test.TrajectoryCollectEngineTest.test_reset_raised_timeout_is_env_timeout
     )
     echo "P58_EXACT_IMAGE_CPU_PASS loss_oracle=1 weighted_accumulation=1 compact_filter=1 durable_journal=1 paired_renderer=1 alignment_policy=1 regressions=1"
   '

@@ -136,6 +136,7 @@ def apply_repoenv_kubernetes_poll_patch() -> str:
     return str(getattr(docker_mod, "__file__", ""))
 
   namespace = docker_mod.DEFAULT_NAMESPACE
+  original_start_container = docker_mod.DockerRuntime.start_container
 
   def pod_name_for(runtime) -> str:
     name = getattr(runtime, "_tunix_kubernetes_pod_name", "")
@@ -180,6 +181,24 @@ def apply_repoenv_kubernetes_poll_patch() -> str:
     raise TimeoutError(
         f"Kubernetes pod {pod_name!r} still exists {timeout}s after deletion"
     )
+
+  def pod_status_summary(pod) -> str:
+    """Returns bounded scheduler diagnostics without pod spec/environment."""
+    status = getattr(pod, "status", None)
+    phase = str(getattr(status, "phase", "unknown") or "unknown")
+    summaries = []
+    for condition in list(getattr(status, "conditions", None) or []):
+      values = (
+          getattr(condition, "type", "unknown"),
+          getattr(condition, "status", "unknown"),
+          getattr(condition, "reason", "unknown"),
+          getattr(condition, "message", ""),
+      )
+      normalized = [
+          re.sub(r"\s+", " ", str(value or "")).strip() for value in values
+      ]
+      summaries.append(":".join(normalized)[:512])
+    return f"phase={phase} conditions={'|'.join(summaries) or 'none'}"
 
   def start_kubernetes_pod(
       self, docker_image: str, command: str, pod_name: str, **docker_kwargs
@@ -296,6 +315,7 @@ def apply_repoenv_kubernetes_poll_patch() -> str:
 
     timeout = int(os.environ.get("R2E_POD_START_TIMEOUT_SECONDS", "1200"))
     deadline = time.monotonic() + timeout
+    last_status = "phase=unobserved conditions=none"
     while time.monotonic() < deadline:
       pod = self.client.read_namespaced_pod(
           name=pod_name,
@@ -303,6 +323,7 @@ def apply_repoenv_kubernetes_poll_patch() -> str:
           _request_timeout=60,
       )
       phase = str(pod.status.phase)
+      last_status = pod_status_summary(pod)
       if phase == "Running":
         self.container = pod
         self.logger.info("Kubernetes pod %s is Running", pod_name)
@@ -319,10 +340,60 @@ def apply_repoenv_kubernetes_poll_patch() -> str:
           max(0, int(deadline - time.monotonic())),
       )
       time.sleep(5)
+    print(
+        "[P34.R2E] KUBERNETES_START_TIMEOUT "
+        f"pod={pod_name} timeout_seconds={timeout} {last_status}",
+        flush=True,
+    )
     delete_and_confirm(self, pod_name)
     raise TimeoutError(
-        f"Kubernetes pod {pod_name!r} did not start within {timeout}s"
+        f"Kubernetes pod {pod_name!r} did not start within {timeout}s; "
+        f"{last_status}"
     )
+
+  def start_container_fail_closed(
+      self, docker_image: str, command: str, ctr_name: str, **docker_kwargs
+  ):
+    """Preserves Docker behavior and refuses a half-created Kubernetes runtime.
+
+    The pinned R2E-Gym ``start_container`` catches every Kubernetes start
+    exception, prints ``Container start error``, deletes the pod, and returns.
+    Its constructor then runs setup against ``container=None``.  P58c04 showed
+    the resulting Kubernetes 404 being obscured by a client-side
+    ``None.decode`` error.  Invoke the bounded Kubernetes start directly so
+    its TimeoutError reaches the trajectory collector as ENV_TIMEOUT.
+    """
+    if getattr(self, "backend", "") != "kubernetes":
+      return original_start_container(
+          self, docker_image, command, ctr_name, **docker_kwargs
+      )
+    try:
+      self._start_kubernetes_pod(  # pylint: disable=protected-access
+          docker_image, command, ctr_name, **docker_kwargs
+      )
+    except Exception as start_error:
+      pod_name = pod_name_for(self) or str(ctr_name)
+      try:
+        delete_and_confirm(self, pod_name)
+      except Exception as cleanup_error:
+        raise ExceptionGroup(
+            "R2E Kubernetes start and cleanup both failed",
+            [start_error, cleanup_error],
+        ) from start_error
+      raise
+    if self.container is None:
+      start_error = RuntimeError(
+          f"Kubernetes pod {ctr_name!r} start returned without a container"
+      )
+      pod_name = pod_name_for(self) or str(ctr_name)
+      try:
+        delete_and_confirm(self, pod_name)
+      except Exception as cleanup_error:
+        raise ExceptionGroup(
+            "R2E Kubernetes start and cleanup both failed",
+            [start_error, cleanup_error],
+        ) from start_error
+      raise start_error
 
   cleanup_method_name = (
       "stop"
@@ -355,6 +426,7 @@ def apply_repoenv_kubernetes_poll_patch() -> str:
       raise cleanup_error
 
   docker_mod.DockerRuntime._start_kubernetes_pod = start_kubernetes_pod
+  docker_mod.DockerRuntime.start_container = start_container_fail_closed
   setattr(
       docker_mod.DockerRuntime,
       cleanup_method_name,

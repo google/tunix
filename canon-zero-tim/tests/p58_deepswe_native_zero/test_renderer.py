@@ -56,6 +56,8 @@ class P58RendererTest(unittest.TestCase):
           self.assertEqual(env["CANON_P58_EXPECTED_UPDATES"], str(steps))
           self.assertIn(f"--max_steps={steps}", env["CANON_RUN_CMD"])
           self.assertIn("--num_generations=16", env["CANON_RUN_CMD"])
+          self.assertIn("--max_concurrency=64", env["CANON_RUN_CMD"])
+          self.assertNotIn("--max_concurrency=128", env["CANON_RUN_CMD"])
           self.assertIn("--loss_scale_factor=16384", env["CANON_RUN_CMD"])
           self.assertIn(
               "--loss_denominator_weighted_accumulation",

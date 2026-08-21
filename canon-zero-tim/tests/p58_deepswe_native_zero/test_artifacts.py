@@ -34,7 +34,13 @@ def _values(root: Path) -> dict[str, str]:
   }
 
 
-def _batch(status: str = "SUCCEEDED"):
+def _batch(
+    status: str = "SUCCEEDED",
+    *,
+    timeout_stage: str = "",
+    timeout_scheduler_reason: str = "",
+    timeout_resource: str = "",
+):
   items = []
   rewards = []
   advantages = []
@@ -47,6 +53,9 @@ def _batch(status: str = "SUCCEEDED"):
           metadata={"task_identity": {"docker_image": f"task-{group}"}},
           traj={
               "status": status,
+              "timeout_stage": timeout_stage,
+              "timeout_scheduler_reason": timeout_scheduler_reason,
+              "timeout_resource": timeout_resource,
               "trajectory_reward": reward,
               "conversation_text": [
                   {"role": "assistant", "content": "redacted test"}
@@ -59,6 +68,38 @@ def _batch(status: str = "SUCCEEDED"):
 
 
 class P58ArtifactTest(unittest.TestCase):
+
+  def test_sandbox_start_timeouts_are_bounded_wandb_metrics(self):
+    with tempfile.TemporaryDirectory() as directory:
+      root = Path(directory)
+      metrics = deepswe_debug.persist_batch(
+          *_batch(
+              "ENV_TIMEOUT",
+              timeout_stage="sandbox_start",
+              timeout_scheduler_reason="unschedulable",
+              timeout_resource="cpu",
+          ),
+          expected_step=0,
+          optimizer_step=0,
+          output_dir=root,
+          model_id="Qwen/Qwen3-4B-Instruct-2507",
+          values=_values(root),
+      )
+      self.assertEqual(metrics["env_timeout_trajectories"], 128)
+      self.assertEqual(metrics["sandbox_start_timeout_trajectories"], 128)
+      self.assertEqual(metrics["unschedulable_trajectories"], 128)
+      self.assertEqual(metrics["insufficient_cpu_trajectories"], 128)
+      self.assertTrue(metrics["all_env_timeout_batch"])
+      self.assertTrue(metrics["all_sandbox_start_timeout_batch"])
+      wandb_metrics = deepswe_debug.timeout_wandb_metrics(metrics)
+      self.assertEqual(wandb_metrics["deepswe/env_timeout_ratio"], 1.0)
+      self.assertEqual(
+          wandb_metrics["deepswe/sandbox_start_timeout_ratio"], 1.0
+      )
+      self.assertEqual(wandb_metrics["deepswe/all_env_timeout_batch"], 1.0)
+      self.assertEqual(
+          wandb_metrics["deepswe/all_sandbox_start_timeout_batch"], 1.0
+      )
 
   def test_batch_index_survives_no_commit_and_resume(self):
     with tempfile.TemporaryDirectory() as directory:

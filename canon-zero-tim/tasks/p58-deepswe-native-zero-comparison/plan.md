@@ -51,6 +51,7 @@ even though the renderer and CPU tests support it.
 | Model | `Qwen/Qwen3-4B-Instruct-2507` |
 | Data | promoted 1,012-task P46 exact-N16 list, SHA-256 `ec297c9cbc39cd67db15b0b9db6a229b15671b848df5ec3101de9ef8df7c9973` |
 | Prompts / generations | B=8, G=16, 128 trajectories per update |
+| Sandbox concurrency | 64, producing the unchanged 128 rows in two waves |
 | Prompt / response / turns | 4,096 / 16,384 / 50 |
 | Sampling | temperature 1.0; top-p and top-k must resolve identically in both arms and be printed in the signed receipt |
 | Topology per arm | 128 TPU total: rollout DP8 x TP8 = 64 and trainer DP8 x TP8 = 64, synchronous disaggregated |
@@ -93,7 +94,11 @@ count/ratio, all-zero/all-one/mixed/effective group counts and ratios,
 compact-filtered row/group counts and ratios by status, structurally invalid
 rows, reward histogram, nonzero-advantage count/ratio, completion/turn lengths,
 latency, throughput, cleanup, policy ratio/clip diagnostics, gradient/update
-norms, and A-B/B-C/A-C receipts.
+norms, and A-B/B-C/A-C receipts. Timeout metrics split sandbox start,
+environment reset/step, model generation, final reward, and trajectory-deadline
+stages. Scheduler dimensions are a fixed vocabulary (`unschedulable`, CPU,
+memory, ephemeral storage, or other); raw scheduler text remains in the
+bounded run log and is never sent to W&B.
 Complete redacted trajectories are journaled atomically to durable storage;
 W&B stores compact metrics plus artifact path and digest.
 
@@ -101,6 +106,17 @@ The trajectory journal uses a monotonically increasing `batch_index` separate
 from `optimizer_step`. An all-filtered batch advances only the former. Resume
 validates contiguous files, metrics parity, and each SHA-256 before choosing
 the next batch index; partial or tampered journals stop fail-closed.
+
+Sandbox construction is also fail-closed. A Kubernetes pod start timeout must
+be propagated through environment reset as signed `ENV_TIMEOUT` only after
+pod deletion is confirmed. Returning a RepoEnv with `container=None` and
+continuing setup against a deleted pod is structurally invalid, not a
+trajectory result. Repeated batches with zero confirmed Running pods require
+cluster scheduling/capacity evidence before another launch. An
+`all_sandbox_start_timeout_batch` means effective environment throughput was
+zero and does not diagnose model-serving throughput. Conversely, model
+throughput is considered only when sandbox-start timeout metrics are zero and
+`MODEL_TIMEOUT` is observed after real environment admission.
 
 ## Paired-treatment invariants
 

@@ -156,6 +156,8 @@ class P58EnvironmentContractTest(unittest.TestCase):
           if arm == "native":
             self.assertNotIn("CANON_FIXED_AR", values)
             self.assertNotIn("CANON_LOGPROB_M", values)
+            self.assertEqual(values["CANON_P28_BATCHED_REVERSE"], "0")
+            self.assertEqual(values["CANON_BATCHED_EVIDENCE"], "0")
           else:
             self.assertEqual(values["CANON_FIXED_AR"], "1")
             self.assertEqual(values["CANON_LOGPROB_M"], "256")

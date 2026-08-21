@@ -195,6 +195,27 @@ class TrajectoryCollectEngine:
     self._logged_clip_reasons.add(reason)
     logging.warning("%s trajectory clipped: %s", self._debug_prefix, reason)
 
+  def _record_timeout(
+      self, stage: str, error: BaseException | None = None
+  ) -> None:
+    """Records bounded timeout provenance without retaining error text."""
+    detail = str(error or "")
+    trajectory = self.agent.trajectory
+    trajectory.timeout_stage = stage
+    trajectory.timeout_scheduler_reason = (
+        "unschedulable" if "Unschedulable" in detail else ""
+    )
+    if "Insufficient cpu" in detail:
+      trajectory.timeout_resource = "cpu"
+    elif "Insufficient memory" in detail:
+      trajectory.timeout_resource = "memory"
+    elif "Insufficient ephemeral-storage" in detail:
+      trajectory.timeout_resource = "ephemeral_storage"
+    elif "Insufficient " in detail:
+      trajectory.timeout_resource = "other"
+    else:
+      trajectory.timeout_resource = ""
+
   async def collect(self, mode: str = "Conversation") -> Any:
     """Execute a complete rollout episode and return the resulting trajectory.
 
@@ -216,12 +237,20 @@ class TrajectoryCollectEngine:
     self._response_token_count = 0
     self.agent.reset()
     self.agent.trajectory.status = agent_types.TrajectoryStatus.RUNNING
+    self._record_timeout("")
     self._logged_clip_reasons.clear()
     try:
       try:
         await self._reset()
-      except asyncio.TimeoutError:
+      except asyncio.TimeoutError as error:
         self.agent.trajectory.status = agent_types.TrajectoryStatus.ENV_TIMEOUT
+        stage = (
+            "sandbox_start"
+            if "Kubernetes pod" in str(error)
+            and "did not start within" in str(error)
+            else "environment_reset"
+        )
+        self._record_timeout(stage, error)
         self._log_trajectory_clip("ENV_RESET_TIMEOUT")
         logging.error(
             "%s env.reset exceeded the %.1fs trajectory deadline",
@@ -262,6 +291,7 @@ class TrajectoryCollectEngine:
             self.agent.trajectory.status = (
                 agent_types.TrajectoryStatus.REWARD_TIMEOUT
             )
+            self._record_timeout("final_reward")
             self._log_trajectory_clip("REWARD_TIMEOUT")
             logging.error(
                 "%s final reward exceeded the remaining %.1fs trajectory "
@@ -271,6 +301,7 @@ class TrajectoryCollectEngine:
             )
         elif self.agent.trajectory.status == agent_types.TrajectoryStatus.SUCCEEDED:
           self.agent.trajectory.status = agent_types.TrajectoryStatus.TIMEOUT
+          self._record_timeout("trajectory_deadline")
           self._log_trajectory_clip("TIMEOUT_BEFORE_FINAL_REWARD")
       self.compute_mc_reward()
       self.compute_trajectory_reward()
@@ -370,6 +401,11 @@ class TrajectoryCollectEngine:
           "conversation_tokens": conversation_tokens,
           "conversation_masks": final_masks,
           "status": self.agent.trajectory.status.name,
+          "timeout_stage": self.agent.trajectory.timeout_stage,
+          "timeout_scheduler_reason": (
+              self.agent.trajectory.timeout_scheduler_reason
+          ),
+          "timeout_resource": self.agent.trajectory.timeout_resource,
           "trajectory_reward": self.agent.trajectory.reward,
           "invalid_action_count": sum(
               1
@@ -576,6 +612,7 @@ class TrajectoryCollectEngine:
     model_timeout = self._model_timeout()
     if model_timeout <= 0:
       self.agent.trajectory.status = agent_types.TrajectoryStatus.TIMEOUT
+      self._record_timeout("trajectory_deadline")
       self._log_trajectory_clip("TIMEOUT_BEFORE_MODEL_CALL")
       return True
     max_generation_steps = (
@@ -610,6 +647,7 @@ class TrajectoryCollectEngine:
       )
     except asyncio.TimeoutError:
       self.agent.trajectory.status = agent_types.TrajectoryStatus.MODEL_TIMEOUT
+      self._record_timeout("model_generation")
       self._log_trajectory_clip("MODEL_TIMEOUT")
       logging.error(
           "%s model generation exceeded the %.1fs turn deadline and was "
@@ -662,6 +700,7 @@ class TrajectoryCollectEngine:
     if not self._check_and_set_context_limit_reached():
       if remaining_time <= 0:
         self.agent.trajectory.status = agent_types.TrajectoryStatus.TIMEOUT
+        self._record_timeout("trajectory_deadline")
         self._log_trajectory_clip("TIMEOUT_BEFORE_ENV_STEP")
         cur_step = self.agent.get_current_step()
         if cur_step is not None:
@@ -682,6 +721,7 @@ class TrajectoryCollectEngine:
           self.agent.trajectory.status = (
               agent_types.TrajectoryStatus.ENV_TIMEOUT
           )
+          self._record_timeout("environment_step")
           self._log_trajectory_clip("ENV_TIMEOUT")
           if step_idx == 0:
             logging.error(

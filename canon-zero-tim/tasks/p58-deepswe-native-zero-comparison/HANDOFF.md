@@ -58,6 +58,34 @@ the first post-push remote readback matched exactly with ahead/behind `0/0`.
 Fetch the final operator tip because this publication-evidence checkpoint
 advances the branch once more.
 
+P58c04 proved the complete bootstrap and initialization chain through real
+128-chip Pathways discovery, Qwen3-4B/vLLM initialization, W&B initialization,
+and entry into `run_producers_from_stream`. It then requested all 128 RepoEnv
+sandboxes concurrently. No sandbox was logged Running before the 1,200-second
+start deadline, and the interleaved log retains at least 121 explicit timeout
+records. The pinned R2E `start_container` swallowed the start `TimeoutError`,
+deleted the pod, and returned with `container=None`; later
+setup attempted a websocket exec into that deleted pod. Kubernetes' real 404
+was then obscured by the client library's `None.decode` AttributeError. The
+websocket payload decoder is not the root cause and must not be patched or
+made permissive.
+
+The local repair bypasses the upstream exception-swallowing wrapper only for
+the Kubernetes backend, propagates the original timeout after confirmed pod
+deletion, and proves that a reset-time start failure becomes the existing
+signed `ENV_TIMEOUT` trajectory status. Docker behavior remains delegated to
+upstream. A bounded timeout marker preserves pod phase and scheduler
+conditions without inspecting the pod spec/environment. The P58 renderer now
+uses the reference sandbox concurrency 64, so
+the unchanged B8 x G16 batch is created in two waves. This changes neither
+data, sampling, RLOO/loss, meshes, optimizer, nor update horizon. Two newly
+shared stock-contract booleans are explicitly zeroed in the native profile;
+that is compatibility hardening, not a new treatment. Focused tests and the
+full pinned-image gate pass. The trajectory journal and W&B now retain bounded
+timeout provenance: status; sandbox/model/environment/reward/deadline stage;
+unschedulable; and insufficient CPU/memory counts and ratios. Raw scheduler
+messages stay in the run log. These changes are uncommitted and unpushed.
+
 Never modify or push `main`. The eventual publication target is
 `yuxzhang/canon-zero-tim` after reconciling the unrelated remote tip.
 
@@ -132,7 +160,7 @@ implementation plus CPU/exact-image validation only.
 4. Publish or select a client image by immutable registry digest and verify the
    mounted Qwen3-4B-Instruct-2507 weights and frozen clean-list digest without
    printing credentials.
-5. Render only `arm=native, stage=three-update` with fresh run-id `p58c04`;
+5. Render only `arm=native, stage=three-update` with fresh run-id `p58c05`;
    preserve its YAML and digest,
    run server-side dry-run, and apply only that JobSet under the user's
    native-first decision.
@@ -143,13 +171,19 @@ implementation plus CPU/exact-image validation only.
 7. Do not render or apply zero. Do not start 1,000 updates merely because the
    native canary passes; return evidence for a new user decision.
 
-Do not reuse any failed `p58c01`, `p58c02`, or `p58c03` YAML/run root. None
+Do not reuse any failed `p58c01`, `p58c02`, `p58c03`, or `p58c04` YAML/run root. None
 contains resumable trajectory state. They remain immutable failure evidence
-under `evidence/p58c01/`, `evidence/p58c02/`, and `evidence/p58c03/`. The
+under `evidence/p58c01/`, `evidence/p58c02/`, `evidence/p58c03/`, and
+`evidence/p58c04/`. The
 p58c03 hashes are `15aa9968200c55a02ef47c72c5e209277397835e1752a4dbd9699fce3b2c42b4`
 for `run.log` and
 `d5e8b5b1941aa5632fa6267cfdac445727c175bf8d2bbcc79c1ece7cf7aba1e2`
 for `head_container.log`.
+P58c04 hashes are
+`f5caf2efb70bfec083a4454e441ce7f4b5b0632abbd206439ba9497bca5a6a40`
+for `run.log` and
+`a311eb64ee30b1fa0a168b68d9f17661756ed9cb3b272dd19d9bdddbc7f34666`
+for `env.sh`.
 
 ## Important operational semantics
 
@@ -160,6 +194,18 @@ for `head_container.log`.
 - Compact-filter statuses are not malformed trajectories. They remain in the
   full journal but have zero policy mask. Structural missing/duplicate/parser
   failures remain fatal.
+- A Kubernetes sandbox start exception must propagate after deletion is
+  confirmed. `ENV_TIMEOUT` is an admitted compact-filter status; a
+  half-created RepoEnv with `container=None` is forbidden. If an entire
+  p58c05 batch again has zero confirmed Running pods, classify infrastructure
+  capacity/scheduling before another launch instead of patching websocket
+  decode or inventing a successful trajectory.
+- Read `deepswe/all_sandbox_start_timeout_batch` first. Value `1` means the
+  effective R2E environment throughput was zero and the model was not the
+  first bottleneck. A zero sandbox-start ratio plus a nonzero
+  `deepswe/status/model_timeout_ratio` instead points to model-serving
+  throughput. W&B dimensions are fixed and low-cardinality; detailed
+  scheduler text is available only in the bounded raw marker.
 - If an entire batch is compact-filtered, `batch_index` advances but
   `optimizer_step` and commit count do not. Relaunching into a complete
   journal continues at the next batch index; a partial/digest-mismatched
