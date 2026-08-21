@@ -13,7 +13,7 @@ class CacheManager:
     def __init__(
         self, 
         hbm_page_manager: page_manager_lib.PageManager,
-        offload_page_manager: Optional[page_manager_lib.PageManager] = None
+        offload_page_manager: Optional[page_manager_lib.BlockPool] = None
     ):
         self.hbm_page_manager = hbm_page_manager
         self.offload_page_manager = offload_page_manager
@@ -95,13 +95,43 @@ class CacheManager:
         
         if len(page_ids) > self.available_hbm_pages:
             raise RuntimeError("Not enough HBM pages available to perform load.")
-            
-        # TODO: Implement physical tensor block transfers between the two page managers
+        
+        if not page_ids:
+            return
+
         # 1. Allocate equivalent physical HBM pages
-        # 2. Issue a batch copy kernel from CPU -> HBM
-        # 3. Evict the old CPU physical pages back into CPU pool
-        # 4. Re-map logical tracking 
-        pass
+        self.hbm_page_manager, allocated_hbm_idxs = self.hbm_page_manager.allocate(jnp.array(len(page_ids)))
+        self.available_hbm_pages -= len(page_ids)
+        physical_hbm_idxs = np.array(allocated_hbm_idxs).tolist()
+        
+        # 2. Gather source CPU physical indices
+        physical_cpu_idxs = []
+        for pid in page_ids:
+            if self._page_location.get(pid) != "cpu":
+                raise RuntimeError("Page is not actually in CPU")
+            physical_cpu_idxs.append(self._page_id_to_idx[pid])
+
+        # 3. Issue batch copy CPU -> HBM
+        block_ids = list(self.hbm_page_manager.pages.keys())
+        self.hbm_page_manager = page_manager_lib.copy_physical_pages(
+            src_pool=self.offload_page_manager,
+            dst_pool=self.hbm_page_manager,
+            src_idxs=jnp.array(physical_cpu_idxs),
+            dst_idxs=jnp.array(physical_hbm_idxs),
+            block_ids=block_ids
+        )
+
+        # 4. Evict the old CPU physical pages
+        self.offload_page_manager = self.offload_page_manager.evict_pages(
+            page_indices_to_evict=jnp.array(physical_cpu_idxs),
+            num_evicted=jnp.array(len(physical_cpu_idxs))
+        )
+        self.available_cpu_pages += len(physical_cpu_idxs)
+
+        # 5. Re-map logical tracking
+        for pid, p_idx in zip(page_ids, physical_hbm_idxs):
+            self._page_id_to_idx[pid] = p_idx
+            self._page_location[pid] = "tpu" 
 
     def offload(self, page_ids: List[int]):
         """Moves logical pages from TPU to CPU."""
@@ -111,12 +141,42 @@ class CacheManager:
         if len(page_ids) > self.available_cpu_pages:
             raise RuntimeError("Not enough CPU pages available to perform offload.")
 
-        # TODO: Implement physical tensor block transfers between the two page managers
+        if not page_ids:
+            return
+
         # 1. Allocate equivalent physical CPU pages
-        # 2. Issue a batch copy kernel from HBM -> CPU
-        # 3. Evict the old HBM physical pages back into HBM pool
-        # 4. Re-map logical tracking 
-        pass
+        self.offload_page_manager, allocated_cpu_idxs = self.offload_page_manager.allocate(jnp.array(len(page_ids)))
+        self.available_cpu_pages -= len(page_ids)
+        physical_cpu_idxs = np.array(allocated_cpu_idxs).tolist()
+        
+        # 2. Gather source TPU physical indices
+        physical_tpu_idxs = []
+        for pid in page_ids:
+            if self._page_location.get(pid) != "tpu":
+                raise RuntimeError("Page is not actually in TPU")
+            physical_tpu_idxs.append(self._page_id_to_idx[pid])
+
+        # 3. Issue batch copy HBM -> CPU
+        block_ids = list(self.hbm_page_manager.pages.keys())
+        self.offload_page_manager = page_manager_lib.copy_physical_pages(
+            src_pool=self.hbm_page_manager,
+            dst_pool=self.offload_page_manager,
+            src_idxs=jnp.array(physical_tpu_idxs),
+            dst_idxs=jnp.array(physical_cpu_idxs),
+            block_ids=block_ids
+        )
+
+        # 4. Evict the old TPU physical pages
+        self.hbm_page_manager = self.hbm_page_manager.evict_pages(
+            page_indices_to_evict=jnp.array(physical_tpu_idxs),
+            num_evicted=jnp.array(len(physical_tpu_idxs))
+        )
+        self.available_hbm_pages += len(physical_tpu_idxs)
+        
+        # 5. Re-map logical tracking
+        for pid, p_idx in zip(page_ids, physical_cpu_idxs):
+            self._page_id_to_idx[pid] = p_idx
+            self._page_location[pid] = "cpu" 
 
     def evict(self, page_ids: List[int]):
         """Releases the underlying physical allocation in page_manager and removes logical IDs."""

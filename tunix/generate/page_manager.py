@@ -252,50 +252,21 @@ class PageManagerConfig:
 
 @jax.tree_util.register_dataclass
 @dataclasses.dataclass(frozen=True, kw_only=True)
-class PageManager:
-  """Page state and data blocks for a batch of sequences."""
+class BlockPool:
+  """Physical data blocks."""
   pages: dict[str, jax.Array]
-  page_indices: jax.Array  # i32[batch_size, max_num_pages_per_seq]
   available_page_indices: jax.Array  # i32[total_num_pages]
   num_available_pages: jax.Array  # i32 scalar
-  seq_lens: jax.Array # i32[batch_size]
   
   page_size: int = dataclasses.field(
       metadata={'static': True}
   )
-  max_seq_len: int = dataclasses.field(
-      metadata={'static': True}
-  )
-  window_size: int | None = dataclasses.field(
-      metadata={'static': True}
-  )
-
-  @property
-  def batch_size(self) -> int:
-    return self.seq_lens.shape[0]
-
-  @property
-  def max_num_pages_per_seq(self) -> int:
-    return utils.cdiv(self.max_seq_len, self.page_size)
 
   @property
   def total_num_pages(self) -> int:
     return self.available_page_indices.shape[0]
 
-  @property
-  def lens(self) -> jax.Array:
-    return self.seq_lens
-
-  @property
-  def kv_lens(self) -> jax.Array:
-    return self.seq_lens
-
-  @functools.cached_property
-  def num_seq_pages(self) -> jax.Array:
-    return utils.cdiv(self.seq_lens, self.page_size)
-
-  @jax.named_call
-  def allocate(self, num_pages_to_allocate: jax.Array) -> tuple["PageManager", jax.Array]:
+  def allocate(self, num_pages_to_allocate: jax.Array) -> tuple["BlockPool", jax.Array]:
     """Allocates pages from the free pool."""
     page_indices_to_allocate = RaggedArray(
         data=self.available_page_indices, lens=num_pages_to_allocate
@@ -313,6 +284,61 @@ class PageManager:
         available_page_indices=updated_available_page_indices,
         num_available_pages=updated_num_available_pages,
     ), page_indices_to_allocate.data
+
+  def evict_pages(self, page_indices_to_evict: jax.Array, num_evicted: jax.Array) -> "BlockPool":
+    """Releases specific physical pages back to the free pool."""
+    target_indices = jnp.arange(page_indices_to_evict.shape[0])
+    target_indices = jnp.where(
+        target_indices < num_evicted,
+        target_indices + self.num_available_pages,
+        self.total_num_pages  # Out of bounds
+    )
+    updated_available_page_indices = self.available_page_indices.at[
+        target_indices
+    ].set(page_indices_to_evict, mode='drop')
+
+    updated_num_available_pages = self.num_available_pages + num_evicted
+    return dataclasses.replace(
+        self,
+        available_page_indices=updated_available_page_indices,
+        num_available_pages=updated_num_available_pages,
+    )
+
+
+@jax.tree_util.register_dataclass
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class PageManager(BlockPool):
+  """Page state and data blocks for a batch of sequences."""
+  page_indices: jax.Array  # i32[batch_size, max_num_pages_per_seq]
+  seq_lens: jax.Array # i32[batch_size]
+
+  max_seq_len: int = dataclasses.field(
+      metadata={'static': True}
+  )
+  window_size: int | None = dataclasses.field(
+      metadata={'static': True}
+  )
+
+  @property
+  def batch_size(self) -> int:
+    return self.seq_lens.shape[0]
+
+  @property
+  def max_num_pages_per_seq(self) -> int:
+    return utils.cdiv(self.max_seq_len, self.page_size)
+
+
+  @property
+  def lens(self) -> jax.Array:
+    return self.seq_lens
+
+  @property
+  def kv_lens(self) -> jax.Array:
+    return self.seq_lens
+
+  @functools.cached_property
+  def num_seq_pages(self) -> jax.Array:
+    return utils.cdiv(self.seq_lens, self.page_size)
 
   @jax.named_call
   def release(self, should_release: jax.Array) -> "PageManager":
@@ -338,26 +364,6 @@ class PageManager:
         self,
         page_indices=updated_page_indices,
         seq_lens=updated_lens
-    )
-
-  @jax.named_call
-  def evict_pages(self, page_indices_to_evict: jax.Array, num_evicted: jax.Array) -> "PageManager":
-    """Releases specific physical pages back to the free pool."""
-    target_indices = jnp.arange(page_indices_to_evict.shape[0])
-    target_indices = jnp.where(
-        target_indices < num_evicted,
-        target_indices + self.num_available_pages,
-        self.total_num_pages  # Out of bounds
-    )
-    updated_available_page_indices = self.available_page_indices.at[
-        target_indices
-    ].set(page_indices_to_evict, mode='drop')
-
-    updated_num_available_pages = self.num_available_pages + num_evicted
-    return dataclasses.replace(
-        self,
-        available_page_indices=updated_available_page_indices,
-        num_available_pages=updated_num_available_pages,
     )
 
   @jax.named_call
@@ -554,3 +560,50 @@ def _put_on_target_device(tensor: jax.Array, target_tensor: jax.Array) -> jax.Ar
     return jax.device_put(tensor, list(target_tensor.devices())[0])
 
   return tensor
+
+@jax.jit
+def copy_physical_pages(
+    src_cache: PageManager,
+    dst_cache: PageManager,
+    src_idxs: jax.Array,
+    dst_idxs: jax.Array,
+    block_ids: Sequence[str],
+) -> PageManager:
+    """Copies raw physical page indices from one cache to another."""
+    if len(src_idxs) == 0:
+        return dst_cache
+
+    for block_id in block_ids:
+        src_tensor = src_cache.pages[block_id]
+        dst_tensor = dst_cache.pages.get(block_id, jnp.zeros_like(src_tensor))
+
+        src_slice = src_tensor[src_idxs]
+        src_slice = _put_on_target_device(src_slice, dst_tensor)
+        
+        dst_tensor = dst_tensor.at[dst_idxs].set(src_slice)
+        # Note: dataclass mutations within JIT are complicated if it's immutable, 
+        # so we modify dict and return a new PageManager.
+        # But wait, pages is a dict property?
+# Removed jax.jit as per user request to let the caller decide
+def copy_physical_pages(
+    src_pool,
+    dst_pool,
+    src_idxs: jax.Array,
+    dst_idxs: jax.Array,
+    block_ids: Sequence[str],
+):
+    """Copies raw physical page indices from one BlockPool to another."""
+    if len(src_idxs) == 0:
+        return dst_pool
+
+    new_pages = {**dst_pool.pages}
+    for block_id in block_ids:
+        src_tensor = src_pool.pages[block_id]
+        dst_tensor = dst_pool.pages.get(block_id, jnp.zeros_like(src_tensor))
+
+        src_slice = src_tensor[src_idxs]
+        src_slice = _put_on_target_device(src_slice, dst_tensor)
+        
+        new_pages[block_id] = dst_tensor.at[dst_idxs].set(src_slice)
+        
+    return dataclasses.replace(dst_pool, pages=new_pages)
