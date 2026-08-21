@@ -1905,7 +1905,7 @@ fi
 # Replace the managed environment instead of layering it over the caller's raw JobSet env.
 for canon_env_key in $(compgen -e); do
   case "$canon_env_key" in
-    CANON_*|WANDB_*|HF_*|MIN_TOKEN_BUCKET|NEW_MODEL_DESIGN|VLLM_*|ROLLOUT_ENGINE|XLA_FLAGS|JAX_*|FL_SHARED_MESH|TPU_*|TF_CPP*|ENABLE_PATHWAYS|PYTHONDONTWRITEBYTECODE)
+    CANON_*|R2E_*|WANDB_*|HF_*|MIN_TOKEN_BUCKET|NEW_MODEL_DESIGN|VLLM_*|ROLLOUT_ENGINE|XLA_FLAGS|JAX_*|FL_SHARED_MESH|TPU_*|TF_CPP*|ENABLE_PATHWAYS|PYTHONDONTWRITEBYTECODE)
       case "$canon_env_key" in
         HF_TOKEN|WANDB_API_KEY|INJECTED_*) ;;
         *) unset "$canon_env_key" ;;
@@ -1915,7 +1915,7 @@ for canon_env_key in $(compgen -e); do
 done
 unset canon_env_key
 EOF
-  for k in $(compgen -e | grep -E '^(CANON_|WANDB_|HF_|MIN_TOKEN_BUCKET|NEW_MODEL_DESIGN|VLLM_|ROLLOUT_ENGINE|XLA_FLAGS|JAX_|FL_SHARED_MESH|TPU_|TF_CPP|ENABLE_PATHWAYS|PYTHONDONTWRITEBYTECODE)' | sort); do
+  for k in $(compgen -e | grep -E '^(CANON_|R2E_|WANDB_|HF_|MIN_TOKEN_BUCKET|NEW_MODEL_DESIGN|VLLM_|ROLLOUT_ENGINE|XLA_FLAGS|JAX_|FL_SHARED_MESH|TPU_|TF_CPP|ENABLE_PATHWAYS|PYTHONDONTWRITEBYTECODE)' | sort); do
     case "$k" in
       HF_TOKEN|WANDB_API_KEY|INJECTED_*) continue ;;
     esac

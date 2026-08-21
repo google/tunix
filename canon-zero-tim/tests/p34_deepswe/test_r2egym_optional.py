@@ -139,6 +139,7 @@ class R2egymOptionalContractTest(unittest.TestCase):
         "CANON_RUN_ID": "Test_Run/01",
         "R2E_ACTIVE_DEADLINE_SECONDS": "3300",
         "R2E_POD_DELETE_TIMEOUT_SECONDS": "1",
+        "R2E_K8S_QUEUE_NAME": "multislice-queue",
     }, clear=False):
       self.assertEqual(
           module.apply_repoenv_kubernetes_poll_patch(),
@@ -184,6 +185,10 @@ class R2egymOptionalContractTest(unittest.TestCase):
           "test_run-01",
       )
       self.assertEqual(
+          body["metadata"]["labels"]["kueue.x-k8s.io/queue-name"],
+          "multislice-queue",
+      )
+      self.assertEqual(
           body["spec"]["containers"][0]["resources"]["requests"],
           {"cpu": "2", "memory": "4Gi"},
       )
@@ -191,6 +196,20 @@ class R2egymOptionalContractTest(unittest.TestCase):
       self.assertTrue(runtime.client.deleted)
       self.assertEqual(runtime.original_start_calls, 0)
       self.assertEqual(runtime.original_stop_calls, 1)
+
+      invalid_queue = FakeDockerRuntime()
+      invalid_queue.client = FakeClient()
+      invalid_queue.logger = mock.Mock()
+      invalid_queue.backend = "kubernetes"
+      invalid_queue.container = None
+      invalid_queue.original_start_calls = 0
+      invalid_queue.original_stop_calls = 0
+      with mock.patch.dict(
+          os.environ, {"R2E_K8S_QUEUE_NAME": "Bad Queue"}, clear=False
+      ):
+        with self.assertRaisesRegex(ValueError, "exact Kubernetes DNS label"):
+          invalid_queue.start_container("image", "command", "invalid-queue")
+      self.assertIsNone(invalid_queue.client.created)
 
       class NeverRunningClient:
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import re
 import shlex
 from typing import Any, Mapping
 
@@ -35,6 +36,10 @@ _KUEUE_MANAGED_WORKER_POOLS = frozenset({
     "tpu-v5p-slice",
     "any",
 })
+_KUEUE_QUEUE_LABEL = "kueue.x-k8s.io/queue-name"
+_KUBERNETES_DNS_LABEL = re.compile(
+    r"[a-z0-9](?:[-a-z0-9]*[a-z0-9])?\Z"
+)
 _FILTER_STATUSES = (
     "MAX_STEPS_REACHED",
     "MAX_CONTEXT_LIMIT_REACHED",
@@ -138,6 +143,15 @@ def render(
       "canon.zero-tim/arm": arm,
       "canon.zero-tim/topology": "128",
   })
+  queue_name = str(
+      document["metadata"]["labels"].get(_KUEUE_QUEUE_LABEL, "")
+  )
+  if (
+      not queue_name
+      or len(queue_name) > 63
+      or not _KUBERNETES_DNS_LABEL.fullmatch(queue_name)
+  ):
+    raise ValueError("P58 requires an exact Kueue LocalQueue label")
 
   head = p34._head(document)
   services = _service_containers(head)
@@ -193,6 +207,7 @@ def render(
       "CANON_DEEPSWE_STEP_TIMEOUT_SECS": "600",
       "CANON_DEEPSWE_REWARD_TIMEOUT_SECS": "600",
       "R2E_ACTIVE_DEADLINE_SECONDS": "3300",
+      "R2E_K8S_QUEUE_NAME": queue_name,
       "MIN_TOKEN_BUCKET": "2048",
       "CANON_RUN_CMD": shlex.join(
           _command(stage, run_root=run_root, whitelist=whitelist)
@@ -321,6 +336,9 @@ def validate(
       "CANON_P30_OPT_STATE_OFFLOAD": "0",
       "MIN_TOKEN_BUCKET": "2048",
       "R2E_ACTIVE_DEADLINE_SECONDS": "3300",
+      "R2E_K8S_QUEUE_NAME": document["metadata"]["labels"].get(
+          _KUEUE_QUEUE_LABEL
+      ),
   }
   wrong = {
       key: env.get(key) for key, value in expected.items()

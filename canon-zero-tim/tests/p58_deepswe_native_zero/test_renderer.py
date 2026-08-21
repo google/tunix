@@ -28,7 +28,10 @@ SPEC.loader.exec_module(renderer)
 class P58RendererTest(unittest.TestCase):
 
   def _render(self, arm: str, stage: str = "three-update", **overrides):
-    base = yaml.safe_load((PKG / "cluster/jobset-64chip.yaml").read_text())
+    base = overrides.pop(
+        "base",
+        yaml.safe_load((PKG / "cluster/jobset-64chip.yaml").read_text()),
+    )
     kwargs = dict(
         source_commit="1" * 40,
         source_branch="yuxzhang/canon-zero-tim",
@@ -64,6 +67,13 @@ class P58RendererTest(unittest.TestCase):
               env["CANON_RUN_CMD"],
           )
           self.assertEqual(env["CANON_P34_CLEAN_ROWS"], "1012")
+          self.assertEqual(
+              env["R2E_K8S_QUEUE_NAME"],
+              document["metadata"]["labels"][
+                  "kueue.x-k8s.io/queue-name"
+              ],
+          )
+          self.assertEqual(env["R2E_K8S_QUEUE_NAME"], "multislice-queue")
 
   def test_pair_diff_is_registered_treatment_only(self):
     native = self._render("native")
@@ -132,6 +142,20 @@ class P58RendererTest(unittest.TestCase):
       self._render(
           "native", whitelist="unreviewed.jsonl", whitelist_sha256="3" * 64
       )
+
+  def test_missing_or_invalid_parent_queue_is_rejected(self):
+    for queue_name in (None, "Bad Queue"):
+      with self.subTest(queue_name=queue_name):
+        base = yaml.safe_load(
+            (PKG / "cluster/jobset-64chip.yaml").read_text()
+        )
+        labels = base["metadata"]["labels"]
+        if queue_name is None:
+          labels.pop("kueue.x-k8s.io/queue-name")
+        else:
+          labels["kueue.x-k8s.io/queue-name"] = queue_name
+        with self.assertRaisesRegex(ValueError, "exact Kueue LocalQueue"):
+          self._render("native", base=base)
 
 
 if __name__ == "__main__":

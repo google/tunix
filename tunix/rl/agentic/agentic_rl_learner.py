@@ -1752,6 +1752,11 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         single_example,
         **{"group_id": group_id, "pair_index": pair_index, **self.env_kwargs},  # pyrefly: ignore[bad-argument-type]
     )
+    # Seed provenance before ``env.reset()``. Reset can fail before the first
+    # model call (for example while a Kubernetes sandbox is being admitted),
+    # but the resulting filtered trajectory still belongs to this policy
+    # version and must remain journalable.
+    env.task["policy_version"] = self.policy_version
 
     return agent, env
 

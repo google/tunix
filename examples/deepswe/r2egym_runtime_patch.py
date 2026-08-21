@@ -8,10 +8,26 @@ import re
 import time
 
 
+_KUBERNETES_DNS_LABEL = re.compile(
+    r"[a-z0-9](?:[-a-z0-9]*[a-z0-9])?\Z"
+)
+
+
 def _kubernetes_label(value: str, *, fallback: str) -> str:
   """Returns a bounded Kubernetes label value without leaking raw metadata."""
   normalized = re.sub(r"[^a-z0-9_.-]+", "-", value.lower()).strip("-_.")
   return (normalized[:63].rstrip("-_.") or fallback)
+
+
+def _optional_queue_name(value: str) -> str:
+  """Validates an optional Kueue LocalQueue name without normalizing it."""
+  if not value:
+    return ""
+  if len(value) > 63 or not _KUBERNETES_DNS_LABEL.fullmatch(value):
+    raise ValueError(
+        "R2E_K8S_QUEUE_NAME must be an exact Kubernetes DNS label"
+    )
+  return value
 
 
 def _cleanup_orphaned_kubernetes_pods(
@@ -236,6 +252,9 @@ def apply_repoenv_kubernetes_poll_patch() -> str:
     memory_request = os.environ.get("R2E_K8S_MEM", "4Gi")
     cpu_limit = os.environ.get("R2E_K8S_CPU_LIMIT", "4")
     memory_limit = os.environ.get("R2E_K8S_MEM_LIMIT", "8Gi")
+    queue_name = _optional_queue_name(
+        os.environ.get("R2E_K8S_QUEUE_NAME", "")
+    )
     labels = {
         "app.kubernetes.io/name": "r2egym",
         "app.kubernetes.io/managed-by": "tunix-deepswe",
@@ -250,6 +269,8 @@ def apply_repoenv_kubernetes_poll_patch() -> str:
             fallback="unknown",
         ),
     }
+    if queue_name:
+      labels["kueue.x-k8s.io/queue-name"] = queue_name
     pod_spec = {
         "restartPolicy": "Never",
         "activeDeadlineSeconds": int(

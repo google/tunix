@@ -72,7 +72,11 @@ _TIMEOUT_STAGES = frozenset({
     "final_reward",
     "trajectory_deadline",
 })
-_TIMEOUT_SCHEDULER_REASONS = frozenset({"", "unschedulable"})
+_TIMEOUT_SCHEDULER_REASONS = frozenset({
+    "",
+    "scheduling_gated",
+    "unschedulable",
+})
 _TIMEOUT_RESOURCES = frozenset({
     "",
     "cpu",
@@ -573,6 +577,7 @@ def timeout_wandb_metrics(metrics: Mapping[str, Any]) -> dict[str, float]:
       "timeout_trajectories",
       "env_timeout_trajectories",
       "sandbox_start_timeout_trajectories",
+      "scheduling_gated_trajectories",
       "unschedulable_trajectories",
       "insufficient_cpu_trajectories",
       "insufficient_memory_trajectories",
@@ -830,6 +835,9 @@ def persist_batch(
       "sandbox_start_timeout_trajectory_ratio": (
           sandbox_start_timeout_trajectories / expected_trajectories
       ),
+      "scheduling_gated_trajectories": timeout_scheduler_histogram[
+          "scheduling_gated"
+      ],
       "unschedulable_trajectories": timeout_scheduler_histogram[
           "unschedulable"
       ],

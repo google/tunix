@@ -110,6 +110,33 @@ affinity to ResourceFlavor while retaining the TPU accelerator and exact
 topology. Explicit real node-pool names remain exact. The next run is fresh
 native full-stage `p58f01`, not a retry or resume of p58c05.
 
+P58f01 proved that repair: it reached 128 Pathways devices, the exact 64/64
+role split, Qwen3-4B/vLLM and online W&B initialization, and the rollout
+producer. It did not produce a usable R2E trajectory. All 128 environment
+resets timed out, and at least 127 bounded Pod markers say
+`PodScheduled=False`, reason `SchedulingGated`. The runtime-created standalone
+Pods lacked `kueue.x-k8s.io/queue-name`; on this cluster Kueue therefore added
+an admission gate but had no LocalQueue through which to admit them. After the
+all-timeout batch completed, a second local bug raised
+`policy_version is missing from trajectory task`: environment reset had failed
+before `_model_call` assigned that provenance, so the batch crashed before
+the P58 journal boundary. P58f01 is `INCONCLUSIVE`, immutable, and not
+resumable. Its raw log SHA-256 is
+`16c513c773ac2bfb1542178b4e42b03098bb9114564106b03f83c0195a0d542f`.
+
+The repair derives `R2E_K8S_QUEUE_NAME` from the parent JobSet queue label,
+persists it through the authoritative environment snapshot, validates it
+without normalization, and applies it to every sandbox Pod. It also assigns
+the current `policy_version` when the environment is constructed, before
+reset, while retaining the strict downstream missing-provenance check.
+`SchedulingGated` is now a separate bounded trajectory/W&B dimension. The next
+fresh native full attempt is `p58f02`; do not reuse the p58f01 root.
+
+At this checkpoint that p58f01 repair is local and uncommitted. It must pass
+final diff/readback review, then receive separate user approval for commit and
+push before any remote executor renders p58f02. Do not launch from the older
+operator tip merely because this handoff names the next run-id.
+
 Never modify or push `main`. The publication target is exclusively
 `yuxzhang/canon-zero-tim`; the implementation is present there.
 
@@ -185,7 +212,7 @@ implementation plus CPU/exact-image validation only.
 4. Publish or select a client image by immutable registry digest and verify the
    mounted Qwen3-4B-Instruct-2507 weights and frozen clean-list digest without
    printing credentials.
-5. Render only `arm=native, stage=full` with fresh run-id `p58f01` and worker
+5. Render only `arm=native, stage=full` with fresh run-id `p58f02` and worker
    sentinel `tpu-v5p-slice`. Require exact `4x4x8` topology and no literal
    `cloud.google.com/gke-nodepool: tpu-v5p-slice`; preserve the YAML/digest and
    run server-side dry-run before the separately approved apply.
@@ -197,7 +224,7 @@ implementation plus CPU/exact-image validation only.
    journal, cleanup, evaluation, checkpoint, and transaction receipts.
 8. Do not render or apply zero.
 
-Do not reuse any failed `p58c01` through `p58c05` YAML/run root. None
+Do not reuse any failed `p58c01` through `p58c05` or `p58f01` YAML/run root. None
 contains resumable trajectory state. They remain immutable failure evidence
 under `evidence/p58c01/`, `evidence/p58c02/`, `evidence/p58c03/`, and
 `evidence/p58c04/`. The
@@ -228,7 +255,7 @@ for `workload_describe.txt`.
 - A Kubernetes sandbox start exception must propagate after deletion is
   confirmed. `ENV_TIMEOUT` is an admitted compact-filter status; a
   half-created RepoEnv with `container=None` is forbidden. If an entire
-  p58f01 batch has zero confirmed Running pods, classify infrastructure
+  p58f02 batch has zero confirmed Running pods, classify infrastructure
   capacity/scheduling before another launch instead of patching websocket
   decode or inventing a successful trajectory.
 - Read `deepswe/all_sandbox_start_timeout_batch` first. Value `1` means the

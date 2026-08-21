@@ -831,6 +831,7 @@ def validate_environment(values: Mapping[str, str]) -> None:
       "R2E_K8S_MEM": "4Gi",
       "R2E_K8S_CPU_LIMIT": "4",
       "R2E_K8S_MEM_LIMIT": "8Gi",
+      "R2E_K8S_QUEUE_NAME": "multislice-queue" if p58_tim else None,
       "WANDB_MODE": "online",
       "CANON_P39_64CHIP_PILOT": "1" if pilot else "0",
       "CANON_P39_PILOT_ADMITTED": "1" if pilot else "0",

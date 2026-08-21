@@ -48,6 +48,13 @@ before any workload pod or update existed. P58.5N is the only active phase.
 Both zero phases remain deferred even though the renderer and CPU tests cover
 that arm.
 
+P58.5N attempt `p58f01` is also `INCONCLUSIVE`: the TPU/Pathways/model path
+started, but every standalone R2E Pod was held by a Kueue scheduling gate
+because it lacked the parent LocalQueue label. The all-timeout batch then
+failed before journaling because reset-time trajectories had not yet been
+seeded with their policy version. The phase remains active; the next fresh
+attempt is `p58f02` after both repairs are published and read back.
+
 ## Frozen shared recipe
 
 | Field | Shared value |

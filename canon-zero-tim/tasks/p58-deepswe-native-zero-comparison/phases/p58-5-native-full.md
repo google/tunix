@@ -24,7 +24,7 @@ validate the deferred zero arm and cannot establish a paired treatment effect.
 - recipe: B8 x G16, response 16,384, 50 turns, RLOO, fixed-context
   `sequence-mean-token-scale`, TPU-resident optimizer, optional interventions
   off, prefix cache off;
-- stage/run: `full`, fresh run-id `p58f01`, exactly 1,000 optimizer commits;
+- stage/run: `full`, fresh run-id `p58f02`, exactly 1,000 optimizer commits;
 - arm: `native` only. Rendering or applying `zero` is outside this phase.
 
 ## Admission gate
@@ -65,6 +65,11 @@ batches exceed 1,000. Partial/tampered evidence, exact native A-B
 
 ## Attempt boundary
 
-P58c05 is immutable Kueue-admission evidence and has no resumable journal or
-checkpoint. Do not reuse its YAML or root. The next attempt is fresh native
-`p58f01` from the published renderer repair. Zero remains deferred.
+P58c05 and p58f01 are immutable `INCONCLUSIVE` evidence. P58f01 proved the
+128-device Pathways/model initialization path, but its standalone R2E Pods
+lacked a LocalQueue label and remained `SchedulingGated`; the subsequent
+all-timeout batch crashed before journal persistence on missing
+`policy_version`. It has no resumable journal or checkpoint. Do not reuse
+either YAML or root. The next attempt is fresh native `p58f02` after the
+sandbox queue and reset-time provenance repairs are published. Zero remains
+deferred.

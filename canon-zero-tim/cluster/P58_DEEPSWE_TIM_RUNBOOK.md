@@ -48,6 +48,18 @@ delegates concrete node-pool selection to Kueue for registered sentinels while
 retaining exact `4x4x8` topology. Use fresh full-stage run-id `p58f01`. Never
 reuse a p58c01 through p58c05 YAML/root.
 
+Native `p58f01` then passed JobSet admission and the complete 128-device
+Pathways/Qwen3-4B/vLLM initialization chain, but every runtime-created R2E Pod
+remained `SchedulingGated`. Those standalone Pods lacked the parent JobSet's
+Kueue queue label, so all 128 resets timed out. The resulting all-timeout
+batch exposed a second bug: `policy_version` was assigned only on the first
+model call, which reset-time failures never reached, and strict processing
+crashed before journaling. The repaired path derives the sandbox queue from
+the parent JobSet, writes it to every Pod, seeds policy provenance before
+reset, and records `scheduling_gated` separately. P58f01 is immutable,
+`INCONCLUSIVE`, and has no resumable state. Use fresh full-stage run-id
+`p58f02`; never reuse its YAML/root.
+
 The direct-entrypoint implementation commit is
 `82d82f72a7220d945737d95f6266b5b7e2cfe706`. Resolve the final runnable SHA by
 fetching the operator branch after the later publication checkpoint; do not
@@ -163,7 +175,7 @@ CLIENT_IMAGE_DIGEST='registry.example/tunix@sha256:<64-hex-digest>'
 CPU_NODEPOOL='deepswe-cpu-pool'
 TPU_NODEPOOL='tpu-v5p-slice'
 MODEL_PVC='haoyugao-cpu-np-pvc'
-RUN_STEM='p58f01'
+RUN_STEM='p58f02'
 STAGE='full'
 
 ARM='native'
@@ -196,11 +208,20 @@ google.com/tpu: 128
 cloud.google.com/gke-tpu-accelerator: tpu-v5p-slice
 cloud.google.com/gke-tpu-topology: 4x4x8
 no cloud.google.com/gke-nodepool: tpu-v5p-slice
+JobSet label kueue.x-k8s.io/queue-name: multislice-queue
+jax-tpu env R2E_K8S_QUEUE_NAME: multislice-queue
 ```
 
 Kueue's selected ResourceFlavor supplies the concrete pool affinity. If the
 literal sentinel appears as node-pool affinity, stop before apply; that is the
 p58c05 admission bug.
+
+After apply, inspect the first sandbox before waiting for a whole batch. Its
+metadata must contain `kueue.x-k8s.io/queue-name=multislice-queue`; its Kueue
+Workload must become admitted, and the `kueue.x-k8s.io/admission` scheduling
+gate must disappear before the Pod can be called healthy. If it remains gated,
+preserve the Pod conditions and matching Workload/LocalQueue status and stop;
+do not tune model concurrency or wait another 1,200 seconds first.
 
 Before apply, preserve the resolved-environment regression result. It must
 prove that a parent process seeded with the renderer's
@@ -253,7 +274,8 @@ audit.
 
 Timeout telemetry is deliberately low-cardinality. W&B receives counts and
 ratios for all timeout statuses, `ENV_TIMEOUT`, sandbox-start timeouts,
-unschedulable sandboxes, and insufficient CPU/memory, plus the batch booleans
+`scheduling_gated` and unschedulable sandboxes, and insufficient CPU/memory,
+plus the batch booleans
 `deepswe/all_env_timeout_batch` and
 `deepswe/all_sandbox_start_timeout_batch`. Full scheduler messages remain only
 in the raw `[P34.R2E] KUBERNETES_START_TIMEOUT` log marker; they are never used

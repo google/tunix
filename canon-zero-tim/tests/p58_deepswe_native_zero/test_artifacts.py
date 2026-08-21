@@ -101,6 +101,31 @@ class P58ArtifactTest(unittest.TestCase):
           wandb_metrics["deepswe/all_sandbox_start_timeout_batch"], 1.0
       )
 
+  def test_scheduling_gated_timeouts_are_distinct_wandb_metrics(self):
+    with tempfile.TemporaryDirectory() as directory:
+      root = Path(directory)
+      metrics = deepswe_debug.persist_batch(
+          *_batch(
+              "ENV_TIMEOUT",
+              timeout_stage="sandbox_start",
+              timeout_scheduler_reason="scheduling_gated",
+          ),
+          expected_step=0,
+          optimizer_step=0,
+          output_dir=root,
+          model_id="Qwen/Qwen3-4B-Instruct-2507",
+          values=_values(root),
+      )
+      self.assertEqual(metrics["scheduling_gated_trajectories"], 128)
+      self.assertEqual(metrics["unschedulable_trajectories"], 0)
+      wandb_metrics = deepswe_debug.timeout_wandb_metrics(metrics)
+      self.assertEqual(
+          wandb_metrics["deepswe/scheduling_gated_trajectories"], 128.0
+      )
+      self.assertEqual(
+          wandb_metrics["deepswe/scheduling_gated_ratio"], 1.0
+      )
+
   def test_batch_index_survives_no_commit_and_resume(self):
     with tempfile.TemporaryDirectory() as directory:
       root = Path(directory)

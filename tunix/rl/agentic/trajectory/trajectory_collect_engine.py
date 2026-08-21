@@ -202,9 +202,12 @@ class TrajectoryCollectEngine:
     detail = str(error or "")
     trajectory = self.agent.trajectory
     trajectory.timeout_stage = stage
-    trajectory.timeout_scheduler_reason = (
-        "unschedulable" if "Unschedulable" in detail else ""
-    )
+    if "SchedulingGated" in detail:
+      trajectory.timeout_scheduler_reason = "scheduling_gated"
+    elif "Unschedulable" in detail:
+      trajectory.timeout_scheduler_reason = "unschedulable"
+    else:
+      trajectory.timeout_scheduler_reason = ""
     if "Insufficient cpu" in detail:
       trajectory.timeout_resource = "cpu"
     elif "Insufficient memory" in detail:

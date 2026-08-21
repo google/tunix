@@ -230,6 +230,33 @@ class _LearnerWithException(agentic_grpo_learner.GRPOLearner):
 
 class AgenticGrpoLearnerTest(parameterized.TestCase):
 
+  def test_environment_is_seeded_with_policy_version_before_reset(self):
+    class FakeAgent:
+
+      def __init__(self, **kwargs):
+        self.kwargs = kwargs
+
+    class FakeEnvironment:
+
+      def __init__(self, example, **kwargs):
+        self.example = example
+        self.kwargs = kwargs
+        self.task = {}
+
+    learner = object.__new__(agentic_grpo_learner.GRPOLearner)
+    learner.agent_class = FakeAgent
+    learner.env_class = FakeEnvironment
+    learner.algo_config = types.SimpleNamespace(system_prompt="system")
+    learner.agent_kwargs = {}
+    learner.env_kwargs = {}
+    learner.policy_version = 7
+
+    _, environment = learner._create_agent_env_pair(  # pylint: disable=protected-access
+        {"prompt": "test"}, group_id=3, pair_index=5
+    )
+
+    self.assertEqual(environment.task["policy_version"], 7)
+
   def test_p41_optimizer_benchmark_has_bounded_geometry(self):
     geometry = agentic_rl_learner._segmented_update_geometry({  # pylint: disable=protected-access
         "CANON_P41_OPTIMIZER_BENCH": "1",

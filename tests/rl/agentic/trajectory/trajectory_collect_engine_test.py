@@ -648,6 +648,30 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     self.mock_model_call.assert_not_called()
     self.mock_env.close.assert_called_once()
 
+  def test_reset_scheduling_gate_is_distinct_env_timeout(self):
+    self.mock_env.reset.side_effect = TimeoutError(
+        "Kubernetes pod did not start within 1200s; phase=Pending "
+        "conditions=PodScheduled:False:SchedulingGated:Scheduling is "
+        "blocked due to non-empty scheduling gates"
+    )
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=self.mock_env,
+        model_call=self.mock_model_call,
+        timeout=1.0,
+        cleanup_timeout=0.1,
+    )
+    result = asyncio.run(self._run_collect(engine, mode='Trajectory'))
+
+    self.assertEqual(
+        result.status, agent_types.TrajectoryStatus.ENV_TIMEOUT
+    )
+    self.assertEqual(result.timeout_stage, "sandbox_start")
+    self.assertEqual(result.timeout_scheduler_reason, "scheduling_gated")
+    self.assertEqual(result.timeout_resource, "")
+    self.mock_model_call.assert_not_called()
+    self.mock_env.close.assert_called_once()
+
   def test_final_reward_timeout_is_recorded_and_closes(self):
     self.mock_env.max_steps = 1
     self.mock_env.step.side_effect = [('done', 0.0, True, {})]
