@@ -29,9 +29,11 @@ identities are skipped, so this does not restart washing from zero.
 
 The fixed entrypoint validates all legacy-v5 rows before writing the new resume
 contract, and the renderer refuses either import mode without an explicit
-sampling-source SHA. This repair must be published and read back exactly
-before a remote launch. Full commands, exact error evidence and cardinality
-limits are in `P46_CENSUS_SNAPSHOT_RESUME_INCIDENT.md`.
+sampling-source SHA. Repair implementation
+`f823bb6a9aabf023e651788452d94ff656c827e1` must be present in the freshly
+read-back operator-branch ancestry before a remote launch. Full commands,
+exact error evidence and cardinality limits are in
+`P46_CENSUS_SNAPSHOT_RESUME_INCIDENT.md`.
 
 ## P46.7 breadth-first census and generic v6 handoff
 

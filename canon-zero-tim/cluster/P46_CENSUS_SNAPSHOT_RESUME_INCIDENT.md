@@ -97,12 +97,13 @@ canon.p46.deepswe-eval.trajectory.v5
 stock@ac2c31bc7f6f82d33b3a62d62e1c390c8338b60e
 ```
 
-Render from the exact published repair SHA, not from this uncommitted
-worktree. The concrete node-pool and image digest still come from the current
-allocation:
+Render from implementation commit
+`f823bb6a9aabf023e651788452d94ff656c827e1` only after a fresh fetch proves it
+is in `origin/yuxzhang/canon-zero-tim`. The concrete node-pool and image digest
+still come from the current allocation:
 
 ```bash
-SOURCE_SHA=<exact-published-repair-sha>
+SOURCE_SHA=f823bb6a9aabf023e651788452d94ff656c827e1
 SAMPLING_SOURCE_SHA=ac2c31bc7f6f82d33b3a62d62e1c390c8338b60e
 RUN_ID=p46c128a1
 BASE=canon-zero-tim/cluster/jobset-256cluster-64chip.yaml

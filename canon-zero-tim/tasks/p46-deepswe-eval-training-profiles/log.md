@@ -736,3 +736,16 @@
 - Claim ceiling: this proves CPU resume orchestration, not target PVC I/O,
   Pathways, R2E cleanup, 128-chip throughput or actual imported cardinality.
   No cluster, PVC, commit, push or credential mutation occurred.
+
+## 2026-08-21T01:14:16Z — P46.7 v5 resume implementation commit
+
+- Fresh fetch resolved local base, `FETCH_HEAD`, and
+  `origin/yuxzhang/canon-zero-tim` to exact
+  `91844a412cc288e18574e0812726263930726b12` with divergence `0/0`.
+- Committed the pre-lease legacy-v5 validation, explicit sampler-lineage
+  renderer gate, v5-only environment preflight, 77-case regressions and
+  synchronized incident/runbook/handoff as implementation
+  `f823bb6a9aabf023e651788452d94ff656c827e1`.
+- `main` was neither checked out nor targeted. No cluster, PVC or credential
+  mutation occurred. Remote execution still requires fresh operator-branch
+  ancestry/read-back and separate launch authority.

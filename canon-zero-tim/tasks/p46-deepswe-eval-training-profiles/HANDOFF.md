@@ -26,10 +26,11 @@ The old entrypoint had already written the wrong destination contract;
 
 The local repair validates every sealed legacy-v5 row before claiming a target
 tag and makes any resume import without explicit `--sampling-source-commit`
-a renderer error. It is not published yet. A remote executor must wait for an
-explicitly approved publication, fetch exact
-`origin/yuxzhang/canon-zero-tim`, and use the exact read-back repair SHA.
-Never launch from this worktree or push/modify `main`.
+a renderer error. Its implementation commit is
+`f823bb6a9aabf023e651788452d94ff656c827e1`. A remote executor must fetch exact
+`origin/yuxzhang/canon-zero-tim`, prove that commit is in its ancestry, and
+use the exact implementation SHA shown below. Never launch from this worktree
+or push/modify `main`.
 
 The recovery procedure and exact observed stack are in
 `../../cluster/P46_CENSUS_SNAPSHOT_RESUME_INCIDENT.md`. The required facts are:

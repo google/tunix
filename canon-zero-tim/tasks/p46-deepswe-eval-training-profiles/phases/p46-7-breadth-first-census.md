@@ -1,6 +1,6 @@
 # P46.7 — breadth-first census before strict repair
 
-- Status: census base published as `365b46c1cd150839e3be1fd50adb33325fe3189f`; returned legacy-v5 import incident reproduced; pre-lease repair passes local release gates and is not published
+- Status: census base published as `365b46c1cd150839e3be1fd50adb33325fe3189f`; returned legacy-v5 import incident reproduced; pre-lease repair committed as `f823bb6a9aabf023e651788452d94ff656c827e1` and passes local release gates
 
 ## Trigger
 
