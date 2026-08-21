@@ -132,10 +132,11 @@ reset, while retaining the strict downstream missing-provenance check.
 `SchedulingGated` is now a separate bounded trajectory/W&B dimension. The next
 fresh native full attempt is `p58f02`; do not reuse the p58f01 root.
 
-At this checkpoint that p58f01 repair is local and uncommitted. It must pass
-final diff/readback review, then receive separate user approval for commit and
-push before any remote executor renders p58f02. Do not launch from the older
-operator tip merely because this handoff names the next run-id.
+The p58f01 repair was published as
+`c67e9d5bfa3f1b3b592a2440075eb165e073e6ac`; its first remote readback matched
+exactly with ahead/behind `0/0`. This publication checkpoint advances the
+branch once more, so the executor must fetch and use the final operator tip
+rather than pinning the implementation commit directly.
 
 Never modify or push `main`. The publication target is exclusively
 `yuxzhang/canon-zero-tim`; the implementation is present there.
