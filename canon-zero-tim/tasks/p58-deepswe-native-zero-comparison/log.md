@@ -74,3 +74,15 @@
 - Readback: local HEAD and the remote-tracking operator branch both resolved to `c5bdc9d993dfaf1a6956335609fbf259f9ed95f7`; ahead/behind was `0/0`; the worktree was clean.
 - External effects: one implementation commit and one fast-forward operator-branch push. `main` was untouched. No image, model, credential, YAML render, Kubernetes object, TPU job, or run artifact was created.
 - Next: this documentation-only publication checkpoint will advance the branch once more. The executor must fetch and use the final post-checkpoint remote SHA, then follow section 3N for native only.
+
+## 2026-08-21 UTC — p58c01 bootstrap failure diagnosed and fixed locally
+
+- Type: target failure/implementation/validation
+- Evidence: `evidence/p58c01/run.log`, SHA-256 `f551712696c9c36dbf4f1f2fb713a4c975ff49f2184cf62e887341679341d0bc`. JobSet attempt was explicitly `0`.
+- First failing boundary: `00_env.sh`. The native profile intentionally resolved `CANON_P32_DP_REDUCTION_ADMITTED=0` for the stock JAX-sharded trainer, while the inherited P34 admission loop demanded `1`. The same native stock loop required `CANON_FROZENLAKE_L3=0`, `CANON_FROZENLAKE_P27=0`, and `CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY=0`, but the DeepSWE profile left them unset.
+- Classification: bootstrap `INCONCLUSIVE`. The coordinator stayed on the CPU preflight and exited before repository sync/install, Pathways device probing, model initialization, rollout, trajectory journaling, forward, backward, optimizer, or checkpoint work. It provides no TPU or training evidence.
+- Fix: keep native reduction admission truthfully at `0`; make only the inherited reduction expectation arm-aware; and export the three unrelated FrozenLake zeros in the P58 profile. Do not set native reduction admission to `1`, because that would falsely claim the zero arm's fixed-tree reducer.
+- Regression: added a renderer-to-real-`00_env.sh` test that executes the exact native three-update shell path, requires `P34 contract OK: DP8xTP8`, and verifies the resolved reduction/FrozenLake values. Profile 2/2, environment 2/2, shell syntax, and `git diff --check` pass.
+- Pinned-image result: `P58_EXACT_IMAGE_CPU_PASS loss_oracle=1 weighted_accumulation=1 compact_filter=1 durable_journal=1 paired_renderer=1 alignment_policy=1 regressions=1`.
+- Publication/rollback: fix is uncommitted and unpushed; `main` is untouched. Reverting the four local source/test changes removes the fix, but no rollback was executed.
+- Next: request commit/push approval, then use a new immutable native run-id `p58c02`; never reuse p58c01 and never launch zero under the current decision.

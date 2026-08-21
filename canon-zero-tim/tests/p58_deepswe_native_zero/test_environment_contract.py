@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 import unittest
 
 import yaml
@@ -36,7 +37,7 @@ SPEC.loader.exec_module(renderer)
 
 class P58EnvironmentContractTest(unittest.TestCase):
 
-  def _resolved(self, arm: str, stage: str) -> dict[str, str]:
+  def _rendered_env(self, arm: str, stage: str) -> dict[str, str]:
     base = yaml.safe_load((PKG / "cluster/jobset-64chip.yaml").read_text())
     document = renderer.render(
         base,
@@ -50,8 +51,11 @@ class P58EnvironmentContractTest(unittest.TestCase):
         worker_nodepool="tpu-pool",
         model_pvc="model-pvc",
     )
+    return dict(renderer.p34._env(document))
+
+  def _resolved(self, arm: str, stage: str) -> dict[str, str]:
     supplied = os.environ.copy()
-    supplied.update(renderer.p34._env(document))
+    supplied.update(self._rendered_env(arm, stage))
     command = (
         "set -a; "
         f"source {PKG / 'cluster/profiles/_canonical_engine.env'}; "
@@ -69,6 +73,36 @@ class P58EnvironmentContractTest(unittest.TestCase):
         for item in completed.stdout.decode().split("\0")
         if "=" in item
     }
+
+  def test_native_renderer_environment_passes_real_00_env(self):
+    supplied = os.environ.copy()
+    supplied.update(self._rendered_env("native", "three-update"))
+    supplied.update({
+        "CANON_PKG": str(PKG),
+        "INJECTED_HF_TOKEN": "test-hf-token",
+        "INJECTED_WANDB_API_KEY": "test-wandb-key",
+    })
+    with tempfile.TemporaryDirectory() as state_dir:
+      supplied["CANON_STATE"] = state_dir
+      completed = subprocess.run(
+          ["bash", str(PKG / "cluster/steps/00_env.sh")],
+          cwd=ROOT,
+          env=supplied,
+          check=True,
+          text=True,
+          capture_output=True,
+      )
+      self.assertIn("[env] P34 contract OK: DP8xTP8", completed.stdout)
+      self.assertNotIn("REFUSING TO CONTINUE", completed.stderr)
+      resolved = (Path(state_dir) / "env.sh").read_text()
+      self.assertIn(
+          "export CANON_P32_DP_REDUCTION_ADMITTED=0", resolved
+      )
+      self.assertIn("export CANON_FROZENLAKE_L3=0", resolved)
+      self.assertIn("export CANON_FROZENLAKE_P27=0", resolved)
+      self.assertIn(
+          "export CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY=0", resolved
+      )
 
   def test_both_arms_resolve_to_the_signed_contract(self):
     for arm in ("native", "zero"):

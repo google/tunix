@@ -1270,13 +1270,25 @@ if [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
       fail=1
     }
   done
-  for k in CANON_P32_TRAIN_ADMITTED CANON_P32_DP_REDUCTION_ADMITTED \
-           CANON_P33_WORKLOAD_LAUNCH_ADMITTED; do
+  for k in CANON_P32_TRAIN_ADMITTED CANON_P33_WORKLOAD_LAUNCH_ADMITTED; do
     [ "${!k:-}" = "$p34_admitted" ] || {
       echo "[env] P34 inherited admission mismatch: $k must equal $p34_admitted" >&2
       fail=1
     }
   done
+  p34_reduction_admitted="$p34_admitted"
+  if [ "$P58_NATIVE" = "1" ]; then
+    # Native is intentionally the stock JAX-sharded trainer.  It admits
+    # training, but it must not claim the zero arm's explicit fixed-tree DP
+    # reduction contract.
+    p34_reduction_admitted=0
+  fi
+  [ "${CANON_P32_DP_REDUCTION_ADMITTED:-}" = \
+    "$p34_reduction_admitted" ] || {
+    echo "[env] P34 inherited admission mismatch: CANON_P32_DP_REDUCTION_ADMITTED must equal $p34_reduction_admitted" >&2
+    fail=1
+  }
+  unset p34_reduction_admitted
   if [ "$p34_admitted" = "1" ]; then
     for k in CANON_RUN_ID CANON_RUN_CMD CANON_RUN_LOG CANON_P34_WEIGHT_REPORT \
              CANON_PRE_ALIGN_REPORT \

@@ -40,3 +40,19 @@ B-C drift is `INCONCLUSIVE`/failure under the classifier, never PASS.
 Preserve and package the immutable run before proposing another launch. A
 native canary PASS does not authorize a 1,000-update run and does not reactivate
 zero; either decision requires a new user instruction.
+
+## Attempt history
+
+### p58c01 — bootstrap INCONCLUSIVE
+
+Attempt-0 reached only `00_env.sh` and exited before a Pathways device probe,
+model initialization, rollout, trajectory, backward, or optimizer action. The
+profile correctly kept native stock DP reduction unadmitted, but the inherited
+P34 shell check incorrectly demanded admission `1`; the same stock check
+required three FrozenLake-only zeros that the DeepSWE profile left unset.
+
+The failed run root is immutable and must not be resumed or reused. Its raw log
+is `../evidence/p58c01/run.log`, SHA-256
+`f551712696c9c36dbf4f1f2fb713a4c975ff49f2184cf62e887341679341d0bc`.
+The next attempt is `p58c02` from a newly published fix SHA. This phase remains
+active; p58c01 closed no target gate.

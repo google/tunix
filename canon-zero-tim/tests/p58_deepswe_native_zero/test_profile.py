@@ -31,6 +31,9 @@ printf 'arm=%s dp=%s gen=%s local=%s global=%s warn=%s engine=%s vjp=%s p32=%s l
   "$CANON_DEEPSWE_ALIGNMENT_WARN_ONLY" "$CANON_ENGINE_MODULE_C" \
   "$CANON_RPA_VJP2" "$CANON_P32_TRAIN_ADMITTED" \
   "$CANON_P33_WORKLOAD_LAUNCH_ADMITTED"
+printf 'reduction=%s l3=%s p27=%s flwarn=%s\\n' \
+  "$CANON_P32_DP_REDUCTION_ADMITTED" "$CANON_FROZENLAKE_L3" \
+  "$CANON_FROZENLAKE_P27" "$CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY"
 if [[ -v CANON_FIXED_AR ]]; then printf 'fixed=present\\n'; else printf 'fixed=absent\\n'; fi
 if [[ -v CANON_LOGPROB_M ]]; then printf 'logm=present\\n'; else printf 'logm=absent\\n'; fi
 printf 'xla=%s\\n' "$XLA_FLAGS"
@@ -55,6 +58,7 @@ class P58ProfileTest(unittest.TestCase):
     self.assertIn("fixed=absent", output)
     self.assertIn("logm=absent", output)
     self.assertIn("xla=--xla_cpu_max_isa=AVX2", output)
+    self.assertIn("reduction=0 l3=0 p27=0 flwarn=0", output)
 
   def test_zero_retains_complete_numerical_bundle(self):
     output = _source("zero")
@@ -66,6 +70,7 @@ class P58ProfileTest(unittest.TestCase):
     self.assertIn("fixed=present", output)
     self.assertIn("logm=present", output)
     self.assertIn("--xla_allow_excess_precision=false", output)
+    self.assertIn("reduction=1 l3=0 p27=0 flwarn=0", output)
 
 
 if __name__ == "__main__":

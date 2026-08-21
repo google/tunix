@@ -21,6 +21,12 @@ canary. The optional one-host phase was explicitly waived, not passed. Zero is
 deferred while its optimization work continues and must not be rendered or
 applied. A native result cannot be reported as a paired comparison.
 
+Attempt history: native `p58c01` Attempt-0 failed in `00_env.sh` before any
+TPU program because the stock reduction admission was checked as canonical and
+three FrozenLake-only zeros were unset. The failed root is immutable and has no
+resumable trajectory state. Use only a published fix SHA and fresh run-id
+`p58c02`; never reuse the p58c01 YAML or root.
+
 ## 1. Frozen recipe
 
 | Field | Value |
@@ -112,7 +118,7 @@ CLIENT_IMAGE_DIGEST='registry.example/tunix@sha256:<64-hex-digest>'
 CPU_NODEPOOL='deepswe-cpu-pool'
 TPU_NODEPOOL='<4x4x8-v5p-nodepool>'
 MODEL_PVC='haoyugao-cpu-np-pvc'
-RUN_STEM='p58c01'
+RUN_STEM='p58c02'
 STAGE='three-update'
 
 ARM='native'
