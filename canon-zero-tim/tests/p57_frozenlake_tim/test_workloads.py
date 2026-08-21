@@ -3,12 +3,28 @@
 from __future__ import annotations
 
 import copy
+from pathlib import Path
 import unittest
 
 from examples.frozenlake import p57_workloads
 
 
 class P57WorkloadsTest(unittest.TestCase):
+
+  def test_generation_contract_is_shared_with_real_workload_entrypoint(self):
+    self.assertEqual(p57_workloads.GENERATIONS_PER_PROMPT, 8)
+    entrypoint = (
+        Path(__file__).resolve().parents[3]
+        / "examples/frozenlake/train_frozenlake_qwen3.py"
+    ).read_text()
+    self.assertIn(
+        "p57_workloads.GENERATIONS_PER_PROMPT if CANON_P57_RUN_KIND else 8",
+        entrypoint,
+    )
+    self.assertNotIn(
+        "expected_generations = 2 if CANON_P57_EVALUATION else 8",
+        entrypoint,
+    )
 
   def test_registered_recipe_table(self):
     self.assertEqual(tuple(p57_workloads.RECIPES), ("l0", "m10", "m15", "m20"))

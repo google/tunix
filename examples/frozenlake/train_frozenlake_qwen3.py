@@ -468,6 +468,14 @@ MINI_BATCH_SIZE = args.mini_batch_size
 NUM_BATCHES = args.num_batches
 if CANON_P32_WORKLOAD:
   assert P32_WORKLOAD is not None
+  # P57 uses one complete eight-row prompt group in every run kind.  In
+  # particular, isolated evaluation retains trainer-side rescore, whose
+  # caller-global row axis is sharded over DP8.  Keep this tied to the same
+  # registry consumed by the renderer instead of maintaining a second
+  # evaluation-only literal here.
+  expected_generations = (
+      p57_workloads.GENERATIONS_PER_PROMPT if CANON_P57_RUN_KIND else 8
+  )
   if CANON_P57_CALIBRATION:
     # All recipes share one physical envelope. Their smaller preregistered
     # context caps are applied by the offline classifier to observed lengths,
@@ -477,13 +485,11 @@ if CANON_P32_WORKLOAD:
     expected_env_steps = max(
         spec.max_turns for spec in p57_workloads.RECIPES.values()
     )
-    expected_generations = 8
     expected_temperature = 0.7
   elif p57_workload_spec is not None:
     expected_prompt_length = 4096
     expected_response_length = p57_workload_spec.context_hard_cap - 4096
     expected_env_steps = p57_workload_spec.max_turns
-    expected_generations = 2 if CANON_P57_EVALUATION else 8
     expected_temperature = 0.0 if CANON_P57_EVALUATION else 0.7
   else:
     expected_prompt_length = 4096
@@ -493,7 +499,6 @@ if CANON_P32_WORKLOAD:
         if p57_workload_spec is not None
         else (2 if CANON_P33_SHORT_ALIGNMENT else 5)
     )
-    expected_generations = 2 if CANON_P57_EVALUATION else 8
     expected_temperature = 0.0 if CANON_P57_EVALUATION else 0.7
   # The P38 serving-capture job is a pre-backward diagnostic. It consumes four
   # prompt groups so the first diagnostic batch is 4 x 8 = 32 trajectories,

@@ -177,3 +177,14 @@
 - Downside: each isolated evaluation now runs 800 deterministic trajectories instead of 200. Capability remains map-level; the eight replicas are not independent samples.
 - Rollback: revert the uncommitted DP8 evaluation-row concern; published source remains at the attempt-2 failure behavior.
 - Next: review and separately approve commit/push. Relaunch a fresh eval-0 in `new` mode from the new immutable SHA; do not resume attempts 1 or 2 and do not launch training before the 100-map/800-reward classifier passes.
+
+## 2026-08-21 UTC — eval-0 attempt 3 exposed stale entrypoint geometry admission
+
+- Type: target failure/correction/evidence
+- Fact: `p57_eval0_att3` used source `8acfe784b6fa8eacb8eb4e41406dd6681173f9c7`. Its resolved environment and command both carried `num_generations=8`, but the process stopped before model load with `P32 FrozenLake geometry mismatch: {'num_generations': 8}`. The committed `run.log` has 76 lines and SHA-256 `b4c5bd426b1b23224e1becfd43dfe18dc5f239d2f59916e06dde1927117d9e6e`; `env.sh` SHA-256 is `c3efb8229c5b1dd90a935b4c22ad0ffab6c443a77f7503a4fc663e36b1429c77`. There is no complete terminal package or evaluation receipt, so the run is analysis-grade `INCONCLUSIVE`.
+- Cause: the DP8 repair updated the renderer, profile, classifier, and evaluator lifecycle, but missed the real workload entrypoint's older `expected_generations = 2 if CANON_P57_EVALUATION else 8` assertion. Existing tests proved the outer contract without exercising that inner admission line.
+- Action: added `p57_workloads.GENERATIONS_PER_PROMPT=8`, made both the renderer and real entrypoint consume it, and added a regression that rejects the obsolete conditional in the actual entrypoint source.
+- Command: `bash canon-zero-tim/tests/p57_frozenlake_tim/run_cpu.sh`; `bash canon-zero-tim/tests/p45_frozenlake_dp8_tp8/run_exact_image.sh`; Python syntax checks; `git diff --check`.
+- Result: host suite `90/90` PASS with `P57_FROZENLAKE_TIM_CPU_PASS`. The pinned-image gate matched all 34 Qwen3-8B TP8 overlay files, passed base `110/110`, P45 `40/40`, PEFT `2/2`, Agentic `4/4`, all stock runtime modes and negatives, fixed-head/TP8 probes, and ended `P45_EXACT_IMAGE_CPU_PASS overlay=qwen8b_tp8`. No 64-chip target rerun was performed.
+- Downside: none beyond the already approved eight-generation evaluation cost; training, calibration, and rendered evaluation counts remain eight.
+- Next: review and separately approve commit/push. Then launch a new eval-0 attempt in `new` mode from the new immutable SHA; attempts 1–3 are not resumable.

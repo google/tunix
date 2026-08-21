@@ -48,6 +48,14 @@ deterministic generations: caller-global M=8, shard-local M=1, semantic rows=8,
 and the same DP8xTP8 trainer program. Do not resume attempts 1 or 2. After this
 repair is published, render a fresh eval-0 in `new` mode from its immutable SHA.
 
+`p57_eval0_att3` is likewise not an evaluation result. Source `8acfe784...`
+rendered eight generations correctly, but the real workload entrypoint retained
+an older `eval ? 2 : 8` P32 geometry assertion and rejected the rendered value
+before model load. The repair moves the P57 count to one
+`GENERATIONS_PER_PROMPT=8` registry value consumed by both renderer and
+entrypoint. Do not resume attempt 3; after publication, use a new run id and
+checkpoint mode `new`.
+
 ## Treatment identity
 
 The stock arm is not merely `CANON_P38_FIXED_LM_HEAD=0`. It requires:
@@ -104,7 +112,7 @@ For stock eval-0 and later stock evaluations, require:
 ~~~
 
 The COMPLETE marker must report `prompts=100 generations=8 rewards=800`.
-Local admission is complete: P57 host tests pass `89/89`, and the pinned-image
+Local admission is complete: P57 host tests pass `90/90`, and the pinned-image
 gate executes the eight-generation evaluator lifecycle plus calibration/train/
 eval stock modes and all registered negatives before ending
 `P45_EXACT_IMAGE_CPU_PASS overlay=qwen8b_tp8`. This is not target evidence.

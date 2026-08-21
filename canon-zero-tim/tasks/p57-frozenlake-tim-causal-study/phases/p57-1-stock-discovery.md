@@ -72,6 +72,12 @@ are coverage replicas, not independent map samples. LatestN(1) means pausing at
 each registered boundary, evaluating, and resuming with the original final
 horizon of 200.
 
+Eval-0 attempts 1–3 remain `INCONCLUSIVE`: leaf runtime admission, DP8 row
+divisibility, and finally a stale workload-entrypoint geometry assertion each
+stopped before a complete receipt. The current repair makes the renderer and
+real entrypoint share `GENERATIONS_PER_PROMPT=8`; no target result is inferred
+from the local admission gates.
+
 The physical envelope is prompt 4,096 plus response 8,192. Training uses
 DP8xTP8, resident optimizer state, batch 32, eight generations, trajectory
 mini/micro 32/8, AdamW `1e-6`, GSPO-token/RLOO, and temperature 0.7. No

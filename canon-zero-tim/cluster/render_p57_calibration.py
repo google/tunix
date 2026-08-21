@@ -30,7 +30,7 @@ _MEMORY = "350G"
 _PHYSICAL_CONTEXT = 16_384
 _RECIPES = ("m10", "m15", "m20")
 _MODE = "stochastic"
-_GENERATIONS = 8
+_GENERATIONS = p57_workloads.GENERATIONS_PER_PROMPT
 _TEMPERATURE = "0.7"
 _SCRIPT_ENTRYPOINT = (
     "python3", "-u", "examples/frozenlake/train_frozenlake_qwen3.py"

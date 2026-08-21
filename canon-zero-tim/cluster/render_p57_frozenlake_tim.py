@@ -32,7 +32,7 @@ _BASE_MEMORY = "200G"
 _P57_MEMORY = "350G"
 _DP_SIZE = 8
 _TP_SIZE = 8
-_EVAL_GENERATIONS = 8
+_EVAL_GENERATIONS = p57_workloads.GENERATIONS_PER_PROMPT
 _SCRIPT_ENTRYPOINT = (
     "python3", "-u", "examples/frozenlake/train_frozenlake_qwen3.py"
 )

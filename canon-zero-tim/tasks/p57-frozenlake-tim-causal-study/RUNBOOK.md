@@ -90,6 +90,10 @@ all 800 rewards must be present. Do not reduce `--num_generations`: attempt 2
 proved that a global row count of 2 cannot enter the DP8 Splash Attention
 program. The classifier requires all eight greedy rewards for each map to be
 identical and computes capability from the resulting 100 map-level values.
+Attempt 3 proved that renderer/profile checks alone are insufficient: the real
+workload entrypoint must consume the same registered generation count. Before
+launch, the host gate must report at least 90 tests and include
+`test_generation_contract_is_shared_with_real_workload_entrypoint`.
 
 ## First stock training segment: 0→50
 

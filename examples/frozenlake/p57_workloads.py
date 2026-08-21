@@ -49,6 +49,11 @@ RECIPES = {
     )
 }
 
+# Every P57 prompt produces one complete DP8 row group.  This is shared by
+# calibration, training, and isolated evaluation: the evaluation rescore maps
+# this caller-global row axis over DP8, so a smaller count is not admissible.
+GENERATIONS_PER_PROMPT = 8
+
 # Calibration and final paired-study data are deliberately disjoint.
 _SPLIT_SEEDS = {
     "calibration": {"train": 57_000_000, "eval": 57_100_000},

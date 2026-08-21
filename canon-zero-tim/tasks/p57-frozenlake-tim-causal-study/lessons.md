@@ -22,3 +22,7 @@
   mesh contract. On DP8, a generation group of two is not a legal global row
   shape even if GRPO itself accepts two; gate generation count against the DP
   divisor before rendering.
+- A renderer/profile contract does not certify the real workload entrypoint.
+  Store cross-layer geometry in one imported registry value and make the host
+  gate inspect the actual entrypoint wiring; otherwise both outer gates can
+  agree while a stale inner assertion rejects the target command.
