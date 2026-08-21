@@ -158,7 +158,9 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         **(route_metadata or {}),
         **(kwargs.get("metadata") or {}),
     }
-    gen_kwargs = generation_args.as_kwargs() if generation_args else {}
+    base_generation_kwargs = (
+        generation_args.as_kwargs() if generation_args else {}
+    )
     version = kwargs.get("policy_version", policy_version)
 
     rollout_reqs: list[datatypes.RolloutRequest] = []
@@ -166,6 +168,14 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       if isinstance(p, datatypes.RolloutRequest):
         rollout_reqs.append(p)
         continue
+
+      item_metadata = dict(getattr(p, "metadata", {}) or {})
+      item_generation_kwargs = dict(getattr(p, "generation_kwargs", {}) or {})
+      if isinstance(p, Mapping):
+        item_metadata.update(dict(p.get("metadata", {}) or {}))
+        item_generation_kwargs.update(
+            dict(p.get("generation_kwargs", {}) or {})
+        )
 
       prompt_id = getattr(p, "prompt_id", None) or (
           p.get("prompt_id") if isinstance(p, dict) else None
@@ -180,23 +190,44 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       group_id = str(
           getattr(p, "group_id", None)
           or (p.get("group_id") if isinstance(p, dict) else None)
+          or item_metadata.get("group_id")
           or prompt_id
       )
-      raw_prompt = p.get("prompt", p) if isinstance(p, dict) else p
+      raw_prompt = (
+          p.get("prompt", p)
+          if isinstance(p, Mapping)
+          else getattr(p, "prompt", p)
+      )
+      max_turns = getattr(p, "max_turns", 10)
+      if isinstance(p, Mapping):
+        max_turns = p.get("max_turns", max_turns)
 
       for g_idx in range(group_size):
+        request_metadata = dict(base_metadata)
+        request_metadata.update(item_metadata)
+        request_metadata["group_id"] = group_id
+        request_metadata["pair_index"] = g_idx
+        request_metadata.setdefault("prefix_hash", group_id)
+        if isinstance(request_metadata.get("env_config"), Mapping):
+          env_config = dict(request_metadata["env_config"])
+          env_config.setdefault("group_id", group_id)
+          env_config["pair_index"] = g_idx
+          env_config["policy_version"] = version
+          request_metadata["env_config"] = env_config
+
+        generation_kwargs = dict(base_generation_kwargs)
+        generation_kwargs.update(item_generation_kwargs)
+
         rollout_reqs.append(
             datatypes.RolloutRequest(
                 request_id=f"req_{prompt_id}_{g_idx}_v{version}",
                 prompt=raw_prompt,
                 prompt_id=prompt_id,
+                group_offset_id=str(g_idx),
                 target_policy_version=version,
-                generation_kwargs=gen_kwargs,
-                metadata={
-                    **base_metadata,
-                    "group_id": group_id,
-                    "pair_index": g_idx,
-                },
+                generation_kwargs=generation_kwargs,
+                max_turns=max_turns,
+                metadata=request_metadata,
             )
         )
 
@@ -210,9 +241,10 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       return []
 
     async def _poll_worker(worker: remote_execution.ActorHandle) -> Any:
-      return await self._invoke_worker(
-          worker, "poll_responses", timeout_s=timeout_s
-      )
+      res = worker.poll_responses(timeout_s=timeout_s)
+      if inspect.isawaitable(res):
+        return await res
+      return res
 
     tasks = [_poll_worker(w) for w in self._rollout_workers]
     responses = await asyncio.gather(*tasks, return_exceptions=True)

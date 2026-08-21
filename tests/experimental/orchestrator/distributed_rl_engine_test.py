@@ -349,6 +349,12 @@ class DistributedRLEngineTest(absltest.TestCase):
           "prompt": "Solve math",
           "prompt_id": "math_1",
           "group_id": "grp_1",
+          "generation_kwargs": {"max_generation_steps": 32},
+          "metadata": {
+              "group_id": "grp_1",
+              "pair_index": 99,
+              "env_config": {"gold_answer": "42"},
+          },
       }
       req_ids = await self.engine.dispatch_rollouts(
           [dict_item], group_size=2, policy_version=1
@@ -364,8 +370,25 @@ class DistributedRLEngineTest(absltest.TestCase):
       pair_indices = {r.metadata["pair_index"] for r in all_dispatched}
       self.assertEqual(pair_indices, {0, 1})
       self.assertTrue(all(r.prompt_id == "math_1" for r in all_dispatched))
+      self.assertTrue(all(r.prompt == "Solve math" for r in all_dispatched))
+      self.assertTrue(
+          all(
+              r.generation_kwargs == {"max_generation_steps": 32}
+              for r in all_dispatched
+          )
+      )
       self.assertTrue(
           all(r.metadata["group_id"] == "grp_1" for r in all_dispatched)
+      )
+      self.assertEqual(
+          {r.metadata["env_config"]["pair_index"] for r in all_dispatched},
+          {0, 1},
+      )
+      self.assertTrue(
+          all(
+              r.metadata["env_config"]["policy_version"] == 1
+              for r in all_dispatched
+          )
       )
 
     asyncio.run(_run())

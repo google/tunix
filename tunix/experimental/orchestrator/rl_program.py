@@ -96,6 +96,8 @@ class StandardRLProgram(RLProgram):
       on_step_end: Callable[[int, Any], None] | None = None,
   ):
     super().__init__()
+    if max_staleness is not None and max_staleness < 0:
+      raise ValueError("max_staleness must be non-negative or None.")
     self.dataset = dataset
     self.algo = algo
     self.reward_fns = list(reward_fns) if reward_fns else []
@@ -104,6 +106,7 @@ class StandardRLProgram(RLProgram):
     self.assembler = assembler or batch_assembly.SequencePackedBatchAssembler(
         max_packed_len=getattr(algo, "max_packed_len", 8192)
     )
+    self.max_staleness = max_staleness
     self.sync_weights = sync_weights
     self.on_step_begin = on_step_begin
     self.on_step_end = on_step_end
@@ -116,6 +119,17 @@ class StandardRLProgram(RLProgram):
     self.scored_q = trajectory_queue_manager.TrajectoryQueueManager.create(
         group_size=self.group_size
     )
+
+  async def _wait_for_dispatch_window(self, prompt_idx: int) -> None:
+    """Applies policy-staleness backpressure before dispatching a prompt group."""
+    if self.max_staleness is None:
+      return
+    max_groups_ahead = self.mini_batch_size * (self.max_staleness + 1)
+    while (
+        prompt_idx - self.policy_version * self.mini_batch_size
+        >= max_groups_ahead
+    ):
+      await asyncio.sleep(0.05)
 
   async def rollout_dispatch_stage(
       self,
@@ -131,6 +145,7 @@ class StandardRLProgram(RLProgram):
           "StandardRLProgram requires a dataset either at init or in run()."
       )
     for prompt_idx, prompt_item in enumerate(active_dataset):
+      await self._wait_for_dispatch_window(prompt_idx)
       if isinstance(prompt_item, dict):
         prompt_item = dict(prompt_item)
         prompt_item.setdefault("prompt_id", f"prompt_{prompt_idx}")
@@ -253,13 +268,15 @@ class StandardRLProgram(RLProgram):
           microbatches = scored_microbatches
 
         num_microbatches += len(microbatches)
-        is_final = group_idx == self.mini_batch_size - 1
-        for batch in microbatches:
+        is_final_group = group_idx == self.mini_batch_size - 1
+        for batch_idx, batch in enumerate(microbatches):
           step_result = await engine.train_step(
               batch,
               role=datatypes.Role.ACTOR,
               accumulate_gradients=True,
-              apply_optimizer=is_final,
+              apply_optimizer=(
+                  is_final_group and batch_idx == len(microbatches) - 1
+              ),
           )
 
       if self.sync_weights:

@@ -40,7 +40,7 @@ class AbstractRLEngine(Protocol):
       route_metadata: Mapping[str, Any] | None = None,
       **kwargs: Any,
   ) -> list[str]:
-    """Dispatches rollout requests across workers (expanding group_size and constructing RolloutRequests internally if needed)."""
+    """Expands prompt groups into RolloutRequests and dispatches them."""
     ...
 
   async def poll_rollouts(
