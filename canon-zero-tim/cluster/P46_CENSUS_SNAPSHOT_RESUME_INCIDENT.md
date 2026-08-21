@@ -103,21 +103,20 @@ canon.p46.deepswe-eval.trajectory.v5
 stock@ac2c31bc7f6f82d33b3a62d62e1c390c8338b60e
 ```
 
-The old `f823bb6a` pin is superseded. The sealed-contract repair is currently an
-uncommitted local candidate based on `6c3ab1f2`; do not launch either SHA.
-After explicit publication, substitute the exact 40-character read-back
-operator-branch SHA below. The concrete node-pool and image digest still come
-from the current allocation:
+The old `f823bb6a` pin is superseded. Sealed-contract implementation
+`9cebe0d1671f6da1748bc53ed0da07a5f970fb37` is the mandatory ancestry gate.
+Use the exact freshly read-back operator-branch HEAD as the source SHA. The
+concrete node-pool and image digest still come from the current allocation:
 
 ```bash
-SOURCE_SHA=replace-with-published-sealed-contract-repair-sha
+IMPLEMENTATION_SHA=9cebe0d1671f6da1748bc53ed0da07a5f970fb37
 RUN_ID=p46c128a1
 BASE=canon-zero-tim/cluster/jobset-256cluster-64chip.yaml
 
-[[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
 git fetch origin yuxzhang/canon-zero-tim
-git merge-base --is-ancestor "$SOURCE_SHA" FETCH_HEAD
-test "$(git rev-parse "$SOURCE_SHA^{commit}")" = "$SOURCE_SHA"
+git merge-base --is-ancestor "$IMPLEMENTATION_SHA" FETCH_HEAD
+SOURCE_SHA=$(git rev-parse FETCH_HEAD)
+[[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
 
 python3 canon-zero-tim/cluster/render_p46_deepswe_profiles.py \
   --base "$BASE" \

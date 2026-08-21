@@ -3,14 +3,12 @@
 ## Current status
 
 The next Q4 target run is the complete data-washing campaign, not another
-standalone `l0/p0` smoke. The current local candidate adds a SHA-sealed
-`legacy_source_contract.json` on top of
-`6c3ab1f2d2ffeaf47667c07fc4151532574e6279`. It is not committed or published
-yet. Therefore a remote executor may inspect the terminal source and prepare a
-fresh staging copy, but must not render/apply until the operator branch
-contains the final repair and its exact 40-character SHA has been fetched and
-read back. Never substitute the older `f823bb6a` or `6c3ab1f2` as the launch
-pin, and never modify or push `main`.
+standalone `l0/p0` smoke. Sealed legacy-source-contract implementation commit
+`9cebe0d1671f6da1748bc53ed0da07a5f970fb37` is the mandatory ancestry gate.
+A remote executor must fetch `origin/yuxzhang/canon-zero-tim`, require that
+commit in `FETCH_HEAD` ancestry, and use the exact freshly read-back branch
+HEAD as the launch `--source-commit`. Never substitute the older `f823bb6a` or
+`6c3ab1f2`, and never modify or push `main`.
 
 No cluster launch is authorized by this handoff alone. Render/dry-run/apply only
 within the operator's explicit instruction.
@@ -272,7 +270,7 @@ v6 trajectory evidence.
 The first adoption manifest must use exactly:
 
 ```text
---source-commit <exact published sealed-contract repair SHA>
+--source-commit <exact freshly read-back operator-branch HEAD containing 9cebe0d1>
 --sampling-source-commit 18d5d2ac1603a26a221af9d5fc430b084ec002df
 --legacy-import-id p46e12805
 --resume-tag <fresh stable tag>

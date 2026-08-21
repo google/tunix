@@ -784,3 +784,14 @@
   phase. Remote execution is explicitly blocked until this candidate is
   committed/pushed under separate authority and read back by exact operator
   SHA. No commit, push, cluster, PVC, credential or `main` mutation occurred.
+
+## 2026-08-21T02:49:00Z — sealed-contract implementation publication
+
+- Under explicit user commit/push authority, created implementation commit
+  `9cebe0d1671f6da1748bc53ed0da07a5f970fb37` on exact remote base
+  `6c3ab1f2d2ffeaf47667c07fc4151532574e6279` after fetch proved divergence
+  `0/0`.
+- Updated operator documents to require `9cebe0d1` in freshly fetched branch
+  ancestry while using the exact read-back branch HEAD as launch source SHA.
+- Publication targets only `yuxzhang/canon-zero-tim`. No cluster, PVC,
+  credential or `main` mutation is authorized or performed by this checkpoint.

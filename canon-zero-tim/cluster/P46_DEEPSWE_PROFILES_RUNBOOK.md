@@ -39,12 +39,11 @@ before the destination resume contract and before TPU initialization.
 
 The earlier `6c3ab1f2d2ffeaf47667c07fc4151532574e6279` compatibility change is not
 an execution pin: it accepted arbitrary well-formed fingerprints and did not
-bind run tags. The sealed-contract repair is currently an uncommitted local
-candidate based on that HEAD. A remote executor may prepare and inspect a
-staging copy now, but must not render/apply from this paragraph until the
-repair is committed, pushed only to `yuxzhang/canon-zero-tim`, and read back as
-an exact 40-character operator-branch SHA. Substitute that published SHA for
-`HARNESS_SHA` in the command below; never fall back to `f823bb6a` or `6c3ab1f2`.
+bind run tags. Sealed-contract implementation
+`9cebe0d1671f6da1748bc53ed0da07a5f970fb37` is the mandatory ancestry gate.
+A remote executor must freshly fetch `yuxzhang/canon-zero-tim`, require that
+implementation in `FETCH_HEAD` ancestry, and use the exact read-back branch
+HEAD as `HARNESS_SHA`; never fall back to `f823bb6a` or `6c3ab1f2`.
 Full commands, exact error evidence and cardinality limits are in
 `P46_CENSUS_SNAPSHOT_RESUME_INCIDENT.md`.
 
@@ -734,13 +733,13 @@ resume-capable launch pins the new harness commit separately from the old
 sampling lineage and performs the import before model initialization:
 
 ```bash
-HARNESS_SHA=replace-with-published-sealed-contract-repair-sha
+IMPLEMENTATION_SHA=9cebe0d1671f6da1748bc53ed0da07a5f970fb37
 RUN_ID=p46r01a0
 
-[[ "$HARNESS_SHA" =~ ^[0-9a-f]{40}$ ]]
 git fetch origin yuxzhang/canon-zero-tim
-git merge-base --is-ancestor "$HARNESS_SHA" FETCH_HEAD
-test "$(git rev-parse "$HARNESS_SHA^{commit}")" = "$HARNESS_SHA"
+git merge-base --is-ancestor "$IMPLEMENTATION_SHA" FETCH_HEAD
+HARNESS_SHA=$(git rev-parse FETCH_HEAD)
+[[ "$HARNESS_SHA" =~ ^[0-9a-f]{40}$ ]]
 
 python3 canon-zero-tim/cluster/render_p46_deepswe_profiles.py \
   --base "$BASE" \

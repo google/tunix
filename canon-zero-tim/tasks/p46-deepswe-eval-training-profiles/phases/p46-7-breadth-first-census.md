@@ -1,6 +1,6 @@
 # P46.7 — breadth-first census before strict repair
 
-- Status: census base published as `365b46c1cd150839e3be1fd50adb33325fe3189f`; returned legacy-v5 import incident reproduced; sealed legacy-source-contract repair is an uncommitted candidate on `6c3ab1f2d2ffeaf47667c07fc4151532574e6279` and passes 79 P46 CPU cases
+- Status: census base published as `365b46c1cd150839e3be1fd50adb33325fe3189f`; returned legacy-v5 import incident reproduced; sealed legacy-source-contract implementation is `9cebe0d1671f6da1748bc53ed0da07a5f970fb37` and passes 79 P46 CPU cases plus adjacent gates; target census pending
 
 ## Trigger
 
