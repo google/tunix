@@ -25,6 +25,10 @@ class P57WorkloadsTest(unittest.TestCase):
         "expected_generations = 2 if CANON_P57_EVALUATION else 8",
         entrypoint,
     )
+    self.assertIn(
+        'next_action = "complete" if completed_step == MAX_STEPS else "isolated-eval"',
+        entrypoint,
+    )
 
   def test_registered_recipe_table(self):
     self.assertEqual(tuple(p57_workloads.RECIPES), ("l0", "m10", "m15", "m20"))

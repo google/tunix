@@ -1784,10 +1784,11 @@ if CANON_P57_STOCK_TRAIN:
         f"completed={completed_step} durable={durable_step} "
         f"expected={P57_STOP_AFTER_STEP}"
     )
+  next_action = "complete" if completed_step == MAX_STEPS else "isolated-eval"
   print(
       "[P57.STOCK] SEGMENT_COMPLETE "
       f"step={completed_step} durable_checkpoint={durable_step} "
-      f"horizon={MAX_STEPS} next_action=isolated-eval",
+      f"horizon={MAX_STEPS} next_action={next_action}",
       flush=True,
   )
 if CANON_P31_CONVERGENCE:

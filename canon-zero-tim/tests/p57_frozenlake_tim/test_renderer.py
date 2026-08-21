@@ -394,6 +394,32 @@ class P57RendererTest(unittest.TestCase):
         eval_preflight.stdout,
     )
 
+  def test_stock_discovery_defaults_to_one_full_horizon_run(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      path = paired.render_all(
+          base_path=BASE,
+          output_dir=Path(tmp),
+          source_commit="a" * 40,
+          run_id="p57stockfull",
+          campaign_tag="p57-m15-selection",
+          checkpoint_mode="new",
+          expected_updates=200,
+          run_kind="train",
+          workload_candidate="m15",
+          data_split="selection",
+          stock_only=True,
+      )[0]
+      env = _env(yaml.safe_load(path.read_text()))
+      preflight = _run_env_preflight(env, Path(tmp) / "state")
+    self.assertEqual(env["CANON_P57_STOP_AFTER_STEP"], "200")
+    self.assertIn("--max_steps=200", env["CANON_RUN_CMD"])
+    self.assertNotIn("--evaluation_only", env["CANON_RUN_CMD"])
+    self.assertEqual(preflight.returncode, 0, preflight.stderr)
+    self.assertIn(
+        "[P57.STOCK_FAST] ZERO_TIM_OFF_PASS mode=train absent=12 observer=train",
+        preflight.stdout,
+    )
+
   def test_eval_rejects_generation_count_not_divisible_by_dp(self):
     with mock.patch.object(paired, "_EVAL_GENERATIONS", 2), self.assertRaisesRegex(
         ValueError, "generations must be divisible by the trainer DP axis"

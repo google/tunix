@@ -188,3 +188,13 @@
 - Result: host suite `90/90` PASS with `P57_FROZENLAKE_TIM_CPU_PASS`. The pinned-image gate matched all 34 Qwen3-8B TP8 overlay files, passed base `110/110`, P45 `40/40`, PEFT `2/2`, Agentic `4/4`, all stock runtime modes and negatives, fixed-head/TP8 probes, and ended `P45_EXACT_IMAGE_CPU_PASS overlay=qwen8b_tp8`. No 64-chip target rerun was performed.
 - Downside: none beyond the already approved eight-generation evaluation cost; training, calibration, and rendered evaluation counts remain eight.
 - Next: review and separately approve commit/push. Then launch a new eval-0 attempt in `new` mode from the new immutable SHA; attempts 1–3 are not resumable.
+
+## 2026-08-21 UTC — P57.1 changed to one direct stock 0→200 run
+
+- Type: user decision / plan correction
+- Fact: three eval-0 startup attempts consumed launch time without producing a scientific receipt. Source `7b55f6f2...` publishes the repaired eight-generation contract, but the user chose not to spend another launch on baseline or intermediate held-out evaluations during stock workload discovery.
+- Decision: launch one uninterrupted mismatch/stock-fast M15 `selection` training JobSet from update 0 through 200. Do not run eval-0 and do not intentionally pause at 50/100/150. Ten-step LatestN(1) checkpoints remain enabled only for infrastructure recovery. An isolated eval-200 is optional after the training curve completes.
+- Claim change: P57.1 freezes or rejects the recipe using the preregistered trailing on-policy training solve statistic and treatment/trajectory-health receipts. It no longer claims held-out improvement from a same-split eval-0 or held-out AUC for the discovery curve. The later paired causal campaign must separately preregister an equal evaluation schedule for both arms.
+- Action: updated the direct-run handoff/runbook/phase/state; added a renderer regression proving the default stock train resolves to stop 200 without `--evaluation_only`; changed the terminal marker to `next_action=complete` at the signed horizon while retaining `isolated-eval` for a nonterminal recovery segment.
+- Downside: less held-out information during workload discovery and no same-split initial baseline. The benefit is one launch instead of eval/train segmentation.
+- Next: pass local gates, then seek separate commit/push and TPU launch approval. The intended manifest is `checkpoint_mode=new`, `run_kind=train`, horizon/stop 200.

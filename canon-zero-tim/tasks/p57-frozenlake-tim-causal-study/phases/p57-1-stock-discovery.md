@@ -59,34 +59,36 @@ unchanged classifier returned `PASS / FREEZE_M15`. M15 measured 24.625% solve,
 56% mixed/nonzero-advantage groups, context max 7,403, completion max 6,223,
 and zero cap hits.
 
-The full-bundle stock/mismatch training and evaluation paths are now
+The full-bundle stock/mismatch training and optional evaluation paths are now
 fail-closed: the profile and entrypoint skip the canonical overlay, validators
 require the complete numerical bundle off, and runtime postflight requires
 zero canonical markers. M15 is rebuilt from immutable base weights on its
 disjoint `selection` maps and trained for 200 signed updates.
-There is no train-20 screen. Independent held-out evaluations occur at updates
-0, 50, 100, 150, and 200. Each evaluates 100 maps with eight deterministic
-generations. Eight is the minimum admitted global row count for trainer-side
-rescore on DP8 (global M=8, shard-local M=1); the repeated greedy generations
-are coverage replicas, not independent map samples. LatestN(1) means pausing at
-each registered boundary, evaluating, and resuming with the original final
-horizon of 200.
+There is no train-20 screen. By user decision on 2026-08-21, P57.1 runs one
+uninterrupted stock/mismatch JobSet from update 0 through 200. It does not run
+eval-0 and does not pause at updates 50/100/150. Checkpoints remain every 10
+updates with LatestN(1), but serve only infrastructure recovery. The discovery
+curve is the signed on-policy training trajectory. An isolated eval-200 remains
+optional after completion and is not a prerequisite for launching training.
 
 Eval-0 attempts 1–3 remain `INCONCLUSIVE`: leaf runtime admission, DP8 row
 divisibility, and finally a stale workload-entrypoint geometry assertion each
 stopped before a complete receipt. The current repair makes the renderer and
 real entrypoint share `GENERATIONS_PER_PROMPT=8`; no target result is inferred
-from the local admission gates.
+from the local admission gates. They are preserved but no fourth attempt is
+required under the direct-run decision.
 
 The physical envelope is prompt 4,096 plus response 8,192. Training uses
 DP8xTP8, resident optimizer state, batch 32, eight generations, trajectory
 mini/micro 32/8, AdamW `1e-6`, GSPO-token/RLOO, and temperature 0.7. No
 in-process evaluation is admitted.
 
-Automatic freeze requires update-200 solve 60–70% and at least 15 percentage
-points improvement from update 0. The 55–75% range is a review guardrail;
-outside it is floor/ceiling. Only after freeze is the unseen `main` split signed
-and the zero arm unblinded.
+Automatic freeze requires the preregistered trailing update-200 on-policy solve
+statistic to be 60–70%, with finite mismatch dose, valid B-C/structural gates,
+and no cap/truncation failure. Without a same-split eval-0, this phase makes no
+held-out improvement-from-baseline claim. The 55–75% range is a review
+guardrail; outside it is floor/ceiling. Only after freeze is the unseen `main`
+split signed and the zero arm unblinded.
 
 ## Exit gate
 

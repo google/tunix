@@ -52,8 +52,11 @@ approval. Advancing a phase requires its exit gate and a decision entry in
   context-length, and physical-cap receipts. The eligible recipe closest to 20%
   stochastic solve receives one full stock 200-update curve; ties prefer M15,
   then M10, then M20. There is no greedy or train-20 rejection stage.
-- Ideal automatic freeze: update-200 solve is 60–70% and improvement from
-  update 0 is at least 15 percentage points.
+- P57.1 uses one uninterrupted stock 0→200 training JobSet. There is no eval-0
+  and no 50/100/150 evaluation pause. The discovery curve is the signed
+  on-policy training trajectory; checkpointing remains recovery infrastructure.
+- Ideal automatic freeze: the preregistered trailing update-200 on-policy solve
+  statistic is 60–70%, with valid treatment-dose and trajectory-health receipts.
 - The 55–75% band is a hard review guardrail, not an alternate automatic
   target. A result in 55–60% or 70–75% stops for user review. Outside it is
   rejected as floor/ceiling.
@@ -85,9 +88,9 @@ approval. Advancing a phase requires its exit gate and a decision entry in
   correctness failure remain fatal.
 - Training never evaluates in-process. Isolated evaluation consumes immutable
   base weights or a signed durable checkpoint and an immutable map set.
-- LatestN(1) requires pausing immediately at every registered checkpoint,
-  evaluating it, then resuming with the same final `max_steps`. The horizon is
-  signed provenance and may not change between segments.
+- P57.1 runs continuously to 200; LatestN(1) is only a recovery mechanism in
+  that discovery phase. The later paired campaign may register its own equal
+  evaluation schedule for both arms before unblinding.
 - No warning-only run may be described as bitwise zero-TIM.
 - The existing paired renderer is staging-only until P57.2 proves that every
   nonnumerical field is equal and every numerical treatment field differs as

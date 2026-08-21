@@ -13,8 +13,8 @@ YAML. Every TPU launch requires explicit user approval.
 | max turns | 15 |
 | physical prompt / response | 4,096 / 8,192 tokens |
 | signed horizon | 200 optimizer updates |
-| segment stops | 50, 100, 150, 200 |
-| held-out eval | updates 0, 50, 100, 150, 200; 100 maps, 8 deterministic generations |
+| process stop | update 200 only; one uninterrupted JobSet |
+| held-out eval | none before/during discovery training; optional eval-200 afterward |
 | rollout group | 32 prompts x 8 generations = 256 trajectories/update |
 | trajectory mini / micro | 32 / 8 |
 | objective | GSPO-token, RLOO, beta 0, epsilon 0.003/0.005 |
@@ -24,9 +24,11 @@ YAML. Every TPU launch requires explicit user approval.
 
 Checkpoint root:
 `gs://yuxzhang-tunix-models/canon-zero-tim/checkpoints/frozenlake`.
-Frozen tag: `p57-m15-selection-mismatch`. Every segment keeps
-`--expected-updates 200`; `--stop-after-step` only chooses where that process
-pauses. Changing horizon or source SHA makes resume provenance fail.
+Frozen tag: `p57-m15-selection-mismatch`. The run keeps
+`--expected-updates 200`; omitting `--stop-after-step` resolves the stop to the
+full horizon. Checkpoints at 10-step intervals are recovery points, not planned
+pause/evaluation barriers. Changing horizon or source SHA makes resume
+provenance fail.
 
 ## Original-arm contract
 
@@ -60,98 +62,39 @@ test "$(printf %s "$SOURCE" | wc -c)" -eq 40
 git cat-file -e "$SOURCE^{commit}"
 ~~~
 
-## Step-0 isolated stock evaluation
-
-Run this before training so LatestN(1) cannot erase the baseline state:
+## Direct stock full training: 0→200
 
 ~~~bash
-OUT=/tmp/p57-m15-stock-eval0
+OUT=/tmp/p57-m15-stock-full200
 python3 canon-zero-tim/cluster/render_p57_frozenlake_tim.py \
   $BASE_ARGS \
-  --run-id p57-m15-stock-eval0 \
+  --run-id p57-m15-stock-full200 \
   --output-dir "$OUT" \
   --checkpoint-mode new \
-  --run-kind eval \
-  --checkpoint-step 0
-find "$OUT" -maxdepth 1 -name 'jobset-*.yaml' -print
-sha256sum "$OUT"/jobset-*.yaml
-~~~
-
-Require one manifest and renderer `INTENT_PASS run_kind=eval`. After approval:
-
-~~~bash
-kubectl apply -f "$OUT/jobset-p57-frozenlake-mismatch-m15-selection-eval-0.yaml"
-~~~
-
-Accept only an eval receipt/classification at step 0 with mutation counters 0.
-The evaluator intentionally keeps trainer-side rescore enabled. Its global
-trajectory row count is therefore 8, shard-local row count is 1 on DP8, and
-all 800 rewards must be present. Do not reduce `--num_generations`: attempt 2
-proved that a global row count of 2 cannot enter the DP8 Splash Attention
-program. The classifier requires all eight greedy rewards for each map to be
-identical and computes capability from the resulting 100 map-level values.
-Attempt 3 proved that renderer/profile checks alone are insufficient: the real
-workload entrypoint must consume the same registered generation count. Before
-launch, the host gate must report at least 90 tests and include
-`test_generation_contract_is_shared_with_real_workload_entrypoint`.
-
-## First stock training segment: 0→50
-
-~~~bash
-OUT=/tmp/p57-m15-stock-train50
-python3 canon-zero-tim/cluster/render_p57_frozenlake_tim.py \
-  $BASE_ARGS \
-  --run-id p57-m15-stock-train50 \
-  --output-dir "$OUT" \
-  --checkpoint-mode new \
-  --run-kind train \
-  --stop-after-step 50
+  --run-kind train
 find "$OUT" -maxdepth 1 -name 'jobset-*.yaml' -print
 sha256sum "$OUT"/jobset-*.yaml
 ~~~
 
 Require one manifest, `--max_steps=200`, prompt/response `4096/8192`, and
-`CANON_P57_STOP_AFTER_STEP=50`. After approval:
+`CANON_P57_STOP_AFTER_STEP=200`. The command must not contain
+`--evaluation_only`. After explicit launch approval:
 
 ~~~bash
 kubectl apply -f "$OUT/jobset-p57-frozenlake-mismatch-m15-selection-200.yaml"
 ~~~
 
 Pod success alone is insufficient. Require
-`SEGMENT_COMPLETE step=50 durable_checkpoint=50 horizon=200` and the stock
-postflight. New training intentionally has no resume-sync marker.
+`SEGMENT_PREFLIGHT restored=0 stop_after=200 horizon=200`,
+`SEGMENT_COMPLETE step=200 durable_checkpoint=200 horizon=200`, and the stock
+postflight. New training intentionally has no resume-sync marker. Do not launch
+eval-0 or intentionally stop at 50/100/150. Never run two jobs against the same
+checkpoint tag concurrently.
 
-## Evaluate and resume later boundaries
-
-Evaluate the just-written boundary first. Step-50 example:
-
-~~~bash
-OUT=/tmp/p57-m15-stock-eval50
-python3 canon-zero-tim/cluster/render_p57_frozenlake_tim.py \
-  $BASE_ARGS \
-  --run-id p57-m15-stock-eval50 \
-  --output-dir "$OUT" \
-  --checkpoint-mode resume \
-  --run-kind eval \
-  --checkpoint-step 50
-~~~
-
-Then resume to the next absolute stop:
-
-~~~bash
-OUT=/tmp/p57-m15-stock-train100
-python3 canon-zero-tim/cluster/render_p57_frozenlake_tim.py \
-  $BASE_ARGS \
-  --run-id p57-m15-stock-train100 \
-  --output-dir "$OUT" \
-  --checkpoint-mode resume \
-  --run-kind train \
-  --stop-after-step 100
-~~~
-
-Repeat at 100, 150, and 200. Each resume restores exactly the previous retained
-checkpoint and emits one stock sync marker. Never run two jobs against the
-same tag concurrently.
+If infrastructure interrupts the run, preserve the failed run and request a
+resume decision. Do not change the source SHA, final horizon, recipe, or tag.
+An optional eval-200 can be rendered from checkpoint 200 after the training
+curve is classified; it is not part of the launch critical path.
 
 ## Monitoring and acceptance
 
@@ -160,16 +103,17 @@ dose. Structural errors, nonfinite values, B-C/non-treatment failures,
 gradient/update failures, and checkpoint failures remain fatal.
 
 Preserve complete log/YAML hashes, source/image/profile identity, stock
-zero-bundle and runtime-route markers, checkpoint markers/URI, W&B run for
-training, evaluation JSON/classification, alignment/update reports, and all
-infrastructure events.
+zero-bundle and runtime-route markers, checkpoint markers/URI, W&B training
+curve, alignment/update reports, and all infrastructure events.
 
 ## Decision after update 200
 
-Automatic freeze requires held-out solve 60–70% and at least +15 points over
-eval-0. A final 55–60% or 70–75% stops for user review. Outside 55–75% is
-floor/ceiling. Do not launch or inspect zero-TIM until this decision and the
-unseen `main` split are frozen in the ledger.
+Automatic freeze requires the preregistered trailing update-200 on-policy solve
+statistic to be 60–70%, with valid mismatch-dose, structural, and trajectory
+health receipts. Because eval-0 was intentionally skipped, P57.1 makes no
+same-split held-out improvement claim. A final 55–60% or 70–75% stops for user
+review. Outside 55–75% is floor/ceiling. Do not launch or inspect zero-TIM until
+this decision and the unseen `main` split are frozen in the ledger.
 
 ## Rollback
 

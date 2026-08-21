@@ -3,9 +3,10 @@
 ## Mission
 
 Run the untreated Qwen3-8B FrozenLake M15 `selection` curve before observing
-any zero-TIM learning outcome. The registered horizon is 200 updates, but each
-JobSet stops on one durable boundary: 50, 100, 150, then 200. Run isolated
-stock evaluations at 0, 50, 100, 150, and 200.
+any zero-TIM learning outcome. The registered horizon is one uninterrupted
+200-update JobSet. Do not run eval-0 and do not pause at 50/100/150. Durable
+checkpoints remain enabled every 10 updates with LatestN(1) for infrastructure
+recovery; they are not evaluation barriers.
 
 Do not render or launch the `zero` arm. Do not hand-edit YAML. Do not commit or
 push unless the user separately authorizes it. Every `kubectl apply` requires
@@ -45,8 +46,9 @@ rollouts, then failed in trainer-side EVAL rescore. The global input had shape
 `[2, ...]` while Splash Attention mapped its row axis over DP8, so JAX rejected
 the non-divisible shape before producing a receipt. The repair uses eight
 deterministic generations: caller-global M=8, shard-local M=1, semantic rows=8,
-and the same DP8xTP8 trainer program. Do not resume attempts 1 or 2. After this
-repair is published, render a fresh eval-0 in `new` mode from its immutable SHA.
+and the same DP8xTP8 trainer program. Do not resume attempts 1 or 2. The plan
+at that point was a fresh eval-0; the later direct-run decision below supersedes
+that next action.
 
 `p57_eval0_att3` is likewise not an evaluation result. Source `8acfe784...`
 rendered eight generations correctly, but the real workload entrypoint retained
@@ -55,6 +57,12 @@ before model load. The repair moves the P57 count to one
 `GENERATIONS_PER_PROMPT=8` registry value consumed by both renderer and
 entrypoint. Do not resume attempt 3; after publication, use a new run id and
 checkpoint mode `new`.
+
+User decision on 2026-08-21 supersedes the eval-first segmented discovery
+flow: P57.1 now launches the stock 0→200 training run directly. Attempts 1–3
+remain preserved as `INCONCLUSIVE` evidence, but no fourth eval-0 attempt is
+required. Isolated evaluation code remains available for an optional final
+step-200 measurement and for the later paired causal campaign.
 
 ## Treatment identity
 
@@ -77,37 +85,36 @@ enforce this contract.
 1. Check out the approved immutable 40-character source SHA. Keep this exact
    SHA and campaign tag for every segment and evaluation.
 2. Run both local gates in `RUNBOOK.md`; stop at the first red gate.
-3. Run stock eval-0 with checkpoint mode `new`.
-4. Run stock train segment 0→50 with checkpoint mode `new`.
-5. Accept it only after the log proves step 50 and durable checkpoint 50.
-6. Run stock eval-50 with checkpoint mode `resume`.
-7. Repeat train/eval at 100, 150, and 200. Later train segments use `resume`;
-   the signed horizon remains 200.
-8. Return all receipts/logs/hashes and stop before any zero-arm render.
+3. Render one stock train run with checkpoint mode `new`, horizon 200, and no
+   explicit `--stop-after-step`; the renderer must resolve the stop to 200.
+4. Launch that one JobSet and let it run continuously through update 200.
+5. Accept it only after the log proves step 200 and durable checkpoint 200.
+6. Return the complete training logs, checkpoint identity, W&B curve, and
+   alignment/update evidence; stop before any zero-arm render.
 
 ## Required first-segment markers
 
-For new 0→50 training, require exactly one each:
+For the direct new 0→200 training run, require exactly one each:
 
 ~~~text
 [P57.STOCK_FAST] ZERO_TIM_OFF_PASS mode=train absent=12 observer=train
 [entrypoint] P57_STOCK_FAST_PATH run_kind=train regime=stock-fast ... canonical_overlay=skipped
 [P57.STOCK] TRAIN_RUNTIME_PASS regime=stock-fast arm=mismatch canonical_bundle=off observer=warning-only
-[P57.STOCK] SEGMENT_PREFLIGHT restored=0 stop_after=50 horizon=200 checkpoint_interval=10 max_to_keep=1
-[P57.STOCK] SEGMENT_COMPLETE step=50 durable_checkpoint=50 horizon=200 next_action=isolated-eval
+[P57.STOCK] SEGMENT_PREFLIGHT restored=0 stop_after=200 horizon=200 checkpoint_interval=10 max_to_keep=1
+[P57.STOCK] SEGMENT_COMPLETE step=200 durable_checkpoint=200 horizon=200 next_action=complete
 [P57.STOCK_FAST] RUNTIME_PATH_PASS canonical_markers=0 overlay=skipped
 ~~~
 
-New training has zero `ROLLOUT_SYNC_PASS` resume markers. A resumed segment
-has exactly one marker at the restored boundary.
+New training has zero `ROLLOUT_SYNC_PASS` resume markers. Do not intentionally
+split or resume a healthy run; resume is reserved for infrastructure recovery.
 
-For stock eval-0 and later stock evaluations, require:
+If the user later requests an optional stock eval-200, require:
 
 ~~~text
 [P57.STOCK_FAST] ZERO_TIM_OFF_PASS mode=eval absent=12 observer=off
 [entrypoint] P57_STOCK_FAST_PATH run_kind=eval regime=stock-fast ... canonical_overlay=skipped
-[P57.STOCK_FAST] ROLLOUT_SYNC_PASS step=<boundary> transport=update_params exact_weight_attestation=unavailable-by-design
-[CANON_P57_EVAL] COMPLETE arm=mismatch step=<boundary> ... backward=0 optimizer_commits=0 checkpoint_writes=0
+[P57.STOCK_FAST] ROLLOUT_SYNC_PASS step=200 transport=update_params exact_weight_attestation=unavailable-by-design
+[CANON_P57_EVAL] COMPLETE arm=mismatch step=200 ... backward=0 optimizer_commits=0 checkpoint_writes=0
 [P57.STOCK_FAST] RUNTIME_PATH_PASS canonical_markers=0 overlay=skipped
 ~~~
 
