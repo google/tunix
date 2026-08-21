@@ -56,14 +56,14 @@ class RolloutManager:
       sampler_type = getattr(config, "sampler_type", "vanilla")
       if sampler_type == "vllm":
         raise NotImplementedError(
-            "vLLM sampler is not implemented yet. Use 'legacy_vllm' or"
+            "vLLM sampler is not implemented yet. Use 'inprocess_vllm' or"
             " 'vanilla'."
         )
-      elif sampler_type == "legacy_vllm":
-        from tunix.experimental.rollout import legacy_vllm_sampler_adapter  # pylint: disable=g-import-not-at-top
+      elif sampler_type == "inprocess_vllm":
+        from tunix.experimental.rollout import inprocess_vllm_sampler_adapter  # pylint: disable=g-import-not-at-top
 
-        sampler = legacy_vllm_sampler_adapter.LegacyVllmSamplerAdapter(  # pyrefly: ignore[bad-instantiation]
-            server_id="legacy_vllm_sampler",
+        sampler = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(  # pyrefly: ignore[bad-instantiation]
+            server_id="inprocess_vllm_sampler",
         )
       elif sampler_type == "vanilla":
         sampler = vanilla_sampler_adapter.VanillaSamplerAdapter(  # pyrefly: ignore[bad-instantiation]

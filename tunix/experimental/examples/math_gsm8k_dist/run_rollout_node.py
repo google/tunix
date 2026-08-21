@@ -28,7 +28,7 @@ from jax.experimental import mesh_utils
 from jax.sharding import Mesh
 from transformers import AutoTokenizer
 from tunix.experimental.examples.math_gsm8k_dist import gsm8k
-from tunix.experimental.rollout import legacy_vllm_sampler_adapter
+from tunix.experimental.rollout import inprocess_vllm_sampler_adapter
 from tunix.experimental.worker import remote_execution
 from tunix.experimental.worker import rollout_worker
 from tunix.generate import mappings as mappings_lib
@@ -100,7 +100,7 @@ def _create_vllm_worker(args, tokenizer):
           "max_model_len": max_model_len,
       },
   )
-  sampler_adapter = legacy_vllm_sampler_adapter.LegacyVllmSamplerAdapter(
+  sampler_adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
       server_id=args.worker_id,
       tokenizer=tokenizer,
       config=vllm_config,
@@ -111,7 +111,7 @@ def _create_vllm_worker(args, tokenizer):
   )
   logging.info("Creating RolloutWorker wrapper...")
   config = rollout_worker.RolloutConfig(
-      sampler_type="legacy_vllm",
+      sampler_type="inprocess_vllm",
       max_prompt_length=args.max_prompt_length,
       max_tokens_to_generate=args.max_response_length,
       temperature=1.0,
