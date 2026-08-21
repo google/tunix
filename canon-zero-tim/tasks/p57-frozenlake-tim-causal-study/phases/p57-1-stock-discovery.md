@@ -52,12 +52,26 @@ and sampled tokens/second.
 
 ## Full stock curve
 
-After calibration, stop. P57.2 must first certify a full-bundle stock/mismatch
-training arm. Only then may the selected recipe be rebuilt from immutable base
-weights on its disjoint `selection` maps and trained for 200 updates.
+`p57cal6` is complete. The immutable original receipt had sentinel map
+provenance but exact group/pair identities; a separately hashed deterministic
+rematerialization plus group-id join derived only those missing fields. The
+unchanged classifier returned `PASS / FREEZE_M15`. M15 measured 24.625% solve,
+56% mixed/nonzero-advantage groups, context max 7,403, completion max 6,223,
+and zero cap hits.
+
+The full-bundle stock/mismatch training and evaluation paths are now
+fail-closed: the profile and entrypoint skip the canonical overlay, validators
+require the complete numerical bundle off, and runtime postflight requires
+zero canonical markers. M15 is rebuilt from immutable base weights on its
+disjoint `selection` maps and trained for 200 signed updates.
 There is no train-20 screen. Independent held-out evaluations occur at updates
 0, 50, 100, 150, and 200. LatestN(1) means pausing at each registered boundary,
 evaluating, and resuming with the original final horizon of 200.
+
+The physical envelope is prompt 4,096 plus response 8,192. Training uses
+DP8xTP8, resident optimizer state, batch 32, eight generations, trajectory
+mini/micro 32/8, AdamW `1e-6`, GSPO-token/RLOO, and temperature 0.7. No
+in-process evaluation is admitted.
 
 Automatic freeze requires update-200 solve 60–70% and at least 15 percentage
 points improvement from update 0. The 55–75% range is a review guardrail;

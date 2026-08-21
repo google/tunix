@@ -21,8 +21,8 @@ FrozenLake/GSPO-RLOO recipe is robust to the measured mismatch dose.
 
 | Phase | Deliverable | Exit gate | Status |
 |---|---|---|---|
-| P57.0 | Local stock-fast calibration, data, renderer, and evaluator readiness | Host and pinned-image gates pass; rendered and resolved environments mechanically prove the zero-TIM bundle is off | active |
-| P57.1 | Stock-only workload calibration and full-curve selection | One no-update temperature-0.7 M10/M15/M20 calibration is complete; one preregistered mixed recipe then completes a stock 200-update curve ending in 60–70%; no zero-arm result is launched or inspected | pending |
+| P57.0 | Local stock-fast calibration, data, renderer, and evaluator readiness | Host and pinned-image gates pass; rendered and resolved environments mechanically prove the zero-TIM bundle is off | complete |
+| P57.1 | Stock-only workload calibration and full-curve selection | One no-update temperature-0.7 M10/M15/M20 calibration is complete; one preregistered mixed recipe then completes a stock 200-update curve ending in 60–70%; no zero-arm result is launched or inspected | active |
 | P57.2 | Immutable recipe and treatment-dose admission | Main data split and full recipe are frozen before zero unblinding; bounded zero arm is exact and stock arm has finite reproducible A-B dose | pending |
 | P57.3 | Paired one-seed operational pilot | Both frozen arms complete 50 updates with valid checkpoints/evaluations and unchanged treatment dose | pending |
 | P57.4 | Paired multi-seed main campaign | Two arms x at least three paired seeds complete the fixed 200-update horizon and isolated evaluations | pending |
@@ -35,8 +35,10 @@ approval. Advancing a phase requires its exit gate and a decision entry in
 ## Discovery-before-unblinding invariant
 
 - P57.1 renders exactly one arm: `mismatch`, with
-  `CANON_P57_INFERENCE_REGIME=stock-fast`, the 12 presence-sensitive numerical
-  switches absent, and the 25 boolean zero-TIM/training/alignment gates zero.
+  `CANON_P57_INFERENCE_REGIME=stock-fast` and the 12 presence-sensitive
+  numerical switches absent. Calibration/evaluation keep every numerical and
+  alignment gate zero; stock training keeps only launch/checkpoint/telemetry
+  and warning-only observation while its numerical bundle remains zero.
 - “Stock-fast” means the untreated serving numerical program. Shared
   nonnumerical infrastructure remains equal: image, model/TP overlay, DP8xTP8,
   vLLM capacity, sampling, resident placement, and datasets.
@@ -59,6 +61,11 @@ approval. Advancing a phase requires its exit gate and a decision entry in
   the unseen `main` split is signed before the first
   zero-arm outcome is unblinded. A task is never selected for a large observed
   zero-minus-stock gap.
+- `p57cal6` selected M15 mechanically: 24.625% solve, 56% mixed groups,
+  context max 7,403, completion max 6,223, and no cap hit. The original receipt
+  is immutable; missing map provenance was derived into a new receipt by exact
+  deterministic rematerialization and `group_id` join, then accepted by the
+  unchanged classifier as `PASS / FREEZE_M15`.
 
 ## Paired-arm invariants (must be implemented and certified in P57.2)
 

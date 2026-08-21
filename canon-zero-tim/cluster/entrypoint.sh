@@ -109,16 +109,16 @@ elif [ "${CANON_P58_DEEPSWE_TIM:-0}" = "1" ] && \
   step 35_install_r2egym.sh
   step p58_verify_stock_engine.sh
   log "P58_NATIVE_STOCK_PATH source=$CANON_EXPECT_COMMIT canonical_overlay=skipped"
-elif p57_is_stock_fast_calibration; then
-  # P57.1 measures the untreated pinned-image serving program.  Installing the
-  # canonical chain and merely unsetting its flags is not stock: several shims
-  # enforce their dependencies at import time.  Keep the independent R2E gym
-  # install, but leave all six tpu_inference targets byte-identical to the
-  # pinned image established by Step 20.
+elif p57_is_stock_fast_runtime; then
+  # P57.1 measures and trains the stock arm with the untreated pinned-image
+  # serving program. Installing the canonical chain and merely unsetting its
+  # flags is not stock: several shims enforce dependencies at import time.
+  # Keep the independent R2E gym install, but leave all six tpu_inference
+  # targets byte-identical to the pinned image established by Step 20.
   step 35_install_r2egym.sh
   step 37_install_stock_runtime.sh
   step 38_verify_stock_engine.sh
-  log "P57_STOCK_FAST_PATH run_kind=calibration regime=stock-fast source=$CANON_EXPECT_COMMIT canonical_overlay=skipped"
+  log "P57_STOCK_FAST_PATH run_kind=$CANON_P57_RUN_KIND regime=stock-fast source=$CANON_EXPECT_COMMIT canonical_overlay=skipped"
 else
   step 30_install_canon.sh
   step 35_install_r2egym.sh

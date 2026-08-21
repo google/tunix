@@ -1,0 +1,22 @@
+{
+  "dataset_eval_sha256": {
+    "m10": "72352117302a695bbb3b194bf4cb5ab38fd03b4c2966654088aa66c9502146ee",
+    "m15": "73d98368623bfb0d21ebc18ae815b768b52d9c6ebdb23e0848991dfb7e2704b6",
+    "m20": "755b1a8a928e13880a38ef9d97923ea30e69bf7d564d3abd2c26bc3d6886f3ff"
+  },
+  "derived_fields": [
+    "p57_index",
+    "grid_side",
+    "shortest_path",
+    "map_sha256"
+  ],
+  "measured_fields_modified": false,
+  "method": "deterministic-dataset-rematerialization-plus-group-id-join",
+  "output_path": "canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/evidence/p57cal6/p57_calibration.derived.json",
+  "output_sha256": "ec03fe33990c300c7648a35a004a0a1deb488f92c7492c143d612c586928a531",
+  "records_derived": 2400,
+  "schema": "p57-calibration-provenance-derivation-v1",
+  "source_path": "canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/evidence/p57cal6/p57_calibration.json",
+  "source_sha256": "b34084dcbeb0f877b793bef1a7383039413b63a17f4f4205d575de6190640276",
+  "verdict": "PASS"
+}

@@ -1,128 +1,122 @@
-# P57 stock-fast calibration execution handoff
+# P57 M15 stock-curve execution handoff
 
 ## Mission
 
-Run one 64-chip temperature-0.7 Qwen3-8B rollout-only JobSet that evaluates
-M10, M15, and M20 sequentially under the untreated `stock-fast` inference
-regime. Return the complete evidence bundle. Do not train or launch zero-TIM.
+Run the untreated Qwen3-8B FrozenLake M15 `selection` curve before observing
+any zero-TIM learning outcome. The registered horizon is 200 updates, but each
+JobSet stops on one durable boundary: 50, 100, 150, then 200. Run isolated
+stock evaluations at 0, 50, 100, 150, and 200.
+
+Do not render or launch the `zero` arm. Do not hand-edit YAML. Do not commit or
+push unless the user separately authorizes it. Every `kubectl apply` requires
+explicit user approval.
 
 ## Read first
 
-Read, in order:
+Read `state.md`, `plan.md`, `phases/p57-1-stock-discovery.md`, then
+`RUNBOOK.md`. The runbook contains the exact commands and is authoritative.
 
-1. `state.md`;
-2. `plan.md`;
-3. `phases/p57-1-stock-discovery.md`;
-4. `RUNBOOK.md`.
+## Scientific state already established
 
-The runbook is authoritative and contains exact commands. Ask the user before
-`kubectl apply`. Do not commit or push unless separately authorized.
+`p57cal6` completed 2,400 stock-fast trajectories. The original receipt
+preserved all measured outcomes and exact group/pair identity, but four map
+provenance fields were sentinels because the recorder read a post-construction
+trajectory object instead of the source dataset row. The source receipt was
+not overwritten. A deterministic rematerialization plus exact `group_id` join
+derived those fields for all 2,400 records, with a separate SHA proof. The
+unchanged classifier returns:
 
-## Honest validation status
+~~~text
+verdict=PASS selection=FREEZE_M15 selected_recipe=m15
+~~~
 
-The dependency-light host suite and pinned-image CPU/overlay suite are green.
-`p57cal5` proved 64-chip connection, all three dataset materializations, model
-load, KV-cache initialization, and approximately 34.3/95 GiB HBM use per
-device. It then stopped before the first recipe because the previous helper
-looked for `should_sync_weights` on `RLCluster`; that admission flag belongs to
-`GRPOLearner`, while transport and attestation belong to
-`GRPOLearner.rl_cluster`. The repaired helper now accepts the learner and
-traverses the same ownership topology as production. It keeps the real
-`update_params` rollout sync, records exact stock attestation as
-`unavailable-by-design`, and retains fail-closed exact attestation for
-canonical resume/evaluation. It is host- and pinned-image-tested but has not
-yet run on the 64-chip target. The committed `p57cal5` file is a workload-only
-log rather than the complete wrapper log, so it is analysis-grade evidence,
-not a complete campaign artifact. The next approved calibration launch closes
-startup readiness only if it reaches real rollout progress under the unchanged
-signed manifest and returns the complete wrapper log from byte zero.
+M15 starts at 24.625% solve, has 56% mixed groups, reaches 7,403 context tokens
+and 6,223 completion tokens, and had no physical/logical cap hit. M15 is frozen
+for the stock curve. M10 and M20 are no longer candidates.
+
+## Treatment identity
+
+The stock arm is not merely `CANON_P38_FIXED_LM_HEAD=0`. It requires:
+
+- `CANON_P57_TIM_ARM=mismatch` and `CANON_P57_INFERENCE_REGIME=stock-fast`;
+- all 12 presence-sensitive canonical switches absent;
+- the complete numerical trainer/serving bundle literal zero;
+- canonical install/overlay/verify skipped, leaving the engine equal to the
+  pinned-image stock bytes;
+- training admission, checkpointing, W&B, host telemetry, and the finite
+  warning-only alignment observer enabled;
+- evaluation on the same untreated engine with training/alignment gates off.
+
+The profile, entrypoint, workload validator, and postflight independently
+enforce this contract.
 
 ## Execute exactly this workflow
 
-1. Check out the approved immutable 40-character source SHA.
-2. Run both local gates in the runbook; stop at the first red gate.
-3. Render once with `cluster/render_p57_calibration.py`.
-4. Run `scripts/verify_calibration_manifest.py` on the rendered YAML.
-5. Confirm exactly one manifest exists.
-6. Obtain explicit launch approval, then apply that manifest once.
-7. Capture the complete chief log from byte zero and immediately check the
-   runbook's first-target-launch startup list; preserve and stop on any red.
-8. Extract the JSON v2 receipt and run `classify_stock_discovery.py`.
-9. Return every item in the runbook's evidence contract and stop.
+1. Check out the approved immutable 40-character source SHA. Keep this exact
+   SHA and campaign tag for every segment and evaluation.
+2. Run both local gates in `RUNBOOK.md`; stop at the first red gate.
+3. Run stock eval-0 with checkpoint mode `new`.
+4. Run stock train segment 0→50 with checkpoint mode `new`.
+5. Accept it only after the log proves step 50 and durable checkpoint 50.
+6. Run stock eval-50 with checkpoint mode `resume`.
+7. Repeat train/eval at 100, 150, and 200. Later train segments use `resume`;
+   the signed horizon remains 200.
+8. Return all receipts/logs/hashes and stop before any zero-arm render.
 
-## Nonnegotiable intent
+## Required first-segment markers
 
-- `CANON_P57_TIM_ARM=mismatch`;
-- `CANON_P57_INFERENCE_REGIME=stock-fast`;
-- exact resolved marker `ZERO_TIM_OFF_PASS absent=12 zero=25`;
-- exact startup route `P57_STOCK_FAST_PATH ... canonical_overlay=skipped`;
-- exact command prefix
-  `python3 -u -m examples.frozenlake.train_frozenlake_qwen3`;
-- stock runtime proof `[P57.STOCK_FAST] RUNTIME_DEPS_PASS packages=6`;
-- full workload-import proof
-  `[P57.STOCK_FAST] WORKLOAD_IMPORT_PASS entrypoint=module`;
-- pre-model stock proof `[P57.STOCK_FAST] PREFLIGHT_PASS files=6 import=pass overlay=absent`;
-- one exact stock sync proof
-  `[P57.STOCK_FAST] ROLLOUT_SYNC_PASS step=0 transport=update_params exact_weight_attestation=unavailable-by-design`;
-- exact postflight `RUNTIME_PATH_PASS canonical_markers=0 overlay=skipped`;
-- fixed AR, pinned RPA, canonical Pallas trunk/VJP, and fixed logprob M absent;
-- RPA VJP2, processed logprobs, log-softmax, module C, KV unified, fixed
-  lm-head, segmented training/update, and all alignment/training admissions 0;
-- no canonical excess-precision XLA pin;
-- M10/M15/M20 only, in that order; no L0 or greedy arm;
-- 100 maps x 8 generations per recipe at temperature 0.7;
-- `--evaluation_only`; base weights remain immutable;
-- no trainer rescore, backward, optimizer commit, checkpoint write, or
-  in-process train evaluation;
-- prefix cache off; no YAML/threshold hand edits;
-- no zero-arm result or W&B run may be launched or inspected.
+For new 0→50 training, require exactly one each:
 
-`CANON_P38_FIXED_LM_HEAD=0` by itself does not satisfy this contract.
+~~~text
+[P57.STOCK_FAST] ZERO_TIM_OFF_PASS mode=train absent=12 observer=train
+[entrypoint] P57_STOCK_FAST_PATH run_kind=train regime=stock-fast ... canonical_overlay=skipped
+[P57.STOCK] TRAIN_RUNTIME_PASS regime=stock-fast arm=mismatch canonical_bundle=off observer=warning-only
+[P57.STOCK] SEGMENT_PREFLIGHT restored=0 stop_after=50 horizon=200 checkpoint_interval=10 max_to_keep=1
+[P57.STOCK] SEGMENT_COMPLETE step=50 durable_checkpoint=50 horizon=200 next_action=isolated-eval
+[P57.STOCK_FAST] RUNTIME_PATH_PASS canonical_markers=0 overlay=skipped
+~~~
 
-## Required success evidence
+New training has zero `ROLLOUT_SYNC_PASS` resume markers. A resumed segment
+has exactly one marker at the restored boundary.
 
-- renderer `VERDICT PASS count=1`;
-- manifest preflight `PASS regime=stock-fast`;
-- resolved-container `ZERO_TIM_OFF_PASS absent=12 zero=25`;
-- stock runtime dependencies, module workload import, stock engine route, and
-  zero-canonical-runtime-marker postflight;
-- 3 dataset attestations, starts, and completes;
-- one JSON v2 receipt with complete zero-TIM-off attestation;
-- that receipt's `rollout_weight_sync` equals the registered transport-only
-  stock receipt; missing or fabricated exact equality is a hard failure;
-- one terminal complete record with all mutation counters zero;
-- offline classifier `verdict=PASS`.
+For stock eval-0 and later stock evaluations, require:
 
-The classifier may select `FREEZE_*` or `REVIEW_NO_ELIGIBLE_RECIPE`; either is
-valid evidence. Do not launch training after classification.
+~~~text
+[P57.STOCK_FAST] ZERO_TIM_OFF_PASS mode=eval absent=12 observer=off
+[entrypoint] P57_STOCK_FAST_PATH run_kind=eval regime=stock-fast ... canonical_overlay=skipped
+[P57.STOCK_FAST] ROLLOUT_SYNC_PASS step=<boundary> transport=update_params exact_weight_attestation=unavailable-by-design
+[CANON_P57_EVAL] COMPLETE arm=mismatch step=<boundary> ... backward=0 optimizer_commits=0 checkpoint_writes=0
+[P57.STOCK_FAST] RUNTIME_PATH_PASS canonical_markers=0 overlay=skipped
+~~~
 
 ## Stop conditions
 
-Stop on source/image drift, local gate failure, manifest preflight failure,
-more/fewer than one manifest, missing zero-TIM-off marker, any canonical switch
-enabled, missing recipe, context-limit/timeout/failed trajectory, OOM, restart,
-missing terminal marker, or classifier `FAIL`. Preserve partial evidence; do
-not patch the cluster or rerun automatically.
+Stop on source/image/profile drift, any canonical runtime marker, missing stock
+route, wrong dataset SHA, cap hit, nonfinite value, structural/B-C/gradient or
+checkpoint failure, OOM, restart, IFRT disconnect, wrong restored step, or
+missing segment completion. Finite A-B drift is warning-only evidence.
+
+Do not automatically rerun or change context, batch, seed, learning rate,
+horizon, or checkpoint tag. Preserve partial evidence and report the first
+failing marker.
 
 ## Return template
 
 ~~~text
-P57 stock-fast stochastic calibration complete/inconclusive
-source_sha: <40 hex>
-image_digest: <digest>
+P57 M15 stock segment/eval complete or inconclusive
+source_sha: <same 40 hex for the whole curve>
+campaign_tag: p57-m15-selection
+run_kind/boundary/checkpoint_mode: <train|eval>/<step>/<new|resume>
 jobset/run/attempt/exit: <...>
 yaml_path/sha256: <...>
-renderer_stdout: <path>
-manifest_preflight_stdout: <path>
+raw_log_path/sha256: <complete log from byte zero>
 zero_tim_off_marker: <exact line>
-runtime_deps_marker: <exact line>
-workload_import_marker: <exact line>
-rollout_sync_marker: <exact line>
-raw_log: <complete path>
-receipt_v2_json/sha256: <...>
-dataset_attestations: <three lines or path>
-classifier_json/sha256/exit: <...>
+runtime_route_marker: <exact line>
+segment_preflight/complete: <exact lines or n/a>
+rollout_sync_marker: <exact line, or absent for new training>
+checkpoint_latest/uri: <step and gs:// path>
+evaluation_json/classification/sha256: <paths or n/a>
+wandb_run: <url/id or n/a>
+alignment_summary: <A-B warning dose; B-C/structural/nonfinite verdict>
 infra_events: <none or exact list>
 ~~~
-
-Attach the files. Do not paste only selected solve rates.

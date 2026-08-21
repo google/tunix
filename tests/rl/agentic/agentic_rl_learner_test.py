@@ -120,10 +120,12 @@ class AgenticRLLearnerTest(parameterized.TestCase):
                     "ineffective_action_count": 1,
                     "policy_version": 0,
                     "original_input": {
-                        "p57_index": group_id,
-                        "size": 5,
-                        "shortest_path": 4,
-                        "map_sha256": "a" * 64,
+                        # Deliberately wrong: production trajectories retain
+                        # presentation text here, not the Grain source row.
+                        "p57_index": -1,
+                        "size": -1,
+                        "shortest_path": -1,
+                        "map_sha256": "",
                     },
                 },
             )
@@ -137,7 +139,14 @@ class AgenticRLLearnerTest(parameterized.TestCase):
     learner.loop = loop
     try:
       result = learner.rollout_only_evaluate(
-          [{"prompts": np.asarray(["p0", "p1"])}], policy_step=0
+          [{
+              "prompts": np.asarray(["p0", "p1"]),
+              "p57_index": np.asarray([10, 11]),
+              "size": np.asarray([5, 6]),
+              "shortest_path": np.asarray([4, 5]),
+              "map_sha256": np.asarray(["a" * 64, "b" * 64]),
+          }],
+          policy_step=0,
       )
     finally:
       loop.call_soon_threadsafe(loop.stop)
@@ -151,6 +160,10 @@ class AgenticRLLearnerTest(parameterized.TestCase):
     self.assertEqual(result["records"][0]["context_tokens"], 10)
     self.assertEqual(result["records"][0]["assistant_tokens"], 3)
     self.assertEqual(result["records"][0]["ineffective_actions"], 1)
+    self.assertEqual(result["records"][0]["p57_index"], 10)
+    self.assertEqual(result["records"][1]["map_sha256"], "a" * 64)
+    self.assertEqual(result["records"][2]["p57_index"], 11)
+    self.assertEqual(result["records"][3]["map_sha256"], "b" * 64)
     learner._batch_to_train_example.assert_not_called()
 
   def test_rollout_batch_watchdog_fails_waiting_for_first_group(self):

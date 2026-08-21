@@ -186,6 +186,16 @@ CANON_P57_RUN_KIND = os.getenv("CANON_P57_RUN_KIND", "")
 CANON_P57_INFERENCE_REGIME = os.getenv("CANON_P57_INFERENCE_REGIME", "")
 CANON_P57_EVALUATION = CANON_P57_RUN_KIND == "eval"
 CANON_P57_CALIBRATION = CANON_P57_RUN_KIND == "calibration"
+CANON_P57_STOCK_TRAIN = (
+    CANON_P57_RUN_KIND == "train"
+    and os.getenv("CANON_P57_TIM_ARM", "") == "mismatch"
+    and CANON_P57_INFERENCE_REGIME == "stock-fast"
+)
+CANON_P57_STOCK_EVAL = (
+    CANON_P57_RUN_KIND == "eval"
+    and os.getenv("CANON_P57_TIM_ARM", "") == "mismatch"
+    and CANON_P57_INFERENCE_REGIME == "stock-fast"
+)
 CANON_P57_NO_UPDATE = CANON_P57_EVALUATION or CANON_P57_CALIBRATION
 CANON_P57_WORKLOAD_CANDIDATE = os.getenv(
     "CANON_P57_WORKLOAD_CANDIDATE", ""
@@ -289,6 +299,24 @@ if CANON_P32_WORKLOAD:
     )
     if CANON_L3:
       raise ValueError("P57 stock-fast calibration forbids canonical L3")
+    CANON_P33_ENABLE_EVAL = False
+  elif CANON_P57_STOCK_TRAIN:
+    P57_STOCK_FAST_ATTESTATION = (
+        dp_workloads.validate_p57_stock_train_environment(
+            P32_WORKLOAD, os.environ
+        )
+    )
+    if CANON_L3:
+      raise ValueError("P57 stock training forbids canonical L3")
+    CANON_P33_ENABLE_EVAL = False
+  elif CANON_P57_STOCK_EVAL:
+    P57_STOCK_FAST_ATTESTATION = (
+        dp_workloads.validate_p57_stock_eval_environment(
+            P32_WORKLOAD, os.environ
+        )
+    )
+    if CANON_L3:
+      raise ValueError("P57 stock evaluation forbids canonical L3")
     CANON_P33_ENABLE_EVAL = False
   else:
     dp_workloads.validate_environment(
@@ -451,6 +479,12 @@ if CANON_P32_WORKLOAD:
     )
     expected_generations = 8
     expected_temperature = 0.7
+  elif p57_workload_spec is not None:
+    expected_prompt_length = 4096
+    expected_response_length = p57_workload_spec.context_hard_cap - 4096
+    expected_env_steps = p57_workload_spec.max_turns
+    expected_generations = 2 if CANON_P57_EVALUATION else 8
+    expected_temperature = 0.0 if CANON_P57_EVALUATION else 0.7
   else:
     expected_prompt_length = 4096
     expected_response_length = 512 if CANON_P33_SHORT_ALIGNMENT else 2048
@@ -641,6 +675,23 @@ if CANON_P57_RUN_KIND:
         "P57 command/horizon mismatch: "
         f"signed={MAX_STEPS} command={args.max_steps}"
     )
+  if CANON_P57_RUN_KIND == "train":
+    try:
+      P57_STOP_AFTER_STEP = int(
+          os.environ.get("CANON_P57_STOP_AFTER_STEP", str(MAX_STEPS))
+      )
+    except ValueError as exc:
+      raise ValueError("P57 segment stop must be an integer") from exc
+    if (
+        P57_STOP_AFTER_STEP not in (50, 100, 150, 200)
+        or P57_STOP_AFTER_STEP > MAX_STEPS
+    ):
+      raise ValueError(
+          "P57 segment stop must be a registered 50-step boundary within "
+          "the signed horizon"
+      )
+  else:
+    P57_STOP_AFTER_STEP = MAX_STEPS
 elif CANON_P32_WORKLOAD:
   MAX_STEPS = dp_workloads.requested_max_steps(P32_WORKLOAD)
   if args.max_steps != MAX_STEPS:
@@ -663,6 +714,8 @@ else:
       if CANON_L3
       else int(NUM_BATCHES * NUM_ITERATIONS * TRAIN_FRACTION * NUM_EPOCHS)
   )
+if not CANON_P57_RUN_KIND:
+  P57_STOP_AFTER_STEP = MAX_STEPS
 
 MAX_CONCURRENCY = args.max_concurrency
 OFF_POLICY_STEPS = 0
@@ -1261,7 +1314,7 @@ cluster_config = rl_cluster_lib.ClusterConfig(
     training_config=rl_cluster_lib.RLTrainingConfig(
         actor_optimizer=optimizer,
         eval_every_n_steps=EVAL_EVERY_N_STEPS,
-        max_steps=MAX_STEPS,
+        max_steps=P57_STOP_AFTER_STEP,
         mini_batch_size=MINI_BATCH_SIZE,
         # Memory-shaping micro-batch for forward+backward. The optimizer sees
         # ``mini_batch_size`` sequences per gradient update; under the hood the
@@ -1364,6 +1417,19 @@ if P45_CHECKPOINT.enabled:
         "[P45.CHECKPOINT] RESTORE_PASS "
         f"step={restored_checkpoint_step} optimizer_state=1 "
         "contract_match=1",
+        flush=True,
+    )
+  if CANON_P57_STOCK_TRAIN:
+    if P57_STOP_AFTER_STEP <= restored_checkpoint_step:
+      raise ValueError(
+          "P57 stock segment must advance beyond the restored checkpoint: "
+          f"restored={restored_checkpoint_step} stop={P57_STOP_AFTER_STEP}"
+      )
+    print(
+        "[P57.STOCK] SEGMENT_PREFLIGHT "
+        f"restored={restored_checkpoint_step} "
+        f"stop_after={P57_STOP_AFTER_STEP} horizon={MAX_STEPS} "
+        "checkpoint_interval=10 max_to_keep=1",
         flush=True,
     )
 if CANON_P32_WORKLOAD:
@@ -1487,6 +1553,13 @@ grpo_trainer = GRPOLearner(
     metric_fns=[metric_fn],
 )
 show_hbm_usage("after GRPOLearner creation")
+if CANON_P57_STOCK_TRAIN:
+  print(
+      "[P57.STOCK] TRAIN_RUNTIME_PASS "
+      "regime=stock-fast arm=mismatch canonical_bundle=off "
+      "observer=warning-only",
+      flush=True,
+  )
 
 rollout_weight_sync = None
 if P45_CHECKPOINT.mode == "resume" or CANON_P57_NO_UPDATE:
@@ -1695,6 +1768,23 @@ grpo_trainer.train(
     train_dataset,
     eval_dataset=training_eval_dataset,
 )
+if CANON_P57_STOCK_TRAIN:
+  completed_step = int(grpo_trainer.rl_cluster.actor_trainer.train_steps)
+  durable_step = (
+      grpo_trainer.rl_cluster.actor_trainer.checkpoint_manager.latest_step()
+  )
+  if completed_step != P57_STOP_AFTER_STEP or durable_step != completed_step:
+    raise RuntimeError(
+        "P57 stock segment did not close on its durable boundary: "
+        f"completed={completed_step} durable={durable_step} "
+        f"expected={P57_STOP_AFTER_STEP}"
+    )
+  print(
+      "[P57.STOCK] SEGMENT_COMPLETE "
+      f"step={completed_step} durable_checkpoint={durable_step} "
+      f"horizon={MAX_STEPS} next_action=isolated-eval",
+      flush=True,
+  )
 if CANON_P31_CONVERGENCE:
   print(
       "[CANON_FROZENLAKE_P31] TRAINING_DONE "

@@ -510,10 +510,13 @@ n_p38_terminal_init=$(grep -ac '^\[CANON_P38_TERMINAL_DISCRIMINATOR_INIT\] ' "$L
 n_p38_terminal_a=$(grep -ac '^\[CANON_P38_TERMINAL_DISCRIMINATOR_RECORD\] .* arm=A ' "$LOG" || true)
 n_p38_terminal_b=$(grep -ac '^\[CANON_P38_TERMINAL_DISCRIMINATOR_RECORD\] .* arm=B ' "$LOG" || true)
 n_p38_coverage=$(grep -ac '^\[CANON_P38\] DIAGNOSTIC_COVERAGE_CONTRACT .*prompt_groups=32 .*unit_prompts=4 .*units=8 .*trajectories=256 .*partial_tail=reject verdict=PASS' "$LOG" || true)
-n_p57_stock_sync=$(grep -ac '^\[P57.STOCK_FAST\] ROLLOUT_SYNC_PASS step=0 transport=update_params exact_weight_attestation=unavailable-by-design$' "$LOG" || true)
+n_p57_stock_sync=$(grep -aEc '^\[P57.STOCK_FAST\] ROLLOUT_SYNC_PASS step=[0-9]+ transport=update_params exact_weight_attestation=unavailable-by-design$' "$LOG" || true)
+n_p57_stock_train_runtime=$(grep -ac '^\[P57.STOCK\] TRAIN_RUNTIME_PASS regime=stock-fast arm=mismatch canonical_bundle=off observer=warning-only$' "$LOG" || true)
+n_p57_stock_segment_preflight=$(grep -ac '^\[P57.STOCK\] SEGMENT_PREFLIGHT ' "$LOG" || true)
+n_p57_stock_segment_complete=$(grep -ac '^\[P57.STOCK\] SEGMENT_COMPLETE ' "$LOG" || true)
 n_p38_standard_init=$(grep -ac '^\[CANON_P38_SERVING_CAPTURE_INIT\].*expected_path=standard' "$LOG" || true)
 n_p38_standard_observe=$(grep -aEc '^\[CANON_P38_SERVING_CAPTURE_OBSERVE\].*"program_path"[[:space:]]*:[[:space:]]*"standard"' "$LOG" || true)
-echo "[run] PATHTRACE fixed_ar=$n_ar embed=$n_emb logprob_m=$n_lp wandb_online=$n_wandb p34_wandb_online=$n_wandb_p34 eval_off=$n_eval_off eval_on=$n_eval_on p35_base=$n_p35_base p35_stop=$n_p35_stop p35_replay=$n_p35_replay p35_stage_begin=$n_p35_stage_begin p35_stage_ready=$n_p35_stage_ready p35_stage_complete=$n_p35_stage_complete p38_precheck=$n_p38_precheck p38_rounds=$n_p38_rounds p38_controlled_exit=$n_p38_controlled_exit p38_fixed_primal=$n_p38_fixed_primal p38_fixed_vjp=$n_p38_fixed_vjp p38_kv_unified=$n_p38_kv_unified p38_capture_init=$n_p38_capture_init p38_capture_observe=$n_p38_capture_observe p38_capture_error=$n_p38_capture_error p38_request_journal=$n_p38_request_journal p38_incident_ledger=$n_p38_incident_ledger p38_kv_observer_init=$n_p38_kv_observer_init p38_kv_observer_candidate=$n_p38_kv_observer_candidate p38_kv_observer_a=$n_p38_kv_observer_a p38_kv_observer_b=$n_p38_kv_observer_b p38_seam_init=$n_p38_seam_init p38_seam_records=$n_p38_seam_records p38_tail_init=$n_p38_tail_init p38_tail_a=$n_p38_tail_a p38_tail_b=$n_p38_tail_b p38_terminal_init=$n_p38_terminal_init p38_terminal_a=$n_p38_terminal_a p38_terminal_b=$n_p38_terminal_b p38_coverage=$n_p38_coverage p57_stock_sync=$n_p57_stock_sync"
+echo "[run] PATHTRACE fixed_ar=$n_ar embed=$n_emb logprob_m=$n_lp wandb_online=$n_wandb p34_wandb_online=$n_wandb_p34 eval_off=$n_eval_off eval_on=$n_eval_on p35_base=$n_p35_base p35_stop=$n_p35_stop p35_replay=$n_p35_replay p35_stage_begin=$n_p35_stage_begin p35_stage_ready=$n_p35_stage_ready p35_stage_complete=$n_p35_stage_complete p38_precheck=$n_p38_precheck p38_rounds=$n_p38_rounds p38_controlled_exit=$n_p38_controlled_exit p38_fixed_primal=$n_p38_fixed_primal p38_fixed_vjp=$n_p38_fixed_vjp p38_kv_unified=$n_p38_kv_unified p38_capture_init=$n_p38_capture_init p38_capture_observe=$n_p38_capture_observe p38_capture_error=$n_p38_capture_error p38_request_journal=$n_p38_request_journal p38_incident_ledger=$n_p38_incident_ledger p38_kv_observer_init=$n_p38_kv_observer_init p38_kv_observer_candidate=$n_p38_kv_observer_candidate p38_kv_observer_a=$n_p38_kv_observer_a p38_kv_observer_b=$n_p38_kv_observer_b p38_seam_init=$n_p38_seam_init p38_seam_records=$n_p38_seam_records p38_tail_init=$n_p38_tail_init p38_tail_a=$n_p38_tail_a p38_tail_b=$n_p38_tail_b p38_terminal_init=$n_p38_terminal_init p38_terminal_a=$n_p38_terminal_a p38_terminal_b=$n_p38_terminal_b p38_coverage=$n_p38_coverage p57_stock_sync=$n_p57_stock_sync p57_stock_train_runtime=$n_p57_stock_train_runtime p57_stock_segment_preflight=$n_p57_stock_segment_preflight p57_stock_segment_complete=$n_p57_stock_segment_complete"
 if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
   if [ "$n_p38_capture_init" -ne 1 ] || [ "$n_p38_capture_observe" -le 0 ]; then
     echo "[run] FATAL: P38 serving capture hook was not observed: init=$n_p38_capture_init observe=$n_p38_capture_observe" >&2
@@ -697,14 +700,26 @@ if [ "${CANON_P58_DEEPSWE_TIM:-0}" = "1" ] && \
     exit 1
   }
   echo "[P58.NATIVE] RUNTIME_PATH_PASS canonical_markers=0 overlay=skipped"
-elif p57_is_stock_fast_calibration; then
-  if [ "$n_p57_stock_sync" -ne 1 ]; then
-    echo "[run] FATAL: P57 stock rollout weight sync marker contract failed: $n_p57_stock_sync" >&2
-    exit 1
-  fi
+elif p57_is_stock_fast_runtime; then
   p57_validate_stock_fast_runtime_markers \
     "$n_ar" "$n_emb" "$n_lp" "$n_p38_fixed_primal" \
     "$n_p38_fixed_vjp" "$n_p38_kv_unified" || exit 1
+  if p57_is_stock_fast_calibration || p57_is_stock_fast_evaluation; then
+    if [ "$n_p57_stock_sync" -ne 1 ]; then
+      echo "[run] FATAL: P57 calibration rollout weight sync marker contract failed: $n_p57_stock_sync" >&2
+      exit 1
+    fi
+  else
+    p57_expected_sync=0
+    [ "${CANON_FROZENLAKE_CKPT_MODE:-}" != "resume" ] || p57_expected_sync=1
+    if [ "$n_p57_stock_sync" -ne "$p57_expected_sync" ] || \
+       [ "$n_p57_stock_train_runtime" -ne 1 ] || \
+       [ "$n_p57_stock_segment_preflight" -ne 1 ] || \
+       [ "$n_p57_stock_segment_complete" -ne 1 ]; then
+      echo "[run] FATAL: P57 stock training segment contract failed: sync=$n_p57_stock_sync/$p57_expected_sync runtime=$n_p57_stock_train_runtime preflight=$n_p57_stock_segment_preflight complete=$n_p57_stock_segment_complete" >&2
+      exit 1
+    fi
+  fi
 elif [ "$n_ar" -eq 0 ] || [ "$n_emb" -eq 0 ]; then
   echo "[run] FATAL: no PATHTRACE for the fixed-order reductions -- the intervention did not" >&2
   echo "[run]        execute.  Any result from this run is void regardless of its exit code." >&2

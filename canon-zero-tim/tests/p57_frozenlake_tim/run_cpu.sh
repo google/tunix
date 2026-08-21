@@ -9,6 +9,7 @@ python3 -m unittest \
   canon-zero-tim/tests/p57_frozenlake_tim/test_checkpoint_eval.py \
   canon-zero-tim/tests/p57_frozenlake_tim/test_eval_classifier.py \
   canon-zero-tim/tests/p57_frozenlake_tim/test_stock_classifier.py \
+  canon-zero-tim/tests/p57_frozenlake_tim/test_provenance_derivation.py \
   canon-zero-tim/tests/p57_frozenlake_tim/test_runtime_contract.py \
   canon-zero-tim/tests/p57_frozenlake_tim/test_workloads.py \
   canon-zero-tim/tests/p33_workloads/test_classify_run.py \
@@ -21,6 +22,7 @@ python3 -m py_compile \
   canon-zero-tim/tests/p33_workloads/classify_run.py \
   canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts/classify_checkpoint_eval.py \
   canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts/classify_stock_discovery.py \
+  canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts/derive_calibration_provenance.py \
   canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts/verify_calibration_manifest.py \
   canon-zero-tim/cluster/steps/p57_probe_stock_engine.py \
   examples/frozenlake/p57_workloads.py \

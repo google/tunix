@@ -82,6 +82,68 @@ P57_STOCK_FAST_ZERO_SWITCHES = (
     "CANON_P38_FIXED_LM_HEAD",
 )
 
+# P57.1 stock training keeps only launch, checkpoint, telemetry, and the
+# observer that measures the treatment dose.  These switches are the
+# numerical/compiled-program part of the canonical bundle and must remain
+# literal zero.  Admission and observer switches are checked separately
+# because a training arm cannot set them to zero like rollout-only calibration.
+P57_STOCK_TRAIN_ZERO_SWITCHES = (
+    "CANON_RPA_VJP2",
+    "CANON_VJP2_MAX_SEQS",
+    "CANON_PROMPT_PROCESSED_LOGPROBS",
+    "CANON_PALLAS_LOGSOFTMAX",
+    "CANON_ENGINE_MODULE_C",
+    "CANON_KV_UNIFIED",
+    "CANON_P32_DP_ADMISSION",
+    "CANON_P32_DP_REDUCTION_ADMITTED",
+    "CANON_P32_DP16_SEGMENTED",
+    "CANON_FROZENLAKE_L3",
+    "CANON_FROZENLAKE_P27",
+    "CANON_P28_SEGMENTED_FORWARD",
+    "CANON_P28_SEGMENTED_VJP",
+    "CANON_P28_SEGMENTED_TRAIN",
+    "CANON_P28_G6_UPDATE",
+    "CANON_P28_BATCHED_REPORT",
+    "CANON_P28_BATCHED_REVERSE",
+    "CANON_BATCHED_EVIDENCE",
+    "CANON_P29_FULL_TRAIN",
+    "CANON_P30_SPARSE_GRAD_ASSEMBLY",
+    "CANON_P30_FUSED_PAIR_ACCUMULATION",
+    "CANON_P30_REUSE_SEGMENTED_ENGINE",
+    "CANON_P30_RELEASE_CAPTURED_STATE",
+    "CANON_P30_RESHARD_ACCUMULATOR",
+    "CANON_ALIGNMENT_GATE_ONLY",
+    "CANON_ALIGNMENT_UPDATE_CANARY",
+    "CANON_P38_FIXED_LM_HEAD",
+)
+P57_STOCK_TRAIN_ONE_SWITCHES = (
+    "CANON_P32_TRAIN_ADMITTED",
+    "CANON_P33_WORKLOAD_LAUNCH_ADMITTED",
+    "CANON_ALIGNMENT_GATE",
+    "CANON_ALIGNMENT_TRAIN",
+    "CANON_PRE_ALIGN_GATE",
+    "CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY",
+    "CANON_OPT_STATE_RESIDENT",
+    "CANON_P45_HOST_MEMORY_TELEMETRY",
+    "CANON_P45_HOST_GC_INTERVAL",
+    "ENABLE_PATHWAYS_PERSISTENCE",
+)
+P57_STOCK_EVAL_ZERO_SWITCHES = (
+    *P57_STOCK_TRAIN_ZERO_SWITCHES,
+    "CANON_P32_TRAIN_ADMITTED",
+    "CANON_ALIGNMENT_GATE",
+    "CANON_ALIGNMENT_TRAIN",
+    "CANON_PRE_ALIGN_GATE",
+    "CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY",
+)
+P57_STOCK_EVAL_ONE_SWITCHES = (
+    "CANON_P33_WORKLOAD_LAUNCH_ADMITTED",
+    "CANON_OPT_STATE_RESIDENT",
+    "CANON_P45_HOST_MEMORY_TELEMETRY",
+    "CANON_P45_HOST_GC_INTERVAL",
+    "ENABLE_PATHWAYS_PERSISTENCE",
+)
+
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class DPWorkloadSpec:
@@ -738,6 +800,136 @@ def validate_p57_stock_fast_environment(
       "regime": "stock-fast",
       "absent_switches": list(P57_STOCK_FAST_ABSENT_SWITCHES),
       "zero_switches": list(P57_STOCK_FAST_ZERO_SWITCHES),
+      "canonical_excess_precision_pin": False,
+  }
+
+
+def validate_p57_stock_train_environment(
+    workload: DPWorkloadSpec,
+    environ: Mapping[str, str] | None = None,
+) -> Mapping[str, Any]:
+  """Fails closed unless P57 runs the untreated stock training program."""
+  workload.validate()
+  values = os.environ if environ is None else environ
+  expected = {
+      "CANON_P57_RUN_KIND": "train",
+      "CANON_P57_TIM_ARM": "mismatch",
+      "CANON_P57_INFERENCE_REGIME": "stock-fast",
+      "CANON_P57_WORKLOAD_CANDIDATE": "m15",
+      "CANON_P57_DATA_SPLIT": "selection",
+      "CANON_P57_EXPECTED_UPDATES": "200",
+      "CANON_P32_WORKLOAD": workload.name,
+      "CANON_DP_SIZE": str(workload.dp_size),
+      "CANON_TP_SIZE": str(workload.tp_size),
+      "CANON_TOTAL_DEVICES": str(workload.total_devices),
+      "CANON_ENGINE_DP_SIZE": str(workload.dp_size),
+      "CANON_QWEN3_TP_SIZE": str(workload.tp_size),
+      "CANON_GLOBAL_PROMPTS": str(workload.global_prompts),
+      "CANON_LOCAL_PROMPTS": str(workload.local_prompts),
+      "CANON_NUM_GENERATIONS": str(workload.num_generations),
+      "CANON_LOCAL_TRAJECTORIES": str(workload.local_trajectories),
+      "CANON_GLOBAL_TRAJECTORIES": str(workload.global_trajectories),
+      "CANON_TARGET_M": str(workload.local_m),
+      "MIN_TOKEN_BUCKET": str(workload.global_m),
+      "CANON_P30_OPT_STATE_OFFLOAD": "0",
+  }
+  wrong = {
+      key: values.get(key)
+      for key, expected_value in expected.items()
+      if values.get(key) != expected_value
+  }
+  present = [
+      key for key in P57_STOCK_FAST_ABSENT_SWITCHES if key in values
+  ]
+  nonzero = {
+      key: values.get(key)
+      for key in P57_STOCK_TRAIN_ZERO_SWITCHES
+      if values.get(key) != "0"
+  }
+  not_one = {
+      key: values.get(key)
+      for key in P57_STOCK_TRAIN_ONE_SWITCHES
+      if values.get(key) != "1"
+  }
+  xla_flags = values.get("XLA_FLAGS", "")
+  if "--xla_allow_excess_precision=false" in xla_flags.split():
+    wrong["XLA_FLAGS"] = xla_flags
+  if present or nonzero or not_one or wrong:
+    raise ValueError(
+        "P57 stock-train environment mismatch: "
+        f"wrong={wrong} present={present} nonzero={nonzero} not_one={not_one}"
+    )
+  return {
+      "regime": "stock-fast",
+      "arm": "mismatch",
+      "absent_switches": list(P57_STOCK_FAST_ABSENT_SWITCHES),
+      "zero_switches": list(P57_STOCK_TRAIN_ZERO_SWITCHES),
+      "one_switches": list(P57_STOCK_TRAIN_ONE_SWITCHES),
+      "canonical_excess_precision_pin": False,
+  }
+
+
+def validate_p57_stock_eval_environment(
+    workload: DPWorkloadSpec,
+    environ: Mapping[str, str] | None = None,
+) -> Mapping[str, Any]:
+  """Fails closed unless P57 evaluates the untreated stock program."""
+  workload.validate()
+  values = os.environ if environ is None else environ
+  expected = {
+      "CANON_P57_RUN_KIND": "eval",
+      "CANON_P57_TIM_ARM": "mismatch",
+      "CANON_P57_INFERENCE_REGIME": "stock-fast",
+      "CANON_P57_WORKLOAD_CANDIDATE": "m15",
+      "CANON_P57_DATA_SPLIT": "selection",
+      "CANON_P57_EXPECTED_UPDATES": "200",
+      "CANON_P32_WORKLOAD": workload.name,
+      "CANON_DP_SIZE": str(workload.dp_size),
+      "CANON_TP_SIZE": str(workload.tp_size),
+      "CANON_TOTAL_DEVICES": str(workload.total_devices),
+      "CANON_ENGINE_DP_SIZE": str(workload.dp_size),
+      "CANON_QWEN3_TP_SIZE": str(workload.tp_size),
+      "CANON_GLOBAL_PROMPTS": str(workload.global_prompts),
+      "CANON_LOCAL_PROMPTS": str(workload.local_prompts),
+      "CANON_NUM_GENERATIONS": str(workload.num_generations),
+      "CANON_LOCAL_TRAJECTORIES": str(workload.local_trajectories),
+      "CANON_GLOBAL_TRAJECTORIES": str(workload.global_trajectories),
+      "CANON_TARGET_M": str(workload.local_m),
+      "MIN_TOKEN_BUCKET": str(workload.global_m),
+      "CANON_P30_OPT_STATE_OFFLOAD": "0",
+  }
+  wrong = {
+      key: values.get(key)
+      for key, expected_value in expected.items()
+      if values.get(key) != expected_value
+  }
+  present = [
+      key for key in P57_STOCK_FAST_ABSENT_SWITCHES if key in values
+  ]
+  nonzero = {
+      key: values.get(key)
+      for key in P57_STOCK_EVAL_ZERO_SWITCHES
+      if values.get(key) != "0"
+  }
+  not_one = {
+      key: values.get(key)
+      for key in P57_STOCK_EVAL_ONE_SWITCHES
+      if values.get(key) != "1"
+  }
+  xla_flags = values.get("XLA_FLAGS", "")
+  if "--xla_allow_excess_precision=false" in xla_flags.split():
+    wrong["XLA_FLAGS"] = xla_flags
+  if present or nonzero or not_one or wrong:
+    raise ValueError(
+        "P57 stock-eval environment mismatch: "
+        f"wrong={wrong} present={present} nonzero={nonzero} not_one={not_one}"
+    )
+  return {
+      "regime": "stock-fast",
+      "arm": "mismatch",
+      "absent_switches": list(P57_STOCK_FAST_ABSENT_SWITCHES),
+      "zero_switches": list(P57_STOCK_EVAL_ZERO_SWITCHES),
+      "one_switches": list(P57_STOCK_EVAL_ONE_SWITCHES),
       "canonical_excess_precision_pin": False,
   }
 

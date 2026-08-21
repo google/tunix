@@ -2164,6 +2164,23 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     self._full_batch_size = len(all_eval_prompts)
     before_train_steps = self.rl_cluster.actor_trainer.train_steps
     before_global_steps = self.rl_cluster.global_steps
+    first_group_id = before_global_steps * len(all_eval_prompts)
+
+    def _prompt_scalar(prompt_index: int, key: str):
+      try:
+        value = all_eval_prompts[prompt_index][key]
+      except (IndexError, KeyError) as exc:
+        raise RuntimeError(
+            f"P57 rollout-only prompt provenance is missing {key!r}"
+        ) from exc
+      array = np.asarray(value)
+      if array.size != 1:
+        raise RuntimeError(
+            "P57 rollout-only prompt provenance must be scalar: "
+            f"index={prompt_index} key={key} shape={array.shape}"
+        )
+      return array.reshape(-1)[0].item()
+
     orchestrator = self._build_orchestrator()
     started = time.perf_counter()
 
@@ -2207,12 +2224,19 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
               if isinstance(message, dict)
               and message.get("role") == "assistant"
           )
-          original = traj.get("original_input") or {}
+          group_id = int(item.group_id)
+          prompt_index = group_id - first_group_id
+          if prompt_index not in range(len(all_eval_prompts)):
+            raise RuntimeError(
+                "P57 rollout-only group id cannot join its prompt: "
+                f"group_id={group_id} first={first_group_id} "
+                f"prompts={len(all_eval_prompts)}"
+            )
           reward_value = float(traj.get("trajectory_reward", 0.0))
           if not np.isfinite(reward_value):
             raise RuntimeError("P57 rollout-only trajectory reward is not finite")
           records.append({
-              "group_id": int(item.group_id),
+              "group_id": group_id,
               "pair_index": int(item.pair_index),
               "policy_version": int(traj.get("policy_version", policy_step)),
               "status": str(traj.get("status", "")),
@@ -2226,13 +2250,17 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
               "completion_tokens": int(completion_tokens.size),
               "assistant_tokens": int(np.count_nonzero(completion_masks)),
               "context_tokens": prompt_length + int(completion_tokens.size),
-              "p57_index": int(np.asarray(original.get("p57_index", -1))),
-              "grid_side": int(np.asarray(original.get("size", -1))),
+              # The agent trajectory's first observation is presentation text,
+              # not the original Grain row. Join through the orchestrator's
+              # exact group-id construction instead of pretending that
+              # ``trajectory.task`` retained dataset metadata.
+              "p57_index": int(_prompt_scalar(prompt_index, "p57_index")),
+              "grid_side": int(_prompt_scalar(prompt_index, "size")),
               "shortest_path": int(
-                  np.asarray(original.get("shortest_path", -1))
+                  _prompt_scalar(prompt_index, "shortest_path")
               ),
               "map_sha256": str(
-                  np.asarray(original.get("map_sha256", "")).item()
+                  _prompt_scalar(prompt_index, "map_sha256")
               ),
           })
         batches += 1

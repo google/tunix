@@ -48,6 +48,25 @@ def _container_env(document):
   return container["env"]
 
 
+def _run_env_preflight(rendered_env, state: Path):
+  state.mkdir()
+  return subprocess.run(
+      ["bash", "cluster/steps/00_env.sh"],
+      cwd=ROOT / "canon-zero-tim",
+      env={
+          **os.environ,
+          **{k: v for k, v in rendered_env.items() if v is not None},
+          "CANON_PKG": str(ROOT / "canon-zero-tim"),
+          "CANON_STATE": str(state),
+          "INJECTED_HF_TOKEN": "test-token",
+          "INJECTED_WANDB_API_KEY": "test-key",
+      },
+      text=True,
+      capture_output=True,
+      check=False,
+  )
+
+
 class P57RendererTest(unittest.TestCase):
 
   def test_calibration_renders_one_stock_stochastic_no_update_job(self):
@@ -314,6 +333,94 @@ class P57RendererTest(unittest.TestCase):
               ],
           )
           self.assertIn("--env_max_steps=15", env["CANON_RUN_CMD"])
+          self.assertIn("--max_prompt_length=4096", env["CANON_RUN_CMD"])
+          self.assertIn("--max_response_length=8192", env["CANON_RUN_CMD"])
+          self.assertEqual(env["CANON_P57_STOP_AFTER_STEP"], "200")
+          if stock_only:
+            self.assertEqual(env["CANON_P57_INFERENCE_REGIME"], "stock-fast")
+
+  def test_stock_curve_renders_registered_segment_and_eval(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      train_path = paired.render_all(
+          base_path=BASE,
+          output_dir=Path(tmp) / "train",
+          source_commit="a" * 40,
+          run_id="p57stock50",
+          campaign_tag="p57-m15-selection",
+          checkpoint_mode="new",
+          expected_updates=200,
+          run_kind="train",
+          workload_candidate="m15",
+          data_split="selection",
+          stock_only=True,
+          stop_after_step=50,
+      )[0]
+      eval_path = paired.render_all(
+          base_path=BASE,
+          output_dir=Path(tmp) / "eval",
+          source_commit="a" * 40,
+          run_id="p57stockeval0",
+          campaign_tag="p57-m15-selection",
+          checkpoint_mode="new",
+          expected_updates=200,
+          run_kind="eval",
+          checkpoint_step=0,
+          workload_candidate="m15",
+          data_split="selection",
+          stock_only=True,
+      )[0]
+      train_env = _env(yaml.safe_load(train_path.read_text()))
+      eval_env = _env(yaml.safe_load(eval_path.read_text()))
+      train_preflight = _run_env_preflight(train_env, Path(tmp) / "train-state")
+      eval_preflight = _run_env_preflight(eval_env, Path(tmp) / "eval-state")
+    self.assertEqual(train_env["CANON_P57_STOP_AFTER_STEP"], "50")
+    self.assertIn("--max_steps=200", train_env["CANON_RUN_CMD"])
+    self.assertEqual(eval_env["CANON_P57_INFERENCE_REGIME"], "stock-fast")
+    self.assertEqual(eval_env["CANON_P57_EVAL_CHECKPOINT_STEP"], "0")
+    self.assertIn("--evaluation_only", eval_env["CANON_RUN_CMD"])
+    self.assertIn("--max_prompt_length=4096", eval_env["CANON_RUN_CMD"])
+    self.assertIn("--max_response_length=8192", eval_env["CANON_RUN_CMD"])
+    self.assertEqual(train_preflight.returncode, 0, train_preflight.stderr)
+    self.assertEqual(eval_preflight.returncode, 0, eval_preflight.stderr)
+    self.assertIn(
+        "[P57.STOCK_FAST] ZERO_TIM_OFF_PASS mode=train absent=12 observer=train",
+        train_preflight.stdout,
+    )
+    self.assertIn(
+        "[P57.STOCK_FAST] ZERO_TIM_OFF_PASS mode=eval absent=12 observer=off",
+        eval_preflight.stdout,
+    )
+
+  def test_stock_curve_rejects_unregistered_stop_or_recipe(self):
+    common = dict(
+        base_path=BASE,
+        source_commit="a" * 40,
+        run_id="p57stock",
+        campaign_tag="p57-m15-selection",
+        checkpoint_mode="new",
+        expected_updates=200,
+        run_kind="train",
+        data_split="selection",
+        stock_only=True,
+    )
+    with tempfile.TemporaryDirectory() as tmp, self.assertRaisesRegex(
+        ValueError, "50-step boundary"
+    ):
+      paired.render_all(
+          **common,
+          output_dir=Path(tmp),
+          workload_candidate="m15",
+          stop_after_step=60,
+      )
+    with tempfile.TemporaryDirectory() as tmp, self.assertRaisesRegex(
+        ValueError, "frozen to M15"
+    ):
+      paired.render_all(
+          **common,
+          output_dir=Path(tmp),
+          workload_candidate="m10",
+          stop_after_step=50,
+      )
 
   def test_paired_renderer_rejects_calibration_split(self):
     with tempfile.TemporaryDirectory() as tmp:

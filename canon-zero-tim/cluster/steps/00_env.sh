@@ -50,9 +50,18 @@ set +a
 P57_STOCK_FAST=0
 if [ "${CANON_PROFILE_FILE:-}" = \
      "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env" ] && \
-   [ "${CANON_P57_RUN_KIND:-}" = "calibration" ] && \
    [ "${CANON_P57_INFERENCE_REGIME:-}" = "stock-fast" ]; then
   P57_STOCK_FAST=1
+fi
+P57_STOCK_TRAIN=0
+if [ "$P57_STOCK_FAST" = "1" ] && \
+   [ "${CANON_P57_RUN_KIND:-}:${CANON_P57_TIM_ARM:-}" = "train:mismatch" ]; then
+  P57_STOCK_TRAIN=1
+fi
+P57_STOCK_EVAL=0
+if [ "$P57_STOCK_FAST" = "1" ] && \
+   [ "${CANON_P57_RUN_KIND:-}:${CANON_P57_TIM_ARM:-}" = "eval:mismatch" ]; then
+  P57_STOCK_EVAL=1
 fi
 P58_NATIVE=0
 if [ "${CANON_PROFILE_FILE:-}" = \
@@ -146,17 +155,37 @@ if [ "$P57_STOCK_FAST" = "1" ] || [ "$P58_NATIVE" = "1" ]; then
   for k in CANON_RPA_VJP2 CANON_VJP2_MAX_SEQS \
            CANON_PROMPT_PROCESSED_LOGPROBS CANON_PALLAS_LOGSOFTMAX \
            CANON_ENGINE_MODULE_C CANON_KV_UNIFIED \
-           CANON_P32_TRAIN_ADMITTED CANON_P32_DP_REDUCTION_ADMITTED \
+           CANON_P32_DP_ADMISSION CANON_P32_TRAIN_ADMITTED \
+           CANON_P32_DP_REDUCTION_ADMITTED \
            CANON_P33_WORKLOAD_LAUNCH_ADMITTED CANON_P32_DP16_SEGMENTED \
            CANON_FROZENLAKE_L3 CANON_FROZENLAKE_P27 \
            CANON_P28_SEGMENTED_FORWARD CANON_P28_SEGMENTED_VJP \
            CANON_P28_SEGMENTED_TRAIN CANON_P28_G6_UPDATE \
-           CANON_P28_BATCHED_REPORT CANON_P29_FULL_TRAIN \
+           CANON_P28_BATCHED_REPORT CANON_P28_BATCHED_REVERSE \
+           CANON_BATCHED_EVIDENCE CANON_P29_FULL_TRAIN \
+           CANON_P30_SPARSE_GRAD_ASSEMBLY \
+           CANON_P30_FUSED_PAIR_ACCUMULATION \
+           CANON_P30_REUSE_SEGMENTED_ENGINE \
+           CANON_P30_RELEASE_CAPTURED_STATE \
+           CANON_P30_RESHARD_ACCUMULATOR \
            CANON_ALIGNMENT_GATE CANON_ALIGNMENT_GATE_ONLY \
            CANON_ALIGNMENT_UPDATE_CANARY CANON_ALIGNMENT_TRAIN \
            CANON_PRE_ALIGN_GATE CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY \
            CANON_P38_FIXED_LM_HEAD; do
     stock_expected=0
+    if [ "$P57_STOCK_TRAIN" = "1" ]; then
+      case "$k" in
+        CANON_P32_TRAIN_ADMITTED|CANON_P33_WORKLOAD_LAUNCH_ADMITTED|CANON_ALIGNMENT_GATE|CANON_ALIGNMENT_TRAIN|CANON_PRE_ALIGN_GATE|CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY)
+          stock_expected=1
+          ;;
+      esac
+    elif [ "$P57_STOCK_EVAL" = "1" ]; then
+      case "$k" in
+        CANON_P33_WORKLOAD_LAUNCH_ADMITTED)
+          stock_expected=1
+          ;;
+      esac
+    fi
     if [ "$P58_NATIVE" = "1" ]; then
       case "$k" in
         CANON_P32_TRAIN_ADMITTED|CANON_P33_WORKLOAD_LAUNCH_ADMITTED|CANON_ALIGNMENT_GATE|CANON_ALIGNMENT_TRAIN|CANON_PRE_ALIGN_GATE)
@@ -574,25 +603,36 @@ if [ "${CANON_PROFILE_FILE:-}" = \
       [ -z "${CANON_P57_INFERENCE_REGIME:-}" ] && \
       [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "1" ] && \
       [ "${CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY:-0}" = "0" ] && \
+      [[ "${CANON_P57_STOP_AFTER_STEP:-}" =~ ^[1-9][0-9]*$ ]] && \
       [ -z "${CANON_P57_EVAL_CHECKPOINT_STEP:-}${CANON_P57_EVAL_OUTPUT:-}" ] || {
         echo "[env] P57 zero training contract drifted" >&2
         fail=1
       }
       ;;
     train:mismatch)
-      [ -z "${CANON_P57_INFERENCE_REGIME:-}" ] && \
+      [ "${CANON_P57_INFERENCE_REGIME:-}" = "stock-fast" ] && \
       [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "0" ] && \
       [ "${CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY:-0}" = "1" ] && \
+      [ "${CANON_P57_WORKLOAD_CANDIDATE:-}" = "m15" ] && \
+      [ "${CANON_P57_DATA_SPLIT:-}" = "selection" ] && \
+      [ "${CANON_P57_EXPECTED_UPDATES:-}" = "200" ] && \
+      [[ "${CANON_P57_STOP_AFTER_STEP:-}" =~ ^(50|100|150|200)$ ]] && \
       [ -z "${CANON_P57_EVAL_CHECKPOINT_STEP:-}${CANON_P57_EVAL_OUTPUT:-}" ] || {
         echo "[env] P57 mismatch training contract drifted" >&2
         fail=1
       }
       ;;
     eval:zero|eval:mismatch)
-      [ -z "${CANON_P57_INFERENCE_REGIME:-}" ] || {
-        echo "[env] P57 legacy eval does not admit an inference-regime override" >&2
+      if [ "${CANON_P57_TIM_ARM}" = "mismatch" ]; then
+        [ "$P57_STOCK_EVAL" = "1" ] && \
+        [ "${CANON_P57_INFERENCE_REGIME:-}" = "stock-fast" ] || {
+          echo "[env] P57 mismatch eval requires the stock-fast runtime" >&2
+          fail=1
+        }
+      elif [ -n "${CANON_P57_INFERENCE_REGIME:-}" ]; then
+        echo "[env] P57 zero eval forbids an inference-regime override" >&2
         fail=1
-      }
+      fi
       p57_expected_fixed=0
       [ "${CANON_P57_TIM_ARM}" = "zero" ] && p57_expected_fixed=1
       [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "$p57_expected_fixed" ] && \
@@ -618,7 +658,7 @@ if [ "${CANON_PROFILE_FILE:-}" = \
       fail=1
       ;;
   esac
-elif [ -n "${CANON_P57_TIM_ARM:-}${CANON_P57_RUN_KIND:-}${CANON_P57_INFERENCE_REGIME:-}${CANON_P57_EXPECTED_UPDATES:-}${CANON_P57_EVAL_CHECKPOINT_STEP:-}${CANON_P57_EVAL_OUTPUT:-}${CANON_P57_CALIBRATION_MODE:-}${CANON_P57_CALIBRATION_OUTPUT:-}${CANON_P57_CALIBRATION_RECIPES:-}${CANON_P57_WORKLOAD_CANDIDATE:-}${CANON_P57_DATA_SPLIT:-}" ]; then
+elif [ -n "${CANON_P57_TIM_ARM:-}${CANON_P57_RUN_KIND:-}${CANON_P57_INFERENCE_REGIME:-}${CANON_P57_EXPECTED_UPDATES:-}${CANON_P57_STOP_AFTER_STEP:-}${CANON_P57_EVAL_CHECKPOINT_STEP:-}${CANON_P57_EVAL_OUTPUT:-}${CANON_P57_CALIBRATION_MODE:-}${CANON_P57_CALIBRATION_OUTPUT:-}${CANON_P57_CALIBRATION_RECIPES:-}${CANON_P57_WORKLOAD_CANDIDATE:-}${CANON_P57_DATA_SPLIT:-}" ]; then
   echo "[env] P57 fields require the P57 profile" >&2
   fail=1
 fi
@@ -1844,7 +1884,13 @@ if [ "${CANON_MODE:-}" = "workload-contract-only" ]; then
 fi
 [ "$fail" = 0 ] || { echo "[env] REFUSING TO CONTINUE: canonical set incomplete" >&2; exit 1; }
 if [ "$P57_STOCK_FAST" = "1" ]; then
-  echo "[P57.STOCK_FAST] ZERO_TIM_OFF_PASS absent=12 zero=25"
+  if [ "$P57_STOCK_TRAIN" = "1" ]; then
+    echo "[P57.STOCK_FAST] ZERO_TIM_OFF_PASS mode=train absent=12 observer=train"
+  elif [ "$P57_STOCK_EVAL" = "1" ]; then
+    echo "[P57.STOCK_FAST] ZERO_TIM_OFF_PASS mode=eval absent=12 observer=off"
+  else
+    echo "[P57.STOCK_FAST] ZERO_TIM_OFF_PASS absent=12 zero=25"
+  fi
 fi
 
 # Emit the resolved configuration as an authoritative snapshot.  00_env.sh runs in a child

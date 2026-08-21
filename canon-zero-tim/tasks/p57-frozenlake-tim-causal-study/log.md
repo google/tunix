@@ -133,3 +133,22 @@
 - Files/artifacts: `evidence/p57cal5/run.log`; `tunix/rl/frozenlake_checkpoint.py`; FrozenLake entrypoint; P45 checkpoint contract test; P57 state/handoff/runbook/lessons.
 - Rollback: revert this ownership-repair change set; the prior published behavior is the p57cal5 failure at `39e77bdd`.
 - Next: after publication, render `p57cal6` from the immutable repair SHA and obtain separate launch approval. Accept only real rollout progress plus the complete wrapper evidence contract.
+
+## 2026-08-21 UTC — p57cal6 selected M15 after auditable provenance repair
+
+- Type: target evidence/correction/decision
+- Fact: p57cal6 completed all M10/M15/M20 stock-fast rollouts, but the recorder wrote sentinel values for `p57_index`, grid side, shortest path, and map SHA because it read the post-construction trajectory task instead of the original dataset row. Every record retained exact `group_id` and pair index; no measured outcome was missing.
+- Action: preserved the original receipt byte-for-byte, rematerialized the signed deterministic calibration rows, joined `group_id` to the source row, required complete 100x8 pair coverage per recipe, and wrote a new derived receipt plus separate SHA proof. Repaired future recording at the learner boundary by joining the orchestrator's registered group-id ordering back to its prompt inventory.
+- Result: source SHA `b34084dc...` unchanged; derived receipt SHA `ec03fe33...`; proof SHA `4328123d...`; classifier SHA `b6b6e04e...`. The unchanged classifier returned `PASS / FREEZE_M15`. M10/M15/M20 solve rates are 32.125/24.625/25.625%; M15 has 56% mixed groups, max context 7,403, max completion 6,223, and no cap hit.
+- Files/artifacts: `evidence/p57cal6/p57_calibration.json`; `p57_calibration.derived.json`; `provenance_derivation.json`; `classification.derived.json`; derivation script and regression test.
+- Next: freeze M15 and implement only its stock `selection` curve. No zero-arm outcome is admitted.
+
+## 2026-08-21 UTC — full-bundle stock M15 segmented curve prepared
+
+- Type: implementation/plan advance
+- Fact: merely zeroing profile flags was insufficient: the runtime router still selected the canonical overlay outside calibration, and the old evaluator would therefore assess stock checkpoints with a different numerical program. LatestN(1) also requires evaluation before advancing to the next retained boundary.
+- Action: extended pristine stock runtime routing to exact mismatch train/eval; added independent stock train/eval environment validators; pinned M15 selection, horizon 200, prompt/response 4096/8192, and stop boundaries 50/100/150/200; added durable segment preflight/completion postflight; kept finite A-B warning-only while structural/nonfinite/non-treatment failures remain fatal; and rewrote runbook/handoff for eval-0 → train-50 → eval-50 → resume.
+- Command: `bash canon-zero-tim/tests/p57_frozenlake_tim/run_cpu.sh`; `bash canon-zero-tim/tests/p45_frozenlake_dp8_tp8/run_exact_image.sh`; shell/Python syntax checks; `git diff --check`.
+- Result: the completed-tree P57 host suite passed `86/86` with terminal `P57_FROZENLAKE_TIM_CPU_PASS`. The pinned image `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a` matched all 34 Qwen3-8B TP8 overlay files, passed base `110/110`, P45 `40/40`, PEFT `2/2`, Agentic `4/4`, all stock import/drift/entrypoint gates, the seven TP8 projection sites, fixed lm-head, and forward/VJP probes; terminal `P45_EXACT_IMAGE_CPU_PASS overlay=qwen8b_tp8`, exit 0. Shell/Python syntax and `git diff --check` are clean. No TPU, commit, or push occurred.
+- Rollback: discard this uncommitted concern; all behavior is P57-env-gated.
+- Next: review this uncommitted concern, then request separate commit and push approvals. Only the resulting immutable 40-character SHA may be used for separately approved stock eval-0 and train 0→50 launches.

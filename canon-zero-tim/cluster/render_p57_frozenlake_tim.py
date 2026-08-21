@@ -41,6 +41,7 @@ _TRAIN_ARM_ENV_DIFFERENCES = {
     "CANON_FROZENLAKE_CKPT_TAG",
     "CANON_P38_FIXED_LM_HEAD",
     "CANON_P57_TIM_ARM",
+    "CANON_P57_INFERENCE_REGIME",
     "CANON_STATE",
     "CANON_RUN_LOG",
     "CANON_PRE_ALIGN_REPORT",
@@ -134,6 +135,14 @@ def _spec(
         f"--p57_workload_candidate={workload_candidate}",
         f"--p57_data_split={data_split}",
     ))
+    _replace_command_arg(
+        command, "--max_prompt_length=", "--max_prompt_length=4096"
+    )
+    _replace_command_arg(
+        command,
+        "--max_response_length=",
+        f"--max_response_length={candidate.context_hard_cap - 4096}",
+    )
   if run_kind == "train":
     command.append("--eval_every_n_steps=0")
     key_suffix = str(expected_updates)
@@ -218,6 +227,7 @@ def render_all(
     workload_candidate: str = "",
     data_split: str = "",
     stock_only: bool = False,
+    stop_after_step: int | None = None,
 ) -> tuple[Path, ...]:
   if expected_updates not in _ALLOWED_UPDATES:
     raise ValueError(
@@ -237,6 +247,10 @@ def render_all(
     p57_workloads.validate_split(data_split)
   if stock_only and (not workload_candidate or data_split != "selection"):
     raise ValueError("P57 stock-only training/eval requires a selection recipe")
+  if stock_only and (
+      workload_candidate != "m15" or expected_updates != 200
+  ):
+    raise ValueError("P57 stock curve is frozen to M15 selection for 200 updates")
   if not stock_only and workload_candidate and data_split != "main":
     raise ValueError("P57 paired arms require the frozen main data split")
   if run_kind == "eval":
@@ -257,6 +271,17 @@ def render_all(
       )
   if not _TAG_RE.fullmatch(campaign_tag):
     raise ValueError("P57 campaign tag is invalid or too long")
+  if run_kind == "train":
+    stop_after_step = (
+        expected_updates if stop_after_step is None else stop_after_step
+    )
+    if (
+        stop_after_step not in (50, 100, 150, 200)
+        or stop_after_step > expected_updates
+    ):
+      raise ValueError("P57 stop-after-step must be a 50-step boundary in horizon")
+  elif stop_after_step is not None:
+    raise ValueError("P57 evaluation does not accept a training stop boundary")
   base = p33.load_base(base_path)
   output_dir.mkdir(parents=True, exist_ok=True)
   documents: dict[str, dict] = {}
@@ -295,7 +320,13 @@ def render_all(
             "CANON_P38_FIXED_LM_HEAD": "1" if arm.fixed_lm_head else "0",
             "CANON_P57_TIM_ARM": arm.name,
             "CANON_P57_RUN_KIND": run_kind,
+            "CANON_P57_INFERENCE_REGIME": (
+                "stock-fast" if arm.name == "mismatch" else ""
+            ),
             "CANON_P57_EXPECTED_UPDATES": str(expected_updates),
+            "CANON_P57_STOP_AFTER_STEP": (
+                str(stop_after_step) if run_kind == "train" else ""
+            ),
             "CANON_P57_WORKLOAD_CANDIDATE": workload_candidate,
             "CANON_P57_DATA_SPLIT": data_split,
             "CANON_P57_EVAL_CHECKPOINT_STEP": (
@@ -340,6 +371,9 @@ def render_all(
         "CANON_PROFILE_FILE": _PROFILE,
         "CANON_P57_TIM_ARM": arm.name,
         "CANON_P57_RUN_KIND": run_kind,
+        "CANON_P57_INFERENCE_REGIME": (
+            "stock-fast" if arm.name == "mismatch" else ""
+        ),
         "CANON_P57_EXPECTED_UPDATES": str(expected_updates),
         "CANON_P57_WORKLOAD_CANDIDATE": workload_candidate,
         "CANON_P57_DATA_SPLIT": data_split,
@@ -356,6 +390,8 @@ def render_all(
           "CANON_P57_EVAL_OUTPUT": f"{state}/p57_evaluation.json",
           "CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY": "0",
       })
+    else:
+      expected["CANON_P57_STOP_AFTER_STEP"] = str(stop_after_step)
     wrong = {key: env.get(key) for key, value in expected.items() if env.get(key) != value}
     if wrong:
       raise ValueError(f"P57 rendered contract drifted: {wrong}")
@@ -369,6 +405,7 @@ def render_all(
     if (
         stock.get("CANON_P38_FIXED_LM_HEAD") != "0"
         or stock.get("CANON_P57_TIM_ARM") != "mismatch"
+        or stock.get("CANON_P57_INFERENCE_REGIME") != "stock-fast"
         or stock.get("CANON_P57_WORKLOAD_CANDIDATE") != workload_candidate
         or stock.get("CANON_P57_DATA_SPLIT") != data_split
     ):
@@ -407,6 +444,7 @@ def main() -> int:
   parser.add_argument("--workload-candidate", choices=tuple(p57_workloads.CANDIDATES), default="")
   parser.add_argument("--data-split", choices=("calibration", "selection", "main"), default="")
   parser.add_argument("--stock-only", action="store_true")
+  parser.add_argument("--stop-after-step", type=int)
   parser.add_argument(
       "--base", type=Path, default=Path(__file__).with_name("jobset-64chip.yaml")
   )
@@ -424,6 +462,7 @@ def main() -> int:
       workload_candidate=args.workload_candidate,
       data_split=args.data_split,
       stock_only=args.stock_only,
+      stop_after_step=args.stop_after_step,
   )
   print(
       "[P57.JOBSET] VERDICT PASS "

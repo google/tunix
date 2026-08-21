@@ -84,6 +84,45 @@ class P57StockFastContractTest(unittest.TestCase):
               workload, {**values, name: value}
           )
 
+  def test_stock_train_and_eval_bundles_are_accepted(self):
+    workload, base = self._environment()
+    shared = {
+        **base,
+        "CANON_P57_WORKLOAD_CANDIDATE": "m15",
+        "CANON_P57_DATA_SPLIT": "selection",
+        "CANON_P57_EXPECTED_UPDATES": "200",
+        "CANON_P30_OPT_STATE_OFFLOAD": "0",
+    }
+    train = {
+        **shared,
+        "CANON_P57_RUN_KIND": "train",
+        **{name: "0" for name in dp_workloads.P57_STOCK_TRAIN_ZERO_SWITCHES},
+        **{name: "1" for name in dp_workloads.P57_STOCK_TRAIN_ONE_SWITCHES},
+    }
+    eval_values = {
+        **shared,
+        "CANON_P57_RUN_KIND": "eval",
+        **{name: "0" for name in dp_workloads.P57_STOCK_EVAL_ZERO_SWITCHES},
+        **{name: "1" for name in dp_workloads.P57_STOCK_EVAL_ONE_SWITCHES},
+    }
+    train_attestation = dp_workloads.validate_p57_stock_train_environment(
+        workload, train
+    )
+    eval_attestation = dp_workloads.validate_p57_stock_eval_environment(
+        workload, eval_values
+    )
+    self.assertEqual(train_attestation["arm"], "mismatch")
+    self.assertEqual(eval_attestation["arm"], "mismatch")
+
+    with self.assertRaisesRegex(ValueError, "stock-train environment"):
+      dp_workloads.validate_p57_stock_train_environment(
+          workload, {**train, "CANON_P28_SEGMENTED_TRAIN": "1"}
+      )
+    with self.assertRaisesRegex(ValueError, "stock-eval environment"):
+      dp_workloads.validate_p57_stock_eval_environment(
+          workload, {**eval_values, "CANON_P33_WORKLOAD_LAUNCH_ADMITTED": "0"}
+      )
+
 
 if __name__ == "__main__":
   unittest.main()

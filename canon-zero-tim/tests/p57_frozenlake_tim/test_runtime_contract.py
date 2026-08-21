@@ -1,4 +1,4 @@
-"""Runtime routing and postflight gates for P57 stock-fast calibration."""
+"""Runtime routing and postflight gates for P57 stock-fast runs."""
 
 from __future__ import annotations
 
@@ -55,6 +55,44 @@ class P57RuntimeContractTest(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
+  def test_exact_stock_training_selects_stock_engine_but_is_training(self):
+    good = {
+        "CANON_PROFILE_FILE": PROFILE,
+        "CANON_P57_RUN_KIND": "train",
+        "CANON_P57_TIM_ARM": "mismatch",
+        "CANON_P57_INFERENCE_REGIME": "stock-fast",
+    }
+    result = _bash(
+        "p57_is_stock_fast_training; p57_is_stock_fast_runtime; "
+        "if p57_is_nontraining_runtime; then exit 9; fi",
+        good,
+    )
+    self.assertEqual(result.returncode, 0, result.stderr)
+    for changed in (
+        {"CANON_P57_TIM_ARM": "zero"},
+        {"CANON_P57_RUN_KIND": "eval"},
+        {"CANON_P57_INFERENCE_REGIME": ""},
+    ):
+      with self.subTest(changed=changed):
+        result = _bash(
+            "if p57_is_stock_fast_training; then exit 9; fi",
+            {**good, **changed},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+  def test_exact_stock_eval_is_stock_runtime_and_nontraining(self):
+    result = _bash(
+        "p57_is_stock_fast_evaluation; p57_is_stock_fast_runtime; "
+        "p57_is_nontraining_runtime",
+        {
+            "CANON_PROFILE_FILE": PROFILE,
+            "CANON_P57_RUN_KIND": "eval",
+            "CANON_P57_TIM_ARM": "mismatch",
+            "CANON_P57_INFERENCE_REGIME": "stock-fast",
+        },
+    )
+    self.assertEqual(result.returncode, 0, result.stderr)
+
   def test_only_exact_p57_eval_bypasses_training_admission(self):
     result = _bash(
         "p57_is_nontraining_runtime; ! p57_is_stock_fast_calibration",
@@ -94,7 +132,7 @@ class P57RuntimeContractTest(unittest.TestCase):
 
   def test_entrypoint_stock_branch_never_installs_canonical_overlay(self):
     text = ENTRYPOINT.read_text(encoding="utf-8")
-    start = text.index("elif p57_is_stock_fast_calibration; then")
+    start = text.index("elif p57_is_stock_fast_runtime; then")
     end = text.index("\nelse\n", start)
     branch = text[start:end]
     self.assertIn("step 35_install_r2egym.sh", branch)
@@ -108,7 +146,9 @@ class P57RuntimeContractTest(unittest.TestCase):
   def test_runner_keeps_distinct_stock_and_canonical_postflights(self):
     text = RUNNER.read_text(encoding="utf-8")
     self.assertIn("p57_validate_stock_fast_runtime_markers", text)
+    self.assertIn("elif p57_is_stock_fast_runtime; then", text)
     self.assertIn('n_p57_stock_sync" -ne 1', text)
+    self.assertIn('n_p57_stock_segment_complete" -ne 1', text)
     self.assertIn('elif [ "$n_ar" -eq 0 ] || [ "$n_emb" -eq 0 ]', text)
 
 

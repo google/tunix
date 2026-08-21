@@ -1396,7 +1396,12 @@ def check_batch(
       os.environ.get("CANON_P58_DEEPSWE_TIM", "") == "1"
       and os.environ.get("CANON_P58_TIM_ARM", "") == "native"
   )
-  if p58_native:
+  p57_stock = (
+      os.environ.get("CANON_P57_RUN_KIND", "") == "train"
+      and os.environ.get("CANON_P57_TIM_ARM", "") == "mismatch"
+      and os.environ.get("CANON_P57_INFERENCE_REGIME", "") == "stock-fast"
+  )
+  if p58_native or p57_stock:
     canonical_c = {
         "mode": "native-stock-trainer",
         "canonical_engine_registered": False,
