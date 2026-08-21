@@ -25,14 +25,8 @@ class Block:
   def total_num_pages(self) -> int:
     return self.available_page_indices.shape[0]
 
-@jax.tree_util.register_dataclass
-@dataclasses.dataclass(frozen=True, kw_only=True)
-class BatchPageManager:
-  """Manager wrapping a Block."""
-  block: Block
-
   @classmethod
-  def init(cls, num_pages: int, page_size: int, block_spec: BlockSpec, device: Any = None) -> "BatchPageManager":
+  def init(cls, num_pages: int, page_size: int, block_spec: BlockSpec, device: Any = None) -> "Block":
       dtype = block_spec.dtype
       subshape = block_spec.subshape
       shape = (num_pages, page_size) + subshape
@@ -46,44 +40,50 @@ class BatchPageManager:
           available_page_indices = jax.device_put(available_page_indices, device)
           num_available_pages = jax.device_put(num_available_pages, device)
           
-      block = Block(
+      return cls(
           pages=pages,
           available_page_indices=available_page_indices,
           num_available_pages=num_available_pages,
           page_size=page_size
       )
-      return cls(block=block)
 
-  def allocate(self, num_pages_to_allocate: jax.Array) -> tuple["BatchPageManager", jax.Array]:
-    start = self.block.total_num_pages - self.block.num_available_pages
-    allocated_indices = self.block.available_page_indices[:num_pages_to_allocate]
+  def allocate(self, num_pages_to_allocate: jax.Array) -> tuple["Block", jax.Array]:
+    start = self.total_num_pages - self.num_available_pages
+    allocated_indices = self.available_page_indices[:num_pages_to_allocate]
     updated_available_page_indices = jnp.roll(
-        self.block.available_page_indices, -num_pages_to_allocate
+        self.available_page_indices, -num_pages_to_allocate
     )
-    updated_num_available_pages = self.block.num_available_pages - num_pages_to_allocate
+    updated_num_available_pages = self.num_available_pages - num_pages_to_allocate
     
     new_block = dataclasses.replace(
-        self.block,
+        self,
         available_page_indices=updated_available_page_indices,
         num_available_pages=updated_num_available_pages,
     )
-    return dataclasses.replace(self, block=new_block), allocated_indices
+    return new_block, allocated_indices
 
-  def evict_pages(self, page_indices_to_evict: jax.Array, num_evicted: jax.Array) -> "BatchPageManager":
-    start_pos = self.block.total_num_pages - self.block.num_available_pages - num_evicted
+  def release(self, page_indices_to_evict: jax.Array, num_evicted: jax.Array) -> "Block":
+    start_pos = self.total_num_pages - self.num_available_pages - num_evicted
     target_indices = jnp.arange(page_indices_to_evict.shape[0])
     safe_indices = jnp.where(target_indices < num_evicted, start_pos + target_indices, 0)
     
-    updated_available_page_indices = self.block.available_page_indices.at[
+    updated_available_page_indices = self.available_page_indices.at[
         safe_indices
     ].set(page_indices_to_evict, mode='drop')
     
-    new_block = dataclasses.replace(
-        self.block,
+    return dataclasses.replace(
+        self,
         available_page_indices=updated_available_page_indices,
-        num_available_pages=self.block.num_available_pages + num_evicted,
+        num_available_pages=self.num_available_pages + num_evicted,
     )
-    return dataclasses.replace(self, block=new_block)
+
+@jax.tree_util.register_dataclass
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class BatchPageManager:
+  """Manager wrapping a Block."""
+  block: Block
+  page_indices: jax.Array
+  seq_lens: jax.Array
 
 def copy_physical_pages(
     src_pages: jax.Array,

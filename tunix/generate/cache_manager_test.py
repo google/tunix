@@ -36,6 +36,16 @@ class CacheManagerTest(unittest.TestCase):
                 self.total_num_pages = num_pages
                 self.pages = jnp.zeros((num_pages, 8, 4))
                 self.available_page_indices = jnp.arange(num_pages)
+                
+            def allocate(self, num_pages):
+                num = int(num_pages)
+                res = [100 + i for i in range(num)]
+                self.num_available_pages -= num
+                return self, res
+                
+            def release(self, idxs, count):
+                self.num_available_pages += int(count)
+                return self
 
         # Monkey patch MockPageManager for testing
         self.hbm.block = MockBlock(self.hbm.total_num_pages)
@@ -93,10 +103,10 @@ class CacheManagerTest(unittest.TestCase):
         
         
         # assign doesn't call hbm anymore, it updates internal numpy arrays
-        self.assertEqual(self.cache_manager.seq_lens[0], 2 * 8)
-        self.assertEqual(self.cache_manager.seq_lens[1], 3 * 8)
-        self.assertEqual(self.cache_manager.page_indices[0, 0], 100)
-        self.assertEqual(self.cache_manager.page_indices[1, 0], 102)
+        self.assertEqual(self.cache_manager.hbm_page_manager.seq_lens[0], 2 * 8)
+        self.assertEqual(self.cache_manager.hbm_page_manager.seq_lens[1], 3 * 8)
+        self.assertEqual(self.cache_manager.hbm_page_manager.page_indices[0, 0], 100)
+        self.assertEqual(self.cache_manager.hbm_page_manager.page_indices[1, 0], 102)
         
     def test_allocate_oom(self):
         """Tests that exceeding physically available boundaries throws Runtime exception."""

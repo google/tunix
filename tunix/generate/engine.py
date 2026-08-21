@@ -41,14 +41,22 @@ class LLMEngine:
         block_spec = batch_page_manager_lib.BlockSpec(name="kv_cache", dtype=dtype, subshape=(num_kv_heads, head_dim))
         
         # Assume roughly some logic to get num pages from max_bytes, since we removed PageManagerConfig
+        import jax.numpy as jnp
+        import numpy as np
         item_size = jnp.dtype(dtype).itemsize
         page_bytes = item_size * self.cache_config.page_size * num_kv_heads * head_dim
         num_hbm_pages = getattr(self.cache_config, "hbm_cache_max_bytes", 1) // page_bytes
-        self.hbm_pm = batch_page_manager_lib.BatchPageManager.init(
+        hbm_block = batch_page_manager_lib.Block.init(
             num_pages=num_hbm_pages,
             page_size=self.cache_config.page_size,
             block_spec=block_spec,
-            device=None # Optional, but JAX handles default nicely
+            device=None
+        )
+        max_num_pages_per_seq = (self.max_seq_len + self.cache_config.page_size - 1) // self.cache_config.page_size
+        self.hbm_pm = batch_page_manager_lib.BatchPageManager(
+            block=hbm_block,
+            page_indices=jnp.full((self.cache_config.max_num_seqs, max_num_pages_per_seq), -1, dtype=jnp.int32),
+            seq_lens=jnp.zeros((self.cache_config.max_num_seqs,), dtype=jnp.int32)
         )
         
         if getattr(self.cache_config, "cpu_offload_bytes", 0) > 0:

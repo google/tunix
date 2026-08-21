@@ -25,8 +25,6 @@ class CacheManager:
         self.max_num_pages_per_seq = max_num_pages_per_seq
         self.page_size = page_size
         
-        self.page_indices = np.full((max_num_seqs, max_num_pages_per_seq), -1, dtype=np.int32)
-        self.seq_lens = np.zeros((max_num_seqs,), dtype=np.int32)
         
         self._next_page_id: int = 0
         
@@ -46,18 +44,25 @@ class CacheManager:
         if num_seqs > self.max_num_seqs:
             raise RuntimeError("Exceeded max_num_seqs")
             
-        self.page_indices = np.full((self.max_num_seqs, self.max_num_pages_per_seq), -1, dtype=np.int32)
-        self.seq_lens = np.zeros((self.max_num_seqs,), dtype=np.int32)
+        page_indices = np.full((self.max_num_seqs, self.max_num_pages_per_seq), -1, dtype=np.int32)
+        seq_lens = np.zeros((self.max_num_seqs,), dtype=np.int32)
         
         for req_idx, page_ids in enumerate(sseq_page_ids):
             seq_hbm_count = 0
             for i, pid in enumerate(page_ids):
                 if self._page_location.get(pid) == "tpu":
-                    self.page_indices[req_idx, i] = self._page_id_to_idx[pid]
+                    page_indices[req_idx, i] = self._page_id_to_idx[pid]
                     seq_hbm_count += 1
                 else:
                     raise RuntimeError(f"Page {pid} is not strictly in HBM, cannot assign!")
-            self.seq_lens[req_idx] = seq_hbm_count * self.page_size
+            seq_lens[req_idx] = seq_hbm_count * self.page_size
+            
+        import dataclasses
+        self.hbm_page_manager = dataclasses.replace(
+            self.hbm_page_manager,
+            page_indices=jnp.array(page_indices),
+            seq_lens=jnp.array(seq_lens)
+        )
 
     def allocate(self, num_pages: int) -> List[int]:
         """Allocates logical pages backing them immediately with HBM physical pages."""
@@ -67,7 +72,9 @@ class CacheManager:
         if num_pages > self.available_hbm_pages:
             raise RuntimeError(f"Cannot allocate {num_pages} pages. Only {self.available_hbm_pages} available.")
         
-        self.hbm_page_manager, allocated_indices = self.hbm_page_manager.allocate(jnp.array(num_pages))
+        new_block, allocated_indices = self.hbm_page_manager.block.allocate(jnp.array(num_pages))
+        import dataclasses
+        self.hbm_page_manager = dataclasses.replace(self.hbm_page_manager, block=new_block)
         physical_indices = np.array(allocated_indices).tolist()
         self.available_hbm_pages -= num_pages
         
@@ -163,10 +170,12 @@ class CacheManager:
         )
 
         # 4. Evict the old TPU physical pages
-        self.hbm_page_manager = self.hbm_page_manager.evict_pages(
+        import dataclasses
+        new_block = self.hbm_page_manager.block.release(
             page_indices_to_evict=jnp.array(physical_tpu_idxs),
             num_evicted=jnp.array(len(physical_tpu_idxs))
         )
+        self.hbm_page_manager = dataclasses.replace(self.hbm_page_manager, block=new_block)
         self.available_hbm_pages += len(physical_tpu_idxs)
         
         # 5. Re-map logical tracking
@@ -201,18 +210,18 @@ class CacheManager:
         if tpu_idxs_to_evict:
             padded_tpu = np.zeros((self.hbm_page_manager.block.total_num_pages,), dtype=np.int32)
             padded_tpu[:len(tpu_idxs_to_evict)] = tpu_idxs_to_evict
-            self.hbm_page_manager = self.hbm_page_manager.evict_pages(
+            import dataclasses
+            new_block = self.hbm_page_manager.block.release(
                 jnp.array(padded_tpu), 
                 jnp.array(len(tpu_idxs_to_evict))
             )
+            self.hbm_page_manager = dataclasses.replace(self.hbm_page_manager, block=new_block)
             self.available_hbm_pages += len(tpu_idxs_to_evict)
 
     def tree_flatten(self):
         children = (
             self.hbm_page_manager,
-            self.cpu_block,
-            self.page_indices,
-            self.seq_lens
+            self.cpu_block
         )
         aux_data = {
             'max_num_seqs': self.max_num_seqs,
@@ -232,8 +241,6 @@ class CacheManager:
         obj = cls.__new__(cls)
         obj.hbm_page_manager = children[0]
         obj.cpu_block = children[1]
-        obj.page_indices = children[2]
-        obj.seq_lens = children[3]
         for k, v in aux_data.items():
             setattr(obj, k, v)
         return obj
