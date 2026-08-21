@@ -208,6 +208,7 @@ def render(
       "CANON_DEEPSWE_REWARD_TIMEOUT_SECS": "600",
       "R2E_ACTIVE_DEADLINE_SECONDS": "3300",
       "R2E_K8S_QUEUE_NAME": queue_name,
+      "NODE_SELECTOR_VAL": cpu_nodepool,
       "MIN_TOKEN_BUCKET": "2048",
       "CANON_RUN_CMD": shlex.join(
           _command(stage, run_root=run_root, whitelist=whitelist)
@@ -312,6 +313,9 @@ def validate(
   if stage not in _STAGE_STEPS or arm not in _ARMS:
     raise ValueError("invalid P58 stage or arm")
   head = p34._head(document)
+  cpu_nodepool = head.get("nodeSelector", {}).get(
+      "cloud.google.com/gke-nodepool", ""
+  )
   worker = p34._worker(document)
   main = p34._container(head["containers"], "jax-tpu")
   env = p34._env(document)
@@ -339,6 +343,7 @@ def validate(
       "R2E_K8S_QUEUE_NAME": document["metadata"]["labels"].get(
           _KUEUE_QUEUE_LABEL
       ),
+      "NODE_SELECTOR_VAL": cpu_nodepool,
   }
   wrong = {
       key: env.get(key) for key, value in expected.items()
@@ -427,7 +432,7 @@ def main() -> None:
   parser.add_argument("--run-id", required=True)
   parser.add_argument("--stage", choices=tuple(_STAGE_STEPS), required=True)
   parser.add_argument("--arm", choices=_ARMS, required=True)
-  parser.add_argument("--cpu-nodepool", default="deepswe-cpu-pool")
+  parser.add_argument("--cpu-nodepool", default="cpu-np")
   parser.add_argument("--worker-nodepool", required=True)
   parser.add_argument("--model-pvc", default="haoyugao-cpu-np-pvc")
   parser.add_argument("--whitelist", default=CLEAN_WHITELIST)

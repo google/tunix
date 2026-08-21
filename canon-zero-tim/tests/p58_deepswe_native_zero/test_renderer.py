@@ -74,6 +74,7 @@ class P58RendererTest(unittest.TestCase):
               ],
           )
           self.assertEqual(env["R2E_K8S_QUEUE_NAME"], "multislice-queue")
+          self.assertEqual(env["NODE_SELECTOR_VAL"], "cpu-pool")
 
   def test_pair_diff_is_registered_treatment_only(self):
     native = self._render("native")

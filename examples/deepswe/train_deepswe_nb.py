@@ -55,7 +55,7 @@ parser.add_argument(
 parser.add_argument("--model_absolute_path", type=str, default=None)
 parser.add_argument("--seed", type=int, default=42)
 parser.add_argument("--model_version", type=str, default="Qwen3-32B")
-parser.add_argument("--node_selector_val", type=str, default="deepswe-cpu-pool")
+parser.add_argument("--node_selector_val", type=str, default="cpu-np")
 parser.add_argument("--dataset_path", type=str, default=None)
 parser.add_argument("--dataset_name", type=str, default=None)
 parser.add_argument("--dataset_revision", type=str, default=None)

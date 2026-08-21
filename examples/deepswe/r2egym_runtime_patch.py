@@ -246,7 +246,7 @@ def apply_repoenv_kubernetes_poll_patch() -> str:
     node_key = os.environ.get(
         "NODE_SELECTOR_KEY", "cloud.google.com/gke-nodepool"
     )
-    node_value = os.environ.get("NODE_SELECTOR_VAL", "deepswe-cpu-pool")
+    node_value = os.environ.get("NODE_SELECTOR_VAL", "cpu-np")
     pull_secret = os.environ.get("IMAGE_PULL_SECRET", "dockerhub-pro")
     cpu_request = os.environ.get("R2E_K8S_CPU", "2")
     memory_request = os.environ.get("R2E_K8S_MEM", "4Gi")

@@ -57,8 +57,14 @@ model call, which reset-time failures never reached, and strict processing
 crashed before journaling. The repaired path derives the sandbox queue from
 the parent JobSet, writes it to every Pod, seeds policy provenance before
 reset, and records `scheduling_gated` separately. P58f01 is immutable,
-`INCONCLUSIVE`, and has no resumable state. Use fresh full-stage run-id
-`p58f02`; never reuse its YAML/root.
+`INCONCLUSIVE`, and has no resumable state.
+
+Native `p58f02` passed initialization and started Step 0, but sandboxes remained
+`SchedulingGated` because `multislice-queue` CPU flavor `cpu-user` requires
+`nodeSelector: cpu-np`, whereas sandboxes defaulted to `deepswe-cpu-pool`.
+The fix routes sandboxes and head pod to `cpu-np` (`NODE_SELECTOR_VAL=cpu-np`).
+P58f02 is immutable, `INCONCLUSIVE`, and has no resumable state. Use fresh
+full-stage run-id `p58f03`; never reuse its YAML/root.
 
 The direct-entrypoint implementation commit is
 `82d82f72a7220d945737d95f6266b5b7e2cfe706`. Resolve the final runnable SHA by
@@ -172,10 +178,10 @@ and a unique run id. Never hand-edit rendered YAML. This phase permits only
 
 ```bash
 CLIENT_IMAGE_DIGEST='registry.example/tunix@sha256:<64-hex-digest>'
-CPU_NODEPOOL='deepswe-cpu-pool'
+CPU_NODEPOOL='cpu-np'
 TPU_NODEPOOL='tpu-v5p-slice'
 MODEL_PVC='haoyugao-cpu-np-pvc'
-RUN_STEM='p58f02'
+RUN_STEM='p58f03'
 STAGE='full'
 
 ARM='native'
