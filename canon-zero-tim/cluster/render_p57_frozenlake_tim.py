@@ -146,7 +146,7 @@ def _spec(
   if run_kind == "train":
     command.append("--eval_every_n_steps=0")
     key_suffix = str(expected_updates)
-    job_prefix = f"canon-p57-fl-{arm.name}"
+    job_prefix = f"canon-p57-fl-{arm.name[:4]}"
   elif run_kind == "eval":
     if checkpoint_step is None:
       raise ValueError("P57 eval spec requires a checkpoint step")
@@ -158,14 +158,14 @@ def _spec(
         "--evaluation_only",
     ))
     key_suffix = f"eval-{checkpoint_step}"
-    job_prefix = f"canon-p57-fl-eval-{arm.name}"
+    job_prefix = f"canon-p57-fl-ev-{arm.name[:4]}"
   else:
     raise ValueError(f"unsupported P57 run kind: {run_kind!r}")
   workload_suffix = (
       f"{workload_candidate}-{data_split}-" if workload_candidate else ""
   )
   if workload_candidate:
-    job_prefix = f"{job_prefix}-{workload_candidate}-{data_split}"
+    job_prefix = f"{job_prefix}-{workload_candidate}"
   return p33.JobSpec(
       key=f"p57-frozenlake-{arm.name}-{workload_suffix}{key_suffix}",
       workload="frozenlake",
