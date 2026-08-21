@@ -108,8 +108,10 @@ enforce this contract.
 1. Check out the approved immutable 40-character source SHA. Keep this exact
    SHA and campaign tag for every segment and evaluation.
 2. Run both local gates in `RUNBOOK.md`; stop at the first red gate.
-3. Render one stock train run with checkpoint mode `new`, horizon 200, and no
-   explicit `--stop-after-step`; the renderer must resolve the stop to 200.
+3. Render one stock train run with run id `p57m15att3`, checkpoint mode `new`,
+   horizon 200, and no explicit `--stop-after-step`; the renderer must resolve
+   the stop to 200. Do not use the obsolete overlength id
+   `p57-m15-stock-full200`, which the 1–16 character DNS gate rejects.
 4. Launch that one JobSet and let it run continuously through update 200.
 5. Accept it only after the log proves step 200 and durable checkpoint 200.
 6. Return the complete training logs, checkpoint identity, W&B curve, and

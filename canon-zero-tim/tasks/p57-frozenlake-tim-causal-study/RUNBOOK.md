@@ -76,7 +76,7 @@ git cat-file -e "$SOURCE^{commit}"
 OUT=/tmp/p57-m15-stock-full200
 python3 canon-zero-tim/cluster/render_p57_frozenlake_tim.py \
   $BASE_ARGS \
-  --run-id p57-m15-stock-full200 \
+  --run-id p57m15att3 \
   --output-dir "$OUT" \
   --checkpoint-mode new \
   --run-kind train
@@ -88,7 +88,9 @@ Require one manifest, `--max_steps=200`, prompt/response `4096/8192`, and
 `CANON_P57_STOP_AFTER_STEP=200`. The command must not contain
 `--evaluation_only`. The resolved preflight must include
 `observer=train processed_b=on`; a train environment with processed-B zero is
-invalid. Startup must also emit
+invalid. `p57m15att3` is the registered next fresh attempt id; it is an
+11-character lowercase DNS label component and therefore satisfies the
+renderer limit of 1–16 characters. Startup must also emit
 `[P57.STOCK_OBSERVER] OVERLAY_PASS files=2 stock_runner_verified=1 treatment=observer-only`.
 The first B call must emit exactly one
 `[P57.STOCK_OBSERVER] PROCESSED_PROMPT_LOGPROBS_PASS ... targets=absolute-request-history treatment=observer-only`.
