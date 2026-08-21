@@ -227,19 +227,7 @@ class ContinuousSampler:
     self.hbm_pm = hbm_pm_config.init()
     self.cpu_pm = None
 
-    self.cache_manager = CacheManager(
-        hbm_page_manager=self.hbm_pm,
-        offload_page_manager=self.cpu_pm
-    )
-    
-    self.scheduler = Scheduler(
-        cache_manager=self.cache_manager,
-        page_size=self.cache_config.page_size,
-        max_num_seqs=self.cache_config.max_num_seqs
-    )
-    
     self.eos_ids = [self.tokenizer.eos_id()]
-    self.generated_tokens = {} # request_id -> list of ints
 
   def _model_step_fn(
       self,
@@ -286,26 +274,17 @@ class ContinuousSampler:
     
     return next_tokens, cache
     
-  def step(self):
-      """One physical iteration of the continuous batch engine."""
-      decodes, prefills = self.scheduler.schedule_step([])
+  def sample(self, all_active, prefills, hbm_pm):
+      """One map execution of the sampler mapping python active arrays to JAX primitives."""
+      num_decodes = len(all_active) - len(prefills)
+      total_active = len(all_active)
       
-      num_decodes = len(decodes)
-      num_prefills = len(prefills)
-      total_active = num_decodes + num_prefills
-      if total_active == 0:
-          return
-          
       # Build inputs natively mapping dynamically! 
       # (0, i) is decodes, (i, j) is chunked prefills, (j, k) is mixed prefills
       # The array `distribution` maps exactly to [i, j, k]. We'll map all prefills to mixed chunk bound.
       distribution_arr = jnp.array([num_decodes, total_active, total_active], dtype=jnp.int32)
       
-      hbm_pm = self.cache_manager.hbm_page_manager
-      
       # We construct tokens, positions and seq_lens matrices cleanly across decodes then prefills
-      all_active = decodes + prefills
-      
       seq_lens_arr = []
       tokens_arr = []
       positions_arr = []
@@ -327,13 +306,9 @@ class ContinuousSampler:
       positions_np = jnp.array(positions_arr, dtype=jnp.int32)
       seq_lens_np = jnp.array(seq_lens_arr, dtype=jnp.int32)
       
-      # Now just simply step the engine JAX boundary once!
-      pad_size = self.cache_config.batch_size if hasattr(self.cache_config, 'batch_size') else 32
-      pad_diff = pad_size - total_active
-      
       # Pad arrays to static loop block capacities if necessary (Optional, nnx handles ragged lengths)
       # Then execute JIT wrapper
-      next_tokens, hbm_pm = self._compiled_step_fn(
+      next_tokens, next_hbm_pm = self._compiled_step_fn(
           self._flattened_transformer_state,
           tokens=tokens_np,
           positions=positions_np,
@@ -344,26 +319,4 @@ class ContinuousSampler:
       )
       
       next_tokens_cpu = jax.device_get(next_tokens)
-      
-      # Write updated physical blocks back to python state tracker
-      self.cache_manager.hbm_page_manager = hbm_pm 
-      
-      # Record outputs precisely, evaluate EOS conditionally
-      for i, r in enumerate(all_active):
-          tok = int(next_tokens_cpu[i])
-          self.generated_tokens.setdefault(r.req_id, []).append(tok)
-          
-          if tok in self.eos_ids or len(r.prompt_tokens) >= self.max_seq_len:
-              # Terminate! 
-              # Scheduler drops seq, CacheManager implicitly unrefs logical chains later or explicitly offloads
-              self.scheduler._remove_request_from_pool(r) # or equivalent method
-          else:
-              # Append the newly generated token back to prompt_tokens so next loop tracks length + evaluates it natively!
-              r.prompt_tokens.append(tok)
-              
-  def add_request(self, req_id: str, prompt_tokens: List[int]):
-      req = Request(req_id, prompt_tokens)
-      self.scheduler.queue_new_requests([req])
-      
-  def has_unfinished_requests(self) -> bool:
-      return len(self.scheduler.pending_requests) > 0 or len(self.scheduler.running_requests) > 0
+      return next_tokens_cpu, next_hbm_pm
