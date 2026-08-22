@@ -16,14 +16,16 @@ p57_is_stock_fast_calibration() {
 p57_is_stock_fast_training() {
   [ "${CANON_PROFILE_FILE:-}" = "$_P57_PROFILE" ] && \
     [ "${CANON_P57_RUN_KIND:-}" = "train" ] && \
-    [ "${CANON_P57_TIM_ARM:-}" = "mismatch" ] && \
+    { [ "${CANON_P57_TIM_ARM:-}" = "mismatch" ] || \
+      [ "${CANON_P57_TIM_ARM:-}" = "is" ]; } && \
     [ "${CANON_P57_INFERENCE_REGIME:-}" = "stock-fast" ]
 }
 
 p57_is_stock_fast_evaluation() {
   [ "${CANON_PROFILE_FILE:-}" = "$_P57_PROFILE" ] && \
     [ "${CANON_P57_RUN_KIND:-}" = "eval" ] && \
-    [ "${CANON_P57_TIM_ARM:-}" = "mismatch" ] && \
+    { [ "${CANON_P57_TIM_ARM:-}" = "mismatch" ] || \
+      [ "${CANON_P57_TIM_ARM:-}" = "is" ]; } && \
     [ "${CANON_P57_INFERENCE_REGIME:-}" = "stock-fast" ]
 }
 

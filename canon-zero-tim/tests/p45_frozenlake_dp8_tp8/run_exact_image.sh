@@ -54,6 +54,17 @@ EOF
     cat > "$stock_state/env.sh" <<EOF
 export CANON_PROFILE_FILE=cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env
 export CANON_P57_RUN_KIND=train
+export CANON_P57_TIM_ARM=is
+export CANON_P57_INFERENCE_REGIME=stock-fast
+EOF
+    CANON_STATE="$stock_state" CANON_PKG=/workspace/canon-zero-tim \
+      bash canon-zero-tim/cluster/steps/37_install_stock_runtime.sh
+    CANON_STATE="$stock_state" CANON_PKG=/workspace/canon-zero-tim \
+      bash canon-zero-tim/cluster/steps/38_verify_stock_engine.sh
+    echo "P57_STOCK_RUNTIME_MODE_PASS run_kind=train arm=is"
+    cat > "$stock_state/env.sh" <<EOF
+export CANON_PROFILE_FILE=cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env
+export CANON_P57_RUN_KIND=train
 export CANON_P57_TIM_ARM=zero
 export CANON_P57_INFERENCE_REGIME=stock-fast
 EOF

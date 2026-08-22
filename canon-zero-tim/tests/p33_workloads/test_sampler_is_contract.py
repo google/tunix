@@ -14,7 +14,9 @@ _tree = ast.parse(_SOURCE.read_text(), filename=str(_SOURCE))
 _names = {
     "_canonical_alignment_sampler_is_valid",
     "_p57_tim_purity_enabled",
+    "_p57_tim_is_enabled",
     "_validate_p57_tim_purity",
+    "_validate_p57_tim_is",
 }
 _matches = [
     node
@@ -33,7 +35,9 @@ exec(
 )
 _sampler_is_valid = _namespace["_canonical_alignment_sampler_is_valid"]
 _p57_purity_enabled = _namespace["_p57_tim_purity_enabled"]
+_p57_is_enabled = _namespace["_p57_tim_is_enabled"]
 _validate_p57_purity = _namespace["_validate_p57_tim_purity"]
+_validate_p57_is = _namespace["_validate_p57_tim_is"]
 
 
 class SamplerIsContractTest(unittest.TestCase):
@@ -97,6 +101,41 @@ class SamplerIsContractTest(unittest.TestCase):
           Exception, "P57 TIM purity contract failed"
       ):
         _validate_p57_purity(**{**base, **changed})
+
+  def test_p57_is_scope_and_contract_require_real_token_tis(self):
+    good_env = {
+        "CANON_P57_RUN_KIND": "train",
+        "CANON_P57_TIM_ARM": "is",
+        "CANON_PROFILE_FILE": (
+            "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env"
+        ),
+        "CANON_P32_WORKLOAD": "frozenlake-dp8-tp8",
+    }
+    self.assertTrue(_p57_is_enabled(good_env))
+    self.assertFalse(
+        _p57_is_enabled({**good_env, "CANON_P57_TIM_ARM": "mismatch"})
+    )
+    base = {
+        "sampler_is": "token",
+        "use_rollout_logps": True,
+        "rollout_logps_present": True,
+        "trainer_logps_present": True,
+        "old_logps_are_trainer": True,
+        "sampler_is_weights_present": True,
+    }
+    _validate_p57_is(**base)
+    for changed in (
+        {"sampler_is": None},
+        {"use_rollout_logps": False},
+        {"rollout_logps_present": False},
+        {"trainer_logps_present": False},
+        {"old_logps_are_trainer": False},
+        {"sampler_is_weights_present": False},
+    ):
+      with self.subTest(changed=changed), self.assertRaisesRegex(
+          Exception, "P57 TIM IS contract failed"
+      ):
+        _validate_p57_is(**{**base, **changed})
 
   def test_frozenlake_accepts_token_sampler_correction(self):
     self.assertTrue(_sampler_is_valid("token", "frozenlake"))

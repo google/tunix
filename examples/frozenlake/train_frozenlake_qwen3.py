@@ -193,16 +193,17 @@ args, _ = arg_parser.parse_known_args()
 
 CANON_P57_RUN_KIND = os.getenv("CANON_P57_RUN_KIND", "")
 CANON_P57_INFERENCE_REGIME = os.getenv("CANON_P57_INFERENCE_REGIME", "")
+CANON_P57_TIM_ARM = os.getenv("CANON_P57_TIM_ARM", "")
 CANON_P57_EVALUATION = CANON_P57_RUN_KIND == "eval"
 CANON_P57_CALIBRATION = CANON_P57_RUN_KIND == "calibration"
 CANON_P57_STOCK_TRAIN = (
     CANON_P57_RUN_KIND == "train"
-    and os.getenv("CANON_P57_TIM_ARM", "") == "mismatch"
+    and CANON_P57_TIM_ARM in ("mismatch", "is")
     and CANON_P57_INFERENCE_REGIME == "stock-fast"
 )
 CANON_P57_STOCK_EVAL = (
     CANON_P57_RUN_KIND == "eval"
-    and os.getenv("CANON_P57_TIM_ARM", "") == "mismatch"
+    and CANON_P57_TIM_ARM in ("mismatch", "is")
     and CANON_P57_INFERENCE_REGIME == "stock-fast"
 )
 CANON_P57_NO_UPDATE = CANON_P57_EVALUATION or CANON_P57_CALIBRATION
@@ -556,7 +557,13 @@ if CANON_P32_WORKLOAD:
       "advantage_estimator": (args.advantage_estimator, "rloo"),
       "sampler_is": (
           args.sampler_is,
-          "none" if CANON_P57_RUN_KIND in ("train", "eval") else "token",
+          (
+              "token"
+              if CANON_P57_TIM_ARM == "is"
+              else "none"
+              if CANON_P57_RUN_KIND in ("train", "eval")
+              else "token"
+          ),
       ),
       "mesh": (
           SHARED_MESH_SHAPE,
@@ -1567,7 +1574,7 @@ show_hbm_usage("after GRPOLearner creation")
 if CANON_P57_STOCK_TRAIN:
   print(
       "[P57.STOCK] TRAIN_RUNTIME_PASS "
-      "regime=stock-fast arm=mismatch canonical_bundle=off "
+      f"regime=stock-fast arm={CANON_P57_TIM_ARM} canonical_bundle=off "
       "observer=warning-only processed_b=observer-only",
       flush=True,
   )

@@ -94,6 +94,17 @@ def _p57_tim_purity_enabled(env: Mapping[str, str]) -> bool:
   )
 
 
+def _p57_tim_is_enabled(env: Mapping[str, str]) -> bool:
+  """Return whether the signed P57 token-TIS treatment applies."""
+  return (
+      env.get("CANON_P57_RUN_KIND") == "train"
+      and env.get("CANON_P57_TIM_ARM") == "is"
+      and env.get("CANON_PROFILE_FILE")
+      == "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env"
+      and env.get("CANON_P32_WORKLOAD") == "frozenlake-dp8-tp8"
+  )
+
+
 def _validate_p57_tim_purity(
     *,
     sampler_is: str | None,
@@ -117,6 +128,35 @@ def _validate_p57_tim_purity(
   if failures:
     raise alignment.AlignmentGateError(
         "P57 TIM purity contract failed: " + ", ".join(failures)
+    )
+
+
+def _validate_p57_tim_is(
+    *,
+    sampler_is: str | None,
+    use_rollout_logps: bool,
+    rollout_logps_present: bool,
+    trainer_logps_present: bool,
+    old_logps_are_trainer: bool,
+    sampler_is_weights_present: bool,
+) -> None:
+  """Fail closed unless the P57 IS arm uses the registered token-TIS path."""
+  failures = []
+  if sampler_is != "token":
+    failures.append(f"sampler_is={sampler_is!r}")
+  if not use_rollout_logps:
+    failures.append("use_rollout_logps=0")
+  if not rollout_logps_present:
+    failures.append("rollout_logps=absent")
+  if not trainer_logps_present:
+    failures.append("trainer_logps=absent")
+  if not old_logps_are_trainer:
+    failures.append("old_logps!=trainer")
+  if not sampler_is_weights_present:
+    failures.append("tis_weights=absent")
+  if failures:
+    raise alignment.AlignmentGateError(
+        "P57 TIM IS contract failed: " + ", ".join(failures)
     )
 
 
@@ -1175,6 +1215,24 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         print(
             "[P57.TIM_PURITY] PASS sampler_is=none old_logps=rollout "
             "tis_weights=absent trainer_rescore=observer-only",
+            flush=True,
+        )
+        self._p57_tim_purity_announced = True
+    elif _p57_tim_is_enabled(os.environ):
+      _validate_p57_tim_is(
+          sampler_is=self.algo_config.sampler_is,
+          use_rollout_logps=self.algo_config.use_rollout_logps,
+          rollout_logps_present=rollout_per_token_logps is not None,
+          trainer_logps_present=trainer_per_token_logps is not None,
+          old_logps_are_trainer=(
+              old_per_token_logps is trainer_per_token_logps
+          ),
+          sampler_is_weights_present=sampler_is_weights is not None,
+      )
+      if not self._p57_tim_purity_announced:
+        print(
+            "[P57.TIM_PURITY] PASS sampler_is=token old_logps=trainer "
+            "tis_weights=present trainer_rescore=training-input",
             flush=True,
         )
         self._p57_tim_purity_announced = True

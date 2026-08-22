@@ -70,6 +70,12 @@ class P57RuntimeContractTest(unittest.TestCase):
         good,
     )
     self.assertEqual(result.returncode, 0, result.stderr)
+    is_result = _bash(
+        "p57_is_stock_fast_training; p57_is_stock_fast_runtime; "
+        "if p57_is_nontraining_runtime; then exit 9; fi",
+        {**good, "CANON_P57_TIM_ARM": "is"},
+    )
+    self.assertEqual(is_result.returncode, 0, is_result.stderr)
     for changed in (
         {"CANON_P57_TIM_ARM": "zero"},
         {"CANON_P57_RUN_KIND": "eval"},
@@ -158,8 +164,10 @@ class P57RuntimeContractTest(unittest.TestCase):
     self.assertIn("elif p57_is_stock_fast_runtime; then", text)
     self.assertIn('n_p57_stock_sync" -ne 1', text)
     self.assertIn('n_p57_stock_segment_complete" -ne 1', text)
-    self.assertIn('n_p57_tim_purity" -ne 1', text)
-    self.assertIn("P57 training purity marker contract failed", text)
+    self.assertIn('n_p57_tim_purity_none" -ne 1', text)
+    self.assertIn('n_p57_tim_purity_is" -ne 1', text)
+    self.assertIn("P57 no-IS purity marker contract failed", text)
+    self.assertIn("P57 IS purity marker contract failed", text)
     self.assertIn('elif [ "$n_ar" -eq 0 ] || [ "$n_emb" -eq 0 ]', text)
 
 

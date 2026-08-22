@@ -454,9 +454,79 @@ class P57RendererTest(unittest.TestCase):
       preflight = _run_env_preflight(env, Path(tmp) / "state")
     self.assertNotEqual(preflight.returncode, 0)
     self.assertIn(
-        "P57 training forbids token sampler/TIS correction",
+        "P57 command/horizon contract drifted",
         preflight.stderr,
     )
+
+  def test_two_workloads_render_all_three_registered_treatments(self):
+    workloads = (
+        ("p45", "", "", 200, 5, 2048),
+        ("m15", "m15", "main", 200, 15, 8192),
+    )
+    arms = (
+        ("mismatch", "none", "stock-fast", "0", "1"),
+        ("is", "token", "stock-fast", "0", "1"),
+        ("zero", "none", "", "1", "0"),
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+      root = Path(tmp)
+      for workload, candidate, split, updates, turns, response in workloads:
+        for arm, sampler, regime, fixed_head, warning_only in arms:
+          with self.subTest(workload=workload, arm=arm):
+            path = paired.render_all(
+                base_path=BASE,
+                output_dir=root / f"{workload}-{arm}",
+                source_commit="a" * 40,
+                run_id=f"p57{workload[:3]}{arm[:2]}",
+                campaign_tag=f"p57-{workload}-{arm}",
+                checkpoint_mode="new",
+                expected_updates=updates,
+                run_kind="train",
+                workload_candidate=candidate,
+                data_split=split,
+                arm=arm,
+            )[0]
+            env = _env(yaml.safe_load(path.read_text()))
+            command = env["CANON_RUN_CMD"].split()
+            self.assertEqual(command.count(f"--sampler_is={sampler}"), 1)
+            self.assertEqual(
+                sum(value.startswith("--sampler_is=") for value in command), 1
+            )
+            self.assertIn(f"--max_steps={updates}", command)
+            self.assertIn(f"--env_max_steps={turns}", command)
+            self.assertIn(f"--max_response_length={response}", command)
+            self.assertEqual(env["CANON_P57_TIM_ARM"], arm)
+            self.assertEqual(env["CANON_P57_INFERENCE_REGIME"], regime)
+            self.assertEqual(env["CANON_P38_FIXED_LM_HEAD"], fixed_head)
+            self.assertEqual(
+                env["CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY"], warning_only
+            )
+            self.assertEqual(env["CANON_P57_STOP_AFTER_STEP"], str(updates))
+            preflight = _run_env_preflight(
+                env, root / f"state-{workload}-{arm}"
+            )
+            self.assertEqual(preflight.returncode, 0, preflight.stderr)
+            if regime == "stock-fast":
+              self.assertIn(
+                  "[P57.STOCK_FAST] ZERO_TIM_OFF_PASS mode=train",
+                  preflight.stdout,
+              )
+
+  def test_original_p45_rejects_historical_450_step_horizon(self):
+    with tempfile.TemporaryDirectory() as tmp, self.assertRaisesRegex(
+        ValueError, "P45 workload is frozen to 200 updates"
+    ):
+      paired.render_all(
+          base_path=BASE,
+          output_dir=Path(tmp),
+          source_commit="a" * 40,
+          run_id="p57p45old",
+          campaign_tag="p57-p45-old-horizon",
+          checkpoint_mode="new",
+          expected_updates=450,
+          run_kind="train",
+          arm="mismatch",
+      )
 
   def test_eval_rejects_generation_count_not_divisible_by_dp(self):
     with mock.patch.object(paired, "_EVAL_GENERATIONS", 2), self.assertRaisesRegex(

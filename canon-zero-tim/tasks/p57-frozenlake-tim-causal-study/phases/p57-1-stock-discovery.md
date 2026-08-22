@@ -1,5 +1,10 @@
 # P57.1 — Stock-only rollout calibration and full-curve selection
 
+- Status: superseded by the user-approved three-arm/two-workload design in
+  `p57-1b-three-arm-baselines.md`. The calibration evidence and failed stock
+  attempts below remain immutable evidence; the former selection-only launch
+  order is no longer the active execution contract.
+
 ## Purpose
 
 Select one learnable, nonsaturated, long-context FrozenLake workload without

@@ -64,12 +64,15 @@ class Arm:
   name: str
   fixed_lm_head: bool
   warning_only: bool
+  sampler_is: str
 
 
 _ARMS = (
-    Arm("zero", fixed_lm_head=True, warning_only=False),
-    Arm("mismatch", fixed_lm_head=False, warning_only=True),
+    Arm("zero", fixed_lm_head=True, warning_only=False, sampler_is="none"),
+    Arm("mismatch", fixed_lm_head=False, warning_only=True, sampler_is="none"),
 )
+_IS_ARM = Arm("is", fixed_lm_head=False, warning_only=True, sampler_is="token")
+_ARM_BY_NAME = {arm.name: arm for arm in (*_ARMS, _IS_ARM)}
 
 
 def _container(document):
@@ -113,11 +116,21 @@ def _use_module_entrypoint(command: list[str]) -> None:
   command[:3] = _MODULE_ENTRYPOINT
 
 
-def _validate_purity_command(command: list[str]) -> None:
-  if command.count("--sampler_is=none") != 1:
-    raise ValueError("P57 recipe must disable sampler/TIS correction exactly once")
-  if "--sampler_is=token" in command:
-    raise ValueError("P57 recipe must not enable token sampler/TIS correction")
+def _validate_sampler_command(command: list[str], arm: Arm) -> None:
+  expected = f"--sampler_is={arm.sampler_is}"
+  if command.count(expected) != 1:
+    raise ValueError(
+        f"P57 {arm.name} arm must select {expected} exactly once"
+    )
+  unexpected = {
+      value for value in command
+      if value.startswith("--sampler_is=") and value != expected
+  }
+  if unexpected:
+    raise ValueError(
+        f"P57 {arm.name} arm has conflicting sampler modes: "
+        f"{sorted(unexpected)}"
+    )
 
 
 def _spec(
@@ -135,7 +148,7 @@ def _spec(
       )
   )
   _use_module_entrypoint(command)
-  command.append("--sampler_is=none")
+  command.append(f"--sampler_is={arm.sampler_is}")
   if workload_candidate:
     candidate = p57_workloads.candidate(workload_candidate)
     p57_workloads.validate_split(data_split)
@@ -181,7 +194,7 @@ def _spec(
     job_prefix = f"canon-p57-fl-ev-{arm.name[:4]}"
   else:
     raise ValueError(f"unsupported P57 run kind: {run_kind!r}")
-  _validate_purity_command(command)
+  _validate_sampler_command(command, arm)
   workload_suffix = (
       f"{workload_candidate}-{data_split}-" if workload_candidate else ""
   )
@@ -222,7 +235,10 @@ def _validate_pair(documents: dict[str, dict], *, run_kind: str) -> None:
     )
   if zero["CANON_RUN_CMD"] != mismatch["CANON_RUN_CMD"]:
     raise ValueError("P57 arms must run the identical recipe command")
-  _validate_purity_command(zero["CANON_RUN_CMD"].split())
+  _validate_sampler_command(zero["CANON_RUN_CMD"].split(), _ARM_BY_NAME["zero"])
+  _validate_sampler_command(
+      mismatch["CANON_RUN_CMD"].split(), _ARM_BY_NAME["mismatch"]
+  )
   if (zero["CANON_P38_FIXED_LM_HEAD"], mismatch["CANON_P38_FIXED_LM_HEAD"]) != (
       "1",
       "0",
@@ -249,6 +265,7 @@ def render_all(
     workload_candidate: str = "",
     data_split: str = "",
     stock_only: bool = False,
+    arm: str = "",
     stop_after_step: int | None = None,
 ) -> tuple[Path, ...]:
   if expected_updates not in _ALLOWED_UPDATES:
@@ -269,12 +286,22 @@ def render_all(
     p57_workloads.validate_split(data_split)
   if stock_only and (not workload_candidate or data_split != "selection"):
     raise ValueError("P57 stock-only training/eval requires a selection recipe")
+  if stock_only and arm:
+    raise ValueError("P57 stock-only discovery cannot also select an arm")
   if stock_only and (
       workload_candidate != "m15" or expected_updates != 200
   ):
     raise ValueError("P57 stock curve is frozen to M15 selection for 200 updates")
   if not stock_only and workload_candidate and data_split != "main":
     raise ValueError("P57 paired arms require the frozen main data split")
+  if arm and arm not in _ARM_BY_NAME:
+    raise ValueError(
+        f"P57 arm must be one of {tuple(_ARM_BY_NAME)}, got {arm!r}"
+    )
+  if arm and not workload_candidate and expected_updates != 200:
+    raise ValueError("P57 original P45 workload is frozen to 200 updates")
+  if arm and workload_candidate == "m15" and expected_updates != 200:
+    raise ValueError("P57 M15 workload is frozen to 200 updates")
   if run_kind == "eval":
     expected_mode = "new" if checkpoint_step == 0 else "resume"
     if checkpoint_mode != expected_mode:
@@ -298,7 +325,8 @@ def render_all(
         expected_updates if stop_after_step is None else stop_after_step
     )
     if (
-        stop_after_step not in (50, 100, 150, 200)
+        stop_after_step <= 0
+        or stop_after_step % 50
         or stop_after_step > expected_updates
     ):
       raise ValueError("P57 stop-after-step must be a 50-step boundary in horizon")
@@ -311,7 +339,7 @@ def render_all(
   selected_arms = (
       tuple(arm for arm in _ARMS if arm.name == "mismatch")
       if stock_only
-      else _ARMS
+      else (_ARM_BY_NAME[arm],) if arm else _ARMS
   )
   for arm in selected_arms:
     spec = _spec(
@@ -343,7 +371,7 @@ def render_all(
             "CANON_P57_TIM_ARM": arm.name,
             "CANON_P57_RUN_KIND": run_kind,
             "CANON_P57_INFERENCE_REGIME": (
-                "stock-fast" if arm.name == "mismatch" else ""
+                "stock-fast" if arm.name in ("mismatch", "is") else ""
             ),
             "CANON_P57_EXPECTED_UPDATES": str(expected_updates),
             "CANON_P57_STOP_AFTER_STEP": (
@@ -394,7 +422,7 @@ def render_all(
         "CANON_P57_TIM_ARM": arm.name,
         "CANON_P57_RUN_KIND": run_kind,
         "CANON_P57_INFERENCE_REGIME": (
-            "stock-fast" if arm.name == "mismatch" else ""
+            "stock-fast" if arm.name in ("mismatch", "is") else ""
         ),
         "CANON_P57_EXPECTED_UPDATES": str(expected_updates),
         "CANON_P57_WORKLOAD_CANDIDATE": workload_candidate,
@@ -438,7 +466,7 @@ def render_all(
         f"split={data_split} fixed_lm_head=0",
         flush=True,
     )
-  else:
+  elif not arm:
     _validate_pair(documents, run_kind=run_kind)
   for arm, path in zip(selected_arms, outputs, strict=True):
     header = (
@@ -466,6 +494,7 @@ def main() -> int:
   parser.add_argument("--workload-candidate", choices=tuple(p57_workloads.CANDIDATES), default="")
   parser.add_argument("--data-split", choices=("calibration", "selection", "main"), default="")
   parser.add_argument("--stock-only", action="store_true")
+  parser.add_argument("--arm", choices=tuple(_ARM_BY_NAME), default="")
   parser.add_argument("--stop-after-step", type=int)
   parser.add_argument(
       "--base", type=Path, default=Path(__file__).with_name("jobset-64chip.yaml")
@@ -484,6 +513,7 @@ def main() -> int:
       workload_candidate=args.workload_candidate,
       data_split=args.data_split,
       stock_only=args.stock_only,
+      arm=args.arm,
       stop_after_step=args.stop_after_step,
   )
   print(

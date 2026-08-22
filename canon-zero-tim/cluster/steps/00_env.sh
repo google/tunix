@@ -55,13 +55,17 @@ if [ "${CANON_PROFILE_FILE:-}" = \
 fi
 P57_STOCK_TRAIN=0
 if [ "$P57_STOCK_FAST" = "1" ] && \
-   [ "${CANON_P57_RUN_KIND:-}:${CANON_P57_TIM_ARM:-}" = "train:mismatch" ]; then
-  P57_STOCK_TRAIN=1
+   [ "${CANON_P57_RUN_KIND:-}" = "train" ]; then
+  case "${CANON_P57_TIM_ARM:-}" in
+    mismatch|is) P57_STOCK_TRAIN=1 ;;
+  esac
 fi
 P57_STOCK_EVAL=0
 if [ "$P57_STOCK_FAST" = "1" ] && \
-   [ "${CANON_P57_RUN_KIND:-}:${CANON_P57_TIM_ARM:-}" = "eval:mismatch" ]; then
-  P57_STOCK_EVAL=1
+   [ "${CANON_P57_RUN_KIND:-}" = "eval" ]; then
+  case "${CANON_P57_TIM_ARM:-}" in
+    mismatch|is) P57_STOCK_EVAL=1 ;;
+  esac
 fi
 P58_NATIVE=0
 if [ "${CANON_PROFILE_FILE:-}" = \
@@ -620,24 +624,23 @@ if [ "${CANON_PROFILE_FILE:-}" = \
         fail=1
       }
       ;;
-    train:mismatch)
+    train:mismatch|train:is)
       [ "${CANON_P57_INFERENCE_REGIME:-}" = "stock-fast" ] && \
       [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "0" ] && \
       [ "${CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY:-0}" = "1" ] && \
-      [ "${CANON_P57_WORKLOAD_CANDIDATE:-}" = "m15" ] && \
-      [ "${CANON_P57_DATA_SPLIT:-}" = "selection" ] && \
-      [ "${CANON_P57_EXPECTED_UPDATES:-}" = "200" ] && \
-      [[ "${CANON_P57_STOP_AFTER_STEP:-}" =~ ^(50|100|150|200)$ ]] && \
+      [[ "${CANON_P57_STOP_AFTER_STEP:-}" =~ ^[1-9][0-9]*$ ]] && \
+      [ $((CANON_P57_STOP_AFTER_STEP % 50)) -eq 0 ] && \
+      [ "$CANON_P57_STOP_AFTER_STEP" -le "$CANON_P57_EXPECTED_UPDATES" ] && \
       [ -z "${CANON_P57_EVAL_CHECKPOINT_STEP:-}${CANON_P57_EVAL_OUTPUT:-}" ] || {
-        echo "[env] P57 mismatch training contract drifted" >&2
+        echo "[env] P57 native training contract drifted" >&2
         fail=1
       }
       ;;
-    eval:zero|eval:mismatch)
-      if [ "${CANON_P57_TIM_ARM}" = "mismatch" ]; then
+    eval:zero|eval:mismatch|eval:is)
+      if [ "${CANON_P57_TIM_ARM}" != "zero" ]; then
         [ "$P57_STOCK_EVAL" = "1" ] && \
         [ "${CANON_P57_INFERENCE_REGIME:-}" = "stock-fast" ] || {
-          echo "[env] P57 mismatch eval requires the stock-fast runtime" >&2
+          echo "[env] P57 native eval requires the stock-fast runtime" >&2
           fail=1
         }
       elif [ -n "${CANON_P57_INFERENCE_REGIME:-}" ]; then

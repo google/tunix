@@ -65,7 +65,7 @@ def _metadata(config, *, arm="zero", step=20):
 class P57CheckpointEvalTest(unittest.TestCase):
 
   def test_accepts_exact_training_provenance(self):
-    for arm in ("zero", "mismatch"):
+    for arm in ("zero", "mismatch", "is"):
       with self.subTest(arm=arm):
         config = _config(arm)
         checkpoint.validate_p57_evaluation_restored(

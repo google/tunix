@@ -41,7 +41,7 @@ def classify(
     data_split: str = "",
 ) -> dict[str, Any]:
   reasons: list[str] = []
-  if arm not in ("zero", "mismatch"):
+  if arm not in ("zero", "mismatch", "is"):
     reasons.append(f"invalid arm: {arm!r}")
   expected_fixed = "1" if arm == "zero" else "0"
   if not _SHA_RE.fullmatch(source_commit):
@@ -169,7 +169,7 @@ def main() -> int:
   parser = argparse.ArgumentParser()
   parser.add_argument("--evaluation", type=Path, required=True)
   parser.add_argument("--run-log", type=Path, required=True)
-  parser.add_argument("--arm", choices=("zero", "mismatch"), required=True)
+  parser.add_argument("--arm", choices=("zero", "mismatch", "is"), required=True)
   parser.add_argument("--source-commit", required=True)
   parser.add_argument("--checkpoint-tag", required=True)
   parser.add_argument("--checkpoint-step", type=int, required=True)
