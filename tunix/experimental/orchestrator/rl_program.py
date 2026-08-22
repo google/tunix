@@ -136,7 +136,12 @@ class StandardRLProgram(RLProgram):
       engine: rl_engine_interface.AbstractRLEngine,
       train_dataset: Iterable[Any] | None = None,
   ) -> None:
-    """Stage 1A: Dispatches rollout requests across workers asynchronously."""
+    """Stage 1A: Dispatches rollout requests across workers asynchronously.
+
+    Ensures that all dataset items carry unique, collision-free `prompt_id`s
+    (e.g., `f"prompt_{prompt_idx}"`) before dispatching to the engine layer,
+    satisfying the engine's strict `prompt_id` contract.
+    """
     active_dataset = (
         train_dataset if train_dataset is not None else self.dataset
     )

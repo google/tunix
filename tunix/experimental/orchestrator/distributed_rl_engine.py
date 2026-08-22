@@ -153,7 +153,11 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       route_metadata: Mapping[str, Any] | None = None,
       **kwargs: Any,
   ) -> list[str]:
-    """Dispatches rollout requests across workers, constructing RolloutRequests internally if needed."""
+    """Dispatches rollout requests across workers, constructing RolloutRequests internally.
+
+    Every prompt item in `prompts` MUST have a unique, collision-free `prompt_id`
+    attribute or dict key. Missing prompt IDs raise a ValueError.
+    """
     base_metadata = {
         **(route_metadata or {}),
         **(kwargs.get("metadata") or {}),
@@ -183,7 +187,8 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       if not prompt_id:
         raise ValueError(
             f"Prompt at index {idx} lacks 'prompt_id'. Every prompt item "
-            "must provide a 'prompt_id' attribute or dict key."
+            "dispatched to DistributedRLEngine must provide a unique, "
+            "collision-free 'prompt_id' (as an attribute or dict key)."
         )
 
       prompt_id = str(prompt_id)

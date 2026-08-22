@@ -27,7 +27,17 @@ class AbstractRLEngine(Protocol):
       self,
       requests: Sequence[datatypes.RolloutRequest],
   ) -> list[str]:
-    """Dispatches pre-formed RolloutRequests across rollout workers using prefix routing."""
+    """Low-level primitive: Dispatches pre-formed RolloutRequests using prefix routing.
+
+    Callers must ensure that all requests have unique, collision-free
+    `request_id` and `prompt_id` attributes.
+
+    Args:
+      requests: Sequence of pre-formed `datatypes.RolloutRequest` DTOs.
+
+    Returns:
+      List of dispatched `request_id` strings.
+    """
     ...
 
   async def dispatch_rollouts(
@@ -40,7 +50,34 @@ class AbstractRLEngine(Protocol):
       route_metadata: Mapping[str, Any] | None = None,
       **kwargs: Any,
   ) -> list[str]:
-    """Expands prompt groups into RolloutRequests and dispatches them."""
+    """High-level convenience: Expands prompts by group_size and dispatches rollouts.
+
+    Contract & Invariants:
+      1. Every item in `prompts` MUST have a unique, collision-free `prompt_id`
+         (provided as an attribute `p.prompt_id` or dict key `p["prompt_id"]`).
+         The engine does not synthesize fallback IDs; missing IDs raise a
+         `ValueError` immediately.
+      2. The engine expands each prompt into `group_size` independent rollout
+         requests with deterministic IDs `req_{prompt_id}_{g_idx}_v{version}`
+         and sets `pair_index = g_idx` (0..G-1).
+      3. `group_id` defaults to `prompt_id` unless an explicit `group_id` is
+         provided on the prompt item.
+
+    Args:
+      prompts: Sequence of prompt items (dicts, objects, or RolloutRequests).
+        Every prompt item MUST provide a unique `prompt_id`.
+      group_size: Number of rollout trajectories to generate per prompt (G).
+      policy_version: Active policy version for generation.
+      generation_args: Optional generation parameters (temperature, max steps).
+      route_metadata: Optional routing metadata (e.g. `prefix_hash`).
+      **kwargs: Optional additional metadata.
+
+    Returns:
+      List of dispatched `request_id` strings.
+
+    Raises:
+      ValueError: If any item in `prompts` lacks a `prompt_id`.
+    """
     ...
 
   async def poll_rollouts(
