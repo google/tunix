@@ -1,0 +1,34 @@
+INFO:absl:[DEEPSWE.ROLLOUT_DEADLINE] batch_complete prompt_groups=8 elapsed_secs=486.4 deadline_secs=3600
+INFO:absl:Logging item to /mnt/disks/linchai_data/deepswe_zero_tim/canon-p58-ds4b-native-full-p58f05/metrics/trajectory_log_1787358806.csv
+[P58.LOGPS_BATCH] configured_prompts=8 generations=16 execution_trajectories=128 observed_trajectories=128
+[P58.TRAJECTORY_BATCH] step=0 path=/mnt/disks/linchai_data/deepswe_zero_tim/canon-p58-ds4b-native-full-p58f05/debug/batch-000000.trajectories.jsonl.gz sha256=90c179d799bb97416f1a4e6cf944a15326cef56360da179c771fad79fa02bcac
+[P58.BATCH_METRICS_JSON] {"all_env_timeout_batch":false,"all_failed_prompt_groups":5,"all_sandbox_start_timeout_batch":false,"all_solved_prompt_groups":0,"compact_filtered_prompt_groups":1,"compact_filtered_trajectories":2,"compact_filtered_trajectory_ratio":0.015625,"complete_trajectories":126,"complete_trajectory_solve_ratio":0.047619047619047616,"effective_prompt_groups":2,"env_timeout_trajectories":0,"env_timeout_trajectory_ratio":0.0,"groups":[{"category":"all_failed","compact_filtered_trajectories":0,"complete_trajectories":16,"group_id":"0","nonzero_advantages":0,"raw_nonzero_advantages":0,"raw_rewards":[0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0],"solved_trajectories":0},{"category":"all_failed","compact_filtered_trajectories":0,"complete_trajectories":16,"group_id":"1","nonzero_advantages":0,"raw_nonzero_advantages":0,"raw_rewards":[0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0],"solved_trajectories":0},{"category":"mixed","compact_filtered_trajectories":0,"complete_trajectories":16,"group_id":"2","nonzero_advantages":16,"raw_nonzero_advantages":16,"raw_rewards":[0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,1.0,0.0,0.0,0.0],"solved_trajectories":1},{"category":"all_failed","compact_filtered_trajectories":0,"complete_trajectories":16,"group_id":"3","nonzero_advantages":0,"raw_nonzero_advantages":0,"raw_rewards":[0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0],"solved_trajectories":0},{"category":"incomplete","compact_filtered_trajectories":2,"complete_trajectories":14,"group_id":"4","nonzero_advantages":0,"raw_nonzero_advantages":0,"raw_rewards":[0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0],"solved_trajectories":0},{"category":"mixed","compact_filtered_trajectories":0,"complete_trajectories":16,"group_id":"5","nonzero_advantages":16,"raw_nonzero_advantages":16,"raw_rewards":[0.0,0.0,0.0,0.0,1.0,0.0,0.0,1.0,0.0,0.0,1.0,0.0,1.0,0.0,0.0,1.0],"solved_trajectories":5},{"category":"all_failed","compact_filtered_trajectories":0,"complete_trajectories":16,"group_id":"6","nonzero_advantages":0,"raw_nonzero_advantages":0,"raw_rewards":[0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0],"solved_trajectories":0},{"category":"all_failed","compact_filtered_trajectories":0,"complete_trajectories":16,"group_id":"7","nonzero_advantages":0,"raw_nonzero_advantages":0,"raw_rewards":[0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0],"solved_trajectories":0}],"incomplete_prompt_groups":1,"incomplete_trajectories":2,"insufficient_cpu_trajectories":0,"insufficient_memory_trajectories":0,"mixed_prompt_groups":2,"nonbinary_final_rewards":0,"nonzero_advantage_ratio":0.25,"nonzero_advantages":32,"optimizer_step":0,"prompt_groups":8,"raw_final_reward_histogram":{"0":122,"1":6},"raw_nonzero_advantage_ratio":0.25,"raw_nonzero_advantages":32,"sandbox_start_timeout_trajectories":0,"sandbox_start_timeout_trajectory_ratio":0.0,"scheduling_gated_trajectories":0,"schema":"canon.p58.deepswe.batch-metrics.v1","solve_definition":"r2egym_final_reward_eq_1","solved_trajectories":6,"status_histogram":{"MAX_CONTEXT_LIMIT_REACHED":2,"SUCCEEDED":126},"step":0,"timeout_resource_histogram":{},"timeout_scheduler_reason_histogram":{},"timeout_stage_histogram":{},"timeout_trajectories":0,"timeout_trajectory_ratio":0.0,"trajectories":128,"trajectory_path":"/mnt/disks/linchai_data/deepswe_zero_tim/canon-p58-ds4b-native-full-p58f05/debug/batch-000000.trajectories.jsonl.gz","trajectory_sha256":"90c179d799bb97416f1a4e6cf944a15326cef56360da179c771fad79fa02bcac","trajectory_solve_ratio":0.046875,"unschedulable_trajectories":0}
+INFO:absl:sampler-trainer: logp_diff=(0.12075,24.68586) prob_diff=(0.03849,0.99999) pearson=0.95318
+[P34.WEIGHTS_JSON] {"equal":true,"live_leaves":398,"mapped_leaves":398,"mesh_device_ids":[0,4,8,12,1,5,9,13,16,20,24,28,17,21,25,29,32,36,40,44,33,37,41,45,48,52,56,60,49,53,57,61,64,68,72,76,65,69,73,77,80,84,88,92,81,85,89,93,96,100,104,108,97,101,105,109,112,116,120,124,113,117,121,125],"mesh_shape":{"dp":8,"tp":8},"mismatch_indices":[],"normalized_memory_leaves":398,"schema":"canon.p34.deepswe.weight-attestation.v1","step":0,"total_elements":4022468096,"verdict":"PASS"}
+[P34.WEIGHTS] EXACT step=0 leaves=398 elements=4022468096 devices=64
+[P58.STOCK_OBSERVER] PROCESSED_PROMPT_LOGPROBS_PASS rows=2048 populated=2048 targets=absolute-request-history treatment=observer-only
+INFO:absl:[CANON_ALIGN] attached host sidecar rows=128 completion_width=16384
+[rank0]: Traceback (most recent call last):
+[rank0]:   File "/app/examples/deepswe/canonical_entrypoint.py", line 36, in <module>
+[rank0]:     main()
+[rank0]:   File "/app/examples/deepswe/canonical_entrypoint.py", line 32, in main
+[rank0]:     runpy.run_module("examples.deepswe.train_deepswe_nb", run_name="__main__")
+[rank0]:   File "<frozen runpy>", line 229, in run_module
+[rank0]:   File "<frozen runpy>", line 88, in _run_code
+[rank0]:   File "/app/examples/deepswe/train_deepswe_nb.py", line 1582, in <module>
+[rank0]:     agentic_grpo_learner.train(train_dataset=train_dataset)
+[rank0]:   File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 2530, in train
+[rank0]:     train_examples = self._batch_to_train_example(
+[rank0]:                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 1981, in _batch_to_train_example
+[rank0]:     return self._process_results(
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/rl/agentic/agentic_grpo_learner.py", line 1514, in _process_results
+[rank0]:     precheck_record = alignment.check_pre_backward(
+[rank0]:                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/rl/alignment.py", line 1211, in check_pre_backward
+[rank0]:     policy = gsm8k_ab_report_policy()
+[rank0]:              ^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/rl/alignment.py", line 465, in gsm8k_ab_report_policy
+[rank0]:     raise AlignmentGateError(
+[rank0]: tunix.rl.alignment.AlignmentGateError: DeepSWE warning policy is admitted only for committed P34 full training or a committed P39, P43, or P44 debug update
