@@ -30,7 +30,7 @@ from jax.sharding import Mesh
 from transformers import AutoTokenizer
 from tunix.experimental.examples.math_gsm8k_dist import gsm8k
 from tunix.experimental.examples.math_gsm8k_dist import models
-from tunix.experimental.rollout import inprocess_vllm_sampler_adapter
+from tunix.experimental.rollout import legacy_vllm_sampler_adapter
 from tunix.experimental.rollout import raiden_sampler_adapter
 from tunix.experimental.worker import remote_execution
 from tunix.experimental.worker import rollout_worker
@@ -84,6 +84,24 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       default=os.getenv("SAMPLER", "legacy_vllm"),
       choices=["legacy_vllm", "vanilla"],
   )
+  parser.add_argument("--tensor_parallel_size", type=int, default=4)
+  parser.add_argument(
+      "--sampler_type",
+      type=str,
+      default="vllm",
+      choices=["vllm", "legacy_vllm"],
+  )
+  parser.add_argument(
+      "--maxtext_model_name",
+      type=str,
+      default="",
+      help=(
+          "MaxText model_name (e.g. qwen3-0.6b). When set, loads the model"
+          " via maxtext_vllm_adapter's MaxTextForCausalLM instead of"
+          " tpu-inference's own reimplementation, so trainer and rollout"
+          " share Raiden weight-sync tensor names."
+      ),
+  )
   return parser.parse_args(argv)
 
 
@@ -132,64 +150,121 @@ def _create_vanilla_worker(args, tokenizer):
 
 
 def _create_vllm_worker(args, tokenizer):
-  logging.info("Creating vLLM mapping config...")
-  mapping_config = mappings_lib.MappingConfig(
-      lora_to_hf_mappings=mapping_vllm_jax.LORA_TO_HF_MAPPINGS
+  vllm_model = (
+      args.model_dir
+      if (
+          args.model_dir
+          and os.path.exists(args.model_dir)
+          and any(os.scandir(args.model_dir))
+      )
+      else args.model_id
   )
-  vllm_model = args.model_dir or args.model_id
-  rollout_mesh = _create_rollout_mesh()
   max_model_len = args.max_prompt_length + args.max_response_length
-  logging.info(
-      "Creating vLLM config for model=%s mesh=%s tensor_parallel_size=%d "
-      "max_model_len=%d...",
-      vllm_model,
-      rollout_mesh,
-      jax.device_count(),
-      max_model_len,
-  )
-  vllm_config = vllm_sampler.VllmConfig(
-      mesh=rollout_mesh,
-      tensor_parallel_size=jax.device_count(),
-      data_parallel_size=1,
-      return_logprobs=True,
-      lora_config=(
-          {
-              "max_lora_rank": args.lora_rank,
-              "max_loras": 1,
-          }
-          if args.use_lora
-          else None
-      ),
-      mapping_config=mapping_config,
-      engine_kwargs={
-          "model": vllm_model,
-          "max_model_len": max_model_len,
-      },
-  )
-  sampler_adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
-      server_id=args.worker_id,
-      tokenizer=tokenizer,
-      config=vllm_config,
-  )
+
+  if getattr(args, "sampler_type", "vllm") == "vllm":
+    from vllm.engine.arg_utils import AsyncEngineArgs  # pylint: disable=g-import-not-at-top
+    from tunix.experimental.rollout import vllm_sampler_adapter  # pylint: disable=g-import-not-at-top
+
+    tp_size = args.tensor_parallel_size
+    logging.info(
+        "Creating vLLM RLVllmSampler config for model=%s tp_size=%d "
+        "max_model_len=%d...",
+        vllm_model,
+        tp_size,
+        max_model_len,
+    )
+    engine_kwargs = dict(
+        model=vllm_model,
+        tokenizer=args.tokenizer_path or vllm_model,
+        tensor_parallel_size=tp_size,
+        max_model_len=max_model_len,
+        trust_remote_code=True,
+        dtype="bfloat16",
+        enable_lora=args.use_lora,
+        max_lora_rank=args.lora_rank if args.use_lora else None,
+        max_loras=1 if args.use_lora else None,
+    )
+    if args.maxtext_model_name:
+      logging.info(
+          "Loading MaxText model %r natively via maxtext_vllm_adapter's"
+          " MaxTextForCausalLM (architectures override).",
+          args.maxtext_model_name,
+      )
+      engine_kwargs["hf_overrides"] = {"architectures": ["MaxTextForCausalLM"]}
+      engine_kwargs["additional_config"] = {
+          "maxtext_config": {"model_name": args.maxtext_model_name}
+      }
+    engine_args = AsyncEngineArgs(**engine_kwargs)
+    sampler_adapter = vllm_sampler_adapter.VllmSamplerAdapter(
+        server_id=args.worker_id,
+        engine_args=engine_args,
+        model_name=vllm_model,
+    )
+    rollout_config = rollout_worker.RolloutConfig(
+        sampler_type="vllm",
+        max_prompt_length=args.max_prompt_length,
+        max_tokens_to_generate=args.max_response_length,
+        temperature=1.0,
+        top_p=1.0,
+        return_logprobs=True,
+        rollout_vllm_model_version=vllm_model,
+    )
+  else:
+    logging.info("Creating vLLM mapping config...")
+    mapping_config = mappings_lib.MappingConfig(
+        lora_to_hf_mappings=mapping_vllm_jax.LORA_TO_HF_MAPPINGS
+    )
+    rollout_mesh = _create_rollout_mesh()
+    logging.info(
+        "Creating legacy vLLM config for model=%s mesh=%s tensor_parallel_size=%d "
+        "max_model_len=%d...",
+        vllm_model,
+        rollout_mesh,
+        jax.device_count(),
+        max_model_len,
+    )
+    vllm_config = vllm_sampler.VllmConfig(
+        mesh=rollout_mesh,
+        tensor_parallel_size=jax.device_count(),
+        data_parallel_size=1,
+        return_logprobs=True,
+        lora_config=(
+            {
+                "max_lora_rank": args.lora_rank,
+                "max_loras": 1,
+            }
+            if args.use_lora
+            else None
+        ),
+        mapping_config=mapping_config,
+        engine_kwargs={
+            "model": vllm_model,
+            "max_model_len": max_model_len,
+        },
+    )
+    sampler_adapter = legacy_vllm_sampler_adapter.LegacyVllmSamplerAdapter(
+        server_id=args.worker_id,
+        tokenizer=tokenizer,
+        config=vllm_config,
+    )
+    rollout_config = rollout_worker.RolloutConfig(
+        sampler_type="legacy_vllm",
+        max_prompt_length=args.max_prompt_length,
+        max_tokens_to_generate=args.max_response_length,
+        temperature=1.0,
+        top_p=1.0,
+        return_logprobs=True,
+        rollout_vllm_model_version=vllm_model,
+    )
+
   rollout_tokenizer = tokenizer_adapter_lib.TokenizerAdapter(tokenizer)
   chat_parser = chat_parser_lib.QwenChatTemplateParser(
       tokenizer, enable_thinking=False
   )
   logging.info("Creating RolloutWorker wrapper...")
-  config = rollout_worker.RolloutConfig(
-      sampler_type="inprocess_vllm",
-      max_prompt_length=args.max_prompt_length,
-      max_tokens_to_generate=args.max_response_length,
-      temperature=1.0,
-      top_p=1.0,
-      return_logprobs=True,
-      rollout_vllm_model_version=vllm_model,
-      env_name=gsm8k.GSM8K_ENV_NAME,
-      agent_name=gsm8k.GSM8K_AGENT_NAME,
-  )
   return rollout_worker.RolloutWorker(
       worker_id=args.worker_id,
-      config=config,
+      config=rollout_config,
       sampler=sampler_adapter,
       tokenizer=rollout_tokenizer,
       chat_parser=chat_parser,
@@ -214,11 +289,16 @@ def main(argv: list[str], context: Any = None) -> None:
   args = _parse_args(argv)
   logging.info("Parsed args: %s", args)
 
-  if context:
+  if context and getattr(args, "sampler_type", "vllm") != "vllm":
     context.jax.initialize()
   os.environ.setdefault("VLLM_ALLOW_LONG_MAX_MODEL_LEN", "1")
   os.environ.setdefault("VLLM_TPU_RPA_VERSION", "2")
   os.environ.setdefault("DISABLE_MOSAIC_ATTN", "1")
+  if args.maxtext_model_name:
+    # the MaxText adapter's logical_axis_rules need the 7-axis mesh that
+    # tpu-inference only builds under NEW_MODEL_DESIGN; must be set before
+    # vllm/tpu_inference is imported, hence here rather than in _create_vllm_worker
+    os.environ.setdefault("NEW_MODEL_DESIGN", "1")
   if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
   logging.info("Repo root inserted into sys.path: %s", REPO_ROOT)

@@ -582,7 +582,11 @@ class WeightSyncCoordinator:
   def _members(self, role: str) -> list[Any]:
     group = self._registry.group(role)
     if group.is_empty():
-      raise ValueError(f"no workers registered for role {role!r}")
+      raise ValueError(
+          f"no workers registered for role {role!r}. Available in registry:"
+          f" {self._registry.roles()!r}, workers:"
+          f" {self._registry.worker_ids()!r}"
+      )
     return list(group)
 
   def _sources(self) -> list[WeightSyncSource]:
@@ -822,6 +826,12 @@ class WeightSyncCoordinator:
       )
 
     def fail(message: str) -> WeightSyncError:
+      # log here too since callers logging str(e) never see .result.failures
+      if failures:
+        logging.error(
+            "[WeightSyncCoordinator] round %d (req_id %s, uuid %s) %s:\n%s",
+            round_index, req_id, uuid, message, "\n".join(failures),
+        )
       return WeightSyncError(
           f"round {round_index} (req_id {req_id}, uuid {uuid}): {message};"
           f" final state {state.value}",
@@ -889,8 +899,16 @@ class WeightSyncCoordinator:
             " quiesced; no rollback needed"
         ) from e
 
-      src_metadata = [m for per_source in src_meta_lists for m in per_source]
-      dst_metadata = [m for per_dest in dst_meta_lists for m in per_dest]
+      src_metadata = [
+          weight_sync.dict_to_metadata(m)
+          for per_source in src_meta_lists
+          for m in per_source
+      ]
+      dst_metadata = [
+          weight_sync.dict_to_metadata(m)
+          for per_dest in dst_meta_lists
+          for m in per_dest
+      ]
       if not src_metadata or not dst_metadata:
         failures.append(
             f"metadata: {len(src_metadata)} source, {len(dst_metadata)}"
@@ -906,10 +924,10 @@ class WeightSyncCoordinator:
       # afterwards it degrades into a lost tensor under a green round.
       preflight_problems = _manifest_mismatches(src_metadata, dst_metadata)
       if preflight_problems:
+        logging.error("[WeightSyncCoordinator] Manifest preflight problems:\n%s", "\n".join(preflight_problems))
         failures.extend(preflight_problems)
         raise fail(
-            "manifest preflight failed before any destination was quiesced;"
-            " no rollback needed"
+            f"manifest preflight failed: {preflight_problems[:5]}; no rollback needed"
         )
 
       loop = asyncio.get_running_loop()

@@ -330,13 +330,13 @@ def _register_workers(
   """Registers gRPC-backed workers in the Orchestrator V2 registry."""
   cluster.register_worker_handle(
       worker_id="trainer-0",
-      roles=[datatypes.Role.ACTOR],
+      roles=[datatypes.Role.ACTOR, "trainer"],
       handle=trainer_handle,
       resources={"address": trainer_addr},
   )
   cluster.register_worker_handle(
       worker_id="rollout-0",
-      roles=[datatypes.Role.ROLLOUT],
+      roles=[datatypes.Role.ROLLOUT, "rollout"],
       handle=rollout_handle,
       resources={"address": rollout_addr},
   )

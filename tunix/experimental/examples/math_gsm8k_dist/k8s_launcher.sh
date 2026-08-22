@@ -14,12 +14,19 @@
 # limitations under the License.
 
 COMMAND=""
-TUNIX_IMAGE="us-central1-docker.pkg.dev/cloud-tpu-multipod-dev/yangmu/tunix/tunix_base_image:trellis-demo-0813"
+# No default: build an image with tunix, maxtext, and tpu-inference baked in
+# at pinned commits (see requirements/special_requirements.txt), then pass it
+# via TUNIX_IMAGE or --image.
+TUNIX_IMAGE=${TUNIX_IMAGE:-}
 
 export MODEL_NAME=${MODEL_NAME:-Qwen3-1.7B}
 export MODEL_ID=${MODEL_ID:-Qwen/Qwen3-1.7B}
 export MODEL_DIR=${MODEL_DIR:-artifacts/qwen3_dist_gsm8k/models}
 export TOKENIZER_PATH=${TOKENIZER_PATH:-${MODEL_DIR}}
+# only consulted when TRAINER_BACKEND=maxtext; keep it matching
+# MODEL_NAME/MODEL_ID or Raiden weight sync between trainer and rollout won't
+# line up
+export MAXTEXT_MODEL_NAME=${MAXTEXT_MODEL_NAME:-qwen3-1.7b}
 
 export MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-512}
 export MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-128}
@@ -27,11 +34,20 @@ export BATCH_SIZE=${BATCH_SIZE:-2}
 export NUM_GENERATIONS=${NUM_GENERATIONS:-2}
 export MAX_STEPS=${MAX_STEPS:-1}
 export TRAIN_MICRO_BATCH_SIZE=${TRAIN_MICRO_BATCH_SIZE:-1}
+
+# peft runs tunix's PeftTrainer (default, matches this script's prior
+# behavior); maxtext runs MaxText's MaxTextTrainingEngine.
+export TRAINER_BACKEND=${TRAINER_BACKEND:-peft}
+export MAXTEXT_CKPT=${MAXTEXT_CKPT:-}
 export MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-$((BATCH_SIZE * NUM_GENERATIONS))}
 export EVAL_EVERY_N_STEPS=${EVAL_EVERY_N_STEPS:-1000000}
 export LORA_RANK=${LORA_RANK:-16}
 export LORA_ALPHA=${LORA_ALPHA:-16.0}
 export USE_LORA=${USE_LORA:-0}
+
+# Logs source/destination Raiden tensor checksums on both the trainer and
+# rollout sides during weight sync, for cross-verification of a real run.
+export VERIFY_WEIGHTS=${VERIFY_WEIGHTS:-false}
 
 export ORCHESTRATOR_ID=$USER-orch
 export ORCHESTRATOR_PORT=20000
@@ -42,15 +58,21 @@ export ROLLOUT_PORT=20001
 export TRAINER_ID=$USER-train
 export TRAINER_PORT=20002
 
+export CPU_MACHINE=${CPU_MACHINE:-n2-standard-64}
+export TRAINER_JOBSET_YAML=${TRAINER_JOBSET_YAML:-jobset.pathways.yaml}
+export TRAINER_TPU_SLICE=${TRAINER_TPU_SLICE:-tpuv5:2x2x2}
+export TRAINER_MESH_FSDP=${TRAINER_MESH_FSDP:-8}
+export TRAINER_MESH_TP=${TRAINER_MESH_TP:-1}
+
 stop_orchestrator() {
-  kubectl delete jobset "${ORCHESTRATOR_ID}"
+  kubectl delete jobset "${ORCHESTRATOR_ID}" 2>/dev/null || true
 }
 
 start_orchestrator() {
   python tunix/experimental/distributed/deployment/yaml_generator.py \
     tunix/experimental/distributed/deployment/yamls/jobset.cpu.yaml \
     --jobset_name="${ORCHESTRATOR_ID}" \
-    --cpu_machine=n2-standard-64 \
+    --cpu_machine=${CPU_MACHINE} \
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${ORCHESTRATOR_PORT}" \
     --worker_startup_command=" \
@@ -66,30 +88,34 @@ start_orchestrator() {
         --max_prompt_length=${MAX_PROMPT_LENGTH} \
         --max_response_length=${MAX_RESPONSE_LENGTH} \
         --train_micro_batch_size=${TRAIN_MICRO_BATCH_SIZE} \
+        --sync_weights \
         --stop_workers_on_exit \
     " \
     | kubectl apply -f -
 }
 
 stop_trainer() {
-  kubectl delete jobset "${TRAINER_ID}"
+  kubectl delete jobset "${TRAINER_ID}" 2>/dev/null || true
 }
 
 start_trainer() {
   python tunix/experimental/distributed/deployment/yaml_generator.py \
-    tunix/experimental/distributed/deployment/yamls/jobset.pathways.yaml \
+    tunix/experimental/distributed/deployment/yamls/${TRAINER_JOBSET_YAML} \
     --jobset_name="${TRAINER_ID}" \
-    --tpu_slice=tpuv5:2x2x2 \
+    --tpu_slice=${TRAINER_TPU_SLICE} \
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${TRAINER_PORT}" \
     --worker_startup_command=" \
-      python -m tunix.experimental.distributed.runtime.main \
+      VERIFY_WEIGHTS=${VERIFY_WEIGHTS} python -m tunix.experimental.distributed.runtime.main \
         --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
         --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
         --process_main=tunix.experimental.examples.math_gsm8k_dist.run_trainer_node.main \
         --worker_id=${TRAINER_ID} \
         --port=${TRAINER_PORT} \
-        --mesh_fsdp=8 \
+        --mesh_fsdp=${TRAINER_MESH_FSDP} \
+        --mesh_tp=${TRAINER_MESH_TP} \
+        --trainer_backend=${TRAINER_BACKEND} \
+        ${MAXTEXT_CKPT:+--maxtext_load_parameters_path=${MAXTEXT_CKPT}} \
         --model_name=${MODEL_NAME} \
         --model_id=${MODEL_ID} \
         --model_dir=${MODEL_DIR} \
@@ -101,13 +127,13 @@ start_trainer() {
         --eval_every_n_steps=${EVAL_EVERY_N_STEPS} \
         --lora_rank=${LORA_RANK} \
         --lora_alpha=${LORA_ALPHA} \
+        --maxtext_model_name=${MAXTEXT_MODEL_NAME} \
     " \
     | kubectl apply -f -
-
 }
 
 stop_rollout() {
-  kubectl delete jobset "${ROLLOUT_ID}"
+  kubectl delete jobset "${ROLLOUT_ID}" 2>/dev/null || true
 }
 
 start_rollout() {
@@ -118,7 +144,7 @@ start_rollout() {
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${ROLLOUT_PORT}" \
     --worker_startup_command=" \
-      SKIP_JAX_PRECOMPILE=1 python -m tunix.experimental.distributed.runtime.main \
+      SKIP_JAX_PRECOMPILE=1 VERIFY_WEIGHTS=${VERIFY_WEIGHTS} python -m tunix.experimental.distributed.runtime.main \
         --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
         --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
         --process_main=tunix.experimental.examples.math_gsm8k_dist.run_rollout_node.main \
@@ -131,6 +157,8 @@ start_rollout() {
         --max_response_length=${MAX_RESPONSE_LENGTH} \
         --lora_rank=${LORA_RANK} \
         --lora_alpha=${LORA_ALPHA} \
+        --tensor_parallel_size=4 \
+        --maxtext_model_name=${MAXTEXT_MODEL_NAME} \
     " \
     | kubectl apply -f -
 }
@@ -160,6 +188,13 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+if [[ -z "$TUNIX_IMAGE" ]]; then
+  echo "Error: no image set. Build one with tunix, maxtext, and" \
+       "tpu-inference installed, then pass it via TUNIX_IMAGE=... or" \
+       "--image=..."
+  exit 1
+fi
 
 if [[ "$COMMAND" == "start" ]]; then
   stop_orchestrator

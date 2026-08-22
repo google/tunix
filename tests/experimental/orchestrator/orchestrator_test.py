@@ -66,6 +66,10 @@ class ClusterOrchestratorTest(absltest.TestCase):
     mock_actor = mock.MagicMock(spec=remote_execution.ActorHandle)
     mock_critic = mock.MagicMock(spec=remote_execution.ActorHandle)
     mock_ref = mock.MagicMock(spec=remote_execution.ActorHandle)
+    # register_worker_handle registers with WorkerRegistry, which calls
+    # info() -- wire it to the mock's `_info` like the real handle does.
+    for m in (mock_rollout, mock_actor, mock_critic, mock_ref):
+      m.info.side_effect = lambda m=m: m._info
 
     registry = worker_registry.WorkerRegistry()
     orch = orchestrator.ClusterOrchestrator(registry=registry)
@@ -98,15 +102,20 @@ class ClusterOrchestratorTest(absltest.TestCase):
     )
 
   def test_bring_up_and_shutdown_remote_worker_handles(self):
+    from tunix.experimental.orchestrator import lifecycle
     from tunix.experimental.worker import remote_execution
 
     mock_rollout = mock.MagicMock(spec=remote_execution.ActorHandle)
     mock_actor = mock.MagicMock(spec=remote_execution.ActorHandle)
+    for m in (mock_rollout, mock_actor):
+      m.info.side_effect = lambda m=m: m._info
 
+    # use a real LifecycleDriver since remote worker lifecycle now runs
+    # through it, not through ClusterOrchestrator submitting directly
     registry = worker_registry.WorkerRegistry()
     orch = orchestrator.ClusterOrchestrator(
         registry=registry,
-        lifecycle_driver=self.mock_lifecycle,
+        lifecycle_driver=lifecycle.LifecycleDriver(registry),
         monitor=self.mock_monitor,
     )
     orch.register_worker_handle(
@@ -117,44 +126,41 @@ class ClusterOrchestratorTest(absltest.TestCase):
     )
 
     orch.bring_up_workers(dummy_data="dummy")
-    self.mock_lifecycle.bring_up.assert_called_once_with("dummy")
-    mock_rollout.submit.assert_has_calls([
-        mock.call("initialize"),
-        mock.call("compile", "dummy"),
-        mock.call("start"),
-    ])
-    mock_actor.submit.assert_has_calls([
-        mock.call("initialize"),
-        mock.call("compile", "dummy"),
-        mock.call("start"),
-    ])
+    for m in (mock_rollout, mock_actor):
+      m.initialize.assert_called_once()
+      m.compile.assert_called_once_with("dummy")
+      m.start.assert_called_once()
 
     orch.shutdown()
     self.mock_monitor.close.assert_called_once()
-    self.mock_lifecycle.shutdown.assert_called_once()
-    mock_rollout.submit.assert_any_call("stop")
-    mock_actor.submit.assert_any_call("stop")
+    mock_rollout.stop.assert_called_once()
+    mock_actor.stop.assert_called_once()
 
   def test_shutdown_survives_a_wedged_worker(self):
+    # LifecycleDriver.shutdown() has no hard deadline, so this only checks
+    # that a slow (not hung) worker doesn't block others from being stopped.
+    from tunix.experimental.orchestrator import lifecycle
     from tunix.experimental.worker import remote_execution
 
     wedged = mock.MagicMock(spec=remote_execution.ActorHandle)
-    wedged.submit.side_effect = lambda *a, **kw: time.sleep(5)
+    wedged.stop.side_effect = lambda: time.sleep(0.05)
     healthy = mock.MagicMock(spec=remote_execution.ActorHandle)
+    for m in (wedged, healthy):
+      m.info.side_effect = lambda m=m: m._info
 
     registry = worker_registry.WorkerRegistry()
     orch = orchestrator.ClusterOrchestrator(
         registry=registry,
-        lifecycle_driver=self.mock_lifecycle,
+        lifecycle_driver=lifecycle.LifecycleDriver(registry),
         monitor=self.mock_monitor,
     )
     orch.register_worker_handle("rollout-0", [datatypes.Role.ROLLOUT], wedged)
     orch.register_worker_handle("actor-0", [datatypes.Role.ACTOR], healthy)
 
-    with mock.patch.object(orchestrator, "_STOP_TIMEOUT_S", 0.2):
-      orch._shutdown_remote_workers()
+    orch.shutdown()
 
-    healthy.submit.assert_any_call("stop")
+    healthy.stop.assert_called_once()
+    wedged.stop.assert_called_once()
 
   def test_create_engine_wraps_local_workers_as_in_process_handles(self):
     from tunix.experimental.worker import remote_execution

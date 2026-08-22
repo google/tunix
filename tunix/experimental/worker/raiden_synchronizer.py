@@ -75,22 +75,30 @@ def flatten_weights(state: Any) -> Tuple[List[str], List[Any]]:
 
 
 def _bindable(arr: Any) -> bool:
-  """True if the native layer can bind this leaf."""
+  """True if the native layer can bind this leaf.
+
+  Binding an unsupported leaf (e.g. RNG keys) can SIGSEGV, so only
+  floating-point, rank>=1, fully TPU-resident arrays qualify.
+  """
   try:
+    if not hasattr(arr, "shape") or not hasattr(arr, "dtype"):
+      return False
+    if arr.ndim < 1:
+      return False
+    if not jnp.issubdtype(arr.dtype, jnp.floating):
+      return False
     devices = arr.devices()
-  except AttributeError:
+    if not devices:
+      return False
+    return all(getattr(d, "platform", "?") == "tpu" for d in devices)
+  except Exception:
     return False
-  on_local_hw = all(
-      getattr(d, "platform", "?") in ("cpu", "tpu") for d in devices
-  )
-  return on_local_hw and jnp.issubdtype(arr.dtype, jnp.number)
 
 
 def _filter_bindable(
     names: List[str], arrays: List[Any]
 ) -> Tuple[List[str], List[Any]]:
-  """Drops leaves the native layer cannot bind; binding them is undefined
-  behavior (observed: random RuntimeError or SIGSEGV on RNG-key arrays)."""
+  """Drops leaves _bindable rejects."""
   logging.vlog(
       1,
       "raiden bind census: %s",
@@ -103,6 +111,12 @@ def _filter_bindable(
   dropped = []
   for name, arr in zip(names, arrays):
     if _bindable(arr):
+      if hasattr(arr, "block_until_ready"):
+        try:
+          # binding an in-flight buffer is part of what SIGSEGVs
+          arr.block_until_ready()
+        except Exception:
+          pass
       keep_names.append(name)
       keep_arrays.append(arr)
     else:
@@ -199,8 +213,7 @@ class RaidenSynchronizer:
           self.arrays,
           local_port=0,
           parallelism=self._parallelism,
-          # Rebinding deadlocks on the retained usage holds otherwise; the
-          # caller keeps Python references to the bound arrays regardless.
+          # rebinding deadlocks on retained usage holds otherwise
           unsafe_skip_buffer_lock=True,
           listener_port=0,
           bind_ip=None,
@@ -218,10 +231,20 @@ class RaidenSynchronizer:
     self._require_sync("d2h()").d2h()
 
   def h2d(self) -> None:
+    # native h2d() dispatches an async device copy; block so a
+    # checksum/read immediately after doesn't observe pre-transfer buffer
+    # contents.
     self._require_sync("h2d()").h2d()
+    jax.block_until_ready(self.arrays)
 
   def metrics(self) -> dict:
-    return self._sync.get_metrics() if self._sync else {}
+    if self._sync is None:
+      return {}
+    if hasattr(self._sync, "get_metrics"):
+      return self._sync.get_metrics()
+    if hasattr(self._sync, "metrics"):
+      return self._sync.metrics()
+    return {}
 
   def checksums(self, sample: int = 3) -> dict:
     """Per-tensor float32 abs-sums for cross-process verification."""

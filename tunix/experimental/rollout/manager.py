@@ -16,6 +16,7 @@
 
 import asyncio
 from typing import Any, AsyncIterator, Callable, Dict, Optional, Sequence, Union
+
 from tunix.experimental.common import datatypes
 from tunix.experimental.rl.agentic import registry
 from tunix.experimental.rollout import collector as collector_lib
@@ -301,7 +302,18 @@ class RolloutManager:
     self.resume_all()
     self._traffic.reopen()
     return res
-  
+
+  async def abort_weight_sync(
+      self, sync_request: sampler_lib.WeightSyncRequest | Any = None, **kwargs
+  ) -> Any:
+    """Discards the round, delegates abort to sampler, and resumes collectors."""
+    res = None
+    if self.sampler and hasattr(self.sampler, "abort_weight_sync"):
+      res = await self.sampler.abort_weight_sync(sync_request, **kwargs)
+    self.resume_all()
+    self._traffic.reopen()
+    return res
+
   def reopen_admission(self) -> bool:
     """Reopens rollout admission after an aborted round."""
     return self._traffic.reopen()
