@@ -266,3 +266,13 @@
 - Validation: ran `render_three_arm_wave.sh` from the exact source for `native` and `is`. Each command emitted two `P57_THREE_ARM_MANIFEST_PASS` lines plus its wave/render PASS markers. The resulting set was exactly `jobset-p57-frozenlake-mismatch-200.yaml`, `jobset-p57-frozenlake-mismatch-m15-main-200.yaml`, `jobset-p57-frozenlake-is-200.yaml`, and `jobset-p57-frozenlake-is-m15-main-200.yaml`; no `zero` manifest was rendered. `git diff --check` passed.
 - Claim boundary: the first four curves can estimate `is - mismatch` within each workload. They cannot estimate a Zero-TIM effect until the two deferred `zero` cells run, and one curve per cell remains concept evidence rather than a stability claim.
 - Next: validate both two-workload render waves from the exact source, commit/push the documentation-only correction, then separately approve any `kubectl apply`.
+
+## 2026-08-22 UTC — four-wave launch attempted and blocked on static environment validator
+
+- Type: target failure / evidence collection
+- Action: rendered all four 200-update manifests with 4-character run-ids (`p45n`, `m15n`, `p45i`, `m15i`) to satisfy the 63-character Pod name limit; applied all four JobSets simultaneously across 256 TPU chips.
+- Result: all 4 JobSets were admitted by Kueue and provisioned all 64 Worker Pods to 1/1 Running. However, during initialization, `train_frozenlake_qwen3.py` called `dp_workloads.validate_p57_stock_train_environment`, which failed because its static `expected` dict in `dp_workloads.py:820-840` hardcodes `TIM_ARM: "mismatch"`, `WORKLOAD_CANDIDATE: "m15"`, and `DATA_SPLIT: "selection"`.
+- Classification: `INCONCLUSIVE` execution failure before step 0. All 4 JobSets were deleted immediately to release the 256 TPU chips.
+- Evidence: `evidence/four_wave_launch_error.log` recorded all four tracebacks.
+- Next: peer agent to update `dp_workloads.py` to validate dynamic environment parameters, then relaunch four waves.
+

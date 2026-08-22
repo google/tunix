@@ -293,3 +293,12 @@
 - Readback: local HEAD, `FETCH_HEAD`, and `origin/yuxzhang/canon-zero-tim` all resolved to the implementation commit with ahead/behind `0/0` before this publication checkpoint.
 - External effects: one normal fast-forward push to `yuxzhang/canon-zero-tim`. `main` was untouched. No image publication, model download, rendered YAML, Kubernetes apply, TPU job, or credential change occurred.
 - Next: publish this documentation-only checkpoint, fetch its final readback SHA, then hand only fresh Native full run-id `p58f06` to the executor. Zero remains deferred.
+
+## 2026-08-22 UTC — p58f06 step-0 rollout and stock observer passed, failed on S_prefill_vs_T_old boundary
+
+- Type: target execution / evidence collection
+- Evidence: `evidence/p58f06/run.log`. JobSet `canon-p58-ds4b-native-full-p58f06` ran across 128 TPU v5p chips.
+- Result: Step 0 Rollout completed all 128 trajectories in 492.7 seconds with 3 solves and 0 timeouts. Exact live-weight attestation passed (`[P34.WEIGHTS] EXACT step=0 leaves=398 elements=4022468096 devices=64 PASS`). Stock prompt observer processed all 2,048 prompt logprob rows (`[P58.STOCK_OBSERVER] PROCESSED_PROMPT_LOGPROBS_PASS rows=2048 populated=2048`).
+- Failure: during `alignment.check_pre_backward`, `S_decode_vs_S_prefill` was warned, but `S_prefill_vs_T_old` had floating-point differences between vLLM Rollout TPU and JAX Trainer TPU and was not in `warning_boundaries` for Native mode, triggering `AlignmentGateError: pre-backward alignment gate RED: ['S_prefill_vs_T_old']`.
+- Action: JobSet deleted immediately to release 128 TPU chips; evidence published to branch.
+
