@@ -366,3 +366,12 @@
 - Readback: local HEAD, `FETCH_HEAD`, and `origin/yuxzhang/canon-zero-tim` all resolved to the implementation commit with ahead/behind `0/0` before this publication checkpoint.
 - External effects: one normal fast-forward push to `yuxzhang/canon-zero-tim`. `main` was untouched. No image publication, rendered YAML, Kubernetes apply, TPU launch, model download, credential change, or failed artifact deletion occurred.
 - Next: publish this documentation-only checkpoint and verify its final remote readback. The executor must fetch that final tip and launch only fresh Native full run-id `p58f08`; Zero remains strict and deferred.
+
+## 2026-08-22 UTC — p58f08 worker crashed on Pathways ResourceManager CL mismatch
+
+- Type: target execution / infrastructure evidence collection
+- Evidence: `evidence/p58f08/run.log`. JobSet `canon-p58-ds4b-native-full-p58f08` ran across 128 TPU v5p chips.
+- Result: Head Pod initialized, verified stock engine, applied bounded R2E patch, and loaded dataset. However, `pathways-worker-0` failed during initialization with `ResourceManagerDone: crashing worker due to failed precondition: FAILED_PRECONDITION: Server pipe /leader_resource_manager id=18098245068127715496: pipes with strict compatibility check require the client and the server binaries to be built at the same CL, but got cl/956357083 (client) vs. cl/42 (server)`.
+- Cause: HostNetwork port 29001 on CPU node `gke-mlperf-v5p-cpu-np-ebb0f94d-lf6h` collided with an existing running Pathways Resource Manager (`nt-ds-pw-35b-gsm8k-v1`) that runs at CL/42, causing the worker to connect to the foreign RM.
+- Action: Deleted failed JobSet to release resources; recorded evidence in `evidence/p58f08/run.log` and pushed to branch.
+
