@@ -183,11 +183,11 @@ was therefore a mapping but lacked `prompts`, and learner processing stopped
 with `KeyError: 'prompts'` before journal, alignment, trainer, optimizer, or
 checkpoint state.
 
-The repair seeds `SWEEnv.task` with the normalized prompt before reset, keeps
+The published repair seeds `SWEEnv.task` with the normalized prompt before reset, keeps
 the singleton batch shape required by learner merge, and makes the
 policy-seeded environment task authoritative for both successful and
 pre-observation termination paths. A policy-seeded mapping without `prompts`
 is now rejected at collection. The timeout row remains compact-filtered with
 its zero policy mask; no row is dropped or resampled. P58f11 is immutable
-`INCONCLUSIVE` and not resumable. After publication/readback, use fresh Native
+`INCONCLUSIVE` and not resumable. After final operator-tip readback, use fresh Native
 `p58f12`; Zero remains deferred.

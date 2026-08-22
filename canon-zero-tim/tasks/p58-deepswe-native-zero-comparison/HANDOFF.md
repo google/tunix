@@ -41,9 +41,12 @@ local HEAD, `FETCH_HEAD`, and the remote-tracking branch with ahead/behind
 `e92b0120a7df371569cc8646eb7b8a9367ebbe86`, which adds immutable p58f11
 evidence. P58f11 proved the one-wave concurrency repair by completing all 128
 trajectories and 8/8 groups in 1,209.2 seconds, then stopped on a missing
-`prompts` key in the single reset-timeout fallback row. The local repair is
-validated but unpublished. After separate publication approval and exact
-readback, the next run id is fresh `p58f12`.
+`prompts` key in the single reset-timeout fallback row. The repair was
+published as implementation commit
+`43614af55ed98423b757945642fa5444ae484ecc`; its first remote readback matched
+local HEAD, `FETCH_HEAD`, and the remote-tracking branch with ahead/behind
+`0/0`. This documentation checkpoint advances the branch once more, so fetch
+the final operator tip. The next run id is fresh `p58f12`.
 
 The user previously waived P58.3 and the separate three-update stop, then chose
 the native 128-chip full 1,000-update stage. That historical phase remains
@@ -350,14 +353,14 @@ a dictionary without `prompts`, and learner processing raised
 `KeyError: 'prompts'` before the durable P58 journal, alignment, trainer,
 optimizer receipt, or checkpoint.
 
-The local repair seeds `SWEEnv.task` with the normalized prompt before any
+The published repair seeds `SWEEnv.task` with the normalized prompt before any
 sandbox work and uses the policy-seeded environment task as the authoritative
 training input for every generation. Successful and reset-timeout rows now
 have the same schema. A future policy-seeded task missing `prompts` fails
 immediately at collection. Compact-filter masks and the no-drop/no-resample
 recipe are unchanged. The exact-image gate passes the positive timeout path,
 the normal-path authority check, and a missing-key negative control. P58f11
-is immutable and not resumable; after publication/readback use `p58f12`.
+is immutable and not resumable; after final operator-tip readback use `p58f12`.
 
 Never modify or push `main`. The publication target is exclusively
 `yuxzhang/canon-zero-tim`; the p58f09 repair is published there as

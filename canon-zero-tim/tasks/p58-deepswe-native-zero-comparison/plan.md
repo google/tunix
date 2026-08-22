@@ -128,15 +128,15 @@ The collector fallback therefore produced a dictionary without `prompts`, and
 learner reward-input merge stopped with `KeyError: 'prompts'` before the P58
 journal or any trainer program.
 
-The local correction makes the normalized prompt a durable part of
+The published correction makes the normalized prompt a durable part of
 `SWEEnv.task` before reset and makes the policy-seeded environment task the
 single original-input source for training trajectories, including successful
 and pre-observation termination paths. This prevents mixed schemas inside a
 G16 group. Missing `prompts` on a policy-seeded task fails at collection.
 Timeout/context masks, rewards, advantages, filtering, resampling, Native/Zero
 flags, data, topology, loss, optimizer, deadlines, and horizon are unchanged.
-After publication/readback, the next attempt is fresh `p58f12`; p58f11 is not
-resumable.
+After final operator-tip readback, the next attempt is fresh `p58f12`; p58f11
+is not resumable.
 
 ## Frozen shared recipe
 

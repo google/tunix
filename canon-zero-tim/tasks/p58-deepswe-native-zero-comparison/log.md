@@ -465,3 +465,12 @@
 - One-host attempt: the first probe encountered a self-created stale zero-byte `/tmp/libtpu_lockfile`; after verifying the current user owned it and `flock -n` showed no active lock, it was removed. The v5p runtime then failed to obtain `CHIPS_PER_HOST_BOUNDS` from instance metadata and emitted `P58_ONEHOST_ALIGNMENT_BLOCKED reason=device_inventory_timeout timeout_secs=30`. This is not a TPU PASS and does not weaken the exact-image CPU contract result.
 - External effects: one requested fast-forward pull, removal of the single self-created unlocked temporary libtpu file, local source/tests/documentation edits, and local/pinned-container tests only. No commit, push, image publication, rendered YAML apply, Kubernetes object, remote TPU launch, model download, credential change, or `main` mutation occurred.
 - Next: await separate explicit commit/push approval. After publication and exact remote readback, launch only fresh Native full `p58f12`; require a durable 128-row journal containing the admitted compact timeout row, finite Native boundaries/backward, a device-resident optimizer receipt, and the first commit. Zero remains strict and deferred.
+
+## 2026-08-22 UTC — p58f11 original-input schema repair published
+
+- Type: publication evidence.
+- Action: after explicit user approval, committed the durable normalized-prompt task record, policy-seeded original-input authority, positive/negative collector regressions, exact-image coverage, and reconciled runbook/handoff/phase records. The pre-push fetch proved the operator branch had not advanced; the push was normal and non-force.
+- Published implementation commit: `43614af55ed98423b757945642fa5444ae484ecc`.
+- Readback: local HEAD, `FETCH_HEAD`, and `origin/yuxzhang/canon-zero-tim` all resolved to the implementation commit with ahead/behind `0/0` before this publication checkpoint.
+- External effects: one normal fast-forward push to `yuxzhang/canon-zero-tim`. `main` was untouched. No image publication, rendered YAML apply, Kubernetes object, TPU launch, model download, credential change, or evidence deletion occurred.
+- Next: publish this documentation-only checkpoint and verify its final remote readback. The executor must fetch that final tip and launch only fresh Native full run-id `p58f12`; Zero remains strict and deferred.
