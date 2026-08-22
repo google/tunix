@@ -445,26 +445,44 @@ def gsm8k_ab_report_policy() -> dict[str, Any]:
     p43_debug = os.environ.get("CANON_P43_DEEPSWE_DEBUG", "") == "1"
     p44_parity = os.environ.get("CANON_P44_DEEPSWE_PARITY", "") == "1"
     p58_tim = os.environ.get("CANON_P58_DEEPSWE_TIM", "") == "1"
+    p58_admitted = os.environ.get("CANON_P58_TIM_ADMITTED", "") == "1"
+    p58_expected_updates = os.environ.get("CANON_P58_EXPECTED_UPDATES", "")
     production_full = (
         not any((p39_pilot, p43_debug, p44_parity, p58_tim))
         and p34_stage == "full"
     )
-    admitted = (
-        os.environ.get("CANON_P34_DEEPSWE", "") == "1"
+    registered_debug_update = (
+        not p58_tim
+        and sum((p39_pilot, p43_debug, p44_parity)) == 1
+        and p34_stage in ("one-update", "three-update")
+    )
+    p58_native_training = (
+        p58_tim
+        and p58_admitted
+        and p58_arm == "native"
+        and not any((p39_pilot, p43_debug, p44_parity))
         and (
-            production_full
+            (
+                p34_stage == "three-update"
+                and p58_expected_updates == "3"
+            )
             or (
-                sum((p39_pilot, p43_debug, p44_parity, p58_tim)) == 1
-                and p34_stage in ("one-update", "three-update")
+                p34_stage == "full"
+                and p58_expected_updates == "1000"
             )
         )
+    )
+    admitted = (
+        os.environ.get("CANON_P34_DEEPSWE", "") == "1"
+        and (production_full or registered_debug_update or p58_native_training)
         and os.environ.get("CANON_P34_NO_COMMIT", "") == "0"
         and execution_mode() == "train"
     )
     if not admitted:
       raise AlignmentGateError(
           "DeepSWE warning policy is admitted only for committed P34 full "
-          "training or a committed P39, P43, or P44 debug update"
+          "training, a committed P39, P43, or P44 debug update, or the "
+          "signed P58 native three-update/full training stage"
       )
     workload = "deepswe"
     stage = p34_stage

@@ -21,6 +21,12 @@ Read this reference only for
 Do not delete Native's explicit zeros or absences. Do not turn on canonical
 processed logprobs to satisfy the Native `S_prefill` API.
 
+Native alignment warning admission is independently signed. Require
+`CANON_P58_TIM_ADMITTED=1`, no competing P39/P43/P44 workload mode, and an
+exact `CANON_P34_RUN_STAGE/CANON_P58_EXPECTED_UPDATES` pair of
+`three-update/3` or `full/1000`. Do not place P58 full training in a generic
+short-debug-stage branch. Zero keeps warning-only at zero and remains strict.
+
 ## Why the Native observer exists
 
 P58f04 completed 128 trajectories and exact live-weight attestation, then

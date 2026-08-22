@@ -18,6 +18,8 @@ $DOCKER run --rm \
   -e JAX_PLATFORMS=cpu \
   "$IMAGE" \
   bash -euo pipefail -c '
+    bash -n \
+      canon-zero-tim/tests/p58_deepswe_native_zero/run_onehost_alignment_v5p.sh
     PYTHONPATH=/workspace python3 \
       canon-zero-tim/tests/p58_deepswe_native_zero/test_loss_contract.py
     PYTHONPATH=/workspace python3 \

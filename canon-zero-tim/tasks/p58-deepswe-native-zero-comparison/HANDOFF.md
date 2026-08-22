@@ -18,17 +18,22 @@ the branch once more, so the executor must still fetch and use the final
 operator-branch SHA rather than pinning the implementation commit directly.
 
 Latest source intake fast-forwarded this isolated worktree to
-`609c8e6d6d2cb9e7ebd0ea8fa0d7a4fe0b877f68`, which adds immutable p58f04
-evidence only. The processed-B repair described below is currently local and
-unpublished. Do not ask an executor to launch p58f05 until the user separately
-approves commit/push and a post-push remote readback is exact.
+`be66906b10da7deba144290644fc4ab543abb464`. P58 evidence commit
+`af4975c42ad9dd49799973027f5ae7b4677ac362` adds immutable p58f05; the following
+tip is a P57-only change. The P58 full-stage alignment admission repair
+described below is currently local and unpublished. Do not ask an executor to
+launch p58f06 until the user separately approves commit/push and a post-push
+remote readback is exact.
 
-The user changed the execution order again: waive the optional one-host sanity
-and the separate three-update stop, then run only the native 128-chip full
-1,000-update stage. Updates 1–3 are live monitoring milestones in the same job,
-not an early-stop condition. Zero is not optimized enough for launch and is
-explicitly deferred. No Kubernetes apply or TPU launch is authorized by this
-handoff alone.
+The user previously waived P58.3 and the separate three-update stop, then chose
+the native 128-chip full 1,000-update stage. That historical phase remains
+waived rather than promoted. For the p58f05 repair, the user later requested a
+new bounded direct-attached one-host gate before publication. Its runner is
+implemented, but this container exposes no `/dev/vfio` and returned
+`P58_ONEHOST_ALIGNMENT_BLOCKED`; it is not a TPU PASS. Updates 1–3 remain live
+monitoring milestones in the same full job, not an early-stop condition. Zero
+is not optimized enough for launch and is explicitly deferred. No Kubernetes
+apply or TPU launch is authorized by this handoff alone.
 
 Native attempts `p58c01`, `p58c02`, and `p58c03` are bootstrap
 `INCONCLUSIVE` results.
@@ -209,8 +214,34 @@ backward, optimizer math, or commits. Native still has
 `CANON_PROMPT_PROCESSED_LOGPROBS=0`, `CANON_ENGINE_MODULE_C=0`, and every other
 zero-TIM numerical switch disabled/absent. Zero sets the new P58 observer flag
 to zero and retains the complete canonical engine. Mixed tuples fail closed.
-After publication/readback, the next run is fresh native `p58f05`; p58f04 is
-not resumable training state. Zero remains deferred.
+P58f05 proved the observer repair. It completed the next 128-row batch in
+486.4 seconds: 126 `SUCCEEDED`, two `MAX_CONTEXT_LIMIT_REACHED`, six solved,
+two mixed/effective groups, and 32 nonzero advantages. All timeout dimensions
+were zero. Exact live weights passed over 398 leaves and 4,022,468,096
+elements, and one observer marker covered all 2,048 prompt rows. The raw log
+is `evidence/p58f05/run.log`, SHA-256
+`73def19531ca1a9ef083a30d11ceb89696afcbe4125bd128f7ff0e7152ec06a6`.
+The trajectory journal is
+`/mnt/disks/linchai_data/deepswe_zero_tim/canon-p58-ds4b-native-full-p58f05/debug/batch-000000.trajectories.jsonl.gz`,
+SHA-256
+`90c179d799bb97416f1a4e6cf944a15326cef56360da179c771fad79fa02bcac`.
+
+P58f05 then attached the alignment sidecar and stopped before trainer
+forward/backward/update. `gsm8k_ab_report_policy()` already recognized the P58
+arm and enforced Native-warning/Zero-strict, but its workload admission placed
+P58 in a branch that accepted only `one-update/three-update`. The signed
+`CANON_P34_RUN_STAGE=full` plus `CANON_P58_EXPECTED_UPDATES=1000` tuple was
+therefore incorrectly rejected. This is a stale stage enumeration, not an
+alignment red or missing treatment dose.
+
+The local repair separates P58 from the P39/P43/P44 debug-update branch and
+admits only its signed Native tuple: `CANON_P58_TIM_ADMITTED=1`, no competing
+DeepSWE mode, and an exact `three-update/3` or `full/1000` stage/horizon. It
+does not add a flag or alter which numerical differences warn. Native remains
+warning-only for finite decode-vs-prefill A-B; Zero remains strict, and B-C,
+nonfinite, shape, replica, weight, transaction, and optimizer failures remain
+hard. P58f05 has no optimizer checkpoint and is not resumable training state.
+After publication/readback, use fresh native `p58f06`. Zero remains deferred.
 
 Never modify or push `main`. The publication target is exclusively
 `yuxzhang/canon-zero-tim`; the implementation is present there.
@@ -288,11 +319,15 @@ pre-forward boundaries named above.
    prove a second remote readback matches, and require a clean tree. Never use
    `main`.
 3. Rerun syntax, `git diff --check`, the P58 renderer/profile/environment
-   tests, and the pinned exact-image gate.
+   tests, and the pinned exact-image gate. On a real direct-attached four-chip
+   v5p host, also run
+   `tests/p58_deepswe_native_zero/run_onehost_alignment_v5p.sh`; require its
+   renderer-profile-policy PASS marker without treating it as a Qwen/R2E or
+   DP8 x TP8 training result.
 4. Publish or select a client image by immutable registry digest and verify the
    mounted Qwen3-4B-Instruct-2507 weights and frozen clean-list digest without
    printing credentials.
-5. Render only `arm=native, stage=full` with fresh run-id `p58f05` and worker
+5. Render only `arm=native, stage=full` with fresh run-id `p58f06` and worker
    sentinel `tpu-v5p-slice`. Require exact `4x4x8` topology and no literal
    `cloud.google.com/gke-nodepool: tpu-v5p-slice`; preserve the YAML/digest and
    run server-side dry-run before the separately approved apply.
@@ -305,9 +340,9 @@ pre-forward boundaries named above.
    journal, cleanup, evaluation, checkpoint, and transaction receipts.
 8. Do not render or apply zero.
 
-Do not reuse any failed `p58c01` through `p58c05` or `p58f01` through `p58f04`
-YAML/run root. P58f03 and p58f04 have valid diagnostic trajectory journals but
-no trainer update or optimizer checkpoint, so neither is resumable training state. The
+Do not reuse any failed `p58c01` through `p58c05` or `p58f01` through `p58f05`
+YAML/run root. P58f03 through p58f05 have valid diagnostic trajectory journals
+but no trainer update or optimizer checkpoint, so none is resumable training state. The
 attempts remain immutable failure evidence
 under `evidence/p58c01/`, `evidence/p58c02/`, `evidence/p58c03/`, and
 `evidence/p58c04/`. The
@@ -338,7 +373,7 @@ for `workload_describe.txt`.
 - A Kubernetes sandbox start exception must propagate after deletion is
   confirmed. `ENV_TIMEOUT` is an admitted compact-filter status; a
   half-created RepoEnv with `container=None` is forbidden. If an entire
-  p58f05 batch has zero confirmed Running pods, classify infrastructure
+  p58f06 batch has zero confirmed Running pods, classify infrastructure
   capacity/scheduling before another launch instead of patching websocket
   decode or inventing a successful trajectory.
 - Read `deepswe/all_sandbox_start_timeout_batch` first. Value `1` means the

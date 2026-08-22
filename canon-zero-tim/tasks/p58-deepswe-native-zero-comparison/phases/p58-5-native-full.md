@@ -24,7 +24,7 @@ validate the deferred zero arm and cannot establish a paired treatment effect.
 - recipe: B8 x G16, response 16,384, 50 turns, RLOO, fixed-context
   `sequence-mean-token-scale`, TPU-resident optimizer, optional interventions
   off, prefix cache off;
-- stage/run: `full`, fresh run-id `p58f05`, exactly 1,000 optimizer commits;
+- stage/run: `full`, fresh run-id `p58f06`, exactly 1,000 optimizer commits;
 - arm: `native` only. Rendering or applying `zero` is outside this phase.
 
 ## Admission gate
@@ -65,7 +65,7 @@ batches exceed 1,000. Partial/tampered evidence, exact native A-B
 
 ## Attempt boundary
 
-P58c05 and p58f01 through p58f04 are immutable `INCONCLUSIVE` evidence.
+P58c05 and p58f01 through p58f05 are immutable `INCONCLUSIVE` evidence.
 P58f01 exposed sandbox LocalQueue and reset-time provenance faults. P58f02
 exposed a CPU-flavor/node-pool mismatch; moving the head and sandboxes to
 `cpu-np` was the correct repair. P58f03 then completed 128 real trajectories
@@ -89,5 +89,20 @@ which native correctly disables. The repair adds an independent, observer-only
 stock B overlay gated solely by the signed P58 native tuple. Native retains
 `CANON_PROMPT_PROCESSED_LOGPROBS=0`, `CANON_ENGINE_MODULE_C=0`, and every other
 zero-TIM disable/absence. Zero retains the canonical engine and sets the stock
-observer to zero. The next attempt is fresh native `p58f05` after publication
-and readback. Zero remains deferred.
+observer to zero.
+
+P58f05 proved that observer repair. It completed 128 trajectories in 486.4
+seconds, durably journaled 126 `SUCCEEDED` plus two
+`MAX_CONTEXT_LIMIT_REACHED` rows, observed six solved trajectories across two
+mixed/effective groups, passed exact live weights over 398 leaves, and emitted
+one processed-B marker covering all 2,048 prompt rows. The alignment sidecar
+was attached, then `gsm8k_ab_report_policy()` rejected the run before trainer
+forward/backward/update: P58 was present in the alternative-workload count but
+that branch admitted only `one-update/three-update`, not the signed full stage.
+
+The repair does not relax warning semantics or add a flag. It admits P58
+Native only when `CANON_P58_TIM_ADMITTED=1`, no P39/P43/P44 mode competes, and
+the stage/horizon is exactly `three-update/3` or `full/1000`. Native still
+warns only on finite decode-vs-prefill A-B; Zero remains strict, and B-C plus
+all structural/numerical failures remain hard. The next attempt is fresh
+native `p58f06` after publication/readback. Zero remains deferred.

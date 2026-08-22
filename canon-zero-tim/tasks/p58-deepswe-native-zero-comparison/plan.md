@@ -17,13 +17,16 @@ DeepSWE-32B run: the model, generation count, clean-data selector, and context
 length differ deliberately. The compact trajectory-filtering rule does match
 the published DeepSWE recipe and the pinned Tunix quality-fix reference.
 
-The execution order changed again by user decision on 2026-08-21: waive the
-optional one-host gate and the separate three-update stop, then run the native
-full 1,000-update campaign directly. Commits 1–3 remain mandatory online
-monitoring boundaries inside the same job. The zero implementation remains
-available for review and regression testing but is not launch-authorized until
-its optimization work is complete and the user explicitly reactivates it. A
-native-only result is an integration/training result, not a causal comparison.
+The execution order changed by user decision on 2026-08-21: waive P58.3 and
+the separate three-update stop, then run the native full 1,000-update campaign
+directly. For the later p58f05 repair, the user requested a separate bounded
+one-host admission gate. That gate does not retroactively promote P58.3 and is
+currently blocked by absent TPU device exposure in this container. Commits
+1–3 remain mandatory online monitoring boundaries inside the same job. The
+zero implementation remains available for review and regression testing but
+is not launch-authorized until its optimization work is complete and the user
+explicitly reactivates it. A native-only result is an integration/training
+result, not a causal comparison.
 
 ## Phases
 
@@ -48,7 +51,7 @@ before any workload pod or update existed. P58.5N is the only active phase.
 Both zero phases remain deferred even though the renderer and CPU tests cover
 that arm.
 
-P58.5N attempts `p58f01` through `p58f04` remain `INCONCLUSIVE`. P58f01 exposed
+P58.5N attempts `p58f01` through `p58f05` remain `INCONCLUSIVE`. P58f01 exposed
 missing sandbox LocalQueue inheritance and reset-time policy provenance;
 p58f02 showed that the chosen CPU flavor required `cpu-np`; and p58f03 proved
 that the CPU routing repair works by completing 128 real trajectories in
@@ -60,8 +63,14 @@ untreatedness. P58f04 proved that repair with exact 398-leaf live weights after
 a 557.2-second, 128-row rollout. It then stopped before trainer forward because
 the shared processed-`S_prefill` contract accepted only the canonical
 processed-logprob engine even though native correctly kept that numerical flag
-off. The independent native stock-B observer repair is local and validated;
-after publication/readback the next fresh attempt is `p58f05`.
+off. P58f05 proved the independent native stock-B observer over all 2,048
+prompt rows after a 486.4-second, 128-row rollout and exact 398-leaf weight
+attestation. It then stopped before trainer forward because the alignment
+policy's P58 admission enumerated only short update stages and incorrectly
+rejected the signed `full/1000` tuple. The local repair separates P58 from the
+debug-stage admission and requires its existing admission, native arm, and
+exact stage/horizon signature. After publication/readback the next fresh
+attempt is `p58f06`.
 
 ## Frozen shared recipe
 

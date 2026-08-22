@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 import yaml
 
@@ -24,6 +25,14 @@ if CONTRACT_SPEC is None or CONTRACT_SPEC.loader is None:
 deepswe_contract = importlib.util.module_from_spec(CONTRACT_SPEC)
 sys.modules[CONTRACT_SPEC.name] = deepswe_contract
 CONTRACT_SPEC.loader.exec_module(deepswe_contract)
+ALIGNMENT_SPEC = importlib.util.spec_from_file_location(
+    "p58_environment_alignment", ROOT / "tunix/rl/alignment.py"
+)
+if ALIGNMENT_SPEC is None or ALIGNMENT_SPEC.loader is None:
+  raise RuntimeError("cannot import alignment policy")
+alignment = importlib.util.module_from_spec(ALIGNMENT_SPEC)
+sys.modules[ALIGNMENT_SPEC.name] = alignment
+ALIGNMENT_SPEC.loader.exec_module(alignment)
 sys.path.insert(0, str(PKG / "cluster"))
 SPEC = importlib.util.spec_from_file_location(
     "p58_environment_renderer", PKG / "cluster/render_p58_deepswe_tim.py"
@@ -194,6 +203,16 @@ class P58EnvironmentContractTest(unittest.TestCase):
       deepswe_contract.validate_environment({
           **zero, "CANON_PROMPT_PROCESSED_LOGPROBS": "0"
       })
+
+  def test_rendered_native_full_environment_is_alignment_admitted(self):
+    values = self._resolved("native", "full")
+    with mock.patch.dict(os.environ, values, clear=True):
+      policy = alignment.gsm8k_ab_report_policy()
+    self.assertTrue(policy["warning_only"])
+    self.assertEqual(policy["stage"], "full")
+    self.assertEqual(
+        policy["warning_boundaries"], ("S_decode_vs_S_prefill",)
+    )
 
 
 if __name__ == "__main__":

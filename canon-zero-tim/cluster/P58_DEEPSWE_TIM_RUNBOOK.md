@@ -16,12 +16,15 @@ P58 does not modify `main`. Rendering and local validation do not authorize a
 Kubernetes apply. An operator must separately approve image publication and
 each launch.
 
-Current execution decision (2026-08-21): run only the native full 1,000-update
-campaign. The optional one-host phase was explicitly waived, not passed, and
-the user superseded the separate three-update stop. Updates 1–3 are monitored
-inside the same full job and do not terminate a healthy run. Zero is deferred
-while its optimization work continues and must not be rendered or applied. A
-native result cannot be reported as a paired comparison.
+Current execution decision: run only the native full 1,000-update campaign.
+P58.3 was explicitly waived, not passed, and the user superseded the separate
+three-update stop. The later p58f05 repair has a separate bounded one-host
+admission gate; it does not retroactively promote P58.3. The first local
+attempt at that gate was blocked because the container exposed no `/dev/vfio`,
+so it is not a TPU PASS. Updates 1–3 are monitored inside the same full job and
+do not terminate a healthy run. Zero is deferred while its optimization work
+continues and must not be rendered or applied. A native result cannot be
+reported as a paired comparison.
 
 Attempt history: native `p58c01` failed in `00_env.sh` before any TPU program;
 that admission fix was published as
@@ -104,8 +107,22 @@ trainer forward, loss, backward, optimizer math, or commit accounting. Zero
 sets the P58 observer to zero and retains
 `CANON_PROMPT_PROCESSED_LOGPROBS=1`, `CANON_ENGINE_MODULE_C=1`, and the complete
 canonical engine. Environment and runtime contracts reject any mixed tuple.
-Use fresh full-stage run-id `p58f05` after publication and readback; never reuse
-p58f04 YAML/root.
+Native `p58f05` proved that observer repair. Its 486.4-second rollout wrote 128
+durable rows: 126 `SUCCEEDED`, two `MAX_CONTEXT_LIMIT_REACHED`, six solved,
+two mixed/effective groups, and 32 nonzero advantages. All timeout dimensions
+were zero. Exact live weights passed over 398 leaves and the processed-B
+observer covered all 2,048 prompt rows. The alignment sidecar then attached,
+but the run stopped before trainer forward/backward/update because the warning
+policy admitted P58 only in an obsolete short-update branch and rejected the
+signed `stage=full, expected_updates=1000` tuple.
+
+The repair admits P58 Native only with `CANON_P58_TIM_ADMITTED=1`, no competing
+P39/P43/P44 mode, and an exact `three-update/3` or `full/1000` pair. It does
+not enable a zero-TIM numerical flag or broaden warning semantics: only finite
+decode-vs-prefill A-B warns in Native; Zero stays strict and B-C plus all hard
+failures remain blocking. Use fresh full-stage run-id `p58f06` after
+publication/readback; never reuse p58f05 YAML/root or journal as training
+state.
 
 The direct-entrypoint implementation commit is
 `82d82f72a7220d945737d95f6266b5b7e2cfe706`. Resolve the final runnable SHA by
@@ -207,6 +224,27 @@ P58_EXACT_IMAGE_CPU_PASS loss_oracle=1 weighted_accumulation=1 compact_filter=1 
 That marker proves CPU/image wiring, not TPU execution, HBM, real R2E rollout,
 native mismatch dose, or zero exactness.
 
+For the p58f05 admission repair, run the bounded direct-attached v5p gate when
+an actual four-device host is available:
+
+```bash
+DEEPSWE_TRAIN_PYTHON=/mnt/disks/tunix-data/venvs/train/bin/python \
+  bash canon-zero-tim/tests/p58_deepswe_native_zero/run_onehost_alignment_v5p.sh
+```
+
+Required terminal marker:
+
+```text
+P58_ONEHOST_ALIGNMENT_ADMISSION_PASS ... devices=4 scope=renderer-profile-policy
+```
+
+The gate requires four real v5p devices, executes a TPU matmul, then checks the
+P58 alignment policy and the renderer-derived full-stage environment. It does
+not run Qwen/R2E rollout, trainer forward/backward, DP8 x TP8, Pathways, or an
+optimizer update. A missing TPU metadata path or device inventory is
+`BLOCKED_DIRECT_TPU_METADATA`, not PASS; do not inject fake topology metadata.
+This repair-only check does not retroactively promote the waived P58.3 phase.
+
 Before rendering, verify read-only that the mounted PVC contains
 `Qwen3-4B-Instruct-2507`, the R2E dependency imports, the clean JSONL has 1,012
 lines, and its digest matches the frozen value. Never print secret values.
@@ -222,7 +260,7 @@ CLIENT_IMAGE_DIGEST='registry.example/tunix@sha256:<64-hex-digest>'
 CPU_NODEPOOL='cpu-np'
 TPU_NODEPOOL='tpu-v5p-slice'
 MODEL_PVC='haoyugao-cpu-np-pvc'
-RUN_STEM='p58f05'
+RUN_STEM='p58f06'
 STAGE='full'
 
 ARM='native'
