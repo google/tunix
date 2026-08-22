@@ -68,6 +68,10 @@ runner's explicit prompt-logprob branch and adds its helper. Processed-B then
 applies temperature 0.7 and gathers target IDs from absolute request history,
 not a roll over the DP-packed input. This branch is dormant during rollout A,
 does not supply `old_per_token_logps`, and is not a gradient input.
+The training command pins `--sampler_is=none`. The learner therefore keeps
+rollout A as `old_per_token_logps` and emits no TIS weights; a runtime purity
+gate verifies those identities on the first real training batch. Standard
+GSPO ratio clipping remains unchanged and shared with the later zero arm.
 Calibration/evaluation keep the stock runner byte-identical. M15 is rebuilt from immutable base
 weights on its disjoint `selection` maps and trained for 200 signed updates.
 There is no train-20 screen. By user decision on 2026-08-21, P57.1 runs one
@@ -105,7 +109,9 @@ fixes both without enabling fixed-M or any canonical training kernel.
 The physical envelope is prompt 4,096 plus response 8,192. Training uses
 DP8xTP8, resident optimizer state, batch 32, eight generations, trajectory
 mini/micro 32/8, AdamW `1e-6`, GSPO-token/RLOO, and temperature 0.7. No
-in-process evaluation is admitted.
+in-process evaluation is admitted. No mismatch-aware weighting, filtering,
+old-logprob substitution, learning-rate change, clipping change, or advantage
+change is admitted.
 
 Automatic freeze requires the preregistered trailing update-200 on-policy solve
 statistic to be 60–70%, with finite mismatch dose, valid B-C/structural gates,

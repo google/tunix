@@ -113,6 +113,13 @@ def _use_module_entrypoint(command: list[str]) -> None:
   command[:3] = _MODULE_ENTRYPOINT
 
 
+def _validate_purity_command(command: list[str]) -> None:
+  if command.count("--sampler_is=none") != 1:
+    raise ValueError("P57 recipe must disable sampler/TIS correction exactly once")
+  if "--sampler_is=token" in command:
+    raise ValueError("P57 recipe must not enable token sampler/TIS correction")
+
+
 def _spec(
     arm: Arm,
     expected_updates: int,
@@ -128,6 +135,7 @@ def _spec(
       )
   )
   _use_module_entrypoint(command)
+  command.append("--sampler_is=none")
   if workload_candidate:
     candidate = p57_workloads.candidate(workload_candidate)
     p57_workloads.validate_split(data_split)
@@ -173,6 +181,7 @@ def _spec(
     job_prefix = f"canon-p57-fl-ev-{arm.name[:4]}"
   else:
     raise ValueError(f"unsupported P57 run kind: {run_kind!r}")
+  _validate_purity_command(command)
   workload_suffix = (
       f"{workload_candidate}-{data_split}-" if workload_candidate else ""
   )
@@ -213,6 +222,7 @@ def _validate_pair(documents: dict[str, dict], *, run_kind: str) -> None:
     )
   if zero["CANON_RUN_CMD"] != mismatch["CANON_RUN_CMD"]:
     raise ValueError("P57 arms must run the identical recipe command")
+  _validate_purity_command(zero["CANON_RUN_CMD"].split())
   if (zero["CANON_P38_FIXED_LM_HEAD"], mismatch["CANON_P38_FIXED_LM_HEAD"]) != (
       "1",
       "0",

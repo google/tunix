@@ -18,6 +18,7 @@ YAML. Every TPU launch requires explicit user approval.
 | rollout group | 32 prompts x 8 generations = 256 trajectories/update |
 | trajectory mini / micro | 32 / 8 |
 | objective | GSPO-token, RLOO, beta 0, epsilon 0.003/0.005 |
+| TIM mitigation | none: sampler IS off, rollout A is old logprob, no TIS weights |
 | optimizer | AdamW, lr 1e-6, b1 0.9, b2 0.95, wd 0, resident on TPU |
 | sampling | temperature 0.7, top-p 1, top-k 0 |
 | checkpoint | every 10 updates, GCS LatestN(1) |
@@ -46,6 +47,16 @@ request history instead of rolling a DP-packed buffer. Sampling does not
 request prompt logprobs, and the learner continues to use `S_decode`—not this
 observer `S_prefill`—as `old_per_token_logps`. Calibration/evaluation keep the
 switch at zero because their alignment observer is off.
+
+The train/eval renderer pins exactly one `--sampler_is=none`; the profile
+rejects `--sampler_is=token`. On the first real training batch, the learner
+fails closed unless `use_rollout_logps=True`, rollout A exists, the old-policy
+field is the same rollout-A array, and sampler-TIS weights are absent. This is
+the untreated causal arm. The ordinary GSPO ratio and epsilon 0.003/0.005 clip
+remain enabled in both arms because they define the shared optimization
+recipe, not a TIM-specific correction. Do not add mismatch-conditioned
+filters, weights, learning-rate changes, advantage changes, or alternate
+old-logprob sources.
 
 ## Local gates
 
@@ -84,7 +95,8 @@ find "$OUT" -maxdepth 1 -name 'jobset-*.yaml' -print
 sha256sum "$OUT"/jobset-*.yaml
 ~~~
 
-Require one manifest, `--max_steps=200`, prompt/response `4096/8192`, and
+Require one manifest, `--max_steps=200`, prompt/response `4096/8192`, exactly
+one `--sampler_is=none` and no `--sampler_is=token`, and
 `CANON_P57_STOP_AFTER_STEP=200`. The command must not contain
 `--evaluation_only`. The resolved preflight must include
 `observer=train processed_b=on`; a train environment with processed-B zero is
@@ -94,6 +106,13 @@ renderer limit of 1–16 characters. Startup must also emit
 `[P57.STOCK_OBSERVER] OVERLAY_PASS files=2 stock_runner_verified=1 treatment=observer-only`.
 The first B call must emit exactly one
 `[P57.STOCK_OBSERVER] PROCESSED_PROMPT_LOGPROBS_PASS ... targets=absolute-request-history treatment=observer-only`.
+The first completed training batch must also emit exactly once:
+
+~~~text
+[P57.TIM_PURITY] PASS sampler_is=none old_logps=rollout tis_weights=absent trainer_rescore=observer-only
+~~~
+
+Missing or duplicate purity receipts invalidate the run.
 After explicit launch approval:
 
 ~~~bash

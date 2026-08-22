@@ -12,6 +12,7 @@ python3 -m unittest \
   canon-zero-tim/tests/p57_frozenlake_tim/test_provenance_derivation.py \
   canon-zero-tim/tests/p57_frozenlake_tim/test_runtime_contract.py \
   canon-zero-tim/tests/p57_frozenlake_tim/test_workloads.py \
+  canon-zero-tim/tests/p33_workloads/test_sampler_is_contract.py \
   canon-zero-tim/tests/p33_workloads/test_classify_run.py \
   canon-zero-tim/tests/p38_serving/test_fixed_lm_head.py \
   canon-zero-tim/tests/p38_serving/test_fixed_lm_head_receipts.py \

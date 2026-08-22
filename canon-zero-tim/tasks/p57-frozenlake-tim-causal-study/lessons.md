@@ -26,3 +26,9 @@
   Store cross-layer geometry in one imported registry value and make the host
   gate inspect the actual entrypoint wiring; otherwise both outer gates can
   agree while a stale inner assertion rejects the target command.
+- An untreated mismatch arm cannot retain a TIM-aware stabilizer. Token
+  sampler IS both replaces rollout A with trainer C as the old-policy source
+  and adds detached mismatch-dependent weights, so it changes the treatment
+  even if the surrounding optimizer recipe is identical. Pin the correction
+  off in both arms and prove the actual `TrainExample` uses rollout A with no
+  sampler weights; retain ordinary PPO/GSPO clipping as shared base behavior.

@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import dataclasses
 import os
-from typing import Any, Dict, List, Sequence, Type, TypeVar
+from typing import Any, Dict, List, Mapping, Sequence, Type, TypeVar
 
 from absl import logging
 from flax import nnx
@@ -68,6 +68,7 @@ def _canonical_alignment_sampler_is_valid(
     sampler_is: str | None,
     workload_name: str,
     *,
+    p57_tim_study: bool = False,
     p34_deepswe: bool = False,
     p34_disable_sampler_is: bool = False,
     p34_disable_tis: bool = False,
@@ -77,9 +78,46 @@ def _canonical_alignment_sampler_is_valid(
     return True
   if sampler_is is not None:
     return False
-  if workload_name == "gsm8k":
+  if workload_name == "gsm8k" or p57_tim_study:
     return True
   return p34_deepswe and p34_disable_sampler_is and p34_disable_tis
+
+
+def _p57_tim_purity_enabled(env: Mapping[str, str]) -> bool:
+  """Return whether the signed P57 training purity contract applies."""
+  return (
+      env.get("CANON_P57_RUN_KIND") == "train"
+      and env.get("CANON_P57_TIM_ARM") in ("mismatch", "zero")
+      and env.get("CANON_PROFILE_FILE")
+      == "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env"
+      and env.get("CANON_P32_WORKLOAD") == "frozenlake-dp8-tp8"
+  )
+
+
+def _validate_p57_tim_purity(
+    *,
+    sampler_is: str | None,
+    use_rollout_logps: bool,
+    rollout_logps_present: bool,
+    old_logps_are_rollout: bool,
+    sampler_is_weights_present: bool,
+) -> None:
+  """Fail closed if a TIM-aware mitigation can affect a P57 update."""
+  failures = []
+  if sampler_is is not None:
+    failures.append(f"sampler_is={sampler_is!r}")
+  if not use_rollout_logps:
+    failures.append("use_rollout_logps=0")
+  if not rollout_logps_present:
+    failures.append("rollout_logps=absent")
+  if not old_logps_are_rollout:
+    failures.append("old_logps!=rollout")
+  if sampler_is_weights_present:
+    failures.append("tis_weights=present")
+  if failures:
+    raise alignment.AlignmentGateError(
+        "P57 TIM purity contract failed: " + ", ".join(failures)
+    )
 
 
 def _canonical_gsm8k_gate_advantages(advantages: Any) -> np.ndarray:
@@ -293,6 +331,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     )
 
     self._trajectory_logger = None
+    self._p57_tim_purity_announced = False
     metrics_logger_options = (
         self.rl_cluster.cluster_config.training_config.metrics_logging_options
     )
@@ -1122,6 +1161,23 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         sampler_is_weights=sampler_is_weights,
         completion_valid_mask=completion_valid_mask,
     )
+    if _p57_tim_purity_enabled(os.environ):
+      _validate_p57_tim_purity(
+          sampler_is=self.algo_config.sampler_is,
+          use_rollout_logps=self.algo_config.use_rollout_logps,
+          rollout_logps_present=rollout_per_token_logps is not None,
+          old_logps_are_rollout=(
+              old_per_token_logps is rollout_per_token_logps
+          ),
+          sampler_is_weights_present=sampler_is_weights is not None,
+      )
+      if not self._p57_tim_purity_announced:
+        print(
+            "[P57.TIM_PURITY] PASS sampler_is=none old_logps=rollout "
+            "tis_weights=absent trainer_rescore=observer-only",
+            flush=True,
+        )
+        self._p57_tim_purity_announced = True
     if (
         deepswe_debug.enabled()
         and deepswe_debug.rollout_only()
@@ -1135,6 +1191,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       if not _canonical_alignment_sampler_is_valid(
           self.algo_config.sampler_is,
           os.environ.get("CANON_P32_WORKLOAD", ""),
+          p57_tim_study=_p57_tim_purity_enabled(os.environ),
           p34_deepswe=(
               os.environ.get("CANON_P34_DEEPSWE", "") == "1"
           ),
@@ -1147,7 +1204,8 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       ):
         raise alignment.AlignmentGateError(
             "canonical alignment requires sampler_is='token'; sampler_is=None "
-            "is admitted only by the signed GSM8K or P34 DeepSWE contract"
+            "is admitted only by the signed GSM8K, P34 DeepSWE, or P57 "
+            "causal-study contract"
         )
       if rollout_per_token_logps is None or trainer_per_token_logps is None:
         raise alignment.AlignmentGateError(

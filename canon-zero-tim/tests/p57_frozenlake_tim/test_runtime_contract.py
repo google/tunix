@@ -158,6 +158,8 @@ class P57RuntimeContractTest(unittest.TestCase):
     self.assertIn("elif p57_is_stock_fast_runtime; then", text)
     self.assertIn('n_p57_stock_sync" -ne 1', text)
     self.assertIn('n_p57_stock_segment_complete" -ne 1', text)
+    self.assertIn('n_p57_tim_purity" -ne 1', text)
+    self.assertIn("P57 training purity marker contract failed", text)
     self.assertIn('elif [ "$n_ar" -eq 0 ] || [ "$n_emb" -eq 0 ]', text)
 
 

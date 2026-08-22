@@ -98,6 +98,10 @@ The stock arm is not merely `CANON_P38_FIXED_LM_HEAD=0`. It requires:
   warning-only alignment observer enabled. Its processed-B interface is on
   only for post-rollout rescore; sampling and gradients do not request prompt
   logprobs;
+- both arms pin `--sampler_is=none`; rollout A is the old-policy denominator,
+  sampler-TIS weights are absent, and processed B/trainer C remain read-only.
+  The ordinary GSPO epsilon clip is shared base-algorithm behavior and remains
+  enabled;
 - evaluation on the same untreated engine with training/alignment gates off.
 
 The profile, entrypoint, workload validator, and postflight independently
@@ -127,6 +131,7 @@ For the direct new 0→200 training run, require exactly one each:
 [entrypoint] P57_STOCK_FAST_PATH run_kind=train regime=stock-fast ... canonical_overlay=skipped observer_overlay=installed
 [P57.STOCK] TRAIN_RUNTIME_PASS regime=stock-fast arm=mismatch canonical_bundle=off observer=warning-only processed_b=observer-only
 [P57.STOCK_OBSERVER] PROCESSED_PROMPT_LOGPROBS_PASS ... targets=absolute-request-history treatment=observer-only
+[P57.TIM_PURITY] PASS sampler_is=none old_logps=rollout tis_weights=absent trainer_rescore=observer-only
 [P57.STOCK] SEGMENT_PREFLIGHT restored=0 stop_after=200 horizon=200 checkpoint_interval=10 max_to_keep=1
 [P57.STOCK] SEGMENT_COMPLETE step=200 durable_checkpoint=200 horizon=200 next_action=complete
 [P57.STOCK_FAST] RUNTIME_PATH_PASS canonical_markers=0 overlay=skipped
@@ -146,7 +151,7 @@ If the user later requests an optional stock eval-200, require:
 ~~~
 
 The COMPLETE marker must report `prompts=100 generations=8 rewards=800`.
-Local admission is complete: P57 host tests pass `91/91`, and the pinned-image
+Local admission is complete: P57 host tests pass `102/102`, and the pinned-image
 gate executes the eight-generation evaluator lifecycle plus calibration/train/
 eval stock modes, installs the exact two-file observer delta, proves absolute
 targets and processed values end to end, and passes all registered negatives
@@ -159,6 +164,8 @@ Stop on source/image/profile drift, any canonical runtime marker, missing stock
 route, wrong dataset SHA, cap hit, nonfinite value, structural/B-C/gradient or
 checkpoint failure, OOM, restart, IFRT disconnect, wrong restored step, or
 missing segment completion. Finite A-B drift is warning-only evidence.
+Any token sampler-IS path, TIS weight, old-logprob source other than rollout A,
+or missing/duplicate P57 purity receipt is a hard causal-contract failure.
 
 Do not automatically rerun or change context, batch, seed, learning rate,
 horizon, or checkpoint tag. Preserve partial evidence and report the first

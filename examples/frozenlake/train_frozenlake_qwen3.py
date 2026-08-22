@@ -180,6 +180,15 @@ arg_parser.add_argument(
     "--advantage_estimator", type=str, default="rloo",
     help="'grpo' (z-score) or 'rloo' (leave-one-out baseline).",
 )
+arg_parser.add_argument(
+    "--sampler_is",
+    choices=("token", "none"),
+    default="token",
+    help=(
+        "Sampler/trainer importance-sampling correction. 'none' keeps "
+        "rollout logprobs as the old-policy denominator without TIS weights."
+    ),
+)
 args, _ = arg_parser.parse_known_args()
 
 CANON_P57_RUN_KIND = os.getenv("CANON_P57_RUN_KIND", "")
@@ -545,6 +554,10 @@ if CANON_P32_WORKLOAD:
       "top_k": (args.top_k, 0),
       "loss_algo": (args.loss_algo, "gspo-token"),
       "advantage_estimator": (args.advantage_estimator, "rloo"),
+      "sampler_is": (
+          args.sampler_is,
+          "none" if CANON_P57_RUN_KIND in ("train", "eval") else "token",
+      ),
       "mesh": (
           SHARED_MESH_SHAPE,
           (P32_WORKLOAD.dp_size, P32_WORKLOAD.tp_size),
@@ -1365,17 +1378,10 @@ grpo_config = GRPOConfig(
     loss_agg_mode=args.loss_agg_mode,
     kl_loss_mode=args.kl_loss_mode,
     loss_algo=args.loss_algo,
-    # Per-token truncated importance-sampling correction. Switches the policy
-    # loss to use the trainer's start-of-step recomputed logp as
-    # ``old_per_token_logps`` and applies a detached per-token weight
-    # ``min(exp(trainer_logp - sampler_logp), threshold)`` to the pg loss.
-    # Recommended for multi-turn agentic rollouts where residual numerical
-    # drift between sampler and trainer can produce occasional outlier
-    # importance ratios.
-    # Canonical FrozenLake keeps the token correction path present. Exact
-    # alignment requires its weights to remain bitwise one with zero clips, so
-    # it cannot silently mask sampler/trainer drift.
-    sampler_is="token",
+    # The default preserves the existing FrozenLake token-TIS recipe. P57
+    # explicitly passes ``none`` to both arms so rollout S_decode remains the
+    # old-policy denominator and no TIM-aware correction weights enter loss.
+    sampler_is=None if args.sampler_is == "none" else args.sampler_is,
     sampler_is_threshold=2.0,
     use_rollout_logps=True,
     advantage_estimator=args.advantage_estimator,

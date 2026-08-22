@@ -2,16 +2,38 @@
 
 from __future__ import annotations
 
+import ast
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Mapping
 import unittest
 
-from tunix.rl.agentic import agentic_grpo_learner
-
-
 _REPO_ROOT = Path(__file__).resolve().parents[3]
-_sampler_is_valid = getattr(
-    agentic_grpo_learner, "_canonical_alignment_sampler_is_valid"
+_SOURCE = _REPO_ROOT / "tunix/rl/agentic/agentic_grpo_learner.py"
+_tree = ast.parse(_SOURCE.read_text(), filename=str(_SOURCE))
+_names = {
+    "_canonical_alignment_sampler_is_valid",
+    "_p57_tim_purity_enabled",
+    "_validate_p57_tim_purity",
+}
+_matches = [
+    node
+    for node in _tree.body
+    if isinstance(node, ast.FunctionDef) and node.name in _names
+]
+if {node.name for node in _matches} != _names:
+  raise RuntimeError("cannot isolate the sampler purity contracts")
+_namespace = {
+    "Mapping": Mapping,
+    "alignment": SimpleNamespace(AlignmentGateError=ValueError),
+}
+exec(
+    compile(ast.Module(body=_matches, type_ignores=[]), str(_SOURCE), "exec"),
+    _namespace,
 )
+_sampler_is_valid = _namespace["_canonical_alignment_sampler_is_valid"]
+_p57_purity_enabled = _namespace["_p57_tim_purity_enabled"]
+_validate_p57_purity = _namespace["_validate_p57_tim_purity"]
 
 
 class SamplerIsContractTest(unittest.TestCase):
@@ -22,14 +44,72 @@ class SamplerIsContractTest(unittest.TestCase):
   def test_frozenlake_rejects_missing_token_sampler_correction(self):
     self.assertFalse(_sampler_is_valid(None, "frozenlake"))
 
+  def test_p57_causal_study_admits_direct_rollout_logprobs(self):
+    self.assertTrue(
+        _sampler_is_valid(None, "frozenlake", p57_tim_study=True)
+    )
+
+  def test_p57_purity_scope_requires_exact_profile_and_workload(self):
+    good = {
+        "CANON_P57_RUN_KIND": "train",
+        "CANON_P57_TIM_ARM": "mismatch",
+        "CANON_PROFILE_FILE": (
+            "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env"
+        ),
+        "CANON_P32_WORKLOAD": "frozenlake-dp8-tp8",
+    }
+    self.assertTrue(_p57_purity_enabled(good))
+    for changed in (
+        {"CANON_P57_RUN_KIND": "eval"},
+        {"CANON_P57_TIM_ARM": "other"},
+        {"CANON_PROFILE_FILE": "cluster/profiles/qwen3-8b.env"},
+        {"CANON_P32_WORKLOAD": "frozenlake"},
+    ):
+      with self.subTest(changed=changed):
+        self.assertFalse(_p57_purity_enabled({**good, **changed}))
+
+  def test_p57_purity_contract_accepts_rollout_old_without_tis(self):
+    _validate_p57_purity(
+        sampler_is=None,
+        use_rollout_logps=True,
+        rollout_logps_present=True,
+        old_logps_are_rollout=True,
+        sampler_is_weights_present=False,
+    )
+
+  def test_p57_purity_contract_rejects_each_mitigation_or_source_drift(self):
+    cases = (
+        {"sampler_is": "token"},
+        {"use_rollout_logps": False},
+        {"rollout_logps_present": False},
+        {"old_logps_are_rollout": False},
+        {"sampler_is_weights_present": True},
+    )
+    base = {
+        "sampler_is": None,
+        "use_rollout_logps": True,
+        "rollout_logps_present": True,
+        "old_logps_are_rollout": True,
+        "sampler_is_weights_present": False,
+    }
+    for changed in cases:
+      with self.subTest(changed=changed), self.assertRaisesRegex(
+          Exception, "P57 TIM purity contract failed"
+      ):
+        _validate_p57_purity(**{**base, **changed})
+
   def test_frozenlake_accepts_token_sampler_correction(self):
     self.assertTrue(_sampler_is_valid("token", "frozenlake"))
 
-  def test_frozenlake_recipe_pins_token_sampler_correction(self):
+  def test_frozenlake_recipe_defaults_to_token_sampler_correction(self):
     source = (
         _REPO_ROOT / "examples/frozenlake/train_frozenlake_qwen3.py"
     ).read_text(encoding="utf-8")
-    self.assertIn('sampler_is="token",', source)
+    self.assertIn('default="token",', source)
+    self.assertIn(
+        'sampler_is=None if args.sampler_is == "none" else args.sampler_is,',
+        source,
+    )
     self.assertNotIn(
         'sampler_is=None if CANON_P32_WORKLOAD else "token",', source
     )

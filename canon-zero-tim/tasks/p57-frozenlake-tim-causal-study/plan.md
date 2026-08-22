@@ -48,6 +48,12 @@ approval. Advancing a phase requires its exit gate and a decision entry in
   It does not mean the B measurement is absent or knowingly mislabeled. Shared
   nonnumerical infrastructure remains equal: image, model/TP overlay, DP8xTP8,
   vLLM capacity, sampling, resident placement, and datasets.
+- P57 training deliberately disables token sampler importance sampling in both
+  arms. `sampler_is=None`, `use_rollout_logps=True`, and the learner must prove
+  that rollout A is `old_per_token_logps` and `sampler_is_weights` is absent.
+  Standard GSPO policy-ratio clipping at epsilon 0.003/0.005 remains part of
+  the shared base algorithm; TIM-aware TIS weights, substituting trainer B/C
+  for A, and mismatch-conditioned filtering or reweighting are forbidden.
 - P57.1 may inspect stock solve rates only. It may not launch, read, or use a
   zero-arm learning outcome.
 - Calibration order is `m10`, `m15`, `m20`. All three are evaluated from the
@@ -89,6 +95,10 @@ approval. Advancing a phase requires its exit gate and a decision entry in
   is not consumed by the loss. The mismatch arm uses the minimal observer
   runner delta; the zero arm may reach the equivalent facility through its
   canonical runner, but both must prove the same B semantics and target IDs.
+- Both arms use rollout A as the old-policy denominator and have no sampler-TIS
+  weights. The runtime purity receipt is required exactly once per training
+  run; processed B and trainer C may be observed but may not enter the
+  `TrainExample` old-logprob or sampler-weight fields.
 - This design estimates the system-bundle effect. It cannot attribute a result
   to lm-head, RoPE, attention, or any individual kernel.
 - Initial checkpoint, source/image/model digests, maps and order, topology,

@@ -336,6 +336,9 @@ class P57RendererTest(unittest.TestCase):
           self.assertIn("--env_max_steps=15", env["CANON_RUN_CMD"])
           self.assertIn("--max_prompt_length=4096", env["CANON_RUN_CMD"])
           self.assertIn("--max_response_length=8192", env["CANON_RUN_CMD"])
+          self.assertEqual(
+              env["CANON_RUN_CMD"].split().count("--sampler_is=none"), 1
+          )
           self.assertEqual(env["CANON_P57_STOP_AFTER_STEP"], "200")
           if stock_only:
             self.assertEqual(env["CANON_P57_INFERENCE_REGIME"], "stock-fast")
@@ -383,6 +386,12 @@ class P57RendererTest(unittest.TestCase):
     self.assertNotIn("--num_generations=2", eval_env["CANON_RUN_CMD"])
     self.assertIn("--max_prompt_length=4096", eval_env["CANON_RUN_CMD"])
     self.assertIn("--max_response_length=8192", eval_env["CANON_RUN_CMD"])
+    self.assertEqual(
+        train_env["CANON_RUN_CMD"].split().count("--sampler_is=none"), 1
+    )
+    self.assertEqual(
+        eval_env["CANON_RUN_CMD"].split().count("--sampler_is=none"), 1
+    )
     self.assertEqual(train_preflight.returncode, 0, train_preflight.stderr)
     self.assertEqual(eval_preflight.returncode, 0, eval_preflight.stderr)
     self.assertIn(
@@ -415,11 +424,38 @@ class P57RendererTest(unittest.TestCase):
     self.assertEqual(env["CANON_P57_STOP_AFTER_STEP"], "200")
     self.assertIn("--max_steps=200", env["CANON_RUN_CMD"])
     self.assertNotIn("--evaluation_only", env["CANON_RUN_CMD"])
+    self.assertIn("--sampler_is=none", env["CANON_RUN_CMD"])
     self.assertEqual(preflight.returncode, 0, preflight.stderr)
     self.assertIn(
         "[P57.STOCK_FAST] ZERO_TIM_OFF_PASS mode=train absent=12 "
         "observer=train processed_b=on",
         preflight.stdout,
+    )
+
+  def test_p57_training_rejects_token_sampler_correction(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      path = paired.render_all(
+          base_path=BASE,
+          output_dir=Path(tmp) / "rendered",
+          source_commit="a" * 40,
+          run_id="p57pure",
+          campaign_tag="p57-m15-selection",
+          checkpoint_mode="new",
+          expected_updates=200,
+          run_kind="train",
+          workload_candidate="m15",
+          data_split="selection",
+          stock_only=True,
+      )[0]
+      env = _env(yaml.safe_load(path.read_text()))
+      env["CANON_RUN_CMD"] = env["CANON_RUN_CMD"].replace(
+          "--sampler_is=none", "--sampler_is=token"
+      )
+      preflight = _run_env_preflight(env, Path(tmp) / "state")
+    self.assertNotEqual(preflight.returncode, 0)
+    self.assertIn(
+        "P57 training forbids token sampler/TIS correction",
+        preflight.stderr,
     )
 
   def test_eval_rejects_generation_count_not_divisible_by_dp(self):
