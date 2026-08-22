@@ -22,13 +22,16 @@ import logging
 import os
 import pickle
 import sys
+from typing import Any
 
 import jax
 from jax.experimental import mesh_utils
 from jax.sharding import Mesh
 from transformers import AutoTokenizer
 from tunix.experimental.examples.math_gsm8k_dist import gsm8k
+from tunix.experimental.examples.math_gsm8k_dist import models
 from tunix.experimental.rollout import inprocess_vllm_sampler_adapter
+from tunix.experimental.rollout import raiden_sampler_adapter
 from tunix.experimental.worker import remote_execution
 from tunix.experimental.worker import rollout_worker
 from tunix.generate import mappings as mappings_lib
@@ -41,6 +44,22 @@ REPO_ROOT = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "..", "..", "..")
 )
 
+SAMPLERS = ("inprocess_vllm",)
+
+CHAT_PARSERS = {
+    "qwen": chat_parser_lib.QwenChatTemplateParser,
+    "llama": chat_parser_lib.LlamaChatTemplateParser,
+    "gemma": chat_parser_lib.GemmaChatTemplateParser,
+}
+
+
+def _chat_parser_for(model_id: str, tokenizer):
+  """Selects the chat template parser by model family."""
+  name = model_id.lower()
+  for family, parser_cls in CHAT_PARSERS.items():
+    if family in name:
+      return parser_cls(tokenizer, enable_thinking=False)
+  return chat_parser_lib.DefaultChatTemplateParser(tokenizer, enable_thinking=False)
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser = argparse.ArgumentParser(description="vLLM rollout worker process")
@@ -56,6 +75,15 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument("--use_lora", action="store_true")
   parser.add_argument("--lora_rank", type=int, default=16)
   parser.add_argument("--lora_alpha", type=float, default=16.0)
+  parser.add_argument(
+      "--model_name", type=str, default=os.getenv("MODEL_NAME", "Qwen3-1.7B")
+  )
+  parser.add_argument(
+      "--sampler",
+      type=str,
+      default=os.getenv("SAMPLER", "legacy_vllm"),
+      choices=["legacy_vllm", "vanilla"],
+  )
   return parser.parse_args(argv)
 
 
@@ -63,6 +91,44 @@ def _create_rollout_mesh() -> Mesh:
   shape = (1, jax.device_count())
   devices = mesh_utils.create_device_mesh(shape, jax.devices())
   return Mesh(devices, axis_names=("fsdp", "tp"))
+
+def _create_vanilla_worker(args, tokenizer):
+  logging.info("Creating native sampler on the rollout mesh...")
+  mesh = _create_rollout_mesh()
+  with mesh:
+    model = models.create_model(
+        args.model_name, args.model_dir or args.model_id, mesh
+    )
+  sampler_adapter = raiden_sampler_adapter.RaidenSamplerAdapter(
+      server_id=args.worker_id,
+      transformer=model,
+      tokenizer=tokenizer,
+      cache_config=args.max_prompt_length + args.max_response_length,
+  )
+
+  rollout_tokenizer = tokenizer_adapter_lib.TokenizerAdapter(tokenizer)
+  chat_parser = chat_parser_lib.QwenChatTemplateParser(
+      tokenizer, enable_thinking=False
+  )
+  # TODO: select the chat template parser by model family instead of hardcoding. 
+  config = rollout_worker.RolloutConfig(
+      sampler_type="raiden_vanilla",
+      max_prompt_length=args.max_prompt_length,
+      max_tokens_to_generate=args.max_response_length,
+      temperature=1.0,
+      top_p=1.0,
+      return_logprobs=True,
+      env_name=gsm8k.GSM8K_ENV_NAME,
+      agent_name=gsm8k.GSM8K_AGENT_NAME,
+  )
+  return rollout_worker.RolloutWorker(
+      worker_id=args.worker_id,
+      config=config,
+      sampler=sampler_adapter,
+      tokenizer=rollout_tokenizer,
+      chat_parser=chat_parser,
+      max_concurrency=64,
+  )
 
 
 def _create_vllm_worker(args, tokenizer):
@@ -166,7 +232,10 @@ def main(argv: list[str], context: Any = None) -> None:
 
   async def grpc_server_main() -> None:
     logging.info("Creating rollout worker service...")
-    worker_service = _create_vllm_worker(args, tokenizer)
+    if args.sampler == "vanilla":
+      worker_service = _create_vanilla_worker(args, tokenizer)
+    else:
+      worker_service = _create_vllm_worker(args, tokenizer)
 
     logging.info("Creating rollout gRPC server...")
     server = remote_execution.GrpcRemoteExecutionServer(worker_service)

@@ -43,6 +43,8 @@ EVAL_EVERY_N_STEPS=${EVAL_EVERY_N_STEPS:-1000000}
 LORA_RANK=${LORA_RANK:-16}
 LORA_ALPHA=${LORA_ALPHA:-16.0}
 USE_LORA=${USE_LORA:-0}
+# Rollout sampler adapter. legacy_vllm was removed in cl/968585828.
+SAMPLER=${SAMPLER:-inprocess_vllm}
 PYTHON_BIN=${PYTHON_BIN:-python3}
 WAIT_TIMEOUT_SECS=${WAIT_TIMEOUT_SECS:-1800}
 WAIT_POLL_SECS=${WAIT_POLL_SECS:-5}
@@ -297,6 +299,7 @@ echo "  response len:   $MAX_RESPONSE_LENGTH"
 echo "  train micro:    $TRAIN_MICRO_BATCH_SIZE"
 echo "  mini batch:     $MINI_BATCH_SIZE"
 echo "  use lora:       $USE_LORA"
+echo "  sampler:        $SAMPLER"
 echo "  trainer chips:  $TRAINER_TPU_CHIPS"
 echo "  rollout chips:  $ROLLOUT_TPU_CHIPS"
 echo "  inference:      $RUN_INFERENCE_NODE"
@@ -343,12 +346,13 @@ echo "Launching trainer node on TPU chips $TRAINER_TPU_CHIPS..."
 
     --port="$TRAINER_PORT"
     --mesh_fsdp="$TRAINER_FSDP"
-    --model_name="$MODEL_NAME"
     --model_id="$MODEL_ID"
     --model_dir="$MODEL_DIR"
+    --model_name="$MODEL_NAME"
     --tokenizer_path="$TOKENIZER_PATH"
     --max_prompt_length="$MAX_PROMPT_LENGTH"
     --max_response_length="$MAX_RESPONSE_LENGTH"
+    --sampler="$SAMPLER"
     --mini_batch_size="$MINI_BATCH_SIZE"
     --train_micro_batch_size="$TRAIN_MICRO_BATCH_SIZE"
     --eval_every_n_steps="$EVAL_EVERY_N_STEPS"
@@ -359,12 +363,21 @@ echo "Launching trainer node on TPU chips $TRAINER_TPU_CHIPS..."
     TRAINER_CMD+=(--use_lora)
   fi
 
-  export JAX_PLATFORMS=tpu,cpu
-  export TPU_VISIBLE_DEVICES=${TRAINER_TPU_CHIPS}
-  export TPU_VISIBLE_CHIPS=${TPU_VISIBLE_DEVICES}
-  export TPU_CHIPS_PER_HOST_BOUNDS=${TPU_CHIPS_PER_HOST_BOUNDS}
-  export TPU_HOST_BOUNDS=${TPU_HOST_BOUNDS}
-  export LIBTPU_INIT_ARGS=deepsea_chips_per_host_bounds=${TPU_CHIPS_PER_HOST_BOUNDS},deepsea_host_bounds=${TPU_HOST_BOUNDS}
+  if [[ "${TRAINER_PATHWAYS:-0}" == "1" ]]; then
+    # Chips 0-3 belong to the local Pathways worker container; the trainer
+    # is a proxy client and must not grab them.
+    export JAX_PLATFORMS=proxy,cpu
+    export JAX_BACKEND_TARGET=${JAX_BACKEND_TARGET:-grpc://127.0.0.1:29000}
+    export TRAINER_PATHWAYS_LOCAL_INIT=1
+    unset TPU_VISIBLE_DEVICES TPU_VISIBLE_CHIPS LIBTPU_INIT_ARGS
+  else
+    export JAX_PLATFORMS=tpu,cpu
+    export TPU_VISIBLE_DEVICES=${TRAINER_TPU_CHIPS}
+    export TPU_VISIBLE_CHIPS=${TPU_VISIBLE_DEVICES}
+    export TPU_CHIPS_PER_HOST_BOUNDS=${TPU_CHIPS_PER_HOST_BOUNDS}
+    export TPU_HOST_BOUNDS=${TPU_HOST_BOUNDS}
+    export LIBTPU_INIT_ARGS=deepsea_chips_per_host_bounds=${TPU_CHIPS_PER_HOST_BOUNDS},deepsea_host_bounds=${TPU_HOST_BOUNDS}
+  fi
   export PYTHONUNBUFFERED=1
   env | egrep 'JAX|TPU'
   print_command "Trainer command" "${TRAINER_CMD[@]}"
@@ -384,6 +397,7 @@ echo "Launching vLLM rollout node on TPU chips $ROLLOUT_TPU_CHIPS..."
     --port="$ROLLOUT_PORT"
     --model_id="$MODEL_ID"
     --model_dir="$MODEL_DIR"
+    --model_name="$MODEL_NAME"
     --tokenizer_path="$TOKENIZER_PATH"
     --max_prompt_length="$MAX_PROMPT_LENGTH"
     --max_response_length="$MAX_RESPONSE_LENGTH"

@@ -234,6 +234,87 @@ def _configure_trainer_loss(
       ),
   )
 
+class _CoordinatorWorkerShim:
+  """Presents a remote ActorHandle as a coordinator-protocol worker."""
+
+  def __init__(self, handle, worker_id, roles):
+    self._handle = handle
+    self._worker_id = worker_id
+    self._roles = frozenset(roles)
+
+  def info(self):
+    return datatypes.WorkerInfo(worker_id=self._worker_id, roles=self._roles)
+
+  async def prepare_weight_sync(self, *args, **kwargs):
+    return await self._handle.asubmit("prepare_weight_sync", *args, **kwargs)
+
+  async def release_weight_sync(self, *args, **kwargs):
+    return await self._handle.asubmit("release_weight_sync", *args, **kwargs)
+
+  async def bind_weight_sync(self, *args, **kwargs):
+    return await self._handle.asubmit("bind_weight_sync", *args, **kwargs)
+
+  async def get_weight_sync_metadata(self, *args, **kwargs):
+    return await self._handle.asubmit("get_weight_sync_metadata", *args, **kwargs)
+
+  async def pre_weight_sync(self, *args, **kwargs):
+    return await self._handle.asubmit("pre_weight_sync", *args, **kwargs)
+
+  async def weight_sync(self, *args, **kwargs):
+    return await self._handle.asubmit("weight_sync", *args, **kwargs)
+
+  async def post_weight_sync(self, *args, **kwargs):
+    return await self._handle.asubmit("post_weight_sync", *args, **kwargs)
+
+  async def abort_weight_sync(self, *args, **kwargs):
+    return await self._handle.asubmit("abort_weight_sync", *args, **kwargs)
+
+  async def get_weight_sync_status(self, *args, **kwargs):
+    return await self._handle.asubmit("get_weight_sync_status", *args, **kwargs)
+
+def _make_weight_sync_coordinator(trainer_handle, rollout_handle):
+  """Builds the weight sync coordinator over the configured transport."""
+  from tunix.experimental.orchestrator import weight_sync  # pylint: disable=g-import-not-at-top
+  from tunix.experimental.orchestrator import weight_sync_coordinator  # pylint: disable=g-import-not-at-top
+  from tunix.experimental.orchestrator import worker_registry as registry_lib  # pylint: disable=g-import-not-at-top
+
+  class _NullHandler(weight_sync.WeightSyncHandler):
+    """Runs every phase without moving bytes."""
+
+    def register_work_unit(self, metadata):
+      del metadata
+
+    def transfer(self, src_units, dst_units, req_id=None, generation=None):
+      del src_units, dst_units, generation
+      return weight_sync.TransferResult(req_id=req_id or "", success=True)
+
+  registry = registry_lib.WorkerRegistry()
+  registry.register(
+      _CoordinatorWorkerShim(trainer_handle, "trainer-0", {"trainer"})
+  )
+  registry.register(
+      _CoordinatorWorkerShim(rollout_handle, "rollout-0", {"rollout"})
+  )
+# TODO: standardize a handeler registry seperate from the worker registry.
+  backend = os.getenv("WEIGHT_SYNC_BACKEND", "raiden").lower()
+  if backend == "raiden":
+    from tunix.experimental.orchestrator import raiden_handler  # pylint: disable=g-import-not-at-top
+
+    handler = raiden_handler.RaidenHandler(
+        transfer_options=raiden_handler.make_host_staged_transfer_options()
+    )
+    logging.info(
+        "Raiden weight sync enabled; controller on port %d.", handler.port
+    )
+  elif backend == "noop":
+    handler = _NullHandler()
+    logging.info("Weight sync running protocol-only; no bytes move.")
+  else:
+    raise ValueError(f"Unknown weight sync backend: {backend!r}")
+  return weight_sync_coordinator.WeightSyncCoordinator(
+      registry, handler, controller_id="gsm8k-demo"
+  )
+
 
 def _register_workers(
     args: argparse.Namespace,
@@ -408,7 +489,12 @@ def main(argv: list[str], context: Any = None) -> None:
       eos_id=eos_id,
   )
 
-  cluster = orchestrator.ClusterOrchestrator()
+  cluster = orchestrator.ClusterOrchestrator(
+      weight_sync_coordinator=_make_weight_sync_coordinator(
+          trainer_handle, rollout_handle
+      )
+  )
+
   _register_workers(
       args,
       cluster=cluster,
@@ -432,7 +518,7 @@ def main(argv: list[str], context: Any = None) -> None:
           pad_id=pad_id,
       ),
       max_staleness=args.max_staleness,
-      sync_weights=args.sync_weights,
+      sync_weights=True,
       on_step_begin=lambda step: logging.info(
           "Async GRPO step %d starting.", step
       ),

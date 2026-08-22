@@ -33,11 +33,10 @@ from jax.experimental import mesh_utils
 from jax.sharding import Mesh
 import optax
 from tunix.cli.utils import model as model_utils
+from tunix.experimental.examples.math_gsm8k_dist import models
 from tunix.experimental.train import peft_trainer_v2
 from tunix.experimental.worker import remote_execution
 from tunix.experimental.worker import trainer_worker
-from tunix.models.qwen3 import model as qwen3_model_lib
-from tunix.models.qwen3 import params as qwen3_params_lib
 
 REPO_ROOT = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "..", "..", "..", "..")
@@ -144,21 +143,6 @@ def _ensure_model_dir_for_trainer(model_dir: str, model_id: str) -> str:
       f"in --model_dir: {model_path}"
   )
 
-
-def _qwen3_config(model_name: str) -> qwen3_model_lib.ModelConfig:
-  normalized = model_name.lower().replace("_", "-")
-  if "1.7b" in normalized or "1p7b" in normalized:
-    config = qwen3_model_lib.ModelConfig.qwen3_1p7b()
-  elif "32b" in normalized:
-    config = qwen3_model_lib.ModelConfig.qwen3_32b()
-  else:
-    raise ValueError(f"Unsupported demo model_name: {model_name!r}")
-  config.shd_config = qwen3_model_lib.ShardingConfig.get_default_sharding()
-  config.dtype = jnp.bfloat16
-  config.param_dtype = jnp.float32
-  return config
-
-
 def _create_mesh(args) -> Mesh:
   shape = (args.mesh_fsdp, args.mesh_tp)
   if args.mesh_fsdp * args.mesh_tp != jax.device_count():
@@ -170,16 +154,13 @@ def _create_mesh(args) -> Mesh:
   return Mesh(devices, axis_names=("fsdp", "tp"))
 
 
-def _load_qwen3(args, mesh: Mesh, *, lora: bool):
+def _load_actor_model(args, mesh: Mesh, *, lora: bool):
   if not args.model_dir:
     raise ValueError(
         "--model_dir is required for JAX trainer weights. Set MODEL_DIR or pass "
-        "--model_dir=/path/to/local/qwen3/safetensors."
+        "--model_dir=/path/to/local/safetensors."
     )
-  config = _qwen3_config(args.model_name)
-  model = qwen3_params_lib.create_model_from_safe_tensors(
-      args.model_dir, config, mesh, dtype=jnp.bfloat16
-  )
+  model = models.create_model(args.model_name, args.model_dir, mesh)
   if not lora:
     return model
   lora_config = {
@@ -190,7 +171,9 @@ def _load_qwen3(args, mesh: Mesh, *, lora: bool):
       "rank": args.lora_rank,
       "alpha": args.lora_alpha,
   }
-  return model_utils.apply_lora_to_model(model, mesh=mesh, lora_config=lora_config)
+  return model_utils.apply_lora_to_model(
+      model, mesh=mesh, lora_config=lora_config
+  )
 
 
 class _MeshBoundTrainer:
@@ -280,7 +263,7 @@ def main(argv: list[str], context: Any = None) -> None:
   logging.info("Trainer mesh: %s", mesh)
 
   logging.info("Loading actor model with use_lora=%s...", args.use_lora)
-  actor_model = _load_qwen3(args, mesh, lora=args.use_lora)
+  actor_model = _load_actor_model(args, mesh, lora=args.use_lora)
 
   logging.info("Building PeftTrainer v2 config...")
   if args.train_micro_batch_size <= 0:
