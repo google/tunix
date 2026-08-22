@@ -17,13 +17,14 @@ matched exactly with ahead/behind `0/0`. This documentation checkpoint advances
 the branch once more, so the executor must still fetch and use the final
 operator-branch SHA rather than pinning the implementation commit directly.
 
-Latest source intake fast-forwarded this isolated worktree to
-`68fa7d924ef7138e99cc2864ebbcf9edb6e676d9`, which contains immutable p58f06
-evidence plus later P57 evidence and execution-log checkpoints. P58f06 proves the published full-stage
-admission repair and exposes a narrower warning-boundary defect described
-below. Its correction is approved for publication. Do not ask an executor to
-render p58f07 until the publication push and post-push remote readback are
-exact.
+Latest source intake fast-forwarded this isolated worktree through immutable
+p58f06 evidence plus later P57 evidence and execution-log checkpoints. The
+finite Native B-C warning-scope correction was published as
+`2ac6383780be57033ddb5f34d348b632bf566011`; its first post-push readback
+matched local HEAD, `FETCH_HEAD`, and `origin/yuxzhang/canon-zero-tim` with
+ahead/behind `0/0`. This publication checkpoint advances the branch once more,
+so the executor must fetch and exactly read back the final operator tip before
+rendering p58f07.
 
 The user previously waived P58.3 and the separate three-update stop, then chose
 the native 128-chip full 1,000-update stage. That historical phase remains

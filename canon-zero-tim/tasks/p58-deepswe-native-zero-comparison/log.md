@@ -314,3 +314,12 @@
 - One-host evidence: the bounded direct runner loaded the training JAX/libtpu environment, but this container exposes no `/dev/vfio` and reports zero chips. It emitted `P58_ONEHOST_ALIGNMENT_BLOCKED reason=device_inventory_timeout timeout_secs=10`; this is an environment blocker, not a TPU PASS or code failure. No topology was emulated.
 - External effects before publication: three requested fast-forward pulls, local source/tests/documentation edits, local tests, one pinned-image test, and removal of the empty lock/cache files created by those tests. No image publication, rendered YAML, Kubernetes apply, remote TPU job, model download, credential change, or `main` mutation occurred.
 - Next: await explicit commit/push approval. After publication and exact remote readback, use only fresh Native full run-id `p58f07`; require both serving-boundary warnings, finite forward/backward, exact trainer repeat, TPU-resident optimizer, and the first commit, then continue the same job through 1,000 commits if healthy. Zero remains strict and deferred.
+
+## 2026-08-22 UTC — p58f06 finite Native B-C warning-scope repair published
+
+- Type: publication evidence.
+- Action: after explicit user approval, committed the signed P58 Native finite A-B/B-C warning scope, strict trainer-repeat/Zero negative controls, classifier treatment-dose correction, runbook/handoff updates, and preserved upstream execution checkpoint. The pre-push fetch proved the operator branch had not advanced; the push was normal and non-force.
+- Published implementation commit: `2ac6383780be57033ddb5f34d348b632bf566011`.
+- Readback: local HEAD, `FETCH_HEAD`, and `origin/yuxzhang/canon-zero-tim` all resolved to the implementation commit with ahead/behind `0/0` before this publication checkpoint.
+- External effects: one normal fast-forward push to `yuxzhang/canon-zero-tim`. `main` was untouched. No image publication, rendered YAML, Kubernetes apply, TPU launch, model download, or credential change occurred.
+- Next: publish this documentation-only checkpoint and verify its final remote readback. The executor must fetch that final tip and launch only fresh Native full run-id `p58f07`; Zero remains strict and deferred.
