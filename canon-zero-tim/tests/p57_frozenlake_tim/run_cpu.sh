@@ -25,6 +25,7 @@ python3 -m py_compile \
   canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts/classify_stock_discovery.py \
   canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts/derive_calibration_provenance.py \
   canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts/verify_calibration_manifest.py \
+  canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts/verify_three_arm_manifests.py \
   canon-zero-tim/cluster/steps/p57_probe_stock_engine.py \
   canon-zero-tim/src/p57_stock_prompt_observer.py \
   examples/frozenlake/p57_workloads.py \

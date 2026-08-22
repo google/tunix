@@ -276,3 +276,11 @@
 - Evidence: `evidence/four_wave_launch_error.log` recorded all four tracebacks.
 - Next: peer agent to update `dp_workloads.py` to validate dynamic environment parameters, then relaunch four waves.
 
+## 2026-08-22 UTC — closed runtime-matrix repair locally validated
+
+- Type: target-failure repair / fail-closed contract expansion / one-host pinned-image validation
+- Cause: the runtime validator was a stale discovery-only contract, not a dynamic validation of the new causal matrix. It admitted exactly `(mismatch,m15,selection)` and therefore rejected all four correctly rendered P45/M15-main `mismatch`/`is` jobs before step 0.
+- Action: replaced the three hardcoded arm/workload/split expectations in both stock train and eval validators with a closed registry of five tuples: the historical discovery tuple and P45/M15-main under `mismatch` and `is`. Returned attestations now carry the resolved tuple and variant name. Added train+eval positives for all five tuples and a negative for unregistered `(is,m15,selection)`. All zero/one/absent numerical switches, topology, optimizer, horizon, and stock-fast requirements are unchanged.
+- Validation: the P57 host suite passed 105/105 with `P57_FROZENLAKE_TIM_CPU_PASS`; syntax and `git diff --check` passed. On the local v5p host, the pinned production image resolved immutable image `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`, installed all 34 overlay files, emitted `P57_STOCK_RUNTIME_MATRIX_PASS variants=5 stages=train,eval`, kept the zero and stock-drift negatives red, passed the Qwen3-8B TP8/fixed-lm-head forward+VJP probes and stock observer, and ended `P45_EXACT_IMAGE_CPU_PASS overlay=qwen8b_tp8` with exit 0. The container reported no `/dev/vfio`; no device computation or target JobSet was claimed.
+- Classification: repair is locally GREEN but unpublished and target `NOT RUN`. The four prior attempts remain immutable `INCONCLUSIVE` evidence.
+- Next: review before any commit/push. If published, rerender from the new SHA with fresh four-character IDs `n45a/n15a/i45a/i15a`, fresh campaign root `p57-native-is-b`, and `checkpoint-mode=new`; then ask separately before launch.

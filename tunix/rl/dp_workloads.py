@@ -149,6 +149,35 @@ P57_STOCK_EVAL_ONE_SWITCHES = (
     "ENABLE_PATHWAYS_PERSISTENCE",
 )
 
+# Registered stock-runtime treatment/workload tuples.  The M15 selection row
+# preserves the discovery campaign; the other four rows are the causal study's
+# P45/M15 x no-IS/token-IS matrix.  Keep this closed rather than accepting
+# arbitrary values from the environment.
+_P57_STOCK_RUNTIME_VARIANTS = {
+    ("mismatch", "m15", "selection"): "m15-selection-mismatch",
+    ("mismatch", "", ""): "p45-mismatch",
+    ("is", "", ""): "p45-is",
+    ("mismatch", "m15", "main"): "m15-main-mismatch",
+    ("is", "m15", "main"): "m15-main-is",
+}
+
+
+def _p57_stock_runtime_variant(
+    values: Mapping[str, str], *, stage: str
+) -> tuple[str, str, str, str]:
+  key = (
+      values.get("CANON_P57_TIM_ARM", ""),
+      values.get("CANON_P57_WORKLOAD_CANDIDATE", ""),
+      values.get("CANON_P57_DATA_SPLIT", ""),
+  )
+  variant = _P57_STOCK_RUNTIME_VARIANTS.get(key)
+  if variant is None:
+    raise ValueError(
+        f"P57 stock-{stage} environment mismatch: "
+        f"unregistered_variant={key!r}"
+    )
+  return (*key, variant)
+
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class DPWorkloadSpec:
@@ -816,12 +845,12 @@ def validate_p57_stock_train_environment(
   """Fails closed unless P57 runs the untreated stock training program."""
   workload.validate()
   values = os.environ if environ is None else environ
+  arm, candidate, split, variant = _p57_stock_runtime_variant(
+      values, stage="train"
+  )
   expected = {
       "CANON_P57_RUN_KIND": "train",
-      "CANON_P57_TIM_ARM": "mismatch",
       "CANON_P57_INFERENCE_REGIME": "stock-fast",
-      "CANON_P57_WORKLOAD_CANDIDATE": "m15",
-      "CANON_P57_DATA_SPLIT": "selection",
       "CANON_P57_EXPECTED_UPDATES": "200",
       "CANON_P32_WORKLOAD": workload.name,
       "CANON_DP_SIZE": str(workload.dp_size),
@@ -866,7 +895,10 @@ def validate_p57_stock_train_environment(
     )
   return {
       "regime": "stock-fast",
-      "arm": "mismatch",
+      "arm": arm,
+      "workload_candidate": candidate,
+      "data_split": split,
+      "variant": variant,
       "absent_switches": list(P57_STOCK_FAST_ABSENT_SWITCHES),
       "zero_switches": list(P57_STOCK_TRAIN_ZERO_SWITCHES),
       "one_switches": list(P57_STOCK_TRAIN_ONE_SWITCHES),
@@ -881,12 +913,12 @@ def validate_p57_stock_eval_environment(
   """Fails closed unless P57 evaluates the untreated stock program."""
   workload.validate()
   values = os.environ if environ is None else environ
+  arm, candidate, split, variant = _p57_stock_runtime_variant(
+      values, stage="eval"
+  )
   expected = {
       "CANON_P57_RUN_KIND": "eval",
-      "CANON_P57_TIM_ARM": "mismatch",
       "CANON_P57_INFERENCE_REGIME": "stock-fast",
-      "CANON_P57_WORKLOAD_CANDIDATE": "m15",
-      "CANON_P57_DATA_SPLIT": "selection",
       "CANON_P57_EXPECTED_UPDATES": "200",
       "CANON_P32_WORKLOAD": workload.name,
       "CANON_DP_SIZE": str(workload.dp_size),
@@ -931,7 +963,10 @@ def validate_p57_stock_eval_environment(
     )
   return {
       "regime": "stock-fast",
-      "arm": "mismatch",
+      "arm": arm,
+      "workload_candidate": candidate,
+      "data_split": split,
+      "variant": variant,
       "absent_switches": list(P57_STOCK_FAST_ABSENT_SWITCHES),
       "zero_switches": list(P57_STOCK_EVAL_ZERO_SWITCHES),
       "one_switches": list(P57_STOCK_EVAL_ONE_SWITCHES),

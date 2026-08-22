@@ -12,6 +12,11 @@
   intentionally truncates every P45 treatment to the preregistered common
   200-update horizon. P57 `l0` is only a rematerialized envelope anchor and is
   not a byte-identical substitute.
+- Confirmed: the first four-job launch is `INCONCLUSIVE` before step 0. The
+  manifests and outer preflights were correct, but the Python runtime validator
+  still hardcoded the older `(mismatch,m15,selection)` discovery cell. The
+  repair must admit only the five preregistered stock tuples and reject every
+  unregistered arm/workload/split combination.
 - Decision: test three treatments independently on both workloads:
 
 | Runtime arm | Numerical program | Sampler correction | Old denominator | TIS weights |
@@ -64,7 +69,9 @@ checkpoint tags. A healthy run is not intentionally paused; checkpoints every
 - Pass before launch: all six rendered cells pass resolved-env preflight; each
   command has exactly one expected sampler mode; native cells attest the entire
   zero-TIM bundle off; zero cells attest the registered canonical bundle; the
-  opposite sampler mode and wrong workload horizon are rejected.
+  opposite sampler mode and wrong workload horizon are rejected. The pinned
+  image must emit
+  `P57_STOCK_RUNTIME_MATRIX_PASS variants=5 stages=train,eval`.
 - Target pass for the current four-job queue: all four full horizons complete;
   the two `mismatch` jobs have exactly one no-IS purity receipt and the two `is`
   jobs have exactly one token-IS purity receipt. All four attest the stock-fast

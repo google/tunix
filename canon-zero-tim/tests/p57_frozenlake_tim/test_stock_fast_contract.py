@@ -141,6 +141,79 @@ class P57StockFastContractTest(unittest.TestCase):
           {**eval_values, "CANON_PROMPT_PROCESSED_LOGPROBS": "1"},
       )
 
+  def test_all_registered_stock_runtime_variants_are_accepted(self):
+    workload, base = self._environment()
+    variants = (
+        ("mismatch", "m15", "selection", "m15-selection-mismatch"),
+        ("mismatch", "", "", "p45-mismatch"),
+        ("is", "", "", "p45-is"),
+        ("mismatch", "m15", "main", "m15-main-mismatch"),
+        ("is", "m15", "main", "m15-main-is"),
+    )
+    for run_kind in ("train", "eval"):
+      zero_switches = (
+          dp_workloads.P57_STOCK_TRAIN_ZERO_SWITCHES
+          if run_kind == "train"
+          else dp_workloads.P57_STOCK_EVAL_ZERO_SWITCHES
+      )
+      one_switches = (
+          dp_workloads.P57_STOCK_TRAIN_ONE_SWITCHES
+          if run_kind == "train"
+          else dp_workloads.P57_STOCK_EVAL_ONE_SWITCHES
+      )
+      validator = (
+          dp_workloads.validate_p57_stock_train_environment
+          if run_kind == "train"
+          else dp_workloads.validate_p57_stock_eval_environment
+      )
+      for arm, candidate, split, expected_variant in variants:
+        with self.subTest(
+            run_kind=run_kind,
+            arm=arm,
+            candidate=candidate,
+            split=split,
+        ):
+          values = {
+              **base,
+              "CANON_P57_RUN_KIND": run_kind,
+              "CANON_P57_TIM_ARM": arm,
+              "CANON_P57_WORKLOAD_CANDIDATE": candidate,
+              "CANON_P57_DATA_SPLIT": split,
+              "CANON_P57_EXPECTED_UPDATES": "200",
+              "CANON_P30_OPT_STATE_OFFLOAD": "0",
+              **{name: "0" for name in zero_switches},
+              **{name: "1" for name in one_switches},
+          }
+          attestation = validator(workload, values)
+          self.assertEqual(attestation["arm"], arm)
+          self.assertEqual(attestation["workload_candidate"], candidate)
+          self.assertEqual(attestation["data_split"], split)
+          self.assertEqual(attestation["variant"], expected_variant)
+    print(
+        "P57_STOCK_RUNTIME_MATRIX_PASS variants=5 stages=train,eval",
+        flush=True,
+    )
+
+  def test_unregistered_stock_runtime_variants_are_rejected(self):
+    workload, base = self._environment()
+    values = {
+        **base,
+        "CANON_P57_RUN_KIND": "train",
+        "CANON_P57_TIM_ARM": "is",
+        "CANON_P57_WORKLOAD_CANDIDATE": "m15",
+        "CANON_P57_DATA_SPLIT": "selection",
+        "CANON_P57_EXPECTED_UPDATES": "200",
+        "CANON_P30_OPT_STATE_OFFLOAD": "0",
+        **{
+            name: "0" for name in dp_workloads.P57_STOCK_TRAIN_ZERO_SWITCHES
+        },
+        **{
+            name: "1" for name in dp_workloads.P57_STOCK_TRAIN_ONE_SWITCHES
+        },
+    }
+    with self.assertRaisesRegex(ValueError, "unregistered_variant"):
+      dp_workloads.validate_p57_stock_train_environment(workload, values)
+
   def test_stock_observer_is_train_only_and_does_not_enable_fixed_m(self):
     entrypoint = (ROOT / "canon-zero-tim/cluster/entrypoint.sh").read_text()
     installer = (

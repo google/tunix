@@ -21,8 +21,13 @@ Read in order: `state.md` → `plan.md` →
   and `zero` = complete zero-TIM/no-IS.
 - All four immediate jobs use Qwen3-8B DP8xTP8, resident optimizer, evaluation off,
   checkpoint every 10 and LatestN(1). Every arm/workload runs 200 updates.
-- The local extension is not target-certified until a published immutable SHA
-  passes the gates below. Do not render from a dirty or unpushed tree.
+- The first four-job attempt (`p45n/m15n/p45i/m15i`) is `INCONCLUSIVE`: all
+  256 chips provisioned, but a stale discovery-only Python validator rejected
+  every job before step 0. This is not training or TPU numerical evidence.
+- The repair replaces that single hardcoded tuple with a closed five-tuple
+  registry. It is locally exact-image certified but is not target-certified
+  until a published immutable repair SHA passes the gates below. Do not render
+  from a dirty or unpushed tree.
 
 ## Operator procedure for the four native-program jobs
 
@@ -35,17 +40,27 @@ bash canon-zero-tim/tests/p45_frozenlake_dp8_tp8/run_exact_image.sh
 git diff --check
 ~~~
 
+Require the exact-image marker
+`P57_STOCK_RUNTIME_MATRIX_PASS variants=5 stages=train,eval` in addition to
+the terminal P57/P45 PASS markers. Missing this marker means the repair was not
+tested and launch is forbidden.
+
 3. Render all four manifests with no hand edits:
 
 ~~~bash
-SOURCE=<approved-pushed-40-character-sha>
-OUT_NATIVE=/tmp/p57-primary-native
-OUT_IS=/tmp/p57-primary-is
+SOURCE=<approved-pushed-repair-40-character-sha>
+OUT_NATIVE=/tmp/p57-primary-native-b
+OUT_IS=/tmp/p57-primary-is-b
 bash canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts/render_three_arm_wave.sh \
-  native "$SOURCE" "$OUT_NATIVE" p57p45n1 p57m15n1 p57-native-is-a
+  native "$SOURCE" "$OUT_NATIVE" n45a n15a p57-native-is-b
 bash canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts/render_three_arm_wave.sh \
-  is "$SOURCE" "$OUT_IS" p57p45is1 p57m15is1 p57-native-is-a
+  is "$SOURCE" "$OUT_IS" i45a i15a p57-native-is-b
 ~~~
+
+Do not reuse the failed attempt's run IDs, output directories, or
+`p57-native-is-a` campaign root. Four-character replacement IDs are deliberate:
+longer examples have already exceeded generated Pod-name limits. Both waves
+must remain `checkpoint-mode=new`; there is no step-0 checkpoint to resume.
 
 4. Stop unless each renderer reports two manifest passes plus its terminal wave
    and render PASS markers. Record all four YAML SHA-256 values.

@@ -35,9 +35,15 @@ git diff --check
 ~~~
 
 Require terminal `P57_FROZENLAKE_TIM_CPU_PASS`,
+`P57_STOCK_RUNTIME_MATRIX_PASS variants=5 stages=train,eval`,
 `P57_STOCK_OBSERVER_EXACT_IMAGE_PASS targets=absolute values=processed`, and
 `P45_EXACT_IMAGE_CPU_PASS overlay=qwen8b_tp8`. Local gates are construction
 evidence, not target evidence.
+
+The runtime matrix marker is mandatory. It proves the pinned production image
+accepted exactly the five registered stock tuples: the historical M15
+selection discovery cell plus P45/M15-main under `mismatch` and `is`. Arbitrary
+arm/workload/split combinations remain fail-closed.
 
 ## Queue now — render native/no-IS and native/token-IS
 
@@ -47,14 +53,20 @@ checkpoint namespace, so a fresh `new` rerun must use a new campaign root.
 
 ~~~bash
 cd /home/yuxuan/code_rl_repro/worktrees/p57_frozenlake_tim_0820
-SOURCE=<approved-pushed-40-character-sha>
-OUT_NATIVE=/tmp/p57-primary-native
-OUT_IS=/tmp/p57-primary-is
+SOURCE=<approved-pushed-repair-40-character-sha>
+OUT_NATIVE=/tmp/p57-primary-native-b
+OUT_IS=/tmp/p57-primary-is-b
 bash canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts/render_three_arm_wave.sh \
-  native "$SOURCE" "$OUT_NATIVE" p57p45n1 p57m15n1 p57-native-is-a
+  native "$SOURCE" "$OUT_NATIVE" n45a n15a p57-native-is-b
 bash canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts/render_three_arm_wave.sh \
-  is "$SOURCE" "$OUT_IS" p57p45is1 p57m15is1 p57-native-is-a
+  is "$SOURCE" "$OUT_IS" i45a i15a p57-native-is-b
 ~~~
+
+The first target attempt used `p45n/m15n/p45i/m15i` and campaign root
+`p57-native-is-a`; all four are immutable `INCONCLUSIVE` evidence and must not
+be reused. Keep rerun IDs at four characters so generated Pod names remain
+within the Kubernetes 63-character limit. The repair SHA, output roots,
+run IDs, campaign root, and `checkpoint-mode=new` must all be fresh.
 
 For each command require two `P57_THREE_ARM_MANIFEST_PASS` lines and its
 terminal markers:
