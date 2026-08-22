@@ -323,3 +323,15 @@
 - Readback: local HEAD, `FETCH_HEAD`, and `origin/yuxzhang/canon-zero-tim` all resolved to the implementation commit with ahead/behind `0/0` before this publication checkpoint.
 - External effects: one normal fast-forward push to `yuxzhang/canon-zero-tim`. `main` was untouched. No image publication, rendered YAML, Kubernetes apply, TPU launch, model download, or credential change occurred.
 - Next: publish this documentation-only checkpoint and verify its final remote readback. The executor must fetch that final tip and launch only fresh Native full run-id `p58f07`; Zero remains strict and deferred.
+
+## 2026-08-22 UTC — p58f07 step-0 rollout and pre-backward passed, failed on post-backward T_old_vs_T_current
+
+- Type: target execution / evidence collection
+- Evidence: `evidence/p58f07/run.log`. JobSet `canon-p58-ds4b-native-full-p58f07` ran across 128 TPU v5p chips.
+- Result:
+  - Step 0 Rollout completed all 128 SWE-bench RepoEnv sandboxes (`N_action=436,464` tokens).
+  - Pre-backward alignment passed with warnings: `[CANON_ALIGN_PRE] step=0 verdict=PASS_WITH_ALIGNMENT_WARNINGS bounds=[('S_decode_vs_S_prefill', 830053), ('S_prefill_vs_T_old', 1169723)]`. This verified that the `S_prefill_vs_T_old` policy repair in `2ac63837` worked as expected.
+  - Step 0 Rescore B completed in 26.9s. Backward gradient accumulation ran across 8 microsteps on 128 TPUs.
+  - In post-backward `alignment.check_batch()`, the trainer failed on `AlignmentGateError: alignment gate RED mode=train: ['T_old_vs_T_current', 'r_all_exactly_1']`.
+- Action: deleted JobSet to release 128 TPU chips; recorded evidence in `evidence/p58f07/run.log` and pushed to branch.
+

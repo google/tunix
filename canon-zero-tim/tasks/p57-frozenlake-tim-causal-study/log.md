@@ -284,3 +284,14 @@
 - Validation: the P57 host suite passed 105/105 with `P57_FROZENLAKE_TIM_CPU_PASS`; syntax and `git diff --check` passed. On the local v5p host, the pinned production image resolved immutable image `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`, installed all 34 overlay files, emitted `P57_STOCK_RUNTIME_MATRIX_PASS variants=5 stages=train,eval`, kept the zero and stock-drift negatives red, passed the Qwen3-8B TP8/fixed-lm-head forward+VJP probes and stock observer, and ended `P45_EXACT_IMAGE_CPU_PASS overlay=qwen8b_tp8` with exit 0. The container reported no `/dev/vfio`; no device computation or target JobSet was claimed.
 - Classification: repair is locally GREEN but unpublished and target `NOT RUN`. The four prior attempts remain immutable `INCONCLUSIVE` evidence.
 - Next: review before any commit/push. If published, rerender from the new SHA with fresh four-character IDs `n45a/n15a/i45a/i15a`, fresh campaign root `p57-native-is-b`, and `checkpoint-mode=new`; then ask separately before launch.
+
+## 2026-08-22 UTC — wave B launched: native mismatch runs committed steps; token-IS blocked on post-backward check
+
+- Type: target execution / evidence collection
+- Action: sequentially launched Wave B manifests (`n45a`, `n15a`, `i45a`, `i15a`) on 26f9f4a2.
+- Result:
+  - `P45 mismatch` (`n45a`): Step 0 and Step 1 committed (`train_steps=2`), rollout throughput ~3.3s/row.
+  - `M15 mismatch` (`n15a`): Step 0 committed (`train_steps=1`), Step 1 rollout underway (~6s/row).
+  - `P45 is` (`i45a`): Step 0 rollout and pre_backward alignment passed with warnings, but post_backward `alignment.check_batch` failed because `CANON_ENGINE_MODULE_C!=1`. Deleted JobSet and recorded evidence in `evidence/i45a_alignment_error.log`.
+- Next: peer agent to update `alignment.py` to allow `CANON_ENGINE_MODULE_C=0` in stock IS mode, then relaunch IS wave.
+
