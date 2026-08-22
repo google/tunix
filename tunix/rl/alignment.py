@@ -1421,7 +1421,7 @@ def check_batch(
   )
   p57_stock = (
       os.environ.get("CANON_P57_RUN_KIND", "") == "train"
-      and os.environ.get("CANON_P57_TIM_ARM", "") == "mismatch"
+      and os.environ.get("CANON_P57_TIM_ARM", "") in ("mismatch", "is")
       and os.environ.get("CANON_P57_INFERENCE_REGIME", "") == "stock-fast"
   )
   if p58_native or p57_stock:

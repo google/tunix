@@ -295,3 +295,11 @@
   - `P45 is` (`i45a`): Step 0 rollout and pre_backward alignment passed with warnings, but post_backward `alignment.check_batch` failed because `CANON_ENGINE_MODULE_C!=1`. Deleted JobSet and recorded evidence in `evidence/i45a_alignment_error.log`.
 - Next: peer agent to update `alignment.py` to allow `CANON_ENGINE_MODULE_C=0` in stock IS mode, then relaunch IS wave.
 
+## 2026-08-22 UTC — token-IS post-backward Module C scope repaired locally
+
+- Type: target-failure repair / post-backward admission / pinned-image validation
+- Cause: `alignment.check_batch` recognized P57 stock training only when `TIM_ARM=mismatch`. The registered `is` arm uses the identical stock-fast A/C program and also intentionally sets `CANON_ENGINE_MODULE_C=0`; its only treatment differences are trainer C as old logprob and token-TIS weights. Consequently `i45a` passed rollout, pre-backward, and backward but was rejected by a stale post-backward attestation before a completed step.
+- Action: changed the existing P57 stock predicate from equality with `mismatch` to membership in the two registered stock arms `(mismatch,is)`. Added a positive covering both arms and a negative proving an unknown arm still fails on `CANON_ENGINE_MODULE_C!=1`. Loss, sampler, forward, backward, reducer, optimizer, warning policy, and zero-arm strictness are untouched.
+- Validation: syntax and `git diff --check` passed. Host bare Python could not import the dependency-complete Tunix stack because `metrax` is absent, so it was not counted. The full pinned image ended `P45_EXACT_IMAGE_CPU_PASS overlay=qwen8b_tp8` with exit 0. A focused run in the same image passed both tests: registered arms emitted two post-backward PASS records; the unknown arm emitted a RED and was accepted only because the negative expected that exception.
+- Classification: local `CPU PASS`; repaired target path `TARGET NOT RUN`. `i45a` remains immutable `INCONCLUSIVE`; healthy native jobs remain untouched.
+- Next: review before commit/push. After publication, determine and package old `i15a` state, then render only the IS wave with fresh IDs `i45b/i15b`, fresh campaign `p57-native-is-c`, and `checkpoint-mode=new`; obtain separate launch approval.

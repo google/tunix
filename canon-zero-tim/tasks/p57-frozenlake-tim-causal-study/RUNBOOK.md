@@ -36,6 +36,8 @@ git diff --check
 
 Require terminal `P57_FROZENLAKE_TIM_CPU_PASS`,
 `P57_STOCK_RUNTIME_MATRIX_PASS variants=5 stages=train,eval`,
+`P57_STOCK_POST_BACKWARD_MODULE_C_PASS arms=mismatch,is`,
+`P57_STOCK_POST_BACKWARD_MODULE_C_NEGATIVE_PASS arm=unknown`,
 `P57_STOCK_OBSERVER_EXACT_IMAGE_PASS targets=absolute values=processed`, and
 `P45_EXACT_IMAGE_CPU_PASS overlay=qwen8b_tp8`. Local gates are construction
 evidence, not target evidence.
@@ -45,35 +47,39 @@ accepted exactly the five registered stock tuples: the historical M15
 selection discovery cell plus P45/M15-main under `mismatch` and `is`. Arbitrary
 arm/workload/split combinations remain fail-closed.
 
-## Queue now — render native/no-IS and native/token-IS
+## Queue now — recover only native/token-IS
 
-Use the approved, pushed 40-character source SHA. The output path must not
-already exist. Campaign root plus `-p45/-m15` and the rendered arm becomes the
-checkpoint namespace, so a fresh `new` rerun must use a new campaign root.
+Do not rerender or relaunch the healthy native/no-IS jobs `n45a` and `n15a`.
+They passed the repaired runtime matrix and committed training steps on
+`26f9f4a2`. The `i45a` token-IS job is immutable `INCONCLUSIVE`: it completed
+rollout, pre-backward, and backward, then a stale post-backward gate incorrectly
+required canonical Engine Module C from a stock-fast arm. The status of the old
+`i15a` identity must be checked and packaged before any replacement apply; do
+not create a duplicate while it may still be live.
+
+After the post-backward repair is reviewed, committed, and pushed, use its full
+40-character SHA. The output path must not already exist. A fresh `new` rerun
+must use a new campaign root because the campaign root becomes part of the
+checkpoint namespace.
 
 ~~~bash
 cd /home/yuxuan/code_rl_repro/worktrees/p57_frozenlake_tim_0820
-SOURCE=<approved-pushed-repair-40-character-sha>
-OUT_NATIVE=/tmp/p57-primary-native-b
-OUT_IS=/tmp/p57-primary-is-b
+SOURCE=<approved-pushed-post-backward-repair-40-character-sha>
+OUT_IS=/tmp/p57-primary-is-c
 bash canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts/render_three_arm_wave.sh \
-  native "$SOURCE" "$OUT_NATIVE" n45a n15a p57-native-is-b
-bash canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts/render_three_arm_wave.sh \
-  is "$SOURCE" "$OUT_IS" i45a i15a p57-native-is-b
+  is "$SOURCE" "$OUT_IS" i45b i15b p57-native-is-c
 ~~~
 
-The first target attempt used `p45n/m15n/p45i/m15i` and campaign root
-`p57-native-is-a`; all four are immutable `INCONCLUSIVE` evidence and must not
-be reused. Keep rerun IDs at four characters so generated Pod names remain
-within the Kubernetes 63-character limit. The repair SHA, output roots,
-run IDs, campaign root, and `checkpoint-mode=new` must all be fresh.
+The first target attempt used `p45n/m15n/p45i/m15i`; the second used
+`n45a/n15a/i45a/i15a`. Never reuse either identity set. Keep replacement IDs at
+four characters so generated Pod names remain within the Kubernetes
+63-character limit. The repair SHA, output root, run IDs, campaign root, and
+`checkpoint-mode=new` must all be fresh.
 
 For each command require two `P57_THREE_ARM_MANIFEST_PASS` lines and its
 terminal markers:
 
 ~~~text
-P57_THREE_ARM_WAVE_PASS wave=native manifests=2
-P57_THREE_ARM_RENDER_PASS wave=native ...
 P57_THREE_ARM_WAVE_PASS wave=is manifests=2
 P57_THREE_ARM_RENDER_PASS wave=is ...
 ~~~
@@ -81,8 +87,6 @@ P57_THREE_ARM_RENDER_PASS wave=is ...
 The manifests are:
 
 ~~~text
-$OUT_NATIVE/p45/jobset-p57-frozenlake-mismatch-200.yaml
-$OUT_NATIVE/m15/jobset-p57-frozenlake-mismatch-m15-main-200.yaml
 $OUT_IS/p45/jobset-p57-frozenlake-is-200.yaml
 $OUT_IS/m15/jobset-p57-frozenlake-is-m15-main-200.yaml
 ~~~
@@ -90,15 +94,15 @@ $OUT_IS/m15/jobset-p57-frozenlake-is-m15-main-200.yaml
 After separate launch approval only:
 
 ~~~bash
-kubectl apply -f "$OUT_NATIVE/p45/jobset-p57-frozenlake-mismatch-200.yaml"
-kubectl apply -f "$OUT_NATIVE/m15/jobset-p57-frozenlake-mismatch-m15-main-200.yaml"
 kubectl apply -f "$OUT_IS/p45/jobset-p57-frozenlake-is-200.yaml"
 kubectl apply -f "$OUT_IS/m15/jobset-p57-frozenlake-is-m15-main-200.yaml"
 ~~~
 
-All four may run concurrently when four independent 64-chip slices are
-available because their checkpoint tags and JobSet identities are disjoint.
-Do not launch two jobs with the same arm/workload campaign tag.
+Only apply after confirming no old `i15a` JobSet remains live and after separate
+user launch approval. The source delta relative to the native jobs is confined
+to the post-backward observer attestation: the `mismatch` truth value is
+unchanged, and no loss, sampler, forward, backward, reducer, or optimizer
+semantics changed.
 
 ## Deferred Zero-TIM wave
 

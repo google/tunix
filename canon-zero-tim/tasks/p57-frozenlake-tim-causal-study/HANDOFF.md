@@ -24,12 +24,16 @@ Read in order: `state.md` → `plan.md` →
 - The first four-job attempt (`p45n/m15n/p45i/m15i`) is `INCONCLUSIVE`: all
   256 chips provisioned, but a stale discovery-only Python validator rejected
   every job before step 0. This is not training or TPU numerical evidence.
-- The repair replaces that single hardcoded tuple with a closed five-tuple
-  registry. It is locally exact-image certified but is not target-certified
-  until a published immutable repair SHA passes the gates below. Do not render
-  from a dirty or unpushed tree.
+- The closed five-tuple registry repair is target-proven: `n45a` committed two
+  steps and `n15a` committed one step before continuing rollout. Do not rerun or
+  disturb these native/no-IS jobs.
+- `i45a` is `INCONCLUSIVE`. It passed rollout, pre-backward warning handling,
+  arm purity, and backward, then failed in post-backward because the shared
+  alignment gate recognized only stock `mismatch`, not stock `is`, when
+  `CANON_ENGINE_MODULE_C=0`. The repair is exact-image certified; its repaired
+  target path remains `TARGET NOT RUN` until a replacement IS job commits.
 
-## Operator procedure for the four native-program jobs
+## Operator procedure for the two token-IS recovery jobs
 
 1. Confirm the user supplied an approved, pushed, full 40-character SHA.
 2. In that exact checkout, run:
@@ -42,39 +46,38 @@ git diff --check
 
 Require the exact-image marker
 `P57_STOCK_RUNTIME_MATRIX_PASS variants=5 stages=train,eval` in addition to
-the terminal P57/P45 PASS markers. Missing this marker means the repair was not
-tested and launch is forbidden.
+`P57_STOCK_POST_BACKWARD_MODULE_C_PASS arms=mismatch,is`, its unknown-arm
+negative, and the terminal P57/P45 PASS markers. Missing a marker forbids
+launch.
 
-3. Render all four manifests with no hand edits:
+3. Confirm and package the status of old `i15a`; never overlap a replacement
+   with a possibly live JobSet. Then render only the two IS manifests with no
+   hand edits:
 
 ~~~bash
-SOURCE=<approved-pushed-repair-40-character-sha>
-OUT_NATIVE=/tmp/p57-primary-native-b
-OUT_IS=/tmp/p57-primary-is-b
+SOURCE=<approved-pushed-post-backward-repair-40-character-sha>
+OUT_IS=/tmp/p57-primary-is-c
 bash canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts/render_three_arm_wave.sh \
-  native "$SOURCE" "$OUT_NATIVE" n45a n15a p57-native-is-b
-bash canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts/render_three_arm_wave.sh \
-  is "$SOURCE" "$OUT_IS" i45a i15a p57-native-is-b
+  is "$SOURCE" "$OUT_IS" i45b i15b p57-native-is-c
 ~~~
 
-Do not reuse the failed attempt's run IDs, output directories, or
-`p57-native-is-a` campaign root. Four-character replacement IDs are deliberate:
-longer examples have already exceeded generated Pod-name limits. Both waves
-must remain `checkpoint-mode=new`; there is no step-0 checkpoint to resume.
+Do not reuse any earlier run ID, output directory, or campaign root.
+Four-character replacement IDs are deliberate: longer examples exceeded
+generated Pod-name limits. Both replacements remain `checkpoint-mode=new`;
+there is no valid IS step-0 checkpoint to resume.
 
-4. Stop unless each renderer reports two manifest passes plus its terminal wave
-   and render PASS markers. Record all four YAML SHA-256 values.
+4. Stop unless the renderer reports two manifest passes plus its terminal wave
+   and render PASS markers. Record both YAML SHA-256 values.
 5. Ask for explicit launch approval. Only after approval:
 
 ~~~bash
-kubectl apply -f "$OUT_NATIVE/p45/jobset-p57-frozenlake-mismatch-200.yaml"
-kubectl apply -f "$OUT_NATIVE/m15/jobset-p57-frozenlake-mismatch-m15-main-200.yaml"
 kubectl apply -f "$OUT_IS/p45/jobset-p57-frozenlake-is-200.yaml"
 kubectl apply -f "$OUT_IS/m15/jobset-p57-frozenlake-is-m15-main-200.yaml"
 ~~~
 
-6. Monitor all four independently. Do not cancel healthy jobs because another
-   fails. Do not modify the campaign tag and relaunch automatically.
+6. Monitor the two replacement IS jobs independently. Leave the healthy native
+   jobs untouched; do not cancel one IS job because the other fails. Do not
+   modify the campaign tag and relaunch automatically.
 7. Package every success or failure with `scripts/package_run.sh`; preserve the
    raw log from byte zero and the resolved environment.
 

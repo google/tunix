@@ -17,6 +17,12 @@
   still hardcoded the older `(mismatch,m15,selection)` discovery cell. The
   repair must admit only the five preregistered stock tuples and reject every
   unregistered arm/workload/split combination.
+- Confirmed: the matrix repair moved native jobs into committed training, but
+  exposed a second stale inner guard in post-backward alignment. Stock
+  `mismatch` and stock `is` both intentionally run without canonical Engine
+  Module C; only the former was exempted. `i45a` is `INCONCLUSIVE`, while its
+  successful pre-backward and backward evidence narrows the repair to this
+  post-backward attestation.
 - Decision: test three treatments independently on both workloads:
 
 | Runtime arm | Numerical program | Sampler correction | Old denominator | TIS weights |
@@ -71,7 +77,9 @@ checkpoint tags. A healthy run is not intentionally paused; checkpoints every
   zero-TIM bundle off; zero cells attest the registered canonical bundle; the
   opposite sampler mode and wrong workload horizon are rejected. The pinned
   image must emit
-  `P57_STOCK_RUNTIME_MATRIX_PASS variants=5 stages=train,eval`.
+  `P57_STOCK_RUNTIME_MATRIX_PASS variants=5 stages=train,eval`,
+  `P57_STOCK_POST_BACKWARD_MODULE_C_PASS arms=mismatch,is`, and the
+  unknown-arm negative marker.
 - Target pass for the current four-job queue: all four full horizons complete;
   the two `mismatch` jobs have exactly one no-IS purity receipt and the two `is`
   jobs have exactly one token-IS purity receipt. All four attest the stock-fast

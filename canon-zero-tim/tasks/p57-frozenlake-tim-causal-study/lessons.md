@@ -26,6 +26,11 @@
   Store cross-layer geometry in one imported registry value and make the host
   gate inspect the actual entrypoint wiring; otherwise both outer gates can
   agree while a stale inner assertion rejects the target command.
+- Adding a treatment arm requires exercising every phase-local admission guard,
+  not only renderer, profile, and entrypoint validation. A new arm can pass
+  pre-backward and backward yet still hit a post-backward guard that copied the
+  old arm set; require a dependency-complete test through `check_batch` for
+  every registered arm and a negative for an unregistered arm.
 - An untreated mismatch arm cannot retain a TIM-aware stabilizer. Token
   sampler IS both replaces rollout A with trainer C as the old-policy source
   and adds detached mismatch-dependent weights, so it changes the treatment

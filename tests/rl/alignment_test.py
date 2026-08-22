@@ -881,6 +881,87 @@ class AlignmentTest(absltest.TestCase):
     ):
       alignment.check_pre_backward(wrapped, step=0)
 
+  def test_p57_stock_arms_do_not_require_canonical_engine_module(self):
+    wrapped = self._wrapped()
+    common = {
+        alignment.GATE_ONLY_ENV: "0",
+        alignment.UPDATE_CANARY_ENV: "0",
+        alignment.TRAIN_ENV: "1",
+        alignment.PRE_GATE_ENV: "1",
+        alignment.GSM8K_AB_REPORT_ONLY_ENV: "0",
+        alignment.GSM8K_ALIGNMENT_WARN_ONLY_ENV: "0",
+        alignment.FROZENLAKE_ALIGNMENT_WARN_ONLY_ENV: "1",
+        canonical_forward.ENV: "0",
+        "CANON_P32_WORKLOAD": "frozenlake-dp8-tp8",
+        "CANON_P33_RUN_STAGE": "full",
+        "CANON_P33_NO_COMMIT": "0",
+        "CANON_P57_RUN_KIND": "train",
+        "CANON_P57_INFERENCE_REGIME": "stock-fast",
+    }
+    for arm in ("mismatch", "is"):
+      with self.subTest(arm=arm), tempfile.TemporaryDirectory() as tmpdir:
+        values = {
+            **common,
+            "CANON_P57_TIM_ARM": arm,
+            alignment.REPORT_ENV: os.path.join(tmpdir, "post.jsonl"),
+        }
+        with mock.patch.dict(os.environ, values, clear=False):
+          record = alignment.check_batch(
+              wrapped,
+              t_current=wrapped.t_old.copy(),
+              gradient_norm=np.asarray(1.0, np.float32),
+              optimizer_skipped=np.asarray(0, np.int32),
+              step=0,
+          )
+      self.assertEmpty(record["blocking_reds"])
+      self.assertEqual(
+          record["context"]["canonical_c"],
+          {
+              "mode": "native-stock-trainer",
+              "canonical_engine_registered": False,
+          },
+      )
+    print(
+        "P57_STOCK_POST_BACKWARD_MODULE_C_PASS arms=mismatch,is",
+        flush=True,
+    )
+
+  def test_p57_unregistered_arm_cannot_bypass_canonical_engine_module(self):
+    wrapped = self._wrapped()
+    with tempfile.TemporaryDirectory() as tmpdir, mock.patch.dict(
+        os.environ,
+        {
+            alignment.GATE_ONLY_ENV: "0",
+            alignment.UPDATE_CANARY_ENV: "0",
+            alignment.TRAIN_ENV: "1",
+            alignment.GSM8K_AB_REPORT_ONLY_ENV: "0",
+            alignment.GSM8K_ALIGNMENT_WARN_ONLY_ENV: "0",
+            alignment.FROZENLAKE_ALIGNMENT_WARN_ONLY_ENV: "1",
+            canonical_forward.ENV: "0",
+            "CANON_P32_WORKLOAD": "frozenlake-dp8-tp8",
+            "CANON_P33_RUN_STAGE": "full",
+            "CANON_P33_NO_COMMIT": "0",
+            "CANON_P57_RUN_KIND": "train",
+            "CANON_P57_TIM_ARM": "unknown",
+            "CANON_P57_INFERENCE_REGIME": "stock-fast",
+            alignment.REPORT_ENV: os.path.join(tmpdir, "post.jsonl"),
+        },
+        clear=False,
+    ), self.assertRaisesRegex(
+        alignment.AlignmentGateError, "CANON_ENGINE_MODULE_C!=1"
+    ):
+      alignment.check_batch(
+          wrapped,
+          t_current=wrapped.t_old.copy(),
+          gradient_norm=np.asarray(1.0, np.float32),
+          optimizer_skipped=np.asarray(0, np.int32),
+          step=0,
+      )
+    print(
+        "P57_STOCK_POST_BACKWARD_MODULE_C_NEGATIVE_PASS arm=unknown",
+        flush=True,
+    )
+
   def test_deepswe_full_warning_policy_continues_finite_bc_only(self):
     wrapped = self._wrapped().replace(
         s_decode=self._wrapped().s_decode - np.float32(0.5),
