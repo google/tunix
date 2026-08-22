@@ -424,3 +424,12 @@
 - Claim ceiling: these tests prove manifest construction and host-side trajectory semantics in the pinned dependency image. They do not prove Kubernetes anti-affinity placement, Pathways runtime, a durable 128-row target journal, trainer forward/backward, or an optimizer commit. Only fresh p58f10 can cross those boundaries.
 - External effects: local rendering/tests/documentation only. No commit, push, image publication, Kubernetes apply, TPU launch, model download, credential change, or `main` mutation occurred.
 - Next: await separate explicit commit/push approval. After publication/readback, launch only fresh Native full p58f10. Zero remains deferred.
+
+## 2026-08-22 UTC — p58f09 placement and trajectory-input repair published
+
+- Type: publication evidence.
+- Action: after explicit user approval, committed the `cpu-np` fail-closed contract, required Pathways-head hostname anti-affinity, reset-timeout original-input fallback, positive/negative regressions, and reconciled runbook/handoff/phase records. The pre-push fetch proved the operator branch had not advanced; the push was normal and non-force.
+- Published implementation commit: `678bc5cfbcec386fd655e6685365c937e826d547`.
+- Readback: local HEAD, `FETCH_HEAD`, and `origin/yuxzhang/canon-zero-tim` all resolved to the implementation commit with ahead/behind `0/0` before this publication checkpoint.
+- External effects: one normal fast-forward push to `yuxzhang/canon-zero-tim`. `main` was untouched. No image publication, rendered YAML apply, Kubernetes object, TPU launch, model download, credential change, or evidence deletion occurred.
+- Next: publish this documentation-only checkpoint and verify its final remote readback. The executor must fetch that final tip and launch only fresh Native full run-id `p58f10`; Zero remains strict and deferred.

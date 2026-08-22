@@ -158,7 +158,7 @@ collector repair preserves the agent task when present, otherwise uses the
 environment task, and fails closed if neither is a dictionary. Timeout/context
 rows retain their compact status and zero policy mask; they are not removed or
 resampled. No training or numerical parameter changed. Use fresh full-stage
-run-id `p58f10` after publication/readback; never reuse p58f08 or p58f09
+run-id `p58f10` after fetching/readback of the final published tip; never reuse p58f08 or p58f09
 YAML/root. Neither has optimizer state to resume.
 
 The direct-entrypoint implementation commit is

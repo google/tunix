@@ -25,9 +25,11 @@ observer gate. The correction was published as
 `81622977bf15393798c671e578ee059d1268e78b`; its first readback matched local
 HEAD, `FETCH_HEAD`, and `origin/yuxzhang/canon-zero-tim` with ahead/behind
 `0/0`. This documentation checkpoint advances the branch once more, so the
-executor must fetch and exactly read back the final operator tip after the
-local p58f09 repair is separately approved and published. The next run id is
-fresh `p58f10`.
+executor must fetch and exactly read back the final operator tip. The p58f09
+repair was published as `678bc5cfbcec386fd655e6685365c937e826d547`; its
+first readback matched local HEAD, `FETCH_HEAD`, and the remote-tracking branch
+with ahead/behind `0/0`. This publication checkpoint advances the branch once
+more. The next run id is fresh `p58f10`.
 
 The user previously waived P58.3 and the separate three-update stop, then chose
 the native 128-chip full 1,000-update stage. That historical phase remains
@@ -312,8 +314,9 @@ training state. After separate publication/readback, use fresh Native
 `p58f10`. Zero remains deferred.
 
 Never modify or push `main`. The publication target is exclusively
-`yuxzhang/canon-zero-tim`; the current p58f09 repair remains local until the
-user separately authorizes commit and push.
+`yuxzhang/canon-zero-tim`; the p58f09 repair is published there as
+`678bc5cfbcec386fd655e6685365c937e826d547`. Always fetch the later final
+documentation tip before rendering.
 
 ## What was implemented
 

@@ -96,15 +96,15 @@ reset-deadline rows had terminated before first observation, leaving
 `agent.trajectory.task=None`; learner `merge_micro_batches()` dereferenced that
 value as a mapping.
 
-The local repair therefore preserves head and TPU-worker host networking,
+The published implementation repair therefore preserves head and TPU-worker host networking,
 adds required hostname-level anti-affinity over every JobSet `pathways-head`
 replicated-job Pod, and validates the exact JobSet DNS/RM route. The collector
 falls back to the environment's original task only when the agent never
 observed one, and fails closed if neither source is a dictionary. Admitted
 compact rows remain journaled with zero policy masks; no row is dropped or
 resampled. No model, data, numerical, topology, deadline, optimizer, or
-Native/Zero flag changed. After publication/readback the next attempt is
-`p58f10`.
+Native/Zero flag changed. After fetching and reading back the final published
+operator tip, the next attempt is `p58f10`.
 
 ## Frozen shared recipe
 
