@@ -303,3 +303,36 @@
 - Validation: syntax and `git diff --check` passed. Host bare Python could not import the dependency-complete Tunix stack because `metrax` is absent, so it was not counted. The full pinned image ended `P45_EXACT_IMAGE_CPU_PASS overlay=qwen8b_tp8` with exit 0. A focused run in the same image passed both tests: registered arms emitted two post-backward PASS records; the unknown arm emitted a RED and was accepted only because the negative expected that exception.
 - Classification: local `CPU PASS`; repaired target path `TARGET NOT RUN`. `i45a` remains immutable `INCONCLUSIVE`; healthy native jobs remain untouched.
 - Next: review before commit/push. After publication, determine and package old `i15a` state, then render only the IS wave with fresh IDs `i45b/i15b`, fresh campaign `p57-native-is-c`, and `checkpoint-mode=new`; obtain separate launch approval.
+
+## 2026-08-22 UTC — paired-arm horizon restored to 450 updates
+
+- Type: user decision / horizon-contract supersession / local validation
+- Decision: the four immediate P45/M15 native-no-IS and native-token-IS jobs must restart from initialization and run 450 updates. The prior 200-update jobs are preserved as immutable partial evidence but are not resumed into the new causal comparison. The deferred zero-TIM cells must also use 450 when separately authorized so horizon remains controlled across all six cells. Historical M15 selection discovery remains a separate 200-update contract.
+- Action: separated `_STOCK_DISCOVERY_UPDATES=200` from `_PAIRED_ARM_UPDATES=450`; updated the profile's train/eval tuple gate and stock runtime attestation so only M15 selection admits 200 while P45/M15-main admit 450; changed the two-workload wave renderer and verifier to 450; replaced the old P45-450 rejection with a paired-200 rejection; synchronized the plan, active phase, future campaign/analysis phases, runbook, handoff, state, and thread row.
+- Invariants: batch remains 32 prompts x eight generations, DP8xTP8, AdamW 1e-6, GSPO-token/RLOO, temperature 0.7, resident optimizer, checkpoint every 10 with LatestN(1), and in-process evaluation off. No precision, model, loss, sampler, ratio clipping, backward, reducer, or optimizer semantics changed.
+- Validation: `bash canon-zero-tim/tests/p57_frozenlake_tim/run_cpu.sh` passed 105/105 with `P57_FROZENLAKE_TIM_CPU_PASS`. The pinned exact-image gate installed and verified all 34 Qwen3-8B TP8 overlay files and exited 0. Fresh local `native` and `is` wave renders each emitted two `P57_THREE_ARM_MANIFEST_PASS` markers plus wave/render PASS; the four outputs were exactly the P45/M15-main mismatch/is `*-450.yaml` manifests. The resolved-env contract rejected the stale 200 paired horizon while retaining the 200-step stock-discovery tests.
+- Claim boundary: this proves construction and pinned-image compatibility only. No 450-update target JobSet has run. The local manifests embed the current committed base SHA for gate purposes and must be rerendered from the eventual approved published SHA; their hashes are not launch artifacts.
+- Next: review the local diff. Commit and push only after separate user approval. Then render both waves with fresh four-character IDs and checkpoint namespaces, record four manifest hashes, and request separate launch approval.
+
+## 2026-08-22 UTC — 450 horizon retained; isolated evaluation fixed to every 50 updates
+
+- Type: user decision / checkpoint-retention contract / evaluation orchestration
+- Decision: keep every paired treatment at 450 updates and evaluate held-out solve at `0,50,100,150,200,250,300,350,400,450`. Training must remain uninterrupted and must not re-enable in-process evaluation.
+- Cause addressed: `LatestN(1)` alone deletes old checkpoints, and the trainer historically restores latest when no exact step is supplied. Rendering ten post-hoc evals without fixing both behaviors would either find missing steps or silently restore 450 for an earlier point.
+- Action: added P57-only `LatestN(1) OR EveryNSteps(50)` preservation while keeping saves every 10; added an optional exact restore step to the trainer and wired isolated evaluation to it; restricted paired eval rendering to retained 50-step milestones; extended the 450 stop-boundary gate through 250/300/350/400/450; added a 20-manifest two-workload schedule renderer/verifier per arm; hardened profile/resolved-env/checkpoint provenance gates; updated the plan, active/future phases, runbook, handoff, state, and thread ledger.
+- Evaluation order: render everything from one immutable SHA; run eval-0 before training while its namespace is empty; run the 450-step train without pauses; after durable close, evaluate retained positive milestones. Milestone deletion is not automatic and requires separate approval after evidence packaging.
+- Validation: Python and shell syntax passed; the full P57 host suite passed
+  119/119 with `P57_FROZENLAKE_TIM_CPU_PASS`; native and IS train waves each
+  passed both manifest preflights; a native eval schedule rendered 20
+  manifests and ended `P57_EVAL_SCHEDULE_PASS ...
+  steps=0,50,100,150,200,250,300,350,400,450` plus
+  `P57_EVAL_RENDER_PASS`. The pinned production-image gate installed all 34
+  Qwen3-8B TP8 overlay files, passed the five-tuple stock train/eval matrix,
+  fixed-head forward/VJP and observer gates, and ended
+  `P45_EXACT_IMAGE_CPU_PASS overlay=qwen8b_tp8` with exit 0.
+- Claim boundary: construction evidence only; no target evaluation or 450-update train has run. No training mathematics or numerical kernel changed.
+- Storage review: the actor is full-parameter FP32 and checkpoints include
+  optimizer state. `LatestN(1)` still limits ordinary recovery generations,
+  but the nine additional 50-step evidence milestones can approach one
+  terabyte per arm. The runbook/handoff now require explicit GCS quota/cost
+  acceptance before launch and separate approval before post-analysis cleanup.

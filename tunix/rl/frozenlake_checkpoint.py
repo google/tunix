@@ -33,6 +33,7 @@ _ENV_KEYS = (
     "CANON_FROZENLAKE_CKPT_TAG",
     "CANON_FROZENLAKE_CKPT_INTERVAL",
     "CANON_FROZENLAKE_CKPT_MAX_TO_KEEP",
+    "CANON_FROZENLAKE_CKPT_MILESTONE_INTERVAL",
 )
 P57_STOCK_SYNC_RECEIPT = {
     "completed": True,
@@ -50,6 +51,7 @@ class Config:
   tag: str = ""
   interval: int = 0
   max_to_keep: int = 0
+  milestone_interval: int = 0
 
   @property
   def enabled(self) -> bool:
@@ -129,12 +131,36 @@ def from_env(env: Mapping[str, str]) -> Config:
   try:
     interval = int(env.get("CANON_FROZENLAKE_CKPT_INTERVAL", ""))
     max_to_keep = int(env.get("CANON_FROZENLAKE_CKPT_MAX_TO_KEEP", ""))
+    milestone_interval = int(
+        env.get("CANON_FROZENLAKE_CKPT_MILESTONE_INTERVAL", "0") or "0"
+    )
   except ValueError as exc:
     raise ValueError("FrozenLake checkpoint bounds must be integers") from exc
   if interval != 10:
     raise ValueError("P45 checkpoint interval must be exactly 10 updates")
   if max_to_keep != 1:
     raise ValueError("P45 checkpoint retention must be exactly one")
+  if milestone_interval not in (0, 50):
+    raise ValueError(
+        "FrozenLake checkpoint milestone interval must be disabled or 50"
+    )
+  if milestone_interval:
+    try:
+      expected_updates = int(env.get("CANON_P57_EXPECTED_UPDATES", ""))
+    except ValueError as exc:
+      raise ValueError(
+          "P57 checkpoint milestones require an integer signed horizon"
+      ) from exc
+    if (
+        env.get("CANON_P57_RUN_KIND", "") not in ("train", "eval")
+        or env.get("CANON_P57_TIM_ARM", "")
+        not in ("zero", "mismatch", "is")
+        or expected_updates != 450
+    ):
+      raise ValueError(
+          "50-step checkpoint milestones are isolated to the registered "
+          "P57 450-update train/eval arms"
+      )
   if env.get("ENABLE_PATHWAYS_PERSISTENCE", "") != "1":
     raise ValueError("P45 checkpointing requires Pathways persistence")
   return Config(
@@ -143,6 +169,7 @@ def from_env(env: Mapping[str, str]) -> Config:
       tag=tag,
       interval=interval,
       max_to_keep=max_to_keep,
+      milestone_interval=milestone_interval,
   )
 
 
@@ -178,9 +205,32 @@ def build_contract(config: Config, values: Mapping[str, Any]) -> dict[str, Any]:
       "checkpoint_max_to_keep": config.max_to_keep,
       **dict(values),
   }
+  # Keep the historical P45 contract byte-for-byte when milestone retention
+  # is disabled, so pre-P57 checkpoints remain resumable.
+  if config.milestone_interval:
+    contract["checkpoint_milestone_interval"] = config.milestone_interval
   # Checkpoint custom metadata must remain portable JSON. Round-tripping also
   # rejects arrays and other objects whose equality would be ambiguous.
   return json.loads(json.dumps(contract, sort_keys=True))
+
+
+def build_preservation_policy(config: Config) -> Any:
+  """Keeps one rolling recovery point plus registered P57 milestones."""
+  if not config.enabled:
+    raise ValueError("cannot build preservation policy for disabled checkpoints")
+  # Import lazily so the pure checkpoint-contract tests remain lightweight.
+  from orbax.checkpoint import v1 as ocp  # pylint: disable=g-import-not-at-top
+
+  latest = ocp.training.preservation_policies.LatestN(config.max_to_keep)
+  if not config.milestone_interval:
+    return latest
+  milestones = ocp.training.preservation_policies.EveryNSteps(
+      config.milestone_interval,
+      exact_interval=True,
+  )
+  return ocp.training.preservation_policies.AnyPreservationPolicy(
+      (latest, milestones)
+  )
 
 
 def contract_json(contract: Mapping[str, Any]) -> str:
@@ -291,6 +341,8 @@ def validate_p57_evaluation_restored(
       "schema": SCHEMA,
       "checkpoint_root": config.root,
       "checkpoint_tag": config.tag,
+      "checkpoint_interval": config.interval,
+      "checkpoint_max_to_keep": config.max_to_keep,
       "source_commit": env.get("CANON_EXPECT_COMMIT", ""),
       "profile": "qwen3-8b-dp8-tp8-frozenlake-tim",
       "workload": "frozenlake-dp8-tp8",
@@ -306,6 +358,8 @@ def validate_p57_evaluation_restored(
       "p57_data_split": env.get("CANON_P57_DATA_SPLIT", ""),
       "eval_enabled": False,
   }
+  if config.milestone_interval:
+    required["checkpoint_milestone_interval"] = config.milestone_interval
   wrong = {
       key: contract.get(key)
       for key, expected in required.items()

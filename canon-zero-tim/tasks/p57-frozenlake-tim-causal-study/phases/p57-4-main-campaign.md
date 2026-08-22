@@ -9,9 +9,10 @@ Measure capability, stability, and cost under the frozen causal contract.
 - Arms: zero TIM and finite TIM.
 - Paired seeds: 42, 43, and 44; identical seed/order/checkpoint pairing across
   arms.
-- Primary horizon: 200 updates.
+- Primary horizon: 450 updates.
 - Checkpoints: every 10 updates.
-- Isolated held-out evaluations: updates 0, 20, 50, 100, 150, and 200.
+- Isolated held-out evaluations: updates 0, 50, 100, 150, 200, 250, 300, 350,
+  400, and 450.
 - Evaluation contract: immutable held-out maps, deterministic greedy decoding
   (`temperature=0`), eight identical-policy generations per map (the minimum
   global row count divisible by the DP8 trainer-rescore axis), fixed map order,
@@ -20,13 +21,10 @@ Measure capability, stability, and cost under the frozen causal contract.
   treated as independent samples.
 - Each expensive arm launch requires explicit user approval.
 
-## Continuation rule
+## Horizon rule
 
-A 450-update extension is permitted only if, before inspecting the arm gap, at
-least one arm improves by more than one percentage point from update 150 to
-200 and no invalidating gate fires. The rule uses learning slope, not the sign
-or magnitude of the treatment effect. Extension still requires user approval
-and applies symmetrically to both arms and every seed.
+The 450-update horizon is fixed before inspecting the final arm gap. Do not
+stop the apparently losing arm early and do not extend only one treatment.
 
 ## Run receipts
 
@@ -46,7 +44,7 @@ attempt, not a continuation of the original seed.
 
 ## Exit gate
 
-All six primary runs complete through update 200 with valid paired receipts and
+All six primary runs complete through update 450 with valid paired receipts and
 the registered isolated evaluations, or the phase records an explicit invalid
 or inconclusive terminal state.
 

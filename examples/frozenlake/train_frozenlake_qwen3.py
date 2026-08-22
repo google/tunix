@@ -708,7 +708,8 @@ if CANON_P57_RUN_KIND:
     except ValueError as exc:
       raise ValueError("P57 segment stop must be an integer") from exc
     if (
-        P57_STOP_AFTER_STEP not in (50, 100, 150, 200)
+        P57_STOP_AFTER_STEP
+        not in (50, 100, 150, 200, 250, 300, 350, 400, 450)
         or P57_STOP_AFTER_STEP > MAX_STEPS
     ):
       raise ValueError(
@@ -908,8 +909,8 @@ if CKPT_DIR:
               SAVE_INTERVAL_STEPS
           )
       ),
-      preservation_policy=ocp.training.preservation_policies.LatestN(
-          MAX_TO_KEEP
+      preservation_policy=frozenlake_checkpoint.build_preservation_policy(
+          P45_CHECKPOINT
       ),
       save_on_close=False,
   )
@@ -926,7 +927,8 @@ if CKPT_DIR:
       "[P45.CHECKPOINT] PREFLIGHT "
       f"mode={P45_CHECKPOINT.mode} root={CKPT_DIR} "
       f"latest={latest_checkpoint_step if latest_checkpoint_step is not None else 'none'} "
-      f"interval={SAVE_INTERVAL_STEPS} max_to_keep={MAX_TO_KEEP}",
+      f"interval={SAVE_INTERVAL_STEPS} max_to_keep={MAX_TO_KEEP} "
+      f"milestone_interval={P45_CHECKPOINT.milestone_interval}",
       flush=True,
   )
 else:
@@ -1365,6 +1367,12 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         metrics_logging_options=metrics_logging_options,
         checkpoint_root_directory=CKPT_DIR,
         checkpointing_options=checkpointing_options,
+        checkpoint_restore_step=(
+            int(os.environ["CANON_P57_EVAL_CHECKPOINT_STEP"])
+            if CANON_P57_EVALUATION
+            and int(os.environ["CANON_P57_EVAL_CHECKPOINT_STEP"]) > 0
+            else None
+        ),
         precomputed_gradient_checkpointing_contract=(
             frozenlake_checkpoint.SCHEMA if P45_CHECKPOINT.enabled else None
         ),

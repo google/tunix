@@ -307,6 +307,7 @@ class P57RendererTest(unittest.TestCase):
     for stock_only, expected_count in ((True, 1), (False, 2)):
       with self.subTest(stock_only=stock_only), tempfile.TemporaryDirectory() as tmp:
         data_split = "selection" if stock_only else "main"
+        expected_updates = 200 if stock_only else 450
         paths = paired.render_all(
             base_path=BASE,
             output_dir=Path(tmp),
@@ -314,7 +315,7 @@ class P57RendererTest(unittest.TestCase):
             run_id="p57main",
             campaign_tag="p57-m15-main",
             checkpoint_mode="new",
-            expected_updates=200,
+            expected_updates=expected_updates,
             workload_candidate="m15",
             data_split=data_split,
             stock_only=stock_only,
@@ -339,7 +340,9 @@ class P57RendererTest(unittest.TestCase):
           self.assertEqual(
               env["CANON_RUN_CMD"].split().count("--sampler_is=none"), 1
           )
-          self.assertEqual(env["CANON_P57_STOP_AFTER_STEP"], "200")
+          self.assertEqual(
+              env["CANON_P57_STOP_AFTER_STEP"], str(expected_updates)
+          )
           if stock_only:
             self.assertEqual(env["CANON_P57_INFERENCE_REGIME"], "stock-fast")
 
@@ -460,8 +463,8 @@ class P57RendererTest(unittest.TestCase):
 
   def test_two_workloads_render_all_three_registered_treatments(self):
     workloads = (
-        ("p45", "", "", 200, 5, 2048),
-        ("m15", "m15", "main", 200, 15, 8192),
+        ("p45", "", "", 450, 5, 2048),
+        ("m15", "m15", "main", 450, 15, 8192),
     )
     arms = (
         ("mismatch", "none", "stock-fast", "0", "1"),
@@ -502,6 +505,9 @@ class P57RendererTest(unittest.TestCase):
                 env["CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY"], warning_only
             )
             self.assertEqual(env["CANON_P57_STOP_AFTER_STEP"], str(updates))
+            self.assertEqual(
+                env["CANON_FROZENLAKE_CKPT_MILESTONE_INTERVAL"], "50"
+            )
             preflight = _run_env_preflight(
                 env, root / f"state-{workload}-{arm}"
             )
@@ -512,19 +518,66 @@ class P57RendererTest(unittest.TestCase):
                   preflight.stdout,
               )
 
-  def test_original_p45_rejects_historical_450_step_horizon(self):
+  def test_paired_arms_reject_superseded_200_step_horizon(self):
+    workloads = (
+        ("p45", "", "", "P45 workload is frozen to 450 updates"),
+        ("m15", "m15", "main", "M15 workload is frozen to 450 updates"),
+    )
+    for workload, candidate, split, message in workloads:
+      with (
+          self.subTest(workload=workload),
+          tempfile.TemporaryDirectory() as tmp,
+          self.assertRaisesRegex(ValueError, message),
+      ):
+        paired.render_all(
+            base_path=BASE,
+            output_dir=Path(tmp),
+            source_commit="a" * 40,
+            run_id=f"p57{workload}short",
+            campaign_tag=f"p57-{workload}-short-horizon",
+            checkpoint_mode="new",
+            expected_updates=200,
+            run_kind="train",
+            workload_candidate=candidate,
+            data_split=split,
+            arm="mismatch",
+        )
+
+  def test_paired_eval_renders_every_fifty_and_rejects_unretained_step(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      path = paired.render_all(
+          base_path=BASE,
+          output_dir=Path(tmp) / "eval-250",
+          source_commit="a" * 40,
+          run_id="p57eval250",
+          campaign_tag="p57-native-450-a-p45",
+          checkpoint_mode="resume",
+          expected_updates=450,
+          run_kind="eval",
+          checkpoint_step=250,
+          arm="mismatch",
+      )[0]
+      env = _env(yaml.safe_load(path.read_text()))
+      preflight = _run_env_preflight(env, Path(tmp) / "state")
+    self.assertEqual(env["CANON_P57_EVAL_CHECKPOINT_STEP"], "250")
+    self.assertEqual(env["CANON_FROZENLAKE_CKPT_MILESTONE_INTERVAL"], "50")
+    self.assertIn("--evaluation_only", env["CANON_RUN_CMD"])
+    self.assertIn("--temperature=0", env["CANON_RUN_CMD"])
+    self.assertEqual(preflight.returncode, 0, preflight.stderr)
+
     with tempfile.TemporaryDirectory() as tmp, self.assertRaisesRegex(
-        ValueError, "P45 workload is frozen to 200 updates"
+        ValueError, "retained milestone"
     ):
       paired.render_all(
           base_path=BASE,
           output_dir=Path(tmp),
           source_commit="a" * 40,
-          run_id="p57p45old",
-          campaign_tag="p57-p45-old-horizon",
-          checkpoint_mode="new",
+          run_id="p57eval240",
+          campaign_tag="p57-native-450-a-p45",
+          checkpoint_mode="resume",
           expected_updates=450,
-          run_kind="train",
+          run_kind="eval",
+          checkpoint_step=240,
           arm="mismatch",
       )
 

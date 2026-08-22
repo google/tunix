@@ -160,6 +160,13 @@ _P57_STOCK_RUNTIME_VARIANTS = {
     ("mismatch", "m15", "main"): "m15-main-mismatch",
     ("is", "m15", "main"): "m15-main-is",
 }
+_P57_STOCK_RUNTIME_UPDATES = {
+    "m15-selection-mismatch": "200",
+    "p45-mismatch": "450",
+    "p45-is": "450",
+    "m15-main-mismatch": "450",
+    "m15-main-is": "450",
+}
 
 
 def _p57_stock_runtime_variant(
@@ -851,7 +858,7 @@ def validate_p57_stock_train_environment(
   expected = {
       "CANON_P57_RUN_KIND": "train",
       "CANON_P57_INFERENCE_REGIME": "stock-fast",
-      "CANON_P57_EXPECTED_UPDATES": "200",
+      "CANON_P57_EXPECTED_UPDATES": _P57_STOCK_RUNTIME_UPDATES[variant],
       "CANON_P32_WORKLOAD": workload.name,
       "CANON_DP_SIZE": str(workload.dp_size),
       "CANON_TP_SIZE": str(workload.tp_size),
@@ -919,7 +926,7 @@ def validate_p57_stock_eval_environment(
   expected = {
       "CANON_P57_RUN_KIND": "eval",
       "CANON_P57_INFERENCE_REGIME": "stock-fast",
-      "CANON_P57_EXPECTED_UPDATES": "200",
+      "CANON_P57_EXPECTED_UPDATES": _P57_STOCK_RUNTIME_UPDATES[variant],
       "CANON_P32_WORKLOAD": workload.name,
       "CANON_DP_SIZE": str(workload.dp_size),
       "CANON_TP_SIZE": str(workload.tp_size),

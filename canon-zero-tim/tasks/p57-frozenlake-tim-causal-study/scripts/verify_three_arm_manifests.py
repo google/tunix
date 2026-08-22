@@ -19,8 +19,8 @@ ARMS = {
     "zero": ("zero", "none", "", "1", "0"),
 }
 WORKLOADS = {
-    "p45": (200, 5, 2048, "", ""),
-    "m15": (200, 15, 8192, "m15", "main"),
+    "p45": (450, 5, 2048, "", ""),
+    "m15": (450, 15, 8192, "m15", "main"),
 }
 
 
@@ -60,6 +60,9 @@ def verify(path: Path, *, wave: str, workload: str, source: str) -> None:
       "CANON_P33_DISABLE_EVAL": "1",
       "CANON_OPT_STATE_RESIDENT": "1",
       "CANON_P30_OPT_STATE_OFFLOAD": "0",
+      "CANON_FROZENLAKE_CKPT_INTERVAL": "10",
+      "CANON_FROZENLAKE_CKPT_MAX_TO_KEEP": "1",
+      "CANON_FROZENLAKE_CKPT_MILESTONE_INTERVAL": "50",
   }
   wrong = {
       name: env.get(name)

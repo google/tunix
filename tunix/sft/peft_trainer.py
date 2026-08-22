@@ -71,6 +71,10 @@ class TrainingConfig:
   checkpoint_root_directory: str | None = None
   # Checkpoint configurations. If None, the default options will be used.
   checkpointing_options: checkpoint_options.CheckpointingOptions | None = None
+  # Optional exact checkpoint step to restore. ``None`` retains the historical
+  # latest-checkpoint behavior. This is used by isolated evaluators which must
+  # compare registered milestones after later checkpoints already exist.
+  checkpoint_restore_step: int | None = None
   # Explicit admission token for checkpointing around a precomputed-gradient
   # transaction.  The default remains fail-closed for isolated G6 canaries.
   precomputed_gradient_checkpointing_contract: str | None = None
@@ -556,6 +560,7 @@ class PeftTrainer:
         self.checkpoint_manager.maybe_restore(
             self.model,
             self.optimizer,
+            step=self.config.checkpoint_restore_step,
             restore_only_lora_params=self._lora_enabled,
         )
     )

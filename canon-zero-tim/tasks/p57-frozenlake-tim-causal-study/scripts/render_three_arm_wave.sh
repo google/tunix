@@ -32,6 +32,7 @@ git cat-file -e "$source_sha^{commit}"
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$script_dir/../../../.." && pwd)"
 renderer="$repo/canon-zero-tim/cluster/render_p57_frozenlake_tim.py"
+expected_updates=450
 mkdir -p "$output_root"
 
 python3 "$renderer" \
@@ -40,7 +41,7 @@ python3 "$renderer" \
   --output-dir "$output_root/p45" \
   --campaign-tag "${campaign_root}-p45" \
   --checkpoint-mode new \
-  --expected-updates 200 \
+  --expected-updates "$expected_updates" \
   --run-kind train \
   --arm "$arm"
 
@@ -50,7 +51,7 @@ python3 "$renderer" \
   --output-dir "$output_root/m15" \
   --campaign-tag "${campaign_root}-m15" \
   --checkpoint-mode new \
-  --expected-updates 200 \
+  --expected-updates "$expected_updates" \
   --run-kind train \
   --workload-candidate m15 \
   --data-split main \

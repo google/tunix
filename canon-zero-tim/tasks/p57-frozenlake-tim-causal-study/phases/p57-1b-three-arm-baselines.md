@@ -8,10 +8,11 @@
   groups, context max 7,403, completion max 6,223, and no cap hit.
 - Confirmed: the historical P45 workload is the original deterministic
   parameter generator (seed 42/123, grid side 2–9, p 0.60–0.85), five turns,
-  prompt/response 4,096/2,048, and a historical 450-update recipe. This study
-  intentionally truncates every P45 treatment to the preregistered common
-  200-update horizon. P57 `l0` is only a rematerialized envelope anchor and is
-  not a byte-identical substitute.
+  prompt/response 4,096/2,048, and a historical 450-update recipe. The user
+  superseded the earlier 200-update truncation after observing that it was too
+  short to judge convergence. All paired treatments now use 450 updates. P57
+  `l0` is only a rematerialized envelope anchor and is not a byte-identical
+  substitute.
 - Confirmed: the first four-job launch is `INCONCLUSIVE` before step 0. The
   manifests and outer preflights were correct, but the Python runtime validator
   still hardcoded the older `(mismatch,m15,selection)` discovery cell. The
@@ -42,8 +43,8 @@ temperature 0.7, AdamW 1e-6, GSPO-token/RLOO, and no in-process evaluation.
 
 | Workload | Dataset | Turns | Prompt/response | Horizon |
 |---|---|---:|---:|---:|
-| P45 | original seed-42/123 parameter generator | 5 | 4,096 / 2,048 | 200 |
-| M15 | materialized `m15/main` split | 15 | 4,096 / 8,192 | 200 |
+| P45 | original seed-42/123 parameter generator | 5 | 4,096 / 2,048 | 450 |
+| M15 | materialized `m15/main` split | 15 | 4,096 / 8,192 | 450 |
 
 Native and zero executables intentionally have different canonical-kernel M
 contracts; within a workload, caller-global rows, semantic rows, scheduler
@@ -52,21 +53,28 @@ the whole zero-TIM bundle effect and cannot attribute a result to one kernel.
 
 ## Execution
 
-1. First queue: render and, after explicit launch approval, launch P45 and M15
-   under both `mismatch` and `is`. These are four independent 64-chip jobs using
-   the same native/stock-fast numerical program; their controlled treatment is
-   token importance sampling and the corresponding old-logprob identity.
+1. First queue: render four fresh 450-update jobs and, after explicit launch
+   approval, launch P45 and M15 under both `mismatch` and `is`. These are four
+   independent 64-chip jobs using the same native/stock-fast numerical program;
+   their controlled treatment is token importance sampling and the
+   corresponding old-logprob identity. The partial 200-update identities remain
+   immutable evidence and are not resumed into this superseding campaign.
 2. Deferred Zero-TIM pair: do not include P45 `zero` or M15 `zero` in the first
    queue. After the first four runs are packaged, require a separate user
    decision before launching either complete Zero-TIM/no-IS cell.
-3. Run one isolated deterministic final-checkpoint evaluation for every valid
-   cell. Never compare P45 accuracy directly with M15 accuracy as an arm effect.
+3. Run isolated deterministic evaluations at updates
+   `0,50,100,150,200,250,300,350,400,450` for every valid cell. Step 0 must
+   complete before training creates the campaign checkpoint namespace. The
+   positive milestones may run after uninterrupted training completes.
+   Never compare P45 accuracy directly with M15 accuracy as an arm effect.
 4. Compute within-workload contrasts: IS benefit (`is - mismatch`), zero-TIM
    benefit (`zero - mismatch`), and zero-TIM versus mitigation (`zero - is`).
 
 Each wave uses the same immutable source/image/model and fresh arm-specific
-checkpoint tags. A healthy run is not intentionally paused; checkpoints every
-10 updates with LatestN(1) are recovery only. No YAML hand edits are admitted.
+checkpoint tags. A healthy run is not intentionally paused. Checkpoints are
+saved every 10 updates; the rolling recovery policy keeps the latest one, while
+an additional P57-only policy retains every 50-step milestone until isolated
+evaluation is classified. No YAML hand edits are admitted.
 
 ## Exit gate
 

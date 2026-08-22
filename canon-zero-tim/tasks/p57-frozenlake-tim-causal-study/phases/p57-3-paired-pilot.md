@@ -1,5 +1,11 @@
 # P57.3 — Paired one-seed pilot
 
+- Status: superseded by P57.1b's direct 450-update concept study.
+
+This file records the earlier 50-update pilot design and is not an execution
+runbook. The active schedule is in `../RUNBOOK.md`: uninterrupted 450-update
+training plus isolated evaluations at `0,50,...,450` using retained milestones.
+
 ## Purpose
 
 Verify that the frozen pair can operate for 50 updates and produce analyzable

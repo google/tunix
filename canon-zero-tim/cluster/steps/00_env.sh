@@ -582,6 +582,15 @@ if [ "${CANON_PROFILE_FILE:-}" = \
     echo "[env] P57 requires a positive expected-update horizon" >&2
     fail=1
   }
+  p57_expected_milestone_interval=0
+  case "${CANON_P57_WORKLOAD_CANDIDATE:-}:${CANON_P57_DATA_SPLIT:-}:${CANON_P57_EXPECTED_UPDATES:-}" in
+    ::450|m15:main:450) p57_expected_milestone_interval=50 ;;
+  esac
+  [ "${CANON_FROZENLAKE_CKPT_MILESTONE_INTERVAL:-0}" = \
+    "$p57_expected_milestone_interval" ] || {
+    echo "[env] P57 checkpoint milestone retention drifted" >&2
+    fail=1
+  }
   if [ -n "${CANON_P57_WORKLOAD_CANDIDATE:-}" ] || \
      [ -n "${CANON_P57_DATA_SPLIT:-}" ]; then
     case "${CANON_P57_WORKLOAD_CANDIDATE:-}:${CANON_P57_DATA_SPLIT:-}" in
@@ -652,7 +661,10 @@ if [ "${CANON_PROFILE_FILE:-}" = \
       [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "$p57_expected_fixed" ] && \
       [ "${CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY:-0}" = "0" ] && \
       [[ "${CANON_P57_EVAL_CHECKPOINT_STEP:-}" =~ ^(0|[1-9][0-9]*)$ ]] && \
-      [ $((CANON_P57_EVAL_CHECKPOINT_STEP % 10)) -eq 0 ] && \
+      { [ "$p57_expected_milestone_interval" = "50" ] && \
+        [ $((CANON_P57_EVAL_CHECKPOINT_STEP % 50)) -eq 0 ] || \
+        { [ "$CANON_P57_EVAL_CHECKPOINT_STEP" = "0" ] || \
+          [ "$CANON_P57_EVAL_CHECKPOINT_STEP" = "$CANON_P57_EXPECTED_UPDATES" ]; }; } && \
       [ "$CANON_P57_EVAL_CHECKPOINT_STEP" -le "$CANON_P57_EXPECTED_UPDATES" ] && \
       [[ "${CANON_P57_EVAL_OUTPUT:-}" = /* ]] || {
         echo "[env] P57 isolated evaluation contract drifted" >&2
@@ -672,6 +684,7 @@ if [ "${CANON_PROFILE_FILE:-}" = \
       fail=1
       ;;
   esac
+  unset p57_expected_milestone_interval
 elif [ -n "${CANON_P57_TIM_ARM:-}${CANON_P57_RUN_KIND:-}${CANON_P57_INFERENCE_REGIME:-}${CANON_P57_EXPECTED_UPDATES:-}${CANON_P57_STOP_AFTER_STEP:-}${CANON_P57_EVAL_CHECKPOINT_STEP:-}${CANON_P57_EVAL_OUTPUT:-}${CANON_P57_CALIBRATION_MODE:-}${CANON_P57_CALIBRATION_OUTPUT:-}${CANON_P57_CALIBRATION_RECIPES:-}${CANON_P57_WORKLOAD_CANDIDATE:-}${CANON_P57_DATA_SPLIT:-}" ]; then
   echo "[env] P57 fields require the P57 profile" >&2
   fail=1

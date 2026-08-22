@@ -28,6 +28,8 @@ _CHECKPOINT_ROOT = (
 )
 _TAG_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,50}[a-z0-9])?")
 _ALLOWED_UPDATES = (1, 3, 20, 50, 100, 150, 200, 450)
+_STOCK_DISCOVERY_UPDATES = 200
+_PAIRED_ARM_UPDATES = 450
 _BASE_MEMORY = "200G"
 _P57_MEMORY = "350G"
 _DP_SIZE = 8
@@ -289,33 +291,54 @@ def render_all(
   if stock_only and arm:
     raise ValueError("P57 stock-only discovery cannot also select an arm")
   if stock_only and (
-      workload_candidate != "m15" or expected_updates != 200
+      workload_candidate != "m15"
+      or expected_updates != _STOCK_DISCOVERY_UPDATES
   ):
-    raise ValueError("P57 stock curve is frozen to M15 selection for 200 updates")
+    raise ValueError(
+        "P57 stock curve is frozen to M15 selection for "
+        f"{_STOCK_DISCOVERY_UPDATES} updates"
+    )
   if not stock_only and workload_candidate and data_split != "main":
     raise ValueError("P57 paired arms require the frozen main data split")
   if arm and arm not in _ARM_BY_NAME:
     raise ValueError(
         f"P57 arm must be one of {tuple(_ARM_BY_NAME)}, got {arm!r}"
     )
-  if arm and not workload_candidate and expected_updates != 200:
-    raise ValueError("P57 original P45 workload is frozen to 200 updates")
-  if arm and workload_candidate == "m15" and expected_updates != 200:
-    raise ValueError("P57 M15 workload is frozen to 200 updates")
+  if arm and not workload_candidate and expected_updates != _PAIRED_ARM_UPDATES:
+    raise ValueError(
+        "P57 original P45 workload is frozen to "
+        f"{_PAIRED_ARM_UPDATES} updates"
+    )
+  if (
+      arm
+      and workload_candidate == "m15"
+      and expected_updates != _PAIRED_ARM_UPDATES
+  ):
+    raise ValueError(
+        f"P57 M15 workload is frozen to {_PAIRED_ARM_UPDATES} updates"
+    )
   if run_kind == "eval":
     expected_mode = "new" if checkpoint_step == 0 else "resume"
     if checkpoint_mode != expected_mode:
       raise ValueError(
           f"P57 checkpoint step {checkpoint_step} requires mode={expected_mode}"
       )
-    if (
-        checkpoint_step is None
-        or checkpoint_step < 0
-        or checkpoint_step % 10
-        or checkpoint_step > expected_updates
-    ):
+    checkpoint_is_registered = (
+        checkpoint_step is not None
+        and checkpoint_step >= 0
+        and checkpoint_step <= expected_updates
+        and (
+            checkpoint_step == 0
+            or (
+                checkpoint_step == expected_updates
+                if stock_only
+                else checkpoint_step % 50 == 0
+            )
+        )
+    )
+    if not checkpoint_is_registered:
       raise ValueError(
-          "P57 evaluation checkpoint must be zero or a 10-step boundary "
+          "P57 evaluation checkpoint must be zero or a retained milestone "
           "within the registered training horizon"
       )
   if not _TAG_RE.fullmatch(campaign_tag):
@@ -361,6 +384,10 @@ def render_all(
     job_name = document["metadata"]["name"]
     state = f"/tmp/canon-state/{job_name}"
     checkpoint_tag = f"{campaign_tag}-{arm.name}"
+    milestone_interval = (
+        "50" if not stock_only and expected_updates == _PAIRED_ARM_UPDATES
+        else "0"
+    )
     _replace_env(
         document,
         {
@@ -390,6 +417,7 @@ def render_all(
             "CANON_FROZENLAKE_CKPT_TAG": checkpoint_tag,
             "CANON_FROZENLAKE_CKPT_INTERVAL": "10",
             "CANON_FROZENLAKE_CKPT_MAX_TO_KEEP": "1",
+            "CANON_FROZENLAKE_CKPT_MILESTONE_INTERVAL": milestone_interval,
             "ENABLE_PATHWAYS_PERSISTENCE": "1",
             "CANON_STATE": state,
             "CANON_RUN_LOG": f"{state}/run.log",
@@ -433,6 +461,7 @@ def render_all(
         "CANON_FROZENLAKE_CKPT_MODE": checkpoint_mode,
         "CANON_FROZENLAKE_CKPT_ROOT": _CHECKPOINT_ROOT,
         "CANON_FROZENLAKE_CKPT_TAG": checkpoint_tag,
+        "CANON_FROZENLAKE_CKPT_MILESTONE_INTERVAL": milestone_interval,
     }
     if run_kind == "eval":
       expected.update({

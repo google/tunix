@@ -144,11 +144,11 @@ class P57StockFastContractTest(unittest.TestCase):
   def test_all_registered_stock_runtime_variants_are_accepted(self):
     workload, base = self._environment()
     variants = (
-        ("mismatch", "m15", "selection", "m15-selection-mismatch"),
-        ("mismatch", "", "", "p45-mismatch"),
-        ("is", "", "", "p45-is"),
-        ("mismatch", "m15", "main", "m15-main-mismatch"),
-        ("is", "m15", "main", "m15-main-is"),
+        ("mismatch", "m15", "selection", "200", "m15-selection-mismatch"),
+        ("mismatch", "", "", "450", "p45-mismatch"),
+        ("is", "", "", "450", "p45-is"),
+        ("mismatch", "m15", "main", "450", "m15-main-mismatch"),
+        ("is", "m15", "main", "450", "m15-main-is"),
     )
     for run_kind in ("train", "eval"):
       zero_switches = (
@@ -166,7 +166,7 @@ class P57StockFastContractTest(unittest.TestCase):
           if run_kind == "train"
           else dp_workloads.validate_p57_stock_eval_environment
       )
-      for arm, candidate, split, expected_variant in variants:
+      for arm, candidate, split, updates, expected_variant in variants:
         with self.subTest(
             run_kind=run_kind,
             arm=arm,
@@ -179,7 +179,7 @@ class P57StockFastContractTest(unittest.TestCase):
               "CANON_P57_TIM_ARM": arm,
               "CANON_P57_WORKLOAD_CANDIDATE": candidate,
               "CANON_P57_DATA_SPLIT": split,
-              "CANON_P57_EXPECTED_UPDATES": "200",
+              "CANON_P57_EXPECTED_UPDATES": updates,
               "CANON_P30_OPT_STATE_OFFLOAD": "0",
               **{name: "0" for name in zero_switches},
               **{name: "1" for name in one_switches},

@@ -4,7 +4,7 @@
 > 焊死数值类 flag = 删代码路径 = 程序变更,走与开启同级认证门(verify+ALIGN+canary)。
 > 生命周期档位:试验 → 已认证 → 默认开 → 焊死(开关可删)→ 退役/否决。
 > 普查基点 a94d6c0c(285 个可设置 env flag,与 ebba4850 普查零漂移);普查后续现役附录
-> 当前 320 个;本表分层登记,D 层按前缀组、语义欠账标"待考古"。
+> 当前 322 个;本表分层登记,D 层按前缀组、语义欠账标"待考古"。
 > 全量机器清单:落地 CL 时由 `grep -rhoE` 生成为附录,条目数必须 == 普查数(排除项列明)。
 
 ## A 层 · 数值语义类(动它 = 动程序身份;焊死走认证门)
@@ -56,7 +56,8 @@
 | CANON_P3x/P4x_*_ADMITTED / NO_COMMIT / RUN_STAGE / 工作负载选通 | 各任务 admission 门 | 任务结案随任务退役(C 层同规) |
 | CANON_P46_CENSUS_FIRST_PASS | P46 reward-only full campaign 的 breadth-first 调度：每个尚无 durable attempt 的 identity 只跑一次，invalid 留证后延后；不进入采样 fingerprint，也不放宽 strict finalizer | 试验、默认关；P46 完成一次 exact 1851 x N16 strict campaign 后退役 |
 | CANON_P46_FROZEN_V6_IMPORT_ID | 显式选择已封存的 v6 resume snapshot；只允许在新 resume tag 内迁移原始轨迹与 sampler provenance，并逐条留迁移来源 | 迁移期、默认空；旧 campaign 全部升级至当前 harness 后退役 |
-| CANON_P57_TIM_ARM / RUN_KIND / INFERENCE_REGIME / EXPECTED_UPDATES / STOP_AFTER_STEP / EVAL_* / WORKLOAD_CANDIDATE / DATA_SPLIT / CALIBRATION_* | P57 FrozenLake TIM 因果实验身份与耐久产物；`TIM_ARM=mismatch` 为 native/no-IS，`is` 为相同 native 数值程序加 token TIS，`zero` 为完整 zero-TIM/no-IS；两 workload 为原始 P45/450（candidate/split 均空）与 materialized M15-main/200；native arms 必须 `INFERENCE_REGIME=stock-fast`，zero 禁止该 override；P57.1 calibration 仍只接受 mismatch、固定 `m10,m15,m20` 顺序及 temperature-0.7 stochastic 模式；`STOP_AFTER_STEP` 只允许 horizon 内 50-step 边界；独立评估沿用相同 checkpoint provenance | 试验、默认空；P57 完成并归档最终因果报告后整体退役 |
+| CANON_P57_TIM_ARM / RUN_KIND / INFERENCE_REGIME / EXPECTED_UPDATES / STOP_AFTER_STEP / EVALUATION / EVAL_* / WORKLOAD_CANDIDATE / DATA_SPLIT / CALIBRATION_* | P57 FrozenLake TIM 因果实验身份与耐久产物；`TIM_ARM=mismatch` 为 native/no-IS，`is` 为相同 native 数值程序加 token TIS，`zero` 为完整 zero-TIM/no-IS；两 paired workload 为原始 P45/450（candidate/split 均空）与 materialized M15-main/450；native arms 必须 `INFERENCE_REGIME=stock-fast`，zero 禁止该 override；P57.1 calibration/selection 仍只接受 mismatch、M15/200 与 temperature-0.7 stochastic 模式；`STOP_AFTER_STEP` 只允许 horizon 内 50-step 边界；`EVALUATION=1` 只标识隔离 evaluator，且必须绑定显式 `EVAL_CHECKPOINT_STEP` 和同一 checkpoint provenance | 试验、默认空/关；P57 完成并归档最终因果报告后整体退役 |
+| CANON_FROZENLAKE_CKPT_MILESTONE_INTERVAL | P57 paired 450-step arms 的证据保留间隔；`0` 保持历史 `LatestN(1)`，`50` 组合 `LatestN(1)` 与 `EveryNSteps(50)`，只允许已登记 P57 train/eval tuple，不能改变 save cadence 或普通恢复策略 | 试验、默认 `0`；P57 六个 450-step curves 的隔离评估归档并批准清理后退役 |
 | CANON_P58_DEEPSWE_TIM / TIM_ADMITTED / TIM_ARM / EXPECTED_UPDATES / DEBUG_DIR / NATIVE_STOCK_PROMPT_OBSERVER | P58 Qwen3-4B-Instruct native-vs-zero 因果训练身份；固定 128-chip synchronous disaggregated、B8xG16、16K、compact filter、TPU optimizer 与完整 trajectory journal；`TIM_ARM=native|zero` 是唯一 treatment 选择；Native 保留完整 stock serving/trainer program，所有 shape-valid finite A/B/T_old/T_current mismatch 只观测，Zero 全边界 exact；`NATIVE_STOCK_PROMPT_OBSERVER=1` 只为 native arm 的 rollout 后 B 观察值提供 processed prompt logprobs，不进入采样、trainer、loss、反向或 optimizer，且与 canonical `PROMPT_PROCESSED_LOGPROBS` 互斥 | 试验、默认关；P58 两臂 3-update canary 与 1,000-update campaign 归档后整体退役 |
 | CANON_ALIGN*/EXPECT_*/DP_SIZE/TP_SIZE/TRAJECTORIES 族 | 对齐门与拓扑断言 | 监控契约,长期保留 |
 
@@ -124,6 +125,7 @@ CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY
 CANON_FROZENLAKE_C0
 CANON_FROZENLAKE_CKPT_INTERVAL
 CANON_FROZENLAKE_CKPT_MAX_TO_KEEP
+CANON_FROZENLAKE_CKPT_MILESTONE_INTERVAL
 CANON_FROZENLAKE_CKPT_MODE
 CANON_FROZENLAKE_CKPT_ROOT
 CANON_FROZENLAKE_CKPT_TAG
@@ -321,6 +323,7 @@ CANON_P57_INFERENCE_REGIME
 CANON_P57_CALIBRATION_MODE
 CANON_P57_CALIBRATION_OUTPUT
 CANON_P57_CALIBRATION_RECIPES
+CANON_P57_EVALUATION
 CANON_P57_EVAL_CHECKPOINT_STEP
 CANON_P57_EVAL_OUTPUT
 CANON_P57_EXPECTED_UPDATES
@@ -402,4 +405,4 @@ CANON_XPROF_SKIP_STEPS
 CANON_XPROF_STEPS
 ```
 
-Count: 320 settable names (appendix inventory above; exclusions: none).
+Count: 322 settable names (appendix inventory above; exclusions: none).

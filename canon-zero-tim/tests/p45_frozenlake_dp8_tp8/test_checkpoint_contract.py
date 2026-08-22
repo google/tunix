@@ -55,6 +55,7 @@ class FrozenLakeCheckpointContractTest(unittest.TestCase):
     self.assertEqual(new.directory, resume.directory)
     frozenlake_checkpoint.require_p45(new, _env("new"))
     frozenlake_checkpoint.require_p45(resume, _env("resume"))
+    self.assertNotIn("checkpoint_milestone_interval", _contract(new))
 
   def test_disabled_rejects_partial_contract(self):
     self.assertFalse(frozenlake_checkpoint.from_env({}).enabled)
@@ -69,6 +70,11 @@ class FrozenLakeCheckpointContractTest(unittest.TestCase):
         ("CANON_FROZENLAKE_CKPT_TAG", "Bad/Tag", "tag must be"),
         ("CANON_FROZENLAKE_CKPT_INTERVAL", "11", "exactly 10"),
         ("CANON_FROZENLAKE_CKPT_MAX_TO_KEEP", "2", "exactly one"),
+        (
+            "CANON_FROZENLAKE_CKPT_MILESTONE_INTERVAL",
+            "25",
+            "disabled or 50",
+        ),
         ("ENABLE_PATHWAYS_PERSISTENCE", "0", "requires Pathways"),
     )
     for key, value, message in cases:
@@ -76,6 +82,41 @@ class FrozenLakeCheckpointContractTest(unittest.TestCase):
         env = _env()
         env[key] = value
         with self.assertRaisesRegex(ValueError, message):
+          frozenlake_checkpoint.from_env(env)
+
+  def test_p57_milestones_keep_latest_one_plus_every_fifty(self):
+    env = _env()
+    env.update({
+        "CANON_FROZENLAKE_CKPT_MILESTONE_INTERVAL": "50",
+        "CANON_P57_EXPECTED_UPDATES": "450",
+        "CANON_P57_RUN_KIND": "train",
+        "CANON_P57_TIM_ARM": "mismatch",
+    })
+    config = frozenlake_checkpoint.from_env(env)
+    policy = frozenlake_checkpoint.build_preservation_policy(config)
+    self.assertEqual(config.milestone_interval, 50)
+    self.assertEqual(len(policy.policies), 2)
+    self.assertEqual(policy.policies[0].n, 1)
+    self.assertEqual(policy.policies[1].interval_steps, 50)
+    self.assertTrue(policy.policies[1].exact_interval)
+    self.assertEqual(_contract(config)["checkpoint_milestone_interval"], 50)
+
+  def test_milestones_reject_non_p57_or_wrong_horizon(self):
+    for key, value in (
+        ("CANON_P57_EXPECTED_UPDATES", "200"),
+        ("CANON_P57_RUN_KIND", ""),
+        ("CANON_P57_TIM_ARM", "unknown"),
+    ):
+      with self.subTest(key=key):
+        env = _env()
+        env.update({
+            "CANON_FROZENLAKE_CKPT_MILESTONE_INTERVAL": "50",
+            "CANON_P57_EXPECTED_UPDATES": "450",
+            "CANON_P57_RUN_KIND": "train",
+            "CANON_P57_TIM_ARM": "mismatch",
+        })
+        env[key] = value
+        with self.assertRaisesRegex(ValueError, "isolated to"):
           frozenlake_checkpoint.from_env(env)
 
   def test_requires_committed_resident_p45(self):
@@ -241,6 +282,7 @@ class FrozenLakeCheckpointContractTest(unittest.TestCase):
     self.assertIn("_p45_precomputed_checkpointing_admitted", trainer)
     self.assertIn("committed ", trainer)
     self.assertIn("P45 checkpoint contract is admitted", trainer)
+    self.assertIn("step=self.config.checkpoint_restore_step", trainer)
 
 
 if __name__ == "__main__":

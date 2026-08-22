@@ -35,6 +35,7 @@ def _config(arm="zero"):
       tag=f"p57-campaign-{arm}",
       interval=10,
       max_to_keep=1,
+      milestone_interval=0,
   )
 
 
@@ -46,6 +47,9 @@ def _metadata(config, *, arm="zero", step=20):
           "schema": checkpoint.SCHEMA,
           "checkpoint_root": config.root,
           "checkpoint_tag": config.tag,
+          "checkpoint_interval": config.interval,
+          "checkpoint_max_to_keep": config.max_to_keep,
+          "checkpoint_milestone_interval": config.milestone_interval,
           "source_commit": "a" * 40,
           "profile": "qwen3-8b-dp8-tp8-frozenlake-tim",
           "workload": "frozenlake-dp8-tp8",
@@ -109,6 +113,7 @@ class P57CheckpointEvalTest(unittest.TestCase):
         tag=config.tag,
         interval=10,
         max_to_keep=1,
+        milestone_interval=0,
     )
     with self.assertRaisesRegex(ValueError, "mode=resume"):
       checkpoint.validate_p57_evaluation_restored(
@@ -125,6 +130,7 @@ class P57CheckpointEvalTest(unittest.TestCase):
         tag="p57-campaign-zero",
         interval=10,
         max_to_keep=1,
+        milestone_interval=0,
     )
     checkpoint.validate_p57_evaluation_restored(
         config,
@@ -139,6 +145,23 @@ class P57CheckpointEvalTest(unittest.TestCase):
           metadata={"global_step": 0},
           env=_env(step="0"),
       )
+
+  def test_accepts_retained_450_horizon_milestone(self):
+    config = checkpoint.Config(
+        mode="resume",
+        root=checkpoint.GCS_ROOT,
+        tag="p57-campaign-mismatch",
+        interval=10,
+        max_to_keep=1,
+        milestone_interval=50,
+    )
+    metadata = _metadata(config, arm="mismatch", step=250)
+    checkpoint.validate_p57_evaluation_restored(
+        config,
+        restored_step=250,
+        metadata=metadata,
+        env={**_env(arm="mismatch", step="250")},
+    )
 
 
 if __name__ == "__main__":

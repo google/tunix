@@ -7,6 +7,7 @@ cd "$ROOT"
 python3 -m unittest \
   canon-zero-tim/tests/p57_frozenlake_tim/test_renderer.py \
   canon-zero-tim/tests/p57_frozenlake_tim/test_checkpoint_eval.py \
+  canon-zero-tim/tests/p45_frozenlake_dp8_tp8/test_checkpoint_contract.py \
   canon-zero-tim/tests/p57_frozenlake_tim/test_eval_classifier.py \
   canon-zero-tim/tests/p57_frozenlake_tim/test_stock_classifier.py \
   canon-zero-tim/tests/p57_frozenlake_tim/test_provenance_derivation.py \
@@ -26,6 +27,7 @@ python3 -m py_compile \
   canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts/derive_calibration_provenance.py \
   canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts/verify_calibration_manifest.py \
   canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts/verify_three_arm_manifests.py \
+  canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts/verify_eval_schedule.py \
   canon-zero-tim/cluster/steps/p57_probe_stock_engine.py \
   canon-zero-tim/src/p57_stock_prompt_observer.py \
   examples/frozenlake/p57_workloads.py \
@@ -42,5 +44,6 @@ bash -n \
   canon-zero-tim/cluster/steps/p57_runtime_contract.sh \
   canon-zero-tim/cluster/steps/90_run.sh \
   canon-zero-tim/cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env \
+  canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts/render_eval_schedule.sh \
   canon-zero-tim/tests/p57_frozenlake_tim/run_cpu.sh
 echo "P57_FROZENLAKE_TIM_CPU_PASS"
