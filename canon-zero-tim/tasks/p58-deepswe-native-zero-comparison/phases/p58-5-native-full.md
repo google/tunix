@@ -170,6 +170,6 @@ repair makes concurrency 128, exactly one wave and exactly the provisioned
 rollout capacity DP8 x max-seqs16. It does not extend the 3,000-second episode,
 300-second cleanup, or 3,600-second batch deadlines. Per-trajectory compact
 timeouts continue as zero-mask rows; a whole batch that cannot drain remains a
-hard failure. P58f10 has no resumable training state. After publication and
-remote readback, the next attempt is fresh Native `p58f11`. Zero remains
+hard failure. P58f10 has no resumable training state. After fetching and
+reading back the final operator tip, the next attempt is fresh Native `p58f11`. Zero remains
 deferred.

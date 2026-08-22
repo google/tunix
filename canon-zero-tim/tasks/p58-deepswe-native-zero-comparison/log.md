@@ -444,3 +444,12 @@
 - Validation: Python compilation and `git diff --check` pass. Focused renderer passes 15/15. A fresh p58f11 Native/full render emits `P58_DEEPSWE_TIM_RENDER_PASS` with concurrency 128 and unchanged deadlines. P34 emits `P34_STATIC_PASS suites=10`; P57 passes 105/105 with `P57_FROZENLAKE_TIM_CPU_PASS`. The complete pinned-image gate at `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a` exits zero and emits `P58_EXACT_IMAGE_CPU_PASS loss_oracle=1 weighted_accumulation=1 compact_filter=1 durable_journal=1 paired_renderer=1 alignment_policy=1 stock_observer=1 regressions=1`.
 - External effects: one requested fast-forward pull plus local source/tests/documentation edits and local/pinned-container tests only. No commit, push, image publication, Kubernetes apply, TPU launch, model download, credential change, or `main` mutation occurred.
 - Next: await separate commit/push approval. After publication and exact remote readback, launch only fresh Native full `p58f11`; require a durable 128-row journal, finite Native boundaries/backward, a TPU-resident optimizer receipt, and the first commit. Zero remains strict and deferred.
+
+## 2026-08-22 UTC — p58f10 one-wave concurrency repair published
+
+- Type: publication evidence.
+- Action: after explicit user approval, committed the B8 x G16 one-wave concurrency repair, exact rollout-capacity regression, and reconciled runbook/handoff/phase records. The pre-push fetch proved the operator branch had not advanced; the push was normal and non-force.
+- Published implementation commit: `44b6fb4527a8a05bf649b5140d12142e2abef83f`.
+- Readback: local HEAD, `FETCH_HEAD`, and `origin/yuxzhang/canon-zero-tim` all resolved to the implementation commit with ahead/behind `0/0` before this publication checkpoint.
+- External effects: one normal fast-forward push to `yuxzhang/canon-zero-tim`. `main` was untouched. No image publication, rendered YAML apply, Kubernetes object, TPU launch, model download, credential change, or evidence deletion occurred.
+- Next: publish this documentation-only checkpoint and verify its final remote readback. The executor must fetch that final tip and launch only fresh Native full run-id `p58f11`; Zero remains strict and deferred.

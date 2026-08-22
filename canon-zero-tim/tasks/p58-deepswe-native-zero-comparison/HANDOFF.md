@@ -33,8 +33,12 @@ with ahead/behind `0/0`. Source intake then fast-forwarded to exact operator tip
 timeout evidence. P58f10 reached Step-0 rollout but the B8 x G16 batch was
 throttled into two waves by concurrency 64; only 5/8 prompt groups completed
 before the 3,600-second hard batch deadline. The local repair makes all 128
-trajectories one wave, matching rollout DP8 x max-seqs16 capacity. It is not
-published yet. After publication/readback, the next run id is fresh `p58f11`.
+trajectories one wave, matching rollout DP8 x max-seqs16 capacity. It was
+published as implementation commit
+`44b6fb4527a8a05bf649b5140d12142e2abef83f`; its first remote readback matched
+local HEAD, `FETCH_HEAD`, and the remote-tracking branch with ahead/behind
+`0/0`. This documentation checkpoint advances the branch once more, so fetch
+the final operator tip. The next run id is fresh `p58f11`.
 
 The user previously waived P58.3 and the separate three-update stop, then chose
 the native 128-chip full 1,000-update stage. That historical phase remains
@@ -325,7 +329,7 @@ Its 128 trajectories were still admitted with
 `max_concurrency=64`, creating two sequential waves. At 3,600 seconds only
 5/8 prompt groups were complete, so the batch orchestrator correctly failed
 closed before durable journal, trainer, optimizer receipt, or checkpoint. The
-local repair sets concurrency to 128, exactly the raw batch and exactly rollout
+published repair sets concurrency to 128, exactly the raw batch and exactly rollout
 DP8 x max-seqs16 capacity. Episode 3,000 s, cleanup 300 s, and batch 3,600 s
 remain unchanged. Individual timeout/context outcomes still become compact
 zero-mask rows; only a whole one-wave batch that cannot drain is fatal. P58f10
@@ -334,7 +338,8 @@ is not resumable. After separate publication/readback, use fresh Native
 
 Never modify or push `main`. The publication target is exclusively
 `yuxzhang/canon-zero-tim`; the p58f09 repair is published there as
-`678bc5cfbcec386fd655e6685365c937e826d547`. Always fetch the later final
+`678bc5cfbcec386fd655e6685365c937e826d547`, and the p58f10 one-wave repair as
+`44b6fb4527a8a05bf649b5140d12142e2abef83f`. Always fetch the later final
 documentation tip before rendering.
 
 ## What was implemented

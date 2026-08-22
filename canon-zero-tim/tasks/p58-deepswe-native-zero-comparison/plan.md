@@ -116,7 +116,8 @@ sets concurrency to 128, exactly matching both the raw batch and rollout
 capacity DP8 x max-seqs16. Episode, cleanup, and batch deadlines remain
 3,000/300/3,600 seconds. Per-trajectory timeout/context outcomes still return
 as compact zero-mask rows; only failure of the complete one-wave batch to drain
-remains fatal. After publication/readback, the next attempt is `p58f11`.
+remains fatal. After fetching/readback of the final operator tip, the next
+attempt is `p58f11`.
 
 ## Frozen shared recipe
 

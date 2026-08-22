@@ -169,7 +169,7 @@ complete. No journal, trainer program, optimizer receipt, or checkpoint was
 created. The repair sets concurrency to 128, matching both the raw batch and
 the provisioned rollout capacity DP8 x max-seqs16. Episode 3,000 s, cleanup
 300 s, and batch 3,600 s remain unchanged. Use fresh full-stage run-id
-`p58f11` after publication and exact remote readback; never reuse p58f08,
+`p58f11` after fetching and exactly reading back the final operator tip; never reuse p58f08,
 p58f09, or p58f10 YAML/root. None has optimizer state to resume.
 
 The direct-entrypoint implementation commit is
