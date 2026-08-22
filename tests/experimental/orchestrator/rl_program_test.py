@@ -12,9 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for RLProgram and StandardRLProgram."""
-
 import asyncio
+from collections.abc import Sequence
+from typing import Any
 from unittest import mock
 
 from absl.testing import absltest
@@ -93,6 +93,58 @@ class RLProgramTest(absltest.TestCase):
     ]
     self.assembler = batch_assembly.SequencePackedBatchAssembler(
         max_packed_len=16
+    )
+
+  def _make_trajectory_group(
+      self,
+      prompt_id: str = "prompt_0",
+      group_id: str = "group_0",
+      group_size: int = 2,
+      reward: float = 1.0,
+  ) -> list[datatypes.TrajectoryItem]:
+    return [
+        distributed_rl_engine._response_to_trajectory_item(
+            _create_rollout_response(
+                f"req_{prompt_id}_{idx}",
+                prompt_id,
+                group_id,
+                pair_index=idx,
+                reward=reward,
+            )
+        )
+        for idx in range(group_size)
+    ]
+
+  def _set_mock_poll_batches(
+      self, *batches: Sequence[datatypes.TrajectoryItem]
+  ) -> None:
+    call_idx = 0
+    batch_list = list(batches)
+
+    async def _mock_poll(timeout_s=0.1):
+      del timeout_s
+      nonlocal call_idx
+      if call_idx < len(batch_list):
+        res = list(batch_list[call_idx])
+        call_idx += 1
+        return res
+      await asyncio.sleep(0.01)
+      return []
+
+    self.mock_engine.poll_rollouts.side_effect = _mock_poll
+
+  def _create_program(
+      self,
+      dataset: Any = ("prompt_0",),
+      reward_fns: Any = None,
+      **kwargs: Any,
+  ) -> rl_program.StandardRLProgram:
+    return rl_program.StandardRLProgram(
+        dataset=dataset,
+        algo=self.mock_algo,
+        reward_fns=reward_fns if reward_fns is not None else [lambda x: 1.0],
+        assembler=self.assembler,
+        **kwargs,
     )
 
   def test_initialization(self):
@@ -667,6 +719,59 @@ class RLProgramTest(absltest.TestCase):
             self.mock_engine, train_dataset=["prompt_0"], num_steps=1
         )
       self.assertIn("Reference KL requires an assembler", str(cm.exception))
+
+    asyncio.run(_run())
+
+  def test_run_async_handles_early_dispatch_completion(self):
+    async def _run():
+      self._set_mock_poll_batches(self._make_trajectory_group())
+      program = self._create_program()
+      await program.run_async(self.mock_engine, num_steps=1)
+      self.assertEqual(program.step, 1)
+
+    asyncio.run(_run())
+
+  def test_run_async_propagates_train_stage_exception(self):
+    async def _run():
+      self._set_mock_poll_batches(self._make_trajectory_group())
+      self.mock_engine.train_step.side_effect = RuntimeError(
+          "Training worker OOM"
+      )
+      program = self._create_program()
+
+      with self.assertRaises(RuntimeError) as cm:
+        await program.run_async(self.mock_engine, num_steps=1)
+      self.assertIn("Training worker OOM", str(cm.exception))
+
+    asyncio.run(_run())
+
+  def test_run_async_propagates_critique_stage_exception(self):
+    async def _run():
+      self._set_mock_poll_batches(self._make_trajectory_group())
+      def failing_reward_fn(_):
+        raise ValueError("Reward model computation failed")
+
+      program = self._create_program(reward_fns=[failing_reward_fn])
+
+      with self.assertRaises(ValueError) as cm:
+        await program.run_async(self.mock_engine, num_steps=1)
+      self.assertIn("Reward model computation failed", str(cm.exception))
+
+    asyncio.run(_run())
+
+  def test_run_async_cancels_background_stages_on_external_cancellation(self):
+    async def _run():
+      self._set_mock_poll_batches()  # Yields empty and sleeps
+      program = self._create_program()
+
+      task = asyncio.create_task(
+          program.run_async(self.mock_engine, num_steps=5)
+      )
+      await asyncio.sleep(0.02)
+      task.cancel()
+
+      with self.assertRaises(asyncio.CancelledError):
+        await task
 
     asyncio.run(_run())
 
