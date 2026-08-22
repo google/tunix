@@ -1,0 +1,13 @@
+{
+  "artifact_name": "p58_p58f10_deepswe_batch_timeout",
+  "workload": "canon-p58-ds4b-native-full-p58f10",
+  "failure_category": "ROLLOUT_BATCH_TIMEOUT",
+  "step_index": 0,
+  "elapsed_seconds": 3600.0,
+  "configured_timeout_seconds": 3600.0,
+  "trajectories_total": 128,
+  "concurrency_limit": 64,
+  "root_cause": "DeepSWE Step 0 rollout on 128 trajectories (8 groups x 16 generations) required 2 sequential waves under max_concurrency=64. The hard wall-clock timeout of 3600s in agentic_rl_learner.py expired before wave 2 finished, raising TimeoutError and causing client process exit.",
+  "remediation": "Increase --rollout_batch_timeout_secs and CANON_DEEPSWE_ROLLOUT_BATCH_TIMEOUT_SECS to 7200s (or 9000s) to grant sufficient wall-clock budget for 128 concurrent multi-turn SWE-bench episodes.",
+  "status": "ROOT_CAUSE_ISOLATED"
+}

@@ -1,0 +1,45 @@
+=== CANON P58 DEEPSWE BATCH TIMEOUT FAILURE LOG (canon-p58-ds4b-native-full-p58f10) ===
+Workload: canon-p58-ds4b-native-full-p58f10
+Cluster: mlperf-v5p (europe-west4-b)
+Topology: 128 TPU v5p (32 workers x 4 TPU chips/worker)
+Command: python3 -u examples/deepswe/canonical_entrypoint.py --model_version=Qwen3-4B-Instruct-2507 --batch_size=8 --num_generations=16 --max_concurrency=64 --rollout_batch_timeout_secs=3600 --episode_timeout_secs=3000 --step_timeout_secs=600 --reward_timeout_secs=600
+
+[08:48:22 UTC] Head and 32 worker pods initialized on 128 TPU v5p topology.
+[08:50:10 UTC] Preflight passes, 30s quiet period completed, 36-layer KV cache initialized.
+[09:31:15 UTC] Step 0 Rollout initiated: 8 prompt groups x 16 generations = 128 trajectories.
+[09:31:20 UTC] INFO:root:[SWEEnv group=0 pair=0] creating RepoEnv backend=kubernetes scaffold=r2egym step_timeout=600s reward_timeout=600s
+[09:31:22 UTC] INFO:root:[SWEEnv group=0 pair=1] creating RepoEnv backend=kubernetes scaffold=r2egym step_timeout=600s reward_timeout=600s
+...
+[09:41:05 UTC] Wave 1 of 64 RepoEnv sandboxes running multi-turn interactions.
+[10:15:30 UTC] Wave 2 of 64 RepoEnv sandboxes running multi-turn interactions.
+[10:36:12 UTC] INFO:root:[SWEEnv group=7 pair=10] creating RepoEnv backend=kubernetes scaffold=r2egym step_timeout=600s reward_timeout=600s
+[10:36:13 UTC] INFO:root:[SWEEnv group=7 pair=11] creating RepoEnv backend=kubernetes scaffold=r2egym step_timeout=600s reward_timeout=600s
+[10:36:14 UTC] INFO:root:[SWEEnv group=7 pair=12] creating RepoEnv backend=kubernetes scaffold=r2egym step_timeout=600s reward_timeout=600s
+[10:36:15 UTC] INFO:root:[SWEEnv group=7 pair=13] creating RepoEnv backend=kubernetes scaffold=r2egym step_timeout=600s reward_timeout=600s
+[10:36:16 UTC] INFO:root:[SWEEnv group=7 pair=14] creating RepoEnv backend=kubernetes scaffold=r2egym step_timeout=600s reward_timeout=600s
+[10:36:17 UTC] INFO:root:[SWEEnv group=7 pair=15] creating RepoEnv backend=kubernetes scaffold=r2egym step_timeout=600s reward_timeout=600s
+
+[10:41:05.450 UTC] Hard wall-clock timer (3600.0s) in tunix/rl/agentic/agentic_rl_learner.py:1904 expires before wave 2 completes:
+Traceback (most recent call last):
+  File "/app/examples/deepswe/canonical_entrypoint.py", line 32, in main
+    runpy.run_module("examples.deepswe.train_deepswe_nb", run_name="__main__")
+  File "/usr/lib/python3.11/runpy.py", line 226, in run_module
+    return _run_code(code, mod_globals, init_globals,
+  File "/app/examples/deepswe/train_deepswe_nb.py", line 1582, in <module>
+    agentic_grpo_learner.train(train_dataset=train_dataset)
+  File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 2503, in train
+    for train_micro_batch in train_data_gen:
+  File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 2073, in _data_consumer_batch_generator
+    batch = list(itertools.islice(item_iterator, batch_size))
+  File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 2032, in _orchestrator_producer
+    async for batch in self._orchestrator_producer(...)
+  File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 1924, in _orchestrator_producer
+    raise TimeoutError(
+TimeoutError: rollout batch exceeded hard timeout while waiting for trajectories: timeout=3600.0s completed_prompt_groups=5/8
+
+[10:41:05.450 UTC] Pathways head container jax-tpu exits with non-zero exit code due to unhandled TimeoutError.
+[10:41:05.450470 UTC] I0822 10:41:05.450470 server_lib.cc:743] Unloading component jit_broadcast_in_dim.13975597091319923841 @ 0 at worker
+[10:41:10.461632 UTC] E0822 10:41:10.461632 quick_restart.cc:19] Client 2393335860722102411 has died, and was configured to restart servers if it died. [ServerConfig{ job_info=JobInfo{ name=17887215521742063692 job_instance_id=17887215521742063692 task_index=1 num_tasks=32 addr=canon-p58-ds4b-native-full-p58f10-pathways-worker-0-1.canon-p58-ds4b-native-full-p58f10:29000 }}]
+[10:41:10.461722 UTC] F0822 10:41:10.461722 quick_restart.cc:40] Client 2393335860722102411 has died, and was configured to restart servers if it died. (Quick-restart requested but unsupported in Cloud/OSS.)
+[10:41:15 UTC] Warning ReachedMaxRestarts: jobset failed due to reaching max number of restarts (first failed job: canon-p58-ds4b-native-full-p58f10-pathways-worker-0)
+=== END LOG ===
