@@ -17,13 +17,13 @@ matched exactly with ahead/behind `0/0`. This documentation checkpoint advances
 the branch once more, so the executor must still fetch and use the final
 operator-branch SHA rather than pinning the implementation commit directly.
 
-Latest source intake fast-forwarded this isolated worktree to
-`be66906b10da7deba144290644fc4ab543abb464`. P58 evidence commit
-`af4975c42ad9dd49799973027f5ae7b4677ac362` adds immutable p58f05; the following
-tip is a P57-only change. The P58 full-stage alignment admission repair
-described below is currently local and unpublished. Do not ask an executor to
-launch p58f06 until the user separately approves commit/push and a post-push
-remote readback is exact.
+P58 evidence commit `af4975c42ad9dd49799973027f5ae7b4677ac362`
+adds immutable p58f05; the following tip is a P57-only change. The P58
+full-stage alignment admission repair described below was published as
+`5132d7ad0d3bc7c53de09e20bae835dca18a211a`. Its post-push readback matched
+local HEAD, `FETCH_HEAD`, and `origin/yuxzhang/canon-zero-tim` exactly with
+ahead/behind `0/0`. An executor must still fetch and independently read back
+the mutable operator branch before rendering p58f06.
 
 The user previously waived P58.3 and the separate three-update stop, then chose
 the native 128-chip full 1,000-update stage. That historical phase remains

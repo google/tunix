@@ -284,3 +284,12 @@
 - Claim ceiling: the one-host runner covers only exact four-device inventory, a TPU matmul, and renderer/profile/alignment-policy admission. Even a future PASS would not prove Qwen/R2E rollout, trainer forward/backward, optimizer commit, Pathways, or DP8 x TP8 behavior.
 - External effects: local tests and documentation only. No commit, push, image publication, model download, rendered YAML, Kubernetes object, remote TPU job, credential change, or `main` mutation occurred.
 - Next: await explicit commit/push approval. After publication and readback, launch only fresh Native run-id `p58f06`; Zero remains strict, separately configured, and deferred.
+
+## 2026-08-22 UTC — p58f05 alignment-admission repair published
+
+- Type: publication evidence.
+- Action: after explicit user approval, committed the signed Native `full/1000` admission repair, positive/opposite-arm/neighboring-workload controls, bounded one-host gate, exact-image coverage, flag guidance, and p58f06 handoff. The final pre-push fetch proved the operator branch had not advanced, and the push was normal and non-force.
+- Published implementation commit: `5132d7ad0d3bc7c53de09e20bae835dca18a211a`.
+- Readback: local HEAD, `FETCH_HEAD`, and `origin/yuxzhang/canon-zero-tim` all resolved to the implementation commit with ahead/behind `0/0` before this publication checkpoint.
+- External effects: one normal fast-forward push to `yuxzhang/canon-zero-tim`. `main` was untouched. No image publication, model download, rendered YAML, Kubernetes apply, TPU job, or credential change occurred.
+- Next: publish this documentation-only checkpoint, fetch its final readback SHA, then hand only fresh Native full run-id `p58f06` to the executor. Zero remains deferred.

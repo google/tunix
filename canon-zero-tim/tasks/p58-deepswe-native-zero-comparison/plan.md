@@ -67,10 +67,11 @@ off. P58f05 proved the independent native stock-B observer over all 2,048
 prompt rows after a 486.4-second, 128-row rollout and exact 398-leaf weight
 attestation. It then stopped before trainer forward because the alignment
 policy's P58 admission enumerated only short update stages and incorrectly
-rejected the signed `full/1000` tuple. The local repair separates P58 from the
-debug-stage admission and requires its existing admission, native arm, and
-exact stage/horizon signature. After publication/readback the next fresh
-attempt is `p58f06`.
+rejected the signed `full/1000` tuple. The published repair separates P58 from
+the debug-stage admission and requires its existing admission, native arm, and
+exact stage/horizon signature. Its implementation SHA is
+`5132d7ad0d3bc7c53de09e20bae835dca18a211a`; after an executor's fresh branch
+readback the next attempt is `p58f06`.
 
 ## Frozen shared recipe
 
