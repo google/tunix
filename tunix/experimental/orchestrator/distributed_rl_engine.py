@@ -23,6 +23,7 @@ import asyncio
 import collections
 from collections.abc import Mapping, Sequence
 import inspect
+import logging
 from typing import Any
 import uuid
 
@@ -267,7 +268,15 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         for it in items:
           if isinstance(it, dict):
             it = datatypes.RolloutResponse(**it)
-          completed.append(_response_to_trajectory_item(it))
+          item = _response_to_trajectory_item(it)
+          logging.debug(
+              "[DistributedRLEngine] poll_rollouts received trajectory item: prompt_id=%s group_id=%s pair_index=%s tokens=%d",
+              getattr(item, "prompt_id", ""),
+              getattr(item, "group_id", ""),
+              getattr(item, "pair_index", ""),
+              len(getattr(item, "completion_tokens", [])),
+          )
+          completed.append(item)
     return completed
 
   async def generate(

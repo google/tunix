@@ -16,11 +16,13 @@
 
 import asyncio
 from typing import Any, AsyncIterator, Callable, Dict, Optional, Sequence, Union
+
 from tunix.experimental.common import datatypes
 from tunix.experimental.rl.agentic import registry
 from tunix.experimental.rollout import collector as collector_lib
 from tunix.experimental.rollout import sampler as sampler_lib
 from tunix.experimental.rollout import vanilla_sampler_adapter
+from tunix.experimental.rollout import vllm_sampler_adapter
 from tunix.experimental.trajectory import trajectory as trajectory_lib
 from tunix.experimental.worker import traffic_controller as traffic_controller_lib
 from tunix.rl.rollout import base_rollout
@@ -56,8 +58,13 @@ class RolloutManager:
       sampler_type = getattr(config, "sampler_type", "vanilla")
       if sampler_type == "vllm":
         raise NotImplementedError(
-            "vLLM sampler is not implemented yet. Use 'inprocess_vllm' or"
-            " 'vanilla'."
+            "vLLM sampler is not implemented yet. Use 'inprocess_vllm',"
+            " 'raiden_vllm', or 'vanilla'."
+        )
+      elif sampler_type in ("raiden_vllm", "vllm_raiden"):
+        sampler = vllm_sampler_adapter.VllmSamplerAdapter(
+            server_id="vllm_sampler",
+            model_name=getattr(config, "rollout_vllm_model_version", ""),
         )
       elif sampler_type == "inprocess_vllm":
         from tunix.experimental.rollout import inprocess_vllm_sampler_adapter  # pylint: disable=g-import-not-at-top
@@ -298,6 +305,17 @@ class RolloutManager:
     res = None
     if self.sampler:
       res = await self.sampler.post_weight_sync(sync_request, **kwargs)
+    self.resume_all()
+    self._traffic.reopen()
+    return res
+
+  async def abort_weight_sync(
+      self, sync_request: sampler_lib.WeightSyncRequest | Any = None, **kwargs
+  ) -> Any:
+    """Discards the round, delegates abort to sampler, and resumes collectors."""
+    res = None
+    if self.sampler and hasattr(self.sampler, "abort_weight_sync"):
+      res = await self.sampler.abort_weight_sync(sync_request, **kwargs)
     self.resume_all()
     self._traffic.reopen()
     return res

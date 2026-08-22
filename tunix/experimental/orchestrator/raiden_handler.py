@@ -38,9 +38,14 @@ import logging
 import threading
 from typing import Any, Mapping, Optional, Sequence
 
-from tpu_sync.rpc import controller_service_pb2
-from tpu_sync.rpc import raiden_controller
-from tpu_sync.rpc import raiden_service_pb2
+try:
+  from tpu_raiden.rpc import controller_service_pb2
+  from tpu_raiden.rpc import raiden_controller
+  from tpu_raiden.rpc import raiden_service_pb2
+except ImportError:
+  from tpu_sync.rpc import controller_service_pb2
+  from tpu_sync.rpc import raiden_controller
+  from tpu_sync.rpc import raiden_service_pb2
 
 from tunix.experimental.orchestrator import weight_sync
 

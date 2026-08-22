@@ -27,9 +27,12 @@ from tunix.experimental.orchestrator import weight_sync
 
 _ws_lib: Any = None
 try:
-  from tpu_sync.api.jax import weight_synchronizer as _ws_lib  # pylint: disable=g-import-not-at-top
+  from tpu_raiden.api.jax import weight_synchronizer as _ws_lib  # pylint: disable=g-import-not-at-top
 except ImportError:
-  _ws_lib = None
+  try:
+    from tpu_sync.api.jax import weight_synchronizer as _ws_lib  # pylint: disable=g-import-not-at-top
+  except ImportError:
+    _ws_lib = None
 
 
 def local_ip() -> str:
@@ -75,15 +78,28 @@ def flatten_weights(state: Any) -> Tuple[List[str], List[Any]]:
 
 
 def _bindable(arr: Any) -> bool:
-  """True if the native layer can bind this leaf."""
+  """True if the native layer can bind this leaf.
+
+  Binding a leaf the native layer cannot handle is undefined behavior
+  (observed: random RuntimeError or SIGSEGV on RNG-key arrays), so this is
+  intentionally conservative: only floating-point, rank>=1 arrays fully
+  resident on TPU devices are considered bindable. RNG keys (uint32, rank 0
+  scalars in some representations) and any CPU/host-resident or mixed-device
+  arrays are excluded.
+  """
   try:
+    if not hasattr(arr, "shape") or not hasattr(arr, "dtype"):
+      return False
+    if arr.ndim < 1:
+      return False
+    if not jnp.issubdtype(arr.dtype, jnp.floating):
+      return False
     devices = arr.devices()
-  except AttributeError:
+    if not devices:
+      return False
+    return all(getattr(d, "platform", "?") == "tpu" for d in devices)
+  except Exception:
     return False
-  on_local_hw = all(
-      getattr(d, "platform", "?") in ("cpu", "tpu") for d in devices
-  )
-  return on_local_hw and jnp.issubdtype(arr.dtype, jnp.number)
 
 
 def _filter_bindable(
@@ -103,6 +119,17 @@ def _filter_bindable(
   dropped = []
   for name, arr in zip(names, arrays):
     if _bindable(arr):
+      if hasattr(arr, "block_until_ready"):
+        try:
+          # Force the async dispatch to complete before handing the array to
+          # the native binder; binding a not-yet-computed/transferred buffer
+          # is part of what produces the undefined behavior noted above. Any
+          # exception here means the array is already in a bad state (e.g.
+          # already deleted/errored), which _bindable's checks below will
+          # also catch, so it's safe to swallow and move on.
+          arr.block_until_ready()
+        except Exception:
+          pass
       keep_names.append(name)
       keep_arrays.append(arr)
     else:
@@ -195,16 +222,27 @@ class RaidenSynchronizer:
     if _ws_lib is None:
       return
     if self._sync is None:
+      kwargs = {
+          "local_port": 0,
+          "parallelism": self._parallelism,
+          "unsafe_skip_buffer_lock": True,
+          "listener_port": 0,
+          "bind_ip": None,
+      }
+      try:
+        # _ws_lib resolves to either tpu_raiden.api.jax or the older
+        # tpu_sync.api.jax (see the import fallback above) depending on which
+        # of the two library versions is installed; only the newer one
+        # accepts auto_h2d, so probe the signature instead of assuming it.
+        import inspect
+        sig = inspect.signature(_ws_lib.WeightSynchronizer.__init__)
+        if "auto_h2d" in sig.parameters:
+          kwargs["auto_h2d"] = self._auto_h2d
+      except Exception:
+        pass
       self._sync = _ws_lib.WeightSynchronizer(
           self.arrays,
-          local_port=0,
-          parallelism=self._parallelism,
-          # Rebinding deadlocks on the retained usage holds otherwise; the
-          # caller keeps Python references to the bound arrays regardless.
-          unsafe_skip_buffer_lock=True,
-          listener_port=0,
-          bind_ip=None,
-          auto_h2d=self._auto_h2d,
+          **kwargs,
       )
     else:
       self._sync.bind_weights(self.arrays)
@@ -221,7 +259,13 @@ class RaidenSynchronizer:
     self._require_sync("h2d()").h2d()
 
   def metrics(self) -> dict:
-    return self._sync.get_metrics() if self._sync else {}
+    if self._sync is None:
+      return {}
+    if hasattr(self._sync, "get_metrics"):
+      return self._sync.get_metrics()
+    if hasattr(self._sync, "metrics"):
+      return self._sync.metrics()
+    return {}
 
   def checksums(self, sample: int = 3) -> dict:
     """Per-tensor float32 abs-sums for cross-process verification."""

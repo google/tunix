@@ -1,0 +1,41 @@
+FROM us-central1-docker.pkg.dev/cloud-tpu-multipod-dev/yangmu/tunix/tunix_base_image:trellis-demo-0813
+
+ENV PATH="/opt/venv/bin:$PATH"
+
+# The base image ships jax/jaxlib 0.9.2 + libtpu 0.0.39. tpu-raiden (the
+# native weight-sync transport, see raiden_wheels/ below) requires JAX
+# >=0.11.0, so bump the stack to the exact version the bundled raiden wheel
+# was built against before installing it -- a version mismatch here is a
+# silent ABI break, not an import error.
+RUN pip install --no-cache-dir -U "jax[tpu]==0.11.0" "jaxlib==0.11.0" "libtpu==0.0.44" \
+    -f https://storage.googleapis.com/jax-releases/libtpu_releases.html
+
+# Install TPU Raiden JAX wheel. Use an already-built wheel matching the JAX
+# version pinned above if you have one; otherwise build one from
+# https://github.com/AI-Hypercomputer/tpu-raiden with
+# `WITH_TORCH=0 ./ci/build_wheel.sh jax` (a from-scratch hermetic build,
+# ~1-2h on a large machine -- mostly compiling LLVM/XLA). Either way, drop
+# the wheel into ./raiden_wheels/ before building this image.
+COPY ./raiden_wheels/*.whl /tmp/raiden_wheels/
+RUN pip install --no-deps /tmp/raiden_wheels/*.whl && rm -rf /tmp/raiden_wheels
+
+# Install MaxText dependencies directly into docker image
+RUN pip install --no-cache-dir \
+    aqtp \
+    tokamax \
+    einshape \
+    typeguard \
+    drjax \
+    ml-goodput-measurement \
+    cloud-accelerator-diagnostics \
+    cloud-tpu-diagnostics \
+    google-cloud-mldiagnostics \
+    google-cloud-monitoring
+
+# Install Tunix in editable mode
+WORKDIR /app
+COPY . /app
+RUN pip install --no-deps -e /app
+
+WORKDIR /app
+CMD ["bash"]

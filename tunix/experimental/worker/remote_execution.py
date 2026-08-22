@@ -88,8 +88,10 @@ def _grpc_options() -> List[Tuple[str, int]]:
       ("grpc.keepalive_time_ms", 20000),
       ("grpc.keepalive_timeout_ms", 10000),
       ("grpc.keepalive_permit_without_calls", 1),
-      ("grpc.http2.min_recv_ping_interval_without_data_ms", 10000),
+      ("grpc.http2.max_pings_without_data", 0),
       ("grpc.http2.max_ping_strikes", 0),
+      ("grpc.http2.min_ping_interval_without_data_ms", 5000),
+      ("grpc.http2.min_recv_ping_interval_without_data_ms", 5000),
   ]
 
 
@@ -246,7 +248,24 @@ class RemoteExecutionServer(abc.ABC):
     return request.request_id
 
   async def _run_and_enqueue(self, request: ExecutionRequest) -> None:
+    logging.debug(
+        "[RemoteExecutionServer] Starting task %s method=%s",
+        request.request_id,
+        request.method_name,
+    )
     response = await self.execute_request(request)
+    if response.error_message:
+      logging.error(
+          "[RemoteExecutionServer] Task %s failed: %s\n%s",
+          request.request_id,
+          response.error_message,
+          response.traceback,
+      )
+    else:
+      logging.debug(
+          "[RemoteExecutionServer] Task %s finished successfully",
+          request.request_id,
+      )
     await self._get_response_queue().put(response)
 
   async def poll_response(
@@ -515,6 +534,91 @@ class ActorHandle(abc.ABC):
   ) -> Optional[ExecutionResponse]:
     """Long-polls remote server response queue for completed result."""
     pass
+
+  def info(self) -> Any:
+    """Returns WorkerInfo for registry."""
+    if hasattr(self, "_info") and getattr(self, "_info") is not None:
+      return getattr(self, "_info")
+    return self.submit("info")
+
+  # Worker lifecycle protocol
+  def initialize(self) -> Any:
+    return self.submit("initialize")
+
+  def compile(self, dummy_data: Any = None) -> Any:
+    return self.submit("compile", dummy_data)
+
+  def start(self) -> Any:
+    return self.submit("start")
+
+  def stop(self) -> Any:
+    return self.submit("stop")
+
+  def pause(self) -> Any:
+    return self.submit("pause")
+
+  def resume(self) -> Any:
+    return self.submit("resume")
+
+  def heartbeat(self) -> Any:
+    return self.submit("heartbeat")
+
+  # WeightSyncSource protocol
+  async def prepare_weight_sync(
+      self, sync_request: Any = None, **kwargs: Any
+  ) -> Any:
+    return await self.asubmit(
+        "prepare_weight_sync", sync_request=sync_request, **kwargs
+    )
+
+  async def release_weight_sync(
+      self, sync_request: Any = None, **kwargs: Any
+  ) -> Any:
+    return await self.asubmit(
+        "release_weight_sync", sync_request=sync_request, **kwargs
+    )
+
+  # WeightSyncDestination protocol
+  async def bind_weight_sync(self, **kwargs: Any) -> Any:
+    return await self.asubmit("bind_weight_sync", **kwargs)
+
+  async def get_weight_sync_metadata(self, **kwargs: Any) -> Any:
+    return await self.asubmit("get_weight_sync_metadata", **kwargs)
+
+  async def pre_weight_sync(
+      self, sync_request: Any = None, **kwargs: Any
+  ) -> Any:
+    return await self.asubmit(
+        "pre_weight_sync", sync_request=sync_request, **kwargs
+    )
+
+  async def weight_sync(
+      self, sync_request: Any = None, **kwargs: Any
+  ) -> Any:
+    return await self.asubmit(
+        "weight_sync", sync_request=sync_request, **kwargs
+    )
+
+  async def post_weight_sync(
+      self, sync_request: Any = None, **kwargs: Any
+  ) -> Any:
+    return await self.asubmit(
+        "post_weight_sync", sync_request=sync_request, **kwargs
+    )
+
+  async def abort_weight_sync(
+      self, sync_request: Any = None, **kwargs: Any
+  ) -> Any:
+    return await self.asubmit(
+        "abort_weight_sync", sync_request=sync_request, **kwargs
+    )
+
+  async def get_weight_sync_status(
+      self, sync_request: Any = None, **kwargs: Any
+  ) -> Any:
+    return await self.asubmit(
+        "get_weight_sync_status", sync_request=sync_request, **kwargs
+    )
 
 
 class RemoteActorHandle(ActorHandle):

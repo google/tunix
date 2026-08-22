@@ -52,7 +52,15 @@ class ClusterOrchestrator:
   ):
     """Initializes ClusterOrchestrator."""
     self.config = config
-    self.registry = registry or worker_registry.WorkerRegistry()
+    # `registry or WorkerRegistry()` looks equivalent but isn't: WorkerRegistry
+    # defines __len__, so a caller-supplied *empty* registry (len 0, the
+    # common case -- every fresh orchestrator starts with one) is falsy and
+    # the `or` would silently discard it in favor of a brand-new, different
+    # registry, leaving the caller's copy permanently out of sync with
+    # self.registry. Check identity against None instead.
+    self.registry = (
+        registry if registry is not None else worker_registry.WorkerRegistry()
+    )
     self.lifecycle_driver = lifecycle_driver or lifecycle.LifecycleDriver(
         self.registry
     )
@@ -110,10 +118,13 @@ class ClusterOrchestrator:
         roles=role_names,
         resources={"remote": True, **dict(resources or {})},
     )
+    handle._worker_id = worker_id  # pylint: disable=protected-access
+    handle._info = info  # pylint: disable=protected-access
     for role in role_names:
       self._remote_worker_handles[role].append(handle)
     self._remote_worker_handles_by_id[worker_id] = handle
     self._remote_worker_infos[worker_id] = info
+    self.registry.register(handle)
     return info
 
   def unregister_worker(self, worker_id: str) -> None:
@@ -134,23 +145,22 @@ class ClusterOrchestrator:
 
   def worker_infos(self) -> list[datatypes.WorkerInfo]:
     """Returns local and remote worker metadata registered with the orchestrator."""
-    return self.registry.infos() + [
-        self._remote_worker_infos[worker_id]
-        for worker_id in sorted(self._remote_worker_infos)
-    ]
+    # register_worker (local) and register_worker_handle (remote) both call
+    # self.registry.register(...), so the registry already holds everything;
+    # appending self._remote_worker_infos on top double-listed every remote
+    # worker.
+    return self.registry.infos()
 
   def bring_up_workers(self, dummy_data: Any = None) -> None:
     """Brings up all registered workers through lifecycle initialization."""
     logging.info("Bringing up workers across cluster...")
     self.lifecycle_driver.bring_up(dummy_data)
-    self._bring_up_remote_workers(dummy_data)
     self.engine = self._create_engine()
 
   def shutdown(self) -> None:
     """Shuts down all workers and closes health monitoring resources."""
     logging.info("Shutting down ClusterOrchestrator...")
     self.monitor.close()
-    self._shutdown_remote_workers()
     self.lifecycle_driver.shutdown()
 
   def validate_startup(self, alg_config: Any, training_config: Any) -> None:
@@ -172,43 +182,22 @@ class ClusterOrchestrator:
       self, role: datatypes.Role | str
   ) -> list[remote_execution.ActorHandle]:
     role_key = role.value if isinstance(role, datatypes.Role) else role
-    handles = list(self._remote_worker_handles.get(role_key, ()))
-    handles.extend(
-        remote_execution.InProcessActorHandle(
-            remote_execution.InProcessRemoteExecutionServer(worker)
+    handles = []
+    if role_key in self._remote_worker_handles:
+      for h in self._remote_worker_handles[role_key]:
+        if h not in handles:
+          handles.append(h)
+    for worker in self._get_role_members(role):
+      if isinstance(worker, remote_execution.ActorHandle):
+        if worker not in handles:
+          handles.append(worker)
+      else:
+        handles.append(
+            remote_execution.InProcessActorHandle(
+                remote_execution.InProcessRemoteExecutionServer(worker)
+            )
         )
-        for worker in self._get_role_members(role)
-    )
     return handles
-
-  def _bring_up_remote_workers(self, dummy_data: Any = None) -> None:
-    """Runs lifecycle hooks on remote worker handles registered directly."""
-    worker_ids = sorted(self._remote_worker_infos)
-    for worker_id in worker_ids:
-      logging.info("Initializing remote worker %s.", worker_id)
-      self._remote_worker_handles_by_id[worker_id].submit("initialize")
-    for worker_id in worker_ids:
-      logging.info("Compiling remote worker %s.", worker_id)
-      self._remote_worker_handles_by_id[worker_id].submit("compile", dummy_data)
-    for worker_id in worker_ids:
-      logging.info("Starting remote worker %s.", worker_id)
-      self._remote_worker_handles_by_id[worker_id].submit("start")
-
-  def _shutdown_remote_workers(self) -> None:
-    """Stops remote worker handles best-effort, with a hard timeout."""
-    pool = futures.ThreadPoolExecutor(max_workers=4)
-    stops = {
-        worker_id: pool.submit(
-            self._remote_worker_handles_by_id[worker_id].submit, "stop"
-        )
-        for worker_id in sorted(self._remote_worker_infos)
-    }
-    for worker_id, fut in stops.items():
-      try:
-        fut.result(timeout=_STOP_TIMEOUT_S)
-      except Exception as err:  # pylint: disable=broad-except
-        logging.warning("Failed to stop remote worker %s: %r", worker_id, err)
-    pool.shutdown(wait=False)
 
   def _create_engine(self) -> distributed_rl_engine.DistributedRLEngine:
     """Constructs a DistributedRLEngine from the registered role groups."""
