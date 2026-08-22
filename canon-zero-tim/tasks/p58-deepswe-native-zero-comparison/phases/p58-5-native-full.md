@@ -24,7 +24,7 @@ validate the deferred zero arm and cannot establish a paired treatment effect.
 - recipe: B8 x G16, response 16,384, 50 turns, RLOO, fixed-context
   `sequence-mean-token-scale`, TPU-resident optimizer, optional interventions
   off, prefix cache off;
-- stage/run: `full`, fresh run-id `p58f06`, exactly 1,000 optimizer commits;
+- stage/run: `full`, fresh run-id `p58f07`, exactly 1,000 optimizer commits;
 - arm: `native` only. Rendering or applying `zero` is outside this phase.
 
 ## Admission gate
@@ -41,8 +41,9 @@ Failure here is admission `INCONCLUSIVE`, not training evidence.
   device count 128;
 - first completed batch: 128 journal rows, sandbox-start/environment/model
   timeout split, cleanup receipts, solve/signal group metrics;
-- commits 1–3: finite forward/backward, finite nonzero native A-B, exact B-C,
-  device-resident optimizer, monotonic transaction and journal state;
+- commits 1–3: finite forward/backward, finite nonzero Native mismatch on A-B
+  or B-C, exact trainer old/current repeat, device-resident optimizer, and
+  monotonic transaction and journal state;
 - later milestones: checkpoint 8, then updates 32, 100, and every 100 updates;
 - evaluation remains at the signed recipe cadence; checkpoint cadence remains
   every 8 committed updates.
@@ -53,19 +54,21 @@ not because the former canary horizon has been crossed.
 ## Exit gate
 
 The native full classifier must report `PASS` from complete, digest-verified
-artifacts and exactly 1,000 commits. It must prove finite nonzero A-B treatment
-dose, exact B-C, finite training values, TPU-resident optimizer state,
-complete 128-row trajectory batches, journal continuity, sandbox cleanup,
-evaluation/checkpoint cadence, and transaction integrity.
+artifacts and exactly 1,000 commits. It must prove a finite nonzero serving-path
+treatment dose across A-B or B-C, exact trainer old/current repeat, finite
+training values, TPU-resident optimizer state, complete 128-row trajectory
+batches, journal continuity, sandbox cleanup, evaluation/checkpoint cadence,
+and transaction integrity.
 
 An all-filtered batch may advance `batch_index` without an optimizer commit;
 it must preserve unchanged optimizer state and may make the number of consumed
-batches exceed 1,000. Partial/tampered evidence, exact native A-B
-(`NO_TREATMENT`), or any B-C drift cannot be promoted.
+batches exceed 1,000. Partial/tampered evidence, no Native serving-path
+mismatch (`NO_TREATMENT`), trainer old/current drift, or any Zero-arm drift
+cannot be promoted.
 
 ## Attempt boundary
 
-P58c05 and p58f01 through p58f05 are immutable `INCONCLUSIVE` evidence.
+P58c05 and p58f01 through p58f06 are immutable `INCONCLUSIVE` evidence.
 P58f01 exposed sandbox LocalQueue and reset-time provenance faults. P58f02
 exposed a CPU-flavor/node-pool mismatch; moving the head and sandboxes to
 `cpu-np` was the correct repair. P58f03 then completed 128 real trajectories
@@ -100,9 +103,18 @@ was attached, then `gsm8k_ab_report_policy()` rejected the run before trainer
 forward/backward/update: P58 was present in the alternative-workload count but
 that branch admitted only `one-update/three-update`, not the signed full stage.
 
-The repair does not relax warning semantics or add a flag. It admits P58
-Native only when `CANON_P58_TIM_ADMITTED=1`, no P39/P43/P44 mode competes, and
-the stage/horizon is exactly `three-update/3` or `full/1000`. Native still
-warns only on finite decode-vs-prefill A-B; Zero remains strict, and B-C plus
-all structural/numerical failures remain hard. The next attempt is fresh
-native `p58f06` after publication/readback. Zero remains deferred.
+The p58f05 repair did not add a flag. It admits P58 Native only when
+`CANON_P58_TIM_ADMITTED=1`, no P39/P43/P44 mode competes, and the stage/horizon
+is exactly `three-update/3` or `full/1000`. P58f06 proved that admission repair:
+its 492.7-second rollout wrote 128 durable rows, observed three solved
+trajectories, passed exact 398-leaf weights, processed all 2,048 Native B rows,
+and executed alignment over 405,827 action tokens. Both A-B and B-C were valid
+and finite, but the policy's P58-specific boundary tuple still allowed only
+A-B and therefore blocked finite B-C before trainer forward/backward/update.
+
+The local correction restores the intended untreated Native scope: finite A-B
+and B-C are treatment warnings, while trainer `T_old_vs_T_current`, derived
+trainer-repeat ratio `r`, nonfinite/shape, weight, replica, transaction, and
+optimizer failures remain hard. Zero stays strict at every boundary. The next
+attempt is fresh Native `p58f07` after publication/readback. Zero remains
+deferred.

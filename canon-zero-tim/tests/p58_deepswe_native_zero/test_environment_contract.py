@@ -211,7 +211,8 @@ class P58EnvironmentContractTest(unittest.TestCase):
     self.assertTrue(policy["warning_only"])
     self.assertEqual(policy["stage"], "full")
     self.assertEqual(
-        policy["warning_boundaries"], ("S_decode_vs_S_prefill",)
+        policy["warning_boundaries"],
+        ("S_decode_vs_S_prefill", "S_prefill_vs_T_old"),
     )
 
 

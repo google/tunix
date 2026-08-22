@@ -25,15 +25,18 @@ treatment comparison and not zero-TIM evidence.
 ## Exit gate
 
 The native classifier must report `PASS` from complete, digest-verified
-artifacts. It must prove exactly three commits, finite nonzero A-B treatment
-dose, exact B-C, finite training values, device-resident optimizer state,
+artifacts. Under the corrected p58f06 interpretation, it must prove exactly
+three commits, a finite nonzero treatment dose on A-B or B-C, exact trainer
+old/current repeat, finite training values, device-resident optimizer state,
 complete 128-row trajectory batches, journal continuity, sandbox cleanup, and
 checkpoint/transaction integrity.
 
 An all-filtered batch may add a trajectory batch without adding an optimizer
 commit. It must have a zero-commit receipt and unchanged state. Interrupted
-infrastructure, missing evidence, exact native A-B (`NO_TREATMENT`), or any
-B-C drift is `INCONCLUSIVE`/failure under the classifier, never PASS.
+infrastructure, missing evidence, no Native serving-path mismatch
+(`NO_TREATMENT`), or any trainer old/current drift is `INCONCLUSIVE`/failure under the classifier,
+never PASS. A finite Native B-C serving-path mismatch is treatment evidence,
+not a veto; Zero remains strict.
 
 ## Supersession
 

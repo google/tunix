@@ -6,9 +6,10 @@ trainer role. Both roles are DP8 x TP8. The two arms share data, seeds,
 sampling, loss, optimizer, deadlines, artifacts, and update horizon.
 
 - `native` preserves the stock serving/trainer numerical programs from the
-  pinned DeepSWE quality-fix lineage. Finite A-B mismatch is the measured
-  treatment dose. B-C, nonfinite values, invalid shapes, replica/transaction
-  failures, and corrupt evidence remain fatal.
+  pinned DeepSWE quality-fix lineage. Finite A-B and B-C differences are the
+  measured serving-path treatment dose. Trainer old/current repeat drift,
+  nonfinite values, invalid shapes, replica/transaction failures, and corrupt
+  evidence remain fatal.
 - `zero` enables the complete canonical numerical bundle. A, B, and C must be
   exact at every admitted boundary.
 
@@ -116,13 +117,17 @@ but the run stopped before trainer forward/backward/update because the warning
 policy admitted P58 only in an obsolete short-update branch and rejected the
 signed `stage=full, expected_updates=1000` tuple.
 
-The repair admits P58 Native only with `CANON_P58_TIM_ADMITTED=1`, no competing
+The p58f05 repair admits P58 Native only with `CANON_P58_TIM_ADMITTED=1`, no competing
 P39/P43/P44 mode, and an exact `three-update/3` or `full/1000` pair. It does
-not enable a zero-TIM numerical flag or broaden warning semantics: only finite
-decode-vs-prefill A-B warns in Native; Zero stays strict and B-C plus all hard
-failures remain blocking. Use fresh full-stage run-id `p58f06` after
-publication/readback; never reuse p58f05 YAML/root or journal as training
-state.
+not enable a zero-TIM numerical flag. P58f06 proved that admission and reached
+alignment after 128 durable trajectories, exact weights, and a complete Native
+processed-B observation. Both A-B and B-C were shape-valid and finite across
+405,827 action tokens, but the P58-specific warning tuple still blocked B-C
+before trainer forward. The correction makes both finite serving-path
+boundaries warnings while keeping trainer old/current repeat, nonfinite/shape,
+weights, replica, transaction, and optimizer errors hard. Zero remains strict.
+Use fresh full-stage run-id `p58f07` after publication/readback; never reuse
+p58f06 YAML/root or journal as training state.
 
 The direct-entrypoint implementation commit is
 `82d82f72a7220d945737d95f6266b5b7e2cfe706`. Resolve the final runnable SHA by
@@ -260,7 +265,7 @@ CLIENT_IMAGE_DIGEST='registry.example/tunix@sha256:<64-hex-digest>'
 CPU_NODEPOOL='cpu-np'
 TPU_NODEPOOL='tpu-v5p-slice'
 MODEL_PVC='haoyugao-cpu-np-pvc'
-RUN_STEM='p58f06'
+RUN_STEM='p58f07'
 STAGE='full'
 
 ARM='native'
@@ -421,18 +426,19 @@ Monitor without stopping the healthy job:
 |---|---|
 | Kueue admission | `QuotaReserved=True`, selected TPU flavor, 32 four-chip worker pods, 128 Pathways devices |
 | first completed batch | 128 journal rows; timeout split; cleanup; solve, all-zero/all-one/mixed/effective-group metrics |
-| commits 1–3 | finite forward/backward; finite nonzero A-B; exact B-C; TPU optimizer; monotonic transaction/journal state |
+| commits 1–3 | finite forward/backward; finite nonzero A-B or B-C dose; exact trainer old/current repeat; TPU optimizer; monotonic transaction/journal state |
 | commit 8 | first expected checkpoint artifact and digest |
 | commits 32, 100, then each 100 | continued finite training, checkpoint/evaluation cadence, no journal or cleanup drift |
 
 Crossing commit 3 is not a stop condition. The classifier cannot say full
 `PASS` until commit 1,000 and complete postflight evidence exist.
 
-The native classifier also requires at least one finite, nonzero
-`S_decode_vs_S_prefill` mismatch. Exact native A-B is `NO_TREATMENT`, not a
-successful comparison. Native `S_prefill_vs_T_old` and
-`T_old_vs_T_current` remain exact. The zero classifier requires all boundaries
-exact. Both require device-resident optimizer evidence and no blocking reds.
+The native classifier requires at least one finite, nonzero mismatch across
+`S_decode_vs_S_prefill` or `S_prefill_vs_T_old`. Exactness on both Native
+serving boundaries is `NO_TREATMENT`, not a successful comparison. Native
+`T_old_vs_T_current` remains exact. The zero classifier requires all
+boundaries exact. Both require device-resident optimizer evidence and no
+blocking reds.
 
 Useful scan:
 
@@ -460,8 +466,8 @@ Stop rather than retrying the same manifest if any of these occurs:
 - source/image/data digest drift;
 - native/zero processed-B treatment mixing, a missing or duplicate native
   stock-observer marker, or a canonical engine marker in native;
-- native has no observed mismatch dose;
-- native B-C or any zero boundary differs;
+- native has no observed finite serving-path mismatch dose;
+- native trainer old/current or any zero boundary differs;
 - NaN/Inf, invalid shape, replica drift, optimizer/weight attestation failure;
 - host optimizer offload, prefix cache, sampler-IS, group filtering, or flat
   resampling appears;

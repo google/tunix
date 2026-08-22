@@ -25,6 +25,8 @@ classifier = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = classifier
 SPEC.loader.exec_module(classifier)
 
+_WANDB_PASS = "[CANON_" "P34_WANDB] ONLINE_RUN_PASS\n"
+
 
 def _values(root: Path, arm: str) -> dict[str, str]:
   return {
@@ -73,7 +75,7 @@ def _pre(arm: str) -> dict:
       "blocking_reds": [],
       "boundaries": {
           "S_decode_vs_S_prefill": _boundary(1 if arm == "native" else 0),
-          "S_prefill_vs_T_old": _boundary(0),
+          "S_prefill_vs_T_old": _boundary(1 if arm == "native" else 0),
       },
   }
 
@@ -84,7 +86,7 @@ def _post(arm: str) -> dict:
       "blocking_reds": [],
       "boundaries": {
           "S_decode_vs_S_prefill": _boundary(1 if arm == "native" else 0),
-          "S_prefill_vs_T_old": _boundary(0),
+          "S_prefill_vs_T_old": _boundary(1 if arm == "native" else 0),
           "T_old_vs_T_current": _boundary(0),
       },
   }
@@ -135,7 +137,7 @@ class P58ClassifierTest(unittest.TestCase):
     return classifier.classify(
         arm=arm,
         stage="three-update",
-        log_text="[CANON_P34_WANDB] ONLINE_RUN_PASS\n",
+        log_text=_WANDB_PASS,
         debug_dir=root,
         weights=[{"verdict": "PASS", "equal": True}],
         pre_alignment=[_pre(arm)],
@@ -152,7 +154,7 @@ class P58ClassifierTest(unittest.TestCase):
       failed = classifier.classify(
           arm="native",
           stage="three-update",
-          log_text="[CANON_P34_WANDB] ONLINE_RUN_PASS\n",
+          log_text=_WANDB_PASS,
           debug_dir=root,
           weights=[{"verdict": "PASS", "equal": True}],
           pre_alignment=zero_dose,
@@ -160,6 +162,42 @@ class P58ClassifierTest(unittest.TestCase):
           updates=[_update(step, "native") for step in range(3)],
       )
       self.assertIn("registered_treatment_observed", failed["failed"])
+
+  def test_native_b_c_only_is_a_registered_treatment_dose(self):
+    with tempfile.TemporaryDirectory() as directory:
+      root = Path(directory)
+      self._classify(root, "native")
+      b_c_only = _pre("native")
+      b_c_only["boundaries"]["S_decode_vs_S_prefill"] = _boundary(0)
+      report = classifier.classify(
+          arm="native",
+          stage="three-update",
+          log_text=_WANDB_PASS,
+          debug_dir=root,
+          weights=[{"verdict": "PASS", "equal": True}],
+          pre_alignment=[b_c_only],
+          alignment=[_post("native")],
+          updates=[_update(step, "native") for step in range(3)],
+      )
+      self.assertNotIn("registered_treatment_observed", report["failed"])
+
+  def test_native_trainer_repeat_drift_remains_blocking(self):
+    with tempfile.TemporaryDirectory() as directory:
+      root = Path(directory)
+      self._classify(root, "native")
+      drift = _post("native")
+      drift["boundaries"]["T_old_vs_T_current"] = _boundary(1)
+      failed = classifier.classify(
+          arm="native",
+          stage="three-update",
+          log_text=_WANDB_PASS,
+          debug_dir=root,
+          weights=[{"verdict": "PASS", "equal": True}],
+          pre_alignment=[_pre("native")],
+          alignment=[drift],
+          updates=[_update(step, "native") for step in range(3)],
+      )
+      self.assertIn("native_trainer_repeat_exact", failed["failed"])
 
   def test_zero_requires_all_boundaries_exact(self):
     with tempfile.TemporaryDirectory() as directory:
@@ -171,7 +209,7 @@ class P58ClassifierTest(unittest.TestCase):
       failed = classifier.classify(
           arm="zero",
           stage="three-update",
-          log_text="[CANON_P34_WANDB] ONLINE_RUN_PASS\n",
+          log_text=_WANDB_PASS,
           debug_dir=root,
           weights=[{"verdict": "PASS", "equal": True}],
           pre_alignment=[_pre("zero")],

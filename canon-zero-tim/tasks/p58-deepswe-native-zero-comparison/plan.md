@@ -35,7 +35,7 @@ result, not a causal comparison.
 | P58.1 | Frozen shared recipe and loss-aggregation contract | Fixed-16K formula oracle, compact-filter mask policy, effective-row-weighted accumulation, and DP8 invariance are specified and locally tested; public-source discrepancy is recorded | completed |
 | P58.2 | Default-off paired profiles, renderer, metrics, trajectory journal, and negative controls | Host tests and pinned-image tests prove that the two rendered arms differ only in the registered numerical treatment bundle | completed |
 | P58.3 | One-host observer and artifact sanity | Full redacted trajectory schema, W&B metric schema, logprob/alignment observers, checkpoint transactions, and no-update neutrality pass without a production claim | waived — not PASS |
-| P58.4N | Native 128-chip three-update canary | Native completes exactly three optimizer commits on rollout DP8 x TP8 plus trainer DP8 x TP8, records finite nonzero A-B, keeps B-C exact, and emits a signed classifier PASS | superseded — p58c05 failed before execution; not PASS |
+| P58.4N | Native 128-chip three-update canary | Native completes exactly three optimizer commits on rollout DP8 x TP8 plus trainer DP8 x TP8, records a finite nonzero serving-path mismatch dose, keeps trainer old/current exact, and emits a signed classifier PASS | superseded — p58c05 failed before execution; not PASS |
 | P58.4Z | Zero 128-chip three-update canary | Zero completes exactly three commits on the identical recipe with strict A=B=C and a signed classifier PASS | deferred — do not launch |
 | P58.5N | Native 128-chip full campaign | Native completes exactly 1,000 optimizer commits; the first three are monitored without stopping; durable trajectory, evaluation, checkpoint, alignment, optimizer, and classifier evidence passes | active |
 | P58.5Z | Zero full or paired comparison | Activated only after zero optimization and a new explicit user decision | deferred — do not launch |
@@ -51,7 +51,7 @@ before any workload pod or update existed. P58.5N is the only active phase.
 Both zero phases remain deferred even though the renderer and CPU tests cover
 that arm.
 
-P58.5N attempts `p58f01` through `p58f05` remain `INCONCLUSIVE`. P58f01 exposed
+P58.5N attempts `p58f01` through `p58f06` remain `INCONCLUSIVE`. P58f01 exposed
 missing sandbox LocalQueue inheritance and reset-time policy provenance;
 p58f02 showed that the chosen CPU flavor required `cpu-np`; and p58f03 proved
 that the CPU routing repair works by completing 128 real trajectories in
@@ -70,8 +70,14 @@ policy's P58 admission enumerated only short update stages and incorrectly
 rejected the signed `full/1000` tuple. The published repair separates P58 from
 the debug-stage admission and requires its existing admission, native arm, and
 exact stage/horizon signature. Its implementation SHA is
-`5132d7ad0d3bc7c53de09e20bae835dca18a211a`; after an executor's fresh branch
-readback the next attempt is `p58f06`.
+`5132d7ad0d3bc7c53de09e20bae835dca18a211a`. P58f06 proved that repair and
+executed alignment after another healthy 128-row rollout, exact live weights,
+and 2,048-row Native B observation. Its A-B and B-C arrays were shape-valid and
+finite across 405,827 action tokens, but the P58 policy still narrowed warnings
+to A-B and blocked on B-C before trainer forward. The correction admits both
+finite Native serving-path boundaries as treatment observations while keeping
+trainer-old/current repeat exact. After publication/readback the next attempt
+is `p58f07`.
 
 ## Frozen shared recipe
 
@@ -153,7 +159,8 @@ throughput is considered only when sandbox-start timeout metrics are zero and
   seed schedule, sampling parameters, topology, optimizer, objective, deadline,
   checkpoint cadence, and observer schema are byte- or value-equal.
 - `native` changes only the registered numerical implementation bundle. Finite
-  A-B is expected and logged; nonfinite values, B-C divergence, replica drift,
+  A-B and B-C serving-path differences are expected treatment observations;
+  trainer old/current repeat drift, nonfinite values, replica drift,
   transaction errors, OOM, and corrupted artifacts remain fatal.
 - `zero` enables the complete canonical serving/forward/backward bundle. Any
   A-B, B-C, or A-C discrepancy is fatal; warning-only is not a zero arm.

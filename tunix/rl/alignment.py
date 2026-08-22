@@ -529,7 +529,12 @@ def gsm8k_ab_report_policy() -> dict[str, Any]:
           warning_only or frozenlake_warning_only or deepswe_warning_only
       ),
       "warning_boundaries": (
-          ("S_decode_vs_S_prefill",) if p58_arm == "native" else None
+          (
+              "S_decode_vs_S_prefill",
+              "S_prefill_vs_T_old",
+          )
+          if p58_arm == "native"
+          else None
       ),
       "bounded_ab_only": bounded_ab,
       "workload": workload,
@@ -563,8 +568,8 @@ def _policy_warns(policy: Mapping[str, Any], item: str) -> bool:
     return True
   if item in boundaries:
     return True
-  # w and w*r include the registered native A-B treatment.  r is B-C and
-  # therefore remains exact/fail-closed.
+  # w and w*r include the registered native serving/trainer treatment.  r is
+  # the trainer-old/current repeat boundary and remains exact/fail-closed.
   return item in ("w_all_exactly_1", "wr_all_exactly_1", "clip_hits", "tis_hits")
 
 
