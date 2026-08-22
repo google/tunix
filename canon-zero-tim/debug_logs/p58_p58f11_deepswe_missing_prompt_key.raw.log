@@ -1,0 +1,38 @@
+=== CANON P58 DEEPSWE STEP 0 MISSING PROMPT KEY ERROR LOG (canon-p58-ds4b-native-full-p58f11) ===
+Workload: canon-p58-ds4b-native-full-p58f11
+Cluster: mlperf-v5p (europe-west4-b)
+Topology: 128 TPU v5p (32 workers x 4 TPU chips/worker)
+Command: python3 -u examples/deepswe/canonical_entrypoint.py --model_version=Qwen3-4B-Instruct-2507 --batch_size=8 --num_generations=16 --max_concurrency=128 --rollout_batch_timeout_secs=3600 --episode_timeout_secs=3000 --step_timeout_secs=600 --reward_timeout_secs=600
+
+[20:54:13 UTC] Initialized 128 physical TPU devices (mesh=[8, 8] rollout and train).
+[20:54:15 UTC] Gold filter passed: 1,012 whitelist entries loaded.
+[20:55:00 UTC] Step 0 Rollout initiated: 8 prompt groups x 16 generations = 128 trajectories in a single concurrency wave (max_concurrency=128).
+[21:15:09 UTC] [DEEPSWE.ROLLOUT_DEADLINE] batch_complete prompt_groups=8 elapsed_secs=1209.2 deadline_secs=3600
+[21:15:09 UTC] Rollout completed in 1209.2s (20.1 minutes) without batch timeout.
+
+[21:15:10 UTC] Trajectory [step_idx=0, pair_index=14, group_id=7] encountered env.reset timeout:
+ERROR:absl:[step_idx=0, pair_index=14, group_id=7] env.reset exceeded the 3000.0s trajectory deadline
+INFO:absl:[step_idx=0, pair_index=14, group_id=7] preserving original input from the environment after pre-observation termination
+[P58.LOGPS_BATCH] configured_prompts=8 generations=16 execution_trajectories=128 observed_trajectories=128
+
+[21:15:11 UTC] Process results crashed on KeyError:
+[rank0]: Traceback (most recent call last):
+[rank0]:   File "/app/examples/deepswe/canonical_entrypoint.py", line 36, in <module>
+[rank0]:     main()
+[rank0]:   File "/app/examples/deepswe/canonical_entrypoint.py", line 32, in main
+[rank0]:     runpy.run_module("examples.deepswe.train_deepswe_nb", run_name="__main__")
+[rank0]:   File "<frozen runpy>", line 229, in run_module
+[rank0]:   File "<frozen runpy>", line 88, in _run_code
+[rank0]:   File "/app/examples/deepswe/train_deepswe_nb.py", line 1582, in <module>
+[rank0]:     agentic_grpo_learner.train(train_dataset=train_dataset)
+[rank0]:   File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 2530, in train
+[rank0]:     train_examples = self._batch_to_train_example(
+[rank0]:                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 1981, in _batch_to_train_example
+[rank0]:     return self._process_results(
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/rl/agentic/agentic_grpo_learner.py", line 775, in _process_results
+[rank0]:     prompts=original_inputs["prompts"],
+[rank0]:             ~~~~~~~~~~~~~~~^^^^^^^^^^^
+[rank0]: KeyError: 'prompts'
+=== END LOG ===

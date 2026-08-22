@@ -1,0 +1,12 @@
+{
+  "artifact_name": "p58_p58f11_deepswe_missing_prompt_key",
+  "workload": "canon-p58-ds4b-native-full-p58f11",
+  "failure_category": "TRAJECTORY_TASK_KEY_ERROR",
+  "step_index": 0,
+  "elapsed_rollout_seconds": 1209.2,
+  "trajectories_total": 128,
+  "concurrency_limit": 128,
+  "root_cause": "When trajectory [group=7, pair=14] hit env.reset timeout (3000s), trajectory_collect_engine._original_input fell back to self.env.task. In SWEEnv, dataset entries are stored on self.entry rather than self.task (which defaulted to {}), so the fallback original_input lacked the 'prompts' key. During batch merge, original_inputs lacked 'prompts', causing agentic_grpo_learner.py:775 to raise KeyError: 'prompts'.",
+  "remediation": "In examples/deepswe/swe_env.py, initialize self.task = dict(self.entry) and ensure self.task['prompts'] = [self.entry.get('problem_statement', '')] so that pre-observation reset timeout trajectories preserve valid task metadata with 'prompts'.",
+  "status": "ROOT_CAUSE_ISOLATED"
+}
