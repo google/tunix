@@ -41,12 +41,13 @@ the whole zero-TIM bundle effect and cannot attribute a result to one kernel.
 
 ## Execution
 
-1. Primary no-IS pair: render and, after explicit approval, launch P45 and M15
-   under both `mismatch` and `zero`. These are four independent 64-chip jobs.
-   Native and zero may run concurrently when four disjoint slices are available;
-   otherwise preserve the same source and campaign contract across the queue.
-2. IS add-on: after the primary pair evidence is packaged, launch P45 `is` and
-   M15 `is`.
+1. First queue: render and, after explicit launch approval, launch P45 and M15
+   under both `mismatch` and `is`. These are four independent 64-chip jobs using
+   the same native/stock-fast numerical program; their controlled treatment is
+   token importance sampling and the corresponding old-logprob identity.
+2. Deferred Zero-TIM pair: do not include P45 `zero` or M15 `zero` in the first
+   queue. After the first four runs are packaged, require a separate user
+   decision before launching either complete Zero-TIM/no-IS cell.
 3. Run one isolated deterministic final-checkpoint evaluation for every valid
    cell. Never compare P45 accuracy directly with M15 accuracy as an arm effect.
 4. Compute within-workload contrasts: IS benefit (`is - mismatch`), zero-TIM
@@ -64,10 +65,11 @@ checkpoint tags. A healthy run is not intentionally paused; checkpoints every
   command has exactly one expected sampler mode; native cells attest the entire
   zero-TIM bundle off; zero cells attest the registered canonical bundle; the
   opposite sampler mode and wrong workload horizon are rejected.
-- Target pass for the primary pair: all four full horizons complete with exactly
-  one no-IS purity receipt; native has a finite A-B dose and valid B-C, while
-  zero has strict A=B=C; every job has checkpoints and complete classifier
-  artifacts.
+- Target pass for the current four-job queue: all four full horizons complete;
+  the two `mismatch` jobs have exactly one no-IS purity receipt and the two `is`
+  jobs have exactly one token-IS purity receipt. All four attest the stock-fast
+  zero-TIM-off path, a finite A-B dose, valid B-C, checkpoints, and complete
+  classifier artifacts.
 - Fail: any missing receipt, nonfinite/B-C/transaction/checkpoint failure,
   restart without an explicit resume decision, or treatment leakage is
   `INCONCLUSIVE`; preserve the run and stop.

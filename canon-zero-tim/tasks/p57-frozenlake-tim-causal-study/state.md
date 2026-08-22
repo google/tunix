@@ -6,8 +6,8 @@
 - Task directory: `canon-zero-tim/tasks/p57-frozenlake-tim-causal-study`
 - Directory state: tracked
 - Current phase: [P57.1b — three-arm baselines](phases/p57-1b-three-arm-baselines.md)
-- Last verified fact: all six local cells now render at exactly 200 updates and pass the real resolved `00_env.sh` preflight. The P57 host suite passed 105/105, including rejection of the historical P45 450-step horizon; flag audit passed 320/320; syntax and diff gates passed; and the pinned-image exact-image gate emitted the IS stock-runtime positive, zero rejection, fixed-lm-head/TP8 forward+VJP receipts, `P57_STOCK_OBSERVER_EXACT_IMAGE_PASS targets=absolute values=processed`, and `P45_EXACT_IMAGE_CPU_PASS overlay=qwen8b_tp8`, exit 0.
-- Next action: present the uncommitted 200-step six-cell diff for review. Commit/push, rebase onto the advanced remote tip, and every target launch require separate approval; no target has tested this local extension.
-- Blockers: publication and target launch approval; the remote delivery tip has advanced beyond this dirty worktree base, so any approved publication must rebase and rerun focused gates first. No TPU run has tested the local three-arm extension.
+- Last verified fact: all six construction cells render at exactly 200 updates and pass the real resolved `00_env.sh` preflight. The P57 host suite passed 105/105, flag audit passed 320/320, and the pinned-image gate passed stock `is`, zero rejection, fixed-lm-head/TP8 forward+VJP, stock observer, and terminal P45 exact-image receipts. After the user selected the first target queue as P45/M15 `mismatch` plus P45/M15 `is`, both two-workload wrapper commands passed and produced exactly those four 200-step manifests; no `zero` manifest was rendered.
+- Next action: from the immutable published documentation tip, render the `native` and `is` waves, record all four manifest hashes, and request separate approval before applying the four JobSets. Do not render or launch the deferred `zero` wave as part of this queue.
+- Blockers: target launch approval and four independent 64-chip slices if all jobs are to run concurrently. No TPU target has tested the three-arm extension.
 - Key artifacts: [plan.md](plan.md); [active phase](phases/p57-1b-three-arm-baselines.md); [RUNBOOK.md](RUNBOOK.md); [HANDOFF.md](HANDOFF.md)
 - Updated: 2026-08-22 UTC

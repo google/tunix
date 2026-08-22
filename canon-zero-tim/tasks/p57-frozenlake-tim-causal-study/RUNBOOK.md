@@ -8,9 +8,9 @@ user approval. Never hand-edit a rendered YAML.
 
 | Wave | Renderer arm | Numerical program | `sampler_is` | Runtime receipt |
 |---|---|---|---|---|
-| Primary `native` | `mismatch` | complete zero-TIM bundle off | `none` | old=A, TIS absent |
-| Add-on `is` | `is` | identical native program | `token` | old=C, TIS present |
-| Primary `zero` | `zero` | complete zero-TIM bundle on | `none` | old=A, TIS absent |
+| Queue now: `native` | `mismatch` | complete zero-TIM bundle off | `none` | old=A, TIS absent |
+| Queue now: `is` | `is` | identical native program | `token` | old=C, TIS present |
+| Deferred: `zero` | `zero` | complete zero-TIM bundle on | `none` | old=A, TIS absent |
 
 Each wave has two 64-chip DP8xTP8 JobSets:
 
@@ -39,21 +39,21 @@ Require terminal `P57_FROZENLAKE_TIM_CPU_PASS`,
 `P45_EXACT_IMAGE_CPU_PASS overlay=qwen8b_tp8`. Local gates are construction
 evidence, not target evidence.
 
-## Primary pair — render native/no-IS and zero/no-IS
+## Queue now — render native/no-IS and native/token-IS
 
 Use the approved, pushed 40-character source SHA. The output path must not
-already exist. Campaign root plus `-p45/-m15` becomes the checkpoint namespace,
-so a fresh `new` rerun must use a new campaign root.
+already exist. Campaign root plus `-p45/-m15` and the rendered arm becomes the
+checkpoint namespace, so a fresh `new` rerun must use a new campaign root.
 
 ~~~bash
 cd /home/yuxuan/code_rl_repro/worktrees/p57_frozenlake_tim_0820
 SOURCE=<approved-pushed-40-character-sha>
 OUT_NATIVE=/tmp/p57-primary-native
-OUT_ZERO=/tmp/p57-primary-zero
+OUT_IS=/tmp/p57-primary-is
 bash canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts/render_three_arm_wave.sh \
-  native "$SOURCE" "$OUT_NATIVE" p57p45n1 p57m15n1 p57-concept-a
+  native "$SOURCE" "$OUT_NATIVE" p57p45n1 p57m15n1 p57-native-is-a
 bash canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts/render_three_arm_wave.sh \
-  zero "$SOURCE" "$OUT_ZERO" p57p45z1 p57m15z1 p57-concept-a
+  is "$SOURCE" "$OUT_IS" p57p45is1 p57m15is1 p57-native-is-a
 ~~~
 
 For each command require two `P57_THREE_ARM_MANIFEST_PASS` lines and its
@@ -62,8 +62,8 @@ terminal markers:
 ~~~text
 P57_THREE_ARM_WAVE_PASS wave=native manifests=2
 P57_THREE_ARM_RENDER_PASS wave=native ...
-P57_THREE_ARM_WAVE_PASS wave=zero manifests=2
-P57_THREE_ARM_RENDER_PASS wave=zero ...
+P57_THREE_ARM_WAVE_PASS wave=is manifests=2
+P57_THREE_ARM_RENDER_PASS wave=is ...
 ~~~
 
 The manifests are:
@@ -71,8 +71,8 @@ The manifests are:
 ~~~text
 $OUT_NATIVE/p45/jobset-p57-frozenlake-mismatch-200.yaml
 $OUT_NATIVE/m15/jobset-p57-frozenlake-mismatch-m15-main-200.yaml
-$OUT_ZERO/p45/jobset-p57-frozenlake-zero-200.yaml
-$OUT_ZERO/m15/jobset-p57-frozenlake-zero-m15-main-200.yaml
+$OUT_IS/p45/jobset-p57-frozenlake-is-200.yaml
+$OUT_IS/m15/jobset-p57-frozenlake-is-m15-main-200.yaml
 ~~~
 
 After separate launch approval only:
@@ -80,26 +80,29 @@ After separate launch approval only:
 ~~~bash
 kubectl apply -f "$OUT_NATIVE/p45/jobset-p57-frozenlake-mismatch-200.yaml"
 kubectl apply -f "$OUT_NATIVE/m15/jobset-p57-frozenlake-mismatch-m15-main-200.yaml"
-kubectl apply -f "$OUT_ZERO/p45/jobset-p57-frozenlake-zero-200.yaml"
-kubectl apply -f "$OUT_ZERO/m15/jobset-p57-frozenlake-zero-m15-main-200.yaml"
+kubectl apply -f "$OUT_IS/p45/jobset-p57-frozenlake-is-200.yaml"
+kubectl apply -f "$OUT_IS/m15/jobset-p57-frozenlake-is-m15-main-200.yaml"
 ~~~
 
 All four may run concurrently when four independent 64-chip slices are
 available because their checkpoint tags and JobSet identities are disjoint.
 Do not launch two jobs with the same arm/workload campaign tag.
 
-## Native/token-IS add-on
+## Deferred Zero-TIM wave
 
-After the primary-pair evidence is packaged, use a fresh output root/run ids.
-Keep the same approved source SHA for all six cells.
+Do not render or launch this wave as part of the current four-job queue. After
+the native/no-IS versus native/token-IS evidence is packaged, the user may
+separately promote the two Zero-TIM cells. Keep the same approved source SHA
+unless a later reviewed repair requires a new immutable source for all affected
+comparisons.
 
 ~~~bash
 bash canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts/render_three_arm_wave.sh \
-  is "$SOURCE" /tmp/p57-wave-b-is p57p45is1 p57m15is1 p57-concept-a
+  zero "$SOURCE" /tmp/p57-deferred-zero p57p45z1 p57m15z1 p57-zero-a
 ~~~
 
-Do not launch the add-on merely because rendering passed; first classify and
-package the primary pair, then obtain separate approval.
+Rendering success does not authorize this deferred wave. Obtain a separate
+launch decision after classifying and packaging the first four jobs.
 
 ## Runtime receipts
 

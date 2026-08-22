@@ -2,11 +2,12 @@
 
 ## Mission
 
-Run a two-workload x three-treatment concept study. The immediate assignment is
-the primary no-IS pair: P45 and M15-main under both native/no-IS and complete
-zero-TIM/no-IS (four JobSets). The native/token-IS add-on follows after those
-four runs are packaged. The execution agent runs reviewed scripts and returns
-artifacts; it does not edit code, YAML, profiles, or scientific parameters.
+Run the first four cells of a two-workload x three-treatment concept study. The
+immediate assignment is P45 and M15-main under native/no-IS and the identical
+native program with token-IS (four JobSets). The two complete Zero-TIM/no-IS
+cells are explicitly deferred. The execution agent runs reviewed scripts and
+returns artifacts; it does not edit code, YAML, profiles, or scientific
+parameters.
 
 Read in order: `state.md` → `plan.md` →
 `phases/p57-1b-three-arm-baselines.md` → `RUNBOOK.md`.
@@ -23,7 +24,7 @@ Read in order: `state.md` → `plan.md` →
 - The local extension is not target-certified until a published immutable SHA
   passes the gates below. Do not render from a dirty or unpushed tree.
 
-## Operator procedure for the primary no-IS pair
+## Operator procedure for the four native-program jobs
 
 1. Confirm the user supplied an approved, pushed, full 40-character SHA.
 2. In that exact checkout, run:
@@ -39,11 +40,11 @@ git diff --check
 ~~~bash
 SOURCE=<approved-pushed-40-character-sha>
 OUT_NATIVE=/tmp/p57-primary-native
-OUT_ZERO=/tmp/p57-primary-zero
+OUT_IS=/tmp/p57-primary-is
 bash canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts/render_three_arm_wave.sh \
-  native "$SOURCE" "$OUT_NATIVE" p57p45n1 p57m15n1 p57-concept-a
+  native "$SOURCE" "$OUT_NATIVE" p57p45n1 p57m15n1 p57-native-is-a
 bash canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts/render_three_arm_wave.sh \
-  zero "$SOURCE" "$OUT_ZERO" p57p45z1 p57m15z1 p57-concept-a
+  is "$SOURCE" "$OUT_IS" p57p45is1 p57m15is1 p57-native-is-a
 ~~~
 
 4. Stop unless each renderer reports two manifest passes plus its terminal wave
@@ -53,8 +54,8 @@ bash canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts/render_three_a
 ~~~bash
 kubectl apply -f "$OUT_NATIVE/p45/jobset-p57-frozenlake-mismatch-200.yaml"
 kubectl apply -f "$OUT_NATIVE/m15/jobset-p57-frozenlake-mismatch-m15-main-200.yaml"
-kubectl apply -f "$OUT_ZERO/p45/jobset-p57-frozenlake-zero-200.yaml"
-kubectl apply -f "$OUT_ZERO/m15/jobset-p57-frozenlake-zero-m15-main-200.yaml"
+kubectl apply -f "$OUT_IS/p45/jobset-p57-frozenlake-is-200.yaml"
+kubectl apply -f "$OUT_IS/m15/jobset-p57-frozenlake-is-m15-main-200.yaml"
 ~~~
 
 6. Monitor all four independently. Do not cancel healthy jobs because another
@@ -62,18 +63,24 @@ kubectl apply -f "$OUT_ZERO/m15/jobset-p57-frozenlake-zero-m15-main-200.yaml"
 7. Package every success or failure with `scripts/package_run.sh`; preserve the
    raw log from byte zero and the resolved environment.
 
-## Required primary-pair treatment proof
+## Required four-job treatment proof
 
-All four logs require exactly once:
+The two native/no-IS logs require exactly once:
 
 ~~~text
 [P57.TIM_PURITY] PASS sampler_is=none old_logps=rollout tis_weights=absent trainer_rescore=observer-only
 ~~~
 
-Native logs require the stock-fast zero-TIM-off receipt, stock observer receipt,
-warning-only A-B treatment dose, and B-C validity. Zero logs require the full
-canonical path receipt and strict A=B=C. All require segment preflight and
-terminal completion. Every job completes at step 200.
+The two native/token-IS logs require exactly once:
+
+~~~text
+[P57.TIM_PURITY] PASS sampler_is=token old_logps=trainer tis_weights=present trainer_rescore=training-input
+~~~
+
+All four logs require the stock-fast zero-TIM-off receipt,
+`canonical_markers=0`, stock observer receipt, warning-only A-B treatment dose,
+B-C validity, segment preflight, and terminal completion. Every job completes
+at step 200. No Zero-TIM receipt is expected in this queue.
 
 Finite A-B is the treatment, not a failure. B-C mismatch, nonfinite values,
 structural/replica/transaction/optimizer/checkpoint failures, missing arm
@@ -89,18 +96,20 @@ Return one block per workload using the template in `RUNBOOK.md`, including:
 - exact purity, stock-route, segment-preflight and completion marker lines;
 - A-B dose and B-C/nonfinite/structural verdict;
 - solve curve, step timing, sampled tokens/s, grad/update norms;
-- confirmation that sampler-IS weights are absent;
+- confirmation that sampler-IS weights are absent in `mismatch` and present in
+  `is`, including mean/max/clip fraction for the IS jobs;
 - every infrastructure event and the W&B run identity.
 
 Do not summarize away a failure. If GCS artifacts are too large, run the
 repository classifier next to the bucket and return its complete JSON plus
 input inventory/SHA ledger; never claim completeness from SHA validity alone.
 
-## Later IS add-on
+## Deferred Zero-TIM wave
 
-After the four primary runs are packaged, use the same script with `is` for P45
-and M15. Primary-pair launch approval does not authorize the IS add-on. The
-final analysis compares arms only within P45 or only within M15.
+Do not launch `zero` in the current assignment. After these four runs are
+packaged, the user may separately authorize the same script with `zero` for P45
+and M15. The final six-cell analysis still compares arms only within P45 or
+only within M15.
 
 ## Rollback
 

@@ -19,14 +19,19 @@ Processed B is shared observation only. Standard GSPO current/old ratio and
 epsilon 0.003/0.005 clipping remain in all cells. The study tests a hypothesis;
 it is not structured to guarantee a positive zero-TIM result.
 
+Execution is staged by user decision. Queue the four native-program cells
+first: P45 and M15 under native/no-IS and native/token-IS. The two Zero-TIM
+cells remain part of the six-cell design but are deferred until a separate
+launch decision after the first four runs are packaged.
+
 ## Phases
 
 | Phase | Deliverable | Exit gate | Status |
 |---|---|---|---|
 | P57.0 | Stock-fast calibration and M15 selection | `p57cal6` classifier PASS/FREEZE_M15 | complete |
 | P57.1 | Former selection-only native curve | Preserved historical evidence | superseded |
-| P57.1b | Six signed cells and primary no-IS pair | CPU + exact-image gates; P45 and M15 native/no-IS plus zero/no-IS complete full horizons | active |
-| P57.2 | Native/token-IS add-on | P45 and M15 IS cells complete with exact IS receipts | pending |
+| P57.1b | Four native-program cells | CPU + exact-image gates; P45 and M15 native/no-IS plus native/token-IS complete full horizons | active |
+| P57.2 | Deferred complete Zero-TIM pair | Separate user launch decision; P45 and M15 zero/no-IS cells complete with strict receipts | pending |
 | P57.3 | Final isolated evaluations and within-workload contrasts | Six final-checkpoint evals and preregistered contrast table | pending |
 | P57.4 | Replication/claim decision | Either stop at concept-study ceiling or run paired multi-seed campaign | pending |
 
