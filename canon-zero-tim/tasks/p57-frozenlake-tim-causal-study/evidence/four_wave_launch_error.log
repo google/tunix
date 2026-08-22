@@ -1,0 +1,35 @@
+# P57 Four-Wave Launch Failure Evidence (Commit 8ec9246b)
+
+All 4 jobs (`canon-p57-fl-mism-p45n-8ec9246b`, `canon-p57-fl-mism-m15-m15n-8ec9246b`, `canon-p57-fl-is-p45i-8ec9246b`, `canon-p57-fl-is-m15-m15i-8ec9246b`) were provisioned and executed on 256 TPU chips, passing all preflights.
+
+However, in `examples/frozenlake/train_frozenlake_qwen3.py:315`, `dp_workloads.validate_p57_stock_train_environment` failed because `expected` dict in `tunix/rl/dp_workloads.py:820-840` hardcodes:
+- `CANON_P57_TIM_ARM: "mismatch"` (rejects `is`)
+- `CANON_P57_WORKLOAD_CANDIDATE: "m15"` (rejects P45 generator where candidate is empty)
+- `CANON_P57_DATA_SPLIT: "selection"` (rejects M15 main split where split is `main`)
+
+## Traceback in P45 mismatch:
+```text
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/app/examples/frozenlake/train_frozenlake_qwen3.py", line 315, in <module>
+    dp_workloads.validate_p57_stock_train_environment(
+  File "/app/tunix/rl/dp_workloads.py", line 863, in validate_p57_stock_train_environment
+    raise ValueError(
+ValueError: P57 stock-train environment mismatch: wrong={'CANON_P57_WORKLOAD_CANDIDATE': '', 'CANON_P57_DATA_SPLIT': ''} present=[] nonzero={} not_one={}
+```
+
+## Traceback in M15 mismatch:
+```text
+ValueError: P57 stock-train environment mismatch: wrong={'CANON_P57_DATA_SPLIT': 'main'} present=[] nonzero={} not_one={}
+```
+
+## Traceback in P45 is:
+```text
+ValueError: P57 stock-train environment mismatch: wrong={'CANON_P57_TIM_ARM': 'is', 'CANON_P57_WORKLOAD_CANDIDATE': '', 'CANON_P57_DATA_SPLIT': ''} present=[] nonzero={} not_one={}
+```
+
+## Traceback in M15 is:
+```text
+ValueError: P57 stock-train environment mismatch: wrong={'CANON_P57_TIM_ARM': 'is', 'CANON_P57_DATA_SPLIT': 'main'} present=[] nonzero={} not_one={}
+```
