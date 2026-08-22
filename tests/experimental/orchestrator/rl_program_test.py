@@ -12,9 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for RLProgram and StandardRLProgram."""
-
 import asyncio
+from collections.abc import Sequence
+from typing import Any
 from unittest import mock
 
 from absl.testing import absltest
@@ -56,6 +56,46 @@ def _create_rollout_response(
   )
 
 
+def _make_trajectory_group(
+    prompt_id: str = "prompt_0",
+    group_id: str = "group_0",
+    group_size: int = 2,
+    reward: float = 1.0,
+) -> list[datatypes.TrajectoryItem]:
+  return [
+      distributed_rl_engine._response_to_trajectory_item(
+          _create_rollout_response(
+              f"req_{prompt_id}_{idx}",
+              prompt_id,
+              group_id,
+              pair_index=idx,
+              reward=reward,
+          )
+      )
+      for idx in range(group_size)
+  ]
+
+
+def _set_mock_poll_batches(
+    mock_engine: mock.MagicMock,
+    *batches: Sequence[datatypes.TrajectoryItem],
+) -> None:
+  call_idx = 0
+  batch_list = list(batches)
+
+  async def _mock_poll(timeout_s=0.1):
+    del timeout_s
+    nonlocal call_idx
+    if call_idx < len(batch_list):
+      res = list(batch_list[call_idx])
+      call_idx += 1
+      return res
+    await asyncio.sleep(0.01)
+    return []
+
+  mock_engine.poll_rollouts.side_effect = _mock_poll
+
+
 class RLProgramTest(absltest.TestCase):
 
   def setUp(self):
@@ -95,6 +135,20 @@ class RLProgramTest(absltest.TestCase):
         max_packed_len=16
     )
 
+  def _create_program(
+      self,
+      dataset: Any = ("prompt_0",),
+      reward_fns: Any = None,
+      **kwargs: Any,
+  ) -> rl_program.StandardRLProgram:
+    return rl_program.StandardRLProgram(
+        dataset=dataset,
+        algo=self.mock_algo,
+        reward_fns=reward_fns if reward_fns is not None else [lambda x: 1.0],
+        assembler=self.assembler,
+        **kwargs,
+    )
+
   def test_initialization(self):
     program = rl_program.StandardRLProgram(
         dataset=["prompt_1"],
@@ -110,34 +164,9 @@ class RLProgramTest(absltest.TestCase):
 
   def test_run_async_four_stages_with_long_polling(self):
     async def _run():
-      poll_results = [
-          [
-              distributed_rl_engine._response_to_trajectory_item(
-                  _create_rollout_response(
-                      "req_0_0", "prompt_0", "group_0", pair_index=0
-                  )
-              ),
-              distributed_rl_engine._response_to_trajectory_item(
-                  _create_rollout_response(
-                      "req_0_1", "prompt_0", "group_0", pair_index=1
-                  )
-              ),
-          ],
-          [],
-      ]
-      call_idx = 0
-
-      async def mock_poll(timeout_s=0.1):
-        del timeout_s
-        nonlocal call_idx
-        if call_idx < len(poll_results):
-          res = poll_results[call_idx]
-          call_idx += 1
-          return res
-        await asyncio.sleep(0.01)
-        return []
-
-      self.mock_engine.poll_rollouts.side_effect = mock_poll
+      _set_mock_poll_batches(
+          self.mock_engine, _make_trajectory_group(), []
+      )
 
       begin_steps = []
       end_steps = []
@@ -148,11 +177,8 @@ class RLProgramTest(absltest.TestCase):
       def on_end(step, result):
         end_steps.append((step, result))
 
-      program = rl_program.StandardRLProgram(
+      program = self._create_program(
           dataset=["prompt_data_0"],
-          algo=self.mock_algo,
-          reward_fns=[lambda x: 1.0],
-          assembler=self.assembler,
           on_step_begin=on_begin,
           on_step_end=on_end,
       )
@@ -182,40 +208,8 @@ class RLProgramTest(absltest.TestCase):
 
   def test_step_can_skip_weight_sync(self):
     async def _run():
-      poll_results = [
-          [
-              distributed_rl_engine._response_to_trajectory_item(
-                  _create_rollout_response(
-                      "req_0_0", "prompt_0", "group_0", pair_index=0
-                  )
-              ),
-              distributed_rl_engine._response_to_trajectory_item(
-                  _create_rollout_response(
-                      "req_0_1", "prompt_0", "group_0", pair_index=1
-                  )
-              ),
-          ],
-      ]
-      call_idx = 0
-
-      async def mock_poll(timeout_s=0.1):
-        del timeout_s
-        nonlocal call_idx
-        if call_idx < len(poll_results):
-          res = poll_results[call_idx]
-          call_idx += 1
-          return res
-        await asyncio.sleep(0.01)
-        return []
-
-      self.mock_engine.poll_rollouts.side_effect = mock_poll
-
-      program = rl_program.StandardRLProgram(
-          algo=self.mock_algo,
-          reward_fns=[lambda x: 1.0],
-          assembler=self.assembler,
-          sync_weights=False,
-      )
+      _set_mock_poll_batches(self.mock_engine, _make_trajectory_group())
+      program = self._create_program(sync_weights=False)
 
       await program.run_async(
           self.mock_engine, train_dataset=["override_prompt"], num_steps=1
@@ -339,41 +333,9 @@ class RLProgramTest(absltest.TestCase):
 
     asyncio.run(_run())
 
-
   def test_run_synchronous_entry_point(self):
-    poll_results = [
-        [
-            distributed_rl_engine._response_to_trajectory_item(
-                _create_rollout_response(
-                    "req_0_0", "prompt_0", "group_0", pair_index=0
-                )
-            ),
-            distributed_rl_engine._response_to_trajectory_item(
-                _create_rollout_response(
-                    "req_0_1", "prompt_0", "group_0", pair_index=1
-                )
-            ),
-        ],
-    ]
-    call_idx = 0
-
-    async def mock_poll(timeout_s=0.1):
-      del timeout_s
-      nonlocal call_idx
-      if call_idx < len(poll_results):
-        res = poll_results[call_idx]
-        call_idx += 1
-        return res
-      await asyncio.sleep(0.01)
-      return []
-
-    self.mock_engine.poll_rollouts.side_effect = mock_poll
-
-    program = rl_program.StandardRLProgram(
-        algo=self.mock_algo,
-        reward_fns=[lambda x: 2.0],
-        assembler=self.assembler,
-    )
+    _set_mock_poll_batches(self.mock_engine, _make_trajectory_group())
+    program = self._create_program(reward_fns=[lambda x: 2.0])
 
     program.run(
         self.mock_engine, train_dataset=["sync_prompt"], num_steps=1
@@ -386,39 +348,8 @@ class RLProgramTest(absltest.TestCase):
 
   def test_run_with_existing_running_loop(self):
     async def _run():
-      poll_results = [
-          [
-              distributed_rl_engine._response_to_trajectory_item(
-                  _create_rollout_response(
-                      "req_0_0", "prompt_0", "group_0", pair_index=0
-                  )
-              ),
-              distributed_rl_engine._response_to_trajectory_item(
-                  _create_rollout_response(
-                      "req_0_1", "prompt_0", "group_0", pair_index=1
-                  )
-              ),
-          ],
-      ]
-      call_idx = 0
-
-      async def mock_poll(timeout_s=0.1):
-        del timeout_s
-        nonlocal call_idx
-        if call_idx < len(poll_results):
-          res = poll_results[call_idx]
-          call_idx += 1
-          return res
-        await asyncio.sleep(0.01)
-        return []
-
-      self.mock_engine.poll_rollouts.side_effect = mock_poll
-
-      program = rl_program.StandardRLProgram(
-          algo=self.mock_algo,
-          reward_fns=[lambda x: 1.0],
-          assembler=self.assembler,
-      )
+      _set_mock_poll_batches(self.mock_engine, _make_trajectory_group())
+      program = self._create_program()
 
       program.run(
           self.mock_engine, train_dataset=["async_prompt"], num_steps=1
@@ -443,39 +374,11 @@ class RLProgramTest(absltest.TestCase):
 
   def test_prompt_dictionary_id_and_group_extraction(self):
     async def _run():
-      poll_results = [
-          [
-              distributed_rl_engine._response_to_trajectory_item(
-                  _create_rollout_response(
-                      "req_0_0", "custom_p0", "custom_g0", pair_index=0
-                  )
-              ),
-              distributed_rl_engine._response_to_trajectory_item(
-                  _create_rollout_response(
-                      "req_0_1", "custom_p0", "custom_g0", pair_index=1
-                  )
-              ),
-          ],
-      ]
-      call_idx = 0
-
-      async def mock_poll(timeout_s=0.1):
-        del timeout_s
-        nonlocal call_idx
-        if call_idx < len(poll_results):
-          res = poll_results[call_idx]
-          call_idx += 1
-          return res
-        await asyncio.sleep(0.01)
-        return []
-
-      self.mock_engine.poll_rollouts.side_effect = mock_poll
-
-      program = rl_program.StandardRLProgram(
-          algo=self.mock_algo,
-          reward_fns=[lambda x: 1.0],
-          assembler=self.assembler,
+      _set_mock_poll_batches(
+          self.mock_engine,
+          _make_trajectory_group(prompt_id="custom_p0", group_id="custom_g0"),
       )
+      program = self._create_program()
 
       dict_item = {
           "prompt_id": "custom_p0",
@@ -497,51 +400,12 @@ class RLProgramTest(absltest.TestCase):
   def test_multi_group_mini_batch_gradient_accumulation(self):
     async def _run():
       self.mock_algo.mini_batch_size = 2
-      poll_results = [
-          [
-              distributed_rl_engine._response_to_trajectory_item(
-                  _create_rollout_response(
-                      "req_0_0", "prompt_0", "group_0", pair_index=0
-                  )
-              ),
-              distributed_rl_engine._response_to_trajectory_item(
-                  _create_rollout_response(
-                      "req_0_1", "prompt_0", "group_0", pair_index=1
-                  )
-              ),
-          ],
-          [
-              distributed_rl_engine._response_to_trajectory_item(
-                  _create_rollout_response(
-                      "req_1_0", "prompt_1", "group_1", pair_index=0
-                  )
-              ),
-              distributed_rl_engine._response_to_trajectory_item(
-                  _create_rollout_response(
-                      "req_1_1", "prompt_1", "group_1", pair_index=1
-                  )
-              ),
-          ],
-      ]
-      call_idx = 0
-
-      async def mock_poll(timeout_s=0.1):
-        del timeout_s
-        nonlocal call_idx
-        if call_idx < len(poll_results):
-          res = poll_results[call_idx]
-          call_idx += 1
-          return res
-        await asyncio.sleep(0.01)
-        return []
-
-      self.mock_engine.poll_rollouts.side_effect = mock_poll
-
-      program = rl_program.StandardRLProgram(
-          algo=self.mock_algo,
-          reward_fns=[lambda x: 1.0],
-          assembler=self.assembler,
+      _set_mock_poll_batches(
+          self.mock_engine,
+          _make_trajectory_group("prompt_0", "group_0"),
+          _make_trajectory_group("prompt_1", "group_1"),
       )
+      program = self._create_program()
 
       await program.run_async(
           self.mock_engine, train_dataset=["p0", "p1"], num_steps=1
@@ -577,39 +441,8 @@ class RLProgramTest(absltest.TestCase):
           return_value=np.array([[-0.1, -0.2]], dtype=np.float32)
       )
 
-      poll_results = [
-          [
-              distributed_rl_engine._response_to_trajectory_item(
-                  _create_rollout_response(
-                      "req_0_0", "prompt_0", "group_0", pair_index=0
-                  )
-              ),
-              distributed_rl_engine._response_to_trajectory_item(
-                  _create_rollout_response(
-                      "req_0_1", "prompt_0", "group_0", pair_index=1
-                  )
-              ),
-          ],
-      ]
-      call_idx = 0
-
-      async def mock_poll(timeout_s=0.1):
-        del timeout_s
-        nonlocal call_idx
-        if call_idx < len(poll_results):
-          res = poll_results[call_idx]
-          call_idx += 1
-          return res
-        await asyncio.sleep(0.01)
-        return []
-
-      self.mock_engine.poll_rollouts.side_effect = mock_poll
-
-      program = rl_program.StandardRLProgram(
-          algo=self.mock_algo,
-          reward_fns=[lambda x: 1.0],
-          assembler=self.assembler,
-      )
+      _set_mock_poll_batches(self.mock_engine, _make_trajectory_group())
+      program = self._create_program()
 
       await program.run_async(
           self.mock_engine, train_dataset=["prompt_0"], num_steps=1
@@ -627,46 +460,67 @@ class RLProgramTest(absltest.TestCase):
       self.mock_algo.requires_reference_kl = True
       # Returning a raw dict instead of TrainExample
       self.assembler.pack = mock.MagicMock(return_value=[{"raw": "batch"}])
-
-      poll_results = [
-          [
-              distributed_rl_engine._response_to_trajectory_item(
-                  _create_rollout_response(
-                      "req_0_0", "prompt_0", "group_0", pair_index=0
-                  )
-              ),
-              distributed_rl_engine._response_to_trajectory_item(
-                  _create_rollout_response(
-                      "req_0_1", "prompt_0", "group_0", pair_index=1
-                  )
-              ),
-          ],
-      ]
-      call_idx = 0
-
-      async def mock_poll(timeout_s=0.1):
-        del timeout_s
-        nonlocal call_idx
-        if call_idx < len(poll_results):
-          res = poll_results[call_idx]
-          call_idx += 1
-          return res
-        await asyncio.sleep(0.01)
-        return []
-
-      self.mock_engine.poll_rollouts.side_effect = mock_poll
-
-      program = rl_program.StandardRLProgram(
-          algo=self.mock_algo,
-          reward_fns=[lambda x: 1.0],
-          assembler=self.assembler,
-      )
+      _set_mock_poll_batches(self.mock_engine, _make_trajectory_group())
+      program = self._create_program()
 
       with self.assertRaises(TypeError) as cm:
         await program.run_async(
             self.mock_engine, train_dataset=["prompt_0"], num_steps=1
         )
       self.assertIn("Reference KL requires an assembler", str(cm.exception))
+
+    asyncio.run(_run())
+
+  def test_run_async_handles_early_dispatch_completion(self):
+    async def _run():
+      _set_mock_poll_batches(self.mock_engine, _make_trajectory_group())
+      program = self._create_program()
+      await program.run_async(self.mock_engine, num_steps=1)
+      self.assertEqual(program.step, 1)
+
+    asyncio.run(_run())
+
+  def test_run_async_propagates_train_stage_exception(self):
+    async def _run():
+      _set_mock_poll_batches(self.mock_engine, _make_trajectory_group())
+      self.mock_engine.train_step.side_effect = RuntimeError(
+          "Training worker OOM"
+      )
+      program = self._create_program()
+
+      with self.assertRaises(RuntimeError) as cm:
+        await program.run_async(self.mock_engine, num_steps=1)
+      self.assertIn("Training worker OOM", str(cm.exception))
+
+    asyncio.run(_run())
+
+  def test_run_async_propagates_critique_stage_exception(self):
+    async def _run():
+      _set_mock_poll_batches(self.mock_engine, _make_trajectory_group())
+      def failing_reward_fn(_):
+        raise ValueError("Reward model computation failed")
+
+      program = self._create_program(reward_fns=[failing_reward_fn])
+
+      with self.assertRaises(ValueError) as cm:
+        await program.run_async(self.mock_engine, num_steps=1)
+      self.assertIn("Reward model computation failed", str(cm.exception))
+
+    asyncio.run(_run())
+
+  def test_run_async_cancels_background_stages_on_external_cancellation(self):
+    async def _run():
+      _set_mock_poll_batches(self.mock_engine)  # Yields empty and sleeps
+      program = self._create_program()
+
+      task = asyncio.create_task(
+          program.run_async(self.mock_engine, num_steps=5)
+      )
+      await asyncio.sleep(0.02)
+      task.cancel()
+
+      with self.assertRaises(asyncio.CancelledError):
+        await task
 
     asyncio.run(_run())
 
