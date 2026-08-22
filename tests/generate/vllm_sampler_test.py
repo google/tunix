@@ -283,7 +283,7 @@ class VllmSamplerTest(absltest.TestCase):
         base_prompts[5]: ["winter"],
         base_prompts[6]: ["romeo", "juliet"],
         base_prompts[7]: ["pancake"],
-        base_prompts[8]: ["100", "celsius"],
+        base_prompts[8]: ["100", "212"],
         base_prompts[9]: ["seven", "eight"],
     }
     prompt_expectations = [
