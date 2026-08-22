@@ -1,0 +1,12 @@
+{
+  "artifact_name": "p58_p58f12_deepswe_empty_batch_rescore",
+  "workload": "canon-p58-ds4b-native-full-p58f12",
+  "failure_category": "EMPTY_BATCH_RESCORE_MISSING_PROVENANCE",
+  "step_index": 0,
+  "elapsed_rollout_seconds": 1209.0,
+  "trajectories_total": 128,
+  "concurrency_limit": 128,
+  "root_cause": "When all 128 trajectories in Step 0 timed out at sandbox start without generating tokens (all_env_timeout_batch=true), rollout.generate() was never invoked. Consequently, vllm_rollout._last_sampling_transforms remained None. When agentic_grpo_learner._process_results attempted to invoke get_prefill_rescore_logps on the all-zero/empty completion tokens, vllm_rollout.py:289 raised RuntimeError: processed S_prefill must follow generate().",
+  "remediation": "In agentic_grpo_learner.py and/or vllm_rollout.py, bypass get_prefill_rescore_logps when all trajectories are compact-filtered / zero-masked (raw_completion_lengths.sum() == 0 or self._last_sampling_transforms is None) and return zeros matching the prompt shape.",
+  "status": "ROOT_CAUSE_ISOLATED"
+}

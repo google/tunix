@@ -1,0 +1,44 @@
+=== CANON P58 DEEPSWE STEP 0 EMPTY BATCH RESCORE ERROR LOG (canon-p58-ds4b-native-full-p58f12) ===
+Workload: canon-p58-ds4b-native-full-p58f12
+Cluster: mlperf-v5p (europe-west4-b)
+Topology: 128 TPU v5p (32 workers x 4 TPU chips/worker)
+Command: python3 -u examples/deepswe/canonical_entrypoint.py --model_version=Qwen3-4B-Instruct-2507 --batch_size=8 --num_generations=16 --max_concurrency=128 --rollout_batch_timeout_secs=3600 --episode_timeout_secs=3000 --step_timeout_secs=600 --reward_timeout_secs=600
+
+[22:50:48 UTC] Initialized 128 physical TPU devices (mesh=[8, 8] rollout and train).
+[22:56:57 UTC] DPScheduler (Async = True) started 8 worker processes. Global max_tokens: 2048, max_seqs: 16 per DP rank (concurrency=128).
+[22:57:02 UTC] Hybrid KV cache layout initialized on 64 rollout TPUs (36 regular attn layers).
+[22:57:05 UTC] Step 0 Rollout initiated: 128 trajectories.
+[23:17:14 UTC] All 128 trajectories experienced sandbox_start timeout due to cluster scheduling gates (scheduling_gated=128).
+[23:17:14 UTC] [DEEPSWE.ROLLOUT_DEADLINE] batch_complete prompt_groups=8 elapsed_secs=1209.0 deadline_secs=3600
+[23:17:15 UTC] Preserving original inputs from environment succeeded across all 128 timeout trajectories (KeyError 'prompts' eliminated).
+[23:17:16 UTC] [P58.TRAJECTORY_BATCH] step=0 path=/mnt/disks/linchai_data/deepswe_zero_tim/canon-p58-ds4b-native-full-p58f12/debug/batch-000000.trajectories.jsonl.gz sha256=d4453eb0873a89933ebd1ccd281fd97c22f86f2870f3ac76dff7fefecae8986c
+[23:17:16 UTC] [P58.BATCH_METRICS_JSON] {"all_env_timeout_batch":true,"compact_filtered_trajectories":128,"env_timeout_trajectories":128,"scheduling_gated_trajectories":128,"step":0}
+[23:17:17 UTC] sampler-trainer: logp_diff=(0.00000,0.00000) prob_diff=(0.00000,0.00000) pearson=0.00000
+[23:17:18 UTC] [P34.WEIGHTS] EXACT step=0 leaves=398 elements=4022468096 devices=64
+[23:17:18 UTC] [PERF] step=0 stage=rescore_b seconds=0.000 rows=128
+
+[23:17:18 UTC] Crash during rescore_b on all-filtered/empty batch:
+[rank0]: Traceback (most recent call last):
+[rank0]:   File "/app/examples/deepswe/canonical_entrypoint.py", line 36, in <module>
+[rank0]:     main()
+[rank0]:   File "/app/examples/deepswe/canonical_entrypoint.py", line 32, in main
+[rank0]:     runpy.run_module("examples.deepswe.train_deepswe_nb", run_name="__main__")
+[rank0]:   File "<frozen runpy>", line 229, in run_module
+[rank0]:   File "<frozen runpy>", line 88, in _run_code
+[rank0]:   File "/app/examples/deepswe/train_deepswe_nb.py", line 1582, in <module>
+[rank0]:     agentic_grpo_learner.train(train_dataset=train_dataset)
+[rank0]:   File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 2530, in train
+[rank0]:     train_examples = self._batch_to_train_example(
+[rank0]:                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 1981, in _batch_to_train_example
+[rank0]:     return self._process_results(
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/rl/agentic/agentic_grpo_learner.py", line 1308, in _process_results
+[rank0]:     s_prefill = self.rl_cluster.get_prefill_rescore_logps(
+[rank0]:                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/rl/rl_cluster.py", line 1164, in get_prefill_rescore_logps
+[rank0]:     source(
+[rank0]:   File "/app/tunix/rl/rollout/vllm_rollout.py", line 289, in get_prefill_rescore_logps
+[rank0]:     raise RuntimeError(
+[rank0]: RuntimeError: processed S_prefill must follow generate(); no rollout sampling provenance is available
+=== END LOG ===
