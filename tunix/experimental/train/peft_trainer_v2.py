@@ -394,6 +394,7 @@ def _default_weight_sync_worker() -> Any:
       host_stage="proxy" in os.environ.get("JAX_PLATFORMS", ""),
   )
 
+# TODO: Construct the use the training config to control PW or McJax
 
 class PeftTrainer(abstract_trainer.AbstractTrainer):
   """PEFT trainer for LoRA. Only LoRA parameters are updated.
