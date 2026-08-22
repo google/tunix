@@ -85,6 +85,7 @@ otel = [
 ]
 frozenlake = [
   "gymnasium",
+  "jax[tpu]==0.10.0", # latest version that works for frozenlake, 0.10.2 has some hbm consumption regression.
 ]
 experimental = [
   "cloudpickle",  # serialization envelope for the remote-execution actor protocol
