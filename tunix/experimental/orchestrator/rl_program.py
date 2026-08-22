@@ -327,10 +327,11 @@ class StandardRLProgram(RLProgram):
         train_task,
     ]
 
+    pending_tasks = set(tasks)
     try:
-      while not train_task.done():
-        done, _ = await asyncio.wait(
-            tasks, return_when=asyncio.FIRST_COMPLETED, timeout=0.05
+      while not train_task.done() and pending_tasks:
+        done, pending_tasks = await asyncio.wait(
+            pending_tasks, return_when=asyncio.FIRST_COMPLETED, timeout=0.05
         )
         for task in done:
           if task.exception():
