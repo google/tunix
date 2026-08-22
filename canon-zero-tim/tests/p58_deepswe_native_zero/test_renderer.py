@@ -77,8 +77,8 @@ class P58RendererTest(unittest.TestCase):
           self.assertEqual(env["CANON_P58_EXPECTED_UPDATES"], str(steps))
           self.assertIn(f"--max_steps={steps}", env["CANON_RUN_CMD"])
           self.assertIn("--num_generations=16", env["CANON_RUN_CMD"])
-          self.assertIn("--max_concurrency=64", env["CANON_RUN_CMD"])
-          self.assertNotIn("--max_concurrency=128", env["CANON_RUN_CMD"])
+          self.assertIn("--max_concurrency=128", env["CANON_RUN_CMD"])
+          self.assertNotIn("--max_concurrency=64", env["CANON_RUN_CMD"])
           self.assertIn("--loss_scale_factor=16384", env["CANON_RUN_CMD"])
           self.assertIn(
               "--loss_denominator_weighted_accumulation",
@@ -93,6 +93,29 @@ class P58RendererTest(unittest.TestCase):
           )
           self.assertEqual(env["R2E_K8S_QUEUE_NAME"], "multislice-queue")
           self.assertEqual(env["NODE_SELECTOR_VAL"], "cpu-np")
+
+  def test_rollout_timeout_geometry_is_exactly_one_concurrency_wave(self):
+    document = self._render("native", "full")
+    args = shlex.split(renderer.p34._env(document)["CANON_RUN_CMD"])
+
+    def int_arg(name: str) -> int:
+      prefix = f"--{name}="
+      values = [int(item.removeprefix(prefix)) for item in args
+                if item.startswith(prefix)]
+      self.assertEqual(len(values), 1, name)
+      return values[0]
+
+    raw_trajectories = int_arg("batch_size") * int_arg("num_generations")
+    self.assertEqual(raw_trajectories, 128)
+    self.assertEqual(int_arg("max_concurrency"), raw_trajectories)
+    self.assertEqual(
+        int_arg("rollout_mesh_dp") * int_arg("rollout_vllm_max_num_seqs"),
+        raw_trajectories,
+    )
+    self.assertGreater(
+        int_arg("rollout_batch_timeout_secs"),
+        int_arg("episode_timeout_secs") + int_arg("cleanup_timeout_secs"),
+    )
 
   def test_pair_diff_is_registered_treatment_only(self):
     native = self._render("native")

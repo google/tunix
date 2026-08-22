@@ -28,6 +28,9 @@ TOPOLOGY = "4x4x8"
 WORKERS = 32
 ROLE_DP = 8
 ROLE_TP = 8
+GLOBAL_PROMPTS = 8
+GENERATIONS = 16
+MAX_CONCURRENCY = GLOBAL_PROMPTS * GENERATIONS
 _STAGE_STEPS = {"three-update": 3, "full": 1000}
 _ARMS = ("native", "zero")
 _KUEUE_MANAGED_WORKER_POOLS = frozenset({
@@ -89,6 +92,7 @@ def _command(stage: str, *, run_root: str, whitelist: str) -> tuple[str, ...]:
       "--step_timeout_secs=1800": "--step_timeout_secs=600",
       "--reward_timeout_secs=1800": "--reward_timeout_secs=600",
       "--rollout_batch_timeout_secs=5400": "--rollout_batch_timeout_secs=3600",
+      "--max_concurrency=64": f"--max_concurrency={MAX_CONCURRENCY}",
       "--rollout_mesh_dp=16": "--rollout_mesh_dp=8",
       "--train_mesh_dp=16": "--train_mesh_dp=8",
       "--rollout_vllm_max_num_seqs=4": "--rollout_vllm_max_num_seqs=16",
@@ -408,11 +412,11 @@ def validate(
   args = shlex.split(env["CANON_RUN_CMD"])
   required = (
       "--model_version=Qwen3-4B-Instruct-2507",
-      "--batch_size=8",
+      f"--batch_size={GLOBAL_PROMPTS}",
       "--mini_batch_size=8",
       "--train_micro_batch_size=8",
       "--compute_logps_micro_batch_size=8",
-      "--num_generations=16",
+      f"--num_generations={GENERATIONS}",
       "--max_response_length=16384",
       "--max_turns=50",
       "--temperature=1.0",
@@ -424,7 +428,7 @@ def validate(
       "--train_mesh_tp=8",
       "--rollout_vllm_max_num_seqs=16",
       "--max_num_batched_tokens=256",
-      "--max_concurrency=64",
+      f"--max_concurrency={MAX_CONCURRENCY}",
       "--loss_agg_mode=sequence-mean-token-scale",
       "--loss_scale_factor=16384",
       "--loss_denominator_weighted_accumulation",

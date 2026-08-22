@@ -157,9 +157,20 @@ the P58 journal, alignment, forward, backward, update, or checkpoint. The
 collector repair preserves the agent task when present, otherwise uses the
 environment task, and fails closed if neither is a dictionary. Timeout/context
 rows retain their compact status and zero policy mask; they are not removed or
-resampled. No training or numerical parameter changed. Use fresh full-stage
-run-id `p58f10` after fetching/readback of the final published tip; never reuse p58f08 or p58f09
-YAML/root. Neither has optimizer state to resume.
+resampled. No training or numerical parameter changed.
+
+Native `p58f10` ran the source containing that repair and entered Step-0
+rollout, then exposed a separate scheduling-geometry error. The hard batch
+timeout prevented post-rollout merge, so the original-input fallback remains
+target-unproven despite its exact-image coverage. B8 x G16 produces 128 trajectories, but
+`max_concurrency=64` split them into two sequential waves. The unchanged
+3,600-second rollout-batch deadline expired with only 5/8 prompt groups
+complete. No journal, trainer program, optimizer receipt, or checkpoint was
+created. The repair sets concurrency to 128, matching both the raw batch and
+the provisioned rollout capacity DP8 x max-seqs16. Episode 3,000 s, cleanup
+300 s, and batch 3,600 s remain unchanged. Use fresh full-stage run-id
+`p58f11` after publication and exact remote readback; never reuse p58f08,
+p58f09, or p58f10 YAML/root. None has optimizer state to resume.
 
 The direct-entrypoint implementation commit is
 `82d82f72a7220d945737d95f6266b5b7e2cfe706`. Resolve the final runnable SHA by
@@ -180,7 +191,7 @@ implementation commit directly.
 | Clean data | 1,012 promoted P46 tasks |
 | Clean SHA-256 | `ec297c9cbc39cd67db15b0b9db6a229b15671b848df5ec3101de9ef8df7c9973` |
 | Prompt batch / generations | B8 x G16 = 128 raw trajectories |
-| Sandbox concurrency | 64; two waves per unchanged 128-trajectory batch |
+| Sandbox concurrency | 128; exactly one wave matching both the raw batch and rollout DP8 x max-seqs16 capacity |
 | Prompt / response / turns | 4,096 / 16,384 / 50 |
 | Sampling | temperature 1.0, top-p 1.0, top-k 0 |
 | Roles | rollout DP8 x TP8 + trainer DP8 x TP8 |
@@ -215,6 +226,12 @@ prevents an all-filtered batch from overwriting the preceding artifact.
 
 Timeout nesting is fixed: turn 300 s, step/reward 600 s, trajectory 3,000 s,
 sandbox 3,300 s, cleanup 300 s, and the shared rollout-batch deadline 3,600 s.
+The renderer requires B x G = `max_concurrency` = rollout DP x
+`rollout_vllm_max_num_seqs` = 128. A per-trajectory timeout returns through the
+normal compact zero-mask path and does not abort sibling trajectories. The
+rollout-batch deadline remains a hard orchestration bound: if the complete
+one-wave batch cannot drain by 3,600 seconds, fail closed rather than fabricating
+missing rows or extending the signed one-hour batch.
 
 Kubernetes sandbox start is fail-closed. A pod that does not become Running
 within 1,200 seconds is deleted and confirmed absent, and its original
@@ -298,7 +315,7 @@ CLIENT_IMAGE_DIGEST='registry.example/tunix@sha256:<64-hex-digest>'
 CPU_NODEPOOL='cpu-np'
 TPU_NODEPOOL='tpu-v5p-slice'
 MODEL_PVC='haoyugao-cpu-np-pvc'
-RUN_STEM='p58f10'
+RUN_STEM='p58f11'
 STAGE='full'
 
 ARM='native'

@@ -27,8 +27,9 @@ validate the deferred zero arm and cannot establish a paired treatment effect.
   that exact head's RM through generated JobSet Pod DNS on port 29001;
 - recipe: B8 x G16, response 16,384, 50 turns, RLOO, fixed-context
   `sequence-mean-token-scale`, TPU-resident optimizer, optional interventions
-  off, prefix cache off;
-- stage/run: `full`, next fresh run-id `p58f10`, exactly 1,000 optimizer commits;
+  off, prefix cache off; all 128 trajectories run as one concurrency wave,
+  equal to rollout DP8 x max-seqs16 capacity;
+- stage/run: `full`, next fresh run-id `p58f11`, exactly 1,000 optimizer commits;
 - arm: `native` only. Rendering or applying `zero` is outside this phase.
 
 ## Admission gate
@@ -82,7 +83,7 @@ cannot be promoted.
 
 ## Attempt boundary
 
-P58c05 and p58f01 through p58f09 are immutable `INCONCLUSIVE` evidence.
+P58c05 and p58f01 through p58f10 are immutable `INCONCLUSIVE` evidence.
 P58f01 exposed sandbox LocalQueue and reset-time provenance faults. P58f02
 exposed a CPU-flavor/node-pool mismatch; moving the head and sandboxes to
 `cpu-np` was the correct repair. P58f03 then completed 128 real trajectories
@@ -159,6 +160,16 @@ alignment, forward, backward, update, or checkpoint. The collector repair
 uses `env.task` as the original-input fallback only for this pre-observation
 case and fails closed if no dictionary is available. Compact rows retain their
 existing status and zero policy mask; there is no filtering or resampling
-change. P58f08 and p58f09 are not resumable training roots. After publication
-and remote readback, the next attempt is fresh Native `p58f10`. Zero remains
+change. P58f08 and p58f09 are not resumable training roots.
+
+P58f10 entered Step-0 rollout but retained concurrency 64 for the B8 x G16
+batch, so 128 trajectories ran in two sequential waves. At the unchanged
+3,600-second batch deadline only 5/8 prompt groups had completed and the
+orchestrator failed closed before journal, trainer, or optimizer state. The
+repair makes concurrency 128, exactly one wave and exactly the provisioned
+rollout capacity DP8 x max-seqs16. It does not extend the 3,000-second episode,
+300-second cleanup, or 3,600-second batch deadlines. Per-trajectory compact
+timeouts continue as zero-mask rows; a whole batch that cannot drain remains a
+hard failure. P58f10 has no resumable training state. After publication and
+remote readback, the next attempt is fresh Native `p58f11`. Zero remains
 deferred.

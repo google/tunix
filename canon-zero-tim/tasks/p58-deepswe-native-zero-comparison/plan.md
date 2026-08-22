@@ -51,7 +51,7 @@ before any workload pod or update existed. P58.5N is the only active phase.
 Both zero phases remain deferred even though the renderer and CPU tests cover
 that arm.
 
-P58.5N attempts `p58f01` through `p58f09` remain `INCONCLUSIVE`. P58f01 exposed
+P58.5N attempts `p58f01` through `p58f10` remain `INCONCLUSIVE`. P58f01 exposed
 missing sandbox LocalQueue inheritance and reset-time policy provenance;
 p58f02 showed that the chosen CPU flavor required `cpu-np`; and p58f03 proved
 that the CPU routing repair works by completing 128 real trajectories in
@@ -96,15 +96,27 @@ reset-deadline rows had terminated before first observation, leaving
 `agent.trajectory.task=None`; learner `merge_micro_batches()` dereferenced that
 value as a mapping.
 
-The published implementation repair therefore preserves head and TPU-worker host networking,
+The published p58f09 implementation repair therefore preserves head and TPU-worker host networking,
 adds required hostname-level anti-affinity over every JobSet `pathways-head`
 replicated-job Pod, and validates the exact JobSet DNS/RM route. The collector
 falls back to the environment's original task only when the agent never
 observed one, and fails closed if neither source is a dictionary. Admitted
 compact rows remain journaled with zero policy masks; no row is dropped or
 resampled. No model, data, numerical, topology, deadline, optimizer, or
-Native/Zero flag changed. After fetching and reading back the final published
-operator tip, the next attempt is `p58f10`.
+Native/Zero flag changed.
+
+P58f10 ran the source containing that repair and entered Step-0 rollout, but
+the batch timeout prevented post-rollout merge, so the original-input fallback
+remains target-unproven despite exact-image coverage. It exposed an independent
+scheduling mismatch: B8 x G16 produces 128 trajectories while
+`max_concurrency=64` admitted only 64 at a time. The resulting two sequential
+waves did not drain before the 3,600-second hard batch deadline; only 5/8
+prompt groups were complete when the orchestrator failed closed. The repair
+sets concurrency to 128, exactly matching both the raw batch and rollout
+capacity DP8 x max-seqs16. Episode, cleanup, and batch deadlines remain
+3,000/300/3,600 seconds. Per-trajectory timeout/context outcomes still return
+as compact zero-mask rows; only failure of the complete one-wave batch to drain
+remains fatal. After publication/readback, the next attempt is `p58f11`.
 
 ## Frozen shared recipe
 
@@ -113,7 +125,7 @@ operator tip, the next attempt is `p58f10`.
 | Model | `Qwen/Qwen3-4B-Instruct-2507` |
 | Data | promoted 1,012-task P46 exact-N16 list, SHA-256 `ec297c9cbc39cd67db15b0b9db6a229b15671b848df5ec3101de9ef8df7c9973` |
 | Prompts / generations | B=8, G=16, 128 trajectories per update |
-| Sandbox concurrency | 64, producing the unchanged 128 rows in two waves |
+| Sandbox concurrency | 128, exactly one wave matching the raw batch and rollout DP8 x max-seqs16 capacity |
 | Prompt / response / turns | 4,096 / 16,384 / 50 |
 | Sampling | temperature 1.0; top-p and top-k must resolve identically in both arms and be printed in the signed receipt |
 | Topology per arm | 128 TPU total: rollout DP8 x TP8 = 64 and trainer DP8 x TP8 = 64, synchronous disaggregated |

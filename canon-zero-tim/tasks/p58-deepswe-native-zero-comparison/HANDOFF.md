@@ -28,8 +28,13 @@ HEAD, `FETCH_HEAD`, and `origin/yuxzhang/canon-zero-tim` with ahead/behind
 executor must fetch and exactly read back the final operator tip. The p58f09
 repair was published as `678bc5cfbcec386fd655e6685365c937e826d547`; its
 first readback matched local HEAD, `FETCH_HEAD`, and the remote-tracking branch
-with ahead/behind `0/0`. This publication checkpoint advances the branch once
-more. The next run id is fresh `p58f10`.
+with ahead/behind `0/0`. Source intake then fast-forwarded to exact operator tip
+`28817bfb3a14c95f42b3950f03380d1c6c03d336`, which contains immutable p58f10
+timeout evidence. P58f10 reached Step-0 rollout but the B8 x G16 batch was
+throttled into two waves by concurrency 64; only 5/8 prompt groups completed
+before the 3,600-second hard batch deadline. The local repair makes all 128
+trajectories one wave, matching rollout DP8 x max-seqs16 capacity. It is not
+published yet. After publication/readback, the next run id is fresh `p58f11`.
 
 The user previously waived P58.3 and the separate three-update stop, then chose
 the native 128-chip full 1,000-update stage. That historical phase remains
@@ -99,9 +104,10 @@ the Kubernetes backend, propagates the original timeout after confirmed pod
 deletion, and proves that a reset-time start failure becomes the existing
 signed `ENV_TIMEOUT` trajectory status. Docker behavior remains delegated to
 upstream. A bounded timeout marker preserves pod phase and scheduler
-conditions without inspecting the pod spec/environment. The P58 renderer now
-uses the reference sandbox concurrency 64, so
-the unchanged B8 x G16 batch is created in two waves. This changes neither
+conditions without inspecting the pod spec/environment. At the p58c04 repair
+checkpoint, the P58 renderer used reference sandbox concurrency 64, so the
+unchanged B8 x G16 batch was created in two waves. That historical choice is
+superseded by the p58f10 one-wave repair below. This changes neither
 data, sampling, RLOO/loss, meshes, optimizer, nor update horizon. Two newly
 shared stock-contract booleans are explicitly zeroed in the native profile;
 that is compatibility hardening, not a new treatment. Focused tests and the
@@ -310,8 +316,21 @@ is a dictionary. Compact timeout/context rows retain the existing zero policy
 mask and are neither dropped nor resampled. Renderer validation requires the
 exact hostname anti-affinity plus retained head/worker host networking,
 JobSet DNS, and RM/PATHWAYS_HEAD route. P58f08 and p58f09 are not resumable
-training state. After separate publication/readback, use fresh Native
-`p58f10`. Zero remains deferred.
+training state.
+
+P58f10 ran the source containing the prior placement/input repairs and entered
+real Step-0 rollout. The batch deadline prevented post-rollout merge, so the
+original-input fallback remains target-unproven despite exact-image coverage.
+Its 128 trajectories were still admitted with
+`max_concurrency=64`, creating two sequential waves. At 3,600 seconds only
+5/8 prompt groups were complete, so the batch orchestrator correctly failed
+closed before durable journal, trainer, optimizer receipt, or checkpoint. The
+local repair sets concurrency to 128, exactly the raw batch and exactly rollout
+DP8 x max-seqs16 capacity. Episode 3,000 s, cleanup 300 s, and batch 3,600 s
+remain unchanged. Individual timeout/context outcomes still become compact
+zero-mask rows; only a whole one-wave batch that cannot drain is fatal. P58f10
+is not resumable. After separate publication/readback, use fresh Native
+`p58f11`. Zero remains deferred.
 
 Never modify or push `main`. The publication target is exclusively
 `yuxzhang/canon-zero-tim`; the p58f09 repair is published there as
@@ -347,7 +366,9 @@ documentation tip before rendering.
 - required hostname anti-affinity for fixed-port Pathways heads while
   preserving host-network transport; and
 - pre-observation reset-timeout original-input recovery from the environment,
-  with a hard error when no mapping exists.
+  with a hard error when no mapping exists; and
+- exact one-wave rollout admission: B8 x G16 = concurrency 128 = rollout DP8 x
+  max-seqs16, without extending the signed timeout hierarchy.
 
 The exact run instructions and artifact interpretation are in
 `canon-zero-tim/cluster/P58_DEEPSWE_TIM_RUNBOOK.md`.
@@ -372,7 +393,7 @@ native-dose/zero-exact classifier negatives, both renderer arms/stages,
 environment resolution, the full alignment suite, and relevant P34/P44
 regressions.
 
-Host validation passes profile 2/2, renderer 14/14, alignment policy 9/9,
+Host validation passes profile 2/2, renderer 15/15, alignment policy 9/9,
 environment 5/5, P34 static 10 suites, and current P57 adjacency
 105/105. In the pinned image, classifier 5/5 and the shared alignment
 regression 42/42 pass; the targeted trajectory batch passes 6/6, including
@@ -380,9 +401,9 @@ reset-timeout fallback and missing-input fail-closed controls. Python compilatio
 the 320/320 flag-registry audit, and `git diff --check` pass. The complete
 pinned-image gate emits the terminal marker above.
 
-No target execution has run after this local p58f09 repair. P58f09 proves
-correct target-scale Pathways attachment and 128-slot rollout completion, but
-it stopped before a durable journal or trainer call; p58f07 remains the latest
+P58f10 is the latest target execution. It proves that the p58f09 placement and
+original-input fixes reach real Step-0 rollout, but fails at the two-wave batch
+deadline before a durable journal or trainer call; p58f07 remains the latest
 attempt to enter real value-and-grad/backward, also without an optimizer
 receipt/checkpoint. The training venv loads JAX/libtpu,
 but this container exposes no `/dev/vfio` and reports zero chips; the bounded
@@ -408,9 +429,10 @@ named above.
 4. Publish or select a client image by immutable registry digest and verify the
    mounted Qwen3-4B-Instruct-2507 weights and frozen clean-list digest without
    printing credentials.
-5. Render only `arm=native, stage=full` with fresh run-id `p58f10` and worker
+5. Render only `arm=native, stage=full` with fresh run-id `p58f11` and worker
    sentinel `tpu-v5p-slice`. Require exact `4x4x8` topology and no literal
-   `cloud.google.com/gke-nodepool: tpu-v5p-slice`; require head pool `cpu-np`,
+   `cloud.google.com/gke-nodepool: tpu-v5p-slice`; require B8 x G16 =
+   concurrency 128 = rollout DP8 x max-seqs16; require head pool `cpu-np`,
    head and worker host networking, exact required hostname anti-affinity over
    the JobSet `pathways-head` label, both JobSet DNS-publication settings, and
    the exact generated head DNS in both worker RM fields. Preserve the
@@ -426,12 +448,13 @@ named above.
    evaluation, checkpoint, and transaction receipts.
 8. Do not render or apply zero.
 
-Do not reuse any failed `p58c01` through `p58c05` or `p58f01` through `p58f09`
+Do not reuse any failed `p58c01` through `p58c05` or `p58f01` through `p58f10`
 YAML/run root. P58f03 through p58f07 have diagnostic trajectory/alignment
 evidence but no durable trainer update or optimizer checkpoint, so none is
 resumable training state. The attempts remain immutable failure evidence.
 P58f08 has no trajectory at all; p58f09 completed rollout processing but
-crashed before the durable journal and therefore also has no resumable state.
+crashed before the durable journal; p58f10 timed out at the batch orchestrator
+before the journal. None has resumable state.
 if a CL mismatch recurs, collect all three head-container logs plus one worker
 log and verify its resolved RM address before deleting the failed JobSet.
 Earlier evidence remains under `evidence/p58c01/`, `evidence/p58c02/`,
@@ -464,7 +487,7 @@ for `workload_describe.txt`.
 - A Kubernetes sandbox start exception must propagate after deletion is
   confirmed. `ENV_TIMEOUT` is an admitted compact-filter status; a
   half-created RepoEnv with `container=None` is forbidden. If an entire
-  p58f10 batch has zero confirmed Running pods, classify infrastructure
+  p58f11 batch has zero confirmed Running pods, classify infrastructure
   capacity/scheduling before another launch instead of patching websocket
   decode or inventing a successful trajectory.
 - Read `deepswe/all_sandbox_start_timeout_batch` first. Value `1` means the
