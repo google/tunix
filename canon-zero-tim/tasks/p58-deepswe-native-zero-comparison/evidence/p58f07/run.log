@@ -1,0 +1,24 @@
+# P58 DeepSWE Native Full (p58f07) Failure Evidence (Commit 26f9f4a2)
+
+`canon-p58-ds4b-native-full-p58f07` successfully:
+1. Initialized 128 TPU v5p chips.
+2. Completed 128 SWE-bench RepoEnv sandboxes in Step 0 Rollout (N_action=436,464 tokens).
+3. Passed Pre-backward alignment gate with warnings ('S_decode_vs_S_prefill', 'S_prefill_vs_T_old').
+4. Rescored B tokens in 26.9s.
+5. Started backward gradient accumulation.
+
+However, during `_post_process_train_step` in `alignment.check_batch()`, it failed on:
+`tunix.rl.alignment.AlignmentGateError: alignment gate RED mode=train: ['T_old_vs_T_current', 'r_all_exactly_1']`
+
+```text
+[rank0]:   File "/app/tunix/rl/rl_cluster.py", line 900, in update_actor
+[rank0]:     self.actor_trainer.train(train_ds, eval_ds, skip_jit)
+[rank0]:   File "/app/tunix/sft/peft_trainer.py", line 1996, in train
+[rank0]:     self._post_process_train_step(aux)
+[rank0]:   File "/app/tunix/rl/trainer.py", line 227, in _post_process_train_step
+[rank0]:     record = alignment.check_batch(
+[rank0]:              ^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/rl/alignment.py", line 1635, in check_batch
+[rank0]:     raise AlignmentGateError(
+[rank0]: tunix.rl.alignment.AlignmentGateError: alignment gate RED mode=train: ['T_old_vs_T_current', 'r_all_exactly_1']; report=/mnt/disks/linchai_data/deepswe_zero_tim/canon-p58-ds4b-native-full-p58f07/alignment.jsonl
+```

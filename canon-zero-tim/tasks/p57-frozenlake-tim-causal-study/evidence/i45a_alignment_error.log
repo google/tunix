@@ -1,0 +1,19 @@
+# P57 P45 Token-IS (i45a) Failure Evidence (Commit 26f9f4a2)
+
+`canon-p57-fl-is-i45a-26f9f4a2` ran Step 0 Rollout and Pre-backward Alignment with Warning successfully.
+However, in post_backward `alignment.check_batch()`, it failed because `CANON_ENGINE_MODULE_C!=1`:
+
+```text
+[rank0]:   File "/app/tunix/rl/rl_cluster.py", line 900, in update_actor
+[rank0]:     self.actor_trainer.train(train_ds, eval_ds, skip_jit)
+[rank0]:   File "/app/tunix/sft/peft_trainer.py", line 1996, in train
+[rank0]:     self._post_process_train_step(aux)
+[rank0]:   File "/app/tunix/rl/trainer.py", line 227, in _post_process_train_step
+[rank0]:     record = alignment.check_batch(
+[rank0]:              ^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/rl/alignment.py", line 1635, in check_batch
+[rank0]:     raise AlignmentGateError(
+[rank0]: tunix.rl.alignment.AlignmentGateError: alignment gate RED mode=train: ['CANON_ENGINE_MODULE_C!=1']; report=/tmp/canon-state/canon-p57-fl-is-i45a-26f9f4a2/alignment.jsonl
+```
+
+In Stock IS mode (`regime=stock-fast, arm=is`), `CANON_ENGINE_MODULE_C` is 0 by design (observer-only). `check_batch` needs to recognize `p57_arm == "is"` and not require `CANON_ENGINE_MODULE_C==1`.
