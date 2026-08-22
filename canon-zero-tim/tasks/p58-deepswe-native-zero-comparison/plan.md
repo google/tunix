@@ -48,7 +48,7 @@ before any workload pod or update existed. P58.5N is the only active phase.
 Both zero phases remain deferred even though the renderer and CPU tests cover
 that arm.
 
-P58.5N attempts `p58f01` through `p58f03` remain `INCONCLUSIVE`. P58f01 exposed
+P58.5N attempts `p58f01` through `p58f04` remain `INCONCLUSIVE`. P58f01 exposed
 missing sandbox LocalQueue inheritance and reset-time policy provenance;
 p58f02 showed that the chosen CPU flavor required `cpu-np`; and p58f03 proved
 that the CPU routing repair works by completing 128 real trajectories in
@@ -56,8 +56,12 @@ that the CPU routing repair works by completing 128 real trajectories in
 forward because the native arm was incorrectly sent through a
 canonical-adapter-only weight-attestation method. The published repair provides a
 shared exact-live-weight observer while preserving native numerical
-untreatedness. The phase remains active; after final branch readback the next
-fresh attempt is `p58f04`.
+untreatedness. P58f04 proved that repair with exact 398-leaf live weights after
+a 557.2-second, 128-row rollout. It then stopped before trainer forward because
+the shared processed-`S_prefill` contract accepted only the canonical
+processed-logprob engine even though native correctly kept that numerical flag
+off. The independent native stock-B observer repair is local and validated;
+after publication/readback the next fresh attempt is `p58f05`.
 
 ## Frozen shared recipe
 
@@ -152,6 +156,14 @@ throughput is considered only when sandbox-start timeout metrics are zero and
   it must neither register the canonical adapter nor replace serving functions.
   Missing/mismatched weights, mesh drift, an unsigned route, or a leaked native
   canonical adapter are fatal before A/B/C.
+- Processed B observation is also arm-aware and mutually exclusive. Native
+  keeps `CANON_PROMPT_PROCESSED_LOGPROBS=0`, `CANON_ENGINE_MODULE_C=0`, and all
+  zero-TIM numerical switches disabled/absent; its independent, signed stock
+  observer only transforms post-rollout prompt logits and uses absolute
+  request-history targets. Zero keeps that observer off and uses the complete
+  canonical processed-logprob engine. Either mixed tuple is a hard contract
+  error. The observer may not affect generation, trainer forward, loss,
+  backward, optimizer math, or commit count.
 - Every rollout batch must contain exactly 128 raw trajectory records. A
   signed compact-filter status may produce a zero policy mask and is not a
   malformed row. Missing, duplicated, structurally empty, or parser-invalid

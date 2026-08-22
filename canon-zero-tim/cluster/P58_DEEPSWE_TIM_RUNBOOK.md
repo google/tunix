@@ -83,8 +83,29 @@ read-only observer; it does not construct/register that adapter or replace a
 serving function. Missing or unequal leaves, DP8 x TP8 mesh drift, an unsigned
 route, or a leaked canonical adapter in native is fatal. The receipt exposes
 contract axis names `dp/tp` even though vLLM internally names them `data/model`.
-Use fresh full-stage run-id `p58f04` after the repair is published and read
-back; never reuse p58f03 YAML/root.
+
+Native `p58f04` proved that weight repair: after a 557.2-second rollout it
+wrote 128 rows (125 `SUCCEEDED`, three `MAX_CONTEXT_LIMIT_REACHED`, six solved,
+one mixed/effective group, 16 nonzero advantages) and emitted
+`[P34.WEIGHTS] EXACT` for 398 leaves and 4,022,468,096 elements. It then failed
+before trainer forward/backward/update because the shared processed
+`S_prefill` call accepted only `CANON_PROMPT_PROCESSED_LOGPROBS=1`. Native
+correctly keeps that canonical flag at zero, so the fail-closed rejection was
+correct but the arm routing was incomplete. P58f04 is immutable,
+`INCONCLUSIVE`, and has no resumable optimizer state.
+
+The repair uses two mutually exclusive processed-B implementations. Native
+keeps the complete zero-TIM bundle disabled/absent and alone sets
+`CANON_P58_NATIVE_STOCK_PROMPT_OBSERVER=1`. After all six stock files are
+verified, a two-file, digest-pinned observer overlay computes only the
+post-rollout B values with decode-equivalent temperature/top-k/top-p transforms
+and absolute request-history targets. It never participates in generation,
+trainer forward, loss, backward, optimizer math, or commit accounting. Zero
+sets the P58 observer to zero and retains
+`CANON_PROMPT_PROCESSED_LOGPROBS=1`, `CANON_ENGINE_MODULE_C=1`, and the complete
+canonical engine. Environment and runtime contracts reject any mixed tuple.
+Use fresh full-stage run-id `p58f05` after publication and readback; never reuse
+p58f04 YAML/root.
 
 The direct-entrypoint implementation commit is
 `82d82f72a7220d945737d95f6266b5b7e2cfe706`. Resolve the final runnable SHA by
@@ -180,7 +201,7 @@ bash canon-zero-tim/tests/p58_deepswe_native_zero/run_exact_image.sh \
 Required terminal marker:
 
 ```text
-P58_EXACT_IMAGE_CPU_PASS loss_oracle=1 weighted_accumulation=1 compact_filter=1 durable_journal=1 paired_renderer=1 alignment_policy=1 regressions=1
+P58_EXACT_IMAGE_CPU_PASS loss_oracle=1 weighted_accumulation=1 compact_filter=1 durable_journal=1 paired_renderer=1 alignment_policy=1 stock_observer=1 regressions=1
 ```
 
 That marker proves CPU/image wiring, not TPU execution, HBM, real R2E rollout,
@@ -201,7 +222,7 @@ CLIENT_IMAGE_DIGEST='registry.example/tunix@sha256:<64-hex-digest>'
 CPU_NODEPOOL='cpu-np'
 TPU_NODEPOOL='tpu-v5p-slice'
 MODEL_PVC='haoyugao-cpu-np-pvc'
-RUN_STEM='p58f04'
+RUN_STEM='p58f05'
 STAGE='full'
 
 ARM='native'
@@ -293,6 +314,19 @@ the same bitwise trainer-to-live-engine proof through an observer-only route;
 the adapter must remain absent. The log must contain `[P34.WEIGHTS] EXACT`.
 Missing/mismatched leaves, invalid mesh, or native adapter leakage is a hard
 failure and must not be converted to warning-only.
+
+For native, also require exactly one engine marker before B is accepted:
+
+```text
+[P58.STOCK_OBSERVER] PROCESSED_PROMPT_LOGPROBS_PASS ... targets=absolute-request-history treatment=observer-only
+```
+
+The preceding install log must say `canonical_bundle=off`, while the native
+environment retains `CANON_PROMPT_PROCESSED_LOGPROBS=0` and
+`CANON_ENGINE_MODULE_C=0`. Seeing a canonical engine marker or either flag at
+one is treatment contamination and a hard stop. Conversely, the zero arm must
+set `CANON_P58_NATIVE_STOCK_PROMPT_OBSERVER=0`; it must never install or emit
+the stock-observer marker.
 
 The gzip files contain the complete redacted conversation/tool trajectory,
 raw final reward, training reward, advantage, status, task identity,
@@ -386,6 +420,8 @@ invariants. P58 does not claim Qwen3-32B or 256-chip production readiness.
 Stop rather than retrying the same manifest if any of these occurs:
 
 - source/image/data digest drift;
+- native/zero processed-B treatment mixing, a missing or duplicate native
+  stock-observer marker, or a canonical engine marker in native;
 - native has no observed mismatch dose;
 - native B-C or any zero boundary differs;
 - NaN/Inf, invalid shape, replica drift, optimizer/weight attestation failure;

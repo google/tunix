@@ -24,7 +24,7 @@ validate the deferred zero arm and cannot establish a paired treatment effect.
 - recipe: B8 x G16, response 16,384, 50 turns, RLOO, fixed-context
   `sequence-mean-token-scale`, TPU-resident optimizer, optional interventions
   off, prefix cache off;
-- stage/run: `full`, fresh run-id `p58f04`, exactly 1,000 optimizer commits;
+- stage/run: `full`, fresh run-id `p58f05`, exactly 1,000 optimizer commits;
 - arm: `native` only. Rendering or applying `zero` is outside this phase.
 
 ## Admission gate
@@ -65,7 +65,7 @@ batches exceed 1,000. Partial/tampered evidence, exact native A-B
 
 ## Attempt boundary
 
-P58c05 and p58f01 through p58f03 are immutable `INCONCLUSIVE` evidence.
+P58c05 and p58f01 through p58f04 are immutable `INCONCLUSIVE` evidence.
 P58f01 exposed sandbox LocalQueue and reset-time provenance faults. P58f02
 exposed a CPU-flavor/node-pool mismatch; moving the head and sandboxes to
 `cpu-np` was the correct repair. P58f03 then completed 128 real trajectories
@@ -74,10 +74,20 @@ throughput are no longer the first failure. It stopped before trainer forward,
 backward, or update because native was routed to a canonical-adapter-only
 weight gate.
 
-The repaired gate uses an exact read-only live-weight observer for signed P58
+The repaired weight gate uses an exact read-only live-weight observer for signed P58
 native and keeps the canonical registered-adapter path for zero. Native still
 has no numerical hook. Any mismatch, invalid mesh, missing signature, or
 leaked adapter remains fatal. P58f03 has no optimizer checkpoint and is not a
 resumable training root; preserve its trajectory journal as diagnostic
-evidence only. The next attempt is fresh native `p58f04` after publication and
-readback. Zero remains deferred.
+evidence only.
+
+P58f04 completed 128 real trajectories in 557.2 seconds, durably journaled
+them, and passed exact live-weight attestation for 398 leaves and
+4,022,468,096 elements. It then failed before trainer forward/backward/update
+because processed `S_prefill` was wired only to the canonical processed engine,
+which native correctly disables. The repair adds an independent, observer-only
+stock B overlay gated solely by the signed P58 native tuple. Native retains
+`CANON_PROMPT_PROCESSED_LOGPROBS=0`, `CANON_ENGINE_MODULE_C=0`, and every other
+zero-TIM disable/absence. Zero retains the canonical engine and sets the stock
+observer to zero. The next attempt is fresh native `p58f05` after publication
+and readback. Zero remains deferred.

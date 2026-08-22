@@ -104,11 +104,13 @@ if [ "${CANON_P46_EVALUATION:-0}" = "1" ]; then
 elif [ "${CANON_P58_DEEPSWE_TIM:-0}" = "1" ] && \
      [ "${CANON_P58_TIM_ARM:-}" = "native" ]; then
   # P58 native is the untreated numerical baseline.  Keep the shared Tunix
-  # trainer/observer code from the pinned source, but leave every signed
-  # tpu_inference target byte-identical to the digest-pinned client image.
+  # trainer code from the pinned source. Verify every signed tpu_inference
+  # target before installing the separately signed, observer-only B overlay.
+  # The zero-TIM canonical chain remains absent.
   step 35_install_r2egym.sh
   step p58_verify_stock_engine.sh
-  log "P58_NATIVE_STOCK_PATH source=$CANON_EXPECT_COMMIT canonical_overlay=skipped"
+  step p58_install_stock_prompt_observer.sh
+  log "P58_NATIVE_STOCK_PATH source=$CANON_EXPECT_COMMIT canonical_overlay=skipped stock_observer=installed"
 elif p57_is_stock_fast_runtime; then
   # P57.1 measures and trains the stock arm with the untreated pinned-image
   # serving program. Installing the canonical chain and merely unsetting its

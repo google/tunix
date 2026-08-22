@@ -17,6 +17,12 @@ matched exactly with ahead/behind `0/0`. This documentation checkpoint advances
 the branch once more, so the executor must still fetch and use the final
 operator-branch SHA rather than pinning the implementation commit directly.
 
+Latest source intake fast-forwarded this isolated worktree to
+`609c8e6d6d2cb9e7ebd0ea8fa0d7a4fe0b877f68`, which adds immutable p58f04
+evidence only. The processed-B repair described below is currently local and
+unpublished. Do not ask an executor to launch p58f05 until the user separately
+approves commit/push and a post-push remote readback is exact.
+
 The user changed the execution order again: waive the optional one-host sanity
 and the separate three-update stop, then run only the native 128-chip full
 1,000-update stage. Updates 1–3 are live monitoring milestones in the same job,
@@ -171,8 +177,40 @@ The implementation was published as
 `234eaddb8e3543083927aa10effe101abef18a91`; its first remote readback matched
 exactly with ahead/behind `0/0`. This publication-evidence checkpoint advances
 the branch once more, so fetch and pin the final remote tip rather than the
-implementation commit directly. The next run is fresh native `p58f04`, not a
-resume of p58f03. Zero remains deferred.
+implementation commit directly. That repair was exercised by fresh native
+`p58f04` below rather than by resuming p58f03. Zero remains deferred.
+
+P58f04 completed the next real rollout batch in 557.2 seconds and durably
+journaled 128 rows: 125 `SUCCEEDED`, three `MAX_CONTEXT_LIMIT_REACHED`, six
+solved trajectories, five all-failed groups, one mixed/effective group, two
+incomplete groups, and 16 nonzero advantages. It proved the preceding repair
+with `[P34.WEIGHTS] EXACT` over 398 leaves and 4,022,468,096 elements. The raw
+log is `evidence/p58f04/run.log`, SHA-256
+`a7b0cda5e7d359c7e320b29f8af197db0dd6c46dc34850aa55ffb350fb766fdd`.
+The trajectory journal is
+`/mnt/disks/linchai_data/deepswe_zero_tim/canon-p58-ds4b-native-full-p58f04/debug/batch-000000.trajectories.jsonl.gz`,
+SHA-256
+`e39caf5df63ba54406a36427a413dea562e5771f4c52b30c840229d3178c1f3b`.
+
+P58f04 then failed before trainer forward/backward/update. The shared
+processed-`S_prefill` interface required the canonical
+`CANON_PROMPT_PROCESSED_LOGPROBS=1` engine path, while native correctly keeps
+that flag and `CANON_ENGINE_MODULE_C` at zero. Reusing the stock raw helper
+would be wrong because it rolls targets across a DP-packed buffer and can cross
+request/padding boundaries. Enabling the canonical flag would contaminate the
+native treatment.
+
+The local repair adds a separately signed, observer-only P58 native stock-B
+overlay. It is installed only after the six stock files verify; it changes one
+runner call site plus one helper under an exact two-file manifest. It applies
+decode-equivalent temperature/top-k/top-p transforms and derives targets from
+absolute request history. It does not enter generation, trainer forward, loss,
+backward, optimizer math, or commits. Native still has
+`CANON_PROMPT_PROCESSED_LOGPROBS=0`, `CANON_ENGINE_MODULE_C=0`, and every other
+zero-TIM numerical switch disabled/absent. Zero sets the new P58 observer flag
+to zero and retains the complete canonical engine. Mixed tuples fail closed.
+After publication/readback, the next run is fresh native `p58f05`; p58f04 is
+not resumable training state. Zero remains deferred.
 
 Never modify or push `main`. The publication target is exclusively
 `yuxzhang/canon-zero-tim`; the implementation is present there.
@@ -192,6 +230,8 @@ Never modify or push `main`. The publication target is exclusively
   signal metrics, and W&B forwarding;
 - native stock-engine verification and absence checks for the complete
   canonical numerical bundle;
+- independent native-only processed-B observer with absolute request-history
+  targets, exact two-file manifest, and mutually exclusive Native/Zero flags;
 - native finite A-B warning boundary with B-C strict, and zero all-boundary
   strictness;
 - native stock optimizer transaction receipts plus zero explicit fixed-tree
@@ -216,7 +256,7 @@ sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a
 Terminal marker:
 
 ```text
-P58_EXACT_IMAGE_CPU_PASS loss_oracle=1 weighted_accumulation=1 compact_filter=1 durable_journal=1 paired_renderer=1 alignment_policy=1 regressions=1
+P58_EXACT_IMAGE_CPU_PASS loss_oracle=1 weighted_accumulation=1 compact_filter=1 durable_journal=1 paired_renderer=1 alignment_policy=1 stock_observer=1 regressions=1
 ```
 
 The gate covers the P58 loss oracle, unequal-effective-row gradients, real
@@ -231,10 +271,13 @@ preceding P34 suites passed. That device-probe result is `INCONCLUSIVE` and is
 not represented as TPU evidence; the final P58 image gate runs the directly
 relevant P34 contract/environment/renderer regressions instead.
 
-No one-host real Qwen/R2E rollout and no 128-chip target training update has run. A
-fresh inventory found Qwen3-4B weights but no `libtpu.so`, so this host cannot
-run the requested direct-attached v5p validation. The current claim is
-implementation plus CPU/exact-image validation only.
+No one-host real Qwen/R2E rollout and no 128-chip target training update has
+run. P58f04 does provide target-scale rollout, journal, and exact-weight
+evidence, but it stopped before trainer forward/backward/update. A fresh local
+inventory found Qwen3-4B weights but no `libtpu.so`, so this host cannot run the
+requested direct-attached v5p validation. The repair claim is implementation
+plus CPU/exact-image validation; the target evidence remains limited to the
+pre-forward boundaries named above.
 
 ## Next executor sequence — native only
 
@@ -249,21 +292,22 @@ implementation plus CPU/exact-image validation only.
 4. Publish or select a client image by immutable registry digest and verify the
    mounted Qwen3-4B-Instruct-2507 weights and frozen clean-list digest without
    printing credentials.
-5. Render only `arm=native, stage=full` with fresh run-id `p58f04` and worker
+5. Render only `arm=native, stage=full` with fresh run-id `p58f05` and worker
    sentinel `tpu-v5p-slice`. Require exact `4x4x8` topology and no literal
    `cloud.google.com/gke-nodepool: tpu-v5p-slice`; preserve the YAML/digest and
    run server-side dry-run before the separately approved apply.
-6. Monitor Kueue admission, the first completed trajectory batch, and commits
-   1–3 without stopping a healthy job. Continue through checkpoint 8, updates
-   32 and 100, then every 100 updates.
+6. Require stock preflight, one P58 stock-observer processed-B marker, exact
+   live weights, finite forward/backward, and the first optimizer commit.
+   Then monitor commits 1–3 without stopping a healthy job. Continue through
+   checkpoint 8, updates 32 and 100, then every 100 updates.
 7. Require the full native classifier JSON to say `PASS`, including finite
    nonzero A-B, exact B-C, exactly 1,000 commits, device optimizer, complete
    journal, cleanup, evaluation, checkpoint, and transaction receipts.
 8. Do not render or apply zero.
 
-Do not reuse any failed `p58c01` through `p58c05` or `p58f01` through `p58f03`
-YAML/run root. P58f03 has a valid diagnostic trajectory journal but no trainer
-update or optimizer checkpoint, so it is not resumable training state. The
+Do not reuse any failed `p58c01` through `p58c05` or `p58f01` through `p58f04`
+YAML/run root. P58f03 and p58f04 have valid diagnostic trajectory journals but
+no trainer update or optimizer checkpoint, so neither is resumable training state. The
 attempts remain immutable failure evidence
 under `evidence/p58c01/`, `evidence/p58c02/`, `evidence/p58c03/`, and
 `evidence/p58c04/`. The
@@ -294,7 +338,7 @@ for `workload_describe.txt`.
 - A Kubernetes sandbox start exception must propagate after deletion is
   confirmed. `ENV_TIMEOUT` is an admitted compact-filter status; a
   half-created RepoEnv with `container=None` is forbidden. If an entire
-  p58f04 batch has zero confirmed Running pods, classify infrastructure
+  p58f05 batch has zero confirmed Running pods, classify infrastructure
   capacity/scheduling before another launch instead of patching websocket
   decode or inventing a successful trajectory.
 - Read `deepswe/all_sandbox_start_timeout_batch` first. Value `1` means the
@@ -310,6 +354,11 @@ for `workload_describe.txt`.
 - The native arm is stock numerical training plus observation. It must not
   inherit `CANON_FIXED_AR`, `CANON_LOGPROB_M`, the canonical module, VJP2, or
   the excess-precision pin. The zero arm retains the complete bundle.
+- Native processed B must come only from the P58 stock observer while
+  `CANON_PROMPT_PROCESSED_LOGPROBS=0`; require exactly one
+  `[P58.STOCK_OBSERVER] PROCESSED_PROMPT_LOGPROBS_PASS` marker. Zero must keep
+  the stock observer off and use its canonical processed engine. Never enable
+  both to make a run pass.
 - Exact live-weight attestation is shared evidence, not a native numerical
   treatment. Native may use only the observer interface and must keep the
   canonical adapter absent; zero uses the registered adapter. Require exact

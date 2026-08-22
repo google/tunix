@@ -149,6 +149,133 @@ class VllmRolloutCanonicalTest(absltest.TestCase):
         [[1, 2, 3, 4], [5, 6]],
     )
 
+  def test_p58_native_processed_rescore_uses_only_signed_stock_observer(self):
+    rollout = object.__new__(vllm_rollout.VllmRollout)
+    rollout._sampler = _RescoreSampler()
+    rollout._last_sampling_transforms = {
+        "temperature": 1.0,
+        "top_p": 1.0,
+        "top_k": 0,
+    }
+    rollout._last_prefill_rescore_provenance = None
+    native = {
+        "CANON_PROFILE_FILE": (
+            "cluster/profiles/qwen3-4b-dp8-tp8-deepswe-tim.env"
+        ),
+        "CANON_P34_DEEPSWE": "1",
+        "CANON_P58_DEEPSWE_TIM": "1",
+        "CANON_P58_TIM_ADMITTED": "1",
+        "CANON_P58_TIM_ARM": "native",
+        "CANON_ENGINE_MODULE_C": "0",
+        "CANON_PROMPT_PROCESSED_LOGPROBS": "0",
+        "CANON_P58_NATIVE_STOCK_PROMPT_OBSERVER": "1",
+    }
+    with mock.patch.dict(os.environ, native, clear=True):
+      result = rollout.get_prefill_rescore_logps(
+          prompt_tokens=np.asarray([[1, 2]], np.int32),
+          completion_tokens=np.asarray([[3, 0]], np.int32),
+          completion_lengths=np.asarray([1], np.int32),
+          processed=True,
+      )
+
+    np.testing.assert_array_equal(
+        result, np.asarray([[-3.0, 0.0]], np.float32)
+    )
+    self.assertEqual(
+        rollout._last_prefill_rescore_provenance["processor"],
+        "p58-native-stock-observer",
+    )
+
+  def test_p58_native_processed_rescore_rejects_missing_observer(self):
+    rollout = object.__new__(vllm_rollout.VllmRollout)
+    rollout._sampler = _RescoreSampler()
+    rollout._last_sampling_transforms = {
+        "temperature": 1.0,
+        "top_p": 1.0,
+        "top_k": 0,
+    }
+    native = {
+        "CANON_PROFILE_FILE": (
+            "cluster/profiles/qwen3-4b-dp8-tp8-deepswe-tim.env"
+        ),
+        "CANON_P34_DEEPSWE": "1",
+        "CANON_P58_DEEPSWE_TIM": "1",
+        "CANON_P58_TIM_ADMITTED": "1",
+        "CANON_P58_TIM_ARM": "native",
+        "CANON_ENGINE_MODULE_C": "0",
+        "CANON_PROMPT_PROCESSED_LOGPROBS": "0",
+        "CANON_P58_NATIVE_STOCK_PROMPT_OBSERVER": "0",
+    }
+    with mock.patch.dict(os.environ, native, clear=True):
+      with self.assertRaisesRegex(RuntimeError, "signed stock prompt observer"):
+        rollout.get_prefill_rescore_logps(
+            np.asarray([[1, 2]], np.int32),
+            np.asarray([[3]], np.int32),
+            processed=True,
+            completion_lengths=np.asarray([1], np.int32),
+        )
+
+  def test_p58_zero_processed_rescore_rejects_native_observer(self):
+    rollout = object.__new__(vllm_rollout.VllmRollout)
+    rollout._sampler = _RescoreSampler()
+    rollout._last_sampling_transforms = {
+        "temperature": 1.0,
+        "top_p": 1.0,
+        "top_k": 0,
+    }
+    zero = {
+        "CANON_PROFILE_FILE": (
+            "cluster/profiles/qwen3-4b-dp8-tp8-deepswe-tim.env"
+        ),
+        "CANON_P34_DEEPSWE": "1",
+        "CANON_P58_DEEPSWE_TIM": "1",
+        "CANON_P58_TIM_ADMITTED": "1",
+        "CANON_P58_TIM_ARM": "zero",
+        "CANON_ENGINE_MODULE_C": "1",
+        "CANON_PROMPT_PROCESSED_LOGPROBS": "1",
+        "CANON_P58_NATIVE_STOCK_PROMPT_OBSERVER": "1",
+    }
+    with mock.patch.dict(os.environ, zero, clear=True):
+      with self.assertRaisesRegex(RuntimeError, "outside its signed arm"):
+        rollout.get_prefill_rescore_logps(
+            np.asarray([[1, 2]], np.int32),
+            np.asarray([[3]], np.int32),
+            processed=True,
+            completion_lengths=np.asarray([1], np.int32),
+        )
+
+  def test_p58_zero_processed_rescore_keeps_canonical_processor(self):
+    rollout = object.__new__(vllm_rollout.VllmRollout)
+    rollout._sampler = _RescoreSampler()
+    rollout._last_sampling_transforms = {
+        "temperature": 1.0,
+        "top_p": 1.0,
+        "top_k": 0,
+    }
+    zero = {
+        "CANON_PROFILE_FILE": (
+            "cluster/profiles/qwen3-4b-dp8-tp8-deepswe-tim.env"
+        ),
+        "CANON_P34_DEEPSWE": "1",
+        "CANON_P58_DEEPSWE_TIM": "1",
+        "CANON_P58_TIM_ADMITTED": "1",
+        "CANON_P58_TIM_ARM": "zero",
+        "CANON_ENGINE_MODULE_C": "1",
+        "CANON_PROMPT_PROCESSED_LOGPROBS": "1",
+        "CANON_P58_NATIVE_STOCK_PROMPT_OBSERVER": "0",
+    }
+    with mock.patch.dict(os.environ, zero, clear=True):
+      rollout.get_prefill_rescore_logps(
+          np.asarray([[1, 2]], np.int32),
+          np.asarray([[3]], np.int32),
+          processed=True,
+          completion_lengths=np.asarray([1], np.int32),
+      )
+    self.assertEqual(
+        rollout._last_prefill_rescore_provenance["processor"],
+        "canonical-processed",
+    )
+
   def test_grouped_prefill_rescore_changes_only_submission_grouping(self):
     rollout = object.__new__(vllm_rollout.VllmRollout)
     rollout._sampler = _RescoreSampler()

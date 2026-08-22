@@ -239,8 +239,9 @@ class VllmRollout(base_rollout.BaseRollout):
     Re-submits prompt+completion to the SAME engine as one prompt with
     `prompt_logprobs=0`, so vLLM's own prefill forward scores every token, and returns the
     completion slice. With ``processed=True`` the engine-side
-    ``CANON_PROMPT_PROCESSED_LOGPROBS`` path must be enabled and reuses decode's exact
-    temperature/top-k/top-p processor. This is the only honest source for the processed
+    processed-logprob path must be enabled: the canonical engine for zero-TIM,
+    or the separately signed observer-only stock path for P58 native. Both
+    reuse decode's exact temperature/top-k/top-p processor. This is the only honest source for the processed
     `S_decode == S_prefill` boundary: aliasing `get_per_token_logps()` there compares a tensor
     with itself and makes the gate vacuous.
 
@@ -249,11 +250,40 @@ class VllmRollout(base_rollout.BaseRollout):
     trailing edge; without lengths the legacy right-pad-run heuristic cannot distinguish the
     two cases.
     """
+    canonical_processed = (
+        os.environ.get("CANON_PROMPT_PROCESSED_LOGPROBS", "") == "1"
+    )
+    p58_stock_observer_requested = (
+        os.environ.get("CANON_P58_NATIVE_STOCK_PROMPT_OBSERVER", "") == "1"
+    )
+    p58_native_requested = (
+        os.environ.get("CANON_P58_TIM_ARM", "") == "native"
+    )
+    p58_stock_observer_signed = (
+        p58_native_requested
+        and os.environ.get("CANON_P34_DEEPSWE", "") == "1"
+        and os.environ.get("CANON_P58_DEEPSWE_TIM", "") == "1"
+        and os.environ.get("CANON_P58_TIM_ADMITTED", "") == "1"
+        and os.environ.get("CANON_PROFILE_FILE", "")
+        == "cluster/profiles/qwen3-4b-dp8-tp8-deepswe-tim.env"
+        and os.environ.get("CANON_ENGINE_MODULE_C", "") == "0"
+        and os.environ.get("CANON_PROMPT_PROCESSED_LOGPROBS", "") == "0"
+        and p58_stock_observer_requested
+    )
+    if p58_native_requested and not p58_stock_observer_signed:
+      raise RuntimeError(
+          "P58 native S_prefill requires the signed stock prompt observer "
+          "while every canonical processed-logprob switch remains off"
+      )
+    if p58_stock_observer_requested and not p58_stock_observer_signed:
+      raise RuntimeError(
+          "P58 native stock prompt observer used outside its signed arm"
+      )
     if processed:
-      if os.environ.get("CANON_PROMPT_PROCESSED_LOGPROBS", "") != "1":
+      if not canonical_processed and not p58_stock_observer_signed:
         raise RuntimeError(
-            "processed S_prefill requires CANON_PROMPT_PROCESSED_LOGPROBS=1 in the "
-            "engine process; refusing to label raw prompt logprobs as processed"
+            "processed S_prefill requires either the canonical processed "
+            "engine path or the signed P58 native stock observer"
         )
       if self._last_sampling_transforms is None:
         raise RuntimeError(
@@ -365,6 +395,13 @@ class VllmRollout(base_rollout.BaseRollout):
 
     self._last_prefill_rescore_provenance = {
         "processed": bool(processed),
+        "processor": (
+            "p58-native-stock-observer"
+            if p58_stock_observer_signed
+            else "canonical-processed"
+            if canonical_processed
+            else "stock-raw"
+        ),
         "temperature": temperature,
         "top_p": top_p,
         "top_k": top_k,

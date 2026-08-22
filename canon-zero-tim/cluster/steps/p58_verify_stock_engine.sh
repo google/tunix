@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Verify that the P58 native arm retained the digest-pinned image engine and
-# can import the DeepSWE program without a canonical overlay.
+# Verify that the P58 native arm retained the digest-pinned image engine before
+# its independent observer-only B overlay is installed.
 set -euo pipefail
 source "$CANON_STATE/env.sh"
 

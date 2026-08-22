@@ -161,11 +161,39 @@ class P58EnvironmentContractTest(unittest.TestCase):
           if arm == "native":
             self.assertNotIn("CANON_FIXED_AR", values)
             self.assertNotIn("CANON_LOGPROB_M", values)
+            self.assertEqual(values["CANON_PROMPT_PROCESSED_LOGPROBS"], "0")
+            self.assertEqual(
+                values["CANON_P58_NATIVE_STOCK_PROMPT_OBSERVER"], "1"
+            )
             self.assertEqual(values["CANON_P28_BATCHED_REVERSE"], "0")
             self.assertEqual(values["CANON_BATCHED_EVIDENCE"], "0")
           else:
             self.assertEqual(values["CANON_FIXED_AR"], "1")
             self.assertEqual(values["CANON_LOGPROB_M"], "256")
+            self.assertEqual(values["CANON_PROMPT_PROCESSED_LOGPROBS"], "1")
+            self.assertEqual(
+                values["CANON_P58_NATIVE_STOCK_PROMPT_OBSERVER"], "0"
+            )
+
+  def test_prompt_observer_treatments_are_mutually_exclusive(self):
+    native = self._resolved("native", "three-update")
+    zero = self._resolved("zero", "three-update")
+    for changed in (
+        {"CANON_PROMPT_PROCESSED_LOGPROBS": "1"},
+        {"CANON_ENGINE_MODULE_C": "1"},
+        {"CANON_P58_NATIVE_STOCK_PROMPT_OBSERVER": "0"},
+    ):
+      with self.subTest(arm="native", changed=changed):
+        with self.assertRaises(ValueError):
+          deepswe_contract.validate_environment({**native, **changed})
+    with self.assertRaises(ValueError):
+      deepswe_contract.validate_environment({
+          **zero, "CANON_P58_NATIVE_STOCK_PROMPT_OBSERVER": "1"
+      })
+    with self.assertRaises(ValueError):
+      deepswe_contract.validate_environment({
+          **zero, "CANON_PROMPT_PROCESSED_LOGPROBS": "0"
+      })
 
 
 if __name__ == "__main__":

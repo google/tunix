@@ -783,6 +783,11 @@ def validate_environment(values: Mapping[str, str]) -> None:
       # VJPs would differentiate inactive capacity rather than the call.
       "CANON_VJP2_MAX_SEQS": "1" if numerical_bundle else "0",
       "CANON_LOGPROB_M": "256" if numerical_bundle else None,
+      "CANON_P58_NATIVE_STOCK_PROMPT_OBSERVER": (
+          "1" if p58_tim and p58_arm == "native" else (
+              "0" if p58_tim else None
+          )
+      ),
       "MIN_TOKEN_BUCKET": str(workload.global_m),
       "CANON_P34_ABCPROD": "256",
       "CANON_QWEN3_TP_SIZE": "8",
@@ -870,6 +875,13 @@ def validate_environment(values: Mapping[str, str]) -> None:
       "CANON_GLOBAL_TRAJECTORIES": str(workload.global_trajectories),
       "FL_SHARED_MESH": f"{workload.dp_size},{workload.tp_size}",
   }
+  if p58_tim:
+    expected.update({
+        "CANON_PROMPT_PROCESSED_LOGPROBS": (
+            "0" if p58_arm == "native" else "1"
+        ),
+        "CANON_ENGINE_MODULE_C": "0" if p58_arm == "native" else "1",
+    })
   if pilot or debug or parity or p58_tim:
     expected.update({
         "CANON_OPT_STATE_RESIDENT": "1",

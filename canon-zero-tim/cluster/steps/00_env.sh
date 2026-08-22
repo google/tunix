@@ -153,7 +153,8 @@ if [ "$P57_STOCK_FAST" = "1" ] || [ "$P58_NATIVE" = "1" ]; then
     fi
   done
   for k in CANON_RPA_VJP2 CANON_VJP2_MAX_SEQS \
-           CANON_PROMPT_PROCESSED_LOGPROBS CANON_PALLAS_LOGSOFTMAX \
+           CANON_PROMPT_PROCESSED_LOGPROBS \
+           CANON_PALLAS_LOGSOFTMAX \
            CANON_ENGINE_MODULE_C CANON_KV_UNIFIED \
            CANON_P32_DP_ADMISSION CANON_P32_TRAIN_ADMITTED \
            CANON_P32_DP_REDUCTION_ADMITTED \
@@ -198,6 +199,16 @@ if [ "$P57_STOCK_FAST" = "1" ] || [ "$P58_NATIVE" = "1" ]; then
       fail=1
     fi
   done
+  if [ "$P58_NATIVE" = "1" ] && \
+     [ "${CANON_P58_NATIVE_STOCK_PROMPT_OBSERVER:-}" != "1" ]; then
+    echo "[env] P58 native requires its independent stock prompt observer" >&2
+    fail=1
+  fi
+  if [ "$P57_STOCK_FAST" = "1" ] && \
+     [ "${CANON_P58_NATIVE_STOCK_PROMPT_OBSERVER:-0}" != "0" ]; then
+    echo "[env] P57 stock-fast forbids the P58 stock prompt observer" >&2
+    fail=1
+  fi
   unset stock_expected
   case "${XLA_FLAGS:-}" in
     *--xla_allow_excess_precision=false*)
@@ -914,10 +925,10 @@ if [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
       echo "[env] P58 requires a TPU-resident optimizer" >&2
       fail=1
     }
-    case "${CANON_P58_TIM_ARM:-}:${CANON_DEEPSWE_ALIGNMENT_WARN_ONLY:-}" in
-      native:1|zero:0) ;;
+    case "${CANON_P58_TIM_ARM:-}:${CANON_DEEPSWE_ALIGNMENT_WARN_ONLY:-}:${CANON_P58_NATIVE_STOCK_PROMPT_OBSERVER:-}" in
+      native:1:1|zero:0:0) ;;
       *)
-        echo "[env] P58 arm/alignment treatment drifted" >&2
+        echo "[env] P58 arm/alignment/stock-observer treatment drifted" >&2
         fail=1
         ;;
     esac

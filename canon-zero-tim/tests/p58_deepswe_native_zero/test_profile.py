@@ -25,11 +25,13 @@ export CANON_P32_TRAIN_ADMITTED=1
 export CANON_P32_DP_REDUCTION_ADMITTED=1
 export CANON_P33_WORKLOAD_LAUNCH_ADMITTED=1
 source {PROFILE}
-printf 'arm=%s dp=%s gen=%s local=%s global=%s warn=%s engine=%s vjp=%s p32=%s launch=%s\\n' \
+printf 'arm=%s dp=%s gen=%s local=%s global=%s warn=%s engine=%s vjp=%s prompt=%s stock_observer=%s p32=%s launch=%s\\n' \
   "$CANON_P58_TIM_ARM" "$CANON_DP_SIZE" "$CANON_NUM_GENERATIONS" \
   "$CANON_LOCAL_TRAJECTORIES" "$CANON_GLOBAL_TRAJECTORIES" \
   "$CANON_DEEPSWE_ALIGNMENT_WARN_ONLY" "$CANON_ENGINE_MODULE_C" \
-  "$CANON_RPA_VJP2" "$CANON_P32_TRAIN_ADMITTED" \
+  "$CANON_RPA_VJP2" "$CANON_PROMPT_PROCESSED_LOGPROBS" \
+  "$CANON_P58_NATIVE_STOCK_PROMPT_OBSERVER" \
+  "$CANON_P32_TRAIN_ADMITTED" \
   "$CANON_P33_WORKLOAD_LAUNCH_ADMITTED"
 printf 'reduction=%s l3=%s p27=%s flwarn=%s\\n' \
   "$CANON_P32_DP_REDUCTION_ADMITTED" "$CANON_FROZENLAKE_L3" \
@@ -52,7 +54,7 @@ class P58ProfileTest(unittest.TestCase):
     output = _source("native")
     self.assertIn(
         "arm=native dp=8 gen=16 local=16 global=128 warn=1 "
-        "engine=0 vjp=0 p32=1 launch=1",
+        "engine=0 vjp=0 prompt=0 stock_observer=1 p32=1 launch=1",
         output,
     )
     self.assertIn("fixed=absent", output)
@@ -64,7 +66,7 @@ class P58ProfileTest(unittest.TestCase):
     output = _source("zero")
     self.assertIn(
         "arm=zero dp=8 gen=16 local=16 global=128 warn=0 "
-        "engine=1 vjp=1 p32=1 launch=1",
+        "engine=1 vjp=1 prompt=1 stock_observer=0 p32=1 launch=1",
         output,
     )
     self.assertIn("fixed=present", output)
