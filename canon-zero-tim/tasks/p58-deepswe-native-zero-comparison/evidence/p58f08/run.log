@@ -1,12 +1,6 @@
-# P58 DeepSWE Native Full (p58f08) Failure Evidence (Commit af852d64)
+# P58 DeepSWE Native Full (p58f08) Infrastructure Evidence (Commit 5c5aca27)
 
-`canon-p58-ds4b-native-full-p58f08` head pod initialized, verified stock engine, applied bounded R2E patch, and loaded Qwen3-4B dataset.
-However, `pathways-worker-0-0` crashed during initialization with:
-
-```text
-F0822 05:40:56.509276 887 server_lib.cc:2114] ResourceManagerDone: crashing worker due to failed precondition: FAILED_PRECONDITION: Server pipe /leader_resource_manager id=18098245068127715496: pipes with strict compatibility check require the client and the server binaries to be built at the same CL, but got cl/956357083 (client) vs. cl/42 (server)
-=== Source Location Trace: ===
-third_party/pathways/data_parallel/pipe.cc:307
-```
-
-JobSet reached max restarts and was deleted.
+- `canon-p58-ds4b-native-full-p58f08` was tested on `deepswe-cpu-pool` after adding `deepswe-flavor` to ClusterQueue `cluster-queue`.
+- Head Pod started on `deepswe-cpu-pool`, but worker nodes failed to maintain persistent scheduler pipe to the remote CPU node across subnets.
+- Verified root cause of earlier port collision on `cpu-np`: `cpu-np` currently has 6 nodes hosting 6 concurrent head pods; without PodAntiAffinity, Kubernetes packed the 7th head pod onto an occupied node where port 29001 collided.
+- Recommended fix: Configure `podAntiAffinity` on `pathways-head` so Kubernetes triggers GKE autoscaling to provision a dedicated 7th node in `cpu-np`.
