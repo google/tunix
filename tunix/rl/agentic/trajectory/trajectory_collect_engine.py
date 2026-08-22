@@ -396,6 +396,7 @@ class TrajectoryCollectEngine:
           if masked_out
           else conversation_masks
       )
+      original_input = self._original_input()
 
       return {
           "conversation_text": self.agent.chat_completions,
@@ -425,8 +426,8 @@ class TrajectoryCollectEngine:
           "old_logprobs": (
               np.concatenate(logprobs, axis=0) if logprobs else None
           ),
-          "policy_version": self.env.task.get("policy_version"),
-          "original_input": self.agent.trajectory.task,
+          "policy_version": original_input.get("policy_version"),
+          "original_input": original_input,
           "group_id": self.env.extra_kwargs.get("group_id"),
       }
     elif mode == "Conversation":
@@ -560,6 +561,23 @@ class TrajectoryCollectEngine:
     return (
         f"[step_idx={step_idx}, pair_index={pair_index}, group_id={group_id}]"
     )
+
+  def _original_input(self) -> Dict[str, Any]:
+    """Returns the task even when reset ended before the first observation."""
+    original_input = self.agent.trajectory.task
+    if original_input is None:
+      original_input = getattr(self.env, "task", None)
+      logging.info(
+          "%s preserving original input from the environment after "
+          "pre-observation termination",
+          self._debug_prefix,
+      )
+    if not isinstance(original_input, dict):
+      raise TypeError(
+          "trajectory original_input must be a dict, got "
+          f"{type(original_input).__name__}"
+      )
+    return original_input
 
   def _rollout_state_info(
       self, info: Optional[Dict[str, Any]] = None

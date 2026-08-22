@@ -56,7 +56,7 @@ class P58EnvironmentContractTest(unittest.TestCase):
         run_id="env-test",
         stage=stage,
         arm=arm,
-        cpu_nodepool="cpu-pool",
+        cpu_nodepool="cpu-np",
         worker_nodepool="tpu-pool",
         model_pvc="model-pvc",
     )

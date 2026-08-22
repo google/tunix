@@ -51,7 +51,7 @@ before any workload pod or update existed. P58.5N is the only active phase.
 Both zero phases remain deferred even though the renderer and CPU tests cover
 that arm.
 
-P58.5N attempts `p58f01` through `p58f07` remain `INCONCLUSIVE`. P58f01 exposed
+P58.5N attempts `p58f01` through `p58f09` remain `INCONCLUSIVE`. P58f01 exposed
 missing sandbox LocalQueue inheritance and reset-time policy provenance;
 p58f02 showed that the chosen CPU flavor required `cpu-np`; and p58f03 proved
 that the CPU routing repair works by completing 128 real trajectories in
@@ -83,7 +83,28 @@ stopped on trainer `T_old_vs_T_current` because the gate still required an
 observer-only stock rescore to match the value-and-grad primal exactly. The
 local correction keeps the original 128-trajectory quality-fix observer and
 classifies every shape-valid finite Native program mismatch as measurement.
-Zero remains exact. After publication/readback the next attempt is `p58f08`.
+Zero remains exact. P58f08 did not exercise that repair: six concurrent
+Pathways heads already occupied the six available `cpu-np` nodes, Kubernetes
+packed the new host-network head onto an occupied node, and fixed port 29001
+connected its CL/956357083 worker to a foreign CL/42 ResourceManager. Moving
+the head to `deepswe-cpu-pool` was also tested and rejected because the worker
+could not maintain its scheduler pipe across the node-pool subnet boundary.
+P58f09 kept the proven host-network transport on `cpu-np`, attached to the
+correct Pathways server, and completed all 128 Step-0 rollout slots in 1,699.1
+seconds. It then failed before durable journaling or any trainer program:
+reset-deadline rows had terminated before first observation, leaving
+`agent.trajectory.task=None`; learner `merge_micro_batches()` dereferenced that
+value as a mapping.
+
+The local repair therefore preserves head and TPU-worker host networking,
+adds required hostname-level anti-affinity over every JobSet `pathways-head`
+replicated-job Pod, and validates the exact JobSet DNS/RM route. The collector
+falls back to the environment's original task only when the agent never
+observed one, and fails closed if neither source is a dictionary. Admitted
+compact rows remain journaled with zero policy masks; no row is dropped or
+resampled. No model, data, numerical, topology, deadline, optimizer, or
+Native/Zero flag changed. After publication/readback the next attempt is
+`p58f10`.
 
 ## Frozen shared recipe
 

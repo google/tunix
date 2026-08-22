@@ -39,7 +39,7 @@ class P58RendererTest(unittest.TestCase):
         run_id="pair-test",
         stage=stage,
         arm=arm,
-        cpu_nodepool="cpu-pool",
+        cpu_nodepool="cpu-np",
         worker_nodepool="tpu-pool",
         model_pvc="model-pvc",
     )
@@ -52,7 +52,25 @@ class P58RendererTest(unittest.TestCase):
         with self.subTest(arm=arm, stage=stage):
           document = self._render(arm, stage)
           env = renderer.p34._env(document)
+          head = renderer.p34._head(document)
           worker = renderer.p34._worker(document)
+          network = document["spec"]["network"]
+          self.assertIs(head["hostNetwork"], True)
+          self.assertEqual(head["dnsPolicy"], "ClusterFirstWithHostNet")
+          required_anti_affinity = head["affinity"]["podAntiAffinity"][
+              "requiredDuringSchedulingIgnoredDuringExecution"
+          ]
+          self.assertIn(
+              renderer._pathways_head_anti_affinity_term(),
+              required_anti_affinity,
+          )
+          self.assertIs(network["enableDNSHostnames"], True)
+          self.assertIs(network["publishNotReadyAddresses"], True)
+          self.assertIs(worker["template"]["spec"]["hostNetwork"], True)
+          self.assertEqual(
+              worker["template"]["spec"]["dnsPolicy"],
+              "ClusterFirstWithHostNet",
+          )
           self.assertEqual(worker["completions"], 32)
           self.assertEqual(worker["parallelism"], 32)
           self.assertEqual(env["CANON_P58_TIM_ARM"], arm)
@@ -74,7 +92,7 @@ class P58RendererTest(unittest.TestCase):
               ],
           )
           self.assertEqual(env["R2E_K8S_QUEUE_NAME"], "multislice-queue")
-          self.assertEqual(env["NODE_SELECTOR_VAL"], "cpu-pool")
+          self.assertEqual(env["NODE_SELECTOR_VAL"], "cpu-np")
 
   def test_pair_diff_is_registered_treatment_only(self):
     native = self._render("native")
@@ -157,6 +175,109 @@ class P58RendererTest(unittest.TestCase):
           labels["kueue.x-k8s.io/queue-name"] = queue_name
         with self.assertRaisesRegex(ValueError, "exact Kueue LocalQueue"):
           self._render("native", base=base)
+
+  def test_nonadmitted_cpu_nodepool_is_rejected(self):
+    with self.assertRaisesRegex(ValueError, "admitted cpu-np"):
+      self._render("native", cpu_nodepool="deepswe-cpu-pool")
+
+  def test_head_host_network_regression_is_rejected(self):
+    document = self._render("native", "full")
+    head = renderer.p34._head(document)
+    head["hostNetwork"] = False
+    head["dnsPolicy"] = "ClusterFirst"
+    with self.assertRaisesRegex(ValueError, "retain the Pathways host network"):
+      renderer.validate(
+          document,
+          source_commit="1" * 40,
+          client_image="registry.example/tunix@sha256:" + "2" * 64,
+          stage="full",
+          arm="native",
+          worker_nodepool="tpu-pool",
+      )
+
+  def test_jobset_dns_regression_is_rejected(self):
+    document = self._render("native", "full")
+    document["spec"]["network"]["enableDNSHostnames"] = False
+    with self.assertRaisesRegex(ValueError, "requires JobSet Pod DNS"):
+      renderer.validate(
+          document,
+          source_commit="1" * 40,
+          client_image="registry.example/tunix@sha256:" + "2" * 64,
+          stage="full",
+          arm="native",
+          worker_nodepool="tpu-pool",
+      )
+
+  def test_pathways_head_anti_affinity_regression_is_rejected(self):
+    document = self._render("native", "full")
+    head = renderer.p34._head(document)
+    head["affinity"]["podAntiAffinity"][
+        "requiredDuringSchedulingIgnoredDuringExecution"
+    ] = []
+    with self.assertRaisesRegex(ValueError, "required Pathways anti-affinity"):
+      renderer.validate(
+          document,
+          source_commit="1" * 40,
+          client_image="registry.example/tunix@sha256:" + "2" * 64,
+          stage="full",
+          arm="native",
+          worker_nodepool="tpu-pool",
+      )
+
+  def test_worker_resource_manager_address_regression_is_rejected(self):
+    document = self._render("native", "full")
+    worker_pod = renderer.p34._worker(document)["template"]["spec"]
+    worker = renderer.p34._container(
+        worker_pod["containers"], "pathways-worker"
+    )
+    worker["args"] = [
+        "--resource_manager_address=foreign-head:29001"
+        if item.startswith("--resource_manager_address=") else item
+        for item in worker["args"]
+    ]
+    with self.assertRaisesRegex(ValueError, "resource-manager address"):
+      renderer.validate(
+          document,
+          source_commit="1" * 40,
+          client_image="registry.example/tunix@sha256:" + "2" * 64,
+          stage="full",
+          arm="native",
+          worker_nodepool="tpu-pool",
+      )
+
+  def test_worker_host_network_regression_is_rejected(self):
+    document = self._render("native", "full")
+    worker_pod = renderer.p34._worker(document)["template"]["spec"]
+    worker_pod["hostNetwork"] = False
+    worker_pod["dnsPolicy"] = "ClusterFirst"
+    with self.assertRaisesRegex(ValueError, "retain the host network"):
+      renderer.validate(
+          document,
+          source_commit="1" * 40,
+          client_image="registry.example/tunix@sha256:" + "2" * 64,
+          stage="full",
+          arm="native",
+          worker_nodepool="tpu-pool",
+      )
+
+  def test_worker_pathways_head_regression_is_rejected(self):
+    document = self._render("native", "full")
+    worker_pod = renderer.p34._worker(document)["template"]["spec"]
+    worker = renderer.p34._container(
+        worker_pod["containers"], "pathways-worker"
+    )
+    for item in worker["env"]:
+      if item["name"] == "PATHWAYS_HEAD":
+        item["value"] = "foreign-head"
+    with self.assertRaisesRegex(ValueError, "JobSet Pod DNS name"):
+      renderer.validate(
+          document,
+          source_commit="1" * 40,
+          client_image="registry.example/tunix@sha256:" + "2" * 64,
+          stage="full",
+          arm="native",
+          worker_nodepool="tpu-pool",
+      )
 
 
 if __name__ == "__main__":

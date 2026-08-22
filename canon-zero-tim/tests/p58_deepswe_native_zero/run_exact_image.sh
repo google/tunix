@@ -88,7 +88,9 @@ $DOCKER run --rm \
         agentic_grpo_learner_test.AgenticGrpoLearnerTest.test_environment_is_seeded_with_policy_version_before_reset \
         trajectory.trajectory_collect_engine_test.TrajectoryCollectEngineTest.test_overlong_filter_masks_out_and_skips_reward \
         trajectory.trajectory_collect_engine_test.TrajectoryCollectEngineTest.test_reset_raised_timeout_is_env_timeout \
-        trajectory.trajectory_collect_engine_test.TrajectoryCollectEngineTest.test_reset_scheduling_gate_is_distinct_env_timeout
+        trajectory.trajectory_collect_engine_test.TrajectoryCollectEngineTest.test_reset_scheduling_gate_is_distinct_env_timeout \
+        trajectory.trajectory_collect_engine_test.TrajectoryCollectEngineTest.test_reset_timeout_token_preserves_environment_task \
+        trajectory.trajectory_collect_engine_test.TrajectoryCollectEngineTest.test_token_missing_original_input_fails_closed
     )
     observer_state="$(mktemp -d /tmp/p58-stock-observer-state.XXXXXX)"
     printf "%s\n" \

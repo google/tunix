@@ -137,8 +137,29 @@ program boundary and derived ratio observational. With rollout logprobs on and
 sampler-IS off, the loss uses rollout A rather than observer `T_old`. Zero
 remains exact, and no training data, accumulation, loss, optimizer, or
 numerical treatment flag changes.
-Use fresh full-stage run-id `p58f08` after publication/readback; never reuse
-p58f07 YAML/root or journal as training state.
+P58f08 never reached rollout. Its CPU head inherited `hostNetwork:true` and
+shared node port 29001 with another Pathways ResourceManager. Six concurrent
+heads already occupied the six available `cpu-np` nodes, so the scheduler
+packed this seventh head onto an occupied host. The P58 CL/956357083 worker
+resolved that foreign CL/42 server and failed strict compatibility. Moving the
+head to `deepswe-cpu-pool` was tested and rejected because the worker could not
+maintain its scheduler pipe across the node-pool subnet boundary. The correct
+repair keeps `cpu-np` and the proven host-network transport, but adds required
+hostname anti-affinity between every JobSet `pathways-head` Pod so Kubernetes
+or the autoscaler must supply an unused CPU node.
+
+P58f09 proved correct Pathways attachment and completed all 128 Step-0 rollout
+slots in 1,699.1 seconds. Some environment resets ended at the admitted
+3,000-second trajectory deadline before first observation. Those rows had
+`agent.trajectory.task=None`, although the original input remained in
+`env.task`; learner `merge_micro_batches()` then crashed on the `None` before
+the P58 journal, alignment, forward, backward, update, or checkpoint. The
+collector repair preserves the agent task when present, otherwise uses the
+environment task, and fails closed if neither is a dictionary. Timeout/context
+rows retain their compact status and zero policy mask; they are not removed or
+resampled. No training or numerical parameter changed. Use fresh full-stage
+run-id `p58f10` after publication/readback; never reuse p58f08 or p58f09
+YAML/root. Neither has optimizer state to resume.
 
 The direct-entrypoint implementation commit is
 `82d82f72a7220d945737d95f6266b5b7e2cfe706`. Resolve the final runnable SHA by
@@ -277,7 +298,7 @@ CLIENT_IMAGE_DIGEST='registry.example/tunix@sha256:<64-hex-digest>'
 CPU_NODEPOOL='cpu-np'
 TPU_NODEPOOL='tpu-v5p-slice'
 MODEL_PVC='haoyugao-cpu-np-pvc'
-RUN_STEM='p58f08'
+RUN_STEM='p58f10'
 STAGE='full'
 
 ARM='native'
@@ -312,11 +333,31 @@ cloud.google.com/gke-tpu-topology: 4x4x8
 no cloud.google.com/gke-nodepool: tpu-v5p-slice
 JobSet label kueue.x-k8s.io/queue-name: multislice-queue
 jax-tpu env R2E_K8S_QUEUE_NAME: multislice-queue
+head nodeSelector cloud.google.com/gke-nodepool: cpu-np
+head hostNetwork: true
+head dnsPolicy: ClusterFirstWithHostNet
+head required podAntiAffinity selector: jobset.sigs.k8s.io/replicatedjob-name In [pathways-head]
+head required podAntiAffinity topologyKey: kubernetes.io/hostname
+JobSet spec.network.enableDNSHostnames: true
+JobSet spec.network.publishNotReadyAddresses: true
+worker hostNetwork: true
+worker dnsPolicy: ClusterFirstWithHostNet
+worker --resource_manager_address: <jobset>-pathways-head-0-0.<jobset>:29001
+worker PATHWAYS_HEAD: <jobset>-pathways-head-0-0.<jobset>
 ```
 
 Kueue's selected ResourceFlavor supplies the concrete pool affinity. If the
 literal sentinel appears as node-pool affinity, stop before apply; that is the
 p58c05 admission bug.
+
+If the head loses host networking, uses `deepswe-cpu-pool`, or lacks the exact
+required hostname anti-affinity, stop before apply. The anti-affinity is the
+fixed-port isolation; changing the proven transport is not. After apply,
+confirm each Pathways head is on a distinct CPU hostname. If a strict-CL
+mismatch recurs despite these invariants, preserve logs from
+`pathways-proxy`, `pathways-rm`, `jax-tpu`, and one `pathways-worker` plus the
+worker's resolved RM address before deletion. Do not wait for rollout: this is
+an immediate bootstrap failure.
 
 After apply, inspect the first sandbox before waiting for a whole batch. Its
 metadata must contain `kueue.x-k8s.io/queue-name=multislice-queue`; its Kueue

@@ -37,6 +37,10 @@ _KUEUE_MANAGED_WORKER_POOLS = frozenset({
     "any",
 })
 _KUEUE_QUEUE_LABEL = "kueue.x-k8s.io/queue-name"
+_CPU_NODEPOOL = "cpu-np"
+_JOBSET_REPLICATEDJOB_LABEL = "jobset.sigs.k8s.io/replicatedjob-name"
+_PATHWAYS_HEAD_REPLICATEDJOB = "pathways-head"
+_HOSTNAME_TOPOLOGY_KEY = "kubernetes.io/hostname"
 _KUBERNETES_DNS_LABEL = re.compile(
     r"[a-z0-9](?:[-a-z0-9]*[a-z0-9])?\Z"
 )
@@ -52,6 +56,19 @@ _FILTER_STATUSES = (
 
 def _service_containers(head: Mapping[str, Any]) -> list[dict[str, Any]]:
   return list(head.get("initContainers", [])) + list(head["containers"])
+
+
+def _pathways_head_anti_affinity_term() -> dict[str, Any]:
+  return {
+      "labelSelector": {
+          "matchExpressions": [{
+              "key": _JOBSET_REPLICATEDJOB_LABEL,
+              "operator": "In",
+              "values": [_PATHWAYS_HEAD_REPLICATEDJOB],
+          }],
+      },
+      "topologyKey": _HOSTNAME_TOPOLOGY_KEY,
+  }
 
 
 def _remove_proxy_precision_pin(proxy: dict[str, Any]) -> None:
@@ -112,6 +129,8 @@ def render(
     raise ValueError("P58 admits only three-update or full")
   if arm not in _ARMS:
     raise ValueError("P58 arm must be native or zero")
+  if cpu_nodepool != _CPU_NODEPOOL:
+    raise ValueError("P58 requires the admitted cpu-np CPU node pool")
   if whitelist != CLEAN_WHITELIST or whitelist_sha256 != CLEAN_WHITELIST_SHA256:
     raise ValueError("P58 requires the reviewed 1012-task clean whitelist")
 
@@ -154,6 +173,20 @@ def render(
     raise ValueError("P58 requires an exact Kueue LocalQueue label")
 
   head = p34._head(document)
+  # Pathways heads intentionally keep the proven host-network transport.  The
+  # JobSet controller labels every head Pod with its replicated-job name, so a
+  # required hostname anti-affinity term prevents two ResourceManagers from
+  # sharing ports 29000/29001 on one CPU node.  P58f08 proved that merely
+  # selecting cpu-np without this term lets Kubernetes pack a seventh head
+  # onto one of six occupied nodes and connect the worker to a foreign RM.
+  affinity = head.setdefault("affinity", {})
+  pod_anti_affinity = affinity.setdefault("podAntiAffinity", {})
+  required = pod_anti_affinity.setdefault(
+      "requiredDuringSchedulingIgnoredDuringExecution", []
+  )
+  anti_affinity_term = _pathways_head_anti_affinity_term()
+  if anti_affinity_term not in required:
+    required.append(anti_affinity_term)
   services = _service_containers(head)
   proxy = p34._container(services, "pathways-proxy")
   manager = p34._container(services, "pathways-rm")
@@ -321,6 +354,26 @@ def validate(
   env = p34._env(document)
   if document["spec"]["failurePolicy"]["maxRestarts"] != 0:
     raise ValueError("P58 must remain attempt-zero")
+  if cpu_nodepool != _CPU_NODEPOOL:
+    raise ValueError("P58 CPU head lost the admitted cpu-np node pool")
+  if (
+      head.get("hostNetwork") is not True
+      or head.get("dnsPolicy") != "ClusterFirstWithHostNet"
+  ):
+    raise ValueError("P58 CPU head must retain the Pathways host network")
+  required_anti_affinity = (
+      head.get("affinity", {})
+      .get("podAntiAffinity", {})
+      .get("requiredDuringSchedulingIgnoredDuringExecution", [])
+  )
+  if _pathways_head_anti_affinity_term() not in required_anti_affinity:
+    raise ValueError("P58 CPU head lost required Pathways anti-affinity")
+  network = document["spec"].get("network", {})
+  if (
+      network.get("enableDNSHostnames") is not True
+      or network.get("publishNotReadyAddresses") is not True
+  ):
+    raise ValueError("P58 Pathways routing requires JobSet Pod DNS")
   if worker["backoffLimit"] != 0 or worker["completions"] != WORKERS or worker["parallelism"] != WORKERS:
     raise ValueError("P58 worker count does not match 4x4x8")
   if main["image"] != client_image or not p34._DIGEST_IMAGE.fullmatch(main["image"]):
@@ -408,6 +461,25 @@ def validate(
   if f"--instance_type=tpuv5:{TOPOLOGY}" not in manager["args"]:
     raise ValueError("P58 resource-manager topology drifted")
   worker_pod = worker["template"]["spec"]
+  if (
+      worker_pod.get("hostNetwork") is not True
+      or worker_pod.get("dnsPolicy") != "ClusterFirstWithHostNet"
+  ):
+    raise ValueError("P58 TPU workers must retain the host network")
+  worker_container = p34._container(
+      worker_pod["containers"], "pathways-worker"
+  )
+  name = document["metadata"]["name"]
+  address = f"{name}-pathways-head-0-0.{name}"
+  rm_arg = f"--resource_manager_address={address}:29001"
+  if rm_arg not in worker_container["args"]:
+    raise ValueError("P58 worker lost the signed resource-manager address")
+  worker_env = {
+      item["name"]: item.get("value")
+      for item in worker_container.get("env", [])
+  }
+  if worker_env.get("PATHWAYS_HEAD") != address:
+    raise ValueError("P58 worker PATHWAYS_HEAD lost the JobSet Pod DNS name")
   if worker_pod["nodeSelector"].get("cloud.google.com/gke-tpu-topology") != TOPOLOGY:
     raise ValueError("P58 worker topology drifted")
   actual_worker_pool = worker_pod["nodeSelector"].get(
@@ -432,7 +504,7 @@ def main() -> None:
   parser.add_argument("--run-id", required=True)
   parser.add_argument("--stage", choices=tuple(_STAGE_STEPS), required=True)
   parser.add_argument("--arm", choices=_ARMS, required=True)
-  parser.add_argument("--cpu-nodepool", default="cpu-np")
+  parser.add_argument("--cpu-nodepool", default=_CPU_NODEPOOL)
   parser.add_argument("--worker-nodepool", required=True)
   parser.add_argument("--model-pvc", default="haoyugao-cpu-np-pvc")
   parser.add_argument("--whitelist", default=CLEAN_WHITELIST)

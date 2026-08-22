@@ -18,16 +18,16 @@ the branch once more, so the executor must still fetch and use the final
 operator-branch SHA rather than pinning the implementation commit directly.
 
 Latest source intake fast-forwarded this isolated worktree through immutable
-p58f07 evidence, then reconciled one later non-overlapping P57-only policy
-commit. The final local base is operator tip
-`963cc2764595eae003b88b868f5818cdc5b659a6`. P58f07 proved the published finite
+p58f09 evidence to operator tip
+`3edf480072126145acc2df259419e12dd2737c69`. P58f07 proved the published finite
 Native B-C warning repair, then exposed an over-strict Native trainer-program
 observer gate. The correction was published as
 `81622977bf15393798c671e578ee059d1268e78b`; its first readback matched local
 HEAD, `FETCH_HEAD`, and `origin/yuxzhang/canon-zero-tim` with ahead/behind
 `0/0`. This documentation checkpoint advances the branch once more, so the
-executor must fetch and exactly read back the final operator tip before
-rendering fresh p58f08.
+executor must fetch and exactly read back the final operator tip after the
+local p58f09 repair is separately approved and published. The next run id is
+fresh `p58f10`.
 
 The user previously waived P58.3 and the separate three-update stop, then chose
 the native 128-chip full 1,000-update stage. That historical phase remains
@@ -287,11 +287,33 @@ loss, eight-step gradient accumulation, optimizer placement and math, commit
 cadence, and every Native/Zero numerical flag remain unchanged.
 
 P58f07 has no durable optimizer receipt or checkpoint and is not resumable
-training state. After publication/readback, use fresh Native `p58f08`. Zero
-remains deferred.
+training state. P58f08 then stopped before rollout: six concurrent Pathways
+heads already occupied all six `cpu-np` nodes, so Kubernetes packed the next
+host-network head onto an occupied node. Port 29001 connected its CL/956357083
+worker to a foreign CL/42 ResourceManager. A follow-up placement on
+`deepswe-cpu-pool` started the head but could not maintain the worker scheduler
+pipe across the node-pool subnet boundary. The correct infrastructure repair
+is therefore not a CPU-pool or Pod-network change: retain `cpu-np` and
+`hostNetwork:true`, and require hostname anti-affinity between every JobSet
+`pathways-head` Pod.
+
+P58f09 proved correct Pathways attachment and completed all 128 Step-0 rollout
+slots in 1,699.1 seconds. Reset-deadline rows that terminated before first
+observation had `agent.trajectory.task=None`, even though `env.task` still
+contained the original input. Learner `merge_micro_batches()` dereferenced
+that value and crashed before the P58 journal, alignment, forward, backward,
+optimizer receipt, or checkpoint. The local repair preserves the agent task
+when present, otherwise falls back to `env.task`, and fails closed if neither
+is a dictionary. Compact timeout/context rows retain the existing zero policy
+mask and are neither dropped nor resampled. Renderer validation requires the
+exact hostname anti-affinity plus retained head/worker host networking,
+JobSet DNS, and RM/PATHWAYS_HEAD route. P58f08 and p58f09 are not resumable
+training state. After separate publication/readback, use fresh Native
+`p58f10`. Zero remains deferred.
 
 Never modify or push `main`. The publication target is exclusively
-`yuxzhang/canon-zero-tim`; the implementation is present there.
+`yuxzhang/canon-zero-tim`; the current p58f09 repair remains local until the
+user separately authorizes commit and push.
 
 ## What was implemented
 
@@ -319,6 +341,10 @@ Never modify or push `main`. The publication target is exclusively
 - negative/regression controls for P34/P44 and the shared trainer/loss paths.
 - authoritative resolved-environment reload semantics so child-shell unsets
   remain absent in all later entrypoint steps.
+- required hostname anti-affinity for fixed-port Pathways heads while
+  preserving host-network transport; and
+- pre-observation reset-timeout original-input recovery from the environment,
+  with a hard error when no mapping exists.
 
 The exact run instructions and artifact interpretation are in
 `canon-zero-tim/cluster/P58_DEEPSWE_TIM_RUNBOOK.md`.
@@ -343,17 +369,19 @@ native-dose/zero-exact classifier negatives, both renderer arms/stages,
 environment resolution, the full alignment suite, and relevant P34/P44
 regressions.
 
-Host validation passes profile 2/2, renderer 7/7, alignment policy 9/9,
+Host validation passes profile 2/2, renderer 14/14, alignment policy 9/9,
 environment 5/5, P34 static 10 suites, and current P57 adjacency
 105/105. In the pinned image, classifier 5/5 and the shared alignment
-regression 42/42 pass. Python compilation,
+regression 42/42 pass; the targeted trajectory batch passes 6/6, including
+reset-timeout fallback and missing-input fail-closed controls. Python compilation,
 the 320/320 flag-registry audit, and `git diff --check` pass. The complete
 pinned-image gate emits the terminal marker above.
 
-No one-host real Qwen/R2E rollout and no 128-chip target training update has
-run after this policy repair. P58f07 provides target-scale rollout,
-alignment, and entry into the first value-and-grad/backward call, but it
-stopped before a durable optimizer receipt or checkpoint. The training venv loads JAX/libtpu,
+No target execution has run after this local p58f09 repair. P58f09 proves
+correct target-scale Pathways attachment and 128-slot rollout completion, but
+it stopped before a durable journal or trainer call; p58f07 remains the latest
+attempt to enter real value-and-grad/backward, also without an optimizer
+receipt/checkpoint. The training venv loads JAX/libtpu,
 but this container exposes no `/dev/vfio` and reports zero chips; the bounded
 runner emitted `P58_ONEHOST_ALIGNMENT_BLOCKED reason=device_inventory_timeout`
 instead of PASS. The repair claim is implementation plus CPU/exact-image
@@ -377,10 +405,13 @@ named above.
 4. Publish or select a client image by immutable registry digest and verify the
    mounted Qwen3-4B-Instruct-2507 weights and frozen clean-list digest without
    printing credentials.
-5. Render only `arm=native, stage=full` with fresh run-id `p58f08` and worker
+5. Render only `arm=native, stage=full` with fresh run-id `p58f10` and worker
    sentinel `tpu-v5p-slice`. Require exact `4x4x8` topology and no literal
-   `cloud.google.com/gke-nodepool: tpu-v5p-slice`; preserve the YAML/digest and
-   run server-side dry-run before the separately approved apply.
+   `cloud.google.com/gke-nodepool: tpu-v5p-slice`; require head pool `cpu-np`,
+   head and worker host networking, exact required hostname anti-affinity over
+   the JobSet `pathways-head` label, both JobSet DNS-publication settings, and
+   the exact generated head DNS in both worker RM fields. Preserve the
+   YAML/digest and run server-side dry-run before the separately approved apply.
 6. Require stock preflight, one P58 stock-observer processed-B marker, exact
    live weights, shape-valid finite Native boundaries/ratios, finite
    forward/backward, and the first optimizer commit.
@@ -392,11 +423,16 @@ named above.
    evaluation, checkpoint, and transaction receipts.
 8. Do not render or apply zero.
 
-Do not reuse any failed `p58c01` through `p58c05` or `p58f01` through `p58f07`
+Do not reuse any failed `p58c01` through `p58c05` or `p58f01` through `p58f09`
 YAML/run root. P58f03 through p58f07 have diagnostic trajectory/alignment
-evidence but no durable trainer update or optimizer checkpoint, so none is resumable training state. The
-attempts remain immutable failure evidence
-under `evidence/p58c01/`, `evidence/p58c02/`, `evidence/p58c03/`, and
+evidence but no durable trainer update or optimizer checkpoint, so none is
+resumable training state. The attempts remain immutable failure evidence.
+P58f08 has no trajectory at all; p58f09 completed rollout processing but
+crashed before the durable journal and therefore also has no resumable state.
+if a CL mismatch recurs, collect all three head-container logs plus one worker
+log and verify its resolved RM address before deleting the failed JobSet.
+Earlier evidence remains under `evidence/p58c01/`, `evidence/p58c02/`,
+`evidence/p58c03/`, and
 `evidence/p58c04/`. The
 p58c03 hashes are `15aa9968200c55a02ef47c72c5e209277397835e1752a4dbd9699fce3b2c42b4`
 for `run.log` and
@@ -425,7 +461,7 @@ for `workload_describe.txt`.
 - A Kubernetes sandbox start exception must propagate after deletion is
   confirmed. `ENV_TIMEOUT` is an admitted compact-filter status; a
   half-created RepoEnv with `container=None` is forbidden. If an entire
-  p58f08 batch has zero confirmed Running pods, classify infrastructure
+  p58f10 batch has zero confirmed Running pods, classify infrastructure
   capacity/scheduling before another launch instead of patching websocket
   decode or inventing a successful trajectory.
 - Read `deepswe/all_sandbox_start_timeout_batch` first. Value `1` means the

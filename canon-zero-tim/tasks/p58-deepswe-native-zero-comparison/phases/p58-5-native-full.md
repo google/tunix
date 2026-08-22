@@ -21,10 +21,14 @@ validate the deferred zero arm and cannot establish a paired treatment effect.
   DP8 x TP8;
 - Kueue affinity: worker sentinel `tpu-v5p-slice` delegates the concrete pool
   to ResourceFlavor and must not appear as a literal node-pool selector;
+- network: the CPU head and TPU workers retain the proven Pathways host
+  network; required hostname-level anti-affinity prevents any two JobSet
+  `pathways-head` Pods from sharing fixed ports 29000/29001, and workers reach
+  that exact head's RM through generated JobSet Pod DNS on port 29001;
 - recipe: B8 x G16, response 16,384, 50 turns, RLOO, fixed-context
   `sequence-mean-token-scale`, TPU-resident optimizer, optional interventions
   off, prefix cache off;
-- stage/run: `full`, next fresh run-id `p58f08`, exactly 1,000 optimizer commits;
+- stage/run: `full`, next fresh run-id `p58f10`, exactly 1,000 optimizer commits;
 - arm: `native` only. Rendering or applying `zero` is outside this phase.
 
 ## Admission gate
@@ -34,6 +38,16 @@ The rendered worker must retain `google.com/tpu: 128`, TPU accelerator
 `cloud.google.com/gke-nodepool: tpu-v5p-slice`. Server-side dry-run must pass,
 then Kueue must report `QuotaReserved=True` before runtime diagnosis begins.
 Failure here is admission `INCONCLUSIVE`, not training evidence.
+
+The rendered CPU head must keep `hostNetwork:true` and
+`dnsPolicy: ClusterFirstWithHostNet`, use `cpu-np`, and carry required Pod
+anti-affinity selecting `jobset.sigs.k8s.io/replicatedjob-name=pathways-head`
+at `kubernetes.io/hostname`. The JobSet must publish not-ready Pod DNS names.
+The TPU worker also remains `hostNetwork:true`; both its ResourceManager
+argument and `PATHWAYS_HEAD` must name the generated P58 head Pod DNS, never
+localhost, a node IP, or another JobSet. This makes the scheduler/autoscaler
+reserve a separate CPU node for every fixed-port head without changing the
+proven Pathways transport.
 
 ## Online monitoring
 
@@ -68,7 +82,7 @@ cannot be promoted.
 
 ## Attempt boundary
 
-P58c05 and p58f01 through p58f06 are immutable `INCONCLUSIVE` evidence.
+P58c05 and p58f01 through p58f09 are immutable `INCONCLUSIVE` evidence.
 P58f01 exposed sandbox LocalQueue and reset-time provenance faults. P58f02
 exposed a CPU-flavor/node-pool mismatch; moving the head and sandboxes to
 `cpu-np` was the correct repair. P58f03 then completed 128 real trajectories
@@ -127,5 +141,24 @@ keeps the stock standalone 128-trajectory `T_old` observer and treats finite
 `use_rollout_logps=true` and sampler-IS disabled, rollout A—not observer
 `T_old`—is the old logprob input to the loss. The classifier requires every
 observed Native boundary to be present, shape-valid, and finite; Zero still
-requires all boundaries exact. After publication/readback, the next attempt
-is fresh Native `p58f08`. Zero remains deferred.
+requires all boundaries exact.
+
+P58f08 stopped before rollout: six concurrent host-network Pathways heads
+already occupied all six `cpu-np` nodes, and the seventh was packed onto an
+occupied node. Its worker reached foreign CL/42 on port 29001 rather than its
+own CL/956357083 RM. A `deepswe-cpu-pool` trial also failed because the worker
+could not maintain the scheduler pipe across the node-pool subnet boundary.
+The correct placement repair is required hostname anti-affinity while keeping
+the head on `cpu-np` and preserving host networking.
+
+P58f09 proved correct head attachment and completed 128 Step-0 rollout slots
+in 1,699.1 seconds. Reset-deadline trajectories that ended before their first
+observation retained no `agent.trajectory.task`; learner preprocessing then
+passed `None` to `merge_micro_batches()` and crashed before the P58 journal,
+alignment, forward, backward, update, or checkpoint. The collector repair
+uses `env.task` as the original-input fallback only for this pre-observation
+case and fails closed if no dictionary is available. Compact rows retain their
+existing status and zero policy mask; there is no filtering or resampling
+change. P58f08 and p58f09 are not resumable training roots. After publication
+and remote readback, the next attempt is fresh Native `p58f10`. Zero remains
+deferred.

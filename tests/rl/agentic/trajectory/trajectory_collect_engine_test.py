@@ -21,6 +21,7 @@ import jax.numpy as jnp
 import numpy as np
 from tunix.perf.experimental import constants as perf_constants
 from tunix.perf.experimental import tracer as perf_tracer_v2
+from tunix.rl import utils as rl_utils
 from tunix.rl.agentic import utils
 from tunix.rl.agentic.agents import agent_types
 from tunix.rl.agentic.agents import base_agent
@@ -622,6 +623,51 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     )
     self.assertEqual(result.timeout_stage, "environment_reset")
     self.mock_model_call.assert_not_called()
+    self.mock_env.close.assert_called_once()
+
+  def test_reset_timeout_token_preserves_environment_task(self):
+    def slow_reset():
+      time.sleep(0.03)
+      return 'late', {}
+
+    self.trajectory.task = None
+    self.mock_env.task = {
+        'prompts': ['original prompt'],
+        'policy_version': 7,
+    }
+    self.mock_env.reset.side_effect = slow_reset
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=self.mock_env,
+        model_call=self.mock_model_call,
+        timeout=0.01,
+        cleanup_timeout=0.1,
+    )
+    result = asyncio.run(self._run_collect(engine, mode='Token'))
+
+    self.assertEqual(result['status'], 'ENV_TIMEOUT')
+    self.assertEqual(result['original_input'], self.mock_env.task)
+    self.assertEqual(result['policy_version'], 7)
+    merged = rl_utils.merge_micro_batches([result['original_input']])
+    self.assertEqual(merged['prompts'], ['original prompt'])
+    np.testing.assert_array_equal(merged['policy_version'], np.array([7]))
+    self.mock_model_call.assert_not_called()
+    self.mock_env.close.assert_called_once()
+
+  def test_token_missing_original_input_fails_closed(self):
+    self.trajectory.task = None
+    self.mock_env.task = None
+    self.mock_env.reset.side_effect = TimeoutError('reset failed')
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=self.mock_env,
+        model_call=self.mock_model_call,
+        timeout=1.0,
+        cleanup_timeout=0.1,
+    )
+
+    with self.assertRaisesRegex(TypeError, 'original_input must be a dict'):
+      asyncio.run(self._run_collect(engine, mode='Token'))
     self.mock_env.close.assert_called_once()
 
   def test_reset_raised_timeout_is_env_timeout(self):
