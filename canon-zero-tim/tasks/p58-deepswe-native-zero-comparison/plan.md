@@ -35,7 +35,7 @@ result, not a causal comparison.
 | P58.1 | Frozen shared recipe and loss-aggregation contract | Fixed-16K formula oracle, compact-filter mask policy, effective-row-weighted accumulation, and DP8 invariance are specified and locally tested; public-source discrepancy is recorded | completed |
 | P58.2 | Default-off paired profiles, renderer, metrics, trajectory journal, and negative controls | Host tests and pinned-image tests prove that the two rendered arms differ only in the registered numerical treatment bundle | completed |
 | P58.3 | One-host observer and artifact sanity | Full redacted trajectory schema, W&B metric schema, logprob/alignment observers, checkpoint transactions, and no-update neutrality pass without a production claim | waived — not PASS |
-| P58.4N | Native 128-chip three-update canary | Native completes exactly three optimizer commits on rollout DP8 x TP8 plus trainer DP8 x TP8, records a finite nonzero serving-path mismatch dose, keeps trainer old/current exact, and emits a signed classifier PASS | superseded — p58c05 failed before execution; not PASS |
+| P58.4N | Native 128-chip three-update canary | Native completes exactly three optimizer commits on rollout DP8 x TP8 plus trainer DP8 x TP8, records a finite nonzero serving-path mismatch dose, keeps every stock numerical boundary finite, and emits a signed classifier PASS | superseded — p58c05 failed before execution; not PASS |
 | P58.4Z | Zero 128-chip three-update canary | Zero completes exactly three commits on the identical recipe with strict A=B=C and a signed classifier PASS | deferred — do not launch |
 | P58.5N | Native 128-chip full campaign | Native completes exactly 1,000 optimizer commits; the first three are monitored without stopping; durable trajectory, evaluation, checkpoint, alignment, optimizer, and classifier evidence passes | active |
 | P58.5Z | Zero full or paired comparison | Activated only after zero optimization and a new explicit user decision | deferred — do not launch |
@@ -51,7 +51,7 @@ before any workload pod or update existed. P58.5N is the only active phase.
 Both zero phases remain deferred even though the renderer and CPU tests cover
 that arm.
 
-P58.5N attempts `p58f01` through `p58f06` remain `INCONCLUSIVE`. P58f01 exposed
+P58.5N attempts `p58f01` through `p58f07` remain `INCONCLUSIVE`. P58f01 exposed
 missing sandbox LocalQueue inheritance and reset-time policy provenance;
 p58f02 showed that the chosen CPU flavor required `cpu-np`; and p58f03 proved
 that the CPU routing repair works by completing 128 real trajectories in
@@ -75,9 +75,15 @@ executed alignment after another healthy 128-row rollout, exact live weights,
 and 2,048-row Native B observation. Its A-B and B-C arrays were shape-valid and
 finite across 405,827 action tokens, but the P58 policy still narrowed warnings
 to A-B and blocked on B-C before trainer forward. The correction admits both
-finite Native serving-path boundaries as treatment observations while keeping
-trainer-old/current repeat exact. After publication/readback the next attempt
-is `p58f07`.
+finite Native serving-path boundaries as treatment observations. P58f07 proved
+that repair: all 128 real
+RepoEnv trajectories completed, the pre-backward gate admitted both finite
+serving warnings, and the trainer entered real value-and-grad/backward. It then
+stopped on trainer `T_old_vs_T_current` because the gate still required an
+observer-only stock rescore to match the value-and-grad primal exactly. The
+local correction keeps the original 128-trajectory quality-fix observer and
+classifies every shape-valid finite Native program mismatch as measurement.
+Zero remains exact. After publication/readback the next attempt is `p58f08`.
 
 ## Frozen shared recipe
 
@@ -94,6 +100,7 @@ is `p58f07`.
 | Objective | RLOO, `sequence-mean-token-scale`, epsilon 0.20 / 0.28, beta 0 |
 | Optimizer | Adam learning rate 1e-6, betas 0.9/0.99, weight decay 0.01, global grad clip 1.0 |
 | Update structure | prompt-counted `batch_size=8`, `mini_batch_size=8`; trajectory mini-batch 128; trajectory micro-batch 16; eight equal-size accumulation calls |
+| Trainer observer | Stock quality-fix prompt-counted rescore: one 128-trajectory observation for B8 x G16; observer-only under `use_rollout_logps=true` |
 | Policy iterations | one; no off-policy replay |
 | Deadlines | batch 3,600 s; episode 3,000 s; sandbox active 3,300 s; turn 300 s; step/reward 600 s; cleanup 300 s |
 | Prefix cache | off |
@@ -158,10 +165,10 @@ throughput is considered only when sandbox-start timeout metrics are zero and
 - Source, base checkpoint, clean-data bytes and ordering, prompt assignment,
   seed schedule, sampling parameters, topology, optimizer, objective, deadline,
   checkpoint cadence, and observer schema are byte- or value-equal.
-- `native` changes only the registered numerical implementation bundle. Finite
-  A-B and B-C serving-path differences are expected treatment observations;
-  trainer old/current repeat drift, nonfinite values, replica drift,
-  transaction errors, OOM, and corrupted artifacts remain fatal.
+- `native` preserves the registered stock numerical implementation bundle.
+  Finite A-B, B-T_old, and T_old-T_current differences and their finite ratio
+  consequences are treatment observations. Nonfinite values, invalid shapes,
+  replica drift, transaction errors, OOM, and corrupted artifacts remain fatal.
 - `zero` enables the complete canonical serving/forward/backward bundle. Any
   A-B, B-C, or A-C discrepancy is fatal; warning-only is not a zero arm.
 - Observers may not change token selection, reward, advantages, loss masks,

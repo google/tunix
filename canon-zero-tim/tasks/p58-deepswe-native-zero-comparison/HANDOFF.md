@@ -18,13 +18,13 @@ the branch once more, so the executor must still fetch and use the final
 operator-branch SHA rather than pinning the implementation commit directly.
 
 Latest source intake fast-forwarded this isolated worktree through immutable
-p58f06 evidence plus later P57 evidence and execution-log checkpoints. The
-finite Native B-C warning-scope correction was published as
-`2ac6383780be57033ddb5f34d348b632bf566011`; its first post-push readback
-matched local HEAD, `FETCH_HEAD`, and `origin/yuxzhang/canon-zero-tim` with
-ahead/behind `0/0`. This publication checkpoint advances the branch once more,
-so the executor must fetch and exactly read back the final operator tip before
-rendering p58f07.
+p58f07 evidence, then reconciled one later non-overlapping P57-only policy
+commit. The final local base is operator tip
+`963cc2764595eae003b88b868f5818cdc5b659a6`. P58f07 proved the published finite
+Native B-C warning repair, then exposed an over-strict Native trainer-program
+observer gate. The local repair is not yet published. After explicit publication
+approval, the executor must fetch and exactly read back the final operator tip
+before rendering fresh p58f08.
 
 The user previously waived P58.3 and the separate three-update stop, then chose
 the native 128-chip full 1,000-update stage. That historical phase remains
@@ -257,12 +257,35 @@ the former was already a warning, but the P58-specific tuple still treated the
 latter as blocking. That contradicted the untreated Native treatment and the
 user's earlier decision that finite B-C must not stop Native training. The
 local correction makes both finite serving-path boundaries warnings and
-updates the classifier to accept a finite nonzero dose on either. Trainer
-`T_old_vs_T_current` repeat and its derived `r` remain exact/fail-closed, as do
-nonfinite, shape, weight, replica, transaction, and optimizer errors. Zero
+updates the classifier to accept a finite nonzero dose on either. Nonfinite,
+shape, weight, replica, transaction, and optimizer errors remain hard. Zero
 remains strict at all boundaries. P58f06 has no optimizer checkpoint and is
-not resumable training state. After publication/readback, use fresh Native
-`p58f07`. Zero remains deferred.
+not resumable training state.
+
+P58f07 completed all 128 real SWE RepoEnv trajectories (`N_action=436,464`),
+passed pre-backward with finite A-B/B-C warnings, completed Rescore B in 26.9
+seconds, and entered real value-and-grad/backward. It then stopped at the
+first post-backward gate on `T_old_vs_T_current` and derived
+`r_all_exactly_1`. The durable launcher marker from this attempt family shows
+`T_old` was computed by one standalone 128-trajectory trainer program, while
+the frozen update structure computes `T_current` in eight ordered
+16-trajectory value-and-grad programs. The arrays therefore came from
+different batch programs; exactness is therefore not a valid admission
+requirement for an untreated Native arm.
+
+The corrected contract preserves the complete stock quality-fix program,
+including the standalone 128-trajectory `T_old` rescore. With
+`use_rollout_logps=true` and sampler-IS disabled, the loss uses rollout A as
+`old_per_token_logps`; `T_old` is observer-only. Signed Native now records any
+shape-valid finite `T_old_vs_T_current` and finite derived ratio drift as a
+warning, while the classifier requires that boundary to be present and
+finite. Zero remains exact. B8 x G16, all 128 training rows, rollout logps,
+loss, eight-step gradient accumulation, optimizer placement and math, commit
+cadence, and every Native/Zero numerical flag remain unchanged.
+
+P58f07 has no durable optimizer receipt or checkpoint and is not resumable
+training state. After publication/readback, use fresh Native `p58f08`. Zero
+remains deferred.
 
 Never modify or push `main`. The publication target is exclusively
 `yuxzhang/canon-zero-tim`; the implementation is present there.
@@ -284,8 +307,8 @@ Never modify or push `main`. The publication target is exclusively
   canonical numerical bundle;
 - independent native-only processed-B observer with absolute request-history
   targets, exact two-file manifest, and mutually exclusive Native/Zero flags;
-- native finite A-B/B-C serving-path warning boundaries with exact trainer
-  old/current repeat, and zero all-boundary strictness;
+- native finite A-B/B-C/T_old-T_current warning boundaries with finite ratio
+  diagnostics, and zero all-boundary strictness;
 - native stock optimizer transaction receipts plus zero explicit fixed-tree
   transaction receipts;
 - P58 fail-closed postflight classifier and automatic invocation from
@@ -317,15 +340,17 @@ native-dose/zero-exact classifier negatives, both renderer arms/stages,
 environment resolution, the full alignment suite, and relevant P34/P44
 regressions.
 
-Host validation passes profile 2/2, renderer 7/7, alignment policy 8/8,
-environment 5/5, classifier 4/4, P34 static 10 suites, current P57 adjacency
-105/105, and the shared alignment regression 40/40. Python compilation, Bash
-syntax, flag-registry audit, and `git diff --check` pass.
+Host validation passes profile 2/2, renderer 7/7, alignment policy 9/9,
+environment 5/5, P34 static 10 suites, and current P57 adjacency
+105/105. In the pinned image, classifier 5/5 and the shared alignment
+regression 42/42 pass. Python compilation,
+the 320/320 flag-registry audit, and `git diff --check` pass. The complete
+pinned-image gate emits the terminal marker above.
 
 No one-host real Qwen/R2E rollout and no 128-chip target training update has
-run after this repair. P58f06 provides target-scale rollout, journal,
-exact-weight, processed-B, and pre-update alignment evidence, but it stopped
-before trainer forward/backward/update. The training venv loads JAX/libtpu,
+run after this policy repair. P58f07 provides target-scale rollout,
+alignment, and entry into the first value-and-grad/backward call, but it
+stopped before a durable optimizer receipt or checkpoint. The training venv loads JAX/libtpu,
 but this container exposes no `/dev/vfio` and reports zero chips; the bounded
 runner emitted `P58_ONEHOST_ALIGNMENT_BLOCKED reason=device_inventory_timeout`
 instead of PASS. The repair claim is implementation plus CPU/exact-image
@@ -349,23 +374,24 @@ named above.
 4. Publish or select a client image by immutable registry digest and verify the
    mounted Qwen3-4B-Instruct-2507 weights and frozen clean-list digest without
    printing credentials.
-5. Render only `arm=native, stage=full` with fresh run-id `p58f07` and worker
+5. Render only `arm=native, stage=full` with fresh run-id `p58f08` and worker
    sentinel `tpu-v5p-slice`. Require exact `4x4x8` topology and no literal
    `cloud.google.com/gke-nodepool: tpu-v5p-slice`; preserve the YAML/digest and
    run server-side dry-run before the separately approved apply.
 6. Require stock preflight, one P58 stock-observer processed-B marker, exact
-   live weights, finite forward/backward, and the first optimizer commit.
+   live weights, shape-valid finite Native boundaries/ratios, finite
+   forward/backward, and the first optimizer commit.
    Then monitor commits 1–3 without stopping a healthy job. Continue through
    checkpoint 8, updates 32 and 100, then every 100 updates.
 7. Require the full native classifier JSON to say `PASS`, including a finite
-   nonzero serving-path dose on A-B or B-C, exact trainer old/current repeat,
+   nonzero serving-path dose on A-B or B-C, finite trainer-program observation,
    exactly 1,000 commits, device optimizer, complete journal, cleanup,
    evaluation, checkpoint, and transaction receipts.
 8. Do not render or apply zero.
 
-Do not reuse any failed `p58c01` through `p58c05` or `p58f01` through `p58f06`
-YAML/run root. P58f03 through p58f06 have valid diagnostic trajectory journals
-but no trainer update or optimizer checkpoint, so none is resumable training state. The
+Do not reuse any failed `p58c01` through `p58c05` or `p58f01` through `p58f07`
+YAML/run root. P58f03 through p58f07 have diagnostic trajectory/alignment
+evidence but no durable trainer update or optimizer checkpoint, so none is resumable training state. The
 attempts remain immutable failure evidence
 under `evidence/p58c01/`, `evidence/p58c02/`, `evidence/p58c03/`, and
 `evidence/p58c04/`. The
@@ -396,7 +422,7 @@ for `workload_describe.txt`.
 - A Kubernetes sandbox start exception must propagate after deletion is
   confirmed. `ENV_TIMEOUT` is an admitted compact-filter status; a
   half-created RepoEnv with `container=None` is forbidden. If an entire
-  p58f07 batch has zero confirmed Running pods, classify infrastructure
+  p58f08 batch has zero confirmed Running pods, classify infrastructure
   capacity/scheduling before another launch instead of patching websocket
   decode or inventing a successful trajectory.
 - Read `deepswe/all_sandbox_start_timeout_batch` first. Value `1` means the

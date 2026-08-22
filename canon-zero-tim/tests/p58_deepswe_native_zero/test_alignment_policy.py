@@ -56,12 +56,17 @@ class P58AlignmentPolicyTest(unittest.TestCase):
       self.assertTrue(policy["warning_only"])
       self.assertEqual(
           policy["warning_boundaries"],
-          ("S_decode_vs_S_prefill", "S_prefill_vs_T_old"),
+          (
+              "S_decode_vs_S_prefill",
+              "S_prefill_vs_T_old",
+              "T_old_vs_T_current",
+          ),
       )
       self.assertTrue(alignment._policy_warns(policy, "S_decode_vs_S_prefill"))
       self.assertTrue(alignment._policy_warns(policy, "S_prefill_vs_T_old"))
+      self.assertTrue(alignment._policy_warns(policy, "T_old_vs_T_current"))
       self.assertTrue(alignment._policy_warns(policy, "w_all_exactly_1"))
-      self.assertFalse(alignment._policy_warns(policy, "r_all_exactly_1"))
+      self.assertTrue(alignment._policy_warns(policy, "r_all_exactly_1"))
 
   def test_native_full_finite_a_b_and_b_c_are_nonblocking(self):
     s_decode = np.asarray([[0.0, 0.25, 0.5]], dtype=np.float32)
@@ -89,7 +94,7 @@ class P58AlignmentPolicyTest(unittest.TestCase):
         record = alignment.check_pre_backward(sidecar, step=0)
         post = alignment.check_batch(
             sidecar,
-            t_current=t_old,
+            t_current=t_old + np.float32(0.05),
             gradient_norm=np.asarray(1.0, dtype=np.float32),
             optimizer_skipped=np.asarray(0, dtype=np.int32),
             step=0,
@@ -101,7 +106,9 @@ class P58AlignmentPolicyTest(unittest.TestCase):
         {"S_decode_vs_S_prefill", "S_prefill_vs_T_old"},
     )
     self.assertEqual(post["blocking_reds"], [])
-    self.assertTrue(post["exact"]["r_all_exactly_1"])
+    self.assertFalse(post["exact"]["r_all_exactly_1"])
+    self.assertIn("T_old_vs_T_current", post["warning_reds"])
+    self.assertIn("r_all_exactly_1", post["warning_reds"])
 
   def test_native_full_nonfinite_b_c_remains_blocking(self):
     s_decode = np.asarray([[0.0, 0.25, 0.5]], dtype=np.float32)
@@ -130,7 +137,7 @@ class P58AlignmentPolicyTest(unittest.TestCase):
       ):
         alignment.check_pre_backward(sidecar, step=0)
 
-  def test_native_full_trainer_repeat_remains_blocking(self):
+  def test_native_full_finite_trainer_program_drift_is_nonblocking(self):
     s_decode = np.asarray([[0.0, 0.25, 0.5]], dtype=np.float32)
     s_prefill = s_decode + np.float32(0.1)
     t_old = s_prefill + np.float32(0.2)
@@ -148,6 +155,41 @@ class P58AlignmentPolicyTest(unittest.TestCase):
     )
     t_current = t_old.copy()
     t_current[0, 1] = np.nextafter(t_current[0, 1], np.float32(np.inf))
+    with tempfile.TemporaryDirectory() as root:
+      values = {
+          **_env("native", "full"),
+          alignment.REPORT_ENV: str(Path(root) / "post.jsonl"),
+      }
+      with mock.patch.dict(os.environ, values, clear=True):
+        record = alignment.check_batch(
+            sidecar,
+            t_current=t_current,
+            gradient_norm=np.asarray(1.0, dtype=np.float32),
+            optimizer_skipped=np.asarray(0, dtype=np.int32),
+            step=0,
+        )
+    self.assertEqual(record["blocking_reds"], [])
+    self.assertIn("T_old_vs_T_current", record["warning_reds"])
+    self.assertIn("r_all_exactly_1", record["warning_reds"])
+
+  def test_native_full_nonfinite_trainer_program_drift_remains_blocking(self):
+    s_decode = np.asarray([[0.0, 0.25, 0.5]], dtype=np.float32)
+    s_prefill = s_decode + np.float32(0.1)
+    t_old = s_prefill + np.float32(0.2)
+    sidecar = alignment.ObservedTrainExample(
+        train_example=types.SimpleNamespace(),
+        s_decode=s_decode,
+        s_prefill=s_prefill,
+        t_old=t_old,
+        action_mask=np.ones_like(s_decode, dtype=np.bool_),
+        completion_valid_mask=np.ones_like(s_decode, dtype=np.bool_),
+        prompt_mask=np.zeros_like(s_decode, dtype=np.bool_),
+        tokens=np.asarray([[10, 11, 12]], dtype=np.int32),
+        policy_version=np.asarray([0], dtype=np.int32),
+        sampling_values=np.asarray([[1.0, 0.0, 1.0]], dtype=np.float32),
+    )
+    t_current = t_old.copy()
+    t_current[0, 1] = np.nan
     with tempfile.TemporaryDirectory() as root:
       values = {
           **_env("native", "full"),

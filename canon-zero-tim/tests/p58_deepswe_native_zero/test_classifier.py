@@ -87,7 +87,7 @@ def _post(arm: str) -> dict:
       "boundaries": {
           "S_decode_vs_S_prefill": _boundary(1 if arm == "native" else 0),
           "S_prefill_vs_T_old": _boundary(1 if arm == "native" else 0),
-          "T_old_vs_T_current": _boundary(0),
+          "T_old_vs_T_current": _boundary(1 if arm == "native" else 0),
       },
   }
 
@@ -181,13 +181,13 @@ class P58ClassifierTest(unittest.TestCase):
       )
       self.assertNotIn("registered_treatment_observed", report["failed"])
 
-  def test_native_trainer_repeat_drift_remains_blocking(self):
+  def test_native_trainer_program_drift_is_finite_observation(self):
     with tempfile.TemporaryDirectory() as directory:
       root = Path(directory)
       self._classify(root, "native")
       drift = _post("native")
       drift["boundaries"]["T_old_vs_T_current"] = _boundary(1)
-      failed = classifier.classify(
+      report = classifier.classify(
           arm="native",
           stage="three-update",
           log_text=_WANDB_PASS,
@@ -197,7 +197,27 @@ class P58ClassifierTest(unittest.TestCase):
           alignment=[drift],
           updates=[_update(step, "native") for step in range(3)],
       )
-      self.assertIn("native_trainer_repeat_exact", failed["failed"])
+      self.assertEqual(report["verdict"], "PASS")
+      self.assertTrue(report["checks"]["native_trainer_program_finite"])
+
+  def test_native_trainer_program_nonfinite_remains_blocking(self):
+    with tempfile.TemporaryDirectory() as directory:
+      root = Path(directory)
+      self._classify(root, "native")
+      invalid = _post("native")
+      invalid["boundaries"]["T_old_vs_T_current"]["finite"] = False
+      failed = classifier.classify(
+          arm="native",
+          stage="three-update",
+          log_text=_WANDB_PASS,
+          debug_dir=root,
+          weights=[{"verdict": "PASS", "equal": True}],
+          pre_alignment=[_pre("native")],
+          alignment=[invalid],
+          updates=[_update(step, "native") for step in range(3)],
+      )
+      self.assertIn("alignment_nonblocking_finite", failed["failed"])
+      self.assertIn("native_trainer_program_finite", failed["failed"])
 
   def test_zero_requires_all_boundaries_exact(self):
     with tempfile.TemporaryDirectory() as directory:
@@ -217,7 +237,6 @@ class P58ClassifierTest(unittest.TestCase):
           updates=[_update(step, "zero") for step in range(3)],
       )
       self.assertIn("zero_all_boundaries_exact", failed["failed"])
-
 
 if __name__ == "__main__":
   unittest.main()

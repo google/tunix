@@ -7,9 +7,10 @@ sampling, loss, optimizer, deadlines, artifacts, and update horizon.
 
 - `native` preserves the stock serving/trainer numerical programs from the
   pinned DeepSWE quality-fix lineage. Finite A-B and B-C differences are the
-  measured serving-path treatment dose. Trainer old/current repeat drift,
-  nonfinite values, invalid shapes, replica/transaction failures, and corrupt
-  evidence remain fatal.
+  measured serving-path treatment dose; finite T_old-T_current and derived
+  ratio differences are additional stock-program observations. Nonfinite
+  values, invalid shapes, replica/transaction failures, and corrupt evidence
+  remain fatal.
 - `zero` enables the complete canonical numerical bundle. A, B, and C must be
   exact at every admitted boundary.
 
@@ -124,10 +125,20 @@ alignment after 128 durable trajectories, exact weights, and a complete Native
 processed-B observation. Both A-B and B-C were shape-valid and finite across
 405,827 action tokens, but the P58-specific warning tuple still blocked B-C
 before trainer forward. The correction makes both finite serving-path
-boundaries warnings while keeping trainer old/current repeat, nonfinite/shape,
-weights, replica, transaction, and optimizer errors hard. Zero remains strict.
-Use fresh full-stage run-id `p58f07` after publication/readback; never reuse
-p58f06 YAML/root or journal as training state.
+boundaries warnings while keeping nonfinite/shape, weights, replica,
+transaction, and optimizer errors hard. Zero remains strict.
+P58f07 proved the warning repair: all 128 real RepoEnv trajectories completed,
+pre-backward passed with finite A-B/B-C warnings, and the trainer entered real
+value-and-grad/backward. It then stopped on `T_old_vs_T_current` because the
+Native gate incorrectly required an observer-only stock rescore to match the
+value-and-grad primal exactly. The correction preserves the stock
+quality-fix 128-trajectory observer and makes every shape-valid finite Native
+program boundary and derived ratio observational. With rollout logprobs on and
+sampler-IS off, the loss uses rollout A rather than observer `T_old`. Zero
+remains exact, and no training data, accumulation, loss, optimizer, or
+numerical treatment flag changes.
+Use fresh full-stage run-id `p58f08` after publication/readback; never reuse
+p58f07 YAML/root or journal as training state.
 
 The direct-entrypoint implementation commit is
 `82d82f72a7220d945737d95f6266b5b7e2cfe706`. Resolve the final runnable SHA by
@@ -153,6 +164,7 @@ implementation commit directly.
 | Sampling | temperature 1.0, top-p 1.0, top-k 0 |
 | Roles | rollout DP8 x TP8 + trainer DP8 x TP8 |
 | Objective | RLOO; `sequence-mean-token-scale`; fixed norm 16,384 |
+| Trainer observer | Stock quality-fix `T_old`: one prompt-counted 128-trajectory rescore for B8 x G16; observer-only under `use_rollout_logps=true` |
 | PPO | epsilon 0.20, epsilon-high 0.28, beta 0 |
 | Optimizer | Adam 1e-6, betas 0.9/0.99, weight decay 0.01, grad clip 1.0 |
 | Optimizer placement | TPU device-resident; host offload forbidden |
@@ -265,7 +277,7 @@ CLIENT_IMAGE_DIGEST='registry.example/tunix@sha256:<64-hex-digest>'
 CPU_NODEPOOL='cpu-np'
 TPU_NODEPOOL='tpu-v5p-slice'
 MODEL_PVC='haoyugao-cpu-np-pvc'
-RUN_STEM='p58f07'
+RUN_STEM='p58f08'
 STAGE='full'
 
 ARM='native'
@@ -426,7 +438,7 @@ Monitor without stopping the healthy job:
 |---|---|
 | Kueue admission | `QuotaReserved=True`, selected TPU flavor, 32 four-chip worker pods, 128 Pathways devices |
 | first completed batch | 128 journal rows; timeout split; cleanup; solve, all-zero/all-one/mixed/effective-group metrics |
-| commits 1–3 | finite forward/backward; finite nonzero A-B or B-C dose; exact trainer old/current repeat; TPU optimizer; monotonic transaction/journal state |
+| commits 1–3 | finite forward/backward; finite nonzero A-B or B-C dose; all Native program boundaries and ratios finite; TPU optimizer; monotonic transaction/journal state |
 | commit 8 | first expected checkpoint artifact and digest |
 | commits 32, 100, then each 100 | continued finite training, checkpoint/evaluation cadence, no journal or cleanup drift |
 
@@ -436,9 +448,9 @@ Crossing commit 3 is not a stop condition. The classifier cannot say full
 The native classifier requires at least one finite, nonzero mismatch across
 `S_decode_vs_S_prefill` or `S_prefill_vs_T_old`. Exactness on both Native
 serving boundaries is `NO_TREATMENT`, not a successful comparison. Native
-`T_old_vs_T_current` remains exact. The zero classifier requires all
-boundaries exact. Both require device-resident optimizer evidence and no
-blocking reds.
+`T_old_vs_T_current` may differ only when the boundary and derived ratios are
+shape-valid and finite. The zero classifier requires all boundaries exact.
+Both require device-resident optimizer evidence and no blocking reds.
 
 Useful scan:
 
@@ -467,7 +479,8 @@ Stop rather than retrying the same manifest if any of these occurs:
 - native/zero processed-B treatment mixing, a missing or duplicate native
   stock-observer marker, or a canonical engine marker in native;
 - native has no observed finite serving-path mismatch dose;
-- native trainer old/current or any zero boundary differs;
+- any Native boundary or derived ratio is nonfinite/invalid, or any Zero
+  boundary differs;
 - NaN/Inf, invalid shape, replica drift, optimizer/weight attestation failure;
 - host optimizer offload, prefix cache, sampler-IS, group filtering, or flat
   resampling appears;

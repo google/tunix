@@ -215,9 +215,8 @@ def classify(
       )
       for record in pre_alignment
   )
-  native_trainer_repeat_exact = bool(alignment) and all(
+  native_trainer_program_finite = bool(alignment) and all(
       _boundary_valid(record, "T_old_vs_T_current")
-      and record["boundaries"]["T_old_vs_T_current"]["differing_bytes"] == 0
       for record in alignment
   )
   common_update_geometry = all(
@@ -265,8 +264,8 @@ def classify(
           for record in all_alignment
       ),
       "registered_treatment_observed": native_dose if arm == "native" else exact_boundaries,
-      "native_trainer_repeat_exact": (
-          native_trainer_repeat_exact if arm == "native" else True
+      "native_trainer_program_finite": (
+          native_trainer_program_finite if arm == "native" else True
       ),
       "zero_all_boundaries_exact": exact_boundaries if arm == "zero" else True,
       "update_records_nonempty": bool(updates),

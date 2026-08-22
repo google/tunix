@@ -24,7 +24,7 @@ validate the deferred zero arm and cannot establish a paired treatment effect.
 - recipe: B8 x G16, response 16,384, 50 turns, RLOO, fixed-context
   `sequence-mean-token-scale`, TPU-resident optimizer, optional interventions
   off, prefix cache off;
-- stage/run: `full`, fresh run-id `p58f07`, exactly 1,000 optimizer commits;
+- stage/run: `full`, next fresh run-id `p58f08`, exactly 1,000 optimizer commits;
 - arm: `native` only. Rendering or applying `zero` is outside this phase.
 
 ## Admission gate
@@ -42,7 +42,7 @@ Failure here is admission `INCONCLUSIVE`, not training evidence.
 - first completed batch: 128 journal rows, sandbox-start/environment/model
   timeout split, cleanup receipts, solve/signal group metrics;
 - commits 1–3: finite forward/backward, finite nonzero Native mismatch on A-B
-  or B-C, exact trainer old/current repeat, device-resident optimizer, and
+  or B-C, shape-valid finite trainer-program observations, device-resident optimizer, and
   monotonic transaction and journal state;
 - later milestones: checkpoint 8, then updates 32, 100, and every 100 updates;
 - evaluation remains at the signed recipe cadence; checkpoint cadence remains
@@ -55,7 +55,7 @@ not because the former canary horizon has been crossed.
 
 The native full classifier must report `PASS` from complete, digest-verified
 artifacts and exactly 1,000 commits. It must prove a finite nonzero serving-path
-treatment dose across A-B or B-C, exact trainer old/current repeat, finite
+treatment dose across A-B or B-C, shape-valid finite stock-program boundaries, finite
 training values, TPU-resident optimizer state, complete 128-row trajectory
 batches, journal continuity, sandbox cleanup, evaluation/checkpoint cadence,
 and transaction integrity.
@@ -63,7 +63,7 @@ and transaction integrity.
 An all-filtered batch may advance `batch_index` without an optimizer commit;
 it must preserve unchanged optimizer state and may make the number of consumed
 batches exceed 1,000. Partial/tampered evidence, no Native serving-path
-mismatch (`NO_TREATMENT`), trainer old/current drift, or any Zero-arm drift
+mismatch (`NO_TREATMENT`), nonfinite/invalid Native drift, or any Zero-arm drift
 cannot be promoted.
 
 ## Attempt boundary
@@ -112,9 +112,20 @@ and executed alignment over 405,827 action tokens. Both A-B and B-C were valid
 and finite, but the policy's P58-specific boundary tuple still allowed only
 A-B and therefore blocked finite B-C before trainer forward/backward/update.
 
-The local correction restores the intended untreated Native scope: finite A-B
-and B-C are treatment warnings, while trainer `T_old_vs_T_current`, derived
-trainer-repeat ratio `r`, nonfinite/shape, weight, replica, transaction, and
-optimizer failures remain hard. Zero stays strict at every boundary. The next
-attempt is fresh Native `p58f07` after publication/readback. Zero remains
-deferred.
+P58f07 proved that correction: 128 real RepoEnv trajectories completed with
+`N_action=436,464`; pre-backward alignment passed with A-B/B-C warnings; and
+the trainer entered a real value-and-grad/backward call. It then stopped on
+post-backward `T_old_vs_T_current` and derived `r`. The durable P58 logps marker
+from the same frozen launcher family shows that standalone `T_old` was scored
+as one 128-trajectory program, while the signed trainer geometry slices the
+same ordered rows into eight 16-trajectory value-and-grad programs. That is a
+program-shape mismatch, not a valid same-program trainer repeat.
+
+The corrected Native contract does not replace the quality-fix program. It
+keeps the stock standalone 128-trajectory `T_old` observer and treats finite
+`T_old_vs_T_current` plus finite derived ratios as measurement. With
+`use_rollout_logps=true` and sampler-IS disabled, rollout A—not observer
+`T_old`—is the old logprob input to the loss. The classifier requires every
+observed Native boundary to be present, shape-valid, and finite; Zero still
+requires all boundaries exact. After publication/readback, the next attempt
+is fresh Native `p58f08`. Zero remains deferred.

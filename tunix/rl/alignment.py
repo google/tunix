@@ -532,6 +532,7 @@ def gsm8k_ab_report_policy() -> dict[str, Any]:
           (
               "S_decode_vs_S_prefill",
               "S_prefill_vs_T_old",
+              "T_old_vs_T_current",
           )
           if p58_arm == "native"
           else None
@@ -568,9 +569,15 @@ def _policy_warns(policy: Mapping[str, Any], item: str) -> bool:
     return True
   if item in boundaries:
     return True
-  # w and w*r include the registered native serving/trainer treatment.  r is
-  # the trainer-old/current repeat boundary and remains exact/fail-closed.
-  return item in ("w_all_exactly_1", "wr_all_exactly_1", "clip_hits", "tis_hits")
+  # The untreated Native arm observes the complete stock numerical program.
+  # Its finite w, r, and w*r drift is measurement, not an optimizer veto.
+  return item in (
+      "w_all_exactly_1",
+      "r_all_exactly_1",
+      "wr_all_exactly_1",
+      "clip_hits",
+      "tis_hits",
+  )
 
 
 def _masked_pair_is_finite(a: Any, b: Any, mask: Any) -> bool:

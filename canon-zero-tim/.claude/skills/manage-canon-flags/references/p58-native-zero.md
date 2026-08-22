@@ -15,7 +15,7 @@ Read this reference only for
 | `CANON_RPA_VJP2` / `CANON_VJP2_MAX_SEQS` | `0 / 0` | canonical admitted values |
 | `CANON_FIXED_AR`, `CANON_FIXED_AR_EMBED`, `CANON_LOGPROB_M` | absent | canonical admitted values |
 | Pallas/segmented numerical bundle | disabled or absent as declared by profile | complete canonical bundle |
-| `CANON_DEEPSWE_ALIGNMENT_WARN_ONLY` | `1` for finite A-B/B-C serving-path observation; trainer repeat strict | `0`, strict exactness |
+| `CANON_DEEPSWE_ALIGNMENT_WARN_ONLY` | `1` for every shape-valid, finite stock numerical boundary and derived ratio; mismatch is observational | `0`, strict exactness |
 | `CANON_P32_DP_REDUCTION_ADMITTED` | `0` | `1` |
 
 Do not delete Native's explicit zeros or absences. Do not turn on canonical
@@ -28,11 +28,14 @@ exact `CANON_P34_RUN_STAGE/CANON_P58_EXPECTED_UPDATES` pair of
 short-debug-stage branch. Zero keeps warning-only at zero and remains strict.
 
 For signed P58 Native, `warning_boundaries` must contain exactly
-`S_decode_vs_S_prefill` and `S_prefill_vs_T_old`. These compare untreated
-serving decode/prefill and serving/trainer programs, so any shape-valid finite
-difference is treatment evidence rather than a training veto. The trainer
-repeat boundary `T_old_vs_T_current`, derived ratio `r`, nonfinite values,
-invalid shapes, weights, replicas, transactions, and optimizer state remain
+`S_decode_vs_S_prefill`, `S_prefill_vs_T_old`, and
+`T_old_vs_T_current`. Native intentionally preserves the complete stock
+serving and trainer programs; therefore every shape-valid finite boundary
+difference and its finite `w`, `r`, or `w*r` consequence is treatment
+measurement rather than a training veto. The standalone `T_old` rescore is an
+observer and does not provide the old logprobs used by the loss when
+`use_rollout_logps=true`; stock rollout A does. Nonfinite values, invalid
+shapes, weights, replicas, transactions, and optimizer state remain
 fail-closed. Zero admits no warning boundary and requires all comparisons
 exact. Do not copy P38's diagnostic-only B-C requirement into P58 Native.
 
