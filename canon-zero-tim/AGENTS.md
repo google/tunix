@@ -36,6 +36,7 @@ from the original delivery: `START_HERE.md`.
 |---|---|---|
 | 1 | `THREADS.md` | what the six work threads are and where each one stands right now |
 | 2 | `.claude/skills/manage-canon-zero-tim-branch/SKILL.md` | how to operate: run contract, gate ladder, flag lifecycle, multi-agent protocol (this in-package copy is canonical) |
+| 2a | `.claude/skills/manage-canon-flags/SKILL.md` | how to audit and change the large `CANON_*` surface: presence semantics, process delivery, environment snapshots, paired-treatment isolation, regressions, and retirement |
 | 3 | `FLAGS.md` | what every `CANON_*` switch means, its lifecycle, and what has been permanently vetoed |
 | 4 | `EVIDENCE.md` | which run proves which claim, and where the artifact + SHA lives |
 | 5 | `KNOWN_FOOTGUNS.md` | numbered incidents — the mistakes already paid for |

@@ -106,6 +106,9 @@ negative stayed green because the device flushes subnormals — flip a normal va
 
 ## 7. Flag lifecycle
 
+For changes that span renderers, profiles, process delivery, or paired treatment
+arms, also read `../manage-canon-flags/SKILL.md` and use its end-to-end flag audit.
+
 - New flag: register in `FLAGS.md` **with a sunset condition** before the code lands.
   Creation is cheap; deletion is ordered.
 - Lifecycle: experimental → certified (per workload) → default-on → welded / retired.

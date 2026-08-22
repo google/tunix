@@ -1,0 +1,4 @@
+interface:
+  display_name: "Manage Canon Flags"
+  short_description: "Audit and isolate zero-TIM runtime flags"
+  default_prompt: "Use $manage-canon-flags to audit this flag change from renderer through runtime markers and preserve Native/Zero treatment isolation."
