@@ -1,0 +1,28 @@
+FROM us-central1-docker.pkg.dev/cloud-tpu-multipod-dev/yangmu/tunix/tunix_base_image:trellis-demo-0813
+
+ENV PATH="/opt/venv/bin:$PATH"
+
+# Install TPU Raiden JAX wheel
+COPY ./raiden_wheels/*.whl /tmp/raiden_wheels/
+RUN pip install --no-deps /tmp/raiden_wheels/*.whl && rm -rf /tmp/raiden_wheels
+
+# Install MaxText dependencies directly into docker image
+RUN pip install --no-cache-dir \
+    aqtp \
+    tokamax \
+    einshape \
+    typeguard \
+    drjax \
+    ml-goodput-measurement \
+    cloud-accelerator-diagnostics \
+    cloud-tpu-diagnostics \
+    google-cloud-mldiagnostics \
+    google-cloud-monitoring
+
+# Install Tunix in editable mode
+WORKDIR /app
+COPY . /app
+RUN pip install --no-deps -e /app
+
+WORKDIR /app
+CMD ["bash"]

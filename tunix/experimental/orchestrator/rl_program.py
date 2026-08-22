@@ -162,6 +162,10 @@ class StandardRLProgram(RLProgram):
       try:
         completed = await engine.poll_rollouts()
         if isinstance(completed, list) and completed:
+          logging.info(
+              "[StandardRLProgram] Enqueued %d trajectories to raw_q",
+              len(completed),
+          )
           for item in completed:
             await self.raw_q.put(item)
 
@@ -231,7 +235,18 @@ class StandardRLProgram(RLProgram):
       num_rollouts = 0
 
       for group_idx in range(self.mini_batch_size):
+        logging.debug(
+            "[StandardRLProgram] train_stage waiting for group %d/%d from scored_q",
+            group_idx + 1,
+            self.mini_batch_size,
+        )
         scored_items = await self.scored_q.get_batch(num_groups=1)
+        logging.debug(
+            "[StandardRLProgram] train_stage received group %d/%d (%d items)",
+            group_idx + 1,
+            self.mini_batch_size,
+            len(scored_items),
+        )
         if not scored_items:
           break
         uncommitted_groups.append(scored_items)

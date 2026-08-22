@@ -27,9 +27,13 @@ dependencies = [
   "huggingface_hub",
   "importlib_resources",
   # Jax 0.7.2 has performance regression on OSS
-  # Jax 0.11.0 breaks several nightly regression tests
+  # Jax 0.11.0 was previously excluded here ("breaks several nightly regression
+  # tests"), but Raiden weight sync (tunix/experimental) requires it -- tpu-raiden
+  # only supports JAX >=0.11.0, and the regression this exclusion guarded against
+  # has not been re-verified against 0.11.0 since; if it resurfaces, re-exclude
+  # narrowly rather than blocking the whole >=0.11.0 range Raiden needs.
   # Jax 0.11.1 removed jax.experimental.hijax.MutableHiType, which flax (through 0.12.8, the newest release) still subclasses
-  "jax[tpu]>=0.6.0,!=0.7.2,!=0.11.0,<0.11.1",
+  "jax[tpu]>=0.6.0,!=0.7.2,<0.11.1",
   "jaxtyping",
   "jinja2",  # Huggingface chat template
   "kagglehub",

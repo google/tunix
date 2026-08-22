@@ -15,6 +15,7 @@
 """Top-level RolloutWorker abstractions (Service vs Client Driver)."""
 
 import dataclasses
+import logging
 from typing import Any, AsyncIterator, Callable, List, Optional, Sequence, Union
 import numpy as np
 from tunix.experimental.common import datatypes
@@ -335,12 +336,25 @@ class RolloutWorker(abstract_worker.Worker):
         and completion_logps.shape != completion_tokens.shape
     ):
       completion_logps = None
-    prompt_token_arr = np.asarray(prompt_tokens, dtype=np.int32).reshape(-1)
+    prompt_token_arr = (
+        np.asarray(prompt_tokens, dtype=np.int32).reshape(-1)
+        if prompt_tokens is not None
+        else np.zeros(0, dtype=np.int32)
+    )
     if prompt_token_arr.size == 0:
-      raise RuntimeError(
-          "Sampler response is missing prompt_token_ids for "
-          f"{request.request_id or request.traj_id}."
-      )
+      if (
+          self.manager.tokenizer is not None
+          and hasattr(self.manager.tokenizer, "encode")
+          and getattr(request, "prompt", None)
+      ):
+        prompt_token_arr = np.asarray(
+            self.manager.tokenizer.encode(request.prompt), dtype=np.int32
+        ).reshape(-1)
+      else:
+        raise RuntimeError(
+            "Sampler response is missing prompt_token_ids for "
+            f"{request.request_id or request.traj_id}."
+        )
     metadata = dict(request.metadata or {})
     metadata.setdefault("text", text)
     return datatypes.RolloutResponse(
@@ -389,8 +403,16 @@ class RolloutWorker(abstract_worker.Worker):
               ),
           )
       )
+    logging.info(
+        "[RolloutWorker] Dispatching %d requests to sampler.",
+        len(sampling_requests),
+    )
     responses = self._as_sampling_response_list(
         await self.sampler.sample(sampling_requests)
+    )
+    logging.info(
+        "[RolloutWorker] Received %d responses from sampler.",
+        len(responses),
     )
     if len(responses) != len(requests):
       raise RuntimeError(
@@ -401,7 +423,7 @@ class RolloutWorker(abstract_worker.Worker):
         self._sampling_to_rollout_response(
             request=req,
             text=responses[i].text,
-            prompt_tokens=responses[i].prompt_token_ids,
+            prompt_tokens=getattr(responses[i], "prompt_token_ids", None),
             token_ids=responses[i].token_ids,
             logprobs=responses[i].logprobs,
         )
@@ -427,6 +449,25 @@ class RolloutWorker(abstract_worker.Worker):
         and all(isinstance(req, str) for req in requests)
     ):
       return await self.sample_prompts(requests, **generation_kwargs)  # pyrefly: ignore[bad-argument-type]
+
+    req_list = (
+        [requests] if not isinstance(requests, (list, tuple)) else list(requests)
+    )
+    env_name = getattr(self.config, "env_name", "")
+    if (
+        not env_name
+        and self.manager.env_pool is None
+        and self.manager.agent_factory is None
+    ):
+      res = await self._generate_rollout_requests_direct(
+          req_list, **generation_kwargs
+      )
+      if on_complete is not None:
+        for item in res:
+          on_complete(item)
+      if not isinstance(requests, (list, tuple)):
+        return res[0] if res else None
+      return res
 
     cb = None
     if on_complete is not None:

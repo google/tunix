@@ -14,46 +14,66 @@
 # limitations under the License.
 
 COMMAND=""
-TUNIX_IMAGE="us-central1-docker.pkg.dev/cloud-tpu-multipod-dev/yangmu/tunix/tunix_base_image:trellis-demo-0813"
+TUNIX_IMAGE=${TUNIX_IMAGE:-"gcr.io/tpu-prod-env-multipod/mohitkhatwani-rl:maxtext-raiden-0821-v4"}
 
-export MODEL_NAME=${MODEL_NAME:-Qwen3-1.7B}
-export MODEL_ID=${MODEL_ID:-Qwen/Qwen3-1.7B}
-export MODEL_DIR=${MODEL_DIR:-artifacts/qwen3_dist_gsm8k/models}
-export TOKENIZER_PATH=${TOKENIZER_PATH:-${MODEL_DIR}}
+# Trainer (MaxText) and rollout (maxtext_vllm_adapter's MaxTextForCausalLM) must load
+# the *same* architecture for Raiden weight sync to line up -- keep MODEL_NAME/MODEL_ID
+# and MAXTEXT_MODEL_NAME in sync (default: qwen3-0.6b, small enough for a v5p-8 debug run).
+export MODEL_NAME=${MODEL_NAME:-Qwen3-0.6B}
+export MODEL_ID=${MODEL_ID:-Qwen/Qwen3-0.6B}
+export MAXTEXT_MODEL_NAME=${MAXTEXT_MODEL_NAME:-qwen3-0.6b}
+export MODEL_DIR=${MODEL_DIR:-/tmp/models/qwen3}
+export TOKENIZER_PATH=${TOKENIZER_PATH:-${MODEL_ID}}
 
-export MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-512}
-export MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-128}
+export MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-1024}
+export MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-512}
 export BATCH_SIZE=${BATCH_SIZE:-2}
 export NUM_GENERATIONS=${NUM_GENERATIONS:-2}
-export MAX_STEPS=${MAX_STEPS:-1}
-export TRAIN_MICRO_BATCH_SIZE=${TRAIN_MICRO_BATCH_SIZE:-1}
+export MAX_STEPS=${MAX_STEPS:-2}
+export TRAINER_FSDP=${TRAINER_FSDP:-4}
+
+# peft runs tunix's PeftTrainer; maxtext runs MaxText's MaxTextTrainingEngine.
+export TRAINER_BACKEND=${TRAINER_BACKEND:-maxtext}
+export MAXTEXT_CKPT=${MAXTEXT_CKPT:-}
+if [[ "$TRAINER_BACKEND" == "maxtext" ]]; then
+  export TRAIN_MICRO_BATCH_SIZE=${TRAIN_MICRO_BATCH_SIZE:-$TRAINER_FSDP}
+else
+  export TRAIN_MICRO_BATCH_SIZE=${TRAIN_MICRO_BATCH_SIZE:-1}
+fi
 export MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-$((BATCH_SIZE * NUM_GENERATIONS))}
 export EVAL_EVERY_N_STEPS=${EVAL_EVERY_N_STEPS:-1000000}
 export LORA_RANK=${LORA_RANK:-16}
 export LORA_ALPHA=${LORA_ALPHA:-16.0}
 export USE_LORA=${USE_LORA:-0}
 
+# Logs source/destination Raiden tensor checksums on both the trainer and
+# rollout sides during weight sync, for cross-verification of a real run.
+export VERIFY_WEIGHTS=${VERIFY_WEIGHTS:-false}
+
 export ORCHESTRATOR_ID=$USER-orch
-export ORCHESTRATOR_PORT=20000
+export ORCHESTRATOR_PORT=21000
 
 export ROLLOUT_ID=$USER-roll
-export ROLLOUT_PORT=20001
+export ROLLOUT_PORT=21001
 
 export TRAINER_ID=$USER-train
-export TRAINER_PORT=20002
+export TRAINER_PORT=21002
+
+PYTHON_BIN=${PYTHON_BIN:-python3}
 
 stop_orchestrator() {
-  kubectl delete jobset "${ORCHESTRATOR_ID}"
+  kubectl delete jobset "${ORCHESTRATOR_ID}" 2>/dev/null || true
 }
 
 start_orchestrator() {
-  python tunix/experimental/distributed/deployment/yaml_generator.py \
+  $PYTHON_BIN tunix/experimental/distributed/deployment/yaml_generator.py \
     tunix/experimental/distributed/deployment/yamls/jobset.cpu.yaml \
     --jobset_name="${ORCHESTRATOR_ID}" \
-    --cpu_machine=n2-standard-64 \
+    --cpu_machine=n2-standard-16 \
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${ORCHESTRATOR_PORT}" \
     --worker_startup_command=" \
+      ( cd /app && git remote set-url origin https://github.com/google/tunix.git && git reset --hard && git clean -fd && git fetch origin mohit/raiden-maxtext-rlvllm && git checkout -f mohit/raiden-maxtext-rlvllm && git reset --hard origin/mohit/raiden-maxtext-rlvllm && pip install --no-deps -e /app ) && \
       python -m tunix.experimental.distributed.runtime.main \
         --discovery_id=${ORCHESTRATOR_ID} \
         --discovery_port=${ORCHESTRATOR_PORT} \
@@ -66,30 +86,35 @@ start_orchestrator() {
         --max_prompt_length=${MAX_PROMPT_LENGTH} \
         --max_response_length=${MAX_RESPONSE_LENGTH} \
         --train_micro_batch_size=${TRAIN_MICRO_BATCH_SIZE} \
+        --sync_weights \
         --stop_workers_on_exit \
     " \
     | kubectl apply -f -
 }
 
 stop_trainer() {
-  kubectl delete jobset "${TRAINER_ID}"
+  kubectl delete jobset "${TRAINER_ID}" 2>/dev/null || true
 }
 
 start_trainer() {
-  python tunix/experimental/distributed/deployment/yaml_generator.py \
-    tunix/experimental/distributed/deployment/yamls/jobset.pathways.yaml \
+  $PYTHON_BIN tunix/experimental/distributed/deployment/yaml_generator.py \
+    tunix/experimental/distributed/deployment/yamls/jobset.tpu.yaml \
     --jobset_name="${TRAINER_ID}" \
-    --tpu_slice=tpuv5:2x2x2 \
+    --tpu_slice=tpuv5:2x2x1 \
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${TRAINER_PORT}" \
     --worker_startup_command=" \
-      python -m tunix.experimental.distributed.runtime.main \
+      ( cd /app && git remote set-url origin https://github.com/google/tunix.git && git reset --hard && git clean -fd && git fetch origin mohit/raiden-maxtext-rlvllm && git checkout -f mohit/raiden-maxtext-rlvllm && git reset --hard origin/mohit/raiden-maxtext-rlvllm && pip install --no-deps -e /app ) && \
+      ( cd /tmp && [ -d maxtext ] || git clone https://github.com/AI-Hypercomputer/maxtext.git ; cd /tmp/maxtext && git reset --hard && git clean -fd && git fetch origin mohit/raiden-engine-sync && git checkout -f mohit/raiden-engine-sync && git reset --hard origin/mohit/raiden-engine-sync && pip install --no-deps -e . ) && \
+      VERIFY_WEIGHTS=${VERIFY_WEIGHTS} python -m tunix.experimental.distributed.runtime.main \
         --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
         --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
         --process_main=tunix.experimental.examples.math_gsm8k_dist.run_trainer_node.main \
         --worker_id=${TRAINER_ID} \
         --port=${TRAINER_PORT} \
-        --mesh_fsdp=8 \
+        --mesh_fsdp=${TRAINER_FSDP} \
+        --trainer_backend=${TRAINER_BACKEND} \
+        ${MAXTEXT_CKPT:+--maxtext_load_parameters_path=${MAXTEXT_CKPT}} \
         --model_name=${MODEL_NAME} \
         --model_id=${MODEL_ID} \
         --model_dir=${MODEL_DIR} \
@@ -101,24 +126,27 @@ start_trainer() {
         --eval_every_n_steps=${EVAL_EVERY_N_STEPS} \
         --lora_rank=${LORA_RANK} \
         --lora_alpha=${LORA_ALPHA} \
+        --maxtext_model_name=${MAXTEXT_MODEL_NAME} \
     " \
     | kubectl apply -f -
-
 }
 
 stop_rollout() {
-  kubectl delete jobset "${ROLLOUT_ID}"
+  kubectl delete jobset "${ROLLOUT_ID}" 2>/dev/null || true
 }
 
 start_rollout() {
-  python tunix/experimental/distributed/deployment/yaml_generator.py \
+  $PYTHON_BIN tunix/experimental/distributed/deployment/yaml_generator.py \
     tunix/experimental/distributed/deployment/yamls/jobset.tpu.yaml \
     --jobset_name="${ROLLOUT_ID}" \
     --tpu_slice=tpuv5:2x2x1 \
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${ROLLOUT_PORT}" \
     --worker_startup_command=" \
-      SKIP_JAX_PRECOMPILE=1 python -m tunix.experimental.distributed.runtime.main \
+      ( cd /app && git remote set-url origin https://github.com/google/tunix.git && git reset --hard && git clean -fd && git fetch origin mohit/raiden-maxtext-rlvllm && git checkout -f mohit/raiden-maxtext-rlvllm && git reset --hard origin/mohit/raiden-maxtext-rlvllm && pip install --no-deps -e /app ) && \
+      ( cd /tmp && [ -d tpu-inference ] || git clone https://github.com/vllm-project/tpu-inference.git ; cd /tmp/tpu-inference && git reset --hard && git clean -fd && git fetch origin mohit/rl-sampler && git checkout -f mohit/rl-sampler && git reset --hard origin/mohit/rl-sampler && pip install --no-deps -e . ) && \
+      ( cd /tmp && [ -d maxtext ] || git clone https://github.com/AI-Hypercomputer/maxtext.git ; cd /tmp/maxtext && git reset --hard && git clean -fd && git fetch origin mohit/raiden-engine-sync && git checkout -f mohit/raiden-engine-sync && git reset --hard origin/mohit/raiden-engine-sync && pip install --no-deps -e . && pip install --no-deps -e src/maxtext/integration/vllm ) && \
+      SKIP_JAX_PRECOMPILE=1 VERIFY_WEIGHTS=${VERIFY_WEIGHTS} python -m tunix.experimental.distributed.runtime.main \
         --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
         --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
         --process_main=tunix.experimental.examples.math_gsm8k_dist.run_rollout_node.main \
@@ -131,6 +159,8 @@ start_rollout() {
         --max_response_length=${MAX_RESPONSE_LENGTH} \
         --lora_rank=${LORA_RANK} \
         --lora_alpha=${LORA_ALPHA} \
+        --tensor_parallel_size=4 \
+        --maxtext_model_name=${MAXTEXT_MODEL_NAME} \
     " \
     | kubectl apply -f -
 }

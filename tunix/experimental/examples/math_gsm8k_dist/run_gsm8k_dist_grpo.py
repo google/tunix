@@ -121,6 +121,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   )
   parser.add_argument("--rpc_timeout_s", type=float, default=1800.0)
   parser.add_argument("--stop_workers_on_exit", action="store_true")
+  parser.add_argument(
+      "--sync_weights",
+      action=argparse.BooleanOptionalAction,
+      default=True,
+      help="Whether to synchronize weights between trainer and rollout workers.",
+  )
   return parser.parse_args(argv)
 
 
@@ -240,13 +246,13 @@ def _register_workers(
   """Registers gRPC-backed workers in the Orchestrator V2 registry."""
   cluster.register_worker_handle(
       worker_id="trainer-0",
-      roles=[datatypes.Role.ACTOR],
+      roles=[datatypes.Role.ACTOR, "trainer"],
       handle=trainer_handle,
       resources={"address": trainer_addr},
   )
   cluster.register_worker_handle(
       worker_id="rollout-0",
-      roles=[datatypes.Role.ROLLOUT],
+      roles=[datatypes.Role.ROLLOUT, "rollout"],
       handle=rollout_handle,
       resources={"address": rollout_addr},
   )
@@ -309,18 +315,16 @@ def _build_step_requests(
 
 def _iter_request_batches(
     args: argparse.Namespace,
-) -> Iterator[list[datatypes.RolloutRequest]]:
-  top_k = None if args.top_k < 0 else args.top_k
-  for step in range(args.max_steps):
-    yield _build_step_requests(
-        step=step,
-        batch_size=args.batch_size,
-        num_generations=args.num_generations,
-        max_response_length=args.max_response_length,
-        temperature=args.temperature,
-        top_p=args.top_p,
-        top_k=top_k,
-    )
+) -> Iterator[dict[str, Any]]:
+  total_prompts = args.batch_size * args.max_steps
+  prompts, gold_answers = _build_prompt_groups(total_prompts)
+  for i, (prompt, gold_answer) in enumerate(zip(prompts, gold_answers)):
+    yield {
+        "prompt": prompt,
+        "prompt_id": f"prompt_{i}",
+        "group_id": f"group_{i}",
+        "gold_answer": gold_answer,
+    }
 
 
 def main(argv: list[str], context: Any = None) -> None:
@@ -408,6 +412,22 @@ def main(argv: list[str], context: Any = None) -> None:
   )
 
   cluster = orchestrator.ClusterOrchestrator()
+  if args.sync_weights:
+    from tunix.experimental.orchestrator import raiden_handler  # pylint: disable=g-import-not-at-top
+    from tunix.experimental.orchestrator import weight_sync_coordinator  # pylint: disable=g-import-not-at-top
+
+    orchestrator_ip = os.environ.get("POD_IP", "")
+    handler = raiden_handler.RaidenHandler(
+        advertised_address=f"{orchestrator_ip}:0" if orchestrator_ip else None
+    )
+    coord = weight_sync_coordinator.WeightSyncCoordinator(
+        registry=cluster.registry,
+        handler=handler,
+        source_role=datatypes.Role.ACTOR.value,
+        destination_role=datatypes.Role.ROLLOUT.value,
+    )
+    cluster._weight_sync_coordinator = coord
+
   _register_workers(
       args,
       cluster=cluster,
@@ -429,7 +449,7 @@ def main(argv: list[str], context: Any = None) -> None:
           max_response_length=args.max_response_length,
           pad_id=pad_id,
       ),
-      sync_weights=False,
+      sync_weights=args.sync_weights,
       on_step_begin=lambda step: logging.info("GRPO step %d starting.", step),
       on_step_end=lambda step, result: logging.info(
           "GRPO advanced to policy_version=%d train_result=%s.", step, result

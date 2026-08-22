@@ -23,6 +23,7 @@ import asyncio
 import collections
 from collections.abc import Mapping, Sequence
 import inspect
+import logging
 from typing import Any
 import uuid
 
@@ -148,19 +149,33 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
               "When passing raw prompts, 'policy_version' must be provided in"
               " kwargs."
           )
-        # TODO: should we autogenerate request_id?
         req_id = (
             kwargs.get("request_id") or f"req_{idx}_{uuid.uuid4().hex[:8]}"
         )
-        rollout_reqs.append(
-            datatypes.RolloutRequest(
-                request_id=req_id,
-                prompt=p,
-                prompt_id=prompt_ids[idx],
-                target_policy_version=kwargs["policy_version"],
-                metadata=dict(kwargs.get("metadata", {})),
-            )
-        )
+        if isinstance(p, dict):
+          prompt_text = p.get("prompt", p)
+          prompt_meta = {k: v for k, v in p.items() if k != "prompt"}
+          merged_meta = dict(kwargs.get("metadata", {}))
+          merged_meta.update(prompt_meta)
+          rollout_reqs.append(
+              datatypes.RolloutRequest(
+                  request_id=req_id,
+                  prompt=prompt_text,
+                  prompt_id=p.get("prompt_id", prompt_ids[idx]),
+                  target_policy_version=kwargs["policy_version"],
+                  metadata=merged_meta,
+              )
+          )
+        else:
+          rollout_reqs.append(
+              datatypes.RolloutRequest(
+                  request_id=req_id,
+                  prompt=p,
+                  prompt_id=prompt_ids[idx],
+                  target_policy_version=kwargs["policy_version"],
+                  metadata=dict(kwargs.get("metadata", {})),
+              )
+          )
 
     for req in rollout_reqs:
       metadata = req.metadata or {}
@@ -185,6 +200,13 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       return []
 
     async def _poll_worker(worker: remote_execution.ActorHandle) -> Any:
+      if hasattr(worker, "poll_responses") and callable(
+          getattr(worker, "poll_responses")
+      ):
+        res = worker.poll_responses(timeout_s=timeout_s)
+        if inspect.isawaitable(res):
+          return await res
+        return res
       return await self._invoke_worker(
           worker, "poll_responses", timeout_s=timeout_s
       )
@@ -205,7 +227,15 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         for it in items:
           if isinstance(it, dict):
             it = datatypes.RolloutResponse(**it)
-          completed.append(_response_to_trajectory_item(it))
+          item = _response_to_trajectory_item(it)
+          logging.debug(
+              "[DistributedRLEngine] poll_rollouts received trajectory item: prompt_id=%s group_id=%s pair_index=%s tokens=%d",
+              getattr(item, "prompt_id", ""),
+              getattr(item, "group_id", ""),
+              getattr(item, "pair_index", ""),
+              len(getattr(item, "completion_tokens", [])),
+          )
+          completed.append(item)
     return completed
 
   async def generate(
