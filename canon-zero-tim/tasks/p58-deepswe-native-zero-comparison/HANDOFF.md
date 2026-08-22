@@ -22,9 +22,12 @@ p58f07 evidence, then reconciled one later non-overlapping P57-only policy
 commit. The final local base is operator tip
 `963cc2764595eae003b88b868f5818cdc5b659a6`. P58f07 proved the published finite
 Native B-C warning repair, then exposed an over-strict Native trainer-program
-observer gate. The local repair is not yet published. After explicit publication
-approval, the executor must fetch and exactly read back the final operator tip
-before rendering fresh p58f08.
+observer gate. The correction was published as
+`81622977bf15393798c671e578ee059d1268e78b`; its first readback matched local
+HEAD, `FETCH_HEAD`, and `origin/yuxzhang/canon-zero-tim` with ahead/behind
+`0/0`. This documentation checkpoint advances the branch once more, so the
+executor must fetch and exactly read back the final operator tip before
+rendering fresh p58f08.
 
 The user previously waived P58.3 and the separate three-update stop, then chose
 the native 128-chip full 1,000-update stage. That historical phase remains

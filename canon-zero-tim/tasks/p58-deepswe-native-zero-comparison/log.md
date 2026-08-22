@@ -357,3 +357,12 @@
 - Validation: Python compilation and `git diff --check` pass; flag audit is `320/320` with `FLAG_AUDIT_PASS`; host environment 5/5, profile 2/2, renderer 7/7, and alignment policy 9/9 pass; P34 emits `P34_STATIC_PASS suites=10`; P57 passes 105/105 with `P57_FROZENLAKE_TIM_CPU_PASS`. Pinned image `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a` passes classifier 5/5, shared alignment 42/42, stock-observer and adjacent regressions, and emits `P58_EXACT_IMAGE_CPU_PASS loss_oracle=1 weighted_accumulation=1 compact_filter=1 durable_journal=1 paired_renderer=1 alignment_policy=1 stock_observer=1 regressions=1`.
 - Target claim: no new TPU run was made. P58f07 remains immutable `INCONCLUSIVE` with no durable optimizer receipt/checkpoint. Direct one-host TPU remains unavailable because this container exposes no `/dev/vfio`; no TPU PASS is claimed.
 - Next: after publication and exact remote readback, launch only fresh Native full run-id `p58f08`; require finite Native boundaries/ratios, a nonzero A-B or B-C dose, finite backward, a device-resident optimizer receipt, and the first commit. Zero remains deferred.
+
+## 2026-08-22 UTC — p58f07 Native stock-program warning policy published
+
+- Type: publication evidence.
+- Action: after explicit user approval, committed the stock-quality-fix Native policy, finite/nonfinite/Zero classifier controls, flag contract, P58 runbook/handoff/phase records, and p58f07 evidence index. The pre-push fetch proved the operator branch had not advanced; the push was normal and non-force.
+- Published implementation commit: `81622977bf15393798c671e578ee059d1268e78b`.
+- Readback: local HEAD, `FETCH_HEAD`, and `origin/yuxzhang/canon-zero-tim` all resolved to the implementation commit with ahead/behind `0/0` before this publication checkpoint.
+- External effects: one normal fast-forward push to `yuxzhang/canon-zero-tim`. `main` was untouched. No image publication, rendered YAML, Kubernetes apply, TPU launch, model download, credential change, or failed artifact deletion occurred.
+- Next: publish this documentation-only checkpoint and verify its final remote readback. The executor must fetch that final tip and launch only fresh Native full run-id `p58f08`; Zero remains strict and deferred.
