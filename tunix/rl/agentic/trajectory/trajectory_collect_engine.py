@@ -563,10 +563,22 @@ class TrajectoryCollectEngine:
     )
 
   def _original_input(self) -> Dict[str, Any]:
-    """Returns the task even when reset ended before the first observation."""
-    original_input = self.agent.trajectory.task
-    if original_input is None:
-      original_input = getattr(self.env, "task", None)
+    """Returns the policy-seeded task across all termination paths."""
+    trajectory_input = self.agent.trajectory.task
+    environment_input = getattr(self.env, "task", None)
+    # Training seeds the environment task with ``policy_version`` before
+    # reset.  Prefer that durable record even after a successful reset so all
+    # generations in a group have the same schema.  In particular, a sandbox
+    # reset timeout has no first observation from which the agent could build
+    # ``trajectory.task``.
+    if (
+        isinstance(environment_input, dict)
+        and environment_input.get("policy_version") is not None
+    ):
+      original_input = environment_input
+    else:
+      original_input = trajectory_input
+    if trajectory_input is None:
       logging.info(
           "%s preserving original input from the environment after "
           "pre-observation termination",
@@ -576,6 +588,14 @@ class TrajectoryCollectEngine:
       raise TypeError(
           "trajectory original_input must be a dict, got "
           f"{type(original_input).__name__}"
+      )
+    if (
+        original_input.get("policy_version") is not None
+        and "prompts" not in original_input
+    ):
+      raise ValueError(
+          "policy-seeded trajectory original_input is missing required key "
+          "'prompts'"
       )
     return original_input
 

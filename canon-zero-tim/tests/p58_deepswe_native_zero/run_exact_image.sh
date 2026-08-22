@@ -90,6 +90,8 @@ $DOCKER run --rm \
         trajectory.trajectory_collect_engine_test.TrajectoryCollectEngineTest.test_reset_raised_timeout_is_env_timeout \
         trajectory.trajectory_collect_engine_test.TrajectoryCollectEngineTest.test_reset_scheduling_gate_is_distinct_env_timeout \
         trajectory.trajectory_collect_engine_test.TrajectoryCollectEngineTest.test_reset_timeout_token_preserves_environment_task \
+        trajectory.trajectory_collect_engine_test.TrajectoryCollectEngineTest.test_token_prefers_policy_seeded_environment_task \
+        trajectory.trajectory_collect_engine_test.TrajectoryCollectEngineTest.test_policy_seeded_original_input_missing_prompt_fails_closed \
         trajectory.trajectory_collect_engine_test.TrajectoryCollectEngineTest.test_token_missing_original_input_fails_closed
     )
     observer_state="$(mktemp -d /tmp/p58-stock-observer-state.XXXXXX)"

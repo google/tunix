@@ -12,7 +12,10 @@ import tempfile
 import unittest
 from unittest import mock
 
+import numpy as np
 import yaml
+
+from examples.deepswe.swe_env import SWEEnv
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -45,6 +48,24 @@ SPEC.loader.exec_module(renderer)
 
 
 class P58EnvironmentContractTest(unittest.TestCase):
+
+  def test_swe_env_preserves_normalized_prompt_before_reset(self):
+    env = SWEEnv({
+        "problem_statement": np.array(["raw problem"]),
+        "prompts": np.array(["normalized problem"]),
+    })
+
+    self.assertEqual(env.entry["problem_statement"], "raw problem")
+    self.assertEqual(env.task, {"prompts": ["normalized problem"]})
+
+  def test_swe_env_falls_back_to_problem_statement(self):
+    env = SWEEnv({"problem_statement": np.array(["raw problem"])})
+
+    self.assertEqual(env.task, {"prompts": ["raw problem"]})
+
+  def test_swe_env_rejects_missing_prompt_source(self):
+    with self.assertRaisesRegex(ValueError, "must contain a non-empty string"):
+      SWEEnv({"docker_image": np.array(["example/image"])})
 
   def _rendered_env(self, arm: str, stage: str) -> dict[str, str]:
     base = yaml.safe_load((PKG / "cluster/jobset-64chip.yaml").read_text())

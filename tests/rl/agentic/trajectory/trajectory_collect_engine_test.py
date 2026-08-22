@@ -654,6 +654,36 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     self.mock_model_call.assert_not_called()
     self.mock_env.close.assert_called_once()
 
+  def test_token_prefers_policy_seeded_environment_task(self):
+    self.trajectory.task = {'prompts': ['formatted observation']}
+    self.mock_env.task = {
+        'prompts': ['dataset prompt'],
+        'policy_version': 7,
+    }
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=self.mock_env,
+        model_call=self.mock_model_call,
+    )
+
+    self.assertEqual(engine._original_input(), self.mock_env.task)
+
+  def test_policy_seeded_original_input_missing_prompt_fails_closed(self):
+    self.trajectory.task = None
+    self.mock_env.task = {'policy_version': 7}
+    self.mock_env.reset.side_effect = TimeoutError('reset failed')
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=self.mock_env,
+        model_call=self.mock_model_call,
+        timeout=1.0,
+        cleanup_timeout=0.1,
+    )
+
+    with self.assertRaisesRegex(ValueError, "missing required key 'prompts'"):
+      asyncio.run(self._run_collect(engine, mode='Token'))
+    self.mock_env.close.assert_called_once()
+
   def test_token_missing_original_input_fails_closed(self):
     self.trajectory.task = None
     self.mock_env.task = None

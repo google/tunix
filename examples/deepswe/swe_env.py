@@ -82,6 +82,12 @@ class SWEEnv(BaseTaskEnv):
         delete_image: Whether to delete the Docker image after closing.
     """
     self.entry = _unpack_entry(entry)
+    prompt = self.entry.get("prompts", self.entry.get("problem_statement"))
+    if not isinstance(prompt, str) or not prompt:
+      raise ValueError(
+          "SWEEnv entry must contain a non-empty string in 'prompts' or "
+          "'problem_statement'"
+      )
     self.step_timeout = step_timeout
     self.reward_timeout = reward_timeout
     self.total_steps = 0
@@ -94,7 +100,13 @@ class SWEEnv(BaseTaskEnv):
         "r2egym",
         "sweagent",
     ], f"Invalid scaffold: {scaffold}, must be one of ['r2egym', 'sweagent']"
-    super().__init__(max_steps=max_steps)
+    # ``BaseTaskEnv.task`` is the durable pre-observation task record used by
+    # the trajectory collector.  R2E sandbox creation can time out before
+    # ``get_task_instruction()`` gives the agent its first observation, so the
+    # agent trajectory cannot be the only copy of the prompt.  Keep the
+    # singleton batch shape expected by ``merge_micro_batches``; the learner
+    # adds ``policy_version`` to this same record before reset.
+    super().__init__(task={"prompts": [prompt]}, max_steps=max_steps)
 
     if not hasattr(self, "extra_kwargs"):
       self.extra_kwargs = {}

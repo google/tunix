@@ -37,8 +37,13 @@ trajectories one wave, matching rollout DP8 x max-seqs16 capacity. It was
 published as implementation commit
 `44b6fb4527a8a05bf649b5140d12142e2abef83f`; its first remote readback matched
 local HEAD, `FETCH_HEAD`, and the remote-tracking branch with ahead/behind
-`0/0`. This documentation checkpoint advances the branch once more, so fetch
-the final operator tip. The next run id is fresh `p58f11`.
+`0/0`. Source intake then fast-forwarded to exact operator tip
+`e92b0120a7df371569cc8646eb7b8a9367ebbe86`, which adds immutable p58f11
+evidence. P58f11 proved the one-wave concurrency repair by completing all 128
+trajectories and 8/8 groups in 1,209.2 seconds, then stopped on a missing
+`prompts` key in the single reset-timeout fallback row. The local repair is
+validated but unpublished. After separate publication approval and exact
+readback, the next run id is fresh `p58f12`.
 
 The user previously waived P58.3 and the separate three-update stop, then chose
 the native 128-chip full 1,000-update stage. That historical phase remains
@@ -336,6 +341,24 @@ zero-mask rows; only a whole one-wave batch that cannot drain is fatal. P58f10
 is not resumable. After separate publication/readback, use fresh Native
 `p58f11`. Zero remains deferred.
 
+P58f11 ran the one-wave B8 x G16 geometry successfully: all 128 trajectories
+completed in 1,209.2 seconds. `group_id=7`, `pair_index=14` terminated during
+`env.reset`, so it used the pre-observation fallback. `SWEEnv` had stored the
+normalized dataset row in `self.entry` but called `BaseTaskEnv` without a
+task; only `policy_version` existed in `env.task`. The fallback was therefore
+a dictionary without `prompts`, and learner processing raised
+`KeyError: 'prompts'` before the durable P58 journal, alignment, trainer,
+optimizer receipt, or checkpoint.
+
+The local repair seeds `SWEEnv.task` with the normalized prompt before any
+sandbox work and uses the policy-seeded environment task as the authoritative
+training input for every generation. Successful and reset-timeout rows now
+have the same schema. A future policy-seeded task missing `prompts` fails
+immediately at collection. Compact-filter masks and the no-drop/no-resample
+recipe are unchanged. The exact-image gate passes the positive timeout path,
+the normal-path authority check, and a missing-key negative control. P58f11
+is immutable and not resumable; after publication/readback use `p58f12`.
+
 Never modify or push `main`. The publication target is exclusively
 `yuxzhang/canon-zero-tim`; the p58f09 repair is published there as
 `678bc5cfbcec386fd655e6685365c937e826d547`, and the p58f10 one-wave repair as
@@ -371,7 +394,8 @@ documentation tip before rendering.
 - required hostname anti-affinity for fixed-port Pathways heads while
   preserving host-network transport; and
 - pre-observation reset-timeout original-input recovery from the environment,
-  with a hard error when no mapping exists; and
+  with a durable normalized prompt, one schema for normal/timeout rows, and a
+  hard error when no mapping or required prompt exists; and
 - exact one-wave rollout admission: B8 x G16 = concurrency 128 = rollout DP8 x
   max-seqs16, without extending the signed timeout hierarchy.
 
@@ -398,21 +422,25 @@ native-dose/zero-exact classifier negatives, both renderer arms/stages,
 environment resolution, the full alignment suite, and relevant P34/P44
 regressions.
 
-Host validation passes profile 2/2, renderer 15/15, alignment policy 9/9,
-environment 5/5, P34 static 10 suites, and current P57 adjacency
-105/105. In the pinned image, classifier 5/5 and the shared alignment
-regression 42/42 pass; the targeted trajectory batch passes 6/6, including
-reset-timeout fallback and missing-input fail-closed controls. Python compilation,
+The current host environment contract passes 8/8. Previously published host
+validation remains profile 2/2, renderer 15/15, alignment policy 9/9, P34
+static 10 suites, and P57 adjacency 105/105. In the pinned image, classifier
+5/5 and the shared alignment
+regression 42/42 pass; the targeted trajectory batch passes 8/8, including
+reset-timeout prompt preservation, policy-seeded normal-path authority, and
+missing-input/missing-prompt fail-closed controls. Python compilation,
 the 320/320 flag-registry audit, and `git diff --check` pass. The complete
 pinned-image gate emits the terminal marker above.
 
-P58f10 is the latest target execution. It proves that the p58f09 placement and
-original-input fixes reach real Step-0 rollout, but fails at the two-wave batch
-deadline before a durable journal or trainer call; p58f07 remains the latest
+P58f11 is the latest target execution. It proves that the 128-way one-wave
+geometry completes real Step-0 rollout in 1,209.2 seconds, but fails at the
+reset-timeout original-input schema before a durable journal or trainer call;
+p58f07 remains the latest
 attempt to enter real value-and-grad/backward, also without an optimizer
-receipt/checkpoint. The training venv loads JAX/libtpu,
-but this container exposes no `/dev/vfio` and reports zero chips; the bounded
-runner emitted `P58_ONEHOST_ALIGNMENT_BLOCKED reason=device_inventory_timeout`
+receipt/checkpoint. The training venv loads JAX/libtpu. After the self-created,
+unlocked zero-byte libtpu lock was removed, the runtime could not obtain
+`CHIPS_PER_HOST_BOUNDS` from instance metadata; the bounded runner emitted
+`P58_ONEHOST_ALIGNMENT_BLOCKED reason=device_inventory_timeout timeout_secs=30`
 instead of PASS. The repair claim is implementation plus CPU/exact-image
 validation; target execution remains limited to the pre-forward boundaries
 named above.
@@ -434,7 +462,7 @@ named above.
 4. Publish or select a client image by immutable registry digest and verify the
    mounted Qwen3-4B-Instruct-2507 weights and frozen clean-list digest without
    printing credentials.
-5. Render only `arm=native, stage=full` with fresh run-id `p58f11` and worker
+5. Render only `arm=native, stage=full` with fresh run-id `p58f12` and worker
    sentinel `tpu-v5p-slice`. Require exact `4x4x8` topology and no literal
    `cloud.google.com/gke-nodepool: tpu-v5p-slice`; require B8 x G16 =
    concurrency 128 = rollout DP8 x max-seqs16; require head pool `cpu-np`,
@@ -453,12 +481,13 @@ named above.
    evaluation, checkpoint, and transaction receipts.
 8. Do not render or apply zero.
 
-Do not reuse any failed `p58c01` through `p58c05` or `p58f01` through `p58f10`
+Do not reuse any failed `p58c01` through `p58c05` or `p58f01` through `p58f11`
 YAML/run root. P58f03 through p58f07 have diagnostic trajectory/alignment
 evidence but no durable trainer update or optimizer checkpoint, so none is
 resumable training state. The attempts remain immutable failure evidence.
 P58f08 has no trajectory at all; p58f09 completed rollout processing but
 crashed before the durable journal; p58f10 timed out at the batch orchestrator
+before the journal; p58f11 completed the batch but failed learner preprocessing
 before the journal. None has resumable state.
 if a CL mismatch recurs, collect all three head-container logs plus one worker
 log and verify its resolved RM address before deleting the failed JobSet.
@@ -492,7 +521,7 @@ for `workload_describe.txt`.
 - A Kubernetes sandbox start exception must propagate after deletion is
   confirmed. `ENV_TIMEOUT` is an admitted compact-filter status; a
   half-created RepoEnv with `container=None` is forbidden. If an entire
-  p58f11 batch has zero confirmed Running pods, classify infrastructure
+  p58f12 batch has zero confirmed Running pods, classify infrastructure
   capacity/scheduling before another launch instead of patching websocket
   decode or inventing a successful trajectory.
 - Read `deepswe/all_sandbox_start_timeout_batch` first. Value `1` means the

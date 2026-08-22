@@ -172,6 +172,16 @@ the provisioned rollout capacity DP8 x max-seqs16. Episode 3,000 s, cleanup
 `p58f11` after fetching and exactly reading back the final operator tip; never reuse p58f08,
 p58f09, or p58f10 YAML/root. None has optimizer state to resume.
 
+Native `p58f11` proves that repair: all 128 trajectories and all 8 prompt
+groups completed in one wave in 1,209.2 seconds. One generation terminated in
+`env.reset` and exercised the compact fallback. It then exposed a task-schema
+bug before journaling: `SWEEnv.entry` had the normalized prompt, but inherited
+`SWEEnv.task` had only `policy_version`, so learner processing raised
+`KeyError: 'prompts'`. The repaired source seeds `SWEEnv.task` with a
+singleton-batched normalized prompt before reset and uses that policy-seeded
+task for both normal and pre-observation termination rows. Missing `prompts`
+now fails at collection. Use fresh `p58f12`; never reuse p58f11 YAML/root.
+
 The direct-entrypoint implementation commit is
 `82d82f72a7220d945737d95f6266b5b7e2cfe706`. Resolve the final runnable SHA by
 fetching the operator branch after the later publication checkpoint; do not
@@ -315,7 +325,7 @@ CLIENT_IMAGE_DIGEST='registry.example/tunix@sha256:<64-hex-digest>'
 CPU_NODEPOOL='cpu-np'
 TPU_NODEPOOL='tpu-v5p-slice'
 MODEL_PVC='haoyugao-cpu-np-pvc'
-RUN_STEM='p58f11'
+RUN_STEM='p58f12'
 STAGE='full'
 
 ARM='native'

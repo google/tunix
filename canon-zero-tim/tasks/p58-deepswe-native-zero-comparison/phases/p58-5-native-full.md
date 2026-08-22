@@ -29,7 +29,7 @@ validate the deferred zero arm and cannot establish a paired treatment effect.
   `sequence-mean-token-scale`, TPU-resident optimizer, optional interventions
   off, prefix cache off; all 128 trajectories run as one concurrency wave,
   equal to rollout DP8 x max-seqs16 capacity;
-- stage/run: `full`, next fresh run-id `p58f11`, exactly 1,000 optimizer commits;
+- stage/run: `full`, next fresh run-id `p58f12`, exactly 1,000 optimizer commits;
 - arm: `native` only. Rendering or applying `zero` is outside this phase.
 
 ## Admission gate
@@ -173,3 +173,21 @@ timeouts continue as zero-mask rows; a whole batch that cannot drain remains a
 hard failure. P58f10 has no resumable training state. After fetching and
 reading back the final operator tip, the next attempt is fresh Native `p58f11`. Zero remains
 deferred.
+
+P58f11 proved that concurrency 128 drains the full B8 x G16 batch in one wave:
+all 8 prompt groups and 128 trajectories completed in 1,209.2 seconds. One
+`env.reset` timeout then exercised the p58f09 fallback. `SWEEnv` had preserved
+the dataset row in `self.entry` but had initialized inherited `self.task` as an
+empty mapping; pre-reset provenance added only `policy_version`. The fallback
+was therefore a mapping but lacked `prompts`, and learner processing stopped
+with `KeyError: 'prompts'` before journal, alignment, trainer, optimizer, or
+checkpoint state.
+
+The repair seeds `SWEEnv.task` with the normalized prompt before reset, keeps
+the singleton batch shape required by learner merge, and makes the
+policy-seeded environment task authoritative for both successful and
+pre-observation termination paths. A policy-seeded mapping without `prompts`
+is now rejected at collection. The timeout row remains compact-filtered with
+its zero policy mask; no row is dropped or resampled. P58f11 is immutable
+`INCONCLUSIVE` and not resumable. After publication/readback, use fresh Native
+`p58f12`; Zero remains deferred.

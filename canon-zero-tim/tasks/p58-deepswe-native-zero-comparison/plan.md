@@ -51,7 +51,7 @@ before any workload pod or update existed. P58.5N is the only active phase.
 Both zero phases remain deferred even though the renderer and CPU tests cover
 that arm.
 
-P58.5N attempts `p58f01` through `p58f10` remain `INCONCLUSIVE`. P58f01 exposed
+P58.5N attempts `p58f01` through `p58f11` remain `INCONCLUSIVE`. P58f01 exposed
 missing sandbox LocalQueue inheritance and reset-time policy provenance;
 p58f02 showed that the chosen CPU flavor required `cpu-np`; and p58f03 proved
 that the CPU routing repair works by completing 128 real trajectories in
@@ -118,6 +118,25 @@ capacity DP8 x max-seqs16. Episode, cleanup, and batch deadlines remain
 as compact zero-mask rows; only failure of the complete one-wave batch to drain
 remains fatal. After fetching/readback of the final operator tip, the next
 attempt is `p58f11`.
+
+P58f11 proved the one-wave repair: all 128 trajectories and all 8 prompt groups
+completed in 1,209.2 seconds. One generation ended during environment reset,
+and the existing compact trajectory path preserved it. That row exposed the
+next schema defect: `SWEEnv` retained the dataset row only as `self.entry`,
+while inherited `self.task` contained only the pre-reset `policy_version`.
+The collector fallback therefore produced a dictionary without `prompts`, and
+learner reward-input merge stopped with `KeyError: 'prompts'` before the P58
+journal or any trainer program.
+
+The local correction makes the normalized prompt a durable part of
+`SWEEnv.task` before reset and makes the policy-seeded environment task the
+single original-input source for training trajectories, including successful
+and pre-observation termination paths. This prevents mixed schemas inside a
+G16 group. Missing `prompts` on a policy-seeded task fails at collection.
+Timeout/context masks, rewards, advantages, filtering, resampling, Native/Zero
+flags, data, topology, loss, optimizer, deadlines, and horizon are unchanged.
+After publication/readback, the next attempt is fresh `p58f12`; p58f11 is not
+resumable.
 
 ## Frozen shared recipe
 
