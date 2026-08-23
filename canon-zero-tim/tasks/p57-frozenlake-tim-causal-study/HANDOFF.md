@@ -43,6 +43,15 @@ Read in order: `state.md` → `plan.md` →
   final arm outcomes. All four native-program cells must restart from the same
   initial checkpoint under fresh identities; the deferred zero cells must also
   use 450 when separately authorized.
+- The first 450-update identities (`n45c/n15c/i45c/i15c`) are also immutable
+  `INCONCLUSIVE` attempts. All four completed a real Step-0 rollout, then
+  trajectory packaging lost the FrozenLake-rendered `prompts` when the newer
+  policy-seeded environment record was selected. No trainer alignment,
+  backward, optimizer update, or checkpoint occurred. The local compatibility
+  repair preserves the DeepSWE environment task when it already has a prompt
+  and merges only when FrozenLake carries the prompt in the trajectory task.
+  It has passed both P45/P57 and P58 pinned-image gates; the repaired 64-chip
+  path remains `TARGET NOT RUN` until a fresh attempt commits an update.
 
 ## Operator procedure for the fresh four-job campaign
 
@@ -57,6 +66,7 @@ git diff --check
 
 Require the exact-image marker
 `P57_STOCK_RUNTIME_MATRIX_PASS variants=5 stages=train,eval` in addition to
+`P57_TRAJECTORY_PROMPT_PROVENANCE_PASS frozenlake=merge deepswe=environment reset_timeout=preserved missing_prompt=fail_closed`,
 `P57_STOCK_POST_BACKWARD_MODULE_C_PASS arms=mismatch,is`, its unknown-arm
 negative, and the terminal P57/P45 PASS markers. Missing a marker forbids
 launch.
@@ -65,24 +75,26 @@ launch.
    Then render both two-job waves with no hand edits:
 
 ~~~bash
-SOURCE=<approved-pushed-450-horizon-40-character-sha>
-OUT_NATIVE=/tmp/p57-primary-native-450-a
-OUT_IS=/tmp/p57-primary-is-450-a
-OUT_EVAL_NATIVE=/tmp/p57-eval-native-450-a
-OUT_EVAL_IS=/tmp/p57-eval-is-450-a
+SOURCE=<approved-pushed-prompt-provenance-repair-40-character-sha>
+OUT_NATIVE=/tmp/p57-primary-native-450-b
+OUT_IS=/tmp/p57-primary-is-450-b
+OUT_EVAL_NATIVE=/tmp/p57-eval-native-450-b
+OUT_EVAL_IS=/tmp/p57-eval-is-450-b
 bash canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts/render_three_arm_wave.sh \
-  native "$SOURCE" "$OUT_NATIVE" n45c n15c p57-native-450-a
+  native "$SOURCE" "$OUT_NATIVE" n45d n15d p57-native-450-b
 bash canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts/render_three_arm_wave.sh \
-  is "$SOURCE" "$OUT_IS" i45c i15c p57-is-450-a
+  is "$SOURCE" "$OUT_IS" i45d i15d p57-is-450-b
 bash canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts/render_eval_schedule.sh \
-  native "$SOURCE" "$OUT_EVAL_NATIVE" en p57-native-450-a
+  native "$SOURCE" "$OUT_EVAL_NATIVE" fn p57-native-450-b
 bash canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts/render_eval_schedule.sh \
-  is "$SOURCE" "$OUT_EVAL_IS" ei p57-is-450-a
+  is "$SOURCE" "$OUT_EVAL_IS" fi p57-is-450-b
 ~~~
 
-The suggested `*c` IDs may be used only after proving they are unused. Otherwise
-choose new four-character IDs. Do not reuse any earlier run ID, output directory,
-campaign root, or checkpoint namespace. All four jobs remain
+The `*c` IDs and their `*-450-a` output/campaign roots were consumed by the
+failed attempts and must never be reused. The commands above preregister fresh
+`*d` train IDs, `fn/fi` evaluation roots, and `*-450-b` namespaces. Do not reuse
+any earlier run ID, output directory, campaign root, or checkpoint namespace.
+All four jobs remain
 `checkpoint-mode=new`; no 200-update checkpoint is admitted as their initial
 state.
 

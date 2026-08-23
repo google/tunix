@@ -567,15 +567,24 @@ class TrajectoryCollectEngine:
     trajectory_input = self.agent.trajectory.task
     environment_input = getattr(self.env, "task", None)
     # Training seeds the environment task with ``policy_version`` before
-    # reset.  Prefer that durable record even after a successful reset so all
-    # generations in a group have the same schema.  In particular, a sandbox
-    # reset timeout has no first observation from which the agent could build
-    # ``trajectory.task``.
+    # reset.  Combine that durable record with the first-observation task so
+    # generations keep the policy version without discarding an
+    # environment-specific prompt.  DeepSWE carries its dataset prompt in
+    # ``environment_input``, which remains the complete authoritative record;
+    # FrozenLake constructs the rendered prompt only in ``trajectory_input``,
+    # so only that case needs a merge.  Environment fields win on overlap.
+    # A sandbox reset timeout has no first observation, so in that case the
+    # environment record remains the only available input.
     if (
         isinstance(environment_input, dict)
         and environment_input.get("policy_version") is not None
     ):
-      original_input = environment_input
+      if "prompts" in environment_input or not isinstance(
+          trajectory_input, dict
+      ):
+        original_input = environment_input
+      else:
+        original_input = {**trajectory_input, **environment_input}
     else:
       original_input = trajectory_input
     if trajectory_input is None:

@@ -34,6 +34,13 @@ $DOCKER run --rm \
       AgenticRLLearnerTest.test_p57_evaluate_only_covers_dataset_without_train_update \
       AgenticRLLearnerTest.test_p57_rollout_only_evaluate_skips_trainer_recompute
     PYTHONPATH=/workspace python3 \
+      tests/rl/agentic/trajectory/trajectory_collect_engine_test.py \
+      TrajectoryCollectEngineTest.test_reset_timeout_token_preserves_environment_task \
+      TrajectoryCollectEngineTest.test_token_prefers_policy_seeded_environment_task \
+      TrajectoryCollectEngineTest.test_token_merges_policy_version_into_frozenlake_prompt \
+      TrajectoryCollectEngineTest.test_policy_seeded_original_input_missing_prompt_fails_closed
+    echo "P57_TRAJECTORY_PROMPT_PROVENANCE_PASS frozenlake=merge deepswe=environment reset_timeout=preserved missing_prompt=fail_closed"
+    PYTHONPATH=/workspace python3 \
       canon-zero-tim/tests/p57_frozenlake_tim/test_stock_fast_contract.py
     stock_state="$(mktemp -d /tmp/p57-stock-state.XXXXXX)"
     printf "%s\n" /usr/local/lib/python3.12/site-packages/tpu_inference \

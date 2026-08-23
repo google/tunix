@@ -655,7 +655,10 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     self.mock_env.close.assert_called_once()
 
   def test_token_prefers_policy_seeded_environment_task(self):
-    self.trajectory.task = {'prompts': ['formatted observation']}
+    self.trajectory.task = {
+        'prompts': ['formatted observation'],
+        'turn_local_field': 'must not leak',
+    }
     self.mock_env.task = {
         'prompts': ['dataset prompt'],
         'policy_version': 7,
@@ -667,6 +670,34 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     )
 
     self.assertEqual(engine._original_input(), self.mock_env.task)
+
+  def test_token_merges_policy_version_into_frozenlake_prompt(self):
+    self.trajectory.task = {'prompts': ['rendered FrozenLake observation']}
+    self.mock_env.task = {
+        'policy_version': 7,
+        'environment_receipt': 'frozenlake',
+    }
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=self.mock_env,
+        model_call=self.mock_model_call,
+    )
+
+    self.assertEqual(
+        engine._original_input(),
+        {
+            'prompts': ['rendered FrozenLake observation'],
+            'policy_version': 7,
+            'environment_receipt': 'frozenlake',
+        },
+    )
+    self.assertEqual(
+        self.trajectory.task, {'prompts': ['rendered FrozenLake observation']}
+    )
+    self.assertEqual(
+        self.mock_env.task,
+        {'policy_version': 7, 'environment_receipt': 'frozenlake'},
+    )
 
   def test_policy_seeded_original_input_missing_prompt_fails_closed(self):
     self.trajectory.task = None

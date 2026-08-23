@@ -24,6 +24,15 @@
   Module C; only the former was exempted. `i45a` is `INCONCLUSIVE`, while its
   successful pre-backward and backward evidence narrows the repair to this
   post-backward attestation.
+- Confirmed: the first four 450-update jobs (`n45c/n15c/i45c/i15c`) all
+  completed Step-0 rollout and then failed before trainer alignment because
+  policy seeding made the collector replace the FrozenLake trajectory task
+  (which owns the rendered prompt) with an environment task containing only
+  durable metadata. The compatibility repair keeps a prompt-bearing DeepSWE
+  environment task exact, merges durable environment metadata into a
+  prompt-bearing FrozenLake trajectory task, and preserves the missing-prompt
+  fail-closed control. Both pinned-image suites pass; target repair validation
+  remains pending.
 - Decision: test three treatments independently on both workloads:
 
 | Runtime arm | Numerical program | Sampler correction | Old denominator | TIS weights |

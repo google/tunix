@@ -51,6 +51,7 @@ git diff --check
 
 Require terminal `P57_FROZENLAKE_TIM_CPU_PASS`,
 `P57_STOCK_RUNTIME_MATRIX_PASS variants=5 stages=train,eval`,
+`P57_TRAJECTORY_PROMPT_PROVENANCE_PASS frozenlake=merge deepswe=environment reset_timeout=preserved missing_prompt=fail_closed`,
 `P57_STOCK_POST_BACKWARD_MODULE_C_PASS arms=mismatch,is`,
 `P57_STOCK_POST_BACKWARD_MODULE_C_NEGATIVE_PASS arm=unknown`,
 `P57_STOCK_OBSERVER_EXACT_IMAGE_PASS targets=absolute values=processed`, and
@@ -64,35 +65,38 @@ arm/workload/split combinations remain fail-closed.
 
 ## Queue now — fresh four-job 450-update campaign
 
-The earlier 200-update identities are immutable historical evidence, not valid
-members of the new 450-update comparison. Package their current terminal state,
-ensure none remains live, and do not resume their checkpoints into this
-campaign. Render both native-program waves from the approved pushed horizon
-change using fresh run IDs, output roots, campaign roots, and checkpoint
-namespaces. Never hand-edit a rendered manifest.
+The earlier 200-update identities and the failed 450-update identities
+`n45c/n15c/i45c/i15c` are immutable historical evidence, not valid members of
+the replacement comparison. The latter four completed Step-0 rollout but
+failed before trainer alignment/backward because trajectory packaging selected
+a policy-seeded FrozenLake environment record that lacked the rendered
+`prompts`. Package their terminal state, ensure none remains live, and do not
+resume their checkpoints. Render both native-program waves from the approved
+pushed prompt-provenance repair using fresh run IDs, output roots, campaign
+roots, and checkpoint namespaces. Never hand-edit a rendered manifest.
 
 ~~~bash
 cd /home/yuxuan/code_rl_repro/worktrees/p57_frozenlake_tim_0820
-SOURCE=<approved-pushed-450-horizon-40-character-sha>
-OUT_NATIVE=/tmp/p57-primary-native-450-a
-OUT_IS=/tmp/p57-primary-is-450-a
-OUT_EVAL_NATIVE=/tmp/p57-eval-native-450-a
-OUT_EVAL_IS=/tmp/p57-eval-is-450-a
+SOURCE=<approved-pushed-prompt-provenance-repair-40-character-sha>
+OUT_NATIVE=/tmp/p57-primary-native-450-b
+OUT_IS=/tmp/p57-primary-is-450-b
+OUT_EVAL_NATIVE=/tmp/p57-eval-native-450-b
+OUT_EVAL_IS=/tmp/p57-eval-is-450-b
 bash canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts/render_three_arm_wave.sh \
-  native "$SOURCE" "$OUT_NATIVE" n45c n15c p57-native-450-a
+  native "$SOURCE" "$OUT_NATIVE" n45d n15d p57-native-450-b
 bash canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts/render_three_arm_wave.sh \
-  is "$SOURCE" "$OUT_IS" i45c i15c p57-is-450-a
+  is "$SOURCE" "$OUT_IS" i45d i15d p57-is-450-b
 bash canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts/render_eval_schedule.sh \
-  native "$SOURCE" "$OUT_EVAL_NATIVE" en p57-native-450-a
+  native "$SOURCE" "$OUT_EVAL_NATIVE" fn p57-native-450-b
 bash canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts/render_eval_schedule.sh \
-  is "$SOURCE" "$OUT_EVAL_IS" ei p57-is-450-a
+  is "$SOURCE" "$OUT_EVAL_IS" fi p57-is-450-b
 ~~~
 
-The suggested `*c` IDs are valid only if cluster inspection confirms they were
-never used; otherwise choose new four-character IDs. The first attempts used
-`p45n/m15n/p45i/m15i` and `n45a/n15a/i45a/i15a`; never reuse them. Four-character
-IDs avoid the Kubernetes 63-character Pod-name limit. All four jobs use
-`checkpoint-mode=new`.
+The first attempts used `p45n/m15n/p45i/m15i`, `n45a/n15a/i45a/i15a`, and
+`n45c/n15c/i45c/i15c`; never reuse them or their output/campaign roots. The
+commands above use fresh `*d` train IDs and `fn/fi` evaluation roots.
+Four-character IDs avoid the Kubernetes 63-character Pod-name limit. All four
+jobs use `checkpoint-mode=new`.
 
 The two evaluation renderers must each report
 `P57_EVAL_SCHEDULE_PASS ... manifests=20
