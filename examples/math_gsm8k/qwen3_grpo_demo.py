@@ -178,6 +178,16 @@ CANON_GSM8K_UPDATE_CANARY = (
 CANON_P41_OPTIMIZER_BENCH = (
     os.getenv("CANON_P41_OPTIMIZER_BENCH", "") == "1"
 )
+_P60_DETERMINISTIC_AB_VALUE = os.getenv("CANON_P60_DETERMINISTIC_AB", "")
+if _P60_DETERMINISTIC_AB_VALUE not in ("", "0", "1"):
+  raise ValueError(
+      "CANON_P60_DETERMINISTIC_AB must be unset/0/1, got "
+      f"{_P60_DETERMINISTIC_AB_VALUE!r}"
+  )
+CANON_P60_DETERMINISTIC_AB = _P60_DETERMINISTIC_AB_VALUE == "1"
+CANON_P61_BACKWARD_NUMERICAL_DIR = os.getenv(
+    "CANON_P61_BACKWARD_NUMERICAL_DIR", ""
+)
 if CANON_GSM8K_L3 and CANON_GSM8K_TRAIN:
   raise ValueError(
       "CANON_GSM8K_L3 and CANON_GSM8K_TRAIN are mutually exclusive"
@@ -186,18 +196,38 @@ if CANON_GSM8K_UPDATE_CANARY and not CANON_GSM8K_L3:
   raise ValueError("CANON_GSM8K_UPDATE_CANARY requires CANON_GSM8K_L3")
 CANON_GSM8K_ACTIVE = CANON_GSM8K_L3 or CANON_GSM8K_TRAIN
 _P32_WORKLOAD_NAME = os.getenv("CANON_P32_WORKLOAD", "")
-if _P32_WORKLOAD_NAME and _P32_WORKLOAD_NAME != "gsm8k":
+if _P32_WORKLOAD_NAME and not _P32_WORKLOAD_NAME.startswith("gsm8k"):
   raise ValueError(
       "GSM8K recipe cannot run a different P32 workload: "
       f"{_P32_WORKLOAD_NAME!r}"
   )
-CANON_P32_WORKLOAD = _P32_WORKLOAD_NAME == "gsm8k"
+CANON_P32_WORKLOAD = bool(_P32_WORKLOAD_NAME)
 P32_WORKLOAD = (
-    dp_workloads.get_workload("gsm8k") if CANON_P32_WORKLOAD else None
+    dp_workloads.get_workload(_P32_WORKLOAD_NAME)
+    if CANON_P32_WORKLOAD
+    else None
 )
 if CANON_P32_WORKLOAD:
   dp_workloads.validate_environment(
       P32_WORKLOAD, require_reduction_admission=True
+  )
+if CANON_P60_DETERMINISTIC_AB and _P32_WORKLOAD_NAME not in (
+    "gsm8k-p59-dp4-tp1",
+    "gsm8k-p60-dp2-tp2",
+):
+  raise ValueError(
+      "CANON_P60_DETERMINISTIC_AB requires an exact P60 one-host "
+      f"zero-TIM workload, got {_P32_WORKLOAD_NAME!r}"
+  )
+if CANON_P61_BACKWARD_NUMERICAL_DIR and (
+    not os.path.isabs(CANON_P61_BACKWARD_NUMERICAL_DIR)
+    or _P32_WORKLOAD_NAME != "gsm8k-p59-dp4-tp1"
+    or os.getenv("CANON_P33_RUN_STAGE", "") != "one-update"
+    or not CANON_P60_DETERMINISTIC_AB
+):
+  raise ValueError(
+      "CANON_P61_BACKWARD_NUMERICAL_DIR requires an absolute path and "
+      "exact gsm8k-p59-dp4-tp1 one-update deterministic geometry"
   )
 CANON_OPTIMIZER_PLACEMENT = dp_workloads.canonical_optimizer_placement(
     os.environ, require_explicit=CANON_P32_WORKLOAD
@@ -272,6 +302,16 @@ MAX_CONCURRENCY = args.max_concurrency or (
 )
 if CANON_P41_OPTIMIZER_BENCH and MAX_CONCURRENCY != 1:
   raise ValueError("P41 optimizer benchmark requires max_concurrency=1")
+if CANON_P60_DETERMINISTIC_AB and (
+    MAX_PROMPT_LENGTH != 1024
+    or MAX_RESPONSE_LENGTH != 256
+    or MAX_CONCURRENCY != 1
+):
+  raise ValueError(
+      "P60 deterministic hash A/B requires prompt/response=1024/256 and "
+      "max_concurrency=1, got "
+      f"{MAX_PROMPT_LENGTH}/{MAX_RESPONSE_LENGTH} and {MAX_CONCURRENCY}"
+  )
 
 ROLLOUT_ENGINE = os.getenv("ROLLOUT_ENGINE", "vllm")
 USE_LORA = False
@@ -343,9 +383,14 @@ if math.prod(SHARED_MESH_SHAPE) != jax.device_count():
   )
 
 if CANON_P32_WORKLOAD:
-  if args.mesh_dp != 16 or MESH_TP != 4:
+  if (
+      args.mesh_dp != P32_WORKLOAD.dp_size
+      or MESH_TP != P32_WORKLOAD.tp_size
+  ):
     raise ValueError(
-        "canonical GSM8K DP workload requires --mesh_dp=16 --mesh_tp=4"
+        "canonical GSM8K DP workload mesh mismatch: expected "
+        f"--mesh_dp={P32_WORKLOAD.dp_size} "
+        f"--mesh_tp={P32_WORKLOAD.tp_size}"
     )
   shared_mesh = dp_workloads.create_mesh(jax.devices(), P32_WORKLOAD)
 else:
@@ -715,11 +760,17 @@ if not CANON_GSM8K_L3:
 
 def create_learning_rate_schedule() -> optax.Schedule:
   """Returns the exact schedule consumed by the GSM8K optimizer."""
-  if CANON_GSM8K_UPDATE_CANARY:
+  if CANON_GSM8K_UPDATE_CANARY or CANON_P61_BACKWARD_NUMERICAL_DIR:
     # The production schedule intentionally starts warmup at LR=0.  A one-step
     # update canary would therefore call the optimizer without changing any
     # weight.  Use the recipe's registered peak LR as a default-off diagnostic
     # constant so the canary tests a real update rather than a no-op.
+    if CANON_P61_BACKWARD_NUMERICAL_DIR:
+      print(
+          "[P61.NUMERICAL] learning_rate_schedule=constant "
+          f"value={LEARNING_RATE}",
+          flush=True,
+      )
     return optax.constant_schedule(LEARNING_RATE)
   return optax.warmup_cosine_decay_schedule(
       init_value=0.0,
@@ -829,7 +880,9 @@ def main() -> None:
     expected_update_canary = "1" if CANON_GSM8K_UPDATE_CANARY else "0"
     expected_train = "1" if CANON_GSM8K_TRAIN else "0"
     expected_grad_probe = "1" if CANON_GSM8K_L3 else "0"
-    expected_min_token_bucket = "4096" if CANON_P32_WORKLOAD else "256"
+    expected_min_token_bucket = (
+        str(P32_WORKLOAD.global_m) if CANON_P32_WORKLOAD else "256"
+    )
     required = {
         "CANON_ALIGNMENT_GATE": "1",
         "CANON_ALIGNMENT_GATE_ONLY": expected_gate_only,
@@ -880,7 +933,11 @@ def main() -> None:
             "canonical GSM8K P35 envelope requires one step, prompt cap 1024 "
             "and response cap 256"
         )
-      expected_mesh = (16, 4) if CANON_P32_WORKLOAD else (1, 4)
+      expected_mesh = (
+          (P32_WORKLOAD.dp_size, P32_WORKLOAD.tp_size)
+          if CANON_P32_WORKLOAD
+          else (1, 4)
+      )
       if SHARED_MESH_SHAPE != expected_mesh:
         raise ValueError(
             f"canonical GSM8K P35 envelope requires mesh={expected_mesh}"
@@ -897,7 +954,7 @@ def main() -> None:
       if CANON_P32_WORKLOAD:
         if global_num_seqs != P32_WORKLOAD.global_trajectories:
           raise ValueError(
-              "real DP16 GSM8K training requires 256 global trajectories; "
+              "canonical GSM8K DP training global trajectory count changed; "
               f"got {global_num_seqs}"
           )
         expected_num_seqs = P32_WORKLOAD.local_trajectories
@@ -919,11 +976,20 @@ def main() -> None:
     else:
       if os.getenv("CANON_GSM8K_GRAD_PROBE", "") == "1":
         raise ValueError("real GSM8K training forbids diagnostic advantages")
-      if MAX_PROMPT_LENGTH != 1024 or MAX_RESPONSE_LENGTH != 1024:
+      expected_response_length = 256 if CANON_P60_DETERMINISTIC_AB else 1024
+      if (
+          MAX_PROMPT_LENGTH != 1024
+          or MAX_RESPONSE_LENGTH != expected_response_length
+      ):
         raise ValueError(
-            "real GSM8K training requires prompt/response 1024/1024"
+            "real GSM8K training requires prompt/response "
+            f"1024/{expected_response_length}"
         )
-      expected_mesh = (16, 4) if CANON_P32_WORKLOAD else (1, 4)
+      expected_mesh = (
+          (P32_WORKLOAD.dp_size, P32_WORKLOAD.tp_size)
+          if CANON_P32_WORKLOAD
+          else (1, 4)
+      )
       if SHARED_MESH_SHAPE != expected_mesh:
         raise ValueError(
             f"real GSM8K training requires mesh={expected_mesh}"
@@ -936,7 +1002,7 @@ def main() -> None:
       if CANON_P32_WORKLOAD:
         if global_num_seqs != P32_WORKLOAD.global_trajectories:
           raise ValueError(
-              "real DP16 GSM8K training requires 256 global trajectories; "
+              "canonical GSM8K DP training global trajectory count changed; "
               f"got {global_num_seqs}"
           )
         expected_num_seqs = P32_WORKLOAD.local_trajectories
@@ -1010,6 +1076,15 @@ def main() -> None:
         f"[P41.OPTIMIZER] engine_seed={SEED} rollout_schedule=serial",
         flush=True,
     )
+  elif CANON_P60_DETERMINISTIC_AB:
+    vllm_rollout_dict["rollout_vllm_kwargs"]["seed"] = SEED
+    print(
+        f"[P60.HASH_AB] engine_seed={SEED} "
+        f"workload={_P32_WORKLOAD_NAME} rollout_schedule=serial "
+        f"max_concurrency={MAX_CONCURRENCY} "
+        f"max_response_length={MAX_RESPONSE_LENGTH}",
+        flush=True,
+    )
 
   if ROLLOUT_ENGINE == "vllm":
     train_rollout_config = base_rollout.RolloutConfig(
@@ -1070,7 +1145,7 @@ def main() -> None:
           # P32 consumes rollout logprobs directly. TIS would mask an
           # alignment failure instead of rejecting it at the four-boundary
           # gate, so it is deliberately absent from the promoted workload.
-          "sampler_is": None if CANON_P32_WORKLOAD else "token",
+          "sampler_is": None if _P32_WORKLOAD_NAME == "gsm8k" else "token",
           "sampler_is_threshold": 2.0,
           "force_compute_kl": False,
       }

@@ -22,6 +22,7 @@ from concurrent.futures import ThreadPoolExecutor
 import contextlib
 import copy
 import dataclasses
+import hashlib
 import itertools
 import json
 import os
@@ -77,6 +78,92 @@ from tunix.rl.queue import data_queue as queue_lib
 from tunix.sft import utils as sft_utils
 
 ArrayLike = typing.ArrayLike
+
+
+def _p61_capture_tree(
+    directory: str, capture_name: str, tree: Any
+) -> dict[str, Any]:
+  """Writes one complete P61 tree without replacing prior evidence."""
+  from flax import nnx  # pylint: disable=g-import-not-at-top
+
+  if not directory or not os.path.isabs(directory):
+    raise alignment.AlignmentGateError(
+        "P61 numerical capture directory must be an absolute path"
+    )
+  if capture_name not in ("gradient", "model_before", "model_after"):
+    raise alignment.AlignmentGateError(
+        f"unsupported P61 numerical capture name: {capture_name!r}"
+    )
+  if os.path.lexists(directory):
+    if os.path.islink(directory) or not os.path.isdir(directory):
+      raise alignment.AlignmentGateError(
+          f"P61 numerical capture root is not a real directory: {directory}"
+      )
+  else:
+    os.makedirs(directory, mode=0o755)
+  capture_dir = os.path.join(directory, capture_name)
+  try:
+    os.mkdir(capture_dir, mode=0o755)
+  except FileExistsError as exc:
+    raise alignment.AlignmentGateError(
+        f"refusing to overwrite P61 numerical capture: {capture_dir}"
+    ) from exc
+
+  flattened = jax.tree_util.tree_flatten_with_path(
+      tree, is_leaf=lambda value: isinstance(value, nnx.Variable)
+  )[0]
+  if not flattened:
+    raise alignment.AlignmentGateError(
+        f"P61 numerical capture {capture_name!r} has no leaves"
+    )
+  leaves = []
+  total_bytes = 0
+  for index, (path, value) in enumerate(flattened):
+    array = value[...] if isinstance(value, nnx.Variable) else value
+    host = np.ascontiguousarray(np.asarray(jax.device_get(array)))
+    if host.dtype.hasobject:
+      raise alignment.AlignmentGateError(
+          "P61 numerical capture refuses object-valued leaves"
+      )
+    filename = f"leaf_{index:05d}.npy"
+    output_path = os.path.join(capture_dir, filename)
+    with open(output_path, "xb") as output_file:
+      np.save(output_file, host, allow_pickle=False)
+    file_digest = hashlib.sha256()
+    with open(output_path, "rb") as input_file:
+      while chunk := input_file.read(8 * 1024 * 1024):
+        file_digest.update(chunk)
+    byte_count = int(host.nbytes)
+    total_bytes += byte_count
+    leaves.append({
+        "index": index,
+        "path": jax.tree_util.keystr(path),
+        "file": filename,
+        "shape": list(host.shape),
+        "dtype": str(host.dtype),
+        "elements": int(host.size),
+        "data_bytes": byte_count,
+        "data_sha256": hashlib.sha256(host.tobytes(order="C")).hexdigest(),
+        "file_sha256": file_digest.hexdigest(),
+    })
+  manifest = {
+      "schema": "canon-p61-full-tree-capture-v1",
+      "capture": capture_name,
+      "leaves": leaves,
+      "leaf_count": len(leaves),
+      "total_data_bytes": total_bytes,
+  }
+  manifest_path = os.path.join(capture_dir, "manifest.json")
+  with open(manifest_path, "x", encoding="utf-8") as manifest_file:
+    json.dump(manifest, manifest_file, indent=2, sort_keys=True)
+    manifest_file.write("\n")
+  print(
+      "[P61.NUMERICAL] capture_complete "
+      f"name={capture_name} leaves={len(leaves)} bytes={total_bytes} "
+      f"manifest={manifest_path}",
+      flush=True,
+  )
+  return manifest
 
 
 def _emit_p45_host_memory(
@@ -719,6 +806,26 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       trajectory_micro = workload.local_trajectories
     else:
       trajectory_micro = expected_trajectory_micro
+    p61_capture_dir = os.environ.get(
+        "CANON_P61_BACKWARD_NUMERICAL_DIR", ""
+    )
+    if p61_capture_dir:
+      p61_contract = (
+          p33_workload
+          and workload.name == "gsm8k-p59-dp4-tp1"
+          and workload.dp_size == 4
+          and workload.tp_size == 1
+          and run_stage == "one-update"
+          and not p33_no_commit
+          and full_train
+          and os.environ.get("CANON_P60_DETERMINISTIC_AB", "") == "1"
+          and os.environ.get("CANON_P59_DP4_TAIL8", "0") == "0"
+      )
+      if not p61_contract or not os.path.isabs(p61_capture_dir):
+        raise alignment.AlignmentGateError(
+            "CANON_P61_BACKWARD_NUMERICAL_DIR requires exact committed "
+            "gsm8k-p59-dp4-tp1 one-update deterministic DP4xTP1 geometry"
+        )
     if num_trajectories % trajectory_micro:
       raise alignment.AlignmentGateError(
           "segmented update trajectory cadence changed: "
@@ -889,6 +996,16 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             flush=True,
         )
 
+    if p61_capture_dir:
+      if before["train_steps"] != 0:
+        raise alignment.AlignmentGateError(
+            "P61 numerical capture requires the first optimizer transaction"
+        )
+      _p61_capture_tree(
+          p61_capture_dir,
+          "model_before",
+          nnx.state(actor_trainer.model, nnx.Param),
+      )
     start = time.perf_counter()
     with self.rl_cluster._get_mesh_and_logical_axis_rules_cm(  # pylint: disable=protected-access
         rl_cluster_lib.Role.ACTOR
@@ -1177,6 +1294,10 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           "dp_rank_pullbacks_per_transaction": result[
               "dp_rank_pullbacks_per_transaction"
           ],
+          "dp_pullback_invocations_per_transaction": result.get(
+              "dp_pullback_invocations_per_transaction",
+              result["dp_rank_pullbacks_per_transaction"],
+          ),
           "micro_gradient_norms": [
               float(np.asarray(value)) for value in micro_norms
           ],
@@ -1213,12 +1334,33 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         )
       return no_commit_record
 
+    if p61_capture_dir:
+      _p61_capture_tree(
+          p61_capture_dir,
+          "gradient",
+          actor_trainer.grad_accumulator.get(),
+      )
     with self.rl_cluster._get_mesh_and_logical_axis_rules_cm(  # pylint: disable=protected-access
         rl_cluster_lib.Role.ACTOR
     ):
       commit_norm = actor_trainer.commit_precomputed_gradients()
     commit_norm.block_until_ready()
     commit_evidence = actor_trainer.consume_precomputed_commit_evidence()
+    if p61_capture_dir:
+      if (
+          commit_evidence.get("effective_learning_rate") is None
+          or commit_evidence["effective_learning_rate"] <= 0.0
+          or commit_evidence.get("parameter_changed_elements", 0) <= 0
+      ):
+        raise alignment.AlignmentGateError(
+            "P61 numerical capture requires a positive learning rate and a "
+            f"material parameter update: {commit_evidence}"
+        )
+      _p61_capture_tree(
+          p61_capture_dir,
+          "model_after",
+          nnx.state(actor_trainer.model, nnx.Param),
+      )
     elapsed = time.perf_counter() - start
     hbm_after_commit = memory_snapshot()
     emit_sharding_inventory("after_commit")
@@ -1402,6 +1544,10 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         "dp_rank_pullbacks_per_transaction": result[
             "dp_rank_pullbacks_per_transaction"
         ],
+        "dp_pullback_invocations_per_transaction": result.get(
+            "dp_pullback_invocations_per_transaction",
+            result["dp_rank_pullbacks_per_transaction"],
+        ),
         "has_learning_signal": has_learning_signal,
         "micro_gradient_norms": [float(np.asarray(x)) for x in micro_norms],
         "commit_gradient_norm": float(np.asarray(commit_norm)),
@@ -2933,6 +3079,11 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         }
 
       if not p28_g6_update:
+        # The stock/non-segmented trainer does not pass through the G6 entry
+        # above.  Open the same phase=update window immediately before its
+        # actor update so P60 can compare a whole warm trainer update across
+        # stock and zero-TIM without tracing rollout/decode.
+        _canon_xprof_update_entry()
         self.rl_cluster.update_actor(
             chunked_train_micro_batch, current_eval_dataset, skip_jit
         )
@@ -3503,9 +3654,35 @@ _CANON_XPROF = {
     "directory": "",
     "host_tracer": 1,
     "python_tracer": 0,
+    "tpu_trace_mode": "",
     "armed": False,
     "started": False,
 }
+
+
+_CANON_XPROF_TPU_TRACE_MODES = (
+    "",
+    "TRACE_ONLY_XLA",
+    "TRACE_COMPUTE",
+    "TRACE_COMPUTE_AND_SYNC",
+)
+
+
+def _canon_xprof_profile_options(
+    *, host_tracer: int, python_tracer: int, tpu_trace_mode: str
+) -> jax.profiler.ProfileOptions:
+  """Builds fail-closed JAX profiler options for an update capture."""
+  if tpu_trace_mode not in _CANON_XPROF_TPU_TRACE_MODES:
+    raise ValueError(
+        "CANON_XPROF_TPU_TRACE_MODE must be empty or one of "
+        f"{_CANON_XPROF_TPU_TRACE_MODES[1:]}, got {tpu_trace_mode!r}"
+    )
+  options = jax.profiler.ProfileOptions()
+  options.host_tracer_level = host_tracer
+  options.python_tracer_level = python_tracer
+  if tpu_trace_mode:
+    options.advanced_configuration = {"tpu_trace_mode": tpu_trace_mode}
+  return options
 
 
 def _canon_xprof_update_entry():
@@ -3525,16 +3702,19 @@ def _canon_xprof_update_entry():
   if not _CANON_XPROF["armed"]:
     return
   _CANON_XPROF["armed"] = False
-  options = jax.profiler.ProfileOptions()
-  options.host_tracer_level = _CANON_XPROF["host_tracer"]
-  options.python_tracer_level = _CANON_XPROF["python_tracer"]
+  options = _canon_xprof_profile_options(
+      host_tracer=_CANON_XPROF["host_tracer"],
+      python_tracer=_CANON_XPROF["python_tracer"],
+      tpu_trace_mode=_CANON_XPROF["tpu_trace_mode"],
+  )
   jax.profiler.start_trace(
       log_dir=_CANON_XPROF["directory"], profiler_options=options
   )
   _CANON_XPROF["started"] = True
   print(
       "[P51.XPROF] phase=update started "
-      f"step={_CANON_XPROF['skip']} anchor=update_entry",
+      f"step={_CANON_XPROF['skip']} anchor=update_entry "
+      f"tpu_trace_mode={_CANON_XPROF['tpu_trace_mode'] or 'default'}",
       flush=True,
   )
 
@@ -3591,6 +3771,17 @@ def _canon_xprof_step_boundary():
     python_tracer = int(
         os.environ.get("CANON_XPROF_PYTHON_TRACER", "") or "0"
     )
+    tpu_trace_mode = os.environ.get("CANON_XPROF_TPU_TRACE_MODE", "")
+    if tpu_trace_mode not in _CANON_XPROF_TPU_TRACE_MODES:
+      raise ValueError(
+          "CANON_XPROF_TPU_TRACE_MODE must be empty or one of "
+          f"{_CANON_XPROF_TPU_TRACE_MODES[1:]}, got {tpu_trace_mode!r}"
+      )
+    if tpu_trace_mode and mode != "update":
+      raise ValueError(
+          "CANON_XPROF_TPU_TRACE_MODE is admitted only for "
+          "CANON_XPROF_PHASE=update"
+      )
     _CANON_XPROF.update(
         configured=True,
         mode=mode,
@@ -3599,6 +3790,7 @@ def _canon_xprof_step_boundary():
         directory=directory,
         host_tracer=host_tracer,
         python_tracer=python_tracer,
+        tpu_trace_mode=tpu_trace_mode,
     )
     if mode == "step":
       _CANON_XPROF["profiler"] = sft_profiler.Profiler(

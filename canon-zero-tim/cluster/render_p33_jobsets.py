@@ -47,6 +47,7 @@ class JobSpec:
   dp_size: int = 16
   tp_size: int = 4
   optimizer_resident: bool = True
+  rank_parallel_backward: bool = False
 
   @property
   def filename(self) -> str:
@@ -350,6 +351,9 @@ def render_jobset(
           "CANON_P30_OPT_STATE_OFFLOAD": (
               "0" if spec.optimizer_resident else "1"
           ),
+          "CANON_P59_RANK_PARALLEL_BACKWARD": (
+              "1" if spec.rank_parallel_backward else "0"
+          ),
           "CANON_GSM8K_AB_REPORT_ONLY": "0",
           "CANON_GSM8K_ALIGNMENT_WARN_ONLY": (
               "1"
@@ -513,6 +517,9 @@ def validate_jobset(
       ),
       "CANON_P30_OPT_STATE_OFFLOAD": (
           "0" if spec.optimizer_resident else "1"
+      ),
+      "CANON_P59_RANK_PARALLEL_BACKWARD": (
+          "1" if spec.rank_parallel_backward else "0"
       ),
       "CANON_GSM8K_AB_REPORT_ONLY": "0",
       "CANON_GSM8K_ALIGNMENT_WARN_ONLY": (

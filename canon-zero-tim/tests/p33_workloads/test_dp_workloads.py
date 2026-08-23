@@ -82,7 +82,7 @@ def _environment(name: str) -> dict[str, str]:
     environ["CANON_P33_DISABLE_EVAL"] = "1"
     environ["CANON_P31_ENABLE_EVAL"] = "0"
     environ["CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY"] = "0"
-  if name == "gsm8k":
+  if name.startswith("gsm8k"):
     environ["CANON_GSM8K_GRAD_PROBE"] = "0"
   return environ
 
@@ -175,6 +175,71 @@ class DPWorkloadsTest(unittest.TestCase):
         (workload.max_prompt_length, workload.max_response_length),
         (1024, 1024),
     )
+
+  def test_p59_four_chip_proxy_preserves_sixteen_local_groups(self):
+    workload = dp_workloads.get_workload("gsm8k-p59-dp4-tp1")
+    self.assertEqual((workload.dp_size, workload.tp_size), (4, 1))
+    self.assertEqual(workload.total_devices, 4)
+    self.assertEqual(workload.global_prompts, 8)
+    self.assertEqual(workload.global_trajectories, 64)
+    self.assertEqual(workload.local_trajectories, 16)
+    self.assertEqual(workload.global_m, 1024)
+    command = workload.command(run_stage="three-update")
+    for argument in (
+        "--mesh_dp=4",
+        "--mesh_tp=1",
+        "--batch_size=8",
+        "--mini_batch_size=8",
+        "--train_trajectory_micro_batch_size=4",
+        "--max_steps=3",
+        "--max_concurrency=64",
+        "--rollout_vllm_max_num_seqs=16",
+        "--rollout_vllm_max_num_batched_tokens=256",
+    ):
+      self.assertIn(argument, command)
+
+    environ = _environment(workload.name)
+    environ.update({
+        "CANON_OPT_STATE_RESIDENT": "1",
+        "CANON_P30_OPT_STATE_OFFLOAD": "0",
+        "CANON_P32_TRAIN_ADMITTED": "1",
+        "CANON_P32_DP_REDUCTION_ADMITTED": "1",
+        "CANON_P33_WORKLOAD_LAUNCH_ADMITTED": "1",
+        "CANON_P33_RUN_STAGE": "three-update",
+        "FL_SHARED_MESH": "4,1",
+    })
+    dp_workloads.validate_environment(
+        workload, environ, require_reduction_admission=True
+    )
+    self.assertEqual(
+        agentic_rl_learner._segmented_update_geometry(environ),
+        (64, 4, "[CANON_P33_DP4]", True),
+    )
+
+  def test_p59_tail_stage_is_exact_workload_and_flag_scoped(self):
+    workload = dp_workloads.get_workload("gsm8k-p59-dp4-tp1")
+    self.assertIn(
+        "--max_steps=8", workload.command(run_stage="p59-eight-update")
+    )
+    environ = _environment(workload.name)
+    environ.update({
+        "CANON_P33_RUN_STAGE": "p59-eight-update",
+        "CANON_P33_NO_COMMIT": "0",
+        "CANON_P59_DP4_TAIL8": "1",
+    })
+    self.assertEqual(dp_workloads.requested_max_steps(workload, environ), 8)
+    for key, value, marker in (
+        ("CANON_P59_DP4_TAIL8", "0", "requires gsm8k-p59-dp4-tp1"),
+        ("CANON_P33_RUN_STAGE", "three-update", "requires CANON_P33_RUN_STAGE"),
+    ):
+      rejected = dict(environ)
+      rejected[key] = value
+      with self.assertRaisesRegex(ValueError, marker):
+        dp_workloads.requested_max_steps(workload, rejected)
+    with self.assertRaisesRegex(ValueError, "only defined"):
+      dp_workloads.get_workload("gsm8k").command(
+          run_stage="p59-eight-update"
+      )
 
   def test_gsm8k_requires_gradient_probe_explicitly_disabled(self):
     workload = dp_workloads.get_workload("gsm8k")

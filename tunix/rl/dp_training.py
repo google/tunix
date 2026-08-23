@@ -518,8 +518,13 @@ class FixedDPRankGradientReducer:
   ):
     _validate_tree_size(dp_size)
     leaves = jax.tree.leaves(template)
-    if not leaves or any(not isinstance(leaf, jax.Array) for leaf in leaves):
-      raise ValueError('DP gradient reducer requires a nonempty JAX array tree')
+    admitted_leaf_types = (jax.Array, jax.ShapeDtypeStruct)
+    if not leaves or any(
+        not isinstance(leaf, admitted_leaf_types) for leaf in leaves
+    ):
+      raise ValueError(
+          'DP gradient reducer requires a nonempty JAX array/spec tree'
+      )
     shardings = [leaf.sharding for leaf in leaves]
     if any(
         not isinstance(sharding, jax.sharding.NamedSharding)
@@ -631,6 +636,23 @@ class FixedDPRankGradientReducer:
     self._reduce = jax.jit(reduce_mapped, donate_argnums=(0,))
     self._compare = jax.jit(compare_mapped)
     self._signature = jax.jit(_gradient_signature)
+    signature_sharding = jax.sharding.NamedSharding(
+        mesh, jax.sharding.PartitionSpec(dp_axis, None)
+    )
+    self._batched_signature = jax.jit(
+        jax.vmap(_gradient_signature), out_shardings=signature_sharding
+    )
+    self._template_structure = jax.tree.structure(template)
+    self._staged_metadata = tuple(
+        (
+            (dp_size,) + tuple(leaf.shape),
+            leaf.dtype,
+            sharding,
+        )
+        for leaf, sharding in zip(
+            leaves, jax.tree.leaves(staged_shardings), strict=True
+        )
+    )
     self._staged = None
     self._next_rank = 0
     self._fingerprints = []
@@ -662,19 +684,18 @@ class FixedDPRankGradientReducer:
     self._next_rank += 1
     return fingerprint
 
-  def finalize(self) -> tuple[Any, dict[str, Any]]:
-    """Executes one fixed reduction and proves every resulting replica equal."""
-    if self._staged is None:
-      raise ValueError('DP gradient reduction transaction is not active')
-    if self._next_rank != self._dp_size:
-      raise ValueError(
-          'DP gradient reduction is missing rank contributions: '
-          f'{self._next_rank} != {self._dp_size}'
-      )
-    unique_fingerprints = len(set(self._fingerprints))
+  def _finalize_staged(
+      self,
+      staged: Any,
+      fingerprints: Sequence[str],
+      *,
+      staging_mode: str,
+  ) -> tuple[Any, dict[str, Any]]:
+    """Reduces one validated rank table and emits common evidence."""
+    unique_fingerprints = len(set(fingerprints))
     if self._require_distinct and unique_fingerprints != self._dp_size:
       raise ValueError('DP rank-local gradient fingerprints are not distinct')
-    reduced = self._reduce(self._staged)
+    reduced = self._reduce(staged)
     flags = np.asarray(jax.device_get(self._compare(reduced)), dtype=np.bool_)
     if flags.size != self._dp_size or not bool(np.all(flags)):
       raise ValueError(
@@ -684,22 +705,84 @@ class FixedDPRankGradientReducer:
     report = {
         'dp_size': self._dp_size,
         'dp_axis': self._dp_axis,
-        'rank_contributions': self._next_rank,
-        'rank_local_fingerprints': tuple(self._fingerprints),
+        'rank_contributions': self._dp_size,
+        'rank_local_fingerprints': tuple(fingerprints),
         'rank_local_fingerprint_unique_count': unique_fingerprints,
         'rank_local_fingerprint_duplicate_count': (
             self._dp_size - unique_fingerprints
         ),
         'rank_local_fingerprints_distinct': unique_fingerprints == self._dp_size,
+        'rank_gradient_staging_mode': staging_mode,
         'reduction_transactions': 1,
         'reduction_rounds': fixed_dp_collective_count(self._dp_size),
         'replica_check_flags': int(flags.size),
         'post_reduction_replicas_exact': True,
       }
+    return reduced, report
+
+  def finalize(self) -> tuple[Any, dict[str, Any]]:
+    """Executes one fixed reduction and proves every resulting replica equal."""
+    if self._staged is None:
+      raise ValueError('DP gradient reduction transaction is not active')
+    if self._next_rank != self._dp_size:
+      raise ValueError(
+          'DP gradient reduction is missing rank contributions: '
+          f'{self._next_rank} != {self._dp_size}'
+      )
+    reduced, report = self._finalize_staged(
+        self._staged,
+        self._fingerprints,
+        staging_mode='serial_add',
+    )
     self._staged = None
     self._next_rank = 0
     self._fingerprints = []
     return reduced, report
+
+  def finalize_staged(self, staged: Any) -> tuple[Any, dict[str, Any]]:
+    """Consumes an already DP-sharded table of rank-local gradients."""
+    if self._staged is not None:
+      raise ValueError(
+          'cannot consume a staged DP gradient table during an active '
+          'serial transaction'
+      )
+    if jax.tree.structure(staged) != self._template_structure:
+      raise ValueError('staged DP gradient tree does not match the template')
+    leaves = jax.tree.leaves(staged)
+    for index, (leaf, metadata) in enumerate(
+        zip(leaves, self._staged_metadata, strict=True)
+    ):
+      expected_shape, expected_dtype, expected_sharding = metadata
+      if not isinstance(leaf, jax.Array):
+        raise ValueError(
+            f'staged DP gradient leaf {index} is not a JAX array'
+        )
+      if tuple(leaf.shape) != expected_shape or leaf.dtype != expected_dtype:
+        raise ValueError(
+            f'staged DP gradient leaf {index} shape/dtype changed: '
+            f'{leaf.shape}/{leaf.dtype} != '
+            f'{expected_shape}/{expected_dtype}'
+        )
+      if leaf.sharding != expected_sharding:
+        raise ValueError(
+            f'staged DP gradient leaf {index} sharding changed: '
+            f'{leaf.sharding} != {expected_sharding}'
+        )
+    signatures = np.asarray(
+        jax.device_get(self._batched_signature(staged)), dtype=np.float32
+    )
+    if signatures.shape != (self._dp_size, 5):
+      raise ValueError(
+          'staged DP gradient signatures changed shape: '
+          f'{signatures.shape} != {(self._dp_size, 5)}'
+      )
+    fingerprints = tuple(
+        _signature_sha256(signatures[rank])
+        for rank in range(self._dp_size)
+    )
+    return self._finalize_staged(
+        staged, fingerprints, staging_mode='parallel_table'
+    )
 
 
 def assert_dp_replicas_equal(

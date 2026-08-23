@@ -15,6 +15,7 @@
 """Tests for agentic_rl_learner."""
 
 import asyncio
+import inspect
 import threading
 import queue
 from types import SimpleNamespace
@@ -38,6 +39,15 @@ class DummyLearner(agentic_rl_learner.AgenticRLLearner):
 
 
 class AgenticRLLearnerTest(parameterized.TestCase):
+
+  def test_p61_validation_follows_p33_workload_initialization(self):
+    source = inspect.getsource(
+        agentic_rl_learner.AgenticRLLearner._run_p28_g6_update  # pylint: disable=protected-access
+    )
+    self.assertLess(
+        source.index("workload = dp_workloads.active_workload()"),
+        source.index("p61_capture_dir = os.environ.get("),
+    )
 
   def test_p57_evaluate_only_covers_dataset_without_train_update(self):
     learner = object.__new__(DummyLearner)

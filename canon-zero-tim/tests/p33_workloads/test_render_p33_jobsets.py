@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import importlib.util
 from pathlib import Path
 import shlex
@@ -96,6 +97,7 @@ class RenderP33JobSetsTest(unittest.TestCase):
         self.assertEqual(env["CANON_P33_SHARED_MESH"], "16,4")
         self.assertEqual(env["CANON_OPT_STATE_RESIDENT"], "1")
         self.assertEqual(env["CANON_P30_OPT_STATE_OFFLOAD"], "0")
+        self.assertEqual(env["CANON_P59_RANK_PARALLEL_BACKWARD"], "0")
         self.assertEqual(env["CANON_PRE_ALIGN_GATE"], "1")
         self.assertTrue(env["CANON_PRE_ALIGN_REPORT"].endswith("pre_alignment.jsonl"))
         if (
@@ -133,6 +135,25 @@ class RenderP33JobSetsTest(unittest.TestCase):
       self.assertEqual(len(set(scratches)), 6)
       self.assertTrue(all(len(values) == 2 for values in scratches))
       self.assertEqual(workloads, {"gsm8k", "frozenlake"})
+
+  def test_rank_parallel_backward_is_explicitly_transmitted(self):
+    base = renderer.load_base(_BASE_PATH)
+    stock = next(
+        spec
+        for spec in renderer._SPECS
+        if spec.key == "frozenlake-backward-no-commit"
+    )
+    spec = dataclasses.replace(
+        stock,
+        job_prefix="canon-p59-fl-bwd",
+        rank_parallel_backward=True,
+    )
+    document = renderer.render_jobset(
+        base, spec, _SOURCE_COMMIT, _RUN_ID
+    )
+    self.assertEqual(
+        _main_env(document)["CANON_P59_RANK_PARALLEL_BACKWARD"], "1"
+    )
 
   def test_rendered_commands_equal_frozen_workload_commands(self):
     with tempfile.TemporaryDirectory() as tmp:

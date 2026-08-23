@@ -877,6 +877,14 @@ class ClassifyP33RunTest(unittest.TestCase):
     self.assertEqual(
         classifier._expected_updates("frozenlake", "three-update"), 3
     )
+    self.assertEqual(
+        classifier._expected_updates(
+            "gsm8k-p59-dp4-tp1", "p59-eight-update"
+        ),
+        8,
+    )
+    with self.assertRaisesRegex(ValueError, "only defined"):
+      classifier._expected_updates("gsm8k", "p59-eight-update")
 
 
 if __name__ == "__main__":

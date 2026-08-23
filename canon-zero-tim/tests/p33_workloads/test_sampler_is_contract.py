@@ -158,6 +158,17 @@ class SamplerIsContractTest(unittest.TestCase):
         _REPO_ROOT / "examples/math_gsm8k/qwen3_grpo_demo.py"
     ).read_text(encoding="utf-8")
     self.assertIn(
+        '"sampler_is": None if _P32_WORKLOAD_NAME == "gsm8k" else "token",',
+        source,
+    )
+
+  def test_p59_proxy_uses_token_sampler_correction(self):
+    self.assertFalse(_sampler_is_valid(None, "gsm8k-p59-dp4-tp1"))
+    self.assertTrue(_sampler_is_valid("token", "gsm8k-p59-dp4-tp1"))
+    source = (
+        _REPO_ROOT / "examples/math_gsm8k/qwen3_grpo_demo.py"
+    ).read_text(encoding="utf-8")
+    self.assertNotIn(
         '"sampler_is": None if CANON_P32_WORKLOAD else "token",', source
     )
 

@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Frozen 64-device DP/TP workload contracts for canonical RL training."""
+"""Frozen DP/TP workload contracts for canonical RL training."""
 
 from __future__ import annotations
 
@@ -33,6 +33,7 @@ _RUN_STAGE_STEPS = {
     "backward-no-commit": 1,
     "one-update": 1,
     "three-update": 3,
+    "p59-eight-update": 8,
 }
 
 
@@ -210,6 +211,7 @@ class DPWorkloadSpec:
   dp_size: int = 16
   tp_size: int = 4
   local_m: int = 256
+  four_chip_proxy: bool = False
 
   @property
   def total_devices(self) -> int:
@@ -245,6 +247,31 @@ class DPWorkloadSpec:
   def validate(self) -> None:
     """Rejects a workload that no longer matches the P32 release geometry."""
     self.training_contract()
+    if self.four_chip_proxy:
+      expected = {
+          "name": "gsm8k-p59-dp4-tp1",
+          "model_id": "Qwen/Qwen3-1.7B",
+          "dp_size": 4,
+          "tp_size": 1,
+          "global_prompts": 8,
+          "num_generations": 8,
+          "local_trajectories": 16,
+          "local_m": 256,
+          "periodic_evaluation": False,
+      }
+      actual = {name: getattr(self, name) for name in expected}
+      wrong = {
+          name: actual[name]
+          for name, expected_value in expected.items()
+          if actual[name] != expected_value
+      }
+      if wrong:
+        raise ValueError(f"P59 four-chip proxy geometry changed: {wrong}")
+      if self.total_devices != 4 or self.global_m != 1024:
+        raise ValueError(
+            "P59 four-chip proxy requires four devices and global M1024"
+        )
+      return
     if (self.dp_size, self.tp_size) not in ((16, 4), (8, 8)):
       raise ValueError(
           "canonical workloads require DP16xTP4 or DP8xTP8"
@@ -278,6 +305,10 @@ class DPWorkloadSpec:
   def command(self, *, run_stage: str = "full") -> tuple[str, ...]:
     """Returns the frozen recipe command for review and launch wrappers."""
     self.validate()
+    if run_stage == "p59-eight-update" and self.name != "gsm8k-p59-dp4-tp1":
+      raise ValueError(
+          "p59-eight-update is only defined for gsm8k-p59-dp4-tp1"
+      )
     if run_stage == "full":
       max_steps = self.max_steps
     else:
@@ -299,23 +330,23 @@ class DPWorkloadSpec:
     common = (
         f"--mesh_dp={self.dp_size}",
         f"--mesh_tp={self.tp_size}",
-        "--batch_size=32",
-        "--mini_batch_size=32",
+        f"--batch_size={self.global_prompts}",
+        f"--mini_batch_size={self.global_prompts}",
         f"--train_trajectory_micro_batch_size={self.dp_size}",
         f"--max_steps={max_steps}",
-        "--num_generations=8",
+        f"--num_generations={self.num_generations}",
         f"--max_prompt_length={self.max_prompt_length}",
         f"--max_response_length={max_response_length}",
-        "--max_concurrency=256",
+        f"--max_concurrency={self.global_trajectories}",
     )
-    if self.name == "gsm8k":
+    if self.name.startswith("gsm8k"):
       return (
           "python3",
           "-u",
           "examples/math_gsm8k/qwen3_grpo_demo.py",
           *common,
-          "--train_micro_batch_size=32",
-          "--compute_logps_micro_batch_size=32",
+          f"--train_micro_batch_size={self.global_prompts}",
+          f"--compute_logps_micro_batch_size={self.global_prompts}",
           "--rollout_vllm_hbm_utilization=0.20",
           f"--rollout_vllm_max_num_seqs={self.local_trajectories}",
           f"--rollout_vllm_max_num_batched_tokens={self.local_m}",
@@ -365,6 +396,28 @@ _WORKLOADS = {
         weight_decay=0.01,
         temperature=1.0,
         wandb_project="zero-tim-gsm8k-dp16-tp4",
+    ),
+    "gsm8k-p59-dp4-tp1": DPWorkloadSpec(
+        name="gsm8k-p59-dp4-tp1",
+        model_id="Qwen/Qwen3-1.7B",
+        model_dir_name="qwen1p7b",
+        global_prompts=8,
+        num_generations=8,
+        local_trajectories=16,
+        max_prompt_length=1024,
+        max_response_length=1024,
+        max_steps=3,
+        learning_rate=2.0e-7,
+        beta=0.04,
+        optimizer_b1=0.9,
+        optimizer_b2=0.999,
+        weight_decay=0.01,
+        temperature=1.0,
+        wandb_project="zero-tim-gsm8k-p59-dp4-tp1",
+        periodic_evaluation=False,
+        dp_size=4,
+        tp_size=1,
+        four_chip_proxy=True,
     ),
     "frozenlake": DPWorkloadSpec(
         name="frozenlake",
@@ -495,6 +548,45 @@ def requested_max_steps(
   """Returns the fail-closed step budget selected by the P33 run stage."""
   values = os.environ if environ is None else environ
   stage = values.get("CANON_P33_RUN_STAGE", "")
+  tail8 = values.get("CANON_P59_DP4_TAIL8", "0")
+  if tail8 not in ("0", "1"):
+    raise ValueError("CANON_P59_DP4_TAIL8 must be exactly 0 or 1")
+  if stage == "p59-eight-update":
+    if workload.name != "gsm8k-p59-dp4-tp1" or tail8 != "1":
+      raise ValueError(
+          "p59-eight-update requires gsm8k-p59-dp4-tp1 and "
+          "CANON_P59_DP4_TAIL8=1"
+      )
+  elif tail8 != "0":
+    raise ValueError(
+        "CANON_P59_DP4_TAIL8=1 requires CANON_P33_RUN_STAGE="
+        "p59-eight-update"
+    )
+  deterministic_ab = values.get("CANON_P60_DETERMINISTIC_AB", "0")
+  if deterministic_ab not in ("0", "1"):
+    raise ValueError("CANON_P60_DETERMINISTIC_AB must be exactly 0 or 1")
+  if deterministic_ab == "1" and workload.name not in (
+      "gsm8k-p59-dp4-tp1",
+      "gsm8k-p60-dp2-tp2",
+  ):
+    raise ValueError(
+        "CANON_P60_DETERMINISTIC_AB requires an exact P60 one-host "
+        "zero-TIM workload"
+    )
+  p61_capture_dir = values.get("CANON_P61_BACKWARD_NUMERICAL_DIR", "")
+  if p61_capture_dir and (
+      not os.path.isabs(p61_capture_dir)
+      or workload.name != "gsm8k-p59-dp4-tp1"
+      or workload.dp_size != 4
+      or workload.tp_size != 1
+      or stage != "one-update"
+      or tail8 != "0"
+      or deterministic_ab != "1"
+  ):
+    raise ValueError(
+        "CANON_P61_BACKWARD_NUMERICAL_DIR requires an absolute path and "
+        "exact gsm8k-p59-dp4-tp1 one-update deterministic geometry"
+    )
   if stage == "full":
     if values.get("CANON_PROFILE_FILE", "") == (
         "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env"
@@ -528,6 +620,33 @@ def requested_max_steps(
         f"stage={stage!r} expected CANON_P33_NO_COMMIT={expected_no_commit}"
     )
   return steps
+
+
+def expected_token_widths(
+    workload: DPWorkloadSpec,
+    environ: Mapping[str, str] | None = None,
+) -> tuple[int, int]:
+  """Returns exact prompt/completion widths for the admitted carrier.
+
+  Production workloads retain their frozen widths.  P60 hash-only A/B runs
+  use the proven 1024/256 GSM8K envelope so single-request rollout remains
+  bounded while the two backward arms see exactly the same trainer shape.
+  """
+  values = os.environ if environ is None else environ
+  deterministic_ab = values.get("CANON_P60_DETERMINISTIC_AB", "0")
+  if deterministic_ab not in ("0", "1"):
+    raise ValueError("CANON_P60_DETERMINISTIC_AB must be exactly 0 or 1")
+  if deterministic_ab == "1":
+    if workload.name not in (
+        "gsm8k-p59-dp4-tp1",
+        "gsm8k-p60-dp2-tp2",
+    ):
+      raise ValueError(
+          "CANON_P60_DETERMINISTIC_AB requires an exact P60 one-host "
+          "zero-TIM workload"
+      )
+    return (1024, 256)
+  return (workload.max_prompt_length, workload.max_response_length)
 
 
 def validate_frozenlake_max_concurrency(
@@ -716,7 +835,7 @@ def validate_environment(
     expected["CANON_P33_ENABLE_EVAL"] = "1" if evaluation_enabled else "0"
     expected["CANON_P33_DISABLE_EVAL"] = "0" if evaluation_enabled else "1"
     expected["CANON_P31_ENABLE_EVAL"] = "1" if evaluation_enabled else "0"
-  if workload.name == "gsm8k":
+  if workload.name.startswith("gsm8k"):
     expected["CANON_GSM8K_GRAD_PROBE"] = "0"
   wrong = {
       key: values.get(key)

@@ -26,6 +26,7 @@ exact processed-logprob call boundary; neither layer mutates serving state.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import functools
 import hashlib
@@ -33,6 +34,7 @@ import importlib
 import json
 import os
 import re
+import threading
 import time
 from typing import Any, Mapping, Sequence
 
@@ -82,6 +84,39 @@ def _xprof_jit(fun, *, module_name: str, scope_name: str, **jit_kwargs):
   return jax.jit(labeled, **jit_kwargs)
 
 
+def _p59_xprof_backward_directory(
+    *, workload_name: str, dp_size: int, tp_size: int, rank_parallel: bool
+) -> str:
+  """Validates the profile-only one-group P59 backward capture."""
+  directory = os.environ.get("CANON_P59_XPROF_BACKWARD_DIR", "")
+  if not directory:
+    return ""
+  if os.environ.get("CANON_XPROF_DIR", ""):
+    raise FunctionalMappingError(
+        "P59 narrow backward XProf cannot nest inside CANON_XPROF_DIR"
+    )
+  if (
+      workload_name != "gsm8k-p59-dp4-tp1"
+      or (dp_size, tp_size) != (4, 1)
+      or not rank_parallel
+  ):
+    raise FunctionalMappingError(
+        "P59 narrow backward XProf requires the exact DP4xTP1 candidate"
+    )
+  if os.environ.get("CANON_XPROF_LABELS", "") != "1":
+    raise FunctionalMappingError(
+        "P59 narrow backward XProf requires CANON_XPROF_LABELS=1"
+    )
+  if (
+      os.environ.get("CANON_XPROF_HOST_TRACER", "1") != "1"
+      or os.environ.get("CANON_XPROF_PYTHON_TRACER", "0") != "0"
+  ):
+    raise FunctionalMappingError(
+        "P59 narrow backward XProf requires host tracer 1 and Python tracer 0"
+    )
+  return directory
+
+
 @functools.partial(jax.jit, static_argnums=2)
 def fused_micro_scale(tree, scale, count):
   """Whole-tree microbatch gradient scaling in one dispatch.
@@ -115,6 +150,591 @@ def _safe_sharding_constraint(value, sharding):
       return jax.lax.with_sharding_constraint(value, sharding)
     except Exception:
       return value
+
+
+def _manual_axis_partition_spec(value, axis_name: str):
+  """Keeps one mesh axis manual and leaves every other axis automatic."""
+  sharding = getattr(value, "sharding", None)
+  if not isinstance(sharding, jax.sharding.NamedSharding):
+    return jax.sharding.PartitionSpec()
+
+  def keep_axis(entry):
+    if entry == axis_name:
+      return axis_name
+    if isinstance(entry, (tuple, list)) and axis_name in entry:
+      return axis_name
+    return None
+
+  return jax.sharding.PartitionSpec(
+      *(keep_axis(entry) for entry in tuple(sharding.spec))
+  )
+
+
+def _manual_axis_specs(tree, axis_name: str):
+  return jax.tree.map(
+      lambda value: _manual_axis_partition_spec(value, axis_name), tree
+  )
+
+
+def _rank_staged_specs(tree, axis_name: str):
+  """Prepends the staged-DP row while retaining physical TP1 placement."""
+
+  def staged_spec(value):
+    sharding = getattr(value, "sharding", None)
+    if not isinstance(sharding, jax.sharding.NamedSharding):
+      return jax.sharding.PartitionSpec(axis_name)
+    data_axis, model_axis = _p59_mesh_roles(
+        sharding.mesh, "P59 staged rank gradient"
+    )
+    if data_axis != axis_name:
+      raise FunctionalMappingError(
+          "P59 staged rank gradient data axis changed: "
+          f"{data_axis!r} != {axis_name!r}"
+      )
+    original_spec = sharding.spec
+    if data_axis in _p59_partition_axes(original_spec):
+      raise FunctionalMappingError(
+          "P59 staged rank gradient requires DP-replicated parameters, got "
+          f"{original_spec}"
+      )
+    if int(sharding.mesh.shape[model_axis]) == 1:
+      return jax.sharding.PartitionSpec(axis_name, *tuple(original_spec))
+    return jax.sharding.PartitionSpec(axis_name)
+
+  return jax.tree.map(staged_spec, tree)
+
+
+def _rank_local_leading_specs(tree, axis_name: str, axis_size: int, label: str):
+  """Partitions semantic per-rank rows even if the input arrived replicated."""
+  axis_size = int(axis_size)
+
+  def spec(value):
+    if getattr(value, "ndim", 0) < 1:
+      return jax.sharding.PartitionSpec()
+    if int(value.shape[0]) % axis_size:
+      raise FunctionalMappingError(
+          f"{label} leading rows are not divisible by {axis_name}: "
+          f"shape={value.shape} size={axis_size}"
+      )
+    return jax.sharding.PartitionSpec(
+        axis_name, *(None for _ in range(value.ndim - 1))
+    )
+
+  return jax.tree.map(spec, tree)
+
+
+def _named_sharding_mesh(tree, axis_name: str | None, label: str):
+  """Returns the single NamedSharding mesh carried by an array tree."""
+  meshes = []
+  for value in jax.tree.leaves(tree):
+    sharding = getattr(value, "sharding", None)
+    if not isinstance(sharding, jax.sharding.NamedSharding):
+      continue
+    if axis_name is not None and axis_name not in sharding.mesh.axis_names:
+      raise FunctionalMappingError(
+          f"{label} sharding mesh omits axis {axis_name!r}"
+      )
+    if not any(sharding.mesh == mesh for mesh in meshes):
+      meshes.append(sharding.mesh)
+  if len(meshes) != 1:
+    raise FunctionalMappingError(
+        f"{label} requires exactly one NamedSharding mesh, got {len(meshes)}"
+    )
+  return meshes[0]
+
+
+def _p59_replicated_data_mesh(tree, label: str):
+  """Returns one registered replicated-DP mesh and its actual data axis."""
+  mesh = _named_sharding_mesh(tree, None, label)
+  axes = tuple(mesh.axis_names)
+  if axes == ("data", "model"):
+    return mesh, "data"
+  if axes == ("dp", "tp"):
+    return mesh, "dp"
+  raise FunctionalMappingError(
+      f"{label} requires replicated DP mesh data/model or dp/tp, got {axes}"
+  )
+
+
+def _p59_mesh_roles(mesh, label: str):
+  """Returns the data/model roles for one admitted trainer or engine mesh."""
+  axes = tuple(mesh.axis_names)
+  if axes == ("dp", "tp"):
+    return "dp", "tp"
+  if axes == ("data", "model"):
+    return "data", "model"
+  engine_axes = (
+      "data",
+      "attn_dp",
+      "attn_dp_expert",
+      "expert",
+      "model",
+      "dcp",
+  )
+  if axes == engine_axes:
+    non_unit_aux = {
+        axis: int(mesh.shape[axis])
+        for axis in ("attn_dp", "attn_dp_expert", "expert", "dcp")
+        if int(mesh.shape[axis]) != 1
+    }
+    if non_unit_aux:
+      raise FunctionalMappingError(
+          f"{label} engine mesh has non-unit auxiliary axes: {non_unit_aux}"
+      )
+    return "data", "model"
+  raise FunctionalMappingError(
+      f"{label} has unsupported mesh axes {axes}"
+  )
+
+
+def _p59_manual_rank_axes(mesh, data_axis: str, label: str):
+  """Makes unit TP manual when an explicit TP1 spec must be retained."""
+  actual_data_axis, model_axis = _p59_mesh_roles(mesh, label)
+  if actual_data_axis != data_axis:
+    raise FunctionalMappingError(
+        f"{label} data axis changed: {actual_data_axis!r} != {data_axis!r}"
+    )
+  manual_axes = {data_axis}
+  if int(mesh.shape[model_axis]) == 1:
+    manual_axes.add(model_axis)
+  return manual_axes
+
+
+def _p59_restore_unit_tp_staged_specs(
+    trainer_state, staged_gradient, data_axis: str
+):
+  """Restores unit-TP metadata only after exact physical equivalence."""
+  if jax.tree.structure(trainer_state) != jax.tree.structure(staged_gradient):
+    raise FunctionalMappingError(
+        "P59 staged-spec restoration tree differs from trainer state"
+    )
+
+  def restore(state_value, staged_value):
+    state_sharding = getattr(state_value, "sharding", None)
+    staged_sharding = getattr(staged_value, "sharding", None)
+    if not isinstance(state_sharding, jax.sharding.NamedSharding):
+      raise FunctionalMappingError(
+          "P59 staged-spec restoration requires NamedSharding parameters"
+      )
+    if not isinstance(staged_sharding, jax.sharding.NamedSharding):
+      raise FunctionalMappingError(
+          "P59 staged-spec restoration requires NamedSharding gradients"
+      )
+    mesh = state_sharding.mesh
+    actual_data_axis, model_axis = _p59_mesh_roles(
+        mesh, "P59 staged-spec restoration"
+    )
+    if actual_data_axis != data_axis:
+      raise FunctionalMappingError(
+          "P59 staged-spec restoration data axis changed: "
+          f"{actual_data_axis!r} != {data_axis!r}"
+      )
+    expected_shape = (int(mesh.shape[data_axis]),) + tuple(state_value.shape)
+    if staged_value.shape != expected_shape or staged_value.dtype != jnp.float32:
+      raise FunctionalMappingError(
+          "P59 staged-spec restoration shape/dtype changed: "
+          f"{staged_value.shape}/{staged_value.dtype} != "
+          f"{expected_shape}/{jnp.float32}"
+      )
+    expected_sharding = jax.sharding.NamedSharding(
+        mesh,
+        jax.sharding.PartitionSpec(
+            data_axis, *tuple(state_sharding.spec)
+        ),
+    )
+    if staged_sharding == expected_sharding:
+      return staged_value
+    if int(mesh.shape[model_axis]) != 1 or staged_sharding.mesh != mesh:
+      raise FunctionalMappingError(
+          "P59 staged-spec restoration is not a same-mesh TP1 difference"
+      )
+    actual_spec = tuple(staged_sharding.spec)
+    if not actual_spec or actual_spec[0] != data_axis:
+      raise FunctionalMappingError(
+          "P59 staged-spec restoration requires leading-DP placement, got "
+          f"{staged_sharding.spec}"
+      )
+    if _p59_partition_axes(staged_sharding.spec) - {data_axis, model_axis}:
+      raise FunctionalMappingError(
+          "P59 staged-spec restoration found an unexpected mesh axis: "
+          f"{staged_sharding.spec}"
+      )
+    if (
+        staged_sharding.devices_indices_map(staged_value.shape)
+        != expected_sharding.devices_indices_map(staged_value.shape)
+    ):
+      raise FunctionalMappingError(
+          "P59 staged-spec restoration placements are not physically equal"
+      )
+    return jax.device_put(staged_value, expected_sharding)
+
+  return jax.tree.map(restore, trainer_state, staged_gradient)
+
+
+def _p59_align_to_mesh(tree, target_mesh, label: str):
+  """Relabels compatible engine shardings onto one trainer DP/TP mesh."""
+  target_data, target_model = _p59_mesh_roles(target_mesh, label)
+  target_devices = tuple(target_mesh.devices.flat)
+
+  def align(value):
+    sharding = getattr(value, "sharding", None)
+    if not isinstance(sharding, jax.sharding.NamedSharding):
+      return value
+    source_mesh = sharding.mesh
+    if source_mesh == target_mesh:
+      return value
+    source_data, source_model = _p59_mesh_roles(source_mesh, label)
+    if tuple(source_mesh.devices.flat) != target_devices:
+      raise FunctionalMappingError(
+          f"{label} trainer and engine device orders differ"
+      )
+    if (
+        int(source_mesh.shape[source_data])
+        != int(target_mesh.shape[target_data])
+        or int(source_mesh.shape[source_model])
+        != int(target_mesh.shape[target_model])
+    ):
+      raise FunctionalMappingError(
+          f"{label} trainer and engine DP/TP dimensions differ"
+      )
+
+    def translate(entry):
+      if entry is None:
+        return None
+      names = (entry,) if isinstance(entry, str) else tuple(entry)
+      translated = []
+      for axis in names:
+        if axis == source_data:
+          mapped = target_data
+        elif axis == source_model:
+          mapped = target_model
+        elif int(source_mesh.shape[axis]) == 1:
+          continue
+        else:
+          raise FunctionalMappingError(
+              f"{label} cannot translate non-unit mesh axis {axis!r}"
+          )
+        if mapped not in translated:
+          translated.append(mapped)
+      if not translated:
+        return None
+      return translated[0] if len(translated) == 1 else tuple(translated)
+
+    translated_spec = jax.sharding.PartitionSpec(
+        *(translate(entry) for entry in tuple(sharding.spec))
+    )
+    return jax.device_put(
+        value, jax.sharding.NamedSharding(target_mesh, translated_spec)
+    )
+
+  return jax.tree.map(align, tree)
+
+
+def _p59_align_serial_gradient_to_trainer_state(
+    trainer_state, gradient, label: str
+):
+  """Relabels a TP1 serial report gradient onto exact trainer shardings.
+
+  The DP4 proxy's trainer uses ``dp/tp`` while its engine uses the equivalent
+  six-axis ``data/.../model`` mesh.  The serial mapping adjoint can therefore
+  return a trainer-shaped tree whose arrays still carry the engine vocabulary.
+  This bridge permits metadata-only relabeling when every physical placement
+  is identical; it rejects data-sharded gradients and any non-unit TP repair.
+  """
+  if jax.tree.structure(trainer_state) != jax.tree.structure(gradient):
+    raise FunctionalMappingError(
+        f"{label} gradient tree differs from trainer state"
+    )
+  trainer_mesh, data_axis = _p59_replicated_data_mesh(
+      trainer_state, label
+  )
+  aligned = _p59_align_to_mesh(gradient, trainer_mesh, label)
+  actual_data_axis, model_axis = _p59_mesh_roles(trainer_mesh, label)
+  if actual_data_axis != data_axis:
+    raise FunctionalMappingError(
+        f"{label} trainer data axis changed: "
+        f"{actual_data_axis!r} != {data_axis!r}"
+    )
+
+  def restore(state_value, gradient_value):
+    state_sharding = getattr(state_value, "sharding", None)
+    gradient_sharding = getattr(gradient_value, "sharding", None)
+    if not isinstance(state_sharding, jax.sharding.NamedSharding):
+      raise FunctionalMappingError(
+          f"{label} trainer state requires NamedSharding leaves"
+      )
+    if not isinstance(gradient_sharding, jax.sharding.NamedSharding):
+      raise FunctionalMappingError(
+          f"{label} gradient requires NamedSharding leaves"
+      )
+    if (
+        state_sharding.mesh != trainer_mesh
+        or gradient_sharding.mesh != trainer_mesh
+    ):
+      raise FunctionalMappingError(
+          f"{label} relabeled leaves do not share the trainer mesh"
+      )
+    if (
+        gradient_value.shape != state_value.shape
+        or gradient_value.dtype != jnp.float32
+    ):
+      raise FunctionalMappingError(
+          f"{label} shape/dtype changed: "
+          f"{gradient_value.shape}/{gradient_value.dtype} != "
+          f"{state_value.shape}/{jnp.float32}"
+      )
+    expected_sharding = jax.sharding.NamedSharding(
+        trainer_mesh, state_sharding.spec
+    )
+    if gradient_sharding == expected_sharding:
+      return gradient_value
+    if int(trainer_mesh.shape[model_axis]) != 1:
+      raise FunctionalMappingError(f"{label} sharding repair is TP1-only")
+    if (
+        _p59_partition_axes(gradient_sharding.spec) - {model_axis}
+        or _p59_partition_axes(expected_sharding.spec) - {model_axis}
+    ):
+      raise FunctionalMappingError(
+          f"{label} requires DP-replicated TP-only parameter placement"
+      )
+    if (
+        gradient_sharding.devices_indices_map(gradient_value.shape)
+        != expected_sharding.devices_indices_map(gradient_value.shape)
+    ):
+      raise FunctionalMappingError(
+          f"{label} placements are not physically identical"
+      )
+    return jax.device_put(gradient_value, expected_sharding)
+
+  return jax.tree.map(restore, trainer_state, aligned), data_axis
+
+
+_P59_NESTED_SHARD_MAP_LOCK = threading.RLock()
+_P59_ENGINE_MESH_AXES = (
+    "data",
+    "attn_dp",
+    "attn_dp_expert",
+    "expert",
+    "model",
+    "dcp",
+)
+
+
+def _p59_partition_axes(specs):
+  """Returns every named mesh axis referenced by a PartitionSpec tree."""
+  axes = set()
+
+  def visit(value):
+    if isinstance(value, jax.sharding.PartitionSpec):
+      for entry in value:
+        if entry is None:
+          continue
+        if isinstance(entry, str):
+          axes.add(entry)
+        else:
+          axes.update(entry)
+      return
+    if isinstance(value, Mapping):
+      for item in value.values():
+        visit(item)
+      return
+    if isinstance(value, (tuple, list)):
+      for item in value:
+        visit(item)
+
+  visit(specs)
+  return frozenset(axes)
+
+
+def _p59_translate_partition_specs(
+    specs, source_axis: str, target_axis: str | None
+):
+  """Relabels or consumes one admitted axis in a PartitionSpec tree."""
+  if isinstance(specs, jax.sharding.PartitionSpec):
+
+    def translate(entry):
+      if entry is None:
+        return None
+      if isinstance(entry, str):
+        return target_axis if entry == source_axis else entry
+      translated = [
+          target_axis if axis == source_axis else axis for axis in entry
+      ]
+      translated = [axis for axis in translated if axis is not None]
+      if not translated:
+        return None
+      return translated[0] if len(translated) == 1 else tuple(translated)
+
+    return jax.sharding.PartitionSpec(*(translate(entry) for entry in specs))
+  if isinstance(specs, Mapping):
+    return type(specs)(
+        (
+            key,
+            _p59_translate_partition_specs(value, source_axis, target_axis),
+        )
+        for key, value in specs.items()
+    )
+  if isinstance(specs, tuple):
+    return tuple(
+        _p59_translate_partition_specs(value, source_axis, target_axis)
+        for value in specs
+    )
+  if isinstance(specs, list):
+    return [
+        _p59_translate_partition_specs(value, source_axis, target_axis)
+        for value in specs
+    ]
+  return specs
+
+
+@contextlib.contextmanager
+def _p59_localize_tp1_engine_shard_maps(target_mesh, label: str):
+  """Runs compatible nested engine shard maps inside the outer DP map.
+
+  P56 engine kernels use a six-axis shard_map even when every axis except
+  data is unit sized. P59 already maps the surrounding pullback manually over
+  data, so nesting that concrete engine mesh below the trainer dp/tp
+  AbstractMesh is illegal. For the four-chip TP1 proxy only, rebuild the inner
+  map on the current trainer AbstractMesh and relabel its unit model specs. A
+  size-one vmap binds the engine's model axis so its fixed collective body
+  retains the exact TP1 all-gather/ppermute semantics, while the retained
+  shard_map remains the explicit partitioning boundary required by Mosaic.
+
+  The inner engine data spec is consumed because the outer P59 map already
+  applied that exact partition. Proven-unit auxiliary specs are also consumed
+  and their named axes are bound at size one. This is deliberately fail-closed
+  for TP>1, non-unit auxiliaries, and unknown axes. The DP16xTP4 target remains
+  deferred rather than silently taking an unproved path.
+  """
+  shard_map_module = importlib.import_module("jax.experimental.shard_map")
+  original_experimental_shard_map = shard_map_module.shard_map
+  original_jax_shard_map = jax.shard_map
+  target_data, target_model = _p59_mesh_roles(target_mesh, label)
+  target_axes = tuple(target_mesh.axis_names)
+
+  def localize_shard_map(original, modern, fun, kwargs):
+
+    context_mesh = jax.sharding.get_abstract_mesh()
+    if tuple(context_mesh.axis_names) != target_axes:
+      return original(fun, **kwargs)
+    axis_types = dict(zip(context_mesh.axis_names, context_mesh.axis_types))
+    if (
+        axis_types.get(target_data) is not jax.sharding.AxisType.Manual
+        or axis_types.get(target_model) is not jax.sharding.AxisType.Manual
+    ):
+      return original(fun, **kwargs)
+
+    inner_mesh = kwargs.get("mesh")
+    if not isinstance(inner_mesh, jax.sharding.Mesh):
+      raise FunctionalMappingError(
+          f"{label} nested shard_map requires a concrete engine mesh"
+      )
+    if tuple(inner_mesh.axis_names) != _P59_ENGINE_MESH_AXES:
+      raise FunctionalMappingError(
+          f"{label} nested shard_map has unsupported axes "
+          f"{tuple(inner_mesh.axis_names)}"
+      )
+    inner_data, inner_model = _p59_mesh_roles(inner_mesh, label)
+    if (
+        int(target_mesh.shape[target_model]) != 1
+        or int(inner_mesh.shape[inner_model]) != 1
+    ):
+      raise FunctionalMappingError(
+          f"{label} nested engine shard_map localization is TP1-only"
+      )
+    if (
+        int(target_mesh.shape[target_data])
+        != int(inner_mesh.shape[inner_data])
+        or tuple(target_mesh.devices.flat) != tuple(inner_mesh.devices.flat)
+    ):
+      raise FunctionalMappingError(
+          f"{label} nested engine shard_map device topology changed"
+      )
+    referenced_axes = _p59_partition_axes(
+        (kwargs.get("in_specs"), kwargs.get("out_specs"))
+    )
+    unsupported_axes = referenced_axes - set(_P59_ENGINE_MESH_AXES)
+    if unsupported_axes:
+      raise FunctionalMappingError(
+          f"{label} nested engine shard_map uses unsupported axes: "
+          f"axes={sorted(unsupported_axes)}"
+      )
+
+    def bind_unit_axis(inner_fun, axis_name):
+
+      def bound_fun(*args):
+        bound = jax.vmap(
+            inner_fun,
+            in_axes=tuple(None for _ in args),
+            out_axes=0,
+            axis_name=axis_name,
+            axis_size=1,
+        )(*args)
+        return jax.tree.map(lambda value: value[0], bound)
+
+      return bound_fun
+
+    localized_fun = fun
+    for unit_axis in _P59_ENGINE_MESH_AXES:
+      if unit_axis != inner_data:
+        localized_fun = bind_unit_axis(localized_fun, unit_axis)
+
+    localized_kwargs = dict(kwargs)
+    localized_kwargs["mesh"] = context_mesh
+    for specs_name in ("in_specs", "out_specs"):
+      translated_specs = kwargs.get(specs_name)
+      for engine_axis in _P59_ENGINE_MESH_AXES:
+        translated_specs = _p59_translate_partition_specs(
+            translated_specs,
+            engine_axis,
+            target_model if engine_axis == inner_model else None,
+        )
+      localized_kwargs[specs_name] = translated_specs
+    if modern:
+      localized_kwargs["axis_names"] = {target_data, target_model}
+    else:
+      # Installed projection/norm shims use the deprecated experimental API.
+      if "check_vma" in localized_kwargs:
+        localized_kwargs["check_rep"] = localized_kwargs.pop("check_vma")
+      localized_kwargs.pop("axis_names", None)
+    return original(localized_fun, **localized_kwargs)
+
+  def localized_experimental_shard_map(fun=None, /, **kwargs):
+    if fun is None:
+      return lambda wrapped: localized_experimental_shard_map(
+          wrapped, **kwargs
+      )
+    return localize_shard_map(
+        original_experimental_shard_map, False, fun, kwargs
+    )
+
+  def localized_jax_shard_map(fun=None, /, **kwargs):
+    if fun is None:
+      return lambda wrapped: localized_jax_shard_map(wrapped, **kwargs)
+    return localize_shard_map(original_jax_shard_map, True, fun, kwargs)
+
+  with _P59_NESTED_SHARD_MAP_LOCK:
+    if (
+        shard_map_module.shard_map is not original_experimental_shard_map
+        or jax.shard_map is not original_jax_shard_map
+    ):
+      raise FunctionalMappingError(
+          f"{label} nested shard_map hook is already active"
+      )
+    shard_map_module.shard_map = localized_experimental_shard_map
+    jax.shard_map = localized_jax_shard_map
+    try:
+      yield
+    finally:
+      if (
+          shard_map_module.shard_map is not localized_experimental_shard_map
+          or jax.shard_map is not localized_jax_shard_map
+      ):
+        raise FunctionalMappingError(
+            f"{label} nested shard_map hook changed during tracing"
+        )
+      shard_map_module.shard_map = original_experimental_shard_map
+      jax.shard_map = original_jax_shard_map
 
 
 def _segmented_loss_geometry(environ) -> tuple[int, tuple[int, int]]:
@@ -637,12 +1257,24 @@ def _make_canonical_compute_and_gather(gather_logprobs, mesh):
   """Builds the one shared rollout/trainer logprob function object."""
 
   data_size, _, local_m, global_m = _canonical_topology_contract()
-  compact_rows_per_rank = local_m // data_size
+  # These are the exact request paddings precompiled by the pinned vLLM TPU
+  # runner. Under engine DP, the scorer receives the caller-global row count
+  # while shard_map sees one data-rank slice. Every admitted short slice is
+  # row-independently zero-padded to the canonical M256 kernel and sliced back.
+  request_rows = (8, 16, 32, 64, 128, 256)
+  admitted_global_rows = tuple(sorted({
+      local_m,
+      global_m,
+      *(rows for rows in request_rows if rows % data_size == 0),
+  }))
+  admitted_local_rows = tuple(
+      sorted({rows // data_size for rows in admitted_global_rows})
+  )
 
   def local_log_softmax(logits):
     if data_size > 1:
       rows = int(logits.shape[0])
-      if rows == compact_rows_per_rank:
+      if rows in admitted_local_rows and rows != local_m:
         logits = jnp.pad(
             logits,
             ((0, local_m - rows), (0, 0)),
@@ -652,7 +1284,7 @@ def _make_canonical_compute_and_gather(gather_logprobs, mesh):
       if rows != local_m:
         raise FunctionalMappingError(
             "canonical log-softmax per-rank row count changed: "
-            f"{rows} not in ({compact_rows_per_rank}, {local_m})"
+            f"{rows} not in {admitted_local_rows}"
         )
     return canonical_logsoftmax.log_softmax(logits)
 
@@ -746,10 +1378,10 @@ def _make_canonical_compute_and_gather(gather_logprobs, mesh):
 
   def compute_and_gather(logits, next_tokens, max_logprobs):
     rows = int(logits.shape[0])
-    if data_size > 1 and rows not in (local_m, global_m):
+    if data_size > 1 and rows not in admitted_global_rows:
       raise FunctionalMappingError(
           "canonical log-softmax global row count changed: "
-          f"{rows} not in ({local_m}, {global_m})"
+          f"{rows} not in {admitted_global_rows}"
       )
     logprobs = mapped_log_softmax(logits)
     return gather_logprobs(logprobs, next_tokens, max_logprobs)
@@ -1981,6 +2613,66 @@ class _P28SegmentedEngineForward:
     )
     return self._embed_local_fn(leaves, input_ids)
 
+  def _p59_parallel_map(
+      self,
+      local_fn,
+      args,
+      out_specs_factory,
+      *,
+      rank_local_arg_indices,
+      module_name,
+      scope_name,
+  ):
+    """Maps one pullback manually over DP while non-unit TP stays automatic."""
+    mesh, data_axis = _p59_replicated_data_mesh(args[0], module_name)
+    aligned_args = tuple(
+        _p59_align_to_mesh(value, mesh, module_name) for value in args
+    )
+    if int(mesh.shape[data_axis]) <= 1:
+      raise FunctionalMappingError(
+          f"{module_name} requires a multi-rank data mesh"
+      )
+    # A unit TP axis changes no placement. Making it manual permits explicit
+    # TP1 output specs and the nested engine shard_map Mosaic/Pallas requires.
+    manual_axes = _p59_manual_rank_axes(mesh, data_axis, module_name)
+    mapped = jax.shard_map(
+        local_fn,
+        mesh=mesh,
+        in_specs=tuple(
+            _rank_local_leading_specs(
+                value,
+                data_axis,
+                int(mesh.shape[data_axis]),
+                module_name,
+            )
+            if index in rank_local_arg_indices
+            else _manual_axis_specs(value, data_axis)
+            for index, value in enumerate(aligned_args)
+        ),
+        out_specs=out_specs_factory(
+            data_axis, int(mesh.shape[data_axis]), aligned_args
+        ),
+        axis_names=manual_axes,
+        check_vma=False,
+    )
+    compiled = _xprof_jit(
+        mapped, module_name=module_name, scope_name=scope_name
+    )
+
+    def invoke(*runtime_args):
+      aligned_runtime_args = tuple(
+          _p59_align_to_mesh(value, mesh, module_name)
+          for value in runtime_args
+      )
+      with _p59_localize_tp1_engine_shard_maps(mesh, module_name):
+        return compiled(*aligned_runtime_args)
+
+    return invoke
+
+  @staticmethod
+  def _p59_stage_rank_gradient(tree):
+    return jax.tree.map(lambda value: jnp.expand_dims(value, 0), tree)
+
   def run_embed_pullback(self, input_ids, dhidden, *, state_leaves=None):
     """Returns local embedding parameter cotangents."""
     self._reject_outer_transform(input_ids, dhidden)
@@ -1992,6 +2684,38 @@ class _P28SegmentedEngineForward:
         "embed",
     )
     return self._embed_pullback_fn(leaves, input_ids, dhidden)
+
+  def run_embed_pullback_rank_parallel(
+      self, input_ids, dhidden, *, state_leaves=None
+  ):
+    """Returns one physically local embedding gradient row per DP rank."""
+    self._reject_outer_transform(input_ids, dhidden)
+    self._require_full_loss_endpoints()
+    leaves = self._endpoint_leaves(
+        state_leaves,
+        self._embed_full_indices,
+        self._embed_local_leaves,
+        "embed",
+    )
+    if getattr(self, "_p59_embed_pullback_fn", None) is None:
+
+      def local_pullback(local_leaves, local_ids, local_dhidden):
+        gradients = self._embed_pullback_fn(
+            local_leaves, local_ids, local_dhidden
+        )
+        return self._p59_stage_rank_gradient(gradients)
+
+      self._p59_embed_pullback_fn = self._p59_parallel_map(
+          local_pullback,
+          (leaves, input_ids, dhidden),
+          lambda data_axis, axis_size, aligned: _rank_staged_specs(
+              aligned[0], data_axis
+          ),
+          rank_local_arg_indices=(1, 2),
+          module_name="zt_tr_dp_parallel_bwd_embed",
+          scope_name="zt/tr/dp_parallel/embed/bwd",
+      )
+    return self._p59_embed_pullback_fn(leaves, input_ids, dhidden)
 
   def run_norm_forward(self, hidden, *, state_leaves=None):
     """Runs the isolated final-norm endpoint used by the G5c host schedule."""
@@ -2017,6 +2741,41 @@ class _P28SegmentedEngineForward:
     )
     return self._norm_pullback_fn(leaves, hidden, dnormalized)
 
+  def run_norm_pullback_rank_parallel(
+      self, hidden, dnormalized, *, state_leaves=None
+  ):
+    """Returns staged norm gradients and the ordinary sharded hidden VJP."""
+    self._reject_outer_transform(hidden, dnormalized)
+    self._require_full_loss_endpoints()
+    leaves = self._endpoint_leaves(
+        state_leaves,
+        self._norm_full_indices,
+        self._norm_local_leaves,
+        "final norm",
+    )
+    if getattr(self, "_p59_norm_pullback_fn", None) is None:
+
+      def local_pullback(local_leaves, local_hidden, local_dnormalized):
+        gradients, dhidden = self._norm_pullback_fn(
+            local_leaves, local_hidden, local_dnormalized
+        )
+        return self._p59_stage_rank_gradient(gradients), dhidden
+
+      self._p59_norm_pullback_fn = self._p59_parallel_map(
+          local_pullback,
+          (leaves, hidden, dnormalized),
+          lambda data_axis, axis_size, aligned: (
+              _rank_staged_specs(aligned[0], data_axis),
+              _rank_local_leading_specs(
+                  aligned[1], data_axis, axis_size, "P59 norm output"
+              ),
+          ),
+          rank_local_arg_indices=(1, 2),
+          module_name="zt_tr_dp_parallel_bwd_norm",
+          scope_name="zt/tr/dp_parallel/final_norm/bwd",
+      )
+    return self._p59_norm_pullback_fn(leaves, hidden, dnormalized)
+
   def run_head_forward(self, hidden, *, state_leaves=None):
     """Runs the isolated tied or untied output endpoint used by G5c."""
     self._reject_outer_transform(hidden)
@@ -2041,12 +2800,151 @@ class _P28SegmentedEngineForward:
     )
     return self._head_pullback_fn(leaves, hidden, dlogits)
 
-  def assemble_full_state_gradient(
-      self, *, embed, layers, norm, head
+  def run_head_pullback_rank_parallel(
+      self, hidden, dlogits, *, state_leaves=None
   ):
-    """Assembles endpoint and layer cotangents in full-state order."""
+    """Returns staged head gradients and the ordinary sharded hidden VJP."""
+    self._reject_outer_transform(hidden, dlogits)
+    self._require_full_loss_endpoints()
+    leaves = self._endpoint_leaves(
+        state_leaves,
+        self._head_full_indices,
+        self._head_local_leaves,
+        "lm head",
+    )
+    if getattr(self, "_p59_head_pullback_fn", None) is None:
+
+      def local_pullback(local_leaves, local_hidden, local_dlogits):
+        gradients, dhidden = self._head_pullback_fn(
+            local_leaves, local_hidden, local_dlogits
+        )
+        return self._p59_stage_rank_gradient(gradients), dhidden
+
+      self._p59_head_pullback_fn = self._p59_parallel_map(
+          local_pullback,
+          (leaves, hidden, dlogits),
+          lambda data_axis, axis_size, aligned: (
+              _rank_staged_specs(aligned[0], data_axis),
+              _rank_local_leading_specs(
+                  aligned[1], data_axis, axis_size, "P59 head output"
+              ),
+          ),
+          rank_local_arg_indices=(1, 2),
+          module_name="zt_tr_dp_parallel_bwd_head",
+          scope_name="zt/tr/dp_parallel/lm_head/bwd",
+      )
+    return self._p59_head_pullback_fn(leaves, hidden, dlogits)
+
+  def run_block_pullback_rank_parallel(
+      self,
+      layer_index,
+      cache,
+      hidden,
+      attention_metadata,
+      dnext_cache,
+      dnext_hidden,
+      *,
+      state_leaves=None,
+  ):
+    """Returns staged layer gradients and ordinary sharded input VJPs."""
+    self._reject_outer_transform(
+        cache,
+        hidden,
+        attention_metadata,
+        dnext_cache,
+        dnext_hidden,
+    )
+    layer_index = int(layer_index)
+    if layer_index < 0 or layer_index >= len(self._local_layer_pullback_fns):
+      raise FunctionalMappingError(
+          f"P59 pullback layer index out of range: {layer_index}"
+      )
+    local_leaves = self._local_layer_leaves[layer_index]
+    if state_leaves is not None:
+      state_leaves = tuple(state_leaves)
+      if len(state_leaves) != self._num_state_leaves:
+        raise FunctionalMappingError(
+            "P59 pullback state leaf count changed: "
+            f"{len(state_leaves)} != {self._num_state_leaves}"
+        )
+      local_leaves = tuple(
+          state_leaves[index]
+          for index in self._local_layer_full_indices[layer_index]
+      )
+    functions = getattr(self, "_p59_layer_pullback_fns", None)
+    if functions is None:
+      functions = [None] * len(self._local_layer_pullback_fns)
+      self._p59_layer_pullback_fns = functions
+    if functions[layer_index] is None:
+      pullback_fn = self._local_layer_pullback_fns[layer_index]
+
+      def local_pullback(
+          leaves,
+          local_cache,
+          local_hidden,
+          local_metadata,
+          local_dcache,
+          local_dhidden,
+      ):
+        gradients, dcache, dhidden = pullback_fn(
+            leaves,
+            local_cache,
+            local_hidden,
+            local_metadata,
+            local_dcache,
+            local_dhidden,
+        )
+        return self._p59_stage_rank_gradient(gradients), dcache, dhidden
+
+      functions[layer_index] = self._p59_parallel_map(
+          local_pullback,
+          (
+              local_leaves,
+              cache,
+              hidden,
+              attention_metadata,
+              dnext_cache,
+              dnext_hidden,
+          ),
+          lambda data_axis, axis_size, aligned: (
+              _rank_staged_specs(aligned[0], data_axis),
+              _rank_local_leading_specs(
+                  aligned[1], data_axis, axis_size, "P59 cache output"
+              ),
+              _rank_local_leading_specs(
+                  aligned[2], data_axis, axis_size, "P59 layer output"
+              ),
+          ),
+          rank_local_arg_indices=(1, 2, 4, 5),
+          module_name=f"zt_tr_dp_parallel_bwd_layer_{layer_index:02d}",
+          scope_name=f"zt/tr/dp_parallel/layer/{layer_index:02d}/bwd",
+      )
+    return functions[layer_index](
+        local_leaves,
+        cache,
+        hidden,
+        attention_metadata,
+        dnext_cache,
+        dnext_hidden,
+    )
+
+  def assemble_full_state_gradient(
+      self, *, embed, layers, norm, head, rank_axis_size=None
+  ):
+    """Assembles ordinary or rank-staged cotangents in full-state order."""
     self._reject_outer_transform(embed, layers, norm, head)
     self._require_full_loss_endpoints()
+    if rank_axis_size is not None:
+      rank_axis_size = int(rank_axis_size)
+      if rank_axis_size <= 1:
+        raise FunctionalMappingError(
+            f"P59 staged rank axis must exceed one, got {rank_axis_size}"
+        )
+      if not self._p30_sparse_grad_assembly:
+        raise FunctionalMappingError(
+            "P59 rank-parallel assembly requires "
+            "CANON_P30_SPARSE_GRAD_ASSEMBLY=1"
+        )
     if len(layers) != len(self._local_layer_full_indices):
       raise FunctionalMappingError(
           "P28 G5c layer-gradient count changed: "
@@ -2070,10 +2968,15 @@ class _P28SegmentedEngineForward:
         )
       for index, value in zip(indices, values, strict=True):
         target = self._full_state_leaves[index]
-        if value.shape != target.shape:
+        target_shape = (
+            target.shape
+            if rank_axis_size is None
+            else (rank_axis_size,) + target.shape
+        )
+        if value.shape != target_shape:
           raise FunctionalMappingError(
               f"P28 G5c {label} cotangent shape changed at full leaf "
-              f"{index}: {value.shape} != {target.shape}"
+              f"{index}: {value.shape} != {target_shape}"
           )
         if self._p30_sparse_grad_assembly:
           if full[index] is not None:
@@ -2103,11 +3006,19 @@ class _P28SegmentedEngineForward:
           strict=True,
       ):
         target = self._full_state_leaves[index]
-        if embed_value.shape != target.shape or head_value.shape != target.shape:
+        target_shape = (
+            target.shape
+            if rank_axis_size is None
+            else (rank_axis_size,) + target.shape
+        )
+        if (
+            embed_value.shape != target_shape
+            or head_value.shape != target_shape
+        ):
           raise FunctionalMappingError(
               "P28 G5c tied embed/head cotangent shape changed at full leaf "
               f"{index}: {embed_value.shape}/{head_value.shape} != "
-              f"{target.shape}"
+              f"{target_shape}"
           )
         tied_values.append(
             embed_value.astype(target.dtype) + head_value.astype(target.dtype)
@@ -3520,6 +4431,149 @@ class Qwen3EngineForwardAdapter:
         )
     return self._p50_adjoint_fn(trainer_state, engine_cotangents)
 
+  def _p59_rank_parallel_report_adjoint(
+      self, trainer_state, staged_engine_cotangents
+  ):
+    """Maps every DP-local engine-gradient row to trainer state in parallel."""
+    _P28SegmentedEngineForward._reject_outer_transform(  # pylint: disable=protected-access
+        trainer_state, staged_engine_cotangents
+    )
+    staged_engine_cotangents = tuple(staged_engine_cotangents)
+    mesh, data_axis = _p59_replicated_data_mesh(
+        (trainer_state, staged_engine_cotangents),
+        "P59 report adjoint",
+    )
+    cached_axis = getattr(self, "_p59_report_dp_axis", None)
+    if cached_axis is not None and cached_axis != data_axis:
+      raise FunctionalMappingError(
+          "P59 report adjoint data axis changed: "
+          f"{cached_axis!r} != {data_axis!r}"
+      )
+    if getattr(self, "_p59_report_adjoint_fn", None) is None:
+      model_config = self._runner.model_config
+
+      def mapping(state):
+        return map_trainer_state_to_engine_leaves(
+            trainer_state=state,
+            engine_state_contract=self._engine_state_contract,
+            key_mappings=self._key_mappings,
+            transpose_keys=self._transpose_keys,
+            key_mapping_hook_fns=self._hook_fns,
+            num_kv_heads=model_config.get_total_num_kv_heads(),
+            head_dim=model_config.get_head_size(),
+            tp_size=self._tp_size,
+        ).leaves
+
+      expected = tuple(
+          value.shape for value in jax.eval_shape(mapping, trainer_state)
+      )
+      if len(expected) != len(staged_engine_cotangents):
+        raise FunctionalMappingError(
+            "P59 mapping-adjoint cotangent count changed: "
+            f"{len(staged_engine_cotangents)} != {len(expected)}"
+        )
+
+      def local_adjoint(state, staged_cotangents):
+        cotangents = jax.tree.map(
+            lambda value: jnp.squeeze(value, axis=0), staged_cotangents
+        )
+        _, pullback = jax.vjp(mapping, state)
+        gradient = pullback(tuple(cotangents))[0]
+        return jax.tree.map(
+            lambda value: jnp.expand_dims(
+                value.astype(jnp.float32), axis=0
+            ),
+            gradient,
+        )
+
+      mapped = jax.shard_map(
+          local_adjoint,
+          mesh=mesh,
+          in_specs=(
+              _manual_axis_specs(trainer_state, data_axis),
+              _manual_axis_specs(
+                  staged_engine_cotangents, data_axis
+              ),
+          ),
+          out_specs=_rank_staged_specs(trainer_state, data_axis),
+          axis_names=_p59_manual_rank_axes(
+              mesh, data_axis, "P59 report adjoint"
+          ),
+          check_vma=False,
+      )
+      self._p59_report_adjoint_shapes = expected
+      self._p59_report_dp_axis = data_axis
+      self._p59_report_adjoint_fn = _xprof_jit(
+          mapped,
+          module_name="zt_tr_dp_parallel_bwd_adjoint",
+          scope_name="zt/tr/dp_parallel/report/adjoint",
+          donate_argnums=(1,),
+      )
+    expected = self._p59_report_adjoint_shapes
+    for index, (shape, cotangent) in enumerate(
+        zip(expected, staged_engine_cotangents, strict=True)
+    ):
+      staged_shape = (self._data_size,) + tuple(shape)
+      if cotangent.shape != staged_shape:
+        raise FunctionalMappingError(
+            "P59 mapping-adjoint staged cotangent shape changed at leaf "
+            f"{index}: {cotangent.shape} != {staged_shape}"
+        )
+    staged_trainer_gradient = self._p59_report_adjoint_fn(
+        trainer_state, staged_engine_cotangents
+    )
+    return _p59_restore_unit_tp_staged_specs(
+        trainer_state, staged_trainer_gradient, data_axis
+    )
+
+  def _p59_reducer_template(self, trainer_state, staged_gradient):
+    """Builds a buffer-free reducer template and checks staged shardings."""
+    if jax.tree.structure(trainer_state) != jax.tree.structure(staged_gradient):
+      raise FunctionalMappingError(
+          "P59 staged trainer-gradient tree differs from trainer state"
+      )
+    _, data_axis = _p59_replicated_data_mesh(
+        (trainer_state, staged_gradient), "P59 reducer template"
+    )
+    if data_axis != getattr(self, "_p59_report_dp_axis", None):
+      raise FunctionalMappingError(
+          "P59 reducer and report-adjoint data axes differ"
+      )
+
+    def template(state_value, staged_value):
+      state_sharding = getattr(state_value, "sharding", None)
+      staged_sharding = getattr(staged_value, "sharding", None)
+      if not isinstance(state_sharding, jax.sharding.NamedSharding):
+        raise FunctionalMappingError(
+            "P59 trainer state requires NamedSharding leaves"
+        )
+      expected_shape = (self._data_size,) + tuple(state_value.shape)
+      expected_spec = jax.sharding.PartitionSpec(
+          data_axis, *tuple(state_sharding.spec)
+      )
+      expected_sharding = jax.sharding.NamedSharding(
+          state_sharding.mesh, expected_spec
+      )
+      if (
+          staged_value.shape != expected_shape
+          or staged_value.dtype != jnp.float32
+          or staged_sharding != expected_sharding
+      ):
+        raise FunctionalMappingError(
+            "P59 staged trainer-gradient placement changed: "
+            f"{staged_value.shape}/{staged_value.dtype}/{staged_sharding} != "
+            f"{expected_shape}/{jnp.float32}/{expected_sharding}"
+        )
+      return jax.ShapeDtypeStruct(
+          state_value.shape,
+          jnp.float32,
+          sharding=jax.sharding.NamedSharding(
+              state_sharding.mesh, state_sharding.spec
+          ),
+      )
+
+    return jax.tree.map(template, trainer_state, staged_gradient)
+
   def _batched_report_add(self, total_tree, delta_tree):
     """One-dispatch elementwise tree add (no reduction freedom)."""
     if getattr(self, "_p50_acc_fn", None) is None:
@@ -4247,9 +5301,15 @@ class Qwen3EngineForwardAdapter:
     _P28SegmentedEngineForward._reject_outer_transform(  # pylint: disable=protected-access
         prompt, completion, prompt_valid, completion_valid
     )
-    if self._data_size not in (8, 16):
+    p59_four_chip_proxy = (
+        self._data_size == 4
+        and os.environ.get("CANON_P32_WORKLOAD", "")
+        == "gsm8k-p59-dp4-tp1"
+    )
+    if self._data_size not in (8, 16) and not p59_four_chip_proxy:
       raise FunctionalMappingError(
-          f"P32 grouped reverse requires data size 8 or 16, got {self._data_size}"
+          "P32 grouped reverse requires data size 8 or 16, or the exact "
+          f"P59 four-chip proxy; got {self._data_size}"
       )
     prompt = jnp.asarray(prompt)
     completion = jnp.asarray(completion)
@@ -4529,6 +5589,17 @@ class Qwen3EngineForwardAdapter:
       self, segmented, engine_leaves, spec, dlogps, dentropy
   ):
     """Reverses one group of rank-local sequences by layer and chunk."""
+    parallel_value = os.environ.get("CANON_P59_RANK_PARALLEL_BACKWARD", "")
+    if parallel_value not in ("", "0", "1"):
+      raise FunctionalMappingError(
+          "CANON_P59_RANK_PARALLEL_BACKWARD must be unset/0/1, "
+          f"got {parallel_value!r}"
+      )
+    rank_parallel = parallel_value == "1"
+    if rank_parallel and self._data_size <= 1:
+      raise FunctionalMappingError(
+          "P59 rank-parallel backward requires more than one DP rank"
+      )
     replay = self._p32_forward_group(
         segmented, engine_leaves, spec, keep_cache_inputs=True
     )
@@ -4552,6 +5623,11 @@ class Qwen3EngineForwardAdapter:
     def tree_add(left, right):
       return jax.tree.map(lambda a, b: a + b, left, right)
 
+    def tree_start(right):
+      return jax.tree.map(
+          lambda value: jnp.asarray(0, value.dtype) + value, right
+      )
+
     # Un-jitted, these dispatch one tiny program per leaf: the gradient
     # accumulation of a ~310-leaf state walks head/norm/embed plus 28
     # layers x 16 chunks and shows up in a profile as tens of thousands
@@ -4564,13 +5640,21 @@ class Qwen3EngineForwardAdapter:
     if os.environ.get("CANON_FUSED_TREE_OPS", "") == "1":
       tree_zeros = jax.jit(tree_zeros)
       tree_add = jax.jit(tree_add)
-    layer_grads = [
-        tree_zeros(leaves)
-        for leaves in segmented._local_layer_leaves  # pylint: disable=protected-access
-    ]
-    embed_grad = tree_zeros(segmented._embed_local_leaves)  # pylint: disable=protected-access
-    norm_grad = tree_zeros(segmented._norm_local_leaves)  # pylint: disable=protected-access
-    head_grad = tree_zeros(segmented._head_local_leaves)  # pylint: disable=protected-access
+      tree_start = jax.jit(tree_start)
+    if rank_parallel:
+      layer_grads = [
+          None
+          for _ in segmented._local_layer_leaves  # pylint: disable=protected-access
+      ]
+      embed_grad = norm_grad = head_grad = None
+    else:
+      layer_grads = [
+          tree_zeros(leaves)
+          for leaves in segmented._local_layer_leaves  # pylint: disable=protected-access
+      ]
+      embed_grad = tree_zeros(segmented._embed_local_leaves)  # pylint: disable=protected-access
+      norm_grad = tree_zeros(segmented._norm_local_leaves)  # pylint: disable=protected-access
+      head_grad = tree_zeros(segmented._head_local_leaves)  # pylint: disable=protected-access
     dcache_carry = tuple(
         tree_zeros(cache) for cache in replay["final_caches"]
     )
@@ -4629,47 +5713,99 @@ class Qwen3EngineForwardAdapter:
             dchunk_entropy,
         ).astype(raw_logits.dtype)
         counts["processed_pullback"] += 1
-        local_head_grad, dnormalized = segmented.run_head_pullback(
-            normalized, dlogits, state_leaves=engine_leaves
-        )
+        if rank_parallel:
+          local_head_grad, dnormalized = (
+              segmented.run_head_pullback_rank_parallel(
+                  normalized, dlogits, state_leaves=engine_leaves
+              )
+          )
+        else:
+          local_head_grad, dnormalized = segmented.run_head_pullback(
+              normalized, dlogits, state_leaves=engine_leaves
+          )
         counts["head_pullback"] += 1
-        head_grad = tree_add(head_grad, local_head_grad)
-        local_norm_grad, dhidden = segmented.run_norm_pullback(
-            pre_norm, dnormalized, state_leaves=engine_leaves
+        head_grad = (
+            tree_start(local_head_grad)
+            if head_grad is None
+            else tree_add(head_grad, local_head_grad)
         )
+        if rank_parallel:
+          local_norm_grad, dhidden = (
+              segmented.run_norm_pullback_rank_parallel(
+                  pre_norm, dnormalized, state_leaves=engine_leaves
+              )
+          )
+        else:
+          local_norm_grad, dhidden = segmented.run_norm_pullback(
+              pre_norm, dnormalized, state_leaves=engine_leaves
+          )
         counts["norm_pullback"] += 1
-        norm_grad = tree_add(norm_grad, local_norm_grad)
+        norm_grad = (
+            tree_start(local_norm_grad)
+            if norm_grad is None
+            else tree_add(norm_grad, local_norm_grad)
+        )
 
         previous_cache_carry = [None] * len(layer_tape)
         for layer_index in reversed(range(len(layer_tape))):
           cache_in, hidden_in = layer_tape[layer_index]
-          local_grad, dcache, dhidden = segmented.run_block_pullback(
-              layer_index,
-              cache_in,
-              hidden_in,
-              metadata,
-              dcache_carry[layer_index],
-              dhidden,
-              state_leaves=engine_leaves,
-          )
-          layer_grads[layer_index] = tree_add(
-              layer_grads[layer_index], local_grad
+          if rank_parallel:
+            local_grad, dcache, dhidden = (
+                segmented.run_block_pullback_rank_parallel(
+                    layer_index,
+                    cache_in,
+                    hidden_in,
+                    metadata,
+                    dcache_carry[layer_index],
+                    dhidden,
+                    state_leaves=engine_leaves,
+                )
+            )
+          else:
+            local_grad, dcache, dhidden = segmented.run_block_pullback(
+                layer_index,
+                cache_in,
+                hidden_in,
+                metadata,
+                dcache_carry[layer_index],
+                dhidden,
+                state_leaves=engine_leaves,
+            )
+          layer_grads[layer_index] = (
+              tree_start(local_grad)
+              if layer_grads[layer_index] is None
+              else tree_add(layer_grads[layer_index], local_grad)
           )
           previous_cache_carry[layer_index] = dcache
           counts["layer_pullback"] += 1
         dcache_carry = tuple(previous_cache_carry)
-        local_embed_grad = segmented.run_embed_pullback(
-            input_ids, dhidden, state_leaves=engine_leaves
+        if rank_parallel:
+          local_embed_grad = segmented.run_embed_pullback_rank_parallel(
+              input_ids, dhidden, state_leaves=engine_leaves
+          )
+        else:
+          local_embed_grad = segmented.run_embed_pullback(
+              input_ids, dhidden, state_leaves=engine_leaves
+          )
+        embed_grad = (
+            tree_start(local_embed_grad)
+            if embed_grad is None
+            else tree_add(embed_grad, local_embed_grad)
         )
-        embed_grad = tree_add(embed_grad, local_embed_grad)
         counts["embed_pullback"] += 1
 
+    if any(
+        value is None
+        for value in (embed_grad, norm_grad, head_grad, *layer_grads)
+    ):
+      raise FunctionalMappingError("P59 reverse emitted an empty gradient pack")
     return {
         "engine_gradients": segmented.assemble_full_state_gradient(
             embed=embed_grad,
             layers=tuple(layer_grads),
             norm=norm_grad,
             head=head_grad,
+            rank_axis_size=self._data_size if rank_parallel else None,
         ),
         "initial_cache_cotangents": dcache_carry,
         "counts": counts,
@@ -4748,6 +5884,11 @@ class Qwen3EngineForwardAdapter:
       )
       contract = workload.training_contract()
       reverse_groups = contract.rank_major_reverse_groups()
+    trainer_dp_axis = self._dp_axis
+    if not p34:
+      _, trainer_dp_axis = _p59_replicated_data_mesh(
+          trainer_state, "P32 grouped trainer state"
+      )
     if getattr(train_example, "segment_ids", None) is not None:
       raise FunctionalMappingError("P32 D3b0 admits unpacked trajectories only")
 
@@ -4786,10 +5927,10 @@ class Qwen3EngineForwardAdapter:
           "P32 grouped reverse requires the frozen global trajectory count: "
           f"{prompts.shape[0]} != {contract.global_trajectories}"
       )
-    expected_widths = (
-        workload.max_prompt_length,
-        workload.max_response_length,
-    )
+    try:
+      expected_widths = dp_workloads.expected_token_widths(workload)
+    except ValueError as exc:
+      raise FunctionalMappingError(str(exc)) from exc
     if (int(prompts.shape[1]), int(completions.shape[1])) != expected_widths:
       raise FunctionalMappingError(
           f"canonical {getattr(workload, 'name', 'deepswe')} token contract changed: "
@@ -4859,6 +6000,48 @@ class Qwen3EngineForwardAdapter:
       )
     batched_report = report_mode == "1"
     report_verify = report_mode == "verify"
+    rank_parallel_value = os.environ.get(
+        "CANON_P59_RANK_PARALLEL_BACKWARD", ""
+    )
+    if rank_parallel_value not in ("", "0", "1"):
+      raise FunctionalMappingError(
+          "CANON_P59_RANK_PARALLEL_BACKWARD must be unset/0/1, "
+          f"got {rank_parallel_value!r}"
+      )
+    rank_parallel_backward = rank_parallel_value == "1"
+    p59_xprof_directory = _p59_xprof_backward_directory(
+        workload_name=workload.name,
+        dp_size=contract.dp_size,
+        tp_size=contract.tp_size,
+        rank_parallel=rank_parallel_backward,
+    )
+    p59_xprof_update = -1
+    if p59_xprof_directory:
+      p59_xprof_update = getattr(self, "_p59_xprof_update", 0)
+      self._p59_xprof_update = p59_xprof_update + 1
+    p59_xprof_capture = bool(p59_xprof_directory) and p59_xprof_update == 1
+    if p59_xprof_directory and p59_xprof_update == 0:
+      print(
+          "[P59.XPROF] phase=backward_group armed update=1 groups=1",
+          flush=True,
+      )
+    serial_bridge_value = os.environ.get(
+        "CANON_P59_DP4_SERIAL_MESH_BRIDGE", ""
+    )
+    if serial_bridge_value not in ("", "0", "1"):
+      raise FunctionalMappingError(
+          "CANON_P59_DP4_SERIAL_MESH_BRIDGE must be unset/0/1, "
+          f"got {serial_bridge_value!r}"
+      )
+    serial_mesh_bridge = serial_bridge_value == "1"
+    if serial_mesh_bridge and (
+        p34
+        or workload.name != "gsm8k-p59-dp4-tp1"
+        or (contract.dp_size, contract.tp_size) != (4, 1)
+    ):
+      raise FunctionalMappingError(
+          "P59 serial mesh bridge requires the exact DP4xTP1 proxy workload"
+      )
     p32_forward_start = time.perf_counter()
     p32_forward_durations = []
     forwards = []
@@ -4921,6 +6104,90 @@ class Qwen3EngineForwardAdapter:
 
     def reverse_reduce_group(index, spec):
       nonlocal reducer
+      if rank_parallel_backward:
+        reverse = self._p32_reverse_group(
+            segmented,
+            engine_leaves,
+            spec,
+            grouped_dlogps[index],
+            grouped_dentropy[index],
+        )
+        if not bool(np.asarray(jnp.array_equal(
+            reverse["replay_logps"], grouped_logps[index]
+        ))):
+          raise FunctionalMappingError(
+              f"P59 group {index} parallel replay logprobs changed"
+          )
+        adjoint_start = time.perf_counter()
+        staged_gradient = self._p59_rank_parallel_report_adjoint(
+            trainer_state, reverse["engine_gradients"]
+        )
+        adjoint_seconds[0] += time.perf_counter() - adjoint_start
+        if reducer is None:
+          reducer_factory = getattr(
+              self,
+              "_p33_gradient_reducer_factory",
+              dp_training.FixedDPRankGradientReducer,
+          )
+          reducer_dp_axis = getattr(self, "_p59_report_dp_axis", None)
+          if reducer_dp_axis not in ("data", "dp"):
+            raise FunctionalMappingError(
+                "P59 report adjoint did not resolve a replicated DP axis"
+            )
+          if reducer_dp_axis != trainer_dp_axis:
+            raise FunctionalMappingError(
+                "P59 report and grouped trainer data axes differ"
+            )
+          reducer = reducer_factory(
+              self._p59_reducer_template(trainer_state, staged_gradient),
+              dp_size=contract.dp_size,
+              dp_axis=reducer_dp_axis,
+              require_distinct_fingerprints=False,
+          )
+          if not callable(getattr(reducer, "finalize_staged", None)):
+            raise FunctionalMappingError(
+              "P59 gradient reducer cannot consume a parallel rank table"
+            )
+          print(
+              f"[P59.DP{contract.dp_size}] gradient_reducer_ready "
+              f"dp_axis={reducer_dp_axis} dp_size={contract.dp_size} "
+              "staging=parallel_table",
+              flush=True,
+          )
+        cache_nonzero = sum(
+            int(np.asarray(jnp.count_nonzero(value)))
+            for value in jax.tree.leaves(
+                reverse["initial_cache_cotangents"]
+            )
+        )
+        one_gradient, reduction_report = reducer.finalize_staged(
+            staged_gradient
+        )
+        leaves = jax.tree.leaves(one_gradient)
+        report = {
+            "group": index,
+            "trajectory_rows": reverse_groups[index],
+            "n_real": spec["host_n_real"],
+            "rank_counts": (reverse["counts"],),
+            "pullback_invocations": 1,
+            "gradient_finite": all(
+                bool(np.asarray(jnp.all(jnp.isfinite(value))))
+                for value in leaves
+            ),
+            "gradient_nonzero": sum(
+                int(np.asarray(jnp.count_nonzero(value))) for value in leaves
+            ),
+            "initial_cache_cotangent_nonzero": cache_nonzero,
+            "dp_reduction": reduction_report,
+        }
+        seen = set()
+        for value in jax.tree.leaves(reverse):
+          if isinstance(value, jax.Array) and id(value) not in seen:
+            seen.add(id(value))
+            if not value.is_deleted():
+              value.delete()
+        return one_gradient, report
+
       rank_counts = []
       cache_nonzero = 0
       for rank in range(contract.dp_size):
@@ -4969,6 +6236,18 @@ class Qwen3EngineForwardAdapter:
                   f"P50 batched-report verify mismatch: {fault}"
               )
         adjoint_seconds[0] += time.perf_counter() - adjoint_start
+        if serial_mesh_bridge:
+          rank_gradient, bridge_dp_axis = (
+              _p59_align_serial_gradient_to_trainer_state(
+                  trainer_state,
+                  rank_gradient,
+                  "P59 DP4 serial report mesh bridge",
+              )
+          )
+          if bridge_dp_axis != trainer_dp_axis:
+            raise FunctionalMappingError(
+                "P59 serial mesh bridge and grouped trainer data axes differ"
+            )
         if reducer is None:
           reducer_factory = getattr(
               self,
@@ -4978,7 +6257,7 @@ class Qwen3EngineForwardAdapter:
           reducer = reducer_factory(
               rank_gradient,
               dp_size=contract.dp_size,
-              dp_axis=self._dp_axis,
+              dp_axis=trainer_dp_axis,
               # Production rewards can legitimately produce identical rank
               # gradients. In particular, RLOO gives every generation an
               # exact zero advantage when all generations for one prompt have
@@ -4986,9 +6265,15 @@ class Qwen3EngineForwardAdapter:
               # order, and post-reduction replica equality remain hard gates.
               require_distinct_fingerprints=False,
           )
+          if serial_mesh_bridge:
+            print(
+                "[P59.DP4] serial_report_mesh_bridge_ready "
+                f"dp_axis={trainer_dp_axis} placement=trainer_exact",
+                flush=True,
+            )
           print(
               f"[{'P34' if p34 else 'P33'}.DP{contract.dp_size}] "
-              f"gradient_reducer_ready dp_axis={self._dp_axis} "
+              f"gradient_reducer_ready dp_axis={trainer_dp_axis} "
               f"dp_size={contract.dp_size}",
               flush=True,
           )
@@ -5015,6 +6300,7 @@ class Qwen3EngineForwardAdapter:
           "trajectory_rows": reverse_groups[index],
           "n_real": spec["host_n_real"],
           "rank_counts": tuple(rank_counts),
+          "pullback_invocations": contract.dp_size,
           "gradient_finite": all(
               bool(np.asarray(jnp.all(jnp.isfinite(value))))
               for value in leaves
@@ -5032,10 +6318,29 @@ class Qwen3EngineForwardAdapter:
     adjoint_seconds = [0.0]
     p32_reverse_start = time.perf_counter()
     p32_reverse_durations = []
+    if p59_xprof_capture:
+      options = jax.profiler.ProfileOptions()
+      options.host_tracer_level = 1
+      options.python_tracer_level = 0
+      jax.profiler.start_trace(
+          log_dir=p59_xprof_directory, profiler_options=options
+      )
+      print(
+          "[P59.XPROF] phase=backward_group started update=1 groups=1",
+          flush=True,
+      )
     for index, spec in enumerate(specs):
       p32_group_start = time.perf_counter()
       one_gradient, report = reverse_reduce_group(index, spec)
       p32_reverse_durations.append(time.perf_counter() - p32_group_start)
+      if p59_xprof_capture and index == 0:
+        jax.block_until_ready(one_gradient)
+        jax.profiler.stop_trace()
+        print(
+            "[P59.XPROF] phase=backward_group stopped update=1 groups=1 "
+            "anchor=gradient_ready",
+            flush=True,
+        )
       if deterministic_repeat:
         repeated_gradient, repeated_report = reverse_reduce_group(index, spec)
         exact_flags = tuple(
@@ -5084,7 +6389,8 @@ class Qwen3EngineForwardAdapter:
           f"[{'P34' if p34 else 'P33'}.DP{contract.dp_size}] reverse_group_done "
           f"group={index + 1}/{contract.local_trajectories} "
           f"rows={reverse_groups[index]} "
-          f"rank_pullbacks={report['dp_reduction']['rank_contributions']} "
+          f"rank_contributions={report['dp_reduction']['rank_contributions']} "
+          f"pullback_invocations={report['pullback_invocations']} "
           "unique_rank_fingerprints="
           f"{report['dp_reduction']['rank_local_fingerprint_unique_count']}/"
           f"{contract.dp_size} "
@@ -5142,7 +6448,7 @@ class Qwen3EngineForwardAdapter:
         "reports": tuple(reports),
         "forward_counts": tuple(result["counts"] for result in forwards),
         "dp_reduction_visibility": "EXPLICIT_FIXED_TREE",
-        "dp_axis": self._dp_axis,
+        "dp_axis": trainer_dp_axis,
         "rank_local_gradient_fingerprints": tuple(
             report["dp_reduction"]["rank_local_fingerprints"]
             for report in reports
@@ -5163,6 +6469,9 @@ class Qwen3EngineForwardAdapter:
             dp_training.fixed_dp_collective_count(contract.dp_size)
         ),
         "dp_rank_pullbacks_per_transaction": contract.dp_size,
+        "dp_pullback_invocations_per_transaction": (
+            1 if rank_parallel_backward else contract.dp_size
+        ),
         "gradient_deterministic_repeat": (
             bool(reports)
             and all(
@@ -5769,6 +7078,7 @@ class Qwen3EngineForwardAdapter:
         "dp_reduction_transactions": 0,
         "dp_reduction_rounds_per_transaction": 0,
         "dp_rank_pullbacks_per_transaction": 1,
+        "dp_pullback_invocations_per_transaction": 1,
     }
 
   def run_p28_segmented_forward_gate(self, lengths=(128, 160, 256)):

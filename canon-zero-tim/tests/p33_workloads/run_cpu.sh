@@ -6,7 +6,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 WORKTREE="$(cd "$ROOT/.." && pwd)"
 cd "$WORKTREE"
 
-python3 -c "import ast,pathlib; files=('tunix/rl/dp_workloads.py','tunix/rl/agentic/agentic_grpo_learner.py','tunix/rl/canonical_qwen3_adapter.py','tunix/rl/envelope_probe.py','tunix/rl/p38_frozenlake_replay.py','canon-zero-tim/src/engine_shims/p38_kv_fingerprint.py','canon-zero-tim/src/engine_shims/p38_tail_capture.py','canon-zero-tim/cluster/render_p33_jobsets.py','canon-zero-tim/cluster/render_p35_jobset.py','canon-zero-tim/cluster/render_p38_aval_jobset.py','canon-zero-tim/cluster/render_p38_serving_jobsets.py','canon-zero-tim/tests/t1_tpu/probe_logprob_aval.py','canon-zero-tim/tests/p33_workloads/validate_workload.py','canon-zero-tim/tests/p33_workloads/classify_run.py','canon-zero-tim/tests/p33_workloads/test_dp_workloads.py','canon-zero-tim/tests/p33_workloads/test_decode_logprob_chunking.py','canon-zero-tim/tests/p33_workloads/test_render_p33_jobsets.py','canon-zero-tim/tests/p33_workloads/test_classify_run.py','canon-zero-tim/tests/p33_workloads/test_sampler_is_contract.py','canon-zero-tim/tests/p35_envelope/probe_memory_space_attestation.py','canon-zero-tim/tests/p35_envelope/test_render_p35_jobset.py','canon-zero-tim/tests/p38_aval/test_render_p38_aval_jobset.py','canon-zero-tim/tests/p38_serving/make_fixture.py','canon-zero-tim/tests/p38_serving/test_kv_fingerprint.py','canon-zero-tim/tests/p38_serving/test_render_p38_serving_jobsets.py','canon-zero-tim/tests/t1_tpu/test_probe_logprob_aval.py','tests/rl/canonical_qwen3_adapter_test.py','tests/rl/envelope_probe_test.py','tests/rl/p38_frozenlake_replay_test.py','examples/math_gsm8k/qwen3_grpo_demo.py','examples/frozenlake/train_frozenlake_qwen3.py'); [ast.parse(pathlib.Path(p).read_text(), filename=p) for p in files]"
+python3 -c "import ast,pathlib; files=('tunix/rl/dp_workloads.py','tunix/rl/agentic/agentic_grpo_learner.py','tunix/rl/canonical_qwen3_adapter.py','tunix/rl/envelope_probe.py','tunix/rl/p38_frozenlake_replay.py','canon-zero-tim/src/engine_shims/p38_kv_fingerprint.py','canon-zero-tim/src/engine_shims/p38_tail_capture.py','canon-zero-tim/src/engine_shims/models/qwen1p7b_tp1/p22xf_contract.py','canon-zero-tim/cluster/render_p33_jobsets.py','canon-zero-tim/cluster/render_p59_backward_ab.py','canon-zero-tim/cluster/render_p35_jobset.py','canon-zero-tim/cluster/render_p38_aval_jobset.py','canon-zero-tim/cluster/render_p38_serving_jobsets.py','canon-zero-tim/tests/t1_tpu/probe_logprob_aval.py','canon-zero-tim/tests/p33_workloads/validate_workload.py','canon-zero-tim/tests/p33_workloads/classify_run.py','canon-zero-tim/tests/p33_workloads/test_dp_workloads.py','canon-zero-tim/tests/p33_workloads/test_decode_logprob_chunking.py','canon-zero-tim/tests/p33_workloads/test_render_p33_jobsets.py','canon-zero-tim/tests/p33_workloads/test_classify_run.py','canon-zero-tim/tests/p33_workloads/test_sampler_is_contract.py','canon-zero-tim/tests/p59_backward/classify_and_analyze.py','canon-zero-tim/tests/p59_backward/probe_dp4_tp1_overlay.py','canon-zero-tim/tests/p59_backward/test_classify_and_analyze.py','canon-zero-tim/tests/p59_backward/test_dp4_carrier.py','canon-zero-tim/tests/p59_backward/test_render_p59_backward_ab.py','canon-zero-tim/tests/p59_backward/test_p59_persistence.py','canon-zero-tim/tests/p35_envelope/probe_memory_space_attestation.py','canon-zero-tim/tests/p35_envelope/test_render_p35_jobset.py','canon-zero-tim/tests/p38_aval/test_render_p38_aval_jobset.py','canon-zero-tim/tests/p38_serving/make_fixture.py','canon-zero-tim/tests/p38_serving/test_kv_fingerprint.py','canon-zero-tim/tests/p38_serving/test_render_p38_serving_jobsets.py','canon-zero-tim/tests/t1_tpu/test_probe_logprob_aval.py','tests/rl/canonical_qwen3_adapter_test.py','tests/rl/envelope_probe_test.py','tests/rl/p38_frozenlake_replay_test.py','examples/math_gsm8k/qwen3_grpo_demo.py','examples/frozenlake/train_frozenlake_qwen3.py'); [ast.parse(pathlib.Path(p).read_text(), filename=p) for p in files]"
 if grep -Fq "P35 first target admits only one local-M chunk" \
   tunix/rl/agentic/agentic_grpo_learner.py; then
   echo "[P35.ENVELOPE] learner retained the rejected single-chunk gate" >&2
@@ -33,6 +33,10 @@ bash -n \
   canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/p38_live_snapshot_worker.sh \
   canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/persist_p38_gcs.sh \
   canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/seal_p38_evidence.sh \
+  canon-zero-tim/tasks/p59-dp16-parallel-backward/scripts/run_and_persist.sh \
+  canon-zero-tim/tasks/p59-dp16-parallel-backward/scripts/run_dp4_inner.sh \
+  canon-zero-tim/tasks/p59-dp16-parallel-backward/scripts/run_onehost_dp4.sh \
+  canon-zero-tim/tests/p59_backward/run_dp4_exact_image.sh \
   canon-zero-tim/tests/p38_serving/fake_gcloud.sh \
   canon-zero-tim/tests/p38_serving/test_evidence_seal.sh \
   canon-zero-tim/tests/p38_serving/test_gcs_persistence.sh \
@@ -40,6 +44,7 @@ bash -n \
   canon-zero-tim/tests/p38_serving/test_postflight.sh \
   canon-zero-tim/cluster/profiles/qwen3-8b-dp16-tp4-frozenlake.env \
   canon-zero-tim/cluster/profiles/qwen3-1p7b-dp16-tp4-gsm8k.env \
+  canon-zero-tim/cluster/profiles/qwen3-1p7b-dp4-tp1-gsm8k-p59.env \
   canon-zero-tim/tests/p33_workloads/run_exact_image.sh \
   canon-zero-tim/tests/p33_workloads/negative_control.sh
 
@@ -62,6 +67,9 @@ JAX_PLATFORMS=cpu python3 -m unittest \
   canon-zero-tim/tests/p33_workloads/test_render_p33_jobsets.py \
   canon-zero-tim/tests/p33_workloads/test_classify_run.py \
   canon-zero-tim/tests/p33_workloads/test_sampler_is_contract.py
+python3 -m unittest discover \
+  -s canon-zero-tim/tests/p59_backward \
+  -p 'test_*.py'
 JAX_PLATFORMS=cpu python3 -m unittest discover \
   -s tests/rl \
   -p alignment_test.py
@@ -115,10 +123,14 @@ python3 -m unittest discover \
   -k p38_frozenlake
 JAX_PLATFORMS=cpu \
 XLA_FLAGS=--xla_force_host_platform_device_count=4 \
+PYTHONPATH="$WORKTREE" \
+python3 tests/rl/canonical_qwen3_adapter_test.py \
+  CanonicalQwen3AdapterTest.test_p59_dp4_logprob_pipeline_pads_request64_per_rank_to_m256
+JAX_PLATFORMS=cpu \
+XLA_FLAGS=--xla_force_host_platform_device_count=4 \
 python3 -m unittest discover \
   -s tests/rl \
-  -p dp_training_test.py \
-  -k explicit_data_axis
+  -p dp_training_test.py
 canon-zero-tim/tests/p33_workloads/negative_control.sh
 
 validate_profile() (
@@ -157,6 +169,7 @@ validate_admitted_preflight() (
   export CANON_P32_DP_REDUCTION_ADMITTED=1
   export CANON_P33_WORKLOAD_LAUNCH_ADMITTED=1
   export CANON_P33_SHARED_MESH=16,4
+  export CANON_P59_RANK_PARALLEL_BACKWARD=1
   export CANON_RUN_CMD="printf admitted-preflight-only"
   export CANON_RUN_LOG="$state/run.log"
   export CANON_PRE_ALIGN_REPORT="$state/pre_alignment.jsonl"
@@ -167,6 +180,7 @@ validate_admitted_preflight() (
   test -s "$state/env.sh"
   grep -q 'export CANON_WANDB_ONLINE_REQUIRED=1' "$state/env.sh"
   grep -q 'export CANON_P31_MONOTONIC_METRICS=1' "$state/env.sh"
+  grep -q 'export CANON_P59_RANK_PARALLEL_BACKWARD=1' "$state/env.sh"
   if grep -q 'WANDB_API_KEY' "$state/env.sh"; then
     echo "[P33.WORKLOAD] admitted preflight persisted a secret" >&2
     exit 1

@@ -14,8 +14,21 @@ from typing import Any, Iterable
 
 _FULL_STEPS = {
     "gsm8k": 200,
+    "gsm8k-p59-dp4-tp1": 3,
     "frozenlake": 450,
     "frozenlake-dp8-tp8": 450,
+}
+_WORKLOAD_TOPOLOGIES = {
+    "gsm8k": (16, 4),
+    "gsm8k-p59-dp4-tp1": (4, 1),
+    "frozenlake": (16, 4),
+    "frozenlake-dp8-tp8": (8, 8),
+}
+_GLOBAL_TRAJECTORIES = {
+    "gsm8k": 256,
+    "gsm8k-p59-dp4-tp1": 64,
+    "frozenlake": 256,
+    "frozenlake-dp8-tp8": 256,
 }
 _BOUNDARIES = {
     "S_decode_vs_S_prefill",
@@ -32,6 +45,12 @@ _FROZENLAKE_WARNING_POLICY_ID = "frozenlake-full-alignment-warning-v1"
 _OPTIMIZER_MEMORY_KIND = {
     "pinned-host-offload": ["pinned_host"],
     "device-resident": ["device"],
+}
+_SIGNED_RUNTIME_CONTRACTS = {
+    "gsm8k-p59-dp4-tp1": {
+        "dp_axis": "dp",
+        "metrics_step_origin": 1,
+    },
 }
 
 
@@ -75,6 +94,12 @@ def _expected_updates(
     return 1
   if stage == "three-update":
     return 3
+  if stage == "p59-eight-update":
+    if workload != "gsm8k-p59-dp4-tp1":
+      raise ValueError(
+          "p59-eight-update is only defined for gsm8k-p59-dp4-tp1"
+      )
+    return 8
   if stage == "full":
     return _FULL_STEPS[workload]
   raise ValueError(f"unsupported P33 queue stage: {stage!r}")
@@ -380,12 +405,14 @@ def classify(
 ) -> dict[str, Any]:
   if workload not in _FULL_STEPS:
     raise ValueError(f"unknown P33 workload: {workload!r}")
-  if (dp_size, tp_size) not in ((16, 4), (8, 8)):
+  expected_topology = _WORKLOAD_TOPOLOGIES[workload]
+  if (dp_size, tp_size) != expected_topology:
     raise ValueError(
-        "P33/P45 classifier requires DP16xTP4 or DP8xTP8, got "
+        f"classifier topology for {workload!r} requires "
+        f"DP{expected_topology[0]}xTP{expected_topology[1]}, got "
         f"DP{dp_size}xTP{tp_size}"
     )
-  local_gradient_groups = 256 // dp_size
+  local_gradient_groups = _GLOBAL_TRAJECTORIES[workload] // dp_size
   if p57_ab_only and (
       workload != "frozenlake-dp8-tp8"
       or stage != "full"
@@ -512,8 +539,18 @@ def classify(
       reasons,
   )
   _require(
-      any(last_step == expected_updates - 1 for last_step, _, _ in metric_markers),
-      f"monotonic_last_step={metric_markers} expected={expected_updates - 1}",
+      any(
+          last_step
+          == expected_updates
+          - 1
+          + _SIGNED_RUNTIME_CONTRACTS.get(workload, {}).get(
+              "metrics_step_origin", 0
+          )
+          for last_step, _, _ in metric_markers
+      ),
+      "monotonic_last_step="
+      f"{metric_markers} expected="
+      f"{expected_updates - 1 + _SIGNED_RUNTIME_CONTRACTS.get(workload, {}).get('metrics_step_origin', 0)}",
       reasons,
   )
 
@@ -555,7 +592,12 @@ def classify(
   for index, record in enumerate(update_records):
     prefix = f"update[{index}]"
     _require(record.get("verdict") == "PASS", f"{prefix}.verdict", reasons)
-    _require(record.get("dp_axis") == "data", f"{prefix}.dp_axis", reasons)
+    _require(
+        record.get("dp_axis")
+        == _SIGNED_RUNTIME_CONTRACTS.get(workload, {}).get("dp_axis", "data"),
+        f"{prefix}.dp_axis",
+        reasons,
+    )
     _require(record.get("dp_size") == dp_size, f"{prefix}.dp_size", reasons)
     _require(record.get("tp_size") == tp_size, f"{prefix}.tp_size", reasons)
     _require(
@@ -735,7 +777,7 @@ def classify(
                   f"{prefix}.{field}",
                   reasons,
               )
-        if workload == "gsm8k":
+        if workload.startswith("gsm8k"):
           _require(
               effective_lr is not None,
               f"{prefix}.gsm8k_schedule_registered",
@@ -825,6 +867,7 @@ def main() -> int:
           "backward-no-commit",
           "one-update",
           "three-update",
+          "p59-eight-update",
           "full",
       ),
   )

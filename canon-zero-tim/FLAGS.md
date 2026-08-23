@@ -4,7 +4,7 @@
 > 焊死数值类 flag = 删代码路径 = 程序变更,走与开启同级认证门(verify+ALIGN+canary)。
 > 生命周期档位:试验 → 已认证 → 默认开 → 焊死(开关可删)→ 退役/否决。
 > 普查基点 a94d6c0c(285 个可设置 env flag,与 ebba4850 普查零漂移);普查后续现役附录
-> 当前 335 个;本表分层登记,D 层按前缀组、语义欠账标"待考古"。
+> 当前 353 个;本表分层登记,D 层按前缀组、语义欠账标"待考古"。
 > 全量机器清单:落地 CL 时由 `grep -rhoE` 生成为附录,条目数必须 == 普查数(排除项列明)。
 
 ## A 层 · 数值语义类(动它 = 动程序身份;焊死走认证门)
@@ -20,6 +20,8 @@
 | CANON_PROMPT_DIRECT_LOGPROBS / ABSOLUTE_TARGET_IDS | R5 同族实现细节开关 | off | 已认证 | 随 R5 同批焊死 |
 | CANON_PALLAS_{CANONICAL_VJP,ALL_PROJ,ALL_RMSNORM,MPAD,SWIGLU,SWIGLU_MPAD} | canonical Pallas 内核族选通 | off | 已认证 | 转正焊死(P22.XI 部分已无条件) |
 | CANON_P28_SEGMENTED_TRAIN | 分段 fixed-M 训练前向 | off | 已认证 | 转正焊死 |
+| CANON_P59_RANK_PARALLEL_BACKWARD | 将 trajectory-group 内逐 DP-rank 串行 VJP 改为一次 DP-manual/TP-auto `shard_map`；leading-DP 暂存后仍走固定序归约 | off | gradient-correctness KEEP；不声称与旧串行 backward 训练轨迹相同 | 三个 full target 严格门归档后按 workload 转正 |
+| CANON_P59_DP4_SERIAL_MESH_BRIDGE / CANON_P61_BACKWARD_NUMERICAL_DIR | P59/P61 DP4 代理与 full-tree 数值载具，不是生产 recipe | off/空 | 载具完成；历史 serial/update 差异永久保留 | 证据交付后退役载具 |
 | CANON_OPT_STATE_RESIDENT / CANON_P30_OPT_STATE_OFFLOAD | 优化器驻留/卸载 | resident=生产默认 | 默认开 | resident 焊死后 OFFLOAD 降级为逃生开关保留 |
 | CANON_KV_UNIFIED | U 臂读路径统一实验 | off | **否决区**:生产红(43→9 仍 0.28),非修复 | 可删,判决记录永存 |
 | MIN_TOKEN_BUCKET / max_num_batched_tokens(非 CANON 但同级) | R2:全局/每 rank 桶契约 | 钉死 256 族 | 已认证 | 永不自由化;新几何走契约注册 |
@@ -43,6 +45,8 @@
 | CANON_PERF_TRACE_DIR | 官方 tunix.perf v2 语义时间线导出目录(learner 内建 span → perfetto_trace_v2_<ts>.pb;空=NoopTracer 零开销) | 仪器;P51 载具恒开 | 长期保留(官方 Metrics 契约) |
 | CANON_XPROF_PYTHON_TRACER/_HOST_TRACER | tracer 档位;**python=0 是 device plane 的前提**(开着它训练捕获退化为 host-only) | 仪器;载具默认 python=0 | 长期保留 |
 | CANON_XPROF_LABELS | 为 rollout model/logits/sample 与 trainer fwd/bwd/report JIT 写语义名称，不改数值 | 仪器；P56 r21/r22 已认证 | XProf 原生提供等价稳定命名后退役 |
+| CANON_P59_XPROF_BACKWARD_DIR / CANON_P59_DP4_TAIL8 / CANON_P60_DETERMINISTIC_AB | P59/P60 DP4 专用 profile、tail 与跨臂载具 | off | 证据交付后退役，不进入生产默认 |
+| CANON_XPROF_TPU_TRACE_MODE | update 窗 TPU trace 密度选择器 | 仪器；空值保持既有 profiler 配置 | target XProf 无 drop 后决定默认 |
 | CANON_XPROF_PHASE | 捕获窗模式:step=整步(device 缓冲 ~283 万事件/核,decode ~25s 填满,实为 engine 前 25s 织物)/ update=G6 update 入口→步完成(rollout 不入镜,缓冲装下完整 backward) | 仪器;载具旋钮 P51_XPROF_PHASE | 长期保留 |
 | CANON_UPDATE_REPORT / CANON_PRE_ALIGN_REPORT / CANON_ALIGN_REPORT | 对齐/更新报告选通 | 默认开(监控契约) | 长期保留;A−B 哨兵不可撤(用户裁决 2026-08-15) |
 | JAX_COMPILATION_CACHE_DIR(非 CANON) | 持久编译缓存(-72s/重启) | 一宿主认证;**Pathways 未验** | 集群验证后进 lane/perf.env |
@@ -66,6 +70,7 @@
 | CANON_P57_TIM_ARM / RUN_KIND / INFERENCE_REGIME / EXPECTED_UPDATES / STOP_AFTER_STEP / EVALUATION / EVAL_* / WORKLOAD_CANDIDATE / DATA_SPLIT / CALIBRATION_* | P57 FrozenLake TIM 因果实验身份与耐久产物；`TIM_ARM=mismatch` 为 native/no-IS，`is` 为相同 native 数值程序加 token TIS，`zero` 为完整 zero-TIM/no-IS；两 paired workload 为原始 P45/300（candidate/split 均空）与 materialized M15-main/300；主训练强制 `CANON_P33_ENABLE_EVAL=1,CANON_P31_ENABLE_EVAL=1`，在同一 JobSet 生成 `0,50,...,300` rollout-only held-out 曲线；native arms 必须 `INFERENCE_REGIME=stock-fast`，zero 禁止该 override；P57.1 calibration/selection 仍只接受 mismatch、M15/200 且无 in-process eval；`STOP_AFTER_STEP` 只允许 horizon 内 50-step 边界；`EVALUATION=1` 仅保留为 step-0/final recovery audit，必须绑定显式 checkpoint provenance，不是主曲线 | 试验、默认空/关；P57 完成并归档最终因果报告后整体退役 |
 | CANON_FROZENLAKE_CKPT_MILESTONE_INTERVAL | FrozenLake 额外证据 checkpoint 保留间隔；P57 active 300-step arms 强制 `0`，只保留 `LatestN(1)`，因为七点主曲线在训练内生成；历史 `50` 仅用于已归档的旧 isolated-eval 设计，不能重新用于 active P57 | 试验、默认 `0`；旧 milestone evidence 清理完成后退役正值路径 |
 | CANON_P58_DEEPSWE_TIM / TIM_ADMITTED / TIM_ARM / EXPECTED_UPDATES / DEBUG_DIR / NATIVE_STOCK_PROMPT_OBSERVER | P58 Qwen3-4B-Instruct native-vs-zero 因果训练身份；固定 128-chip synchronous disaggregated、B8xG16、16K、compact filter、TPU optimizer 与完整 trajectory journal；`TIM_ARM=native|zero` 是唯一 treatment 选择；Native 保留完整 stock serving/trainer program，所有 shape-valid finite A/B/T_old/T_current mismatch 只观测，Zero 全边界 exact；`NATIVE_STOCK_PROMPT_OBSERVER=1` 只为 native arm 的 rollout 后 B 观察值提供 processed prompt logprobs，不进入采样、trainer、loss、反向或 optimizer，且与 canonical `PROMPT_PROCESSED_LOGPROBS` 互斥 | 试验、默认关；P58 两臂 3-update canary 与 1,000-update campaign 归档后整体退役 |
+| CANON_P59_GCS_PREFIX / CANON_P59_INNER_RUN_CMD / CANON_P59_KIND / CANON_P59_REQUIRE_XPROF | P59 单次载具的证据目的地、冻结内层命令、臂身份与 XProf 完整性要求 | 试验；仅 P59 renderer/one-host wrapper 设置 | P59 证据载具归档后整体退役 |
 | CANON_ALIGN*/EXPECT_*/DP_SIZE/TP_SIZE/TRAJECTORIES 族 | 对齐门与拓扑断言 | 监控契约,长期保留 |
 
 ## MARKERS(日志 marker 契约,非开关;~60 个)
@@ -93,6 +98,8 @@ CANON_ALIGNMENT_GATE
 CANON_ALIGNMENT_GATE_ONLY
 CANON_ALIGNMENT_TRAIN
 CANON_ALIGNMENT_UPDATE_CANARY
+CANON_ALIGN
+CANON_ALIGN_PRE
 CANON_ANCHOR_OVERLAP
 CANON_ALIGN_REPORT
 CANON_BATCHED_EVIDENCE
@@ -200,6 +207,7 @@ CANON_P30_RESHARD_ACCUMULATOR
 CANON_P30_REUSE_SEGMENTED_ENGINE
 CANON_P30_SHARDING_PROFILE
 CANON_P30_SPARSE_GRAD_ASSEMBLY
+CANON_P31_METRICS
 CANON_P31_CONVERGENCE
 CANON_P31_ENABLE_EVAL
 CANON_P31_MONOTONIC_METRICS
@@ -215,11 +223,15 @@ CANON_P32_RC_STAGE
 CANON_P32_TRAIN_ADMITTED
 CANON_P32_WORKLOAD
 CANON_P33_DISABLE_EVAL
+CANON_P33_DP
+CANON_P33_DP4
 CANON_P33_ENABLE_EVAL
+CANON_P33_EVAL
 CANON_P33_NO_COMMIT
 CANON_P33_RUN_STAGE
 CANON_P33_SHARED_MESH
 CANON_P33_SHORT_ALIGNMENT
+CANON_P33_WANDB
 CANON_P33_WORKLOAD_LAUNCH_ADMITTED
 CANON_P34_ABCPROD
 CANON_P34_CLEAN_ROWS
@@ -352,6 +364,16 @@ CANON_P58_EXPECTED_UPDATES
 CANON_P58_NATIVE_STOCK_PROMPT_OBSERVER
 CANON_P58_TIM_ADMITTED
 CANON_P58_TIM_ARM
+CANON_P59_DP4_SERIAL_MESH_BRIDGE
+CANON_P59_DP4_TAIL8
+CANON_P59_GCS_PREFIX
+CANON_P59_INNER_RUN_CMD
+CANON_P59_KIND
+CANON_P59_RANK_PARALLEL_BACKWARD
+CANON_P59_REQUIRE_XPROF
+CANON_P59_XPROF_BACKWARD_DIR
+CANON_P60_DETERMINISTIC_AB
+CANON_P61_BACKWARD_NUMERICAL_DIR
 CANON_PALLAS_ALL_PROJ
 CANON_PALLAS_ALL_RMSNORM
 CANON_PALLAS_CANONICAL_VJP
@@ -423,6 +445,7 @@ CANON_XPROF_PHASE
 CANON_XPROF_PYTHON_TRACER
 CANON_XPROF_SKIP_STEPS
 CANON_XPROF_STEPS
+CANON_XPROF_TPU_TRACE_MODE
 ```
 
-Count: 335 settable names (appendix inventory above; exclusions: none).
+Count: 353 settable names (appendix inventory above; exclusions: none).

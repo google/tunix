@@ -343,6 +343,130 @@ class DPTrainingTest(absltest.TestCase):
     self.assertEqual(report['reduction_rounds'], 2)
     self.assertTrue(report['post_reduction_replicas_exact'])
 
+  def test_rank_gradient_reducer_consumes_parallel_staged_table(self):
+    if len(jax.devices()) < 4:
+      self.skipTest('requires at least four forced CPU or accelerator devices')
+    mesh = Mesh(
+        np.asarray(jax.devices()[:4]).reshape(2, 2), ('data', 'model')
+    )
+    template_sharding = jax.sharding.NamedSharding(mesh, P('model'))
+    staged_sharding = jax.sharding.NamedSharding(
+        mesh, P('data', 'model')
+    )
+    template = jax.device_put(jnp.zeros((8,), jnp.float32), template_sharding)
+    staged = jax.device_put(
+        jnp.stack(
+            (
+                jnp.arange(8, dtype=jnp.float32) + 1.0,
+                jnp.arange(8, dtype=jnp.float32) + 11.0,
+            )
+        ),
+        staged_sharding,
+    )
+    reducer = dp_training.FixedDPRankGradientReducer(
+        template, dp_size=2, dp_axis='data'
+    )
+    reduced, report = reducer.finalize_staged(staged)
+    np.testing.assert_array_equal(
+        np.asarray(reduced), np.arange(8, dtype=np.float32) * 2.0 + 12.0
+    )
+    self.assertEqual(report['rank_contributions'], 2)
+    self.assertEqual(report['rank_gradient_staging_mode'], 'parallel_table')
+    self.assertLen(set(report['rank_local_fingerprints']), 2)
+    self.assertEqual(report['reduction_rounds'], 2)
+    self.assertTrue(report['post_reduction_replicas_exact'])
+
+  def test_rank_gradient_reducer_rejects_unsharded_parallel_table(self):
+    if len(jax.devices()) < 4:
+      self.skipTest('requires at least four forced CPU or accelerator devices')
+    mesh = Mesh(
+        np.asarray(jax.devices()[:4]).reshape(2, 2), ('data', 'model')
+    )
+    template_sharding = jax.sharding.NamedSharding(mesh, P('model'))
+    replicated_sharding = jax.sharding.NamedSharding(mesh, P())
+    template = jax.device_put(jnp.zeros((8,), jnp.float32), template_sharding)
+    staged = jax.device_put(
+        jnp.zeros((2, 8), jnp.float32), replicated_sharding
+    )
+    reducer = dp_training.FixedDPRankGradientReducer(
+        template,
+        dp_size=2,
+        dp_axis='data',
+        require_distinct_fingerprints=False,
+    )
+    with self.assertRaisesRegex(ValueError, 'sharding changed'):
+      reducer.finalize_staged(staged)
+
+  def test_dp2_tp2_rank_parallel_vjp_matches_serial_rank_isolation(self):
+    if len(jax.devices()) < 4:
+      self.skipTest('requires at least four forced CPU or accelerator devices')
+    mesh = Mesh(
+        np.asarray(jax.devices()[:4]).reshape(2, 2), ('data', 'model')
+    )
+    weight = jax.device_put(
+        jnp.arange(24, dtype=jnp.float32).reshape(4, 6) / 17.0,
+        jax.sharding.NamedSharding(mesh, P(None, 'model')),
+    )
+    values = jax.device_put(
+        jnp.arange(24, dtype=jnp.float32).reshape(2, 3, 4) / 13.0,
+        jax.sharding.NamedSharding(mesh, P('data')),
+    )
+    cotangent = jax.device_put(
+        jnp.arange(36, dtype=jnp.float32).reshape(2, 3, 6) / 19.0,
+        jax.sharding.NamedSharding(mesh, P('data', None, 'model')),
+    )
+
+    def forward(local_weight, local_values):
+      return jnp.einsum('bsk,kh->bsh', local_values, local_weight)
+
+    _, global_pullback = jax.vjp(forward, weight, values)
+    serial_rows = jnp.stack([
+        global_pullback(
+            dp_training.isolate_dp_rank_cotangent(
+                cotangent, rank=rank, dp_size=2
+            )
+        )[0]
+        for rank in range(2)
+    ])
+    full_weight_gradient, full_value_gradient = global_pullback(cotangent)
+
+    def local_pullback(local_weight, local_values, local_cotangent):
+      _, pullback = jax.vjp(forward, local_weight, local_values)
+      weight_gradient, value_gradient = pullback(local_cotangent)
+      return jnp.expand_dims(weight_gradient, 0), value_gradient
+
+    parallel_pullback = jax.shard_map(
+        local_pullback,
+        mesh=mesh,
+        in_specs=(P(), P('data'), P('data')),
+        out_specs=(P('data'), P('data')),
+        axis_names={'data'},
+        check_vma=False,
+    )
+    staged, value_gradient = jax.jit(parallel_pullback)(
+        weight, values, cotangent
+    )
+    np.testing.assert_array_equal(np.asarray(staged), np.asarray(serial_rows))
+    np.testing.assert_array_equal(
+        np.asarray(value_gradient), np.asarray(full_value_gradient)
+    )
+
+    reducer = dp_training.FixedDPRankGradientReducer(
+        full_weight_gradient, dp_size=2, dp_axis='data'
+    )
+    reduced, report = reducer.finalize_staged(staged)
+    np.testing.assert_array_equal(
+        np.asarray(reduced), np.asarray(full_weight_gradient)
+    )
+    self.assertEqual(report['rank_gradient_staging_mode'], 'parallel_table')
+
+    serial_host = np.asarray(serial_rows)
+    perturbed = serial_host.copy()
+    perturbed[1, 0, 0] = np.nextafter(
+        perturbed[1, 0, 0], np.float32(np.inf), dtype=np.float32
+    )
+    self.assertFalse(np.array_equal(serial_host, perturbed))
+
   def test_rank_gradient_reducer_rejects_rank_cadence_fault(self):
     if len(jax.devices()) != 64:
       self.skipTest('requires exactly 64 forced CPU or accelerator devices')

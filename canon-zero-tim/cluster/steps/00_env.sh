@@ -31,7 +31,7 @@ for _canon_p46_key in CANON_P46_DEEPSWE_TRAIN CANON_P34_DEEPSWE \
     CANON_P28_G6_UPDATE CANON_P29_FULL_TRAIN CANON_OPT_STATE_RESIDENT \
     CANON_P30_SPARSE_GRAD_ASSEMBLY CANON_P30_FUSED_PAIR_ACCUMULATION \
     CANON_P30_REUSE_SEGMENTED_ENGINE CANON_P30_RELEASE_CAPTURED_STATE \
-    CANON_P30_RESHARD_ACCUMULATOR; do
+    CANON_P30_RESHARD_ACCUMULATOR CANON_P59_RANK_PARALLEL_BACKWARD; do
   if [[ -v "$_canon_p46_key" && "${!_canon_p46_key}" != "0" ]]; then
     _CANON_P46_INPUT_CONTRADICTIONS+=(
       "${_canon_p46_key}=${!_canon_p46_key}"
@@ -108,6 +108,36 @@ echo "[env] preflight mode: JAX_PLATFORMS=cpu (Pathways connection deferred to S
 # Preflight: refuse an incomplete canonical set rather than warn inside a log nobody reads.
 fail=0
 req() { [ -n "${!1:-}" ] || { echo "[env] MISSING: $1" >&2; fail=1; }; }
+case "${CANON_P59_RANK_PARALLEL_BACKWARD:-0}" in
+  0) ;;
+  1)
+    [ "${CANON_P32_TRAIN_ADMITTED:-0}" = "1" ] && \
+    [ "${CANON_P32_DP16_SEGMENTED:-0}" = "1" ] && \
+    [ "${CANON_P30_SPARSE_GRAD_ASSEMBLY:-0}" = "1" ] || {
+      echo "[env] P59 rank-parallel backward requires admitted DP segmented training with sparse assembly" >&2
+      fail=1
+    }
+    ;;
+  *)
+    echo "[env] CANON_P59_RANK_PARALLEL_BACKWARD must be exactly 0 or 1" >&2
+    fail=1
+    ;;
+esac
+case "${CANON_P59_DP4_TAIL8:-0}" in
+  0) ;;
+  1)
+    [ "${CANON_P32_WORKLOAD:-}" = "gsm8k-p59-dp4-tp1" ] && \
+    [ "${CANON_P33_RUN_STAGE:-}" = "p59-eight-update" ] && \
+    [ "${CANON_P33_NO_COMMIT:-0}" = "0" ] || {
+      echo "[env] CANON_P59_DP4_TAIL8=1 requires committed P59 DP4 eight-update stage" >&2
+      fail=1
+    }
+    ;;
+  *)
+    echo "[env] CANON_P59_DP4_TAIL8 must be exactly 0 or 1" >&2
+    fail=1
+    ;;
+esac
 positive_int() {
   local key="$1" value="${!1:-}"
   [[ "$value" =~ ^[1-9][0-9]*$ ]] || {
@@ -1643,7 +1673,7 @@ if [ "${CANON_P32_DP_ADMISSION:-0}" = "1" ]; then
       }
     fi
     case "${CANON_P32_WORKLOAD:-}" in
-      gsm8k|frozenlake|frozenlake-dp8-tp8) ;;
+      gsm8k|gsm8k-p59-dp4-tp1|frozenlake|frozenlake-dp8-tp8) ;;
       *) echo "[env] admitted P33 training has invalid workload" >&2; fail=1 ;;
     esac
     case "${CANON_P32_WORKLOAD:-}" in
@@ -1723,6 +1753,14 @@ if [ "${CANON_P32_DP_ADMISSION:-0}" = "1" ]; then
       one-update|three-update|full)
         [ "${CANON_P33_NO_COMMIT:-0}" = "0" ] || {
           echo "[env] update/full stages require CANON_P33_NO_COMMIT=0" >&2
+          fail=1
+        }
+        ;;
+      p59-eight-update)
+        [ "${CANON_P33_NO_COMMIT:-0}" = "0" ] && \
+        [ "${CANON_P32_WORKLOAD:-}" = "gsm8k-p59-dp4-tp1" ] && \
+        [ "${CANON_P59_DP4_TAIL8:-0}" = "1" ] || {
+          echo "[env] p59-eight-update requires committed P59 DP4 tail admission" >&2
           fail=1
         }
         ;;
