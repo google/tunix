@@ -37,13 +37,17 @@ exact-image runs execute TP4/TP8 fixed-head markers with
 `all_gather_rank_order_f32_barrier`, installed projections remain
 `serial_parallel=exact`, and both manifests are 36/36.
 
-No direct TPU pair or DP8 x TP8 target was run. The approved release was
-serialized as four local commits only; no push, image publish, Kubernetes
-apply, or TPU launch occurred. CPU/pinned-image admission must not be promoted
-to target certification. The exact operator commands and artifact rules are
-in `RUNBOOK_P58_6_7.md`. Any real Zero `CANON_ALIGN ... verdict=FAIL` kills the
-candidate. P59 claims ordinary-JAX FP64 gradient correctness, not serial-AdamW
-weight-trajectory identity.
+No direct TPU pair or DP8 x TP8 target was run. The approved release is four
+functional commits plus one audit-only release-gate commit. The latter excludes
+immutable logs and Markdown marker contracts from changed-settable-flag
+discovery while preserving the independent 366-name registry inventory.
+Publication is authorized, but the runnable source is only the exact
+operator-branch SHA read back after push. No image publish, Kubernetes apply,
+or TPU launch is authorized here. CPU/pinned-image admission must not be
+promoted to target certification. The exact operator commands and artifact
+rules are in `RUNBOOK_P58_6_7.md`. Any real Zero `CANON_ALIGN ... verdict=FAIL`
+kills the candidate. P59 claims ordinary-JAX FP64 gradient correctness, not
+serial-AdamW weight-trajectory identity.
 
 The corrected P59 admission gate is
 `canon-zero-tim/tests/p59_backward/run_tp4_tp8_installed_shim_exact_image.sh`.

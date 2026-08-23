@@ -151,6 +151,35 @@ explicitly off. No target TPU execution is claimed by this CL.
 Rollback: revert CL-D alone to remove the recipe and renderer reachability;
 CL-A/B/C remain independently testable and default off.
 
+## CL-E — Restrict changed-flag auditing to executable files
+
+Proposed subject: `Ignore evidence markers in flag diff audits`
+
+Problem: the final pre-push audit scanned newly committed immutable `run.log`
+files and Markdown receipts. Stable non-settable marker names such as
+`CANON_ALIGN_PRE_JSON` were therefore reported as missing environment flags,
+even though all 366 settable names were registered.
+
+Scope:
+
+- the changed-name pathspec in
+  `.claude/skills/manage-canon-flags/scripts/audit_flag_registry.py`;
+- a focused temporary-Git-repository regression proving executable names are
+  still found while Markdown, evidence, and debug-log markers are ignored;
+- only the release-gate and handoff receipts needed to disclose this fifth,
+  audit-only CL.
+
+Gate: focused audit regression, full `--changed-base` registry audit at
+366/366, the existing host adjacency suites, and `git diff --check`.
+
+Downside: a settable flag written only in Markdown or an immutable evidence
+artifact is no longer considered executable and will not be discovered by the
+changed-name scan. The independent full `FLAGS.md` inventory count remains
+mandatory.
+
+Rollback: revert CL-E alone. It changes no model, rollout, trainer, numerical,
+renderer, profile, or target-runtime path.
+
 ## Excluded concern
 
 The unrelated APC B-arm `num_cached_tokens` availability hardening found in
@@ -160,8 +189,8 @@ concern. The release tree retains the `ccbcf572` APC implementation.
 
 ## Publication order
 
-Stage and review A, B, C, then D. After every approved commit, run that CL's
-focused host gates. After D, run `git diff --check`, flag audit, both complete
+Stage and review A, B, C, D, then the audit-only E. After every approved
+commit, run that CL's focused host gates. After E, run `git diff --check`, flag audit, both complete
 pinned-image gates, and a file-hash audit against the tested release tree.
 Fetch again before any separately approved push; if the operator tip moved,
 rebase and repeat focused gates. Hardware launch remains a separate approval.

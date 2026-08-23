@@ -1,5 +1,29 @@
 # Log
 
+## 2026-08-23 UTC — pre-push flag-audit false positive repaired
+
+- Type: release gate / audit correctness.
+- Fact: the exact handoff command reported nine unregistered names even though
+  the 366-name inventory was internally complete. Every reported name came
+  from newly committed immutable exact-image `run.log` marker output; the only
+  documentation-only instance was the release receipt for the emitted
+  `CANON_ADAPTER` marker. No executable settable flag was missing.
+- Action: restrict changed-name discovery to executable files by excluding
+  Markdown, immutable evidence trees, and `debug_logs`; retain the independent
+  full inventory count. Add a temporary-Git-repository negative control that
+  proves a real runtime environment read remains discoverable while all three
+  marker-only locations are ignored.
+- Result: focused regression 1/1 PASS; full changed-base audit
+  `declared=366 actual=366 unique=366 changed_names=126` with
+  `FLAG_AUDIT_PASS`; V1 12/12, P57 136/136, P59 30/30, APC 31/31, and diff
+  hygiene PASS. The fetched operator base remains exact `ccbcf572`, so no
+  rebase or numerical/image rerun is required.
+- Downside: names appearing only in non-executable Markdown or immutable logs
+  are intentionally outside changed-settable discovery. Registry inventory
+  validation remains mandatory and unchanged.
+- Next: publish the approved five-CL stack, exact-read back the remote SHA, and
+  leave all image/Kubernetes/TPU actions untouched.
+
 ## 2026-08-23 UTC — latest-base post-barrier release gates sealed
 
 - Source intake: fetched the operator branch at exact tip

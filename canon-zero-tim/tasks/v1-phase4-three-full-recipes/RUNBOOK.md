@@ -42,7 +42,7 @@ The 2026-08-23 pinned-image admission against image
 `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`
 passed with terminal marker
 `V1_HP_EXACT_IMAGE_PASS dp16_gathered=1 dp2tp2_parallel=2
-perfetto_window=1 manifests=3`. It includes the production-image install/hash
+p59_tp4_tp8=2 p59_real_shim=4 p57_wandb=1 perfetto_window=1 manifests=3`. It includes the production-image install/hash
 checks for Qwen3-1.7B TP4 and Qwen3-8B TP8. Any rerun still requires a fresh
 approval and remains a separate evidence event.
 

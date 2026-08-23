@@ -6,13 +6,14 @@ Prepare exactly three strict optimized Zero-TIM full-training recipes from one
 approved immutable source: GSM8K Qwen3-1.7B DP16xTP4 for 200 updates,
 FrozenLake P45 Qwen3-8B DP8xTP8 for 300 updates, and FrozenLake M15-main
 Qwen3-8B DP8xTP8 for 300 updates. M15 is a production/scientific recipe, not a
-canary. The worktree is
-`/home/yuxuan/code_rl_repro/worktrees/v1_phase4_three_recipes_0823`, branch
-`local/v1-phase4-three-recipes-0823`, based on
-`9c422bd224671a4ee0c6795223d0168debd4ca62`. The release candidate is a clean,
-linear five-commit stack ahead of that base; this task directory is tracked in
-the final recipe/ledger CL. Resolve the exact current tip with `git rev-parse
-HEAD` and require a clean worktree before any push or render.
+canary. The original three-recipe stack is published in the operator history.
+The current repair release is staged in
+`/home/yuxuan/code_rl_repro/worktrees/p58_zero_hp_release3_0823`, branch
+`local/p58-zero-hp-release3-0823`, on exact base
+`ccbcf572dc903bb1cce12f897cbdb05aec94922a`. Its four functional repair CLs
+plus one audit-only release CL are authorized for publication. Render only
+from the exact 40-character operator-branch SHA read back after that push, and
+require a clean worktree before rendering.
 
 Do not push, rerun the pinned image, publish an image, apply a JobSet, or occupy
 TPU resources without the separate user approval for that boundary. Never
@@ -43,10 +44,10 @@ and read back that repair before rendering fresh run IDs.
 
 ## Claim provenance and ceilings
 
-- The remote base `9c422bd2` supplies the P57 300-update signed in-process-eval
-  setup. P56 serving, P59, APC, and this three-recipe integration are locally
-  committed as five reviewable CLs but remain unpushed pending explicit user
-  approval.
+- The published operator history supplies the P56 serving, P59/APC foundation,
+  three-recipe integration, and P57 300-update signed in-process-eval setup.
+  The current release adds the P59 TP4/TP8 and signed P57 W&B repairs; target
+  certification remains pending after publication.
 - P56 knives have one-host KEEP evidence. Their complete current profiles and
   DP8/DP16 target geometries have not run at target scale.
 - P59 is accepted under ordinary-JAX FP64 gradient correctness: the oracle is
@@ -87,7 +88,7 @@ bash canon-zero-tim/tests/v1_phase4/run_exact_image.sh
 ```
 
 Require the exact terminal marker:
-`V1_HP_EXACT_IMAGE_PASS dp16_gathered=1 dp2tp2_parallel=2 p59_tp4_tp8=2 p57_wandb=1 perfetto_window=1 manifests=3`.
+`V1_HP_EXACT_IMAGE_PASS dp16_gathered=1 dp2tp2_parallel=2 p59_tp4_tp8=2 p59_real_shim=4 p57_wandb=1 perfetto_window=1 manifests=3`.
 This is an exact-image admission receipt, not a signed raw-log artifact: the
 stdout/stderr log was not durably preserved, so no raw-log path or SHA exists.
 

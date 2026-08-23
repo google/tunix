@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Audit the FLAGS.md inventory and CANON_* names added by a Git diff."""
+"""Audit the FLAGS.md inventory and executable CANON_* names added by a diff."""
 
 from __future__ import annotations
 
@@ -13,6 +13,17 @@ import sys
 
 FLAG_RE = re.compile(r"\bCANON_[A-Z0-9_]+\b")
 COUNT_RE = re.compile(r"Count:\s*(\d+)\s+settable names")
+
+# Historical and newly captured logs contain stable CANON_* marker names that
+# are deliberately not settable environment variables.  Markdown may quote the
+# same marker contracts.  The inventory check still reads FLAGS.md directly;
+# the changed-name check is restricted to files that can affect execution.
+CHANGED_FLAG_PATHS = (
+    ".",
+    ":(exclude,glob)**/*.md",
+    ":(exclude,glob)**/evidence/**",
+    ":(exclude,glob)**/debug_logs/**",
+)
 
 
 def _package_root() -> Path:
@@ -35,7 +46,7 @@ def _inventory(flags_path: Path) -> tuple[list[str], int]:
 
 def _added_flags(repo: Path, base: str) -> set[str]:
   completed = subprocess.run(
-      ["git", "diff", "--unified=0", base, "--"],
+      ["git", "diff", "--unified=0", base, "--", *CHANGED_FLAG_PATHS],
       cwd=repo,
       check=True,
       text=True,
