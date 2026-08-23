@@ -1,0 +1,44 @@
+[CANON_P31_METRICS] monotonic_direct last_step=0 events=40 regressions=0
+[rank0]: Traceback (most recent call last):
+[rank0]:   File "/app/examples/math_gsm8k/qwen3_grpo_demo.py", line 1309, in <module>
+[rank0]:     main()
+[rank0]:   File "/app/examples/math_gsm8k/qwen3_grpo_demo.py", line 1272, in main
+[rank0]:     grpo_trainer.train(
+[rank0]:   File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 2868, in train
+[rank0]:     segmented_result = self._run_p28_g6_update(
+[rank0]:                        ^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 1022, in _run_p28_g6_update
+[rank0]:     result = adapter.segmented_dp_grpo_value_and_grad(
+[rank0]:              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/rl/canonical_qwen3_adapter.py", line 6365, in segmented_dp_grpo_value_and_grad
+[rank0]:     one_gradient, report = reverse_reduce_group(index, spec)
+[rank0]:                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/rl/canonical_qwen3_adapter.py", line 6139, in reverse_reduce_group
+[rank0]:     reverse = self._p32_reverse_group(
+[rank0]:               ^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/rl/canonical_qwen3_adapter.py", line 5749, in _p32_reverse_group
+[rank0]:     segmented.run_head_pullback_rank_parallel(
+[rank0]:   File "/app/tunix/rl/canonical_qwen3_adapter.py", line 2867, in run_head_pullback_rank_parallel
+[rank0]:     return self._p59_head_pullback_fn(leaves, hidden, dlogits)
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/rl/canonical_qwen3_adapter.py", line 2699, in invoke
+[rank0]:     return compiled(*aligned_runtime_args)
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/rl/canonical_qwen3_adapter.py", line 2849, in local_pullback
+[rank0]:     gradients, dhidden = self._head_pullback_fn(
+[rank0]:                          ^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/rl/canonical_qwen3_adapter.py", line 1793, in bwd_lm_head
+[rank0]:     _, pullback = jax.vjp(fwd_lm_head, leaves, hidden)
+[rank0]:                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/rl/canonical_qwen3_adapter.py", line 1789, in fwd_lm_head
+[rank0]:     return module.decode(hidden)
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/usr/local/lib/python3.12/site-packages/tpu_inference/layers/jax/linear.py", line 130, in _p38_fixed_tied_head_decode
+[rank0]:     return _p38_fixed_lm_head(
+[rank0]:            ^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/tmp/canon-state/canon-v1hp-gsm8k-g64e-7265291c/canon/p38_fixed_lm_head.py", line 409, in fixed_lm_head
+[rank0]:     output = mapped(inputs, weight)
+[rank0]:              ^^^^^^^^^^^^^^^^^^^^^^
+[rank0]: ValueError: The context mesh AbstractMesh('dp': 16, 'tp': 4, axis_types=(Manual, Auto), device_kind=TPU v5p, num_cores=2, platform=tpu) should match the mesh passed to shard_map Mesh('data': 16, 'attn_dp': 1, 'attn_dp_expert': 1, 'expert': 1, 'model': 4, 'dcp': 1, axis_types=(Auto, Auto, Auto, Auto, Auto, Auto))
+[rank0]: --------------------
+[rank0]: For simplicity, JAX has removed its internal frames from the traceback of the following exception. Set JAX_TRACEBACK_FILTERING=off to include these.

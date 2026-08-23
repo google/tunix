@@ -1,0 +1,13 @@
+{
+  "incident_id": "v1_phase4_gsm8k_full_p59_p38_context_mesh_mismatch",
+  "stage": "v1_phase4_three_full_recipes",
+  "recipes_affected": [
+    "canon-v1hp-gsm8k-g64e-7265291c"
+  ],
+  "root_cause": "When P59 rank-parallel backward (DP16xTP4) calls LM-Head backward, outer jax.shard_map sets context mesh with axes ('dp', 'tp'), while inner p38_fixed_lm_head shard_map passes the stock mesh with axes ('data', 'model'). JAX raises ValueError due to nested shard_map mesh axis name mismatch.",
+  "error_type": "ValueError",
+  "error_message": "The context mesh AbstractMesh('dp': 16, 'tp': 4) should match the mesh passed to shard_map Mesh('data': 16, ..., 'model': 4)",
+  "source_file": "canon/p38_fixed_lm_head.py",
+  "source_line": 409,
+  "fix_required": "In p38_fixed_lm_head.py or canonical_qwen3_adapter.py, inherit the outer context mesh or adapt mesh axis names ('dp', 'tp') when running under P59 rank-parallel backward."
+}
