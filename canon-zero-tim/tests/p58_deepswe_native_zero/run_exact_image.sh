@@ -19,7 +19,8 @@ $DOCKER run --rm \
   "$IMAGE" \
   bash -euo pipefail -c '
     bash -n \
-      canon-zero-tim/tests/p58_deepswe_native_zero/run_onehost_alignment_v5p.sh
+      canon-zero-tim/tests/p58_deepswe_native_zero/run_onehost_alignment_v5p.sh \
+      canon-zero-tim/cluster/steps/p58_verify_sandbox_capacity.sh
     PYTHONPATH=/workspace python3 \
       canon-zero-tim/tests/p58_deepswe_native_zero/test_loss_contract.py
     PYTHONPATH=/workspace python3 \
@@ -30,6 +31,8 @@ $DOCKER run --rm \
       canon-zero-tim/tests/p58_deepswe_native_zero/test_alignment_policy.py
     PYTHONPATH=/workspace python3 \
       canon-zero-tim/tests/p58_deepswe_native_zero/test_environment_contract.py
+    PYTHONPATH=/workspace python3 \
+      canon-zero-tim/tests/p58_deepswe_native_zero/test_sandbox_capacity_probe.py
     PYTHONPATH=/workspace python3 \
       canon-zero-tim/tests/p58_deepswe_native_zero/test_artifacts.py
     PYTHONPATH=/workspace python3 \
@@ -50,7 +53,9 @@ $DOCKER run --rm \
         vllm_rollout_canonical_test.VllmRolloutCanonicalTest.test_p58_native_processed_rescore_uses_only_signed_stock_observer \
         vllm_rollout_canonical_test.VllmRolloutCanonicalTest.test_p58_native_processed_rescore_rejects_missing_observer \
         vllm_rollout_canonical_test.VllmRolloutCanonicalTest.test_p58_zero_processed_rescore_rejects_native_observer \
-        vllm_rollout_canonical_test.VllmRolloutCanonicalTest.test_p58_zero_processed_rescore_keeps_canonical_processor
+        vllm_rollout_canonical_test.VllmRolloutCanonicalTest.test_p58_zero_processed_rescore_keeps_canonical_processor \
+        vllm_rollout_canonical_test.VllmRolloutCanonicalTest.test_processed_rescore_skips_engine_for_empty_completion_batch \
+        vllm_rollout_canonical_test.VllmRolloutCanonicalTest.test_processed_rescore_still_requires_provenance_for_any_target
     )
     (
       cd tests/rl
@@ -86,6 +91,11 @@ $DOCKER run --rm \
       cd tests/rl/agentic
       PYTHONPATH=/workspace python3 -m unittest \
         agentic_grpo_learner_test.AgenticGrpoLearnerTest.test_environment_is_seeded_with_policy_version_before_reset \
+        agentic_grpo_learner_test.AgenticGrpoLearnerTest.test_p58_all_sandbox_timeout_blocks_after_durable_journal \
+        agentic_grpo_learner_test.AgenticGrpoLearnerTest.test_non_infrastructure_all_filtered_batch_does_not_capacity_block \
+        agentic_grpo_learner_test.AgenticGrpoLearnerTest.test_p58_sandbox_capacity_evidence_is_fail_closed \
+        agentic_grpo_learner_test.AgenticGrpoLearnerTest.test_p58_all_filtered_no_commit_suppresses_step_advance \
+        agentic_grpo_learner_test.AgenticGrpoLearnerTest.test_p58_all_filtered_no_commit_rejects_optimizer_advance \
         trajectory.trajectory_collect_engine_test.TrajectoryCollectEngineTest.test_overlong_filter_masks_out_and_skips_reward \
         trajectory.trajectory_collect_engine_test.TrajectoryCollectEngineTest.test_reset_raised_timeout_is_env_timeout \
         trajectory.trajectory_collect_engine_test.TrajectoryCollectEngineTest.test_reset_scheduling_gate_is_distinct_env_timeout \

@@ -135,8 +135,60 @@ and pre-observation termination paths. This prevents mixed schemas inside a
 G16 group. Missing `prompts` on a policy-seeded task fails at collection.
 Timeout/context masks, rewards, advantages, filtering, resampling, Native/Zero
 flags, data, topology, loss, optimizer, deadlines, and horizon are unchanged.
-After final operator-tip readback, the next attempt is fresh `p58f12`; p58f11
-is not resumable.
+At that historical checkpoint the next attempt was fresh `p58f12`; p58f11 was
+not resumable.
+
+P58f12 proved that prompt provenance repair and wrote the first valid 128-row
+Step-0 journal after it. It did not prove model rollout or training: all 128
+RepoEnv Pods remained `scheduling_gated` until sandbox-start timeout, so every
+row was signed compact-filtered `ENV_TIMEOUT`, action/completion token counts
+were zero, and `generate()` was never called. The Native processed-B observer
+then required rollout sampling-transform provenance and failed before
+alignment, backward, optimizer, or checkpoint. The journal is durable
+diagnostic evidence, not resumable trainer state.
+
+The local correction implements the already frozen all-filtered contract all
+the way through the outer learner. A signed P58 batch with zero completion
+targets validates its structure and observer signature, skips engine rescore,
+and records explicit empty-target provenance; it does not synthesize
+log-probabilities. Only durable all-compact provenance admits zero action
+tokens through alignment. For an ordinary all-compact model/context/runtime
+batch, the trainer's existing zero-gradient transaction makes no optimizer
+commit, the outer learner suppresses weight sync plus policy/RL/trainer step
+advance, `batch_index` advances, and the next clean prompt batch is consumed
+without resampling.
+
+A batch whose durable metrics prove `all_sandbox_start_timeout_batch=true` is
+an infrastructure outage, not an ordinary training sample. Once its journal
+and bounded timeout metrics exist, a separate circuit breaker emits
+`[P58.SANDBOX_CAPACITY] BLOCKED` with `optimizer_commits=0` and
+`prompts_consumed_after_batch=0`, then raises `BLOCKED_SANDBOX_CAPACITY` before
+rescore, alignment, trainer execution, weight sync, or consumption of a later
+prompt batch. Evidence claiming that condition while row counts, timeout
+counts, compact masks, effective groups, environment-timeout status, or token
+targets disagree is fatal. Any nonempty target still requires real
+post-`generate()` sampling provenance and engine rescore; unsigned
+zero-action, nonfinite, shape, or nonzero-gradient cases remain fatal.
+
+Fresh `p58f13` is the next attempt only after publication approval, exact
+remote readback, and a separately approved live one-sandbox admission probe.
+The probe must use a real frozen-clean-list task image, queue
+`multislice-queue`, node pool `cpu-np`, and production requests 2 CPU/4 GiB;
+the read-only verifier must observe the Pod Running with no scheduling gate.
+That is only one-Pod evidence. Before the full JobSet, the operator must also
+confirm ClusterQueue/ResourceFlavor/autoscaler capacity for 128 sandboxes:
+at least 256 requested CPU and 512 GiB requested memory, plus head and cluster
+overhead. P58f12's 128/128 `scheduling_gated` result cannot be fixed by tuning
+vLLM concurrency, and removing the Kueue queue label is forbidden.
+
+Read-only review of `origin/main` at
+`c7d8950f12a9c55a976bf2e1a0d8b447d71c20b3` found Agent Sandbox/SandboxFleet
+commit `e789573964b6f695ded85fe519040bd06a2b9f37`. It is not integrated into this
+repair: it does not supply CPU quota, its prewarm failures are warning-only,
+and its current-plus-lookahead sizing can request 256 sandboxes for B8 x G16.
+Any later P58 port needs a separate default-off, Kueue-aware, fail-closed phase
+with current-batch-only capacity and exact cleanup receipts. `main` remains
+untouched.
 
 ## Frozen shared recipe
 
@@ -198,9 +250,11 @@ Complete redacted trajectories are journaled atomically to durable storage;
 W&B stores compact metrics plus artifact path and digest.
 
 The trajectory journal uses a monotonically increasing `batch_index` separate
-from `optimizer_step`. An all-filtered batch advances only the former. Resume
+from `optimizer_step`. An ordinary all-filtered batch advances only the former;
+a full sandbox-start outage writes its current journal and stops. Resume
 validates contiguous files, metrics parity, and each SHA-256 before choosing
-the next batch index; partial or tampered journals stop fail-closed.
+the next batch index; partial or tampered journals stop fail-closed. P58f12 has
+no trainer checkpoint and is diagnostic evidence, not resumable training.
 
 Sandbox construction is also fail-closed. A Kubernetes pod start timeout must
 be propagated through environment reset as signed `ENV_TIMEOUT` only after
@@ -244,9 +298,14 @@ throughput is considered only when sandbox-start timeout metrics are zero and
 - Every rollout batch must contain exactly 128 raw trajectory records. A
   signed compact-filter status may produce a zero policy mask and is not a
   malformed row. Missing, duplicated, structurally empty, or parser-invalid
-  records are fatal. If all 128 rows are compact-filtered, the update performs
-  no optimizer commit and does not resample; partial filtering uses the exact
-  effective-row denominator described in P58.1.
+  records are fatal. If all 128 rows are compact-filtered by ordinary
+  model/context/runtime outcomes, the update performs no optimizer commit,
+  weight sync, or trainer/RL/policy-version step advance; it does not resample
+  and consumes the next prompt batch. Its `batch_index` advances while
+  `optimizer_step` remains the actual committed trainer step. If all 128
+  failed before sandbox start, persist the journal and stop
+  `BLOCKED_SANDBOX_CAPACITY` without consuming another prompt. Partial
+  filtering uses the exact effective-row denominator described in P58.1.
 
 Postflight is arm-aware. Native records the stock JAX sharded trainer
 transaction without pretending it used the zero arm's explicit fixed-tree DP

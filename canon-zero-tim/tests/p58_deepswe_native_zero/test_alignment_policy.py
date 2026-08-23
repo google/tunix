@@ -47,6 +47,60 @@ def _env(arm: str, stage: str = "three-update") -> dict[str, str]:
 
 class P58AlignmentPolicyTest(unittest.TestCase):
 
+  def _empty_sidecar(self, *, all_compact_filtered: bool):
+    values = np.zeros((2, 3), dtype=np.float32)
+    return alignment.ObservedTrainExample(
+        train_example=types.SimpleNamespace(),
+        s_decode=values,
+        s_prefill=values.copy(),
+        t_old=values.copy(),
+        action_mask=np.zeros_like(values, dtype=np.bool_),
+        completion_valid_mask=np.zeros_like(values, dtype=np.bool_),
+        prompt_mask=np.ones((2, 2), dtype=np.bool_),
+        tokens=np.zeros((2, 3), dtype=np.int32),
+        policy_version=np.zeros((2,), dtype=np.int32),
+        sampling_values=np.asarray(
+            [[1.0, 0.0, 1.0], [1.0, 0.0, 1.0]], dtype=np.float32
+        ),
+        all_compact_filtered=all_compact_filtered,
+    )
+
+  def test_signed_all_compact_filtered_batch_is_no_signal_not_alignment_red(self):
+    sidecar = self._empty_sidecar(all_compact_filtered=True)
+    with tempfile.TemporaryDirectory() as root:
+      values = {
+          **_env("native", "full"),
+          alignment.PRE_REPORT_ENV: str(Path(root) / "pre.jsonl"),
+          alignment.REPORT_ENV: str(Path(root) / "post.jsonl"),
+      }
+      with mock.patch.dict(os.environ, values, clear=True):
+        pre = alignment.check_pre_backward(sidecar, step=0)
+        post = alignment.check_batch(
+            sidecar,
+            t_current=np.zeros((2, 3), dtype=np.float32),
+            gradient_norm=np.asarray(0.0, dtype=np.float32),
+            optimizer_skipped=np.asarray(0, dtype=np.int32),
+            step=0,
+        )
+    self.assertEqual(pre["verdict"], "PASS")
+    self.assertEqual(post["verdict"], "PASS")
+    self.assertTrue(pre["no_signal_admitted"])
+    self.assertTrue(post["no_signal_admitted"])
+    self.assertEqual(pre["N_action"], 0)
+    self.assertEqual(post["N_action"], 0)
+
+  def test_zero_action_without_compact_filter_provenance_remains_blocking(self):
+    sidecar = self._empty_sidecar(all_compact_filtered=False)
+    with tempfile.TemporaryDirectory() as root:
+      values = {
+          **_env("native", "full"),
+          alignment.PRE_REPORT_ENV: str(Path(root) / "pre.jsonl"),
+      }
+      with mock.patch.dict(os.environ, values, clear=True), self.assertRaisesRegex(
+          alignment.AlignmentGateError, "N_action=0"
+      ):
+        alignment.check_pre_backward(sidecar, step=0)
+
   def test_native_warns_for_registered_serving_trainer_treatment(self):
     for stage in ("three-update", "full"):
       with self.subTest(stage=stage), mock.patch.dict(

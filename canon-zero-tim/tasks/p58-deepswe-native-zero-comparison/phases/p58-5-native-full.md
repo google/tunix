@@ -29,7 +29,7 @@ validate the deferred zero arm and cannot establish a paired treatment effect.
   `sequence-mean-token-scale`, TPU-resident optimizer, optional interventions
   off, prefix cache off; all 128 trajectories run as one concurrency wave,
   equal to rollout DP8 x max-seqs16 capacity;
-- stage/run: `full`, next fresh run-id `p58f12`, exactly 1,000 optimizer commits;
+- stage/run: `full`, next fresh run-id `p58f13`, exactly 1,000 optimizer commits;
 - arm: `native` only. Rendering or applying `zero` is outside this phase.
 
 ## Admission gate
@@ -75,11 +75,12 @@ training values, TPU-resident optimizer state, complete 128-row trajectory
 batches, journal continuity, sandbox cleanup, evaluation/checkpoint cadence,
 and transaction integrity.
 
-An all-filtered batch may advance `batch_index` without an optimizer commit;
-it must preserve unchanged optimizer state and may make the number of consumed
-batches exceed 1,000. Partial/tampered evidence, no Native serving-path
-mismatch (`NO_TREATMENT`), nonfinite/invalid Native drift, or any Zero-arm drift
-cannot be promoted.
+An ordinary model/context/runtime all-filtered batch may advance `batch_index`
+without an optimizer commit; it must preserve unchanged optimizer state and
+may make the number of consumed batches exceed 1,000. A full sandbox-start
+outage must journal and stop without consuming a later prompt. Partial or
+tampered evidence, no Native serving-path mismatch (`NO_TREATMENT`),
+nonfinite/invalid Native drift, or any Zero-arm drift cannot be promoted.
 
 ## Attempt boundary
 
@@ -191,3 +192,31 @@ is now rejected at collection. The timeout row remains compact-filtered with
 its zero policy mask; no row is dropped or resampled. P58f11 is immutable
 `INCONCLUSIVE` and not resumable. After final operator-tip readback, use fresh Native
 `p58f12`; Zero remains deferred.
+
+P58f12 wrote a durable 128-row Step-0 journal and thereby target-proved the
+p58f11 normalized-prompt schema repair. It did not reach model rollout:
+128/128 sandboxes remained Kueue `scheduling_gated` until start timeout, so
+all rows were compact-filtered `ENV_TIMEOUT`, completion/action token counts
+were zero, and `generate()` had no sampling provenance to expose. Processed-B
+rescore nevertheless ran and stopped before alignment/backward/update with
+`processed S_prefill must follow generate()`. P58f12 is immutable
+`INCONCLUSIVE`; its journal is diagnostic evidence, not resumable trainer
+state.
+
+The local phase repair makes ordinary all-filtered model/context/runtime
+outcomes a complete no-commit transaction. Empty completion targets skip the
+engine with signed `engine_called=false` provenance; any nonempty target still
+requires real post-generation sampling provenance. Alignment admits zero
+actions only for the signed durable all-compact P58 batch. Trainer and outer
+progress remain unchanged: no optimizer commit, weight sync, policy-version
+increment, or trainer/RL global-step increment. Only `batch_index` advances,
+and the next prompt batch is consumed without resampling.
+
+The p58f12-shaped full sandbox-start outage is intentionally stricter. After
+the 128-row journal is durable, it emits `[P58.SANDBOX_CAPACITY] BLOCKED` and
+raises `BLOCKED_SANDBOX_CAPACITY` before rescore/trainer or any later prompt
+consumption. Fresh Native `p58f13` is next only after publication/readback,
+one production-shaped sandbox reaches Running through Kueue, and the operator
+confirms capacity/quota for the 128-Pod request. All geometry, deadlines,
+optimizer placement, Native/Zero flags, and the Zero deferment remain
+unchanged. Main's SandboxFleet implementation remains deferred and off.

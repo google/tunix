@@ -232,6 +232,9 @@ class ObservedTrainExample:
   source_name: str = flax.struct.field(
       pytree_node=False, default="VllmRollout.get_prefill_rescore_logps"
   )
+  all_compact_filtered: bool = flax.struct.field(
+      pytree_node=False, default=False
+  )
 
   # AgenticRLLearner reads these attributes before Trainer unwraps the object.
   @property
@@ -627,6 +630,7 @@ def wrap_train_example(
     top_k: int,
     top_p: float,
     s_prefill_source: Any,
+    all_compact_filtered: bool = False,
 ) -> ObservedTrainExample:
   """Validate real-rescore provenance and create a merge/slice-safe wrapper."""
   if not getattr(s_prefill_source, "is_real_rescore", False):
@@ -669,6 +673,10 @@ def wrap_train_example(
     raise AlignmentGateError(
         "action_mask must be a subset of completion_valid_mask"
     )
+  if all_compact_filtered and np.any(mask.astype(np.bool_)):
+    raise AlignmentGateError(
+        "all-compact-filtered batch contains policy action tokens"
+    )
   if np.shares_memory(sd, sp) or s_decode is s_prefill:
     raise AlignmentGateError(
         "S_prefill aliases S_decode; the decode-vs-rescore gate would be vacuous"
@@ -690,6 +698,7 @@ def wrap_train_example(
           expected[0],
           axis=0,
       ),
+      all_compact_filtered=bool(all_compact_filtered),
   )
 
 
@@ -1222,6 +1231,31 @@ def _masked_bytes_differ(a: Any, b: Any, mask: Any) -> tuple[int, dict | None]:
   return result["differing_bytes"], result["first_mismatch"]
 
 
+def _p58_all_compact_filtered_no_signal(
+    sidecar: ObservedTrainExample, *, n_action: int
+) -> bool:
+  """Admits only the signed P58 all-filtered zero-action transaction."""
+  if not sidecar.all_compact_filtered:
+    return False
+  signed = (
+      os.environ.get("CANON_P34_DEEPSWE", "") == "1"
+      and os.environ.get("CANON_P58_DEEPSWE_TIM", "") == "1"
+      and os.environ.get("CANON_P58_TIM_ADMITTED", "") == "1"
+      and os.environ.get("CANON_P58_TIM_ARM", "") in ("native", "zero")
+      and os.environ.get("CANON_ALIGNMENT_TRAIN", "") == "1"
+  )
+  if not signed:
+    raise AlignmentGateError(
+        "all-compact-filtered no-signal admission is restricted to signed "
+        "P58 training"
+    )
+  if n_action != 0:
+    raise AlignmentGateError(
+        "all-compact-filtered no-signal batch has policy action tokens"
+    )
+  return True
+
+
 def check_pre_backward(
     sidecar: ObservedTrainExample,
     *,
@@ -1242,7 +1276,10 @@ def check_pre_backward(
   blocking_reds: list[str] = []
   reported_reds: list[str] = []
   warning_reds: list[str] = []
-  if n_action == 0:
+  all_compact_filtered_no_signal = _p58_all_compact_filtered_no_signal(
+      sidecar, n_action=n_action
+  )
+  if n_action == 0 and not all_compact_filtered_no_signal:
     blocking_reds.append("N_action=0")
   boundaries = {}
   for name, a, b in (
@@ -1318,6 +1355,8 @@ def check_pre_backward(
       "reported_reds": reported_reds,
       "admission_policy": policy,
       "N_action": n_action,
+      "all_compact_filtered": bool(sidecar.all_compact_filtered),
+      "no_signal_admitted": all_compact_filtered_no_signal,
       "action_geometry": _action_geometry(
           prompt_mask=sidecar.prompt_mask,
           action_mask=sidecar.action_mask,
@@ -1419,7 +1458,10 @@ def check_batch(
   blocking_reds: list[str] = []
   reported_reds: list[str] = []
   warning_reds: list[str] = []
-  if n_action == 0:
+  all_compact_filtered_no_signal = _p58_all_compact_filtered_no_signal(
+      sidecar, n_action=n_action
+  )
+  if n_action == 0 and not all_compact_filtered_no_signal:
     blocking_reds.append("N_action=0")
   canonical_c = None
   p58_native = (
@@ -1538,6 +1580,8 @@ def check_batch(
   }
   if not gradient["finite"]:
     blocking_reds.append("gradient_nonfinite")
+  if all_compact_filtered_no_signal and gradient["nonzero"]:
+    blocking_reds.append("compact_filtered_gradient_nonzero")
   # A real GRPO group may legitimately have identical rewards and therefore a
   # zero advantage/gradient.  Keep that measurement visible, but do not turn
   # it into a numerical alignment red in the multi-step training mode.  The
@@ -1573,6 +1617,8 @@ def check_batch(
       "reported_reds": reported_reds,
       "admission_policy": policy,
       "N_action": n_action,
+      "all_compact_filtered": bool(sidecar.all_compact_filtered),
+      "no_signal_admitted": all_compact_filtered_no_signal,
       "boundaries": boundaries,
       "exact": exact,
       "ratio_finite": ratio_finite,

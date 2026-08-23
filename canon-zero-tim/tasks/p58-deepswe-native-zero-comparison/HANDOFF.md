@@ -45,8 +45,12 @@ trajectories and 8/8 groups in 1,209.2 seconds, then stopped on a missing
 published as implementation commit
 `43614af55ed98423b757945642fa5444ae484ecc`; its first remote readback matched
 local HEAD, `FETCH_HEAD`, and the remote-tracking branch with ahead/behind
-`0/0`. This documentation checkpoint advances the branch once more, so fetch
-the final operator tip. The next run id is fresh `p58f12`.
+`0/0`. Latest source intake reached exact operator tip
+`5f449cc8def801b4a61387ef664b2cb1f7ab05cf`, which contains immutable p58f12
+evidence plus a later P57-only checkpoint change. The p58f12 repair described
+below is local and uncommitted. It must not be launched until separately
+approved, published to `yuxzhang/canon-zero-tim`, and exactly read back. The
+next run id is fresh `p58f13`.
 
 The user previously waived P58.3 and the separate three-update stop, then chose
 the native 128-chip full 1,000-update stage. That historical phase remains
@@ -360,7 +364,45 @@ have the same schema. A future policy-seeded task missing `prompts` fails
 immediately at collection. Compact-filter masks and the no-drop/no-resample
 recipe are unchanged. The exact-image gate passes the positive timeout path,
 the normal-path authority check, and a missing-key negative control. P58f11
-is immutable and not resumable; after final operator-tip readback use `p58f12`.
+is immutable and not resumable; at that historical checkpoint the next run was
+`p58f12`.
+
+P58f12 target-proved that repair by writing a valid 128-row Step-0 journal.
+However, all 128 R2E Pods remained Kueue `scheduling_gated` until sandbox-start
+timeout. Every row was therefore signed compact-filtered `ENV_TIMEOUT`, with
+zero completion/action tokens; no model call occurred and `generate()` never
+created sampling-transform provenance. The processed-B observer still tried
+to rescore and raised `processed S_prefill must follow generate()` before
+alignment, backward, optimizer, or checkpoint. Effective sandbox throughput
+was zero. This is a `cpu-np`/Kueue scheduling-capacity failure, not evidence
+that vLLM max-seqs or model generation was too slow.
+
+The local repair completes the preregistered ordinary all-filtered no-commit
+path. When and only when signed P58 durable metrics prove every row is compact
+filtered, zero completion targets skip the observer engine after structural
+and signature validation and record `engine_called=false`; no fake zero
+log-probability values are introduced. Alignment accepts the empty policy mask
+only with that provenance. For model/context/runtime all-compact outcomes, the
+trainer makes no optimizer commit, the outer learner suppresses weight sync
+and all committed-step advances, `batch_index` advances, and the next clean
+prompt batch is consumed without resampling.
+
+An entire batch that timed out before sandbox start is not treated as training
+data. After its 128-row journal and bounded metrics are durable, the new
+circuit breaker emits `[P58.SANDBOX_CAPACITY] BLOCKED` with
+`optimizer_commits=0 prompts_consumed_after_batch=0` and raises
+`BLOCKED_SANDBOX_CAPACITY` before processed rescore, alignment, trainer, or a
+later prompt batch. Any inconsistent infrastructure signature fails closed.
+P58f12 is immutable and not resumable trainer state; fresh `p58f13` is next
+only after publication/readback and live CPU sandbox admission evidence.
+
+`origin/main` was reviewed read-only at
+`c7d8950f12a9c55a976bf2e1a0d8b447d71c20b3`. Its Agent
+Sandbox/SandboxFleet commit `e789573964b6f695ded85fe519040bd06a2b9f37`
+is not integrated or enabled: it does not create Kueue quota, currently treats
+prewarm failures as warnings, and current-plus-lookahead sizing can request
+256 sandboxes for B8 x G16. A later port requires its own default-off,
+Kueue-aware, fail-closed phase. Never modify or push `main`.
 
 Never modify or push `main`. The publication target is exclusively
 `yuxzhang/canon-zero-tim`; the p58f09 repair is published there as
@@ -400,7 +442,12 @@ documentation tip before rendering.
   with a durable normalized prompt, one schema for normal/timeout rows, and a
   hard error when no mapping or required prompt exists; and
 - exact one-wave rollout admission: B8 x G16 = concurrency 128 = rollout DP8 x
-  max-seqs16, without extending the signed timeout hierarchy.
+  max-seqs16, without extending the signed timeout hierarchy;
+- a P58 infrastructure circuit breaker that stops after durable evidence when
+  every trajectory timed out before sandbox start, without rescore, trainer,
+  optimizer commit, or consumption of later prompts; and
+- a production-shaped one-Pod Kueue admission probe plus a read-only verifier
+  for the exact queue, `cpu-np` routing, Pod gate, and selected node.
 
 The exact run instructions and artifact interpretation are in
 `canon-zero-tim/cluster/P58_DEEPSWE_TIM_RUNBOOK.md`.
@@ -423,30 +470,30 @@ The gate covers the P58 loss oracle, unequal-effective-row gradients, real
 trainer accumulation, stock/canonical all-filter discard, journal resume,
 native-dose/zero-exact classifier negatives, both renderer arms/stages,
 environment resolution, the full alignment suite, and relevant P34/P44
-regressions.
+regressions. It now also covers the three sandbox-capacity circuit-breaker
+controls and the production-shaped probe/verifier's Running, Pending, and
+unmanaged-Pod cases. The standalone probe suite passes 4/4 on host.
 
 The current host environment contract passes 8/8. Previously published host
 validation remains profile 2/2, renderer 15/15, alignment policy 9/9, P34
 static 10 suites, and P57 adjacency 105/105. In the pinned image, classifier
 5/5 and the shared alignment
-regression 42/42 pass; the targeted trajectory batch passes 8/8, including
+regression 42/42 pass; the targeted agentic/trajectory batch passes 13/13,
+including the new infrastructure signature controls plus
 reset-timeout prompt preservation, policy-seeded normal-path authority, and
 missing-input/missing-prompt fail-closed controls. Python compilation,
 the 320/320 flag-registry audit, and `git diff --check` pass. The complete
 pinned-image gate emits the terminal marker above.
 
-P58f11 is the latest target execution. It proves that the 128-way one-wave
-geometry completes real Step-0 rollout in 1,209.2 seconds, but fails at the
-reset-timeout original-input schema before a durable journal or trainer call;
-p58f07 remains the latest
+P58f12 is the latest target execution. It proved the 128-row journal schema but
+ran zero real R2E sandboxes and no model generation; p58f07 remains the latest
 attempt to enter real value-and-grad/backward, also without an optimizer
 receipt/checkpoint. The training venv loads JAX/libtpu. After the self-created,
 unlocked zero-byte libtpu lock was removed, the runtime could not obtain
 `CHIPS_PER_HOST_BOUNDS` from instance metadata; the bounded runner emitted
 `P58_ONEHOST_ALIGNMENT_BLOCKED reason=device_inventory_timeout timeout_secs=30`
-instead of PASS. The repair claim is implementation plus CPU/exact-image
-validation; target execution remains limited to the pre-forward boundaries
-named above.
+instead of PASS. No one-host or CPU test proves live Kueue admission, 128-chip
+Pathways, real R2E rollout, or TPU training.
 
 ## Next executor sequence — native only
 
@@ -465,7 +512,19 @@ named above.
 4. Publish or select a client image by immutable registry digest and verify the
    mounted Qwen3-4B-Instruct-2507 weights and frozen clean-list digest without
    printing credentials.
-5. Render only `arm=native, stage=full` with fresh run-id `p58f12` and worker
+5. Follow the runbook's `P58 sandbox capacity gate` exactly. Derive a real
+   `docker_image` from the frozen clean list, render the production-shaped
+   one-Pod probe, preserve its digest, and run server-side dry-run. Applying
+   the probe is a separate user/operator-approved Kubernetes mutation. Once
+   applied, require
+   `P58_SANDBOX_CAPACITY_PASS scope=one-sandbox-admission-only`, preserve Pod,
+   matching Workload, LocalQueue, ClusterQueue, ResourceFlavor and `cpu-np`
+   node evidence, then delete only that exact probe and confirm deletion.
+   Separately confirm capacity for 128 x 2 requested CPU = 256 CPU and
+   128 x 4 GiB = 512 GiB requested memory, plus head/cluster overhead. A
+   one-Pod PASS is necessary but does not prove full-batch capacity. Never
+   remove the queue label to bypass Kueue.
+6. Render only `arm=native, stage=full` with fresh run-id `p58f13` and worker
    sentinel `tpu-v5p-slice`. Require exact `4x4x8` topology and no literal
    `cloud.google.com/gke-nodepool: tpu-v5p-slice`; require B8 x G16 =
    concurrency 128 = rollout DP8 x max-seqs16; require head pool `cpu-np`,
@@ -473,25 +532,42 @@ named above.
    the JobSet `pathways-head` label, both JobSet DNS-publication settings, and
    the exact generated head DNS in both worker RM fields. Preserve the
    YAML/digest and run server-side dry-run before the separately approved apply.
-6. Require stock preflight, one P58 stock-observer processed-B marker, exact
+7. If an ordinary model/context/runtime all-compact batch occurs, require all
+   of these markers before allowing the loop to consume the next prompt batch
+   without a commit:
+   `[CANON_RESCORE] empty_completion_batch ... engine_called=0`, signed
+   alignment with `N_action=0 ... no_signal_admitted=true`,
+   `[DEEPSWE.COMPACT_FILTER] optimizer_boundary_skipped effective_rows=0`, a
+   Native optimizer transaction with `commits=0`, and
+   `[P58.COMPACT_FILTER] ... optimizer_commits=0 ... weight_sync=0`. Require
+   identical trainer/RL/optimizer/policy versions and an incremented
+   `batch_index`; never retry the same prompt batch. If instead
+   `all_sandbox_start_timeout_batch=1`, require the durable journal and
+   `[P58.SANDBOX_CAPACITY] BLOCKED ... optimizer_commits=0
+   prompts_consumed_after_batch=0`, followed by `BLOCKED_SANDBOX_CAPACITY`.
+   That JobSet must stop before rescore/trainer or a later prompt batch; return
+   to the capacity gate with a fresh run id after the infrastructure issue is
+   resolved.
+8. Require stock preflight, one P58 stock-observer processed-B marker, exact
    live weights, shape-valid finite Native boundaries/ratios, finite
    forward/backward, and the first optimizer commit.
    Then monitor commits 1–3 without stopping a healthy job. Continue through
    checkpoint 8, updates 32 and 100, then every 100 updates.
-7. Require the full native classifier JSON to say `PASS`, including a finite
+9. Require the full native classifier JSON to say `PASS`, including a finite
    nonzero serving-path dose on A-B or B-C, finite trainer-program observation,
    exactly 1,000 commits, device optimizer, complete journal, cleanup,
    evaluation, checkpoint, and transaction receipts.
-8. Do not render or apply zero.
+10. Do not render or apply zero.
 
-Do not reuse any failed `p58c01` through `p58c05` or `p58f01` through `p58f11`
+Do not reuse any failed `p58c01` through `p58c05` or `p58f01` through `p58f12`
 YAML/run root. P58f03 through p58f07 have diagnostic trajectory/alignment
 evidence but no durable trainer update or optimizer checkpoint, so none is
 resumable training state. The attempts remain immutable failure evidence.
 P58f08 has no trajectory at all; p58f09 completed rollout processing but
 crashed before the durable journal; p58f10 timed out at the batch orchestrator
 before the journal; p58f11 completed the batch but failed learner preprocessing
-before the journal. None has resumable state.
+before the journal. P58f12 has a valid diagnostic trajectory journal but no
+trainer/optimizer checkpoint, so it is also not resumable training state.
 if a CL mismatch recurs, collect all three head-container logs plus one worker
 log and verify its resolved RM address before deleting the failed JobSet.
 Earlier evidence remains under `evidence/p58c01/`, `evidence/p58c02/`,
@@ -524,7 +600,7 @@ for `workload_describe.txt`.
 - A Kubernetes sandbox start exception must propagate after deletion is
   confirmed. `ENV_TIMEOUT` is an admitted compact-filter status; a
   half-created RepoEnv with `container=None` is forbidden. If an entire
-  p58f12 batch has zero confirmed Running pods, classify infrastructure
+  p58f13 batch has zero confirmed Running pods, classify infrastructure
   capacity/scheduling before another launch instead of patching websocket
   decode or inventing a successful trajectory.
 - Read `deepswe/all_sandbox_start_timeout_batch` first. Value `1` means the
@@ -533,10 +609,13 @@ for `workload_describe.txt`.
   `deepswe/status/model_timeout_ratio` instead points to model-serving
   throughput. W&B dimensions are fixed and low-cardinality; detailed
   scheduler text is available only in the bounded raw marker.
-- If an entire batch is compact-filtered, `batch_index` advances but
-  `optimizer_step` and commit count do not. Relaunching into a complete
-  journal continues at the next batch index; a partial/digest-mismatched
-  journal stops fail-closed.
+- If an ordinary model/context/runtime batch is entirely compact-filtered,
+  `batch_index` advances but trainer/RL steps, `optimizer_step`,
+  `policy_version`, weight sync, and commit count do not; the next prompt batch
+  is consumed without resampling. If all rows timed out before sandbox start,
+  the durable journal is followed by `BLOCKED_SANDBOX_CAPACITY` and no later
+  prompt is consumed. A partial/digest-mismatched journal always stops
+  fail-closed. Do not describe p58f12 as resumable trainer state.
 - The native arm is stock numerical training plus observation. It must not
   inherit `CANON_FIXED_AR`, `CANON_LOGPROB_M`, the canonical module, VJP2, or
   the excess-precision pin. The zero arm retains the complete bundle.

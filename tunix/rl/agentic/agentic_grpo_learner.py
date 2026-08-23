@@ -64,6 +64,64 @@ MetricFn = agentic_rl_learner.MetricFn
 TrainExample = agentic_rl_learner.TrainExample
 
 
+class P58SandboxCapacityBlockedError(RuntimeError):
+  """Raised after durable evidence proves zero sandbox-start throughput."""
+
+
+def _p58_sandbox_capacity_block_record(
+    *,
+    p58_artifacts: bool,
+    metrics: Mapping[str, Any],
+    completion_targets: int,
+) -> dict[str, Any] | None:
+  """Validate and summarize a signed P58 all-sandbox-start timeout batch."""
+  if not p58_artifacts or not bool(
+      metrics.get("all_sandbox_start_timeout_batch", False)
+  ):
+    return None
+
+  trajectories = int(metrics.get("trajectories", -1))
+  sandbox_timeouts = int(
+      metrics.get("sandbox_start_timeout_trajectories", -1)
+  )
+  compact_filtered = int(metrics.get("compact_filtered_trajectories", -1))
+  effective_groups = int(metrics.get("effective_prompt_groups", -1))
+  all_env_timeout = bool(metrics.get("all_env_timeout_batch", False))
+  if (
+      trajectories <= 0
+      or sandbox_timeouts != trajectories
+      or compact_filtered != trajectories
+      or effective_groups != 0
+      or not all_env_timeout
+      or completion_targets != 0
+  ):
+    raise alignment.AlignmentGateError(
+        "inconsistent P58 all-sandbox-start-timeout evidence: "
+        f"trajectories={trajectories} sandbox_timeouts={sandbox_timeouts} "
+        f"compact_filtered={compact_filtered} "
+        f"effective_groups={effective_groups} "
+        f"all_env_timeout={int(all_env_timeout)} "
+        f"completion_targets={completion_targets}"
+    )
+  return {
+      "batch_index": int(metrics.get("step", -1)),
+      "optimizer_step": int(metrics.get("optimizer_step", -1)),
+      "trajectories": trajectories,
+      "scheduling_gated": int(
+          metrics.get("scheduling_gated_trajectories", 0)
+      ),
+      "unschedulable": int(metrics.get("unschedulable_trajectories", 0)),
+      "insufficient_cpu": int(
+          metrics.get("insufficient_cpu_trajectories", 0)
+      ),
+      "insufficient_memory": int(
+          metrics.get("insufficient_memory_trajectories", 0)
+      ),
+      "trajectory_path": str(metrics.get("trajectory_path", "")),
+      "trajectory_sha256": str(metrics.get("trajectory_sha256", "")),
+  }
+
+
 def _canonical_alignment_sampler_is_valid(
     sampler_is: str | None,
     workload_name: str,
@@ -872,6 +930,8 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
 
     logging.debug("Advantages computed: %s", advantages)
 
+    p58_all_compact_filtered = False
+    p58_sandbox_capacity_block = None
     if deepswe_debug.enabled() and mode == rl_cluster_lib.Mode.TRAIN:
       if expected_step is None:
         raise ValueError("DeepSWE debug artifacts require an expected step")
@@ -902,7 +962,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
               deepswe_debug.artifact_directory()
           )
         artifact_step = self._p58_debug_batch_index
-        optimizer_step = int(expected_step)
+        optimizer_step = int(self.rl_cluster.actor_trainer.train_steps)
       debug_metrics = deepswe_debug.persist_batch(
           trajectories,
           rewards,
@@ -916,6 +976,24 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
         self._p58_debug_batch_index += 1
       trajectory_count = debug_metrics["trajectories"]
       prompt_group_count = debug_metrics["prompt_groups"]
+      p58_all_compact_filtered = bool(
+          p58_artifacts
+          and debug_metrics["compact_filtered_trajectories"]
+          == trajectory_count
+      )
+      if p58_all_compact_filtered and bool(
+          np.any(np.asarray(completion_mask, dtype=np.bool_))
+      ):
+        raise alignment.AlignmentGateError(
+            "P58 all-compact-filtered journal contains policy action tokens"
+        )
+      p58_sandbox_capacity_block = _p58_sandbox_capacity_block_record(
+          p58_artifacts=p58_artifacts,
+          metrics=debug_metrics,
+          completion_targets=sum(
+              int(value) for value in raw_completion_lengths
+          ),
+      )
       self.rl_cluster.buffer_metrics_async(
           {
               "deepswe/trajectory_solve_ratio": (
@@ -998,6 +1076,27 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
           mode=mode,
           step=expected_step,
       )
+      if p58_sandbox_capacity_block is not None:
+        block = p58_sandbox_capacity_block
+        print(
+            "[P58.SANDBOX_CAPACITY] BLOCKED "
+            f"batch_index={block['batch_index']} "
+            f"optimizer_step={block['optimizer_step']} "
+            f"trajectories={block['trajectories']} "
+            f"scheduling_gated={block['scheduling_gated']} "
+            f"unschedulable={block['unschedulable']} "
+            f"insufficient_cpu={block['insufficient_cpu']} "
+            f"insufficient_memory={block['insufficient_memory']} "
+            "optimizer_commits=0 prompts_consumed_after_batch=0 "
+            f"trajectory_path={block['trajectory_path']} "
+            f"trajectory_sha256={block['trajectory_sha256']}",
+            flush=True,
+        )
+        raise P58SandboxCapacityBlockedError(
+            "BLOCKED_SANDBOX_CAPACITY: all P58 trajectories timed out before "
+            "sandbox start; durable journal preserved and no later prompt "
+            "batch was consumed"
+        )
 
     policy_versions = np.array(policy_versions_list, dtype=np.int32)
 
@@ -1329,6 +1428,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
           top_k=rollout_config.top_k,
           top_p=rollout_config.top_p,
           s_prefill_source=rescore_source,
+          all_compact_filtered=p58_all_compact_filtered,
       )
       logging.info(
           "[CANON_ALIGN] attached host sidecar rows=%d completion_width=%d",

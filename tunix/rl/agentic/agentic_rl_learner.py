@@ -27,7 +27,22 @@ import json
 import os
 import queue
 import threading
-from typing import Any, AsyncIterator, Callable, Dict, Generic, Iterable, Iterator, List, Sequence, Type, TypeVar, Optional, Set
+from typing import (
+    Any,
+    AsyncIterator,
+    Callable,
+    Dict,
+    Generic,
+    Iterable,
+    Iterator,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    Set,
+    Type,
+    TypeVar,
+)
 
 from absl import logging
 import flax
@@ -330,6 +345,38 @@ def _advance_unpacked_microsteps(
         f" steps_per_update={steps_per_update}"
     )
   return next_counter, updates == 1
+
+
+def _p58_all_filtered_no_commit_contract(
+    values: Mapping[str, str],
+    *,
+    all_compact_filtered: bool,
+    train_steps_before: int,
+    train_steps_after: int,
+) -> bool:
+  """Validate the P58 all-filtered boundary before skipping weight sync."""
+  if not all_compact_filtered:
+    return False
+  signed = (
+      values.get("CANON_P34_DEEPSWE") == "1"
+      and values.get("CANON_P58_DEEPSWE_TIM") == "1"
+      and values.get("CANON_P58_TIM_ADMITTED") == "1"
+      and values.get("CANON_P58_TIM_ARM") in ("native", "zero")
+      and values.get("CANON_ALIGNMENT_TRAIN") == "1"
+  )
+  if not signed:
+    raise alignment.AlignmentGateError(
+        "all-compact-filtered no-commit sync suppression is restricted to "
+        "signed P58 training"
+    )
+  if train_steps_after != train_steps_before:
+    raise alignment.AlignmentGateError(
+        "P58 all-compact-filtered batch advanced optimizer train_steps: "
+        f"before={train_steps_before} after={train_steps_after}"
+    )
+  return True
+
+
 TrainingInputT = Dict[str, List[str] | ArrayLike]
 RewardFn = Callable[..., List[float]]
 MetricFn = Callable[..., rl_cluster_lib.MetricsT]
@@ -2583,6 +2630,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       # actor_trainer.train_steps. Rollout weights are synchronized only after
       # the evaluation block, so this remains the authoritative eval step.
       pre_update_train_step = self.rl_cluster.actor_trainer.train_steps
+      pre_update_global_step = self.rl_cluster.global_steps
 
       if os.environ.get("CANON_P28_G5C_ONLY", "") == "1":
         alignment_pass = self._run_p28_g5c_gate(merged_train_micro_batch)
@@ -2877,6 +2925,24 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           self.rl_cluster.update_critic(
               chunked_train_micro_batch, current_eval_dataset, skip_jit
           )
+      p58_all_filtered_no_commit = _p58_all_filtered_no_commit_contract(
+          os.environ,
+          all_compact_filtered=bool(
+              getattr(
+                  merged_train_micro_batch, "all_compact_filtered", False
+              )
+          ),
+          train_steps_before=int(pre_update_train_step),
+          train_steps_after=int(self.rl_cluster.actor_trainer.train_steps),
+      )
+      if (
+          p58_all_filtered_no_commit
+          and self.rl_cluster.global_steps != pre_update_global_step
+      ):
+        raise alignment.AlignmentGateError(
+            "P58 all-compact-filtered batch advanced RL global_steps before "
+            "the no-commit boundary"
+        )
       # Evaluation can contain hundreds of full trajectory objects. Keep it
       # alive only through the actor/critic call that consumes it; otherwise
       # Python function locals retain the most recent eval until the next
@@ -3028,6 +3094,10 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       if update_steps_since_last_sync == update_steps_per_full_batch:
         # --- Remaining Iterations Training Step ---
         iterations = self._num_iterations()
+        if p58_all_filtered_no_commit and iterations != 1:
+          raise alignment.AlignmentGateError(
+              "P58 all-compact-filtered no-commit requires num_iterations=1"
+          )
 
         for i in range(1, iterations):
           # TODO(b/483779605) Sub-step checkpointing.
@@ -3046,11 +3116,19 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
 
 
         global_step_time = time.time() - self._global_step_start_time
-        logging.info(
-            f"Global step {self.rl_cluster.global_steps} completed in"
-            f" {global_step_time:.2f} seconds."
-        )
-        _canon_xprof_step_boundary()
+        if p58_all_filtered_no_commit:
+          logging.info(
+              "P58 all-compact-filtered rollout batch completed without "
+              "advancing global step %d in %.2f seconds.",
+              self.rl_cluster.global_steps,
+              global_step_time,
+          )
+        else:
+          logging.info(
+              f"Global step {self.rl_cluster.global_steps} completed in"
+              f" {global_step_time:.2f} seconds."
+          )
+          _canon_xprof_step_boundary()
         # One-line per-step diagnostic: raw rewards, solve rate, completion
         # length, advantage scale, and eval (when an eval just fired this
         # step). Mirrors the per-iter view a wandb dashboard would show
@@ -3165,7 +3243,33 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             mode=rl_cluster_lib.Mode.TRAIN,
             step=self.rl_cluster.global_steps,
         )
-        if self.should_sync_weights:
+        if p58_all_filtered_no_commit:
+          if (
+              self.rl_cluster.global_steps != pre_update_global_step
+              or self.rl_cluster.actor_trainer.train_steps
+              != pre_update_train_step
+          ):
+            raise alignment.AlignmentGateError(
+                "P58 all-compact-filtered no-commit state advanced before "
+                "the next rollout batch"
+            )
+          print(
+              "[P58.COMPACT_FILTER] all_filtered=1 optimizer_commits=0 "
+              f"train_steps={pre_update_train_step} "
+              f"global_steps={pre_update_global_step} "
+              f"policy_version={self.policy_version} weight_sync=0",
+              flush=True,
+          )
+          try:
+            with self.rl_cluster.perf_v2.span(
+                perf_constants.DATA_LOADING,
+                tags={perf_constants.STEP: self.rl_cluster.global_steps},
+            ):
+              batch = next(full_dataset_iterator)
+            self._put_prompts_to_queue(prompt_queue, batch)
+          except StopIteration:
+            prompt_queue.put(None)
+        elif self.should_sync_weights:
           logging.info("Requesting sync lock to sync weights...")
           self._rollout_sync_lock.acquire_weight_sync()
           try:

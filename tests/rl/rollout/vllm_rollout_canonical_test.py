@@ -149,6 +149,45 @@ class VllmRolloutCanonicalTest(absltest.TestCase):
         [[1, 2, 3, 4], [5, 6]],
     )
 
+  def test_processed_rescore_skips_engine_for_empty_completion_batch(self):
+    rollout = object.__new__(vllm_rollout.VllmRollout)
+    rollout._sampler = _RescoreSampler()
+    rollout._last_sampling_transforms = None
+    rollout._last_prefill_rescore_provenance = None
+    with mock.patch.dict(
+        os.environ, {"CANON_PROMPT_PROCESSED_LOGPROBS": "1"}, clear=True
+    ):
+      result = rollout.get_prefill_rescore_logps(
+          prompt_tokens=np.asarray([[0, 1, 2], [0, 0, 5]], np.int32),
+          completion_tokens=np.zeros((2, 3), np.int32),
+          completion_lengths=np.zeros((2,), np.int32),
+          processed=True,
+      )
+
+    np.testing.assert_array_equal(result, np.zeros((2, 3), np.float32))
+    self.assertEqual(rollout._sampler.prompt_batches, [])
+    self.assertFalse(
+        rollout._last_prefill_rescore_provenance["engine_called"]
+    )
+    self.assertEqual(
+        rollout._last_prefill_rescore_provenance["skip_reason"],
+        "empty-completion-batch",
+    )
+
+  def test_processed_rescore_still_requires_provenance_for_any_target(self):
+    rollout = object.__new__(vllm_rollout.VllmRollout)
+    rollout._sampler = _RescoreSampler()
+    rollout._last_sampling_transforms = None
+    with mock.patch.dict(
+        os.environ, {"CANON_PROMPT_PROCESSED_LOGPROBS": "1"}, clear=True
+    ), self.assertRaisesRegex(RuntimeError, "must follow generate"):
+      rollout.get_prefill_rescore_logps(
+          prompt_tokens=np.asarray([[1, 2], [3, 4]], np.int32),
+          completion_tokens=np.asarray([[0, 0], [5, 0]], np.int32),
+          completion_lengths=np.asarray([0, 1], np.int32),
+          processed=True,
+      )
+
   def test_p58_native_processed_rescore_uses_only_signed_stock_observer(self):
     rollout = object.__new__(vllm_rollout.VllmRollout)
     rollout._sampler = _RescoreSampler()

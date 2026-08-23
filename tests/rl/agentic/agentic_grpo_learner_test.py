@@ -230,6 +230,102 @@ class _LearnerWithException(agentic_grpo_learner.GRPOLearner):
 
 class AgenticGrpoLearnerTest(parameterized.TestCase):
 
+  def _p58_all_sandbox_timeout_metrics(self):
+    return {
+        "step": 3,
+        "optimizer_step": 1,
+        "trajectories": 128,
+        "sandbox_start_timeout_trajectories": 128,
+        "compact_filtered_trajectories": 128,
+        "effective_prompt_groups": 0,
+        "all_env_timeout_batch": True,
+        "all_sandbox_start_timeout_batch": True,
+        "scheduling_gated_trajectories": 128,
+        "unschedulable_trajectories": 0,
+        "insufficient_cpu_trajectories": 0,
+        "insufficient_memory_trajectories": 0,
+        "trajectory_path": "/durable/batch-000003.trajectories.jsonl.gz",
+        "trajectory_sha256": "a" * 64,
+    }
+
+  def test_p58_all_sandbox_timeout_blocks_after_durable_journal(self):
+    record = agentic_grpo_learner._p58_sandbox_capacity_block_record(  # pylint: disable=protected-access
+        p58_artifacts=True,
+        metrics=self._p58_all_sandbox_timeout_metrics(),
+        completion_targets=0,
+    )
+    self.assertEqual(record["batch_index"], 3)
+    self.assertEqual(record["optimizer_step"], 1)
+    self.assertEqual(record["scheduling_gated"], 128)
+    self.assertEqual(record["trajectory_sha256"], "a" * 64)
+
+  def test_non_infrastructure_all_filtered_batch_does_not_capacity_block(self):
+    metrics = self._p58_all_sandbox_timeout_metrics()
+    metrics["all_sandbox_start_timeout_batch"] = False
+    self.assertIsNone(
+        agentic_grpo_learner._p58_sandbox_capacity_block_record(  # pylint: disable=protected-access
+            p58_artifacts=True,
+            metrics=metrics,
+            completion_targets=0,
+        )
+    )
+
+  def test_p58_sandbox_capacity_evidence_is_fail_closed(self):
+    metrics = self._p58_all_sandbox_timeout_metrics()
+    metrics["compact_filtered_trajectories"] = 127
+    with self.assertRaisesRegex(
+        alignment.AlignmentGateError,
+        "inconsistent P58 all-sandbox-start-timeout evidence",
+    ):
+      agentic_grpo_learner._p58_sandbox_capacity_block_record(  # pylint: disable=protected-access
+          p58_artifacts=True,
+          metrics=metrics,
+          completion_targets=0,
+      )
+
+  def test_p58_all_filtered_no_commit_suppresses_step_advance(self):
+    values = {
+        "CANON_P34_DEEPSWE": "1",
+        "CANON_P58_DEEPSWE_TIM": "1",
+        "CANON_P58_TIM_ADMITTED": "1",
+        "CANON_P58_TIM_ARM": "native",
+        "CANON_ALIGNMENT_TRAIN": "1",
+    }
+    self.assertTrue(
+        agentic_rl_learner._p58_all_filtered_no_commit_contract(  # pylint: disable=protected-access
+            values,
+            all_compact_filtered=True,
+            train_steps_before=7,
+            train_steps_after=7,
+        )
+    )
+    self.assertFalse(
+        agentic_rl_learner._p58_all_filtered_no_commit_contract(  # pylint: disable=protected-access
+            {},
+            all_compact_filtered=False,
+            train_steps_before=7,
+            train_steps_after=8,
+        )
+    )
+
+  def test_p58_all_filtered_no_commit_rejects_optimizer_advance(self):
+    values = {
+        "CANON_P34_DEEPSWE": "1",
+        "CANON_P58_DEEPSWE_TIM": "1",
+        "CANON_P58_TIM_ADMITTED": "1",
+        "CANON_P58_TIM_ARM": "native",
+        "CANON_ALIGNMENT_TRAIN": "1",
+    }
+    with self.assertRaisesRegex(
+        alignment.AlignmentGateError, "advanced optimizer train_steps"
+    ):
+      agentic_rl_learner._p58_all_filtered_no_commit_contract(  # pylint: disable=protected-access
+          values,
+          all_compact_filtered=True,
+          train_steps_before=7,
+          train_steps_after=8,
+      )
+
   def test_environment_is_seeded_with_policy_version_before_reset(self):
     class FakeAgent:
 

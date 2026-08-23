@@ -279,12 +279,98 @@ class VllmRollout(base_rollout.BaseRollout):
       raise RuntimeError(
           "P58 native stock prompt observer used outside its signed arm"
       )
-    if processed:
-      if not canonical_processed and not p58_stock_observer_signed:
-        raise RuntimeError(
-            "processed S_prefill requires either the canonical processed "
-            "engine path or the signed P58 native stock observer"
+    if processed and not canonical_processed and not p58_stock_observer_signed:
+      raise RuntimeError(
+          "processed S_prefill requires either the canonical processed "
+          "engine path or the signed P58 native stock observer"
+      )
+    pad = self.pad_id()
+    prompts = np.atleast_2d(np.asarray(prompt_tokens))
+    comps = np.atleast_2d(np.asarray(completion_tokens))
+    if prompts.shape[0] != comps.shape[0]:
+      raise ValueError(
+          f"batch mismatch: {prompts.shape[0]} prompts vs {comps.shape[0]}"
+      )
+    lengths = None
+    if completion_lengths is not None:
+      lengths = np.asarray(completion_lengths, dtype=np.int64).reshape(-1)
+      if lengths.shape[0] != comps.shape[0]:
+        raise ValueError(
+            f"completion-length mismatch: {lengths.shape[0]} lengths for "
+            f"{comps.shape[0]} rows"
         )
+      if np.any(lengths < 0) or np.any(lengths > comps.shape[1]):
+        raise ValueError(
+            f"completion lengths outside [0,{comps.shape[1]}]: "
+            f"{lengths.tolist()}"
+        )
+
+    seqs, meta = [], []
+    for row_index, (row_p, row_c) in enumerate(zip(prompts, comps)):
+      # Prompts are LEFT padded and completions RIGHT padded: strip only the
+      # pad RUN at the respective end, never every occurrence -- pad_id can be
+      # a legitimate interior token.
+      lead = 0
+      while lead < row_p.shape[0] and int(row_p[lead]) == pad:
+        lead += 1
+      p = [int(t) for t in row_p[lead:]]
+      if lengths is None:
+        trail = row_c.shape[0]
+        while trail > 0 and int(row_c[trail - 1]) == pad:
+          trail -= 1
+      else:
+        trail = int(lengths[row_index])
+      c = [int(t) for t in row_c[:trail]]
+      if not p:
+        raise ValueError(
+            "empty prompt after stripping padding: position 0 has no "
+            "predictor, so its logprob does not exist and the re-score would "
+            "be silently misaligned"
+        )
+      seqs.append(p + c)
+      meta.append((len(p), trail))
+
+    if diagnostic_arm not in (None, "A", "B"):
+      raise ValueError(f"unsupported P35 diagnostic arm: {diagnostic_arm!r}")
+
+    # There is no numerical S_prefill value to observe when the complete
+    # batch has zero completion targets. In particular, an all-reset-timeout
+    # DeepSWE batch never called generate(), so requiring decode sampling
+    # provenance here would reject the preregistered compact-filter no-commit
+    # path. Return padding zeros without invoking the engine and record that
+    # fact explicitly; any non-empty row still requires real generation
+    # provenance and a real engine re-score below.
+    if all(completion_length == 0 for _, completion_length in meta):
+      processor = (
+          "p58-native-stock-observer"
+          if p58_stock_observer_signed
+          else "canonical-processed"
+          if canonical_processed
+          else "stock-raw"
+      )
+      self._last_prefill_rescore_provenance = {
+          "processed": bool(processed),
+          "processor": processor,
+          "temperature": None,
+          "top_p": None,
+          "top_k": None,
+          "batch_size": len(seqs),
+          "sequence_lengths": tuple(len(s) for s in seqs),
+          "completion_targets": 0,
+          "diagnostic_arm": diagnostic_arm,
+          "reset_prefix_cache": False,
+          "engine_called": False,
+          "skip_reason": "empty-completion-batch",
+      }
+      print(
+          "[CANON_RESCORE] empty_completion_batch targets=0 "
+          f"rows={len(seqs)} engine_called=0",
+          flush=True,
+      )
+      out = np.zeros(comps.shape, np.float32)
+      return out if np.asarray(completion_tokens).ndim > 1 else out[0]
+
+    if processed:
       if self._last_sampling_transforms is None:
         raise RuntimeError(
             "processed S_prefill must follow generate(); no rollout sampling provenance "
@@ -319,53 +405,10 @@ class VllmRollout(base_rollout.BaseRollout):
       top_k = 0 if top_k_value is None else int(top_k_value)
     else:
       temperature, top_p, top_k = 0.0, 1.0, 0
-    pad = self.pad_id()
-    prompts = np.atleast_2d(np.asarray(prompt_tokens))
-    comps = np.atleast_2d(np.asarray(completion_tokens))
-    if prompts.shape[0] != comps.shape[0]:
-      raise ValueError(f"batch mismatch: {prompts.shape[0]} prompts vs {comps.shape[0]}")
-    lengths = None
-    if completion_lengths is not None:
-      lengths = np.asarray(completion_lengths, dtype=np.int64).reshape(-1)
-      if lengths.shape[0] != comps.shape[0]:
-        raise ValueError(
-            f"completion-length mismatch: {lengths.shape[0]} lengths for "
-            f"{comps.shape[0]} rows"
-        )
-      if np.any(lengths < 0) or np.any(lengths > comps.shape[1]):
-        raise ValueError(
-            f"completion lengths outside [0,{comps.shape[1]}]: {lengths.tolist()}"
-        )
-
-    seqs, meta = [], []
-    for row_index, (row_p, row_c) in enumerate(zip(prompts, comps)):
-      # Prompts are LEFT padded and completions RIGHT padded: strip only the pad RUN at the
-      # respective end, never every occurrence -- pad_id can be a legitimate interior token.
-      lead = 0
-      while lead < row_p.shape[0] and int(row_p[lead]) == pad:
-        lead += 1
-      p = [int(t) for t in row_p[lead:]]
-      if lengths is None:
-        trail = row_c.shape[0]
-        while trail > 0 and int(row_c[trail - 1]) == pad:
-          trail -= 1
-      else:
-        trail = int(lengths[row_index])
-      c = [int(t) for t in row_c[:trail]]
-      if not p:
-        raise ValueError(
-            "empty prompt after stripping padding: position 0 has no predictor, so its "
-            "logprob does not exist and the re-score would be silently misaligned"
-        )
-      seqs.append(p + c)
-      meta.append((len(p), trail))
-
     # Otherwise a cached prefix makes the 'prefill' partly a cache read, so the re-score is
     # no longer the same forward the gate claims to be comparing.  The sampler's driver-mode
     # path performs wait-idle + reset + request submission atomically, preventing another
     # continuous-batching producer from racing between the reset and this score request.
-    if diagnostic_arm not in (None, "A", "B"):
-      raise ValueError(f"unsupported P35 diagnostic arm: {diagnostic_arm!r}")
     previous_arm = os.environ.get("CANON_P35_ARM")
     if diagnostic_arm is not None:
       if os.environ.get("CANON_P35_ENVELOPE", "") != "1":

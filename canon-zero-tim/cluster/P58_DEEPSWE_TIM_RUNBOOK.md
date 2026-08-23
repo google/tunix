@@ -180,7 +180,34 @@ bug before journaling: `SWEEnv.entry` had the normalized prompt, but inherited
 `KeyError: 'prompts'`. The repaired source seeds `SWEEnv.task` with a
 singleton-batched normalized prompt before reset and uses that policy-seeded
 task for both normal and pre-observation termination rows. Missing `prompts`
-now fails at collection. Use fresh `p58f12`; never reuse p58f11 YAML/root.
+now fails at collection. At that historical checkpoint the next run was
+`p58f12`; never reuse p58f11 YAML/root.
+
+Native `p58f12` proved the normalized-prompt repair and wrote a valid durable
+128-row Step-0 journal. All 128 R2E Pods nevertheless remained Kueue
+`scheduling_gated` until sandbox-start timeout, so every trajectory was signed
+compact-filtered `ENV_TIMEOUT`, completion/action token counts were zero, and
+`generate()` was never called. Processed-B rescore then failed because no
+rollout sampling-transform provenance existed. No alignment, backward,
+optimizer commit, or checkpoint followed. The journal is diagnostic evidence,
+not resumable trainer state. This batch diagnoses zero CPU sandbox admission
+throughput; do not respond by increasing vLLM max-seqs or model concurrency.
+
+The local repair first completes the signed empty-completion observer path
+without changing the training algorithm. Zero completion targets validate
+structure and the observer signature, skip the engine, and record
+`engine_called=false`; any nonempty target still requires real
+post-`generate()` sampling provenance. Alignment admits zero policy actions
+only with durable P58 all-compact provenance. For ordinary
+model/context/runtime all-compact outcomes, the existing zero-gradient
+transaction makes no optimizer commit, the outer learner suppresses weight
+sync and every committed-step advance, only `batch_index` advances, and the
+next prompt batch is consumed without resampling.
+
+A durable full sandbox-start outage uses a separate circuit breaker: emit
+`[P58.SANDBOX_CAPACITY] BLOCKED` and raise `BLOCKED_SANDBOX_CAPACITY` before
+rescore/alignment/trainer or any later prompt consumption. Use fresh `p58f13`
+only after publication/readback and the `cpu-np`/Kueue capacity gate below.
 
 The direct-entrypoint implementation commit is
 `82d82f72a7220d945737d95f6266b5b7e2cfe706`. Resolve the final runnable SHA by
@@ -228,11 +255,14 @@ REWARD_TIMEOUT
 ```
 
 Partial filtering uses
-`sum(mask * token_loss) / (B_eff * 16384)`. If all 128 rows are filtered,
-the transaction is discarded without an optimizer commit and the next data
-batch is consumed. It is not resampled. `batch_index` still advances while
-`optimizer_step` does not; this separation makes the journal resumable and
-prevents an all-filtered batch from overwriting the preceding artifact.
+`sum(mask * token_loss) / (B_eff * 16384)`. If all 128 rows are filtered by
+ordinary model/context/runtime outcomes, the transaction is discarded without
+an optimizer commit or weight sync and the next data batch is consumed. It is
+not resampled. Trainer/RL global steps and `policy_version` remain unchanged;
+`batch_index` advances while `optimizer_step` remains the actual committed
+trainer step. A full sandbox-start outage instead journals and stops before a
+later prompt. This separation prevents artifact collisions without allowing
+an infrastructure outage to scan the clean list.
 
 Timeout nesting is fixed: turn 300 s, step/reward 600 s, trajectory 3,000 s,
 sandbox 3,300 s, cleanup 300 s, and the shared rollout-batch deadline 3,600 s.
@@ -314,6 +344,100 @@ Before rendering, verify read-only that the mounted PVC contains
 `Qwen3-4B-Instruct-2507`, the R2E dependency imports, the clean JSONL has 1,012
 lines, and its digest matches the frozen value. Never print secret values.
 
+## 2A. P58 sandbox capacity gate
+
+P58f12 had 128/128 sandboxes `scheduling_gated`. Before reserving TPUs, prove
+one production-shaped sandbox can pass the exact Kueue/CPU route. This probe
+checks admission only; it does not execute R2E, model rollout, or training.
+
+First derive a real task image from the frozen clean list and render a unique
+Pod. Do not substitute a generic image, hand-edit the YAML, or overwrite a
+previous probe artifact.
+
+```bash
+CLEAN_JSONL='canon-zero-tim/clean_data/p46_q4_learnable/p46q4census02_qwen3_4b_instruct_2507_n16_learnable_tasks.jsonl'
+TASK_IMAGE="$(head -n 1 "$CLEAN_JSONL" | jq -er '.docker_image')"
+PROBE_RUN_ID='p58f13'
+PROBE_POD="canon-p58-sandbox-probe-${PROBE_RUN_ID}"
+PROBE_YAML="/tmp/${PROBE_POD}.yaml"
+
+python3 canon-zero-tim/cluster/render_p58_sandbox_probe.py \
+  --run-id "$PROBE_RUN_ID" \
+  --task-image "$TASK_IMAGE" \
+  --output "$PROBE_YAML"
+sha256sum "$PROBE_YAML"
+kubectl apply --server-side --dry-run=server -f "$PROBE_YAML"
+```
+
+Required render marker:
+
+```text
+P58_SANDBOX_PROBE_RENDER_PASS pod=canon-p58-sandbox-probe-p58f13 ...
+```
+
+Applying the probe is a separate user/operator-approved Kubernetes mutation.
+Only after that approval:
+
+```bash
+kubectl apply -f "$PROBE_YAML"
+kubectl -n default wait --for=condition=Ready "pod/$PROBE_POD" \
+  --timeout=10m || true
+P58_SANDBOX_PROBE_POD="$PROBE_POD" \
+  bash canon-zero-tim/cluster/steps/p58_verify_sandbox_capacity.sh
+```
+
+The only pass marker is:
+
+```text
+P58_SANDBOX_CAPACITY_PASS scope=one-sandbox-admission-only ...
+```
+
+The verifier requires an Active `multislice-queue` LocalQueue, an Active
+backing ClusterQueue, at least one Ready schedulable `cpu-np` node, a Running
+probe labeled `kueue.x-k8s.io/managed=true` with no scheduling gate, the exact
+queue/node selector, and a selected node that actually belongs to `cpu-np`.
+Preserve read-only evidence before cleanup:
+
+```bash
+kubectl -n default get pod "$PROBE_POD" -o yaml
+kubectl -n default describe pod "$PROBE_POD"
+kubectl -n default get workloads.kueue.x-k8s.io -o wide
+kubectl -n default get localqueue.kueue.x-k8s.io multislice-queue -o yaml
+CLUSTER_QUEUE="$(kubectl -n default get localqueue.kueue.x-k8s.io \
+  multislice-queue -o jsonpath='{.spec.clusterQueue}')"
+kubectl get clusterqueue.kueue.x-k8s.io "$CLUSTER_QUEUE" -o yaml
+kubectl get resourceflavors.kueue.x-k8s.io -o yaml
+kubectl get nodes -l cloud.google.com/gke-nodepool=cpu-np \
+  -o custom-columns=NAME:.metadata.name,UNSCHEDULABLE:.spec.unschedulable,CPU:.status.allocatable.cpu,MEMORY:.status.allocatable.memory
+```
+
+Identify and preserve the Workload associated with the probe from the Pod UID,
+owner/labels, and timestamps; do not guess a Workload name. A one-Pod PASS is
+necessary but is not proof that the full 128-Pod wave can be admitted. The
+production request floor is 128 x 2 CPU = 256 requested CPU and 128 x 4 GiB =
+512 GiB requested memory, plus the Pathways head and cluster overhead. Confirm
+the ClusterQueue quota/usage, selected ResourceFlavor, ready-node capacity,
+and autoscaler behavior can supply that request, or obtain explicit operator
+signoff before applying the full JobSet. Container limits are 4 CPU/8 GiB each
+and must also remain feasible on selected nodes.
+
+If the probe remains Pending or gated, the verifier emits
+`P58_SANDBOX_CAPACITY_BLOCKED`. Preserve Pod conditions/events, the matching
+Workload's `QuotaReserved`/admission checks, LocalQueue/ClusterQueue status,
+selected ResourceFlavor, and `cpu-np` readiness. Do not launch TPUs, tune vLLM,
+increase `max_num_seqs`, or remove the queue label. The returned p58f12 log is
+insufficient to distinguish quota exhaustion from a flavor/admission issue.
+
+When evidence is preserved, delete only the exact probe and confirm recovery:
+
+```bash
+kubectl -n default delete pod "$PROBE_POD"
+kubectl -n default wait --for=delete "pod/$PROBE_POD" --timeout=5m
+```
+
+This deletion is also a Kubernetes mutation and requires operator authority.
+Report the exact deleted Pod name and whether deletion was confirmed.
+
 ## 3N. Render and launch the native full campaign
 
 Use the exact source SHA, image digest, CPU pool, Kueue worker sentinel, PVC,
@@ -325,7 +449,7 @@ CLIENT_IMAGE_DIGEST='registry.example/tunix@sha256:<64-hex-digest>'
 CPU_NODEPOOL='cpu-np'
 TPU_NODEPOOL='tpu-v5p-slice'
 MODEL_PVC='haoyugao-cpu-np-pvc'
-RUN_STEM='p58f12'
+RUN_STEM='p58f13'
 STAGE='full'
 
 ARM='native'
@@ -494,11 +618,37 @@ jq . "$RUN_ROOT/p58_deepswe_<arm>_<stage>.classification.json"
 ```
 
 Full-stage PASS requires exactly 1,000 committed update records. There may be
-more than 1,000 trajectory batches if an entire batch was compact-filtered;
-every such extra batch must have a zero-commit receipt, unchanged state, and
-the same optimizer step as its successor. Any partial journal, missing digest,
-duplicate/missing trajectory, wrong task identity, or non-signed filtered
-status is fatal.
+more than 1,000 trajectory batches if an ordinary model/context/runtime batch
+was entirely compact-filtered; every such extra batch must have a zero-commit
+receipt, no weight sync, unchanged trainer/RL/policy state, an incremented
+batch index, and the same optimizer step as its successor. Require these
+bounded markers:
+
+```text
+[CANON_RESCORE] empty_completion_batch targets=0 ... engine_called=0
+CANON_ALIGN... N_action=0 ... all_compact_filtered=true ... no_signal_admitted=true
+[DEEPSWE.COMPACT_FILTER] optimizer_boundary_skipped effective_rows=0 train_steps=<N>
+[P58.NATIVE] optimizer_transaction ... commits=0 mode=compact...
+[P58.COMPACT_FILTER] all_filtered=1 optimizer_commits=0 train_steps=<N> global_steps=<N> ... weight_sync=0
+```
+
+The subsequent journal may use a larger `batch_index` but must still report
+`optimizer_step=<N>` until a real commit occurs. Any partial journal, missing
+digest, duplicate/missing trajectory, wrong task identity, unsigned filtered
+status, or state advance on the no-commit path is fatal.
+
+A full sandbox-start outage uses a different terminal contract. After the
+durable journal and bounded timeout metrics, require:
+
+```text
+[P58.SANDBOX_CAPACITY] BLOCKED ... optimizer_commits=0 prompts_consumed_after_batch=0 trajectory_path=<...> trajectory_sha256=<...>
+BLOCKED_SANDBOX_CAPACITY: all P58 trajectories timed out before sandbox start
+```
+
+No processed rescore, alignment, trainer call, weight sync, optimizer commit,
+or later prompt batch may follow. Preserve the run as `INCONCLUSIVE`, repair
+capacity, and use a fresh run id. Do not let a persistent cluster outage scan
+past the frozen clean-task ordering.
 
 Monitor without stopping the healthy job:
 
@@ -554,6 +704,7 @@ Stop rather than retrying the same manifest if any of these occurs:
   resampling appears;
 - fewer/more than 128 raw trajectory records in any batch;
 - journal continuity or digest failure;
+- `BLOCKED_SANDBOX_CAPACITY` after a durable full sandbox-start-timeout batch;
 - sandbox cleanup failure, OOM, IFRT/CANCELLED, or deadline nesting drift; or
 - classifier verdict is not `PASS`.
 
