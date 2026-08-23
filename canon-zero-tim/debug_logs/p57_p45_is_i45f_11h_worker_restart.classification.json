@@ -1,0 +1,12 @@
+{
+  "incident_id": "p57_p45_is_i45f_11h_worker_restart",
+  "stage": "p57_p45_token_is_training",
+  "recipes_affected": [
+    "canon-p57-fl-is-i45f-9c422bd2"
+  ],
+  "root_cause": "After 11 hours of continuous execution and completing 100 full training updates and 3 held-out evaluations (Step 0: 41.5%, Step 50: 49.38%, Step 100: 50.88%), worker-0 reached the GKE JobSet restart threshold.",
+  "error_type": "ReachedMaxRestarts",
+  "error_message": "jobset failed due to reaching max number of restarts (first failed job: canon-p57-fl-is-i45f-9c422bd2-pathways-worker-0)",
+  "work_accomplished": "100 committed update steps and 3 milestone evaluations (0, 50, 100) completed.",
+  "next_action": "Relaunch P45 full campaign from Step 100 checkpoint or fresh 300-step run with non-fatal checkpoint wrapper."
+}

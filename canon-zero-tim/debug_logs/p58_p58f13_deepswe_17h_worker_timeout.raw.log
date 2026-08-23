@@ -1,0 +1,4 @@
+[P58.DEEPSWE] step=56 committed=1 train_steps_before=55 train_steps_after=56 verdict=PASS
+[P58.SANDBOX] 128 concurrent sandbox environments executed and evaluated
+Warning: ReachedMaxRestarts: jobset failed due to reaching max number of restarts (first failed job: canon-p58-ds4b-native-full-p58f13-pathways-worker-0)
+[P58.INCIDENT] Worker 0 disconnected after 17 hours continuous execution. Persistent disk data preserved at /mnt/disks/linchai_data/deepswe_zero_tim/canon-p58-ds4b-native-full-p58f13.

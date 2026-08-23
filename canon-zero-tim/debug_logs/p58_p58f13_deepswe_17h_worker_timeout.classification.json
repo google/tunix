@@ -1,0 +1,12 @@
+{
+  "incident_id": "p58_p58f13_deepswe_17h_worker_timeout",
+  "stage": "p58_deepswe_128tpu_training",
+  "recipes_affected": [
+    "canon-p58-ds4b-native-full-p58f13"
+  ],
+  "root_cause": "After 17 hours of continuous distributed training (56 update steps, 7,160+ trajectories across 128 TPU chips and 128 sandboxes), a GKE TPU host node encountered a networking/keepalive timeout on worker-0, reaching the JobSet maximum restart limit.",
+  "error_type": "ReachedMaxRestarts",
+  "error_message": "jobset failed due to reaching max number of restarts (first failed job: canon-p58-ds4b-native-full-p58f13-pathways-worker-0)",
+  "work_accomplished": "56 committed training steps, 7,160+ SWE trajectories saved to persistent disk.",
+  "next_action": "Resume DeepSWE from checkpoint Step 50/56 snapshot on fresh TPU slice."
+}

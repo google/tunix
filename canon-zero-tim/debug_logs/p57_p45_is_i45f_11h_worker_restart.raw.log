@@ -1,0 +1,6 @@
+[CANON_GSM8K_TRAIN] update_step_committed train_steps=100
+2026-08-23 11:09:02 - INFO - [absl] [step 99] train_reward=0.508 train_solve=0.508 n=256 adv_abs_mean=0.257 compl_len=983.4 raw_compl_len=1145.5 trunc_ratio=0.211 time=133.8s loss=0.0013 grad_norm=0.0055 reduced_pg_loss=0.0013 entropy=0.4364 kl=0.0000 log_ratio_abs=0.0118 clipfrac=0.1674
+[CANON_FROZENLAKE_P42_JSON] {"n":800,"policy_step":0,"solve":0.4150}
+[CANON_FROZENLAKE_P42_JSON] {"n":800,"policy_step":50,"solve":0.4938}
+[CANON_FROZENLAKE_P42_JSON] {"n":800,"policy_step":100,"solve":0.5088}
+Warning: ReachedMaxRestarts: jobset failed due to reaching max number of restarts (first failed job: canon-p57-fl-is-i45f-9c422bd2-pathways-worker-0)
