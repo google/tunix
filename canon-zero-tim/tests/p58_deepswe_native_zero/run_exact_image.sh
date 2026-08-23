@@ -73,6 +73,9 @@ $DOCKER run --rm \
         canonical_qwen3_adapter_test.CanonicalQwen3AdapterTest.test_p59_tp4_tp8_localizes_nested_engine_maps_and_collectives
     )
     PYTHONPATH=/workspace python3 \
+      canon-zero-tim/tests/p33_workloads/test_dp_workloads.py \
+      DPWorkloadsTest.test_p57_zero_full_admits_its_signed_wandb_project_only
+    PYTHONPATH=/workspace python3 \
       canon-zero-tim/tests/p34_deepswe/test_contract.py
     PYTHONPATH=/workspace python3 \
       canon-zero-tim/tests/p34_deepswe/test_env_contract.py
@@ -132,5 +135,5 @@ $DOCKER run --rm \
       python3 \
       canon-zero-tim/tests/p58_deepswe_native_zero/probe_stock_prompt_observer.py
     rm -r "$observer_state"
-    echo "P58_EXACT_IMAGE_CPU_PASS loss_oracle=1 weighted_accumulation=1 compact_filter=1 durable_journal=1 paired_renderer=1 alignment_policy=1 stock_observer=1 p59_tp4_tp8=2 p59_real_shim=4 regressions=1"
+    echo "P58_EXACT_IMAGE_CPU_PASS loss_oracle=1 weighted_accumulation=1 compact_filter=1 durable_journal=1 paired_renderer=1 alignment_policy=1 stock_observer=1 p59_tp4_tp8=2 p59_real_shim=4 p57_wandb=1 regressions=1"
   '

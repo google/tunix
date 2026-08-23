@@ -888,10 +888,22 @@ def validate_environment(
     )
   if require_reduction_admission:
     requested_max_steps(workload, values)
+    wandb_project = workload.wandb_project
+    p57_profile = values.get("CANON_PROFILE_FILE", "") in (
+        "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env",
+        "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env",
+    )
+    if (
+        p57_profile
+        and workload.name == "frozenlake-dp8-tp8"
+        and values.get("CANON_P57_RUN_KIND") == "train"
+        and values.get("CANON_P57_TIM_ARM") == "zero"
+    ):
+      wandb_project = "zero-tim-p57-frozenlake-tim"
     wandb_expected = {
         "CANON_WANDB_ONLINE_REQUIRED": "1",
         "CANON_P31_MONOTONIC_METRICS": "1",
-        "CANON_WANDB_PROJECT": workload.wandb_project,
+        "CANON_WANDB_PROJECT": wandb_project,
         "WANDB_MODE": "online",
     }
     wandb_wrong = {

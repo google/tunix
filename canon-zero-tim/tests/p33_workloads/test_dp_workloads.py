@@ -462,6 +462,48 @@ class DPWorkloadsTest(unittest.TestCase):
         workload, environ, require_reduction_admission=True
     )
 
+  def test_p57_zero_full_admits_its_signed_wandb_project_only(self):
+    workload = dp_workloads.get_workload("frozenlake-dp8-tp8")
+    environ = _environment("frozenlake-dp8-tp8")
+    environ.update({
+        "CANON_P32_TRAIN_ADMITTED": "1",
+        "CANON_P32_DP_REDUCTION_ADMITTED": "1",
+        "CANON_P33_WORKLOAD_LAUNCH_ADMITTED": "1",
+        "FL_SHARED_MESH": "8,8",
+        "CANON_P33_ENABLE_EVAL": "1",
+        "CANON_P33_DISABLE_EVAL": "0",
+        "CANON_P31_ENABLE_EVAL": "1",
+        "CANON_PROFILE_FILE": (
+            "cluster/profiles/"
+            "qwen3-8b-dp8-tp8-frozenlake-v1-hp.env"
+        ),
+        "CANON_P57_RUN_KIND": "train",
+        "CANON_P57_TIM_ARM": "zero",
+        "CANON_P57_EXPECTED_UPDATES": "300",
+        "CANON_WANDB_PROJECT": "zero-tim-p57-frozenlake-tim",
+    })
+    dp_workloads.validate_environment(
+        workload, environ, require_reduction_admission=True
+    )
+    with self.assertRaisesRegex(ValueError, "CANON_WANDB_PROJECT"):
+      dp_workloads.validate_environment(
+          workload,
+          {**environ, "CANON_P57_TIM_ARM": "mismatch"},
+          require_reduction_admission=True,
+      )
+    with self.assertRaisesRegex(ValueError, "CANON_WANDB_PROJECT"):
+      dp_workloads.validate_environment(
+          workload,
+          {
+              **environ,
+              "CANON_PROFILE_FILE": (
+                  "cluster/profiles/"
+                  "qwen3-8b-dp8-tp8-frozenlake-resident.env"
+              ),
+          },
+          require_reduction_admission=True,
+      )
+
   def test_frozenlake_evaluation_rejects_diagnostic_stage(self):
     environ = _environment("frozenlake")
     environ.update({
