@@ -588,8 +588,9 @@ def requested_max_steps(
         "exact gsm8k-p59-dp4-tp1 one-update deterministic geometry"
     )
   if stage == "full":
-    if values.get("CANON_PROFILE_FILE", "") == (
-        "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env"
+    if values.get("CANON_PROFILE_FILE", "") in (
+        "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env",
+        "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env",
     ):
       try:
         steps = int(values.get("CANON_P57_EXPECTED_UPDATES", ""))

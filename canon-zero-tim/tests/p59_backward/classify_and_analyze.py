@@ -33,6 +33,7 @@ _EXPECTED_STEPS = {
     "tail": 8,
     "numerical-control": 1,
     "numerical-candidate": 1,
+    "v1": 3,
 }
 
 
@@ -345,6 +346,7 @@ def main() -> int:
           "tail",
           "numerical-control",
           "numerical-candidate",
+          "v1",
       )
   )
   parser.add_argument(

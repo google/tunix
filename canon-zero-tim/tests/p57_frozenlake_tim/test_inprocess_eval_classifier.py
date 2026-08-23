@@ -24,7 +24,13 @@ sys.modules[SPEC.name] = classifier
 SPEC.loader.exec_module(classifier)
 
 
-def _log(*, omit_step: int | None = None, bad_n: bool = False) -> str:
+def _log(
+    *,
+    omit_step: int | None = None,
+    bad_n: bool = False,
+    bad_cycle_step: int | None = None,
+    omit_cycle_step: int | None = None,
+) -> str:
   lines = [
       "[CANON_" "P33_EVAL] ENABLED workload=frozenlake cadence=50 "
       "held_out_rows=100 generations=8",
@@ -56,6 +62,14 @@ def _log(*, omit_step: int | None = None, bad_n: bool = False) -> str:
         "[CANON_" "FROZENLAKE_P42_JSON] "
         + json.dumps(last, sort_keys=True, separators=(",", ":"))
     )
+    if step != omit_cycle_step:
+      enclosing = "none" if step == 300 else str(
+          step if step == bad_cycle_step else step + 1
+      )
+      lines.append(
+          f"[P57.EVAL.CYCLE] policy_step={step} "
+          f"enclosing_global_step={enclosing}"
+      )
   assert last is not None
   lines.append(
       "[P57.EVAL] FINAL policy_step=300 prompts=100 generations=8 n=800 "
@@ -85,6 +99,16 @@ class InprocessEvalClassifierTest(unittest.TestCase):
     result = self._classify(_log())
     self.assertEqual(result["verdict"], "PASS")
     self.assertEqual(result["steps"], [0, 50, 100, 150, 200, 250, 300])
+    self.assertEqual(
+        result["cycle_receipts"],
+        [
+            {
+                "policy_step": step,
+                "enclosing_global_step": None if step == 300 else step + 1,
+            }
+            for step in range(0, 301, 50)
+        ],
+    )
     print("P57_INPROCESS_EVAL_CLASSIFIER_PASS steps=7", flush=True)
 
   def test_missing_point_and_bad_coverage_fail(self):
@@ -92,6 +116,12 @@ class InprocessEvalClassifierTest(unittest.TestCase):
       self._classify(_log(omit_step=150))
     with self.assertRaisesRegex(ValueError, "coverage drifted"):
       self._classify(_log(bad_n=True))
+
+  def test_cycle_mapping_is_explicit_and_fail_closed(self):
+    with self.assertRaisesRegex(ValueError, "cycle mapping incomplete"):
+      self._classify(_log(omit_cycle_step=150))
+    with self.assertRaisesRegex(ValueError, "cycle mapping incomplete"):
+      self._classify(_log(bad_cycle_step=150))
 
   def test_dataset_and_seed_drift_fail(self):
     with self.assertRaisesRegex(ValueError, "dataset identity drifted"):

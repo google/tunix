@@ -63,6 +63,15 @@ class SamplerIsContractTest(unittest.TestCase):
         "CANON_P32_WORKLOAD": "frozenlake-dp8-tp8",
     }
     self.assertTrue(_p57_purity_enabled(good))
+    self.assertTrue(
+        _p57_purity_enabled({
+            **good,
+            "CANON_P57_TIM_ARM": "zero",
+            "CANON_PROFILE_FILE": (
+                "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env"
+            ),
+        })
+    )
     for changed in (
         {"CANON_P57_RUN_KIND": "eval"},
         {"CANON_P57_TIM_ARM": "other"},
@@ -112,6 +121,14 @@ class SamplerIsContractTest(unittest.TestCase):
         "CANON_P32_WORKLOAD": "frozenlake-dp8-tp8",
     }
     self.assertTrue(_p57_is_enabled(good_env))
+    self.assertFalse(
+        _p57_is_enabled({
+            **good_env,
+            "CANON_PROFILE_FILE": (
+                "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env"
+            ),
+        })
+    )
     self.assertFalse(
         _p57_is_enabled({**good_env, "CANON_P57_TIM_ARM": "mismatch"})
     )

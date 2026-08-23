@@ -1186,12 +1186,20 @@ def main() -> None:
     # perfetto_trace_v2_<ts>.pb under the given directory.
     from tunix.perf import metrics as perf_metrics_lib  # pylint: disable=g-import-not-at-top
     from tunix.perf.experimental import export as perf_export_lib  # pylint: disable=g-import-not-at-top
+    from tunix.perf import profile_window as perf_profile_window  # pylint: disable=g-import-not-at-top
 
+    perfetto_exporter = perf_export_lib.PerfMetricsExport.from_cluster_config(
+        cluster_config=cluster_config,
+        trace_dir=canon_perf_trace_dir,
+    )
+    perfetto_target_step = int(
+        os.environ.get("CANON_PERF_TRACE_EXPORT_STEP", "") or "2"
+    )
     perf_config = perf_metrics_lib.PerfMetricsConfig(
-        custom_export_fn_v2=perf_export_lib.PerfMetricsExport.from_cluster_config(
-            cluster_config=cluster_config,
-            trace_dir=canon_perf_trace_dir,
-        ).export_metrics
+        custom_export_fn_v2=perf_profile_window.single_step_export_fn(
+            perfetto_exporter.export_metrics,
+            target_step=perfetto_target_step,
+        )
     )
   rl_cluster = rl_cluster_lib.RLCluster(
       actor=actor,

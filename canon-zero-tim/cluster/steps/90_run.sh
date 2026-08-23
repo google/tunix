@@ -640,7 +640,8 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
 fi
 if [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "1" ]; then
   case "${CANON_PROFILE_FILE:-}" in
-    cluster/profiles/qwen3-1p7b-dp16-tp4-gsm8k.env)
+    cluster/profiles/qwen3-1p7b-dp16-tp4-gsm8k.env|\
+    cluster/profiles/qwen3-1p7b-dp16-tp4-gsm8k-v1-hp.env)
       p38_fixed_endpoint=tied_embed
       p38_fixed_hidden=2048
       p38_fixed_tp=4
@@ -650,7 +651,8 @@ if [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "1" ]; then
       p38_fixed_hidden=4096
       p38_fixed_tp=4
       ;;
-    cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env)
+    cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env|\
+    cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env)
       p38_fixed_endpoint=untied_lm_head
       p38_fixed_hidden=4096
       p38_fixed_tp=8
@@ -1032,8 +1034,10 @@ elif [ "$rc" -eq 0 ] && [ "${CANON_P33_WORKLOAD_LAUNCH_ADMITTED:-0}" = "1" ]; th
   else
     classification="$CANON_STATE/p33_${CANON_P32_WORKLOAD}_${CANON_P33_RUN_STAGE}.classification.json"
     p57_classifier_args=()
-    if [ "${CANON_PROFILE_FILE:-}" = \
-         "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env" ] && \
+    if { [ "${CANON_PROFILE_FILE:-}" = \
+           "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env" ] || \
+         [ "${CANON_PROFILE_FILE:-}" = \
+           "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env" ]; } && \
        [ "${CANON_P33_ENABLE_EVAL:-0}" = "1" ]; then
       p57_eval_classification="$CANON_STATE/p57_inprocess_eval.classification.json"
       JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
@@ -1049,7 +1053,12 @@ elif [ "$rc" -eq 0 ] && [ "${CANON_P33_WORKLOAD_LAUNCH_ADMITTED:-0}" = "1" ]; th
       p57_eval_class_sha="$(sha256sum "$p57_eval_classification" | awk '{print $1}')"
       echo "[P57.EVAL] EVIDENCE classification=$p57_eval_classification classification_sha256=$p57_eval_class_sha"
     fi
-    if [ "${CANON_PROFILE_FILE:-}" = \
+    if [ "${CANON_V1_HP_FULL:-0}" = "1" ]; then
+      p57_classifier_args+=(--alignment-warning-only 0)
+      if [ "${CANON_P32_WORKLOAD:-}" = "frozenlake-dp8-tp8" ]; then
+        p57_classifier_args+=(--expected-updates "$CANON_P57_EXPECTED_UPDATES")
+      fi
+    elif [ "${CANON_PROFILE_FILE:-}" = \
          "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env" ]; then
       p57_classifier_args+=(
         --expected-updates "$CANON_P57_EXPECTED_UPDATES"
@@ -1071,8 +1080,32 @@ elif [ "$rc" -eq 0 ] && [ "${CANON_P33_WORKLOAD_LAUNCH_ADMITTED:-0}" = "1" ]; th
         --alignment-report "$CANON_ALIGN_REPORT" \
         "${p57_classifier_args[@]}" \
         --output "$classification" || exit 1
+    if [ "${CANON_V1_HP_FULL:-0}" = "1" ]; then
+      case "${CANON_P32_WORKLOAD:-}:${CANON_P57_WORKLOAD_CANDIDATE:-}:${CANON_P57_DATA_SPLIT:-}" in
+        gsm8k::) v1_recipe=gsm8k ;;
+        frozenlake-dp8-tp8::) v1_recipe=p45 ;;
+        frozenlake-dp8-tp8:m15:main) v1_recipe=m15 ;;
+        *)
+          echo "[run] FATAL: unknown V1 high-performance recipe identity" >&2
+          exit 1
+          ;;
+      esac
+      v1_classification="$CANON_STATE/v1_hp_${v1_recipe}_full.classification.json"
+      JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
+        python3 "$CANON_PKG/tasks/v1-phase4-three-full-recipes/scripts/classify_full_recipe.py" \
+          --recipe "$v1_recipe" \
+          --state "$CANON_STATE" \
+          --run-log "$LOG" \
+          --update-report "$CANON_UPDATE_REPORT" \
+          --base-classification "$classification" \
+          --output "$v1_classification" || exit 1
+      unset v1_recipe
+      unset v1_classification
+    fi
     if [ "${CANON_PROFILE_FILE:-}" = \
-         "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env" ]; then
+         "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env" ] || \
+       [ "${CANON_PROFILE_FILE:-}" = \
+         "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env" ]; then
       class_sha="$(sha256sum "$classification" | awk '{print $1}')"
       echo "[P57.TRAIN] EVIDENCE classification=$classification classification_sha256=$class_sha"
       JAX_PLATFORMS=cpu python3 -c \

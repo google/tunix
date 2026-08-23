@@ -23,6 +23,10 @@ _FINAL_RE = re.compile(
     r"solve=([-+0-9.eE]+) backward=0 optimizer_commits=0 "
     r"evaluation_checkpoint_writes=0"
 )
+_CYCLE_RE = re.compile(
+    r"\[P57\.EVAL\.CYCLE\] policy_step=(\d+) "
+    r"enclosing_global_step=(\d+|none)"
+)
 _DATASET_RE = re.compile(
     r"\[P57\.DATASET\] MATERIALIZED_PASS candidate=(\S+) split=(\S+) "
     r"train_rows=(\d+) eval_rows=(\d+) "
@@ -99,6 +103,31 @@ def classify(
         "P57 evaluation schedule incomplete or duplicated: "
         f"actual={actual_steps} expected={expected_steps}"
     )
+  raw_cycle_receipts = _CYCLE_RE.findall(text)
+  cycle_receipts = [
+      {
+          "policy_step": int(policy_step),
+          "enclosing_global_step": (
+              None if enclosing_global_step == "none"
+              else int(enclosing_global_step)
+          ),
+      }
+      for policy_step, enclosing_global_step in raw_cycle_receipts
+  ]
+  expected_cycle_receipts = [
+      {
+          "policy_step": step,
+          "enclosing_global_step": (
+              None if step == expected_updates else step + 1
+          ),
+      }
+      for step in expected_steps
+  ]
+  if cycle_receipts != expected_cycle_receipts:
+    raise ValueError(
+        "P57 evaluation cycle mapping incomplete or drifted: "
+        f"actual={cycle_receipts!r} expected={expected_cycle_receipts!r}"
+    )
   expected_rewards = held_out_rows * generations
   for record in records:
     if set(record) != {"n", "policy_step", "reward", "solve", "wall_seconds"}:
@@ -130,7 +159,7 @@ def classify(
   if final != expected_final:
     raise ValueError(f"P57 final evaluation receipt drifted: {final!r}")
   return {
-      "schema": "p57-inprocess-evaluation-classification-v1",
+      "schema": "p57-inprocess-evaluation-classification-v2",
       "verdict": "PASS",
       "expected_updates": expected_updates,
       "interval": interval,
@@ -146,6 +175,7 @@ def classify(
           "train_sha256": train_sha,
           "eval_sha256": eval_sha,
       },
+      "cycle_receipts": cycle_receipts,
       "records": records,
   }
 

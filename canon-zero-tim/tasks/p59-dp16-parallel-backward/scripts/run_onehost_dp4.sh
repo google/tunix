@@ -2,15 +2,16 @@
 # Run one immutable Qwen3-1.7B DP4xTP1 P59 arm.
 set -euo pipefail
 
-kind="${1:?usage: run_onehost_dp4.sh <candidate|control|profile|tail|numerical-control|numerical-candidate> <unique-label>}"
-label="${2:?usage: run_onehost_dp4.sh <candidate|control|profile|tail|numerical-control|numerical-candidate> <unique-label>}"
+kind="${1:?usage: run_onehost_dp4.sh <candidate|control|profile|tail|numerical-control|numerical-candidate|v1> <unique-label>}"
+label="${2:?usage: run_onehost_dp4.sh <candidate|control|profile|tail|numerical-control|numerical-candidate|v1> <unique-label>}"
 case "$kind" in
-  candidate) rank_parallel=1; capture=0; numerical=0; tail8=0; run_stage=three-update; expected_steps=3; expected_align=51 ;;
-  control) rank_parallel=0; capture=0; numerical=0; tail8=0; run_stage=three-update; expected_steps=3; expected_align=51 ;;
-  profile) rank_parallel=1; capture=1; numerical=0; tail8=0; run_stage=three-update; expected_steps=3; expected_align=51 ;;
-  tail) rank_parallel=1; capture=0; numerical=0; tail8=1; run_stage=p59-eight-update; expected_steps=8; expected_align=136 ;;
-  numerical-control) rank_parallel=0; capture=0; numerical=1; tail8=0; run_stage=one-update; expected_steps=1; expected_align=17 ;;
-  numerical-candidate) rank_parallel=1; capture=0; numerical=1; tail8=0; run_stage=one-update; expected_steps=1; expected_align=17 ;;
+  candidate) rank_parallel=1; capture=0; numerical=0; tail8=0; run_stage=three-update; expected_steps=3; expected_align=51; recipe=p59-p56-ab ;;
+  control) rank_parallel=0; capture=0; numerical=0; tail8=0; run_stage=three-update; expected_steps=3; expected_align=51; recipe=p59-p56-ab ;;
+  profile) rank_parallel=1; capture=1; numerical=0; tail8=0; run_stage=three-update; expected_steps=3; expected_align=51; recipe=p59-p56-ab ;;
+  tail) rank_parallel=1; capture=0; numerical=0; tail8=1; run_stage=p59-eight-update; expected_steps=8; expected_align=136; recipe=p59-p56-ab ;;
+  numerical-control) rank_parallel=0; capture=0; numerical=1; tail8=0; run_stage=one-update; expected_steps=1; expected_align=17; recipe=p59-p56-ab ;;
+  numerical-candidate) rank_parallel=1; capture=0; numerical=1; tail8=0; run_stage=one-update; expected_steps=1; expected_align=17; recipe=p59-p56-ab ;;
+  v1) rank_parallel=1; capture=0; numerical=0; tail8=0; run_stage=three-update; expected_steps=3; expected_align=51; recipe=v1-phase4-current-bundle ;;
   *) echo "[P59.DP4] invalid kind: $kind" >&2; exit 2 ;;
 esac
 case "$label" in
@@ -107,7 +108,12 @@ mkdir -p "$state/wandb" "$state/logs" "$xprof_dir" "$perf_dir"
   echo "[P59.DP4] zero_tim_gate=$expected_align/$expected_align strict expected_fail=0"
   echo "[P59.DP4] deterministic_ab=$deterministic_ab engine_seed=42 max_concurrency=$ab_concurrency max_response_length=$ab_response_length"
   echo "[P61.NUMERICAL] enabled=$numerical capture=$([ "$numerical" = 1 ] && echo full_gradient_and_update || echo none) performance_eligible=$([ "$numerical" = 1 ] && echo 0 || echo 1)"
-  echo "[P59.DP4] p56_recipe=batched_reverse,fused_tree_ops,dp_row_padded_logprobs,fixed_ar_gather,norm_matmul,logprob_step_fusion,continue_decode8"
+  echo "[P59.DP4] recipe=$recipe"
+  if [ "$kind" = v1 ]; then
+    echo "[V1.ONEHOST] bundle=gathered_logprobs,fixed_ar_gather,logprob_step_fusion,continue_decode8,batched_report,batched_evidence,p59_rank_parallel excluded=apc,fixed_lm_head"
+  else
+    echo "[P59.DP4] p56_recipe=batched_reverse,fused_tree_ops,dp_row_padded_logprobs,fixed_ar_gather,norm_matmul,logprob_step_fusion,continue_decode8"
+  fi
 } >"$driver"
 
 bash "$pkg/install.sh" "$canon_out" --from-image "$image" --model qwen1p7b_tp1 \
@@ -122,6 +128,7 @@ bash "$pkg/install.sh" "$canon_out" --from-image "$image" --model qwen1p7b_tp1 \
     "$repo/tunix/rl/canonical_qwen3_adapter.py" \
     "$repo/examples/math_gsm8k/qwen3_grpo_demo.py" \
     "$pkg/cluster/profiles/qwen3-1p7b-dp4-tp1-gsm8k-p59.env" \
+    "$pkg/cluster/profiles/qwen3-1p7b-dp4-tp1-gsm8k-v1-hp.env" \
     "$pkg/tests/p33_workloads/classify_run.py" \
     "$pkg/tests/p59_backward/classify_and_analyze.py" \
     "$script_dir/run_dp4_inner.sh" "$0" \

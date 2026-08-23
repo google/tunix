@@ -23,6 +23,9 @@ from examples.frozenlake import p57_workloads
 
 
 _PROFILE = "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env"
+_V1_HP_PROFILE = (
+    "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env"
+)
 _CHECKPOINT_ROOT = (
     "gs://yuxzhang-tunix-models/canon-zero-tim/checkpoints/frozenlake"
 )
@@ -145,6 +148,7 @@ def _spec(
     checkpoint_step: int | None,
     workload_candidate: str,
     data_split: str,
+    high_performance: bool = False,
 ) -> p33.JobSpec:
   enable_train_evaluation = run_kind == "train" and data_split != "selection"
   command = list(
@@ -216,7 +220,7 @@ def _spec(
       key=f"p57-frozenlake-{arm.name}-{workload_suffix}{key_suffix}",
       workload="frozenlake",
       stage="full",
-      profile=_PROFILE,
+      profile=_V1_HP_PROFILE if high_performance else _PROFILE,
       no_commit=False,
       job_prefix=job_prefix,
       command=tuple(command),
@@ -225,6 +229,8 @@ def _spec(
       dp_size=_DP_SIZE,
       tp_size=_TP_SIZE,
       optimizer_resident=True,
+      rank_parallel_backward=high_performance,
+      v1_hp_full=high_performance,
   )
 
 
@@ -280,6 +286,7 @@ def render_all(
     stock_only: bool = False,
     arm: str = "",
     stop_after_step: int | None = None,
+    high_performance: bool = False,
 ) -> tuple[Path, ...]:
   if expected_updates not in _ALLOWED_UPDATES:
     raise ValueError(
@@ -290,6 +297,15 @@ def render_all(
     raise ValueError("P57 checkpoint mode must be new or resume")
   if run_kind not in ("train", "eval"):
     raise ValueError("P57 run kind must be train or eval")
+  if high_performance and (
+      run_kind != "train"
+      or arm != "zero"
+      or checkpoint_mode != "new"
+      or expected_updates != _PAIRED_ARM_UPDATES
+  ):
+    raise ValueError(
+        "P57 v1 high-performance mode requires a new 300-update zero train"
+    )
   if run_kind == "train" and checkpoint_step is not None:
     raise ValueError("P57 training must not name an evaluation checkpoint")
   if bool(workload_candidate) != bool(data_split):
@@ -383,6 +399,7 @@ def render_all(
         checkpoint_step=checkpoint_step,
         workload_candidate=workload_candidate,
         data_split=data_split,
+        high_performance=high_performance,
     )
     path = output_dir / f"jobset-{spec.key}.yaml"
     if path.exists():
@@ -395,8 +412,8 @@ def render_all(
     job_name = document["metadata"]["name"]
     state = f"/tmp/canon-state/{job_name}"
     checkpoint_tag = f"{campaign_tag}-{arm.name}"
-    # The active 300-update campaign evaluates in-process, so it needs only the
-    # rolling recovery checkpoint.  Do not retain seven full model milestones.
+    # Active P57 evaluates in-process and needs only the rolling recovery
+    # checkpoint; retaining full-model milestones wastes storage and time.
     milestone_interval = "0"
     _replace_env(
         document,
@@ -406,6 +423,7 @@ def render_all(
             ),
             "CANON_P38_FIXED_LM_HEAD": "1" if arm.fixed_lm_head else "0",
             "CANON_P57_TIM_ARM": arm.name,
+            "CANON_V1_HP_FULL": "1" if high_performance else "0",
             "CANON_P57_RUN_KIND": run_kind,
             "CANON_P57_INFERENCE_REGIME": (
                 "stock-fast" if arm.name in ("mismatch", "is") else ""
@@ -445,6 +463,9 @@ def render_all(
         workload_candidate or "readiness"
     )
     labels["canon.zero-tim/data-split"] = data_split or "readiness"
+    labels["canon.zero-tim/performance-profile"] = (
+        "v1-hp" if high_performance else "baseline"
+    )
     p33.validate_jobset(
         document,
         spec,
@@ -456,7 +477,10 @@ def render_all(
     )
     env = _env(document)
     expected = {
-        "CANON_PROFILE_FILE": _PROFILE,
+        "CANON_PROFILE_FILE": (
+            _V1_HP_PROFILE if high_performance else _PROFILE
+        ),
+        "CANON_V1_HP_FULL": "1" if high_performance else "0",
         "CANON_P57_TIM_ARM": arm.name,
         "CANON_P57_RUN_KIND": run_kind,
         "CANON_P57_INFERENCE_REGIME": (
@@ -535,6 +559,7 @@ def main() -> int:
   parser.add_argument("--stock-only", action="store_true")
   parser.add_argument("--arm", choices=tuple(_ARM_BY_NAME), default="")
   parser.add_argument("--stop-after-step", type=int)
+  parser.add_argument("--high-performance", action="store_true")
   parser.add_argument(
       "--base", type=Path, default=Path(__file__).with_name("jobset-64chip.yaml")
   )
@@ -554,6 +579,7 @@ def main() -> int:
       stock_only=args.stock_only,
       arm=args.arm,
       stop_after_step=args.stop_after_step,
+      high_performance=args.high_performance,
   )
   print(
       "[P57.JOBSET] VERDICT PASS "

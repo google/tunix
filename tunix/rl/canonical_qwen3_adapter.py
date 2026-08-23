@@ -1315,32 +1315,63 @@ def _make_canonical_compute_and_gather(gather_logprobs, mesh):
     # gather; stages 1+2 are shared verbatim and every comparison runs
     # on the same x - normalizer values, so the emitted logprob, top-1,
     # and rank are bit-identical (CPU interpret gate + 51/51 judge).
-    if data_size > 1:
-      raise FunctionalMappingError(
-          "CANON_PALLAS_GATHERED_LOGPROBS=1 is certified for one-host "
-          "topologies only; unset it or port the DP row padding first"
-      )
     from tpu_inference.layers.jax.sample.sampling import LogprobsTensors  # pylint: disable=g-import-not-at-top
 
     continue_decode = os.environ.get("CANON_CONTINUE_DECODE", "")
+    print(
+        "[P56.GATHERED_LOGPROBS] installed "
+        f"data={data_size} local_m={local_m} "
+        f"continue_decode={continue_decode or '0'}",
+        flush=True,
+    )
 
     def local_gathered(logits, tokens):
-      if continue_decode:
+      rows = int(logits.shape[0])
+      if int(tokens.shape[0]) != rows:
+        raise FunctionalMappingError(
+            "canonical gathered-logprobs logits/token rows differ: "
+            f"{rows} vs {tokens.shape[0]}"
+        )
+      if data_size > 1:
+        if rows in admitted_local_rows and rows != local_m:
+          padded_logits = jnp.pad(
+              logits,
+              ((0, local_m - rows), (0, 0)),
+              constant_values=jnp.float32(0),
+          )
+          padded_tokens = jnp.pad(
+              tokens,
+              ((0, local_m - rows),),
+              constant_values=jnp.int32(0),
+          )
+          output = canonical_logsoftmax.gathered_logprobs(
+              padded_logits, padded_tokens
+          )
+          return tuple(item[:rows] for item in output)
+        if rows != local_m:
+          raise FunctionalMappingError(
+              "canonical gathered-logprobs per-rank row count changed: "
+              f"{rows} not in {admitted_local_rows}"
+          )
+      if continue_decode and data_size == 1:
         return canonical_logsoftmax.continue_decode_gathered_logprobs(
             logits, tokens
         )
       return canonical_logsoftmax.gathered_logprobs(logits, tokens)
 
-    replicated_row = jax.sharding.PartitionSpec(None, None)
-    replicated_vec = jax.sharding.PartitionSpec(None)
+    vector_spec = (
+        jax.sharding.PartitionSpec("data")
+        if "data" in tuple(mesh.axis_names)
+        else jax.sharding.PartitionSpec(None)
+    )
     gathered_out_specs = (
-        replicated_vec, replicated_vec, replicated_vec, replicated_vec
+        vector_spec, vector_spec, vector_spec, vector_spec
     )
     try:
       mapped_gathered = jax.shard_map(
           local_gathered,
           mesh=mesh,
-          in_specs=(replicated_row, replicated_vec),
+          in_specs=(row_spec, vector_spec),
           out_specs=gathered_out_specs,
           check_vma=False,
       )
@@ -1348,7 +1379,7 @@ def _make_canonical_compute_and_gather(gather_logprobs, mesh):
       mapped_gathered = jax.shard_map(
           local_gathered,
           mesh=mesh,
-          in_specs=(replicated_row, replicated_vec),
+          in_specs=(row_spec, vector_spec),
           out_specs=gathered_out_specs,
           check_rep=False,
       )

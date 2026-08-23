@@ -607,7 +607,9 @@ case "${CANON_P38_FIXED_LM_HEAD:-0}" in
     ;;
 esac
 if [ "${CANON_PROFILE_FILE:-}" = \
-     "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env" ]; then
+     "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env" ] || \
+   [ "${CANON_PROFILE_FILE:-}" = \
+     "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env" ]; then
   [[ "${CANON_P57_EXPECTED_UPDATES:-}" =~ ^[1-9][0-9]*$ ]] || {
     echo "[env] P57 requires a positive expected-update horizon" >&2
     fail=1
@@ -766,7 +768,8 @@ if [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "1" ] && \
       }
       echo "[env] P38.2h fixed lm-head backward-no-commit enabled"
       ;;
-    frozenlake-dp8-tp8:full:0:cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env)
+    frozenlake-dp8-tp8:full:0:cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env|\
+    frozenlake-dp8-tp8:full:0:cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env)
       case "${CANON_P57_RUN_KIND:-}:${CANON_P57_TIM_ARM:-}" in
         train:zero)
           [ "${CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY:-0}" = "0" ] && \
@@ -798,6 +801,14 @@ if [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "1" ] && \
         fail=1
       }
       echo "[env] P38.2y fixed lm-head GSM8K full enabled"
+      ;;
+    gsm8k:full:0:cluster/profiles/qwen3-1p7b-dp16-tp4-gsm8k-v1-hp.env)
+      [ "${CANON_GSM8K_ALIGNMENT_WARN_ONLY:-0}" = "0" ] && \
+      [ "${CANON_V1_HP_FULL:-0}" = "1" ] || {
+        echo "[env] V1 high-performance GSM8K requires strict alignment" >&2
+        fail=1
+      }
+      echo "[env] V1 high-performance fixed lm-head GSM8K full enabled"
       ;;
       *)
         echo "[env] fixed lm-head is not admitted for this workload/stage/profile" >&2

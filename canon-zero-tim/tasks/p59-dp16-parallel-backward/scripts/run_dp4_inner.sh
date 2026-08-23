@@ -41,8 +41,13 @@ esac
 
 # shellcheck disable=SC1091
 source "$P59_REPO/canon-zero-tim/cluster/profiles/_canonical_engine.env"
+case "$CANON_P59_KIND" in
+  v1) p59_profile=qwen3-1p7b-dp4-tp1-gsm8k-v1-hp.env ;;
+  *) p59_profile=qwen3-1p7b-dp4-tp1-gsm8k-p59.env ;;
+esac
 # shellcheck disable=SC1091
-source "$P59_REPO/canon-zero-tim/cluster/profiles/qwen3-1p7b-dp4-tp1-gsm8k-p59.env"
+source "$P59_REPO/canon-zero-tim/cluster/profiles/$p59_profile"
+unset p59_profile
 export XLA_FLAGS="$P59_XLA_FLAGS"
 
 python3 - <<'PY'
@@ -76,7 +81,8 @@ dp_workloads.validate_environment(
 )
 print(
     "[P59.DP4] PREFLIGHT_PASS "
-    f"kind={os.environ['CANON_P59_KIND']} topology=DP4xTP1 "
+    f"kind={os.environ['CANON_P59_KIND']} profile={os.environ['CANON_PROFILE']} "
+    "topology=DP4xTP1 "
     f"mesh_ids={actual_ids} global_trajectories=64 local_trajectories=16 "
     "groups=16 local_m=256 global_m=1024",
     flush=True,

@@ -2330,6 +2330,7 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
         np.asarray(jax.devices()).reshape(16, 4), ("data", "model")
     )
     env = {
+        "CANON_P32_WORKLOAD": "gsm8k",
         "CANON_P32_TRAIN_ADMITTED": "1",
         "CANON_DP_SIZE": "16",
         "CANON_TP_SIZE": "4",
@@ -2411,6 +2412,63 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
     )
     np.testing.assert_array_equal(
         np.asarray(actual), np.asarray(logits + jnp.float32(1.0))
+    )
+
+  def test_dp16_gathered_logprobs_pads_and_slices_each_data_rank(self):
+    if len(jax.devices()) != 64:
+      self.skipTest("requires exactly 64 forced CPU or accelerator devices")
+    mesh = jax.sharding.Mesh(
+        np.asarray(jax.devices()).reshape(16, 4), ("data", "model")
+    )
+    env = {
+        "CANON_P32_WORKLOAD": "gsm8k",
+        "CANON_P32_TRAIN_ADMITTED": "1",
+        "CANON_DP_SIZE": "16",
+        "CANON_TP_SIZE": "4",
+        "CANON_LOGPROB_M": "256",
+        "CANON_TARGET_M": "256",
+        "MIN_TOKEN_BUCKET": "4096",
+        "CANON_PALLAS_GATHERED_LOGPROBS": "1",
+        "CANON_CONTINUE_DECODE": "8",
+    }
+    observed_shapes = []
+
+    def gathered(logits, tokens):
+      observed_shapes.append((logits.shape, tokens.shape))
+      self.assertEqual(logits.shape, (256, 8))
+      self.assertEqual(tokens.shape, (256,))
+      selected = jnp.take_along_axis(logits, tokens[:, None], axis=1)[:, 0]
+      top_index = jnp.argmax(logits, axis=1).astype(jnp.int32)
+      top_value = jnp.max(logits, axis=1)
+      ranks = jnp.sum(logits > selected[:, None], axis=1).astype(jnp.int32)
+      return selected, top_value, top_index, ranks
+
+    logits = jnp.arange(256 * 8, dtype=jnp.float32).reshape(256, 8)
+    logits = jnp.mod(logits, 17.0) / 7.0
+    tokens = jnp.mod(jnp.arange(256, dtype=jnp.int32), 8)
+    with mock.patch.dict(os.environ, env, clear=False), mock.patch.object(
+        canonical_qwen3_adapter.canonical_logsoftmax,
+        "gathered_logprobs",
+        gathered,
+    ):
+      scorer = canonical_qwen3_adapter._make_canonical_compute_and_gather(
+          lambda *_: None, mesh
+      )
+      actual = scorer(logits, tokens, 1)
+
+    expected_selected = np.take_along_axis(
+        np.asarray(logits), np.asarray(tokens)[:, None], axis=1
+    )[:, 0]
+    self.assertTrue(observed_shapes)
+    self.assertTrue(
+        all(shape == ((256, 8), (256,)) for shape in observed_shapes)
+    )
+    self.assertEqual(actual.logprobs.shape, (256, 2))
+    self.assertEqual(
+        actual.logprobs.sharding.spec, jax.sharding.PartitionSpec("data")
+    )
+    np.testing.assert_array_equal(
+        np.asarray(actual.logprobs)[:, 0], expected_selected
     )
 
   def test_p59_dp4_logprob_pipeline_pads_request64_per_rank_to_m256(self):

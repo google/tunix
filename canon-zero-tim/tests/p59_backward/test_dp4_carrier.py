@@ -16,6 +16,9 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[3]
 PKG = ROOT / "canon-zero-tim"
 PROFILE = PKG / "cluster/profiles/qwen3-1p7b-dp4-tp1-gsm8k-p59.env"
+V1_PROFILE = (
+    PKG / "cluster/profiles/qwen3-1p7b-dp4-tp1-gsm8k-v1-hp.env"
+)
 RUNNER = PKG / "tasks/p59-dp16-parallel-backward/scripts/run_onehost_dp4.sh"
 INNER = PKG / "tasks/p59-dp16-parallel-backward/scripts/run_dp4_inner.sh"
 P61_PAIR = (
@@ -155,6 +158,68 @@ class DP4CarrierTest(unittest.TestCase):
       self.assertNotEqual(result.returncode, 0)
       self.assertIn(marker, result.stdout)
 
+  def test_v1_profile_resolves_final_supported_bundle(self):
+    keys = (
+        "CANON_PROFILE",
+        "CANON_CONTINUE_DECODE",
+        "CANON_FIXED_AR_GATHER",
+        "CANON_PALLAS_GATHERED_LOGPROBS",
+        "CANON_LOGPROB_STEP_FUSION",
+        "CANON_VLLM_ENABLE_PREFIX_CACHING",
+        "CANON_P59_RANK_PARALLEL_BACKWARD",
+        "CANON_P28_BATCHED_REPORT",
+        "CANON_BATCHED_EVIDENCE",
+        "CANON_P28_BATCHED_REVERSE",
+        "CANON_FUSED_TREE_OPS",
+        "CANON_PALLAS_NORM_MATMUL",
+        "CANON_P38_FIXED_LM_HEAD",
+    )
+    python = (
+        "import json,os; print(json.dumps({key: os.environ.get(key) "
+        f"for key in {keys!r}}}))"
+    )
+    command = f"source {V1_PROFILE}; python3 -c {json.dumps(python)}"
+    environ = os.environ.copy()
+    environ.update({
+        "CANON_P32_TRAIN_ADMITTED": "1",
+        "CANON_P32_DP_REDUCTION_ADMITTED": "1",
+        "CANON_P33_WORKLOAD_LAUNCH_ADMITTED": "1",
+        "CANON_P33_RUN_STAGE": "three-update",
+        "CANON_P33_NO_COMMIT": "0",
+        "CANON_P59_KIND": "v1",
+        "CANON_P59_RANK_PARALLEL_BACKWARD": "1",
+        "CANON_P59_DP4_SERIAL_MESH_BRIDGE": "1",
+        "CANON_P59_DP4_TAIL8": "0",
+        "CANON_OPT_STATE_RESIDENT": "1",
+        "CANON_P30_OPT_STATE_OFFLOAD": "0",
+        "CANON_WANDB_RUN_NAME": "v1-onehost-test",
+    })
+    result = subprocess.run(
+        ["bash", "-c", command],
+        cwd=ROOT,
+        env=environ,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
+    self.assertEqual(result.returncode, 0, result.stdout)
+    self.assertEqual(json.loads(result.stdout.splitlines()[-1]), {
+        "CANON_PROFILE": "qwen3-1p7b-dp4-tp1-gsm8k-v1-hp",
+        "CANON_CONTINUE_DECODE": "8",
+        "CANON_FIXED_AR_GATHER": "1",
+        "CANON_PALLAS_GATHERED_LOGPROBS": "1",
+        "CANON_LOGPROB_STEP_FUSION": "1",
+        "CANON_VLLM_ENABLE_PREFIX_CACHING": "0",
+        "CANON_P59_RANK_PARALLEL_BACKWARD": "1",
+        "CANON_P28_BATCHED_REPORT": "1",
+        "CANON_BATCHED_EVIDENCE": "1",
+        "CANON_P28_BATCHED_REVERSE": "0",
+        "CANON_FUSED_TREE_OPS": "0",
+        "CANON_PALLAS_NORM_MATMUL": "0",
+        "CANON_P38_FIXED_LM_HEAD": "0",
+    })
+
   def test_runner_freezes_immutable_hard_gate_and_serial_lane(self):
     text = RUNNER.read_text(encoding="utf-8")
     for token in (
@@ -173,6 +238,8 @@ class DP4CarrierTest(unittest.TestCase):
         'tail) rank_parallel=1; capture=0; numerical=0; tail8=1; run_stage=p59-eight-update; expected_steps=8; expected_align=136',
         'numerical-control) rank_parallel=0; capture=0; numerical=1; tail8=0; run_stage=one-update; expected_steps=1; expected_align=17',
         'numerical-candidate) rank_parallel=1; capture=0; numerical=1; tail8=0; run_stage=one-update; expected_steps=1; expected_align=17',
+        'v1) rank_parallel=1; capture=0; numerical=0; tail8=0; run_stage=three-update; expected_steps=3; expected_align=51; recipe=v1-phase4-current-bundle',
+        "qwen3-1p7b-dp4-tp1-gsm8k-v1-hp.env",
         '-e CANON_P59_DP4_TAIL8="$tail8"',
         '-e CANON_P61_BACKWARD_NUMERICAL_DIR=',
         'steps_done" -eq "$expected_steps"',
@@ -250,6 +317,7 @@ class DP4CarrierTest(unittest.TestCase):
         "max_response_length=256",
         'CANON_P60_DETERMINISTIC_AB:-0',
         '--max_concurrency="$max_concurrency"',
+        'v1) p59_profile=qwen3-1p7b-dp4-tp1-gsm8k-v1-hp.env',
         "--rollout_vllm_max_num_seqs=16",
         "--rollout_vllm_max_num_batched_tokens=256",
     ):

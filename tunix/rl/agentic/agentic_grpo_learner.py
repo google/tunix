@@ -146,8 +146,10 @@ def _p57_tim_purity_enabled(env: Mapping[str, str]) -> bool:
   return (
       env.get("CANON_P57_RUN_KIND") == "train"
       and env.get("CANON_P57_TIM_ARM") in ("mismatch", "zero")
-      and env.get("CANON_PROFILE_FILE")
-      == "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env"
+      and env.get("CANON_PROFILE_FILE") in (
+          "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env",
+          "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env",
+      )
       and env.get("CANON_P32_WORKLOAD") == "frozenlake-dp8-tp8"
   )
 

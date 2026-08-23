@@ -264,8 +264,9 @@ if CANON_P57_CALIBRATION:
 elif args.p57_calibration_mode or args.p57_calibration_recipes:
   raise ValueError("P57 calibration CLI arguments require run kind calibration")
 if CANON_P57_WORKLOAD_CANDIDATE:
-  if os.getenv("CANON_PROFILE_FILE", "") != (
-      "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env"
+  if os.getenv("CANON_PROFILE_FILE", "") not in (
+      "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env",
+      "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env",
   ):
     raise ValueError("materialized P57 workloads require the P57 profile")
   p57_workload_spec = p57_workloads.candidate(
@@ -1363,12 +1364,6 @@ vllm_rollout_dict = {
         **({"seed": 0} if CANON_P57_RUN_KIND else {}),
     },
 }
-print(
-    "[P3_APC_CONFIG] "
-    f"enabled={int(CANON_VLLM_ENABLE_PREFIX_CACHING)} "
-    "workload=frozenlake reader=train_frozenlake_qwen3",
-    flush=True,
-)
 
 if CANON_P57_RUN_KIND:
   if SEED != 42:
@@ -1378,6 +1373,31 @@ if CANON_P57_RUN_KIND:
       "vllm_global_seed=0 per_request_seed=unsupported",
       flush=True,
   )
+canon_continue_decode = os.environ.get("CANON_CONTINUE_DECODE", "")
+if canon_continue_decode:
+  if (
+      not canon_continue_decode.isdigit()
+      or not 1 <= int(canon_continue_decode) <= 64
+  ):
+    raise ValueError(
+        "CANON_CONTINUE_DECODE must be an integer in [1, 64], got "
+        f"{canon_continue_decode!r}"
+    )
+  vllm_rollout_dict["rollout_vllm_additional_config"] = {
+      "enable_continue_decode": True,
+      "max_decode_steps": int(canon_continue_decode),
+  }
+  print(
+      "[P57.CONTINUE_DECODE] on-device decode loop enabled "
+      f"max_decode_steps={canon_continue_decode}",
+      flush=True,
+  )
+print(
+    "[P3_APC_CONFIG] "
+    f"enabled={int(CANON_VLLM_ENABLE_PREFIX_CACHING)} "
+    "workload=frozenlake reader=train_frozenlake_qwen3",
+    flush=True,
+)
 
 if ROLLOUT_ENGINE == "vllm":
   rollout_engine_config = base_rollout.RolloutConfig(
@@ -1471,12 +1491,20 @@ if canon_perf_trace_dir:
   # NoopTracer path; Phase3 profile runs set this only as instrumentation.
   from tunix.perf import metrics as perf_metrics_lib  # pylint: disable=g-import-not-at-top
   from tunix.perf.experimental import export as perf_export_lib  # pylint: disable=g-import-not-at-top
+  from tunix.perf import profile_window as perf_profile_window  # pylint: disable=g-import-not-at-top
 
+  perfetto_exporter = perf_export_lib.PerfMetricsExport.from_cluster_config(
+      cluster_config=cluster_config,
+      trace_dir=canon_perf_trace_dir,
+  )
+  perfetto_target_step = int(
+      os.environ.get("CANON_PERF_TRACE_EXPORT_STEP", "") or "2"
+  )
   perf_config = perf_metrics_lib.PerfMetricsConfig(
-      custom_export_fn_v2=perf_export_lib.PerfMetricsExport.from_cluster_config(
-          cluster_config=cluster_config,
-          trace_dir=canon_perf_trace_dir,
-      ).export_metrics
+      custom_export_fn_v2=perf_profile_window.single_step_export_fn(
+          perfetto_exporter.export_metrics,
+          target_step=perfetto_target_step,
+      )
   )
 
 rl_cluster = rl_cluster_lib.RLCluster(

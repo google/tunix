@@ -1,0 +1,209 @@
+#!/usr/bin/env python3
+
+from __future__ import annotations
+
+import importlib.util
+import json
+from pathlib import Path
+import sys
+import tempfile
+import unittest
+
+
+ROOT = Path(__file__).resolve().parents[3]
+MODULE_PATH = ROOT / (
+    "canon-zero-tim/tasks/v1-phase4-three-full-recipes/scripts/"
+    "classify_full_recipe.py"
+)
+SPEC = importlib.util.spec_from_file_location("v1_full_classifier", MODULE_PATH)
+assert SPEC is not None and SPEC.loader is not None
+classifier = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = classifier
+SPEC.loader.exec_module(classifier)
+
+
+class FullClassifierTest(unittest.TestCase):
+
+  def setUp(self):
+    self.original_updates = classifier._RECIPES["gsm8k"]["updates"]
+    classifier._RECIPES["gsm8k"]["updates"] = 4
+
+  def tearDown(self):
+    classifier._RECIPES["gsm8k"]["updates"] = self.original_updates
+
+  def _evidence(self, root: Path, *, alignment_fail: bool = False):
+    state = root / "state"
+    state.mkdir()
+    env = {
+        "CANON_V1_HP_FULL": "1",
+        "CANON_P33_RUN_STAGE": "full",
+        "CANON_P33_NO_COMMIT": "0",
+        "CANON_P59_RANK_PARALLEL_BACKWARD": "1",
+        "CANON_CONTINUE_DECODE": "8",
+        "CANON_FIXED_AR_GATHER": "1",
+        "CANON_PALLAS_GATHERED_LOGPROBS": "1",
+        "CANON_LOGPROB_STEP_FUSION": "1",
+        "CANON_P28_BATCHED_REPORT": "1",
+        "CANON_P28_BATCHED_REVERSE": "0",
+        "CANON_FUSED_TREE_OPS": "0",
+        "CANON_XPROF_PHASE": "update",
+        "CANON_XPROF_SKIP_STEPS": "2",
+        "CANON_XPROF_STEPS": "1",
+        "CANON_XPROF_PYTHON_TRACER": "0",
+        "CANON_XPROF_HOST_TRACER": "1",
+        "CANON_XPROF_TPU_TRACE_MODE": "TRACE_COMPUTE",
+        "CANON_XPROF_LABELS": "1",
+        "CANON_PERF_TRACE_EXPORT_STEP": "2",
+        "CANON_VLLM_ENABLE_PREFIX_CACHING": "0",
+        "CANON_GSM8K_ALIGNMENT_WARN_ONLY": "0",
+        "CANON_BATCHED_EVIDENCE": "1",
+    }
+    (state / "env.sh").write_text(
+        "".join(f"export {name}={value}\n" for name, value in env.items()),
+        encoding="utf-8",
+    )
+    updates = []
+    log = [
+        "[P57.CONTINUE_DECODE] on-device decode loop enabled max_decode_steps=8",
+        "[P56.GATHERED_LOGPROBS] installed data=16 local_m=256 continue_decode=8",
+        "[P56.LOGPROB_STEP_FUSION] active target_rows=4096 max_logprobs=1",
+        "[PATHTRACE] CANON_FIXED_AR=1 gather-ordered-sum at x",
+        "[CANON_XPROF_LABELS] continue-decode stage callables cached",
+        "[P51.XPROF] phase=update armed step=2",
+        "[P51.XPROF] phase=update started step=2 anchor=update_entry tpu_trace_mode=TRACE_COMPUTE",
+        "[P51.XPROF] phase=update stopped step=3 anchor=step_completed",
+        "[V1.PERFETTO] captured training_step=2 timelines=3",
+    ]
+    for step in range(4):
+      updates.append({
+          "elapsed_seconds": 6.0,
+          "dp_rank_pullbacks_per_transaction": 16,
+          "dp_pullback_invocations_per_transaction": 1,
+          "dp_replicas_exact": True,
+      })
+      log.extend([
+          "[P59.DP16] gradient_reducer_ready dp_axis=data dp_size=16 staging=parallel_table",
+          f"[PERF] step={step} stage=p32_vag_forward seconds=1.0",
+          f"[PERF] step={step} stage=p32_vag_reverse seconds=3.0",
+          f"[PERF] step={step} stage=segmented_value_and_grad seconds=4.0",
+          f"[PERF] step={step} stage=optimizer_transaction seconds=1.0",
+          f"[PERF] step={step} stage=weight_sync seconds=1.0",
+          f"Global step {step} completed in {80.0 if step == 2 else 8.0} seconds.",
+      ])
+    for index in range(68):
+      verdict = "FAIL" if alignment_fail and index == 0 else "PASS"
+      prefix = "CANON_ALIGN_PRE" if index % 17 == 0 else "CANON_ALIGN"
+      log.append(f"[{prefix}] step={index} verdict={verdict}")
+    run_log = state / "run.log"
+    run_log.write_text("\n".join(log) + "\n", encoding="utf-8")
+    update_report = state / "updates.jsonl"
+    update_report.write_text(
+        "".join(json.dumps(row) + "\n" for row in updates), encoding="utf-8"
+    )
+    base = {
+        "verdict": "PASS",
+        "claim_level": "strict-zero-tim",
+        "expected_updates": 4,
+        "observed_updates": 4,
+        "observed_pre_alignments": 4,
+        "observed_alignments": 64,
+        "alignment_warning_records": 0,
+        "pre_alignment_warning_records": 0,
+    }
+    base_path = state / "base.json"
+    base_path.write_text(json.dumps(base), encoding="utf-8")
+    xprof = state / "xprof-update/plugins/profile/1"
+    xprof.mkdir(parents=True)
+    (xprof / "device.xplane.pb").write_bytes(b"xplane")
+    (xprof / "device.trace.json.gz").write_bytes(b"trace")
+    perfetto = state / "perfetto"
+    perfetto.mkdir()
+    (perfetto / "perfetto_trace_v2_1.pb").write_bytes(b"perfetto")
+    return state, run_log, update_report, base_path
+
+  def test_green_full_contract_and_excludes_profiled_step(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      state, run_log, updates, base = self._evidence(Path(tmp))
+      record = classifier.classify(
+          recipe="gsm8k",
+          state=state,
+          run_log=run_log,
+          update_report=updates,
+          base_classification=base,
+      )
+      self.assertEqual(record["verdict"], "PASS", record["reasons"])
+      self.assertEqual(record["zero_tim"]["observed_pass"], 68)
+      self.assertEqual(
+          record["timing"]["steady_steps2_plus_excluding_profile_count"], 1
+      )
+      self.assertEqual(
+          record["timing"]["steady_steps2_plus_excluding_profile_mean"][
+              "wall_seconds"
+          ],
+          8.0,
+      )
+
+  def test_any_real_alignment_fail_is_fatal(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      state, run_log, updates, base = self._evidence(
+          Path(tmp), alignment_fail=True
+      )
+      record = classifier.classify(
+          recipe="gsm8k",
+          state=state,
+          run_log=run_log,
+          update_report=updates,
+          base_classification=base,
+      )
+      self.assertEqual(record["verdict"], "FAIL")
+      self.assertIn("canon_align_fail=1 expected=0", record["reasons"])
+
+  def test_missing_profile_artifact_is_fatal(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      state, run_log, updates, base = self._evidence(Path(tmp))
+      (state / "xprof-update/plugins/profile/1/device.xplane.pb").unlink()
+      record = classifier.classify(
+          recipe="gsm8k",
+          state=state,
+          run_log=run_log,
+          update_report=updates,
+          base_classification=base,
+      )
+      self.assertEqual(record["verdict"], "FAIL")
+      self.assertIn("missing_xplane", record["reasons"])
+
+  def test_direct_eval_cycle_timing_uses_explicit_enclosing_step(self):
+    rows = [
+        {"global_step": float(step), "wall_seconds": float(step)}
+        for step in range(300)
+    ]
+    steady, eval_steps, direct_eval_cycle_excluded = (
+        classifier._steady_timing_rows(
+        rows,
+        expected_updates=300,
+        p57_eval={
+            "steps": [0, 50, 100, 150, 200, 250, 300],
+            "cycle_receipts": [
+                {
+                    "policy_step": step,
+                    "enclosing_global_step": (
+                        None if step == 300 else step + 1
+                    ),
+                }
+                for step in range(0, 301, 50)
+            ],
+        },
+        )
+    )
+    self.assertNotIn(2, {int(row["global_step"]) for row in steady})
+    self.assertEqual(eval_steps, {1, 51, 101, 151, 201, 251})
+    training_steps = {
+        int(row["global_step"]) for row in direct_eval_cycle_excluded
+    }
+    self.assertTrue(eval_steps.isdisjoint(training_steps))
+    self.assertIn(50, training_steps)
+    self.assertIn(299, training_steps)
+
+
+if __name__ == "__main__":
+  unittest.main()

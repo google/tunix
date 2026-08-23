@@ -40,15 +40,6 @@ class DummyLearner(agentic_rl_learner.AgenticRLLearner):
 
 class AgenticRLLearnerTest(parameterized.TestCase):
 
-  def test_p61_validation_follows_p33_workload_initialization(self):
-    source = inspect.getsource(
-        agentic_rl_learner.AgenticRLLearner._run_p28_g6_update  # pylint: disable=protected-access
-    )
-    self.assertLess(
-        source.index("workload = dp_workloads.active_workload()"),
-        source.index("p61_capture_dir = os.environ.get("),
-    )
-
   def test_p57_evaluate_only_covers_dataset_without_train_update(self):
     learner = object.__new__(DummyLearner)
     learner.algo_config = agentic_rl_learner.AgenticRLConfig(num_generations=8)
@@ -179,6 +170,35 @@ class AgenticRLLearnerTest(parameterized.TestCase):
     self.assertEqual(result["records"][2]["p57_index"], 11)
     self.assertEqual(result["records"][3]["map_sha256"], "b" * 64)
     learner._batch_to_train_example.assert_not_called()
+
+  def test_p61_validation_follows_p33_workload_initialization(self):
+    source = inspect.getsource(
+        agentic_rl_learner.AgenticRLLearner._run_p28_g6_update  # pylint: disable=protected-access
+    )
+    self.assertLess(
+        source.index("workload = dp_workloads.active_workload()"),
+        source.index("p61_capture_dir = os.environ.get("),
+    )
+
+  def test_p60_xprof_compute_mode_is_forwarded(self):
+    options = agentic_rl_learner._canon_xprof_profile_options(  # pylint: disable=protected-access
+        host_tracer=1,
+        python_tracer=0,
+        tpu_trace_mode="TRACE_COMPUTE",
+    )
+    self.assertEqual(options.host_tracer_level, 1)
+    self.assertEqual(options.python_tracer_level, 0)
+    self.assertEqual(
+        options.advanced_configuration, {"tpu_trace_mode": "TRACE_COMPUTE"}
+    )
+
+  def test_p60_xprof_rejects_unknown_tpu_trace_mode(self):
+    with self.assertRaisesRegex(ValueError, "CANON_XPROF_TPU_TRACE_MODE"):
+      agentic_rl_learner._canon_xprof_profile_options(  # pylint: disable=protected-access
+          host_tracer=1,
+          python_tracer=0,
+          tpu_trace_mode="TRACE_EVERYTHING",
+      )
 
   def test_rollout_batch_watchdog_fails_waiting_for_first_group(self):
     class StalledOrchestrator:

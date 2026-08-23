@@ -48,6 +48,9 @@ class JobSpec:
   tp_size: int = 4
   optimizer_resident: bool = True
   rank_parallel_backward: bool = False
+  fixed_lm_head: bool = False
+  strict_alignment: bool = False
+  v1_hp_full: bool = False
 
   @property
   def filename(self) -> str:
@@ -172,6 +175,7 @@ _SPECS = (
         no_commit=False,
         job_prefix="canon-p33-gsm8k-full",
         command=_gsm8k_command(200),
+        fixed_lm_head=True,
     ),
     JobSpec(
         key="frozenlake-full",
@@ -354,10 +358,13 @@ def render_jobset(
           "CANON_P59_RANK_PARALLEL_BACKWARD": (
               "1" if spec.rank_parallel_backward else "0"
           ),
+          "CANON_V1_HP_FULL": "1" if spec.v1_hp_full else "0",
           "CANON_GSM8K_AB_REPORT_ONLY": "0",
           "CANON_GSM8K_ALIGNMENT_WARN_ONLY": (
               "1"
-              if spec.workload == "gsm8k" and spec.stage == "full"
+              if spec.workload == "gsm8k"
+              and spec.stage == "full"
+              and not spec.strict_alignment
               else "0"
           ),
           "CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY": (
@@ -391,7 +398,7 @@ def render_jobset(
       },
       remove=("CANON_P32_RC_STAGE",),
   )
-  if spec.key == "gsm8k-full":
+  if spec.fixed_lm_head:
     _set_named_env(
         main["env"], {"CANON_P38_FIXED_LM_HEAD": "1"}, remove=()
     )
@@ -495,7 +502,7 @@ def validate_jobset(
   )
   expected_capsule_rows = "256" if is_p38_capture else "2"
   if fixed_lm_head is None:
-    fixed_lm_head = spec.key == "gsm8k-full"
+    fixed_lm_head = spec.fixed_lm_head
   if alignment_warning_only is None:
     alignment_warning_only = spec.stage == "full"
   expected = {
@@ -521,10 +528,13 @@ def validate_jobset(
       "CANON_P59_RANK_PARALLEL_BACKWARD": (
           "1" if spec.rank_parallel_backward else "0"
       ),
+      "CANON_V1_HP_FULL": "1" if spec.v1_hp_full else "0",
       "CANON_GSM8K_AB_REPORT_ONLY": "0",
       "CANON_GSM8K_ALIGNMENT_WARN_ONLY": (
           "1"
-          if spec.workload == "gsm8k" and spec.stage == "full"
+          if spec.workload == "gsm8k"
+          and spec.stage == "full"
+          and not spec.strict_alignment
           else "0"
       ),
       "CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY": (

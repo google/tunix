@@ -222,6 +222,28 @@ class ClassifyAndAnalyzeTest(unittest.TestCase):
       })
       self.assertEqual(result["topology"], {"dp": 4, "tp": 1})
 
+  def test_v1_dp4_proxy_uses_the_same_strict_hardware_gate(self):
+    with tempfile.TemporaryDirectory() as directory:
+      paths = self._fixture(
+          Path(directory),
+          workload="gsm8k-p59-dp4-tp1",
+          dp_size=4,
+          tp_size=1,
+      )
+      result = self._classify(
+          paths,
+          kind="v1",
+          workload="gsm8k-p59-dp4-tp1",
+          dp_size=4,
+          tp_size=1,
+      )
+      self.assertEqual(result["verdict"], "PASS")
+      self.assertEqual(result["zero_tim"], {
+          "expected_pass": 51,
+          "observed_pass": 51,
+          "observed_fail": 0,
+      })
+
   def test_dp4_tail_requires_136_passes_and_reports_six_stable_steps(self):
     with tempfile.TemporaryDirectory() as directory:
       paths = self._fixture(
