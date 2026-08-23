@@ -10,6 +10,9 @@ if [[ ! "$IMAGE" =~ ^sha256:[0-9a-f]{64}$ ]]; then
   exit 2
 fi
 
+bash "$ROOT/canon-zero-tim/tests/p59_backward/run_tp4_tp8_installed_shim_exact_image.sh" \
+  "$IMAGE"
+
 $DOCKER image inspect "$IMAGE" \
   --format 'P58_EXACT_IMAGE image_id={{.Id}}' >/dev/null
 $DOCKER run --rm \
@@ -62,6 +65,12 @@ $DOCKER run --rm \
       PYTHONPATH=/workspace python3 -m unittest \
         canonical_qwen3_adapter_test.CanonicalQwen3AdapterTest.test_observer_only_attestation_compares_stock_live_state_exactly \
         canonical_qwen3_adapter_test.CanonicalQwen3AdapterTest.test_deepswe_weight_report_normalizes_and_validates_logical_mesh
+    )
+    (
+      cd tests/rl
+      XLA_FLAGS=--xla_force_host_platform_device_count=16 \
+        PYTHONPATH=/workspace python3 -m unittest \
+        canonical_qwen3_adapter_test.CanonicalQwen3AdapterTest.test_p59_tp4_tp8_localizes_nested_engine_maps_and_collectives
     )
     PYTHONPATH=/workspace python3 \
       canon-zero-tim/tests/p34_deepswe/test_contract.py
@@ -123,5 +132,5 @@ $DOCKER run --rm \
       python3 \
       canon-zero-tim/tests/p58_deepswe_native_zero/probe_stock_prompt_observer.py
     rm -r "$observer_state"
-    echo "P58_EXACT_IMAGE_CPU_PASS loss_oracle=1 weighted_accumulation=1 compact_filter=1 durable_journal=1 paired_renderer=1 alignment_policy=1 stock_observer=1 regressions=1"
+    echo "P58_EXACT_IMAGE_CPU_PASS loss_oracle=1 weighted_accumulation=1 compact_filter=1 durable_journal=1 paired_renderer=1 alignment_policy=1 stock_observer=1 p59_tp4_tp8=2 p59_real_shim=4 regressions=1"
   '

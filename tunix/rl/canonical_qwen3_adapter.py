@@ -152,38 +152,54 @@ def _safe_sharding_constraint(value, sharding):
       return value
 
 
-def _manual_axis_partition_spec(value, axis_name: str):
-  """Keeps one mesh axis manual and leaves every other axis automatic."""
+def _manual_axis_partition_spec(
+    value, axis_name: str, manual_axes: frozenset[str] | None = None
+):
+  """Keeps admitted manual mesh axes and leaves every other axis automatic."""
   sharding = getattr(value, "sharding", None)
   if not isinstance(sharding, jax.sharding.NamedSharding):
     return jax.sharding.PartitionSpec()
+  admitted = frozenset((axis_name,)) if manual_axes is None else manual_axes
+  if axis_name not in admitted:
+    raise FunctionalMappingError(
+        f"manual axis set omits required data axis {axis_name!r}"
+    )
 
   def keep_axis(entry):
-    if entry == axis_name:
-      return axis_name
-    if isinstance(entry, (tuple, list)) and axis_name in entry:
-      return axis_name
-    return None
+    names = () if entry is None else (
+        (entry,) if isinstance(entry, str) else tuple(entry)
+    )
+    kept = tuple(name for name in names if name in admitted)
+    if not kept:
+      return None
+    return kept[0] if len(kept) == 1 else kept
 
   return jax.sharding.PartitionSpec(
       *(keep_axis(entry) for entry in tuple(sharding.spec))
   )
 
 
-def _manual_axis_specs(tree, axis_name: str):
+def _manual_axis_specs(
+    tree, axis_name: str, manual_axes: frozenset[str] | None = None
+):
   return jax.tree.map(
-      lambda value: _manual_axis_partition_spec(value, axis_name), tree
+      lambda value: _manual_axis_partition_spec(
+          value, axis_name, manual_axes
+      ),
+      tree,
   )
 
 
-def _rank_staged_specs(tree, axis_name: str):
-  """Prepends the staged-DP row while retaining physical TP1 placement."""
+def _rank_staged_specs(
+    tree, axis_name: str, manual_axes: frozenset[str] | None = None
+):
+  """Prepends the staged-DP row while retaining admitted TP placement."""
 
   def staged_spec(value):
     sharding = getattr(value, "sharding", None)
     if not isinstance(sharding, jax.sharding.NamedSharding):
       return jax.sharding.PartitionSpec(axis_name)
-    data_axis, model_axis = _p59_mesh_roles(
+    data_axis, _ = _p59_mesh_roles(
         sharding.mesh, "P59 staged rank gradient"
     )
     if data_axis != axis_name:
@@ -191,20 +207,26 @@ def _rank_staged_specs(tree, axis_name: str):
           "P59 staged rank gradient data axis changed: "
           f"{data_axis!r} != {axis_name!r}"
       )
-    original_spec = sharding.spec
+    original_spec = _manual_axis_partition_spec(
+        value, axis_name, manual_axes
+    )
     if data_axis in _p59_partition_axes(original_spec):
       raise FunctionalMappingError(
           "P59 staged rank gradient requires DP-replicated parameters, got "
           f"{original_spec}"
       )
-    if int(sharding.mesh.shape[model_axis]) == 1:
-      return jax.sharding.PartitionSpec(axis_name, *tuple(original_spec))
-    return jax.sharding.PartitionSpec(axis_name)
+    return jax.sharding.PartitionSpec(axis_name, *tuple(original_spec))
 
   return jax.tree.map(staged_spec, tree)
 
 
-def _rank_local_leading_specs(tree, axis_name: str, axis_size: int, label: str):
+def _rank_local_leading_specs(
+    tree,
+    axis_name: str,
+    axis_size: int,
+    label: str,
+    manual_axes: frozenset[str] | None = None,
+):
   """Partitions semantic per-rank rows even if the input arrived replicated."""
   axis_size = int(axis_size)
 
@@ -216,9 +238,20 @@ def _rank_local_leading_specs(tree, axis_name: str, axis_size: int, label: str):
           f"{label} leading rows are not divisible by {axis_name}: "
           f"shape={value.shape} size={axis_size}"
       )
-    return jax.sharding.PartitionSpec(
-        axis_name, *(None for _ in range(value.ndim - 1))
+    retained = list(
+        _manual_axis_partition_spec(value, axis_name, manual_axes)
     )
+    retained.extend(None for _ in range(value.ndim - len(retained)))
+    first = retained[0] if retained else None
+    first_axes = () if first is None else (
+        (first,) if isinstance(first, str) else tuple(first)
+    )
+    retained[0] = (
+        axis_name
+        if not first_axes
+        else tuple(dict.fromkeys((axis_name, *first_axes)))
+    )
+    return jax.sharding.PartitionSpec(*retained)
 
   return jax.tree.map(spec, tree)
 
@@ -285,6 +318,15 @@ def _p59_mesh_roles(mesh, label: str):
   raise FunctionalMappingError(
       f"{label} has unsupported mesh axes {axes}"
   )
+
+
+def _p59_engine_data_model_mesh(mesh, label: str):
+  """Returns the exact engine devices as a two-axis data/model mesh."""
+  data_axis, model_axis = _p59_mesh_roles(mesh, label)
+  data_size = int(mesh.shape[data_axis])
+  model_size = int(mesh.shape[model_axis])
+  devices = np.asarray(mesh.devices).reshape(data_size, model_size)
+  return jax.sharding.Mesh(devices, ("data", "model"))
 
 
 def _p59_manual_rank_axes(mesh, data_axis: str, label: str):
@@ -588,7 +630,7 @@ def _p59_translate_partition_specs(
 
 
 @contextlib.contextmanager
-def _p59_localize_tp1_engine_shard_maps(target_mesh, label: str):
+def _p59_localize_engine_shard_maps(target_mesh, label: str):
   """Runs compatible nested engine shard maps inside the outer DP map.
 
   P56 engine kernels use a six-axis shard_map even when every axis except
@@ -602,9 +644,12 @@ def _p59_localize_tp1_engine_shard_maps(target_mesh, label: str):
 
   The inner engine data spec is consumed because the outer P59 map already
   applied that exact partition. Proven-unit auxiliary specs are also consumed
-  and their named axes are bound at size one. This is deliberately fail-closed
-  for TP>1, non-unit auxiliaries, and unknown axes. The DP16xTP4 target remains
-  deferred rather than silently taking an unproved path.
+  and their named axes are bound at size one. At TP>1 the outer P59 map uses a
+  two-axis ``data/model`` view of the exact engine topology and makes both axes
+  manual. The nested map therefore consumes both partitions while its body
+  reuses those already-bound names for fixed-order TP collectives. Unknown
+  axes, non-unit auxiliaries, topology changes, and any other axis-type
+  transition remain fail-closed.
   """
   shard_map_module = importlib.import_module("jax.experimental.shard_map")
   original_experimental_shard_map = shard_map_module.shard_map
@@ -618,6 +663,7 @@ def _p59_localize_tp1_engine_shard_maps(target_mesh, label: str):
     if tuple(context_mesh.axis_names) != target_axes:
       return original(fun, **kwargs)
     axis_types = dict(zip(context_mesh.axis_names, context_mesh.axis_types))
+    target_tp = int(target_mesh.shape[target_model])
     if (
         axis_types.get(target_data) is not jax.sharding.AxisType.Manual
         or axis_types.get(target_model) is not jax.sharding.AxisType.Manual
@@ -635,12 +681,10 @@ def _p59_localize_tp1_engine_shard_maps(target_mesh, label: str):
           f"{tuple(inner_mesh.axis_names)}"
       )
     inner_data, inner_model = _p59_mesh_roles(inner_mesh, label)
-    if (
-        int(target_mesh.shape[target_model]) != 1
-        or int(inner_mesh.shape[inner_model]) != 1
-    ):
+    if int(inner_mesh.shape[inner_model]) != target_tp:
       raise FunctionalMappingError(
-          f"{label} nested engine shard_map localization is TP1-only"
+          f"{label} nested engine shard_map TP changed: "
+          f"{int(inner_mesh.shape[inner_model])} != {target_tp}"
       )
     if (
         int(target_mesh.shape[target_data])
@@ -676,8 +720,10 @@ def _p59_localize_tp1_engine_shard_maps(target_mesh, label: str):
 
     localized_fun = fun
     for unit_axis in _P59_ENGINE_MESH_AXES:
-      if unit_axis != inner_data:
+      if unit_axis not in (inner_data, inner_model):
         localized_fun = bind_unit_axis(localized_fun, unit_axis)
+    if target_tp == 1:
+      localized_fun = bind_unit_axis(localized_fun, inner_model)
 
     localized_kwargs = dict(kwargs)
     localized_kwargs["mesh"] = context_mesh
@@ -690,6 +736,28 @@ def _p59_localize_tp1_engine_shard_maps(target_mesh, label: str):
             target_model if engine_axis == inner_model else None,
         )
       localized_kwargs[specs_name] = translated_specs
+    if target_tp > 1:
+      # Data and model were already partitioned by the outer two-axis engine
+      # view. Keep the inner shard_map as the Mosaic/Pallas boundary, but do
+      # not divide either dimension a second time. Both legacy and modern
+      # calls route through the modern primitive so the exact current
+      # AbstractMesh, rather than the original six-axis concrete mesh, is
+      # retained.
+      for specs_name in ("in_specs", "out_specs"):
+        translated_specs = localized_kwargs[specs_name]
+        translated_specs = _p59_translate_partition_specs(
+            translated_specs, target_data, None
+        )
+        translated_specs = _p59_translate_partition_specs(
+            translated_specs, target_model, None
+        )
+        localized_kwargs[specs_name] = translated_specs
+      check_vma = localized_kwargs.pop(
+          "check_vma", localized_kwargs.pop("check_rep", True)
+      )
+      localized_kwargs["axis_names"] = {target_data, target_model}
+      localized_kwargs["check_vma"] = check_vma
+      return original_jax_shard_map(localized_fun, **localized_kwargs)
     if modern:
       localized_kwargs["axis_names"] = {target_data, target_model}
     else:
@@ -1605,6 +1673,11 @@ class _P28SegmentedEngineForward:
       raise FunctionalMappingError(
           "live runner does not expose the NNX model/state reconstruction seam"
       )
+    if not isinstance(getattr(runner, "mesh", None), jax.sharding.Mesh):
+      raise FunctionalMappingError(
+          "P28 segmented forward requires the concrete live engine mesh"
+      )
+    self._engine_mesh = runner.mesh
 
     from flax import nnx  # pylint: disable=g-import-not-at-top
 
@@ -2655,7 +2728,21 @@ class _P28SegmentedEngineForward:
       scope_name,
   ):
     """Maps one pullback manually over DP while non-unit TP stays automatic."""
-    mesh, data_axis = _p59_replicated_data_mesh(args[0], module_name)
+    trainer_mesh, _ = _p59_replicated_data_mesh(
+        args[0], module_name
+    )
+    _, trainer_model_axis = _p59_mesh_roles(trainer_mesh, module_name)
+    # A TP>1 engine body contains nested shard_maps and named fixed-order TP
+    # collectives. Its surrounding P59 map therefore uses the exact concrete
+    # engine mesh vocabulary, then relabels the result back to the trainer
+    # mesh after the compiled boundary. TP1 keeps the already-certified
+    # trainer-mesh carrier.
+    mesh = (
+        _p59_engine_data_model_mesh(self._engine_mesh, module_name)
+        if int(trainer_mesh.shape[trainer_model_axis]) > 1
+        else trainer_mesh
+    )
+    data_axis, _ = _p59_mesh_roles(mesh, module_name)
     aligned_args = tuple(
         _p59_align_to_mesh(value, mesh, module_name) for value in args
     )
@@ -2663,9 +2750,16 @@ class _P28SegmentedEngineForward:
       raise FunctionalMappingError(
           f"{module_name} requires a multi-rank data mesh"
       )
-    # A unit TP axis changes no placement. Making it manual permits explicit
-    # TP1 output specs and the nested engine shard_map Mosaic/Pallas requires.
-    manual_axes = _p59_manual_rank_axes(mesh, data_axis, module_name)
+    # TP1 retains the certified data-plus-unit-model carrier. At TP>1 the
+    # reduced engine mesh makes both real axes manual so nested engine kernels
+    # reuse, rather than replace or repartition, their TP collective name.
+    manual_axes = (
+        frozenset(mesh.axis_names)
+        if int(mesh.shape[_p59_mesh_roles(mesh, module_name)[1]]) > 1
+        else frozenset(_p59_manual_rank_axes(
+            mesh, data_axis, module_name
+        ))
+    )
     mapped = jax.shard_map(
         local_fn,
         mesh=mesh,
@@ -2675,13 +2769,14 @@ class _P28SegmentedEngineForward:
                 data_axis,
                 int(mesh.shape[data_axis]),
                 module_name,
+                manual_axes,
             )
             if index in rank_local_arg_indices
-            else _manual_axis_specs(value, data_axis)
+            else _manual_axis_specs(value, data_axis, manual_axes)
             for index, value in enumerate(aligned_args)
         ),
         out_specs=out_specs_factory(
-            data_axis, int(mesh.shape[data_axis]), aligned_args
+            data_axis, int(mesh.shape[data_axis]), aligned_args, manual_axes
         ),
         axis_names=manual_axes,
         check_vma=False,
@@ -2695,8 +2790,13 @@ class _P28SegmentedEngineForward:
           _p59_align_to_mesh(value, mesh, module_name)
           for value in runtime_args
       )
-      with _p59_localize_tp1_engine_shard_maps(mesh, module_name):
-        return compiled(*aligned_runtime_args)
+      with _p59_localize_engine_shard_maps(mesh, module_name):
+        result = compiled(*aligned_runtime_args)
+      if mesh != trainer_mesh:
+        result = _p59_align_to_mesh(
+            result, trainer_mesh, f"{module_name} output"
+        )
+      return result
 
     return invoke
 
@@ -2739,8 +2839,8 @@ class _P28SegmentedEngineForward:
       self._p59_embed_pullback_fn = self._p59_parallel_map(
           local_pullback,
           (leaves, input_ids, dhidden),
-          lambda data_axis, axis_size, aligned: _rank_staged_specs(
-              aligned[0], data_axis
+          lambda data_axis, axis_size, aligned, manual_axes: _rank_staged_specs(
+              aligned[0], data_axis, manual_axes
           ),
           rank_local_arg_indices=(1, 2),
           module_name="zt_tr_dp_parallel_bwd_embed",
@@ -2795,10 +2895,11 @@ class _P28SegmentedEngineForward:
       self._p59_norm_pullback_fn = self._p59_parallel_map(
           local_pullback,
           (leaves, hidden, dnormalized),
-          lambda data_axis, axis_size, aligned: (
-              _rank_staged_specs(aligned[0], data_axis),
+          lambda data_axis, axis_size, aligned, manual_axes: (
+              _rank_staged_specs(aligned[0], data_axis, manual_axes),
               _rank_local_leading_specs(
-                  aligned[1], data_axis, axis_size, "P59 norm output"
+                  aligned[1], data_axis, axis_size, "P59 norm output",
+                  manual_axes,
               ),
           ),
           rank_local_arg_indices=(1, 2),
@@ -2854,10 +2955,11 @@ class _P28SegmentedEngineForward:
       self._p59_head_pullback_fn = self._p59_parallel_map(
           local_pullback,
           (leaves, hidden, dlogits),
-          lambda data_axis, axis_size, aligned: (
-              _rank_staged_specs(aligned[0], data_axis),
+          lambda data_axis, axis_size, aligned, manual_axes: (
+              _rank_staged_specs(aligned[0], data_axis, manual_axes),
               _rank_local_leading_specs(
-                  aligned[1], data_axis, axis_size, "P59 head output"
+                  aligned[1], data_axis, axis_size, "P59 head output",
+                  manual_axes,
               ),
           ),
           rank_local_arg_indices=(1, 2),
@@ -2937,13 +3039,15 @@ class _P28SegmentedEngineForward:
               dnext_cache,
               dnext_hidden,
           ),
-          lambda data_axis, axis_size, aligned: (
-              _rank_staged_specs(aligned[0], data_axis),
+          lambda data_axis, axis_size, aligned, manual_axes: (
+              _rank_staged_specs(aligned[0], data_axis, manual_axes),
               _rank_local_leading_specs(
-                  aligned[1], data_axis, axis_size, "P59 cache output"
+                  aligned[1], data_axis, axis_size, "P59 cache output",
+                  manual_axes,
               ),
               _rank_local_leading_specs(
-                  aligned[2], data_axis, axis_size, "P59 layer output"
+                  aligned[2], data_axis, axis_size, "P59 layer output",
+                  manual_axes,
               ),
           ),
           rank_local_arg_indices=(1, 2, 4, 5),

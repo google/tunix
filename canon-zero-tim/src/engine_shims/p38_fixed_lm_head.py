@@ -228,11 +228,18 @@ def validate_global_contract(
     return input_shape[0]
 
 
-def validate_local_contract(input_shape, weight_shape, *, tp_size: int = TP_SIZE) -> int:
+def validate_local_contract(
+    input_shape,
+    weight_shape,
+    *,
+    tp_size: int = TP_SIZE,
+    admitted_m: tuple[int, ...] = SEMANTIC_M,
+) -> int:
     """Validate one shard_map local shard and return semantic M."""
     input_shape = tuple(map(int, input_shape))
     weight_shape = tuple(map(int, weight_shape))
-    if len(input_shape) != 2 or input_shape[0] not in SEMANTIC_M:
+    admitted_m = tuple(map(int, admitted_m))
+    if len(input_shape) != 2 or input_shape[0] not in admitted_m:
         raise ValueError(f"P38 fixed lm_head local M invalid: {input_shape}")
     hidden = _validate_hidden(input_shape[1])
     geometry = resolve_geometry(hidden, tp_size)
@@ -243,6 +250,78 @@ def validate_local_contract(input_shape, weight_shape, *, tp_size: int = TP_SIZE
             f"({hidden},{geometry.local_vocab})"
         )
     return input_shape[0]
+
+
+def _p59_local_contract(inputs, weight, *, mesh, tp_axis: str):
+    """Resolve one already-DP/TP-mapped P59 head call or return None.
+
+    P59's outer shard_map has already sliced both the DP row dimension and the
+    TP vocabulary dimension. Re-entering the engine's concrete shard_map is
+    illegal and would partition the TP-local weight twice. This admission is
+    deliberately structural: ordinary serving with the P59 flag present has
+    no two-axis manual outer context and therefore stays on the global path.
+    """
+    if os.environ.get("CANON_P59_RANK_PARALLEL_BACKWARD", "") != "1":
+        return None
+
+    import jax
+    import jax.numpy as jnp
+
+    context = jax.sharding.get_abstract_mesh()
+    if tuple(context.axis_names) != ("data", "model"):
+        return None
+    axis_types = dict(zip(context.axis_names, context.axis_types))
+    if (
+        axis_types.get("data") is not jax.sharding.AxisType.Manual
+        or axis_types.get("model") is not jax.sharding.AxisType.Manual
+    ):
+        return None
+    if tp_axis != "model" or tp_axis not in mesh.shape or "data" not in mesh.shape:
+        raise RuntimeError(
+            "P59 local fixed lm_head requires engine data/model axes"
+        )
+    dp_size = int(context.shape["data"])
+    tp_size = int(context.shape["model"])
+    if dp_size <= 1 or tp_size <= 1:
+        raise RuntimeError(
+            "P59 local fixed lm_head requires non-unit DP and TP"
+        )
+    if (
+        int(mesh.shape["data"]) != dp_size
+        or int(mesh.shape[tp_axis]) != tp_size
+    ):
+        raise RuntimeError(
+            "P59 local fixed lm_head context and engine topology differ"
+        )
+    input_shape = tuple(map(int, inputs.shape))
+    weight_shape = tuple(map(int, weight.shape))
+    if len(input_shape) != 2:
+        raise ValueError(
+            f"P59 local fixed lm_head input rank changed: {input_shape}"
+        )
+    hidden_size = _validate_hidden(input_shape[1])
+    geometry = resolve_geometry(hidden_size, tp_size)
+    if weight_shape != (hidden_size, geometry.local_vocab):
+        raise ValueError(
+            "P59 local fixed lm_head weight shape mismatch: "
+            f"{weight_shape} != {(hidden_size, geometry.local_vocab)}"
+        )
+    if inputs.dtype != jnp.bfloat16 or weight.dtype != jnp.bfloat16:
+        raise ValueError(
+            "P59 local fixed lm_head requires bf16 input/weight, got "
+            f"{inputs.dtype}/{weight.dtype}"
+        )
+    global_m = tuple(
+        candidate
+        for candidate in LEARNER_M
+        if candidate % dp_size == 0 and candidate // dp_size == input_shape[0]
+    )
+    if len(global_m) != 1:
+        raise ValueError(
+            "P59 local fixed lm_head rows do not reconstruct one learner M: "
+            f"local_M={input_shape[0]} dp={dp_size} learner_M={LEARNER_M}"
+        )
+    return dp_size, global_m[0], geometry
 
 
 def fixed_lm_head(
@@ -274,19 +353,31 @@ def fixed_lm_head(
             f"P38 fixed lm_head mesh lacks axis {tp_axis!r}: {mesh.shape}"
         )
     tp_size = int(mesh.shape[tp_axis])
-    semantic_m = validate_global_contract(
-        inputs.shape,
-        weight.shape,
-        inputs.dtype,
-        weight.dtype,
-        tp_size=tp_size,
+    p59_local = _p59_local_contract(
+        inputs, weight, mesh=mesh, tp_axis=tp_axis
     )
+    if p59_local is None:
+        semantic_m = validate_global_contract(
+            inputs.shape,
+            weight.shape,
+            inputs.dtype,
+            weight.dtype,
+            tp_size=tp_size,
+        )
+        p59_dp_size = 0
+        p59_global_m = semantic_m
+    else:
+        p59_dp_size, p59_global_m, _ = p59_local
+        semantic_m = int(inputs.shape[0])
     hidden_size = _validate_hidden(inputs.shape[1])
     geometry = resolve_geometry(hidden_size, tp_size, endpoint=endpoint)
 
     def local(a_local, w_local):
         local_m = validate_local_contract(
-            a_local.shape, w_local.shape, tp_size=tp_size
+            a_local.shape,
+            w_local.shape,
+            tp_size=tp_size,
+            admitted_m=(semantic_m,),
         )
         if a_local.dtype != jnp.bfloat16 or w_local.dtype != jnp.bfloat16:
             raise ValueError(
@@ -328,7 +419,8 @@ def fixed_lm_head(
                 "accumulation=lax.scan order=ascending "
                 f"K={hidden_size} TP={tp_size} "
                 f"local_N={geometry.local_vocab} "
-                f"fixed_N={geometry.padded_local_vocab} endpoint={endpoint}",
+                f"fixed_N={geometry.padded_local_vocab} "
+                f"endpoint={endpoint}",
                 flush=True,
             )
             a_learner, weight_local = residual
@@ -375,13 +467,18 @@ def fixed_lm_head(
         else:
             chunks = local_m // FIXED_M
             out = learner_fixed_vjp(a_local, w_local)
+        p59_receipt = (
+            f" p59_local=1 global_M={p59_global_m} dp={p59_dp_size}"
+            if p59_local is not None
+            else ""
+        )
         print(
             "[PATHTRACE] CANON_P38_FIXED_LM_HEAD=1 "
             f"semantic_M={local_m} fixed_M={FIXED_M} K={hidden_size} "
             f"TP={tp_size} local_N={geometry.local_vocab} "
             f"fixed_N={geometry.padded_local_vocab} "
             f"BM={BM} BN={BN} BK={BK} chunks={chunks} "
-            f"endpoint={endpoint}",
+            f"endpoint={endpoint}{p59_receipt}",
             flush=True,
         )
         if tuple(map(int, out.shape)) != (local_m, geometry.local_vocab):
@@ -390,25 +487,76 @@ def fixed_lm_head(
             )
         return out
 
-    try:
-        mapped = shard_map(
-            local,
-            mesh=mesh,
-            in_specs=(P(None, None), P(None, tp_axis)),
-            out_specs=P(None, tp_axis),
-            check_vma=False,
-        )
-    except TypeError:
-        mapped = shard_map(
-            local,
-            mesh=mesh,
-            in_specs=(P(None, None), P(None, tp_axis)),
-            out_specs=P(None, tp_axis),
-            check_rep=False,
-        )
-    output = mapped(inputs, weight)
-    if tuple(map(int, output.shape)) != (semantic_m, VOCAB):
+    if p59_local is not None:
+
+        @jax.custom_vjp
+        def p59_local_head(a_local, w_local):
+            return local(a_local, w_local)
+
+        def p59_local_head_fwd(a_local, w_local):
+            output_local = local(a_local, w_local)
+            return output_local, (a_local, w_local)
+
+        def p59_local_head_bwd(residual, cotangent):
+            a_local, w_local = residual
+            _, pullback = jax.vjp(local, a_local, w_local)
+            da_local, dw_local = pullback(cotangent)
+            gathered = lax.all_gather(
+                da_local.astype(jnp.float32),
+                tp_axis,
+                axis=0,
+                tiled=False,
+            )
+            da = gathered[0]
+            for rank in range(1, tp_size):
+                da = (
+                    lax.optimization_barrier(da)
+                    + lax.optimization_barrier(gathered[rank])
+                )
+            da = da.astype(da_local.dtype)
+            print(
+                "[PATHTRACE] CANON_" "P38_FIXED_LM_HEAD_VJP=1 "
+                f"semantic_M={p59_global_m} local_M={semantic_m} "
+                f"fixed_M={FIXED_M} chunks={semantic_m // FIXED_M} "
+                "accumulation=lax.scan order=ascending "
+                "tp_input_reduction=all_gather_rank_order_f32_barrier "
+                f"K={hidden_size} "
+                f"TP={tp_size} local_N={geometry.local_vocab} "
+                f"fixed_N={geometry.padded_local_vocab} "
+                f"endpoint={endpoint}",
+                flush=True,
+            )
+            return da, dw_local
+
+        p59_local_head.defvjp(p59_local_head_fwd, p59_local_head_bwd)
+        output = p59_local_head(inputs, weight)
+    else:
+        try:
+            mapped = shard_map(
+                local,
+                mesh=mesh,
+                in_specs=(P(None, None), P(None, tp_axis)),
+                out_specs=P(None, tp_axis),
+                check_vma=False,
+            )
+        except TypeError:
+            mapped = shard_map(
+                local,
+                mesh=mesh,
+                in_specs=(P(None, None), P(None, tp_axis)),
+                out_specs=P(None, tp_axis),
+                check_rep=False,
+            )
+        output = mapped(inputs, weight)
+    p59_local_tp = p59_local is not None
+    expected_output_shape = (
+        (semantic_m, geometry.local_vocab)
+        if p59_local_tp
+        else (semantic_m, VOCAB)
+    )
+    if tuple(map(int, output.shape)) != expected_output_shape:
         raise RuntimeError(
-            f"P38 fixed lm_head global output mismatch: {output.shape}"
+            "P38 fixed lm_head output boundary mismatch: "
+            f"{output.shape} != {expected_output_shape}"
         )
     return output

@@ -19,12 +19,15 @@ import contextlib
 import dataclasses
 from flax import nnx
 import hashlib
+import importlib.util
 import io
 import jax
 import jax.numpy as jnp
 import json
 import numpy as np
 import os
+from pathlib import Path
+import sys
 import tempfile
 import types
 from unittest import mock
@@ -32,6 +35,18 @@ from unittest import mock
 from tunix.rl import algo_core
 from tunix.rl import canonical_qwen3_adapter
 from tunix.rl import dp_training
+
+
+ROOT = Path(__file__).resolve().parents[2]
+
+
+def _load_test_module(path: Path, name: str):
+  spec = importlib.util.spec_from_file_location(name, path)
+  assert spec is not None and spec.loader is not None
+  module = importlib.util.module_from_spec(spec)
+  sys.modules[name] = module
+  spec.loader.exec_module(module)
+  return module
 
 
 def _state(tree):
@@ -1267,9 +1282,10 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
     mapped = segmented._p59_parallel_map(  # pylint: disable=protected-access
         local_fn,
         (weight, values),
-        lambda data_axis, axis_size, aligned: (
+        lambda data_axis, axis_size, aligned, manual_axes: (
             canonical_qwen3_adapter._rank_local_leading_specs(  # pylint: disable=protected-access
-                aligned[1], data_axis, axis_size, "nested output"
+                aligned[1], data_axis, axis_size, "nested output",
+                manual_axes,
             )
         ),
         rank_local_arg_indices=(1,),
@@ -1332,9 +1348,10 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
     mapped = segmented._p59_parallel_map(  # pylint: disable=protected-access
         local_fn,
         (weight, values),
-        lambda data_axis, axis_size, aligned: (
+        lambda data_axis, axis_size, aligned, manual_axes: (
             canonical_qwen3_adapter._rank_local_leading_specs(  # pylint: disable=protected-access
-                aligned[1], data_axis, axis_size, "nested output"
+                aligned[1], data_axis, axis_size, "nested output",
+                manual_axes,
             )
         ),
         rank_local_arg_indices=(1,),
@@ -1346,6 +1363,350 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
         "uses unsupported axes",
     ):
       mapped(weight, values)
+
+  def test_p59_tp4_tp8_localizes_nested_engine_maps_and_collectives(self):
+    if len(jax.devices()) < 16:
+      self.skipTest("requires sixteen forced CPU or accelerator devices")
+    engine_axes = (
+        "data",
+        "attn_dp",
+        "attn_dp_expert",
+        "expert",
+        "model",
+        "dcp",
+    )
+    for tp_size in (4, 8):
+      with self.subTest(tp_size=tp_size):
+        devices = np.asarray(jax.devices()[: 2 * tp_size])
+        trainer_mesh = jax.sharding.Mesh(
+            devices.reshape(2, tp_size), ("dp", "tp")
+        )
+        engine_mesh = jax.sharding.Mesh(
+            devices.reshape(2, 1, 1, 1, tp_size, 1), engine_axes
+        )
+        weight = jax.device_put(
+            jnp.arange(1, tp_size + 1, dtype=jnp.float32),
+            jax.sharding.NamedSharding(
+                trainer_mesh, jax.sharding.PartitionSpec("tp")
+            ),
+        )
+        values = jax.device_put(
+            jnp.arange(4 * tp_size, dtype=jnp.float32).reshape(
+                4, tp_size
+            ),
+            jax.sharding.NamedSharding(
+                engine_mesh,
+                jax.sharding.PartitionSpec("data", "model"),
+            ),
+        )
+        segmented = object.__new__(
+            canonical_qwen3_adapter._P28SegmentedEngineForward  # pylint: disable=protected-access
+        )
+        segmented._engine_mesh = engine_mesh  # pylint: disable=protected-access
+
+        def local_fn(local_weight, local_values):
+          from jax.experimental.shard_map import shard_map
+
+          column = shard_map(
+              lambda x, w: x * w,
+              mesh=engine_mesh,
+              in_specs=(
+                  jax.sharding.PartitionSpec("data", "model"),
+                  jax.sharding.PartitionSpec("model"),
+              ),
+              out_specs=jax.sharding.PartitionSpec("data", "model"),
+              check_rep=False,
+          )(local_values, local_weight)
+
+          def contract_local(x):
+            gathered = jax.lax.all_gather(
+                x, "model", axis=0, tiled=False
+            )
+            total = gathered[0]
+            for rank in range(1, tp_size):
+              total = total + gathered[rank]
+            return total
+
+          contracted = jax.shard_map(
+              contract_local,
+              mesh=engine_mesh,
+              in_specs=jax.sharding.PartitionSpec("data", "model"),
+              out_specs=jax.sharding.PartitionSpec("data", None),
+              check_vma=False,
+          )(column)
+          return column, contracted
+
+        mapped = segmented._p59_parallel_map(  # pylint: disable=protected-access
+            local_fn,
+            (weight, values),
+            lambda data_axis, axis_size, aligned, manual_axes: (
+                canonical_qwen3_adapter._rank_local_leading_specs(  # pylint: disable=protected-access
+                    aligned[1],
+                    data_axis,
+                    axis_size,
+                    "TP nested column output",
+                    manual_axes,
+                ),
+                jax.sharding.PartitionSpec(data_axis, None),
+            ),
+            rank_local_arg_indices=(1,),
+            module_name=f"zt_tr_dp_parallel_nested_tp{tp_size}",
+            scope_name=f"zt/tr/dp_parallel/nested/tp{tp_size}",
+        )
+        column, contracted = mapped(weight, values)
+        expected_column = np.asarray(values) * np.asarray(weight)
+        np.testing.assert_array_equal(np.asarray(column), expected_column)
+        np.testing.assert_array_equal(
+            np.asarray(contracted), expected_column.sum(axis=1, keepdims=True)
+        )
+        self.assertEqual(
+            column.sharding.spec,
+            jax.sharding.PartitionSpec("dp", "tp"),
+        )
+        self.assertEqual(
+            contracted.sharding.spec,
+            jax.sharding.PartitionSpec("dp"),
+        )
+
+  def test_p59_tpx_executes_fixed_head_local_vjp_and_global_negative(self):
+    tp_size = int(os.environ.get("P59_TEST_TP_SIZE", "4"))
+    if tp_size not in (4, 8):
+      self.fail(f"unsupported test TP size: {tp_size}")
+    device_count = 2 * tp_size
+    if len(jax.devices()) < device_count:
+      self.skipTest(
+          f"requires {device_count} forced CPU or accelerator devices"
+      )
+    fixed = _load_test_module(
+        ROOT / "canon-zero-tim/src/engine_shims/p38_fixed_lm_head.py",
+        f"p59_fixed_lm_head_composition_tp{tp_size}_test",
+    )
+    devices = np.asarray(jax.devices()[:device_count])
+    trainer_mesh = jax.sharding.Mesh(
+        devices.reshape(2, tp_size), ("dp", "tp")
+    )
+    engine_axes = (
+        "data",
+        "attn_dp",
+        "attn_dp_expert",
+        "expert",
+        "model",
+        "dcp",
+    )
+    engine_mesh = jax.sharding.Mesh(
+        devices.reshape(2, 1, 1, 1, tp_size, 1), engine_axes
+    )
+    vocab = 4 * tp_size
+    geometry = fixed.Geometry(
+        model="test-qwen",
+        hidden=4,
+        tp_size=tp_size,
+        endpoint="direct_probe",
+        local_vocab=4,
+        padded_local_vocab=8,
+    )
+    weight = jax.device_put(
+        (
+            jnp.arange(4 * vocab, dtype=jnp.float32).reshape(4, vocab)
+            / 32
+        ).astype(jnp.bfloat16),
+        jax.sharding.NamedSharding(
+            trainer_mesh, jax.sharding.PartitionSpec(None, "tp")
+        ),
+    )
+    hidden = jax.device_put(
+        (jnp.arange(64, dtype=jnp.float32).reshape(16, 4) / 64).astype(
+            jnp.bfloat16
+        ),
+        jax.sharding.NamedSharding(
+            trainer_mesh, jax.sharding.PartitionSpec("dp", None)
+        ),
+    )
+    dlogits = jax.device_put(
+        jnp.ones((16, vocab), jnp.bfloat16),
+        jax.sharding.NamedSharding(
+            trainer_mesh, jax.sharding.PartitionSpec("dp", "tp")
+        ),
+    )
+    segmented = object.__new__(
+        canonical_qwen3_adapter._P28SegmentedEngineForward  # pylint: disable=protected-access
+    )
+    segmented._engine_mesh = engine_mesh  # pylint: disable=protected-access
+
+    def local_matmul(left, right, **_):
+      return jnp.matmul(left, right)
+
+    env = {
+        fixed.ENV: "1",
+        **fixed.REQUIRED,
+        "CANON_P59_RANK_PARALLEL_BACKWARD": "1",
+    }
+    constants = {
+        "VOCAB": vocab,
+        "FIXED_M": 8,
+        "LEARNER_M": (16,),
+        "SEMANTIC_M": (8, 16),
+        "SUPPORTED_HIDDEN": (4,),
+        "GEOMETRIES": {(4, tp_size): geometry},
+    }
+    with mock.patch.dict(os.environ, env, clear=False), mock.patch.multiple(
+        fixed, **constants
+    ):
+
+      def local_pullback(local_weight, local_hidden, local_dlogits):
+        def forward(weight_arg, hidden_arg):
+          return fixed.fixed_lm_head(
+              hidden_arg,
+              weight_arg,
+              mesh=engine_mesh,
+              tp_axis="model",
+              local_matmul=local_matmul,
+              endpoint="direct_probe",
+          )
+
+        _, pullback = jax.vjp(forward, local_weight, local_hidden)
+        dweight, dhidden = pullback(local_dlogits)
+        return jnp.expand_dims(dweight, 0), dhidden
+
+      parallel = segmented._p59_parallel_map(  # pylint: disable=protected-access
+          local_pullback,
+          (weight, hidden, dlogits),
+          lambda data_axis, axis_size, aligned, manual_axes: (
+              canonical_qwen3_adapter._rank_staged_specs(  # pylint: disable=protected-access
+                  aligned[0], data_axis, manual_axes
+              ),
+              canonical_qwen3_adapter._rank_local_leading_specs(  # pylint: disable=protected-access
+                  aligned[1],
+                  data_axis,
+                  axis_size,
+                  "fixed-head hidden cotangent",
+                  manual_axes,
+              ),
+          ),
+          rank_local_arg_indices=(1, 2),
+          module_name="zt_tr_dp_parallel_fixed_head_composition",
+          scope_name="zt/tr/dp_parallel/fixed_head/composition",
+      )
+      staged, dhidden = parallel(weight, hidden, dlogits)
+
+      def ordinary_forward(weight_arg, hidden_arg):
+        return jnp.matmul(hidden_arg, weight_arg)
+
+      _, ordinary_pullback = jax.vjp(ordinary_forward, weight, hidden)
+      expected_rows = []
+      for rank in range(2):
+        row_mask = (
+            jnp.arange(dlogits.shape[0], dtype=jnp.int32) // 8 == rank
+        )
+        isolated = jnp.where(
+            row_mask[:, None], dlogits, jnp.zeros_like(dlogits)
+        )
+        expected_rows.append(ordinary_pullback(isolated)[0])
+      expected_staged = jnp.stack(expected_rows)
+      _, expected_dhidden = ordinary_pullback(dlogits)
+      np.testing.assert_array_equal(
+          np.asarray(staged), np.asarray(expected_staged)
+      )
+      np.testing.assert_array_equal(
+          np.asarray(dhidden), np.asarray(expected_dhidden)
+      )
+      self.assertEqual(
+          staged.sharding.spec,
+          jax.sharding.PartitionSpec("dp", None, "tp"),
+      )
+      self.assertEqual(
+          dhidden.sharding.spec,
+          jax.sharding.PartitionSpec("dp"),
+      )
+
+      # Continue the same real fixed-head cotangent through P59's production
+      # report-adjoint and fixed reducer.  The identity mapping isolates this
+      # composition boundary: it does not replace either production stage.
+      adapter = object.__new__(
+          canonical_qwen3_adapter.Qwen3EngineForwardAdapter
+      )
+      adapter._runner = types.SimpleNamespace(  # pylint: disable=protected-access
+          model_config=types.SimpleNamespace(
+              get_total_num_kv_heads=lambda: 1,
+              get_head_size=lambda: 1,
+          )
+      )
+      adapter._engine_state_contract = (weight,)  # pylint: disable=protected-access
+      adapter._key_mappings = {}  # pylint: disable=protected-access
+      adapter._transpose_keys = None  # pylint: disable=protected-access
+      adapter._hook_fns = None  # pylint: disable=protected-access
+      adapter._tp_size = tp_size  # pylint: disable=protected-access
+      adapter._dp_axis = "data"  # pylint: disable=protected-access
+      adapter._data_size = 2  # pylint: disable=protected-access
+
+      def identity_mapping(*, trainer_state, **unused):
+        del unused
+        return canonical_qwen3_adapter.FunctionalEngineLeaves(
+            paths=(), leaves=tuple(trainer_state), source_to_target=()
+        )
+
+      with mock.patch.object(
+          canonical_qwen3_adapter,
+          "map_trainer_state_to_engine_leaves",
+          side_effect=identity_mapping,
+      ):
+        staged_trainer = adapter._p59_rank_parallel_report_adjoint(  # pylint: disable=protected-access
+            (weight,), (staged,)
+        )
+      template = adapter._p59_reducer_template(  # pylint: disable=protected-access
+          (weight,), staged_trainer
+      )
+      reducer = dp_training.FixedDPRankGradientReducer(
+          template,
+          dp_size=2,
+          dp_axis="dp",
+          require_distinct_fingerprints=False,
+      )
+      reduced, reduction_report = reducer.finalize_staged(staged_trainer)
+      expected_reduced = (
+          expected_staged[0].astype(jnp.float32)
+          + expected_staged[1].astype(jnp.float32)
+      )
+      np.testing.assert_array_equal(
+          np.asarray(reduced[0]), np.asarray(expected_reduced)
+      )
+      self.assertEqual(
+          reduction_report["rank_gradient_staging_mode"],
+          "parallel_table",
+      )
+      self.assertTrue(reduction_report["post_reduction_replicas_exact"])
+
+      # Presence of the P59 flag is not enough to select the local boundary.
+      # Outside the outer manual DP/TP context, ordinary serving still returns
+      # the caller-global vocabulary with its original TP placement.
+      engine_hidden = jax.device_put(
+          hidden,
+          jax.sharding.NamedSharding(
+              engine_mesh, jax.sharding.PartitionSpec(None, None)
+          ),
+      )
+      engine_weight = jax.device_put(
+          weight,
+          jax.sharding.NamedSharding(
+              engine_mesh, jax.sharding.PartitionSpec(None, "model")
+          ),
+      )
+      global_output = fixed.fixed_lm_head(
+          engine_hidden,
+          engine_weight,
+          mesh=engine_mesh,
+          tp_axis="model",
+          local_matmul=local_matmul,
+          endpoint="direct_probe",
+      )
+      self.assertEqual(global_output.shape, (16, vocab))
+      expected_global_sharding = jax.sharding.NamedSharding(
+          engine_mesh, jax.sharding.PartitionSpec(None, "model")
+      )
+      self.assertEqual(
+          global_output.sharding.devices_indices_map(global_output.shape),
+          expected_global_sharding.devices_indices_map(global_output.shape),
+      )
 
   def test_p59_rank_parallel_rejects_fsdp_mesh(self):
     if len(jax.devices()) < 4:

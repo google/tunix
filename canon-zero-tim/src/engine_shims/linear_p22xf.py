@@ -21,6 +21,100 @@ spec.loader.exec_module(base)
 original_einsum_call = base.JaxEinsum.__call__
 
 
+def _p59_local_tp_context() -> bool:
+    """Return whether P59 already maps the live engine over DP and TP."""
+    if os.environ.get("CANON_P59_RANK_PARALLEL_BACKWARD", "") != "1":
+        return False
+    import jax
+
+    context = jax.sharding.get_abstract_mesh()
+    if tuple(context.axis_names) != ("data", "model"):
+        return False
+    axis_types = dict(zip(context.axis_names, context.axis_types))
+    if (
+        axis_types.get("data") is not jax.sharding.AxisType.Manual
+        or axis_types.get("model") is not jax.sharding.AxisType.Manual
+    ):
+        return False
+    mesh = base._CANON_MESH
+    if mesh is None or base._CANON_TP_AXIS != "model":
+        raise RuntimeError(
+            "P59 local projection requires the live engine model axis"
+        )
+    if "data" not in mesh.shape or "model" not in mesh.shape:
+        raise RuntimeError(
+            "P59 local projection requires engine data/model axes"
+        )
+    if (
+        int(context.shape["data"]) <= 1
+        or int(context.shape["model"]) <= 1
+        or int(context.shape["data"]) != int(mesh.shape["data"])
+        or int(context.shape["model"]) != int(mesh.shape["model"])
+    ):
+        raise RuntimeError(
+            "P59 local projection context and engine topology differ"
+        )
+    return True
+
+
+def _p59_fixed_order_tp_sum(value):
+    """Sum one replicated-input cotangent in explicit TP rank order.
+
+    The per-shard cotangent has the BF16 primal dtype.  Accumulating eight TP
+    partials in BF16 introduced multiple avoidable roundings and was measurably
+    farther from the FP64 oracle.  Match the canonical matmul accumulator
+    contract by adding rank-ordered partials in FP32, then cast once at the
+    replicated-input boundary.  Barriers on both operands preserve each
+    source-level association instead of leaving the FP32 chain open to XLA
+    reassociation.
+    """
+    count = int(base._CANON_MESH.shape[base._CANON_TP_AXIS])
+    gathered = base.jax.lax.all_gather(
+        value.astype(base.jnp.float32),
+        base._CANON_TP_AXIS,
+        axis=0,
+        tiled=False,
+    )
+    total = gathered[0]
+    for rank in range(1, count):
+        total = (
+            base.jax.lax.optimization_barrier(total)
+            + base.jax.lax.optimization_barrier(gathered[rank])
+        )
+    return total.astype(value.dtype)
+
+
+def _p59_local_fused_pieces(output, output_sizes, n_shards, prefix):
+    """Split one already-TP-local fused output, or return None globally."""
+    if not _p59_local_tp_context():
+        return None
+    n_shards = int(n_shards)
+    output_sizes = tuple(map(int, output_sizes))
+    if n_shards <= 1 or any(size % n_shards for size in output_sizes):
+        raise RuntimeError(
+            f"P59 local fused-linear split is not TP divisible at {prefix}: "
+            f"sizes={output_sizes} tp={n_shards}"
+        )
+    local_sizes = tuple(size // n_shards for size in output_sizes)
+    expected_local_width = sum(local_sizes)
+    if int(output.shape[-1]) != expected_local_width:
+        raise RuntimeError(
+            "P59 local fused-linear width mismatch at "
+            f"{prefix}: {output.shape[-1]} != {expected_local_width}"
+        )
+    pieces = []
+    start = 0
+    for local_size in local_sizes:
+        pieces.append(output[..., start:start + local_size])
+        start += local_size
+    if start != int(output.shape[-1]):
+        raise RuntimeError(
+            f"P59 local fused-linear split did not consume output at "
+            f"{prefix}: {start} != {output.shape[-1]}"
+        )
+    return tuple(pieces)
+
+
 if value == "1":
     from p22_pallas_matmul import matmul as pallas_matmul
     from p56_pallas_norm_matmul import continue_decode_norm_matmul
@@ -112,6 +206,52 @@ def _column_parallel(site, equation, inputs, weight, prefix, norm=None):
         map_args = (inputs, weight, norm[0])
     else:
         map_args = (inputs, weight)
+    if _p59_local_tp_context():
+        import jax
+
+        if norm is None:
+
+            @jax.custom_vjp
+            def p59_column(a_local, w_local):
+                return local(a_local, w_local)
+
+            def p59_column_fwd(a_local, w_local):
+                output_local = local(a_local, w_local)
+                return output_local, (a_local, w_local)
+
+            def p59_column_bwd(residual, cotangent):
+                a_local, w_local = residual
+                _, pullback = jax.vjp(local, a_local, w_local)
+                da_local, dw_local = pullback(cotangent)
+                return _p59_fixed_order_tp_sum(da_local), dw_local
+
+            p59_column.defvjp(p59_column_fwd, p59_column_bwd)
+            return p59_column(*map_args)
+
+        @jax.custom_vjp
+        def p59_norm_column(a_local, w_local, gamma_local):
+            return local(a_local, w_local, gamma_local)
+
+        def p59_norm_column_fwd(a_local, w_local, gamma_local):
+            output_local = local(a_local, w_local, gamma_local)
+            return output_local, (a_local, w_local, gamma_local)
+
+        def p59_norm_column_bwd(residual, cotangent):
+            a_local, w_local, gamma_local = residual
+            _, pullback = jax.vjp(
+                local, a_local, w_local, gamma_local
+            )
+            da_local, dw_local, dgamma_local = pullback(cotangent)
+            return (
+                _p59_fixed_order_tp_sum(da_local),
+                dw_local,
+                _p59_fixed_order_tp_sum(dgamma_local),
+            )
+
+        p59_norm_column.defvjp(
+            p59_norm_column_fwd, p59_norm_column_bwd
+        )
+        return p59_norm_column(*map_args)
     try:
         mapped = shard_map(local, mesh=mesh, in_specs=in_specs, out_specs=out_specs,
                            check_vma=False)
@@ -190,6 +330,8 @@ def _contract_parallel(site, equation, inputs, weight, prefix):
         f"at {prefix} ({equation}, tp={count})",
         flush=True,
     )
+    if _p59_local_tp_context():
+        return local(inputs, weight)
     try:
         mapped = shard_map(
             local,
@@ -266,9 +408,13 @@ def _p22xf_einsum_call(self, inputs):
     if self.bias is not None:
         output += self.bias
     if not site.contract_parallel:
-        pieces = slice_sharded_tensor_for_concatenation(
-            output, config.output_sizes, config.n_shards
+        pieces = _p59_local_fused_pieces(
+            output, config.output_sizes, config.n_shards, self.prefix
         )
+        if pieces is None:
+            pieces = slice_sharded_tensor_for_concatenation(
+                output, config.output_sizes, config.n_shards
+            )
         output = base.jnp.concatenate(pieces, axis=-1)
     return output
 
