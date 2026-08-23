@@ -662,6 +662,11 @@ if [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "1" ]; then
       p38_fixed_hidden=2560
       p38_fixed_tp=8
       ;;
+    cluster/profiles/qwen3-4b-dp8-tp8-deepswe-v1-hp.env)
+      p38_fixed_endpoint=tied_embed
+      p38_fixed_hidden=2560
+      p38_fixed_tp=8
+      ;;
     cluster/profiles/qwen3-32b-dp16-tp8-deepswe.env|\
     cluster/profiles/qwen3-32b-dp-parity-deepswe-full.env)
       p38_fixed_endpoint=untied_lm_head
@@ -944,6 +949,16 @@ elif [ "$rc" -eq 0 ] && [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
         --update-report "$CANON_UPDATE_REPORT" \
         --alignment-report "$CANON_ALIGN_REPORT" \
         --output "$classification" || exit 1
+    if [ "${CANON_V1_HP_FULL:-0}" = "1" ]; then
+      p58_hp_classification="$CANON_STATE/p58_zero_hp_full.classification.json"
+      JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
+        python3 "$CANON_PKG/tasks/p58-deepswe-native-zero-comparison/scripts/classify_zero_hp_full.py" \
+          --state "$CANON_STATE" \
+          --run-log "$LOG" \
+          --update-report "$CANON_UPDATE_REPORT" \
+          --base-classification "$classification" \
+          --output "$p58_hp_classification" || exit 1
+    fi
   elif [ "${CANON_P46_DEEPSWE_TRAIN:-0}" = "1" ]; then
     classification="$CANON_STATE/p46_deepswe_q32_${CANON_P46_TOPOLOGY}_full.classification.json"
     JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \

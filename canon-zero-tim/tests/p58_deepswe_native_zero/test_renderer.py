@@ -127,12 +127,28 @@ class P58RendererTest(unittest.TestCase):
         "arm": "native",
         "alignment_warning_only": "1",
         "proxy_xla": [],
+        "high_performance": "0",
     })
     self.assertEqual(renderer.treatment_signature(zero), {
         "arm": "zero",
         "alignment_warning_only": "0",
         "proxy_xla": [renderer.p34.PROXY_XLA_FLAG],
+        "high_performance": "0",
     })
+
+  def test_zero_hp_full_is_additive_and_target_only(self):
+    document = self._render(
+        "zero", "full", high_performance=True, run_id="hp-test"
+    )
+    env = renderer.p34._env(document)
+    self.assertEqual(env["CANON_PROFILE_FILE"], renderer.HP_PROFILE)
+    self.assertEqual(env["CANON_V1_HP_FULL"], "1")
+    self.assertEqual(env["CANON_P38_FIXED_LM_HEAD"], "1")
+    self.assertIn("zero-hp-full", document["metadata"]["name"])
+    for arm, stage in (("native", "full"), ("zero", "three-update")):
+      with self.subTest(arm=arm, stage=stage):
+        with self.assertRaisesRegex(ValueError, "only for Zero full"):
+          self._render(arm, stage, high_performance=True)
 
   def test_optional_algorithm_interventions_are_absent(self):
     for arm in ("native", "zero"):

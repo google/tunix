@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[3]
 PKG = ROOT / "canon-zero-tim"
 PROFILE = PKG / "cluster/profiles/qwen3-4b-dp8-tp8-deepswe-tim.env"
 CANON = PKG / "cluster/profiles/_canonical_engine.env"
+HP_PROFILE = PKG / "cluster/profiles/qwen3-4b-dp8-tp8-deepswe-v1-hp.env"
 
 
 def _source(arm: str) -> str:
@@ -73,6 +74,57 @@ class P58ProfileTest(unittest.TestCase):
     self.assertIn("logm=present", output)
     self.assertIn("--xla_allow_excess_precision=false", output)
     self.assertIn("reduction=1 l3=0 p27=0 flwarn=0", output)
+
+  def test_zero_hp_profile_resolves_exact_bundle(self):
+    script = f"""
+set -euo pipefail
+export CANON_STATE=/tmp/p58-hp-test
+export CANON_V1_HP_FULL=1
+export CANON_P58_TIM_ARM=zero
+export CANON_P58_DEEPSWE_TIM=1
+export CANON_P58_TIM_ADMITTED=1
+export CANON_P34_RUN_STAGE=full
+export CANON_P34_NO_COMMIT=0
+export CANON_P58_EXPECTED_UPDATES=1000
+export CANON_P32_TRAIN_ADMITTED=1
+export CANON_P32_DP_REDUCTION_ADMITTED=1
+export CANON_P33_WORKLOAD_LAUNCH_ADMITTED=1
+source {CANON}
+source {HP_PROFILE}
+printf '%s\n' "$CANON_PROFILE|$CANON_CONTINUE_DECODE|$CANON_FIXED_AR_GATHER|$CANON_PALLAS_GATHERED_LOGPROBS|$CANON_LOGPROB_STEP_FUSION|$CANON_P59_RANK_PARALLEL_BACKWARD|$CANON_P38_FIXED_LM_HEAD|$CANON_VLLM_ENABLE_PREFIX_CACHING|$CANON_BATCHED_EVIDENCE"
+"""
+    output = subprocess.run(
+        ["bash", "-c", script], check=True, text=True, capture_output=True
+    ).stdout
+    self.assertIn(
+        "qwen3-4b-dp8-tp8-deepswe-v1-hp|8|1|1|1|1|1|0|0",
+        output,
+    )
+
+  def test_zero_hp_profile_rejects_unsigned_or_native_entry(self):
+    for v1, arm in (("0", "zero"), ("1", "native")):
+      with self.subTest(v1=v1, arm=arm):
+        script = f"""
+set -euo pipefail
+export CANON_STATE=/tmp/p58-hp-negative
+export CANON_V1_HP_FULL={v1}
+export CANON_P58_TIM_ARM={arm}
+export CANON_P58_DEEPSWE_TIM=1
+export CANON_P58_TIM_ADMITTED=1
+export CANON_P34_RUN_STAGE=full
+export CANON_P34_NO_COMMIT=0
+export CANON_P58_EXPECTED_UPDATES=1000
+export CANON_P32_TRAIN_ADMITTED=1
+export CANON_P32_DP_REDUCTION_ADMITTED=1
+export CANON_P33_WORKLOAD_LAUNCH_ADMITTED=1
+source {CANON}
+source {HP_PROFILE}
+"""
+        result = subprocess.run(
+            ["bash", "-c", script], check=False, text=True,
+            capture_output=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
 
 
 if __name__ == "__main__":

@@ -17,16 +17,16 @@ DeepSWE-32B run: the model, generation count, clean-data selector, and context
 length differ deliberately. The compact trajectory-filtering rule does match
 the published DeepSWE recipe and the pinned Tunix quality-fix reference.
 
-The execution order changed by user decision on 2026-08-21: waive P58.3 and
-the separate three-update stop, then run the native full 1,000-update campaign
-directly. For the later p58f05 repair, the user requested a separate bounded
-one-host admission gate. That gate does not retroactively promote P58.3 and is
-currently blocked by absent TPU device exposure in this container. Commits
-1–3 remain mandatory online monitoring boundaries inside the same job. The
-zero implementation remains available for review and regression testing but
-is not launch-authorized until its optimization work is complete and the user
-explicitly reactivates it. A native-only result is an integration/training
-result, not a causal comparison.
+The execution order changed again by user decision on 2026-08-23. The native
+full campaign remains incomplete historical evidence; the current work is
+P58.6, a matched one-host Native/optimized-Zero XProf carrier, followed by
+P58.7, an optimized strict-Zero Qwen3-4B full recipe. P58.8 then repairs the
+TP4/TP8 P59 nested-mesh admission failure and the P57 Zero/full telemetry
+identity exposed by the first Phase4 target logs. Review then found that the
+new exact-image gate exercised only a synthetic nested map, not the installed
+fixed-head/projection shim VJP that failed in GSM8K. P58.8 is therefore active
+again until that real path passes a bounded no-commit gate and the dirty tree
+is reconstructed as four independent CLs on the latest evidence tip.
 
 ## Phases
 
@@ -37,8 +37,11 @@ result, not a causal comparison.
 | P58.3 | One-host observer and artifact sanity | Full redacted trajectory schema, W&B metric schema, logprob/alignment observers, checkpoint transactions, and no-update neutrality pass without a production claim | waived — not PASS |
 | P58.4N | Native 128-chip three-update canary | Native completes exactly three optimizer commits on rollout DP8 x TP8 plus trainer DP8 x TP8, records a finite nonzero serving-path mismatch dose, keeps every stock numerical boundary finite, and emits a signed classifier PASS | superseded — p58c05 failed before execution; not PASS |
 | P58.4Z | Zero 128-chip three-update canary | Zero completes exactly three commits on the identical recipe with strict A=B=C and a signed classifier PASS | deferred — do not launch |
-| P58.5N | Native 128-chip full campaign | Native completes exactly 1,000 optimizer commits; the first three are monitored without stopping; durable trajectory, evaluation, checkpoint, alignment, optimizer, and classifier evidence passes | active |
+| P58.5N | Native 128-chip full campaign | Native completes exactly 1,000 optimizer commits; the first three are monitored without stopping; durable trajectory, evaluation, checkpoint, alignment, optimizer, and classifier evidence passes | incomplete historical campaign; superseded as active implementation queue |
 | P58.5Z | Zero full or paired comparison | Activated only after zero optimization and a new explicit user decision | deferred — do not launch |
+| P58.6 | Matched one-host Native/Zero-HP XProf and Perfetto carriers | Both immutable arms pass on the same direct four-chip host and pair work hashes match | implementation + pinned-image PASS; direct TPU pair not run |
+| P58.7 | Optimized strict-Zero Qwen3-4B full recipe | Exactly 1,000 DP8 x TP8 commits, zero alignment failures, complete P59/fixed-head/XProf/Perfetto/postflight receipts | implementation + construction PASS; target not run |
+| P58.8 | P59 TP4/TP8 nested-mesh and P57 Zero/full telemetry repair | Installed fixed-head + projection shim VJPs run through P59 parallel/report/fixed-reducer no-commit paths; local-output positive/negative placement controls pass; four independent CLs are rebuilt on latest tip `ccbcf572` | local four-CL release and committed-tree manifest audit PASS; push/hardware target not run |
 
 Exactly one phase may be active. Commit, push, image publication, Kubernetes
 render/application, and TPU execution each remain separately user-gated.
@@ -46,10 +49,11 @@ render/application, and TPU execution each remain separately user-gated.
 P58.1 and P58.2 are closed by the pinned-image marker recorded in `state.md`.
 P58.3 has CPU coverage for journal continuity and observer/classifier logic but
 no real Qwen/R2E one-host evidence; the user explicitly waived it rather than
-calling it PASS. P58.4N was superseded after p58c05 failed Kueue admission
-before any workload pod or update existed. P58.5N is the only active phase.
-Both zero phases remain deferred even though the renderer and CPU tests cover
-that arm.
+calling it PASS. P58.4N was superseded after p58c05 failed Kueue admission.
+P58.5N never completed and is not a valid full Native baseline. P58.6 through
+P58.8 are specified in their phase files; P58.8 is the only active phase.
+P58.7 target execution resumes only after P58.8's CL split and publication.
+No remote execution is authorized by this plan alone.
 
 P58.5N attempts `p58f01` through `p58f11` remain `INCONCLUSIVE`. P58f01 exposed
 missing sandbox LocalQueue inheritance and reset-time policy provenance;

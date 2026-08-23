@@ -1,0 +1,13 @@
+{
+  "schema": "canon.p58.release-exact-image.v1",
+  "run_id": "p58rel3-p58-exact-image-20260823",
+  "source_base_sha": "ccbcf572dc903bb1cce12f897cbdb05aec94922a",
+  "runtime_manifest_sha256": "644a29c3eced70121caf39a3a08fb0775b9441f34a6dff8e7c923b0b2fc53556",
+  "image_id": "sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a",
+  "command": "bash canon-zero-tim/tests/p58_deepswe_native_zero/run_exact_image.sh <image-id>",
+  "exit_code": 0,
+  "raw_log": "run.log",
+  "raw_log_sha256": "28c84689b58dd746b3700ae1a3b8a60dd01fc6d3e34ebc92184e35f0a8a05112",
+  "terminal": "P58_EXACT_IMAGE_CPU_PASS loss_oracle=1 weighted_accumulation=1 compact_filter=1 durable_journal=1 paired_renderer=1 alignment_policy=1 stock_observer=1 onehost_xprof=1 zero_hp_full=1 apc=1 p59_tp4_tp8=2 p59_real_shim=4 p57_wandb=1 regressions=1",
+  "claim_ceiling": "pinned exact-image CPU admission; TPU target, optimizer commit, strict target alignment, and performance not run"
+}

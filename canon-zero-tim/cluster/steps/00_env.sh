@@ -766,6 +766,18 @@ if [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "1" ] && \
         }
         echo "[env] P38.2y2 fixed lm-head DeepSWE training enabled"
         ;;
+      full:cluster/profiles/qwen3-4b-dp8-tp8-deepswe-v1-hp.env)
+        [ "${CANON_P58_DEEPSWE_TIM:-0}" = "1" ] && \
+        [ "${CANON_P58_TIM_ADMITTED:-0}" = "1" ] && \
+        [ "${CANON_P58_TIM_ARM:-}" = "zero" ] && \
+        [ "${CANON_V1_HP_FULL:-0}" = "1" ] && \
+        [ "${CANON_DEEPSWE_ALIGNMENT_WARN_ONLY:-1}" = "0" ] && \
+        [ "${CANON_P46_EVALUATION:-0}" = "0" ] || {
+          echo "[env] P58 v1-hp fixed lm-head requires strict Zero full training" >&2
+          fail=1
+        }
+        echo "[env] P58 v1-hp Qwen3-4B TP8 fixed lm-head enabled"
+        ;;
       *)
         echo "[env] fixed lm-head is not admitted for this DeepSWE stage/profile" >&2
         fail=1

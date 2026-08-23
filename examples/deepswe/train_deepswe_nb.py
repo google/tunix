@@ -1501,11 +1501,18 @@ if ONEHOST_SMOKE:
 
 canon_continue_decode = os.environ.get("CANON_CONTINUE_DECODE", "")
 if canon_continue_decode:
+  p58_hp = (
+      P34_DEEPSWE
+      and os.environ.get("CANON_P58_DEEPSWE_TIM", "0") == "1"
+      and os.environ.get("CANON_P58_TIM_ARM", "") == "zero"
+      and os.environ.get("CANON_V1_HP_FULL", "0") == "1"
+      and os.environ.get("CANON_P34_RUN_STAGE", "") == "full"
+  )
   p58_onehost_hp = P58_ONEHOST_XPROF_ARM == "zero-hp"
-  if not p58_onehost_hp:
+  if not (p58_hp or p58_onehost_hp):
     raise ValueError(
-        "DeepSWE continue-decode is admitted only by its signed "
-        "one-host profile carrier"
+        "DeepSWE continue-decode is admitted only by P58 Zero-HP full or "
+        "its one-host profile carrier"
     )
   if (
       not canon_continue_decode.isdigit()

@@ -19,6 +19,13 @@ TPU resources without the separate user approval for that boundary. Never
 launch through a pipe. Run IDs, campaign roots, and evidence directories are
 first-use only; preserve every failed run.
 
+The first published target logs are immutable failures rather than campaign
+passes. GSM8K DP16 x TP4 stopped at the P59 outer-trainer/inner-engine mesh
+boundary; FrozenLake DP8 x TP8 stopped earlier at signed P57 W&B admission.
+The local P58.8 follow-up repairs both and passes forced TP4/TP8 plus extended
+P58/V1 pinned-image gates, but no real target rerun has certified it. Publish
+and read back that repair before rendering fresh run IDs.
+
 ## Resolved bundle
 
 - All recipes: automatic P47a, continue-decode K=8, fixed-AR gather,
@@ -80,7 +87,7 @@ bash canon-zero-tim/tests/v1_phase4/run_exact_image.sh
 ```
 
 Require the exact terminal marker:
-`V1_HP_EXACT_IMAGE_PASS dp16_gathered=1 dp2tp2_parallel=2 perfetto_window=1 manifests=3`.
+`V1_HP_EXACT_IMAGE_PASS dp16_gathered=1 dp2tp2_parallel=2 p59_tp4_tp8=2 p57_wandb=1 perfetto_window=1 manifests=3`.
 This is an exact-image admission receipt, not a signed raw-log artifact: the
 stdout/stderr log was not durably preserved, so no raw-log path or SHA exists.
 

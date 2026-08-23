@@ -1,5 +1,11 @@
 # Log
 
+## 2026-08-23 UTC — target bootstrap reds consumed by P58.8 repair
+
+- Incoming evidence: GSM8K DP16 x TP4 stopped in P59 head pullback on the trainer `dp/tp` versus six-axis engine shard-map context mismatch; FrozenLake DP8 x TP8 stopped earlier on the signed P57 Zero/full W&B project check. Neither run committed an optimizer update.
+- Local follow-up: P58.8 adds an exact-device TP4/TP8 P59 two-axis engine carrier, barrier-pinned FP32 TP input-cotangent sums, and the exact-profile P57 W&B admission. On latest base `ccbcf572`, complete P58 and V1 pinned-image gates pass with `p59_real_shim=4 p57_wandb=1`; P59/P57/V1 host suites are 30/30, 136/136, and 12/12.
+- Claim boundary: this repairs source admission only. The failed run directories remain immutable; DP16 x TP4 and DP8 x TP8 targets must use fresh run IDs after publication and still require strict alignment, P59, fixed-head, optimizer, XProf/Perfetto, and full-horizon evidence.
+
 ## 2026-08-23 UTC — V1.P4.1: bind three-recipe integration
 
 - Type: decision / implementation

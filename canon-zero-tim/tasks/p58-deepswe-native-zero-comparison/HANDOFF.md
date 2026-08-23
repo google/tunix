@@ -1,5 +1,57 @@
 # P58 DeepSWE native-first training handoff
 
+## 2026-08-23 P58.6/P58.7/P58.8 override
+
+This checkpoint supersedes the later native-only execution wording in this
+historical handoff. The current local worktree is
+`/home/yuxuan/code_rl_repro/worktrees/p58_zero_hp_release3_0823`, branch
+`local/p58-zero-hp-release3-0823`, based exactly on latest fetched operator tip
+`ccbcf572dc903bb1cce12f897cbdb05aec94922a`. The release was rebuilt by
+migrating only prior dirty hunks and new files, preserving the upstream P57
+evaluation-cycle, final-only checkpoint, and lazy NumPy host-render fixes. The
+older dirty and release worktrees were not rebased, reset, or modified.
+
+The three user-requested TODOs are implemented:
+
+1. P58.6 provides matched direct-four-chip Native and optimized Zero-HP
+   no-commit update XProf/Perfetto carriers, immutable provenance/work hashes,
+   state neutrality, arm classifiers, cross-arm classification, and sealed
+   packages. See `phases/p58-6-onehost-native-zero-xprof.md`.
+2. P58.7 provides a default-off optimized strict-Zero Qwen3-4B DP8 x TP8 full
+   profile, exact renderer/admission tuple, P59 and fixed-head receipts,
+   update XProf/Perfetto, and a 1,000-update postflight/performance ledger. APC
+   remains off. See `phases/p58-7-qwen4b-zero-hp.md`.
+3. P58.8 repairs the P59 TP4/TP8 nested-engine mesh boundary exposed by the
+   first GSM8K full log and the signed P57 Zero/full W&B project admission
+   exposed by the FrozenLake log. See `phases/p58-8-p59-tp-mesh.md`.
+
+The complete pinned-image gate passes on the latest reconstructed tree with
+`sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`
+with terminal marker
+`P58_EXACT_IMAGE_CPU_PASS ... onehost_xprof=1 zero_hp_full=1 p59_tp4_tp8=2 p59_real_shim=4 p57_wandb=1 regressions=1`.
+The complete V1 exact-image gate independently passes with
+`V1_HP_EXACT_IMAGE_PASS dp16_gathered=1 dp2tp2_parallel=2 p59_tp4_tp8=2 p59_real_shim=4 p57_wandb=1 perfetto_window=1 manifests=3`.
+Host adjacency is P59 30/30, current P57 136/136, V1 12/12, APC 31/31,
+and flags 366/366. The FP32 TP rank sums include operand barriers; both complete
+exact-image runs execute TP4/TP8 fixed-head markers with
+`all_gather_rank_order_f32_barrier`, installed projections remain
+`serial_parallel=exact`, and both manifests are 36/36.
+
+No direct TPU pair or DP8 x TP8 target was run. The approved release was
+serialized as four local commits only; no push, image publish, Kubernetes
+apply, or TPU launch occurred. CPU/pinned-image admission must not be promoted
+to target certification. The exact operator commands and artifact rules are
+in `RUNBOOK_P58_6_7.md`. Any real Zero `CANON_ALIGN ... verdict=FAIL` kills the
+candidate. P59 claims ordinary-JAX FP64 gradient correctness, not serial-AdamW
+weight-trajectory identity.
+
+The corrected P59 admission gate is
+`canon-zero-tim/tests/p59_backward/run_tp4_tp8_installed_shim_exact_image.sh`.
+It executes real installed Qwen1.7B/TP4 and Qwen8B/TP8 projection branches plus
+the fixed-head/report-adjoint/fixed-reducer composition with zero commits. The
+available four-chip v5p cannot form the minimum real DP2 x TP4 composition, so
+this is not recorded as a one-host TPU PASS.
+
 ## Current checkpoint
 
 P58 was developed in isolated worktree

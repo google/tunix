@@ -24,6 +24,7 @@ CLEAN_WHITELIST_SHA256 = (
 )
 CLEAN_ROWS = 1012
 PROFILE = "cluster/profiles/qwen3-4b-dp8-tp8-deepswe-tim.env"
+HP_PROFILE = "cluster/profiles/qwen3-4b-dp8-tp8-deepswe-v1-hp.env"
 TOPOLOGY = "4x4x8"
 WORKERS = 32
 ROLE_DP = 8
@@ -127,12 +128,15 @@ def render(
     model_pvc: str,
     whitelist: str = CLEAN_WHITELIST,
     whitelist_sha256: str = CLEAN_WHITELIST_SHA256,
+    high_performance: bool = False,
 ) -> dict[str, Any]:
   """Returns one immutable P58 native or zero JobSet."""
   if stage not in _STAGE_STEPS:
     raise ValueError("P58 admits only three-update or full")
   if arm not in _ARMS:
     raise ValueError("P58 arm must be native or zero")
+  if high_performance and (arm != "zero" or stage != "full"):
+    raise ValueError("P58 high-performance is admitted only for Zero full")
   if cpu_nodepool != _CPU_NODEPOOL:
     raise ValueError("P58 requires the admitted cpu-np CPU node pool")
   if whitelist != CLEAN_WHITELIST or whitelist_sha256 != CLEAN_WHITELIST_SHA256:
@@ -155,7 +159,11 @@ def render(
       fixed_lm_head=False,
   )
 
-  name = f"canon-p58-ds4b-{arm}-{'three' if stage == 'three-update' else 'full'}-{run_id}"
+  treatment = "zero-hp" if high_performance else arm
+  name = (
+      f"canon-p58-ds4b-{treatment}-"
+      f"{'three' if stage == 'three-update' else 'full'}-{run_id}"
+  )
   if len(name) > 63:
     raise ValueError("rendered P58 JobSet name exceeds 63 characters")
   run_root = f"/mnt/disks/linchai_data/deepswe_zero_tim/{name}"
@@ -212,7 +220,7 @@ def render(
 
   document["spec"]["failurePolicy"]["maxRestarts"] = 3
   p34._set_env(main, {
-      "CANON_PROFILE_FILE": PROFILE,
+      "CANON_PROFILE_FILE": HP_PROFILE if high_performance else PROFILE,
       "CANON_STATE": run_root,
       "CANON_P34_RUN_STAGE": stage,
       "CANON_P34_NO_COMMIT": "0",
@@ -234,6 +242,8 @@ def render(
       "CANON_P58_TIM_ARM": arm,
       "CANON_P58_EXPECTED_UPDATES": str(_STAGE_STEPS[stage]),
       "CANON_P58_DEBUG_DIR": f"{run_root}/debug",
+      "CANON_V1_HP_FULL": "1" if high_performance else "0",
+      "CANON_P38_FIXED_LM_HEAD": "1" if high_performance else "0",
       "CANON_P34_CLEAN_ROWS": str(CLEAN_ROWS),
       "CANON_DEEPSWE_ALIGNMENT_WARN_ONLY": "1" if arm == "native" else "0",
       "CANON_OPT_STATE_RESIDENT": "1",
@@ -300,6 +310,7 @@ def render(
       stage=stage,
       arm=arm,
       worker_nodepool=worker_nodepool,
+      high_performance=high_performance,
   )
   return document
 
@@ -341,6 +352,7 @@ def treatment_signature(document: Mapping[str, Any]) -> dict[str, Any]:
       "arm": env["CANON_P58_TIM_ARM"],
       "alignment_warning_only": env["CANON_DEEPSWE_ALIGNMENT_WARN_ONLY"],
       "proxy_xla": proxy_xla,
+      "high_performance": env.get("CANON_V1_HP_FULL", "0"),
   }
 
 
@@ -352,6 +364,7 @@ def validate(
     stage: str,
     arm: str,
     worker_nodepool: str,
+    high_performance: bool = False,
 ) -> None:
   if stage not in _STAGE_STEPS or arm not in _ARMS:
     raise ValueError("invalid P58 stage or arm")
@@ -390,13 +403,15 @@ def validate(
     raise ValueError("P58 client image is not digest-pinned")
   expected = {
       "CANON_EXPECT_COMMIT": source_commit,
-      "CANON_PROFILE_FILE": PROFILE,
+      "CANON_PROFILE_FILE": HP_PROFILE if high_performance else PROFILE,
       "CANON_P34_RUN_STAGE": stage,
       "CANON_P34_NO_COMMIT": "0",
       "CANON_P58_DEEPSWE_TIM": "1",
       "CANON_P58_TIM_ADMITTED": "1",
       "CANON_P58_TIM_ARM": arm,
       "CANON_P58_EXPECTED_UPDATES": str(_STAGE_STEPS[stage]),
+      "CANON_V1_HP_FULL": "1" if high_performance else "0",
+      "CANON_P38_FIXED_LM_HEAD": "1" if high_performance else "0",
       "CANON_P34_CLEAN_ROWS": str(CLEAN_ROWS),
       "CANON_DEEPSWE_ALIGNMENT_WARN_ONLY": "1" if arm == "native" else "0",
       "CANON_OPT_STATE_RESIDENT": "1",
@@ -519,6 +534,7 @@ def main() -> None:
   parser.add_argument("--model-pvc", default="haoyugao-cpu-np-pvc")
   parser.add_argument("--whitelist", default=CLEAN_WHITELIST)
   parser.add_argument("--whitelist-sha256", default=CLEAN_WHITELIST_SHA256)
+  parser.add_argument("--high-performance", action="store_true")
   args = parser.parse_args()
   if args.output.exists():
     raise FileExistsError(f"refusing to overwrite JobSet: {args.output}")
@@ -535,6 +551,7 @@ def main() -> None:
       model_pvc=args.model_pvc,
       whitelist=args.whitelist,
       whitelist_sha256=args.whitelist_sha256,
+      high_performance=args.high_performance,
   )
   args.output.write_text(p34.dump_jobset(document))
   print(f"P58_DEEPSWE_TIM_RENDER_PASS arm={args.arm} stage={args.stage} output={args.output}")

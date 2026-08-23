@@ -760,6 +760,13 @@ def validate_environment(values: Mapping[str, str]) -> None:
   p58_arm = values.get("CANON_P58_TIM_ARM", "")
   if p58_tim and p58_arm not in ("native", "zero"):
     raise ValueError("CANON_P58_TIM_ARM must be native or zero")
+  p58_hp = values.get("CANON_V1_HP_FULL", "0") == "1"
+  if p58_hp and (
+      not p58_tim
+      or p58_arm != "zero"
+      or values.get("CANON_P34_RUN_STAGE", "") != "full"
+  ):
+    raise ValueError("P58 v1-hp is admitted only for strict Zero full")
   parity_topology = str(workload.devices_per_role * 2) if parity else "none"
   production_capture = bool(
       not pilot
@@ -881,7 +888,35 @@ def validate_environment(values: Mapping[str, str]) -> None:
             "0" if p58_arm == "native" else "1"
         ),
         "CANON_ENGINE_MODULE_C": "0" if p58_arm == "native" else "1",
+        "CANON_V1_HP_FULL": "1" if p58_hp else "0",
     })
+    if p58_hp:
+      expected.update({
+          "CANON_P38_FIXED_LM_HEAD": "1",
+          "CANON_CONTINUE_DECODE": "8",
+          "CANON_FIXED_AR_GATHER": "1",
+          "CANON_PALLAS_GATHERED_LOGPROBS": "1",
+          "CANON_LOGPROB_STEP_FUSION": "1",
+          "CANON_VLLM_ENABLE_PREFIX_CACHING": "0",
+          "CANON_P59_RANK_PARALLEL_BACKWARD": "1",
+          "CANON_P28_BATCHED_REPORT": "1",
+          "CANON_P28_BATCHED_REVERSE": "0",
+          "CANON_BATCHED_EVIDENCE": "0",
+          "CANON_FUSED_TREE_OPS": "0",
+          "CANON_PALLAS_NORM_MATMUL": "0",
+          "CANON_PALLAS_INPUT_FUSION": "0",
+          "CANON_SAMPLE_SPLIT_FUSION": "0",
+          "CANON_ENGINE_LOGPROB_READBACK": "0",
+          "CANON_ANCHOR_OVERLAP": "0",
+          "CANON_XPROF_PHASE": "update",
+          "CANON_XPROF_SKIP_STEPS": "2",
+          "CANON_XPROF_STEPS": "1",
+          "CANON_XPROF_PYTHON_TRACER": "0",
+          "CANON_XPROF_HOST_TRACER": "1",
+          "CANON_XPROF_TPU_TRACE_MODE": "TRACE_COMPUTE",
+          "CANON_XPROF_LABELS": "1",
+          "CANON_PERF_TRACE_EXPORT_STEP": "2",
+      })
   if pilot or debug or parity or p58_tim:
     expected.update({
         "CANON_OPT_STATE_RESIDENT": "1",

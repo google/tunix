@@ -1,5 +1,70 @@
 # Log
 
+## 2026-08-23 UTC — latest-base post-barrier release gates sealed
+
+- Source intake: fetched the operator branch at exact tip
+  `ccbcf572dc903bb1cce12f897cbdb05aec94922a` and created fresh worktree
+  `p58_zero_hp_release3_0823` on `local/p58-zero-hp-release3-0823`. The prior
+  dirty release was migrated as dirty hunks plus new files rather than copied
+  as a whole tree. This preserves upstream P57 evaluation-cycle counter,
+  final-only primary checkpoint, and lazy NumPy host-render fixes.
+- Numerical hardening: both P59 replicated-input TP cotangent paths retain
+  FP32 accumulation and now put `optimization_barrier` on both operands of
+  every ascending-rank addition, matching the registered fixed reducer's
+  source-order construction. The shim manifest hashes were updated. The P57
+  W&B gate now rejects a signed Zero arm under the wrong profile as well as the
+  wrong arm.
+- Host gates: P59 30/30, current P57 136/136, V1 12/12, APC 31/31, flags
+  366/366 with `FLAG_AUDIT_PASS`, Python/Bash syntax, and `git diff --check`
+  pass. Bare-host P58 discovery ran 51 tests but four modules were uncollectable
+  because the shell lacks `metrax`; this is `INCONCLUSIVE` dependency coverage,
+  not an assertion red.
+- Pinned-image gates: image
+  `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`
+  passes both complete runners. TP4/TP8 fixed-head VJPs emit
+  `all_gather_rank_order_f32_barrier`; installed projections remain
+  `serial_parallel=exact`; both overlays verify 36/36. Terminals are
+  `P58_EXACT_IMAGE_CPU_PASS ... p59_real_shim=4 ...` and
+  `V1_HP_EXACT_IMAGE_PASS ... p59_real_shim=4 ... manifests=3`.
+- Durable evidence: P58 raw log SHA
+  `28c84689b58dd746b3700ae1a3b8a60dd01fc6d3e34ebc92184e35f0a8a05112`
+  is under `evidence/p58rel3-p58-exact-image-20260823/`; V1 raw log SHA
+  `7f652c0f811770a2054b4e138fca45bc36e21c9ac2dfa0b82d5c12da02801722`
+  is under `evidence/p58rel3-v1-exact-image-20260823/`. The exact 38-file
+  runtime/test delta is sealed under `evidence/p58rel3-release-tree-20260823/`.
+  The post-commit flag audit exposed `[CANON_ADAPTER]` log-marker text in two
+  newly tracked Python files as a false settable flag. Rewriting those literals
+  as adjacent strings preserves emitted bytes; their committed-tree tests and
+  flag audit pass. The final 38-file manifest SHA is
+  `babc1c708f7cee01c14e465058991013fd5483e6a0a75b7c367a22cd44e329da`.
+- Claim ceiling: `PINNED EXACT-IMAGE PASS / TARGET NOT RUN`. No direct TPU
+  pair, DP16xTP4/DP8xTP8 target, optimizer commit, strict target alignment, or
+  performance result is claimed. No commit, push, image publication,
+  Kubernetes apply, or TPU launch occurred.
+
+## 2026-08-23 UTC — P58.8 TP4/TP8 P59 and P57 telemetry admission repaired
+
+- Type: remote evidence intake / first-red analysis / implementation / validation / handoff.
+- Source intake: fetched operator tip `f7d22555e28270fef8128c287948a5b83ca2cc7d`, containing only two immutable failed-run log commits beyond this worktree base. The commits were inspected but not merged into the dirty implementation tree.
+- GSM8K first red: DP16 x TP4 reached P59 head pullback and stopped before fixed-head backward because outer trainer `AbstractMesh('dp':16,'tp':4, Manual,Auto)` could not nest the engine six-axis concrete shard_map. This is a mesh carrier incompatibility, not a gradient-oracle failure; no optimizer commit occurred.
+- FrozenLake first red: DP8 x TP8 stopped earlier in environment validation because the generic workload W&B project disagreed with the exact P57 Zero/full signed project. It did not exercise P59 or the fixed head.
+- Repair: TP>1 P59 now uses the exact engine devices under a two-axis `data/model` vocabulary with both axes manual, localizes compatible nested maps without double-partitioning, retains fixed-order named TP collectives, and relabels results to trainer `dp/tp` only after topology/device checks. TP-local fixed-head/fused-linear boundaries are accepted only on the explicit P59 TP>1 path. P57 W&B admission changes only for the exact Zero/full signed profile; mismatch-arm and unrelated routes retain the generic default and fail closed.
+- Validation: forced CPU DP2 x TP4 and DP2 x TP8 nested maps/collectives PASS through both shard-map APIs in the dependency-complete pinned image; existing P59 numerical/negative tests remain green; P59 30/30, P57 128/128, V1 12/12, manifest 36/36, flags 366/366, syntax and diff hygiene PASS. Pinned image `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a` exits zero for both extended P58 and V1 exact-image gates with `p59_tp4_tp8=2 p57_wandb=1`. A later bare-host direct import of the focused topology/W&B tests was INCONCLUSIVE because that shell lacks `metrax`/`datasets`; it did not execute an assertion and does not replace the pinned verdict.
+- Claim ceiling: CPU/pinned-image topology admission only. Real DP16 x TP4 and DP8 x TP8 P59 reverse, fixed head, strict alignment, optimizer commit, and performance remain `TARGET NOT RUN`; any next real red stops at its original boundary.
+- External effects: fetch/read-only log analysis plus local source/tests/docs and pinned-container validation. No commit, push, image publication, Kubernetes apply, TPU launch, model download, credential mutation, or evidence deletion.
+
+## 2026-08-23 UTC — P58.6/P58.7 implemented and pinned-image admitted
+
+- Type: source reconciliation / implementation / validation / handoff.
+- Source: created clean-start worktree `p58_zero_hp_0823` on branch `local/p58-zero-hp-0823` at exact operator tip `7265291c4edb928b92a79813b3fc5b77e4ab1c50`; preserved the older dirty P58 worktree without modification.
+- P58.6: added two thin one-host Qwen3-4B arm wrappers and one shared fail-closed DP1 x TP4 driver. The driver pins hostname, source/diff, model snapshot, R2E SHA, Docker task-image ID, seed and geometry; runs one warmup plus one identical no-commit update repeat; requires unchanged model/reference/optimizer/accumulator/step fingerprints, finite nonzero repeat-exact gradients, complete XPlane/trace/semantic Perfetto capture, per-arm classification, pair work-hash matching, and immutable package sealing. Fixed `[-1,1]` diagnostic advantages prevent a zero-reward carrier from DCE'ing backward and are explicitly not a quality claim.
+- P58.7: added a default-off P58 Zero-HP profile and renderer selector for the frozen 1,000-update Qwen3-4B DP8 x TP8 recipe. The bundle admits continue-decode K8, fixed-AR gather, DP-aware gathered logprobs, logprob step fusion, tied K2560/TP8 fixed head, device-resident trainer placement, P59 rank-parallel backward, update XProf and semantic Perfetto. APC, batched reverse/evidence and vetoed kernels remain off. The postflight requires the base strict P58 PASS, 1,000 P59 commit receipts, zero real alignment failures, complete performance stages, fixed-head receipts and complete captures.
+- Correction found by the first pinned-image run: latest APC provenance observation accessed `RequestOutput.num_cached_tokens` unconditionally, while two established P58 tests use older/mock outputs without that optional field. Ordinary rescore now records field availability and defaults the observation to zero when absent. The real APC boundary certification remains fail-closed and separately requires `num_cached_tokens_available == (True,)` before accepting B as a full recompute. This fixes compatibility without weakening the APC judge.
+- Validation: host one-host 5/5, pair 2/2, full classifier 3/3, renderer 16/16, profile 4/4, P57 128/128, V1 12/12, P59 30/30, APC 31/31, flag audit 366/366, Python/Bash syntax and `git diff --check` pass. The complete rerun in pinned image `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a` exits zero with `P58_EXACT_IMAGE_CPU_PASS ... onehost_xprof=1 zero_hp_full=1 regressions=1`.
+- Claim boundary: direct four-chip XProf/Perfetto packages and DP8 x TP8/128-chip full execution are not run. P59 target, Qwen3-4B TP8 fixed head, DP-aware serving kernels, full checkpoints/evaluation and 1,000 commits remain `TARGET NOT RUN`. P59 does not claim serial-AdamW trajectory identity.
+- External effects: local source/tests/docs and a local pinned-image Docker test only. No commit, push, image publication, remote host command, rendered YAML apply, Kubernetes object, TPU job, model download, credential mutation, or evidence deletion.
+- Next: after explicit review/publication approval and exact remote readback, run the P58.6 arms serially on the named direct TPU host and classify the pair. Separately obtain launch approval and the existing sandbox-capacity/Kueue admission before one fresh P58.7 full JobSet; monitor updates 1–3 inside that same full run.
+
 ## 2026-08-21 UTC — P58 task bound and loss ambiguity preregistered
 
 - Type: decision/research
@@ -504,3 +569,72 @@
 - Publication boundary: this small documentation checkpoint follows the implementation commit. Both are published together by a normal non-force push exclusively to `yuxzhang/canon-zero-tim`; executors must fetch and verify the final operator tip rather than pinning the implementation SHA.
 - External effects: no `main` mutation, merge, or push; no image publication, Kubernetes object, TPU job, model download, credential change, or artifact deletion.
 - Next: exact remote readback, then the separately approved one-Pod Kueue probe and 128-Pod capacity inventory. Launch only fresh Native `p58f13` after that gate passes. Zero and SandboxFleet remain off.
+
+## 2026-08-23 UTC — P58.8 construction claim downgraded; real-shim gate activated
+
+- Type: review correction / phase reactivation.
+- Correction: the forced DP2 x TP4/TP8 exact-image test proves the two-axis manual mesh carrier, column placement, and a named model collective, but it does not execute the installed fixed-head or fused-linear P59-local branches. The earlier wording could be read as proving the original GSM8K fixed-head VJP failure repaired; that claim is withdrawn.
+- Current claim: `IMPLEMENTED / CPU+EXACT-IMAGE CONSTRUCTION PASS / TARGET NOT RUN`. FrozenLake W&B admission remains a separately reasonable change.
+- Active gate: exercise installed `p38_fixed_lm_head.py` and `linear_p22xf.py` under a bounded DP2 x TP2 P59 head/layer VJP, then report adjoint and fixed reducer; compare serial/parallel gradient leaves, prove zero optimizer commits, and add local/global shape plus device-index-map controls.
+- Publication plan: after the gate passes, reconstruct on exact evidence tip `f7d22555` as four independent rollback units: P59, P57 W&B, P58.6 one-host XProf, and P58.7 Qwen3-4B Zero-HP. No push is authorized.
+
+## 2026-08-23 UTC — P58.8 real installed-shim composition admitted
+
+- Type: first-red follow-up / numerical repair / pinned-image certification.
+- Real branch coverage: the new consolidated exact-image gate installs the Qwen1.7B/TP4 and Qwen8B/TP8 overlay chains (36/36 files each), executes the modified fixed-head P59-local VJP and installed `linear_p22xf` column/local-split VJP, continues the same staged head cotangent through production report adjoint and fixed reducer, and exercises ordinary-global shape/device-index-map negative controls. Both topologies use DP2 and zero optimizer commits.
+- Useful TP8 red: the initial fixed-rank BF16 addition of eight TP input-cotangent partials differed from the serial probe in 32/64 values and had max-abs FP64 error `0.5`; the serial probe error was `0.0`. This was not waived. The TP reduction now gathers/accumulates FP32 partials in ascending rank order and casts once at the BF16 boundary. TP4 and TP8 then pass serial/parallel exact comparison.
+- Exact receipts: `P59_TP_SHIM_EXACT_IMAGE_PASS fixed_head=2 installed_projection=2 report_adjoint=2 fixed_reducer=2 topologies=DP2xTP4,DP2xTP8 optimizer_commits=0 manifests=2x36/36`; full P58 and V1 suites terminate with `p59_real_shim=4`. P59 30/30, P57 128/128, V1 12/12, flags 366/366, syntax, manifest, and diff hygiene pass.
+- Hardware ceiling: registered production heads are TP4/TP8. The available four-chip one-host v5p cannot form P59 DP2 x TP4, and an artificial fixed-head TP2 geometry is forbidden. No TPU target, optimizer commit, strict target alignment, or performance claim is made.
+- Source intake: a fresh fetch confirms `f7d22555e28270fef8128c287948a5b83ca2cc7d` is still the exact operator tip. Release reconstruction into four independent concerns is next; no commit or push is recorded by this entry.
+## 2026-08-23 UTC — final release-tree exact-image audit
+
+- Rebuilt the full implementation on exact evidence tip
+  `f7d22555e28270fef8128c287948a5b83ca2cc7d` and froze CL-A/B/C/D hunk
+  ownership, downsides, gates, and rollback in `RELEASE_CL_PLAN.md`.
+- Excluded the unrelated APC B-arm availability hardening from this series.
+  The first full P58 pinned-image rerun then stopped in two P58 observer unit
+  tests because their `SimpleNamespace` output omitted stock
+  `num_cached_tokens`; this was a test-double construction red, not a
+  CANON_ALIGN or optimizer red. Added `num_cached_tokens=0` to the test double
+  and did not change the production APC decision.
+- Final pinned image
+  `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`
+  passed both complete aggregations:
+  `P58_EXACT_IMAGE_CPU_PASS ... onehost_xprof=1 zero_hp_full=1 apc=1
+  p59_tp4_tp8=2 p59_real_shim=4 p57_wandb=1 regressions=1` and
+  `V1_HP_EXACT_IMAGE_PASS dp16_gathered=1 dp2tp2_parallel=2 p59_tp4_tp8=2
+  p59_real_shim=4 p57_wandb=1 perfetto_window=1 manifests=3`.
+- APC host gate is 31/31 and flag audit is 366/366. No TPU target, direct
+  one-host XProf arm, optimizer commit, Kubernetes launch, commit, or push was
+  performed.
+
+## 2026-08-23 UTC — operator tip advanced and setup changes integrated
+
+- Final read-only fetch advanced the operator tip from `f7d22555` to
+  `24b1bbcf4453cab3af46c3749c0105b56fc7459d`. Two intervening commits add only
+  immutable P45/P58 failure evidence. The tip commit changes the shared P58
+  renderer to `maxRestarts=3` and adds Pathways/IFRT/GRPC keepalives after a
+  long worker-timeout run.
+- Created fresh worktree `p58_zero_hp_release2_0823` on the exact new tip,
+  mechanically migrated the already tested release tree without deleting the
+  new evidence files, and integrated the upstream tolerance settings into the
+  same renderer used by P58.7 Zero-HP.
+- Latest-tip focused and pinned-image gates are pending at this entry. No
+  commit, push, image publication, Kubernetes apply, or TPU launch occurred.
+
+## 2026-08-23 UTC — latest-tip setup integration admitted
+
+- Renderer 16/16, profile 4/4, Zero-HP full classifier 3/3, flag audit
+  366/366, and diff hygiene pass on exact base `24b1bbcf`.
+- Complete pinned-image P58 aggregation terminates
+  `P58_EXACT_IMAGE_CPU_PASS ... onehost_xprof=1 zero_hp_full=1 apc=1
+  p59_tp4_tp8=2 p59_real_shim=4 p57_wandb=1 regressions=1` after integrating
+  the upstream restart/keepalive setup.
+- A checksum dry-run against the first fully tested release tree reports no
+  difference outside `render_p58_deepswe_tim.py`, newly fetched debug evidence,
+  and P58 task documents. The renderer diff against `24b1bbcf` contains only
+  the additive Zero-HP profile/selector. The earlier complete V1 exact-image
+  PASS is therefore byte-applicable to every V1 runtime and test input.
+- The bare-host environment-contract import remains INCONCLUSIVE because the
+  host lacks `metrax`; the dependency-complete pinned-image execution passes
+  that exact suite. No commit, push, TPU target, or external launch occurred.

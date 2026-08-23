@@ -1,0 +1,14 @@
+{
+  "schema": "canon.p58.release-runtime-manifest.v1",
+  "run_id": "p58rel3-release-tree-20260823",
+  "source_base_sha": "ccbcf572dc903bb1cce12f897cbdb05aec94922a",
+  "manifest": "RUNTIME_SHA256SUMS",
+  "manifest_sha256": "babc1c708f7cee01c14e465058991013fd5483e6a0a75b7c367a22cd44e329da",
+  "file_count": 38,
+  "scope": "all modified or new non-Markdown runtime, renderer, runner, shim, manifest, and test inputs relative to source_base_sha; task evidence directories and legacy debug logs excluded",
+  "intent_manifest": "INTENT_SHA256SUMS",
+  "intent_manifest_sha256": "ca4c41cddbce303c4d6ab301b817d2f46af59de50e2b42b346ff6c9cec36410c",
+  "intent_file_count": 59,
+  "intent_scope": "all modified or new release files, including documentation and the two exact-image evidence directories; this release-tree evidence directory is excluded to avoid a self-hash cycle",
+  "verification": "sha256sum -c RUNTIME_SHA256SUMS and sha256sum -c INTENT_SHA256SUMS from the worktree root"
+}

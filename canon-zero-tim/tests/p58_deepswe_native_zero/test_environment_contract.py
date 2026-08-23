@@ -67,7 +67,9 @@ class P58EnvironmentContractTest(unittest.TestCase):
     with self.assertRaisesRegex(ValueError, "must contain a non-empty string"):
       SWEEnv({"docker_image": np.array(["example/image"])})
 
-  def _rendered_env(self, arm: str, stage: str) -> dict[str, str]:
+  def _rendered_env(
+      self, arm: str, stage: str, *, high_performance: bool = False
+  ) -> dict[str, str]:
     base = yaml.safe_load((PKG / "cluster/jobset-64chip.yaml").read_text())
     document = renderer.render(
         base,
@@ -80,16 +82,22 @@ class P58EnvironmentContractTest(unittest.TestCase):
         cpu_nodepool="cpu-np",
         worker_nodepool="tpu-pool",
         model_pvc="model-pvc",
+        high_performance=high_performance,
     )
     return dict(renderer.p34._env(document))
 
-  def _resolved(self, arm: str, stage: str) -> dict[str, str]:
+  def _resolved(
+      self, arm: str, stage: str, *, high_performance: bool = False
+  ) -> dict[str, str]:
     supplied = os.environ.copy()
-    supplied.update(self._rendered_env(arm, stage))
+    supplied.update(
+        self._rendered_env(arm, stage, high_performance=high_performance)
+    )
+    profile = supplied["CANON_PROFILE_FILE"]
     command = (
         "set -a; "
         f"source {PKG / 'cluster/profiles/_canonical_engine.env'}; "
-        f"source {PKG / 'cluster/profiles/qwen3-4b-dp8-tp8-deepswe-tim.env'}; "
+        f"source {PKG / profile}; "
         "env -0"
     )
     completed = subprocess.run(
@@ -104,9 +112,13 @@ class P58EnvironmentContractTest(unittest.TestCase):
         if "=" in item
     }
 
-  def _persisted(self, arm: str, stage: str):
+  def _persisted(
+      self, arm: str, stage: str, *, high_performance: bool = False
+  ):
     supplied = os.environ.copy()
-    supplied.update(self._rendered_env(arm, stage))
+    supplied.update(
+        self._rendered_env(arm, stage, high_performance=high_performance)
+    )
     supplied.update({
         "CANON_PKG": str(PKG),
         "HF_TOKEN": "test-hf-runtime-token",
@@ -175,6 +187,33 @@ class P58EnvironmentContractTest(unittest.TestCase):
     self.assertEqual(values["HF_TOKEN"], "test-hf-runtime-token")
     self.assertEqual(values["WANDB_API_KEY"], "test-wandb-runtime-key")
     deepswe_contract.validate_environment(values)
+
+  def test_zero_hp_full_survives_real_env_and_python_contract(self):
+    completed, resolved, values = self._persisted(
+        "zero", "full", high_performance=True
+    )
+    self.assertIn("P58 v1-hp Qwen3-4B TP8 fixed lm-head enabled", completed.stdout)
+    for key, expected in {
+        "CANON_V1_HP_FULL": "1",
+        "CANON_P38_FIXED_LM_HEAD": "1",
+        "CANON_CONTINUE_DECODE": "8",
+        "CANON_P59_RANK_PARALLEL_BACKWARD": "1",
+        "CANON_VLLM_ENABLE_PREFIX_CACHING": "0",
+    }.items():
+      self.assertEqual(values[key], expected)
+      self.assertIn(f"export {key}={expected}", resolved)
+    deepswe_contract.validate_environment(values)
+
+  def test_zero_hp_partial_bundle_is_rejected_by_python_contract(self):
+    values = self._resolved("zero", "full", high_performance=True)
+    for key, replacement in (
+        ("CANON_CONTINUE_DECODE", "0"),
+        ("CANON_P59_RANK_PARALLEL_BACKWARD", "0"),
+        ("CANON_P38_FIXED_LM_HEAD", "0"),
+        ("CANON_VLLM_ENABLE_PREFIX_CACHING", "1"),
+    ):
+      with self.subTest(key=key), self.assertRaises(ValueError):
+        deepswe_contract.validate_environment({**values, key: replacement})
 
   def test_both_arms_resolve_to_the_signed_contract(self):
     for arm in ("native", "zero"):
