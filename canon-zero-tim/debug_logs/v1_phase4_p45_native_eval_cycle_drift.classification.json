@@ -1,0 +1,13 @@
+{
+  "incident_id": "v1_phase4_p45_native_eval_cycle_drift",
+  "stage": "v1_phase4_p45_native_training",
+  "recipes_affected": [
+    "canon-p57-fl-mism-n45j-2a89eef3"
+  ],
+  "root_cause": "In agentic_rl_learner.py:3309, when p28_g6_update is not active (standard unsegmented learner), the post-update check inspects self.rl_cluster.global_steps (which is only incremented at the bottom of the loop, thus 0) instead of actor_trainer.train_steps (which was already incremented to 1 by update_actor). This causes the assertion enclosing_global_step == policy_step + 1 (0 == 0 + 1) to fail.",
+  "error_type": "RuntimeError",
+  "error_message": "P57 evaluation cycle mapping drifted: policy_step=0 enclosing_global_step=0",
+  "source_file": "tunix/rl/agentic/agentic_rl_learner.py",
+  "source_line": 3311,
+  "fix_required": "In agentic_rl_learner.py line 3309, inspect getattr(self.rl_cluster.actor_trainer, 'train_steps', self.rl_cluster.global_steps) when not p28_g6_update."
+}

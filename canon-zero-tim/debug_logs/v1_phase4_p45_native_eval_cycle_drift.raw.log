@@ -1,0 +1,17 @@
+[CANON_ALIGN] step=0 verdict=PASS_WITH_ALIGNMENT_WARNINGS N_action=3337 bounds=[('S_decode_vs_S_prefill', 3358), ('S_prefill_vs_T_old', 4596), ('T_old_vs_T_current', 2843)] w/r/wr={'w_all_exactly_1': False, 'r_all_exactly_1': False, 'wr_all_exactly_1': False} clip=134 tis=0 grad_norm=1.3053
+[CANON_ALIGN_WARNING] boundary=post_backward step=0 warnings=['S_decode_vs_S_prefill', 'S_prefill_vs_T_old', 'T_old_vs_T_current', 'w_all_exactly_1', 'r_all_exactly_1', 'wr_all_exactly_1', 'clip_hits=134']
+[CANON_GSM8K_TRAIN] update_step_committed train_steps=1
+2026-08-23 11:10:18 - INFO - [absl] Using persistence array handler for jax.Array.
+2026-08-23 11:10:18 - INFO - [absl] Using CloudPathwaysArrayHandler for jax.Array.
+2026-08-23 11:10:18 - INFO - [absl] Created BasePyTreeCheckpointHandler: use_ocdbt=False, use_zarr3=False, pytree_metadata_options=PyTreeMetadataOptions(support_rich_types=False), array_metadata_store=<orbax.checkpoint._src.metadata.array_metadata_store.Store object at 0x78763b0a4b30>, enable_pinned_host_transfer=False, save_concurrent_bytes: None, restore_concurrent_bytes: None
+2026-08-23 11:10:18 - INFO - [absl] Initialized registry DefaultCheckpointHandlerRegistry({('model_params', <class 'orbax.checkpoint.experimental.v1._src.handlers.compatibility.Args'>): CompatibilityCheckpointHandler(orbax.checkpoint.experimental.v1._src.handlers.pytree_handler.PyTreeHandler), ('optimizer_state', <class 'orbax.checkpoint.experimental.v1._src.handlers.compatibility.Args'>): CompatibilityCheckpointHandler(orbax.checkpoint.experimental.v1._src.handlers.pytree_handler.PyTreeHandler)}).
+2026-08-23 11:10:18 - INFO - [absl] [process=0][thread=MainThread] Using barrier_sync_fn: <function get_barrier_sync_fn.<locals>.<lambda> at 0x786ba61616c0> timeout: 1200 secs and primary_host=0 for async checkpoint writes
+2026-08-23 11:10:18 - INFO - [absl] Train loop finished in: 316.3171 seconds
+[rank0]: Traceback (most recent call last):
+[rank0]:   File "<frozen runpy>", line 198, in _run_module_as_main
+[rank0]:   File "<frozen runpy>", line 88, in _run_code
+[rank0]:   File "/app/examples/frozenlake/train_frozenlake_qwen3.py", line 1936, in <module>
+[rank0]:     grpo_trainer.train(
+[rank0]:   File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 3311, in train
+[rank0]:     raise RuntimeError(
+[rank0]: RuntimeError: P57 evaluation cycle mapping drifted: policy_step=0 enclosing_global_step=0
