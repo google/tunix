@@ -10,8 +10,6 @@ import json
 import random
 from typing import Any, Iterable, Mapping
 
-import numpy as np
-
 
 @dataclass(frozen=True, slots=True)
 class Recipe:
@@ -377,6 +375,7 @@ def materialize_p45_records(role: str, count: int) -> list[dict[str, Any]]:
     raise ValueError("P45 dataset role must be train or eval") from exc
   if count <= 0:
     raise ValueError("P45 dataset count must be positive")
+  import numpy as np  # pylint: disable=g-import-not-at-top
   rng = np.random.RandomState(generator_seed)
   seeds = rng.randint(0, 100_000, size=count)
   sizes = rng.randint(2, 10, size=count)
