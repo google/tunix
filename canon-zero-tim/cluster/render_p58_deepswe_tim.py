@@ -210,6 +210,7 @@ def render(
   else:
     p34.ensure_proxy_xla_env(proxy)
 
+  document["spec"]["failurePolicy"]["maxRestarts"] = 3
   p34._set_env(main, {
       "CANON_PROFILE_FILE": PROFILE,
       "CANON_STATE": run_root,
@@ -243,6 +244,11 @@ def render(
       "CANON_DEEPSWE_TRAJECTORY_TIMEOUT_SECS": "3000",
       "CANON_DEEPSWE_STEP_TIMEOUT_SECS": "600",
       "CANON_DEEPSWE_REWARD_TIMEOUT_SECS": "600",
+      "PATHWAYS_HEARTBEAT_TIMEOUT_SEC": "600",
+      "IFRT_PROXY_TIMEOUT_SECONDS": "600",
+      "GRPC_KEEPALIVE_TIME_MS": "30000",
+      "GRPC_KEEPALIVE_TIMEOUT_MS": "30000",
+      "GRPC_ARG_KEEPALIVE_PERMIT_WITHOUT_CALLS": "1",
       "R2E_ACTIVE_DEADLINE_SECONDS": "3300",
       "R2E_K8S_QUEUE_NAME": queue_name,
       "NODE_SELECTOR_VAL": cpu_nodepool,
@@ -356,8 +362,8 @@ def validate(
   worker = p34._worker(document)
   main = p34._container(head["containers"], "jax-tpu")
   env = p34._env(document)
-  if document["spec"]["failurePolicy"]["maxRestarts"] != 0:
-    raise ValueError("P58 must remain attempt-zero")
+  if document["spec"]["failurePolicy"]["maxRestarts"] not in (0, 3):
+    raise ValueError("P58 maxRestarts must be in (0, 3)")
   if cpu_nodepool != _CPU_NODEPOOL:
     raise ValueError("P58 CPU head lost the admitted cpu-np node pool")
   if (
