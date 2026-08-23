@@ -337,6 +337,19 @@ def validate_p57_evaluation_restored(
   contract = metadata.get("canon_resume_contract")
   if not isinstance(contract, Mapping):
     raise ValueError("P57 evaluation checkpoint lacks its training contract")
+  active_inprocess_eval = (
+      env.get("CANON_P57_EXPECTED_UPDATES", "") == "300"
+      and (
+          (
+              env.get("CANON_P57_WORKLOAD_CANDIDATE", "") == ""
+              and env.get("CANON_P57_DATA_SPLIT", "") == ""
+          )
+          or (
+              env.get("CANON_P57_WORKLOAD_CANDIDATE", "") == "m15"
+              and env.get("CANON_P57_DATA_SPLIT", "") == "main"
+          )
+      )
+  )
   required = {
       "schema": SCHEMA,
       "checkpoint_root": config.root,
@@ -350,13 +363,14 @@ def validate_p57_evaluation_restored(
       "model_dir_name": "qwen8b_tp8",
       "mesh_dp": 8,
       "mesh_tp": 8,
+      "seed": 42,
       "p57_tim_arm": env.get("CANON_P57_TIM_ARM", ""),
       "p57_fixed_lm_head": env.get("CANON_P38_FIXED_LM_HEAD", "0"),
       "p57_workload_candidate": env.get(
           "CANON_P57_WORKLOAD_CANDIDATE", ""
       ),
       "p57_data_split": env.get("CANON_P57_DATA_SPLIT", ""),
-      "eval_enabled": False,
+      "eval_enabled": active_inprocess_eval,
   }
   if config.milestone_interval:
     required["checkpoint_milestone_interval"] = config.milestone_interval

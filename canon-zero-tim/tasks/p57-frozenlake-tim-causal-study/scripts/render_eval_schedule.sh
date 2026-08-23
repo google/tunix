@@ -38,6 +38,9 @@ renderer="$repo/canon-zero-tim/cluster/render_p57_frozenlake_tim.py"
 base_yaml="$repo/canon-zero-tim/cluster/jobset-64chip.yaml"
 [ -f "$base_yaml" ] || { echo "base YAML is absent: $base_yaml" >&2; exit 2; }
 
+# The primary 0..300 curve is emitted by each training JobSet.  This renderer
+# remains only as a recovery audit for the clean initial policy and final
+# rolling checkpoint; intermediate checkpoints are intentionally not retained.
 for workload in p45 m15; do
   workload_letter=p
   candidate_args=()
@@ -45,7 +48,7 @@ for workload in p45 m15; do
     workload_letter=m
     candidate_args=(--workload-candidate m15 --data-split main)
   fi
-  for step in 0 50 100 150 200 250 300 350 400 450; do
+  for step in 0 300; do
     mode=resume
     if [ "$step" -eq 0 ]; then mode=new; fi
     run_id="${run_id_root}${workload_letter}${step}"
@@ -56,7 +59,7 @@ for workload in p45 m15; do
       --output-dir "$output_root/$workload/step-$step" \
       --campaign-tag "${campaign_root}-${workload}" \
       --checkpoint-mode "$mode" \
-      --expected-updates 450 \
+      --expected-updates 300 \
       --run-kind eval \
       --checkpoint-step "$step" \
       --arm "$arm" \
@@ -72,4 +75,4 @@ python3 "$script_dir/verify_eval_schedule.py" \
 find "$output_root" -type f -name 'jobset-*.yaml' -print0 \
   | sort -z \
   | xargs -0 sha256sum
-echo "P57_EVAL_RENDER_PASS wave=$wave output=$output_root manifests=20"
+echo "P57_RECOVERY_EVAL_RENDER_PASS wave=$wave output=$output_root manifests=4"

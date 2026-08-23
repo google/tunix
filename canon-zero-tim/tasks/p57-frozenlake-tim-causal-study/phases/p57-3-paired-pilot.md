@@ -1,10 +1,10 @@
 # P57.3 — Paired one-seed pilot
 
-- Status: superseded by P57.1b's direct 450-update concept study.
+- Status: superseded by P57.1b's direct 300-update concept study.
 
 This file records the earlier 50-update pilot design and is not an execution
-runbook. The active schedule is in `../RUNBOOK.md`: uninterrupted 450-update
-training plus isolated evaluations at `0,50,...,450` using retained milestones.
+runbook. The active schedule is in `../RUNBOOK.md`: uninterrupted 300-update
+training with rollout-only evaluations at `0,50,...,300`.
 
 ## Purpose
 

@@ -479,7 +479,7 @@ n_lp=$(grep -ac 'CANON_LOGPROB_M on' "$LOG" || true)
 n_wandb=$(grep -ac '\[CANON_P33_WANDB\] ONLINE_RUN_PASS' "$LOG" || true)
 n_wandb_p34=$(grep -ac '\[CANON_P34_WANDB\] ONLINE_RUN_PASS' "$LOG" || true)
 n_eval_off=$(grep -ac '\[CANON_P33_EVAL\] DISABLED workload=frozenlake' "$LOG" || true)
-n_eval_on=$(grep -ac '\[CANON_P33_EVAL\] ENABLED workload=frozenlake cadence=10 held_out_rows=100 generations=8' "$LOG" || true)
+n_eval_on=$(grep -aEc '\[CANON_''P33_EVAL\] ENABLED workload=frozenlake cadence=[0-9]+ held_out_rows=100 generations=8' "$LOG" || true)
 n_p35_stop=$(grep -ac '^\[CANON_P35\] REPORT_COMPLETE .*STOP_BEFORE_BACKWARD' "$LOG" || true)
 n_p35_base=$(grep -ac '^\[CANON_P35\] BASE_REPORT_COMPLETE .*REPLAY_PENDING' "$LOG" || true)
 n_p35_replay=$(grep -ac '^\[CANON_P35.3\] REPLAY_COMPLETE' "$LOG" || true)
@@ -1032,6 +1032,23 @@ elif [ "$rc" -eq 0 ] && [ "${CANON_P33_WORKLOAD_LAUNCH_ADMITTED:-0}" = "1" ]; th
   else
     classification="$CANON_STATE/p33_${CANON_P32_WORKLOAD}_${CANON_P33_RUN_STAGE}.classification.json"
     p57_classifier_args=()
+    if [ "${CANON_PROFILE_FILE:-}" = \
+         "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env" ] && \
+       [ "${CANON_P33_ENABLE_EVAL:-0}" = "1" ]; then
+      p57_eval_classification="$CANON_STATE/p57_inprocess_eval.classification.json"
+      JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
+        python3 "$CANON_PKG/tasks/p57-frozenlake-tim-causal-study/scripts/classify_inprocess_eval.py" \
+          --run-log "$LOG" \
+          --expected-updates "$CANON_P57_EXPECTED_UPDATES" \
+          --interval 50 \
+          --held-out-rows 100 \
+          --generations 8 \
+          --workload-candidate "${CANON_P57_WORKLOAD_CANDIDATE:-}" \
+          --data-split "${CANON_P57_DATA_SPLIT:-}" \
+          --output "$p57_eval_classification" || exit 1
+      p57_eval_class_sha="$(sha256sum "$p57_eval_classification" | awk '{print $1}')"
+      echo "[P57.EVAL] EVIDENCE classification=$p57_eval_classification classification_sha256=$p57_eval_class_sha"
+    fi
     if [ "${CANON_PROFILE_FILE:-}" = \
          "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env" ]; then
       p57_classifier_args+=(

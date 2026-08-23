@@ -27,9 +27,11 @@ _CHECKPOINT_ROOT = (
     "gs://yuxzhang-tunix-models/canon-zero-tim/checkpoints/frozenlake"
 )
 _TAG_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,50}[a-z0-9])?")
-_ALLOWED_UPDATES = (1, 3, 20, 50, 100, 150, 200, 450)
+_ALLOWED_UPDATES = (1, 3, 20, 50, 100, 150, 200, 300, 450)
 _STOCK_DISCOVERY_UPDATES = 200
-_PAIRED_ARM_UPDATES = 450
+_PAIRED_ARM_UPDATES = 300
+_EVAL_EVERY_N_STEPS = 50
+_EVAL_TEST_BATCHES = 4
 _BASE_MEMORY = "200G"
 _P57_MEMORY = "350G"
 _DP_SIZE = 8
@@ -144,6 +146,7 @@ def _spec(
     workload_candidate: str,
     data_split: str,
 ) -> p33.JobSpec:
+  enable_train_evaluation = run_kind == "train" and data_split != "selection"
   command = list(
       p33._frozenlake_command(  # pylint: disable=protected-access
           expected_updates, dp_size=_DP_SIZE, tp_size=_TP_SIZE
@@ -151,6 +154,7 @@ def _spec(
   )
   _use_module_entrypoint(command)
   command.append(f"--sampler_is={arm.sampler_is}")
+  command.append("--seed=42")
   if workload_candidate:
     candidate = p57_workloads.candidate(workload_candidate)
     p57_workloads.validate_split(data_split)
@@ -170,7 +174,13 @@ def _spec(
         f"--max_response_length={candidate.context_hard_cap - 4096}",
     )
   if run_kind == "train":
-    command.append("--eval_every_n_steps=0")
+    if enable_train_evaluation:
+      command.extend((
+          f"--num_test_batches={_EVAL_TEST_BATCHES}",
+          f"--eval_every_n_steps={_EVAL_EVERY_N_STEPS}",
+      ))
+    else:
+      command.append("--eval_every_n_steps=0")
     key_suffix = str(expected_updates)
     job_prefix = f"canon-p57-fl-{arm.name[:4]}"
   elif run_kind == "eval":
@@ -210,7 +220,8 @@ def _spec(
       no_commit=False,
       job_prefix=job_prefix,
       command=tuple(command),
-      enable_evaluation=False,
+      enable_evaluation=enable_train_evaluation,
+      eval_every_n_steps=_EVAL_EVERY_N_STEPS,
       dp_size=_DP_SIZE,
       tp_size=_TP_SIZE,
       optimizer_resident=True,
@@ -331,7 +342,7 @@ def render_all(
             checkpoint_step == 0
             or (
                 checkpoint_step == expected_updates
-                if stock_only
+                if stock_only or expected_updates == _PAIRED_ARM_UPDATES
                 else checkpoint_step % 50 == 0
             )
         )
@@ -384,10 +395,9 @@ def render_all(
     job_name = document["metadata"]["name"]
     state = f"/tmp/canon-state/{job_name}"
     checkpoint_tag = f"{campaign_tag}-{arm.name}"
-    milestone_interval = (
-        "50" if not stock_only and expected_updates == _PAIRED_ARM_UPDATES
-        else "0"
-    )
+    # The active 300-update campaign evaluates in-process, so it needs only the
+    # rolling recovery checkpoint.  Do not retain seven full model milestones.
+    milestone_interval = "0"
     _replace_env(
         document,
         {
@@ -455,9 +465,9 @@ def render_all(
         "CANON_P57_EXPECTED_UPDATES": str(expected_updates),
         "CANON_P57_WORKLOAD_CANDIDATE": workload_candidate,
         "CANON_P57_DATA_SPLIT": data_split,
-        "CANON_P33_ENABLE_EVAL": "0",
-        "CANON_P33_DISABLE_EVAL": "1",
-        "CANON_P31_ENABLE_EVAL": "0",
+        "CANON_P33_ENABLE_EVAL": "1" if spec.enable_evaluation else "0",
+        "CANON_P33_DISABLE_EVAL": "0" if spec.enable_evaluation else "1",
+        "CANON_P31_ENABLE_EVAL": "1" if spec.enable_evaluation else "0",
         "CANON_FROZENLAKE_CKPT_MODE": checkpoint_mode,
         "CANON_FROZENLAKE_CKPT_ROOT": _CHECKPOINT_ROOT,
         "CANON_FROZENLAKE_CKPT_TAG": checkpoint_tag,

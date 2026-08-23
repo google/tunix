@@ -43,6 +43,7 @@ class JobSpec:
   job_prefix: str
   command: tuple[str, ...]
   enable_evaluation: bool = False
+  eval_every_n_steps: int = 10
   dp_size: int = 16
   tp_size: int = 4
   optimizer_resident: bool = True
@@ -571,12 +572,33 @@ def validate_jobset(
     }
     if wrong_eval:
       raise ValueError(f"FrozenLake evaluation contract drifted: {wrong_eval}")
-    has_eval_args = (
-        "--num_test_batches=4" in env["CANON_RUN_CMD"]
-        and "--eval_every_n_steps=10" in env["CANON_RUN_CMD"]
-    )
-    if has_eval_args != spec.enable_evaluation:
-      raise ValueError("FrozenLake evaluation command drifted")
+    command_args = env["CANON_RUN_CMD"].split()
+    eval_cadences = [
+        value for value in command_args
+        if value.startswith("--eval_every_n_steps=")
+    ]
+    test_batches = [
+        value for value in command_args
+        if value.startswith("--num_test_batches=")
+    ]
+    if spec.enable_evaluation:
+      expected_eval_args = [
+          f"--eval_every_n_steps={spec.eval_every_n_steps}"
+      ]
+      expected_test_batches = ["--num_test_batches=4"]
+      drifted = (
+          eval_cadences != expected_eval_args
+          or test_batches != expected_test_batches
+      )
+    else:
+      # Calibration and isolated evaluators legitimately materialize held-out
+      # inputs while keeping the training cadence at zero.
+      drifted = any(value != "--eval_every_n_steps=0" for value in eval_cadences)
+    if drifted:
+      raise ValueError(
+          "FrozenLake evaluation command drifted: "
+          f"cadence={eval_cadences} batches={test_batches}"
+      )
   if env.get("CANON_P38_MISMATCH_CAPSULE_MAX_ROWS") != expected_capsule_rows:
     raise ValueError(
         "P38 mismatch capsule row bound drifted: "

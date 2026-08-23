@@ -9,21 +9,18 @@ Measure capability, stability, and cost under the frozen causal contract.
 - Arms: zero TIM and finite TIM.
 - Paired seeds: 42, 43, and 44; identical seed/order/checkpoint pairing across
   arms.
-- Primary horizon: 450 updates.
+- Primary horizon: 300 updates.
 - Checkpoints: every 10 updates.
-- Isolated held-out evaluations: updates 0, 50, 100, 150, 200, 250, 300, 350,
-  400, and 450.
-- Evaluation contract: immutable held-out maps, deterministic greedy decoding
-  (`temperature=0`), eight identical-policy generations per map (the minimum
-  global row count divisible by the DP8 trainer-rescore axis), fixed map order,
-  and no prefix state shared with training. Capability statistics are map-level;
-  duplicate deterministic generations are retained as a coverage check, not
-  treated as independent samples.
+- Rollout-only held-out evaluations: updates 0, 50, 100, 150, 200, 250, 300.
+- Evaluation contract: immutable 100-row held-out maps, common temperature-0.7
+  sampling, eight generations per map, fixed map order, and no prefix state
+  shared with training. The exact 800-reward inventory is required at every
+  point and evaluation examples never enter trainer forward/backward.
 - Each expensive arm launch requires explicit user approval.
 
 ## Horizon rule
 
-The 450-update horizon is fixed before inspecting the final arm gap. Do not
+The 300-update horizon is fixed before inspecting the final arm gap. Do not
 stop the apparently losing arm early and do not extend only one treatment.
 
 ## Run receipts
@@ -31,7 +28,7 @@ stop the apparently losing arm early and do not extend only one treatment.
 Every run must persist:
 
 - source/image/model/recipe digests and intent diff;
-- train transaction, checkpoint, and isolated-evaluation receipts;
+- train transaction, checkpoint, and rollout-only evaluation receipts;
 - per-step A-B/B-C dose summaries and zero exactness;
 - solve/reward, effective/mixed groups, context/turn/completion lengths,
   truncation and invalid actions;
@@ -44,8 +41,8 @@ attempt, not a continuation of the original seed.
 
 ## Exit gate
 
-All six primary runs complete through update 450 with valid paired receipts and
-the registered isolated evaluations, or the phase records an explicit invalid
+All six primary runs complete through update 300 with valid paired receipts and
+the registered rollout-only evaluations, or the phase records an explicit invalid
 or inconclusive terminal state.
 
 ## Claim boundary

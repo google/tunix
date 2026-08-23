@@ -91,6 +91,54 @@ class P57WorkloadsTest(unittest.TestCase):
           corrupted, "m10", "calibration", "eval", expected_count=2
       )
 
+  def test_primary_dataset_hashes_are_frozen(self):
+    p45_train = p57_workloads.materialize_p45_records("train", 10_000)
+    p45_eval = p57_workloads.materialize_p45_records("eval", 100)
+    self.assertEqual(
+        p57_workloads.attest_p45_records(
+            p45_train, "train", expected_count=10_000
+        ),
+        p57_workloads.PRIMARY_DATASET_SHA256[
+            ("p45", "legacy", "train", 10_000)
+        ],
+    )
+    self.assertEqual(
+        p57_workloads.attest_p45_records(
+            p45_eval, "eval", expected_count=100
+        ),
+        p57_workloads.PRIMARY_DATASET_SHA256[
+            ("p45", "legacy", "eval", 100)
+        ],
+    )
+    m15_train, m15_eval = p57_workloads.materialize_dataset_pair(
+        "m15", "main", train_count=10_000, eval_count=100
+    )
+    self.assertEqual(
+        p57_workloads.attest_records(
+            m15_train, "m15", "main", "train", expected_count=10_000
+        ),
+        p57_workloads.PRIMARY_DATASET_SHA256[
+            ("m15", "main", "train", 10_000)
+        ],
+    )
+    self.assertEqual(
+        p57_workloads.attest_records(
+            m15_eval, "m15", "main", "eval", expected_count=100
+        ),
+        p57_workloads.PRIMARY_DATASET_SHA256[
+            ("m15", "main", "eval", 100)
+        ],
+    )
+
+  def test_p45_attestation_rejects_row_mutation(self):
+    rows = p57_workloads.materialize_p45_records("eval", 100)
+    corrupted = copy.deepcopy(rows)
+    corrupted[0]["seed"] += 1
+    with self.assertRaisesRegex(ValueError, "P45 dataset row drifted"):
+      p57_workloads.attest_p45_records(
+          corrupted, "eval", expected_count=100
+      )
+
 
 if __name__ == "__main__":
   unittest.main()

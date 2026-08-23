@@ -162,10 +162,10 @@ _P57_STOCK_RUNTIME_VARIANTS = {
 }
 _P57_STOCK_RUNTIME_UPDATES = {
     "m15-selection-mismatch": "200",
-    "p45-mismatch": "450",
-    "p45-is": "450",
-    "m15-main-mismatch": "450",
-    "m15-main-is": "450",
+    "p45-mismatch": "300",
+    "p45-is": "300",
+    "m15-main-mismatch": "300",
+    "m15-main-is": "300",
 }
 
 
@@ -874,6 +874,12 @@ def validate_p57_stock_train_environment(
       "MIN_TOKEN_BUCKET": str(workload.global_m),
       "CANON_P30_OPT_STATE_OFFLOAD": "0",
   }
+  evaluation_enabled = variant != "m15-selection-mismatch"
+  expected.update({
+      "CANON_P33_ENABLE_EVAL": "1" if evaluation_enabled else "0",
+      "CANON_P33_DISABLE_EVAL": "0" if evaluation_enabled else "1",
+      "CANON_P31_ENABLE_EVAL": "1" if evaluation_enabled else "0",
+  })
   wrong = {
       key: values.get(key)
       for key, expected_value in expected.items()

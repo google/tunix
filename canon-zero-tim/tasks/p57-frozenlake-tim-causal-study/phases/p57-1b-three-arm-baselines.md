@@ -9,8 +9,9 @@
 - Confirmed: the historical P45 workload is the original deterministic
   parameter generator (seed 42/123, grid side 2–9, p 0.60–0.85), five turns,
   prompt/response 4,096/2,048, and a historical 450-update recipe. The user
-  superseded the earlier 200-update truncation after observing that it was too
-  short to judge convergence. All paired treatments now use 450 updates. P57
+  superseded the earlier 450-update/no-eval plan before the replacement launch.
+  All paired treatments now use 300 updates with seven in-process held-out
+  evaluations. P57
   `l0` is only a rematerialized envelope anchor and is not a byte-identical
   substitute.
 - Confirmed: the first four-job launch is `INCONCLUSIVE` before step 0. The
@@ -48,12 +49,16 @@ algorithm behavior and remains enabled in every cell.
 
 Both workloads use Qwen3-8B, DP8xTP8, global 32 prompts x eight generations =
 256 rollout rows, 32 local trajectories per DP rank, resident optimizer state,
-temperature 0.7, AdamW 1e-6, GSPO-token/RLOO, and no in-process evaluation.
+temperature 0.7, AdamW 1e-6, GSPO-token/RLOO, and rollout-only in-process
+evaluation every 50 updates plus the final step 300. Every paired command pins
+experiment/data-shuffle seed 42 and rollout-engine global seed 0. Dataset rows
+and canonical SHA-256 identities are checked before rollout; the exact hashes
+are registered in `RUNBOOK.md`.
 
 | Workload | Dataset | Turns | Prompt/response | Horizon |
 |---|---|---:|---:|---:|
-| P45 | original seed-42/123 parameter generator | 5 | 4,096 / 2,048 | 450 |
-| M15 | materialized `m15/main` split | 15 | 4,096 / 8,192 | 450 |
+| P45 | original seed-42/123 parameter generator | 5 | 4,096 / 2,048 | 300 |
+| M15 | materialized `m15/main` split | 15 | 4,096 / 8,192 | 300 |
 
 Native and zero executables intentionally have different canonical-kernel M
 contracts; within a workload, caller-global rows, semantic rows, scheduler
@@ -62,7 +67,7 @@ the whole zero-TIM bundle effect and cannot attribute a result to one kernel.
 
 ## Execution
 
-1. First queue: render four fresh 450-update jobs and, after explicit launch
+1. First queue: render four fresh 300-update jobs and, after explicit launch
    approval, launch P45 and M15 under both `mismatch` and `is`. These are four
    independent 64-chip jobs using the same native/stock-fast numerical program;
    their controlled treatment is token importance sampling and the
@@ -71,37 +76,44 @@ the whole zero-TIM bundle effect and cannot attribute a result to one kernel.
 2. Deferred Zero-TIM pair: do not include P45 `zero` or M15 `zero` in the first
    queue. After the first four runs are packaged, require a separate user
    decision before launching either complete Zero-TIM/no-IS cell.
-3. Run isolated deterministic evaluations at updates
-   `0,50,100,150,200,250,300,350,400,450` for every valid cell. Step 0 must
-   complete before training creates the campaign checkpoint namespace. The
-   positive milestones may run after uninterrupted training completes.
-   Never compare P45 accuracy directly with M15 accuracy as an arm effect.
+3. Each JobSet runs held-out rollout-only evaluation at
+   `0,50,100,150,200,250,300`. Every point uses 100 prompts x eight generations
+   at temperature 0.7 over the same signed eval rows. Step 0 is the initial
+   rollout policy; at step 50 the rollout engine holds the weights after 50
+   updates and update-51 weights are not yet synced. The final point runs after
+   update 300 and its final weight sync. Never compare P45 accuracy directly
+   with M15 accuracy as an arm effect.
 4. Compute within-workload contrasts: IS benefit (`is - mismatch`), zero-TIM
    benefit (`zero - mismatch`), and zero-TIM versus mitigation (`zero - is`).
 
 Each wave uses the same immutable source/image/model and fresh arm-specific
 checkpoint tags. A healthy run is not intentionally paused. Checkpoints are
-saved every 10 updates; the rolling recovery policy keeps the latest one, while
-an additional P57-only policy retains every 50-step milestone until isolated
-evaluation is classified. No YAML hand edits are admitted.
+saved every 10 updates and the rolling recovery policy keeps only the latest
+one. No YAML hand edits are admitted.
 
 ## Exit gate
 
 - Command: `bash canon-zero-tim/tests/p57_frozenlake_tim/run_cpu.sh` and
   `bash canon-zero-tim/tests/p45_frozenlake_dp8_tp8/run_exact_image.sh`.
 - Pass before launch: all six rendered cells pass resolved-env preflight; each
-  command has exactly one expected sampler mode; native cells attest the entire
+  command has exactly one expected sampler mode and exactly one `--seed=42`;
+  a seed-43 mutation is rejected; native cells attest the entire
   zero-TIM bundle off; zero cells attest the registered canonical bundle; the
   opposite sampler mode and wrong workload horizon are rejected. The pinned
   image must emit
   `P57_STOCK_RUNTIME_MATRIX_PASS variants=5 stages=train,eval`,
   `P57_STOCK_POST_BACKWARD_MODULE_C_PASS arms=mismatch,is`, and the
   unknown-arm negative marker.
-- Target pass for the current four-job queue: all four full horizons complete;
+- Target pass for the current four-job queue: all four 300-update horizons and
+  seven-point evaluation classifiers complete;
   the two `mismatch` jobs have exactly one no-IS purity receipt and the two `is`
   jobs have exactly one token-IS purity receipt. All four attest the stock-fast
   zero-TIM-off path, a finite A-B dose, valid B-C, checkpoints, and complete
   classifier artifacts.
+- Target data/seed pass: exactly one seed receipt reports data shuffle 42 and
+  vLLM global seed 0; exactly one dataset receipt reports the registered P45 or
+  M15 train/eval hashes. Per-request stochastic seed remains unsupported, so
+  cross-launch token streams are not required to be byte-identical.
 - Fail: any missing receipt, nonfinite/B-C/transaction/checkpoint failure,
   restart without an explicit resume decision, or treatment leakage is
   `INCONCLUSIVE`; preserve the run and stop.

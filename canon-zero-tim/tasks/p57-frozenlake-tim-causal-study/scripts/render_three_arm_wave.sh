@@ -32,7 +32,7 @@ git cat-file -e "$source_sha^{commit}"
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$script_dir/../../../.." && pwd)"
 renderer="$repo/canon-zero-tim/cluster/render_p57_frozenlake_tim.py"
-expected_updates=450
+expected_updates=300
 mkdir -p "$output_root"
 
 python3 "$renderer" \

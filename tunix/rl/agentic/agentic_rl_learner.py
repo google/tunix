@@ -2463,6 +2463,13 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     p31_eval_rollout_enabled = (
         os.environ.get("CANON_P31_ENABLE_EVAL", "") == "1"
     )
+    p57_inprocess_eval_enabled = (
+        p31_eval_rollout_enabled
+        and os.environ.get("CANON_PROFILE_FILE", "")
+        == "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env"
+        and os.environ.get("CANON_P57_RUN_KIND", "") == "train"
+        and os.environ.get("CANON_P57_EXPECTED_UPDATES", "") == "300"
+    )
     if p31_eval_rollout_enabled:
       expected_eval_rewards = len(all_eval_prompts) * self._num_generations()
       print(
@@ -2865,7 +2872,15 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
                 flush=True,
             )
           self._eval_iter_steps += 1
-          current_eval_dataset = eval_examples
+          # Rollout-only evaluation publishes environment reward metrics
+          # directly.  Feeding the materialized examples to the trainer would
+          # run an unnecessary eval forward and is forbidden while the
+          # alignment observer is active.
+          current_eval_dataset = (
+              None if p57_inprocess_eval_enabled else eval_examples
+          )
+          if p57_inprocess_eval_enabled:
+            eval_examples = None
           did_eval_this_global_step = True
 
       # --- First iteration Training Step (Parallelized with Rollout) ---
@@ -3362,6 +3377,46 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         self._global_step_start_time = time.time()
 
     _ = producer_future.result()
+    final_policy_step = int(self.rl_cluster.actor_trainer.train_steps)
+    if p57_inprocess_eval_enabled and _should_run_eval(
+        prompt_count=len(all_eval_prompts),
+        schedule_step=final_policy_step,
+        eval_every_n_steps=training_config.eval_every_n_steps,
+        last_eval_train_step=self._last_eval_train_step,
+    ):
+      final_evaluation = self.evaluate_only(
+          all_eval_prompts,
+          policy_step=final_policy_step,
+      )
+      self._last_eval_train_step = final_policy_step
+      final_metrics = {
+          name: final_evaluation[name]
+          for name in ("reward", "solve", "n", "wall_seconds", "policy_step")
+      }
+      self.rl_cluster.buffer_metrics_async(
+          {
+              f"frozenlake_eval/{name}": (value, np.mean)
+              for name, value in final_metrics.items()
+          },
+          mode=rl_cluster_lib.Mode.EVAL,
+          step=final_policy_step,
+      )
+      print(
+          "[CANON_" "FROZENLAKE_P42_JSON] "
+          + json.dumps(final_metrics, sort_keys=True, separators=(",", ":")),
+          flush=True,
+      )
+      print(
+          "[P57.EVAL] FINAL "
+          f"policy_step={final_policy_step} "
+          f"prompts={final_evaluation['prompts']} "
+          f"generations={final_evaluation['generations']} "
+          f"n={final_evaluation['n']} "
+          f"reward={final_evaluation['reward']:.6f} "
+          f"solve={final_evaluation['solve']:.6f} "
+          "backward=0 optimizer_commits=0 evaluation_checkpoint_writes=0",
+          flush=True,
+      )
     self.rl_cluster.close()
 
   def _put_prompts_to_queue(

@@ -8,7 +8,7 @@ or exclusions after seeing the arm comparison.
 ## Primary analysis
 
 - For each paired seed, compute held-out solve-rate AUC from update 0 through
-  450 using the equally spaced 50-update evaluation checkpoints.
+  300 using the equally spaced 50-update in-process evaluation points.
 - Report the paired zero-minus-mismatch differences for every seed, their mean,
   uncertainty interval, and all raw seed trajectories.
 - A campaign with unresolved uncertainty is `INCONCLUSIVE`; three seeds are not
@@ -16,7 +16,7 @@ or exclusions after seeing the arm comparison.
 
 ## Secondary analyses
 
-- Held-out solve rate at update 450.
+- Held-out solve rate at update 300.
 - Time-to-preregistered solve thresholds.
 - Collapse incidence and cross-seed variance.
 - Training reward/solve curves as supportive, not replacement, outcomes.

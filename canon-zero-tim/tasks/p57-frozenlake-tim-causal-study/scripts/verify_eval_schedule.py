@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail closed on one P57 two-workload milestone-evaluation schedule."""
+"""Fail closed on one P57 initial/final recovery-evaluation schedule."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ import yaml
 
 
 PROFILE = "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env"
-STEPS = tuple(range(0, 451, 50))
+STEPS = (0, 300)
 ARMS = {
     "native": ("mismatch", "none", "stock-fast", "0"),
     "is": ("is", "token", "stock-fast", "0"),
@@ -67,7 +67,7 @@ def verify_manifest(
       "CANON_P57_TIM_ARM": arm,
       "CANON_P57_RUN_KIND": "eval",
       "CANON_P57_INFERENCE_REGIME": regime,
-      "CANON_P57_EXPECTED_UPDATES": "450",
+      "CANON_P57_EXPECTED_UPDATES": "300",
       "CANON_P57_WORKLOAD_CANDIDATE": candidate,
       "CANON_P57_DATA_SPLIT": split,
       "CANON_P57_EVAL_CHECKPOINT_STEP": str(step),
@@ -77,7 +77,7 @@ def verify_manifest(
       "CANON_FROZENLAKE_CKPT_TAG": f"{campaign_root}-{workload}-{arm}",
       "CANON_FROZENLAKE_CKPT_INTERVAL": "10",
       "CANON_FROZENLAKE_CKPT_MAX_TO_KEEP": "1",
-      "CANON_FROZENLAKE_CKPT_MILESTONE_INTERVAL": "50",
+      "CANON_FROZENLAKE_CKPT_MILESTONE_INTERVAL": "0",
       "CANON_P33_ENABLE_EVAL": "0",
       "CANON_P33_DISABLE_EVAL": "1",
       "CANON_P31_ENABLE_EVAL": "0",
@@ -91,7 +91,7 @@ def verify_manifest(
     raise ValueError(f"{path}: evaluation environment drifted: {wrong}")
   command = env["CANON_RUN_CMD"].split()
   required = {
-      "--max_steps=450",
+      "--max_steps=300",
       f"--env_max_steps={turns}",
       "--max_prompt_length=4096",
       f"--max_response_length={response}",
@@ -167,7 +167,7 @@ def main() -> int:
         f"expected={count}"
     )
   print(
-      "P57_EVAL_SCHEDULE_PASS "
+      "P57_RECOVERY_EVAL_SCHEDULE_PASS "
       f"wave={args.wave} manifests={count} steps="
       + ",".join(str(step) for step in STEPS),
       flush=True,

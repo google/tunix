@@ -23,6 +23,7 @@ def _env(*, arm="zero", step="20"):
       "CANON_P57_TIM_ARM": arm,
       "CANON_P38_FIXED_LM_HEAD": "1" if arm == "zero" else "0",
       "CANON_P57_EVAL_CHECKPOINT_STEP": step,
+      "CANON_P57_EXPECTED_UPDATES": "300",
       "CANON_P57_WORKLOAD_CANDIDATE": "",
       "CANON_P57_DATA_SPLIT": "",
   }
@@ -57,11 +58,12 @@ def _metadata(config, *, arm="zero", step=20):
           "model_dir_name": "qwen8b_tp8",
           "mesh_dp": 8,
           "mesh_tp": 8,
+          "seed": 42,
           "p57_tim_arm": arm,
           "p57_fixed_lm_head": "1" if arm == "zero" else "0",
           "p57_workload_candidate": "",
           "p57_data_split": "",
-          "eval_enabled": False,
+          "eval_enabled": True,
       },
   }
 
@@ -146,21 +148,41 @@ class P57CheckpointEvalTest(unittest.TestCase):
           env=_env(step="0"),
       )
 
-  def test_accepts_retained_450_horizon_milestone(self):
+  def test_accepts_active_300_horizon_recovery_checkpoint(self):
     config = checkpoint.Config(
         mode="resume",
         root=checkpoint.GCS_ROOT,
         tag="p57-campaign-mismatch",
         interval=10,
         max_to_keep=1,
-        milestone_interval=50,
+        milestone_interval=0,
     )
-    metadata = _metadata(config, arm="mismatch", step=250)
+    metadata = _metadata(config, arm="mismatch", step=300)
     checkpoint.validate_p57_evaluation_restored(
         config,
-        restored_step=250,
+        restored_step=300,
         metadata=metadata,
-        env={**_env(arm="mismatch", step="250")},
+        env={**_env(arm="mismatch", step="300")},
+    )
+
+  def test_historical_selection_checkpoint_keeps_eval_disabled_provenance(self):
+    config = _config("mismatch")
+    env = {
+        **_env(arm="mismatch", step="200"),
+        "CANON_P57_EXPECTED_UPDATES": "200",
+        "CANON_P57_WORKLOAD_CANDIDATE": "m15",
+        "CANON_P57_DATA_SPLIT": "selection",
+    }
+    metadata = _metadata(config, arm="mismatch", step=200)
+    contract = metadata["canon_resume_contract"]
+    contract["p57_workload_candidate"] = "m15"
+    contract["p57_data_split"] = "selection"
+    contract["eval_enabled"] = False
+    checkpoint.validate_p57_evaluation_restored(
+        config,
+        restored_step=200,
+        metadata=metadata,
+        env=env,
     )
 
 

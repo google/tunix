@@ -307,7 +307,7 @@ class P57RendererTest(unittest.TestCase):
     for stock_only, expected_count in ((True, 1), (False, 2)):
       with self.subTest(stock_only=stock_only), tempfile.TemporaryDirectory() as tmp:
         data_split = "selection" if stock_only else "main"
-        expected_updates = 200 if stock_only else 450
+        expected_updates = 200 if stock_only else 300
         paths = paired.render_all(
             base_path=BASE,
             output_dir=Path(tmp),
@@ -463,8 +463,8 @@ class P57RendererTest(unittest.TestCase):
 
   def test_two_workloads_render_all_three_registered_treatments(self):
     workloads = (
-        ("p45", "", "", 450, 5, 2048),
-        ("m15", "m15", "main", 450, 15, 8192),
+        ("p45", "", "", 300, 5, 2048),
+        ("m15", "m15", "main", 300, 15, 8192),
     )
     arms = (
         ("mismatch", "none", "stock-fast", "0", "1"),
@@ -496,6 +496,7 @@ class P57RendererTest(unittest.TestCase):
                 sum(value.startswith("--sampler_is=") for value in command), 1
             )
             self.assertIn(f"--max_steps={updates}", command)
+            self.assertEqual(command.count("--seed=42"), 1)
             self.assertIn(f"--env_max_steps={turns}", command)
             self.assertIn(f"--max_response_length={response}", command)
             self.assertEqual(env["CANON_P57_TIM_ARM"], arm)
@@ -506,8 +507,13 @@ class P57RendererTest(unittest.TestCase):
             )
             self.assertEqual(env["CANON_P57_STOP_AFTER_STEP"], str(updates))
             self.assertEqual(
-                env["CANON_FROZENLAKE_CKPT_MILESTONE_INTERVAL"], "50"
+                env["CANON_FROZENLAKE_CKPT_MILESTONE_INTERVAL"], "0"
             )
+            self.assertEqual(env["CANON_P33_ENABLE_EVAL"], "1")
+            self.assertEqual(env["CANON_P33_DISABLE_EVAL"], "0")
+            self.assertEqual(env["CANON_P31_ENABLE_EVAL"], "1")
+            self.assertIn("--num_test_batches=4", command)
+            self.assertIn("--eval_every_n_steps=50", command)
             preflight = _run_env_preflight(
                 env, root / f"state-{workload}-{arm}"
             )
@@ -518,10 +524,10 @@ class P57RendererTest(unittest.TestCase):
                   preflight.stdout,
               )
 
-  def test_paired_arms_reject_superseded_200_step_horizon(self):
+  def test_paired_arms_reject_unregistered_200_step_horizon(self):
     workloads = (
-        ("p45", "", "", "P45 workload is frozen to 450 updates"),
-        ("m15", "m15", "main", "M15 workload is frozen to 450 updates"),
+        ("p45", "", "", "P45 workload is frozen to 300 updates"),
+        ("m15", "m15", "main", "M15 workload is frozen to 300 updates"),
     )
     for workload, candidate, split, message in workloads:
       with (
@@ -543,41 +549,63 @@ class P57RendererTest(unittest.TestCase):
             arm="mismatch",
         )
 
-  def test_paired_eval_renders_every_fifty_and_rejects_unretained_step(self):
+  def test_paired_train_preflight_rejects_seed_drift(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      root = Path(tmp)
+      path = paired.render_all(
+          base_path=BASE,
+          output_dir=root / "rendered",
+          source_commit="a" * 40,
+          run_id="p57seed",
+          campaign_tag="p57-p45-seed-negative",
+          checkpoint_mode="new",
+          expected_updates=300,
+          run_kind="train",
+          arm="mismatch",
+      )[0]
+      env = _env(yaml.safe_load(path.read_text()))
+      env["CANON_RUN_CMD"] = env["CANON_RUN_CMD"].replace(
+          "--seed=42", "--seed=43"
+      )
+      preflight = _run_env_preflight(env, root / "state")
+    self.assertNotEqual(preflight.returncode, 0)
+    self.assertIn("P57 command/horizon contract drifted", preflight.stderr)
+
+  def test_paired_eval_keeps_only_zero_and_final_recovery_checkpoints(self):
     with tempfile.TemporaryDirectory() as tmp:
       path = paired.render_all(
           base_path=BASE,
-          output_dir=Path(tmp) / "eval-250",
+          output_dir=Path(tmp) / "eval-300",
           source_commit="a" * 40,
-          run_id="p57eval250",
-          campaign_tag="p57-native-450-a-p45",
+          run_id="p57eval300",
+          campaign_tag="p57-native-300-a-p45",
           checkpoint_mode="resume",
-          expected_updates=450,
+          expected_updates=300,
           run_kind="eval",
-          checkpoint_step=250,
+          checkpoint_step=300,
           arm="mismatch",
       )[0]
       env = _env(yaml.safe_load(path.read_text()))
       preflight = _run_env_preflight(env, Path(tmp) / "state")
-    self.assertEqual(env["CANON_P57_EVAL_CHECKPOINT_STEP"], "250")
-    self.assertEqual(env["CANON_FROZENLAKE_CKPT_MILESTONE_INTERVAL"], "50")
+    self.assertEqual(env["CANON_P57_EVAL_CHECKPOINT_STEP"], "300")
+    self.assertEqual(env["CANON_FROZENLAKE_CKPT_MILESTONE_INTERVAL"], "0")
     self.assertIn("--evaluation_only", env["CANON_RUN_CMD"])
     self.assertIn("--temperature=0", env["CANON_RUN_CMD"])
     self.assertEqual(preflight.returncode, 0, preflight.stderr)
 
     with tempfile.TemporaryDirectory() as tmp, self.assertRaisesRegex(
-        ValueError, "retained milestone"
+        ValueError, "registered training horizon"
     ):
       paired.render_all(
           base_path=BASE,
           output_dir=Path(tmp),
           source_commit="a" * 40,
-          run_id="p57eval240",
-          campaign_tag="p57-native-450-a-p45",
+          run_id="p57eval250",
+          campaign_tag="p57-native-300-a-p45",
           checkpoint_mode="resume",
-          expected_updates=450,
+          expected_updates=300,
           run_kind="eval",
-          checkpoint_step=240,
+          checkpoint_step=250,
           arm="mismatch",
       )
 

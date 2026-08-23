@@ -1,47 +1,127 @@
-# P57 two-workload, three-arm runbook
+# P57 300-update FrozenLake runbook
 
-This runbook renders and verifies the six concept-study cells. It never launches
-a JobSet automatically. Every `kubectl apply`, commit, and push requires separate
-user approval. Never hand-edit a rendered YAML.
+This runbook is the authoritative operator procedure for the two-workload,
+three-treatment concept study. It renders JobSets but never applies them.
+Every `kubectl apply`, commit, and push requires separate user approval. Never
+hand-edit a rendered YAML.
 
-## Experimental matrix
+## Active contract
 
-| Wave | Renderer arm | Numerical program | `sampler_is` | Runtime receipt |
+| Wave | Runtime arm | Numerical program | Sampler correction | Launch now |
 |---|---|---|---|---|
-| Queue now: `native` | `mismatch` | complete zero-TIM bundle off | `none` | old=A, TIS absent |
-| Queue now: `is` | `is` | identical native program | `token` | old=C, TIS present |
-| Deferred: `zero` | `zero` | complete zero-TIM bundle on | `none` | old=A, TIS absent |
+| `native` | `mismatch` | stock-fast / zero-TIM bundle off | none; old=A | yes |
+| `is` | `is` | identical stock-fast program | token TIS; old=C | yes |
+| `zero` | `zero` | complete registered zero-TIM bundle | none; old=A | deferred |
 
-Each wave has two 64-chip DP8xTP8 JobSets:
+Each wave renders two independent 64-chip DP8xTP8 jobs:
 
-- P45 original: generated train/eval parameters use seeds 42/123, grid side
-  2–9 and p 0.60–0.85, five turns, prompt/response 4,096/2,048. The historical
-  recipe and every paired P57 treatment run 450 updates.
-- M15: materialized `m15/main`, grid side 5–12 and p 0.82, 15 turns,
-  prompt/response 4,096/8,192, 450 updates.
+- P45 original: generator-backed seed 42/123 maps, side 2–9, five turns,
+  prompt/response 4,096/2,048;
+- M15: materialized `m15/main`, side 5–12, 15 turns,
+  prompt/response 4,096/8,192.
 
-Both use 32 prompts x eight generations, temperature 0.7, GSPO-token/RLOO,
-AdamW 1e-6 and resident optimizer state. Training evaluation is disabled.
-Checkpoints are written every 10 updates. The recovery policy still keeps only
-the latest ordinary checkpoint; P57 additionally preserves every 50-step
-milestone through update 450 so isolated evaluation can restore an exact older
-step after training finishes. These are temporary experiment evidence, not
-extra recovery generations.
+Both jobs run Qwen3-8B for exactly 300 optimizer updates with 32 prompts x
+eight generations, temperature 0.7, top-p 1, top-k 0, GSPO-token/RLOO, AdamW
+1e-6, and resident optimizer state. Native A-B remains warning-only; B-C,
+nonfinite, structural, replica, transaction, optimizer, checkpoint, and
+evaluation-completeness failures remain fatal. Zero remains strict.
 
-Storage warning: this workload trains the full Qwen3-8B actor in FP32 and its
-checkpoint also contains optimizer state. A retained milestone is therefore a
-full distributed checkpoint; TP/DP sharding reduces each worker's transfer but
-does not reduce aggregate GCS bytes. Nine retained positive milestones can be
-on the order of one terabyte per arm (several terabytes for the immediate four
-arms). Before launch, the owner must explicitly accept the bucket quota/cost.
-Do not replace this with segmented stop/eval/resume or in-process evaluation:
-either would change the registered execution contract. Delete milestones only
-after every classifier artifact is durable and only with separate destructive
-approval.
+## Reproducibility and data identity
 
-## Local gates
+Every paired command contains exactly one `--seed=42`. The runtime also pins
+the vLLM engine global seed to `0`. Startup must emit exactly one:
 
-From the exact source worktree:
+~~~text
+[P57.SEED] CONTRACT_PASS data_shuffle_seed=42 vllm_global_seed=0 per_request_seed=unsupported
+~~~
+
+The experiment seed fixes the dataset shuffle and the supported host/JAX random
+streams. vLLM's current backend does not expose a stable per-request sampling
+seed in this path. Therefore the scientific guarantee is **same signed data,
+same seed configuration, and statistically paired recipes**; it is not a claim
+that two temperature-0.7 launches produce bitwise-identical token trajectories
+or identical curves. One curve per cell is a one-seed concept study. A general
+stability claim requires a later preregistered 42/43/44 replication wave.
+
+The primary train/eval dataset identities are frozen and checked row-by-row at
+runtime before rollout:
+
+| Workload/split | Rows | Generator namespace | Required SHA-256 |
+|---|---:|---|---|
+| P45 train | 10,000 | 42 | `ddc96fd9ae4e807d8aa8e800795aa743e423ffe4f936f681596460d28e670487` |
+| P45 eval | 100 | 123 | `b10add7f31b2cc9931c65b4cc59780004fd3d52a4fce9d20ed565c87df44b580` |
+| M15 `main` train | 10,000 | 57,400,000 | `ff1e659b80a0c9bd640e616972a523132f4a333ef174b1a0b13b202958a30e43` |
+| M15 `main` eval | 100 | 57,500,000 | `8edb61cb995b4abe8d3f90b32e961be74b8b74ab46120e0d43513ea26d324089` |
+
+Startup must emit one `[P57.DATASET] MATERIALIZED_PASS ...` line containing the
+appropriate pair of hashes. The postflight classifier independently requires
+the seed receipt and registered hashes. A row mutation, wrong count, wrong
+hash, or `--seed` drift is fatal before a run can be accepted.
+
+## Evaluation contract
+
+Evaluation is enabled inside the training JobSet and is rollout-only. It uses
+the held-out 100-row dataset, eight generations per row, and the same
+temperature-0.7 sampling recipe as training. It does not feed evaluation
+examples to the trainer, does not execute an evaluation backward, and does not
+write an evaluation checkpoint.
+
+The required policy steps are exactly:
+
+~~~text
+0, 50, 100, 150, 200, 250, 300
+~~~
+
+The policy-step labels are the number of updates represented by the weights
+currently installed in the rollout engine, not host loop indices. In the
+segmented path the trainer can compute the next update before reaching the
+shared evaluation block, but those newer weights are not synced to rollout
+until after evaluation. The observed policy is therefore still exactly N:
+
+| Policy step | Exact timing |
+|---:|---|
+| 0 | initial rollout weights; update-1 weights are not yet synced |
+| 50 | rollout weights after 50 updates; update-51 weights are not yet synced |
+| 100 | rollout weights after 100 updates; update-101 weights are not yet synced |
+| 150 | rollout weights after 150 updates; update-151 weights are not yet synced |
+| 200 | rollout weights after 200 updates; update-201 weights are not yet synced |
+| 250 | rollout weights after 250 updates; update-251 weights are not yet synced |
+| 300 | after update 300 commits and its weights are synced to rollout |
+
+Every point reuses the same signed 100-row held-out set and contains exactly
+100 x 8 = 800 finite rewards. The postflight classifier rejects a missing,
+duplicated, nonfinite, under-covered, wrong-seed, or wrong-dataset point.
+
+W&B metrics are under:
+
+~~~text
+frozenlake_eval/eval/reward
+frozenlake_eval/eval/solve
+frozenlake_eval/eval/n
+frozenlake_eval/eval/wall_seconds
+frozenlake_eval/eval/policy_step
+~~~
+
+The raw log also contains one P42 evaluation JSON record per point
+and a unique `[P57.EVAL] FINAL policy_step=300 ...` receipt.
+
+The primary curve does not use `render_eval_schedule.sh`. That script now
+renders only optional step-0/final recovery audits and cannot reconstruct an
+intermediate point. If the seven-point in-process curve is incomplete, classify
+the run `INCONCLUSIVE`; do not fabricate it from training reward.
+
+## Checkpoint contract
+
+Checkpoints write every 10 updates to
+`gs://yuxzhang-tunix-models/canon-zero-tim/checkpoints/frozenlake`. The rolling
+policy keeps only the latest checkpoint (`max_to_keep=1`). The active campaign
+sets `CANON_FROZENLAKE_CKPT_MILESTONE_INTERVAL=0`; no additional 50-step full
+model checkpoints are retained. Evaluation therefore no longer creates the
+previous multi-terabyte milestone-storage envelope.
+
+## Preflight gates
+
+Run from the exact source worktree:
 
 ~~~bash
 bash canon-zero-tim/tests/p57_frozenlake_tim/run_cpu.sh
@@ -49,206 +129,150 @@ bash canon-zero-tim/tests/p45_frozenlake_dp8_tp8/run_exact_image.sh
 git diff --check
 ~~~
 
-Require terminal `P57_FROZENLAKE_TIM_CPU_PASS`,
-`P57_STOCK_RUNTIME_MATRIX_PASS variants=5 stages=train,eval`,
-`P57_TRAJECTORY_PROMPT_PROVENANCE_PASS frozenlake=merge deepswe=environment reset_timeout=preserved missing_prompt=fail_closed`,
-`P57_STOCK_POST_BACKWARD_MODULE_C_PASS arms=mismatch,is`,
-`P57_STOCK_POST_BACKWARD_MODULE_C_NEGATIVE_PASS arm=unknown`,
-`P57_STOCK_OBSERVER_EXACT_IMAGE_PASS targets=absolute values=processed`, and
-`P45_EXACT_IMAGE_CPU_PASS overlay=qwen8b_tp8`. Local gates are construction
-evidence, not target evidence.
+Require at least:
 
-The runtime matrix marker is mandatory. It proves the pinned production image
-accepted exactly the five registered stock tuples: the historical M15
-selection discovery cell plus P45/M15-main under `mismatch` and `is`. Arbitrary
-arm/workload/split combinations remain fail-closed.
+~~~text
+P57_FROZENLAKE_TIM_CPU_PASS
+P57_INPROCESS_EVAL_CLASSIFIER_PASS steps=7
+P57_STOCK_RUNTIME_MATRIX_PASS variants=5 stages=train,eval
+P57_TRAJECTORY_PROMPT_PROVENANCE_PASS frozenlake=merge deepswe=environment reset_timeout=preserved missing_prompt=fail_closed
+P57_STOCK_POST_BACKWARD_MODULE_C_PASS arms=mismatch,is
+P57_STOCK_POST_BACKWARD_MODULE_C_NEGATIVE_PASS arm=unknown
+P57_STOCK_OBSERVER_EXACT_IMAGE_PASS targets=absolute values=processed
+P45_EXACT_IMAGE_CPU_PASS overlay=qwen8b_tp8
+~~~
 
-## Queue now — fresh four-job 450-update campaign
+Missing any required marker forbids launch. Local gates prove construction,
+not target TPU behavior.
 
-The earlier 200-update identities and the failed 450-update identities
-`n45c/n15c/i45c/i15c` are immutable historical evidence, not valid members of
-the replacement comparison. The latter four completed Step-0 rollout but
-failed before trainer alignment/backward because trajectory packaging selected
-a policy-seeded FrozenLake environment record that lacked the rendered
-`prompts`. Package their terminal state, ensure none remains live, and do not
-resume their checkpoints. Render both native-program waves from the approved
-pushed prompt-provenance repair using fresh run IDs, output roots, campaign
-roots, and checkpoint namespaces. Never hand-edit a rendered manifest.
+## Render the immediate four jobs
+
+First package/stop every earlier P57 JobSet. Never reuse an old run ID,
+campaign root, output directory, or checkpoint tag. Replace the example IDs
+below if they have already been consumed.
 
 ~~~bash
 cd /home/yuxuan/code_rl_repro/worktrees/p57_frozenlake_tim_0820
-SOURCE=<approved-pushed-prompt-provenance-repair-40-character-sha>
-OUT_NATIVE=/tmp/p57-primary-native-450-b
-OUT_IS=/tmp/p57-primary-is-450-b
-OUT_EVAL_NATIVE=/tmp/p57-eval-native-450-b
-OUT_EVAL_IS=/tmp/p57-eval-is-450-b
+SOURCE=<approved-pushed-full-40-character-sha>
+OUT_NATIVE=/tmp/p57-primary-native-300-c
+OUT_IS=/tmp/p57-primary-is-300-c
+
 bash canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts/render_three_arm_wave.sh \
-  native "$SOURCE" "$OUT_NATIVE" n45d n15d p57-native-450-b
+  native "$SOURCE" "$OUT_NATIVE" n45e n15e p57-native-300-c
 bash canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts/render_three_arm_wave.sh \
-  is "$SOURCE" "$OUT_IS" i45d i15d p57-is-450-b
-bash canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts/render_eval_schedule.sh \
-  native "$SOURCE" "$OUT_EVAL_NATIVE" fn p57-native-450-b
-bash canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts/render_eval_schedule.sh \
-  is "$SOURCE" "$OUT_EVAL_IS" fi p57-is-450-b
+  is "$SOURCE" "$OUT_IS" i45e i15e p57-is-300-c
 ~~~
 
-The first attempts used `p45n/m15n/p45i/m15i`, `n45a/n15a/i45a/i15a`, and
-`n45c/n15c/i45c/i15c`; never reuse them or their output/campaign roots. The
-commands above use fresh `*d` train IDs and `fn/fi` evaluation roots.
-Four-character IDs avoid the Kubernetes 63-character Pod-name limit. All four
-jobs use `checkpoint-mode=new`.
-
-The two evaluation renderers must each report
-`P57_EVAL_SCHEDULE_PASS ... manifests=20
-steps=0,50,100,150,200,250,300,350,400,450` and
-`P57_EVAL_RENDER_PASS ... manifests=20`. They reuse the exact training campaign
-tags by construction. Do not change a campaign root between its training and
-evaluation renders.
-
-Before applying a training YAML, inspect the target GCS quota and record the
-storage decision in the campaign evidence. `max_to_keep=1` limits ordinary
-recovery points; the nine `EveryNSteps(50)` evidence points are additional
-retained full checkpoints. Insufficient storage blocks launch—it is not
-permission to silently drop intermediate evaluations.
-
-For each command require two `P57_THREE_ARM_MANIFEST_PASS` lines and its
-terminal markers:
+Each command must emit two `P57_THREE_ARM_MANIFEST_PASS` lines plus:
 
 ~~~text
-P57_THREE_ARM_WAVE_PASS wave=native manifests=2
-P57_THREE_ARM_RENDER_PASS wave=native ...
-P57_THREE_ARM_WAVE_PASS wave=is manifests=2
-P57_THREE_ARM_RENDER_PASS wave=is ...
+P57_THREE_ARM_WAVE_PASS wave=<native|is> manifests=2
+P57_THREE_ARM_RENDER_PASS wave=<native|is> ...
 ~~~
 
-The manifests are:
+The four manifests are:
 
 ~~~text
-$OUT_NATIVE/p45/jobset-p57-frozenlake-mismatch-450.yaml
-$OUT_NATIVE/m15/jobset-p57-frozenlake-mismatch-m15-main-450.yaml
-$OUT_IS/p45/jobset-p57-frozenlake-is-450.yaml
-$OUT_IS/m15/jobset-p57-frozenlake-is-m15-main-450.yaml
+$OUT_NATIVE/p45/jobset-p57-frozenlake-mismatch-300.yaml
+$OUT_NATIVE/m15/jobset-p57-frozenlake-mismatch-m15-main-300.yaml
+$OUT_IS/p45/jobset-p57-frozenlake-is-300.yaml
+$OUT_IS/m15/jobset-p57-frozenlake-is-m15-main-300.yaml
 ~~~
 
-### Launch order
-
-Step-0 evaluation must run before training because its `new`-mode provenance
-gate requires the campaign checkpoint namespace to be empty. After separate
-launch approval, launch and fully package these four step-0 evaluators first:
-
-~~~bash
-kubectl apply -f "$OUT_EVAL_NATIVE/p45/step-0/jobset-p57-frozenlake-mismatch-eval-0.yaml"
-kubectl apply -f "$OUT_EVAL_NATIVE/m15/step-0/jobset-p57-frozenlake-mismatch-m15-main-eval-0.yaml"
-kubectl apply -f "$OUT_EVAL_IS/p45/step-0/jobset-p57-frozenlake-is-eval-0.yaml"
-kubectl apply -f "$OUT_EVAL_IS/m15/step-0/jobset-p57-frozenlake-is-m15-main-eval-0.yaml"
-~~~
-
-Only after all four step-0 evaluations classify PASS, obtain launch approval
-for the uninterrupted training jobs:
-
-~~~bash
-kubectl apply -f "$OUT_NATIVE/p45/jobset-p57-frozenlake-mismatch-450.yaml"
-kubectl apply -f "$OUT_NATIVE/m15/jobset-p57-frozenlake-mismatch-m15-main-450.yaml"
-kubectl apply -f "$OUT_IS/p45/jobset-p57-frozenlake-is-450.yaml"
-kubectl apply -f "$OUT_IS/m15/jobset-p57-frozenlake-is-m15-main-450.yaml"
-~~~
-
-Only apply after confirming none of the earlier P57 JobSets remains live and
-after separate user launch approval. The two waves share source, image, data,
-horizon, optimizer, and objective. Their registered treatment difference is
-only token importance sampling and the corresponding old-logprob identity.
-
-Once all four trains close durably at 450, obtain separate evaluation launch
-approval. Apply the step 50 through 450 manifests from each schedule. They may
-run in any resource-aware order because they are read-only and restore their
-explicit `CANON_P57_EVAL_CHECKPOINT_STEP`; they must not silently restore the
-latest checkpoint. Every positive milestone requires a restore receipt for the
-requested step and the no-update completion marker. Do not delete milestones
-until every corresponding classifier artifact is packaged; cleanup is a
-separate destructive action requiring explicit approval.
-
-## Deferred Zero-TIM wave
-
-Do not render or launch this wave as part of the current four-job queue. After
-the native/no-IS versus native/token-IS evidence is packaged, the user may
-separately promote the two Zero-TIM cells. Keep the same approved source SHA
-unless a later reviewed repair requires a new immutable source for all affected
-comparisons.
-
-~~~bash
-bash canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts/render_three_arm_wave.sh \
-  zero "$SOURCE" /tmp/p57-deferred-zero-450-a z45a z15a p57-zero-450-a
-~~~
-
-Rendering success does not authorize this deferred wave. Obtain a separate
-launch decision after classifying and packaging the first four jobs.
-
-## Runtime receipts
-
-Every full train must produce exactly one arm receipt:
+Inspect and retain every rendered YAML SHA-256. Confirm each manifest contains:
 
 ~~~text
-# native/no-IS and zero/no-IS
+CANON_P57_EXPECTED_UPDATES=300
+CANON_P57_STOP_AFTER_STEP=300
+CANON_P33_ENABLE_EVAL=1
+CANON_P33_DISABLE_EVAL=0
+CANON_P31_ENABLE_EVAL=1
+CANON_FROZENLAKE_CKPT_MILESTONE_INTERVAL=0
+--seed=42
+--num_test_batches=4
+--eval_every_n_steps=50
+~~~
+
+## Launch
+
+Only after separate user approval:
+
+~~~bash
+kubectl apply -f "$OUT_NATIVE/p45/jobset-p57-frozenlake-mismatch-300.yaml"
+kubectl apply -f "$OUT_NATIVE/m15/jobset-p57-frozenlake-mismatch-m15-main-300.yaml"
+kubectl apply -f "$OUT_IS/p45/jobset-p57-frozenlake-is-300.yaml"
+kubectl apply -f "$OUT_IS/m15/jobset-p57-frozenlake-is-m15-main-300.yaml"
+~~~
+
+The jobs are independent. Do not cancel a healthy arm because another fails,
+and do not relaunch automatically under a changed tag.
+
+## Live and terminal gates
+
+All four logs require exactly one enabled receipt with `cadence=50`, seven
+P42 JSON records at the registered policy steps, and the final step-300
+receipt. They also require exactly one `[P57.SEED] CONTRACT_PASS` and one
+`[P57.DATASET] MATERIALIZED_PASS` whose hashes match the registered table.
+Native/no-IS additionally requires:
+
+~~~text
 [P57.TIM_PURITY] PASS sampler_is=none old_logps=rollout tis_weights=absent trainer_rescore=observer-only
+~~~
 
-# native/token-IS
+Native/token-IS requires:
+
+~~~text
 [P57.TIM_PURITY] PASS sampler_is=token old_logps=trainer tis_weights=present trainer_rescore=training-input
 ~~~
 
-Native arms must additionally emit zero-TIM-off and stock-route receipts,
-including `canonical_markers=0`; zero arms must execute the canonical markers
-and remain strict A=B=C. Native A-B is warning-only. B-C, nonfinite,
-structural, transaction, optimizer and checkpoint failures are fatal in every
-arm. Missing or duplicate purity receipts invalidate the run.
-
-Every train must finish update 450. Healthy trains are
-not intentionally paused. A restart or node loss is `INCONCLUSIVE` until the
-user chooses whether to resume from the retained checkpoint.
-
-## Evidence return
-
-For each JobSet, return and package:
+Postflight must emit:
 
 ~~~text
-workload/arm/source_sha/image_id:
-jobset/run_id/attempt/exit:
-yaml_path/sha256:
-complete_log_path/sha256:
-resolved_env_path/sha256:
-arm_purity_marker:
-stock_off_or_canonical_receipts:
-segment_preflight/segment_complete:
-final_checkpoint_step/uri:
-alignment: A-B dose, B-C verdict, nonfinite/structural verdict
-training: solve curve, sampled tokens/s, seconds/update, grad/update norms
-sampler_is: weight mean/max/clip fraction or verified absent
-infra_events:
-classification/verdict artifact/sha256:
-wandb_run:
+P57_INPROCESS_EVAL_PASS steps=0,50,100,150,200,250,300 rewards_per_step=800 ...
+[P57.EVAL] EVIDENCE classification=... classification_sha256=...
+[P57.TRAIN] EVIDENCE classification=... classification_sha256=...
 ~~~
 
-Use `canon-zero-tim/scripts/package_run.sh` for every returned run directory.
-Incomplete evidence is preserved and classified `INCONCLUSIVE`, never silently
-rerun or overwritten.
+Finite A-B is the native treatment, not failure. Missing A-B is
+`NO_TREATMENT`. B-C mismatch, nonfinite data, wrong sampler receipt, canonical
+marker leakage into native, missing eval point, restart without explicit resume
+decision, or an incomplete log makes that run `INCONCLUSIVE` or invalid.
 
-## Milestone evaluation and analysis
+## Package and return
 
-For each valid cell, classify all ten isolated checkpoints at
-`0,50,100,150,200,250,300,350,400,450`. Evaluation is deterministic
-temperature-0, uses the same immutable held-out maps within a workload, and
-performs no backward, optimizer commit, or checkpoint write. Positive steps
-restore exactly the named checkpoint even when a later checkpoint exists.
-Compute only within-workload contrasts and compare equal steps:
+Run the existing `scripts/package_run.sh` for every success or failure. Return
+one block per JobSet containing:
 
-- IS effect: `native-is - native-no-IS`;
-- zero-TIM effect: `zero-no-IS - native-no-IS`;
-- exactness versus mitigation: `zero-no-IS - native-is`.
+- source/image/jobset/run/attempt identity and YAML SHA;
+- full raw log from byte zero and resolved environment;
+- training and in-process-eval classifier JSON plus SHA-256;
+- checkpoint tag, latest durable step/path, and checkpoint contract;
+- exact purity, stock-route, segment-preflight/completion, and eval receipts;
+- seven evaluation JSON records and the W&B run URL/name;
+- A-B dose, B-C/nonfinite/structural verdicts;
+- training solve/reward, eval solve/reward, step timing, sampled tokens/s,
+  gradient/update norms, and IS mean/max/clip fraction where applicable;
+- every infrastructure event or restart.
 
-One curve per cell is a concept study. Multi-seed replication is a later gate,
-not something the first six curves can claim.
+Do not summarize away failure. If a large artifact cannot be committed, run
+the checked-in classifier beside it and return the complete classifier JSON,
+input inventory, paths, sizes, and SHA ledger.
+
+## Deferred Zero-TIM pair
+
+Do not launch `zero` in the immediate four-job assignment. After the four
+native-program runs are packaged, the user may separately authorize:
+
+~~~bash
+bash canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts/render_three_arm_wave.sh \
+  zero "$SOURCE" /tmp/p57-deferred-zero-300-a z45a z15a p57-zero-300-a
+~~~
+
+The same 300-update/evaluation/checkpoint contract applies. Compare treatments
+only within P45 or only within M15.
 
 ## Rollback
 
-The renderer/profile is P57-only and default-empty. Leaving P57 fields unset or
-reverting the isolated P57 concern restores the historical P45 paths. Do not
-edit or replace the existing P45 production renderer/profile.
+P57 is isolated behind its renderer/profile and explicit arm fields. Leaving
+P57 fields unset restores existing workloads. Do not reset shared history or
+edit historical P45 files to recover from a P57 failure.

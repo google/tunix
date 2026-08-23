@@ -32,7 +32,7 @@ launch decision after the first four runs are packaged.
 | P57.1 | Former selection-only native curve | Preserved historical evidence | superseded |
 | P57.1b | Four native-program cells | CPU + exact-image gates; P45 and M15 native/no-IS plus native/token-IS complete full horizons | active |
 | P57.2 | Deferred complete Zero-TIM pair | Separate user launch decision; P45 and M15 zero/no-IS cells complete with strict receipts | pending |
-| P57.3 | Isolated milestone evaluations and within-workload contrasts | Evaluations at 0,50,...,450 and preregistered contrast table | pending |
+| P57.3 | In-process held-out evaluation and within-workload contrasts | Exact rollout-only evaluations at 0,50,...,300 and preregistered contrast table | pending |
 | P57.4 | Replication/claim decision | Either stop at concept-study ceiling or run paired multi-seed campaign | pending |
 
 Exactly one phase is active. Every TPU launch and every commit/push requires
@@ -45,13 +45,14 @@ separate user approval.
 | data | original deterministic generator, train seed 42/eval seed 123, side 2–9, p 0.60–0.85 | materialized `m15/main`, side 5–12, p 0.82 |
 | turns | 5 | 15 |
 | prompt/response cap | 4,096 / 2,048 | 4,096 / 8,192 |
-| updates | 450 | 450 |
+| updates | 300 | 300 |
 | topology | DP8xTP8 | DP8xTP8 |
 | rollout rows | 32 prompts x 8 = 256 | 32 prompts x 8 = 256 |
 | optimizer | AdamW 1e-6, b1 0.9, b2 0.95, wd 0, resident | same |
 | objective | GSPO-token, RLOO, beta 0, epsilon 0.003/0.005 | same |
 | sampling | temperature 0.7, top-p 1, top-k 0 | same |
-| checkpoint | every 10; latest recovery point + every-50 milestone | same |
+| experiment/engine seed | CLI/data shuffle 42; vLLM global 0 | same |
+| checkpoint | every 10; `LatestN(1)`, no evidence milestones | same |
 
 P57 `l0` is not used: it matches only the historical envelope, not the exact
 P45 dataset identity. Absolute capability is never compared across P45 and
@@ -72,22 +73,33 @@ M15 as if workload were controlled.
 - Initial model/source/image, data/order, sampling, topology, optimizer,
   objective, horizon, checkpoint schedule, and nonnumerical infrastructure are
   held equal within each workload.
-- The 450-update horizon is shared by all three treatments. The immediate
+- Primary dataset identity is fail-closed: P45 train/eval hashes are
+  `ddc96fd9...`/`b10add7f...`; M15 `main` hashes are
+  `ff1e659b...`/`8edb61cb...`. Full values and generator namespaces are in the
+  runbook. Runtime startup and postflight both attest them.
+- Every paired command pins experiment/data-shuffle seed 42 and the rollout
+  engine global seed 0. Per-request stochastic seeding is unsupported in this
+  backend, so equal seed configuration does not imply byte-identical
+  temperature-0.7 trajectories across independent launches.
+- The 300-update horizon is shared by all three treatments. The immediate
   queue contains only the four native-program cells, but the deferred zero-TIM
-  cells must use the same 450-update horizon when separately authorized.
-- No in-process evaluation. Isolated greedy evaluation uses checkpoints at
-  updates 0, 50, 100, ..., 450 and the same held-out set within a workload.
-  Step 0 runs before training starts; positive milestones run after the
-  uninterrupted 450-update train has durably closed.
-- Milestone retention is deliberately separate from `LatestN(1)`: each
-  retained point contains the full FP32 actor and optimizer state. The operator
-  must accept the multi-terabyte four-arm GCS envelope before launch, and may
-  clean it only after evaluation evidence is durable and separately approved.
+  cells must use the same 300-update horizon when separately authorized.
+- Each training JobSet runs rollout-only held-out evaluation at updates
+  0, 50, 100, 150, 200, 250, and 300. It uses the common temperature-0.7
+  sampling recipe, 100 held-out prompts, and eight generations. Evaluation
+  examples never enter the trainer or backward path.
+- Step labels identify the update count installed in the rollout engine: 0 is
+  the initial policy; at 50 the update-51 weights have not yet been synced; and
+  300 is after the final update and rollout weight sync. The same signed
+  100-row held-out set is reused at all seven points.
+- The final point runs after update 300 and rollout weight sync. A fail-closed
+  postflight classifier requires exactly seven points and 800 rewards per
+  point. Checkpoint milestones are not used for the primary curve.
 
 ## Registered outcomes
 
-- Primary: within-workload on-policy solve curve and isolated held-out
-  milestone solve curve.
+- Primary: within-workload on-policy solve curve and rollout-only held-out
+  solve curve.
 - Secondary: area under the update-indexed solve curve and time-to-threshold.
 - Stability/mechanism: nonfinite/collapse incidence, A-B dose, B-C exactness,
   TIS weight tail and clip fraction, ordinary GSPO ratio/clip tail, gradient and

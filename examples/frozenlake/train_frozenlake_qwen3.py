@@ -318,7 +318,9 @@ if CANON_P32_WORKLOAD:
     )
     if CANON_L3:
       raise ValueError("P57 stock training forbids canonical L3")
-    CANON_P33_ENABLE_EVAL = False
+    CANON_P33_ENABLE_EVAL = dp_workloads.frozenlake_evaluation_enabled(
+        os.environ
+    )
   elif CANON_P57_STOCK_EVAL:
     P57_STOCK_FAST_ATTESTATION = (
         dp_workloads.validate_p57_stock_eval_environment(
@@ -565,6 +567,7 @@ if CANON_P32_WORKLOAD:
               else "token"
           ),
       ),
+      "seed": (SEED, 42),
       "mesh": (
           SHARED_MESH_SHAPE,
           (P32_WORKLOAD.dp_size, P32_WORKLOAD.tp_size),
@@ -1056,6 +1059,22 @@ def create_datasets(
         f"eval_sha256={P57_DATASET_ATTESTATION['eval_sha256']}",
         flush=True,
     )
+  elif CANON_P57_RUN_KIND:
+    P57_DATASET_ATTESTATION = {
+        "train_sha256": p57_workloads.attest_p45_records(
+            train_df.to_dict("records"), "train", expected_count=10_000
+        ),
+        "eval_sha256": p57_workloads.attest_p45_records(
+            test_df.to_dict("records"), "eval", expected_count=100
+        ),
+    }
+    print(
+        "[P57.DATASET] MATERIALIZED_PASS "
+        "candidate=p45 split=legacy train_rows=10000 eval_rows=100 "
+        f"train_sha256={P57_DATASET_ATTESTATION['train_sha256']} "
+        f"eval_sha256={P57_DATASET_ATTESTATION['eval_sha256']}",
+        flush=True,
+    )
 
   train_ds = grain.MapDataset.source(
       frozenlake_data.add_empty_prompt_column(Dataset.from_pandas(train_df))
@@ -1314,8 +1333,18 @@ vllm_rollout_dict = {
         "disable_log_stats": False,
         "enable_prefix_caching": False,
         "dtype": "bfloat16",
+        **({"seed": 0} if CANON_P57_RUN_KIND else {}),
     },
 }
+
+if CANON_P57_RUN_KIND:
+  if SEED != 42:
+    raise ValueError(f"P57 experiment seed drifted: {SEED} != 42")
+  print(
+      f"[P57.SEED] CONTRACT_PASS data_shuffle_seed={SEED} "
+      "vllm_global_seed=0 per_request_seed=unsupported",
+      flush=True,
+  )
 
 if ROLLOUT_ENGINE == "vllm":
   rollout_engine_config = base_rollout.RolloutConfig(
@@ -1620,8 +1649,8 @@ if CANON_P32_WORKLOAD:
       raise ValueError("canonical FrozenLake evaluation dataset is missing")
     training_eval_dataset = test_dataset
     print(
-        "[CANON_P33_EVAL] ENABLED workload=frozenlake cadence=10 "
-        "held_out_rows=100 generations=8",
+        "[CANON_" "P33_EVAL] ENABLED workload=frozenlake "
+        f"cadence={EVAL_EVERY_N_STEPS} held_out_rows=100 generations=8",
         flush=True,
     )
   else:

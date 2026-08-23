@@ -583,9 +583,11 @@ if [ "${CANON_PROFILE_FILE:-}" = \
     fail=1
   }
   p57_expected_milestone_interval=0
+  p57_expected_eval_enabled=0
   case "${CANON_P57_WORKLOAD_CANDIDATE:-}:${CANON_P57_DATA_SPLIT:-}:${CANON_P57_EXPECTED_UPDATES:-}" in
-    ::450|m15:main:450) p57_expected_milestone_interval=50 ;;
+    ::300|m15:main:300) p57_expected_eval_enabled=1 ;;
   esac
+  p57_expected_eval_disabled=$((1 - p57_expected_eval_enabled))
   [ "${CANON_FROZENLAKE_CKPT_MILESTONE_INTERVAL:-0}" = \
     "$p57_expected_milestone_interval" ] || {
     echo "[env] P57 checkpoint milestone retention drifted" >&2
@@ -627,6 +629,9 @@ if [ "${CANON_PROFILE_FILE:-}" = \
       [ -z "${CANON_P57_INFERENCE_REGIME:-}" ] && \
       [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "1" ] && \
       [ "${CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY:-0}" = "0" ] && \
+      [ "${CANON_P33_ENABLE_EVAL:-}" = "$p57_expected_eval_enabled" ] && \
+      [ "${CANON_P33_DISABLE_EVAL:-}" = "$p57_expected_eval_disabled" ] && \
+      [ "${CANON_P31_ENABLE_EVAL:-}" = "$p57_expected_eval_enabled" ] && \
       [[ "${CANON_P57_STOP_AFTER_STEP:-}" =~ ^[1-9][0-9]*$ ]] && \
       [ -z "${CANON_P57_EVAL_CHECKPOINT_STEP:-}${CANON_P57_EVAL_OUTPUT:-}" ] || {
         echo "[env] P57 zero training contract drifted" >&2
@@ -637,6 +642,9 @@ if [ "${CANON_PROFILE_FILE:-}" = \
       [ "${CANON_P57_INFERENCE_REGIME:-}" = "stock-fast" ] && \
       [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "0" ] && \
       [ "${CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY:-0}" = "1" ] && \
+      [ "${CANON_P33_ENABLE_EVAL:-}" = "$p57_expected_eval_enabled" ] && \
+      [ "${CANON_P33_DISABLE_EVAL:-}" = "$p57_expected_eval_disabled" ] && \
+      [ "${CANON_P31_ENABLE_EVAL:-}" = "$p57_expected_eval_enabled" ] && \
       [[ "${CANON_P57_STOP_AFTER_STEP:-}" =~ ^[1-9][0-9]*$ ]] && \
       [ $((CANON_P57_STOP_AFTER_STEP % 50)) -eq 0 ] && \
       [ "$CANON_P57_STOP_AFTER_STEP" -le "$CANON_P57_EXPECTED_UPDATES" ] && \
@@ -685,6 +693,8 @@ if [ "${CANON_PROFILE_FILE:-}" = \
       ;;
   esac
   unset p57_expected_milestone_interval
+  unset p57_expected_eval_enabled
+  unset p57_expected_eval_disabled
 elif [ -n "${CANON_P57_TIM_ARM:-}${CANON_P57_RUN_KIND:-}${CANON_P57_INFERENCE_REGIME:-}${CANON_P57_EXPECTED_UPDATES:-}${CANON_P57_STOP_AFTER_STEP:-}${CANON_P57_EVAL_CHECKPOINT_STEP:-}${CANON_P57_EVAL_OUTPUT:-}${CANON_P57_CALIBRATION_MODE:-}${CANON_P57_CALIBRATION_OUTPUT:-}${CANON_P57_CALIBRATION_RECIPES:-}${CANON_P57_WORKLOAD_CANDIDATE:-}${CANON_P57_DATA_SPLIT:-}" ]; then
   echo "[env] P57 fields require the P57 profile" >&2
   fail=1
@@ -730,9 +740,9 @@ if [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "1" ] && \
       case "${CANON_P57_RUN_KIND:-}:${CANON_P57_TIM_ARM:-}" in
         train:zero)
           [ "${CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY:-0}" = "0" ] && \
-          [ "${CANON_P33_ENABLE_EVAL:-0}" = "0" ] && \
-          [ "${CANON_P33_DISABLE_EVAL:-}" = "1" ] || {
-            echo "[env] P57 zero arm requires strict no-eval full training" >&2
+          [ "${CANON_P33_ENABLE_EVAL:-0}" = "1" ] && \
+          [ "${CANON_P33_DISABLE_EVAL:-}" = "0" ] || {
+            echo "[env] P57 zero arm requires strict full training with rollout-only evaluation" >&2
             fail=1
           }
           echo "[env] P57 zero-TIM fixed lm-head training enabled"

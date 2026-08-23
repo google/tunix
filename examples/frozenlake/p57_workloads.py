@@ -10,6 +10,8 @@ import json
 import random
 from typing import Any, Iterable, Mapping
 
+import numpy as np
+
 
 @dataclass(frozen=True, slots=True)
 class Recipe:
@@ -54,11 +56,33 @@ RECIPES = {
 # this caller-global row axis over DP8, so a smaller count is not admissible.
 GENERATIONS_PER_PROMPT = 8
 
+# The original P45 workload predates the materialized P57 recipes.  Preserve
+# its exact generator namespaces here so a stale or hand-edited parquet cannot
+# silently become a different paired workload.
+P45_GENERATOR_SEEDS = {"train": 42, "eval": 123}
+
 # Calibration and final paired-study data are deliberately disjoint.
 _SPLIT_SEEDS = {
     "calibration": {"train": 57_000_000, "eval": 57_100_000},
     "selection": {"train": 57_200_000, "eval": 57_300_000},
     "main": {"train": 57_400_000, "eval": 57_500_000},
+}
+
+# Immutable primary-study dataset identities.  These literals make a source
+# change to either generator visible before any expensive run starts.
+PRIMARY_DATASET_SHA256 = {
+    ("p45", "legacy", "train", 10_000): (
+        "ddc96fd9ae4e807d8aa8e800795aa743e423ffe4f936f681596460d28e670487"
+    ),
+    ("p45", "legacy", "eval", 100): (
+        "b10add7f31b2cc9931c65b4cc59780004fd3d52a4fce9d20ed565c87df44b580"
+    ),
+    ("m15", "main", "train", 10_000): (
+        "ff1e659b80a0c9bd640e616972a523132f4a333ef174b1a0b13b202958a30e43"
+    ),
+    ("m15", "main", "eval", 100): (
+        "8edb61cb995b4abe8d3f90b32e961be74b8b74ab46120e0d43513ea26d324089"
+    ),
 }
 
 
@@ -290,6 +314,84 @@ def materialize_dataset_pair(
   return selected
 
 
+def attest_p45_records(
+    records: Iterable[Mapping[str, Any]],
+    role: str,
+    *,
+    expected_count: int,
+) -> str:
+  """Validates one legacy P45 split and returns its canonical SHA-256."""
+  try:
+    generator_seed = P45_GENERATOR_SEEDS[role]
+  except KeyError as exc:
+    raise ValueError("P45 dataset role must be train or eval") from exc
+  rows = [
+      {key: _plain(value) for key, value in dict(raw).items()}
+      for raw in records
+  ]
+  if len(rows) != expected_count:
+    raise ValueError(
+        f"P45 dataset row count drifted: {len(rows)} != {expected_count}"
+    )
+  expected_rows = materialize_p45_records(role, expected_count)
+  canonical_rows = []
+  for index, (row, expected) in enumerate(zip(rows, expected_rows)):
+    if row != expected:
+      wrong = {
+          key: row.get(key)
+          for key, value in expected.items()
+          if row.get(key) != value
+      }
+      extra = sorted(set(row) - set(expected))
+      raise ValueError(
+          "P45 dataset row drifted: "
+          f"role={role} index={index} wrong={wrong} extra={extra}"
+      )
+    canonical_rows.append(expected)
+  payload = json.dumps(
+      {
+          "schema": "p57-p45-generator-dataset-v1",
+          "role": role,
+          "generator_seed": generator_seed,
+          "rows": canonical_rows,
+      },
+      sort_keys=True,
+      separators=(",", ":"),
+  ).encode("utf-8")
+  digest = hashlib.sha256(payload).hexdigest()
+  registered = PRIMARY_DATASET_SHA256.get(
+      ("p45", "legacy", role, expected_count)
+  )
+  if registered is not None and digest != registered:
+    raise ValueError(
+        f"P45 registered dataset SHA drifted: {digest} != {registered}"
+    )
+  return digest
+
+
+def materialize_p45_records(role: str, count: int) -> list[dict[str, Any]]:
+  """Reconstructs the original seed-42/123 P45 parameter rows."""
+  try:
+    generator_seed = P45_GENERATOR_SEEDS[role]
+  except KeyError as exc:
+    raise ValueError("P45 dataset role must be train or eval") from exc
+  if count <= 0:
+    raise ValueError("P45 dataset count must be positive")
+  rng = np.random.RandomState(generator_seed)
+  seeds = rng.randint(0, 100_000, size=count)
+  sizes = rng.randint(2, 10, size=count)
+  probabilities = rng.uniform(0.60, 0.85, size=count)
+  return [
+      {
+          "env_name": "frozenlake",
+          "seed": int(seed),
+          "size": int(side),
+          "p": float(probability),
+      }
+      for seed, side, probability in zip(seeds, sizes, probabilities)
+  ]
+
+
 def _plain(value: Any) -> Any:
   return value.item() if hasattr(value, "item") else value
 
@@ -369,4 +471,13 @@ def attest_records(
       sort_keys=True,
       separators=(",", ":"),
   ).encode("utf-8")
-  return hashlib.sha256(payload).hexdigest()
+  digest = hashlib.sha256(payload).hexdigest()
+  registered = PRIMARY_DATASET_SHA256.get(
+      (recipe_name, split, role, expected_count)
+  )
+  if registered is not None and digest != registered:
+    raise ValueError(
+        "P57 registered dataset SHA drifted: "
+        f"{recipe_name}/{split}/{role} {digest} != {registered}"
+    )
+  return digest

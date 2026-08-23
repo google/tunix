@@ -92,6 +92,9 @@ class P57StockFastContractTest(unittest.TestCase):
         "CANON_P57_DATA_SPLIT": "selection",
         "CANON_P57_EXPECTED_UPDATES": "200",
         "CANON_P30_OPT_STATE_OFFLOAD": "0",
+        "CANON_P33_ENABLE_EVAL": "0",
+        "CANON_P33_DISABLE_EVAL": "1",
+        "CANON_P31_ENABLE_EVAL": "0",
     }
     train = {
         **shared,
@@ -145,10 +148,10 @@ class P57StockFastContractTest(unittest.TestCase):
     workload, base = self._environment()
     variants = (
         ("mismatch", "m15", "selection", "200", "m15-selection-mismatch"),
-        ("mismatch", "", "", "450", "p45-mismatch"),
-        ("is", "", "", "450", "p45-is"),
-        ("mismatch", "m15", "main", "450", "m15-main-mismatch"),
-        ("is", "m15", "main", "450", "m15-main-is"),
+        ("mismatch", "", "", "300", "p45-mismatch"),
+        ("is", "", "", "300", "p45-is"),
+        ("mismatch", "m15", "main", "300", "m15-main-mismatch"),
+        ("is", "m15", "main", "300", "m15-main-is"),
     )
     for run_kind in ("train", "eval"):
       zero_switches = (
@@ -181,6 +184,9 @@ class P57StockFastContractTest(unittest.TestCase):
               "CANON_P57_DATA_SPLIT": split,
               "CANON_P57_EXPECTED_UPDATES": updates,
               "CANON_P30_OPT_STATE_OFFLOAD": "0",
+              "CANON_P33_ENABLE_EVAL": "0" if updates == "200" else "1",
+              "CANON_P33_DISABLE_EVAL": "1" if updates == "200" else "0",
+              "CANON_P31_ENABLE_EVAL": "0" if updates == "200" else "1",
               **{name: "0" for name in zero_switches},
               **{name: "1" for name in one_switches},
           }
@@ -204,6 +210,9 @@ class P57StockFastContractTest(unittest.TestCase):
         "CANON_P57_DATA_SPLIT": "selection",
         "CANON_P57_EXPECTED_UPDATES": "200",
         "CANON_P30_OPT_STATE_OFFLOAD": "0",
+        "CANON_P33_ENABLE_EVAL": "0",
+        "CANON_P33_DISABLE_EVAL": "1",
+        "CANON_P31_ENABLE_EVAL": "0",
         **{
             name: "0" for name in dp_workloads.P57_STOCK_TRAIN_ZERO_SWITCHES
         },

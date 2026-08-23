@@ -19,8 +19,8 @@ ARMS = {
     "zero": ("zero", "none", "", "1", "0"),
 }
 WORKLOADS = {
-    "p45": (450, 5, 2048, "", ""),
-    "m15": (450, 15, 8192, "m15", "main"),
+    "p45": (300, 5, 2048, "", ""),
+    "m15": (300, 15, 8192, "m15", "main"),
 }
 
 
@@ -56,13 +56,14 @@ def verify(path: Path, *, wave: str, workload: str, source: str) -> None:
       "CANON_P57_DATA_SPLIT": split,
       "CANON_P38_FIXED_LM_HEAD": fixed,
       "CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY": warning,
-      "CANON_P33_ENABLE_EVAL": "0",
-      "CANON_P33_DISABLE_EVAL": "1",
+      "CANON_P33_ENABLE_EVAL": "1",
+      "CANON_P33_DISABLE_EVAL": "0",
+      "CANON_P31_ENABLE_EVAL": "1",
       "CANON_OPT_STATE_RESIDENT": "1",
       "CANON_P30_OPT_STATE_OFFLOAD": "0",
       "CANON_FROZENLAKE_CKPT_INTERVAL": "10",
       "CANON_FROZENLAKE_CKPT_MAX_TO_KEEP": "1",
-      "CANON_FROZENLAKE_CKPT_MILESTONE_INTERVAL": "50",
+      "CANON_FROZENLAKE_CKPT_MILESTONE_INTERVAL": "0",
   }
   wrong = {
       name: env.get(name)
@@ -74,11 +75,13 @@ def verify(path: Path, *, wave: str, workload: str, source: str) -> None:
   command = env["CANON_RUN_CMD"].split()
   required = {
       f"--max_steps={updates}",
+      "--seed=42",
       f"--env_max_steps={turns}",
       "--max_prompt_length=4096",
       f"--max_response_length={response}",
       f"--sampler_is={sampler}",
-      "--eval_every_n_steps=0",
+      "--num_test_batches=4",
+      "--eval_every_n_steps=50",
   }
   missing = sorted(required - set(command))
   sampler_args = [value for value in command if value.startswith("--sampler_is=")]
