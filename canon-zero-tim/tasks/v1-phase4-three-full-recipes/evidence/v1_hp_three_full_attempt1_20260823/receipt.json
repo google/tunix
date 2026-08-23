@@ -1,0 +1,9 @@
+{
+  "attempt": 1,
+  "timestamp_utc": "2026-08-23T21:58:00Z",
+  "source_commit": "dc84ced02b6720d1cf164c5e9960b9fbc6853e92",
+  "gsm8k_run_id": "g64f",
+  "p45_run_id": "f45g",
+  "gsm8k_error": "ValueError: unexpected JAX type (e.g. shape/dtype) for argument to VJP function: got bfloat16[256,151936], but expected bfloat16[256,37984]",
+  "p45_error": "ValueError: P38 fixed lm_head requires semantic M in (8, 16, 32, 64, 128, 256, 4096), got (2048, 4096)"
+}
