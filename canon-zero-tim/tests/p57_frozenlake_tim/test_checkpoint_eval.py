@@ -17,7 +17,7 @@ sys.modules[SPEC.name] = checkpoint
 SPEC.loader.exec_module(checkpoint)
 
 
-def _env(*, arm="zero", step="20"):
+def _env(*, arm="zero", step="300"):
   return {
       "CANON_EXPECT_COMMIT": "a" * 40,
       "CANON_P57_TIM_ARM": arm,
@@ -34,13 +34,13 @@ def _config(arm="zero"):
       mode="resume",
       root=checkpoint.GCS_ROOT,
       tag=f"p57-campaign-{arm}",
-      interval=10,
+      interval=300,
       max_to_keep=1,
       milestone_interval=0,
   )
 
 
-def _metadata(config, *, arm="zero", step=20):
+def _metadata(config, *, arm="zero", step=300):
   return {
       "global_step": step,
       "role": "actor",
@@ -76,7 +76,7 @@ class P57CheckpointEvalTest(unittest.TestCase):
         config = _config(arm)
         checkpoint.validate_p57_evaluation_restored(
             config,
-            restored_step=20,
+            restored_step=300,
             metadata=_metadata(config, arm=arm),
             env=_env(arm=arm),
         )
@@ -86,11 +86,11 @@ class P57CheckpointEvalTest(unittest.TestCase):
     cases = []
     wrong_role = _metadata(config)
     wrong_role["role"] = "reference"
-    cases.append((20, wrong_role, _env(), "actor"))
+    cases.append((300, wrong_role, _env(), "actor"))
     wrong_treatment = _metadata(config)
     wrong_treatment["canon_resume_contract"]["p57_fixed_lm_head"] = "0"
-    cases.append((20, wrong_treatment, _env(), "provenance"))
-    cases.append((10, _metadata(config), _env(), "wrong checkpoint"))
+    cases.append((300, wrong_treatment, _env(), "provenance"))
+    cases.append((200, _metadata(config), _env(), "wrong checkpoint"))
     for restored, metadata, env, message in cases:
       with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
         checkpoint.validate_p57_evaluation_restored(
@@ -105,22 +105,22 @@ class P57CheckpointEvalTest(unittest.TestCase):
     with self.assertRaisesRegex(ValueError, "boundary"):
       checkpoint.validate_p57_evaluation_restored(
           config,
-          restored_step=20,
+          restored_step=300,
           metadata=_metadata(config),
-          env=_env(step="25"),
+          env=_env(step="250"),
       )
     new_config = checkpoint.Config(
         mode="new",
         root=config.root,
         tag=config.tag,
-        interval=10,
+        interval=300,
         max_to_keep=1,
         milestone_interval=0,
     )
     with self.assertRaisesRegex(ValueError, "mode=resume"):
       checkpoint.validate_p57_evaluation_restored(
           new_config,
-          restored_step=20,
+          restored_step=300,
           metadata=_metadata(config),
           env=_env(),
       )
@@ -130,7 +130,7 @@ class P57CheckpointEvalTest(unittest.TestCase):
         mode="new",
         root=checkpoint.GCS_ROOT,
         tag="p57-campaign-zero",
-        interval=10,
+        interval=300,
         max_to_keep=1,
         milestone_interval=0,
     )
@@ -153,7 +153,7 @@ class P57CheckpointEvalTest(unittest.TestCase):
         mode="resume",
         root=checkpoint.GCS_ROOT,
         tag="p57-campaign-mismatch",
-        interval=10,
+        interval=300,
         max_to_keep=1,
         milestone_interval=0,
     )
@@ -166,7 +166,14 @@ class P57CheckpointEvalTest(unittest.TestCase):
     )
 
   def test_historical_selection_checkpoint_keeps_eval_disabled_provenance(self):
-    config = _config("mismatch")
+    config = checkpoint.Config(
+        mode="resume",
+        root=checkpoint.GCS_ROOT,
+        tag="p57-campaign-mismatch",
+        interval=10,
+        max_to_keep=1,
+        milestone_interval=0,
+    )
     env = {
         **_env(arm="mismatch", step="200"),
         "CANON_P57_EXPECTED_UPDATES": "200",

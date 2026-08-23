@@ -52,7 +52,7 @@ separate user approval.
 | objective | GSPO-token, RLOO, beta 0, epsilon 0.003/0.005 | same |
 | sampling | temperature 0.7, top-p 1, top-k 0 | same |
 | experiment/engine seed | CLI/data shuffle 42; vLLM global 0 | same |
-| checkpoint | every 10; `LatestN(1)`, no evidence milestones | same |
+| checkpoint | final step 300 only; `LatestN(1)`, no evidence milestones | same |
 
 P57 `l0` is not used: it matches only the historical envelope, not the exact
 P45 dataset identity. Absolute capability is never compared across P45 and
@@ -73,6 +73,10 @@ M15 as if workload were controlled.
 - Initial model/source/image, data/order, sampling, topology, optimizer,
   objective, horizon, checkpoint schedule, and nonnumerical infrastructure are
   held equal within each workload.
+- The active 300-update primary cells run uninterrupted and write exactly one
+  scheduled checkpoint at update 300. `LatestN(1)` retains that final actor and
+  optimizer state. Historical P45 and M15-selection carriers keep their
+  registered ten-update cadence; they are not members of the primary contrast.
 - Primary dataset identity is fail-closed: P45 train/eval hashes are
   `ddc96fd9...`/`b10add7f...`; M15 `main` hashes are
   `ff1e659b...`/`8edb61cb...`. Full values and generator namespaces are in the

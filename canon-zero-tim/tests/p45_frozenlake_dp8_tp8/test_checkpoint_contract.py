@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 import unittest
 
 _ROOT = Path(__file__).resolve().parents[3]
@@ -68,7 +69,7 @@ class FrozenLakeCheckpointContractTest(unittest.TestCase):
     cases = (
         ("CANON_FROZENLAKE_CKPT_ROOT", "gs://wrong", "root drifted"),
         ("CANON_FROZENLAKE_CKPT_TAG", "Bad/Tag", "tag must be"),
-        ("CANON_FROZENLAKE_CKPT_INTERVAL", "11", "exactly 10"),
+        ("CANON_FROZENLAKE_CKPT_INTERVAL", "11", "expected 10"),
         ("CANON_FROZENLAKE_CKPT_MAX_TO_KEEP", "2", "exactly one"),
         (
             "CANON_FROZENLAKE_CKPT_MILESTONE_INTERVAL",
@@ -83,6 +84,77 @@ class FrozenLakeCheckpointContractTest(unittest.TestCase):
         env[key] = value
         with self.assertRaisesRegex(ValueError, message):
           frozenlake_checkpoint.from_env(env)
+
+  def test_active_p57_primary_uses_only_the_final_checkpoint(self):
+    for arm in ("mismatch", "is", "zero"):
+      for candidate, split in (("", ""), ("m15", "main")):
+        with self.subTest(arm=arm, candidate=candidate):
+          env = _env()
+          env.update({
+              "CANON_P57_RUN_KIND": "train",
+              "CANON_P57_TIM_ARM": arm,
+              "CANON_P57_EXPECTED_UPDATES": "300",
+              "CANON_P57_WORKLOAD_CANDIDATE": candidate,
+              "CANON_P57_DATA_SPLIT": split,
+              "CANON_FROZENLAKE_CKPT_INTERVAL": "300",
+          })
+          config = frozenlake_checkpoint.from_env(env)
+          self.assertEqual(config.interval, 300)
+          policy = frozenlake_checkpoint.build_preservation_policy(config)
+          self.assertEqual(policy.n, 1)
+
+          from orbax.checkpoint import v1 as ocp
+          interval_policy = (
+              ocp.training.save_decision_policies.FixedIntervalPolicy(
+                  config.interval
+              )
+          )
+          self.assertFalse(
+              interval_policy.should_save(
+                  SimpleNamespace(step=299), (), context=None
+              )
+          )
+          self.assertTrue(
+              interval_policy.should_save(
+                  SimpleNamespace(step=300), (), context=None
+              )
+          )
+
+  def test_final_only_interval_is_scoped_to_registered_p57_primary(self):
+    base = {
+        "CANON_P57_RUN_KIND": "train",
+        "CANON_P57_TIM_ARM": "mismatch",
+        "CANON_P57_EXPECTED_UPDATES": "300",
+        "CANON_P57_WORKLOAD_CANDIDATE": "",
+        "CANON_P57_DATA_SPLIT": "",
+    }
+    mutations = (
+        ("CANON_P57_RUN_KIND", "calibration"),
+        ("CANON_P57_TIM_ARM", "unknown"),
+        ("CANON_P57_EXPECTED_UPDATES", "200"),
+        ("CANON_P57_WORKLOAD_CANDIDATE", "m15"),
+        ("CANON_P57_DATA_SPLIT", "selection"),
+    )
+    for key, value in mutations:
+      with self.subTest(key=key):
+        env = _env()
+        env.update(base)
+        env[key] = value
+        env["CANON_FROZENLAKE_CKPT_INTERVAL"] = "300"
+        with self.assertRaisesRegex(ValueError, "expected 10"):
+          frozenlake_checkpoint.from_env(env)
+
+  def test_active_p57_primary_rejects_legacy_ten_step_interval(self):
+    env = _env()
+    env.update({
+        "CANON_P57_RUN_KIND": "train",
+        "CANON_P57_TIM_ARM": "mismatch",
+        "CANON_P57_EXPECTED_UPDATES": "300",
+        "CANON_P57_WORKLOAD_CANDIDATE": "m15",
+        "CANON_P57_DATA_SPLIT": "main",
+    })
+    with self.assertRaisesRegex(ValueError, "expected 300"):
+      frozenlake_checkpoint.from_env(env)
 
   def test_p57_milestones_keep_latest_one_plus_every_fifty(self):
     env = _env()

@@ -87,9 +87,10 @@ the whole zero-TIM bundle effect and cannot attribute a result to one kernel.
    benefit (`zero - mismatch`), and zero-TIM versus mitigation (`zero - is`).
 
 Each wave uses the same immutable source/image/model and fresh arm-specific
-checkpoint tags. A healthy run is not intentionally paused. Checkpoints are
-saved every 10 updates and the rolling recovery policy keeps only the latest
-one. No YAML hand edits are admitted.
+checkpoint tags. A healthy run is not intentionally paused. The primary
+300-update recipes save only at the final update and `LatestN(1)` retains that
+single actor+optimizer checkpoint. Partial stops are rejected because they
+would have no durable recovery point. No YAML hand edits are admitted.
 
 ## Exit gate
 
@@ -104,8 +105,8 @@ one. No YAML hand edits are admitted.
   `P57_STOCK_RUNTIME_MATRIX_PASS variants=5 stages=train,eval`,
   `P57_STOCK_POST_BACKWARD_MODULE_C_PASS arms=mismatch,is`, and the
   unknown-arm negative marker.
-- Target pass for the current four-job queue: all four 300-update horizons and
-  seven-point evaluation classifiers complete;
+- Target pass for the current four-job queue: all four **fresh** 300-update
+  horizons and seven-point evaluation classifiers complete;
   the two `mismatch` jobs have exactly one no-IS purity receipt and the two `is`
   jobs have exactly one token-IS purity receipt. All four attest the stock-fast
   zero-TIM-off path, a finite A-B dose, valid B-C, checkpoints, and complete

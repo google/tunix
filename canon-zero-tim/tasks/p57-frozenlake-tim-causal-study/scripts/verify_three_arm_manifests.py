@@ -61,7 +61,7 @@ def verify(path: Path, *, wave: str, workload: str, source: str) -> None:
       "CANON_P31_ENABLE_EVAL": "1",
       "CANON_OPT_STATE_RESIDENT": "1",
       "CANON_P30_OPT_STATE_OFFLOAD": "0",
-      "CANON_FROZENLAKE_CKPT_INTERVAL": "10",
+      "CANON_FROZENLAKE_CKPT_INTERVAL": "300",
       "CANON_FROZENLAKE_CKPT_MAX_TO_KEEP": "1",
       "CANON_FROZENLAKE_CKPT_MILESTONE_INTERVAL": "0",
   }

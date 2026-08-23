@@ -40,6 +40,36 @@ P57_STOCK_SYNC_RECEIPT = {
     "transport": "update_params",
     "exact_weight_attestation": "unavailable-by-design",
 }
+P45_CHECKPOINT_INTERVAL = 10
+P57_PRIMARY_CHECKPOINT_INTERVAL = 300
+
+
+def registered_checkpoint_interval(env: Mapping[str, str]) -> int:
+  """Returns the exact checkpoint interval registered for this workload.
+
+  The active P57 concept-study arms run uninterrupted for 300 updates and
+  produce their learning curve in-process.  They need only the final durable
+  recovery point.  Historical P45 and P57 discovery carriers retain their
+  ten-update recovery cadence.
+  """
+  primary_workload = (
+      (
+          env.get("CANON_P57_WORKLOAD_CANDIDATE", "") == ""
+          and env.get("CANON_P57_DATA_SPLIT", "") == ""
+      )
+      or (
+          env.get("CANON_P57_WORKLOAD_CANDIDATE", "") == "m15"
+          and env.get("CANON_P57_DATA_SPLIT", "") == "main"
+      )
+  )
+  if (
+      env.get("CANON_P57_RUN_KIND", "") in ("train", "eval")
+      and env.get("CANON_P57_TIM_ARM", "") in ("zero", "mismatch", "is")
+      and env.get("CANON_P57_EXPECTED_UPDATES", "") == "300"
+      and primary_workload
+  ):
+    return P57_PRIMARY_CHECKPOINT_INTERVAL
+  return P45_CHECKPOINT_INTERVAL
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -136,8 +166,12 @@ def from_env(env: Mapping[str, str]) -> Config:
     )
   except ValueError as exc:
     raise ValueError("FrozenLake checkpoint bounds must be integers") from exc
-  if interval != 10:
-    raise ValueError("P45 checkpoint interval must be exactly 10 updates")
+  expected_interval = registered_checkpoint_interval(env)
+  if interval != expected_interval:
+    raise ValueError(
+        "FrozenLake checkpoint interval drifted: "
+        f"expected {expected_interval}, got {interval}"
+    )
   if max_to_keep != 1:
     raise ValueError("P45 checkpoint retention must be exactly one")
   if milestone_interval not in (0, 50):

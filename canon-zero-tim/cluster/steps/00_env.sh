@@ -615,14 +615,24 @@ if [ "${CANON_PROFILE_FILE:-}" = \
     fail=1
   }
   p57_expected_milestone_interval=0
+  p57_expected_checkpoint_interval=10
   p57_expected_eval_enabled=0
   case "${CANON_P57_WORKLOAD_CANDIDATE:-}:${CANON_P57_DATA_SPLIT:-}:${CANON_P57_EXPECTED_UPDATES:-}" in
-    ::300|m15:main:300) p57_expected_eval_enabled=1 ;;
+    ::300|m15:main:300)
+      p57_expected_eval_enabled=1
+      p57_expected_checkpoint_interval=300
+      ;;
   esac
   p57_expected_eval_disabled=$((1 - p57_expected_eval_enabled))
   [ "${CANON_FROZENLAKE_CKPT_MILESTONE_INTERVAL:-0}" = \
     "$p57_expected_milestone_interval" ] || {
     echo "[env] P57 checkpoint milestone retention drifted" >&2
+    fail=1
+  }
+  [ "${CANON_FROZENLAKE_CKPT_INTERVAL:-}" = \
+    "$p57_expected_checkpoint_interval" ] && \
+  [ "${CANON_FROZENLAKE_CKPT_MAX_TO_KEEP:-}" = "1" ] || {
+    echo "[env] P57 checkpoint cadence drifted" >&2
     fail=1
   }
   if [ -n "${CANON_P57_WORKLOAD_CANDIDATE:-}" ] || \
@@ -664,7 +674,8 @@ if [ "${CANON_PROFILE_FILE:-}" = \
       [ "${CANON_P33_ENABLE_EVAL:-}" = "$p57_expected_eval_enabled" ] && \
       [ "${CANON_P33_DISABLE_EVAL:-}" = "$p57_expected_eval_disabled" ] && \
       [ "${CANON_P31_ENABLE_EVAL:-}" = "$p57_expected_eval_enabled" ] && \
-      [[ "${CANON_P57_STOP_AFTER_STEP:-}" =~ ^[1-9][0-9]*$ ]] && \
+      [ "${CANON_P57_STOP_AFTER_STEP:-}" = \
+        "${CANON_P57_EXPECTED_UPDATES:-}" ] && \
       [ -z "${CANON_P57_EVAL_CHECKPOINT_STEP:-}${CANON_P57_EVAL_OUTPUT:-}" ] || {
         echo "[env] P57 zero training contract drifted" >&2
         fail=1
@@ -680,6 +691,8 @@ if [ "${CANON_PROFILE_FILE:-}" = \
       [[ "${CANON_P57_STOP_AFTER_STEP:-}" =~ ^[1-9][0-9]*$ ]] && \
       [ $((CANON_P57_STOP_AFTER_STEP % 50)) -eq 0 ] && \
       [ "$CANON_P57_STOP_AFTER_STEP" -le "$CANON_P57_EXPECTED_UPDATES" ] && \
+      { [ "$p57_expected_checkpoint_interval" != "300" ] || \
+        [ "$CANON_P57_STOP_AFTER_STEP" = "$CANON_P57_EXPECTED_UPDATES" ]; } && \
       [ -z "${CANON_P57_EVAL_CHECKPOINT_STEP:-}${CANON_P57_EVAL_OUTPUT:-}" ] || {
         echo "[env] P57 native training contract drifted" >&2
         fail=1
@@ -725,6 +738,7 @@ if [ "${CANON_PROFILE_FILE:-}" = \
       ;;
   esac
   unset p57_expected_milestone_interval
+  unset p57_expected_checkpoint_interval
   unset p57_expected_eval_enabled
   unset p57_expected_eval_disabled
 elif [ -n "${CANON_P57_TIM_ARM:-}${CANON_P57_RUN_KIND:-}${CANON_P57_INFERENCE_REGIME:-}${CANON_P57_EXPECTED_UPDATES:-}${CANON_P57_STOP_AFTER_STEP:-}${CANON_P57_EVAL_CHECKPOINT_STEP:-}${CANON_P57_EVAL_OUTPUT:-}${CANON_P57_CALIBRATION_MODE:-}${CANON_P57_CALIBRATION_OUTPUT:-}${CANON_P57_CALIBRATION_RECIPES:-}${CANON_P57_WORKLOAD_CANDIDATE:-}${CANON_P57_DATA_SPLIT:-}" ]; then

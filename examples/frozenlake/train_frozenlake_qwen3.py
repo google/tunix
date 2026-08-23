@@ -1561,7 +1561,8 @@ if P45_CHECKPOINT.enabled:
         "[P57.STOCK] SEGMENT_PREFLIGHT "
         f"restored={restored_checkpoint_step} "
         f"stop_after={P57_STOP_AFTER_STEP} horizon={MAX_STEPS} "
-        "checkpoint_interval=10 max_to_keep=1",
+        f"checkpoint_interval={SAVE_INTERVAL_STEPS} "
+        f"max_to_keep={MAX_TO_KEEP}",
         flush=True,
     )
 if CANON_P32_WORKLOAD:

@@ -9,8 +9,32 @@ JobSet, or delete an artifact without explicit user approval.
 Read in order: `state.md` → `plan.md` →
 `phases/p57-1b-three-arm-baselines.md` → `RUNBOOK.md`.
 
-The immediate queue is four jobs: P45 and M15 under native/no-IS and
-native/token-IS. The Zero-TIM pair is deferred.
+The immediate queue is four **fresh** jobs: P45 and M15 under native/no-IS and
+native/token-IS. None may resume an earlier attempt. The Zero-TIM pair is
+deferred.
+
+## Current P45 native incident
+
+Do not resume or reuse `canon-p57-fl-mism-n45j-2a89eef3`. It committed update
+1, then failed before weight sync because the evaluation-cycle receipt treated
+the pre-sync `rl_cluster.global_steps=0` as the completed timing row. At this
+exact boundary the authoritative committed counter is
+`actor_trainer.train_steps=1`; the cluster counter deliberately remains at the
+evaluated policy step until `sync_weights()` finishes.
+
+The repair keeps the public receipt unchanged:
+
+~~~text
+[P57.EVAL.CYCLE] policy_step=0 enclosing_global_step=1
+~~~
+
+It now fail-closes on both lifecycle facts: committed actor step must be
+`policy_step+1`, and deferred cluster step must still be `policy_step`. Before
+rendering replacements, require the P57 CPU suite to report 136/136 and the V1
+suite to report 12/12. Use fresh run ids, output roots, campaign roots, and
+checkpoint tags for all four jobs. A replacement is accepted only after it
+crosses update 1, emits the receipt above, completes weight sync, and begins policy step 1; host
+tests alone do not certify the target fix.
 
 ## Contract you must not reinterpret
 
@@ -26,7 +50,8 @@ native/token-IS. The Zero-TIM pair is deferred.
   `0,50,100,150,200,250,300`.
 - Each evaluation point is 100 prompts x eight generations = 800 rewards.
 - Evaluation does not run trainer eval/backward and does not write a checkpoint.
-- Checkpoint every 10, `LatestN(1)`, no retained 50-step milestones.
+- One scheduled checkpoint at final update 300, `LatestN(1)`, no retained
+  50-step milestones. A partial primary run is not resumable by design.
 - Native finite A-B is warning-only treatment; B-C and all structural safety
   gates remain fatal.
 
@@ -56,6 +81,9 @@ Stop if any marker is absent.
 
 Confirm every earlier P57 JobSet is terminal and packaged. Choose fresh,
 previously unused run IDs, output roots, campaign roots, and checkpoint tags.
+All four cells are rerendered together after the shared receipt fix so source,
+checkpoint cadence, and launch generation remain matched; do not selectively
+resume a cell that happened to run farther.
 
 ## Render
 
@@ -92,7 +120,7 @@ Never hide a restart or relaunch under the same scientific identity.
 
 Each successful run must have:
 
-- update/checkpoint completion at 300;
+- update completion at 300 and exactly the registered final checkpoint at 300;
 - one eval-enabled receipt with cadence 50;
 - P42 JSON policy steps exactly `0,50,100,150,200,250,300`;
 - `n=800` and finite metrics at every point;

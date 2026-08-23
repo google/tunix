@@ -46,8 +46,15 @@ def classify(
   expected_fixed = "1" if arm == "zero" else "0"
   if not _SHA_RE.fullmatch(source_commit):
     reasons.append("source commit is not a full lowercase SHA")
-  if checkpoint_step < 0 or checkpoint_step % 10:
-    reasons.append("checkpoint step is not zero or a 10-step boundary")
+  active_primary = expected_updates == 300 and (
+      (workload_candidate == "" and data_split == "")
+      or (workload_candidate == "m15" and data_split == "main")
+  )
+  if active_primary:
+    if checkpoint_step not in (0, 300):
+      reasons.append("checkpoint step is not the registered zero/final boundary")
+  elif checkpoint_step < 0 or checkpoint_step % 10:
+    reasons.append("historical checkpoint step is not a 10-step boundary")
   if expected_updates <= 0 or checkpoint_step > expected_updates:
     reasons.append("checkpoint step lies outside the registered horizon")
   if bool(workload_candidate) != bool(data_split):

@@ -380,6 +380,15 @@ def render_all(
         or stop_after_step > expected_updates
     ):
       raise ValueError("P57 stop-after-step must be a 50-step boundary in horizon")
+    if (
+        not stock_only
+        and expected_updates == _PAIRED_ARM_UPDATES
+        and stop_after_step != expected_updates
+    ):
+      raise ValueError(
+          "P57 primary 300-update arms must run the full horizon because the "
+          "only durable checkpoint is the final step"
+      )
   elif stop_after_step is not None:
     raise ValueError("P57 evaluation does not accept a training stop boundary")
   base = p33.load_base(base_path)
@@ -412,9 +421,14 @@ def render_all(
     job_name = document["metadata"]["name"]
     state = f"/tmp/canon-state/{job_name}"
     checkpoint_tag = f"{campaign_tag}-{arm.name}"
-    # Active P57 evaluates in-process and needs only the rolling recovery
-    # checkpoint; retaining full-model milestones wastes storage and time.
+    # Active P57 evaluates in-process and needs only the final recovery
+    # checkpoint; historical discovery carriers keep the 10-step cadence.
     milestone_interval = "0"
+    checkpoint_interval = (
+        "300"
+        if not stock_only and expected_updates == _PAIRED_ARM_UPDATES
+        else "10"
+    )
     _replace_env(
         document,
         {
@@ -443,7 +457,7 @@ def render_all(
             "CANON_FROZENLAKE_CKPT_MODE": checkpoint_mode,
             "CANON_FROZENLAKE_CKPT_ROOT": _CHECKPOINT_ROOT,
             "CANON_FROZENLAKE_CKPT_TAG": checkpoint_tag,
-            "CANON_FROZENLAKE_CKPT_INTERVAL": "10",
+            "CANON_FROZENLAKE_CKPT_INTERVAL": checkpoint_interval,
             "CANON_FROZENLAKE_CKPT_MAX_TO_KEEP": "1",
             "CANON_FROZENLAKE_CKPT_MILESTONE_INTERVAL": milestone_interval,
             "ENABLE_PATHWAYS_PERSISTENCE": "1",
@@ -495,6 +509,8 @@ def render_all(
         "CANON_FROZENLAKE_CKPT_MODE": checkpoint_mode,
         "CANON_FROZENLAKE_CKPT_ROOT": _CHECKPOINT_ROOT,
         "CANON_FROZENLAKE_CKPT_TAG": checkpoint_tag,
+        "CANON_FROZENLAKE_CKPT_INTERVAL": checkpoint_interval,
+        "CANON_FROZENLAKE_CKPT_MAX_TO_KEEP": "1",
         "CANON_FROZENLAKE_CKPT_MILESTONE_INTERVAL": milestone_interval,
     }
     if run_kind == "eval":

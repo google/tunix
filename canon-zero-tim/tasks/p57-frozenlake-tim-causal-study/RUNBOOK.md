@@ -92,6 +92,23 @@ Every point reuses the same signed 100-row held-out set and contains exactly
 100 x 8 = 800 finite rewards. The postflight classifier rejects a missing,
 duplicated, nonfinite, under-covered, wrong-seed, or wrong-dataset point.
 
+The pre-update receipt is emitted after the actor optimizer transaction and
+before weight synchronization. Therefore its two live counters intentionally
+differ at policy step `s`:
+
+~~~text
+actor_trainer.train_steps == s + 1   # committed update / timing row
+rl_cluster.global_steps == s         # rollout policy, advanced by sync_weights
+~~~
+
+`enclosing_global_step=s+1` in `[P57.EVAL.CYCLE]` names the completed timing
+row consumed by the classifier; it is not a raw echo of the still-deferred
+cluster counter. The failed `n45j` P45-native attempt read that deferred
+counter, false-red at `0 == 0 + 1`, and is `INCONCLUSIVE` despite one committed
+optimizer transaction. Never resume or reuse it. A repaired fresh run must
+emit the step-0 receipt, finish weight sync, and start policy step 1 before the
+target repair is considered exercised.
+
 W&B metrics are under:
 
 ~~~text
@@ -112,12 +129,16 @@ the run `INCONCLUSIVE`; do not fabricate it from training reward.
 
 ## Checkpoint contract
 
-Checkpoints write every 10 updates to
+The active P57 300-update primary recipes write one scheduled checkpoint at
+update 300 to
 `gs://yuxzhang-tunix-models/canon-zero-tim/checkpoints/frozenlake`. The rolling
-policy keeps only the latest checkpoint (`max_to_keep=1`). The active campaign
-sets `CANON_FROZENLAKE_CKPT_MILESTONE_INTERVAL=0`; no additional 50-step full
-model checkpoints are retained. Evaluation therefore no longer creates the
-previous multi-terabyte milestone-storage envelope.
+policy is `LatestN(1)` (`max_to_keep=1`) and
+`CANON_FROZENLAKE_CKPT_MILESTONE_INTERVAL=0`, so there are no intermediate or
+50-step full-model checkpoints. This removes 29 unnecessary writes per run and
+the former multi-terabyte milestone envelope. It also means a primary run
+stopped before update 300 has no resume point and must remain `INCONCLUSIVE`;
+the renderer therefore rejects partial primary horizons. Historical P45 and
+M15-selection recipes remain on their registered ten-update recovery cadence.
 
 ## Preflight gates
 
@@ -184,6 +205,8 @@ Inspect and retain every rendered YAML SHA-256. Confirm each manifest contains:
 ~~~text
 CANON_P57_EXPECTED_UPDATES=300
 CANON_P57_STOP_AFTER_STEP=300
+CANON_FROZENLAKE_CKPT_INTERVAL=300
+CANON_FROZENLAKE_CKPT_MAX_TO_KEEP=1
 CANON_P33_ENABLE_EVAL=1
 CANON_P33_DISABLE_EVAL=0
 CANON_P31_ENABLE_EVAL=1

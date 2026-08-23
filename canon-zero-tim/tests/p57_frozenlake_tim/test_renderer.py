@@ -343,6 +343,11 @@ class P57RendererTest(unittest.TestCase):
           self.assertEqual(
               env["CANON_P57_STOP_AFTER_STEP"], str(expected_updates)
           )
+          self.assertEqual(
+              env["CANON_FROZENLAKE_CKPT_INTERVAL"],
+              "10" if stock_only else "300",
+          )
+          self.assertEqual(env["CANON_FROZENLAKE_CKPT_MAX_TO_KEEP"], "1")
           if stock_only:
             self.assertEqual(env["CANON_P57_INFERENCE_REGIME"], "stock-fast")
 
@@ -381,6 +386,7 @@ class P57RendererTest(unittest.TestCase):
       train_preflight = _run_env_preflight(train_env, Path(tmp) / "train-state")
       eval_preflight = _run_env_preflight(eval_env, Path(tmp) / "eval-state")
     self.assertEqual(train_env["CANON_P57_STOP_AFTER_STEP"], "50")
+    self.assertEqual(train_env["CANON_FROZENLAKE_CKPT_INTERVAL"], "10")
     self.assertIn("--max_steps=200", train_env["CANON_RUN_CMD"])
     self.assertEqual(eval_env["CANON_P57_INFERENCE_REGIME"], "stock-fast")
     self.assertEqual(eval_env["CANON_P57_EVAL_CHECKPOINT_STEP"], "0")
@@ -509,6 +515,8 @@ class P57RendererTest(unittest.TestCase):
             self.assertEqual(
                 env["CANON_FROZENLAKE_CKPT_MILESTONE_INTERVAL"], "0"
             )
+            self.assertEqual(env["CANON_FROZENLAKE_CKPT_INTERVAL"], "300")
+            self.assertEqual(env["CANON_FROZENLAKE_CKPT_MAX_TO_KEEP"], "1")
             self.assertEqual(env["CANON_P33_ENABLE_EVAL"], "1")
             self.assertEqual(env["CANON_P33_DISABLE_EVAL"], "0")
             self.assertEqual(env["CANON_P31_ENABLE_EVAL"], "1")
@@ -588,6 +596,7 @@ class P57RendererTest(unittest.TestCase):
       env = _env(yaml.safe_load(path.read_text()))
       preflight = _run_env_preflight(env, Path(tmp) / "state")
     self.assertEqual(env["CANON_P57_EVAL_CHECKPOINT_STEP"], "300")
+    self.assertEqual(env["CANON_FROZENLAKE_CKPT_INTERVAL"], "300")
     self.assertEqual(env["CANON_FROZENLAKE_CKPT_MILESTONE_INTERVAL"], "0")
     self.assertIn("--evaluation_only", env["CANON_RUN_CMD"])
     self.assertIn("--temperature=0", env["CANON_RUN_CMD"])
@@ -607,6 +616,23 @@ class P57RendererTest(unittest.TestCase):
           run_kind="eval",
           checkpoint_step=250,
           arm="mismatch",
+      )
+
+  def test_primary_train_rejects_partial_stop_without_recovery_checkpoint(self):
+    with tempfile.TemporaryDirectory() as tmp, self.assertRaisesRegex(
+        ValueError, "only durable checkpoint is the final step"
+    ):
+      paired.render_all(
+          base_path=BASE,
+          output_dir=Path(tmp),
+          source_commit="a" * 40,
+          run_id="p57partial",
+          campaign_tag="p57-primary-partial",
+          checkpoint_mode="new",
+          expected_updates=300,
+          run_kind="train",
+          arm="mismatch",
+          stop_after_step=50,
       )
 
   def test_eval_rejects_generation_count_not_divisible_by_dp(self):
