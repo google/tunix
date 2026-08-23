@@ -409,6 +409,7 @@ def gsm8k_ab_report_policy() -> dict[str, Any]:
   deepswe_warning_only = deepswe_warn_raw == "1"
   p58_active = os.environ.get("CANON_P58_DEEPSWE_TIM", "") == "1"
   p58_arm = os.environ.get("CANON_P58_TIM_ARM", "") if p58_active else ""
+  p58_onehost_native = False
   if p58_active and p58_arm not in ("native", "zero"):
     raise AlignmentGateError("P58 alignment arm must be native or zero")
   if p58_active and (deepswe_warning_only != (p58_arm == "native")):
@@ -450,6 +451,14 @@ def gsm8k_ab_report_policy() -> dict[str, Any]:
     p58_tim = os.environ.get("CANON_P58_DEEPSWE_TIM", "") == "1"
     p58_admitted = os.environ.get("CANON_P58_TIM_ADMITTED", "") == "1"
     p58_expected_updates = os.environ.get("CANON_P58_EXPECTED_UPDATES", "")
+    p58_onehost_native = (
+        os.environ.get("CANON_P58_ONEHOST_XPROF_ARM", "") == "native"
+        and os.environ.get("CANON_DEEPSWE_ONEHOST_SMOKE", "0") == "1"
+        and os.environ.get("CANON_DEEPSWE_ONEHOST_STAGE", "")
+        == "backward-no-commit"
+        and os.environ.get("CANON_DEEPSWE_ONEHOST_NO_COMMIT", "0") == "1"
+        and not any((p39_pilot, p43_debug, p44_parity, p58_tim))
+    )
     production_full = (
         not any((p39_pilot, p43_debug, p44_parity, p58_tim))
         and p34_stage == "full"
@@ -476,19 +485,30 @@ def gsm8k_ab_report_policy() -> dict[str, Any]:
         )
     )
     admitted = (
-        os.environ.get("CANON_P34_DEEPSWE", "") == "1"
-        and (production_full or registered_debug_update or p58_native_training)
-        and os.environ.get("CANON_P34_NO_COMMIT", "") == "0"
-        and execution_mode() == "train"
-    )
+        (
+            os.environ.get("CANON_P34_DEEPSWE", "") == "1"
+            and (
+                production_full
+                or registered_debug_update
+                or p58_native_training
+            )
+            and os.environ.get("CANON_P34_NO_COMMIT", "") == "0"
+        )
+        or p58_onehost_native
+    ) and execution_mode() == "train"
     if not admitted:
       raise AlignmentGateError(
           "DeepSWE warning policy is admitted only for committed P34 full "
           "training, a committed P39, P43, or P44 debug update, or the "
-          "signed P58 native three-update/full training stage"
+          "signed P58 native three-update/full training stage, or its "
+          "mutation-free one-host XProf carrier"
       )
     workload = "deepswe"
-    stage = p34_stage
+    stage = (
+        os.environ.get("CANON_DEEPSWE_ONEHOST_STAGE", "")
+        if p58_onehost_native
+        else p34_stage
+    )
   elif frozenlake_warning_only:
     admitted = (
         workload in ("frozenlake", "frozenlake-dp8-tp8")
@@ -537,7 +557,7 @@ def gsm8k_ab_report_policy() -> dict[str, Any]:
               "S_prefill_vs_T_old",
               "T_old_vs_T_current",
           )
-          if p58_arm == "native"
+          if p58_arm == "native" or p58_onehost_native
           else None
       ),
       "bounded_ab_only": bounded_ab,
@@ -1440,7 +1460,15 @@ def check_batch(
   mode = execution_mode()
   skipped = int(np.asarray(optimizer_skipped).item())
   no_commit = os.environ.get("CANON_P33_NO_COMMIT", "") == "1"
-  expected_skipped = 1 if (mode == "gate-only" or no_commit) else 0
+  onehost_no_commit = (
+      os.environ.get("CANON_P58_ONEHOST_XPROF_ARM", "")
+      in ("native", "zero-hp")
+      and os.environ.get("CANON_DEEPSWE_ONEHOST_SMOKE", "0") == "1"
+      and os.environ.get("CANON_DEEPSWE_ONEHOST_NO_COMMIT", "0") == "1"
+  )
+  expected_skipped = 1 if (
+      mode == "gate-only" or no_commit or onehost_no_commit
+  ) else 0
   if skipped != expected_skipped:
     raise AlignmentGateError(
         "compiled train step optimizer attestation mismatch: "

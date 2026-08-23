@@ -61,7 +61,10 @@ class _RescoreSampler:
         prompt_logprobs.append({
             token_id: types.SimpleNamespace(logprob=-float(token_id))
         })
-      outputs.append(types.SimpleNamespace(prompt_logprobs=prompt_logprobs))
+      outputs.append(types.SimpleNamespace(
+          prompt_logprobs=prompt_logprobs,
+          num_cached_tokens=0,
+      ))
     return outputs
 
 

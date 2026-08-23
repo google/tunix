@@ -447,9 +447,20 @@ def _deepswe_onehost_no_commit(environ) -> bool:
           "CANON_ALIGNMENT_TRAIN",
       )
   ):
-    raise ValueError(
-        "one-host no-commit cannot overlap a canonical alignment mode"
+    p58_xprof_arm = environ.get("CANON_P58_ONEHOST_XPROF_ARM", "")
+    p58_xprof_alignment = (
+        p58_xprof_arm in ("native", "zero-hp")
+        and environ.get("CANON_DEEPSWE_ONEHOST_STAGE", "")
+        == "backward-no-commit"
+        and environ.get("CANON_ALIGNMENT_GATE", "0") == "1"
+        and environ.get("CANON_ALIGNMENT_GATE_ONLY", "0") == "0"
+        and environ.get("CANON_ALIGNMENT_UPDATE_CANARY", "0") == "0"
+        and environ.get("CANON_ALIGNMENT_TRAIN", "0") == "1"
     )
+    if not p58_xprof_alignment:
+      raise ValueError(
+          "one-host no-commit cannot overlap a canonical alignment mode"
+      )
   return smoke == no_commit == "1"
 
 
@@ -1544,7 +1555,7 @@ class PeftTrainer:
       if canon_alignment:
         aux.aux_metrics["canon/gradient_norm"] = grad_norm
         aux.aux_metrics["canon/optimizer_skipped"] = jnp.asarray(
-            canon_gate_only, dtype=jnp.int32
+            canon_gate_only or deepswe_onehost_no_commit, dtype=jnp.int32
         )
         aux.aux_metrics["canon/is_update_step"] = jnp.asarray(
             is_update_step, dtype=jnp.bool_

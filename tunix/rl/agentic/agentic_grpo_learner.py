@@ -130,6 +130,7 @@ def _canonical_alignment_sampler_is_valid(
     p34_deepswe: bool = False,
     p34_disable_sampler_is: bool = False,
     p34_disable_tis: bool = False,
+    p58_onehost_xprof: bool = False,
 ) -> bool:
   """Return whether sampler IS preserves the workload contract."""
   if sampler_is == "token":
@@ -138,7 +139,9 @@ def _canonical_alignment_sampler_is_valid(
     return False
   if workload_name == "gsm8k" or p57_tim_study:
     return True
-  return p34_deepswe and p34_disable_sampler_is and p34_disable_tis
+  return (
+      p34_deepswe and p34_disable_sampler_is and p34_disable_tis
+  ) or p58_onehost_xprof
 
 
 def _p57_tim_purity_enabled(env: Mapping[str, str]) -> bool:
@@ -254,6 +257,17 @@ def _canonical_frozenlake_release_advantages(advantages: Any) -> np.ndarray:
         f"got shape={original.shape} values={original.tolist()}"
     )
   return np.tile(np.asarray([-1.0, 1.0], dtype=np.float32), 4)
+
+
+def _p58_onehost_xprof_advantages(advantages: Any) -> np.ndarray:
+  """Return the registered nonzero cotangent for the P58 profile carrier."""
+  original = np.asarray(advantages, dtype=np.float32)
+  if original.shape != (2,) or not np.isfinite(original).all():
+    raise alignment.AlignmentGateError(
+        "P58 one-host XProf requires two finite rollout advantages, "
+        f"got shape={original.shape} values={original.tolist()}"
+    )
+  return np.asarray([-1.0, 1.0], dtype=np.float32)
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -929,6 +943,15 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
           original_advantages.tolist(),
           advantages.tolist(),
       )
+    elif deepswe_debug.onehost_xprof_arm(os.environ):
+      original_advantages = np.asarray(advantages, dtype=np.float32)
+      advantages = _p58_onehost_xprof_advantages(original_advantages)
+      print(
+          "[P58.ONEHOST.XPROF] diagnostic_advantages "
+          f"original={original_advantages.tolist()} "
+          f"injected={advantages.tolist()} purpose=backward-shape-only",
+          flush=True,
+      )
 
     logging.debug("Advantages computed: %s", advantages)
 
@@ -1359,6 +1382,10 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
           ),
           p34_disable_tis=(
               os.environ.get("CANON_P34_DISABLE_TIS", "") == "1"
+          ),
+          p58_onehost_xprof=(
+              deepswe_debug.onehost_xprof_arm(os.environ)
+              in ("native", "zero-hp")
           ),
       ):
         raise alignment.AlignmentGateError(

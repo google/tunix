@@ -23,7 +23,10 @@ $DOCKER run --rm \
   bash -euo pipefail -c '
     bash -n \
       canon-zero-tim/tests/p58_deepswe_native_zero/run_onehost_alignment_v5p.sh \
-      canon-zero-tim/cluster/steps/p58_verify_sandbox_capacity.sh
+      canon-zero-tim/cluster/steps/p58_verify_sandbox_capacity.sh \
+      canon-zero-tim/tasks/p58-deepswe-native-zero-comparison/scripts/run_onehost_deepswe_xprof_common.sh \
+      canon-zero-tim/tasks/p58-deepswe-native-zero-comparison/scripts/run_onehost_deepswe_xprof_native.sh \
+      canon-zero-tim/tasks/p58-deepswe-native-zero-comparison/scripts/run_onehost_deepswe_xprof_zero_hp.sh
     PYTHONPATH=/workspace python3 \
       canon-zero-tim/tests/p58_deepswe_native_zero/test_loss_contract.py
     PYTHONPATH=/workspace python3 \
@@ -42,6 +45,10 @@ $DOCKER run --rm \
       canon-zero-tim/tests/p58_deepswe_native_zero/test_classifier.py
     PYTHONPATH=/workspace python3 \
       canon-zero-tim/tests/p58_deepswe_native_zero/test_stock_prompt_observer.py
+    PYTHONPATH=/workspace python3 \
+      canon-zero-tim/tests/p58_deepswe_native_zero/test_onehost_xprof.py
+    PYTHONPATH=/workspace python3 \
+      canon-zero-tim/tests/p58_deepswe_native_zero/test_onehost_xprof_pair.py
     (
       cd tests/rl
       PYTHONPATH=/workspace python3 -m unittest alignment_test
@@ -135,5 +142,5 @@ $DOCKER run --rm \
       python3 \
       canon-zero-tim/tests/p58_deepswe_native_zero/probe_stock_prompt_observer.py
     rm -r "$observer_state"
-    echo "P58_EXACT_IMAGE_CPU_PASS loss_oracle=1 weighted_accumulation=1 compact_filter=1 durable_journal=1 paired_renderer=1 alignment_policy=1 stock_observer=1 p59_tp4_tp8=2 p59_real_shim=4 p57_wandb=1 regressions=1"
+    echo "P58_EXACT_IMAGE_CPU_PASS loss_oracle=1 weighted_accumulation=1 compact_filter=1 durable_journal=1 paired_renderer=1 alignment_policy=1 stock_observer=1 onehost_xprof=1 p59_tp4_tp8=2 p59_real_shim=4 p57_wandb=1 regressions=1"
   '

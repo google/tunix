@@ -153,6 +153,39 @@ def no_commit(values: Mapping[str, str] | None = None) -> bool:
   return raw == "1"
 
 
+def onehost_xprof_arm(
+    values: Mapping[str, str] | None = None,
+) -> str:
+  """Returns the signed P58 one-host profiling arm, or an empty string.
+
+  The selector is deliberately narrower than the general one-host smoke. It
+  admits only the mutation-free backward carrier so a profile cannot silently
+  commit an optimizer update or overlap a production P58 arm.
+  """
+  environ = os.environ if values is None else values
+  arm = environ.get("CANON_P58_ONEHOST_XPROF_ARM", "")
+  if arm not in ("", "native", "zero-hp"):
+    raise ValueError(
+        "CANON_P58_ONEHOST_XPROF_ARM must be empty, native, or zero-hp"
+    )
+  if not arm:
+    return ""
+  exact = (
+      onehost(environ)
+      and no_commit(environ)
+      and environ.get("CANON_DEEPSWE_ONEHOST_STAGE", "")
+      == "backward-no-commit"
+      and environ.get("CANON_DEEPSWE_ONEHOST_ROLLOUT_ONLY", "0") == "0"
+      and environ.get("CANON_P58_DEEPSWE_TIM", "0") == "0"
+  )
+  if not exact:
+    raise ValueError(
+        "P58 one-host XProf requires the exclusive backward-no-commit "
+        "DP1xTP4 carrier"
+    )
+  return arm
+
+
 def artifact_directory(values: Mapping[str, str] | None = None) -> str:
   environ = os.environ if values is None else values
   key = {
@@ -361,6 +394,7 @@ def _manifest(
 ) -> dict[str, Any]:
   trajectory_schema, metrics_schema, manifest_schema = _schemas(values)
   mode = _mode(values)
+  xprof_arm = ""
   if mode == "onehost":
     if model_id != "Qwen/Qwen3-4B-Instruct-2507":
       raise ValueError(
@@ -375,6 +409,7 @@ def _manifest(
     max_turns = 2
     max_response_length = 512
     stage = values.get("CANON_DEEPSWE_ONEHOST_STAGE", "")
+    xprof_arm = onehost_xprof_arm(values)
   elif mode == "p34":
     if model_id != "Qwen/Qwen3-32B":
       raise ValueError("P34 production artifacts require Qwen/Qwen3-32B")
@@ -454,11 +489,19 @@ def _manifest(
       "solve_definition": SOLVE_DEFINITION,
       "source_commit": values.get("CANON_EXPECT_COMMIT", ""),
       "source_branch": values.get("CANON_SOURCE_BRANCH", ""),
+      "source_diff_sha256": values.get("CANON_P58_SOURCE_DIFF_SHA256", ""),
       "run_id": values.get("CANON_RUN_ID", ""),
+      "expected_hostname": values.get("CANON_P58_EXPECT_HOSTNAME", ""),
+      "model_snapshot": values.get("CANON_P58_MODEL_SNAPSHOT", ""),
+      "r2egym_commit": values.get("CANON_P58_R2EGYM_COMMIT", ""),
+      "task_image": values.get("CANON_DEEPSWE_ONEHOST_TASK_IMAGE", ""),
+      "task_image_id": values.get("CANON_P58_TASK_IMAGE_ID", ""),
+      "runner_sha256": values.get("CANON_P58_RUNNER_SHA256", ""),
       "stage": stage,
       "model_id": model_id,
       "contract_name": contract_name,
       "tim_arm": values.get("CANON_P58_TIM_ARM", "none"),
+      "onehost_xprof_arm": xprof_arm if mode == "onehost" else "none",
       "slice_topology": slice_topology,
       "role_topology": role_topology,
       "global_prompts": global_prompts,

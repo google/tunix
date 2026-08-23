@@ -260,14 +260,28 @@ class VllmRollout(base_rollout.BaseRollout):
     )
     p58_native_requested = (
         os.environ.get("CANON_P58_TIM_ARM", "") == "native"
+        or os.environ.get("CANON_P58_ONEHOST_XPROF_ARM", "") == "native"
+    )
+    p58_onehost_stock_observer = (
+        os.environ.get("CANON_P58_ONEHOST_XPROF_ARM", "") == "native"
+        and os.environ.get("CANON_DEEPSWE_ONEHOST_SMOKE", "0") == "1"
+        and os.environ.get("CANON_DEEPSWE_ONEHOST_STAGE", "")
+        == "backward-no-commit"
+        and os.environ.get("CANON_DEEPSWE_ONEHOST_NO_COMMIT", "0") == "1"
+        and os.environ.get("CANON_P58_DEEPSWE_TIM", "0") == "0"
     )
     p58_stock_observer_signed = (
         p58_native_requested
-        and os.environ.get("CANON_P34_DEEPSWE", "") == "1"
-        and os.environ.get("CANON_P58_DEEPSWE_TIM", "") == "1"
-        and os.environ.get("CANON_P58_TIM_ADMITTED", "") == "1"
-        and os.environ.get("CANON_PROFILE_FILE", "")
-        == "cluster/profiles/qwen3-4b-dp8-tp8-deepswe-tim.env"
+        and (
+            (
+                os.environ.get("CANON_P34_DEEPSWE", "") == "1"
+                and os.environ.get("CANON_P58_DEEPSWE_TIM", "") == "1"
+                and os.environ.get("CANON_P58_TIM_ADMITTED", "") == "1"
+                and os.environ.get("CANON_PROFILE_FILE", "")
+                == "cluster/profiles/qwen3-4b-dp8-tp8-deepswe-tim.env"
+            )
+            or p58_onehost_stock_observer
+        )
         and os.environ.get("CANON_ENGINE_MODULE_C", "") == "0"
         and os.environ.get("CANON_PROMPT_PROCESSED_LOGPROBS", "") == "0"
         and p58_stock_observer_requested

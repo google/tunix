@@ -3084,8 +3084,12 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       onehost_no_commit = (
           deepswe_debug.onehost() and deepswe_debug.no_commit()
       )
+      onehost_xprof_arm = deepswe_debug.onehost_xprof_arm()
       onehost_before = None
       onehost_hbm_before = None
+      onehost_after_warmup = None
+      onehost_warmup_gradient_norms = None
+      onehost_work_hashes = None
       if onehost_no_commit:
         from flax import nnx  # pylint: disable=g-import-not-at-top
 
@@ -3124,16 +3128,142 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             ),
             "train_steps": actor_trainer.train_steps,
         }
+        if onehost_xprof_arm:
+          def hash_array(value):
+            array = np.asarray(jax.device_get(value))
+            digest = hashlib.sha256()
+            digest.update(str(array.dtype).encode("ascii"))
+            digest.update(json.dumps(array.shape).encode("ascii"))
+            digest.update(np.ascontiguousarray(array).tobytes())
+            return digest.hexdigest()
+
+          work_fields = (
+              "prompt_ids",
+              "prompt_mask",
+              "completion_ids",
+              "completion_mask",
+              "completion_valid_mask",
+              "advantages",
+              "policy_version",
+          )
+          onehost_work_hashes = {
+              name: hash_array(getattr(merged_train_micro_batch, name))
+              for name in work_fields
+              if getattr(merged_train_micro_batch, name, None) is not None
+          }
+          onehost_work_hashes["shape_signature"] = hashlib.sha256(
+              json.dumps(
+                  {
+                      name: list(
+                          np.shape(getattr(merged_train_micro_batch, name))
+                      )
+                      for name in work_fields
+                      if getattr(merged_train_micro_batch, name, None) is not None
+                  },
+                  sort_keys=True,
+                  separators=(",", ":"),
+              ).encode("utf-8")
+          ).hexdigest()
+          onehost_work_hashes["actor_update_calls"] = 2
 
       if not p28_g6_update:
         # The stock/non-segmented trainer does not pass through the G6 entry
         # above.  Open the same phase=update window immediately before its
         # actor update so P60 can compare a whole warm trainer update across
         # stock and zero-TIM without tracing rollout/decode.
-        _canon_xprof_update_entry()
-        self.rl_cluster.update_actor(
-            chunked_train_micro_batch, current_eval_dataset, skip_jit
-        )
+        if onehost_xprof_arm:
+          # Compile and execute the exact same no-commit update once before
+          # tracing.  The second invocation reuses the same in-memory batch;
+          # the no-commit contract below proves that neither invocation
+          # changes model, optimizer, accumulator, reference, or train step.
+          self.rl_cluster.update_actor(
+              chunked_train_micro_batch, current_eval_dataset, skip_jit
+          )
+          actor_trainer = self.rl_cluster.actor_trainer
+          trainer_buffer = (
+              getattr(actor_trainer, "_prev_buffered_train_metrics", None)
+              or getattr(actor_trainer, "_buffered_train_metrics", None)
+          )
+          try:
+            gradient_values, _ = trainer_buffer.additional_metrics["grad_norm"]
+            onehost_warmup_gradient_norms = [
+                float(np.asarray(jax.device_get(value)))
+                for value in gradient_values
+            ]
+          except (AttributeError, KeyError, TypeError) as exc:
+            raise RuntimeError(
+                "P58 one-host XProf warmup gradient metric is missing"
+            ) from exc
+          reference_state = _p28_reference_state(self.rl_cluster)
+          onehost_after_warmup = {
+              "model": actor_trainer._canon_fingerprint_state(  # pylint: disable=protected-access
+                  nnx.state(actor_trainer.model, nnx.Param)
+              ),
+              "optimizer": actor_trainer._canon_fingerprint_state(  # pylint: disable=protected-access
+                  nnx.state(actor_trainer.optimizer, nnx.optimizer.OptState)
+              ),
+              "accumulator": actor_trainer._canon_fingerprint_state(  # pylint: disable=protected-access
+                  nnx.state(actor_trainer.grad_accumulator), min_elements=1
+              ),
+              "reference": (
+                  actor_trainer._canon_fingerprint_state(reference_state)  # pylint: disable=protected-access
+                  if reference_state is not None
+                  else None
+              ),
+              "train_steps": actor_trainer.train_steps,
+          }
+          warmup_changed = {
+              name: actor_trainer._canon_changed_paths(  # pylint: disable=protected-access
+                  onehost_before[name], onehost_after_warmup[name]
+              )
+              for name in ("model", "optimizer", "accumulator")
+          }
+          if onehost_before["reference"] is not None:
+            warmup_changed["reference"] = (
+                actor_trainer._canon_changed_paths(  # pylint: disable=protected-access
+                    onehost_before["reference"],
+                    onehost_after_warmup["reference"],
+                )
+            )
+          if (
+              any(warmup_changed.values())
+              or onehost_after_warmup["train_steps"]
+              != onehost_before["train_steps"]
+          ):
+            raise RuntimeError(
+                "P58 one-host XProf warmup mutated no-commit state: "
+                f"{warmup_changed}"
+            )
+          print(
+              "[P58.ONEHOST.XPROF] warmup_complete "
+              f"arm={onehost_xprof_arm} commits=0 state_unchanged=1",
+              flush=True,
+          )
+          # Commit the warmup semantic spans without invoking the exporter.
+          # The later single-step export then selects only the newly committed
+          # profiled repeat rather than merging both backward calls.
+          perf_v2 = self.rl_cluster.perf_v2
+          if not hasattr(perf_v2, "process_and_commit_timelines"):
+            raise RuntimeError(
+                "P58 one-host XProf requires the PerfMetrics v2 tracer"
+            )
+          perf_v2.process_and_commit_timelines()
+          print(
+              "[P58.ONEHOST.XPROF] semantic_warmup_discarded "
+              f"arm={onehost_xprof_arm} next_export=profiled-repeat-only",
+              flush=True,
+          )
+          _canon_xprof_onehost_update_entry(onehost_xprof_arm)
+          self.rl_cluster.update_actor(
+              chunked_train_micro_batch, current_eval_dataset, skip_jit
+          )
+          _canon_xprof_onehost_update_complete(onehost_xprof_arm)
+          perf_v2.export()
+        else:
+          _canon_xprof_update_entry()
+          self.rl_cluster.update_actor(
+              chunked_train_micro_batch, current_eval_dataset, skip_jit
+          )
         if hasattr(self.rl_cluster, "critic_trainer"):
           self.rl_cluster.update_critic(
               chunked_train_micro_batch, current_eval_dataset, skip_jit
@@ -3229,7 +3359,13 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             and onehost_after["train_steps"]
             == onehost_before["train_steps"]
         )
+        gradient_repeat_exact = bool(
+            not onehost_xprof_arm
+            or gradient_norms == onehost_warmup_gradient_norms
+        )
         if not gradient_finite or not state_unchanged:
+          verdict = "FAIL"
+        elif not gradient_repeat_exact:
           verdict = "FAIL"
         elif gradient_nonzero:
           verdict = "PASS"
@@ -3242,6 +3378,11 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             "gradient_finite": gradient_finite,
             "gradient_nonzero": gradient_nonzero,
             "gradient_norms": gradient_norms,
+            "gradient_warmup_norms": onehost_warmup_gradient_norms,
+            "gradient_repeat_exact": gradient_repeat_exact,
+            "repeat_count": 2 if onehost_xprof_arm else 1,
+            "xprof_arm": onehost_xprof_arm,
+            "work_hashes": onehost_work_hashes,
             "model_changed_paths": changed["model"],
             "optimizer_changed_paths": changed["optimizer"],
             "accumulator_changed_paths": changed["accumulator"],
@@ -3254,6 +3395,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             "hbm_before_backward": onehost_hbm_before,
             "hbm_after_backward": onehost_hbm_after,
             "state_fingerprints_before": onehost_before,
+            "state_fingerprints_after_warmup": onehost_after_warmup,
             "state_fingerprints_after": onehost_after,
         }
         report_path = os.environ.get("CANON_DEEPSWE_ONEHOST_REPORT", "")
@@ -3784,6 +3926,53 @@ def _canon_xprof_update_entry():
   )
 
 
+def _canon_xprof_onehost_update_entry(arm: str) -> None:
+  """Opens the profiled repeat of the P58 no-commit one-host carrier."""
+  from tunix.rl import deepswe_debug  # pylint: disable=g-import-not-at-top
+
+  if deepswe_debug.onehost_xprof_arm() != arm:
+    raise RuntimeError("P58 one-host XProf arm changed before update entry")
+  if not _canon_xprof_configure():
+    raise RuntimeError("P58 one-host XProf requires a non-empty trace directory")
+  exact = (
+      _CANON_XPROF["mode"] == "update"
+      and _CANON_XPROF["skip"] == 0
+      and _CANON_XPROF["steps"] == 1
+      and _CANON_XPROF["host_tracer"] == 1
+      and _CANON_XPROF["python_tracer"] == 0
+      and _CANON_XPROF["tpu_trace_mode"] == "TRACE_COMPUTE"
+  )
+  if not exact or _CANON_XPROF["armed"] or _CANON_XPROF["started"]:
+    raise RuntimeError(
+        "P58 one-host XProf requires a fresh immediate update window with "
+        "host_tracer=1 and python_tracer=0"
+    )
+  _CANON_XPROF["armed"] = True
+  print(
+      f"[P51.XPROF] phase=update armed step=0 arm={arm} "
+      "anchor=onehost_profiled_repeat",
+      flush=True,
+  )
+  _canon_xprof_update_entry()
+
+
+def _canon_xprof_onehost_update_complete(arm: str) -> None:
+  """Closes the no-commit one-host trace without inventing a global step."""
+  from tunix.rl import deepswe_debug  # pylint: disable=g-import-not-at-top
+
+  if deepswe_debug.onehost_xprof_arm() != arm:
+    raise RuntimeError("P58 one-host XProf arm changed before trace stop")
+  if not _CANON_XPROF["started"]:
+    raise RuntimeError("P58 one-host XProf trace never started")
+  jax.profiler.stop_trace()
+  _CANON_XPROF["started"] = False
+  print(
+      f"[P51.XPROF] phase=update stopped step=0 arm={arm} "
+      "anchor=onehost_profiled_repeat_complete",
+      flush=True,
+  )
+
+
 def _canon_xprof_step_boundary():
   """Drives the xprof capture window at global-step boundaries.
 
@@ -3849,11 +4038,14 @@ def _canon_xprof_configure() -> bool:
   if not _CANON_XPROF["configured"]:
     skip = int(os.environ.get("CANON_XPROF_SKIP_STEPS", "") or "2")
     steps = int(os.environ.get("CANON_XPROF_STEPS", "") or "1")
-    if skip < 1 or steps < 1:
+    from tunix.rl import deepswe_debug  # pylint: disable=g-import-not-at-top
+
+    onehost_immediate = bool(deepswe_debug.onehost_xprof_arm())
+    if skip < 0 or steps < 1 or (skip == 0 and not onehost_immediate):
       raise ValueError(
-          "CANON_XPROF_SKIP_STEPS and CANON_XPROF_STEPS must be >= 1; the "
-          "window opens after a completed step, so the first capturable "
-          f"step is step 1 (got skip={skip}, steps={steps})"
+          "CANON_XPROF_STEPS must be >= 1 and CANON_XPROF_SKIP_STEPS must "
+          "be >= 1 except for the signed P58 one-host profiled repeat "
+          f"(got skip={skip}, steps={steps})"
       )
     mode = os.environ.get("CANON_XPROF_PHASE", "") or "step"
     if mode not in ("step", "update", "diagnostic"):

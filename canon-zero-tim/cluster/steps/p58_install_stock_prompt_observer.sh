@@ -5,12 +5,18 @@
 set -euo pipefail
 source "$CANON_STATE/env.sh"
 
-if [ "${CANON_PROFILE_FILE:-}" != \
-     "cluster/profiles/qwen3-4b-dp8-tp8-deepswe-tim.env" ] || \
-   [ "${CANON_P34_DEEPSWE:-}" != "1" ] || \
-   [ "${CANON_P58_DEEPSWE_TIM:-}" != "1" ] || \
-   [ "${CANON_P58_TIM_ADMITTED:-}" != "1" ] || \
-   [ "${CANON_P58_TIM_ARM:-}" != "native" ]; then
+production_native="$([ "${CANON_PROFILE_FILE:-}" = \
+     "cluster/profiles/qwen3-4b-dp8-tp8-deepswe-tim.env" ] && \
+   [ "${CANON_P34_DEEPSWE:-}" = "1" ] && \
+   [ "${CANON_P58_DEEPSWE_TIM:-}" = "1" ] && \
+   [ "${CANON_P58_TIM_ADMITTED:-}" = "1" ] && \
+   [ "${CANON_P58_TIM_ARM:-}" = "native" ] && echo 1 || echo 0)"
+onehost_native="$([ "${CANON_P58_ONEHOST_XPROF_ARM:-}" = "native" ] && \
+   [ "${CANON_DEEPSWE_ONEHOST_SMOKE:-0}" = "1" ] && \
+   [ "${CANON_DEEPSWE_ONEHOST_STAGE:-}" = "backward-no-commit" ] && \
+   [ "${CANON_DEEPSWE_ONEHOST_NO_COMMIT:-0}" = "1" ] && \
+   [ "${CANON_P58_DEEPSWE_TIM:-0}" = "0" ] && echo 1 || echo 0)"
+if [ "$production_native" != "1" ] && [ "$onehost_native" != "1" ]; then
   echo "[P58.STOCK_OBSERVER] FATAL: overlay used outside signed native arm" >&2
   exit 2
 fi
@@ -92,4 +98,4 @@ install -m 0644 "$stage/tpu_runner.py" "$RUNNER"
   echo "[P58.STOCK_OBSERVER] FATAL: installed manifest mismatch" >&2
   exit 1
 }
-echo "[P58.STOCK_OBSERVER] OVERLAY_PASS files=2 stock_runner_verified=1 canonical_bundle=off treatment=observer-only"
+echo "[P58.STOCK_OBSERVER] OVERLAY_PASS files=2 stock_runner_verified=1 canonical_bundle=off treatment=observer-only onehost=$onehost_native"

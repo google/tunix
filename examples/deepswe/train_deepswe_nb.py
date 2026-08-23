@@ -435,6 +435,7 @@ from tunix.sft import utils as sft_utils
 from tunix.sft import metrics_logger
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl import deepswe_contract
+from tunix.rl import deepswe_debug
 from tunix.rl import dp_workloads
 from tunix.rl.rollout import base_rollout
 from tunix.rl.agentic import agentic_grpo_learner
@@ -788,6 +789,7 @@ if P34_DEEPSWE:
       flush=True,
   )
 
+P58_ONEHOST_XPROF_ARM = ""
 if ONEHOST_SMOKE:
   stage = os.environ.get("CANON_DEEPSWE_ONEHOST_STAGE", "")
   if stage not in ("rollout-only", "backward-no-commit", "one-update"):
@@ -809,6 +811,84 @@ if ONEHOST_SMOKE:
       ("one-update", "0", "0"),
   ):
     raise ValueError("one-host stage selectors are inconsistent")
+  P58_ONEHOST_XPROF_ARM = deepswe_debug.onehost_xprof_arm(os.environ)
+  if P58_ONEHOST_XPROF_ARM:
+    common_xprof = {
+        "CANON_XPROF_PHASE": "update",
+        "CANON_XPROF_SKIP_STEPS": "0",
+        "CANON_XPROF_STEPS": "1",
+        "CANON_XPROF_HOST_TRACER": "1",
+        "CANON_XPROF_PYTHON_TRACER": "0",
+        "CANON_XPROF_TPU_TRACE_MODE": "TRACE_COMPUTE",
+        "CANON_XPROF_LABELS": "1",
+        "CANON_PERF_TRACE_EXPORT_STEP": "0",
+        "CANON_VLLM_ENABLE_PREFIX_CACHING": "0",
+        "CANON_P38_FIXED_LM_HEAD": "0",
+        "CANON_P59_RANK_PARALLEL_BACKWARD": "0",
+        "CANON_P34_DISABLE_SAMPLER_IS": "1",
+        "CANON_P34_DISABLE_TIS": "1",
+    }
+    wrong = {
+        key: os.environ.get(key)
+        for key, value in common_xprof.items()
+        if os.environ.get(key) != value
+    }
+    if not os.environ.get("CANON_XPROF_DIR"):
+      wrong["CANON_XPROF_DIR"] = os.environ.get("CANON_XPROF_DIR")
+    if not os.environ.get("CANON_PERF_TRACE_DIR"):
+      wrong["CANON_PERF_TRACE_DIR"] = os.environ.get(
+          "CANON_PERF_TRACE_DIR"
+      )
+    if wrong:
+      raise ValueError(f"P58 one-host XProf instrumentation drifted: {wrong}")
+    zero_hp = P58_ONEHOST_XPROF_ARM == "zero-hp"
+    numerical = {
+        "CANON_ENGINE_MODULE_C": "1" if zero_hp else "0",
+        "CANON_PROMPT_PROCESSED_LOGPROBS": "1" if zero_hp else "0",
+        "CANON_RPA_VJP2": "1" if zero_hp else "0",
+        "CANON_PALLAS_LOGSOFTMAX": "1" if zero_hp else "0",
+        "CANON_CONTINUE_DECODE": "8" if zero_hp else "0",
+        "CANON_FIXED_AR_GATHER": "1" if zero_hp else "0",
+        "CANON_PALLAS_GATHERED_LOGPROBS": "1" if zero_hp else "0",
+        "CANON_LOGPROB_STEP_FUSION": "1" if zero_hp else "0",
+    }
+    wrong = {
+        key: os.environ.get(key)
+        for key, value in numerical.items()
+        if os.environ.get(key) != value
+    }
+    if zero_hp:
+      for key in (
+          "CANON_FIXED_AR",
+          "CANON_FIXED_AR_EMBED",
+          "CANON_LOGPROB_M",
+          "CANON_PALLAS_ALL_PROJ",
+          "CANON_PALLAS_ALL_RMSNORM",
+          "CANON_PALLAS_SWIGLU",
+          "CANON_PALLAS_MPAD",
+          "CANON_PALLAS_SWIGLU_MPAD",
+          "CANON_PALLAS_CANONICAL_VJP",
+      ):
+        if not os.environ.get(key):
+          wrong[key] = os.environ.get(key)
+    else:
+      for key in (
+          "CANON_FIXED_AR",
+          "CANON_FIXED_AR_EMBED",
+          "CANON_LOGPROB_M",
+          "CANON_PALLAS_ALL_PROJ",
+          "CANON_PALLAS_ALL_RMSNORM",
+          "CANON_PALLAS_SWIGLU",
+          "CANON_PALLAS_MPAD",
+          "CANON_PALLAS_SWIGLU_MPAD",
+          "CANON_PALLAS_CANONICAL_VJP",
+      ):
+        if key in os.environ:
+          wrong[key] = os.environ.get(key)
+    if wrong:
+      raise ValueError(
+          f"P58 one-host XProf numerical arm drifted: {wrong}"
+      )
   onehost_exact = {
       "model_version": MODEL_VERSION == "Qwen3-4B-Instruct-2507",
       "local_model": bool(MODEL_ABSOLUTE_PATH)
@@ -843,6 +923,13 @@ if ONEHOST_SMOKE:
       "optimizer=device checkpoint=off",
       flush=True,
   )
+  if P58_ONEHOST_XPROF_ARM:
+    print(
+        "[P58.ONEHOST.XPROF] ARM_PASS "
+        f"arm={P58_ONEHOST_XPROF_ARM} topology=dp1-tp4 "
+        "fixed_head=off p59=off apc=off",
+        flush=True,
+    )
 
 
 # %%
@@ -1368,6 +1455,8 @@ base_rollout_dict = {
     "return_logprobs": USE_ROLLOUT_LOGPS,
     "max_tokens_to_generate": MAX_RESPONSE_LENGTH,
 }
+if P58_ONEHOST_XPROF_ARM:
+  base_rollout_dict["seed"] = SEED
 
 sglang_jax_rollout_dict = {
     "rollout_sglang_jax_model_version": MODEL_PATH,  # Uses local absolute path
@@ -1404,6 +1493,38 @@ if ONEHOST_SMOKE:
   # Preserve the signed P34 production expression above; the local colocated
   # smoke disables prefix caching through a separate default-off override.
   vllm_rollout_dict["rollout_vllm_kwargs"]["enable_prefix_caching"] = False
+  if P58_ONEHOST_XPROF_ARM:
+    # Both profiling arms use the same serial scheduler contract. This pins
+    # request/RNG consumption order and is required for the cross-arm work-hash
+    # classifier; continue-decode also rejects asynchronous scheduling.
+    vllm_rollout_dict["rollout_vllm_async_scheduling"] = False
+
+canon_continue_decode = os.environ.get("CANON_CONTINUE_DECODE", "")
+if canon_continue_decode:
+  p58_onehost_hp = P58_ONEHOST_XPROF_ARM == "zero-hp"
+  if not p58_onehost_hp:
+    raise ValueError(
+        "DeepSWE continue-decode is admitted only by its signed "
+        "one-host profile carrier"
+    )
+  if (
+      not canon_continue_decode.isdigit()
+      or not 1 <= int(canon_continue_decode) <= 64
+  ):
+    raise ValueError(
+        "CANON_CONTINUE_DECODE must be an integer in [1, 64], got "
+        f"{canon_continue_decode!r}"
+    )
+  vllm_rollout_dict["rollout_vllm_async_scheduling"] = False
+  vllm_rollout_dict["rollout_vllm_additional_config"] = {
+      "enable_continue_decode": True,
+      "max_decode_steps": int(canon_continue_decode),
+  }
+  print(
+      "[P57.CONTINUE_DECODE] on-device decode loop enabled "
+      f"max_decode_steps={canon_continue_decode} workload=deepswe",
+      flush=True,
+  )
 
 
 if ROLLOUT_ENGINE == "sglang_jax":
@@ -1460,11 +1581,36 @@ cluster_config = rl_cluster_lib.ClusterConfig(
 )
 sft_utils.show_hbm_usage()
 
+perf_config = None
+canon_perf_trace_dir = os.environ.get("CANON_PERF_TRACE_DIR", "")
+if canon_perf_trace_dir:
+  # The official tunix.perf v2 semantic timeline. The P58 one-host pair uses
+  # target step 0 because its profiled repeat is mutation-free and therefore
+  # never advances the trainer step; production full recipes use warmed step 2.
+  from tunix.perf import metrics as perf_metrics_lib
+  from tunix.perf.experimental import export as perf_export_lib
+  from tunix.perf import profile_window as perf_profile_window
+
+  perfetto_exporter = perf_export_lib.PerfMetricsExport.from_cluster_config(
+      cluster_config=cluster_config,
+      trace_dir=canon_perf_trace_dir,
+  )
+  perfetto_target_step = int(
+      os.environ.get("CANON_PERF_TRACE_EXPORT_STEP", "") or "2"
+  )
+  perf_config = perf_metrics_lib.PerfMetricsConfig(
+      custom_export_fn_v2=perf_profile_window.single_step_export_fn(
+          perfetto_exporter.export_metrics,
+          target_step=perfetto_target_step,
+      )
+  )
+
 rl_cluster = rl_cluster_lib.RLCluster(
     actor=qwen_actor,
     reference=qwen_reference,
     tokenizer=tokenizer,
     cluster_config=cluster_config,
+    perf_config=perf_config,
 )
 
 
