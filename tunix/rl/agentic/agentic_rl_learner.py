@@ -305,6 +305,38 @@ def _eval_schedule_step(
   return pre_update_train_step if segmented_update else current_train_step
 
 
+def _p57_eval_cycle_enclosing_step(
+    *,
+    policy_step: int,
+    actor_train_steps: int,
+    cluster_global_steps: int,
+) -> int:
+  """Returns the completed wall-row step for a pre-update P57 evaluation.
+
+  This receipt is emitted after the actor update but before ``sync_weights``.
+  At that boundary ``actor_trainer.train_steps`` has advanced, while
+  ``rl_cluster.global_steps`` deliberately still identifies the rollout
+  policy that was evaluated.  Both the standard update and P28/G6 update use
+  this lifecycle; reading the deferred cluster counter as the completed row
+  produces a false drift failure.
+  """
+  policy_step = int(policy_step)
+  committed_train_step = int(actor_train_steps)
+  deferred_global_step = int(cluster_global_steps)
+  expected_completed_step = policy_step + 1
+  if (
+      committed_train_step != expected_completed_step
+      or deferred_global_step != policy_step
+  ):
+    raise RuntimeError(
+        "P57 evaluation cycle mapping drifted: "
+        f"policy_step={policy_step} "
+        f"committed_train_step={committed_train_step} "
+        f"deferred_global_step={deferred_global_step}"
+    )
+  return committed_train_step
+
+
 def _should_run_eval(
     *,
     prompt_count: int,
@@ -3306,13 +3338,11 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           )
         else:
           if p57_eval_policy_step_this_cycle is not None:
-            enclosing_global_step = int(self.rl_cluster.global_steps)
-            if enclosing_global_step != p57_eval_policy_step_this_cycle + 1:
-              raise RuntimeError(
-                  "P57 evaluation cycle mapping drifted: "
-                  f"policy_step={p57_eval_policy_step_this_cycle} "
-                  f"enclosing_global_step={enclosing_global_step}"
-              )
+            enclosing_global_step = _p57_eval_cycle_enclosing_step(
+                policy_step=p57_eval_policy_step_this_cycle,
+                actor_train_steps=self.rl_cluster.actor_trainer.train_steps,
+                cluster_global_steps=self.rl_cluster.global_steps,
+            )
             print(
                 "[P57.EVAL.CYCLE] "
                 f"policy_step={p57_eval_policy_step_this_cycle} "

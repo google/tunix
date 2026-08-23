@@ -7,6 +7,7 @@ cd "$ROOT"
 python3 -m unittest \
   canon-zero-tim/tests/p57_frozenlake_tim/test_renderer.py \
   canon-zero-tim/tests/p57_frozenlake_tim/test_checkpoint_eval.py \
+  canon-zero-tim/tests/p57_frozenlake_tim/test_eval_cycle_counter.py \
   canon-zero-tim/tests/p45_frozenlake_dp8_tp8/test_checkpoint_contract.py \
   canon-zero-tim/tests/p57_frozenlake_tim/test_eval_classifier.py \
   canon-zero-tim/tests/p57_frozenlake_tim/test_inprocess_eval_classifier.py \

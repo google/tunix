@@ -239,3 +239,20 @@ is tied K2560/TP8 while Qwen3-32B is untied K5120/TP8; neither inherits the
 Qwen3-1.7B/8B TP4 evidence. Register the exact `(hidden, TP, endpoint)` tuple,
 validate its local-N padding, and require its own primal+VJP receipts. A green
 overlay import is construction evidence, not TPU numerical certification.
+
+### 23. A pre-sync global counter is not the completed optimizer step
+
+P57 `n45j` committed its first actor update and then false-red while mapping
+the step-0 evaluation to its enclosing timing row. The receipt runs before
+`RLCluster.sync_weights()`: `actor_trainer.train_steps` is already 1, but
+`rl_cluster.global_steps` deliberately remains 0 until weight sync advances
+the rollout policy. Reading the latter as the completed row produced
+`policy_step=0 enclosing_global_step=0` and killed an otherwise valid first
+transaction.
+
+At this boundary assert both sides of the lifecycle instead of choosing a
+convenient shared counter: committed actor step must be `policy_step+1`, while
+the deferred cluster step must still equal `policy_step`. Keep the external
+receipt mapped to the committed timing row. Any future reordering that
+advances either counter early must trip the negative control rather than
+silently relabel evaluation cost.
