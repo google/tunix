@@ -1,0 +1,42 @@
+=== CANON P57 FROZENLAKE 450-STEP CAMPAIGN MISSING PROMPT KEY ERROR LOG ===
+Workloads:
+  - canon-p57-fl-is-i45c-5f449cc8 (P45 Token-IS, 64 TPU)
+  - canon-p57-fl-is-m15-i15c-5f449cc8 (M15 Token-IS, 64 TPU)
+  - canon-p57-fl-mism-m15-n15c-5f449cc8 (M15 Native / no-IS, 64 TPU)
+  - canon-p57-fl-mism-n45c-5f449cc8 (P45 Native / no-IS, 64 TPU)
+Cluster: mlperf-v5p (europe-west4-b)
+Topology: 256 TPU v5p total (4 JobSets x 64 TPU chips)
+Source commit: 5f449cc8def801b4a61387ef664b2cb1f7ab05cf
+
+[00:07:20 UTC] Initialized 64 physical TPU devices across each of the 4 JobSets (Device 0 to 63 per JobSet).
+[00:17:46 UTC] Starting run_producers_from_stream with 256 concurrency.
+[00:18:49 UTC] Step 0 Rollout in progress: Avg prompt throughput: 33017.2 tokens/s, Avg generation throughput: 3698.8 tokens/s.
+[00:18:50 UTC] Trajectories completed generation in 59.2s ~ 62.5s.
+
+[00:18:51 UTC] Post-rollout packaging error in TrajectoryCollectEngine._original_input():
+2026-08-23 00:18:34 - ERROR - [absl] Fatal error in runner for pair 1: policy-seeded trajectory original_input is missing required key 'prompts'
+Traceback (most recent call last):
+  File "/app/tunix/rl/agentic/pipeline/rollout_orchestrator.py", line 180, in _runner
+    episode_count = await self._run_and_queue_one_episode(
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/tunix/rl/agentic/pipeline/rollout_orchestrator.py", line 118, in _run_and_queue_one_episode
+    traj = await self._collect_trajectory(agent, env, mode=collect_mode)
+  File "/app/tunix/rl/agentic/trajectory/trajectory_collect_engine.py", line 596, in _original_input
+    raise ValueError(
+ValueError: policy-seeded trajectory original_input is missing required key 'prompts'
+
+2026-08-23 00:18:34 - ERROR - [absl] Error yielding batches: policy-seeded trajectory original_input is missing required key 'prompts'
+[rank0]: Traceback (most recent call last):
+[rank0]:   File "<frozen runpy>", line 198, in _run_module_as_main
+[rank0]:   File "<frozen runpy>", line 88, in _run_code
+[rank0]:   File "/app/examples/frozenlake/train_frozenlake_qwen3.py", line 1793, in <module>
+[rank0]:     grpo_trainer.train(
+[rank0]:   File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 3260, in train
+[rank0]:   File "/app/tunix/rl/agentic/trajectory/trajectory_collect_engine.py", line 596, in _original_input
+[rank0]:     raise ValueError(
+[rank0]: ValueError: policy-seeded trajectory original_input is missing required key 'prompts'
+
+[00:18:51 UTC] [run] exit=1
+[run] FATAL: P57 IS purity marker contract failed: none=0/0 is=0/1
+[entrypoint] FATAL: 90_run.sh exited 1
+=== END LOG ===

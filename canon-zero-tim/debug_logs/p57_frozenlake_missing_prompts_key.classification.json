@@ -1,0 +1,14 @@
+{
+  "artifact_name": "p57_frozenlake_missing_prompts_key",
+  "workloads": [
+    "canon-p57-fl-is-i45c-5f449cc8",
+    "canon-p57-fl-is-m15-i15c-5f449cc8",
+    "canon-p57-fl-mism-m15-n15c-5f449cc8",
+    "canon-p57-fl-mism-n45c-5f449cc8"
+  ],
+  "failure_category": "TRAJECTORY_TASK_OVERRIDE_MISSING_PROMPTS",
+  "step_index": 0,
+  "root_cause": "In trajectory_collect_engine.py:574, when environment_input (self.env.task) has 'policy_version', it unconditionally overrides trajectory_input (self.agent.trajectory.task). In FrozenLake, self.env.task only contains {'policy_version': 0, ...} and lacks 'prompts', whereas the agent's trajectory.task holds the actual {'prompts': [...]}. The override causes original_input to lack 'prompts', triggering ValueError: policy-seeded trajectory original_input is missing required key 'prompts' at line 596.",
+  "remediation": "In trajectory_collect_engine.py:574, only prefer environment_input if trajectory_input is None (pre-observation termination fallback) or if environment_input contains 'prompts'; otherwise preserve or merge trajectory_input so that 'prompts' is retained across FrozenLake and all environments.",
+  "status": "ROOT_CAUSE_ISOLATED"
+}
