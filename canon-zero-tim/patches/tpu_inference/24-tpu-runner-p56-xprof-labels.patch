@@ -1,0 +1,50 @@
+--- a/tpu_runner_p21_l30.py
++++ b/tpu_runner_p21_l30.py
+@@ -88,6 +88,7 @@
+ from tpu_inference.runner.structured_decoding_manager import \
+     StructuredDecodingManager
+ from tpu_inference.spec_decode.jax.dflash import DFlashProposer
++from xprof_labels import enabled as xprof_labels_enabled
+ from tpu_inference.spec_decode.jax.eagle3 import Eagle3Proposer
+ from tpu_inference.spec_decode.jax.utils import (
+     concat_last_sampled_tokens_and_draft_tokens, extend_logits_simple,
+@@ -4519,2 +4519,25 @@
+         lora_metadata = self.lora_utils.extract_lora_metadata()
+
++        model_fn = getattr(self.model, "step_fn_no_options", self.model_fn)
++        compute_logits_fn = self.compute_logits_fn
++        sample_fn = sample
++        if xprof_labels_enabled():
++            labeled_callables = getattr(
++                self, "_canon_xprof_continue_callables", None)
++            if labeled_callables is None:
++                # These objects are static _decode_core arguments. Cache the
++                # wrappers once: recreating named_call wrappers per burst
++                # would turn observability into a JIT-cache miss storm.
++                labeled_callables = (
++                    jax.named_call(model_fn, name="zt/ro/model"),
++                    jax.named_call(compute_logits_fn, name="zt/ro/logits"),
++                    jax.named_call(sample_fn, name="zt/ro/sample"),
++                )
++                self._canon_xprof_continue_callables = labeled_callables
++                print(
++                    "[CANON_XPROF_LABELS] continue-decode stage callables "
++                    "cached",
++                    flush=True,
++                )
++            model_fn, compute_logits_fn, sample_fn = labeled_callables
++
+@@ -4531,10 +4554,9 @@
+             (generated_tokens, final_kv_caches, final_state, final_rng,
+              all_expert_indices, logprobs_tensors) = continue_decode(
+                  state=self.state_leaves,
+-                 model_fn=getattr(self.model, "step_fn_no_options",
+-                                  self.model_fn),
+-                 compute_logits_fn=self.compute_logits_fn,
+-                 sample_fn=sample,
++                 model_fn=model_fn,
++                 compute_logits_fn=compute_logits_fn,
++                 sample_fn=sample_fn,
+                  mesh=self.mesh,
+                  sampling_metadata=sampling_metadata,
+                  init_state=init_state,

@@ -1,0 +1,53 @@
+--- a/tpu_runner_p21_l30.py
++++ b/tpu_runner_p21_l30.py
+@@ -765,11 +765,30 @@
+         runner: Optional[Any] = None,
+         num_reqs: Optional[int] = None) -> LogprobsLists:
+     """Materializes logprobs from JAX arrays into NumPy-backed LogprobsLists."""
+-    log_token_ids = np.asarray(
+-        jax.device_get(logprobs_tensors.logprob_token_ids))
+-    logprobs_arr = np.asarray(jax.device_get(logprobs_tensors.logprobs))
+-    selected_token_ranks = np.asarray(
+-        jax.device_get(logprobs_tensors.selected_token_ranks))
++    # P56 CANON_ENGINE_LOGPROB_READBACK=1: every emitted VALUE stays
++    # identical, but the three tensors come back through ONE
++    # synchronizing device_get instead of three sequential ones, and
++    # the arrays feed LogprobsLists directly instead of round-tripping
++    # through python lists.  Token ids and ranks are exact integers
++    # either way; float32 logprobs convert downstream to the identical
++    # python floats (f32->f64 widening is exact), so per-token logprob
++    # values are bit-identical to the stock readback.
++    _fast_readback = os.environ.get(
++        "CANON_ENGINE_LOGPROB_READBACK", "") == "1"
++    if _fast_readback:
++        log_token_ids, logprobs_arr, selected_token_ranks = (
++            np.asarray(value) for value in jax.device_get((
++                logprobs_tensors.logprob_token_ids,
++                logprobs_tensors.logprobs,
++                logprobs_tensors.selected_token_ranks,
++            )))
++    else:
++        log_token_ids = np.asarray(
++            jax.device_get(logprobs_tensors.logprob_token_ids))
++        logprobs_arr = np.asarray(
++            jax.device_get(logprobs_tensors.logprobs))
++        selected_token_ranks = np.asarray(
++            jax.device_get(logprobs_tensors.selected_token_ranks))
+
+     # For speculative decoding, we need to filter and reorganize the materialized
+     # logprobs. The raw logprobs contain info for all proposed draft tokens (including
+@@ -809,6 +828,14 @@
+             num_reqs = runner.input_batch.num_reqs if num_reqs is None else num_reqs
+             cu_num_generated_tokens = list(range(num_reqs + 1))
+
++    if _fast_readback:
++        return LogprobsLists(
++            logprob_token_ids=np.ascontiguousarray(log_token_ids),
++            logprobs=np.ascontiguousarray(logprobs_arr),
++            sampled_token_ranks=np.ascontiguousarray(
++                selected_token_ranks),
++            cu_num_generated_tokens=cu_num_generated_tokens,
++        )
+     return LogprobsLists(
+         logprob_token_ids=np.array(log_token_ids.tolist()),
+         logprobs=np.array(logprobs_arr.tolist()),

@@ -167,6 +167,26 @@ patch -s --no-backup-if-mismatch "$OUT/tpu_runner_p21_l30.py" \
   echo "      PATCH FAILED: 20-tpu-runner-p38-terminal-discriminator.patch" >&2
   exit 1
 }
+patch -s --no-backup-if-mismatch "$OUT/tpu_runner_p21_l30.py" \
+  "$PKG/patches/tpu_inference/21-tpu-runner-p56-logprob-readback.patch" || {
+  echo "      PATCH FAILED: 21-tpu-runner-p56-logprob-readback.patch" >&2
+  exit 1
+}
+patch -s --no-backup-if-mismatch "$OUT/tpu_runner_p21_l30.py" \
+  "$PKG/patches/tpu_inference/22-tpu-runner-p56-logprob-step-fusion.patch" || {
+  echo "      PATCH FAILED: 22-tpu-runner-p56-logprob-step-fusion.patch" >&2
+  exit 1
+}
+patch -s --no-backup-if-mismatch "$OUT/tpu_runner_p21_l30.py" \
+  "$PKG/patches/tpu_inference/23-tpu-runner-p56-sample-split-fusion.patch" || {
+  echo "      PATCH FAILED: 23-tpu-runner-p56-sample-split-fusion.patch" >&2
+  exit 1
+}
+patch -s --no-backup-if-mismatch "$OUT/tpu_runner_p21_l30.py" \
+  "$PKG/patches/tpu_inference/24-tpu-runner-p56-xprof-labels.patch" || {
+  echo "      PATCH FAILED: 24-tpu-runner-p56-xprof-labels.patch" >&2
+  exit 1
+}
 
 echo "[3/4] laying down the shim chain (model=$MODEL)"
 cp "$PKG"/src/engine_shims/*.py "$OUT/"

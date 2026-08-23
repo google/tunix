@@ -19,6 +19,42 @@ P21_Q17_RMSNORM_WRAPPER_ID = "qwen3-1.7b-p22xh"
 P21_Q17_RMSNORM_WIDTHS = (128, HIDDEN_SIZE)
 
 value = os.environ.get("CANON_PALLAS_ALL_RMSNORM", "")
+_norm_matmul_value = os.environ.get("CANON_PALLAS_NORM_MATMUL", "")
+if _norm_matmul_value not in ("", "0", "1"):
+    raise RuntimeError(
+        f"CANON_PALLAS_NORM_MATMUL must be unset/0/1, got {_norm_matmul_value!r}"
+    )
+_NORM_MATMUL = _norm_matmul_value == "1"
+
+
+class P22XHDeferredNorm:
+    """P56.4.6 sentinel: a hidden-site rmsnorm deferred into its consumer.
+
+    The only legal consumer is the projection einsum, which fuses the
+    verbatim P22.XH normalize into the P22.XE matmul prologue.  Any other
+    consumer touching this object fails loudly instead of silently
+    skipping the norm.
+    """
+
+    _p22xh_deferred = True
+
+    def __init__(self, x, weight, epsilon, prefix):
+        self.x = x
+        self.weight = weight
+        self.epsilon = epsilon
+        self.prefix = prefix
+
+    @property
+    def ndim(self):
+        return self.x.ndim
+
+    @property
+    def shape(self):
+        return self.x.shape
+
+    @property
+    def dtype(self):
+        return self.x.dtype
 if value not in ("", "1"):
     raise RuntimeError(
         f"CANON_PALLAS_ALL_RMSNORM must be unset or 1, got {value!r}"
@@ -105,6 +141,18 @@ class P22XHRmsNorm(stock_rmsnorm):
             raise RuntimeError(
                 f"P22.XH weight contract failed at {self._p22xh_prefix}: "
                 f"shape={weight.shape} dtype={weight.dtype}"
+            )
+        if _NORM_MATMUL and x.ndim == 2 and site in ("input", "post"):
+            # P56.4.6: hand the raw rows plus gamma to the projection
+            # einsum, which runs the verbatim normalize as the matmul
+            # prologue in one custom call.
+            print(
+                f"[PATHTRACE] CANON_PALLAS_NORM_MATMUL=1 deferred site={site} "
+                f"prefix={self._p22xh_prefix} rows={x.shape[0]}",
+                flush=True,
+            )
+            return P22XHDeferredNorm(
+                x, weight, float(self.epsilon), self._p22xh_prefix
             )
         mesh = linear_module._CANON_MESH
         axis = linear_module._CANON_TP_AXIS

@@ -100,7 +100,14 @@ def matmul(
         ),
         compiler_params=pltpu.CompilerParams(
             dimension_semantics=("parallel", "parallel", "arbitrary"),
-            allow_input_fusion=(False, False),
+            # P56.4.7: producer fusion changes materialization, not
+            # values -- the fused producers are elementwise-exact and
+            # the kernel reads identical operand values either way.
+            allow_input_fusion=(
+                (True, True)
+                if os.environ.get("CANON_PALLAS_INPUT_FUSION", "") == "1"
+                else (False, False)
+            ),
             shape_invariant_numerics=shape_invariant_numerics,
         ),
         interpret=interpret,

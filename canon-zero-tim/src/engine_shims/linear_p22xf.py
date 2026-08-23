@@ -23,22 +23,60 @@ original_einsum_call = base.JaxEinsum.__call__
 
 if value == "1":
     from p22_pallas_matmul import matmul as pallas_matmul
+    from p56_pallas_norm_matmul import continue_decode_norm_matmul
+    from p56_pallas_norm_matmul import norm_matmul as pallas_norm_matmul
 
     preflight(require_enabled=True)
 
 
-def _column_parallel(site, equation, inputs, weight, prefix):
+def _column_parallel(site, equation, inputs, weight, prefix, norm=None):
     from jax.experimental.shard_map import shard_map
     from jax.sharding import PartitionSpec as P
 
     mesh = base._CANON_MESH
+    # norm: optional (gamma, epsilon) from a P56.4.6 deferred rmsnorm; the
+    # local body then runs the verbatim normalize as the matmul prologue
+    # in one custom call instead of consuming a pre-normalized tensor.
+    norm_epsilon = norm[1] if norm is not None else None
+
+    def _project(a_local, w2, gamma_local):
+        if gamma_local is None:
+            return pallas_matmul(a_local, w2, block_n=BN, block_k=BK)
+        # The custom-vjp coat keeps the fused Pallas primal and supplies
+        # the composed canonical-replica backward, so admission gates
+        # that differentiate through the engine layer stay analytic
+        # instead of hitting pallas AD (the r13 crash).
+        from p22xk_vjp_ops import norm_matmul as coated_norm_matmul
+
+        if (
+            os.environ.get("CANON_CONTINUE_DECODE", "")
+            and int(a_local.shape[0]) % 128
+        ):
+            return continue_decode_norm_matmul(
+                a_local,
+                gamma_local,
+                w2,
+                epsilon=norm_epsilon,
+                block_n=BN,
+                block_k=BK,
+            )
+
+        def _fused_forward(a, g, b):
+            return pallas_norm_matmul(
+                a, g, b, epsilon=norm_epsilon, block_n=BN, block_k=BK
+            )
+
+        return coated_norm_matmul(
+            a_local, gamma_local, w2, epsilon=norm_epsilon,
+            forward=_fused_forward,
+        )
 
     if site.family in ("gate_proj", "up_proj"):
         in_specs = (P(None, None), P(None, base._CANON_TP_AXIS))
         out_specs = P(None, base._CANON_TP_AXIS)
 
-        def local(a_local, w_local):
-            out = pallas_matmul(a_local, w_local, block_n=BN, block_k=BK)
+        def local(a_local, w_local, gamma_local=None):
+            out = _project(a_local, w_local, gamma_local)
             print(
                 f"[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site={site.family} prefix={prefix} "
                 f"M={a_local.shape[0]} Klocal={a_local.shape[1]} Nlocal={w_local.shape[1]}",
@@ -55,12 +93,12 @@ def _column_parallel(site, equation, inputs, weight, prefix):
         in_specs = (P(None, None), weight_spec)
         out_specs = P(None, base._CANON_TP_AXIS, None)
 
-        def local(a_local, w_local):
+        def local(a_local, w_local, gamma_local=None):
             if equation == "TD,NDH->TNH":
                 w_local = w_local.transpose(1, 0, 2)
             k_local, n_heads, head_dim = w_local.shape
             w2 = w_local.reshape(k_local, n_heads * head_dim)
-            out2 = pallas_matmul(a_local, w2, block_n=BN, block_k=BK)
+            out2 = _project(a_local, w2, gamma_local)
             out = out2.reshape(a_local.shape[0], n_heads, head_dim)
             print(
                 f"[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site={site.family} prefix={prefix} "
@@ -69,13 +107,18 @@ def _column_parallel(site, equation, inputs, weight, prefix):
             )
             return out
 
+    if norm is not None:
+        in_specs = in_specs + (P(None),)
+        map_args = (inputs, weight, norm[0])
+    else:
+        map_args = (inputs, weight)
     try:
         mapped = shard_map(local, mesh=mesh, in_specs=in_specs, out_specs=out_specs,
                            check_vma=False)
     except TypeError:
         mapped = shard_map(local, mesh=mesh, in_specs=in_specs, out_specs=out_specs,
                            check_rep=False)
-    return mapped(inputs, weight)
+    return mapped(*map_args)
 
 
 def _contract_parallel(site, equation, inputs, weight, prefix):
@@ -86,9 +129,37 @@ def _contract_parallel(site, equation, inputs, weight, prefix):
     count = int(mesh.shape[base._CANON_TP_AXIS])
     in_spec, weight_spec = base._CANON_FIXED_SPECS[equation]
 
+    gather_mode = os.environ.get("CANON_FIXED_AR_GATHER", "")
+    if gather_mode not in ("", "0", "1"):
+        raise RuntimeError(
+            f"CANON_FIXED_AR_GATHER must be unset/0/1, got {gather_mode!r}"
+        )
+    gather_mode = gather_mode == "1"
+
     def local(a_local, w_local):
         a2 = a_local.reshape(a_local.shape[0], -1)
         w2 = w_local.reshape(a2.shape[1], -1)
+        if gather_mode:
+            # P56.4.5a: one all_gather delivers every rank's partial in
+            # rank order (all_gather concatenates by axis index), and the
+            # sum below adds them in that same rank order -- the identical
+            # operand values in the identical association order as the
+            # ppermute ring, so the committed activations are bit-equal
+            # while the per-call collective count drops from three
+            # sequential hops to one and the stack/argsort glue vanishes.
+            partial = pallas_matmul(a2, w2, block_n=BN, block_k=BK)
+            print(
+                f"[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site={site.family} prefix={prefix} "
+                f"M={a2.shape[0]} Klocal={a2.shape[1]} Nlocal={w2.shape[1]}",
+                flush=True,
+            )
+            gathered = base.jax.lax.all_gather(
+                partial, base._CANON_TP_AXIS, axis=0, tiled=False
+            )
+            acc = gathered[0]
+            for part_index in range(1, count):
+                acc = acc + gathered[part_index]
+            return acc
         partial = pallas_matmul(a2, w2, block_n=BN, block_k=BK)[None]
         print(
             f"[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site={site.family} prefix={prefix} "
@@ -114,8 +185,9 @@ def _contract_parallel(site, equation, inputs, weight, prefix):
         return acc[0]
 
     print(
-        f"[PATHTRACE] CANON_FIXED_AR=1 fixed-order tree at {prefix} "
-        f"({equation}, tp={count})",
+        f"[PATHTRACE] CANON_FIXED_AR=1 "
+        f"{'gather-ordered-sum' if gather_mode else 'fixed-order tree'} "
+        f"at {prefix} ({equation}, tp={count})",
         flush=True,
     )
     try:
@@ -140,11 +212,31 @@ def _contract_parallel(site, equation, inputs, weight, prefix):
 def _p22xf_einsum_call(self, inputs):
     if base._CANON_MESH is not _CANON_MESH:
         base._CANON_MESH = _CANON_MESH
+    # A P56.4.6 deferred rmsnorm may arrive instead of a tensor; unwrap it
+    # BEFORE any early return so it can never silently reach stock code.
+    norm = None
+    if getattr(inputs, "_p22xh_deferred", False):
+        if value != "1":
+            raise RuntimeError(
+                "P56.4.6 deferred norm requires CANON_PALLAS_ALL_PROJ=1"
+            )
+        norm = (inputs.weight, inputs.epsilon)
+        inputs = inputs.x
     if value != "1":
         return original_einsum_call(self, inputs)
     site = match_site(self.prefix, self.einsum_str)
     if site is None:
+        if norm is not None:
+            raise RuntimeError(
+                f"P56.4.6 deferred norm reached an unmatched einsum at "
+                f"{self.prefix}"
+            )
         return original_einsum_call(self, inputs)
+    if norm is not None and site.contract_parallel:
+        raise RuntimeError(
+            f"P56.4.6 deferred norm reached a contract-parallel site at "
+            f"{self.prefix}"
+        )
     # The frozen bf16 checkpoint uses the package's *unquantized* method
     # wrapper even though a quant_method object is present.  Preserve its
     # post-einsum slice/concat exactly; reject every genuinely quantized or
@@ -167,7 +259,10 @@ def _p22xf_einsum_call(self, inputs):
     if site.contract_parallel:
         output = _contract_parallel(site, self.einsum_str, inputs, self.weight.value, self.prefix)
     else:
-        output = _column_parallel(site, self.einsum_str, inputs, self.weight.value, self.prefix)
+        output = _column_parallel(
+            site, self.einsum_str, inputs, self.weight.value, self.prefix,
+            norm=norm,
+        )
     if self.bias is not None:
         output += self.bias
     if not site.contract_parallel:

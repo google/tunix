@@ -3455,6 +3455,12 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       prompt_queue.put(None)
     else:
       prompt_queue.put(batch)
+      if os.environ.get("CANON_ANCHOR_OVERLAP", "") == "1":
+        # Every prompt flow passes through here (priming included), so
+        # the anchor exists before any step's rescore-era consumers. The
+        # queue is already loaded: the ~3s pinned-host copy below runs
+        # while the rollout generates.
+        self.rl_cluster.snapshot_anchor_policy()
 
   def _filter_outdated_offpolicy_examples(
       self,

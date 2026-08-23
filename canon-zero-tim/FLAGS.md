@@ -4,7 +4,7 @@
 > 焊死数值类 flag = 删代码路径 = 程序变更,走与开启同级认证门(verify+ALIGN+canary)。
 > 生命周期档位:试验 → 已认证 → 默认开 → 焊死(开关可删)→ 退役/否决。
 > 普查基点 a94d6c0c(285 个可设置 env flag,与 ebba4850 普查零漂移);普查后续现役附录
-> 当前 322 个;本表分层登记,D 层按前缀组、语义欠账标"待考古"。
+> 当前 335 个;本表分层登记,D 层按前缀组、语义欠账标"待考古"。
 > 全量机器清单:落地 CL 时由 `grep -rhoE` 生成为附录,条目数必须 == 普查数(排除项列明)。
 
 ## A 层 · 数值语义类(动它 = 动程序身份;焊死走认证门)
@@ -33,9 +33,16 @@
 | CANON_P28_BATCHED_REPORT(=1/=verify) | report 窗合并+remap jit 化(FL -14.5%) | GSM8K 默认;DP16 待验 | 同上 |
 | CANON_P28_BATCHED_REVERSE(=1/=verify) | P52 反向脚手架合并(-13.3%) | 一宿主认证;DP16 等 grouped 移植 | 同上 |
 | CANON_P28_LAYER_SCAN | =verify 恒等仪器/=verify_rev THIRDPROG 演示 | **=1 否决(净负 -5%)** | 仪器保留;=1 进否决区 |
+| CANON_CONTINUE_DECODE(=K) | 设备内 `lax.while_loop` 连续 decode，摊薄逐 token host 往返；async scheduling 必须关 | off；P56 一宿主固定 K=8 已认证 | DP16 与新 K/尾桶重认证后再转正 |
+| CANON_FIXED_AR_GATHER | fixed TP reduction 的三轮 ppermute 传输换成一次 all-gather，本地仍按相同 rank 顺序相加 | off；一宿主 KEEP | target topology strict 绿后转正 |
+| CANON_PALLAS_GATHERED_LOGPROBS | Pallas scorer 片上直接产 selected logprob/top1/rank，避免全词表 logprob 物化 | off；一宿主 KEEP；data_size>1 fail-closed | target topology exact gate 与 XProf 绿后转正 |
+| CANON_LOGPROB_STEP_FUSION | decode logprob 的 slice/pad/gather/slice 胶水收进一个 jitted program，值链不变 | off；一宿主 KEEP | target topology strict 绿后转正 |
+| CANON_FUSED_TREE_OPS / CANON_PALLAS_NORM_MATMUL / CANON_PALLAS_INPUT_FUSION | P56 默认-off 候选：树操作整批 JIT、norm-matmul 融合与 Pallas input fusion | off；分别保留历史 KEEP/边际/未转正事实 | 按各自 P56 判决转正或退役 |
+| CANON_SAMPLE_SPLIT_FUSION / CANON_ENGINE_LOGPROB_READBACK / CANON_ANCHOR_OVERLAP / CANON_GSM8K_VANILLA | P56 中性、被取代或仅对标/载具开关 | off；不属于默认配方 | 战役归档后退役 |
 | CANON_XPROF_DIR/_SKIP_STEPS/_STEPS | XProf+perfetto 捕获(一次出双产物) | 仪器 | 长期保留 |
 | CANON_PERF_TRACE_DIR | 官方 tunix.perf v2 语义时间线导出目录(learner 内建 span → perfetto_trace_v2_<ts>.pb;空=NoopTracer 零开销) | 仪器;P51 载具恒开 | 长期保留(官方 Metrics 契约) |
 | CANON_XPROF_PYTHON_TRACER/_HOST_TRACER | tracer 档位;**python=0 是 device plane 的前提**(开着它训练捕获退化为 host-only) | 仪器;载具默认 python=0 | 长期保留 |
+| CANON_XPROF_LABELS | 为 rollout model/logits/sample 与 trainer fwd/bwd/report JIT 写语义名称，不改数值 | 仪器；P56 r21/r22 已认证 | XProf 原生提供等价稳定命名后退役 |
 | CANON_XPROF_PHASE | 捕获窗模式:step=整步(device 缓冲 ~283 万事件/核,decode ~25s 填满,实为 engine 前 25s 织物)/ update=G6 update 入口→步完成(rollout 不入镜,缓冲装下完整 backward) | 仪器;载具旋钮 P51_XPROF_PHASE | 长期保留 |
 | CANON_UPDATE_REPORT / CANON_PRE_ALIGN_REPORT / CANON_ALIGN_REPORT | 对齐/更新报告选通 | 默认开(监控契约) | 长期保留;A−B 哨兵不可撤(用户裁决 2026-08-15) |
 | JAX_COMPILATION_CACHE_DIR(非 CANON) | 持久编译缓存(-72s/重启) | 一宿主认证;**Pathways 未验** | 集群验证后进 lane/perf.env |
@@ -86,12 +93,14 @@ CANON_ALIGNMENT_GATE
 CANON_ALIGNMENT_GATE_ONLY
 CANON_ALIGNMENT_TRAIN
 CANON_ALIGNMENT_UPDATE_CANARY
+CANON_ANCHOR_OVERLAP
 CANON_ALIGN_REPORT
 CANON_BATCHED_EVIDENCE
 CANON_CANONICAL_DEPTHS
 CANON_CHECKPOINT_CONTRACT_JSON
 CANON_CLIENT_IMAGE
 CANON_CLUSTER
+CANON_CONTINUE_DECODE
 CANON_CUT
 CANON_DEEPSWE_ALIGNMENT_WARN_ONLY
 CANON_DEEPSWE_CLEANUP_TIMEOUT_SECS
@@ -110,6 +119,7 @@ CANON_DEEPSWE_TRAJECTORY_TIMEOUT_SECS
 CANON_DP_PROBE_LOCAL_SAMPLES
 CANON_DP_SIZE
 CANON_ENGINE_DP_SIZE
+CANON_ENGINE_LOGPROB_READBACK
 CANON_ENGINE_MODULE_C
 CANON_ENV
 CANON_EXPECTED_SLICE_DEVICES
@@ -121,6 +131,7 @@ CANON_EXPECT_TRAIN_MESH_IDS
 CANON_EXPECT_VISIBLE_DEVICES
 CANON_FIXED_AR
 CANON_FIXED_AR_EMBED
+CANON_FIXED_AR_GATHER
 CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY
 CANON_FROZENLAKE_C0
 CANON_FROZENLAKE_CKPT_INTERVAL
@@ -135,12 +146,15 @@ CANON_FROZENLAKE_P27
 CANON_FROZENLAKE_RELEASE_GRAD_PROBE
 CANON_GLOBAL_PROMPTS
 CANON_GLOBAL_TRAJECTORIES
+CANON_FUSED_TREE_OPS
+CANON_GSM8K_ACTIVE
 CANON_GSM8K_AB_REPORT_ONLY
 CANON_GSM8K_ALIGNMENT_WARN_ONLY
 CANON_GSM8K_GRAD_PROBE
 CANON_GSM8K_L3
 CANON_GSM8K_TRAIN
 CANON_GSM8K_UPDATE_CANARY
+CANON_GSM8K_VANILLA
 CANON_IN_CONTAINER
 CANON_KV_PACKING
 CANON_KV_UNIFIED
@@ -148,6 +162,7 @@ CANON_L3_A3_DIAG
 CANON_LOCAL_PROMPTS
 CANON_LOCAL_TRAJECTORIES
 CANON_LOGPROB_M
+CANON_LOGPROB_STEP_FUSION
 CANON_MAX_BATCHED
 CANON_MESH_SHAPE
 CANON_MINREPRO_N
@@ -340,10 +355,13 @@ CANON_P58_TIM_ARM
 CANON_PALLAS_ALL_PROJ
 CANON_PALLAS_ALL_RMSNORM
 CANON_PALLAS_CANONICAL_VJP
+CANON_PALLAS_GATHERED_LOGPROBS
+CANON_PALLAS_INPUT_FUSION
 CANON_PALLAS_LOGSOFTMAX
 CANON_PALLAS_MATERIALIZE
 CANON_PALLAS_MATMUL
 CANON_PALLAS_MPAD
+CANON_PALLAS_NORM_MATMUL
 CANON_PALLAS_SWIGLU
 CANON_PALLAS_SWIGLU_MPAD
 CANON_PERF_LOG
@@ -376,6 +394,7 @@ CANON_RUN_ID
 CANON_RUN_LOG
 CANON_RUN_P38_AVAL
 CANON_RUN_T2_DP
+CANON_SAMPLE_SPLIT_FUSION
 CANON_SHIM_ROOT
 CANON_SITES
 CANON_SOURCE_BRANCH
@@ -399,10 +418,11 @@ CANON_WAYCOUNT_DEPTHS
 CANON_WAYCOUNT_WIDTHS
 CANON_XPROF_DIR
 CANON_XPROF_HOST_TRACER
+CANON_XPROF_LABELS
 CANON_XPROF_PHASE
 CANON_XPROF_PYTHON_TRACER
 CANON_XPROF_SKIP_STEPS
 CANON_XPROF_STEPS
 ```
 
-Count: 322 settable names (appendix inventory above; exclusions: none).
+Count: 335 settable names (appendix inventory above; exclusions: none).

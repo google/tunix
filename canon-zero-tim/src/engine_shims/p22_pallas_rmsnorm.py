@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import os
+
 from p22xh_contract import BF, BM, validate_shape
 
 
@@ -80,7 +82,13 @@ def rmsnorm(
         ),
         compiler_params=pltpu.CompilerParams(
             dimension_semantics=("parallel",),
-            allow_input_fusion=(False, False),
+            # P56.4.7: producer fusion changes materialization, not
+            # values (elementwise-exact producers; layout is not value).
+            allow_input_fusion=(
+                (True, True)
+                if os.environ.get("CANON_PALLAS_INPUT_FUSION", "") == "1"
+                else (False, False)
+            ),
             shape_invariant_numerics=shape_invariant_numerics,
         ),
         interpret=interpret,

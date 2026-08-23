@@ -1,0 +1,94 @@
+--- a/tpu_runner_p21_l30.py
++++ b/tpu_runner_p21_l30.py
+@@ -215,6 +215,38 @@
+     )
+
+
++def _canon_sample_split_fusion() -> bool:
++    value = os.environ.get("CANON_SAMPLE_SPLIT_FUSION", "")
++    if value not in ("", "0", "1"):
++        raise ValueError(
++            f"CANON_SAMPLE_SPLIT_FUSION must be unset/0/1, got {value!r}")
++    return value == "1"
++
++
++@functools.partial(jax.jit, static_argnames=("mesh",))
++def _canon_split_and_sample(
++    rng_state: jax.Array,
++    mesh,
++    logits: jax.Array,
++    tpu_sampling_metadata,
++):
++    """P56: rng split -> f32 cast -> sample as ONE program.
++
++    Verbatim ops inside one jit: the same jax.random.split of the
++    sampling state, the same float32 cast, and the (inlined) sample.
++    Values are bit-identical -- split is a pure function of the state,
++    and the cast and sampler see the exact operands the eager chain
++    produced.  Three per-step launches collapse into one.  The step key
++    is returned as well because the prompt processed-logprob path
++    consumes the same key downstream (the r18 None crash).
++    """
++    new_state, step_rng = jax.random.split(rng_state)
++    logits32 = logits.astype(jnp.float32)
++    next_tokens, processed_logits = sample(
++        step_rng, mesh, logits32, tpu_sampling_metadata)
++    return new_state, step_rng, next_tokens, processed_logits
++
++
+ def _canon_logprob_step_fusion() -> bool:
+     value = os.environ.get("CANON_LOGPROB_STEP_FUSION", "")
+     if value not in ("", "0", "1"):
+@@ -4749,7 +4781,14 @@
+             padded_num_reqs = runner_utils.get_padded_num_reqs_with_upper_limit(
+                 self.input_batch.num_reqs, self.max_num_reqs)
+
+-        if tpu_sampling_metadata.do_sampling:
++        fused_split_sample = (
++            spec_decode_metadata is None
++            and tpu_sampling_metadata.do_sampling
++            and _canon_sample_split_fusion()
++        )
++        if fused_split_sample:
++            step_rng = None
++        elif tpu_sampling_metadata.do_sampling:
+             self.rng_params_for_sampling, step_rng = jax.random.split(
+                 self.rng_params_for_sampling)
+         else:
+@@ -4757,14 +4796,28 @@
+
+         processed_bonus_logits = None
+         if spec_decode_metadata is None:
+-            logits = logits.astype(jnp.float32)
+-            with self.maybe_forbid_compile:
+-                next_tokens, processed_logits = sample(
+-                    step_rng,
+-                    self.mesh,
+-                    logits,
+-                    tpu_sampling_metadata,
+-                )
++            if fused_split_sample:
++                with self.maybe_forbid_compile:
++                    (
++                        self.rng_params_for_sampling,
++                        step_rng,
++                        next_tokens,
++                        processed_logits,
++                    ) = _canon_split_and_sample(
++                        self.rng_params_for_sampling,
++                        self.mesh,
++                        logits,
++                        tpu_sampling_metadata,
++                    )
++            else:
++                logits = logits.astype(jnp.float32)
++                with self.maybe_forbid_compile:
++                    next_tokens, processed_logits = sample(
++                        step_rng,
++                        self.mesh,
++                        logits,
++                        tpu_sampling_metadata,
++                    )
+         else:
+             if tpu_sampling_metadata.do_sampling:
+                 bonus_rng, rejection_rng = jax.random.split(step_rng)

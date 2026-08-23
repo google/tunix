@@ -1,0 +1,83 @@
+--- a/tpu_runner_p21_l30.py
++++ b/tpu_runner_p21_l30.py
+@@ -215,6 +215,58 @@
+     )
+
+
++def _canon_logprob_step_fusion() -> bool:
++    value = os.environ.get("CANON_LOGPROB_STEP_FUSION", "")
++    if value not in ("", "0", "1"):
++        raise ValueError(
++            f"CANON_LOGPROB_STEP_FUSION must be unset/0/1, got {value!r}")
++    return value == "1"
++
++
++@functools.partial(
++    jax.jit,
++    static_argnames=("start", "stop", "target_rows", "max_logprobs"),
++)
++def _canon_fused_decode_logprob_chunk(
++    logits: jax.Array,
++    token_ids: jax.Array,
++    start: int,
++    stop: int,
++    target_rows: int,
++    max_logprobs: int,
++) -> LogprobsTensors:
++    """P56: slice -> pad -> compute_and_gather -> slice as ONE program.
++
++    Every op is the eager chunk body's, verbatim, inside a single jit:
++    the same [start:stop] windows, the same constant-0 pads to the
++    canonical M, the same (inlined) compute_and_gather_logprobs, the
++    same [:rows] tail slices.  Values are bit-identical; roughly seven
++    per-step program launches collapse into one.  Distinct
++    (start, stop) windows compile distinct programs, exactly as the
++    eager chain's shapes already did.
++    """
++    chunk_logits = logits[start:stop]
++    chunk_tokens = token_ids[start:stop]
++    chunk_rows = stop - start
++    pad = target_rows - chunk_rows
++    if pad < 0:
++        raise ValueError(
++            f"decode logprob chunk rows {chunk_rows} exceed "
++            f"CANON_LOGPROB_M={target_rows}")
++    if pad:
++        chunk_logits = jnp.pad(
++            chunk_logits, ((0, pad), (0, 0)), constant_values=0.0)
++        token_pad = [(0, pad)] + [(0, 0)] * (chunk_tokens.ndim - 1)
++        chunk_tokens = jnp.pad(chunk_tokens, token_pad, constant_values=0)
++    tensors = compute_and_gather_logprobs(
++        chunk_logits, chunk_tokens, max_logprobs)
++    return LogprobsTensors(
++        logprob_token_ids=tensors.logprob_token_ids[:chunk_rows],
++        logprobs=tensors.logprobs[:chunk_rows],
++        selected_token_ranks=tensors.selected_token_ranks[:chunk_rows],
++    )
++
++
+ def _canon_compute_decode_logprobs(
+     logits: jax.Array,
+     token_ids: jax.Array,
+@@ -228,9 +280,21 @@
+     if int(token_ids.shape[0]) != rows:
+         raise ValueError(
+             f"logprob logits/token row mismatch: {rows} vs {token_ids.shape[0]}")
++    fused_chunks = _canon_logprob_step_fusion()
++    if fused_chunks and not getattr(
++            _canon_compute_decode_logprobs, "_p56_reported", False):
++        print(
++            "[P56.LOGPROB_STEP_FUSION] active "
++            f"target_rows={target_rows} max_logprobs={max_logprobs}",
++            flush=True)
++        _canon_compute_decode_logprobs._p56_reported = True
+     chunks = []
+     for start in range(0, rows, target_rows):
+         stop = min(start + target_rows, rows)
++        if fused_chunks:
++            chunks.append(_canon_fused_decode_logprob_chunk(
++                logits, token_ids, start, stop, target_rows, max_logprobs))
++            continue
+         chunk_logits, chunk_token_ids, chunk_rows = _canon_pad_logprob_inputs(
+             logits[start:stop], token_ids[start:stop], target_rows)
+         chunk = compute_and_gather_logprobs(

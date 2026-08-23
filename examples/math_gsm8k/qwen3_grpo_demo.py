@@ -812,7 +812,17 @@ def main() -> None:
       if args.rollout_vllm_max_num_batched_tokens is not None
       else (vllm_max_num_seqs * KV_CACHE_SIZE) // 8
   )
-  if CANON_GSM8K_ACTIVE:
+  if CANON_GSM8K_ACTIVE and os.getenv("CANON_GSM8K_VANILLA", "") == "1":
+    # Stage-two stock arm: same finite-step TRAIN driver and workload
+    # shape, canonical numeric admission bypassed. A yardstick for the
+    # gap ledger only -- its numbers never enter the A=B=C account, and
+    # the banner makes any log unmistakable.
+    print(
+        "[P56.VANILLA] stock arm: canonical numeric admission bypassed;"
+        " yardstick only",
+        flush=True,
+    )
+  elif CANON_GSM8K_ACTIVE:
     expected_gate_only = (
         "0" if CANON_GSM8K_UPDATE_CANARY or CANON_GSM8K_TRAIN else "1"
     )
@@ -966,6 +976,32 @@ def main() -> None:
           "dtype": "bfloat16",
       },
   }
+  canon_continue_decode = os.environ.get("CANON_CONTINUE_DECODE", "")
+  if canon_continue_decode:
+    # P57: the stack's on-device decode loop (jitted lax.while with donated
+    # KV and on-device EOS exit) amortizes every per-step host round trip
+    # over max_decode_steps. The loop consumes the same patched model_fn /
+    # compute_logits_fn / sample_fn, and resolves compute_and_gather_logprobs
+    # from the sampling module at trace time, where the canonical scorer is
+    # installed -- the 51/51 gate judges the result. Requires
+    # rollout_vllm_async_scheduling=False, which this driver already pins.
+    if (
+        not canon_continue_decode.isdigit()
+        or not 1 <= int(canon_continue_decode) <= 64
+    ):
+      raise ValueError(
+          "CANON_CONTINUE_DECODE must be an integer in [1, 64], got "
+          f"{canon_continue_decode!r}"
+      )
+    vllm_rollout_dict["rollout_vllm_additional_config"] = {
+        "enable_continue_decode": True,
+        "max_decode_steps": int(canon_continue_decode),
+    }
+    print(
+        "[P57.CONTINUE_DECODE] on-device decode loop enabled "
+        f"max_decode_steps={canon_continue_decode}",
+        flush=True,
+    )
   if jax.default_backend() == "tpu":
     vllm_rollout_dict["rollout_vllm_tpu_backend_type"] = "jax"
   if CANON_P41_OPTIMIZER_BENCH:
@@ -1099,7 +1135,12 @@ def main() -> None:
         f"[CANON_P33_WANDB] ONLINE_RUN_PASS {wandb_attestation}",
         flush=True,
     )
-  if CANON_GSM8K_ACTIVE:
+  if CANON_GSM8K_ACTIVE and os.getenv("CANON_GSM8K_VANILLA", "") == "1":
+    print(
+        "[P56.VANILLA] engine contract attestation bypassed (stock arm)",
+        flush=True,
+    )
+  elif CANON_GSM8K_ACTIVE:
     contract = rl_cluster.rollout.canonical_engine_contract_attestation()
     marker = "CANON_GSM8K_TRAIN" if CANON_GSM8K_TRAIN else "CANON_GSM8K_L3"
     print(f"[{marker}] engine contract admitted: {contract}", flush=True)

@@ -363,6 +363,60 @@ class _TiedSegmentedRunner:
 
 class CanonicalQwen3AdapterTest(absltest.TestCase):
 
+  def test_xprof_jit_is_exactly_plain_jit_when_disabled(self):
+    def add_one(value):
+      return value + jnp.float32(1)
+
+    with mock.patch.dict(
+        os.environ, {"CANON_XPROF_LABELS": "0"}, clear=False
+    ):
+      compiled = canonical_qwen3_adapter._xprof_jit(  # pylint: disable=protected-access
+          add_one,
+          module_name="zt_tr_fwd_l00",
+          scope_name="zt/tr/l00/fwd",
+      )
+
+    lowered = compiled.lower(jnp.ones((4,), jnp.float32)).as_text(
+        debug_info=True
+    )
+    self.assertIn("module @jit_add_one", lowered)
+    self.assertNotIn("zt/tr/l00/fwd", lowered)
+
+  def test_xprof_jit_labels_module_and_operation_stack(self):
+    def add_one(value):
+      return value + jnp.float32(1)
+
+    with mock.patch.dict(
+        os.environ, {"CANON_XPROF_LABELS": "1"}, clear=False
+    ):
+      compiled = canonical_qwen3_adapter._xprof_jit(  # pylint: disable=protected-access
+          add_one,
+          module_name="zt_tr_fwd_l00",
+          scope_name="zt/tr/l00/fwd",
+      )
+
+    values = jnp.arange(4, dtype=jnp.float32)
+    np.testing.assert_array_equal(
+        np.asarray(compiled(values)), np.asarray(values + 1)
+    )
+    lowered = compiled.lower(values).as_text(debug_info=True)
+    self.assertIn("module @jit_zt_tr_fwd_l00", lowered)
+    self.assertIn("zt/tr/l00/fwd", lowered)
+
+  def test_xprof_jit_rejects_unknown_mode(self):
+    with mock.patch.dict(
+        os.environ, {"CANON_XPROF_LABELS": "pretty"}, clear=False
+    ):
+      with self.assertRaisesRegex(
+          canonical_qwen3_adapter.FunctionalMappingError,
+          "CANON_XPROF_LABELS must be unset/0/1",
+      ):
+        canonical_qwen3_adapter._xprof_jit(  # pylint: disable=protected-access
+            lambda value: value,
+            module_name="zt_tr_fwd_l00",
+            scope_name="zt/tr/l00/fwd",
+        )
+
   def test_p41_segmented_loss_geometry_is_bounded(self):
     geometry = canonical_qwen3_adapter._segmented_loss_geometry({  # pylint: disable=protected-access
         "CANON_P41_OPTIMIZER_BENCH": "1",

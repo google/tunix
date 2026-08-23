@@ -27,6 +27,7 @@ exact processed-logprob call boundary; neither layer mutates serving state.
 from __future__ import annotations
 
 import dataclasses
+import functools
 import hashlib
 import importlib
 import json
@@ -49,6 +50,53 @@ from tunix.rl import p38_frozenlake_replay
 
 class FunctionalMappingError(ValueError):
   """Raised when a trainer-to-engine weight map is not a bijection."""
+
+
+def _xprof_jit(fun, *, module_name: str, scope_name: str, **jit_kwargs):
+  """Adds compact module/op labels only for an explicit XProf capture.
+
+  The disabled route is exactly ``jax.jit(fun, ...)``.  The enabled route
+  changes only JAX source metadata: ``module_name`` names the executable on
+  XProf's XLA Modules line, while ``scope_name`` prefixes the HLO operation
+  source stack used by Trace Viewer and HLO Op Profile.
+  """
+  value = os.environ.get("CANON_XPROF_LABELS", "")
+  if value not in ("", "0", "1"):
+    raise FunctionalMappingError(
+        "CANON_XPROF_LABELS must be unset/0/1, "
+        f"got {value!r}"
+    )
+  if value != "1":
+    return jax.jit(fun, **jit_kwargs)
+  if not re.fullmatch(r"[a-z0-9_]+", module_name):
+    raise FunctionalMappingError(
+        f"invalid XProf module label {module_name!r}"
+    )
+  if not re.fullmatch(r"[a-z0-9_./-]+", scope_name):
+    raise FunctionalMappingError(
+        f"invalid XProf operation scope {scope_name!r}"
+    )
+  labeled = jax.named_call(fun, name=scope_name)
+  labeled.__name__ = module_name
+  labeled.__qualname__ = module_name
+  return jax.jit(labeled, **jit_kwargs)
+
+
+@functools.partial(jax.jit, static_argnums=2)
+def fused_micro_scale(tree, scale, count):
+  """Whole-tree microbatch gradient scaling in one dispatch.
+
+  Keeps the eager path's exact per-leaf expression -- (value * scale) *
+  asarray(float(count), value.dtype), two ordered multiplies and a cast --
+  as one program instead of ~three tiny launches per leaf. The pinned
+  --xla_allow_excess_precision=false forbids float reassociation, so the
+  compiled result keeps the eager rounding order; the 51/51 alignment
+  gate is the judge regardless. CANON_FUSED_TREE_OPS gates the call.
+  """
+  return jax.tree.map(
+      lambda value: value * scale * jnp.asarray(float(count), value.dtype),
+      tree,
+  )
 
 
 class P35ReplayStageProbeComplete(RuntimeError):
@@ -410,6 +458,127 @@ def _canonical_logprob_row_spec(mesh) -> jax.sharding.PartitionSpec:
   return jax.sharding.PartitionSpec(None, None)
 
 
+_ISSUE_ANATOMY = {"prep": 0.0, "call": 0.0, "n": 0}
+
+
+@functools.partial(jax.jit, static_argnums=(3, 4, 5, 6))
+def _fused_p28_chunk_inputs(
+    n_real,
+    packed_ids,
+    next_ids,
+    chunk_start,
+    bucket,
+    max_num_reqs,
+    blocks_per_req,
+):
+  """One-dispatch build of a P28 single-request chunk's engine inputs.
+
+  The eager body issues ~8 tiny programs per build (arange/where, three
+  zeros-with-.at sets, two slices, an asarray). chunk_start stays a
+  static python int, so the slices keep their exact static semantics and
+  the trace count is bounded by the chunk count (<= a handful at the
+  fixed bucket). Every output value is unchanged integer index math.
+  P52's per-(sequence, chunk) cache already bounds how often this runs;
+  the fusion trims the residual builds to one dispatch each.
+  """
+  rows = jnp.arange(bucket, dtype=jnp.int32)
+  q_len = jnp.minimum(bucket, n_real - chunk_start)
+  kv_len = jnp.minimum(n_real, chunk_start + bucket)
+  positions = jnp.where(rows < q_len, chunk_start + rows, 0)
+  query_start = jnp.zeros((max_num_reqs + 1,), jnp.int32).at[1:].set(q_len)
+  seq_lens = jnp.zeros((max_num_reqs,), jnp.int32).at[0].set(kv_len)
+  block_tables = jnp.zeros(
+      (max_num_reqs, blocks_per_req), jnp.int32
+  ).at[0].set(jnp.arange(blocks_per_req, dtype=jnp.int32))
+  request_distribution = jnp.asarray((0, 0, 1), jnp.int32)
+  ids = packed_ids[chunk_start : chunk_start + bucket]
+  targets = next_ids[chunk_start : chunk_start + bucket]
+  return (
+      ids,
+      targets,
+      positions,
+      block_tables.reshape(-1),
+      seq_lens,
+      query_start,
+      request_distribution,
+  )
+
+
+@functools.partial(jax.jit, static_argnums=(4, 5, 6, 7))
+def _fused_chunk_metadata(
+    n_real,
+    packed_ids,
+    next_ids,
+    chunk_start,
+    sequence_bucket,
+    data_size,
+    max_num_reqs,
+    blocks_per_req,
+):
+  """One-dispatch build of a chunk's engine-call inputs.
+
+  Eagerly, _p32_group_chunk_inputs plus the metadata-arrays helper issue
+  ~15 tiny programs per chunk (arange/clip/where/minimum, two .at sets,
+  slices, reshapes) -- measured as the add/convert scalar-glue swarm in
+  the p56r3 update window. This computes the same integer index math in
+  one program; the python-int slices become dynamic slices whose starts
+  are chunk_index * bucket and therefore in bounds by construction, so
+  every output value is unchanged. chunk_start travels as an array to
+  keep a single trace across chunks.
+  """
+  rows = jnp.arange(sequence_bucket, dtype=jnp.int32)
+  q_len = jnp.clip(n_real - chunk_start, 0, sequence_bucket)
+  kv_len = jnp.where(
+      q_len > 0,
+      jnp.minimum(n_real, chunk_start + sequence_bucket),
+      0,
+  )
+  chunk_ids = jax.lax.dynamic_slice_in_dim(
+      packed_ids, chunk_start, sequence_bucket, axis=1
+  )
+  chunk_targets = jax.lax.dynamic_slice_in_dim(
+      next_ids, chunk_start, sequence_bucket, axis=1
+  )
+  positions = jnp.where(
+      rows[None, :] < q_len[:, None], chunk_start + rows[None, :], 0
+  )
+  local_max_num_reqs = max_num_reqs // data_size
+  active = q_len > 0
+  block_tables = jnp.zeros(
+      (data_size, local_max_num_reqs, blocks_per_req), jnp.int32
+  ).at[:, 0, :].set(
+      jnp.broadcast_to(
+          jnp.arange(blocks_per_req, dtype=jnp.int32),
+          (data_size, blocks_per_req),
+      )
+  )
+  query_start = jnp.where(
+      jnp.arange(local_max_num_reqs + 1)[None, :] == 0,
+      0,
+      q_len[:, None],
+  ).astype(jnp.int32)
+  seq_lens = jnp.zeros(
+      (data_size, local_max_num_reqs), jnp.int32
+  ).at[:, 0].set(jnp.where(active, kv_len, 0))
+  request_distribution = jnp.stack(
+      (
+          jnp.zeros_like(q_len),
+          jnp.zeros_like(q_len),
+          active.astype(jnp.int32),
+      ),
+      axis=1,
+  )
+  return (
+      chunk_ids.reshape(-1),
+      chunk_targets.reshape(-1),
+      positions.reshape(-1),
+      block_tables.reshape(-1),
+      seq_lens.reshape(-1),
+      query_start.reshape(-1),
+      request_distribution.reshape(-1),
+  )
+
+
 def _canonical_dp_attention_metadata_arrays(
     *,
     data_size,
@@ -504,6 +673,75 @@ def _make_canonical_compute_and_gather(gather_logprobs, mesh):
         in_specs=row_spec,
         out_specs=row_spec,
         check_rep=False,
+    )
+
+  gathered_mode = (
+      os.environ.get("CANON_PALLAS_GATHERED_LOGPROBS", "") == "1"
+  )
+  if gathered_mode:
+    # P56.4.3: skip the [rows, vocab] stage-3 materialize and the stock
+    # gather; stages 1+2 are shared verbatim and every comparison runs
+    # on the same x - normalizer values, so the emitted logprob, top-1,
+    # and rank are bit-identical (CPU interpret gate + 51/51 judge).
+    if data_size > 1:
+      raise FunctionalMappingError(
+          "CANON_PALLAS_GATHERED_LOGPROBS=1 is certified for one-host "
+          "topologies only; unset it or port the DP row padding first"
+      )
+    from tpu_inference.layers.jax.sample.sampling import LogprobsTensors  # pylint: disable=g-import-not-at-top
+
+    continue_decode = os.environ.get("CANON_CONTINUE_DECODE", "")
+
+    def local_gathered(logits, tokens):
+      if continue_decode:
+        return canonical_logsoftmax.continue_decode_gathered_logprobs(
+            logits, tokens
+        )
+      return canonical_logsoftmax.gathered_logprobs(logits, tokens)
+
+    replicated_row = jax.sharding.PartitionSpec(None, None)
+    replicated_vec = jax.sharding.PartitionSpec(None)
+    gathered_out_specs = (
+        replicated_vec, replicated_vec, replicated_vec, replicated_vec
+    )
+    try:
+      mapped_gathered = jax.shard_map(
+          local_gathered,
+          mesh=mesh,
+          in_specs=(replicated_row, replicated_vec),
+          out_specs=gathered_out_specs,
+          check_vma=False,
+      )
+    except TypeError:
+      mapped_gathered = jax.shard_map(
+          local_gathered,
+          mesh=mesh,
+          in_specs=(replicated_row, replicated_vec),
+          out_specs=gathered_out_specs,
+          check_rep=False,
+      )
+
+    def compute_and_gather_fused(logits, next_tokens, max_logprobs):
+      if int(max_logprobs) != 1:
+        raise FunctionalMappingError(
+            "CANON_PALLAS_GATHERED_LOGPROBS=1 requires the max_logprobs=1 "
+            f"rollout contract, got {max_logprobs}"
+        )
+      token_logprob, top_value, top_index, token_ranks = mapped_gathered(
+          logits, next_tokens
+      )
+      token_ids = jnp.int32(next_tokens)[:, None]
+      indices = jnp.concatenate((token_ids, top_index[:, None]), axis=1)
+      values = jnp.concatenate(
+          (token_logprob[:, None], top_value[:, None]), axis=1
+      )
+      return LogprobsTensors(jnp.int32(indices), values, token_ranks)
+
+    return _xprof_jit(
+        compute_and_gather_fused,
+        module_name="zt_ro_logprob_gather",
+        scope_name="zt/ro/logprob/gather",
+        static_argnames=("max_logprobs",),
     )
 
   def compute_and_gather(logits, next_tokens, max_logprobs):
@@ -865,39 +1103,63 @@ class _P28SegmentedEngineForward:
             "P28 G5c embed/norm/lm-head must each expose parameter leaves"
         )
 
-      def run_local_embed(leaves, input_ids):
+      def fwd_embed(leaves, input_ids):
         module = merge_local(embed_graphdef, embed_treedef, leaves)
         return module(input_ids)
 
-      def pullback_local_embed(leaves, input_ids, dhidden):
-        _, pullback = jax.vjp(run_local_embed, leaves, input_ids)
+      def bwd_embed(leaves, input_ids, dhidden):
+        _, pullback = jax.vjp(fwd_embed, leaves, input_ids)
         dleaves, _ = pullback(dhidden)
         return dleaves
 
-      def run_local_norm(leaves, hidden):
+      def fwd_norm(leaves, hidden):
         module = merge_local(norm_graphdef, norm_treedef, leaves)
         return module(hidden)
 
-      def pullback_local_norm(leaves, hidden, dnormalized):
-        _, pullback = jax.vjp(run_local_norm, leaves, hidden)
+      def bwd_norm(leaves, hidden, dnormalized):
+        _, pullback = jax.vjp(fwd_norm, leaves, hidden)
         return pullback(dnormalized)
 
-      def run_local_head(leaves, hidden):
+      def fwd_lm_head(leaves, hidden):
         module = merge_local(head_graphdef, head_treedef, leaves)
         if tied_word_embeddings:
           return module.decode(hidden)
         return module(hidden)
 
-      def pullback_local_head(leaves, hidden, dlogits):
-        _, pullback = jax.vjp(run_local_head, leaves, hidden)
+      def bwd_lm_head(leaves, hidden, dlogits):
+        _, pullback = jax.vjp(fwd_lm_head, leaves, hidden)
         return pullback(dlogits)
 
-      embed_local_fn = jax.jit(run_local_embed)
-      embed_pullback_fn = jax.jit(pullback_local_embed)
-      norm_local_fn = jax.jit(run_local_norm)
-      norm_pullback_fn = jax.jit(pullback_local_norm)
-      head_local_fn = jax.jit(run_local_head)
-      head_pullback_fn = jax.jit(pullback_local_head)
+      embed_local_fn = _xprof_jit(
+          fwd_embed,
+          module_name="zt_tr_fwd_embed",
+          scope_name="zt/tr/embed/fwd",
+      )
+      embed_pullback_fn = _xprof_jit(
+          bwd_embed,
+          module_name="zt_tr_bwd_embed",
+          scope_name="zt/tr/embed/bwd",
+      )
+      norm_local_fn = _xprof_jit(
+          fwd_norm,
+          module_name="zt_tr_fwd_norm",
+          scope_name="zt/tr/final_norm/fwd",
+      )
+      norm_pullback_fn = _xprof_jit(
+          bwd_norm,
+          module_name="zt_tr_bwd_norm",
+          scope_name="zt/tr/final_norm/bwd",
+      )
+      head_local_fn = _xprof_jit(
+          fwd_lm_head,
+          module_name="zt_tr_fwd_head",
+          scope_name="zt/tr/lm_head/fwd",
+      )
+      head_pullback_fn = _xprof_jit(
+          bwd_lm_head,
+          module_name="zt_tr_bwd_head",
+          scope_name="zt/tr/lm_head/bwd",
+      )
       endpoint_contract = {
           "embed": embed_full_indices,
           "norm": norm_full_indices,
@@ -915,6 +1177,7 @@ class _P28SegmentedEngineForward:
     local_layer_defs = []
     local_layer_vjp_fns = []
     local_layer_pullback_fns = []
+    local_layer_pullback_tape_fns = []
     local_layer_leaves = []
     local_layer_contracts = []
     for layer_index in range(start_layer, end_layer):
@@ -925,13 +1188,19 @@ class _P28SegmentedEngineForward:
         model = merge(state_leaves)
         return model.model.layers[_index](cache, hidden, attention_metadata)
 
-      layer_fns.append(jax.jit(run_layer))
+      layer_fns.append(
+          _xprof_jit(
+              run_layer,
+              module_name="zt_tr_ref_fwd_layer",
+              scope_name="zt/tr/layer/reference",
+          )
+      )
 
       layer_graphdef, layer_state = nnx.split(layers[layer_index])
       layer_treedef = jax.tree_util.tree_structure(layer_state)
       layer_leaves = tuple(jax.tree_util.tree_leaves(layer_state))
 
-      def run_local_layer(
+      def fwd_layer(
           leaves, cache, hidden, attention_metadata,
           *, _graphdef=layer_graphdef, _treedef=layer_treedef
       ):
@@ -941,7 +1210,7 @@ class _P28SegmentedEngineForward:
 
       def block_objective(
           leaves, cache, hidden, attention_metadata,
-          *, _run=run_local_layer
+          *, _run=fwd_layer
       ):
         next_cache, next_hidden = _run(
             leaves, cache, hidden, attention_metadata
@@ -954,7 +1223,7 @@ class _P28SegmentedEngineForward:
         ) / jnp.asarray(next_hidden.size, jnp.float32)
         return loss, (next_cache, next_hidden)
 
-      def block_pullback(
+      def bwd_layer_block(
           leaves,
           cache,
           hidden,
@@ -962,7 +1231,7 @@ class _P28SegmentedEngineForward:
           dnext_cache,
           dnext_hidden,
           *,
-          _run=run_local_layer,
+          _run=fwd_layer,
       ):
         def primal(p, c, h):
           return _run(p, c, h, attention_metadata)
@@ -970,15 +1239,66 @@ class _P28SegmentedEngineForward:
         _, pullback = jax.vjp(primal, leaves, cache, hidden)
         return pullback((dnext_cache, dnext_hidden))
 
-      local_layer_fns.append(jax.jit(run_local_layer))
-      local_layer_vjp_fns.append(
-          jax.jit(
-              jax.value_and_grad(
-                  block_objective, argnums=(0, 1, 2), has_aux=True
-              )
+      def bwd_layer_block_tape(
+          leaves,
+          stacked_caches,
+          stacked_hidden,
+          attention_metadata,
+          dnext_cache,
+          dnext_hidden,
+          *,
+          _run=fwd_layer,
+          _index=layer_index,
+      ):
+        # scan_fwd reverse: this layer's (cache, hidden) tape entries are
+        # static-index slices of the scanned stack, taken INSIDE the
+        # pullback program so no standalone unstack dispatch exists.  The
+        # slice is exact; the vjp body below is bwd_layer_block's,
+        # unchanged, on the same values.
+        cache = jax.tree.map(
+            lambda x: jax.lax.index_in_dim(x, _index, 0, keepdims=False),
+            stacked_caches,
+        )
+        hidden = jax.lax.index_in_dim(
+            stacked_hidden, _index, 0, keepdims=False
+        )
+
+        def primal(p, c, h):
+          return _run(p, c, h, attention_metadata)
+
+        _, pullback = jax.vjp(primal, leaves, cache, hidden)
+        return pullback((dnext_cache, dnext_hidden))
+
+      local_layer_fns.append(
+          _xprof_jit(
+              fwd_layer,
+              module_name="zt_tr_fwd_layer",
+              scope_name="zt/tr/layer/fwd",
           )
       )
-      local_layer_pullback_fns.append(jax.jit(block_pullback))
+      local_layer_vjp_fns.append(
+          _xprof_jit(
+              jax.value_and_grad(
+                  block_objective, argnums=(0, 1, 2), has_aux=True
+              ),
+              module_name="zt_tr_probe_vjp_layer",
+              scope_name="zt/tr/layer/probe_vjp",
+          )
+      )
+      local_layer_pullback_fns.append(
+          _xprof_jit(
+              bwd_layer_block,
+              module_name="zt_tr_bwd_layer",
+              scope_name="zt/tr/layer/bwd",
+          )
+      )
+      local_layer_pullback_tape_fns.append(
+          _xprof_jit(
+              bwd_layer_block_tape,
+              module_name="zt_tr_bwd_tape_layer",
+              scope_name="zt/tr/layer/bwd_tape",
+          )
+      )
       local_layer_leaves.append(layer_leaves)
       local_layer_defs.append((layer_graphdef, layer_treedef))
       local_layer_contracts.append(
@@ -1041,6 +1361,7 @@ class _P28SegmentedEngineForward:
     self._layer_scan_stack = None
     self._local_layer_vjp_fns = tuple(local_layer_vjp_fns)
     self._local_layer_pullback_fns = tuple(local_layer_pullback_fns)
+    self._local_layer_pullback_tape_fns = tuple(local_layer_pullback_tape_fns)
     self._local_layer_leaves = tuple(local_layer_leaves)
     self._local_layer_full_indices = tuple(local_layer_full_indices)
     self._local_layer_contracts = tuple(local_layer_contracts)
@@ -1278,7 +1599,7 @@ class _P28SegmentedEngineForward:
   def _ensure_layer_scan(self, engine_leaves):
     """Builds the shared scan body once and the leaf stack per leaves object.
 
-    The scan body reuses run_local_layer's exact composition (unflatten ->
+    The scan body reuses fwd_layer's exact composition (unflatten ->
     nnx.merge -> layer(...)) with layer 0's graphdef/treedef; a non-uniform
     stack fails closed rather than silently falling back.
     """
@@ -1516,6 +1837,12 @@ class _P28SegmentedEngineForward:
       state_leaves=None,
   ):
     """Applies one real layer pullback to caller-provided output cotangents."""
+    # Issue-anatomy timers: R2-R4 showed the reverse issue segment pinned
+    # at ~14s while every dispatch-count lever left it unmoved, so the
+    # suspect is this call itself -- python prep (validation walk, the
+    # per-call leaf tuple) versus the jitted dispatch. The [PERF]
+    # vag_reverse line reports both sums.
+    _anatomy_t0 = time.perf_counter()
     self._reject_outer_transform(
         cache,
         hidden,
@@ -1545,7 +1872,8 @@ class _P28SegmentedEngineForward:
           state_leaves[index]
           for index in self._local_layer_full_indices[layer_index]
       )
-    return self._local_layer_pullback_fns[layer_index](
+    _anatomy_t1 = time.perf_counter()
+    result = self._local_layer_pullback_fns[layer_index](
         local_leaves,
         cache,
         hidden,
@@ -1553,6 +1881,70 @@ class _P28SegmentedEngineForward:
         dnext_cache,
         dnext_hidden,
     )
+    _anatomy_t2 = time.perf_counter()
+    _ISSUE_ANATOMY["prep"] += _anatomy_t1 - _anatomy_t0
+    _ISSUE_ANATOMY["call"] += _anatomy_t2 - _anatomy_t1
+    _ISSUE_ANATOMY["n"] += 1
+    return result
+
+  def run_block_pullback_tape(
+      self,
+      layer_index,
+      stacked_caches,
+      stacked_hidden,
+      attention_metadata,
+      dnext_cache,
+      dnext_hidden,
+      *,
+      state_leaves=None,
+  ):
+    """Applies one layer pullback that slices its tape inputs in-program."""
+    _anatomy_t0 = time.perf_counter()
+    self._reject_outer_transform(
+        stacked_caches,
+        stacked_hidden,
+        attention_metadata,
+        dnext_cache,
+        dnext_hidden,
+    )
+    layer_index = int(layer_index)
+    if layer_index < 0 or layer_index >= len(
+        self._local_layer_pullback_tape_fns
+    ):
+      raise FunctionalMappingError(
+          f"P28 tape pullback layer index out of range: {layer_index}"
+      )
+    if state_leaves is None and self._captured_state_released:
+      raise FunctionalMappingError(
+          "P30 pullback requires explicit current state after captured state "
+          "was released"
+      )
+    local_leaves = self._local_layer_leaves[layer_index]
+    if state_leaves is not None:
+      state_leaves = tuple(state_leaves)
+      if len(state_leaves) != self._num_state_leaves:
+        raise FunctionalMappingError(
+            "P28 pullback state leaf count changed: "
+            f"{len(state_leaves)} != {self._num_state_leaves}"
+        )
+      local_leaves = tuple(
+          state_leaves[index]
+          for index in self._local_layer_full_indices[layer_index]
+      )
+    _anatomy_t1 = time.perf_counter()
+    result = self._local_layer_pullback_tape_fns[layer_index](
+        local_leaves,
+        stacked_caches,
+        stacked_hidden,
+        attention_metadata,
+        dnext_cache,
+        dnext_hidden,
+    )
+    _anatomy_t2 = time.perf_counter()
+    _ISSUE_ANATOMY["prep"] += _anatomy_t1 - _anatomy_t0
+    _ISSUE_ANATOMY["call"] += _anatomy_t2 - _anatomy_t1
+    _ISSUE_ANATOMY["n"] += 1
+    return result
 
   def _require_full_loss_endpoints(self):
     if self._endpoint_contract is None:
@@ -2090,7 +2482,7 @@ class Qwen3EngineForwardAdapter:
         else stock_target_logprobs
     )
 
-    def p28_processed_rows(logits, target_ids, temperature):
+    def fwd_logprob_rows(logits, target_ids, temperature):
       sampling_metadata = self._sampling_metadata_cls(
           temperature=jnp.full(
               (self._bucket,), temperature, dtype=jnp.float32
@@ -2115,7 +2507,7 @@ class Qwen3EngineForwardAdapter:
       )
       return target_logprobs, entropy
 
-    def p28_processed_rows_pullback(
+    def bwd_logprob_rows(
         logits,
         target_ids,
         temperature,
@@ -2123,14 +2515,20 @@ class Qwen3EngineForwardAdapter:
         dentropy,
     ):
       def primal(values):
-        return p28_processed_rows(values, target_ids, temperature)
+        return fwd_logprob_rows(values, target_ids, temperature)
 
       _, pullback = jax.vjp(primal, logits)
       return pullback((dtarget_logprobs, dentropy))[0]
 
-    self._p28_processed_rows_fn = jax.jit(p28_processed_rows)
-    self._p28_processed_rows_pullback_fn = jax.jit(
-        p28_processed_rows_pullback
+    self._p28_processed_rows_fn = _xprof_jit(
+        fwd_logprob_rows,
+        module_name="zt_tr_fwd_logprob",
+        scope_name="zt/tr/logprob/fwd",
+    )
+    self._p28_processed_rows_pullback_fn = _xprof_jit(
+        bwd_logprob_rows,
+        module_name="zt_tr_bwd_logprob",
+        scope_name="zt/tr/logprob/bwd",
     )
     print(
         "[CANON_ADAPTER] processed-logprob custom VJP installed "
@@ -3091,7 +3489,7 @@ class Qwen3EngineForwardAdapter:
             tp_size=self._tp_size,
         ).leaves
 
-      def adjoint(state, cotangents):
+      def bwd_adjoint_link(state, cotangents):
         _, pullback = jax.vjp(mapping, state)
         gradient = pullback(tuple(cotangents))[0]
         return jax.tree.map(
@@ -3101,7 +3499,11 @@ class Qwen3EngineForwardAdapter:
       self._p50_adjoint_shapes = tuple(
           value.shape for value in jax.eval_shape(mapping, trainer_state)
       )
-      self._p50_adjoint_fn = jax.jit(adjoint)
+      self._p50_adjoint_fn = _xprof_jit(
+          bwd_adjoint_link,
+          module_name="zt_tr_bwd_adjoint",
+          scope_name="zt/tr/report/adjoint",
+      )
     expected = self._p50_adjoint_shapes
     if len(expected) != len(engine_cotangents):
       raise FunctionalMappingError(
@@ -3121,10 +3523,15 @@ class Qwen3EngineForwardAdapter:
   def _batched_report_add(self, total_tree, delta_tree):
     """One-dispatch elementwise tree add (no reduction freedom)."""
     if getattr(self, "_p50_acc_fn", None) is None:
-      self._p50_acc_fn = jax.jit(
-          lambda total, delta: jax.tree.map(
-              lambda a, b: a + b, total, delta
-          )
+      # Named so profiles show bwd_report_acc instead of jit__lambda
+      # (1.5ms per call at the certified geometry -- worth a name).
+      def bwd_report_acc(total, delta):
+        return jax.tree.map(lambda a, b: a + b, total, delta)
+
+      self._p50_acc_fn = _xprof_jit(
+          bwd_report_acc,
+          module_name="zt_tr_bwd_report_acc",
+          scope_name="zt/tr/report/accumulate",
       )
     return self._p50_acc_fn(total_tree, delta_tree)
 
@@ -3164,7 +3571,11 @@ class Qwen3EngineForwardAdapter:
             "cache": (stacked_finite(cache_lv), stacked_nonzero(cache_lv)),
         }
 
-      self._p50_evidence_fn = jax.jit(evidence)
+      self._p50_evidence_fn = _xprof_jit(
+          evidence,
+          module_name="zt_tr_evidence",
+          scope_name="zt/tr/report/evidence",
+      )
     return self._p50_evidence_fn(
         tuple(trainer_leaves), tuple(engine_gradients), tuple(cache_leaves)
     )
@@ -3237,7 +3648,9 @@ class Qwen3EngineForwardAdapter:
   def _p28_chunk_inputs(self, spec, chunk_index):
     """Constructs one real engine metadata/input tuple at fixed M."""
     chunk_index = int(chunk_index)
-    if os.environ.get("CANON_P28_BATCHED_REVERSE", "") in ("1", "verify"):
+    if os.environ.get("CANON_P28_BATCHED_REVERSE", "") in (
+        "1", "verify", "scan_fwd"
+    ):
       cache = spec.get("_p52_chunk_inputs")
       if cache is None:
         cache = {}
@@ -3249,6 +3662,42 @@ class Qwen3EngineForwardAdapter:
     q_len = min(self._bucket, spec["n_real"] - chunk_start)
     if q_len <= 0:
       raise FunctionalMappingError("P28 G5c attempted an empty chunk")
+    if os.environ.get("CANON_FUSED_TREE_OPS", "") == "1":
+      (
+          ids,
+          targets,
+          positions,
+          block_tables_flat,
+          seq_lens,
+          query_start,
+          request_distribution,
+      ) = _fused_p28_chunk_inputs(
+          jnp.asarray(spec["n_real"], jnp.int32),
+          spec["packed_ids"],
+          spec["next_ids"],
+          chunk_start,
+          self._bucket,
+          int(self._max_num_reqs),
+          int(self._blocks_per_req),
+      )
+      metadata = self._metadata_cls(
+          input_positions=self._engine_array(positions),
+          block_tables=self._engine_array(block_tables_flat),
+          seq_lens=self._engine_array(seq_lens),
+          query_start_loc=self._engine_array(query_start),
+          request_distribution=self._engine_array(request_distribution),
+      )
+      metadata.padded_num_reqs = self._max_num_reqs
+      result = (
+          self._engine_array(ids),
+          self._engine_array(targets),
+          metadata,
+      )
+      if os.environ.get("CANON_P28_BATCHED_REVERSE", "") in (
+          "1", "verify", "scan_fwd"
+      ):
+        spec["_p52_chunk_inputs"][chunk_index] = result
+      return result
     kv_len = min(spec["n_real"], chunk_start + self._bucket)
     rows = jnp.arange(self._bucket, dtype=jnp.int32)
     positions = jnp.where(rows < q_len, chunk_start + rows, 0)
@@ -3278,7 +3727,9 @@ class Qwen3EngineForwardAdapter:
         ),
         metadata,
     )
-    if os.environ.get("CANON_P28_BATCHED_REVERSE", "") in ("1", "verify"):
+    if os.environ.get("CANON_P28_BATCHED_REVERSE", "") in (
+        "1", "verify", "scan_fwd"
+    ):
       spec["_p52_chunk_inputs"][chunk_index] = result
     return result
 
@@ -3371,12 +3822,18 @@ class Qwen3EngineForwardAdapter:
         )
         counts["embed_forward"] += 1
         layer_scan_mode = segmented.layer_scan_mode()
+        # scan_fwd (P56.4.11): the forward chunk also rides the
+        # byte-preserving layer scan (one program instead of one per
+        # layer); the P50 verify machinery certified this exact branch.
+        scan_fwd_forward = (
+            os.environ.get("CANON_P28_BATCHED_REVERSE", "") == "scan_fwd"
+        )
         scan_caches = scan_hidden = None
-        if layer_scan_mode:
+        if layer_scan_mode or scan_fwd_forward:
           scan_caches, scan_hidden = segmented.run_layers_scan(
               engine_leaves, caches, hidden, metadata
           )
-        if layer_scan_mode == "1":
+        if layer_scan_mode == "1" or scan_fwd_forward:
           caches = scan_caches
           hidden = scan_hidden
           counts["layer_forward"] += len(caches)
@@ -3450,17 +3907,40 @@ class Qwen3EngineForwardAdapter:
         spec["source_rows"]
     ].add(jnp.where(completion_valid, dentropy, 0.0))
 
-    tree_zeros = lambda tree: jax.tree.map(jnp.zeros_like, tree)
-    tree_add = lambda left, right: jax.tree.map(
-        lambda a, b: a + b, left, right
-    )
+    def tree_zeros(tree):
+      return jax.tree.map(jnp.zeros_like, tree)
+
+    def tree_add(left, right):
+      return jax.tree.map(lambda a, b: a + b, left, right)
+
+    # Un-jitted, these dispatch one tiny program per leaf: the gradient
+    # accumulation of a ~310-leaf state walks head/norm/embed plus 28
+    # layers x 16 chunks and shows up in a profile as tens of thousands
+    # of jit_add launches per update, all host dispatch overhead. Jitting
+    # the whole-tree op keeps every leaf's elementwise a + b exactly as
+    # it was (no cross-leaf math exists to reassociate), so the committed
+    # gradient stays bitwise identical; the 51/51 alignment gate is the
+    # judge, and the flag keeps the certified recipe untouched until it
+    # rules.
+    if os.environ.get("CANON_FUSED_TREE_OPS", "") == "1":
+      tree_zeros = jax.jit(tree_zeros)
+      tree_add = jax.jit(tree_add)
     reverse_mode = os.environ.get("CANON_P28_BATCHED_REVERSE", "")
-    if reverse_mode not in ("", "0", "1", "verify"):
+    if reverse_mode not in ("", "0", "1", "verify", "scan_fwd"):
       raise FunctionalMappingError(
-          "CANON_P28_BATCHED_REVERSE must be unset/0/1/verify, "
+          "CANON_P28_BATCHED_REVERSE must be unset/0/1/verify/scan_fwd, "
           f"got {reverse_mode!r}"
       )
-    batched_reverse = reverse_mode == "1"
+    # scan_fwd: batched accumulation plus the forward tape rebuilt by the
+    # byte-preserving layer tape scan (one program instead of one per
+    # layer), with each layer pullback slicing its (cache, hidden) inputs
+    # from the stacked tape INSIDE its own program.  The P49 layer-scan
+    # ablation lost to the standalone unstack step; slicing inside the
+    # pullback removes that step instead of paying it.  The pullback
+    # arithmetic is the same per-layer program body on the same values;
+    # the 51/51 gate judges the compiled result.
+    batched_reverse = reverse_mode in ("1", "scan_fwd")
+    scan_fwd_reverse = reverse_mode == "scan_fwd"
     reverse_verify = reverse_mode == "verify"
     if batched_reverse:
       zero_layers, zero_embed, zero_norm, zero_head, zero_caches = (
@@ -3511,7 +3991,15 @@ class Qwen3EngineForwardAdapter:
           scan_tape = segmented.run_layers_tape_scan(
               engine_leaves, caches, hidden, metadata
           )
-        if layer_scan_mode == "1":
+        if scan_fwd_reverse:
+          scan_stacked_caches, scan_stacked_hidden, hidden = (
+              segmented.run_layers_tape_scan(
+                  engine_leaves, caches, hidden, metadata
+              )
+          )
+          layer_tape = [None] * layer_count
+          counts["layer_forward"] += layer_count
+        elif layer_scan_mode == "1":
           stacked_cache_ins, stacked_hidden_ins, hidden = scan_tape
           hidden_ins = segmented.unstack_hidden_ins(
               engine_leaves, stacked_hidden_ins
@@ -3632,16 +4120,27 @@ class Qwen3EngineForwardAdapter:
           )
           previous_cache_carry = [None] * len(layer_tape)
           for layer_index in reversed(range(len(layer_tape))):
-            cache_in, hidden_in = layer_tape[layer_index]
-            local_grad, dcache, dhidden = segmented.run_block_pullback(
-                layer_index,
-                cache_in,
-                hidden_in,
-                metadata,
-                dcache_carry[layer_index],
-                dhidden,
-                state_leaves=engine_leaves,
-            )
+            if scan_fwd_reverse:
+              local_grad, dcache, dhidden = segmented.run_block_pullback_tape(
+                  layer_index,
+                  scan_stacked_caches,
+                  scan_stacked_hidden,
+                  metadata,
+                  dcache_carry[layer_index],
+                  dhidden,
+                  state_leaves=engine_leaves,
+              )
+            else:
+              cache_in, hidden_in = layer_tape[layer_index]
+              local_grad, dcache, dhidden = segmented.run_block_pullback(
+                  layer_index,
+                  cache_in,
+                  hidden_in,
+                  metadata,
+                  dcache_carry[layer_index],
+                  dhidden,
+                  state_leaves=engine_leaves,
+              )
             if chunk_layer_grads is not None:
               chunk_layer_grads.append(local_grad)
             if not batched_reverse:
@@ -3846,6 +4345,48 @@ class Qwen3EngineForwardAdapter:
     """Constructs one global-M engine call from data-rank-local sequences."""
     chunk_index = int(chunk_index)
     chunk_start = chunk_index * self._sequence_bucket
+    if os.environ.get("CANON_FUSED_TREE_OPS", "") == "1":
+      # Same guards the eager helper enforces per call; config is pinned
+      # but a fused path must not be the one that skips the checks.
+      if self._data_size < 1 or self._max_num_reqs % self._data_size:
+        raise FunctionalMappingError(
+            "RPA metadata requires max_num_reqs divisible by data size"
+        )
+      if spec["n_real"].shape != (self._data_size,):
+        raise FunctionalMappingError(
+            "RPA metadata lengths must contain one scalar per data rank"
+        )
+      (
+          ids_flat,
+          targets_flat,
+          positions_flat,
+          block_tables,
+          seq_lens,
+          query_start,
+          request_distribution,
+      ) = _fused_chunk_metadata(
+          spec["n_real"],
+          spec["packed_ids"],
+          spec["next_ids"],
+          jnp.asarray(chunk_start, jnp.int32),
+          self._sequence_bucket,
+          int(self._data_size),
+          int(self._max_num_reqs),
+          int(self._blocks_per_req),
+      )
+      metadata = self._metadata_cls(
+          input_positions=self._engine_array(positions_flat),
+          block_tables=self._engine_array(block_tables),
+          seq_lens=self._engine_array(seq_lens),
+          query_start_loc=self._engine_array(query_start),
+          request_distribution=self._engine_array(request_distribution),
+      )
+      metadata.padded_num_reqs = self._max_num_reqs
+      return (
+          self._engine_array(ids_flat),
+          self._engine_array(targets_flat),
+          metadata,
+      )
     rows = jnp.arange(self._sequence_bucket, dtype=jnp.int32)
     q_len = jnp.clip(
         spec["n_real"] - chunk_start, 0, self._sequence_bucket
@@ -4005,10 +4546,24 @@ class Qwen3EngineForwardAdapter:
         jnp.where(completion_valid, dentropy, 0.0)
     )
 
-    tree_zeros = lambda tree: jax.tree.map(jnp.zeros_like, tree)
-    tree_add = lambda left, right: jax.tree.map(
-        lambda a, b: a + b, left, right
-    )
+    def tree_zeros(tree):
+      return jax.tree.map(jnp.zeros_like, tree)
+
+    def tree_add(left, right):
+      return jax.tree.map(lambda a, b: a + b, left, right)
+
+    # Un-jitted, these dispatch one tiny program per leaf: the gradient
+    # accumulation of a ~310-leaf state walks head/norm/embed plus 28
+    # layers x 16 chunks and shows up in a profile as tens of thousands
+    # of jit_add launches per update, all host dispatch overhead. Jitting
+    # the whole-tree op keeps every leaf's elementwise a + b exactly as
+    # it was (no cross-leaf math exists to reassociate), so the committed
+    # gradient stays bitwise identical; the 51/51 alignment gate is the
+    # judge, and the flag keeps the certified recipe untouched until it
+    # rules.
+    if os.environ.get("CANON_FUSED_TREE_OPS", "") == "1":
+      tree_zeros = jax.jit(tree_zeros)
+      tree_add = jax.jit(tree_add)
     layer_grads = [
         tree_zeros(leaves)
         for leaves in segmented._local_layer_leaves  # pylint: disable=protected-access
@@ -4805,6 +5360,8 @@ class Qwen3EngineForwardAdapter:
     vag_pre_sum = 0.0
     vag_issue_sum = 0.0
     vag_drain_sum = 0.0
+    vag_report_sum = 0.0
+    _ISSUE_ANATOMY.update(prep=0.0, call=0.0, n=0)
     # CANON_BATCHED_EVIDENCE=1 keeps every evidence VALUE identical (same
     # per-leaf predicates, same python-side reductions) but collects them
     # through one device_get per trajectory instead of two per leaf.  The
@@ -5109,12 +5666,19 @@ class Qwen3EngineForwardAdapter:
                   raise FunctionalMappingError(
                       f"P50 batched-report verify mismatch: {fault}"
                   )
-            micro_gradient = jax.tree.map(
-                lambda value: value * scale * jnp.asarray(
-                    float(gradient_microbatches), value.dtype
-                ),
-                pair_gradient,
-            )
+            if os.environ.get("CANON_FUSED_TREE_OPS", "") == "1":
+              # scale must travel as an argument: a closure would embed the
+              # array as a trace constant and force a retrace per value.
+              micro_gradient = fused_micro_scale(
+                  pair_gradient, scale, gradient_microbatches
+              )
+            else:
+              micro_gradient = jax.tree.map(
+                  lambda value: value * scale * jnp.asarray(
+                      float(gradient_microbatches), value.dtype
+                  ),
+                  pair_gradient,
+              )
             gradient_microbatch_sink(emitted_microbatches, micro_gradient)
           emitted_microbatches += 1
           pair_gradient = None
@@ -5139,6 +5703,12 @@ class Qwen3EngineForwardAdapter:
               "nonzero": cache_nonzero,
           },
       })
+      # Everything after the drain barrier is the per-round report tail
+      # (adjoint mapping, evidence prep, accumulation tree ops). Timing it
+      # splits the [PERF] report residual into report_ops vs report_other,
+      # so the P2.c overlap work aims at a measured component instead of a
+      # residual.
+      vag_report_sum += time.perf_counter() - vag_drain_done
       vag_reverse_durations.append(time.perf_counter() - vag_iter_start)
     if (
         os.environ.get("CANON_PERF_LOG", "1") != "0"
@@ -5148,6 +5718,8 @@ class Qwen3EngineForwardAdapter:
       print(
           "[PERF] stage=vag_reverse seconds=%.3f trajectories=%d"
           " mean=%.3f max=%.3f pre=%.3f issue=%.3f drain=%.3f report=%.3f"
+          " report_ops=%.3f report_other=%.3f"
+          " blk_prep=%.3f blk_call=%.3f blk_n=%d"
           % (
               vag_total,
               len(vag_reverse_durations),
@@ -5157,6 +5729,15 @@ class Qwen3EngineForwardAdapter:
               vag_issue_sum,
               vag_drain_sum,
               vag_total - vag_pre_sum - vag_issue_sum - vag_drain_sum,
+              vag_report_sum,
+              vag_total
+              - vag_pre_sum
+              - vag_issue_sum
+              - vag_drain_sum
+              - vag_report_sum,
+              _ISSUE_ANATOMY["prep"],
+              _ISSUE_ANATOMY["call"],
+              _ISSUE_ANATOMY["n"],
           ),
           flush=True,
       )

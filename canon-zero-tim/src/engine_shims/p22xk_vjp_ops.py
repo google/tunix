@@ -84,6 +84,39 @@ def swiglu(gate, up, *, forward):
     return op(gate, up)
 
 
+def norm_matmul(x, gamma, y, *, epsilon: float, forward):
+    """P56.4.6 coat: fused Pallas primal, composed canonical-replica VJP.
+
+    The backward differentiates canonical_matmul(canonical_rmsnorm(.)) --
+    the same two replicas the separate XK coats differentiate, composed
+    by the chain rule in the same order the un-fused path applies them.
+    canonical_rmsnorm is the declared bit-exact semantic of the Pallas
+    norm, so the recomputed intermediate matches the stored one.
+    """
+    import jax
+    from p22_pallas_rmsnorm import canonical_rmsnorm
+
+    preflight(require_enabled=True)
+
+    def oracle(a, g, b):
+        return canonical_matmul(canonical_rmsnorm(a, g, epsilon=epsilon), b)
+
+    @jax.custom_vjp
+    def op(a, g, b):
+        return forward(a, g, b)
+
+    def fwd(a, g, b):
+        return forward(a, g, b), (a, g, b)
+
+    def bwd(residual, cotangent):
+        a, g, b = residual
+        _, pullback = jax.vjp(oracle, a, g, b)
+        return pullback(cotangent)
+
+    op.defvjp(fwd, bwd)
+    return op(x, gamma, y)
+
+
 def rmsnorm(x, weight, *, epsilon: float, forward):
     """Use promoted Pallas RMSNorm for primal and fixed-BF replica for VJP."""
     import jax

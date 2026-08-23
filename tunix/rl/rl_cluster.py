@@ -1371,10 +1371,36 @@ class RLCluster:
           if sft_utils.is_lora_enabled(self.actor_trainer.model)
           else nnx.Param,
       )
-      src_filtered_params = nnx.state(self.actor_trainer.model, filter_types)
-      self.rollout.update_params(src_filtered_params, filter_types)
-      gc.collect()
+      # Sub-timers split the weight_sync wall time so the sync can be
+      # optimized against measured parts instead of one 9s number. Note
+      # the anchor snapshot is a device_put and may return before the
+      # d2h completes; a near-zero anchor_d2h reading means the transfer
+      # is async and its cost lands on the first consumer, which is
+      # itself the answer the timer exists to give.
+      with perf_log.phase("weight_sync_engine"):
+        src_filtered_params = nnx.state(
+            self.actor_trainer.model, filter_types
+        )
+        self.rollout.update_params(src_filtered_params, filter_types)
+      with perf_log.phase("weight_sync_gc"):
+        gc.collect()
       # The anchor policy state is snapshotted from actor_trainer.model.
+      # Under CANON_ANCHOR_OVERLAP the ~3s blocking pinned-host copy moves
+      # to snapshot_anchor_policy, which the learner calls right after the
+      # next batch's prompts are queued -- the copy then overlaps the
+      # rollout instead of sitting on the sync critical path. The first
+      # consumer is the rescore after collection, and the model is not
+      # mutated between here and the prompt-issue point, so the snapshot
+      # bytes are identical either way.
+      if os.environ.get("CANON_ANCHOR_OVERLAP", "") != "1":
+        with perf_log.phase("weight_sync_anchor_d2h"):
+          self._anchor_policy_state = rl_utils.put_params_on_memory_kind(
+              nnx.state(self.actor_trainer.model), "pinned_host"
+          )
+
+  def snapshot_anchor_policy(self) -> None:
+    """Takes the pinned-host anchor snapshot off the sync critical path."""
+    with perf_log.phase("weight_sync_anchor_d2h"):
       self._anchor_policy_state = rl_utils.put_params_on_memory_kind(
           nnx.state(self.actor_trainer.model), "pinned_host"
       )
