@@ -170,8 +170,8 @@ targets disagree is fatal. Any nonempty target still requires real
 post-`generate()` sampling provenance and engine rescore; unsigned
 zero-action, nonfinite, shape, or nonzero-gradient cases remain fatal.
 
-Fresh `p58f13` is the next attempt only after publication approval, exact
-remote readback, and a separately approved live one-sandbox admission probe.
+Fresh `p58f13` is the next attempt only after exact final remote readback and a
+separately approved live one-sandbox admission probe.
 The probe must use a real frozen-clean-list task image, queue
 `multislice-queue`, node pool `cpu-np`, and production requests 2 CPU/4 GiB;
 the read-only verifier must observe the Pod Running with no scheduling gate.

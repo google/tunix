@@ -47,10 +47,13 @@ published as implementation commit
 local HEAD, `FETCH_HEAD`, and the remote-tracking branch with ahead/behind
 `0/0`. Latest source intake reached exact operator tip
 `5f449cc8def801b4a61387ef664b2cb1f7ab05cf`, which contains immutable p58f12
-evidence plus a later P57-only checkpoint change. The p58f12 repair described
-below is local and uncommitted. It must not be launched until separately
-approved, published to `yuxzhang/canon-zero-tim`, and exactly read back. The
-next run id is fresh `p58f13`.
+evidence plus a later P57-only checkpoint change. After explicit user approval,
+the p58f12 repair described below was committed as
+`135867f04bfa0fc90ea1d4528ba59f365573a78b` after a conflict-free rebase over
+non-overlapping P57 evidence commit
+`e7958a27851931ab9bcff232088efd95bbc12021`; this publication-evidence
+checkpoint follows it. Fetch the final `yuxzhang/canon-zero-tim` tip and prove
+the remote readback matches before use. The next run id is fresh `p58f13`.
 
 The user previously waived P58.3 and the separate three-update stop, then chose
 the native 128-chip full 1,000-update stage. That historical phase remains

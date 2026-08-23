@@ -215,7 +215,7 @@ and the next prompt batch is consumed without resampling.
 The p58f12-shaped full sandbox-start outage is intentionally stricter. After
 the 128-row journal is durable, it emits `[P58.SANDBOX_CAPACITY] BLOCKED` and
 raises `BLOCKED_SANDBOX_CAPACITY` before rescore/trainer or any later prompt
-consumption. Fresh Native `p58f13` is next only after publication/readback,
+consumption. Fresh Native `p58f13` is next only after final remote readback,
 one production-shaped sandbox reaches Running through Kueue, and the operator
 confirms capacity/quota for the 128-Pod request. All geometry, deadlines,
 optimizer placement, Native/Zero flags, and the Zero deferment remain

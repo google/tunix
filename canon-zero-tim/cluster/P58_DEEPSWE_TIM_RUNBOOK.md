@@ -207,7 +207,8 @@ next prompt batch is consumed without resampling.
 A durable full sandbox-start outage uses a separate circuit breaker: emit
 `[P58.SANDBOX_CAPACITY] BLOCKED` and raise `BLOCKED_SANDBOX_CAPACITY` before
 rescore/alignment/trainer or any later prompt consumption. Use fresh `p58f13`
-only after publication/readback and the `cpu-np`/Kueue capacity gate below.
+only after exact final remote readback and the `cpu-np`/Kueue capacity gate
+below.
 
 The direct-entrypoint implementation commit is
 `82d82f72a7220d945737d95f6266b5b7e2cfe706`. Resolve the final runnable SHA by
