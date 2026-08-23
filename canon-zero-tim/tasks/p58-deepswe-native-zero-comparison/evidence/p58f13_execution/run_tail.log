@@ -1,0 +1,200 @@
+INFO:root:[SWEEnv group=72 pair=13] env.step done in 0.13s done=False reward=0 chars=166
+INFO:root:[SWEEnv group=76 pair=8] closing RepoEnv
+[PERF] stage=rollout_generate seconds=26.945 rows=1
+INFO:root:[SWEEnv group=76 pair=12] env.step start step=17 function=file_editor
+[PERF] stage=rollout_generate seconds=9.120 rows=1
+INFO:root:[SWEEnv group=76 pair=11] env.step start step=14 function=file_editor
+INFO:root:[SWEEnv group=76 pair=12] env.step done in 0.17s done=False reward=0 chars=442
+[PERF] stage=rollout_generate seconds=13.035 rows=1
+[PERF] stage=rollout_generate seconds=8.269 rows=1
+INFO:root:[SWEEnv group=76 pair=2] env.step start step=23 function=search
+INFO:root:[SWEEnv group=79 pair=15] env.step start step=18 function=execute_bash
+[PERF] stage=rollout_generate seconds=4.152 rows=1
+[PERF] stage=rollout_generate seconds=7.276 rows=1
+INFO:root:[SWEEnv group=72 pair=11] env.step start step=20 function=execute_bash
+INFO:root:[SWEEnv group=72 pair=1] env.step start step=24 function=search
+INFO:root:[SWEEnv group=76 pair=11] env.step done in 0.17s done=False reward=0 chars=435
+INFO:root:[SWEEnv group=76 pair=2] env.step done in 0.14s done=False reward=0 chars=226
+INFO:root:[SWEEnv group=79 pair=15] env.step done in 0.14s done=False reward=0 chars=73
+INFO:root:[SWEEnv group=72 pair=1] env.step done in 0.13s done=False reward=0 chars=171
+INFO:root:[SWEEnv group=72 pair=11] env.step done in 0.13s done=False reward=0 chars=73
+[PERF] stage=rollout_generate seconds=15.257 rows=1
+INFO:root:[SWEEnv group=75 pair=4] env.step start step=26 function=finish
+[PERF] stage=rollout_generate seconds=8.957 rows=1
+INFO:root:[SWEEnv group=72 pair=9] env.step start step=20 function=file_editor
+INFO:root:[SWEEnv group=75 pair=4] env.step done in 0.08s done=True reward=0 chars=16
+[PERF] stage=rollout_generate seconds=10.584 rows=1
+INFO:root:[SWEEnv group=77 pair=2] env.step start step=21 function=finish
+INFO:root:[SWEEnv group=77 pair=7] closing RepoEnv
+[PERF] stage=rollout_generate seconds=11.460 rows=1
+INFO:root:[SWEEnv group=73 pair=8] env.step start step=20 function=finish
+INFO:root:[SWEEnv group=72 pair=9] env.step done in 0.16s done=False reward=0 chars=442
+INFO:root:[SWEEnv group=77 pair=2] env.step done in 0.07s done=True reward=0 chars=16
+[PERF] stage=rollout_generate seconds=7.252 rows=1
+INFO:root:[SWEEnv group=75 pair=9] env.step start step=16 function=file_editor
+INFO:root:[SWEEnv group=73 pair=8] env.step done in 0.09s done=True reward=0 chars=16
+INFO:root:[SWEEnv group=75 pair=9] env.step done in 0.17s done=False reward=0 chars=442
+[PERF] stage=rollout_generate seconds=5.148 rows=1
+[PERF] stage=rollout_generate seconds=10.134 rows=1
+INFO:root:[SWEEnv group=75 pair=11] env.step start step=23 function=finish
+INFO:root:[SWEEnv group=75 pair=11] env.step done in 0.08s done=True reward=0 chars=16
+[PERF] stage=rollout_generate seconds=5.971 rows=1
+INFO:root:[SWEEnv group=73 pair=1] env.step start step=23 function=execute_bash
+[PERF] stage=rollout_generate seconds=16.627 rows=1
+INFO:root:[SWEEnv group=73 pair=12] env.step start step=16 function=finish
+INFO:root:[SWEEnv group=73 pair=12] env.step done in 0.09s done=True reward=0 chars=16
+INFO:root:[SWEEnv group=73 pair=1] env.step done in 0.15s done=False reward=0 chars=2311
+[PERF] stage=rollout_generate seconds=3.456 rows=1
+INFO:root:[SWEEnv group=76 pair=4] env.step start step=8 function=search
+[PERF] stage=rollout_generate seconds=4.777 rows=1
+INFO:root:[SWEEnv group=75 pair=10] env.step start step=19 function=execute_bash
+INFO:root:[SWEEnv group=76 pair=4] env.step done in 0.08s done=False reward=0 chars=79
+[PERF] stage=rollout_generate seconds=5.377 rows=1
+INFO:root:[SWEEnv group=78 pair=6] env.step start step=17 function=execute_bash
+[PERF] stage=rollout_generate seconds=6.085 rows=1
+INFO:root:[SWEEnv group=78 pair=3] env.step start step=19 function=execute_bash
+INFO:root:[SWEEnv group=78 pair=3] env.step done in 0.15s done=False reward=0 chars=73
+INFO:root:[SWEEnv group=78 pair=6] env.step done in 0.19s done=False reward=0 chars=413
+INFO:root:[SWEEnv group=75 pair=10] env.step done in 0.39s done=False reward=0 chars=363
+INFO:root:[SWEEnv group=77 pair=2] closing RepoEnv
+[PERF] stage=rollout_generate seconds=36.038 rows=1
+INFO:root:[SWEEnv group=79 pair=13] env.step start step=19 function=file_editor
+[PERF] stage=rollout_generate seconds=8.344 rows=1
+INFO:root:[SWEEnv group=77 pair=13] env.step start step=23 function=file_editor
+INFO:root:[SWEEnv group=79 pair=13] env.step done in 0.08s done=False reward=0 chars=76
+INFO:root:[SWEEnv group=75 pair=4] closing RepoEnv
+INFO:root:[SWEEnv group=77 pair=13] env.step done in 0.16s done=False reward=0 chars=442
+[PERF] stage=rollout_generate seconds=7.559 rows=1
+INFO:root:[SWEEnv group=77 pair=8] env.step start step=22 function=execute_bash
+[PERF] stage=rollout_generate seconds=8.039 rows=1
+INFO:root:[SWEEnv group=78 pair=8] env.step start step=18 function=execute_bash
+[PERF] stage=rollout_generate seconds=5.153 rows=1
+INFO:root:[SWEEnv group=74 pair=11] env.step start step=20 function=execute_bash
+INFO:root:[SWEEnv group=77 pair=8] env.step done in 0.13s done=False reward=0 chars=166
+[PERF] stage=rollout_generate seconds=7.271 rows=1
+INFO:root:[SWEEnv group=75 pair=7] env.step start step=18 function=file_editor
+INFO:root:[SWEEnv group=78 pair=8] env.step done in 0.14s done=False reward=0 chars=1015
+INFO:root:[SWEEnv group=75 pair=7] env.step done in 0.16s done=False reward=0 chars=437
+INFO:root:[SWEEnv group=74 pair=11] env.step done in 0.46s done=False reward=0 chars=528
+INFO:root:[SWEEnv group=75 pair=11] closing RepoEnv
+[PERF] stage=rollout_generate seconds=19.261 rows=1
+INFO:root:[SWEEnv group=72 pair=0] env.step start step=16 function=file_editor
+INFO:root:[SWEEnv group=72 pair=0] env.step done in 0.19s done=False reward=0 chars=925
+[PERF] stage=rollout_generate seconds=3.479 rows=1
+INFO:root:[SWEEnv group=79 pair=15] env.step start step=19 function=execute_bash
+[PERF] stage=rollout_generate seconds=4.368 rows=1
+INFO:root:[SWEEnv group=72 pair=13] env.step start step=23 function=execute_bash
+INFO:root:[SWEEnv group=72 pair=13] env.step done in 0.16s done=False reward=0 chars=73
+INFO:root:[SWEEnv group=79 pair=15] env.step done in 0.51s done=False reward=0 chars=1146
+INFO 08-23 02:36:52 [loggers.py:273] Engine 000: Avg prompt throughput: 46917.0 tokens/s, Avg generation throughput: 1789.9 tokens/s, Running: 49 reqs, Waiting: 0 reqs, GPU KV cache usage: 1.8%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=11.226 rows=1
+INFO:root:[SWEEnv group=73 pair=6] env.step start step=18 function=execute_bash
+[PERF] stage=rollout_generate seconds=4.243 rows=1
+INFO:root:[SWEEnv group=76 pair=11] env.step start step=15 function=file_editor
+[PERF] stage=rollout_generate seconds=7.447 rows=1
+INFO:root:[SWEEnv group=72 pair=8] env.step start step=20 function=execute_bash
+[PERF] stage=rollout_generate seconds=4.251 rows=1
+INFO:root:[SWEEnv group=72 pair=11] env.step start step=21 function=execute_bash
+INFO:root:[SWEEnv group=73 pair=6] env.step done in 0.15s done=False reward=0 chars=100
+INFO:root:[SWEEnv group=76 pair=11] env.step done in 0.18s done=False reward=0 chars=435
+INFO:root:[SWEEnv group=72 pair=8] env.step done in 0.14s done=False reward=0 chars=73
+[PERF] stage=rollout_generate seconds=5.323 rows=1
+INFO:root:[SWEEnv group=72 pair=6] env.step start step=22 function=execute_bash
+[PERF] stage=rollout_generate seconds=4.641 rows=1
+INFO:root:[SWEEnv group=76 pair=2] env.step start step=24 function=execute_bash
+INFO:root:[SWEEnv group=72 pair=11] env.step done in 0.41s done=False reward=0 chars=960
+[PERF] stage=rollout_generate seconds=9.444 rows=1
+INFO:root:[SWEEnv group=77 pair=5] env.step start step=14 function=execute_bash
+INFO:root:[SWEEnv group=76 pair=2] env.step done in 0.12s done=False reward=0 chars=268
+[PERF] stage=rollout_generate seconds=5.942 rows=1
+INFO:root:[SWEEnv group=78 pair=11] env.step start step=19 function=execute_bash
+INFO:root:[SWEEnv group=77 pair=5] env.step done in 0.08s done=False reward=0 chars=107
+INFO:root:[SWEEnv group=72 pair=6] env.step done in 0.36s done=False reward=0 chars=1023
+[PERF] stage=rollout_generate seconds=20.942 rows=1
+INFO:root:[SWEEnv group=79 pair=10] env.step start step=18 function=file_editor
+[PERF] stage=rollout_generate seconds=7.048 rows=1
+INFO:root:[SWEEnv group=75 pair=14] env.step start step=22 function=execute_bash
+[PERF] stage=rollout_generate seconds=11.970 rows=1
+INFO:root:[SWEEnv group=73 pair=11] env.step start step=18 function=file_editor
+[PERF] stage=rollout_generate seconds=5.006 rows=1
+INFO:root:[SWEEnv group=72 pair=1] env.step start step=25 function=execute_bash
+INFO:root:[SWEEnv group=79 pair=10] env.step done in 0.14s done=False reward=0 chars=442
+INFO:root:[SWEEnv group=75 pair=14] env.step done in 0.12s done=False reward=0 chars=116
+[PERF] stage=rollout_generate seconds=9.142 rows=1
+INFO:root:[SWEEnv group=79 pair=2] env.step start step=21 function=file_editor
+INFO:root:[SWEEnv group=78 pair=11] env.step done in 0.33s done=False reward=0 chars=966
+INFO:root:[SWEEnv group=73 pair=11] env.step done in 0.17s done=False reward=0 chars=442
+INFO:root:[SWEEnv group=72 pair=1] env.step done in 0.15s done=False reward=0 chars=115
+INFO:root:[SWEEnv group=79 pair=2] env.step done in 0.16s done=False reward=0 chars=442
+[PERF] stage=rollout_generate seconds=11.209 rows=1
+INFO:root:[SWEEnv group=75 pair=0] env.step start step=19 function=execute_bash
+INFO:root:[SWEEnv group=75 pair=0] env.step done in 0.11s done=False reward=0 chars=73
+[PERF] stage=rollout_generate seconds=11.777 rows=1
+INFO:root:[SWEEnv group=76 pair=0] env.step start step=13 function=execute_bash
+INFO:root:[SWEEnv group=76 pair=0] env.step done in 0.14s done=False reward=0 chars=156
+[PERF] stage=rollout_generate seconds=27.073 rows=1
+INFO:root:[SWEEnv group=75 pair=15] env.step start step=14 function=file_editor
+INFO:root:[SWEEnv group=75 pair=15] env.step done in 0.15s done=False reward=0 chars=437
+[PERF] stage=rollout_generate seconds=7.742 rows=1
+INFO:root:[SWEEnv group=73 pair=3] env.step start step=23 function=search
+INFO:root:[SWEEnv group=73 pair=8] closing RepoEnv
+[PERF] stage=rollout_generate seconds=8.656 rows=1
+INFO:root:[SWEEnv group=76 pair=3] env.step start step=16 function=file_editor
+[PERF] stage=rollout_generate seconds=5.613 rows=1
+INFO:root:[SWEEnv group=75 pair=9] env.step start step=17 function=file_editor
+INFO:root:[SWEEnv group=73 pair=3] env.step done in 0.15s done=False reward=0 chars=704
+INFO:root:[SWEEnv group=76 pair=3] env.step done in 0.18s done=False reward=0 chars=437
+INFO:root:[SWEEnv group=75 pair=9] env.step done in 0.17s done=False reward=0 chars=435
+[PERF] stage=rollout_generate seconds=5.809 rows=1
+INFO:root:[SWEEnv group=73 pair=12] closing RepoEnv
+[PERF] stage=rollout_generate seconds=15.963 rows=1
+INFO:root:[SWEEnv group=74 pair=10] env.step start step=17 function=file_editor
+[PERF] stage=rollout_generate seconds=10.257 rows=1
+INFO:root:[SWEEnv group=78 pair=10] env.step start step=21 function=execute_bash
+INFO:root:[SWEEnv group=74 pair=10] env.step done in 0.15s done=False reward=0 chars=442
+INFO:root:[SWEEnv group=78 pair=10] env.step done in 0.16s done=False reward=0 chars=73
+[PERF] stage=rollout_generate seconds=16.332 rows=1
+INFO:root:[SWEEnv group=75 pair=3] env.step start step=15 function=file_editor
+[PERF] stage=rollout_generate seconds=14.365 rows=1
+INFO:root:[SWEEnv group=78 pair=15] env.step start step=17 function=file_editor
+INFO:root:[SWEEnv group=78 pair=15] env.step done in 0.08s done=False reward=0 chars=84
+INFO:root:[SWEEnv group=75 pair=3] env.step done in 0.14s done=False reward=0 chars=437
+INFO 08-23 02:36:56 [loggers.py:273] Engine 000: Avg prompt throughput: 49776.5 tokens/s, Avg generation throughput: 1405.8 tokens/s, Running: 50 reqs, Waiting: 0 reqs, GPU KV cache usage: 1.9%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=30.774 rows=1
+INFO:root:[SWEEnv group=75 pair=5] env.step start step=17 function=execute_bash
+[PERF] stage=rollout_generate seconds=26.205 rows=1
+[PERF] stage=rollout_generate seconds=14.059 rows=1
+INFO:root:[SWEEnv group=74 pair=8] env.step start step=15 function=file_editor
+INFO:root:[SWEEnv group=79 pair=8] env.step start step=19 function=file_editor
+INFO:root:[SWEEnv group=75 pair=5] env.step done in 0.14s done=False reward=0 chars=156
+[PERF] stage=rollout_generate seconds=3.545 rows=1
+INFO:root:[SWEEnv group=73 pair=6] env.step start step=19 function=execute_bash
+INFO:root:[SWEEnv group=74 pair=8] env.step done in 0.15s done=False reward=0 chars=442
+INFO:root:[SWEEnv group=79 pair=8] env.step done in 0.17s done=False reward=0 chars=437
+INFO:root:[SWEEnv group=73 pair=6] env.step done in 0.17s done=False reward=0 chars=2485
+[PERF] stage=rollout_generate seconds=30.541 rows=1
+INFO:root:[SWEEnv group=74 pair=1] env.step start step=12 function=execute_bash
+INFO:root:[SWEEnv group=74 pair=1] env.step done in 0.15s done=False reward=0 chars=156
+[PERF] stage=rollout_generate seconds=6.832 rows=1
+INFO:root:[SWEEnv group=78 pair=3] env.step start step=20 function=execute_bash
+[PERF] stage=rollout_generate seconds=4.185 rows=1
+INFO:root:[SWEEnv group=72 pair=8] env.step start step=21 function=execute_bash
+[PERF] stage=rollout_generate seconds=6.218 rows=1
+INFO:root:[SWEEnv group=77 pair=8] env.step start step=23 function=execute_bash
+INFO:root:[SWEEnv group=77 pair=8] env.step done in 0.13s done=False reward=0 chars=73
+INFO:root:[SWEEnv group=78 pair=3] env.step done in 0.54s done=False reward=0 chars=73
+INFO:root:[SWEEnv group=72 pair=8] env.step done in 0.44s done=False reward=0 chars=117
+[PERF] stage=rollout_generate seconds=14.523 rows=1
+INFO:root:[SWEEnv group=74 pair=13] env.step start step=19 function=file_editor
+[PERF] stage=rollout_generate seconds=8.178 rows=1
+INFO:root:[SWEEnv group=73 pair=1] env.step start step=24 function=execute_bash
+INFO:root:[SWEEnv group=74 pair=13] env.step done in 0.15s done=False reward=0 chars=442
+INFO:root:[SWEEnv group=73 pair=1] env.step done in 0.14s done=False reward=0 chars=156
+[PERF] stage=rollout_generate seconds=5.906 rows=1
+INFO:root:[SWEEnv group=72 pair=13] env.step start step=24 function=search
+INFO:root:[SWEEnv group=72 pair=13] env.step done in 0.16s done=False reward=0 chars=171
+[PERF] stage=rollout_generate seconds=5.918 rows=1
+INFO:root:[SWEEnv group=79 pair=15] env.step start step=20 function=finish
+INFO:root:[SWEEnv group=79 pair=15] env.step done in 0.08s done=True reward=0 chars=16
+[PERF] stage=rollout_generate seconds=14.995 rows=1
+INFO:root:[SWEEnv group=74 pair=6] env.step start step=19 function=execute_bash

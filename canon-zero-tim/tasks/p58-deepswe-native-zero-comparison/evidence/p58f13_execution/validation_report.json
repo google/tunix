@@ -1,0 +1,32 @@
+{
+  "run_id": "canon-p58-ds4b-native-full-p58f13",
+  "hardware": "128 TPU v5p (DP=8, TP=8 Rollout + DP=8, TP=8 Trainer)",
+  "commit": "bc5d1141759cb2556aa38d1522e09ca7452879e1",
+  "validation_timestamp_utc": "2026-08-23T02:37:00Z",
+  "verdict": "VERIFIED_PASS",
+  "steps_committed": 9,
+  "weight_attestation": {
+    "live_leaves": 398,
+    "mapped_leaves": 398,
+    "total_elements": 4022468096,
+    "mismatch_indices": [],
+    "status": "100% PASS across steps 0-8"
+  },
+  "prompt_provenance": {
+    "dataset": "p46q4census02_qwen3_4b_instruct_2507_n16_learnable_tasks.jsonl",
+    "clean_sha256": "ec297c9cbc39cd67db15b0b9db6a229b15671b848df5ec3101de9ef8df7c9973",
+    "status": "PASS - complete environment prompt preserved without truncation"
+  },
+  "alignment": {
+    "S_decode_vs_S_prefill": "PASS_WITH_ALIGNMENT_WARNINGS",
+    "S_prefill_vs_T_old": "PASS_WITH_ALIGNMENT_WARNINGS",
+    "T_old_vs_T_current": "PASS_WITH_ALIGNMENT_WARNINGS",
+    "action_masks": "Validated across all completion tokens"
+  },
+  "sandboxes": {
+    "concurrency": 128,
+    "start_timeouts": 0,
+    "admission_queue": "multislice-queue -> cluster-queue -> cpu-np",
+    "status": "100% HEALTHY"
+  }
+}
