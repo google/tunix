@@ -1,0 +1,14 @@
+{
+  "incident_id": "v1_phase4_frozenlake_zero_wandb_project_mismatch",
+  "stage": "v1_phase4_three_full_recipes",
+  "recipes_affected": [
+    "canon-p57-fl-zero-f45f-7265291c",
+    "canon-p57-fl-zero-m15-m15f-7265291c"
+  ],
+  "root_cause": "In train_frozenlake_qwen3.py, CANON_P57_TIM_ARM=zero (fixed_lm_head=1) bypasses validate_p57_stock_train_environment and falls into generic dp_workloads.validate_environment, which hardcodes wandb_project='zero-tim-frozenlake-dp8-tp8-resident' instead of accepting the P57 tim study project 'zero-tim-p57-frozenlake-tim'.",
+  "error_type": "ValueError",
+  "error_message": "canonical workload requires online W&B telemetry: {'CANON_WANDB_PROJECT': 'zero-tim-p57-frozenlake-tim'}",
+  "source_file": "tunix/rl/dp_workloads.py",
+  "source_line": 903,
+  "fix_required": "Allow CANON_P57_TIM_ARM=zero or P57 environment to use zero-tim-p57-frozenlake-tim in dp_workloads.validate_environment."
+}

@@ -1,0 +1,18 @@
+[run] cmd: python3 -u -m examples.frozenlake.train_frozenlake_qwen3 --sampler_is=none --seed=42 --env_max_steps=15 --p57_workload_candidate=m15 --p57_data_split=main --max_prompt_length=4096 --max_response_length=8192 --num_test_batches=4 --eval_every_n_steps=50 --wandb_project=zero-tim-p57-frozenlake-tim
+[run] log: /tmp/canon-state/canon-p57-fl-zero-m15-m15f-7265291c/attempt-0/run.log
+Logging configured at INFO level.
+2026-08-23 10:32:26 - WARNING - [absl] Type handler registry type "<class 'jax.Array'>" overriding jax.Array
+I0823 10:32:26.974652     381 registry.cc:82] Attempting to create IFRT proxy client with transport name grpc to address 'localhost:29000'
+I0823 10:32:26.974704     381 grpc_client.cc:171] Connecting to IFRT proxy server (grpc version '1.78.0') at localhost:29000...
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/app/examples/frozenlake/train_frozenlake_qwen3.py", line 350, in <module>
+    dp_workloads.validate_environment(
+  File "/app/tunix/rl/dp_workloads.py", line 903, in validate_environment
+    raise ValueError(
+ValueError: canonical workload requires online W&B telemetry: {'CANON_WANDB_PROJECT': 'zero-tim-p57-frozenlake-tim'}
+I0823 10:32:27.451347     381 client.cc:221] Client::~Client() starting.
+I0823 10:32:27.452072     381 rpc_helper.cc:217] RpcHelper::Batcher::Finish() starting: CANCELLED: Disconnected by client [via RpcHelper::Disconnect()]
+[run] exit=1
+[run] transport_rc=0
