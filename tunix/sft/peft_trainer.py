@@ -365,7 +365,20 @@ class PeftTrainer:
     self.model = model
     self.config = training_config
     self._lora_enabled = utils.is_lora_enabled(self.model)
-    wrt_target = nnx.LoRAParam if self._lora_enabled else nnx.Param
+    self._beft_enabled = utils.is_beft_enabled(self.model)
+    self._peft_enabled = utils.is_peft_enabled(self.model)
+
+    if getattr(self.config, "wrt", None) is not None:
+      wrt_target = self.config.wrt
+    elif self._beft_enabled:
+      from tunix.sft.peft.beft import BEFTParam  # pylint: disable=g-import-not-at-top
+      wrt_target = BEFTParam
+    elif self._lora_enabled:
+      wrt_target = nnx.LoRAParam
+    else:
+      wrt_target = nnx.Param
+
+    self._wrt_target = wrt_target
     self.optimizer = nnx.Optimizer(self.model, optimizer, wrt=wrt_target)
      # Adam moments follow the param dtype by default (optax inits them as
     # zeros_like(params)).
@@ -415,7 +428,8 @@ class PeftTrainer:
         self.checkpoint_manager.maybe_restore(
             self.model,
             self.optimizer,
-            restore_only_lora_params=self._lora_enabled,
+            restore_only_lora_params=self._peft_enabled,
+            param_type=self._wrt_target if self._peft_enabled else None,
         )
     )
     self._iter_steps = self._train_steps * self.config.get_with_default(
@@ -526,7 +540,9 @@ class PeftTrainer:
 
     grad_fn = nnx.value_and_grad(
         diff_fn,
-        argnums=nnx.DiffState(0, nnx.LoRAParam) if self._lora_enabled else 0,
+        argnums=nnx.DiffState(0, self._wrt_target)
+        if (self._peft_enabled or getattr(self.config, "wrt", None) is not None)
+        else 0,
         has_aux=True,
     )
     (loss_val, aux), grads = grad_fn(model, **inputs)
@@ -1089,7 +1105,8 @@ class PeftTrainer:
               self._train_steps,
               self.model,
               self.optimizer,
-              save_only_lora_params=self._lora_enabled,
+              save_only_lora_params=self._peft_enabled,
+              param_type=self._wrt_target if self._peft_enabled else None,
               custom_metadata=self.custom_checkpoint_metadata(),
           )
 
@@ -1118,7 +1135,8 @@ class PeftTrainer:
           self._train_steps,
           self.model,
           self.optimizer,
-          save_only_lora_params=self._lora_enabled,
+          save_only_lora_params=self._peft_enabled,
+          param_type=self._wrt_target if self._peft_enabled else None,
           force=True,
       )
 

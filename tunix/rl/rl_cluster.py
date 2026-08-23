@@ -135,7 +135,12 @@ class RLEngine:
         self._load_model(critic, self.r2m[Role.CRITIC]) if critic else None
     )
     if Role.CRITIC in self._backbone_sharing_map[Role.ACTOR]:
-      critic_state = nnx.state(self.train_actor, filterlib.Not(nnx.LoRAParam))
+      peft_param_type = (
+          sft_utils.get_peft_param_type(self.train_actor) or nnx.LoRAParam
+      )
+      critic_state = nnx.state(
+          self.train_actor, filterlib.Not(peft_param_type)
+      )
       nnx.update(self.critic, critic_state)
     self.reward = (
         self._load_model(reward, self.r2m[Role.REWARD]) if reward else None
@@ -181,7 +186,7 @@ class RLEngine:
         reference and not isinstance(reference, nnx.Module)
     ):
       return
-    if sft_utils.is_lora_enabled(actor):
+    if sft_utils.is_peft_enabled(actor):
       if reference and self.r2m[Role.ACTOR] == self.r2m[Role.REFERENCE]:
         self._backbone_sharing_map[Role.ACTOR].append(Role.REFERENCE)
         self._backbone_sharing_map[Role.REFERENCE].append(Role.ACTOR)
@@ -516,9 +521,12 @@ class RLEngine:
             else self.inference_worker.get_model("reference")
         )
         if ref_model:
+          peft_param_type = (
+              sft_utils.get_peft_param_type(ref_model) or nnx.LoRAParam
+          )
           nnx.update(
               ref_model,
-              statelib.filter_state(params, filterlib.Not(nnx.LoRAParam)),
+              statelib.filter_state(params, filterlib.Not(peft_param_type)),
           )
       elif role == Role.ACTOR:
         actor_model = (
@@ -1172,10 +1180,11 @@ class RLEngine:
     else:
       cm = contextlib.nullcontext()
     with cm:
+      peft_param_type = sft_utils.get_peft_param_type(self.actor_trainer.model)
       filter_types = (
-          nnx.LoRAParam
-          if sft_utils.is_lora_enabled(self.actor_trainer.model)
-          else nnx.Param,
+          (peft_param_type,)
+          if peft_param_type is not None
+          else (nnx.Param,)
       )
       src_filtered_params = nnx.state(self.actor_trainer.model, filter_types)
       self.rollout.update_params(src_filtered_params, filter_types)
