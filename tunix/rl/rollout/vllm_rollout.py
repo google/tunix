@@ -15,10 +15,12 @@
 """vLLM rollout worker with Tunix sampler."""
 
 import dataclasses
+import hashlib
 from typing import Any, Dict, Optional, Tuple
 
 from flax import nnx
 import jax
+import jax.numpy as jnp
 import jaxtyping
 import numpy as np
 import os
@@ -452,6 +454,9 @@ class VllmRollout(base_rollout.BaseRollout):
         "sequence_lengths": tuple(len(s) for s in seqs),
         "diagnostic_arm": diagnostic_arm,
         "reset_prefix_cache": bool(reset_prefix_cache),
+        "num_cached_tokens": tuple(
+            int(output.num_cached_tokens or 0) for output in outputs
+        ),
     }
 
     out = np.zeros(comps.shape, np.float32)
@@ -472,6 +477,330 @@ class VllmRollout(base_rollout.BaseRollout):
   # Consumed by the alignment gate to refuse a `S_prefill` that is really a decode alias.
   get_prefill_rescore_logps.is_real_rescore = True
   get_prefill_rescore_logps.is_processed_rescore = True
+
+  def run_p3_apc_boundary_probe(self) -> dict[str, Any]:
+    """Compares real APC-hit decode against the full-reset B rescore.
+
+    This is a default-off, forward-only Phase 3 discriminator.  It changes no
+    engine arithmetic.  A primes the real vLLM prefix cache, decodes exactly 16
+    tokens, and reads the production sampled-token logprobs.  B invokes the
+    production processed-prefill rescore with ``reset_prefix_cache=True`` on
+    those exact A-returned token IDs.  A intentionally does not request prompt
+    logprobs because pinned vLLM makes such requests skip prefix-cache reads.
+    """
+    if not os.environ.get("CANON_P3_APC_BOUNDARY_REPORT", ""):
+      raise RuntimeError(
+          "P3 APC boundary probe requires CANON_P3_APC_BOUNDARY_REPORT"
+      )
+    if os.environ.get("CANON_P38_PRECHECK_ONLY", "") != "1":
+      raise RuntimeError("P3 APC boundary probe is restricted to gate-only runs")
+
+    prefix_lengths = (
+        1535,
+        1536,
+        1537,
+        1685,
+        1686,
+        1687,
+        1788,
+        1792,
+        2047,
+        2048,
+        2049,
+    )
+    target_length = 16
+    sampling = {
+        "temperature": 0.7,
+        "top_p": 1.0,
+        "top_k": 0,
+    }
+    dirty_page_raw = os.environ.get("CANON_P3_APC_DIRTY_PAGE", "")
+    if dirty_page_raw not in ("", "0", "1"):
+      raise RuntimeError(
+          "CANON_P3_APC_DIRTY_PAGE must be absent, empty, 0, or 1"
+      )
+    dirty_page_enabled = dirty_page_raw == "1"
+    if dirty_page_enabled and os.environ.get(
+        "CANON_VLLM_ENABLE_PREFIX_CACHING", "0"
+    ) != "1":
+      raise RuntimeError("P3 dirty-page control requires APC enabled")
+    dirty_page_target_prefix = prefix_lengths[0]
+    dirty_page_control = None
+
+    def sampling_params(
+        *, max_tokens: int, sampled_logprobs: int | None, ignore_eos: bool
+    ) -> SamplingParams:
+      return SamplingParams(
+          max_tokens=max_tokens,
+          temperature=sampling["temperature"],
+          top_p=sampling["top_p"],
+          top_k=sampling["top_k"],
+          logprobs=sampled_logprobs,
+          prompt_logprobs=None,
+          detokenize=False,
+          ignore_eos=ignore_eos,
+      )
+
+    cases = []
+    for prefix_length in prefix_lengths:
+      prefix_tokens = np.arange(
+          1000, 1000 + prefix_length, dtype=np.int32
+      )
+
+      prime_output = self._sampler.generate_request_outputs(
+          [TokensPrompt(prompt_token_ids=prefix_tokens.tolist())],
+          sampling_params=sampling_params(
+              max_tokens=1, sampled_logprobs=None, ignore_eos=True
+          ),
+          reset_prefix_cache=True,
+      )[0]
+      if dirty_page_enabled and prefix_length == dirty_page_target_prefix:
+        dirty_page_control = self._p3_dirty_one_cached_page()
+      cached_params = sampling_params(
+          max_tokens=target_length, sampled_logprobs=1, ignore_eos=True
+      )
+      if cached_params.skip_reading_prefix_cache is not False:
+        raise RuntimeError(
+            "P3 APC A arm is not cache-readable: "
+            f"skip_reading_prefix_cache={cached_params.skip_reading_prefix_cache}"
+        )
+      cached_output = self._sampler.generate_request_outputs(
+          [TokensPrompt(prompt_token_ids=prefix_tokens.tolist())],
+          sampling_params=cached_params,
+          reset_prefix_cache=False,
+      )[0]
+      if len(cached_output.outputs) != 1:
+        raise RuntimeError(
+            "P3 APC cached arm returned an invalid output count: "
+            f"prefix={prefix_length} got={len(cached_output.outputs)} expected=1"
+        )
+      completion = cached_output.outputs[0]
+      target_tokens = np.asarray(completion.token_ids, dtype=np.int32)
+      if target_tokens.size != target_length:
+        raise RuntimeError(
+            "P3 APC cached arm returned an invalid completion length: "
+            f"prefix={prefix_length} got={target_tokens.size} "
+            f"expected={target_length}"
+        )
+      cached_logps = np.asarray(
+          generate_utils.get_logprobs_from_vllm_output(
+              target_tokens.tolist(),
+              completion.logprobs,
+          ),
+          dtype=np.float32,
+      )
+      if cached_logps.size != target_length:
+        raise RuntimeError(
+            "P3 APC cached arm returned an invalid sampled-logprob length: "
+            f"prefix={prefix_length} got={cached_logps.size} "
+            f"expected={target_length}"
+        )
+
+      # The direct cached request used the same processed sampling transforms;
+      # record that real provenance before calling the unchanged production B.
+      self._last_sampling_transforms = dict(sampling)
+      full_logps = np.asarray(
+          self.get_prefill_rescore_logps(
+              prefix_tokens[None, :],
+              target_tokens[None, :],
+              reset_prefix_cache=True,
+              processed=True,
+              completion_lengths=np.asarray([len(target_tokens)], np.int64),
+          )[0],
+          dtype=np.float32,
+      )
+      b_provenance = dict(self._last_prefill_rescore_provenance or {})
+      b_cached_tokens = tuple(b_provenance.get("num_cached_tokens", ()))
+      if b_provenance.get("reset_prefix_cache") is not True:
+        raise RuntimeError("P3 APC B arm did not attest reset_prefix_cache=True")
+      if b_cached_tokens != (0,):
+        raise RuntimeError(
+            "P3 APC B arm was not a full recompute: "
+            f"num_cached_tokens={b_cached_tokens}"
+        )
+
+      cached_bytes = cached_logps.view(np.uint8)
+      full_bytes = full_logps.view(np.uint8)
+      byte_diff = cached_bytes != full_bytes
+      element_diff = cached_logps.view(np.uint32) != full_logps.view(np.uint32)
+      element_indices = np.flatnonzero(element_diff)
+      first_index = int(element_indices[0]) if element_indices.size else None
+      input_sha = hashlib.sha256()
+      input_sha.update(prefix_tokens.tobytes())
+      input_sha.update(target_tokens.tobytes())
+      case = {
+          "prefix_length": prefix_length,
+          "target_length": int(target_tokens.size),
+          "target_tokens": target_tokens.tolist(),
+          "target_sha256": hashlib.sha256(target_tokens.tobytes()).hexdigest(),
+          "input_sha256": input_sha.hexdigest(),
+          "prime_num_cached_tokens": int(prime_output.num_cached_tokens or 0),
+          "a_num_cached_tokens": int(cached_output.num_cached_tokens or 0),
+          "b_num_cached_tokens": int(b_cached_tokens[0]),
+          "b_reset_prefix_cache": True,
+          "finite": bool(
+              np.isfinite(cached_logps).all() and np.isfinite(full_logps).all()
+          ),
+          "differing_bytes": int(np.count_nonzero(byte_diff)),
+          "differing_elements": int(element_indices.size),
+          "first_mismatch": (
+              None
+              if first_index is None
+              else {
+                  "target_index": first_index,
+                  "a": float(cached_logps[first_index]),
+                  "b": float(full_logps[first_index]),
+              }
+          ),
+          "a_sha256": hashlib.sha256(cached_logps.tobytes()).hexdigest(),
+          "b_sha256": hashlib.sha256(full_logps.tobytes()).hexdigest(),
+      }
+      cases.append(case)
+      print(
+          "[P3_APC_BOUNDARY_CASE] "
+          f"prefix={prefix_length} a_cached={case['a_num_cached_tokens']} "
+          f"b_cached={case['b_num_cached_tokens']} "
+          f"differing_bytes={case['differing_bytes']}",
+          flush=True,
+      )
+
+    return {
+        "schema": "phase3-apc-boundary-probe-v2",
+        "apc_enabled": os.environ.get(
+            "CANON_VLLM_ENABLE_PREFIX_CACHING", "0"
+        ) == "1",
+        "topology": "DP1xTP4",
+        "canonical_m": 256,
+        "sampling": sampling,
+        "token_source": "fixed-arange-prefix-v1:a-decode-completion-v1",
+        "a_request_contract": {
+            "max_tokens": target_length,
+            "sampled_logprobs": 1,
+            "prompt_logprobs": None,
+            "skip_reading_prefix_cache": False,
+            "ignore_eos": True,
+        },
+        "prefix_lengths": list(prefix_lengths),
+        "cases": cases,
+        "backward": 0,
+        "optimizer_commits": 0,
+        "claim": "G-A boundary reproduction only; not an APC certification",
+        "dirty_page_control": {
+            "enabled": dirty_page_enabled,
+            "target_prefix_length": (
+                dirty_page_target_prefix if dirty_page_enabled else None
+            ),
+            "page": dirty_page_control,
+        },
+    }
+
+  def _p3_dirty_one_cached_page(self) -> dict[str, Any]:
+    """Corrupts one real cached KV page for the Phase3 negative control.
+
+    This hook is inaccessible unless the explicit diagnostic flag and the
+    gate-only carrier are both enabled. It runs only while the in-process
+    driver is idle, takes the first prefix-hash entry (the first logical block
+    reused by A), and replaces that physical page in layer 0. B remains the
+    unchanged full-reset recompute.
+    """
+    if os.environ.get("CANON_P3_APC_DIRTY_PAGE", "") != "1":
+      raise RuntimeError("P3 dirty-page mutation was not explicitly enabled")
+    if os.environ.get("CANON_P38_PRECHECK_ONLY", "") != "1":
+      raise RuntimeError("P3 dirty-page mutation is restricted to gate-only")
+
+    driver = self._sampler._driver  # pylint: disable=protected-access
+    if driver is None:
+      raise RuntimeError("P3 dirty-page mutation requires in-process vLLM")
+    with driver._engine_lock:  # pylint: disable=protected-access
+      if (
+          driver._pending  # pylint: disable=protected-access
+          or driver._submission_queue  # pylint: disable=protected-access
+          or driver.llm_engine.has_unfinished_requests()
+      ):
+        raise RuntimeError("P3 dirty-page mutation requires an idle driver")
+      engine_core = getattr(driver.llm_engine.engine_core, "engine_core", None)
+      if engine_core is None:
+        raise RuntimeError("P3 dirty-page mutation requires local EngineCore")
+      scheduler = engine_core.scheduler
+      manager = scheduler.kv_cache_manager
+      if manager.num_kv_cache_groups != 1:
+        raise RuntimeError(
+            "P3 dirty-page mutation requires one KV-cache group, got "
+            f"{manager.num_kv_cache_groups}"
+        )
+      cached_map = manager.block_pool.cached_block_hash_to_block._cache
+      if not cached_map:
+        raise RuntimeError("P3 dirty-page mutation found no cached prefix block")
+      first_entry = next(iter(cached_map.values()))
+      if isinstance(first_entry, dict):
+        if not first_entry:
+          raise RuntimeError("P3 dirty-page cache map contains an empty entry")
+        block = next(iter(first_entry.values()))
+      else:
+        block = first_entry
+      block_id = int(block.block_id)
+      block_hash_tokens = block.block_hash_num_tokens
+      if block_hash_tokens is None or int(block_hash_tokens) <= 0:
+        raise RuntimeError("P3 dirty-page block has no logical token extent")
+
+      runner = self._sampler._model_runner  # pylint: disable=protected-access
+      if not runner.kv_caches:
+        raise RuntimeError("P3 dirty-page mutation found no live KV cache")
+      cache = runner.kv_caches[0]
+      if len(cache.shape) != 5 or jnp.dtype(cache.dtype) != jnp.bfloat16:
+        raise RuntimeError(
+            "P3 dirty-page cache geometry drifted: "
+            f"shape={cache.shape} dtype={cache.dtype}"
+        )
+      if not 0 <= block_id < int(cache.shape[0]):
+        raise RuntimeError(
+            f"P3 dirty-page block {block_id} exceeds cache {cache.shape}"
+        )
+
+      before = np.asarray(jax.device_get(cache[block_id]))
+      before_bytes = before.tobytes()
+      fill_value = 0.0 if any(before_bytes) else 1.0
+
+      def replace_page(value):
+        return value.at[block_id].set(
+            jnp.asarray(fill_value, dtype=value.dtype)
+        )
+
+      dirty_cache = jax.jit(replace_page, donate_argnums=(0,))(cache)
+      dirty_cache.block_until_ready()
+      runner.kv_caches[0] = dirty_cache
+      after = np.asarray(jax.device_get(dirty_cache[block_id]))
+      after_bytes = after.tobytes()
+      before_words = np.frombuffer(before_bytes, dtype=np.uint16)
+      after_words = np.frombuffer(after_bytes, dtype=np.uint16)
+      differing_bytes = int(np.count_nonzero(
+          np.frombuffer(before_bytes, dtype=np.uint8)
+          != np.frombuffer(after_bytes, dtype=np.uint8)
+      ))
+      differing_elements = int(np.count_nonzero(before_words != after_words))
+      if differing_bytes <= 0 or differing_elements <= 0:
+        raise RuntimeError("P3 dirty-page mutation did not change the page")
+      result = {
+          "layer_index": 0,
+          "physical_block_id": block_id,
+          "logical_token_extent": int(block_hash_tokens),
+          "page_shape": [int(value) for value in after.shape],
+          "page_dtype": str(after.dtype),
+          "mutation": "fill-zero" if fill_value == 0.0 else "fill-one",
+          "before_sha256": hashlib.sha256(before_bytes).hexdigest(),
+          "after_sha256": hashlib.sha256(after_bytes).hexdigest(),
+          "differing_bytes": differing_bytes,
+          "differing_elements": differing_elements,
+      }
+      print(
+          "[P3_APC_DIRTY_PAGE] "
+          f"layer=0 block={block_id} tokens={block_hash_tokens} "
+          f"mutation={result['mutation']} "
+          f"differing_bytes={differing_bytes} "
+          f"differing_elements={differing_elements}",
+          flush=True,
+      )
+      return result
 
   def get_grouped_prefill_rescore_logps(
       self,

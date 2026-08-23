@@ -4,7 +4,7 @@
 > 焊死数值类 flag = 删代码路径 = 程序变更,走与开启同级认证门(verify+ALIGN+canary)。
 > 生命周期档位:试验 → 已认证 → 默认开 → 焊死(开关可删)→ 退役/否决。
 > 普查基点 a94d6c0c(285 个可设置 env flag,与 ebba4850 普查零漂移);普查后续现役附录
-> 当前 353 个;本表分层登记,D 层按前缀组、语义欠账标"待考古"。
+> 当前 357 个;本表分层登记,D 层按前缀组、语义欠账标"待考古"。
 > 全量机器清单:落地 CL 时由 `grep -rhoE` 生成为附录,条目数必须 == 普查数(排除项列明)。
 
 ## A 层 · 数值语义类(动它 = 动程序身份;焊死走认证门)
@@ -18,6 +18,7 @@
 | CANON_MM_ALGO / CANON_MM_ALGO_PRESET | P19/P38:非 Pallas einsum 的 dot-algorithm 判别器;P38 仅允许 fixed `BF16_BF16_F32` 单变量臂 | off / BF16_BF16_F32 | **否决区**:旧 M16/M2048 e2e 无效;P38s22 三轮 A-B 仍红 | 可删,判决记录永存 |
 | CANON_P38_FIXED_LM_HEAD | P38.2x/2y/2y1/2y2:registered Qwen3 output heads 的 M8/16/32/64/128/256 request buckets 均 pad 到 M256；learner M4096 映射为 16xM256；untied `JaxLmHead` 与 tied `JaxEmbed.decode` 共用 Pallas body 和 endpoint-scoped receipts。几何为 1.7B K2048/TP4 tied、8B K4096/TP4 untied（N37984→38144），4B K2560/TP8 tied、32B K5120/TP8 untied（N18992→19200）；tiles 均 BM128/BN256/BK256 | off；仅显式 renderer opt-in | 8B untied DP16xTP4 forward+backward-no-commit 已认证；1.7B 状态沿其独立 target；4B/32B pinned-image CPU gates 已过但 TPU target 未跑 | 每个 model/TP/endpoint 独立 target 绿后逐项转正；任一红仅退役对应 registry entry |
 | CANON_PROMPT_DIRECT_LOGPROBS / ABSOLUTE_TARGET_IDS | R5 同族实现细节开关 | off | 已认证 | 随 R5 同批焊死 |
+| CANON_VLLM_ENABLE_PREFIX_CACHING | Phase3 APC:仅改变 A rollout 的 vLLM prefix-cache 读取路径；B rescore 继续固定 `reset_prefix_cache=True` 全量重算 | off；缺省/空/0 均关，仅 1 开 | 试验；Qwen3-8B DP1×TP4 G-A/G-B/G-C/G-D、脏页阴性与匹配性能/XProf 已绿，G-E/64 卡未验 | G-E 与用户主跑的 multi-turn canary 全绿后逐项转正；单轮负载不强制 |
 | CANON_PALLAS_{CANONICAL_VJP,ALL_PROJ,ALL_RMSNORM,MPAD,SWIGLU,SWIGLU_MPAD} | canonical Pallas 内核族选通 | off | 已认证 | 转正焊死(P22.XI 部分已无条件) |
 | CANON_P28_SEGMENTED_TRAIN | 分段 fixed-M 训练前向 | off | 已认证 | 转正焊死 |
 | CANON_P59_RANK_PARALLEL_BACKWARD | 将 trajectory-group 内逐 DP-rank 串行 VJP 改为一次 DP-manual/TP-auto `shard_map`；leading-DP 暂存后仍走固定序归约 | off | gradient-correctness KEEP；不声称与旧串行 backward 训练轨迹相同 | 三个 full target 严格门归档后按 workload 转正 |
@@ -35,6 +36,7 @@
 | CANON_P28_BATCHED_REPORT(=1/=verify) | report 窗合并+remap jit 化(FL -14.5%) | GSM8K 默认;DP16 待验 | 同上 |
 | CANON_P28_BATCHED_REVERSE(=1/=verify) | P52 反向脚手架合并(-13.3%) | 一宿主认证;DP16 等 grouped 移植 | 同上 |
 | CANON_P28_LAYER_SCAN | =verify 恒等仪器/=verify_rev THIRDPROG 演示 | **=1 否决(净负 -5%)** | 仪器保留;=1 进否决区 |
+| CANON_P3_APC_BOUNDARY_REPORT | Phase3 G-A 固定 token deep-prefix 边界报告路径；有值才运行 cache-hit prefill vs B full-reset 的前向探针 | 试验，缺省空/off | Phase3 结案后退役；证据保留 |
 | CANON_CONTINUE_DECODE(=K) | 设备内 `lax.while_loop` 连续 decode，摊薄逐 token host 往返；async scheduling 必须关 | off；P56 一宿主固定 K=8 已认证 | DP16 与新 K/尾桶重认证后再转正 |
 | CANON_FIXED_AR_GATHER | fixed TP reduction 的三轮 ppermute 传输换成一次 all-gather，本地仍按相同 rank 顺序相加 | off；一宿主 KEEP | target topology strict 绿后转正 |
 | CANON_PALLAS_GATHERED_LOGPROBS | Pallas scorer 片上直接产 selected logprob/top1/rank，避免全词表 logprob 物化 | off；一宿主 KEEP；data_size>1 fail-closed | target topology exact gate 与 XProf 绿后转正 |
@@ -47,7 +49,7 @@
 | CANON_XPROF_LABELS | 为 rollout model/logits/sample 与 trainer fwd/bwd/report JIT 写语义名称，不改数值 | 仪器；P56 r21/r22 已认证 | XProf 原生提供等价稳定命名后退役 |
 | CANON_P59_XPROF_BACKWARD_DIR / CANON_P59_DP4_TAIL8 / CANON_P60_DETERMINISTIC_AB | P59/P60 DP4 专用 profile、tail 与跨臂载具 | off | 证据交付后退役，不进入生产默认 |
 | CANON_XPROF_TPU_TRACE_MODE | update 窗 TPU trace 密度选择器 | 仪器；空值保持既有 profiler 配置 | target XProf 无 drop 后决定默认 |
-| CANON_XPROF_PHASE | 捕获窗模式:step=整步(device 缓冲 ~283 万事件/核,decode ~25s 填满,实为 engine 前 25s 织物)/ update=G6 update 入口→步完成(rollout 不入镜,缓冲装下完整 backward) | 仪器;载具旋钮 P51_XPROF_PHASE | 长期保留 |
+| CANON_XPROF_PHASE | 捕获窗模式:step=整步(device 缓冲 ~283 万事件/核,decode ~25s 填满,实为 engine 前 25s 织物)/ update=G6 update 入口→步完成(rollout 不入镜,缓冲装下完整 backward)/ diagnostic=冻结权重 precheck 的一个完整 A-rollout/B-full-rescore/C-old-forward round | 仪器;载具旋钮 P51_XPROF_PHASE;Phase3 profile 固定 diagnostic skip=1 steps=1 | 长期保留 |
 | CANON_UPDATE_REPORT / CANON_PRE_ALIGN_REPORT / CANON_ALIGN_REPORT | 对齐/更新报告选通 | 默认开(监控契约) | 长期保留;A−B 哨兵不可撤(用户裁决 2026-08-15) |
 | JAX_COMPILATION_CACHE_DIR(非 CANON) | 持久编译缓存(-72s/重启) | 一宿主认证;**Pathways 未验** | 集群验证后进 lane/perf.env |
 
@@ -56,6 +58,7 @@
 | 组 | 代表 | 日落条件(一条覆盖全家) |
 |---|---|---|
 | capture/journal/ledger/capsule/GCS/replay | SERVING_CAPTURE_*、REQUEST_JOURNAL、INCIDENT_LEDGER、MISMATCH_CAPSULE、GCS_PREFIX、DURABILITY_PROFILE、FROZENLAKE_REPLAY、PRECHECK_ONLY… | **carrier 结案(strict 复验全绿)→ 全家整体退役**;判决类结论(U 臂、slot bug、co-batch、shape-1)迁 FOOTGUNS 后删 |
+| Phase3 APC dirty-page negative | CANON_P3_APC_DIRTY_PAGE:布尔诊断旗标；缺省/空/0 不污染，仅 boundary dirty mode 污染 A 确定会复用的 layer-0 单个真实 KV page，B 仍 full reset | G-D `p3gd1` 已命中；为 G-E 复验保留默认-off 载具，Phase3 最终结案后退役 |
 
 ## D 层 · 发射/基建管道(~230,按前缀组;逐条语义允许"待考古")
 
@@ -266,6 +269,7 @@ CANON_P35_PRE_REPLAY_REPORT
 CANON_P35_REPLAY_STAGE_CLASSIFICATION
 CANON_P35_REPLAY_STAGE_PROBE
 CANON_P35_REPLAY_STAGE_REPORT
+CANON_P38
 CANON_P38_AVAL_REPORT
 CANON_P38_CONTROLLED_EXIT
 CANON_P38_DIAGNOSTIC_ROUNDS
@@ -324,6 +328,8 @@ CANON_P38_TERMINAL_DISCRIMINATOR
 CANON_P38_TERMINAL_MAX_BYTES
 CANON_P39_64CHIP_PILOT
 CANON_P39_PILOT_ADMITTED
+CANON_P3_APC_BOUNDARY_REPORT
+CANON_P3_APC_DIRTY_PAGE
 CANON_P41_OPTIMIZER_BENCH
 CANON_P43_DEBUG_ADMITTED
 CANON_P43_DEEPSWE_DEBUG
@@ -432,6 +438,7 @@ CANON_TP_WIDTHS
 CANON_TRAIN_DP_SHARDING
 CANON_UPDATE_REPORT
 CANON_VJP2_MAX_SEQS
+CANON_VLLM_ENABLE_PREFIX_CACHING
 CANON_WANDB_GROUP
 CANON_WANDB_ONLINE_REQUIRED
 CANON_WANDB_PROJECT
@@ -448,4 +455,4 @@ CANON_XPROF_STEPS
 CANON_XPROF_TPU_TRACE_MODE
 ```
 
-Count: 353 settable names (appendix inventory above; exclusions: none).
+Count: 357 settable names (appendix inventory above; exclusions: none).

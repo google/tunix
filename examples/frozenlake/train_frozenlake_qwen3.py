@@ -57,6 +57,9 @@ from tunix.cli.utils import data as data_lib
 # learner and intentionally have no FrozenLake environment dependency.  Keep
 # the normal path's eager imports unchanged so a real L3 run still fails
 # immediately when its environment package is absent.
+CANON_P3_APC_BOUNDARY_REPORT = os.getenv(
+    "CANON_P3_APC_BOUNDARY_REPORT", ""
+)
 _CANON_PRELEARNER_ONLY = (
     os.getenv("CANON_L3_CONTRACT_ONLY", "") == "1"
     or os.getenv("CANON_L3_A3_ONLY", "") == "1"
@@ -64,6 +67,7 @@ _CANON_PRELEARNER_ONLY = (
     or os.getenv("CANON_P28_G4_ONLY", "") == "1"
     or os.getenv("CANON_P28_G5_ONLY", "") == "1"
     or os.getenv("CANON_P38_FROZENLAKE_REPLAY", "") == "1"
+    or bool(CANON_P3_APC_BOUNDARY_REPORT)
 )
 if not _CANON_PRELEARNER_ONLY:
   from examples.frozenlake.agent import FrozenLakeAgent
@@ -194,6 +198,16 @@ args, _ = arg_parser.parse_known_args()
 CANON_P57_RUN_KIND = os.getenv("CANON_P57_RUN_KIND", "")
 CANON_P57_INFERENCE_REGIME = os.getenv("CANON_P57_INFERENCE_REGIME", "")
 CANON_P57_TIM_ARM = os.getenv("CANON_P57_TIM_ARM", "")
+_CANON_VLLM_PREFIX_CACHE_RAW = os.getenv(
+    "CANON_VLLM_ENABLE_PREFIX_CACHING", "0"
+)
+if _CANON_VLLM_PREFIX_CACHE_RAW not in ("", "0", "1"):
+  raise ValueError(
+      "CANON_VLLM_ENABLE_PREFIX_CACHING must be absent, empty, 0, or 1"
+  )
+CANON_VLLM_ENABLE_PREFIX_CACHING = (
+    _CANON_VLLM_PREFIX_CACHE_RAW == "1"
+)
 CANON_P57_EVALUATION = CANON_P57_RUN_KIND == "eval"
 CANON_P57_CALIBRATION = CANON_P57_RUN_KIND == "calibration"
 CANON_P57_STOCK_TRAIN = (
@@ -278,6 +292,7 @@ CANON_P28_G5C_ONLY = os.getenv("CANON_P28_G5C_ONLY", "") == "1"
 CANON_P28_G6_UPDATE = os.getenv("CANON_P28_G6_UPDATE", "") == "1"
 CANON_P38_FROZENLAKE_REPLAY = (
     os.getenv("CANON_P38_FROZENLAKE_REPLAY", "") == "1"
+    or bool(CANON_P3_APC_BOUNDARY_REPORT)
 )
 CANON_P29_FULL_TRAIN = os.getenv("CANON_P29_FULL_TRAIN", "") == "1"
 CANON_P31_CONVERGENCE = os.getenv("CANON_P31_CONVERGENCE", "") == "1"
@@ -1279,12 +1294,22 @@ if CANON_P29_FULL_TRAIN or not (
       },
   )
 
-optimizer = optax.adamw(
-    learning_rate=LEARNING_RATE,
-    b1=B1,
-    b2=B2,
-    weight_decay=WEIGHT_DECAY,
-)
+_FL_STATELESS_OPTIMIZER = os.getenv("FL_STATELESS_OPTIMIZER", "")
+if _FL_STATELESS_OPTIMIZER not in ("", "0", "1"):
+  raise ValueError("FL_STATELESS_OPTIMIZER must be absent, empty, 0, or 1")
+if _FL_STATELESS_OPTIMIZER == "1" and not CANON_P38_PRECHECK_ONLY:
+  raise ValueError("FL_STATELESS_OPTIMIZER=1 is restricted to P38 gate-only")
+if _FL_STATELESS_OPTIMIZER == "1":
+  # P38 gate-only performs zero optimizer commits.  Avoid allocating Adam
+  # moments that do not fit beside Qwen3-8B and vLLM on a 32-GiB v4 chip.
+  optimizer = optax.sgd(learning_rate=LEARNING_RATE)
+else:
+  optimizer = optax.adamw(
+      learning_rate=LEARNING_RATE,
+      b1=B1,
+      b2=B2,
+      weight_decay=WEIGHT_DECAY,
+  )
 if MAX_GRAD_NORM is not None:
   optimizer = optax.chain(
       optax.clip_by_global_norm(max_norm=MAX_GRAD_NORM),
@@ -1313,7 +1338,9 @@ vllm_rollout_dict = {
     # max_seq_len rather than the vLLM default. Once vLLM-TPU gains support
     # for sleep/wake_up, this can be relaxed since the KV pool can be
     # offloaded to host RAM during train_step.
-    "rollout_vllm_hbm_utilization": 0.20,
+    "rollout_vllm_hbm_utilization": float(
+        os.getenv("FL_VLLM_HBM_UTIL", "0.20")
+    ),
     "rollout_vllm_tpu_backend_type": "jax",
     # AgenticRLLearner requires the in-process continuous-batching driver.
     # Canonical C accesses that driver's live model runner through the same
@@ -1331,11 +1358,17 @@ vllm_rollout_dict = {
     "rollout_vllm_kwargs": {
         "kv_cache_metrics": True,
         "disable_log_stats": False,
-        "enable_prefix_caching": False,
+        "enable_prefix_caching": CANON_VLLM_ENABLE_PREFIX_CACHING,
         "dtype": "bfloat16",
         **({"seed": 0} if CANON_P57_RUN_KIND else {}),
     },
 }
+print(
+    "[P3_APC_CONFIG] "
+    f"enabled={int(CANON_VLLM_ENABLE_PREFIX_CACHING)} "
+    "workload=frozenlake reader=train_frozenlake_qwen3",
+    flush=True,
+)
 
 if CANON_P57_RUN_KIND:
   if SEED != 42:
@@ -1431,11 +1464,27 @@ grpo_config = GRPOConfig(
     advantage_estimator=args.advantage_estimator,
 )
 
+perf_config = None
+canon_perf_trace_dir = os.environ.get("CANON_PERF_TRACE_DIR", "")
+if canon_perf_trace_dir:
+  # Official tunix.perf v2 semantic spans.  Empty/unset remains the existing
+  # NoopTracer path; Phase3 profile runs set this only as instrumentation.
+  from tunix.perf import metrics as perf_metrics_lib  # pylint: disable=g-import-not-at-top
+  from tunix.perf.experimental import export as perf_export_lib  # pylint: disable=g-import-not-at-top
+
+  perf_config = perf_metrics_lib.PerfMetricsConfig(
+      custom_export_fn_v2=perf_export_lib.PerfMetricsExport.from_cluster_config(
+          cluster_config=cluster_config,
+          trace_dir=canon_perf_trace_dir,
+      ).export_metrics
+  )
+
 rl_cluster = rl_cluster_lib.RLCluster(
     actor=qwen_actor,
     reference=qwen_ref,
     tokenizer=tokenizer,
     cluster_config=cluster_config,
+    perf_config=perf_config,
 )
 show_hbm_usage("after RLCluster creation")
 if P45_CHECKPOINT.enabled:
@@ -1522,6 +1571,43 @@ if CANON_L3:
     rl_cluster.rollout.run_p28_full_chain_gate()
     print(
         "[P28.G5B] CHAIN_ONLY_PASS no_loss=1 no_optimizer=1",
+        flush=True,
+    )
+    raise SystemExit(0)
+  if CANON_P3_APC_BOUNDARY_REPORT:
+    if not CANON_P38_PRECHECK_ONLY:
+      raise ValueError("P3 APC boundary probe requires gate-only mode")
+    if os.path.exists(CANON_P3_APC_BOUNDARY_REPORT):
+      raise FileExistsError(
+          "refusing to overwrite P3 APC boundary report: "
+          f"{CANON_P3_APC_BOUNDARY_REPORT}"
+      )
+    weight_attestation = rl_cluster.attest_actor_anchor_matches_engine()
+    if weight_attestation.get("equal") is not True:
+      raise ValueError(
+          "P3 APC boundary probe requires bitwise-equal actor and engine weights"
+      )
+    report = rl_cluster.rollout.run_p3_apc_boundary_probe()
+    report["weight_attestation"] = {
+        "equal": True,
+        "mapped_leaves": int(weight_attestation["mapped_leaves"]),
+        "live_leaves": int(weight_attestation["live_leaves"]),
+        "total_elements": int(weight_attestation["total_elements"]),
+        "mismatch_indices": list(weight_attestation["mismatch_indices"]),
+        "mesh_device_ids": list(weight_attestation["mesh_device_ids"]),
+    }
+    os.makedirs(
+        os.path.dirname(CANON_P3_APC_BOUNDARY_REPORT) or ".", exist_ok=True
+    )
+    with open(
+        CANON_P3_APC_BOUNDARY_REPORT, "x", encoding="utf-8"
+    ) as report_file:
+      json.dump(report, report_file, sort_keys=True, indent=2)
+      report_file.write("\n")
+    print(
+        "[P3_APC_BOUNDARY] COMPLETE "
+        f"report={CANON_P3_APC_BOUNDARY_REPORT} "
+        f"cases={len(report['cases'])} backward=0 optimizer_commits=0",
         flush=True,
     )
     raise SystemExit(0)

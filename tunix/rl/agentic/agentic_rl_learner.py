@@ -2611,8 +2611,10 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     )
     p57_inprocess_eval_enabled = (
         p31_eval_rollout_enabled
-        and os.environ.get("CANON_PROFILE_FILE", "")
-        == "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env"
+        and os.environ.get("CANON_PROFILE_FILE", "") in (
+            "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env",
+            "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env",
+        )
         and os.environ.get("CANON_P57_RUN_KIND", "") == "train"
         and os.environ.get("CANON_P57_EXPECTED_UPDATES", "") == "300"
     )
@@ -2699,6 +2701,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     update_steps_per_full_batch = full_batch_size // mini_batch_size
     unpacked_micro_step_counter = 0
     did_eval_this_global_step = False
+    p57_eval_policy_step_this_cycle = None
     full_batch_chunks = []
     for train_micro_batch in train_data_gen:
       if (
@@ -2736,6 +2739,18 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             raise
           completed = alignment.p38_diagnostic_round_index()
           total = alignment.p38_diagnostic_rounds()
+          profile_stopped = _canon_xprof_diagnostic_round_boundary(completed)
+          if profile_stopped:
+            # The precheck vehicle never reaches a global-step boundary, so
+            # explicitly export the official semantic timeline after the
+            # selected diagnostic round.  This is instrumentation only: it
+            # does not enter the alignment values or training state.
+            self.rl_cluster.perf_v2.export()
+            print(
+                "[P3.XPROF] semantic_perfetto_exported "
+                f"completed_rounds={completed}",
+                flush=True,
+            )
           try:
             next_prompts = next(full_dataset_iterator)
           except StopIteration as exc:
@@ -3018,15 +3033,15 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
                 flush=True,
             )
           self._eval_iter_steps += 1
-          # Rollout-only evaluation publishes environment reward metrics
-          # directly.  Feeding the materialized examples to the trainer would
-          # run an unnecessary eval forward and is forbidden while the
-          # alignment observer is active.
+          # P57 publishes rollout-only environment rewards.  Sending these
+          # examples through trainer eval would add an unrelated forward pass
+          # and would contaminate the alignment/performance contract.
           current_eval_dataset = (
               None if p57_inprocess_eval_enabled else eval_examples
           )
           if p57_inprocess_eval_enabled:
             eval_examples = None
+            p57_eval_policy_step_this_cycle = int(current_train_step)
           did_eval_this_global_step = True
 
       # --- First iteration Training Step (Parallelized with Rollout) ---
@@ -3290,6 +3305,20 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
               global_step_time,
           )
         else:
+          if p57_eval_policy_step_this_cycle is not None:
+            enclosing_global_step = int(self.rl_cluster.global_steps)
+            if enclosing_global_step != p57_eval_policy_step_this_cycle + 1:
+              raise RuntimeError(
+                  "P57 evaluation cycle mapping drifted: "
+                  f"policy_step={p57_eval_policy_step_this_cycle} "
+                  f"enclosing_global_step={enclosing_global_step}"
+              )
+            print(
+                "[P57.EVAL.CYCLE] "
+                f"policy_step={p57_eval_policy_step_this_cycle} "
+                f"enclosing_global_step={enclosing_global_step}",
+                flush=True,
+            )
           logging.info(
               f"Global step {self.rl_cluster.global_steps} completed in"
               f" {global_step_time:.2f} seconds."
@@ -3404,6 +3433,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             eval_str,
         )
         did_eval_this_global_step = False
+        p57_eval_policy_step_this_cycle = None
         self.rl_cluster.buffer_metrics_async(
             {"perf/global_step_time": (global_step_time, np.mean)},
             mode=rl_cluster_lib.Mode.TRAIN,
@@ -3555,6 +3585,11 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       print(
           "[CANON_" "FROZENLAKE_P42_JSON] "
           + json.dumps(final_metrics, sort_keys=True, separators=(",", ":")),
+          flush=True,
+      )
+      print(
+          "[P57.EVAL.CYCLE] "
+          f"policy_step={final_policy_step} enclosing_global_step=none",
           flush=True,
       )
       print(
@@ -3743,9 +3778,44 @@ def _canon_xprof_step_boundary():
   boundary (the armed step never reached the G6 update call) is a hard
   error for the same reason.
   """
+  if not _canon_xprof_configure():
+    return
+  if _CANON_XPROF["mode"] == "diagnostic":
+    return
+
+  _CANON_XPROF["completed_steps"] += 1
+  completed = _CANON_XPROF["completed_steps"]
+  if _CANON_XPROF["mode"] == "step":
+    _CANON_XPROF["profiler"].maybe_activate(completed)
+    _CANON_XPROF["profiler"].maybe_deactivate(completed)
+    return
+  if completed == _CANON_XPROF["skip"]:
+    _CANON_XPROF["armed"] = True
+    print(
+        f"[P51.XPROF] phase=update armed step={completed}",
+        flush=True,
+    )
+    return
+  if completed == _CANON_XPROF["skip"] + _CANON_XPROF["steps"]:
+    if not _CANON_XPROF["started"]:
+      raise RuntimeError(
+          "phase=update capture window never started before its stop "
+          "boundary; the armed step never reached the G6 update call"
+      )
+    jax.profiler.stop_trace()
+    _CANON_XPROF["started"] = False
+    print(
+        "[P51.XPROF] phase=update stopped "
+        f"step={completed} anchor=step_completed",
+        flush=True,
+    )
+
+
+def _canon_xprof_configure() -> bool:
+  """Configures one of the mutually exclusive XProf window modes."""
   directory = os.environ.get("CANON_XPROF_DIR", "")
   if not directory:
-    return
+    return False
   if not _CANON_XPROF["configured"]:
     skip = int(os.environ.get("CANON_XPROF_SKIP_STEPS", "") or "2")
     steps = int(os.environ.get("CANON_XPROF_STEPS", "") or "1")
@@ -3756,16 +3826,15 @@ def _canon_xprof_step_boundary():
           f"step is step 1 (got skip={skip}, steps={steps})"
       )
     mode = os.environ.get("CANON_XPROF_PHASE", "") or "step"
-    if mode not in ("step", "update"):
+    if mode not in ("step", "update", "diagnostic"):
       raise ValueError(
-          f"CANON_XPROF_PHASE must be 'step' or 'update': {mode!r}"
+          "CANON_XPROF_PHASE must be 'step', 'update', or 'diagnostic': "
+          f"{mode!r}"
       )
-    if mode == "update" and steps != 1:
+    if mode in ("update", "diagnostic") and steps != 1:
       raise ValueError(
-          "CANON_XPROF_PHASE=update requires CANON_XPROF_STEPS=1: the "
-          "window closes at the next step boundary, and a longer window "
-          "would run across the following step's rollout and refill the "
-          f"device trace buffer with decode (got steps={steps})"
+          f"CANON_XPROF_PHASE={mode} requires CANON_XPROF_STEPS=1 "
+          f"(got steps={steps})"
       )
     host_tracer = int(os.environ.get("CANON_XPROF_HOST_TRACER", "") or "1")
     python_tracer = int(
@@ -3804,29 +3873,47 @@ def _canon_xprof_step_boundary():
               python_tracer_level=python_tracer,
           ),
       )
-  _CANON_XPROF["completed_steps"] += 1
-  completed = _CANON_XPROF["completed_steps"]
-  if _CANON_XPROF["mode"] == "step":
-    _CANON_XPROF["profiler"].maybe_activate(completed)
-    _CANON_XPROF["profiler"].maybe_deactivate(completed)
-    return
-  if completed == _CANON_XPROF["skip"]:
-    _CANON_XPROF["armed"] = True
+  return True
+
+
+def _canon_xprof_diagnostic_round_boundary(completed_rounds: int) -> bool:
+  """Captures one frozen-weight diagnostic round and reports a stop event.
+
+  `skip=1, steps=1` opens after round 0 has fully passed A/B/C and closes
+  after round 1 has fully passed A/B/C.  Starting at this boundary excludes
+  model/engine initialization and the first C compilation while retaining the
+  production A rollout, independent B full rescore, and trainer-old C forward.
+  """
+  if not _canon_xprof_configure() or _CANON_XPROF["mode"] != "diagnostic":
+    return False
+  if completed_rounds == _CANON_XPROF["skip"]:
+    options = jax.profiler.ProfileOptions()
+    options.host_tracer_level = _CANON_XPROF["host_tracer"]
+    options.python_tracer_level = _CANON_XPROF["python_tracer"]
+    jax.profiler.start_trace(
+        log_dir=_CANON_XPROF["directory"], profiler_options=options
+    )
+    _CANON_XPROF["started"] = True
     print(
-        f"[P51.XPROF] phase=update armed step={completed}",
+        "[P3.XPROF] phase=diagnostic started "
+        f"completed_rounds={completed_rounds} "
+        f"capture_round={completed_rounds}",
         flush=True,
     )
-    return
-  if completed == _CANON_XPROF["skip"] + _CANON_XPROF["steps"]:
+    return False
+  if completed_rounds == _CANON_XPROF["skip"] + _CANON_XPROF["steps"]:
     if not _CANON_XPROF["started"]:
       raise RuntimeError(
-          "phase=update capture window never started before its stop "
-          "boundary; the armed step never reached the G6 update call"
+          "phase=diagnostic capture window never started before its stop "
+          "boundary"
       )
     jax.profiler.stop_trace()
     _CANON_XPROF["started"] = False
     print(
-        "[P51.XPROF] phase=update stopped "
-        f"step={completed} anchor=step_completed",
+        "[P3.XPROF] phase=diagnostic stopped "
+        f"completed_rounds={completed_rounds} "
+        f"captured_round={completed_rounds - 1}",
         flush=True,
     )
+    return True
+  return False
