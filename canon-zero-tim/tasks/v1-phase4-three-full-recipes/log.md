@@ -1,5 +1,24 @@
 # Log
 
+## 2026-08-24T05:13:22Z — attempt-2 reds classified and repaired locally
+
+- Incoming source/evidence: fast-forwarded to `238ca28cf6eb642429de66c0da58b68ea659309f`; all four entries in `evidence/v1_hp_three_full_attempt2_20260824/SHA256SUMS` verify.
+- GSM8K `g64k` and P45 `f45i`: strict step-0 pre-alignment PASS, then no optimizer commit. Both hit `P59 local fused-linear split ... sizes=(128,) tp=1` in real q_proj backward. Root cause: the shim confused engine fused-layout `config.n_shards` with the live mesh TP degree; a non-fused q_proj legitimately has one layout shard inside TP4/TP8.
+- M15 `m15i`: hard numerical FAIL before backward. `S_decode_vs_S_prefill` differs on 760 elements / 1389 bytes with max abs `0.998443603515625`; `S_prefill_vs_T_old` is exact. This isolates the red to APC-on decode, so APC is target-VETOED and reverted only for M15/main. P45 remains APC-on. No gate tolerance changed.
+- Repair: the local P59 layout helper admits positive `n_shards=1`, retains invalid/divisibility/width failures, and updates `MANIFEST.sha256`. The installed-shim carrier now executes real q_proj `(128,),1` under DP2xTP4 and DP2xTP8, while retaining fused-layout, wrong-width, and ordinary-global controls. Full postflight requires exactly one explicit APC-off runtime receipt for M15 and rejects an unexpected APC-on marker.
+- Final admission: after adding missing/duplicate/opposite APC-off marker negatives, host gates pass V1 19/19, P57 144/144, P59 31/31, APC 31/31, and flags 366/366. Full pinned-image r5 passes with raw-log SHA `90affa9db1ca8ba4df6d7334aa7897aa9bd77492d93fd1378753396ff531556e` and terminal `V1_HP_EXACT_IMAGE_PASS ... p59_real_shim=4 ... manifests=3`. Post-fix target remains unrun.
+- Host PASS: V1 18/18, P57 144/144, P59 31/31, APC 31/31, flags 366/366, syntax, manifest, and diff hygiene. Bare-host P33 broad discovery still lacks optional `datasets`/`metrax`; 29 other tests pass and the dependency-complete image gate supersedes it.
+- Exact-image evidence: r1 is an immutable sandbox/sudo infrastructure red; r2 is an immutable trailing-`None` sharding-assertion carrier red; focused r3 passes with SHA `a556a808e7ba5a40e7b8f4d45e8398af8b9ec3a216286ca642e91985da9af50d`; complete r4 passes with raw-log SHA `281c13a6c0b4dd84a3a19505b1f147ee8e4aaaeff9161738a9a2c521f6813dbc` and receipt SHA `3db65eef408e92534ee0759437800b79c445fd8fb556ac2447309d3618ea9364`.
+- Claim ceiling: `HOST PASS / EXACT_IMAGE PASS / ATTEMPT2 TARGET REDS PRESERVED / POST-FIX TARGET NOT RUN`. No commit, push, manifest render, Kubernetes mutation, TPU run, or post-fix optimizer commit occurred.
+- Rollback: revert the evidence/ledger CL, then the M15 APC profile/classifier CL, then the P59 layout/manifest/carrier CL. Never delete attempt-2 or r1-r4 evidence.
+
+## 2026-08-24T03:57:06Z — direct-full launch order confirmed
+
+- Decision: all three target jobs are direct full trains; there is no separate short canary.
+- Order: render only from published/read-back SHA `71d889a32f4668353c758d5c00df88299e6c0d35`, start the 200-update GSM8K full train first, and treat its first real optimizer commit as an early admission checkpoint rather than a stopping horizon.
+- Gate: require zero real alignment FAIL plus the registered P59-local, fixed-head, and optimizer receipts at that checkpoint. Keep GSM8K running toward its full horizon; after this checkpoint P45 followed by M15 may start as 300-update full trains from the same source SHA.
+- Claim boundary: this records the approved execution sequence only. No target manifest was rendered and no TPU or Kubernetes resource was started by this checkpoint.
+
 ## 2026-08-24 UTC — post-fix pinned-image r3 admitted
 
 - Focused r3 ran the revised non-head DP2xTP2 carrier and the retained rank-2

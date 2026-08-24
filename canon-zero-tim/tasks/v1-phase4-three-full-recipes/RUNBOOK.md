@@ -77,15 +77,20 @@ checkpoint, completion, update, or runtime performance receipts makes the run
 
 On the first backward, require
 `[P59.DP<dp>] head_cotangent_partition_ready` with the target placement
-`data,model`. FrozenLake must additionally emit fixed-head primal/VJP receipts
-with `semantic_M=2048 ... chunks=8`; M4096 receipts cannot substitute for
-them. Missing either receipt makes the run `INCONCLUSIVE` before performance
-interpretation.
+`data,model`. FrozenLake must additionally emit the P59-local fixed-head primal
+receipt with `semantic_M=256 ... chunks=1 p59_local=1 global_M=2048 dp=8` and
+the VJP receipt with `semantic_M=2048 local_M=256 chunks=1` plus
+`tp_input_reduction=all_gather_rank_order_f32_barrier`; M4096 or ordinary
+eight-chunk receipts cannot substitute for them. Missing either receipt makes
+the run `INCONCLUSIVE` before performance interpretation.
 
 After a pushed approved SHA has rendered the three immutable manifests, and
-only after separate launch approval, apply GSM8K first. Inspect its complete
-strict-alignment/P59/XProf postflight before opening the FrozenLake runs. Then
-apply P45, followed by M15, from the same SHA. The direct-full commands are:
+only after separate launch approval, apply GSM8K first. Its first real optimizer
+commit is the early admission checkpoint: require zero real alignment FAIL and
+the registered P59-local/fixed-head/optimizer receipts, but do not stop or
+shorten the full run. After that checkpoint, apply P45 followed by M15 from the
+same SHA while GSM8K continues to its complete horizon. The direct-full commands
+are:
 
 ```bash
 kubectl apply -f "$OUT/gsm8k/jobset-v1-hp-gsm8k-full.yaml"
@@ -102,7 +107,9 @@ the same uninterrupted full JobSet.
 The in-container postflight writes `v1_hp_<recipe>_full.classification.json`.
 It requires the complete 200/300 horizon, zero real ALIGN FAIL, the signed
 FrozenLake in-process evaluation classification, all P59
-parallel/reduction receipts, positive APC hits for FrozenLake, one XPlane plus
-UI trace, and exactly one semantic Perfetto file. Use `xprof-trace-analysis`
+parallel/reduction receipts, positive APC hits for P45, and an exact APC-off
+resolved profile plus exactly one `[P3_APC_CONFIG] enabled=0` runtime receipt
+and no APC-on marker for M15. It also requires one XPlane plus UI trace and
+exactly one semantic Perfetto file. Use `xprof-trace-analysis`
 after packaging each returned run; operation attribution is a separate claim
 from the `[PERF]` timing verdict.

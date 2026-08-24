@@ -7,18 +7,17 @@ approved immutable source: GSM8K Qwen3-1.7B DP16xTP4 for 200 updates,
 FrozenLake P45 Qwen3-8B DP8xTP8 for 300 updates, and FrozenLake M15-main
 Qwen3-8B DP8xTP8 for 300 updates. M15 is a production/scientific recipe, not a
 canary. The original three-recipe stack is published in the operator history.
-The current repair release is staged in
+The active worktree is
 `/home/yuxuan/code_rl_repro/worktrees/p58_zero_hp_release3_0823`, branch
-`local/p58-zero-hp-release3-0823`, built on incoming evidence tip
-`5f3e8ff95075642b5e660af8d1219e1c98e71c72` as two functional CLs plus one
-registry/evidence/handoff CL. That stack was published and exactly read back at
-`dfec27378bfdd9b73b7bf8f7930bacaa685b3a16`. A follow-up release-contract stack
-now requires exact P59-local M/global/DP/chunk/reduction receipts and exact full
-postflight shapes. Its host gates and fresh r3 pinned-image gate are green; the
-follow-up stack is not yet published. Do not render or launch from this dirty tree.
-Render only
-from the exact 40-character operator-branch SHA read back after that push, and
-require a clean worktree before rendering.
+`local/p58-zero-hp-release3-0823`. The attempt-1 repairs and release contracts
+were published through `71d889a32f4668353c758d5c00df88299e6c0d35`.
+The latest pulled operator tip is
+`238ca28cf6eb642429de66c0da58b68ea659309f`; it adds the GSM8K anti-affinity
+repair plus immutable attempt-2 error evidence. The attempt-2 repair stack is
+split into P59 q_proj, M15 APC-off, and evidence/ledger CLs. Host gates and the
+r5 dependency-complete pinned-image gate are green, but the repaired target has
+not run. After authorized publication, render only from the exact 40-character
+SHA read back from the operator branch and require a clean worktree.
 
 Do not push, rerun the pinned image, publish an image, apply a JobSet, or occupy
 TPU resources without the separate user approval for that boundary. Never
@@ -33,7 +32,20 @@ TP4 fixed-head width `[256,37984]`; P45 `f45g` stopped in C-forward because
 the Qwen3-8B/TP8 fixed-head contract omitted learner M2048. Neither is a real
 alignment FAIL. The current repair restores `P(data,model)` before the
 P59 head VJP and admits M2048 only for the 8B/TP8 geometry. Host/static gates
-are green; post-fix pinned-image and target execution are not run.
+and the dependency-complete post-fix pinned-image gate are green.
+
+Attempt 2 is immutable under
+`evidence/v1_hp_three_full_attempt2_20260824/`. GSM8K `g64k` and P45 `f45i`
+both passed strict step-0 pre-alignment, then stopped before optimizer because
+the P59 local projection shim treated engine fused-layout `n_shards=1` as if it
+were the mesh TP degree. M15 `m15i` is a genuine numerical red: APC-on decode
+differs from full prefill on 760 elements / 1389 bytes with max abs
+`0.998443603515625`, while prefill and independent B rescore are exact. Per the
+hard rule, APC is dead for M15/main and is reverted there; no warning or
+tolerance was introduced. The local P59 repair admits the legitimate q_proj
+one-layout-shard boundary while retaining invalid-layout and width negatives.
+The full classifier now requires exactly one explicit APC-off runtime receipt
+for M15 and rejects a missing, duplicate, or opposite-arm receipt.
 
 ## Resolved bundle
 
@@ -41,8 +53,9 @@ are green; post-fix pinned-image and target execution are not run.
   DP-aware gathered logprobs, logprob step fusion, fixed LM head, resident
   trainer placement, batched report, and P59 rank-parallel backward.
 - GSM8K only: batched evidence on; APC off.
-- FrozenLake only: APC on and batched evidence off. B rescore remains an
-  independent full recomputation with `reset_prefix_cache=True`.
+- FrozenLake: batched evidence off. APC remains on for P45 only and is forced
+  off for M15/main after its attempt-2 target red. B rescore remains an
+  independent full recomputation with `reset_prefix_cache=True` in every case.
 - Explicitly off: batched reverse, fused tree ops, norm-matmul, sample-split,
   engine-logprob-readback, anchor overlap, and vanilla/non-Zero paths.
 - FrozenLake held-out rollout-only eval runs at pre-update policy steps
@@ -68,8 +81,10 @@ are green; post-fix pinned-image and target execution are not run.
   postflight requires `head_cotangent_partition_ready`; it still needs the
   dependency-complete pinned image and real target before promotion.
 - APC passed Phase3 one-host G-A through G-D, including the dirty-page negative
-  control and matched performance/XProf. G-E and both DP8xTP8 full targets are
-  unverified. Strict A(APC)-B(full-reset)=0 bytes remains mandatory.
+  control and matched performance/XProf. Attempt-2 M15/main failed G-E and its
+  APC knife is VETOED; P45 remains APC-on but has only one target pre-alignment
+  PASS before an unrelated backward carrier stop. Strict A(APC)-B(full-reset)=0
+  bytes remains mandatory and was not relaxed.
 - Qwen3-8B TP8 fixed-head code/overlay construction and pinned-image
   construction gate are green. The DP8xTP8 target is pending; TP4
   certification does not transfer to TP8.
@@ -116,6 +131,17 @@ It contains one required V1 terminal plus
 unittest failure terminal. Failed r1/r2 carrier logs are preserved beside it.
 This is dependency-complete CPU/image admission, not target execution.
 
+The attempt-2 repair passed the complete gate again on that image. The raw log
+is `evidence/v1_hp_attempt2_fix_exact_image_20260824_r4/run.log`, SHA-256
+`281c13a6c0b4dd84a3a19505b1f147ee8e4aaaeff9161738a9a2c521f6813dbc`;
+receipt SHA-256 is
+`3db65eef408e92534ee0759437800b79c445fd8fb556ac2447309d3618ea9364`.
+The focused r3 additionally records real q_proj `layout_shards=1` under TP4
+and TP8, exact serial/parallel gradients, fixed TP input reduction, fused-layout
+positive control, wrong-width negative, and ordinary-serving global negative.
+Failed r1/r2 carrier logs remain immutable. This is still not a target or
+optimizer-commit result.
+
 The separately approved one-host v5p integration proxy is frozen at evidence
 root
 `/mnt/disks/tunix-data/logp_probe_1host/p59_dp4_v1_v1hp_20260823_0824utc`.
@@ -125,12 +151,19 @@ Its terminal marker is
 
 ## Launch and postflight
 
-Render only from the approved pushed 40-character SHA using `RUNBOOK.md`.
-Require three manifest PASS receipts and freeze every YAML hash. With separate
-approval for each apply, launch GSM8K full first and classify its complete
-strict alignment, P59, timing, XProf, and Perfetto evidence. Only then apply
-P45, followed by M15, from the same SHA. A GSM8K green does not certify APC,
-TP8 fixed head, DP8xTP8, FrozenLake evaluation, or M15 workload geometry.
+The approved target plan uses direct full trains, not separate short canaries.
+After the repair is committed, pushed, and exactly read back, render from that
+new exact source SHA using `RUNBOOK.md`, require three manifest PASS receipts,
+and freeze every YAML hash. Apply the 200-update GSM8K
+full train first. Its first real optimizer commit is an early admission
+checkpoint, not a shortened run: require zero real alignment FAIL plus the
+registered P59-local, fixed-head, and optimizer receipts, then let the same
+JobSet continue to its full horizon. Only after that checkpoint may the two
+300-update FrozenLake full trains start, P45 first and M15 second, from the same
+source SHA. Each remains an uninterrupted full train and must receive its own
+complete strict-alignment, P59/APC/fixed-head, timing, XProf, Perfetto, eval,
+and horizon postflight. A GSM8K green does not certify APC, TP8 fixed head,
+DP8xTP8, FrozenLake evaluation, or M15 workload geometry.
 
 Any real `CANON_ALIGN` or `CANON_ALIGN_PRE verdict=FAIL` kills that recipe.
 Missing horizon, receipts, trace, checkpoint, or artifacts is INCONCLUSIVE,

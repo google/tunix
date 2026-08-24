@@ -1,0 +1,32 @@
+{
+  "schema": "v1-hp-attempt2-fix-exact-image-v2",
+  "timestamp": "2026-08-24T05:43:21Z",
+  "base_commit": "238ca28cf6eb642429de66c0da58b68ea659309f",
+  "tested_code_tree": "dc1d0f5a1da122c89a0649b09fb5039266b5047b",
+  "image": "sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a",
+  "runtime_sha256": {
+    "linear_p22xf.py": "db2c25e6ec2e3afabe98fdf13c44aea4ee10cd804d2d3d62fbd0039c317fa345",
+    "qwen3-8b-dp8-tp8-frozenlake-v1-hp.env": "0ca8c3134aaee5ae1aac7c3533b5c023e75598e7068a2cc27e899b663232a4e5",
+    "classify_full_recipe.py": "9cfd36139c7374f5b6485c706002379e8a82e8ec9a87801a595edc3b12fb4cc2"
+  },
+  "logs": {
+    "r1_infrastructure_red": "f8bddde1614658488d073efc2f474baf6ee8c0c53eeae369a2533e715705cc20",
+    "r2_test_carrier_red": "b8f80bf183750d1e12c2aa5c3c9a0367767e767d190b96f0f9bf6d9b00c4c17c",
+    "r3_focused_green": "a556a808e7ba5a40e7b8f4d45e8398af8b9ec3a216286ca642e91985da9af50d",
+    "r4_full_green_before_apc_off_marker_gate": "281c13a6c0b4dd84a3a19505b1f147ee8e4aaaeff9161738a9a2c521f6813dbc",
+    "r5_full_green_with_apc_off_marker_gate": "90affa9db1ca8ba4df6d7334aa7897aa9bd77492d93fd1378753396ff531556e"
+  },
+  "terminals": {
+    "focused": "P59_TP_SHIM_EXACT_IMAGE_PASS fixed_head=2 installed_projection=2 report_adjoint=2 fixed_reducer=2 topologies=DP2xTP4,DP2xTP8 optimizer_commits=0 manifests=2x36/36",
+    "full": "V1_HP_EXACT_IMAGE_PASS dp16_gathered=1 dp2tp2_parallel=2 p59_tp4_tp8=2 p59_real_shim=4 p57_wandb=1 perfetto_window=1 manifests=3"
+  },
+  "host": {
+    "v1": "19/19",
+    "p57": "144/144",
+    "p59": "31/31",
+    "apc": "31/31",
+    "flags": "366/366"
+  },
+  "apc_off_gate": "FrozenLake APC-off requires exactly one enabled=0 runtime receipt and rejects the opposite arm",
+  "claim": "HOST PASS / EXACT_IMAGE PASS / ATTEMPT2 TARGET REDS PRESERVED / POST-FIX TARGET NOT RUN"
+}

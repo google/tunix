@@ -1,0 +1,104 @@
+P59_TP_SHIM_EXACT_IMAGE image_ref=tunix_frozenlake_image:vllm-tpu0.25.0 image_id=sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a
+Running tests under Python 3.12.13: /usr/local/bin/python3
+[ RUN      ] CanonicalQwen3AdapterTest.test_p59_tpx_executes_fixed_head_local_vjp_and_global_negative
+/usr/local/lib/python3.12/site-packages/flax/nnx/tracers.py:29: DeprecationWarning: jax.core.get_opaque_trace_state is deprecated. Use jax.extend.core.get_opaque_trace_state.
+  return jax.core.get_opaque_trace_state(convention="nnx")
+[P59.DP2] head_cotangent_partition_ready global_shape=(16, 16) local_shape=(8,4) placement=dp,tp
+[PATHTRACE] CANON_P38_FIXED_LM_HEAD=1 semantic_M=8 fixed_M=8 K=4 TP=4 local_N=4 fixed_N=8 BM=128 BN=256 BK=256 chunks=1 endpoint=direct_probe p59_local=1 global_M=16 dp=2
+[PATHTRACE] CANON_P38_FIXED_LM_HEAD=1 semantic_M=8 fixed_M=8 K=4 TP=4 local_N=4 fixed_N=8 BM=128 BN=256 BK=256 chunks=1 endpoint=direct_probe p59_local=1 global_M=16 dp=2
+[PATHTRACE] CANON_P38_FIXED_LM_HEAD_VJP=1 semantic_M=16 local_M=8 fixed_M=8 chunks=1 accumulation=lax.scan order=ascending tp_input_reduction=all_gather_rank_order_f32_barrier K=4 TP=4 local_N=4 fixed_N=8 endpoint=direct_probe
+[PATHTRACE] CANON_P38_FIXED_LM_HEAD=1 semantic_M=16 fixed_M=8 K=4 TP=4 local_N=4 fixed_N=8 BM=128 BN=256 BK=256 chunks=2 endpoint=direct_probe
+[       OK ] CanonicalQwen3AdapterTest.test_p59_tpx_executes_fixed_head_local_vjp_and_global_negative
+----------------------------------------------------------------------
+Ran 1 test in 1.764s
+
+OK
+Running tests under Python 3.12.13: /usr/local/bin/python3
+[ RUN      ] CanonicalQwen3AdapterTest.test_p59_tpx_executes_fixed_head_local_vjp_and_global_negative
+/usr/local/lib/python3.12/site-packages/flax/nnx/tracers.py:29: DeprecationWarning: jax.core.get_opaque_trace_state is deprecated. Use jax.extend.core.get_opaque_trace_state.
+  return jax.core.get_opaque_trace_state(convention="nnx")
+[P59.DP2] head_cotangent_partition_ready global_shape=(16, 32) local_shape=(8,4) placement=dp,tp
+[PATHTRACE] CANON_P38_FIXED_LM_HEAD=1 semantic_M=8 fixed_M=8 K=4 TP=8 local_N=4 fixed_N=8 BM=128 BN=256 BK=256 chunks=1 endpoint=direct_probe p59_local=1 global_M=16 dp=2
+[PATHTRACE] CANON_P38_FIXED_LM_HEAD=1 semantic_M=8 fixed_M=8 K=4 TP=8 local_N=4 fixed_N=8 BM=128 BN=256 BK=256 chunks=1 endpoint=direct_probe p59_local=1 global_M=16 dp=2
+[PATHTRACE] CANON_P38_FIXED_LM_HEAD_VJP=1 semantic_M=16 local_M=8 fixed_M=8 chunks=1 accumulation=lax.scan order=ascending tp_input_reduction=all_gather_rank_order_f32_barrier K=4 TP=8 local_N=4 fixed_N=8 endpoint=direct_probe
+[PATHTRACE] CANON_P38_FIXED_LM_HEAD=1 semantic_M=16 fixed_M=8 K=4 TP=8 local_N=4 fixed_N=8 BM=128 BN=256 BK=256 chunks=2 endpoint=direct_probe
+[       OK ] CanonicalQwen3AdapterTest.test_p59_tpx_executes_fixed_head_local_vjp_and_global_negative
+----------------------------------------------------------------------
+Ran 1 test in 1.971s
+
+OK
+[1/4] extracting stock tpu_inference (mode=path)
+      path=/usr/local/lib/python3.12/site-packages/tpu_inference
+[2/4] applying patches
+[3/4] laying down the shim chain (model=qwen1p7b)
+[4/4] verifying against MANIFEST.sha256
+      all 36 files match (qwen1p7b)
+
+Installed to: /tmp/p59-qwen1p7b-tp4.yUQ2u0   (model=qwen1p7b)
+
+Container mounts -- target paths are under the engine's tpu_inference package
+($SP, /usr/local/lib/python3.12/site-packages/tpu_inference on the anchored image):
+
+  $OUT/attn_iface_patched.py   -> $SP/layers/common/attention_interface.py
+  $OUT/linear_p22xk.py         -> $SP/layers/jax/linear.py
+  $OUT/embed_patched.py        -> $SP/layers/jax/embed.py
+  $OUT/tpu_runner_p21_l30.py   -> $SP/runner/tpu_runner.py
+  $OUT/qwen3_p22xk.py          -> $SP/models/jax/qwen3.py
+  $OUT/qwen2_p22xk.py          -> $SP/models/jax/qwen2.py
+
+  PYTHONPATH=/tmp/p59-qwen1p7b-tp4.yUQ2u0:$PYTHONPATH
+  CANON_SHIM_ROOT=/tmp/p59-qwen1p7b-tp4.yUQ2u0          # optional; defaults to each shim's own directory
+
+Under Kubernetes there are no bind mounts: copy the six files over the target paths instead
+(cluster/steps/40_overlay_engine.sh does exactly that).
+
+The canonical switch set is in README.md.  A launch missing any of it is not a canonical run,
+and the only proof that the intervention took is the [PATHTRACE] lines -- never the exit code.
+WARNING 08-24 05:05:27 [tpu_platform.py:408] Pin memory is not supported on TPU.
+INFO 08-24 05:05:32 [importing.py:53] Triton is installed but 0 active driver(s) found (expected 1). Disabling Triton to prevent runtime errors.
+WARNING 08-24 05:05:32 [importing.py:73] Triton is installed, but `triton.backends` could not be imported. Disabling Triton.
+INFO 08-24 05:05:32 [importing.py:88] Triton not installed or not compatible; certain GPU-related functions will not be available.
+ERROR 08-24 05:05:33 [tpu_info.py:91] Failed to detect number of TPUs: [Errno 2] No such file or directory: '/dev/vfio'
+INFO 08-24 05:05:33 [__init__.py:76] TPU info: node_name=aaron-v5p-node6 | tpu_type=v5p-8 | worker_id=0 | num_chips=0 | num_cores_per_chip=2
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=q_proj prefix=model.layers.0.self_attn.q_proj M=8 Klocal=4 Nlocal=512
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=q_proj prefix=model.layers.0.self_attn.q_proj M=8 Klocal=4 Nlocal=512
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=q_proj prefix=ordinary.serving.q_proj M=16 Klocal=4 Nlocal=512
+P59_TP4_INSTALLED_PROJECTION_PASS topology=DP2xTP4 q_proj_layout_shards=1 fused_layout=1 wrong_width_negative=1 ordinary_global=1 serial_parallel=exact optimizer_commits=0
+[1/4] extracting stock tpu_inference (mode=path)
+      path=/usr/local/lib/python3.12/site-packages/tpu_inference
+[2/4] applying patches
+[3/4] laying down the shim chain (model=qwen8b_tp8)
+[4/4] verifying against MANIFEST.sha256
+      all 36 files match (qwen8b_tp8)
+
+Installed to: /tmp/p59-qwen8b-tp8.mQPtkW   (model=qwen8b_tp8)
+
+Container mounts -- target paths are under the engine's tpu_inference package
+($SP, /usr/local/lib/python3.12/site-packages/tpu_inference on the anchored image):
+
+  $OUT/attn_iface_patched.py   -> $SP/layers/common/attention_interface.py
+  $OUT/linear_p22xk.py         -> $SP/layers/jax/linear.py
+  $OUT/embed_patched.py        -> $SP/layers/jax/embed.py
+  $OUT/tpu_runner_p21_l30.py   -> $SP/runner/tpu_runner.py
+  $OUT/qwen3_p22xk.py          -> $SP/models/jax/qwen3.py
+  $OUT/qwen2_p22xk.py          -> $SP/models/jax/qwen2.py
+
+  PYTHONPATH=/tmp/p59-qwen8b-tp8.mQPtkW:$PYTHONPATH
+  CANON_SHIM_ROOT=/tmp/p59-qwen8b-tp8.mQPtkW          # optional; defaults to each shim's own directory
+
+Under Kubernetes there are no bind mounts: copy the six files over the target paths instead
+(cluster/steps/40_overlay_engine.sh does exactly that).
+
+The canonical switch set is in README.md.  A launch missing any of it is not a canonical run,
+and the only proof that the intervention took is the [PATHTRACE] lines -- never the exit code.
+WARNING 08-24 05:05:39 [tpu_platform.py:408] Pin memory is not supported on TPU.
+INFO 08-24 05:05:45 [importing.py:53] Triton is installed but 0 active driver(s) found (expected 1). Disabling Triton to prevent runtime errors.
+WARNING 08-24 05:05:45 [importing.py:73] Triton is installed, but `triton.backends` could not be imported. Disabling Triton.
+INFO 08-24 05:05:45 [importing.py:88] Triton not installed or not compatible; certain GPU-related functions will not be available.
+ERROR 08-24 05:05:45 [tpu_info.py:91] Failed to detect number of TPUs: [Errno 2] No such file or directory: '/dev/vfio'
+INFO 08-24 05:05:45 [__init__.py:76] TPU info: node_name=aaron-v5p-node6 | tpu_type=v5p-8 | worker_id=0 | num_chips=0 | num_cores_per_chip=2
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=q_proj prefix=model.layers.0.self_attn.q_proj M=8 Klocal=4 Nlocal=512
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=q_proj prefix=model.layers.0.self_attn.q_proj M=8 Klocal=4 Nlocal=512
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=q_proj prefix=ordinary.serving.q_proj M=16 Klocal=4 Nlocal=512
+P59_TP8_INSTALLED_PROJECTION_PASS topology=DP2xTP8 q_proj_layout_shards=1 fused_layout=1 wrong_width_negative=1 ordinary_global=1 serial_parallel=exact optimizer_commits=0
+P59_TP_SHIM_EXACT_IMAGE_PASS fixed_head=2 installed_projection=2 report_adjoint=2 fixed_reducer=2 topologies=DP2xTP4,DP2xTP8 optimizer_commits=0 manifests=2x36/36
