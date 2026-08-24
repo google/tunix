@@ -164,7 +164,7 @@ class ContinuousSampler:
             is_leaf=lambda x: isinstance(x, nnx.Variable),
         )
 
-def sample_step(
+    def sample_step(
         self,
         cache: Any,
         seq_lens: np.ndarray,
@@ -193,7 +193,7 @@ def sample_step(
             static_token_capacity=static_token_capacity
         )
         
-if forbidden_token_ids:
+        if forbidden_token_ids:
             logits = logits.at[:, forbidden_token_ids].set(-jnp.inf)
             
         key = jax.random.fold_in(jax.random.PRNGKey(self.seed), step)
@@ -251,10 +251,12 @@ if forbidden_token_ids:
         last_token_logits = logits[valid_idxs]
         
         # Zero out invalid logits from inactive sequences or chunked sequences.
-        # distribution = [i, j, k]
-        # Sequences [0, j) have finished prefilling or are decoding.
-        # Sequences [j, k) are chunk-prefilling and should not emit tokens yet!
-        # Sequences [k, batch_size) are inactive.
+        # distribution = [i, j, k] mapping:
+        # sequences[0:i] are decode.
+        # sequences[i:j] are prefill only.
+        # sequences[j:k] are chunked prefill.
+        # We only want to sample from [0:j] (i.e. decoding seqs and completed prefill seqs).
+        # Sequences [j:k] are chunk-prefilling and should not emit tokens yet.
         num_sampleable = distribution[1] 
         seq_indices = jnp.arange(batch_size)
         is_sampleable = seq_indices < num_sampleable
