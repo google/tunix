@@ -31,40 +31,35 @@ class PageManagerTest(parameterized.TestCase):
     np.testing.assert_array_equal(ragged.intra_offsets, expected)
 
   def test_cache_config_num_pages_aligns_with_dp_size(self):
-    config = pm_lib.PageManagerConfig(
-        max_bytes=1300,
+    config = pm_lib.TpuCpuPageManagerConfig(
+        max_tpu_bytes=1000,
+        max_cpu_bytes=0,
         dp_size=4,
         logical_page_sharding="dp_axis",
         page_size=10,
         max_seq_len=10,
         max_num_seqs=5,
-        block_specs=[
-            pm_lib.BlockSpec(name="block1", dtype=jnp.int32),
-            pm_lib.BlockSpec(name="block2", subshape=(2,), dtype=jnp.int32),
-        ]
+        dtype=jnp.int32,
     )
 
     # This test verifies the number of pages per layer block is
     # properly aligned with dp_size.
 
     # block1_page_size_bytes = page_size * dtype_size = 40
-    # block2_page_size_bytes = page_size * dim * dtype_size = 80 
-    # Bytes_per_global_page = 40 + 80 = 120 
-    # max_pages_per_layer_block = max_bytes // 120 = 10
-    # pages_per_block = (10 // dp_size) * dp_size = 8
+    # max_pages_per_layer_block = max_bytes // 40 = 25 
+    # pages_per_block = (25 // dp_size) * dp_size = 24
 
-    self.assertEqual(config.num_pages_per_block, 8)
+    self.assertEqual(config.num_tpu_pages, 24)
 
   def test_allocate(self):
-    config = pm_lib.PageManagerConfig(
-        max_bytes=130000,
+    config = pm_lib.TpuCpuPageManagerConfig(
+        max_tpu_bytes=1300,
+        max_cpu_bytes=0,
         dp_size=1,
         page_size=1,
         max_seq_len=10,
         max_num_seqs=5,
-        block_specs=[
-            pm_lib.BlockSpec(name="block", dtype=jnp.int32),
-        ]
+        dtype=jnp.int32,
     )
 
     pm = config.init()
@@ -72,30 +67,29 @@ class PageManagerTest(parameterized.TestCase):
     self.assertEqual(pm.page_indices.shape, (5, max_num_pages_per_seq))
 
     q_lens = jnp.array([0, 1, 2, 0, 5])
-    pm = pm.allocate(q_lens)
+    pm, allocated_idxs = pm.allocate(q_lens)
 
     np.testing.assert_array_equal(pm.seq_lens, q_lens)
     np.testing.assert_array_equal(pm.page_indices[1][:1], [0])
     np.testing.assert_array_equal(pm.page_indices[2][:2], [1, 2])
     np.testing.assert_array_equal(pm.page_indices[4][:5], [3, 4, 5, 6, 7])
+    np.testing.assert_array_equal(allocated_idxs[:8], [0, 1, 2, 3, 4, 5, 6, 7])
 
     pages_allocated = 8
-    num_pages = config.num_pages_per_block
+    num_pages = config.num_tpu_pages
     expected_remaining_pages = num_pages - pages_allocated
     self.assertEqual(
-        pm.num_available_pages, expected_remaining_pages 
+        pm.tpu_block.num_available_pages, expected_remaining_pages 
     )
 
   def test_allocate_max_seq_len_indivisible_by_page_size(self):
-    config = pm_lib.PageManagerConfig(
-        max_bytes=130000,
+    config = pm_lib.TpuCpuPageManagerConfig(
+        max_tpu_bytes=130000,
         dp_size=1,
         page_size=3,
         max_seq_len=10,
         max_num_seqs=5,
-        block_specs=[
-            pm_lib.BlockSpec(name="block", dtype=jnp.int32),
-        ]
+        dtype=jnp.int32,
     )
 
     pm = config.init()
@@ -105,36 +99,35 @@ class PageManagerTest(parameterized.TestCase):
     self.assertEqual(pm.page_indices.shape, (5, max_num_pages_per_seq))
 
     q_lens = jnp.array([1, 5, 3, 0, 5])
-    pm = pm.allocate(q_lens)
+    pm, allocated_idxs = pm.allocate(q_lens)
 
     np.testing.assert_array_equal(pm.seq_lens, q_lens)
     np.testing.assert_array_equal(pm.page_indices[0][:1], [0])
     np.testing.assert_array_equal(pm.page_indices[1][:2], [1, 2])
     np.testing.assert_array_equal(pm.page_indices[2][:1], [3])
     np.testing.assert_array_equal(pm.page_indices[4][:2], [4, 5])
+    np.testing.assert_array_equal(allocated_idxs[:6], [0, 1, 2, 3, 4, 5])
 
     pages_allocated = 6
-    num_pages = config.num_pages_per_block
+    num_pages = config.num_tpu_pages
     expected_remaining_pages = num_pages - pages_allocated
     self.assertEqual(
-        pm.num_available_pages, expected_remaining_pages 
+        pm.tpu_block.num_available_pages, expected_remaining_pages 
     )
 
 
   def test_allocate_twice(self):
-    config = pm_lib.PageManagerConfig(
-        max_bytes=130000,
+    config = pm_lib.TpuCpuPageManagerConfig(
+        max_tpu_bytes=130000,
         dp_size=1,
         page_size=1,
         max_seq_len=10,
         max_num_seqs=5,
-        block_specs=[
-            pm_lib.BlockSpec(name="block", dtype=jnp.int32),
-        ]
+        dtype=jnp.int32, 
     )
     pm = config.init()
-    pm = pm.allocate(jnp.array([0, 1, 2, 0, 5]))
-    pm = pm.allocate(jnp.array([1, 1, 0, 0, 2]))
+    pm, first_allocated_idxs = pm.allocate(jnp.array([0, 1, 2, 0, 5]))
+    pm, second_allocated_idxs = pm.allocate(jnp.array([1, 1, 0, 0, 2]))
 
     expected_seq_lens = jnp.array([1, 2, 2, 0, 7])
     np.testing.assert_array_equal(pm.seq_lens, expected_seq_lens)
@@ -147,8 +140,12 @@ class PageManagerTest(parameterized.TestCase):
     self.assertEqual(pm.page_indices[1][1], 9)
     np.testing.assert_array_equal(pm.page_indices[4][5:7], [10, 11])
 
+    np.testing.assert_array_equal(first_allocated_idxs[:8], [0, 1, 2, 3, 4, 5, 6, 7])
+    np.testing.assert_array_equal(second_allocated_idxs[:4], [8, 9, 10, 11])
+
+
   def test_release(self):
-    config = pm_lib.PageManagerConfig(
+    config = pm_lib.TpuCpuPageManagerConfig(
         max_bytes=130000,
         dp_size=1,
         page_size=1,
@@ -173,7 +170,7 @@ class PageManagerTest(parameterized.TestCase):
     )
 
   def test_release_for_window(self):
-    config = pm_lib.PageManagerConfig(
+    config = pm_lib.TpuCpuPageManagerConfig(
         max_bytes=130000,
         dp_size=1,
         page_size=1,
@@ -205,7 +202,7 @@ class PageManagerTest(parameterized.TestCase):
     )
 
   def test_load_values_no_subshape(self):
-    config = pm_lib.PageManagerConfig(
+    config = pm_lib.TpuCpuPageManagerConfig(
         max_bytes=130000,
         dp_size=1,
         page_size=1,
@@ -226,7 +223,7 @@ class PageManagerTest(parameterized.TestCase):
     np.testing.assert_array_equal(out_tokens, tokens)
 
   def test_load_values_with_subshape(self):
-    config = pm_lib.PageManagerConfig(
+    config = pm_lib.TpuCpuPageManagerConfig(
         max_bytes=130000,
         dp_size=1,
         page_size=1,
@@ -247,7 +244,7 @@ class PageManagerTest(parameterized.TestCase):
     np.testing.assert_array_equal(out_values, values)
 
   def test_insert_values_no_subshape(self):
-    config = pm_lib.PageManagerConfig(
+    config = pm_lib.TpuCpuPageManagerConfig(
         max_bytes=130000,
         dp_size=1,
         page_size=2,
@@ -279,7 +276,7 @@ class PageManagerTest(parameterized.TestCase):
     np.testing.assert_array_equal(out_values, jnp.array([42, 99, 43, 44, 100, 101], dtype=jnp.int32))
 
   def test_insert_values_with_subshape(self):
-    config = pm_lib.PageManagerConfig(
+    config = pm_lib.TpuCpuPageManagerConfig(
         max_bytes=130000,
         dp_size=1,
         page_size=2,
@@ -316,7 +313,7 @@ class PageManagerTest(parameterized.TestCase):
     np.testing.assert_array_equal(out_values, expected)
 
   def test_batch_copy_pages_only_one_block(self):
-    config = pm_lib.PageManagerConfig(
+    config = pm_lib.TpuCpuPageManagerConfig(
         max_bytes=130000,
         dp_size=1,
         page_size=1,
@@ -358,7 +355,7 @@ class PageManagerTest(parameterized.TestCase):
     np.testing.assert_array_equal(copied_tokens, tokens)
 
   def test_batch_copy_pages_with_kv(self):
-    config = pm_lib.PageManagerConfig(
+    config = pm_lib.TpuCpuPageManagerConfig(
         max_bytes=130000,
         dp_size=1,
         page_size=1,
@@ -415,7 +412,7 @@ class PageManagerTest(parameterized.TestCase):
       )
 
   def test_batch_copy_pages_with_kv_hbm_to_cpu_dp(self):
-    config = pm_lib.PageManagerConfig(
+    config = pm_lib.TpuCpuPageManagerConfig(
         max_bytes=132000,
         dp_size=4,
         dp_axis='fsdp',
@@ -454,7 +451,7 @@ class PageManagerTest(parameterized.TestCase):
     self.assertIsNotNone(cpu_pm)
 
   def test_batch_copy_pages_with_kv_cpu_to_hbm_dp(self):
-    config = pm_lib.PageManagerConfig(
+    config = pm_lib.TpuCpuPageManagerConfig(
         max_bytes=132000,
         dp_size=4,
         dp_axis='fsdp',
@@ -492,7 +489,7 @@ class PageManagerTest(parameterized.TestCase):
     self.assertIsNotNone(hbm_pm)
 
   def test_batch_copy_pages_with_kv_cpu_to_hbm_no_dp(self):
-    config = pm_lib.PageManagerConfig(
+    config = pm_lib.TpuCpuPageManagerConfig(
         max_bytes=132000,
         dp_size=1,
         page_size=1,
