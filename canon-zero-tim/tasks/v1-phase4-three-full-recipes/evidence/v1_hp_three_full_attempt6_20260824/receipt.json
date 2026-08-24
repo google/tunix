@@ -1,0 +1,21 @@
+{
+  "attempt": 6,
+  "campaign_root": "v1hp-att5",
+  "source_commit": "85f45c219a16f2e22c83ff1c8e0a3be3b7a59e98",
+  "timestamp": "2026-08-24T21:24:00Z",
+  "run_ids": {
+    "gsm8k": "g64r",
+    "frozenlake_p45": "f45r",
+    "frozenlake_m15": "m15r"
+  },
+  "jobsets": {
+    "gsm8k": "canon-v1hp-gsm8k-g64r-85f45c21",
+    "frozenlake_p45": "canon-p57-fl-zero-f45r-85f45c21",
+    "frozenlake_m15": "canon-p57-fl-zero-m15-m15r-85f45c21"
+  },
+  "logs": {
+    "gsm8k": "gsm8k_g64r_error.log",
+    "p45": "p45_f45r_error.log",
+    "m15": "m15_m15r_error.log"
+  }
+}
