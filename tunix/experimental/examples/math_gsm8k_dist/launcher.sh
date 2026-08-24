@@ -49,11 +49,11 @@ WAIT_POLL_SECS=${WAIT_POLL_SECS:-5}
 WAIT_DEBUG_EVERY_POLLS=${WAIT_DEBUG_EVERY_POLLS:-6}
 WAIT_LOG_TAIL_LINES=${WAIT_LOG_TAIL_LINES:-40}
 
-TRAINER_TPU_CHIPS=${TRAINER_TPU_CHIPS:-0,1,2,3}
-TRAINER_FSDP=${TRAINER_FSDP:-4}
-ROLLOUT_TPU_CHIPS=${ROLLOUT_TPU_CHIPS:-4,5,6,7}
+TRAINER_TPU_CHIPS=${TRAINER_TPU_CHIPS:-0,1}
+TRAINER_FSDP=${TRAINER_FSDP:-2}
+ROLLOUT_TPU_CHIPS=${ROLLOUT_TPU_CHIPS:-2,3}
 INFERENCE_TPU_CHIPS=${INFERENCE_TPU_CHIPS:-}
-TPU_CHIPS_PER_HOST_BOUNDS=${TPU_CHIPS_PER_HOST_BOUNDS:-1,4,1}
+TPU_CHIPS_PER_HOST_BOUNDS=${TPU_CHIPS_PER_HOST_BOUNDS:-1,2,1}
 TPU_HOST_BOUNDS=${TPU_HOST_BOUNDS:-1,1,1}
 
 TRAINER_LOG="${LOG_ROOT}/trainer.log"
@@ -169,7 +169,7 @@ print_safetensors_candidates() {
 
 has_direct_safetensors() {
   [[ -d "$MODEL_DIR" ]] && [[ -n "$(
-    find "$MODEL_DIR" -maxdepth 1 -type f -name '*.safetensors' -print -quit 2>/dev/null || true
+    find "$MODEL_DIR" -maxdepth 1 -name '*.safetensors' -print -quit 2>/dev/null || true
   )" ]]
 }
 
@@ -357,7 +357,9 @@ echo "Launching trainer node on TPU chips $TRAINER_TPU_CHIPS..."
   export TPU_VISIBLE_CHIPS=${TPU_VISIBLE_DEVICES}
   export TPU_CHIPS_PER_HOST_BOUNDS=${TPU_CHIPS_PER_HOST_BOUNDS}
   export TPU_HOST_BOUNDS=${TPU_HOST_BOUNDS}
-  export LIBTPU_INIT_ARGS=deepsea_chips_per_host_bounds=${TPU_CHIPS_PER_HOST_BOUNDS},deepsea_host_bounds=${TPU_HOST_BOUNDS}
+  if [[ -n "${TPU_CHIPS_PER_HOST_BOUNDS}" ]]; then
+    export LIBTPU_INIT_ARGS="${LIBTPU_INIT_ARGS:-} --deepsea_chips_per_host_bounds=${TPU_CHIPS_PER_HOST_BOUNDS} --deepsea_host_bounds=${TPU_HOST_BOUNDS}"
+  fi
   export PYTHONUNBUFFERED=1
   env | egrep 'JAX|TPU'
   print_command "Trainer command" "${TRAINER_CMD[@]}"
@@ -393,7 +395,9 @@ echo "Launching vLLM rollout node on TPU chips $ROLLOUT_TPU_CHIPS..."
   export TPU_VISIBLE_CHIPS=${TPU_VISIBLE_DEVICES}
   export TPU_CHIPS_PER_HOST_BOUNDS=${TPU_CHIPS_PER_HOST_BOUNDS}
   export TPU_HOST_BOUNDS=${TPU_HOST_BOUNDS}
-  export LIBTPU_INIT_ARGS=deepsea_chips_per_host_bounds=${TPU_CHIPS_PER_HOST_BOUNDS},deepsea_host_bounds=${TPU_HOST_BOUNDS}
+  if [[ -n "${TPU_CHIPS_PER_HOST_BOUNDS}" ]]; then
+    export LIBTPU_INIT_ARGS="${LIBTPU_INIT_ARGS:-} --deepsea_chips_per_host_bounds=${TPU_CHIPS_PER_HOST_BOUNDS} --deepsea_host_bounds=${TPU_HOST_BOUNDS}"
+  fi
   export PYTHONUNBUFFERED=1
   env | egrep 'JAX|TPU'
   print_command "Rollout command" "${ROLLOUT_CMD[@]}"
@@ -439,7 +443,9 @@ if [[ "$RUN_INFERENCE_NODE" == "1" || "$RUN_INFERENCE_NODE" == "true" || "$RUN_I
     export TPU_VISIBLE_CHIPS=${TPU_VISIBLE_DEVICES}
     export TPU_CHIPS_PER_HOST_BOUNDS=${TPU_CHIPS_PER_HOST_BOUNDS}
     export TPU_HOST_BOUNDS=${TPU_HOST_BOUNDS}
-    export LIBTPU_INIT_ARGS=deepsea_chips_per_host_bounds=${TPU_CHIPS_PER_HOST_BOUNDS},deepsea_host_bounds=${TPU_HOST_BOUNDS}
+    if [[ -n "${TPU_CHIPS_PER_HOST_BOUNDS}" ]]; then
+    export LIBTPU_INIT_ARGS="${LIBTPU_INIT_ARGS:-} --deepsea_chips_per_host_bounds=${TPU_CHIPS_PER_HOST_BOUNDS} --deepsea_host_bounds=${TPU_HOST_BOUNDS}"
+  fi
     export PYTHONUNBUFFERED=1
     env | egrep 'JAX|TPU'
     print_command "Inference command" "${INFERENCE_CMD[@]}"
