@@ -126,6 +126,7 @@ if fixed.REQUEST_M != (8, 16, 32, 64, 128, 256):
   raise AssertionError(f"fixed lm_head request buckets drifted: {fixed.REQUEST_M}")
 if fixed.LEARNER_M != (4096,):
   raise AssertionError(f"fixed lm_head learner rows drifted: {fixed.LEARNER_M}")
+learner_m = fixed.LEARNER_M
 model.preflight(require_enabled=True)
 fixed.validate_global_contract(
     (16, args.hidden_size),
@@ -134,6 +135,20 @@ fixed.validate_global_contract(
     "bfloat16",
     tp_size=tp_size,
 )
+if (args.hidden_size, tp_size) == (4096, 8):
+  if fixed.QWEN8B_TP8_LEARNER_M != (2048, 4096):
+    raise AssertionError(
+        "Qwen3-8B TP8 learner rows drifted: "
+        f"{fixed.QWEN8B_TP8_LEARNER_M}"
+    )
+  fixed.validate_global_contract(
+      (2048, args.hidden_size),
+      (args.hidden_size, fixed.VOCAB),
+      "bfloat16",
+      "bfloat16",
+      tp_size=tp_size,
+  )
+  learner_m = fixed.QWEN8B_TP8_LEARNER_M
 geometry = fixed.resolve_geometry(args.hidden_size, tp_size, endpoint=endpoint)
 if (
     geometry.local_vocab != local_vocab
@@ -145,7 +160,7 @@ print(
     "P38_FIXED_LM_HEAD_EXACT_IMAGE_PASS "
     f"chain=linear_p22xk model={model_name} tp={tp_size} K={args.hidden_size} "
     "request_M=8,16,32,64,128,256 "
-    "learner_M=4096 fixed_M=256 "
+    f"learner_M={','.join(map(str, learner_m))} fixed_M=256 "
     f"local_N={local_vocab} fixed_N={padded_local_vocab} endpoint={endpoint}",
     flush=True,
 )

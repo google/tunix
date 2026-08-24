@@ -10,12 +10,16 @@ from dataclasses import dataclass
 
 ENV = "CANON_P38_FIXED_LM_HEAD"
 # Pinned tpu_inference request buckets for this max-concurrency-256 target plus
-# the one learner chunk shape exercised by canonical_qwen3_adapter. Request
-# buckets are padded to FIXED_M; the learner shape is mapped as exact FIXED_M
-# chunks. Non-registered row counts remain fail-closed instead of retracing.
+# the registered learner shapes exercised by canonical_qwen3_adapter. Request
+# buckets are padded to FIXED_M; learner shapes map to exact FIXED_M chunks.
+# Non-registered model/topology/row tuples remain fail-closed instead of
+# retracing.
 REQUEST_M = (8, 16, 32, 64, 128, 256)
 LEARNER_M = (4096,)
-SEMANTIC_M = REQUEST_M + LEARNER_M
+QWEN8B_TP8_LEARNER_M = (2048, 4096)
+# Union retained for static registries; runtime admission remains geometry-
+# specific through _semantic_m_for_geometry.
+SEMANTIC_M = REQUEST_M + (2048, 4096)
 FIXED_M = 256
 HIDDEN = 4096  # Historical Qwen3-8B default retained for old probes.
 VOCAB = 151936
@@ -150,6 +154,19 @@ def resolve_geometry(
     return geometry
 
 
+def _semantic_m_for_geometry(geometry: Geometry) -> tuple[int, ...]:
+    learner_m = (
+        QWEN8B_TP8_LEARNER_M
+        if (geometry.hidden, geometry.tp_size) == (4096, 8)
+        else LEARNER_M
+    )
+    return REQUEST_M + learner_m
+
+
+def _learner_m_for_geometry(geometry: Geometry) -> tuple[int, ...]:
+    return _semantic_m_for_geometry(geometry)[len(REQUEST_M):]
+
+
 def classify_vjp(
     *,
     hidden_differing: int,
@@ -209,11 +226,18 @@ def validate_global_contract(
     """Validate one caller-global Qwen3 contract and return semantic M."""
     input_shape = tuple(map(int, input_shape))
     weight_shape = tuple(map(int, weight_shape))
-    if len(input_shape) != 2 or input_shape[0] not in SEMANTIC_M:
+    if len(input_shape) != 2:
         raise ValueError(
-            f"P38 fixed lm_head requires semantic M in {SEMANTIC_M}, got {input_shape}"
+            f"P38 fixed lm_head requires rank-2 input, got {input_shape}"
         )
     hidden = _validate_hidden(input_shape[1])
+    geometry = resolve_geometry(hidden, tp_size)
+    admitted_m = _semantic_m_for_geometry(geometry)
+    if input_shape[0] not in admitted_m:
+        raise ValueError(
+            f"P38 fixed lm_head requires semantic M in {admitted_m}, "
+            f"got {input_shape}"
+        )
     if weight_shape != (hidden, VOCAB):
         raise ValueError(
             "P38 fixed lm_head requires input/weight "
@@ -224,7 +248,6 @@ def validate_global_contract(
             "P38 fixed lm_head requires bf16 input/weight, got "
             f"{input_dtype}/{weight_dtype}"
         )
-    resolve_geometry(hidden, tp_size)
     return input_shape[0]
 
 
@@ -233,16 +256,22 @@ def validate_local_contract(
     weight_shape,
     *,
     tp_size: int = TP_SIZE,
-    admitted_m: tuple[int, ...] = SEMANTIC_M,
+    admitted_m: tuple[int, ...] | None = None,
 ) -> int:
     """Validate one shard_map local shard and return semantic M."""
     input_shape = tuple(map(int, input_shape))
     weight_shape = tuple(map(int, weight_shape))
-    admitted_m = tuple(map(int, admitted_m))
-    if len(input_shape) != 2 or input_shape[0] not in admitted_m:
-        raise ValueError(f"P38 fixed lm_head local M invalid: {input_shape}")
+    if len(input_shape) != 2:
+        raise ValueError(f"P38 fixed lm_head local rank invalid: {input_shape}")
     hidden = _validate_hidden(input_shape[1])
     geometry = resolve_geometry(hidden, tp_size)
+    admitted_m = (
+        _semantic_m_for_geometry(geometry)
+        if admitted_m is None
+        else tuple(map(int, admitted_m))
+    )
+    if input_shape[0] not in admitted_m:
+        raise ValueError(f"P38 fixed lm_head local M invalid: {input_shape}")
     if weight_shape != (hidden, geometry.local_vocab):
         raise ValueError(
             "P38 fixed lm_head local shape mismatch: "
@@ -313,13 +342,14 @@ def _p59_local_contract(inputs, weight, *, mesh, tp_axis: str):
         )
     global_m = tuple(
         candidate
-        for candidate in LEARNER_M
+        for candidate in _learner_m_for_geometry(geometry)
         if candidate % dp_size == 0 and candidate // dp_size == input_shape[0]
     )
     if len(global_m) != 1:
         raise ValueError(
             "P59 local fixed lm_head rows do not reconstruct one learner M: "
-            f"local_M={input_shape[0]} dp={dp_size} learner_M={LEARNER_M}"
+            f"local_M={input_shape[0]} dp={dp_size} "
+            f"learner_M={_learner_m_for_geometry(geometry)}"
         )
     return dp_size, global_m[0], geometry
 
@@ -413,9 +443,12 @@ def fixed_lm_head(
             return output, (a_learner, weight_local)
 
         def learner_bwd(residual, cotangent):
+            learner_m = int(residual[0].shape[0])
+            learner_chunks = learner_m // FIXED_M
             print(
-                "[PATHTRACE] CANON_P38_FIXED_LM_HEAD_VJP=1 "
-                "semantic_M=4096 fixed_M=256 chunks=16 "
+                "[PATHTRACE] CANON_" "P38_FIXED_LM_HEAD_VJP=1 "
+                f"semantic_M={learner_m} fixed_M=256 "
+                f"chunks={learner_chunks} "
                 "accumulation=lax.scan order=ascending "
                 f"K={hidden_size} TP={tp_size} "
                 f"local_N={geometry.local_vocab} "

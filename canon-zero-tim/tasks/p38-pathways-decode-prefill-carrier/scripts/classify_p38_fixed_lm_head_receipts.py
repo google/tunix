@@ -11,7 +11,8 @@ import sys
 
 
 REQUEST_M = (16, 32, 64, 128, 256)
-LEARNER_M = 4096
+DEFAULT_LEARNER_M = 4096
+LEARNER_M = DEFAULT_LEARNER_M  # Historical import retained for old readers.
 ENDPOINTS = ("untied_lm_head", "tied_embed")
 GEOMETRIES = {
     ("tied_embed", 2048, 4): (37984, 38144),
@@ -41,8 +42,9 @@ def _matches_primal(
     endpoint: str,
     local_vocab: int,
     padded_local_vocab: int,
+    learner_m: int,
 ) -> bool:
-  chunks = 16 if semantic_m == LEARNER_M else 1
+  chunks = semantic_m // 256 if semantic_m == learner_m else 1
   expected = {
       "semantic_M": str(semantic_m),
       "fixed_M": "256",
@@ -67,11 +69,12 @@ def _matches_vjp(
     endpoint: str,
     local_vocab: int,
     padded_local_vocab: int,
+    learner_m: int,
 ) -> bool:
   expected = {
-      "semantic_M": "4096",
+      "semantic_M": str(learner_m),
       "fixed_M": "256",
-      "chunks": "16",
+      "chunks": str(learner_m // 256),
       "accumulation": "lax.scan",
       "order": "ascending",
       "K": str(hidden),
@@ -91,6 +94,7 @@ def classify(
     tp_size: int,
     require_vjp: bool,
     include_learner: bool = True,
+    learner_m: int = DEFAULT_LEARNER_M,
 ) -> dict[str, object]:
   if endpoint not in ENDPOINTS:
     raise ValueError(f"unsupported fixed-head endpoint: {endpoint!r}")
@@ -101,6 +105,15 @@ def classify(
         "unsupported fixed-head geometry: "
         f"endpoint={endpoint} hidden={hidden} tp={tp_size}"
     ) from error
+  if learner_m not in (2048, 4096) or learner_m % 256:
+    raise ValueError(f"unsupported fixed-head learner M: {learner_m}")
+  if learner_m == 2048 and (endpoint, hidden, tp_size) != (
+      "untied_lm_head", 4096, 8
+  ):
+    raise ValueError(
+        "fixed-head learner M2048 is registered only for "
+        "Qwen3-8B/TP8 untied_lm_head"
+    )
 
   primal = []
   vjp = []
@@ -112,7 +125,7 @@ def classify(
 
   missing_m = [
       semantic_m
-      for semantic_m in (*REQUEST_M, *((LEARNER_M,) if include_learner else ()))
+      for semantic_m in (*REQUEST_M, *((learner_m,) if include_learner else ()))
       if not any(
           _matches_primal(
               record,
@@ -122,6 +135,7 @@ def classify(
               endpoint=endpoint,
               local_vocab=local_vocab,
               padded_local_vocab=padded_local_vocab,
+              learner_m=learner_m,
           )
           for record in primal
       )
@@ -140,6 +154,7 @@ def classify(
           endpoint=endpoint,
           local_vocab=local_vocab,
           padded_local_vocab=padded_local_vocab,
+          learner_m=learner_m,
       )
       for record in vjp
   )
@@ -171,7 +186,7 @@ def classify(
       "local_vocab": local_vocab,
       "padded_local_vocab": padded_local_vocab,
       "request_M": list(REQUEST_M),
-      "learner_M": LEARNER_M if include_learner else None,
+      "learner_M": learner_m if include_learner else None,
       "include_learner": include_learner,
       "require_vjp": require_vjp,
       "primal_records": len(primal),
@@ -192,6 +207,9 @@ def main() -> int:
       "--hidden", required=True, type=int, choices=(2048, 2560, 4096, 5120)
   )
   parser.add_argument("--tp-size", required=True, type=int, choices=(4, 8))
+  parser.add_argument(
+      "--learner-m", type=int, choices=(2048, 4096), default=4096
+  )
   parser.add_argument("--require-vjp", action="store_true")
   parser.add_argument(
       "--request-only",
@@ -209,6 +227,7 @@ def main() -> int:
       tp_size=args.tp_size,
       require_vjp=args.require_vjp,
       include_learner=not args.request_only,
+      learner_m=args.learner_m,
   )
   report["log_sha256"] = hashlib.sha256(args.log.read_bytes()).hexdigest()
   args.output.parent.mkdir(parents=True, exist_ok=True)

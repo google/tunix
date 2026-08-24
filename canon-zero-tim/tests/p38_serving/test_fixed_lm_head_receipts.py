@@ -28,6 +28,7 @@ def _log(
     hidden: int = 2048,
     tp_size: int = 4,
     vjp: bool = True,
+    learner_m: int = receipts.DEFAULT_LEARNER_M,
 ) -> str:
   local_vocab, padded_local_vocab = receipts.GEOMETRIES[
       (endpoint, hidden, tp_size)
@@ -35,8 +36,8 @@ def _log(
   lines = []
   if endpoint == "tied_embed":
     lines.append("[P28.G5C] TIED_EMBEDDING_HEAD on shared_leaves=1")
-  for semantic_m in (*receipts.REQUEST_M, receipts.LEARNER_M):
-    chunks = 16 if semantic_m == receipts.LEARNER_M else 1
+  for semantic_m in (*receipts.REQUEST_M, learner_m):
+    chunks = semantic_m // 256 if semantic_m == learner_m else 1
     lines.append(
         "[PATHTRACE] CANON_P38_FIXED_LM_HEAD=1 "
         f"semantic_M={semantic_m} fixed_M=256 K={hidden} TP={tp_size} "
@@ -46,8 +47,9 @@ def _log(
     )
   if vjp:
     lines.append(
-        "[PATHTRACE] CANON_P38_FIXED_LM_HEAD_VJP=1 semantic_M=4096 "
-        "fixed_M=256 chunks=16 accumulation=lax.scan order=ascending "
+        "[PATHTRACE] CANON_" "P38_FIXED_LM_HEAD_VJP=1 "
+        f"semantic_M={learner_m} fixed_M=256 chunks={learner_m // 256} "
+        "accumulation=lax.scan order=ascending "
         f"K={hidden} TP={tp_size} local_N={local_vocab} "
         f"fixed_N={padded_local_vocab} endpoint={endpoint}"
     )
@@ -168,6 +170,32 @@ class FixedLmHeadReceiptTest(unittest.TestCase):
     self.assertEqual(report["local_vocab"], 18992)
     self.assertEqual(report["padded_local_vocab"], 19200)
 
+  def test_frozenlake_tp8_learner_m2048_passes_and_wrong_m_fails(self):
+    text = _log(
+        "untied_lm_head", hidden=4096, tp_size=8, learner_m=2048
+    )
+    report = receipts.classify(
+        text,
+        endpoint="untied_lm_head",
+        hidden=4096,
+        tp_size=8,
+        require_vjp=True,
+        learner_m=2048,
+    )
+    self.assertEqual(report["verdict"], "P38_FIXED_LM_HEAD_RECEIPTS_PASS")
+    self.assertEqual(report["learner_M"], 2048)
+    wrong = receipts.classify(
+        text,
+        endpoint="untied_lm_head",
+        hidden=4096,
+        tp_size=8,
+        require_vjp=True,
+        learner_m=4096,
+    )
+    self.assertEqual(wrong["verdict"], "P38_FIXED_LM_HEAD_RECEIPTS_FAIL")
+    self.assertIn("missing_primal_M=4096", wrong["reasons"])
+    self.assertIn("missing_fixed_order_vjp", wrong["reasons"])
+
   def test_request_only_eval_does_not_require_learner_or_vjp(self):
     text = "\n".join(
         line
@@ -192,7 +220,18 @@ class FixedLmHeadReceiptTest(unittest.TestCase):
           endpoint="untied_lm_head",
           hidden=2560,
           tp_size=8,
-          require_vjp=False,
+        require_vjp=False,
+      )
+
+  def test_learner_m2048_rejects_neighboring_geometry(self):
+    with self.assertRaisesRegex(ValueError, "registered only"):
+      receipts.classify(
+          _log("tied_embed", hidden=2560, tp_size=8, learner_m=2048),
+          endpoint="tied_embed",
+          hidden=2560,
+          tp_size=8,
+          require_vjp=True,
+          learner_m=2048,
       )
 
 

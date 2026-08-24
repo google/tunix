@@ -41,7 +41,10 @@ class FixedLmHeadContractTest(unittest.TestCase):
   def test_registered_production_shape(self):
     self.assertEqual(fixed.REQUEST_M, (8, 16, 32, 64, 128, 256))
     self.assertEqual(fixed.LEARNER_M, (4096,))
-    self.assertEqual(fixed.SEMANTIC_M, (8, 16, 32, 64, 128, 256, 4096))
+    self.assertEqual(fixed.QWEN8B_TP8_LEARNER_M, (2048, 4096))
+    self.assertEqual(
+        fixed.SEMANTIC_M, (8, 16, 32, 64, 128, 256, 2048, 4096)
+    )
     expected = {
         (2048, 4): ("qwen3-1p7b", "tied_embed", 37984, 38144),
         (4096, 4): ("qwen3-8b", "untied_lm_head", 37984, 38144),
@@ -56,7 +59,12 @@ class FixedLmHeadContractTest(unittest.TestCase):
           (geometry.model, geometry.local_vocab, geometry.padded_local_vocab),
           (model, local_vocab, padded_local_vocab),
       )
-      for m in fixed.SEMANTIC_M:
+      learner_m = (
+          fixed.QWEN8B_TP8_LEARNER_M
+          if (hidden, tp_size) == (4096, 8)
+          else fixed.LEARNER_M
+      )
+      for m in (*fixed.REQUEST_M, *learner_m):
         with self.subTest(hidden=hidden, tp=tp_size, m=m):
           self.assertEqual(
               fixed.validate_global_contract(
@@ -74,6 +82,22 @@ class FixedLmHeadContractTest(unittest.TestCase):
               ),
               m,
           )
+      if (hidden, tp_size) != (4096, 8):
+        with self.subTest(hidden=hidden, tp=tp_size, m=2048):
+          with self.assertRaisesRegex(ValueError, "requires semantic M"):
+            fixed.validate_global_contract(
+                (2048, hidden),
+                (hidden, 151936),
+                "bfloat16",
+                "bfloat16",
+                tp_size=tp_size,
+            )
+          with self.assertRaisesRegex(ValueError, "local M invalid"):
+            fixed.validate_local_contract(
+                (2048, hidden),
+                (hidden, local_vocab),
+                tp_size=tp_size,
+            )
     self.assertEqual((fixed.BM, fixed.BN, fixed.BK), (128, 256, 256))
     self.assertEqual(fixed.PADDED_LOCAL_VOCAB, 38144)
 
@@ -199,6 +223,10 @@ class FixedLmHeadContractTest(unittest.TestCase):
     self.assertIn("lax.scan(", text)
     self.assertIn("out = learner_fixed_vjp(a_local, w_local)", text)
     self.assertNotIn("original_lm_head", text)
+
+  def test_frozenlake_runtime_selects_m2048_receipts(self):
+    text = RUN_STEP.read_text()
+    self.assertIn('p38_fixed_receipt_args+=(--learner-m 2048)', text)
 
   def test_exact_target_does_not_require_a_mismatch_join(self):
     text = RUN_STEP.read_text()
