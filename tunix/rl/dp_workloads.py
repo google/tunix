@@ -169,6 +169,16 @@ _P57_STOCK_RUNTIME_UPDATES = {
     "m15-main-is": "300",
 }
 
+# P57 materializes M15 with a wider physical response buffer than the original
+# P45 carrier.  Keep the admitted pairs closed here: the renderer and training
+# entrypoint already sign the same candidate/split tuple, while the P32 adapter
+# consumes this table to reject any unregistered token width before tracing.
+_P57_DP8_TP8_TOKEN_WIDTHS = {
+    ("", ""): (4096, 2048),
+    ("m15", "selection"): (4096, 8192),
+    ("m15", "main"): (4096, 8192),
+}
+
 
 def _p57_stock_runtime_variant(
     values: Mapping[str, str], *, stage: str
@@ -647,6 +657,23 @@ def expected_token_widths(
           "zero-TIM workload"
       )
     return (1024, 256)
+  p57_key = (
+      values.get("CANON_P57_WORKLOAD_CANDIDATE", ""),
+      values.get("CANON_P57_DATA_SPLIT", ""),
+  )
+  if workload.name == "frozenlake-dp8-tp8":
+    try:
+      return _P57_DP8_TP8_TOKEN_WIDTHS[p57_key]
+    except KeyError as exc:
+      raise ValueError(
+          "frozenlake-dp8-tp8 token widths require an admitted P57 "
+          f"candidate/split pair, got {p57_key!r}"
+      ) from exc
+  if any(p57_key):
+    raise ValueError(
+        "P57 candidate token widths require frozenlake-dp8-tp8, got "
+        f"workload={workload.name!r} candidate_split={p57_key!r}"
+    )
   return (workload.max_prompt_length, workload.max_response_length)
 
 

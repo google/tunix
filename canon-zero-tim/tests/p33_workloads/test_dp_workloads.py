@@ -285,6 +285,44 @@ class DPWorkloadsTest(unittest.TestCase):
         (4096, 2048),
     )
 
+  def test_p57_m15_uses_its_signed_wide_token_contract(self):
+    workload = dp_workloads.get_workload("frozenlake-dp8-tp8")
+    self.assertEqual(
+        dp_workloads.expected_token_widths(workload, {}), (4096, 2048)
+    )
+    for split in ("selection", "main"):
+      with self.subTest(split=split):
+        self.assertEqual(
+            dp_workloads.expected_token_widths(workload, {
+                "CANON_P57_WORKLOAD_CANDIDATE": "m15",
+                "CANON_P57_DATA_SPLIT": split,
+            }),
+            (4096, 8192),
+        )
+
+  def test_p57_token_contract_rejects_partial_or_foreign_pairs(self):
+    workload = dp_workloads.get_workload("frozenlake-dp8-tp8")
+    for environ in (
+        {"CANON_P57_WORKLOAD_CANDIDATE": "m15"},
+        {"CANON_P57_DATA_SPLIT": "main"},
+        {
+            "CANON_P57_WORKLOAD_CANDIDATE": "m10",
+            "CANON_P57_DATA_SPLIT": "main",
+        },
+    ):
+      with self.subTest(environ=environ), self.assertRaisesRegex(
+          ValueError, "admitted P57 candidate/split pair"
+      ):
+        dp_workloads.expected_token_widths(workload, environ)
+    with self.assertRaisesRegex(ValueError, "require frozenlake-dp8-tp8"):
+      dp_workloads.expected_token_widths(
+          dp_workloads.get_workload("gsm8k"),
+          {
+              "CANON_P57_WORKLOAD_CANDIDATE": "m15",
+              "CANON_P57_DATA_SPLIT": "main",
+          },
+      )
+
   def test_frozenlake_short_alignment_preserves_shape_contract(self):
     workload = dp_workloads.get_workload("frozenlake")
     command = workload.command(run_stage="alignment-short")

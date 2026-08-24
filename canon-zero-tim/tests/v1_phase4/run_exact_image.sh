@@ -37,8 +37,10 @@ $docker run --rm \
       python3 tests/rl/dp_training_test.py \
         DPTrainingTest.test_dp2_tp2_rank_parallel_vjp_matches_serial_rank_isolation
     python3 canon-zero-tim/tests/p33_workloads/test_dp_workloads.py \
-      DPWorkloadsTest.test_p57_zero_full_admits_its_signed_wandb_project_only
+      DPWorkloadsTest.test_p57_zero_full_admits_its_signed_wandb_project_only \
+      DPWorkloadsTest.test_p57_m15_uses_its_signed_wide_token_contract \
+      DPWorkloadsTest.test_p57_token_contract_rejects_partial_or_foreign_pairs
     python3 tests/perf/profile_window_test.py
     bash canon-zero-tim/tests/v1_phase4/run_cpu.sh
-    echo "V1_HP_EXACT_IMAGE_PASS dp16_gathered=1 dp2tp2_parallel=2 p59_tp4_tp8=2 p59_real_shim=4 p59_rpa=2 p57_wandb=1 perfetto_window=1 manifests=3"
+    echo "V1_HP_EXACT_IMAGE_PASS dp16_gathered=1 dp2tp2_parallel=2 p59_tp4_tp8=2 p59_real_shim=4 p59_rpa=2 p57_wandb=1 m15_token=1 perfetto_window=1 manifests=3"
   '
