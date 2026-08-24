@@ -38,13 +38,16 @@ After those host gates pass, the separately approved pinned-image command is:
 bash canon-zero-tim/tests/v1_phase4/run_exact_image.sh
 ```
 
-The 2026-08-23 pinned-image admission against image
+The pre-attempt-1 2026-08-23 pinned-image admission against image
 `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`
 passed with terminal marker
 `V1_HP_EXACT_IMAGE_PASS dp16_gathered=1 dp2tp2_parallel=2
 p59_tp4_tp8=2 p59_real_shim=4 p57_wandb=1 perfetto_window=1 manifests=3`. It includes the production-image install/hash
-checks for Qwen3-1.7B TP4 and Qwen3-8B TP8. Any rerun still requires a fresh
-approval and remains a separate evidence event.
+checks for Qwen3-1.7B TP4 and Qwen3-8B TP8, but its P59 test supplied an already
+TP-sharded cotangent and did not cover the real full-vocabulary seam exposed by
+`g64f`. It does not admit the current repair. A post-fix rerun requires fresh
+approval and remains a separate evidence event; require both TP4/TP8 installed-
+shim cases plus the 8B/TP8 M2048 overlay contract.
 
 The current supported bundle also passed a separately approved one-host v5p
 DP4xTP1 three-update proxy with 51/51 strict PASS and 0 FAIL. Evidence is at
@@ -71,6 +74,13 @@ Judgment is fail-closed. Every expected alignment record must pass and any real
 `CANON_ALIGN verdict=FAIL` kills that recipe. Missing XProf/Perfetto,
 checkpoint, completion, update, or runtime performance receipts makes the run
 `INCONCLUSIVE`; it is never silently rerun or shortened.
+
+On the first backward, require
+`[P59.DP<dp>] head_cotangent_partition_ready` with the target placement
+`data,model`. FrozenLake must additionally emit fixed-head primal/VJP receipts
+with `semantic_M=2048 ... chunks=8`; M4096 receipts cannot substitute for
+them. Missing either receipt makes the run `INCONCLUSIVE` before performance
+interpretation.
 
 After a pushed approved SHA has rendered the three immutable manifests, and
 only after separate launch approval, apply GSM8K first. Inspect its complete

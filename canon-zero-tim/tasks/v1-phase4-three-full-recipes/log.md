@@ -1,5 +1,28 @@
 # Log
 
+## 2026-08-24 UTC — attempt-1 repair reconstructed for authorized publication
+
+- The user explicitly authorized commit and push. The repair is split into the
+  P59 head-cotangent placement CL, the FrozenLake M2048 fixed-head CL, and this
+  registry/evidence/handoff CL so both runtime concerns remain independently
+  reversible.
+- A fresh fetch proved the operator tip still equals immutable evidence base
+  `5f3e8ff95075642b5e660af8d1219e1c98e71c72`; the local stack is linear and
+  fast-forwardable.
+- This publication is source delivery only. The post-fix pinned-image gate is
+  still separately approval-bound and remains mandatory before any render or
+  launch; no TPU or Kubernetes action is authorized by this entry.
+
+## 2026-08-23 UTC — attempt-1 target shape boundaries repaired on host
+
+- Incoming immutable evidence: `g64f` and `f45g` under `evidence/v1_hp_three_full_attempt1_20260823/`; all four archive SHA checks pass. `g64f` has 1 alignment PASS, 0 FAIL, 0 completed updates; `f45g` has 0 alignment records and 0 completed updates.
+- GSM8K first fatal: the processed-logprob VJP produced the logical `[256,151936]` cotangent with DP-only placement, while the P59 outer manual DP/TP map selected the fixed-head local-output boundary `[256,37984]`. The old forced-CPU test supplied `P(dp,tp)` in advance and therefore did not exercise this seam. The repair explicitly device-places the rank-2 cotangent as `P(data,model)` before constructing/invoking the cached P59 head map, emits `head_cotangent_partition_ready`, and rejects non-divisible vocabulary widths.
+- FrozenLake first fatal: Qwen3-8B/TP8 C-forward legitimately uses learner M2048, but the fixed-head registry admitted only M4096. The repair admits M2048 only for the 8B/TP8 geometry, maps it to eight M256 chunks, makes VJP receipts dynamic, and passes `--learner-m 2048` only for the FrozenLake training profile. Other model/topology geometries continue to reject M2048.
+- Postflight hardening: full-recipe classification now requires the new P59 head-partition receipt; the fixed-head receipt classifier rejects an M4096/VJP receipt substituted for FrozenLake M2048.
+- Host results: fixed-head plus receipt 27/27, P59 31/31, P57 139/139, V1 13/13, APC 31/31, and 121 executable P38 serving tests pass. The broad P38 host discovery has one import-only error because optional `metrax` is absent; the production installed-shim TP4/TP8 test is therefore `INCONCLUSIVE` in bare host Python, not FAIL.
+- Claim ceiling: `IMPLEMENTED / HOST+STATIC PASS / POST-FIX EXACT-IMAGE NOT RUN / TARGET NOT RUN`. No pinned image, TPU, Kubernetes object, optimizer transaction, commit, or push was created by this repair turn.
+- Rollback: revert the adapter cotangent placement/postflight receipt concern independently from the geometry-specific M2048 fixed-head/receipt concern; keep the immutable failed logs and this superseding classification.
+
 ## 2026-08-23 UTC — target bootstrap reds consumed by P58.8 repair
 
 - Incoming evidence: GSM8K DP16 x TP4 stopped in P59 head pullback on the trainer `dp/tp` versus six-axis engine shard-map context mismatch; FrozenLake DP8 x TP8 stopped earlier on the signed P57 Zero/full W&B project check. Neither run committed an optimizer update.

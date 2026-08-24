@@ -9,9 +9,12 @@ Qwen3-8B DP8xTP8 for 300 updates. M15 is a production/scientific recipe, not a
 canary. The original three-recipe stack is published in the operator history.
 The current repair release is staged in
 `/home/yuxuan/code_rl_repro/worktrees/p58_zero_hp_release3_0823`, branch
-`local/p58-zero-hp-release3-0823`, on exact base
-`ccbcf572dc903bb1cce12f897cbdb05aec94922a`. Its four functional repair CLs
-plus one audit-only release CL are authorized for publication. Render only
+`local/p58-zero-hp-release3-0823`, built on incoming evidence tip
+`5f3e8ff95075642b5e660af8d1219e1c98e71c72` as two functional CLs plus one
+registry/evidence/handoff CL. Commit and push were explicitly authorized on
+2026-08-24. Source publication does not waive the missing post-fix
+dependency-complete gate: do not render or launch until that separately
+approved gate passes. Render only
 from the exact 40-character operator-branch SHA read back after that push, and
 require a clean worktree before rendering.
 
@@ -20,12 +23,15 @@ TPU resources without the separate user approval for that boundary. Never
 launch through a pipe. Run IDs, campaign roots, and evidence directories are
 first-use only; preserve every failed run.
 
-The first published target logs are immutable failures rather than campaign
-passes. GSM8K DP16 x TP4 stopped at the P59 outer-trainer/inner-engine mesh
-boundary; FrozenLake DP8 x TP8 stopped earlier at signed P57 W&B admission.
-The local P58.8 follow-up repairs both and passes forced TP4/TP8 plus extended
-P58/V1 pinned-image gates, but no real target rerun has certified it. Publish
-and read back that repair before rendering fresh run IDs.
+The earlier bootstrap failures and their P58.8 repairs remain historical. The
+new immutable attempt-1 logs are under
+`evidence/v1_hp_three_full_attempt1_20260823/`: GSM8K `g64f` stopped
+pre-optimizer when a DP-only `[256,151936]` cotangent was not localized to the
+TP4 fixed-head width `[256,37984]`; P45 `f45g` stopped in C-forward because
+the Qwen3-8B/TP8 fixed-head contract omitted learner M2048. Neither is a real
+alignment FAIL. The current repair restores `P(data,model)` before the
+P59 head VJP and admits M2048 only for the 8B/TP8 geometry. Host/static gates
+are green; post-fix pinned-image and target execution are not run.
 
 ## Resolved bundle
 
@@ -54,6 +60,11 @@ and read back that repair before rendering fresh run IDs.
   rel-L2 `3.91e-16`, the frozen real-Qwen gradient gate records `1.582%`, and
   DP4 reverse measured 3.605x. Serial and parallel AdamW first-step deltas
   differ by rel-L2 `9.976%`; do not claim trajectory identity.
+- Attempt-1 overturned the old TP4/TP8 construction ceiling: the prior test
+  pre-sharded `dlogits` and did not cover the production DP-only full-vocab
+  carrier. The new test starts from that production placement and the full
+  postflight requires `head_cotangent_partition_ready`; it still needs the
+  dependency-complete pinned image and real target before promotion.
 - APC passed Phase3 one-host G-A through G-D, including the dirty-page negative
   control and matched performance/XProf. G-E and both DP8xTP8 full targets are
   unverified. Strict A(APC)-B(full-reset)=0 bytes remains mandatory.
@@ -80,7 +91,7 @@ python3 canon-zero-tim/.claude/skills/manage-canon-flags/scripts/audit_flag_regi
 git diff --check
 ```
 
-The approved pinned-image gate was executed against image
+The historical pinned-image gate was executed against image
 `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`:
 
 ```bash
@@ -89,7 +100,9 @@ bash canon-zero-tim/tests/v1_phase4/run_exact_image.sh
 
 Require the exact terminal marker:
 `V1_HP_EXACT_IMAGE_PASS dp16_gathered=1 dp2tp2_parallel=2 p59_tp4_tp8=2 p59_real_shim=4 p57_wandb=1 perfetto_window=1 manifests=3`.
-This is an exact-image admission receipt, not a signed raw-log artifact: the
+This is an exact-image admission receipt for the pre-attempt-1 tree, not a
+post-fix result. A new separately approved run is mandatory. The historical
+receipt is not a signed raw-log artifact: the
 stdout/stderr log was not durably preserved, so no raw-log path or SHA exists.
 
 The separately approved one-host v5p integration proxy is frozen at evidence
