@@ -145,14 +145,14 @@ class CacheManager:
 
   def load(self, page_ids: List[int]):
     """Moves logical pages from CPU to TPU."""
+    if not page_ids:
+      return
+
     if self.config.num_cpu_pages == 0:
       raise RuntimeError("No CPU cache configured to load from.")
 
     if len(page_ids) > self.available_tpu_pages:
       raise RuntimeError("Not enough HBM pages available to perform load.")
-
-    if not page_ids:
-      return
 
     physical_cpu_idxs = []
     for pid in page_ids:

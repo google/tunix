@@ -147,7 +147,7 @@ class Scheduler:
       return
 
     # chunked prefill
-    n_free_pages = self.cache_manager.available_hbm_pages
+    n_free_pages = self.cache_manager.available_tpu_pages
     
     n_pages_available = n_free_pages + len(self.unreferenced_tpu_pages)
     n_new_pages_required = 0
@@ -217,7 +217,7 @@ class Scheduler:
     """
     Admit sequences while TPU space is available.
     """
-    free_tpu = self.cache_manager.available_hbm_pages + len(self.unreferenced_tpu_pages)
+    free_tpu = self.cache_manager.available_tpu_pages + len(self.unreferenced_tpu_pages)
     pages_to_load = set()
 
     while self.token_budget > 0 and self.pending_requests:
@@ -261,7 +261,7 @@ class Scheduler:
         self.running_requests.append(req)
         free_tpu -= total_hbm_cost
             
-    physically_free = self.cache_manager.available_hbm_pages
+    physically_free = self.cache_manager.available_tpu_pages
     if len(pages_to_load) > physically_free:
         self._free_up_unreferenced_tpu_space(len(pages_to_load) - physically_free)
 
