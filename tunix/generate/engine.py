@@ -173,3 +173,15 @@ class LLMEngine:
                  r.num_completed_tokens = 0
             r.num_completed_tokens += getattr(r, 'num_in_flight_tokens', 0)
 
+
+    def generate(self, prompt_tokens: List[List[int]]) -> List[List[int]]:
+        """Vanilla synchronous rollout loop."""
+        req_ids = [f"req_{i}_{id(self)}" for i in range(len(prompt_tokens))]
+        
+        for req_id, p_tokens in zip(req_ids, prompt_tokens):
+            self.add_request(req_id, p_tokens)
+            
+        while self.has_unfinished_requests():
+            self.step()
+            
+        return [self.generated_tokens[req_id] for req_id in req_ids]

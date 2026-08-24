@@ -32,7 +32,8 @@ from jax.interpreters import pxla
 import jaxtyping
 import numpy as np
 from tunix.generate import sampler as sampler_lib
-from tunix.generate import cache_manager as cache_manager_lib 
+from tunix.generate import cache_manager as cache_manager_lib
+from tunix.generate import page_manager as page_manager_lib 
 from tunix.generate import utils
 
 
@@ -65,7 +66,7 @@ class _SamplingState:
   # sequences[i:j] are chunked-prefill-only, and sequences[j:k] are mixed.
   distribution: jnp.ndarray  # i32[3]
   # Sharded TPU HBM cache storing tokens and KV values for active sequences on TPU
-  hbm_cache: cache_manager_lib.PageManager
+  hbm_cache: Any
   # Is decoding done on the given sequence?
   done: jnp.ndarray  # bool[max_num_sequences]
   # Fixed-size buffer for accumulating output logits.
@@ -360,21 +361,15 @@ class VanillaSampler:
       dp_axis = None
       tp_axis = None
     
-    hbm_pm_config = cache_manager_lib.PageManagerConfig(
-        page_size=page_size,
-        max_seq_len=max_seq_len,
-        max_bytes=hbm_max_bytes,
-        num_kv_heads=num_kv_heads,
-        max_num_seqs=max_num_seqs,
-        head_dim=head_dim,
-        dtype=dtype,
-        num_layers=num_layers,
+    cache_manager = cache_manager_lib.init_cache_manager(
+        cache_config=self.cache_config,
+        model_config=self.transformer.config,
+        kv_dtype=dtype,
         dp_axis=dp_axis,
-        tp_axis=tp_axis,
-        dp_size=dp_size,
-        tp_size=tp_size,
+        tp_axis=tp_axis
     )
-    hbm_cache = hbm_pm_config.init()
+    # The vanilla sampler loop only needs the physical PyTree components!
+    hbm_cache = cache_manager.page_manager
     
     eos_ids = tuple(sampling_config.eos_tokens) if sampling_config.eos_tokens is not None else None
     
@@ -546,7 +541,7 @@ class VanillaSampler:
     soft_cap = sampling_state.soft_cap
     done = sampling_state.done
 
-    ragged = cache_manager_lib.RaggedArray(
+    ragged = page_manager_lib.RaggedArray(
         data=jnp.zeros((batch_size,), dtype=jnp.int32),
         lens=cache.seq_lens,
     )
@@ -623,9 +618,9 @@ class VanillaSampler:
     static_token_capacity = int(
          batch_size 
     )
-    ragged = cache_manager_lib.RaggedArray(
+    ragged = page_manager_lib.RaggedArray(
         data=jnp.zeros((static_token_capacity,), dtype=jnp.int32),
-        lens=,
+        lens=jnp.ones((batch_size,), dtype=jnp.int32),
     )
     seq_idxs = ragged.row_idxs
     positions = ragged.intra_offsets
