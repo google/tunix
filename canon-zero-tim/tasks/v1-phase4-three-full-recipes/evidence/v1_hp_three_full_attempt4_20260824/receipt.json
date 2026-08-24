@@ -1,0 +1,22 @@
+{
+  "schema": "v1-hp-three-full-attempt4-receipt-v1",
+  "timestamp": "2026-08-24T09:00:10Z",
+  "attempt": 4,
+  "jobs": {
+    "gsm8k": {
+      "jobset": "canon-v1hp-gsm8k-g64p-7b85b42d",
+      "error": "RuntimeError: P59 local fused-linear width mismatch at model.layers.27.mlp.gate_proj: 1536 != 6144",
+      "cause": "_p59_local_fused_pieces in linear_p22xf.py checks global width 6144 against TP4 local slice width 1536"
+    },
+    "p45": {
+      "jobset": "canon-p57-fl-zero-f45p-7b85b42d",
+      "error": "RuntimeError: P59 local fused-linear width mismatch at model.layers.35.mlp.gate_proj: 1536 != 12288",
+      "cause": "_p59_local_fused_pieces in linear_p22xf.py checks global width 12288 against TP8 local slice width 1536"
+    },
+    "m15": {
+      "jobset": "canon-p57-fl-zero-m15-m15p-7b85b42d",
+      "error": "RuntimeError: P59 local fused-linear width mismatch at model.layers.35.mlp.gate_proj: 1536 != 12288",
+      "cause": "_p59_local_fused_pieces in linear_p22xf.py checks global width 12288 against TP8 local slice width 1536"
+    }
+  }
+}
