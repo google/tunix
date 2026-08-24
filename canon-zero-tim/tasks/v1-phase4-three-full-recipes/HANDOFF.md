@@ -7,23 +7,27 @@ approved immutable source: GSM8K Qwen3-1.7B DP16xTP4 for 200 updates,
 FrozenLake P45 Qwen3-8B DP8xTP8 for 300 updates, and FrozenLake M15-main
 Qwen3-8B DP8xTP8 for 300 updates. M15 is a production/scientific recipe, not a
 canary. The original three-recipe stack is published in the operator history.
-The active worktree is
-`/home/yuxuan/code_rl_repro/worktrees/p58_is_zero_refine_0824`, branch
-`local/p58-is-zero-refine-0824`. The attempt-1 repairs and release contracts
-were published through `71d889a32f4668353c758d5c00df88299e6c0d35`.
-The latest pulled operator tip is
-`7e9b31cb`; it adds the immutable Attempt-4 logs and receipt. Attempt 4 proves
-that the published q_proj, RPA, and M15-width repairs all took effect, then all
-three recipes stop at the same P59-local gate/up projection layout seam before
-an optimizer commit. Runtime CL `5bd90bff` makes the live TP degree,
-not engine `config.n_shards=1`, the divisor for gate/up's globally declared
-last-axis width; q/k/v retain their one-layout-shard contract. Host admission,
-the focused installed-shim image gate, and the complete V1 exact-image gate
-are green. The complete gate is durably sealed under
-`evidence/v1_hp_attempt4_fix_exact_image_20260824_r1/`. Every repaired target
-optimizer commit remains unrun. After authorized publication, render
-only from the exact 40-character SHA read back from the operator branch and
-require a clean worktree.
+The active repair worktree is
+`/home/yuxuan/code_rl_repro/worktrees/v1_attempt6_p59_restore_0824`, branch
+`local/v1-attempt6-p59-restore-0824`, based on pulled operator tip
+`0a68e1f705b6b63ca4dc86e5713e4785cb73e7d1`. The branch was cleanly
+fast-forward rebased from `f2dd9d90` after fetching the three P60 GSM8K XProf
+carrier commits `ad972daa`, `56c6a6d4`, and `0a68e1f7`; no local commit was
+rewritten.
+The earlier tip archives immutable Attempt-6 logs from source `85f45c21`.
+GSM8K `g64r` passes strict step-0
+pre-alignment for 193,146 actions with both byte deltas zero, traverses all
+previous P59 TP4 repairs, then stops before its first optimizer commit because
+the staged-spec metadata restorer still rejects every non-TP1 difference.
+The local repair admits only same-mesh, leading-DP metadata normalization whose
+`devices_indices_map` is exactly equal to the expected trainer placement; it
+continues to reject a TP-sharded parameter gradient that has become physically
+TP-replicated. Focused DP2xTP4 and DP2xTP8 forced-CPU gates are green. The
+dependency-complete pinned-image gate and a real-v5p DP2xTP2 staged-spec
+mechanism gate are now green; DP16xTP4/DP8xTP8 optimizer commit and performance
+remain unverified. After publication,
+render only from the exact 40-character SHA read back from the operator branch
+and require a clean worktree.
 
 After exact-image admission, publication, exact remote readback, rendering,
 and separate launch approval, start all three full JobSets in one wave. Do not
@@ -32,11 +36,34 @@ owns an independent first-commit admission and strict zero-TIM verdict; a red
 freezes and kills only that recipe while the other healthy full runs continue.
 
 Do not push, rerun the pinned image, publish an image, apply a JobSet, or occupy
-TPU resources without the separate user approval for that boundary. The user
-approved the current exact-image rerun and publication only; no JobSet launch
-is implied. Never
-launch through a pipe. Run IDs, campaign roots, and evidence directories are
-first-use only; preserve every failed run.
+TPU resources without the separate user approval for that boundary. The
+one-time pinned-image and bounded one-host approvals were consumed by the green
+runs below. The 2026-08-24 publication approval is scoped to local runtime CL
+`26b8a36d`, carrier CL `ef481f02`, the following evidence/ledger CL, and their
+single operator-branch push; it does not authorize another image/TPU run or a
+JobSet launch. Never launch through a pipe. Run IDs, campaign roots, and
+evidence directories are first-use only; preserve every failed run.
+
+Post-rebase host admission is V1 29/29, P57 144/144, P59 34/34, APC 31/31,
+P60 GSM8K XProf 4/4, and flag audit 368/368. The saved exact-image and real-v5p
+evidence hashes still verify byte-for-byte. Those historical hardware runs
+certify the Attempt-6/APC-off/cache runtime they executed; they do not
+retroactively certify the newly inherited P60 learner/XProf runtime additions.
+
+The current production decision supersedes the earlier P45-only APC readiness
+choice: all three Phase4 full recipes now force
+`CANON_VLLM_ENABLE_PREFIX_CACHING=0`. This disables only cross-request prefix
+reuse; ordinary request-local prefill/decode KV state and B's independent
+`reset_prefix_cache=True` full recomputation remain unchanged. Phase3 APC code
+and diagnostic carriers stay default-off for a separate debugging thread.
+The three manifests already inherited the P33 JAX persistent-cache directory
+and GCS bucket. The local hardening makes those values an exact renderer and
+postflight contract and emits durable `restore`/`save` receipts instead of
+silencing GCS failures. A cache miss/error is performance evidence, never an
+alignment verdict; a missing receipt or wrong directory/bucket/profile is a
+release-carrier failure. V1 full runs save immediately after the training
+command, before any fail-closed postflight can exit. This APC/cache hardening is
+host- and pinned-image-green; GCS cache hit/JIT reduction remains target-unrun.
 
 The earlier bootstrap failures and their P58.8 repairs remain historical. The
 new immutable attempt-1 logs are under
@@ -56,7 +83,8 @@ were the mesh TP degree. M15 `m15i` is a genuine numerical red: APC-on decode
 differs from full prefill on 760 elements / 1389 bytes with max abs
 `0.998443603515625`, while prefill and independent B rescore are exact. Per the
 hard rule, APC is dead for M15/main and is reverted there; no warning or
-tolerance was introduced. The local P59 repair admits the legitimate q_proj
+tolerance was introduced. P45 remained APC-on for Attempts 3-6; the uniform
+APC-off production decision below supersedes that historical choice. The local P59 repair admits the legitimate q_proj
 one-layout-shard boundary while retaining invalid-layout and width negatives.
 The full classifier now requires exactly one explicit APC-off runtime receipt
 for M15 and rejects a missing, duplicate, or opposite-arm receipt.
@@ -117,6 +145,37 @@ receipt SHA is
 Claim ceiling remains `HOST PASS / EXACT_IMAGE PASS / ATTEMPT-4 TARGET REDS
 PRESERVED / POST-FIX TARGET NOT RUN`.
 
+Attempt 6 is immutable under
+`evidence/v1_hp_three_full_attempt6_20260824/`; all four `SHA256SUMS` entries
+verify. GSM8K `g64r` records strict PASS at
+`gsm8k_g64r_error.log:11060` and the first fatal at
+`gsm8k_g64r_error.log:13553-13555`. The sharding inventory at line 11064
+contains 113 replicated parameter leaves with `P(None,)`. Report-adjoint
+normalizes their staged form to `P(dp)`, while the trainer-derived expected
+form is `P(dp,None)`: these `NamedSharding` objects compare unequal but have
+identical per-device index maps. The old helper rejected the difference only
+because TP=4, before reaching its existing physical-equivalence check. Local
+`canonical_qwen3_adapter.py:345-413` removes only that TP1 restriction and
+renames the helper to describe its actual invariant. The TP4/TP8 installed
+fixed-head composition test now includes this replicated-parameter leaf and
+continues through production report-adjoint and fixed reduction; a separate
+negative proves TP-replicated staged data cannot replace a TP-sharded expected
+placement. P45 `f45r` and M15 `m15r` archives end mid-computation and have no
+terminal traceback or completed update, so they receive no numerical or
+runtime classification. Claim ceiling:
+`HOST PASS / EXACT_IMAGE PASS / ONEHOST_TPU_MECHANISM PASS / TARGET NOT RUN`.
+The exact-image terminal records `staged_spec_restore=2`; the two invocations
+cover DP2xTP4 and DP2xTP8 positive plus wrong-placement negative. Durable
+image evidence is
+`evidence/v1_hp_attempt6_apcoff_cache_exact_image_20260824_r1/`, raw SHA
+`8d8d776451615de58a749c0be0200d28107b86cc44504200afde4f5acffc712a`.
+The real-v5p run
+`/mnt/disks/tunix-data/logp_probe_1host/p59_rpa_a6restore_dp2tp2_20260824_2256utc/`
+passes the replicated-leaf seam at DP2xTP2, fires the wrong-placement negative,
+retains RPA/ordinary-TP4 controls, and makes zero optimizer commits. Its
+raw/driver SHAs are `432bc6ae015d3b325ebeb5e06fff412ce6e53d1108cc7aa6d09b3c6d8a837d` /
+`2bb7ff5409ed404fa13261a2a3934bb6baef4b7e21f456ec1038bfccd98f33e7`.
+
 The operator's appended `SHA256SUMS` contains an impossible stale self-hash and
 is preserved unchanged. `SHA256SUMS.artifacts` is the additive verification
 source for the three logs and `receipt.json`; all four entries pass. See
@@ -135,10 +194,15 @@ evidence, not DP16xTP4 production certification.
 - All recipes: automatic P47a, continue-decode K=8, fixed-AR gather,
   DP-aware gathered logprobs, logprob step fusion, fixed LM head, resident
   trainer placement, batched report, and P59 rank-parallel backward.
-- GSM8K only: batched evidence on; APC off.
-- FrozenLake: batched evidence off. APC remains on for P45 only and is forced
-  off for M15/main after its attempt-2 target red. B rescore remains an
-  independent full recomputation with `reset_prefix_cache=True` in every case.
+- GSM8K only: batched evidence on.
+- FrozenLake: batched evidence off.
+- All three production recipes: APC off. B rescore remains an independent full
+  recomputation with `reset_prefix_cache=True`; normal request-local decode KV
+  caching remains enabled.
+- All three manifests: JAX cache directory
+  `/tmp/jax_compilation_cache`, minimum compile time `0`, XLA caches `all`, and
+  GCS root `gs://yuxzhang-tunix-models/cache/p33_compilation_cache`. The
+  profile basename is the remote namespace.
 - Explicitly off: batched reverse, fused tree ops, norm-matmul, sample-split,
   engine-logprob-readback, anchor overlap, and vanilla/non-Zero paths.
 - FrozenLake held-out rollout-only eval runs at pre-update policy steps
@@ -150,7 +214,7 @@ evidence, not DP16xTP4 production certification.
 
 - The published operator history supplies the P56 serving, P59/APC foundation,
   three-recipe integration, and P57 300-update signed in-process-eval setup.
-The current release adds the P59 TP4/TP8 and signed P57 W&B repairs; target
+  The current release adds the P59 TP4/TP8 and signed P57 W&B repairs; target
   certification remains pending after publication.
 - P56 knives have one-host KEEP evidence. Their complete current profiles and
   DP8/DP16 target geometries have not run at target scale.
@@ -165,9 +229,13 @@ The current release adds the P59 TP4/TP8 and signed P57 W&B repairs; target
   dependency-complete pinned image and real target before promotion.
 - APC passed Phase3 one-host G-A through G-D, including the dirty-page negative
   control and matched performance/XProf. Attempt-2 M15/main failed G-E and its
-  APC knife is VETOED; P45 remains APC-on but has only one target pre-alignment
-  PASS before an unrelated backward carrier stop. Strict A(APC)-B(full-reset)=0
-  bytes remains mandatory and was not relaxed.
+  APC knife is VETOED. P45 did not record the same numerical red, but the user
+  chose the lower-risk uniform production policy, so P45 is also APC-off.
+  Strict A(APC)-B(full-reset)=0 bytes remains mandatory for the separate APC
+  debugging thread and was not relaxed.
+- JAX persistent cache is configured in all three rendered manifests and its
+  host restore/save carrier is tested. Attempt-6 restored zero entries under
+  the old silent script, so no target cache hit or JIT reduction is claimed.
 - Qwen3-8B TP8 fixed-head code/overlay construction and pinned-image
   construction gate are green. The DP8xTP8 target is pending; TP4
   certification does not transfer to TP8.
@@ -263,11 +331,12 @@ and freeze every YAML hash. With separate launch approval and all three
 64-chip allocations confirmed, apply GSM8K, P45, and M15 in one wave. Each
 first real optimizer commit is that recipe's independent early admission
 checkpoint, not a shortened run: require zero real alignment FAIL plus its
-registered P59-local, fixed-head, token/APC, and optimizer receipts, then let
+registered P59-local, fixed-head, token/APC-off, and optimizer receipts, then let
 the same JobSet continue to its full horizon. A red freezes only that recipe;
 it does not stop another healthy full run. Each must receive its own complete
-strict-alignment, P59/APC/fixed-head, timing, XProf, Perfetto, eval, and horizon
-postflight. A GSM8K green does not certify APC, TP8 fixed head, DP8xTP8,
+strict-alignment, P59/APC-off/fixed-head, cache, timing, XProf, Perfetto, eval,
+and horizon postflight. A GSM8K green does not certify the experimental APC
+path, TP8 fixed head, DP8xTP8,
 FrozenLake evaluation, or M15 workload geometry.
 
 Any real `CANON_ALIGN` or `CANON_ALIGN_PRE verdict=FAIL` kills that recipe.

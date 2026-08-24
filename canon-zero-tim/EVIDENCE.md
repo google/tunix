@@ -23,6 +23,31 @@ Machine-readable lists: `evidence/artifacts.sha256` and
 The training branch tip (`3a00d951`) is byte-identical to the sources that run recorded: all
 25 files in its manifest match. See `docs/phase0.md` finding F4.
 
+## V1 Attempt-6 repair admission (2026-08-24)
+
+- Publication package: base `0a68e1f7`, P59 runtime/carrier CL `26b8a36d`,
+  APC-off/auditable-cache CL `ef481f02`, followed by the owning evidence and
+  handoff ledger CL. The inherited P60 learner/XProf additions are host-tested
+  but were not present in the hardware captures below.
+
+- Dependency-complete pinned-image PASS against
+  `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`:
+  `evidence/v1_hp_attempt6_apcoff_cache_exact_image_20260824_r1/`. Raw log
+  SHA-256 is `8d8d776451615de58a749c0be0200d28107b86cc44504200afde4f5acffc712a`;
+  its terminal includes `staged_spec_restore=2`, `report_adjoint=2`,
+  `fixed_reducer=2`, `p59_fused_linear=2`, and `manifests=3`.
+- Real four-chip v5p mechanism PASS:
+  `/mnt/disks/tunix-data/logp_probe_1host/p59_rpa_a6restore_dp2tp2_20260824_2256utc/`.
+  Raw/driver SHA-256 values are
+  `432bc6ae015d3b325ebeb5e06fff412ce6e53d1108cc7aa6d09b3c6d8a837d` /
+  `2bb7ff5409ed404fa13261a2a3934bb6baef4b7e21f456ec1038bfccd98f33e7`.
+  It proves the Attempt-6 replicated-leaf staged-spec repair at real
+  `DP2xTP2`, catches TP-sharded-to-replicated wrong placement, retains the RPA
+  VJP and ordinary `DP1xTP4` GQA controls, and performs zero optimizer commits.
+- Ceiling: exact-image CPU admission plus one-host TPU mechanism only. No
+  DP16xTP4/DP8xTP8 optimizer commit, full horizon, GCS cache hit, JIT speedup,
+  or target performance is certified.
+
 ## Where the chain is weak
 
 Stated plainly, because a reader who discovers this later will discount everything else.
@@ -133,5 +158,6 @@ p38s12f / p38s15 / p38s16.
 | V1 full Attempt 3: GSM8K/P45 expose the same P59 already-local RPA K/V expansion at TP4/TP8; M15 exposes an independent stale 4096/2048 token gate against its signed 4096/8192 buffers | g64m/f45m/m15m | `tasks/v1-phase4-three-full-recipes/evidence/v1_hp_three_full_attempt3_20260824/`; all three strict step-0 pre-alignments PASS with 0 FAIL and 0 optimizer commits. GSM8K completed 16 and P45 32 forward groups before their RPA stops; M15 stopped before forward/backward. All four entries in additive `SHA256SUMS.artifacts` verify. The operator's original `SHA256SUMS` stale self-entry is preserved and explained by `MANIFEST_NOTE.md`; `INCONCLUSIVE_PRE_OPTIMIZER_SHAPE_CONTRACT`, no performance claim |
 | Attempt-3 RPA-local repair real-v5p mechanism gate: real RPA forward+VJP2 under P59 DP2xTP2, wrong-cache negative, and unchanged ordinary DP1xTP4 global GQA all pass; four gradient leaves finite; zero optimizer commits | p59-rpa-onehost-r2 | probe host `p59_rpa_a3dp2tp2tp4_20260824_0648utc_r2/`; raw SHA `c28af46bda81e262a7de282d75d5f809dd0813eb364ff98a2153eba47b9f5826`, driver SHA `7e35d4c4f0056b94ea64e4131a08ea1a2d6d89d625f81ce187e7a82542aac99b`, both `SHA256SUMS` entries verify; first-use carrier red `p59_rpa_a3dp2tp2tp4_20260824_0645utc/` is preserved with raw/driver SHAs `4004aa4853ff3a8b692c0837a06ea1652f8420e643e8bea197b69d8f7ea0f32e` / `9a12b6f37030a1b361ce94b3b1a429cfe44e5a20ccc4364860eefd09fa5a4016`; `ONEHOST_MECHANISM_PASS / DP16xTP4 TARGET NOT RUN` |
 | Attempt-3 repair dependency-complete pinned-image admission: P58 and V1 aggregators pass the real installed-attention TP4/TP8 RPA VJP2 carriers, M15 signed token widths, all three manifests, and adjacent regressions | v1-hp-attempt3-fix-r1 | `tasks/v1-phase4-three-full-recipes/evidence/v1_hp_attempt3_fix_exact_image_20260824_r1/`; tested commit/tree `f0af2d9b31d3ca1324549df3660ebc6894856b74` / `24675392adee620ab36b87f9a0c4f7e8111f4839`, pinned image `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`; P58 raw SHA `a07f05631373c13c54f03906dbda5b07b3d9981ab50148b7e48d23f88037534e`, V1 raw SHA `d9fe0af37025abd20a6027027ed995849a301ef9b5a2c69fecb00fcfa028861d`, receipt SHA `16bc0f85921b40e1a0e6dbcbd6187329199c6833c99d5f1b280eca14e58305cb`; both exit 0, terminals include `p59_rpa=2 m15_token=1`, P59 reports `installed_attention=2 optimizer_commits=0`; `HOST PASS / EXACT_IMAGE PASS / POST-FIX TARGET NOT RUN` |
+| V1 full Attempt 6: GSM8K passes strict Zero-TIM then a stale TP1-only P59 staged-spec metadata gate stops before optimizer; P45/M15 logs are non-terminal | g64r/f45r/m15r | `tasks/v1-phase4-three-full-recipes/evidence/v1_hp_three_full_attempt6_20260824/`; source `85f45c21`; GSM8K raw SHA `e6266d25dfa6f6a7dce4abfb60b18f4a886007f8f93077909bc26711efef12d9`, P45 SHA `6bca0e1f410627d830a1d29aa2712523ee60f166ee01a4b0bed0ae43672550e1`, M15 SHA `0448cea864446ccc1d21cc46e401c571156acc67a93bf549493c67bd3fee8ffa`, receipt SHA `a6d5c0eee73c3008ef4e6b8e665f47afd63e940833d6caf530bd2acb8e54ddf8`; GSM8K 193,146 actions, both byte deltas zero, 0 FAIL, 0 commits; `INCONCLUSIVE_PRE_OPTIMIZER_SHARDING_METADATA`, no performance claim. P45/M15 have no terminal classification. |
 
 Legacy flat pile `debug_logs/` is frozen read-only; anything new must use a run directory.

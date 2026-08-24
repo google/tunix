@@ -66,6 +66,17 @@ installed projection carriers must emit both gate and up receipts at TP4
 recipe-specific receipts; missing, wrong-width, wrong-TP, or partial-site
 evidence is fatal.
 
+The current Attempt-6 admission additionally requires
+`staged_spec_restore=2` in `P59_TP_SHIM_EXACT_IMAGE_PASS`. The complete green
+raw log and receipt are under
+`evidence/v1_hp_attempt6_apcoff_cache_exact_image_20260824_r1/`, raw SHA
+`8d8d776451615de58a749c0be0200d28107b86cc44504200afde4f5acffc712a`.
+The bounded real-v5p follow-up is
+`/mnt/disks/tunix-data/logp_probe_1host/p59_rpa_a6restore_dp2tp2_20260824_2256utc/`;
+it proves the replicated-leaf staged-spec positive and wrong-placement negative
+at DP2xTP2 with zero optimizer commits. Neither gate substitutes for the first
+real DP16xTP4/DP8xTP8 optimizer commit.
+
 The complete Attempt-3 admission passed on tested commit `f0af2d9b`, tree
 `24675392adee620ab36b87f9a0c4f7e8111f4839`. Use the durable P58/V1 raw logs
 and receipt under
@@ -89,9 +100,26 @@ an explicit `policy_step -> enclosing_global_step` receipt: policy steps
 maps to `none`. Each run captures one warmed `phase=update` XProf window and a
 semantic Perfetto trace. The profiled update is excluded from performance
 means. FrozenLake additionally reports a `direct_eval_cycle_excluded` steady
-mean using those receipts. This is not called training-only: evaluation may
-change APC cache occupancy, so the view is not a counterfactual no-eval run.
+mean using those receipts. This is not called training-only: evaluation can
+perturb allocator/JIT/runtime state even with APC disabled, so the view is not
+a counterfactual no-eval run.
 The raw mean remains visible so direct evaluation cost is not hidden.
+
+All three production profiles require APC off. Require exactly one FrozenLake
+`[P3_APC_CONFIG] enabled=0` receipt and no enabled=1 receipt for both P45 and
+M15. This disables cross-request prefix reuse only; request-local prefill/decode
+KV state is unchanged and B rescore still uses `reset_prefix_cache=True`.
+
+All three manifests must also contain the exact JAX persistent-cache contract:
+local `/tmp/jax_compilation_cache`, minimum compile time `0`, XLA caches `all`,
+and GCS root `gs://yuxzhang-tunix-models/cache/p33_compilation_cache`. Step 28
+must emit one `[JAX_CACHE_SYNC] phase=restore ...` receipt and step 90 one
+`phase=save` receipt under `CANON_STATE`; V1 saves before postflight. `hit` or
+`saved` proves transport plus nonempty contents, while `empty`, `error`, or
+`no-tool` is an explicit performance limitation and does not alter the strict
+alignment verdict. Missing/malformed receipts or a wrong bucket/profile/local
+path fail the full carrier. Record cache status alongside first-JIT timing; do
+not claim a compilation speedup from configuration alone.
 
 Judgment is fail-closed. Every expected alignment record must pass and any real
 `CANON_ALIGN verdict=FAIL` kills that recipe. Missing XProf/Perfetto,
@@ -116,7 +144,7 @@ only after separate launch approval, apply GSM8K, P45, and M15 in one launch
 wave. Do not wait for one recipe's first optimizer commit before applying the
 other two. Each run's first real optimizer commit remains its own early
 admission checkpoint: require zero real alignment FAIL and that recipe's
-registered P59-local/fixed-head/token/APC/optimizer receipts, but do not stop or
+registered P59-local/fixed-head/token/APC-off/optimizer receipts, but do not stop or
 shorten another healthy full run. The direct-full commands are:
 
 ```bash
@@ -135,9 +163,10 @@ the same uninterrupted full JobSet.
 The in-container postflight writes `v1_hp_<recipe>_full.classification.json`.
 It requires the complete 200/300 horizon, zero real ALIGN FAIL, the signed
 FrozenLake in-process evaluation classification, all P59
-parallel/reduction receipts, positive APC hits for P45, and an exact APC-off
-resolved profile plus exactly one `[P3_APC_CONFIG] enabled=0` runtime receipt
-and no APC-on marker for M15. It also requires one XPlane plus UI trace and
-exactly one semantic Perfetto file. Use `xprof-trace-analysis`
+parallel/reduction receipts, exact APC-off resolved profiles, and exactly one
+`[P3_APC_CONFIG] enabled=0` runtime receipt with no APC-on marker for both P45
+and M15. It also records both JAX cache receipts and requires their exact
+profile/bucket/local-path identity. Finally it requires one XPlane plus UI
+trace and exactly one semantic Perfetto file. Use `xprof-trace-analysis`
 after packaging each returned run; operation attribution is a separate claim
 from the `[PERF]` timing verdict.

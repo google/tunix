@@ -1,0 +1,31 @@
+{
+  "schema": "v1-hp-exact-image-receipt-v1",
+  "run_label": "v1_hp_attempt6_apcoff_cache_exact_image_20260824_r1",
+  "recorded_at_utc": "2026-08-24T22:55:09Z",
+  "source_head": "f2dd9d901742414f8d43e7a29185ee4c1f95c329",
+  "image_id": "sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a",
+  "raw_log": {
+    "path": "run.log",
+    "sha256": "8d8d776451615de58a749c0be0200d28107b86cc44504200afde4f5acffc712a",
+    "bytes": 189916,
+    "lines": 782,
+    "tracebacks": 0,
+    "unittest_failed_terminals": 0
+  },
+  "terminals": {
+    "p59_tp_shim_exact_image_pass": 1,
+    "v1_hp_exact_image_pass": 1,
+    "staged_spec_restore": 2,
+    "report_adjoint": 2,
+    "fixed_reducer": 2,
+    "p59_fused_linear": 2,
+    "manifests": 3
+  },
+  "verdict": "PASS",
+  "claim_ceiling": "DEPENDENCY_COMPLETE_CPU_EXACT_IMAGE_PASS_TARGET_NOT_RUN",
+  "notes": [
+    "The /dev/vfio TPU-detection errors are expected inside forced-CPU image gates.",
+    "The two P57 FATAL lines are deliberate negative controls caught by the green enclosing test.",
+    "The later real-v5p carrier addition changes test-only files; runtime source remains the pinned-image-tested runtime."
+  ]
+}
