@@ -23,6 +23,7 @@ from flax import nnx
 import jax
 import jaxtyping
 from tunix.generate import engine
+from tunix.generate import sampler_v2
 from tunix.rl import common
 from tunix.rl import reshard
 from tunix.rl import utils
@@ -38,7 +39,6 @@ class VanillaRollout(base_rollout.BaseRollout):
       tokenizer: Any,
       cache_config_or_size: base_rollout.CacheConfig,
   ):
-    from tunix.generate import sampler_v2
     engine_cache_config = sampler_v2.CacheConfig()
     engine_cache_config.max_num_seqs = max(256, getattr(cache_config_or_size, "cache_size", 256))
     
