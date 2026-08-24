@@ -203,7 +203,7 @@ class Attention(nnx.Module):
     x = x.astype(self.config.dtype)
     seq_len = x.shape[1]
     query_proj = self.q_einsum(x)
-    query_proj = shard(query_proj, self.config.shd_config.act_btnh)  # pyrefly: ignore[bad-argument-type]
+    query_proj = shard(query_proj, self.config.shd_config.act_btnh)
     query_proj = self._query_norm(query_proj)
     query_proj = apply_rope(
         query_proj,
@@ -224,8 +224,8 @@ class Attention(nnx.Module):
       else:
         key_proj, value_proj = self.kv_einsum(x)
 
-      key_proj = shard(key_proj, self.config.shd_config.act_btnh)  # pyrefly: ignore[bad-argument-type]
-      value_proj = shard(value_proj, self.config.shd_config.act_btnh)  # pyrefly: ignore[bad-argument-type]
+      key_proj = shard(key_proj, self.config.shd_config.act_btnh)
+      value_proj = shard(value_proj, self.config.shd_config.act_btnh)
 
       # Apply norms to computed KV
       value_var = jnp.mean(jnp.square(value_proj), axis=-1, keepdims=True)
@@ -496,7 +496,7 @@ class Attention(nnx.Module):
         encoded = jnp.einsum('BTNS,BSNH->BTNH', attn, value_proj)
 
     attn_output = self.attn_vec_einsum(encoded)
-    attn_output = shard(attn_output, self.config.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
+    attn_output = shard(attn_output, self.config.shd_config.act_btd)
     return new_cache, attn_output, (key_proj, value_proj)
 
   @property
@@ -505,13 +505,17 @@ class Attention(nnx.Module):
 
   def __call__(
       self,
-      x,
-      segment_pos,
-      cache,
-      attn_mask,
-      kv_shared_cache=None,
-      segment_ids=None,
-  ):
+      x: jaxtyping.Array,
+      segment_pos: jaxtyping.Array,
+      cache: LayerCache | None,
+      attn_mask: jaxtyping.Array,
+      kv_shared_cache: LayerCache | None = None,
+      segment_ids: jaxtyping.Array | None = None,
+  ) -> tuple[
+      LayerCache | None,
+      jaxtyping.Array,
+      tuple[jaxtyping.Array, jaxtyping.Array],
+  ]:
     remat_config = getattr(self.config, 'remat_config', RematConfig.NONE)
     if (
         remat_config == RematConfig.BLOCK
@@ -536,29 +540,32 @@ class Attention(nnx.Module):
           segment_ids=segment_ids,
       )
 
-  def init_cache(self, batch_size, max_seq_len, dtype):
+  def init_cache(
+      self, batch_size: int, max_seq_len: int, dtype: jnp.dtype
+  ) -> LayerCache:
     cache_len = max_seq_len
+    sliding_window_size = self.config.sliding_window_size
     if (
         self.config.use_sliding_window_kv_cache
         and self.attn_type == AttentionType.LOCAL_SLIDING
-        and self.config.sliding_window_size is not None
+        and sliding_window_size is not None
     ):
-      cache_len = min(max_seq_len, self.config.sliding_window_size)
+      cache_len = min(max_seq_len, sliding_window_size)
 
     cache_shape = (batch_size, cache_len, self.num_kv_heads, self.head_dim)
     k = shard(
-        np.zeros(cache_shape, dtype),  # pyrefly: ignore[bad-argument-type]
-        self.config.shd_config.act_btnh,  # pyrefly: ignore[bad-argument-type]
+        np.zeros(cache_shape, dtype),
+        self.config.shd_config.act_btnh,
         eager=True,
     )
     v = shard(
-        np.zeros(cache_shape, dtype),  # pyrefly: ignore[bad-argument-type]
-        self.config.shd_config.act_btnh,  # pyrefly: ignore[bad-argument-type]
+        np.zeros(cache_shape, dtype),
+        self.config.shd_config.act_btnh,
         eager=True,
     )
     end_index = shard(
-        np.zeros((batch_size,), np.int32),  # pyrefly: ignore[bad-argument-type]
-        self.config.shd_config.act_btnh[:1],  # pyrefly: ignore[bad-argument-type]
+        np.zeros((batch_size,), np.int32),
+        self.config.shd_config.act_btnh[:1],
         eager=True,
     )
     return {'k': k, 'v': v, 'end_index': end_index}
