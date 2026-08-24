@@ -63,60 +63,39 @@ class SamplingConfig:
   max_audio_clips: int | None = None
   attn_logits_soft_cap: float | None = None
 
+@dataclasses.dataclass
+class RequestOutput:
+  request_id: str
+  text: str
+  tokens: List[int]
+  padded_tokens: np.ndarray
+  logprobs: np.ndarray | None = None
+  logits: np.ndarray | None = None
 
-@flax.struct.dataclass(kw_only=True)
-class _SamplingState:
-  """Internal sampling state for Continuous Batching."""
-  # Decoding steps: ith entry contains the decoding step of the ith HBM sequence.
-  decoding_steps: jnp.ndarray  # i32[max_num_sequences]
-  # Global Decoding Step (Used to maintain backwards compatability when sampling tokens).
-  global_decoding_step: jnp.ndarray  # i32
-  # (i, j, k) represents that sequences[0:i] are decode-only,
-  # sequences[i:j] are chunked-prefill-only, and sequences[j:k] are mixed.
-  distribution: jnp.ndarray  # i32[3]
-  # Sharded TPU HBM cache storing tokens and KV values for active sequences on TPU.
-  hbm_cache: cache_manager_lib.PageManager
-  # Is decoding done on the given sequence?
-  done: jnp.ndarray  # bool[max_num_sequences]
-  # Fixed-size buffer for accumulating output logits.
-  # logits_buffer: jnp.ndarray | None
-  # Fixed-size buffer for accumulating output logprobs.
-  # logprobs_buffer: jnp.ndarray | None
-  # List of tokens that are forbidden to be generated.
-  forbidden_token_ids: tuple[int, ...] | None
-  # Uniform EOS token IDs for all requests.
-  eos_token_ids: tuple[int, ...] | None
-  # Random seed for sampling.
-  seed: jax.Array
+class RequestFuture:
+  """Future handle returned to callers submitting async requests."""
 
-  # Host-side Python sequence tracking (not traced by JAX JIT)
-  sampling_mode: str = flax.struct.field(
-      default="greedy", pytree_node=False
-  )
-  include_logprobs: bool = flax.struct.field(
-      default=False, pytree_node=False
-  )
-  include_logits: bool = flax.struct.field(
-      default=False, pytree_node=False
-  )
-  max_prompt_length: int = flax.struct.field(
-      default=128, pytree_node=False
-  )
-  max_generation_steps: int = flax.struct.field(
-      default=128, pytree_node=False
-  )
-  temperature: float = flax.struct.field(
-      default=0.0, pytree_node=False
-  )
-  sampling_parameters: dict[str, float | int] = flax.struct.field(
-      default_factory=dict, pytree_node=False
-  )
-  attn_logits_soft_cap: float | None = flax.struct.field(
-      default=None, pytree_node=False
-  )
-  beam_search_sampling_state: (
-      Any | None
-  ) = None
+  def __init__(self, request_id: str):
+    self.request_id = request_id
+    self._event = threading.Event()
+    self._output: RequestOutput | None = None
+    self._error: Exception | None = None
+
+  def set_result(self, output: RequestOutput) -> None:
+    self._output = output
+    self._event.set()
+
+  def set_error(self, error: Exception) -> None:
+    self._error = error
+    self._event.set()
+
+  def result(self, timeout: float | None = None) -> RequestOutput:
+    self._event.wait(timeout=timeout)
+    if self._error is not None:
+      raise self._error
+    if self._output is None:
+      raise TimeoutError(f"RequestFuture {self.request_id} timed out.")
+    return self._output
 
 @dataclasses.dataclass(frozen=True)
 class CacheConfig:
@@ -194,7 +173,7 @@ def sample_best(
   logp_sampled = jnp.squeeze(logp_sampled, axis=-1)
   return next_token, logp_sampled
 
-class Sampler:
+class VanillaSampler:
   def __init__(
       self,
       transformer: nnx.Module,
@@ -224,20 +203,12 @@ class Sampler:
         is_leaf=lambda x: isinstance(x, nnx.Variable),
     )
 
-    # We separate out state and graph def so that the state can be passed as an
-    # argument to _decode_fn, resulting in it not being treated as a static
-    # arg. This greatly reduces the size of the HLO and reduces compile time.
-    self._compiled_decode_fn = jax.jit(
-      self._decode_fn
-    )
-    self._compiled_prefill_fn = jax.jit(
-      self._prefill_fn, static_argnames=("echo",)
-    )
+    self._compiled_step_fn = jax.jit(self._model_step_fn, static_argnames=("echo",))
     self._supports_decode_only_last_token = (
         'decode_only_last_token'
         in inspect.signature(transformer.__call__).parameters
     )
-
+    
   def model_def_and_state(self) -> tuple[Any, Any]:
     """Returns the transformer graphdef and state."""
     return self._transformer_graphdef, self._flattened_transformer_state
@@ -436,17 +407,27 @@ class Sampler:
     )
     hbm_cache = hbm_pm_config.init()
 
-    return hbm_cache
+    cpu_device = jax.devices("cpu")[0] if jax.devices("cpu") else None
+    cpu_pm_config = dataclasses.replace(
+      hbm_pm_config,
+      max_bytes=cpu_max_bytes,
+      dp_axis=None,
+      tp_axis=None,
+      dp_size=1,
+      tp_size=1,
+      device=cpu_device
+    )
+    offloaded_cache = cpu_pm_config.init()
+
+    return hbm_cache, offloaded_cache
     
   def init_sample_state(
       self,
-      all_input_ids: jax.Array,
       sampling_config: SamplingConfig,
-      q_lens: jax.Array,
   ) -> _SamplingState:
     """Initialize sampling state with HBM, Offloaded, and Prefix cache pools."""
     max_seq_len = sampling_config.max_generation_steps + sampling_config.max_prompt_length
-    hbm_cache = self._init_cache(sampling_config)
+    hbm_cache, offloaded_cache = self._init_cache(sampling_config)
     batch_size = sampling_config.batch_size
         
     sampling_parameters = {}
@@ -467,9 +448,6 @@ class Sampler:
     
     logging.debug('Using sampling mode: %s', sampling_mode[0])
     
-    hbm_cache = hbm_cache.allocate(q_lens=q_lens)
-    hbm_cache = hbm_cache.load_values(all_input_ids, lens=q_lens, block_id="tokens")
-
     eos_ids = sampling_config.eos_tokens
     eos_ids = jnp.array(eos_ids or [self.tokenizer.eos_id()])
     
@@ -485,18 +463,46 @@ class Sampler:
         distribution=jnp.array([0, 0, 0], dtype=jnp.int32),
         hbm_cache=hbm_cache,
         done=jnp.zeros((batch_size,), dtype=jnp.bool_),
-        global_decoding_step=jnp.max(q_lens) - 1,
         decoding_steps=jnp.zeros((batch_size,), dtype=jnp.int32),
+        offloaded_decoding_steps=jnp.zeros((max_num_seqs,), dtype=jnp.int32),
         include_logits=sampling_config.include_logits,
         include_logprobs=sampling_config.include_logprobs,
         forbidden_token_ids=sampling_config.forbidden_tokens,
         eos_token_ids=eos_ids,
+        hbm_request_ids=[],
+        cpu_request_ids=[],
         seed=seed,
         sampling_mode=sampling_mode[0],
         temperature=sampling_config.temperature,
         sampling_parameters=sampling_parameters,
         attn_logits_soft_cap=sampling_config.attn_logits_soft_cap,
     )
+
+  def cancel_request(
+      self,
+      sampling_state: _SamplingState,
+      request_id: str,
+  ) -> _SamplingState:
+    """Cancels a request, and release slots."""
+    sampling_state, updated_offloaded, removed = self._remove_request_from_pool(
+        sampling_state, request_id, sampling_state.cpu_request_ids, sampling_state.offloaded_cache
+    )
+    if removed:
+      return dataclasses.replace(sampling_state, offloaded_cache=updated_offloaded)
+
+    sampling_state, updated_hbm, removed = self._remove_request_from_pool(
+        sampling_state, request_id, sampling_state.hbm_request_ids, sampling_state.hbm_cache
+    )
+    if removed:
+      slot = len(sampling_state.hbm_request_ids)
+      sampling_state = dataclasses.replace(
+          sampling_state,
+          hbm_cache=updated_hbm,
+          done=sampling_state.done.at[slot].set(True),
+      )
+      return self._compact_batch(sampling_state)
+
+    return sampling_state
 
   def tokenize(self, input_string: str) -> np.ndarray | list[int]:
     """Tokenizes the input string."""
@@ -514,6 +520,199 @@ class Sampler:
       input_ids = np.array(input_ids, dtype=np.int32)
     return input_ids
 
+  def _model_step_fn(
+      self,
+      params: statelib.State,
+      images: jnp.ndarray | None = None,
+      audios: Any = None,
+      echo: bool = False,
+      soft_cap: float | None = None,
+      **kwargs,
+  ) -> Tuple[jnp.ndarray, cache_manager_lib.PageManager]:
+    """JIT-compiled forward pass invoking Gemma with ragged paged attention and explicit soft_cap."""
+    transformer = nnx.merge(self._transformer_graphdef, params)  # pyrefly: ignore[no-matching-overload]
+    
+    # TODO: kwargs should only be used for prefill seqs
+      
+    kwargs = {}
+    if images is not None:
+      kwargs['images'] = images
+    if audios is not None:
+      kwargs['audios'] = audios
+    decode_only_last_token = self._supports_decode_only_last_token and not echo
+    if decode_only_last_token:
+      kwargs['decode_only_last_token'] = True
+    
+
+    transformer = nnx.merge(self._transformer_graphdef, params)
+
+    cache = sampling_state.hbm_cache
+    batch_size = cache.batch_size
+    max_prompt_length = sampling_state.max_prompt_length
+    include_logits = sampling_state.include_logits
+    soft_cap = sampling_state.attn_logits_soft_cap
+
+    is_decode = (decoding_steps > 0) & (cache.seq_lens > 0)
+    active_seq_lens = jnp.where(
+        is_decode,
+        1,
+        cache.seq_lens,
+    )
+
+    token_start_idxs = jnp.where(
+        is_decode,
+        cache.seq_lens - 1,
+        0,
+    )
+
+    # TODO: Replace static_token_capacity with max_tokens.
+    # We should priortize decode sequences and fill in
+    # remaining space with chunked prefill.
+    max_seqs = cache.batch_size
+    static_token_capacity = int(
+         max_prompt_length * max_seqs
+    )
+
+    ragged = cache_manager_lib.RaggedArray(
+        data=jnp.zeros((static_token_capacity,), dtype=jnp.int32),
+        lens=active_seq_lens,
+    )
+    seq_idxs = ragged.row_idxs
+    intra_offsets = ragged.intra_offsets
+
+    abs_positions = token_start_idxs[seq_idxs] + intra_offsets
+    page_cols = abs_positions // cache.page_size
+    page_offsets = abs_positions % cache.page_size
+    phys_page_ids = cache.page_indices[seq_idxs, page_cols]
+
+    tokens = cache.pages["tokens"][
+        phys_page_ids, page_offsets
+    ]
+
+    logits, cache = transformer(
+        tokens,
+        abs_positions.reshape(-1),
+        cache=cache,
+        distribution=distribution,
+        seq_lens=cache.seq_lens,
+        soft_cap=soft_cap,
+        **kwargs,
+    )
+
+    last_token_idxs = jnp.cumsum(active_seq_lens) - 1
+    last_token_logits = logits[last_token_idxs]
+    last_token_logits = jnp.expand_dims(last_token_logits, axis=1)
+
+    has_new_logits = ~sampling_state.done
+    updated_sampling_state = self._sample(
+        logits=last_token_logits,
+        cache=cache,
+        eos=jnp.array(sampling_state.eos_token_ids),
+        sampling_state=sampling_state,
+    )
+
+    if not include_logits:
+      return updated_sampling_state
+
+    cache = updated_sampling_state.hbm_cache
+    n_decode = distribution[0]
+  
+    # Record decode logits
+    input_token_idxs = cache.seq_lens - 2 # Ignore new token
+    decode_logits = last_token_logits[:, 0, :]
+    is_decode_seq = jnp.arange(batch_size) < n_decode
+
+    cache = cache.insert_values(
+        decode_logits,
+        idxs=input_token_idxs,
+        valid_mask=has_new_logits & is_decode_seq,
+        block_id="logits"
+    )
+    
+    # Record prefill logits
+    prompt_lens = cache.seq_lens - 1 # Ignore new token
+    is_prefill_logit = jnp.arange(static_token_capacity) >= n_decode
+    cache = cache.load_values(
+      logits,
+      lens=prompt_lens,
+      valid_mask=is_prefill_logit,
+      block_id="logits"
+    )
+    
+    return dataclasses.replace(
+        updated_sampling_state,
+        hbm_cache=cache
+    )
+
+
+  def _sample_step(
+      self,
+      sampling_state: _SamplingState,
+      requests: Sequence[dict[str, Any]] = (),
+  ) -> dict[str, RequestOutput]:
+    """Complete a single sampling step, and return completions."""
+    sampling_state = self._queue_new_requests(sampling_state, requests)
+    hbm_available, sampling_state = self._make_room_for_allocation(sampling_state)
+    sampling_state = self._drain_pending_queue(hbm_available, sampling_state)
+
+    num_tpu = len(sampling_state.hbm_request_ids)
+    if num_tpu == 0:
+      return sampling_state, {}
+
+    cache = sampling_state.hbm_cache
+
+    logits, updated_hbm_cache = self._compiled_step_fn(
+        sampling_state.max_prompt_length,
+        params=self._flattened_transformer_state,
+        cache=sampling_state.hbm_cache,
+        decoding_steps=sampling_state.decoding_steps,
+        distribution=sampling_state.distribution,
+        soft_cap=sampling_state.attn_logits_soft_cap,
+    )
+
+    key, subkey = jax.random.split(sampling_state.seed)
+
+    next_tokens, log_probs = sampler_lib.sample_top_p(
+        logits=logits,
+        key=subkey,
+        temperature=sampling_state.temperature,
+        top_p=sampling_state.sampling_parameters['top_p'],
+        top_k=sampling_state.sampling_parameters['top_k'],  # pyrefly: ignore[bad-argument-type]
+        return_logprobs=True,
+    )
+
+    seq_idxs = jnp.arange(updated_hbm_cache.batch_size)
+    valid_mask = seq_idxs  < num_tpu
+    updated_hbm_cache = updated_hbm_cache.append_tokens(next_tokens, valid_mask)
+
+    updated_logits = None
+    updated_logprobs = None
+
+    decoding_steps = sampling_state.decoding_steps
+    if sampling_state.logits_buffer is not None:
+      updated_logits = sampling_state.logits_buffer.at[seq_idxs, decoding_steps, :].set(logits)
+    if sampling_state.logprobs_buffer is not None:
+      updated_logprobs = sampling_state.logprobs_buffer.at[seq_idxs, decoding_steps].set(log_probs)
+
+    sampling_state = dataclasses.replace(
+        sampling_state,
+        hbm_cache=updated_hbm_cache,
+        logits_buffer=updated_logits,
+        logprobs_buffer=updated_logprobs,
+        seed=key,
+        decoding_steps=decoding_steps + 1,
+    )
+
+    sampling_state, completed_outputs = self._release_completed(sampling_state, next_tokens)
+    return sampling_state, completed_outputs
+
+  def __call__(
+      self,
+      sampling_state: _SamplingState,
+      requests: Sequence[dict[str, Any]] = (),
+  ) -> dict[str, RequestOutput]:
+    """Forward call to _sample_step."""
+    return self._sample_step(sampling_state, requests)
 
   def _sample(
       self,

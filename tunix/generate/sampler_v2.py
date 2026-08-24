@@ -32,7 +32,7 @@ from jax.interpreters import pxla
 import jaxtyping
 import numpy as np
 from tunix.generate import sampler as sampler_lib
-from tunix.generate import page_manager as page_manager_lib 
+from tunix.generate import cache_manager as cache_manager_lib 
 from tunix.generate import utils
 
 
@@ -65,7 +65,7 @@ class _SamplingState:
   # sequences[i:j] are chunked-prefill-only, and sequences[j:k] are mixed.
   distribution: jnp.ndarray  # i32[3]
   # Sharded TPU HBM cache storing tokens and KV values for active sequences on TPU
-  hbm_cache: page_manager_lib.PageManager
+  hbm_cache: cache_manager_lib.PageManager
   # Is decoding done on the given sequence?
   done: jnp.ndarray  # bool[max_num_sequences]
   # Fixed-size buffer for accumulating output logits.
@@ -360,7 +360,7 @@ class VanillaSampler:
       dp_axis = None
       tp_axis = None
     
-    hbm_pm_config = page_manager_lib.PageManagerConfig(
+    hbm_pm_config = cache_manager_lib.PageManagerConfig(
         page_size=page_size,
         max_seq_len=max_seq_len,
         max_bytes=hbm_max_bytes,
@@ -474,7 +474,7 @@ class VanillaSampler:
 
   def _sample(
       self,
-      cache: page_manager_lib.PageManager,
+      cache: cache_manager_lib.PageManager,
       logits: jnp.ndarray,
       eos: jax.Array,
       sampling_state: _SamplingState,
@@ -546,7 +546,7 @@ class VanillaSampler:
     soft_cap = sampling_state.soft_cap
     done = sampling_state.done
 
-    ragged = page_manager_lib.RaggedArray(
+    ragged = cache_manager_lib.RaggedArray(
         data=jnp.zeros((batch_size,), dtype=jnp.int32),
         lens=cache.seq_lens,
     )
@@ -623,7 +623,7 @@ class VanillaSampler:
     static_token_capacity = int(
          batch_size 
     )
-    ragged = page_manager_lib.RaggedArray(
+    ragged = cache_manager_lib.RaggedArray(
         data=jnp.zeros((static_token_capacity,), dtype=jnp.int32),
         lens=,
     )
