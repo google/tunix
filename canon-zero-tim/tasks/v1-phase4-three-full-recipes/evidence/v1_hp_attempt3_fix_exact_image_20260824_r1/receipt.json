@@ -1,0 +1,41 @@
+{
+  "schema": "v1-hp-attempt3-fix-exact-image-v1",
+  "timestamp": "2026-08-24T07:39:21Z",
+  "tested_commit": "f0af2d9b31d3ca1324549df3660ebc6894856b74",
+  "tested_code_tree": "24675392adee620ab36b87f9a0c4f7e8111f4839",
+  "base_commit": "65606a985aa869f09a3bd3a39a3c9268a432aa71",
+  "image": "sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a",
+  "logs": {
+    "p58_run.log": {
+      "sha256": "a07f05631373c13c54f03906dbda5b07b3d9981ab50148b7e48d23f88037534e",
+      "lines": 458,
+      "bytes": 183738,
+      "exit_code": 0
+    },
+    "v1_run.log": {
+      "sha256": "d9fe0af37025abd20a6027027ed995849a301ef9b5a2c69fecb00fcfa028861d",
+      "lines": 769,
+      "bytes": 188754,
+      "exit_code": 0
+    }
+  },
+  "terminals": {
+    "p59": "P59_TP_SHIM_EXACT_IMAGE_PASS fixed_head=2 installed_projection=2 installed_attention=2 report_adjoint=2 fixed_reducer=2 topologies=DP2xTP4,DP2xTP8 optimizer_commits=0 manifests=2x36/36",
+    "p58": "P58_EXACT_IMAGE_CPU_PASS loss_oracle=1 weighted_accumulation=1 compact_filter=1 durable_journal=1 paired_renderer=1 alignment_policy=1 stock_observer=1 onehost_xprof=1 zero_hp_full=1 apc=1 p59_tp4_tp8=2 p59_real_shim=4 p59_rpa=2 p57_wandb=1 m15_token=1 regressions=1",
+    "v1": "V1_HP_EXACT_IMAGE_PASS dp16_gathered=1 dp2tp2_parallel=2 p59_tp4_tp8=2 p59_real_shim=4 p59_rpa=2 p57_wandb=1 m15_token=1 perfetto_window=1 manifests=3"
+  },
+  "host": {
+    "v1": "21/21",
+    "p57": "144/144",
+    "p59": "34/34",
+    "apc": "31/31",
+    "flags": "366/366"
+  },
+  "onehost_mechanism": {
+    "evidence_root": "/mnt/disks/tunix-data/logp_probe_1host/p59_rpa_a3dp2tp2tp4_20260824_0648utc_r2",
+    "topologies": "P59 DP2xTP2 plus ordinary DP1xTP4",
+    "optimizer_commits": 0
+  },
+  "claim": "HOST PASS / EXACT_IMAGE PASS / ONEHOST MECHANISM PASS / POST-FIX TARGET NOT RUN",
+  "limitations": "Dependency-complete CPU/image admission and a four-chip mechanism proxy do not certify the repaired DP16xTP4 or DP8xTP8 optimizer path, full horizons, or performance."
+}

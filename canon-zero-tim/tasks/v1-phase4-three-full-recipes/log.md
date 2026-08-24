@@ -1,5 +1,13 @@
 # Log
 
+## 2026-08-24T07:39:21Z — Attempt-3 exact-image admission passed and was sealed
+
+- With explicit approval, the complete P58 and V1 gates ran against immutable image `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a` on clean tested commit `f0af2d9b31d3ca1324549df3660ebc6894856b74`, tree `24675392adee620ab36b87f9a0c4f7e8111f4839`. A first P58 invocation omitted the required image argument and exited at usage before starting a container; it is not a gate or target result.
+- Durable reruns both exit zero. P58 emits `P58_EXACT_IMAGE_CPU_PASS ... p59_real_shim=4 p59_rpa=2 ... m15_token=1 ...`; V1 emits `P59_TP_SHIM_EXACT_IMAGE_PASS ... installed_attention=2 ... DP2xTP4,DP2xTP8 ... optimizer_commits=0 ...` and `V1_HP_EXACT_IMAGE_PASS ... p59_rpa=2 ... m15_token=1 ... manifests=3`.
+- Evidence is `evidence/v1_hp_attempt3_fix_exact_image_20260824_r1/`: P58 raw SHA `a07f05631373c13c54f03906dbda5b07b3d9981ab50148b7e48d23f88037534e`, V1 raw SHA `d9fe0af37025abd20a6027027ed995849a301ef9b5a2c69fecb00fcfa028861d`, receipt SHA `16bc0f85921b40e1a0e6dbcbd6187329199c6833c99d5f1b280eca14e58305cb`.
+- Claim ceiling: `HOST PASS / EXACT_IMAGE PASS / ONEHOST MECHANISM PASS / POST-FIX TARGET NOT RUN`. The image gate is dependency-complete CPU admission; it does not certify a real DP16×TP4 or DP8×TP8 optimizer commit, performance, or any full horizon.
+- The launch handoff now has one order everywhere: after normal push, exact remote readback, immutable three-manifest render, allocation checks, and separate launch approval, apply GSM8K/P45/M15 in one wave. Each first commit is independently fail-closed; one red does not terminate another healthy full run.
+
 ## 2026-08-24T07:15:52Z — complete Attempt-3 intake repaired; concurrent launch decision registered
 
 - Fresh fetch advanced the immutable operator base to `65606a985aa869f09a3bd3a39a3c9268a432aa71`, adding P45 `f45m` and M15 `m15m` to GSM8K `g64m`. The local RPA and ledger CLs were cleanly rebased as `248c5f9d` and `0ab5ae76`.

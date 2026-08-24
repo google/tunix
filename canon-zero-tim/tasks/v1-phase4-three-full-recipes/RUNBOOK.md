@@ -35,7 +35,8 @@ git diff --check
 After those host gates pass, the separately approved pinned-image command is:
 
 ```bash
-bash canon-zero-tim/tests/v1_phase4/run_exact_image.sh
+bash canon-zero-tim/tests/v1_phase4/run_exact_image.sh \
+  sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a
 ```
 
 The pre-attempt-1 2026-08-23 pinned-image admission against image
@@ -56,6 +57,12 @@ carriers pass, including the wrong local-cache shape negative and an ordinary
 global-GQA control with the P59 flag present. The M15 field additionally
 requires the signed 4096/8192 positive plus partial and foreign candidate/split
 negatives; P45 remains 4096/2048.
+
+The complete Attempt-3 admission passed on tested commit `f0af2d9b`, tree
+`24675392adee620ab36b87f9a0c4f7e8111f4839`. Use the durable P58/V1 raw logs
+and receipt under
+`evidence/v1_hp_attempt3_fix_exact_image_20260824_r1/`; do not substitute the
+earlier rawless or pre-Attempt-3 receipts.
 
 The current supported bundle also passed a separately approved one-host v5p
 DP4xTP1 three-update proxy with 51/51 strict PASS and 0 FAIL. Evidence is at

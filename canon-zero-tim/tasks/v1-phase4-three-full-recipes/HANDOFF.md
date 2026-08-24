@@ -16,12 +16,12 @@ The latest pulled operator tip is
 Attempt-3 logs to the earlier GSM8K evidence. The Attempt-2 q_proj/APC repair
 is published, but Attempt 3 exposed the next P59 TP seam at the RPA boundary
 and one independent M15 token-contract seam. The local stack is
-`248c5f9d` (RPA runtime/gates), `0ab5ae76` (initial evidence ledger), and
-`aa84c147` (signed M15 4096/8192 token widths); this updated ledger is the next
-local CL. Host/static admission is green, while the separately approval-bound
-pinned-image gate and every repaired optimizer commit remain unrun. None of
-these CLs is published while that gate remains unapproved and unrun. After
-authorized publication, render
+`248c5f9d` (RPA runtime/gates), `0ab5ae76` (initial evidence ledger),
+`aa84c147` (signed M15 4096/8192 token widths), and `f0af2d9b` (complete
+Attempt-3 ledger). Host/static admission and both dependency-complete
+pinned-image aggregators are green; every repaired target optimizer commit
+remains unrun. The exact-image receipt is the final local evidence CL before
+publication. After authorized publication, render
 only from the exact 40-character SHA read back from the operator branch and
 require a clean worktree.
 
@@ -32,7 +32,9 @@ owns an independent first-commit admission and strict zero-TIM verdict; a red
 freezes and kills only that recipe while the other healthy full runs continue.
 
 Do not push, rerun the pinned image, publish an image, apply a JobSet, or occupy
-TPU resources without the separate user approval for that boundary. Never
+TPU resources without the separate user approval for that boundary. The user
+approved the current exact-image rerun and publication only; no JobSet launch
+is implied. Never
 launch through a pipe. Run IDs, campaign roots, and evidence directories are
 first-use only; preserve every failed run.
 
@@ -162,7 +164,8 @@ The historical pinned-image gate was executed against image
 `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`:
 
 ```bash
-bash canon-zero-tim/tests/v1_phase4/run_exact_image.sh
+bash canon-zero-tim/tests/v1_phase4/run_exact_image.sh \
+  sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a
 ```
 
 Require the exact terminal marker:
@@ -176,6 +179,21 @@ The current Attempt-3 repair must instead end with additive `p59_rpa=2` and
 carriers with wrong-cache and ordinary-serving negatives, plus the signed M15
 4096/8192 positive and partial/foreign negatives:
 `V1_HP_EXACT_IMAGE_PASS dp16_gathered=1 dp2tp2_parallel=2 p59_tp4_tp8=2 p59_real_shim=4 p59_rpa=2 p57_wandb=1 m15_token=1 perfetto_window=1 manifests=3`.
+
+That Attempt-3 gate is now green on tested commit
+`f0af2d9b31d3ca1324549df3660ebc6894856b74`, tree
+`24675392adee620ab36b87f9a0c4f7e8111f4839`. Durable logs and the signed
+receipt are under
+`evidence/v1_hp_attempt3_fix_exact_image_20260824_r1/`: P58 raw SHA-256
+`a07f05631373c13c54f03906dbda5b07b3d9981ab50148b7e48d23f88037534e`,
+V1 raw SHA-256
+`d9fe0af37025abd20a6027027ed995849a301ef9b5a2c69fecb00fcfa028861d`,
+and receipt SHA-256
+`16bc0f85921b40e1a0e6dbcbd6187329199c6833c99d5f1b280eca14e58305cb`.
+Both scripts exited zero; both include `P59_TP_SHIM_EXACT_IMAGE_PASS` with
+`installed_attention=2`, and the P58/V1 terminals include `p59_rpa=2` plus
+`m15_token=1`. This is dependency-complete CPU/image admission, not a target
+optimizer or performance result.
 
 The current post-fix gate passed on the same immutable image. Its raw log is
 `evidence/v1_hp_postfix_exact_image_20260824_r3/run.log` with SHA-256
@@ -210,16 +228,16 @@ Its terminal marker is
 The approved target plan uses direct full trains, not separate short canaries.
 After the repair is committed, pushed, and exactly read back, render from that
 new exact source SHA using `RUNBOOK.md`, require three manifest PASS receipts,
-and freeze every YAML hash. Apply the 200-update GSM8K
-full train first. Its first real optimizer commit is an early admission
-checkpoint, not a shortened run: require zero real alignment FAIL plus the
-registered P59-local, fixed-head, and optimizer receipts, then let the same
-JobSet continue to its full horizon. Only after that checkpoint may the two
-300-update FrozenLake full trains start, P45 first and M15 second, from the same
-source SHA. Each remains an uninterrupted full train and must receive its own
-complete strict-alignment, P59/APC/fixed-head, timing, XProf, Perfetto, eval,
-and horizon postflight. A GSM8K green does not certify APC, TP8 fixed head,
-DP8xTP8, FrozenLake evaluation, or M15 workload geometry.
+and freeze every YAML hash. With separate launch approval and all three
+64-chip allocations confirmed, apply GSM8K, P45, and M15 in one wave. Each
+first real optimizer commit is that recipe's independent early admission
+checkpoint, not a shortened run: require zero real alignment FAIL plus its
+registered P59-local, fixed-head, token/APC, and optimizer receipts, then let
+the same JobSet continue to its full horizon. A red freezes only that recipe;
+it does not stop another healthy full run. Each must receive its own complete
+strict-alignment, P59/APC/fixed-head, timing, XProf, Perfetto, eval, and horizon
+postflight. A GSM8K green does not certify APC, TP8 fixed head, DP8xTP8,
+FrozenLake evaluation, or M15 workload geometry.
 
 Any real `CANON_ALIGN` or `CANON_ALIGN_PRE verdict=FAIL` kills that recipe.
 Missing horizon, receipts, trace, checkpoint, or artifacts is INCONCLUSIVE,
