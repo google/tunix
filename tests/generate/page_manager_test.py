@@ -5,6 +5,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from tunix.generate import page_manager as pm_lib
+from tunix.generate import utils
 
 class PageManagerTest(parameterized.TestCase):
   def test_ragged_array_row_idxs_capacity_equals_size(self):
@@ -43,7 +44,7 @@ class PageManagerTest(parameterized.TestCase):
 
   def test_allocate(self):
     config = pm_lib.TpuCpuPageManagerConfig(
-        max_tpu_bytes=128, # roughly 8 pages of 1*jnp.int32 = 4 bytes -> actually wait: 128 / 4 = 32 pages
+        max_tpu_bytes=128, 
         max_cpu_bytes=0,
         dp_size=1,
         page_size=1,
@@ -58,7 +59,6 @@ class PageManagerTest(parameterized.TestCase):
 
     q_lens = jnp.array([0, 1, 2, 0, 5])
     pm, allocated_idxs = pm.allocate(q_lens)
-    pm = pm.assign(jnp.arange(5), allocated_idxs, q_lens)
     pm = pm.assign(jnp.arange(5), allocated_idxs, q_lens)
 
     np.testing.assert_array_equal(pm.seq_lens, q_lens)
@@ -75,10 +75,11 @@ class PageManagerTest(parameterized.TestCase):
     )
 
   def test_allocate_max_seq_len_indivisible_by_page_size(self):
+    page_size = 3
     config = pm_lib.TpuCpuPageManagerConfig(
         max_tpu_bytes=3000, # plenty
         dp_size=1,
-        page_size=3,
+        page_size=page_size,
         max_seq_len=10,
         max_num_seqs=5,
         dtype=jnp.int32,
@@ -91,11 +92,12 @@ class PageManagerTest(parameterized.TestCase):
     self.assertEqual(pm.page_indices.shape, (5, max_num_pages_per_seq))
 
     q_lens = jnp.array([1, 5, 3, 0, 5])
-    pm, allocated_idxs = pm.allocate(q_lens)
-    pm = pm.assign(jnp.arange(5), allocated_idxs, q_lens)
-    pm = pm.assign(jnp.arange(5), allocated_idxs, q_lens)
+    pages_needed = jnp.array(utils.cdiv(q_lens, page_size))
 
-    np.testing.assert_array_equal(pm.seq_lens, q_lens)
+    pm, allocated_idxs = pm.allocate(pages_needed)
+    pm = pm.assign(jnp.arange(5), allocated_idxs, pages_needed)
+
+    np.testing.assert_array_equal(pm.seq_lens, pages_needed)
     np.testing.assert_array_equal(pm.page_indices[0][:1], [0])
     np.testing.assert_array_equal(pm.page_indices[1][:2], [1, 2])
     np.testing.assert_array_equal(pm.page_indices[2][:1], [3])
