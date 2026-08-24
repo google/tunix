@@ -151,12 +151,10 @@ class LLMEngine:
             distribution=distribution,
             static_token_capacity=total_tokens, 
             temperature=temperature,
-            top_p=top_p,
-            top_k=top_k,
-            return_logits=return_logits,
+            top_p=top_p if top_p is not None else 1.0,
+            top_k=top_k if top_k is not None else -1,
             return_logprobs=return_logprobs,
-            eos_tokens=eos_tokens,
-            forbidden_tokens=forbidden_tokens,
+            forbidden_token_ids=list(forbidden_tokens) if forbidden_tokens else None,
         )
         
         self.cache_manager.page_manager = next_cache
