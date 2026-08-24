@@ -269,10 +269,12 @@ jobs:
         # Download GSM8K dataset
         mkdir -p /tmp/grpo_test/rl/grpo/data
 
-        run_and_log "math_eval_nb.py" bash -c "NUM_BATCHES=1 python examples/deepscaler/math_eval_nb.py"
         run_and_log "grpo_demo_llama3_qwen2.py (colocated)" python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20
         run_and_log "grpo_demo_llama3_qwen2.py (disaggregated-2-way)" python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 --cluster-setup=disaggregated-2-way
         run_and_log "grpo_demo_llama3_qwen2.py (disaggregated-3-way)" python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 --cluster-setup=disaggregated-3-way
+
+        pip install 'jax[tpu]<0.11.0'
+        run_and_log "math_eval_nb.py" bash -c "NUM_BATCHES=1 python examples/deepscaler/math_eval_nb.py"
 
         # TODO(b/508252632): Re-enable once the bug is fixed.
         # vLLM Tests
