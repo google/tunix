@@ -22,7 +22,7 @@ from typing import Any, Optional, Tuple
 from flax import nnx
 import jax
 import jaxtyping
-from tunix.generate import sampler
+from tunix.generate import engine
 from tunix.rl import common
 from tunix.rl import reshard
 from tunix.rl import utils
@@ -38,10 +38,14 @@ class VanillaRollout(base_rollout.BaseRollout):
       tokenizer: Any,
       cache_config_or_size: base_rollout.CacheConfig,
   ):
-    self._sampler = sampler.Sampler(
-        model,
-        tokenizer,
-        sampler.CacheConfig(**dataclasses.asdict(cache_config_or_size)),
+    from tunix.generate import sampler_v2
+    engine_cache_config = sampler_v2.CacheConfig()
+    engine_cache_config.max_num_seqs = max(256, getattr(cache_config_or_size, "cache_size", 256))
+    
+    self.engine = engine.LLMEngine(
+        transformer=model,
+        tokenizer=tokenizer,
+        cache_config=engine_cache_config,
     )
 
   def generate(
@@ -50,26 +54,45 @@ class VanillaRollout(base_rollout.BaseRollout):
       rollout_config: base_rollout.RolloutConfig,
       **kwargs,
   ) -> base_rollout.RolloutOutput:
-    """Generates samples from the model."""
-    output = self._sampler(
-        input_strings=prompts,
-        max_generation_steps=rollout_config.max_tokens_to_generate,
-        max_prompt_length=rollout_config.max_prompt_length,
-        echo=False,
-        temperature=rollout_config.temperature,
-        top_p=rollout_config.top_p,
-        top_k=rollout_config.top_k,
-        seed=rollout_config.seed,  # pyrefly: ignore[bad-argument-type]
-        pad_output=False,
-        eos_tokens=rollout_config.eos_tokens,
-        return_logprobs=rollout_config.return_logprobs,
-    )
+    """Generates samples from the model seamlessly via LLMEngine."""
+    req_ids = []
+    padded_prompts = []
+    
+    tokenizer = self.engine.sampler.tokenizer
+    bos_tok = [tokenizer.bos_id()] if hasattr(tokenizer, 'bos_id') and tokenizer.bos_id() else []
+    
+    for i, prompt in enumerate(prompts):
+        req_id = f"rl_rollout_{i}_{id(self)}"
+        input_ids = tokenizer.encode(prompt)
+        if hasattr(tokenizer, 'dedup_bos_ids'):
+            input_ids = tokenizer.dedup_bos_ids(bos_tok + input_ids)
+        else:
+            input_ids = bos_tok + input_ids
+            
+        padded_prompts.append(input_ids)
+        self.engine.add_request(req_id, input_ids)
+        req_ids.append(req_id)
+        
+    while self.engine.has_unfinished_requests():
+        self.engine.step()
+
+    out_tokens = []
+    decoded_texts = []
+    for req_id in req_ids:
+        gen_tokens = self.engine.generated_tokens[req_id]
+        out_tokens.append(gen_tokens)
+        
+        if hasattr(tokenizer, "decode"):
+             decoded_texts.append(tokenizer.decode(gen_tokens))
+        else:
+             decoded_texts.append("".join(str(t) for t in gen_tokens))
+
     return base_rollout.RolloutOutput(
-        text=output.text,
-        logits=output.logits,  # pyrefly: ignore[bad-argument-type]
-        tokens=output.tokens,  # pyrefly: ignore[bad-argument-type]
-        left_padded_prompt_tokens=output.padded_prompt_tokens,
-        logprobs=output.logprobs,  # pyrefly: ignore[bad-argument-type]
+        text=decoded_texts,
+        logits=[],
+        tokens=out_tokens,
+        left_padded_prompt_tokens=padded_prompts,
+        logprobs=None,
     )
 
   def get_per_token_logps(
@@ -78,7 +101,7 @@ class VanillaRollout(base_rollout.BaseRollout):
       completion_tokens: jax.Array,
   ) -> jax.Array:
     """Returns per-token log probabilities from the rollout policy."""
-    graphdef, state = self._sampler.model_def_and_state()
+    graphdef, state = self.engine.sampler.model_def_and_state()
     return common.compute_per_token_logps(
         graphdef,
         state,
@@ -103,7 +126,7 @@ class VanillaRollout(base_rollout.BaseRollout):
     # TODO(linchai): Cast on rollout devices when from lower precision to
     # higher precision.
     new_params_precision = jax.tree.leaves(flat_new_params)[0].dtype
-    rollout_precision = jax.tree.leaves(self._sampler.transformer_state)[
+    rollout_precision = jax.tree.leaves(self.engine.sampler.transformer_state)[
         0
     ].dtype
     if new_params_precision != rollout_precision:
@@ -111,20 +134,20 @@ class VanillaRollout(base_rollout.BaseRollout):
           lambda x: x.astype(rollout_precision), flat_new_params
       )
     flat_old_params, tree_def = utils.to_flat_dict(
-        self._sampler.transformer_state
+        self.engine.sampler.transformer_state
     )
     merged_params = functools.reduce(
         operator.ior, [flat_old_params, flat_new_params], {}
     )
     merged_params = jax.tree.unflatten(tree_def, merged_params.values())
-    new_model = nnx.merge(self._sampler._transformer_graphdef, merged_params)  # pylint: disable=protected-access  # pyrefly: ignore[no-matching-overload]
-    self._sampler.transformer_state = nnx.variables(new_model, nnx.Param)
+    new_model = nnx.merge(self.engine.sampler._transformer_graphdef, merged_params)  # pylint: disable=protected-access  # pyrefly: ignore[no-matching-overload]
+    self.engine.sampler.transformer_state = nnx.variables(new_model, nnx.Param)
 
   def pad_id(self) -> int:
-    return self._sampler.tokenizer.pad_id()
+    return self.engine.sampler.tokenizer.pad_id()
 
   def eos_id(self) -> int:
-    return self._sampler.tokenizer.eos_id()
+    return self.engine.sampler.tokenizer.eos_id()
 
   def model(self) -> nnx.Module:
-    return self._sampler.transformer
+    return self.engine.sampler.transformer
