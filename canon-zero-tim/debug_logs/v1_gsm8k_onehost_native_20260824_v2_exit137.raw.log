@@ -1,0 +1,408 @@
+[V1.GSM8K.XPROF] RUN_BEGIN arm=native
+b0e149d58141629e7cc0f4230709bf50eb79fde02101e4ab00d0be72f0780c5a  /mnt/disks/tunix-data/tunix_code_rl/tunix/rl/agentic/agentic_rl_learner.py
+47ecf7a7adce72322d4d045308af79905373fcecc010a52c8c874b3c56540fa1  /mnt/disks/tunix-data/tunix_code_rl/tunix/rl/gsm8k_xprof.py
+ea226bfa9e981b327ee4d2427fb95e955d40a1274cbc9ef8fc72c32418d62965  /mnt/disks/tunix-data/tunix_code_rl/examples/math_gsm8k/qwen3_grpo_demo.py
+fe8c560c896b64a13f621dbd06c2f097cecf4d7e55ddad80f10024afd876dbb5  /mnt/disks/tunix-data/tunix_code_rl/canon-zero-tim/tasks/v1-gsm8k-onehost-xprof-pair/scripts/run_onehost_gsm8k_xprof_inner.sh
+b45616be8873bae2fbabdfbb3894fa94795a2293058a94803eb9e65de6bd4e59  /mnt/disks/tunix-data/tunix_code_rl/canon-zero-tim/tasks/v1-gsm8k-onehost-xprof-pair/scripts/run_onehost_gsm8k_xprof_common.sh
+1ddb5b89ebc90dcb417a45c213d818577e65976454d29385c8f6140771d95197  /mnt/disks/tunix-data/gsm8k_zero_tim/models/config.json
+0d660e94b165eb912669a5249dff44b83188c4777a07ddb9611fb78d91b0578d  /mnt/disks/tunix-data/gsm8k_zero_tim/models/model.safetensors.index.json
+[V1.GSM8K.XPROF] PREFLIGHT_PASS arm=native topology=DP4xTP1 mesh_ids=[0, 2, 1, 3] prompts=8 generations=8 trajectories=64 groups=16 capture=update:1->2
+Logging configured at INFO level.
+jax devices:  [TpuDevice(id=0, process_index=0, coords=(0,0,0), core_on_chip=0), TpuDevice(id=1, process_index=0, coords=(1,0,0), core_on_chip=0), TpuDevice(id=2, process_index=0, coords=(0,1,0), core_on_chip=0), TpuDevice(id=3, process_index=0, coords=(1,1,0), core_on_chip=0)]
+shared_mesh.devices.shape=(4, 1) axis_names=('dp', 'tp') axis_types=(Auto, Auto)
+2026-08-24 23:40:15 - INFO - [absl] Load dataset info from /mnt/disks/tunix-data/gsm8k_zero_tim/data/gsm8k/1.0.0
+2026-08-24 23:40:15 - INFO - [absl] Load dataset info from /mnt/disks/tunix-data/gsm8k_zero_tim/data/gsm8k/1.0.0
+2026-08-24 23:40:15 - INFO - [absl] Done with loading datasets - Pathways not available. Using default HBM stats collector
+2026-08-24 23:40:15 - INFO - [absl] Using 64.5 KiB / 95.7 GiB (6.424687886172301e-07) on TPU_0(process=0,(0,0,0,0))
+2026-08-24 23:40:15 - INFO - [absl] Using 64.5 KiB / 95.7 GiB (6.424687886172301e-07) on TPU_1(process=0,(1,0,0,0))
+2026-08-24 23:40:15 - INFO - [absl] Using 64.5 KiB / 95.7 GiB (6.424687886172301e-07) on TPU_2(process=0,(0,1,0,0))
+2026-08-24 23:40:15 - INFO - [absl] Using 64.5 KiB / 95.7 GiB (6.424687886172301e-07) on TPU_3(process=0,(1,1,0,0))
+2026-08-24 23:40:22 - INFO - [absl] Params are already on the requested memory kind: device
+2026-08-24 23:40:22 - INFO - [absl] Params are already on the requested memory kind: device
+2026-08-24 23:40:22 - INFO - [absl] after loading qwen_ref / qwen_actor - Pathways not available. Using default HBM stats collector
+2026-08-24 23:40:22 - INFO - [absl] Using 9.6 GiB / 95.7 GiB (0.10042008792917488) on TPU_0(process=0,(0,0,0,0))
+2026-08-24 23:40:22 - INFO - [absl] Using 9.6 GiB / 95.7 GiB (0.10042008792917488) on TPU_1(process=0,(1,0,0,0))
+2026-08-24 23:40:22 - INFO - [absl] Using 9.6 GiB / 95.7 GiB (0.10042008792917488) on TPU_2(process=0,(0,1,0,0))
+2026-08-24 23:40:22 - INFO - [absl] Using 9.6 GiB / 95.7 GiB (0.10042008792917488) on TPU_3(process=0,(1,1,0,0))
+[P56.VANILLA] stock arm: canonical numeric admission bypassed; yardstick only
+[P60.HASH_AB] engine_seed=42 workload= rollout_schedule=serial max_concurrency=1 max_response_length=256
+2026-08-24 23:40:22 - INFO - [absl] Initializing perfetto trace writer at: /mnt/disks/tunix-data/gsm8k-onehost-xprof/v1_native_20260824_v2/train/perf/perfetto_trace_v2_1787614822.pb
+wandb: WARNING The anonymous setting has no effect and will be removed in a future version.
+wandb: [wandb.login()] Loaded credentials for https://api.wandb.ai from WANDB_API_KEY.
+wandb: Currently logged in as: yuxzhang (yuxzhang-google) to https://api.wandb.ai. Use `wandb login --relogin` to force relogin
+wandb: setting up run f2dc06lb
+wandb: Tracking run with wandb version 0.28.1
+wandb: Run data is saved locally in /mnt/disks/tunix-data/gsm8k-onehost-xprof/v1_native_20260824_v2/train/wandb/wandb/run-20260824_234024-f2dc06lb
+wandb: Run `wandb offline` to turn off syncing.
+wandb: Syncing run v1-gsm8k-xprof-native-20260824_v2
+wandb: ⭐️ View project at https://wandb.ai/yuxzhang-google/v1-gsm8k-onehost-xprof
+wandb: 🚀 View run at https://wandb.ai/yuxzhang-google/v1-gsm8k-onehost-xprof/runs/f2dc06lb
+2026-08-24 23:40:25 - INFO - [root] W&B run URL: https://wandb.ai/yuxzhang-google/v1-gsm8k-onehost-xprof/runs/f2dc06lb
+INFO 08-24 23:40:25 [__init__.py:76] TPU info: node_name=maxtext-single-host-1-v5p-8 | tpu_type=v5p-8 | worker_id=0 | num_chips=4 | num_cores_per_chip=2
+WARNING 08-24 23:40:25 [tpu_platform.py:408] Pin memory is not supported on TPU.
+/usr/local/lib/python3.12/multiprocessing/popen_fork.py:66: RuntimeWarning: os.fork() was called. os.fork() is incompatible with multithreaded code, and JAX is multithreaded, so this will likely lead to a deadlock.
+  self.pid = os.fork()
+INFO 08-24 23:40:28 [importing.py:53] Triton is installed but 0 active driver(s) found (expected 1). Disabling Triton to prevent runtime errors.
+WARNING 08-24 23:40:28 [importing.py:73] Triton is installed, but `triton.backends` could not be imported. Disabling Triton.
+INFO 08-24 23:40:28 [importing.py:88] Triton not installed or not compatible; certain GPU-related functions will not be available.
+2026-08-24 23:40:30 - INFO - [absl] Engine kwargs setting key 'model' with value '/mnt/disks/tunix-data/gsm8k_zero_tim/models'.
+2026-08-24 23:40:30 - INFO - [absl] Engine kwargs setting key 'max_model_len' with value '1536'.
+2026-08-24 23:40:30 - INFO - [absl] Engine kwargs setting key 'async_scheduling' with value 'False'.
+2026-08-24 23:40:30 - INFO - [absl] Engine kwargs setting key 'max_num_batched_tokens' with value '256'.
+2026-08-24 23:40:30 - INFO - [absl] Engine kwargs setting key 'max_num_seqs' with value '16'.
+2026-08-24 23:40:30 - INFO - [absl] Engine kwargs setting key 'hf_config_path' with value 'None'.
+2026-08-24 23:40:30 - INFO - [absl] Engine kwargs setting key 'max_logprobs' with value '1'.
+2026-08-24 23:40:30 - INFO - [absl] Engine kwargs setting key 'logprobs_mode' with value 'processed_logprobs'.
+2026-08-24 23:40:30 - INFO - [absl] Engine kwargs setting key 'kv_cache_metrics' with value 'True'.
+2026-08-24 23:40:30 - INFO - [absl] Engine kwargs setting key 'disable_log_stats' with value 'False'.
+2026-08-24 23:40:30 - INFO - [absl] Engine kwargs setting key 'enable_prefix_caching' with value 'False'.
+2026-08-24 23:40:30 - INFO - [absl] Engine kwargs setting key 'dtype' with value 'bfloat16'.
+2026-08-24 23:40:30 - INFO - [absl] Engine kwargs setting key 'seed' with value '42'.
+INFO 08-24 23:40:30 [attention_interface.py:56] Using default RPA kernel
+WARNING 08-24 23:40:30 [interface.py:368] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
+WARNING 08-24 23:40:30 [interface.py:368] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
+WARNING 08-24 23:40:30 [interface.py:368] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
+WARNING 08-24 23:40:30 [interface.py:368] Failed to import from vllm._C: ModuleNotFoundError("No module named 'vllm._C'")
+INFO 08-24 23:40:31 [__init__.py:112] Registered model loader `<class 'tpu_inference.models.jax.utils.weight_utils.JaxDummyModelLoader'>` with load format `jax_dummy`
+INFO 08-24 23:40:31 [__init__.py:112] Registered model loader `<class 'tpu_inference.models.common.pathways_dummy_loader.PathwaysDummyModelLoader'>` with load format `pathways_dummy`
+INFO 08-24 23:40:31 [__init__.py:112] Registered model loader `<class 'tpu_inference.models.vllm.vllm_model_loader.IncrementalModelLoader'>` with load format `tpu_streaming_loader`
+WARNING 08-24 23:40:31 [__init__.py:101] Load format `runai_streamer` is already registered, and will be overwritten by the new loader class `<class 'tpu_inference.models.vllm.vllm_model_loader.RunaiIncrementalModelLoader'>`.
+INFO 08-24 23:40:31 [__init__.py:112] Registered model loader `<class 'tpu_inference.models.vllm.vllm_model_loader.RunaiIncrementalModelLoader'>` with load format `runai_streamer`
+WARNING 08-24 23:40:31 [envs.py:2069] Unknown vLLM environment variable detected: VLLM_TPU_RPA_VERSION
+WARNING 08-24 23:40:31 [arg_utils.py:1617] The global random seed is set to 42. Since VLLM_ENABLE_V1_MULTIPROCESSING is set to False, this may affect the random state of the Python process that launched vLLM.
+INFO 08-24 23:40:42 [model.py:619] Resolved architecture: Qwen3ForCausalLM
+INFO 08-24 23:40:42 [model.py:1776] Using max model len 1536
+INFO 08-24 23:40:42 [scheduler.py:252] Chunked prefill is enabled with max_num_batched_tokens=256.
+INFO 08-24 23:40:42 [vllm.py:1089] Asynchronous scheduling is disabled.
+WARNING 08-24 23:40:42 [vllm.py:1191] Inductor compilation was disabled by user settings, optimizations settings that are only active during inductor compilation will be ignored.
+INFO 08-24 23:40:42 [kernel.py:292] Final IR op priority after setting platform defaults: IrOpPriorityConfig(rms_norm=['native'], fused_add_rms_norm=['native'])
+INFO 08-24 23:40:42 [tpu_platform.py:263] Resolved TPU_MULTIPROCESS_DP=0
+INFO 08-24 23:40:42 [tpu_platform.py:233] Initialized sharding configuration: ShardingConfigManager(total_devices=4, sharding_strategy=ShardingStrategy(tensor_parallelism=1, expert_parallelism=1, sequence_parallelism=1, data_parallelism=4, attention_data_parallelism=1, attention_data_expert_parallelism=1, decode_context_parallelism=1), mm_encoder_tp_mode=weights, device_indexes=[0, 2, 1, 3])
+INFO 08-24 23:40:42 [tpu_platform.py:320] Force using UniProcExecutor for JAX on single host without pipeline parallelism.
+WARNING 08-24 23:40:42 [vllm.py:557] Model Runner V2 requires Triton; using the V1 model runner instead.
+INFO 08-24 23:40:42 [compilation.py:312] Enabled custom fusions: norm_quant, act_quant
+INFO 08-24 23:40:45 [core.py:114] Initializing a V1 LLM engine (v0.25.0) with config: model='/mnt/disks/tunix-data/gsm8k_zero_tim/models', speculative_config=None, tokenizer='/mnt/disks/tunix-data/gsm8k_zero_tim/models', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, tokenizer_revision=None, trust_remote_code=False, dtype=torch.bfloat16, max_seq_len=1536, download_dir=None, load_format=dummy, tensor_parallel_size=1, pipeline_parallel_size=1, data_parallel_size=1, decode_context_parallel_size=1, dcp_comm_backend=ag_rs, disable_custom_all_reduce=True, quantization=None, quantization_config=None, enforce_eager=False, enable_return_routed_experts=False, kv_cache_dtype=auto, device_config=None, structured_outputs_config=StructuredOutputsConfig(backend='auto', disable_any_whitespace=False, disable_additional_properties=False, reasoning_parser='', reasoning_parser_plugin='', enable_in_reasoning=False), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None, kv_cache_metrics=True, kv_cache_metrics_sample=0.01, cudagraph_metrics=False, enable_layerwise_nvtx_tracing=False, enable_mfu_metrics=False, enable_mm_processor_stats=False, enable_logging_iteration_details=False, jit_monitor_mode='warn', jit_monitor_verbose=False), seed=42, served_model_name=/mnt/disks/tunix-data/gsm8k_zero_tim/models, enable_prefix_caching=False, enable_chunked_prefill=True, pooler_config=None, compilation_config={'mode': <CompilationMode.VLLM_COMPILE: 3>, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'eager', 'custom_ops': ['all'], 'ir_enable_torch_wrap': False, 'splitting_ops': ['vllm::unified_attention_with_output', 'vllm::unified_mla_attention_with_output', 'vllm::mamba_mixer2', 'vllm::mamba_mixer', 'vllm::short_conv', 'vllm::linear_attention', 'vllm::plamo2_mamba_mixer', 'vllm::qwen_gdn_attention_core', 'vllm::gdn_attention_core_xpu', 'vllm::olmo_hybrid_gdn_full_forward', 'vllm::kda_attention', 'vllm::sparse_attn_indexer', 'vllm::rocm_aiter_sparse_attn_indexer', 'vllm::deepseek_v4_attention', 'vllm::hpc_rope_norm_forward', 'vllm::unified_kv_cache_update', 'vllm::unified_mla_kv_cache_update'], 'compile_mm_encoder': False, 'cudagraph_mm_encoder': False, 'encoder_cudagraph_token_budgets': [], 'encoder_cudagraph_max_vision_items_per_batch': 0, 'encoder_cudagraph_max_frames_per_batch': None, 'compile_sizes': None, 'compile_ranges_endpoints': [256], 'inductor_compile_config': {'enable_auto_functionalized_v2': False, 'size_asserts': False, 'alignment_asserts': False, 'scalar_asserts': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.NONE: 0>, 'cudagraph_num_of_warmups': 0, 'cudagraph_capture_sizes': None, 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': False, 'pass_config': {'fuse_norm_quant': True, 'fuse_act_quant': True, 'fuse_attn_quant': False, 'enable_sp': False, 'fuse_gemm_comms': False, 'fuse_allreduce_rms': False, 'fuse_rope_kvcache_cat_mla': False, 'fuse_act_padding': False}, 'max_cudagraph_capture_size': None, 'dynamic_shapes_config': {'type': <DynamicShapesType.BACKED: 'backed'>, 'evaluate_guards': False, 'assume_32_bit_indexing': False}, 'local_cache_dir': None, 'fast_moe_cold_start': True, 'static_all_moe_layers': []}, kernel_config=KernelConfig(ir_op_priority=IrOpPriorityConfig(rms_norm=['native'], fused_add_rms_norm=['native']), enable_flashinfer_autotune=True, enable_cutedsl_warmup=True, moe_backend='auto', linear_backend='auto')
+INFO 08-24 23:40:46 [parallel_state.py:1607] world_size=1 rank=0 local_rank=0 distributed_init_method=file:///tmp/tmplju0wonz backend=gloo
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+[Gloo] Rank 0 is connected to 0 peer ranks. Expected number of connected peer ranks is : 0
+INFO 08-24 23:40:46 [parallel_state.py:1942] rank 0 in world size 1 is assigned as DP rank 0, PP rank 0, PCP rank 0, TP rank 0, EP rank N/A, EPLB rank N/A
+INFO 08-24 23:40:46 [tpu_runner.py:622] Creating new model mesh | devices=4, num_slices=1
+INFO 08-24 23:40:46 [tpu_runner.py:617] Init mesh | mesh=Mesh('data': 4, 'attn_dp': 1, 'attn_dp_expert': 1, 'expert': 1, 'model': 1, 'dcp': 1, axis_types=(Auto, Auto, Auto, Auto, Auto, Auto))
+INFO 08-24 23:40:46 [utils.py:210] Prepared token paddings: [16, 32, 64, 128, 256, 512, 1024]
+INFO 08-24 23:40:46 [utils.py:156] Prepared request paddings: [8, 16, 32, 64]
+INFO 08-24 23:40:46 [utils.py:175] Prepared attn request paddings: [16]
+INFO 08-24 23:40:46 [compilation_manager.py:63] Enabling JAX compile cache.
+INFO 08-24 23:40:46 [tpu_worker.py:377] Init worker | rank=0 | is_first_rank=True | is_last_rank=True | topology_order_id=0 | is_driver_worker=True | hbm=[(9.61, 95.74), (9.61, 95.74), (9.61, 95.74), (9.61, 95.74)]GiB |self.devices=[TpuDevice(id=0, process_index=0, coords=(0,0,0), core_on_chip=0), TpuDevice(id=2, process_index=0, coords=(0,1,0), core_on_chip=0), TpuDevice(id=1, process_index=0, coords=(1,0,0), core_on_chip=0), TpuDevice(id=3, process_index=0, coords=(1,1,0), core_on_chip=0)] | total devices=[TpuDevice(id=0, process_index=0, coords=(0,0,0), core_on_chip=0), TpuDevice(id=1, process_index=0, coords=(1,0,0), core_on_chip=0), TpuDevice(id=2, process_index=0, coords=(0,1,0), core_on_chip=0), TpuDevice(id=3, process_index=0, coords=(1,1,0), core_on_chip=0)] | local_devices=[TpuDevice(id=0, process_index=0, coords=(0,0,0), core_on_chip=0), TpuDevice(id=1, process_index=0, coords=(1,0,0), core_on_chip=0), TpuDevice(id=2, process_index=0, coords=(0,1,0), core_on_chip=0), TpuDevice(id=3, process_index=0, coords=(1,1,0), core_on_chip=0)]
+INFO 08-24 23:40:46 [model_loader.py:621] Loading model with MODEL_IMPL_TYPE=auto
+INFO 08-24 23:40:46 [model_loader.py:624] Resolved MODEL_IMPL_TYPE 'auto' to 'flax_nnx'
+INFO 08-24 23:40:46 [qwen3.py:92] Running with attention Q-Projection laid out as DNH
+INFO 08-24 23:40:54 [weight_utils.py:1166] Loading dummy weights took 5.43 seconds.
+INFO 08-24 23:40:55 [tpu_runner.py:979] Cleared JIT caches after weight loading
+INFO 08-24 23:40:55 [tpu_runner.py:981] Init model | hbm=[(12.82, 95.74), (12.82, 95.74), (12.82, 95.74), (12.82, 95.74)]GiB
+INFO 08-24 23:40:55 [tpu_platform.py:399] Using cache_config.block_size: 128 instead of overriding with _align_hybrid_block_size() since we set mamba_page_size_padded in kv_cache_manager.py
+INFO 08-24 23:40:55 [tpu_worker.py:463] Memory statistics | total_hbm_limit_gb=382.97GiB | total_hbm_limit_cap_gb=76.59GiB | total_hbm_used_gb=51.28GiB | total_hbm_avail_gb=25.32GiB
+INFO 08-24 23:40:55 [kv_cache_utils.py:2168] GPU KV cache size: 236,928 tokens
+INFO 08-24 23:40:55 [kv_cache_utils.py:2169] Maximum concurrency for 1,536 tokens per request: 154.25x
+INFO 08-24 23:40:55 [compilation_manager.py:855] Compiling sampling with different input shapes.
+INFO 08-24 23:40:55 [compilation_manager.py:133] Precompile worker0 sample --> {'num_reqs': 8, 'do_sampling': True, 'logprobs': True}
+INFO 08-24 23:40:58 [compilation_manager.py:167] Compilation of worker0 sample --> {'num_reqs': 8, 'do_sampling': True, 'logprobs': True} finished in 1.61 [secs].
+INFO 08-24 23:40:58 [compilation_manager.py:133] Precompile worker0 sample --> {'num_reqs': 8, 'do_sampling': True, 'logprobs': False}
+INFO 08-24 23:40:59 [compilation_manager.py:167] Compilation of worker0 sample --> {'num_reqs': 8, 'do_sampling': True, 'logprobs': False} finished in 1.50 [secs].
+INFO 08-24 23:40:59 [compilation_manager.py:133] Precompile worker0 sample --> {'num_reqs': 8, 'do_sampling': False, 'logprobs': True}
+INFO 08-24 23:41:00 [compilation_manager.py:167] Compilation of worker0 sample --> {'num_reqs': 8, 'do_sampling': False, 'logprobs': True} finished in 0.41 [secs].
+INFO 08-24 23:41:00 [compilation_manager.py:133] Precompile worker0 sample --> {'num_reqs': 8, 'do_sampling': False, 'logprobs': False}
+INFO 08-24 23:41:00 [compilation_manager.py:167] Compilation of worker0 sample --> {'num_reqs': 8, 'do_sampling': False, 'logprobs': False} finished in 0.40 [secs].
+INFO 08-24 23:41:00 [compilation_manager.py:133] Precompile worker0 sample --> {'num_reqs': 16, 'do_sampling': True, 'logprobs': True}
+INFO 08-24 23:41:02 [compilation_manager.py:167] Compilation of worker0 sample --> {'num_reqs': 16, 'do_sampling': True, 'logprobs': True} finished in 1.49 [secs].
+INFO 08-24 23:41:02 [compilation_manager.py:133] Precompile worker0 sample --> {'num_reqs': 16, 'do_sampling': True, 'logprobs': False}
+INFO 08-24 23:41:03 [compilation_manager.py:167] Compilation of worker0 sample --> {'num_reqs': 16, 'do_sampling': True, 'logprobs': False} finished in 1.50 [secs].
+INFO 08-24 23:41:03 [compilation_manager.py:133] Precompile worker0 sample --> {'num_reqs': 16, 'do_sampling': False, 'logprobs': True}
+INFO 08-24 23:41:04 [compilation_manager.py:167] Compilation of worker0 sample --> {'num_reqs': 16, 'do_sampling': False, 'logprobs': True} finished in 0.42 [secs].
+INFO 08-24 23:41:04 [compilation_manager.py:133] Precompile worker0 sample --> {'num_reqs': 16, 'do_sampling': False, 'logprobs': False}
+INFO 08-24 23:41:04 [compilation_manager.py:167] Compilation of worker0 sample --> {'num_reqs': 16, 'do_sampling': False, 'logprobs': False} finished in 0.41 [secs].
+INFO 08-24 23:41:04 [compilation_manager.py:133] Precompile worker0 sample --> {'num_reqs': 32, 'do_sampling': True, 'logprobs': True}
+INFO 08-24 23:41:08 [compilation_manager.py:167] Compilation of worker0 sample --> {'num_reqs': 32, 'do_sampling': True, 'logprobs': True} finished in 3.12 [secs].
+INFO 08-24 23:41:08 [compilation_manager.py:133] Precompile worker0 sample --> {'num_reqs': 32, 'do_sampling': True, 'logprobs': False}
+INFO 08-24 23:41:11 [compilation_manager.py:167] Compilation of worker0 sample --> {'num_reqs': 32, 'do_sampling': True, 'logprobs': False} finished in 3.09 [secs].
+INFO 08-24 23:41:11 [compilation_manager.py:133] Precompile worker0 sample --> {'num_reqs': 32, 'do_sampling': False, 'logprobs': True}
+INFO 08-24 23:41:11 [compilation_manager.py:167] Compilation of worker0 sample --> {'num_reqs': 32, 'do_sampling': False, 'logprobs': True} finished in 0.33 [secs].
+INFO 08-24 23:41:11 [compilation_manager.py:133] Precompile worker0 sample --> {'num_reqs': 32, 'do_sampling': False, 'logprobs': False}
+INFO 08-24 23:41:11 [compilation_manager.py:167] Compilation of worker0 sample --> {'num_reqs': 32, 'do_sampling': False, 'logprobs': False} finished in 0.32 [secs].
+INFO 08-24 23:41:11 [compilation_manager.py:133] Precompile worker0 sample --> {'num_reqs': 64, 'do_sampling': True, 'logprobs': True}
+INFO 08-24 23:41:23 [compilation_manager.py:167] Compilation of worker0 sample --> {'num_reqs': 64, 'do_sampling': True, 'logprobs': True} finished in 11.10 [secs].
+INFO 08-24 23:41:23 [compilation_manager.py:133] Precompile worker0 sample --> {'num_reqs': 64, 'do_sampling': True, 'logprobs': False}
+INFO 08-24 23:41:34 [compilation_manager.py:167] Compilation of worker0 sample --> {'num_reqs': 64, 'do_sampling': True, 'logprobs': False} finished in 11.12 [secs].
+INFO 08-24 23:41:34 [compilation_manager.py:133] Precompile worker0 sample --> {'num_reqs': 64, 'do_sampling': False, 'logprobs': True}
+INFO 08-24 23:41:35 [compilation_manager.py:167] Compilation of worker0 sample --> {'num_reqs': 64, 'do_sampling': False, 'logprobs': True} finished in 0.69 [secs].
+INFO 08-24 23:41:35 [compilation_manager.py:133] Precompile worker0 sample --> {'num_reqs': 64, 'do_sampling': False, 'logprobs': False}
+INFO 08-24 23:41:35 [compilation_manager.py:167] Compilation of worker0 sample --> {'num_reqs': 64, 'do_sampling': False, 'logprobs': False} finished in 0.68 [secs].
+INFO 08-24 23:41:35 [compilation_manager.py:944] Compiling gather_logprobs with different input shapes.
+INFO 08-24 23:41:35 [compilation_manager.py:133] Precompile worker0 gather_logprobs --> {'num_reqs': 8}
+INFO 08-24 23:41:36 [compilation_manager.py:167] Compilation of worker0 gather_logprobs --> {'num_reqs': 8} finished in 0.47 [secs].
+INFO 08-24 23:41:36 [compilation_manager.py:133] Precompile worker0 gather_logprobs --> {'num_reqs': 16}
+INFO 08-24 23:41:36 [compilation_manager.py:167] Compilation of worker0 gather_logprobs --> {'num_reqs': 16} finished in 0.55 [secs].
+INFO 08-24 23:41:36 [compilation_manager.py:133] Precompile worker0 gather_logprobs --> {'num_reqs': 32}
+INFO 08-24 23:41:37 [compilation_manager.py:167] Compilation of worker0 gather_logprobs --> {'num_reqs': 32} finished in 0.96 [secs].
+INFO 08-24 23:41:37 [compilation_manager.py:133] Precompile worker0 gather_logprobs --> {'num_reqs': 64}
+INFO 08-24 23:41:38 [compilation_manager.py:167] Compilation of worker0 gather_logprobs --> {'num_reqs': 64} finished in 0.95 [secs].
+INFO 08-24 23:41:38 [compilation_manager.py:993] Compiling compute_and_gather_prompt_logprobs with different input shapes.
+INFO 08-24 23:41:38 [compilation_manager.py:133] Precompile worker0 compute_and_gather_prompt_logprobs --> {'num_tokens': 16}
+INFO 08-24 23:41:39 [compilation_manager.py:167] Compilation of worker0 compute_and_gather_prompt_logprobs --> {'num_tokens': 16} finished in 0.58 [secs].
+INFO 08-24 23:41:39 [compilation_manager.py:133] Precompile worker0 compute_and_gather_prompt_logprobs --> {'num_tokens': 32}
+INFO 08-24 23:41:40 [compilation_manager.py:167] Compilation of worker0 compute_and_gather_prompt_logprobs --> {'num_tokens': 32} finished in 0.96 [secs].
+INFO 08-24 23:41:40 [compilation_manager.py:133] Precompile worker0 compute_and_gather_prompt_logprobs --> {'num_tokens': 64}
+INFO 08-24 23:41:41 [compilation_manager.py:167] Compilation of worker0 compute_and_gather_prompt_logprobs --> {'num_tokens': 64} finished in 0.98 [secs].
+INFO 08-24 23:41:41 [compilation_manager.py:133] Precompile worker0 compute_and_gather_prompt_logprobs --> {'num_tokens': 128}
+INFO 08-24 23:41:46 [compilation_manager.py:167] Compilation of worker0 compute_and_gather_prompt_logprobs --> {'num_tokens': 128} finished in 5.23 [secs].
+INFO 08-24 23:41:47 [compilation_manager.py:133] Precompile worker0 compute_and_gather_prompt_logprobs --> {'num_tokens': 256}
+INFO 08-24 23:41:52 [compilation_manager.py:167] Compilation of worker0 compute_and_gather_prompt_logprobs --> {'num_tokens': 256} finished in 5.17 [secs].
+INFO 08-24 23:41:52 [compilation_manager.py:133] Precompile worker0 compute_and_gather_prompt_logprobs --> {'num_tokens': 512}
+INFO 08-24 23:41:57 [compilation_manager.py:167] Compilation of worker0 compute_and_gather_prompt_logprobs --> {'num_tokens': 512} finished in 5.17 [secs].
+INFO 08-24 23:41:57 [compilation_manager.py:133] Precompile worker0 compute_and_gather_prompt_logprobs --> {'num_tokens': 1024}
+INFO 08-24 23:42:03 [compilation_manager.py:167] Compilation of worker0 compute_and_gather_prompt_logprobs --> {'num_tokens': 1024} finished in 5.19 [secs].
+INFO 08-24 23:42:47 [compilation_manager.py:207] Warm-up call pass finished in 44.57 [secs] over 27 tasks.
+INFO 08-24 23:42:49 [kv_cache_manager.py:976] Hybrid KV cache layout: num_kv_cache_groups=1, num_kv_cache_tensors=28, kv_cache_config.num_blocks=1851, duplicate_shared_layers=False
+INFO 08-24 23:42:49 [kv_cache_manager.py:1004] Init kv-cache | num_total_layers=28 | num_blocks=[1848, 1848, 1848, 1848, 1848, 1848, 1848, 1848, 1848, 1848, 1848, 1848, 1848, 1848, 1848, 1848, 1848, 1848, 1848, 1848, 1848, 1848, 1848, 1848, 1848, 1848, 1848, 1848] | regular_attn_layers=28 | regular_attn_shape=(num_blocks, (128, 8, 2, 128)) | regular_attn_sharding=NamedSharding(mesh=Mesh('data': 4, 'attn_dp': 1, 'attn_dp_expert': 1, 'expert': 1, 'model': 1, 'dcp': 1, axis_types=(Auto, Auto, Auto, Auto, Auto, Auto)), spec=P(('data', 'attn_dp', 'attn_dp_expert'), 'dcp', ('model', 'expert')), memory_kind=device) | regular_attn_dtype=bfloat16 | hbm=[(19.16, 95.74), (19.16, 95.74), (19.16, 95.74), (19.16, 95.74)]Gb
+INFO 08-24 23:42:49 [compilation_manager.py:215] Precompile all the subgraphs with possible input shapes.
+INFO 08-24 23:42:50 [compilation_manager.py:133] Precompile worker0 backbone --> {'num_tokens': 16, 'num_reqs': 64}
+INFO 08-24 23:42:50 [compilation_manager.py:146] AOT lower skipped for worker0 backbone (not a jit); will compile in warmup.
+INFO 08-24 23:42:50 [compilation_manager.py:133] Precompile worker0 backbone --> {'num_tokens': 32, 'num_reqs': 64}
+INFO 08-24 23:42:50 [compilation_manager.py:146] AOT lower skipped for worker0 backbone (not a jit); will compile in warmup.
+INFO 08-24 23:42:50 [compilation_manager.py:133] Precompile worker0 backbone --> {'num_tokens': 64, 'num_reqs': 64}
+INFO 08-24 23:42:50 [compilation_manager.py:146] AOT lower skipped for worker0 backbone (not a jit); will compile in warmup.
+INFO 08-24 23:42:50 [compilation_manager.py:133] Precompile worker0 backbone --> {'num_tokens': 128, 'num_reqs': 64}
+INFO 08-24 23:42:50 [compilation_manager.py:146] AOT lower skipped for worker0 backbone (not a jit); will compile in warmup.
+INFO 08-24 23:42:50 [compilation_manager.py:133] Precompile worker0 backbone --> {'num_tokens': 256, 'num_reqs': 64}
+INFO 08-24 23:42:50 [compilation_manager.py:146] AOT lower skipped for worker0 backbone (not a jit); will compile in warmup.
+INFO 08-24 23:42:50 [compilation_manager.py:133] Precompile worker0 backbone --> {'num_tokens': 512, 'num_reqs': 64}
+INFO 08-24 23:42:50 [compilation_manager.py:146] AOT lower skipped for worker0 backbone (not a jit); will compile in warmup.
+INFO 08-24 23:42:50 [compilation_manager.py:133] Precompile worker0 backbone --> {'num_tokens': 1024, 'num_reqs': 64}
+INFO 08-24 23:42:50 [compilation_manager.py:146] AOT lower skipped for worker0 backbone (not a jit); will compile in warmup.
+INFO 08-24 23:43:52 [compilation_manager.py:207] Warm-up call pass finished in 62.61 [secs] over 7 tasks.
+INFO 08-24 23:43:52 [compilation_manager.py:771] Compiling select_from_array with different input shapes.
+INFO 08-24 23:43:52 [compilation_manager.py:743] Compiling select_from_array for worker0 select all logits.
+INFO 08-24 23:43:53 [compilation_manager.py:133] Precompile select_from_array [worker0 select all logits] --> {'array_size': 16, 'index_size': 8}
+INFO 08-24 23:43:53 [compilation_manager.py:167] Compilation of select_from_array [worker0 select all logits] --> {'array_size': 16, 'index_size': 8} finished in 0.05 [secs].
+INFO 08-24 23:43:53 [compilation_manager.py:133] Precompile select_from_array [worker0 select all logits] --> {'array_size': 16, 'index_size': 16}
+INFO 08-24 23:43:53 [compilation_manager.py:167] Compilation of select_from_array [worker0 select all logits] --> {'array_size': 16, 'index_size': 16} finished in 0.05 [secs].
+INFO 08-24 23:43:53 [compilation_manager.py:133] Precompile select_from_array [worker0 select all logits] --> {'array_size': 32, 'index_size': 8}
+INFO 08-24 23:43:53 [compilation_manager.py:167] Compilation of select_from_array [worker0 select all logits] --> {'array_size': 32, 'index_size': 8} finished in 0.05 [secs].
+INFO 08-24 23:43:53 [compilation_manager.py:133] Precompile select_from_array [worker0 select all logits] --> {'array_size': 32, 'index_size': 16}
+INFO 08-24 23:43:53 [compilation_manager.py:167] Compilation of select_from_array [worker0 select all logits] --> {'array_size': 32, 'index_size': 16} finished in 0.05 [secs].
+INFO 08-24 23:43:53 [compilation_manager.py:133] Precompile select_from_array [worker0 select all logits] --> {'array_size': 32, 'index_size': 32}
+INFO 08-24 23:43:53 [compilation_manager.py:167] Compilation of select_from_array [worker0 select all logits] --> {'array_size': 32, 'index_size': 32} finished in 0.06 [secs].
+INFO 08-24 23:43:53 [compilation_manager.py:133] Precompile select_from_array [worker0 select all logits] --> {'array_size': 64, 'index_size': 8}
+INFO 08-24 23:43:53 [compilation_manager.py:167] Compilation of select_from_array [worker0 select all logits] --> {'array_size': 64, 'index_size': 8} finished in 0.05 [secs].
+INFO 08-24 23:43:53 [compilation_manager.py:133] Precompile select_from_array [worker0 select all logits] --> {'array_size': 64, 'index_size': 16}
+INFO 08-24 23:43:54 [compilation_manager.py:167] Compilation of select_from_array [worker0 select all logits] --> {'array_size': 64, 'index_size': 16} finished in 0.05 [secs].
+INFO 08-24 23:43:54 [compilation_manager.py:133] Precompile select_from_array [worker0 select all logits] --> {'array_size': 64, 'index_size': 32}
+INFO 08-24 23:43:54 [compilation_manager.py:167] Compilation of select_from_array [worker0 select all logits] --> {'array_size': 64, 'index_size': 32} finished in 0.05 [secs].
+INFO 08-24 23:43:54 [compilation_manager.py:133] Precompile select_from_array [worker0 select all logits] --> {'array_size': 64, 'index_size': 64}
+INFO 08-24 23:43:54 [compilation_manager.py:167] Compilation of select_from_array [worker0 select all logits] --> {'array_size': 64, 'index_size': 64} finished in 0.07 [secs].
+INFO 08-24 23:43:54 [compilation_manager.py:133] Precompile select_from_array [worker0 select all logits] --> {'array_size': 128, 'index_size': 8}
+INFO 08-24 23:43:54 [compilation_manager.py:167] Compilation of select_from_array [worker0 select all logits] --> {'array_size': 128, 'index_size': 8} finished in 0.05 [secs].
+INFO 08-24 23:43:54 [compilation_manager.py:133] Precompile select_from_array [worker0 select all logits] --> {'array_size': 128, 'index_size': 16}
+INFO 08-24 23:43:54 [compilation_manager.py:167] Compilation of select_from_array [worker0 select all logits] --> {'array_size': 128, 'index_size': 16} finished in 0.06 [secs].
+INFO 08-24 23:43:54 [compilation_manager.py:133] Precompile select_from_array [worker0 select all logits] --> {'array_size': 128, 'index_size': 32}
+INFO 08-24 23:43:54 [compilation_manager.py:167] Compilation of select_from_array [worker0 select all logits] --> {'array_size': 128, 'index_size': 32} finished in 0.06 [secs].
+INFO 08-24 23:43:54 [compilation_manager.py:133] Precompile select_from_array [worker0 select all logits] --> {'array_size': 128, 'index_size': 64}
+INFO 08-24 23:43:54 [compilation_manager.py:167] Compilation of select_from_array [worker0 select all logits] --> {'array_size': 128, 'index_size': 64} finished in 0.07 [secs].
+INFO 08-24 23:43:54 [compilation_manager.py:133] Precompile select_from_array [worker0 select all logits] --> {'array_size': 256, 'index_size': 8}
+INFO 08-24 23:43:54 [compilation_manager.py:167] Compilation of select_from_array [worker0 select all logits] --> {'array_size': 256, 'index_size': 8} finished in 0.06 [secs].
+INFO 08-24 23:43:54 [compilation_manager.py:133] Precompile select_from_array [worker0 select all logits] --> {'array_size': 256, 'index_size': 16}
+INFO 08-24 23:43:54 [compilation_manager.py:167] Compilation of select_from_array [worker0 select all logits] --> {'array_size': 256, 'index_size': 16} finished in 0.06 [secs].
+INFO 08-24 23:43:54 [compilation_manager.py:133] Precompile select_from_array [worker0 select all logits] --> {'array_size': 256, 'index_size': 32}
+INFO 08-24 23:43:54 [compilation_manager.py:167] Compilation of select_from_array [worker0 select all logits] --> {'array_size': 256, 'index_size': 32} finished in 0.06 [secs].
+INFO 08-24 23:43:54 [compilation_manager.py:133] Precompile select_from_array [worker0 select all logits] --> {'array_size': 256, 'index_size': 64}
+INFO 08-24 23:43:54 [compilation_manager.py:167] Compilation of select_from_array [worker0 select all logits] --> {'array_size': 256, 'index_size': 64} finished in 0.07 [secs].
+INFO 08-24 23:43:54 [compilation_manager.py:133] Precompile select_from_array [worker0 select all logits] --> {'array_size': 512, 'index_size': 8}
+INFO 08-24 23:43:54 [compilation_manager.py:167] Compilation of select_from_array [worker0 select all logits] --> {'array_size': 512, 'index_size': 8} finished in 0.07 [secs].
+INFO 08-24 23:43:54 [compilation_manager.py:133] Precompile select_from_array [worker0 select all logits] --> {'array_size': 512, 'index_size': 16}
+INFO 08-24 23:43:55 [compilation_manager.py:167] Compilation of select_from_array [worker0 select all logits] --> {'array_size': 512, 'index_size': 16} finished in 0.07 [secs].
+INFO 08-24 23:43:55 [compilation_manager.py:133] Precompile select_from_array [worker0 select all logits] --> {'array_size': 512, 'index_size': 32}
+INFO 08-24 23:43:55 [compilation_manager.py:167] Compilation of select_from_array [worker0 select all logits] --> {'array_size': 512, 'index_size': 32} finished in 0.07 [secs].
+INFO 08-24 23:43:55 [compilation_manager.py:133] Precompile select_from_array [worker0 select all logits] --> {'array_size': 512, 'index_size': 64}
+INFO 08-24 23:43:55 [compilation_manager.py:167] Compilation of select_from_array [worker0 select all logits] --> {'array_size': 512, 'index_size': 64} finished in 0.09 [secs].
+INFO 08-24 23:43:55 [compilation_manager.py:133] Precompile select_from_array [worker0 select all logits] --> {'array_size': 1024, 'index_size': 8}
+INFO 08-24 23:43:55 [compilation_manager.py:167] Compilation of select_from_array [worker0 select all logits] --> {'array_size': 1024, 'index_size': 8} finished in 0.10 [secs].
+INFO 08-24 23:43:55 [compilation_manager.py:133] Precompile select_from_array [worker0 select all logits] --> {'array_size': 1024, 'index_size': 16}
+INFO 08-24 23:43:55 [compilation_manager.py:167] Compilation of select_from_array [worker0 select all logits] --> {'array_size': 1024, 'index_size': 16} finished in 0.10 [secs].
+INFO 08-24 23:43:55 [compilation_manager.py:133] Precompile select_from_array [worker0 select all logits] --> {'array_size': 1024, 'index_size': 32}
+INFO 08-24 23:43:55 [compilation_manager.py:167] Compilation of select_from_array [worker0 select all logits] --> {'array_size': 1024, 'index_size': 32} finished in 0.10 [secs].
+INFO 08-24 23:43:55 [compilation_manager.py:133] Precompile select_from_array [worker0 select all logits] --> {'array_size': 1024, 'index_size': 64}
+INFO 08-24 23:43:55 [compilation_manager.py:167] Compilation of select_from_array [worker0 select all logits] --> {'array_size': 1024, 'index_size': 64} finished in 0.11 [secs].
+INFO 08-24 23:43:55 [compilation_manager.py:207] Warm-up call pass finished in 0.01 [secs] over 25 tasks.
+INFO 08-24 23:43:55 [compilation_manager.py:818] Compiling compute_logits with different input shapes.
+INFO 08-24 23:43:55 [compilation_manager.py:133] Precompile worker0 compute_logits --> {'num_reqs': 8}
+INFO 08-24 23:43:56 [compilation_manager.py:167] Compilation of worker0 compute_logits --> {'num_reqs': 8} finished in 0.22 [secs].
+INFO 08-24 23:43:56 [compilation_manager.py:133] Precompile worker0 compute_logits --> {'num_reqs': 16}
+INFO 08-24 23:43:56 [compilation_manager.py:167] Compilation of worker0 compute_logits --> {'num_reqs': 16} finished in 0.21 [secs].
+INFO 08-24 23:43:56 [compilation_manager.py:133] Precompile worker0 compute_logits --> {'num_reqs': 32}
+INFO 08-24 23:43:56 [compilation_manager.py:167] Compilation of worker0 compute_logits --> {'num_reqs': 32} finished in 0.20 [secs].
+INFO 08-24 23:43:56 [compilation_manager.py:133] Precompile worker0 compute_logits --> {'num_reqs': 64}
+INFO 08-24 23:43:56 [compilation_manager.py:167] Compilation of worker0 compute_logits --> {'num_reqs': 64} finished in 0.21 [secs].
+INFO 08-24 23:43:56 [compilation_manager.py:207] Warm-up call pass finished in 0.02 [secs] over 4 tasks.
+INFO 08-24 23:43:56 [compilation_manager.py:1769] Compiling structured_decoding with different input shapes.
+WARNING 08-24 23:43:56 [compilation_manager.py:1772] Structured decoding precompilation skipped since structured decoding is not supported with DP.
+INFO 08-24 23:43:56 [core.py:337] init engine (profile, create kv cache, warmup model) took 181.29 s (compilation: 66.89 s)
+WARNING 08-24 23:43:56 [scheduler.py:192] Using custom scheduler class <class 'tpu_inference.core.sched.dp_scheduler.DPScheduler'>. This scheduler interface is not public and compatibility may not be maintained. If you have subclassed Scheduler instead of AsyncScheduler, you will see degraded performance due to async scheduling being disabled.
+/usr/local/lib/python3.12/multiprocessing/popen_fork.py:66: RuntimeWarning: os.fork() was called. os.fork() is incompatible with multithreaded code, and JAX is multithreaded, so this will likely lead to a deadlock.
+  self.pid = os.fork()
+INFO 08-24 23:43:57 [dp_scheduler.py:181] Scheduler worker process 0 started (PID=6128)
+INFO 08-24 23:43:58 [dp_scheduler.py:181] Scheduler worker process 1 started (PID=6129)
+INFO 08-24 23:43:59 [dp_scheduler.py:181] Scheduler worker process 2 started (PID=6130)
+INFO 08-24 23:44:00 [dp_scheduler.py:495] DPScheduler (Async = False) started 4 worker processes with cloudpickle. Per-rank limits: max_seqs=16, max_tokens=256; global max_tokens across dp=4: 1024
+INFO 08-24 23:44:00 [dp_scheduler.py:502] DPScheduler batch prefills ENABLED (threshold=4, flush when 4 pending or any rank idle).
+INFO 08-24 23:44:00 [dp_scheduler.py:181] Scheduler worker process 3 started (PID=6132)
+INFO 08-24 23:44:00 [block_pool.py:768] Successfully reset prefix cache
+INFO 08-24 23:44:00 [block_pool.py:768] Successfully reset prefix cache
+INFO 08-24 23:44:00 [block_pool.py:768] Successfully reset prefix cache
+INFO 08-24 23:44:00 [block_pool.py:768] Successfully reset prefix cache
+INFO 08-24 23:44:00 [kv_cache_manager.py:1026] Deleting kv-cache | num_layers=28 | hbm_before=[(19.47, 95.74), (19.47, 95.74), (19.47, 95.74), (19.47, 95.74)]Gb
+INFO 08-24 23:44:00 [kv_cache_manager.py:1038] KV cache delete complete | hbm_after=[(13.15, 95.74), (13.15, 95.74), (13.15, 95.74), (13.15, 95.74)]Gb
+2026-08-24 23:44:00 - WARNING - [absl] Type mismatch on embedder.input_embedding: float32 -> bfloat16
+2026-08-24 23:44:00 - INFO - [absl] Reshard finished in 0.02s
+INFO 08-24 23:44:00 [kv_cache_manager.py:1060] Reinitializing kv-cache | hbm_before=[(13.15, 95.74), (13.15, 95.74), (13.15, 95.74), (13.15, 95.74)]Gb
+INFO 08-24 23:44:03 [kv_cache_manager.py:976] Hybrid KV cache layout: num_kv_cache_groups=1, num_kv_cache_tensors=28, kv_cache_config.num_blocks=1851, duplicate_shared_layers=False
+INFO 08-24 23:44:03 [kv_cache_manager.py:1004] Init kv-cache | num_total_layers=28 | num_blocks=[1848, 1848, 1848, 1848, 1848, 1848, 1848, 1848, 1848, 1848, 1848, 1848, 1848, 1848, 1848, 1848, 1848, 1848, 1848, 1848, 1848, 1848, 1848, 1848, 1848, 1848, 1848, 1848] | regular_attn_layers=28 | regular_attn_shape=(num_blocks, (128, 8, 2, 128)) | regular_attn_sharding=NamedSharding(mesh=Mesh('data': 4, 'attn_dp': 1, 'attn_dp_expert': 1, 'expert': 1, 'model': 1, 'dcp': 1, axis_types=(Auto, Auto, Auto, Auto, Auto, Auto)), spec=P(('data', 'attn_dp', 'attn_dp_expert'), 'dcp', ('model', 'expert')), memory_kind=device) | regular_attn_dtype=bfloat16 | hbm=[(19.47, 95.74), (19.47, 95.74), (19.47, 95.74), (19.47, 95.74)]Gb
+2026-08-24 23:44:04 - INFO - [absl] after RLCluster creation - Pathways not available. Using default HBM stats collector
+2026-08-24 23:44:04 - INFO - [absl] Using 38.7 GiB / 95.7 GiB (0.4042003434030538) on TPU_0(process=0,(0,0,0,0))
+2026-08-24 23:44:04 - INFO - [absl] Using 38.7 GiB / 95.7 GiB (0.40417660194014415) on TPU_1(process=0,(1,0,0,0))
+2026-08-24 23:44:04 - INFO - [absl] Using 38.7 GiB / 95.7 GiB (0.40417660194014415) on TPU_2(process=0,(0,1,0,0))
+2026-08-24 23:44:04 - INFO - [absl] Using 38.7 GiB / 95.7 GiB (0.40417660194014415) on TPU_3(process=0,(1,1,0,0))
+[P56.VANILLA] engine contract attestation bypassed (stock arm)
+2026-08-24 23:44:04 - INFO - [absl] AgenticRLLearner init - Pathways not available. Using default HBM stats collector
+2026-08-24 23:44:04 - INFO - [absl] Using 38.7 GiB / 95.7 GiB (0.4042003434030538) on TPU_0(process=0,(0,0,0,0))
+2026-08-24 23:44:04 - INFO - [absl] Using 38.7 GiB / 95.7 GiB (0.40417660194014415) on TPU_1(process=0,(1,0,0,0))
+2026-08-24 23:44:04 - INFO - [absl] Using 38.7 GiB / 95.7 GiB (0.40417660194014415) on TPU_2(process=0,(0,1,0,0))
+2026-08-24 23:44:04 - INFO - [absl] Using 38.7 GiB / 95.7 GiB (0.40417660194014415) on TPU_3(process=0,(1,1,0,0))
+2026-08-24 23:44:04 - INFO - [absl] Started trajectory logging thread.
+2026-08-24 23:44:04 - INFO - [absl] after GRPOLearner creation - Pathways not available. Using default HBM stats collector
+2026-08-24 23:44:04 - INFO - [absl] Using 38.7 GiB / 95.7 GiB (0.4042003434030538) on TPU_0(process=0,(0,0,0,0))
+2026-08-24 23:44:04 - INFO - [absl] Using 38.7 GiB / 95.7 GiB (0.40417660194014415) on TPU_1(process=0,(1,0,0,0))
+2026-08-24 23:44:04 - INFO - [absl] Using 38.7 GiB / 95.7 GiB (0.40417660194014415) on TPU_2(process=0,(0,1,0,0))
+2026-08-24 23:44:04 - INFO - [absl] Using 38.7 GiB / 95.7 GiB (0.40417660194014415) on TPU_3(process=0,(1,1,0,0))
+Shared mesh: Mesh('dp': 4, 'tp': 1, axis_types=(Auto, Auto))
+Config summary: {'model_id': 'Qwen/Qwen3-1.7B', 'mesh_shape': (4, 1), 'rollout_engine': 'vllm', 'prompts_per_step': 8, 'num_generations': 8, 'mini_batch_size': 8, 'train_micro_batch_size': 8, 'trajectory_mini_batch_size': 64, 'train_trajectory_micro_batch_size': 4, 'compute_logps_micro_batch_size': 8, 'max_steps': 3, 'max_prompt_length': 1024, 'max_response_length': 256, 'reference_beta': 0.04, 'wandb_project': 'v1-gsm8k-onehost-xprof', 'wandb_run_name': 'v1-gsm8k-xprof-native-20260824_v2', 'max_concurrency': 1, 'rollout_vllm_hbm_utilization': 0.2, 'rollout_vllm_max_num_seqs': 16, 'rollout_vllm_max_num_batched_tokens': 256}
+2026-08-24 23:44:04 - INFO - [absl] Training with full_batch_size=8, mini_batch_size=8, train_micro_batch_size=8, self._rollout_micro_batch_size=1, self._compute_logps_micro_batch_size=8, grad_acc_steps=16, trajectory_micro_batch_size=4
+2026-08-24 23:44:04 - INFO - [absl] Starting AgenticRLLearner training loop.
+2026-08-24 23:44:04 - INFO - [absl] Prefilling prompt queue with 1 batches.
+2026-08-24 23:44:04 - INFO - [absl] Starting run_producers_from_stream with 1 concurrency
+WARNING 08-24 23:44:04 [model.py:1528] Default vLLM sampling parameters have been overridden by the model's `generation_config.json`: `{'temperature': 0.6, 'top_k': 20, 'top_p': 0.95}`. If this is not intended, please relaunch vLLM instance with `--generation-config vllm`.
+2026-08-24 23:44:04 - INFO - [absl] [VLLM.LOGPROB_REQUEST] return_logprobs=1 sampled=1 prompt=None host_extraction=enabled
+WARNING 08-24 23:44:04 [input_processor.py:282] Passing raw prompts to InputProcessor is deprecated and will be removed in v0.18. You should instead pass the outputs of Renderer.render_cmpl() or Renderer.render_chat().
+INFO 08-24 23:44:30 [loggers.py:273] Engine 000: Avg prompt throughput: 12.3 tokens/s, Avg generation throughput: 16.9 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.2%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=26.128 rows=1
+2026-08-24 23:44:30 - WARNING - [absl] [step_idx=1, pair_index=0, group_id=0] trajectory clipped: MAX_CONTEXT_LIMIT_REACHED
+INFO 08-24 23:44:31 [loggers.py:273] Engine 000: Avg prompt throughput: 110.4 tokens/s, Avg generation throughput: 145.4 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.1%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=1.271 rows=1
+[PERF] stage=rollout_generate seconds=1.745 rows=1
+2026-08-24 23:44:33 - WARNING - [absl] [step_idx=1, pair_index=2, group_id=0] trajectory clipped: MAX_CONTEXT_LIMIT_REACHED
+[PERF] stage=rollout_generate seconds=1.197 rows=1
+[PERF] stage=rollout_generate seconds=1.342 rows=1
+[PERF] stage=rollout_generate seconds=1.734 rows=1
+2026-08-24 23:44:38 - WARNING - [absl] [step_idx=1, pair_index=5, group_id=0] trajectory clipped: MAX_CONTEXT_LIMIT_REACHED
+[PERF] stage=rollout_generate seconds=1.505 rows=1
+INFO 08-24 23:44:40 [loggers.py:273] Engine 000: Avg prompt throughput: 83.0 tokens/s, Avg generation throughput: 146.6 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.1%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=1.392 rows=1
+INFO 08-24 23:44:41 [loggers.py:273] Engine 000: Avg prompt throughput: 86.2 tokens/s, Avg generation throughput: 148.1 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.1%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=1.750 rows=1
+2026-08-24 23:44:42 - WARNING - [absl] [step_idx=1, pair_index=0, group_id=1] trajectory clipped: MAX_CONTEXT_LIMIT_REACHED
+[PERF] stage=rollout_generate seconds=1.762 rows=1
+2026-08-24 23:44:44 - WARNING - [absl] [step_idx=1, pair_index=1, group_id=1] trajectory clipped: MAX_CONTEXT_LIMIT_REACHED
+[PERF] stage=rollout_generate seconds=1.736 rows=1
+2026-08-24 23:44:46 - WARNING - [absl] [step_idx=1, pair_index=2, group_id=1] trajectory clipped: MAX_CONTEXT_LIMIT_REACHED
+[PERF] stage=rollout_generate seconds=1.731 rows=1
+2026-08-24 23:44:47 - WARNING - [absl] [step_idx=1, pair_index=3, group_id=1] trajectory clipped: MAX_CONTEXT_LIMIT_REACHED
+[PERF] stage=rollout_generate seconds=1.741 rows=1
+2026-08-24 23:44:49 - WARNING - [absl] [step_idx=1, pair_index=4, group_id=1] trajectory clipped: MAX_CONTEXT_LIMIT_REACHED
+INFO 08-24 23:44:50 [loggers.py:273] Engine 000: Avg prompt throughput: 54.0 tokens/s, Avg generation throughput: 146.5 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.1%, Prefix cache hit rate: 0.0%
+INFO 08-24 23:44:51 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 146.8 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.2%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=1.748 rows=1
+2026-08-24 23:44:51 - WARNING - [absl] [step_idx=1, pair_index=5, group_id=1] trajectory clipped: MAX_CONTEXT_LIMIT_REACHED
+[PERF] stage=rollout_generate seconds=1.757 rows=1
+2026-08-24 23:44:53 - WARNING - [absl] [step_idx=1, pair_index=6, group_id=1] trajectory clipped: MAX_CONTEXT_LIMIT_REACHED
+[PERF] stage=rollout_generate seconds=1.770 rows=1
+2026-08-24 23:44:54 - WARNING - [absl] [step_idx=1, pair_index=7, group_id=1] trajectory clipped: MAX_CONTEXT_LIMIT_REACHED
+[PERF] stage=rollout_generate seconds=1.753 rows=1
+2026-08-24 23:44:56 - WARNING - [absl] [step_idx=1, pair_index=0, group_id=2] trajectory clipped: MAX_CONTEXT_LIMIT_REACHED
+[PERF] stage=rollout_generate seconds=1.753 rows=1
+2026-08-24 23:44:58 - WARNING - [absl] [step_idx=1, pair_index=1, group_id=2] trajectory clipped: MAX_CONTEXT_LIMIT_REACHED
+[PERF] stage=rollout_generate seconds=1.537 rows=1
+INFO 08-24 23:45:00 [loggers.py:273] Engine 000: Avg prompt throughput: 72.5 tokens/s, Avg generation throughput: 145.2 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.1%, Prefix cache hit rate: 0.0%
+INFO 08-24 23:45:01 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 147.3 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.2%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=1.757 rows=1
+2026-08-24 23:45:01 - WARNING - [absl] [step_idx=1, pair_index=3, group_id=2] trajectory clipped: MAX_CONTEXT_LIMIT_REACHED
+[PERF] stage=rollout_generate seconds=1.755 rows=1
+2026-08-24 23:45:03 - WARNING - [absl] [step_idx=1, pair_index=4, group_id=2] trajectory clipped: MAX_CONTEXT_LIMIT_REACHED
+[PERF] stage=rollout_generate seconds=1.765 rows=1
+2026-08-24 23:45:05 - WARNING - [absl] [step_idx=1, pair_index=5, group_id=2] trajectory clipped: MAX_CONTEXT_LIMIT_REACHED
+[PERF] stage=rollout_generate seconds=1.415 rows=1
+[PERF] stage=rollout_generate seconds=1.759 rows=1
+2026-08-24 23:45:08 - WARNING - [absl] [step_idx=1, pair_index=7, group_id=2] trajectory clipped: MAX_CONTEXT_LIMIT_REACHED
+INFO 08-24 23:45:10 [loggers.py:273] Engine 000: Avg prompt throughput: 61.6 tokens/s, Avg generation throughput: 145.1 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.2%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=1.757 rows=1
+2026-08-24 23:45:10 - WARNING - [absl] [step_idx=1, pair_index=0, group_id=3] trajectory clipped: MAX_CONTEXT_LIMIT_REACHED
+INFO 08-24 23:45:11 [loggers.py:273] Engine 000: Avg prompt throughput: 84.9 tokens/s, Avg generation throughput: 145.6 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.1%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=1.750 rows=1
+2026-08-24 23:45:12 - WARNING - [absl] [step_idx=1, pair_index=1, group_id=3] trajectory clipped: MAX_CONTEXT_LIMIT_REACHED
+[PERF] stage=rollout_generate seconds=1.761 rows=1
+2026-08-24 23:45:13 - WARNING - [absl] [step_idx=1, pair_index=2, group_id=3] trajectory clipped: MAX_CONTEXT_LIMIT_REACHED
+[PERF] stage=rollout_generate seconds=1.538 rows=1
+[PERF] stage=rollout_generate seconds=1.753 rows=1
+2026-08-24 23:45:17 - WARNING - [absl] [step_idx=1, pair_index=4, group_id=3] trajectory clipped: MAX_CONTEXT_LIMIT_REACHED
+[PERF] stage=rollout_generate seconds=1.758 rows=1
+2026-08-24 23:45:18 - WARNING - [absl] [step_idx=1, pair_index=5, group_id=3] trajectory clipped: MAX_CONTEXT_LIMIT_REACHED
+INFO 08-24 23:45:20 [loggers.py:273] Engine 000: Avg prompt throughput: 53.5 tokens/s, Avg generation throughput: 144.7 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.2%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=1.800 rows=1
+2026-08-24 23:45:20 - WARNING - [absl] [step_idx=1, pair_index=6, group_id=3] trajectory clipped: MAX_CONTEXT_LIMIT_REACHED
+INFO 08-24 23:45:21 [loggers.py:273] Engine 000: Avg prompt throughput: 84.6 tokens/s, Avg generation throughput: 144.2 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.1%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=1.752 rows=1
+2026-08-24 23:45:22 - WARNING - [absl] [step_idx=1, pair_index=7, group_id=3] trajectory clipped: MAX_CONTEXT_LIMIT_REACHED
+[PERF] stage=rollout_generate seconds=1.767 rows=1
+2026-08-24 23:45:24 - WARNING - [absl] [step_idx=1, pair_index=0, group_id=4] trajectory clipped: MAX_CONTEXT_LIMIT_REACHED
+[PERF] stage=rollout_generate seconds=1.764 rows=1
+2026-08-24 23:45:25 - WARNING - [absl] [step_idx=1, pair_index=1, group_id=4] trajectory clipped: MAX_CONTEXT_LIMIT_REACHED
+[PERF] stage=rollout_generate seconds=1.745 rows=1
+2026-08-24 23:45:27 - WARNING - [absl] [step_idx=1, pair_index=2, group_id=4] trajectory clipped: MAX_CONTEXT_LIMIT_REACHED
+[PERF] stage=rollout_generate seconds=1.764 rows=1
+2026-08-24 23:45:29 - WARNING - [absl] [step_idx=1, pair_index=3, group_id=4] trajectory clipped: MAX_CONTEXT_LIMIT_REACHED
+INFO 08-24 23:45:30 [loggers.py:273] Engine 000: Avg prompt throughput: 71.5 tokens/s, Avg generation throughput: 145.1 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.1%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=1.792 rows=1
+2026-08-24 23:45:31 - WARNING - [absl] [step_idx=1, pair_index=4, group_id=4] trajectory clipped: MAX_CONTEXT_LIMIT_REACHED
+INFO 08-24 23:45:31 [loggers.py:273] Engine 000: Avg prompt throughput: 98.2 tokens/s, Avg generation throughput: 118.4 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.1%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=1.751 rows=1
+2026-08-24 23:45:33 - WARNING - [absl] [step_idx=1, pair_index=5, group_id=4] trajectory clipped: MAX_CONTEXT_LIMIT_REACHED
+[PERF] stage=rollout_generate seconds=1.742 rows=1
+2026-08-24 23:45:34 - WARNING - [absl] [step_idx=1, pair_index=6, group_id=4] trajectory clipped: MAX_CONTEXT_LIMIT_REACHED
+[PERF] stage=rollout_generate seconds=1.734 rows=1
+2026-08-24 23:45:36 - WARNING - [absl] [step_idx=1, pair_index=7, group_id=4] trajectory clipped: MAX_CONTEXT_LIMIT_REACHED
+INFO 08-24 23:45:40 [loggers.py:273] Engine 000: Avg prompt throughput: 50.6 tokens/s, Avg generation throughput: 90.1 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.1%, Prefix cache hit rate: 0.0%
+INFO 08-24 23:45:41 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 146.5 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.2%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=5.112 rows=1
+2026-08-24 23:45:41 - WARNING - [absl] [step_idx=1, pair_index=0, group_id=5] trajectory clipped: MAX_CONTEXT_LIMIT_REACHED
+[PERF] stage=rollout_generate seconds=1.750 rows=1
+2026-08-24 23:45:43 - WARNING - [absl] [step_idx=1, pair_index=1, group_id=5] trajectory clipped: MAX_CONTEXT_LIMIT_REACHED
+[PERF] stage=rollout_generate seconds=1.754 rows=1
+2026-08-24 23:45:45 - WARNING - [absl] [step_idx=1, pair_index=2, group_id=5] trajectory clipped: MAX_CONTEXT_LIMIT_REACHED
+[PERF] stage=rollout_generate seconds=1.750 rows=1
+2026-08-24 23:45:47 - WARNING - [absl] [step_idx=1, pair_index=3, group_id=5] trajectory clipped: MAX_CONTEXT_LIMIT_REACHED
+[PERF] stage=rollout_generate seconds=1.769 rows=1
+2026-08-24 23:45:48 - WARNING - [absl] [step_idx=1, pair_index=4, group_id=5] trajectory clipped: MAX_CONTEXT_LIMIT_REACHED
+INFO 08-24 23:45:50 [loggers.py:273] Engine 000: Avg prompt throughput: 107.4 tokens/s, Avg generation throughput: 144.9 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.2%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=1.796 rows=1
+2026-08-24 23:45:50 - WARNING - [absl] [step_idx=1, pair_index=5, group_id=5] trajectory clipped: MAX_CONTEXT_LIMIT_REACHED
+INFO 08-24 23:45:51 [loggers.py:273] Engine 000: Avg prompt throughput: 143.9 tokens/s, Avg generation throughput: 145.4 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.2%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=1.778 rows=1
+2026-08-24 23:45:52 - WARNING - [absl] [step_idx=1, pair_index=6, group_id=5] trajectory clipped: MAX_CONTEXT_LIMIT_REACHED
+[PERF] stage=rollout_generate seconds=1.784 rows=1
+2026-08-24 23:45:54 - WARNING - [absl] [step_idx=1, pair_index=7, group_id=5] trajectory clipped: MAX_CONTEXT_LIMIT_REACHED
+[PERF] stage=rollout_generate seconds=1.784 rows=1
+2026-08-24 23:45:56 - WARNING - [absl] [step_idx=1, pair_index=0, group_id=6] trajectory clipped: MAX_CONTEXT_LIMIT_REACHED
+/mnt/disks/tunix-data/tunix_code_rl/canon-zero-tim/tasks/v1-gsm8k-onehost-xprof-pair/scripts/run_onehost_gsm8k_xprof_inner.sh: line 83:  1194 Killed                  python3 -u examples/math_gsm8k/qwen3_grpo_demo.py --mesh_dp=4 --mesh_tp=1 --batch_size=8 --mini_batch_size=8 --train_micro_batch_size=8 --compute_logps_micro_batch_size=8 --train_trajectory_micro_batch_size=4 --max_steps=3 --num_generations=8 --max_prompt_length=1024 --max_response_length=256 --max_concurrency=1 --rollout_vllm_hbm_utilization=0.20 --rollout_vllm_max_num_seqs=16 --rollout_vllm_max_num_batched_tokens=256 --wandb_project=v1-gsm8k-onehost-xprof --wandb_run_name="v1-gsm8k-xprof-${V1_GSM8K_XPROF_ARM}-${V1_GSM8K_XPROF_LABEL}"
+[V1.GSM8K.XPROF] RUN_END arm=native docker_exit=137 elapsed_seconds=377
