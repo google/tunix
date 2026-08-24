@@ -198,9 +198,9 @@ class PageManagerTest(parameterized.TestCase):
     pm = pm.assign(alloc, n_pages)
 
     tokens = jnp.arange(10, 18, dtype=jnp.int32)
-    pm = pm.load_values(tokens, q_lens)
+    pm = pm.load_values(tokens, q_lens, 'tokens')
 
-    out_tokens = pm.to_array(8, q_lens)
+    out_tokens = pm.to_array(8, q_lens, 'tokens')
     np.testing.assert_array_equal(out_tokens, tokens)
 
   def test_load_values_with_subshape(self):
@@ -220,9 +220,9 @@ class PageManagerTest(parameterized.TestCase):
     pm = pm.assign(alloc, n_pages)
 
     values = jnp.arange(8 * 2 * 4, dtype=jnp.float32).reshape((8, 2, 4))
-    pm = pm.load_values(values, q_lens)
+    pm = pm.load_values(values, q_lens, 'tokens')
 
-    out_values = pm.to_array(8, q_lens)
+    out_values = pm.to_array(8, q_lens, 'tokens')
     np.testing.assert_array_equal(out_values, values)
 
   def test_insert_values_no_subshape(self):
@@ -241,7 +241,7 @@ class PageManagerTest(parameterized.TestCase):
     pm = pm.assign(alloc, n_pages1)
 
     init_values = jnp.array([42, 43, 44])
-    pm = pm.load_values(init_values, jnp.array([1, 2, 0]))
+    pm = pm.load_values(init_values, jnp.array([1, 2, 0]), 'tokens')
 
     n_pages2 = jnp.array([1, 1, 1])
     pm, alloc2 = pm.allocate(n_pages2)
@@ -274,7 +274,7 @@ class PageManagerTest(parameterized.TestCase):
     pm = pm.assign(alloc, n_pages1)
 
     init_values = jnp.arange(3 * 2 * 4, dtype=jnp.float32).reshape((3, 2, 4))
-    pm = pm.load_values(init_values, jnp.array([1, 2, 0]))
+    pm = pm.load_values(init_values, jnp.array([1, 2, 0]), 'tokens')
 
     n_pages2 = jnp.array([1, 1, 1])
     pm, alloc2 = pm.allocate(n_pages2)
@@ -313,7 +313,7 @@ class PageManagerTest(parameterized.TestCase):
     pm, alloc = pm.allocate(n_pages)
     pm = pm.assign(alloc, n_pages)
     tokens = jnp.array([42, 43, 44, 45, 46], dtype=jnp.int32)
-    pm = pm.load_values(tokens, q_lens)
+    pm = pm.load_values(tokens, q_lens, 'tokens')
 
     # Offload first sequence entirely to CPU
     pages_to_offload = 2

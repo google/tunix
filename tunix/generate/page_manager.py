@@ -567,7 +567,7 @@ class TpuCpuPageManagerConfig:
     if self.num_tpu_pages < self.max_num_pages_per_seq:
       raise ValueError(
           'TPU block capacity is too small. '
-          f'Available pages: {tpu_num_pages}, Max required per seq: {self.max_num_pages_per_seq}'
+          f'Available pages: {self.num_tpu_pages}, Max required per seq: {self.max_num_pages_per_seq}'
       )
 
     tpu_block = self._make_block(num_pages=self.num_tpu_pages,

@@ -14,18 +14,23 @@ class CacheManagerTest(unittest.TestCase):
 
   def setUp(self):
     super().setUp()
-    self.config = pm_lib.CacheManagerConfig(
-        page_size=2,
-        page_subshape=(2, 4),
-        dtype=jnp.float32,
-        max_num_seqs=5,
-        max_seq_len=10,
-        max_tpu_bytes=1000,
-        max_cpu_bytes=1000,
-    )
+    class DummyCacheConfig:
+      page_size = 2
+      max_num_seqs = 5
+      max_prompt_length = 5
+      max_tokens_to_generate = 5
+      max_tpu_bytes = 1920
+    
+    class DummyModelConfig:
+      num_layers = 1
+      num_kv_heads = 2
+      head_dim = 4
+
+    self.dummy_cache_config = DummyCacheConfig()
+    self.dummy_model_config = DummyModelConfig()
 
   def test_initialization_single_device(self):
-    pm = self.config.init()
+    pm = pm_lib.init_cache_manager(self.dummy_cache_config, self.dummy_model_config, jnp.float32, max_cpu_bytes=1920)
 
     self.assertIsNotNone(pm.page_manager.tpu_block)
     self.assertEqual(pm.page_manager.tpu_block.total_num_pages, 15)
@@ -36,7 +41,7 @@ class CacheManagerTest(unittest.TestCase):
     self.assertEqual(pm.max_num_pages_per_seq, 5)
 
   def test_allocate(self):
-    pm = self.config.init()
+    pm = pm_lib.init_cache_manager(self.dummy_cache_config, self.dummy_model_config, jnp.float32, max_cpu_bytes=1920)
 
     allocated_ids = pm.allocate(2)
     self.assertEqual(len(allocated_ids), 2)
@@ -46,7 +51,7 @@ class CacheManagerTest(unittest.TestCase):
     self.assertEqual(pm.seq_lens[0], 2)
 
   def test_offload_and_load(self):
-    pm = self.config.init()
+    pm = pm_lib.init_cache_manager(self.dummy_cache_config, self.dummy_model_config, jnp.float32, max_cpu_bytes=1920)
 
     # allocate 3 pages
     allocated_ids = pm.allocate(3)
@@ -63,7 +68,7 @@ class CacheManagerTest(unittest.TestCase):
     self.assertEqual(pm.available_cpu_pages, 15)
 
   def test_evict(self):
-    pm = self.config.init()
+    pm = pm_lib.init_cache_manager(self.dummy_cache_config, self.dummy_model_config, jnp.float32, max_cpu_bytes=1920)
     # allocate 4 pages
     allocated_ids = pm.allocate(4)
     pm.evict(allocated_ids)
