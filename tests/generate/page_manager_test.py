@@ -61,7 +61,7 @@ class PageManagerTest(parameterized.TestCase):
 
     q_lens = jnp.array([0, 1, 2, 0, 5])
     pm, allocated_idxs = pm.allocate(q_lens)
-    pm = pm.assign(jnp.arange(5), allocated_idxs, q_lens)
+    pm = pm.assign(allocated_idxs, q_lens)
 
     np.testing.assert_array_equal(pm.seq_lens, q_lens)
     np.testing.assert_array_equal(pm.page_indices[1][:1], [0])
@@ -95,7 +95,7 @@ class PageManagerTest(parameterized.TestCase):
     pages_needed = jnp.array(utils.cdiv(q_lens, page_size))
 
     pm, allocated_idxs = pm.allocate(pages_needed)
-    pm = pm.assign(jnp.arange(5), allocated_idxs, pages_needed)
+    pm = pm.assign(allocated_idxs, pages_needed)
 
     np.testing.assert_array_equal(pm.seq_lens, pages_needed)
     np.testing.assert_array_equal(pm.page_indices[0][:1], [0])
@@ -115,11 +115,9 @@ class PageManagerTest(parameterized.TestCase):
     )
     pm = config.init()
     pm, first_allocated_idxs = pm.allocate(jnp.array([0, 1, 2, 0, 5]))
-    pm = pm.assign(jnp.arange(5), first_allocated_idxs,
-                   jnp.array([0, 1, 2, 0, 5]))
+    pm = pm.assign(first_allocated_idxs, jnp.array([0, 1, 2, 0, 5]))
     pm, second_allocated_idxs = pm.allocate(jnp.array([1, 1, 0, 0, 2]))
-    pm = pm.assign(jnp.arange(5), second_allocated_idxs,
-                   jnp.array([1, 1, 0, 0, 2]))
+    pm = pm.assign(second_allocated_idxs, jnp.array([1, 1, 0, 0, 2]))
 
     expected_seq_lens = jnp.array([1, 2, 2, 0, 7])
     np.testing.assert_array_equal(pm.seq_lens, expected_seq_lens)
@@ -145,7 +143,7 @@ class PageManagerTest(parameterized.TestCase):
     q_lens = jnp.array([0, 1, 2, 0, 5])
     n_pages = jnp.array([0, 1, 2, 0, 5])
     pm, alloc = pm.allocate(n_pages)
-    pm = pm.assign(jnp.arange(5), alloc, n_pages)
+    pm = pm.assign(alloc, n_pages)
 
     initial_avail = pm.tpu_block.num_available_pages
     should_release = jnp.array([False, True, False, False, True])
@@ -168,14 +166,14 @@ class PageManagerTest(parameterized.TestCase):
 
     q_lens1 = jnp.array([0, 1, 2, 0, 3])
     pm, alloc1 = pm.allocate(q_lens1)
-    pm = pm.assign(jnp.arange(5), alloc1, q_lens1)
+    pm = pm.assign(alloc1, q_lens1)
     avail_after_first = pm.tpu_block.num_available_pages
     pm = pm.release_for_window()
     self.assertEqual(pm.tpu_block.num_available_pages, avail_after_first)
 
     q_lens2 = jnp.array([0, 0, 0, 0, 2])
     pm, alloc2 = pm.allocate(q_lens2)
-    pm = pm.assign(jnp.arange(5), alloc2, q_lens2)
+    pm = pm.assign(alloc2, q_lens2)
 
     avail_before_release = pm.tpu_block.num_available_pages
     pm = pm.release_for_window()
@@ -197,7 +195,7 @@ class PageManagerTest(parameterized.TestCase):
     q_lens = jnp.array([0, 1, 2, 0, 5])
     n_pages = jnp.array([0, 1, 2, 0, 5])
     pm, alloc = pm.allocate(n_pages)
-    pm = pm.assign(jnp.arange(5), alloc, n_pages)
+    pm = pm.assign(alloc, n_pages)
 
     tokens = jnp.arange(10, 18, dtype=jnp.int32)
     pm = pm.load_values(tokens, q_lens)
@@ -219,7 +217,7 @@ class PageManagerTest(parameterized.TestCase):
     q_lens = jnp.array([0, 1, 2, 0, 5])
     n_pages = jnp.array([0, 1, 2, 0, 5])
     pm, alloc = pm.allocate(n_pages)
-    pm = pm.assign(jnp.arange(5), alloc, n_pages)
+    pm = pm.assign(alloc, n_pages)
 
     values = jnp.arange(8 * 2 * 4, dtype=jnp.float32).reshape((8, 2, 4))
     pm = pm.load_values(values, q_lens)
@@ -240,14 +238,14 @@ class PageManagerTest(parameterized.TestCase):
 
     n_pages1 = jnp.array([1, 1, 0])
     pm, alloc = pm.allocate(n_pages1)
-    pm = pm.assign(jnp.arange(3), alloc, n_pages1)
+    pm = pm.assign(alloc, n_pages1)
 
     init_values = jnp.array([42, 43, 44])
     pm = pm.load_values(init_values, jnp.array([1, 2, 0]))
 
     n_pages2 = jnp.array([1, 1, 1])
     pm, alloc2 = pm.allocate(n_pages2)
-    pm = pm.assign(jnp.arange(3), alloc2, n_pages2)
+    pm = pm.assign(alloc2, n_pages2)
 
     new_values = jnp.array([99, 100, 101], dtype=jnp.int32)
     valid_mask = jnp.array([True, True, True])
@@ -273,14 +271,14 @@ class PageManagerTest(parameterized.TestCase):
 
     n_pages1 = jnp.array([1, 1, 0])
     pm, alloc = pm.allocate(n_pages1)
-    pm = pm.assign(jnp.arange(3), alloc, n_pages1)
+    pm = pm.assign(alloc, n_pages1)
 
     init_values = jnp.arange(3 * 2 * 4, dtype=jnp.float32).reshape((3, 2, 4))
     pm = pm.load_values(init_values, jnp.array([1, 2, 0]))
 
     n_pages2 = jnp.array([1, 1, 1])
     pm, alloc2 = pm.allocate(n_pages2)
-    pm = pm.assign(jnp.arange(3), alloc2, n_pages2)
+    pm = pm.assign(alloc2, n_pages2)
 
     new_values = jnp.arange(3 * 2 * 4, dtype=jnp.float32).reshape(
         (3, 2, 4)) + 100.0
@@ -313,7 +311,7 @@ class PageManagerTest(parameterized.TestCase):
     q_lens = jnp.array([2, 3, 0, 0, 0])
     n_pages = jnp.array([2, 3, 0, 0, 0])
     pm, alloc = pm.allocate(n_pages)
-    pm = pm.assign(jnp.arange(5), alloc, n_pages)
+    pm = pm.assign(alloc, n_pages)
     tokens = jnp.array([42, 43, 44, 45, 46], dtype=jnp.int32)
     pm = pm.load_values(tokens, q_lens)
 

@@ -177,18 +177,19 @@ class TpuCpuPageManager:
     return new_page_manager, padded_allocated_page_data
 
   @jax.named_call
-  def assign(self, seq_idxs: jax.Array, page_indices: jax.Array,
+  def assign(self, page_indices: jax.Array,
              lens: jax.Array) -> 'TpuCpuPageManager':
     """Assigns physical page indices to sequences directly."""
     ragged = RaggedArray(data=page_indices, lens=lens)
 
-    target_rows = seq_idxs[ragged.row_idxs]
+    target_rows = ragged.row_idxs
     target_cols = self.seq_lens[target_rows] + ragged.intra_offsets
 
     updated_page_indices = self.page_indices.at[target_rows,
                                                 target_cols].set(ragged.data,
                                                                  mode='drop')
 
+    seq_idxs = jnp.arange(lens.shape[0])
     updated_lens = self.seq_lens.at[seq_idxs].set(self.seq_lens[seq_idxs] +
                                                   lens,
                                                   mode='drop')
