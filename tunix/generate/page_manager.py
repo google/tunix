@@ -120,7 +120,7 @@ class Block:
     )
 
     updated_pages = ( 
-        self.pages.at[safe_page_indices, page_offsets].set(
+        self.pages.at[target_page_indices, page_offsets].set(
             values,
             mode='drop',
         )
@@ -398,7 +398,7 @@ class TpuCpuPageManager:
     is_real = jnp.arange(values_ragged.capacity) < values_ragged.total_length
     
     new_tpu_block = self.tpu_block.write_values(
-        values, phys_page_ids, page_offsets, is_real
+        values_ragged.capacity, values, phys_page_ids, page_offsets
     )
 
     return dataclasses.replace(self, tpu_block=new_tpu_block)
@@ -409,20 +409,18 @@ class TpuCpuPageManager:
       idxs: jax.Array | None = None,
       valid_mask: jax.Array | None = None,
   ) -> 'TpuCpuPageManager':
-    """Insert 1 new token per sequence to the last allocated idx in paged memory."""
+    """Insert 1 new token per sequence into paged memory."""
     if valid_mask is None:
       valid_mask = self.seq_lens > 0
-
-    if idxs is None:
-      idxs = self.seq_lens - 1
-
+    
+    n_values = jnp.sum(valid_mask)
     local_page_cols = idxs // self.page_size
     page_offsets = idxs % self.page_size
     seq_idxs = jnp.arange(self.batch_size)
     phys_page_ids = self.page_indices[seq_idxs, local_page_cols]
 
     new_tpu_block = self.tpu_block.write_values(
-        values, phys_page_ids, page_offsets, valid_mask
+        n_values, values, phys_page_ids, page_offsets
     )
 
     return dataclasses.replace(self, tpu_block=new_tpu_block)
@@ -430,11 +428,12 @@ class TpuCpuPageManager:
   def to_array(
       self,
       total_num_elements: int,
+      seq_lens: int,
   ) -> jax.Array:
     """Extracts array of token IDs from paged memory."""
     elements_ragged = RaggedArray(
         data=jnp.zeros((total_num_elements,), dtype=jnp.int32),
-        lens=self.seq_lens * self.page_size,
+        lens=seq_lens,
     )
     seq_idxs = elements_ragged.row_idxs
     element_offsets = elements_ragged.intra_offsets
