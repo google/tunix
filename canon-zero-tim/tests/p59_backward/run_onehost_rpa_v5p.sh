@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Real four-chip v5p mechanism gate for the Attempt-3 RPA-local repair.
+# Real four-chip v5p mechanism gate for the P59 RPA and staged-spec repairs.
 set -euo pipefail
 
 label="${1:?usage: run_onehost_rpa_v5p.sh <unique-label>}"
@@ -53,7 +53,8 @@ sha256sum \
   "$pkg/patches/tpu_inference/25-attention-p59-local-kv.patch" \
   "$pkg/MANIFEST.sha256" \
   "$pkg/tests/p59_backward/probe_onehost_rpa_v5p.py" \
-  "$pkg/tests/p59_backward/run_onehost_rpa_v5p.sh" >"$raw"
+  "$pkg/tests/p59_backward/run_onehost_rpa_v5p.sh" \
+  "$repo/tunix/rl/canonical_qwen3_adapter.py" >"$raw"
 
 active="$(sudo docker ps --format '{{.Names}}' | grep -E '^(p51_|p59_)' || true)"
 if [[ -n "$active" ]]; then
@@ -91,14 +92,16 @@ if sudo docker ps --format '{{.Names}}' | grep -q "^${container}$"; then
 fi
 terminal_count="$(grep -ac '^P59_RPA_ONEHOST_V5P_PASS ' "$raw" || true)"
 local_marker_count="$(grep -ac '^\[PATHTRACE\] P59_RPA_LOCAL_KV_READY tp=2 local_q_heads=4 local_kv_heads=1 cache_heads=1 packing=2$' "$raw" || true)"
+restore_marker_count="$(grep -ac '^P59_STAGED_SPEC_ONEHOST_PASS topology=DP2xTP2 replicated_leaf_positive=1 wrong_placement_negative=1$' "$raw" || true)"
 traceback_count="$(grep -ac 'Traceback (most recent call last)' "$raw" || true)"
 red=""
 [[ "$docker_rc" -eq 0 ]] || red="$red docker_exit=$docker_rc"
 [[ "$terminal_count" -eq 1 ]] || red="$red terminal=$terminal_count/1"
 [[ "$local_marker_count" -eq 1 ]] || red="$red local_marker=$local_marker_count/1"
+[[ "$restore_marker_count" -eq 1 ]] || red="$red restore_marker=$restore_marker_count/1"
 [[ "$traceback_count" -eq 0 ]] || red="$red traceback=$traceback_count"
 {
-  echo "P59_RPA_ONEHOST_SUMMARY docker_exit=$docker_rc elapsed_seconds=$elapsed terminal=$terminal_count local_marker=$local_marker_count traceback=$traceback_count"
+  echo "P59_RPA_ONEHOST_SUMMARY docker_exit=$docker_rc elapsed_seconds=$elapsed terminal=$terminal_count local_marker=$local_marker_count restore_marker=$restore_marker_count traceback=$traceback_count"
   if [[ -n "$red" ]]; then
     echo "P59_RPA_ONEHOST_RED$red"
   else

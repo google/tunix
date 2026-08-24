@@ -342,10 +342,10 @@ def _p59_manual_rank_axes(mesh, data_axis: str, label: str):
   return manual_axes
 
 
-def _p59_restore_unit_tp_staged_specs(
+def _p59_restore_physically_equal_staged_specs(
     trainer_state, staged_gradient, data_axis: str
 ):
-  """Restores unit-TP metadata only after exact physical equivalence."""
+  """Restores staged metadata only after exact physical equivalence."""
   if jax.tree.structure(trainer_state) != jax.tree.structure(staged_gradient):
     raise FunctionalMappingError(
         "P59 staged-spec restoration tree differs from trainer state"
@@ -372,7 +372,10 @@ def _p59_restore_unit_tp_staged_specs(
           f"{actual_data_axis!r} != {data_axis!r}"
       )
     expected_shape = (int(mesh.shape[data_axis]),) + tuple(state_value.shape)
-    if staged_value.shape != expected_shape or staged_value.dtype != jnp.float32:
+    if (
+        staged_value.shape != expected_shape
+        or staged_value.dtype != jnp.float32
+    ):
       raise FunctionalMappingError(
           "P59 staged-spec restoration shape/dtype changed: "
           f"{staged_value.shape}/{staged_value.dtype} != "
@@ -386,9 +389,9 @@ def _p59_restore_unit_tp_staged_specs(
     )
     if staged_sharding == expected_sharding:
       return staged_value
-    if int(mesh.shape[model_axis]) != 1 or staged_sharding.mesh != mesh:
+    if staged_sharding.mesh != mesh:
       raise FunctionalMappingError(
-          "P59 staged-spec restoration is not a same-mesh TP1 difference"
+          "P59 staged-spec restoration is not a same-mesh difference"
       )
     actual_spec = tuple(staged_sharding.spec)
     if not actual_spec or actual_spec[0] != data_axis:
@@ -4708,7 +4711,7 @@ class Qwen3EngineForwardAdapter:
     staged_trainer_gradient = self._p59_report_adjoint_fn(
         trainer_state, staged_engine_cotangents
     )
-    return _p59_restore_unit_tp_staged_specs(
+    return _p59_restore_physically_equal_staged_specs(
         trainer_state, staged_trainer_gradient, data_axis
     )
 

@@ -39,11 +39,13 @@ $docker run --rm \
 
     XLA_FLAGS=--xla_force_host_platform_device_count=8 \
       PYTHONPATH=/workspace python3 tests/rl/canonical_qwen3_adapter_test.py \
-        CanonicalQwen3AdapterTest.test_p59_tpx_executes_fixed_head_local_vjp_and_global_negative
+        CanonicalQwen3AdapterTest.test_p59_tpx_executes_fixed_head_local_vjp_and_global_negative \
+        CanonicalQwen3AdapterTest.test_p59_restores_only_physically_equal_tpx_staged_specs
     P59_TEST_TP_SIZE=8 \
       XLA_FLAGS=--xla_force_host_platform_device_count=16 \
       PYTHONPATH=/workspace python3 tests/rl/canonical_qwen3_adapter_test.py \
-        CanonicalQwen3AdapterTest.test_p59_tpx_executes_fixed_head_local_vjp_and_global_negative
+        CanonicalQwen3AdapterTest.test_p59_tpx_executes_fixed_head_local_vjp_and_global_negative \
+        CanonicalQwen3AdapterTest.test_p59_restores_only_physically_equal_tpx_staged_specs
 
     bash canon-zero-tim/install.sh "$qwen1p7b_overlay" \
       --from-path /usr/local/lib/python3.12/site-packages/tpu_inference \
@@ -67,5 +69,5 @@ $docker run --rm \
       PYTHONPATH="$qwen8b_overlay:/workspace" python3 \
         canon-zero-tim/tests/p59_backward/probe_tp4_installed_attention_composition.py
 
-    echo "P59_TP_SHIM_EXACT_IMAGE_PASS fixed_head=2 installed_projection=2 installed_attention=2 report_adjoint=2 fixed_reducer=2 topologies=DP2xTP4,DP2xTP8 optimizer_commits=0 manifests=2x36/36"
+    echo "P59_TP_SHIM_EXACT_IMAGE_PASS fixed_head=2 installed_projection=2 installed_attention=2 report_adjoint=2 staged_spec_restore=2 fixed_reducer=2 topologies=DP2xTP4,DP2xTP8 optimizer_commits=0 manifests=2x36/36"
   '

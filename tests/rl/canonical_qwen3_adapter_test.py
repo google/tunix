@@ -1061,7 +1061,10 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
         ),
     )
     canonicalized_host = np.asarray(canonicalized[0]).copy()
-    restored = canonical_qwen3_adapter._p59_restore_unit_tp_staged_specs(  # pylint: disable=protected-access
+    restore_staged_specs = (  # pylint: disable=protected-access
+        canonical_qwen3_adapter._p59_restore_physically_equal_staged_specs
+    )
+    restored = restore_staged_specs(
         trainer_state, canonicalized, "dp"
     )
     np.testing.assert_array_equal(np.asarray(restored[0]), canonicalized_host)
@@ -1082,8 +1085,75 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
         canonical_qwen3_adapter.FunctionalMappingError,
         "requires leading-DP placement",
     ):
-      canonical_qwen3_adapter._p59_restore_unit_tp_staged_specs(  # pylint: disable=protected-access
+      restore_staged_specs(
           trainer_state, wrong_leading_axis, "dp"
+      )
+
+  def test_p59_restores_only_physically_equal_tpx_staged_specs(self):
+    tp_size = int(os.environ.get("P59_TEST_TP_SIZE", "4"))
+    if tp_size not in (4, 8):
+      self.fail(f"unsupported test TP size: {tp_size}")
+    device_count = 2 * tp_size
+    if len(jax.devices()) < device_count:
+      self.skipTest(
+          f"requires {device_count} forced CPU or accelerator devices"
+      )
+    mesh = jax.sharding.Mesh(
+        np.asarray(jax.devices()[:device_count]).reshape(2, tp_size),
+        ("dp", "tp"),
+    )
+    trainer_state = (
+        jax.device_put(
+            jnp.arange(4, dtype=jnp.bfloat16),
+            jax.sharding.NamedSharding(
+                mesh, jax.sharding.PartitionSpec(None)
+            ),
+        ),
+    )
+    canonicalized = (
+        jax.device_put(
+            jnp.arange(8, dtype=jnp.float32).reshape(2, 4) / 5.0,
+            jax.sharding.NamedSharding(
+                mesh, jax.sharding.PartitionSpec("dp")
+            ),
+        ),
+    )
+    restore_staged_specs = (  # pylint: disable=protected-access
+        canonical_qwen3_adapter._p59_restore_physically_equal_staged_specs
+    )
+    restored = restore_staged_specs(
+        trainer_state, canonicalized, "dp"
+    )
+    np.testing.assert_array_equal(
+        np.asarray(restored[0]), np.asarray(canonicalized[0])
+    )
+    self.assertEqual(
+        restored[0].sharding.spec,
+        jax.sharding.PartitionSpec("dp", None),
+    )
+
+    tp_sharded_state = (
+        jax.device_put(
+            jnp.arange(32, dtype=jnp.bfloat16).reshape(4, 8),
+            jax.sharding.NamedSharding(
+                mesh, jax.sharding.PartitionSpec(None, "tp")
+            ),
+        ),
+    )
+    tp_replicated_staged = (
+        jax.device_put(
+            jnp.arange(64, dtype=jnp.float32).reshape(2, 4, 8) / 5.0,
+            jax.sharding.NamedSharding(
+                mesh, jax.sharding.PartitionSpec("dp")
+            ),
+        ),
+    )
+    with self.assertRaisesRegex(
+        canonical_qwen3_adapter.FunctionalMappingError,
+        "placements are not physically equal",
+    ):
+      restore_staged_specs(
+          tp_sharded_state, tp_replicated_staged, "dp"
       )
 
   def test_p59_rank_parallel_head_accepts_trainer_dp_tp_mesh(self):
@@ -1603,6 +1673,21 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
       # Continue the same real fixed-head cotangent through P59's production
       # report-adjoint and fixed reducer.  The identity mapping isolates this
       # composition boundary: it does not replace either production stage.
+      replicated_parameter = jax.device_put(
+          jnp.arange(4, dtype=jnp.bfloat16),
+          jax.sharding.NamedSharding(
+              trainer_mesh, jax.sharding.PartitionSpec(None)
+          ),
+      )
+      staged_replicated = jax.device_put(
+          (jnp.arange(8, dtype=jnp.float32).reshape(2, 4) / 9.0).astype(
+              jnp.bfloat16
+          ),
+          jax.sharding.NamedSharding(
+              trainer_mesh, jax.sharding.PartitionSpec("dp")
+          ),
+      )
+      staged_replicated_host = np.asarray(staged_replicated).copy()
       adapter = object.__new__(
           canonical_qwen3_adapter.Qwen3EngineForwardAdapter
       )
@@ -1612,7 +1697,10 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
               get_head_size=lambda: 1,
           )
       )
-      adapter._engine_state_contract = (weight,)  # pylint: disable=protected-access
+      adapter._engine_state_contract = (  # pylint: disable=protected-access
+          weight,
+          replicated_parameter,
+      )
       adapter._key_mappings = {}  # pylint: disable=protected-access
       adapter._transpose_keys = None  # pylint: disable=protected-access
       adapter._hook_fns = None  # pylint: disable=protected-access
@@ -1632,11 +1720,12 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
           side_effect=identity_mapping,
       ):
         staged_trainer = adapter._p59_rank_parallel_report_adjoint(  # pylint: disable=protected-access
-            (weight,), (staged,)
+            (weight, replicated_parameter), (staged, staged_replicated)
         )
       template = adapter._p59_reducer_template(  # pylint: disable=protected-access
-          (weight,), staged_trainer
+          (weight, replicated_parameter), staged_trainer
       )
+      staged_trainer_replicated_host = np.asarray(staged_trainer[1]).copy()
       reducer = dp_training.FixedDPRankGradientReducer(
           template,
           dp_size=2,
@@ -1650,6 +1739,17 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
       )
       np.testing.assert_array_equal(
           np.asarray(reduced[0]), np.asarray(expected_reduced)
+      )
+      np.testing.assert_array_equal(
+          staged_trainer_replicated_host, staged_replicated_host
+      )
+      self.assertEqual(
+          staged_trainer[1].sharding.spec,
+          jax.sharding.PartitionSpec("dp", None),
+      )
+      np.testing.assert_array_equal(
+          np.asarray(reduced[1]),
+          staged_replicated_host.astype(np.float32).sum(axis=0),
       )
       self.assertEqual(
           reduction_report["rank_gradient_staging_mode"],

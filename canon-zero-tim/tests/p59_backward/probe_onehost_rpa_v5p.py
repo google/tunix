@@ -185,6 +185,66 @@ def _check_gradients(gradients, primals):
   return norms
 
 
+def _run_staged_spec_restore(mesh):
+  """Exercises the Attempt-6 replicated-leaf seam on real DP2xTP2 TPU."""
+  trainer_state = (
+      _put(jnp.arange(4, dtype=jnp.bfloat16), mesh, (None,)),
+  )
+  staged_gradient = (
+      _put(
+          jnp.arange(8, dtype=jnp.float32).reshape(2, 4) / 5.0,
+          mesh,
+          ("data",),
+      ),
+  )
+  restored = (
+      canonical_qwen3_adapter._p59_restore_physically_equal_staged_specs(  # pylint: disable=protected-access
+          trainer_state, staged_gradient, "data"
+      )
+  )
+  jax.block_until_ready(restored)
+  np.testing.assert_array_equal(
+      np.asarray(jax.device_get(restored[0])),
+      np.asarray(jax.device_get(staged_gradient[0])),
+  )
+  if restored[0].sharding.spec != jax.sharding.PartitionSpec("data", None):
+    raise AssertionError(
+        "P59 one-host staged-spec restore did not retain explicit TP metadata: "
+        f"{restored[0].sharding.spec}"
+    )
+
+  tp_sharded_state = (
+      _put(
+          jnp.arange(32, dtype=jnp.bfloat16).reshape(4, 8),
+          mesh,
+          (None, "model"),
+      ),
+  )
+  tp_replicated_staged = (
+      _put(
+          jnp.arange(64, dtype=jnp.float32).reshape(2, 4, 8) / 5.0,
+          mesh,
+          ("data",),
+      ),
+  )
+  try:
+    canonical_qwen3_adapter._p59_restore_physically_equal_staged_specs(  # pylint: disable=protected-access
+        tp_sharded_state, tp_replicated_staged, "data"
+    )
+  except canonical_qwen3_adapter.FunctionalMappingError as error:
+    if "placements are not physically equal" not in str(error):
+      raise
+  else:
+    raise AssertionError(
+        "P59 one-host TP-replicated wrong-placement negative did not fire"
+    )
+  print(
+      "P59_STAGED_SPEC_ONEHOST_PASS topology=DP2xTP2 "
+      "replicated_leaf_positive=1 wrong_placement_negative=1",
+      flush=True,
+  )
+
+
 def _run_ordinary_tp4(attention, devices):
   # The same four devices are rearranged as DP1xTP4. With no outer manual P59
   # map, two global KV heads must follow the unchanged stock expansion to four.
@@ -233,6 +293,7 @@ def main() -> None:
       ("data", "attn_dp", "attn_dp_expert", "expert", "model", "dcp"),
   )
   values = _p59_inputs(outer_mesh)
+  _run_staged_spec_restore(outer_mesh)
   gradients = _run_p59_vjp(attention, engine_mesh, outer_mesh, values)
   jax.block_until_ready(gradients)
   norms = _check_gradients(gradients, values)
@@ -255,7 +316,7 @@ def main() -> None:
       "P59_RPA_ONEHOST_V5P_PASS "
       "p59_topology=DP2xTP2 ordinary_topology=DP1xTP4 "
       "real_rpa=2 rpa_vjp2=1 local_kv_heads=1 wrong_cache_negative=1 "
-      "ordinary_global_gqa=1 optimizer_commits=0 "
+      "ordinary_global_gqa=1 staged_spec_restore=1 optimizer_commits=0 "
       "gradient_norms=" + ",".join(f"{value:.8g}" for value in norms),
       flush=True,
   )
