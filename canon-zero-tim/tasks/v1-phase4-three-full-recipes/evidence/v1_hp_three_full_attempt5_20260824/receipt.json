@@ -1,0 +1,27 @@
+{
+  "schema": "v1-hp-three-full-attempt5-receipt-v1",
+  "timestamp": "2026-08-24T18:57:30Z",
+  "attempt": 5,
+  "jobs": {
+    "gsm8k": {
+      "jobset": "canon-v1hp-gsm8k-g64q-e15f737f",
+      "alignment": "PASS (0 delta / 194815 tokens)",
+      "p59_fused_linear": "READY (tp=4 site=gate_proj/up_proj declared=6144 local=1536)",
+      "error": "FunctionalMappingError: P59 staged-spec restoration is not a same-mesh TP1 difference",
+      "cause": "_p59_restore_unit_tp_staged_specs in canonical_qwen3_adapter.py"
+    },
+    "p45": {
+      "jobset": "canon-p57-fl-zero-f45q-e15f737f",
+      "alignment": "FAIL (116 differing elements on S_decode_vs_S_prefill with APC-on)",
+      "error": "AlignmentGateError: pre-backward alignment gate RED: ['S_decode_vs_S_prefill']",
+      "cause": "APC prefix cache numerical drift on P45 recipe"
+    },
+    "m15": {
+      "jobset": "canon-p57-fl-zero-m15-m15q-e15f737f",
+      "alignment": "PASS (0 delta / 116886 tokens with APC-off)",
+      "p59_fused_linear": "READY",
+      "error": "FunctionalMappingError: P59 staged-spec restoration is not a same-mesh TP1 difference",
+      "cause": "_p59_restore_unit_tp_staged_specs in canonical_qwen3_adapter.py"
+    }
+  }
+}
