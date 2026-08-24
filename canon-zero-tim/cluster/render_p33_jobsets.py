@@ -320,6 +320,23 @@ def render_jobset(
   head = _head_pod(document)
   if head["restartPolicy"] != "Never":
     raise ValueError("strict P33 head must retain restartPolicy=Never")
+  affinity = head.setdefault("affinity", {})
+  pod_anti_affinity = affinity.setdefault("podAntiAffinity", {})
+  required = pod_anti_affinity.setdefault(
+      "requiredDuringSchedulingIgnoredDuringExecution", []
+  )
+  anti_affinity_term = {
+      "labelSelector": {
+          "matchExpressions": [{
+              "key": "jobset.sigs.k8s.io/replicatedjob-name",
+              "operator": "In",
+              "values": ["pathways-head"],
+          }]
+      },
+      "topologyKey": "kubernetes.io/hostname",
+  }
+  if anti_affinity_term not in required:
+    required.append(anti_affinity_term)
   proxy = _container(head["initContainers"], "pathways-proxy")
   resource_manager = _container(head["initContainers"], "pathways-rm")
   ensure_proxy_xla_env(proxy)
