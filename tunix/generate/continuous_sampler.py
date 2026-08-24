@@ -90,7 +90,13 @@ class ContinuousSampler:
         max_seq_len: int = 1000,
         seed: int = 0,
     ):
-        self.transformer = transformer
+        self._transformer_graphdef = nnx.graphdef(transformer)
+        self._transformer_state = nnx.variables(transformer)
+        self._flattened_transformer_state = jax.tree.leaves(
+            self._transformer_state,
+            is_leaf=lambda x: isinstance(x, nnx.Variable),
+        )
+
         self.tokenizer = tokenizer
 
         config = transformer.config if hasattr(transformer, "config") else getattr(transformer, "model_config", None)
@@ -100,12 +106,56 @@ class ContinuousSampler:
         self.max_seq_len = max_seq_len
         self.seed = seed
         self.rng = jax.random.PRNGKey(seed)
-
-        self._transformer_graphdef, self._flattened_transformer_state = nnx.split(transformer)
         
         self._compiled_sample_step = jax.jit(
             self._sample_step_fn,
             static_argnames=["batch_size", "static_token_capacity"]
+        )
+
+    def model_def_and_state(self) -> tuple[Any, Any]:
+        return self._transformer_graphdef, self._flattened_transformer_state
+
+    @property
+    def transformer(self) -> nnx.Module:
+        return nnx.merge(
+            self._transformer_graphdef, self._flattened_transformer_state
+        )
+
+    @property
+    def transformer_state(self) -> Any:
+        return self._transformer_state
+
+    @transformer_state.setter
+    def transformer_state(self, state: Any) -> None:
+        def check_tree_structure(tree1, tree2):
+            if jax.tree_util.tree_structure(tree1) != jax.tree_util.tree_structure(tree2):
+                raise ValueError('New state must have the same structure as the old state.')
+
+            def check_shape_dtype_sharding(x, y):
+                def equivalent_sharding(x, y):
+                    if isinstance(x.sharding, jax.sharding.SingleDeviceSharding) and isinstance(y.sharding, jax.sharding.SingleDeviceSharding):
+                        return x.sharding.device_set == y.sharding.device_set
+                    if not (isinstance(x.sharding, jax.sharding.NamedSharding) and isinstance(y.sharding, jax.sharding.NamedSharding)):
+                        return False
+                    if x.sharding.mesh != y.sharding.mesh:
+                        return False
+                    mesh = x.sharding.mesh
+                    diff_spec = list(set(x.sharding.spec) - set(y.sharding.spec))
+                    for spec in diff_spec:
+                        if spec and mesh.shape[spec] != 1:
+                            return False
+                    return True
+
+                return jnp.shape(x) == jnp.shape(y) and x.dtype == y.dtype and equivalent_sharding(x, y)
+
+            if not all(jax.tree_util.tree_leaves(jax.tree_util.tree_map(check_shape_dtype_sharding, tree1, tree2))):
+                raise ValueError('New state must have the same shape, dtype and sharding as the old state.')
+
+        check_tree_structure(self._transformer_state, state)
+        self._transformer_state = state
+        self._flattened_transformer_state = jax.tree.leaves(
+            self._transformer_state,
+            is_leaf=lambda x: isinstance(x, nnx.Variable),
         )
 
     def sample_step(
