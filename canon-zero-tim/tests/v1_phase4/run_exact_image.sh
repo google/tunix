@@ -29,7 +29,7 @@ $docker run --rm \
         CanonicalQwen3AdapterTest.test_dp16_gathered_logprobs_pads_and_slices_each_data_rank
     XLA_FLAGS=--xla_force_host_platform_device_count=4 \
       python3 tests/rl/canonical_qwen3_adapter_test.py \
-        CanonicalQwen3AdapterTest.test_p59_rank_parallel_endpoint_pullbacks_match_serial_dp2_tp2
+        CanonicalQwen3AdapterTest.test_p59_rank_parallel_nonhead_pullbacks_match_serial_dp2_tp2
     XLA_FLAGS=--xla_force_host_platform_device_count=16 \
       python3 tests/rl/canonical_qwen3_adapter_test.py \
         CanonicalQwen3AdapterTest.test_p59_tp4_tp8_localizes_nested_engine_maps_and_collectives

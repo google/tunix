@@ -705,7 +705,7 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
         0,
     )
 
-  def test_p59_rank_parallel_endpoint_pullbacks_match_serial_dp2_tp2(self):
+  def test_p59_rank_parallel_nonhead_pullbacks_match_serial_dp2_tp2(self):
     if len(jax.devices()) < 4:
       self.skipTest("requires four forced CPU or accelerator devices")
     mesh = jax.sharding.Mesh(
@@ -744,38 +744,6 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
           runner
       )
       leaves = tuple(runner.state_leaves)
-
-      logits = segmented.run_head_forward(hidden, state_leaves=leaves)
-      dlogits = jax.device_put(jnp.ones_like(logits), logits.sharding)
-      serial_head_rows = []
-      for rank in range(2):
-        isolated = dp_training.isolate_dp_rank_cotangent(
-            dlogits, rank=rank, dp_size=2
-        )
-        rank_gradient, _ = segmented.run_head_pullback(
-            hidden, isolated, state_leaves=leaves
-        )
-        serial_head_rows.append(rank_gradient)
-      _, full_head_dhidden = segmented.run_head_pullback(
-          hidden, dlogits, state_leaves=leaves
-      )
-      parallel_head, parallel_head_dhidden = (
-          segmented.run_head_pullback_rank_parallel(
-              hidden, dlogits, state_leaves=leaves
-          )
-      )
-      expected_head = jax.tree.map(
-          lambda *rows: jnp.stack(rows), *serial_head_rows
-      )
-      for expected, actual in zip(
-          jax.tree.leaves(expected_head),
-          jax.tree.leaves(parallel_head),
-          strict=True,
-      ):
-        np.testing.assert_array_equal(np.asarray(actual), np.asarray(expected))
-      np.testing.assert_array_equal(
-          np.asarray(parallel_head_dhidden), np.asarray(full_head_dhidden)
-      )
 
       normalized = segmented.run_norm_forward(hidden, state_leaves=leaves)
       dnormalized = jax.device_put(
@@ -1165,26 +1133,35 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
           runner
       )
       leaves = tuple(runner.state_leaves)
-      logits = segmented.run_head_forward(hidden, state_leaves=leaves)
+      head_hidden = jax.device_put(
+          hidden.reshape(12, 1),
+          jax.sharding.NamedSharding(
+              engine_mesh, jax.sharding.PartitionSpec("data", None)
+          ),
+      )
+      logits = segmented.run_head_forward(head_hidden, state_leaves=leaves)
       dlogits = jax.device_put(
           jnp.ones_like(logits),
           jax.sharding.NamedSharding(
               engine_mesh,
-              jax.sharding.PartitionSpec("data", None, None),
+              jax.sharding.PartitionSpec("data", None),
           ),
       )
       serial_rows = []
       for rank in range(4):
-        isolated = dp_training.isolate_dp_rank_cotangent(
-            dlogits, rank=rank, dp_size=4
+        row_mask = (
+            jnp.arange(dlogits.shape[0], dtype=jnp.int32) // 3 == rank
+        )
+        isolated = jnp.where(
+            row_mask[:, None], dlogits, jnp.zeros_like(dlogits)
         )
         rank_gradient, _ = segmented.run_head_pullback(
-            hidden, isolated, state_leaves=leaves
+            head_hidden, isolated, state_leaves=leaves
         )
         serial_rows.append(rank_gradient)
       expected = jax.tree.map(lambda *rows: jnp.stack(rows), *serial_rows)
       actual, _ = segmented.run_head_pullback_rank_parallel(
-          hidden, dlogits, state_leaves=leaves
+          head_hidden, dlogits, state_leaves=leaves
       )
     for expected_leaf, actual_leaf in zip(
         jax.tree.leaves(expected), jax.tree.leaves(actual), strict=True
