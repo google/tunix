@@ -100,7 +100,9 @@ def run_engine_generation(
         gen = engine.generated_tokens.get(req_id, [])
         out_tokens.append(np.array(gen, dtype=np.int32))
         
-        if hasattr(tokenizer, "decode"):
+        if hasattr(tokenizer, "DecodeIds"):
+             decoded_outputs.append(tokenizer.DecodeIds(gen))
+        elif hasattr(tokenizer, "decode"):
              decoded_outputs.append(tokenizer.decode(gen))
         else:
              decoded_outputs.append("".join(str(t) for t in gen))
