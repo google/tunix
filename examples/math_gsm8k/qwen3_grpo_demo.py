@@ -211,13 +211,23 @@ if CANON_P32_WORKLOAD:
   dp_workloads.validate_environment(
       P32_WORKLOAD, require_reduction_admission=True
   )
-if CANON_P60_DETERMINISTIC_AB and _P32_WORKLOAD_NAME not in (
-    "gsm8k-p59-dp4-tp1",
-    "gsm8k-p60-dp2-tp2",
+_V1_GSM8K_XPROF_NATIVE_AB = (
+    os.getenv("CANON_V1_GSM8K_XPROF_ARM", "") == "native"
+    and os.getenv("CANON_GSM8K_VANILLA", "") == "1"
+)
+if (
+    CANON_P60_DETERMINISTIC_AB
+    and _P32_WORKLOAD_NAME not in (
+        "gsm8k-p59-dp4-tp1",
+        "gsm8k-p60-dp2-tp2",
+    )
+    and not _V1_GSM8K_XPROF_NATIVE_AB
 ):
   raise ValueError(
       "CANON_P60_DETERMINISTIC_AB requires an exact P60 one-host "
-      f"zero-TIM workload, got {_P32_WORKLOAD_NAME!r}"
+      "zero-TIM workload or the signed stock V1 XProf arm, got "
+      f"workload={_P32_WORKLOAD_NAME!r} "
+      f"xprof_arm={os.getenv('CANON_V1_GSM8K_XPROF_ARM', '')!r}"
   )
 if CANON_P61_BACKWARD_NUMERICAL_DIR and (
     not os.path.isabs(CANON_P61_BACKWARD_NUMERICAL_DIR)

@@ -60,6 +60,7 @@ from tunix.rl import deepswe_debug
 from tunix.rl import dp_workloads
 from tunix.perf.experimental import constants as perf_constants
 from tunix.rl import function_registry
+from tunix.rl import gsm8k_xprof
 from tunix.rl import host_memory as host_memory_lib
 from tunix.rl import perf_log
 from tunix.rl import reward_manager  # pylint: disable=unused-import
@@ -2831,6 +2832,14 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       # the evaluation block, so this remains the authoritative eval step.
       pre_update_train_step = self.rl_cluster.actor_trainer.train_steps
       pre_update_global_step = self.rl_cluster.global_steps
+      receipt_train_example, _ = alignment.unwrap_train_example(
+          merged_train_micro_batch
+      )
+      gsm8k_xprof.emit_work_receipt(
+          receipt_train_example,
+          train_step=int(pre_update_train_step),
+          global_step=int(pre_update_global_step),
+      )
 
       if os.environ.get("CANON_P28_G5C_ONLY", "") == "1":
         alignment_pass = self._run_p28_g5c_gate(merged_train_micro_batch)
