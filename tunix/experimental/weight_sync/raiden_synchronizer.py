@@ -23,11 +23,11 @@ from typing import Any, List, Optional, Tuple
 from absl import logging
 import jax
 import jax.numpy as jnp
-from tunix.experimental.orchestrator import weight_sync
+from tunix.experimental.weight_sync import weight_sync
 
 _ws_lib: Any = None
 try:
-  from tpu_sync.api.jax import weight_synchronizer as _ws_lib  # pylint: disable=g-import-not-at-top
+  from tpu_sync.api.jax import weight_synchronizer as _ws_lib  # pytype: disable=import-error  pylint: disable=g-import-not-at-top
 except ImportError:
   _ws_lib = None
 

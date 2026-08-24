@@ -274,8 +274,8 @@ class _CoordinatorWorkerShim:
 
 def _make_weight_sync_coordinator(trainer_handle, rollout_handle):
   """Builds the weight sync coordinator over the configured transport."""
-  from tunix.experimental.orchestrator import weight_sync  # pylint: disable=g-import-not-at-top
-  from tunix.experimental.orchestrator import weight_sync_coordinator  # pylint: disable=g-import-not-at-top
+  from tunix.experimental.weight_sync import weight_sync  # pylint: disable=g-import-not-at-top
+  from tunix.experimental.weight_sync import weight_sync_coordinator  # pylint: disable=g-import-not-at-top
   from tunix.experimental.orchestrator import worker_registry as registry_lib  # pylint: disable=g-import-not-at-top
 
   class _NullHandler(weight_sync.WeightSyncHandler):
@@ -298,7 +298,7 @@ def _make_weight_sync_coordinator(trainer_handle, rollout_handle):
 # TODO: standardize a handeler registry seperate from the worker registry.
   backend = os.getenv("WEIGHT_SYNC_BACKEND", "raiden").lower()
   if backend == "raiden":
-    from tunix.experimental.orchestrator import raiden_handler  # pylint: disable=g-import-not-at-top
+    from tunix.experimental.weight_sync import raiden_handler  # pylint: disable=g-import-not-at-top
 
     handler = raiden_handler.RaidenHandler(
         transfer_options=raiden_handler.make_host_staged_transfer_options()

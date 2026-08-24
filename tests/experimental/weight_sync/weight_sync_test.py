@@ -20,7 +20,7 @@ import inspect
 
 from absl.testing import absltest
 
-from tunix.experimental.orchestrator import weight_sync
+from tunix.experimental.weight_sync import weight_sync
 
 
 def _tensor(**overrides) -> weight_sync.TensorMetadata:

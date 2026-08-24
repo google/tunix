@@ -41,8 +41,8 @@ from tunix.experimental.common import datatypes
 from tunix.experimental.orchestrator import worker_registry
 
 try:
-  from tunix.experimental.orchestrator import weight_sync
-  from tunix.experimental.orchestrator import weight_sync_coordinator
+  from tunix.experimental.weight_sync import weight_sync
+  from tunix.experimental.weight_sync import weight_sync_coordinator
 except ImportError:
   raise unittest.SkipTest("tpu_raiden is required")
 

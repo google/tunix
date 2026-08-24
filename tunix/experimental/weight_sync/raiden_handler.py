@@ -42,7 +42,7 @@ from tpu_sync.rpc import controller_service_pb2
 from tpu_sync.rpc import raiden_controller
 from tpu_sync.rpc import raiden_service_pb2
 
-from tunix.experimental.orchestrator import weight_sync
+from tunix.experimental.weight_sync import weight_sync
 
 
 @dataclasses.dataclass(frozen=True)

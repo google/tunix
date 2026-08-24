@@ -131,7 +131,7 @@ from typing import Any, Optional, Sequence
 
 from tunix.experimental.common import datatypes
 from tunix.experimental.orchestrator import worker_registry
-from tunix.experimental.orchestrator import weight_sync
+from tunix.experimental.weight_sync import weight_sync
 
 
 TRAINER_ROLE = "trainer"

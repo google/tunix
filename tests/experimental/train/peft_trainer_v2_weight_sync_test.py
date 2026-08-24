@@ -23,7 +23,7 @@ from flax import nnx
 import jax.numpy as jnp
 
 from tunix.experimental.train import peft_trainer_v2
-from tunix.experimental.worker import raiden_synchronizer
+from tunix.experimental.weight_sync import raiden_synchronizer
 
 
 class _FakeSynchronizer:

@@ -22,7 +22,7 @@ from typing import Any, List
 from absl import logging
 
 from tunix.experimental.rollout import vanilla_sampler_adapter
-from tunix.experimental.worker import raiden_synchronizer
+from tunix.experimental.weight_sync import raiden_synchronizer
 
 
 class RaidenSamplerAdapter(vanilla_sampler_adapter.VanillaSamplerAdapter):

@@ -387,7 +387,7 @@ class GradientAccumulator(nnx.Module):
 
 
 def _default_weight_sync_worker() -> Any:
-  from tunix.experimental.worker import raiden_synchronizer  # pylint: disable=g-import-not-at-top
+  from tunix.experimental.weight_sync import raiden_synchronizer  # pylint: disable=g-import-not-at-top
 
   return raiden_synchronizer.RaidenSynchronizer(
       "trainer",
