@@ -82,7 +82,7 @@ class Block:
     return new_block, allocated_pages
 
   @jax.named_call
-  def release(self, num_pages_to_release: jax.Array, page_idxs_to_release: jax.Array) -> 'Block':
+  def release(self, num_pages_to_release: int | jax.Array, page_idxs_to_release: jax.Array) -> 'Block':
     """Releases pages."""
     target_slots = jnp.arange(self.total_num_pages) + self.num_available_pages
     
@@ -98,7 +98,7 @@ class Block:
     ].set(page_idxs_to_release, mode='drop')
 
     updated_num_available_pages = (
-        self.num_available_pages + num_total_released 
+        self.num_available_pages + num_pages_to_release 
     )
     return dataclasses.replace(
         self,
@@ -165,53 +165,22 @@ class TpuCpuPageManager:
 
   @functools.cached_property
   def num_pages_per_seq(self) -> jax.Array:
-    return utils.cdiv(self.seq_lens, self.page_size)
+    return self.seq_lens
 
   @jax.named_call
-  def allocate(self, q_lens: jax.Array) -> 'TpuCpuPageManager':
+  def allocate(self, num_pages_to_allocate: jax.Array) -> tuple['TpuCpuPageManager', jax.Array]:
     """Allocates pages for new tokens."""
-    pages_required = utils.cdiv(self.seq_lens + q_lens, self.page_size)
-    num_pages_to_allocate = pages_required - self.num_pages_per_seq
-
     total_pages_to_allocate = jnp.sum(num_pages_to_allocate)
     new_tpu_block, allocated_page_data = self.tpu_block.allocate(total_pages_to_allocate)
     
-    # We pad allocated_page_data back up to capacity so RaggedArray layout fits perfectly
     padded_allocated_page_data = jnp.where(
         jnp.arange(self.tpu_block.total_num_pages) < total_pages_to_allocate,
         self.tpu_block.available_page_indices,
         self.tpu_block.total_num_pages
     )
     
-    page_indices_to_allocate = RaggedArray(
-        data=padded_allocated_page_data, lens=num_pages_to_allocate
-    )
-    
-    page_indices_rows = page_indices_to_allocate.row_idxs
-    page_indices_cols = (
-        self.num_pages_per_seq[page_indices_rows]
-        + page_indices_to_allocate.intra_offsets
-    )
-
-    out_of_bounds_idx = self.page_indices.shape[1]
-    is_real_allocation = (
-        jnp.arange(page_indices_to_allocate.capacity)
-        < page_indices_to_allocate.total_length
-    )
-    safe_page_indices_cols = jnp.where(
-        is_real_allocation,
-        page_indices_cols,
-        out_of_bounds_idx,
-    )
-
-    updated_page_indices = self.page_indices.at[
-        page_indices_rows, safe_page_indices_cols
-    ].set(page_indices_to_allocate.data, mode='drop')
-    
     new_page_manager = dataclasses.replace(
         self,
-        seq_lens=self.seq_lens + q_lens,
-        page_indices=updated_page_indices,
         tpu_block=new_tpu_block,
     )
 
@@ -223,13 +192,13 @@ class TpuCpuPageManager:
     ragged = RaggedArray(data=page_indices, lens=lens)
     
     target_rows = seq_idxs[ragged.row_idxs]
-    target_cols = ragged.intra_offsets
+    target_cols = self.seq_lens[target_rows] + ragged.intra_offsets
     
     updated_page_indices = self.page_indices.at[
         target_rows, target_cols
     ].set(ragged.data, mode='drop')
 
-    updated_lens = self.seq_lens.at[seq_idxs].set(lens * self.page_size, mode='drop')
+    updated_lens = self.seq_lens.at[seq_idxs].set(self.seq_lens[seq_idxs] + lens, mode='drop')
 
     return dataclasses.replace(
         self,
@@ -257,8 +226,9 @@ class TpuCpuPageManager:
     safe_icols = jnp.where(is_real_release, page_indices_icols, 0)
     released_pages = self.page_indices[page_indices_irows, safe_icols]
 
+    num_total_released = jnp.sum(page_indices_to_release.lens)
     new_block = block.release(
-        page_indices_to_release.lens, released_pages
+        num_total_released, released_pages
     )
 
     kwargs = {'seq_lens': updated_lens}
@@ -289,144 +259,89 @@ class TpuCpuPageManager:
     safe_icols = jnp.where(is_real_release, page_indices_icols, 0)
     released_pages = self.page_indices[page_indices_irows, safe_icols]
 
+    num_total_released = jnp.sum(page_indices_to_release.lens)
     new_block = block.release(
-        page_indices_to_release.lens, released_pages
+        num_total_released, released_pages
     )
 
     num_released_pages = jnp.sum(self.seq_lens - updated_lens)
 
     new_page_manager = dataclasses.replace(self, 
-        seq_lens=seq_lens
+        seq_lens=updated_lens
     )
 
     return new_page_manager, num_released_pages, released_pages
 
 
   @jax.named_call
-  def offload(self, seq_mask: jax.Array) -> 'TpuCpuPageManager':
-    """Moves sequences from TPU block to CPU block."""
-    # TODO: You offload pages no sequences. The arg should be list of
-    # page_idxs to offload. It is the caller's responiability to 
-    # release sequences before hand. 
+  def offload(self, num_pages: int | jax.Array, page_idxs: jax.Array) -> tuple['TpuCpuPageManager', jax.Array]:
+    """Moves physical pages from TPU block to CPU block."""
     if self.cpu_block is None:
         raise ValueError("Cannot offload; cpu_block is None.")
 
-    num_pages_to_allocate = jnp.where(seq_mask, self.num_pages_per_seq, 0)
-    total_cpu_pages = jnp.sum(num_pages_to_allocate)
-    
-    new_cpu_block, cpu_allocated_pages = self.cpu_block.allocate(total_cpu_pages)
+    new_cpu_block, cpu_allocated_pages = self.cpu_block.allocate(num_pages)
     
     padded_allocated_page_data = jnp.where(
-        jnp.arange(self.cpu_block.total_num_pages) < total_cpu_pages,
+        jnp.arange(self.cpu_block.total_num_pages) < num_pages,
         self.cpu_block.available_page_indices,
         self.cpu_block.total_num_pages
     )
     
-    cpu_page_indices_ragged = RaggedArray(
-        data=padded_allocated_page_data, lens=num_pages_to_allocate
-    )
-    
-    seq_idxs = cpu_page_indices_ragged.row_idxs
-    element_offsets = cpu_page_indices_ragged.intra_offsets
-    
-    # physical indices on TPU
-    tpu_phys_page_ids = self.page_indices[seq_idxs, element_offsets]
-    
-    is_real = jnp.arange(cpu_page_indices_ragged.capacity) < cpu_page_indices_ragged.total_length
+    is_real = jnp.arange(page_idxs.shape[0]) < num_pages
     
     # Copy data
-    safe_tpu_phys = jnp.where(is_real, tpu_phys_page_ids, 0)
+    safe_tpu_phys = jnp.where(is_real, page_idxs, 0)
     tpu_vals = self.tpu_block.pages[safe_tpu_phys]
     tpu_vals_cpu = _put_on_target_device(tpu_vals, self.cpu_block.pages)
     
-    safe_cpu_phys = jnp.where(is_real, cpu_page_indices_ragged.data, self.cpu_block.pages.shape[0])
+    safe_cpu_phys = jnp.where(is_real, padded_allocated_page_data[:page_idxs.shape[0]], self.cpu_block.pages.shape[0])
     new_cpu_pages = self.cpu_block.pages.at[safe_cpu_phys].set(tpu_vals_cpu, mode='drop')
     new_cpu_block = dataclasses.replace(new_cpu_block, pages=new_cpu_pages)
     
     # Release from TPU
-    new_tpu_block = self.tpu_block.release(num_pages_to_allocate, tpu_phys_page_ids)
+    new_tpu_block = self.tpu_block.release(num_pages, page_idxs)
     
-    # Update page_indices
-    out_of_bounds_idx = self.page_indices.shape[1]
-    safe_page_indices_cols = jnp.where(
-        is_real,
-        element_offsets,
-        out_of_bounds_idx,
-    )
-    
-    updated_page_indices = self.page_indices.at[
-        seq_idxs, safe_page_indices_cols
-    ].set(cpu_page_indices_ragged.data, mode='drop')
-    
-    return dataclasses.replace(
+    new_pm = dataclasses.replace(
         self,
         tpu_block=new_tpu_block,
         cpu_block=new_cpu_block,
-        page_indices=updated_page_indices
     )
+    return new_pm, padded_allocated_page_data
 
   @jax.named_call
-  def load(self, seq_mask: jax.Array) -> 'TpuCpuPageManager':
-    # We load page_idxs not sequences. The cpu block is 
-    # sequence agnostic. seq_lens, and etc are just a tpu_block
-    # concept. 
-    """Moves sequences from CPU block to TPU block."""
+  def load(self, num_pages: int | jax.Array, cpu_page_idxs: jax.Array) -> tuple['TpuCpuPageManager', jax.Array]:
+    """Moves physical pages from CPU block back to TPU block."""
     if self.cpu_block is None:
         raise ValueError("Cannot load; cpu_block is None.")
 
-    num_pages_to_allocate = jnp.where(seq_mask, self.num_pages_per_seq, 0)
-    total_tpu_pages = jnp.sum(num_pages_to_allocate)
-    
-    new_tpu_block, tpu_allocated_pages = self.tpu_block.allocate(total_tpu_pages)
+    new_tpu_block, tpu_allocated_pages = self.tpu_block.allocate(num_pages)
     
     padded_allocated_page_data = jnp.where(
-        jnp.arange(self.tpu_block.total_num_pages) < total_tpu_pages,
+        jnp.arange(self.tpu_block.total_num_pages) < num_pages,
         self.tpu_block.available_page_indices,
         self.tpu_block.total_num_pages
     )
     
-    tpu_page_indices_ragged = RaggedArray(
-        data=padded_allocated_page_data, lens=num_pages_to_allocate
-    )
-    
-    seq_idxs = tpu_page_indices_ragged.row_idxs
-    element_offsets = tpu_page_indices_ragged.intra_offsets
-    
-    # physical indices on CPU
-    cpu_phys_page_ids = self.page_indices[seq_idxs, element_offsets]
-    
-    is_real = jnp.arange(tpu_page_indices_ragged.capacity) < tpu_page_indices_ragged.total_length
+    is_real = jnp.arange(cpu_page_idxs.shape[0]) < num_pages
     
     # Copy data
-    safe_cpu_phys = jnp.where(is_real, cpu_phys_page_ids, 0)
+    safe_cpu_phys = jnp.where(is_real, cpu_page_idxs, 0)
     cpu_vals = self.cpu_block.pages[safe_cpu_phys]
     cpu_vals_tpu = _put_on_target_device(cpu_vals, self.tpu_block.pages)
     
-    safe_tpu_phys = jnp.where(is_real, tpu_page_indices_ragged.data, self.tpu_block.pages.shape[0])
+    safe_tpu_phys = jnp.where(is_real, padded_allocated_page_data[:cpu_page_idxs.shape[0]], self.tpu_block.pages.shape[0])
     new_tpu_pages = self.tpu_block.pages.at[safe_tpu_phys].set(cpu_vals_tpu, mode='drop')
     new_tpu_block = dataclasses.replace(new_tpu_block, pages=new_tpu_pages)
     
     # Release from CPU
-    new_cpu_block = self.cpu_block.release(num_pages_to_allocate, cpu_phys_page_ids)
+    new_cpu_block = self.cpu_block.release(num_pages, cpu_page_idxs)
     
-    # Update page_indices
-    out_of_bounds_idx = self.page_indices.shape[1]
-    safe_page_indices_cols = jnp.where(
-        is_real,
-        element_offsets,
-        out_of_bounds_idx,
-    )
-    
-    updated_page_indices = self.page_indices.at[
-        seq_idxs, safe_page_indices_cols
-    ].set(tpu_page_indices_ragged.data, mode='drop')
-    
-    return dataclasses.replace(
+    new_pm = dataclasses.replace(
         self,
         tpu_block=new_tpu_block,
         cpu_block=new_cpu_block,
-        page_indices=updated_page_indices
     )
+    return new_pm, padded_allocated_page_data
 
   @jax.named_call
   def release_for_window(self) -> 'TpuCpuPageManager':
@@ -435,7 +350,7 @@ class TpuCpuPageManager:
       return self
 
     num_pages_to_release = (
-        jnp.maximum(self.seq_lens - self.window_size, 0) // self.page_size
+        jnp.maximum(self.seq_lens - (self.window_size // self.page_size), 0)
     )
     page_indices_irows = jnp.arange(self.batch_size)[:, None]
     page_indices_icols = (
@@ -465,7 +380,7 @@ class TpuCpuPageManager:
         self,
         page_indices=updated_page_indices,
         tpu_block=new_tpu_block,
-        seq_lens=self.seq_lens - num_pages_to_release * self.page_size,
+        seq_lens=self.seq_lens - num_pages_to_release,
     )
 
   def load_values(
@@ -519,7 +434,7 @@ class TpuCpuPageManager:
     """Extracts array of token IDs from paged memory."""
     elements_ragged = RaggedArray(
         data=jnp.zeros((total_num_elements,), dtype=jnp.int32),
-        lens=self.seq_lens,
+        lens=self.seq_lens * self.page_size,
     )
     seq_idxs = elements_ragged.row_idxs
     element_offsets = elements_ragged.intra_offsets
