@@ -90,18 +90,21 @@ def main() -> None:
   xf.base._CANON_MESH = engine_mesh
   xf.base._CANON_TP_AXIS = "model"
   xf.pallas_matmul = lambda left, right, **_: jnp.matmul(left, right)
-  site = types.SimpleNamespace(family="gate_proj", contract_parallel=False)
+  site = types.SimpleNamespace(family="q_proj", contract_parallel=False)
 
-  global_width = 4 * TP_SIZE
+  head_dim = 128
+  local_heads = 4
+  global_heads = local_heads * TP_SIZE
+  global_width = global_heads * head_dim
   weight = jax.device_put(
       (
           jnp.arange(4 * global_width, dtype=jnp.float32).reshape(
-              4, global_width
+              4, global_heads, head_dim
           )
-          / 32
+          / 4096
       ).astype(jnp.bfloat16),
       jax.sharding.NamedSharding(
-          trainer_mesh, jax.sharding.PartitionSpec(None, "tp")
+          trainer_mesh, jax.sharding.PartitionSpec(None, "tp", None)
       ),
   )
   hidden = jax.device_put(
@@ -113,9 +116,9 @@ def main() -> None:
       ),
   )
   cotangent = jax.device_put(
-      jnp.ones((16, global_width), jnp.bfloat16),
+      jnp.ones((16, global_heads, head_dim), jnp.bfloat16),
       jax.sharding.NamedSharding(
-          trainer_mesh, jax.sharding.PartitionSpec("dp", "tp")
+          trainer_mesh, jax.sharding.PartitionSpec("dp", "tp", None)
       ),
   )
   segmented = object.__new__(
@@ -127,20 +130,49 @@ def main() -> None:
     def forward(weight_arg, hidden_arg):
       output = xf._column_parallel(
           site,
-          "mn,np->mp",
+          "TD,DNH->TNH",
           hidden_arg,
           weight_arg,
-          "model.layers.0.mlp.gate_proj",
+          "model.layers.0.self_attn.q_proj",
       )
       pieces = xf._p59_local_fused_pieces(
           output,
-          (2 * TP_SIZE, 2 * TP_SIZE),
+          (head_dim,),
+          1,
+          "model.layers.0.self_attn.q_proj",
+      )
+      if pieces is None:
+        raise RuntimeError("P59 local q_proj layout was not selected")
+      q_output = jnp.concatenate(pieces, axis=-1)
+      if q_output.shape != output.shape:
+        raise RuntimeError(
+            f"P59 local q_proj layout changed shape: {q_output.shape}"
+        )
+
+      # Retain the previous multi-output layout coverage while making the
+      # differentiated carrier match the real q_proj n_shards=1 contract.
+      flat = output.reshape(output.shape[0], -1)
+      fused = xf._p59_local_fused_pieces(
+          flat,
+          (global_width // 2, global_width // 2),
           TP_SIZE,
           "model.layers.0.mlp.gate_proj",
       )
-      if pieces is None:
-        raise RuntimeError("P59 local fused split was not selected")
-      return jnp.concatenate(pieces, axis=-1)
+      if fused is None or jnp.concatenate(fused, axis=-1).shape != flat.shape:
+        raise RuntimeError("P59 local fused layout was not selected")
+      try:
+        xf._p59_local_fused_pieces(
+            output,
+            (head_dim + 1,),
+            1,
+            "negative.q_proj",
+        )
+      except RuntimeError as error:
+        if "width mismatch" not in str(error):
+          raise
+      else:
+        raise RuntimeError("P59 local q_proj wrong-width negative did not fire")
+      return q_output
 
     _, pullback = jax.vjp(forward, local_weight, local_hidden)
     dweight, dhidden = pullback(local_cotangent)
@@ -168,7 +200,9 @@ def main() -> None:
   staged, dhidden = parallel(weight, hidden, cotangent)
 
   _, ordinary_pullback = jax.vjp(
-      lambda weight_arg, hidden_arg: jnp.matmul(hidden_arg, weight_arg),
+      lambda weight_arg, hidden_arg: jnp.einsum(
+          "td,dnh->tnh", hidden_arg, weight_arg
+      ),
       weight,
       hidden,
   )
@@ -176,7 +210,7 @@ def main() -> None:
   for rank in range(2):
     row_mask = jnp.arange(cotangent.shape[0], dtype=jnp.int32) // 8 == rank
     isolated = jnp.where(
-        row_mask[:, None], cotangent, jnp.zeros_like(cotangent)
+        row_mask[:, None, None], cotangent, jnp.zeros_like(cotangent)
     )
     expected_rows.append(ordinary_pullback(isolated)[0])
   expected_staged = jnp.stack(expected_rows)
@@ -186,9 +220,10 @@ def main() -> None:
   if not np.array_equal(np.asarray(dhidden), np.asarray(expected_dhidden)):
     actual_host = np.asarray(dhidden, dtype=np.float32)
     serial_host = np.asarray(expected_dhidden, dtype=np.float32)
-    oracle_host = np.matmul(
+    oracle_host = np.einsum(
+        "tnh,dnh->td",
         np.asarray(cotangent, dtype=np.float64),
-        np.asarray(weight, dtype=np.float64).T,
+        np.asarray(weight, dtype=np.float64),
     )
     different = np.argwhere(actual_host != serial_host)
     first = tuple(map(int, different[0]))
@@ -218,18 +253,20 @@ def main() -> None:
   engine_weight = jax.device_put(
       weight,
       jax.sharding.NamedSharding(
-          engine_mesh, jax.sharding.PartitionSpec(None, "model")
+          engine_mesh, jax.sharding.PartitionSpec(None, "model", None)
       ),
   )
   ordinary_global = xf._column_parallel(
       site,
-      "mn,np->mp",
+      "TD,DNH->TNH",
       engine_hidden,
       engine_weight,
-      "ordinary.serving.gate_proj",
+      "ordinary.serving.q_proj",
   )
-  expected_ordinary = jnp.matmul(engine_hidden, engine_weight)
-  if ordinary_global.shape != (16, global_width):
+  expected_ordinary = jnp.einsum(
+      "td,dnh->tnh", engine_hidden, engine_weight
+  )
+  if ordinary_global.shape != (16, global_heads, head_dim):
     raise AssertionError(
         f"ordinary projection output boundary changed: {ordinary_global.shape}"
     )
@@ -238,7 +275,7 @@ def main() -> None:
   ):
     raise AssertionError("ordinary projection values changed with P59 flag")
   expected_ordinary_sharding = jax.sharding.NamedSharding(
-      engine_mesh, jax.sharding.PartitionSpec(None, "model")
+      engine_mesh, jax.sharding.PartitionSpec(None, "model", None)
   )
   if ordinary_global.sharding.devices_indices_map(ordinary_global.shape) != (
       expected_ordinary_sharding.devices_indices_map(ordinary_global.shape)
@@ -247,10 +284,10 @@ def main() -> None:
         "ordinary projection TP device-index map changed with P59 flag"
     )
   if xf._p59_local_fused_pieces(
-      jnp.ones((16, global_width), jnp.bfloat16),
-      (4 * TP_SIZE, 4 * TP_SIZE),
-      TP_SIZE,
-      "ordinary.serving.gate_proj",
+      jnp.ones((16, global_heads, head_dim), jnp.bfloat16),
+      (head_dim,),
+      1,
+      "ordinary.serving.q_proj",
   ) is not None:
     raise AssertionError("ordinary serving selected the P59 local split")
 
@@ -260,7 +297,8 @@ def main() -> None:
     raise AssertionError("installed projection negative control did not fire")
   print(
       f"P59_TP{TP_SIZE}_INSTALLED_PROJECTION_PASS "
-      f"topology=DP2xTP{TP_SIZE} local_split=1 ordinary_global=1 "
+      f"topology=DP2xTP{TP_SIZE} q_proj_layout_shards=1 "
+      "fused_layout=1 wrong_width_negative=1 ordinary_global=1 "
       "serial_parallel=exact optimizer_commits=0",
       flush=True,
   )

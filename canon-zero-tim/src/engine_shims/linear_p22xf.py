@@ -85,15 +85,20 @@ def _p59_fixed_order_tp_sum(value):
 
 
 def _p59_local_fused_pieces(output, output_sizes, n_shards, prefix):
-    """Split one already-TP-local fused output, or return None globally."""
+    """Apply the engine's local concat layout inside the P59 TP map.
+
+    ``n_shards`` belongs to the fused-output layout; it is not the live mesh TP
+    size.  A non-fused q/k/v projection legitimately reports one layout shard
+    even on TP4/TP8 and is already TP-local at this boundary.
+    """
     if not _p59_local_tp_context():
         return None
     n_shards = int(n_shards)
     output_sizes = tuple(map(int, output_sizes))
-    if n_shards <= 1 or any(size % n_shards for size in output_sizes):
+    if n_shards <= 0 or any(size % n_shards for size in output_sizes):
         raise RuntimeError(
-            f"P59 local fused-linear split is not TP divisible at {prefix}: "
-            f"sizes={output_sizes} tp={n_shards}"
+            f"P59 local fused-linear split is not layout-shard divisible at "
+            f"{prefix}: sizes={output_sizes} layout_shards={n_shards}"
         )
     local_sizes = tuple(size // n_shards for size in output_sizes)
     expected_local_width = sum(local_sizes)
