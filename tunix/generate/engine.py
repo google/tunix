@@ -24,6 +24,8 @@ class LLMEngine:
         
         self.eos_ids = [tokenizer.eos_id() if hasattr(tokenizer, 'eos_id') else tokenizer.GetPieceSize()]
         self.generated_tokens = {} # request_id -> list of ints
+        self.generated_logprobs = {}
+        self.generated_logits = {}
         
         # 2. Own and Initialize the Sampler!
         self.sampler = sampler_lib.VanillaSampler(
@@ -164,6 +166,16 @@ class LLMEngine:
             r = ordered_reqs[idx]
             tok = int(gen_tokens[idx])
             self.generated_tokens[r.request_id].append(tok)
+            if logp is not None:
+                try:
+                    self.generated_logprobs[r.request_id].append(float(logp[idx]))
+                except Exception:
+                    pass
+            if logits is not None:
+                try:
+                    self.generated_logits[r.request_id].append(list(logits[idx]))
+                except Exception:
+                    pass
             r.token_ids.append(tok)
             
             if not hasattr(r, 'num_completed_tokens'):
