@@ -36,7 +36,7 @@ class ContinuousSamplerTest(parameterized.TestCase):
     seq_lens = np.array([3, 4], dtype=np.int32)
     distribution = np.array([1, 2, 2], dtype=np.int32)
 
-    gen_tokens, logits, updated_pm = sampler.sample_step(
+    gen_tokens, logits, logp, updated_pm = sampler.sample_step(
         cache=pm,
         seq_lens=seq_lens,
         tokens=tokens,
@@ -71,7 +71,7 @@ class ContinuousSamplerTest(parameterized.TestCase):
     seq_lens = np.array([2], dtype=np.int32)
     distribution = np.array([0, 1, 1], dtype=np.int32)
     
-    gen, logits, pm = sampler.sample_step(
+    gen, logits, logp, pm = sampler.sample_step(
         cache=cm.page_manager,
         seq_lens=seq_lens,
         tokens=tokens,

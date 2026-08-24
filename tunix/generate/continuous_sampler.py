@@ -21,43 +21,49 @@ from tunix.generate import utils
 
 
 def sample_top_p(
-    logits: jax.Array,
+    logits: jnp.ndarray,
     key: jax.Array,
-    temperature: float = 1.0,
-    top_p: float = 1.0,
-    top_k: int = -1,
-        pad_output: bool = False,
-) -> jax.Array:
+    temperature: float,
+    top_p: float,
+    top_k: int | None,
+    return_logprobs: bool = False,
+) -> tuple[jnp.ndarray, jnp.ndarray | None]:
     """Sample a token using top-p sampling."""
     if temperature == 0.0:
-        return jnp.argmax(logits, axis=-1)
+        return sample_best(logits, return_logprobs)
 
-    logits = logits / temperature
+    next_token_logits = logits[:, -1].astype(jnp.float32) / temperature
 
-    if top_k > 0:
-        top_k = min(top_k, logits.shape[-1])
-        top_k_val = jax.lax.top_k(logits, top_k)[0][..., -1:]
-        logits = jnp.where(logits >= top_k_val, logits, -jnp.inf)
+    _no_topk = top_k is None or top_k <= 0
+    if top_p >= 1.0 and _no_topk:
+        next_token = jax.random.categorical(key, logits=next_token_logits)
+        if not return_logprobs:
+            return next_token, None
+        logp = jax.nn.log_softmax(next_token_logits, axis=-1)
+        logp_sampled = jnp.take_along_axis(logp, next_token[..., None], axis=-1)
+        logp_sampled = jnp.squeeze(logp_sampled, axis=-1)
+        return next_token, logp_sampled
 
-    probs = jax.nn.softmax(logits, axis=-1)
-    
-    if top_p < 1.0:
-        sorted_indices = jnp.argsort(probs, axis=-1)[..., ::-1]
-        sorted_probs = jnp.take_along_axis(probs, sorted_indices, axis=-1)
-        cumulative_probs = jnp.cumsum(sorted_probs, axis=-1)
-        
-        mask = cumulative_probs > top_p
-        mask = jnp.pad(mask[..., :-1], ((0, 0), (1, 0)), constant_values=False)
-        
-        sorted_probs = jnp.where(mask, 0.0, sorted_probs)
-        sorted_probs = sorted_probs / jnp.sum(sorted_probs, axis=-1, keepdims=True)
-        
-        next_token_sorted = jax.random.categorical(key, jnp.log(sorted_probs + 1e-10), axis=-1)
-        next_token = jnp.take_along_axis(sorted_indices, next_token_sorted[..., None], axis=-1).squeeze(-1)
+    k = next_token_logits.shape[-1] if _no_topk else top_k
+    logits_sorted, indices = jax.lax.top_k(next_token_logits, k=k)
+
+    probs_sorted = jax.nn.softmax(logits_sorted, axis=-1)
+    cumsum_probs = jnp.cumsum(probs_sorted, axis=-1)
+    mask = cumsum_probs - probs_sorted > top_p
+    logits_sorted = jnp.where(mask, -jnp.inf, logits_sorted)
+
+    next_token_idx = jax.random.categorical(key, logits=logits_sorted)
+    next_token = jnp.take_along_axis(indices, next_token_idx[..., None], axis=-1)
+    next_token = jnp.squeeze(next_token, axis=-1)
+
+    if return_logprobs:
+        logp = jax.nn.log_softmax(next_token_logits, axis=-1)
+        logp_sampled = jnp.take_along_axis(logp, next_token[..., None], axis=-1)
+        logp_sampled = jnp.squeeze(logp_sampled, axis=-1)
     else:
-        next_token = jax.random.categorical(key, logits, axis=-1)
+        logp_sampled = None
 
-    return next_token
+    return next_token, logp_sampled
 
 
 def sample_best(
@@ -158,7 +164,7 @@ class ContinuousSampler:
             is_leaf=lambda x: isinstance(x, nnx.Variable),
         )
 
-    def sample_step(
+def sample_step(
         self,
         cache: Any,
         seq_lens: np.ndarray,
@@ -170,8 +176,9 @@ class ContinuousSampler:
         top_p: float = 1.0,
         top_k: int = -1,
         forbidden_token_ids: list[int] | None = None,
+        return_logprobs: bool = False,
         step: int = 0
-    ) -> Tuple[np.ndarray, np.ndarray, Any]:
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray | None, Any]:
         
         batch_size = len(seq_lens)
         
@@ -186,23 +193,25 @@ class ContinuousSampler:
             static_token_capacity=static_token_capacity
         )
         
-        if forbidden_token_ids:
+if forbidden_token_ids:
             logits = logits.at[:, forbidden_token_ids].set(-jnp.inf)
             
         key = jax.random.fold_in(jax.random.PRNGKey(self.seed), step)
         
-        tokens = jax.jit(sample_top_p, static_argnames=["temperature", "top_p", "top_k"])(
+        tokens, logp = jax.jit(sample_top_p, static_argnames=["temperature", "top_p", "top_k", "return_logprobs"])(
             logits[:, None, :], 
             key, 
             temperature=temperature, 
             top_p=top_p, 
-            top_k=top_k
+            top_k=top_k,
+            return_logprobs=return_logprobs,
         )
         
         tokens_cpu = jax.device_get(tokens)
         logits_cpu = jax.device_get(logits)
+        logp_cpu = jax.device_get(logp) if return_logprobs else None
         
-        return tokens_cpu.squeeze(axis=1), logits_cpu, updated_cache
+        return tokens_cpu, logits_cpu, logp_cpu, updated_cache
 
     def _sample_step_fn(
         self,
