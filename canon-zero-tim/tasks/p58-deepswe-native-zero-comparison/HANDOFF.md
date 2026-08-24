@@ -34,8 +34,8 @@ with terminal marker
 `P58_EXACT_IMAGE_CPU_PASS ... onehost_xprof=1 zero_hp_full=1 p59_tp4_tp8=2 p59_real_shim=4 p57_wandb=1 regressions=1`.
 The V1 exact-image gate independently passed with
 `V1_HP_EXACT_IMAGE_PASS dp16_gathered=1 dp2tp2_parallel=2 p59_tp4_tp8=2 p59_real_shim=4 p57_wandb=1 perfetto_window=1 manifests=3`.
-The current additive installed-attention gate changes both expected terminals
-to include `p59_rpa=2`; that gate has not run and remains separately
+The current additive Attempt-3 gate changes both expected terminals to include
+`p59_rpa=2` and `m15_token=1`; that gate has not run and remains separately
 approval-bound. Current host adjacency is P59 34/34, P57 144/144, V1 21/21,
 APC 31/31, and flags 366/366. The FP32 TP rank sums include operand barriers;
 the historical complete exact-image runs execute TP4/TP8 fixed-head markers with

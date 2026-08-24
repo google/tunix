@@ -12,16 +12,24 @@ The active worktree is
 `local/p58-zero-hp-release3-0823`. The attempt-1 repairs and release contracts
 were published through `71d889a32f4668353c758d5c00df88299e6c0d35`.
 The latest pulled operator tip is
-`614156c1ab067192ab65b2969543e23904f192be`; it adds immutable GSM8K
-Attempt-3 evidence. The Attempt-2 q_proj/APC repair is published, but Attempt 3
-exposed the next P59 TP seam at the RPA boundary. Its additive local repair has
-host/static admission only; the separately approval-bound pinned-image gate and
-the real optimizer commit have not run. Runtime and gate changes are committed
-locally as `8a9c8019`; the evidence/handoff CL is the following local commit.
-Neither CL is published while the new exact-image gate remains unapproved and
-unrun. After authorized publication, render
+`65606a985aa869f09a3bd3a39a3c9268a432aa71`; it adds the P45 and M15
+Attempt-3 logs to the earlier GSM8K evidence. The Attempt-2 q_proj/APC repair
+is published, but Attempt 3 exposed the next P59 TP seam at the RPA boundary
+and one independent M15 token-contract seam. The local stack is
+`248c5f9d` (RPA runtime/gates), `0ab5ae76` (initial evidence ledger), and
+`aa84c147` (signed M15 4096/8192 token widths); this updated ledger is the next
+local CL. Host/static admission is green, while the separately approval-bound
+pinned-image gate and every repaired optimizer commit remain unrun. None of
+these CLs is published while that gate remains unapproved and unrun. After
+authorized publication, render
 only from the exact 40-character SHA read back from the operator branch and
 require a clean worktree.
+
+After exact-image admission, publication, exact remote readback, rendering,
+and separate launch approval, start all three full JobSets in one wave. Do not
+gate P45 or M15 launch on GSM8K's first optimizer commit. Every recipe still
+owns an independent first-commit admission and strict zero-TIM verdict; a red
+freezes and kills only that recipe while the other healthy full runs continue.
 
 Do not push, rerun the pinned image, publish an image, apply a JobSet, or occupy
 TPU resources without the separate user approval for that boundary. Never
@@ -64,6 +72,23 @@ alignment FAIL. Patch 25 skips that repeat only under the exact two-manual-axis
 P59 context, validates local Q/K/V/cache shape, and leaves ordinary serving GQA
 unchanged. Full postflight now requires its exact local-KV runtime receipt.
 
+P45 `f45m` independently passed strict step-0 pre-alignment for 45,074 action
+elements with both byte deltas zero and completed all 32 forward groups. Its
+first backward then expanded already TP8-local K/V from one head to eight, so
+RPA rejected `actual_num_q_heads=4` versus `actual_num_kv_heads=8`. This is the
+same patch-25 seam at the target TP8 geometry. M15 `m15m` passed strict
+pre-alignment for 124,867 action elements, then stopped before forward/backward
+because its signed physical 4096/8192 prompt/completion buffers were compared
+against the original P45 4096/2048 contract. CL `aa84c147` admits 4096/8192
+only for the registered `m15/selection` and `m15/main` DP8xTP8 tuples; partial,
+foreign, and m10 tuples remain negative. All three Attempt-3 runs have zero
+alignment FAIL, zero optimizer commits, and no performance claim.
+
+The operator's appended `SHA256SUMS` contains an impossible stale self-hash and
+is preserved unchanged. `SHA256SUMS.artifacts` is the additive verification
+source for the three logs and `receipt.json`; all four entries pass. See
+`MANIFEST_NOTE.md` in the same evidence directory.
+
 The approved direct-attached v5p mechanism gate is green at
 `/mnt/disks/tunix-data/logp_probe_1host/p59_rpa_a3dp2tp2tp4_20260824_0648utc_r2`.
 On the same four physical chips it executed real RPA forward plus VJP2 backward
@@ -92,7 +117,7 @@ evidence, not DP16xTP4 production certification.
 
 - The published operator history supplies the P56 serving, P59/APC foundation,
   three-recipe integration, and P57 300-update signed in-process-eval setup.
-  The current release adds the P59 TP4/TP8 and signed P57 W&B repairs; target
+The current release adds the P59 TP4/TP8 and signed P57 W&B repairs; target
   certification remains pending after publication.
 - P56 knives have one-host KEEP evidence. Their complete current profiles and
   DP8/DP16 target geometries have not run at target scale.
@@ -146,10 +171,11 @@ This is an exact-image admission receipt for the pre-attempt-1 tree. The
 historical receipt is not a signed raw-log artifact: the
 stdout/stderr log was not durably preserved, so no raw-log path or SHA exists.
 
-The current Attempt-3 repair must instead end with the additive
-`p59_rpa=2` field, proving the installed-attention DP2xTP4 and DP2xTP8 VJP2
-carriers plus their wrong-cache and ordinary-serving negatives:
-`V1_HP_EXACT_IMAGE_PASS dp16_gathered=1 dp2tp2_parallel=2 p59_tp4_tp8=2 p59_real_shim=4 p59_rpa=2 p57_wandb=1 perfetto_window=1 manifests=3`.
+The current Attempt-3 repair must instead end with additive `p59_rpa=2` and
+`m15_token=1` fields. They prove the installed-attention DP2xTP4/DP2xTP8 VJP2
+carriers with wrong-cache and ordinary-serving negatives, plus the signed M15
+4096/8192 positive and partial/foreign negatives:
+`V1_HP_EXACT_IMAGE_PASS dp16_gathered=1 dp2tp2_parallel=2 p59_tp4_tp8=2 p59_real_shim=4 p59_rpa=2 p57_wandb=1 m15_token=1 perfetto_window=1 manifests=3`.
 
 The current post-fix gate passed on the same immutable image. Its raw log is
 `evidence/v1_hp_postfix_exact_image_20260824_r3/run.log` with SHA-256

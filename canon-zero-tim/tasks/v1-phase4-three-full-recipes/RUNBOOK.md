@@ -49,10 +49,13 @@ TP-sharded cotangent and did not cover the real full-vocabulary seam exposed by
 approval and remains a separate evidence event; require both TP4/TP8 installed-
 shim cases plus the 8B/TP8 M2048 overlay contract.
 
-The Attempt-3 RPA repair additionally requires terminal field `p59_rpa=2`.
-That field is emitted only after installed-attention DP2xTP4 and DP2xTP8 VJP2
+The Attempt-3 repairs additionally require terminal fields `p59_rpa=2` and
+`m15_token=1`.
+The P59 field is emitted only after installed-attention DP2xTP4 and DP2xTP8 VJP2
 carriers pass, including the wrong local-cache shape negative and an ordinary
-global-GQA control with the P59 flag present.
+global-GQA control with the P59 flag present. The M15 field additionally
+requires the signed 4096/8192 positive plus partial and foreign candidate/split
+negatives; P45 remains 4096/2048.
 
 The current supported bundle also passed a separately approved one-host v5p
 DP4xTP1 three-update proxy with 51/51 strict PASS and 0 FAIL. Evidence is at
@@ -94,12 +97,12 @@ eight-chunk receipts cannot substitute for them. Missing either receipt makes
 the run `INCONCLUSIVE` before performance interpretation.
 
 After a pushed approved SHA has rendered the three immutable manifests, and
-only after separate launch approval, apply GSM8K first. Its first real optimizer
-commit is the early admission checkpoint: require zero real alignment FAIL and
-the registered P59-local/fixed-head/optimizer receipts, but do not stop or
-shorten the full run. After that checkpoint, apply P45 followed by M15 from the
-same SHA while GSM8K continues to its complete horizon. The direct-full commands
-are:
+only after separate launch approval, apply GSM8K, P45, and M15 in one launch
+wave. Do not wait for one recipe's first optimizer commit before applying the
+other two. Each run's first real optimizer commit remains its own early
+admission checkpoint: require zero real alignment FAIL and that recipe's
+registered P59-local/fixed-head/token/APC/optimizer receipts, but do not stop or
+shorten another healthy full run. The direct-full commands are:
 
 ```bash
 kubectl apply -f "$OUT/gsm8k/jobset-v1-hp-gsm8k-full.yaml"
@@ -107,9 +110,10 @@ kubectl apply -f "$OUT/frozenlake-p45/jobset-p57-frozenlake-zero-300.yaml"
 kubectl apply -f "$OUT/frozenlake-m15/jobset-p57-frozenlake-zero-m15-main-300.yaml"
 ```
 
-Do not pipe any apply or workload-launch command. These are three full runs,
-not canaries; M15 is a production/scientific recipe, not a canary. Apply only
-after checking the active 64-chip lane and storage quota; P45/M15 keep only the
+Do not pipe any apply or workload-launch command. These are three concurrent
+full runs, not canaries; M15 is a production/scientific recipe, not a canary.
+Apply only after checking all three 64-chip allocations and storage quota;
+P45/M15 keep only the
 rolling recovery checkpoint while their seven held-out evaluations stay inside
 the same uninterrupted full JobSet.
 

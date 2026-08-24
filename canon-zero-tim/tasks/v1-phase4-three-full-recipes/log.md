@@ -1,5 +1,15 @@
 # Log
 
+## 2026-08-24T07:15:52Z — complete Attempt-3 intake repaired; concurrent launch decision registered
+
+- Fresh fetch advanced the immutable operator base to `65606a985aa869f09a3bd3a39a3c9268a432aa71`, adding P45 `f45m` and M15 `m15m` to GSM8K `g64m`. The local RPA and ledger CLs were cleanly rebased as `248c5f9d` and `0ab5ae76`.
+- All three step-0 pre-alignments are strict PASS: GSM8K 194,633 actions, P45 45,074, M15 124,867; all byte deltas are zero, no alignment FAIL exists, and no optimizer commit occurred. P45 completed all 32 forward groups, then reproduced the same already-TP-local K/V expansion seam at TP8 (`q=4`, erroneous `kv=8`), confirming patch 25 covers both GSM8K and P45.
+- M15 stopped earlier and independently: its signed 4096/8192 buffers were rejected by the stale P45 4096/2048 width gate before forward/backward. Local CL `aa84c147` admits 4096/8192 only for registered DP8xTP8 `m15/selection` and `m15/main`; P45 remains 4096/2048, and partial/foreign/m10 tuples remain red. Host contract positives=2/negatives=3 pass; complete host adjacency remains V1 21/21, P57 144/144, P59 34/34, APC 31/31, flags 366/366.
+- Operator `SHA256SUMS` added a stale hash of itself, so the standard check correctly fails only that impossible self-reference. The original is preserved; additive `SHA256SUMS.artifacts` verifies all three raw logs and `receipt.json`, with `MANIFEST_NOTE.md` explaining the packaging correction.
+- Exact-image terminals now require both `p59_rpa=2` and `m15_token=1`; execution remains separately approval-bound and unrun. No push, render, Kubernetes mutation, or target run occurred.
+- User launch decision supersedes the older staged order: after admission/publication/readback and separate launch approval, apply all three uninterrupted full JobSets in one wave. Each recipe keeps an independent first-commit/strict-alignment verdict; one red does not stop the other healthy runs.
+- Rollback: revert the updated ledger, then `aa84c147`, then `0ab5ae76`, then `248c5f9d`; preserve all Attempt-3 and one-host evidence.
+
 ## 2026-08-24T07:00:22Z — Attempt-3 repair committed locally; push gate remains closed
 
 - The user authorized commit and push. A fresh fetch proved the operator tip still equals the immutable Attempt-3 base `614156c1ab067192ab65b2969543e23904f192be`; no rebase is required.
