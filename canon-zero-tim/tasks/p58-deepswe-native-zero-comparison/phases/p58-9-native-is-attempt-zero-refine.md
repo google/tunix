@@ -2,14 +2,15 @@
 
 ## Status
 
-`IMPLEMENTED LOCALLY / CONSTRUCTION PASS / NATIVE-IS TARGET SELECTED / PUBLICATION AUTHORIZED`
+`IMPLEMENTED / CONSTRUCTION PASS / PUBLISHED / NATIVE-IS TARGET SELECTED`
 
-This phase is an unpublished refinement built in
+This phase was built in
 `/home/yuxuan/code_rl_repro/worktrees/p58_is_zero_refine_0824` on exact
-operator tip `614156c1ab067192ab65b2969543e23904f192be`. The user explicitly
-authorized commit and push on 2026-08-24; replay over the latest operator tip,
-validation, push, and exact remote readback remain. `main`, the earlier dirty
-P58 worktree, Kubernetes, images, and TPU jobs were not modified.
+operator tip `614156c1ab067192ab65b2969543e23904f192be`. It was replayed over
+`7b85b42d0a019d70f32a7dc9712c538ad42f5cb5`, validated, and published as
+`2aedd73c957abba29d21d05b866a996af2f66dfd`; first remote readback was exact.
+`main`, the earlier dirty P58 worktree, Kubernetes, images, and TPU jobs were
+not modified.
 
 ## Objective
 
@@ -74,14 +75,15 @@ Host results on 2026-08-24 UTC:
   with terminal marker `P58_EXACT_IMAGE_CPU_PASS loss_oracle=1
   weighted_accumulation=1 compact_filter=1 durable_journal=1
   paired_renderer=1 alignment_policy=1 stock_observer=1 onehost_xprof=1
-  zero_hp_full=1 apc=1 p59_tp4_tp8=2 p59_real_shim=4 p57_wandb=1
-  regressions=1`.
+  zero_hp_full=1 apc=1 p59_tp4_tp8=2 p59_real_shim=4 p59_rpa=2
+  p57_wandb=1 m15_token=1 regressions=1`.
 
 Required next gates before any launch:
 
 1. inspect the three rendered YAMLs and their SHA-256 values;
-2. separately approve publication and read back the exact remote SHA;
-3. launch Native-IS first only if that is the user-selected experiment;
+2. fetch the final operator tip and read back the exact remote SHA containing
+   implementation commit `2aedd73c`;
+3. preserve/stop the exact Native-raw run, then launch fresh Native-IS;
 4. treat any missing recipe marker, wrong tuple, Zero alignment difference,
    corrupted journal, optimizer mismatch, OOM, or IFRT failure as blocking.
 
@@ -105,8 +107,7 @@ It is sufficient to change execution order:
   run id, run root, W&B run, and checkpoint directory.
 
 Stopping the exact Native-raw JobSet is authorized by this decision after its
-identity and full reward-curve evidence are preserved. Native+IS launch
-remains blocked until publication and exact remote readback complete. After
-readback and separate launch approval, render `--stage full --arm native
+identity and full reward-curve evidence are preserved. Native+IS launch is now
+source-ready. After final branch readback, render `--stage full --arm native
 --sampler-is`, verify the `0:0` tuple and `recipe=native-is` marker contract,
 then apply only that fresh YAML.

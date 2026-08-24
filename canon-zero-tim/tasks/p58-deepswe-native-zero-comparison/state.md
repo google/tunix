@@ -1,12 +1,15 @@
 # State
 
-## Current P58.9 local checkpoint (2026-08-24; unpublished)
+## Current P58.9 publication checkpoint (2026-08-24)
 
-- Status: Native-IS target selected; commit/push was explicitly authorized on
-  2026-08-24 and publication reconciliation is in progress. Worktree
+- Status: Native-IS target selected and source publication complete.
+  Implementation commit `2aedd73c957abba29d21d05b866a996af2f66dfd`
+  was pushed only to `yuxzhang/canon-zero-tim`; first remote readback matched
+  local/FETCH_HEAD/remote-tracking refs with ahead/behind `0/0`. Worktree
   `/home/yuxuan/code_rl_repro/worktrees/p58_is_zero_refine_0824`, branch
-  `local/p58-is-zero-refine-0824`, is based exactly on latest fetched operator
-  tip `614156c1ab067192ab65b2969543e23904f192be`.
+  `local/p58-is-zero-refine-0824`, was originally based on
+  `614156c1ab067192ab65b2969543e23904f192be` and replayed over exact operator
+  tip `7b85b42d0a019d70f32a7dc9712c538ad42f5cb5` before publication.
 - Scope: add a third executable recipe, Native+token-IS, without changing the
   existing Native-raw or Zero-HP numerical programs. Native+IS is selected
   only by renderer `--arm native --sampler-is`, resolves the existing disable
@@ -30,24 +33,25 @@
   execution decision is final: preserve that run as immutable Native-raw
   failure evidence, stop its exact JobSet, do not resume its optimizer
   checkpoint, and do not launch Native raw again.
-- Evidence: renderer 20/20, profile 7/7, sampler recipe 7/7, stock observer
-  6/6, Python/Bash syntax, and diff hygiene pass. Bare-host environment import
+- Evidence after replay: focused renderer/profile/sampler/observer tests 40/40,
+  Python/Bash syntax, and diff hygiene pass. Bare-host environment import
   is `INCONCLUSIVE` because `metrax` is absent. The complete pinned-image gate
   passes with `P58_EXACT_IMAGE_CPU_PASS ... paired_renderer=1 ...
-  zero_hp_full=1 ... p59_real_shim=4 ... regressions=1`.
+  zero_hp_full=1 ... p59_real_shim=4 p59_rpa=2 ... m15_token=1
+  regressions=1`.
 - Claim ceiling: implementation plus pinned-image construction only. No direct
   TPU run, Pathways target, optimizer commit, full training, or performance
   result exists.
 - Next action: the remote executor identifies and archives the exact live
-  Native-raw JobSet, then deletes only that JobSet and verifies cleanup. In
-  parallel, replay and validate the Native+IS delta over the latest operator
-  tip, push only to `yuxzhang/canon-zero-tim`, and read back the exact SHA.
-  After exact remote readback and separate launch approval, render and launch a fresh `--arm native
+  Native-raw JobSet, then deletes only that JobSet and verifies cleanup. After
+  fetching the final operator tip and proving it contains implementation
+  commit `2aedd73c`, render and launch a fresh `--arm native
   --sampler-is` full run from the original frozen base checkpoint using a new
   run id/root/W&B/checkpoint. Never resume the collapsed Native-raw state.
-- Blocker: Native+IS is not yet verified on the operator branch, so the
-  replacement launch cannot truthfully begin from a pull until publication
-  and exact readback complete.
+- Blocker: source publication is not blocked. Remote execution must still
+  preserve/stop the exact Native-raw run, pin the final read-back source SHA
+  and image digest, pass render/admission checks, and never resume the
+  collapsed optimizer state.
 - Phase: `phases/p58-9-native-is-attempt-zero-refine.md`.
 
 ## Current P58.6/P58.7/P58.8 checkpoint (supersedes the legacy P58.5N snapshot below)

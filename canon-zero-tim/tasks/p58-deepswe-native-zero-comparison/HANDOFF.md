@@ -92,11 +92,15 @@ missing TIS weights, group filtering, host optimizer offload, prefix cache, or
 resume from the collapsed Native checkpoint is a hard stop.
 
 Publication status: on 2026-08-24 the user explicitly authorized commit and
-push of this Native+IS refinement. The implementation is being replayed over
-the latest operator tip and is not launchable until that push completes, the
-exact remote SHA is read back, and the rendered YAML pins that SHA. Stopping
-and archiving the current Native-raw job may proceed now. Do not silently
-launch an older branch and call it Native+IS.
+push of this Native+IS refinement. Implementation commit
+`2aedd73c957abba29d21d05b866a996af2f66dfd` was replayed over operator tip
+`7b85b42d0a019d70f32a7dc9712c538ad42f5cb5`, pushed only to
+`yuxzhang/canon-zero-tim`, and its first post-push readback matched local HEAD,
+`FETCH_HEAD`, and the remote-tracking ref with ahead/behind `0/0`. Fetch the
+final operator tip containing this publication checkpoint and pin that exact
+40-character SHA in the rendered YAML. Stopping and archiving the current
+Native-raw job may proceed now. Do not silently launch an older branch and
+call it Native+IS.
 
 ## 2026-08-24 P58.9 publication override — launch remains separately gated
 
@@ -104,11 +108,13 @@ This is the current checkpoint. It supersedes older execution wording below
 without deleting historical evidence. Work only from
 `/home/yuxuan/code_rl_repro/worktrees/p58_is_zero_refine_0824`, branch
 `local/p58-is-zero-refine-0824`, originally based on operator tip
-`614156c1ab067192ab65b2969543e23904f192be`. Commit/push is now explicitly
-authorized, but the delta must first be replayed over the latest operator tip
-and validated. Do not use the older dirty P58 worktree, do not touch `main`,
-and do not apply a JobSet until exact remote readback and separate launch
-approval.
+`614156c1ab067192ab65b2969543e23904f192be`. It was replayed over
+`7b85b42d0a019d70f32a7dc9712c538ad42f5cb5` and published as implementation
+commit `2aedd73c957abba29d21d05b866a996af2f66dfd`. Do not use the older dirty P58
+worktree and do not touch `main`. The execution decision at the top of this
+handoff authorizes the remote executor to preserve/stop the exact Native-raw
+run and then apply only the fresh Native+IS YAML after final SHA readback and
+all listed render/admission checks.
 
 P58 now maintains three closed production recipes on the same Qwen3-4B,
 1,012-task, B8 x G16, 16K, 50-turn, 128-chip DP8 x TP8-per-role setup:
@@ -131,18 +137,19 @@ Pathways/IFRT/GRPC keepalive environment names were removed because pinned
 image inspection found no code consumer; they were configuration-shaped text,
 not a proven recovery mechanism.
 
-Focused host gates pass: renderer 20/20, profile 7/7, sampler recipe 7/7,
-stock observer 6/6, Python/Bash syntax, and diff hygiene. Bare-host
+Focused host gates pass after replay: renderer/profile/sampler-recipe/stock-
+observer aggregate 40/40, Python/Bash syntax, and diff hygiene. Bare-host
 environment-contract import is `INCONCLUSIVE` because this shell lacks
 `metrax`. The complete P58 exact-image gate passes in
 `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`
 with terminal marker `P58_EXACT_IMAGE_CPU_PASS ... paired_renderer=1 ...
-zero_hp_full=1 ... p59_real_shim=4 ... regressions=1`. No target or one-host
-TPU PASS exists for this delta.
+zero_hp_full=1 ... p59_real_shim=4 p59_rpa=2 ... m15_token=1
+regressions=1`. No target or one-host TPU PASS exists for this delta.
 
 See `phases/p58-9-native-is-attempt-zero-refine.md` and the top of
-`cluster/P58_DEEPSWE_TIM_RUNBOOK.md`. Commit/push is authorized; image
-publication, Kubernetes apply, and TPU execution remain separately user-gated.
+`cluster/P58_DEEPSWE_TIM_RUNBOOK.md`. Source publication is complete. This
+agent did not publish an image, apply Kubernetes resources, stop a live job,
+or execute TPU training.
 
 ## 2026-08-23 P58.6/P58.7/P58.8 override
 

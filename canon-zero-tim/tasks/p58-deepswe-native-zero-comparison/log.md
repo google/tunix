@@ -740,3 +740,22 @@
 - Next gate: create the scoped local publication commit, replay it over the
   exact operator tip, rerun focused and complete pinned-image validation, push
   only to `yuxzhang/canon-zero-tim`, and prove exact remote readback.
+
+## 2026-08-24 UTC — Native+IS implementation published and read back
+
+- Local publication commit `364ef7af` was replayed without conflict over exact
+  operator tip `7b85b42d0a019d70f32a7dc9712c538ad42f5cb5`, producing implementation
+  commit `2aedd73c957abba29d21d05b866a996af2f66dfd`. The replay preserved the
+  upstream P59 RPA and M15 token-width changes alongside Native+IS.
+- Post-replay focused renderer/profile/sampler-recipe/stock-observer tests pass
+  40/40; Python compilation, Bash syntax, and `git diff --check` pass.
+- The dependency-bearing digest-pinned image gate exits zero with
+  `P58_EXACT_IMAGE_CPU_PASS ... paired_renderer=1 ... p59_real_shim=4
+  p59_rpa=2 ... m15_token=1 regressions=1`. This is construction evidence, not
+  a TPU/Pathways target result.
+- The implementation was pushed only to `yuxzhang/canon-zero-tim`. Immediate
+  post-push readback produced identical local HEAD, `FETCH_HEAD`, and
+  remote-tracking SHA `2aedd73c957abba29d21d05b866a996af2f66dfd` with
+  ahead/behind `0/0`. `main` was neither modified nor pushed.
+- No image was published, no Kubernetes resource was applied/deleted, no live
+  Native job was stopped, and no TPU target was executed by this agent.

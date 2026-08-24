@@ -23,11 +23,12 @@ each launch.
 The current unpublished refinement lives at
 `/home/yuxuan/code_rl_repro/worktrees/p58_is_zero_refine_0824` on local branch
 `local/p58-is-zero-refine-0824`, originally based on operator tip
-`614156c1ab067192ab65b2969543e23904f192be`. The user authorized commit/push on
-2026-08-24, but image publication and launch remain separately gated. Before
-use, replay over the latest operator tip and replace `<published-40-char-sha>`
-below with the exact fetched/read-back operator SHA; never use the mutable
-branch name as provenance.
+`614156c1ab067192ab65b2969543e23904f192be`. The implementation was replayed
+over `7b85b42d0a019d70f32a7dc9712c538ad42f5cb5`, published as
+`2aedd73c957abba29d21d05b866a996af2f66dfd`, and passed exact first remote
+readback. Before use, fetch the final operator tip containing that commit and
+replace `<published-40-char-sha>` below with the exact fetched/read-back SHA;
+never use the mutable branch name as provenance.
 
 The renderer admits exactly three recipe shapes:
 
@@ -99,9 +100,10 @@ inventory, and metrics spanning the last stable reward region, reward-drop
 onset, and subsequent completed batches before deleting only that exact JobSet
 and its proven run-owned sandboxes. Then launch a fresh Native+IS 1,000-update
 campaign from the original frozen base, with a new run id, run root, W&B run,
-and checkpoint directory. Commit/push is authorized, but the replacement
-launch must still wait for the completed push, exact remote-SHA readback,
-digest-pinned image, and separate launch approval.
+and checkpoint directory. Source publication and first readback are complete.
+The replacement launch still requires final tip readback, digest-pinned image,
+the render/admission checks below, and the exact Native-raw archival/cleanup
+boundary in the handoff.
 
 P58.3 was explicitly waived, not passed, and the user superseded the separate
 three-update stop. The later p58f05 repair has a separate bounded one-host
