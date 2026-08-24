@@ -267,6 +267,25 @@ class DP4CarrierTest(unittest.TestCase):
     self.assertLess(serial_start, bridge_call)
     self.assertLess(bridge_call, serial_reducer)
 
+  def test_tp_head_cotangent_is_partitioned_before_the_local_vjp(self):
+    text = ADAPTER.read_text(encoding="utf-8")
+    helper_start = text.index("def _p59_partition_head_cotangent(")
+    helper_end = text.index(
+        "def _p59_align_serial_gradient_to_trainer_state("
+    )
+    helper = text[helper_start:helper_end]
+    self.assertIn(
+        "jax.sharding.PartitionSpec(data_axis, model_axis)", helper
+    )
+    self.assertIn("vocabulary is not divisible", helper)
+    method_start = text.index("  def run_head_pullback_rank_parallel(")
+    method_end = text.index("  def run_block_pullback_rank_parallel(")
+    method = text[method_start:method_end]
+    partition = method.index("_p59_partition_head_cotangent(")
+    mapped = method.index("self._p59_parallel_map(")
+    self.assertLess(partition, mapped)
+    self.assertIn("head_cotangent_partition_ready", method)
+
   def test_tp1_model_contract_has_exact_local_shapes_and_negative(self):
     spec = importlib.util.spec_from_file_location(
         "p59_qwen1p7b_tp1_contract", MODEL_CONTRACT

@@ -69,6 +69,9 @@ class FullClassifierTest(unittest.TestCase):
         "[P56.LOGPROB_STEP_FUSION] active target_rows=4096 max_logprobs=1",
         "[PATHTRACE] CANON_FIXED_AR=1 gather-ordered-sum at x",
         "[CANON_XPROF_LABELS] continue-decode stage callables cached",
+        "[P59.DP16] head_cotangent_partition_ready "
+        "global_shape=(4096, 151936) local_shape=(256,37984) "
+        "placement=data,model",
         "[P51.XPROF] phase=update armed step=2",
         "[P51.XPROF] phase=update started step=2 anchor=update_entry tpu_trace_mode=TRACE_COMPUTE",
         "[P51.XPROF] phase=update stopped step=3 anchor=step_completed",
@@ -171,6 +174,29 @@ class FullClassifierTest(unittest.TestCase):
       )
       self.assertEqual(record["verdict"], "FAIL")
       self.assertIn("missing_xplane", record["reasons"])
+
+  def test_missing_p59_head_partition_receipt_is_fatal(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      state, run_log, updates, base = self._evidence(Path(tmp))
+      text = run_log.read_text(encoding="utf-8")
+      run_log.write_text(
+          "\n".join(
+              line
+              for line in text.splitlines()
+              if "head_cotangent_partition_ready" not in line
+          )
+          + "\n",
+          encoding="utf-8",
+      )
+      record = classifier.classify(
+          recipe="gsm8k",
+          state=state,
+          run_log=run_log,
+          update_report=updates,
+          base_classification=base,
+      )
+      self.assertEqual(record["verdict"], "FAIL")
+      self.assertIn("marker.p59_head_partition=0", record["reasons"])
 
   def test_direct_eval_cycle_timing_uses_explicit_enclosing_step(self):
     rows = [

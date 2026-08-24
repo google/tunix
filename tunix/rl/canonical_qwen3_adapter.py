@@ -472,6 +472,34 @@ def _p59_align_to_mesh(tree, target_mesh, label: str):
   return jax.tree.map(align, tree)
 
 
+def _p59_partition_head_cotangent(dlogits, trainer_mesh, label: str):
+  """Restores the TP-local vocabulary boundary before the P59 head VJP."""
+  if getattr(dlogits, "ndim", None) != 2:
+    raise FunctionalMappingError(
+        f"{label} requires rank-2 logits cotangent, got "
+        f"{getattr(dlogits, 'shape', None)}"
+    )
+  data_axis, model_axis = _p59_mesh_roles(trainer_mesh, label)
+  data_size = int(trainer_mesh.shape[data_axis])
+  model_size = int(trainer_mesh.shape[model_axis])
+  if int(dlogits.shape[0]) % data_size:
+    raise FunctionalMappingError(
+        f"{label} rows are not divisible by {data_axis}: "
+        f"shape={dlogits.shape} size={data_size}"
+    )
+  if int(dlogits.shape[1]) % model_size:
+    raise FunctionalMappingError(
+        f"{label} vocabulary is not divisible by {model_axis}: "
+        f"shape={dlogits.shape} size={model_size}"
+    )
+  aligned = _p59_align_to_mesh(dlogits, trainer_mesh, label)
+  target = jax.sharding.NamedSharding(
+      trainer_mesh,
+      jax.sharding.PartitionSpec(data_axis, model_axis),
+  )
+  return jax.device_put(aligned, target)
+
+
 def _p59_align_serial_gradient_to_trainer_state(
     trainer_state, gradient, label: str
 ):
@@ -2944,7 +2972,30 @@ class _P28SegmentedEngineForward:
         self._head_local_leaves,
         "lm head",
     )
+    trainer_mesh, _ = _p59_replicated_data_mesh(
+        leaves, "P59 head cotangent"
+    )
+    dlogits = _p59_partition_head_cotangent(
+        dlogits, trainer_mesh, "P59 head cotangent"
+    )
     if getattr(self, "_p59_head_pullback_fn", None) is None:
+      data_axis, model_axis = _p59_mesh_roles(
+          trainer_mesh, "P59 head cotangent"
+      )
+      local_rows = int(dlogits.shape[0]) // int(
+          trainer_mesh.shape[data_axis]
+      )
+      local_vocab = int(dlogits.shape[1]) // int(
+          trainer_mesh.shape[model_axis]
+      )
+      print(
+          f"[P59.DP{int(trainer_mesh.shape[data_axis])}] "
+          "head_cotangent_partition_ready "
+          f"global_shape={tuple(map(int, dlogits.shape))} "
+          f"local_shape=({local_rows},{local_vocab}) "
+          f"placement={data_axis},{model_axis}",
+          flush=True,
+      )
 
       def local_pullback(local_leaves, local_hidden, local_dlogits):
         gradients, dhidden = self._head_pullback_fn(

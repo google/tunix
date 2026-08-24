@@ -341,6 +341,9 @@ def classify(
       "logprob_step_fusion": text.count("[P56.LOGPROB_STEP_FUSION] active"),
       "fixed_ar_gather": text.count("CANON_FIXED_AR=1 gather-ordered-sum"),
       "xprof_labels": text.count("[CANON_XPROF_LABELS] continue-decode stage callables cached"),
+      "p59_head_partition": text.count(
+          f"[P59.DP{dp_size}] head_cotangent_partition_ready"
+      ),
       "p59_parallel": text.count(f"[P59.DP{dp_size}] gradient_reducer_ready"),
       "xprof_armed": text.count(f"[P51.XPROF] phase=update armed step={_PROFILED_STEP}"),
       "xprof_started": text.count(f"[P51.XPROF] phase=update started step={_PROFILED_STEP}"),
@@ -352,6 +355,11 @@ def classify(
       "fixed_ar_gather", "xprof_labels",
   ):
     _require(marker_counts[name] >= 1, f"marker.{name}={marker_counts[name]}", reasons)
+  _require(
+      marker_counts["p59_head_partition"] >= 1,
+      f"marker.p59_head_partition={marker_counts['p59_head_partition']}",
+      reasons,
+  )
   _require(marker_counts["p59_parallel"] == expected_updates, f"marker.p59_parallel={marker_counts['p59_parallel']} expected={expected_updates}", reasons)
   for name in ("xprof_armed", "xprof_started", "xprof_stopped", "perfetto"):
     _require(marker_counts[name] == 1, f"marker.{name}={marker_counts[name]} expected=1", reasons)

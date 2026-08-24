@@ -1525,13 +1525,19 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
     dlogits = jax.device_put(
         jnp.ones((16, vocab), jnp.bfloat16),
         jax.sharding.NamedSharding(
-            trainer_mesh, jax.sharding.PartitionSpec("dp", "tp")
+            trainer_mesh, jax.sharding.PartitionSpec("dp", None)
         ),
     )
     segmented = object.__new__(
         canonical_qwen3_adapter._P28SegmentedEngineForward  # pylint: disable=protected-access
     )
     segmented._engine_mesh = engine_mesh  # pylint: disable=protected-access
+    segmented._endpoint_contract = {}  # pylint: disable=protected-access
+    segmented._num_state_leaves = 1  # pylint: disable=protected-access
+    segmented._head_full_indices = (0,)  # pylint: disable=protected-access
+    segmented._head_local_leaves = (weight,)  # pylint: disable=protected-access
+    segmented._captured_state_released = False  # pylint: disable=protected-access
+    segmented._p59_head_pullback_fn = None  # pylint: disable=protected-access
 
     def local_matmul(left, right, **_):
       return jnp.matmul(left, right)
@@ -1553,7 +1559,7 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
         fixed, **constants
     ):
 
-      def local_pullback(local_weight, local_hidden, local_dlogits):
+      def head_pullback(local_leaves, local_hidden, local_dlogits):
         def forward(weight_arg, hidden_arg):
           return fixed.fixed_lm_head(
               hidden_arg,
@@ -1564,30 +1570,15 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
               endpoint="direct_probe",
           )
 
-        _, pullback = jax.vjp(forward, local_weight, local_hidden)
+        _, pullback = jax.vjp(forward, local_leaves[0], local_hidden)
         dweight, dhidden = pullback(local_dlogits)
-        return jnp.expand_dims(dweight, 0), dhidden
+        return (dweight,), dhidden
 
-      parallel = segmented._p59_parallel_map(  # pylint: disable=protected-access
-          local_pullback,
-          (weight, hidden, dlogits),
-          lambda data_axis, axis_size, aligned, manual_axes: (
-              canonical_qwen3_adapter._rank_staged_specs(  # pylint: disable=protected-access
-                  aligned[0], data_axis, manual_axes
-              ),
-              canonical_qwen3_adapter._rank_local_leading_specs(  # pylint: disable=protected-access
-                  aligned[1],
-                  data_axis,
-                  axis_size,
-                  "fixed-head hidden cotangent",
-                  manual_axes,
-              ),
-          ),
-          rank_local_arg_indices=(1, 2),
-          module_name="zt_tr_dp_parallel_fixed_head_composition",
-          scope_name="zt/tr/dp_parallel/fixed_head/composition",
+      segmented._head_pullback_fn = head_pullback  # pylint: disable=protected-access
+      staged_tree, dhidden = segmented.run_head_pullback_rank_parallel(
+          hidden, dlogits, state_leaves=(weight,)
       )
-      staged, dhidden = parallel(weight, hidden, dlogits)
+      staged = staged_tree[0]
 
       def ordinary_forward(weight_arg, hidden_arg):
         return jnp.matmul(hidden_arg, weight_arg)
@@ -1618,6 +1609,19 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
           dhidden.sharding.spec,
           jax.sharding.PartitionSpec("dp"),
       )
+      bad_dlogits = jax.device_put(
+          jnp.ones((16, vocab + 1), jnp.bfloat16),
+          jax.sharding.NamedSharding(
+              trainer_mesh, jax.sharding.PartitionSpec("dp", None)
+          ),
+      )
+      with self.assertRaisesRegex(
+          canonical_qwen3_adapter.FunctionalMappingError,
+          "vocabulary is not divisible",
+      ):
+        segmented.run_head_pullback_rank_parallel(
+            hidden, bad_dlogits, state_leaves=(weight,)
+        )
 
       # Continue the same real fixed-head cotangent through P59's production
       # report-adjoint and fixed reducer.  The identity mapping isolates this
