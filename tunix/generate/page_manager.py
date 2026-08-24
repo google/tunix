@@ -52,7 +52,7 @@ class RaggedArray:
 class Block:
   """A block of physical pages."""
 
-  pages: jax.Array 
+  pages: jax.Array
   available_page_indices: jax.Array  # i32[total_num_pages]
   num_available_pages: jax.Array  # i32 scalar
 
@@ -67,12 +67,9 @@ class Block:
     """Allocate `num_pages` (total scalar) pages in the block."""
     allocated_pages = self.available_page_indices
 
-    updated_num_available_pages = (
-        self.num_available_pages - num_pages
-    )
-    updated_available_page_indices = jnp.roll(
-        self.available_page_indices, -num_pages
-    )
+    updated_num_available_pages = (self.num_available_pages - num_pages)
+    updated_available_page_indices = jnp.roll(self.available_page_indices,
+                                              -num_pages)
 
     new_block = dataclasses.replace(
         self,
@@ -82,54 +79,46 @@ class Block:
     return new_block, allocated_pages
 
   @jax.named_call
-  def release(self, num_pages_to_release: int | jax.Array, page_idxs_to_release: jax.Array) -> 'Block':
+  def release(self, num_pages_to_release: int | jax.Array,
+              page_idxs_to_release: jax.Array) -> 'Block':
     """Releases pages."""
     target_slots = jnp.arange(self.total_num_pages) + self.num_available_pages
-    
+
     # Map non-target slots to out of bounds indicies so that they are not modified
     safe_target_slots = jnp.where(
-        jnp.arange(self.total_num_pages) < num_pages_to_release, 
-        target_slots, 
-        self.total_num_pages
-    )
+        jnp.arange(self.total_num_pages) < num_pages_to_release, target_slots,
+        self.total_num_pages)
 
     updated_available_page_indices = self.available_page_indices.at[
-        safe_target_slots
-    ].set(page_idxs_to_release, mode='drop')
+        safe_target_slots].set(page_idxs_to_release, mode='drop')
 
-    updated_num_available_pages = (
-        self.num_available_pages + num_pages_to_release 
-    )
+    updated_num_available_pages = (self.num_available_pages +
+                                   num_pages_to_release)
     return dataclasses.replace(
         self,
         available_page_indices=updated_available_page_indices,
         num_available_pages=updated_num_available_pages,
     )
 
-  def write_values(
-      self, num_values: jax.Array, values: jax.Array, page_indices: jax.Array, page_offsets: jax.Array 
-  ) -> 'Block':
+  def write_values(self, num_values: jax.Array, values: jax.Array,
+                   page_indices: jax.Array, page_offsets: jax.Array) -> 'Block':
     """Write packed 1D array of values into allocated paged memory of block."""
     max_n_pages = self.pages.shape[0]
     batch_size = values.shape[0]
 
     target_page_indices = jnp.where(
-        jnp.arange(batch_size) < num_values,
-        page_indices,
-        max_n_pages
-    )
+        jnp.arange(batch_size) < num_values, page_indices, max_n_pages)
 
-    updated_pages = ( 
-        self.pages.at[target_page_indices, page_offsets].set(
-            values,
-            mode='drop',
-        )
-    )
+    updated_pages = (self.pages.at[target_page_indices, page_offsets].set(
+        values,
+        mode='drop',
+    ))
 
     return dataclasses.replace(
         self,
         pages=updated_pages,
     )
+
 
 @jax.tree_util.register_dataclass
 @dataclasses.dataclass(frozen=True, kw_only=True)
@@ -139,7 +128,7 @@ class TpuCpuPageManager:
   cpu_block: Block | None
   page_indices: jax.Array  # i32[batch_size, max_num_pages_per_seq]
   seq_lens: jax.Array  # i32[batch_size]
-  
+
   max_seq_len: int = dataclasses.field(metadata={'static': True})
   window_size: int | None = dataclasses.field(metadata={'static': True})
 
@@ -168,46 +157,50 @@ class TpuCpuPageManager:
     return self.seq_lens
 
   @jax.named_call
-  def allocate(self, num_pages_to_allocate: jax.Array) -> tuple['TpuCpuPageManager', jax.Array]:
+  def allocate(
+      self, num_pages_to_allocate: jax.Array
+  ) -> tuple['TpuCpuPageManager', jax.Array]:
     """Allocates pages for new tokens."""
     total_pages_to_allocate = jnp.sum(num_pages_to_allocate)
-    new_tpu_block, allocated_page_data = self.tpu_block.allocate(total_pages_to_allocate)
-    
+    new_tpu_block, allocated_page_data = self.tpu_block.allocate(
+        total_pages_to_allocate)
+
     padded_allocated_page_data = jnp.where(
         jnp.arange(self.tpu_block.total_num_pages) < total_pages_to_allocate,
-        self.tpu_block.available_page_indices,
-        self.tpu_block.total_num_pages
-    )
-    
+        self.tpu_block.available_page_indices, self.tpu_block.total_num_pages)
+
     new_page_manager = dataclasses.replace(
         self,
         tpu_block=new_tpu_block,
     )
 
-    return new_page_manager, padded_allocated_page_data  
+    return new_page_manager, padded_allocated_page_data
 
   @jax.named_call
-  def assign(self, seq_idxs: jax.Array, page_indices: jax.Array, lens: jax.Array) -> 'TpuCpuPageManager':
+  def assign(self, seq_idxs: jax.Array, page_indices: jax.Array,
+             lens: jax.Array) -> 'TpuCpuPageManager':
     """Assigns physical page indices to sequences directly."""
     ragged = RaggedArray(data=page_indices, lens=lens)
-    
+
     target_rows = seq_idxs[ragged.row_idxs]
     target_cols = self.seq_lens[target_rows] + ragged.intra_offsets
-    
-    updated_page_indices = self.page_indices.at[
-        target_rows, target_cols
-    ].set(ragged.data, mode='drop')
 
-    updated_lens = self.seq_lens.at[seq_idxs].set(self.seq_lens[seq_idxs] + lens, mode='drop')
+    updated_page_indices = self.page_indices.at[target_rows,
+                                                target_cols].set(ragged.data,
+                                                                 mode='drop')
 
-    return dataclasses.replace(
-        self,
-        page_indices=updated_page_indices,
-        seq_lens=updated_lens
-    )
+    updated_lens = self.seq_lens.at[seq_idxs].set(self.seq_lens[seq_idxs] +
+                                                  lens,
+                                                  mode='drop')
+
+    return dataclasses.replace(self,
+                               page_indices=updated_page_indices,
+                               seq_lens=updated_lens)
 
   @jax.named_call
-  def release(self, should_release: jax.Array, device: str = 'tpu') -> 'TpuCpuPageManager':
+  def release(self,
+              should_release: jax.Array,
+              device: str = 'tpu') -> 'TpuCpuPageManager':
     """Releases pages from block."""
     updated_lens = jnp.where(should_release, 0, self.seq_lens)
 
@@ -220,22 +213,19 @@ class TpuCpuPageManager:
     page_indices_irows = page_indices_to_release.row_idxs
     page_indices_icols = page_indices_to_release.intra_offsets
 
-    is_real_release = (
-        jnp.arange(block.total_num_pages) < page_indices_to_release.total_length
-    )
+    is_real_release = (jnp.arange(block.total_num_pages)
+                       < page_indices_to_release.total_length)
     safe_icols = jnp.where(is_real_release, page_indices_icols, 0)
     released_pages = self.page_indices[page_indices_irows, safe_icols]
 
     num_total_released = jnp.sum(page_indices_to_release.lens)
-    new_block = block.release(
-        num_total_released, released_pages
-    )
+    new_block = block.release(num_total_released, released_pages)
 
     kwargs = {'seq_lens': updated_lens}
     if device == 'tpu':
-        kwargs['tpu_block'] = new_block
+      kwargs['tpu_block'] = new_block
     else:
-        kwargs['cpu_block'] = new_block
+      kwargs['cpu_block'] = new_block
 
     return dataclasses.replace(self, **kwargs)
 
@@ -244,7 +234,7 @@ class TpuCpuPageManager:
     """Releases sequence."""
     updated_lens = jnp.where(should_release, 0, self.seq_lens)
 
-    block = self.tpu_block 
+    block = self.tpu_block
     page_indices_to_release = RaggedArray(
         data=jax.lax.empty((block.total_num_pages,), dtype=jnp.int32),
         lens=jnp.where(should_release, self.num_pages_per_seq, 0),
@@ -253,54 +243,50 @@ class TpuCpuPageManager:
     page_indices_irows = page_indices_to_release.row_idxs
     page_indices_icols = page_indices_to_release.intra_offsets
 
-    is_real_release = (
-        jnp.arange(block.total_num_pages) < page_indices_to_release.total_length
-    )
+    is_real_release = (jnp.arange(block.total_num_pages)
+                       < page_indices_to_release.total_length)
     safe_icols = jnp.where(is_real_release, page_indices_icols, 0)
     released_pages = self.page_indices[page_indices_irows, safe_icols]
 
     num_total_released = jnp.sum(page_indices_to_release.lens)
-    new_block = block.release(
-        num_total_released, released_pages
-    )
+    new_block = block.release(num_total_released, released_pages)
 
     num_released_pages = jnp.sum(self.seq_lens - updated_lens)
 
-    new_page_manager = dataclasses.replace(self, 
-        seq_lens=updated_lens
-    )
+    new_page_manager = dataclasses.replace(self, seq_lens=updated_lens)
 
     return new_page_manager, num_released_pages, released_pages
 
-
   @jax.named_call
-  def offload(self, num_pages: int | jax.Array, page_idxs: jax.Array) -> tuple['TpuCpuPageManager', jax.Array]:
+  def offload(self, num_pages: int | jax.Array,
+              page_idxs: jax.Array) -> tuple['TpuCpuPageManager', jax.Array]:
     """Moves physical pages from TPU block to CPU block."""
     if self.cpu_block is None:
-        raise ValueError("Cannot offload; cpu_block is None.")
+      raise ValueError("Cannot offload; cpu_block is None.")
 
     new_cpu_block, cpu_allocated_pages = self.cpu_block.allocate(num_pages)
-    
+
     padded_allocated_page_data = jnp.where(
         jnp.arange(self.cpu_block.total_num_pages) < num_pages,
-        self.cpu_block.available_page_indices,
-        self.cpu_block.total_num_pages
-    )
-    
+        self.cpu_block.available_page_indices, self.cpu_block.total_num_pages)
+
     is_real = jnp.arange(page_idxs.shape[0]) < num_pages
-    
+
     # Copy data
     safe_tpu_phys = jnp.where(is_real, page_idxs, 0)
     tpu_vals = self.tpu_block.pages[safe_tpu_phys]
     tpu_vals_cpu = _put_on_target_device(tpu_vals, self.cpu_block.pages)
-    
-    safe_cpu_phys = jnp.where(is_real, padded_allocated_page_data[:page_idxs.shape[0]], self.cpu_block.pages.shape[0])
-    new_cpu_pages = self.cpu_block.pages.at[safe_cpu_phys].set(tpu_vals_cpu, mode='drop')
+
+    safe_cpu_phys = jnp.where(is_real,
+                              padded_allocated_page_data[:page_idxs.shape[0]],
+                              self.cpu_block.pages.shape[0])
+    new_cpu_pages = self.cpu_block.pages.at[safe_cpu_phys].set(tpu_vals_cpu,
+                                                               mode='drop')
     new_cpu_block = dataclasses.replace(new_cpu_block, pages=new_cpu_pages)
-    
+
     # Release from TPU
     new_tpu_block = self.tpu_block.release(num_pages, page_idxs)
-    
+
     new_pm = dataclasses.replace(
         self,
         tpu_block=new_tpu_block,
@@ -309,33 +295,35 @@ class TpuCpuPageManager:
     return new_pm, padded_allocated_page_data
 
   @jax.named_call
-  def load(self, num_pages: int | jax.Array, cpu_page_idxs: jax.Array) -> tuple['TpuCpuPageManager', jax.Array]:
+  def load(self, num_pages: int | jax.Array,
+           cpu_page_idxs: jax.Array) -> tuple['TpuCpuPageManager', jax.Array]:
     """Moves physical pages from CPU block back to TPU block."""
     if self.cpu_block is None:
-        raise ValueError("Cannot load; cpu_block is None.")
+      raise ValueError("Cannot load; cpu_block is None.")
 
     new_tpu_block, tpu_allocated_pages = self.tpu_block.allocate(num_pages)
-    
+
     padded_allocated_page_data = jnp.where(
         jnp.arange(self.tpu_block.total_num_pages) < num_pages,
-        self.tpu_block.available_page_indices,
-        self.tpu_block.total_num_pages
-    )
-    
+        self.tpu_block.available_page_indices, self.tpu_block.total_num_pages)
+
     is_real = jnp.arange(cpu_page_idxs.shape[0]) < num_pages
-    
+
     # Copy data
     safe_cpu_phys = jnp.where(is_real, cpu_page_idxs, 0)
     cpu_vals = self.cpu_block.pages[safe_cpu_phys]
     cpu_vals_tpu = _put_on_target_device(cpu_vals, self.tpu_block.pages)
-    
-    safe_tpu_phys = jnp.where(is_real, padded_allocated_page_data[:cpu_page_idxs.shape[0]], self.tpu_block.pages.shape[0])
-    new_tpu_pages = self.tpu_block.pages.at[safe_tpu_phys].set(cpu_vals_tpu, mode='drop')
+
+    safe_tpu_phys = jnp.where(
+        is_real, padded_allocated_page_data[:cpu_page_idxs.shape[0]],
+        self.tpu_block.pages.shape[0])
+    new_tpu_pages = self.tpu_block.pages.at[safe_tpu_phys].set(cpu_vals_tpu,
+                                                               mode='drop')
     new_tpu_block = dataclasses.replace(new_tpu_block, pages=new_tpu_pages)
-    
+
     # Release from CPU
     new_cpu_block = self.cpu_block.release(num_pages, cpu_page_idxs)
-    
+
     new_pm = dataclasses.replace(
         self,
         tpu_block=new_tpu_block,
@@ -349,32 +337,26 @@ class TpuCpuPageManager:
     if self.window_size is None:
       return self
 
-    num_pages_to_release = (
-        jnp.maximum(self.seq_lens - (self.window_size // self.page_size), 0)
-    )
+    num_pages_to_release = (jnp.maximum(
+        self.seq_lens - (self.window_size // self.page_size), 0))
     page_indices_irows = jnp.arange(self.batch_size)[:, None]
-    page_indices_icols = (
-        jnp.arange(self.max_num_pages_per_seq) + num_pages_to_release[:, None]
-    )
-    updated_page_indices = self.page_indices[
-        page_indices_irows, page_indices_icols
-    ]
+    page_indices_icols = (jnp.arange(self.max_num_pages_per_seq) +
+                          num_pages_to_release[:, None])
+    updated_page_indices = self.page_indices[page_indices_irows,
+                                             page_indices_icols]
     release_helper = RaggedArray(
         data=jax.lax.empty((self.tpu_block.total_num_pages,), dtype=jnp.int32),
         lens=num_pages_to_release,
     )
 
-    is_real_release = (
-        jnp.arange(self.tpu_block.total_num_pages) < release_helper.total_length
-    )
+    is_real_release = (jnp.arange(self.tpu_block.total_num_pages)
+                       < release_helper.total_length)
     safe_icols = jnp.where(is_real_release, release_helper.intra_offsets, 0)
-    released_page_indices = (
-        self.page_indices[release_helper.row_idxs, safe_icols]
-    )
+    released_page_indices = (self.page_indices[release_helper.row_idxs,
+                                               safe_icols])
 
-    new_tpu_block = self.tpu_block.release(
-        release_helper.lens, released_page_indices
-    )
+    new_tpu_block = self.tpu_block.release(jnp.sum(release_helper.lens),
+                                           released_page_indices)
 
     return dataclasses.replace(
         self,
@@ -383,9 +365,8 @@ class TpuCpuPageManager:
         seq_lens=self.seq_lens - num_pages_to_release,
     )
 
-  def load_values(
-      self, values: jax.Array, lens: jax.Array 
-  ) -> 'TpuCpuPageManager':
+  def load_values(self, values: jax.Array,
+                  lens: jax.Array) -> 'TpuCpuPageManager':
     """Loads packed 1D array of values into allocated paged memory of block."""
     values_ragged = RaggedArray(data=values, lens=lens)
     seq_idxs = values_ragged.row_idxs
@@ -396,10 +377,9 @@ class TpuCpuPageManager:
     phys_page_ids = self.page_indices[seq_idxs, local_page_cols]
 
     is_real = jnp.arange(values_ragged.capacity) < values_ragged.total_length
-    
-    new_tpu_block = self.tpu_block.write_values(
-        values_ragged.capacity, values, phys_page_ids, page_offsets
-    )
+
+    new_tpu_block = self.tpu_block.write_values(values_ragged.capacity, values,
+                                                phys_page_ids, page_offsets)
 
     return dataclasses.replace(self, tpu_block=new_tpu_block)
 
@@ -412,23 +392,22 @@ class TpuCpuPageManager:
     """Insert 1 new token per sequence into paged memory."""
     if valid_mask is None:
       valid_mask = self.seq_lens > 0
-    
+
     n_values = jnp.sum(valid_mask)
     local_page_cols = idxs // self.page_size
     page_offsets = idxs % self.page_size
     seq_idxs = jnp.arange(self.batch_size)
     phys_page_ids = self.page_indices[seq_idxs, local_page_cols]
 
-    new_tpu_block = self.tpu_block.write_values(
-        n_values, values, phys_page_ids, page_offsets
-    )
+    new_tpu_block = self.tpu_block.write_values(n_values, values, phys_page_ids,
+                                                page_offsets)
 
     return dataclasses.replace(self, tpu_block=new_tpu_block)
 
   def to_array(
       self,
       total_num_elements: int,
-      seq_lens: int,
+      seq_lens: jax.Array,
   ) -> jax.Array:
     """Extracts array of token IDs from paged memory."""
     elements_ragged = RaggedArray(
@@ -451,59 +430,57 @@ class TpuCpuPageManagerConfig:
   """Configuration for a TpuCpuPageManager."""
   page_size: int
   page_subshape: tuple[int, ...] = ()
-  dtype: jnp.dtype  
+  dtype: jnp.dtype
 
   max_num_seqs: int
   max_seq_len: int
   max_tpu_bytes: int
   max_cpu_bytes: int = 0
-  
+
   logical_page_sharding: str | None = None
-  logical_subsharding: tuple[str | None, ...] = () 
+  logical_subsharding: tuple[str | None, ...] = ()
 
   dp_axis: str | None = None
   tp_axis: str | None = None
   dp_size: int = 1
   tp_size: int = 1
-  
-  def _calculate_pages_for_capacity(self, max_bytes: int, logical_sharding: tuple) -> int:
+
+  def _calculate_pages_for_capacity(self, max_bytes: int,
+                                    logical_sharding: tuple) -> int:
     item_size = jnp.dtype(self.dtype).itemsize
     page_shape = (self.page_size,) + self.page_subshape
-    
+
     block_subsharding = logical_sharding[1:]
     elements = 1
     for dim, shard in zip(page_shape, block_subsharding):
-        dim_size = (dim * self.dp_size) if shard == 'dp_axis' else dim
-        elements *= dim_size
+      dim_size = (dim * self.dp_size) if shard == 'dp_axis' else dim
+      elements *= dim_size
 
     page_bytes = elements * item_size
     if page_bytes == 0:
-        return 0
+      return 0
 
     num_block_pages = max_bytes // page_bytes
     page_sharding = logical_sharding[0]
     if page_sharding == 'dp_axis':
       num_block_pages = (num_block_pages // self.dp_size) * self.dp_size
 
-    return num_block_pages 
+    return num_block_pages
 
   @property
   def num_tpu_pages(self) -> int:
     return self._calculate_pages_for_capacity(
-        max_bytes=self.max_tpu_bytes,
-        logical_sharding=self.logical_sharding 
-    )
+        max_bytes=self.max_tpu_bytes, logical_sharding=self.logical_sharding)
 
   @property
   def num_cpu_pages(self) -> int:
     # A block has shape: num_pages, page_size, *page_subshape
     sharding_len = 2 + len(self.page_subshape)
-    
-    return self._calculate_pages_for_capacity(
-        max_bytes=self.max_cpu_bytes,
-        logical_sharding=(None,) * sharding_len
-    )
- 
+
+    return self._calculate_pages_for_capacity(max_bytes=self.max_cpu_bytes,
+                                              logical_sharding=(None,) *
+                                              sharding_len)
+
   @property
   def max_num_pages_per_seq(self) -> int:
     return utils.cdiv(self.max_seq_len, self.page_size)
@@ -511,8 +488,8 @@ class TpuCpuPageManagerConfig:
   @property
   def logical_shard_to_physical(self) -> dict:
     return {'dp_axis': self.dp_axis, 'tp_axis': self.tp_axis, None: None}
-  
-  @property 
+
+  @property
   def logical_sharding(self):
     logical_page_sharding = self.logical_page_sharding
     logical_subsharding = self.logical_subsharding
@@ -523,12 +500,10 @@ class TpuCpuPageManagerConfig:
     l_subshape = len(self.page_subshape)
 
     if l_subsharding > l_subshape:
-      raise ValueError(
-          f'Cannot initialize BlockSpec {spec.name}. '
-          f'Block subsharding `{spec.logical_subsharding}` '
-          'cannot have length greater than block subshape '
-          f'`{spec.subshape}`'
-      )
+      raise ValueError(f'Cannot initialize BlockSpec {spec.name}. '
+                       f'Block subsharding `{spec.logical_subsharding}` '
+                       'cannot have length greater than block subshape '
+                       f'`{spec.subshape}`')
 
     if l_subsharding < l_subshape:
       num_padding = l_subshape - l_subsharding
@@ -537,32 +512,33 @@ class TpuCpuPageManagerConfig:
     logical_sharding = logical_prefix_sharding + logical_subsharding
 
     return logical_sharding
-  
+
   @property
   def physical_sharding(self):
     logical_sharding = self.logical_sharding
     if all(axis is None for axis in logical_sharding):
       return None
-      
+
     mapping = self.logical_shard_to_physical
     return tuple(mapping[axis] for axis in logical_sharding)
 
-  def _make_block(self, num_pages: int, sharding=None, device: jax.Device = None) -> Block:
+  def _make_block(self,
+                  num_pages: int,
+                  sharding=None,
+                  device: jax.Device = None) -> Block:
     with jax.default_device(device) if device else contextlib.nullcontext():
-        shape = (num_pages, self.page_size) + self.page_subshape
-        pages = jnp.zeros(shape, dtype=self.dtype)
-        avail_indices = jnp.arange(num_pages, dtype=jnp.int32)
-        num_avail = jnp.array(num_pages, dtype=jnp.int32)
+      shape = (num_pages, self.page_size) + self.page_subshape
+      pages = jnp.zeros(shape, dtype=self.dtype)
+      avail_indices = jnp.arange(num_pages, dtype=jnp.int32)
+      num_avail = jnp.array(num_pages, dtype=jnp.int32)
 
     if sharding is not None:
-        pages = utils.shard(pages, sharding)
+      pages = utils.shard(pages, sharding)
 
-    return Block(
-        pages=pages,
-        available_page_indices=avail_indices,
-        num_available_pages=num_avail,
-        page_size=self.page_size
-    )
+    return Block(pages=pages,
+                 available_page_indices=avail_indices,
+                 num_available_pages=num_avail,
+                 page_size=self.page_size)
 
   def init(self) -> 'TpuCpuPageManager':
     """Initializes physical page tensors for TPU and CPU."""
@@ -573,24 +549,20 @@ class TpuCpuPageManagerConfig:
           'TPU block capacity is too small. '
           f'Available pages: {tpu_num_pages}, Max required per seq: {self.max_num_pages_per_seq}'
       )
-          
-    tpu_block = self._make_block(
-      num_pages=self.num_tpu_pages, 
-      sharding=self.physical_sharding
-    )
-    
+
+    tpu_block = self._make_block(num_pages=self.num_tpu_pages,
+                                 sharding=self.physical_sharding)
+
     cpu_block = None
     if self.num_cpu_pages > 0:
-      cpu_block = make_block(
-        num_pages=self.num_cpu_pages, 
-        device=jax.devices('cpu')[0]
-      )
+      cpu_block = self._make_block(num_pages=self.num_cpu_pages,
+                                   device=jax.devices('cpu')[0])
 
-    page_indices = jnp.full(
-        (self.max_num_seqs, self.max_num_pages_per_seq), -1, dtype=jnp.int32
-    )
+    page_indices = jnp.full((self.max_num_seqs, self.max_num_pages_per_seq),
+                            -1,
+                            dtype=jnp.int32)
     seq_lens = jnp.zeros((self.max_num_seqs,), dtype=jnp.int32)
-    
+
     return TpuCpuPageManager(
         tpu_block=tpu_block,
         cpu_block=cpu_block,
@@ -607,9 +579,8 @@ def _remove_dp_spec(spec: P) -> P:
   return P(*new_spec)
 
 
-def _put_on_target_device(
-    tensor: jax.Array, target_tensor: jax.Array
-) -> jax.Array:
+def _put_on_target_device(tensor: jax.Array,
+                          target_tensor: jax.Array) -> jax.Array:
   if hasattr(target_tensor, 'sharding') and target_tensor.sharding is not None:
     sharding = target_tensor.sharding
     if isinstance(sharding, jax.sharding.NamedSharding):
@@ -624,17 +595,18 @@ def _put_on_target_device(
 
   return tensor
 
+
 def copy_physical_pages(
     src_pages: jax.Array,
     dst_pages: jax.Array,
     src_idxs: jax.Array,
     dst_idxs: jax.Array,
 ) -> jax.Array:
-    if len(src_idxs) == 0:
-        return dst_pages
-
-    src_slice = src_pages[src_idxs]
-    src_slice = _put_on_target_device(src_slice, dst_pages)
-    
-    dst_pages = dst_pages.at[dst_idxs].set(src_slice)
+  if len(src_idxs) == 0:
     return dst_pages
+
+  src_slice = src_pages[src_idxs]
+  src_slice = _put_on_target_device(src_slice, dst_pages)
+
+  dst_pages = dst_pages.at[dst_idxs].set(src_slice)
+  return dst_pages
