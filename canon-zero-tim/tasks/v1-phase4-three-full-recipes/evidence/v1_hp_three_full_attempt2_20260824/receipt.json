@@ -1,0 +1,28 @@
+{
+  "schema": "v1-hp-three-full-attempt2-receipt-v1",
+  "timestamp": "2026-08-24T04:54:30Z",
+  "source_commit": "7a2a456ce43302c34958fa34c11b0583b45a666e",
+  "runs": {
+    "gsm8k": {
+      "run_id": "g64k",
+      "jobset": "canon-v1hp-gsm8k-g64k-7a2a456c",
+      "failure_stage": "backward_self_attn_q_proj",
+      "error": "RuntimeError: P59 local fused-linear split is not TP divisible at model.layers.27.self_attn.q_proj: sizes=(128,) tp=1",
+      "log_file": "gsm8k_g64k_error.log"
+    },
+    "p45": {
+      "run_id": "f45i",
+      "jobset": "canon-p57-fl-zero-f45i-71d889a3",
+      "failure_stage": "backward_self_attn_q_proj",
+      "error": "RuntimeError: P59 local fused-linear split is not TP divisible at model.layers.35.self_attn.q_proj: sizes=(128,) tp=1",
+      "log_file": "p45_f45i_error.log"
+    },
+    "m15": {
+      "run_id": "m15i",
+      "jobset": "canon-p57-fl-zero-m15-m15i-71d889a3",
+      "failure_stage": "check_pre_backward_gate",
+      "error": "tunix.rl.alignment.AlignmentGateError: pre-backward alignment gate RED: ['S_decode_vs_S_prefill']",
+      "log_file": "m15_m15i_error.log"
+    }
+  }
+}
