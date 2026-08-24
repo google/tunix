@@ -1,0 +1,26 @@
+{
+  "schema": "v1-hp-postfix-exact-image-receipt-v1",
+  "status": "PASS",
+  "recorded_at_utc": "2026-08-24T03:41:04Z",
+  "source_remote_base": "dfec27378bfdd9b73b7bf8f7930bacaa685b3a16",
+  "image_id": "sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a",
+  "focused_log": "focused_dp2tp2.log",
+  "focused_log_sha256": "eae6378df8339481b93a60592b2808a74cd4a4cf9c1093536e19ff6f2f04e71a",
+  "raw_log": "run.log",
+  "raw_log_sha256": "7ef23c9b7f4997a1855a16e99e348e4c981a1f80f9614cc95be1703771338264",
+  "terminal": "V1_HP_EXACT_IMAGE_PASS dp16_gathered=1 dp2tp2_parallel=2 p59_tp4_tp8=2 p59_real_shim=4 p57_wandb=1 perfetto_window=1 manifests=3",
+  "installed_shim_terminal": "P59_TP_SHIM_EXACT_IMAGE_PASS fixed_head=2 installed_projection=2 report_adjoint=2 fixed_reducer=2 topologies=DP2xTP4,DP2xTP8 optimizer_commits=0 manifests=2x36/36",
+  "failed_predecessors": [
+    {
+      "path": "../v1_hp_postfix_exact_image_20260824/run.log",
+      "sha256": "621edbe196233dd00bcefe68790d30b9c7fd929f9f18c8071627efa828d8c2b1",
+      "classification": "STALE_DP2TP2_TEST_CARRIER_RED"
+    },
+    {
+      "path": "../v1_hp_postfix_exact_image_20260824_r2/focused_dp2tp2.log",
+      "sha256": "8b609e3893d5e6b581dbacf96c5d70f97bb9f1bbe6d979e3d082abad1f701045",
+      "classification": "UNTREATED_GLOBAL_TO_TP_LOCAL_TOY_HEAD_RED"
+    }
+  ],
+  "claim_ceiling": "EXACT_IMAGE PASS / TARGET NOT RUN"
+}

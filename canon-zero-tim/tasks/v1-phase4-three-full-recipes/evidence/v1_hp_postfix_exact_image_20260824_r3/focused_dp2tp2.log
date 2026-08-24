@@ -1,0 +1,14 @@
+Running tests under Python 3.12.13: /usr/local/bin/python3
+[ RUN      ] CanonicalQwen3AdapterTest.test_p59_rank_parallel_nonhead_pullbacks_match_serial_dp2_tp2
+/usr/local/lib/python3.12/site-packages/flax/nnx/tracers.py:29: DeprecationWarning: jax.core.get_opaque_trace_state is deprecated. Use jax.extend.core.get_opaque_trace_state.
+  return jax.core.get_opaque_trace_state(convention="nnx")
+[P30.G2] SPARSE_GRAD_ASSEMBLY on scalar_zero_canonicalization=1
+[       OK ] CanonicalQwen3AdapterTest.test_p59_rank_parallel_nonhead_pullbacks_match_serial_dp2_tp2
+[ RUN      ] CanonicalQwen3AdapterTest.test_p59_rank_parallel_head_accepts_trainer_dp_tp_mesh
+[P30.G2] SPARSE_GRAD_ASSEMBLY on scalar_zero_canonicalization=1
+[P59.DP4] head_cotangent_partition_ready global_shape=(12, 3) local_shape=(3,3) placement=dp,tp
+[       OK ] CanonicalQwen3AdapterTest.test_p59_rank_parallel_head_accepts_trainer_dp_tp_mesh
+----------------------------------------------------------------------
+Ran 2 tests in 1.484s
+
+OK

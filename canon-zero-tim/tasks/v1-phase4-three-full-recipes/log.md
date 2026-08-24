@@ -1,5 +1,68 @@
 # Log
 
+## 2026-08-24 UTC — post-fix pinned-image r3 admitted
+
+- Focused r3 ran the revised non-head DP2xTP2 carrier and the retained rank-2
+  generic-head carrier: 2/2 PASS. Focused raw-log SHA-256 is
+  `eae6378df8339481b93a60592b2808a74cd4a4cf9c1093536e19ff6f2f04e71a`.
+- The complete V1 pinned-image script then exited zero and emitted exactly one
+  `P59_TP_SHIM_EXACT_IMAGE_PASS ... topologies=DP2xTP4,DP2xTP8 ...` plus
+  exactly one `V1_HP_EXACT_IMAGE_PASS ... p59_real_shim=4 ... manifests=3`.
+  No unittest FAILED or traceback terminal is present. Raw-log SHA-256 is
+  `7ef23c9b7f4997a1855a16e99e348e4c981a1f80f9614cc95be1703771338264`;
+  receipt SHA-256 is
+  `4c99f542ea6907ad48f7d716e8bb9db2db77865a3fec136e3cf88bcd5ec82f5f`.
+- The old DP2xTP2 endpoint test is now honestly scoped to non-head endpoints.
+  Generic head remains covered at rank-2 TP1, while actual P59 TP-local head
+  VJP and fixed TP input reduction remain independently covered by installed
+  fixed-head TP4/TP8 tests. Runtime rank-2 enforcement was not loosened.
+- Result: `HOST PASS / EXACT_IMAGE PASS / TARGET NOT RUN`. Source publication
+  is next; no render, Kubernetes object, TPU use, or optimizer commit occurred.
+
+## 2026-08-24 UTC — post-fix pinned-image attempt 1 stopped at stale DP2xTP2 carrier
+
+- Command: `bash canon-zero-tim/tests/v1_phase4/run_exact_image.sh`, with raw
+  stdout/stderr written directly to
+  `evidence/v1_hp_postfix_exact_image_20260824/run.log` and no launch pipeline.
+  Raw log SHA-256 is
+  `621edbe196233dd00bcefe68790d30b9c7fd929f9f18c8071627efa828d8c2b1`.
+- Result: exit 1. The dependency-complete gate reached
+  `P59_TP_SHIM_EXACT_IMAGE_PASS ... manifests=2x36/36`, then the older
+  `CanonicalQwen3AdapterTest.test_p59_rank_parallel_endpoint_pullbacks_match_serial_dp2_tp2`
+  supplied rank-3 `(2,3,3)` logits cotangents at
+  `tests/rl/canonical_qwen3_adapter_test.py:763`. The production repair rejects
+  that at `tunix/rl/canonical_qwen3_adapter.py:478` because its logical carrier
+  is rank 2. The V1 terminal PASS was absent.
+- Classification: `TEST_CARRIER_RED / EXACT_IMAGE FAIL / TARGET NOT RUN`.
+  This is not an alignment verdict and no optimizer transaction, TPU, render,
+  or JobSet occurred. The failed evidence is immutable.
+- Repair under validation: retain the strict rank-2 production API; update the
+  old DP2xTP2 test to use flattened logical rows and a TP-divisible toy
+  vocabulary, with serial per-rank masks over row ranges. Do not add rank-3
+  compatibility to runtime code.
+
+## 2026-08-24 UTC — P59-local release contract hardened on host
+
+- Exact remote readback completed for the first repair stack at
+  `dfec27378bfdd9b73b7bf8f7930bacaa685b3a16`; the earlier review snapshot that
+  reported remote `5f3e8ff9` is superseded.
+- Both FrozenLake TIM and V1-HP runtime branches now select learner M2048. The
+  fixed-head receipt classifier has a fail-closed P59-local mode for the exact
+  DP16/M4096/M256 and DP8/M2048/M256 contracts, one local chunk, and the
+  barrier-pinned fixed TP input reduction. Ordinary request receipts cannot be
+  substituted for the P59-local learner receipt.
+- Full postflight now requires the exact recipe profile, global/local head
+  cotangent shapes, P59-local primal shape, one-chunk VJP, and TP reduction.
+  Negative controls reject wrong global/local shape, wrong profile, wrong
+  chunks, missing reduction, and invalid global-M/DP pairs.
+- Host result: V1 17/17, P57 144/144, P59 31/31, APC 31/31,
+  fixed-head/receipt 32/32, flags 366/366, Python/Bash syntax, and diff hygiene
+  PASS. The follow-up stack remains uncommitted until its explicitly approved
+  post-fix pinned-image gate completes.
+- Rollback: revert the evidence CL, then the carrier CL, then the contract CL.
+  The already-published attempt-1 runtime repairs and immutable failed logs
+  remain intact.
+
 ## 2026-08-24 UTC — attempt-1 repair reconstructed for authorized publication
 
 - The user explicitly authorized commit and push. The repair is split into the

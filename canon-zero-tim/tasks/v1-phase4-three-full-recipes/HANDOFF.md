@@ -11,10 +11,12 @@ The current repair release is staged in
 `/home/yuxuan/code_rl_repro/worktrees/p58_zero_hp_release3_0823`, branch
 `local/p58-zero-hp-release3-0823`, built on incoming evidence tip
 `5f3e8ff95075642b5e660af8d1219e1c98e71c72` as two functional CLs plus one
-registry/evidence/handoff CL. Commit and push were explicitly authorized on
-2026-08-24. Source publication does not waive the missing post-fix
-dependency-complete gate: do not render or launch until that separately
-approved gate passes. Render only
+registry/evidence/handoff CL. That stack was published and exactly read back at
+`dfec27378bfdd9b73b7bf8f7930bacaa685b3a16`. A follow-up release-contract stack
+now requires exact P59-local M/global/DP/chunk/reduction receipts and exact full
+postflight shapes. Its host gates and fresh r3 pinned-image gate are green; the
+follow-up stack is not yet published. Do not render or launch from this dirty tree.
+Render only
 from the exact 40-character operator-branch SHA read back after that push, and
 require a clean worktree before rendering.
 
@@ -100,10 +102,19 @@ bash canon-zero-tim/tests/v1_phase4/run_exact_image.sh
 
 Require the exact terminal marker:
 `V1_HP_EXACT_IMAGE_PASS dp16_gathered=1 dp2tp2_parallel=2 p59_tp4_tp8=2 p59_real_shim=4 p57_wandb=1 perfetto_window=1 manifests=3`.
-This is an exact-image admission receipt for the pre-attempt-1 tree, not a
-post-fix result. A new separately approved run is mandatory. The historical
-receipt is not a signed raw-log artifact: the
+This is an exact-image admission receipt for the pre-attempt-1 tree. The
+historical receipt is not a signed raw-log artifact: the
 stdout/stderr log was not durably preserved, so no raw-log path or SHA exists.
+
+The current post-fix gate passed on the same immutable image. Its raw log is
+`evidence/v1_hp_postfix_exact_image_20260824_r3/run.log` with SHA-256
+`7ef23c9b7f4997a1855a16e99e348e4c981a1f80f9614cc95be1703771338264`;
+its receipt SHA-256 is
+`4c99f542ea6907ad48f7d716e8bb9db2db77865a3fec136e3cf88bcd5ec82f5f`.
+It contains one required V1 terminal plus
+`P59_TP_SHIM_EXACT_IMAGE_PASS ... topologies=DP2xTP4,DP2xTP8 ...`, and no
+unittest failure terminal. Failed r1/r2 carrier logs are preserved beside it.
+This is dependency-complete CPU/image admission, not target execution.
 
 The separately approved one-host v5p integration proxy is frozen at evidence
 root

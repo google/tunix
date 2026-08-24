@@ -1,0 +1,34 @@
+Running tests under Python 3.12.13: /usr/local/bin/python3
+[ RUN      ] CanonicalQwen3AdapterTest.test_p59_rank_parallel_endpoint_pullbacks_match_serial_dp2_tp2
+/usr/local/lib/python3.12/site-packages/flax/nnx/tracers.py:29: DeprecationWarning: jax.core.get_opaque_trace_state is deprecated. Use jax.extend.core.get_opaque_trace_state.
+  return jax.core.get_opaque_trace_state(convention="nnx")
+[P30.G2] SPARSE_GRAD_ASSEMBLY on scalar_zero_canonicalization=1
+[P59.DP2] head_cotangent_partition_ready global_shape=(6, 4) local_shape=(3,2) placement=data,model
+[  FAILED  ] CanonicalQwen3AdapterTest.test_p59_rank_parallel_endpoint_pullbacks_match_serial_dp2_tp2
+======================================================================
+ERROR: test_p59_rank_parallel_endpoint_pullbacks_match_serial_dp2_tp2 (__main__.CanonicalQwen3AdapterTest.test_p59_rank_parallel_endpoint_pullbacks_match_serial_dp2_tp2)
+CanonicalQwen3AdapterTest.test_p59_rank_parallel_endpoint_pullbacks_match_serial_dp2_tp2
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/workspace/tests/rl/canonical_qwen3_adapter_test.py", line 774, in test_p59_rank_parallel_endpoint_pullbacks_match_serial_dp2_tp2
+    segmented.run_head_pullback_rank_parallel(
+  File "/workspace/tunix/rl/canonical_qwen3_adapter.py", line 3020, in run_head_pullback_rank_parallel
+    return self._p59_head_pullback_fn(leaves, hidden, dlogits)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/tunix/rl/canonical_qwen3_adapter.py", line 2822, in invoke
+    result = compiled(*aligned_runtime_args)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/tunix/rl/canonical_qwen3_adapter.py", line 3001, in local_pullback
+    gradients, dhidden = self._head_pullback_fn(
+                         ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/tunix/rl/canonical_qwen3_adapter.py", line 1895, in bwd_lm_head
+    return pullback(dlogits)
+           ^^^^^^^^^^^^^^^^^
+ValueError: unexpected JAX type (e.g. shape/dtype) for argument to VJP function: got bfloat16[3,2], but expected bfloat16[3,4] because the corresponding output of the differentiated function had JAX type bfloat16[3,4]
+--------------------
+For simplicity, JAX has removed its internal frames from the traceback of the following exception. Set JAX_TRACEBACK_FILTERING=off to include these.
+
+----------------------------------------------------------------------
+Ran 1 test in 0.616s
+
+FAILED (errors=1)
