@@ -1,21 +1,21 @@
-2026-08-24 22:48:47,585 - [TrainerNode] Parsed args: Namespace(port=20000, worker_id='trainer-0', model_name='Qwen3-1.7B', model_id='Qwen/Qwen3-1.7B', model_dir='/mnt/disks/linchai-data/huggingface/hub/models--Qwen--Qwen3-1.7B/snapshots/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e', tokenizer_path='/mnt/disks/linchai-data/huggingface/hub/models--Qwen--Qwen3-1.7B/snapshots/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e', mesh_fsdp=2, mesh_tp=1, max_prompt_length=512, max_response_length=128, mini_batch_size=4, train_micro_batch_size=1, compute_logps_micro_batch_size=1, compute_logps_chunk_size=0, eval_every_n_steps=1000000, learning_rate=2e-07, use_lora=False, lora_rank=16, lora_alpha=16.0)
-2026-08-24 22:48:47,585 - [TrainerNode] Repo root inserted into sys.path: /mnt/disks/linchai-data/tunix
-2026-08-24 22:48:47,586 - [TrainerNode] Prepared trainer safetensors directory: /mnt/disks/linchai-data/huggingface/hub/models--Qwen--Qwen3-1.7B/snapshots/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e
-2026-08-24 22:48:47,586 - [TrainerNode] Creating trainer mesh...
-2026-08-24 22:48:51,515 - [TrainerNode] Trainer mesh: Mesh('fsdp': 2, 'tp': 1, axis_types=(Auto, Auto))
-2026-08-24 22:48:51,515 - [TrainerNode] Loading actor model with use_lora=False...
-2026-08-24 22:48:54,166 - [TrainerNode] Building PeftTrainer v2 config...
-2026-08-24 22:48:54,167 - [TrainerNode] PeftTrainer v2 gradient_accumulation_steps=4.
-2026-08-24 22:48:54,167 - [TrainerNode] Creating generic TrainerWorker and gRPC server...
-2026-08-24 22:48:55,854 - [TrainerNode] Serving trainer worker on port 20000.
-2026-08-24 22:48:55,854 - [TrainerNode] register to discovery server at localhost:30000
-2026-08-24 22:49:40,875 - [TrainerNode] registered to discovery server at localhost:30000
-2026-08-24 22:49:40,875 - [TrainerNode] Trainer worker is registered.
-https://symbolize.stripped_domain/r/?trace=7fd58bd25e6e,7fd58bc4251f&map= 
-*** SIGTERM received by PID 706451 (TID 706451) on cpu 97, si_code=0, from PID 706427; stack trace: ***
-PC: @     0x7fd58bd25e6e  (unknown)  epoll_wait
-    @     0x7fd3a8cce743       1888  FailureSignalHandler()
-    @     0x7fd58bc42520  (unknown)  (unknown)
-https://symbolize.stripped_domain/r/?trace=7fd58bd25e6e,7fd3a8cce742,7fd58bc4251f&map= 
-E0824 22:50:34.554052  706451 coredump_hook.cc:251] RAW: Remote crash gathering disabled for SIGTERM.
-E0824 22:50:35.038465  706451 process_state.cc:771] RAW: Raising signal 15 with default behavior
+2026-08-24 23:52:29,712 - [TrainerNode] Parsed args: Namespace(port=20000, worker_id='trainer-0', model_name='Qwen3-1.7B', model_id='Qwen/Qwen3-1.7B', model_dir='/mnt/disks/linchai-data/huggingface/hub/models--Qwen--Qwen3-1.7B/snapshots/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e', tokenizer_path='/mnt/disks/linchai-data/huggingface/hub/models--Qwen--Qwen3-1.7B/snapshots/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e', mesh_fsdp=2, mesh_tp=1, max_prompt_length=512, max_response_length=128, mini_batch_size=4, train_micro_batch_size=1, compute_logps_micro_batch_size=1, compute_logps_chunk_size=0, eval_every_n_steps=1000000, learning_rate=2e-07, use_lora=False, lora_rank=16, lora_alpha=16.0)
+2026-08-24 23:52:29,712 - [TrainerNode] Repo root inserted into sys.path: /mnt/disks/linchai-data/tunix
+2026-08-24 23:52:29,713 - [TrainerNode] Prepared trainer safetensors directory: /mnt/disks/linchai-data/huggingface/hub/models--Qwen--Qwen3-1.7B/snapshots/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e
+2026-08-24 23:52:29,713 - [TrainerNode] Creating trainer mesh...
+2026-08-24 23:52:35,510 - [TrainerNode] Trainer mesh: Mesh('fsdp': 2, 'tp': 1, axis_types=(Auto, Auto))
+2026-08-24 23:52:35,510 - [TrainerNode] Loading actor model with use_lora=False...
+2026-08-24 23:52:38,427 - [TrainerNode] Building PeftTrainer v2 config...
+2026-08-24 23:52:38,427 - [TrainerNode] PeftTrainer v2 gradient_accumulation_steps=4.
+2026-08-24 23:52:38,427 - [TrainerNode] Creating generic TrainerWorker and gRPC server...
+2026-08-24 23:52:39,762 - [TrainerNode] Using v0 ocp.CheckpointManagerOptions is deprecated, along with save_interval_steps. Please use a checkpointing_options with save_decision_policy instead.
+2026-08-24 23:52:39,763 - [TrainerNode] Using v0 ocp.CheckpointManagerOptions is deprecated, along with max_to_keep. Please use a checkpointing_options with preservation_policy instead.
+2026-08-24 23:52:39,763 - [TrainerNode] [thread=MainThread] Failed to get flag value for EXPERIMENTAL_ORBAX_USE_DISTRIBUTED_PROCESS_ID.
+2026-08-24 23:52:39,763 - [TrainerNode] [process=0][thread=MainThread] CheckpointManager init: checkpointers=None, item_names=None, item_handlers=None, handler_registry=None
+2026-08-24 23:52:39,763 - [TrainerNode] Initialized registry DefaultCheckpointHandlerRegistry({('metrics', <class 'orbax.checkpoint._src.handlers.json_checkpoint_handler.JsonSaveArgs'>): <orbax.checkpoint._src.handlers.json_checkpoint_handler.JsonCheckpointHandler object at 0x7feca78a5580>, ('metrics', <class 'orbax.checkpoint._src.handlers.json_checkpoint_handler.JsonRestoreArgs'>): <orbax.checkpoint._src.handlers.json_checkpoint_handler.JsonCheckpointHandler object at 0x7feca78a5580>}).
+2026-08-24 23:52:39,764 - [TrainerNode] orbax-checkpoint version: 0.12.4
+2026-08-24 23:52:39,764 - [TrainerNode] [process=0][thread=MainThread] Using barrier_sync_fn: <function get_barrier_sync_fn.<locals>.<lambda> at 0x7feca73ffce0> timeout: 1200 secs and primary_host=0 for async checkpoint writes
+2026-08-24 23:52:39,764 - [TrainerNode] Created directory=/mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints
+2026-08-24 23:52:39,765 - [TrainerNode] Found 0 checkpoint steps in /mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints
+2026-08-24 23:52:39,765 - [TrainerNode] [process=0][thread=MainThread] CheckpointManager created,  primary_host=0, CheckpointManagerOptions=CheckpointManagerOptions(save_interval_steps=1, max_to_keep=None, keep_time_interval=None, keep_period=None, best_fn=None, best_mode='max', keep_checkpoints_without_metrics=True, step_prefix=None, step_format_fixed_length=None, step_name_format=<orbax.checkpoint.experimental.v1._src.path.step._StandardNameFormat object at 0x7ff1f3d3ffe0>, create=True, cleanup_tmp_directories=False, save_on_steps=frozenset(), single_host_load_and_broadcast=False, todelete_subdir=None, todelete_full_path=None, enable_background_delete=False, num_deletion_threads=None, read_only=False, enable_async_checkpointing=True, async_options=AsyncOptions(timeout_secs=1200, barrier_sync_fn=None, post_finalization_callback=None, create_directories_asynchronously=True), multiprocessing_options=MultiprocessingOptions(primary_host=0, active_processes=None, barrier_sync_key_prefix=None), should_save_fn=None, file_options=FileOptions(path_permission_mode=None), atomicity_options=AtomicityOptions(mode=<AtomicityMode.AUTO: 'auto'>, allow_legacy_atomic_rename=False), save_root_metadata=True, temporary_path_class=None, save_decision_policy=FixedIntervalPolicy(interval=1), preservation_policy=LatestN(n=5), prevent_write_metrics=True, enable_should_save_is_saving_in_progress_check=True, enable_per_process_directory_creation=False, lightweight_initialize=False), root_directory=/mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints: <orbax.checkpoint.checkpoint_manager.CheckpointManager object at 0x7feca77d6660>
+2026-08-24 23:52:39,767 - [TrainerNode] Serving trainer worker on port 20000.
+2026-08-24 23:52:39,768 - [TrainerNode] register to discovery server at localhost:30000

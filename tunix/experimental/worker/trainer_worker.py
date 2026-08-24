@@ -223,6 +223,7 @@ class TrainerWorker(abstract_worker.Worker):
     """Force the trainer to serialize its state (model + optimizer)."""
     self._ensure_ready()
     try:
+      print(f"TrainerWorker {self._worker_id} saving checkpoint with metadata: {metadata}")
       self._trainer.save_checkpoint(metadata, **kwargs)
       self._last_error = None
       return self._response(checkpoint_saved=True)

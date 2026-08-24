@@ -364,3 +364,17 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     if tasks:
       await asyncio.gather(*tasks)
     return getattr(sync_metadata, "new_policy_version", 1)
+
+  async def save_checkpoint(
+      self,
+      role: datatypes.Role = datatypes.Role.ACTOR,
+      metadata: Any = None,
+      **kwargs: Any,
+  ) -> Any:
+    """Forces the trainer worker for `role` to serialize its state."""
+    worker = self._trainer_workers.get(role)
+    if worker is None:
+      raise ValueError(f"No trainer worker registered for role {role}")
+    return await self._invoke_worker(
+        worker, "save_checkpoint", metadata=metadata, **kwargs
+    )

@@ -201,6 +201,20 @@ class SyncRLProgram:
               apply_optimizer=is_last,
           )
       )
+    
+    await _await_if_needed(
+      active_engine.save_checkpoint(
+        role=datatypes.Role.ACTOR,
+        step=current_step,
+        metadata={
+            "step": current_step,
+            "policy_version": self.policy_version,
+            "num_rollouts": len(rollouts),
+            "num_microbatches": len(microbatches),
+        },
+      )
+    )
+
 
     # 6. Sync weights to rollout replicas
     if self.sync_weights:

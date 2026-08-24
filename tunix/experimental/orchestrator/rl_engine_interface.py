@@ -77,3 +77,12 @@ class AbstractRLEngine(Protocol):
   ) -> int:
     """Coordinates decentralized peer-to-peer weight sync across worker roles."""
     ...
+
+  async def save_checkpoint(
+      self,
+      role: datatypes.Role = datatypes.Role.ACTOR,
+      metadata: Any = None,
+      **kwargs: Any,
+  ) -> Any:
+    """Requests the trainer worker for `role` to save a checkpoint."""
+    ...

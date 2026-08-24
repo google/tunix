@@ -27,6 +27,8 @@ import pickle
 import sys
 from typing import Any
 
+
+from orbax import checkpoint as ocp
 import jax
 from jax import numpy as jnp
 from jax.experimental import mesh_utils
@@ -229,6 +231,10 @@ class _MeshBoundTrainer:
     with self._mesh:
       return self._trainer.prepare_weight_sync(**kwargs)
 
+  def save_checkpoint(self, metadata: Any = None, **kwargs) -> None:
+    with self._mesh:
+      self._trainer.save_checkpoint(metadata, **kwargs)
+
   def close(self) -> None:
     with self._mesh:
       self._trainer.close()
@@ -288,12 +294,17 @@ def main(argv: list[str], context: Any = None) -> None:
   grad_accumulation_steps = max(
       1, math.ceil(args.mini_batch_size / args.train_micro_batch_size)
   )
+  checkpointing_options = ocp.CheckpointManagerOptions(
+    save_interval_steps=1, max_to_keep=5
+  )
   training_config = peft_trainer_v2.TrainingConfig(
       eval_every_n_steps=args.eval_every_n_steps,
       gradient_accumulation_steps=grad_accumulation_steps,
       metrics_prefix="actor",
       pbar_description="Actor Training",
       data_sharding_axis=("fsdp",),
+      checkpoint_root_directory=os.path.join("/mnt/disks/linchai-data/tmp_ckpt", "tunix_trainer_checkpoints"),
+      checkpointing_options=checkpointing_options,
   )
   logging.info(
       "PeftTrainer v2 gradient_accumulation_steps=%d.",
