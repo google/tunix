@@ -84,28 +84,62 @@ def _p59_fixed_order_tp_sum(value):
     return total.astype(value.dtype)
 
 
-def _p59_local_fused_pieces(output, output_sizes, n_shards, prefix):
+def _p59_local_fused_pieces(
+    output,
+    output_sizes,
+    n_shards,
+    prefix,
+    *,
+    expected_local_width,
+    tp_sharded_last_dim,
+    site_family,
+):
     """Apply the engine's local concat layout inside the P59 TP map.
 
     ``n_shards`` belongs to the fused-output layout; it is not the live mesh TP
     size.  A non-fused q/k/v projection legitimately reports one layout shard
-    even on TP4/TP8 and is already TP-local at this boundary.
+    even on TP4/TP8 and is already TP-local at this boundary.  Conversely,
+    gate/up keep their global logical ``output_sizes`` while the enclosing P59
+    map has already reduced the last dimension to one physical TP slice.  Use
+    the live TP size only for that last-dimension layout and validate the
+    resulting feature width against the model-exact projection contract.
     """
     if not _p59_local_tp_context():
         return None
     n_shards = int(n_shards)
     output_sizes = tuple(map(int, output_sizes))
-    if n_shards <= 0 or any(size % n_shards for size in output_sizes):
+    expected_local_width = int(expected_local_width)
+    tp_size = int(base._CANON_MESH.shape[base._CANON_TP_AXIS])
+    if n_shards not in (1, tp_size):
         raise RuntimeError(
-            f"P59 local fused-linear split is not layout-shard divisible at "
-            f"{prefix}: sizes={output_sizes} layout_shards={n_shards}"
+            f"P59 local fused-linear layout shard mismatch at {prefix}: "
+            f"layout_shards={n_shards} live_tp={tp_size}"
         )
-    local_sizes = tuple(size // n_shards for size in output_sizes)
-    expected_local_width = sum(local_sizes)
-    if int(output.shape[-1]) != expected_local_width:
+    actual_local_width = 1
+    for dimension in output.shape[1:]:
+        actual_local_width *= int(dimension)
+    if actual_local_width != expected_local_width:
         raise RuntimeError(
-            "P59 local fused-linear width mismatch at "
-            f"{prefix}: {output.shape[-1]} != {expected_local_width}"
+            "P59 local projection feature width mismatch at "
+            f"{prefix}: {actual_local_width} != {expected_local_width}"
+        )
+    if tp_sharded_last_dim and output.ndim != 2:
+        raise RuntimeError(
+            f"P59 local {site_family} expected rank-2 TP-last output at "
+            f"{prefix}, got shape={output.shape}"
+        )
+    split_divisor = tp_size if tp_sharded_last_dim else n_shards
+    if any(size % split_divisor for size in output_sizes):
+        raise RuntimeError(
+            f"P59 local fused-linear split is not divisible at {prefix}: "
+            f"sizes={output_sizes} divisor={split_divisor}"
+        )
+    local_sizes = tuple(size // split_divisor for size in output_sizes)
+    expected_local_last_dim = sum(local_sizes)
+    if int(output.shape[-1]) != expected_local_last_dim:
+        raise RuntimeError(
+            "P59 local fused-linear last-dimension mismatch at "
+            f"{prefix}: {output.shape[-1]} != {expected_local_last_dim}"
         )
     pieces = []
     start = 0
@@ -116,6 +150,15 @@ def _p59_local_fused_pieces(output, output_sizes, n_shards, prefix):
         raise RuntimeError(
             f"P59 local fused-linear split did not consume output at "
             f"{prefix}: {start} != {output.shape[-1]}"
+        )
+    if tp_sharded_last_dim:
+        print(
+            "[PATHTRACE] P59_LOCAL_FUSED_LINEAR_READY "
+            f"tp={tp_size} site={site_family} "
+            f"local_width={expected_local_width} "
+            f"declared_width={sum(output_sizes)} "
+            f"layout_shards={n_shards} pieces={len(pieces)}",
+            flush=True,
         )
     return tuple(pieces)
 
@@ -414,7 +457,13 @@ def _p22xf_einsum_call(self, inputs):
         output += self.bias
     if not site.contract_parallel:
         pieces = _p59_local_fused_pieces(
-            output, config.output_sizes, config.n_shards, self.prefix
+            output,
+            config.output_sizes,
+            config.n_shards,
+            self.prefix,
+            expected_local_width=site.n_local,
+            tp_sharded_last_dim=site.family in ("gate_proj", "up_proj"),
+            site_family=site.family,
         )
         if pieces is None:
             pieces = slice_sharded_tensor_for_concatenation(

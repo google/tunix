@@ -86,6 +86,10 @@ class FullClassifierTest(unittest.TestCase):
         "K=2048 TP=4 local_N=37984 fixed_N=38144 endpoint=tied_embed",
         "[PATHTRACE] P59_RPA_LOCAL_KV_READY tp=4 local_q_heads=4 "
         "local_kv_heads=2 cache_heads=2 packing=2",
+        "[PATHTRACE] P59_LOCAL_FUSED_LINEAR_READY tp=4 site=gate_proj "
+        "local_width=1536 declared_width=6144 layout_shards=1 pieces=1",
+        "[PATHTRACE] P59_LOCAL_FUSED_LINEAR_READY tp=4 site=up_proj "
+        "local_width=1536 declared_width=6144 layout_shards=1 pieces=1",
         "[P51.XPROF] phase=update armed step=2",
         "[P51.XPROF] phase=update started step=2 anchor=update_entry tpu_trace_mode=TRACE_COMPUTE",
         "[P51.XPROF] phase=update stopped step=3 anchor=step_completed",
@@ -244,9 +248,9 @@ class FullClassifierTest(unittest.TestCase):
 
   def test_recipe_shape_contracts_cover_dp16_and_dp8(self):
     expected = {
-        "gsm8k": (16, 4, 4096, 256, 37984),
-        "p45": (8, 8, 2048, 256, 18992),
-        "m15": (8, 8, 2048, 256, 18992),
+        "gsm8k": (16, 4, 4096, 256, 6144, 37984),
+        "p45": (8, 8, 2048, 256, 12288, 18992),
+        "m15": (8, 8, 2048, 256, 12288, 18992),
     }
     for recipe, values in expected.items():
       contract = classifier._RECIPES[recipe]
@@ -256,6 +260,7 @@ class FullClassifierTest(unittest.TestCase):
               contract["tp"],
               contract["global_m"],
               contract["local_m"],
+              contract["intermediate"],
               contract["local_vocab"],
           ),
           values,
@@ -422,6 +427,51 @@ class FullClassifierTest(unittest.TestCase):
       )
       self.assertEqual(record["verdict"], "FAIL")
       self.assertIn("p59_rpa_local_kv_shape_or_topology", record["reasons"])
+
+  def test_missing_p59_local_fused_linear_receipt_is_fatal(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      state, run_log, updates, base = self._evidence(Path(tmp))
+      text = run_log.read_text(encoding="utf-8")
+      run_log.write_text(
+          "\n".join(
+              line
+              for line in text.splitlines()
+              if "P59_LOCAL_FUSED_LINEAR_READY" not in line
+          )
+          + "\n",
+          encoding="utf-8",
+      )
+      record = classifier.classify(
+          recipe="gsm8k",
+          state=state,
+          run_log=run_log,
+          update_report=updates,
+          base_classification=base,
+      )
+      self.assertEqual(record["verdict"], "FAIL")
+      self.assertIn(
+          "p59_local_fused_linear_receipt_missing", record["reasons"]
+      )
+
+  def test_wrong_p59_local_fused_linear_shape_is_fatal(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      state, run_log, updates, base = self._evidence(Path(tmp))
+      text = run_log.read_text(encoding="utf-8")
+      run_log.write_text(
+          text.replace("local_width=1536", "local_width=6144"),
+          encoding="utf-8",
+      )
+      record = classifier.classify(
+          recipe="gsm8k",
+          state=state,
+          run_log=run_log,
+          update_report=updates,
+          base_classification=base,
+      )
+      self.assertEqual(record["verdict"], "FAIL")
+      self.assertIn(
+          "p59_local_fused_linear_shape_or_topology", record["reasons"]
+      )
 
   def test_direct_eval_cycle_timing_uses_explicit_enclosing_step(self):
     rows = [

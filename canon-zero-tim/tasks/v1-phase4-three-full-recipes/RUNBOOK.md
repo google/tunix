@@ -58,6 +58,14 @@ global-GQA control with the P59 flag present. The M15 field additionally
 requires the signed 4096/8192 positive plus partial and foreign candidate/split
 negatives; P45 remains 4096/2048.
 
+The Attempt-4 repair additionally requires `p59_fused_linear=2`. The
+installed projection carriers must emit both gate and up receipts at TP4
+(`declared_width=6144 local_width=1536`) and TP8
+(`declared_width=12288 local_width=1536`), always with
+`layout_shards=1 pieces=1`. Full target postflight requires the matching
+recipe-specific receipts; missing, wrong-width, wrong-TP, or partial-site
+evidence is fatal.
+
 The complete Attempt-3 admission passed on tested commit `f0af2d9b`, tree
 `24675392adee620ab36b87f9a0c4f7e8111f4839`. Use the durable P58/V1 raw logs
 and receipt under

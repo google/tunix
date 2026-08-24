@@ -23,6 +23,7 @@ _RECIPES = {
         "global_m": 4096,
         "local_m": 256,
         "hidden": 2048,
+        "intermediate": 6144,
         "local_vocab": 37984,
         "fixed_local_vocab": 38144,
         "endpoint": "tied_embed",
@@ -39,6 +40,7 @@ _RECIPES = {
         "global_m": 2048,
         "local_m": 256,
         "hidden": 4096,
+        "intermediate": 12288,
         "local_vocab": 18992,
         "fixed_local_vocab": 19200,
         "endpoint": "untied_lm_head",
@@ -55,6 +57,7 @@ _RECIPES = {
         "global_m": 2048,
         "local_m": 256,
         "hidden": 4096,
+        "intermediate": 12288,
         "local_vocab": 18992,
         "fixed_local_vocab": 19200,
         "endpoint": "untied_lm_head",
@@ -449,6 +452,46 @@ def classify(
       reasons,
   )
 
+  fused_linear_records = [
+      dict(_FIELD_RE.findall(line))
+      for line in text.splitlines()
+      if line.strip().startswith(
+          "[PATHTRACE] P59_LOCAL_FUSED_LINEAR_READY "
+      )
+  ]
+  expected_fused_linear = {
+      "tp": str(tp_size),
+      "local_width": str(int(contract["intermediate"]) // tp_size),
+      "declared_width": str(contract["intermediate"]),
+      "layout_shards": "1",
+      "pieces": "1",
+  }
+  matching_fused_linear = [
+      record
+      for record in fused_linear_records
+      if record.get("site") in ("gate_proj", "up_proj")
+      and all(
+          record.get(name) == value
+          for name, value in expected_fused_linear.items()
+      )
+  ]
+  _require(
+      bool(fused_linear_records),
+      "p59_local_fused_linear_receipt_missing",
+      reasons,
+  )
+  _require(
+      len(matching_fused_linear) == len(fused_linear_records),
+      "p59_local_fused_linear_shape_or_topology",
+      reasons,
+  )
+  _require(
+      {record.get("site") for record in matching_fused_linear}
+      == {"gate_proj", "up_proj"},
+      "p59_local_fused_linear_sites",
+      reasons,
+  )
+
   updates = _json_lines(update_report)
   _require(len(updates) == expected_updates, f"updates={len(updates)} expected={expected_updates}", reasons)
   for index, update in enumerate(updates):
@@ -475,6 +518,7 @@ def classify(
           f"[P59.DP{dp_size}] head_cotangent_partition_ready"
       ),
       "p59_rpa_local_kv": len(rpa_receipts),
+      "p59_local_fused_linear": len(fused_linear_records),
       "p59_parallel": text.count(f"[P59.DP{dp_size}] gradient_reducer_ready"),
       "xprof_armed": text.count(f"[P51.XPROF] phase=update armed step={_PROFILED_STEP}"),
       "xprof_started": text.count(f"[P51.XPROF] phase=update started step={_PROFILED_STEP}"),
@@ -494,6 +538,12 @@ def classify(
   _require(
       marker_counts["p59_rpa_local_kv"] >= 1,
       f"marker.p59_rpa_local_kv={marker_counts['p59_rpa_local_kv']}",
+      reasons,
+  )
+  _require(
+      marker_counts["p59_local_fused_linear"] >= 2,
+      "marker.p59_local_fused_linear="
+      f"{marker_counts['p59_local_fused_linear']}",
       reasons,
   )
   _require(marker_counts["p59_parallel"] == expected_updates, f"marker.p59_parallel={marker_counts['p59_parallel']} expected={expected_updates}", reasons)

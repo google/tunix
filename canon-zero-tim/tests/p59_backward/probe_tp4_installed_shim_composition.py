@@ -140,6 +140,9 @@ def main() -> None:
           (head_dim,),
           1,
           "model.layers.0.self_attn.q_proj",
+          expected_local_width=local_heads * head_dim,
+          tp_sharded_last_dim=False,
+          site_family="q_proj",
       )
       if pieces is None:
         raise RuntimeError("P59 local q_proj layout was not selected")
@@ -149,29 +152,62 @@ def main() -> None:
             f"P59 local q_proj layout changed shape: {q_output.shape}"
         )
 
-      # Retain the previous multi-output layout coverage while making the
-      # differentiated carrier match the real q_proj n_shards=1 contract.
+      # Reproduce the Attempt-4 gate/up boundary exactly: the engine retains
+      # one logical layout shard and a global declared width, while the P59
+      # outer TP map has already produced the 1536-wide physical slice.
       flat = output.reshape(output.shape[0], -1)
-      fused = xf._p59_local_fused_pieces(
-          flat,
-          (global_width // 2, global_width // 2),
-          TP_SIZE,
-          "model.layers.0.mlp.gate_proj",
+      intermediate_width = 6144 if TP_SIZE == 4 else 12288
+      local_intermediate = intermediate_width // TP_SIZE
+      gate_output = jnp.ones(
+          (flat.shape[0], local_intermediate), dtype=flat.dtype
       )
-      if fused is None or jnp.concatenate(fused, axis=-1).shape != flat.shape:
-        raise RuntimeError("P59 local fused layout was not selected")
+      for family in ("gate_proj", "up_proj"):
+        fused = xf._p59_local_fused_pieces(
+            gate_output,
+            (intermediate_width,),
+            1,
+            f"model.layers.0.mlp.{family}",
+            expected_local_width=local_intermediate,
+            tp_sharded_last_dim=True,
+            site_family=family,
+        )
+        if (
+            fused is None
+            or jnp.concatenate(fused, axis=-1).shape != gate_output.shape
+        ):
+          raise RuntimeError(f"P59 local {family} layout was not selected")
       try:
         xf._p59_local_fused_pieces(
             output,
             (head_dim + 1,),
             1,
             "negative.q_proj",
+            expected_local_width=local_heads * head_dim,
+            tp_sharded_last_dim=False,
+            site_family="q_proj",
         )
       except RuntimeError as error:
-        if "width mismatch" not in str(error):
+        if "last-dimension mismatch" not in str(error):
           raise
       else:
         raise RuntimeError("P59 local q_proj wrong-width negative did not fire")
+      try:
+        xf._p59_local_fused_pieces(
+            gate_output[..., :-1],
+            (intermediate_width,),
+            1,
+            "negative.gate_proj",
+            expected_local_width=local_intermediate,
+            tp_sharded_last_dim=True,
+            site_family="gate_proj",
+        )
+      except RuntimeError as error:
+        if "feature width mismatch" not in str(error):
+          raise
+      else:
+        raise RuntimeError(
+            "P59 local gate_proj wrong-feature-width negative did not fire"
+        )
       return q_output
 
     _, pullback = jax.vjp(forward, local_weight, local_hidden)
@@ -288,6 +324,9 @@ def main() -> None:
       (head_dim,),
       1,
       "ordinary.serving.q_proj",
+      expected_local_width=global_heads * head_dim,
+      tp_sharded_last_dim=False,
+      site_family="q_proj",
   ) is not None:
     raise AssertionError("ordinary serving selected the P59 local split")
 
@@ -298,7 +337,7 @@ def main() -> None:
   print(
       f"P59_TP{TP_SIZE}_INSTALLED_PROJECTION_PASS "
       f"topology=DP2xTP{TP_SIZE} q_proj_layout_shards=1 "
-      "fused_layout=1 wrong_width_negative=1 ordinary_global=1 "
+      "gate_up_layout_shards_one=2 wrong_width_negative=2 ordinary_global=1 "
       "serial_parallel=exact optimizer_commits=0",
       flush=True,
   )
