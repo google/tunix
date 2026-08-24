@@ -1,0 +1,73 @@
+--- attn_iface_p38_kv_unified.py
++++ attn_iface_p59_local_kv.py
+@@ -384,3 +384,54 @@
++def _p59_local_attention_context(mesh):
++    """Returns whether P59 has already sliced attention over DP and TP."""
++    if os.environ.get("CANON_P59_RANK_PARALLEL_BACKWARD", "") != "1":
++        return False
++    context = jax.sharding.get_abstract_mesh()
++    if tuple(context.axis_names) != ("data", "model"):
++        return False
++    axis_types = dict(zip(context.axis_names, context.axis_types))
++    if (
++        axis_types.get("data") is not jax.sharding.AxisType.Manual
++        or axis_types.get("model") is not jax.sharding.AxisType.Manual
++    ):
++        return False
++    if "data" not in mesh.shape or "model" not in mesh.shape:
++        raise RuntimeError(
++            "P59 local attention requires engine data/model axes"
++        )
++    if (
++        int(context.shape["data"]) <= 1
++        or int(context.shape["model"]) <= 1
++        or int(context.shape["data"]) != int(mesh.shape["data"])
++        or int(context.shape["model"]) != int(mesh.shape["model"])
++    ):
++        raise RuntimeError(
++            "P59 local attention context and engine topology differ"
++        )
++    return True
++
++
++def _p59_validate_local_attention(q, k, v, kv_cache, tp_size):
++    shapes = tuple(tuple(map(int, value.shape)) for value in (q, k, v, kv_cache))
++    q_shape, k_shape, v_shape, cache_shape = shapes
++    if len(q_shape) != 3 or len(cache_shape) != 5 or k_shape != v_shape:
++        raise ValueError(f"P59 local attention rank/shape mismatch: {shapes}")
++    if k_shape[0] != q_shape[0] or k_shape[2] != q_shape[2]:
++        raise ValueError(f"P59 local attention Q/K/V mismatch: {shapes}")
++    if k_shape[1] <= 0 or q_shape[1] % k_shape[1] != 0:
++        raise ValueError(f"P59 local attention GQA ratio mismatch: {shapes}")
++    packing = cache_shape[3]
++    if packing <= 0:
++        raise ValueError(f"P59 local attention cache packing mismatch: {shapes}")
++    expected_cache_heads = (2 * k_shape[1] + packing - 1) // packing
++    if cache_shape[2] != expected_cache_heads or cache_shape[4] != k_shape[2]:
++        raise ValueError(f"P59 local attention cache shape mismatch: {shapes}")
++    _ahit(
++        "P59_RPA_LOCAL_KV_READY "
++        f"tp={tp_size} local_q_heads={q_shape[1]} local_kv_heads={k_shape[1]} "
++        f"cache_heads={cache_shape[2]} packing={packing}"
++    )
++
++
+ def sharded_ragged_paged_attention(
+     mesh: Mesh,
+     q: jax.Array,
+@@ -401,11 +452,14 @@
+     use_causal_mask: bool = True,
+ ):
+     """Shards along KV heads."""
++    p59_local_attention = _p59_local_attention_context(mesh)
+     # Handle GQA/MQA where num_kv_heads < tp_size
+     # We replicate KV heads to match tp_size so that we can shard them evenly.
+     # TODO (ranlihao): This is not performant and introduces extra overhead during inference. We need to handle this during weight loading
+     tp_size = get_mesh_shape_product(mesh, ShardingAxisName.ATTN_HEAD)
+-    if tp_size > 1:
++    if p59_local_attention:
++        _p59_validate_local_attention(q, k, v, kv_cache, tp_size)
++    elif tp_size > 1:
+         num_kv_heads = k.shape[1]
+         if num_kv_heads < tp_size:
+             if tp_size % num_kv_heads != 0:

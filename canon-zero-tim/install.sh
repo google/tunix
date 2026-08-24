@@ -108,6 +108,11 @@ patch -s --no-backup-if-mismatch "$OUT/attn_iface_patched.py" \
   echo "      PATCH FAILED: 08-attention-kv-unified.patch" >&2
   exit 1
 }
+patch -s --no-backup-if-mismatch "$OUT/attn_iface_patched.py" \
+  "$PKG/patches/tpu_inference/25-attention-p59-local-kv.patch" || {
+  echo "      PATCH FAILED: 25-attention-p59-local-kv.patch" >&2
+  exit 1
+}
 patch -s --no-backup-if-mismatch "$OUT/tpu_runner_p21_l30.py" \
   "$PKG/patches/tpu_inference/09-tpu-runner-p38-serving-capture.patch" || {
   echo "      PATCH FAILED: 09-tpu-runner-p38-serving-capture.patch" >&2

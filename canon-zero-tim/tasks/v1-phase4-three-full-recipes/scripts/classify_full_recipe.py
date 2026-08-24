@@ -428,6 +428,27 @@ def classify(
       reasons,
   )
 
+  local_q_heads = 4
+  local_kv_heads = 8 // tp_size
+  expected_rpa_receipt = (
+      "[PATHTRACE] P59_RPA_LOCAL_KV_READY "
+      f"tp={tp_size} local_q_heads={local_q_heads} "
+      f"local_kv_heads={local_kv_heads} cache_heads={local_kv_heads} "
+      "packing=2"
+  )
+  rpa_receipts = [
+      line.strip()
+      for line in text.splitlines()
+      if line.strip().startswith("[PATHTRACE] P59_RPA_LOCAL_KV_READY ")
+  ]
+  _require(bool(rpa_receipts), "p59_rpa_local_kv_receipt_missing", reasons)
+  _require(
+      bool(rpa_receipts)
+      and all(line == expected_rpa_receipt for line in rpa_receipts),
+      "p59_rpa_local_kv_shape_or_topology",
+      reasons,
+  )
+
   updates = _json_lines(update_report)
   _require(len(updates) == expected_updates, f"updates={len(updates)} expected={expected_updates}", reasons)
   for index, update in enumerate(updates):
@@ -453,6 +474,7 @@ def classify(
       "p59_head_partition": text.count(
           f"[P59.DP{dp_size}] head_cotangent_partition_ready"
       ),
+      "p59_rpa_local_kv": len(rpa_receipts),
       "p59_parallel": text.count(f"[P59.DP{dp_size}] gradient_reducer_ready"),
       "xprof_armed": text.count(f"[P51.XPROF] phase=update armed step={_PROFILED_STEP}"),
       "xprof_started": text.count(f"[P51.XPROF] phase=update started step={_PROFILED_STEP}"),
@@ -467,6 +489,11 @@ def classify(
   _require(
       marker_counts["p59_head_partition"] >= 1,
       f"marker.p59_head_partition={marker_counts['p59_head_partition']}",
+      reasons,
+  )
+  _require(
+      marker_counts["p59_rpa_local_kv"] >= 1,
+      f"marker.p59_rpa_local_kv={marker_counts['p59_rpa_local_kv']}",
       reasons,
   )
   _require(marker_counts["p59_parallel"] == expected_updates, f"marker.p59_parallel={marker_counts['p59_parallel']} expected={expected_updates}", reasons)

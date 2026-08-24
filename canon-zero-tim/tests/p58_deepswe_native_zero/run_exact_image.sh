@@ -148,5 +148,5 @@ $DOCKER run --rm \
       python3 \
       canon-zero-tim/tests/p58_deepswe_native_zero/probe_stock_prompt_observer.py
     rm -r "$observer_state"
-    echo "P58_EXACT_IMAGE_CPU_PASS loss_oracle=1 weighted_accumulation=1 compact_filter=1 durable_journal=1 paired_renderer=1 alignment_policy=1 stock_observer=1 onehost_xprof=1 zero_hp_full=1 apc=1 p59_tp4_tp8=2 p59_real_shim=4 p57_wandb=1 regressions=1"
+    echo "P58_EXACT_IMAGE_CPU_PASS loss_oracle=1 weighted_accumulation=1 compact_filter=1 durable_journal=1 paired_renderer=1 alignment_policy=1 stock_observer=1 onehost_xprof=1 zero_hp_full=1 apc=1 p59_tp4_tp8=2 p59_real_shim=4 p59_rpa=2 p57_wandb=1 regressions=1"
   '

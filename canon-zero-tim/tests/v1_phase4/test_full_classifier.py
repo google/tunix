@@ -84,6 +84,8 @@ class FullClassifierTest(unittest.TestCase):
         "accumulation=lax.scan order=ascending "
         "tp_input_reduction=all_gather_rank_order_f32_barrier "
         "K=2048 TP=4 local_N=37984 fixed_N=38144 endpoint=tied_embed",
+        "[PATHTRACE] P59_RPA_LOCAL_KV_READY tp=4 local_q_heads=4 "
+        "local_kv_heads=2 cache_heads=2 packing=2",
         "[P51.XPROF] phase=update armed step=2",
         "[P51.XPROF] phase=update started step=2 anchor=update_entry tpu_trace_mode=TRACE_COMPUTE",
         "[P51.XPROF] phase=update stopped step=3 anchor=step_completed",
@@ -378,6 +380,48 @@ class FullClassifierTest(unittest.TestCase):
           "p59_fixed_head_vjp_global_local_shape_chunks_or_reduction",
           record["reasons"],
       )
+
+  def test_missing_p59_rpa_local_kv_receipt_is_fatal(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      state, run_log, updates, base = self._evidence(Path(tmp))
+      run_log.write_text(
+          "\n".join(
+              line
+              for line in run_log.read_text(encoding="utf-8").splitlines()
+              if "P59_RPA_LOCAL_KV_READY" not in line
+          )
+          + "\n",
+          encoding="utf-8",
+      )
+      record = classifier.classify(
+          recipe="gsm8k",
+          state=state,
+          run_log=run_log,
+          update_report=updates,
+          base_classification=base,
+      )
+      self.assertEqual(record["verdict"], "FAIL")
+      self.assertIn("p59_rpa_local_kv_receipt_missing", record["reasons"])
+
+  def test_wrong_p59_rpa_local_kv_shape_is_fatal(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      state, run_log, updates, base = self._evidence(Path(tmp))
+      run_log.write_text(
+          run_log.read_text(encoding="utf-8").replace(
+              "local_kv_heads=2 cache_heads=2",
+              "local_kv_heads=4 cache_heads=2",
+          ),
+          encoding="utf-8",
+      )
+      record = classifier.classify(
+          recipe="gsm8k",
+          state=state,
+          run_log=run_log,
+          update_report=updates,
+          base_classification=base,
+      )
+      self.assertEqual(record["verdict"], "FAIL")
+      self.assertIn("p59_rpa_local_kv_shape_or_topology", record["reasons"])
 
   def test_direct_eval_cycle_timing_uses_explicit_enclosing_step(self):
     rows = [
