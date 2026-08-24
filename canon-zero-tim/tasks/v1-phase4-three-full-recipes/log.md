@@ -1,5 +1,13 @@
 # Log
 
+## 2026-08-24T09:18:00Z — Attempt-4 fused-linear local-width seam repaired and image-admitted
+
+- Fast-forwarded the clean worktree to operator tip `7e9b31cb`; all four Attempt-4 evidence hashes verify. GSM8K `g64p`, P45 `f45p`, and M15 `m15p` passed strict step-0 pre-alignment for 190,635 / 47,329 / 122,754 actions with both byte deltas zero. No alignment FAIL or optimizer commit exists.
+- First red interval: the published RPA fix emits exact TP4/TP8 local-KV receipts, then final-layer `gate_proj` produces the correct physical width 1536. Installed `linear_p22xf.py:106` incorrectly compares it to the global engine declaration 6144 on TP4 or 12288 on TP8 because `config.n_shards=1`. Terminals are `gsm8k_g64p_error.log:12179`, `p45_f45p_error.log:21910`, and `m15_m15p_error.log:19955`.
+- Runtime CL `5bd90bff`: q/k/v retain layout-shard splitting; gate/up divide their global declared last-axis widths by the live TP degree and validate the flattened output against model-exact `site.n_local`. Exact positive receipt is `P59_LOCAL_FUSED_LINEAR_READY`; wrong feature width and full-postflight missing/wrong receipt controls fail closed. `MANIFEST.sha256` is synchronized.
+- Validation: syntax, diff hygiene, P59 34/34, and V1 23/23 pass. Focused pinned-image installed-shim gate passes TP4 `6144->1536` and TP8 `12288->1536` gate/up boundaries, ordinary-global negatives, RPA, 2x36/36 manifests, and zero commits. Complete V1 exact-image exits zero with `V1_HP_EXACT_IMAGE_PASS ... p59_fused_linear=2 ... manifests=3`.
+- Durable evidence is `evidence/v1_hp_attempt4_fix_exact_image_20260824_r1/`: raw SHA `9d50ec495c189a77dfdab92b8496580a58a55d101ed03cd2b977728a69ef5001`, one terminal, command exit 0, and no unittest FAILED or traceback. Its tested runtime hashes match CL `5bd90bff`. Claim ceiling is `HOST PASS / EXACT_IMAGE PASS / TARGET NOT RUN`. No TPU target, optimizer commit, performance verdict, push, render, or Kubernetes mutation occurred. Rollback the evidence ledger first, then `5bd90bff`; preserve all Attempt-4 logs.
+
 ## 2026-08-24T07:39:21Z — Attempt-3 exact-image admission passed and was sealed
 
 - With explicit approval, the complete P58 and V1 gates ran against immutable image `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a` on clean tested commit `f0af2d9b31d3ca1324549df3660ebc6894856b74`, tree `24675392adee620ab36b87f9a0c4f7e8111f4839`. A first P58 invocation omitted the required image argument and exited at usage before starting a container; it is not a gate or target result.

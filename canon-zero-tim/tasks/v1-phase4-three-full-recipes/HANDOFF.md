@@ -8,20 +8,20 @@ FrozenLake P45 Qwen3-8B DP8xTP8 for 300 updates, and FrozenLake M15-main
 Qwen3-8B DP8xTP8 for 300 updates. M15 is a production/scientific recipe, not a
 canary. The original three-recipe stack is published in the operator history.
 The active worktree is
-`/home/yuxuan/code_rl_repro/worktrees/p58_zero_hp_release3_0823`, branch
-`local/p58-zero-hp-release3-0823`. The attempt-1 repairs and release contracts
+`/home/yuxuan/code_rl_repro/worktrees/p58_is_zero_refine_0824`, branch
+`local/p58-is-zero-refine-0824`. The attempt-1 repairs and release contracts
 were published through `71d889a32f4668353c758d5c00df88299e6c0d35`.
 The latest pulled operator tip is
-`65606a985aa869f09a3bd3a39a3c9268a432aa71`; it adds the P45 and M15
-Attempt-3 logs to the earlier GSM8K evidence. The Attempt-2 q_proj/APC repair
-is published, but Attempt 3 exposed the next P59 TP seam at the RPA boundary
-and one independent M15 token-contract seam. The local stack is
-`248c5f9d` (RPA runtime/gates), `0ab5ae76` (initial evidence ledger),
-`aa84c147` (signed M15 4096/8192 token widths), and `f0af2d9b` (complete
-Attempt-3 ledger). Host/static admission and both dependency-complete
-pinned-image aggregators are green; every repaired target optimizer commit
-remains unrun. The exact-image receipt is the final local evidence CL before
-publication. After authorized publication, render
+`7e9b31cb`; it adds the immutable Attempt-4 logs and receipt. Attempt 4 proves
+that the published q_proj, RPA, and M15-width repairs all took effect, then all
+three recipes stop at the same P59-local gate/up projection layout seam before
+an optimizer commit. Runtime CL `5bd90bff` makes the live TP degree,
+not engine `config.n_shards=1`, the divisor for gate/up's globally declared
+last-axis width; q/k/v retain their one-layout-shard contract. Host admission,
+the focused installed-shim image gate, and the complete V1 exact-image gate
+are green. The complete gate is durably sealed under
+`evidence/v1_hp_attempt4_fix_exact_image_20260824_r1/`. Every repaired target
+optimizer commit remains unrun. After authorized publication, render
 only from the exact 40-character SHA read back from the operator branch and
 require a clean worktree.
 
@@ -85,6 +85,37 @@ against the original P45 4096/2048 contract. CL `aa84c147` admits 4096/8192
 only for the registered `m15/selection` and `m15/main` DP8xTP8 tuples; partial,
 foreign, and m10 tuples remain negative. All three Attempt-3 runs have zero
 alignment FAIL, zero optimizer commits, and no performance claim.
+
+Attempt 4 is immutable under
+`evidence/v1_hp_three_full_attempt4_20260824/`; all four `SHA256SUMS` entries
+verify. GSM8K `g64p`, P45 `f45p`, and M15 `m15p` passed strict step-0
+pre-alignment for 190,635, 47,329, and 122,754 action elements respectively,
+with both byte deltas zero and no alignment FAIL. The repaired TP4/TP8 RPA
+boundary emitted its exact `P59_RPA_LOCAL_KV_READY` receipt in all three runs.
+The first fatal then occurred at the final decoder layer's `gate_proj`:
+installed `linear_p22xf.py:106` compared the already TP-local output width
+1536 against the globally declared width 6144 on TP4 or 12288 on TP8 because
+the engine config legitimately retained `n_shards=1`. The raw terminals are
+`gsm8k_g64p_error.log:12179`, `p45_f45p_error.log:21910`, and
+`m15_m15p_error.log:19955`. This is one pre-optimizer shape-contract seam,
+not a numerical verdict; all three runs have zero optimizer commits.
+
+Attempt-4 runtime CL `5bd90bff` validates every local projection's flattened
+feature width against the model-exact `site.n_local`. Only gate/up, whose last
+axis is physically TP-local under the outer P59 map, divide global
+`output_sizes` by the live TP degree; q/k/v continue using their independent
+layout-shard count. It emits `P59_LOCAL_FUSED_LINEAR_READY`, and full
+postflight requires exact TP4 `6144->1536` or TP8 `12288->1536` gate and up
+receipts with `layout_shards=1`. Missing/wrong receipt and wrong-width controls
+are fatal. Host gates pass P59 34/34 and V1 23/23. The focused pinned-image
+gate passes installed TP4 and TP8 projection plus RPA carriers, 2x36/36
+manifests, ordinary-global negatives, and zero commits. The complete V1 image
+gate exits zero with additive terminal `p59_fused_linear=2`. Durable raw SHA is
+`9d50ec495c189a77dfdab92b8496580a58a55d101ed03cd2b977728a69ef5001`;
+receipt SHA is
+`62995bb94a849602eeb2390d8e83b75bb1bf6b082d7044d47912d8b9e694b205`.
+Claim ceiling remains `HOST PASS / EXACT_IMAGE PASS / ATTEMPT-4 TARGET REDS
+PRESERVED / POST-FIX TARGET NOT RUN`.
 
 The operator's appended `SHA256SUMS` contains an impossible stale self-hash and
 is preserved unchanged. `SHA256SUMS.artifacts` is the additive verification

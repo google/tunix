@@ -14,7 +14,7 @@ the semantic Perfetto timeline.
 | V1.P4.1 | Integrated default-off P56/P59/APC implementations | syntax, focused CPU, manifest | complete |
 | V1.P4.2 | Three immutable manifests and intent verifier | exactly three renderer PASS records | complete |
 | V1.P4.3 | Host/real-env/exact-image admission | all positive and negative markers | complete |
-| V1.P4.4 | Attempt-3 RPA-local plus M15 token-contract repairs and concurrent direct full target reruns | publish exact-image-green repair; launch all three together, independently admit each first commit, then complete horizons with zero ALIGN FAIL | active (host and exact-image green; publication and post-fix targets pending) |
+| V1.P4.4 | Attempt-4 P59-local gate/up width repair and concurrent direct full target reruns | seal and publish the exact-image-green repair; launch all three together, independently admit each first commit, then complete horizons with zero ALIGN FAIL | active (host and durable exact-image green; publication and post-fix targets pending) |
 
 ## Decisions
 

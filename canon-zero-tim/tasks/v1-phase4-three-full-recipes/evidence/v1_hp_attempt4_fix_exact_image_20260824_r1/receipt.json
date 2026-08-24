@@ -1,0 +1,28 @@
+{
+  "schema": "v1-hp-attempt4-fix-exact-image-receipt-v1",
+  "timestamp_utc": "2026-08-24T09:35:31Z",
+  "source_base": "7e9b31cb185da8d6febc71650467641811732b5e",
+  "runtime_commit": "5bd90bff51ee29734e800f154e5426ccd3a8582e",
+  "runtime_commit_match": "verified_by_tested_runtime_sha256",
+  "image_id": "sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a",
+  "command_exit_code": 0,
+  "terminal_count": 1,
+  "failure_or_traceback_count": 0,
+  "terminal": "V1_HP_EXACT_IMAGE_PASS dp16_gathered=1 dp2tp2_parallel=2 p59_tp4_tp8=2 p59_real_shim=4 p59_rpa=2 p59_fused_linear=2 p57_wandb=1 m15_token=1 perfetto_window=1 manifests=3",
+  "raw_log": {
+    "path": "run.log",
+    "bytes": 189597,
+    "sha256": "9d50ec495c189a77dfdab92b8496580a58a55d101ed03cd2b977728a69ef5001"
+  },
+  "tested_runtime_sha256": {
+    "canon-zero-tim/MANIFEST.sha256": "db12aeeeb4305c4e5a6e15129e891f725637b4c2da4c83798eeb4447c8cdf52b",
+    "canon-zero-tim/src/engine_shims/linear_p22xf.py": "74b58743b4dc1361d4ab510b52d302a3d12cf40bd55bae77e0d59784f4cd9bb7",
+    "canon-zero-tim/tasks/v1-phase4-three-full-recipes/RUNBOOK.md": "1a6b3eaf49e1dd63b3e93a8f3e3397cd979054c7ac676dade958d2d546f4a561",
+    "canon-zero-tim/tasks/v1-phase4-three-full-recipes/scripts/classify_full_recipe.py": "046772943d1a8444b80ed58a9b920c781f4962cadee2f78654c780dd2092058d",
+    "canon-zero-tim/tests/p58_deepswe_native_zero/run_exact_image.sh": "7686ed7977a6b75ee35e404f3599f49aa17923b7d4099580634c27739ed656ba",
+    "canon-zero-tim/tests/p59_backward/probe_tp4_installed_shim_composition.py": "06f2f9b58348c45530f660921969489055f0cb391379bfa5c13073358cce60e4",
+    "canon-zero-tim/tests/v1_phase4/run_exact_image.sh": "5d02bfdcef0a7c149f252060c0bb2780fd358723c4b15815e7fce1e681b9b6a9",
+    "canon-zero-tim/tests/v1_phase4/test_full_classifier.py": "7b28da0e7939efa3912871134e79e3cc8aba388bbf29a9fdd41b36c730113fcd"
+  },
+  "claim_ceiling": "HOST PASS / EXACT_IMAGE PASS / TARGET NOT RUN"
+}
