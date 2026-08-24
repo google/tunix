@@ -8,6 +8,8 @@ set -uo pipefail
 source "$CANON_STATE/env.sh"
 # shellcheck disable=SC1091
 source "$CANON_PKG/cluster/steps/p57_runtime_contract.sh"
+# shellcheck disable=SC1091
+source "$CANON_PKG/cluster/steps/jax_cache_sync_lib.sh"
 
 # A full GSM8K JobSet may be recreated after an eviction or node loss. Preserve
 # fail-closed no-overwrite semantics within each attempt without letting an
@@ -256,6 +258,14 @@ tee_rc="${pipeline_status[1]:-1}"
 set +e
 echo "[run] exit=$rc"
 echo "[run] transport_rc=$tee_rc"
+# Persist compiled executables before any fail-closed postflight branch can
+# exit. The receipt is informational: cache transport never relaxes or replaces
+# a numerical/alignment verdict.
+jax_cache_saved_early=0
+if [ "${CANON_V1_HP_FULL:-0}" = "1" ]; then
+  canon_jax_cache_sync save
+  jax_cache_saved_early=1
+fi
 if [ "${CANON_P46_EVALUATION:-0}" = "1" ]; then
   n_eval_subshard=$(grep -ac '^P46_EVAL_SUBSHARD_PASS ' "$LOG" || true)
   n_eval_report=$(grep -ac '^P46_EVAL_LOGICAL_REPORT_PASS ' "$LOG" || true)
@@ -1186,14 +1196,7 @@ if [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "1" ] && \
     echo "[CANON_P38H_ARTIFACT] name=$p38h_name sha256=$p38h_sha encoding=base64 data=$p38h_data"
   done
 fi
-if [ -n "${CANON_GCS_CACHE_BUCKET:-}" ] && [ -d "${JAX_COMPILATION_CACHE_DIR:-}" ]; then
-  PROFILE_NAME="$(basename "${CANON_PROFILE_FILE:-default}" .env)"
-  GCS_PATH="${CANON_GCS_CACHE_BUCKET}/${PROFILE_NAME}"
-  echo "[cache] Syncing persistent compilation cache back to $GCS_PATH..."
-  if command -v gcloud >/dev/null 2>&1; then
-    gcloud storage rsync -r "$JAX_COMPILATION_CACHE_DIR" "$GCS_PATH" 2>/dev/null || true
-  elif command -v gsutil >/dev/null 2>&1; then
-    gsutil -m rsync -r "$JAX_COMPILATION_CACHE_DIR" "$GCS_PATH" 2>/dev/null || true
-  fi
+if [ "$jax_cache_saved_early" -ne 1 ]; then
+  canon_jax_cache_sync save
 fi
 exit "$rc"

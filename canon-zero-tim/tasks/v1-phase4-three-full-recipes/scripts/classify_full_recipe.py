@@ -44,7 +44,7 @@ _RECIPES = {
         "local_vocab": 18992,
         "fixed_local_vocab": 19200,
         "endpoint": "untied_lm_head",
-        "apc": True,
+        "apc": False,
         "candidate": "",
         "split": "",
     },
@@ -67,6 +67,14 @@ _RECIPES = {
     },
 }
 _PROFILED_STEP = 2
+_JAX_CACHE_ENV = {
+    "JAX_COMPILATION_CACHE_DIR": "/tmp/jax_compilation_cache",
+    "JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS": "0",
+    "JAX_PERSISTENT_CACHE_ENABLE_XLA_CACHES": "all",
+    "CANON_GCS_CACHE_BUCKET": (
+        "gs://yuxzhang-tunix-models/cache/p33_compilation_cache"
+    ),
+}
 _FIELD_RE = re.compile(r"([a-zA-Z_][a-zA-Z0-9_]*)=([^ ]+)")
 _STEP_RE = re.compile(r"Global step (\d+) completed in ([0-9.]+) seconds\.")
 _ALIGN_RE = re.compile(
@@ -137,6 +145,87 @@ def _perf_rows(text: str) -> dict[str, list[dict[str, str]]]:
     if stage:
       result.setdefault(stage, []).append(fields)
   return result
+
+
+def _jax_cache_receipt(
+    path: Path,
+    *,
+    phase: str,
+    profile: str,
+    reasons: list[str],
+) -> dict[str, str]:
+  _require(path.is_file(), f"missing_jax_cache_{phase}_receipt", reasons)
+  if not path.is_file():
+    return {}
+  lines = [
+      line.strip()
+      for line in path.read_text(encoding="utf-8").splitlines()
+      if line.strip()
+  ]
+  _require(len(lines) == 1, f"jax_cache_{phase}_receipt_lines", reasons)
+  if len(lines) != 1 or not lines[0].startswith("[JAX_CACHE_SYNC] "):
+    _require(False, f"jax_cache_{phase}_receipt_format", reasons)
+    return {}
+  fields = dict(_FIELD_RE.findall(lines[0]))
+  expected_profile = Path(profile).stem
+  expected_bucket = (
+      f"{_JAX_CACHE_ENV['CANON_GCS_CACHE_BUCKET']}/{expected_profile}"
+  )
+  allowed_status = (
+      {"hit", "empty", "error", "no-tool"}
+      if phase == "restore"
+      else {"saved", "empty", "error", "no-tool"}
+  )
+  _require(fields.get("phase") == phase, f"jax_cache_{phase}.phase", reasons)
+  _require(
+      fields.get("status") in allowed_status,
+      f"jax_cache_{phase}.status",
+      reasons,
+  )
+  _require(
+      fields.get("profile") == expected_profile,
+      f"jax_cache_{phase}.profile",
+      reasons,
+  )
+  _require(
+      fields.get("bucket") == expected_bucket,
+      f"jax_cache_{phase}.bucket",
+      reasons,
+  )
+  _require(
+      fields.get("local") == _JAX_CACHE_ENV["JAX_COMPILATION_CACHE_DIR"],
+      f"jax_cache_{phase}.local",
+      reasons,
+  )
+  _require(
+      str(fields.get("rc", "")).isdigit(),
+      f"jax_cache_{phase}.rc",
+      reasons,
+  )
+  _require(
+      str(fields.get("entries", "")).isdigit(),
+      f"jax_cache_{phase}.entries",
+      reasons,
+  )
+  if str(fields.get("rc", "")).isdigit() and str(
+      fields.get("entries", "")
+  ).isdigit():
+    rc = int(fields["rc"])
+    entries = int(fields["entries"])
+    status = fields.get("status")
+    tool = fields.get("tool")
+    if status in {"hit", "saved"}:
+      coherent = rc == 0 and entries > 0 and tool in {"gcloud", "gsutil"}
+    elif status == "empty":
+      coherent = rc == 0 and entries == 0 and tool in {"gcloud", "gsutil"}
+    elif status == "error":
+      coherent = rc not in {0, 127} and tool in {"gcloud", "gsutil"}
+    elif status == "no-tool":
+      coherent = rc == 127 and tool == "none"
+    else:
+      coherent = False
+    _require(coherent, f"jax_cache_{phase}.status_contract", reasons)
+  return fields
 
 
 def _seconds(row: dict[str, str], label: str, reasons: list[str]) -> float:
@@ -239,6 +328,7 @@ def classify(
       "CANON_XPROF_LABELS": "1",
       "CANON_PERF_TRACE_EXPORT_STEP": str(_PROFILED_STEP),
       "CANON_VLLM_ENABLE_PREFIX_CACHING": "1" if contract["apc"] else "0",
+      **_JAX_CACHE_ENV,
   }
   if recipe == "gsm8k":
     required_env.update({
@@ -264,6 +354,20 @@ def classify(
       if env.get(name) != value
   }
   _require(not wrong_env, f"resolved_env={wrong_env}", reasons)
+
+  cache_receipt_paths = {
+      phase: state / f"jax_cache_{phase}.receipt"
+      for phase in ("restore", "save")
+  }
+  cache_receipts = {
+      phase: _jax_cache_receipt(
+          path,
+          phase=phase,
+          profile=str(contract["profile"]),
+          reasons=reasons,
+      )
+      for phase, path in cache_receipt_paths.items()
+  }
 
   p57_eval_classification = state / "p57_inprocess_eval.classification.json"
   p57_eval = None
@@ -650,6 +754,9 @@ def classify(
     artifacts["p57_inprocess_eval"] = _artifact(
         p57_eval_classification, state
     )
+  for phase, path in cache_receipt_paths.items():
+    if path.is_file():
+      artifacts[f"jax_cache_{phase}_receipt"] = _artifact(path, state)
   return {
       "schema": "v1-hp-full-classification-v1",
       "verdict": "PASS" if not reasons else "FAIL",
@@ -679,6 +786,12 @@ def classify(
           "enabled": apc_on,
           "hit_rates_percent": hit_rates,
           "max_hit_rate_percent": max(hit_rates) if hit_rates else None,
+      },
+      "jax_persistent_cache": {
+          "configuration": {
+              name: env.get(name) for name in _JAX_CACHE_ENV
+          },
+          "receipts": cache_receipts,
       },
       "p57_inprocess_evaluation": p57_eval,
       "timing": {

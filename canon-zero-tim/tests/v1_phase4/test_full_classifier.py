@@ -58,6 +58,12 @@ class FullClassifierTest(unittest.TestCase):
         "CANON_XPROF_LABELS": "1",
         "CANON_PERF_TRACE_EXPORT_STEP": "2",
         "CANON_VLLM_ENABLE_PREFIX_CACHING": "0",
+        "JAX_COMPILATION_CACHE_DIR": "/tmp/jax_compilation_cache",
+        "JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS": "0",
+        "JAX_PERSISTENT_CACHE_ENABLE_XLA_CACHES": "all",
+        "CANON_GCS_CACHE_BUCKET": (
+            "gs://yuxzhang-tunix-models/cache/p33_compilation_cache"
+        ),
         "CANON_GSM8K_ALIGNMENT_WARN_ONLY": "0",
         "CANON_BATCHED_EVIDENCE": "1",
     }
@@ -65,6 +71,18 @@ class FullClassifierTest(unittest.TestCase):
         "".join(f"export {name}={value}\n" for name, value in env.items()),
         encoding="utf-8",
     )
+    cache_profile = "qwen3-1p7b-dp16-tp4-gsm8k-v1-hp"
+    cache_bucket = (
+        "gs://yuxzhang-tunix-models/cache/p33_compilation_cache/"
+        f"{cache_profile}"
+    )
+    for phase, status in (("restore", "hit"), ("save", "saved")):
+      (state / f"jax_cache_{phase}.receipt").write_text(
+          f"[JAX_CACHE_SYNC] phase={phase} status={status} tool=gcloud "
+          f"rc=0 entries=3 profile={cache_profile} bucket={cache_bucket} "
+          "local=/tmp/jax_compilation_cache\n",
+          encoding="utf-8",
+      )
     updates = []
     log = [
         "[P57.CONTINUE_DECODE] on-device decode loop enabled max_decode_steps=8",
@@ -265,8 +283,66 @@ class FullClassifierTest(unittest.TestCase):
           ),
           values,
       )
-    self.assertTrue(classifier._RECIPES["p45"]["apc"])
+    self.assertFalse(classifier._RECIPES["p45"]["apc"])
     self.assertFalse(classifier._RECIPES["m15"]["apc"])
+
+  def test_wrong_jax_cache_bucket_is_fatal(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      state, run_log, updates, base = self._evidence(Path(tmp))
+      env = state / "env.sh"
+      env.write_text(
+          env.read_text(encoding="utf-8").replace(
+              "gs://yuxzhang-tunix-models/cache/p33_compilation_cache",
+              "gs://wrong/cache",
+          ),
+          encoding="utf-8",
+      )
+      record = classifier.classify(
+          recipe="gsm8k",
+          state=state,
+          run_log=run_log,
+          update_report=updates,
+          base_classification=base,
+      )
+      self.assertEqual(record["verdict"], "FAIL")
+      self.assertTrue(
+          any(reason.startswith("resolved_env=") for reason in record["reasons"])
+      )
+
+  def test_missing_jax_cache_receipt_is_fatal(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      state, run_log, updates, base = self._evidence(Path(tmp))
+      (state / "jax_cache_restore.receipt").unlink()
+      record = classifier.classify(
+          recipe="gsm8k",
+          state=state,
+          run_log=run_log,
+          update_report=updates,
+          base_classification=base,
+      )
+      self.assertEqual(record["verdict"], "FAIL")
+      self.assertIn("missing_jax_cache_restore_receipt", record["reasons"])
+
+  def test_incoherent_jax_cache_receipt_is_fatal(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      state, run_log, updates, base = self._evidence(Path(tmp))
+      receipt = state / "jax_cache_restore.receipt"
+      receipt.write_text(
+          receipt.read_text(encoding="utf-8").replace(
+              "status=hit tool=gcloud rc=0 entries=3",
+              "status=hit tool=none rc=23 entries=0",
+          ),
+          encoding="utf-8",
+      )
+      record = classifier.classify(
+          recipe="gsm8k",
+          state=state,
+          run_log=run_log,
+          update_report=updates,
+          base_classification=base,
+      )
+      self.assertEqual(record["verdict"], "FAIL")
+      self.assertIn("jax_cache_restore.status_contract", record["reasons"])
 
   def test_wrong_profile_is_fatal(self):
     with tempfile.TemporaryDirectory() as tmp:

@@ -29,6 +29,14 @@ _SHA_RE = re.compile(r"[0-9a-f]{40}")
 _GSM8K_PROFILE = (
     "cluster/profiles/qwen3-1p7b-dp16-tp4-gsm8k-v1-hp.env"
 )
+_JAX_CACHE_ENV = {
+    "JAX_COMPILATION_CACHE_DIR": "/tmp/jax_compilation_cache",
+    "JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS": "0",
+    "JAX_PERSISTENT_CACHE_ENABLE_XLA_CACHES": "all",
+    "CANON_GCS_CACHE_BUCKET": (
+        "gs://yuxzhang-tunix-models/cache/p33_compilation_cache"
+    ),
+}
 
 
 def _container(document: dict) -> dict:
@@ -156,6 +164,7 @@ def render_three(
         "CANON_P59_RANK_PARALLEL_BACKWARD": "1",
         "CANON_P33_RUN_STAGE": "full",
         "CANON_P33_NO_COMMIT": "0",
+        **_JAX_CACHE_ENV,
     }
     if label == "gsm8k":
       required.update({

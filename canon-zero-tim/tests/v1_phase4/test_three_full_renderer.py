@@ -97,6 +97,20 @@ class ThreeFullRendererTest(unittest.TestCase):
         self.assertEqual(values["CANON_P59_RANK_PARALLEL_BACKWARD"], "1")
         self.assertEqual(values["CANON_P33_RUN_STAGE"], "full")
         self.assertEqual(values["CANON_P33_NO_COMMIT"], "0")
+        self.assertEqual(
+            values["JAX_COMPILATION_CACHE_DIR"],
+            "/tmp/jax_compilation_cache",
+        )
+        self.assertEqual(
+            values["JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS"], "0"
+        )
+        self.assertEqual(
+            values["JAX_PERSISTENT_CACHE_ENABLE_XLA_CACHES"], "all"
+        )
+        self.assertEqual(
+            values["CANON_GCS_CACHE_BUCKET"],
+            "gs://yuxzhang-tunix-models/cache/p33_compilation_cache",
+        )
 
   def test_profiles_resolve_complete_workload_scoped_bundle(self):
     with tempfile.TemporaryDirectory() as tmp:
@@ -118,6 +132,12 @@ class ThreeFullRendererTest(unittest.TestCase):
             "test \"$CANON_XPROF_STEPS\" = 1"
             "; test \"$CANON_XPROF_LABELS\" = 1"
             "; test \"$CANON_PERF_TRACE_EXPORT_STEP\" = 2"
+            "; test \"$CANON_VLLM_ENABLE_PREFIX_CACHING\" = 0"
+            "; test \"$JAX_COMPILATION_CACHE_DIR\" = /tmp/jax_compilation_cache"
+            "; test \"$JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS\" = 0"
+            "; test \"$JAX_PERSISTENT_CACHE_ENABLE_XLA_CACHES\" = all"
+            "; test \"$CANON_GCS_CACHE_BUCKET\" = "
+            "gs://yuxzhang-tunix-models/cache/p33_compilation_cache"
         )
         completed = subprocess.run(
             ["bash", "-euo", "pipefail", "-c", command],
@@ -132,36 +152,17 @@ class ThreeFullRendererTest(unittest.TestCase):
             0,
             msg=f"{path}\nstdout={completed.stdout}\nstderr={completed.stderr}",
         )
-        if values.get("CANON_P57_TIM_ARM") == "zero":
-          expected_apc = (
-              "0"
-              if values.get("CANON_P57_WORKLOAD_CANDIDATE") == "m15"
-              and values.get("CANON_P57_DATA_SPLIT") == "main"
-              else "1"
-          )
-          resolved = subprocess.run(
-              [
-                  "bash", "-euo", "pipefail", "-c",
-                  f"source {profile}; "
-                  "test \"$CANON_VLLM_ENABLE_PREFIX_CACHING\" = "
-                  f"{expected_apc}",
-              ],
-              cwd=_REPO,
-              env={**os.environ, **values},
-              check=False,
-          )
-          self.assertEqual(resolved.returncode, 0)
-        else:
-          resolved = subprocess.run(
-              [
-                  "bash", "-euo", "pipefail", "-c",
-                  f"source {profile}; test \"$CANON_VLLM_ENABLE_PREFIX_CACHING\" = 0",
-              ],
-              cwd=_REPO,
-              env={**os.environ, **values},
-              check=False,
-          )
-          self.assertEqual(resolved.returncode, 0)
+        resolved = subprocess.run(
+            [
+                "bash", "-euo", "pipefail", "-c",
+                f"source {profile}; "
+                "test \"$CANON_VLLM_ENABLE_PREFIX_CACHING\" = 0",
+            ],
+            cwd=_REPO,
+            env={**os.environ, **values},
+            check=False,
+        )
+        self.assertEqual(resolved.returncode, 0)
 
       frozen_profile = (
           _REPO

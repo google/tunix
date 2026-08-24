@@ -68,7 +68,7 @@ class PrefixCacheContractTest(unittest.TestCase):
     text = FLAGS.read_text(encoding="utf-8")
     self.assertIn("CANON_VLLM_ENABLE_PREFIX_CACHING", text)
     self.assertIn("CANON_P3_APC_DIRTY_PAGE", text)
-    self.assertIn("Count: 366 settable names", text)
+    self.assertIn("Count: 368 settable names", text)
 
   def test_v4_optimizer_escape_hatch_is_gate_only(self):
     text = TRAIN.read_text(encoding="utf-8")
