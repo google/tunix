@@ -1,6 +1,6 @@
 {
   "schema": "v1-hp-three-full-attempt3-receipt-v1",
-  "timestamp": "2026-08-24T06:18:00Z",
+  "timestamp": "2026-08-24T07:08:45Z",
   "source_commit": "a840226e083eb2836468cb251d012723304bfe3d",
   "runs": {
     "gsm8k": {
@@ -8,8 +8,21 @@
       "jobset": "canon-v1hp-gsm8k-g64m-a840226e",
       "failure_stage": "rpa_diff_chunked_kv_cache_shape",
       "error": "ValueError: Expected kv_cache.shape=(9, 256, 2, 2, 128) to be equal to expected_kv_cache_shape=(9, 256, 4, 2, 128)",
-      "log_file": "gsm8k_g64m_error.log",
-      "stack_trace_snippet": "File '/tmp/canon-state/.../canon/rpa_diff_chunked.py', line 204, in _fwd -> diff_rpa -> ragged_paged_attention -> static_validate_inputs"
+      "log_file": "gsm8k_g64m_error.log"
+    },
+    "p45": {
+      "run_id": "f45m",
+      "jobset": "canon-p57-fl-zero-f45m-a840226e",
+      "failure_stage": "rpa_diff_chunked_head_divisibility",
+      "error": "ValueError: Expected actual_num_q_heads=4 to be divisible by actual_num_kv_heads=8",
+      "log_file": "p45_f45m_error.log"
+    },
+    "m15": {
+      "run_id": "m15m",
+      "jobset": "canon-p57-fl-zero-m15-m15m-a840226e",
+      "failure_stage": "segmented_dp_grpo_token_contract",
+      "error": "tunix.rl.canonical_qwen3_adapter.FunctionalMappingError: canonical frozenlake-dp8-tp8 token contract changed: 4096/8192 != 4096/2048",
+      "log_file": "m15_m15m_error.log"
     }
   }
 }
