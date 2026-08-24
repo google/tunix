@@ -409,29 +409,40 @@ class GRPOTrainExampleAssembler:
 
 
 class PaddedBatchAssembler:
-  """Simple 2D rectangular batching into fixed `[B, max_seq_len]` trainer payloads."""
+  """Simple 2D rectangular batching into fixed `[B, P + C]` trainer payloads.
+  """
 
   def __init__(
       self,
       *,
       batch_size: int = 4,
-      max_seq_len: int = 2048,
-      pad_id: int = 0,
+      max_prompt_length: int,
+      max_response_length: int,
+      pad_id: int,
   ):
     if batch_size <= 0:
       raise ValueError(f"batch_size must be positive, got {batch_size}.")
-    if max_seq_len <= 0:
+    if max_prompt_length <= 0:
       raise ValueError(
-          f"max_seq_len must be positive, got {max_seq_len}."
+          f"max_prompt_length must be positive, got {max_prompt_length}."
+      )
+    if max_response_length <= 0:
+      raise ValueError(
+          f"max_response_length must be positive, got {max_response_length}."
       )
     self.batch_size = batch_size
-    self.max_seq_len = max_seq_len
+    self.max_prompt_length = max_prompt_length
+    self.max_response_length = max_response_length
     self.pad_id = pad_id
+
+  @property
+  def max_seq_len(self) -> int:
+    return self.max_prompt_length + self.max_response_length
 
   def pack(
       self, items: Sequence[datatypes.RLTrainerPayload]
   ) -> list[datatypes.RLTrainerPayload]:
-    """Pads items into rectangular 2D batches `[B, max_seq_len]`."""
+    """Pads items into rectangular 2D batches `[B, P + C]`."""
     item_list = list(items)
     if not item_list:
       return []
@@ -469,129 +480,140 @@ class PaddedBatchAssembler:
           partially_present_fields,
       )
 
+    prompt_ids, prompt_mask = [], []
+    completion_ids, completion_mask, completion_valid = [], [], []
+    advantages = []
     optional_rows: dict[str, list[np.ndarray]] = {
         name: [] for name in present_fields
     }
-    truncated_sequences = 0
-
-    batched_token_ids = []
-    batched_token_mask = []
-    batched_loss_mask = []
-    batched_action_mask = []
-    batched_advantages = []
+    truncated_prompts = truncated_completions = 0
 
     for item in chunk:
-      token_ids = (
-          np.asarray(item.token_ids, dtype=np.int32).reshape(-1)
-          if item.token_ids is not None
-          else np.zeros(0, dtype=np.int32)
-      )
-      truncated_sequences += token_ids.size > self.max_seq_len
-      token_ids = token_ids[: self.max_seq_len]
+      p_full = np.asarray(item.prompt_ids, dtype=np.int32).reshape(-1)
+      c_full = np.asarray(item.completion_ids, dtype=np.int32).reshape(-1)
+      truncated_prompts += p_full.size > self.max_prompt_length
+      truncated_completions += c_full.size > self.max_response_length
+      c = c_full[: self.max_response_length]
 
-      token_ids, default_token_mask = _right_pad(
-          token_ids, self.max_seq_len, pad_value=self.pad_id, dtype=np.int32
+      p_ids, p_default_mask = _left_pad(
+          p_full, self.max_prompt_length, pad_id=self.pad_id
       )
-      if item.token_mask is not None:
-        tm = np.asarray(item.token_mask, dtype=np.float32).reshape(-1)[
-            : self.max_seq_len
-        ]
-        token_mask, _ = _right_pad(
-            tm, self.max_seq_len, pad_value=0.0, dtype=np.float32
-        )
-      else:
-        token_mask = default_token_mask
-
-      batched_token_ids.append(token_ids)
-      batched_token_mask.append(token_mask)
-
-      loss_mask = (
-          np.asarray(item.loss_mask, dtype=np.float32).reshape(-1)
-          if item.loss_mask is not None
-          else np.zeros(0, dtype=np.float32)
+      c_ids, c_valid = _right_pad(
+          c, self.max_response_length, pad_value=self.pad_id, dtype=np.int32
       )
-      loss_mask, _ = _right_pad(
-          loss_mask, self.max_seq_len, pad_value=0.0, dtype=np.float32
-      )
-      batched_loss_mask.append(loss_mask)
+      prompt_ids.append(p_ids)
+      completion_ids.append(c_ids)
+      completion_valid.append(c_valid)
 
-      action_mask = (
-          np.asarray(item.action_mask, dtype=np.float32).reshape(-1)
+      # A caller-supplied prompt mask is prompt-aligned, so it must be
+      # left-padded exactly like the prompt ids to stay in register. If its
+      # length disagrees with the prompt the alignment is undefined, so fall
+      # back to the validity mask derived from the ids themselves.
+      p_mask = p_default_mask
+      if item.prompt_mask is not None:
+        src = np.asarray(item.prompt_mask, dtype=np.float32).reshape(-1)
+        if src.size == p_full.size:
+          src = src[-self.max_prompt_length :]
+          p_mask = np.zeros(self.max_prompt_length, dtype=np.float32)
+          if src.size:
+            p_mask[-src.size :] = src
+      prompt_mask.append(p_mask)
+
+      # Action mask over the completion: prefer an explicit action_mask, fall
+      # back to completion_mask, then to "every generated token is an action".
+      # completion_mask will be used in the loss_fn that's defined in
+      # algo_core.py which masks out the non-action tokens so here we make sure
+      # that completion_mask is aligned with the action masks.
+      # TODO(tunix-dev): either deprecate action_mask or completion_mask as now
+      # they are identical.
+      action_source = (
+          item.action_mask
           if item.action_mask is not None
-          else np.zeros(0, dtype=np.float32)
+          else item.completion_mask
       )
-      action_mask, _ = _right_pad(
-          action_mask, self.max_seq_len, pad_value=0.0, dtype=np.float32
-      )
-      batched_action_mask.append(action_mask)
-
-      if item.advantages is None:
-        adv = np.zeros(self.max_seq_len, dtype=np.float32)
+      if action_source is None:
+        c_mask = c_valid.copy()
       else:
-        adv = np.asarray(item.advantages, dtype=np.float32).reshape(-1)
-        if adv.size == 1:
-          adv = (
-              np.full(self.max_seq_len, float(adv[0]), dtype=np.float32)
-              * token_mask
+        c_mask = _completion_aligned(
+            action_source,
+            c.size,
+            self.max_response_length,
+            prompt_len=p_full.size,
+            full_completion_len=c_full.size,
+        )
+      completion_mask.append(c_mask)
+
+      advantages.append(
+          _completion_aligned(
+              item.advantages,
+              c.size,
+              self.max_response_length,
+              fill_value=0.0,
+              prompt_len=p_full.size,
+              full_completion_len=c_full.size,
           )
-        else:
-          adv, _ = _right_pad(
-              adv, self.max_seq_len, pad_value=0.0, dtype=np.float32
-          )
-      batched_advantages.append(adv)
+      )
 
       for name in optional_rows:
-        val = getattr(item, name)
-        if val is None:
-          arr = np.zeros(self.max_seq_len, dtype=np.float32)
-        else:
-          arr = np.asarray(val, dtype=np.float32).reshape(-1)
-          if arr.size == 1:
-            arr = (
-                np.full(self.max_seq_len, float(arr[0]), dtype=np.float32)
-                * token_mask
+        optional_rows[name].append(
+            _completion_aligned(
+                getattr(item, name),
+                c.size,
+                self.max_response_length,
+                fill_value=0.0,
+                prompt_len=p_full.size,
+                full_completion_len=c_full.size,
             )
-          else:
-            arr, _ = _right_pad(
-                arr, self.max_seq_len, pad_value=0.0, dtype=np.float32
-            )
-        optional_rows[name].append(arr)
+        )
 
-    if truncated_sequences:
+    if truncated_prompts or truncated_completions:
       logging.warning(
-          "PaddedBatchAssembler truncated %d sequence(s) to %d tokens; raise "
-          "max_seq_len to avoid dropping training signal.",
-          truncated_sequences,
-          self.max_seq_len,
+          "PaddedBatchAssembler truncated %d prompt(s) to %d tokens and %d "
+          "completion(s) to %d tokens; raise max_prompt_length / "
+          "max_response_length to avoid dropping training signal.",
+          truncated_prompts,
+          self.max_prompt_length,
+          truncated_completions,
+          self.max_response_length,
       )
 
     # Zero-pad trailing rows so every chunk yields a static [B, ...] shape.
-    while len(batched_token_ids) < self.batch_size:
-      batched_token_ids.append(
-          np.full(self.max_seq_len, self.pad_id, dtype=np.int32)
+    while len(prompt_ids) < self.batch_size:
+      prompt_ids.append(
+          np.full(self.max_prompt_length, self.pad_id, dtype=np.int32)
       )
-      batched_token_mask.append(np.zeros(self.max_seq_len, dtype=np.float32))
-      batched_loss_mask.append(np.zeros(self.max_seq_len, dtype=np.float32))
-      batched_action_mask.append(np.zeros(self.max_seq_len, dtype=np.float32))
-      batched_advantages.append(np.zeros(self.max_seq_len, dtype=np.float32))
+      prompt_mask.append(np.zeros(self.max_prompt_length, dtype=np.float32))
+      completion_ids.append(
+          np.full(self.max_response_length, self.pad_id, dtype=np.int32)
+      )
+      completion_mask.append(np.zeros(self.max_response_length, np.float32))
+      completion_valid.append(np.zeros(self.max_response_length, np.float32))
+      advantages.append(np.zeros(self.max_response_length, dtype=np.float32))
       for rows in optional_rows.values():
-        rows.append(np.zeros(self.max_seq_len, dtype=np.float32))
+        rows.append(np.zeros(self.max_response_length, dtype=np.float32))
 
-    batched_token_ids = np.stack(batched_token_ids)
-    batched_token_mask = np.stack(batched_token_mask)
-    batched_loss_mask = np.stack(batched_loss_mask)
-    batched_action_mask = np.stack(batched_action_mask)
-    batched_advantages = np.stack(batched_advantages)
+    batched_prompt_ids = np.stack(prompt_ids)
+    batched_prompt_mask = np.stack(prompt_mask)
+    batched_completion_ids = np.stack(completion_ids)
+    batched_completion_mask = np.stack(completion_mask)
+
+    # loss_mask tracks the trainable tokens including prompt and completion
+    # tokens.
+    loss_mask = np.concatenate(
+        [np.zeros_like(batched_prompt_mask), batched_completion_mask], axis=1
+    )
 
     stacked_optional = {
         name: np.stack(rows) for name, rows in optional_rows.items()
     }
     return datatypes.RLTrainerPayload(
-        token_ids=batched_token_ids,
-        token_mask=batched_token_mask,
-        loss_mask=batched_loss_mask,
-        action_mask=batched_action_mask,
-        advantages=batched_advantages,
+        loss_mask=loss_mask,
+        action_mask=loss_mask,
+        advantages=np.stack(advantages),
+        prompt_ids=batched_prompt_ids,
+        prompt_mask=batched_prompt_mask,
+        completion_ids=batched_completion_ids,
+        completion_mask=batched_completion_mask,
         ref_per_token_logps=stacked_optional.get("ref_per_token_logps"),
         old_per_token_logps=stacked_optional.get("old_per_token_logps"),
         returns=stacked_optional.get("returns"),
