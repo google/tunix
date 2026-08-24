@@ -74,6 +74,15 @@ spec:
               cloud.google.com/gke-nodepool: cpu-np
             hostNetwork: true
             dnsPolicy: ClusterFirstWithHostNet
+            tolerations:
+            - key: node.kubernetes.io/not-ready
+              operator: Exists
+              effect: NoExecute
+              tolerationSeconds: 900
+            - key: node.kubernetes.io/unreachable
+              operator: Exists
+              effect: NoExecute
+              tolerationSeconds: 900
             restartPolicy: Never
             initContainers:
             - name: pathways-proxy
@@ -226,6 +235,14 @@ spec:
             tolerations:
             - key: google.com/tpu
               operator: Exists
+            - key: node.kubernetes.io/not-ready
+              operator: Exists
+              effect: NoExecute
+              tolerationSeconds: 900
+            - key: node.kubernetes.io/unreachable
+              operator: Exists
+              effect: NoExecute
+              tolerationSeconds: 900
             volumes:
             - hostPath:
                 path: /tmp
