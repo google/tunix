@@ -126,9 +126,9 @@ class CacheConfig:
   max_num_seqs: int = 32
   max_prompt_length: int = 200
   max_tokens_to_generate: int = 500
-  # TODO: Replace hbm_cache_max_bytes w/ hbm_utilization 
+  # TODO: Replace max_tpu_bytes w/ hbm_utilization 
   # like VLLM
-  hbm_cache_max_bytes: int = 5 * 1024 **3 # 5 GiB
+  max_tpu_bytes: int = 5 * 1024 **3 # 5 GiB
 
   # Keep for backwards compatability
   cache_size: int = 0
@@ -395,7 +395,7 @@ class Sampler:
     return block_specs
 
   def _init_cache(self, sampling_config):
-    hbm_max_bytes = self.cache_config.hbm_cache_max_bytes
+    hbm_max_bytes = self.cache_config.max_tpu_bytes
     page_size = self.cache_config.page_size
     max_num_seqs = sampling_config.batch_size 
     max_seq_len = sampling_config.max_prompt_length + sampling_config.max_generation_steps

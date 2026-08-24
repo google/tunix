@@ -52,7 +52,7 @@ class RaggedArray:
 class Block:
   """A block of physical pages."""
 
-  pages: jax.Array
+  pages: dict[str, jax.Array]
   available_page_indices: jax.Array  # i32[total_num_pages]
   num_available_pages: jax.Array  # i32 scalar
 
@@ -101,23 +101,19 @@ class Block:
     )
 
   def write_values(self, num_values: jax.Array, values: jax.Array,
-                   page_indices: jax.Array, page_offsets: jax.Array) -> 'Block':
+                   page_indices: jax.Array, page_offsets: jax.Array, block_id: str = "tokens") -> 'Block':
     """Write packed 1D array of values into allocated paged memory of block."""
-    max_n_pages = self.pages.shape[0]
+    max_n_pages = self.pages[block_id].shape[0]
     batch_size = values.shape[0]
 
     target_page_indices = jnp.where(
         jnp.arange(batch_size) < num_values, page_indices, max_n_pages)
 
-    updated_pages = (self.pages.at[target_page_indices, page_offsets].set(
-        values,
-        mode='drop',
-    ))
+    updated_arr = self.pages[block_id].at[target_page_indices, page_offsets].set(values, mode='drop')
+    new_pages = dict(self.pages)
+    new_pages[block_id] = updated_arr
 
-    return dataclasses.replace(
-        self,
-        pages=updated_pages,
-    )
+    return dataclasses.replace(self, pages=new_pages)
 
 
 @jax.tree_util.register_dataclass
@@ -231,6 +227,20 @@ class TpuCpuPageManager:
     return dataclasses.replace(self, **kwargs)
 
   @jax.named_call
+  @jax.named_call
+  def release_pages(self, num_pages: int | jax.Array, page_idxs: jax.Array, device: str = 'tpu') -> 'TpuCpuPageManager':
+    """Releases specific physical pages back to the block's available pool."""
+    if device == 'tpu':
+      new_block = self.tpu_block.release(num_pages, page_idxs)
+      return dataclasses.replace(self, tpu_block=new_block)
+    elif device == 'cpu':
+      if self.cpu_block is None:
+        raise ValueError("CPU block is not initialized.")
+      new_block = self.cpu_block.release(num_pages, page_idxs)
+      return dataclasses.replace(self, cpu_block=new_block)
+    else:
+      raise ValueError(f"Unknown device: {device}")
+
   def release_sequences(self, should_release: jax.Array) -> 'TpuCpuPageManager':
     """Releases sequence."""
     updated_lens = jnp.where(should_release, 0, self.seq_lens)
@@ -260,7 +270,7 @@ class TpuCpuPageManager:
 
   @jax.named_call
   def offload(self, num_pages: int | jax.Array,
-              page_idxs: jax.Array) -> tuple['TpuCpuPageManager', jax.Array]:
+              page_idxs: jax.Array, block_id: str = "tokens") -> tuple['TpuCpuPageManager', jax.Array]:
     """Moves physical pages from TPU block to CPU block."""
     if self.cpu_block is None:
       raise ValueError("Cannot offload; cpu_block is None.")
@@ -275,14 +285,16 @@ class TpuCpuPageManager:
 
     # Copy data
     safe_tpu_phys = jnp.where(is_real, page_idxs, 0)
-    tpu_vals = self.tpu_block.pages[safe_tpu_phys]
-    tpu_vals_cpu = _put_on_target_device(tpu_vals, self.cpu_block.pages)
+    tpu_vals = self.tpu_block.pages[block_id][safe_tpu_phys]
+    tpu_vals_cpu = _put_on_target_device(tpu_vals, self.cpu_block.pages[block_id])
 
     safe_cpu_phys = jnp.where(is_real,
                               padded_allocated_page_data[:page_idxs.shape[0]],
-                              self.cpu_block.pages.shape[0])
-    new_cpu_pages = self.cpu_block.pages.at[safe_cpu_phys].set(tpu_vals_cpu,
-                                                               mode='drop')
+                              self.cpu_block.pages[block_id].shape[0])
+    
+    updated_arr = self.cpu_block.pages[block_id].at[safe_cpu_phys].set(tpu_vals_cpu, mode='drop')
+    new_cpu_pages = dict(self.cpu_block.pages)
+    new_cpu_pages[block_id] = updated_arr
     new_cpu_block = dataclasses.replace(new_cpu_block, pages=new_cpu_pages)
 
     # Release from TPU
@@ -297,7 +309,7 @@ class TpuCpuPageManager:
 
   @jax.named_call
   def load(self, num_pages: int | jax.Array,
-           cpu_page_idxs: jax.Array) -> tuple['TpuCpuPageManager', jax.Array]:
+           page_idxs: jax.Array, block_id: str = "tokens") -> tuple['TpuCpuPageManager', jax.Array]:
     """Moves physical pages from CPU block back to TPU block."""
     if self.cpu_block is None:
       raise ValueError("Cannot load; cpu_block is None.")
@@ -308,22 +320,24 @@ class TpuCpuPageManager:
         jnp.arange(self.tpu_block.total_num_pages) < num_pages,
         self.tpu_block.available_page_indices, self.tpu_block.total_num_pages)
 
-    is_real = jnp.arange(cpu_page_idxs.shape[0]) < num_pages
+    is_real = jnp.arange(page_idxs.shape[0]) < num_pages
 
     # Copy data
-    safe_cpu_phys = jnp.where(is_real, cpu_page_idxs, 0)
-    cpu_vals = self.cpu_block.pages[safe_cpu_phys]
-    cpu_vals_tpu = _put_on_target_device(cpu_vals, self.tpu_block.pages)
+    safe_cpu_phys = jnp.where(is_real, page_idxs, 0)
+    cpu_vals = self.cpu_block.pages[block_id][safe_cpu_phys]
+    cpu_vals_tpu = _put_on_target_device(cpu_vals, self.tpu_block.pages[block_id])
 
-    safe_tpu_phys = jnp.where(
-        is_real, padded_allocated_page_data[:cpu_page_idxs.shape[0]],
-        self.tpu_block.pages.shape[0])
-    new_tpu_pages = self.tpu_block.pages.at[safe_tpu_phys].set(cpu_vals_tpu,
-                                                               mode='drop')
+    safe_tpu_phys = jnp.where(is_real,
+                              padded_allocated_page_data[:page_idxs.shape[0]],
+                              self.tpu_block.pages[block_id].shape[0])
+    
+    updated_arr = self.tpu_block.pages[block_id].at[safe_tpu_phys].set(cpu_vals_tpu, mode='drop')
+    new_tpu_pages = dict(self.tpu_block.pages)
+    new_tpu_pages[block_id] = updated_arr
     new_tpu_block = dataclasses.replace(new_tpu_block, pages=new_tpu_pages)
 
     # Release from CPU
-    new_cpu_block = self.cpu_block.release(num_pages, cpu_page_idxs)
+    new_cpu_block = self.cpu_block.release(num_pages, page_idxs)
 
     new_pm = dataclasses.replace(
         self,
@@ -367,7 +381,7 @@ class TpuCpuPageManager:
     )
 
   def load_values(self, values: jax.Array,
-                  lens: jax.Array) -> 'TpuCpuPageManager':
+                  lens: jax.Array, block_id: str = "tokens") -> 'TpuCpuPageManager':
     """Loads packed 1D array of values into allocated paged memory of block."""
     values_ragged = RaggedArray(data=values, lens=lens)
     seq_idxs = values_ragged.row_idxs
@@ -380,13 +394,14 @@ class TpuCpuPageManager:
     is_real = jnp.arange(values_ragged.capacity) < values_ragged.total_length
 
     new_tpu_block = self.tpu_block.write_values(values_ragged.capacity, values,
-                                                phys_page_ids, page_offsets)
+                                                phys_page_ids, page_offsets, block_id)
 
     return dataclasses.replace(self, tpu_block=new_tpu_block)
 
   def insert_values(
       self,
       values: jax.Array,
+      block_id: str = "tokens",
       idxs: jax.Array | None = None,
       valid_mask: jax.Array | None = None,
   ) -> 'TpuCpuPageManager':
@@ -409,6 +424,7 @@ class TpuCpuPageManager:
       self,
       total_num_elements: int,
       seq_lens: jax.Array,
+      block_id: str = "tokens",
   ) -> jax.Array:
     """Extracts array of token IDs from paged memory."""
     elements_ragged = RaggedArray(
@@ -422,7 +438,7 @@ class TpuCpuPageManager:
     page_offsets = element_offsets % self.page_size
     phys_page_ids = self.page_indices[seq_idxs, local_page_cols]
 
-    packed_tokens = self.tpu_block.pages[phys_page_ids, page_offsets]
+    packed_tokens = self.tpu_block.pages[block_id][phys_page_ids, page_offsets]
     return packed_tokens
 
 
@@ -432,6 +448,7 @@ class TpuCpuPageManagerConfig:
   page_size: int
   page_subshape: tuple[int, ...] = ()
   dtype: jnp.dtype
+  block_keys: tuple[str, ...] = ("tokens",)
 
   max_num_seqs: int
   max_seq_len: int
@@ -457,7 +474,7 @@ class TpuCpuPageManagerConfig:
       dim_size = (dim * self.dp_size) if shard == 'dp_axis' else dim
       elements *= dim_size
 
-    page_bytes = elements * item_size
+    page_bytes = elements * item_size * len(self.block_keys)
     if page_bytes == 0:
       return 0
 
@@ -529,22 +546,24 @@ class TpuCpuPageManagerConfig:
                   device: jax.Device = None) -> Block:
     with jax.default_device(device) if device else contextlib.nullcontext():
       shape = (num_pages, self.page_size) + self.page_subshape
-      pages = jnp.zeros(shape, dtype=self.dtype)
+      
+      pages_dict = {}
+      for k in self.block_keys:
+        arr = jnp.zeros(shape, dtype=self.dtype)
+        if sharding is not None:
+          arr = utils.shard(arr, sharding)
+        pages_dict[k] = arr
+        
       avail_indices = jnp.arange(num_pages, dtype=jnp.int32)
       num_avail = jnp.array(num_pages, dtype=jnp.int32)
 
-    if sharding is not None:
-      pages = utils.shard(pages, sharding)
-
-    return Block(pages=pages,
+    return Block(pages=pages_dict,
                  available_page_indices=avail_indices,
                  num_available_pages=num_avail,
                  page_size=self.page_size)
 
   def init(self) -> 'TpuCpuPageManager':
     """Initializes physical page tensors for TPU and CPU."""
-    # TODO: cpu pages aren't sharded at all
-
     if self.num_tpu_pages < self.max_num_pages_per_seq:
       raise ValueError(
           'TPU block capacity is too small. '

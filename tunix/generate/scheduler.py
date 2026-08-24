@@ -1,9 +1,11 @@
+import dataclasses
+
 import collections
 from typing import List, Dict, Tuple
 from tunix.generate.cache_manager import CacheManager
 from tunix.generate import utils
 
-@dataclasses
+
 
 class Request:
   def __init__(self, req_id: str, prompt_token_ids: List[int]):
@@ -24,6 +26,7 @@ class Scheduler:
     self.page_size = page_size
     self.max_num_seqs = max_num_seqs
     self.max_num_batch_tokens = max_num_batch_tokens
+    self.token_budget = max_num_batch_tokens
     
     self.running_requests = collections.deque()
     self.pending_requests = collections.deque()
@@ -37,11 +40,9 @@ class Scheduler:
 
   def _touch_page(self, page_id: int):
     """Mark that a page was referenced."""
-    # TODO Test: verify touching page not in page_ref_counts, sets it to 1
     if page_id not in self.page_ref_counts:
       self.page_ref_counts[page_id] = 1
     else:
-      # TODO Test: verify touching page with ref, increments ref
       self.page_ref_counts[page_id] += 1
       if page_id in self.unreferenced_tpu_pages:
           del self.unreferenced_tpu_pages[page_id]
@@ -49,24 +50,20 @@ class Scheduler:
           del self.unreferenced_cpu_pages[page_id]
 
   def _release_page(self, page_id: int):
-    # TODO Test: Verify releasing page with ref > 1 does not mark it unreferenced
     self.page_ref_counts[page_id] -= 1
     
     if self.page_ref_counts[page_id] > 0:  
       return 
     
-    # TODO Test: Verify releasing page with ref = 1 on tpu marks it unref
     if self.page_location.get(page_id) == "tpu":
       self.unreferenced_tpu_pages[page_id] = None
     
-    # TODO Test: Verify releasing page with ref = 1 on cpu marks it unref
     else:
       self.unreferenced_cpu_pages[page_id] = None
 
   def _free_up_unreferenced_tpu_space(self, num_pages: int):
     if num_pages <= 0: return
     
-    # TODO Test: Verify trying to free more pages than available throws error 
     n_unref_pages = len(self.unreferenced_tpu_pages)
     if num_pages > n_unref_pages:
       raise RuntimeError(
@@ -74,7 +71,6 @@ class Scheduler:
         f"but only {n_unref_pages} HBM pages are available."
       )
     
-    # TODO Test: Verify freed tpu pages end up on cpu
     pages_to_offload = []
     for _ in range(num_pages):
       pid, _ = self.unreferenced_tpu_pages.popitem(last=False)
@@ -88,7 +84,6 @@ class Scheduler:
   def _free_up_unreferenced_cpu_space(self, num_pages: int):
     if num_pages <= 0: return
     
-    # TODO TEST: Verify trying to free more pages than available throws error 
     n_unref_pages = len(self.unreferenced_cpu_pages)
     if num_pages > n_unref_pages:
       raise RuntimeError(
@@ -96,7 +91,6 @@ class Scheduler:
         f"but only {n_unref_pages} host pages are available."
       )
     
-    # TODO TEST: Verify evicted pages are removed from page_location and page_ref_counts 
     pages_to_evict = []
     for _ in range(num_pages):
       pid, _ = self.unreferenced_cpu_pages.popitem(last=False)
@@ -129,10 +123,6 @@ class Scheduler:
     new_page_ids = [req.page_ids[-n_new_pages[i]:] if n_new_pages[i] > 0 else [] for (i, req) in enumerate(self.running_requests)]
     self.cache_manager.assign(new_page_ids)
     
-    # TODO TEST: decode sequences are always at front of batch
-    # TODO TEST: len(running_requests) < max_num_reqs
-    # TODO TEST: n_decode + len([p.token_ids for p in prefill]) < num_batch_tokens
-    # TODO TEST: first in, first scheduled
     return self.running_requests 
 
   def _queue_new_requests(self, new_requests: List[Request]):
@@ -140,15 +130,12 @@ class Scheduler:
         self.pending_requests.append(req)
   
   def _preempt(self):
-    n_free_pages + len(self.unreferenced_tpu_pages) < n_required_pages
     preempted_request = self.running_requests.pop()
     preempted_request.is_prefill = True
-    preempted_requests.append(preempted_request)
-
     # Release pages in reverse order so that right-most pages are reused 
     # first (this allows left-most pages to be prefixed-matched).
     for pid in reversed(preempted_request.page_ids):
-        self.release_page(pid)
+        self._release_page(pid)
     
     self.pending_requests.appendleft(preempted_request)
 
@@ -159,9 +146,8 @@ class Scheduler:
     if len(self.running_requests) == 0:
       return
 
-    # TODO: This assumes all running requests are decode. This will need to change with
     # chunked prefill
-    n_free_pages = self.cache_manager.num_free_tpu_pages
+    n_free_pages = self.cache_manager.available_hbm_pages
     
     n_pages_available = n_free_pages + len(self.unreferenced_tpu_pages)
     n_new_pages_required = 0
@@ -171,7 +157,6 @@ class Scheduler:
     while self.token_budget > 0 and n_running_admitted != len(self.running_requests):
       candidate_req = self.running_requests[n_running_admitted]
       
-      # TODO Test: chunked_prefill has clipped n_tokens_to_compute
       max_n_tokens_to_compute = (
           1 + len(candidate_req.token_ids) - candidate_req.num_completed_tokens
       )
@@ -191,9 +176,7 @@ class Scheduler:
       self.token_budget -= n_tokens_to_compute
       n_running_admitted += 1      
     
-    # TODO TEST: Verify there is always enough pages for a single sampling step
     # E.g. Error should be thrown if deadlock occurs 
-    assert(n_running_admitted != 0) # Cache should always be large enough for one sequence to complete
 
     pages_to_free = max(0, n_new_pages_required - n_free_pages)
     self._free_up_unreferenced_tpu_space(pages_to_free)
@@ -212,12 +195,6 @@ class Scheduler:
   def _get_matched_pages(self, request: Request):
     req_hashes = self._chunk_and_hash(request.token_ids)
     
-    # TODO TEST: test full prefix matches
-    # TODO TEST: test partial prefix matches
-    # TODO TEST: test only full pages match
-    # TODO TEST: test suffixs aren't matched  
-    # TODO TEST: test both cpu and tpu pages match 
-    # TODO TEST: evicted pages do not match
    
     matched_page_ids = []
     for h in req_hashes:
@@ -259,8 +236,6 @@ class Scheduler:
         matched_page_ids = self._get_matched_pages(req)
         new_pages_needed = total_pages_needed - len(matched_page_ids)
         
-        # TODO test: test cpu pages incur budget (i.e. set small cache size, verify right pages are loaded)  
-        # TODO test: test tpu pages do not incur budget
 
         # CPU pages will need to be loaded onto the TPU
         cpu_pages_used = 0
@@ -280,7 +255,7 @@ class Scheduler:
             if self.page_location.get(pid) == "cpu":
                 pages_to_load.add(pid)
 
-            self.touch_page(pid)
+            self._touch_page(pid)
             req.page_ids.append(pid)
         
         self.running_requests.append(req)
@@ -291,7 +266,6 @@ class Scheduler:
         self._free_up_unreferenced_tpu_space(len(pages_to_load) - physically_free)
 
     self.cache_manager.load(list(pages_to_load))
-    # TODO TEST: loaded page locations should be tpu    
     for pid in pages_to_load:
         self.page_location[pid] = "tpu"
 
@@ -300,7 +274,7 @@ class Scheduler:
     total_missing = 0
     for req in self.running_requests:
         current_capacity = len(req.page_ids) * self.page_size
-        total_desired = req.seq_len + 1
+        total_desired = len(req.token_ids) + 1
         
         if total_desired > current_capacity:
             total_missing += utils.cdiv(total_desired - current_capacity, self.page_size)
@@ -311,8 +285,6 @@ class Scheduler:
     """Pops logical page IDs from batch and appends onto requests, updating prefix cache where appropriate."""
     allocated_queue = collections.deque(allocated_ids)
     
-    # TODO TEST: distrbiuting pages updates req hashes (for full pages)
-    # TODO test: partially full pages aren't hashed 
     for req in self.running_requests:
         current_capacity = len(req.page_ids) * self.page_size
         total_desired = req.num_in_flight_tokens
@@ -338,4 +310,4 @@ class Scheduler:
                 self.prefix_hash_to_page_id[block_hash] = new_pid
             
             req.page_ids.append(new_pid)
-            self.touch_page(new_pid)
+            self._touch_page(new_pid)
