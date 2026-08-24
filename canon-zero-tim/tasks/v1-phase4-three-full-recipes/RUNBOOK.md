@@ -49,6 +49,11 @@ TP-sharded cotangent and did not cover the real full-vocabulary seam exposed by
 approval and remains a separate evidence event; require both TP4/TP8 installed-
 shim cases plus the 8B/TP8 M2048 overlay contract.
 
+The Attempt-3 RPA repair additionally requires terminal field `p59_rpa=2`.
+That field is emitted only after installed-attention DP2xTP4 and DP2xTP8 VJP2
+carriers pass, including the wrong local-cache shape negative and an ordinary
+global-GQA control with the P59 flag present.
+
 The current supported bundle also passed a separately approved one-host v5p
 DP4xTP1 three-update proxy with 51/51 strict PASS and 0 FAIL. Evidence is at
 `/mnt/disks/tunix-data/logp_probe_1host/p59_dp4_v1_v1hp_20260823_0824utc`.
@@ -77,7 +82,11 @@ checkpoint, completion, update, or runtime performance receipts makes the run
 
 On the first backward, require
 `[P59.DP<dp>] head_cotangent_partition_ready` with the target placement
-`data,model`. FrozenLake must additionally emit the P59-local fixed-head primal
+`data,model`, followed by the exact
+`[PATHTRACE] P59_RPA_LOCAL_KV_READY` receipt. GSM8K requires
+`tp=4 local_q_heads=4 local_kv_heads=2 cache_heads=2 packing=2`; P45/M15
+require `tp=8 local_q_heads=4 local_kv_heads=1 cache_heads=1 packing=2`.
+FrozenLake must additionally emit the P59-local fixed-head primal
 receipt with `semantic_M=256 ... chunks=1 p59_local=1 global_M=2048 dp=8` and
 the VJP receipt with `semantic_M=2048 local_M=256 chunks=1` plus
 `tp_input_reduction=all_gather_rank_order_f32_barrier`; M4096 or ordinary

@@ -12,12 +12,16 @@ The active worktree is
 `local/p58-zero-hp-release3-0823`. The attempt-1 repairs and release contracts
 were published through `71d889a32f4668353c758d5c00df88299e6c0d35`.
 The latest pulled operator tip is
-`238ca28cf6eb642429de66c0da58b68ea659309f`; it adds the GSM8K anti-affinity
-repair plus immutable attempt-2 error evidence. The attempt-2 repair stack is
-split into P59 q_proj, M15 APC-off, and evidence/ledger CLs. Host gates and the
-r5 dependency-complete pinned-image gate are green, but the repaired target has
-not run. After authorized publication, render only from the exact 40-character
-SHA read back from the operator branch and require a clean worktree.
+`614156c1ab067192ab65b2969543e23904f192be`; it adds immutable GSM8K
+Attempt-3 evidence. The Attempt-2 q_proj/APC repair is published, but Attempt 3
+exposed the next P59 TP seam at the RPA boundary. Its additive local repair has
+host/static admission only; the separately approval-bound pinned-image gate and
+the real optimizer commit have not run. Runtime and gate changes are committed
+locally as `8a9c8019`; the evidence/handoff CL is the following local commit.
+Neither CL is published while the new exact-image gate remains unapproved and
+unrun. After authorized publication, render
+only from the exact 40-character SHA read back from the operator branch and
+require a clean worktree.
 
 Do not push, rerun the pinned image, publish an image, apply a JobSet, or occupy
 TPU resources without the separate user approval for that boundary. Never
@@ -46,6 +50,27 @@ tolerance was introduced. The local P59 repair admits the legitimate q_proj
 one-layout-shard boundary while retaining invalid-layout and width negatives.
 The full classifier now requires exactly one explicit APC-off runtime receipt
 for M15 and rejects a missing, duplicate, or opposite-arm receipt.
+
+Attempt 3 is immutable under
+`evidence/v1_hp_three_full_attempt3_20260824/`. GSM8K `g64m` passed strict
+step-0 pre-alignment for 194,633 action elements with both canonical byte deltas
+zero, completed all 16 forward groups, and crossed the P59 head and q/k/v
+projection-local boundaries. Before any optimizer commit, the stock attention
+entry mistook already TP-local K/V (`2` heads on TP4) for global GQA and
+expanded them again to `4`; the correctly localized cache remained `2`, so RPA
+rejected `(9,256,2,2,128)` versus the erroneous expected
+`(9,256,4,2,128)`. This is `INCONCLUSIVE_PRE_OPTIMIZER_SHAPE_CONTRACT`, not an
+alignment FAIL. Patch 25 skips that repeat only under the exact two-manual-axis
+P59 context, validates local Q/K/V/cache shape, and leaves ordinary serving GQA
+unchanged. Full postflight now requires its exact local-KV runtime receipt.
+
+The approved direct-attached v5p mechanism gate is green at
+`/mnt/disks/tunix-data/logp_probe_1host/p59_rpa_a3dp2tp2tp4_20260824_0648utc_r2`.
+On the same four physical chips it executed real RPA forward plus VJP2 backward
+under P59 `DP2xTP2`, caught a wrong local-cache negative, then rearranged the
+mesh as ordinary `DP1xTP4` and proved the stock global GQA expansion still
+works. The run made zero optimizer commits. This is real-hardware mechanism
+evidence, not DP16xTP4 production certification.
 
 ## Resolved bundle
 
@@ -120,6 +145,11 @@ Require the exact terminal marker:
 This is an exact-image admission receipt for the pre-attempt-1 tree. The
 historical receipt is not a signed raw-log artifact: the
 stdout/stderr log was not durably preserved, so no raw-log path or SHA exists.
+
+The current Attempt-3 repair must instead end with the additive
+`p59_rpa=2` field, proving the installed-attention DP2xTP4 and DP2xTP8 VJP2
+carriers plus their wrong-cache and ordinary-serving negatives:
+`V1_HP_EXACT_IMAGE_PASS dp16_gathered=1 dp2tp2_parallel=2 p59_tp4_tp8=2 p59_real_shim=4 p59_rpa=2 p57_wandb=1 perfetto_window=1 manifests=3`.
 
 The current post-fix gate passed on the same immutable image. Its raw log is
 `evidence/v1_hp_postfix_exact_image_20260824_r3/run.log` with SHA-256

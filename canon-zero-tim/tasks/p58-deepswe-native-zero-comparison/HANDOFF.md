@@ -5,11 +5,13 @@
 This checkpoint supersedes the later native-only execution wording in this
 historical handoff. The current local worktree is
 `/home/yuxuan/code_rl_repro/worktrees/p58_zero_hp_release3_0823`, branch
-`local/p58-zero-hp-release3-0823`, based exactly on latest fetched operator tip
-`ccbcf572dc903bb1cce12f897cbdb05aec94922a`. The release was rebuilt by
+`local/p58-zero-hp-release3-0823`. The release was originally rebuilt from
+operator tip `ccbcf572dc903bb1cce12f897cbdb05aec94922a` by
 migrating only prior dirty hunks and new files, preserving the upstream P57
 evaluation-cycle, final-only checkpoint, and lazy NumPy host-render fixes. The
-older dirty and release worktrees were not rebased, reset, or modified.
+branch has since fast-forwarded through immutable V1 evidence to
+`614156c1ab067192ab65b2969543e23904f192be`; the older dirty and release
+worktrees were not rebased, reset, or modified.
 
 The three user-requested TODOs are implemented:
 
@@ -25,15 +27,18 @@ The three user-requested TODOs are implemented:
    first GSM8K full log and the signed P57 Zero/full W&B project admission
    exposed by the FrozenLake log. See `phases/p58-8-p59-tp-mesh.md`.
 
-The complete pinned-image gate passes on the latest reconstructed tree with
+Before the current V1 Attempt-3 RPA repair, the complete pinned-image gate
+passed on the reconstructed release tree with
 `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`
 with terminal marker
 `P58_EXACT_IMAGE_CPU_PASS ... onehost_xprof=1 zero_hp_full=1 p59_tp4_tp8=2 p59_real_shim=4 p57_wandb=1 regressions=1`.
-The complete V1 exact-image gate independently passes with
+The V1 exact-image gate independently passed with
 `V1_HP_EXACT_IMAGE_PASS dp16_gathered=1 dp2tp2_parallel=2 p59_tp4_tp8=2 p59_real_shim=4 p57_wandb=1 perfetto_window=1 manifests=3`.
-Host adjacency is P59 30/30, current P57 136/136, V1 12/12, APC 31/31,
-and flags 366/366. The FP32 TP rank sums include operand barriers; both complete
-exact-image runs execute TP4/TP8 fixed-head markers with
+The current additive installed-attention gate changes both expected terminals
+to include `p59_rpa=2`; that gate has not run and remains separately
+approval-bound. Current host adjacency is P59 34/34, P57 144/144, V1 21/21,
+APC 31/31, and flags 366/366. The FP32 TP rank sums include operand barriers;
+the historical complete exact-image runs execute TP4/TP8 fixed-head markers with
 `all_gather_rank_order_f32_barrier`, installed projections remain
 `serial_parallel=exact`, and both manifests are 36/36.
 
