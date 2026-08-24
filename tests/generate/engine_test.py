@@ -334,23 +334,7 @@ class EngineTest(parameterized.TestCase):
         echo=echo,
     )
     
-    sampler_orig = sampler_lib2.Sampler(
-        transformer=transformer,
-        tokenizer=vocab,
-        cache_config=sampler_lib.CacheConfig(
-            cache_size=64,
-            num_layers=4,
-            num_kv_heads=4,
-            head_dim=16,
-        ),
-    )
-    result_orig = sampler_orig(
-        ['input string', 'hello world'],
-        max_generation_steps=10,
-        return_logits=True,
-        max_prompt_length=max_prompt_length,
-        echo=echo,
-    )
+
 
     self.assertIsNotNone(result)
     
@@ -374,13 +358,6 @@ class EngineTest(parameterized.TestCase):
     self.assertNotEqual(result.text, top_p_result.text)
     
     """
-    top_p_result_orig = sampler_orig(
-        ['input string', 'hello world'],
-        max_generation_steps=10,
-        temperature=9,
-        top_p=0.95,
-        echo=echo,
-    )
     # self.assertIsNotNone(top_p_result)
     self.assertEqual(top_p_result.text, top_p_result_orig.text)
     """
@@ -397,14 +374,6 @@ class EngineTest(parameterized.TestCase):
     self.assertNotEqual(top_p_result.text, top_p_result_2.text)
     
     """
-    top_p_result_2_orig = sampler_orig(
-        ['input string', 'hello world'],
-        max_generation_steps=10,
-        temperature=9,
-        top_p=0.95,
-        seed=42,
-        echo=echo,
-    )
     # self.assertIsNotNone(top_p_result_2)
     self.assertEqual(top_p_result_2_orig.text, top_p_result_2.text)
     """
@@ -422,15 +391,6 @@ class EngineTest(parameterized.TestCase):
     self.assertNotEqual(top_p_result_2.text, top_k_result.text)
 
     """
-    top_k_result_orig = sampler(
-        ['input string', 'hello world'],
-        max_generation_steps=10,
-        temperature=9,
-        top_p=0.95,
-        top_k=3,
-        seed=42,
-        echo=echo,
-    )
     # self.assertIsNotNone(top_k_result)
     self.assertEqual(top_k_result_orig.text, top_k_result.text)
     """
