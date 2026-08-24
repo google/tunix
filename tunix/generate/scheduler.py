@@ -118,7 +118,7 @@ class Scheduler:
     
     max_pages = self.max_num_batch_tokens  
 
-    req_ids = [req.req_id for req in self.running_requests]
+    req_ids = [req.request_id for req in self.running_requests]
     n_new_pages = [len(req.page_ids) - utils.cdiv(req.num_completed_tokens, self.page_size) for req in self.running_requests]
     new_page_ids = [req.page_ids[-n_new_pages[i]:] if n_new_pages[i] > 0 else [] for (i, req) in enumerate(self.running_requests)]
     self.cache_manager.assign(new_page_ids)
