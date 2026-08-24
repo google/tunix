@@ -194,7 +194,7 @@ class EngineTest(parameterized.TestCase):
         cache_config=sampler_lib.CacheConfig(),
     )
     max_generation_steps = 10
-    result_padded = sampler(
+    result_padded = run_engine_generation(sampler, 
         ['input string', 'hello world'],
         max_generation_steps=max_generation_steps,
         return_logits=return_logits,
@@ -203,7 +203,7 @@ class EngineTest(parameterized.TestCase):
         pad_output=True,
     )
 
-    result_not_padded = sampler(
+    result_not_padded = run_engine_generation(sampler, 
         ['input string', 'hello world'],
         max_generation_steps=max_generation_steps,
         return_logits=return_logits,
@@ -253,7 +253,7 @@ class EngineTest(parameterized.TestCase):
 
     image_processor = DummyImageProcessor()
 
-    sampler = sampler_lib.VanillaSampler(
+    sampler = engine.LLMEngine(
         transformer=transformer,
         tokenizer=vocab,
         cache_config=sampler_lib.CacheConfig(),
@@ -362,7 +362,7 @@ class EngineTest(parameterized.TestCase):
     self.assertEqual(top_p_result.text, top_p_result_orig.text)
     """
 
-    top_p_result_2 = sampler(
+    top_p_result_2 = run_engine_generation(sampler, 
         ['input string', 'hello world'],
         max_generation_steps=10,
         temperature=9,
@@ -448,7 +448,7 @@ class EngineTest(parameterized.TestCase):
 
     # With 1 beam, the beam search result should be the
     # same as the greedy output
-    result_beam_search_1 = sampler(
+    result_beam_search_1 = run_engine_generation(sampler, 
         ['input string', 'hello world'],
         max_generation_steps=10,
         return_logits=True,
@@ -460,7 +460,7 @@ class EngineTest(parameterized.TestCase):
     self.assertEqual(result_beam_search_1.text, result.text)
 
     # Check with multiple beams, it still works.
-    result_beam_search_2 = sampler(
+    result_beam_search_2 = run_engine_generation(sampler, 
         ['input string', 'hello world'],
         max_generation_steps=10,
         return_logits=True,
@@ -480,7 +480,7 @@ class EngineTest(parameterized.TestCase):
     self.assertIsNotNone(top_p_result)
     self.assertNotEqual(result.text, top_p_result.text)
 
-    top_p_result_2 = sampler(
+    top_p_result_2 = run_engine_generation(sampler, 
         ['input string', 'hello world'],
         max_generation_steps=10,
         temperature=9,
@@ -637,7 +637,7 @@ class EngineTest(parameterized.TestCase):
         rngs=nnx.Rngs(42),
     )
     sampler.transformer_state = nnx.variables(new_transformer, nnx.Param)
-    new_logits = sampler(
+    new_logits = run_engine_generation(sampler, 
         input_strings, max_generation_steps=10, return_logits=True
     ).logits
     with self.assertRaises(AssertionError):
@@ -677,7 +677,7 @@ class EngineTest(parameterized.TestCase):
     new_lora_params = jax.tree.map(lambda x: x + 0.1, new_lora_params)
 
     sampler.transformer_state = new_lora_params
-    new_logits = sampler(
+    new_logits = run_engine_generation(sampler, 
         input_strings, max_generation_steps=10, return_logits=True
     ).logits
     with self.assertRaises(AssertionError):
@@ -829,8 +829,8 @@ class EngineTest(parameterized.TestCase):
     mock_tokenizer = tc.MockVocab()
     mock_tokenizer.DecodeIds = mock.MagicMock()
     mock_tokenizer.DecodeIds.return_value = 'decoded_string'
-    sampler = sampler_lib.VanillaSampler(model, mock_tokenizer, cache_config)
-    sampler(
+    sampler = engine.LLMEngine(model, mock_tokenizer, cache_config)
+    run_engine_generation(sampler, 
         ['input string', 'hello world'],
         max_generation_steps=10,
         max_prompt_length=10,
@@ -871,9 +871,9 @@ class EngineTest(parameterized.TestCase):
     mock_tokenizer.DecodeIds.return_value = 'decoded_string'
 
     # Run 1: Optimized (decode_only_last_token = True)
-    sampler_opt = sampler_lib.VanillaSampler(model, mock_tokenizer, cache_config)
+    sampler_opt = engine.LLMEngine(model, mock_tokenizer, cache_config)
     self.assertTrue(sampler_opt._supports_decode_only_last_token)
-    res_opt = sampler_opt(
+    res_opt = run_engine_generation(sampler_opt, 
         ['input string', 'hello world'],
         max_generation_steps=10,
         max_prompt_length=10,
@@ -882,9 +882,9 @@ class EngineTest(parameterized.TestCase):
     )
 
     # Run 2: Unoptimized (force decode_only_last_token = False)
-    sampler_unopt = sampler_lib.VanillaSampler(model, mock_tokenizer, cache_config)
+    sampler_unopt = engine.LLMEngine(model, mock_tokenizer, cache_config)
     sampler_unopt._supports_decode_only_last_token = False
-    res_unopt = sampler_unopt(
+    res_unopt = run_engine_generation(sampler_unopt, 
         ['input string', 'hello world'],
         max_generation_steps=10,
         max_prompt_length=10,
