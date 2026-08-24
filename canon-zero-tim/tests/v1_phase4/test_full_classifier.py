@@ -35,6 +35,9 @@ class FullClassifierTest(unittest.TestCase):
     state = root / "state"
     state.mkdir()
     env = {
+        "CANON_PROFILE_FILE": (
+            "cluster/profiles/qwen3-1p7b-dp16-tp4-gsm8k-v1-hp.env"
+        ),
         "CANON_V1_HP_FULL": "1",
         "CANON_P33_RUN_STAGE": "full",
         "CANON_P33_NO_COMMIT": "0",
@@ -72,6 +75,15 @@ class FullClassifierTest(unittest.TestCase):
         "[P59.DP16] head_cotangent_partition_ready "
         "global_shape=(4096, 151936) local_shape=(256,37984) "
         "placement=data,model",
+        "[PATHTRACE] CANON_P38_FIXED_LM_HEAD=1 "
+        "semantic_M=256 fixed_M=256 K=2048 TP=4 local_N=37984 "
+        "fixed_N=38144 BM=128 BN=256 BK=256 chunks=1 "
+        "endpoint=tied_embed p59_local=1 global_M=4096 dp=16",
+        "[PATHTRACE] CANON_" "P38_FIXED_LM_HEAD_VJP=1 "
+        "semantic_M=4096 local_M=256 fixed_M=256 chunks=1 "
+        "accumulation=lax.scan order=ascending "
+        "tp_input_reduction=all_gather_rank_order_f32_barrier "
+        "K=2048 TP=4 local_N=37984 fixed_N=38144 endpoint=tied_embed",
         "[P51.XPROF] phase=update armed step=2",
         "[P51.XPROF] phase=update started step=2 anchor=update_entry tpu_trace_mode=TRACE_COMPUTE",
         "[P51.XPROF] phase=update stopped step=3 anchor=step_completed",
@@ -197,6 +209,104 @@ class FullClassifierTest(unittest.TestCase):
       )
       self.assertEqual(record["verdict"], "FAIL")
       self.assertIn("marker.p59_head_partition=0", record["reasons"])
+
+  def test_wrong_p59_head_shape_is_fatal(self):
+    replacements = {
+        "global": (
+            "global_shape=(4096, 151936)",
+            "global_shape=(2048, 151936)",
+        ),
+        "local": (
+            "local_shape=(256,37984)",
+            "local_shape=(128,37984)",
+        ),
+    }
+    for label, (before, after) in replacements.items():
+      with self.subTest(label=label), tempfile.TemporaryDirectory() as tmp:
+        state, run_log, updates, base = self._evidence(Path(tmp))
+        run_log.write_text(
+            run_log.read_text(encoding="utf-8").replace(before, after),
+            encoding="utf-8",
+        )
+        record = classifier.classify(
+            recipe="gsm8k",
+            state=state,
+            run_log=run_log,
+            update_report=updates,
+            base_classification=base,
+        )
+        self.assertEqual(record["verdict"], "FAIL")
+        self.assertIn(
+            "p59_head_partition_shape_or_placement", record["reasons"]
+        )
+
+  def test_recipe_shape_contracts_cover_dp16_and_dp8(self):
+    expected = {
+        "gsm8k": (16, 4, 4096, 256, 37984),
+        "p45": (8, 8, 2048, 256, 18992),
+        "m15": (8, 8, 2048, 256, 18992),
+    }
+    for recipe, values in expected.items():
+      contract = classifier._RECIPES[recipe]
+      self.assertEqual(
+          (
+              contract["dp"],
+              contract["tp"],
+              contract["global_m"],
+              contract["local_m"],
+              contract["local_vocab"],
+          ),
+          values,
+      )
+
+  def test_wrong_profile_is_fatal(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      state, run_log, updates, base = self._evidence(Path(tmp))
+      env = state / "env.sh"
+      env.write_text(
+          env.read_text(encoding="utf-8").replace(
+              "qwen3-1p7b-dp16-tp4-gsm8k-v1-hp.env",
+              "qwen3-8b-dp8-tp8-frozenlake-v1-hp.env",
+          ),
+          encoding="utf-8",
+      )
+      record = classifier.classify(
+          recipe="gsm8k",
+          state=state,
+          run_log=run_log,
+          update_report=updates,
+          base_classification=base,
+      )
+      self.assertEqual(record["verdict"], "FAIL")
+      self.assertTrue(
+          any(
+              reason.startswith("resolved_env=")
+              for reason in record["reasons"]
+          )
+      )
+
+  def test_wrong_p59_local_chunks_is_fatal(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      state, run_log, updates, base = self._evidence(Path(tmp))
+      run_log.write_text(
+          run_log.read_text(encoding="utf-8").replace(
+              "fixed_M=256 chunks=1 accumulation=lax.scan",
+              "fixed_M=256 chunks=16 accumulation=lax.scan",
+          ),
+          encoding="utf-8",
+      )
+      record = classifier.classify(
+          recipe="gsm8k",
+          state=state,
+          run_log=run_log,
+          update_report=updates,
+          base_classification=base,
+      )
+      self.assertEqual(record["verdict"], "FAIL")
+      self.assertIn(
+          "p59_fixed_head_vjp_global_local_shape_chunks_or_reduction",
+          record["reasons"],
+      )
 
   def test_direct_eval_cycle_timing_uses_explicit_enclosing_step(self):
     rows = [

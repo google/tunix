@@ -16,27 +16,48 @@ from typing import Any
 _RECIPES = {
     "gsm8k": {
         "workload": "gsm8k",
+        "profile": "cluster/profiles/qwen3-1p7b-dp16-tp4-gsm8k-v1-hp.env",
         "updates": 200,
         "dp": 16,
         "tp": 4,
+        "global_m": 4096,
+        "local_m": 256,
+        "hidden": 2048,
+        "local_vocab": 37984,
+        "fixed_local_vocab": 38144,
+        "endpoint": "tied_embed",
         "apc": False,
         "candidate": "",
         "split": "",
     },
     "p45": {
         "workload": "frozenlake-dp8-tp8",
+        "profile": "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env",
         "updates": 300,
         "dp": 8,
         "tp": 8,
+        "global_m": 2048,
+        "local_m": 256,
+        "hidden": 4096,
+        "local_vocab": 18992,
+        "fixed_local_vocab": 19200,
+        "endpoint": "untied_lm_head",
         "apc": True,
         "candidate": "",
         "split": "",
     },
     "m15": {
         "workload": "frozenlake-dp8-tp8",
+        "profile": "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env",
         "updates": 300,
         "dp": 8,
         "tp": 8,
+        "global_m": 2048,
+        "local_m": 256,
+        "hidden": 4096,
+        "local_vocab": 18992,
+        "fixed_local_vocab": 19200,
+        "endpoint": "untied_lm_head",
         "apc": True,
         "candidate": "m15",
         "split": "main",
@@ -194,6 +215,7 @@ def classify(
 
   env = _resolved_env(env_path)
   required_env = {
+      "CANON_PROFILE_FILE": str(contract["profile"]),
       "CANON_V1_HP_FULL": "1",
       "CANON_P33_RUN_STAGE": "full",
       "CANON_P33_NO_COMMIT": "0",
@@ -316,6 +338,93 @@ def classify(
   _require(
       align_verdicts.count("FAIL") == 0,
       f"canon_align_fail={align_verdicts.count('FAIL')} expected=0",
+      reasons,
+  )
+
+  global_m = int(contract["global_m"])
+  local_m = int(contract["local_m"])
+  local_vocab = int(contract["local_vocab"])
+  fixed_local_vocab = int(contract["fixed_local_vocab"])
+  hidden = int(contract["hidden"])
+  endpoint = str(contract["endpoint"])
+  head_prefix = f"[P59.DP{dp_size}] head_cotangent_partition_ready "
+  expected_head_receipt = (
+      head_prefix
+      + f"global_shape=({global_m}, 151936) "
+      + f"local_shape=({local_m},{local_vocab}) placement=data,model"
+  )
+  head_receipts = [
+      line.strip()
+      for line in text.splitlines()
+      if line.strip().startswith(head_prefix)
+  ]
+  _require(bool(head_receipts), "p59_head_partition_receipt_missing", reasons)
+  _require(
+      bool(head_receipts)
+      and all(line == expected_head_receipt for line in head_receipts),
+      "p59_head_partition_shape_or_placement",
+      reasons,
+  )
+
+  primal_records = [
+      dict(_FIELD_RE.findall(line))
+      for line in text.splitlines()
+      if "[PATHTRACE] CANON_P38_FIXED_LM_HEAD=1 " in line
+      and " p59_local=1 " in line
+  ]
+  expected_primal = {
+      "semantic_M": str(local_m),
+      "fixed_M": "256",
+      "K": str(hidden),
+      "TP": str(tp_size),
+      "local_N": str(local_vocab),
+      "fixed_N": str(fixed_local_vocab),
+      "BM": "128",
+      "BN": "256",
+      "BK": "256",
+      "chunks": "1",
+      "endpoint": endpoint,
+      "p59_local": "1",
+      "global_M": str(global_m),
+      "dp": str(dp_size),
+  }
+  matching_primal = sum(
+      all(record.get(name) == value for name, value in expected_primal.items())
+      for record in primal_records
+  )
+  _require(
+      matching_primal >= 1 and matching_primal == len(primal_records),
+      "p59_fixed_head_primal_global_local_shape_or_chunks",
+      reasons,
+  )
+
+  vjp_records = [
+      dict(_FIELD_RE.findall(line))
+      for line in text.splitlines()
+      if "[PATHTRACE] CANON_" "P38_FIXED_LM_HEAD_VJP=1 " in line
+      and " tp_input_reduction=" in line
+  ]
+  expected_vjp = {
+      "semantic_M": str(global_m),
+      "local_M": str(local_m),
+      "fixed_M": "256",
+      "chunks": "1",
+      "accumulation": "lax.scan",
+      "order": "ascending",
+      "tp_input_reduction": "all_gather_rank_order_f32_barrier",
+      "K": str(hidden),
+      "TP": str(tp_size),
+      "local_N": str(local_vocab),
+      "fixed_N": str(fixed_local_vocab),
+      "endpoint": endpoint,
+  }
+  matching_vjp = sum(
+      all(record.get(name) == value for name, value in expected_vjp.items())
+      for record in vjp_records
+  )
+  _require(
+      matching_vjp >= 1 and matching_vjp == len(vjp_records),
+      "p59_fixed_head_vjp_global_local_shape_chunks_or_reduction",
       reasons,
   )
 
@@ -468,6 +577,14 @@ def classify(
           "claim_level": "strict-zero-tim",
       },
       "p59_acceptance": "ordinary-jax-fp64-gradient-correctness",
+      "p59_fixed_head_contract": {
+          "profile": contract["profile"],
+          "global_shape": [global_m, 151936],
+          "local_shape": [local_m, local_vocab],
+          "matching_head_partition_receipts": len(head_receipts),
+          "matching_local_primal_receipts": matching_primal,
+          "matching_local_vjp_receipts": matching_vjp,
+      },
       "profiled_step": _PROFILED_STEP,
       "profiled_step_excluded_from_steady_mean": True,
       "runtime_markers": marker_counts,

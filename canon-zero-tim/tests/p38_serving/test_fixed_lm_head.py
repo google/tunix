@@ -226,7 +226,36 @@ class FixedLmHeadContractTest(unittest.TestCase):
 
   def test_frozenlake_runtime_selects_m2048_receipts(self):
     text = RUN_STEP.read_text()
-    self.assertIn('p38_fixed_receipt_args+=(--learner-m 2048)', text)
+    receipt_section = text[text.index("p38_fixed_receipt_args=("):]
+    for profile in (
+        "qwen3-8b-dp8-tp8-frozenlake-tim.env",
+        "qwen3-8b-dp8-tp8-frozenlake-v1-hp.env",
+    ):
+      with self.subTest(profile=profile):
+        start = receipt_section.index(f"cluster/profiles/{profile})")
+        branch = receipt_section[start:receipt_section.index(";;", start)]
+        self.assertIn(
+            "p38_fixed_receipt_args+=(--learner-m 2048)", branch
+        )
+    self.assertEqual(
+        receipt_section.count("p38_fixed_receipt_args+=(--learner-m 2048)"), 2
+    )
+
+  def test_v1_runtime_selects_exact_p59_local_dp_receipts(self):
+    text = RUN_STEP.read_text()
+    receipt_section = text[text.index("p38_fixed_receipt_args=("):]
+    expected = {
+        "qwen3-1p7b-dp16-tp4-gsm8k-v1-hp.env": 16,
+        "qwen3-8b-dp8-tp8-frozenlake-v1-hp.env": 8,
+    }
+    for profile, dp_size in expected.items():
+      with self.subTest(profile=profile):
+        start = receipt_section.index(f"cluster/profiles/{profile})")
+        branch = receipt_section[start:receipt_section.index(";;", start)]
+        self.assertIn(
+            f"p38_fixed_receipt_args+=(--p59-local-dp-size {dp_size})",
+            branch,
+        )
 
   def test_exact_target_does_not_require_a_mismatch_join(self):
     text = RUN_STEP.read_text()

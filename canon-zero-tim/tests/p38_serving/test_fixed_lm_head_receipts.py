@@ -29,6 +29,7 @@ def _log(
     tp_size: int = 4,
     vjp: bool = True,
     learner_m: int = receipts.DEFAULT_LEARNER_M,
+    p59_local_dp_size: int | None = None,
 ) -> str:
   local_vocab, padded_local_vocab = receipts.GEOMETRIES[
       (endpoint, hidden, tp_size)
@@ -36,23 +37,52 @@ def _log(
   lines = []
   if endpoint == "tied_embed":
     lines.append("[P28.G5C] TIED_EMBEDDING_HEAD on shared_leaves=1")
-  for semantic_m in (*receipts.REQUEST_M, learner_m):
-    chunks = semantic_m // 256 if semantic_m == learner_m else 1
+  for semantic_m in receipts.REQUEST_M:
     lines.append(
         "[PATHTRACE] CANON_P38_FIXED_LM_HEAD=1 "
         f"semantic_M={semantic_m} fixed_M=256 K={hidden} TP={tp_size} "
         f"local_N={local_vocab} fixed_N={padded_local_vocab} "
         "BM=128 BN=256 BK=256 "
-        f"chunks={chunks} endpoint={endpoint}"
+        f"chunks=1 endpoint={endpoint}"
+    )
+  if p59_local_dp_size is None:
+    lines.append(
+        "[PATHTRACE] CANON_P38_FIXED_LM_HEAD=1 "
+        f"semantic_M={learner_m} fixed_M=256 K={hidden} TP={tp_size} "
+        f"local_N={local_vocab} fixed_N={padded_local_vocab} "
+        "BM=128 BN=256 BK=256 "
+        f"chunks={learner_m // 256} endpoint={endpoint}"
+    )
+  else:
+    local_m = learner_m // p59_local_dp_size
+    lines.append(
+        "[PATHTRACE] CANON_P38_FIXED_LM_HEAD=1 "
+        f"semantic_M={local_m} fixed_M=256 K={hidden} TP={tp_size} "
+        f"local_N={local_vocab} fixed_N={padded_local_vocab} "
+        "BM=128 BN=256 BK=256 chunks=1 "
+        f"endpoint={endpoint} p59_local=1 global_M={learner_m} "
+        f"dp={p59_local_dp_size}"
     )
   if vjp:
-    lines.append(
-        "[PATHTRACE] CANON_" "P38_FIXED_LM_HEAD_VJP=1 "
-        f"semantic_M={learner_m} fixed_M=256 chunks={learner_m // 256} "
-        "accumulation=lax.scan order=ascending "
-        f"K={hidden} TP={tp_size} local_N={local_vocab} "
-        f"fixed_N={padded_local_vocab} endpoint={endpoint}"
-    )
+    if p59_local_dp_size is None:
+      lines.append(
+          "[PATHTRACE] CANON_" "P38_FIXED_LM_HEAD_VJP=1 "
+          f"semantic_M={learner_m} fixed_M=256 "
+          f"chunks={learner_m // 256} "
+          "accumulation=lax.scan order=ascending "
+          f"K={hidden} TP={tp_size} local_N={local_vocab} "
+          f"fixed_N={padded_local_vocab} endpoint={endpoint}"
+      )
+    else:
+      lines.append(
+          "[PATHTRACE] CANON_" "P38_FIXED_LM_HEAD_VJP=1 "
+          f"semantic_M={learner_m} "
+          f"local_M={learner_m // p59_local_dp_size} "
+          "fixed_M=256 chunks=1 accumulation=lax.scan order=ascending "
+          "tp_input_reduction=all_gather_rank_order_f32_barrier "
+          f"K={hidden} TP={tp_size} local_N={local_vocab} "
+          f"fixed_N={padded_local_vocab} endpoint={endpoint}"
+      )
   return "\n".join(lines) + "\n"
 
 
@@ -195,6 +225,101 @@ class FixedLmHeadReceiptTest(unittest.TestCase):
     self.assertEqual(wrong["verdict"], "P38_FIXED_LM_HEAD_RECEIPTS_FAIL")
     self.assertIn("missing_primal_M=4096", wrong["reasons"])
     self.assertIn("missing_fixed_order_vjp", wrong["reasons"])
+
+  def test_p59_local_dp8_m2048_requires_exact_local_receipts(self):
+    text = _log(
+        "untied_lm_head",
+        hidden=4096,
+        tp_size=8,
+        learner_m=2048,
+        p59_local_dp_size=8,
+    )
+    report = receipts.classify(
+        text,
+        endpoint="untied_lm_head",
+        hidden=4096,
+        tp_size=8,
+        require_vjp=True,
+        learner_m=2048,
+        p59_local_dp_size=8,
+    )
+    self.assertEqual(report["verdict"], "P38_FIXED_LM_HEAD_RECEIPTS_PASS")
+    self.assertEqual(report["p59_local_M"], 256)
+    self.assertEqual(report["matching_p59_local_primal_records"], 1)
+
+    corruptions = {
+        "global": text.replace("global_M=2048", "global_M=4096"),
+        "local": text.replace("local_M=256", "local_M=128"),
+        "chunks": text.replace(
+            "chunks=1 endpoint=untied_lm_head p59_local=1",
+            "chunks=2 endpoint=untied_lm_head p59_local=1",
+        ),
+        "reduction": text.replace(
+            "tp_input_reduction=all_gather_rank_order_f32_barrier ", ""
+        ),
+    }
+    for label, corrupted in corruptions.items():
+      with self.subTest(label=label):
+        red = receipts.classify(
+            corrupted,
+            endpoint="untied_lm_head",
+            hidden=4096,
+            tp_size=8,
+            require_vjp=True,
+            learner_m=2048,
+            p59_local_dp_size=8,
+        )
+        self.assertEqual(
+            red["verdict"], "P38_FIXED_LM_HEAD_RECEIPTS_FAIL"
+        )
+
+  def test_p59_local_dp16_m4096_passes(self):
+    report = receipts.classify(
+        _log(
+            "tied_embed",
+            hidden=2048,
+            tp_size=4,
+            learner_m=4096,
+            p59_local_dp_size=16,
+        ),
+        endpoint="tied_embed",
+        hidden=2048,
+        tp_size=4,
+        require_vjp=True,
+        learner_m=4096,
+        p59_local_dp_size=16,
+    )
+    self.assertEqual(report["verdict"], "P38_FIXED_LM_HEAD_RECEIPTS_PASS")
+    self.assertEqual(report["p59_local_M"], 256)
+
+  def test_p59_local_rejects_non_m256_global_dp_pair(self):
+    with self.assertRaisesRegex(ValueError, "local_M=256"):
+      receipts.classify(
+          "",
+          endpoint="untied_lm_head",
+          hidden=4096,
+          tp_size=8,
+          require_vjp=True,
+          learner_m=4096,
+          p59_local_dp_size=8,
+      )
+
+  def test_p59_local_mode_cannot_drop_learner_or_vjp_receipts(self):
+    for include_learner, require_vjp in ((False, True), (True, False)):
+      with self.subTest(
+          include_learner=include_learner, require_vjp=require_vjp
+      ):
+        with self.assertRaisesRegex(ValueError, "requires learner primal"):
+          receipts.classify(
+              "",
+              endpoint="untied_lm_head",
+              hidden=4096,
+              tp_size=8,
+              require_vjp=require_vjp,
+              include_learner=include_learner,
+              learner_m=2048,
+              p59_local_dp_size=8,
+          )
 
   def test_request_only_eval_does_not_require_learner_or_vjp(self):
     text = "\n".join(

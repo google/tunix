@@ -685,14 +685,29 @@ if [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "1" ]; then
     --tp-size "$p38_fixed_tp"
     --output "$CANON_STATE/p38_fixed_lm_head_receipts.json"
   )
-  if [ "${CANON_PROFILE_FILE:-}" = \
-       "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env" ] && \
-     [ "${CANON_P57_RUN_KIND:-}" = "eval" ]; then
-    p38_fixed_receipt_args+=(--request-only)
-  elif [ "${CANON_PROFILE_FILE:-}" = \
-         "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env" ]; then
-    p38_fixed_receipt_args+=(--learner-m 2048)
-  fi
+  case "${CANON_PROFILE_FILE:-}" in
+    cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env)
+      if [ "${CANON_P57_RUN_KIND:-}" = "eval" ]; then
+        p38_fixed_receipt_args+=(--request-only)
+      else
+        p38_fixed_receipt_args+=(--learner-m 2048)
+        if [ "${CANON_P59_RANK_PARALLEL_BACKWARD:-0}" = "1" ]; then
+          p38_fixed_receipt_args+=(--p59-local-dp-size 8)
+        fi
+      fi
+      ;;
+    cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env)
+      p38_fixed_receipt_args+=(--learner-m 2048)
+      if [ "${CANON_P59_RANK_PARALLEL_BACKWARD:-0}" = "1" ]; then
+        p38_fixed_receipt_args+=(--p59-local-dp-size 8)
+      fi
+      ;;
+    cluster/profiles/qwen3-1p7b-dp16-tp4-gsm8k-v1-hp.env)
+      if [ "${CANON_P59_RANK_PARALLEL_BACKWARD:-0}" = "1" ]; then
+        p38_fixed_receipt_args+=(--p59-local-dp-size 16)
+      fi
+      ;;
+  esac
   if [ -z "${CANON_P38_SERVING_CAPTURE_DIR:-}" ] && \
      ! { [ "${CANON_PROFILE_FILE:-}" = \
              "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env" ] && \
