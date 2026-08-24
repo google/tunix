@@ -3,7 +3,7 @@ from typing import List, Any
 from flax import nnx
 from tunix.generate import scheduler
 from tunix.generate import cache_manager as cache_manager_lib
-from tunix.generate import continuous_sampler as sampler_lib
+from tunix.generate import sampler_v2 as sampler_lib
 from tunix.generate import cache_manager as batch_cache_manager_lib
 from tunix.tests import test_common as tc
 
@@ -26,7 +26,7 @@ class LLMEngine:
         self.generated_tokens = {} # request_id -> list of ints
         
         # 2. Own and Initialize the Sampler!
-        self.sampler = sampler_lib.ContinuousSampler(
+        self.sampler = sampler_lib.VanillaSampler(
             transformer=transformer,
             tokenizer=tokenizer,
             cache_config=cache_config,

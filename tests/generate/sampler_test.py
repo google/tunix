@@ -6,20 +6,20 @@ from absl.testing import parameterized
 from flax import nnx
 
 from tunix.generate import cache_manager as cm_lib
-from tunix.generate import continuous_sampler
+from tunix.generate import sampler_v2
 from tunix.tests import test_common as tc
 
-class ContinuousSamplerTest(parameterized.TestCase):
+class VanillaSamplerTest(parameterized.TestCase):
   def test_sample_step(self):
     vocab = tc.MockVocab()
     transformer = tc.ToyTransformer(
         config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()),
         rngs=nnx.Rngs(42),
     )
-    sampler = continuous_sampler.ContinuousSampler(
+    sampler = sampler_v2.VanillaSampler(
         transformer=transformer,
         tokenizer=vocab,
-        cache_config=continuous_sampler.CacheConfig(),
+        cache_config=sampler_v2.CacheConfig(),
     )
     cm = cm_lib.init_cache_manager(
         cache_config=sampler.cache_config,
@@ -55,10 +55,10 @@ class ContinuousSamplerTest(parameterized.TestCase):
         config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()),
         rngs=nnx.Rngs(42),
     )
-    sampler = continuous_sampler.ContinuousSampler(
+    sampler = sampler_v2.VanillaSampler(
         transformer=transformer,
         tokenizer=vocab,
-        cache_config=continuous_sampler.CacheConfig(),
+        cache_config=sampler_v2.CacheConfig(),
     )
     cm = cm_lib.init_cache_manager(
         cache_config=sampler.cache_config,
