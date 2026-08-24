@@ -58,7 +58,7 @@ _RECIPES = {
         "local_vocab": 18992,
         "fixed_local_vocab": 19200,
         "endpoint": "untied_lm_head",
-        "apc": True,
+        "apc": False,
         "candidate": "m15",
         "split": "main",
     },
@@ -482,11 +482,21 @@ def classify(
       f"[P3_APC_CONFIG] enabled={int(apc_on)} "
       "workload=frozenlake reader=train_frozenlake_qwen3"
   )
-  if apc_on:
+  if contract["workload"] == "frozenlake-dp8-tp8":
     _require(text.count(apc_marker) == 1, "apc_runtime_marker", reasons)
-    _require(bool(hit_rates) and max(hit_rates) > 0.0, "apc_positive_cache_hit", reasons)
+    opposite_apc_marker = (
+        f"[P3_APC_CONFIG] enabled={int(not apc_on)} "
+        "workload=frozenlake reader=train_frozenlake_qwen3"
+    )
+    _require(
+        opposite_apc_marker not in text,
+        "opposite_apc_runtime_marker",
+        reasons,
+    )
   else:
     _require("[P3_APC_CONFIG] enabled=1" not in text, "unexpected_apc_on", reasons)
+  if apc_on:
+    _require(bool(hit_rates) and max(hit_rates) > 0.0, "apc_positive_cache_hit", reasons)
 
   xplanes = sorted((state / "xprof-update").rglob("*.xplane.pb"))
   trace_json = sorted((state / "xprof-update").rglob("*.trace.json.gz"))

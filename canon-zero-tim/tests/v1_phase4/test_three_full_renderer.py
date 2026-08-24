@@ -133,10 +133,18 @@ class ThreeFullRendererTest(unittest.TestCase):
             msg=f"{path}\nstdout={completed.stdout}\nstderr={completed.stderr}",
         )
         if values.get("CANON_P57_TIM_ARM") == "zero":
+          expected_apc = (
+              "0"
+              if values.get("CANON_P57_WORKLOAD_CANDIDATE") == "m15"
+              and values.get("CANON_P57_DATA_SPLIT") == "main"
+              else "1"
+          )
           resolved = subprocess.run(
               [
                   "bash", "-euo", "pipefail", "-c",
-                  f"source {profile}; test \"$CANON_VLLM_ENABLE_PREFIX_CACHING\" = 1",
+                  f"source {profile}; "
+                  "test \"$CANON_VLLM_ENABLE_PREFIX_CACHING\" = "
+                  f"{expected_apc}",
               ],
               cwd=_REPO,
               env={**os.environ, **values},
@@ -154,6 +162,33 @@ class ThreeFullRendererTest(unittest.TestCase):
               check=False,
           )
           self.assertEqual(resolved.returncode, 0)
+
+      frozen_profile = (
+          _REPO
+          / "canon-zero-tim/cluster/profiles/"
+          "qwen3-8b-dp8-tp8-frozenlake-v1-hp.env"
+      )
+      m15_values = _env(
+          yaml.safe_load(outputs[2].read_text(encoding="utf-8"))
+      )
+      wrong_m15 = subprocess.run(
+          [
+              "bash", "-euo", "pipefail", "-c",
+              f"source {frozen_profile}",
+          ],
+          cwd=_REPO,
+          env={
+              **os.environ,
+              **m15_values,
+              "CANON_P57_WORKLOAD_CANDIDATE": "m15",
+              "CANON_P57_DATA_SPLIT": "selection",
+          },
+          text=True,
+          capture_output=True,
+          check=False,
+      )
+      self.assertNotEqual(wrong_m15.returncode, 0)
+      self.assertTrue(wrong_m15.stderr)
 
   def test_refuses_reused_output_and_duplicate_ids(self):
     with tempfile.TemporaryDirectory() as tmp:

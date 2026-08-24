@@ -258,6 +258,8 @@ class FullClassifierTest(unittest.TestCase):
           ),
           values,
       )
+    self.assertTrue(classifier._RECIPES["p45"]["apc"])
+    self.assertFalse(classifier._RECIPES["m15"]["apc"])
 
   def test_wrong_profile_is_fatal(self):
     with tempfile.TemporaryDirectory() as tmp:
@@ -284,6 +286,75 @@ class FullClassifierTest(unittest.TestCase):
               for reason in record["reasons"]
           )
       )
+
+  def test_apc_on_is_fatal_for_an_apc_off_recipe(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      state, run_log, updates, base = self._evidence(Path(tmp))
+      run_log.write_text(
+          "[P3_APC_CONFIG] enabled=1 workload=frozenlake "
+          "reader=train_frozenlake_qwen3\n"
+          + run_log.read_text(encoding="utf-8"),
+          encoding="utf-8",
+      )
+      record = classifier.classify(
+          recipe="gsm8k",
+          state=state,
+          run_log=run_log,
+          update_report=updates,
+          base_classification=base,
+      )
+      self.assertEqual(record["verdict"], "FAIL")
+      self.assertIn("unexpected_apc_on", record["reasons"])
+
+  def test_frozenlake_apc_off_requires_exact_runtime_marker(self):
+    contract = classifier._RECIPES["gsm8k"]
+    original_workload = contract["workload"]
+    contract["workload"] = "frozenlake-dp8-tp8"
+    try:
+      with tempfile.TemporaryDirectory() as tmp:
+        state, run_log, updates, base = self._evidence(Path(tmp))
+        record = classifier.classify(
+            recipe="gsm8k",
+            state=state,
+            run_log=run_log,
+            update_report=updates,
+            base_classification=base,
+        )
+        self.assertEqual(record["verdict"], "FAIL")
+        self.assertIn("apc_runtime_marker", record["reasons"])
+
+        marker = (
+            "[P3_APC_CONFIG] enabled=0 workload=frozenlake "
+            "reader=train_frozenlake_qwen3\n"
+        )
+        run_log.write_text(
+            marker + run_log.read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+        record = classifier.classify(
+            recipe="gsm8k",
+            state=state,
+            run_log=run_log,
+            update_report=updates,
+            base_classification=base,
+        )
+        self.assertEqual(record["verdict"], "PASS", record["reasons"])
+
+        run_log.write_text(
+            marker + run_log.read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+        record = classifier.classify(
+            recipe="gsm8k",
+            state=state,
+            run_log=run_log,
+            update_report=updates,
+            base_classification=base,
+        )
+        self.assertEqual(record["verdict"], "FAIL")
+        self.assertIn("apc_runtime_marker", record["reasons"])
+    finally:
+      contract["workload"] = original_workload
 
   def test_wrong_p59_local_chunks_is_fatal(self):
     with tempfile.TemporaryDirectory() as tmp:
