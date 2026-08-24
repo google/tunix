@@ -60,6 +60,18 @@ def sample_top_p(
     return next_token
 
 
+def sample_best(
+    logits, return_logprobs: bool = False
+) -> tuple[jnp.ndarray, jnp.ndarray | None]:
+    next_token = jnp.argmax(logits[:, -1], axis=-1, keepdims=True)
+    next_token = next_token[:, 0]
+    if not return_logprobs:
+        return next_token, None
+    logp = jax.nn.log_softmax(logits[:, -1].astype(jnp.float32), axis=-1)
+    logp_sampled = jnp.take_along_axis(logp, next_token[:, None], axis=-1)
+    return next_token, logp_sampled
+
+
 class ContinuousSampler:
     """
     Stateless Continuous Batching JAX Sampler.
@@ -102,6 +114,7 @@ class ContinuousSampler:
         seq_lens: np.ndarray,
         tokens: np.ndarray,
         active_seq_lens: np.ndarray,
+        distribution: np.ndarray,
         static_token_capacity: int,
         temperature: float = 0.0,
         top_p: float = 1.0,
@@ -118,6 +131,7 @@ class ContinuousSampler:
             jnp.array(seq_lens, dtype=jnp.int32),
             jnp.array(tokens, dtype=jnp.int32),
             jnp.array(active_seq_lens, dtype=jnp.int32),
+            jnp.array(distribution, dtype=jnp.int32),
             batch_size=batch_size,
             static_token_capacity=static_token_capacity
         )
@@ -147,6 +161,7 @@ class ContinuousSampler:
         seq_lens: jnp.ndarray,
         tokens_ragged: jnp.ndarray,
         active_seq_lens: jnp.ndarray,
+        distribution: jnp.ndarray,
         batch_size: int,
         static_token_capacity: int,
     ) -> Tuple[jnp.ndarray, Any]:
@@ -162,8 +177,6 @@ class ContinuousSampler:
 
         global_positions = positions + (seq_lens[seq_idxs] - active_seq_lens[seq_idxs])
         tokens = tokens_ragged
-
-        distribution = jnp.array([0, 0, batch_size], dtype=jnp.int32)
         
         logits, cache = transformer(
             tokens,
@@ -178,9 +191,16 @@ class ContinuousSampler:
         valid_idxs = jnp.maximum(0, last_token_idxs)
         last_token_logits = logits[valid_idxs]
         
-        # Zero out invalid logits from inactive sequences
-        is_active = active_seq_lens > 0
-        last_token_logits = jnp.where(is_active[:, None], last_token_logits, 0.0)
+        # Zero out invalid logits from inactive sequences or chunked sequences.
+        # distribution = [i, j, k]
+        # Sequences [0, j) have finished prefilling or are decoding.
+        # Sequences [j, k) are chunk-prefilling and should not emit tokens yet!
+        # Sequences [k, batch_size) are inactive.
+        num_sampleable = distribution[1] 
+        seq_indices = jnp.arange(batch_size)
+        is_sampleable = seq_indices < num_sampleable
+        
+        last_token_logits = jnp.where(is_sampleable[:, None], last_token_logits, 0.0)
         
         return last_token_logits, cache
 

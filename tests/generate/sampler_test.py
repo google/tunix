@@ -34,12 +34,14 @@ class ContinuousSamplerTest(parameterized.TestCase):
     tokens = np.array([4, 5, 6, 7], dtype=np.int32) 
     active_seq_lens = np.array([3, 1], dtype=np.int32)
     seq_lens = np.array([3, 4], dtype=np.int32)
+    distribution = np.array([1, 2, 2], dtype=np.int32)
 
     gen_tokens, logits, updated_pm = sampler.sample_step(
         cache=pm,
         seq_lens=seq_lens,
         tokens=tokens,
         active_seq_lens=active_seq_lens,
+        distribution=distribution,
         static_token_capacity=4,
         temperature=0.0,
     )
@@ -67,12 +69,14 @@ class ContinuousSamplerTest(parameterized.TestCase):
     tokens = np.array([4, 5], dtype=np.int32) 
     active_seq_lens = np.array([2], dtype=np.int32)
     seq_lens = np.array([2], dtype=np.int32)
+    distribution = np.array([0, 1, 1], dtype=np.int32)
     
     gen, logits, pm = sampler.sample_step(
         cache=cm.page_manager,
         seq_lens=seq_lens,
         tokens=tokens,
         active_seq_lens=active_seq_lens,
+        distribution=distribution,
         static_token_capacity=2,
         temperature=0.0,
         forbidden_token_ids=[1]
