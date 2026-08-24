@@ -56,13 +56,24 @@ class LLMEngine:
         req = scheduler.Request(req_id, prompt_tokens)
         self.scheduler._queue_new_requests([req])
         self.generated_tokens[req_id] = []
+        self.generated_logprobs[req_id] = []
+        self.generated_logits[req_id] = []
         return req
         
     def has_unfinished_requests(self) -> bool:
         return len(self.scheduler.pending_requests) > 0 or len(self.scheduler.running_requests) > 0
         
 
-    def step(self):
+    def step(
+        self,
+        temperature: float = 0.0,
+        top_p: float | None = None,
+        top_k: int | None = None,
+        return_logits: bool = False,
+        return_logprobs: bool = False,
+        eos_tokens: tuple[int, ...] | None = None,
+        forbidden_tokens: tuple[int, ...] | None = None,
+    ):
         """One physical iteration of the continuous batch engine."""
         
         running_requests = self.scheduler.schedule_step([])
@@ -137,7 +148,13 @@ class LLMEngine:
             active_seq_lens=active_seq_lens,
             distribution=distribution,
             static_token_capacity=total_tokens, 
-            temperature=0.0
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
+            return_logits=return_logits,
+            return_logprobs=return_logprobs,
+            eos_tokens=eos_tokens,
+            forbidden_tokens=forbidden_tokens,
         )
         
         self.cache_manager.page_manager = next_cache

@@ -74,7 +74,13 @@ class VanillaRollout(base_rollout.BaseRollout):
         req_ids.append(req_id)
         
     while self.engine.has_unfinished_requests():
-        self.engine.step()
+        self.engine.step(
+            temperature=rollout_config.temperature,
+            top_p=rollout_config.top_p,
+            top_k=rollout_config.top_k,
+            return_logprobs=rollout_config.return_logprobs,
+            eos_tokens=rollout_config.eos_tokens,
+        )
 
     out_tokens = []
     decoded_texts = []
