@@ -288,6 +288,27 @@ class TrajectoryWriterTestCase(
     metas = self.reader.get_trajectories_metadata()
     self.assertEqual(metas, [trajectory_testing.METADATA_1])
 
+  def test_close_persists_pending_writes(self) -> None:
+    """Tests that close() drains pending writes without an explicit flush()."""
+    self.writer.add_step(
+        trajectory_testing.STEP_1_1, trajectory_testing.METADATA_1
+    )
+    self.writer.close()
+
+    trajs = self.reader.get_trajectories([trajectory_testing.TRAJECTORY_ID_1])
+    self.assertEqual(trajs, [trajectory_testing.TRAJECTORY_1])
+
+  def test_close_is_idempotent(self) -> None:
+    """Tests that closing an already closed writer is a no-op."""
+    self.writer.add_step(
+        trajectory_testing.STEP_1_1, trajectory_testing.METADATA_1
+    )
+    self.writer.close()
+    self.writer.close()
+
+    trajs = self.reader.get_trajectories([trajectory_testing.TRAJECTORY_ID_1])
+    self.assertEqual(trajs, [trajectory_testing.TRAJECTORY_1])
+
   def test_update_metadata_standalone(self) -> None:
     """Tests updating metadata prior to adding any steps."""
     self.writer.update_metadata(trajectory_testing.METADATA_1)
