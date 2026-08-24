@@ -6,7 +6,7 @@ native_root="${1:?usage: analyze_gsm8k_xprof_pair.sh <native-root> <zero-root> <
 zero_root="${2:?usage: analyze_gsm8k_xprof_pair.sh <native-root> <zero-root> <fresh-output-dir>}"
 output_dir="${3:?usage: analyze_gsm8k_xprof_pair.sh <native-root> <zero-root> <fresh-output-dir>}"
 script_dir="$(cd "$(dirname "$0")" && pwd)"
-trace_summary="${V1_GSM8K_XPROF_TRACE_SUMMARY:-/home/yuxuan/.codex/skills/xprof-trace-analysis/scripts/xprof_trace_summary.py}"
+trace_summary="${V1_GSM8K_XPROF_TRACE_SUMMARY:-$script_dir/xprof_trace_summary.py}"
 
 for root in "$native_root" "$zero_root"; do
   if [ "$root" = "${root#/}" ] || [ ! -s "$root/train/classification.json" ]; then
