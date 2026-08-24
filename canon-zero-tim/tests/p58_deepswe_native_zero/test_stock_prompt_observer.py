@@ -71,7 +71,8 @@ class P58StockPromptObserverContractTest(unittest.TestCase):
         PKG / "cluster/profiles/qwen3-4b-dp8-tp8-deepswe-tim.env"
     ).read_text()
     native = profile[profile.index("  native)"):profile.index("  zero)")]
-    zero = profile[profile.index("  zero)"):profile.index("  *)")]
+    zero_start = profile.index("  zero)")
+    zero = profile[zero_start:profile.index("  *)", zero_start)]
     self.assertIn("CANON_P58_NATIVE_STOCK_PROMPT_OBSERVER=1", native)
     self.assertIn("CANON_PROMPT_PROCESSED_LOGPROBS=0", native)
     self.assertIn("CANON_ENGINE_MODULE_C=0", native)

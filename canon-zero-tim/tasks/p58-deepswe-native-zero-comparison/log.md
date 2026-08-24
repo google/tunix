@@ -662,3 +662,81 @@
 - The bare-host environment-contract import remains INCONCLUSIVE because the
   host lacks `metrax`; the dependency-complete pinned-image execution passes
   that exact suite. No commit, push, TPU target, or external launch occurred.
+
+## 2026-08-24 UTC — P58.9 Native-IS and Attempt-0 local refinement
+
+- Created isolated worktree
+  `/home/yuxuan/code_rl_repro/worktrees/p58_is_zero_refine_0824` from exact
+  fetched operator tip `614156c1ab067192ab65b2969543e23904f192be`; preflight
+  was clean. The older dirty Native-IS worktree and `main` were untouched.
+- Integrated Native token-IS into the latest Zero-HP/P59 tree as one explicit
+  renderer selector. Native raw resolves the sampler/TIS disable tuple to
+  `1:1`; Native-IS resolves it to `0:0`, passes token TIS threshold 2.0, and
+  requires trainer-old logps plus present TIS weights. Zero stays `1:1`.
+  Partial tuples, IS on Zero/Zero-HP, group filter, and optimizer offload fail
+  closed. Runtime and postflight require exactly one signed Native recipe
+  marker on the first effective batch.
+- Reverted P58 to exact Attempt-0. JobSet retry did not isolate the persistent
+  run root or reports by attempt, so `maxRestarts=3` was not a recoverable
+  execution contract. Removed five renderer-only keepalive environment names
+  after exact pinned-image source search found no consumer.
+- Host gates pass: renderer 20/20, profile 7/7, sampler recipe 7/7, stock
+  observer 6/6, Python/Bash syntax, and diff hygiene. Environment-contract
+  collection is `INCONCLUSIVE` on the bare host because `metrax` is absent.
+  The complete pinned-image gate then exits zero with
+  `P58_EXACT_IMAGE_CPU_PASS ... paired_renderer=1 ... zero_hp_full=1 ...
+  p59_tp4_tp8=2 p59_real_shim=4 ... regressions=1`.
+- No commit, push, image publication, Kubernetes apply, TPU execution, model
+  download, credential change, or artifact deletion occurred.
+
+## 2026-08-24 UTC — Native raw retired; fresh Native+IS selected
+
+- The operator reported a sharp training-reward drop in the live Native/no-IS
+  full campaign and judged the run collapsed. The onset update is not
+  established and must not be recorded as a fixed optimizer step. Its
+  exact run id, logs, W&B export, and checkpoint receipts are not present in
+  this local worktree, so the root cause remains unclassified here.
+- The execution decision is now durable: identify the exact Native-raw JobSet,
+  preserve its source/image/YAML, logs, trajectories, W&B metrics, update and
+  checkpoint receipts, then stop and delete only that JobSet and its proven
+  run-owned sandboxes. The failed optimizer checkpoint is not resumable and
+  Native raw is removed from the launch queue.
+- The replacement is a fresh Native+IS full run from the original frozen base:
+  Qwen3-4B-Instruct-2507, 1,012 tasks, B8 x G16, 16K, 50 turns, 128 chips,
+  1,000 updates, token IS threshold 2.0, trainer old logps, TIS weights present,
+  no group filter, and TPU-resident optimizer. It requires a new run id, run
+  root, W&B run, and checkpoint directory.
+- The Native+IS implementation remains an uncommitted/unpushed local delta.
+  Stopping/archiving the old run may proceed through the remote operator, but
+  the replacement launch is blocked until separate commit/push approval and
+  exact remote-SHA readback. This agent performed no cluster mutation, commit,
+  or push at this checkpoint.
+
+## 2026-08-24 UTC — correction: collapse has no fixed step attribution
+
+- The prior handoff checkpoint over-interpreted the operator's observation by
+  assigning a fixed optimizer-step onset. The confirmed operator observation
+  is only that training reward has dropped sharply in the current Native/no-IS
+  run; the onset update is not established.
+- Current handoff, runbook, state, plan, and P58.9 phase now explicitly forbid
+  assigning the collapse to a fixed optimizer step. Evidence capture
+  spans the last stable reward region, the observed drop onset, and all later
+  completed batches rather than ending at an assumed boundary.
+- The execution decision is unchanged: archive and stop the exact Native-raw
+  run, never resume its optimizer checkpoint, and select a fresh Native+IS run
+  from the original frozen base after publication/readback approval. No
+  cluster mutation, commit, or push was performed.
+
+## 2026-08-24 UTC — Native+IS publication authorized
+
+- The user explicitly authorized commit and push. Image publication,
+  Kubernetes apply, TPU launch, and any mutation of `main` remain outside this
+  authorization.
+- The tracked operator tip is `7b85b42d0a019d70f32a7dc9712c538ad42f5cb5`,
+  six commits ahead of the original P58.9 base. Those commits contain V1/P59/
+  M15 Attempt-3 repair and evidence. The overlapping `FLAGS.md`, P58 handoff,
+  and P58 exact-image aggregation changes must be merged additively so neither
+  the new P59/M15 gates nor the Native+IS gate is lost.
+- Next gate: create the scoped local publication commit, replay it over the
+  exact operator tip, rerun focused and complete pinned-image validation, push
+  only to `yuxzhang/canon-zero-tim`, and prove exact remote readback.

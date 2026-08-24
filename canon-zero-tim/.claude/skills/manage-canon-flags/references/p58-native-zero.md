@@ -9,6 +9,7 @@ Read this reference only for
 | Contract | Native | Zero |
 |---|---:|---:|
 | `CANON_P58_TIM_ARM` | `native` | `zero` |
+| `CANON_P34_DISABLE_SAMPLER_IS / CANON_P34_DISABLE_TIS` | `1 / 1` for Native raw; exactly `0 / 0` only for registered Native-IS | `1 / 1`; IS forbidden |
 | `CANON_P58_NATIVE_STOCK_PROMPT_OBSERVER` | `1` | `0` |
 | `CANON_PROMPT_PROCESSED_LOGPROBS` | `0` | `1` through canonical profile |
 | `CANON_ENGINE_MODULE_C` | `0` | `1` through canonical profile |
@@ -20,6 +21,13 @@ Read this reference only for
 
 Do not delete Native's explicit zeros or absences. Do not turn on canonical
 processed logprobs to satisfy the Native `S_prefill` API.
+
+Native sampler selection is a closed tuple, not two independent booleans.
+`1:1` means untreated Native raw; `0:0` means token sampler IS with threshold
+`2.0`; `0:1` and `1:0` are invalid. The Native-IS path must use rollout logps
+to measure the sampling policy, trainer logps as old policy logps, and
+materialized TIS weights. Group filtering remains absent. Zero and Zero-HP
+must stay `1:1`.
 
 Native alignment warning admission is independently signed. Require
 `CANON_P58_TIM_ADMITTED=1`, no competing P39/P43/P44 workload mode, and an
@@ -63,6 +71,7 @@ Require all of the following:
 [P58.STOCK_OBSERVER] PROCESSED_PROMPT_LOGPROBS_PASS ... targets=absolute-request-history treatment=observer-only
 [P34.WEIGHTS] EXACT ...
 [P58.NATIVE] RUNTIME_PATH_PASS canonical_markers=0 canonical_overlay=skipped stock_observer=observer-only
+[P58.TIM_RECIPE] PASS recipe=native-(raw|is) ... group_filter=none
 ```
 
 The processed observer marker must occur exactly once. Any canonical engine
@@ -75,6 +84,7 @@ canonical overlay and strict A=B=C postflight.
 ## Regression set
 
 - `tests/p58_deepswe_native_zero/test_profile.py`
+- `tests/p58_deepswe_native_zero/test_sampler_recipe.py`
 - `tests/p58_deepswe_native_zero/test_environment_contract.py`
 - `tests/p58_deepswe_native_zero/test_stock_prompt_observer.py`
 - `tests/p58_deepswe_native_zero/probe_stock_prompt_observer.py`

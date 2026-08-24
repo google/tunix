@@ -68,7 +68,12 @@ class P58EnvironmentContractTest(unittest.TestCase):
       SWEEnv({"docker_image": np.array(["example/image"])})
 
   def _rendered_env(
-      self, arm: str, stage: str, *, high_performance: bool = False
+      self,
+      arm: str,
+      stage: str,
+      *,
+      sampler_is: bool = False,
+      high_performance: bool = False,
   ) -> dict[str, str]:
     base = yaml.safe_load((PKG / "cluster/jobset-64chip.yaml").read_text())
     document = renderer.render(
@@ -82,16 +87,27 @@ class P58EnvironmentContractTest(unittest.TestCase):
         cpu_nodepool="cpu-np",
         worker_nodepool="tpu-pool",
         model_pvc="model-pvc",
+        sampler_is=sampler_is,
         high_performance=high_performance,
     )
     return dict(renderer.p34._env(document))
 
   def _resolved(
-      self, arm: str, stage: str, *, high_performance: bool = False
+      self,
+      arm: str,
+      stage: str,
+      *,
+      sampler_is: bool = False,
+      high_performance: bool = False,
   ) -> dict[str, str]:
     supplied = os.environ.copy()
     supplied.update(
-        self._rendered_env(arm, stage, high_performance=high_performance)
+        self._rendered_env(
+            arm,
+            stage,
+            sampler_is=sampler_is,
+            high_performance=high_performance,
+        )
     )
     profile = supplied["CANON_PROFILE_FILE"]
     command = (
@@ -113,11 +129,21 @@ class P58EnvironmentContractTest(unittest.TestCase):
     }
 
   def _persisted(
-      self, arm: str, stage: str, *, high_performance: bool = False
+      self,
+      arm: str,
+      stage: str,
+      *,
+      sampler_is: bool = False,
+      high_performance: bool = False,
   ):
     supplied = os.environ.copy()
     supplied.update(
-        self._rendered_env(arm, stage, high_performance=high_performance)
+        self._rendered_env(
+            arm,
+            stage,
+            sampler_is=sampler_is,
+            high_performance=high_performance,
+        )
     )
     supplied.update({
         "CANON_PKG": str(PKG),
@@ -187,6 +213,26 @@ class P58EnvironmentContractTest(unittest.TestCase):
     self.assertEqual(values["HF_TOKEN"], "test-hf-runtime-token")
     self.assertEqual(values["WANDB_API_KEY"], "test-wandb-runtime-key")
     deepswe_contract.validate_environment(values)
+
+  def test_native_is_renderer_environment_survives_authoritative_reload(self):
+    completed, resolved, values = self._persisted(
+        "native", "full", sampler_is=True
+    )
+    self.assertIn("[env] P34 contract OK: DP8xTP8", completed.stdout)
+    self.assertIn("export CANON_P34_DISABLE_SAMPLER_IS=0", resolved)
+    self.assertIn("export CANON_P34_DISABLE_TIS=0", resolved)
+    self.assertEqual(
+        deepswe_contract.p58_sampler_recipe(values), "native-is"
+    )
+    deepswe_contract.validate_environment(values)
+
+  def test_native_rejects_partial_sampler_tuple(self):
+    values = self._resolved("native", "full", sampler_is=True)
+    with self.assertRaisesRegex(ValueError, "sampler recipe"):
+      deepswe_contract.validate_environment({
+          **values,
+          "CANON_P34_DISABLE_TIS": "1",
+      })
 
   def test_zero_hp_full_survives_real_env_and_python_contract(self):
     completed, resolved, values = self._persisted(

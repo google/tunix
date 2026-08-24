@@ -18,7 +18,91 @@ P58 does not modify `main`. Rendering and local validation do not authorize a
 Kubernetes apply. An operator must separately approve image publication and
 each launch.
 
-Current execution decision: run only the native full 1,000-update campaign.
+## 2026-08-24 local P58.9 execution override
+
+The current unpublished refinement lives at
+`/home/yuxuan/code_rl_repro/worktrees/p58_is_zero_refine_0824` on local branch
+`local/p58-is-zero-refine-0824`, originally based on operator tip
+`614156c1ab067192ab65b2969543e23904f192be`. The user authorized commit/push on
+2026-08-24, but image publication and launch remain separately gated. Before
+use, replay over the latest operator tip and replace `<published-40-char-sha>`
+below with the exact fetched/read-back operator SHA; never use the mutable
+branch name as provenance.
+
+The renderer admits exactly three recipe shapes:
+
+```bash
+# Untreated Native numerical program; rollout logps are the old policy.
+python3 canon-zero-tim/cluster/render_p58_deepswe_tim.py \
+  --base canon-zero-tim/cluster/jobset-64chip.yaml \
+  --output /tmp/p58-native-raw.yaml \
+  --source-commit <published-40-char-sha> \
+  --source-branch yuxzhang/canon-zero-tim \
+  --client-image <digest-pinned-image> --run-id <fresh-id> \
+  --stage full --arm native --worker-nodepool <pool-or-auto>
+
+# Identical Native program plus registered token TIS at threshold 2.0.
+python3 canon-zero-tim/cluster/render_p58_deepswe_tim.py \
+  --base canon-zero-tim/cluster/jobset-64chip.yaml \
+  --output /tmp/p58-native-is.yaml \
+  --source-commit <published-40-char-sha> \
+  --source-branch yuxzhang/canon-zero-tim \
+  --client-image <digest-pinned-image> --run-id <fresh-id> \
+  --stage full --arm native --sampler-is \
+  --worker-nodepool <pool-or-auto>
+
+# Optimized strict Zero. Sampler IS remains forbidden here.
+python3 canon-zero-tim/cluster/render_p58_deepswe_tim.py \
+  --base canon-zero-tim/cluster/jobset-64chip.yaml \
+  --output /tmp/p58-zero-hp.yaml \
+  --source-commit <published-40-char-sha> \
+  --source-branch yuxzhang/canon-zero-tim \
+  --client-image <digest-pinned-image> --run-id <fresh-id> \
+  --stage full --arm zero --high-performance \
+  --worker-nodepool <pool-or-auto>
+```
+
+Native raw resolves `CANON_P34_DISABLE_SAMPLER_IS/TIS=1/1`. Native IS
+resolves exactly `0/0`, passes `--sampler_is=token` and
+`--sampler_is_threshold=2.0`, and must emit exactly one
+`[P58.TIM_RECIPE] ... recipe=native-is ... old_logps=trainer
+tis_weights=present` marker. Native raw emits exactly one corresponding
+`native-raw ... old_logps=rollout tis_weights=absent` marker. Zero and Zero-HP
+remain `1/1` and reject `--sampler-is`. No recipe enables group filtering or
+host optimizer offload.
+
+Every rendered P58 JobSet must contain the exact Attempt-0 policy
+`maxRestarts: 0, restartStrategy: Recreate`. Do not increase retries until the
+run root, report paths, W&B identity, and postflight are all attempt-scoped and
+tested. The renderer intentionally omits unconsumed
+`PATHWAYS_HEARTBEAT_TIMEOUT_SEC`, `IFRT_PROXY_TIMEOUT_SECONDS`, and GRPC
+keepalive environment names.
+
+Before any publication or launch run:
+
+```bash
+bash canon-zero-tim/tests/p58_deepswe_native_zero/run_exact_image.sh \
+  sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a
+```
+
+This gate is construction evidence only. Native-IS and Zero-HP target jobs are
+separate experiments. Native-IS is now the selected replacement experiment,
+but it remains publication-blocked; Zero-HP is still deferred.
+
+Current execution decision: stop and archive the exact running Native/no-IS
+campaign after the operator observed a sharp training-reward drop and judged
+the run collapsed. The onset update is not established; do not assign the
+event to a fixed optimizer step. Do not resume its optimizer checkpoint
+and do not relaunch Native raw. Preserve the rendered YAML, source/image
+provenance, logs, full W&B export, trajectories, update receipts, checkpoint
+inventory, and metrics spanning the last stable reward region, reward-drop
+onset, and subsequent completed batches before deleting only that exact JobSet
+and its proven run-owned sandboxes. Then launch a fresh Native+IS 1,000-update
+campaign from the original frozen base, with a new run id, run root, W&B run,
+and checkpoint directory. Commit/push is authorized, but the replacement
+launch must still wait for the completed push, exact remote-SHA readback,
+digest-pinned image, and separate launch approval.
+
 P58.3 was explicitly waived, not passed, and the user superseded the separate
 three-update stop. The later p58f05 repair has a separate bounded one-host
 admission gate; it does not retroactively promote P58.3. The first local
@@ -206,9 +290,9 @@ next prompt batch is consumed without resampling.
 
 A durable full sandbox-start outage uses a separate circuit breaker: emit
 `[P58.SANDBOX_CAPACITY] BLOCKED` and raise `BLOCKED_SANDBOX_CAPACITY` before
-rescore/alignment/trainer or any later prompt consumption. Use fresh `p58f13`
-only after exact final remote readback and the `cpu-np`/Kueue capacity gate
-below.
+rescore/alignment/trainer or any later prompt consumption. For the selected
+replacement, use a fresh Native+IS run id such as `p58is01` only after exact
+final remote readback and the `cpu-np`/Kueue capacity gate below.
 
 The direct-entrypoint implementation commit is
 `82d82f72a7220d945737d95f6266b5b7e2cfe706`. Resolve the final runnable SHA by
@@ -358,7 +442,7 @@ previous probe artifact.
 ```bash
 CLEAN_JSONL='canon-zero-tim/clean_data/p46_q4_learnable/p46q4census02_qwen3_4b_instruct_2507_n16_learnable_tasks.jsonl'
 TASK_IMAGE="$(head -n 1 "$CLEAN_JSONL" | jq -er '.docker_image')"
-PROBE_RUN_ID='p58f13'
+PROBE_RUN_ID='p58is01'
 PROBE_POD="canon-p58-sandbox-probe-${PROBE_RUN_ID}"
 PROBE_YAML="/tmp/${PROBE_POD}.yaml"
 
@@ -373,7 +457,7 @@ kubectl apply --server-side --dry-run=server -f "$PROBE_YAML"
 Required render marker:
 
 ```text
-P58_SANDBOX_PROBE_RENDER_PASS pod=canon-p58-sandbox-probe-p58f13 ...
+P58_SANDBOX_PROBE_RENDER_PASS pod=canon-p58-sandbox-probe-p58is01 ...
 ```
 
 Applying the probe is a separate user/operator-approved Kubernetes mutation.
@@ -439,22 +523,26 @@ kubectl -n default wait --for=delete "pod/$PROBE_POD" --timeout=5m
 This deletion is also a Kubernetes mutation and requires operator authority.
 Report the exact deleted Pod name and whether deletion was confirmed.
 
-## 3N. Render and launch the native full campaign
+## 3N. Render and launch the fresh Native+IS full campaign
 
 Use the exact source SHA, image digest, CPU pool, Kueue worker sentinel, PVC,
 and a unique run id. Never hand-edit rendered YAML. This phase permits only
-`native`.
+the registered Native+IS recipe. It is invalid until the old Native/no-IS
+JobSet has been stopped and archived and the exact published operator SHA
+containing P58.9 has been fetched and read back. Load the original frozen base
+model; never resume the collapsed Native/no-IS checkpoint.
 
 ```bash
 CLIENT_IMAGE_DIGEST='registry.example/tunix@sha256:<64-hex-digest>'
 CPU_NODEPOOL='cpu-np'
 TPU_NODEPOOL='tpu-v5p-slice'
 MODEL_PVC='haoyugao-cpu-np-pvc'
-RUN_STEM='p58f13'
+RUN_STEM='p58is01'
 STAGE='full'
 
 ARM='native'
-OUTPUT="/tmp/p58-${ARM}-${STAGE}-${RUN_STEM}.yaml"
+RECIPE='native-is'
+OUTPUT="/tmp/p58-${RECIPE}-${STAGE}-${RUN_STEM}.yaml"
 python3 canon-zero-tim/cluster/render_p58_deepswe_tim.py \
   --base canon-zero-tim/cluster/jobset-64chip.yaml \
   --output "$OUTPUT" \
@@ -464,6 +552,7 @@ python3 canon-zero-tim/cluster/render_p58_deepswe_tim.py \
   --run-id "$RUN_STEM" \
   --stage "$STAGE" \
   --arm "$ARM" \
+  --sampler-is \
   --cpu-nodepool "$CPU_NODEPOOL" \
   --worker-nodepool "$TPU_NODEPOOL" \
   --model-pvc "$MODEL_PVC"
@@ -472,7 +561,11 @@ kubectl apply --server-side --dry-run=server -f "$OUTPUT"
 ```
 
 The renderer must emit
-`P58_DEEPSWE_TIM_RENDER_PASS arm=native stage=full`.
+`P58_DEEPSWE_TIM_RENDER_PASS arm=native stage=full recipe=native-is`.
+The JobSet name must contain `native-is`, its label must contain
+`canon.zero-tim/sampler-recipe=token-is`, and the resolved environment must
+contain the exact sampler/TIS disable tuple `0:0`. A `native-raw` marker,
+tuple `1:1`, or a partial tuple is a hard stop.
 
 `tpu-v5p-slice` is a Kueue-managed sentinel, not a concrete node-pool name.
 Before server-side dry-run, inspect the rendered worker and require all of the
@@ -528,11 +621,16 @@ of the native treatment definition.
 The explicit launch boundary, only after operator approval, is:
 
 ```bash
-kubectl apply -f /tmp/p58-native-full-${RUN_STEM}.yaml
+kubectl apply -f /tmp/p58-native-is-full-${RUN_STEM}.yaml
 ```
 
-Do not produce or apply a zero YAML in this phase. Preserve the exact native
-YAML and digest with the returned run.
+Do not produce or apply a Native raw or Zero YAML in this phase. Preserve the
+exact Native+IS YAML and digest with the returned run. Before admitting the
+first optimizer update, require exactly one:
+
+```text
+[P58.TIM_RECIPE] PASS recipe=native-is sampler_is=token old_logps=trainer tis_weights=present threshold=2.0 group_filter=none
+```
 
 ## 4. Evidence and full-campaign interpretation
 
@@ -701,8 +799,8 @@ Stop rather than retrying the same manifest if any of these occurs:
 - any Native boundary or derived ratio is nonfinite/invalid, or any Zero
   boundary differs;
 - NaN/Inf, invalid shape, replica drift, optimizer/weight attestation failure;
-- host optimizer offload, prefix cache, sampler-IS, group filtering, or flat
-  resampling appears;
+- host optimizer offload, prefix cache, unregistered sampler-IS, a mixed
+  sampler/TIS tuple, group filtering, or flat resampling appears;
 - fewer/more than 128 raw trajectory records in any batch;
 - journal continuity or digest failure;
 - `BLOCKED_SANDBOX_CAPACITY` after a durable full sandbox-start-timeout batch;

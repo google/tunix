@@ -15,11 +15,23 @@ CANON = PKG / "cluster/profiles/_canonical_engine.env"
 HP_PROFILE = PKG / "cluster/profiles/qwen3-4b-dp8-tp8-deepswe-v1-hp.env"
 
 
-def _source(arm: str) -> str:
+def _source(
+    arm: str,
+    *,
+    sampler_is: bool = False,
+    sampler_tuple: tuple[int, int] | None = None,
+) -> str:
+  disable_sampler, disable_tis = (
+      sampler_tuple
+      if sampler_tuple is not None
+      else ((0, 0) if sampler_is else (1, 1))
+  )
   script = f"""
 set -euo pipefail
 source {CANON}
 export CANON_P58_TIM_ARM={arm}
+export CANON_P34_DISABLE_SAMPLER_IS={disable_sampler}
+export CANON_P34_DISABLE_TIS={disable_tis}
 export CANON_P34_RUN_STAGE=three-update
 export CANON_P58_EXPECTED_UPDATES=3
 export CANON_P32_TRAIN_ADMITTED=1
@@ -40,6 +52,8 @@ printf 'reduction=%s l3=%s p27=%s flwarn=%s\\n' \
 if [[ -v CANON_FIXED_AR ]]; then printf 'fixed=present\\n'; else printf 'fixed=absent\\n'; fi
 if [[ -v CANON_LOGPROB_M ]]; then printf 'logm=present\\n'; else printf 'logm=absent\\n'; fi
 printf 'xla=%s\\n' "$XLA_FLAGS"
+printf 'sampler_disable=%s tis_disable=%s\\n' \
+  "$CANON_P34_DISABLE_SAMPLER_IS" "$CANON_P34_DISABLE_TIS"
 """
   return subprocess.run(
       ["bash", "-c", script],
@@ -62,6 +76,18 @@ class P58ProfileTest(unittest.TestCase):
     self.assertIn("logm=absent", output)
     self.assertIn("xla=--xla_cpu_max_isa=AVX2", output)
     self.assertIn("reduction=0 l3=0 p27=0 flwarn=0", output)
+    self.assertIn("sampler_disable=1 tis_disable=1", output)
+
+  def test_native_is_preserves_stock_runtime_and_selects_exact_zero_tuple(self):
+    output = _source("native", sampler_is=True)
+    self.assertIn(
+        "arm=native dp=8 gen=16 local=16 global=128 warn=1 "
+        "engine=0 vjp=0 prompt=0 stock_observer=1 p32=1 launch=1",
+        output,
+    )
+    self.assertIn("fixed=absent", output)
+    self.assertIn("logm=absent", output)
+    self.assertIn("sampler_disable=0 tis_disable=0", output)
 
   def test_zero_retains_complete_numerical_bundle(self):
     output = _source("zero")
@@ -74,6 +100,15 @@ class P58ProfileTest(unittest.TestCase):
     self.assertIn("logm=present", output)
     self.assertIn("--xla_allow_excess_precision=false", output)
     self.assertIn("reduction=1 l3=0 p27=0 flwarn=0", output)
+    self.assertIn("sampler_disable=1 tis_disable=1", output)
+
+  def test_zero_rejects_native_is_tuple(self):
+    with self.assertRaises(subprocess.CalledProcessError):
+      _source("zero", sampler_is=True)
+
+  def test_native_rejects_partial_sampler_tuple(self):
+    with self.assertRaises(subprocess.CalledProcessError):
+      _source("native", sampler_tuple=(0, 1))
 
   def test_zero_hp_profile_resolves_exact_bundle(self):
     script = f"""

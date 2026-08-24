@@ -1328,11 +1328,22 @@ if [ "${CANON_P34_DEEPSWE:-0}" = "1" ]; then
     fail=1
   }
   [ "${CANON_P34_STRICT_CLI:-}" = "1" ] && \
-  [ "${CANON_P34_DISABLE_SAMPLER_IS:-}" = "1" ] && \
-  [ "${CANON_P34_DISABLE_TIS:-}" = "1" ] && \
   [ "${CANON_PRE_ALIGN_GATE:-}" = "1" ] || {
-    echo "[env] P34 strict CLI, neutral importance paths and pre-backward gate are mandatory" >&2; fail=1;
+    echo "[env] P34 strict CLI and pre-backward gate are mandatory" >&2; fail=1;
   }
+  if [ "$P58_NATIVE" = "1" ]; then
+    case "${CANON_P34_DISABLE_SAMPLER_IS:-}:${CANON_P34_DISABLE_TIS:-}" in
+      1:1|0:0) ;;
+      *)
+        echo "[env] P58 native sampler recipe must be exactly raw 1/1 or token-IS 0/0" >&2
+        fail=1
+        ;;
+    esac
+  elif [ "${CANON_P34_DISABLE_SAMPLER_IS:-}" != "1" ] || \
+       [ "${CANON_P34_DISABLE_TIS:-}" != "1" ]; then
+    echo "[env] P34 non-native-P58 workloads require neutral importance paths" >&2
+    fail=1
+  fi
   [ "${CANON_P34_DATASET_NAME:-}" = "R2E-Gym/R2E-Gym-Subset" ] && \
   [ "${CANON_P34_DATASET_REVISION:-}" = "2e8108ff942f24fcb5686badfaf7f9a8808566d5" ] && \
   [ "${CANON_P34_DATASET_SPLIT:-}" = "train" ] && \

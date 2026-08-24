@@ -265,6 +265,22 @@ parser.add_argument(
         "Default is False to recompute old logps on the actor side. "
     ),
 )
+parser.add_argument(
+    "--sampler_is",
+    type=str,
+    default="none",
+    choices=["none", "token"],
+    help=(
+        "Sampler-trainer truncated importance-sampling correction. "
+        "Default is none; signed workloads must opt in explicitly."
+    ),
+)
+parser.add_argument(
+    "--sampler_is_threshold",
+    type=float,
+    default=2.0,
+    help="Upper clamp for token sampler-IS weights.",
+)
 
 
 # Other
@@ -664,7 +680,11 @@ LOSS_DENOMINATOR_WEIGHTED_ACCUMULATION = (
     args.loss_denominator_weighted_accumulation
 )
 ADVANTAGE_ESTIMATOR = args.advantage_estimator
-USE_ROLLOUT_LOGPS = args.use_rollout_logps
+SAMPLER_IS = None if args.sampler_is == "none" else args.sampler_is
+SAMPLER_IS_THRESHOLD = args.sampler_is_threshold
+if not np.isfinite(SAMPLER_IS_THRESHOLD) or SAMPLER_IS_THRESHOLD <= 0:
+  raise ValueError("sampler_is_threshold must be finite and positive")
+USE_ROLLOUT_LOGPS = args.use_rollout_logps or SAMPLER_IS is not None
 
 P34_DEEPSWE = os.environ.get("CANON_P34_DEEPSWE", "") == "1"
 if P34_DEEPSWE:
@@ -673,6 +693,11 @@ if P34_DEEPSWE:
   p34_stage = os.environ.get("CANON_P34_RUN_STAGE", "")
   p34_full = p34.contract_name == "p34-production" and p34_stage == "full"
   p58_tim = p34.contract_name == "p58-qwen4b-tim-128"
+  p58_sampler_recipe = (
+      deepswe_contract.p58_sampler_recipe(os.environ)
+      if p58_tim
+      else "native-raw"
+  )
   p58_filter_statuses = {
       agent_types.TrajectoryStatus.MAX_STEPS_REACHED,
       agent_types.TrajectoryStatus.MAX_CONTEXT_LIMIT_REACHED,
@@ -752,6 +777,9 @@ if P34_DEEPSWE:
       "num_epochs": NUM_EPOCHS == p34.num_epochs,
       "remat": ENABLE_REMAT is True and REMAT_POLICY == p34.remat_policy,
       "use_rollout_logps": USE_ROLLOUT_LOGPS is True,
+      "sampler_is": SAMPLER_IS
+      == ("token" if p58_sampler_recipe == "native-is" else None),
+      "sampler_is_threshold": SAMPLER_IS_THRESHOLD == 2.0,
       "top_k": TOP_K in (None, 0, -1),
       "top_p": TOP_P in (None, 1.0),
       "optimizer_device_resident": OPTIMIZER_OFFLOAD is False,
@@ -1646,6 +1674,8 @@ config_kwargs = {
     "loss_scale_factor": LOSS_SCALE_FACTOR,
     "advantage_estimator": ADVANTAGE_ESTIMATOR,
     "use_rollout_logps": USE_ROLLOUT_LOGPS,
+    "sampler_is": SAMPLER_IS,
+    "sampler_is_threshold": SAMPLER_IS_THRESHOLD,
 }
 
 grpo_config = agentic_grpo_learner.GRPOConfig(**config_kwargs)

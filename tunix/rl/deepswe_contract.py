@@ -743,6 +743,27 @@ def split_4x4x8_role_devices(
   return rollout, trainer, report
 
 
+def p58_sampler_recipe(values: Mapping[str, str]) -> str:
+  """Returns the signed P58 sampler recipe or rejects a mixed tuple."""
+  if values.get("CANON_P58_DEEPSWE_TIM") != "1":
+    raise ValueError("P58 sampler recipe requested outside P58")
+  arm = values.get("CANON_P58_TIM_ARM", "")
+  sampler_tuple = (
+      values.get("CANON_P34_DISABLE_SAMPLER_IS"),
+      values.get("CANON_P34_DISABLE_TIS"),
+  )
+  if arm == "native" and sampler_tuple == ("1", "1"):
+    return "native-raw"
+  if arm == "native" and sampler_tuple == ("0", "0"):
+    return "native-is"
+  if arm == "zero" and sampler_tuple == ("1", "1"):
+    return "zero"
+  raise ValueError(
+      "P58 sampler recipe must be native raw 1/1, native IS 0/0, or "
+      "zero 1/1"
+  )
+
+
 def validate_environment(values: Mapping[str, str]) -> None:
   """Validates the exact P34 profile without accepting implicit defaults."""
   workload = active_workload(values)
@@ -760,6 +781,7 @@ def validate_environment(values: Mapping[str, str]) -> None:
   p58_arm = values.get("CANON_P58_TIM_ARM", "")
   if p58_tim and p58_arm not in ("native", "zero"):
     raise ValueError("CANON_P58_TIM_ARM must be native or zero")
+  p58_recipe = p58_sampler_recipe(values) if p58_tim else ""
   p58_hp = values.get("CANON_V1_HP_FULL", "0") == "1"
   if p58_hp and (
       not p58_tim
@@ -802,8 +824,12 @@ def validate_environment(values: Mapping[str, str]) -> None:
       "CANON_P34_MAX_NUM_SEQS": str(workload.max_num_seqs_per_dp),
       "CANON_P34_MAX_BATCHED_TOKENS": "256",
       "CANON_P34_STRICT_CLI": "1",
-      "CANON_P34_DISABLE_SAMPLER_IS": "1",
-      "CANON_P34_DISABLE_TIS": "1",
+      "CANON_P34_DISABLE_SAMPLER_IS": (
+          "0" if p58_recipe == "native-is" else "1"
+      ),
+      "CANON_P34_DISABLE_TIS": (
+          "0" if p58_recipe == "native-is" else "1"
+      ),
       "CANON_PRE_ALIGN_GATE": "1",
       "CANON_P34_TRAJECTORY_CAPTURE": "1" if production_capture else "0",
       "CANON_P34_DATASET_NAME": "R2E-Gym/R2E-Gym-Subset",

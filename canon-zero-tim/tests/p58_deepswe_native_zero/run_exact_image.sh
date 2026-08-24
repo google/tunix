@@ -35,6 +35,8 @@ $DOCKER run --rm \
     PYTHONPATH=/workspace python3 \
       canon-zero-tim/tests/p58_deepswe_native_zero/test_profile.py
     PYTHONPATH=/workspace python3 \
+      canon-zero-tim/tests/p58_deepswe_native_zero/test_sampler_recipe.py
+    PYTHONPATH=/workspace python3 \
       canon-zero-tim/tests/p58_deepswe_native_zero/test_alignment_policy.py
     PYTHONPATH=/workspace python3 \
       canon-zero-tim/tests/p58_deepswe_native_zero/test_environment_contract.py

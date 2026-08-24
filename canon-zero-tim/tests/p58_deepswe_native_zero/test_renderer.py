@@ -128,12 +128,18 @@ class P58RendererTest(unittest.TestCase):
         "alignment_warning_only": "1",
         "proxy_xla": [],
         "high_performance": "0",
+        "disable_sampler_is": "1",
+        "disable_tis": "1",
+        "sampler_is": (),
     })
     self.assertEqual(renderer.treatment_signature(zero), {
         "arm": "zero",
         "alignment_warning_only": "0",
         "proxy_xla": [renderer.p34.PROXY_XLA_FLAG],
         "high_performance": "0",
+        "disable_sampler_is": "1",
+        "disable_tis": "1",
+        "sampler_is": (),
     })
 
   def test_zero_hp_full_is_additive_and_target_only(self):
@@ -156,7 +162,7 @@ class P58RendererTest(unittest.TestCase):
           renderer.p34._env(self._render(arm))["CANON_RUN_CMD"]
       )
       self.assertIn("--use_rollout_logps", args)
-      self.assertNotIn("--sampler_is", args)
+      self.assertFalse(any(item.startswith("--sampler_is=") for item in args))
       self.assertFalse(
           any(item.startswith("--group_clip_filter_threshold") for item in args)
       )
@@ -164,6 +170,97 @@ class P58RendererTest(unittest.TestCase):
       index = args.index("--filter_statuses")
       self.assertEqual(
           tuple(args[index + 1:index + 7]), renderer._FILTER_STATUSES
+      )
+
+  def test_native_is_changes_only_the_registered_sampler_recipe(self):
+    raw = self._render("native", "full")
+    corrected = self._render("native", "full", sampler_is=True)
+    raw_env = renderer.p34._env(raw)
+    corrected_env = renderer.p34._env(corrected)
+    raw_args = shlex.split(raw_env["CANON_RUN_CMD"])
+    corrected_args = shlex.split(corrected_env["CANON_RUN_CMD"])
+
+    self.assertNotIn("--sampler_is=token", raw_args)
+    self.assertNotIn("--sampler_is_threshold=2.0", raw_args)
+    self.assertIn("--sampler_is=token", corrected_args)
+    self.assertIn("--sampler_is_threshold=2.0", corrected_args)
+    self.assertEqual(raw_env["CANON_P34_DISABLE_SAMPLER_IS"], "1")
+    self.assertEqual(raw_env["CANON_P34_DISABLE_TIS"], "1")
+    self.assertEqual(corrected_env["CANON_P34_DISABLE_SAMPLER_IS"], "0")
+    self.assertEqual(corrected_env["CANON_P34_DISABLE_TIS"], "0")
+    self.assertNotIn("canon.zero-tim/sampler-recipe", raw["metadata"]["labels"])
+    self.assertEqual(
+        corrected["metadata"]["labels"]["canon.zero-tim/sampler-recipe"],
+        "token-is",
+    )
+    self.assertIn("ds4b-native-is-full", corrected["metadata"]["name"])
+    for forbidden in ("--group_clip_filter_threshold", "--optimizer-offload"):
+      self.assertFalse(
+          any(
+              item == forbidden or item.startswith(forbidden + "=")
+              for item in corrected_args
+          )
+      )
+
+    ignored = {
+        "CANON_RUN_CMD",
+        "CANON_RUN_LOG",
+        "CANON_STATE",
+        "CANON_P34_WEIGHT_REPORT",
+        "CANON_PRE_ALIGN_REPORT",
+        "CANON_ALIGN_REPORT",
+        "CANON_UPDATE_REPORT",
+        "CANON_P58_DEBUG_DIR",
+        "CANON_WANDB_RUN_NAME",
+        "CANON_WANDB_GROUP",
+        "CANON_P34_DISABLE_SAMPLER_IS",
+        "CANON_P34_DISABLE_TIS",
+    }
+    self.assertEqual(
+        {key: value for key, value in raw_env.items() if key not in ignored},
+        {
+            key: value
+            for key, value in corrected_env.items()
+            if key not in ignored
+        },
+    )
+    self.assertEqual(
+        renderer.recipe_signature(raw), renderer.recipe_signature(corrected)
+    )
+
+  def test_sampler_is_is_rejected_outside_native(self):
+    with self.assertRaisesRegex(ValueError, "only for the native arm"):
+      self._render("zero", sampler_is=True)
+    with self.assertRaisesRegex(ValueError, "only for the native arm"):
+      self._render("zero", "full", sampler_is=True, high_performance=True)
+
+  def test_attempt_zero_and_transport_environment_are_exact(self):
+    forbidden_env = {
+        "PATHWAYS_HEARTBEAT_TIMEOUT_SEC",
+        "IFRT_PROXY_TIMEOUT_SECONDS",
+        "GRPC_KEEPALIVE_TIME_MS",
+        "GRPC_KEEPALIVE_TIMEOUT_MS",
+        "GRPC_ARG_KEEPALIVE_PERMIT_WITHOUT_CALLS",
+    }
+    for arm in ("native", "zero"):
+      document = self._render(arm, "full")
+      self.assertEqual(
+          document["spec"]["failurePolicy"],
+          {"maxRestarts": 0, "restartStrategy": "Recreate"},
+      )
+      self.assertTrue(forbidden_env.isdisjoint(renderer.p34._env(document)))
+
+  def test_restart_policy_drift_is_rejected(self):
+    document = self._render("native", "full")
+    document["spec"]["failurePolicy"]["maxRestarts"] = 3
+    with self.assertRaisesRegex(ValueError, "Attempt-0"):
+      renderer.validate(
+          document,
+          source_commit="1" * 40,
+          client_image="registry.example/tunix@sha256:" + "2" * 64,
+          stage="full",
+          arm="native",
+          worker_nodepool="tpu-pool",
       )
 
   def test_kueue_managed_worker_pool_does_not_become_literal_affinity(self):

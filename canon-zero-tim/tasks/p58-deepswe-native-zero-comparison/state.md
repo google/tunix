@@ -1,5 +1,55 @@
 # State
 
+## Current P58.9 local checkpoint (2026-08-24; unpublished)
+
+- Status: Native-IS target selected; commit/push was explicitly authorized on
+  2026-08-24 and publication reconciliation is in progress. Worktree
+  `/home/yuxuan/code_rl_repro/worktrees/p58_is_zero_refine_0824`, branch
+  `local/p58-is-zero-refine-0824`, is based exactly on latest fetched operator
+  tip `614156c1ab067192ab65b2969543e23904f192be`.
+- Scope: add a third executable recipe, Native+token-IS, without changing the
+  existing Native-raw or Zero-HP numerical programs. Native+IS is selected
+  only by renderer `--arm native --sampler-is`, resolves the existing disable
+  tuple to `0:0`, uses threshold `2.0`, and requires trainer-old logps plus
+  materialized TIS weights. Native-raw and every Zero recipe remain `1:1`.
+  Partial tuples and IS on Zero fail closed. Group filtering remains absent.
+- Retry correction: P58 is restored to exact Attempt-0
+  (`maxRestarts: 0`, `restartStrategy: Recreate`). The prior JobSet retry used
+  the same persistent run root without attempt isolation. Five renderer-only
+  keepalive environment names had no exact-image code consumer and were
+  removed rather than represented as recovery controls.
+- Shared recipe remains Qwen3-4B-Instruct-2507, clean 1,012 tasks, B8 x G16,
+  16K/50 turns, 128-chip synchronous disaggregated DP8 x TP8 per role,
+  one-hour batch deadline, TPU-resident optimizer, prefix cache off, and full
+  1,000 committed updates.
+- Latest target fact: the operator reports a sharp training-reward drop in the
+  live Native/no-IS run and judges the run collapsed. The onset update is not
+  established and must not be recorded as a fixed optimizer step. Its
+  exact run id, log, W&B series, and checkpoint receipts are not yet present
+  locally, so the root cause is not independently classified here. The
+  execution decision is final: preserve that run as immutable Native-raw
+  failure evidence, stop its exact JobSet, do not resume its optimizer
+  checkpoint, and do not launch Native raw again.
+- Evidence: renderer 20/20, profile 7/7, sampler recipe 7/7, stock observer
+  6/6, Python/Bash syntax, and diff hygiene pass. Bare-host environment import
+  is `INCONCLUSIVE` because `metrax` is absent. The complete pinned-image gate
+  passes with `P58_EXACT_IMAGE_CPU_PASS ... paired_renderer=1 ...
+  zero_hp_full=1 ... p59_real_shim=4 ... regressions=1`.
+- Claim ceiling: implementation plus pinned-image construction only. No direct
+  TPU run, Pathways target, optimizer commit, full training, or performance
+  result exists.
+- Next action: the remote executor identifies and archives the exact live
+  Native-raw JobSet, then deletes only that JobSet and verifies cleanup. In
+  parallel, replay and validate the Native+IS delta over the latest operator
+  tip, push only to `yuxzhang/canon-zero-tim`, and read back the exact SHA.
+  After exact remote readback and separate launch approval, render and launch a fresh `--arm native
+  --sampler-is` full run from the original frozen base checkpoint using a new
+  run id/root/W&B/checkpoint. Never resume the collapsed Native-raw state.
+- Blocker: Native+IS is not yet verified on the operator branch, so the
+  replacement launch cannot truthfully begin from a pull until publication
+  and exact readback complete.
+- Phase: `phases/p58-9-native-is-attempt-zero-refine.md`.
+
 ## Current P58.6/P58.7/P58.8 checkpoint (supersedes the legacy P58.5N snapshot below)
 
 - Status: active; P58.6/P58.7 are implemented and the approved four functional CLs plus one audit-only release CL on latest tip `ccbcf572` pass the post-barrier host and pinned-image admission ladder. Publication is authorized; exact remote readback and hardware targets remain open.

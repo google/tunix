@@ -168,6 +168,73 @@ def _p57_tim_is_enabled(env: Mapping[str, str]) -> bool:
   )
 
 
+def _p58_native_sampler_recipe(env: Mapping[str, str]) -> str | None:
+  """Returns the signed P58 native sampler recipe, if active."""
+  if not (
+      env.get("CANON_P58_DEEPSWE_TIM") == "1"
+      and env.get("CANON_P58_TIM_ADMITTED") == "1"
+      and env.get("CANON_P58_TIM_ARM") == "native"
+      and env.get("CANON_PROFILE_FILE")
+      == "cluster/profiles/qwen3-4b-dp8-tp8-deepswe-tim.env"
+  ):
+    return None
+  sampler_tuple = (
+      env.get("CANON_P34_DISABLE_SAMPLER_IS"),
+      env.get("CANON_P34_DISABLE_TIS"),
+  )
+  if sampler_tuple == ("1", "1"):
+    return "native-raw"
+  if sampler_tuple == ("0", "0"):
+    return "native-is"
+  raise alignment.AlignmentGateError(
+      "P58 native sampler recipe requires exact 1/1 raw or 0/0 token-IS"
+  )
+
+
+def _validate_p58_native_sampler_recipe(
+    *,
+    recipe: str,
+    sampler_is: str | None,
+    sampler_is_threshold: float,
+    use_rollout_logps: bool,
+    rollout_logps_present: bool,
+    trainer_logps_present: bool,
+    old_logps_are_rollout: bool,
+    old_logps_are_trainer: bool,
+    sampler_is_weights_present: bool,
+) -> None:
+  """Fail closed unless an effective P58 batch executed its signed recipe."""
+  failures = []
+  if not use_rollout_logps:
+    failures.append("use_rollout_logps=0")
+  if not rollout_logps_present:
+    failures.append("rollout_logps=absent")
+  if recipe == "native-raw":
+    if sampler_is is not None:
+      failures.append(f"sampler_is={sampler_is!r}")
+    if not old_logps_are_rollout:
+      failures.append("old_logps!=rollout")
+    if sampler_is_weights_present:
+      failures.append("tis_weights=present")
+  elif recipe == "native-is":
+    if sampler_is != "token":
+      failures.append(f"sampler_is={sampler_is!r}")
+    if sampler_is_threshold != 2.0:
+      failures.append(f"sampler_is_threshold={sampler_is_threshold!r}")
+    if not trainer_logps_present:
+      failures.append("trainer_logps=absent")
+    if not old_logps_are_trainer:
+      failures.append("old_logps!=trainer")
+    if not sampler_is_weights_present:
+      failures.append("tis_weights=absent")
+  else:
+    failures.append(f"recipe={recipe!r}")
+  if failures:
+    raise alignment.AlignmentGateError(
+        "P58 native sampler recipe failed: " + ", ".join(failures)
+    )
+
+
 def _validate_p57_tim_purity(
     *,
     sampler_is: str | None,
@@ -446,6 +513,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
 
     self._trajectory_logger = None
     self._p57_tim_purity_announced = False
+    self._p58_sampler_recipe_announced = False
     metrics_logger_options = (
         self.rl_cluster.cluster_config.training_config.metrics_logging_options
     )
@@ -1360,6 +1428,41 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
             flush=True,
         )
         self._p57_tim_purity_announced = True
+    p58_sampler_recipe = _p58_native_sampler_recipe(os.environ)
+    if p58_sampler_recipe is not None and bool(
+        np.asarray(completion_mask).astype(bool).any()
+    ):
+      _validate_p58_native_sampler_recipe(
+          recipe=p58_sampler_recipe,
+          sampler_is=self.algo_config.sampler_is,
+          sampler_is_threshold=self.algo_config.sampler_is_threshold,
+          use_rollout_logps=self.algo_config.use_rollout_logps,
+          rollout_logps_present=rollout_per_token_logps is not None,
+          trainer_logps_present=trainer_per_token_logps is not None,
+          old_logps_are_rollout=(
+              old_per_token_logps is rollout_per_token_logps
+          ),
+          old_logps_are_trainer=(
+              old_per_token_logps is trainer_per_token_logps
+          ),
+          sampler_is_weights_present=sampler_is_weights is not None,
+      )
+      if not self._p58_sampler_recipe_announced:
+        if p58_sampler_recipe == "native-is":
+          print(
+              "[P58.TIM_RECIPE] PASS recipe=native-is sampler_is=token "
+              "old_logps=trainer tis_weights=present threshold=2.0 "
+              "group_filter=none",
+              flush=True,
+          )
+        else:
+          print(
+              "[P58.TIM_RECIPE] PASS recipe=native-raw sampler_is=none "
+              "old_logps=rollout tis_weights=absent threshold=inactive "
+              "group_filter=none",
+              flush=True,
+          )
+        self._p58_sampler_recipe_announced = True
     if (
         deepswe_debug.enabled()
         and deepswe_debug.rollout_only()

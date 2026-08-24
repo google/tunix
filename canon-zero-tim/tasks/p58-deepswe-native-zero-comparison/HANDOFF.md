@@ -1,5 +1,149 @@
 # P58 DeepSWE native-first training handoff
 
+## 2026-08-24 execution decision — stop Native raw, launch fresh Native+IS
+
+This is the highest-priority execution instruction and supersedes every
+native-raw launch/resume instruction later in this historical handoff. The
+operator reports that the currently running Native/no-IS campaign's training
+reward has dropped sharply and considers the run collapsed. The onset update
+is not established; do not assign the event to any fixed optimizer step. The
+exact run id, W&B series, raw log, and checkpoint receipts have not yet been
+ingested into this worktree, so the reward collapse
+is operator-reported evidence rather than a locally verified diagnosis. The
+execution decision does not wait for a root-cause classification:
+
+1. stop the exact currently running Native/no-IS JobSet;
+2. preserve its full evidence, including the reward-drop onset, as an
+   immutable failed/collapsed Native-raw attempt;
+3. never resume that optimizer checkpoint and never relaunch Native raw;
+4. launch a fresh Native+IS full run only from the original frozen base model,
+   with a new run id, run root, W&B run, and checkpoint directory.
+
+Before stopping, resolve the exact JobSet name rather than guessing. Require
+all of the following from its rendered YAML/resolved environment:
+
+```text
+canon.zero-tim/arm: native
+CANON_P58_TIM_ARM=native
+CANON_P34_DISABLE_SAMPLER_IS=1
+CANON_P34_DISABLE_TIS=1
+no --sampler_is=token
+no canon.zero-tim/sampler-recipe=token-is
+```
+
+Preserve the exact rendered YAML and digest, source SHA, image digest, JobSet
+and Workload YAML, head/worker logs, run log, W&B URL/export, trajectory
+journals and their digests, update receipts, optimizer/checkpoint inventory,
+and metrics covering the last stable reward region, the reward-drop onset, and
+all subsequent completed batches. At minimum retain solve ratio,
+all-zero/all-one/mixed/effective group counts, nonzero-advantage ratio,
+completion lengths, sampler-trainer logp/prob diffs, policy ratio/clip metrics,
+gradient/update norms, and A/B/T-old/T-current observations. Do not truncate
+the evidence export at an assumed optimizer step.
+
+Only after the identity and evidence above are preserved, the remote executor
+is authorized by this decision to delete that exact Native-raw JobSet and wait
+for its deletion:
+
+```bash
+JOBSET='<exact-running-native-raw-jobset-name>'
+kubectl -n default get jobset "$JOBSET" -o yaml
+kubectl -n default get pods \
+  -l "jobset.sigs.k8s.io/jobset-name=$JOBSET" -o wide
+kubectl -n default delete jobset "$JOBSET" --wait=true --timeout=10m
+kubectl -n default wait --for=delete "jobset/$JOBSET" --timeout=10m
+```
+
+Do not substitute a wildcard, namespace-wide delete, or a guessed name. After
+the JobSet is gone, confirm the Pathways head/workers are gone. Enumerate any
+remaining R2E sandboxes and delete only Pods proven by run provenance to
+belong to this exact attempt; preserve cleanup receipts. Never delete unrelated
+R2E workloads.
+
+The replacement experiment is the registered Native+IS recipe:
+
+```text
+model/data/geometry: unchanged Qwen3-4B-Instruct-2507, 1,012 tasks,
+                     B8 x G16, 16K, 50 turns, 128 chips
+renderer:            --stage full --arm native --sampler-is
+sampler tuple:        CANON_P34_DISABLE_SAMPLER_IS/TIS=0/0
+runtime:              sampler_is=token, threshold=2.0
+old policy logps:     trainer logps
+correction:           token TIS weights present
+group filter:         absent
+optimizer:            TPU resident; no host offload
+restart policy:       exact Attempt-0
+horizon:              1,000 committed updates
+```
+
+Use a fresh run id such as `p58is01`; do not reuse the Native-raw run root,
+W&B run, or checkpoint. The renderer must emit
+`P58_DEEPSWE_TIM_RENDER_PASS arm=native stage=full recipe=native-is`, the
+JobSet name must contain `native-is`, and its label must contain
+`canon.zero-tim/sampler-recipe=token-is`. On the first effective batch require
+exactly one marker:
+
+```text
+[P58.TIM_RECIPE] PASS recipe=native-is sampler_is=token old_logps=trainer tis_weights=present threshold=2.0 group_filter=none
+```
+
+A `native-raw` marker, a `1:1` or partial sampler tuple, missing trainer logps,
+missing TIS weights, group filtering, host optimizer offload, prefix cache, or
+resume from the collapsed Native checkpoint is a hard stop.
+
+Publication status: on 2026-08-24 the user explicitly authorized commit and
+push of this Native+IS refinement. The implementation is being replayed over
+the latest operator tip and is not launchable until that push completes, the
+exact remote SHA is read back, and the rendered YAML pins that SHA. Stopping
+and archiving the current Native-raw job may proceed now. Do not silently
+launch an older branch and call it Native+IS.
+
+## 2026-08-24 P58.9 publication override — launch remains separately gated
+
+This is the current checkpoint. It supersedes older execution wording below
+without deleting historical evidence. Work only from
+`/home/yuxuan/code_rl_repro/worktrees/p58_is_zero_refine_0824`, branch
+`local/p58-is-zero-refine-0824`, originally based on operator tip
+`614156c1ab067192ab65b2969543e23904f192be`. Commit/push is now explicitly
+authorized, but the delta must first be replayed over the latest operator tip
+and validated. Do not use the older dirty P58 worktree, do not touch `main`,
+and do not apply a JobSet until exact remote readback and separate launch
+approval.
+
+P58 now maintains three closed production recipes on the same Qwen3-4B,
+1,012-task, B8 x G16, 16K, 50-turn, 128-chip DP8 x TP8-per-role setup:
+
+| Recipe | Renderer selector | Sampler tuple | Required first-effective-batch evidence |
+|---|---|---|---|
+| Native raw | `--arm native` | disable sampler/TIS `1:1` | one `recipe=native-raw`, old logps=rollout, TIS absent |
+| Native IS | `--arm native --sampler-is` | `0:0` | one `recipe=native-is`, token IS threshold 2.0, old logps=trainer, TIS present |
+| Zero HP | `--arm zero --high-performance` | `1:1` | strict Zero/P59/fixed-head receipts; no Native recipe marker |
+
+All mixed or partial tuples fail closed. Native-IS does not enable group clip
+filtering, flat-group resampling, host optimizer offload, prefix cache, or a
+Zero numerical switch. The original Native-vs-Zero estimand remains distinct;
+Native-IS is a mitigation arm.
+
+The renderer also restores exact Attempt-0:
+`failurePolicy={maxRestarts: 0, restartStrategy: Recreate}`. The prior retry
+setting reused a persistent run root without attempt isolation. Five
+Pathways/IFRT/GRPC keepalive environment names were removed because pinned
+image inspection found no code consumer; they were configuration-shaped text,
+not a proven recovery mechanism.
+
+Focused host gates pass: renderer 20/20, profile 7/7, sampler recipe 7/7,
+stock observer 6/6, Python/Bash syntax, and diff hygiene. Bare-host
+environment-contract import is `INCONCLUSIVE` because this shell lacks
+`metrax`. The complete P58 exact-image gate passes in
+`sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`
+with terminal marker `P58_EXACT_IMAGE_CPU_PASS ... paired_renderer=1 ...
+zero_hp_full=1 ... p59_real_shim=4 ... regressions=1`. No target or one-host
+TPU PASS exists for this delta.
+
+See `phases/p58-9-native-is-attempt-zero-refine.md` and the top of
+`cluster/P58_DEEPSWE_TIM_RUNBOOK.md`. Commit/push is authorized; image
+publication, Kubernetes apply, and TPU execution remain separately user-gated.
+
 ## 2026-08-23 P58.6/P58.7/P58.8 override
 
 This checkpoint supersedes the later native-only execution wording in this
@@ -114,7 +258,9 @@ the p58f12 repair described below was committed as
 non-overlapping P57 evidence commit
 `e7958a27851931ab9bcff232088efd95bbc12021`; this publication-evidence
 checkpoint follows it. Fetch the final `yuxzhang/canon-zero-tim` tip and prove
-the remote readback matches before use. The next run id is fresh `p58f13`.
+the remote readback matches before use. The historical next id was `p58f13`;
+the 2026-08-24 execution decision above supersedes it with fresh Native+IS id
+`p58is01`.
 
 The user previously waived P58.3 and the separate three-update stop, then chose
 the native 128-chip full 1,000-update stage. That historical phase remains
@@ -457,8 +603,9 @@ circuit breaker emits `[P58.SANDBOX_CAPACITY] BLOCKED` with
 `optimizer_commits=0 prompts_consumed_after_batch=0` and raises
 `BLOCKED_SANDBOX_CAPACITY` before processed rescore, alignment, trainer, or a
 later prompt batch. Any inconsistent infrastructure signature fails closed.
-P58f12 is immutable and not resumable trainer state; fresh `p58f13` is next
-only after publication/readback and live CPU sandbox admission evidence.
+P58f12 is immutable and not resumable trainer state. The former `p58f13`
+Native-raw instruction is superseded; fresh `p58is01` Native+IS is next only
+after publication/readback and live CPU sandbox admission evidence.
 
 `origin/main` was reviewed read-only at
 `c7d8950f12a9c55a976bf2e1a0d8b447d71c20b3`. Its Agent
@@ -588,8 +735,14 @@ Pathways, real R2E rollout, or TPU training.
    128 x 4 GiB = 512 GiB requested memory, plus head/cluster overhead. A
    one-Pod PASS is necessary but does not prove full-batch capacity. Never
    remove the queue label to bypass Kueue.
-6. Render only `arm=native, stage=full` with fresh run-id `p58f13` and worker
-   sentinel `tpu-v5p-slice`. Require exact `4x4x8` topology and no literal
+6. After the exact Native/no-IS JobSet is archived and deleted, and only after
+   P58.9 is published with an exact remote readback, render
+   `arm=native, stage=full, --sampler-is` with fresh run-id `p58is01` and
+   worker sentinel `tpu-v5p-slice`. Start from the original frozen base; never
+   resume the collapsed Native checkpoint. Require renderer recipe
+   `native-is`, JobSet label `canon.zero-tim/sampler-recipe=token-is`, sampler
+   disable tuple `0:0`, token threshold `2.0`, trainer old logps, present TIS
+   weights, and no group filter. Require exact `4x4x8` topology and no literal
    `cloud.google.com/gke-nodepool: tpu-v5p-slice`; require B8 x G16 =
    concurrency 128 = rollout DP8 x max-seqs16; require head pool `cpu-np`,
    head and worker host networking, exact required hostname anti-affinity over
@@ -612,16 +765,18 @@ Pathways, real R2E rollout, or TPU training.
    That JobSet must stop before rescore/trainer or a later prompt batch; return
    to the capacity gate with a fresh run id after the infrastructure issue is
    resolved.
-8. Require stock preflight, one P58 stock-observer processed-B marker, exact
-   live weights, shape-valid finite Native boundaries/ratios, finite
+8. Require stock preflight, one P58 stock-observer processed-B marker, exactly
+   one signed `[P58.TIM_RECIPE] ... recipe=native-is ...` marker, exact live
+   weights, shape-valid finite Native boundaries/ratios, finite
    forward/backward, and the first optimizer commit.
    Then monitor commits 1–3 without stopping a healthy job. Continue through
    checkpoint 8, updates 32 and 100, then every 100 updates.
-9. Require the full native classifier JSON to say `PASS`, including a finite
-   nonzero serving-path dose on A-B or B-C, finite trainer-program observation,
-   exactly 1,000 commits, device optimizer, complete journal, cleanup,
-   evaluation, checkpoint, and transaction receipts.
-10. Do not render or apply zero.
+9. Require the full Native-arm classifier JSON to say `PASS` and the separate
+   Native+IS recipe receipts to pass, including a finite nonzero serving-path
+   dose on A-B or B-C, finite trainer-program observation, exactly 1,000
+   commits, device optimizer, complete journal, cleanup, evaluation,
+   checkpoint, and transaction receipts.
+10. Do not render or apply Native raw or Zero.
 
 Do not reuse any failed `p58c01` through `p58c05` or `p58f01` through `p58f12`
 YAML/run root. P58f03 through p58f07 have diagnostic trajectory/alignment
@@ -654,8 +809,11 @@ for `workload_describe.txt`.
 
 ## Important operational semantics
 
-- `use_rollout_logps=true` is shared. Sampler-IS, TIS correction, group
-  clip/filter, degenerate-group masking, and flat-group resampling are off.
+- `use_rollout_logps=true` remains enabled. For the active Native+IS recipe,
+  token sampler-IS and TIS correction are enabled only through the registered
+  `0:0` tuple at threshold `2.0`; trainer logps define the old policy and TIS
+  weights must be present. Group clip/filter, degenerate-group masking, and
+  flat-group resampling remain off. Native raw is retired and must not resume.
 - All-zero/all-one reward groups remain. They naturally produce zero RLOO
   advantage and are logged.
 - Compact-filter statuses are not malformed trajectories. They remain in the
@@ -664,7 +822,7 @@ for `workload_describe.txt`.
 - A Kubernetes sandbox start exception must propagate after deletion is
   confirmed. `ENV_TIMEOUT` is an admitted compact-filter status; a
   half-created RepoEnv with `container=None` is forbidden. If an entire
-  p58f13 batch has zero confirmed Running pods, classify infrastructure
+  Native+IS batch has zero confirmed Running pods, classify infrastructure
   capacity/scheduling before another launch instead of patching websocket
   decode or inventing a successful trajectory.
 - Read `deepswe/all_sandbox_start_timeout_batch` first. Value `1` means the

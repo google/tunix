@@ -80,7 +80,13 @@ def _remove_proxy_precision_pin(proxy: dict[str, Any]) -> None:
   proxy["env"] = [item for item in env if item.get("name") != p34.PROXY_XLA_ENV]
 
 
-def _command(stage: str, *, run_root: str, whitelist: str) -> tuple[str, ...]:
+def _command(
+    stage: str,
+    *,
+    run_root: str,
+    whitelist: str,
+    sampler_is: bool = False,
+) -> tuple[str, ...]:
   if stage not in _STAGE_STEPS:
     raise ValueError("P58 admits only three-update or full")
   args = list(
@@ -111,6 +117,11 @@ def _command(stage: str, *, run_root: str, whitelist: str) -> tuple[str, ...]:
       "--filter_statuses",
       *_FILTER_STATUSES,
   ))
+  if sampler_is:
+    args.extend((
+        "--sampler_is=token",
+        "--sampler_is_threshold=2.0",
+    ))
   return tuple(args)
 
 
@@ -128,6 +139,7 @@ def render(
     model_pvc: str,
     whitelist: str = CLEAN_WHITELIST,
     whitelist_sha256: str = CLEAN_WHITELIST_SHA256,
+    sampler_is: bool = False,
     high_performance: bool = False,
 ) -> dict[str, Any]:
   """Returns one immutable P58 native or zero JobSet."""
@@ -137,6 +149,10 @@ def render(
     raise ValueError("P58 arm must be native or zero")
   if high_performance and (arm != "zero" or stage != "full"):
     raise ValueError("P58 high-performance is admitted only for Zero full")
+  if sampler_is and arm != "native":
+    raise ValueError("P58 sampler IS is admitted only for the native arm")
+  if sampler_is and high_performance:
+    raise ValueError("P58 sampler IS and Zero high-performance are disjoint")
   if cpu_nodepool != _CPU_NODEPOOL:
     raise ValueError("P58 requires the admitted cpu-np CPU node pool")
   if whitelist != CLEAN_WHITELIST or whitelist_sha256 != CLEAN_WHITELIST_SHA256:
@@ -159,7 +175,7 @@ def render(
       fixed_lm_head=False,
   )
 
-  treatment = "zero-hp" if high_performance else arm
+  treatment = "zero-hp" if high_performance else "native-is" if sampler_is else arm
   name = (
       f"canon-p58-ds4b-{treatment}-"
       f"{'three' if stage == 'three-update' else 'full'}-{run_id}"
@@ -174,6 +190,10 @@ def render(
       "canon.zero-tim/arm": arm,
       "canon.zero-tim/topology": "128",
   })
+  if sampler_is:
+    document["metadata"]["labels"]["canon.zero-tim/sampler-recipe"] = (
+        "token-is"
+    )
   queue_name = str(
       document["metadata"]["labels"].get(_KUEUE_QUEUE_LABEL, "")
   )
@@ -218,7 +238,14 @@ def render(
   else:
     p34.ensure_proxy_xla_env(proxy)
 
-  document["spec"]["failurePolicy"]["maxRestarts"] = 3
+  # P58 is an evidence-bearing paired experiment.  A JobSet-level retry
+  # recreates the whole JobSet while retaining the same persistent run root;
+  # that can mix attempt artifacts and invalidate the arm comparison.  Keep
+  # the signed Attempt-0 contract until explicit attempt isolation exists.
+  document["spec"]["failurePolicy"] = {
+      "maxRestarts": 0,
+      "restartStrategy": "Recreate",
+  }
   p34._set_env(main, {
       "CANON_PROFILE_FILE": HP_PROFILE if high_performance else PROFILE,
       "CANON_STATE": run_root,
@@ -240,6 +267,8 @@ def render(
       "CANON_P58_DEEPSWE_TIM": "1",
       "CANON_P58_TIM_ADMITTED": "1",
       "CANON_P58_TIM_ARM": arm,
+      "CANON_P34_DISABLE_SAMPLER_IS": "0" if sampler_is else "1",
+      "CANON_P34_DISABLE_TIS": "0" if sampler_is else "1",
       "CANON_P58_EXPECTED_UPDATES": str(_STAGE_STEPS[stage]),
       "CANON_P58_DEBUG_DIR": f"{run_root}/debug",
       "CANON_V1_HP_FULL": "1" if high_performance else "0",
@@ -254,17 +283,17 @@ def render(
       "CANON_DEEPSWE_TRAJECTORY_TIMEOUT_SECS": "3000",
       "CANON_DEEPSWE_STEP_TIMEOUT_SECS": "600",
       "CANON_DEEPSWE_REWARD_TIMEOUT_SECS": "600",
-      "PATHWAYS_HEARTBEAT_TIMEOUT_SEC": "600",
-      "IFRT_PROXY_TIMEOUT_SECONDS": "600",
-      "GRPC_KEEPALIVE_TIME_MS": "30000",
-      "GRPC_KEEPALIVE_TIMEOUT_MS": "30000",
-      "GRPC_ARG_KEEPALIVE_PERMIT_WITHOUT_CALLS": "1",
       "R2E_ACTIVE_DEADLINE_SECONDS": "3300",
       "R2E_K8S_QUEUE_NAME": queue_name,
       "NODE_SELECTOR_VAL": cpu_nodepool,
       "MIN_TOKEN_BUCKET": "2048",
       "CANON_RUN_CMD": shlex.join(
-          _command(stage, run_root=run_root, whitelist=whitelist)
+          _command(
+              stage,
+              run_root=run_root,
+              whitelist=whitelist,
+              sampler_is=sampler_is,
+          )
       ),
       "CANON_RUN_LOG": f"{run_root}/run.log",
       "CANON_P34_WEIGHT_REPORT": f"{run_root}/weight_attestation.jsonl",
@@ -273,7 +302,11 @@ def render(
       "CANON_UPDATE_REPORT": f"{run_root}/updates.jsonl",
       "CANON_WANDB_RUN_NAME": name,
       "CANON_WANDB_PROJECT": "zero-tim-deepswe-4b-native-zero",
-      "CANON_WANDB_GROUP": f"qwen3-4b-p58-{stage}",
+      "CANON_WANDB_GROUP": (
+          f"qwen3-4b-p58-native-is-{stage}"
+          if sampler_is
+          else f"qwen3-4b-p58-{stage}"
+      ),
       "CANON_OPTIMIZER_HBM_MIN_FREE_BYTES": str(8 * 1024**3),
   })
 
@@ -310,6 +343,7 @@ def render(
       stage=stage,
       arm=arm,
       worker_nodepool=worker_nodepool,
+      sampler_is=sampler_is,
       high_performance=high_performance,
   )
   return document
@@ -322,6 +356,8 @@ def recipe_signature(document: Mapping[str, Any]) -> dict[str, Any]:
       "--gold_whitelist=",
       "--metric_logger_dir=",
       "--ckpt_dir=",
+      "--sampler_is=",
+      "--sampler_is_threshold=",
   )
   command = tuple(
       item for item in shlex.split(env["CANON_RUN_CMD"])
@@ -353,6 +389,13 @@ def treatment_signature(document: Mapping[str, Any]) -> dict[str, Any]:
       "alignment_warning_only": env["CANON_DEEPSWE_ALIGNMENT_WARN_ONLY"],
       "proxy_xla": proxy_xla,
       "high_performance": env.get("CANON_V1_HP_FULL", "0"),
+      "disable_sampler_is": env["CANON_P34_DISABLE_SAMPLER_IS"],
+      "disable_tis": env["CANON_P34_DISABLE_TIS"],
+      "sampler_is": tuple(
+          item
+          for item in shlex.split(env["CANON_RUN_CMD"])
+          if item.startswith(("--sampler_is=", "--sampler_is_threshold="))
+      ),
   }
 
 
@@ -364,6 +407,7 @@ def validate(
     stage: str,
     arm: str,
     worker_nodepool: str,
+    sampler_is: bool = False,
     high_performance: bool = False,
 ) -> None:
   if stage not in _STAGE_STEPS or arm not in _ARMS:
@@ -375,8 +419,12 @@ def validate(
   worker = p34._worker(document)
   main = p34._container(head["containers"], "jax-tpu")
   env = p34._env(document)
-  if document["spec"]["failurePolicy"]["maxRestarts"] not in (0, 3):
-    raise ValueError("P58 maxRestarts must be in (0, 3)")
+  expected_failure_policy = {
+      "maxRestarts": 0,
+      "restartStrategy": "Recreate",
+  }
+  if document["spec"].get("failurePolicy") != expected_failure_policy:
+    raise ValueError("P58 requires exact Attempt-0 failure policy")
   if cpu_nodepool != _CPU_NODEPOOL:
     raise ValueError("P58 CPU head lost the admitted cpu-np node pool")
   if (
@@ -409,6 +457,8 @@ def validate(
       "CANON_P58_DEEPSWE_TIM": "1",
       "CANON_P58_TIM_ADMITTED": "1",
       "CANON_P58_TIM_ARM": arm,
+      "CANON_P34_DISABLE_SAMPLER_IS": "0" if sampler_is else "1",
+      "CANON_P34_DISABLE_TIS": "0" if sampler_is else "1",
       "CANON_P58_EXPECTED_UPDATES": str(_STAGE_STEPS[stage]),
       "CANON_V1_HP_FULL": "1" if high_performance else "0",
       "CANON_P38_FIXED_LM_HEAD": "1" if high_performance else "0",
@@ -429,6 +479,21 @@ def validate(
   }
   if wrong:
     raise ValueError(f"P58 rendered environment mismatch: {wrong}")
+  unproven_transport_env = (
+      "PATHWAYS_HEARTBEAT_TIMEOUT_SEC",
+      "IFRT_PROXY_TIMEOUT_SECONDS",
+      "GRPC_KEEPALIVE_TIME_MS",
+      "GRPC_KEEPALIVE_TIMEOUT_MS",
+      "GRPC_ARG_KEEPALIVE_PERMIT_WITHOUT_CALLS",
+  )
+  present_transport_env = [
+      key for key in unproven_transport_env if key in env
+  ]
+  if present_transport_env:
+    raise ValueError(
+        "P58 contains unproven transport keepalive overrides: "
+        f"{present_transport_env}"
+    )
 
   args = shlex.split(env["CANON_RUN_CMD"])
   required = (
@@ -465,7 +530,22 @@ def validate(
   status_index = args.index("--filter_statuses")
   if tuple(args[status_index + 1:status_index + 1 + len(_FILTER_STATUSES)]) != _FILTER_STATUSES:
     raise ValueError("P58 compact-filter status set drifted")
-  forbidden = ("--sampler_is", "--group_clip_filter_threshold", "--optimizer-offload")
+  sampler_args = tuple(
+      item
+      for item in args
+      if item.startswith(("--sampler_is=", "--sampler_is_threshold="))
+  )
+  expected_sampler_args = (
+      ("--sampler_is=token", "--sampler_is_threshold=2.0")
+      if sampler_is
+      else ()
+  )
+  if sampler_args != expected_sampler_args:
+    raise ValueError(
+        "P58 sampler-IS command drifted: "
+        f"expected={expected_sampler_args} actual={sampler_args}"
+    )
+  forbidden = ("--group_clip_filter_threshold", "--optimizer-offload")
   if any(item == value or item.startswith(value + "=") for item in args for value in forbidden):
     raise ValueError("P58 command enabled an optional algorithm intervention")
   if not env.get("CANON_P58_DEBUG_DIR", "").endswith("/debug"):
@@ -534,6 +614,7 @@ def main() -> None:
   parser.add_argument("--model-pvc", default="haoyugao-cpu-np-pvc")
   parser.add_argument("--whitelist", default=CLEAN_WHITELIST)
   parser.add_argument("--whitelist-sha256", default=CLEAN_WHITELIST_SHA256)
+  parser.add_argument("--sampler-is", action="store_true")
   parser.add_argument("--high-performance", action="store_true")
   args = parser.parse_args()
   if args.output.exists():
@@ -551,10 +632,22 @@ def main() -> None:
       model_pvc=args.model_pvc,
       whitelist=args.whitelist,
       whitelist_sha256=args.whitelist_sha256,
+      sampler_is=args.sampler_is,
       high_performance=args.high_performance,
   )
   args.output.write_text(p34.dump_jobset(document))
-  print(f"P58_DEEPSWE_TIM_RENDER_PASS arm={args.arm} stage={args.stage} output={args.output}")
+  recipe = (
+      "native-is"
+      if args.sampler_is
+      else "zero-hp"
+      if args.high_performance
+      else f"{args.arm}-raw"
+  )
+  print(
+      "P58_DEEPSWE_TIM_RENDER_PASS "
+      f"arm={args.arm} stage={args.stage} recipe={recipe} "
+      f"output={args.output}"
+  )
 
 
 if __name__ == "__main__":

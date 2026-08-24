@@ -3,13 +3,17 @@
 ## Outcome
 
 Compare two otherwise identical synchronous disaggregated DeepSWE-derived
-Qwen3-4B-Instruct training arms on the promoted P46 clean task set:
+Qwen3-4B-Instruct numerical systems on the promoted P46 clean task set, with
+one separately registered Native mitigation variant:
 
 - `native`: preserve the untreated serving and trainer numerical programs from
   the pinned `yuxzhang/deepswe-quality-fix` reference and measure their finite
   inference-trainer mismatch as the treatment dose;
 - `zero`: enable the complete canonical numerical bundle and require exact
   A=B=C at every admitted boundary.
+- `native-is`: preserve the same Native serving/trainer programs but apply
+  token-level sampler/trainer truncated importance weights at threshold 2.0.
+  This is a mitigation arm, not part of the original two-system estimand.
 
 This is a causal comparison of two complete numerical systems. It is not an
 ablation of one kernel, and it is not an exact reproduction of the published
@@ -24,9 +28,18 @@ P58.7, an optimized strict-Zero Qwen3-4B full recipe. P58.8 then repairs the
 TP4/TP8 P59 nested-mesh admission failure and the P57 Zero/full telemetry
 identity exposed by the first Phase4 target logs. Review then found that the
 new exact-image gate exercised only a synthetic nested map, not the installed
-fixed-head/projection shim VJP that failed in GSM8K. P58.8 is therefore active
-again until that real path passes a bounded no-commit gate and the dirty tree
-is reconstructed as four independent CLs on the latest evidence tip.
+fixed-head/projection shim VJP that failed in GSM8K. P58.9 now refines the
+latest published tree by adding the Native-IS recipe as a fail-closed selector
+and restoring exact Attempt-0 semantics until attempt-isolated durable roots
+exist.
+
+On 2026-08-24 the operator reported a sharp training-reward drop in the live
+Native/no-IS campaign and judged it collapsed. The onset update is unknown; do
+not attribute the event to a fixed optimizer step. Preserve and stop
+that exact run; do not resume its checkpoint. Native raw is removed from the
+active launch queue. The next training target is a fresh Native+IS full run
+from the original frozen base checkpoint after the local P58.9 source is
+explicitly published and read back.
 
 ## Phases
 
@@ -42,6 +55,7 @@ is reconstructed as four independent CLs on the latest evidence tip.
 | P58.6 | Matched one-host Native/Zero-HP XProf and Perfetto carriers | Both immutable arms pass on the same direct four-chip host and pair work hashes match | implementation + pinned-image PASS; direct TPU pair not run |
 | P58.7 | Optimized strict-Zero Qwen3-4B full recipe | Exactly 1,000 DP8 x TP8 commits, zero alignment failures, complete P59/fixed-head/XProf/Perfetto/postflight receipts | implementation + construction PASS; target not run |
 | P58.8 | P59 TP4/TP8 nested-mesh and P57 Zero/full telemetry repair | Installed fixed-head + projection shim VJPs run through P59 parallel/report/fixed-reducer no-commit paths; local-output positive/negative placement controls pass; four independent CLs are rebuilt on latest tip `ccbcf572` | local four-CL release and committed-tree manifest audit PASS; push/hardware target not run |
+| P58.9 | Native token-IS plus Attempt-0 refinement | Native raw/IS and Zero-HP render as a closed set; partial/mixed tuples fail; runtime proves old-logp/TIS provenance; JobSet retry and unconsumed keepalive overrides are absent; full pinned-image gate passes | Native-IS selected after operator-observed Native-raw reward collapse; onset step unknown, publication authorized/in progress, target not run |
 
 Exactly one phase may be active. Commit, push, image publication, Kubernetes
 render/application, and TPU execution each remain separately user-gated.
@@ -51,8 +65,10 @@ P58.3 has CPU coverage for journal continuity and observer/classifier logic but
 no real Qwen/R2E one-host evidence; the user explicitly waived it rather than
 calling it PASS. P58.4N was superseded after p58c05 failed Kueue admission.
 P58.5N never completed and is not a valid full Native baseline. P58.6 through
-P58.8 are specified in their phase files; P58.8 is the only active phase.
-P58.7 target execution resumes only after P58.8's CL split and publication.
+P58.9 are specified in their phase files; P58.9 is the only active phase.
+P58.7 remains deferred. The user selected Native-IS as the next target and
+authorized P58.9 commit/push, but it cannot launch from the operator branch
+until publication and exact remote readback complete.
 No remote execution is authorized by this plan alone.
 
 P58.5N attempts `p58f01` through `p58f11` remain `INCONCLUSIVE`. P58f01 exposed
@@ -220,11 +236,14 @@ prompts. The 128 count belongs to the trajectory-level fields.
 
 ## Algorithm-neutrality contract
 
-Both arms retain rollout log probabilities because those are part of the
-training ratio and the treatment measurement. Both arms disable optional
-corrections and sample-selection interventions:
+All recipes retain rollout log probabilities because those are part of the
+training ratio and treatment measurement. Native raw and Zero disable optional
+corrections. The active Native-IS mitigation changes only the registered
+sampler correction:
 
-- `sampler_is=None`; its threshold is inactive;
+- Native raw and Zero: `sampler_is=None`; threshold inactive;
+- Native-IS: `sampler_is=token`, threshold `2.0`, trainer logps are old policy
+  logps, and token TIS weights correct the trainer-vs-rollout sampler gap;
 - `group_clip_filter_threshold=None` (renderer sentinel `-1` only if that is
   the parser's registered representation);
 - `degenerate_group_masking=false`;
