@@ -242,3 +242,86 @@
   are green. Exact-image and target have not run.
 - Claim ceiling: observer repair only. No APC numerical result, localization,
   or production enablement follows from this host pass.
+
+## 2026-08-25T07:01:51Z — Attempt 3 invalidated the tail-only admission assumption
+
+- Evidence: `evidence/v1_apc_m15_attempt3_20260825/` contains a receipt and a
+  433-line error tail; both files pass the committed `SHA256SUMS`. The package
+  is sufficient to prove the fatal stack and source identity, but it is not a
+  complete run package and contains no A/B/C verdict.
+- Fact: source `cdd3987caa648e6112ee8fc184b2e3421de3a4b2` installed patch 27
+  (the traceback line moved into its expanded predicate), yet APC-on failed
+  with `expected=standard actual=continue_decode` before rollout completed.
+- Root cause: patch 27 incorrectly required four completed standard tensor
+  strata before admitting the production `continue_decode` path. That ordering
+  happened in Attempt 2's APC-off control but is not a serving invariant;
+  APC-on can select `continue_decode` earlier because the cache changes the
+  request/scheduler state.
+- Local repair: append-only patch 28 separates program-path admission from
+  tensor-capture completion. Registered M15 off/on runs admit
+  `continue_decode` from its first call into the full replay envelope; generic
+  tensor capture, request journal, and incident ledger remain standard-only.
+  Generic P38 and unknown paths retain the fatal assertion.
+- Gate repair: the exact-image runner test now sets capture count and strata to
+  zero and calls the installed predicate directly. It also checks that generic
+  mode and unknown paths are not admitted. This is the executable negative
+  control missing from patch 27's string-only host test.
+- Validation: task carrier 44/44, P38 classifier 37/37, Phase3 12/12,
+  V1 CPU 45/45, P57 CPU 144/144, and flag audit 372/372 all pass. The targeted
+  P33 pinned-image gate assembles both Qwen3-1.7B and Qwen3-8B overlays with
+  all 36 manifested files, then runs 35/35 installed-runner tests per overlay;
+  the new zero-strata program-path negative control passes. The aggregate V1
+  exact-image gate and target are not run.
+- Claim ceiling: observer-control repair only. No APC mechanism, evaluation,
+  alignment, or production-enable conclusion follows from Attempt 3.
+
+## 2026-08-25T09:18:58Z — Patch 28 aggregate exact-image gate PASS
+
+- Integration: fetched the operator branch and rebased the uncommitted repair
+  from `bc214018...` onto `53876c15f407435dbd44680ad18f5f8e88f3c255`.
+  The incoming commit contains only the separate M15 full-training non-finite
+  evidence package; it does not overlap this APC observer repair.
+- Evidence integrity: Attempt 3's `apc_m15_on_d9b_error.log` and
+  `receipt.json` both pass their committed `SHA256SUMS`. They prove the
+  pre-classification program-path failure but contain no A/B/C verdict.
+- Host gates: target carrier 44/44, P38 classifier 37/37, Phase3 12/12,
+  V1 CPU 45/45, P57 CPU 144/144, flag audit 372/372, syntax, and
+  `git diff --check` all pass.
+- Targeted exact-image: both Qwen3-1.7B and Qwen3-8B installed overlays match
+  all 36 manifest files and execute 35/35 runner tests. The zero-strata test
+  executes the full `_p38_serving_begin` branch, proves M15 `continue_decode`
+  admission from the first call, requires the replay-ledger write, and requires
+  generic incident capture to remain absent. Generic mode and unknown paths
+  remain negative controls.
+- Aggregate exact-image: immutable image
+  `sha256:418dc632...e53a` terminates with `V1_HP_EXACT_IMAGE_PASS ...
+  apc_m15_carrier=44 ... manifests=3` and exit 0.
+- Review hardening changed only that installed-runner test; the targeted and
+  aggregate exact-image gates were rerun afterward and produced the same PASS
+  terminals with exit 0.
+- Claim ceiling: observer-control repair is host and aggregate exact-image
+  admitted. It has not produced an APC-off/on A/B/C result, localized the
+  historical mismatch, fixed APC numerics, or enabled production APC.
+
+## 2026-08-25T09:41:00Z — Patch 28 rebased onto the latest operator tip
+
+- Integration: a final fetch advanced the operator branch from `53876c15...`
+  to `548db7e9f014def3cb2b37e66c6f0e62c2041f1d`. The four incoming commits
+  restore XProf evidence and add the separate P64/FrozenLake backward
+  diagnostics. They do not overlap patch 28's APC observer control flow; the
+  uncommitted repair rebased without conflict and remains ahead/behind `0/0`.
+- Host gates on the new tip: target carrier 44/44, P38 classifier 37/37,
+  Phase3 12/12, V1 Phase4 CPU 67/67, and flag audit 378/378 pass.
+- Expanded aggregate exact-image: immutable image
+  `sha256:418dc632...e53a` exits 0 with the terminal
+  `V1_HP_EXACT_IMAGE_PASS ... p64_numeric=4 p64_capsule=3 ...
+  apc_m15_carrier=44 ... manifests=3`.
+- A subsequent final fetch added documentation-only commit `95e290b0...`
+  (`v1-phase4-three-full-recipes` handoff/runbook/ledgers only). Patch 28 was
+  rebased onto that tip without conflict. Runtime and test files are byte-for-
+  byte identical to the aggregate-exact-image tree, so the image gate was not
+  rerun solely for this documentation-only commit.
+- Scope remains unchanged: this admits the observer repair against the latest
+  release dependency graph. It does not repair or classify the APC numerical
+  mismatch, and it does not address the separate APC-off full-training
+  non-finite-gradient incident.

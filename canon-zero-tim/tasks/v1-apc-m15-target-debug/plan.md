@@ -81,9 +81,10 @@ B - C = 0 bytes
   (`268,192,266` bytes) and later reached about 1,894 calls. The M15-only
   signed bound is raised to 2 GiB; ordinary P38 remains renderer-limited to
   128 MiB.
-- Decision: tensor capture remains standard-only. After all four strata are
-  complete, the M15 observer admits a continue-decode tail only in the
-  dedicated full replay envelope. The generic tensor capture, request journal,
-  and incident ledger remain standard-only. Full replay packaging requires A
-  to attest both program paths and B to remain full-reset standard; early or
-  unknown path changes still fail closed.
+- Decision corrected by Attempt 3: tensor capture remains standard-only, but
+  an M15 target may enter `continue_decode` before four standard strata exist.
+  The observer therefore admits the registered path from its first call only
+  into the dedicated full replay envelope. Generic tensor capture, request
+  journal, and incident ledger remain standard-only. Full replay packaging
+  requires A to attest both program paths and B to remain full-reset standard;
+  unknown paths and non-M15 use still fail closed.

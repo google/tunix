@@ -57,9 +57,10 @@ It then exposed two observer defects, not a model mismatch:
 
 Do **not** remove `CANON_CONTINUE_DECODE=8`. The historical `m15i` production
 red used that program; removing it changes the experiment. The current repair
-keeps the four tensor records and generic request/incident ledgers
-standard-only, admits continue-decode only after all four are complete, and
-keeps writing the dedicated full replay chronology. A red
+keeps tensor records and generic request/incident ledgers standard-only,
+admits M15 `continue_decode` into the dedicated full replay chronology from
+its first production call, and never treats tensor-strata completion as a
+program-path prerequisite. A red
 carrier must prove A used both `standard` and `continue_decode`; B must remain
 the independent full-reset `standard` path. The M15-only signed ledger bound
 is 2 GiB, based on Attempt 2's 268,192,266 bytes at call 326 and roughly 1,894
@@ -117,9 +118,10 @@ CANON_P57_DATA_SPLIT=main
 --p57_data_split=main
 ```
 
-## Optional exact-image admission
+## Exact-image admission
 
-This is not a target numerical result and needs its own approval:
+The current patch-28 tree passed this gate on 2026-08-25. It remains the
+canonical rerun command if any runtime or test file changes before publication:
 
 ```bash
 cd /home/yuxuan/code_rl_repro/sequence_packing/tunix
@@ -127,7 +129,12 @@ bash canon-zero-tim/tests/v1_phase4/run_exact_image.sh \
   sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a
 ```
 
-Expected post-fix terminal marker includes `apc_m15_carrier=44`.
+Expected post-fix terminal marker includes `apc_m15_carrier=44`. The nested
+P33 gate must also report `runner_tests_per_overlay=35`; its new installed-
+runner test sets captured records/strata to zero, executes the full
+`_p38_serving_begin` branch, and proves M15 `continue_decode` writes the replay
+ledger without entering generic incident/tensor capture. The same path remains
+rejected outside M15 debug. This is not a target numerical result.
 
 ## Launch order
 

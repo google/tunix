@@ -107,6 +107,71 @@ class DecodeLogprobChunkingTest(unittest.TestCase):
     np.testing.assert_array_equal(captured["array"], np.array([3, 5]))
     self.assertNotIn("logical_dtype", captured)
 
+  def test_m15_continue_decode_is_admitted_before_standard_capture_completes(self):
+    scheduled_prefixes = [{
+        "request_id": "request-a",
+        "request_index": 0,
+        "num_computed_tokens": 100,
+    }]
+    with (
+        mock.patch.object(self.runner, "_P38_M15_TARGET_DEBUG", "on"),
+        mock.patch.object(
+            self.runner, "_P38_SERVING_CAPTURE_EXPECTED_PATH", "standard"
+        ),
+        mock.patch.object(self.runner, "_P38_SERVING_CAPTURE_SEQ", {"n": 0}),
+        mock.patch.object(self.runner, "_P38_SERVING_CAPTURED_STRATA", set()),
+        mock.patch.object(
+            self.runner,
+            "_p38_scheduled_decode_prefixes",
+            return_value=scheduled_prefixes,
+        ),
+        mock.patch.object(self.runner, "_p38_observe_scheduled_prefixes"),
+        mock.patch.object(
+            self.runner, "_p38_request_journal", return_value=7
+        ) as request_journal,
+        mock.patch.object(self.runner, "_p38_m15_replay_ledger") as replay_ledger,
+        mock.patch.object(self.runner, "_p38_incident_ledger") as incident_ledger,
+    ):
+      self.assertTrue(
+          self.runner._p38_m15_continue_program_path("continue_decode")
+      )
+      self.assertFalse(self.runner._p38_m15_continue_program_path("unknown"))
+      result = self.runner._p38_serving_begin(
+          SimpleNamespace(),
+          SimpleNamespace(),
+          {0: ["request-a"]},
+          None,
+          None,
+          None,
+          None,
+          None,
+          None,
+          None,
+          8,
+          256,
+          "continue_decode",
+      )
+      self.assertIsNone(result)
+      request_journal.assert_called_once_with(
+          mock.ANY,
+          mock.ANY,
+          {0: ["request-a"]},
+          [],
+          "continue_decode",
+      )
+      replay_ledger.assert_called_once_with(
+          mock.ANY,
+          mock.ANY,
+          {0: ["request-a"]},
+          7,
+          "continue_decode",
+      )
+      incident_ledger.assert_not_called()
+    with mock.patch.object(self.runner, "_P38_M15_TARGET_DEBUG", ""):
+      self.assertFalse(
+          self.runner._p38_m15_continue_program_path("continue_decode")
+      )
+
   def test_mismatched_rows_fail_closed(self):
     with self.assertRaisesRegex(ValueError, "row mismatch"):
       self.runner._canon_compute_decode_logprobs(

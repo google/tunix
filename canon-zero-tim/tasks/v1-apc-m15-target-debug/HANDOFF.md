@@ -40,14 +40,17 @@ Current immutable facts:
   later entered the production `continue_decode` path, which the old
   single-path observer rejected.
 - Removing `CANON_CONTINUE_DECODE=8` is explicitly rejected because `m15i`
-  used it. The local repair is observer-only: standard tensor capture stays
-  unchanged; after all four records exist, an M15-only continue-decode tail
-  may continue only the dedicated host replay envelope. Generic request and
-  incident evidence stays standard-only. The M15-only incident/replay ceiling
-  is raised to 2 GiB. A frozen red must attest A=`standard+continue_decode`
-  and B=`standard`; every earlier/unknown path change remains fatal.
+  used it. Attempt 3 proved patch 27's remaining assumption was also wrong:
+  APC-on can enter `continue_decode` before four standard tensor strata have
+  been captured. Append-only patch 28 admits that registered M15 program path
+  from its first call and writes only the dedicated host replay envelope;
+  standard tensor capture and generic request/incident evidence stay
+  standard-only. The M15-only incident/replay ceiling remains 2 GiB. A frozen
+  red must attest A=`standard+continue_decode` and B=`standard`; unknown paths
+  and any non-M15 use remain fatal, while a B-side continue path is rejected
+  by packaging.
 
-Claim ceiling: `ATTEMPT2_OBSERVER_REPAIR_HOST_PASS_EXACT_IMAGE_TARGET_NOT_RUN`.
+Claim ceiling: `ATTEMPT3_OBSERVER_REPAIR_AGGREGATE_EXACT_IMAGE_PASS_TARGET_NOT_RUN`.
 
 The exact remote procedure is in [RUNBOOK.md](RUNBOOK.md). The execution agent
 must run those commands rather than constructing a new carrier by hand.
@@ -108,7 +111,7 @@ replay harness, so it remains input evidence rather than a mechanism verdict.
 From the independent worktree:
 
 ```bash
-cd /home/yuxuan/code_rl_repro/worktrees/v1_apc_m15_target_debug_0824
+cd /home/yuxuan/code_rl_repro/worktrees/m15_eval_fix_0825
 python3 canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/test_analyze_m15i_evidence.py -v
 python3 canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/test_classify_m15_apc_target_run.py -v
 python3 canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/test_package_first_red_replay.py -v
@@ -139,10 +142,12 @@ without conflict before the final gates.
 ## Next action before any launch
 
 Do not relaunch source `eb58954f...`; its missing signed identity is
-deterministically invalid. First publish and exact-image-test the bootstrap
-repair, then render only from that new full SHA. Publication does not
-authorize a launch; the APC-off control and APC-on treatment retain separate
-user approval boundaries. Use a unique label and a new output directory:
+deterministically invalid. Patch 28 has passed the targeted and aggregate
+exact-image gates on the current tree. First publish the observer repair, then
+verify that the committed tree is identical to the admitted tree and render
+only from that new full SHA. Publication does not authorize a launch; the
+APC-off control and APC-on treatment retain separate user approval boundaries.
+Use a unique label and a new output directory:
 
 ```bash
 cd /home/yuxuan/code_rl_repro/sequence_packing/tunix
@@ -158,8 +163,8 @@ sha256sum "$OUT"/*.yaml
 
 Do not edit the rendered YAML. Do not render from a dirty or abbreviated SHA.
 
-Before spending the 64-card target, request separate approval to run the
-dependency-complete pinned-image gate against the immutable production image:
+If any runtime or test file changes before publication, rerun the dependency-
+complete pinned-image gate against the immutable production image:
 
 ```bash
 cd /home/yuxuan/code_rl_repro/sequence_packing/tunix
@@ -167,8 +172,13 @@ bash canon-zero-tim/tests/v1_phase4/run_exact_image.sh \
   sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a
 ```
 
-The post-fix terminal must include `apc_m15_carrier=44`. This remains a CPU/image
+The post-fix terminal must include `apc_m15_carrier=44`. The current patch-28
+tree already produced that terminal with exit 0. This remains a CPU/image
 admission gate, not a DP8xTP8 numerical result.
+
+The installed-runner test is not a string-only predicate check: with zero
+captured records and zero strata it executes `_p38_serving_begin`, requires the
+M15 replay ledger call, and requires generic incident capture to remain absent.
 
 Before applying the YAML, the rendered environment must contain all four
 members of one workload identity:

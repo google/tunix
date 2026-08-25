@@ -71,22 +71,26 @@ admission_geometry, p38_batch_contract = _load_train_geometry_contracts()
 
 class TargetCarrierTest(unittest.TestCase):
 
-  def test_m15_capture_preserves_production_continue_decode_and_scopes_tail(self):
+  def test_m15_capture_preserves_production_continue_decode_from_first_call(self):
     profile = (CANON / "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-apc-debug.env").read_text(
         encoding="utf-8"
     )
-    patch = (CANON / "patches/tpu_inference/27-tpu-runner-m15-mixed-program-tail.patch").read_text(
+    tail_patch = (CANON / "patches/tpu_inference/27-tpu-runner-m15-mixed-program-tail.patch").read_text(
+        encoding="utf-8"
+    )
+    path_patch = (CANON / "patches/tpu_inference/28-tpu-runner-m15-mixed-program-path.patch").read_text(
         encoding="utf-8"
     )
     installer = (CANON / "install.sh").read_text(encoding="utf-8")
     self.assertIn('export CANON_CONTINUE_DECODE=8', profile)
-    self.assertIn('_P38_M15_TARGET_DEBUG in ("off", "on")', patch)
-    self.assertIn('program_path == "continue_decode"', patch)
-    self.assertIn('_P38_SERVING_CAPTURE_SEQ["n"] >=', patch)
-    self.assertIn('len(_P38_SERVING_CAPTURED_STRATA) >=', patch)
-    self.assertIn('journal_prefixes = [] if m15_continue_tail', patch)
-    self.assertIn('if not m15_continue_tail:', patch)
+    self.assertIn('_P38_M15_TARGET_DEBUG in ("off", "on")', tail_patch)
+    self.assertIn('program_path == "continue_decode"', tail_patch)
+    self.assertIn('+def _p38_m15_continue_program_path', path_patch)
+    self.assertIn('+    m15_continue_path = _p38_m15_continue_program_path', path_patch)
+    self.assertIn('+    journal_prefixes = [] if m15_continue_path', path_patch)
+    self.assertIn('+    if not m15_continue_path:', path_patch)
     self.assertIn("27-tpu-runner-m15-mixed-program-tail.patch", installer)
+    self.assertIn("28-tpu-runner-m15-mixed-program-path.patch", installer)
 
   def test_renders_exact_off_on_pair(self):
     with tempfile.TemporaryDirectory() as directory:
