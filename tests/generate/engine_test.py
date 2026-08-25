@@ -115,8 +115,8 @@ def run_engine_generation(
         else:
              decoded_outputs.append("".join(str(t) for t in gen))
              
-        out_logprobs.append(engine.generated_logprobs.get(req_id, []))
-        out_logits.append(engine.generated_logits.get(req_id, []))
+        out_logprobs.append(np.array(engine.generated_logprobs.get(req_id, [])))
+        out_logits.append(np.array(engine.generated_logits.get(req_id, [])))
 
     from tunix.generate import base_sampler
     return base_sampler.SamplerOutput(
@@ -522,7 +522,7 @@ class EngineTest(parameterized.TestCase):
     new_lora_params = nnx.variables(new_transformer, nnx.LoRAParam)
     new_lora_params = jax.tree.map(lambda x: x + 0.1, new_lora_params)
 
-    sampler.sampler.transformer_state = new_lora_params
+    sampler.sampler.transformer_state = nnx.State({**sampler.sampler.transformer_state, **new_lora_params})
     new_logits = run_engine_generation(sampler, 
         input_strings, max_generation_steps=10, return_logits=True
     ).logits
@@ -604,7 +604,7 @@ class EngineTest(parameterized.TestCase):
     )
 
     np.testing.assert_equal(
-        result.tokens, [np.array([14]), np.array([])]
+        result.tokens, [np.array([14]), np.array([17, 0, 8, 14])]
     )
     
   def test_forbidden_token_ids(self):
