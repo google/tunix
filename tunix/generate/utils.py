@@ -1916,3 +1916,10 @@ def verify_state_closeness(golden_state, state, atol=1e-2):
       logging.info('Loaded state: %s', state_flatten[key].value.ravel()[:10])
       matched = False
   return matched
+
+import jax.numpy as jnp
+
+def get_dtype_packing(dtype):
+    """Returns the packing factor for the given dtype for TPU SRAM (4 bytes / itemsize)."""
+    n_bytes = jnp.dtype(dtype).itemsize
+    return 4 // n_bytes

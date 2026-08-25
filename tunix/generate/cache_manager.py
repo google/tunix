@@ -25,14 +25,13 @@ def init_cache_manager(
     num_layers = model_config.num_layers
     num_kv_heads = model_config.num_kv_heads
     head_dim = model_config.head_dim
-    # We don't have access to utils._get_dtype_packing easily, so we assume no packing or user handles it inside.
-    # Actually, sampler packs it.
+    kv_packing = utils.get_dtype_packing(kv_dtype)
     
     block_keys = tuple(f"layer_{i}" for i in range(num_layers))
     
     pm_config = page_manager.TpuCpuPageManagerConfig(
         page_size=cache_config.page_size,
-        page_subshape=(2, num_kv_heads, head_dim),
+        page_subshape=(2 * num_kv_heads // kv_packing, kv_packing, head_dim),
         dtype=kv_dtype,
         block_keys=block_keys,
         max_num_seqs=cache_config.max_num_seqs,

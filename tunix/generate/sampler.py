@@ -40,9 +40,7 @@ from tunix.generate import page_manager as page_manager_lib
 from tunix.generate import utils
 import logging
 
-def _get_dtype_packing(dtype):
-  n_bytes = jnp.dtype(dtype).itemsize
-  return 4 // n_bytes
+
 
 @dataclasses.dataclass
 class SamplingConfig:
@@ -381,7 +379,7 @@ class Sampler:
       )
       block_specs.append(logits_spec)
 
-    kv_packing = _get_dtype_packing(kv_dtype) 
+    kv_packing = utils.get_dtype_packing(kv_dtype) 
     packed_kv_head_dim = 2 * num_kv_heads // kv_packing
     for i in range(num_layers):
       layer_spec = page_manager_lib.BlockSpec(
