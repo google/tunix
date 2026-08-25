@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import collections
+import gc
 import resource
 import socket
 from typing import Any, List, Optional, Tuple
@@ -81,7 +82,19 @@ def to_host_cpu_state(state: Any) -> Any:
       new_leaves.append(jax.device_put(jax.device_get(arr), cpu))
     else:
       new_leaves.append(leaf)
+    del leaf, arr
+    # A dropped proxy-backed source array only releases its Pathways-proxy
+    # transit buffer once Python actually collects it. At 30B-A3B scale
+    # (100+ tensors, tens of GB each) relying on incidental refcount-zero
+    # collection let the proxy's staged-but-uncollected buffers pile up
+    # alongside this container's own host copy, and their combined size
+    # exceeded node-level free memory (a kubelet eviction, not a cgroup
+    # OOM) even though no single container had crossed its own limit.
+    # Forcing a collection every few leaves keeps that pileup bounded.
+    if i % 4 == 3:
+      gc.collect()
   del leaves
+  gc.collect()
   return jax.tree_util.tree_unflatten(treedef, new_leaves)
 
 
