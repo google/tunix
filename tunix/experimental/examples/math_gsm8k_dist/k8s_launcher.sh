@@ -72,6 +72,13 @@ export TRAINER_MESH_TP=${TRAINER_MESH_TP:-1}
 export TRAINER_MESH_EXPERT=${TRAINER_MESH_EXPERT:-1}
 export ROLLOUT_TPU_SLICE=${ROLLOUT_TPU_SLICE:-tpuv5:2x2x1}
 export ROLLOUT_TENSOR_PARALLEL_SIZE=${ROLLOUT_TENSOR_PARALLEL_SIZE:-4}
+# Set both to try tpu-inference's experimental batched-RPA kernel instead of
+# the default v3 ragged_paged_attention kernel. ROLLOUT_USE_BATCHED_RPA sets
+# USE_BATCHED_RPA_KERNEL=1 as a pod env var (must be pre-import, since
+# attention_interface.py picks the kernel at module-import time -- MaxText's
+# own self-set of this var, gated on maxtext_attention, happens too late).
+export ROLLOUT_USE_BATCHED_RPA=${ROLLOUT_USE_BATCHED_RPA:-}
+export ROLLOUT_MAXTEXT_ATTENTION=${ROLLOUT_MAXTEXT_ATTENTION:-}
 # Number of independent rollout replicas (each its own TPU slice reservation
 # and JobSet, ${ROLLOUT_ID}-0, ${ROLLOUT_ID}-1, ...) for data-parallel
 # rollout. A single multi-host ROLLOUT_TPU_SLICE (e.g. tpuv5:2x2x2) is one
@@ -172,7 +179,7 @@ start_rollout() {
       --worker_container_image="${TUNIX_IMAGE}" \
       --worker_container_port="${ROLLOUT_PORT}" \
       --worker_startup_command=" \
-        SKIP_JAX_PRECOMPILE=1 VERIFY_WEIGHTS=${VERIFY_WEIGHTS} python -m tunix.experimental.distributed.runtime.main \
+        SKIP_JAX_PRECOMPILE=1 VERIFY_WEIGHTS=${VERIFY_WEIGHTS} ${ROLLOUT_USE_BATCHED_RPA:+USE_BATCHED_RPA_KERNEL=1} python -m tunix.experimental.distributed.runtime.main \
           --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
           --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
           --process_main=tunix.experimental.examples.math_gsm8k_dist.run_rollout_node.main \
@@ -187,6 +194,7 @@ start_rollout() {
           --lora_alpha=${LORA_ALPHA} \
           --tensor_parallel_size=${ROLLOUT_TENSOR_PARALLEL_SIZE} \
           --maxtext_model_name=${MAXTEXT_MODEL_NAME} \
+          ${ROLLOUT_MAXTEXT_ATTENTION:+--maxtext_attention=${ROLLOUT_MAXTEXT_ATTENTION}} \
       " \
       | kubectl apply -f -
   done

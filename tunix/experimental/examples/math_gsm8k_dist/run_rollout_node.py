@@ -102,6 +102,20 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
           " share Raiden weight-sync tensor names."
       ),
   )
+  parser.add_argument(
+      "--maxtext_attention",
+      type=str,
+      default="",
+      help=(
+          "Override MaxText's inference attention kernel (e.g."
+          " vllm_batched_rpa instead of the maxtext_vllm_adapter default"
+          " vllm_rpa). Passed through maxtext_config; USE_BATCHED_RPA_KERNEL"
+          " must also be set as a pod env var for vllm_batched_rpa, since"
+          " tpu_inference.layers.common.attention_interface reads it at"
+          " module-import time -- MaxText's own os.environ set (on model"
+          " construction) happens too late for that check."
+      ),
+  )
   return parser.parse_args(argv)
 
 
@@ -191,8 +205,11 @@ def _create_vllm_worker(args, tokenizer):
           args.maxtext_model_name,
       )
       engine_kwargs["hf_overrides"] = {"architectures": ["MaxTextForCausalLM"]}
+      maxtext_config_overrides = {"model_name": args.maxtext_model_name}
+      if args.maxtext_attention:
+        maxtext_config_overrides["attention"] = args.maxtext_attention
       engine_kwargs["additional_config"] = {
-          "maxtext_config": {"model_name": args.maxtext_model_name}
+          "maxtext_config": maxtext_config_overrides
       }
     engine_args = AsyncEngineArgs(**engine_kwargs)
     sampler_adapter = vllm_sampler_adapter.VllmSamplerAdapter(
