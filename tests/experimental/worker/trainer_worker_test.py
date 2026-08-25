@@ -21,6 +21,7 @@ AbstractTrainer (fwd_bwd, eval_step, update), and response metadata stamping.
 from absl.testing import absltest
 import numpy as np
 from tunix.experimental.common import datatypes
+from tunix.experimental.common import lineage
 from tunix.experimental.train import abstract_trainer
 from tunix.experimental.worker import trainer_worker
 
@@ -126,6 +127,44 @@ class TrainerWorkerTest(absltest.TestCase):
     step = self.worker.update()
     self.assertEqual(step, 11)
 
+  def test_fwd_bwd_appends_trainer_worker_lineage_event(self):
+    ctx = lineage.LineageContext(
+        tracking_id="batch_0", parent_tracking_ids=["traj_p1_g0"]
+    )
+    ctx.add_event("orchestrator.assembler", "pack")
+
+    payload = datatypes.RLTrainerPayload(
+        advantages=np.array([1.0], dtype=np.float32),
+        loss_mask=np.array([[1]], dtype=np.int32),
+    )
+    request = datatypes.TrainRequest(
+        request_id="req-train-lineage",
+        payload=payload,
+        metadata={"lineage": ctx},
+    )
+
+    resp = self.worker.fwd_bwd(request=request)
+
+    self.assertIn("lineage", resp.metadata)
+    self.assertIs(resp.metadata["lineage"], ctx)
+    self.assertLen(ctx.events, 2)
+    self.assertEqual(ctx.events[1].component, "worker.trainer")
+    self.assertEqual(ctx.events[1].operation, "fwd_bwd")
+    self.assertEqual(ctx.events[1].attributes.get("worker_id"), "trainer_0")
+    self.assertEqual(ctx.events[1].attributes.get("policy_version"), 3)
+
+  def test_fwd_bwd_handles_request_without_lineage(self):
+    payload = datatypes.RLTrainerPayload(
+        advantages=np.array([1.0], dtype=np.float32),
+        loss_mask=np.array([[1]], dtype=np.int32),
+    )
+    request = datatypes.TrainRequest(
+        request_id="req-train-no-lineage",
+        payload=payload,
+        metadata={},
+    )
+    resp = self.worker.fwd_bwd(request=request)
+    self.assertNotIn("lineage", resp.metadata)
 
 if __name__ == "__main__":
   absltest.main()
