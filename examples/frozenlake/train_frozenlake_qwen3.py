@@ -61,6 +61,7 @@ def _canonical_frozenlake_admission_geometry(
     apc_m15_target_arm: str,
     p57_tim_arm: str,
     p57_run_kind: str,
+    p64_numeric_debug: bool = False,
 ) -> tuple[int, str]:
   """Returns the signed mini-batch and sampler admission values.
 
@@ -80,6 +81,8 @@ def _canonical_frozenlake_admission_geometry(
       raise ValueError("M15 APC target debug requires P38 precheck-only mode")
     if p57_tim_arm or p57_run_kind:
       raise ValueError("M15 APC target debug cannot overlap a P57 TIM run")
+    return 32, "none"
+  if p64_numeric_debug:
     return 32, "none"
   return (
       4 if p38_precheck_only else 32,
@@ -414,6 +417,9 @@ CANON_P38_PRECHECK_ONLY = (
     os.getenv("CANON_P38_PRECHECK_ONLY", "0") == "1"
 )
 CANON_APC_M15_TARGET_DEBUG = os.getenv("CANON_APC_M15_TARGET_DEBUG", "")
+CANON_P64_P45_NUMERIC_DEBUG = (
+    os.getenv("CANON_P64_P45_NUMERIC_DEBUG", "0") == "1"
+)
 CANON_ALIGNMENT_TRAIN_MODE = dp_workloads.requires_alignment_train_mode(
     os.environ
 )
@@ -638,6 +644,7 @@ if CANON_P32_WORKLOAD:
           apc_m15_target_arm=CANON_APC_M15_TARGET_DEBUG,
           p57_tim_arm=CANON_P57_TIM_ARM,
           p57_run_kind=CANON_P57_RUN_KIND,
+          p64_numeric_debug=CANON_P64_P45_NUMERIC_DEBUG,
       )
   )
   dp_workloads.validate_frozenlake_max_concurrency(
