@@ -139,7 +139,7 @@ mkdir -p "$state/wandb" "$state/logs" "$xprof_dir" "$perf_dir"
 } >"$raw"
 
 docker_args=(
-  sudo docker run --rm --privileged --net=host --name "$container"
+  sudo docker run --rm --privileged --net=host --ipc=host --name "$container"
   -v /mnt/disks/tunix-data:/mnt/disks/tunix-data
   -v "$model":"$hf_snapshot":ro
   -v "$repo":"$repo":ro
@@ -246,7 +246,7 @@ if [ "$docker_rc" -eq 0 ]; then
     --arm "$arm" --run-root "$root" \
     >"$xprof_census" 2>&1
   xprof_census_rc=$?
-  sudo docker run --rm \
+  sudo docker run --rm --ipc=host \
     -v "$repo":"$repo":ro -v /mnt/disks/tunix-data:/mnt/disks/tunix-data \
     -w "$repo" "$image" \
     python3 "$script_dir/census_gsm8k_semantic_trace.py" \
