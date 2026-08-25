@@ -19,6 +19,8 @@ from unittest import mock
 from absl.testing import absltest
 import jax.numpy as jnp
 import numpy as np
+from tunix.experimental.trajectory import converter as converter_lib
+from tunix.experimental.trajectory import in_memory_store
 from tunix.perf.experimental import constants as perf_constants
 from tunix.perf.experimental import tracer as perf_tracer_v2
 from tunix.rl.agentic import utils
@@ -1131,6 +1133,61 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     # Prompt (len 1, carrying prompt_routing 3) and conversation (len 0)
     self.assertEqual(routed.shape, (1, num_layers, top_k))
     np.testing.assert_array_equal(routed[0], 3)
+
+  @mock.patch.object(utils, 'tokenize_and_generate_masks')
+  def test_trajectory_store_writes(self, mock_convert):
+    mock_convert.side_effect = [
+        ([101], [1]),  # prompt tokens
+        ([301, 302], [1, 1]),  # env tokens 1
+        ([303, 304], [1, 1]),  # env tokens 2
+    ]
+    self.mock_env.final_reward_fn = lambda: 0.5
+    store = in_memory_store.InMemoryTrajectoryStore()
+    metadata = converter_lib.create_trajectory_metadata(
+        traj_id='traj_test_123',
+    )
+    self.mock_agent.trajectory.task = {'prompts': ['Solve math']}
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=self.mock_env,
+        model_call=self.mock_model_call,
+        tokenizer=self.mock_tokenizer,
+        chat_parser=self.mock_chat_parser,
+        trajectory_store=store,
+        metadata=metadata,
+        policy_version=42,
+    )
+    with (
+        mock.patch.object(store, 'flush', wraps=store.flush) as mock_flush,
+        mock.patch.object(store, 'close', wraps=store.close) as mock_close,
+    ):
+      asyncio.run(self._run_collect(engine, mode='Trajectory'))
+      mock_flush.assert_not_called()
+      mock_close.assert_not_called()
+
+    # Verify trajectory store contains the written steps via public API
+    trajs = store.get_trajectories(['traj_test_123'])
+    self.assertLen(trajs, 1)
+    stored_traj = trajs[0]
+    self.assertLen(stored_traj.steps, 5)
+    self.assertEqual(stored_traj.steps[0].step_id, 0)
+    self.assertEqual(stored_traj.steps[0].message, 'Solve math')
+    # Turn 0 agent step (step_id=1) and env step (step_id=2)
+    self.assertEqual(stored_traj.steps[1].mc_return, 3.5)
+    self.assertIsNotNone(stored_traj.steps[1].assistant_tokens)
+    self.assertIsNotNone(stored_traj.steps[1].assistant_masks)
+    self.assertEqual(stored_traj.steps[2].reward, 1.0)
+    self.assertIsNotNone(stored_traj.steps[2].env_tokens)
+    self.assertIsNotNone(stored_traj.steps[2].env_masks)
+    # Turn 1 agent step (step_id=3) and env step (step_id=4, with final reward)
+    self.assertEqual(stored_traj.steps[3].mc_return, 2.5)
+    self.assertEqual(stored_traj.steps[4].reward, 2.5)
+    self.assertTrue(stored_traj.steps[4].done)
+    metas = store.get_trajectories_metadata()
+    self.assertLen(metas, 1)
+    self.assertEqual(metas[0].trajectory_id, 'traj_test_123')
+    self.assertEqual(metas[0].status, 'SUCCEEDED')
+    self.assertEqual(metas[0].target_policy_versions, [42])
 
 
 class _FreshTextTokenizer:
