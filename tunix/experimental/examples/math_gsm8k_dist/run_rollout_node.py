@@ -86,6 +86,23 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   )
   parser.add_argument("--tensor_parallel_size", type=int, default=4)
   parser.add_argument(
+      "--attn_dp_size",
+      type=int,
+      default=0,
+      help=(
+          "Explicit attention-DP degree (tpu-inference's"
+          " sharding.sharding_strategy.attn_dp_size). 0 disables attention"
+          " DP entirely. tensor_parallel_size must be an exact multiple of"
+          " this. Needed when num_kv_heads == tensor_parallel_size: at that"
+          " exact boundary, tpu-inference's own auto-attn_dp computation is"
+          " a no-op (attn_dp ends up 1), so the KV-cache allocator and"
+          " ragged_paged_attention's static shape validator disagree,"
+          " crashing the engine. Splitting off an explicit attn_dp_size"
+          " here (e.g. 2, halving the effective tensor_parallel_size) moves"
+          " off that boundary without changing chip count."
+      ),
+  )
+  parser.add_argument(
       "--sampler_type",
       type=str,
       default="vllm",
@@ -193,6 +210,18 @@ def _create_vllm_worker(args, tokenizer):
       engine_kwargs["hf_overrides"] = {"architectures": ["MaxTextForCausalLM"]}
       engine_kwargs["additional_config"] = {
           "maxtext_config": {"model_name": args.maxtext_model_name}
+      }
+    if args.attn_dp_size:
+      if tp_size % args.attn_dp_size:
+        raise ValueError(
+            f"--tensor_parallel_size={tp_size} must be a multiple of "
+            f"--attn_dp_size={args.attn_dp_size}."
+        )
+      engine_kwargs.setdefault("additional_config", {})["sharding"] = {
+          "sharding_strategy": {
+              "enable_dp_attention": True,
+              "attn_dp_size": args.attn_dp_size,
+          }
       }
     engine_args = AsyncEngineArgs(**engine_kwargs)
     sampler_adapter = vllm_sampler_adapter.VllmSamplerAdapter(
