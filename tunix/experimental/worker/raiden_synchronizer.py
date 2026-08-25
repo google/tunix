@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import collections
+import resource
 import socket
 from typing import Any, List, Optional, Tuple
 
@@ -24,6 +25,14 @@ from absl import logging
 import jax
 import jax.numpy as jnp
 from tunix.experimental.orchestrator import weight_sync
+
+
+def _log_rss(tag: str) -> None:
+  """Logs process peak RSS (GB) -- pinpoints which bind() stage spikes host
+  memory, since ru_maxrss is a high-water mark that only grows.
+  """
+  rss_gb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1e6
+  logging.info("raiden bind rss checkpoint [%s]: %.1f GB (peak)", tag, rss_gb)
 
 _ws_lib: Any = None
 try:
@@ -219,9 +228,13 @@ class RaidenSynchronizer:
     With host_stage the arrays are copied to local CPU memory first; arrays
     backed by the pathways proxy cannot bind in place.
     """
+    _log_rss("bind:start")
     if self._host_stage:
       state = to_host_cpu_state(state)
+    _log_rss("bind:after_host_stage")
     self.names, self.arrays = _filter_bindable(*flatten_weights(state))
+    del state
+    _log_rss("bind:after_flatten")
     if _ws_lib is None:
       return
     if self._sync is None:
@@ -235,8 +248,10 @@ class RaidenSynchronizer:
           bind_ip=None,
           auto_h2d=self._auto_h2d,
       )
+      _log_rss("bind:after_native_construct")
     else:
       self._sync.bind_weights(self.arrays)
+      _log_rss("bind:after_native_rebind")
 
   def _require_sync(self, op: str) -> Any:
     if self._sync is None:
