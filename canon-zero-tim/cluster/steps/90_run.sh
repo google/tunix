@@ -865,7 +865,8 @@ if [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "1" ]; then
       ;;
     cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env|\
     cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env|\
-    cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-apc-debug.env)
+    cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-apc-debug.env|\
+    cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-p64-debug.env)
       p38_fixed_endpoint=untied_lm_head
       p38_fixed_hidden=4096
       p38_fixed_tp=8
@@ -909,7 +910,8 @@ if [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "1" ]; then
         fi
       fi
       ;;
-    cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env)
+    cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env|\
+    cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-p64-debug.env)
       p38_fixed_receipt_args+=(--learner-m 2048)
       if [ "${CANON_P59_RANK_PARALLEL_BACKWARD:-0}" = "1" ]; then
         p38_fixed_receipt_args+=(--p59-local-dp-size 8)
