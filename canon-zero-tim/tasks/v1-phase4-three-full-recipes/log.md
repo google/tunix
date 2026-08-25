@@ -667,3 +667,21 @@
 - Full host regression also passes V1 67/67, P57 144/144, P59 37/37, APC
   31/31, flags 378/378, syntax, and diff hygiene. No target JobSet or TPU
   workload was launched.
+
+## 2026-08-25T09:24:15Z — Publication read back; handoff made executable
+
+- Type: handoff.
+- Fact: the four-CL recovery chain was pushed and exactly read back from
+  `origin/yuxzhang/canon-zero-tim` at
+  `548db7e9f014def3cb2b37e66c6f0e62c2041f1d`; local/remote were 0/0 and no
+  JobSet or TPU workload had been launched from it.
+- Action: added a single current-truth first screen to `HANDOFF.md`, corrected
+  stale pre-publication state, and made the P64 runbook command bind the exact
+  published SHA. Historical failed evidence remains unchanged.
+- Result: the next agent must obtain one explicit matrix choice before apply:
+  recommended A launches GSM8K full plus P64 P45 capture; accepted-risk B
+  launches all four while treating unchanged P45/M15 full as expected
+  Step-0 backward reproductions, not expected-green production runs.
+- Rollback: revert only this documentation refresh; no runtime blob changed.
+- Next: obtain the launch-matrix choice, render fresh never-reused manifests,
+  audit their hashes, then request approval for the exact apply set.

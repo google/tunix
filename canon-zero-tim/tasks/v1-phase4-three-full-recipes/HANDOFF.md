@@ -1,5 +1,89 @@
 # V1 Phase4 three-full handoff
 
+## START HERE — published recovery tree and the one pending decision
+
+This section is the current source of truth. Everything below it is historical
+context unless explicitly linked from here.
+
+- Worktree: `/home/yuxuan/code_rl_repro/worktrees/v1_stable_clip_0825`
+- Local branch: `local/v1-stable-clip-0825`
+- Operator branch: `origin/yuxzhang/canon-zero-tim`
+- Exact published/read-back source:
+  `548db7e9f014def3cb2b37e66c6f0e62c2041f1d`
+- Publication state: local and remote were `0/0` immediately after push. The
+  HANDOFF/state/runbook refresh following that push is documentation-only and
+  is intentionally uncommitted until the user separately approves another
+  commit/push.
+- Resource state: no JobSet or TPU workload has been launched from the new
+  source SHA.
+
+The published recovery consists of four independently revertible CLs:
+
+1. `4c59ba5d` restores Pathways XProf from an attempt-scoped GCS directory and
+   fails closed on missing XPlane/trace artifacts;
+2. `f62eb4bf` adds the frozen DP16xTP4 GSM scale/ownership carrier against an
+   FP64 oracle, with zero optimizer commits;
+3. `3533146d` adds default-off P64 exact-P45 capture plus hash/model-bound
+   group-0 diagnostic replay, also with zero optimizer commits;
+4. `548db7e9` records the phase, signed evidence, gates, and launch-matrix
+   checkpoint.
+
+Release gates are green on the final committed runtime: V1 67/67, P57
+144/144, P59 37/37, APC 31/31, flags 378/378, syntax and diff hygiene. The
+complete immutable-image gate on
+`sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`
+exited zero with one terminal containing `p64_capsule=3`,
+`gsm_scale_replay=1`, and `manifests=3`. This is construction admission, not
+target success.
+
+### Target facts that control the next action
+
+- GSM8K DP16xTP4: strict Zero-TIM passed and two real optimizer commits were
+  completed. Its gradients were element-finite; the old `norm=inf` was FP32
+  sum-of-squares overflow. The later stop was the now-repaired XProf path.
+- P45 DP8xTP8: strict Zero-TIM passed, then rank 1 produced 253 non-finite
+  staged gradient leaves before the first optimizer commit.
+- M15 DP8xTP8: strict Zero-TIM passed, then rank 3 produced 122 non-finite
+  staged gradient leaves before the first optimizer commit.
+- Both FrozenLake recipes use RLOO. An all-equal reward group gives exact-zero
+  advantages without a standard-deviation division. Zero reward remains a
+  possible trigger for a zero-cotangent-unsafe VJP, not a proven divide-by-zero
+  root cause.
+
+### The only pending decision
+
+The user requested four concurrent jobs: GSM8K full, P64 P45 capture, P45
+full, and M15 full. Do not apply anything until the user chooses one of these
+matrices explicitly:
+
+| Choice | Apply now | Meaning |
+|---|---|---|
+| A — recommended | GSM8K full + P64 P45 capture | Obtain useful full-training and first-red evidence; hold the two unchanged known-red FrozenLake full recipes. |
+| B — accepted-risk | all four requested jobs | P45/M15 full are expected to reproduce Step-0 backward reds and add little localization evidence. Preserve them as failed target evidence if they do. |
+
+### Executable next action after that decision
+
+1. Fetch and require the operator branch still resolves exactly to
+   `548db7e9f014def3cb2b37e66c6f0e62c2041f1d`.
+2. Generate fresh, never-reused IDs and output directories. Render only—do not
+   apply—using the commands at the top of `RUNBOOK.md`. Both renderers must use
+   the exact published SHA above.
+3. Require `P64_P45_NUMERIC_RENDER_PASS ... capsule_mode=capture
+   optimizer_commits=0`, three `V1_HP_MANIFEST_PASS` records, and one
+   `V1_HP_THREE_FULL_RENDER_PASS manifests=3`. Record every YAML SHA; never
+   hand-edit a rendered manifest.
+4. Check that no conflicting P51/P59/P62/P64 or three-full JobSet is live and
+   obtain explicit approval for the exact `kubectl apply` set. Never pipe an
+   apply command.
+5. On every target, any real `CANON_ALIGN`/`CANON_ALIGN_PRE verdict=FAIL` is a
+   hard death. Freeze that run and preserve all evidence. P64 must commit zero
+   updates; its capture executes all 32 groups. Replay is optional, uses a new
+   label, executes group 0 only, and is permanently `certification=0`.
+
+The active technical plan and classifier branches are in
+`phases/v1-p4-8-attempt7-target-recovery.md`. `RUNBOOK.md` owns rendering and
+apply commands. `state.md` owns the one-line resumable state.
+
 ## 2026-08-25 launch-matrix checkpoint — both FrozenLake full recipes are known red
 
 The user requested one concurrent wave containing GSM8K full, P64 P45 capture,
@@ -12,11 +96,12 @@ group produces exact-zero advantages without a standard-deviation division.
 The leading hypothesis is a data-dependent TP8 VJP/zero-cotangent failure, not
 reward-normalization divide-by-zero.
 
-Do not call unchanged P45/M15 full relaunches expected-green. Safe progress is
-to publish the admitted recovery tree and render P64 P45 capture. Applying the
-two known-red full recipes is a distinct final matrix choice; their current
-profiles do not add first-red instrumentation and would most likely reproduce
-the existing Step-0 evidence.
+Do not call unchanged P45/M15 full relaunches expected-green. At this historical
+checkpoint, safe progress was to publish the admitted recovery tree and render
+P64 P45 capture; publication is now complete as recorded in START HERE.
+Applying the two known-red full recipes remains a distinct final matrix choice;
+their current profiles do not add first-red instrumentation and would most
+likely reproduce the existing Step-0 evidence.
 
 ## 2026-08-25 superseding status — P64 capsule replay admitted through pinned image
 
@@ -49,15 +134,15 @@ zero with the same unique terminal, including `p64_capsule=3`,
 receipt only; the earlier r1 directory remains the durable signed raw log.
 
 Claim ceiling: `IMPLEMENTED / HOST PASS / EXACT_IMAGE PASS / TPU TARGET NOT
-RUN`. The admitted runtime is now split into three local commits:
+RUN`. The admitted runtime was split into three runtime commits:
 `4c59ba5d` (GCS XProf restore), `f62eb4bf` (frozen GSM scale oracle), and
-`3533146d` (P64 capsule/replay). They remain unpushed at this checkpoint. No
-JobSet, TPU workload, or optimizer commit occurred. Publish and read back one
-immutable SHA before rendering one fresh capture. Use replay only if that full
-capture shows that another earlier observer is needed. Do not relaunch from an
-unpublished tree.
+`3533146d` (P64 capsule/replay), followed by ledger commit `548db7e9`. The
+complete chain is published and read back at
+`548db7e9f014def3cb2b37e66c6f0e62c2041f1d`. No JobSet or TPU workload has
+been launched from it. Use replay only if a fresh full capture shows that
+another earlier observer is needed. Do not relaunch from any other SHA.
 
-## 2026-08-25 current status — P63 published; launch approval pending
+## Historical — P63 publication boundary before Attempt-7 recovery
 
 G5b resolved the Attempt-7 ambiguity on the real GSM8K DP16xTP4 target: all
 16 backward groups and the full accumulator are element-finite, denominator

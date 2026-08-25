@@ -2,14 +2,16 @@
 
 ## Current boundary — P64 P45 capture, then optional diagnostic replay
 
-Do not launch from a dirty or merely local tree. The recovery runtime is split
-into three local CLs at `4c59ba5d`, `f62eb4bf`, and `3533146d`; publish the
-complete ledger CL and read back the exact published 40-character SHA before
-rendering one fresh P45 capture. The renderer never launches:
+The recovery chain is published and exactly read back at
+`548db7e9f014def3cb2b37e66c6f0e62c2041f1d`. Do not launch from a dirty,
+merely local, or different tree. The user must first choose launch matrix A
+(GSM8K full plus P64 capture, recommended) or B (all four jobs, accepting that
+unchanged P45/M15 full are known Step-0 backward reds). After that choice,
+render one fresh P45 capture; the renderer never launches:
 
 ```bash
 python3 canon-zero-tim/tasks/v1-phase4-three-full-recipes/scripts/render_p64_p45_numeric_debug.py \
-  --source-commit <approved-40-character-sha> \
+  --source-commit 548db7e9f014def3cb2b37e66c6f0e62c2041f1d \
   --run-id <fresh-p64-capture-id> \
   --output-dir /tmp/v1-p64-<fresh-p64-capture-id> \
   --capsule-mode capture
@@ -47,7 +49,7 @@ Replay must print transport, producer-bypass, live-model verification, and
 Its classifier evidence kind is `diagnostic-replay-not-certification`; never
 use it as a fresh strict target verdict or optimizer result.
 
-## Current boundary — P63 published; render before launch approval
+## Historical — P63 publication boundary before Attempt-7 recovery
 
 The P62 first-red campaign is complete. Real DP16xTP4 G5b proved that the
 backward tree is finite and the old `norm=inf` is naive FP32 sum-of-squares
@@ -125,7 +127,7 @@ single-use; failed attempts are never reused.
 
 ```bash
 python3 canon-zero-tim/tasks/v1-phase4-three-full-recipes/scripts/render_three_full_recipes.py \
-  --source-commit <approved-40-character-sha> \
+  --source-commit 548db7e9f014def3cb2b37e66c6f0e62c2041f1d \
   --output-dir /tmp/v1-hp-three-full-a \
   --gsm8k-run-id <fresh-id> \
   --p45-run-id <fresh-id> \
