@@ -36,7 +36,20 @@ $docker run --rm \
     XLA_FLAGS=--xla_force_host_platform_device_count=4 \
       python3 tests/rl/dp_training_test.py \
         DPTrainingTest.test_dp2_tp2_rank_parallel_vjp_matches_serial_rank_isolation
+    XLA_FLAGS=--xla_force_host_platform_device_count=64 \
+      python3 tests/rl/dp_training_test.py \
+        DPTrainingTest.test_dp8_tp8_rank_gradient_reducer_consumes_finite_staged_table \
+        DPTrainingTest.test_parallel_staged_common_nan_is_nonfinite_not_replica_mismatch \
+        DPTrainingTest.test_finite_replica_mismatch_remains_fatal
+    python3 tests/sft/sft_utils_test.py StableGlobalNormTest
+    python3 tests/sft/peft_trainer_test.py \
+      PeftTrainerTest.test_p62_precomputed_diagnostic_discard_resets_without_commit
+    python3 tests/rl/canonical_qwen3_adapter_test.py \
+      CanonicalQwen3AdapterTest.test_p62_tree_receipt_catches_first_nonfinite_boundary \
+      CanonicalQwen3AdapterTest.test_p62_loss_receipt_locks_denominator_and_scale \
+      CanonicalQwen3AdapterTest.test_p62_flag_parser_is_exact_boolean
     python3 canon-zero-tim/tests/p33_workloads/test_dp_workloads.py \
+      DPWorkloadsTest.test_p62_numeric_debug_is_exact_no_commit_geometry \
       DPWorkloadsTest.test_p57_zero_full_admits_its_signed_wandb_project_only \
       DPWorkloadsTest.test_p57_m15_uses_its_signed_wide_token_contract \
       DPWorkloadsTest.test_p57_token_contract_rejects_partial_or_foreign_pairs
@@ -48,5 +61,5 @@ $docker run --rm \
     python3 canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/test_package_full_replay_carrier.py
     python3 canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/test_target_carrier.py
     python3 canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/test_resolved_env.py
-    echo "V1_HP_EXACT_IMAGE_PASS dp16_gathered=1 dp2tp2_parallel=2 p59_tp4_tp8=2 p59_real_shim=4 p59_rpa=2 p59_fused_linear=2 p57_wandb=1 m15_token=1 apc_m15_carrier=33 perfetto_window=1 manifests=3"
+    echo "V1_HP_EXACT_IMAGE_PASS dp16_gathered=1 dp2tp2_parallel=2 p59_tp4_tp8=2 p59_real_shim=4 p59_rpa=2 p59_fused_linear=2 p62_numeric=6 p57_wandb=1 m15_token=1 apc_m15_carrier=33 perfetto_window=1 manifests=3"
   '

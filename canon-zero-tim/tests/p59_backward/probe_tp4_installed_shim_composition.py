@@ -234,6 +234,18 @@ def main() -> None:
       scope_name="zt/tr/dp_parallel/installed_projection",
   )
   staged, dhidden = parallel(weight, hidden, cotangent)
+  projection_record = canonical_qwen3_adapter._p62_emit_tree_receipt(
+      stage="engine_projection_vjp",
+      group=0,
+      group_count=2,
+      tree={"weight": staged},
+      ranked=True,
+      force=True,
+  )
+  if not projection_record["all_finite"]:
+    raise AssertionError(
+        f"installed projection P62 receipt changed: {projection_record}"
+    )
 
   _, ordinary_pullback = jax.vjp(
       lambda weight_arg, hidden_arg: jnp.einsum(
