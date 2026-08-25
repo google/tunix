@@ -28,6 +28,7 @@ import humanize
 import jax
 import jax.numpy as jnp
 import numpy as np
+import optax
 from tunix.oss import utils as google_utils
 
 
@@ -85,6 +86,164 @@ def stable_global_norm(tree: Any) -> jax.Array:
   saturated = jnp.minimum(raw_norm, jnp.finfo(jnp.float32).max)
   finite_norm = jnp.where(max_abs == 0.0, 0.0, saturated)
   return jnp.where(all_finite, finite_norm, max_abs)
+
+
+def hybrid_global_norm_stats(
+    tree: Any, *, max_norm: float | jax.Array | None = None
+) -> dict[str, jax.Array]:
+  """Returns stock and overflow-safe norm state without sanitizing inputs.
+
+  The selected norm is byte-identical to the stock Optax norm whenever the
+  latter is finite.  Max-scaled L2 is selected only for an independently
+  all-finite tree whose stock sum of squares overflowed.  A tree containing
+  NaN or Inf therefore retains its non-finite stock result.
+  """
+  naive_norm = optax.tree.norm(tree)
+  max_abs, scaled_sumsq, all_finite = _scaled_l2_components(tree)
+  root = jnp.sqrt(scaled_sumsq)
+  raw_stable_norm = max_abs * root
+  stable_norm = jnp.where(
+      max_abs == 0.0,
+      jnp.asarray(0.0, jnp.float32),
+      jnp.minimum(raw_stable_norm, jnp.finfo(jnp.float32).max),
+  )
+  fallback_used = jnp.logical_and(
+      all_finite, jnp.logical_not(jnp.isfinite(naive_norm))
+  )
+  selected_norm = jnp.where(
+      fallback_used, stable_norm, naive_norm.astype(jnp.float32)
+  )
+  result = {
+      "all_finite": all_finite,
+      "naive_norm": naive_norm,
+      "naive_norm_finite": jnp.isfinite(naive_norm),
+      "max_abs": max_abs,
+      "scaled_sumsq": scaled_sumsq,
+      "stable_norm": stable_norm,
+      "fallback_used": fallback_used,
+      "selected_norm": selected_norm,
+  }
+  if max_norm is not None:
+    max_norm_array = jnp.asarray(max_norm, jnp.float32)
+    safe_norm = jnp.where(
+        jnp.logical_and(
+            jnp.isfinite(selected_norm), selected_norm > 0.0
+        ),
+        selected_norm,
+        jnp.asarray(1.0, jnp.float32),
+    )
+    result["max_norm"] = max_norm_array
+    result["clip_factor"] = jnp.where(
+        selected_norm < max_norm_array,
+        jnp.asarray(1.0, jnp.float32),
+        max_norm_array / safe_norm,
+    )
+  return result
+
+
+def hybrid_global_norm(tree: Any) -> jax.Array:
+  """Returns stock norm, falling back only for finite FP32 overflow."""
+  return hybrid_global_norm_stats(tree)["selected_norm"]
+
+
+def overflow_safe_clip_by_global_norm(
+    max_norm: float,
+) -> optax.GradientTransformation:
+  """Preserves stock clipping except for proven finite norm overflow."""
+  stock = optax.clip_by_global_norm(max_norm)
+
+  def update_fn(updates, state, params=None):
+    stock_updates, _ = stock.update(updates, state, params)
+    stats = hybrid_global_norm_stats(updates, max_norm=max_norm)
+    stable_norm = stats["stable_norm"]
+    stable_trigger = jnp.squeeze(stable_norm < max_norm)
+
+    def stable_clip(value):
+      clipped = (
+          value / stable_norm.astype(value.dtype)
+      ) * jnp.asarray(max_norm, value.dtype)
+      return jax.lax.select(stable_trigger, value, clipped)
+
+    stable_updates = jax.tree.map(stable_clip, updates)
+    fallback = jnp.squeeze(stats["fallback_used"])
+    selected = jax.tree.map(
+        lambda stable, original: jax.lax.select(
+            fallback, stable, original
+        ),
+        stable_updates,
+        stock_updates,
+    )
+    return selected, state
+
+  return optax.GradientTransformation(stock.init, update_fn)
+
+
+_P63_CONTEXTS = {
+    (
+        "cluster/profiles/qwen3-1p7b-dp16-tp4-gsm8k-v1-hp.env",
+        "qwen3-1p7b-dp16-tp4-gsm8k-v1-hp",
+        "gsm8k",
+    ): 1.0,
+    (
+        "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env",
+        "qwen3-8b-dp8-tp8-frozenlake-v1-hp",
+        "frozenlake-dp8-tp8",
+    ): 100.0,
+}
+
+
+def canonical_overflow_safe_clip_max_norm(
+    environ: dict[str, str],
+) -> float | None:
+  """Validates the exact P63 production context and returns its max norm."""
+  raw = environ.get("CANON_P63_OVERFLOW_SAFE_CLIP")
+  if raw is None or raw == "0":
+    return None
+  if raw != "1":
+    raise ValueError(
+        "CANON_P63_OVERFLOW_SAFE_CLIP must be absent, 0, or 1"
+    )
+  key = (
+      environ.get("CANON_PROFILE_FILE", ""),
+      environ.get("CANON_PROFILE", ""),
+      environ.get("CANON_P32_WORKLOAD", ""),
+  )
+  if key not in _P63_CONTEXTS:
+    raise ValueError(
+        "CANON_P63_OVERFLOW_SAFE_CLIP is restricted to the exact Phase4 "
+        f"GSM8K/FrozenLake profiles; found {key!r}"
+    )
+  required = {
+      "CANON_V1_HP_FULL": "1",
+      "CANON_P33_WORKLOAD_LAUNCH_ADMITTED": "1",
+      "CANON_P33_RUN_STAGE": "full",
+      "CANON_P33_NO_COMMIT": "0",
+      "CANON_P28_SEGMENTED_TRAIN": "1",
+      "CANON_P28_G6_UPDATE": "1",
+      "CANON_P59_RANK_PARALLEL_BACKWARD": "1",
+      "CANON_VLLM_ENABLE_PREFIX_CACHING": "0",
+  }
+  wrong = {
+      name: environ.get(name)
+      for name, expected in required.items()
+      if environ.get(name) != expected
+  }
+  if wrong:
+    raise ValueError(
+        "CANON_P63_OVERFLOW_SAFE_CLIP production contract changed: "
+        f"{wrong}"
+    )
+  warn_only_name = (
+      "CANON_GSM8K_ALIGNMENT_WARN_ONLY"
+      if key[2] == "gsm8k"
+      else "CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY"
+  )
+  if environ.get(warn_only_name) != "0":
+    raise ValueError(
+        "CANON_P63_OVERFLOW_SAFE_CLIP requires strict alignment: "
+        f"{warn_only_name}={environ.get(warn_only_name)!r}"
+    )
+  return _P63_CONTEXTS[key]
 
 
 @jax.jit

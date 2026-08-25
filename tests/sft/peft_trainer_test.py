@@ -1515,6 +1515,66 @@ class PeftTrainerTest(parameterized.TestCase):
     self.assertIsNone(scaled._jitted_precomputed_gradient_scaled_step_fn)
     self.assertIsNotNone(scaled._jitted_precomputed_gradient_scaled_step_impl)
 
+  def test_p63_finite_overflow_commits_nonzero_clipped_update(self):
+    config = peft_trainer.TrainingConfig(
+        eval_every_n_steps=100,
+        max_steps=1,
+        gradient_accumulation_steps=16,
+        checkpoint_root_directory=None,
+    )
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    optimizer = optax.chain(
+        utils.overflow_safe_clip_by_global_norm(1.0),
+        optax.sgd(1.0e-3),
+    )
+    trainer = peft_trainer.PeftTrainer(model, optimizer, config)
+    env = {
+        "CANON_ALIGNMENT_GATE": "1",
+        "CANON_ALIGNMENT_TRAIN": "1",
+        "CANON_P28_SEGMENTED_TRAIN": "1",
+        "CANON_P28_G6_UPDATE": "1",
+        "CANON_P28_G5C_ONLY": "0",
+        "CANON_P33_WORKLOAD_LAUNCH_ADMITTED": "1",
+        "CANON_LOCAL_TRAJECTORIES": "16",
+        "CANON_P63_OVERFLOW_SAFE_CLIP": "1",
+        "CANON_PROFILE_FILE": (
+            "cluster/profiles/qwen3-1p7b-dp16-tp4-gsm8k-v1-hp.env"
+        ),
+        "CANON_PROFILE": "qwen3-1p7b-dp16-tp4-gsm8k-v1-hp",
+        "CANON_P32_WORKLOAD": "gsm8k",
+        "CANON_V1_HP_FULL": "1",
+        "CANON_P33_RUN_STAGE": "full",
+        "CANON_P33_NO_COMMIT": "0",
+        "CANON_P59_RANK_PARALLEL_BACKWARD": "1",
+        "CANON_VLLM_ENABLE_PREFIX_CACHING": "0",
+        "CANON_GSM8K_ALIGNMENT_WARN_ONLY": "0",
+        "CANON_PERF_LOG": "0",
+    }
+    with mock.patch.dict(os.environ, env, clear=False):
+      for index in range(16):
+        gradient = jax.tree.map(
+            lambda value: type(value)(
+                jnp.full_like(value[...], 1.0e20, dtype=jnp.float32)
+            ),
+            nnx.state(trainer.model, nnx.Param),
+            is_leaf=lambda value: isinstance(value, nnx.VariableState),
+        )
+        norm = trainer.accumulate_precomputed_gradient_microbatch(
+            gradient, microbatch_index=index
+        )
+        self.assertTrue(np.isfinite(float(np.asarray(norm))))
+      commit_norm = trainer.commit_precomputed_gradients()
+    self.assertTrue(np.isfinite(float(np.asarray(commit_norm))))
+    evidence = trainer.consume_precomputed_commit_evidence()
+    clip = evidence["overflow_safe_clip"]
+    self.assertTrue(clip["all_finite"])
+    self.assertFalse(clip["naive_norm_finite"])
+    self.assertTrue(clip["fallback_used"])
+    self.assertEqual(clip["naive_norm"], "inf")
+    self.assertGreater(clip["clip_factor"], 0.0)
+    self.assertGreater(evidence["parameter_changed_elements"], 0)
+    self.assertTrue(evidence["parameter_delta_finite"])
+
   @parameterized.named_parameters(
       ("zero_lr", 0.0, False),
       ("constant_lr", 1.0e-3, True),

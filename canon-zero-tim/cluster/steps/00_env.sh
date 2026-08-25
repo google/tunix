@@ -139,6 +139,45 @@ case "${CANON_P59_RANK_PARALLEL_BACKWARD:-0}" in
     fail=1
     ;;
 esac
+case "${CANON_P63_OVERFLOW_SAFE_CLIP:-0}" in
+  0) ;;
+  1)
+    case "${CANON_PROFILE_FILE:-}:${CANON_PROFILE:-}:${CANON_P32_WORKLOAD:-}" in
+      cluster/profiles/qwen3-1p7b-dp16-tp4-gsm8k-v1-hp.env:qwen3-1p7b-dp16-tp4-gsm8k-v1-hp:gsm8k)
+        [ "${CANON_GSM8K_ALIGNMENT_WARN_ONLY:-1}" = "0" ] || {
+          echo "[env] P63 GSM8K overflow-safe clip requires strict alignment" >&2
+          fail=1
+        }
+        ;;
+      cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env:qwen3-8b-dp8-tp8-frozenlake-v1-hp:frozenlake-dp8-tp8)
+        [ "${CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY:-1}" = "0" ] || {
+          echo "[env] P63 FrozenLake overflow-safe clip requires strict alignment" >&2
+          fail=1
+        }
+        ;;
+      *)
+        echo "[env] P63 overflow-safe clip is restricted to exact Phase4 full profiles" >&2
+        fail=1
+        ;;
+    esac
+    [ "${CANON_V1_HP_FULL:-0}" = "1" ] && \
+    [ "${CANON_P33_WORKLOAD_LAUNCH_ADMITTED:-0}" = "1" ] && \
+    [ "${CANON_P33_RUN_STAGE:-}" = "full" ] && \
+    [ "${CANON_P33_NO_COMMIT:-1}" = "0" ] && \
+    [ "${CANON_P28_SEGMENTED_TRAIN:-0}" = "1" ] && \
+    [ "${CANON_P28_G6_UPDATE:-0}" = "1" ] && \
+    [ "${CANON_P59_RANK_PARALLEL_BACKWARD:-0}" = "1" ] && \
+    [ "${CANON_VLLM_ENABLE_PREFIX_CACHING:-1}" = "0" ] || {
+      echo "[env] P63 overflow-safe clip requires strict committed P59 full training with APC off" >&2
+      fail=1
+    }
+    echo "[env] P63 hybrid overflow-safe global-norm clipping enabled"
+    ;;
+  *)
+    echo "[env] CANON_P63_OVERFLOW_SAFE_CLIP must be exactly 0 or 1" >&2
+    fail=1
+    ;;
+esac
 case "${CANON_P59_DP4_TAIL8:-0}" in
   0) ;;
   1)

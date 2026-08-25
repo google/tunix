@@ -221,6 +221,7 @@ class NumericDebugTest(unittest.TestCase):
           "test \"$CANON_P59_RANK_PARALLEL_BACKWARD\" = 1; "
           "test \"$CANON_P38_FIXED_LM_HEAD\" = 1; "
           "test \"$CANON_V1_HP_FULL\" = 0; "
+          "test \"${CANON_P63_OVERFLOW_SAFE_CLIP:-0}\" = 0; "
           "test \"$CANON_VLLM_ENABLE_PREFIX_CACHING\" = 0"
       )
       result = subprocess.run(

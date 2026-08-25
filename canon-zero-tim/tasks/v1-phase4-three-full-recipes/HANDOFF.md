@@ -1,5 +1,48 @@
 # V1 Phase4 three-full handoff
 
+## 2026-08-25 current status — P63 admitted; publication and launch approvals pending
+
+G5b resolved the Attempt-7 ambiguity on the real GSM8K DP16xTP4 target: all
+16 backward groups and the full accumulator are element-finite, denominator
+16 is exact, and only Optax's naive FP32 sum of squares overflows. The scoped
+`CANON_P63_OVERFLOW_SAFE_CLIP` repair is now implemented. It returns the stock
+Optax transform byte-for-byte whenever the stock norm is finite, selects
+max-scaled L2 only when an independent all-finite predicate proves finite
+overflow, and never admits a tree containing NaN/Inf. Max norms remain GSM8K
+1 and FrozenLake 100.
+
+The final dirty release candidate is
+`/home/yuxuan/code_rl_repro/worktrees/v1_stable_clip_0825`, branch
+`local/v1-stable-clip-0825`, on base and current remote tip
+`22da654ab846b6d3b8a5c0e78e9ded6e04178fd1`. Host gates pass V1 45/45,
+P57 144/144, P59 37/37, APC 31/31, flags 372/372, syntax, and diff hygiene.
+The complete pinned image
+`sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`
+exits zero with exactly one `V1_HP_EXACT_IMAGE_PASS ... p63_clip=1 ...
+manifests=3`. Its raw log SHA is
+`31126e623c7ad775614a3ce1ff89d3798d095482d0cbefc84a47ae0d0a2d6c44`;
+receipt, checksums, and tested runtime hashes are under
+`evidence/v1_hp_p63_exact_image_20260825_r2/`. The sandbox-blocked r1 never
+entered Docker and is preserved as infrastructure-inconclusive.
+
+Release verdict: `GO FOR COMMIT REVIEW`, not yet `GO FOR LAUNCH`. No commit or
+push exists for this P63 tree, and no manifest has been rendered. Obtain the
+user's explicit commit/push approval, read back the exact remote 40-character
+SHA, render three fresh manifests, verify their hashes, check TPU/storage
+availability, then obtain separate explicit launch approval. Apply GSM8K
+DP16xTP4 (200), FrozenLake P45 DP8xTP8 (300), and FrozenLake M15 DP8xTP8
+(300) in one wave; do not gate one healthy launch on another recipe's first
+commit.
+
+Every target remains strict Zero-TIM and APC-off. Each first optimizer
+transaction independently requires zero real `CANON_ALIGN verdict=FAIL`, the
+registered P59 target-shape receipts, and one valid P63 receipt. GSM8K must
+actually observe the finite-overflow fallback; every receipt must show an
+all-finite tree, finite selected norm and clip factor, and the exact max norm.
+The complete horizon, XProf, Perfetto, JAX-cache, evaluation, checkpoint, and
+postflight requirements are unchanged. Current claim ceiling is `HOST PASS /
+EXACT_IMAGE PASS / TARGET OPTIMIZER COMMIT NOT RUN`.
+
 ## 2026-08-25 superseding status — G5b full-log carrier ready for commit review
 
 The preserved six-line P62 target excerpt is not a complete G5 result. It

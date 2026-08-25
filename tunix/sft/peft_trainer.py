@@ -19,6 +19,7 @@ import contextlib
 import dataclasses
 import functools
 import gc
+import math
 import os
 import time
 from typing import Any, Callable, Concatenate, Dict, List, ParamSpec, Tuple
@@ -389,6 +390,16 @@ def _precomputed_expected_microbatches(environ) -> int:
   return 4
 
 
+def _precomputed_gradient_norm(tree: Any) -> ArrayLike:
+  """Returns the stock norm or the exact-profile P63 hybrid norm."""
+  float_tree = jax.tree.map(
+      lambda value: value.astype(jnp.float32), tree
+  )
+  if utils.canonical_overflow_safe_clip_max_norm(os.environ) is not None:
+    return utils.hybrid_global_norm(float_tree)
+  return optax.global_norm(float_tree)
+
+
 def _requires_precomputed_gradient_accumulator(environ) -> bool:
   """Returns whether the explicit segmented update path needs its accumulator."""
   return (
@@ -676,9 +687,7 @@ class PeftTrainer:
   ) -> ArrayLike:
     """Accumulates one externally computed gradient without updating."""
     grad_accumulator.add(grads, denom=jnp.asarray(1.0, jnp.float32))
-    return optax.global_norm(jax.tree.map(
-        lambda value: value.astype(jnp.float32), grads
-    ))
+    return _precomputed_gradient_norm(grads)
 
   def _precomputed_gradient_pair_step(
       self,
@@ -692,9 +701,7 @@ class PeftTrainer:
         lambda a, b: (a + b) * multiplier.astype(a.dtype), left, right
     )
     grad_accumulator.add(paired, denom=jnp.asarray(1.0, jnp.float32))
-    return optax.global_norm(jax.tree.map(
-        lambda value: value.astype(jnp.float32), paired
-    ))
+    return _precomputed_gradient_norm(paired)
 
   def _precomputed_gradient_scaled_step(
       self,
@@ -707,21 +714,17 @@ class PeftTrainer:
         lambda value: value * multiplier.astype(value.dtype), grads
     )
     grad_accumulator.add(scaled, denom=jnp.asarray(1.0, jnp.float32))
-    return optax.global_norm(jax.tree.map(
-        lambda value: value.astype(jnp.float32), scaled
-    ))
+    return _precomputed_gradient_norm(scaled)
 
   def _precomputed_gradient_commit(
       self,
       model: nnx.Module,
       optimizer: nnx.Optimizer,
       grad_accumulator: GradientAccumulator,
-  ) -> tuple[ArrayLike, dict[str, tuple[ArrayLike, ...]]]:
+  ) -> tuple[ArrayLike, dict[str, Any]]:
     """Commits the already accumulated G6 gradient exactly once."""
     acc_grads = grad_accumulator.get()
-    norm = optax.global_norm(jax.tree.map(
-        lambda value: value.astype(jnp.float32), acc_grads
-    ))
+    norm = _precomputed_gradient_norm(acc_grads)
     acc_leaves, acc_treedef = jax.tree_util.tree_flatten(acc_grads)
     param_dtypes = [
         value.dtype
@@ -732,6 +735,14 @@ class PeftTrainer:
         [value.astype(dtype) for value, dtype in zip(
             acc_leaves, param_dtypes, strict=True
         )],
+    )
+    p63_max_norm = utils.canonical_overflow_safe_clip_max_norm(os.environ)
+    p63_stats = (
+        utils.hybrid_global_norm_stats(
+            acc_grads, max_norm=p63_max_norm
+        )
+        if p63_max_norm is not None
+        else None
     )
     # JAX arrays are immutable.  Holding the input references is sufficient for
     # the post-rounding comparison and avoids asking XLA to materialize an
@@ -775,6 +786,8 @@ class PeftTrainer:
             jnp.all(jnp.isfinite(delta)) for delta in parameter_deltas
         ),
     }
+    if p63_stats is not None:
+      commit_evidence["overflow_safe_clip"] = p63_stats
     grad_accumulator.reset()
     return norm, commit_evidence
 
@@ -1195,6 +1208,71 @@ class PeftTrainer:
         ),
         "parameter_delta_finite": _all_true("parameter_delta_finite"),
     }
+    p63_max_norm = utils.canonical_overflow_safe_clip_max_norm(os.environ)
+    if p63_max_norm is not None:
+      clip_stats = host_evidence.get("overflow_safe_clip")
+      if not isinstance(clip_stats, dict):
+        raise RuntimeError("P63 optimizer clip evidence is unavailable")
+
+      def _p63_float(name: str) -> float:
+        return float(np.asarray(clip_stats[name]))
+
+      naive_norm = _p63_float("naive_norm")
+      stable_norm = _p63_float("stable_norm")
+      selected_norm = _p63_float("selected_norm")
+      clip_factor = _p63_float("clip_factor")
+      all_finite = bool(np.asarray(clip_stats["all_finite"]))
+      naive_norm_finite = bool(
+          np.asarray(clip_stats["naive_norm_finite"])
+      )
+      fallback_used = bool(np.asarray(clip_stats["fallback_used"]))
+      max_norm = _p63_float("max_norm")
+      valid = (
+          all_finite
+          and math.isfinite(stable_norm)
+          and stable_norm >= 0.0
+          and math.isfinite(selected_norm)
+          and selected_norm >= 0.0
+          and math.isfinite(clip_factor)
+          and 0.0 < clip_factor <= 1.0
+          and max_norm == p63_max_norm
+          and fallback_used == (not naive_norm_finite)
+      )
+      if not valid:
+        raise RuntimeError(
+            "P63 optimizer clip evidence is invalid: "
+            f"all_finite={all_finite} naive_norm={naive_norm} "
+            f"naive_norm_finite={naive_norm_finite} "
+            f"stable_norm={stable_norm} selected_norm={selected_norm} "
+            f"fallback_used={fallback_used} clip_factor={clip_factor} "
+            f"max_norm={max_norm}"
+        )
+      clip_receipt = {
+          "enabled": True,
+          "all_finite": all_finite,
+          "naive_norm": (
+              naive_norm if math.isfinite(naive_norm) else "inf"
+          ),
+          "naive_norm_finite": naive_norm_finite,
+          "stable_norm": stable_norm,
+          "selected_norm": selected_norm,
+          "fallback_used": fallback_used,
+          "clip_factor": clip_factor,
+          "max_norm": max_norm,
+      }
+      self._last_precomputed_commit_evidence[
+          "overflow_safe_clip"
+      ] = clip_receipt
+      print(
+          "[P63.STABLE_CLIP] "
+          f"update={self._train_steps} all_finite=1 "
+          f"naive_norm={clip_receipt['naive_norm']} "
+          f"naive_norm_finite={int(naive_norm_finite)} "
+          f"stable_norm={stable_norm} selected_norm={selected_norm} "
+          f"fallback_used={int(fallback_used)} "
+          f"clip_factor={clip_factor} max_norm={max_norm}",
+          flush=True,
+      )
     if self.config.optimizer_offload:
       transfer_start = time.perf_counter()
       self._put_optimizer_state_on_memory_kind("pinned_host")

@@ -27,6 +27,7 @@ _RECIPES = {
         "local_vocab": 37984,
         "fixed_local_vocab": 38144,
         "endpoint": "tied_embed",
+        "max_grad_norm": 1.0,
         "apc": False,
         "candidate": "",
         "split": "",
@@ -44,6 +45,7 @@ _RECIPES = {
         "local_vocab": 18992,
         "fixed_local_vocab": 19200,
         "endpoint": "untied_lm_head",
+        "max_grad_norm": 100.0,
         "apc": False,
         "candidate": "",
         "split": "",
@@ -61,6 +63,7 @@ _RECIPES = {
         "local_vocab": 18992,
         "fixed_local_vocab": 19200,
         "endpoint": "untied_lm_head",
+        "max_grad_norm": 100.0,
         "apc": False,
         "candidate": "m15",
         "split": "main",
@@ -312,6 +315,7 @@ def classify(
       "CANON_P33_RUN_STAGE": "full",
       "CANON_P33_NO_COMMIT": "0",
       "CANON_P59_RANK_PARALLEL_BACKWARD": "1",
+      "CANON_P63_OVERFLOW_SAFE_CLIP": "1",
       "CANON_CONTINUE_DECODE": "8",
       "CANON_FIXED_AR_GATHER": "1",
       "CANON_PALLAS_GATHERED_LOGPROBS": "1",
@@ -598,6 +602,7 @@ def classify(
 
   updates = _json_lines(update_report)
   _require(len(updates) == expected_updates, f"updates={len(updates)} expected={expected_updates}", reasons)
+  p63_fallbacks = 0
   for index, update in enumerate(updates):
     expected = {
         "dp_rank_pullbacks_per_transaction": dp_size,
@@ -611,6 +616,60 @@ def classify(
     }
     if wrong:
       reasons.append(f"update[{index}].p59={wrong}")
+    commit_evidence = update.get("commit_evidence")
+    clip = (
+        commit_evidence.get("overflow_safe_clip")
+        if isinstance(commit_evidence, dict)
+        else None
+    )
+    if not isinstance(clip, dict):
+      reasons.append(f"update[{index}].p63_missing")
+      continue
+    all_finite = clip.get("all_finite") is True
+    naive_finite = clip.get("naive_norm_finite") is True
+    fallback = clip.get("fallback_used") is True
+    numeric = {}
+    for name in (
+        "stable_norm", "selected_norm", "clip_factor", "max_norm"
+    ):
+      value = clip.get(name)
+      numeric[name] = (
+          float(value)
+          if isinstance(value, (int, float)) and not isinstance(value, bool)
+          else float("nan")
+      )
+    valid = (
+        clip.get("enabled") is True
+        and all_finite
+        and fallback == (not naive_finite)
+        and math.isfinite(numeric["stable_norm"])
+        and numeric["stable_norm"] >= 0.0
+        and math.isfinite(numeric["selected_norm"])
+        and numeric["selected_norm"] >= 0.0
+        and math.isfinite(numeric["clip_factor"])
+        and 0.0 < numeric["clip_factor"] <= 1.0
+        and numeric["max_norm"] == float(contract["max_grad_norm"])
+    )
+    naive_norm = clip.get("naive_norm")
+    if fallback:
+      valid = (
+          valid
+          and naive_norm == "inf"
+          and numeric["selected_norm"] == numeric["stable_norm"]
+      )
+      p63_fallbacks += 1
+    else:
+      valid = (
+          valid
+          and isinstance(naive_norm, (int, float))
+          and not isinstance(naive_norm, bool)
+          and math.isfinite(float(naive_norm))
+          and numeric["selected_norm"] == float(naive_norm)
+      )
+    if not valid:
+      reasons.append(f"update[{index}].p63_invalid={clip}")
+  if recipe == "gsm8k":
+    _require(p63_fallbacks >= 1, "p63_gsm8k_fallback_not_observed", reasons)
 
   marker_counts = {
       "continue_decode": text.count("[P57.CONTINUE_DECODE] on-device decode loop enabled"),
@@ -624,6 +683,10 @@ def classify(
       "p59_rpa_local_kv": len(rpa_receipts),
       "p59_local_fused_linear": len(fused_linear_records),
       "p59_parallel": text.count(f"[P59.DP{dp_size}] gradient_reducer_ready"),
+      "p63_configured": text.count(
+          "[P63.STABLE_CLIP] configured enabled=1 mode=hybrid "
+      ),
+      "p63_updates": text.count("[P63.STABLE_CLIP] update="),
       "xprof_armed": text.count(f"[P51.XPROF] phase=update armed step={_PROFILED_STEP}"),
       "xprof_started": text.count(f"[P51.XPROF] phase=update started step={_PROFILED_STEP}"),
       "xprof_stopped": text.count(f"[P51.XPROF] phase=update stopped step={_PROFILED_STEP + 1}"),
@@ -651,6 +714,16 @@ def classify(
       reasons,
   )
   _require(marker_counts["p59_parallel"] == expected_updates, f"marker.p59_parallel={marker_counts['p59_parallel']} expected={expected_updates}", reasons)
+  _require(
+      marker_counts["p63_configured"] == 1,
+      f"marker.p63_configured={marker_counts['p63_configured']} expected=1",
+      reasons,
+  )
+  _require(
+      marker_counts["p63_updates"] == expected_updates,
+      f"marker.p63_updates={marker_counts['p63_updates']} expected={expected_updates}",
+      reasons,
+  )
   for name in ("xprof_armed", "xprof_started", "xprof_stopped", "perfetto"):
     _require(marker_counts[name] == 1, f"marker.{name}={marker_counts[name]} expected=1", reasons)
 

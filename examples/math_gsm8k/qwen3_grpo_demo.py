@@ -293,6 +293,17 @@ ADAM_B1 = 0.9
 ADAM_B2 = 0.999
 ADAM_EPS = 1.0e-8
 MAX_GRAD_NORM = 1.0
+P63_OVERFLOW_SAFE_CLIP_MAX_NORM = (
+    sft_utils.canonical_overflow_safe_clip_max_norm(os.environ)
+)
+if (
+    P63_OVERFLOW_SAFE_CLIP_MAX_NORM is not None
+    and P63_OVERFLOW_SAFE_CLIP_MAX_NORM != MAX_GRAD_NORM
+):
+  raise ValueError(
+      "P63 GSM8K max-norm contract changed: "
+      f"{P63_OVERFLOW_SAFE_CLIP_MAX_NORM} != {MAX_GRAD_NORM}"
+  )
 WARMUP_STEPS = 50
 LR_DECAY_STEPS = 500
 
@@ -803,7 +814,17 @@ def create_optimizer(
       eps=ADAM_EPS,
       weight_decay=WEIGHT_DECAY,
   )
-  return optax.chain(optax.clip_by_global_norm(MAX_GRAD_NORM), optimizer)
+  if P63_OVERFLOW_SAFE_CLIP_MAX_NORM is None:
+    clip = optax.clip_by_global_norm(MAX_GRAD_NORM)
+  else:
+    clip = sft_utils.overflow_safe_clip_by_global_norm(MAX_GRAD_NORM)
+    print(
+        "[P63.STABLE_CLIP] configured enabled=1 mode=hybrid "
+        "stock_finite=stock_exact overflow_fallback=max_scaled_l2 "
+        f"nonfinite=fatal max_norm={MAX_GRAD_NORM} workload=gsm8k",
+        flush=True,
+    )
+  return optax.chain(clip, optimizer)
 
 
 def _shutdown_rollout_runtime(rl_cluster) -> None:

@@ -1,0 +1,18 @@
+{
+  "schema": "v1-hp-p63-exact-image-receipt-v1",
+  "status": "INCONCLUSIVE_INFRASTRUCTURE",
+  "timestamp_utc": "2026-08-25T05:17:00Z",
+  "source_base_sha": "22da654ab846b6d3b8a5c0e78e9ded6e04178fd1",
+  "image_id": "sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a",
+  "command": "bash canon-zero-tim/tests/v1_phase4/run_exact_image.sh sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a",
+  "raw_log_archive": "run.log.gz",
+  "raw_log_compression": "gzip -n",
+  "raw_log_archive_sha256": "a1db7ab9f96c4e624a5591a0c9ce29d5feee2044d0812afc1aba73c1b85326ff",
+  "raw_log_archive_bytes": 311,
+  "raw_log_uncompressed_sha256": "7b8424f0c9beeabc97331f5d5b2b011025b6d4fe277ea4151415bf0f3e3c1143",
+  "raw_log_uncompressed_bytes": 427,
+  "raw_log_uncompressed_lines": 6,
+  "reason": "The managed sandbox set no-new-privileges, so sudo docker was rejected before the image or any test entered.",
+  "numerical_verdict": "NONE",
+  "superseded_by": "../v1_hp_p63_exact_image_20260825_r2/receipt.json"
+}

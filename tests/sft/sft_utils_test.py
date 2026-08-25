@@ -16,6 +16,7 @@ from absl.testing import absltest
 import jax
 import jax.numpy as jnp
 import numpy as np
+import optax
 from tunix.sft import utils
 
 
@@ -66,6 +67,38 @@ class UtilsTest(absltest.TestCase):
 
 class StableGlobalNormTest(absltest.TestCase):
 
+  @staticmethod
+  def _p63_env(*, frozenlake: bool = False) -> dict[str, str]:
+    if frozenlake:
+      profile_file = (
+          "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env"
+      )
+      profile = "qwen3-8b-dp8-tp8-frozenlake-v1-hp"
+      workload = "frozenlake-dp8-tp8"
+      warn_only = {"CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY": "0"}
+    else:
+      profile_file = (
+          "cluster/profiles/qwen3-1p7b-dp16-tp4-gsm8k-v1-hp.env"
+      )
+      profile = "qwen3-1p7b-dp16-tp4-gsm8k-v1-hp"
+      workload = "gsm8k"
+      warn_only = {"CANON_GSM8K_ALIGNMENT_WARN_ONLY": "0"}
+    return {
+        "CANON_P63_OVERFLOW_SAFE_CLIP": "1",
+        "CANON_PROFILE_FILE": profile_file,
+        "CANON_PROFILE": profile,
+        "CANON_P32_WORKLOAD": workload,
+        "CANON_V1_HP_FULL": "1",
+        "CANON_P33_WORKLOAD_LAUNCH_ADMITTED": "1",
+        "CANON_P33_RUN_STAGE": "full",
+        "CANON_P33_NO_COMMIT": "0",
+        "CANON_P28_SEGMENTED_TRAIN": "1",
+        "CANON_P28_G6_UPDATE": "1",
+        "CANON_P59_RANK_PARALLEL_BACKWARD": "1",
+        "CANON_VLLM_ENABLE_PREFIX_CACHING": "0",
+        **warn_only,
+    }
+
   def test_finite_large_gradient_does_not_overflow(self):
     gradient = {"x": jnp.asarray([1.0e20, -1.0e20], jnp.float32)}
     naive = jnp.sqrt(jnp.sum(jnp.square(gradient["x"])))
@@ -80,6 +113,88 @@ class StableGlobalNormTest(absltest.TestCase):
       with self.subTest(value=value):
         norm = float(utils.stable_global_norm({"x": jnp.asarray([value])}))
         self.assertFalse(np.isfinite(norm))
+
+  def test_hybrid_clip_stock_finite_path_is_byte_exact(self):
+    for dtype in (jnp.float32, jnp.bfloat16):
+      for values in ([0.25, -0.5, 0.75], [2.0, -3.0, 4.0]):
+        with self.subTest(dtype=dtype, values=values):
+          gradient = {"x": jnp.asarray(values, dtype=dtype)}
+          stock = optax.clip_by_global_norm(1.0)
+          hybrid = utils.overflow_safe_clip_by_global_norm(1.0)
+          stock_update, _ = stock.update(
+              gradient, stock.init(gradient)
+          )
+          hybrid_update, _ = hybrid.update(
+              gradient, hybrid.init(gradient)
+          )
+          np.testing.assert_array_equal(
+              np.asarray(hybrid_update["x"]),
+              np.asarray(stock_update["x"]),
+          )
+          stats = utils.hybrid_global_norm_stats(
+              gradient, max_norm=1.0
+          )
+          self.assertTrue(bool(stats["naive_norm_finite"]))
+          self.assertFalse(bool(stats["fallback_used"]))
+
+  def test_hybrid_clip_overflow_matches_fp64_oracle(self):
+    gradient = {"x": jnp.asarray([1.0e20, -1.0e20], jnp.float32)}
+    stock = optax.clip_by_global_norm(1.0)
+    hybrid = utils.overflow_safe_clip_by_global_norm(1.0)
+    stock_update, _ = stock.update(gradient, stock.init(gradient))
+    hybrid_update, _ = hybrid.update(gradient, hybrid.init(gradient))
+    np.testing.assert_array_equal(
+        np.asarray(stock_update["x"]), np.zeros((2,), np.float32)
+    )
+    oracle_input = np.asarray(gradient["x"], dtype=np.float64)
+    oracle = oracle_input / np.linalg.norm(oracle_input)
+    np.testing.assert_allclose(
+        np.asarray(hybrid_update["x"]), oracle, rtol=2e-6, atol=0.0
+    )
+    stats = utils.hybrid_global_norm_stats(gradient, max_norm=1.0)
+    self.assertTrue(bool(stats["all_finite"]))
+    self.assertFalse(bool(stats["naive_norm_finite"]))
+    self.assertTrue(bool(stats["fallback_used"]))
+    self.assertGreater(float(stats["clip_factor"]), 0.0)
+
+  def test_hybrid_clip_does_not_sanitize_nonfinite_tree(self):
+    transform = utils.overflow_safe_clip_by_global_norm(1.0)
+    for value in (jnp.inf, jnp.nan):
+      with self.subTest(value=value):
+        gradient = {"x": jnp.asarray([value], jnp.float32)}
+        update, _ = transform.update(
+            gradient, transform.init(gradient)
+        )
+        self.assertFalse(np.all(np.isfinite(np.asarray(update["x"]))))
+        stats = utils.hybrid_global_norm_stats(gradient, max_norm=1.0)
+        self.assertFalse(bool(stats["all_finite"]))
+        self.assertFalse(bool(stats["fallback_used"]))
+
+  def test_p63_context_is_exact_and_default_off(self):
+    self.assertIsNone(utils.canonical_overflow_safe_clip_max_norm({}))
+    self.assertIsNone(utils.canonical_overflow_safe_clip_max_norm({
+        "CANON_P63_OVERFLOW_SAFE_CLIP": "0"
+    }))
+    self.assertEqual(
+        utils.canonical_overflow_safe_clip_max_norm(self._p63_env()), 1.0
+    )
+    self.assertEqual(
+        utils.canonical_overflow_safe_clip_max_norm(
+            self._p63_env(frozenlake=True)
+        ),
+        100.0,
+    )
+    for key, value in (
+        ("CANON_P63_OVERFLOW_SAFE_CLIP", ""),
+        ("CANON_PROFILE", "foreign-profile"),
+        ("CANON_P33_NO_COMMIT", "1"),
+        ("CANON_VLLM_ENABLE_PREFIX_CACHING", "1"),
+    ):
+      with self.subTest(key=key):
+        env = self._p63_env()
+        env[key] = value
+        with self.assertRaisesRegex(ValueError, "P63|OVERFLOW_SAFE_CLIP"):
+          utils.canonical_overflow_safe_clip_max_norm(env)
 
   def test_numeric_stats_distinguish_finite_huge_from_nonfinite(self):
     gradient = {"x": jnp.asarray([1.0e20, -1.0e20], jnp.float32)}

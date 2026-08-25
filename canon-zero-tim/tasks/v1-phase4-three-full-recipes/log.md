@@ -462,4 +462,30 @@
 - Fact: All 16 microsteps and DP16 accumulator produced 100% finite backward gradients across all 27.5B parameters: `all_finite: true`, `first_nonfinite: null`. Accumulator final stable norm: `4.6885e+20`, max abs: `7.1880e+19`, denominator: `16.0`.
 - Fact: `[CANON_P33_DP16] backward_no_commit verdict=PASS commits=0 microsteps=16` and `[CANON_GSM8K_TRAIN] TRAINING_DONE max_steps=1` passed cleanly with zero optimizer commits.
 - Files/artifacts: [P62 64-TPU Remote Evidence](evidence/v1_hp_attempt8_p62_remote_64tpu_20260825/receipt.json), [Log](evidence/v1_hp_attempt8_p62_remote_64tpu_20260825/p62_remote_64tpu_diagnostic.log)
+## 2026-08-25T05:24:13Z — P63 host and pinned-image admission complete
 
+- Implemented the pre-registered default-off hybrid clip only for the exact
+  three strict Phase4 full profiles. The stock Optax transform is selected
+  unchanged for every finite stock norm. Max-scaled L2 is selected only for an
+  independently all-finite tree with non-finite stock norm; NaN/Inf remains
+  fatal. Runtime receipts and postflight negatives bind max norm 1/100,
+  fallback coherence, selected norm, and clip factor per update.
+- Host admission passes V1 45/45, P57 144/144, P59 37/37, APC 31/31, flags
+  372/372, Python/Bash syntax, and `git diff --check`. The initial flag audit
+  caught a bare P63-like flag token in a test-only exception regex; the regex was
+  corrected without changing runtime behavior and the audit then passed.
+- Pinned-image r1 did not enter Docker because the managed sandbox rejected
+  `sudo` under no-new-privileges. It is preserved as
+  `INCONCLUSIVE_INFRASTRUCTURE`, not a numerical red.
+- Fresh r2 on immutable image
+  `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`
+  exits zero with one terminal `V1_HP_EXACT_IMAGE_PASS ... p63_clip=1 ...
+  manifests=3`. Utility oracles pass 9/9; the real trainer integration observes
+  `naive_norm=inf`, stable norm `1.2973823439541035e22`, clip factor
+  `7.707828007371153e-23`, and a finite nonzero parameter update. Raw SHA is
+  `31126e623c7ad775614a3ce1ff89d3798d095482d0cbefc84a47ae0d0a2d6c44`.
+  Checksums, receipt, and the eight-file runtime hash manifest are under
+  `evidence/v1_hp_p63_exact_image_20260825_r2/`.
+- Phase verdict: `HOST PASS / EXACT_IMAGE PASS / TARGET OPTIMIZER COMMIT NOT
+  RUN`. V1.P4.6 is complete and V1.P4.7 publication/three-full execution is
+  active. No commit, push, manifest render, JobSet, or TPU launch occurred.

@@ -42,6 +42,7 @@ class FullClassifierTest(unittest.TestCase):
         "CANON_P33_RUN_STAGE": "full",
         "CANON_P33_NO_COMMIT": "0",
         "CANON_P59_RANK_PARALLEL_BACKWARD": "1",
+        "CANON_P63_OVERFLOW_SAFE_CLIP": "1",
         "CANON_CONTINUE_DECODE": "8",
         "CANON_FIXED_AR_GATHER": "1",
         "CANON_PALLAS_GATHERED_LOGPROBS": "1",
@@ -112,16 +113,41 @@ class FullClassifierTest(unittest.TestCase):
         "[P51.XPROF] phase=update started step=2 anchor=update_entry tpu_trace_mode=TRACE_COMPUTE",
         "[P51.XPROF] phase=update stopped step=3 anchor=step_completed",
         "[V1.PERFETTO] captured training_step=2 timelines=3",
+        "[P63.STABLE_CLIP] configured enabled=1 mode=hybrid "
+        "stock_finite=stock_exact overflow_fallback=max_scaled_l2 "
+        "nonfinite=fatal max_norm=1.0 workload=gsm8k",
     ]
     for step in range(4):
+      fallback = step == 0
       updates.append({
           "elapsed_seconds": 6.0,
           "dp_rank_pullbacks_per_transaction": 16,
           "dp_pullback_invocations_per_transaction": 1,
           "dp_replicas_exact": True,
+          "commit_evidence": {
+              "overflow_safe_clip": {
+                  "enabled": True,
+                  "all_finite": True,
+                  "naive_norm": "inf" if fallback else 0.5,
+                  "naive_norm_finite": not fallback,
+                  "stable_norm": 2.0 if fallback else 0.5,
+                  "selected_norm": 2.0 if fallback else 0.5,
+                  "fallback_used": fallback,
+                  "clip_factor": 0.5 if fallback else 1.0,
+                  "max_norm": 1.0,
+              },
+          },
       })
       log.extend([
           "[P59.DP16] gradient_reducer_ready dp_axis=data dp_size=16 staging=parallel_table",
+          "[P63.STABLE_CLIP] "
+          f"update={step} all_finite=1 "
+          f"naive_norm={'inf' if fallback else 0.5} "
+          f"naive_norm_finite={int(not fallback)} "
+          f"stable_norm={2.0 if fallback else 0.5} "
+          f"selected_norm={2.0 if fallback else 0.5} "
+          f"fallback_used={int(fallback)} "
+          f"clip_factor={0.5 if fallback else 1.0} max_norm=1.0",
           f"[PERF] step={step} stage=p32_vag_forward seconds=1.0",
           f"[PERF] step={step} stage=p32_vag_reverse seconds=3.0",
           f"[PERF] step={step} stage=segmented_value_and_grad seconds=4.0",
@@ -369,6 +395,74 @@ class FullClassifierTest(unittest.TestCase):
               for reason in record["reasons"]
           )
       )
+
+  def test_missing_p63_update_receipt_is_fatal(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      state, run_log, updates, base = self._evidence(Path(tmp))
+      rows = [json.loads(line) for line in updates.read_text().splitlines()]
+      del rows[0]["commit_evidence"]["overflow_safe_clip"]
+      updates.write_text(
+          "".join(json.dumps(row) + "\n" for row in rows),
+          encoding="utf-8",
+      )
+      record = classifier.classify(
+          recipe="gsm8k",
+          state=state,
+          run_log=run_log,
+          update_report=updates,
+          base_classification=base,
+      )
+      self.assertEqual(record["verdict"], "FAIL")
+      self.assertIn("update[0].p63_missing", record["reasons"])
+
+  def test_p63_nonfinite_or_wrong_max_norm_is_fatal(self):
+    for field, value in (("all_finite", False), ("max_norm", 100.0)):
+      with self.subTest(field=field), tempfile.TemporaryDirectory() as tmp:
+        state, run_log, updates, base = self._evidence(Path(tmp))
+        rows = [json.loads(line) for line in updates.read_text().splitlines()]
+        rows[0]["commit_evidence"]["overflow_safe_clip"][field] = value
+        updates.write_text(
+            "".join(json.dumps(row) + "\n" for row in rows),
+            encoding="utf-8",
+        )
+        record = classifier.classify(
+            recipe="gsm8k",
+            state=state,
+            run_log=run_log,
+            update_report=updates,
+            base_classification=base,
+        )
+        self.assertEqual(record["verdict"], "FAIL")
+        self.assertTrue(
+            any(".p63_invalid=" in reason for reason in record["reasons"])
+        )
+
+  def test_gsm8k_requires_observed_p63_fallback(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      state, run_log, updates, base = self._evidence(Path(tmp))
+      rows = [json.loads(line) for line in updates.read_text().splitlines()]
+      clip = rows[0]["commit_evidence"]["overflow_safe_clip"]
+      clip.update({
+          "naive_norm": 0.5,
+          "naive_norm_finite": True,
+          "stable_norm": 0.5,
+          "selected_norm": 0.5,
+          "fallback_used": False,
+          "clip_factor": 1.0,
+      })
+      updates.write_text(
+          "".join(json.dumps(row) + "\n" for row in rows),
+          encoding="utf-8",
+      )
+      record = classifier.classify(
+          recipe="gsm8k",
+          state=state,
+          run_log=run_log,
+          update_report=updates,
+          base_classification=base,
+      )
+      self.assertEqual(record["verdict"], "FAIL")
+      self.assertIn("p63_gsm8k_fallback_not_observed", record["reasons"])
 
   def test_apc_on_is_fatal_for_an_apc_off_recipe(self):
     with tempfile.TemporaryDirectory() as tmp:

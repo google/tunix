@@ -126,6 +126,7 @@ class ThreeFullRendererTest(unittest.TestCase):
             "test \"$CANON_PALLAS_GATHERED_LOGPROBS\" = 1; "
             "test \"$CANON_LOGPROB_STEP_FUSION\" = 1; "
             "test \"$CANON_P59_RANK_PARALLEL_BACKWARD\" = 1; "
+            "test \"$CANON_P63_OVERFLOW_SAFE_CLIP\" = 1; "
             "test \"$CANON_P28_BATCHED_REPORT\" = 1; "
             "test \"$CANON_XPROF_PHASE\" = update; "
             "test \"$CANON_XPROF_SKIP_STEPS\" = 2; "
@@ -191,6 +192,37 @@ class ThreeFullRendererTest(unittest.TestCase):
       self.assertNotEqual(wrong_m15.returncode, 0)
       self.assertTrue(wrong_m15.stderr)
 
+  def test_p63_rejects_neighboring_stock_profile(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      root = Path(tmp)
+      outputs = self._render(root / "rendered")
+      values = _env(yaml.safe_load(outputs[0].read_text(encoding="utf-8")))
+      values["CANON_PROFILE_FILE"] = (
+          "cluster/profiles/qwen3-1p7b-dp16-tp4-gsm8k.env"
+      )
+      values["CANON_P63_OVERFLOW_SAFE_CLIP"] = "1"
+      state = root / "wrong-profile"
+      state.mkdir()
+      completed = subprocess.run(
+          [
+              "bash",
+              str(_REPO / "canon-zero-tim/cluster/steps/00_env.sh"),
+          ],
+          cwd=_REPO,
+          env={
+              **os.environ,
+              **values,
+              "CANON_PKG": str(_REPO / "canon-zero-tim"),
+              "CANON_STATE": str(state),
+              "INJECTED_WANDB_API_KEY": "test-key-not-a-credential",
+          },
+          text=True,
+          capture_output=True,
+          check=False,
+      )
+      self.assertNotEqual(completed.returncode, 0)
+      self.assertIn("P63 overflow-safe clip is restricted", completed.stderr)
+
   def test_refuses_reused_output_and_duplicate_ids(self):
     with tempfile.TemporaryDirectory() as tmp:
       root = Path(tmp) / "rendered"
@@ -255,6 +287,7 @@ class ThreeFullRendererTest(unittest.TestCase):
         snapshot = (state / "env.sh").read_text(encoding="utf-8")
         self.assertIn("export CANON_V1_HP_FULL=1", snapshot)
         self.assertIn("export CANON_P59_RANK_PARALLEL_BACKWARD=1", snapshot)
+        self.assertIn("export CANON_P63_OVERFLOW_SAFE_CLIP=1", snapshot)
         self.assertIn("export CANON_PERF_TRACE_EXPORT_STEP=2", snapshot)
 
       gsm_values = _env(

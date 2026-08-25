@@ -1,0 +1,8 @@
+f0a97c4d779372944c81594290bfbd9d5d964b6064766f2952b0010ed26778c2  tunix/sft/utils.py
+52d7dac95a58361fd95c69bcd90d6f0ced1c8c95af80c9f7d0b89df37d52937b  tunix/sft/peft_trainer.py
+698942d218103d4068d8ba094f8bfd6f38085ad263ccdabc4c604905846e9d98  examples/math_gsm8k/qwen3_grpo_demo.py
+8d35adb61937d00dd3ed0f215ac4a481bf37055257a610f02301016304bff7e0  examples/frozenlake/train_frozenlake_qwen3.py
+931a4a2c10eb3e1b8867b8f02338037700926bc2e525b966ed55554ea79a3021  canon-zero-tim/cluster/profiles/qwen3-1p7b-dp16-tp4-gsm8k-v1-hp.env
+d7eeb3db21f2ad3643e8541cbdf788e0716a47bd26a5afc6554dca179f8ea980  canon-zero-tim/cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env
+5a031d7af89f29960770e636965d3de15264a7d769460a7d8155ff0ab33742db  canon-zero-tim/cluster/steps/00_env.sh
+58e4bd7c2e29c59bf519ca2eb246c271239df01fb54046984e5d857b4f0a454b  canon-zero-tim/tasks/v1-phase4-three-full-recipes/scripts/classify_full_recipe.py

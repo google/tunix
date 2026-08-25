@@ -147,8 +147,14 @@ numerical criterion.
   relative-L2 about `1`, and optimizer commits are zero. Not verified by this
   gate: full Qwen DP16xTP4 magnitude or the first target red, because the
   carrier is a bounded linear/reduction mechanism test.
-- G5a is incomplete and G5b remains pending. Full recipes and one-commit
-  admission remain blocked.
+- G5a is incomplete historical evidence and remains preserved. G5b is complete:
+  fresh target run `canon-p62-gsm8k-num-c1-e2c51a89` executed all 16 groups
+  and the final DP16 accumulator with `all_finite=true`,
+  `first_nonfinite=null`, denominator 16, 16/16 strict alignment PASS, and
+  zero optimizer commits. The final accumulator has
+  `stable_norm=4.688506872758702e20`, `max_abs=7.188024281236767e19`, and
+  `naive_norm=inf`; this identifies FP32 sum-of-squares overflow after a valid
+  finite backward. G6 may now design the root-cause repair.
 - The offline G5 classifier is implemented and host-negative-tested. It keeps
   `ROOT_LOCALIZED_NONFINITE`, `FINITE_NAIVE_L2_OVERFLOW`, and
   `ALL_BOUNDARIES_FINITE_NO_COMMIT` distinct; alignment/shape/scale/optimizer

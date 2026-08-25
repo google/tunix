@@ -1,6 +1,33 @@
 # V1 high-performance three-full runbook
 
-## Attempt-7 P62 first-red diagnostic before any full recipe
+## Current boundary — P63 admitted; publish before rendering
+
+The P62 first-red campaign is complete. Real DP16xTP4 G5b proved that the
+backward tree is finite and the old `norm=inf` is naive FP32 sum-of-squares
+overflow. The default-off P63 hybrid clip has passed the complete host and
+pinned-image ladders on the final dirty runtime tree. Its evidence is under
+`evidence/v1_hp_p63_exact_image_20260825_r2/`; require the unique terminal
+`V1_HP_EXACT_IMAGE_PASS ... p63_clip=1 ... manifests=3` and verify its
+`SHA256SUMS` before publication review.
+
+Do not render or launch from the dirty tree. First obtain explicit commit/push
+approval, push the reviewed concern, and read back the exact remote
+40-character SHA. Then render three fresh full manifests from that SHA and
+obtain separate explicit launch approval. The launch remains one concurrent
+wave with no short canary: GSM8K DP16xTP4 for 200 updates, P45 DP8xTP8 for 300,
+and M15 DP8xTP8 for 300.
+
+All three rendered environments must resolve
+`CANON_P63_OVERFLOW_SAFE_CLIP=1`; neighboring and diagnostic profiles must
+omit it. Every committed update must emit exactly one `[P63.STABLE_CLIP]
+update=` receipt with an all-finite tree, finite selected norm and clip factor,
+and exact max norm 1 for GSM8K or 100 for FrozenLake. GSM8K postflight also
+requires at least one observed fallback because G5b proved its stock norm
+overflows. A non-finite gradient is fatal and must never be converted into a
+fallback. These checks do not relax any strict alignment, P59, APC-off, XProf,
+Perfetto, JAX-cache, evaluation, checkpoint, or full-horizon gate.
+
+## Historical — Attempt-7 P62 first-red diagnostic before any full recipe
 
 The three production JobSets are currently blocked. First publish one reviewed
 40-character SHA containing P62, then render exactly one fresh GSM8K

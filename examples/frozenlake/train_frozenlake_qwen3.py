@@ -881,6 +881,17 @@ WARMUP_STEPS = 0
 # against numerical explosions; lower it (e.g. ``1.0``) if a particular
 # recipe exhibits unstable grad norms.
 MAX_GRAD_NORM = 100.0
+P63_OVERFLOW_SAFE_CLIP_MAX_NORM = (
+    sft_utils.canonical_overflow_safe_clip_max_norm(os.environ)
+)
+if (
+    P63_OVERFLOW_SAFE_CLIP_MAX_NORM is not None
+    and P63_OVERFLOW_SAFE_CLIP_MAX_NORM != MAX_GRAD_NORM
+):
+  raise ValueError(
+      "P63 FrozenLake max-norm contract changed: "
+      f"{P63_OVERFLOW_SAFE_CLIP_MAX_NORM} != {MAX_GRAD_NORM}"
+  )
 
 # ====== Checkpoint saving ======
 P45_CHECKPOINT = frozenlake_checkpoint.from_env(os.environ)
@@ -1410,8 +1421,18 @@ else:
       weight_decay=WEIGHT_DECAY,
   )
 if MAX_GRAD_NORM is not None:
+  clip = optax.clip_by_global_norm(max_norm=MAX_GRAD_NORM)
+  if P63_OVERFLOW_SAFE_CLIP_MAX_NORM is not None:
+    clip = sft_utils.overflow_safe_clip_by_global_norm(MAX_GRAD_NORM)
+    print(
+        "[P63.STABLE_CLIP] configured enabled=1 mode=hybrid "
+        "stock_finite=stock_exact overflow_fallback=max_scaled_l2 "
+        f"nonfinite=fatal max_norm={MAX_GRAD_NORM} "
+        "workload=frozenlake-dp8-tp8",
+        flush=True,
+    )
   optimizer = optax.chain(
-      optax.clip_by_global_norm(max_norm=MAX_GRAD_NORM),
+      clip,
       optimizer,
   )
 
