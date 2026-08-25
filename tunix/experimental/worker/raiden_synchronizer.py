@@ -235,11 +235,17 @@ class RaidenSynchronizer:
   def active(self) -> bool:
     return self._sync is not None
 
-  def bind(self, state: Any) -> None:
+  def bind(self, state: Any, *, already_staged: bool = False) -> None:
     """Binds this host's weights, or rebinds them after a training step.
 
     With host_stage the arrays are copied to local CPU memory first; arrays
-    backed by the pathways proxy cannot bind in place.
+    backed by the pathways proxy cannot bind in place. Pass
+    already_staged=True (with a state that's already gone through
+    to_host_cpu_state()) to skip that copy here -- used by callers doing
+    multiple chunks' staging up front so every chunk's native listener gets
+    constructed back-to-back afterward instead of spread across the whole
+    staging window; see maxtext_engine.py's prepare_weight_sync() for why
+    that ordering matters (listener idle time before its own transfer).
     """
     _log_rss("bind:start")
     # self.arrays/self.names hold the PREVIOUS bind's host-staged buffers.
@@ -251,7 +257,7 @@ class RaidenSynchronizer:
     # 242.8GB (fit) and cycle 2 climbed past 370GB and got evicted (didn't).
     self.names = []
     self.arrays = []
-    if self._host_stage:
+    if self._host_stage and not already_staged:
       state = to_host_cpu_state(state)
     _log_rss("bind:after_host_stage")
     self.names, self.arrays = _filter_bindable(*flatten_weights(state))
