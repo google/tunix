@@ -27,15 +27,7 @@ from __future__ import annotations
 
 import abc
 import dataclasses
-import enum
 from typing import Any, Mapping, Optional, Protocol, Sequence, runtime_checkable
-
-
-class WeightSyncMode(str, enum.Enum):
-  """Modes for weight synchronization across workers."""
-
-  FALLBACK = "fallback"
-  RAIDEN = "raiden"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -69,18 +61,12 @@ class TensorMetadata:
   not need it may ignore it.
 
   Attributes:
-    name: Variable name.
-    shape: Shape of the tensor.
-    mesh_shape: Mesh shape for this tensor.
-    layout: Layout mapping.
-    item_size: Bytes per element.
-    layer_idx: Stable batching ordinal.
     sharding_spec: One mesh axis name per TENSOR dimension, empty string where
-      that dimension is replicated. This is the subset of JAX `PartitionSpec`
-      used by the Tunix/JAX adapters: `P(None, "y")` is `("", "y")`. Together
-      with the work unit's physical `mesh_axes`, it maps device coordinates onto
-      the variable's logical mesh. A concrete transport must reject forms its
-      wire representation cannot encode.
+      that dimension is replicated. This is the subset of JAX
+      `PartitionSpec` used by the Tunix/JAX adapters: `P(None, "y")` is
+      `("", "y")`. Together with the work unit's physical `mesh_axes`, it
+      maps device coordinates onto the variable's logical mesh. A concrete
+      transport must reject forms its wire representation cannot encode.
   """
 
   name: str
@@ -271,27 +257,16 @@ class WeightSyncSource(Protocol):
     transport commonly uses one unit per physical host/listener, so a
     multi-host source returns several. Wire-safe values only; no device
     arrays.
-
-    Args:
-      sync_request: Optional request context for the sync round.
-      **kwargs: Additional transport-specific options.
     """
     ...
 
   async def release_weight_sync(
       self, sync_request: Any = None, **kwargs: Any
   ) -> Any:
-    """Releases this round's staging.
-
-    Called on every exit path except an UNKNOWN_TRANSFER_STATE round (a
-    possibly-live transfer may still be reading the staging). Idempotent, and
-    must be safe to call while a timed-out prepare for the same round is still
-    running remotely.
-
-    Args:
-      sync_request: Optional request context for the sync round.
-      **kwargs: Additional transport-specific options.
-    """
+    """Releases this round's staging. Called on every exit path except an
+    UNKNOWN_TRANSFER_STATE round (a possibly-live transfer may still be
+    reading the staging). Idempotent, and must be safe to call while a
+    timed-out prepare for the same round is still running remotely."""
     ...
 
 
@@ -338,19 +313,13 @@ class WeightSyncDestination(Protocol):
     """
     ...
 
-  async def pre_weight_sync(
-      self, sync_request: Any = None, **kwargs: Any
-  ) -> Any:
+  async def pre_weight_sync(self, sync_request: Any = None, **kwargs: Any) -> Any:
     """Quiesces the worker so the arriving weights have somewhere to land.
 
     Must actually gate admission: stop accepting new requests, drain or cancel
     in-flight ones, drop the prefix cache, free the KV cache. The worker is
     not serving from the moment this returns until post or abort. Merely
     setting a pause flag does not satisfy this.
-
-    Args:
-      sync_request: Optional request context for the sync round.
-      **kwargs: Additional transport-specific options.
     """
     ...
 
@@ -361,31 +330,19 @@ class WeightSyncDestination(Protocol):
     performs H2D from host staging here; a file-backed worker may load its
     prepared checkpoint. It must not touch the serving copy and records the
     pending policy version for post to publish.
-
-    Args:
-      sync_request: Optional request context for the sync round.
-      **kwargs: Additional transport-specific options.
     """
     ...
 
-  async def post_weight_sync(
-      self, sync_request: Any = None, **kwargs: Any
-  ) -> Any:
+  async def post_weight_sync(self, sync_request: Any = None, **kwargs: Any) -> Any:
     """Publishes the pending weights atomically, rebuilds caches, resumes.
 
     Must be idempotent for the round key: a retry after a lost reply, or
     after a crash between publishing and recording, must converge to the
     same committed state rather than fail or double-apply.
-
-    Args:
-      sync_request: Optional request context for the sync round.
-      **kwargs: Additional transport-specific options.
     """
     ...
 
-  async def abort_weight_sync(
-      self, sync_request: Any = None, **kwargs: Any
-  ) -> Any:
+  async def abort_weight_sync(self, sync_request: Any = None, **kwargs: Any) -> Any:
     """Rolls back to serving the previous weights.
 
     Invalidates this round's staging -- physically or logically: a
@@ -405,10 +362,6 @@ class WeightSyncDestination(Protocol):
     between any two syncs, and the alternative on every such failure would
     be a fleet restart that lands on the same old version far more
     expensively.
-
-    Args:
-      sync_request: Optional request context for the sync round.
-      **kwargs: Additional transport-specific options.
     """
     ...
 

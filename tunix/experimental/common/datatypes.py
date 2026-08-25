@@ -37,9 +37,8 @@ TrajectoryStatus = agent_types.TrajectoryStatus
 Role = common_datatypes.Role
 
 
-# TODO(tunix-dev): Unify this extended TrajectoryItem back into
-# agent_types.TrajectoryItem so that all agentic workflows share the same strict
-# token array fields.
+# TODO: Unify this extended TrajectoryItem back into agent_types.TrajectoryItem
+# so that all agentic workflows share the same strict token array fields.
 @dataclasses.dataclass(kw_only=True)
 class TrajectoryItem(agent_types.TrajectoryItem):
   """Extended TrajectoryItem for Orchestrator with token arrays."""
@@ -47,6 +46,7 @@ class TrajectoryItem(agent_types.TrajectoryItem):
   completion_tokens: np.ndarray | None = None
   action_mask: np.ndarray | None = None
   policy_version: int = 0
+
 
 
 ##### Common DTOs (Data Transfer Objects) #####
@@ -397,7 +397,6 @@ class WeightSyncRequest(Request):
     controller_id: Optional identifier for transport controllers (e.g., TPU
       Raiden).
     policy_version: Target policy version identifier of the weights to sync.
-    weights: Optional source weights payload for non-Raiden / fallback sync.
     source_metadata: Optional transport/layout metadata describing source
       weights.
     extra_config: Optional backend-specific configuration parameters.
@@ -405,7 +404,6 @@ class WeightSyncRequest(Request):
 
   controller_id: str = ""
   policy_version: int = 0
-  weights: Any = None
   source_metadata: Any = None
   extra_config: dict[str, Any] = dataclasses.field(default_factory=dict)
 
@@ -505,8 +503,7 @@ class SFTTrainerPayload(TrainerPayload):
   token_mask: ArrayLike
 
 
-# TODO(tunix-dev): Introduce PPOTrainerPayload to replace generic
-# RLTrainerPayload when PPO specific fields are needed.
+# TODO: Introduce PPOTrainerPayload to replace generic RLTrainerPayload when PPO specific fields are needed.
 @dataclasses.dataclass(kw_only=True)
 class RLTrainerPayload(TrainerPayload):
   """RL training payload.
@@ -532,8 +529,7 @@ class RLTrainerPayload(TrainerPayload):
   advantages: ArrayLike
   loss_mask: ArrayLike
   action_mask: ArrayLike | None = None
-  # TODO(tunix-dev): make prompt_ids/mask and completion_ids/mask required after
-  # SequencePackedBatchAssembler refactor is done.
+  # TODO(tunix-dev): make prompt_ids/mask and completion_ids/mask required after SequencePackedBatchAssembler refactor is done.
   prompt_ids: ArrayLike | None = None
   prompt_mask: ArrayLike | None = None
   completion_ids: ArrayLike | None = None
@@ -544,7 +540,7 @@ class RLTrainerPayload(TrainerPayload):
   returns: ArrayLike | None = None
   old_values: ArrayLike | None = None
   metadata: dict[str, Any] = dataclasses.field(default_factory=dict)
-  # TODO(tunix-dev): add ppo specific fields in PPORLTrainerPayload.
+  # TODO: add ppo sepcific fields in a PPO specific fields in  PPORLTrainerPayload
 
 
 @dataclasses.dataclass(kw_only=True)

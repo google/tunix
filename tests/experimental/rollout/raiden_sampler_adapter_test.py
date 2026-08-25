@@ -12,13 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests verifying destination-side Raiden weight sync delegation."""
+"""Tests for RaidenSamplerAdapter."""
 
 import unittest
 from unittest import mock
 
 from absl.testing import absltest
-from tunix.experimental.weight_sync import raiden_weight_sync_delegate
+from tunix.experimental.rollout import raiden_sampler_adapter
 
 
 class _FakeWorker:
@@ -30,11 +30,10 @@ class _FakeWorker:
     self.bound = False
     self.bound_state = None
     self.h2d_calls = 0
-    self.bind_calls = 0
 
   def bind(self, state):
     self.bound = True
-    self.bind_calls += 1
+    self.bind_calls = getattr(self, "bind_calls", 0) + 1
     self.bound_state = state
 
   def work_unit_metadata(self):
@@ -50,78 +49,91 @@ class _FakeWorker:
     return {}
 
 
+class _FakeSampler:
+  transformer_state = {"w": 1}
+
+
 class _Request:
 
   def __init__(self, policy_version):
     self.policy_version = policy_version
 
 
-class RaidenWeightSyncDelegateTest(unittest.IsolatedAsyncioTestCase):
+class RaidenSamplerAdapterTest(unittest.IsolatedAsyncioTestCase):
 
   def setUp(self):
     super().setUp()
     patcher = mock.patch.object(
-        raiden_weight_sync_delegate.raiden_synchronizer,
+        raiden_sampler_adapter.raiden_synchronizer,
         "RaidenSynchronizer",
         _FakeWorker,
     )
     patcher.start()
     self.addCleanup(patcher.stop)
 
-  def _delegate(self):
-    return raiden_weight_sync_delegate.RaidenWeightSyncDelegate()
+  def _adapter(self):
+    adapter = raiden_sampler_adapter.RaidenSamplerAdapter(
+        server_id="test_sampler"
+    )
+    adapter.sampler = _FakeSampler()
+    return adapter
 
-  async def test_bind_binds_state(self):
-    delegate = self._delegate()
-    fake_state = {"w": 1}
-    await delegate.bind_weight_sync(state=fake_state)
-    worker = delegate._synchronizers[0]
-    self.assertIs(worker.bound_state, fake_state)
+  async def test_bind_binds_sampler_state(self):
+    adapter = self._adapter()
+    await adapter.bind_weight_sync()
+    worker = adapter._synchronizers[0]
+    self.assertIs(worker.bound_state, adapter.sampler.transformer_state)
 
   async def test_worker_uses_the_validated_config(self):
-    delegate = self._delegate()
-    self.assertIs(delegate._synchronizers[0].kwargs["auto_h2d"], True)
+    adapter = self._adapter()
+    self.assertIs(adapter._synchronizers[0].kwargs["auto_h2d"], True)
 
   async def test_repeat_phases_bind_exactly_once(self):
-    delegate = self._delegate()
-    fake_state = {"w": 1}
-    await delegate.bind_weight_sync(state=fake_state)
-    await delegate.get_weight_sync_metadata()
-    await delegate.pre_weight_sync()
-    await delegate.weight_sync()
-    self.assertEqual(delegate._synchronizers[0].bind_calls, 1)
+    adapter = self._adapter()
+    await adapter.bind_weight_sync()
+    await adapter.get_weight_sync_metadata()
+    await adapter.pre_weight_sync()
+    await adapter.weight_sync()
+    self.assertEqual(adapter._synchronizers[0].bind_calls, 1)
 
   async def test_metadata_returns_one_entry_per_worker(self):
-    delegate = self._delegate()
-    md = await delegate.get_weight_sync_metadata()
+    adapter = self._adapter()
+    md = await adapter.get_weight_sync_metadata()
     self.assertEqual(md, [{"unit": "rollout"}])
 
   async def test_weight_sync_installs_and_tracks_version(self):
-    delegate = self._delegate()
-    await delegate.bind_weight_sync(state={"w": 1})
-    version = await delegate.weight_sync(_Request(policy_version=5))
+    adapter = self._adapter()
+    await adapter.bind_weight_sync()
+    version = await adapter.weight_sync(_Request(policy_version=5))
     self.assertEqual(version, 5)
-    self.assertEqual(delegate._synchronizers[0].h2d_calls, 1)
+    self.assertEqual(adapter._synchronizers[0].h2d_calls, 1)
 
   async def test_weight_sync_without_request_bumps_version(self):
-    delegate = self._delegate()
-    await delegate.bind_weight_sync(state={"w": 1})
-    self.assertEqual(await delegate.weight_sync(), 1)
-    self.assertEqual(await delegate.weight_sync(), 2)
+    adapter = self._adapter()
+    await adapter.bind_weight_sync()
+    self.assertEqual(await adapter.weight_sync(), 1)
+    self.assertEqual(await adapter.weight_sync(), 2)
 
   async def test_weight_sync_with_zero_version_bumps(self):
-    delegate = self._delegate()
-    await delegate.bind_weight_sync(state={"w": 1})
-    self.assertEqual(await delegate.weight_sync(_Request(policy_version=0)), 1)
+    adapter = self._adapter()
+    await adapter.bind_weight_sync()
+    self.assertEqual(await adapter.weight_sync(_Request(policy_version=0)), 1)
 
   async def test_weight_sync_before_bind_raises(self):
-    delegate = self._delegate()
+    adapter = self._adapter()
     with self.assertRaisesRegex(RuntimeError, "bind_weight_sync"):
-      await delegate.weight_sync()
+      await adapter.weight_sync()
+
+  async def test_bind_without_sampler_raises(self):
+    adapter = raiden_sampler_adapter.RaidenSamplerAdapter(
+        server_id="test_sampler"
+    )
+    with self.assertRaisesRegex(RuntimeError, "initialize"):
+      await adapter.bind_weight_sync()
 
   async def test_post_weight_sync_returns_true(self):
-    delegate = self._delegate()
-    self.assertTrue(await delegate.post_weight_sync())
+    adapter = self._adapter()
+    self.assertTrue(await adapter.post_weight_sync())
 
 
 if __name__ == "__main__":

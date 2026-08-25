@@ -31,9 +31,7 @@ from transformers import AutoTokenizer
 from tunix.experimental.examples.math_gsm8k_dist import gsm8k
 from tunix.experimental.examples.math_gsm8k_dist import models
 from tunix.experimental.rollout import inprocess_vllm_sampler_adapter
-from tunix.experimental.rollout import vanilla_sampler_adapter
-from tunix.experimental.weight_sync import raiden_weight_sync_delegate
-from tunix.experimental.weight_sync import weight_sync
+from tunix.experimental.rollout import raiden_sampler_adapter
 from tunix.experimental.worker import remote_execution
 from tunix.experimental.worker import rollout_worker
 from tunix.generate import mappings as mappings_lib
@@ -61,13 +59,9 @@ def _chat_parser_for(model_id: str, tokenizer):
   for family, parser_cls in CHAT_PARSERS.items():
     if family in name:
       return parser_cls(tokenizer, enable_thinking=False)
-  return chat_parser_lib.DefaultChatTemplateParser(
-      tokenizer, enable_thinking=False
-  )
-
+  return chat_parser_lib.DefaultChatTemplateParser(tokenizer, enable_thinking=False)
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
-  """Parses command line arguments for the rollout worker process."""
   parser = argparse.ArgumentParser(description="vLLM rollout worker process")
   parser.add_argument("--port", type=int, default=20001)
   parser.add_argument("--worker_id", type=str, default="vllm-rollout-0")
@@ -87,17 +81,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument(
       "--sampler",
       type=str,
-      default=os.getenv("SAMPLER", "inprocess_vllm"),
-      choices=["inprocess_vllm", "vanilla"],
-  )
-  parser.add_argument(
-      "--weight_sync_mode",
-      type=weight_sync.WeightSyncMode,
-      default=weight_sync.WeightSyncMode(
-          os.getenv("WEIGHT_SYNC_MODE", "raiden")
-      ),
-      choices=list(weight_sync.WeightSyncMode),
-      help="Weight sync mode (e.g. raiden, fallback).",
+      default=os.getenv("SAMPLER", "legacy_vllm"),
+      choices=["legacy_vllm", "vanilla"],
   )
   return parser.parse_args(argv)
 
@@ -107,23 +92,27 @@ def _create_rollout_mesh() -> Mesh:
   devices = mesh_utils.create_device_mesh(shape, jax.devices())
   return Mesh(devices, axis_names=("fsdp", "tp"))
 
-
 def _create_vanilla_worker(args, tokenizer):
-  """Creates a vanilla sampler rollout worker instance."""
   logging.info("Creating native sampler on the rollout mesh...")
   mesh = _create_rollout_mesh()
   with mesh:
     model = models.create_model(
         args.model_name, args.model_dir or args.model_id, mesh
     )
-  raiden_delegate = (
-      raiden_weight_sync_delegate.RaidenWeightSyncDelegate()
-      if args.weight_sync_mode == weight_sync.WeightSyncMode.RAIDEN
-      else None
+  sampler_adapter = raiden_sampler_adapter.RaidenSamplerAdapter(
+      server_id=args.worker_id,
+      transformer=model,
+      tokenizer=tokenizer,
+      cache_config=args.max_prompt_length + args.max_response_length,
   )
+
+  rollout_tokenizer = tokenizer_adapter_lib.TokenizerAdapter(tokenizer)
+  chat_parser = chat_parser_lib.QwenChatTemplateParser(
+      tokenizer, enable_thinking=False
+  )
+  # TODO: select the chat template parser by model family instead of hardcoding. 
   config = rollout_worker.RolloutConfig(
-      sampler_type="vanilla",
-      weight_sync_mode=args.weight_sync_mode,
+      sampler_type="raiden_vanilla",
       max_prompt_length=args.max_prompt_length,
       max_tokens_to_generate=args.max_response_length,
       temperature=1.0,
@@ -131,19 +120,6 @@ def _create_vanilla_worker(args, tokenizer):
       return_logprobs=True,
       env_name=gsm8k.GSM8K_ENV_NAME,
       agent_name=gsm8k.GSM8K_AGENT_NAME,
-  )
-  sampler_adapter = vanilla_sampler_adapter.VanillaSamplerAdapter(
-      server_id=args.worker_id,
-      transformer=model,
-      tokenizer=tokenizer,
-      cache_config=args.max_prompt_length + args.max_response_length,
-      config=config,
-      raiden_sync_delegate=raiden_delegate,
-  )
-
-  rollout_tokenizer = tokenizer_adapter_lib.TokenizerAdapter(tokenizer)
-  chat_parser = chat_parser_lib.QwenChatTemplateParser(
-      tokenizer, enable_thinking=False
   )
   return rollout_worker.RolloutWorker(
       worker_id=args.worker_id,
@@ -156,7 +132,6 @@ def _create_vanilla_worker(args, tokenizer):
 
 
 def _create_vllm_worker(args, tokenizer):
-  """Creates an in-process vLLM sampler rollout worker instance."""
   logging.info("Creating vLLM mapping config...")
   mapping_config = mappings_lib.MappingConfig(
       lora_to_hf_mappings=mapping_vllm_jax.LORA_TO_HF_MAPPINGS
@@ -172,34 +147,29 @@ def _create_vllm_worker(args, tokenizer):
       jax.device_count(),
       max_model_len,
   )
-  lora_config = None
-  if args.use_lora:
-    lora_config = {
-        "max_lora_rank": args.lora_rank,
-        "max_loras": 1,
-    }
   vllm_config = vllm_sampler.VllmConfig(
       mesh=rollout_mesh,
       tensor_parallel_size=jax.device_count(),
       data_parallel_size=1,
       return_logprobs=True,
-      lora_config=lora_config,
+      lora_config=(
+          {
+              "max_lora_rank": args.lora_rank,
+              "max_loras": 1,
+          }
+          if args.use_lora
+          else None
+      ),
       mapping_config=mapping_config,
       engine_kwargs={
           "model": vllm_model,
           "max_model_len": max_model_len,
       },
   )
-  raiden_delegate = (
-      raiden_weight_sync_delegate.RaidenWeightSyncDelegate()
-      if args.weight_sync_mode == weight_sync.WeightSyncMode.RAIDEN
-      else None
-  )
   sampler_adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
       server_id=args.worker_id,
       tokenizer=tokenizer,
       config=vllm_config,
-      raiden_sync_delegate=raiden_delegate,
   )
   rollout_tokenizer = tokenizer_adapter_lib.TokenizerAdapter(tokenizer)
   chat_parser = chat_parser_lib.QwenChatTemplateParser(
@@ -208,7 +178,6 @@ def _create_vllm_worker(args, tokenizer):
   logging.info("Creating RolloutWorker wrapper...")
   config = rollout_worker.RolloutConfig(
       sampler_type="inprocess_vllm",
-      weight_sync_mode=args.weight_sync_mode,
       max_prompt_length=args.max_prompt_length,
       max_tokens_to_generate=args.max_response_length,
       temperature=1.0,
@@ -254,11 +223,10 @@ def main(argv: list[str], context: Any = None) -> None:
     sys.path.insert(0, REPO_ROOT)
   logging.info("Repo root inserted into sys.path: %s", REPO_ROOT)
 
+
   tokenizer_path = args.tokenizer_path or args.model_dir or args.model_id
   logging.info("Loading tokenizer from %s...", tokenizer_path)
-  tokenizer: Any = AutoTokenizer.from_pretrained(
-      tokenizer_path, trust_remote_code=True
-  )
+  tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
   if tokenizer.pad_token_id is None and tokenizer.eos_token is not None:
     tokenizer.pad_token = tokenizer.eos_token
 

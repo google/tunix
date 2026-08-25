@@ -17,11 +17,9 @@
 import abc
 import numbers
 from typing import Any, List, Sequence
-from absl import logging
 import numpy as np
+
 from tunix.experimental.rollout import sampler as base_sampler_lib
-from tunix.experimental.weight_sync import raiden_weight_sync_delegate
-from tunix.experimental.weight_sync import weight_sync
 
 Sampler = base_sampler_lib.Sampler
 
@@ -41,7 +39,6 @@ class InprocessVllmSamplerAdapter(Sampler, abc.ABC):
       tokenizer: Any = None,
       config: Any = None,
       model_name: str = "",
-      raiden_sync_delegate: Any = None,
       **kwargs,
   ):
     self.server_id = server_id
@@ -49,32 +46,6 @@ class InprocessVllmSamplerAdapter(Sampler, abc.ABC):
     self.config = config
     self.model_name = model_name or kwargs.get("model", "")
     self.vllm_sampler = None
-    self.raiden_sync_delegate = raiden_sync_delegate
-    self.weight_sync_mode = getattr(
-        config, "weight_sync_mode", weight_sync.WeightSyncMode.FALLBACK
-    )
-    self.enable_raiden = (
-        self.weight_sync_mode == weight_sync.WeightSyncMode.RAIDEN
-    )
-
-    if self.enable_raiden:
-      logging.info(
-          "InprocessVllmSamplerAdapter [%s] weight_sync: initializing Raiden"
-          " delegate",
-          self.server_id,
-      )
-
-      if self.raiden_sync_delegate is None:
-        self.raiden_sync_delegate = (
-            raiden_weight_sync_delegate.RaidenWeightSyncDelegate()
-        )
-
-    if not self.enable_raiden and self.raiden_sync_delegate:
-      logging.warning(
-          "InprocessVllmSamplerAdapter [%s] raiden_sync_delegate is set but"
-          " enable_raiden is False.",
-          self.server_id,
-      )
 
     if self.tokenizer is not None and self.config is not None:
       vllm_lib = _get_vllm_sampler_cls()
@@ -101,6 +72,11 @@ class InprocessVllmSamplerAdapter(Sampler, abc.ABC):
       vllm_lib = _get_vllm_sampler_cls()
       self.vllm_sampler = vllm_lib.VllmSampler(
           tokenizer=self.tokenizer, config=self.config
+      )
+    if self.vllm_sampler is None:
+      raise RuntimeError(
+          f"InprocessVllmSamplerAdapter [{self.server_id}] requires a"
+          " vllm_sampler instance or tokenizer + config."
       )
 
   def _unpadded_prompt_tokens(self, padded_tokens: Any) -> np.ndarray:
@@ -150,7 +126,6 @@ class InprocessVllmSamplerAdapter(Sampler, abc.ABC):
     return True
 
   async def stop(self, **kwargs) -> str | None | Any:
-    """Terminates sampler execution and closes local connections."""
     del kwargs
     if self.vllm_sampler and hasattr(self.vllm_sampler, "stop"):
       self.vllm_sampler.stop()
@@ -180,7 +155,6 @@ class InprocessVllmSamplerAdapter(Sampler, abc.ABC):
           base_sampler_lib.SamplingRequest
           | Sequence[base_sampler_lib.SamplingRequest]
           | Any
-          | Sequence[Any]
       ),
       **kwargs,
   ) -> (
@@ -298,120 +272,48 @@ class InprocessVllmSamplerAdapter(Sampler, abc.ABC):
     return responses[0]
 
   # --- Weight Synchronization ---
-  def _check_weight_sync_boundness(
-      self,
-  ):
-    """Returns whether the weight sync delegate is bounded."""
-    if not self.enable_raiden:
-      return
-
-    if not self.raiden_sync_delegate.is_bounded():
-      raise RuntimeError(
-          f"InprocessVllmSamplerAdapter [{self.server_id}] weight sync delegate"
-          " is not bounded."
-      )
-
   async def get_weight_sync_metadata(self, **kwargs) -> Any:
     """Returns sharding specs and layout metadata across devices for weights."""
-    self._check_weight_sync_boundness()
-
-    if self.enable_raiden:
-      return await self.raiden_sync_delegate.get_weight_sync_metadata(**kwargs)
+    del kwargs
     raise NotImplementedError(
-        f"InprocessVllmSamplerAdapter [{self.server_id}] does not support"
-        " get_weight_sync_metadata when Raiden is disabled."
+        "get_weight_sync_metadata() not implemented for this SamplerServer."
     )
-
-  async def bind_weight_sync(
-      self,
-      sync_request: base_sampler_lib.WeightSyncRequest | Any = None,
-      **kwargs,
-  ) -> Any:
-    """Binds destination-side transport resources."""
-    if self.enable_raiden:
-      if not hasattr(self.vllm_sampler, "transformer_state"):
-        raise RuntimeError(
-            f"InprocessVllmSamplerAdapter [{self.server_id}] does not expose"
-            " transformer_state for Raiden weight sync."
-        )
-
-      if self.raiden_sync_delegate.is_bounded():
-        raise RuntimeError(
-            f"InprocessVllmSamplerAdapter [{self.server_id}] weight sync"
-            " delegate is already bounded before bind_weight_sync."
-        )
-
-      state = self.vllm_sampler.transformer_state
-      return await self.raiden_sync_delegate.bind_weight_sync(
-          sync_request=sync_request, state=state, **kwargs
-      )
+    
+  async def bind_weight_sync(self, **kwargs) -> Any:
+    del kwargs
     return None
 
-  async def pre_weight_sync(
-      self,
-      sync_request: base_sampler_lib.WeightSyncRequest | Any = None,
-      **kwargs,
-  ) -> str | None | Any:
+  async def pre_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
     """Prepares staging handshake prior to policy weight update."""
-    self._check_weight_sync_boundness()
-
-    if self.enable_raiden:
-      return await self.raiden_sync_delegate.pre_weight_sync(
-          sync_request=sync_request, **kwargs
-      )
+    del sync_request, kwargs
     return True
 
-  async def weight_sync(
-      self,
-      sync_request: base_sampler_lib.WeightSyncRequest | Any = None,
-      **kwargs,
-  ) -> str | None | Any:
+  async def weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
     """Updates model weights in-place from the specified controller."""
-    self._check_weight_sync_boundness()
-
-    if self.enable_raiden:
-      return await self.raiden_sync_delegate.weight_sync(
-          sync_request=sync_request, **kwargs
-      )
-    else:
-      if sync_request is None:
-        raise ValueError(
-            f"InprocessVllmSamplerAdapter Fallback mode [{self.server_id}]"
-            " weight_sync: sync_request is None."
-        )
-      if self.vllm_sampler and hasattr(self.vllm_sampler, "update_params"):
-        weights = getattr(sync_request, "weights", None)
-        if weights is None:
-          raise ValueError(
-              f"InprocessVllmSamplerAdapter [{self.server_id}] weight_sync:"
-              " weights not found in sync_request."
-          )
-
-        self.vllm_sampler.update_params(weights)
-      else:
-        raise RuntimeError(
-            f"InprocessVllmSamplerAdapter [{self.server_id}] does not support"
-            " Raiden weight sync, while the fallback path missing required"
-            " components."
-        )
-      return True
-
-  async def post_weight_sync(
-      self,
-      sync_request: base_sampler_lib.WeightSyncRequest | Any = None,
-      **kwargs,
-  ) -> str | None | Any:
-    """Finalizes and switches active policy weights after transfer completion."""
-    if self.enable_raiden:
-      return await self.raiden_sync_delegate.post_weight_sync(
-          sync_request=sync_request, **kwargs
-      )
+    del kwargs
+    if (
+        sync_request is not None
+        and self.vllm_sampler
+        and hasattr(self.vllm_sampler, "update_params")
+    ):
+      weights = getattr(sync_request, "weights", sync_request)
+      self.vllm_sampler.update_params(weights)
     return True
 
-  async def get_transfer_status(self, req_id: str | Any, **kwargs) -> str | Any:
+  async def get_transfer_status(self, req_id: Any, **kwargs) -> Any:
     """Queries status of an ongoing weight transfer or KV-cache migration."""
     del req_id, kwargs
     return "SUCCESS"
+
+  async def get_load_info(self, **kwargs) -> base_sampler_lib.LoadInfo:
+    """Returns best-effort vLLM queue/cache load information."""
+    del kwargs
+    return base_sampler_lib.LoadInfo()
+
+  async def post_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
+    """Finalizes and switches active policy weights after transfer completion."""
+    del sync_request, kwargs
+    return True
 
   async def migrate_kv_cache(
       self,
@@ -421,10 +323,5 @@ class InprocessVllmSamplerAdapter(Sampler, abc.ABC):
       **kwargs,
   ) -> bool:
     """Triggers KV-cache transfer across TPU slices."""
-    del source_server_id, target_server_id, token_ids, kwargs
+    del source_server_id, target_server_id, token_ids
     return True
-
-  async def get_load_info(self, **kwargs) -> base_sampler_lib.LoadInfo:
-    """Returns best-effort vLLM queue/cache load information."""
-    del kwargs
-    return base_sampler_lib.LoadInfo()
