@@ -408,10 +408,23 @@ def create_kv_cache_sharing_patterns(
     if i < num_unshared_layers:
       kv_cache_sharing_patterns.append(i)
     else:
-      if attention_types[i] == AttentionType.GLOBAL and share_global:
-        kv_cache_sharing_patterns.append(num_unshared_layers - 1)
-      elif attention_types[i] == AttentionType.LOCAL_SLIDING and share_local:
-        kv_cache_sharing_patterns.append(num_unshared_layers - 2)
+      attn_type = attention_types[i]
+      if (attn_type == AttentionType.GLOBAL and share_global) or (
+          attn_type == AttentionType.LOCAL_SLIDING and share_local
+      ):
+        lender = None
+        for j in reversed(range(num_unshared_layers)):
+          if attention_types[j] == attn_type:
+            lender = j
+            break
+        if lender is None:
+          raise ValueError(
+              f'Cannot share KV cache for layer {i} of type {attn_type}: no'
+              ' unshared layer of the same type exists in layers'
+              f' 0..{num_unshared_layers - 1}. Reduce frac_shared_layers or'
+              ' adjust attention_types.'
+          )
+        kv_cache_sharing_patterns.append(lender)
       else:
         kv_cache_sharing_patterns.append(i)
   return kv_cache_sharing_patterns

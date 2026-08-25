@@ -255,7 +255,12 @@ class DecoderLayer(nnx.Module):
   ) -> tuple[
       LayerCache | None,
       jaxtyping.Array,
-      tuple[jaxtyping.Array, jaxtyping.Array],
+      tuple[
+          jaxtyping.Array,
+          jaxtyping.Array,
+          jaxtyping.Array | None,
+          jaxtyping.Array | None,
+      ],
   ]:
     norm = self.pre_attention_norm(x)
     cache, attn, kv = self.attn(
@@ -304,7 +309,12 @@ class DecoderLayer(nnx.Module):
   ) -> tuple[
       LayerCache | None,
       jaxtyping.Array,
-      tuple[jaxtyping.Array, jaxtyping.Array],
+      tuple[
+          jaxtyping.Array,
+          jaxtyping.Array,
+          jaxtyping.Array | None,
+          jaxtyping.Array | None,
+      ],
   ]:
     remat_config = getattr(self.config, 'remat_config', RematConfig.NONE)
     if (
@@ -486,8 +496,16 @@ class Gemma4(BackendMappingMixin, nnx.Module):
         shared_layer_name = f'layer_{shared_idx}'
         if is_prefill:
           # During prefill, use full KV projections from the shared layer.
-          shared_k, shared_v = transient_kvs[shared_layer_name]
+          shared_k, shared_v, shared_valid_mask, origin_prior_end_index = (
+              transient_kvs[shared_layer_name]
+          )
           kv_shared_cache = {'k': shared_k, 'v': shared_v}
+          if shared_valid_mask is not None:
+            kv_shared_cache['valid_mask'] = shared_valid_mask
+          # Propagate origin layer's prior_end_index so shared GLOBAL
+          # layers can mask uninitialized prefix cache positions.
+          if origin_prior_end_index is not None:
+            kv_shared_cache['prior_end_index'] = origin_prior_end_index
         else:
           # During decoding, use the shared layer's cache (which may be
           # an optimized sliding window ring cache).

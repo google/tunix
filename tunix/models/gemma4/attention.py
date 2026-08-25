@@ -376,7 +376,12 @@ class Attention(nnx.Module):
   ) -> tuple[
       LayerCache | None,
       jaxtyping.Array,
-      tuple[jaxtyping.Array, jaxtyping.Array],
+      tuple[
+          jaxtyping.Array,
+          jaxtyping.Array,
+          jaxtyping.Array | None,
+          jaxtyping.Array | None,
+      ],
   ]:
     x = x.astype(self.config.dtype)
     seq_len = x.shape[1]
@@ -397,6 +402,7 @@ class Attention(nnx.Module):
         kv_shared_cache,
     )
 
+    prior_end_index = None
     if cache is not None:
       assert kv_shared_cache is None
       cache_len = cache['v'].shape[1]
@@ -534,7 +540,11 @@ class Attention(nnx.Module):
 
     attn_output = self.attn_vec_einsum(encoded)
     attn_output = shard(attn_output, self.config.shd_config.act_btd)
-    return new_cache, attn_output, (key_proj, value_proj)
+    return (
+        new_cache,
+        attn_output,
+        (key_proj, value_proj, kv_valid_mask, prior_end_index),
+    )
 
   def _flash_attention_single(
       self,
@@ -718,7 +728,12 @@ class Attention(nnx.Module):
   ) -> tuple[
       LayerCache | None,
       jaxtyping.Array,
-      tuple[jaxtyping.Array, jaxtyping.Array],
+      tuple[
+          jaxtyping.Array,
+          jaxtyping.Array,
+          jaxtyping.Array | None,
+          jaxtyping.Array | None,
+      ],
   ]:
     remat_config = getattr(self.config, 'remat_config', RematConfig.NONE)
     if (
