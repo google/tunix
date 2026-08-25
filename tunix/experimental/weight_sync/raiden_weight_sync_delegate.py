@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Vanilla sampler adapter with raiden weight sync as the destination."""
+"""Raiden weight sync delegate for destination-side rollout workers."""
 
 from __future__ import annotations
 
@@ -20,13 +20,11 @@ import os
 from typing import Any, List
 
 from absl import logging
-
-from tunix.experimental.rollout import vanilla_sampler_adapter
 from tunix.experimental.weight_sync import raiden_synchronizer
 
 
-class RaidenSamplerAdapter(vanilla_sampler_adapter.VanillaSamplerAdapter):
-  """Serves with the in-process sampler; syncs weights over raiden.
+class RaidenWeightSyncDelegate:
+  """Manages weight synchronization over Raiden for sampler adapters.
 
   The destination side of a weight sync round: bind_weight_sync binds the
   sampler's transformer state to the raiden transport, the transfer lands
@@ -47,30 +45,37 @@ class RaidenSamplerAdapter(vanilla_sampler_adapter.VanillaSamplerAdapter):
     ]
     self._version = 0
 
-  def _bound_synchronizers(self) -> List[Any]:
-    if self.sampler is None:
-      raise RuntimeError("initialize the sampler before weight sync")
+  def is_bounded(
+      self,
+  ) -> bool:
+    """Returns whether all managed synchronizers are bound."""
+    return all(s.bound for s in self._synchronizers)
+
+  async def bind_weight_sync(
+      self, sync_request: Any = None, state: Any = None, **kwargs
+  ) -> Any:
+    """Binds destination-side transport resources for weight sync."""
+    del sync_request, kwargs
+
     for sync in self._synchronizers:
       # The state arrays never change, so one bind covers every round.
       if not sync.bound:
-        sync.bind(self.sampler.transformer_state)
-    return self._synchronizers
+        sync.bind(state)
 
-  async def bind_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
-    del sync_request, kwargs
-    self._bound_synchronizers()
-    return None
+    return True
 
   async def get_weight_sync_metadata(self, **kwargs) -> Any:
+    """Retrieves destination worker metadata for the sync coordinator."""
     del kwargs
-    return [s.work_unit_metadata() for s in self._bound_synchronizers()]
+    return [s.work_unit_metadata() for s in self._synchronizers]
 
   async def pre_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
+    """Pre-sync phase hook executed before weight transfer begins."""
     del sync_request, kwargs
-    self._bound_synchronizers()
     return True
 
   async def weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
+    """Executes weight installation on device from host staging buffer."""
     del kwargs
     for sync in self._synchronizers:
       if not sync.bound:
@@ -85,6 +90,7 @@ class RaidenSamplerAdapter(vanilla_sampler_adapter.VanillaSamplerAdapter):
     return self._version
 
   async def post_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
+    """Post-sync phase hook executed after weight installation completes."""
     del sync_request, kwargs
     if os.environ.get("VERIFY_WEIGHTS", "").lower() == "true":
       for sync in self._synchronizers:

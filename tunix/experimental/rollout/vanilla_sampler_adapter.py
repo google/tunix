@@ -17,8 +17,11 @@
 import abc
 import numbers
 from typing import Any, List, Sequence
+from absl import logging
 import numpy as np
 from tunix.experimental.rollout import sampler as base_sampler_lib
+from tunix.experimental.weight_sync import raiden_weight_sync_delegate
+from tunix.experimental.weight_sync import weight_sync
 from tunix.generate import sampler as generate_sampler_lib
 
 Sampler = base_sampler_lib.Sampler
@@ -29,6 +32,17 @@ class VanillaSamplerAdapter(Sampler, abc.ABC):
 
   Constructs or wraps a Tunix generate_sampler_lib.Sampler instance and
   executes sampling requests.
+
+  Supported Weight Synchronization Modes:
+    1. Raiden Mode (`weight_sync_mode == RAIDEN`):
+       Delegates high-performance decentralized P2P / DCN weight synchronization
+       to `RaidenWeightSyncDelegate`. Binds destination memory buffers using
+       `self.sampler.transformer_state` and executes phased synchronization
+       lifecycle hooks (`bind`, `pre`, `sync`, `post`).
+    2. Fallback Direct Mode (`weight_sync_mode == FALLBACK`):
+       Synchronizes weights in-place without Raiden transport. When a weight
+       payload is received in `sync_request.weights`, updates the underlying
+       JAX sampler directly via `self.sampler.transformer_state`.
   """
 
   def __init__(
@@ -39,12 +53,34 @@ class VanillaSamplerAdapter(Sampler, abc.ABC):
       cache_config: generate_sampler_lib.CacheConfig | int | None = None,
       image_processor: Any = None,
       model: Any = None,
+      config: Any = None,
+      raiden_sync_delegate: Any = None,
       **kwargs,
   ):
     self.server_id = server_id
     self.transformer = transformer if transformer is not None else model
     self.tokenizer = tokenizer
     self.image_processor = image_processor
+    self.config = config
+    self.raiden_sync_delegate = raiden_sync_delegate
+    self.weight_sync_mode = getattr(
+        config, "weight_sync_mode", weight_sync.WeightSyncMode.FALLBACK
+    )
+    self.enable_raiden = (
+        self.weight_sync_mode == weight_sync.WeightSyncMode.RAIDEN
+    )
+
+    if self.enable_raiden and self.raiden_sync_delegate is None:
+      self.raiden_sync_delegate = (
+          raiden_weight_sync_delegate.RaidenWeightSyncDelegate()
+      )
+
+    if not self.enable_raiden and self.raiden_sync_delegate:
+      logging.warning(
+          "VanillaSamplerAdapter [%s] raiden_sync_delegate is set but"
+          " enable_raiden is False.",
+          self.server_id,
+      )
 
     if self.transformer is not None and self.tokenizer is not None:
       self.sampler = self._build_generate_sampler(cache_config)
@@ -59,30 +95,25 @@ class VanillaSamplerAdapter(Sampler, abc.ABC):
       cache_cfg = cache_config
     else:
       cfg = getattr(self.transformer, "config", None)
-      num_layers = (
-          getattr(cfg, "num_layers", getattr(cfg, "num_hidden_layers", 4))
-          if cfg
-          else 4
-      )
-      num_kv_heads = (
-          getattr(
-              cfg, "num_kv_heads", getattr(cfg, "num_key_value_heads", 4)
-          )
-          if cfg
-          else 4
-      )
-      head_dim = (
-          getattr(cfg, "head_dim", getattr(cfg, "head_dimension", 16))
-          if cfg
-          else 16
-      )
-      cache_size = (
-          cache_config
-          if isinstance(cache_config, int)
-          else (
-              getattr(cfg, "max_position_embeddings", 1024) if cfg else 1024
-          )
-      )
+      if cfg:
+        num_layers = getattr(
+            cfg, "num_layers", getattr(cfg, "num_hidden_layers", 4)
+        )
+        num_kv_heads = getattr(
+            cfg, "num_kv_heads", getattr(cfg, "num_key_value_heads", 4)
+        )
+        head_dim = getattr(cfg, "head_dim", getattr(cfg, "head_dimension", 16))
+        cache_size = (
+            cache_config
+            if isinstance(cache_config, int)
+            else getattr(cfg, "max_position_embeddings", 1024)
+        )
+      else:
+        num_layers = 4
+        num_kv_heads = 4
+        head_dim = 16
+        cache_size = cache_config if isinstance(cache_config, int) else 1024
+
       cache_cfg = generate_sampler_lib.CacheConfig(
           cache_size=cache_size,
           num_layers=num_layers,
@@ -105,14 +136,6 @@ class VanillaSamplerAdapter(Sampler, abc.ABC):
         and self.tokenizer is not None
     ):
       self.sampler = self._build_generate_sampler(None)
-
-    if self.sampler is None and (
-        self.transformer is not None or self.tokenizer is not None
-    ):
-      raise RuntimeError(
-          f"VanillaSamplerAdapter [{self.server_id}] requires a sampler"
-          " instance or transformer + tokenizer."
-      )
 
   def _unpadded_prompt_tokens(self, padded_tokens: Any) -> np.ndarray:
     """Returns sampler-tokenized prompt ids without backend left padding."""
@@ -161,6 +184,7 @@ class VanillaSamplerAdapter(Sampler, abc.ABC):
           base_sampler_lib.SamplingRequest
           | Sequence[base_sampler_lib.SamplingRequest]
           | Any
+          | Sequence[Any]
       ),
       **kwargs,
   ) -> (
@@ -259,14 +283,9 @@ class VanillaSamplerAdapter(Sampler, abc.ABC):
           if isinstance(sampler_output.tokens, list)
           else sampler_output.tokens
       )
-      lps = (
-          sampler_output.logprobs[i]
-          if (
-              sampler_output.logprobs
-              and isinstance(sampler_output.logprobs, list)
-          )
-          else None
-      )
+      lps = None
+      if sampler_output.logprobs and isinstance(sampler_output.logprobs, list):
+        lps = sampler_output.logprobs[i]
 
       tok_ids = (
           np.array(toks, dtype=np.int32)
@@ -294,28 +313,7 @@ class VanillaSamplerAdapter(Sampler, abc.ABC):
     return responses[0]
 
   # --- Weight Synchronization ---
-  async def get_weight_sync_metadata(self, **kwargs) -> Any:
-    """Returns sharding specs and layout metadata across devices for weights."""
-    del kwargs
-    raise NotImplementedError(
-        "get_weight_sync_metadata() not implemented for this SamplerServer."
-    )
-
-  async def bind_weight_sync(self, **kwargs) -> Any:
-    del kwargs
-    return None
-
-  async def pre_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
-    """Prepares staging handshake prior to policy weight update."""
-    del sync_request, kwargs
-    return True
-
-  async def weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
-    """Updates model weights in-place from the specified controller."""
-    del sync_request, kwargs
-    return True
-
-  async def get_transfer_status(self, req_id: Any, **kwargs) -> Any:
+  async def get_transfer_status(self, req_id: str | Any, **kwargs) -> str | Any:
     """Queries status of an ongoing weight transfer or KV-cache migration."""
     del req_id, kwargs
     return "SUCCESS"
@@ -325,11 +323,134 @@ class VanillaSamplerAdapter(Sampler, abc.ABC):
     del kwargs
     return base_sampler_lib.LoadInfo()
 
-  async def post_weight_sync(self, sync_request: Any = None, **kwargs) -> Any:
-    """Finalizes and switches active policy weights after transfer completion."""
-    del sync_request, kwargs
+  # --- Weight Synchronization ---
+  def _check_weight_sync_boundness(
+      self,
+  ):
+    """Verifies that the Raiden delegate has been bound before executing sync phases."""
+    if not self.enable_raiden:
+      return
+
+    if not self.raiden_sync_delegate.is_bounded():
+      raise RuntimeError(
+          f"VanillaSamplerAdapter [{self.server_id}] weight sync delegate"
+          " is not bounded."
+      )
+
+  async def get_weight_sync_metadata(self, **kwargs) -> Any:
+    """Returns sharding specs and layout metadata across devices for weights."""
+    self._check_weight_sync_boundness()
+
+    # In Raiden mode, retrieve transport endpoint and tensor shard layout
+    # metadata.
+    if self.enable_raiden:
+      return await self.raiden_sync_delegate.get_weight_sync_metadata(**kwargs)
+
+    # In Fallback mode, metadata query is not supported.
+    raise NotImplementedError(
+        f"VanillaSamplerAdapter [{self.server_id}] does not support"
+        " get_weight_sync_metadata when Raiden is disabled."
+    )
+
+  async def bind_weight_sync(
+      self,
+      sync_request: base_sampler_lib.WeightSyncRequest | Any = None,
+      **kwargs,
+  ) -> Any:
+    """Binds destination-side transport resources for weight transfer."""
+    if self.enable_raiden:
+      # In Raiden mode, register destination sampler transformer_state memory
+      # buffers.
+      if not hasattr(self.sampler, "transformer_state"):
+        raise RuntimeError(
+            f"VanillaSamplerAdapter [{self.server_id}] sampler does not expose"
+            " transformer_state for Raiden weight sync."
+        )
+
+      if self.raiden_sync_delegate.is_bounded():
+        raise RuntimeError(
+            f"VanillaSamplerAdapter [{self.server_id}] weight sync delegate is"
+            " already bounded before bind_weight_sync."
+        )
+
+      state = self.sampler.transformer_state
+      return await self.raiden_sync_delegate.bind_weight_sync(
+          sync_request=sync_request, state=state, **kwargs
+      )
+    # In Fallback mode, no transport binding is required.
+    return None
+
+  async def pre_weight_sync(
+      self,
+      sync_request: base_sampler_lib.WeightSyncRequest | Any = None,
+      **kwargs,
+  ) -> str | None | Any:
+    """Prepares staging handshake prior to policy weight update."""
+    self._check_weight_sync_boundness()
+
+    # In Raiden mode, execute the pre-synchronization barrier via delegate.
+    if self.enable_raiden:
+      return await self.raiden_sync_delegate.pre_weight_sync(
+          sync_request=sync_request, **kwargs
+      )
+    # In Fallback mode, acts as a no-op returning True.
     return True
 
+  async def weight_sync(
+      self,
+      sync_request: base_sampler_lib.WeightSyncRequest | Any = None,
+      **kwargs,
+  ) -> str | None | Any:
+    """Updates model weights in-place from the specified controller or request."""
+    self._check_weight_sync_boundness()
+
+    # Raiden mode: Invoke Raiden transport to stream weights into bound memory
+    # buffers.
+    if self.enable_raiden:
+      return await self.raiden_sync_delegate.weight_sync(
+          sync_request=sync_request, **kwargs
+      )
+    else:
+      # Fallback mode: Directly assign source weights from sync_request.weights.
+      if sync_request is None:
+        raise ValueError(
+            "VanillaSamplerAdapter Fallback mode [%s] weight_sync:"
+            " sync_request is None."
+            % self.server_id
+        )
+      if self.sampler and hasattr(self.sampler, "transformer_state"):
+        weights = getattr(sync_request, "weights", None)
+        if weights is None:
+          raise ValueError(
+              "VanillaSamplerAdapter [%s] weight_sync: weights not found"
+              " in sync_request."
+              % self.server_id
+          )
+        self.sampler.transformer_state = weights
+      else:
+        raise RuntimeError(
+            f"VanillaSamplerAdapter [{self.server_id}] does not support"
+            " Raiden weight sync, while the fallback path missing required"
+            " components."
+        )
+      return True
+
+  async def post_weight_sync(
+      self,
+      sync_request: base_sampler_lib.WeightSyncRequest | Any = None,
+      **kwargs,
+  ) -> str | None | Any:
+    """Finalizes and switches active policy weights after transfer completion."""
+    # Raiden mode: Commit newly transferred weights and execute post-sync
+    # barrier.
+    if self.enable_raiden:
+      return await self.raiden_sync_delegate.post_weight_sync(
+          sync_request=sync_request, **kwargs
+      )
+    # Fallback mode: acts as a no-op returning True.
+    return True
+
+  # --- KV-cache Migration ---
   async def migrate_kv_cache(
       self,
       source_server_id: str,
@@ -338,5 +459,5 @@ class VanillaSamplerAdapter(Sampler, abc.ABC):
       **kwargs,
   ) -> bool:
     """Triggers Raiden P2P KV-cache transfer across TPU slices."""
-    del source_server_id, target_server_id, token_ids
+    del source_server_id, target_server_id, token_ids, kwargs
     return True

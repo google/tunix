@@ -15,11 +15,14 @@
 """Tests for VanillaSamplerAdapter with Tunix JAX Sampler."""
 
 import asyncio
+import types
+from unittest import mock
 from absl.testing import absltest
 from flax import nnx
 import numpy as np
 from tunix.experimental.rollout import sampler as base_sampler_lib
 from tunix.experimental.rollout import vanilla_sampler_adapter
+from tunix.experimental.weight_sync import weight_sync
 from tunix.generate import sampler as generate_sampler_lib
 from tunix.tests import test_common as tc
 
@@ -138,9 +141,71 @@ class VanillaSamplerAdapterTest(absltest.TestCase):
           )
       )
 
-  def test_sample_none_requests_raises(self):
-    with self.assertRaises(ValueError):
-      asyncio.run(self.vanilla_sampler.sample(None))
+  def test_weight_sync_without_raiden_delegate(self):
+    self.assertIsNone(asyncio.run(self.vanilla_sampler.bind_weight_sync()))
+    self.assertTrue(asyncio.run(self.vanilla_sampler.pre_weight_sync()))
+    new_state = self.vanilla_sampler.sampler.transformer_state
+    req = base_sampler_lib.WeightSyncRequest(weights=new_state)
+    self.assertTrue(
+        asyncio.run(self.vanilla_sampler.weight_sync(sync_request=req))
+    )
+    self.assertTrue(asyncio.run(self.vanilla_sampler.post_weight_sync()))
+    with self.assertRaises(NotImplementedError):
+      asyncio.run(self.vanilla_sampler.get_weight_sync_metadata())
+
+  def test_weight_sync_with_raiden_delegate(self):
+    mock_delegate = mock.MagicMock()
+    mock_delegate.is_bounded.return_value = False
+    mock_delegate.bind_weight_sync = mock.AsyncMock(return_value=True)
+    mock_delegate.get_weight_sync_metadata = mock.AsyncMock(
+        return_value=[{"unit": "rollout"}]
+    )
+    mock_delegate.pre_weight_sync = mock.AsyncMock(return_value=True)
+    mock_delegate.weight_sync = mock.AsyncMock(return_value=10)
+    mock_delegate.post_weight_sync = mock.AsyncMock(return_value=True)
+
+    sampler_with_raiden = vanilla_sampler_adapter.VanillaSamplerAdapter(
+        server_id="tpu_slice_raiden",
+        transformer=self.transformer,
+        tokenizer=self.vocab,
+        cache_config=self.cache_config,
+        config=types.SimpleNamespace(
+            weight_sync_mode=weight_sync.WeightSyncMode.RAIDEN
+        ),
+        raiden_sync_delegate=mock_delegate,
+    )
+    sampler_with_raiden.initialize()
+
+    sync_req = base_sampler_lib.WeightSyncRequest(policy_version=10)
+
+    # 1. bind_weight_sync
+    asyncio.run(sampler_with_raiden.bind_weight_sync(sync_req))
+    mock_delegate.bind_weight_sync.assert_awaited_once_with(
+        sync_request=sync_req,
+        state=sampler_with_raiden.sampler.transformer_state,
+    )
+    mock_delegate.is_bounded.return_value = True
+
+    # 2. get_weight_sync_metadata
+    metadata = asyncio.run(sampler_with_raiden.get_weight_sync_metadata())
+    self.assertEqual(metadata, [{"unit": "rollout"}])
+
+    # 3. pre_weight_sync
+    self.assertTrue(asyncio.run(sampler_with_raiden.pre_weight_sync(sync_req)))
+    mock_delegate.pre_weight_sync.assert_awaited_once_with(
+        sync_request=sync_req
+    )
+
+    # 4. weight_sync
+    version = asyncio.run(sampler_with_raiden.weight_sync(sync_req))
+    self.assertEqual(version, 10)
+    mock_delegate.weight_sync.assert_awaited_once_with(sync_request=sync_req)
+
+    # 5. post_weight_sync
+    self.assertTrue(asyncio.run(sampler_with_raiden.post_weight_sync(sync_req)))
+    mock_delegate.post_weight_sync.assert_awaited_once_with(
+        sync_request=sync_req
+    )
 
 
 if __name__ == "__main__":

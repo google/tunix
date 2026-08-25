@@ -13,11 +13,14 @@
 # limitations under the License.
 
 import asyncio
+import types
 import unittest
+from unittest import mock
 
 from absl.testing import absltest
 from tunix.experimental.rollout import manager as manager_lib
 from tunix.experimental.rollout import sampler as sampler_lib
+from tunix.experimental.weight_sync import weight_sync
 
 
 class _FakeSampler(sampler_lib.Sampler):
@@ -91,7 +94,7 @@ class AdmissionGateTest(unittest.IsolatedAsyncioTestCase):
     await manager.pre_weight_sync()
     await manager.post_weight_sync()
     self.assertTrue(manager._traffic.is_admission_open())
-    
+
   async def test_reopen_admission_after_abort(self):
     manager = self._manager()
     await manager.pre_weight_sync()
@@ -136,6 +139,49 @@ class AdmissionGateTest(unittest.IsolatedAsyncioTestCase):
     await manager.pre_weight_sync()
     task.cancel()
     manager._active_tasks.pop("t0", None)
+
+
+class WeightSyncModeTest(absltest.TestCase):
+
+  def test_config_weight_sync_mode_raiden(self):
+    config = types.SimpleNamespace(
+        sampler_type="vanilla",
+        weight_sync_mode=weight_sync.WeightSyncMode.RAIDEN,
+    )
+    manager = manager_lib.RolloutManager(
+        config=config, tokenizer="mock", chat_parser="mock"
+    )
+    self.assertTrue(getattr(manager.sampler, "enable_raiden", False))
+    self.assertIsNotNone(getattr(manager.sampler, "raiden_sync_delegate", None))
+
+  def test_config_weight_sync_mode_fallback(self):
+    config = types.SimpleNamespace(
+        sampler_type="vanilla",
+        weight_sync_mode=weight_sync.WeightSyncMode.FALLBACK,
+    )
+    manager = manager_lib.RolloutManager(
+        config=config, tokenizer="mock", chat_parser="mock"
+    )
+    self.assertFalse(getattr(manager.sampler, "enable_raiden", False))
+    self.assertIsNone(getattr(manager.sampler, "raiden_sync_delegate", None))
+
+  @mock.patch(
+      "tunix.experimental.rollout.inprocess_vllm_sampler_adapter._get_vllm_sampler_cls"
+  )
+  def test_config_weight_sync_mode_inprocess_vllm_raiden(self, mock_get_vllm):
+    mock_lib = mock.MagicMock()
+    mock_lib.VllmSampler.return_value = mock.MagicMock()
+    mock_get_vllm.return_value = mock_lib
+    config = types.SimpleNamespace(
+        sampler_type="inprocess_vllm",
+        weight_sync_mode=weight_sync.WeightSyncMode.RAIDEN,
+    )
+    manager = manager_lib.RolloutManager(
+        config=config, tokenizer="mock", chat_parser="mock"
+    )
+    self.assertTrue(getattr(manager.sampler, "enable_raiden", False))
+    self.assertIsNotNone(getattr(manager.sampler, "raiden_sync_delegate", None))
+
 
 if __name__ == "__main__":
   absltest.main()

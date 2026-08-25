@@ -21,6 +21,7 @@ from tunix.experimental.common import datatypes
 from tunix.experimental.rollout import manager as manager_lib
 from tunix.experimental.rollout import sampler as sampler_lib
 from tunix.experimental.trajectory import trajectory as trajectory_lib
+from tunix.experimental.weight_sync import weight_sync
 from tunix.experimental.worker import abstract_worker
 from tunix.rl.rollout import base_rollout
 
@@ -32,6 +33,8 @@ class RolloutConfig(base_rollout.RolloutConfig):
   Attributes:
     sampler_type: Type of sampler adapter to construct ("vanilla",
       "inprocess_vllm", "vllm").
+    weight_sync_mode: Mode of weight synchronization ("default", "fallback",
+      "raiden").
     env_name: Registered name of environment class in ENV_REGISTRY.
     agent_name: Registered name of agent class in AGENT_REGISTRY.
     env_config: Configuration dictionary passed to environment constructor.
@@ -39,6 +42,9 @@ class RolloutConfig(base_rollout.RolloutConfig):
   """
 
   sampler_type: str = "vanilla"
+  weight_sync_mode: weight_sync.WeightSyncMode = (
+      weight_sync.WeightSyncMode.FALLBACK
+  )
   env_name: str = ""
   agent_name: str = ""
   env_config: dict[str, Any] = dataclasses.field(default_factory=dict)
@@ -224,7 +230,9 @@ class RolloutWorker(abstract_worker.Worker):
             if max_generation_steps is not None
             else config.max_tokens_to_generate
         ),
-        temperature=temperature if temperature is not None else config.temperature,
+        temperature=(
+            temperature if temperature is not None else config.temperature
+        ),
         top_p=top_p if top_p is not None else config.top_p,
         top_k=top_k if top_k is not None else config.top_k,
         seed=seed if seed is not None else config.seed,  # pyrefly: ignore[bad-argument-type]
@@ -381,7 +389,9 @@ class RolloutWorker(abstract_worker.Worker):
                   max_tokens=sample_kwargs.get(
                       "max_generation_steps", config.max_tokens_to_generate
                   ),
-                  temperature=sample_kwargs.get("temperature", config.temperature),
+                  temperature=(
+                      sample_kwargs.get("temperature", config.temperature)
+                  ),
                   top_p=sample_kwargs.get("top_p", config.top_p),
                   top_k=sample_kwargs.get("top_k", config.top_k),
                   seed=sample_kwargs.get("seed", config.seed),

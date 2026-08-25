@@ -18,6 +18,7 @@ import unittest
 
 from absl.testing import absltest
 from tunix.experimental.common import datatypes
+from tunix.experimental.common import test_utils as mocks
 from tunix.experimental.worker import rollout_worker as rollout_worker_lib
 
 WorkerState = datatypes.WorkerState
@@ -30,22 +31,27 @@ class _FakeManager:
     self.admission_open = True
 
   async def pre_weight_sync(self, sync_request=None, **kwargs):
+    del sync_request, kwargs
     self.calls.append("pre")
     return "ok"
 
   async def weight_sync(self, sync_request=None, **kwargs):
+    del sync_request, kwargs
     self.calls.append("sync")
     return 1
 
   async def post_weight_sync(self, sync_request=None, **kwargs):
+    del sync_request, kwargs
     self.calls.append("post")
     return "ok"
-  
+
   async def bind_weight_sync(self, **kwargs):
+    del kwargs
     self.calls.append("bind")
     return None
 
   async def get_weight_sync_metadata(self, **kwargs):
+    del kwargs
     self.calls.append("metadata")
     return [{"unit": "u0"}]
 
@@ -67,7 +73,10 @@ class WeightSyncPhasesTest(unittest.IsolatedAsyncioTestCase):
 
   def _worker(self):
     worker = rollout_worker_lib.RolloutWorker(
-        worker_id="w0", tokenizer="mock", chat_parser="mock"
+        worker_id="w0",
+        sampler=mocks.MockBaseSamplerImpl(sampler_name="mock_sampler"),
+        tokenizer="mock",
+        chat_parser="mock",
     )
     worker.manager = _FakeManager()
     worker._state = WorkerState.READY
@@ -121,7 +130,9 @@ class WeightSyncPhasesTest(unittest.IsolatedAsyncioTestCase):
     await worker.pre_weight_sync(req)
     await worker.weight_sync(req)
     await worker.post_weight_sync(req)
-    self.assertEqual(worker.manager.calls, ["bind", "metadata", "pre", "sync", "post"])
+    self.assertEqual(
+        worker.manager.calls, ["bind", "metadata", "pre", "sync", "post"]
+    )
 
   async def test_bind_delegates_to_manager(self):
     worker = self._worker()

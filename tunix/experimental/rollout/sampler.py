@@ -19,8 +19,9 @@ from typing import Any, Protocol, Sequence, runtime_checkable
 from jax import typing
 import numpy as np
 
-ArrayLike = typing.ArrayLike
 from tunix.experimental.common import datatypes
+
+ArrayLike = typing.ArrayLike
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -113,6 +114,7 @@ class WeightSyncRequest(datatypes.Request):
     controller_id: Optional identifier for transport controllers (e.g., TPU
       Raiden).
     policy_version: Target policy version identifier of the weights to sync.
+    weights: Optional source weights payload for non-Raiden / fallback sync.
     source_metadata: Optional transport/layout metadata describing source
       weights.
     extra_config: Optional backend-specific configuration parameters.
@@ -120,6 +122,7 @@ class WeightSyncRequest(datatypes.Request):
 
   controller_id: str = ""
   policy_version: int = 0
+  weights: Any = None
   source_metadata: Any = None
   extra_config: dict[str, Any] = dataclasses.field(default_factory=dict)
 
@@ -174,14 +177,18 @@ class Sampler(Protocol):
   ) -> list[SamplingResponse] | Any:
     """Generates completions for a batch of prompt conversations concurrently."""
     ...
-    
-  async def bind_weight_sync(self, **kwargs) -> Any:
-    """Binds destination-side transport resources. Idempotent per round."""
-    ...
 
   # --- Weight Synchronization ---
   async def get_weight_sync_metadata(self, **kwargs) -> Any:
     """Returns the sharding specs and layout metadata across devices for policy model weights."""
+    ...
+
+  async def bind_weight_sync(
+      self,
+      sync_request: WeightSyncRequest | Any = None,
+      **kwargs,
+  ) -> Any:
+    """Binds destination-side transport resources. Idempotent per round."""
     ...
 
   async def pre_weight_sync(
