@@ -121,10 +121,18 @@ spec:
               imagePullPolicy: Always
               securityContext:
                 privileged: true
-              # resources:
-              #   limits:
-              #     cpu: "24"
-              #     memory: 32G
+              # Without an explicit request, this container has no memory
+              # guarantee and kubelet can OOM-kill it under any transient
+              # pressure even when the node has ample free capacity --
+              # confirmed the hard way: OOMKilled here during Raiden's D2H
+              # host-staging of a ~30B param MoE model with padded MoE MLP
+              # weights (~80GB of host-resident bf16 params), on a node that
+              # `kubectl describe node` showed had 300+GB free at the time.
+              resources:
+                requests:
+                  memory: 200G
+                limits:
+                  memory: 350G
               command:
                 - bash
                 - -c
