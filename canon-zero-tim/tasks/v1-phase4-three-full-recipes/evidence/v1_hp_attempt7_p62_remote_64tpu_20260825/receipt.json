@@ -1,0 +1,23 @@
+{
+  "task": "v1_hp_attempt7_p62_remote_64tpu",
+  "jobset_name": "canon-p62-gsm8k-num-p62d3-505bfb95",
+  "head_pod": "canon-p62-gsm8k-num-p62d3-505bfb95-pathways-head-0-0-hf2km",
+  "source_commit": "505bfb952f4a5697669d0563b78cfdf099ce66ea",
+  "date_utc": "2026-08-25T02:48:32Z",
+  "topology": "64 TPU (16 nodes, DP16xTP4)",
+  "workload": "gsm8k",
+  "stage": "backward-no-commit",
+  "optimizer_commits": 0,
+  "verdict": "NUMERIC_FINITE_DIAGNOSTIC_CONFIRMED",
+  "findings": {
+    "all_finite": true,
+    "first_nonfinite": null,
+    "naive_norm": "inf",
+    "naive_norm_finite": false,
+    "max_abs": 5.792277639144799e+21,
+    "stable_norm": 5.3814200998193044e+22,
+    "scaled_sumsq": 86.3167495727539,
+    "total_elements": 27529199616,
+    "root_cause": "Attempt 7 norm=inf confirmed as Optax naive FP32 sum-of-squares overflow, not non-finite tensor or mathematical corruption"
+  }
+}

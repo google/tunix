@@ -1,0 +1,34 @@
+[entrypoint] start 2026-08-25T02:47:57Z mode=run pkg=/tmp/canon-state/canon-v1-apc-m15-off-d4-283cb67e/canon
+[entrypoint] JOBSET_ATTEMPT 0 (first attempt) pod=canon-v1-apc-m15-off-d4-283cb67e-pathways-head-0-0-jn4mb
+[entrypoint] --> 00_env.sh
+[env] preflight mode: JAX_PLATFORMS=cpu (Pathways connection deferred to Step 70)
+[entrypoint] <-- 00_env.sh ok
+[entrypoint] --> 30_install_canon.sh
+[install] runtime deps OK numpy=2.3.5 numba=0.62.1
+[install] installed to /tmp/canon-state/canon-v1-apc-m15-off-d4-283cb67e/canon (36 files)
+[entrypoint] <-- 30_install_canon.sh ok
+[entrypoint] --> 40_overlay_engine.sh
+[overlay] attn_iface_patched.py        -> layers/common/attention_interface.py
+[overlay] linear_p22xk.py              -> layers/jax/linear.py
+[overlay] embed_patched.py             -> layers/jax/embed.py
+[overlay] tpu_runner_p21_l30.py        -> runner/tpu_runner.py
+[overlay] qwen3_p22xk.py               -> models/jax/qwen3.py
+[overlay] qwen2_p22xk.py               -> models/jax/qwen2.py
+[entrypoint] <-- 40_overlay_engine.sh ok
+[entrypoint] --> 50_verify_overlay.sh
+[verify] Section A passed: all 6 overlay files verified by SHA256 byte identity.
+[entrypoint] <-- 50_verify_overlay.sh ok
+[entrypoint] --> 60_wait_workers.sh
+[wait] 180s quiet period for worker boot/registration (configured per-role device expectation: 64)...
+[entrypoint] <-- 60_wait_workers.sh ok
+[entrypoint] --> 90_run.sh
+[P38.GCS] GCS preflight writable: gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-v1-apc-m15-off-d4-283cb67e/attempt-0/PREFLIGHT.json
+[run] cmd: python3 -u -m examples.frozenlake.train_frozenlake_qwen3 --mesh_dp=8 --mesh_tp=8 --batch_size=32 --mini_batch_size=32 --train_trajectory_micro_batch_size=8 --max_steps=1 --num_generations=8 --max_prompt_length=4096 --max_response_length=8192 --max_concurrency=256 --vllm_max_num_seqs=32 --vllm_max_num_batched_tokens=256 --env_max_steps=15 --num_batches=150 --learning_rate=1e-6 --b1=0.9 --b2=0.95 --weight_decay=0 --beta=0 --epsilon=0.003 --epsilon_high=0.005 --loss_algo=gspo-token --advantage_estimator=rloo --temperature=0.7 --top_k=0 --top_p=1.0 --sampler_is=none --seed=42 --p57_workload_candidate=m15 --p57_data_split=main --eval_every_n_steps=0
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/tmp/canon-state/canon-v1-apc-m15-off-d4-283cb67e/canon/examples/frozenlake/train_frozenlake_qwen3.py", line 601, in <module>
+    raise ValueError(f"P32 FrozenLake geometry mismatch: {wrong_geometry}")
+ValueError: P32 FrozenLake geometry mismatch: {'mini_batch_size': (32, 4), 'sampler_is': ('none', 'token')}
+[run] exit=1
+[run] transport_rc=0

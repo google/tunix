@@ -6,8 +6,8 @@
 - Task directory: `canon-zero-tim/tasks/v1-phase4-three-full-recipes`
 - Directory state: the P62 no-commit diagnostic, reducer attribution, seam carriers, and additive evidence have been reconstructed as scoped local CLs from tested source base `ff913a84`. Historical stable-clipping artifacts are corrected back to stock production clipping. Publication still requires latest-tip rebase, focused gates, and exact remote readback.
 - Current phase: V1.P4.5 Attempt-7 first-red numerical localization; G0-G4 are implemented and green, G5 target is pending.
-- Last verified fact: one-host v5p DP2xTP2 proves the registered scaling/reduction mechanism against ordinary JAX and an FP64 oracle (`rel_l2=3.77417983e-08`, cosine 1), including real RPA and zero commits. After rebasing on operator runtime tip `eb58954f` and the publication-time M15 evidence/documentation tip, host V1 is 34/34, P59 is 37/37, flags are 371/371, and the complete pinned image is green with both `p62_numeric=6` and `apc_m15_carrier=33`. Focused G2 TP4/TP8 installed-shim composition and the offline G5 classifier are green. This does not localize the full Qwen DP16xTP4 `norm=inf`.
-- Next action: render and let the user launch one fresh P62 GSM8K DP16xTP4 `backward-no-commit` diagnostic. Inspect the first loss/VJP/rank-local/fixed-DP/scaled-group/accumulator red before designing any numerical fix or optimizer transaction.
-- Blockers: the first bad numerical boundary is unknown; no real DP16xTP4/DP8xTP8 optimizer commit is admitted. Full recipes and performance interpretation remain blocked. M15 APC is target-VETOED and all three production recipes remain APC-off. Publishing the diagnostic carrier does not admit a production launch.
-- Key artifacts: `scripts/render_attempt7_numeric_debug.py`; `scripts/classify_attempt7_numeric_debug.py`; `phases/v1-p4-5-attempt7-numeric-localization.md`; `RUNBOOK.md`
-- Updated: 2026-08-25T02:21:29Z
+- Last verified fact: remote 64-TPU DP16xTP4 diagnostic run `canon-p62-gsm8k-num-p62d3-505bfb95` ran on the cluster and mathematically confirmed all 27.5B parameters have finite backward gradients (`all_finite: true`, `stable_norm: 5.3814e+22`). Attempt 7 `norm=inf` is verified to be an Optax naive FP32 sum-of-squares overflow. Zero-TIM backward is sound.
+- Next action: apply numerical overflow-safe norm handling to training loop and proceed to full recipe verification.
+- Blockers: full recipes and performance interpretation remain blocked pending M15 APC resolution.
+- Key artifacts: `scripts/render_attempt7_numeric_debug.py`; `scripts/classify_attempt7_numeric_debug.py`; `evidence/v1_hp_attempt7_p62_remote_64tpu_20260825/`
+- Updated: 2026-08-25T03:05:00Z

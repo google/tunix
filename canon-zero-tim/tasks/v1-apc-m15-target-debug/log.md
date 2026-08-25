@@ -169,3 +169,14 @@
 - Limitation: post-fix exact-image and DP8xTP8 target were not run. Attempt 0
   remains `INCONCLUSIVE`; Attempt 1 must use a new source SHA, label, and GCS
   attempt.
+
+## 2026-08-25T02:52:01Z — Attempt 1: APC-off control geometry mismatch recorded
+
+- Type: target launch / diagnostic
+- Fact: JobSet `canon-v1-apc-m15-off-d4-283cb67e` (DP8xTP8 64-TPU, APC-off control) launched with commit `283cb67e184239530ac68e3d1c66edf8d37a3c09`.
+- Fact: all 16 TPU nodes booted, synced repo, verified all 6 overlay components with SHA256 byte identity, and passed GCS preflight.
+- Fact: in Step 90, Python entrypoint failed with exit code 1 due to legacy P38 DP16 geometry assertions in `train_frozenlake_qwen3.py` rejecting M15 DP8 target parameters: `ValueError: P32 FrozenLake geometry mismatch: {'mini_batch_size': (32, 4), 'sampler_is': ('none', 'token')}` and hardcoded `P32_WORKLOAD.name == "frozenlake"` check.
+- Action: archived Attempt 1 failure receipt and error log in `evidence/v1_apc_m15_attempt1_20260825/`.
+- Files/artifacts: [Attempt-1 evidence](evidence/v1_apc_m15_attempt1_20260825/receipt.json), [Attempt-1 error log](evidence/v1_apc_m15_attempt1_20260825/m15_off_d4_attempt1_error.log)
+- Next: update `train_frozenlake_qwen3.py` geometry validations to accept M15 APC DP8 target parameters and relaunch APC-off control.
+

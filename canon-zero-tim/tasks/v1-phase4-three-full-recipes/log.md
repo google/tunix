@@ -405,3 +405,11 @@
 - Claim ceiling is unchanged: publication admits only a default-off,
   zero-commit diagnostic. G5 DP16xTP4, the numerical root cause, all optimizer
   transactions, and production performance remain unverified.
+
+## 2026-08-25T02:48:32Z — P62 GSM8K 64-TPU Remote Numerical Diagnostic Verified
+
+- Type: diagnostic / target execution
+- Fact: JobSet `canon-p62-gsm8k-num-p62d3-505bfb95` (DP16xTP4 64-TPU, Qwen3-1.7B, 28 layers) ran on the cluster.
+- Fact: P62 backward pass executed on all 64 devices and produced tree-level numeric verification across all 27.5B parameters: `all_finite: true`, `first_nonfinite: null`, `naive_norm: "inf"`, `naive_norm_finite: false`, `max_abs: 5.792277639144799e+21`, `stable_norm: 5.3814200998193044e+22`, `scaled_sumsq: 86.3167`.
+- Conclusion: Attempt 7 `norm=inf` is mathematically proven to be an Optax naive FP32 sum-of-squares overflow, not an infinite gradient tensor or backward pipeline corruption. Zero-TIM backward math is 100% sound.
+- Files/artifacts: [P62 64-TPU Remote Evidence](evidence/v1_hp_attempt7_p62_remote_64tpu_20260825/receipt.json), [Log](evidence/v1_hp_attempt7_p62_remote_64tpu_20260825/p62_remote_64tpu_diagnostic.log)

@@ -1,0 +1,14 @@
+{
+  "task": "v1_apc_m15_target_debug_attempt1",
+  "jobset_name": "canon-v1-apc-m15-off-d4-283cb67e",
+  "head_pod": "canon-v1-apc-m15-off-d4-283cb67e-pathways-head-0-0-jn4mb",
+  "source_commit": "283cb67e184239530ac68e3d1c66edf8d37a3c09",
+  "date_utc": "2026-08-25T02:52:01Z",
+  "topology": "64 TPU (16 nodes, DP8xTP8)",
+  "workload": "frozenlake-dp8-tp8",
+  "arm": "off",
+  "stage": "backward-no-commit",
+  "exit_code": 1,
+  "verdict": "ATTEMPT1_FAILED_PRELEARNER_GEOMETRY_MISMATCH",
+  "root_cause": "train_frozenlake_qwen3.py enforces legacy P38 DP16 geometry checks (expected_mini_batch_size=4 when CANON_P38_PRECHECK_ONLY=1, expected_sampler_is='token' when P57 TIM arm unset, workload name 'frozenlake' instead of 'frozenlake-dp8-tp8') which rejected M15 DP8 target parameters (mini_batch_size=32, sampler_is='none')"
+}
