@@ -307,7 +307,13 @@ def _build_maxtext_config(args, num_devices: int) -> Any:
       # tunix owns gradient accumulation, so MaxText must not also accumulate
       "gradient_accumulation_steps=1",
       f"max_target_length={args.max_prompt_length + args.max_response_length}",
-      "attention=flash",
+      # flash/splash attention both dispatch to the same Pallas splash kernel,
+      # which requires q_block_size (512) to divide q_seq_len exactly; it
+      # doesn't for max_prompt_length + max_response_length = 640. Confirmed
+      # by testing "flash" directly: ValueError: q_block_size=512 should
+      # divide q_seq_len=640. dot_product is the only kernel that works at
+      # this sequence length without also changing the block size.
+      "attention=dot_product",
       "use_tokamax_gmm=true",
       "use_gmm_v2=true",
       f"ici_fsdp_parallelism={args.mesh_fsdp}",
