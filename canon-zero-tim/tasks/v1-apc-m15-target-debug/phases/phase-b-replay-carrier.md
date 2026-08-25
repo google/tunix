@@ -1,6 +1,6 @@
 # Phase B — freeze a strict replay carrier
 
-- Status: Attempt-2 observer repair host PASS; exact-image and target execution not approved
+- Status: Attempt-5 rollout snapshots present; paired GCS audit and A/B/C verdict pending
 
 ## Finding
 
@@ -67,10 +67,12 @@ or the B-arm reset.
 
 ## Claim ceiling
 
-Until an approved run returns a red with complete joins, the ceiling is
-`PHASE_B_STATIC_CARRIER_ONLY`. A newly captured trajectory is not historical
-`m15i`; only its source/model/config and red signature may be compared with
-`m15i`.
+Until the Attempt-5 off/on GCS roots pass the checked-in audit, the ceiling is
+`ATTEMPT5_ROLLOUT_SNAPSHOTS_PRESENT_GCS_AUDIT_PENDING`. A newly captured
+trajectory is not historical `m15i`; only its source/model/config and red
+signature may be compared with `m15i`. The committed snapshots do not contain
+the alignment, controlled-exit, classification, or terminal-marker records
+needed to decide whether a replayable red was captured.
 
 ## Static result
 

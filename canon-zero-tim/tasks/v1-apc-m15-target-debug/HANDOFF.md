@@ -1,5 +1,83 @@
 # M15 APC target-debug handoff
 
+## START HERE — Attempt 5 requires GCS-side classification, not a relaunch
+
+This section supersedes every older "next action" below it.  The checked-in
+Attempt-5 directory is **not** a complete target result.  It contains two
+hash-valid 33-KiB log snapshots plus a hand-written summary receipt, but the
+snapshots contain none of the markers required to decide A/B/C numerics:
+
+- no `CANON_ALIGN_PRE` or A/B/C boundary record;
+- no `CANON_APC_M15_SAMPLER_CONTRACT` receipt;
+- no `CONTROLLED_EXIT` receipt;
+- no `PREFLIGHT.json`, `COLLECTED.json`, or `COMPLETE.json`;
+- no serving or M15 target classification;
+- no producer NPZ, replay envelope, or first-red join.
+
+The snapshots do prove that the APC-off process reported a 0.0% cache-hit
+rate and the APC-on process reported approximately 89.4%--97.5%.  They do not
+mechanically prove the receipt's claims that both arms reached controlled exit
+42, that the sampler gate passed, or that the target mismatch was not
+reproduced.  `SHA256SUMS` proves integrity of the three committed files only;
+it is not a completeness receipt.
+
+Current claim ceiling:
+
+```text
+ATTEMPT5_ROLLOUT_SNAPSHOTS_PRESENT / GCS_AUDIT_PENDING /
+A-B-C_NUMERICAL_VERDICT_UNKNOWN
+```
+
+Do **not** launch another JobSet, change APC/RoPE/attention/KV code, or start
+XProf analysis yet.  The next action belongs to the remote agent that can read
+the bucket: audit the existing Attempt-0 roots for both JobSets with the
+checked-in script.  Run the off audit and the on audit independently:
+
+```bash
+cd /home/yuxuan/code_rl_repro/sequence_packing/tunix
+
+bash canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/run_m15_replay_gcs_audit.sh \
+  gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-v1-apc-m15-off-d11-a909fda1/attempt-0
+
+bash canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/run_m15_replay_gcs_audit.sh \
+  gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-v1-apc-m15-on-d11-a909fda1/attempt-0
+```
+
+Each command verifies the immutable root manifest, the three GCS terminal
+markers, the full run log, serving classification, M15 classification, and
+the nested replay manifests before uploading a small derived audit.  If the
+derived audit already exists, do not delete or overwrite it: fetch its small
+files and verify its `SHA256SUMS` instead.
+
+### Return contract for the remote agent
+
+Return one machine-generated bundle per arm, without manually rewriting its
+verdict:
+
+1. exact source SHA, JobSet, Attempt-0 URI, and Kubernetes terminal state;
+2. the complete one-line `[M15.APC.GCS] COMPLETE ...` output, or complete
+   stderr plus the nonzero return code;
+3. derived audit URI, `RETURN_RECEIPT.json`, and derived `SHA256SUMS`;
+4. `m15-classification.json`, `serving-classification.json`,
+   `PREFLIGHT.json`, `COLLECTED.json`, and `COMPLETE.json`;
+5. `selected-markers.log` and the immutable raw-log URI/SHA;
+6. for `FRESH_TARGET_RED_FROZEN`, also return `first-red-contract.json`,
+   `replay-contract.json`, `request-row-joins.jsonl`, and both nested
+   manifests.
+
+Do not call the pair complete if either audit lacks a root terminal marker,
+classification, or manifest member.  Interpret the two results in this order:
+
+| Off result | On result | Decision |
+|---|---|---|
+| `CONTROL_GREEN` | `FRESH_TARGET_RED_FROZEN` | Use the frozen carrier for exact replay and first-red localization; do not rerun rollout. |
+| `CONTROL_GREEN` | `TARGET_NOT_REPRODUCED` | Record one representative exact observation; this is not an APC repair or certification. |
+| anything else | any result | Preserve both arms but make no APC-specific claim; repair/recover evidence first. |
+
+Only if the GCS audit proves required payloads are irrecoverably absent should
+the operator propose a new paired launch.  That proposal is a separate user
+approval boundary.
+
 ## Scope and current ceiling
 
 This task is the independent APC/prefix-cache numerical lane. It does not
@@ -55,16 +133,13 @@ Current immutable facts:
   generic alignment gate did not admit this carrier's signed
   `sampler_is=None` recipe. Its two committed files pass `SHA256SUMS`; they
   prove the fatal admission boundary but are not a complete replay package.
-- Attempt 5 paired run (`d11-a909fda1`, commit `a909fda1`) unblocks the sampler
-  admission gate (`[CANON_APC_M15_SAMPLER_CONTRACT] PASS`). Both arms completed
-  2,560 rollout requests across 15 sampling turns. Control arm `off`
-  (`canon-v1-apc-m15-off-d11-a909fda1`) verified 0.0% prefix cache hit rate.
-  Treatment arm `on` (`canon-v1-apc-m15-on-d11-a909fda1`) achieved 89.7% ~ 97.5%
-  prefix cache hit rate. Both arms cleanly executed controlled exit 42 with
-  zero optimizer commits. Evidence sealed in
-  `evidence/v1_apc_m15_attempt5_paired_d11_20260825/`.
+- Attempt 5 paired run (`d11-a909fda1`, source `a909fda1`) produced hash-valid
+  Git snapshots for both arms.  The snapshots show 0.0% cache hits off and
+  approximately 89.4%--97.5% on, but contain no alignment, sampler,
+  controlled-exit, classification, or GCS-terminal markers.  The accompanying
+  receipt is an unverified summary until the GCS-side audit returns.
 
-Claim ceiling: `ATTEMPT5_PAIRED_ROLLOUT_COMPLETE_GATE_VERIFIED_TARGET_NOT_REPRODUCED`.
+Claim ceiling: `ATTEMPT5_ROLLOUT_SNAPSHOTS_PRESENT_GCS_AUDIT_PENDING`.
 
 The exact remote procedure is in [RUNBOOK.md](RUNBOOK.md). The execution agent
 must run those commands rather than constructing a new carrier by hand.

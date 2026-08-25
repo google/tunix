@@ -20,7 +20,7 @@ B - C = 0 bytes
 | Phase | Deliverable | Exit gate | Status |
 |---|---|---|---|
 | A | `M15_FIRST_RED_INPUT_CONTRACT` with mismatch distribution, identity hashes, and artifact-completeness matrix | every field is traced to immutable `file:line` or explicitly marked missing | complete: audit PASS, replay inputs missing |
-| B | fresh captured-red replay carrier and APC-off/APC-on decision table | static/host carrier tests prove full 256-row producer, mixed standard/continue A chronology, standard-only full-reset B, exact first-red join, GCS durability, zero backward/commit | Attempts 0/1/4 were admission failures; Attempts 2/3 exposed observer path/capacity defects. Latest repair host + aggregate exact-image PASS, target control pending |
+| B | fresh captured-red replay carrier and APC-off/APC-on decision table | static/host carrier tests prove full 256-row producer, mixed standard/continue A chronology, standard-only full-reset B, exact first-red join, GCS durability, zero backward/commit | Attempt 5 off/on snapshots are present, but the authoritative GCS classifications and carrier manifests have not been audited or returned |
 | C | single-variable reproduction ladder | control A-B=0; treatment either reproduces red or is classified `ONEHOST_NOT_REPRODUCED` without mechanism claims | pending |
 | D | observer-neutral coarse-to-fine first-red walk | `FIRST_RED_LOCALIZED` names last exact and first red tensor, shape ledger, request/token/cache coordinate, and `file:line` | pending |
 | E | minimal localized repair, default off or experiment-bound | reproducer flips red to zero; APC-off and B are unchanged; adjacent and dirty-page negatives fire | pending |

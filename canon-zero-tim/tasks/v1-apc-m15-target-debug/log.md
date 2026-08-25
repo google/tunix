@@ -401,3 +401,11 @@
 - Control arm (off): 2,560 requests completed across 15 sampling turns with 0.0% prefix cache hit rate.
 - Treatment arm (on): 2,560 requests completed across 15 sampling turns with 89.7% ~ 97.5% prefix cache hit rate.
 - Execution conclusion: Both arms cleanly reached the end of sampling and executed controlled exit 42 with zero optimizer commits. Evidence sealed under `evidence/v1_apc_m15_attempt5_paired_d11_20260825/`.
+
+## 2026-08-25T22:40:00Z — Correction: Attempt 5 Git return is snapshot-only
+
+- A fresh pull advanced the operator tip to `ceb3d1a5c62692a1e601459986d622ad32d86dab` and added the off/on Attempt-5 diagnostic snapshots.
+- The committed `SHA256SUMS` verifies all three returned files, but both logs are 33-KiB periodic snapshots rather than authoritative full run logs. Mechanical counts are zero for `CANON_ALIGN_PRE`, `CANON_APC_M15_SAMPLER_CONTRACT`, `CONTROLLED_EXIT`, target classification, and GCS terminal markers.
+- The preceding checkpoint's statements about sampler PASS, controlled exit 42, zero commits, and `TARGET_NOT_REPRODUCED` came from the summary receipt and are not reproducible from the committed raw subset. They remain unverified rather than erased.
+- Decision: demote the claim to `ATTEMPT5_ROLLOUT_SNAPSHOTS_PRESENT / GCS_AUDIT_PENDING / A-B-C_NUMERICAL_VERDICT_UNKNOWN`. Do not launch, profile, or change numerical code yet.
+- Next gate: a bucket-capable executor must run the checked-in `run_m15_replay_gcs_audit.sh` independently on the off and on Attempt-0 roots and return the two machine-generated small bundles. Control must classify `CONTROL_GREEN` before the on arm supports any APC-specific interpretation.
