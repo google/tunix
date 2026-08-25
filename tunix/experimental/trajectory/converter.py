@@ -431,8 +431,8 @@ def create_trajectory_metadata(
     agent: Any = None,
     target_policy_versions: list[int] | None = None,
     status: (
-        str | agent_types.TrajectoryStatus
-    ) = agent_types.TrajectoryStatus.RUNNING,
+        str | agent_types.TrajectoryStatus | None
+    ) = None,
     extra: dict[str, Any] | None = None,
 ) -> trajectory_lib.TunixTrajectoryMetadata:
   """Constructs TunixTrajectoryMetadata from rollout request and agent state."""
@@ -451,15 +451,14 @@ def create_trajectory_metadata(
 
   effective_status = status
   if effective_status is None:
-    effective_status = getattr(
-        traj_obj, "status", agent_types.TrajectoryStatus.RUNNING
-    )
+    effective_status = getattr(traj_obj, "status", None)
 
-  status_str = (
-      effective_status.name
-      if hasattr(effective_status, "name")
-      else str(effective_status)
-  )
+  if effective_status is None:
+    status_str = None
+  elif hasattr(effective_status, "name"):
+    status_str = effective_status.name
+  else:
+    status_str = str(effective_status)
 
   return trajectory_lib.TunixTrajectoryMetadata(
       trajectory_id=traj_id,
