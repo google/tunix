@@ -15,10 +15,12 @@
   },
   "verdicts": {
     "gsm8k": "STEP2_XPROF_GCS_PATH_REQUIRED (Step 0 & 1 SUCCESS, solve_ratio jumped 28.9% -> 32.4%, P63 overflow-safe clip PASS, Step 2 halted on Pathways XProf log_dir GCS path requirement)",
-    "frozenlake_p45": "STEP0_BACKWARD_RANK1_NONFINITE_GRADIENT (Rollout 60.9% solve_ratio, halted in Step 0 finalize_staged due to Rank 1 non-finite staged DP gradient)"
+    "frozenlake_p45": "STEP0_BACKWARD_RANK1_NONFINITE_GRADIENT (Rollout 60.9% solve_ratio, halted in Step 0 finalize_staged due to Rank 1 non-finite staged DP gradient)",
+    "frozenlake_m15": "STEP0_BACKWARD_RANK3_NONFINITE_GRADIENT (Rollout 15.6% solve_ratio, completed 32 forward DP groups in 282s, halted in Step 0 finalize_staged due to Rank 3 non-finite staged DP gradient)"
   },
   "logs": {
     "gsm8k": "gsm8k_g8_error.log",
-    "p45": "p45_p8_error.log"
+    "p45": "p45_p8_error.log",
+    "m15": "m15_m8_error.log"
   }
 }
