@@ -36,11 +36,12 @@ also report dataset and rollout seed 42. The scope text matters: R2E sandbox
 completion and async collection order remain nondeterministic, so this is not
 a bitwise end-to-end replay guarantee.
 
-This P58.10 delta is locally validated but not committed or published. Its
-worktree is `/home/yuxuan/code_rl_repro/worktrees/p58_fixed_seed_0824` on base
-`687b2bd6d0815b5628af39e7adbf949e429e72ae`. Do not render or launch a target
-until the user separately authorizes commit/push and the executor fetches the
-exact remote read-back SHA containing P58.10.
+P58.10 is published as implementation commit
+`9597de3d99fbf65c87f4fea3d86e639cca0b7abe`, replayed over fetched operator
+tip `ff646a4d76f58e9f328bc640f44d362637eb1432`. Immediate local/FETCH_HEAD/
+remote-tracking readback matched with ahead/behind `0/0`. Before rendering,
+fetch the final operator tip containing that implementation commit and pin its
+exact 40-character SHA. Source publication does not authorize a target launch.
 
 ## 2026-08-24 local P58.9 execution override
 
@@ -112,8 +113,8 @@ bash canon-zero-tim/tests/p58_deepswe_native_zero/run_exact_image.sh \
 
 This gate is construction evidence only. Native-IS and Zero-HP target jobs are
 separate experiments. Native-IS is now the selected replacement experiment.
-P58.9 is published, but the newer P58.10 fixed-seed delta above remains
-publication-blocked; Zero-HP is still deferred.
+P58.9 and P58.10 are published; target launch remains separately gated and
+Zero-HP is still deferred.
 
 Current execution decision: stop and archive the exact running Native/no-IS
 campaign after the operator observed a sharp training-reward drop and judged

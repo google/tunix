@@ -1,5 +1,21 @@
 # Log
 
+## 2026-08-25 UTC — P58.10 fixed-seed implementation published
+
+- The user explicitly authorized commit and push. The local implementation
+  commit was replayed without conflict over latest fetched operator tip
+  `ff646a4d76f58e9f328bc640f44d362637eb1432`; the two intervening commits add
+  only immutable V1 Attempt-7 debug logs and do not overlap P58 files.
+- Post-replay Python compilation, shell syntax, diff hygiene, and focused P58
+  tests pass 33/33. Implementation commit
+  `9597de3d99fbf65c87f4fea3d86e639cca0b7abe` was pushed only to
+  `yuxzhang/canon-zero-tim`.
+- Immediate remote readback returned identical local HEAD, `FETCH_HEAD`, and
+  remote-tracking SHA `9597de3d99fbf65c87f4fea3d86e639cca0b7abe`
+  with ahead/behind `0/0`. `main` was neither modified nor pushed.
+- No image publication, Kubernetes apply/delete, live-job stop, credential
+  mutation, or TPU target execution occurred.
+
 ## 2026-08-24 UTC — P58 dataset and rollout seed fixed explicitly
 
 - Type: reproducibility contract / implementation / validation / handoff.

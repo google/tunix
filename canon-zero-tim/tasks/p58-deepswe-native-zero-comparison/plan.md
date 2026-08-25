@@ -58,7 +58,7 @@ explicitly published and read back.
 | P58.7 | Optimized strict-Zero Qwen3-4B full recipe | Exactly 1,000 DP8 x TP8 commits, zero alignment failures, complete P59/fixed-head/XProf/Perfetto/postflight receipts | implementation + construction PASS; target not run |
 | P58.8 | P59 TP4/TP8 nested-mesh and P57 Zero/full telemetry repair | Installed fixed-head + projection shim VJPs run through P59 parallel/report/fixed-reducer no-commit paths; local-output positive/negative placement controls pass; four independent CLs are rebuilt on latest tip `ccbcf572` | local four-CL release and committed-tree manifest audit PASS; push/hardware target not run |
 | P58.9 | Native token-IS plus Attempt-0 refinement | Native raw/IS and Zero-HP render as a closed set; partial/mixed tuples fail; runtime proves old-logp/TIS provenance; JobSet retry and unconsumed keepalive overrides are absent; full pinned-image gate passes | implementation `2aedd73c` published/read back; Native-IS selected after operator-observed Native-raw reward collapse; onset step unknown, target not run |
-| P58.10 | Fixed dataset and rollout seed | All three P58 recipes render exactly one `--seed=42`; training, W&B, manifests, classifiers, and first-batch marker agree; missing/duplicate/drifted values fail closed | local implementation + pinned-image PASS; unpublished; target not run |
+| P58.10 | Fixed dataset and rollout seed | All three P58 recipes render exactly one `--seed=42`; training, W&B, manifests, classifiers, and first-batch marker agree; missing/duplicate/drifted values fail closed | implementation `9597de3d` published/read back; pinned-image PASS; target not run |
 
 Exactly one phase may be active. Commit, push, image publication, Kubernetes
 render/application, and TPU execution each remain separately user-gated.
@@ -70,9 +70,9 @@ calling it PASS. P58.4N was superseded after p58c05 failed Kueue admission.
 P58.5N never completed and is not a valid full Native baseline. P58.6 through
 P58.9 and P58.10 are specified in their phase files; P58.10 is the only active
 phase. P58.7 remains deferred. The user selected Native-IS as the next target;
-P58.9 source is published and read back, while the fixed-seed P58.10 delta is
-not. Target execution begins only after the exact Native-raw archival boundary,
-P58.10 publication/readback, and final render/admission checks.
+P58.9 and P58.10 source are published and read back. Target execution begins
+only after the exact Native-raw archival boundary and final render/admission
+checks.
 No remote execution is authorized by this plan alone.
 
 P58.5N attempts `p58f01` through `p58f11` remain `INCONCLUSIVE`. P58f01 exposed

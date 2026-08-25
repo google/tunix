@@ -2,12 +2,16 @@
 
 ## Status
 
-`LOCAL IMPLEMENTATION / PINNED-IMAGE PASS / UNPUBLISHED / TARGET NOT RUN`
+`IMPLEMENTED / PINNED-IMAGE PASS / PUBLISHED / TARGET NOT RUN`
 
 Built in `/home/yuxuan/code_rl_repro/worktrees/p58_fixed_seed_0824` on branch
 `local/p58-fixed-seed-0824`, based exactly on operator tip
-`687b2bd6d0815b5628af39e7adbf949e429e72ae`. The older P58 worktree contained
-unrelated dirty P59/V1 work and was left untouched.
+`687b2bd6d0815b5628af39e7adbf949e429e72ae`, then replayed without conflict
+over fetched tip `ff646a4d76f58e9f328bc640f44d362637eb1432`.
+Implementation commit `9597de3d99fbf65c87f4fea3d86e639cca0b7abe`
+was pushed only to `yuxzhang/canon-zero-tim` and immediately read back exactly
+with ahead/behind `0/0`. The older P58 worktree contained unrelated dirty
+P59/V1 work and was left untouched.
 
 ## Objective and contract
 
@@ -48,11 +52,12 @@ deterministic sandbox scheduler was added.
   onehost_xprof=1 zero_hp_full=1 ... regressions=1`.
 
 No real one-host TPU rollout, Pathways target, optimizer commit, image
-publication, Kubernetes mutation, commit, or push occurred.
+publication, or Kubernetes mutation occurred. Commit and push were performed
+only after explicit user approval and only on the operator branch.
 
 ## Next gate
 
-Obtain explicit commit/push approval, publish only to
-`yuxzhang/canon-zero-tim`, and read back the exact remote SHA. Then render the
-fresh Native+IS full job and reject it unless the YAML has one `--seed=42` and
-the runtime produces the signed seed marker and manifest fields.
+Fetch the final operator tip containing `9597de3d`, then render the fresh
+Native+IS full job and reject it unless the YAML has one `--seed=42` and the
+runtime produces the signed seed marker and manifest fields. Launch remains a
+separate approval boundary.

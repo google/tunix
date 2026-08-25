@@ -1,6 +1,6 @@
 # P58 DeepSWE native-first training handoff
 
-## 2026-08-24 P58.10 fixed-seed override — local, do not launch yet
+## 2026-08-25 P58.10 fixed-seed override — published, launch separately gated
 
 This is the newest source checkpoint. It adds one shared fixed-seed contract
 to all three P58 recipes without changing the selected Native+IS treatment:
@@ -21,15 +21,17 @@ R2E sandbox completion, and `asyncio.as_completed` ordering remain
 asynchronous. The seed fixes the configured sampling stream and data shuffle,
 not external completion order.
 
-The implementation is currently an uncommitted/unpushed delta in
+The implementation was built in
 `/home/yuxuan/code_rl_repro/worktrees/p58_fixed_seed_0824`, branch
-`local/p58-fixed-seed-0824`, based on exact operator tip
-`687b2bd6d0815b5628af39e7adbf949e429e72ae`. It passes 33/33 focused tests and
-the complete pinned-image P58 gate. Do not launch from this worktree or assume
-the mutable operator branch contains the change. Commit/push requires a new
-explicit user approval; after publication, fetch and pin the exact read-back
-40-character SHA. The Native-raw archival/stop decision below is unchanged,
-but its fresh Native+IS replacement is source-blocked on P58.10 publication.
+`local/p58-fixed-seed-0824`, then replayed over latest fetched operator tip
+`ff646a4d76f58e9f328bc640f44d362637eb1432`. It passes 33/33 focused tests and
+the complete pinned-image P58 gate. Implementation commit
+`9597de3d99fbf65c87f4fea3d86e639cca0b7abe` was pushed only to
+`yuxzhang/canon-zero-tim`; immediate local/FETCH_HEAD/remote-tracking readback
+was exact with ahead/behind `0/0`. Fetch the final operator tip containing
+that commit and pin the exact read-back 40-character SHA in the rendered YAML.
+The Native-raw archival/stop decision below is unchanged. Fresh Native+IS is
+source-ready, but launch remains separately user-gated.
 
 See `phases/p58-10-fixed-seed.md` and
 `cluster/P58_DEEPSWE_TIM_RUNBOOK.md`.

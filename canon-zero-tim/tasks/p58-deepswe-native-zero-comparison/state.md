@@ -2,12 +2,16 @@
 
 ## Current P58.10 fixed-seed checkpoint (2026-08-24)
 
-- Status: local implementation and pinned-image construction PASS;
-  unpublished. Worktree
+- Status: implementation published and exact-read back; pinned-image
+  construction PASS. Worktree
   `/home/yuxuan/code_rl_repro/worktrees/p58_fixed_seed_0824`, branch
-  `local/p58-fixed-seed-0824`, is based exactly on operator tip
-  `687b2bd6d0815b5628af39e7adbf949e429e72ae`. The older P58 worktree was
-  already dirty with unrelated P59/V1 work and was not modified.
+  `local/p58-fixed-seed-0824`, was built on operator tip
+  `687b2bd6d0815b5628af39e7adbf949e429e72ae`, then replayed without conflict
+  over latest fetched tip `ff646a4d76f58e9f328bc640f44d362637eb1432`.
+  Implementation commit `9597de3d99fbf65c87f4fea3d86e639cca0b7abe`
+  was pushed only to `yuxzhang/canon-zero-tim`; immediate local/FETCH_HEAD/
+  remote-tracking readback matched with ahead/behind `0/0`. The older P58
+  worktree was already dirty with unrelated P59/V1 work and was not modified.
 - Contract: every P58 Native-raw, Native+IS, and Zero-HP render contains
   exactly one `--seed=42`. Any missing, duplicate, or different seed is
   rejected. The training entry point requires 42 for P58, uses it for both
@@ -25,12 +29,12 @@
   image `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`
   exits zero with `P58_EXACT_IMAGE_CPU_PASS ... paired_renderer=1 ...
   onehost_xprof=1 zero_hp_full=1 ... regressions=1`.
-- Next action: review, then obtain separate commit/push approval. After exact
-  remote readback, render the fresh Native+IS full JobSet and verify both its
+- Next action: fetch the final operator tip containing implementation commit
+  `9597de3d`, render the fresh Native+IS full JobSet, and verify both its
   unique `--seed=42` argument and first `[P58.SEED] PASS dataset_seed=42
-  rollout_seed=42 ...` marker. Do not launch the unpublished local delta.
-- No commit, push, image publication, Kubernetes mutation, or TPU execution
-  occurred in P58.10.
+  rollout_seed=42 ...` marker. Launch remains separately user-gated.
+- Source was committed and pushed only under explicit approval. No image
+  publication, Kubernetes mutation, live-job stop, or TPU execution occurred.
 - Phase: `phases/p58-10-fixed-seed.md`.
 
 ## Current P58.9 publication checkpoint (2026-08-24)
