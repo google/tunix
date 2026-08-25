@@ -230,6 +230,7 @@ class FixedLmHeadContractTest(unittest.TestCase):
     for profile in (
         "qwen3-8b-dp8-tp8-frozenlake-tim.env",
         "qwen3-8b-dp8-tp8-frozenlake-v1-hp.env",
+        "qwen3-8b-dp8-tp8-frozenlake-apc-debug.env",
     ):
       with self.subTest(profile=profile):
         start = receipt_section.index(f"cluster/profiles/{profile})")
@@ -238,7 +239,7 @@ class FixedLmHeadContractTest(unittest.TestCase):
             "p38_fixed_receipt_args+=(--learner-m 2048)", branch
         )
     self.assertEqual(
-        receipt_section.count("p38_fixed_receipt_args+=(--learner-m 2048)"), 2
+        receipt_section.count("p38_fixed_receipt_args+=(--learner-m 2048)"), 3
     )
 
   def test_v1_runtime_selects_exact_p59_local_dp_receipts(self):

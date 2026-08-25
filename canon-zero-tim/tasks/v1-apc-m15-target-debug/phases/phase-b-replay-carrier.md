@@ -110,8 +110,18 @@ contract 12/12, Phase3 profile/boundary classifiers 11/11, V1 Phase4 CPU
 contracts 29/29, flag audit 370/370, shell syntax, Python compile, and
 `git diff --check`. Wider P33/P45 discovery ran all dependency-free cases but
 could not import two tests because the host lacks `datasets` and `metrax`.
-The existing V1 exact-image runner includes all 33 carrier tests. A full run
+The existing V1 exact-image runner includes all carrier tests. A historical run
 against pinned image `sha256:418dc632...e53a` passed with
 `V1_HP_EXACT_IMAGE_PASS ... apc_m15_carrier=33 ... manifests=3`. This does not
 promote the claim beyond exact-image admission; one-host replay and target
 topology remain unrun.
+
+Attempt 1 subsequently passed overlay installation and GCS preflight but
+exposed a second prelearner defect: the FrozenLake entrypoint inferred legacy
+P38 DP16 geometry solely from `CANON_P38_PRECHECK_ONLY=1`. It rejected the M15
+carrier's 32-prompt/no-IS command and would next have rejected its
+`frozenlake-dp8-tp8`/one-unit identity. The repair splits those two admission
+contracts behind the already registered M15 selector and adds positives for
+both arms plus legacy-P38/P57 preservation and wrong-mode/geometry negatives.
+The host carrier suite is now 39/39. Post-fix exact-image and DP8xTP8 target
+remain unrun and require separate approval.

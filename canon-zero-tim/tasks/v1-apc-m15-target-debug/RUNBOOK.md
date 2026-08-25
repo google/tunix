@@ -22,7 +22,7 @@ still execute the real serving decode and independent full-reset B arm.
 This carrier does not modify or repair RoPE, attention, KV values, lm-head,
 loss, backward, or optimizer. Both JobSets stop before backward and commit.
 
-## Attempt-0 bootstrap incident
+## Attempt-0 and Attempt-1 prelearner incidents
 
 Never relaunch source `eb58954f...`. That Attempt-0 command carried
 `--p57_workload_candidate=m15 --p57_data_split=main`, but the rendered
@@ -34,6 +34,16 @@ The repaired source requires exact `m15/main` in both CLI and environment and
 keeps the package-safe `python3 -u -m
 examples.frozenlake.train_frozenlake_qwen3` entrypoint. This is a bootstrap
 contract fix only; production APC remains off.
+
+Never relaunch source `283cb67e...`. Attempt 1 proved that bootstrap repair
+worked: all overlays and GCS preflight passed. It then stopped before learner
+construction because `train_frozenlake_qwen3.py` reused the legacy P38 DP16
+geometry for this different carrier. The old contract expected
+`mini_batch_size=4`, token IS, workload `frozenlake`, and eight producer units;
+the signed M15 target is `mini_batch_size=32`, no IS,
+`frozenlake-dp8-tp8`, and one full producer unit. The current source keeps both
+contracts separately fail-closed. This is still admission-only and is not an
+APC numerical fix.
 
 ## Approval boundaries
 
@@ -95,7 +105,7 @@ bash canon-zero-tim/tests/v1_phase4/run_exact_image.sh \
   sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a
 ```
 
-Expected post-fix terminal marker includes `apc_m15_carrier=35`.
+Expected post-fix terminal marker includes `apc_m15_carrier=39`.
 
 ## Launch order
 

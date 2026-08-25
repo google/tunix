@@ -180,3 +180,30 @@
 - Files/artifacts: [Attempt-1 evidence](evidence/v1_apc_m15_attempt1_20260825/receipt.json), [Attempt-1 error log](evidence/v1_apc_m15_attempt1_20260825/m15_off_d4_attempt1_error.log)
 - Next: update `train_frozenlake_qwen3.py` geometry validations to accept M15 APC DP8 target parameters and relaunch APC-off control.
 
+## 2026-08-25T03:14:09Z — Attempt-1 geometry repair host-pass
+
+- Type: prelearner admission repair; no numerical repair and no target launch.
+- Root cause: `CANON_P38_PRECHECK_ONLY=1` selected one legacy DP16 contract in
+  two places. It expected `mini_batch_size=4` and token IS, then required
+  workload `frozenlake`, DP16, and eight four-prompt producer units. The M15
+  APC target carrier intentionally preserves the production DP8 geometry:
+  `mini_batch_size=32`, no IS, workload `frozenlake-dp8-tp8`, and one complete
+  32-prompt/256-trajectory producer unit.
+- Repair: introduce pure fail-closed entrypoint helpers keyed by the existing
+  exact `CANON_APC_M15_TARGET_DEBUG=off|on` selector. Legacy P38 and P57
+  contracts are unchanged; invalid selector values, mixed P57 TIM mode, wrong
+  workload/DP/unit geometry, and APC target without precheck are rejected.
+- Adjacent test repair: the fixed-lm-head M2048 receipt test now includes the
+  already registered APC debug profile; the pinned-image terminal count is
+  synchronized to the expanded 39-test carrier suite.
+- Validation: APC task 39/39; P57 FrozenLake 144/144; P38 fixed-head 15/15;
+  P38 serving classifier 37/37; Phase3 prefix-cache 12/12; V1 Phase4 34/34;
+  Python/shell syntax and `git diff --check` PASS. The broad P33 host runner's
+  dependency-free tests ran, but two imports remain unavailable on this host
+  (`datasets`, `metrax`); this is why the post-fix pinned-image gate remains a
+  separate required approval.
+- Limitation: exact-image and fresh DP8xTP8 control were not run. No A/B/C
+  observation, replay carrier, localization, APC repair, or production-enable
+  claim is made.
+- Next: user diff review; then separate approvals for commit/push, exact-image,
+  APC-off target control, and (only after a green control) APC-on treatment.

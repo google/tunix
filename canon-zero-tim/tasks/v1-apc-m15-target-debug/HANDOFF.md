@@ -23,6 +23,16 @@ Current immutable facts:
 - The bootstrap repair carries exact `m15/main` identity through the renderer,
   profile, and Step-00 resolver and preserves the package-safe module
   entrypoint. It changes no APC, model, alignment, backward, or optimizer math.
+- Attempt 1 (`canon-v1-apc-m15-off-d4-283cb67e`) is also prelearner-only: it
+  passed all overlays and GCS preflight, then legacy P38 DP16 assertions
+  rejected the M15 carrier's `(mini_batch_size, sampler_is)=(32, none)` and
+  would next have rejected its DP8 workload/unit identity. No A/B/C verdict or
+  replay payload was produced.
+- The bounded follow-up keeps legacy P38 exactly at `frozenlake`, DP16,
+  8 x 4-prompt producer units and token IS, while only
+  `CANON_APC_M15_TARGET_DEBUG=off|on` admits `frozenlake-dp8-tp8`, DP8,
+  1 x 32-prompt unit and no IS. Cross-mode and partial geometry negatives are
+  executable host tests. It changes no numerical code.
 
 Claim ceiling: `PHASE_B_STATIC_CARRIER_ONLY`.
 
@@ -144,7 +154,7 @@ bash canon-zero-tim/tests/v1_phase4/run_exact_image.sh \
   sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a
 ```
 
-The post-fix terminal must include `apc_m15_carrier=35`. This remains a CPU/image
+The post-fix terminal must include `apc_m15_carrier=39`. This remains a CPU/image
 admission gate, not a DP8xTP8 numerical result.
 
 Before applying the YAML, the rendered environment must contain all four

@@ -53,6 +53,108 @@ from tunix.sft import checkpoint_manager as checkpoint_manager_lib
 from tunix.sft import checkpoint_options as checkpoint_options_lib
 from tunix.sft import utils as sft_utils
 from tunix.cli.utils import data as data_lib
+
+
+def _canonical_frozenlake_admission_geometry(
+    *,
+    p38_precheck_only: bool,
+    apc_m15_target_arm: str,
+    p57_tim_arm: str,
+    p57_run_kind: str,
+) -> tuple[int, str]:
+  """Returns the signed mini-batch and sampler admission values.
+
+  The historical P38 serving diagnostic consumes eight four-prompt producer
+  units and uses the legacy token-IS default.  The M15 APC target carrier is a
+  different, explicitly named diagnostic: it preserves the production
+  32-prompt producer unit and the native/zero recipe's no-IS sampling.  Keep
+  that exception narrow so setting ``CANON_P38_PRECHECK_ONLY`` elsewhere does
+  not silently change an existing P38 or P57 recipe.
+  """
+  if apc_m15_target_arm not in ("", "off", "on"):
+    raise ValueError(
+        "CANON_APC_M15_TARGET_DEBUG must be unset, off, or on"
+    )
+  if apc_m15_target_arm:
+    if not p38_precheck_only:
+      raise ValueError("M15 APC target debug requires P38 precheck-only mode")
+    if p57_tim_arm or p57_run_kind:
+      raise ValueError("M15 APC target debug cannot overlap a P57 TIM run")
+    return 32, "none"
+  return (
+      4 if p38_precheck_only else 32,
+      "token"
+      if p57_tim_arm == "is"
+      else "none"
+      if p57_run_kind in ("train", "eval")
+      else "token",
+  )
+
+
+def _canonical_frozenlake_p38_batch_contract(
+    *,
+    p38_precheck_only: bool,
+    apc_m15_target_arm: str,
+    workload_name: str,
+    dp_size: int,
+    batch_size: int,
+    mini_batch_size: int,
+    num_generations: int,
+) -> tuple[int, int, int]:
+  """Validates the legacy-P38 or M15-target producer-unit geometry."""
+  if not p38_precheck_only:
+    if apc_m15_target_arm:
+      raise ValueError("M15 APC target debug requires P38 precheck-only mode")
+    return 0, 0, 0
+  if apc_m15_target_arm not in ("", "off", "on"):
+    raise ValueError(
+        "CANON_APC_M15_TARGET_DEBUG must be unset, off, or on"
+    )
+  expected = (
+      ("frozenlake-dp8-tp8", 8, 32, 1, 256)
+      if apc_m15_target_arm
+      else ("frozenlake", 16, 4, 8, 32)
+  )
+  (
+      expected_workload,
+      expected_dp,
+      expected_unit_prompts,
+      expected_units,
+      expected_unit_trajectories,
+  ) = expected
+  if batch_size % mini_batch_size:
+    raise ValueError("P38 diagnostic batch must divide into complete units")
+  unit_trajectories = mini_batch_size * num_generations
+  units = batch_size // mini_batch_size
+  covered_trajectories = unit_trajectories * units
+  observed = (
+      workload_name,
+      dp_size,
+      mini_batch_size,
+      units,
+      unit_trajectories,
+      covered_trajectories,
+  )
+  expected_observed = (
+      expected_workload,
+      expected_dp,
+      expected_unit_prompts,
+      expected_units,
+      expected_unit_trajectories,
+      256,
+  )
+  if (
+      observed != expected_observed
+      or unit_trajectories % dp_size
+  ):
+    mode = "M15 APC target" if apc_m15_target_arm else "legacy P38"
+    raise ValueError(
+        f"{mode} diagnostic geometry changed: "
+        f"observed={observed} expected={expected_observed}"
+    )
+  return unit_trajectories, units, covered_trajectories
+
+
 # The A1b/A2 contract and A3 adapter preflights exit before constructing the
 # learner and intentionally have no FrozenLake environment dependency.  Keep
 # the normal path's eager imports unchanged so a real L3 run still fails
@@ -311,6 +413,7 @@ CANON_P33_SHORT_ALIGNMENT = (
 CANON_P38_PRECHECK_ONLY = (
     os.getenv("CANON_P38_PRECHECK_ONLY", "0") == "1"
 )
+CANON_APC_M15_TARGET_DEBUG = os.getenv("CANON_APC_M15_TARGET_DEBUG", "")
 CANON_ALIGNMENT_TRAIN_MODE = dp_workloads.requires_alignment_train_mode(
     os.environ
 )
@@ -529,11 +632,14 @@ if CANON_P32_WORKLOAD:
         else (2 if CANON_P33_SHORT_ALIGNMENT else 5)
     )
     expected_temperature = 0.0 if CANON_P57_EVALUATION else 0.7
-  # The P38 serving-capture job is a pre-backward diagnostic. It consumes four
-  # prompt groups so the first diagnostic batch is 4 x 8 = 32 trajectories,
-  # exactly divisible by DP16. The dataset/global batch remains 32 prompts and
-  # every non-P38 training profile retains mini_batch_size=32.
-  expected_mini_batch_size = 4 if CANON_P38_PRECHECK_ONLY else 32
+  expected_mini_batch_size, expected_sampler_is = (
+      _canonical_frozenlake_admission_geometry(
+          p38_precheck_only=CANON_P38_PRECHECK_ONLY,
+          apc_m15_target_arm=CANON_APC_M15_TARGET_DEBUG,
+          p57_tim_arm=CANON_P57_TIM_ARM,
+          p57_run_kind=CANON_P57_RUN_KIND,
+      )
+  )
   dp_workloads.validate_frozenlake_max_concurrency(
       P32_WORKLOAD, args.max_concurrency, os.environ
   )
@@ -576,13 +682,7 @@ if CANON_P32_WORKLOAD:
       "advantage_estimator": (args.advantage_estimator, "rloo"),
       "sampler_is": (
           args.sampler_is,
-          (
-              "token"
-              if CANON_P57_TIM_ARM == "is"
-              else "none"
-              if CANON_P57_RUN_KIND in ("train", "eval")
-              else "token"
-          ),
+          expected_sampler_is,
       ),
       "seed": (SEED, 42),
       "mesh": (
@@ -663,27 +763,24 @@ if _P27_TRAJECTORY_MICRO_RAW and not CANON_P27:
 if CANON_P32_WORKLOAD:
   TRAIN_TRAJECTORY_MICRO_BATCH_SIZE = args.train_trajectory_micro_batch_size
   if CANON_P38_PRECHECK_ONLY:
-    p38_trajectories = MINI_BATCH_SIZE * NUM_GENERATIONS
-    p38_units = BATCH_SIZE // MINI_BATCH_SIZE
-    if (
-        P32_WORKLOAD is None
-        or P32_WORKLOAD.name != "frozenlake"
-        or p38_trajectories != 32
-        or p38_units != 8
-        or p38_units * p38_trajectories != 256
-        or p38_trajectories % P32_WORKLOAD.dp_size
-    ):
-      raise ValueError(
-          "P38 diagnostic requires eight 4-prompt units x 8 generations "
-          "= 256 covered trajectories, with every 32-trajectory unit "
-          "divisible by FrozenLake DP16"
-      )
+    assert P32_WORKLOAD is not None
+    p38_trajectories, p38_units, p38_covered_trajectories = (
+        _canonical_frozenlake_p38_batch_contract(
+            p38_precheck_only=True,
+            apc_m15_target_arm=CANON_APC_M15_TARGET_DEBUG,
+            workload_name=P32_WORKLOAD.name,
+            dp_size=P32_WORKLOAD.dp_size,
+            batch_size=BATCH_SIZE,
+            mini_batch_size=MINI_BATCH_SIZE,
+            num_generations=NUM_GENERATIONS,
+        )
+    )
     print(
         "[CANON_P38] DIAGNOSTIC_BATCH_CONTRACT "
         f"global_prompts={BATCH_SIZE} unit_prompts={MINI_BATCH_SIZE} "
         f"units={p38_units} generations={NUM_GENERATIONS} "
         f"unit_trajectories={p38_trajectories} "
-        f"covered_trajectories={p38_units * p38_trajectories} "
+        f"covered_trajectories={p38_covered_trajectories} "
         f"dp={P32_WORKLOAD.dp_size} verdict=PASS",
         flush=True,
     )

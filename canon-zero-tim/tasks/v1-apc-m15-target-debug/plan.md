@@ -20,7 +20,7 @@ B - C = 0 bytes
 | Phase | Deliverable | Exit gate | Status |
 |---|---|---|---|
 | A | `M15_FIRST_RED_INPUT_CONTRACT` with mismatch distribution, identity hashes, and artifact-completeness matrix | every field is traced to immutable `file:line` or explicitly marked missing | complete: audit PASS, replay inputs missing |
-| B | fresh captured-red replay carrier and APC-off/APC-on decision table | static/host carrier tests prove full 256-row producer, every-call envelope, exact first-red join, GCS durability, A cache-readable decode, B full reset, zero backward/commit | Attempt-0 bootstrap invalid; signed-identity repair host PASS; post-fix exact-image/target pending |
+| B | fresh captured-red replay carrier and APC-off/APC-on decision table | static/host carrier tests prove full 256-row producer, every-call envelope, exact first-red join, GCS durability, A cache-readable decode, B full reset, zero backward/commit | Attempt-0 bootstrap invalid; Attempt-1 exposed legacy geometry cross-talk; bounded geometry repair host PASS; exact-image/target pending |
 | C | single-variable reproduction ladder | control A-B=0; treatment either reproduces red or is classified `ONEHOST_NOT_REPRODUCED` without mechanism claims | pending |
 | D | observer-neutral coarse-to-fine first-red walk | `FIRST_RED_LOCALIZED` names last exact and first red tensor, shape ledger, request/token/cache coordinate, and `file:line` | pending |
 | E | minimal localized repair, default off or experiment-bound | reproducer flips red to zero; APC-off and B are unchanged; adjacent and dirty-page negatives fire | pending |
@@ -63,3 +63,13 @@ B - C = 0 bytes
   fields, so the FrozenLake entrypoint rejected the split identity before
   learner construction. The repaired carrier transports and checks both sides
   of that identity; this is a launcher-contract repair, not an APC repair.
+- Confirmed: Attempt 1 also did not reach an APC numerical boundary. It passed
+  overlay and GCS preflight, then the entrypoint treated every P38 precheck as
+  the legacy DP16 carrier and rejected the signed M15 target's
+  `mini_batch_size=32` and `sampler_is=none`. A second hardcoded legacy check
+  would also have rejected `frozenlake-dp8-tp8` and the one-unit DP8 geometry.
+- Decision: admission now has two explicit contracts. Legacy P38 remains
+  `frozenlake`, DP16, 8 x 4 prompts, token IS; the experiment-scoped
+  `CANON_APC_M15_TARGET_DEBUG=off|on` path is exactly
+  `frozenlake-dp8-tp8`, DP8, 1 x 32 prompts, no IS. Cross-use and partial
+  geometries fail closed. This changes no APC or model arithmetic.

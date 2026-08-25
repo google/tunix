@@ -17,6 +17,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[4]
 RENDERER_PATH = ROOT / "canon-zero-tim/cluster/render_v1_apc_m15_target_debug.py"
 LEARNER_PATH = ROOT / "tunix/rl/agentic/agentic_rl_learner.py"
+TRAIN_PATH = ROOT / "examples/frozenlake/train_frozenlake_qwen3.py"
 BASE = ROOT / "canon-zero-tim/cluster/jobset-64chip.yaml"
 SOURCE = "6" * 40
 SPEC = importlib.util.spec_from_file_location("render_v1_apc_m15_target_debug", RENDERER_PATH)
@@ -42,6 +43,29 @@ def _load_consumer_contract():
 
 
 consumer_contract = _load_consumer_contract()
+
+
+def _load_train_geometry_contracts():
+  """Load pure entrypoint contracts without importing JAX/TPU dependencies."""
+  names = {
+      "_canonical_frozenlake_admission_geometry",
+      "_canonical_frozenlake_p38_batch_contract",
+  }
+  tree = ast.parse(TRAIN_PATH.read_text(encoding="utf-8"))
+  functions = [
+      node
+      for node in tree.body
+      if isinstance(node, ast.FunctionDef) and node.name in names
+  ]
+  if {node.name for node in functions} != names:
+    raise AssertionError("FrozenLake entrypoint geometry helpers are incomplete")
+  module = ast.Module(body=functions, type_ignores=[])
+  namespace = {}
+  exec(compile(ast.fix_missing_locations(module), str(TRAIN_PATH), "exec"), namespace)
+  return tuple(namespace[name] for name in sorted(names))
+
+
+admission_geometry, p38_batch_contract = _load_train_geometry_contracts()
 
 
 class TargetCarrierTest(unittest.TestCase):
@@ -161,6 +185,99 @@ class TargetCarrierTest(unittest.TestCase):
           process_in_consumer=True,
           onehost_rehearsal=True,
           m15_target_debug=True,
+      )
+
+  def test_entrypoint_admits_exact_m15_target_geometry(self):
+    for arm in ("off", "on"):
+      self.assertEqual(
+          admission_geometry(
+              p38_precheck_only=True,
+              apc_m15_target_arm=arm,
+              p57_tim_arm="",
+              p57_run_kind="",
+          ),
+          (32, "none"),
+      )
+      self.assertEqual(
+          p38_batch_contract(
+              p38_precheck_only=True,
+              apc_m15_target_arm=arm,
+              workload_name="frozenlake-dp8-tp8",
+              dp_size=8,
+              batch_size=32,
+              mini_batch_size=32,
+              num_generations=8,
+          ),
+          (256, 1, 256),
+      )
+
+  def test_entrypoint_preserves_legacy_p38_geometry(self):
+    self.assertEqual(
+        admission_geometry(
+            p38_precheck_only=True,
+            apc_m15_target_arm="",
+            p57_tim_arm="",
+            p57_run_kind="",
+        ),
+        (4, "token"),
+    )
+    self.assertEqual(
+        p38_batch_contract(
+            p38_precheck_only=True,
+            apc_m15_target_arm="",
+            workload_name="frozenlake",
+            dp_size=16,
+            batch_size=32,
+            mini_batch_size=4,
+            num_generations=8,
+        ),
+        (32, 8, 256),
+    )
+
+  def test_entrypoint_preserves_p57_training_sampler_contracts(self):
+    self.assertEqual(
+        admission_geometry(
+            p38_precheck_only=False,
+            apc_m15_target_arm="",
+            p57_tim_arm="zero",
+            p57_run_kind="train",
+        ),
+        (32, "none"),
+    )
+    self.assertEqual(
+        admission_geometry(
+            p38_precheck_only=False,
+            apc_m15_target_arm="",
+            p57_tim_arm="is",
+            p57_run_kind="train",
+        ),
+        (32, "token"),
+    )
+
+  def test_entrypoint_rejects_m15_target_contract_leaks(self):
+    with self.assertRaisesRegex(ValueError, "requires P38 precheck-only"):
+      admission_geometry(
+          p38_precheck_only=False,
+          apc_m15_target_arm="off",
+          p57_tim_arm="",
+          p57_run_kind="",
+      )
+    with self.assertRaisesRegex(ValueError, "cannot overlap a P57 TIM run"):
+      admission_geometry(
+          p38_precheck_only=True,
+          apc_m15_target_arm="on",
+          p57_tim_arm="zero",
+          p57_run_kind="train",
+      )
+    with self.assertRaisesRegex(ValueError, "diagnostic geometry changed"):
+      p38_batch_contract(
+          p38_precheck_only=True,
+          apc_m15_target_arm="off",
+          workload_name="frozenlake-dp8-tp8",
+          dp_size=8,
+          batch_size=32,
+          mini_batch_size=4,
+          num_generations=8,
       )
 
   def test_runtime_markers_are_fail_closed_and_debug_scoped(self):
