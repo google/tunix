@@ -97,6 +97,24 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   )
   parser.add_argument("--maxtext_model_name", type=str, default="qwen3-0.6b")
   parser.add_argument(
+      "--maxtext_padded_moe_mlp_dim",
+      type=int,
+      default=0,
+      help=(
+          "Explicit padded_base_moe_mlp_dim override for MoE models. The"
+          " rollout side (maxtext_vllm_adapter.generate_maxtext_config) pads"
+          " moe_intermediate_size up automatically to satisfy the GMM"
+          " kernel's tile-alignment requirement whenever it doesn't divide"
+          " evenly by rollout tensor_parallel_size * 2 * num_lanes; the"
+          " trainer never applies this padding on its own, so Raiden's"
+          " weight-sync preflight fails on a global-shape mismatch for"
+          " every MoE MLP tensor. Must match whatever the rollout side"
+          " actually computes for its own tensor_parallel_size -- 0 leaves"
+          " padding off (correct for dense models, or a rollout TP where no"
+          " padding is needed)."
+      ),
+  )
+  parser.add_argument(
       "--maxtext_load_parameters_path",
       type=str,
       default=os.getenv("MAXTEXT_CKPT", ""),
@@ -317,6 +335,11 @@ def _build_maxtext_config(args, num_devices: int) -> Any:
       "use_tokamax_gmm=true",
       "use_gmm_v2=true",
       f"ici_fsdp_parallelism={args.mesh_fsdp}",
+      *(
+          [f"padded_base_moe_mlp_dim={args.maxtext_padded_moe_mlp_dim}"]
+          if args.maxtext_padded_moe_mlp_dim
+          else []
+      ),
       f"ici_tensor_parallelism={args.mesh_tp}",
       f"ici_expert_parallelism={args.mesh_expert}",
       f"learning_rate={args.learning_rate}",

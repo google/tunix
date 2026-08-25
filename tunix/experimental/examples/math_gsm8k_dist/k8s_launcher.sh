@@ -86,6 +86,12 @@ export TRAINER_TPU_SLICE=${TRAINER_TPU_SLICE:-tpuv5:2x2x2}
 export TRAINER_MESH_FSDP=${TRAINER_MESH_FSDP:-8}
 export TRAINER_MESH_TP=${TRAINER_MESH_TP:-1}
 export TRAINER_MESH_EXPERT=${TRAINER_MESH_EXPERT:-1}
+# Empty by default (no padding). Must match whatever
+# maxtext_vllm_adapter.generate_maxtext_config() computes for the rollout's
+# own moe_intermediate_size/tensor_parallel_size on the rollout side -- see
+# run_trainer_node.py's --maxtext_padded_moe_mlp_dim for why this has to be
+# set explicitly for MoE models rather than derived automatically here.
+export TRAINER_PADDED_MOE_MLP_DIM=${TRAINER_PADDED_MOE_MLP_DIM:-}
 export ROLLOUT_TPU_SLICE=${ROLLOUT_TPU_SLICE:-tpuv5:2x2x1}
 export ROLLOUT_TENSOR_PARALLEL_SIZE=${ROLLOUT_TENSOR_PARALLEL_SIZE:-4}
 # Set both to try tpu-inference's experimental batched-RPA kernel instead of
@@ -162,6 +168,7 @@ start_trainer() {
         --mesh_tp=${TRAINER_MESH_TP} \
         --mesh_expert=${TRAINER_MESH_EXPERT} \
         --trainer_backend=${TRAINER_BACKEND} \
+        ${TRAINER_PADDED_MOE_MLP_DIM:+--maxtext_padded_moe_mlp_dim=${TRAINER_PADDED_MOE_MLP_DIM}} \
         ${MAXTEXT_CKPT:+--maxtext_load_parameters_path=${MAXTEXT_CKPT}} \
         --model_name=${MODEL_NAME} \
         --model_id=${MODEL_ID} \
