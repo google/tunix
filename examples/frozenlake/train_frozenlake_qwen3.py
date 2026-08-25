@@ -902,7 +902,11 @@ if (
 
 # ====== Checkpoint saving ======
 P45_CHECKPOINT = frozenlake_checkpoint.from_env(os.environ)
-if _P32_WORKLOAD_NAME == "frozenlake-dp8-tp8" and not CANON_APC_M15_TARGET_DEBUG:
+if (
+    _P32_WORKLOAD_NAME == "frozenlake-dp8-tp8"
+    and not CANON_APC_M15_TARGET_DEBUG
+    and not CANON_P64_P45_NUMERIC_DEBUG
+):
   frozenlake_checkpoint.require_p45(P45_CHECKPOINT, os.environ)
 elif P45_CHECKPOINT.enabled:
   raise ValueError(
