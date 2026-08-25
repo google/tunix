@@ -269,6 +269,7 @@ class DPTrainingTest(absltest.TestCase):
     self.assertEqual(report['reduction_transactions'], 1)
     self.assertEqual(report['reduction_rounds'], 8)
     self.assertEqual(report['replica_check_flags'], 16)
+    self.assertTrue(report['post_reduction_all_finite'])
     self.assertTrue(report['post_reduction_replicas_exact'])
 
   def test_rank_gradient_reducer_accepts_duplicate_production_gradients(self):
@@ -375,6 +376,77 @@ class DPTrainingTest(absltest.TestCase):
     self.assertLen(set(report['rank_local_fingerprints']), 2)
     self.assertEqual(report['reduction_rounds'], 2)
     self.assertTrue(report['post_reduction_replicas_exact'])
+
+  def test_dp8_tp8_rank_gradient_reducer_consumes_finite_staged_table(self):
+    if len(jax.devices()) != 64:
+      self.skipTest('requires exactly 64 forced CPU or accelerator devices')
+    mesh = Mesh(np.asarray(jax.devices()).reshape(8, 8), ('data', 'model'))
+    template_sharding = jax.sharding.NamedSharding(mesh, P('model'))
+    staged_sharding = jax.sharding.NamedSharding(
+        mesh, P('data', 'model')
+    )
+    template = jax.device_put(jnp.zeros((32,), jnp.float32), template_sharding)
+    staged_host = np.stack(
+        [np.arange(32, dtype=np.float32) + 10.0 * rank for rank in range(8)]
+    )
+    staged = jax.device_put(staged_host, staged_sharding)
+    reducer = dp_training.FixedDPRankGradientReducer(
+        template, dp_size=8, dp_axis='data'
+    )
+    reduced, report = reducer.finalize_staged(staged)
+    np.testing.assert_array_equal(np.asarray(reduced), staged_host.sum(axis=0))
+    self.assertEqual(report['dp_size'], 8)
+    self.assertEqual(report['reduction_rounds'], 6)
+    self.assertTrue(report['post_reduction_all_finite'])
+    self.assertTrue(report['post_reduction_replicas_exact'])
+
+  def test_parallel_staged_common_nan_is_nonfinite_not_replica_mismatch(self):
+    if len(jax.devices()) < 4:
+      self.skipTest('requires at least four forced CPU or accelerator devices')
+    mesh = Mesh(
+        np.asarray(jax.devices()[:4]).reshape(2, 2), ('data', 'model')
+    )
+    template_sharding = jax.sharding.NamedSharding(mesh, P('model'))
+    staged_sharding = jax.sharding.NamedSharding(
+        mesh, P('data', 'model')
+    )
+    template = jax.device_put(jnp.zeros((8,), jnp.float32), template_sharding)
+    staged_host = np.ones((2, 8), np.float32)
+    staged_host[:, 3] = np.nan
+    staged = jax.device_put(staged_host, staged_sharding)
+    reducer = dp_training.FixedDPRankGradientReducer(
+        template,
+        dp_size=2,
+        dp_axis='data',
+        require_distinct_fingerprints=False,
+    )
+    with self.assertRaisesRegex(
+        ValueError, 'staged DP gradient contains non-finite values'
+    ) as context:
+      reducer.finalize_staged(staged)
+    self.assertNotIn('unequal replicas', str(context.exception))
+
+  def test_finite_replica_mismatch_remains_fatal(self):
+    if len(jax.devices()) < 4:
+      self.skipTest('requires at least four forced CPU or accelerator devices')
+    mesh = Mesh(
+        np.asarray(jax.devices()[:4]).reshape(2, 2), ('data', 'model')
+    )
+    template_sharding = jax.sharding.NamedSharding(mesh, P('model'))
+    staged_sharding = jax.sharding.NamedSharding(
+        mesh, P('data', 'model')
+    )
+    template = jax.device_put(jnp.zeros((8,), jnp.float32), template_sharding)
+    staged = jax.device_put(jnp.ones((2, 8), jnp.float32), staged_sharding)
+    reducer = dp_training.FixedDPRankGradientReducer(
+        template,
+        dp_size=2,
+        dp_axis='data',
+        require_distinct_fingerprints=False,
+    )
+    reducer._compare = lambda _: jnp.asarray([True, False])
+    with self.assertRaisesRegex(ValueError, 'unequal replicas'):
+      reducer.finalize_staged(staged)
 
   def test_rank_gradient_reducer_rejects_unsharded_parallel_table(self):
     if len(jax.devices()) < 4:

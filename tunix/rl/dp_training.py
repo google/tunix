@@ -493,6 +493,18 @@ def _gradient_signature(tree: Any) -> jax.Array:
   return jnp.stack((total, absolute, squared, weighted, nonzero))
 
 
+def _gradient_finite_flags(tree: Any) -> jax.Array:
+  """Returns one finite bit per leaf without copying gradient payloads."""
+  return jnp.stack(
+      tuple(jnp.all(jnp.isfinite(leaf)) for leaf in jax.tree.leaves(tree))
+  )
+
+
+def _gradient_diagnostics(tree: Any) -> tuple[jax.Array, jax.Array]:
+  """Computes the existing signature and finite bits in one dispatch."""
+  return _gradient_signature(tree), _gradient_finite_flags(tree)
+
+
 def _signature_sha256(signature: Any) -> str:
   value = np.ascontiguousarray(jax.device_get(signature))
   return hashlib.sha256(value.view(np.uint8)).hexdigest()
@@ -636,13 +648,19 @@ class FixedDPRankGradientReducer:
     self._reduce = jax.jit(reduce_mapped, donate_argnums=(0,))
     self._compare = jax.jit(compare_mapped)
     self._signature = jax.jit(_gradient_signature)
+    self._finite_flags = jax.jit(_gradient_finite_flags)
     signature_sharding = jax.sharding.NamedSharding(
         mesh, jax.sharding.PartitionSpec(dp_axis, None)
     )
-    self._batched_signature = jax.jit(
-        jax.vmap(_gradient_signature), out_shardings=signature_sharding
+    self._batched_diagnostics = jax.jit(
+        jax.vmap(_gradient_diagnostics),
+        out_shardings=(signature_sharding, signature_sharding),
     )
     self._template_structure = jax.tree.structure(template)
+    self._leaf_paths = tuple(
+        jax.tree_util.keystr(path)
+        for path, _ in jax.tree_util.tree_flatten_with_path(template)[0]
+    )
     self._staged_metadata = tuple(
         (
             (dp_size,) + tuple(leaf.shape),
@@ -696,6 +714,24 @@ class FixedDPRankGradientReducer:
     if self._require_distinct and unique_fingerprints != self._dp_size:
       raise ValueError('DP rank-local gradient fingerprints are not distinct')
     reduced = self._reduce(staged)
+    finite_flags = np.asarray(
+        jax.device_get(self._finite_flags(reduced)), dtype=np.bool_
+    )
+    if finite_flags.shape != (len(self._staged_metadata),):
+      raise ValueError(
+          'reduced DP gradient finite flags changed shape: '
+          f'{finite_flags.shape} != {(len(self._staged_metadata),)}'
+      )
+    if not bool(np.all(finite_flags)):
+      bad_leaves = np.flatnonzero(~finite_flags).astype(np.int32).tolist()
+      examples = [
+          {'leaf': index, 'path': self._leaf_paths[index]}
+          for index in bad_leaves[:16]
+      ]
+      raise ValueError(
+          'fixed DP gradient reduction produced non-finite values: '
+          f'examples={examples} total={len(bad_leaves)}'
+      )
     flags = np.asarray(jax.device_get(self._compare(reduced)), dtype=np.bool_)
     if flags.size != self._dp_size or not bool(np.all(flags)):
       raise ValueError(
@@ -716,6 +752,8 @@ class FixedDPRankGradientReducer:
         'reduction_transactions': 1,
         'reduction_rounds': fixed_dp_collective_count(self._dp_size),
         'replica_check_flags': int(flags.size),
+        'finite_leaf_flags': int(finite_flags.size),
+        'post_reduction_all_finite': True,
         'post_reduction_replicas_exact': True,
       }
     return reduced, report
@@ -768,13 +806,36 @@ class FixedDPRankGradientReducer:
             f'staged DP gradient leaf {index} sharding changed: '
             f'{leaf.sharding} != {expected_sharding}'
         )
-    signatures = np.asarray(
-        jax.device_get(self._batched_signature(staged)), dtype=np.float32
+    signatures_device, staged_finite_device = self._batched_diagnostics(staged)
+    signatures, staged_finite = jax.device_get(
+        (signatures_device, staged_finite_device)
     )
+    signatures = np.asarray(signatures, dtype=np.float32)
     if signatures.shape != (self._dp_size, 5):
       raise ValueError(
           'staged DP gradient signatures changed shape: '
           f'{signatures.shape} != {(self._dp_size, 5)}'
+      )
+    staged_finite = np.asarray(staged_finite, dtype=np.bool_)
+    expected_finite_shape = (self._dp_size, len(self._staged_metadata))
+    if staged_finite.shape != expected_finite_shape:
+      raise ValueError(
+          'staged DP gradient finite flags changed shape: '
+          f'{staged_finite.shape} != {expected_finite_shape}'
+      )
+    if not bool(np.all(staged_finite)):
+      bad = np.argwhere(~staged_finite)
+      examples = [
+          {
+              'rank': int(rank),
+              'leaf': int(leaf),
+              'path': self._leaf_paths[int(leaf)],
+          }
+          for rank, leaf in bad[:16]
+      ]
+      raise ValueError(
+          'staged DP gradient contains non-finite values: '
+          f'examples={examples} total={len(bad)}'
       )
     fingerprints = tuple(
         _signature_sha256(signatures[rank])

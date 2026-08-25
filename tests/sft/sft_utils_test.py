@@ -64,6 +64,62 @@ class UtilsTest(absltest.TestCase):
     np.testing.assert_array_equal(positions, expected_value)
 
 
+class StableGlobalNormTest(absltest.TestCase):
+
+  def test_finite_large_gradient_does_not_overflow(self):
+    gradient = {"x": jnp.asarray([1.0e20, -1.0e20], jnp.float32)}
+    naive = jnp.sqrt(jnp.sum(jnp.square(gradient["x"])))
+    self.assertTrue(np.isinf(float(naive)))
+
+    norm = float(utils.stable_global_norm(gradient))
+    self.assertTrue(np.isfinite(norm))
+    self.assertAlmostEqual(norm / 1.0e20, np.sqrt(2.0), places=5)
+
+  def test_nonfinite_gradient_remains_nonfinite(self):
+    for value in (jnp.inf, jnp.nan):
+      with self.subTest(value=value):
+        norm = float(utils.stable_global_norm({"x": jnp.asarray([value])}))
+        self.assertFalse(np.isfinite(norm))
+
+  def test_numeric_stats_distinguish_finite_huge_from_nonfinite(self):
+    gradient = {"x": jnp.asarray([1.0e20, -1.0e20], jnp.float32)}
+    receipt = utils.tree_numeric_receipt(gradient)
+    self.assertTrue(receipt["all_finite"])
+    self.assertFalse(receipt["naive_norm_finite"])
+    self.assertAlmostEqual(receipt["max_abs"] / 1.0e20, 1.0, places=6)
+    self.assertIsNone(receipt["first_nonfinite"])
+
+    nonfinite = utils.tree_numeric_receipt({
+        "good": jnp.asarray([1.0], jnp.float32),
+        "bad": jnp.asarray([jnp.nan], jnp.float32),
+    })
+    self.assertFalse(nonfinite["all_finite"])
+    self.assertIsNotNone(nonfinite["first_nonfinite"])
+    self.assertIn("bad", nonfinite["first_nonfinite"]["path"])
+
+  def test_scaled_numeric_stats_expose_multiplier(self):
+    gradient = {"x": jnp.asarray([8.0, -4.0], jnp.float32)}
+    stats = utils.scaled_tree_numeric_stats(
+        gradient, jnp.asarray(1.0 / 16.0, jnp.float32)
+    )
+    receipt = utils.tree_numeric_receipt(gradient, stats=stats)
+    self.assertAlmostEqual(receipt["max_abs"], 0.5)
+    self.assertAlmostEqual(
+        receipt["stable_norm"], np.sqrt(0.5**2 + 0.25**2), places=6
+    )
+
+  def test_ranked_numeric_stats_identify_rank_and_leaf(self):
+    tree = {
+        "a": jnp.asarray([[1.0], [2.0]], jnp.float32),
+        "b": jnp.asarray([[3.0], [jnp.inf]], jnp.float32),
+    }
+    receipt = utils.tree_numeric_receipt(tree, ranked=True)
+    self.assertFalse(receipt["all_finite"])
+    self.assertEqual(receipt["rank_count"], 2)
+    self.assertEqual(receipt["first_nonfinite_rank"]["rank"], 1)
+    self.assertIn("b", receipt["first_nonfinite_rank"]["path"])
+
+
 class WeightedMetricTest(absltest.TestCase):
   """Isolated tests for WeightedMetric's deferred division and safeguards.
 
