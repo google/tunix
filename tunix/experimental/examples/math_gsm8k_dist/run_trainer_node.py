@@ -307,8 +307,9 @@ def _build_maxtext_config(args, num_devices: int) -> Any:
       # tunix owns gradient accumulation, so MaxText must not also accumulate
       "gradient_accumulation_steps=1",
       f"max_target_length={args.max_prompt_length + args.max_response_length}",
-      # splash attention's block size doesn't divide every prompt+response length here
-      "attention=dot_product",
+      "attention=splash",
+      "use_tokamax_gmm=true",
+      "use_gmm_v2=true",
       f"ici_fsdp_parallelism={args.mesh_fsdp}",
       f"ici_tensor_parallelism={args.mesh_tp}",
       f"ici_expert_parallelism={args.mesh_expert}",
