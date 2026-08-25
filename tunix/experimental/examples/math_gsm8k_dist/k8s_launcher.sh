@@ -21,7 +21,15 @@ TUNIX_IMAGE=${TUNIX_IMAGE:-}
 
 export MODEL_NAME=${MODEL_NAME:-Qwen3-1.7B}
 export MODEL_ID=${MODEL_ID:-Qwen/Qwen3-1.7B}
-export MODEL_DIR=${MODEL_DIR:-artifacts/qwen3_dist_gsm8k/models}
+# Must be model-specific: it's a local HF snapshot cache, and vLLM's own
+# model_config reads config.json straight from here whenever the directory
+# is non-empty, bypassing MODEL_ID entirely. A shared path across different
+# models silently reuses a stale snapshot -- confirmed root cause of a
+# multi-hour KV-cache shape-mismatch chase on Qwen3-30B-A3B: with a leftover
+# Qwen3-0.6B snapshot sitting here, vLLM's config (num_key_value_heads=8)
+# and MaxText's own model construction (num_key_value_heads=4, correctly
+# built from MAXTEXT_MODEL_NAME) silently disagreed.
+export MODEL_DIR=${MODEL_DIR:-artifacts/qwen3_dist_gsm8k/models/${MODEL_NAME}}
 export TOKENIZER_PATH=${TOKENIZER_PATH:-${MODEL_DIR}}
 # only consulted when TRAINER_BACKEND=maxtext; keep it matching
 # MODEL_NAME/MODEL_ID or Raiden weight sync between trainer and rollout won't
