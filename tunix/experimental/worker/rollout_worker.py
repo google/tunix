@@ -20,6 +20,7 @@ import numpy as np
 from tunix.experimental.common import datatypes
 from tunix.experimental.rollout import manager as manager_lib
 from tunix.experimental.rollout import sampler as sampler_lib
+from tunix.experimental.trajectory import store
 from tunix.experimental.trajectory import trajectory as trajectory_lib
 from tunix.experimental.weight_sync import weight_sync
 from tunix.experimental.worker import abstract_worker
@@ -50,7 +51,9 @@ class RolloutConfig(base_rollout.RolloutConfig):
 
 
 TrajectoryOrError = Union[
-    trajectory_lib.Trajectory, trajectory_lib.TrajectoryError
+    trajectory_lib.TunixTrajectory,
+    trajectory_lib.Trajectory,
+    trajectory_lib.TrajectoryError,
 ]
 
 WorkerState = datatypes.WorkerState
@@ -73,6 +76,7 @@ class RolloutWorker(abstract_worker.Worker):
       max_concurrency: int = 64,
       tokenizer: Any = None,
       chat_parser: Any = None,
+      trajectory_store: Optional[store.TrajectoryWriter] = None,
   ):
     super().__init__()
     self.worker_id = worker_id
@@ -93,6 +97,7 @@ class RolloutWorker(abstract_worker.Worker):
         max_concurrency=max_concurrency,
         tokenizer=tokenizer,
         chat_parser=chat_parser,
+        trajectory_store=trajectory_store,
     )
 
   @property
@@ -309,13 +314,23 @@ class RolloutWorker(abstract_worker.Worker):
           ),
           policy_version=self._policy_version,
       )
-    if isinstance(item, (trajectory_lib.Trajectory, datatypes.Trajectory)):
+    if isinstance(
+        item,
+        (
+            trajectory_lib.TunixTrajectory,
+            trajectory_lib.Trajectory,
+            datatypes.Trajectory,
+        ),
+    ):
       req_id = request_id or getattr(item, "trajectory_id", "default")
       if prompt_tokens is None:
         extra = getattr(item, "extra", None)
         extra = extra if isinstance(extra, dict) else {}
         prompt_tokens = np.asarray(
-            extra.get("prompt_tokens", np.zeros(0, dtype=np.int32)),
+            extra.get(
+                "prompt_tokens",
+                getattr(item, "prompt_tokens", np.zeros(0, dtype=np.int32)),
+            ),
             dtype=np.int32,
         )
       response = datatypes.RolloutResponse.from_trajectory(
@@ -323,6 +338,15 @@ class RolloutWorker(abstract_worker.Worker):
           traj=item,  # pyrefly: ignore[bad-argument-type]
           prompt_tokens=prompt_tokens,
           policy_version=self._policy_version,
+      )
+      prompt_id_val = getattr(item, "prompt_id", None) or extra.get("prompt_id")
+      if prompt_id_val:
+        response.prompt_id = str(prompt_id_val)
+      reward_val = getattr(item, "total_reward", None) or extra.get("reward")
+      if reward_val is not None:
+        response.env_reward = float(reward_val)
+      response.metadata.update(
+          {k: v for k, v in extra.items() if k != "prompt_tokens"}
       )
       self._stamp_worker_lineage(response.metadata)
       return response

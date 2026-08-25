@@ -19,6 +19,8 @@ from unittest import mock
 from absl.testing import absltest
 import jax.numpy as jnp
 import numpy as np
+from tunix.experimental.trajectory import converter as converter_lib
+from tunix.experimental.trajectory import in_memory_store
 from tunix.perf.experimental import constants as perf_constants
 from tunix.perf.experimental import tracer as perf_tracer_v2
 from tunix.rl.agentic import utils
@@ -733,6 +735,72 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     self.assertIn('step_latency', trajectory.env_time)
     self.assertIsInstance(trajectory.env_time['step_latency'], list)
     self.assertIn('close_latency', trajectory.env_time)
+
+  def test_on_rollout_output_callback(self):
+    outputs = []
+
+    def _on_rollout_output(output):
+      outputs.append(output)
+
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=self.mock_env,
+        model_call=self.mock_model_call,
+        on_rollout_output_callback=_on_rollout_output,
+    )
+    asyncio.run(self._run_collect(engine, mode='Trajectory'))
+    self.assertLen(outputs, 2)
+    self.assertEqual(outputs[0].text, ['response1'])
+    self.assertEqual(outputs[1].text, ['response2'])
+
+  def test_on_final_reward_callback(self):
+    reward_steps = []
+
+    def _on_final_reward(step):
+      reward_steps.append(step)
+
+    def _mock_final_reward():
+      return 0.5
+
+    self.mock_env.final_reward_fn = _mock_final_reward
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=self.mock_env,
+        model_call=self.mock_model_call,
+        on_final_reward_callback=_on_final_reward,
+    )
+    asyncio.run(self._run_collect(engine, mode='Trajectory'))
+    self.assertLen(reward_steps, 1)
+    self.assertEqual(reward_steps[0].reward, 2.5)  # initial 2.0 + final 0.5
+
+  def test_trajectory_store_writes(self):
+    store = in_memory_store.InMemoryTrajectoryStore()
+    metadata = converter_lib.create_trajectory_metadata(
+        traj_id='traj_test_123',
+        status=agent_types.TrajectoryStatus.RUNNING,
+    )
+    self.mock_agent.trajectory.task = {'prompts': ['Solve math']}
+    engine = trajectory_collect_engine.TrajectoryCollectEngine(
+        agent=self.mock_agent,
+        env=self.mock_env,
+        model_call=self.mock_model_call,
+        trajectory_store=store,
+        metadata=metadata,
+        policy_version=42,
+    )
+    asyncio.run(self._run_collect(engine, mode='Trajectory'))
+
+    # Verify trajectory store contains the written steps via public API
+    trajs = store.get_trajectories(['traj_test_123'])
+    self.assertLen(trajs, 1)
+    stored_traj = trajs[0]
+    self.assertGreaterEqual(len(stored_traj.steps), 3)
+    self.assertEqual(stored_traj.steps[0].step_id, 0)
+    self.assertEqual(stored_traj.steps[0].message, 'Solve math')
+    metas = store.get_trajectories_metadata()
+    self.assertLen(metas, 1)
+    self.assertEqual(metas[0].trajectory_id, 'traj_test_123')
+    self.assertEqual(metas[0].target_policy_versions, [42])
 
 
 if __name__ == '__main__':
