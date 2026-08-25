@@ -151,13 +151,19 @@ def _canonical_alignment_sampler_is_valid(
     p34_disable_tis: bool = False,
     p58_onehost_xprof: bool = False,
     m15_apc_target: bool = False,
+    p64_numeric_debug: bool = False,
 ) -> bool:
   """Return whether sampler IS preserves the workload contract."""
   if sampler_is == "token":
     return True
   if sampler_is is not None:
     return False
-  if workload_name == "gsm8k" or p57_tim_study or m15_apc_target:
+  if (
+      workload_name == "gsm8k"
+      or p57_tim_study
+      or m15_apc_target
+      or p64_numeric_debug
+  ):
     return True
   return (
       p34_deepswe and p34_disable_sampler_is and p34_disable_tis
@@ -1512,11 +1518,14 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
               in ("native", "zero-hp")
           ),
           m15_apc_target=m15_apc_target_alignment,
+          p64_numeric_debug=(
+              os.environ.get("CANON_P64_P45_NUMERIC_DEBUG", "") == "1"
+          ),
       ):
         raise alignment.AlignmentGateError(
             "canonical alignment requires sampler_is='token'; sampler_is=None "
             "is admitted only by the signed GSM8K, P34 DeepSWE, P57 "
-            "causal-study, or M15 APC target-debug contract"
+            "causal-study, M15 APC target-debug, or P64 numeric-debug contract"
         )
       if rollout_per_token_logps is None or trainer_per_token_logps is None:
         raise alignment.AlignmentGateError(
