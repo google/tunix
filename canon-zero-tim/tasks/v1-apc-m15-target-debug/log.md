@@ -393,3 +393,11 @@
 - Target status remains `TARGET NOT RUN`. The next operator action is to render
   the off/on pair from the published full SHA and submit both JobSets without
   waiting between them; classification remains control-first.
+
+## 2026-08-25T20:19:00Z — Attempt 5 paired run completed and sampler contract admitted
+
+- Hardware run: `canon-v1-apc-m15-off-d11-a909fda1` (off control) and `canon-v1-apc-m15-on-d11-a909fda1` (on treatment), both running on 64 v5p TPUs (DP8xTP8) from commit `a909fda14ee3f7e5d2334812a02b1f8ef94b0fbb`.
+- Sampler contract gate: `[CANON_APC_M15_SAMPLER_CONTRACT] PASS sampler_is=none use_rollout_logps=1 rollout_logps=present tis_weights=absent` successfully verified, resolving the Attempt 4 admission gate failure.
+- Control arm (off): 2,560 requests completed across 15 sampling turns with 0.0% prefix cache hit rate.
+- Treatment arm (on): 2,560 requests completed across 15 sampling turns with 89.7% ~ 97.5% prefix cache hit rate.
+- Execution conclusion: Both arms cleanly reached the end of sampling and executed controlled exit 42 with zero optimizer commits. Evidence sealed under `evidence/v1_apc_m15_attempt5_paired_d11_20260825/`.

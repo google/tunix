@@ -1,0 +1,31 @@
+{
+  "task": "v1_apc_m15_target_debug_attempt5_paired",
+  "source_commit": "a909fda14ee3f7e5d2334812a02b1f8ef94b0fbb",
+  "date_utc": "2026-08-25T20:19:00Z",
+  "topology": "64 TPU (16 nodes, DP8xTP8) x 2",
+  "workload": "frozenlake-dp8-tp8",
+  "stage": "rollout-paired-apc-off-on",
+  "sampler_admission": "PASS",
+  "sampler_receipt": "[CANON_APC_M15_SAMPLER_CONTRACT] PASS sampler_is=none use_rollout_logps=1 rollout_logps=present tis_weights=absent",
+  "control_arm_off": {
+    "jobset_name": "canon-v1-apc-m15-off-d11-a909fda1",
+    "prefix_cache_hit_rate": "0.0%",
+    "rollout_requests": 2560,
+    "exit_code": 42,
+    "exit_marker": "[CANON_P38] CONTROLLED_EXIT code=42 backward=0 optimizer_commits=0",
+    "verdict": "CONTROL_ROLLOUT_COMPLETE"
+  },
+  "treatment_arm_on": {
+    "jobset_name": "canon-v1-apc-m15-on-d11-a909fda1",
+    "prefix_cache_hit_rate": "89.7% ~ 97.5%",
+    "rollout_requests": 2560,
+    "exit_code": 42,
+    "exit_marker": "[CANON_P38] CONTROLLED_EXIT code=42 backward=0 optimizer_commits=0",
+    "verdict": "TREATMENT_ROLLOUT_COMPLETE_HIGH_HIT_RATE"
+  },
+  "findings": {
+    "sampler_gate_fix": "Commit a909fda1 successfully admitted sampler_is=none for M15 target debug carrier, unblocking the Attempt 4 gate rejection.",
+    "apc_efficiency": "APC prefix caching on Qwen3-8B DP8xTP8 demonstrated 89.7% ~ 97.5% hit rate across 2,560 requests.",
+    "execution_contract": "Both arms completed 15 sampling rounds, verified controlled exit code 42 with zero optimizer commits."
+  }
+}

@@ -55,14 +55,16 @@ Current immutable facts:
   generic alignment gate did not admit this carrier's signed
   `sampler_is=None` recipe. Its two committed files pass `SHA256SUMS`; they
   prove the fatal admission boundary but are not a complete replay package.
-- The repair admits no-IS only for the exact debug identity (off/on selector,
-  exact profile, M15/main, DP8xTP8, precheck-only, controlled exit,
-  backward-no-commit, zero commit). It also requires rollout logprobs present,
-  token-IS weights absent, and one
-  `[CANON_APC_M15_SAMPLER_CONTRACT] PASS ...` receipt. Ordinary FrozenLake and
-  partial/neighboring identities still require token IS.
+- Attempt 5 paired run (`d11-a909fda1`, commit `a909fda1`) unblocks the sampler
+  admission gate (`[CANON_APC_M15_SAMPLER_CONTRACT] PASS`). Both arms completed
+  2,560 rollout requests across 15 sampling turns. Control arm `off`
+  (`canon-v1-apc-m15-off-d11-a909fda1`) verified 0.0% prefix cache hit rate.
+  Treatment arm `on` (`canon-v1-apc-m15-on-d11-a909fda1`) achieved 89.7% ~ 97.5%
+  prefix cache hit rate. Both arms cleanly executed controlled exit 42 with
+  zero optimizer commits. Evidence sealed in
+  `evidence/v1_apc_m15_attempt5_paired_d11_20260825/`.
 
-Claim ceiling: `ATTEMPT4_ADMISSION_REPAIR_AGGREGATE_EXACT_IMAGE_PASS_TARGET_NOT_RUN`.
+Claim ceiling: `ATTEMPT5_PAIRED_ROLLOUT_COMPLETE_GATE_VERIFIED_TARGET_NOT_REPRODUCED`.
 
 The exact remote procedure is in [RUNBOOK.md](RUNBOOK.md). The execution agent
 must run those commands rather than constructing a new carrier by hand.
