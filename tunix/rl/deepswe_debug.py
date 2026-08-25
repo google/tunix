@@ -510,6 +510,14 @@ def _manifest(
       "max_turns": max_turns,
       "max_response_length": max_response_length,
       "dataset_seed": 42,
+      "rollout_seed": (
+          42 if mode == "p58" or bool(xprof_arm) else None
+      ),
+      "seed_scope": (
+          "config-level; async completion order not claimed"
+          if mode == "p58" or bool(xprof_arm)
+          else "dataset-only"
+      ),
       "dataset_name": values.get("CANON_P34_DATASET_NAME", ""),
       "dataset_revision": values.get("CANON_P34_DATASET_REVISION", ""),
       "dataset_split": values.get("CANON_P34_DATASET_SPLIT", ""),

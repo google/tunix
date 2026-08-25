@@ -1,5 +1,31 @@
 # Log
 
+## 2026-08-24 UTC — P58 dataset and rollout seed fixed explicitly
+
+- Type: reproducibility contract / implementation / validation / handoff.
+- Source isolation: created clean worktree `p58_fixed_seed_0824` at exact
+  operator tip `687b2bd6d0815b5628af39e7adbf949e429e72ae`; preserved the already-dirty
+  prior P58 worktree without modification.
+- Change: the P58 renderer now emits and validates exactly one `--seed=42` for
+  Native raw, Native+IS, and Zero-HP. P58 CLI validation requires 42; the
+  training entry point passes it into `RolloutConfig.seed` as well as the
+  existing dataset shuffle. Missing, duplicate, or drifted seeds fail closed.
+- Evidence: startup prints `[P58.SEED] PASS`; W&B and durable manifests record
+  dataset/rollout seed plus the bounded scope; P58 target and one-host
+  classifiers require the provenance.
+- Validation: Python compilation, diff hygiene, and focused tests 33/33 PASS.
+  Bare-host artifact/classifier imports are `INCONCLUSIVE` because `metrax`
+  is absent. The full dependency-bearing pinned-image gate at
+  `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`
+  exits zero with `P58_EXACT_IMAGE_CPU_PASS ... paired_renderer=1 ...
+  onehost_xprof=1 zero_hp_full=1 ... regressions=1`.
+- Claim ceiling: configuration-level seed reproducibility only; asynchronous
+  vLLM/R2E completion order is not bitwise replay evidence. No target TPU run
+  or optimizer commit occurred.
+- External effects: local code/tests/docs and local pinned-image validation
+  only. No commit, push, image publication, Kubernetes mutation, live-job
+  stop, credential access, or TPU execution occurred.
+
 ## 2026-08-23 UTC — pre-push flag-audit false positive repaired
 
 - Type: release gate / audit correctness.

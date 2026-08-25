@@ -77,6 +77,7 @@ class P58RendererTest(unittest.TestCase):
           self.assertEqual(env["CANON_P58_EXPECTED_UPDATES"], str(steps))
           self.assertIn(f"--max_steps={steps}", env["CANON_RUN_CMD"])
           self.assertIn("--num_generations=16", env["CANON_RUN_CMD"])
+          self.assertIn("--seed=42", env["CANON_RUN_CMD"])
           self.assertIn("--max_concurrency=128", env["CANON_RUN_CMD"])
           self.assertNotIn("--max_concurrency=64", env["CANON_RUN_CMD"])
           self.assertIn("--loss_scale_factor=16384", env["CANON_RUN_CMD"])
@@ -116,6 +117,34 @@ class P58RendererTest(unittest.TestCase):
         int_arg("rollout_batch_timeout_secs"),
         int_arg("episode_timeout_secs") + int_arg("cleanup_timeout_secs"),
     )
+
+  def test_fixed_seed_is_unique_and_fail_closed(self):
+    document = self._render("native", "full")
+    env = renderer.p34._env(document)
+    args = shlex.split(env["CANON_RUN_CMD"])
+    self.assertEqual(
+        [item for item in args if item.startswith("--seed=")],
+        ["--seed=42"],
+    )
+    renderer.p34._set_env(
+        renderer.p34._container(
+            renderer.p34._head(document)["containers"], "jax-tpu"
+        ),
+        {
+            "CANON_RUN_CMD": env["CANON_RUN_CMD"].replace(
+                "--seed=42", "--seed=7"
+            )
+        },
+    )
+    with self.assertRaisesRegex(ValueError, "exactly one fixed seed"):
+      renderer.validate(
+          document,
+          source_commit="1" * 40,
+          client_image="registry.example/tunix@sha256:" + "2" * 64,
+          stage="full",
+          arm="native",
+          worker_nodepool="tpu-pool",
+      )
 
   def test_pair_diff_is_registered_treatment_only(self):
     native = self._render("native")

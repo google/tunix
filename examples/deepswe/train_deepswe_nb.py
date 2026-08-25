@@ -725,6 +725,7 @@ if P34_DEEPSWE:
       "max_steps": MAX_STEPS
       == deepswe_contract.requested_max_steps(os.environ),
       "temperature": TEMPERATURE == p34.temperature,
+      "seed": SEED == 42 if p58_tim else True,
       "per_turn_timeout_secs": (
           PER_TURN_TIMEOUT_SECS == p34.per_turn_timeout_secs
       ),
@@ -1483,8 +1484,13 @@ base_rollout_dict = {
     "return_logprobs": USE_ROLLOUT_LOGPS,
     "max_tokens_to_generate": MAX_RESPONSE_LENGTH,
 }
-if P58_ONEHOST_XPROF_ARM:
+if P58_ONEHOST_XPROF_ARM or (P34_DEEPSWE and p58_tim):
   base_rollout_dict["seed"] = SEED
+  print(
+      f"[P58.SEED] PASS dataset_seed={SEED} rollout_seed={SEED} "
+      "scope=config-level async_completion_order=not-claimed",
+      flush=True,
+  )
 
 sglang_jax_rollout_dict = {
     "rollout_sglang_jax_model_version": MODEL_PATH,  # Uses local absolute path
@@ -1717,6 +1723,12 @@ def initialize_wandb():
       "kv_cache_size": KV_CACHE_SIZE,
       "vllm_max_num_seqs": VLLM_MAX_NUM_SEQS,
       "vllm_max_batched_tokens": VLLM_MAX_BATCHED_TOKENS,
+      "rollout_seed": base_rollout_dict.get("seed"),
+      "seed_scope": (
+          "config-level; async completion order not claimed"
+          if "seed" in base_rollout_dict
+          else "dataset-only"
+      ),
       # Stringify set so wandb can serialize it
       "filter_statuses": (
           [s.name for s in FILTER_STATUSES] if FILTER_STATUSES else None

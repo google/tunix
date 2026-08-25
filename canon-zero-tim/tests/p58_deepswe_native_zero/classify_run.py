@@ -155,6 +155,10 @@ def _artifact_checks(
       and manifest.get("global_trajectories") == 128
       and manifest.get("max_response_length") == 16384
       and manifest.get("max_turns") == 50
+      and manifest.get("dataset_seed") == 42
+      and manifest.get("rollout_seed") == 42
+      and manifest.get("seed_scope")
+      == "config-level; async completion order not claimed"
       and str(manifest.get("clean_rows")) == "1012"
       and manifest.get("whitelist_sha256") == _WHITELIST_SHA256
       and bool(_SHA.fullmatch(str(manifest.get("source_commit", ""))))

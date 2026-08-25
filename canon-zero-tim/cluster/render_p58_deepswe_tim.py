@@ -32,6 +32,7 @@ ROLE_TP = 8
 GLOBAL_PROMPTS = 8
 GENERATIONS = 16
 MAX_CONCURRENCY = GLOBAL_PROMPTS * GENERATIONS
+FIXED_SEED = 42
 _STAGE_STEPS = {"three-update": 3, "full": 1000}
 _ARMS = ("native", "zero")
 _KUEUE_MANAGED_WORKER_POOLS = frozenset({
@@ -110,6 +111,7 @@ def _command(
       raise ValueError(f"P34 command no longer contains exactly one {old!r}")
     args[args.index(old)] = new
   args.extend((
+      f"--seed={FIXED_SEED}",
       f"--expected_filtered_rows={CLEAN_ROWS}",
       "--loss_scale_factor=16384",
       "--loss_denominator_weighted_accumulation",
@@ -508,6 +510,7 @@ def validate(
       "--temperature=1.0",
       "--top_p=1.0",
       "--top_k=0",
+      f"--seed={FIXED_SEED}",
       "--rollout_mesh_dp=8",
       "--rollout_mesh_tp=8",
       "--train_mesh_dp=8",
@@ -524,6 +527,12 @@ def validate(
       f"--max_steps={_STAGE_STEPS[stage]}",
       "--no-optimizer-offload",
   )
+  seed_args = tuple(item for item in args if item.startswith("--seed="))
+  if seed_args != (f"--seed={FIXED_SEED}",):
+    raise ValueError(
+        "P58 command requires exactly one fixed seed: "
+        f"expected=--seed={FIXED_SEED} actual={seed_args}"
+    )
   missing = [item for item in required if item not in args]
   if missing:
     raise ValueError(f"P58 command lost signed fields: {missing}")

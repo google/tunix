@@ -1,5 +1,39 @@
 # P58 DeepSWE native-first training handoff
 
+## 2026-08-24 P58.10 fixed-seed override — local, do not launch yet
+
+This is the newest source checkpoint. It adds one shared fixed-seed contract
+to all three P58 recipes without changing the selected Native+IS treatment:
+
+```text
+CLI:               exactly one --seed=42
+dataset shuffle:   seed 42
+rollout sampler:   RolloutConfig.seed=42
+W&B/manifest:      dataset_seed=42, rollout_seed=42,
+                   seed_scope=config-level
+runtime marker:    [P58.SEED] PASS dataset_seed=42 rollout_seed=42
+```
+
+Missing, duplicate, or non-42 CLI values fail closed. Native raw, Native+IS,
+and Zero-HP use the same value, so seed is not a treatment difference. This
+does not claim bitwise-identical end-to-end trajectories: vLLM scheduling,
+R2E sandbox completion, and `asyncio.as_completed` ordering remain
+asynchronous. The seed fixes the configured sampling stream and data shuffle,
+not external completion order.
+
+The implementation is currently an uncommitted/unpushed delta in
+`/home/yuxuan/code_rl_repro/worktrees/p58_fixed_seed_0824`, branch
+`local/p58-fixed-seed-0824`, based on exact operator tip
+`687b2bd6d0815b5628af39e7adbf949e429e72ae`. It passes 33/33 focused tests and
+the complete pinned-image P58 gate. Do not launch from this worktree or assume
+the mutable operator branch contains the change. Commit/push requires a new
+explicit user approval; after publication, fetch and pin the exact read-back
+40-character SHA. The Native-raw archival/stop decision below is unchanged,
+but its fresh Native+IS replacement is source-blocked on P58.10 publication.
+
+See `phases/p58-10-fixed-seed.md` and
+`cluster/P58_DEEPSWE_TIM_RUNBOOK.md`.
+
 ## 2026-08-24 execution decision — stop Native raw, launch fresh Native+IS
 
 This is the highest-priority execution instruction and supersedes every
@@ -73,6 +107,7 @@ correction:           token TIS weights present
 group filter:         absent
 optimizer:            TPU resident; no host offload
 restart policy:       exact Attempt-0
+seed:                 42 for dataset shuffle and rollout sampler
 horizon:              1,000 committed updates
 ```
 
@@ -85,6 +120,7 @@ exactly one marker:
 
 ```text
 [P58.TIM_RECIPE] PASS recipe=native-is sampler_is=token old_logps=trainer tis_weights=present threshold=2.0 group_filter=none
+[P58.SEED] PASS dataset_seed=42 rollout_seed=42 scope=config-level async_completion_order=not-claimed
 ```
 
 A `native-raw` marker, a `1:1` or partial sampler tuple, missing trainer logps,

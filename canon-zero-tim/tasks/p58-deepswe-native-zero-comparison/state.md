@@ -1,5 +1,38 @@
 # State
 
+## Current P58.10 fixed-seed checkpoint (2026-08-24)
+
+- Status: local implementation and pinned-image construction PASS;
+  unpublished. Worktree
+  `/home/yuxuan/code_rl_repro/worktrees/p58_fixed_seed_0824`, branch
+  `local/p58-fixed-seed-0824`, is based exactly on operator tip
+  `687b2bd6d0815b5628af39e7adbf949e429e72ae`. The older P58 worktree was
+  already dirty with unrelated P59/V1 work and was not modified.
+- Contract: every P58 Native-raw, Native+IS, and Zero-HP render contains
+  exactly one `--seed=42`. Any missing, duplicate, or different seed is
+  rejected. The training entry point requires 42 for P58, uses it for both
+  dataset shuffle and `RolloutConfig.seed`, and emits `[P58.SEED] PASS`.
+- Provenance: W&B records `seed`, `rollout_seed`, and `seed_scope`; the durable
+  run manifest records `dataset_seed=42`, `rollout_seed=42`, and the same
+  scope. P58 classifiers require those fields.
+- Claim boundary: this is configuration-level reproducibility. vLLM/R2E
+  generation and sandbox collection remain asynchronous, so bitwise-equal
+  trajectory order or identical end-to-end artifacts across independent jobs
+  is not claimed.
+- Validation: Python compilation and `git diff --check` pass; focused
+  renderer/sampler/one-host tests pass 33/33. Bare-host artifact/classifier
+  imports are unavailable because `metrax` is absent. The complete pinned
+  image `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`
+  exits zero with `P58_EXACT_IMAGE_CPU_PASS ... paired_renderer=1 ...
+  onehost_xprof=1 zero_hp_full=1 ... regressions=1`.
+- Next action: review, then obtain separate commit/push approval. After exact
+  remote readback, render the fresh Native+IS full JobSet and verify both its
+  unique `--seed=42` argument and first `[P58.SEED] PASS dataset_seed=42
+  rollout_seed=42 ...` marker. Do not launch the unpublished local delta.
+- No commit, push, image publication, Kubernetes mutation, or TPU execution
+  occurred in P58.10.
+- Phase: `phases/p58-10-fixed-seed.md`.
+
 ## Current P58.9 publication checkpoint (2026-08-24)
 
 - Status: Native-IS target selected and source publication complete.

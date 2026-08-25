@@ -18,9 +18,33 @@ P58 does not modify `main`. Rendering and local validation do not authorize a
 Kubernetes apply. An operator must separately approve image publication and
 each launch.
 
+## 2026-08-24 P58.10 fixed-seed override
+
+P58 now signs one fixed seed across Native raw, Native+IS, and Zero-HP:
+
+```text
+--seed=42
+dataset shuffle seed = 42
+rollout sampler seed = 42
+```
+
+The renderer requires exactly one `--seed=42`; missing, duplicate, or drifted
+values are invalid. The first startup must emit exactly one
+`[P58.SEED] PASS dataset_seed=42 rollout_seed=42 scope=config-level
+async_completion_order=not-claimed` marker. W&B and `run_manifest.json` must
+also report dataset and rollout seed 42. The scope text matters: R2E sandbox
+completion and async collection order remain nondeterministic, so this is not
+a bitwise end-to-end replay guarantee.
+
+This P58.10 delta is locally validated but not committed or published. Its
+worktree is `/home/yuxuan/code_rl_repro/worktrees/p58_fixed_seed_0824` on base
+`687b2bd6d0815b5628af39e7adbf949e429e72ae`. Do not render or launch a target
+until the user separately authorizes commit/push and the executor fetches the
+exact remote read-back SHA containing P58.10.
+
 ## 2026-08-24 local P58.9 execution override
 
-The current unpublished refinement lives at
+The published P58.9 refinement was built at
 `/home/yuxuan/code_rl_repro/worktrees/p58_is_zero_refine_0824` on local branch
 `local/p58-is-zero-refine-0824`, originally based on operator tip
 `614156c1ab067192ab65b2969543e23904f192be`. The implementation was replayed
@@ -87,8 +111,9 @@ bash canon-zero-tim/tests/p58_deepswe_native_zero/run_exact_image.sh \
 ```
 
 This gate is construction evidence only. Native-IS and Zero-HP target jobs are
-separate experiments. Native-IS is now the selected replacement experiment,
-but it remains publication-blocked; Zero-HP is still deferred.
+separate experiments. Native-IS is now the selected replacement experiment.
+P58.9 is published, but the newer P58.10 fixed-seed delta above remains
+publication-blocked; Zero-HP is still deferred.
 
 Current execution decision: stop and archive the exact running Native/no-IS
 campaign after the operator observed a sharp training-reward drop and judged
