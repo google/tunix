@@ -1,6 +1,6 @@
 # V1 Phase4 three-full handoff
 
-## 2026-08-25 current status — P63 admitted; publication and launch approvals pending
+## 2026-08-25 current status — P63 published; launch approval pending
 
 G5b resolved the Attempt-7 ambiguity on the real GSM8K DP16xTP4 target: all
 16 backward groups and the full accumulator are element-finite, denominator
@@ -11,9 +11,11 @@ max-scaled L2 only when an independent all-finite predicate proves finite
 overflow, and never admits a tree containing NaN/Inf. Max norms remain GSM8K
 1 and FrozenLake 100.
 
-The final dirty release candidate is
+The final tested runtime was published as
+`98be7b291ddb92391f71d360dd59b09f83edc118` and exactly read back from the
+operator branch. Its clean isolated worktree is
 `/home/yuxuan/code_rl_repro/worktrees/v1_stable_clip_0825`, branch
-`local/v1-stable-clip-0825`, on base and current remote tip
+`local/v1-stable-clip-0825`; the published commit's parent is admitted base
 `22da654ab846b6d3b8a5c0e78e9ded6e04178fd1`. Host gates pass V1 45/45,
 P57 144/144, P59 37/37, APC 31/31, flags 372/372, syntax, and diff hygiene.
 The complete pinned image
@@ -25,11 +27,10 @@ receipt, checksums, and tested runtime hashes are under
 `evidence/v1_hp_p63_exact_image_20260825_r2/`. The sandbox-blocked r1 never
 entered Docker and is preserved as infrastructure-inconclusive.
 
-Release verdict: `GO FOR COMMIT REVIEW`, not yet `GO FOR LAUNCH`. No commit or
-push exists for this P63 tree, and no manifest has been rendered. Obtain the
-user's explicit commit/push approval, read back the exact remote 40-character
-SHA, render three fresh manifests, verify their hashes, check TPU/storage
-availability, then obtain separate explicit launch approval. Apply GSM8K
+Release verdict: `PUBLISHED / GO FOR MANIFEST RENDER`, not yet `GO FOR
+LAUNCH`. No manifest has been rendered. Render three fresh manifests only from
+the exact published SHA, verify their hashes, check TPU/storage availability,
+then obtain separate explicit launch approval. Apply GSM8K
 DP16xTP4 (200), FrozenLake P45 DP8xTP8 (300), and FrozenLake M15 DP8xTP8
 (300) in one wave; do not gate one healthy launch on another recipe's first
 commit.
@@ -40,8 +41,8 @@ registered P59 target-shape receipts, and one valid P63 receipt. GSM8K must
 actually observe the finite-overflow fallback; every receipt must show an
 all-finite tree, finite selected norm and clip factor, and the exact max norm.
 The complete horizon, XProf, Perfetto, JAX-cache, evaluation, checkpoint, and
-postflight requirements are unchanged. Current claim ceiling is `HOST PASS /
-EXACT_IMAGE PASS / TARGET OPTIMIZER COMMIT NOT RUN`.
+postflight requirements are unchanged. Current claim ceiling is `PUBLISHED /
+HOST PASS / EXACT_IMAGE PASS / TARGET OPTIMIZER COMMIT NOT RUN`.
 
 ## 2026-08-25 superseding status — G5b full-log carrier ready for commit review
 

@@ -1,6 +1,6 @@
 # V1 high-performance three-full runbook
 
-## Current boundary — P63 admitted; publish before rendering
+## Current boundary — P63 published; render before launch approval
 
 The P62 first-red campaign is complete. Real DP16xTP4 G5b proved that the
 backward tree is finite and the old `norm=inf` is naive FP32 sum-of-squares
@@ -10,10 +10,11 @@ pinned-image ladders on the final dirty runtime tree. Its evidence is under
 `V1_HP_EXACT_IMAGE_PASS ... p63_clip=1 ... manifests=3` and verify its
 `SHA256SUMS` before publication review.
 
-Do not render or launch from the dirty tree. First obtain explicit commit/push
-approval, push the reviewed concern, and read back the exact remote
-40-character SHA. Then render three fresh full manifests from that SHA and
-obtain separate explicit launch approval. The launch remains one concurrent
+The reviewed P63 concern is published at exact operator SHA
+`98be7b291ddb92391f71d360dd59b09f83edc118`. Do not render or launch from a
+dirty tree or substitute a local SHA. Render three fresh full manifests from
+that exact SHA, audit their hashes, and obtain separate explicit launch
+approval. The launch remains one concurrent
 wave with no short canary: GSM8K DP16xTP4 for 200 updates, P45 DP8xTP8 for 300,
 and M15 DP8xTP8 for 300.
 

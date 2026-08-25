@@ -489,3 +489,18 @@
 - Phase verdict: `HOST PASS / EXACT_IMAGE PASS / TARGET OPTIMIZER COMMIT NOT
   RUN`. V1.P4.6 is complete and V1.P4.7 publication/three-full execution is
   active. No commit, push, manifest render, JobSet, or TPU launch occurred.
+
+## 2026-08-25T05:31:55Z — P63 publication completed
+
+- Fetched the operator branch immediately before publication and verified its
+  exact tip remained the admitted parent
+  `22da654ab846b6d3b8a5c0e78e9ded6e04178fd1`.
+- Created scoped runtime/evidence commit
+  `98be7b291ddb92391f71d360dd59b09f83edc118` with the target-verification
+  limitation in its commit body. The worktree was clean, committed runtime
+  hashes matched the pinned-image manifest, and `git show --check` passed.
+- Fast-forward pushed that single commit and independently read back the exact
+  same 40-character SHA from the operator branch. No force push occurred.
+- Publication does not authorize resource use. No manifest was rendered and
+  no JobSet or TPU workload was launched. The next boundary is three-manifest
+  rendering from the published SHA followed by separate launch approval.
