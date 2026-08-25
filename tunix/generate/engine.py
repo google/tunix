@@ -1,11 +1,14 @@
 import jax
 from typing import List, Any
 from flax import nnx
+
+import numpy as np
 from tunix.generate import scheduler
 from tunix.generate import cache_manager as cache_manager_lib
 from tunix.generate import sampler_v2 as sampler_lib
 from tunix.generate import cache_manager as batch_cache_manager_lib
 from tunix.tests import test_common as tc
+
 
 class LLMEngine:
     """Core Continuous Batching Engine orchestration layer."""
@@ -49,8 +52,6 @@ class LLMEngine:
         
         self.scheduler = scheduler.Scheduler(
             cache_manager=self.cache_manager,
-            page_size=cache_config.page_size,
-            max_num_seqs=cache_config.max_num_seqs,
             max_num_batch_tokens=getattr(cache_config, "max_num_batch_tokens", 1024),
         )
         
@@ -84,7 +85,6 @@ class LLMEngine:
         if not running_requests:
             return
             
-        import numpy as np
         
         # Categorize running requests by execution mode to form [i, j, k] distribution
         # i: purely decoding (1 token)
@@ -148,6 +148,7 @@ class LLMEngine:
         gen_tokens, logits, logp, next_cache = self.sampler.sample_step(
             cache=self.cache_manager.page_manager,
             seq_lens=seq_lens,
+            kv_lens=self.cache_manager.kv_lens,
             tokens=tokens,
             active_seq_lens=active_seq_lens,
             distribution=distribution,

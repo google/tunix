@@ -168,6 +168,7 @@ class VanillaSampler:
         self,
         cache: Any,
         seq_lens: np.ndarray,
+        kv_lens: np.ndarray,
         tokens: np.ndarray,
         active_seq_lens: np.ndarray,
         distribution: np.ndarray,
@@ -237,7 +238,7 @@ class VanillaSampler:
         global_positions = positions + (seq_lens[seq_idxs] - active_seq_lens[seq_idxs])
         tokens = tokens_ragged
         
-        logits, cache = transformer(
+        logits = transformer(
             tokens,
             global_positions, 
             cache=cache,
