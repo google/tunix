@@ -1,0 +1,41 @@
+{
+  "schema": "v1-hp-attempt7-norm-dp-diagnostic-v1",
+  "date_utc": "2026-08-25",
+  "source_head": "ff913a84ec9aa66bfd152415688bc431ca1d1a1b",
+  "source_state": "dirty repair tree; no commit or push",
+  "image_id": "sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a",
+  "incoming_logs": {
+    "gsm8k": {
+      "path": "canon-zero-tim/debug_logs/v1hp_att7_gsm8k_g64s_p28_g6_norm_inf_error.raw.log",
+      "sha256": "68aa10263bed8343623ef48d933d4bb1fbca367cc3df01745a03cd108316425a",
+      "classification": "strict alignment PASS; 16/16 P59 groups; old norm observer ambiguous; zero optimizer commits"
+    },
+    "frozenlake_p45": {
+      "path": "canon-zero-tim/debug_logs/v1hp_att7_fl_f45s_dp_reduction_unequal_replicas.raw.log",
+      "sha256": "41d2dd0cb4810cbe3e0f434c18558575f48033d6eb428d951b222772598584e8",
+      "classification": "strict alignment PASS; real DP8xTP8 backward entered; old array_equal flags ambiguous between common non-finite and unequal finite replicas; zero optimizer commits"
+    }
+  },
+  "host_gates": {
+    "v1_phase4": "30/30 PASS",
+    "p57_frozenlake": "144/144 PASS",
+    "p59_backward": "34/34 PASS",
+    "p3_prefix_cache": "31/31 PASS",
+    "flag_audit": "368/368 PASS"
+  },
+  "dp8_tp8_diagnostic_gate": {
+    "tests": "3/3 PASS",
+    "finite_fixed_reduction": true,
+    "common_nan_rejected_as_nonfinite": true,
+    "finite_replica_mismatch_rejected": true
+  },
+  "complete_exact_image_gate": {
+    "command": "bash canon-zero-tim/tests/v1_phase4/run_exact_image.sh sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a",
+    "exit_code": 0,
+    "terminal_count": 1,
+    "terminal": "V1_HP_EXACT_IMAGE_PASS dp16_gathered=1 dp2tp2_parallel=2 p59_tp4_tp8=2 p59_real_shim=4 p59_rpa=2 p59_fused_linear=2 p57_wandb=1 m15_token=1 perfetto_window=1 manifests=3",
+    "raw_log": "run.log",
+    "raw_log_sha256": "f09a14b1e472d76f6a620166de38e9ecb5e8814cdb0836eae3149784ccbaaea8"
+  },
+  "claim_ceiling": "HOST PASS / FORCED-CPU DP8xTP8 PASS / EXACT-IMAGE PASS / POST-FIX TPU TARGET NOT RUN; P45 numerical fork unresolved"
+}

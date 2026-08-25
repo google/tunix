@@ -1,5 +1,133 @@
 # V1 Phase4 three-full handoff
 
+## 2026-08-25 superseding status — P62 first-red carrier admitted through one host
+
+This is the current boundary. Attempt 7 is strict Zero-TIM through the full
+forward and all 16 GSM8K reverse groups, but `norm=inf` is not explained by
+the saved log. The earlier max-scaled production clipping proposal is
+withdrawn: GSM8K, FrozenLake, and DeepSWE again use historical stock
+`optax.clip_by_global_norm`. `stable_global_norm` remains an observer only.
+
+The default-off `CANON_P62_BACKWARD_NUMERIC_DEBUG=1` carrier is admitted only
+for strict GSM8K DP16xTP4, global trajectories 256, global/local M 4096/256,
+16 reverse groups, fixed head and P59 enabled, `backward-no-commit`, and
+`CANON_P58_NO_OPTIMIZER_COMMIT=1`. It prints the first-red boundaries from
+loss scale through final accumulator, then discards the accumulator. Any
+non-finite boundary is fatal and every valid run requires
+`optimizer_commits=0`.
+
+Verified by host/forced-CPU and pinned image:
+
+- V1 host 34/34, P59 host 37/37, and flag audit 369/369;
+- complete exact-image raw SHA
+  `604c95e5953f97fa8465e03f38b15589bd38fbf618b04c5652be0328b446689e`,
+  unique terminal `V1_HP_EXACT_IMAGE_PASS ... p62_numeric=6 ... manifests=3`;
+- focused G2 installed-shim raw SHA
+  `8fb3720e3ac39cf80535833e1786585950ab13bd7015b4c9c9aa66da0dc60b92`:
+  TP4/TP8 fixed-head, report adjoint, fixed reducer, installed projection and
+  installed attention all green, with 10 P62 receipts and two caught NaN
+  first-red negatives. Failed carrier r1 is preserved beside it;
+- real one-host v5p DP2xTP2 run
+  `a7_numeric_dp2tp2_20260825_r2`, 54 seconds, real RPA and staged-spec
+  carriers green, FP64 oracle relative-L2 `3.77417983e-08`, cosine `1`, both
+  wrong-scaling negatives separated, zero optimizer commits;
+- durable evidence under
+  `evidence/v1_hp_attempt7_p62_numeric_exact_image_20260825_r1/` and
+  `evidence/v1_hp_attempt7_p62_onehost_v5p_20260825_r2/`; focused G2 is under
+  `evidence/v1_hp_attempt7_p62_g2_exact_image_20260825_r1/` and `..._r2/`.
+
+Claim ceiling: the one-host carrier proves the DP2xTP2 reduction/accumulation
+algebra and real installed RPA mechanism. It does not execute the full Qwen
+DP16xTP4 target and therefore does not explain the historical `norm=inf`.
+Full recipes and all optimizer commits remain blocked. The next hardware step
+is one fresh user-run P62 GSM8K DP16xTP4 diagnostic, not a production full
+recipe. Classify its earliest red using
+`phases/v1-p4-5-attempt7-numeric-localization.md`; only then design a bounded
+one-commit fix. Publication of this diagnostic stack was explicitly approved
+on 2026-08-25, but it does not authorize a JobSet or optimizer transaction.
+
+## Historical superseded status — Attempt 7 stable-clipping proposal
+
+This section supersedes older publication/launch-ready wording below. The
+active worktree is now rebased on pulled operator tip
+`ff913a84ec9aa66bfd152415688bc431ca1d1a1b`; its relevant immutable logs are:
+
+- GSM8K Attempt 7:
+  `canon-zero-tim/debug_logs/v1hp_att7_gsm8k_g64s_p28_g6_norm_inf_error.raw.log`,
+  SHA-256
+  `68aa10263bed8343623ef48d933d4bb1fbca367cc3df01745a03cd108316425a`;
+- one-host native XProf:
+  `canon-zero-tim/debug_logs/v1_gsm8k_onehost_native_20260824_v2_exit137.raw.log`,
+  SHA-256
+  `3312c56e74ef1cc7d10072791993ee47fc72ec6d7931b1d73ec8641b17496128`.
+- FrozenLake P45 Attempt 7:
+  `canon-zero-tim/debug_logs/v1hp_att7_fl_f45s_dp_reduction_unequal_replicas.raw.log`,
+  SHA-256
+  `41d2dd0cb4810cbe3e0f434c18558575f48033d6eb428d951b222772598584e8`.
+
+Attempt 7 is not a Zero-TIM red. Step 0 has 191,439 action tokens,
+`S_decode==S_prefill==T_old` byte-for-byte, and zero alignment FAIL. All 16
+P59 reverse groups finish and report replica equality before the old P28 G6
+activity guard stops with `active=True norm=inf`; no optimizer commit occurs.
+The guard used Optax's naive FP32 sum of squares. It also failed before the
+commit path's independent per-leaf finite evidence and did not serialize the
+adapter's per-group finite bit, so the saved log cannot distinguish these two
+cases:
+
+1. every element is finite but squaring a value above about `1.84e19` (or the
+   aggregate sum) overflows FP32;
+2. at least one gradient element is genuinely NaN/Inf.
+
+The uncommitted repair intentionally handles both without weakening a gate:
+
+- P28 precomputed microgradient and commit diagnostics use max-scaled L2;
+- P28 production optimizers use the same stable clipping transform, so a
+  finite overflow no longer becomes an all-zero Optax update;
+- the G6 gate separately consumes each adapter report's element-finiteness bit
+  and remains fatal for any genuine NaN/Inf;
+- full postflight now requires exactly one
+  `[P28.G6] STABLE_GLOBAL_NORM ... algorithm=scaled-l2` runtime receipt.
+
+P45 independently passes strict step-0 pre-alignment for 48,082 actions with
+both byte deltas zero, enters the real DP8xTP8 P59 fixed-head/projection
+backward, then stops before its first reverse-group receipt and before any
+optimizer commit at
+`fixed DP gradient reduction produced unequal replicas: flags=[0,...,0]`.
+That old message was ambiguous: `jnp.array_equal` is false for identical NaNs,
+so it could not distinguish genuinely unequal finite replicas from a common
+non-finite gradient. The repair now checks the staged DP table for finiteness
+before reduction, reports the first bad rank/leaf/tree path, checks the reduced
+tree again, and only then runs the unchanged finite-replica equality gate.
+NaN/Inf remains fatal; no `equal_nan=True` admission was introduced.
+
+Validation on the latest dirty repair tree is host V1 30/30, P57 144/144, P59 34/34,
+APC 31/31, flag audit 368/368, and `git diff --check`. Pinned-image focused
+norm tests are 16/16. A forced-CPU DP8xTP8 gate proves finite fixed reduction,
+common-NaN rejection, and finite replica-mismatch rejection 3/3. The complete
+pinned-image gate rerun exits zero with exactly
+one terminal
+`V1_HP_EXACT_IMAGE_PASS ... p59_fused_linear=2 ... manifests=3`. Durable logs,
+receipt, and checksums for the superseding gate are under
+`evidence/v1_hp_attempt7_norm_dp_diagnostic_exact_image_20260825_r3/`;
+complete raw SHA is
+`fa4960bed7f7d94250c59d683aeb89dd7fc7edd81fdbcbe367b30c3a7c5017ee`.
+Claim ceiling is `HOST PASS / FORCED-CPU DP8xTP8 PASS / EXACT-IMAGE PASS /
+POST-FIX TPU TARGET NOT RUN`.
+
+The one-host native exit 137 is separate: the OS killed Python during serial
+rollout generation after 377 seconds, with no traceback or numerical verdict.
+Treat it as `INCONCLUSIVE_RESOURCE_KILL`; do not use it to judge Zero-TIM or
+the norm repair. Its carrier needs memory telemetry before any resource fix.
+
+Next boundary: review the dirty repair. Do not commit or push without a fresh
+explicit user instruction. After publication and exact remote readback, a
+separately approved launch may render and start GSM8K/P45/M15 together. The
+first real optimizer transaction of each recipe is the target discriminator.
+GSM8K must distinguish finite norm overflow from a true non-finite leaf. P45
+must now report either a precise non-finite rank/leaf/path or retain the
+finite-replica mismatch; only a finite, exact reduction may proceed. Preserve
+every Attempt-7 and post-fix artifact.
+
 ## Mission and current boundary
 
 Prepare exactly three strict optimized Zero-TIM full-training recipes from one

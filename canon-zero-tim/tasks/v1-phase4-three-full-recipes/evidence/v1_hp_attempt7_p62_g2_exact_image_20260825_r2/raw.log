@@ -1,0 +1,146 @@
+P59_TP_SHIM_EXACT_IMAGE image_ref=tunix_frozenlake_image:vllm-tpu0.25.0 image_id=sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a
+Running tests under Python 3.12.13: /usr/local/bin/python3
+[ RUN      ] CanonicalQwen3AdapterTest.test_p59_tpx_executes_fixed_head_local_vjp_and_global_negative
+/usr/local/lib/python3.12/site-packages/flax/nnx/tracers.py:29: DeprecationWarning: jax.core.get_opaque_trace_state is deprecated. Use jax.extend.core.get_opaque_trace_state.
+  return jax.core.get_opaque_trace_state(convention="nnx")
+[P59.DP2] head_cotangent_partition_ready global_shape=(16, 16) local_shape=(8,4) placement=dp,tp
+[PATHTRACE] CANON_P38_FIXED_LM_HEAD=1 semantic_M=8 fixed_M=8 K=4 TP=4 local_N=4 fixed_N=8 BM=128 BN=256 BK=256 chunks=1 endpoint=direct_probe p59_local=1 global_M=16 dp=2
+[PATHTRACE] CANON_P38_FIXED_LM_HEAD=1 semantic_M=8 fixed_M=8 K=4 TP=4 local_N=4 fixed_N=8 BM=128 BN=256 BK=256 chunks=1 endpoint=direct_probe p59_local=1 global_M=16 dp=2
+[PATHTRACE] CANON_P38_FIXED_LM_HEAD_VJP=1 semantic_M=16 local_M=8 fixed_M=8 chunks=1 accumulation=lax.scan order=ascending tp_input_reduction=all_gather_rank_order_f32_barrier K=4 TP=4 local_N=4 fixed_N=8 endpoint=direct_probe
+[P62.NUMERIC] {"all_finite":true,"any_nonzero":true,"first_nonfinite":null,"first_nonfinite_rank":null,"group":0,"groups":2,"leaf_count":1,"max_abs":6.125,"naive_norm":49.98999786376953,"naive_norm_finite":true,"nonzero_leaf_count":1,"rank_count":2,"rank_max_abs":[2.125,6.125],"scaled_sumsq":66.61224365234375,"schema":"canon-p62-tree-numeric-v1","stable_norm":49.98999786376953,"stage":"engine_vjp","top_leaves":[{"leaf":0,"max_abs":6.125,"path":"[0]"}],"total_elements":128}
+[P62.NUMERIC] {"all_finite":true,"any_nonzero":true,"first_nonfinite":null,"first_nonfinite_rank":null,"group":0,"groups":2,"leaf_count":2,"max_abs":6.125,"naive_norm":50.00729751586914,"naive_norm_finite":true,"nonzero_leaf_count":2,"rank_count":2,"rank_max_abs":[2.125,6.125],"scaled_sumsq":66.65836334228516,"schema":"canon-p62-tree-numeric-v1","stable_norm":50.007301330566406,"stage":"trainer_rank_local","top_leaves":[{"leaf":0,"max_abs":6.125,"path":"[0]"},{"leaf":1,"max_abs":0.77734375,"path":"[1]"}],"total_elements":136}
+[P62.NUMERIC] {"all_finite":false,"any_nonzero":true,"first_nonfinite":{"leaf":0,"path":"[0]"},"first_nonfinite_rank":{"leaf":0,"path":"[0]","rank":0},"group":0,"groups":2,"leaf_count":2,"max_abs":6.125,"naive_norm":"nan","naive_norm_finite":false,"nonzero_leaf_count":2,"rank_count":2,"rank_max_abs":["nan",6.125],"scaled_sumsq":"nan","schema":"canon-p62-tree-numeric-v1","stable_norm":6.125,"stage":"trainer_rank_local_negative","top_leaves":[{"leaf":0,"max_abs":6.125,"path":"[0]"},{"leaf":1,"max_abs":0.77734375,"path":"[1]"}],"total_elements":136}
+[P62.NUMERIC] {"all_finite":true,"any_nonzero":true,"first_nonfinite":null,"group":0,"groups":2,"leaf_count":2,"max_abs":8.25,"naive_norm":63.06084442138672,"naive_norm_finite":true,"nonzero_leaf_count":2,"scaled_sumsq":58.4267463684082,"schema":"canon-p62-tree-numeric-v1","stable_norm":63.060848236083984,"stage":"fixed_dp_reduced","top_leaves":[{"leaf":0,"max_abs":8.25,"path":"[0]"},{"leaf":1,"max_abs":1.111328125,"path":"[1]"}],"total_elements":68}
+[PATHTRACE] CANON_P38_FIXED_LM_HEAD=1 semantic_M=16 fixed_M=8 K=4 TP=4 local_N=4 fixed_N=8 BM=128 BN=256 BK=256 chunks=2 endpoint=direct_probe
+[       OK ] CanonicalQwen3AdapterTest.test_p59_tpx_executes_fixed_head_local_vjp_and_global_negative
+[ RUN      ] CanonicalQwen3AdapterTest.test_p59_restores_only_physically_equal_tpx_staged_specs
+[       OK ] CanonicalQwen3AdapterTest.test_p59_restores_only_physically_equal_tpx_staged_specs
+----------------------------------------------------------------------
+Ran 2 tests in 2.906s
+
+OK
+Running tests under Python 3.12.13: /usr/local/bin/python3
+[ RUN      ] CanonicalQwen3AdapterTest.test_p59_tpx_executes_fixed_head_local_vjp_and_global_negative
+/usr/local/lib/python3.12/site-packages/flax/nnx/tracers.py:29: DeprecationWarning: jax.core.get_opaque_trace_state is deprecated. Use jax.extend.core.get_opaque_trace_state.
+  return jax.core.get_opaque_trace_state(convention="nnx")
+[P59.DP2] head_cotangent_partition_ready global_shape=(16, 32) local_shape=(8,4) placement=dp,tp
+[PATHTRACE] CANON_P38_FIXED_LM_HEAD=1 semantic_M=8 fixed_M=8 K=4 TP=8 local_N=4 fixed_N=8 BM=128 BN=256 BK=256 chunks=1 endpoint=direct_probe p59_local=1 global_M=16 dp=2
+[PATHTRACE] CANON_P38_FIXED_LM_HEAD=1 semantic_M=8 fixed_M=8 K=4 TP=8 local_N=4 fixed_N=8 BM=128 BN=256 BK=256 chunks=1 endpoint=direct_probe p59_local=1 global_M=16 dp=2
+[PATHTRACE] CANON_P38_FIXED_LM_HEAD_VJP=1 semantic_M=16 local_M=8 fixed_M=8 chunks=1 accumulation=lax.scan order=ascending tp_input_reduction=all_gather_rank_order_f32_barrier K=4 TP=8 local_N=4 fixed_N=8 endpoint=direct_probe
+[P62.NUMERIC] {"all_finite":true,"any_nonzero":true,"first_nonfinite":null,"first_nonfinite_rank":null,"group":0,"groups":2,"leaf_count":1,"max_abs":6.125,"naive_norm":70.696533203125,"naive_norm_finite":true,"nonzero_leaf_count":1,"rank_count":2,"rank_max_abs":[2.125,6.125],"scaled_sumsq":133.2244873046875,"schema":"canon-p62-tree-numeric-v1","stable_norm":70.696533203125,"stage":"engine_vjp","top_leaves":[{"leaf":0,"max_abs":6.125,"path":"[0]"}],"total_elements":256}
+[P62.NUMERIC] {"all_finite":true,"any_nonzero":true,"first_nonfinite":null,"first_nonfinite_rank":null,"group":0,"groups":2,"leaf_count":2,"max_abs":6.125,"naive_norm":70.70877075195312,"naive_norm_finite":true,"nonzero_leaf_count":2,"rank_count":2,"rank_max_abs":[2.125,6.125],"scaled_sumsq":133.27061462402344,"schema":"canon-p62-tree-numeric-v1","stable_norm":70.70877075195312,"stage":"trainer_rank_local","top_leaves":[{"leaf":0,"max_abs":6.125,"path":"[0]"},{"leaf":1,"max_abs":0.77734375,"path":"[1]"}],"total_elements":264}
+[P62.NUMERIC] {"all_finite":false,"any_nonzero":true,"first_nonfinite":{"leaf":0,"path":"[0]"},"first_nonfinite_rank":{"leaf":0,"path":"[0]","rank":0},"group":0,"groups":2,"leaf_count":2,"max_abs":6.125,"naive_norm":"nan","naive_norm_finite":false,"nonzero_leaf_count":2,"rank_count":2,"rank_max_abs":["nan",6.125],"scaled_sumsq":"nan","schema":"canon-p62-tree-numeric-v1","stable_norm":6.125,"stage":"trainer_rank_local_negative","top_leaves":[{"leaf":0,"max_abs":6.125,"path":"[0]"},{"leaf":1,"max_abs":0.77734375,"path":"[1]"}],"total_elements":264}
+[P62.NUMERIC] {"all_finite":true,"any_nonzero":true,"first_nonfinite":null,"group":0,"groups":2,"leaf_count":2,"max_abs":8.25,"naive_norm":89.1665267944336,"naive_norm_finite":true,"nonzero_leaf_count":2,"scaled_sumsq":116.81426239013672,"schema":"canon-p62-tree-numeric-v1","stable_norm":89.16653442382812,"stage":"fixed_dp_reduced","top_leaves":[{"leaf":0,"max_abs":8.25,"path":"[0]"},{"leaf":1,"max_abs":1.111328125,"path":"[1]"}],"total_elements":132}
+[PATHTRACE] CANON_P38_FIXED_LM_HEAD=1 semantic_M=16 fixed_M=8 K=4 TP=8 local_N=4 fixed_N=8 BM=128 BN=256 BK=256 chunks=2 endpoint=direct_probe
+[       OK ] CanonicalQwen3AdapterTest.test_p59_tpx_executes_fixed_head_local_vjp_and_global_negative
+[ RUN      ] CanonicalQwen3AdapterTest.test_p59_restores_only_physically_equal_tpx_staged_specs
+[       OK ] CanonicalQwen3AdapterTest.test_p59_restores_only_physically_equal_tpx_staged_specs
+----------------------------------------------------------------------
+Ran 2 tests in 3.180s
+
+OK
+[1/4] extracting stock tpu_inference (mode=path)
+      path=/usr/local/lib/python3.12/site-packages/tpu_inference
+[2/4] applying patches
+[3/4] laying down the shim chain (model=qwen1p7b)
+[4/4] verifying against MANIFEST.sha256
+      all 36 files match (qwen1p7b)
+
+Installed to: /tmp/p59-qwen1p7b-tp4.aPOmmZ   (model=qwen1p7b)
+
+Container mounts -- target paths are under the engine's tpu_inference package
+($SP, /usr/local/lib/python3.12/site-packages/tpu_inference on the anchored image):
+
+  $OUT/attn_iface_patched.py   -> $SP/layers/common/attention_interface.py
+  $OUT/linear_p22xk.py         -> $SP/layers/jax/linear.py
+  $OUT/embed_patched.py        -> $SP/layers/jax/embed.py
+  $OUT/tpu_runner_p21_l30.py   -> $SP/runner/tpu_runner.py
+  $OUT/qwen3_p22xk.py          -> $SP/models/jax/qwen3.py
+  $OUT/qwen2_p22xk.py          -> $SP/models/jax/qwen2.py
+
+  PYTHONPATH=/tmp/p59-qwen1p7b-tp4.aPOmmZ:$PYTHONPATH
+  CANON_SHIM_ROOT=/tmp/p59-qwen1p7b-tp4.aPOmmZ          # optional; defaults to each shim's own directory
+
+Under Kubernetes there are no bind mounts: copy the six files over the target paths instead
+(cluster/steps/40_overlay_engine.sh does exactly that).
+
+The canonical switch set is in README.md.  A launch missing any of it is not a canonical run,
+and the only proof that the intervention took is the [PATHTRACE] lines -- never the exit code.
+WARNING 08-25 01:50:48 [tpu_platform.py:408] Pin memory is not supported on TPU.
+INFO 08-25 01:50:53 [importing.py:53] Triton is installed but 0 active driver(s) found (expected 1). Disabling Triton to prevent runtime errors.
+WARNING 08-25 01:50:53 [importing.py:73] Triton is installed, but `triton.backends` could not be imported. Disabling Triton.
+INFO 08-25 01:50:53 [importing.py:88] Triton not installed or not compatible; certain GPU-related functions will not be available.
+ERROR 08-25 01:50:54 [tpu_info.py:91] Failed to detect number of TPUs: [Errno 2] No such file or directory: '/dev/vfio'
+INFO 08-25 01:50:54 [__init__.py:76] TPU info: node_name=aaron-v5p-node6 | tpu_type=v5p-8 | worker_id=0 | num_chips=0 | num_cores_per_chip=2
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=q_proj prefix=model.layers.0.self_attn.q_proj M=8 Klocal=4 Nlocal=512
+[PATHTRACE] P59_LOCAL_FUSED_LINEAR_READY tp=4 site=gate_proj local_width=1536 declared_width=6144 layout_shards=1 pieces=1
+[PATHTRACE] P59_LOCAL_FUSED_LINEAR_READY tp=4 site=up_proj local_width=1536 declared_width=6144 layout_shards=1 pieces=1
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=q_proj prefix=model.layers.0.self_attn.q_proj M=8 Klocal=4 Nlocal=512
+[P62.NUMERIC] {"all_finite":true,"any_nonzero":true,"first_nonfinite":null,"first_nonfinite_rank":null,"group":0,"groups":2,"leaf_count":1,"max_abs":6.125,"naive_norm":565.572265625,"naive_norm_finite":true,"nonzero_leaf_count":1,"rank_count":2,"rank_max_abs":[2.125,6.125],"scaled_sumsq":8526.36328125,"schema":"canon-p62-tree-numeric-v1","stable_norm":565.5721435546875,"stage":"engine_projection_vjp","top_leaves":[{"leaf":0,"max_abs":6.125,"path":"['weight']"}],"total_elements":16384}
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=q_proj prefix=ordinary.serving.q_proj M=16 Klocal=4 Nlocal=512
+P59_TP4_INSTALLED_PROJECTION_PASS topology=DP2xTP4 q_proj_layout_shards=1 gate_up_layout_shards_one=2 wrong_width_negative=2 ordinary_global=1 serial_parallel=exact optimizer_commits=0
+WARNING 08-25 01:51:02 [tpu_platform.py:408] Pin memory is not supported on TPU.
+/usr/local/lib/python3.12/multiprocessing/popen_fork.py:66: RuntimeWarning: os.fork() was called. os.fork() is incompatible with multithreaded code, and JAX is multithreaded, so this will likely lead to a deadlock.
+  self.pid = os.fork()
+INFO 08-25 01:51:07 [importing.py:53] Triton is installed but 0 active driver(s) found (expected 1). Disabling Triton to prevent runtime errors.
+WARNING 08-25 01:51:07 [importing.py:73] Triton is installed, but `triton.backends` could not be imported. Disabling Triton.
+INFO 08-25 01:51:07 [importing.py:88] Triton not installed or not compatible; certain GPU-related functions will not be available.
+ERROR 08-25 01:51:08 [tpu_info.py:91] Failed to detect number of TPUs: [Errno 2] No such file or directory: '/dev/vfio'
+INFO 08-25 01:51:08 [__init__.py:76] TPU info: node_name=aaron-v5p-node6 | tpu_type=v5p-8 | worker_id=0 | num_chips=0 | num_cores_per_chip=2
+INFO 08-25 01:51:08 [attn_iface_patched.py:58] Using default RPA kernel
+[PATHTRACE] P59_RPA_LOCAL_KV_READY tp=4 local_q_heads=4 local_kv_heads=2 cache_heads=2 packing=2
+[PATHTRACE] RPA_VJP2 on (chunked-cache differentiable)
+P59_TP4_INSTALLED_ATTENTION_PASS topology=DP2xTP4 local_kv_heads=2 rpa_vjp2=1 wrong_cache_negative=1 ordinary_global_gqa=1 optimizer_commits=0
+[1/4] extracting stock tpu_inference (mode=path)
+      path=/usr/local/lib/python3.12/site-packages/tpu_inference
+[2/4] applying patches
+[3/4] laying down the shim chain (model=qwen8b_tp8)
+[4/4] verifying against MANIFEST.sha256
+      all 36 files match (qwen8b_tp8)
+
+Installed to: /tmp/p59-qwen8b-tp8.8ds0EU   (model=qwen8b_tp8)
+
+Container mounts -- target paths are under the engine's tpu_inference package
+($SP, /usr/local/lib/python3.12/site-packages/tpu_inference on the anchored image):
+
+  $OUT/attn_iface_patched.py   -> $SP/layers/common/attention_interface.py
+  $OUT/linear_p22xk.py         -> $SP/layers/jax/linear.py
+  $OUT/embed_patched.py        -> $SP/layers/jax/embed.py
+  $OUT/tpu_runner_p21_l30.py   -> $SP/runner/tpu_runner.py
+  $OUT/qwen3_p22xk.py          -> $SP/models/jax/qwen3.py
+  $OUT/qwen2_p22xk.py          -> $SP/models/jax/qwen2.py
+
+  PYTHONPATH=/tmp/p59-qwen8b-tp8.8ds0EU:$PYTHONPATH
+  CANON_SHIM_ROOT=/tmp/p59-qwen8b-tp8.8ds0EU          # optional; defaults to each shim's own directory
+
+Under Kubernetes there are no bind mounts: copy the six files over the target paths instead
+(cluster/steps/40_overlay_engine.sh does exactly that).
+
+The canonical switch set is in README.md.  A launch missing any of it is not a canonical run,
+and the only proof that the intervention took is the [PATHTRACE] lines -- never the exit code.
+WARNING 08-25 01:51:14 [tpu_platform.py:408] Pin memory is not supported on TPU.
+INFO 08-25 01:51:19 [importing.py:53] Triton is installed but 0 active driver(s) found (expected 1). Disabling Triton to prevent runtime errors.
+WARNING 08-25 01:51:19 [importing.py:73] Triton is installed, but `triton.backends` could not be imported. Disabling Triton.
+INFO 08-25 01:51:19 [importing.py:88] Triton not installed or not compatible; certain GPU-related functions will not be available.
+ERROR 08-25 01:51:20 [tpu_info.py:91] Failed to detect number of TPUs: [Errno 2] No such file or directory: '/dev/vfio'
+INFO 08-25 01:51:20 [__init__.py:76] TPU info: node_name=aaron-v5p-node6 | tpu_type=v5p-8 | worker_id=0 | num_chips=0 | num_cores_per_chip=2
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=q_proj prefix=model.layers.0.self_attn.q_proj M=8 Klocal=4 Nlocal=512
+[PATHTRACE] P59_LOCAL_FUSED_LINEAR_READY tp=8 site=gate_proj local_width=1536 declared_width=12288 layout_shards=1 pieces=1
+[PATHTRACE] P59_LOCAL_FUSED_LINEAR_READY tp=8 site=up_proj local_width=1536 declared_width=12288 layout_shards=1 pieces=1
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=q_proj prefix=model.layers.0.self_attn.q_proj M=8 Klocal=4 Nlocal=512
+[P62.NUMERIC] {"all_finite":true,"any_nonzero":true,"first_nonfinite":null,"first_nonfinite_rank":null,"group":0,"groups":2,"leaf_count":1,"max_abs":6.125,"naive_norm":799.8399658203125,"naive_norm_finite":true,"nonzero_leaf_count":1,"rank_count":2,"rank_max_abs":[2.125,6.125],"scaled_sumsq":17052.7265625,"schema":"canon-p62-tree-numeric-v1","stable_norm":799.8397827148438,"stage":"engine_projection_vjp","top_leaves":[{"leaf":0,"max_abs":6.125,"path":"['weight']"}],"total_elements":32768}
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=q_proj prefix=ordinary.serving.q_proj M=16 Klocal=4 Nlocal=512
+P59_TP8_INSTALLED_PROJECTION_PASS topology=DP2xTP8 q_proj_layout_shards=1 gate_up_layout_shards_one=2 wrong_width_negative=2 ordinary_global=1 serial_parallel=exact optimizer_commits=0
+WARNING 08-25 01:51:28 [tpu_platform.py:408] Pin memory is not supported on TPU.
+/usr/local/lib/python3.12/multiprocessing/popen_fork.py:66: RuntimeWarning: os.fork() was called. os.fork() is incompatible with multithreaded code, and JAX is multithreaded, so this will likely lead to a deadlock.
+  self.pid = os.fork()
+INFO 08-25 01:51:34 [importing.py:53] Triton is installed but 0 active driver(s) found (expected 1). Disabling Triton to prevent runtime errors.
+WARNING 08-25 01:51:34 [importing.py:73] Triton is installed, but `triton.backends` could not be imported. Disabling Triton.
+INFO 08-25 01:51:34 [importing.py:88] Triton not installed or not compatible; certain GPU-related functions will not be available.
+ERROR 08-25 01:51:34 [tpu_info.py:91] Failed to detect number of TPUs: [Errno 2] No such file or directory: '/dev/vfio'
+INFO 08-25 01:51:34 [__init__.py:76] TPU info: node_name=aaron-v5p-node6 | tpu_type=v5p-8 | worker_id=0 | num_chips=0 | num_cores_per_chip=2
+INFO 08-25 01:51:34 [attn_iface_patched.py:58] Using default RPA kernel
+[PATHTRACE] P59_RPA_LOCAL_KV_READY tp=8 local_q_heads=4 local_kv_heads=1 cache_heads=1 packing=2
+[PATHTRACE] RPA_VJP2 on (chunked-cache differentiable)
+P59_TP8_INSTALLED_ATTENTION_PASS topology=DP2xTP8 local_kv_heads=1 rpa_vjp2=1 wrong_cache_negative=1 ordinary_global_gqa=1 optimizer_commits=0
+P59_TP_SHIM_EXACT_IMAGE_PASS fixed_head=2 installed_projection=2 installed_attention=2 report_adjoint=2 staged_spec_restore=2 fixed_reducer=2 topologies=DP2xTP4,DP2xTP8 optimizer_commits=0 manifests=2x36/36

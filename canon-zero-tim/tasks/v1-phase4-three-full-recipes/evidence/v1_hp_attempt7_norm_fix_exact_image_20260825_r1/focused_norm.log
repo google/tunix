@@ -1,0 +1,37 @@
+Running tests under Python 3.12.13: /usr/local/bin/python3
+[ RUN      ] StableGlobalNormTest.test_clipper_preserves_below_limit_values_exactly
+[       OK ] StableGlobalNormTest.test_clipper_preserves_below_limit_values_exactly
+[ RUN      ] StableGlobalNormTest.test_clipper_scales_large_finite_values_instead_of_zeroing
+[       OK ] StableGlobalNormTest.test_clipper_scales_large_finite_values_instead_of_zeroing
+[ RUN      ] StableGlobalNormTest.test_finite_large_gradient_does_not_overflow
+[       OK ] StableGlobalNormTest.test_finite_large_gradient_does_not_overflow
+[ RUN      ] StableGlobalNormTest.test_nonfinite_gradient_remains_nonfinite
+[       OK ] StableGlobalNormTest.test_nonfinite_gradient_remains_nonfinite
+[ RUN      ] UtilsTest.test_build_positions_from_mask
+[       OK ] UtilsTest.test_build_positions_from_mask
+[ RUN      ] UtilsTest.test_make_causal_attn_mask
+[       OK ] UtilsTest.test_make_causal_attn_mask
+[ RUN      ] WeightedMetricTest.test_basic_compute
+[       OK ] WeightedMetricTest.test_basic_compute
+[ RUN      ] WeightedMetricTest.test_eps_and_min_denom_applied_in_order
+[       OK ] WeightedMetricTest.test_eps_and_min_denom_applied_in_order
+[ RUN      ] WeightedMetricTest.test_eps_bypasses_zero_guard
+[       OK ] WeightedMetricTest.test_eps_bypasses_zero_guard
+[ RUN      ] WeightedMetricTest.test_eps_is_negligible_for_nonzero_denominator
+[       OK ] WeightedMetricTest.test_eps_is_negligible_for_nonzero_denominator
+[ RUN      ] WeightedMetricTest.test_gradient_is_finite_at_zero_denominator
+[       OK ] WeightedMetricTest.test_gradient_is_finite_at_zero_denominator
+[ RUN      ] WeightedMetricTest.test_is_a_pytree_with_two_dynamic_leaves
+[       OK ] WeightedMetricTest.test_is_a_pytree_with_two_dynamic_leaves
+[ RUN      ] WeightedMetricTest.test_min_denom_acts_as_zero_safeguard
+[       OK ] WeightedMetricTest.test_min_denom_acts_as_zero_safeguard
+[ RUN      ] WeightedMetricTest.test_min_denom_clamps_small_denominator
+[       OK ] WeightedMetricTest.test_min_denom_clamps_small_denominator
+[ RUN      ] WeightedMetricTest.test_min_denom_noop_when_denominator_is_larger
+[       OK ] WeightedMetricTest.test_min_denom_noop_when_denominator_is_larger
+[ RUN      ] WeightedMetricTest.test_zero_denominator_is_safe
+[       OK ] WeightedMetricTest.test_zero_denominator_is_safe
+----------------------------------------------------------------------
+Ran 16 tests in 1.375s
+
+OK

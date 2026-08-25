@@ -1,0 +1,35 @@
+{
+  "schema": "v1-hp-attempt7-stable-global-norm-evidence-v1",
+  "date_utc": "2026-08-25",
+  "source_head": "307cb42da5c6a6f7ec70dceec359e948b1080316",
+  "source_state": "dirty repair tree; no commit or push",
+  "image_id": "sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a",
+  "attempt7_raw_log": {
+    "path": "canon-zero-tim/debug_logs/v1hp_att7_gsm8k_g64s_p28_g6_norm_inf_error.raw.log",
+    "sha256": "68aa10263bed8343623ef48d933d4bb1fbca367cc3df01745a03cd108316425a",
+    "classification": "strict pre-alignment PASS; all 16 P59 reverse groups completed replica-exact; stopped before optimizer commit because naive FP32 L2 norm was inf; the old log did not serialize element-finiteness, so finite sum-of-squares overflow versus a genuinely non-finite leaf was ambiguous"
+  },
+  "focused_norm_gate": {
+    "command": "sudo docker run --rm -v <worktree>:/workspace:ro -w /workspace -e JAX_PLATFORMS=cpu -e PYTHONPATH=/workspace <image_id> python3 tests/sft/sft_utils_test.py",
+    "exit_code": 0,
+    "tests": "16/16",
+    "raw_log": "focused_norm.log",
+    "raw_log_sha256": "7d5877b6d7f6b6bb85d3b396516aa657d516701b805c1327c9260926da3ae34c"
+  },
+  "complete_exact_image_gate": {
+    "command": "bash canon-zero-tim/tests/v1_phase4/run_exact_image.sh sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a",
+    "exit_code": 0,
+    "terminal_count": 1,
+    "terminal": "V1_HP_EXACT_IMAGE_PASS dp16_gathered=1 dp2tp2_parallel=2 p59_tp4_tp8=2 p59_real_shim=4 p59_rpa=2 p59_fused_linear=2 p57_wandb=1 m15_token=1 perfetto_window=1 manifests=3",
+    "raw_log": "run.log",
+    "raw_log_sha256": "817990220b0415b4347434ca6c9fc57688fcd14fb8ee2280447f1e41a1b015fe"
+  },
+  "host_gates": {
+    "v1_phase4": "30/30 PASS",
+    "p57_frozenlake": "144/144 PASS",
+    "p59_backward": "34/34 PASS",
+    "p3_prefix_cache": "31/31 PASS",
+    "flag_audit": "368/368 PASS"
+  },
+  "claim_ceiling": "HOST PASS / FOCUSED STABLE-NORM PASS / EXACT-IMAGE PASS / POST-FIX TPU TARGET NOT RUN"
+}

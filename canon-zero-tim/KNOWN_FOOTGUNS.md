@@ -256,3 +256,47 @@ the deferred cluster step must still equal `policy_step`. Keep the external
 receipt mapped to the committed timing row. Any future reordering that
 advances either counter early must trip the negative control rather than
 silently relabel evaluation cost.
+
+### 24. `global_norm == inf` does not identify a non-finite gradient
+
+The old P28 G6 observer used the conventional FP32 expression
+`sqrt(sum(square(g)))`. A finite float32 element above about `1.84e19` already
+overflows when squared, and a large aggregate can overflow the sum. Attempt 7
+therefore stopped at `active=True norm=inf` before the optimizer, but its log
+did not serialize the already-computed per-group element-finiteness bit. The
+artifact cannot tell a finite sum-of-squares overflow from a true NaN/Inf.
+
+Never fix this by accepting `inf` or dropping the gate. Compute the L2 norm and
+clip factor with max scaling, and independently require `all(isfinite(g))`.
+Apply the same algorithm to the observer and the optimizer transform; fixing
+only the observer lets Optax's old global-norm clip turn `inf` into an all-zero
+update. A target rerun must report both the stable-norm runtime marker and the
+element-finiteness/optimizer evidence before the repair can be promoted.
+
+### 25. `array_equal == false` does not prove finite DP replicas differ
+
+`jnp.array_equal` treats a NaN as unequal to another NaN, including an
+identical NaN in the same position on every replica. A post-reduction peer
+comparison can therefore label a common non-finite gradient as “unequal
+replicas”. Never repair this with `equal_nan=True` and continue training.
+
+Check staged rank-local and reduced trees with `all(isfinite)` first, fail with
+rank/leaf/tree-path evidence for any NaN/Inf, and only compare replicas after
+the tree is proven finite. A saved old-style all-zero replica flag vector is
+ambiguous and cannot support either a collective-bug or non-finite-gradient
+root-cause claim.
+
+### 26. An overflow-safe norm is an observer, not proof that a gradient is valid
+
+A max-scaled L2 can distinguish finite leaves from a NaN/Inf leaf even when a
+naive FP32 sum of squares overflows. It cannot prove that the finite magnitude
+is expected. At Phase4 scale, an `inf` naive norm may instead expose a wrong
+loss denominator, streamed multiplier, implicit collective, or duplicate DP
+sum. Replacing stock clipping with a stable implementation before locating the
+first numerical red can silently admit that bug to AdamW.
+
+Keep production clipping unchanged. Run the exact-workload P62 carrier with a
+disposable accumulator and `optimizer_commits=0`; record loss scale, engine
+VJP, rank-local, fixed-DP, scaled-group, and final-accumulator boundaries.
+Only a root-cause repair that passes the target carrier may reach a one-commit
+gate.

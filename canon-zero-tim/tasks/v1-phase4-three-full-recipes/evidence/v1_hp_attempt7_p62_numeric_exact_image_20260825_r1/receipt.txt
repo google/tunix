@@ -1,0 +1,16 @@
+V1_HP_ATTEMPT7_P62_EXACT_IMAGE_RECEIPT
+date_utc=2026-08-25
+source_head=ff913a84ec9aa66bfd152415688bc431ca1d1a1b
+source_diff_sha256=1087b712717c14813862adff15deb65aee344dad30f99c9b7fb551923d23643c
+image_ref=tunix_frozenlake_image:vllm-tpu0.25.0
+image_id=sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a
+command=bash canon-zero-tim/tests/v1_phase4/run_exact_image.sh tunix_frozenlake_image:vllm-tpu0.25.0
+exit_code=0
+raw_lines=842
+raw_sha256=604c95e5953f97fa8465e03f38b15589bd38fbf618b04c5652be0328b446689e
+v1_terminal_count=1
+p59_installed_terminal_count=1
+p62_numeric_contracts=6
+optimizer_commits=0
+verdict=EXACT_IMAGE_PASS_TARGET_NOT_RUN
+claim_ceiling=dependency_and_forced_cpu_construction_only

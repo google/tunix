@@ -1,0 +1,33 @@
+P62_ONEHOST source=ff913a84ec9aa66bfd152415688bc431ca1d1a1b diff_sha256=1087b712717c14813862adff15deb65aee344dad30f99c9b7fb551923d23643c
+P62_ONEHOST image=tunix_frozenlake_image:vllm-tpu0.25.0 image_id=sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a
+P62_ONEHOST topology=DP2xTP2 scope=matched-backward-and-installed-rpa
+P62_ONEHOST optimizer_commits=0
+[1/4] extracting stock tpu_inference (mode=image)
+      image=tunix_frozenlake_image:vllm-tpu0.25.0
+[2/4] applying patches
+[3/4] laying down the shim chain (model=qwen1p7b)
+[4/4] verifying against MANIFEST.sha256
+      all 36 files match (qwen1p7b)
+
+Installed to: /mnt/disks/tunix-data/logp_probe_1host/p62_numeric_a7_numeric_dp2tp2_20260825_r2/overlay   (model=qwen1p7b)
+
+Container mounts -- target paths are under the engine's tpu_inference package
+($SP, /usr/local/lib/python3.12/site-packages/tpu_inference on the anchored image):
+
+  $OUT/attn_iface_patched.py   -> $SP/layers/common/attention_interface.py
+  $OUT/linear_p22xk.py         -> $SP/layers/jax/linear.py
+  $OUT/embed_patched.py        -> $SP/layers/jax/embed.py
+  $OUT/tpu_runner_p21_l30.py   -> $SP/runner/tpu_runner.py
+  $OUT/qwen3_p22xk.py          -> $SP/models/jax/qwen3.py
+  $OUT/qwen2_p22xk.py          -> $SP/models/jax/qwen2.py
+
+  PYTHONPATH=/mnt/disks/tunix-data/logp_probe_1host/p62_numeric_a7_numeric_dp2tp2_20260825_r2/overlay:$PYTHONPATH
+  CANON_SHIM_ROOT=/mnt/disks/tunix-data/logp_probe_1host/p62_numeric_a7_numeric_dp2tp2_20260825_r2/overlay          # optional; defaults to each shim's own directory
+
+Under Kubernetes there are no bind mounts: copy the six files over the target paths instead
+(cluster/steps/40_overlay_engine.sh does exactly that).
+
+The canonical switch set is in README.md.  A launch missing any of it is not a canonical run,
+and the only proof that the intervention took is the [PATHTRACE] lines -- never the exit code.
+P62_ONEHOST_SUMMARY docker_exit=0 elapsed_seconds=54 rpa=1 numeric=1 traceback=0
+P62_ONEHOST_GREEN root=/mnt/disks/tunix-data/logp_probe_1host/p62_numeric_a7_numeric_dp2tp2_20260825_r2

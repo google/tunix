@@ -1,0 +1,71 @@
+P59_TP_SHIM_EXACT_IMAGE image_ref=tunix_frozenlake_image:vllm-tpu0.25.0 image_id=sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a
+Running tests under Python 3.12.13: /usr/local/bin/python3
+[ RUN      ] CanonicalQwen3AdapterTest.test_p59_tpx_executes_fixed_head_local_vjp_and_global_negative
+/usr/local/lib/python3.12/site-packages/flax/nnx/tracers.py:29: DeprecationWarning: jax.core.get_opaque_trace_state is deprecated. Use jax.extend.core.get_opaque_trace_state.
+  return jax.core.get_opaque_trace_state(convention="nnx")
+[P59.DP2] head_cotangent_partition_ready global_shape=(16, 16) local_shape=(8,4) placement=dp,tp
+[PATHTRACE] CANON_P38_FIXED_LM_HEAD=1 semantic_M=8 fixed_M=8 K=4 TP=4 local_N=4 fixed_N=8 BM=128 BN=256 BK=256 chunks=1 endpoint=direct_probe p59_local=1 global_M=16 dp=2
+[PATHTRACE] CANON_P38_FIXED_LM_HEAD=1 semantic_M=8 fixed_M=8 K=4 TP=4 local_N=4 fixed_N=8 BM=128 BN=256 BK=256 chunks=1 endpoint=direct_probe p59_local=1 global_M=16 dp=2
+[PATHTRACE] CANON_P38_FIXED_LM_HEAD_VJP=1 semantic_M=16 local_M=8 fixed_M=8 chunks=1 accumulation=lax.scan order=ascending tp_input_reduction=all_gather_rank_order_f32_barrier K=4 TP=4 local_N=4 fixed_N=8 endpoint=direct_probe
+[P62.NUMERIC] {"all_finite":true,"any_nonzero":true,"first_nonfinite":null,"first_nonfinite_rank":null,"group":0,"groups":2,"leaf_count":1,"max_abs":6.125,"naive_norm":49.98999786376953,"naive_norm_finite":true,"nonzero_leaf_count":1,"rank_count":2,"rank_max_abs":[2.125,6.125],"scaled_sumsq":66.61224365234375,"schema":"canon-p62-tree-numeric-v1","stable_norm":49.98999786376953,"stage":"engine_vjp","top_leaves":[{"leaf":0,"max_abs":6.125,"path":"[0]"}],"total_elements":128}
+[P62.NUMERIC] {"all_finite":true,"any_nonzero":true,"first_nonfinite":null,"first_nonfinite_rank":null,"group":0,"groups":2,"leaf_count":2,"max_abs":6.125,"naive_norm":50.00729751586914,"naive_norm_finite":true,"nonzero_leaf_count":2,"rank_count":2,"rank_max_abs":[2.125,6.125],"scaled_sumsq":66.65836334228516,"schema":"canon-p62-tree-numeric-v1","stable_norm":50.007301330566406,"stage":"trainer_rank_local","top_leaves":[{"leaf":0,"max_abs":6.125,"path":"[0]"},{"leaf":1,"max_abs":0.77734375,"path":"[1]"}],"total_elements":136}
+[P62.NUMERIC] {"all_finite":true,"any_nonzero":true,"first_nonfinite":null,"group":0,"groups":2,"leaf_count":2,"max_abs":8.25,"naive_norm":63.06084442138672,"naive_norm_finite":true,"nonzero_leaf_count":2,"scaled_sumsq":58.4267463684082,"schema":"canon-p62-tree-numeric-v1","stable_norm":63.060848236083984,"stage":"fixed_dp_reduced","top_leaves":[{"leaf":0,"max_abs":8.25,"path":"[0]"},{"leaf":1,"max_abs":1.111328125,"path":"[1]"}],"total_elements":68}
+[  FAILED  ] CanonicalQwen3AdapterTest.test_p59_tpx_executes_fixed_head_local_vjp_and_global_negative
+[ RUN      ] CanonicalQwen3AdapterTest.test_p59_restores_only_physically_equal_tpx_staged_specs
+[       OK ] CanonicalQwen3AdapterTest.test_p59_restores_only_physically_equal_tpx_staged_specs
+======================================================================
+ERROR: test_p59_tpx_executes_fixed_head_local_vjp_and_global_negative (__main__.CanonicalQwen3AdapterTest.test_p59_tpx_executes_fixed_head_local_vjp_and_global_negative)
+CanonicalQwen3AdapterTest.test_p59_tpx_executes_fixed_head_local_vjp_and_global_negative
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/workspace/tests/rl/canonical_qwen3_adapter_test.py", line 1876, in test_p59_tpx_executes_fixed_head_local_vjp_and_global_negative
+    poisoned_staged = jax.tree.map(
+                      ^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/jax/_src/tree.py", line 156, in map
+    return tree_util.tree_map(f, tree, *rest, is_leaf=is_leaf)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/jax/_src/tree_util.py", line 399, in tree_map
+    return treedef.unflatten(f(*xs) for xs in zip(*all_leaves))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/jax/_src/tree_util.py", line 399, in <genexpr>
+    return treedef.unflatten(f(*xs) for xs in zip(*all_leaves))
+                             ^^^^^^
+  File "/workspace/tests/rl/canonical_qwen3_adapter_test.py", line 1877, in <lambda>
+    lambda value: value.at[0].set(jnp.nan), staged_trainer
+                  ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/jax/_src/numpy/array_methods.py", line 1208, in set
+    return scatter._scatter_update(
+           ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/jax/_src/ops/scatter.py", line 90, in _scatter_update
+    return internal_scatter(x, y, dynamic_idx)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/jax/_src/ops/scatter.py", line 143, in _scatter_impl
+    out = scatter_op(
+          ^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/jax/_src/lax/slicing.py", line 910, in scatter
+    return scatter_p.bind(
+           ^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/jax/_src/core.py", line 705, in bind
+    return self.bind_with_trace(prev_trace, args, avals, params)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/jax/_src/core.py", line 713, in bind_with_trace
+    return trace.process_primitive(self, args, params)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/jax/_src/core.py", line 1294, in process_primitive
+    return primitive.impl(*args, **params)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/jax/_src/dispatch.py", line 88, in apply_primitive
+    outs = fun(*args)
+           ^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/jax/_src/array.py", line 1217, in _array_shard_arg
+    x._check_if_deleted()
+  File "/usr/local/lib/python3.12/site-packages/jax/_src/array.py", line 587, in _check_if_deleted
+    raise RuntimeError(
+RuntimeError: Array has been deleted with shape=float32[2,4,16].
+--------------------
+For simplicity, JAX has removed its internal frames from the traceback of the following exception. Set JAX_TRACEBACK_FILTERING=off to include these.
+
+----------------------------------------------------------------------
+Ran 2 tests in 2.622s
+
+FAILED (errors=1)

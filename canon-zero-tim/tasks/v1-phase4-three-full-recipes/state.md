@@ -1,13 +1,13 @@
 # State
 
 - Status: active
-- Objective: render and locally certify three strict optimized 64-chip full-training manifests.
-- Definition of done: one GSM8K DP16xTP4 manifest plus P45/M15 DP8xTP8 manifests resolve the complete workload-scoped v1 bundle and pass CPU, real-env, exact-image, and negative gates.
+- Objective: localize the first numerical red exposed by Attempt 7 without optimizer mutation, then admit only a root-cause repair before relaunching the three strict optimized full-training recipes.
+- Definition of done: GSM8K DP16xTP4 plus P45/M15 DP8xTP8 complete their signed horizons with every strict Zero-TIM gate green and durable optimizer, timing, XProf, Perfetto, cache, evaluation, and checkpoint evidence.
 - Task directory: `canon-zero-tim/tasks/v1-phase4-three-full-recipes`
-- Directory state: cleanly rebased onto pulled operator tip `0a68e1f7`, which adds the P60 GSM8K XProf carriers and trace summarizer after immutable Attempt-6 tip `f2dd9d90`. Three rollback-safe CLs are committed locally: P59 staged-spec runtime `26b8a36d`, uniform APC-off/auditable-cache carrier `ef481f02`, and the current evidence/ledger CL. Only the approved push and exact remote readback remain. Dependency-complete pinned-image and real-v5p DP2xTP2 mechanism gates are green for the pre-P60 Attempt-6 runtime.
-- Current phase: V1.P4.4 admission green; publication and target execution pending.
-- Last verified fact: exact-image raw SHA `8d8d776451615de58a749c0be0200d28107b86cc44504200afde4f5acffc712a` ends with `staged_spec_restore=2` and full V1 PASS. Real-v5p run `p59_rpa_a6restore_dp2tp2_20260824_2256utc` passes the replicated-leaf positive, wrong-placement negative, RPA VJP, and ordinary TP4 control in 32 seconds with zero optimizer commits; raw/driver hashes verify. After rebase, host gates pass V1 29/29, P57 144/144, P59 34/34, APC 31/31, P60 XProf 4/4, and flags 368/368.
-- Next action: quiet-fetch to prove the operator tip still equals `0a68e1f7`, push the three approved CLs, and verify exact remote SHA readback. Preserve the claim boundary that inherited P60 runtime was not part of the earlier exact-image/TPU captures. After publication/readback and separate launch approval, render and apply fresh GSM8K/P45/M15 full JobSets in one wave.
-- Blockers: repaired DP16×TP4/DP8×TP8 optimizer commits, target cache hit/JIT effect, TP8 fixed head, performance, and all full horizons remain unverified. M15 APC is target-VETOED; P45 is also production-disabled by user decision. P45/M15 Attempt-6 logs are non-terminal and receive no verdict.
-- Key artifacts: `scripts/render_three_full_recipes.py`; `scripts/classify_full_recipe.py`; `RUNBOOK.md`
-- Updated: 2026-08-24T23:11:10Z
+- Directory state: the P62 no-commit diagnostic, reducer attribution, seam carriers, and additive evidence have been reconstructed as scoped local CLs from tested source base `ff913a84`. Historical stable-clipping artifacts are corrected back to stock production clipping. Publication still requires latest-tip rebase, focused gates, and exact remote readback.
+- Current phase: V1.P4.5 Attempt-7 first-red numerical localization; G0-G4 are implemented and green, G5 target is pending.
+- Last verified fact: one-host v5p DP2xTP2 proves the registered scaling/reduction mechanism against ordinary JAX and an FP64 oracle (`rel_l2=3.77417983e-08`, cosine 1), including real RPA and zero commits. Complete pinned-image is green with `p62_numeric=6`; focused G2 TP4/TP8 installed-shim composition and the offline G5 classifier are green. This does not localize the full Qwen DP16xTP4 `norm=inf`.
+- Next action: render and let the user launch one fresh P62 GSM8K DP16xTP4 `backward-no-commit` diagnostic. Inspect the first loss/VJP/rank-local/fixed-DP/scaled-group/accumulator red before designing any numerical fix or optimizer transaction.
+- Blockers: the first bad numerical boundary is unknown; no real DP16xTP4/DP8xTP8 optimizer commit is admitted. Full recipes and performance interpretation remain blocked. M15 APC is target-VETOED and all three production recipes remain APC-off. Publishing the diagnostic carrier does not admit a production launch.
+- Key artifacts: `scripts/render_attempt7_numeric_debug.py`; `scripts/classify_attempt7_numeric_debug.py`; `phases/v1-p4-5-attempt7-numeric-localization.md`; `RUNBOOK.md`
+- Updated: 2026-08-25T03:06:00Z

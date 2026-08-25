@@ -1,5 +1,12 @@
 # Log
 
+## 2026-08-25T01:19:08Z — Attempt-7 claim corrected; first-red diagnostic pre-registered
+
+- User correction accepted: max-scaled L2 can prevent an observer's FP32 sum-of-squares overflow, but it does not prove that the underlying finite magnitude is legitimate. With roughly 1.72B nonzero elements, naive overflow from uniformly finite values alone requires an implausibly large RMS near `4.4e14`; silently clipping such a gradient could hide a scaling or double-reduction bug.
+- Source audit shows the GSM8K `norm=inf` is measured on the first incoming reduced-and-scaled group, before `GradientAccumulator.get()` performs its final 16-group average. Therefore the saved symptom is not directly explained by a missing final accumulator divide. The intended algebra is `scale=1/256`, streamed multiplier `scale*16=1/16`, then accumulator denominator 16, yielding a global average over 256 trajectories.
+- Opened V1.P4.5 and froze a discriminator across loss inputs/cotangents, engine VJP, trainer adjoint, fixed DP reduction, streamed scaling, and final accumulator. The next vehicle is exact-workload, default-off, fail-closed, and zero optimizer commit. Production full recipes remain blocked; no code gate, image, TPU run, commit, push, render, or JobSet action occurred at this checkpoint.
+- Rollback: the new phase/ledger entries are documentation-only. Preserve the immutable Attempt-7 logs and the earlier construction evidence; do not reinterpret them as a target optimizer admission.
+
 ## 2026-08-24T23:11:10Z — rollback-safe publication CLs prepared
 
 - CL `26b8a36d` (`Restore physically equivalent P59 staged specs`) contains only the Attempt-6 runtime seam and its TP4/TP8 forced-device plus real-DP2xTP2 carriers. Its stated downside is the broadened TP>1 restoration path and missing production-topology optimizer commit.
@@ -273,3 +280,107 @@
 - Final host rerun: V1 12/12, P57 128/128, P59 30/30, APC 31/31, flags 359/359, and diff hygiene PASS.
 - The final committed source differs from tested freeze tree `331ac60940b2c754fa516d94eaf039513b41dc11` only in release evidence/registry/count assertions and one host-script trailing blank. All runtime paths are byte-identical, so no TPU rerun is required.
 - Fresh fetch found remote tip unchanged at `9c422bd224671a4ee0c6795223d0168debd4ca62`. No rebase, push, rendering, or launch occurred.
+
+## 2026-08-25 UTC — Attempt 7 stable-global-norm repair
+
+- Pulled operator tip `307cb42d`. The additive GSM8K log SHA is
+  `68aa10263bed8343623ef48d933d4bb1fbca367cc3df01745a03cd108316425a`.
+  Step-0 strict pre-alignment is PASS for 191,439 actions with both byte
+  deltas zero; all 16 P59 reverse groups complete replica-exact; the old G6
+  guard then stops before optimizer commit at `active=True norm=inf`.
+- Root-cause boundary: P28/Optax computed FP32 L2 as a naive sum of squares.
+  The old log omitted the adapter's per-group element-finiteness bit, so it is
+  not evidence that the leaves were finite and not evidence that they were
+  non-finite. Two interpretations remain: finite square/sum overflow or a
+  genuine NaN/Inf leaf.
+- Repair: `tunix/sft/utils.py` adds max-scaled L2 and stable global-norm
+  clipping. P28 microgradient/commit diagnostics use it; GSM8K, FrozenLake,
+  and DeepSWE select the stable clipper only for the default-off segmented
+  training path. G6 now independently requires each canonical report's
+  element-finiteness bit. The full classifier requires the runtime marker and
+  has a missing-marker negative control. No alignment threshold changed.
+- Host PASS: V1 30/30, P57 144/144, P59 34/34, APC 31/31, flags 368/368,
+  syntax, and diff hygiene. Bare host Python lacks `pytest`/`metrax`; the
+  dependency-complete pinned image runs the focused SFT suite 16/16.
+- Complete pinned-image PASS: exit 0, 783-line raw log, exactly one
+  `V1_HP_EXACT_IMAGE_PASS ... p59_fused_linear=2 ... manifests=3`, raw SHA
+  `817990220b0415b4347434ca6c9fc57688fcd14fb8ee2280447f1e41a1b015fe`.
+  Evidence is additive under
+  `evidence/v1_hp_attempt7_norm_fix_exact_image_20260825_r1/`.
+- Separate log: one-host native XProf was killed by the OS during rollout
+  after 377 seconds (`exit 137`) with no Python traceback. It remains
+  `INCONCLUSIVE_RESOURCE_KILL`; no memory telemetry means no resource fix is
+  claimed in this CL.
+- Result: `HOST PASS / FOCUSED STABLE-NORM PASS / EXACT-IMAGE PASS /
+  POST-FIX TPU TARGET NOT RUN`. No commit, push, JobSet, TPU run, optimizer
+  commit, or performance verdict occurred. Next target must distinguish the
+  two Attempt-7 interpretations using the new finite receipt.
+
+## 2026-08-25 UTC — Attempt 7 P45 reducer diagnostic repair
+
+- Rebasing the dirty repair onto latest operator tip `ff913a84` preserved the
+  P58 fixed-seed runtime and added P45 raw log
+  `v1hp_att7_fl_f45s_dp_reduction_unequal_replicas.raw.log`, SHA
+  `41d2dd0cb4810cbe3e0f434c18558575f48033d6eb428d951b222772598584e8`.
+- P45 step 0 is strict PASS for 48,082 actions with both byte deltas zero. The
+  real DP8xTP8 fixed-head and layer backward execute, then the first staged
+  reduction stops before a group receipt or optimizer commit with eight false
+  replica flags.
+- Root-cause boundary: the old comparator used `jnp.array_equal`; identical
+  NaNs also return false. The artifact therefore cannot choose between a
+  common non-finite gradient and genuinely unequal finite replicas.
+- Repair: staged tables are checked for finite values before reduction and
+  report rank/leaf/tree path; reduced trees are checked again; only proven
+  finite values reach the unchanged replica-equality gate. NaN/Inf remains
+  fatal. Staged finite bits share the existing fingerprint dispatch, and the
+  adapter consumes the reducer finite receipt rather than rescanning the
+  reduced tree. Added DP8xTP8 finite positive, common-NaN negative, and finite
+  mismatch negative to the complete exact-image ladder.
+- Validation: V1 30/30, P57 144/144, P59 34/34, APC 31/31, flags 368/368;
+  focused forced-CPU DP8xTP8 3/3; complete exact-image exit 0 with one terminal
+  and raw SHA
+  `fa4960bed7f7d94250c59d683aeb89dd7fc7edd81fdbcbe367b30c3a7c5017ee`.
+- Result: error attribution is repaired, but target numerical root cause is
+  still unresolved until a new DP8xTP8 run emits the new diagnostic or reaches
+  a finite exact reduction and optimizer commit. No TPU, JobSet, commit, or
+  push occurred.
+
+## 2026-08-25T01:44:24Z — P62 no-commit carrier passes G0-G4
+
+- Corrected the earlier repair boundary: stable/global max-scaled L2 remains a
+  diagnostic observer only. Production GSM8K, FrozenLake, DeepSWE, P28 commit
+  norm and optimizer clipping are restored to their historical Optax path.
+- Added the default-off exact GSM8K DP16xTP4 P62 carrier. It locks global/local
+  M, trajectories, groups, denominator, multiplier, P59/head flags, strict
+  alignment and no-commit stage; then emits compact first-red receipts and
+  discards the accumulator.
+- Host V1 is 34/34, P59 is 37/37; flag registry is 369/369. Complete pinned image exits zero
+  with raw SHA
+  `604c95e5953f97fa8465e03f38b15589bd38fbf618b04c5652be0328b446689e`
+  and one `V1_HP_EXACT_IMAGE_PASS ... p62_numeric=6 ... manifests=3`.
+- Real one-host v5p DP2xTP2 run `a7_numeric_dp2tp2_20260825_r2` is green in
+  54 seconds: real RPA, staged-spec restore, fixed TP input reduction, fixed DP
+  reduction, two-group accumulation and FP64 oracle all pass. Relative-L2 is
+  `3.77417983e-08`, cosine is `1`; wrong multiplier and duplicate DP sum are
+  caught; optimizer commits are zero.
+- Decision: `G0-G4 PASS / G5 TARGET NOT RUN / ROOT CAUSE UNRESOLVED`. The
+  small carrier rules out its own registered algebra and mechanism but cannot
+  explain the full Qwen DP16xTP4 magnitude. No commit, push, JobSet, or target
+  optimizer transaction occurred.
+
+## 2026-08-25T01:51:52Z — focused G2 installed-shim composition closes
+
+- Added P62 numerical receipts directly around the existing real fixed-head,
+  report-adjoint and fixed-reducer composition, plus the installed projection
+  VJP, for DP2xTP4 and DP2xTP8. The negative injects NaN before the reducer and
+  must report the first rank/tree path.
+- r1 stopped in the test only after three positive receipts because the
+  negative read a buffer donated by `finalize_staged`; raw SHA
+  `07ef7e7869b1e61e31a732cac0877ec710dacfe98c2dd12d38c3ce84e55cabbb`.
+  It is preserved as `CARRIER_RED_NOT_NUMERICAL_VERDICT`.
+- r2 moves the negative before donation and passes with 10 P62 receipts, two
+  caught NaN negatives, TP4/TP8 installed head/projection/attention terminals,
+  zero optimizer commits, and final raw SHA
+  `8fb3720e3ac39cf80535833e1786585950ab13bd7015b4c9c9aa66da0dc60b92`.
+- Claim ceiling remains seam composition. Only G5 executes the full Qwen
+  DP16xTP4 target and can explain Attempt 7.

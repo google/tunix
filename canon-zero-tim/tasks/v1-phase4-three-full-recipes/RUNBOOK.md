@@ -1,5 +1,42 @@
 # V1 high-performance three-full runbook
 
+## Attempt-7 P62 first-red diagnostic before any full recipe
+
+The three production JobSets are currently blocked. First publish one reviewed
+40-character SHA containing P62, then render exactly one fresh GSM8K
+DP16xTP4 `backward-no-commit` diagnostic. The renderer never launches:
+
+```bash
+python3 canon-zero-tim/tasks/v1-phase4-three-full-recipes/scripts/render_attempt7_numeric_debug.py \
+  --source-commit <approved-40-character-sha> \
+  --run-id <fresh-p62-id> \
+  --output-dir /tmp/v1-p62-<fresh-p62-id>
+```
+
+Require one `P62_NUMERIC_RENDER_PASS ... optimizer_commits=0`, review the YAML
+and receipt, verify no active P51/P59/P62 or three-full JobSet, and obtain the
+separate 64-chip launch approval. Do not pipe the apply command:
+
+```bash
+kubectl apply -f /tmp/v1-p62-<fresh-p62-id>/jobset-p62-gsm8k-numeric-debug.yaml
+```
+
+The workload may exit nonzero when it deliberately catches the first
+non-finite boundary. Preserve the raw log and classify it offline:
+
+```bash
+python3 canon-zero-tim/tasks/v1-phase4-three-full-recipes/scripts/classify_attempt7_numeric_debug.py \
+  <raw.log> \
+  --output <fresh-evidence-dir>/classification.json
+```
+
+`ROOT_LOCALIZED_NONFINITE` and `FINITE_NAIVE_L2_OVERFLOW` are useful G5
+findings, not permission to update weights. `ALL_BOUNDARIES_FINITE_NO_COMMIT`
+means the recorded seams are finite but their magnitudes still require review.
+`FATAL_CONTRACT` or `INCONCLUSIVE_INCOMPLETE` does not localize the numerical
+root. Any alignment FAIL or optimizer commit is fatal. Only after a classified
+G5 finding may a separate one-commit repair phase be designed.
+
 This renderer prepares exactly three JobSets and never launches them. Use one
 approved, pushed 40-character source SHA. Run IDs and the campaign root are
 single-use; failed attempts are never reused.

@@ -1,0 +1,26 @@
+db12aeeeb4305c4e5a6e15129e891f725637b4c2da4c83798eeb4447c8cdf52b  /home/yuxuan/code_rl_repro/worktrees/v1_attempt6_p59_restore_0824/canon-zero-tim/MANIFEST.sha256
+9bc0bad5cf93f4e692cb5dc52866c87655455ee9ca1273e05d54c887d55ba390  /home/yuxuan/code_rl_repro/worktrees/v1_attempt6_p59_restore_0824/canon-zero-tim/tests/p59_backward/probe_onehost_rpa_v5p.py
+af638a69f6a7f5c18a8aa8c6d798f9440e846c64e0cb4e8847a35f67c8e45253  /home/yuxuan/code_rl_repro/worktrees/v1_attempt6_p59_restore_0824/canon-zero-tim/tests/p59_backward/probe_onehost_numeric_v5p.py
+9099e8d9d7d6adc66af9a622382213581db6f4e0f01a94e57c9379ce2e35e4bd  /home/yuxuan/code_rl_repro/worktrees/v1_attempt6_p59_restore_0824/canon-zero-tim/tests/p59_backward/run_onehost_numeric_v5p.sh
+c92c56bacc90228ce089807cea6eae94408d5c54d933a5ea556984296863a7f8  /home/yuxuan/code_rl_repro/worktrees/v1_attempt6_p59_restore_0824/tunix/rl/canonical_qwen3_adapter.py
+1c4b7839bced3bed7be7c5642befec93052011bc9b96da5c30c27a3fda5ae2b3  /home/yuxuan/code_rl_repro/worktrees/v1_attempt6_p59_restore_0824/tunix/rl/dp_training.py
+06a167c20b6a34ccf26074abd969d90432731f5ab4b46bb21e2c25f6bdea515b  /home/yuxuan/code_rl_repro/worktrees/v1_attempt6_p59_restore_0824/tunix/sft/utils.py
+WARNING 08-25 01:36:27 [tpu_platform.py:408] Pin memory is not supported on TPU.
+/usr/local/lib/python3.12/multiprocessing/popen_fork.py:66: RuntimeWarning: os.fork() was called. os.fork() is incompatible with multithreaded code, and JAX is multithreaded, so this will likely lead to a deadlock.
+  self.pid = os.fork()
+INFO 08-25 01:36:33 [importing.py:53] Triton is installed but 0 active driver(s) found (expected 1). Disabling Triton to prevent runtime errors.
+WARNING 08-25 01:36:33 [importing.py:73] Triton is installed, but `triton.backends` could not be imported. Disabling Triton.
+INFO 08-25 01:36:33 [importing.py:88] Triton not installed or not compatible; certain GPU-related functions will not be available.
+INFO 08-25 01:36:34 [__init__.py:76] TPU info: node_name=aaron-v5p-node6 | tpu_type=v5p-8 | worker_id=0 | num_chips=4 | num_cores_per_chip=2
+INFO 08-25 01:36:34 [attn_iface_patched.py:58] Using default RPA kernel
+P59_STAGED_SPEC_ONEHOST_PASS topology=DP2xTP2 replicated_leaf_positive=1 wrong_placement_negative=1
+[PATHTRACE] P59_RPA_LOCAL_KV_READY tp=2 local_q_heads=4 local_kv_heads=1 cache_heads=1 packing=2
+[PATHTRACE] RPA_VJP2 on (chunked-cache differentiable)
+[PATHTRACE] RPA_BLOCK d_block_sizes=(128, 512, 128, 512)
+[PATHTRACE] RPA_BLOCK p_block_sizes=(128, 512, 128, 512)
+[PATHTRACE] RPA_BLOCK m_block_sizes=(128, 512, 128, 512)
+P59_RPA_ONEHOST_V5P_PASS p59_topology=DP2xTP2 ordinary_topology=DP1xTP4 real_rpa=2 rpa_vjp2=1 local_kv_heads=1 wrong_cache_negative=1 ordinary_global_gqa=1 staged_spec_restore=1 optimizer_commits=0 gradient_norms=3.0937957e-05,0.00019927174,2035.6141,0
+[P62.ONEHOST] {"group":0,"rank_local":{"all_finite":true,"any_nonzero":true,"first_nonfinite":null,"first_nonfinite_rank":null,"leaf_count":1,"max_abs":0.4004449248313904,"naive_norm":2.4283838272094727,"naive_norm_finite":true,"nonzero_leaf_count":1,"rank_count":2,"rank_max_abs":[0.09343715012073517,0.4004449248313904],"scaled_sumsq":36.77469253540039,"stable_norm":2.4283835887908936,"top_leaves":[{"leaf":0,"max_abs":0.4004449248313904,"path":"['weight']"}],"total_elements":192},"reduction_rounds":2,"replicas_exact":true,"schema":"canon-p62-onehost-group-v1"}
+[P62.ONEHOST] {"group":1,"rank_local":{"all_finite":true,"any_nonzero":true,"first_nonfinite":null,"first_nonfinite_rank":null,"leaf_count":1,"max_abs":0.5005561709403992,"naive_norm":3.228487491607666,"naive_norm_finite":true,"nonzero_leaf_count":1,"rank_count":2,"rank_max_abs":[0.1446051150560379,0.5005561709403992],"scaled_sumsq":41.599918365478516,"stable_norm":3.228487253189087,"top_leaves":[{"leaf":0,"max_abs":0.5005561709403992,"path":"['weight']"}],"total_elements":192},"reduction_rounds":2,"replicas_exact":true,"schema":"canon-p62-onehost-group-v1"}
+P62_NUMERIC_ONEHOST_V5P_PASS topology=DP2xTP2 groups=2 global_trajectories=4 loss_scale=0.25 streamed_multiplier=0.5 accumulator_denom=2 rel_l2_fp64=3.77417983e-08 cosine_fp64=1 wrong_multiplier_rel_l2=0.999999996 wrong_dp_sum_rel_l2=0.999999996 fixed_tp_input_reduction=1 fixed_dp_reduction=1 optimizer_commits=0
+P62_ONEHOST_END docker_exit=0 elapsed_seconds=54
