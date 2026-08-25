@@ -132,7 +132,7 @@ spec:
                 requests:
                   memory: 200G
                 limits:
-                  memory: 350G
+                  memory: 420G
               command:
                 - bash
                 - -c
