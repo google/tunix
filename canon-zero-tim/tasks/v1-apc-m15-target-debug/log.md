@@ -138,3 +138,13 @@
   red, localization, repair, or APC production enablement is claimed.
 - Next: user review and explicit commit/push approval, then separately approved
   APC-off DP8xTP8 control.
+
+## 2026-08-25T02:22:00Z — Attempt 0: APC-off control failure recorded
+
+- Type: target launch / diagnostic
+- Fact: JobSet `canon-v1-apc-m15-off-d3-eb58954f` (DP8xTP8 64-TPU, APC-off control) launched on the cluster with commit `eb58954f90572e19602b354cfcb71cc5d58f35d5`.
+- Fact: all 16 TPU nodes booted, synced repo, verified all 6 overlay files with SHA256 byte identity, and completed worker registration.
+- Fact: in Step 90, the Python launcher exited with code 1 during startup before populating `p38_serving_capture`, resulting in `INCONCLUSIVE` postflight classification.
+- Action: archived Attempt 0 failure receipt and error log in `evidence/v1_apc_m15_attempt0_20260825/`.
+- Files/artifacts: [Attempt-0 evidence](evidence/v1_apc_m15_attempt0_20260825/receipt.json), [Attempt-0 error log](evidence/v1_apc_m15_attempt0_20260825/m15_off_d3_attempt0_error.log)
+- Next: diagnose the root cause of the Python launcher exit in Step 90, re-render, and relaunch APC-off control.

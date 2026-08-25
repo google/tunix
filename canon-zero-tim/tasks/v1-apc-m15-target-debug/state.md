@@ -7,8 +7,9 @@
 - Current baseline: operator tip `ff913a84`; the intervening raw-log and P58 seed-registry commits were reviewed before fast-forward, with no conflicting numerical hunk
 - Release state: the isolated release candidate passed host and pinned exact-image admission; publication is recorded by Git, and no runtime launch is implied by publication
 - Current phase: Phase B EXACT-IMAGE PASS / TARGET NOT RUN, [freeze a replay carrier](phases/phase-b-replay-carrier.md)
-- Last verified fact: Phase B captures all 256 producer rows and a host-only envelope for every A/B serving call, then mechanically joins both to the first red. The large carrier is included in the existing GCS serving archive, the replay envelope is included in live snapshots, and the GCS-side wrapper was integration-tested against a fake immutable bucket: download, root/nested SHA verification, small-receipt upload, manifest-last completion, and overwrite rejection all passed. No numerical red has been freshly reproduced and no replay has run.
-- Next action after publication: request separate approval for the APC-off target control. APC-on target treatment remains a later independent approval; the remote agent follows `RUNBOOK.md` without editing code/YAML.
-- Blockers: the exact historical `m15i` request/token/cache chronology was not archived and cannot be reconstructed from hashes. A fresh, fully captured red must become the strict replay source.
-- Key artifacts: [Attempt-2 receipt](../v1-phase4-three-full-recipes/evidence/v1_hp_three_full_attempt2_20260824/receipt.json), [M15 raw log](../v1-phase4-three-full-recipes/evidence/v1_hp_three_full_attempt2_20260824/m15_m15i_error.log), [Phase3 state](../v1-phase3-prefix-cache/state.md)
+- Last verified fact: Attempt 0 of APC-off control (`canon-v1-apc-m15-off-d3-eb58954f`) completed cluster boot and overlay verification, but exited with code 1 at Step 90 Python initialization. Failure receipt archived in `evidence/v1_apc_m15_attempt0_20260825/`.
+- Next action after publication: fix Step 90 entrypoint invocation for M15 APC debug, re-render, and launch Attempt 1 APC-off target control.
+- Blockers: Python launcher exit 1 during Step 90 startup under `qwen3-8b-dp8-tp8-frozenlake-apc-debug.env`.
+- Key artifacts: [Attempt-0 receipt](evidence/v1_apc_m15_attempt0_20260825/receipt.json), [Attempt-2 receipt](../v1-phase4-three-full-recipes/evidence/v1_hp_three_full_attempt2_20260824/receipt.json), [M15 raw log](../v1-phase4-three-full-recipes/evidence/v1_hp_three_full_attempt2_20260824/m15_m15i_error.log), [Phase3 state](../v1-phase3-prefix-cache/state.md)
 - Updated: 2026-08-25
+
