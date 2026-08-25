@@ -309,6 +309,26 @@ tee_rc="${pipeline_status[1]:-1}"
 set +e
 echo "[run] exit=$rc"
 echo "[run] transport_rc=$tee_rc"
+if [ "${CANON_P64_P45_NUMERIC_DEBUG:-0}" = "1" ] && [ -s "$LOG" ]; then
+  p64_gcs_log_uri="gs://yuxzhang-tunix-models/tmp/canon-zero-tim/p64_debug/${JOBSET_NAME:-$(basename "$CANON_STATE")}_run.log"
+  if command -v gcloud >/dev/null 2>&1; then
+    gcloud storage cp "$LOG" "$p64_gcs_log_uri" 2>/dev/null || true
+  elif command -v gsutil >/dev/null 2>&1; then
+    gsutil cp "$LOG" "$p64_gcs_log_uri" 2>/dev/null || true
+  else
+    python3 -c '
+import sys
+try:
+    from google.cloud import storage
+    src, dst_uri = sys.argv[1:3]
+    client = storage.Client()
+    bucket_name, key = dst_uri[5:].split("/", 1)
+    client.bucket(bucket_name).blob(key).upload_from_filename(src)
+except Exception:
+    pass
+' "$LOG" "$p64_gcs_log_uri" 2>/dev/null || true
+  fi
+fi
 # Persist compiled executables before any fail-closed postflight branch can
 # exit. The receipt is informational: cache transport never relaxes or replaces
 # a numerical/alignment verdict.
