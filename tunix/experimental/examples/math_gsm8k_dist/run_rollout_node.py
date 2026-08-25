@@ -65,6 +65,22 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser = argparse.ArgumentParser(description="vLLM rollout worker process")
   parser.add_argument("--port", type=int, default=20001)
   parser.add_argument("--worker_id", type=str, default="vllm-rollout-0")
+  parser.add_argument(
+      "--worker_index",
+      type=int,
+      default=0,
+      help=(
+          "Distinguishes this replica's Raiden work-unit registration from"
+          " every other rollout replica's. raiden_worker_sync.py derives"
+          " job_replica_id from this (falling back to '' when it's 0), so"
+          " leaving every replica at the class default of 0 makes them all"
+          " register under the same empty job_replica_id -- the second"
+          " replica to register silently overwrites the first's endpoint in"
+          " the coordinator's registry, and only one replica actually"
+          " receives each subsequent weight-sync transfer. Must be nonzero"
+          " and unique per replica; k8s_launcher.sh passes replica_index+1."
+      ),
+  )
   parser.add_argument("--model_id", type=str, default="Qwen/Qwen3-1.7B")
   parser.add_argument(
       "--model_dir", type=str, default=os.getenv("MODEL_DIR", "")
@@ -235,6 +251,7 @@ def _create_vllm_worker(args, tokenizer):
         server_id=args.worker_id,
         engine_args=engine_args,
         model_name=vllm_model,
+        worker_index=args.worker_index,
     )
     rollout_config = rollout_worker.RolloutConfig(
         sampler_type="vllm",

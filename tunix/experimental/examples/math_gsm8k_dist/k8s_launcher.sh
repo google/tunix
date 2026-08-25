@@ -207,6 +207,7 @@ start_rollout() {
           --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
           --process_main=tunix.experimental.examples.math_gsm8k_dist.run_rollout_node.main \
           --worker_id=${replica_id} \
+          --worker_index=$((i + 1)) \
           --port=${ROLLOUT_PORT} \
           --model_id=${MODEL_ID} \
           --model_dir=${MODEL_DIR} \
