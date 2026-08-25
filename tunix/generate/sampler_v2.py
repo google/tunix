@@ -1,4 +1,36 @@
 import dataclasses
+from typing import Any, Sequence, Tuple, Optional, Iterable, Dict, List
+import jax
+import jax.numpy as jnp
+import numpy as np
+from flax import nnx
+from flax import struct
+
+@struct.dataclass
+class RPAMetadata:
+    """Encapsulates execution metadata arrays for the Ragged Page Attention kernel."""
+    page_indices: np.ndarray | jnp.ndarray
+    seq_lens: np.ndarray | jnp.ndarray
+    active_seq_lens: np.ndarray | jnp.ndarray
+    distribution: np.ndarray | jnp.ndarray
+
+@struct.dataclass
+class RaggedArray:
+    data: jnp.ndarray
+    lens: jnp.ndarray
+    
+    @property
+    def row_idxs(self) -> jnp.ndarray:
+        return jnp.repeat(jnp.arange(len(self.lens)), self.lens)
+        
+    @property
+    def intra_offsets(self) -> jnp.ndarray:
+        num_tokens = self.data.shape[0]
+        positions = jnp.arange(num_tokens)
+        starts = jnp.zeros_like(self.lens)
+        if len(self.lens) > 0:
+            starts = starts.at[1:].set(jnp.cumsum(self.lens)[:-1])
+        return positions - starts[self.row_idxs]
 
 @dataclasses.dataclass
 class CacheConfig:
@@ -8,14 +40,9 @@ class CacheConfig:
   max_prompt_length: int = 1000
   max_tokens_to_generate: int = 1000
   max_tpu_bytes: int = 5 * 1024 ** 3
+  max_cpu_bytes: int = 0
 
-from typing import Any, Sequence, Tuple, Optional, Iterable, Dict, List
-import jax
-import jax.numpy as jnp
-import numpy as np
-from flax import nnx
 
-from tunix.generate import page_manager as page_manager_lib
 from tunix.generate import cache_manager as cache_manager_lib
 from tunix.generate import utils
 
@@ -167,12 +194,9 @@ class VanillaSampler:
     def sample_step(
         self,
         cache: Any,
-        seq_lens: np.ndarray,
-        kv_lens: np.ndarray,
         tokens: np.ndarray,
-        active_seq_lens: np.ndarray,
-        distribution: np.ndarray,
-        static_token_capacity: int,
+        metadata: RPAMetadata,
+        static_token_capacity: int = 1000,
         temperature: float = 0.0,
         top_p: float = 1.0,
         top_k: int = -1,
@@ -181,15 +205,13 @@ class VanillaSampler:
         step: int = 0
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray | None, Any]:
         
-        batch_size = len(seq_lens)
+        batch_size = len(metadata.seq_lens)
         
         logits, updated_cache = self._compiled_sample_step(
             self._flattened_transformer_state, 
             cache,
-            jnp.array(seq_lens, dtype=jnp.int32),
             jnp.array(tokens, dtype=jnp.int32),
-            jnp.array(active_seq_lens, dtype=jnp.int32),
-            jnp.array(distribution, dtype=jnp.int32),
+            metadata,
             batch_size=batch_size,
             static_token_capacity=static_token_capacity
         )
@@ -218,52 +240,42 @@ class VanillaSampler:
         self,
         params: Any,
         cache: Any,
-        seq_lens: jnp.ndarray,
         tokens_ragged: jnp.ndarray,
-        active_seq_lens: jnp.ndarray,
-        distribution: jnp.ndarray,
-        batch_size: int,
-        static_token_capacity: int,
+        metadata: RPAMetadata,
+        batch_size: int = 1,
+        static_token_capacity: int = 1000,
     ) -> Tuple[jnp.ndarray, Any]:
         
         transformer = nnx.merge(self._transformer_graphdef, params)
         
-        ragged = page_manager_lib.RaggedArray(
+        ragged = RaggedArray(
             data=tokens_ragged,
-            lens=active_seq_lens,
+            lens=metadata.active_seq_lens,
         )
         seq_idxs = ragged.row_idxs
         positions = ragged.intra_offsets
-
-        global_positions = positions + (seq_lens[seq_idxs] - active_seq_lens[seq_idxs])
+        global_positions = positions + (metadata.seq_lens[seq_idxs] - metadata.active_seq_lens[seq_idxs])
         tokens = tokens_ragged
         
+        # The transformer natively supports receiving metadata (or None for non-ragged cases).
         logits = transformer(
             tokens,
             global_positions, 
             cache=cache,
-            distribution=distribution, 
-            seq_lens=seq_lens,
+            metadata=metadata,
             soft_cap=None, 
         )
         
-        last_token_idxs = jnp.cumsum(active_seq_lens) - 1
+        last_token_idxs = jnp.cumsum(metadata.active_seq_lens) - 1
         valid_idxs = jnp.maximum(0, last_token_idxs)
         last_token_logits = logits[valid_idxs]
         
-        # Zero out invalid logits from inactive sequences or chunked sequences.
-        # distribution = [i, j, k] mapping:
-        # sequences[0:i] are decode.
-        # sequences[i:j] are prefill only.
-        # sequences[j:k] are chunked prefill.
-        # We only want to sample from [0:j] (i.e. decoding seqs and completed prefill seqs).
-        # Sequences [j:k] are chunk-prefilling and should not emit tokens yet.
-        num_sampleable = distribution[1] 
+        num_sampleable = metadata.distribution[1] 
         seq_indices = jnp.arange(batch_size)
         is_sampleable = seq_indices < num_sampleable
         
         last_token_logits = jnp.where(is_sampleable[:, None], last_token_logits, 0.0)
-        
+            
         return last_token_logits, cache
 
 

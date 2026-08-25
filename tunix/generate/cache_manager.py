@@ -1,10 +1,10 @@
-from tunix.generate import page_manager
+import contextlib
+import collections
 import jax
 import jax.numpy as jnp
 import numpy as np
 from typing import List, Dict, Optional
 import dataclasses
-from tunix.generate import page_manager as pm_lib
 from tunix.generate import utils
 
 @dataclasses.dataclass(kw_only=True)
@@ -12,6 +12,19 @@ class Block:
   partition_pages: dict[str, jax.Array]
   available_page_indices: collections.deque
   num_available_pages: int
+
+  def allocate(self, num_pages: int) -> list[int]:
+    """Allocates physical indices from the block."""
+    assert num_pages <= self.num_available_pages, "Not enough physical pages"
+    indices = [self.available_page_indices.popleft() for _ in range(num_pages)]
+    self.num_available_pages -= num_pages
+    return indices
+
+  def free(self, indices: list[int]):
+    """Frees physical indices logically."""
+    for idx in indices:
+        self.available_page_indices.append(idx)
+    self.num_available_pages += len(indices)
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class TieredMemoryConfig:
@@ -21,8 +34,8 @@ class TieredMemoryConfig:
   dtype: jnp.dtype
   partition_keys: tuple[str, ...]
 
-  max_tpu_bytes: int
-  max_cpu_bytes: int = 0
+  num_tpu_pages: int
+  num_cpu_pages: int = 0
 
   logical_page_sharding: str | None = None
   logical_subsharding: tuple[str | None, ...] = ()
@@ -31,42 +44,6 @@ class TieredMemoryConfig:
   tp_axis: str | None = None
   dp_size: int = 1
   tp_size: int = 1
-
-  def _calculate_pages_for_capacity(self, max_bytes: int, logical_sharding: tuple) -> int:
-    item_size = jnp.dtype(self.dtype).itemsize
-    page_shape = (self.page_size,) + self.page_subshape
-
-    block_subsharding = logical_sharding[1:]
-    elements = 1
-    for dim, shard in zip(page_shape, block_subsharding):
-        dim_size = (dim * self.dp_size) if shard == 'dp_axis' else dim
-        elements *= dim_size
-
-    page_bytes = elements * item_size * len(self.partition_keys)
-    if page_bytes == 0:
-        return 0
-
-    num_block_pages = max_bytes // page_bytes
-    page_sharding = logical_sharding[0]
-    if page_sharding == 'dp_axis':
-        num_block_pages = (num_block_pages // self.dp_size) * self.dp_size
-
-    return num_block_pages
-
-  @property
-  def num_tpu_pages(self) -> int:
-    return self._calculate_pages_for_capacity(
-      max_bytes=self.max_tpu_bytes, logical_sharding=self.logical_sharding)
-
-  @property
-  def num_cpu_pages(self) -> int:
-    # A block has shape: num_pages, page_size, *page_subshape
-    sharding_len = 2 + len(self.page_subshape)
-
-    return self._calculate_pages_for_capacity(
-      max_bytes=self.max_cpu_bytes,
-      logical_sharding=(None,) * sharding_len
-    )
 
   @property
   def logical_shard_to_physical(self) -> dict[str | None, str | None]:
@@ -125,7 +102,6 @@ class TieredMemoryConfig:
 
   def init(self) -> tuple[Block, Block | None]:
     """Initializes physical page tensors for TPU and CPU."""
-    assert self.num_tpu_pages >= self.max_num_pages_per_seq
         
     tpu_block = self._make_block(
         num_pages=self.num_tpu_pages,
@@ -141,6 +117,35 @@ class TieredMemoryConfig:
 
     return (tpu_block, cpu_block)
 
+
+def _calculate_pages_for_capacity(
+    max_bytes: int, 
+    logical_sharding: tuple,
+    page_size: int,
+    page_subshape: tuple,
+    dp_size: int,
+    dtype: jnp.dtype,
+    partition_keys: tuple
+) -> int:
+    item_size = jnp.dtype(dtype).itemsize
+    page_shape = (page_size,) + page_subshape
+
+    block_subsharding = logical_sharding[1:]
+    elements = 1
+    for dim, shard in zip(page_shape, block_subsharding):
+        dim_size = (dim * dp_size) if shard == 'dp_axis' else dim
+        elements *= dim_size
+
+    page_bytes = elements * item_size * len(partition_keys)
+    if page_bytes == 0:
+        return 0
+
+    num_block_pages = max_bytes // page_bytes
+    page_sharding = logical_sharding[0]
+    if page_sharding == 'dp_axis':
+        num_block_pages = (num_block_pages // dp_size) * dp_size
+
+    return num_block_pages
 
 def init_cache_manager(
     cache_config,
@@ -164,14 +169,39 @@ def init_cache_manager(
     packed_kv_dim = 2 * num_kv_heads // kv_packing
     
     partition_keys = tuple(f"layer_{i}" for i in range(num_layers))
+    page_subshape = (packed_kv_dim, kv_packing, head_dim)
+    
+    # Calculate TPU pages
+    logical_sharding = ('dp_axis', None, None, 'tp_axis')
+    num_tpu_pages = _calculate_pages_for_capacity(
+        max_bytes=cache_config.max_tpu_bytes,
+        logical_sharding=logical_sharding,
+        page_size=cache_config.page_size,
+        page_subshape=page_subshape,
+        dp_size=dp_size,
+        dtype=kv_dtype,
+        partition_keys=partition_keys
+    )
+    
+    # Calculate CPU pages
+    sharding_len = 2 + len(page_subshape)
+    num_cpu_pages = _calculate_pages_for_capacity(
+        max_bytes=getattr(cache_config, 'max_cpu_bytes', 0),
+        logical_sharding=(None,) * sharding_len,
+        page_size=cache_config.page_size,
+        page_subshape=page_subshape,
+        dp_size=dp_size,
+        dtype=kv_dtype,
+        partition_keys=partition_keys
+    )
     
     tiered_memory_config = TieredMemoryConfig(
         page_size=cache_config.page_size,
-        page_subshape=(packed_kv_dim, kv_packing, head_dim),
+        page_subshape=page_subshape,
         dtype=kv_dtype,
-        partition_keys=block_keys,
-        max_tpu_bytes=cache_config.max_tpu_bytes,
-        max_cpu_bytes=cache_config.max_cpu_bytes,
+        partition_keys=partition_keys,
+        num_tpu_pages=num_tpu_pages,
+        num_cpu_pages=num_cpu_pages,
         logical_page_sharding='dp_axis',
         logical_subsharding=(None, None, 'tp_axis'),
         dp_axis=dp_axis,
@@ -181,43 +211,52 @@ def init_cache_manager(
     )
     
     tpu_block, cpu_block = tiered_memory_config.init() 
-    return tpu_block, cpu_block
+    return CacheManager(
+        tiered_config=tiered_memory_config,
+        tpu_block=tpu_block,
+        cpu_block=cpu_block,
+        max_num_seqs=cache_config.max_num_seqs,
+    )
 
 class CacheManager:
   """
-    Manages logical page IDs and orchestrates the physical JAX TpuCpuPageManager.
+    Manages logical page IDs and orchestrates the physical JAX block memory.
     Operates outside of `jax.jit()`, tracking logic in pure Python and calling JAX methods
     when physical state needs to be updated.
     """
 
   def __init__(
       self,
-      config: CacheConfig,
-      model_config: ModelConfig,
+      tiered_config: TieredMemoryConfig,
+      tpu_block: Block,
+      cpu_block: Block | None,
+      max_num_seqs: int = 256,
   ):
-    self.config = config
-    self.page_manager = config.init()
-    self.page_size = config.page_size
+    self.config = tiered_config
+    self.page_manager = tpu_block
+    self.cpu_block = cpu_block
+    self.page_size = tiered_config.page_size
+    self.max_num_seqs = max_num_seqs
 
     self._next_page_id: int = 0
     self._page_id_to_idx: Dict[int, int] = {}
     self._page_location: Dict[int, str] = {}
 
-    self.available_tpu_pages = config.num_tpu_pages
-    self.available_cpu_pages = config.num_cpu_pages
+    self.available_tpu_pages = tpu_block.num_available_pages
+    self.available_cpu_pages = cpu_block.num_available_pages if cpu_block else 0
 
   def allocate_tpu_pages(self, num_pages: int) -> List[int]:
     """Allocates logical pages backing them immediately with TPU physical pages."""
     if num_pages == 0:
       return []
     
-    assert(num_pages > self.available_tpu_pages)
+    assert(num_pages <= self.available_tpu_pages)
 
     allocated_ids = []
-    for phys_idx in physical_indices:
+    phys_indices = self.page_manager.allocate(num_pages)
+    
+    for phys_idx in phys_indices:
       pid = self._next_page_id
-      phys_idx = available_pages.pop()
-
       self._next_page_id += 1
       self._page_id_to_idx[pid] = phys_idx
       self._page_location[pid] = "tpu"
@@ -233,7 +272,7 @@ class CacheManager:
     if not page_ids:
       return
 
-    if self.config.num_cpu_pages == 0:
+    if not self.cpu_block:
       raise RuntimeError("No CPU cache configured to load from.")
 
     if len(page_ids) > self.available_tpu_pages:
@@ -245,13 +284,18 @@ class CacheManager:
         raise RuntimeError("Page is not actually in CPU")
       physical_cpu_idxs.append(self._page_id_to_idx[pid])
 
-    padded_cpu_idxs = np.zeros(self.config.num_cpu_pages, dtype=np.int32)
-    padded_cpu_idxs[:len(physical_cpu_idxs)] = physical_cpu_idxs
+    physical_hbm_idxs = self.page_manager.allocate(len(page_ids))
+    self.cpu_block.free(physical_cpu_idxs)
+    
+    cpu_indices_arr = jnp.array(physical_cpu_idxs, dtype=jnp.int32)
+    tpu_indices_arr = jnp.array(physical_hbm_idxs, dtype=jnp.int32)
 
-    self.page_manager, padded_hbm_idxs = self.page_manager.load(
-        len(page_ids), jnp.array(padded_cpu_idxs, dtype=jnp.int32), "layer_0")
-
-    physical_hbm_idxs = np.array(padded_hbm_idxs)[:len(page_ids)].tolist()
+    for layer_name in self.page_manager.partition_pages.keys():
+       cpu_tensor = self.cpu_block.partition_pages[layer_name]
+       source_data = cpu_tensor[cpu_indices_arr]
+       
+       tpu_tensor = self.page_manager.partition_pages[layer_name]
+       self.page_manager.partition_pages[layer_name] = tpu_tensor.at[tpu_indices_arr].set(source_data)
 
     self.available_tpu_pages -= len(page_ids)
     self.available_cpu_pages += len(page_ids)
@@ -272,13 +316,18 @@ class CacheManager:
       assert(self._page_location.get(pid) == "tpu")
       physical_tpu_idxs.append(self._page_id_to_idx[pid])
 
-    padded_tpu_idxs = np.zeros(self.config.num_tpu_pages, dtype=np.int32)
-    padded_tpu_idxs[:len(physical_tpu_idxs)] = physical_tpu_idxs
+    physical_cpu_idxs = self.cpu_block.allocate(len(page_ids))
+    self.page_manager.free(physical_tpu_idxs)
+    
+    cpu_indices_arr = jnp.array(physical_cpu_idxs, dtype=jnp.int32)
+    tpu_indices_arr = jnp.array(physical_tpu_idxs, dtype=jnp.int32)
 
-    self.page_manager, padded_cpu_idxs = self.page_manager.offload(
-        len(page_ids), jnp.array(padded_tpu_idxs, dtype=jnp.int32), "layer_0")
-
-    physical_cpu_idxs = np.array(padded_cpu_idxs)[:len(page_ids)].tolist()
+    for layer_name in self.page_manager.partition_pages.keys():
+       tpu_tensor = self.page_manager.partition_pages[layer_name]
+       source_data = tpu_tensor[tpu_indices_arr]
+       
+       cpu_tensor = self.cpu_block.partition_pages[layer_name]
+       self.cpu_block.partition_pages[layer_name] = cpu_tensor.at[cpu_indices_arr].set(source_data)
 
     self.available_cpu_pages -= len(page_ids)
     self.available_tpu_pages += len(page_ids)

@@ -118,9 +118,13 @@ class LLMEngine:
         distribution = np.array([i, j, k], dtype=np.int32)
         
         # Build 1D arrays
+        # Build 1D arrays
         tokens = []
         active_seq_lens = []
         seq_lens = []
+        page_indices = []
+        
+        max_pages = max([len(r.page_ids) for r in ordered_reqs] + [1])
         
         for r in ordered_reqs:
             completed = getattr(r, 'num_completed_tokens', 0)
@@ -139,19 +143,27 @@ class LLMEngine:
             active_seq_lens.append(len(toks))
             seq_lens.append(completed + len(toks))
             
+            # Map logical page IDs to physical hardware indices
+            phys_idxs = [self.cache_manager._page_id_to_idx[pid] for pid in r.page_ids]
+            # Pad indices for batch uniformity
+            phys_idxs.extend([0] * (max_pages - len(phys_idxs)))
+            page_indices.append(phys_idxs)
+            
         tokens = np.array(tokens, dtype=np.int32)
-        active_seq_lens = np.array(active_seq_lens, dtype=np.int32)
-        seq_lens = np.array(seq_lens, dtype=np.int32)
+        
+        metadata = sampler_lib.RPAMetadata(
+            page_indices=np.array(page_indices, dtype=np.int32),
+            seq_lens=np.array(seq_lens, dtype=np.int32),
+            active_seq_lens=np.array(active_seq_lens, dtype=np.int32),
+            distribution=distribution,
+        )
         
         total_tokens = len(tokens)
         
         gen_tokens, logits, logp, next_cache = self.sampler.sample_step(
-            cache=self.cache_manager.page_manager,
-            seq_lens=seq_lens,
-            kv_lens=self.cache_manager.kv_lens,
+            cache=self.cache_manager.tpu_block.partition_pages,
             tokens=tokens,
-            active_seq_lens=active_seq_lens,
-            distribution=distribution,
+            metadata=metadata,
             static_token_capacity=total_tokens, 
             temperature=temperature,
             top_p=top_p if top_p is not None else 1.0,
@@ -160,7 +172,7 @@ class LLMEngine:
             forbidden_token_ids=list(forbidden_tokens) if forbidden_tokens else None,
         )
         
-        self.cache_manager.page_manager = next_cache
+        self.cache_manager.tpu_block.partition_pages = next_cache
         
         # We only sampled for indices < j (decodes and prefills_completing)
         for idx in range(j):

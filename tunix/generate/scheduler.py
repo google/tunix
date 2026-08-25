@@ -14,8 +14,6 @@
 
 """A scheduler for rollout requests in Tunix."""
 
-import dataclasses
-
 import collections
 from typing import List, Dict, Tuple
 from tunix.generate.cache_manager import CacheManager
@@ -84,19 +82,19 @@ class Scheduler:
     full_tokens = request.token_ids
     req_hashes = self._chunk_and_hash(full_tokens)
     n_full_pages = len(full_tokens) // self.page_size
-    allocated_pages = self._cache_manager.allocate_tpu_pages(num_pages)
+    allocated_pages = self.cache_manager.allocate_tpu_pages(num_pages)
 
     for pid in allocated_pages:
-      self.page_location[] = "tpu"
+      self.page_location[pid] = "tpu"
       
       # Associate this new block ID with its prefix chunk hash
       chunk_idx = len(request.page_ids)
       if chunk_idx < n_full_pages:
         block_hash = req_hashes[chunk_idx]
-        self.prefix_hash_to_page_id[block_hash] = new_pid
+        self.prefix_hash_to_page_id[block_hash] = pid
       
-      req.page_ids.append(new_pid)
-      self._touch_page(new_pid)
+      request.page_ids.append(pid)
+      self._touch_page(pid)
 
   def _preempt(self):
     """Remove the newest-request from the active batch."""
@@ -116,7 +114,7 @@ class Scheduler:
     if num_pages <= 0: 
         return
 
-    assert num_pages <= len(self.unreferenced_tpu_pages)
+    if num_pages > len(self.unreferenced_tpu_pages): raise RuntimeError("Not enough space")
 
     cpu_shortfall = num_pages - self.cache_manager.available_cpu_pages
     if cpu_shortfall > 0:
@@ -150,7 +148,7 @@ class Scheduler:
     if num_pages <= 0: return
     
     n_unref_pages = len(self.unreferenced_cpu_pages)
-    assert(num_pages > n_unref_pages)
+    if num_pages > n_unref_pages: raise RuntimeError("Not enough")
     
     pages_to_evict = []
     for _ in range(num_pages):
@@ -193,23 +191,23 @@ class Scheduler:
       if is_empty or is_partially_full:
           continue
       
-      n_full_pages = len(req.token_ids) // self.page_size 
+      n_full_pages = n_tokens // self.page_size 
       last_full_idx = n_full_pages - 1
       pid = req.page_ids[last_full_idx]
       
-      chunk = tuple(tokens[i:i+self.page_size])
-      chunk_hash = hash(request.last_page_hash, chunk)
-      request.last_page_hash = chunk_hash 
+      chunk = tuple(req.token_ids[-self.page_size:])
+      chunk_hash = hash((req.last_page_hash, chunk))
+      req.last_page_hash = chunk_hash 
       
       if chunk_hash in self.prefix_hash_to_page_id:
         cached_pid = self.prefix_hash_to_page_id[chunk_hash]
         if cached_pid != pid:
           # Deduplicate page in case of cache hit
           req.page_ids[last_full_idx] = cached_pid
-          self.release_page(pid)
-          self.touch_page(cached_pid)
+          self._release_page(pid)
+          self._touch_page(cached_pid)
       else:
-        self.prefix_hash_to_page_id[block_hash] = pid
+        self.prefix_hash_to_page_id[chunk_hash] = pid
             
   def _queue_new_requests(self, new_requests: List[Request]):
     """Insert new requests into the pending queue."""
@@ -320,7 +318,7 @@ class Scheduler:
         n_cpu_pages_used = 0
         for pid in matched_page_ids:
             if self.page_location.get(pid) == "cpu" and pid not in pages_to_load:
-                cpu_pages_used += 1
+                n_cpu_pages_used += 1
          
         total_hbm_cost = n_new_pages_needed + n_cpu_pages_used
         if free_tpu < total_hbm_cost:
@@ -328,8 +326,6 @@ class Scheduler:
 
         self.pending_requests.popleft()
         self._token_budget -= n_tokens_to_compute
-        self._allocate(req, n_new_pages_required) 
-
         req.num_in_flight_tokens = n_tokens_to_load 
         req.page_ids = []
         cache_seq_slot = len(self.running_requests)
@@ -340,6 +336,8 @@ class Scheduler:
 
             self._touch_page(pid)
             req.page_ids.append(pid)
+            
+        self._allocate(req, n_new_pages_needed) 
         
         self.running_requests.append(req)
         free_tpu -= total_hbm_cost
