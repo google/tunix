@@ -14,6 +14,8 @@
 
 """Tests for framework-neutral diffusion contracts."""
 
+from typing import Any, cast
+
 from absl.testing import absltest
 from flax import nnx
 import jax
@@ -59,6 +61,7 @@ class _ToyModel(nnx.Module):
 
 
 def _score_fn(model: nnx.Module, model_inputs: types.ModelInputs) -> jax.Array:
+  assert isinstance(model, _ToyModel)
   return model.score(model_inputs["input_tokens"])
 
 
@@ -105,7 +108,7 @@ class DiffusionTokenBatchTest(absltest.TestCase):
         target_ids=target_ids,
         loss_weights=jnp.array([[0, 1, 1], [1, 1, 1]], dtype=jnp.float32),
     )
-    self.assertEqual(int(batch.target_ids[0, 0]), -1)
+    self.assertEqual(int(np.asarray(batch.target_ids)[0, 0]), -1)
 
   def test_requires_nonempty_batch_major_array_inputs(self):
     with self.assertRaisesRegex(ValueError, "at least one array"):
@@ -155,7 +158,8 @@ class DiffusionTokenBatchTest(absltest.TestCase):
       return value.target_ids * value.loss_weights
 
     np.testing.assert_array_equal(
-        weighted_targets(batch), batch.target_ids.astype(jnp.float32)
+        weighted_targets(batch),
+        np.asarray(batch.target_ids).astype(jnp.float32),
     )
 
   def test_array_leaves_are_compatible_with_data_sharding(self):
@@ -163,10 +167,11 @@ class DiffusionTokenBatchTest(absltest.TestCase):
     mesh = shd.Mesh(np.array(jax.devices()[:1]), ("data",))
 
     with mesh:
-      sharded_batch = sharding_utils.shard_input(batch, ("data",))
+      sharded_batch = sharding_utils.shard_input(cast(Any, batch), ("data",))
 
     for leaf in jax.tree.leaves(sharded_batch):
       self.assertIsInstance(leaf, jax.Array)
+      assert isinstance(leaf.sharding, shd.NamedSharding)
       self.assertEqual(leaf.sharding.spec, shd.PartitionSpec("data"))
 
 
