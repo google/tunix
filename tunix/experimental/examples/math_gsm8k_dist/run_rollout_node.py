@@ -205,7 +205,23 @@ def _create_vllm_worker(args, tokenizer):
           args.maxtext_model_name,
       )
       engine_kwargs["hf_overrides"] = {"architectures": ["MaxTextForCausalLM"]}
-      maxtext_config_overrides = {"model_name": args.maxtext_model_name}
+      # Matches maxtext/src/maxtext/trainers/post_train/rl/scripts/run_qwen3_30b_rl.sh's
+      # working vllm_additional_config for Qwen3-30B-A3B: enable_dp_attention
+      # is explicitly False here (attn DP is a trainer-side setting, not a
+      # rollout one), allow_split_physical_axes governs how mesh axes can
+      # split/share across the physical device topology (plausibly the fix
+      # for the KV-cache shape mismatch we've been chasing), and
+      # prefuse_moe_weights changes the MoE weight layout the rollout engine
+      # expects.
+      maxtext_config_overrides = {
+          "model_name": args.maxtext_model_name,
+          "model_call_mode": "inference",
+          "enable_dp_attention": False,
+          "allow_split_physical_axes": True,
+          "log_config": False,
+          "weight_dtype": "bfloat16",
+          "prefuse_moe_weights": True,
+      }
       if args.maxtext_attention:
         maxtext_config_overrides["attention"] = args.maxtext_attention
       engine_kwargs["additional_config"] = {
