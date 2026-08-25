@@ -249,7 +249,19 @@ echo "[run] log: $LOG"
 cd "${CANON_RUN_CWD:-$CANON_PKG/..}"
 set +e
 set -o pipefail
-bash -c "$CANON_RUN_CMD" 2>&1 | tee "$LOG"
+run_tee_args=("$LOG")
+if [ "${CANON_P62_BACKWARD_NUMERIC_DEBUG:-0}" = "1" ]; then
+  if [ "${CANON_PROFILE_FILE:-}" != \
+       "cluster/profiles/qwen3-1p7b-dp16-tp4-gsm8k-p62-debug.env" ]; then
+    echo "[run] FATAL: P62 full-log seed requires its exact profile" >&2
+    exit 1
+  fi
+  p62_profile_receipt="[P62.NUMERIC] profile_resolved workload=gsm8k dp=16 tp=4 stage=backward-no-commit optimizer_commits=0"
+  printf '%s\n' "$p62_profile_receipt" > "$LOG"
+  echo "$p62_profile_receipt"
+  run_tee_args=(-a "$LOG")
+fi
+bash -c "$CANON_RUN_CMD" 2>&1 | tee "${run_tee_args[@]}"
 pipeline_status=("${PIPESTATUS[@]}")
 rc="${pipeline_status[0]}"
 tee_rc="${pipeline_status[1]:-1}"
@@ -766,7 +778,8 @@ fi
 if [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "1" ]; then
   case "${CANON_PROFILE_FILE:-}" in
     cluster/profiles/qwen3-1p7b-dp16-tp4-gsm8k.env|\
-    cluster/profiles/qwen3-1p7b-dp16-tp4-gsm8k-v1-hp.env)
+    cluster/profiles/qwen3-1p7b-dp16-tp4-gsm8k-v1-hp.env|\
+    cluster/profiles/qwen3-1p7b-dp16-tp4-gsm8k-p62-debug.env)
       p38_fixed_endpoint=tied_embed
       p38_fixed_hidden=2048
       p38_fixed_tp=4
@@ -831,7 +844,8 @@ if [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "1" ]; then
     cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-apc-debug.env)
       p38_fixed_receipt_args+=(--learner-m 2048)
       ;;
-    cluster/profiles/qwen3-1p7b-dp16-tp4-gsm8k-v1-hp.env)
+    cluster/profiles/qwen3-1p7b-dp16-tp4-gsm8k-v1-hp.env|\
+    cluster/profiles/qwen3-1p7b-dp16-tp4-gsm8k-p62-debug.env)
       if [ "${CANON_P59_RANK_PARALLEL_BACKWARD:-0}" = "1" ]; then
         p38_fixed_receipt_args+=(--p59-local-dp-size 16)
       fi
@@ -953,7 +967,51 @@ if [ "${is_frozenlake:-0}" = "1" ]; then
     exit 1
   fi
 fi
-if [ "${CANON_P35_ENVELOPE:-0}" = "1" ]; then
+if [ "${CANON_P62_BACKWARD_NUMERIC_DEBUG:-0}" = "1" ]; then
+  p62_classification="$CANON_STATE/p62_backward_numeric.classification.json"
+  p62_classifier_rc=0
+  JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
+    python3 "$CANON_PKG/tasks/v1-phase4-three-full-recipes/scripts/classify_attempt7_numeric_debug.py" \
+      "$LOG" --output "$p62_classification" || p62_classifier_rc=$?
+  if [ ! -s "$p62_classification" ]; then
+    echo "[run] FATAL: P62 classifier did not persist its result" >&2
+    exit 1
+  fi
+  p62_log_sha="$(sha256sum "$LOG" | awk '{print $1}')"
+  p62_log_bytes="$(wc -c < "$LOG" | tr -d '[:space:]')"
+  p62_log_lines="$(wc -l < "$LOG" | tr -d '[:space:]')"
+  p62_class_sha="$(sha256sum "$p62_classification" | awk '{print $1}')"
+  p62_verdict="$(JAX_PLATFORMS=cpu python3 -c \
+    'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["verdict"])' \
+    "$p62_classification")" || {
+      echo "[run] FATAL: P62 classification verdict is unreadable" >&2
+      exit 1
+    }
+  echo "[P62.NUMERIC.POSTFLIGHT] verdict=$p62_verdict workload_rc=$rc transport_rc=$tee_rc run_log=$LOG run_log_sha256=$p62_log_sha run_log_bytes=$p62_log_bytes run_log_lines=$p62_log_lines classification=$p62_classification classification_sha256=$p62_class_sha"
+  sed 's/^/[P62.NUMERIC.CLASSIFICATION_JSON] /' "$p62_classification"
+  if [ "$tee_rc" -ne 0 ]; then
+    echo "[run] FATAL: P62 full-log transport failed: rc=$tee_rc" >&2
+    exit 1
+  fi
+  if [ "$p62_classifier_rc" -ne 0 ]; then
+    echo "[run] FATAL: P62 full-log classification failed: rc=$p62_classifier_rc verdict=$p62_verdict" >&2
+    exit "$p62_classifier_rc"
+  fi
+  if [ "$p62_verdict" = "ROOT_LOCALIZED_NONFINITE" ]; then
+    if [ "$rc" -eq 0 ]; then
+      echo "[run] FATAL: P62 localized non-finite without fail-closed workload exit" >&2
+      exit 1
+    fi
+    echo "[P62.NUMERIC.POSTFLIGHT] ROOT_LOCALIZED workload_exit_preserved=$rc"
+    exit "$rc"
+  fi
+  if [ "$rc" -ne 0 ]; then
+    echo "[run] FATAL: P62 workload failed after successful finite classification: rc=$rc verdict=$p62_verdict" >&2
+    exit "$rc"
+  fi
+  echo "[P62.NUMERIC.POSTFLIGHT] PASS complete_log=1 optimizer_commits=0"
+  exit 0
+elif [ "${CANON_P35_ENVELOPE:-0}" = "1" ]; then
   if [ "${CANON_P35_REPLAY_STAGE_PROBE:-0}" = "1" ]; then
     if [ "$rc" -ne 1 ]; then
       echo "[run] FATAL: P35.3c must terminate with diagnostic exit=1; got $rc" >&2

@@ -23,6 +23,11 @@ commits.
   naive sum of squares overflows; a single element must exceed about 1.84e19
   before its square overflows. Normal training gradients are not expected near
   those scales.
+- Remote G5a run `canon-p62-gsm8k-num-p62d3-505bfb95` adds one bounded fact:
+  the loss cotangent and group-0 engine/rank-local trees are finite, but the
+  latter has `max_abs=5.7923e21` and `stable_norm=5.3814e22`. The preserved
+  artifact contains only six selected lines and cannot establish later
+  boundaries, complete execution, or a zero-commit terminal.
 
 ## Frozen GSM8K algebra and shape ledger
 
@@ -95,10 +100,14 @@ The diagnostic is default-off, exact-workload admitted, and fail-closed.
   ordinary JAX/Tunix and P28+P59 gradients are compared by per-leaf finiteness,
   max-abs, relative L2, cosine, and bounded FP64 endpoint oracles. Serial and
   parallel need not be bitwise identical.
-- G5: user-run fresh DP16xTP4 GSM8K diagnostic preserves strict alignment,
+- G5a: remote DP16xTP4 GSM8K partial excerpt is preserved as incomplete; it
+  must not admit a repair or optimizer transaction.
+- G5b: user-run fresh DP16xTP4 GSM8K diagnostic preserves strict alignment,
   completes 16 groups, identifies the first numerical red or proves every
-  boundary sane, and performs zero optimizer commits.
-- G6: only after G5 may a one-commit candidate be designed. Full recipes stay
+  boundary sane, persists the complete raw log, and performs zero optimizer
+  commits. The classifier must validate exactly one profile marker and reject
+  unknown non-JSON P62 markers.
+- G6: only after G5b may a one-commit candidate be designed. Full recipes stay
   blocked until that transaction and its prior gates are green.
 
 G2 topology correction: the pre-registered `DP2xTP2 installed fixed-head`
@@ -138,12 +147,19 @@ numerical criterion.
   relative-L2 about `1`, and optimizer commits are zero. Not verified by this
   gate: full Qwen DP16xTP4 magnitude or the first target red, because the
   carrier is a bounded linear/reduction mechanism test.
-- G5 remains pending. Full recipes and one-commit admission remain blocked.
+- G5a is incomplete and G5b remains pending. Full recipes and one-commit
+  admission remain blocked.
 - The offline G5 classifier is implemented and host-negative-tested. It keeps
   `ROOT_LOCALIZED_NONFINITE`, `FINITE_NAIVE_L2_OVERFLOW`, and
   `ALL_BOUNDARIES_FINITE_NO_COMMIT` distinct; alignment/shape/scale/optimizer
   violations are `FATAL_CONTRACT`, and an unlocalized truncated log is
   `INCONCLUSIVE_INCOMPLETE`.
+- 2026-08-25 G5a correction: the signed six-line target artifact passes its
+  own SHA256. The repaired classifier admits and exactly validates its
+  `profile_resolved` marker, then still returns `FATAL_CONTRACT` because the
+  artifact omits strict alignment, groups 1-15, fixed-DP/scaled/accumulator
+  boundaries, and discard. It is not backward-correctness or naive-norm-only
+  evidence.
 - 2026-08-25 publication audit: rebased the scoped P62 CLs on operator runtime
   tip `eb58954f`, then through the publication-time M15 evidence/documentation
   tip, and preserved the incoming APC carrier and Attempt-0 receipt. Host V1 34/34, P59
@@ -153,3 +169,29 @@ numerical criterion.
   but not registered as a new signed raw artifact. The previously signed P62
   r1, G2 r2, and one-host r2 evidence remains byte-verified. G5 is still not
   run and no optimizer transaction is admitted.
+- 2026-08-25 G5b carrier admission: the P62 run now seeds the exact validated
+  profile receipt into its unique `$CANON_STATE/run.log`, appends the complete
+  workload output, and automatically classifies that exact file in pod before
+  exit. The terminal receipt binds verdict, workload/transport return codes,
+  log SHA/bytes/lines, classification path, and classification SHA. The
+  renderer records both durable paths. A selected-line excerpt cannot pass.
+- Classifier negatives require one exact profile and admission marker, strict
+  pre-alignment, complete reverse groups 1-16, loss cotangent, group-0/group-15
+  engine/rank-local/fixed-DP/scaled seams, final denominator 16, and one
+  discard. Finite naive-L2 overflow is downgraded to
+  `INCONCLUSIVE_INCOMPLETE` until all completion seams exist; unknown textual
+  P62 markers and optimizer activity are fatal. P62 also enters the exact
+  fixed-head DP16 local-receipt classifier path.
+- Parent base `bdfa50e1` passes V1 38/38, P57 144/144, P59 37/37, APC
+  31/31, M15 APC target 9/9, flag audit 371/371, Bash syntax, and diff hygiene.
+  Dependency-complete pinned image
+  `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`
+  exits zero with unique terminal `V1_HP_EXACT_IMAGE_PASS ... p62_numeric=6
+  ... apc_m15_carrier=39 ... manifests=3`. This execution was observed in the
+  terminal but was not saved as a new signed raw artifact. No TPU, JobSet,
+  optimizer commit, source commit, or push occurred. G5b target remains
+  pending.
+- Final operator base `41a2043c` adds only a one-line checkpoint exemption for
+  the separate zero-commit M15 APC target carrier. Its focused host and pinned-
+  image tests pass 9/9; P62 runtime and classifier blobs are unchanged from the
+  complete green parent gate.

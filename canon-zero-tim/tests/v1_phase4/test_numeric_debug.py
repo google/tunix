@@ -109,6 +109,8 @@ def _p62_fixture(*, red_stage: str | None = None, overflow=False) -> str:
 
   lines = [
       "[" "CANON" "_ALIGN_PRE_JSON] " + json.dumps(pre),
+      "[P62.NUMERIC] profile_resolved workload=gsm8k dp=16 tp=4 "
+      "stage=backward-no-commit optimizer_commits=0",
       "[P62.NUMERIC] admission workload=gsm8k dp=16 tp=4 "
       "global_trajectories=256 local_trajectories=16 "
       "global_M=4096 local_M=256 optimizer_commits=0",
@@ -178,6 +180,35 @@ class NumericDebugTest(unittest.TestCase):
           ],
           "0",
       )
+      state = values["CANON_STATE"]
+      self.assertEqual(values["CANON_RUN_LOG"], f"{state}/run.log")
+      receipt = json.loads(
+          (output.parent / "render-receipt.json").read_text(encoding="utf-8")
+      )
+      self.assertEqual(receipt["run_log"], f"{state}/run.log")
+      self.assertEqual(
+          receipt["classification"],
+          f"{state}/p62_backward_numeric.classification.json",
+      )
+
+  def test_cluster_postflight_persists_and_classifies_full_p62_log(self):
+    runner = (
+        _REPO / "canon-zero-tim/cluster/steps/90_run.sh"
+    ).read_text(encoding="utf-8")
+    self.assertIn(
+        "cluster/profiles/qwen3-1p7b-dp16-tp4-gsm8k-p62-debug.env)",
+        runner,
+    )
+    self.assertIn(
+        'p62_classification="$CANON_STATE/'
+        'p62_backward_numeric.classification.json"',
+        runner,
+    )
+    self.assertIn('p62_log_sha="$(sha256sum "$LOG"', runner)
+    self.assertIn('printf \'%s\\n\' "$p62_profile_receipt" > "$LOG"', runner)
+    self.assertIn('run_tee_args=(-a "$LOG")', runner)
+    self.assertIn("[P62.NUMERIC.POSTFLIGHT] PASS", runner)
+    self.assertIn("P62 full-log classification failed", runner)
 
   def test_profile_resolves_only_from_exact_renderer_tuple(self):
     with tempfile.TemporaryDirectory() as tmp:
@@ -232,6 +263,73 @@ class NumericDebugTest(unittest.TestCase):
     overflow = classifier.classify(_p62_fixture(overflow=True))
     self.assertEqual(overflow["verdict"], "FINITE_NAIVE_L2_OVERFLOW")
     self.assertEqual(overflow["first_red"]["stage"], "engine_vjp")
+
+  def test_classifier_rejects_or_downgrades_truncated_evidence(self):
+    complete = _p62_fixture(overflow=True)
+    partial = "\n".join(complete.splitlines()[:6]) + "\n"
+    result = classifier.classify(partial)
+    self.assertIn(
+        result["verdict"], {"FATAL_CONTRACT", "INCONCLUSIVE_INCOMPLETE"}
+    )
+    self.assertNotEqual(result["verdict"], "FINITE_NAIVE_L2_OVERFLOW")
+
+    with tempfile.TemporaryDirectory() as tmp:
+      raw = Path(tmp) / "partial.log"
+      output = Path(tmp) / "classification.json"
+      raw.write_text(partial, encoding="utf-8")
+      process = subprocess.run(
+          [
+              "python3",
+              str(_CLASSIFIER_SCRIPT),
+              str(raw),
+              "--output",
+              str(output),
+          ],
+          cwd=_REPO,
+          text=True,
+          capture_output=True,
+          check=False,
+      )
+      self.assertNotEqual(process.returncode, 0)
+      self.assertTrue(output.is_file())
+
+  def test_classifier_rejects_unknown_or_wrong_text_markers(self):
+    unknown = _p62_fixture() + "[P62.NUMERIC] future_marker foo=1\n"
+    self.assertEqual(
+        classifier.classify(unknown)["verdict"], "FATAL_CONTRACT"
+    )
+    missing_profile = _p62_fixture().replace(
+        "[P62.NUMERIC] profile_resolved workload=gsm8k dp=16 tp=4 "
+        "stage=backward-no-commit optimizer_commits=0\n",
+        "",
+    )
+    self.assertEqual(
+        classifier.classify(missing_profile)["verdict"], "FATAL_CONTRACT"
+    )
+    wrong_profile = _p62_fixture().replace(
+        "stage=backward-no-commit optimizer_commits=0",
+        "stage=full optimizer_commits=0",
+        1,
+    )
+    self.assertEqual(
+        classifier.classify(wrong_profile)["verdict"], "FATAL_CONTRACT"
+    )
+
+  def test_classifier_requires_all_completion_seams(self):
+    for missing in (
+        '"stage": "fixed_dp_reduced", "group": 15',
+        '"stage": "scaled_microgradient", "group": 15',
+        '"stage": "final_accumulator", "group": 15',
+        "reverse_group_done group=16/16",
+        "discard_complete optimizer_commits=0",
+    ):
+      lines = _p62_fixture().splitlines()
+      partial = "\n".join(line for line in lines if missing not in line) + "\n"
+      self.assertEqual(
+          classifier.classify(partial)["verdict"],
+          "INCONCLUSIVE_INCOMPLETE",
+          missing,
+      )
 
   def test_classifier_rejects_alignment_scale_and_optimizer_violations(self):
     alignment = _p62_fixture().replace(

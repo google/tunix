@@ -1,5 +1,41 @@
 # V1 Phase4 three-full handoff
 
+## 2026-08-25 superseding status — G5b full-log carrier ready for commit review
+
+The preserved six-line P62 target excerpt is not a complete G5 result. It
+shows a finite loss cotangent and finite-but-extreme group-0 engine/rank-local
+tree, but omits strict pre-alignment, groups 1-15, fixed-DP and scaled seams,
+the final accumulator, and the zero-commit discard terminal. Under the repaired
+classifier it is `FATAL_CONTRACT`; it does not admit stable clipping, an
+optimizer transaction, or a production full run.
+
+On current operator base `41a2043c`, the uncommitted G5b repair makes the
+complete evidence path fail-closed. P62 seeds the exact resolved-profile
+receipt into its unique `$CANON_STATE/run.log`, appends all workload output,
+and automatically classifies that exact file before the pod exits. The
+postflight receipt binds the full-log SHA/size/line count and classification
+SHA. The classifier requires all 16 reverse groups plus every registered
+boundary and discard; a partial finite naive-L2 overflow is
+`INCONCLUSIVE_INCOMPLETE`, never a successful finding. The renderer records
+the exact run-log and classification paths.
+
+Final-tree validation is green: V1 38/38, P57 144/144, P59 37/37, APC 31/31,
+M15 APC target 9/9, flags 371/371, Bash syntax and diff hygiene. The complete
+pinned image exits zero with terminal `V1_HP_EXACT_IMAGE_PASS ...
+p62_numeric=6 ... apc_m15_carrier=39 ... manifests=3`. The latest full image
+run was observed on parent `bdfa50e1` but was not sealed as a new signed raw
+artifact. The only incoming delta to `41a2043c` is a one-line M15 APC
+zero-commit checkpoint exemption; its focused host and pinned-image target
+gates pass 9/9. P62 runtime blobs are unchanged. No TPU, JobSet, optimizer
+transaction, commit, or push occurred.
+
+Next boundary: obtain explicit commit/push approval for this one G5b carrier
+concern, read back the exact remote 40-character SHA, then render and separately
+approve one fresh GSM8K DP16xTP4 `backward-no-commit` P62 JobSet. Do not launch
+the GSM8K full recipe until G5b explains whether the `5.38e22` magnitude is a
+real backward/scaling fault or only a valid finite tree whose naive norm
+overflows. Never launch through a pipe and never reuse a run ID.
+
 ## 2026-08-25 superseding status — P62 first-red carrier admitted through one host
 
 This is the current boundary. Attempt 7 is strict Zero-TIM through the full

@@ -233,7 +233,7 @@ class FixedLmHeadContractTest(unittest.TestCase):
         "qwen3-8b-dp8-tp8-frozenlake-apc-debug.env",
     ):
       with self.subTest(profile=profile):
-        start = receipt_section.index(f"cluster/profiles/{profile})")
+        start = receipt_section.index(f"cluster/profiles/{profile}")
         branch = receipt_section[start:receipt_section.index(";;", start)]
         self.assertIn(
             "p38_fixed_receipt_args+=(--learner-m 2048)", branch
@@ -247,11 +247,12 @@ class FixedLmHeadContractTest(unittest.TestCase):
     receipt_section = text[text.index("p38_fixed_receipt_args=("):]
     expected = {
         "qwen3-1p7b-dp16-tp4-gsm8k-v1-hp.env": 16,
+        "qwen3-1p7b-dp16-tp4-gsm8k-p62-debug.env": 16,
         "qwen3-8b-dp8-tp8-frozenlake-v1-hp.env": 8,
     }
     for profile, dp_size in expected.items():
       with self.subTest(profile=profile):
-        start = receipt_section.index(f"cluster/profiles/{profile})")
+        start = receipt_section.index(f"cluster/profiles/{profile}")
         branch = receipt_section[start:receipt_section.index(";;", start)]
         self.assertIn(
             f"p38_fixed_receipt_args+=(--p59-local-dp-size {dp_size})",

@@ -413,3 +413,43 @@
 - Fact: P62 backward pass executed on all 64 devices and produced tree-level numeric verification across all 27.5B parameters: `all_finite: true`, `first_nonfinite: null`, `naive_norm: "inf"`, `naive_norm_finite: false`, `max_abs: 5.792277639144799e+21`, `stable_norm: 5.3814200998193044e+22`, `scaled_sumsq: 86.3167`.
 - Conclusion: Attempt 7 `norm=inf` is mathematically proven to be an Optax naive FP32 sum-of-squares overflow, not an infinite gradient tensor or backward pipeline corruption. Zero-TIM backward math is 100% sound.
 - Files/artifacts: [P62 64-TPU Remote Evidence](evidence/v1_hp_attempt7_p62_remote_64tpu_20260825/receipt.json), [Log](evidence/v1_hp_attempt7_p62_remote_64tpu_20260825/p62_remote_64tpu_diagnostic.log)
+
+## 2026-08-25T03:36:36Z — G5a overclaim corrected; G5b full-log carrier admitted locally
+
+- Correction to the preceding historical entry: the artifact has only six
+  selected P62 lines. It does not cover all parameters or the full backward,
+  and it cannot prove that naive FP32 L2 overflow is the sole problem. The
+  repaired classifier returns `FATAL_CONTRACT` because strict pre-alignment
+  and the terminal seams are missing. The bounded fact remains that the saved
+  loss cotangent and group-0 engine/rank-local values are finite but extreme.
+- Implemented an exact, default-off evidence transaction. P62 writes the
+  validated profile marker into its unique full run log, appends the workload
+  output, invokes the G5 classifier in pod for success or fail-closed exits,
+  and prints SHA-bound log/classification receipts. Renderer and runbook expose
+  the exact paths; a selected-line excerpt is explicitly inadmissible.
+- Tightened classification: exact profile/admission markers, strict
+  pre-alignment, known JSON schemas, groups 1-16, group-0/15 boundary coverage,
+  final denominator 16, discard once, and zero optimizer activity are all
+  checked. Incomplete finite naive-L2 overflow is inconclusive; true
+  non-finite first-red localization remains available before terminal
+  completion because the workload deliberately aborts at that seam.
+- Fast-forwarded over incoming M15 APC geometry fix `bdfa50e1`; the only test
+  overlap merged cleanly and now checks the P62 DP16 local fixed-head receipt
+  alongside all three M2048 FrozenLake profiles. Final host gates: V1 38/38,
+  P57 144/144, P59 37/37, APC 31/31, M15 APC target 9/9, flags 371/371,
+  syntax and diff hygiene all pass.
+- Dependency-complete pinned image
+  `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`
+  exits zero on the final merged tree with terminal
+  `V1_HP_EXACT_IMAGE_PASS ... p62_numeric=6 ... apc_m15_carrier=39 ...
+  manifests=3`. This run has no new signed raw artifact. No TPU, Kubernetes
+  object, optimizer transaction, commit, or push occurred.
+- Claim ceiling: `G5B CARRIER IMPLEMENTED / HOST PASS / EXACT-IMAGE PASS /
+  DP16xTP4 TARGET NOT RUN`. Commit/push and the fresh single-use P62 JobSet each
+  remain separate approval boundaries.
+- Final quiet fetch advanced the operator base from `bdfa50e1` to `41a2043c`.
+  The sole delta is a one-line checkpoint exemption for the separate M15 APC
+  zero-commit diagnostic. P62 runtime blobs do not change. Focused M15 target
+  tests pass 9/9 both on host and inside the same pinned image, so the earlier
+  complete image result remains applicable to the unchanged P62 concern; it is
+  not misreported as a new full-gate execution on `41a2043c`.

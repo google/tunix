@@ -22,7 +22,14 @@ kubectl apply -f /tmp/v1-p62-<fresh-p62-id>/jobset-p62-gsm8k-numeric-debug.yaml
 ```
 
 The workload may exit nonzero when it deliberately catches the first
-non-finite boundary. Preserve the raw log and classify it offline:
+non-finite boundary. The launcher itself classifies the complete
+`$CANON_STATE/run.log` before exiting and must print exactly one
+`[P62.NUMERIC.POSTFLIGHT]` receipt containing the full-log SHA, byte/line
+counts, classification path and classification SHA. A hand-selected P62
+excerpt is not evidence. Before deleting the pod, copy both exact paths from
+that receipt into a fresh append-only evidence directory and verify both
+hashes. Offline reclassification is a second check, not a substitute for the
+in-pod full-log classification:
 
 ```bash
 python3 canon-zero-tim/tasks/v1-phase4-three-full-recipes/scripts/classify_attempt7_numeric_debug.py \

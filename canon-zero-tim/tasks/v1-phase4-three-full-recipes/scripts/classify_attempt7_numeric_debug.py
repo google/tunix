@@ -12,6 +12,18 @@ from typing import Any
 
 _P62_PREFIX = "[P62.NUMERIC] "
 _PRE_PREFIX = "[" "CANON" "_ALIGN_PRE_JSON] "
+_PROFILE_PAYLOAD = (
+    "profile_resolved workload=gsm8k dp=16 tp=4 "
+    "stage=backward-no-commit optimizer_commits=0"
+)
+_ADMISSION_PAYLOAD = (
+    "admission workload=gsm8k dp=16 tp=4 "
+    "global_trajectories=256 local_trajectories=16 "
+    "global_M=4096 local_M=256 optimizer_commits=0"
+)
+_DISCARD_PAYLOAD = (
+    "discard_complete optimizer_commits=0 microsteps=16 denominator=16.0"
+)
 _REVERSE_RE = re.compile(
     r"^\[P33\.DP16\] reverse_group_done group=(\d+)/16 .*"
     r"rank_contributions=16 .*pullback_invocations=1 .*"
@@ -26,6 +38,12 @@ _EXPECTED_TREE_STAGES = {
     "scaled_microgradient",
     "final_accumulator",
 }
+_PER_GROUP_STAGES = {
+    "engine_vjp",
+    "trainer_rank_local",
+    "fixed_dp_reduced",
+    "scaled_microgradient",
+}
 
 
 def _json_lines(text: str, prefix: str) -> list[dict[str, Any]]:
@@ -34,11 +52,6 @@ def _json_lines(text: str, prefix: str) -> list[dict[str, Any]]:
     if not line.startswith(prefix):
       continue
     payload = line[len(prefix) :]
-    if prefix == _P62_PREFIX and (
-        payload.startswith("admission workload=gsm8k ")
-        or payload.startswith("discard_complete optimizer_commits=0 ")
-    ):
-      continue
     try:
       record = json.loads(payload)
     except json.JSONDecodeError as error:
@@ -48,6 +61,42 @@ def _json_lines(text: str, prefix: str) -> list[dict[str, Any]]:
     record["_line"] = line_number
     records.append(record)
   return records
+
+
+def _p62_lines(
+    text: str,
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+  records = []
+  markers = {"profile": 0, "admission": 0, "discard": 0}
+  exact_payloads = {
+      _PROFILE_PAYLOAD: "profile",
+      _ADMISSION_PAYLOAD: "admission",
+      _DISCARD_PAYLOAD: "discard",
+  }
+  for line_number, line in enumerate(text.splitlines(), 1):
+    if not line.startswith(_P62_PREFIX):
+      continue
+    payload = line[len(_P62_PREFIX) :]
+    marker = exact_payloads.get(payload)
+    if marker is not None:
+      markers[marker] += 1
+      continue
+    if not payload.startswith("{"):
+      raise ValueError(
+          "unknown textual P62 marker at "
+          f"line {line_number}: {payload!r}"
+      )
+    try:
+      record = json.loads(payload)
+    except json.JSONDecodeError as error:
+      raise ValueError(
+          f"malformed P62 JSON at line {line_number}: {error}"
+      ) from error
+    if not isinstance(record, dict):
+      raise ValueError(f"non-object P62 JSON at line {line_number}")
+    record["_line"] = line_number
+    records.append(record)
+  return records, markers
 
 
 def _validate_pre_alignment(record: dict[str, Any]) -> list[str]:
@@ -108,7 +157,13 @@ def _validate_p62_records(
     if changed:
       failures.append(f"loss_scale_contract_changed={changed}")
   for record in records:
-    if record.get("schema") != "canon-p62-tree-numeric-v1":
+    schema = record.get("schema")
+    if schema == "canon-p62-loss-scale-v1":
+      continue
+    if schema != "canon-p62-tree-numeric-v1":
+      failures.append(
+          f"unknown_p62_schema_at_line_{record['_line']}={schema!r}"
+      )
       continue
     tree_records.append(record)
     stage = record.get("stage")
@@ -137,7 +192,7 @@ def classify(text: str) -> dict[str, Any]:
   failures = []
   try:
     pre_records = _json_lines(text, _PRE_PREFIX)
-    p62_records = _json_lines(text, _P62_PREFIX)
+    p62_records, markers = _p62_lines(text)
   except ValueError as error:
     return {
         "schema": "canon-p62-classification-v1",
@@ -148,13 +203,9 @@ def classify(text: str) -> dict[str, Any]:
     failures.append(f"pre_alignment_receipts={len(pre_records)}/1")
   else:
     failures.extend(_validate_pre_alignment(pre_records[0]))
-  admission_count = text.count(
-      "[P62.NUMERIC] admission workload=gsm8k dp=16 tp=4 "
-      "global_trajectories=256 local_trajectories=16 "
-      "global_M=4096 local_M=256 optimizer_commits=0"
-  )
-  if admission_count != 1:
-    failures.append(f"p62_admission={admission_count}/1")
+  for marker in ("profile", "admission"):
+    if markers[marker] != 1:
+      failures.append(f"p62_{marker}={markers[marker]}/1")
   if any(
       "CANON_ALIGN" in line
       and (
@@ -195,16 +246,36 @@ def classify(text: str) -> dict[str, Any]:
       for line in text.splitlines()
       if (match := _REVERSE_RE.match(line))
   }
-  discard_count = text.count(
-      "[P62.NUMERIC] discard_complete optimizer_commits=0 "
-      "microsteps=16 denominator=16.0"
-  )
+  discard_count = markers["discard"]
   final_records = [
       record for record in tree_records
       if record.get("stage") == "final_accumulator"
   ]
+  loss_cotangent_records = [
+      record for record in tree_records
+      if record.get("stage") == "loss_cotangent"
+  ]
+  stage_groups: dict[str, list[int]] = {
+      stage: [
+          record["group"] for record in tree_records
+          if record.get("stage") == stage
+      ]
+      for stage in _PER_GROUP_STAGES
+  }
+  duplicates = sorted(
+      (stage, group)
+      for stage, groups in stage_groups.items()
+      for group in set(groups)
+      if groups.count(group) > 1
+  )
+  required_boundaries = all(
+      {0, 15}.issubset(groups) for groups in stage_groups.values()
+  )
   complete = (
       reverse_groups == set(range(1, 17))
+      and len(loss_cotangent_records) == 1
+      and required_boundaries
+      and not duplicates
       and len(final_records) == 1
       and final_records[0].get("accumulator_denominator") == 16.0
       and discard_count == 1
@@ -218,6 +289,7 @@ def classify(text: str) -> dict[str, Any]:
       "reverse_groups": sorted(reverse_groups),
       "discard_count": discard_count,
       "optimizer_commits": 0,
+      "complete": complete,
   }
   if first_nonfinite is not None:
     return {
@@ -237,10 +309,32 @@ def classify(text: str) -> dict[str, Any]:
         },
     }
   if first_naive_overflow is not None:
+    if not complete:
+      return {
+          **common,
+          "verdict": "INCONCLUSIVE_INCOMPLETE",
+          "first_observation": {
+              key: first_naive_overflow.get(key)
+              for key in (
+                  "_line", "stage", "group", "max_abs", "stable_norm"
+              )
+          },
+          "incomplete": {
+              "missing_reverse_groups": sorted(
+                  set(range(1, 17)) - reverse_groups
+              ),
+              "missing_boundary_stages": sorted(
+                  stage for stage, groups in stage_groups.items()
+                  if not {0, 15}.issubset(groups)
+              ),
+              "loss_cotangent_records": len(loss_cotangent_records),
+              "final_accumulator_records": len(final_records),
+              "discard_count": discard_count,
+          },
+      }
     return {
         **common,
         "verdict": "FINITE_NAIVE_L2_OVERFLOW",
-        "complete": complete,
         "first_red": {
             key: first_naive_overflow.get(key)
             for key in (
@@ -252,7 +346,6 @@ def classify(text: str) -> dict[str, Any]:
     return {
         **common,
         "verdict": "ALL_BOUNDARIES_FINITE_NO_COMMIT",
-        "complete": True,
         "max_abs_by_record": [
             {
                 "stage": record["stage"],
@@ -266,7 +359,18 @@ def classify(text: str) -> dict[str, Any]:
   return {
       **common,
       "verdict": "INCONCLUSIVE_INCOMPLETE",
-      "complete": False,
+      "incomplete": {
+          "missing_reverse_groups": sorted(
+              set(range(1, 17)) - reverse_groups
+          ),
+          "missing_boundary_stages": sorted(
+              stage for stage, groups in stage_groups.items()
+              if not {0, 15}.issubset(groups)
+          ),
+          "loss_cotangent_records": len(loss_cotangent_records),
+          "final_accumulator_records": len(final_records),
+          "discard_count": discard_count,
+      },
   }
 
 
