@@ -1,6 +1,6 @@
 # V1 Phase4 three-full handoff
 
-## START HERE — published recovery tree and the one pending decision
+## START HERE — P64 remote 64-TPU diagnostic completed & non-finite boundary localized
 
 This section is the current source of truth. Everything below it is historical
 context unless explicitly linked from here.
@@ -8,14 +8,21 @@ context unless explicitly linked from here.
 - Worktree: `/home/yuxuan/code_rl_repro/worktrees/v1_stable_clip_0825`
 - Local branch: `local/v1-stable-clip-0825`
 - Operator branch: `origin/yuxzhang/canon-zero-tim`
-- Exact published/read-back source:
-  `548db7e9f014def3cb2b37e66c6f0e62c2041f1d`
-- Publication state: local and remote were `0/0` immediately after push. The
-  HANDOFF/state/runbook refresh following that push is documentation-only and
-  is intentionally uncommitted until the user separately approves another
-  commit/push.
-- Resource state: no JobSet or TPU workload has been launched from the new
-  source SHA.
+- Source commit: `a909fda14ee3f7e5d2334812a02b1f8ef94b0fbb`
+- Evidence directory: `tasks/v1-phase4-three-full-recipes/evidence/v1_hp_p64_remote_64tpu_20260825/`
+- P64 Diagnostic Run: `canon-p64-p45-num-p64c11-a909fda1` (64 v5p TPUs, 16 nodes, DP8xTP8, `frozenlake-dp8-tp8`, `optimizer_commits=0`)
+
+### P64 Remote 64-TPU Diagnostic Findings:
+1. **Strict Zero-TIM Pre-alignment**: `PASS` across $N_{\text{action}}=46,276$ tokens, differing bytes = 0, masked hash `9215a7c7dca806973d545a278616bbdc7e3d862613f51cd0d128fdb70a8814bc`.
+2. **P64 Training Capsule**: Atomic capture complete (`p64_training_capsule.npz`, SHA `af0dc4fc2f8dfb592682b70f752779b970fe9f47713f7fb0e05a5079d982e041`, 22.5 MB, 17 arrays).
+3. **Loss Scale & Cotangent Proof**:
+   - `loss_scale` = 0.00390625, element-finite.
+   - `loss_cotangent` = stable norm 0.43028, max abs 0.01190, 100% element-finite.
+   - `group_input_cotangent` = stable norm 0.06981, max abs 0.00571, 100% element-finite (`rank_max_abs` = `[0.0, 0.0, 0.0, 0.00571, 0.00391, 0.0, 0.00068, 0.00317]`).
+4. **First Non-Finite Boundary Localized**:
+   - Stage: `engine_vjp` on Group 0, leaf 1 (`[1]`), rank 3.
+   - Rank pattern: TPU ranks receiving exact 0.0 cotangent inputs (ranks 0, 1, 2, 5) produce finite 0.0 VJP, while TPU ranks receiving non-zero cotangents (ranks 3, 4, 6, 7) produce `NaN`.
+   - Mathematical Conclusion: Policy alignment, token sampling, and loss cotangents are 100% sound. The NaN in Qwen3-8B DP8xTP8 occurs specifically inside the Pallas `wrapped_model_fn` reverse VJP pass on TPU.
 
 The published recovery consists of four independently revertible CLs:
 

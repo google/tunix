@@ -1,0 +1,67 @@
+{
+  "task": "v1_hp_p64_remote_64tpu",
+  "jobset_name": "canon-p64-p45-num-p64c11-a909fda1",
+  "source_commit": "a909fda14ee3f7e5d2334812a02b1f8ef94b0fbb",
+  "date_utc": "2026-08-25T19:53:51Z",
+  "topology": "64 TPU (16 nodes, DP8xTP8)",
+  "workload": "frozenlake-dp8-tp8",
+  "stage": "backward-no-commit",
+  "optimizer_commits": 0,
+  "verdict": "NUMERIC_NONFINITE_FIRST_BOUNDARY_LOCALIZED",
+  "findings": {
+    "pre_alignment": {
+      "verdict": "PASS",
+      "N_action": 46276,
+      "differing_bytes": 0,
+      "masked_hash": "9215a7c7dca806973d545a278616bbdc7e3d862613f51cd0d128fdb70a8814bc"
+    },
+    "capsule": {
+      "path": "/tmp/canon-state/canon-p64-p45-num-p64c11-a909fda1/p64_training_capsule.npz",
+      "sha256": "af0dc4fc2f8dfb592682b70f752779b970fe9f47713f7fb0e05a5079d982e041",
+      "arrays": 17,
+      "logical_bytes": 22551552,
+      "rows": 256
+    },
+    "loss_scale": {
+      "loss_scale": 0.00390625,
+      "valid_tokens": 46276.0,
+      "effective_rows": 256.0
+    },
+    "loss_cotangent": {
+      "all_finite": true,
+      "stable_norm": 0.43028101325035095,
+      "max_abs": 0.01190476305782795
+    },
+    "group_input_cotangent": {
+      "all_finite": true,
+      "stable_norm": 0.06980957090854645,
+      "max_abs": 0.0057142856530845165,
+      "rank_max_abs": [
+        0.0,
+        0.0,
+        0.0,
+        0.0057142856530845165,
+        0.003913894761353731,
+        0.0,
+        0.0006802721763961017,
+        0.0031746034510433674
+      ]
+    },
+    "engine_vjp": {
+      "all_finite": false,
+      "first_nonfinite_leaf": 1,
+      "first_nonfinite_rank": 3,
+      "rank_max_abs": [
+        0.0,
+        0.0,
+        0.0,
+        "nan",
+        "nan",
+        0.0,
+        "nan",
+        "nan"
+      ],
+      "root_cause": "Qwen3 DP8xTP8 Pallas wrapped_model_fn engine_vjp produces NaN on TPU ranks receiving non-zero cotangents (ranks 3, 4, 6, 7), while ranks with zero cotangents (0, 1, 2, 5) produce finite 0.0. Policy alignment, token sampling, and loss cotangents are 100% element-finite."
+    }
+  }
+}
