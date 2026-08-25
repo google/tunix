@@ -10,6 +10,8 @@ source "$CANON_STATE/env.sh"
 source "$CANON_PKG/cluster/steps/p57_runtime_contract.sh"
 # shellcheck disable=SC1091
 source "$CANON_PKG/cluster/steps/jax_cache_sync_lib.sh"
+# shellcheck disable=SC1091
+source "$CANON_PKG/cluster/steps/xprof_gcs_sync_lib.sh"
 
 # A full GSM8K JobSet may be recreated after an eviction or node loss. Preserve
 # fail-closed no-overwrite semantics within each attempt without letting an
@@ -277,6 +279,28 @@ jax_cache_saved_early=0
 if [ "${CANON_V1_HP_FULL:-0}" = "1" ]; then
   canon_jax_cache_sync save
   jax_cache_saved_early=1
+fi
+xprof_restore_rc=0
+xprof_local_dir=""
+xprof_restore_receipt=""
+if [ "${CANON_V1_HP_FULL:-0}" = "1" ]; then
+  xprof_attempt="${JOBSET_RESTART_ATTEMPT:-direct}"
+  if [[ ! "$xprof_attempt" =~ ^(direct|[0-9]+)$ ]]; then
+    echo "[run] FATAL: V1 XProf attempt is not direct or a non-negative integer" >&2
+    exit 1
+  fi
+  if [ "$xprof_attempt" = direct ]; then
+    xprof_local_dir="${CANON_STATE%/}/xprof-update"
+  else
+    xprof_local_dir="${CANON_STATE%/}/attempt-$xprof_attempt/xprof-update"
+  fi
+  xprof_restore_receipt="$(dirname -- "$xprof_local_dir")/xprof_gcs_restore.receipt"
+  canon_xprof_gcs_restore "$xprof_local_dir" "$xprof_restore_receipt" || \
+    xprof_restore_rc=$?
+  if [ "$rc" -eq 0 ] && [ "$xprof_restore_rc" -ne 0 ]; then
+    echo "[run] FATAL: completed V1 workload lacks a durable GCS XProf restore: rc=$xprof_restore_rc" >&2
+    exit "$xprof_restore_rc"
+  fi
 fi
 if [ "${CANON_P46_EVALUATION:-0}" = "1" ]; then
   n_eval_subshard=$(grep -ac '^P46_EVAL_SUBSHARD_PASS ' "$LOG" || true)
@@ -1341,6 +1365,8 @@ elif [ "$rc" -eq 0 ] && [ "${CANON_P33_WORKLOAD_LAUNCH_ADMITTED:-0}" = "1" ]; th
           --run-log "$LOG" \
           --update-report "$CANON_UPDATE_REPORT" \
           --base-classification "$classification" \
+          --xprof-dir "$xprof_local_dir" \
+          --xprof-receipt "$xprof_restore_receipt" \
           --output "$v1_classification" || exit 1
       unset v1_recipe
       unset v1_classification

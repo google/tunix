@@ -231,6 +231,54 @@ def _jax_cache_receipt(
   return fields
 
 
+def _xprof_restore_receipt(
+    path: Path,
+    *,
+    remote: str,
+    local_dir: Path,
+    reasons: list[str],
+) -> dict[str, str]:
+  _require(path.is_file(), "missing_xprof_gcs_restore_receipt", reasons)
+  if not path.is_file():
+    return {}
+  lines = [
+      line.strip()
+      for line in path.read_text(encoding="utf-8").splitlines()
+      if line.strip()
+  ]
+  _require(len(lines) == 1, "xprof_gcs_restore_receipt_lines", reasons)
+  if len(lines) != 1 or not lines[0].startswith("[P51.XPROF.GCS] "):
+    _require(False, "xprof_gcs_restore_receipt_format", reasons)
+    return {}
+  fields = dict(_FIELD_RE.findall(lines[0]))
+  expected = {
+      "phase": "restore",
+      "status": "PASS",
+      "rc": "0",
+      "remote": remote,
+      "local": str(local_dir),
+  }
+  wrong = {
+      name: fields.get(name)
+      for name, value in expected.items()
+      if fields.get(name) != value
+  }
+  _require(not wrong, f"xprof_gcs_restore={wrong}", reasons)
+  _require(
+      fields.get("tool") in {"gcloud", "gsutil"},
+      "xprof_gcs_restore.tool",
+      reasons,
+  )
+  for name in ("xplanes", "traces"):
+    value = fields.get(name, "")
+    _require(
+        value.isdigit() and int(value) > 0,
+        f"xprof_gcs_restore.{name}",
+        reasons,
+    )
+  return fields
+
+
 def _seconds(row: dict[str, str], label: str, reasons: list[str]) -> float:
   try:
     value = float(row["seconds"])
@@ -287,6 +335,8 @@ def classify(
     run_log: Path,
     update_report: Path,
     base_classification: Path,
+    xprof_dir: Path | None = None,
+    xprof_receipt: Path | None = None,
 ) -> dict[str, Any]:
   contract = _RECIPES[recipe]
   expected_updates = int(contract["updates"])
@@ -295,6 +345,10 @@ def classify(
   local_groups = 256 // dp_size
   expected_alignment_pass = expected_updates * (1 + local_groups)
   reasons: list[str] = []
+  if xprof_dir is None:
+    xprof_dir = state / "xprof-update"
+  if xprof_receipt is None:
+    xprof_receipt = state / "xprof_gcs_restore.receipt"
 
   env_path = state / "env.sh"
   for path, label in (
@@ -358,6 +412,38 @@ def classify(
       if env.get(name) != value
   }
   _require(not wrong_env, f"resolved_env={wrong_env}", reasons)
+
+  xprof_remote = env.get("CANON_XPROF_DIR", "")
+  expected_xprof_prefix = (
+      "gs://yuxzhang-tunix-models/tmp/canon-zero-tim/p33/"
+      f"{state.name}/attempt-"
+  )
+  xprof_remote_match = re.fullmatch(
+      re.escape(expected_xprof_prefix)
+      + r"(?P<attempt>direct|[0-9]+)/xprof-update",
+      xprof_remote,
+  )
+  _require(xprof_remote_match is not None, "resolved_env.CANON_XPROF_DIR", reasons)
+  if xprof_remote_match is not None:
+    attempt = xprof_remote_match.group("attempt")
+    expected_xprof_dir = (
+        state / "xprof-update"
+        if attempt == "direct"
+        else state / f"attempt-{attempt}" / "xprof-update"
+    )
+    _require(xprof_dir == expected_xprof_dir, "xprof_local_attempt_path", reasons)
+    _require(
+        xprof_receipt == expected_xprof_dir.parent / "xprof_gcs_restore.receipt",
+        "xprof_receipt_attempt_path",
+        reasons,
+    )
+
+  xprof_restore = _xprof_restore_receipt(
+      xprof_receipt,
+      remote=xprof_remote,
+      local_dir=xprof_dir,
+      reasons=reasons,
+  )
 
   cache_receipt_paths = {
       phase: state / f"jax_cache_{phase}.receipt"
@@ -752,8 +838,8 @@ def classify(
   if apc_on:
     _require(bool(hit_rates) and max(hit_rates) > 0.0, "apc_positive_cache_hit", reasons)
 
-  xplanes = sorted((state / "xprof-update").rglob("*.xplane.pb"))
-  trace_json = sorted((state / "xprof-update").rglob("*.trace.json.gz"))
+  xplanes = sorted(xprof_dir.rglob("*.xplane.pb"))
+  trace_json = sorted(xprof_dir.rglob("*.trace.json.gz"))
   perfetto = sorted((state / "perfetto").rglob("perfetto_trace_v2_*.pb"))
   _require(bool(xplanes), "missing_xplane", reasons)
   _require(bool(trace_json), "missing_trace_json_gz", reasons)
@@ -830,6 +916,8 @@ def classify(
   for phase, path in cache_receipt_paths.items():
     if path.is_file():
       artifacts[f"jax_cache_{phase}_receipt"] = _artifact(path, state)
+  if xprof_receipt.is_file():
+    artifacts["xprof_gcs_restore_receipt"] = _artifact(xprof_receipt, state)
   return {
       "schema": "v1-hp-full-classification-v1",
       "verdict": "PASS" if not reasons else "FAIL",
@@ -866,6 +954,7 @@ def classify(
           },
           "receipts": cache_receipts,
       },
+      "xprof_gcs_restore": xprof_restore,
       "p57_inprocess_evaluation": p57_eval,
       "timing": {
           "steps": timing_rows,
@@ -900,6 +989,8 @@ def main() -> int:
   parser.add_argument("--run-log", type=Path, required=True)
   parser.add_argument("--update-report", type=Path, required=True)
   parser.add_argument("--base-classification", type=Path, required=True)
+  parser.add_argument("--xprof-dir", type=Path)
+  parser.add_argument("--xprof-receipt", type=Path)
   parser.add_argument("--output", type=Path, required=True)
   args = parser.parse_args()
   if args.output.exists():
@@ -910,6 +1001,8 @@ def main() -> int:
       run_log=args.run_log,
       update_report=args.update_report,
       base_classification=args.base_classification,
+      xprof_dir=args.xprof_dir,
+      xprof_receipt=args.xprof_receipt,
   )
   args.output.parent.mkdir(parents=True, exist_ok=True)
   args.output.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")

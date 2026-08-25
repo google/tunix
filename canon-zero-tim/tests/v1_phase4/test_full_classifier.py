@@ -57,6 +57,10 @@ class FullClassifierTest(unittest.TestCase):
         "CANON_XPROF_HOST_TRACER": "1",
         "CANON_XPROF_TPU_TRACE_MODE": "TRACE_COMPUTE",
         "CANON_XPROF_LABELS": "1",
+        "CANON_XPROF_DIR": (
+            "gs://yuxzhang-tunix-models/tmp/canon-zero-tim/p33/"
+            "state/attempt-direct/xprof-update"
+        ),
         "CANON_PERF_TRACE_EXPORT_STEP": "2",
         "CANON_VLLM_ENABLE_PREFIX_CACHING": "0",
         "JAX_COMPILATION_CACHE_DIR": "/tmp/jax_compilation_cache",
@@ -181,6 +185,13 @@ class FullClassifierTest(unittest.TestCase):
     xprof.mkdir(parents=True)
     (xprof / "device.xplane.pb").write_bytes(b"xplane")
     (xprof / "device.trace.json.gz").write_bytes(b"trace")
+    (state / "xprof_gcs_restore.receipt").write_text(
+        "[P51.XPROF.GCS] phase=restore status=PASS tool=gcloud rc=0 "
+        "xplanes=1 traces=1 "
+        "remote=gs://yuxzhang-tunix-models/tmp/canon-zero-tim/p33/"
+        f"state/attempt-direct/xprof-update local={state}/xprof-update\n",
+        encoding="utf-8",
+    )
     perfetto = state / "perfetto"
     perfetto.mkdir()
     (perfetto / "perfetto_trace_v2_1.pb").write_bytes(b"perfetto")
@@ -236,6 +247,63 @@ class FullClassifierTest(unittest.TestCase):
       )
       self.assertEqual(record["verdict"], "FAIL")
       self.assertIn("missing_xplane", record["reasons"])
+
+  def test_wrong_xprof_gcs_path_is_fatal(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      state, run_log, updates, base = self._evidence(Path(tmp))
+      env = state / "env.sh"
+      env.write_text(
+          env.read_text(encoding="utf-8").replace(
+              "p33/state/attempt-direct/xprof-update",
+              "p33/foreign/attempt-direct/xprof-update",
+          ),
+          encoding="utf-8",
+      )
+      record = classifier.classify(
+          recipe="gsm8k",
+          state=state,
+          run_log=run_log,
+          update_report=updates,
+          base_classification=base,
+      )
+      self.assertEqual(record["verdict"], "FAIL")
+      self.assertIn("resolved_env.CANON_XPROF_DIR", record["reasons"])
+
+  def test_missing_xprof_restore_receipt_is_fatal(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      state, run_log, updates, base = self._evidence(Path(tmp))
+      (state / "xprof_gcs_restore.receipt").unlink()
+      record = classifier.classify(
+          recipe="gsm8k",
+          state=state,
+          run_log=run_log,
+          update_report=updates,
+          base_classification=base,
+      )
+      self.assertEqual(record["verdict"], "FAIL")
+      self.assertIn("missing_xprof_gcs_restore_receipt", record["reasons"])
+
+  def test_incoherent_xprof_restore_receipt_is_fatal(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      state, run_log, updates, base = self._evidence(Path(tmp))
+      receipt = state / "xprof_gcs_restore.receipt"
+      receipt.write_text(
+          receipt.read_text(encoding="utf-8").replace(
+              "status=PASS tool=gcloud rc=0 xplanes=1 traces=1",
+              "status=PASS tool=none rc=0 xplanes=0 traces=1",
+          ),
+          encoding="utf-8",
+      )
+      record = classifier.classify(
+          recipe="gsm8k",
+          state=state,
+          run_log=run_log,
+          update_report=updates,
+          base_classification=base,
+      )
+      self.assertEqual(record["verdict"], "FAIL")
+      self.assertIn("xprof_gcs_restore.tool", record["reasons"])
+      self.assertIn("xprof_gcs_restore.xplanes", record["reasons"])
 
   def test_missing_p59_head_partition_receipt_is_fatal(self):
     with tempfile.TemporaryDirectory() as tmp:

@@ -139,6 +139,9 @@ class ThreeFullRendererTest(unittest.TestCase):
             "; test \"$JAX_PERSISTENT_CACHE_ENABLE_XLA_CACHES\" = all"
             "; test \"$CANON_GCS_CACHE_BUCKET\" = "
             "gs://yuxzhang-tunix-models/cache/p33_compilation_cache"
+            "; test \"$CANON_XPROF_DIR\" = "
+            "gs://yuxzhang-tunix-models/tmp/canon-zero-tim/p33/"
+            "${CANON_STATE##*/}/attempt-direct/xprof-update"
         )
         completed = subprocess.run(
             ["bash", "-euo", "pipefail", "-c", command],
@@ -273,6 +276,7 @@ class ThreeFullRendererTest(unittest.TestCase):
                 **values,
                 "CANON_PKG": str(_REPO / "canon-zero-tim"),
                 "CANON_STATE": str(state),
+                "JOBSET_RESTART_ATTEMPT": "0",
                 "INJECTED_WANDB_API_KEY": "test-key-not-a-credential",
             },
             text=True,
@@ -289,6 +293,11 @@ class ThreeFullRendererTest(unittest.TestCase):
         self.assertIn("export CANON_P59_RANK_PARALLEL_BACKWARD=1", snapshot)
         self.assertIn("export CANON_P63_OVERFLOW_SAFE_CLIP=1", snapshot)
         self.assertIn("export CANON_PERF_TRACE_EXPORT_STEP=2", snapshot)
+        expected_xprof = (
+            "gs://yuxzhang-tunix-models/tmp/canon-zero-tim/p33/"
+            f"{state.name}/attempt-0/xprof-update"
+        )
+        self.assertIn(f"export CANON_XPROF_DIR={expected_xprof}", snapshot)
 
       gsm_values = _env(
           yaml.safe_load(outputs[0].read_text(encoding="utf-8"))
