@@ -388,10 +388,16 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     worker = self._trainer_workers.get(role)
     if worker is None:
       raise ValueError(f"No trainer worker registered for role {role}")
+    metadata = dict(getattr(payload, "metadata", {}) or {})
+    request = datatypes.TrainRequest(
+        request_id=f"train_{uuid.uuid4().hex[:8]}",
+        payload=payload,
+        metadata=metadata,
+    )
     fwd_bwd_result = await self._invoke_worker(
         worker,
         "fwd_bwd",
-        payload=payload,
+        request=request,
         skip_jit=skip_jit,
         **kwargs,
     )

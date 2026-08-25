@@ -148,16 +148,19 @@ class TrainerWorker(abstract_worker.Worker):
 
   def fwd_bwd(
       self,
-      payload: datatypes.TrainerPayload,
+      request: datatypes.TrainRequest,
       **kwargs: Any,
   ) -> datatypes.Response:
     """Executes one forward/backward pass."""
     self._ensure_ready()
+    req_metadata = dict(request.metadata) if request.metadata else {}
     kwargs.pop("skip_jit", None)
     try:
-      self._trainer.fwd_bwd(payload, **kwargs)
+      self._trainer.fwd_bwd(request.payload, **kwargs)
       self._last_error = None
-      return self._response(queued=True)
+      resp = self._response(queued=True, **req_metadata)
+      resp.request_id = request.request_id
+      return resp
     except Exception as exc:
       self._last_error = str(exc)
       self.state = WorkerState.ERROR
@@ -176,14 +179,19 @@ class TrainerWorker(abstract_worker.Worker):
       raise
 
   def eval_step(
-      self, payload: datatypes.TrainerPayload, **kwargs
+      self,
+      request: datatypes.TrainRequest,
+      **kwargs: Any,
   ) -> datatypes.Response:
     """Executes one evaluation step on the given payload."""
     self._ensure_ready()
+    req_metadata = dict(request.metadata) if request.metadata else {}
     try:
-      self._trainer.eval_step(payload, **kwargs)
+      self._trainer.eval_step(request.payload, **kwargs)
       self._last_error = None
-      return self._response(evaluated=True)
+      resp = self._response(evaluated=True, **req_metadata)
+      resp.request_id = request.request_id
+      return resp
     except Exception as exc:
       self._last_error = str(exc)
       self.state = WorkerState.ERROR

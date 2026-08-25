@@ -79,6 +79,29 @@ class WireSerializationTest(absltest.TestCase):
     )
     self.assertEqual(restored.metadata, original.metadata)
 
+  def test_train_request_round_trips_through_cloudpickle(self):
+    payload = datatypes.RLTrainerPayload(
+        advantages=np.array([1.0, 2.0], dtype=np.float32),
+        loss_mask=np.array([[1, 1], [1, 0]], dtype=np.int32),
+        metadata={"step": 42},
+    )
+    original = datatypes.TrainRequest(
+        request_id="train-req-1",
+        payload=payload,
+        target_policy_version=2,
+        metadata={"lineage_id": "batch_0"},
+    )
+
+    restored = cloudpickle.loads(cloudpickle.dumps(original))
+
+    self.assertEqual(restored.request_id, "train-req-1")
+    self.assertEqual(restored.target_policy_version, 2)
+    self.assertEqual(restored.metadata, {"lineage_id": "batch_0"})
+    np.testing.assert_allclose(restored.payload.advantages, [1.0, 2.0])
+    np.testing.assert_array_equal(
+        restored.payload.loss_mask, [[1, 1], [1, 0]]
+    )
+
   def test_trajectory_response_round_trips_through_cloudpickle(self):
     original = _rollout_response_dto()
 

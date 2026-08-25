@@ -548,6 +548,19 @@ class RLTrainerPayload(TrainerPayload):
 
 
 @dataclasses.dataclass(kw_only=True)
+class TrainRequest(Request):
+  """Request to execute training (forward/backward or eval) on a TrainerWorker.
+
+  Attributes:
+    payload: The TrainerPayload containing model inputs, masks, etc.
+    target_policy_version: Version of the policy weights to train.
+  """
+
+  payload: TrainerPayload
+  target_policy_version: int = 0
+
+
+@dataclasses.dataclass(kw_only=True)
 class LogprobsRequest(Request):
   """Request to score per-token log-probabilities under a frozen model.
 

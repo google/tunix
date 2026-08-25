@@ -179,6 +179,7 @@ class DistributedRLEngineTest(absltest.TestCase):
     async def _run():
       self.mock_actor.fwd_bwd.return_value = {"loss": 0.5}
       mock_payload = mock.MagicMock(spec=datatypes.RLTrainerPayload)
+      mock_payload.metadata = {"lineage_id": "batch_1"}
 
       res = await self.engine.train_step(
           mock_payload,
@@ -188,10 +189,13 @@ class DistributedRLEngineTest(absltest.TestCase):
       )
       self.assertEqual(res, {"loss": 0.5})
 
-      self.mock_actor.fwd_bwd.assert_called_once_with(
-          payload=mock_payload,
-          skip_jit=False,
-      )
+      self.mock_actor.fwd_bwd.assert_called_once()
+      call_kwargs = self.mock_actor.fwd_bwd.call_args.kwargs
+      self.assertIn("request", call_kwargs)
+      req = call_kwargs["request"]
+      self.assertIsInstance(req, datatypes.TrainRequest)
+      self.assertIs(req.payload, mock_payload)
+      self.assertEqual(req.metadata, {"lineage_id": "batch_1"})
       self.mock_actor.update.assert_not_called()
 
     asyncio.run(_run())
@@ -203,6 +207,7 @@ class DistributedRLEngineTest(absltest.TestCase):
       )
       self.mock_actor.update.return_value = 3
       mock_payload = mock.MagicMock(spec=datatypes.RLTrainerPayload)
+      mock_payload.metadata = {}
 
       res = await self.engine.train_step(
           mock_payload,
@@ -220,10 +225,12 @@ class DistributedRLEngineTest(absltest.TestCase):
           },
       )
 
-      self.mock_actor.fwd_bwd.assert_called_once_with(
-          payload=mock_payload,
-          skip_jit=False,
-      )
+      self.mock_actor.fwd_bwd.assert_called_once()
+      call_kwargs = self.mock_actor.fwd_bwd.call_args.kwargs
+      self.assertIn("request", call_kwargs)
+      req = call_kwargs["request"]
+      self.assertIsInstance(req, datatypes.TrainRequest)
+      self.assertIs(req.payload, mock_payload)
       self.mock_actor.update.assert_called_once_with()
 
     asyncio.run(_run())
