@@ -44,10 +44,33 @@ class LLMEngine:
         model_config = transformer.config if hasattr(transformer, "config") else getattr(transformer, "model_config", None)
         kv_dtype = getattr(model_config, 'dtype', jax.numpy.float32) if model_config else jax.numpy.float32
         
+        # Discover parallel axes if present on transformer params
+        dp_axis = None
+        tp_axis = None
+        dp_size = 1
+        tp_size = 1
+        try:
+            shd_config = getattr(model_config, "shd_config", None)
+            if shd_config is not None:
+                dp_axis = shd_config.act_btd[0]
+                tp_axis = shd_config.act_btnh[2]
+            
+            param_0 = jax.tree_util.tree_leaves(transformer.flax_module.params if hasattr(transformer, "flax_module") else transformer)[0]
+            if hasattr(param_0, "sharding") and hasattr(param_0.sharding, "mesh") and param_0.sharding.mesh is not None:
+                mesh = param_0.sharding.mesh
+                dp_size = mesh.shape.get(dp_axis, 1) if dp_axis else 1
+                tp_size = mesh.shape.get(tp_axis, 1) if tp_axis else 1
+        except Exception:
+            pass
+            
         self.cache_manager = batch_cache_manager_lib.init_cache_manager(
             cache_config=cache_config,
             model_config=model_config,
             kv_dtype=kv_dtype,
+            dp_axis=dp_axis,
+            tp_axis=tp_axis,
+            dp_size=dp_size,
+            tp_size=tp_size,
         )
         
         self.scheduler = scheduler.Scheduler(
@@ -81,41 +104,12 @@ class LLMEngine:
     ):
         """One physical iteration of the continuous batch engine."""
         
-        running_requests = self.scheduler.schedule_step([])
-        if not running_requests:
+        ordered_reqs, distribution_list = self.scheduler.schedule_step([])
+        if not ordered_reqs:
             return
             
-        
-        # Categorize running requests by execution mode to form [i, j, k] distribution
-        # i: purely decoding (1 token)
-        # i -> j: prefill completing (multi-token, will sample)
-        # j -> k: chunk prefill (multi-token, won't sample yet)
-        decodes = []
-        prefills_completing = []
-        chunked_prefills = []
-        
-        for r in running_requests:
-            total_prompt_tokens = len(r.token_ids)
-            # Find if this step will hit the end of the prompt
-            if getattr(r, 'num_completed_tokens', 0) >= total_prompt_tokens:
-                # Already completed prompt, so it's a decode
-                decodes.append(r)
-            else:
-                completed = getattr(r, 'num_completed_tokens', 0)
-                in_flight = getattr(r, 'num_in_flight_tokens', 0)
-                if completed + in_flight >= total_prompt_tokens:
-                    prefills_completing.append(r)
-                else:
-                    chunked_prefills.append(r)
-                    
-        # Re-order requests for the batch
-        ordered_reqs = decodes + prefills_completing + chunked_prefills
-        
-        # Build distribution
-        i = len(decodes)
-        j = i + len(prefills_completing)
-        k = j + len(chunked_prefills)
-        distribution = np.array([i, j, k], dtype=np.int32)
+        distribution = np.array(distribution_list, dtype=np.int32)
+        j = distribution_list[1]
         
         # Build 1D arrays
         # Build 1D arrays

@@ -159,7 +159,7 @@ class Scheduler:
         
     self.cache_manager.evict(pages_to_evict)
 
-  def schedule_step(self, new_requests: List[Request]) -> Tuple[List[Request], List[Request]]:
+  def schedule_step(self, new_requests: List[Request]) -> Tuple[List[Request], List[int]]:
     """
     Select the requests to sample in the next step, and ensure their pages are loaded
     on to the TPU.
@@ -175,7 +175,25 @@ class Scheduler:
     self._schedule_running_sequences()
     self._schedule_pending_sequences()
     
-    return self.running_requests 
+
+    decodes = 0
+    prefills_completing = 0
+    chunked_prefills = 0
+    
+    for r in self.running_requests:
+        total_prompt_tokens = len(r.token_ids)
+        if getattr(r, 'num_completed_tokens', 0) >= total_prompt_tokens:
+            decodes += 1
+        else:
+            completed = getattr(r, 'num_completed_tokens', 0)
+            in_flight = getattr(r, 'num_in_flight_tokens', 0)
+            if completed + in_flight >= total_prompt_tokens:
+                prefills_completing += 1
+            else:
+                chunked_prefills += 1
+                
+    distribution = [decodes, decodes + prefills_completing, len(self.running_requests)]
+    return self.running_requests, distribution
 
   def _deduplicate_and_cache_full_pages(self) -> int:
     """
