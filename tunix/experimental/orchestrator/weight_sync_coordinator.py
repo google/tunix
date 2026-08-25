@@ -1022,19 +1022,44 @@ class WeightSyncCoordinator:
       state = RoundState.TRANSFERRING
       transfer_in_flight = True
       try:
-        transfer = await asyncio.wait_for(
-            loop.run_in_executor(
-                None,
-                functools.partial(
-                    self._handler.transfer,
-                    src_units=list(source_units),
-                    dst_units=list(destination_units),
-                    req_id=req_id,
-                    generation=uuid,
-                ),
-            ),
-            self._timeouts.transfer,
-        )
+        # One native transfer() call per source unit instead of one combined
+        # call spanning all of them. Binding multiple RaidenSynchronizer
+        # chunks concurrently is fine and memory-bounded (see
+        # MaxTextTrainingEngine._split_into_chunks), but *transferring* them
+        # concurrently -- the native controller's own many-to-one scheduling,
+        # exercised whenever every src_unit is handed to one transfer() call
+        # -- segfaulted the source process every time it was tried, always
+        # immediately after every chunk finished binding (confirmed across 4
+        # separate runs). Serializing here keeps only one native
+        # WeightSynchronizer's transfer active in the process at a time,
+        # sidestepping that path, at the cost of N sequential RPCs instead of
+        # one.
+        #
+        # req_id must be unique per call: RaidenController.start_transfer
+        # treats a repeated req_id as a duplicate of the first call and
+        # returns its cached task without even looking at the new src_units
+        # (tpu_sync/rpc/raiden_controller.py's `if req_id and req_id in
+        # self._active_tasks: return self._active_tasks[req_id]`) -- reusing
+        # the round's req_id verbatim across chunks would silently transfer
+        # only the first chunk and no-op the rest under an apparently
+        # successful round.
+        transfer = None
+        for chunk_idx, unit in enumerate(source_units):
+          transfer = await asyncio.wait_for(
+              loop.run_in_executor(
+                  None,
+                  functools.partial(
+                      self._handler.transfer,
+                      src_units=[unit],
+                      dst_units=list(destination_units),
+                      req_id=f"{req_id}-chunk{chunk_idx}",
+                      generation=uuid,
+                  ),
+              ),
+              self._timeouts.transfer,
+          )
+          if not transfer.success:
+            break
         transfer_in_flight = False
       except (
           asyncio.TimeoutError,
