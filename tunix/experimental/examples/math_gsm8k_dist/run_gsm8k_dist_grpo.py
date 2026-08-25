@@ -177,12 +177,26 @@ def _make_reward_fn(mode: str, num_generations: int):
 
   def reward_fn(item: datatypes.TrajectoryItem) -> float:
     metadata = dict(item.metadata or {})
-    if mode == "synthetic":
-      pair_index = int(metadata.get("pair_index", item.pair_index))
-      return pair_index / max(num_generations - 1, 1)
-
     text = str(metadata.get("text", ""))
     gold_answer = metadata.get("gold_answer")
+    prompt_id = metadata.get("prompt_id", getattr(item, "group_id", "unknown"))
+    pair_index = int(metadata.get("pair_index", item.pair_index))
+
+    logging.info(
+        "[Orchestrator] Sampler response for %s (generation %d/%d):\n"
+        "--- [Sampled Response] ---\n%s\n--- [End Response] ---\n"
+        "Gold Answer: %s | Extracted Answer: %s",
+        prompt_id,
+        pair_index + 1,
+        num_generations,
+        text,
+        gold_answer,
+        _extract_answer(text),
+    )
+
+    if mode == "synthetic":
+      return pair_index / max(num_generations - 1, 1)
+
     return 1.0 if gold_answer and _extract_answer(text) == gold_answer else 0.0
 
   return reward_fn
