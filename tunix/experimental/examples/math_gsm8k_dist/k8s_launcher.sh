@@ -30,7 +30,15 @@ export MODEL_ID=${MODEL_ID:-Qwen/Qwen3-1.7B}
 # and MaxText's own model construction (num_key_value_heads=4, correctly
 # built from MAXTEXT_MODEL_NAME) silently disagreed.
 export MODEL_DIR=${MODEL_DIR:-artifacts/qwen3_dist_gsm8k/models/${MODEL_NAME}}
-export TOKENIZER_PATH=${TOKENIZER_PATH:-${MODEL_DIR}}
+# Defaults to MODEL_ID (an HF hub repo id), not MODEL_DIR: MODEL_DIR is a
+# per-model-name local directory that starts out empty for any model that
+# hasn't been downloaded there before by *something* -- nothing pre-populates
+# it before the trainer's own AutoTokenizer.from_pretrained(tokenizer_path)
+# call, which then misreads a nonexistent local path as a malformed hub repo
+# id and fails HFValidationError. MODEL_ID always works: it's a genuine hub
+# id AutoTokenizer downloads directly, independent of any local directory
+# state or trainer/rollout pod download-ordering races.
+export TOKENIZER_PATH=${TOKENIZER_PATH:-${MODEL_ID}}
 # only consulted when TRAINER_BACKEND=maxtext; keep it matching
 # MODEL_NAME/MODEL_ID or Raiden weight sync between trainer and rollout won't
 # line up
