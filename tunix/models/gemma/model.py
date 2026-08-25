@@ -35,7 +35,7 @@ import jax.sharding as shd
 from jax.sharding import PartitionSpec as P
 import jaxtyping
 from tunix.generate.mappings import BackendMappingMixin
-import tunix.generate.page_manager as page_manager_lib
+
 from tunix.models.gemma import params as params_lib
 from tunix.utils import compat
 from tunix.utils import env_utils
@@ -432,8 +432,7 @@ class Attention(nnx.Module):
       cache: Cache | None = None,
       layer_name: str | None = None,
       attention_mask: jaxtyping.Array | None = None,
-      seq_lens: jaxtyping.Array | None = None,
-      distribution: jaxtyping.Array | None = None,
+      metadata: Any = None,
       soft_cap: float | None = None,
   ) -> tuple[Cache | None, jaxtyping.Array]:
     seq_len = x.shape[1]
@@ -462,15 +461,15 @@ class Attention(nnx.Module):
 
     # Cache is left aligned.
     # Update cache
-    if cache is not None and distribution is None:
-      raise ValueError("distribution cannot be None when cache is provided.")
+    if cache is not None and metadata is None:
+      raise ValueError("metadata cannot be None when cache is provided.")
 
     if cache is not None:
       q = query_scaled.reshape(-1, self.num_heads, self.head_dim)
       k = key_proj.reshape(-1, self.num_kv_heads, self.head_dim)
       v = value_proj.reshape(-1, self.num_kv_heads, self.head_dim)
 
-      num_seqs = jnp.array([cache.batch_size], dtype=jnp.int32)
+      num_seqs = jnp.array([metadata.seq_lens.shape[0]], dtype=jnp.int32)
       mesh = pxla.thread_resources.env.physical_mesh
 
       tp_axis   = self.shd_config.act_btnh[2]  # 'tp'
@@ -501,7 +500,7 @@ class Attention(nnx.Module):
       def sharded_rpa(
           q_in, k_in, v_in, pages_in, kv_lens_in, page_idxs_in, q_lens_in, distribution_in, soft_cap_in=None
       ):
-        batch_size = cache.batch_size
+        batch_size = metadata.seq_lens.shape[0]
         # is_decode = jnp.arange(batch_size) < decode_end
         # actual_q_lens = jnp.where(is_decode, 1, q_lens_in)
         cu_q_lens_in = jnp.pad(jnp.cumsum(q_lens_in), (1, 0))
@@ -524,22 +523,19 @@ class Attention(nnx.Module):
           q,
           k,
           v,
-          cache.pages[layer_name],
-          cache.kv_lens,
-          cache.page_indices.reshape(-1),
-          seq_lens,
-          distribution,
+          cache[layer_name],
+          metadata.seq_lens,
+          metadata.page_indices.reshape(-1),
+          metadata.seq_lens,
+          metadata.distribution,
           soft_cap,
       )
 
       attn_output = self.attn_vec_einsum(attn_output)
       attn_output = shard(attn_output, self.shd_config.act_btd)
      
-      new_pages = {**cache.pages, layer_name: updated_layer_pages}
-      updated_cache = dataclasses.replace(
-          cache, 
-          pages=new_pages,
-      )
+      new_pages = {**cache, layer_name: updated_layer_pages}
+      updated_cache = new_pages
       
       return updated_cache, attn_output
 
@@ -602,8 +598,7 @@ class Attention(nnx.Module):
       cache: Cache | None = None,
       layer_name: str | None = None,
       attention_mask: jaxtyping.Array | None = None,
-      seq_lens: jaxtyping.Array | None = None,
-      distribution: jaxtyping.Array | None = None,
+      metadata: Any = None,
       soft_cap: float | None = None,
   ) -> tuple[Cache | None, jaxtyping.Array]:
     if (
@@ -617,7 +612,7 @@ class Attention(nnx.Module):
         return module.block(*args, **kwargs)
 
       return jax.checkpoint(_checkpointed_block)(
-          state, x, segment_pos, cache, attn_mask, seq_lens, distribution, soft_cap
+          state, x, segment_pos, cache, attn_mask, metadata, soft_cap
       )
     else:
       return self.block(
@@ -626,8 +621,7 @@ class Attention(nnx.Module):
           cache,
           layer_name,
           attention_mask=attention_mask,
-          seq_lens=seq_lens,
-          distribution=distribution,
+          metadata=metadata,
           soft_cap=soft_cap,
       )
 
@@ -777,8 +771,7 @@ class DecoderLayer(nnx.Module):
       cache: Cache | None = None,
       layer_name: str | None = None,
       attention_mask: jaxtyping.Array | None = None,
-      seq_lens: jaxtyping.Array | None = None,
-      distribution: jaxtyping.Array | None = None,
+      metadata: Any = None,
       soft_cap: float | None = None,
   ) -> tuple[Cache | None, jaxtyping.Array]:
     inputs_normalized = self.pre_attention_norm(x)
@@ -788,8 +781,7 @@ class DecoderLayer(nnx.Module):
         cache,
         layer_name,
         attention_mask=attention_mask,
-        seq_lens=seq_lens,
-        distribution=distribution,
+        metadata=metadata,
         soft_cap=soft_cap,
     )
 
@@ -814,8 +806,7 @@ class DecoderLayer(nnx.Module):
       cache: Cache | None = None,
       layer_name: str | None = None,
       attention_mask: jaxtyping.Array | None = None,
-      seq_lens: jaxtyping.Array | None = None,
-      distribution: jaxtyping.Array | None = None,
+      metadata: Any = None,
       soft_cap: float | None = None,
   ) -> tuple[Cache | None, jaxtyping.Array]:
     if (
@@ -829,7 +820,7 @@ class DecoderLayer(nnx.Module):
         return module.block(*args, **kwargs)
 
       return jax.checkpoint(_checkpointed_block)(
-          state, x, segment_pos, cache, attn_mask, seq_lens, distribution, soft_cap
+          state, x, segment_pos, cache, attn_mask, metadata, soft_cap
       )
     else:
       return self.block(
@@ -838,8 +829,7 @@ class DecoderLayer(nnx.Module):
           cache,
           layer_name,
           attention_mask=attention_mask,
-          seq_lens=seq_lens,
-          distribution=distribution,
+          metadata=metadata,
           soft_cap=soft_cap,
       )
 
@@ -1051,8 +1041,7 @@ class Gemma(BackendMappingMixin, nnx.Module):
       positions: jaxtyping.Array,  # [B, L]
       cache: Cache | None = None,  # (sequence length L')
       attention_mask: jaxtyping.Array | None = None,  # [B, L, L']
-      seq_lens: jaxtyping.Array | None = None,
-      distribution: jaxtyping.Array | None = None,
+      metadata: Any = None,
       output_hidden_states: bool = False,
       skip_lm_head: bool = False,
       soft_cap: float | None = None,
@@ -1085,8 +1074,7 @@ class Gemma(BackendMappingMixin, nnx.Module):
           cache,
           layer_name,
           attention_mask=attention_mask,
-          seq_lens=seq_lens,
-          distribution=distribution,
+          metadata=metadata,
           soft_cap=soft_cap,
       )
 
