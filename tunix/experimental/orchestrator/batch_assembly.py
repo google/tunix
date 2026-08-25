@@ -25,13 +25,17 @@ potentially move to a common library.
 """
 
 import collections
+from collections.abc import Mapping, Sequence
 import dataclasses
-from typing import Any, Generic, NamedTuple, Protocol, Sequence, TypeVar
+from typing import Any, Generic, NamedTuple, Protocol, TypeVar
 from absl import logging
 import numpy as np
 from tunix.experimental.common import datatypes
+from tunix.experimental.common import lineage
 
 T = TypeVar("T")
+
+_BATCH_ID_PREFIX: str = "batch"
 
 
 class AssembledBatch(NamedTuple):
@@ -64,15 +68,20 @@ class BatchAssembler(Generic[T], Protocol):
     """Total number of rollouts expected per global training step."""
     return self.mini_batch_size * self.group_size
 
-  def feed(self, items: Sequence[T]) -> list[AssembledBatch]:
+  def feed(
+      self,
+      items: Sequence[T],
+  ) -> list[AssembledBatch]:
     """Ingests rollouts, emitting ready microbatches and auto-flushing at step end."""
     ...
 
-  def flush(self) -> list[AssembledBatch]:
+  def flush(
+      self,
+  ) -> list[AssembledBatch]:
     """Drains remaining buffered items, padding to the required static tensor shape."""
     ...
 
-  def reset(self) -> None:
+  def reset(self, *, start_batch_index: int | None = None) -> None:
     """Clears buffered items and resets the step rollouts counter."""
     ...
 
@@ -211,6 +220,40 @@ def with_ref_per_token_logps(
   return dataclasses.replace(batch, ref_per_token_logps=ref_logps_arr)
 
 
+def _merge_batch_lineage(
+    items: Sequence[Any],
+    *,
+    batch_id: str,
+    attributes: Mapping[str, Any] | None = None,
+) -> lineage.LineageContext | None:
+  """Extracts and merges lineage contexts from a sequence of batch items.
+
+  Args:
+    items: Sequence of items that may carry lineage context in their metadata.
+    batch_id: Tracking ID to assign to the merged batch context.
+    attributes: Optional key-value metadata attached to the merge event.
+
+  Returns:
+    The merged LineageContext, or None if no upstream lineage contexts exist.
+  """
+  lineages = [
+      it.metadata["lineage"]
+      for it in items
+      if isinstance(getattr(it, "metadata", None), Mapping)
+      and it.metadata.get("lineage") is not None
+  ]
+  if not lineages:
+    return None
+
+  return lineage.LineageContext.merge(
+      batch_id=batch_id,
+      contexts=lineages,
+      component="orchestrator.assembler",
+      operation="pack",
+      attributes=dict(attributes) if attributes else None,
+  )
+
+
 class SequencePackedBatchAssembler:
   """Sequence Packing: Concatenates items into dense `[B, max_packed_len]` buffers."""
 
@@ -223,6 +266,7 @@ class SequencePackedBatchAssembler:
       max_packed_len: int = 8192,
       pad_id: int = 0,
       target_occupancy: float = 0.90,
+      start_batch_index: int = 0,
   ):
     """Initializes SequencePackedBatchAssembler.
 
@@ -233,6 +277,7 @@ class SequencePackedBatchAssembler:
       max_packed_len: Maximum packed sequence length per row.
       pad_id: Token ID used for padding.
       target_occupancy: Occupancy ratio above which a bin is sealed before full.
+      start_batch_index: Initial microbatch index offset for tracking IDs.
     """
     if batch_size <= 0:
       raise ValueError(f"batch_size must be positive, got {batch_size}.")
@@ -252,6 +297,7 @@ class SequencePackedBatchAssembler:
     self.group_size = group_size
     self.mini_batch_size = mini_batch_size
     self.target_occupancy = target_occupancy
+    self._batch_counter = start_batch_index
 
     self._current_bin: list[datatypes.RLTrainerPayload] = []
     self._current_len: int = 0
@@ -355,7 +401,8 @@ class SequencePackedBatchAssembler:
     }
 
   def _seal_batch(
-      self, chunk_of_bins: Sequence[Sequence[datatypes.RLTrainerPayload]]
+      self,
+      chunk_of_bins: Sequence[Sequence[datatypes.RLTrainerPayload]],
   ) -> tuple[datatypes.RLTrainerPayload, tuple[str, ...]]:
     rows = [self._seal_row(b) for b in chunk_of_bins]
     any_old_lp = any(r["old_logprobs"] is not None for r in rows)
@@ -404,6 +451,23 @@ class SequencePackedBatchAssembler:
     )
 
     all_traj_ids = tuple(t for r in rows for t in r["traj_ids"])
+    batch_tracking_id = f"{_BATCH_ID_PREFIX}_{self._batch_counter}"
+    all_items = [it for b in chunk_of_bins for it in b]
+    merged_lineage = _merge_batch_lineage(
+        all_items,
+        batch_id=batch_tracking_id,
+        attributes={
+            "packing_type": "sequence_packed",
+            "num_items": len(all_items),
+            "packed_len": self.max_packed_len,
+        },
+    )
+    # TODO (tunix-dev): consolidate trajectory_ids from metadata and lineage.
+    payload_metadata: dict[str, Any] = {"trajectory_ids": all_traj_ids}
+    if merged_lineage:
+      payload_metadata["lineage"] = merged_lineage
+    self._batch_counter += 1
+
     payload = datatypes.RLTrainerPayload(
         token_ids=_stack("tokens"),
         token_mask=_stack("segment_ids"),
@@ -414,7 +478,7 @@ class SequencePackedBatchAssembler:
         ref_per_token_logps=batch_ref_lp,
         segment_ids=_stack("segment_ids"),
         segment_positions=_stack("segment_positions"),
-        metadata={"trajectory_ids": all_traj_ids},
+        metadata=payload_metadata,
     )
     return payload, all_traj_ids
 
@@ -423,7 +487,11 @@ class SequencePackedBatchAssembler:
       self._sealed_bins.append(self._current_bin)
       self._current_bin, self._current_len = [], 0
 
-  def _pop_batches(self, *, drain_all: bool = False) -> list[AssembledBatch]:
+  def _pop_batches(
+      self,
+      *,
+      drain_all: bool = False,
+  ) -> list[AssembledBatch]:
     out: list[AssembledBatch] = []
     while len(self._sealed_bins) >= self.batch_size or (
         drain_all and self._sealed_bins
@@ -441,7 +509,8 @@ class SequencePackedBatchAssembler:
     return out
 
   def feed(
-      self, items: Sequence[datatypes.RLTrainerPayload]
+      self,
+      items: Sequence[datatypes.RLTrainerPayload],
   ) -> list[AssembledBatch]:
     """Ingests items into dense bins, auto-flushing on the step boundary."""
     self._step_rollouts += len(items)
@@ -479,18 +548,22 @@ class SequencePackedBatchAssembler:
 
     return out
 
-  def flush(self) -> list[AssembledBatch]:
+  def flush(
+      self,
+  ) -> list[AssembledBatch]:
     """Flushes any remaining open bins padded to batch_size."""
     self._seal_current_bin()
     self._step_rollouts = 0
     return self._pop_batches(drain_all=True)
 
-  def reset(self) -> None:
+  def reset(self, *, start_batch_index: int | None = None) -> None:
     """Clears internal bins and resets step rollouts counter."""
     self._current_bin = []
     self._current_len = 0
     self._sealed_bins = []
     self._step_rollouts = 0
+    if start_batch_index is not None:
+      self._batch_counter = start_batch_index
 
 
 class PaddedBatchAssembler:
@@ -505,6 +578,7 @@ class PaddedBatchAssembler:
       pad_id: int,
       group_size: int,
       mini_batch_size: int,
+      start_batch_index: int = 0,
   ):
     """Initializes PaddedBatchAssembler.
 
@@ -516,6 +590,7 @@ class PaddedBatchAssembler:
       pad_id: Token ID used for padding prompts and completions.
       group_size: Number of rollout generations per prompt group (G).
       mini_batch_size: Number of prompt groups per global training step.
+      start_batch_index: Initial microbatch index offset for tracking IDs.
     """
     if batch_size <= 0:
       raise ValueError(f"batch_size must be positive, got {batch_size}.")
@@ -539,6 +614,7 @@ class PaddedBatchAssembler:
     self.pad_id = pad_id
     self.group_size = group_size
     self.mini_batch_size = mini_batch_size
+    self._batch_counter = start_batch_index
 
     self._buffer: collections.deque[datatypes.RLTrainerPayload] = (
         collections.deque()
@@ -555,7 +631,8 @@ class PaddedBatchAssembler:
     return self.max_prompt_length + self.max_response_length
 
   def feed(
-      self, items: Sequence[datatypes.RLTrainerPayload]
+      self,
+      items: Sequence[datatypes.RLTrainerPayload],
   ) -> list[AssembledBatch]:
     """Ingests items, emitting full microbatches and auto-flushing at step end."""
     self._buffer.extend(items)
@@ -602,7 +679,9 @@ class PaddedBatchAssembler:
 
     return out
 
-  def flush(self) -> list[AssembledBatch]:
+  def flush(
+      self,
+  ) -> list[AssembledBatch]:
     """Flushes any remaining items padded to batch_size."""
     if not self._buffer:
       return []
@@ -618,13 +697,16 @@ class PaddedBatchAssembler:
         )
     ]
 
-  def reset(self) -> None:
+  def reset(self, *, start_batch_index: int | None = None) -> None:
     """Clears internal buffer and resets step rollouts counter."""
     self._buffer.clear()
     self._step_rollouts = 0
+    if start_batch_index is not None:
+      self._batch_counter = start_batch_index
 
   def pack(
-      self, items: Sequence[datatypes.RLTrainerPayload]
+      self,
+      items: Sequence[datatypes.RLTrainerPayload],
   ) -> list[datatypes.RLTrainerPayload]:
     """Pads items into rectangular 2D batches `[B, P + C]`."""
     item_list = list(items)
@@ -633,7 +715,8 @@ class PaddedBatchAssembler:
 
     payloads: list[datatypes.RLTrainerPayload] = []
     for i in range(0, len(item_list), self.batch_size):
-      payloads.append(self._pack_chunk(item_list[i : i + self.batch_size]))
+      chunk = item_list[i : i + self.batch_size]
+      payloads.append(self._pack_chunk(chunk))
     return payloads
 
   def _pack_chunk(
@@ -815,6 +898,23 @@ class PaddedBatchAssembler:
     stacked_optional = {
         name: np.stack(rows) for name, rows in optional_rows.items()
     }
+    batch_tracking_id = f"{_BATCH_ID_PREFIX}_{self._batch_counter}"
+    merged_lineage = _merge_batch_lineage(
+        chunk,
+        batch_id=batch_tracking_id,
+        attributes={
+            "packing_type": "padded",
+            "num_items": len(chunk),
+            "batch_size": self.batch_size,
+        },
+    )
+    self._batch_counter += 1
+    payload_metadata: dict[str, Any] = {
+        "trajectory_ids": tuple(_extract_trajectory_id(it) for it in chunk)
+    }
+    if merged_lineage:
+      payload_metadata["lineage"] = merged_lineage
+
     return datatypes.RLTrainerPayload(
         loss_mask=loss_mask,
         action_mask=loss_mask,
@@ -831,7 +931,5 @@ class PaddedBatchAssembler:
         routed_experts=(
             np.stack(routed_experts_rows) if routed_experts_rows else None
         ),
-        metadata={
-            "trajectory_ids": tuple(_extract_trajectory_id(it) for it in chunk)
-        },
+        metadata=payload_metadata,
     )
