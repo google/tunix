@@ -2053,8 +2053,6 @@ if [ "${CANON_P32_DP_ADMISSION:-0}" = "1" ]; then
       fi
       if { [ "${CANON_P32_WORKLOAD:-}" = "frozenlake" ] || \
            { [ "$APC_M15_TARGET_DEBUG" = "1" ] && \
-             [ "${CANON_P32_WORKLOAD:-}" = "frozenlake-dp8-tp8" ]; } || \
-           { [ "${CANON_P64_P45_NUMERIC_DEBUG:-0}" = "1" ] && \
              [ "${CANON_P32_WORKLOAD:-}" = "frozenlake-dp8-tp8" ]; }; } && \
          [ "${CANON_P33_RUN_STAGE:-}" = "backward-no-commit" ]; then
         req CANON_P38_MISMATCH_CAPSULE
@@ -2067,6 +2065,11 @@ if [ "${CANON_P32_DP_ADMISSION:-0}" = "1" ]; then
           echo "[env] FrozenLake replay capsule row bound drifted: expected=$expected_p38_capsule_rows" >&2
           fail=1
         }
+      elif [ "${CANON_P64_P45_NUMERIC_DEBUG:-0}" = "1" ] && \
+           [ "${CANON_P32_WORKLOAD:-}" = "frozenlake-dp8-tp8" ] && \
+           [ "${CANON_P33_RUN_STAGE:-}" = "backward-no-commit" ]; then
+        req CANON_P64_TRAINING_CAPSULE
+        req CANON_P64_TRAINING_CAPSULE_GCS_URI
       elif [ -n "${CANON_P38_MISMATCH_CAPSULE:-}" ]; then
         echo "[env] mismatch capsule is admitted only for FrozenLake backward-no-commit" >&2
         fail=1
