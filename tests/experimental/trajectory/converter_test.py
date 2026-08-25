@@ -120,6 +120,50 @@ class CreateAgentStepTest(trajectory_testing.TrajectoryTestCase):
     self.assertEqual(agent_step.tool_calls[1].function_name, "python")
     self.assertEqual(agent_step.tool_calls[1].arguments, {"code": "print(42)"})
 
+  def test_create_agent_step_with_policy_version(self):
+    mock_agent_step = agent_types.Step(
+        model_response="resp", info={"policy_version": 2}
+    )
+    agent_step = converter.create_agent_step(mock_agent_step, tunix_step_id=0)
+    self.assertIsNotNone(agent_step)
+    self.assertEqual(agent_step.policy_version, 2)
+
+    # Explicit override takes precedence
+    agent_step_override = converter.create_agent_step(
+        mock_agent_step, tunix_step_id=0, policy_version=5
+    )
+    self.assertIsNotNone(agent_step_override)
+    self.assertEqual(agent_step_override.policy_version, 5)
+
+  def test_create_agent_step_preserves_zero_mc_return(self):
+    mock_agent_step = agent_types.Step(
+        model_response="resp",
+        mc_return=0.0,
+    )
+    agent_step = converter.create_agent_step(mock_agent_step, tunix_step_id=0)
+    self.assertIsNotNone(agent_step)
+    self.assertEqual(agent_step.mc_return, 0.0)
+
+    # Verify roundtrip through to_tunix_step
+    restored_step = converter.to_tunix_step(agent_step=agent_step)
+    self.assertEqual(restored_step.mc_return, 0.0)
+
+  @parameterized.parameters(0, 1, 5)
+  def test_create_agent_step_preserves_and_roundtrips_policy_version(
+      self, policy_version
+  ):
+    mock_agent_step = agent_types.Step(
+        model_response="resp",
+        info={"policy_version": policy_version},
+    )
+    agent_step = converter.create_agent_step(mock_agent_step, tunix_step_id=0)
+    self.assertIsNotNone(agent_step)
+    self.assertEqual(agent_step.policy_version, policy_version)
+
+    # Verify roundtrip through to_tunix_step
+    restored_step = converter.to_tunix_step(agent_step=agent_step)
+    self.assertEqual(restored_step.info.get("policy_version"), policy_version)
+
 
 class CreateEnvStepTest(trajectory_testing.TrajectoryTestCase):
 
@@ -1116,5 +1160,84 @@ class CreateTrajectoryMetadataTest(parameterized.TestCase):
     )
 
 
+class UpdateTrajectoryMetadataTest(parameterized.TestCase):
+
+  def test_update_trajectory_metadata_from_agent(self):
+    class MockAgentTrajectory:
+      status = agent_types.TrajectoryStatus.SUCCEEDED
+      reward = 10.0
+      env_time = {"step_latency": [0.1, 0.2]}
+      reward_time = {"eval_latency": 0.05}
+
+    class MockAgent:
+      trajectory = MockAgentTrajectory()
+
+    meta = trajectory_lib.TunixTrajectoryMetadata(
+        trajectory_id="traj_1",
+        agent=trajectory_lib.Agent(name="agent", version="1.0"),
+        status="RUNNING",
+    )
+
+    updated_meta = converter.update_trajectory_metadata(
+        metadata=meta,
+        agent=MockAgent(),
+        extra={"checkpoint": "step_100"},
+    )
+
+    self.assertEqual(updated_meta.status, "SUCCEEDED")
+    self.assertEqual(updated_meta.total_reward, 10.0)
+    self.assertEqual(updated_meta.env_time, {"step_latency": [0.1, 0.2]})
+    self.assertEqual(updated_meta.reward_time, {"eval_latency": 0.05})
+    self.assertEqual(updated_meta.extra, {"checkpoint": "step_100"})
+
+  def test_update_trajectory_metadata_status_override(self):
+    meta = trajectory_lib.TunixTrajectoryMetadata(
+        trajectory_id="traj_2",
+        agent=trajectory_lib.Agent(name="agent", version="1.0"),
+        status="RUNNING",
+    )
+
+    updated_meta = converter.update_trajectory_metadata(
+        metadata=meta,
+        status=agent_types.TrajectoryStatus.TIMEOUT,
+    )
+
+    self.assertEqual(updated_meta.status, "TIMEOUT")
+
+  def test_update_trajectory_metadata_policy_version_appends_and_deduplicates(
+      self,
+  ):
+    meta = trajectory_lib.TunixTrajectoryMetadata(
+        trajectory_id="traj_3",
+        agent=trajectory_lib.Agent(name="agent", version="1.0"),
+        status="RUNNING",
+    )
+    self.assertIsNone(meta.target_policy_versions)
+
+    # First agent step with policy_version 1
+    converter.update_trajectory_metadata(metadata=meta, policy_version=1)
+    self.assertEqual(meta.target_policy_versions, [1])
+
+    # Second agent step with policy_version 2
+    converter.update_trajectory_metadata(metadata=meta, policy_version=2)
+    self.assertEqual(meta.target_policy_versions, [1, 2])
+
+    # Third agent step with policy_version 2 (no duplicate)
+    converter.update_trajectory_metadata(metadata=meta, policy_version=2)
+    self.assertEqual(meta.target_policy_versions, [1, 2])
+
+  def test_update_trajectory_metadata_target_policy_versions_override(self):
+    meta = trajectory_lib.TunixTrajectoryMetadata(
+        trajectory_id="traj_4",
+        agent=trajectory_lib.Agent(name="agent", version="1.0"),
+        target_policy_versions=[1, 2],
+    )
+    converter.update_trajectory_metadata(
+        metadata=meta, target_policy_versions=[3, 4, 5]
+    )
+    self.assertEqual(meta.target_policy_versions, [3, 4, 5])
+
+
 if __name__ == "__main__":
   absltest.main()
+
