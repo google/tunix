@@ -4,7 +4,7 @@
 > 焊死数值类 flag = 删代码路径 = 程序变更,走与开启同级认证门(verify+ALIGN+canary)。
 > 生命周期档位:试验 → 已认证 → 默认开 → 焊死(开关可删)→ 退役/否决。
 > 普查基点 a94d6c0c(285 个可设置 env flag,与 ebba4850 普查零漂移);普查后续现役附录
-> 当前 371 个;本表分层登记,D 层按前缀组、语义欠账标"待考古"。
+> 当前 378 个;本表分层登记,D 层按前缀组、语义欠账标"待考古"。
 > 全量机器清单:落地 CL 时由 `grep -rhoE` 生成为附录,条目数必须 == 普查数(排除项列明)。
 
 ## A 层 · 数值语义类(动它 = 动程序身份;焊死走认证门)
@@ -43,7 +43,7 @@
 | CANON_FUSED_TREE_OPS / CANON_PALLAS_NORM_MATMUL / CANON_PALLAS_INPUT_FUSION | P56 默认-off 候选实现；V1.1 不启用：P59 已取代主要 host-glue 靶，norm/input fusion 未进入最终 serving 配方 | off；保留历史 KEEP/边际/未转正事实；V1 profile 明确为 0 | V1 full 完成后按 P56 判决裁撤或另立新证据重开 |
 | CANON_SAMPLE_SPLIT_FUSION / CANON_ENGINE_LOGPROB_READBACK / CANON_ANCHOR_OVERLAP / CANON_GSM8K_VANILLA | P56 中性、被取代或仅对标/载具开关，不属于 V1 默认配方 | off；不进入三个 full recipe | 战役归档后退役；禁止借 V1 profile 开启 |
 | CANON_P3_APC_BOUNDARY_REPORT | Phase3 G-A 固定 token deep-prefix 边界报告路径;有值才运行 cache-hit prefill vs B full-reset 的前向探针 | 试验,缺省空/off | P3.1 结束后退役;证据保留 |
-| CANON_XPROF_DIR/_SKIP_STEPS/_STEPS | XProf+perfetto 捕获(一次出双产物) | 仪器 | 长期保留 |
+| CANON_XPROF_DIR/_SKIP_STEPS/_STEPS | XProf+perfetto 捕获(一次出双产物)；Pathways V1 full 的 DIR 固定为按 JobSet/attempt 隔离的 `gs://.../p33/<job>/attempt-<n>/xprof-update`，结束后硬门回收到本地证据目录 | 仪器 | 长期保留 |
 | CANON_PERF_TRACE_DIR / CANON_PERF_TRACE_EXPORT_STEP | 官方 tunix.perf v2 语义时间线导出目录与零起点单步窗口；V1 只序列化 warmed step 2，避免 full train 每步写盘，空目录仍为 NoopTracer 零开销 | 仪器；V1 full 固定 step=2 | 长期保留(官方 Metrics 契约) |
 | CANON_XPROF_PYTHON_TRACER/_HOST_TRACER | tracer 档位;**python=0 是 device plane 的前提**(开着它训练捕获退化为 host-only) | 仪器;载具默认 python=0 | 长期保留 |
 | CANON_XPROF_TPU_TRACE_MODE | update 窗 TPU trace 密度；V1 full 固定 `TRACE_COMPUTE` 以降低超 2GB drop 风险 | 仪器；仅 `phase=update` 接受 | 三个 target XProf 无 drop 后决定是否保留默认 |
@@ -64,6 +64,7 @@
 | M15 replay envelope | CANON_APC_M15_REPLAY_LEDGER=`<capture-dir>/m15_replay_envelope.jsonl`:仅与 `CANON_APC_M15_TARGET_DEBUG=off\|on` 成对启用；逐 serving call 保存 host 侧 dispatch/request/position/page 几何与 token-history SHA，不读取 device tensor；A 的冻结 carrier 必须机械证明 standard+continue-decode，B 必须只走 full-reset standard；路径直接位于 P38 capture 目录。M15 incident/replay 共享 2 GiB 单文件硬界（Attempt 2 在 call 326 已用 268,192,266 bytes，按 1,894-call 观测包络留有余量）；普通 P38 仍用其原 128 MiB renderer 界 | M15 target red 的完整 producer unit、serving chronology 与 first-red join 已冻结并完成 deterministic replay 后退役；不得单独开启 |
 | Attempt-7 backward first-red | CANON_P62_BACKWARD_NUMERIC_DEBUG:布尔诊断旗标；仅严格 GSM8K DP16xTP4、P59 fixed-head、`backward-no-commit` 载具可开，打印 loss/VJP/DP-reduce/scale/accumulator 紧凑数值 receipt，累加器最终丢弃且 optimizer commit 必须为 0；它不启用 stable clipping | 默认 off；首红根因定位并由独立修复通过 target 后退役，失败证据永久保留 |
 | Phase4 overflow-safe clip | CANON_P63_OVERFLOW_SAFE_CLIP:数值布尔旗标；缺省/0 关闭、仅 1 开，空值或其他值 fatal。仅三个 V1 high-performance committed full recipes 可开；stock norm finite 时逐位返回原 Optax transform，只有独立 `all_finite` 且 stock norm overflow 时才选 max-scaled L2；真实 NaN/Inf 永不 fallback。GSM8K max norm 1，P45/M15 max norm 100，均不改变 | 默认 off；G5b finite-backward 根因已定位，host 372/372 与完整 pinned-image `p63_clip=1` 已绿，target optimizer commit 未跑；三组 target 首 commit + full horizon 绿且通用 upstream replacement 另审后方可焊死或退役，认证不转移到 P58 |
+| P45 rank-1 first-red | CANON_P64_P45_NUMERIC_DEBUG 与 `CANON_P64_TRAINING_CAPSULE_{MODE,GCS_URI,SHA256}`、`CANON_P64_TRAINING_CAPSULE`、`CANON_P64_MODEL_BINDING_SHA256`:仅严格原始 P45 DP8xTP8、APC-off、P59 fixed-head、`backward-no-commit` 载具可开。capture 在 strict pre-alignment 后原子保存完整 tensorized train batch，并在 backward 前绑定 live model sample；replay 逐数组/文件/模型指纹验真，跳过 environment/rollout/B-rescore，只执行完整 trainer forward 与 group-0 backward，随后丢弃 accumulator。Replay 明示 `certification=0`，不能冒充新 Zero-TIM 认证；首次 NaN/Inf 立即停，绝不 clamp/cast/commit | 默认 off；定位 Attempt-7 P45 rank1 的首个 finite→non-finite 边界并完成根因修复后整体退役，所有 capsule、失败证据与 GCS 路径永久保留 |
 
 ## D 层 · 发射/基建管道(~230,按前缀组;逐条语义允许"待考古")
 
@@ -400,6 +401,12 @@ CANON_P60_DETERMINISTIC_AB
 CANON_P61_BACKWARD_NUMERICAL_DIR
 CANON_P62_BACKWARD_NUMERIC_DEBUG
 CANON_P63_OVERFLOW_SAFE_CLIP
+CANON_P64_MODEL_BINDING_SHA256
+CANON_P64_P45_NUMERIC_DEBUG
+CANON_P64_TRAINING_CAPSULE
+CANON_P64_TRAINING_CAPSULE_GCS_URI
+CANON_P64_TRAINING_CAPSULE_MODE
+CANON_P64_TRAINING_CAPSULE_SHA256
 CANON_PALLAS_ALL_PROJ
 CANON_PALLAS_ALL_RMSNORM
 CANON_PALLAS_CANONICAL_VJP
@@ -478,4 +485,4 @@ CANON_XPROF_STEPS
 CANON_XPROF_TPU_TRACE_MODE
 ```
 
-Count: 372 settable names (appendix inventory above; exclusions: none).
+Count: 378 settable names (appendix inventory above; exclusions: none).

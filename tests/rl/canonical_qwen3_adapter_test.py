@@ -469,6 +469,40 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
       ):
         canonical_qwen3_adapter._p62_numeric_debug_enabled()
 
+  def test_p64_receipts_and_flag_parser_are_isolated_from_p62(self):
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+      record = canonical_qwen3_adapter._p62_emit_tree_receipt(
+          stage="group_input_cotangent",
+          group=0,
+          group_count=32,
+          tree=jnp.ones((8, 2), jnp.float32),
+          ranked=True,
+          force=True,
+          mode="p64",
+      )
+    self.assertTrue(record["all_finite"])
+    self.assertIn("[P64.NUMERIC]", output.getvalue())
+    self.assertIn('"schema":"canon-p64-tree-numeric-v1"', output.getvalue())
+    with mock.patch.dict(
+        os.environ, {"CANON_P64_P45_NUMERIC_DEBUG": "1"}, clear=True
+    ):
+      self.assertEqual(
+          canonical_qwen3_adapter._backward_numeric_debug_mode(), "p64"
+      )
+    with mock.patch.dict(
+        os.environ,
+        {
+            "CANON_P62_BACKWARD_NUMERIC_DEBUG": "1",
+            "CANON_P64_P45_NUMERIC_DEBUG": "1",
+        },
+        clear=True,
+    ):
+      with self.assertRaisesRegex(
+          canonical_qwen3_adapter.FunctionalMappingError, "conflict"
+      ):
+        canonical_qwen3_adapter._backward_numeric_debug_mode()
+
   def test_xprof_jit_is_exactly_plain_jit_when_disabled(self):
     def add_one(value):
       return value + jnp.float32(1)

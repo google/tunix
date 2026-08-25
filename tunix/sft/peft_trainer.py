@@ -1328,9 +1328,10 @@ class PeftTrainer:
     if (
         os.environ.get("CANON_P58_DEEPSWE_TIM", "") != "1"
         and os.environ.get("CANON_P62_BACKWARD_NUMERIC_DEBUG", "") != "1"
+        and os.environ.get("CANON_P64_P45_NUMERIC_DEBUG", "") != "1"
     ):
       raise ValueError(
-          "precomputed discard is reserved for P58 or P62 diagnostics"
+          "precomputed discard is reserved for P58/P62/P64 diagnostics"
       )
     self._last_precomputed_commit_evidence = None
     self._validate_precomputed_gradient_contract()

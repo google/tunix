@@ -617,6 +617,28 @@ def requested_max_steps(
         "CANON_P62_BACKWARD_NUMERIC_DEBUG requires exact GSM8K "
         "DP16xTP4 P59 fixed-head backward-no-commit geometry"
     )
+  p64_numeric_debug = values.get("CANON_P64_P45_NUMERIC_DEBUG", "0")
+  if p64_numeric_debug not in ("0", "1"):
+    raise ValueError(
+        "CANON_P64_P45_NUMERIC_DEBUG must be exactly 0 or 1"
+    )
+  if p62_numeric_debug == "1" and p64_numeric_debug == "1":
+    raise ValueError("P62 and P64 numerical observers conflict")
+  if p64_numeric_debug == "1" and (
+      workload.name != "frozenlake-dp8-tp8"
+      or (workload.dp_size, workload.tp_size) != (8, 8)
+      or stage != "backward-no-commit"
+      or values.get("CANON_P33_NO_COMMIT") != "1"
+      or values.get("CANON_P59_RANK_PARALLEL_BACKWARD") != "1"
+      or values.get("CANON_P38_FIXED_LM_HEAD") != "1"
+      or values.get("CANON_V1_HP_FULL", "0") != "0"
+      or values.get("CANON_P64_TRAINING_CAPSULE_MODE")
+      not in ("capture", "replay")
+  ):
+    raise ValueError(
+        "CANON_P64_P45_NUMERIC_DEBUG requires exact P45 DP8xTP8 P59 "
+        "fixed-head backward-no-commit geometry"
+    )
   if stage == "full":
     if values.get("CANON_PROFILE_FILE", "") in (
         "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env",

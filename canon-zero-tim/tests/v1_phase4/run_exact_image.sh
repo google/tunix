@@ -44,13 +44,20 @@ $docker run --rm \
     python3 tests/sft/sft_utils_test.py StableGlobalNormTest
     python3 tests/sft/peft_trainer_test.py \
       PeftTrainerTest.test_p62_precomputed_diagnostic_discard_resets_without_commit \
+      PeftTrainerTest.test_p64_precomputed_diagnostic_discard_resets_without_commit \
       PeftTrainerTest.test_p63_finite_overflow_commits_nonzero_clipped_update
     python3 tests/rl/canonical_qwen3_adapter_test.py \
       CanonicalQwen3AdapterTest.test_p62_tree_receipt_catches_first_nonfinite_boundary \
       CanonicalQwen3AdapterTest.test_p62_loss_receipt_locks_denominator_and_scale \
-      CanonicalQwen3AdapterTest.test_p62_flag_parser_is_exact_boolean
+      CanonicalQwen3AdapterTest.test_p62_flag_parser_is_exact_boolean \
+      CanonicalQwen3AdapterTest.test_p64_receipts_and_flag_parser_are_isolated_from_p62
+    python3 canon-zero-tim/tests/v1_phase4/test_p64_numeric_debug.py \
+      P64NumericDebugTest.test_classifier_accepts_group0_only_diagnostic_replay \
+      P64NumericDebugTest.test_capsule_gcs_transport_round_trip_and_hash_negative \
+      P64NumericDebugTest.test_capsule_round_trip_and_model_binding_are_fail_closed
     python3 canon-zero-tim/tests/p33_workloads/test_dp_workloads.py \
       DPWorkloadsTest.test_p62_numeric_debug_is_exact_no_commit_geometry \
+      DPWorkloadsTest.test_p64_numeric_debug_is_exact_p45_no_commit_geometry \
       DPWorkloadsTest.test_p57_zero_full_admits_its_signed_wandb_project_only \
       DPWorkloadsTest.test_p57_m15_uses_its_signed_wide_token_contract \
       DPWorkloadsTest.test_p57_token_contract_rejects_partial_or_foreign_pairs
@@ -64,5 +71,5 @@ $docker run --rm \
     python3 canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/test_package_full_replay_carrier.py
     python3 canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/test_target_carrier.py
     python3 canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/test_resolved_env.py
-    echo "V1_HP_EXACT_IMAGE_PASS dp16_gathered=1 dp2tp2_parallel=2 p59_tp4_tp8=2 p59_real_shim=4 p59_rpa=2 p59_fused_linear=2 p62_numeric=6 p63_clip=1 gsm_scale_replay=1 p57_wandb=1 m15_token=1 apc_m15_carrier=44 perfetto_window=1 manifests=3"
+    echo "V1_HP_EXACT_IMAGE_PASS dp16_gathered=1 dp2tp2_parallel=2 p59_tp4_tp8=2 p59_real_shim=4 p59_rpa=2 p59_fused_linear=2 p62_numeric=6 p64_numeric=4 p64_capsule=3 p63_clip=1 gsm_scale_replay=1 p57_wandb=1 m15_token=1 apc_m15_carrier=44 perfetto_window=1 manifests=3"
   '

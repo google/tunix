@@ -47,6 +47,7 @@ from tunix.rl import canonical_logsoftmax
 from tunix.rl import dp_training
 from tunix.rl import dp_workloads
 from tunix.rl import deepswe_contract
+from tunix.rl import p64_training_capsule
 from tunix.rl import p38_frozenlake_replay
 from tunix.sft import utils as sft_utils
 
@@ -66,6 +67,33 @@ def _p62_numeric_debug_enabled() -> bool:
   return value == "1"
 
 
+def _p64_numeric_debug_enabled() -> bool:
+  """Parses the exact default-off P45 first-red observer."""
+  value = os.environ.get("CANON_P64_P45_NUMERIC_DEBUG", "")
+  if value not in ("", "0", "1"):
+    raise FunctionalMappingError(
+        "CANON_P64_P45_NUMERIC_DEBUG must be unset/0/1, "
+        f"got {value!r}"
+    )
+  return value == "1"
+
+
+def _backward_numeric_debug_mode() -> str:
+  p62 = _p62_numeric_debug_enabled()
+  p64 = _p64_numeric_debug_enabled()
+  if p62 and p64:
+    raise FunctionalMappingError("P62 and P64 numerical observers conflict")
+  return "p62" if p62 else "p64" if p64 else ""
+
+
+def _numeric_debug_identity(mode: str) -> tuple[str, str]:
+  if mode == "p62":
+    return "P62", "canon-p62"
+  if mode == "p64":
+    return "P64", "canon-p64"
+  raise FunctionalMappingError(f"unknown numerical debug mode: {mode!r}")
+
+
 def _p62_emit_tree_receipt(
     *,
     stage: str,
@@ -74,8 +102,10 @@ def _p62_emit_tree_receipt(
     tree: Any,
     ranked: bool = False,
     force: bool = False,
+    mode: str = "p62",
 ) -> dict[str, Any]:
   """Emits one compact first-red receipt and fails on non-finite data."""
+  marker, schema_prefix = _numeric_debug_identity(mode)
   receipt = sft_utils.tree_numeric_receipt(tree, ranked=ranked)
   should_emit = (
       force
@@ -84,7 +114,7 @@ def _p62_emit_tree_receipt(
       or not receipt["naive_norm_finite"]
   )
   record = {
-      "schema": "canon-p62-tree-numeric-v1",
+      "schema": f"{schema_prefix}-tree-numeric-v1",
       "stage": stage,
       "group": group,
       "groups": group_count,
@@ -92,13 +122,13 @@ def _p62_emit_tree_receipt(
   }
   if should_emit:
     print(
-        "[P62.NUMERIC] "
+        f"[{marker}.NUMERIC] "
         + json.dumps(record, sort_keys=True, separators=(",", ":")),
         flush=True,
     )
   if not receipt["all_finite"]:
     raise FunctionalMappingError(
-        "P62 first non-finite numerical boundary: "
+        f"{marker} first non-finite numerical boundary: "
         f"stage={stage} group={group} "
         f"first={receipt['first_nonfinite']} "
         f"rank={receipt.get('first_nonfinite_rank')}"
@@ -107,9 +137,10 @@ def _p62_emit_tree_receipt(
 
 
 def _p62_emit_loss_receipt(
-    *, loss_output: Any, contract: Any
+    *, loss_output: Any, contract: Any, mode: str = "p62"
 ) -> dict[str, Any]:
   """Validates the frozen loss denominator and compact GRPO metrics."""
+  marker, schema_prefix = _numeric_debug_identity(mode)
 
   def metric_value(value):
     compute = getattr(value, "compute", None)
@@ -148,7 +179,7 @@ def _p62_emit_loss_receipt(
   expected_denominator = float(contract.global_trajectories)
   expected_scale = float(np.float32(1.0 / expected_denominator))
   record = {
-      "schema": "canon-p62-loss-scale-v1",
+      "schema": f"{schema_prefix}-loss-scale-v1",
       "stage": "loss_scale",
       "dp": int(contract.dp_size),
       "tp": int(contract.tp_size),
@@ -164,7 +195,7 @@ def _p62_emit_loss_receipt(
       **host,
   }
   print(
-      "[P62.NUMERIC] "
+      f"[{marker}.NUMERIC] "
       + json.dumps(record, sort_keys=True, separators=(",", ":")),
       flush=True,
   )
@@ -177,7 +208,7 @@ def _p62_emit_loss_receipt(
       or host["valid_tokens"] <= 0.0
   ):
     raise FunctionalMappingError(
-        f"P62 loss-scale contract failed: {record}"
+        f"{marker} loss-scale contract failed: {record}"
     )
   return record
 
@@ -6326,33 +6357,66 @@ class Qwen3EngineForwardAdapter:
           f"got {rank_parallel_value!r}"
       )
     rank_parallel_backward = rank_parallel_value == "1"
-    numeric_debug = _p62_numeric_debug_enabled()
+    numeric_debug_mode = _backward_numeric_debug_mode()
+    numeric_debug = bool(numeric_debug_mode)
+    p64_capsule_mode = (
+        p64_training_capsule.mode()
+        if numeric_debug_mode == "p64"
+        else ""
+    )
     if numeric_debug:
-      numeric_contract = (
+      common_numeric_contract = (
           not p34
-          and workload.name == "gsm8k"
-          and (contract.dp_size, contract.tp_size) == (16, 4)
           and contract.global_trajectories == 256
-          and contract.local_trajectories == 16
-          and self._bucket == 4096
           and rank_parallel_backward
           and os.environ.get("CANON_P33_RUN_STAGE", "")
           == "backward-no-commit"
           and os.environ.get("CANON_P33_NO_COMMIT", "") == "1"
-          and os.environ.get("CANON_GSM8K_ALIGNMENT_WARN_ONLY", "0") == "0"
           and os.environ.get("CANON_P38_FIXED_LM_HEAD", "") == "1"
           and os.environ.get("CANON_V1_HP_FULL", "0") == "0"
       )
+      if numeric_debug_mode == "p62":
+        numeric_contract = (
+            common_numeric_contract
+            and workload.name == "gsm8k"
+            and (contract.dp_size, contract.tp_size) == (16, 4)
+            and contract.local_trajectories == 16
+            and self._bucket == 4096
+            and os.environ.get(
+                "CANON_GSM8K_ALIGNMENT_WARN_ONLY", "0"
+            ) == "0"
+        )
+        admission = (
+            "workload=gsm8k dp=16 tp=4 global_trajectories=256 "
+            "local_trajectories=16 global_M=4096 local_M=256 "
+            "optimizer_commits=0"
+        )
+      else:
+        numeric_contract = (
+            common_numeric_contract
+            and workload.name == "frozenlake-dp8-tp8"
+            and (contract.dp_size, contract.tp_size) == (8, 8)
+            and contract.local_trajectories == 32
+            and self._bucket == 2048
+            and os.environ.get(
+                "CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY", "0"
+            ) == "0"
+            and p64_capsule_mode in ("capture", "replay")
+        )
+        admission = (
+            "workload=frozenlake-dp8-tp8 dp=8 tp=8 "
+            "global_trajectories=256 local_trajectories=32 "
+            "global_M=2048 local_M=256 optimizer_commits=0"
+        )
       if not numeric_contract:
         raise FunctionalMappingError(
-            "P62 numerical debug requires strict GSM8K DP16xTP4, "
-            "M4096/local-M256, P59 fixed-head backward-no-commit, and "
-            "must not impersonate the V1 full profile"
+            f"{numeric_debug_mode.upper()} numerical debug requires its "
+            "exact strict target geometry, P59 fixed-head "
+            "backward-no-commit, and must not impersonate V1 full"
         )
+      marker, _ = _numeric_debug_identity(numeric_debug_mode)
       print(
-          "[P62.NUMERIC] admission workload=gsm8k dp=16 tp=4 "
-          "global_trajectories=256 local_trajectories=16 "
-          "global_M=4096 local_M=256 optimizer_commits=0",
+          f"[{marker}.NUMERIC] admission {admission}",
           flush=True,
       )
     p59_xprof_directory = _p59_xprof_backward_directory(
@@ -6446,14 +6510,32 @@ class Qwen3EngineForwardAdapter:
     )
     scale = loss_output.primary_loss.compute_scale()
     if numeric_debug:
-      _p62_emit_loss_receipt(loss_output=loss_output, contract=contract)
+      _p62_emit_loss_receipt(
+          loss_output=loss_output,
+          contract=contract,
+          mode=numeric_debug_mode,
+      )
       _p62_emit_tree_receipt(
           stage="loss_cotangent",
           group=-1,
           group_count=contract.local_trajectories,
           tree={"dentropy": dentropy, "dlogps": dlogps},
           force=True,
+          mode=numeric_debug_mode,
       )
+      if numeric_debug_mode == "p64":
+        _p62_emit_tree_receipt(
+            stage="group_input_cotangent",
+            group=0,
+            group_count=contract.local_trajectories,
+            tree={
+                "dentropy": grouped_dentropy[0],
+                "dlogps": grouped_dlogps[0],
+            },
+            ranked=True,
+            force=True,
+            mode=numeric_debug_mode,
+        )
 
     reducer = None
 
@@ -6479,6 +6561,8 @@ class Qwen3EngineForwardAdapter:
               group=index,
               group_count=contract.local_trajectories,
               tree=reverse["engine_gradients"],
+              ranked=numeric_debug_mode == "p64",
+              mode=numeric_debug_mode,
           )
         adjoint_start = time.perf_counter()
         staged_gradient = self._p59_rank_parallel_report_adjoint(
@@ -6492,6 +6576,7 @@ class Qwen3EngineForwardAdapter:
               group_count=contract.local_trajectories,
               tree=staged_gradient,
               ranked=True,
+              mode=numeric_debug_mode,
           )
         if reducer is None:
           reducer_factory = getattr(
@@ -6539,6 +6624,7 @@ class Qwen3EngineForwardAdapter:
               group=index,
               group_count=contract.local_trajectories,
               tree=one_gradient,
+              mode=numeric_debug_mode,
           )
         leaves = jax.tree.leaves(one_gradient)
         reduction_finite = reduction_report.get(
@@ -6713,7 +6799,19 @@ class Qwen3EngineForwardAdapter:
           "[P59.XPROF] phase=backward_group started update=1 groups=1",
           flush=True,
       )
-    for index, spec in enumerate(specs):
+    reverse_limit = (
+        p64_training_capsule.reverse_group_limit(len(specs))
+        if numeric_debug_mode == "p64"
+        else len(specs)
+    )
+    reverse_specs = specs[:reverse_limit]
+    if len(reverse_specs) != len(specs):
+      print(
+          "[P64.CAPSULE] backward_scope mode=replay groups=1/32 "
+          "selected=group0 optimizer_commits=0",
+          flush=True,
+      )
+    for index, spec in enumerate(reverse_specs):
       p32_group_start = time.perf_counter()
       one_gradient, report = reverse_reduce_group(index, spec)
       p32_reverse_durations.append(time.perf_counter() - p32_group_start)
@@ -6755,7 +6853,7 @@ class Qwen3EngineForwardAdapter:
       reports.append(report)
       if (
           os.environ.get("CANON_PERF_LOG", "1") != "0"
-          and index == len(specs) - 1
+          and index == len(reverse_specs) - 1
       ):
         print(
             "[PERF] stage=p32_vag_reverse seconds=%.3f groups=%d"

@@ -46,6 +46,7 @@ from tunix.rl import deepswe_contract
 from tunix.rl import deepswe_debug
 from tunix.rl import envelope_probe
 from tunix.rl import function_registry
+from tunix.rl import p64_training_capsule
 from tunix.rl import perf_log
 from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl import utils as rl_utils
@@ -1864,6 +1865,17 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
             step=int(expected_step),
             fail_closed=not diagnostic_only,
         )
+        capsule_mode = p64_training_capsule.mode()
+        if capsule_mode == "capture":
+          if precheck_record.get("verdict") != "PASS":
+            raise alignment.AlignmentGateError(
+                "P64 training capsule requires strict pre-alignment PASS"
+            )
+          p64_training_capsule.persist(combined_batch)
+        elif capsule_mode == "replay":
+          raise alignment.AlignmentGateError(
+              "P64 replay must bypass rollout and rescore production"
+          )
         if diagnostic_only:
           alignment.stop_after_diagnostic_precheck(precheck_record)
     return [combined_batch]

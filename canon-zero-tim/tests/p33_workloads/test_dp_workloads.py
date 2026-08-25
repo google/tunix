@@ -271,6 +271,39 @@ class DPWorkloadsTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "P62"):
           dp_workloads.requested_max_steps(workload, rejected)
 
+  def test_p64_numeric_debug_is_exact_p45_no_commit_geometry(self):
+    workload = dp_workloads.get_workload("frozenlake-dp8-tp8")
+    environ = _environment("frozenlake-dp8-tp8")
+    environ.update({
+        "CANON_P33_RUN_STAGE": "backward-no-commit",
+        "CANON_P33_NO_COMMIT": "1",
+        "CANON_P59_DP4_TAIL8": "0",
+        "CANON_P60_DETERMINISTIC_AB": "0",
+        "CANON_P61_BACKWARD_NUMERICAL_DIR": "",
+        "CANON_P62_BACKWARD_NUMERIC_DEBUG": "0",
+        "CANON_P64_P45_NUMERIC_DEBUG": "1",
+        "CANON_P64_TRAINING_CAPSULE_MODE": "capture",
+        "CANON_P59_RANK_PARALLEL_BACKWARD": "1",
+        "CANON_P38_FIXED_LM_HEAD": "1",
+        "CANON_V1_HP_FULL": "0",
+    })
+    self.assertEqual(
+        dp_workloads.requested_max_steps(workload, environ), 1
+    )
+    for key, value in (
+        ("CANON_P33_RUN_STAGE", "full"),
+        ("CANON_P33_NO_COMMIT", "0"),
+        ("CANON_P59_RANK_PARALLEL_BACKWARD", "0"),
+        ("CANON_P38_FIXED_LM_HEAD", "0"),
+        ("CANON_V1_HP_FULL", "1"),
+        ("CANON_P64_TRAINING_CAPSULE_MODE", ""),
+    ):
+      with self.subTest(key=key):
+        rejected = dict(environ)
+        rejected[key] = value
+        with self.assertRaisesRegex(ValueError, "P64"):
+          dp_workloads.requested_max_steps(workload, rejected)
+
   def test_gsm8k_requires_gradient_probe_explicitly_disabled(self):
     workload = dp_workloads.get_workload("gsm8k")
     environ = _environment("gsm8k")

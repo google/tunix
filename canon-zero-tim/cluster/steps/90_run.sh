@@ -12,6 +12,8 @@ source "$CANON_PKG/cluster/steps/p57_runtime_contract.sh"
 source "$CANON_PKG/cluster/steps/jax_cache_sync_lib.sh"
 # shellcheck disable=SC1091
 source "$CANON_PKG/cluster/steps/xprof_gcs_sync_lib.sh"
+# shellcheck disable=SC1091
+source "$CANON_PKG/cluster/steps/p64_capsule_gcs_sync_lib.sh"
 
 # A full GSM8K JobSet may be recreated after an eviction or node loss. Preserve
 # fail-closed no-overwrite semantics within each attempt without letting an
@@ -127,6 +129,9 @@ if [ "${CANON_P33_WORKLOAD_LAUNCH_ADMITTED:-0}" = "1" ]; then
   if [ -n "${CANON_P38_MISMATCH_CAPSULE:-}" ]; then
     report_keys+=(CANON_P38_MISMATCH_CAPSULE)
   fi
+  if [ "${CANON_P64_P45_NUMERIC_DEBUG:-0}" = "1" ]; then
+    report_keys+=(CANON_P64_TRAINING_CAPSULE)
+  fi
   if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
     report_keys+=(CANON_P38_SERVING_CAPTURE_CLASSIFICATION
                   CANON_P38_SERVING_CAPTURE_ARCHIVE)
@@ -153,6 +158,16 @@ if [ "${CANON_P33_WORKLOAD_LAUNCH_ADMITTED:-0}" = "1" ]; then
     fi
     mkdir -p "$(dirname "$report_path")"
   done
+  if [ "${CANON_P64_P45_NUMERIC_DEBUG:-0}" = "1" ]; then
+    for report_path in \
+      "${CANON_P64_TRAINING_CAPSULE}.model.json" \
+      "${CANON_STATE%/}/p64_capsule_${CANON_P64_TRAINING_CAPSULE_MODE}.receipt"; do
+      if [ -e "$report_path" ]; then
+        echo "[run] FATAL: P64 capsule evidence path already exists: $report_path" >&2
+        exit 1
+      fi
+    done
+  fi
   if [ "${CANON_P35_ENVELOPE:-0}" = "1" ]; then
     for report_key in CANON_P35_ENVELOPE_REPORT CANON_P35_METADATA_DIR \
                       CANON_P35_CLASSIFICATION; do
@@ -262,6 +277,28 @@ if [ "${CANON_P62_BACKWARD_NUMERIC_DEBUG:-0}" = "1" ]; then
   printf '%s\n' "$p62_profile_receipt" > "$LOG"
   echo "$p62_profile_receipt"
   run_tee_args=(-a "$LOG")
+elif [ "${CANON_P64_P45_NUMERIC_DEBUG:-0}" = "1" ]; then
+  if [ "${CANON_PROFILE_FILE:-}" != \
+       "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-p64-debug.env" ]; then
+    echo "[run] FATAL: P64 full-log seed requires its exact profile" >&2
+    exit 1
+  fi
+  p64_profile_receipt="[P64.NUMERIC] profile_resolved workload=frozenlake-dp8-tp8 dp=8 tp=8 stage=backward-no-commit optimizer_commits=0 capsule_mode=${CANON_P64_TRAINING_CAPSULE_MODE:-missing}"
+  printf '%s\n' "$p64_profile_receipt" > "$LOG"
+  echo "$p64_profile_receipt"
+  run_tee_args=(-a "$LOG")
+  if [ "${CANON_P64_TRAINING_CAPSULE_MODE:-}" = "replay" ]; then
+    p64_replay_sync_rc=0
+    canon_p64_capsule_sync replay || p64_replay_sync_rc=$?
+    p64_replay_receipt="${CANON_STATE%/}/p64_capsule_replay.receipt"
+    if [ -s "$p64_replay_receipt" ]; then
+      cat "$p64_replay_receipt" >> "$LOG"
+    fi
+    if [ "$p64_replay_sync_rc" -ne 0 ]; then
+      echo "[run] FATAL: P64 replay capsule restore failed: rc=$p64_replay_sync_rc" >&2
+      exit "$p64_replay_sync_rc"
+    fi
+  fi
 fi
 bash -c "$CANON_RUN_CMD" 2>&1 | tee "${run_tee_args[@]}"
 pipeline_status=("${PIPESTATUS[@]}")
@@ -300,6 +337,19 @@ if [ "${CANON_V1_HP_FULL:-0}" = "1" ]; then
   if [ "$rc" -eq 0 ] && [ "$xprof_restore_rc" -ne 0 ]; then
     echo "[run] FATAL: completed V1 workload lacks a durable GCS XProf restore: rc=$xprof_restore_rc" >&2
     exit "$xprof_restore_rc"
+  fi
+fi
+if [ "${CANON_P64_P45_NUMERIC_DEBUG:-0}" = "1" ] && \
+   [ "${CANON_P64_TRAINING_CAPSULE_MODE:-}" = "capture" ]; then
+  p64_capture_sync_rc=0
+  canon_p64_capsule_sync capture || p64_capture_sync_rc=$?
+  p64_capture_receipt="${CANON_STATE%/}/p64_capsule_capture.receipt"
+  if [ -s "$p64_capture_receipt" ]; then
+    cat "$p64_capture_receipt" >> "$LOG"
+  fi
+  if [ "$p64_capture_sync_rc" -ne 0 ]; then
+    echo "[run] FATAL: P64 capture capsule persistence failed: rc=$p64_capture_sync_rc" >&2
+    rc="$p64_capture_sync_rc"
   fi
 fi
 if [ "${CANON_P46_EVALUATION:-0}" = "1" ]; then
@@ -991,7 +1041,51 @@ if [ "${is_frozenlake:-0}" = "1" ]; then
     exit 1
   fi
 fi
-if [ "${CANON_P62_BACKWARD_NUMERIC_DEBUG:-0}" = "1" ]; then
+if [ "${CANON_P64_P45_NUMERIC_DEBUG:-0}" = "1" ]; then
+  p64_classification="$CANON_STATE/p64_p45_numeric.classification.json"
+  p64_classifier_rc=0
+  JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
+    python3 "$CANON_PKG/tasks/v1-phase4-three-full-recipes/scripts/classify_p64_p45_numeric_debug.py" \
+      "$LOG" --output "$p64_classification" || p64_classifier_rc=$?
+  if [ ! -s "$p64_classification" ]; then
+    echo "[run] FATAL: P64 classifier did not persist its result" >&2
+    exit 1
+  fi
+  p64_log_sha="$(sha256sum "$LOG" | awk '{print $1}')"
+  p64_log_bytes="$(wc -c < "$LOG" | tr -d '[:space:]')"
+  p64_log_lines="$(wc -l < "$LOG" | tr -d '[:space:]')"
+  p64_class_sha="$(sha256sum "$p64_classification" | awk '{print $1}')"
+  p64_verdict="$(JAX_PLATFORMS=cpu python3 -c \
+    'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["verdict"])' \
+    "$p64_classification")" || {
+      echo "[run] FATAL: P64 classification verdict is unreadable" >&2
+      exit 1
+    }
+  echo "[P64.NUMERIC.POSTFLIGHT] verdict=$p64_verdict workload_rc=$rc transport_rc=$tee_rc run_log=$LOG run_log_sha256=$p64_log_sha run_log_bytes=$p64_log_bytes run_log_lines=$p64_log_lines classification=$p64_classification classification_sha256=$p64_class_sha"
+  sed 's/^/[P64.NUMERIC.CLASSIFICATION_JSON] /' "$p64_classification"
+  if [ "$tee_rc" -ne 0 ]; then
+    echo "[run] FATAL: P64 full-log transport failed: rc=$tee_rc" >&2
+    exit 1
+  fi
+  if [ "$p64_classifier_rc" -ne 0 ]; then
+    echo "[run] FATAL: P64 full-log classification failed: rc=$p64_classifier_rc verdict=$p64_verdict" >&2
+    exit "$p64_classifier_rc"
+  fi
+  if [ "$p64_verdict" = "ROOT_LOCALIZED_NONFINITE" ]; then
+    if [ "$rc" -eq 0 ]; then
+      echo "[run] FATAL: P64 localized non-finite without fail-closed workload exit" >&2
+      exit 1
+    fi
+    echo "[P64.NUMERIC.POSTFLIGHT] ROOT_LOCALIZED workload_exit_preserved=$rc"
+    exit "$rc"
+  fi
+  if [ "$rc" -ne 0 ]; then
+    echo "[run] FATAL: P64 workload failed after finite classification: rc=$rc verdict=$p64_verdict" >&2
+    exit "$rc"
+  fi
+  echo "[P64.NUMERIC.POSTFLIGHT] PASS complete_log=1 optimizer_commits=0"
+  exit 0
+elif [ "${CANON_P62_BACKWARD_NUMERIC_DEBUG:-0}" = "1" ]; then
   p62_classification="$CANON_STATE/p62_backward_numeric.classification.json"
   p62_classifier_rc=0
   JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \

@@ -18,7 +18,7 @@ from __future__ import annotations
 import abc
 import time
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 import contextlib
 import copy
 import dataclasses
@@ -62,6 +62,7 @@ from tunix.perf.experimental import constants as perf_constants
 from tunix.rl import function_registry
 from tunix.rl import gsm8k_xprof
 from tunix.rl import host_memory as host_memory_lib
+from tunix.rl import p64_training_capsule
 from tunix.rl import perf_log
 from tunix.rl import reward_manager  # pylint: disable=unused-import
 from tunix.rl import rl_cluster as rl_cluster_lib
@@ -874,6 +875,22 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           "CANON_P62_BACKWARD_NUMERIC_DEBUG must be unset/0/1"
       )
     p62_numeric_debug = p62_value == "1"
+    p64_value = os.environ.get("CANON_P64_P45_NUMERIC_DEBUG", "")
+    if p64_value not in ("", "0", "1"):
+      raise alignment.AlignmentGateError(
+          "CANON_P64_P45_NUMERIC_DEBUG must be unset/0/1"
+      )
+    p64_numeric_debug = p64_value == "1"
+    if p62_numeric_debug and p64_numeric_debug:
+      raise alignment.AlignmentGateError(
+          "P62 and P64 numerical observers are mutually exclusive"
+      )
+    p64_capsule_mode = p64_training_capsule.mode()
+    if p64_numeric_debug != bool(p64_capsule_mode):
+      raise alignment.AlignmentGateError(
+          "P64 numerical debug and training-capsule mode must be enabled "
+          "together"
+      )
     if p62_numeric_debug and not (
         p33_workload
         and workload.name == "gsm8k"
@@ -889,15 +906,40 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           "P62 numerical debug requires exact strict GSM8K DP16xTP4 "
           "P59 fixed-head backward-no-commit geometry"
       )
+    if p64_numeric_debug and not (
+        p33_workload
+        and workload.name == "frozenlake-dp8-tp8"
+        and (workload.dp_size, workload.tp_size) == (8, 8)
+        and run_stage == "backward-no-commit"
+        and p33_no_commit
+        and full_train
+        and os.environ.get("CANON_P59_RANK_PARALLEL_BACKWARD", "") == "1"
+        and os.environ.get("CANON_P38_FIXED_LM_HEAD", "") == "1"
+        and os.environ.get("CANON_V1_HP_FULL", "0") == "0"
+    ):
+      raise alignment.AlignmentGateError(
+          "P64 numerical debug requires exact strict P45 DP8xTP8 "
+          "P59 fixed-head backward-no-commit geometry"
+      )
+    numeric_debug = p62_numeric_debug or p64_numeric_debug
+    numeric_marker = "P62" if p62_numeric_debug else "P64"
+    numeric_schema = (
+        "canon-p62" if p62_numeric_debug else "canon-p64"
+    )
     if num_trajectories % trajectory_micro:
       raise alignment.AlignmentGateError(
           "segmented update trajectory cadence changed: "
           f"trajectories={num_trajectories} micro={trajectory_micro}"
       )
-    expected_microbatches = (
+    registered_microbatches = (
         workload.local_trajectories
         if canonical_workload
         else num_trajectories // trajectory_micro
+    )
+    expected_microbatches = (
+        p64_training_capsule.reverse_group_limit(registered_microbatches)
+        if p64_numeric_debug
+        else registered_microbatches
     )
     if canonical_workload:
       expected_trajectories = workload.global_trajectories
@@ -968,6 +1010,8 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         ),
         "train_steps": actor_trainer.train_steps,
     }
+    if p64_numeric_debug:
+      p64_training_capsule.bind_or_verify_model(before["model"])
     hbm_before = memory_snapshot()
     emit_sharding_inventory("before_reverse")
     optimizer_memory_kinds_before = (
@@ -1036,7 +1080,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     def consume_scaled(index, gradients, multiplier):
       if p33_no_commit:
         multiplier = jnp.asarray(multiplier, jnp.float32)
-        if p62_numeric_debug:
+        if numeric_debug:
           numeric_stats = sft_utils.scaled_tree_numeric_stats(
               gradients, multiplier
           )
@@ -1044,10 +1088,11 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
               gradients, stats=numeric_stats
           )
           numeric_record = {
-              "schema": "canon-p62-tree-numeric-v1",
+              "schema": f"{numeric_schema}-tree-numeric-v1",
               "stage": "scaled_microgradient",
               "group": index,
-              "groups": expected_microbatches,
+              "groups": registered_microbatches,
+              "executed_groups": expected_microbatches,
               "multiplier": float(np.asarray(multiplier)),
               **numeric_receipt,
           }
@@ -1057,7 +1102,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
               or not numeric_receipt["naive_norm_finite"]
           ):
             print(
-                "[P62.NUMERIC] "
+                f"[{numeric_marker}.NUMERIC] "
                 + json.dumps(
                     numeric_record,
                     sort_keys=True,
@@ -1067,7 +1112,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             )
           if not numeric_receipt["all_finite"]:
             raise alignment.AlignmentGateError(
-                "P62 first non-finite numerical boundary: "
+                f"{numeric_marker} first non-finite numerical boundary: "
                 f"stage=scaled_microgradient group={index} "
                 f"first={numeric_receipt['first_nonfinite']}"
             )
@@ -1247,22 +1292,23 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       )
 
     p62_accumulator_denominator = None
-    if p62_numeric_debug:
+    if numeric_debug:
       accumulator_tree = actor_trainer.grad_accumulator.get()
       accumulator_receipt = sft_utils.tree_numeric_receipt(accumulator_tree)
       p62_accumulator_denominator = float(np.asarray(jax.device_get(
           actor_trainer.grad_accumulator.denom[...]
       )))
       accumulator_record = {
-          "schema": "canon-p62-tree-numeric-v1",
+          "schema": f"{numeric_schema}-tree-numeric-v1",
           "stage": "final_accumulator",
           "group": expected_microbatches - 1,
-          "groups": expected_microbatches,
+          "groups": registered_microbatches,
+          "executed_groups": expected_microbatches,
           "accumulator_denominator": p62_accumulator_denominator,
           **accumulator_receipt,
       }
       print(
-          "[P62.NUMERIC] "
+          f"[{numeric_marker}.NUMERIC] "
           + json.dumps(
               accumulator_record, sort_keys=True, separators=(",", ":")
           ),
@@ -1273,7 +1319,8 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           or p62_accumulator_denominator != float(expected_microbatches)
       ):
         raise alignment.AlignmentGateError(
-            f"P62 final accumulator contract failed: {accumulator_record}"
+            f"{numeric_marker} final accumulator contract failed: "
+            f"{accumulator_record}"
         )
       with self.rl_cluster._get_mesh_and_logical_axis_rules_cm(  # pylint: disable=protected-access
           rl_cluster_lib.Role.ACTOR
@@ -1283,14 +1330,15 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           expected_microbatches
       ):
         raise alignment.AlignmentGateError(
-            "P62 discarded accumulator denominator changed: "
+            f"{numeric_marker} discarded accumulator denominator changed: "
             f"{float(np.asarray(discarded_denominator))} != "
             f"{expected_microbatches}"
         )
       print(
-          "[P62.NUMERIC] discard_complete optimizer_commits=0 "
+          f"[{numeric_marker}.NUMERIC] discard_complete optimizer_commits=0 "
           f"microsteps={expected_microbatches} "
-          f"denominator={p62_accumulator_denominator}",
+          f"denominator={p62_accumulator_denominator} "
+          f"diagnostic_replay={int(p64_capsule_mode == 'replay')}",
           flush=True,
       )
 
@@ -1466,6 +1514,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
               float(np.asarray(value)) for value in micro_norms
           ],
           "p62_numeric_debug": p62_numeric_debug,
+          "p64_numeric_debug": p64_numeric_debug,
           "p62_accumulator_denominator": p62_accumulator_denominator,
           "model_changed_paths": changed["model"],
           "optimizer_changed_paths": changed["optimizer"],
@@ -2798,25 +2847,54 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
 
     train_data_queue = queue_lib.SimpleDataQueue(maxsize=0)
 
-    # 1. Start producer thread to generate rollouts and training examples.
-    orchestrator = self._build_orchestrator()
-
+    # 1. Start the rollout producer, except for the explicitly hash-bound P64
+    # diagnostic replay. Replay loads the already certified train batch and
+    # must never regenerate environment or serving work.
+    p64_replay = p64_training_capsule.is_replay()
     prompt_queue = queue.Queue()
-    initial_buffer_size = self.algo_config.off_policy_steps + 1
-    logging.info(
-        "Prefilling prompt queue with %d batches.", initial_buffer_size
-    )
-    for _ in range(initial_buffer_size):
-      try:
-        self._put_prompts_to_queue(prompt_queue, next(full_dataset_iterator))
-      except StopIteration:
-        prompt_queue.put(None)
-        break
+    replay_train_example = None
+    if p64_replay:
+      if eval_dataset is not None or all_eval_prompts:
+        raise alignment.AlignmentGateError(
+            "P64 diagnostic replay forbids evaluation inputs"
+        )
+      verified_capsule = p64_training_capsule.load_verified()
+      replay_train_example = verified_capsule.build(
+          TrainExample, alignment.ObservedTrainExample
+      )
+      replay_precheck = alignment.check_pre_backward(
+          replay_train_example,
+          step=int(self.rl_cluster.actor_trainer.train_steps),
+          fail_closed=True,
+      )
+      if replay_precheck.get("verdict") != "PASS":
+        raise alignment.AlignmentGateError(
+            "P64 diagnostic replay capsule failed strict pre-alignment"
+        )
+      producer_future = Future()
+      producer_future.set_result(None)
+      print(
+          "[P64.CAPSULE] producer_bypass verdict=PASS "
+          "environment=0 rollout=0 rescore_b=0",
+          flush=True,
+      )
+    else:
+      orchestrator = self._build_orchestrator()
+      initial_buffer_size = self.algo_config.off_policy_steps + 1
+      logging.info(
+          "Prefilling prompt queue with %d batches.", initial_buffer_size
+      )
+      for _ in range(initial_buffer_size):
+        try:
+          self._put_prompts_to_queue(prompt_queue, next(full_dataset_iterator))
+        except StopIteration:
+          prompt_queue.put(None)
+          break
 
-    producer_future = asyncio.run_coroutine_threadsafe(
-        self._producer(orchestrator, prompt_queue, train_data_queue),
-        self.loop,
-    )
+      producer_future = asyncio.run_coroutine_threadsafe(
+          self._producer(orchestrator, prompt_queue, train_data_queue),
+          self.loop,
+      )
 
     # 2. Consume training examples and train.
     p38_precheck_only = (
@@ -2859,12 +2937,19 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           "partial_tail=reject verdict=PASS",
           flush=True,
       )
-    train_data_gen = self._data_consumer_batch_generator(
-        train_data_queue,
-        consumer_batch_size,
-        require_full_batch=require_full_consumer_batch,
-    )
+    if p64_replay:
+      train_data_gen = iter([[replay_train_example]])
+    else:
+      train_data_gen = self._data_consumer_batch_generator(
+          train_data_queue,
+          consumer_batch_size,
+          require_full_batch=require_full_consumer_batch,
+      )
     is_packed = self._training_config.max_seq_token_per_tpu is not None
+    if p64_replay and is_packed:
+      raise alignment.AlignmentGateError(
+          "P64 diagnostic replay requires the original unpacked P45 batch"
+      )
     if is_packed:
       logging.info(
           "Using sequence packing with max_seq_token_per_tpu: %d",
@@ -2904,7 +2989,13 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       #   continue
       # train_micro_batch = filtered_train_micro_batch
 
-      if self._process_in_consumer:
+      if p64_replay:
+        if len(train_micro_batch) != 1:
+          raise alignment.AlignmentGateError(
+              "P64 replay must contain exactly one frozen train batch"
+          )
+        merged_train_micro_batch = train_micro_batch[0]
+      elif self._process_in_consumer:
         # train_micro_batch is a list of lists of trajectories.
         all_trajectories = [t for group in train_micro_batch for t in group]
         try:

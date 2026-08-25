@@ -952,6 +952,15 @@ if [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "1" ] && \
       }
       echo "[env] P62 numeric debug fixed lm-head enabled"
       ;;
+    frozenlake-dp8-tp8:backward-no-commit:1:cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-p64-debug.env)
+      [ "${CANON_P64_P45_NUMERIC_DEBUG:-0}" = "1" ] && \
+      [ "${CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY:-0}" = "0" ] && \
+      [ "${CANON_P33_NO_COMMIT:-0}" = "1" ] || {
+        echo "[env] P64 numeric debug requires strict alignment and zero optimizer commits" >&2
+        fail=1
+      }
+      echo "[env] P64 numeric debug fixed lm-head enabled"
+      ;;
     *)
       echo "[env] fixed lm-head is not admitted for this workload/stage/profile" >&2
       fail=1
@@ -1894,6 +1903,15 @@ if [ "${CANON_P32_DP_ADMISSION:-0}" = "1" ]; then
       0|1) ;;
       *) echo "[env] CANON_P62_BACKWARD_NUMERIC_DEBUG must be 0 or 1" >&2; fail=1 ;;
     esac
+    case "${CANON_P64_P45_NUMERIC_DEBUG:-0}" in
+      0|1) ;;
+      *) echo "[env] CANON_P64_P45_NUMERIC_DEBUG must be 0 or 1" >&2; fail=1 ;;
+    esac
+    if [ "${CANON_P62_BACKWARD_NUMERIC_DEBUG:-0}" = "1" ] && \
+       [ "${CANON_P64_P45_NUMERIC_DEBUG:-0}" = "1" ]; then
+      echo "[env] P62 and P64 numerical observers are mutually exclusive" >&2
+      fail=1
+    fi
     case "${CANON_GSM8K_AB_REPORT_ONLY:-0}" in
       0|1) ;;
       *) echo "[env] CANON_GSM8K_AB_REPORT_ONLY must be 0 or 1" >&2; fail=1 ;;
@@ -1911,6 +1929,49 @@ if [ "${CANON_P32_DP_ADMISSION:-0}" = "1" ]; then
         echo "[env] P62 requires exact GSM8K DP16xTP4 fixed-head backward-no-commit profile" >&2
         fail=1
       }
+    fi
+    if [ "${CANON_P64_P45_NUMERIC_DEBUG:-0}" = "1" ]; then
+      [ "${CANON_P32_WORKLOAD:-}" = "frozenlake-dp8-tp8" ] && \
+      [ "${CANON_DP_SIZE:-}" = "8" ] && \
+      [ "${CANON_TP_SIZE:-}" = "8" ] && \
+      [ "${CANON_P33_RUN_STAGE:-}" = "backward-no-commit" ] && \
+      [ "${CANON_P33_NO_COMMIT:-}" = "1" ] && \
+      [ "${CANON_P59_RANK_PARALLEL_BACKWARD:-}" = "1" ] && \
+      [ "${CANON_P38_FIXED_LM_HEAD:-}" = "1" ] && \
+      [ "${CANON_V1_HP_FULL:-0}" = "0" ] && \
+      [ "${CANON_PROFILE_FILE:-}" = "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-p64-debug.env" ] || {
+        echo "[env] P64 requires exact P45 DP8xTP8 fixed-head backward-no-commit profile" >&2
+        fail=1
+      }
+      [ "${CANON_P64_TRAINING_CAPSULE:-}" = \
+        "${CANON_STATE%/}/p64_training_capsule.npz" ] || {
+        echo "[env] P64 capsule path must be isolated under CANON_STATE" >&2
+        fail=1
+      }
+      [[ "${CANON_P64_TRAINING_CAPSULE_GCS_URI:-}" =~ ^gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p64/[a-z0-9][a-z0-9-]*/training-capsule\.npz$ ]] || {
+        echo "[env] P64 capsule GCS URI is outside the evidence root" >&2
+        fail=1
+      }
+      case "${CANON_P64_TRAINING_CAPSULE_MODE:-}" in
+        capture)
+          [ -z "${CANON_P64_TRAINING_CAPSULE_SHA256:-}" ] && \
+          [ -z "${CANON_P64_MODEL_BINDING_SHA256:-}" ] || {
+            echo "[env] P64 capture mode forbids replay hashes" >&2
+            fail=1
+          }
+          ;;
+        replay)
+          [[ "${CANON_P64_TRAINING_CAPSULE_SHA256:-}" =~ ^[0-9a-f]{64}$ ]] && \
+          [[ "${CANON_P64_MODEL_BINDING_SHA256:-}" =~ ^[0-9a-f]{64}$ ]] || {
+            echo "[env] P64 replay requires capsule and model-binding hashes" >&2
+            fail=1
+          }
+          ;;
+        *)
+          echo "[env] P64 capsule mode must be capture or replay" >&2
+          fail=1
+          ;;
+      esac
     fi
     case "${CANON_GSM8K_ALIGNMENT_WARN_ONLY:-0}" in
       0|1) ;;
