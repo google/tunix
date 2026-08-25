@@ -278,7 +278,7 @@ class StandardRLProgram(RLProgram):
       consumed_policy_version: int,
       log_step: int,
   ) -> dict[str, Any]:
-    """Logs rollout, reward, queue, trainer, and orchestrator metrics.
+    """Logs rollout, reward, trainer, and orchestrator metrics.
 
     TODO: b/552087289 - All metrics in this program are currently aggregated
     and flushed at the trainer's global step T boundary, which relies on an
@@ -416,7 +416,7 @@ class StandardRLProgram(RLProgram):
             self.metrics_prefix, f"rollout/{tag}", val, self.mode, log_step
         )
 
-    # --- 2. Reward & Queue Metrics ---
+    # --- 2. Reward Metrics ---
     reward_mean = float(np.mean(step_rewards)) if step_rewards else 0.0
     reward_std = float(np.std(step_rewards)) if step_rewards else 0.0
     reward_min = float(np.min(step_rewards)) if step_rewards else 0.0
@@ -434,31 +434,6 @@ class StandardRLProgram(RLProgram):
         self.metrics_logger.log(
             self.metrics_prefix, f"rewards/{tag}", val, self.mode, log_step
         )
-
-    raw_q_depth = getattr(
-        self.raw_q,
-        "ready_groups_count",
-        len(getattr(self.raw_q, "_ready_groups", [])),
-    )
-    scored_q_depth = getattr(
-        self.scored_q,
-        "ready_groups_count",
-        len(getattr(self.scored_q, "_ready_groups", [])),
-    )
-    raw_q_buckets = getattr(
-        self.raw_q,
-        "incomplete_buckets_count",
-        len(getattr(self.raw_q, "_buckets", {})),
-    )
-    queue_stats = {
-        "raw_q_depth": float(raw_q_depth),
-        "scored_q_depth": float(scored_q_depth),
-        "raw_q_incomplete_buckets": float(raw_q_buckets),
-    }
-    for tag, val in queue_stats.items():
-      self.metrics_logger.log(
-          self.metrics_prefix, f"queue/{tag}", val, self.mode, log_step
-      )
 
     # --- 3. Orchestrator Metrics ---
     orchestrator_stats = {

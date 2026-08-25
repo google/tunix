@@ -670,7 +670,7 @@ class RLProgramTest(absltest.TestCase):
       self.assertTrue(logger.metric_exists("", "trainer/kl", "train"))
       self.assertAlmostEqual(logger.get_metric("", "trainer/kl", "train"), 0.02)
 
-      # 2. Reward & Queue Metrics
+      # 2. Reward Metrics
       self.assertTrue(logger.metric_exists("", "rewards/mean", "train"))
       self.assertAlmostEqual(
           logger.get_metric("", "rewards/mean", "train"), 2.5
@@ -683,11 +683,6 @@ class RLProgramTest(absltest.TestCase):
       self.assertAlmostEqual(logger.get_metric("", "rewards/max", "train"), 2.5)
       self.assertTrue(logger.metric_exists("", "rewards/sum", "train"))
       self.assertAlmostEqual(logger.get_metric("", "rewards/sum", "train"), 5.0)
-      self.assertTrue(logger.metric_exists("", "queue/raw_q_depth", "train"))
-      self.assertTrue(logger.metric_exists("", "queue/scored_q_depth", "train"))
-      self.assertTrue(
-          logger.metric_exists("", "queue/raw_q_incomplete_buckets", "train")
-      )
 
       # 3. Rollout Metrics (collected from RolloutWorker responses)
       self.assertTrue(
