@@ -169,8 +169,8 @@ class LLMEngine:
             if logp is not None:
                 try:
                     self.generated_logprobs[r.request_id].append(float(logp[idx]))
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"Logprobs Exception: {e}")
             if logits is not None:
                 try:
                     self.generated_logits[r.request_id].append(list(logits[idx]))
