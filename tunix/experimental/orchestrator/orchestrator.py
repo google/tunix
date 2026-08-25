@@ -237,8 +237,6 @@ class ClusterOrchestrator:
   def run_program(
       self,
       program: rl_program.RLProgram,
-      train_dataset: Iterable[Any] | None = None,
-      num_steps: int | None = None,
       bring_up: bool = True,
       dummy_data: Any = None,
       **kwargs: Any,
@@ -253,8 +251,6 @@ class ClusterOrchestrator:
 
     program.run(
         engine=engine,
-        train_dataset=train_dataset,
-        num_steps=num_steps,
         **kwargs,
     )
 
@@ -265,7 +261,7 @@ class ClusterOrchestrator:
       reward_fns: Sequence[Callable[..., Any]] | None = None,
       assembler: batch_assembly.BatchAssembler | None = None,
       program: rl_program.RLProgram | None = None,
-      num_steps: int = 1000,
+      max_steps: int = 1000,
   ) -> None:
     """Managed Program Submission: auto-wires Engine, Assembler, Queues & StandardRLProgram."""
     if self.engine is None:
@@ -280,6 +276,7 @@ class ClusterOrchestrator:
     metrics_prefix = getattr(self.config, "metrics_prefix", "")
     active_program = program or rl_program.StandardRLProgram(
         dataset=dataset,
+        max_steps=max_steps,
         algo=algo,
         reward_fns=reward_fns,
         assembler=active_assembler,
@@ -288,7 +285,5 @@ class ClusterOrchestrator:
     )
     self.run_program(
         program=active_program,
-        train_dataset=dataset,
-        num_steps=num_steps,
         bring_up=False,
     )

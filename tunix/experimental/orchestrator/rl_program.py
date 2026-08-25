@@ -27,7 +27,6 @@ from typing import Any
 
 from absl import logging
 import numpy as np
-
 from tunix.experimental.common import datatypes
 from tunix.experimental.orchestrator import algorithm_adapter
 from tunix.experimental.orchestrator import batch_assembly
@@ -63,6 +62,7 @@ class RLProgram(abc.ABC):
     self._step = 0
     self.policy_version = 0
     self.last_step_result: RLStepResult | None = None
+    self.engine: rl_engine_interface.AbstractRLEngine | None = None
 
   @property
   def step(self) -> int:
@@ -72,8 +72,6 @@ class RLProgram(abc.ABC):
   def run(
       self,
       engine: rl_engine_interface.AbstractRLEngine,
-      train_dataset: Iterable[Any] | None = None,
-      num_steps: int | None = None,
       **kwargs: Any,
   ) -> None:
     """Entry point running all stages on an event loop."""
@@ -98,6 +96,7 @@ class StandardRLProgram(RLProgram):
       self,
       algo: algorithm_adapter.AlgorithmAdapter,
       dataset: Iterable[Any] | None = None,
+      max_steps: int | None = None,
       reward_fns: Sequence[Callable[..., Any]] | None = None,
       assembler: batch_assembly.BatchAssembler | None = None,
       group_size: int = 8,
@@ -111,9 +110,11 @@ class StandardRLProgram(RLProgram):
       on_step_end: Callable[[int, Any], None] | None = None,
   ):
     super().__init__()
+    self.engine: rl_engine_interface.AbstractRLEngine | None = None
     if max_staleness is not None and max_staleness < 0:
       raise ValueError("max_staleness must be non-negative or None.")
     self.dataset = dataset
+    self.max_steps = max_steps
     self.algo = algo
     self.reward_fns = list(reward_fns) if reward_fns else []
     self.group_size = getattr(algo, "group_size", group_size)
@@ -143,7 +144,6 @@ class StandardRLProgram(RLProgram):
     if self.metrics_logger is not None:
       self.metrics_logger.close()
 
-
   async def _wait_for_dispatch_window(self, prompt_idx: int) -> None:
     """Applies policy-staleness backpressure before dispatching a prompt group."""
     if self.max_staleness is None:
@@ -155,25 +155,19 @@ class StandardRLProgram(RLProgram):
     ):
       await asyncio.sleep(0.05)
 
-  async def rollout_dispatch_stage(
-      self,
-      engine: rl_engine_interface.AbstractRLEngine,
-      train_dataset: Iterable[Any] | None = None,
-  ) -> None:
+  async def rollout_dispatch_stage(self) -> None:
+    assert self.engine is not None
     """Stage 1A: Dispatches rollout requests across workers asynchronously.
 
     Ensures that all dataset items carry unique, collision-free `prompt_id`s
     (e.g., `f"prompt_{prompt_idx}"`) before dispatching to the engine layer,
     satisfying the engine's strict `prompt_id` contract.
     """
-    active_dataset = (
-        train_dataset if train_dataset is not None else self.dataset
-    )
-    if active_dataset is None:
+    if self.dataset is None:
       raise ValueError(
           "StandardRLProgram requires a dataset either at init or in run()."
       )
-    for prompt_idx, prompt_item in enumerate(active_dataset):
+    for prompt_idx, prompt_item in enumerate(self.dataset):
       await self._wait_for_dispatch_window(prompt_idx)
       if isinstance(prompt_item, dict):
         prompt_item = dict(prompt_item)
@@ -184,19 +178,18 @@ class StandardRLProgram(RLProgram):
             "prompt_id": f"prompt_{prompt_idx}",
         }
 
-      await engine.dispatch_rollouts(
+      await self.engine.dispatch_rollouts(
           [prompt_item],
           group_size=self.group_size,
           policy_version=self.policy_version,
       )
 
-  async def polling_stage(
-      self, engine: rl_engine_interface.AbstractRLEngine
-  ) -> None:
+  async def polling_stage(self) -> None:
     """Stage 1B: Long-polls completed worker rollout responses into the queue."""
+    assert self.engine is not None
     while True:
       try:
-        completed = await engine.poll_rollouts()
+        completed = await self.engine.poll_rollouts()
         if isinstance(completed, list) and completed:
           for item in completed:
             await self.raw_q.put(item)
@@ -207,11 +200,9 @@ class StandardRLProgram(RLProgram):
         logging.warning("Error in polling_stage: %s", exc)
         await asyncio.sleep(0.01)
 
-  async def critique_stage(
-      self, engine: rl_engine_interface.AbstractRLEngine
-  ) -> None:
+  async def critique_stage(self) -> None:
     """Stage 2: Scores rewards, PRMs, and reference KL logprobs."""
-    del engine
+    assert self.engine is not None
     while True:
       try:
         group = await self.raw_q.get_group()
@@ -349,9 +340,9 @@ class StandardRLProgram(RLProgram):
       if steps and len(steps) > 0:
         turns_list.append(len(steps))
 
-      status = (
-          getattr(traj, "status", None) if traj else None
-      ) or getattr(item, "status", None)
+      status = (getattr(traj, "status", None) if traj else None) or getattr(
+          item, "status", None
+      )
       if status is not None:
         if isinstance(status, datatypes.TrajectoryStatus):
           if status != datatypes.TrajectoryStatus.RUNNING:
@@ -590,13 +581,11 @@ class StandardRLProgram(RLProgram):
         "perplexity_val": perplexity_val,
     }
 
-  async def train_stage(
-      self,
-      engine: rl_engine_interface.AbstractRLEngine,
-      num_steps: int | None = None,
-  ) -> None:
+  async def train_stage(self) -> None:
     """Stage 3: Streaming gradient accumulation with RLTrainerPayloads."""
-    while num_steps is None or self._step < num_steps:
+    assert self.engine is not None
+
+    while self.max_steps is None or self._step < self.max_steps:
       current_step = self._step
       step_start_time = time.monotonic()
       consumed_policy_version = self.policy_version
@@ -634,7 +623,7 @@ class StandardRLProgram(RLProgram):
                   "rl_common.TrainExample microbatches; got "
                   f"{type(batch).__name__}."
               )
-            ref_logps = await engine.per_token_logps(
+            ref_logps = await self.engine.per_token_logps(
                 datatypes.Role.REFERENCE, items=batch
             )
             scored_microbatches.append(
@@ -645,22 +634,20 @@ class StandardRLProgram(RLProgram):
         num_microbatches += len(microbatches)
         is_final_group = group_idx == self.mini_batch_size - 1
         for batch_idx, batch in enumerate(microbatches):
-          is_final_batch = (
-              is_final_group and batch_idx == len(microbatches) - 1
-          )
-          step_result = await engine.train_step(
+          is_final_batch = is_final_group and batch_idx == len(microbatches) - 1
+          step_result = await self.engine.train_step(
               batch,
               role=datatypes.Role.ACTOR,
               accumulate_gradients=True,
               apply_optimizer=is_final_batch,
           )
           if is_final_batch:
-            trainer_metrics = await engine.get_metrics(
+            trainer_metrics = await self.engine.get_metrics(
                 role=datatypes.Role.ACTOR
             )
 
       if self.sync_weights:
-        new_version = await engine.sync_weights(role=datatypes.Role.ACTOR)
+        new_version = await self.engine.sync_weights(role=datatypes.Role.ACTOR)
         self.policy_version = (
             new_version if new_version is not None else self.policy_version + 1
         )
@@ -712,21 +699,18 @@ class StandardRLProgram(RLProgram):
   async def run_async(
       self,
       engine: rl_engine_interface.AbstractRLEngine,
-      train_dataset: Iterable[Any] | None = None,
-      num_steps: int | None = None,
       **kwargs: Any,
   ) -> None:
     """Launches all stages concurrently on event loop."""
     del kwargs
+    self.engine = engine
     logging.info("Starting StandardRLProgram concurrent stages...")
 
-    train_task = asyncio.create_task(self.train_stage(engine, num_steps))
+    train_task = asyncio.create_task(self.train_stage())
     tasks = [
-        asyncio.create_task(
-            self.rollout_dispatch_stage(engine, train_dataset=train_dataset)
-        ),
-        asyncio.create_task(self.polling_stage(engine)),
-        asyncio.create_task(self.critique_stage(engine)),
+        asyncio.create_task(self.rollout_dispatch_stage()),
+        asyncio.create_task(self.polling_stage()),
+        asyncio.create_task(self.critique_stage()),
         train_task,
     ]
 
@@ -754,8 +738,6 @@ class StandardRLProgram(RLProgram):
   def run(
       self,
       engine: rl_engine_interface.AbstractRLEngine,
-      train_dataset: Iterable[Any] | None = None,
-      num_steps: int | None = None,
       **kwargs: Any,
   ) -> None:
     """Synchronous entry point running all stages on an event loop."""
@@ -773,15 +755,7 @@ class StandardRLProgram(RLProgram):
         pass
 
     if loop and loop.is_running():
-      self._bg_task = asyncio.create_task(
-          self.run_async(
-              engine, train_dataset=train_dataset, num_steps=num_steps, **kwargs
-          )
-      )
+      self._bg_task = asyncio.create_task(self.run_async(engine, **kwargs))
       self._bg_task.add_done_callback(_retrieve_task_exception)
     else:
-      asyncio.run(
-          self.run_async(
-              engine, train_dataset=train_dataset, num_steps=num_steps, **kwargs
-          )
-      )
+      asyncio.run(self.run_async(engine, **kwargs))

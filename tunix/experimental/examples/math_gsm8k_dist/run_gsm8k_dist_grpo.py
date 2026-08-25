@@ -510,6 +510,7 @@ def main(argv: list[str], context: Any = None) -> None:
   program = rl_program.StandardRLProgram(
       algo=algo,
       dataset=_iter_prompt_items(args),
+      max_steps=args.max_steps,
       reward_fns=[_make_reward_fn(args.reward_mode, args.num_generations)],
       assembler=batch_assembly.GRPOTrainExampleAssembler(
           batch_size=args.train_micro_batch_size,
@@ -537,7 +538,6 @@ def main(argv: list[str], context: Any = None) -> None:
     )
     cluster.run_program(
         program=program,
-        num_steps=args.max_steps,
         bring_up=False,
     )
   finally:

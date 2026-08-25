@@ -205,6 +205,7 @@ class RLProgramTest(absltest.TestCase):
     super().tearDown()
     try:
       import jax._src.monitoring as jax_monitoring  # pyrefly: ignore[import-error]
+
       jax_monitoring._scalar_listeners.clear()
     except Exception:
       pass
@@ -212,16 +213,19 @@ class RLProgramTest(absltest.TestCase):
   def _create_program(
       self,
       dataset: Any = ("prompt_0",),
+      max_steps: int | None = 1,
       reward_fns: Any = None,
       **kwargs: Any,
   ) -> rl_program.StandardRLProgram:
-    return rl_program.StandardRLProgram(
+    program = rl_program.StandardRLProgram(
         dataset=dataset,
+        max_steps=max_steps,
         algo=self.mock_algo,
         reward_fns=reward_fns if reward_fns is not None else [lambda x: 1.0],
         assembler=self.assembler,
         **kwargs,
     )
+    return program
 
   def test_initialization(self):
     program = rl_program.StandardRLProgram(
@@ -238,9 +242,7 @@ class RLProgramTest(absltest.TestCase):
 
   def test_run_async_four_stages_with_long_polling(self):
     async def _run():
-      _set_mock_poll_batches(
-          self.mock_engine, _make_trajectory_group(), []
-      )
+      _set_mock_poll_batches(self.mock_engine, _make_trajectory_group(), [])
 
       begin_steps = []
       end_steps = []
@@ -253,11 +255,12 @@ class RLProgramTest(absltest.TestCase):
 
       program = self._create_program(
           dataset=["prompt_data_0"],
+          max_steps=1,
           on_step_begin=on_begin,
           on_step_end=on_end,
       )
 
-      await program.run_async(self.mock_engine, num_steps=1)
+      await program.run_async(self.mock_engine)
 
       self.assertEqual(program.step, 1)
       self.assertEqual(begin_steps, [0])
@@ -285,9 +288,7 @@ class RLProgramTest(absltest.TestCase):
       _set_mock_poll_batches(self.mock_engine, _make_trajectory_group())
       program = self._create_program(sync_weights=False)
 
-      await program.run_async(
-          self.mock_engine, train_dataset=["override_prompt"], num_steps=1
-      )
+      await program.run_async(self.mock_engine)
 
       self.assertEqual(program.step, 1)
       self.mock_engine.sync_weights.assert_not_called()
@@ -313,10 +314,9 @@ class RLProgramTest(absltest.TestCase):
           assembler=self.assembler,
           max_staleness=0,
       )
+      program.engine = self.mock_engine
 
-      dispatch_task = asyncio.create_task(
-          program.rollout_dispatch_stage(self.mock_engine)
-      )
+      dispatch_task = asyncio.create_task(program.rollout_dispatch_stage())
 
       for _ in range(50):
         if dispatched:
@@ -356,11 +356,13 @@ class RLProgramTest(absltest.TestCase):
     async def _run():
       program = rl_program.StandardRLProgram(
           dataset=[],
+          max_steps=1,
           algo=self.mock_algo,
           reward_fns=[lambda x: 1.0],
           assembler=TwoMicrobatchAssembler(),
           sync_weights=False,
       )
+      program.engine = self.mock_engine
 
       for pair_index in range(2):
         item = datatypes.TrajectoryItem(
@@ -374,7 +376,7 @@ class RLProgramTest(absltest.TestCase):
         ]
         await program.scored_q.put(item)
 
-      await program.train_stage(self.mock_engine, num_steps=1)
+      await program.train_stage()
 
       self.assertEqual(self.mock_engine.train_step.call_count, 2)
       self.assertEqual(
@@ -391,8 +393,8 @@ class RLProgramTest(absltest.TestCase):
   def test_stage_exception_aborts_queue_and_propagates(self):
     class FailingProgram(rl_program.StandardRLProgram):
 
-      async def rollout_dispatch_stage(self, engine, train_dataset=None):
-        del engine, train_dataset
+      async def rollout_dispatch_stage(self, train_dataset=None):
+        del train_dataset
         raise RuntimeError("Rollout worker cluster down!")
 
     async def _run():
@@ -402,18 +404,18 @@ class RLProgramTest(absltest.TestCase):
           assembler=self.assembler,
       )
       with self.assertRaises(RuntimeError) as cm:
-        await prog.run_async(self.mock_engine, num_steps=1)
+        await prog.run_async(self.mock_engine)
       self.assertIn("Rollout worker cluster down!", str(cm.exception))
 
     asyncio.run(_run())
 
   def test_run_synchronous_entry_point(self):
     _set_mock_poll_batches(self.mock_engine, _make_trajectory_group())
-    program = self._create_program(reward_fns=[lambda x: 2.0])
-
-    program.run(
-        self.mock_engine, train_dataset=["sync_prompt"], num_steps=1
+    program = self._create_program(
+        reward_fns=[lambda x: 2.0], dataset=["sync_prompt"]
     )
+
+    program.run(self.mock_engine)
 
     self.assertEqual(program.step, 1)
     self.assertIsNotNone(program.last_step_result)
@@ -423,11 +425,9 @@ class RLProgramTest(absltest.TestCase):
   def test_run_with_existing_running_loop(self):
     async def _run():
       _set_mock_poll_batches(self.mock_engine, _make_trajectory_group())
-      program = self._create_program()
+      program = self._create_program(dataset=["async_prompt"])
 
-      program.run(
-          self.mock_engine, train_dataset=["async_prompt"], num_steps=1
-      )
+      program.run(self.mock_engine)
       self.assertIsNotNone(program._bg_task)
       await program._bg_task
       self.assertEqual(program.step, 1)
@@ -440,8 +440,9 @@ class RLProgramTest(absltest.TestCase):
           algo=self.mock_algo,
           assembler=self.assembler,
       )
+      program.engine = self.mock_engine
       with self.assertRaises(ValueError) as cm:
-        await program.run_async(self.mock_engine, num_steps=1)
+        await program.run_async(self.mock_engine)
       self.assertIn("requires a dataset", str(cm.exception))
 
     asyncio.run(_run())
@@ -452,16 +453,19 @@ class RLProgramTest(absltest.TestCase):
           self.mock_engine,
           _make_trajectory_group(prompt_id="custom_p0", group_id="custom_g0"),
       )
-      program = self._create_program()
+      dict_item = {
+          "prompt_id": "custom_p0",
+          "group_id": "custom_g0",
+          "data": "test",
+      }
+      program = self._create_program(dataset=[dict_item])
 
       dict_item = {
           "prompt_id": "custom_p0",
           "group_id": "custom_g0",
           "data": "test",
       }
-      await program.run_async(
-          self.mock_engine, train_dataset=[dict_item], num_steps=1
-      )
+      await program.run_async(self.mock_engine)
 
       self.mock_engine.dispatch_rollouts.assert_called_once_with(
           [dict_item],
@@ -479,11 +483,9 @@ class RLProgramTest(absltest.TestCase):
           _make_trajectory_group("prompt_0", "group_0"),
           _make_trajectory_group("prompt_1", "group_1"),
       )
-      program = self._create_program()
+      program = self._create_program(dataset=["p0", "p1"])
 
-      await program.run_async(
-          self.mock_engine, train_dataset=["p0", "p1"], num_steps=1
-      )
+      await program.run_async(self.mock_engine)
 
       self.assertEqual(self.mock_engine.train_step.call_count, 2)
       calls = self.mock_engine.train_step.call_args_list
@@ -516,11 +518,9 @@ class RLProgramTest(absltest.TestCase):
       )
 
       _set_mock_poll_batches(self.mock_engine, _make_trajectory_group())
-      program = self._create_program()
+      program = self._create_program(dataset=["prompt_0"])
 
-      await program.run_async(
-          self.mock_engine, train_dataset=["prompt_0"], num_steps=1
-      )
+      await program.run_async(self.mock_engine)
 
       self.mock_engine.per_token_logps.assert_called_once_with(
           datatypes.Role.REFERENCE, items=mock_train_example
@@ -535,12 +535,10 @@ class RLProgramTest(absltest.TestCase):
       # Returning a raw dict instead of TrainExample
       self.assembler.pack = mock.MagicMock(return_value=[{"raw": "batch"}])
       _set_mock_poll_batches(self.mock_engine, _make_trajectory_group())
-      program = self._create_program()
+      program = self._create_program(dataset=["prompt_0"])
 
       with self.assertRaises(TypeError) as cm:
-        await program.run_async(
-            self.mock_engine, train_dataset=["prompt_0"], num_steps=1
-        )
+        await program.run_async(self.mock_engine)
       self.assertIn("Reference KL requires an assembler", str(cm.exception))
 
     asyncio.run(_run())
@@ -549,7 +547,7 @@ class RLProgramTest(absltest.TestCase):
     async def _run():
       _set_mock_poll_batches(self.mock_engine, _make_trajectory_group())
       program = self._create_program()
-      await program.run_async(self.mock_engine, num_steps=1)
+      await program.run_async(self.mock_engine)
       self.assertEqual(program.step, 1)
 
     asyncio.run(_run())
@@ -560,10 +558,10 @@ class RLProgramTest(absltest.TestCase):
       self.mock_engine.train_step.side_effect = RuntimeError(
           "Training worker OOM"
       )
-      program = self._create_program()
+      program = self._create_program(max_steps=1)
 
       with self.assertRaises(RuntimeError) as cm:
-        await program.run_async(self.mock_engine, num_steps=1)
+        await program.run_async(self.mock_engine)
       self.assertIn("Training worker OOM", str(cm.exception))
 
     asyncio.run(_run())
@@ -571,13 +569,14 @@ class RLProgramTest(absltest.TestCase):
   def test_run_async_propagates_critique_stage_exception(self):
     async def _run():
       _set_mock_poll_batches(self.mock_engine, _make_trajectory_group())
+
       def failing_reward_fn(_):
         raise ValueError("Reward model computation failed")
 
       program = self._create_program(reward_fns=[failing_reward_fn])
 
       with self.assertRaises(ValueError) as cm:
-        await program.run_async(self.mock_engine, num_steps=1)
+        await program.run_async(self.mock_engine)
       self.assertIn("Reward model computation failed", str(cm.exception))
 
     asyncio.run(_run())
@@ -587,9 +586,7 @@ class RLProgramTest(absltest.TestCase):
       _set_mock_poll_batches(self.mock_engine)  # Yields empty and sleeps
       program = self._create_program()
 
-      task = asyncio.create_task(
-          program.run_async(self.mock_engine, num_steps=5)
-      )
+      task = asyncio.create_task(program.run_async(self.mock_engine))
       await asyncio.sleep(0.02)
       task.cancel()
 
@@ -644,7 +641,7 @@ class RLProgramTest(absltest.TestCase):
       program = self._create_program(
           dataset=["prompt_data_0"], reward_fns=[], sync_weights=False
       )
-      await program.run_async(engine, num_steps=1)
+      await program.run_async(engine, max_steps=1)
 
       logger = program.metrics_logger
       self.assertIsNotNone(logger)
@@ -671,9 +668,7 @@ class RLProgramTest(absltest.TestCase):
           logger.get_metric("", "trainer/grad_norm", "train"), 0.25
       )
       self.assertTrue(logger.metric_exists("", "trainer/kl", "train"))
-      self.assertAlmostEqual(
-          logger.get_metric("", "trainer/kl", "train"), 0.02
-      )
+      self.assertAlmostEqual(logger.get_metric("", "trainer/kl", "train"), 0.02)
 
       # 2. Reward & Queue Metrics
       self.assertTrue(logger.metric_exists("", "rewards/mean", "train"))
@@ -714,9 +709,7 @@ class RLProgramTest(absltest.TestCase):
           logger.get_metric("", "rollout/total_tokens_mean", "train"), 4.0
       )
 
-      self.assertTrue(
-          logger.metric_exists("", "rollout/success_rate", "train")
-      )
+      self.assertTrue(logger.metric_exists("", "rollout/success_rate", "train"))
       self.assertAlmostEqual(
           logger.get_metric("", "rollout/success_rate", "train"), 1.0
       )
@@ -830,7 +823,7 @@ class RLProgramTest(absltest.TestCase):
           metrics_prefix="actor_mesh",
           mode=metrics_logger_lib.Mode.EVAL,
       )
-      await program.run_async(self.mock_engine, num_steps=1)
+      await program.run_async(self.mock_engine)
 
       logger = program.metrics_logger
       self.assertTrue(
@@ -907,7 +900,7 @@ class RLProgramTest(absltest.TestCase):
       program = self._create_program(dataset=["prompt_0"], reward_fns=[])
       program.policy_version = 5
 
-      await program.run_async(self.mock_engine, num_steps=1)
+      await program.run_async(self.mock_engine)
 
       logger = program.metrics_logger
       self.assertTrue(
@@ -967,7 +960,7 @@ class RLProgramTest(absltest.TestCase):
       _set_mock_poll_batches(self.mock_engine, [traj_item_0, traj_item_1], [])
       program = self._create_program(dataset=["prompt_0"], reward_fns=[])
 
-      await program.run_async(self.mock_engine, num_steps=1)
+      await program.run_async(self.mock_engine)
 
       logger = program.metrics_logger
       self.assertAlmostEqual(
@@ -1003,7 +996,7 @@ class RLProgramTest(absltest.TestCase):
       _set_mock_poll_batches(self.mock_engine, [traj_item_0, traj_item_1], [])
       program = self._create_program(dataset=["prompt_0"], reward_fns=[])
 
-      await program.run_async(self.mock_engine, num_steps=1)
+      await program.run_async(self.mock_engine)
 
       logger = program.metrics_logger
       self.assertFalse(
@@ -1024,7 +1017,7 @@ class RLProgramTest(absltest.TestCase):
       }
       program = self._create_program(dataset=["prompt_0"], reward_fns=[])
 
-      await program.run_async(self.mock_engine, num_steps=1)
+      await program.run_async(self.mock_engine)
 
       logger = program.metrics_logger
       self.assertAlmostEqual(
@@ -1033,9 +1026,7 @@ class RLProgramTest(absltest.TestCase):
       self.assertAlmostEqual(
           logger.get_metric("", "trainer/learning_rate", "train"), 5e-5
       )
-      self.assertAlmostEqual(
-          logger.get_metric("", "trainer/kl", "train"), 0.01
-      )
+      self.assertAlmostEqual(logger.get_metric("", "trainer/kl", "train"), 0.01)
 
     asyncio.run(_run())
 
@@ -1087,7 +1078,7 @@ class RLProgramTest(absltest.TestCase):
       _set_mock_poll_batches(self.mock_engine, [traj_item_0, traj_item_1], [])
       program = self._create_program(dataset=["prompt_0"], reward_fns=[])
 
-      await program.run_async(self.mock_engine, num_steps=1)
+      await program.run_async(self.mock_engine)
 
       logger = program.metrics_logger
       self.assertTrue(
@@ -1158,9 +1149,7 @@ class RLProgramTest(absltest.TestCase):
                 "learning_rate": lr,
                 "grad_norm": grad_norm,
             },
-            weighted_metrics={
-                "kl": float(0.01 + 0.02 * (step_num / 20.0))
-            },
+            weighted_metrics={"kl": float(0.01 + 0.02 * (step_num / 20.0))},
         )
 
       self.mock_engine.train_step.side_effect = _mock_train_step
@@ -1168,10 +1157,11 @@ class RLProgramTest(absltest.TestCase):
       program = self._create_program(
           dataset=["p0"] * 20,
           reward_fns=[],
+          max_steps=20,
           metrics_logging_options=options,
           sync_weights=False,
       )
-      await program.run_async(self.mock_engine, num_steps=20)
+      await program.run_async(self.mock_engine)
       program.close()
       self.assertEqual(program.step, 20)
 
@@ -1229,7 +1219,7 @@ class RLProgramTest(absltest.TestCase):
             metrics_logging_options=options,
             sync_weights=False,
         )
-        await program.run_async(self.mock_engine, num_steps=1)
+        await program.run_async(self.mock_engine)
         program.close()
 
         # Verify wandb initialization

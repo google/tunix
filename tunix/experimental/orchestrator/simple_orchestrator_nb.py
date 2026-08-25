@@ -147,7 +147,7 @@ def main():
       dataset=train_dataset,
       reward_fns=[lambda x: 1.0],
       assembler=assembler,
-      num_steps=2,
+      max_steps=2,
   )
   print("Execution completed successfully!")
 

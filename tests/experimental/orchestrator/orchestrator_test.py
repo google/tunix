@@ -112,9 +112,7 @@ class ClusterOrchestratorTest(absltest.TestCase):
     orch.register_worker_handle(
         "rollout-0", [datatypes.Role.ROLLOUT], mock_rollout
     )
-    orch.register_worker_handle(
-        "actor-0", [datatypes.Role.ACTOR], mock_actor
-    )
+    orch.register_worker_handle("actor-0", [datatypes.Role.ACTOR], mock_actor)
 
     orch.bring_up_workers(dummy_data="dummy")
     self.mock_lifecycle.bring_up.assert_called_once_with("dummy")
@@ -211,7 +209,7 @@ class ClusterOrchestratorTest(absltest.TestCase):
           dataset=["prompt1"],
           reward_fns=[lambda x: 1.0],
           assembler=assembler,
-          num_steps=5,
+          max_steps=5,
       )
       self.mock_lifecycle.bring_up.assert_called_once()
       self.mock_monitor.poll.assert_called_once()
@@ -221,11 +219,13 @@ class ClusterOrchestratorTest(absltest.TestCase):
     mock_program = mock.MagicMock(spec=rl_program.RLProgram)
     mock_engine = mock.MagicMock()
 
-    with mock.patch.object(self.orch, "_create_engine", return_value=mock_engine):
+    with mock.patch.object(
+        self.orch, "_create_engine", return_value=mock_engine
+    ):
       self.orch.run_program(
           program=mock_program,
           train_dataset=["batch1", "batch2"],
-          num_steps=10,
+          max_steps=10,
           bring_up=True,
           dummy_data="dummy_init",
       )
@@ -235,7 +235,7 @@ class ClusterOrchestratorTest(absltest.TestCase):
     mock_program.run.assert_called_once_with(
         engine=mock_engine,
         train_dataset=["batch1", "batch2"],
-        num_steps=10,
+        max_steps=10,
     )
 
   def test_run_program_without_bring_up(self):
@@ -245,7 +245,6 @@ class ClusterOrchestratorTest(absltest.TestCase):
 
     self.orch.run_program(
         program=mock_program,
-        num_steps=2,
         bring_up=False,
     )
 
@@ -253,8 +252,6 @@ class ClusterOrchestratorTest(absltest.TestCase):
     self.mock_monitor.poll.assert_called_once()
     mock_program.run.assert_called_once_with(
         engine=mock_engine,
-        train_dataset=None,
-        num_steps=2,
     )
 
 
