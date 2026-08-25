@@ -45,17 +45,20 @@ xprof_dir="$state/xprof"
 perf_dir="$state/perf"
 xprof_census="$state/xprof_census.txt"
 semantic_census="$state/semantic_census.txt"
+hierarchy_census="$state/hierarchy_census.txt"
 classification="$state/classification.json"
 canon_out="$root/canon"
 container="v1_gsm8k_xprof_${arm//-/_}_${label}"
 runtime_files=(
   "$repo/tunix/rl/agentic/agentic_rl_learner.py"
+  "$repo/tunix/rl/canonical_qwen3_adapter.py"
   "$repo/tunix/rl/gsm8k_xprof.py"
   "$repo/examples/math_gsm8k/qwen3_grpo_demo.py"
   "$repo/canon-zero-tim/cluster/profiles/qwen3-1p7b-dp4-tp1-gsm8k-v1-hp.env"
   "$script_dir/run_onehost_gsm8k_xprof_common.sh"
   "$script_dir/run_onehost_gsm8k_xprof_inner.sh"
   "$script_dir/classify_gsm8k_xprof_arm.py"
+  "$script_dir/census_gsm8k_xprof_hierarchy.py"
   "$script_dir/census_gsm8k_xprof_modules.py"
   "$script_dir/census_gsm8k_semantic_trace.py"
 )
@@ -133,6 +136,7 @@ mkdir -p "$state/wandb" "$state/logs" "$xprof_dir" "$perf_dir"
   echo "[V1.GSM8K.XPROF] RUN_BEGIN arm=$arm"
   sha256sum \
     "$repo/tunix/rl/agentic/agentic_rl_learner.py" \
+    "$repo/tunix/rl/canonical_qwen3_adapter.py" \
     "$repo/tunix/rl/gsm8k_xprof.py" \
     "$repo/examples/math_gsm8k/qwen3_grpo_demo.py" \
     "$script_dir/run_onehost_gsm8k_xprof_inner.sh" "$0" \
@@ -241,6 +245,7 @@ fi
 
 xprof_census_rc=1
 semantic_census_rc=1
+hierarchy_census_rc=1
 if [ "$docker_rc" -eq 0 ]; then
   set +e
   python3 "$script_dir/census_gsm8k_xprof_modules.py" \
@@ -254,22 +259,37 @@ if [ "$docker_rc" -eq 0 ]; then
       --arm "$arm" --run-root "$root" \
     >"$semantic_census" 2>&1
   semantic_census_rc=$?
+  if [ "$arm" = zero-hp ]; then
+    python3 "$script_dir/census_gsm8k_xprof_hierarchy.py" \
+      --run-root "$root" --expected-step 1 \
+      >"$hierarchy_census" 2>&1
+    hierarchy_census_rc=$?
+  fi
   set -e
 fi
 
 set +e
-python3 "$script_dir/classify_gsm8k_xprof_arm.py" \
+classifier_args=(
+  python3 "$script_dir/classify_gsm8k_xprof_arm.py"
   --arm "$arm" --run-root "$root" --source-sha "$source_sha" \
   --source-diff-sha256 "$source_diff_sha256" \
   --runtime-manifest-sha256 "$runtime_manifest_sha256" \
   --model-snapshot "$hf_snapshot_sha" --image-id "$image_id" \
   --xprof-census-rc "$xprof_census_rc" \
   --semantic-census-rc "$semantic_census_rc" \
-  --output "$classification" >>"$driver" 2>&1
+  --output "$classification"
+)
+if [ "$arm" = zero-hp ]; then
+  classifier_args+=(
+    --require-hierarchy --hierarchy-census-rc "$hierarchy_census_rc"
+  )
+fi
+"${classifier_args[@]}" >>"$driver" 2>&1
 classifier_rc=$?
 set -e
 
 sha_inputs=("$raw" "$driver" "$xprof_census" "$semantic_census" "$classification")
+[ -e "$hierarchy_census" ] && sha_inputs+=("$hierarchy_census")
 for path in "$pre" "$align" "$update"; do
   [ -e "$path" ] && sha_inputs+=("$path")
 done

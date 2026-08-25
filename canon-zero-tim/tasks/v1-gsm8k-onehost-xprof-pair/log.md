@@ -74,3 +74,243 @@
   Zero-HP commands, clean-vs-dirty evidence grade, expected arm-specific
   backward markers, output-root derivation, pair exit-code handling, artifact
   authority, and the complete return manifest. No runtime behavior changed.
+
+## 2026-08-25 — P60-2 readability diagnosis and plan
+
+- Re-read both immutable full XPlanes using the read-xprof method. Native
+  TPU:0 contains 672 XLA-module events and a host `train` annotation; Zero-HP
+  TPU:0 contains 59,028 module events and no host `train` annotation.
+- Preserved the existing completeness verdict: Zero-HP backward is present on
+  8/8 TensorCore planes, decode is absent, and the run passed 51/51 strict
+  alignment. The defect is navigation/hierarchy, not capture loss.
+- Confirmed that both historical captures already have non-empty device
+  `Steps` rows on all eight TPU planes. Native additionally supplies the exact
+  host `StepTraceAnnotation("train")`; revised Zero-HP must supply both.
+- Traced the source difference to stock `PeftTrainer.train` owning a
+  `StepTraceAnnotation("train")`, while G6 directly calls
+  `_run_p28_g6_update` and only writes the separate official semantic
+  `peft_train` span. Existing `CANON_XPROF_LABELS=1` names individual JITs but
+  supplies no update/group parent intervals.
+- Added the P60-2A..D phase plan, a cold-start implementation handoff, and a
+  copyable executor prompt. The proposed change is profile-only and reuses the
+  existing flag; it forbids new synchronization, numerical changes, per-layer
+  span explosion, semantic-Perfetto changes, or raw-event filtering.
+- No TPU job, Kubernetes object, commit, or push was created.
+
+## 2026-08-25 — P60-2B implementation and local gates
+
+- Created the executor-owned worktree
+  `/home/yuxuan/code_rl_repro/worktrees/p60_2b_xprof_hierarchy_0825` at
+  fetched tip `16db308b35c6e625d6a47c40b039ecfea317d9b3`.
+- Added the shared labels helper and bounded host hierarchy without changing
+  JIT/shard-map/reducer/optimizer expressions. The G6 entry now uses Native's
+  exact `StepTraceAnnotation("train", step_num=...)` API; the fixed existing
+  commit readiness boundary is merely enclosed by `optimizer_commit`.
+- Added a pure interval/count validator and a real full-XPlane census requiring
+  the one host step parent, 16 group transactions, and non-empty `Steps` lines
+  on exactly eight TPU device planes. Revised Zero classification requires this
+  census; Native's historical classifier behavior remains unchanged.
+- Historical XPlane reads produced expected RED hierarchy verdicts while
+  correctly recovering Native device `Steps` counts
+  `672,672,576,576,576,576,576,576` and old Zero counts
+  `59028,59028,37260,37260,37260,37260,37260,37260`.
+- Local task tests passed 7/7; P59 host contracts passed 37/37; V1 Phase4 host
+  contracts passed 34/34. The complete pinned CPU image gate passed existing
+  V1/P59/P62 controls, labels off/on, the one-ULP fail-closed control, and the
+  host annotation API probe.
+- Final static gates: flag registry 371/371 PASS, branch preflight PASS,
+  `git diff --check` clean, P60-2 doc set 12/12 PASS, changed-patch secret scan
+  zero matches, and semantic Perfetto vocabulary unchanged.
+- No TPU/Kubernetes action, commit, push, or image publication occurred.
+
+## 2026-08-25 — P60-2C one-host canary preflight
+
+- The user approved exactly one direct four-chip v5p Zero-HP development
+  canary with the dirty-tree override, one update-level
+  `train(step_num=1)` parent, and no Native rerun.
+- Bound launch identity: branch
+  `local/p60-2b-xprof-hierarchy-0825`, HEAD
+  `16db308b35c6e625d6a47c40b039ecfea317d9b3`, label
+  `p60_readable_zero_dev1_20260825`, and fresh root
+  `/mnt/disks/tunix-data/gsm8k-onehost-xprof/v1_zero-hp_p60_readable_zero_dev1_20260825`.
+- Preflight gates passed immediately before launch: branch runtime preflight
+  PASS with the expected dirty development tree; flag registry 371/371 PASS;
+  `git diff --check` exit 0; task suite 7/7 plus P60-2 document set and CPU
+  contract PASS. Hostname, pinned local image ID, model/data assets, and fresh
+  artifact root checks passed.
+- A concurrent randomly named container was inspected before launch. It uses
+  the same pinned image but is non-privileged and has no device mappings, so it
+  does not own the TPU lane. No P51, P59, or V1 GSM8K XProf carrier is active.
+- This run can produce analysis-grade target evidence only. Signed clean-SHA
+  acceptance, Native rerun, Kubernetes, commit, push, and image publication
+  remain outside the authorization.
+
+## 2026-08-25 — P60-2C first canary RED and localized fix
+
+- Ran the one authorized Zero-HP label
+  `p60_readable_zero_dev1_20260825`. The container exited 0 after 1,501
+  seconds, completed 3/3 optimizer updates, and produced 3 pre-alignment plus
+  48 update-alignment PASS records with zero FAIL.
+- The update-only window markers were exact: armed step 1, started at update
+  entry step 1, and stopped at step-completed step 2. The XPlane is
+  778,688,563 bytes with SHA-256
+  `06b0c43c34361eab3a976d5870bd5b3b49a898500f741ab3676d06adc1da12a2`;
+  the trace JSON is 33,971,974 bytes with SHA-256
+  `4558f01b505cf496db2340e1d916fa29986cb3048bae272c606c18eb336c24db`.
+- Old target gates passed: P59 backward families were present and decode was
+  absent on all 8/8 TPU planes; semantic Perfetto was GREEN. The hierarchy
+  census recovered exact child counts (16 forward groups, 16 reverse groups,
+  16 of each transaction stage, one optimizer) and non-empty device Steps on
+  8/8 planes.
+- The first failing boundary was hierarchy parent capture:
+  `train:count=0 expected=1` and
+  `zero_tim_update:count=0 expected=1`. The classifier correctly returned
+  FAIL with reason `hierarchy_census_rc=1`; the complete RED root was
+  preserved.
+- Root cause is confirmed from the real XPlane and pinned JAX TraceMe
+  lifecycle: both parent annotation objects were constructed before
+  `_canon_xprof_update_entry()` called `start_trace()`. Their intervals began
+  outside the window; children constructed after start were captured.
+- Applied the smallest local fix: move only the two parent constructions after
+  the existing trace-start call and add a source-order regression test. No
+  retry was launched; a fresh direct-TPU run requires separate approval.
+- Post-fix gates passed: task suite 8/8 plus P60-2 document set; branch
+  preflight PASS; flag registry 371/371 PASS; syntax and `git diff --check`
+  exit 0. The complete pinned CPU-image ladder ended in
+  `V1_HP_EXACT_IMAGE_PASS`,
+  `P60_XPROF_ANNOTATION_API_PASS step=train step_num=1`, and
+  `P60_2B_EXACT_IMAGE_PASS hierarchy_api=1 labels_off_on=1 one_ulp=1
+  p59_v1=1 tpu_devices=0`.
+- The no-new-sync diff audit shows the same three readiness calls removed and
+  re-added only by indentation. Source counts remain `block_until_ready=15`,
+  `device_get=21`, `optimization_barrier=0`, `jax.jit=21`, and
+  `shard_map=57` across the audited runtime files.
+
+## 2026-08-25 — P60-2C second canary authorized
+
+- The user explicitly authorized one fresh direct-v5p Zero-HP retry after the
+  parent-construction ordering fix passed local and pinned-image gates.
+- Bound label and fresh root:
+  `p60_readable_zero_dev2_20260825` and
+  `/mnt/disks/tunix-data/gsm8k-onehost-xprof/v1_zero-hp_p60_readable_zero_dev2_20260825`.
+  Native is not rerun and the dev1 RED root remains unchanged.
+- Immediate preflight passed: fresh root, task suite 8/8, P60-2 document set,
+  `git diff --check`, flag registry 371/371, branch runtime preflight, and an
+  idle TPU lane. This remains a dirty-tree analysis-grade canary.
+
+## 2026-08-25 — P60-2C second canary PASS
+
+- Ran the single authorized retry `p60_readable_zero_dev2_20260825`. It
+  completed 3/3 optimizer updates, 3/3 pre-alignment PASS records, and 48/48
+  update-alignment PASS records with zero FAIL. The container ended after
+  `TRAINING_DONE max_steps=3` with `docker_exit=0`; the wrapper returned GREEN.
+- Capture markers were exact: armed step 1, started at update entry step 1,
+  and stopped at step-completed step 2. The complete XPlane is 778,720,935
+  bytes (`4ee534ed81ff4e721a5482ac42057048382161d569f6c608c9c56f29e7aa38fd`)
+  and the trace JSON is 33,809,800 bytes
+  (`dc68ba730cb54108d6be27147cdf315871819ec24193880473ed61bbcfb240a2`).
+- The all-plane census passed: all five P59 backward families are present and
+  decode is absent on 8/8 TPU planes. The semantic census passed with the
+  unchanged official flat vocabulary and one profiled update.
+- The repaired hierarchy census passed with one
+  `train(step_num=1, _r=1)`, one `zero_tim_update`, 16 forward groups, 16
+  reverse groups, 16 complete report/reduce/accumulate transactions, one
+  optimizer, and non-empty `Steps` rows on 8/8 device planes.
+- A direct read of the full XPlane confirmed parent containment and ordering.
+  Reverse group 0 overlaps head, norm, layer, embed, and adjoint backward
+  modules on each of the eight TPU planes, satisfying the navigation check.
+- The post-training weakref finalizer traceback is the known cleanup-only
+  message after `TRAINING_DONE`; it did not affect exit 0 or any artifact.
+  This is analysis-grade dirty-tree evidence, not a signed clean-SHA receipt.
+  No further TPU run, Native rerun, Kubernetes action, commit, push, or image
+  publication is authorized.
+- Post-run local closure passed: task suite 8/8, P60-2 document set 12/12,
+  flag registry 371/371, branch runtime preflight, and `git diff --check`.
+  The registry count is 371 on the fetched P62-inclusive source tip; 370/370
+  was the correct count only on the earlier registry revision.
+
+## 2026-08-25 — P60-2E truthful microstep metadata local PASS
+
+- Type: code change and decision.
+- Fact: Native and Zero-HP device `Steps` rows both contain numeric derived
+  event names. Native host `train` events are microstep annotations; Zero-HP's
+  decomposed all-forward-then-reverse schedule cannot truthfully reuse their
+  contiguous monolithic shape.
+- Action: kept one whole-update `train(step_num=1)`; added
+  `micro_step=0..15` and one `is_last_accumulate=1` to the existing
+  `gradient_accumulate` spans, plus `update_step=1` to optimizer commit.
+  Strengthened the hierarchy census and added source/API/negative controls.
+- Result: task 9/9 and document set 13/13 PASS. Pinned exact-image ended in
+  `V1_HP_EXACT_IMAGE_PASS`,
+  `P60_XPROF_ANNOTATION_API_PASS step=train step_num=1 micro_steps=0..15
+  last_accumulate=15 optimizer_update=1 metadata=integer xplane=1 trace=1`,
+  and `P60_2B_EXACT_IMAGE_PASS hierarchy_api=1 labels_off_on=1 one_ulp=1
+  p59_v1=1 tpu_devices=0`.
+- Negative result: strengthened census on immutable dev2 preserved every old
+  count and 8/8 device Steps rows, then returned exactly 33 RED reasons for
+  the intentionally absent new metadata. Dev2 remains valid P60-2C evidence
+  and does not certify P60-2E.
+- Static result: flag audit 371/371, branch preflight, diff, syntax, semantic
+  vocabulary, no-new-sync, and secret gates pass. P60-2E is target not run;
+  no TPU, Kubernetes, commit, push, or image publication occurred.
+
+## 2026-08-25 — P60-2E same-track gate migrated to P63 tip
+
+- Type: migration, gate hardening, and local/exact-image checkpoint.
+- Source: fetched `origin/yuxzhang/canon-zero-tim` tip
+  `cdd3987caa648e6112ee8fc184b2e3421de3a4b2`; created
+  `local/p60-2e-microstep-latest-0825`. The root filesystem had no room to
+  expand another checkout, so the independent worktree is data-disk-backed
+  with an entry under the conventional `worktrees/` path. No existing
+  worktree or evidence was deleted.
+- Action: migrated the P60-2B/P60-2E diff, required every hierarchy span on
+  the same `/host:CPU` `python3` line, added a wrong-track synthetic negative,
+  and made the pinned annotation probe fail closed on process/thread drift.
+  Documentation now says Native API-compatible only; Zero-HP retains one
+  whole-update parent and does not match Native cadence/cardinality/program
+  shape.
+- Full-XPlane negative result: immutable dev2 retained every hierarchy count,
+  the single host track, and device `Steps` counts
+  `49124,49124,27356,27356,27356,27356,27356,27356`; it returned exactly 33
+  missing-metadata reasons and no track reason.
+- Local result: task suite 9/9 and P60-2 document set 13/13 PASS. Exact-image
+  ended in `V1_HP_EXACT_IMAGE_PASS`,
+  `P60_XPROF_ANNOTATION_API_PASS ... host_plane=/host:CPU
+  host_line=python3 xplane=1 trace=1`, and
+  `P60_2B_EXACT_IMAGE_PASS ... tpu_devices=0`.
+- Static result: flag audit 372/372, branch preflight PASS with dirty=21,
+  `git diff --check`, Python/shell syntax, no-new-sync counts, unchanged
+  official Perfetto vocabulary, and changed-file secret scan all pass.
+- Boundary: P60-2E remains `TARGET NOT RUN`. No TPU, Kubernetes, commit, push,
+  or image publication occurred.
+
+## 2026-08-25 — P60-2E exact receipt and optimizer-tail gates closed
+
+- Type: local gate hardening and evidence replay.
+- Exact-image action: changed the annotation probe from one synthetic final
+  accumulator to 16 actual `gradient_accumulate` spans. It now requires
+  `group_index == micro_step == 0..15`, only 15 marked last, and every selected
+  hierarchy event on one `/host:CPU` `python3` track before printing the
+  `micro_steps=0..15` marker.
+- Device action: made the module census require exactly TPU planes 0..7 and,
+  on every plane, the five P59 backward families,
+  `jit__precomputed_gradient_scaled_step=16`,
+  `jit__precomputed_gradient_commit=1`, and decode absent. Added fail-closed
+  CPU negatives for a missing commit, only 15 scaled steps, and a missing
+  device plane.
+- Local result: 10/10 task tests and the 13-file P60-2 document gate pass.
+  The immutable dev2 XPlane replays GREEN on all 8/8 device planes with
+  `scaled_step=16/16,commit=1/1` and decode absent.
+- Exact-image result: the full P63-inclusive ladder ends in
+  `V1_HP_EXACT_IMAGE_PASS`, then
+  `P60_XPROF_ANNOTATION_API_PASS step=train step_num=1 micro_steps=0..15
+  last_accumulate=15 optimizer_update=1 metadata=integer
+  host_plane=/host:CPU host_line=python3 xplane=1 trace=1`, and finally
+  `P60_2B_EXACT_IMAGE_PASS ... tpu_devices=0`.
+- Static result: flag audit 372/372, branch preflight PASS at
+  `cdd3987caa648e6112ee8fc184b2e3421de3a4b2`, `git diff --check`, and shell
+  syntax pass. Production synchronization-token counts remain identical to
+  HEAD.
+- Boundary: this closes the two local evidence ambiguities only. P60-2E is
+  still `TARGET NOT RUN`; no TPU, Kubernetes, commit, push, or image
+  publication occurred.

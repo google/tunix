@@ -1,5 +1,13 @@
 # Execution handoff: produce Native and Zero-HP backward XProf
 
+> **Active follow-up (P60-2):** the original pair below is complete, but the
+> Zero-HP view lacks a navigable host hierarchy. Do not rerun this two-arm
+> recipe as a readability fix. A new executor must first follow
+> [`HANDOFF_P60_2.md`](HANDOFF_P60_2.md). Its P60-2B local gates and the
+> separately approved P60-2C Zero-HP development canary now pass. Do not rerun
+> either arm without new approval. The historical pair remains
+> `INCONCLUSIVE_INPUT_MISMATCH` for timing.
+
 This task is GSM8K, not DeepSWE. Do not run anything under
 `tasks/p58-deepswe-native-zero-comparison/`. The two authoritative launchers
 are in this task directory and must run sequentially on one direct-attached

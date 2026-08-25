@@ -16,9 +16,12 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
+import numbers
 import os
+import re
 from typing import Any, Mapping
 
 
@@ -33,6 +36,55 @@ _WORK_FIELDS = (
     "advantages",
     "policy_version",
 )
+_LABEL_ENV = "CANON_XPROF_LABELS"
+_ANNOTATION_NAME = re.compile(r"[a-z][a-z0-9_]*")
+
+
+def labels_enabled(values: Mapping[str, str] | None = None) -> bool:
+  """Returns the exact default-off XProf annotation contract."""
+  values = os.environ if values is None else values
+  value = values.get(_LABEL_ENV, "")
+  if value not in ("", "0", "1"):
+    raise ValueError(
+        f"{_LABEL_ENV} must be unset/0/1 (empty is disabled), got {value!r}"
+    )
+  return value == "1"
+
+
+def _annotation_metadata(metadata: Mapping[str, Any]) -> dict[str, int]:
+  normalized = {}
+  for name, value in metadata.items():
+    if not _ANNOTATION_NAME.fullmatch(name):
+      raise ValueError(f"invalid XProf annotation metadata name {name!r}")
+    if isinstance(value, bool) or not isinstance(value, numbers.Integral):
+      raise ValueError(
+          "XProf annotation metadata must be integer-valued: "
+          f"{name}={value!r}"
+      )
+    normalized[name] = int(value)
+  return normalized
+
+
+def trace_annotation(name: str, **metadata: Any):
+  """Returns a bounded host TraceAnnotation or an exact no-op context."""
+  if not labels_enabled():
+    return contextlib.nullcontext()
+  if not _ANNOTATION_NAME.fullmatch(name):
+    raise ValueError(f"invalid XProf annotation name {name!r}")
+  normalized = _annotation_metadata(metadata)
+  import jax  # pylint: disable=g-import-not-at-top
+
+  return jax.profiler.TraceAnnotation(name, **normalized)
+
+
+def train_step_annotation(*, step_num: int):
+  """Matches Native's ``StepTraceAnnotation('train')`` Steps-row contract."""
+  if not labels_enabled():
+    return contextlib.nullcontext()
+  normalized = _annotation_metadata({"step_num": step_num})
+  import jax  # pylint: disable=g-import-not-at-top
+
+  return jax.profiler.StepTraceAnnotation("train", **normalized)
 
 
 def arm(values: Mapping[str, str] | None = None) -> str:

@@ -1,5 +1,35 @@
 # GSM8K one-host Native vs Zero-HP XProf runbook
 
+> **P60-2 readability follow-up is active.** The P60-2C second Zero-HP canary
+> proved the whole-update hierarchy at dirty-tree analysis grade. P60-2E adds
+> accumulator microstep and optimizer-update metadata locally; that increment
+> is `TARGET NOT RUN`. Before any new run, read
+> [`HANDOFF_P60_2.md`](HANDOFF_P60_2.md) and all `phases/p60-2*.md`. Do not
+> rerun Native. A fresh Zero-HP canary is allowed only after P60-2B's
+> host/static/exact-image gates and explicit user approval. The revised census
+> also requires the Native API-compatible host `train(step_num=1)` event, the
+> complete hierarchy on one `/host:CPU` `python3` track, non-empty device
+> `Steps` rows on 8/8 TPU planes, `micro_step=0..15`, exactly one last
+> accumulator at 15, optimizer `update_step=1`, and, on every device plane,
+> `jit__precomputed_gradient_scaled_step`×16 plus
+> `jit__precomputed_gradient_commit`×1. API-compatible does not
+> mean Native-compatible cadence, cardinality, or monolithic program shape:
+> Zero-HP intentionally retains one whole-update `train` parent.
+
+The primary analysis method is
+`/home/yuxuan/code_rl_repro/.claude/skills/read-xprof/SKILL.md`: trainer work
+uses `phase=update`; complete XPlane plus 8/8 TensorCore planes decides capture
+completeness; `[PERF]` from comparable unprofiled steps decides speed. The UI,
+host hierarchy, semantic Perfetto, and trace JSON are attribution/navigation
+views, not interchangeable clocks.
+
+P60-2B/P60-2E local implementation gates are green on branch
+`local/p60-2e-microstep-latest-0825` at base
+`cdd3987caa648e6112ee8fc184b2e3421de3a4b2`. The latest registry contains
+372 flags because P63 is included. P60-2C passed on immutable dev2 evidence;
+P60-2E remains `TARGET NOT RUN`. Do not interpret its local annotation API
+output as proof that the new metadata appears in a TPU XPlane.
+
 Run from the exact worktree on the direct four-chip v5p. Do not run the two
 arms concurrently. During development only, the dirty-tree override is
 explicit; acceptance evidence requires a clean committed tree.
@@ -32,7 +62,11 @@ The device census is intentionally arm-aware:
 - Native stock training is one XLA `jit__train_step` per trajectory group,
   so every TPU plane must contain exactly 16 and no decode module.
 - Zero-HP must contain P59 parallel backward for layer, head, final norm,
-  embedding and mapping adjoint on every plane, plus no decode module.
+  embedding and mapping adjoint on exactly eight planes, plus no decode
+  module. Every plane must also contain
+  `jit__precomputed_gradient_scaled_step` exactly 16 times and
+  `jit__precomputed_gradient_commit` exactly once; either mismatch is a RED
+  optimizer-tail/drop verdict.
 
 Do not apply the old P55 `pullback`-only/19-track census to Native: it was
 certified for a different trainer and topology and produces a false RED here.

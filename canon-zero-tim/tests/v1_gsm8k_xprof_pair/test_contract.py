@@ -35,6 +35,10 @@ PAIR_CLASSIFIER = _load(
     "v1_gsm8k_xprof_pair_classifier",
     SCRIPTS / "classify_gsm8k_xprof_pair.py",
 )
+MODULE_CENSUS = _load(
+    "v1_gsm8k_xprof_module_census",
+    SCRIPTS / "census_gsm8k_xprof_modules.py",
+)
 GSM8K_XPROF = _load("gsm8k_xprof", ROOT / "tunix/rl/gsm8k_xprof.py")
 
 
@@ -119,7 +123,10 @@ def _fixture(root: Path, arm: str) -> None:
   (root / "driver.log").write_text("driver\n")
   xprof_detail = "CENSUS_GREEN all 8 planes: backward present, decode absent\n"
   if arm == "zero-hp":
-    xprof_detail += "zt_tr_dp_parallel_bwd_layer_00\n"
+    xprof_detail += (
+        "zt_tr_dp_parallel_bwd_layer_00\n"
+        "optimizer_tail=scaled_step:16,commit:1\n"
+    )
   (state / "xprof_census.txt").write_text(xprof_detail)
   (state / "semantic_census.txt").write_text(
       "CENSUS_GREEN peft_train placed like weight_sync, no custom spans\n"
@@ -127,6 +134,40 @@ def _fixture(root: Path, arm: str) -> None:
 
 
 class ContractTest(unittest.TestCase):
+
+  def test_zero_hp_module_census_requires_complete_optimizer_tail(self):
+    counts = {
+        pattern.pattern: 1 for pattern in MODULE_CENSUS.ZERO_REQUIRED
+    }
+    counts.update(MODULE_CENSUS.ZERO_TAIL_EXACT)
+    self.assertEqual(
+        MODULE_CENSUS.validate_module_counts("zero-hp", counts), []
+    )
+
+    without_commit = dict(counts)
+    del without_commit["jit__precomputed_gradient_commit"]
+    self.assertIn(
+        "jit__precomputed_gradient_commit=0!=1",
+        MODULE_CENSUS.validate_module_counts("zero-hp", without_commit),
+    )
+
+    short_scaled_step = dict(counts)
+    short_scaled_step["jit__precomputed_gradient_scaled_step"] = 15
+    self.assertIn(
+        "jit__precomputed_gradient_scaled_step=15!=16",
+        MODULE_CENSUS.validate_module_counts("zero-hp", short_scaled_step),
+    )
+    self.assertEqual(
+        MODULE_CENSUS.validate_plane_names(
+            [f"/device:TPU:{index}" for index in range(8)]
+        ),
+        [],
+    )
+    self.assertTrue(
+        MODULE_CENSUS.validate_plane_names(
+            [f"/device:TPU:{index}" for index in range(7)]
+        )
+    )
 
   def test_arm_selector_is_default_off_and_treatment_exact(self):
     self.assertEqual(GSM8K_XPROF.arm({}), "")
@@ -184,6 +225,60 @@ class ContractTest(unittest.TestCase):
         records[arm] = record
       pair = PAIR_CLASSIFIER.classify(records["native"], records["zero-hp"])
       self.assertEqual(pair["verdict"], "PASS", pair)
+      missing_hierarchy = ARM_CLASSIFIER.classify(
+          arm="zero-hp",
+          run_root=base / "zero-hp",
+          source_sha="1" * 40,
+          source_diff_sha256="2" * 64,
+          runtime_manifest_sha256="5" * 64,
+          model_snapshot="3" * 40,
+          image_id="sha256:" + "4" * 64,
+          xprof_census_rc=0,
+          semantic_census_rc=0,
+          require_hierarchy=True,
+          hierarchy_census_rc=1,
+      )
+      self.assertEqual(missing_hierarchy["verdict"], "FAIL")
+      hierarchy = base / "zero-hp/train/hierarchy_census.txt"
+      hierarchy.write_text(
+          "V1_GSM8K_XPROF_HIERARCHY_CENSUS_GREEN "
+          "train_step=1 host_plane=/host:CPU host_line=python3 "
+          "steps_planes=8 forward_groups=16 reverse_groups=16 "
+          "transactions=16 micro_steps=0..15 last_accumulate=15 "
+          "optimizer_update=1\n"
+      )
+      revised_zero = ARM_CLASSIFIER.classify(
+          arm="zero-hp",
+          run_root=base / "zero-hp",
+          source_sha="1" * 40,
+          source_diff_sha256="2" * 64,
+          runtime_manifest_sha256="5" * 64,
+          model_snapshot="3" * 40,
+          image_id="sha256:" + "4" * 64,
+          xprof_census_rc=0,
+          semantic_census_rc=0,
+          require_hierarchy=True,
+          hierarchy_census_rc=0,
+      )
+      self.assertEqual(revised_zero["verdict"], "PASS", revised_zero)
+      forbidden_native = ARM_CLASSIFIER.classify(
+          arm="native",
+          run_root=base / "native",
+          source_sha="1" * 40,
+          source_diff_sha256="2" * 64,
+          runtime_manifest_sha256="5" * 64,
+          model_snapshot="3" * 40,
+          image_id="sha256:" + "4" * 64,
+          xprof_census_rc=0,
+          semantic_census_rc=0,
+          require_hierarchy=True,
+          hierarchy_census_rc=0,
+      )
+      self.assertEqual(forbidden_native["verdict"], "FAIL")
+      self.assertIn(
+          "hierarchy_requirement_is_zero_hp_only",
+          forbidden_native["reasons"],
+      )
       native_raw = base / "native/train/raw.log"
       native_raw.write_text(
           native_raw.read_text() + "[CANON_" + "ADAPTER] unexpected\n"
@@ -225,6 +320,8 @@ class ContractTest(unittest.TestCase):
     self.assertIn("-e CANON_P60_DETERMINISTIC_AB=1", common)
     self.assertIn("census_gsm8k_xprof_modules.py", common)
     self.assertIn("census_gsm8k_semantic_trace.py", common)
+    self.assertIn("census_gsm8k_xprof_hierarchy.py", common)
+    self.assertIn("--require-hierarchy", common)
     analyze = (SCRIPTS / "analyze_gsm8k_xprof_pair.sh").read_text()
     self.assertIn("classify_gsm8k_xprof_pair.py", analyze)
     self.assertIn("xprof_trace_summary.py", analyze)

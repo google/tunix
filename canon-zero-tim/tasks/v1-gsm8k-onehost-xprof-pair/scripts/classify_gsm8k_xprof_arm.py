@@ -52,6 +52,8 @@ def classify(
     image_id: str,
     xprof_census_rc: int,
     semantic_census_rc: int,
+    require_hierarchy: bool = False,
+    hierarchy_census_rc: int | None = None,
 ) -> dict:
   if arm not in ("native", "zero-hp"):
     raise ValueError(f"invalid arm: {arm!r}")
@@ -60,8 +62,11 @@ def classify(
   driver_path = run_root / "driver.log"
   xprof_census_path = state / "xprof_census.txt"
   semantic_census_path = state / "semantic_census.txt"
+  hierarchy_census_path = state / "hierarchy_census.txt"
   reasons = []
-  required = (raw_path, driver_path, xprof_census_path, semantic_census_path)
+  required = [raw_path, driver_path, xprof_census_path, semantic_census_path]
+  if require_hierarchy:
+    required.append(hierarchy_census_path)
   for path in required:
     if not path.is_file() or path.stat().st_size == 0:
       reasons.append(f"missing_or_empty:{path.name}")
@@ -74,6 +79,11 @@ def classify(
   semantic_text = (
       semantic_census_path.read_text(encoding="utf-8", errors="replace")
       if semantic_census_path.is_file()
+      else ""
+  )
+  hierarchy_text = (
+      hierarchy_census_path.read_text(encoding="utf-8", errors="replace")
+      if hierarchy_census_path.is_file()
       else ""
   )
 
@@ -127,6 +137,13 @@ def classify(
     reasons.append(f"xprof_census_rc={xprof_census_rc}")
   if semantic_census_rc != 0 or "CENSUS_GREEN" not in semantic_text:
     reasons.append(f"semantic_census_rc={semantic_census_rc}")
+  if require_hierarchy:
+    if arm != "zero-hp":
+      reasons.append("hierarchy_requirement_is_zero_hp_only")
+    if hierarchy_census_rc != 0 or (
+        "V1_GSM8K_XPROF_HIERARCHY_CENSUS_GREEN" not in hierarchy_text
+    ):
+      reasons.append(f"hierarchy_census_rc={hierarchy_census_rc}")
 
   align_verdicts = [
       match.group(1)
@@ -183,7 +200,12 @@ def classify(
       "model_snapshot": model_snapshot,
       "image_id": image_id,
       "topology": {"dp": 4, "tp": 1, "devices": 4},
-      "capture": {"phase": "update", "start_step": 1, "stop_step": 2},
+      "capture": {
+          "phase": "update",
+          "start_step": 1,
+          "stop_step": 2,
+          "hierarchy_required": require_hierarchy,
+      },
       "profiled_work": comparable_work,
       "artifacts": artifacts,
       "reasons": reasons,
@@ -201,6 +223,8 @@ def main() -> int:
   parser.add_argument("--image-id", required=True)
   parser.add_argument("--xprof-census-rc", type=int, required=True)
   parser.add_argument("--semantic-census-rc", type=int, required=True)
+  parser.add_argument("--require-hierarchy", action="store_true")
+  parser.add_argument("--hierarchy-census-rc", type=int)
   parser.add_argument("--output", type=Path, required=True)
   args = parser.parse_args()
   if args.output.exists():
@@ -215,6 +239,8 @@ def main() -> int:
       image_id=args.image_id,
       xprof_census_rc=args.xprof_census_rc,
       semantic_census_rc=args.semantic_census_rc,
+      require_hierarchy=args.require_hierarchy,
+      hierarchy_census_rc=args.hierarchy_census_rc,
   )
   args.output.write_text(
       json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8"

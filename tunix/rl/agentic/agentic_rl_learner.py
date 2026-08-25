@@ -1555,11 +1555,14 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           "gradient",
           actor_trainer.grad_accumulator.get(),
       )
-    with self.rl_cluster._get_mesh_and_logical_axis_rules_cm(  # pylint: disable=protected-access
-        rl_cluster_lib.Role.ACTOR
+    with gsm8k_xprof.trace_annotation(
+        "optimizer_commit", update_step=self.rl_cluster.global_steps
     ):
-      commit_norm = actor_trainer.commit_precomputed_gradients()
-    commit_norm.block_until_ready()
+      with self.rl_cluster._get_mesh_and_logical_axis_rules_cm(  # pylint: disable=protected-access
+          rl_cluster_lib.Role.ACTOR
+      ):
+        commit_norm = actor_trainer.commit_precomputed_gradients()
+      commit_norm.block_until_ready()
     commit_evidence = actor_trainer.consume_precomputed_commit_evidence()
     if p61_capture_dir:
       if (
@@ -3127,6 +3130,14 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             flush=True,
         )
         _canon_xprof_update_entry()
+        # TraceAnnotation starts its TraceMe interval at construction time,
+        # not at __enter__. Construct both parents only after the update-only
+        # profiler window is open; otherwise their children are captured but
+        # the two outer intervals begin before start_trace() and disappear.
+        train_step_annotation = gsm8k_xprof.train_step_annotation(
+            step_num=self.rl_cluster.global_steps
+        )
+        update_annotation = gsm8k_xprof.trace_annotation("zero_tim_update")
         # One flat PEFT_TRAIN span for the whole G6 update, mirroring the
         # official peft_trainer usage: official vocabulary, no nesting, no
         # custom names. The official call ends with async_end([train_loss])
@@ -3134,17 +3145,19 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         # call blocks through loss and commit_norm block_until_ready
         # internally, so the span already closes at device completion and
         # there is nothing asynchronous left to register.
-        with self.rl_cluster.perf_v2.span(
-            perf_constants.PEFT_TRAIN,
-            self.rl_cluster.perf_v2.all_devices,
-            tags={
-                perf_constants.STEP: self.rl_cluster.global_steps,
-                perf_constants.ROLE: "actor",
-            },
-        ):
-          segmented_result = self._run_p28_g6_update(
-              merged_train_micro_batch
-          )
+        with train_step_annotation:
+          with update_annotation:
+            with self.rl_cluster.perf_v2.span(
+                perf_constants.PEFT_TRAIN,
+                self.rl_cluster.perf_v2.all_devices,
+                tags={
+                    perf_constants.STEP: self.rl_cluster.global_steps,
+                    perf_constants.ROLE: "actor",
+                },
+            ):
+              segmented_result = self._run_p28_g6_update(
+                  merged_train_micro_batch
+              )
         if (
             canonical_workload
             and (

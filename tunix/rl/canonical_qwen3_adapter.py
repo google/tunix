@@ -47,6 +47,7 @@ from tunix.rl import canonical_logsoftmax
 from tunix.rl import dp_training
 from tunix.rl import dp_workloads
 from tunix.rl import deepswe_contract
+from tunix.rl import gsm8k_xprof
 from tunix.rl import p64_training_capsule
 from tunix.rl import p38_frozenlake_replay
 from tunix.sft import utils as sft_utils
@@ -221,13 +222,11 @@ def _xprof_jit(fun, *, module_name: str, scope_name: str, **jit_kwargs):
   XProf's XLA Modules line, while ``scope_name`` prefixes the HLO operation
   source stack used by Trace Viewer and HLO Op Profile.
   """
-  value = os.environ.get("CANON_XPROF_LABELS", "")
-  if value not in ("", "0", "1"):
-    raise FunctionalMappingError(
-        "CANON_XPROF_LABELS must be unset/0/1, "
-        f"got {value!r}"
-    )
-  if value != "1":
+  try:
+    enabled = gsm8k_xprof.labels_enabled()
+  except ValueError as exc:
+    raise FunctionalMappingError(str(exc)) from exc
+  if not enabled:
     return jax.jit(fun, **jit_kwargs)
   if not re.fullmatch(r"[a-z0-9_]+", module_name):
     raise FunctionalMappingError(
@@ -5934,7 +5933,7 @@ class Qwen3EngineForwardAdapter:
     }
 
   def _p32_reverse_group(
-      self, segmented, engine_leaves, spec, dlogps, dentropy
+      self, segmented, engine_leaves, spec, dlogps, dentropy, replay=None
   ):
     """Reverses one group of rank-local sequences by layer and chunk."""
     parallel_value = os.environ.get("CANON_P59_RANK_PARALLEL_BACKWARD", "")
@@ -5948,9 +5947,10 @@ class Qwen3EngineForwardAdapter:
       raise FunctionalMappingError(
           "P59 rank-parallel backward requires more than one DP rank"
       )
-    replay = self._p32_forward_group(
-        segmented, engine_leaves, spec, keep_cache_inputs=True
-    )
+    if replay is None:
+      replay = self._p32_forward_group(
+          segmented, engine_leaves, spec, keep_cache_inputs=True
+      )
     padded_width = spec["num_chunks"] * self._sequence_bucket
     completion_valid = spec["completion_valid"]
     rank_rows = jnp.arange(self._data_size, dtype=jnp.int32)[:, None]
@@ -6455,21 +6455,25 @@ class Qwen3EngineForwardAdapter:
     p32_forward_start = time.perf_counter()
     p32_forward_durations = []
     forwards = []
-    for index, spec in enumerate(specs):
-      p32_group_start = time.perf_counter()
-      forward = self._p32_forward_group(
-          segmented, engine_leaves, spec, keep_cache_inputs=False
-      )
-      forward["logps"].block_until_ready()
-      p32_forward_durations.append(time.perf_counter() - p32_group_start)
-      forwards.append(forward)
-      print(
-          f"[P32.DP{contract.dp_size}] forward_group_done "
-          f"group={index + 1}/{contract.local_trajectories} "
-          f"rows={reverse_groups[index]} "
-          f"n_real={spec['host_n_real']}",
-          flush=True,
-      )
+    with gsm8k_xprof.trace_annotation("forward_groups"):
+      for index, spec in enumerate(specs):
+        with gsm8k_xprof.trace_annotation(
+            "forward_group", group_index=index
+        ):
+          p32_group_start = time.perf_counter()
+          forward = self._p32_forward_group(
+              segmented, engine_leaves, spec, keep_cache_inputs=False
+          )
+          forward["logps"].block_until_ready()
+          p32_forward_durations.append(time.perf_counter() - p32_group_start)
+          forwards.append(forward)
+          print(
+              f"[P32.DP{contract.dp_size}] forward_group_done "
+              f"group={index + 1}/{contract.local_trajectories} "
+              f"rows={reverse_groups[index]} "
+              f"n_real={spec['host_n_real']}",
+              flush=True,
+          )
     forwards = tuple(forwards)
     if os.environ.get("CANON_PERF_LOG", "1") != "0" and p32_forward_durations:
       print(
@@ -6499,16 +6503,17 @@ class Qwen3EngineForwardAdapter:
           logps, entropy, train_example, algo_config
       ).primary_loss.unreduced_sum
 
-    unreduced_value, loss_pullback = jax.vjp(
-        unreduced_loss, per_token_logps, token_entropy
-    )
-    dlogps, dentropy = loss_pullback(jnp.ones_like(unreduced_value))
-    grouped_dlogps = self._group_batch_rows(dlogps)
-    grouped_dentropy = self._group_batch_rows(dentropy)
-    loss_output = algo_core.grpo_loss_from_precomputed_logps(
-        per_token_logps, token_entropy, train_example, algo_config
-    )
-    scale = loss_output.primary_loss.compute_scale()
+    with gsm8k_xprof.trace_annotation("loss_pullback"):
+      unreduced_value, loss_pullback = jax.vjp(
+          unreduced_loss, per_token_logps, token_entropy
+      )
+      dlogps, dentropy = loss_pullback(jnp.ones_like(unreduced_value))
+      grouped_dlogps = self._group_batch_rows(dlogps)
+      grouped_dentropy = self._group_batch_rows(dentropy)
+      loss_output = algo_core.grpo_loss_from_precomputed_logps(
+          per_token_logps, token_entropy, train_example, algo_config
+      )
+      scale = loss_output.primary_loss.compute_scale()
     if numeric_debug:
       _p62_emit_loss_receipt(
           loss_output=loss_output,
@@ -6542,13 +6547,23 @@ class Qwen3EngineForwardAdapter:
     def reverse_reduce_group(index, spec):
       nonlocal reducer
       if rank_parallel_backward:
-        reverse = self._p32_reverse_group(
-            segmented,
-            engine_leaves,
-            spec,
-            grouped_dlogps[index],
-            grouped_dentropy[index],
-        )
+        with gsm8k_xprof.trace_annotation(
+            "replay_forward", group_index=index
+        ):
+          replay = self._p32_forward_group(
+              segmented, engine_leaves, spec, keep_cache_inputs=True
+          )
+        with gsm8k_xprof.trace_annotation(
+            "model_backward", group_index=index
+        ):
+          reverse = self._p32_reverse_group(
+              segmented,
+              engine_leaves,
+              spec,
+              grouped_dlogps[index],
+              grouped_dentropy[index],
+              replay=replay,
+          )
         if not bool(np.asarray(jnp.array_equal(
             reverse["replay_logps"], grouped_logps[index]
         ))):
@@ -6564,11 +6579,14 @@ class Qwen3EngineForwardAdapter:
               ranked=numeric_debug_mode == "p64",
               mode=numeric_debug_mode,
           )
-        adjoint_start = time.perf_counter()
-        staged_gradient = self._p59_rank_parallel_report_adjoint(
-            trainer_state, reverse["engine_gradients"]
-        )
-        adjoint_seconds[0] += time.perf_counter() - adjoint_start
+        with gsm8k_xprof.trace_annotation(
+            "report_adjoint", group_index=index
+        ):
+          adjoint_start = time.perf_counter()
+          staged_gradient = self._p59_rank_parallel_report_adjoint(
+              trainer_state, reverse["engine_gradients"]
+          )
+          adjoint_seconds[0] += time.perf_counter() - adjoint_start
         if numeric_debug:
           _p62_emit_tree_receipt(
               stage="trainer_rank_local",
@@ -6615,9 +6633,12 @@ class Qwen3EngineForwardAdapter:
                 reverse["initial_cache_cotangents"]
             )
         )
-        one_gradient, reduction_report = reducer.finalize_staged(
-            staged_gradient
-        )
+        with gsm8k_xprof.trace_annotation(
+            "fixed_dp_reduce", group_index=index
+        ):
+          one_gradient, reduction_report = reducer.finalize_staged(
+              staged_gradient
+          )
         if numeric_debug:
           _p62_emit_tree_receipt(
               stage="fixed_dp_reduced",
@@ -6667,45 +6688,58 @@ class Qwen3EngineForwardAdapter:
         rank_dentropy = dp_training.isolate_dp_rank_cotangent(
             grouped_dentropy[index], rank=rank, dp_size=contract.dp_size
         )
-        reverse = self._p32_reverse_group(
-            segmented,
-            engine_leaves,
-            spec,
-            rank_dlogps,
-            rank_dentropy,
-        )
+        with gsm8k_xprof.trace_annotation(
+            "replay_forward", group_index=index, rank_index=rank
+        ):
+          replay = self._p32_forward_group(
+              segmented, engine_leaves, spec, keep_cache_inputs=True
+          )
+        with gsm8k_xprof.trace_annotation(
+            "model_backward", group_index=index, rank_index=rank
+        ):
+          reverse = self._p32_reverse_group(
+              segmented,
+              engine_leaves,
+              spec,
+              rank_dlogps,
+              rank_dentropy,
+              replay=replay,
+          )
         if not bool(np.asarray(jnp.array_equal(
             reverse["replay_logps"], grouped_logps[index]
         ))):
           raise FunctionalMappingError(
               f"P33 group {index} rank {rank} replay logprobs changed"
           )
-        adjoint_start = time.perf_counter()
-        if batched_report:
-          rank_gradient = self._batched_report_adjoint(
-              trainer_state, reverse["engine_gradients"]
-          )
-        else:
-          rank_gradient = self.map_engine_cotangents_to_trainer_state(
-              trainer_state, reverse["engine_gradients"]
-          )
-          rank_gradient = jax.tree.map(
-              lambda value: value.astype(jnp.float32), rank_gradient
-          )
-          if report_verify:
-            fault = self._p50_rev_verify(
-                "p32 report adjoint",
-                index,
-                rank_gradient,
-                self._batched_report_adjoint(
-                    trainer_state, reverse["engine_gradients"]
-                ),
+        with gsm8k_xprof.trace_annotation(
+            "report_adjoint", group_index=index, rank_index=rank
+        ):
+          adjoint_start = time.perf_counter()
+          if batched_report:
+            rank_gradient = self._batched_report_adjoint(
+                trainer_state, reverse["engine_gradients"]
             )
-            if fault is not None:
-              raise FunctionalMappingError(
-                  f"P50 batched-report verify mismatch: {fault}"
+          else:
+            rank_gradient = self.map_engine_cotangents_to_trainer_state(
+                trainer_state, reverse["engine_gradients"]
+            )
+            rank_gradient = jax.tree.map(
+                lambda value: value.astype(jnp.float32), rank_gradient
+            )
+            if report_verify:
+              fault = self._p50_rev_verify(
+                  "p32 report adjoint",
+                  index,
+                  rank_gradient,
+                  self._batched_report_adjoint(
+                      trainer_state, reverse["engine_gradients"]
+                  ),
               )
-        adjoint_seconds[0] += time.perf_counter() - adjoint_start
+              if fault is not None:
+                raise FunctionalMappingError(
+                    f"P50 batched-report verify mismatch: {fault}"
+                )
+          adjoint_seconds[0] += time.perf_counter() - adjoint_start
         if serial_mesh_bridge:
           rank_gradient, bridge_dp_axis = (
               _p59_align_serial_gradient_to_trainer_state(
@@ -6763,7 +6797,10 @@ class Qwen3EngineForwardAdapter:
             seen.add(id(value))
             if not value.is_deleted():
               value.delete()
-      one_gradient, reduction_report = reducer.finalize()
+      with gsm8k_xprof.trace_annotation(
+          "fixed_dp_reduce", group_index=index
+      ):
+        one_gradient, reduction_report = reducer.finalize()
       leaves = jax.tree.leaves(one_gradient)
       report = {
           "group": index,
@@ -6811,107 +6848,127 @@ class Qwen3EngineForwardAdapter:
           "selected=group0 optimizer_commits=0",
           flush=True,
       )
-    for index, spec in enumerate(reverse_specs):
-      p32_group_start = time.perf_counter()
-      one_gradient, report = reverse_reduce_group(index, spec)
-      p32_reverse_durations.append(time.perf_counter() - p32_group_start)
-      if p59_xprof_capture and index == 0:
-        jax.block_until_ready(one_gradient)
-        jax.profiler.stop_trace()
-        print(
-            "[P59.XPROF] phase=backward_group stopped update=1 groups=1 "
-            "anchor=gradient_ready",
-            flush=True,
-        )
-      if deterministic_repeat:
-        repeated_gradient, repeated_report = reverse_reduce_group(index, spec)
-        exact_flags = tuple(
-            bool(np.asarray(jnp.array_equal(first, second)))
-            for first, second in zip(
-                jax.tree.leaves(one_gradient),
-                jax.tree.leaves(repeated_gradient),
-                strict=True,
+    with gsm8k_xprof.trace_annotation("reverse_groups"):
+      for index, spec in enumerate(reverse_specs):
+        with gsm8k_xprof.trace_annotation(
+            "reverse_group", group_index=index
+        ):
+          p32_group_start = time.perf_counter()
+          one_gradient, report = reverse_reduce_group(index, spec)
+          p32_reverse_durations.append(time.perf_counter() - p32_group_start)
+          if p59_xprof_capture and index == 0:
+            jax.block_until_ready(one_gradient)
+            jax.profiler.stop_trace()
+            print(
+                "[P59.XPROF] phase=backward_group stopped update=1 groups=1 "
+                "anchor=gradient_ready",
+                flush=True,
             )
-        )
-        report["deterministic_repeat_exact"] = (
-            bool(exact_flags)
-            and all(exact_flags)
-            and report["dp_reduction"]["rank_local_fingerprints"]
-            == repeated_report["dp_reduction"]["rank_local_fingerprints"]
-        )
-        report["deterministic_repeat_leaf_checks"] = len(exact_flags)
-        seen = set()
-        for value in jax.tree.leaves(repeated_gradient):
-          if isinstance(value, jax.Array) and id(value) not in seen:
-            seen.add(id(value))
-            if not value.is_deleted():
-              value.delete()
-        if not report["deterministic_repeat_exact"]:
-          raise FunctionalMappingError(
-              f"P34 group {index} repeated gradient is not array-exact"
+          if deterministic_repeat:
+            repeated_gradient, repeated_report = reverse_reduce_group(
+                index, spec
+            )
+            exact_flags = tuple(
+                bool(np.asarray(jnp.array_equal(first, second)))
+                for first, second in zip(
+                    jax.tree.leaves(one_gradient),
+                    jax.tree.leaves(repeated_gradient),
+                    strict=True,
+                )
+            )
+            report["deterministic_repeat_exact"] = (
+                bool(exact_flags)
+                and all(exact_flags)
+                and report["dp_reduction"]["rank_local_fingerprints"]
+                == repeated_report["dp_reduction"][
+                    "rank_local_fingerprints"
+                ]
+            )
+            report["deterministic_repeat_leaf_checks"] = len(exact_flags)
+            seen = set()
+            for value in jax.tree.leaves(repeated_gradient):
+              if isinstance(value, jax.Array) and id(value) not in seen:
+                seen.add(id(value))
+                if not value.is_deleted():
+                  value.delete()
+            if not report["deterministic_repeat_exact"]:
+              raise FunctionalMappingError(
+                  f"P34 group {index} repeated gradient is not array-exact"
+              )
+          reports.append(report)
+          if (
+              os.environ.get("CANON_PERF_LOG", "1") != "0"
+              and index == len(reverse_specs) - 1
+          ):
+            print(
+                "[PERF] stage=p32_vag_reverse seconds=%.3f groups=%d"
+                " mean=%.3f max=%.3f adjoint=%.3f"
+                % (
+                    time.perf_counter() - p32_reverse_start,
+                    len(p32_reverse_durations),
+                    sum(p32_reverse_durations) / len(p32_reverse_durations),
+                    max(p32_reverse_durations),
+                    adjoint_seconds[0],
+                ),
+                flush=True,
+            )
+          print(
+              f"[{'P34' if p34 else 'P33'}.DP{contract.dp_size}] "
+              "reverse_group_done "
+              f"group={index + 1}/{contract.local_trajectories} "
+              f"rows={reverse_groups[index]} "
+              "rank_contributions="
+              f"{report['dp_reduction']['rank_contributions']} "
+              f"pullback_invocations={report['pullback_invocations']} "
+              "unique_rank_fingerprints="
+              f"{report['dp_reduction']['rank_local_fingerprint_unique_count']}/"
+              f"{contract.dp_size} "
+              f"reduction_rounds={report['dp_reduction']['reduction_rounds']} "
+              "replicas_exact="
+              f"{int(report['dp_reduction']['post_reduction_replicas_exact'])} "
+              f"gradient_nonzero={report['gradient_nonzero']} "
+              "repeat_exact="
+              f"{int(report.get('deterministic_repeat_exact', False))}",
+              flush=True,
           )
-      reports.append(report)
-      if (
-          os.environ.get("CANON_PERF_LOG", "1") != "0"
-          and index == len(reverse_specs) - 1
-      ):
-        print(
-            "[PERF] stage=p32_vag_reverse seconds=%.3f groups=%d"
-            " mean=%.3f max=%.3f adjoint=%.3f"
-            % (
-                time.perf_counter() - p32_reverse_start,
-                len(p32_reverse_durations),
-                sum(p32_reverse_durations) / len(p32_reverse_durations),
-                max(p32_reverse_durations),
-                adjoint_seconds[0],
-            ),
-            flush=True,
-        )
-      print(
-          f"[{'P34' if p34 else 'P33'}.DP{contract.dp_size}] reverse_group_done "
-          f"group={index + 1}/{contract.local_trajectories} "
-          f"rows={reverse_groups[index]} "
-          f"rank_contributions={report['dp_reduction']['rank_contributions']} "
-          f"pullback_invocations={report['pullback_invocations']} "
-          "unique_rank_fingerprints="
-          f"{report['dp_reduction']['rank_local_fingerprint_unique_count']}/"
-          f"{contract.dp_size} "
-          f"reduction_rounds={report['dp_reduction']['reduction_rounds']} "
-          "replicas_exact="
-          f"{int(report['dp_reduction']['post_reduction_replicas_exact'])} "
-          f"gradient_nonzero={report['gradient_nonzero']} "
-          f"repeat_exact={int(report.get('deterministic_repeat_exact', False))}",
-          flush=True,
-      )
-      if gradient_microbatch_sink is None:
-        trainer_gradients = (
-            one_gradient
-            if trainer_gradients is None
-            else jax.tree.map(
-                lambda total, value: total + value,
-                trainer_gradients,
-                one_gradient,
-            )
-        )
-      else:
-        # The accumulator averages its streamed groups. Each reduced group is
-        # an unreduced sum over one trajectory from every DP rank, so
-        # multiplying by the group count makes the final accumulator value
-        # exactly ``scale * sum(all trajectory gradients)``.
-        gradient_microbatch_sink(
-            index,
-            one_gradient,
-            scale * jnp.asarray(contract.local_trajectories, scale.dtype),
-        )
-        # The sink blocks after donating the persistent accumulator. The
-        # reduced per-group gradient is now dead; explicit deletion prevents
-        # Python reference lifetime from retaining a second model-sized tree.
-        seen = set()
-        for value in jax.tree.leaves(one_gradient):
-          if isinstance(value, jax.Array) and id(value) not in seen:
-            seen.add(id(value))
-            if not value.is_deleted():
-              value.delete()
+          with gsm8k_xprof.trace_annotation(
+              "gradient_accumulate",
+              group_index=index,
+              micro_step=index,
+              is_last_accumulate=int(index == len(specs) - 1),
+          ):
+            if gradient_microbatch_sink is None:
+              trainer_gradients = (
+                  one_gradient
+                  if trainer_gradients is None
+                  else jax.tree.map(
+                      lambda total, value: total + value,
+                      trainer_gradients,
+                      one_gradient,
+                  )
+              )
+            else:
+              # The accumulator averages its streamed groups. Each reduced
+              # group is an unreduced sum over one trajectory from every DP
+              # rank, so multiplying by the group count makes the final value
+              # exactly ``scale * sum(all trajectory gradients)``.
+              gradient_microbatch_sink(
+                  index,
+                  one_gradient,
+                  scale
+                  * jnp.asarray(contract.local_trajectories, scale.dtype),
+              )
+          if gradient_microbatch_sink is not None:
+            # The sink blocks after donating the persistent accumulator. The
+            # reduced per-group gradient is now dead; explicit deletion
+            # prevents Python reference lifetime from retaining a second
+            # model-sized tree.
+            seen = set()
+            for value in jax.tree.leaves(one_gradient):
+              if isinstance(value, jax.Array) and id(value) not in seen:
+                seen.add(id(value))
+                if not value.is_deleted():
+                  value.delete()
     if gradient_microbatch_sink is None:
       if trainer_gradients is None:
         raise FunctionalMappingError("P32 D3b0 emitted no grouped gradient")
