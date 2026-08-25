@@ -1,0 +1,12 @@
+{
+  "attempt": 0,
+  "campaign_root": "v1-apc-m15-d3",
+  "source_commit": "eb58954f90572e19602b354cfcb71cc5d58f35d5",
+  "timestamp": "2026-08-25T02:14:41Z",
+  "jobset": "canon-v1-apc-m15-off-d3-eb58954f",
+  "arm": "off",
+  "exit_code": 1,
+  "status": "INCONCLUSIVE",
+  "error_reason": "python launcher exited with code 1 before capture directory creation",
+  "log": "m15_off_d3_attempt0_error.log"
+}

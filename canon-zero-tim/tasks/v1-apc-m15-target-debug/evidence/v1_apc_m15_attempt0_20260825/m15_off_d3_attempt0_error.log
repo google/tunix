@@ -1,0 +1,36 @@
+[entrypoint] start 2026-08-25T02:10:48Z  mode=run  pkg=/app/canon-zero-tim
+[entrypoint] JOBSET_ATTEMPT 0 (first attempt)  pod=canon-v1-apc-m15-off-d3-eb58954f-pathways-head-0-0-ghcch
+[sync] HEAD=eb58954f90572e19602b354cfcb71cc5d58f35d5
+[sync] describe=eb58954f Allow apc-debug profile for P57 M15 candidate in train_frozenlake_qwen3
+[verify] Section A passed: all 6 overlay files verified by SHA256 byte identity.
+[wait] 180s quiet period for worker boot/registration (configured per-role device expectation: 64)...
+I0825 02:14:41.511288     419 rpc_helper.cc:233] RpcHelper::Batcher::Finish(): calling session_->Finish().
+I0825 02:14:41.511293     419 grpc_client_session.cc:198] GrpcClientSession: Finish() called with client status CANCELLED: Disconnected by client [via RpcHelper::Disconnect()]
+I0825 02:14:41.511295     419 grpc_client_session.cc:241] GrpcClientSession: Finish() done.
+I0825 02:14:41.511298     419 rpc_helper.cc:235] RpcHelper::Batcher::Finish(): done.
+I0825 02:14:41.511300     419 rpc_helper.cc:511] RpcHelper::~RpcHelper() done.
+I0825 02:14:41.511305     419 grpc_host_buffer.cc:92] Waiting for destruction of HostBufferStoreLookupsWorkQueue...
+I0825 02:14:41.511317     419 grpc_host_buffer.cc:94] Destructed HostBufferStoreLookupsWorkQueue.
+I0825 02:14:41.511375     419 grpc_client_session.cc:245] GrpcClientSession::~GrpcClientSession() starting.
+I0825 02:14:41.511388     419 grpc_client_session.cc:198] GrpcClientSession: Finish() called with client status CANCELLED: ~GrpcClientSession called.
+I0825 02:14:41.511392     419 grpc_client_session.cc:241] GrpcClientSession: Finish() done.
+I0825 02:14:41.511568     419 grpc_client_session.cc:248] Deleting GrpcClientSession.user_futures_work_queue_ ...
+I0825 02:14:41.511733     419 grpc_client_session.cc:250] Deleted GrpcClientSession.user_futures_work_queue_.
+[run] exit=1
+[run] transport_rc=0
+{"error": "capture directory does not exist: /tmp/canon-state/canon-v1-apc-m15-off-d3-eb58954f/p38_serving_capture", "schema_version": 1, "scope": "p38-serving-capture", "verdict": "INCONCLUSIVE"}
+[CANON_P38_SERVING_CLASSIFICATION] path=/tmp/canon-state/canon-v1-apc-m15-off-d3-eb58954f/p38_serving_capture.classification.json sha256=3515f94e5af8f436856d89d72e2d4ccb8b246535f2c31102ae49d2385030a623
+[CANON_P38_SERVING_CLASSIFICATION_JSON] {
+  "error": "capture directory does not exist: /tmp/canon-state/canon-v1-apc-m15-off-d3-eb58954f/p38_serving_capture",
+  "schema_version": 1,
+  "scope": "p38-serving-capture",
+  "verdict": "INCONCLUSIVE"
+}
+{"error": "runtime source receipt drifted: []", "schema": "m15-apc-target-run-classification-v1", "status": "INCONCLUSIVE"}
+[CANON_APC_M15_CLASSIFICATION] path=/tmp/canon-state/canon-v1-apc-m15-off-d3-eb58954f/p38_serving_capture/m15_apc_target.classification.json sha256=db74b4c7e819c4fb25bbee466d6bfb1b8a451512e7339f3051015211cb1683ca
+[CANON_APC_M15_CLASSIFICATION_JSON] {
+  "error": "runtime source receipt drifted: []",
+  "schema": "m15-apc-target-run-classification-v1",
+  "status": "INCONCLUSIVE"
+}
+[P38.GCS] LIVE_ACTION_REQUESTED action=collect request=/tmp/canon-state/canon-v1-apc-m15-off-d3-eb58954f/p38_collect.request
