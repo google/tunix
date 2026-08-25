@@ -75,6 +75,7 @@ spec:
               - --node_type=resource_manager
               - --instance_count=${REPLICAS}
               - --instance_type=${PW_INSTANCE_TYPE}:${TPU_TOPOLOGY}
+              - --pathways_persistent_compilation_cache=false
               env:
               - name: REPLICATED_JOB_NAME
                 valueFrom:
