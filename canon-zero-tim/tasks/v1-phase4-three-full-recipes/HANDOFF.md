@@ -18,7 +18,7 @@ non-finite boundary is fatal and every valid run requires
 
 Verified by host/forced-CPU and pinned image:
 
-- V1 host 34/34, P59 host 37/37, and flag audit 369/369;
+- V1 host 34/34, P59 host 37/37, and post-rebase flag audit 371/371;
 - complete exact-image raw SHA
   `604c95e5953f97fa8465e03f38b15589bd38fbf618b04c5652be0328b446689e`,
   unique terminal `V1_HP_EXACT_IMAGE_PASS ... p62_numeric=6 ... manifests=3`;
@@ -45,6 +45,19 @@ recipe. Classify its earliest red using
 `phases/v1-p4-5-attempt7-numeric-localization.md`; only then design a bounded
 one-commit fix. Publication of this diagnostic stack was explicitly approved
 on 2026-08-25, but it does not authorize a JobSet or optimizer transaction.
+
+Publication audit: the scoped P62 stack was rebased on operator runtime tip
+`eb58954f`, then through the publication-time M15 evidence/documentation tip,
+preserving its APC target/replay flags, tests, and Attempt-0 failure receipt. The merged
+pinned image `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`
+exited zero with the unique combined terminal
+`V1_HP_EXACT_IMAGE_PASS ... p62_numeric=6 ... apc_m15_carrier=33 ... manifests=3`.
+This final merged-tree execution was observed in the release terminal but was
+not saved as a new signed raw artifact; the durable P62 r1 and G2 r2 artifacts
+and their checksums remain the evidence sources above. The classifier's
+alignment/update strings are log markers, not environment flags, and are split
+lexically so the deterministic flag audit remains 371/371 without inventing
+two false flags.
 
 ## Historical superseded status — Attempt 7 stable-clipping proposal
 

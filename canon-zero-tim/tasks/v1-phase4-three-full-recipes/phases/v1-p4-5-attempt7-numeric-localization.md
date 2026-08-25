@@ -144,3 +144,12 @@ numerical criterion.
   `ALL_BOUNDARIES_FINITE_NO_COMMIT` distinct; alignment/shape/scale/optimizer
   violations are `FATAL_CONTRACT`, and an unlocalized truncated log is
   `INCONCLUSIVE_INCOMPLETE`.
+- 2026-08-25 publication audit: rebased the scoped P62 CLs on operator runtime
+  tip `eb58954f`, then through the publication-time M15 evidence/documentation
+  tip, and preserved the incoming APC carrier and Attempt-0 receipt. Host V1 34/34, P59
+  37/37, and deterministic flag registry 371/371 pass. The complete merged
+  pinned-image tree exits zero with one terminal containing both
+  `p62_numeric=6` and `apc_m15_carrier=33`; verified by the release terminal,
+  but not registered as a new signed raw artifact. The previously signed P62
+  r1, G2 r2, and one-host r2 evidence remains byte-verified. G5 is still not
+  run and no optimizer transaction is admitted.

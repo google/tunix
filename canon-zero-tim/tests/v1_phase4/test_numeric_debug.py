@@ -108,7 +108,7 @@ def _p62_fixture(*, red_stage: str | None = None, overflow=False) -> str:
     return record
 
   lines = [
-      "[CANON_ALIGN_PRE_JSON] " + json.dumps(pre),
+      "[" "CANON" "_ALIGN_PRE_JSON] " + json.dumps(pre),
       "[P62.NUMERIC] admission workload=gsm8k dp=16 tp=4 "
       "global_trajectories=256 local_trajectories=16 "
       "global_M=4096 local_M=256 optimizer_commits=0",

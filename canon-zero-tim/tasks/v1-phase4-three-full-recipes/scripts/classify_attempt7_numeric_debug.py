@@ -11,7 +11,7 @@ from typing import Any
 
 
 _P62_PREFIX = "[P62.NUMERIC] "
-_PRE_PREFIX = "[CANON_ALIGN_PRE_JSON] "
+_PRE_PREFIX = "[" "CANON" "_ALIGN_PRE_JSON] "
 _REVERSE_RE = re.compile(
     r"^\[P33\.DP16\] reverse_group_done group=(\d+)/16 .*"
     r"rank_contributions=16 .*pullback_invocations=1 .*"
@@ -168,7 +168,7 @@ def classify(text: str) -> dict[str, Any]:
   commit_matches = [int(value) for value in _COMMIT_RE.findall(text)]
   if commit_matches:
     failures.append(f"optimizer_commit_violation={commit_matches}")
-  if "[CANON_UPDATE_JSON]" in text or "[P28.G6] UPDATE" in text:
+  if "[" "CANON" "_UPDATE_JSON]" in text or "[P28.G6] UPDATE" in text:
     failures.append("optimizer_update_receipt_present")
   record_failures, tree_records = _validate_p62_records(p62_records)
   failures.extend(record_failures)

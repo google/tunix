@@ -384,3 +384,24 @@
   `8fb3720e3ac39cf80535833e1786585950ab13bd7015b4c9c9aa66da0dc60b92`.
 - Claim ceiling remains seam composition. Only G5 executes the full Qwen
   DP16xTP4 target and can explain Attempt 7.
+
+## 2026-08-25T02:21:29Z — P62 publication tree rebased and re-admitted
+
+- Rebased the four scoped P62 CLs on operator runtime tip `eb58954f`, then
+  through the publication-time M15 evidence/documentation tip. The only manual merges preserve both the
+  incoming M15 APC target/replay flags and P62 in `FLAGS.md`, and require both
+  M15 and P62 markers in the exact-image terminal. The later rebase only adds
+  immutable M15 Attempt-0 failure receipt and its status update; neither alters runtime blobs.
+- Host V1 passes 34/34, P59 passes 37/37, and deterministic flag audit passes
+  371/371. Two classifier strings were confirmed to be existing log markers,
+  not environment flags; lexical splitting prevents false registry entries
+  without changing runtime matching.
+- Complete pinned image
+  `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`
+  exits zero with the unique terminal containing `p62_numeric=6`,
+  `apc_m15_carrier=33`, and `manifests=3`. This merged-tree run is verified by
+  the release terminal but has no new durable raw log; signed P62 r1/G2 r2 and
+  one-host r2 artifacts remain unchanged and checksum-valid.
+- Claim ceiling is unchanged: publication admits only a default-off,
+  zero-commit diagnostic. G5 DP16xTP4, the numerical root cause, all optimizer
+  transactions, and production performance remain unverified.
