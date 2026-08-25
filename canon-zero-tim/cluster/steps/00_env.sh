@@ -496,7 +496,7 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
   if [ "$APC_M15_TARGET_DEBUG" = "1" ]; then
     expected_p38_incident_min=1152
     expected_p38_incident_max=7168
-    expected_p38_incident_bytes=268435456
+    expected_p38_incident_bytes=2147483648
   fi
   [ "${CANON_P38_INCIDENT_MIN_PREFIX:-}" = \
       "$expected_p38_incident_min" ] && \

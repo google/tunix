@@ -1,0 +1,52 @@
+--- tpu_runner_p21_l30.py
++++ tpu_runner_p21_l30.py
+@@ -1254,7 +1254,7 @@
+                 "M15 replay ledger must live directly in the capture directory")
+     if not (0 <= _P38_INCIDENT_MIN_PREFIX < _P38_INCIDENT_MAX_PREFIX):
+         raise RuntimeError("P38 incident prefix bounds are invalid")
+-    if not (1024 * 1024 <= _P38_INCIDENT_MAX_BYTES <= 256 * 1024 * 1024):
++    if not (1024 * 1024 <= _P38_INCIDENT_MAX_BYTES <= 2 * 1024 * 1024 * 1024):
+         raise RuntimeError("P38 incident ledger byte bound is invalid")
+     if not _P38_DIAGNOSTIC_ROUND_FILE:
+         raise RuntimeError(
+@@ -3201,7 +3201,17 @@
+     """Write the pre-dispatch record and return its sequence number."""
+     if not _P38_SERVING_CAPTURE_DIR:
+         return None
+-    if program_path != _P38_SERVING_CAPTURE_EXPECTED_PATH:
++    m15_continue_tail = (
++        _P38_M15_TARGET_DEBUG in ("off", "on")
++        and _P38_SERVING_CAPTURE_EXPECTED_PATH == "standard"
++        and program_path == "continue_decode"
++        and _P38_SERVING_CAPTURE_SEQ["n"] >=
++        _P38_SERVING_CAPTURE_MAX_CALLS
++        and len(_P38_SERVING_CAPTURED_STRATA) >=
++        _P38_SERVING_CAPTURE_MAX_CALLS
++    )
++    if (program_path != _P38_SERVING_CAPTURE_EXPECTED_PATH and
++            not m15_continue_tail):
+         raise RuntimeError(
+             "P38 serving capture reached an unexpected program path: "
+             f"expected={_P38_SERVING_CAPTURE_EXPECTED_PATH} "
+@@ -3214,14 +3224,16 @@
+     scheduled_prefixes = _p38_scheduled_decode_prefixes(
+         runner, scheduler_output)
+     _p38_observe_scheduled_prefixes(scheduled_prefixes, program_path)
++    journal_prefixes = [] if m15_continue_tail else scheduled_prefixes
+     call_index = _p38_request_journal(
+-        runner, scheduler_output, req_ids_dp, scheduled_prefixes, program_path)
++        runner, scheduler_output, req_ids_dp, journal_prefixes, program_path)
+     _p38_m15_replay_ledger(
+         runner, scheduler_output, req_ids_dp, call_index, program_path)
+-    _p38_incident_ledger(
+-        runner, scheduler_output, req_ids_dp, scheduled_prefixes, program_path,
+-        call_index, input_ids, input_positions, attn_metadata,
+-        padded_num_scheduled_tokens_per_dp_rank)
++    if not m15_continue_tail:
++        _p38_incident_ledger(
++            runner, scheduler_output, req_ids_dp, scheduled_prefixes,
++            program_path, call_index, input_ids, input_positions,
++            attn_metadata, padded_num_scheduled_tokens_per_dp_rank)
+     if _P38_SERVING_CAPTURE_SEQ["n"] >= _P38_SERVING_CAPTURE_MAX_CALLS:
+         return None
+     candidate_strata = []

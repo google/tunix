@@ -1,6 +1,6 @@
 # Phase B — freeze a strict replay carrier
 
-- Status: static carrier complete; target execution not approved
+- Status: Attempt-2 observer repair host PASS; exact-image and target execution not approved
 
 ## Finding
 
@@ -125,3 +125,19 @@ contracts behind the already registered M15 selector and adds positives for
 both arms plus legacy-P38/P57 preservation and wrong-mode/geometry negatives.
 The host carrier suite is now 39/39. Post-fix exact-image and DP8xTP8 target
 remain unrun and require separate approval.
+
+Attempt 2 then exercised the bounded carrier on DP8xTP8 far enough to expose
+two observer-only defects. It completed all four standard tensor strata and
+more than 1,800 serving calls, but its incident ledger hit the 256 MiB ceiling
+at call 326 and its production-congruent drain tail entered
+`continue_decode`, which the old whole-process single-path assertion rejected.
+The repair deliberately preserves `CANON_CONTINUE_DECODE=8`: only after all
+standard strata are complete may an M15 target run continue its host-only
+ledger on the continue-decode tail. The signed M15 ledger ceiling is 2 GiB;
+ordinary P38 renderer limits are unchanged. Full carrier packaging now
+requires A to attest both registered paths and B to remain standard. Early,
+unknown, or B-side continue-decode paths still fail closed.
+
+Current host result: task carrier suite 44/44, patch-27 dry application PASS,
+Python compilation PASS. Exact-image and a fresh APC-off target control remain
+unrun; this is not an APC numerical repair or verdict.

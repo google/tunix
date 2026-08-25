@@ -33,8 +33,21 @@ Current immutable facts:
   `CANON_APC_M15_TARGET_DEBUG=off|on` admits `frozenlake-dp8-tp8`, DP8,
   1 x 32-prompt unit and no IS. Cross-mode and partial geometry negatives are
   executable host tests. It changes no numerical code.
+- Attempt 2 (`canon-v1-apc-m15-off-d7-41a2043c`) finally reached the real
+  DP8xTP8 rollout and completed more than 1,800 serving calls plus all four
+  standard capture strata. It did not reach A/B/C classification: the
+  incident ledger saturated at call 326 (268,192,266 bytes) and the drain tail
+  later entered the production `continue_decode` path, which the old
+  single-path observer rejected.
+- Removing `CANON_CONTINUE_DECODE=8` is explicitly rejected because `m15i`
+  used it. The local repair is observer-only: standard tensor capture stays
+  unchanged; after all four records exist, an M15-only continue-decode tail
+  may continue only the dedicated host replay envelope. Generic request and
+  incident evidence stays standard-only. The M15-only incident/replay ceiling
+  is raised to 2 GiB. A frozen red must attest A=`standard+continue_decode`
+  and B=`standard`; every earlier/unknown path change remains fatal.
 
-Claim ceiling: `PHASE_B_STATIC_CARRIER_ONLY`.
+Claim ceiling: `ATTEMPT2_OBSERVER_REPAIR_HOST_PASS_EXACT_IMAGE_TARGET_NOT_RUN`.
 
 The exact remote procedure is in [RUNBOOK.md](RUNBOOK.md). The execution agent
 must run those commands rather than constructing a new carrier by hand.
@@ -154,7 +167,7 @@ bash canon-zero-tim/tests/v1_phase4/run_exact_image.sh \
   sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a
 ```
 
-The post-fix terminal must include `apc_m15_carrier=39`. This remains a CPU/image
+The post-fix terminal must include `apc_m15_carrier=44`. This remains a CPU/image
 admission gate, not a DP8xTP8 numerical result.
 
 Before applying the YAML, the rendered environment must contain all four
@@ -169,6 +182,11 @@ CANON_P57_DATA_SPLIT=main
 
 The checked-in renderer and real Step-00 resolver now enforce this and reject
 wrong identity or file-path-entrypoint negatives before TPU work begins.
+It must also contain `CANON_CONTINUE_DECODE=8`,
+`CANON_P38_SERVING_CAPTURE_EXPECTED_PATH=standard`, and
+`CANON_P38_INCIDENT_MAX_BYTES=2147483648`. This combination is intentional:
+the tensor records stay single-path while the replay envelope attests the
+mixed production tail.
 
 ## Launch order — each needs separate user approval
 

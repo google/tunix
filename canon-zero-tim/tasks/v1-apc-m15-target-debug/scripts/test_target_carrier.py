@@ -15,6 +15,7 @@ import yaml
 
 
 ROOT = Path(__file__).resolve().parents[4]
+CANON = ROOT / "canon-zero-tim"
 RENDERER_PATH = ROOT / "canon-zero-tim/cluster/render_v1_apc_m15_target_debug.py"
 LEARNER_PATH = ROOT / "tunix/rl/agentic/agentic_rl_learner.py"
 TRAIN_PATH = ROOT / "examples/frozenlake/train_frozenlake_qwen3.py"
@@ -70,6 +71,23 @@ admission_geometry, p38_batch_contract = _load_train_geometry_contracts()
 
 class TargetCarrierTest(unittest.TestCase):
 
+  def test_m15_capture_preserves_production_continue_decode_and_scopes_tail(self):
+    profile = (CANON / "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-apc-debug.env").read_text(
+        encoding="utf-8"
+    )
+    patch = (CANON / "patches/tpu_inference/27-tpu-runner-m15-mixed-program-tail.patch").read_text(
+        encoding="utf-8"
+    )
+    installer = (CANON / "install.sh").read_text(encoding="utf-8")
+    self.assertIn('export CANON_CONTINUE_DECODE=8', profile)
+    self.assertIn('_P38_M15_TARGET_DEBUG in ("off", "on")', patch)
+    self.assertIn('program_path == "continue_decode"', patch)
+    self.assertIn('_P38_SERVING_CAPTURE_SEQ["n"] >=', patch)
+    self.assertIn('len(_P38_SERVING_CAPTURED_STRATA) >=', patch)
+    self.assertIn('journal_prefixes = [] if m15_continue_tail', patch)
+    self.assertIn('if not m15_continue_tail:', patch)
+    self.assertIn("27-tpu-runner-m15-mixed-program-tail.patch", installer)
+
   def test_renders_exact_off_on_pair(self):
     with tempfile.TemporaryDirectory() as directory:
       paths = renderer.render_all(
@@ -98,7 +116,7 @@ class TargetCarrierTest(unittest.TestCase):
         self.assertEqual(env["CANON_P38_SERVING_CAPTURE_PREFIX_BOUNDS"], "1152,1216,1280,1408,1696")
         self.assertEqual(env["CANON_P38_INCIDENT_MIN_PREFIX"], "1152")
         self.assertEqual(env["CANON_P38_INCIDENT_MAX_PREFIX"], "7168")
-        self.assertEqual(env["CANON_P38_INCIDENT_MAX_BYTES"], "268435456")
+        self.assertEqual(env["CANON_P38_INCIDENT_MAX_BYTES"], "2147483648")
         self.assertEqual(
             env["CANON_APC_M15_REPLAY_LEDGER"],
             f"{env['CANON_P38_SERVING_CAPTURE_DIR']}/m15_replay_envelope.jsonl",

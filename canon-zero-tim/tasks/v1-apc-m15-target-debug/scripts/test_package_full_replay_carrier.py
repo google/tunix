@@ -120,8 +120,32 @@ class PackageFullReplayCarrierTest(unittest.TestCase):
         {
             "schema": "m15-apc-serving-envelope-v1",
             "arm": "on",
-            "serving_arm": "B",
+            "serving_arm": "A",
             "call_index": 2,
+            "program_path": "continue_decode",
+            "request_order": ["rollout-9"],
+            "requests": [{
+                "request_id": "rollout-9",
+                "request_index": 0,
+                "dp_rank": 2,
+                "local_scheduler_slot": 1,
+                "scheduled_tokens": 1,
+                "num_computed_tokens": 3,
+                "num_prompt_tokens": 2,
+                "num_tokens": 4,
+                "token_history_sha256": _token_sha(history[:4]),
+                "request_kind": "decode",
+                "block_size": 4,
+                "logical_blocks_before": 1,
+                "logical_blocks_after": 1,
+                "physical_pages": [11],
+            }],
+        },
+        {
+            "schema": "m15-apc-serving-envelope-v1",
+            "arm": "on",
+            "serving_arm": "B",
+            "call_index": 3,
             "program_path": "standard",
             "request_order": ["rescore-9"],
             "requests": [{
@@ -233,8 +257,13 @@ class PackageFullReplayCarrierTest(unittest.TestCase):
       result = self._package(root, self._inputs(root))
       self.assertEqual(result["status"], "FULL_REPLAY_CARRIER_FROZEN")
       self.assertEqual(result["producer_rows"], 256)
-      self.assertEqual(result["serving_call_count"], 2)
+      self.assertEqual(result["serving_call_count"], 3)
       self.assertEqual(result["serving_arms"], ["A", "B"])
+      self.assertEqual(result["program_paths"], ["continue_decode", "standard"])
+      self.assertEqual(
+          result["program_paths_by_arm"],
+          {"A": ["continue_decode", "standard"], "B": ["standard"]},
+      )
       joins = (root / "m15_full_replay_carrier/request_row_joins.jsonl").read_text()
       self.assertIn('"candidate_source_rows":[9]', joins)
       check = subprocess.run(
@@ -255,6 +284,45 @@ class PackageFullReplayCarrierTest(unittest.TestCase):
           encoding="utf-8",
       )
       with self.assertRaisesRegex(carrier.CarrierError, "not contiguous"):
+        self._package(root, inputs)
+
+  def test_rejects_missing_continue_decode_attestation(self):
+    with tempfile.TemporaryDirectory() as directory:
+      root = Path(directory)
+      inputs = self._inputs(root)
+      records = [inputs[-1][0], inputs[-1][2]]
+      records[1]["call_index"] = 2
+      inputs[1].write_text(
+          "".join(json.dumps(record) + "\n" for record in records),
+          encoding="utf-8",
+      )
+      with self.assertRaisesRegex(carrier.CarrierError, "must attest standard and continue_decode"):
+        self._package(root, inputs)
+
+  def test_rejects_continue_decode_on_full_reset_arm(self):
+    with tempfile.TemporaryDirectory() as directory:
+      root = Path(directory)
+      inputs = self._inputs(root)
+      records = inputs[-1]
+      records[2]["program_path"] = "continue_decode"
+      inputs[1].write_text(
+          "".join(json.dumps(record) + "\n" for record in records),
+          encoding="utf-8",
+      )
+      with self.assertRaisesRegex(carrier.CarrierError, "full-reset standard"):
+        self._package(root, inputs)
+
+  def test_rejects_unknown_program_path(self):
+    with tempfile.TemporaryDirectory() as directory:
+      root = Path(directory)
+      inputs = self._inputs(root)
+      records = inputs[-1]
+      records[1]["program_path"] = "vendor_magic"
+      inputs[1].write_text(
+          "".join(json.dumps(record) + "\n" for record in records),
+          encoding="utf-8",
+      )
+      with self.assertRaisesRegex(carrier.CarrierError, "program path drifted"):
         self._package(root, inputs)
 
   def test_rejects_token_history_outside_full_producer(self):

@@ -219,3 +219,26 @@
 - Files/artifacts: [Attempt-2 evidence](evidence/v1_apc_m15_attempt2_20260825/receipt.json), [Attempt-2 error log](evidence/v1_apc_m15_attempt2_20260825/m15_off_d7_attempt2_error.log)
 - Next: remove `export CANON_CONTINUE_DECODE=8` from profile, re-render, and relaunch APC-off control.
 
+## 2026-08-25T06:30:00Z — Attempt 2 diagnosis corrected; observer repair host PASS
+
+- Correction: the prior recommendation to remove `CANON_CONTINUE_DECODE=8`
+  is superseded. `m15i` and the signed M15 production recipe use K=8; deleting
+  it would change the serving executable and invalidate the reproduction.
+- Additional fact: Attempt 2 first saturated the incident ledger at call 326
+  with 268,192,266 bytes and emitted 1,650 nonfatal capture errors. The later
+  standard-vs-continue assertion was the fatal error because the continue
+  call site did not have the standard path's nonfatal wrapper.
+- Implementation: append-only runner patch 27 keeps standard capture
+  fail-closed until all four strata are present, then permits only M15
+  `continue_decode` tail calls to keep recording the dedicated full host
+  chronology; generic request/incident artifacts remain standard-only.
+  The M15 signed incident/replay bound is 2 GiB; generic P38's renderer bound
+  remains 128 MiB.
+- Implementation: full carrier packaging accepts only two registered program
+  paths and requires A=`standard+continue_decode`, B=`standard`. Unknown
+  paths, an absent continue tail, or continue-decode B are negative controls.
+- Validation: task carrier tests are 44/44; patch 27 applies cleanly to the
+  manifested post-patch26 runner; Python compilation and manifest target hash
+  are green. Exact-image and target have not run.
+- Claim ceiling: observer repair only. No APC numerical result, localization,
+  or production enablement follows from this host pass.

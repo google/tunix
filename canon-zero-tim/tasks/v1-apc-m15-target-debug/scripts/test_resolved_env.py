@@ -45,6 +45,7 @@ class ResolvedEnvironmentTest(unittest.TestCase):
       *,
       wrong_profile: bool = False,
       wrong_replay_path: bool = False,
+      wrong_incident_bound: bool = False,
       wrong_workload_identity: bool = False,
       wrong_entrypoint: bool = False,
   ):
@@ -78,6 +79,8 @@ class ResolvedEnvironmentTest(unittest.TestCase):
         env["CANON_APC_M15_REPLAY_LEDGER"] = str(
             state / "outside-capture.jsonl"
         )
+      if wrong_incident_bound:
+        env["CANON_P38_INCIDENT_MAX_BYTES"] = "268435456"
       if wrong_workload_identity:
         env["CANON_P57_DATA_SPLIT"] = "selection"
       if wrong_entrypoint:
@@ -107,6 +110,8 @@ class ResolvedEnvironmentTest(unittest.TestCase):
     self.assertIn("export CANON_TP_SIZE=8", resolved)
     self.assertIn("export CANON_P57_WORKLOAD_CANDIDATE=m15", resolved)
     self.assertIn("export CANON_P57_DATA_SPLIT=main", resolved)
+    self.assertIn("export CANON_CONTINUE_DECODE=8", resolved)
+    self.assertIn("export CANON_P38_INCIDENT_MAX_BYTES=2147483648", resolved)
 
   def test_on_arm_resolves_apc_on(self):
     result, resolved = self._resolve("on")
@@ -127,6 +132,12 @@ class ResolvedEnvironmentTest(unittest.TestCase):
     self.assertNotEqual(result.returncode, 0, result.stdout)
     self.assertFalse(resolved)
     self.assertIn("replay ledger must live in the capture directory", result.stdout)
+
+  def test_legacy_incident_bound_is_rejected(self):
+    result, resolved = self._resolve("off", wrong_incident_bound=True)
+    self.assertNotEqual(result.returncode, 0, result.stdout)
+    self.assertFalse(resolved)
+    self.assertIn("incident ledger bounds drifted", result.stdout)
 
   def test_cli_and_signed_workload_identity_cannot_diverge(self):
     result, resolved = self._resolve("off", wrong_workload_identity=True)

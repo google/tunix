@@ -20,7 +20,7 @@ B - C = 0 bytes
 | Phase | Deliverable | Exit gate | Status |
 |---|---|---|---|
 | A | `M15_FIRST_RED_INPUT_CONTRACT` with mismatch distribution, identity hashes, and artifact-completeness matrix | every field is traced to immutable `file:line` or explicitly marked missing | complete: audit PASS, replay inputs missing |
-| B | fresh captured-red replay carrier and APC-off/APC-on decision table | static/host carrier tests prove full 256-row producer, every-call envelope, exact first-red join, GCS durability, A cache-readable decode, B full reset, zero backward/commit | Attempt-0 bootstrap invalid; Attempt-1 exposed legacy geometry cross-talk; bounded geometry repair host PASS; exact-image/target pending |
+| B | fresh captured-red replay carrier and APC-off/APC-on decision table | static/host carrier tests prove full 256-row producer, mixed standard/continue A chronology, standard-only full-reset B, exact first-red join, GCS durability, zero backward/commit | Attempts 0/1 were admission failures; Attempt 2 exposed observer path/capacity defects after deep real rollout; repair host PASS, exact-image/target pending |
 | C | single-variable reproduction ladder | control A-B=0; treatment either reproduces red or is classified `ONEHOST_NOT_REPRODUCED` without mechanism claims | pending |
 | D | observer-neutral coarse-to-fine first-red walk | `FIRST_RED_LOCALIZED` names last exact and first red tensor, shape ledger, request/token/cache coordinate, and `file:line` | pending |
 | E | minimal localized repair, default off or experiment-bound | reproducer flips red to zero; APC-off and B are unchanged; adjacent and dirty-page negatives fire | pending |
@@ -73,3 +73,17 @@ B - C = 0 bytes
   `CANON_APC_M15_TARGET_DEBUG=off|on` path is exactly
   `frozenlake-dp8-tp8`, DP8, 1 x 32 prompts, no IS. Cross-use and partial
   geometries fail closed. This changes no APC or model arithmetic.
+- Confirmed: Attempt 2 preserved the production `CANON_CONTINUE_DECODE=8`
+  program and reached all four standard tensor-capture strata before the
+  drain/tail switched to `_execute_continue_decode`. Removing the flag would
+  change the executable being investigated and is therefore rejected.
+- Confirmed: the same run saturated the 256 MiB incident ledger at call 326
+  (`268,192,266` bytes) and later reached about 1,894 calls. The M15-only
+  signed bound is raised to 2 GiB; ordinary P38 remains renderer-limited to
+  128 MiB.
+- Decision: tensor capture remains standard-only. After all four strata are
+  complete, the M15 observer admits a continue-decode tail only in the
+  dedicated full replay envelope. The generic tensor capture, request journal,
+  and incident ledger remain standard-only. Full replay packaging requires A
+  to attest both program paths and B to remain full-reset standard; early or
+  unknown path changes still fail closed.

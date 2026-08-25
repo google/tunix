@@ -37,6 +37,7 @@ REQUIRED_ARRAYS = {
     "sampling_values",
     "metadata_json",
 }
+PROGRAM_PATHS = {"standard", "continue_decode"}
 
 
 def _require(condition: bool, message: str) -> None:
@@ -112,7 +113,10 @@ def _load_ledger(path: Path, expected_arm: str) -> list[dict[str, Any]]:
       _require(record.get("schema") == "m15-apc-serving-envelope-v1", f"line {line_number} schema drifted")
       _require(record.get("arm") == expected_arm, f"line {line_number} target arm drifted")
       _require(record.get("serving_arm") in ("A", "B"), f"line {line_number} serving arm drifted")
-      _require(record.get("program_path") == "standard", f"line {line_number} program path drifted")
+      _require(
+          record.get("program_path") in PROGRAM_PATHS,
+          f"line {line_number} program path drifted",
+      )
       call_index = int(record.get("call_index", -1))
       _require(call_index == previous_call + 1, f"serving call chronology is not contiguous at line {line_number}")
       previous_call = call_index
@@ -153,6 +157,22 @@ def _load_ledger(path: Path, expected_arm: str) -> list[dict[str, Any]]:
       records.append(record)
   _require(records, "serving envelope is empty")
   _require({record["serving_arm"] for record in records} == {"A", "B"}, "serving envelope must contain both A and B calls")
+  paths_by_arm = {
+      arm: {
+          str(record["program_path"])
+          for record in records
+          if record["serving_arm"] == arm
+      }
+      for arm in ("A", "B")
+  }
+  _require(
+      paths_by_arm["A"] == PROGRAM_PATHS,
+      "serving arm A must attest standard and continue_decode program paths",
+  )
+  _require(
+      paths_by_arm["B"] == {"standard"},
+      "serving arm B must remain on the full-reset standard program path",
+  )
   return records
 
 
@@ -210,6 +230,7 @@ def _request_joins(
           "last_call": int(record["call_index"]),
           "observations": 0,
           "serving_arms": set(),
+          "program_paths": set(),
           "max_num_tokens": 0,
       })
       current["candidate_source_rows"] &= candidates
@@ -217,6 +238,7 @@ def _request_joins(
       current["last_call"] = int(record["call_index"])
       current["observations"] += 1
       current["serving_arms"].add(record["serving_arm"])
+      current["program_paths"].add(record["program_path"])
       current["max_num_tokens"] = max(current["max_num_tokens"], key[0])
   joins = []
   for request_id in sorted(state):
@@ -225,6 +247,7 @@ def _request_joins(
         **item,
         "candidate_source_rows": sorted(item["candidate_source_rows"]),
         "serving_arms": sorted(item["serving_arms"]),
+        "program_paths": sorted(item["program_paths"]),
     })
   return joins, lookup
 
@@ -319,6 +342,15 @@ def package(
       "request_count": len(request_joins),
       "serving_call_count": len(records),
       "serving_arms": sorted({record["serving_arm"] for record in records}),
+      "program_paths": sorted({record["program_path"] for record in records}),
+      "program_paths_by_arm": {
+          arm: sorted({
+              record["program_path"]
+              for record in records
+              if record["serving_arm"] == arm
+          })
+          for arm in ("A", "B")
+      },
       "first_red": {
           "source_row": source_row,
           "request_id": request_id,

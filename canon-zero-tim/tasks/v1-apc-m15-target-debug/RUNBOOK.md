@@ -22,7 +22,7 @@ still execute the real serving decode and independent full-reset B arm.
 This carrier does not modify or repair RoPE, attention, KV values, lm-head,
 loss, backward, or optimizer. Both JobSets stop before backward and commit.
 
-## Attempt-0 and Attempt-1 prelearner incidents
+## Attempt-0 through Attempt-2 incidents
 
 Never relaunch source `eb58954f...`. That Attempt-0 command carried
 `--p57_workload_candidate=m15 --p57_data_split=main`, but the rendered
@@ -44,6 +44,26 @@ the signed M15 target is `mini_batch_size=32`, no IS,
 `frozenlake-dp8-tp8`, and one full producer unit. The current source keeps both
 contracts separately fail-closed. This is still admission-only and is not an
 APC numerical fix.
+
+Never relaunch source `41a2043c...`. Attempt 2 was the first run to exercise
+the real DP8xTP8 M15 serving envelope: it completed more than 1,800 serving
+calls, all four standard tensor captures, and most of the 15-turn rollout.
+It then exposed two observer defects, not a model mismatch:
+
+- the incident ledger reached its 256 MiB ceiling at call 326 and emitted
+  1,650 nonfatal capture errors;
+- the drain tail entered the production `continue_decode` program, while the
+  old observer asserted that every call in the process must be `standard`.
+
+Do **not** remove `CANON_CONTINUE_DECODE=8`. The historical `m15i` production
+red used that program; removing it changes the experiment. The current repair
+keeps the four tensor records and generic request/incident ledgers
+standard-only, admits continue-decode only after all four are complete, and
+keeps writing the dedicated full replay chronology. A red
+carrier must prove A used both `standard` and `continue_decode`; B must remain
+the independent full-reset `standard` path. The M15-only signed ledger bound
+is 2 GiB, based on Attempt 2's 268,192,266 bytes at call 326 and roughly 1,894
+observed calls. Ordinary P38 renderer limits are unchanged.
 
 ## Approval boundaries
 
@@ -83,7 +103,9 @@ jobset-v1-apc-m15-on.yaml
 Never edit either file. The renderer fixes M15/main, seed 42, DP8xTP8,
 32 prompts x 8 generations, concurrency 256, 15 turns, 4096 prompt tokens,
 8192 response tokens, temperature 0.7, one diagnostic round, zero backward,
-and zero optimizer commit.
+and zero optimizer commit. It also deliberately preserves
+`CANON_CONTINUE_DECODE=8`, standard-only four-stratum tensor capture, and the
+2 GiB M15 incident/replay byte bound.
 
 The renderer and Step-00 resolver must reject any CLI/environment identity
 split. A valid rendered arm carries:
@@ -105,7 +127,7 @@ bash canon-zero-tim/tests/v1_phase4/run_exact_image.sh \
   sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a
 ```
 
-Expected post-fix terminal marker includes `apc_m15_carrier=39`.
+Expected post-fix terminal marker includes `apc_m15_carrier=44`.
 
 ## Launch order
 
@@ -163,6 +185,12 @@ m15_producer_unit.npz
 m15_replay_envelope.jsonl
 m15_apc_target.classification.json
 ```
+
+The complete `m15_replay_envelope.jsonl` must contain both `standard` and
+`continue_decode` records for serving arm A, and only `standard` records for
+serving arm B. `m15_full_replay_carrier/replay_contract.json` records the
+mechanically checked `program_paths_by_arm` map. Missing the continue tail,
+placing B on it, or observing any unknown path makes packaging inconclusive.
 
 For a red treatment it must additionally contain:
 
