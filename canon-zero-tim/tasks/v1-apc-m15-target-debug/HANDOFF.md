@@ -147,13 +147,13 @@ the task carrier is 46/46, P57 is 146/146, V1 CPU is 67/67, and flags are
 attempt exposed an image-only test PATH defect (`python3` lives under
 `/usr/local/bin`); after the test inherited the active interpreter directory,
 the full rerun terminated with `V1_HP_EXACT_IMAGE_PASS ...
-apc_m15_carrier=33 ... manifests=3`. This is exact-image admission, not a
+apc_m15_carrier=46 ... manifests=3`. This is exact-image admission, not a
 one-host numerical replay or DP8xTP8 target result.
 
 The worktree was initially created at reference `687b2bd6...`. The operator
-branch later advanced to `ff913a84`; the intervening raw-log and P58 seed
-registry changes were reviewed, then the isolated worktree was fast-forwarded
-without conflict before the final gates.
+branch later advanced through `ff913a84` to `9f79cc56`; the intervening raw-log,
+P58 seed, and P64 shared-entrypoint changes were reviewed, then the release
+commit was rebased without conflict before the final aggregate gate.
 
 ## Next action before any launch
 
