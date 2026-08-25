@@ -23,6 +23,8 @@ from tunix.experimental.common import datatypes
 from tunix.experimental.common import test_utils as mocks
 from tunix.experimental.rl.agentic import registry
 from tunix.experimental.rollout import collector
+from tunix.experimental.trajectory import in_memory_store
+from tunix.experimental.trajectory import store as trajectory_store_lib
 from tunix.experimental.worker import remote_execution
 from tunix.experimental.worker import rollout_worker as worker
 
@@ -280,6 +282,232 @@ class RolloutWorkerTest(parameterized.TestCase):
         results.append(res)
       self.assertLen(results, 1)
       self.assertEqual(results[0].request_id, "traj_prompt_native_actor_g0")
+
+    asyncio.run(_run_test())
+
+  def test_trajectory_store_writing(self):
+    """Verifies that generated trajectories are written to trajectory_store."""
+
+    async def _run_test():
+      svc = worker.RolloutWorker(
+          worker_id="test_store_worker",
+          config=worker.RolloutConfig(
+              trajectory_store_config={"backend": "memory", "enabled": True}
+          ),
+          sampler=self.sampler,
+          env_pool=self.env_pool,
+          agent_factory=registry.AGENT_REGISTRY.get("mock_agent"),
+          tokenizer=mocks.MockTokenizer(),
+          chat_parser=mocks.MockChatParser(),
+      )
+      mem_store = svc.trajectory_store
+      self.assertIsInstance(
+          mem_store, in_memory_store.InMemoryTrajectoryStore
+      )
+      svc.start()
+      req = datatypes.RolloutRequest(
+          prompt_id="prompt_store_test",
+          prompt="Task for store test",
+          target_policy_version=7,
+          generation_kwargs={
+              "delay_seconds": 0.01,
+              "force_finish": True,
+              "max_generation_steps": 64,
+          },
+          metadata={"pair_idx": 42},
+      )
+      with (
+          mock.patch.object(
+              mem_store, "flush", wraps=mem_store.flush
+          ) as mock_flush,
+          mock.patch.object(
+              mem_store, "close", wraps=mem_store.close
+          ) as mock_close,
+      ):
+        res = await svc.generate(req)
+        self.assertEqual(res.request_id, "traj_prompt_store_test_g0")
+        mock_flush.assert_not_called()
+        mock_close.assert_not_called()
+
+        metas = mem_store.get_trajectories_metadata()
+        self.assertLen(metas, 1)
+        self.assertEqual(metas[0].trajectory_id, "traj_prompt_store_test_g0")
+        self.assertEqual(metas[0].prompt_id, "prompt_store_test")
+        self.assertEqual(metas[0].status, "SUCCEEDED")
+        self.assertEqual(metas[0].target_policy_versions, [7])
+        self.assertEqual(metas[0].extra.get("pair_idx"), 42)
+        self.assertEqual(
+            metas[0].hyperparams,
+            {
+                "delay_seconds": 0.01,
+                "force_finish": True,
+                "max_generation_steps": 64,
+            },
+        )
+        self.assertIsInstance(metas[0].env_time, dict)
+        self.assertIn("reset_latency", metas[0].env_time)
+        self.assertIn("step_latency", metas[0].env_time)
+        self.assertIn("close_latency", metas[0].env_time)
+        self.assertIsInstance(metas[0].reward_time, dict)
+        self.assertIn("reward_latency", metas[0].reward_time)
+
+        trajs = mem_store.get_trajectories(["traj_prompt_store_test_g0"])
+        self.assertLen(trajs, 1)
+        self.assertNotEmpty(trajs[0].steps)
+        svc.stop()
+        mock_flush.assert_not_called()
+        mock_close.assert_called_once()
+
+    asyncio.run(_run_test())
+
+  def test_trajectory_store_writing_non_zero_group_index_and_object_preservation(
+      self,
+  ):
+    """Verifies that non-zero group_index and complex metadata objects are preserved."""
+
+    async def _run_test():
+      svc = worker.RolloutWorker(
+          worker_id="test_store_worker_grp",
+          config=worker.RolloutConfig(
+              trajectory_store_config={"backend": "memory", "enabled": True}
+          ),
+          sampler=self.sampler,
+          env_pool=self.env_pool,
+          agent_factory=registry.AGENT_REGISTRY.get("mock_agent"),
+          tokenizer=mocks.MockTokenizer(),
+          chat_parser=mocks.MockChatParser(),
+      )
+      mem_store = svc.trajectory_store
+      self.assertIsInstance(
+          mem_store, in_memory_store.InMemoryTrajectoryStore
+      )
+      svc.start()
+      custom_obj = ["nested", "data", 123]
+      req = datatypes.RolloutRequest(
+          prompt_id="prompt_grp_test",
+          group_index=2,
+          prompt="Task for group test",
+          target_policy_version=3,
+          generation_kwargs={
+              "delay_seconds": 0.01,
+              "force_finish": True,
+              "max_generation_steps": 64,
+          },
+          metadata={"custom_ref": custom_obj},
+      )
+      res = await svc.generate(req)
+      self.assertEqual(res.request_id, "traj_prompt_grp_test_g2")
+      self.assertEqual(res.payload.group_index, 2)
+      self.assertIs(res.metadata.get("custom_ref"), custom_obj)
+
+      metas = mem_store.get_trajectories_metadata()
+      self.assertLen(metas, 1)
+      self.assertEqual(metas[0].trajectory_id, "traj_prompt_grp_test_g2")
+      self.assertEqual(metas[0].group_index, 2)
+      self.assertEqual(metas[0].extra.get("custom_ref"), custom_obj)
+
+      svc.stop()
+
+    asyncio.run(_run_test())
+
+  def test_trajectory_store_cancelled_and_non_succeeded_status(self):
+    """Verifies file-store cancellation via stop() sets FAILED and MAX_STEPS_REACHED is preserved."""
+    temp_dir = self.create_tempdir().full_path
+    file_store_cfg = {
+        "backend": "file",
+        "enabled": True,
+        "root_dir": temp_dir,
+        "run_id": "test_cancel_and_max_steps",
+    }
+
+    class _OneStepEnv(mocks.MockEnvironment):
+      max_steps = 1
+
+    async def _run_test():
+      # 1. Real in-flight episode cancelled via RolloutWorker.stop() with
+      # FileTrajectoryStore persists status="FAILED" without raising
+      # RuntimeError when the store closes.
+      cancel_svc = worker.RolloutWorker(
+          worker_id="test_cancel_worker",
+          config=worker.RolloutConfig(trajectory_store_config=file_store_cfg),
+          sampler=self.sampler,
+          env_pool=self.env_pool,
+          agent_factory=registry.AGENT_REGISTRY.get("mock_agent"),
+          tokenizer=mocks.MockTokenizer(),
+          chat_parser=mocks.MockChatParser(),
+      )
+      cancel_svc.start()
+      cancel_req = datatypes.RolloutRequest(
+          prompt_id="prompt_cancel",
+          prompt="Task to cancel",
+          generation_kwargs={
+              "delay_seconds": 2.0,
+              "max_generation_steps": 64,
+          },
+      )
+      gen_task = asyncio.create_task(cancel_svc.generate(cancel_req))
+      await asyncio.sleep(0.05)
+      cancel_svc.stop()
+      with self.assertRaises(asyncio.CancelledError):
+        await gen_task
+
+      reader_store = trajectory_store_lib.TrajectoryStore.from_config(
+          file_store_cfg
+      )
+      assert reader_store is not None
+      meta_path = reader_store.get_trajectory_metadata_path(  # pyrefly: ignore[missing-attribute]
+          "traj_prompt_cancel_g0"
+      )
+      cancel_meta = collector.converter_lib.trajectory_lib.TunixTrajectoryMetadata.model_validate_json(
+          meta_path.read_text()
+      )
+      self.assertEqual(cancel_meta.status, "FAILED")
+      self.assertIsInstance(cancel_meta.env_time, dict)
+      self.assertIn("reset_latency", cancel_meta.env_time)
+      reader_store.close()
+
+      # 2. Unmocked episode hitting MAX_STEPS_REACHED preserves
+      # MAX_STEPS_REACHED and populates env_time/reward_time.
+      max_steps_pool = mocks.MockEnvironmentPool(
+          pool_size=2, env_factory=_OneStepEnv
+      )
+      max_steps_svc = worker.RolloutWorker(
+          worker_id="test_max_steps_worker",
+          config=worker.RolloutConfig(
+              trajectory_store_config={"backend": "memory", "enabled": True}
+          ),
+          sampler=self.sampler,
+          env_pool=max_steps_pool,
+          agent_factory=registry.AGENT_REGISTRY.get("mock_agent"),
+          tokenizer=mocks.MockTokenizer(),
+          chat_parser=mocks.MockChatParser(),
+      )
+      max_steps_svc.start()
+      max_steps_req = datatypes.RolloutRequest(
+          prompt_id="prompt_max_steps",
+          prompt="Task hitting max steps",
+          generation_kwargs={
+              "delay_seconds": 0.01,
+              "min_turns": 3,
+              "force_finish": False,
+              "max_generation_steps": 64,
+          },
+      )
+      await max_steps_svc.generate(max_steps_req)
+      mem_store = max_steps_svc.trajectory_store
+      assert mem_store is not None
+      max_steps_metas = mem_store.get_trajectories_metadata(
+          ["traj_prompt_max_steps_g0"]
+      )
+      self.assertLen(max_steps_metas, 1)
+      self.assertEqual(max_steps_metas[0].status, "MAX_STEPS_REACHED")
+      self.assertIsInstance(max_steps_metas[0].env_time, dict)
+      self.assertIn("reset_latency", max_steps_metas[0].env_time)
+      self.assertIn("step_latency", max_steps_metas[0].env_time)
+      self.assertIn("close_latency", max_steps_metas[0].env_time)
+      self.assertIsInstance(max_steps_metas[0].reward_time, dict)
+      self.assertIn("reward_latency", max_steps_metas[0].reward_time)
+      max_steps_svc.stop()
 
     asyncio.run(_run_test())
 

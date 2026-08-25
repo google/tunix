@@ -45,10 +45,11 @@ class RolloutConfig(base_rollout.RolloutConfig):
     agent_config: Configuration dictionary passed to agent constructor.
     trajectory_store_config: Trajectory Store configuration for this worker
       process, or None to run without a store. See
-      `store.TrajectoryStore.from_config`. Must match what the orchestrator
-      was given: for the file backend it is the shared root_dir and run_id
-      that will make these writes visible to the orchestrator's reads once
-      rollout step logging is wired.
+      `store.TrajectoryStore.from_config`. The worker builds the store from
+      this config and passes it to its RolloutManager, so rollout steps are
+      written by this process. Must match what the orchestrator was given: for
+      the file backend it is the shared root_dir and run_id that make these
+      writes visible to the orchestrator's reads.
   """
 
   sampler_type: str = "vanilla"
@@ -97,20 +98,9 @@ class RolloutWorker(abstract_worker.Worker):
           "RolloutWorker requires valid tokenizer and chat_parser arguments"
           " (none can be None)."
       )
-    self.manager = manager_lib.RolloutManager(
-        config=config,
-        sampler=sampler,
-        env_pool=env_pool,
-        agent_factory=agent_factory,
-        max_concurrency=max_concurrency,
-        tokenizer=tokenizer,
-        chat_parser=chat_parser,
-    )
     # Built at most once per process: this __init__ runs exactly once per
     # RolloutWorker instance, so there is no separate guard against
     # constructing the store twice. See store.TrajectoryStore.from_config.
-    # TODO(sizhi): Pass self._trajectory_store into RolloutManager / collector
-    # to log rollout steps in follow-up CLs.
     self._trajectory_store = trajectory_store_lib.TrajectoryStore.from_config(
         config.trajectory_store_config if config is not None else None
     )
@@ -123,6 +113,16 @@ class RolloutWorker(abstract_worker.Worker):
           worker_id,
           self._trajectory_store.to_config(),
       )
+    self.manager = manager_lib.RolloutManager(
+        config=config,
+        sampler=sampler,
+        env_pool=env_pool,
+        agent_factory=agent_factory,
+        max_concurrency=max_concurrency,
+        tokenizer=tokenizer,
+        chat_parser=chat_parser,
+        trajectory_store=self._trajectory_store,
+    )
 
   @property
   def trajectory_store(self) -> trajectory_store_lib.TrajectoryStore | None:
