@@ -893,10 +893,19 @@ if [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "1" ] && \
       }
       echo "[env] V1 high-performance fixed lm-head GSM8K full enabled"
       ;;
-      *)
-        echo "[env] fixed lm-head is not admitted for this workload/stage/profile" >&2
+    gsm8k:backward-no-commit:1:cluster/profiles/qwen3-1p7b-dp16-tp4-gsm8k-p62-debug.env)
+      [ "${CANON_P62_BACKWARD_NUMERIC_DEBUG:-0}" = "1" ] && \
+      [ "${CANON_GSM8K_ALIGNMENT_WARN_ONLY:-0}" = "0" ] && \
+      [ "${CANON_P33_NO_COMMIT:-0}" = "1" ] || {
+        echo "[env] P62 numeric debug requires strict alignment and zero optimizer commits" >&2
         fail=1
-        ;;
+      }
+      echo "[env] P62 numeric debug fixed lm-head enabled"
+      ;;
+    *)
+      echo "[env] fixed lm-head is not admitted for this workload/stage/profile" >&2
+      fail=1
+      ;;
     esac
   fi
   [ -z "${CANON_MM_ALGO:-}${CANON_P38_PRECHECK_ONLY:-}${CANON_P38_CONTROLLED_EXIT:-}${CANON_P38_DIAGNOSTIC_ROUNDS:-}${CANON_P38_KV_OBSERVER_DIR:-}${CANON_P38_SEAM_OBSERVER:-}${CANON_P38_TAIL_OBSERVER:-}${CANON_P38_TERMINAL_DISCRIMINATOR:-}" ] || {
