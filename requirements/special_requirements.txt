@@ -3,6 +3,6 @@
 # --pre
 
 tpu-inference @ git+https://github.com/vllm-project/tpu-inference.git@8d30921e602b01652ebe204c2d328251bfa2aff5
-maxtext @ git+https://github.com/AI-Hypercomputer/maxtext.git@5be6880204c3c0e40c7534c0a0f503f78bfad02e
-maxtext-vllm-adapter @ git+https://github.com/AI-Hypercomputer/maxtext.git@5be6880204c3c0e40c7534c0a0f503f78bfad02e#subdirectory=src/maxtext/integration/vllm
+maxtext @ git+https://github.com/AI-Hypercomputer/maxtext.git@7d9b3dbb05700c7b83019fbbbf56cd5b662da8ee
+maxtext-vllm-adapter @ git+https://github.com/AI-Hypercomputer/maxtext.git@7d9b3dbb05700c7b83019fbbbf56cd5b662da8ee#subdirectory=src/maxtext/integration/vllm
 
