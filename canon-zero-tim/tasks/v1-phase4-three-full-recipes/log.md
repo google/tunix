@@ -504,3 +504,166 @@
 - Publication does not authorize resource use. No manifest was rendered and
   no JobSet or TPU workload was launched. The next boundary is three-manifest
   rendering from the published SHA followed by separate launch approval.
+
+## 2026-08-25T07:02:39Z — Attempt 7 reconciled and recovery phase opened
+
+- Reconciled the branch state with committed Attempt-7 evidence at HEAD
+  `bc214018641521339eb9807c6baf62cf5e90b569`. Earlier state text claiming that
+  no manifest or TPU launch had occurred was stale and is corrected.
+- GSM8K completed two real optimizer transactions with 35 strict alignment
+  PASS records and zero FAIL. Its gradients were all-finite; P63 handled only
+  naive FP32 L2 overflow. Step 2 stopped before training because Pathways
+  requires a GCS XProf directory, while the profile supplied a local path.
+- P45 is a separate true numerical failure: DP rank 1 produced 253 non-finite
+  staged gradient leaves before any optimizer commit. P63 correctly did not
+  sanitize or commit them. The initial checkpoint lacked M15 evidence; remote
+  commit `53876c15` later supplied the result recorded below.
+- Opened V1.P4.8 with three bounded packages: exact GCS XProf capture/restore,
+  frozen GSM native-vs-P59 no-commit scale replay with an FP64 oracle, and P45
+  first-red observation. No runtime code, commit, push, manifest, or TPU launch
+  occurred in this bookkeeping checkpoint.
+
+## 2026-08-25T07:43:47Z — GCS XProf and P64 P45 carrier admitted in construction
+
+- Replaced the invalid local Pathways XProf directory with an immutable
+  JobSet/attempt-scoped GCS path. The postflight now synchronously restores the
+  capture, requires both nonempty XPlane and trace JSON artifacts, records the
+  exact remote/local/tool/count receipt, and fails closed before full-recipe
+  classification on path, tool, transport, or completeness errors.
+- Added default-off P64 for the original P45 DP8xTP8 numerical red. The
+  diagnostic has its own no-commit profile rather than weakening the resident
+  production profile. It preserves strict APC-off/P59/fixed-head geometry,
+  emits rank-aware ordered boundary receipts, fails at the first NaN/Inf, and
+  discards an all-finite accumulator without changing model or optimizer.
+- Host admission: V1 59/59, P57 144/144, P59 37/37, APC 31/31, flags 373/373,
+  Python/Bash syntax and `git diff --check` all pass. The APC suite initially
+  caught its stale hard-coded 372 count; the registry test was updated to the
+  actual 373 without changing APC runtime.
+- Complete pinned-image r1 stopped only because the newly added toy P64 test
+  requested two microbatches while the toy precomputed-gradient contract
+  requires four. The runtime was not reached and this is preserved as
+  `INCONCLUSIVE_TEST_FIXTURE`. After correcting only that fixture, its focused
+  image test passed and the complete pinned image exited zero with
+  `V1_HP_EXACT_IMAGE_PASS ... p64_numeric=4 ... p63_clip=1 ... manifests=3`.
+  This invocation has a transcript terminal but no new durable raw-log file.
+- Claim ceiling: XProf transport and P64 are source/host/pinned-image
+  construction PASS. The GCS transport has not executed under Pathways, P64
+  has not localized the real P45 target, and the frozen GSM native-vs-P59
+  replay is still pending. No TPU, JobSet, optimizer commit, commit, or push
+  occurred.
+
+## 2026-08-25T07:53:03Z — DP16xTP4 fixed replay closes bounded G2
+
+- Added a bounded projection carrier that freezes exactly one seed-42 capsule
+  containing checkpoint weights, tokens, action mask, advantages, values, and
+  cotangent. Ordinary JAX and P59 consume that same capsule under a 64-device
+  DP16xTP4 mesh; P59 uses 16 rank-parallel groups, the fixed DP reducer,
+  streamed multiplier `1/16`, and accumulator denominator 16.
+- Pinned-image result: ordinary/FP64 relative-L2 `5.8478937e-8`, P59/FP64
+  `7.2022915e-8`, ordinary/P59 `9.1470272e-8`; both FP64 cosine values are
+  above `0.99999999999999`. Each of 16 groups has 16 distinct rank-partial
+  hashes. Wrong denominator and an extra DP sum are both caught with
+  relative-L2 `15.0000001`. Byte identity is false and is not required.
+- Durable receipt is
+  `evidence/v1_hp_gsm_fixed_replay_exact_image_20260825_r1/receipt.json`, SHA
+  `f226097c0c0f0239bec23d91dfe09c31d90ed9a87ef4d2cdf39d9aec71be0f6e`;
+  its `SHA256SUMS` verifies. Optimizer commits are zero and the claim ceiling is
+  bounded projection topology/scaling only.
+- Final admission after adding G2: V1 host 62/62, registry 373/373, syntax and
+  diff hygiene pass; unchanged adjacent P57 144/144, P59 37/37, APC 31/31
+  remain green. Complete pinned image exits zero with terminal
+  `V1_HP_EXACT_IMAGE_PASS ... p64_numeric=4 p63_clip=1
+  gsm_scale_replay=1 ... manifests=3`.
+- Remaining boundary: P64 has not run on real DP8xTP8 TPU, so P45's earliest
+  non-finite boundary is still unknown. GCS XProf restore also needs a real
+  Pathways capture. No TPU, JobSet, optimizer commit, source commit, or push
+  occurred.
+
+## 2026-08-25T08:02:10Z — Final P64 classifier and pinned-image admission
+
+- Strengthened P64 completion semantics before any target run: group 0 and
+  group 31 must each contain the engine-VJP, trainer-rank-local, fixed-DP, and
+  scaled-microgradient boundaries; the final accumulator and discard must each
+  occur exactly once. Any receipt after the first non-finite boundary is fatal.
+- Focused P64 tests pass 8/8 and the complete V1 host suite passes 64/64.
+  `git diff --check` and Python compilation pass.
+- Re-ran the complete immutable-image gate on
+  `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`.
+  It exited zero with terminal `V1_HP_EXACT_IMAGE_PASS ... p64_numeric=4
+  p63_clip=1 gsm_scale_replay=1 ... manifests=3`.
+- Construction admission is complete. The P45 DP8xTP8 first-red result and
+  real Pathways GCS XProf restore remain unverified because no TPU/JobSet was
+  launched. No optimizer commit, source commit, or push occurred.
+
+## 2026-08-25T08:53:31Z — P64 training-capsule capture/replay admitted
+
+- Added a default-off exact-P45 capsule contract. Capture occurs only after
+  strict prealignment PASS and persists 17 prompt/completion, mask, advantage,
+  logprob, policy-version, and sampling arrays with per-array and whole-file
+  hashes. A sidecar binds the capsule to the exact geometry and bounded live
+  model sample. Capture still executes all 32 backward groups with no commit.
+- Replay verifies the immutable capsule, sidecar, live model, and frozen
+  alignment values before it bypasses environment, rollout, and B rescore. It
+  executes only reverse group 0 and emits both `optimizer_commits=0` and
+  `certification=0`; the classifier records
+  `diagnostic-replay-not-certification`.
+- Host admission passes focused P64 11/11, V1 67/67, P57 144/144, P59 37/37,
+  APC 31/31, flags 378/378, Python/Bash syntax, and `git diff --check`.
+- The complete pinned image
+  `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`
+  exits zero. Its 966-line raw log has SHA
+  `c8121b6668e4fbdcceec14214966c7ba8ef55ba30ff4b9b1a52e1baa7c70177c`,
+  no `FAILED` or `Traceback`, and exactly one terminal
+  `V1_HP_EXACT_IMAGE_PASS ... p64_numeric=4 p64_capsule=3 ... manifests=3`.
+  Receipt and checksums are under
+  `evidence/v1_hp_p64_capsule_exact_image_20260825_r1/`.
+- TPU capture/replay remains unverified because no JobSet or TPU was launched.
+  No optimizer commit, source commit, or push occurred.
+
+## 2026-08-25T09:08:00Z — Remote M15 evidence changes the four-job risk
+
+- Fast-forwarded the evidence-only remote commit `53876c15`. The added M15
+  Attempt-7 log verifies 118,816 strict-aligned actions with zero A/B and B/C
+  bytes, rollout solve ratio 0.156, and all 32 forward groups complete.
+- The first staged DP reduction then finds 122 non-finite leaves on rank 3 and
+  exits before any optimizer commit. Raw SHA is
+  `9f221091fd685b7303bc8203fffc4e931191faecc260145d27f167d2eddc9492`.
+  This matches P45's failure family (rank 1/253 leaves) on a different rank.
+- Both recipes use RLOO, whose all-equal reward groups produce exact-zero
+  advantages without a standard-deviation division. Zero/all-equal reward is
+  still a plausible trigger for a zero-cotangent-unsafe VJP, but it is not a
+  reward-normalization divide-by-zero diagnosis.
+- Registered the user's requested four-job matrix. Publication and rendering
+  can proceed; applying unchanged P45/M15 full recipes is held as a final
+  matrix decision because those profiles add no new first-red evidence and are
+  already known Step-0 reds.
+
+## 2026-08-25T09:24:00Z — Recovery runtime split into three local CLs
+
+- Committed the admitted runtime as `4c59ba5d` (GCS XProf restore),
+  `f62eb4bf` (bounded frozen GSM scale oracle), and `3533146d` (exact-P45 P64
+  capture/replay). Each commit records its drawback and has an independent
+  rollback boundary.
+- The fixture-only flag spelling correction emits identical receipt bytes.
+  Focused P64 remains 11/11, flag audit is 378/378 with `FLAG_AUDIT_PASS`, and
+  the staged runtime diff passes `git diff --cached --check`.
+- The durable pinned-image receipt still describes the exact dirty runtime
+  that was split into these CLs. The intervening remote commit `53876c15` is
+  evidence-only; no tested runtime blob changed. Full post-commit host and
+  immutable-image gates remain the publication boundary.
+- No push, render, JobSet, TPU workload, or optimizer commit occurred.
+
+## 2026-08-25T09:31:00Z — Final committed runtime passes immutable image
+
+- Re-ran the complete gate on the clean committed runtime using immutable
+  image `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`.
+  The command exited zero with exactly one terminal
+  `V1_HP_EXACT_IMAGE_PASS ... p64_capsule=3 ... gsm_scale_replay=1 ...
+  manifests=3`.
+- This directly verifies the committed runtime after CL splitting; the ledger
+  amend that records this result changes documentation only. No new durable
+  raw log was written, so the signed r1 raw log remains the durable artifact
+  and this rerun is an execution-transcript receipt.
+- Full host regression also passes V1 67/67, P57 144/144, P59 37/37, APC
+  31/31, flags 378/378, syntax, and diff hygiene. No target JobSet or TPU
+  workload was launched.

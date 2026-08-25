@@ -1,5 +1,52 @@
 # V1 high-performance three-full runbook
 
+## Current boundary — P64 P45 capture, then optional diagnostic replay
+
+Do not launch from a dirty or merely local tree. The recovery runtime is split
+into three local CLs at `4c59ba5d`, `f62eb4bf`, and `3533146d`; publish the
+complete ledger CL and read back the exact published 40-character SHA before
+rendering one fresh P45 capture. The renderer never launches:
+
+```bash
+python3 canon-zero-tim/tasks/v1-phase4-three-full-recipes/scripts/render_p64_p45_numeric_debug.py \
+  --source-commit <approved-40-character-sha> \
+  --run-id <fresh-p64-capture-id> \
+  --output-dir /tmp/v1-p64-<fresh-p64-capture-id> \
+  --capsule-mode capture
+```
+
+Review the YAML and receipt, require
+`P64_P45_NUMERIC_RENDER_PASS ... capsule_mode=capture optimizer_commits=0`,
+then obtain launch approval. Never pipe the apply command:
+
+```bash
+kubectl apply -f /tmp/v1-p64-<fresh-p64-capture-id>/jobset-p64-p45-numeric-debug.yaml
+```
+
+Capture must pass strict prealignment, upload the immutable capsule and model
+binding, then either identify the first non-finite boundary or complete all 32
+groups and discard with zero commits. Preserve the raw log, classification,
+capsule URI, capsule SHA, and binding SHA even when backward stops at first red.
+
+Only when another observer iteration is needed, use a new run ID and the exact
+captured hashes:
+
+```bash
+python3 canon-zero-tim/tasks/v1-phase4-three-full-recipes/scripts/render_p64_p45_numeric_debug.py \
+  --source-commit <approved-40-character-sha> \
+  --run-id <fresh-p64-replay-id> \
+  --output-dir /tmp/v1-p64-<fresh-p64-replay-id> \
+  --capsule-mode replay \
+  --capsule-gcs-uri <captured-gs-uri> \
+  --capsule-sha256 <captured-capsule-sha256> \
+  --model-binding-sha256 <captured-binding-sha256>
+```
+
+Replay must print transport, producer-bypass, live-model verification, and
+`backward_scope ... groups=1/32 selected=group0 optimizer_commits=0` receipts.
+Its classifier evidence kind is `diagnostic-replay-not-certification`; never
+use it as a fresh strict target verdict or optimizer result.
+
 ## Current boundary — P63 published; render before launch approval
 
 The P62 first-red campaign is complete. Real DP16xTP4 G5b proved that the

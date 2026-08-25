@@ -1,0 +1,31 @@
+{
+  "schema": "canon-v1-p64-capsule-exact-image-v1",
+  "timestamp_utc": "2026-08-25T08:53:31Z",
+  "source_head": "bc214018641521339eb9807c6baf62cf5e90b569",
+  "tree_state": "dirty-uncommitted-unpushed",
+  "image_id": "sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a",
+  "command": "bash canon-zero-tim/tests/v1_phase4/run_exact_image.sh sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a",
+  "exit_code": 0,
+  "raw_log": "run.log",
+  "raw_log_sha256": "c8121b6668e4fbdcceec14214966c7ba8ef55ba30ff4b9b1a52e1baa7c70177c",
+  "raw_log_lines": 966,
+  "terminal_count": 1,
+  "failed_terminal_count": 0,
+  "traceback_count": 0,
+  "terminal": "V1_HP_EXACT_IMAGE_PASS dp16_gathered=1 dp2tp2_parallel=2 p59_tp4_tp8=2 p59_real_shim=4 p59_rpa=2 p59_fused_linear=2 p62_numeric=6 p64_numeric=4 p64_capsule=3 p63_clip=1 gsm_scale_replay=1 p57_wandb=1 m15_token=1 apc_m15_carrier=44 perfetto_window=1 manifests=3",
+  "host_gates": {
+    "v1": "67/67",
+    "p57": "144/144",
+    "p59": "37/37",
+    "apc": "31/31",
+    "flags": "378/378"
+  },
+  "capsule_contract": {
+    "capture_backward_groups": 32,
+    "replay_backward_groups": 1,
+    "optimizer_commits": 0,
+    "replay_certification": false,
+    "target_tpu_verified": false
+  },
+  "claim_ceiling": "host-and-pinned-image-construction-only; replay-is-diagnostic-not-fresh-certification"
+}

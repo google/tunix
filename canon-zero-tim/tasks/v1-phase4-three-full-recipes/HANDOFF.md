@@ -1,5 +1,62 @@
 # V1 Phase4 three-full handoff
 
+## 2026-08-25 launch-matrix checkpoint — both FrozenLake full recipes are known red
+
+The user requested one concurrent wave containing GSM8K full, P64 P45 capture,
+P45 full, and M15 full. Before publication, remote tip `53876c15` supplied the
+previously missing M15 Attempt-7 log. M15 passed strict prealignment for
+118,816 actions with zero A/B and B/C bytes, then rank 3 produced 122
+non-finite staged leaves before the first commit. P45 already showed the same
+family on rank 1 with 253 leaves. Both recipes use RLOO, so an all-equal reward
+group produces exact-zero advantages without a standard-deviation division.
+The leading hypothesis is a data-dependent TP8 VJP/zero-cotangent failure, not
+reward-normalization divide-by-zero.
+
+Do not call unchanged P45/M15 full relaunches expected-green. Safe progress is
+to publish the admitted recovery tree and render P64 P45 capture. Applying the
+two known-red full recipes is a distinct final matrix choice; their current
+profiles do not add first-red instrumentation and would most likely reproduce
+the existing Step-0 evidence.
+
+## 2026-08-25 superseding status — P64 capsule replay admitted through pinned image
+
+Attempt-7 P45's real rank-1 non-finite source is still unknown, but repeated
+localization iterations no longer need to regenerate the expensive FrozenLake
+rollout. Default-off P64 now has two exact modes on the original P45 DP8xTP8
+geometry:
+
+- `capture` waits for strict prealignment PASS, atomically stores all 17
+  training/observation arrays, binds per-array plus whole-file SHA-256 and a
+  bounded live-model sample, uploads the capsule/model sidecar to a unique GCS
+  URI, then executes the normal 32-group no-commit diagnostic;
+- `replay` verifies both immutable files and the live model, rechecks the
+  frozen A/B/C alignment values, bypasses environment/rollout/B rescore, and
+  executes reverse group 0 only. It emits `certification=0` and can never
+  replace the capture arm as strict target evidence.
+
+Admission is complete through host and immutable image: V1 67/67, P57
+144/144, P59 37/37, APC 31/31, flags 378/378, syntax and diff hygiene pass.
+The durable pinned-image run is 966 lines with SHA
+`c8121b6668e4fbdcceec14214966c7ba8ef55ba30ff4b9b1a52e1baa7c70177c`
+and exactly one terminal `V1_HP_EXACT_IMAGE_PASS ... p64_numeric=4
+p64_capsule=3 ... manifests=3`; receipt and checksums are in
+`evidence/v1_hp_p64_capsule_exact_image_20260825_r1/`.
+
+After the runtime was split into the three local CLs, the complete immutable
+image gate was run once more directly on the clean committed tree. It exited
+zero with the same unique terminal, including `p64_capsule=3`,
+`gsm_scale_replay=1`, and `manifests=3`. That final-tree rerun is an execution
+receipt only; the earlier r1 directory remains the durable signed raw log.
+
+Claim ceiling: `IMPLEMENTED / HOST PASS / EXACT_IMAGE PASS / TPU TARGET NOT
+RUN`. The admitted runtime is now split into three local commits:
+`4c59ba5d` (GCS XProf restore), `f62eb4bf` (frozen GSM scale oracle), and
+`3533146d` (P64 capsule/replay). They remain unpushed at this checkpoint. No
+JobSet, TPU workload, or optimizer commit occurred. Publish and read back one
+immutable SHA before rendering one fresh capture. Use replay only if that full
+capture shows that another earlier observer is needed. Do not relaunch from an
+unpublished tree.
+
 ## 2026-08-25 current status — P63 published; launch approval pending
 
 G5b resolved the Attempt-7 ambiguity on the real GSM8K DP16xTP4 target: all
