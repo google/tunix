@@ -398,6 +398,90 @@ serialize the entire batch. As soon as one episode finishes, a concurrency slot
 can be refilled. The group queue then reorders by readiness while preserving
 the complete-group invariant.
 
+### Concrete Async Timeline
+
+Consider a run with:
+
+```text
+batch_size = 8                  # original prompts per RL global step
+num_generations = 8             # trajectories per prompt
+max_concurrency = 64            # max active agent-env episodes
+train_micro_batch_size = 8      # actor update chunk size in trajectories
+mini_batch_size = 64            # one optimizer mini-batch per full RL batch
+full_batch_training_units = 8 * 8 = 64 trajectories
+```
+
+With `off_policy_steps=0`, the learner initially enqueues one prompt batch.
+Those 8 prompts expand into 64 independent agent-env episodes. Because
+`max_concurrency=64`, the rollout side can start the whole first RL batch at
+`policy_version=k`.
+
+```text
+t0:
+  enqueue prompts p0..p7
+  start up to 64 rollout episodes:
+    p0 generation 0..7
+    ...
+    p7 generation 0..7
+  all started episodes carry policy_version=k
+
+t1:
+  the first complete prompt group finishes, for example p3 generation 0..7
+  GroupQueueManager emits exactly 8 trajectories for group p3
+  GRPOLearner converts the group into TrainExample tensors
+  trainer can run the first actor micro-step on those 8 trajectories
+
+t2:
+  other groups from p0..p7 keep finishing while trainer consumes ready groups
+  actor_trainer.train_steps may advance several times
+  rl_cluster.global_steps is still k because the full 64 trajectories have not
+  all been trained yet
+
+t3:
+  after 64 trajectories have been trained, one RL global step is complete
+  learner acquires RolloutSyncLock
+  RLCluster.sync_weights updates the rollout policy
+  policy_version becomes k + 1
+  only then does the learner enqueue the next 8 prompts
+```
+
+This is still on-policy at the full-batch boundary: no next-batch prompt is
+started with the old policy after the sync boundary is reached. However, actor
+micro-steps can happen while other trajectories from the same already-started
+full batch are still finishing. That is expected and is the practical overlap
+provided by async rollout.
+
+With `off_policy_steps=1`, the initial prompt queue contains two prompt
+batches, or 16 prompts. The same `max_concurrency=64` cap still allows only 64
+active episodes at once, but as soon as some first-batch episodes finish,
+concurrency slots can be refilled from the second prompt batch before the first
+RL global step has fully trained and synced.
+
+```text
+off_policy_steps=1:
+  initial queue = prompts p0..p15
+  active limit = 64 episodes
+  p0..p7 can occupy the first 64 slots
+  as slots free, p8..p15 can begin under policy_version=k
+  trainer may still be updating on p0..p7 while p8..p15 are being collected
+  rollout freshness is bounded by the one extra queued prompt batch plus active
+  in-flight episodes
+```
+
+Therefore:
+
+* `off_policy_steps=0` means at most the current full prompt batch is prefetched
+  ahead of training.
+* `off_policy_steps=1` allows one additional full prompt batch to be collected
+  ahead, improving rollout utilization but increasing stale-policy exposure.
+* `max_concurrency` controls how many expanded agent-env episodes can be active
+  at once; it does not change the number of trajectories required for one RL
+  global step.
+* `policy_version` changes only after the full batch of 64 trajectories has
+  been trained and rollout weights have been synchronized.
+* `actor_trainer.train_steps` can advance before `rl_cluster.global_steps`
+  changes, because global step is counted at the full-batch sync boundary.
+
 ### Backpressure and Policy Lag
 
 Async rollout is intentionally bounded. The design uses several backpressure
