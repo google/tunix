@@ -123,6 +123,24 @@ def _p58_sandbox_capacity_block_record(
   }
 
 
+def _m15_apc_target_alignment_enabled(env: Mapping[str, str]) -> bool:
+  """Return whether the signed M15 APC target alignment contract applies."""
+  return (
+      env.get("CANON_APC_M15_TARGET_DEBUG") in ("off", "on")
+      and env.get("CANON_PROFILE_FILE")
+      == "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-apc-debug.env"
+      and env.get("CANON_P32_WORKLOAD") == "frozenlake-dp8-tp8"
+      and env.get("CANON_P57_WORKLOAD_CANDIDATE") == "m15"
+      and env.get("CANON_P57_DATA_SPLIT") == "main"
+      and env.get("CANON_P38_PRECHECK_ONLY") == "1"
+      and env.get("CANON_P38_CONTROLLED_EXIT") == "1"
+      and env.get("CANON_P33_RUN_STAGE") == "backward-no-commit"
+      and env.get("CANON_P33_NO_COMMIT") == "1"
+      and env.get("CANON_DP_SIZE") == "8"
+      and env.get("CANON_TP_SIZE") == "8"
+  )
+
+
 def _canonical_alignment_sampler_is_valid(
     sampler_is: str | None,
     workload_name: str,
@@ -132,13 +150,14 @@ def _canonical_alignment_sampler_is_valid(
     p34_disable_sampler_is: bool = False,
     p34_disable_tis: bool = False,
     p58_onehost_xprof: bool = False,
+    m15_apc_target: bool = False,
 ) -> bool:
   """Return whether sampler IS preserves the workload contract."""
   if sampler_is == "token":
     return True
   if sampler_is is not None:
     return False
-  if workload_name == "gsm8k" or p57_tim_study:
+  if workload_name == "gsm8k" or p57_tim_study or m15_apc_target:
     return True
   return (
       p34_deepswe and p34_disable_sampler_is and p34_disable_tis
@@ -1470,6 +1489,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
     ):
       return [combined_batch]
     if alignment.enabled():
+      m15_apc_target_alignment = _m15_apc_target_alignment_enabled(os.environ)
       if not self.algo_config.use_rollout_logps:
         raise alignment.AlignmentGateError(
             "FrozenLake alignment requires use_rollout_logps=True"
@@ -1491,16 +1511,32 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
               deepswe_debug.onehost_xprof_arm(os.environ)
               in ("native", "zero-hp")
           ),
+          m15_apc_target=m15_apc_target_alignment,
       ):
         raise alignment.AlignmentGateError(
             "canonical alignment requires sampler_is='token'; sampler_is=None "
-            "is admitted only by the signed GSM8K, P34 DeepSWE, or P57 "
-            "causal-study contract"
+            "is admitted only by the signed GSM8K, P34 DeepSWE, P57 "
+            "causal-study, or M15 APC target-debug contract"
         )
       if rollout_per_token_logps is None or trainer_per_token_logps is None:
         raise alignment.AlignmentGateError(
             "alignment batch is missing S_decode or trainer T_old"
         )
+      if m15_apc_target_alignment:
+        if (
+            self.algo_config.sampler_is is not None
+            or sampler_is_weights is not None
+        ):
+          raise alignment.AlignmentGateError(
+              "M15 APC target-debug requires sampler_is=None and no TIS weights"
+          )
+        if not getattr(self, "_m15_apc_sampler_contract_announced", False):
+          print(
+              "[CANON_" "APC_M15_SAMPLER_CONTRACT] PASS sampler_is=none "
+              "use_rollout_logps=1 rollout_logps=present tis_weights=absent",
+              flush=True,
+          )
+          self._m15_apc_sampler_contract_announced = True
       if os.environ.get("CANON_P34_DEEPSWE", "") == "1":
         try:
           deepswe_contract.persist_weight_attestation(

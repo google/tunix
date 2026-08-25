@@ -13,6 +13,7 @@ _SOURCE = _REPO_ROOT / "tunix/rl/agentic/agentic_grpo_learner.py"
 _tree = ast.parse(_SOURCE.read_text(), filename=str(_SOURCE))
 _names = {
     "_canonical_alignment_sampler_is_valid",
+    "_m15_apc_target_alignment_enabled",
     "_p57_tim_purity_enabled",
     "_p57_tim_is_enabled",
     "_validate_p57_tim_purity",
@@ -34,6 +35,7 @@ exec(
     _namespace,
 )
 _sampler_is_valid = _namespace["_canonical_alignment_sampler_is_valid"]
+_m15_apc_target_enabled = _namespace["_m15_apc_target_alignment_enabled"]
 _p57_purity_enabled = _namespace["_p57_tim_purity_enabled"]
 _p57_is_enabled = _namespace["_p57_tim_is_enabled"]
 _validate_p57_purity = _namespace["_validate_p57_tim_purity"]
@@ -51,6 +53,53 @@ class SamplerIsContractTest(unittest.TestCase):
   def test_p57_causal_study_admits_direct_rollout_logprobs(self):
     self.assertTrue(
         _sampler_is_valid(None, "frozenlake", p57_tim_study=True)
+    )
+
+  def test_signed_m15_apc_target_admits_no_is_only_at_exact_identity(self):
+    good = {
+        "CANON_APC_M15_TARGET_DEBUG": "on",
+        "CANON_PROFILE_FILE": (
+            "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-apc-debug.env"
+        ),
+        "CANON_P32_WORKLOAD": "frozenlake-dp8-tp8",
+        "CANON_P57_WORKLOAD_CANDIDATE": "m15",
+        "CANON_P57_DATA_SPLIT": "main",
+        "CANON_P38_PRECHECK_ONLY": "1",
+        "CANON_P38_CONTROLLED_EXIT": "1",
+        "CANON_P33_RUN_STAGE": "backward-no-commit",
+        "CANON_P33_NO_COMMIT": "1",
+        "CANON_DP_SIZE": "8",
+        "CANON_TP_SIZE": "8",
+    }
+    for arm in ("off", "on"):
+      env = {**good, "CANON_APC_M15_TARGET_DEBUG": arm}
+      self.assertTrue(_m15_apc_target_enabled(env))
+      self.assertTrue(
+          _sampler_is_valid(
+              None,
+              "frozenlake-dp8-tp8",
+              m15_apc_target=_m15_apc_target_enabled(env),
+          )
+      )
+    for changed in (
+        {"CANON_APC_M15_TARGET_DEBUG": ""},
+        {"CANON_PROFILE_FILE": "cluster/profiles/qwen3-8b.env"},
+        {"CANON_P32_WORKLOAD": "frozenlake"},
+        {"CANON_P57_WORKLOAD_CANDIDATE": "p45"},
+        {"CANON_P57_DATA_SPLIT": "selection"},
+        {"CANON_P38_PRECHECK_ONLY": "0"},
+        {"CANON_P38_CONTROLLED_EXIT": "0"},
+        {"CANON_P33_RUN_STAGE": "train"},
+        {"CANON_P33_NO_COMMIT": "0"},
+        {"CANON_DP_SIZE": "16"},
+        {"CANON_TP_SIZE": "4"},
+    ):
+      with self.subTest(changed=changed):
+        self.assertFalse(_m15_apc_target_enabled({**good, **changed}))
+
+  def test_unsigned_m15_workload_still_rejects_no_is(self):
+    self.assertFalse(
+        _sampler_is_valid(None, "frozenlake-dp8-tp8")
     )
 
   def test_p57_purity_scope_requires_exact_profile_and_workload(self):

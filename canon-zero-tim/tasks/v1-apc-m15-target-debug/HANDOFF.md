@@ -49,8 +49,20 @@ Current immutable facts:
   red must attest A=`standard+continue_decode` and B=`standard`; unknown paths
   and any non-M15 use remain fatal, while a B-side continue path is rejected
   by packaging.
+- Attempt 4 (`canon-v1-apc-m15-on-d10-618eb775`) proves patch 28 reached the
+  end of the real rollout: 2,560 requests completed, prefix-cache hit rate was
+  92.5%, and solve ratio was 0.203. It then failed before A/B/C because the
+  generic alignment gate did not admit this carrier's signed
+  `sampler_is=None` recipe. Its two committed files pass `SHA256SUMS`; they
+  prove the fatal admission boundary but are not a complete replay package.
+- The repair admits no-IS only for the exact debug identity (off/on selector,
+  exact profile, M15/main, DP8xTP8, precheck-only, controlled exit,
+  backward-no-commit, zero commit). It also requires rollout logprobs present,
+  token-IS weights absent, and one
+  `[CANON_APC_M15_SAMPLER_CONTRACT] PASS ...` receipt. Ordinary FrozenLake and
+  partial/neighboring identities still require token IS.
 
-Claim ceiling: `ATTEMPT3_OBSERVER_REPAIR_AGGREGATE_EXACT_IMAGE_PASS_TARGET_NOT_RUN`.
+Claim ceiling: `ATTEMPT4_ADMISSION_REPAIR_AGGREGATE_EXACT_IMAGE_PASS_TARGET_NOT_RUN`.
 
 The exact remote procedure is in [RUNBOOK.md](RUNBOOK.md). The execution agent
 must run those commands rather than constructing a new carrier by hand.
@@ -66,6 +78,8 @@ Both use the exact M15 main geometry: DP8xTP8, 32 prompts, 8 generations,
 256 trajectories, concurrency 256, `vllm_max_num_seqs=32`, batched tokens 256,
 15 turns, prompt 4096, response 8192, temperature 0.7, seed 42. Both stop after
 one strict pre-alignment round with zero backward and zero optimizer commit.
+Both deliberately use `--sampler_is=none`: A supplies rollout logprobs as the
+old-policy source and no token-IS correction weights may exist.
 
 The only intended cross-arm values are
 `CANON_APC_M15_TARGET_DEBUG=off|on` and derived
@@ -126,7 +140,9 @@ bash -n canon-zero-tim/cluster/steps/00_env.sh canon-zero-tim/cluster/steps/90_r
 git diff --check
 ```
 
-All task-specific tests and the flag audit pass. The pinned image
+All task-specific tests and the flag audit pass. After the Attempt-4 repair,
+the task carrier is 46/46, P57 is 146/146, V1 CPU is 67/67, and flags are
+378/378. The pinned image
 `sha256:418dc632...e53a` was then run on the final runtime/test tree. The first
 attempt exposed an image-only test PATH defect (`python3` lives under
 `/usr/local/bin`); after the test inherited the active interpreter directory,
@@ -145,9 +161,8 @@ Do not relaunch source `eb58954f...`; its missing signed identity is
 deterministically invalid. Patch 28 has passed the targeted and aggregate
 exact-image gates on the current tree. First publish the observer repair, then
 verify that the committed tree is identical to the admitted tree and render
-only from that new full SHA. Publication does not authorize a launch; the
-APC-off control and APC-on treatment retain separate user approval boundaries.
-Use a unique label and a new output directory:
+only from that new full SHA. One paired-launch approval covers both target
+arms. Use a unique label and a new output directory:
 
 ```bash
 cd /home/yuxuan/code_rl_repro/sequence_packing/tunix
@@ -172,8 +187,8 @@ bash canon-zero-tim/tests/v1_phase4/run_exact_image.sh \
   sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a
 ```
 
-The post-fix terminal must include `apc_m15_carrier=44`. The current patch-28
-tree already produced that terminal with exit 0. This remains a CPU/image
+The post-fix terminal must include `apc_m15_carrier=46`. The current
+Attempt-4 repair tree produced that terminal with exit 0. This remains a CPU/image
 admission gate, not a DP8xTP8 numerical result.
 
 The installed-runner test is not a string-only predicate check: with zero
@@ -188,6 +203,7 @@ CANON_P57_WORKLOAD_CANDIDATE=m15
 CANON_P57_DATA_SPLIT=main
 --p57_workload_candidate=m15
 --p57_data_split=main
+--sampler_is=none
 ```
 
 The checked-in renderer and real Step-00 resolver now enforce this and reject
@@ -198,27 +214,33 @@ It must also contain `CANON_CONTINUE_DECODE=8`,
 the tensor records stay single-path while the replay envelope attests the
 mixed production tail.
 
-## Launch order — each needs separate user approval
+Do not relaunch Attempt-4 source `618eb775...`: it deterministically lacks the
+new sampler admission. Attempt 4 has no matched fresh APC-off arm, so it cannot
+substitute for either member of the new pair below.
 
-Run the control first. The launch command must be standalone; do not append a
-pipe, `tee`, `&&`, or a monitor:
+## Paired launch — submit both without waiting
+
+After one explicit paired-launch approval, issue both standalone commands
+immediately. Do not append a pipe, `tee`, `&&`, or a monitor to either command:
 
 ```bash
 kubectl apply -f "$OUT/jobset-v1-apc-m15-off.yaml"
 ```
-
-Read the raw log only after the JobSet terminates. The control is admissible
-only if the embedded `m15_apc_target.classification.json` says
-`CONTROL_GREEN`, all B-C bytes are zero, and GCS has `PREFLIGHT.json`,
-`COLLECTED.json`, and `COMPLETE.json`. A red control stops the campaign.
-
-Only after that verdict, request separate approval for:
-
 ```bash
 kubectl apply -f "$OUT/jobset-v1-apc-m15-on.yaml"
 ```
 
-The treatment has two admissible outcomes:
+Do not wait for off to finish before submitting on. The arms may execute and
+fail concurrently; they still use distinct JobSets, logs, and JobSet-derived
+GCS roots. A failure in one arm must not cancel or delete the other arm.
+
+Interpretation remains control-first even though execution is concurrent.
+First classify off and require `CONTROL_GREEN`, B-C zero, plus
+`PREFLIGHT.json`, `COLLECTED.json`, and `COMPLETE.json`. If off is red or
+inconclusive, preserve and report the on package, but do not use on to make an
+APC-specific causal claim.
+
+After a green control, the treatment has two admissible outcomes:
 
 - `FRESH_TARGET_RED_FROZEN`: proceed to Phase C/D using the bundled first-red
   carrier; do not infer RoPE/page/cache mechanism yet;

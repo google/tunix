@@ -38,6 +38,7 @@ _REQUIRED_COMMAND = {
     "temperature": "0.7",
     "top_k": "0",
     "top_p": "1.0",
+    "sampler_is": "none",
     "seed": "42",
     "p57_workload_candidate": "m15",
     "p57_data_split": "main",
@@ -208,6 +209,13 @@ def classify(
           "workload=m15/main backward=0 optimizer_commits=0"
       ) == 1,
       "M15 target-debug identity is absent or duplicated",
+  )
+  _require(
+      raw.count(
+          "[CAN" "ON_APC_M15_SAMPLER_CONTRACT] PASS sampler_is=none "
+          "use_rollout_logps=1 rollout_logps=present tis_weights=absent"
+      ) == 1,
+      "M15 no-IS alignment receipt is absent or duplicated",
   )
   _require(
       raw.count("[CANON_P38] CONTROLLED_EXIT code=42 backward=0 optimizer_commits=0") == 1,

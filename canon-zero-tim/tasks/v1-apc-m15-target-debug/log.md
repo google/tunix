@@ -325,3 +325,71 @@
   release dependency graph. It does not repair or classify the APC numerical
   mismatch, and it does not address the separate APC-off full-training
   non-finite-gradient incident.
+
+## 2026-08-25T11:09:00Z — Attempt 4 reached alignment, then exposed a signed sampler-admission omission
+
+- Evidence: `evidence/v1_apc_m15_attempt4_20260825/` contains the error log and
+  receipt; both pass the committed `SHA256SUMS`.
+- Fact: source `618eb7758a7fa094110b5cc47049f3578fdb960a` completed all
+  2,560 APC-on rollout requests with 92.5% prefix-cache hit rate and solve
+  ratio 0.203. This confirms patch 28 no longer aborts on early
+  `continue_decode`.
+- Failure boundary: the learner stopped before A/B/C with
+  `AlignmentGateError` because the generic canonical sampler gate admitted
+  `sampler_is=None` for GSM8K/P34/P57 but omitted the exact M15 APC target
+  carrier. No alignment classification or replay bundle exists.
+- Repair: admit no-IS only when every signed target coordinate matches: off/on
+  selector, exact debug profile, M15/main, DP8xTP8, precheck-only, controlled
+  exit, backward-no-commit, and no commit. Require rollout logprobs present and
+  token-IS weights absent; emit one exact runtime receipt. The profile,
+  classifier, and negative controls all require `--sampler_is=none`.
+- Regression gates: target carrier 46/46; P38 classifier 37/37; Phase3 12/12;
+  P57 146/146; V1 CPU 67/67; flag audit 378/378; Python/shell syntax and
+  `git diff --check` PASS. Host P33 ran all dependency-free tests; its two
+  missing host dependencies (`datasets`, `metrax`) are covered by the pinned
+  image.
+- Aggregate exact-image: immutable image
+  `sha256:418dc632...e53a` exits 0 with
+  `V1_HP_EXACT_IMAGE_PASS ... apc_m15_carrier=46 ... manifests=3`.
+- Integration: the operator branch advanced once more to `74b123a7...`; the
+  incoming commit changes only the separate P64 FrozenLake entrypoint
+  admission. It does not overlap the M15 learner/profile/classifier repair and
+  was fast-forwarded without conflict. The final-tree aggregate exact-image
+  gate was rerun after this integration and exited 0 with
+  `V1_HP_EXACT_IMAGE_PASS ... apc_m15_carrier=46 ... p64_numeric=4
+  p64_capsule=3 ... manifests=3`; no pre-fast-forward result is inherited
+  silently.
+- Claim ceiling: admission repair only. Post-fix DP8xTP8 is not run and there
+  is still no fresh A/B/C verdict, frozen carrier, localization, or APC
+  numerical repair. Because Attempt 4 skipped the fresh APC-off control, the
+  next target action remains control first.
+
+## 2026-08-25T11:30:00Z — Matched target arms approved for concurrent launch
+
+- User decision: submit the newly rendered APC-off control and APC-on
+  treatment immediately from the same committed source SHA when both
+  allocations are available. Do not wait for off to finish before submitting
+  on. Keep separate JobSets, logs, and GCS roots; a failure in one arm does not
+  cancel or delete the other.
+- Scientific gate: execution is concurrent but interpretation remains
+  control-first. The on-arm result supports an APC-specific claim only after
+  the off arm is `CONTROL_GREEN`; otherwise its immutable package is retained
+  and reported without a causal claim.
+- Handoff, runbook, state, plan, and Phase-B ledger now encode this distinction.
+  No renderer, runtime, numerical, or classifier behavior changed for this
+  scheduling decision.
+
+## 2026-08-25T18:26:00Z — Final release tree rebased and re-admitted
+
+- Integration: fetched operator tip `9f79cc562b2032f3fe02297ce5608023d907361e`.
+  Its three P64 commits touch the shared FrozenLake entrypoint and Step-90 but
+  do not overlap this M15 patch. The release commit rebased cleanly.
+- Focused post-rebase gates: sampler contract 14/14, M15 classifier 14/14,
+  target carrier 10/10, flag registry 378/378, and `git diff --check` PASS.
+- Because the incoming P64 work touched shared launch code, the aggregate
+  pinned-image gate was rerun instead of inheriting the earlier result. It
+  exited 0 with `V1_HP_EXACT_IMAGE_PASS ... apc_m15_carrier=46 ...
+  p64_numeric=4 p64_capsule=3 ... manifests=3`.
+- Target status remains `TARGET NOT RUN`. The next operator action is to render
+  the off/on pair from the published full SHA and submit both JobSets without
+  waiting between them; classification remains control-first.

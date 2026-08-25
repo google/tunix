@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[4]
 CANON = ROOT / "canon-zero-tim"
 RENDERER_PATH = ROOT / "canon-zero-tim/cluster/render_v1_apc_m15_target_debug.py"
 LEARNER_PATH = ROOT / "tunix/rl/agentic/agentic_rl_learner.py"
+GRPO_LEARNER_PATH = ROOT / "tunix/rl/agentic/agentic_grpo_learner.py"
 TRAIN_PATH = ROOT / "examples/frozenlake/train_frozenlake_qwen3.py"
 BASE = ROOT / "canon-zero-tim/cluster/jobset-64chip.yaml"
 SOURCE = "6" * 40
@@ -130,6 +131,7 @@ class TargetCarrierTest(unittest.TestCase):
         self.assertEqual(env["CANON_P57_DATA_SPLIT"], "main")
         self.assertEqual(env["CANON_P33_NO_COMMIT"], "1")
         self.assertEqual(env["CANON_P33_ENABLE_EVAL"], "0")
+        self.assertIn("--sampler_is=none", env["CANON_RUN_CMD"].split())
         self.assertEqual(document["spec"]["failurePolicy"]["maxRestarts"], 0)
         self.assertNotIn("CANON_P38_KV_OBSERVER_DIR", env)
         self.assertNotIn("CANON_P38_SEAM_OBSERVER", env)
@@ -321,6 +323,10 @@ class TargetCarrierTest(unittest.TestCase):
     self.assertIn("M15 APC target classification failed", run)
     self.assertIn("M15 first-red replay bundle failed", run)
     self.assertIn("M15 full replay carrier failed", run)
+    grpo_learner = GRPO_LEARNER_PATH.read_text(encoding="utf-8").replace(
+        '" "', ""
+    )
+    self.assertIn("CAN" "ON_APC_M15_SAMPLER_CONTRACT", grpo_learner)
     self.assertIn("encoding=gcs-only", run)
     self.assertIn("26-tpu-runner-m15-replay-envelope.patch", install)
     self.assertIn("m15-apc-serving-envelope-v1", runner_patch)

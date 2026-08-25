@@ -22,7 +22,7 @@ still execute the real serving decode and independent full-reset B arm.
 This carrier does not modify or repair RoPE, attention, KV values, lm-head,
 loss, backward, or optimizer. Both JobSets stop before backward and commit.
 
-## Attempt-0 through Attempt-2 incidents
+## Attempt-0 through Attempt-4 incidents
 
 Never relaunch source `eb58954f...`. That Attempt-0 command carried
 `--p57_workload_candidate=m15 --p57_data_split=main`, but the rendered
@@ -66,14 +66,34 @@ the independent full-reset `standard` path. The M15-only signed ledger bound
 is 2 GiB, based on Attempt 2's 268,192,266 bytes at call 326 and roughly 1,894
 observed calls. Ordinary P38 renderer limits are unchanged.
 
+Never relaunch source `cdd3987c...`. Attempt 3 proved that APC-on can enter
+`continue_decode` before any complete set of standard tensor strata exists.
+Patch 28 removed that invalid ordering assumption without broadening tensor or
+incident capture.
+
+Never relaunch source `618eb775...`. Attempt 4 completed all 2,560 APC-on
+rollout requests at 92.5% prefix-cache hit rate, proving the patch-28 program
+path repair took effect. It then stopped before A/B/C because the generic
+alignment gate rejected `sampler_is=None`. The current repair admits no-IS
+only for the exact signed M15 target identity and requires this one runtime
+receipt:
+
+```text
+[CANON_APC_M15_SAMPLER_CONTRACT] PASS sampler_is=none use_rollout_logps=1 rollout_logps=present tis_weights=absent
+```
+
+Missing/duplicate receipt, a token sampler, any TIS weights, or a neighboring
+workload/profile/topology is fatal. This is an admission repair, not an APC
+numerical repair.
+
 ## Approval boundaries
 
-The following are four separate user decisions:
+The following are three separate user decisions:
 
 1. commit and push the prepared source;
 2. run the exact-image gate;
-3. launch the APC-off control;
-4. after the control is green, launch the APC-on treatment.
+3. launch the matched APC-off/APC-on pair. One explicit pair-launch approval
+   covers both standalone submissions, which run concurrently.
 
 Do not infer one approval from another. Do not launch from a dirty tree or an
 abbreviated SHA.
@@ -106,7 +126,8 @@ Never edit either file. The renderer fixes M15/main, seed 42, DP8xTP8,
 8192 response tokens, temperature 0.7, one diagnostic round, zero backward,
 and zero optimizer commit. It also deliberately preserves
 `CANON_CONTINUE_DECODE=8`, standard-only four-stratum tensor capture, and the
-2 GiB M15 incident/replay byte bound.
+2 GiB M15 incident/replay byte bound. It also fixes
+`--sampler_is=none`; do not hand-edit that to `token`.
 
 The renderer and Step-00 resolver must reject any CLI/environment identity
 split. A valid rendered arm carries:
@@ -116,6 +137,7 @@ CANON_P57_WORKLOAD_CANDIDATE=m15
 CANON_P57_DATA_SPLIT=main
 --p57_workload_candidate=m15
 --p57_data_split=main
+--sampler_is=none
 ```
 
 ## Exact-image admission
@@ -129,35 +151,38 @@ bash canon-zero-tim/tests/v1_phase4/run_exact_image.sh \
   sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a
 ```
 
-Expected post-fix terminal marker includes `apc_m15_carrier=44`. The nested
+Expected post-fix terminal marker includes `apc_m15_carrier=46`. The nested
 P33 gate must also report `runner_tests_per_overlay=35`; its new installed-
 runner test sets captured records/strata to zero, executes the full
 `_p38_serving_begin` branch, and proves M15 `continue_decode` writes the replay
 ledger without entering generic incident/tensor capture. The same path remains
 rejected outside M15 debug. This is not a target numerical result.
 
-## Launch order
+## Paired launch
 
 Launch commands must be standalone. Do not append `tee`, a pipe, `&&`, or a
 monitor.
 
-First, with separate approval:
+After paired-launch approval, submit both manifests immediately as separate
+commands:
 
 ```bash
 kubectl apply -f "$OUT/jobset-v1-apc-m15-off.yaml"
 ```
-
-Wait for termination, then read the stored raw log. Continue only if the M15
-classification is `CONTROL_GREEN`, B-C is zero, and the GCS attempt has all
-three terminal markers.
-
-Second, with a new approval:
-
 ```bash
 kubectl apply -f "$OUT/jobset-v1-apc-m15-on.yaml"
 ```
 
-Accepted treatment outcomes are:
+Do not wait for the control before submitting treatment. The two JobSets may
+run and fail concurrently; keep their logs and GCS evidence separate. A
+failure in one arm does not stop or delete the other.
+
+Classify off first after both return. Only `CONTROL_GREEN`, B-C zero, and all
+three GCS terminal markers make the on-arm result interpretable as an APC
+comparison. If off is red or inconclusive, retain and report on, but make no
+APC-specific causal claim from it.
+
+After a green control, accepted treatment outcomes are:
 
 - `FRESH_TARGET_RED_FROZEN`: a complete replay carrier must also be frozen;
 - `TARGET_NOT_REPRODUCED`: one target observation was exact, no fix claim.

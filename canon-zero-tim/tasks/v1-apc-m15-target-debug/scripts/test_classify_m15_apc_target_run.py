@@ -32,6 +32,7 @@ def _raw(arm: str) -> str:
       "--max_concurrency=256", "--vllm_max_num_seqs=32",
       "--vllm_max_num_batched_tokens=256", "--env_max_steps=15",
       "--temperature=0.7", "--top_k=0", "--top_p=1.0", "--seed=42",
+      "--sampler_is=none",
       "--p57_workload_candidate=m15", "--p57_data_split=main",
   ])
   lines = [
@@ -42,6 +43,7 @@ def _raw(arm: str) -> str:
       "[CAN" "ON_APC_M15_A_CONTRACT] prompt_logprobs=None logprobs=1 skip_reading_prefix_cache=False",
       "[CAN" "ON_APC_M15_B_CONTRACT] reset_prefix_cache=True all_num_cached_tokens_zero=True",
       f"[CAN" f"ON_APC_M15_TARGET_CONTRACT] arm={arm} topology=DP8xTP8 workload=m15/main backward=0 optimizer_commits=0",
+      "[CAN" "ON_APC_M15_SAMPLER_CONTRACT] PASS sampler_is=none use_rollout_logps=1 rollout_logps=present tis_weights=absent",
       "[CANON_P38] CONTROLLED_EXIT code=42 backward=0 optimizer_commits=0",
   ]
   if arm == "on":
@@ -203,6 +205,18 @@ class ClassifyM15ApcTargetRunTest(unittest.TestCase):
     with self.assertRaisesRegex(MODULE.ClassificationError, "B full-reset"):
       fixture.classify()
 
+  def test_rejects_missing_no_is_alignment_receipt(self):
+    fixture = self._fixture(arm="on", red=True)
+    fixture.raw.write_text(
+        fixture.raw.read_text().replace(
+            "[CAN" "ON_APC_M15_SAMPLER_CONTRACT] PASS sampler_is=none "
+            "use_rollout_logps=1 rollout_logps=present tis_weights=absent\n",
+            "",
+        )
+    )
+    with self.assertRaisesRegex(MODULE.ClassificationError, "no-IS alignment"):
+      fixture.classify()
+
   def test_rejects_underdepth_exact_treatment(self):
     fixture = self._fixture(arm="on", red=False)
     record = _record(ab_bytes=0)
@@ -215,6 +229,14 @@ class ClassifyM15ApcTargetRunTest(unittest.TestCase):
   def test_rejects_wrong_m15_geometry(self):
     fixture = self._fixture(arm="off", red=False)
     fixture.raw.write_text(fixture.raw.read_text().replace("--mesh_tp=8", "--mesh_tp=4"))
+    with self.assertRaisesRegex(MODULE.ClassificationError, "command geometry"):
+      fixture.classify()
+
+  def test_rejects_wrong_sampler_contract(self):
+    fixture = self._fixture(arm="off", red=False)
+    fixture.raw.write_text(
+        fixture.raw.read_text().replace("--sampler_is=none", "--sampler_is=token")
+    )
     with self.assertRaisesRegex(MODULE.ClassificationError, "command geometry"):
       fixture.classify()
 

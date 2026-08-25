@@ -20,7 +20,7 @@ B - C = 0 bytes
 | Phase | Deliverable | Exit gate | Status |
 |---|---|---|---|
 | A | `M15_FIRST_RED_INPUT_CONTRACT` with mismatch distribution, identity hashes, and artifact-completeness matrix | every field is traced to immutable `file:line` or explicitly marked missing | complete: audit PASS, replay inputs missing |
-| B | fresh captured-red replay carrier and APC-off/APC-on decision table | static/host carrier tests prove full 256-row producer, mixed standard/continue A chronology, standard-only full-reset B, exact first-red join, GCS durability, zero backward/commit | Attempts 0/1 were admission failures; Attempt 2 exposed observer path/capacity defects after deep real rollout; repair host PASS, exact-image/target pending |
+| B | fresh captured-red replay carrier and APC-off/APC-on decision table | static/host carrier tests prove full 256-row producer, mixed standard/continue A chronology, standard-only full-reset B, exact first-red join, GCS durability, zero backward/commit | Attempts 0/1/4 were admission failures; Attempts 2/3 exposed observer path/capacity defects. Latest repair host + aggregate exact-image PASS, target control pending |
 | C | single-variable reproduction ladder | control A-B=0; treatment either reproduces red or is classified `ONEHOST_NOT_REPRODUCED` without mechanism claims | pending |
 | D | observer-neutral coarse-to-fine first-red walk | `FIRST_RED_LOCALIZED` names last exact and first red tensor, shape ledger, request/token/cache coordinate, and `file:line` | pending |
 | E | minimal localized repair, default off or experiment-bound | reproducer flips red to zero; APC-off and B are unchanged; adjacent and dirty-page negatives fire | pending |
@@ -31,7 +31,7 @@ B - C = 0 bytes
 | Observation | Interpretation | Next action | Forbidden claim |
 |---|---|---|---|
 | replay tokens/order differ from `m15i` | comparison invalid | repair capture/join | APC mechanism conclusion |
-| APC-off control is red | carrier or shared serving contract is invalid | stop before APC treatment | prefix-cache root cause |
+| APC-off control is red | carrier or shared serving contract is invalid | preserve the concurrently run treatment but do not interpret it as APC-specific | prefix-cache root cause |
 | APC-on one-host is exact | production envelope not reproduced | add exactly one missing M15 variable | bug disappeared |
 | APC-on clean run is red | deterministic carrier available | observer-neutral Phase D | RoPE/page cause before localization |
 | observer changes endpoint bytes | instrumentation invalid | redesign observer | first-red conclusion |
@@ -88,3 +88,16 @@ B - C = 0 bytes
   journal, and incident ledger remain standard-only. Full replay packaging
   requires A to attest both program paths and B to remain full-reset standard;
   unknown paths and non-M15 use still fail closed.
+- Confirmed: Attempt 4 proves patch 28 reached the end of the real APC-on
+  rollout: 2,560 requests completed with 92.5% prefix-cache hits. The run then
+  stopped before A/B/C because the generic alignment admission omitted the
+  already signed M15 `sampler_is=none` recipe. It is not a numerical verdict.
+- Decision: no-IS admission is restricted to the exact M15 target identity:
+  APC off/on selector, APC debug profile, M15/main, DP8xTP8, precheck-only,
+  controlled exit, backward-no-commit, and zero commit. It requires rollout
+  logprobs to be present, token-IS weights to be absent, and emits one
+  fail-closed sampler receipt. Unsigned FrozenLake remains token-IS-only.
+- Decision: Attempt 4 lacks a matched fresh control, so it cannot satisfy the
+  paired decision. The newly rendered off/on arms may execute concurrently
+  from one source SHA; only their interpretation is ordered. Classify off
+  first, and use on for an APC-specific claim only after `CONTROL_GREEN`.

@@ -141,8 +141,38 @@ unchanged. Full carrier packaging requires A to attest both registered paths
 and B to remain standard. Unknown paths, non-M15 use, and B-side
 continue-decode still fail closed.
 
-Current result: task carrier suite 44/44, patch-28 applies after patch 27, and
+Patch-28 admission result before Attempt 4: task carrier suite 44/44; patch 28
+applied after patch 27, and
 the targeted P33 pinned-image gate loads both installed runners and reports
 35/35 tests per overlay. The aggregate V1 exact-image gate also passes with
-`apc_m15_carrier=44`. A fresh APC-off target control remains unrun; this is
-not an APC numerical repair or verdict.
+`apc_m15_carrier=44`. That gate is retained as the observer-repair receipt,
+not the current release terminal or an APC numerical verdict.
+
+## Attempt-4 sampler admission repair
+
+Attempt 4 (`canon-v1-apc-m15-on-d10-618eb775`, source `618eb775...`) proves
+patch 28 completed the full APC-on rollout: 2,560 requests, 92.5% prefix-cache
+hit rate, solve ratio 0.203. It then failed before A/B/C because the canonical
+alignment sampler gate omitted the target carrier's signed no-IS recipe. The
+committed receipt and error log both pass `SHA256SUMS`; no alignment report or
+replay carrier was produced.
+
+The repair adds one exact identity predicate spanning the existing off/on
+selector, debug profile, M15/main workload, DP8xTP8 topology, precheck-only,
+controlled exit, backward-no-commit, and zero-commit receipts. Only this
+identity may use `sampler_is=None`; runtime additionally requires rollout
+logprobs present and token-IS weights absent. The classifier requires the exact
+sampler receipt once and the command must still contain `--sampler_is=none`.
+Unsigned FrozenLake and every neighboring identity remain negative controls.
+
+Post-repair gates: target carrier 46/46, P38 classifier 37/37, Phase3 12/12,
+P57 146/146, V1 CPU 67/67, flags 378/378, and aggregate pinned image exit 0
+with `V1_HP_EXACT_IMAGE_PASS ... apc_m15_carrier=46 ... manifests=3`.
+
+Current ceiling:
+`ATTEMPT4_ADMISSION_REPAIR_AGGREGATE_EXACT_IMAGE_PASS_TARGET_NOT_RUN`.
+Attempt 4 has no matched fresh control and cannot stand in for the new pair.
+The new APC-off control and APC-on treatment execute concurrently from one
+source SHA under one paired-launch approval. Classification remains ordered:
+only `CONTROL_GREEN` makes the paired treatment result usable for an
+APC-specific claim; otherwise both packages are retained without such a claim.
