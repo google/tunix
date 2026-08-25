@@ -320,17 +320,6 @@ def _build_maxtext_config(args, num_devices: int) -> Any:
       "scan_layers=True",
       # with load_parameters_path set, from_pretrained must not fall back to HF conversion
       "convert_checkpoint_if_possible=False",
-      # MaxText defaults jax_cache_dir to "~/jax_cache" (base.yml), which
-      # pyconfig.py wires straight into JAX's persistent compilation cache.
-      # The trainer's main container has no volume mount, so that cache lands
-      # on the pod's writable overlay -- on a TPU worker node's local disk,
-      # which can be as small as ~44GB allocatable ephemeral-storage. A 30B-A3B
-      # MoE compile (48 scanned layers, padded MoE MLP dim) produced enough
-      # cached executables there to trip a kubelet ephemeral-storage eviction
-      # mid-run. Each pod is fresh anyway (no cross-run reuse benefit), so
-      # disable the persistent cache entirely rather than trying to size a
-      # volume for it.
-      "jax_cache_dir=",
       "skip_jax_distributed_system=True",  # tunix already did this
       f"per_device_batch_size={per_device_batch_size}",
       # tunix owns gradient accumulation, so MaxText must not also accumulate
