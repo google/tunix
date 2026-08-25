@@ -80,11 +80,22 @@ class TargetCarrierTest(unittest.TestCase):
             f"{env['CANON_P38_SERVING_CAPTURE_DIR']}/m15_replay_envelope.jsonl",
         )
         self.assertEqual(env["CANON_P38_FIXED_LM_HEAD"], "1")
+        self.assertEqual(env["CANON_P57_WORKLOAD_CANDIDATE"], "m15")
+        self.assertEqual(env["CANON_P57_DATA_SPLIT"], "main")
         self.assertEqual(env["CANON_P33_NO_COMMIT"], "1")
         self.assertEqual(env["CANON_P33_ENABLE_EVAL"], "0")
         self.assertEqual(document["spec"]["failurePolicy"]["maxRestarts"], 0)
         self.assertNotIn("CANON_P38_KV_OBSERVER_DIR", env)
         self.assertNotIn("CANON_P38_SEAM_OBSERVER", env)
+        self.assertEqual(
+            env["CANON_RUN_CMD"].split()[:4],
+            [
+                "python3",
+                "-u",
+                "-m",
+                "examples.frozenlake.train_frozenlake_qwen3",
+            ],
+        )
 
       # The two target documents must be structurally identical after
       # normalizing the arm name and the two intended arm values.  This catches

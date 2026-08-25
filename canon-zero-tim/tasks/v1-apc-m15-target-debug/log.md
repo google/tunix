@@ -148,3 +148,24 @@
 - Action: archived Attempt 0 failure receipt and error log in `evidence/v1_apc_m15_attempt0_20260825/`.
 - Files/artifacts: [Attempt-0 evidence](evidence/v1_apc_m15_attempt0_20260825/receipt.json), [Attempt-0 error log](evidence/v1_apc_m15_attempt0_20260825/m15_off_d3_attempt0_error.log)
 - Next: diagnose the root cause of the Python launcher exit in Step 90, re-render, and relaunch APC-off control.
+
+## 2026-08-25 — Attempt-0 bootstrap root cause and host repair
+
+- Type: launcher-contract repair; no numerical repair.
+- Confirmed cause: the rendered command contained
+  `--p57_workload_candidate=m15 --p57_data_split=main`, while the JobSet had no
+  `CANON_P57_WORKLOAD_CANDIDATE` or `CANON_P57_DATA_SPLIT`. The FrozenLake
+  entrypoint requires these CLI and signed-environment values to agree before
+  learner construction, so Attempt 0 could not create the capture directory.
+- Repair: carry exact `m15/main` through the renderer, admit only those two P57
+  identity fields for the exact APC-debug profile in Step 00, require the
+  package-safe module entrypoint, and add wrong-identity and wrong-entrypoint
+  negatives. APC on/off, A/B/C, model math, backward, and optimizer are
+  unchanged.
+- Validation: APC task tests 35/35; P38 classifier 37/37; V1 Phase4 CPU 34/34;
+  flag audit 371/371; Python/shell syntax and `git diff --check` PASS. The
+  Phase3 flag-count assertion was stale at 370 on the incoming tip and was
+  synchronized to the already registered 371-name inventory.
+- Limitation: post-fix exact-image and DP8xTP8 target were not run. Attempt 0
+  remains `INCONCLUSIVE`; Attempt 1 must use a new source SHA, label, and GCS
+  attempt.

@@ -798,6 +798,17 @@ if [ "${CANON_PROFILE_FILE:-}" = \
   unset p57_expected_checkpoint_interval
   unset p57_expected_eval_enabled
   unset p57_expected_eval_disabled
+elif [ "${CANON_PROFILE_FILE:-}" = \
+       "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-apc-debug.env" ]; then
+  # The bounded APC carrier is not a P57 train/eval arm, but it reuses the
+  # materialized M15 workload.  Admit only its exact signed workload identity;
+  # all training-horizon/arm fields remain forbidden.
+  [ "${CANON_P57_WORKLOAD_CANDIDATE:-}" = "m15" ] && \
+  [ "${CANON_P57_DATA_SPLIT:-}" = "main" ] && \
+  [ -z "${CANON_P57_TIM_ARM:-}${CANON_P57_RUN_KIND:-}${CANON_P57_INFERENCE_REGIME:-}${CANON_P57_EXPECTED_UPDATES:-}${CANON_P57_STOP_AFTER_STEP:-}${CANON_P57_EVAL_CHECKPOINT_STEP:-}${CANON_P57_EVAL_OUTPUT:-}${CANON_P57_CALIBRATION_MODE:-}${CANON_P57_CALIBRATION_OUTPUT:-}${CANON_P57_CALIBRATION_RECIPES:-}" ] || {
+    echo "[env] M15 APC target debug P57 identity drifted" >&2
+    fail=1
+  }
 elif [ -n "${CANON_P57_TIM_ARM:-}${CANON_P57_RUN_KIND:-}${CANON_P57_INFERENCE_REGIME:-}${CANON_P57_EXPECTED_UPDATES:-}${CANON_P57_STOP_AFTER_STEP:-}${CANON_P57_EVAL_CHECKPOINT_STEP:-}${CANON_P57_EVAL_OUTPUT:-}${CANON_P57_CALIBRATION_MODE:-}${CANON_P57_CALIBRATION_OUTPUT:-}${CANON_P57_CALIBRATION_RECIPES:-}${CANON_P57_WORKLOAD_CANDIDATE:-}${CANON_P57_DATA_SPLIT:-}" ]; then
   echo "[env] P57 fields require the P57 profile" >&2
   fail=1

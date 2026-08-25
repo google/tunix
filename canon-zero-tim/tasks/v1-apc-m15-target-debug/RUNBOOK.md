@@ -22,6 +22,19 @@ still execute the real serving decode and independent full-reset B arm.
 This carrier does not modify or repair RoPE, attention, KV values, lm-head,
 loss, backward, or optimizer. Both JobSets stop before backward and commit.
 
+## Attempt-0 bootstrap incident
+
+Never relaunch source `eb58954f...`. That Attempt-0 command carried
+`--p57_workload_candidate=m15 --p57_data_split=main`, but the rendered
+environment omitted the matching signed `CANON_P57_*` fields. The workload
+entrypoint therefore exited before learner construction, capture creation, or
+any A/B/C numerical verdict. `INCONCLUSIVE` is the permanent classification.
+
+The repaired source requires exact `m15/main` in both CLI and environment and
+keeps the package-safe `python3 -u -m
+examples.frozenlake.train_frozenlake_qwen3` entrypoint. This is a bootstrap
+contract fix only; production APC remains off.
+
 ## Approval boundaries
 
 The following are four separate user decisions:
@@ -62,6 +75,16 @@ Never edit either file. The renderer fixes M15/main, seed 42, DP8xTP8,
 8192 response tokens, temperature 0.7, one diagnostic round, zero backward,
 and zero optimizer commit.
 
+The renderer and Step-00 resolver must reject any CLI/environment identity
+split. A valid rendered arm carries:
+
+```text
+CANON_P57_WORKLOAD_CANDIDATE=m15
+CANON_P57_DATA_SPLIT=main
+--p57_workload_candidate=m15
+--p57_data_split=main
+```
+
 ## Optional exact-image admission
 
 This is not a target numerical result and needs its own approval:
@@ -72,7 +95,7 @@ bash canon-zero-tim/tests/v1_phase4/run_exact_image.sh \
   sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a
 ```
 
-Expected terminal marker includes `apc_m15_carrier=33`.
+Expected post-fix terminal marker includes `apc_m15_carrier=35`.
 
 ## Launch order
 

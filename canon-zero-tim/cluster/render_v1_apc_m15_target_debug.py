@@ -27,6 +27,8 @@ _INCIDENT_MIN_PREFIX = 1152
 _INCIDENT_MAX_PREFIX = 7168
 _INCIDENT_MAX_BYTES = 256 * 1024 * 1024
 _ARTIFACT_BUCKET = "gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38"
+_WORKLOAD_CANDIDATE = "m15"
+_DATA_SPLIT = "main"
 
 
 def _replace_arg(command: list[str], prefix: str, replacement: str) -> None:
@@ -93,6 +95,11 @@ def _capture_values(document: Mapping[str, Any], arm: str) -> dict[str, str]:
   capture = f"{state}/p38_serving_capture"
   return {
       "CANON_APC_M15_TARGET_DEBUG": arm,
+      # train_frozenlake_qwen3 treats the CLI selector and these environment
+      # fields as one signed workload identity.  Supplying only the CLI values
+      # passes rendering/profile checks but fails before learner construction.
+      "CANON_P57_WORKLOAD_CANDIDATE": _WORKLOAD_CANDIDATE,
+      "CANON_P57_DATA_SPLIT": _DATA_SPLIT,
       "CANON_VLLM_ENABLE_PREFIX_CACHING": "1" if arm == "on" else "0",
       "CANON_KV_UNIFIED": "0",
       "CANON_P38_PRECHECK_ONLY": "1",
@@ -151,6 +158,10 @@ def validate(document: Mapping[str, Any], *, arm: str, source_commit: str, run_i
   if any(name.startswith(forbidden_prefixes) for name in env):
     raise ValueError("Phase B must not attach a numerical observer")
   command = shlex.split(env["CANON_RUN_CMD"])
+  if tuple(command[:4]) != (
+      "python3", "-u", "-m", "examples.frozenlake.train_frozenlake_qwen3"
+  ):
+    raise ValueError("M15 APC command must use the package-safe module entrypoint")
   required = {
       "--mesh_dp=8", "--mesh_tp=8", "--batch_size=32",
       "--mini_batch_size=32", "--num_generations=8",
@@ -158,7 +169,8 @@ def validate(document: Mapping[str, Any], *, arm: str, source_commit: str, run_i
       "--max_concurrency=256", "--vllm_max_num_seqs=32",
       "--vllm_max_num_batched_tokens=256", "--env_max_steps=15",
       "--temperature=0.7", "--top_k=0", "--top_p=1.0", "--seed=42",
-      "--p57_workload_candidate=m15", "--p57_data_split=main",
+      f"--p57_workload_candidate={_WORKLOAD_CANDIDATE}",
+      f"--p57_data_split={_DATA_SPLIT}",
       "--sampler_is=none", "--eval_every_n_steps=0",
   }
   missing = sorted(required - set(command))

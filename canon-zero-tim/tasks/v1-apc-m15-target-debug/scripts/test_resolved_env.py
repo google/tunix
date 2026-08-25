@@ -45,6 +45,8 @@ class ResolvedEnvironmentTest(unittest.TestCase):
       *,
       wrong_profile: bool = False,
       wrong_replay_path: bool = False,
+      wrong_workload_identity: bool = False,
+      wrong_entrypoint: bool = False,
   ):
     run_id = f"cpu-{uuid.uuid4().hex[:10]}"
     with tempfile.TemporaryDirectory(prefix="v1-apc-render-", dir="/tmp") as output:
@@ -76,6 +78,13 @@ class ResolvedEnvironmentTest(unittest.TestCase):
         env["CANON_APC_M15_REPLAY_LEDGER"] = str(
             state / "outside-capture.jsonl"
         )
+      if wrong_workload_identity:
+        env["CANON_P57_DATA_SPLIT"] = "selection"
+      if wrong_entrypoint:
+        env["CANON_RUN_CMD"] = env["CANON_RUN_CMD"].replace(
+            "-m examples.frozenlake.train_frozenlake_qwen3",
+            "examples/frozenlake/train_frozenlake_qwen3.py",
+        )
       result = subprocess.run(
           ["bash", str(CANON / "cluster/steps/00_env.sh")],
           env=env,
@@ -96,6 +105,8 @@ class ResolvedEnvironmentTest(unittest.TestCase):
     self.assertIn("export CANON_VLLM_ENABLE_PREFIX_CACHING=0", resolved)
     self.assertIn("export CANON_DP_SIZE=8", resolved)
     self.assertIn("export CANON_TP_SIZE=8", resolved)
+    self.assertIn("export CANON_P57_WORKLOAD_CANDIDATE=m15", resolved)
+    self.assertIn("export CANON_P57_DATA_SPLIT=main", resolved)
 
   def test_on_arm_resolves_apc_on(self):
     result, resolved = self._resolve("on")
@@ -116,6 +127,18 @@ class ResolvedEnvironmentTest(unittest.TestCase):
     self.assertNotEqual(result.returncode, 0, result.stdout)
     self.assertFalse(resolved)
     self.assertIn("replay ledger must live in the capture directory", result.stdout)
+
+  def test_cli_and_signed_workload_identity_cannot_diverge(self):
+    result, resolved = self._resolve("off", wrong_workload_identity=True)
+    self.assertNotEqual(result.returncode, 0, result.stdout)
+    self.assertFalse(resolved)
+    self.assertIn("requires signed m15/main workload identity", result.stdout)
+
+  def test_file_path_entrypoint_is_rejected_before_runtime(self):
+    result, resolved = self._resolve("off", wrong_entrypoint=True)
+    self.assertNotEqual(result.returncode, 0, result.stdout)
+    self.assertFalse(resolved)
+    self.assertIn("requires the package-safe module entrypoint", result.stdout)
 
 
 if __name__ == "__main__":

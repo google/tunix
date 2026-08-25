@@ -16,6 +16,13 @@ Current immutable facts:
   cache lineage, so `m15i` itself is not an exact replay carrier;
 - no numerical source has been repaired and all production full recipes remain
   APC-off.
+- Attempt 0 (`canon-v1-apc-m15-off-d3-eb58954f`) is `INCONCLUSIVE`: it never
+  reached alignment or created a serving capture. Its command selected
+  `m15/main` on the CLI but omitted `CANON_P57_WORKLOAD_CANDIDATE` and
+  `CANON_P57_DATA_SPLIT`, which the FrozenLake entrypoint requires to match.
+- The bootstrap repair carries exact `m15/main` identity through the renderer,
+  profile, and Step-00 resolver and preserves the package-safe module
+  entrypoint. It changes no APC, model, alignment, backward, or optimizer math.
 
 Claim ceiling: `PHASE_B_STATIC_CARRIER_ONLY`.
 
@@ -108,7 +115,9 @@ without conflict before the final gates.
 
 ## Next action before any launch
 
-Render only from the published full SHA of this carrier. Publication does not
+Do not relaunch source `eb58954f...`; its missing signed identity is
+deterministically invalid. First publish and exact-image-test the bootstrap
+repair, then render only from that new full SHA. Publication does not
 authorize a launch; the APC-off control and APC-on treatment retain separate
 user approval boundaries. Use a unique label and a new output directory:
 
@@ -135,8 +144,21 @@ bash canon-zero-tim/tests/v1_phase4/run_exact_image.sh \
   sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a
 ```
 
-The required terminal includes `apc_m15_carrier=33`. This remains a CPU/image
+The post-fix terminal must include `apc_m15_carrier=35`. This remains a CPU/image
 admission gate, not a DP8xTP8 numerical result.
+
+Before applying the YAML, the rendered environment must contain all four
+members of one workload identity:
+
+```text
+CANON_P57_WORKLOAD_CANDIDATE=m15
+CANON_P57_DATA_SPLIT=main
+--p57_workload_candidate=m15
+--p57_data_split=main
+```
+
+The checked-in renderer and real Step-00 resolver now enforce this and reject
+wrong identity or file-path-entrypoint negatives before TPU work begins.
 
 ## Launch order — each needs separate user approval
 
