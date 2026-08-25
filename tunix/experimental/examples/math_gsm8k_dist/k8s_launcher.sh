@@ -72,13 +72,6 @@ export TRAINER_MESH_TP=${TRAINER_MESH_TP:-1}
 export TRAINER_MESH_EXPERT=${TRAINER_MESH_EXPERT:-1}
 export ROLLOUT_TPU_SLICE=${ROLLOUT_TPU_SLICE:-tpuv5:2x2x1}
 export ROLLOUT_TENSOR_PARALLEL_SIZE=${ROLLOUT_TENSOR_PARALLEL_SIZE:-4}
-# 0 disables attention DP. Needed when num_kv_heads == ROLLOUT_TENSOR_PARALLEL_SIZE:
-# tpu-inference's own auto-attn_dp is a no-op at that exact boundary, and its
-# KV-cache allocator disagrees with ragged_paged_attention's static shape
-# validation, crashing the engine. An explicit divisor here (e.g. 2) moves
-# off that boundary without changing chip count -- see run_rollout_node.py's
-# --attn_dp_size for the underlying tpu-inference mechanics.
-export ROLLOUT_ATTN_DP_SIZE=${ROLLOUT_ATTN_DP_SIZE:-0}
 # Number of independent rollout replicas (each its own TPU slice reservation
 # and JobSet, ${ROLLOUT_ID}-0, ${ROLLOUT_ID}-1, ...) for data-parallel
 # rollout. A single multi-host ROLLOUT_TPU_SLICE (e.g. tpuv5:2x2x2) is one
@@ -193,7 +186,6 @@ start_rollout() {
           --lora_rank=${LORA_RANK} \
           --lora_alpha=${LORA_ALPHA} \
           --tensor_parallel_size=${ROLLOUT_TENSOR_PARALLEL_SIZE} \
-          --attn_dp_size=${ROLLOUT_ATTN_DP_SIZE} \
           --maxtext_model_name=${MAXTEXT_MODEL_NAME} \
       " \
       | kubectl apply -f -
