@@ -209,10 +209,14 @@ def _create_vllm_worker(args, tokenizer):
       # working vllm_additional_config for Qwen3-30B-A3B: enable_dp_attention
       # is explicitly False here (attn DP is a trainer-side setting, not a
       # rollout one), allow_split_physical_axes governs how mesh axes can
-      # split/share across the physical device topology (plausibly the fix
-      # for the KV-cache shape mismatch we've been chasing), and
-      # prefuse_moe_weights changes the MoE weight layout the rollout engine
-      # expects.
+      # split/share across the physical device topology.
+      #
+      # Deliberately NOT setting prefuse_moe_weights=True here (unlike that
+      # script): it fuses wi_0/wi_1 into a single tensor on the rollout side,
+      # but the trainer (run_trainer_node.py) never sets it, so Raiden's
+      # weight-sync preflight fails with "source variable [...]['wi_0'].value
+      # has no destination counterpart" -- the two sides must agree on this
+      # since it's a wire-format shape difference, not just a perf knob.
       maxtext_config_overrides = {
           "model_name": args.maxtext_model_name,
           "model_call_mode": "inference",
@@ -220,7 +224,6 @@ def _create_vllm_worker(args, tokenizer):
           "allow_split_physical_axes": True,
           "log_config": False,
           "weight_dtype": "bfloat16",
-          "prefuse_moe_weights": True,
       }
       if args.maxtext_attention:
         maxtext_config_overrides["attention"] = args.maxtext_attention
