@@ -1,0 +1,27 @@
+{
+  "task": "v1_apc_m15_target_debug_attempt4",
+  "jobset_name": "canon-v1-apc-m15-on-d10-618eb775",
+  "head_pod": "canon-v1-apc-m15-on-d10-618eb775-pathways-head-0-0-x8vjn",
+  "source_commit": "618eb7758a7fa094110b5cc47049f3578fdb960a",
+  "date_utc": "2026-08-25T10:45:00Z",
+  "topology": "64 TPU (16 nodes, DP8xTP8)",
+  "workload": "frozenlake-dp8-tp8",
+  "arm": "on",
+  "stage": "rollout-m15-apc-on",
+  "exit_code": 1,
+  "verdict": "ROLLOUT_COMPLETE_ALIGNMENT_GATE_REJECT_SAMPLER_IS_NONE",
+  "prefix_cache_hit_rate": "92.5%",
+  "prompt_throughput_tps": "406.1~478.5",
+  "generation_throughput_tps": "130.1~256.4",
+  "gpu_kv_cache_usage": "2.0%",
+  "rollout_solve_ratio": 0.203,
+  "rollout_requests": 2560,
+  "sampler_trainer_agreement": {
+    "logp_diff_mean": 0.00065,
+    "logp_diff_max": 19.64533,
+    "prob_diff_mean": 0.00019,
+    "prob_diff_max": 0.99918,
+    "probs_pearson_corr": 0.99888
+  },
+  "root_cause": "tunix.rl.alignment.AlignmentGateError: canonical alignment requires sampler_is='token'; sampler_is=None is admitted only by the signed GSM8K, P34 DeepSWE, or P57 causal-study contract"
+}
