@@ -48,10 +48,138 @@ from tunix.rl import dp_training
 from tunix.rl import dp_workloads
 from tunix.rl import deepswe_contract
 from tunix.rl import p38_frozenlake_replay
+from tunix.sft import utils as sft_utils
 
 
 class FunctionalMappingError(ValueError):
   """Raised when a trainer-to-engine weight map is not a bijection."""
+
+
+def _p62_numeric_debug_enabled() -> bool:
+  """Parses the exact default-off Attempt-7 numerical observer."""
+  value = os.environ.get("CANON_P62_BACKWARD_NUMERIC_DEBUG", "")
+  if value not in ("", "0", "1"):
+    raise FunctionalMappingError(
+        "CANON_P62_BACKWARD_NUMERIC_DEBUG must be unset/0/1, "
+        f"got {value!r}"
+    )
+  return value == "1"
+
+
+def _p62_emit_tree_receipt(
+    *,
+    stage: str,
+    group: int,
+    group_count: int,
+    tree: Any,
+    ranked: bool = False,
+    force: bool = False,
+) -> dict[str, Any]:
+  """Emits one compact first-red receipt and fails on non-finite data."""
+  receipt = sft_utils.tree_numeric_receipt(tree, ranked=ranked)
+  should_emit = (
+      force
+      or group in (0, group_count - 1)
+      or not receipt["all_finite"]
+      or not receipt["naive_norm_finite"]
+  )
+  record = {
+      "schema": "canon-p62-tree-numeric-v1",
+      "stage": stage,
+      "group": group,
+      "groups": group_count,
+      **receipt,
+  }
+  if should_emit:
+    print(
+        "[P62.NUMERIC] "
+        + json.dumps(record, sort_keys=True, separators=(",", ":")),
+        flush=True,
+    )
+  if not receipt["all_finite"]:
+    raise FunctionalMappingError(
+        "P62 first non-finite numerical boundary: "
+        f"stage={stage} group={group} "
+        f"first={receipt['first_nonfinite']} "
+        f"rank={receipt.get('first_nonfinite_rank')}"
+    )
+  return record
+
+
+def _p62_emit_loss_receipt(
+    *, loss_output: Any, contract: Any
+) -> dict[str, Any]:
+  """Validates the frozen loss denominator and compact GRPO metrics."""
+
+  def metric_value(value):
+    compute = getattr(value, "compute", None)
+    return compute() if callable(compute) else value
+
+  metrics = {
+      "advantage_abs_mean": metric_value(
+          loss_output.aux_metrics["advantage/abs_mean"]
+      ),
+      "advantage_max": metric_value(
+          loss_output.aux_metrics["advantage/max"]
+      ),
+      "advantage_min": metric_value(
+          loss_output.aux_metrics["advantage/min"]
+      ),
+      "effective_rows": metric_value(
+          loss_output.aux_metrics["loss/effective_rows"]
+      ),
+      "is_ratio_max": metric_value(
+          loss_output.aux_metrics["is_ratio/max"]
+      ),
+      "is_ratio_min": metric_value(
+          loss_output.aux_metrics["is_ratio/min"]
+      ),
+      "loss": loss_output.primary_loss.compute(),
+      "loss_denominator": loss_output.primary_loss.denominator,
+      "loss_scale": loss_output.primary_loss.compute_scale(),
+      "valid_tokens": metric_value(
+          loss_output.aux_metrics["loss/valid_tokens"]
+      ),
+  }
+  host = {
+      name: float(np.asarray(value))
+      for name, value in jax.device_get(metrics).items()
+  }
+  expected_denominator = float(contract.global_trajectories)
+  expected_scale = float(np.float32(1.0 / expected_denominator))
+  record = {
+      "schema": "canon-p62-loss-scale-v1",
+      "stage": "loss_scale",
+      "dp": int(contract.dp_size),
+      "tp": int(contract.tp_size),
+      "global_trajectories": int(contract.global_trajectories),
+      "local_trajectories": int(contract.local_trajectories),
+      "gradient_groups": int(contract.local_trajectories),
+      "global_M": int(contract.dp_size * 256),
+      "local_M": 256,
+      "expected_accumulator_denominator": int(contract.local_trajectories),
+      "expected_streamed_multiplier": float(np.float32(
+          expected_scale * contract.local_trajectories
+      )),
+      **host,
+  }
+  print(
+      "[P62.NUMERIC] "
+      + json.dumps(record, sort_keys=True, separators=(",", ":")),
+      flush=True,
+  )
+  finite = all(np.isfinite(value) for value in host.values())
+  if (
+      not finite
+      or host["loss_denominator"] != expected_denominator
+      or host["loss_scale"] != expected_scale
+      or host["effective_rows"] <= 0.0
+      or host["valid_tokens"] <= 0.0
+  ):
+    raise FunctionalMappingError(
+        f"P62 loss-scale contract failed: {record}"
+    )
+  return record
 
 
 def _xprof_jit(fun, *, module_name: str, scope_name: str, **jit_kwargs):
@@ -6198,6 +6326,35 @@ class Qwen3EngineForwardAdapter:
           f"got {rank_parallel_value!r}"
       )
     rank_parallel_backward = rank_parallel_value == "1"
+    numeric_debug = _p62_numeric_debug_enabled()
+    if numeric_debug:
+      numeric_contract = (
+          not p34
+          and workload.name == "gsm8k"
+          and (contract.dp_size, contract.tp_size) == (16, 4)
+          and contract.global_trajectories == 256
+          and contract.local_trajectories == 16
+          and self._bucket == 4096
+          and rank_parallel_backward
+          and os.environ.get("CANON_P33_RUN_STAGE", "")
+          == "backward-no-commit"
+          and os.environ.get("CANON_P33_NO_COMMIT", "") == "1"
+          and os.environ.get("CANON_GSM8K_ALIGNMENT_WARN_ONLY", "0") == "0"
+          and os.environ.get("CANON_P38_FIXED_LM_HEAD", "") == "1"
+          and os.environ.get("CANON_V1_HP_FULL", "0") == "0"
+      )
+      if not numeric_contract:
+        raise FunctionalMappingError(
+            "P62 numerical debug requires strict GSM8K DP16xTP4, "
+            "M4096/local-M256, P59 fixed-head backward-no-commit, and "
+            "must not impersonate the V1 full profile"
+        )
+      print(
+          "[P62.NUMERIC] admission workload=gsm8k dp=16 tp=4 "
+          "global_trajectories=256 local_trajectories=16 "
+          "global_M=4096 local_M=256 optimizer_commits=0",
+          flush=True,
+      )
     p59_xprof_directory = _p59_xprof_backward_directory(
         workload_name=workload.name,
         dp_size=contract.dp_size,
@@ -6288,6 +6445,15 @@ class Qwen3EngineForwardAdapter:
         per_token_logps, token_entropy, train_example, algo_config
     )
     scale = loss_output.primary_loss.compute_scale()
+    if numeric_debug:
+      _p62_emit_loss_receipt(loss_output=loss_output, contract=contract)
+      _p62_emit_tree_receipt(
+          stage="loss_cotangent",
+          group=-1,
+          group_count=contract.local_trajectories,
+          tree={"dentropy": dentropy, "dlogps": dlogps},
+          force=True,
+      )
 
     reducer = None
 
@@ -6307,11 +6473,26 @@ class Qwen3EngineForwardAdapter:
           raise FunctionalMappingError(
               f"P59 group {index} parallel replay logprobs changed"
           )
+        if numeric_debug:
+          _p62_emit_tree_receipt(
+              stage="engine_vjp",
+              group=index,
+              group_count=contract.local_trajectories,
+              tree=reverse["engine_gradients"],
+          )
         adjoint_start = time.perf_counter()
         staged_gradient = self._p59_rank_parallel_report_adjoint(
             trainer_state, reverse["engine_gradients"]
         )
         adjoint_seconds[0] += time.perf_counter() - adjoint_start
+        if numeric_debug:
+          _p62_emit_tree_receipt(
+              stage="trainer_rank_local",
+              group=index,
+              group_count=contract.local_trajectories,
+              tree=staged_gradient,
+              ranked=True,
+          )
         if reducer is None:
           reducer_factory = getattr(
               self,
@@ -6352,17 +6533,31 @@ class Qwen3EngineForwardAdapter:
         one_gradient, reduction_report = reducer.finalize_staged(
             staged_gradient
         )
+        if numeric_debug:
+          _p62_emit_tree_receipt(
+              stage="fixed_dp_reduced",
+              group=index,
+              group_count=contract.local_trajectories,
+              tree=one_gradient,
+          )
         leaves = jax.tree.leaves(one_gradient)
+        reduction_finite = reduction_report.get(
+            "post_reduction_all_finite"
+        )
+        if reduction_finite is None:
+          # Compatibility for test-only reducer doubles. The production fixed
+          # reducer always owns this scan before its replica comparison.
+          reduction_finite = all(
+              bool(np.asarray(jnp.all(jnp.isfinite(value))))
+              for value in leaves
+          )
         report = {
             "group": index,
             "trajectory_rows": reverse_groups[index],
             "n_real": spec["host_n_real"],
             "rank_counts": (reverse["counts"],),
             "pullback_invocations": 1,
-            "gradient_finite": all(
-                bool(np.asarray(jnp.all(jnp.isfinite(value))))
-                for value in leaves
-            ),
+            "gradient_finite": bool(reduction_finite),
             "gradient_nonzero": sum(
                 int(np.asarray(jnp.count_nonzero(value))) for value in leaves
             ),

@@ -1296,6 +1296,54 @@ class PeftTrainerTest(parameterized.TestCase):
     for value in jax.tree.leaves(nnx.state(trainer.grad_accumulator)):
       np.testing.assert_array_equal(np.asarray(value), np.zeros_like(value))
 
+  def test_p62_precomputed_diagnostic_discard_resets_without_commit(self):
+    config = peft_trainer.TrainingConfig(
+        eval_every_n_steps=100,
+        max_steps=1,
+        gradient_accumulation_steps=4,
+        checkpoint_root_directory=None,
+    )
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=nnx.Rngs(0))
+    trainer = peft_trainer.PeftTrainer(model, optax.sgd(1e-3), config)
+    gradient = jax.tree.map(
+        lambda value: type(value)(jnp.ones_like(value[...])),
+        nnx.state(trainer.model, nnx.Param),
+        is_leaf=lambda value: isinstance(value, nnx.VariableState),
+    )
+    before = jax.tree.map(
+        lambda value: np.asarray(value).copy(),
+        nnx.state(trainer.model, nnx.Param),
+    )
+    env = {
+        "CANON_ALIGNMENT_GATE": "1",
+        "CANON_ALIGNMENT_UPDATE_CANARY": "1",
+        "CANON_ALIGNMENT_GATE_ONLY": "0",
+        "CANON_ALIGNMENT_TRAIN": "0",
+        "CANON_P28_SEGMENTED_TRAIN": "1",
+        "CANON_P28_G5C_ONLY": "0",
+        "CANON_P28_G6_UPDATE": "1",
+        "CANON_P58_DEEPSWE_TIM": "0",
+        "CANON_P62_BACKWARD_NUMERIC_DEBUG": "1",
+    }
+    with mock.patch.dict(os.environ, env, clear=False):
+      for index in range(4):
+        trainer.accumulate_precomputed_gradient_microbatch(
+            gradient, microbatch_index=index
+        )
+      denominator = trainer.discard_precomputed_gradients()
+
+    self.assertEqual(float(denominator), 4.0)
+    self.assertEqual(trainer.train_steps, 0)
+    self.assertEqual(trainer._p28_precomputed_microstep, 0)
+    for actual, expected in zip(
+        jax.tree.leaves(nnx.state(trainer.model, nnx.Param)),
+        jax.tree.leaves(before),
+        strict=True,
+    ):
+      np.testing.assert_array_equal(np.asarray(actual), np.asarray(expected))
+    for value in jax.tree.leaves(nnx.state(trainer.grad_accumulator)):
+      np.testing.assert_array_equal(np.asarray(value), np.zeros_like(value))
+
   def test_p28_g6_checkpointing_is_isolated_to_signed_p45(self):
     checkpoint_directory = (
         "gs://yuxzhang-tunix-models/canon-zero-tim/checkpoints/"

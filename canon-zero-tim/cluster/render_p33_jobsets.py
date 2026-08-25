@@ -51,6 +51,7 @@ class JobSpec:
   fixed_lm_head: bool = False
   strict_alignment: bool = False
   v1_hp_full: bool = False
+  backward_numeric_debug: bool = False
 
   @property
   def filename(self) -> str:
@@ -376,6 +377,11 @@ def render_jobset(
               "1" if spec.rank_parallel_backward else "0"
           ),
           "CANON_V1_HP_FULL": "1" if spec.v1_hp_full else "0",
+          **(
+              {"CANON_P62_BACKWARD_NUMERIC_DEBUG": "1"}
+              if spec.backward_numeric_debug
+              else {}
+          ),
           "CANON_GSM8K_AB_REPORT_ONLY": "0",
           "CANON_GSM8K_ALIGNMENT_WARN_ONLY": (
               "1"
@@ -546,6 +552,11 @@ def validate_jobset(
           "1" if spec.rank_parallel_backward else "0"
       ),
       "CANON_V1_HP_FULL": "1" if spec.v1_hp_full else "0",
+      **(
+          {"CANON_P62_BACKWARD_NUMERIC_DEBUG": "1"}
+          if spec.backward_numeric_debug
+          else {}
+      ),
       "CANON_GSM8K_AB_REPORT_ONLY": "0",
       "CANON_GSM8K_ALIGNMENT_WARN_ONLY": (
           "1"
@@ -587,6 +598,11 @@ def validate_jobset(
       raise ValueError("generated P33 fixed lm-head off intent drifted")
   elif "CANON_P38_FIXED_LM_HEAD" in env:
     raise ValueError("generated P33 unexpectedly enabled fixed lm-head")
+  if spec.backward_numeric_debug:
+    if env.get("CANON_P62_BACKWARD_NUMERIC_DEBUG") != "1":
+      raise ValueError("generated P33 P62 diagnostic intent drifted")
+  elif "CANON_P62_BACKWARD_NUMERIC_DEBUG" in env:
+    raise ValueError("generated P33 unexpectedly enabled P62 diagnostic")
   if "CANON_P32_RC_STAGE" in env:
     raise ValueError("P33 JobSet retained a P32 release-candidate stage")
   if env.get("CANON_P32_EXPECT_MODEL_MESH_IDS") != "":

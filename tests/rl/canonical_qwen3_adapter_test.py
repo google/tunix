@@ -35,6 +35,7 @@ from unittest import mock
 from tunix.rl import algo_core
 from tunix.rl import canonical_qwen3_adapter
 from tunix.rl import dp_training
+from tunix.sft import utils as sft_utils
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -377,6 +378,96 @@ class _TiedSegmentedRunner:
 
 
 class CanonicalQwen3AdapterTest(absltest.TestCase):
+
+  def test_p62_tree_receipt_catches_first_nonfinite_boundary(self):
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+      with self.assertRaisesRegex(
+          canonical_qwen3_adapter.FunctionalMappingError,
+          "first non-finite numerical boundary",
+      ):
+        canonical_qwen3_adapter._p62_emit_tree_receipt(
+            stage="engine_vjp",
+            group=3,
+            group_count=16,
+            tree={
+                "good": jnp.asarray([1.0], jnp.float32),
+                "bad": jnp.asarray([jnp.nan], jnp.float32),
+            },
+        )
+    marker = output.getvalue()
+    self.assertIn("[P62.NUMERIC]", marker)
+    self.assertIn('"stage":"engine_vjp"', marker)
+    self.assertIn('"all_finite":false', marker)
+    self.assertIn("bad", marker)
+
+  def test_p62_loss_receipt_locks_denominator_and_scale(self):
+    def metric(value):
+      return sft_utils.WeightedMetric(
+          jnp.asarray(value, jnp.float32), jnp.asarray(1.0, jnp.float32)
+      )
+
+    loss_output = sft_utils.LossOutput(
+        primary_loss=sft_utils.WeightedMetric(
+            jnp.asarray(64.0, jnp.float32),
+            jnp.asarray(256.0, jnp.float32),
+        ),
+        aux_metrics={
+            "advantage/abs_mean": metric(0.5),
+            "advantage/max": metric(1.0),
+            "advantage/min": metric(-1.0),
+            "loss/effective_rows": metric(256.0),
+            "is_ratio/max": metric(1.1),
+            "is_ratio/min": metric(0.9),
+            "loss/valid_tokens": metric(1024.0),
+        },
+    )
+    contract = types.SimpleNamespace(
+        dp_size=16,
+        tp_size=4,
+        global_trajectories=256,
+        local_trajectories=16,
+    )
+    record = canonical_qwen3_adapter._p62_emit_loss_receipt(
+        loss_output=loss_output, contract=contract
+    )
+    self.assertEqual(record["loss_denominator"], 256.0)
+    self.assertEqual(record["loss_scale"], np.float32(1.0 / 256.0))
+    self.assertEqual(record["expected_streamed_multiplier"], 1.0 / 16.0)
+
+    wrong = dataclasses.replace(
+        loss_output,
+        primary_loss=sft_utils.WeightedMetric(
+            jnp.asarray(64.0, jnp.float32),
+            jnp.asarray(128.0, jnp.float32),
+        ),
+    )
+    with self.assertRaisesRegex(
+        canonical_qwen3_adapter.FunctionalMappingError,
+        "loss-scale contract failed",
+    ):
+      canonical_qwen3_adapter._p62_emit_loss_receipt(
+          loss_output=wrong, contract=contract
+      )
+
+  def test_p62_flag_parser_is_exact_boolean(self):
+    for value, expected in ((None, False), ("0", False), ("1", True)):
+      with self.subTest(value=value):
+        environ = {}
+        if value is not None:
+          environ["CANON_P62_BACKWARD_NUMERIC_DEBUG"] = value
+        with mock.patch.dict(os.environ, environ, clear=True):
+          self.assertEqual(
+              canonical_qwen3_adapter._p62_numeric_debug_enabled(),
+              expected,
+          )
+    with mock.patch.dict(
+        os.environ, {"CANON_P62_BACKWARD_NUMERIC_DEBUG": "yes"}, clear=True
+    ):
+      with self.assertRaisesRegex(
+          canonical_qwen3_adapter.FunctionalMappingError, "unset/0/1"
+      ):
+        canonical_qwen3_adapter._p62_numeric_debug_enabled()
 
   def test_xprof_jit_is_exactly_plain_jit_when_disabled(self):
     def add_one(value):
@@ -1626,6 +1717,15 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
           hidden, dlogits, state_leaves=(weight,)
       )
       staged = staged_tree[0]
+      engine_record = canonical_qwen3_adapter._p62_emit_tree_receipt(  # pylint: disable=protected-access
+          stage="engine_vjp",
+          group=0,
+          group_count=2,
+          tree=staged_tree,
+          ranked=True,
+          force=True,
+      )
+      self.assertTrue(engine_record["all_finite"])
 
       def ordinary_forward(weight_arg, hidden_arg):
         return jnp.matmul(hidden_arg, weight_arg)
@@ -1722,6 +1822,30 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
         staged_trainer = adapter._p59_rank_parallel_report_adjoint(  # pylint: disable=protected-access
             (weight, replicated_parameter), (staged, staged_replicated)
         )
+      trainer_record = canonical_qwen3_adapter._p62_emit_tree_receipt(  # pylint: disable=protected-access
+          stage="trainer_rank_local",
+          group=0,
+          group_count=2,
+          tree=staged_trainer,
+          ranked=True,
+          force=True,
+      )
+      self.assertTrue(trainer_record["all_finite"])
+      poisoned_staged = jax.tree.map(
+          lambda value: value.at[0].set(jnp.nan), staged_trainer
+      )
+      with self.assertRaisesRegex(
+          canonical_qwen3_adapter.FunctionalMappingError,
+          "P62 first non-finite numerical boundary",
+      ):
+        canonical_qwen3_adapter._p62_emit_tree_receipt(  # pylint: disable=protected-access
+            stage="trainer_rank_local_negative",
+            group=0,
+            group_count=2,
+            tree=poisoned_staged,
+            ranked=True,
+            force=True,
+        )
       template = adapter._p59_reducer_template(  # pylint: disable=protected-access
           (weight, replicated_parameter), staged_trainer
       )
@@ -1733,6 +1857,14 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
           require_distinct_fingerprints=False,
       )
       reduced, reduction_report = reducer.finalize_staged(staged_trainer)
+      reduced_record = canonical_qwen3_adapter._p62_emit_tree_receipt(  # pylint: disable=protected-access
+          stage="fixed_dp_reduced",
+          group=0,
+          group_count=2,
+          tree=reduced,
+          force=True,
+      )
+      self.assertTrue(reduced_record["all_finite"])
       expected_reduced = (
           expected_staged[0].astype(jnp.float32)
           + expected_staged[1].astype(jnp.float32)

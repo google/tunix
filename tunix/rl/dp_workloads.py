@@ -597,6 +597,26 @@ def requested_max_steps(
         "CANON_P61_BACKWARD_NUMERICAL_DIR requires an absolute path and "
         "exact gsm8k-p59-dp4-tp1 one-update deterministic geometry"
     )
+  p62_numeric_debug = values.get(
+      "CANON_P62_BACKWARD_NUMERIC_DEBUG", "0"
+  )
+  if p62_numeric_debug not in ("0", "1"):
+    raise ValueError(
+        "CANON_P62_BACKWARD_NUMERIC_DEBUG must be exactly 0 or 1"
+    )
+  if p62_numeric_debug == "1" and (
+      workload.name != "gsm8k"
+      or (workload.dp_size, workload.tp_size) != (16, 4)
+      or stage != "backward-no-commit"
+      or values.get("CANON_P33_NO_COMMIT") != "1"
+      or values.get("CANON_P59_RANK_PARALLEL_BACKWARD") != "1"
+      or values.get("CANON_P38_FIXED_LM_HEAD") != "1"
+      or values.get("CANON_V1_HP_FULL", "0") != "0"
+  ):
+    raise ValueError(
+        "CANON_P62_BACKWARD_NUMERIC_DEBUG requires exact GSM8K "
+        "DP16xTP4 P59 fixed-head backward-no-commit geometry"
+    )
   if stage == "full":
     if values.get("CANON_PROFILE_FILE", "") in (
         "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env",

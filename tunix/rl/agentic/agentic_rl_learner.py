@@ -868,6 +868,27 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             "CANON_P61_BACKWARD_NUMERICAL_DIR requires exact committed "
             "gsm8k-p59-dp4-tp1 one-update deterministic DP4xTP1 geometry"
         )
+    p62_value = os.environ.get("CANON_P62_BACKWARD_NUMERIC_DEBUG", "")
+    if p62_value not in ("", "0", "1"):
+      raise alignment.AlignmentGateError(
+          "CANON_P62_BACKWARD_NUMERIC_DEBUG must be unset/0/1"
+      )
+    p62_numeric_debug = p62_value == "1"
+    if p62_numeric_debug and not (
+        p33_workload
+        and workload.name == "gsm8k"
+        and (workload.dp_size, workload.tp_size) == (16, 4)
+        and run_stage == "backward-no-commit"
+        and p33_no_commit
+        and full_train
+        and os.environ.get("CANON_P59_RANK_PARALLEL_BACKWARD", "") == "1"
+        and os.environ.get("CANON_P38_FIXED_LM_HEAD", "") == "1"
+        and os.environ.get("CANON_V1_HP_FULL", "0") == "0"
+    ):
+      raise alignment.AlignmentGateError(
+          "P62 numerical debug requires exact strict GSM8K DP16xTP4 "
+          "P59 fixed-head backward-no-commit geometry"
+      )
     if num_trajectories % trajectory_micro:
       raise alignment.AlignmentGateError(
           "segmented update trajectory cadence changed: "
@@ -1015,14 +1036,57 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     def consume_scaled(index, gradients, multiplier):
       if p33_no_commit:
         multiplier = jnp.asarray(multiplier, jnp.float32)
-        squared_norm = sum(
-            jnp.sum(jnp.square(
-                value.astype(jnp.float32) * multiplier
-            ))
-            for value in jax.tree.leaves(gradients)
-        )
-        norm = jnp.sqrt(squared_norm)
-        norm.block_until_ready()
+        if p62_numeric_debug:
+          numeric_stats = sft_utils.scaled_tree_numeric_stats(
+              gradients, multiplier
+          )
+          numeric_receipt = sft_utils.tree_numeric_receipt(
+              gradients, stats=numeric_stats
+          )
+          numeric_record = {
+              "schema": "canon-p62-tree-numeric-v1",
+              "stage": "scaled_microgradient",
+              "group": index,
+              "groups": expected_microbatches,
+              "multiplier": float(np.asarray(multiplier)),
+              **numeric_receipt,
+          }
+          if (
+              index in (0, expected_microbatches - 1)
+              or not numeric_receipt["all_finite"]
+              or not numeric_receipt["naive_norm_finite"]
+          ):
+            print(
+                "[P62.NUMERIC] "
+                + json.dumps(
+                    numeric_record,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                flush=True,
+            )
+          if not numeric_receipt["all_finite"]:
+            raise alignment.AlignmentGateError(
+                "P62 first non-finite numerical boundary: "
+                f"stage=scaled_microgradient group={index} "
+                f"first={numeric_receipt['first_nonfinite']}"
+            )
+          actor_trainer.accumulate_precomputed_scaled_gradient_microbatch(
+              gradients,
+              multiplier,
+              microbatch_index=index,
+          )
+          norm = jnp.asarray(
+              numeric_receipt["stable_norm"], dtype=jnp.float32
+          )
+        else:
+          norm = jnp.sqrt(sum(
+              jnp.sum(jnp.square(
+                  value.astype(jnp.float32) * multiplier
+              ))
+              for value in jax.tree.leaves(gradients)
+          ))
+          norm.block_until_ready()
       else:
         norm = actor_trainer.accumulate_precomputed_scaled_gradient_microbatch(
             gradients,
@@ -1143,11 +1207,21 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
               for report in result["reports"][rows[0] : rows[-1] + 1]
           )
       )
+      gradient_finite = (
+          bool(result["reports"][index].get("gradient_finite", False))
+          if canonical_workload
+          else True
+      )
       norm_value = float(np.asarray(micro_norms[index]))
-      if (norm_value > 0.0) != active or not np.isfinite(norm_value):
+      if (
+          not gradient_finite
+          or (norm_value > 0.0) != active
+          or not np.isfinite(norm_value)
+      ):
         raise alignment.AlignmentGateError(
             "P28 G6 microgradient activity mismatch: "
-            f"index={index} active={active} norm={norm_value}"
+            f"index={index} active={active} finite={gradient_finite} "
+            f"norm={norm_value}"
         )
       activity.append(active)
       record = alignment.check_batch(
@@ -1170,6 +1244,54 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     if not any(activity) and (not full_train or p33_no_commit):
       raise alignment.AlignmentGateError(
           "INCONCLUSIVE_NO_SIGNAL: all four G6 microgradients are zero"
+      )
+
+    p62_accumulator_denominator = None
+    if p62_numeric_debug:
+      accumulator_tree = actor_trainer.grad_accumulator.get()
+      accumulator_receipt = sft_utils.tree_numeric_receipt(accumulator_tree)
+      p62_accumulator_denominator = float(np.asarray(jax.device_get(
+          actor_trainer.grad_accumulator.denom[...]
+      )))
+      accumulator_record = {
+          "schema": "canon-p62-tree-numeric-v1",
+          "stage": "final_accumulator",
+          "group": expected_microbatches - 1,
+          "groups": expected_microbatches,
+          "accumulator_denominator": p62_accumulator_denominator,
+          **accumulator_receipt,
+      }
+      print(
+          "[P62.NUMERIC] "
+          + json.dumps(
+              accumulator_record, sort_keys=True, separators=(",", ":")
+          ),
+          flush=True,
+      )
+      if (
+          not accumulator_receipt["all_finite"]
+          or p62_accumulator_denominator != float(expected_microbatches)
+      ):
+        raise alignment.AlignmentGateError(
+            f"P62 final accumulator contract failed: {accumulator_record}"
+        )
+      with self.rl_cluster._get_mesh_and_logical_axis_rules_cm(  # pylint: disable=protected-access
+          rl_cluster_lib.Role.ACTOR
+      ):
+        discarded_denominator = actor_trainer.discard_precomputed_gradients()
+      if float(np.asarray(discarded_denominator)) != float(
+          expected_microbatches
+      ):
+        raise alignment.AlignmentGateError(
+            "P62 discarded accumulator denominator changed: "
+            f"{float(np.asarray(discarded_denominator))} != "
+            f"{expected_microbatches}"
+        )
+      print(
+          "[P62.NUMERIC] discard_complete optimizer_commits=0 "
+          f"microsteps={expected_microbatches} "
+          f"denominator={p62_accumulator_denominator}",
+          flush=True,
       )
 
     p58_all_filtered = (
@@ -1343,6 +1465,8 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           "micro_gradient_norms": [
               float(np.asarray(value)) for value in micro_norms
           ],
+          "p62_numeric_debug": p62_numeric_debug,
+          "p62_accumulator_denominator": p62_accumulator_denominator,
           "model_changed_paths": changed["model"],
           "optimizer_changed_paths": changed["optimizer"],
           "accumulator_changed_paths": changed["accumulator"],

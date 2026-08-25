@@ -1831,10 +1831,28 @@ if [ "${CANON_P32_DP_ADMISSION:-0}" = "1" ]; then
       0|1) ;;
       *) echo "[env] CANON_P33_NO_COMMIT must be 0 or 1" >&2; fail=1 ;;
     esac
+    case "${CANON_P62_BACKWARD_NUMERIC_DEBUG:-0}" in
+      0|1) ;;
+      *) echo "[env] CANON_P62_BACKWARD_NUMERIC_DEBUG must be 0 or 1" >&2; fail=1 ;;
+    esac
     case "${CANON_GSM8K_AB_REPORT_ONLY:-0}" in
       0|1) ;;
       *) echo "[env] CANON_GSM8K_AB_REPORT_ONLY must be 0 or 1" >&2; fail=1 ;;
     esac
+    if [ "${CANON_P62_BACKWARD_NUMERIC_DEBUG:-0}" = "1" ]; then
+      [ "${CANON_P32_WORKLOAD:-}" = "gsm8k" ] && \
+      [ "${CANON_DP_SIZE:-}" = "16" ] && \
+      [ "${CANON_TP_SIZE:-}" = "4" ] && \
+      [ "${CANON_P33_RUN_STAGE:-}" = "backward-no-commit" ] && \
+      [ "${CANON_P33_NO_COMMIT:-}" = "1" ] && \
+      [ "${CANON_P59_RANK_PARALLEL_BACKWARD:-}" = "1" ] && \
+      [ "${CANON_P38_FIXED_LM_HEAD:-}" = "1" ] && \
+      [ "${CANON_V1_HP_FULL:-0}" = "0" ] && \
+      [ "${CANON_PROFILE_FILE:-}" = "cluster/profiles/qwen3-1p7b-dp16-tp4-gsm8k-p62-debug.env" ] || {
+        echo "[env] P62 requires exact GSM8K DP16xTP4 fixed-head backward-no-commit profile" >&2
+        fail=1
+      }
+    fi
     case "${CANON_GSM8K_ALIGNMENT_WARN_ONLY:-0}" in
       0|1) ;;
       *) echo "[env] CANON_GSM8K_ALIGNMENT_WARN_ONLY must be 0 or 1" >&2; fail=1 ;;

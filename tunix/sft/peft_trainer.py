@@ -1246,9 +1246,14 @@ class PeftTrainer:
     return norm
 
   def discard_precomputed_gradients(self) -> ArrayLike:
-    """Discards an all-filtered P58 transaction without committing it."""
-    if os.environ.get("CANON_P58_DEEPSWE_TIM", "") != "1":
-      raise ValueError("precomputed discard is reserved for P58 DeepSWE")
+    """Discards one explicitly admitted transaction without committing it."""
+    if (
+        os.environ.get("CANON_P58_DEEPSWE_TIM", "") != "1"
+        and os.environ.get("CANON_P62_BACKWARD_NUMERIC_DEBUG", "") != "1"
+    ):
+      raise ValueError(
+          "precomputed discard is reserved for P58 or P62 diagnostics"
+      )
     self._last_precomputed_commit_evidence = None
     self._validate_precomputed_gradient_contract()
     expected_microsteps = _precomputed_expected_microbatches(os.environ)
