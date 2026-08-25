@@ -1,11 +1,14 @@
 # GSM8K one-host Native vs Zero-HP XProf runbook
 
-> **P60-2 readability follow-up is active.** P60-2E's first clean-SHA Zero-HP
+> **P60-2 readability target has a historical clean-SHA pass.** P60-2E's first
+> clean-SHA Zero-HP
 > run passed its runtime, hierarchy, all-plane, optimizer-tail, alignment, and
 > classifier gates, but its old runner hashed `driver.log` before appending the
 > final GREEN line. Its strongest claim is therefore `CORE TARGET GATES PASS /
-> EVIDENCE PACKAGING RED`, not TARGET PASS. P60-2F repairs that ordering and is
-> not yet committed or target-rerun. Before any new run, read
+> EVIDENCE PACKAGING RED`, not TARGET PASS. P60-2F repairs that ordering;
+> historical clean source `5549b5b6` has a fresh TARGET PASS, while the
+> latest-tip integration `c87838d8` is local/exact-image admitted and was not
+> target-rerun. Before any new run, read
 > [`HANDOFF_P60_2.md`](HANDOFF_P60_2.md) and all `phases/p60-2*.md`. Do not
 > rerun Native. A fresh Zero-HP canary is allowed only after P60-2B's
 > host/static/exact-image gates and explicit user approval. The revised census
@@ -25,11 +28,19 @@ completeness; `[PERF]` from comparable unprofiled steps decides speed. The UI,
 host hierarchy, semantic Perfetto, and trace JSON are attribution/navigation
 views, not interchangeable clocks.
 
-P60-2B/P60-2E implementation commit
-`da535c1d5cee7573671fa40809547a6972bec072` passed the clean-SHA core target
-gates. The latest registry contains 372 flags because P63 is included. The
-preserved packaging-RED root proves the P60-2E XPlane metadata, but cannot be
-accepted until a fresh runner-fixed receipt has a valid SHA ledger.
+Historical P60-2F source
+`5549b5b6046f91406d1897b47618fca83c5fad7d` passed the fresh clean-SHA target
+on root
+`/mnt/disks/tunix-data/gsm8k-onehost-xprof/v1_zero-hp_p60_readable_zero_p60_2f_ledger_clean_20260825_r1`.
+It ended with `SHA_LEDGER_PASS entries=9` and Zero-HP GREEN; independent
+`sha256sum -c SHA256SUMS` passed all entries. The prior P60-2E packaging-RED
+root remains preserved and is not retroactively accepted. The latest-tip
+integration `c87838d8a77ddca33800df024b3fef9edc503327` passed the complete
+host gates and has pinned exact-image admission but was not target-rerun. Base
+`a909fda1` includes M15/P64 runtime and evidence changes, so the complete
+aggregate-plus-P60 pinned exact-image ladder was rerun on the final rebased
+three-commit tree before publication rather than admitted by byte identity.
+The registry contains 378 flags, including P64.
 
 Run from the exact worktree on the direct four-chip v5p. Do not run the two
 arms concurrently. During development only, the dirty-tree override is

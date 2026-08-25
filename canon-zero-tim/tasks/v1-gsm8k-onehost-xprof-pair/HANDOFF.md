@@ -3,9 +3,10 @@
 > **Active follow-up (P60-2):** the original pair below is complete, but the
 > Zero-HP view lacks a navigable host hierarchy. Do not rerun this two-arm
 > recipe as a readability fix. A new executor must first follow
-> [`HANDOFF_P60_2.md`](HANDOFF_P60_2.md). Its P60-2B local gates and the
-> separately approved P60-2C Zero-HP development canary now pass. Do not rerun
-> either arm without new approval. The historical pair remains
+> [`HANDOFF_P60_2.md`](HANDOFF_P60_2.md). P60-2F has a historical clean-SHA
+> Zero-HP TARGET PASS at `5549b5b6`; the latest-tip integration `c87838d8` is
+> local/exact-image admitted but was not target-rerun. Do not rerun either arm
+> without new approval. The historical pair remains
 > `INCONCLUSIVE_INPUT_MISMATCH` for timing.
 
 This task is GSM8K, not DeepSWE. Do not run anything under

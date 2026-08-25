@@ -1,7 +1,8 @@
 # State
 
-- Status: P60-2E CLEAN-SHA CORE TARGET GATES PASS / EVIDENCE PACKAGING RED;
-  P60-2F LOCAL/EXACT-IMAGE PASS / TARGET NOT RERUN.
+- Status: P60-2F historical CLEAN-SHA ZERO-HP TARGET PASS at `5549b5b6`;
+  latest-tip integration `c87838d8` is LOCAL/EXACT-IMAGE PASS / TARGET NOT
+  RERUN. The earlier P60-2E root remains EVIDENCE PACKAGING RED.
 - Objective: make the Zero-HP P59 update capture human-readable as one training
   step with stable update, group, backward, reducer, and optimizer hierarchy,
   without changing its numerical program or adding synchronization.
@@ -9,17 +10,18 @@
   exact-image, flag, diff, and P60-2 document gates pass locally. The separately
   authorized P60-2C one-host certification has now passed its machine and
   full-XPlane readability gates.
-- Worktree entry: `/home/yuxuan/code_rl_repro/worktrees/p60_2e_microstep_latest_0825`
+- Worktree entry: `/home/yuxuan/code_rl_repro/worktrees/p60_2f_integrated_0825`
   (data-disk-backed because the root filesystem was full).
-- Branch: `local/p60-2e-microstep-latest-0825`
-- Base: `53876c15f407435dbd44680ad18f5f8e88f3c255` from the fetched
-  `origin/yuxzhang/canon-zero-tim` tip. P60-2E was rebased without conflict as
-  local commit `d0c6c67474d836664bab69eed665d96d6ff53a25`; the immutable clean-SHA
-  target below correctly retains its historical source `da535c1d...`.
+- Branch: `local/p60-2f-integrated-0825`
+- Base: `a909fda18ce97c885f9e5dcbd687e0b62c808c91` from the publication-time operator tip.
+  P60 implementation is integrated as local commit
+  `9493928fda4fac3186d4a7eaa49ad33ba59c8162`; the ledger change is replayed
+  as local commit `c87838d8a77ddca33800df024b3fef9edc503327`. The immutable
+  target below correctly retains its historical source `5549b5b6...`.
 - Current phase: [P60-2F — evidence-ledger finalization](phases/p60-2f-evidence-ledger-finalization.md).
-  The P60-2E implementation was committed locally as
-  `da535c1d5cee7573671fa40809547a6972bec072` and received one clean-SHA
-  Zero-HP target run. P60-2D remains pending.
+  Historical source `5549b5b6...` has a clean committed-tree Zero-HP TARGET
+  PASS. The integrated source has host/exact-image admission only. P60-2D
+  remains pending.
 - Implemented contract: labels-off is an exact no-op; labels-on adds the
   Native API-compatible `StepTraceAnnotation("train", step_num=1)` envelope
   and bounded update/group/transaction annotations. This is API compatibility
@@ -33,14 +35,17 @@
 - Preserved fact: the historical Native and Zero-HP captures are complete; the
   historical pair remains `INCONCLUSIVE_INPUT_MISMATCH` and cannot support a
   causal timing ratio.
-- Next action: review the P60-2F diff and stop for a separate additive-commit
-  approval. A fresh target rerun would require a later, separate launch
-  approval. Do not rerun Native.
-- Current P60-2F result on the fetched `53876c15...` base: task suite 11/11,
-  document set 14/14, full pinned exact-image ladder,
-  GREEN/RED/post-manifest-tamper/duplicate-marker controls, 372/372 flag audit,
-  branch preflight, syntax, diff, secret, and no-production-source-change gates
-  pass.
+- Next action: after the separately approved rebase, validation, and
+  fast-forward publication, stop. The historical-source claim needs no
+  additional TPU run. Calling the integrated SHA itself TARGET PASS would
+  require a separately approved fresh run. Do not rerun Native.
+- Current integrated result on `c87838d8...`: P60 task suite 11/11, document
+  set 14/14, P59 37/37, V1/P64 67/67, complete 378/378 flag audit, branch
+  preflight, syntax, diff, secret, P59 DP4 exact-image, and full
+  aggregate-plus-P60 pinned exact-image gates pass. Base `a909fda1` contains
+  M15/P64 runtime and evidence changes, so the complete pinned exact-image
+  ladder and all focused host gates were rerun on the final rebased
+  three-commit tree before publication.
 - First target result: RED only at the new hierarchy gate. Training completed
   3/3 updates with 51/51 alignment PASS; old all-plane backward and semantic
   censuses passed; all bounded child spans and 8/8 device Steps rows were
@@ -72,17 +77,52 @@
   freezes the unique terminal marker before manifest creation, verifies the
   manifest immediately, emits `SHA_LEDGER_PASS` only afterward, and returns
   98 on a ledger failure. The immutable failed-package root is not modified.
+- P60-2F historical clean-SHA target result: TARGET PASS. Fresh root
+  `/mnt/disks/tunix-data/gsm8k-onehost-xprof/v1_zero-hp_p60_readable_zero_p60_2f_ledger_clean_20260825_r1`
+  used source `5549b5b6046f91406d1897b47618fca83c5fad7d`, tree
+  `becf1f03e7659d80618c191ef6e05fce7ec3ba6c`, empty source diff, pinned
+  image `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`,
+  and wrapper exit 0. It completed 3/3 updates and 51/51 alignment PASS, has
+  the exact same-track host hierarchy with `train_step=1`, microsteps 0..15,
+  last accumulator 15, optimizer update 1, and has all backward families plus
+  scaled-step×16 and commit×1 with decode absent on 8/8 TPU planes. The arm
+  classifier is PASS with no reasons and no training/rank-0 traceback was
+  recorded. One ignored weakref-finalizer traceback after `TRAINING_DONE` is
+  preserved as tail noise; Docker returned 0.
+- Historical evidence-ledger result: PASS. `driver.log` contains exactly one
+  terminal GREEN marker, the runner emitted `SHA_LEDGER_PASS entries=9`, no
+  temporary manifest remains, and an independent `sha256sum -c SHA256SUMS`
+  passed 9/9. Manifest SHA-256 is
+  `7faaa0d35ca112027f4638e95baa8d2738510eafdf96b5f11b790a8bb1bab0e0`.
+  XPlane is 768,320,714 bytes / SHA-256
+  `9f317e50e61cc92c5b1ce1c742904a3bb0c5c7ef2d8debb050e244cd9a051de8`;
+  trace JSON is 33,680,377 bytes /
+  `263c79a0bbabf4269322a8adb552b29b438ffbc82402b89c7a21735e5be65d6a`;
+  semantic Perfetto is 12,436 bytes /
+  `d4d465639658a9a49741d540a256ca13f5bba27d8610b876ca258a6d2c25e529`.
+- Runtime observation: historical target step durations were 646.87, 224.61,
+  and 192.93 seconds versus 642.74, 225.70, and 192.33 seconds in the
+  immediately preceding clean-SHA run. This is no observed regression in a
+  single-run smoke comparison, not a matched unprofiled performance claim.
+- Latest-tip integration result: commits `9493928f...` and `c87838d8...` sit
+  on operator base `a909fda1...`. The append-only registry merge retains both
+  the latest M15 row and the P60 row, and the subsequent publication-time
+  rebase completed without conflicts. P64 group-0 diagnostic replay and its
+  `sampler_is=none` admission remain nested inside the P60 hierarchy.
+  P60/P59/V1/P64 host gates and both pinned exact-image ladders
+  pass. No TPU was run for this integrated SHA, so its ceiling is
+  LOCAL/EXACT-IMAGE PASS / TARGET NOT RERUN.
 - Full-XPlane navigation result: group 0's reverse interval overlaps the
   head, norm, layer, embed, and adjoint backward module families on 8/8 TPU
   planes. Host parent/child containment and stage order pass mechanically.
-- Blocker: the clean-SHA target's core evidence is good, but its SHA ledger is
-  invalid, so `TARGET PASS` is prohibited. P60-2F is uncommitted and has not
-  been target-rerun.
+- Blocker: none for historical P60-2F target acceptance. The integrated SHA is
+  not target-certified, P60-2D remains pending, and this evidence-only concern
+  is published as the third commit in the approved stack.
 - Key artifacts: [P60-2 handoff](HANDOFF_P60_2.md), [plan](plan.md),
   [P60-2B phase](phases/p60-2b-hierarchy-instrumentation.md), and
   [operator runbook](RUNBOOK.md).
 - All prior roots and the clean-SHA packaging-RED root remain preserved. The
-  authorized clean-SHA Zero-HP run has been consumed. No additive P60-2F
-  commit, push, image publication, Native rerun, or further TPU retry is
-  authorized.
+  authorized P60-2F historical run, evidence-doc commit, rebase, validation,
+  and fast-forward push have been consumed. No image publication, Native
+  rerun, further TPU launch, or additional remote mutation is authorized.
 - Updated: 2026-08-25.

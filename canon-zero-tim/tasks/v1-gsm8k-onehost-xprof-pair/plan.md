@@ -28,7 +28,7 @@ Native-vs-Zero timing from the existing input-mismatched pair.
 | [P60-2C](phases/p60-2c-onehost-visual-certification.md) | One fresh Zero-HP one-host capture with hierarchy census and UI checklist | 3/3 commits, 51/51 alignment PASS, 8/8 backward planes, exact hierarchy counts, decode absent; optimizer-tail drop was not yet a mechanical gate | passed (dirty-tree analysis grade) |
 | [P60-2D](phases/p60-2d-attribution-and-next-decision.md) | Deterministic hierarchy summary and performance follow-up decision | All-plane stage report produced; any optimization is split into a new single-variable phase | pending |
 | [P60-2E](phases/p60-2e-microstep-readability.md) | Truthful accumulator microstep and optimizer-update metadata without pretending Zero-HP is Native's monolithic graph | CPU/negative controls, exact-image 16-span receipt, old-artifact fail-closed hierarchy probe, 8/8 device planes with scaled-step×16 + commit×1, flag/diff/no-sync gates | core target gates pass; evidence packaging red |
-| [P60-2F](phases/p60-2f-evidence-ledger-finalization.md) | Fail-closed terminal marker and immutable evidence-ledger finalization | GREEN/RED/tamper CPU controls, immediate `sha256sum -c`, no post-manifest hashed writes, exact-image and static gates | passed (local/exact-image); target not rerun |
+| [P60-2F](phases/p60-2f-evidence-ledger-finalization.md) | Fail-closed terminal marker and immutable evidence-ledger finalization | GREEN/RED/tamper CPU controls, immediate `sha256sum -c`, no post-manifest hashed writes, exact-image and static gates | historical clean-SHA target pass (`5549b5b6`); latest-tip integration exact-image admitted (`c87838d8`), target not rerun |
 
 ## Decisions
 

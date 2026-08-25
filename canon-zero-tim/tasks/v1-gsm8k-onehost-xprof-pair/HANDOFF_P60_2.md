@@ -230,11 +230,20 @@ It is dirty-tree analysis-grade evidence, not a signed clean-SHA receipt. It
 is not a Native/Zero speed claim and not a 64-chip certification.
 
 P60-2E was added afterward to expose truthful accumulator microsteps and the
-separate optimizer update. Its clean-SHA run passed the core target gates, but
-the old runner produced its SHA ledger before appending the terminal GREEN
-line. That immutable root is packaging RED. P60-2F fixes finalization order
-additively; until a fresh committed-tree run passes both the core gates and
-`SHA_LEDGER_PASS`, P60-2E cannot be promoted to TARGET PASS.
+separate optimizer update. Its first clean-SHA run passed the core target
+gates, but the old runner produced its SHA ledger before appending the terminal
+GREEN line. That immutable root remains packaging RED. P60-2F fixes
+finalization order additively in historical clean source
+`5549b5b6046f91406d1897b47618fca83c5fad7d`. Fresh root
+`v1_zero-hp_p60_readable_zero_p60_2f_ledger_clean_20260825_r1` passes 3/3
+updates, 51/51 alignment, the exact same-track hierarchy and metadata, 8/8
+backward plus optimizer-tail planes with decode absent, classifier PASS with
+no reasons, `SHA_LEDGER_PASS entries=9`, and an independent 9/9 manifest
+check. That historical source therefore has CLEAN-SHA TARGET PASS. The
+latest-tip integration `c87838d8a77ddca33800df024b3fef9edc503327` passes
+host and pinned exact-image admission only; it was not target-rerun and must
+not inherit the TARGET PASS label. Neither result promotes the earlier
+packaging-RED root or creates a Native/Zero speed claim.
 
 Rollback is the single annotation/census/classifier CL. With
 `CANON_XPROF_LABELS` absent or `0`, runtime behavior must already be an exact

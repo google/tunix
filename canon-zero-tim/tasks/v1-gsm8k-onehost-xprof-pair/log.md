@@ -379,3 +379,53 @@
   `P60_2B_EXACT_IMAGE_PASS ... tpu_devices=0`.
 - No functional commit, push, TPU/Kubernetes launch, or mutation of the
   packaging-RED run root occurred. P60-2F remains TARGET NOT RERUN.
+
+## 2026-08-25 — P60-2F historical clean-SHA Zero-HP TARGET PASS and latest-tip admission
+
+- Historical source: authorized additive local commit
+  `5549b5b6046f91406d1897b47618fca83c5fad7d`, tree
+  `becf1f03e7659d80618c191ef6e05fce7ec3ba6c`, empty source diff, pinned
+  image `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`.
+  Fresh root:
+  `/mnt/disks/tunix-data/gsm8k-onehost-xprof/v1_zero-hp_p60_readable_zero_p60_2f_ledger_clean_20260825_r1`.
+- Runtime: wrapper exit 0, 3/3 update receipts PASS, 3/3 pre-alignment plus
+  48/48 micro-alignment PASS, no training/rank-0 traceback. One ignored
+  weakref-finalizer traceback after `TRAINING_DONE` is preserved as tail noise;
+  Docker returned 0. Global-step durations were 646.87, 224.61, and 192.93
+  seconds versus 642.74, 225.70, and 192.33 seconds in the prior clean-SHA
+  run; this is no observed smoke-test regression, not a matched unprofiled
+  performance claim.
+- Hierarchy: one same-track `train_step=1`; 16 forward groups, 16 reverse
+  groups, 16 complete transactions; `micro_step=0..15`, unique last=15,
+  optimizer update=1; non-empty Steps rows on all eight TPU planes.
+- Device/semantic: all five backward families present on 8/8 planes, each
+  plane has scaled-step×16 and commit×1, decode absent, and the single-update
+  semantic census is GREEN. Classification is PASS with `reasons=[]`.
+- Ledger: runner printed `SHA_LEDGER_PASS entries=9` before terminal Zero-HP
+  GREEN; `driver.log` has exactly one terminal marker, no temporary manifest
+  remains, and independent `sha256sum -c SHA256SUMS` passed 9/9. Manifest
+  SHA-256 is
+  `7faaa0d35ca112027f4638e95baa8d2738510eafdf96b5f11b790a8bb1bab0e0`.
+- Artifacts: XPlane 768,320,714 bytes /
+  `9f317e50e61cc92c5b1ce1c742904a3bb0c5c7ef2d8debb050e244cd9a051de8`;
+  trace JSON 33,680,377 bytes /
+  `263c79a0bbabf4269322a8adb552b29b438ffbc82402b89c7a21735e5be65d6a`;
+  semantic Perfetto 12,436 bytes /
+  `d4d465639658a9a49741d540a256ca13f5bba27d8610b876ca258a6d2c25e529`.
+- Latest-tip integration: rebased onto
+  `a909fda18ce97c885f9e5dcbd687e0b62c808c91`, replayed the implementation as
+  `9493928fda4fac3186d4a7eaa49ad33ba59c8162` and the ledger change as
+  `c87838d8a77ddca33800df024b3fef9edc503327`. P60 11/11, P59 37/37,
+  V1/P64 67/67, flags 378/378, P59 DP4 exact-image, and the full
+  aggregate-plus-P60 pinned exact-image ladder pass. The final P60 marker is
+  `P60_2B_EXACT_IMAGE_PASS ... tpu_devices=0`.
+- Exact-image provenance: base `a909fda1` includes M15/P64 runtime and evidence
+  changes, so the previous byte-identical closure is not reused. The complete
+  aggregate-plus-P60 pinned exact-image ladder and the P60/P59/V1-P64 host
+  gates were rerun on the final rebased three-commit tree before publication
+  and exited 0.
+- Verdict: historical `5549b5b6` is CLEAN-SHA TARGET PASS; integrated
+  `c87838d8` is LOCAL/EXACT-IMAGE PASS / TARGET NOT RERUN. The prior
+  packaging-RED root remains immutable. This evidence-only concern is
+  published as the third CL in the approved stack after all publication gates;
+  no image publication, Native rerun, or extra TPU launch occurred.
