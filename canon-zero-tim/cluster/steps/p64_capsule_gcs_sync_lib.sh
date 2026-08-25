@@ -71,6 +71,54 @@ canon_p64_capsule_sync() {
         gsutil cp "$remote_binding" "$binding" || rc=$?
       fi
     fi
+  elif python3 -c "from google.cloud import storage" >/dev/null 2>&1; then
+    tool="python"
+    if [ "$phase" = "capture" ]; then
+      [ -s "$capsule" ] && [ -s "$binding" ] || rc=3
+      if [ "$rc" -eq 0 ]; then
+        python3 -c '
+import sys
+from google.cloud import storage
+
+c_local, b_local, c_uri, b_uri = sys.argv[1:5]
+client = storage.Client()
+def parse(uri):
+    return uri[5:].split("/", 1)
+
+cb, ckey = parse(c_uri)
+bb, bkey = parse(b_uri)
+b_capsule = client.bucket(cb)
+b_binding = client.bucket(bb)
+
+try:
+    b_capsule.blob(ckey).upload_from_filename(c_local, if_generation_match=0)
+    b_binding.blob(bkey).upload_from_filename(b_local, if_generation_match=0)
+except Exception as e:
+    # If PreconditionFailed or already uploaded, verify existence
+    if not (b_capsule.blob(ckey).exists() and b_binding.blob(bkey).exists()):
+        raise
+' "$capsule" "$binding" "$remote" "$remote_binding" || rc=$?
+      fi
+    else
+      [ ! -e "$capsule" ] && [ ! -e "$binding" ] || rc=4
+      if [ "$rc" -eq 0 ]; then
+        mkdir -p "$(dirname -- "$capsule")"
+        python3 -c '
+import sys
+from google.cloud import storage
+
+c_local, b_local, c_uri, b_uri = sys.argv[1:5]
+client = storage.Client()
+def parse(uri):
+    return uri[5:].split("/", 1)
+
+cb, ckey = parse(c_uri)
+bb, bkey = parse(b_uri)
+client.bucket(cb).blob(ckey).download_to_filename(c_local)
+client.bucket(bb).blob(bkey).download_to_filename(b_local)
+' "$capsule" "$binding" "$remote" "$remote_binding" || rc=$?
+      fi
+    fi
   else
     rc=127
   fi
