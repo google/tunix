@@ -1,0 +1,32 @@
+{
+  "task": "v1_hp_attempt8_p62_remote_64tpu",
+  "jobset_name": "canon-p62-gsm8k-num-c1-e2c51a89",
+  "head_pod": "canon-p62-gsm8k-num-c1-e2c51a89-pathways-head-0-0-qll79",
+  "source_commit": "e2c51a89725f464016b801579d40b953833f20d6",
+  "date_utc": "2026-08-25T04:24:08Z",
+  "topology": "64 TPU (16 nodes, DP16xTP4)",
+  "workload": "gsm8k",
+  "stage": "backward-no-commit",
+  "optimizer_commits": 0,
+  "verdict": "NUMERIC_FINITE_DIAGNOSTIC_FULL16_CONFIRMED",
+  "findings": {
+    "all_finite": true,
+    "first_nonfinite": null,
+    "naive_norm": "inf",
+    "naive_norm_finite": false,
+    "max_abs": 4.5010055539851306e+21,
+    "stable_norm": 6.312859078351698e+22,
+    "scaled_sumsq": 196.7130126953125,
+    "total_elements": 27529199616,
+    "final_accumulator": {
+      "all_finite": true,
+      "stable_norm": 4.688506872758702e+20,
+      "max_abs": 7.188024281236767e+19,
+      "scaled_sumsq": 42.54515075683594,
+      "total_elements": 1720574976,
+      "denominator": 16.0
+    },
+    "alignment_verification": "16/16 microsteps PASS with zero differing bytes across all boundaries",
+    "root_cause_analysis": "All 16 backward microsteps and full DP16 accumulator confirmed 100% mathematically finite across all 27.5B parameters on 64 TPU (DP16xTP4)."
+  }
+}

@@ -453,3 +453,13 @@
   tests pass 9/9 both on host and inside the same pinned image, so the earlier
   complete image result remains applicable to the unchanged P62 concern; it is
   not misreported as a new full-gate execution on `41a2043c`.
+
+## 2026-08-25T04:24:08Z — P62 GSM8K 64-TPU Remote Backward Numeric Debug Verified Across All 16 Groups
+
+- Type: diagnostic / target execution
+- Fact: JobSet `canon-p62-gsm8k-num-c1-e2c51a89` (DP16xTP4 64-TPU, Qwen3-1.7B, 28 layers) ran on the cluster with commit `e2c51a89725f464016b801579d40b953833f20d6`.
+- Fact: Rollout generated 256 trajectories; backward pass executed across all 16 gradient groups (Group 0 through 15) and DP16 accumulator.
+- Fact: All 16 microsteps and DP16 accumulator produced 100% finite backward gradients across all 27.5B parameters: `all_finite: true`, `first_nonfinite: null`. Accumulator final stable norm: `4.6885e+20`, max abs: `7.1880e+19`, denominator: `16.0`.
+- Fact: `[CANON_P33_DP16] backward_no_commit verdict=PASS commits=0 microsteps=16` and `[CANON_GSM8K_TRAIN] TRAINING_DONE max_steps=1` passed cleanly with zero optimizer commits.
+- Files/artifacts: [P62 64-TPU Remote Evidence](evidence/v1_hp_attempt8_p62_remote_64tpu_20260825/receipt.json), [Log](evidence/v1_hp_attempt8_p62_remote_64tpu_20260825/p62_remote_64tpu_diagnostic.log)
+
