@@ -1,0 +1,246 @@
+=== STEP 71734 LOG SNAPSHOT ===
+2026-08-25 19:38:58 - INFO - [absl] Using 1.9 GiB on device(39,TPU_DEVICE,coords=[3,1,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3)
+2026-08-25 19:38:58 - INFO - [absl] Using 1.9 GiB on device(40,TPU_DEVICE,coords=[0,2,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3)
+2026-08-25 19:38:58 - INFO - [absl] Using 1.9 GiB on device(41,TPU_DEVICE,coords=[1,2,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3)
+2026-08-25 19:38:58 - INFO - [absl] Using 1.9 GiB on device(42,TPU_DEVICE,coords=[2,2,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3)
+2026-08-25 19:38:58 - INFO - [absl] Using 1.9 GiB on device(43,TPU_DEVICE,coords=[3,2,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3)
+2026-08-25 19:38:58 - INFO - [absl] Using 1.9 GiB on device(44,TPU_DEVICE,coords=[0,3,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3)
+2026-08-25 19:38:58 - INFO - [absl] Using 1.9 GiB on device(45,TPU_DEVICE,coords=[1,3,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3)
+2026-08-25 19:38:58 - INFO - [absl] Using 1.9 GiB on device(46,TPU_DEVICE,coords=[2,3,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3)
+2026-08-25 19:38:58 - INFO - [absl] Using 1.9 GiB on device(47,TPU_DEVICE,coords=[3,3,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3)
+2026-08-25 19:38:58 - INFO - [absl] Using 1.9 GiB on device(48,TPU_DEVICE,coords=[0,0,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3)
+2026-08-25 19:38:58 - INFO - [absl] Using 1.9 GiB on device(49,TPU_DEVICE,coords=[1,0,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3)
+2026-08-25 19:38:58 - INFO - [absl] Using 1.9 GiB on device(50,TPU_DEVICE,coords=[2,0,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3)
+2026-08-25 19:38:58 - INFO - [absl] Using 1.9 GiB on device(51,TPU_DEVICE,coords=[3,0,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3)
+2026-08-25 19:38:58 - INFO - [absl] Using 1.9 GiB on device(52,TPU_DEVICE,coords=[0,1,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3)
+2026-08-25 19:38:58 - INFO - [absl] Using 1.9 GiB on device(53,TPU_DEVICE,coords=[1,1,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3)
+2026-08-25 19:38:58 - INFO - [absl] Using 1.9 GiB on device(54,TPU_DEVICE,coords=[2,1,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3)
+2026-08-25 19:38:58 - INFO - [absl] Using 1.9 GiB on device(55,TPU_DEVICE,coords=[3,1,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3)
+2026-08-25 19:38:58 - INFO - [absl] Using 1.9 GiB on device(56,TPU_DEVICE,coords=[0,2,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3)
+2026-08-25 19:38:58 - INFO - [absl] Using 1.9 GiB on device(57,TPU_DEVICE,coords=[1,2,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3)
+2026-08-25 19:38:58 - INFO - [absl] Using 1.9 GiB on device(58,TPU_DEVICE,coords=[2,2,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3)
+2026-08-25 19:38:58 - INFO - [absl] Using 1.9 GiB on device(59,TPU_DEVICE,coords=[3,2,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3)
+2026-08-25 19:38:58 - INFO - [absl] Using 1.9 GiB on device(60,TPU_DEVICE,coords=[0,3,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3)
+2026-08-25 19:38:58 - INFO - [absl] Using 1.9 GiB on device(61,TPU_DEVICE,coords=[1,3,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3)
+2026-08-25 19:38:58 - INFO - [absl] Using 1.9 GiB on device(62,TPU_DEVICE,coords=[2,3,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3)
+2026-08-25 19:38:58 - INFO - [absl] Using 1.9 GiB on device(63,TPU_DEVICE,coords=[3,3,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3)
+
+=== STEP 71746 LOG SNAPSHOT ===
+2026-08-25 19:38:58 - INFO - [absl] Using 1.9 GiB on device(39,TPU_DEVICE,coords=[3,1,2,0],logical_task=9,slice=0,default_mem=device,mem_spaces=3)
+2026-08-25 19:38:58 - INFO - [absl] Using 1.9 GiB on device(40,TPU_DEVICE,coords=[0,2,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3)
+2026-08-25 19:38:58 - INFO - [absl] Using 1.9 GiB on device(41,TPU_DEVICE,coords=[1,2,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3)
+2026-08-25 19:38:58 - INFO - [absl] Using 1.9 GiB on device(42,TPU_DEVICE,coords=[2,2,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3)
+2026-08-25 19:38:58 - INFO - [absl] Using 1.9 GiB on device(43,TPU_DEVICE,coords=[3,2,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3)
+2026-08-25 19:38:58 - INFO - [absl] Using 1.9 GiB on device(44,TPU_DEVICE,coords=[0,3,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3)
+2026-08-25 19:38:58 - INFO - [absl] Using 1.9 GiB on device(45,TPU_DEVICE,coords=[1,3,2,0],logical_task=10,slice=0,default_mem=device,mem_spaces=3)
+2026-08-25 19:38:58 - INFO - [absl] Using 1.9 GiB on device(46,TPU_DEVICE,coords=[2,3,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3)
+2026-08-25 19:38:58 - INFO - [absl] Using 1.9 GiB on device(47,TPU_DEVICE,coords=[3,3,2,0],logical_task=11,slice=0,default_mem=device,mem_spaces=3)
+2026-08-25 19:38:58 - INFO - [absl] Using 1.9 GiB on device(48,TPU_DEVICE,coords=[0,0,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3)
+2026-08-25 19:38:58 - INFO - [absl] Using 1.9 GiB on device(49,TPU_DEVICE,coords=[1,0,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3)
+2026-08-25 19:38:58 - INFO - [absl] Using 1.9 GiB on device(50,TPU_DEVICE,coords=[2,0,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3)
+2026-08-25 19:38:58 - INFO - [absl] Using 1.9 GiB on device(51,TPU_DEVICE,coords=[3,0,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3)
+2026-08-25 19:38:58 - INFO - [absl] Using 1.9 GiB on device(52,TPU_DEVICE,coords=[0,1,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3)
+2026-08-25 19:38:58 - INFO - [absl] Using 1.9 GiB on device(53,TPU_DEVICE,coords=[1,1,3,0],logical_task=12,slice=0,default_mem=device,mem_spaces=3)
+2026-08-25 19:38:58 - INFO - [absl] Using 1.9 GiB on device(54,TPU_DEVICE,coords=[2,1,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3)
+2026-08-25 19:38:58 - INFO - [absl] Using 1.9 GiB on device(55,TPU_DEVICE,coords=[3,1,3,0],logical_task=13,slice=0,default_mem=device,mem_spaces=3)
+2026-08-25 19:38:58 - INFO - [absl] Using 1.9 GiB on device(56,TPU_DEVICE,coords=[0,2,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3)
+2026-08-25 19:38:58 - INFO - [absl] Using 1.9 GiB on device(57,TPU_DEVICE,coords=[1,2,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3)
+2026-08-25 19:38:58 - INFO - [absl] Using 1.9 GiB on device(58,TPU_DEVICE,coords=[2,2,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3)
+2026-08-25 19:38:58 - INFO - [absl] Using 1.9 GiB on device(59,TPU_DEVICE,coords=[3,2,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3)
+2026-08-25 19:38:58 - INFO - [absl] Using 1.9 GiB on device(60,TPU_DEVICE,coords=[0,3,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3)
+2026-08-25 19:38:58 - INFO - [absl] Using 1.9 GiB on device(61,TPU_DEVICE,coords=[1,3,3,0],logical_task=14,slice=0,default_mem=device,mem_spaces=3)
+2026-08-25 19:38:58 - INFO - [absl] Using 1.9 GiB on device(62,TPU_DEVICE,coords=[2,3,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3)
+2026-08-25 19:38:58 - INFO - [absl] Using 1.9 GiB on device(63,TPU_DEVICE,coords=[3,3,3,0],logical_task=15,slice=0,default_mem=device,mem_spaces=3)
+
+=== STEP 71758 LOG SNAPSHOT ===
+<truncated 9 lines>
+INFO 08-25 19:43:42 [model_loader.py:621] Loading model with MODEL_IMPL_TYPE=auto
+INFO 08-25 19:43:42 [model_loader.py:624] Resolved MODEL_IMPL_TYPE 'auto' to 'flax_nnx'
+ERROR 08-25 19:43:42 [tpu_info.py:91] Failed to detect number of TPUs: [Errno 2] No such file or directory: '/dev/vfio'
+ERROR 08-25 19:43:42 [tpu_info.py:40] Unable to poll TPU GCE Metadata. Got status code: 404 and content: <!DOCTYPE html>
+ERROR 08-25 19:43:42 [tpu_info.py:40] <html lang=en>
+ERROR 08-25 19:43:42 [tpu_info.py:40]   <meta charset=utf-8>
+ERROR 08-25 19:43:42 [tpu_info.py:40]   <meta name=viewport content="initial-scale=1, minimum-scale=1, width=device-width">
+ERROR 08-25 19:43:42 [tpu_info.py:40]   <title>Error 404 (Not Found)!!1</title>
+ERROR 08-25 19:43:42 [tpu_info.py:40]   <style>
+ERROR 08-25 19:43:42 [tpu_info.py:40]     *{margin:0;padding:0}html,code{font:15px/22px arial,sans-serif}html{background:#fff;color:#222;padding:15px}body{margin:7% auto 0;max-width:390px;min-height:180px;padding:30px 0 15px}* > body{background:url(//www.google.com/images/errors/robot.png) 100% 5px no-repeat;padding-right:205px}p{margin:11px 0 22px;overflow:hidden}ins{color:#777;text-decoration:none}a img{border:0}@media screen and (max-width:772px){body{background:none;margin-top:0;max-width:none;padding-right:0}}#logo{background:url(//www.google.com/images/branding/googlelogo/1x/googlelogo_color_150x54dp.png) no-repeat;margin-left:-5px}@media only screen and (min-resolution:192dpi){#logo{background:url(//www.google.com/images/branding/googlelogo/2x/googlelogo_color_150x54dp.png) no-repeat 0% 0%/100% 100%;-moz-border-image:url(//www.google.com/images/branding/googlelogo/2x/googlelogo_color_150x54dp.png) 0}}@media only screen and (-webkit-min-device-pixel-ratio:2){#logo{background:url(//www.google.com/images/branding/googlelogo/2x/googlelogo_color_150x54dp.png) no-repeat;-webkit-background-size:100% 100%}}#logo{display:inline-block;height:54px;width:150px}
+ERROR 08-25 19:43:42 [tpu_info.py:40]   </style>
+ERROR 08-25 19:43:42 [tpu_info.py:40]   <a href=//www.google.com/><span id=logo aria-label=Google></span></a>
+ERROR 08-25 19:43:42 [tpu_info.py:40]   <p><b>404.</b> <ins>That’s an error.</ins>
+ERROR 08-25 19:43:42 [tpu_info.py:40]   <p>The requested URL <code>/computeMetadata/v1/instance/attributes/accelerator-type</code> was not found on this server.  <ins>That’s all we know.</ins>
+ERROR 08-25 19:43:42 [tpu_info.py:40] 
+INFO 08-25 19:43:42 [qwen3.py:136] Running with attention Q-Projection laid out as DNH
+
+=== STEP 71770 LOG SNAPSHOT ===
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=k prefix=model.layers.35.self_attn.k_norm rows=16 F=128 model=qwen3-8b-tp8
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=16 K=4096 N=128
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=16 Mp=128 padded=1 K=4096 Kp=4096 N=128 Np=128 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=v_proj prefix=model.layers.35.self_attn.v_proj M=16 Klocal=4096 Nlocal=128
+[PATHTRACE] CANON_FIXED_AR=1 gather-ordered-sum at model.layers.35.self_attn.o_proj (TNH,NHD->TD, tp=8)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=16 K=512 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=16 Mp=128 padded=1 K=512 Kp=512 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=o_proj prefix=model.layers.35.self_attn.o_proj M=16 Klocal=512 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=16 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=post prefix=model.layers.35.post_attention_layernorm rows=16 F=4096 model=qwen3-8b-tp8
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=16 K=4096 N=1536
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=16 Mp=128 padded=1 K=4096 Kp=4096 N=1536 Np=1536 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=gate_proj prefix=model.layers.35.mlp.gate_proj M=16 Klocal=4096 Nlocal=1536
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=16 K=4096 N=1536
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=16 Mp=128 padded=1 K=4096 Kp=4096 N=1536 Np=1536 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=up_proj prefix=model.layers.35.mlp.up_proj M=16 Klocal=4096 Nlocal=1536
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=swiglu M=16 F=1536
+[PATHTRACE] CANON_PALLAS_SWIGLU_MPAD=1 M=16 Mp=128 F=1536 Fp=1536 row_padded=1 feature_padded=0
+[PATHTRACE] CANON_PALLAS_SWIGLU=1 M=16 Flocal=1536
+[PATHTRACE] CANON_FIXED_AR=1 gather-ordered-sum at model.layers.35.mlp.down_proj (mn,np->mp, tp=8)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=16 K=1536 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=16 Mp=128 padded=1 K=1536 Kp=1536 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=down_proj prefix=model.layers.35.mlp.down_proj M=16 Klocal=1536 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=16 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=final prefix=model.norm rows=16 F=4096 model=qwen3-8b-tp8
+
+=== STEP 71790 LOG SNAPSHOT ===
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=post prefix=model.layers.34.post_attention_layernorm rows=128 F=4096 model=qwen3-8b-tp8
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=128 K=4096 N=1536
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=128 Mp=128 padded=0 K=4096 Kp=4096 N=1536 Np=1536 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=gate_proj prefix=model.layers.34.mlp.gate_proj M=128 Klocal=4096 Nlocal=1536
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=128 K=4096 N=1536
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=128 Mp=128 padded=0 K=4096 Kp=4096 N=1536 Np=1536 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=up_proj prefix=model.layers.34.mlp.up_proj M=128 Klocal=4096 Nlocal=1536
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=swiglu M=128 F=1536
+[PATHTRACE] CANON_PALLAS_SWIGLU_MPAD=1 M=128 Mp=128 F=1536 Fp=1536 row_padded=0 feature_padded=0
+[PATHTRACE] CANON_PALLAS_SWIGLU=1 M=128 Flocal=1536
+[PATHTRACE] CANON_FIXED_AR=1 gather-ordered-sum at model.layers.34.mlp.down_proj (mn,np->mp, tp=8)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=128 K=1536 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=128 Mp=128 padded=0 K=1536 Kp=1536 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=down_proj prefix=model.layers.34.mlp.down_proj M=128 Klocal=1536 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=128 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=input prefix=model.layers.35.input_layernorm rows=128 F=4096 model=qwen3-8b-tp8
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=128 K=4096 N=512
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=128 Mp=128 padded=0 K=4096 Kp=4096 N=512 Np=512 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=q_proj prefix=model.layers.35.self_attn.q_proj M=128 Klocal=4096 Nlocal=512
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=512 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=q prefix=model.layers.35.self_attn.q_norm rows=512 F=128 model=qwen3-8b-tp8
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=128 K=4096 N=128
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=128 Mp=128 padded=0 K=4096 Kp=4096 N=128 Np=128 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=k_proj prefix=model.layers.35.self_attn.k_proj M=128 Klocal=4096 Nlocal=128
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=128 F=128
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=k prefix=model.layers.35.self_attn.k_norm rows=128 F=128 model=qwen3-8b-tp8
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=128 K=4096 N=128
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=128 Mp=128 padded=0 K=4096 Kp=4096 N=128 Np=128 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=v_proj prefix=model.layers.35.self_attn.v_proj M=128 Klocal=4096 Nlocal=128
+[PATHTRACE] CANON_FIXED_AR=1 gather-ordered-sum at model.layers.35.self_attn.o_proj (TNH,NHD->TD, tp=8)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=128 K=512 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=128 Mp=128 padded=0 K=512 Kp=512 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=o_proj prefix=model.layers.35.self_attn.o_proj M=128 Klocal=512 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=128 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=post prefix=model.layers.35.post_attention_layernorm rows=128 F=4096 model=qwen3-8b-tp8
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=128 K=4096 N=1536
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=128 Mp=128 padded=0 K=4096 Kp=4096 N=1536 Np=1536 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=gate_proj prefix=model.layers.35.mlp.gate_proj M=128 Klocal=4096 Nlocal=1536
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=128 K=4096 N=1536
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=128 Mp=128 padded=0 K=4096 Kp=4096 N=1536 Np=1536 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=up_proj prefix=model.layers.35.mlp.up_proj M=128 Klocal=4096 Nlocal=1536
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=swiglu M=128 F=1536
+[PATHTRACE] CANON_PALLAS_SWIGLU_MPAD=1 M=128 Mp=128 F=1536 Fp=1536 row_padded=0 feature_padded=0
+[PATHTRACE] CANON_PALLAS_SWIGLU=1 M=128 Flocal=1536
+[PATHTRACE] CANON_FIXED_AR=1 gather-ordered-sum at model.layers.35.mlp.down_proj (mn,np->mp, tp=8)
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=matmul M=128 K=1536 N=4096
+[PATHTRACE] CANON_PALLAS_MPAD=1 M=128 Mp=128 padded=0 K=1536 Kp=1536 N=4096 Np=4096 contract_padded=0 output_padded=0
+[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site=down_proj prefix=model.layers.35.mlp.down_proj M=128 Klocal=1536 Nlocal=4096
+[PATHTRACE] CANON_PALLAS_CANONICAL_VJP=1 op=rmsnorm M=128 F=4096
+[PATHTRACE] CANON_PALLAS_ALL_RMSNORM=1 site=final prefix=model.norm rows=128 F=4096 model=qwen3-8b-tp8
+
+=== STEP 71805 LOG SNAPSHOT ===
+INFO 08-25 19:49:29 [dp_scheduler.py:181] Scheduler worker process 5 started (PID=2099)
+INFO 08-25 19:49:29 [dp_scheduler.py:181] Scheduler worker process 6 started (PID=2100)
+INFO 08-25 19:49:29 [dp_scheduler.py:495] DPScheduler (Async = False) started 8 worker processes with cloudpickle. Per-rank limits: max_seqs=32, max_tokens=256; global max_tokens across dp=8: 2048
+INFO 08-25 19:49:29 [dp_scheduler.py:502] DPScheduler batch prefills ENABLED (threshold=8, flush when 8 pending or any rank idle).
+INFO 08-25 19:49:29 [dp_scheduler.py:181] Scheduler worker process 7 started (PID=2101)
+INFO 08-25 19:49:29 [block_pool.py:768] Successfully reset prefix cache
+INFO 08-25 19:49:29 [block_pool.py:768] Successfully reset prefix cache
+INFO 08-25 19:49:29 [block_pool.py:768] Successfully reset prefix cache
+INFO 08-25 19:49:29 [block_pool.py:768] Successfully reset prefix cache
+INFO 08-25 19:49:29 [block_pool.py:768] Successfully reset prefix cache
+INFO 08-25 19:49:29 [block_pool.py:768] Successfully reset prefix cache
+INFO 08-25 19:49:29 [block_pool.py:768] Successfully reset prefix cache
+INFO 08-25 19:49:29 [block_pool.py:768] Successfully reset prefix cache
+INFO 08-25 19:49:30 [kv_cache_manager.py:1026] Deleting kv-cache | num_layers=36 | hbm_before=[(19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0)]Gb
+INFO 08-25 19:49:30 [kv_cache_manager.py:1038] KV cache delete complete | hbm_after=[(8.65, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0)]Gb
+2026-08-25 19:49:30 - WARNING - [absl] Type mismatch on embedder.input_embedding: float32 -> bfloat16
+2026-08-25 19:49:33 - INFO - [absl] Reshard finished in 0.36s
+INFO 08-25 19:49:33 [kv_cache_manager.py:1060] Reinitializing kv-cache | hbm_before=[(8.65, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0), (8.64, 95.0)]Gb
+INFO 08-25 19:49:34 [kv_cache_manager.py:976] Hybrid KV cache layout: num_kv_cache_groups=1, num_kv_cache_tensors=36, kv_cache_config.num_blocks=301625, duplicate_shared_layers=False
+INFO 08-25 19:49:34 [kv_cache_manager.py:1004] Init kv-cache | num_total_layers=36 | num_blocks=[301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624, 301624] | regular_attn_layers=36 | regular_attn_shape=(num_blocks, (16, 8, 2, 128)) | regular_attn_sharding=NamedSharding(mesh=Mesh('data': 8, 'attn_dp': 1, 'attn_dp_expert': 1, 'expert': 1, 'model': 8, 'dcp': 1, axis_types=(Auto, Auto, Auto, Auto, Auto, Auto)), spec=P(('data', 'attn_dp', 'attn_dp_expert'), 'dcp', ('model', 'expert')), memory_kind=device) | regular_attn_dtype=bfloat16 | hbm=[(19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0), (19.0, 95.0)]Gb
+[CANON_ADAPTER] live engine contract {'implementation_id': 'tpu_inference.runner.tpu_runner.TPUModelRunner:qwen3', 'mapping_entries': 399, 'target_path_sha256': 'f51e6f0cfc606c1e6cfc144a1bd950a0c10ee25c71cbde479ec3b5e1150c7a09', 'state_leaves': 399, 'mesh_shape': (('data', 8), ('attn_dp', 1), ('attn_dp_expert', 1), ('expert', 1), ('model', 8), ('dcp', 1)), 'kv_caches': 36, 'model_fn': 'wrapped_model_fn', 'compute_logits_fn': 'run_compute_logits'}
+[P56.GATHERED_LOGPROBS] installed data=8 local_m=256 continue_decode=8
+[CANON_ADAPTER] shared canonical logprob pipeline installed runner_sampling_adapter_same_object=True stages=partial,combine,normalize
+[CANON_ADAPTER] processed-logprob custom VJP installed m=2048 max_logprobs=1
+[CANON_ADAPTER] differentiable engine adapter registered {'implementation_id': 'tpu_inference.runner.tpu_runner.TPUModelRunner:qwen3-canonical-dp8-tp8-m256-vjp2', 'is_engine_module': True, 'supports_value_and_grad': True}
+
+=== STEP 71821 LOG SNAPSHOT ===
+[PERF] stage=rollout_generate seconds=70.360 rows=1
+[CANON_P38_INCIDENT_LEDGER] record=525 call=544 requests=71 bytes=524035391
+[PERF] stage=rollout_generate seconds=72.906 rows=1
+[CANON_P38_REQUEST_JOURNAL] record=740 request=754-8ecba740 prefix=1601 stratum=3 dp=3
+[CANON_P38_INCIDENT_LEDGER] record=526 call=545 requests=71 bytes=525239120
+[CANON_P38_INCIDENT_LEDGER] record=527 call=546 requests=71 bytes=526443645
+[CANON_P38_INCIDENT_LEDGER] record=528 call=547 requests=74 bytes=527699900
+INFO 08-25 19:54:04 [loggers.py:273] Engine 000: Avg prompt throughput: 5643.0 tokens/s, Avg generation throughput: 180.7 tokens/s, Running: 82 reqs, Waiting: 78 reqs, GPU KV cache usage: 2.9%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=63.552 rows=1
+[CANON_P38_INCIDENT_LEDGER] record=529 call=548 requests=74 bytes=528957714
+[PERF] stage=rollout_generate seconds=80.556 rows=1
+[CANON_P38_INCIDENT_LEDGER] record=530 call=549 requests=73 bytes=530200294
+[PERF] stage=rollout_generate seconds=66.970 rows=1
+[CANON_P38_REQUEST_JOURNAL] record=741 request=760-a6f01811 prefix=1606 stratum=3 dp=1
+[CANON_P38_INCIDENT_LEDGER] record=531 call=550 requests=74 bytes=531460211
+[PERF] stage=rollout_generate seconds=71.199 rows=1
+[CANON_P38_INCIDENT_LEDGER] record=532 call=551 requests=74 bytes=532721722
+[PERF] stage=rollout_generate seconds=69.502 rows=1
+[PERF] stage=rollout_generate seconds=62.712 rows=1
+[CANON_P38_INCIDENT_LEDGER] record=533 call=552 requests=73 bytes=533970167
+[PERF] stage=rollout_generate seconds=70.348 rows=1
+[PERF] stage=rollout_generate seconds=80.094 rows=1
+[CANON_P38_INCIDENT_LEDGER] record=534 call=553 requests=71 bytes=535189751
+[PERF] stage=rollout_generate seconds=116.446 rows=1
+[CANON_P38_REQUEST_JOURNAL] record=742 request=766-880da675 prefix=1461 stratum=3 dp=6
+[CANON_P38_REQUEST_JOURNAL] record=743 request=765-a98e098b prefix=1533 stratum=3 dp=7
+[CANON_P38_INCIDENT_LEDGER] record=535 call=554 requests=73 bytes=536437787
+[PERF] stage=rollout_generate seconds=67.860 rows=1
+[PERF] stage=rollout_generate seconds=72.918 rows=1
+[CANON_P38_INCIDENT_LEDGER] record=536 call=555 requests=72 bytes=537666719
+
+=== STEP 71836 LOG SNAPSHOT ===
+INFO 08-25 19:53:50 [loggers.py:273] Engine 000: Avg prompt throughput: 4398.6 tokens/s, Avg generation throughput: 152.3 tokens/s, Running: 75 reqs, Waiting: 89 reqs, GPU KV cache usage: 2.6%, Prefix cache hit rate: 0.0%
+INFO 08-25 19:53:53 [loggers.py:273] Engine 000: Avg prompt throughput: 4658.5 tokens/s, Avg generation throughput: 172.6 tokens/s, Running: 74 reqs, Waiting: 91 reqs, GPU KV cache usage: 2.7%, Prefix cache hit rate: 0.0%
+INFO 08-25 19:54:00 [loggers.py:273] Engine 000: Avg prompt throughput: 4776.9 tokens/s, Avg generation throughput: 149.7 tokens/s, Running: 73 reqs, Waiting: 88 reqs, GPU KV cache usage: 2.6%, Prefix cache hit rate: 0.0%
+INFO 08-25 19:54:04 [loggers.py:273] Engine 000: Avg prompt throughput: 5643.0 tokens/s, Avg generation throughput: 180.7 tokens/s, Running: 82 reqs, Waiting: 78 reqs, GPU KV cache usage: 2.9%, Prefix cache hit rate: 0.0%
+INFO 08-25 19:54:10 [loggers.py:273] Engine 000: Avg prompt throughput: 3757.3 tokens/s, Avg generation throughput: 154.9 tokens/s, Running: 80 reqs, Waiting: 76 reqs, GPU KV cache usage: 2.9%, Prefix cache hit rate: 0.0%
+INFO 08-25 19:54:14 [loggers.py:273] Engine 000: Avg prompt throughput: 4399.3 tokens/s, Avg generation throughput: 184.3 tokens/s, Running: 78 reqs, Waiting: 73 reqs, GPU KV cache usage: 2.9%, Prefix cache hit rate: 0.0%
+INFO 08-25 19:54:20 [loggers.py:273] Engine 000: Avg prompt throughput: 4346.8 tokens/s, Avg generation throughput: 153.3 tokens/s, Running: 77 reqs, Waiting: 75 reqs, GPU KV cache usage: 2.9%, Prefix cache hit rate: 0.0%
+INFO 08-25 19:54:24 [loggers.py:273] Engine 000: Avg prompt throughput: 5048.3 tokens/s, Avg generation throughput: 180.9 tokens/s, Running: 83 reqs, Waiting: 68 reqs, GPU KV cache usage: 3.2%, Prefix cache hit rate: 0.0%
+INFO 08-25 19:54:30 [loggers.py:273] Engine 000: Avg prompt throughput: 3867.2 tokens/s, Avg generation throughput: 157.6 tokens/s, Running: 76 reqs, Waiting: 71 reqs, GPU KV cache usage: 3.0%, Prefix cache hit rate: 0.0%
+INFO 08-25 19:54:35 [loggers.py:273] Engine 000: Avg prompt throughput: 5322.4 tokens/s, Avg generation throughput: 175.8 tokens/s, Running: 76 reqs, Waiting: 69 reqs, GPU KV cache usage: 3.0%, Prefix cache hit rate: 0.0%
+
+=== STEP 71862 LOG SNAPSHOT ===
+INFO 08-25 19:56:27 [loggers.py:273] Engine 000: Avg prompt throughput: 4832.9 tokens/s, Avg generation throughput: 126.7 tokens/s, Running: 60 reqs, Waiting: 56 reqs, GPU KV cache usage: 2.9%, Prefix cache hit rate: 0.0%
+INFO 08-25 19:56:30 [loggers.py:273] Engine 000: Avg prompt throughput: 2985.4 tokens/s, Avg generation throughput: 111.0 tokens/s, Running: 56 reqs, Waiting: 57 reqs, GPU KV cache usage: 2.8%, Prefix cache hit rate: 0.0%
+INFO 08-25 19:56:38 [loggers.py:273] Engine 000: Avg prompt throughput: 4752.9 tokens/s, Avg generation throughput: 124.1 tokens/s, Running: 59 reqs, Waiting: 55 reqs, GPU KV cache usage: 3.0%, Prefix cache hit rate: 0.0%
+INFO 08-25 19:56:40 [loggers.py:273] Engine 000: Avg prompt throughput: 5354.1 tokens/s, Avg generation throughput: 103.6 tokens/s, Running: 59 reqs, Waiting: 54 reqs, GPU KV cache usage: 3.0%, Prefix cache hit rate: 0.0%
+INFO 08-25 19:56:48 [loggers.py:273] Engine 000: Avg prompt throughput: 4696.2 tokens/s, Avg generation throughput: 120.9 tokens/s, Running: 60 reqs, Waiting: 53 reqs, GPU KV cache usage: 3.0%, Prefix cache hit rate: 0.0%
+INFO 08-25 19:56:50 [loggers.py:273] Engine 000: Avg prompt throughput: 2684.2 tokens/s, Avg generation throughput: 107.6 tokens/s, Running: 57 reqs, Waiting: 56 reqs, GPU KV cache usage: 2.9%, Prefix cache hit rate: 0.0%
+INFO 08-25 19:56:58 [loggers.py:273] Engine 000: Avg prompt throughput: 4655.3 tokens/s, Avg generation throughput: 118.1 tokens/s, Running: 56 reqs, Waiting: 53 reqs, GPU KV cache usage: 2.9%, Prefix cache hit rate: 0.0%
+INFO 08-25 19:57:00 [loggers.py:273] Engine 000: Avg prompt throughput: 8415.6 tokens/s, Avg generation throughput: 89.9 tokens/s, Running: 60 reqs, Waiting: 52 reqs, GPU KV cache usage: 2.9%, Prefix cache hit rate: 0.0%
+INFO 08-25 19:57:08 [loggers.py:273] Engine 000: Avg prompt throughput: 4543.0 tokens/s, Avg generation throughput: 122.9 tokens/s, Running: 57 reqs, Waiting: 50 reqs, GPU KV cache usage: 2.7%, Prefix cache hit rate: 0.0%
+INFO 08-25 19:57:10 [loggers.py:273] Engine 000: Avg prompt throughput: 1680.0 tokens/s, Avg generation throughput: 107.6 tokens/s, Running: 56 reqs, Waiting: 52 reqs, GPU KV cache usage: 2.7%, Prefix cache hit rate: 0.0%
+
+=== STEP 71876 LOG SNAPSHOT ===
+INFO 08-25 19:59:30 [loggers.py:273] Engine 000: Avg prompt throughput: 5234.6 tokens/s, Avg generation throughput: 91.9 tokens/s, Running: 48 reqs, Waiting: 27 reqs, GPU KV cache usage: 2.9%, Prefix cache hit rate: 0.0%
+INFO 08-25 19:59:31 [loggers.py:273] Engine 000: Avg prompt throughput: 1986.7 tokens/s, Avg generation throughput: 95.6 tokens/s, Running: 47 reqs, Waiting: 29 reqs, GPU KV cache usage: 2.9%, Prefix cache hit rate: 0.0%
+INFO 08-25 19:59:40 [loggers.py:273] Engine 000: Avg prompt throughput: 4309.5 tokens/s, Avg generation throughput: 90.6 tokens/s, Running: 48 reqs, Waiting: 26 reqs, GPU KV cache usage: 3.1%, Prefix cache hit rate: 0.0%
+INFO 08-25 19:59:41 [loggers.py:273] Engine 000: Avg prompt throughput: 4759.0 tokens/s, Avg generation throughput: 123.8 tokens/s, Running: 48 reqs, Waiting: 24 reqs, GPU KV cache usage: 3.1%, Prefix cache hit rate: 0.0%
+INFO 08-25 19:59:50 [loggers.py:273] Engine 000: Avg prompt throughput: 4696.5 tokens/s, Avg generation throughput: 89.2 tokens/s, Running: 46 reqs, Waiting: 26 reqs, GPU KV cache usage: 3.0%, Prefix cache hit rate: 0.0%
+INFO 08-25 19:59:51 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 93.9 tokens/s, Running: 42 reqs, Waiting: 29 reqs, GPU KV cache usage: 2.9%, Prefix cache hit rate: 0.0%
+INFO 08-25 20:00:00 [loggers.py:273] Engine 000: Avg prompt throughput: 6951.1 tokens/s, Avg generation throughput: 87.3 tokens/s, Running: 50 reqs, Waiting: 20 reqs, GPU KV cache usage: 3.2%, Prefix cache hit rate: 0.0%
+INFO 08-25 20:00:02 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 101.8 tokens/s, Running: 43 reqs, Waiting: 26 reqs, GPU KV cache usage: 2.8%, Prefix cache hit rate: 0.0%
+INFO 08-25 20:00:10 [loggers.py:273] Engine 000: Avg prompt throughput: 3914.5 tokens/s, Avg generation throughput: 83.5 tokens/s, Running: 43 reqs, Waiting: 22 reqs, GPU KV cache usage: 2.9%, Prefix cache hit rate: 0.0%
+INFO 08-25 20:00:12 [loggers.py:273] Engine 000: Avg prompt throughput: 6567.2 tokens/s, Avg generation throughput: 94.8 tokens/s, Running: 40 reqs, Waiting: 22 reqs, GPU KV cache usage: 2.7%, Prefix cache hit rate: 0.0%
