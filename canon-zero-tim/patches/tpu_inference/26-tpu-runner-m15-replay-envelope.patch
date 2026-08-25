@@ -1,0 +1,164 @@
+--- tpu_runner_p21_l30.py
++++ tpu_runner_p21_l30.py
+@@ -1139,6 +1139,11 @@
+ _P38_DIAGNOSTIC_ROUND_FILE = os.environ.get(
+     "CANON_P38_DIAGNOSTIC_ROUND_FILE", "")
+ _P38_INCIDENT_STATE = {"records": 0, "bytes": 0}
++_P38_M15_TARGET_DEBUG = os.environ.get(
++    "CANON_APC_M15_TARGET_DEBUG", "")
++_P38_M15_REPLAY_LEDGER = os.environ.get(
++    "CANON_APC_M15_REPLAY_LEDGER", "")
++_P38_M15_REPLAY_STATE = {"records": 0, "bytes": 0}
+ _P38_KV_OBSERVER_DIR = os.environ.get("CANON_P38_KV_OBSERVER_DIR", "")
+ _P38_KV_OBSERVER_MAX_CANDIDATES = int(os.environ.get(
+     "CANON_P38_KV_OBSERVER_MAX_CANDIDATES", "4") or "4")
+@@ -1196,0 +1202,7 @@
++if _P38_M15_TARGET_DEBUG not in ("", "off", "on"):
++    raise RuntimeError(
++        "CANON_APC_M15_TARGET_DEBUG must be unset, off, or on")
++if bool(_P38_M15_TARGET_DEBUG) != bool(_P38_M15_REPLAY_LEDGER):
++    raise RuntimeError(
++        "M15 target debug and replay ledger must be enabled together")
++
+@@ -1234,6 +1246,12 @@
+     if incident_parent != capture_root:
+         raise RuntimeError(
+             "P38 incident ledger must live directly in the capture directory")
++    if _P38_M15_REPLAY_LEDGER:
++        replay_parent = os.path.realpath(os.path.dirname(
++            _P38_M15_REPLAY_LEDGER))
++        if replay_parent != capture_root:
++            raise RuntimeError(
++                "M15 replay ledger must live directly in the capture directory")
+     if not (0 <= _P38_INCIDENT_MIN_PREFIX < _P38_INCIDENT_MAX_PREFIX):
+         raise RuntimeError("P38 incident prefix bounds are invalid")
+     if not (1024 * 1024 <= _P38_INCIDENT_MAX_BYTES <= 256 * 1024 * 1024):
+@@ -1709,0 +1728,125 @@
++def _p38_m15_replay_ledger(
++        runner, scheduler_output, req_ids_dp, call_index, program_path):
++    """Persist reversible request identities for every serving call.
++
++    Token payloads are not repeated in every ledger line. The alignment-side
++    producer-unit artifact owns those bytes; this host-only envelope records a
++    token-history SHA and length for every scheduled request so postflight can
++    join the two sources exactly. No device value is fetched here.
++    """
++    if not _P38_M15_TARGET_DEBUG:
++        return
++    import json as _json
++    import os as _os
++    from pathlib import Path as _Path
++
++    co_batch = sorted(
++        str(request_id)
++        for request_id, scheduled_tokens in
++        scheduler_output.num_scheduled_tokens.items()
++        if int(scheduled_tokens) > 0
++    )
++    if not co_batch:
++        return
++    dispatch_order = [
++        str(request_id)
++        for dp_rank in sorted(req_ids_dp)
++        for request_id in req_ids_dp[dp_rank]
++        if str(request_id) in co_batch
++    ]
++    if len(dispatch_order) != len(co_batch) or set(dispatch_order) != set(co_batch):
++        raise RuntimeError(
++            "M15 replay envelope does not cover the exact co-batch")
++    dp_slots = {
++        str(request_id): (int(dp_rank), int(local_slot))
++        for dp_rank, request_ids in req_ids_dp.items()
++        for local_slot, request_id in enumerate(request_ids)
++    }
++    requests = []
++    for request_id in dispatch_order:
++        if request_id not in runner.input_batch.req_id_to_index:
++            raise RuntimeError(
++                "M15 replay request is absent from the input batch: "
++                f"{request_id}")
++        request_index = int(runner.input_batch.req_id_to_index[request_id])
++        dp_rank, local_slot = dp_slots[request_id]
++        scheduled_tokens = int(
++            scheduler_output.num_scheduled_tokens[request_id])
++        num_computed = int(
++            runner.input_batch.num_computed_tokens_cpu[request_index])
++        num_prompt = int(
++            runner.input_batch.num_prompt_tokens[request_index])
++        num_tokens = int(runner.input_batch.num_tokens[request_index])
++        token_ids = [
++            int(token_id) for token_id in np.asarray(
++                runner.input_batch.token_ids_cpu[request_index, :num_tokens])
++        ]
++        request_state = runner.requests.get(request_id)
++        pages = _p38_primary_pages(getattr(request_state, "block_ids", None))
++        logical_blocks_before = (
++            num_computed + runner.block_size - 1) // runner.block_size
++        logical_blocks_after = (
++            num_computed + scheduled_tokens + runner.block_size - 1
++        ) // runner.block_size
++        if logical_blocks_after > len(pages):
++            raise RuntimeError(
++                "M15 replay request page table is shorter than its call: "
++                f"request={request_id} pages={len(pages)} "
++                f"needed={logical_blocks_after}")
++        requests.append({
++            "request_id": request_id,
++            "request_index": request_index,
++            "dp_rank": dp_rank,
++            "local_scheduler_slot": local_slot,
++            "scheduled_tokens": scheduled_tokens,
++            "num_computed_tokens": num_computed,
++            "num_prompt_tokens": num_prompt,
++            "num_tokens": num_tokens,
++            "token_history_sha256": _p38_token_history_sha256(token_ids),
++            "request_kind": (
++                "prefill" if num_computed < num_prompt else "decode"
++            ),
++            "block_size": int(runner.block_size),
++            "logical_blocks_before": logical_blocks_before,
++            "logical_blocks_after": logical_blocks_after,
++            "physical_pages": pages[:logical_blocks_after],
++        })
++    record = {
++        "schema": "m15-apc-serving-envelope-v1",
++        "arm": _P38_M15_TARGET_DEBUG,
++        "serving_arm": (
++            "B" if runner.input_batch.num_prompt_logprobs else "A"),
++        "call_index": int(call_index),
++        "program_path": program_path,
++        "request_order": dispatch_order,
++        "requests": requests,
++    }
++    encoded = (_json.dumps(record, sort_keys=True) + "\n").encode()
++    state = _P38_M15_REPLAY_STATE
++    ledger = _Path(_P38_M15_REPLAY_LEDGER)
++    current_bytes = ledger.stat().st_size if ledger.exists() else 0
++    if current_bytes != int(state["bytes"]):
++        raise RuntimeError("M15 replay ledger size changed out of band")
++    if current_bytes + len(encoded) > _P38_INCIDENT_MAX_BYTES:
++        raise RuntimeError("M15 replay ledger exceeded its registered byte bound")
++    ledger.parent.mkdir(parents=True, exist_ok=True)
++    descriptor = _os.open(
++        ledger, _os.O_APPEND | _os.O_CREAT | _os.O_WRONLY, 0o600)
++    try:
++        written = _os.write(descriptor, encoded)
++        if written != len(encoded):
++            raise RuntimeError("M15 replay ledger append was incomplete")
++        _os.fsync(descriptor)
++    finally:
++        _os.close(descriptor)
++    state["records"] += 1
++    state["bytes"] += len(encoded)
++    if state["records"] == 1 or state["records"] % 256 == 0:
++        print(
++            "[CANON_APC_M15_REPLAY_LEDGER] "
++            f"records={state['records']} call={call_index} "
++            f"requests={len(requests)} bytes={state['bytes']}",
++            flush=True,
++        )
++
++
+@@ -3075,0 +3219,2 @@
++    _p38_m15_replay_ledger(
++        runner, scheduler_output, req_ids_dp, call_index, program_path)

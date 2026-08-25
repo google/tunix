@@ -192,18 +192,27 @@ def _p38_diagnostic_consumer_contract(
     num_generations: int,
     process_in_consumer: bool,
     onehost_rehearsal: bool = False,
+    m15_target_debug: bool = False,
 ) -> tuple[int, bool, int]:
   """Return the P38 full-coverage consumer geometry.
 
-  P38 keeps a four-prompt mini-batch so each diagnostic unit contains 32
-  trajectories and is divisible by DP16.  Numerical alignment, however, must
-  cover all 32 prompt groups from the production-shaped input batch.  Waiting
-  for the complete producer output before calling ``_process_results`` avoids
-  both the old five-group partial tail and the P38s10 first-four-prompt subset.
+  Historical P38 keeps four prompts per producer unit and consumes all eight
+  units.  The M15 target carrier instead preserves the production 32-prompt
+  unit and consumes that one complete unit.  Both paths cover all 256
+  trajectories before calling ``_process_results``; neither admits a partial
+  tail or the old P38s10 first-four-prompt subset.
   """
   if not enabled:
     return train_micro_batch_size, False, 0
-  expected = (2, 2, 2) if onehost_rehearsal else (32, 4, 8)
+  if onehost_rehearsal and m15_target_debug:
+    raise ValueError("M15 target debug is not a one-host rehearsal")
+  expected = (
+      (2, 2, 2)
+      if onehost_rehearsal
+      else (32, 32, 8)
+      if m15_target_debug
+      else (32, 4, 8)
+  )
   observed = (full_batch_size, mini_batch_size, num_generations)
   if observed != expected:
     raise ValueError(
@@ -2703,8 +2712,20 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         onehost_rehearsal=(
             os.environ.get("CANON_P38_ONEHOST_REHEARSAL", "0") == "1"
         ),
+        m15_target_debug=(
+            os.environ.get("CANON_APC_M15_TARGET_DEBUG", "")
+            in ("off", "on")
+        ),
     )
     if p38_precheck_only:
+      m15_debug_arm = os.environ.get("CANON_APC_M15_TARGET_DEBUG", "")
+      if m15_debug_arm in ("off", "on"):
+        print(
+            "[CAN" "ON_APC_M15_TARGET_CONTRACT] "
+            f"arm={m15_debug_arm} topology=DP8xTP8 "
+            "workload=m15/main backward=0 optimizer_commits=0",
+            flush=True,
+        )
       print(
           "[CANON_P38] DIAGNOSTIC_COVERAGE_CONTRACT "
           f"prompt_groups={full_batch_size} "

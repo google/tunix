@@ -582,6 +582,26 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       _configure_logprob_request(
           sampling_params, return_logprobs=self.config.return_logprobs
       )
+      if os.environ.get("CANON_APC_M15_TARGET_DEBUG", "") in ("off", "on"):
+        if (
+            sampling_params.prompt_logprobs is not None
+            or sampling_params.logprobs != 1
+            or sampling_params.skip_reading_prefix_cache is not False
+        ):
+          raise RuntimeError(
+              "M15 APC A arm lost its production cache-readable request "
+              "contract: "
+              f"prompt_logprobs={sampling_params.prompt_logprobs!r} "
+              f"logprobs={sampling_params.logprobs!r} "
+              "skip_reading_prefix_cache="
+              f"{sampling_params.skip_reading_prefix_cache!r}"
+          )
+        logging.log_first_n(
+            logging.INFO,
+            "[CAN" "ON_APC_M15_A_CONTRACT] prompt_logprobs=None logprobs=1 "
+            "skip_reading_prefix_cache=False",
+            1,
+        )
       logging.log_first_n(
           logging.INFO,
           "[VLLM.LOGPROB_REQUEST] return_logprobs=%d sampled=%r prompt=%r "

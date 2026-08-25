@@ -959,6 +959,17 @@ def classify(
       "schema_version": 1,
       "verdict": "PASS",
       "scope": "p38-serving-capture",
+      "mismatch_capsule": (
+          None
+          if capsule is None
+          else {
+              "path": str(mismatch_capsule),
+              "sha256": _sha256(mismatch_capsule),
+              "diagnostic_round": int(
+                  capsule["metadata"]["diagnostic_round"]
+              ),
+          }
+      ),
       "prefix_bounds": list(prefix_bounds),
       "program_path": expected_program_path,
       "successful_mismatch_joins": successful_joins,

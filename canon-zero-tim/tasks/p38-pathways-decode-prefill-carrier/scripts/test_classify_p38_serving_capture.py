@@ -315,6 +315,29 @@ class ClassifyServingCaptureTest(unittest.TestCase):
     self.assertEqual(
         report["incident_exact_joins"][0]["num_computed_tokens"], 2
     )
+    self.assertEqual(
+        report["mismatch_capsule"]["sha256"],
+        hashlib.sha256(
+            (Path(holder.name) / "mismatch.npz").read_bytes()
+        ).hexdigest(),
+    )
+
+  def test_accepts_clean_capture_without_capsule_when_join_not_required(self):
+    holder = _valid_directory()
+    self.addCleanup(holder.cleanup)
+    directory = Path(holder.name)
+    (directory / "mismatch.npz").unlink()
+    report = MODULE.classify(
+        directory,
+        4,
+        directory / "mismatch.npz",
+        PREFIX_BOUNDS,
+        "standard",
+        require_mismatch_join=False,
+    )
+    self.assertEqual(report["verdict"], "PASS")
+    self.assertIsNone(report["mismatch_capsule"])
+    self.assertEqual(report["incident_exact_joins"], [])
 
   def test_accepts_fixed_m_single_active_incident(self):
     holder = _valid_directory()

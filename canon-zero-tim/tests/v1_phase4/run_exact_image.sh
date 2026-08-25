@@ -42,5 +42,11 @@ $docker run --rm \
       DPWorkloadsTest.test_p57_token_contract_rejects_partial_or_foreign_pairs
     python3 tests/perf/profile_window_test.py
     bash canon-zero-tim/tests/v1_phase4/run_cpu.sh
-    echo "V1_HP_EXACT_IMAGE_PASS dp16_gathered=1 dp2tp2_parallel=2 p59_tp4_tp8=2 p59_real_shim=4 p59_rpa=2 p59_fused_linear=2 p57_wandb=1 m15_token=1 perfetto_window=1 manifests=3"
+    python3 canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/test_analyze_m15i_evidence.py
+    python3 canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/test_classify_m15_apc_target_run.py
+    python3 canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/test_package_first_red_replay.py
+    python3 canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/test_package_full_replay_carrier.py
+    python3 canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/test_target_carrier.py
+    python3 canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/test_resolved_env.py
+    echo "V1_HP_EXACT_IMAGE_PASS dp16_gathered=1 dp2tp2_parallel=2 p59_tp4_tp8=2 p59_real_shim=4 p59_rpa=2 p59_fused_linear=2 p57_wandb=1 m15_token=1 apc_m15_carrier=33 perfetto_window=1 manifests=3"
   '

@@ -108,6 +108,22 @@ echo "[env] preflight mode: JAX_PLATFORMS=cpu (Pathways connection deferred to S
 # Preflight: refuse an incomplete canonical set rather than warn inside a log nobody reads.
 fail=0
 req() { [ -n "${!1:-}" ] || { echo "[env] MISSING: $1" >&2; fail=1; }; }
+case "${CANON_APC_M15_TARGET_DEBUG:-}" in
+  "") APC_M15_TARGET_DEBUG=0 ;;
+  off|on)
+    APC_M15_TARGET_DEBUG=1
+    [ "${CANON_PROFILE_FILE:-}" = \
+        "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-apc-debug.env" ] || {
+      echo "[env] M15 APC target debug requires its exact profile" >&2
+      fail=1
+    }
+    ;;
+  *)
+    APC_M15_TARGET_DEBUG=0
+    echo "[env] CANON_APC_M15_TARGET_DEBUG must be unset, off, or on" >&2
+    fail=1
+    ;;
+esac
 case "${CANON_P59_RANK_PARALLEL_BACKWARD:-0}" in
   0) ;;
   1)
@@ -318,8 +334,14 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
            CANON_P38_MIN_ACTION_KV; do
     req "$k"
   done
-  [ "${CANON_P32_WORKLOAD:-}" = "frozenlake" ] || {
-    echo "[env] P38 serving capture requires the FrozenLake workload" >&2
+  if [ "$APC_M15_TARGET_DEBUG" = "1" ]; then
+    req CANON_APC_M15_REPLAY_LEDGER
+  fi
+  { [ "$APC_M15_TARGET_DEBUG" = "0" ] && \
+    [ "${CANON_P32_WORKLOAD:-}" = "frozenlake" ]; } || \
+  { [ "$APC_M15_TARGET_DEBUG" = "1" ] && \
+    [ "${CANON_P32_WORKLOAD:-}" = "frozenlake-dp8-tp8" ]; } || {
+    echo "[env] P38 serving capture workload identity drifted" >&2
     fail=1
   }
   [ "${CANON_P33_RUN_STAGE:-}" = "backward-no-commit" ] && \
@@ -340,8 +362,10 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
     echo "[env] P38 serving capture requires controlled diagnostic exit" >&2
     fail=1
   }
-  [ "${CANON_P38_DIAGNOSTIC_ROUNDS:-}" = "3" ] || {
-    echo "[env] P38 terminal capture requires three frozen-weight rounds" >&2
+  expected_p38_rounds=3
+  [ "$APC_M15_TARGET_DEBUG" = "0" ] || expected_p38_rounds=1
+  [ "${CANON_P38_DIAGNOSTIC_ROUNDS:-}" = "$expected_p38_rounds" ] || {
+    echo "[env] P38 diagnostic round count drifted: expected=$expected_p38_rounds" >&2
     fail=1
   }
   [ "${CANON_P38_ONEHOST_REHEARSAL:-0}" = "0" ] || {
@@ -367,9 +391,13 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
       echo "[env] P38 fixed lm-head is admitted only on the stock arm" >&2
       fail=1
     }
-    [ "${CANON_PROFILE_FILE:-}" = \
-        "cluster/profiles/qwen3-8b-dp16-tp4-frozenlake.env" ] || {
-      echo "[env] P38 fixed lm-head requires the Qwen3-8B TP4 profile" >&2
+    { [ "$APC_M15_TARGET_DEBUG" = "0" ] && \
+      [ "${CANON_PROFILE_FILE:-}" = \
+        "cluster/profiles/qwen3-8b-dp16-tp4-frozenlake.env" ]; } || \
+    { [ "$APC_M15_TARGET_DEBUG" = "1" ] && \
+      [ "${CANON_PROFILE_FILE:-}" = \
+        "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-apc-debug.env" ]; } || {
+      echo "[env] P38 fixed lm-head profile identity drifted" >&2
       fail=1
     }
     [ -z "${CANON_MM_ALGO:-}" ] || {
@@ -425,9 +453,16 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
     echo "[env] P38 serving capture minimum prefix must be non-negative" >&2
     fail=1
   }
-  [ "${CANON_P38_SERVING_CAPTURE_MIN_PREFIX:-}" = "1536" ] && \
+  expected_p38_capture_min=1536
+  expected_p38_capture_bounds=1536,1664,1792,1920,2048
+  if [ "$APC_M15_TARGET_DEBUG" = "1" ]; then
+    expected_p38_capture_min=1152
+    expected_p38_capture_bounds=1152,1216,1280,1408,1696
+  fi
+  [ "${CANON_P38_SERVING_CAPTURE_MIN_PREFIX:-}" = \
+      "$expected_p38_capture_min" ] && \
   [ "${CANON_P38_SERVING_CAPTURE_PREFIX_BOUNDS:-}" = \
-      "1536,1664,1792,1920,2048" ] || {
+      "$expected_p38_capture_bounds" ] || {
     echo "[env] P38 serving capture prefix strata drifted" >&2
     fail=1
   }
@@ -449,9 +484,26 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
     echo "[env] P38 incident ledger must live in the capture directory" >&2
     fail=1
   }
-  [ "${CANON_P38_INCIDENT_MIN_PREFIX:-}" = "1400" ] && \
-  [ "${CANON_P38_INCIDENT_MAX_PREFIX:-}" = "3072" ] && \
-  [ "${CANON_P38_INCIDENT_MAX_BYTES:-}" = "134217728" ] || {
+  if [ "$APC_M15_TARGET_DEBUG" = "1" ] && \
+     [ "${CANON_APC_M15_REPLAY_LEDGER:-}" != \
+       "${CANON_P38_SERVING_CAPTURE_DIR%/}/m15_replay_envelope.jsonl" ]; then
+    echo "[env] M15 replay ledger must live in the capture directory" >&2
+    fail=1
+  fi
+  expected_p38_incident_min=1400
+  expected_p38_incident_max=3072
+  expected_p38_incident_bytes=134217728
+  if [ "$APC_M15_TARGET_DEBUG" = "1" ]; then
+    expected_p38_incident_min=1152
+    expected_p38_incident_max=7168
+    expected_p38_incident_bytes=268435456
+  fi
+  [ "${CANON_P38_INCIDENT_MIN_PREFIX:-}" = \
+      "$expected_p38_incident_min" ] && \
+  [ "${CANON_P38_INCIDENT_MAX_PREFIX:-}" = \
+      "$expected_p38_incident_max" ] && \
+  [ "${CANON_P38_INCIDENT_MAX_BYTES:-}" = \
+      "$expected_p38_incident_bytes" ] || {
     echo "[env] P38 incident ledger bounds drifted" >&2
     fail=1
   }
@@ -594,8 +646,13 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
 elif [ "${CANON_KV_UNIFIED:-0}" = "1" ]; then
   echo "[env] CANON_KV_UNIFIED is admitted only with bounded P38 serving capture" >&2
   fail=1
-elif [ -n "${CANON_P38_SERVING_CAPTURE_MAX_CALLS:-}${CANON_P38_SERVING_CAPTURE_MIN_PREFIX:-}${CANON_P38_SERVING_CAPTURE_PREFIX_BOUNDS:-}${CANON_P38_SERVING_CAPTURE_FREE_SPACE_MULTIPLIER:-}${CANON_P38_SERVING_CAPTURE_EXPECTED_PATH:-}${CANON_P38_SERVING_CAPTURE_EXPECTED_RECORDS:-}${CANON_P38_REQUEST_JOURNAL:-}${CANON_P38_INCIDENT_LEDGER:-}${CANON_P38_INCIDENT_MIN_PREFIX:-}${CANON_P38_INCIDENT_MAX_PREFIX:-}${CANON_P38_INCIDENT_MAX_BYTES:-}${CANON_P38_DURABILITY_PROFILE:-}${CANON_P38_LIVE_SNAPSHOT_INTERVAL_SECONDS:-}${CANON_P38_LIVE_SNAPSHOT_STOP_FILE:-}${CANON_P38_LIVE_SNAPSHOT_WORKER_LOG:-}${CANON_P38_LIVE_COLLECT_REQUEST_FILE:-}${CANON_P38_LIVE_COLLECT_ACK_FILE:-}${CANON_P38_LIVE_COMPLETE_REQUEST_FILE:-}${CANON_P38_LIVE_COMPLETE_ACK_FILE:-}${CANON_P38_SERVING_CAPTURE_CLASSIFICATION:-}${CANON_P38_SERVING_CAPTURE_ARCHIVE:-}${CANON_P38_GCS_PREFIX:-}${CANON_P38_PRECHECK_ONLY:-}${CANON_P38_CONTROLLED_EXIT:-}${CANON_P38_DIAGNOSTIC_ROUNDS:-}${CANON_P38_DIAGNOSTIC_ROUND_FILE:-}${CANON_P38_ROUND_SEAL_REQUEST_DIR:-}${CANON_P38_ROUND_SEAL_ACK_DIR:-}${CANON_P38_ONEHOST_REHEARSAL:-}${CANON_P38_MIN_ACTION_KV:-}${CANON_P38_KV_OBSERVER_DIR:-}${CANON_P38_KV_OBSERVER_MAX_CANDIDATES:-}${CANON_P38_KV_OBSERVER_MAX_PAGES:-}${CANON_P38_KV_OBSERVER_MAX_BYTES:-}${CANON_P38_KV_OBSERVER_MAX_READ_BYTES:-}${CANON_P38_KV_OBSERVER_CLASSIFICATION:-}${CANON_P38_SEAM_OBSERVER:-}${CANON_P38_SEAM_OBSERVER_DIR:-}${CANON_P38_SEAM_MIN_POSITION:-}${CANON_P38_SEAM_MAX_POSITION:-}${CANON_P38_SEAM_MAX_BYTES:-}${CANON_P38_SEAM_LAYER:-}${CANON_P38_SEAM_CLASSIFICATION:-}${CANON_P38_TAIL_OBSERVER:-}${CANON_P38_TAIL_MAX_BYTES:-}" ]; then
+elif [ -n "${CANON_P38_SERVING_CAPTURE_MAX_CALLS:-}${CANON_P38_SERVING_CAPTURE_MIN_PREFIX:-}${CANON_P38_SERVING_CAPTURE_PREFIX_BOUNDS:-}${CANON_P38_SERVING_CAPTURE_FREE_SPACE_MULTIPLIER:-}${CANON_P38_SERVING_CAPTURE_EXPECTED_PATH:-}${CANON_P38_SERVING_CAPTURE_EXPECTED_RECORDS:-}${CANON_P38_REQUEST_JOURNAL:-}${CANON_P38_INCIDENT_LEDGER:-}${CANON_APC_M15_REPLAY_LEDGER:-}${CANON_P38_INCIDENT_MIN_PREFIX:-}${CANON_P38_INCIDENT_MAX_PREFIX:-}${CANON_P38_INCIDENT_MAX_BYTES:-}${CANON_P38_DURABILITY_PROFILE:-}${CANON_P38_LIVE_SNAPSHOT_INTERVAL_SECONDS:-}${CANON_P38_LIVE_SNAPSHOT_STOP_FILE:-}${CANON_P38_LIVE_SNAPSHOT_WORKER_LOG:-}${CANON_P38_LIVE_COLLECT_REQUEST_FILE:-}${CANON_P38_LIVE_COLLECT_ACK_FILE:-}${CANON_P38_LIVE_COMPLETE_REQUEST_FILE:-}${CANON_P38_LIVE_COMPLETE_ACK_FILE:-}${CANON_P38_SERVING_CAPTURE_CLASSIFICATION:-}${CANON_P38_SERVING_CAPTURE_ARCHIVE:-}${CANON_P38_GCS_PREFIX:-}${CANON_P38_PRECHECK_ONLY:-}${CANON_P38_CONTROLLED_EXIT:-}${CANON_P38_DIAGNOSTIC_ROUNDS:-}${CANON_P38_DIAGNOSTIC_ROUND_FILE:-}${CANON_P38_ROUND_SEAL_REQUEST_DIR:-}${CANON_P38_ROUND_SEAL_ACK_DIR:-}${CANON_P38_ONEHOST_REHEARSAL:-}${CANON_P38_MIN_ACTION_KV:-}${CANON_P38_KV_OBSERVER_DIR:-}${CANON_P38_KV_OBSERVER_MAX_CANDIDATES:-}${CANON_P38_KV_OBSERVER_MAX_PAGES:-}${CANON_P38_KV_OBSERVER_MAX_BYTES:-}${CANON_P38_KV_OBSERVER_MAX_READ_BYTES:-}${CANON_P38_KV_OBSERVER_CLASSIFICATION:-}${CANON_P38_SEAM_OBSERVER:-}${CANON_P38_SEAM_OBSERVER_DIR:-}${CANON_P38_SEAM_MIN_POSITION:-}${CANON_P38_SEAM_MAX_POSITION:-}${CANON_P38_SEAM_MAX_BYTES:-}${CANON_P38_SEAM_LAYER:-}${CANON_P38_SEAM_CLASSIFICATION:-}${CANON_P38_TAIL_OBSERVER:-}${CANON_P38_TAIL_MAX_BYTES:-}" ]; then
   echo "[env] partial P38 serving-capture configuration is not admitted" >&2
+  fail=1
+fi
+if [ "$APC_M15_TARGET_DEBUG" = "1" ] && \
+   [ -z "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
+  echo "[env] M15 APC target debug requires bounded serving capture" >&2
   fail=1
 fi
 
@@ -1856,7 +1913,9 @@ if [ "${CANON_P32_DP_ADMISSION:-0}" = "1" ]; then
         echo "[env] only alignment-short may enable CANON_P33_SHORT_ALIGNMENT" >&2
         fail=1
       fi
-      if [ "${CANON_P32_WORKLOAD:-}" = "frozenlake" ] && \
+      if { [ "${CANON_P32_WORKLOAD:-}" = "frozenlake" ] || \
+           { [ "$APC_M15_TARGET_DEBUG" = "1" ] && \
+             [ "${CANON_P32_WORKLOAD:-}" = "frozenlake-dp8-tp8" ]; }; } && \
          [ "${CANON_P33_RUN_STAGE:-}" = "backward-no-commit" ]; then
         req CANON_P38_MISMATCH_CAPSULE
         expected_p38_capsule_rows=2

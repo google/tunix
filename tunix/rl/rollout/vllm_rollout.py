@@ -472,6 +472,21 @@ class VllmRollout(base_rollout.BaseRollout):
             int(output.num_cached_tokens or 0) for output in outputs
         ),
     }
+    if os.environ.get("CANON_APC_M15_TARGET_DEBUG", "") in ("off", "on"):
+      cached_tokens = self._last_prefill_rescore_provenance[
+          "num_cached_tokens"
+      ]
+      if not reset_prefix_cache or any(cached_tokens):
+        raise RuntimeError(
+            "M15 APC B arm is not an independent full-reset judge: "
+            f"reset_prefix_cache={reset_prefix_cache!r} "
+            f"num_cached_tokens={cached_tokens!r}"
+        )
+      print(
+          "[CAN" "ON_APC_M15_B_CONTRACT] reset_prefix_cache=True "
+          "all_num_cached_tokens_zero=True",
+          flush=True,
+      )
 
     out = np.zeros(comps.shape, np.float32)
     for i, (out_i, seq, (n_p, n_c)) in enumerate(zip(outputs, seqs, meta)):

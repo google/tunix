@@ -20,7 +20,7 @@ make_case() {
   local root="$1" job="$2"
   unset CANON_P38_KV_OBSERVER_DIR CANON_P38_KV_OBSERVER_CLASSIFICATION \
     CANON_P38_SEAM_OBSERVER_DIR CANON_P38_TAIL_OBSERVER \
-    CANON_P38_FIXED_LM_HEAD || true
+    CANON_P38_FIXED_LM_HEAD CANON_APC_M15_REPLAY_LEDGER || true
   mkdir -p "$root/state/capture"
   printf 'run\n' > "$root/state/run.log"
   printf '{}\n' > "$root/state/pre.jsonl"
@@ -61,6 +61,9 @@ fi
 grep -q 'remote marker already exists: PREFLIGHT.json' \
   "$tmp/pass/reused-prefix.log"
 printf 'round-0\n' > "${CANON_P38_MISMATCH_CAPSULE%.npz}.round-000000.npz"
+printf '{"schema":"m15-apc-serving-envelope-v1"}\n' > \
+  "$tmp/pass/state/capture/m15_replay_envelope.jsonl"
+export CANON_APC_M15_REPLAY_LEDGER="$tmp/pass/state/capture/m15_replay_envelope.jsonl"
 bash "$PERSIST" snapshot 000000 > "$tmp/pass/snapshot.log"
 live="$FAKE_GCS_ROOT/yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-p38-test-pass/attempt-0/live/000000"
 for name in LIVE_ARCHIVE.tar SHA256SUMS LIVE.json; do
@@ -72,6 +75,7 @@ python3 "$ARCHIVE_TOOL" extract \
   --output "$tmp/pass/live-extracted" > "$tmp/pass/live-extract.log"
 (cd "$tmp/pass/live-extracted" && sha256sum -c SHA256SUMS --quiet)
 for name in run.log request-journal.jsonl incident-ledger.jsonl \
+    m15-replay-envelope.jsonl \
     diagnostic-round.txt pre-alignment.jsonl capsule.npz \
     capsule.round-000000.npz; do
   test -s "$tmp/pass/live-extracted/$name"

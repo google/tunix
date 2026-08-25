@@ -337,13 +337,23 @@ fi
 if [ "$rc" -ne 0 ] && [ -s "${CANON_P38_MISMATCH_CAPSULE:-}" ]; then
   capsule_sha="$(sha256sum "$CANON_P38_MISMATCH_CAPSULE" | awk '{print $1}')"
   capsule_bytes="$(wc -c < "$CANON_P38_MISMATCH_CAPSULE" | tr -d '[:space:]')"
-  echo "[CANON_P38_CAPSULE_ARTIFACT] path=$CANON_P38_MISMATCH_CAPSULE bytes=$capsule_bytes sha256=$capsule_sha encoding=base64"
-  base64 "$CANON_P38_MISMATCH_CAPSULE" | sed 's/^/[CANON_P38_CAPSULE_B64] /'
+  p38_capsule_artifact_marker='CANON_''P38_CAPSULE_ARTIFACT'
+  p38_capsule_b64_marker='CANON_''P38_CAPSULE_B64'
+  if [ -n "${CANON_APC_M15_TARGET_DEBUG:-}" ]; then
+    echo "[$p38_capsule_artifact_marker] path=$CANON_P38_MISMATCH_CAPSULE bytes=$capsule_bytes sha256=$capsule_sha encoding=gcs-only"
+  else
+    echo "[$p38_capsule_artifact_marker] path=$CANON_P38_MISMATCH_CAPSULE bytes=$capsule_bytes sha256=$capsule_sha encoding=base64"
+    base64 "$CANON_P38_MISMATCH_CAPSULE" | sed "s/^/[$p38_capsule_b64_marker] /"
+  fi
 fi
 if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
   p38_join_args=()
-  if [ "${CANON_KV_UNIFIED:-0}" = "0" ] && \
-     [ "${CANON_P38_FIXED_LM_HEAD:-0}" != "1" ]; then
+  if [ -n "${CANON_APC_M15_TARGET_DEBUG:-}" ] && \
+     [ -s "${CANON_P38_MISMATCH_CAPSULE:-}" ]; then
+    p38_join_args+=(--require-mismatch-join)
+  elif [ -z "${CANON_APC_M15_TARGET_DEBUG:-}" ] && \
+       [ "${CANON_KV_UNIFIED:-0}" = "0" ] && \
+       [ "${CANON_P38_FIXED_LM_HEAD:-0}" != "1" ]; then
     p38_join_args+=(--require-mismatch-join)
   fi
   JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
@@ -363,6 +373,64 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
     echo "[CANON_P38_SERVING_CLASSIFICATION] path=$CANON_P38_SERVING_CAPTURE_CLASSIFICATION sha256=$p38_class_sha"
     sed 's/^/[CANON_P38_SERVING_CLASSIFICATION_JSON] /' \
       "$CANON_P38_SERVING_CAPTURE_CLASSIFICATION"
+  fi
+  if [ -n "${CANON_APC_M15_TARGET_DEBUG:-}" ]; then
+    m15_apc_classification="$CANON_P38_SERVING_CAPTURE_DIR/m15_apc_target.classification.json"
+    m15_replay_bundle_dir="$CANON_P38_SERVING_CAPTURE_DIR/m15_first_red_replay"
+    m15_full_replay_dir="$CANON_P38_SERVING_CAPTURE_DIR/m15_full_replay_carrier"
+    m15_replay_bundle_rc=0
+    m15_full_replay_rc=0
+    m15_apc_capsule_args=()
+    if [ -s "${CANON_P38_MISMATCH_CAPSULE:-}" ]; then
+      m15_apc_capsule_args+=(--mismatch-capsule "$CANON_P38_MISMATCH_CAPSULE")
+    fi
+    JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
+      python3 "$CANON_PKG/tasks/v1-apc-m15-target-debug/scripts/classify_m15_apc_target_run.py" \
+        --raw "$LOG" \
+        --report "$CANON_PRE_ALIGN_REPORT" \
+        --capture-classification "$CANON_P38_SERVING_CAPTURE_CLASSIFICATION" \
+        --arm "$CANON_APC_M15_TARGET_DEBUG" \
+        --expected-source-commit "$CANON_EXPECT_COMMIT" \
+        "${m15_apc_capsule_args[@]}" \
+        --output "$m15_apc_classification"
+    m15_apc_rc=$?
+    if [ -s "$m15_apc_classification" ]; then
+      m15_apc_sha="$(sha256sum "$m15_apc_classification" | awk '{print $1}')"
+      echo "[CAN""ON_APC_M15_CLASSIFICATION] path=$m15_apc_classification sha256=$m15_apc_sha"
+      sed 's/^/[CAN''ON_APC_M15_CLASSIFICATION_JSON] /' "$m15_apc_classification"
+    fi
+    if [ "${m15_apc_rc:-1}" -ne 0 ] && [ "$rc" -eq 0 ]; then
+      rc=2
+    fi
+    if [ "${m15_apc_rc:-1}" -eq 0 ] && \
+       [ -s "${CANON_P38_MISMATCH_CAPSULE:-}" ]; then
+      JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
+        python3 "$CANON_PKG/tasks/v1-apc-m15-target-debug/scripts/package_first_red_replay.py" \
+          --capsule "$CANON_P38_MISMATCH_CAPSULE" \
+          --capture-classification "$CANON_P38_SERVING_CAPTURE_CLASSIFICATION" \
+          --m15-classification "$m15_apc_classification" \
+          --output-dir "$m15_replay_bundle_dir" || \
+        m15_replay_bundle_rc=$?
+      if [ -s "$m15_replay_bundle_dir/first_red_contract.json" ]; then
+        m15_replay_bundle_sha="$(sha256sum "$m15_replay_bundle_dir/first_red_contract.json" | awk '{print $1}')"
+        echo "[CAN""ON_APC_M15_REPLAY_BUNDLE] path=$m15_replay_bundle_dir sha256=$m15_replay_bundle_sha"
+      fi
+      if [ "${m15_replay_bundle_rc:-1}" -eq 0 ]; then
+        JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
+          python3 "$CANON_PKG/tasks/v1-apc-m15-target-debug/scripts/package_full_replay_carrier.py" \
+            --producer-unit "$CANON_P38_SERVING_CAPTURE_DIR/m15_producer_unit.npz" \
+            --serving-envelope "$CANON_APC_M15_REPLAY_LEDGER" \
+            --first-red-dir "$m15_replay_bundle_dir" \
+            --capture-classification "$CANON_P38_SERVING_CAPTURE_CLASSIFICATION" \
+            --m15-classification "$m15_apc_classification" \
+            --output-dir "$m15_full_replay_dir" || \
+          m15_full_replay_rc=$?
+        if [ -s "$m15_full_replay_dir/replay_contract.json" ]; then
+          m15_full_replay_sha="$(sha256sum "$m15_full_replay_dir/replay_contract.json" | awk '{print $1}')"
+          echo "[CAN""ON_APC_M15_FULL_REPLAY_CARRIER] path=$m15_full_replay_dir sha256=$m15_full_replay_sha"
+        fi
+      fi
+    fi
   fi
   p38_kv_observer_rc=0
   if [ -n "${CANON_P38_KV_OBSERVER_DIR:-}" ]; then
@@ -464,9 +532,15 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
     p38_archive_bytes="$(wc -c < "$CANON_P38_SERVING_CAPTURE_ARCHIVE" | tr -d '[:space:]')"
     p38_persist_rc=0
     p38_request_live_action collect || p38_persist_rc=$?
-    echo "[CANON_P38_SERVING_ARCHIVE] path=$CANON_P38_SERVING_CAPTURE_ARCHIVE bytes=$p38_archive_bytes sha256=$p38_archive_sha encoding=base64"
-    base64 "$CANON_P38_SERVING_CAPTURE_ARCHIVE" | \
-      sed 's/^/[CANON_P38_SERVING_ARCHIVE_B64] /'
+    p38_serving_archive_marker='CANON_''P38_SERVING_ARCHIVE'
+    p38_serving_archive_b64_marker='CANON_''P38_SERVING_ARCHIVE_B64'
+    if [ -n "${CANON_APC_M15_TARGET_DEBUG:-}" ]; then
+      echo "[$p38_serving_archive_marker] path=$CANON_P38_SERVING_CAPTURE_ARCHIVE bytes=$p38_archive_bytes sha256=$p38_archive_sha encoding=gcs-only"
+    else
+      echo "[$p38_serving_archive_marker] path=$CANON_P38_SERVING_CAPTURE_ARCHIVE bytes=$p38_archive_bytes sha256=$p38_archive_sha encoding=base64"
+      base64 "$CANON_P38_SERVING_CAPTURE_ARCHIVE" | \
+        sed "s/^/[$p38_serving_archive_b64_marker] /"
+    fi
   fi
   if [ "$p38_capture_rc" -ne 0 ] && [ "$rc" -eq 0 ]; then
     rc=2
@@ -507,6 +581,8 @@ n_p38_capture_observe=$(grep -ac '^\[CANON_P38_SERVING_CAPTURE_OBSERVE\]' "$LOG"
 n_p38_capture_error=$(grep -ac '^\[CANON_P38_SERVING_CAPTURE_ERROR\]' "$LOG" || true)
 n_p38_request_journal=$(grep -ac '^\[CANON_P38_REQUEST_JOURNAL\]' "$LOG" || true)
 n_p38_incident_ledger=$(grep -ac '^\[CANON_P38_INCIDENT_LEDGER\]' "$LOG" || true)
+n_m15_replay_ledger=$(grep -ac '^\[CAN''ON_APC_M15_REPLAY_LEDGER\]' "$LOG" || true)
+n_m15_producer_carrier=$(grep -ac '^\[CAN''ON_APC_M15_PRODUCER_CARRIER\]' "$LOG" || true)
 n_p38_kv_observer_init=$(grep -ac '^\[CANON_P38_KV_OBSERVER_INIT\]' "$LOG" || true)
 n_p38_kv_observer_candidate=$(grep -ac '^\[CANON_P38_KV_OBSERVER_CANDIDATE\]' "$LOG" || true)
 n_p38_kv_observer_a=$(grep -ac '^\[CANON_P38_KV_OBSERVER_RECORD\] arm=A ' "$LOG" || true)
@@ -519,7 +595,11 @@ n_p38_tail_b=$(grep -ac '^\[CANON_P38_TAIL_OBSERVER_RECORD\] .* arm=B ' "$LOG" |
 n_p38_terminal_init=$(grep -ac '^\[CANON_P38_TERMINAL_DISCRIMINATOR_INIT\] ' "$LOG" || true)
 n_p38_terminal_a=$(grep -ac '^\[CANON_P38_TERMINAL_DISCRIMINATOR_RECORD\] .* arm=A ' "$LOG" || true)
 n_p38_terminal_b=$(grep -ac '^\[CANON_P38_TERMINAL_DISCRIMINATOR_RECORD\] .* arm=B ' "$LOG" || true)
-n_p38_coverage=$(grep -ac '^\[CANON_P38\] DIAGNOSTIC_COVERAGE_CONTRACT .*prompt_groups=32 .*unit_prompts=4 .*units=8 .*trajectories=256 .*partial_tail=reject verdict=PASS' "$LOG" || true)
+if [ -n "${CANON_APC_M15_TARGET_DEBUG:-}" ]; then
+  n_p38_coverage=$(grep -ac '^\[CANON_P38\] DIAGNOSTIC_COVERAGE_CONTRACT .*prompt_groups=32 .*unit_prompts=32 .*units=1 .*trajectories=256 .*partial_tail=reject verdict=PASS' "$LOG" || true)
+else
+  n_p38_coverage=$(grep -ac '^\[CANON_P38\] DIAGNOSTIC_COVERAGE_CONTRACT .*prompt_groups=32 .*unit_prompts=4 .*units=8 .*trajectories=256 .*partial_tail=reject verdict=PASS' "$LOG" || true)
+fi
 n_p57_stock_sync=$(grep -aEc '^\[P57.STOCK_FAST\] ROLLOUT_SYNC_PASS step=[0-9]+ transport=update_params exact_weight_attestation=unavailable-by-design$' "$LOG" || true)
 n_p57_stock_train_runtime=$(grep -aEc '^\[P57.STOCK\] TRAIN_RUNTIME_PASS regime=stock-fast arm=(mismatch|is) canonical_bundle=off observer=warning-only processed_b=observer-only$' "$LOG" || true)
 n_p57_stock_observer=$(grep -ac '^\[P57.STOCK_OBSERVER\] PROCESSED_PROMPT_LOGPROBS_PASS .*targets=absolute-request-history treatment=observer-only$' "$LOG" || true)
@@ -564,6 +644,38 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
   fi
   if [ "$n_p38_capture_error" -ne 0 ]; then
     echo "[run] FATAL: P38 serving capture reported internal errors: $n_p38_capture_error" >&2
+    exit 1
+  fi
+  if [ -n "${CANON_APC_M15_TARGET_DEBUG:-}" ] && \
+     { [ "${m15_apc_rc:-1}" -ne 0 ] || \
+       [ ! -s "${m15_apc_classification:-}" ]; }; then
+    echo "[run] FATAL: M15 APC target classification failed: rc=${m15_apc_rc:-unset} artifact=${m15_apc_classification:-unset}" >&2
+    exit 1
+  fi
+  if [ -n "${CANON_APC_M15_TARGET_DEBUG:-}" ] && \
+     [ -s "${CANON_P38_MISMATCH_CAPSULE:-}" ] && \
+     { [ "${m15_replay_bundle_rc:-1}" -ne 0 ] || \
+       [ ! -s "${m15_replay_bundle_dir:-}/first_red_capsule.npz" ] || \
+       [ ! -s "${m15_replay_bundle_dir:-}/first_red_contract.json" ] || \
+       [ ! -s "${m15_replay_bundle_dir:-}/SHA256SUMS" ]; }; then
+    echo "[run] FATAL: M15 first-red replay bundle failed: rc=${m15_replay_bundle_rc:-unset} directory=${m15_replay_bundle_dir:-unset}" >&2
+    exit 1
+  fi
+  if [ -n "${CANON_APC_M15_TARGET_DEBUG:-}" ] && \
+     { [ "$n_m15_replay_ledger" -le 0 ] || \
+       [ "$n_m15_producer_carrier" -ne 1 ] || \
+       [ ! -s "${CANON_APC_M15_REPLAY_LEDGER:-}" ] || \
+       [ ! -s "$CANON_P38_SERVING_CAPTURE_DIR/m15_producer_unit.npz" ]; }; then
+    echo "[run] FATAL: M15 full replay inputs are incomplete: ledger_markers=$n_m15_replay_ledger producer_markers=$n_m15_producer_carrier ledger=${CANON_APC_M15_REPLAY_LEDGER:-unset}" >&2
+    exit 1
+  fi
+  if [ -n "${CANON_APC_M15_TARGET_DEBUG:-}" ] && \
+     [ -s "${CANON_P38_MISMATCH_CAPSULE:-}" ] && \
+     { [ "${m15_full_replay_rc:-1}" -ne 0 ] || \
+       [ ! -s "${m15_full_replay_dir:-}/replay_contract.json" ] || \
+       [ ! -s "${m15_full_replay_dir:-}/request_row_joins.jsonl" ] || \
+       [ ! -s "${m15_full_replay_dir:-}/SHA256SUMS" ]; }; then
+    echo "[run] FATAL: M15 full replay carrier failed: rc=${m15_full_replay_rc:-unset} directory=${m15_full_replay_dir:-unset}" >&2
     exit 1
   fi
   if [ -n "${CANON_P38_KV_OBSERVER_DIR:-}" ] && \
@@ -665,7 +777,8 @@ if [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "1" ]; then
       p38_fixed_tp=4
       ;;
     cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env|\
-    cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env)
+    cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env|\
+    cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-apc-debug.env)
       p38_fixed_endpoint=untied_lm_head
       p38_fixed_hidden=4096
       p38_fixed_tp=8
@@ -714,6 +827,9 @@ if [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "1" ]; then
       if [ "${CANON_P59_RANK_PARALLEL_BACKWARD:-0}" = "1" ]; then
         p38_fixed_receipt_args+=(--p59-local-dp-size 8)
       fi
+      ;;
+    cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-apc-debug.env)
+      p38_fixed_receipt_args+=(--learner-m 2048)
       ;;
     cluster/profiles/qwen3-1p7b-dp16-tp4-gsm8k-v1-hp.env)
       if [ "${CANON_P59_RANK_PARALLEL_BACKWARD:-0}" = "1" ]; then

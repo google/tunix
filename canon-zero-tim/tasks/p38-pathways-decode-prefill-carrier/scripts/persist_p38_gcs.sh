@@ -186,6 +186,11 @@ if [ "$mode" = snapshot ]; then
     cp -- "$CANON_P38_INCIDENT_LEDGER" "$live_stage/incident-ledger.jsonl"
     live_files+=(incident-ledger.jsonl)
   fi
+  if [ -s "${CANON_APC_M15_REPLAY_LEDGER:-}" ]; then
+    cp -- "$CANON_APC_M15_REPLAY_LEDGER" \
+      "$live_stage/m15-replay-envelope.jsonl"
+    live_files+=(m15-replay-envelope.jsonl)
+  fi
   if [ -s "${CANON_P38_DIAGNOSTIC_ROUND_FILE:-}" ]; then
     cp -- "$CANON_P38_DIAGNOSTIC_ROUND_FILE" "$live_stage/diagnostic-round.txt"
     live_files+=(diagnostic-round.txt)

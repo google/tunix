@@ -1073,6 +1073,150 @@ def _p38_capsule_rows(record: dict[str, Any], max_rows: int) -> list[int]:
   return rows
 
 
+def _p38_replay_row_arrays(
+    sidecar: ObservedTrainExample,
+) -> dict[str, np.ndarray]:
+  """Returns the host-side row arrays shared by P38 replay artifacts."""
+  prompt_ids = getattr(sidecar.train_example, "prompt_ids", None)
+  if prompt_ids is None:
+    raise AlignmentGateError(
+        "P38 replay artifacts require train_example.prompt_ids"
+    )
+  row_arrays = {
+      "prompt_ids": np.asarray(prompt_ids),
+      "prompt_mask": np.asarray(sidecar.prompt_mask, dtype=np.bool_),
+      "completion_ids": np.asarray(sidecar.tokens),
+      "completion_valid_mask": np.asarray(
+          sidecar.completion_valid_mask, dtype=np.bool_
+      ),
+      "action_mask": np.asarray(sidecar.action_mask, dtype=np.bool_),
+      "s_decode": np.asarray(sidecar.s_decode),
+      "s_prefill": np.asarray(sidecar.s_prefill),
+      "t_old": np.asarray(sidecar.t_old),
+      "policy_version": np.asarray(sidecar.policy_version),
+      "sampling_values": np.asarray(sidecar.sampling_values),
+  }
+  batch_rows = np.asarray(sidecar.tokens).shape[0]
+  invalid = {
+      name: value.shape
+      for name, value in row_arrays.items()
+      if value.ndim == 0 or value.shape[0] != batch_rows
+  }
+  if invalid:
+    raise AlignmentGateError(
+        f"P38 replay artifact contains non-batch-aligned arrays: {invalid}"
+    )
+  return row_arrays
+
+
+def _persist_m15_producer_unit_carrier(
+    sidecar: ObservedTrainExample,
+    record: dict[str, Any],
+) -> dict[str, Any] | None:
+  """Persists all 256 M15 rows without changing any numerical value."""
+  arm = os.environ.get("CANON_APC_M15_TARGET_DEBUG", "")
+  if arm not in ("off", "on"):
+    return None
+  capture_dir = os.environ.get("CANON_P38_SERVING_CAPTURE_DIR", "")
+  if not capture_dir:
+    raise AlignmentGateError(
+        "M15 producer-unit capture requires CANON_P38_SERVING_CAPTURE_DIR"
+    )
+  if not precheck_only_enabled():
+    raise AlignmentGateError(
+        "M15 producer-unit capture is restricted to P38 precheck-only runs"
+    )
+  if p38_diagnostic_rounds() != 1 or p38_diagnostic_round_index() != 0:
+    raise AlignmentGateError(
+        "M15 producer-unit capture currently requires exactly one round"
+    )
+  row_arrays = _p38_replay_row_arrays(sidecar)
+  batch_rows = int(np.asarray(sidecar.tokens).shape[0])
+  try:
+    num_generations = int(os.environ.get("CANON_NUM_GENERATIONS", "0"))
+  except ValueError as exc:
+    raise AlignmentGateError(
+        "CANON_NUM_GENERATIONS must be an integer for M15 capture"
+    ) from exc
+  if batch_rows != 256 or num_generations != 8:
+    raise AlignmentGateError(
+        "M15 producer-unit capture requires 256 rows and 8 generations: "
+        f"rows={batch_rows} generations={num_generations}"
+    )
+  captured = {
+      name: np.ascontiguousarray(value) for name, value in row_arrays.items()
+  }
+  record_json = json.dumps(
+      record, sort_keys=True, separators=(",", ":"), allow_nan=False
+  )
+  metadata = {
+      "schema": "m15-apc-producer-unit-v1",
+      "arm": arm,
+      "step": int(record["step"]),
+      "diagnostic_round": 0,
+      "source": sidecar.source_name,
+      "source_commit": os.environ.get("CANON_EXPECT_COMMIT", ""),
+      "rows": batch_rows,
+      "prompt_groups": batch_rows // num_generations,
+      "num_generations": num_generations,
+      "source_rows": list(range(batch_rows)),
+      "record_sha256": hashlib.sha256(record_json.encode()).hexdigest(),
+      "boundaries": {
+          name: {
+              "differing_bytes": value.get("differing_bytes"),
+              "differing_elements": value.get("differing_elements"),
+              "max_abs": value.get("max_abs"),
+          }
+          for name, value in record.get("boundaries", {}).items()
+      },
+      "arrays": {
+          name: {
+              "shape": list(value.shape),
+              "dtype": str(value.dtype),
+              "sha256": _hash(value),
+          }
+          for name, value in captured.items()
+      },
+  }
+  metadata_json = json.dumps(
+      metadata, sort_keys=True, separators=(",", ":"), allow_nan=False
+  ).encode()
+  path = os.path.join(capture_dir, "m15_producer_unit.npz")
+  os.makedirs(capture_dir, exist_ok=True)
+  if os.path.exists(path):
+    raise AlignmentGateError(
+        f"M15 producer-unit carrier path already exists: {path}"
+    )
+  temporary = f"{path}.tmp"
+  try:
+    with open(temporary, "xb") as carrier_file:
+      np.savez_compressed(
+          carrier_file,
+          source_rows=np.arange(batch_rows, dtype=np.int32),
+          metadata_json=np.frombuffer(metadata_json, dtype=np.uint8),
+          **captured,
+      )
+      carrier_file.flush()
+      os.fsync(carrier_file.fileno())
+    os.replace(temporary, path)
+  finally:
+    if os.path.exists(temporary):
+      os.unlink(temporary)
+  result = {
+      "path": path,
+      "sha256": _report_sha256(path),
+      "rows": batch_rows,
+      "logical_bytes": sum(value.nbytes for value in captured.values()),
+  }
+  print(
+      "[CAN" "ON_APC_M15_PRODUCER_CARRIER] "
+      f"arm={arm} path={path} sha256={result['sha256']} "
+      f"rows={batch_rows} logical_bytes={result['logical_bytes']}",
+      flush=True,
+  )
+  return result
+
+
 def _persist_p38_mismatch_capsule(
     sidecar: ObservedTrainExample,
     record: dict[str, Any],
@@ -1109,35 +1253,7 @@ def _persist_p38_mismatch_capsule(
     raise AlignmentGateError(
         "P38 mismatch capsule requested but no red sequence rows were localized"
     )
-  prompt_ids = getattr(sidecar.train_example, "prompt_ids", None)
-  if prompt_ids is None:
-    raise AlignmentGateError(
-        "P38 mismatch capsule requires train_example.prompt_ids"
-    )
-  row_arrays = {
-      "prompt_ids": np.asarray(prompt_ids),
-      "prompt_mask": np.asarray(sidecar.prompt_mask, dtype=np.bool_),
-      "completion_ids": np.asarray(sidecar.tokens),
-      "completion_valid_mask": np.asarray(
-          sidecar.completion_valid_mask, dtype=np.bool_
-      ),
-      "action_mask": np.asarray(sidecar.action_mask, dtype=np.bool_),
-      "s_decode": np.asarray(sidecar.s_decode),
-      "s_prefill": np.asarray(sidecar.s_prefill),
-      "t_old": np.asarray(sidecar.t_old),
-      "policy_version": np.asarray(sidecar.policy_version),
-      "sampling_values": np.asarray(sidecar.sampling_values),
-  }
-  batch_rows = np.asarray(sidecar.tokens).shape[0]
-  invalid = {
-      name: value.shape
-      for name, value in row_arrays.items()
-      if value.ndim == 0 or value.shape[0] != batch_rows
-  }
-  if invalid:
-    raise AlignmentGateError(
-        f"P38 mismatch capsule contains non-batch-aligned arrays: {invalid}"
-    )
+  row_arrays = _p38_replay_row_arrays(sidecar)
   selected = np.asarray(rows, dtype=np.int32)
   try:
     num_generations = int(os.environ.get("CANON_NUM_GENERATIONS", "0"))
@@ -1410,6 +1526,9 @@ def check_pre_backward(
       PRE_REPORT_ENV,
       "/mnt/disks/tunix-data/frozenlake/logs/pre_alignment_report.jsonl",
   )
+  producer_unit = _persist_m15_producer_unit_carrier(sidecar, record)
+  if producer_unit is not None:
+    record["m15_producer_unit"] = producer_unit
   capsule = _persist_p38_mismatch_capsule(sidecar, record)
   if capsule is not None:
     record["mismatch_capsule"] = capsule
