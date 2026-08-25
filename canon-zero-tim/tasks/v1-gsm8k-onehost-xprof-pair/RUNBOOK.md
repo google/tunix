@@ -1,9 +1,11 @@
 # GSM8K one-host Native vs Zero-HP XProf runbook
 
-> **P60-2 readability follow-up is active.** The P60-2C second Zero-HP canary
-> proved the whole-update hierarchy at dirty-tree analysis grade. P60-2E adds
-> accumulator microstep and optimizer-update metadata locally; that increment
-> is `TARGET NOT RUN`. Before any new run, read
+> **P60-2 readability follow-up is active.** P60-2E's first clean-SHA Zero-HP
+> run passed its runtime, hierarchy, all-plane, optimizer-tail, alignment, and
+> classifier gates, but its old runner hashed `driver.log` before appending the
+> final GREEN line. Its strongest claim is therefore `CORE TARGET GATES PASS /
+> EVIDENCE PACKAGING RED`, not TARGET PASS. P60-2F repairs that ordering and is
+> not yet committed or target-rerun. Before any new run, read
 > [`HANDOFF_P60_2.md`](HANDOFF_P60_2.md) and all `phases/p60-2*.md`. Do not
 > rerun Native. A fresh Zero-HP canary is allowed only after P60-2B's
 > host/static/exact-image gates and explicit user approval. The revised census
@@ -23,12 +25,11 @@ completeness; `[PERF]` from comparable unprofiled steps decides speed. The UI,
 host hierarchy, semantic Perfetto, and trace JSON are attribution/navigation
 views, not interchangeable clocks.
 
-P60-2B/P60-2E local implementation gates are green on branch
-`local/p60-2e-microstep-latest-0825` at base
-`cdd3987caa648e6112ee8fc184b2e3421de3a4b2`. The latest registry contains
-372 flags because P63 is included. P60-2C passed on immutable dev2 evidence;
-P60-2E remains `TARGET NOT RUN`. Do not interpret its local annotation API
-output as proof that the new metadata appears in a TPU XPlane.
+P60-2B/P60-2E implementation commit
+`da535c1d5cee7573671fa40809547a6972bec072` passed the clean-SHA core target
+gates. The latest registry contains 372 flags because P63 is included. The
+preserved packaging-RED root proves the P60-2E XPlane metadata, but cannot be
+accepted until a fresh runner-fixed receipt has a valid SHA ledger.
 
 Run from the exact worktree on the direct four-chip v5p. Do not run the two
 arms concurrently. During development only, the dirty-tree override is
@@ -44,11 +45,17 @@ bash canon-zero-tim/tasks/v1-gsm8k-onehost-xprof-pair/scripts/run_onehost_gsm8k_
   '<fresh-zero-label>'
 ```
 
-Each arm must end in:
+Each successful arm must end on stdout in this order:
 
 ```text
+[V1.GSM8K.XPROF] SHA_LEDGER_PASS entries=<count> root=<absolute-root>
 [V1.GSM8K.XPROF] GREEN arm=<arm> backward_xprof=1 root=<absolute-root>
 ```
+
+The wrapper must return 0, and `sha256sum -c <root>/SHA256SUMS` must
+independently return 0. `driver.log` contains exactly one terminal GREEN or
+RED marker and is never changed after manifest construction. A standalone
+GREEN marker without `SHA_LEDGER_PASS` is not acceptance evidence.
 
 The runners set `CANON_P60_DETERMINISTIC_AB=1` in both arms. This is a
 diagnostic input-control flag: it pins engine seed 42, serial scheduling,

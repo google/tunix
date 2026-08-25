@@ -1,6 +1,7 @@
 # P60-2E — Expose truthful accumulator microsteps and optimizer update
 
-- Status: passed (local); target not run
+- Status: local/exact-image pass; clean-SHA core target gates pass; evidence
+  packaging red
 
 ## Finding
 
@@ -80,5 +81,15 @@ GREEN on that immutable XPlane: all 8/8 planes contain the five backward
 families, `jit__precomputed_gradient_scaled_step` exactly 16 times, and
 `jit__precomputed_gradient_commit` exactly once, with decode absent. The two
 new tail negative controls fail on a missing commit and on only 15 scaled
-steps. No TPU, Kubernetes, commit, push, or image publication occurred;
-P60-2E is `TARGET NOT RUN`.
+steps. No TPU, Kubernetes, commit, push, or image publication occurred during
+that local checkpoint.
+
+The later clean implementation commit
+`da535c1d5cee7573671fa40809547a6972bec072` received one authorized fresh
+Zero-HP run. Its target XPlane satisfies the exact metadata, host-track,
+8/8-device, backward, scaled-step×16, commit×1, decode-absent, 3/3-update, and
+51/51-alignment gates; classification is PASS with no reasons. However, the
+old runner generated `SHA256SUMS` before appending the terminal GREEN marker
+to `driver.log`, so independent manifest verification fails. P60-2E therefore
+has `CORE TARGET GATES PASS / EVIDENCE PACKAGING RED`, not TARGET PASS.
+P60-2F owns the additive ledger-order repair and fresh-receipt requirement.

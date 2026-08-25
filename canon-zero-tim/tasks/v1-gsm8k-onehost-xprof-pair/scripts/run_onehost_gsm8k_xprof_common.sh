@@ -17,6 +17,8 @@ case "$label" in
 esac
 
 script_dir="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck disable=SC1091
+source "$script_dir/finalize_gsm8k_xprof_evidence.sh"
 repo="$(git -C "$script_dir" rev-parse --show-toplevel)"
 pkg="$repo/canon-zero-tim"
 canon_env=/mnt/disks/tunix-data/claude_work/canon_env.sh
@@ -57,6 +59,7 @@ runtime_files=(
   "$repo/canon-zero-tim/cluster/profiles/qwen3-1p7b-dp4-tp1-gsm8k-v1-hp.env"
   "$script_dir/run_onehost_gsm8k_xprof_common.sh"
   "$script_dir/run_onehost_gsm8k_xprof_inner.sh"
+  "$script_dir/finalize_gsm8k_xprof_evidence.sh"
   "$script_dir/classify_gsm8k_xprof_arm.py"
   "$script_dir/census_gsm8k_xprof_hierarchy.py"
   "$script_dir/census_gsm8k_xprof_modules.py"
@@ -288,14 +291,29 @@ fi
 classifier_rc=$?
 set -e
 
-sha_inputs=("$raw" "$driver" "$xprof_census" "$semantic_census" "$classification")
-[ -e "$hierarchy_census" ] && sha_inputs+=("$hierarchy_census")
-for path in "$pre" "$align" "$update"; do
+sha_inputs=("$raw" "$driver")
+for path in \
+    "$xprof_census" "$semantic_census" "$classification" \
+    "$hierarchy_census" "$pre" "$align" "$update"; do
   [ -e "$path" ] && sha_inputs+=("$path")
 done
-sha256sum "${sha_inputs[@]}" >"$root/SHA256SUMS" 2>/dev/null || true
-if [ "$docker_rc" -ne 0 ] || [ "$classifier_rc" -ne 0 ]; then
-  echo "[V1.GSM8K.XPROF] RED arm=$arm docker_rc=$docker_rc classifier_rc=$classifier_rc root=$root" | tee -a "$driver"
-  exit 1
+if ! gsm8k_xprof_choose_terminal \
+    "$arm" "$root" "$docker_rc" "$classifier_rc"; then
+  echo "[V1.GSM8K.XPROF] SHA_LEDGER_RED stage=select root=$root" >&2
+  exit 98
 fi
-echo "[V1.GSM8K.XPROF] GREEN arm=$arm backward_xprof=1 root=$root" | tee -a "$driver"
+if ! gsm8k_xprof_write_terminal_manifest \
+    "$GSM8K_XPROF_TERMINAL_MARKER" "$driver" "$root/SHA256SUMS" \
+    "${sha_inputs[@]}"; then
+  echo "[V1.GSM8K.XPROF] SHA_LEDGER_RED stage=write root=$root" >&2
+  exit 98
+fi
+# Verification is intentionally immediate. After this point the runner may
+# write only to stdout/stderr, never to a file covered by SHA256SUMS.
+if ! gsm8k_xprof_verify_manifest "$root/SHA256SUMS"; then
+  echo "[V1.GSM8K.XPROF] SHA_LEDGER_RED stage=verify root=$root" >&2
+  exit 98
+fi
+echo "[V1.GSM8K.XPROF] SHA_LEDGER_PASS entries=${#sha_inputs[@]} root=$root"
+printf '%s\n' "$GSM8K_XPROF_TERMINAL_MARKER"
+exit "$GSM8K_XPROF_TERMINAL_RC"

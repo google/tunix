@@ -27,7 +27,8 @@ Native-vs-Zero timing from the existing input-mismatched pair.
 | [P60-2B](phases/p60-2b-hierarchy-instrumentation.md) | Profile-only `train -> zero_tim_update -> phase -> group -> transaction` annotations and mechanical tests | Host/static, flag audit, P59 numerical controls, exact-image, and no-new-sync review pass; the census requires the complete hierarchy on `/host:CPU` `python3`, the exact host `train(step_num=1)` API, and 8/8 non-empty device `Steps` rows | passed (local) |
 | [P60-2C](phases/p60-2c-onehost-visual-certification.md) | One fresh Zero-HP one-host capture with hierarchy census and UI checklist | 3/3 commits, 51/51 alignment PASS, 8/8 backward planes, exact hierarchy counts, decode absent; optimizer-tail drop was not yet a mechanical gate | passed (dirty-tree analysis grade) |
 | [P60-2D](phases/p60-2d-attribution-and-next-decision.md) | Deterministic hierarchy summary and performance follow-up decision | All-plane stage report produced; any optimization is split into a new single-variable phase | pending |
-| [P60-2E](phases/p60-2e-microstep-readability.md) | Truthful accumulator microstep and optimizer-update metadata without pretending Zero-HP is Native's monolithic graph | CPU/negative controls, exact-image 16-span receipt, old-artifact fail-closed hierarchy probe, 8/8 device planes with scaled-step×16 + commit×1, flag/diff/no-sync gates | passed (local); target not run |
+| [P60-2E](phases/p60-2e-microstep-readability.md) | Truthful accumulator microstep and optimizer-update metadata without pretending Zero-HP is Native's monolithic graph | CPU/negative controls, exact-image 16-span receipt, old-artifact fail-closed hierarchy probe, 8/8 device planes with scaled-step×16 + commit×1, flag/diff/no-sync gates | core target gates pass; evidence packaging red |
+| [P60-2F](phases/p60-2f-evidence-ledger-finalization.md) | Fail-closed terminal marker and immutable evidence-ledger finalization | GREEN/RED/tamper CPU controls, immediate `sha256sum -c`, no post-manifest hashed writes, exact-image and static gates | passed (local/exact-image); target not rerun |
 
 ## Decisions
 
@@ -63,6 +64,10 @@ Native-vs-Zero timing from the existing input-mismatched pair.
   the exact eight TPU planes must contain the five backward families,
   `jit__precomputed_gradient_scaled_step` exactly 16 times, and
   `jit__precomputed_gradient_commit` exactly once, with decode absent.
+- Decision: a terminal GREEN marker is an execution/classifier result, not by
+  itself an acceptance receipt. Acceptance also requires runner exit 0,
+  `SHA_LEDGER_PASS`, and an independently verifiable root `SHA256SUMS` created
+  only after the unique terminal marker is frozen in `driver.log`.
 - Hypothesis: one top-level `StepTraceAnnotation` plus bounded group/stage
   `TraceAnnotation` scopes will restore navigation while adding only tens of
   host events to a capture that currently contains 59,028 TPU module events.

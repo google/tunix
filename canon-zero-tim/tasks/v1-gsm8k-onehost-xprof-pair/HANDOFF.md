@@ -83,11 +83,16 @@ The wrapper calls the shared runner with `arm=native`. It does not install any
 canonical inference shim. It runs three stock GSM8K updates and captures the
 second update's ordinary backward.
 
-The final terminal line must be:
+The final stdout lines must be:
 
 ```text
+[V1.GSM8K.XPROF] SHA_LEDGER_PASS entries=<count> root=<absolute-root>
 [V1.GSM8K.XPROF] GREEN arm=native backward_xprof=1 root=<absolute-root>
 ```
+
+Require wrapper exit 0 and independent
+`sha256sum -c "$p60_native_root/SHA256SUMS"` success after assigning the root
+below. A GREEN marker without `SHA_LEDGER_PASS` is not acceptance evidence.
 
 With the default evidence root, record and inspect:
 
@@ -123,11 +128,17 @@ V1 profile, enables P59 rank-parallel backward, and retains fixed-order DP
 reduction. It uses the same topology, prompt/response tensor shapes, seed,
 number of trajectory groups, optimizer placement, and XProf window as Native.
 
-The final terminal line must be:
+The final stdout lines must be:
 
 ```text
+[V1.GSM8K.XPROF] SHA_LEDGER_PASS entries=<count> root=<absolute-root>
 [V1.GSM8K.XPROF] GREEN arm=zero-hp backward_xprof=1 root=<absolute-root>
 ```
+
+Also require wrapper exit 0 and an independent
+`sha256sum -c "$p60_zero_root/SHA256SUMS"` success. The driver must contain
+exactly one terminal marker. A GREEN marker without `SHA_LEDGER_PASS` is an
+evidence-packaging failure, not acceptance.
 
 Inspect the Zero-HP result:
 
@@ -204,6 +215,9 @@ would require a future frozen-train-batch replay carrier.
    the completeness gate.
 4. `classification.json` is the arm verdict. A zero shell exit without this
    PASS record is not acceptance evidence.
+5. root `SHA256SUMS` is the immutable evidence ledger. It is written only
+   after the terminal marker is frozen and must pass `sha256sum -c`; runner
+   output must include `SHA_LEDGER_PASS`.
 
 This distinction matters in the certified development run: Native's full
 XPlane contains 16/16 `jit__train_step` modules on every plane, while its

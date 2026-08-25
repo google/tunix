@@ -1,7 +1,7 @@
 # State
 
-- Status: P60-2C SECOND CANARY PASS (DIRTY-TREE ANALYSIS GRADE);
-  P60-2E MICROSTEP + SAME-HOST-TRACK LOCAL/EXACT-IMAGE PASS / TARGET NOT RUN.
+- Status: P60-2E CLEAN-SHA CORE TARGET GATES PASS / EVIDENCE PACKAGING RED;
+  P60-2F LOCAL/EXACT-IMAGE PASS / TARGET NOT RERUN.
 - Objective: make the Zero-HP P59 update capture human-readable as one training
   step with stable update, group, backward, reducer, and optimizer hierarchy,
   without changing its numerical program or adding synchronization.
@@ -12,11 +12,14 @@
 - Worktree entry: `/home/yuxuan/code_rl_repro/worktrees/p60_2e_microstep_latest_0825`
   (data-disk-backed because the root filesystem was full).
 - Branch: `local/p60-2e-microstep-latest-0825`
-- Base: `cdd3987caa648e6112ee8fc184b2e3421de3a4b2` from the fetched
-  `origin/yuxzhang/canon-zero-tim` tip.
-- Current phase: [P60-2E — microstep readability metadata](phases/p60-2e-microstep-readability.md)
-  passed locally on the migrated P63-inclusive base; its target gate has not
-  run. P60-2D remains pending.
+- Base: `53876c15f407435dbd44680ad18f5f8e88f3c255` from the fetched
+  `origin/yuxzhang/canon-zero-tim` tip. P60-2E was rebased without conflict as
+  local commit `d0c6c67474d836664bab69eed665d96d6ff53a25`; the immutable clean-SHA
+  target below correctly retains its historical source `da535c1d...`.
+- Current phase: [P60-2F — evidence-ledger finalization](phases/p60-2f-evidence-ledger-finalization.md).
+  The P60-2E implementation was committed locally as
+  `da535c1d5cee7573671fa40809547a6972bec072` and received one clean-SHA
+  Zero-HP target run. P60-2D remains pending.
 - Implemented contract: labels-off is an exact no-op; labels-on adds the
   Native API-compatible `StepTraceAnnotation("train", step_num=1)` envelope
   and bounded update/group/transaction annotations. This is API compatibility
@@ -30,14 +33,14 @@
 - Preserved fact: the historical Native and Zero-HP captures are complete; the
   historical pair remains `INCONCLUSIVE_INPUT_MISMATCH` and cannot support a
   causal timing ratio.
-- Next action: review this latest-base diff. A clean local commit requires
-  explicit approval; after that, a fresh Zero-HP one-host target receipt
-  requires separate launch approval. Do not rerun Native.
-- Current local result: 10/10 task tests, P60-2 document set 13/13, pinned-image
-  P59/V1/P63 regressions, labels-off/on numerical controls, one-ULP negative,
-  and the same-host-track annotation API probe all pass. Registry audit is
-  372/372 on the fetched P63-inclusive tip; 371 and 370 belong to prior source
-  revisions.
+- Next action: review the P60-2F diff and stop for a separate additive-commit
+  approval. A fresh target rerun would require a later, separate launch
+  approval. Do not rerun Native.
+- Current P60-2F result on the fetched `53876c15...` base: task suite 11/11,
+  document set 14/14, full pinned exact-image ladder,
+  GREEN/RED/post-manifest-tamper/duplicate-marker controls, 372/372 flag audit,
+  branch preflight, syntax, diff, secret, and no-production-source-change gates
+  pass.
 - First target result: RED only at the new hierarchy gate. Training completed
   3/3 updates with 51/51 alignment PASS; old all-plane backward and semantic
   censuses passed; all bounded child spans and 8/8 device Steps rows were
@@ -56,26 +59,30 @@
   groups, 16 complete reduction transactions, and one optimizer commit.
   All eight device planes have non-empty `Steps` rows and all five P59
   backward families with decode absent.
-- P60-2E result: the latest-base implementation and fail-closed census are
-  local and exact-image PASS. The prior dev2 XPlane has every hierarchy span
-  on `/host:CPU` `python3`, remains structurally green, and correctly fails the
-  new census with exactly 33 missing-metadata reasons. Therefore dev2 proves
-  P60-2C but does not certify P60-2E. A separate read-only device-module
-  recensus of dev2 is GREEN on 8/8 planes with scaled-step=16 and commit=1 on
-  every plane and decode absent; missing-commit and 15-scaled-step CPU
-  negatives fail closed. Matched unprofiled step-2 records show no
-  performance-regression signal, but are not a repeated A/B.
+- P60-2E clean-SHA target result: immutable run
+  `v1_zero-hp_p60_readable_zero_p60_2e_clean_20260825_r1` used source
+  `da535c1d5cee7573671fa40809547a6972bec072` with an empty source diff. It
+  completed 3/3 updates and 51/51 alignment, passed the complete hierarchy
+  metadata census, passed all five backward families plus scaled-step×16 and
+  commit×1 on 8/8 planes, and had no decode. Its arm classifier verdict is
+  PASS with no reasons.
+- Packaging result: RED. The old runner hashed `driver.log` before appending
+  its final GREEN line. `sha256sum -c SHA256SUMS` fails only for that file;
+  removing the last line reproduces the recorded hash exactly. P60-2F now
+  freezes the unique terminal marker before manifest creation, verifies the
+  manifest immediately, emits `SHA_LEDGER_PASS` only afterward, and returns
+  98 on a ledger failure. The immutable failed-package root is not modified.
 - Full-XPlane navigation result: group 0's reverse interval overlaps the
   head, norm, layer, embed, and adjoint backward module families on 8/8 TPU
   planes. Host parent/child containment and stage order pass mechanically.
-- Blocker: P60-2E has no clean local commit and its target was not run; neither
-  action is authorized yet. The dirty-tree override also limits the passing
-  P60-2C canary to analysis-grade evidence.
+- Blocker: the clean-SHA target's core evidence is good, but its SHA ledger is
+  invalid, so `TARGET PASS` is prohibited. P60-2F is uncommitted and has not
+  been target-rerun.
 - Key artifacts: [P60-2 handoff](HANDOFF_P60_2.md), [plan](plan.md),
   [P60-2B phase](phases/p60-2b-hierarchy-instrumentation.md), and
   [operator runbook](RUNBOOK.md).
-- The first RED root and second PASS root remain preserved. The user's one
-  authorized direct-v5p Zero-HP retry has been consumed. No Kubernetes action,
-  commit, push, image publication, Native rerun, or further retry is
+- All prior roots and the clean-SHA packaging-RED root remain preserved. The
+  authorized clean-SHA Zero-HP run has been consumed. No additive P60-2F
+  commit, push, image publication, Native rerun, or further TPU retry is
   authorized.
 - Updated: 2026-08-25.

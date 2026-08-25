@@ -214,6 +214,10 @@ Acceptance requires all of the following:
 - the official semantic Perfetto counts unchanged;
 - raw log, full XPlane tree, semantic Perfetto, trace JSON, all censuses,
   classification, and SHA ledger preserved.
+- exactly one terminal GREEN marker frozen in `driver.log` before
+  `SHA256SUMS` is generated;
+- wrapper exit 0 followed by `SHA_LEDGER_PASS`, plus independent
+  `sha256sum -c SHA256SUMS` success. A driver GREEN alone is insufficient.
 
 ## Claim ceiling and rollback
 
@@ -226,8 +230,11 @@ It is dirty-tree analysis-grade evidence, not a signed clean-SHA receipt. It
 is not a Native/Zero speed claim and not a 64-chip certification.
 
 P60-2E was added afterward to expose truthful accumulator microsteps and the
-separate optimizer update. It is local + exact-image PASS and target not run;
-the dev2 capture predates those metadata fields and cannot certify them.
+separate optimizer update. Its clean-SHA run passed the core target gates, but
+the old runner produced its SHA ledger before appending the terminal GREEN
+line. That immutable root is packaging RED. P60-2F fixes finalization order
+additively; until a fresh committed-tree run passes both the core gates and
+`SHA_LEDGER_PASS`, P60-2E cannot be promoted to TARGET PASS.
 
 Rollback is the single annotation/census/classifier CL. With
 `CANON_XPROF_LABELS` absent or `0`, runtime behavior must already be an exact

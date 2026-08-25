@@ -22,5 +22,10 @@ official semantic Perfetto vocabulary. The revised carrier must emit the same
 host `StepTraceAnnotation("train", step_num=1)` contract as Native and retain
 non-empty `Steps` rows on all eight TPU device planes. A future, separately
 approved one-host Zero-HP capture must also retain 3/3 commits, 51/51 strict
-alignment PASS, and complete backward on 8/8 TensorCore planes. This follow-up
-does not repair the input mismatch and does not authorize a timing ratio.
+  alignment PASS, and complete backward on 8/8 TensorCore planes. This follow-up
+  does not repair the input mismatch and does not authorize a timing ratio.
+
+Acceptance also requires fail-closed evidence packaging: freeze one terminal
+marker in `driver.log`, generate `SHA256SUMS` only after all hashed files are
+immutable, verify it immediately, and emit `SHA_LEDGER_PASS` before returning
+success. A runtime/classifier GREEN with an invalid ledger is not TARGET PASS.

@@ -7,6 +7,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import subprocess
 import tempfile
 import types
 import unittest
@@ -134,6 +135,102 @@ def _fixture(root: Path, arm: str) -> None:
 
 
 class ContractTest(unittest.TestCase):
+
+  def test_evidence_ledger_green_red_and_post_manifest_tamper(self):
+    helper = SCRIPTS / "finalize_gsm8k_xprof_evidence.sh"
+    harness = r'''
+source "$1"
+root="$2"
+docker_rc="$3"
+classifier_rc="$4"
+tamper="$5"
+driver="$root/driver.log"
+raw="$root/raw.log"
+manifest="$root/SHA256SUMS"
+gsm8k_xprof_choose_terminal zero-hp "$root" "$docker_rc" "$classifier_rc"
+gsm8k_xprof_write_terminal_manifest \
+  "$GSM8K_XPROF_TERMINAL_MARKER" "$driver" "$manifest" "$driver" "$raw"
+if [ "$tamper" = 1 ]; then
+  printf 'post-manifest tamper\n' >>"$raw"
+fi
+if ! gsm8k_xprof_verify_manifest "$manifest"; then
+  printf '[V1.GSM8K.XPROF] SHA_LEDGER_RED stage=verify root=%s\n' "$root" >&2
+  exit 98
+fi
+printf '[V1.GSM8K.XPROF] SHA_LEDGER_PASS entries=2 root=%s\n' "$root"
+printf '%s\n' "$GSM8K_XPROF_TERMINAL_MARKER"
+exit "$GSM8K_XPROF_TERMINAL_RC"
+'''
+    cases = (
+        ("green", "0", "0", "0", 0, "GREEN", True),
+        ("red", "7", "0", "0", 1, "RED", True),
+        ("tamper", "0", "0", "1", 98, "GREEN", False),
+    )
+    with tempfile.TemporaryDirectory() as directory:
+      base = Path(directory)
+      for name, docker_rc, classifier_rc, tamper, expected_rc, marker, valid in cases:
+        with self.subTest(name=name):
+          root = base / name
+          root.mkdir()
+          (root / "driver.log").write_text("driver preamble\n")
+          (root / "raw.log").write_text("raw evidence\n")
+          result = subprocess.run(
+              [
+                  "bash", "-euo", "pipefail", "-c", harness, "ledger-test",
+                  str(helper), str(root), docker_rc, classifier_rc, tamper,
+              ],
+              capture_output=True,
+              text=True,
+              check=False,
+          )
+          self.assertEqual(result.returncode, expected_rc, result)
+          terminal_lines = [
+              line for line in (root / "driver.log").read_text().splitlines()
+              if line.startswith("[V1.GSM8K.XPROF] GREEN ")
+              or line.startswith("[V1.GSM8K.XPROF] RED ")
+          ]
+          self.assertEqual(len(terminal_lines), 1)
+          self.assertIn(marker, terminal_lines[0])
+          verify = subprocess.run(
+              ["sha256sum", "-c", str(root / "SHA256SUMS")],
+              capture_output=True,
+              text=True,
+              check=False,
+          )
+          self.assertEqual(verify.returncode == 0, valid, verify)
+          if valid:
+            self.assertIn("SHA_LEDGER_PASS", result.stdout)
+            self.assertNotIn("SHA_LEDGER_RED", result.stderr)
+          else:
+            self.assertIn("SHA_LEDGER_RED", result.stderr)
+            self.assertNotIn("SHA_LEDGER_PASS", result.stdout)
+
+      green_root = base / "green"
+      duplicate = subprocess.run(
+          [
+              "bash", "-euo", "pipefail", "-c",
+              r'''
+source "$1"
+if gsm8k_xprof_write_terminal_manifest \
+    "[V1.GSM8K.XPROF] RED arm=zero-hp docker_rc=1 classifier_rc=1 root=$2" \
+    "$2/driver.log" "$2/duplicate-SHA256SUMS" "$2/driver.log"; then
+  exit 1
+fi
+''',
+              "duplicate-test", str(helper), str(green_root),
+          ],
+          capture_output=True,
+          text=True,
+          check=False,
+      )
+      self.assertEqual(duplicate.returncode, 0, duplicate)
+      terminal_lines = [
+          line for line in (green_root / "driver.log").read_text().splitlines()
+          if line.startswith("[V1.GSM8K.XPROF] GREEN ")
+          or line.startswith("[V1.GSM8K.XPROF] RED ")
+      ]
+      self.assertEqual(len(terminal_lines), 1)
+      self.assertFalse((green_root / "duplicate-SHA256SUMS").exists())
 
   def test_zero_hp_module_census_requires_complete_optimizer_tail(self):
     counts = {
@@ -322,6 +419,19 @@ class ContractTest(unittest.TestCase):
     self.assertIn("census_gsm8k_semantic_trace.py", common)
     self.assertIn("census_gsm8k_xprof_hierarchy.py", common)
     self.assertIn("--require-hierarchy", common)
+    self.assertIn("finalize_gsm8k_xprof_evidence.sh", common)
+    self.assertIn('sha_inputs=("$raw" "$driver")', common)
+    self.assertIn('"$xprof_census" "$semantic_census" "$classification"', common)
+    choose = common.index("gsm8k_xprof_choose_terminal")
+    write = common.index("gsm8k_xprof_write_terminal_manifest")
+    verify = common.index("gsm8k_xprof_verify_manifest")
+    ledger_pass = common.index("SHA_LEDGER_PASS")
+    self.assertLess(choose, write)
+    self.assertLess(write, verify)
+    self.assertLess(verify, ledger_pass)
+    self.assertNotIn('tee -a "$driver"', common[verify:])
+    self.assertNotIn('>>"$driver"', common[verify:])
+    self.assertNotIn('sha256sum "${sha_inputs[@]}"', common)
     analyze = (SCRIPTS / "analyze_gsm8k_xprof_pair.sh").read_text()
     self.assertIn("classify_gsm8k_xprof_pair.py", analyze)
     self.assertIn("xprof_trace_summary.py", analyze)

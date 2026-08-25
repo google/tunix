@@ -314,3 +314,68 @@
 - Boundary: this closes the two local evidence ambiguities only. P60-2E is
   still `TARGET NOT RUN`; no TPU, Kubernetes, commit, push, or image
   publication occurred.
+
+## 2026-08-25 — P60-2E clean-SHA core PASS, evidence packaging RED
+
+- Source: locally committed implementation
+  `da535c1d5cee7573671fa40809547a6972bec072`, clean source diff SHA-256
+  `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855`.
+  The authorized fresh Zero-HP run root is
+  `/mnt/disks/tunix-data/gsm8k-onehost-xprof/v1_zero-hp_p60_readable_zero_p60_2e_clean_20260825_r1`.
+- Core result: 3/3 updates, 51/51 alignment, exact hierarchy metadata on the
+  single host track, non-empty Steps on 8/8 planes, all required backward
+  families and per-plane scaled-step×16 plus commit×1, decode absent, semantic
+  census GREEN, and arm classification PASS with no reasons.
+- Artifact result: full XPlane 768,217,129 bytes with SHA-256
+  `fb9d41d1ccb50948aa7704b9d325ffcfae81659a4c3dc8d29e3f669f039d56bb`;
+  trace JSON 33,812,925 bytes with SHA-256
+  `c3251f92f57d7ac7900ec6ae0c68da93e1e226ed1ee5c0610fdf7b841a92178d`;
+  semantic Perfetto 12,436 bytes with SHA-256
+  `784a31c8924ff8a73b1893f96000eeee2049cb70954257efc16c92a69186c724`.
+- Packaging result: `sha256sum -c SHA256SUMS` fails only on `driver.log`.
+  The manifest records
+  `f025bf90b76d668b37311ab420571e90ffaca3b2f10248bf082aaa2b259cd8d7`,
+  the final file hashes to
+  `d946011e6fa704f2db20fa75e170b20373296420335c33c91d043c1470769a8b`,
+  and removing the last GREEN line reproduces the recorded value. Root cause:
+  the old runner wrote the manifest before appending its terminal marker.
+- Verdict: `CORE TARGET GATES PASS / EVIDENCE PACKAGING RED`. The immutable
+  root was not modified. The weakref finalizer traceback occurs after
+  `TRAINING_DONE` and is recorded as tail noise, not the packaging cause.
+
+## 2026-08-25 — P60-2F additive ledger fix started
+
+- Added a sourced finalization helper that selects GREEN/RED first, freezes a
+  unique terminal marker in `driver.log`, atomically installs `SHA256SUMS`,
+  verifies it immediately, and emits `SHA_LEDGER_PASS` only after success.
+  Write or verification failure returns 98 with `SHA_LEDGER_RED`; no hashed
+  file is written after verification.
+- Focused CPU controls pass for execution GREEN/exit 0, execution RED/exit 1,
+  and post-manifest tamper/exit 98. The tamper branch retains the already
+  hashed execution GREEN marker but correctly withholds `SHA_LEDGER_PASS`.
+- Final local result: task suite 11/11 and document set 14/14 pass. The full
+  pinned-image P63/V1/P59 ladder passed on immutable image
+  `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`
+  and ended with `V1_HP_EXACT_IMAGE_PASS`, the complete P60 annotation API
+  receipt, and `P60_2B_EXACT_IMAGE_PASS ... tpu_devices=0`.
+- Static result: flag audit 372/372, expected-branch preflight, syntax,
+  `git diff --check`, changed-file secret scan, and no-production-training-
+  source-change gates pass. No commit, amend, push, image mutation, Kubernetes
+  action, or TPU rerun occurred.
+
+## 2026-08-25 — P60-2F migrated to latest operator tip
+
+- Fetched `origin/yuxzhang/canon-zero-tim` at
+  `53876c15f407435dbd44680ad18f5f8e88f3c255`. The two incoming commits add
+  FrozenLake/M15 evidence only; the P60 runtime/test tree is unchanged.
+- Preserved the uncommitted P60-2F tree, rebased P60-2E without conflict as
+  local commit `d0c6c67474d836664bab69eed665d96d6ff53a25`, and restored P60-2F
+  without conflict. The prior clean target remains attributed to its actual
+  immutable source `da535c1d5cee7573671fa40809547a6972bec072`.
+- Latest-base gates pass: task suite 11/11, document set 14/14, flag audit
+  372/372, branch preflight, `git diff --check`, and the complete pinned-image
+  ladder ending in `V1_HP_EXACT_IMAGE_PASS`,
+  `P60_XPROF_ANNOTATION_API_PASS ... micro_steps=0..15 ...`, and
+  `P60_2B_EXACT_IMAGE_PASS ... tpu_devices=0`.
+- No functional commit, push, TPU/Kubernetes launch, or mutation of the
+  packaging-RED run root occurred. P60-2F remains TARGET NOT RERUN.
