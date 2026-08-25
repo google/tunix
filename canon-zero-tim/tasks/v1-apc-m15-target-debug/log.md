@@ -207,3 +207,15 @@
   claim is made.
 - Next: user diff review; then separate approvals for commit/push, exact-image,
   APC-off target control, and (only after a green control) APC-on treatment.
+
+## 2026-08-25T03:58:44Z — Attempt 2: APC-off control program path mismatch recorded
+
+- Type: target launch / diagnostic
+- Fact: JobSet `canon-v1-apc-m15-off-d7-41a2043c` (DP8xTP8 64-TPU, APC-off control) launched with commit `41a2043ca612eeb8dcf77ae1262d18471c26b479`.
+- Fact: all 16 TPU nodes booted, synced repo, verified all 6 overlay components with SHA256 byte identity, passed GCS preflight, and completed >95% of 15-turn FrozenLake rollout (1800+ model calls, 760+ requests, 256 trajectories).
+- Fact: in Step 90 during final token generation, P38 serving capture hook asserted `expected=standard actual=continue_decode` and failed with `RuntimeError: P38 serving capture reached an unexpected program path: expected=standard actual=continue_decode`.
+- Root cause: `qwen3-8b-dp8-tp8-frozenlake-apc-debug.env:L32` had `export CANON_CONTINUE_DECODE=8` set, causing vLLM to route deep decode tokens to `_execute_continue_decode` while P38 serving capture asserted `EXPECTED_PATH="standard"`.
+- Action: archived Attempt 2 failure receipt and error log in `evidence/v1_apc_m15_attempt2_20260825/`.
+- Files/artifacts: [Attempt-2 evidence](evidence/v1_apc_m15_attempt2_20260825/receipt.json), [Attempt-2 error log](evidence/v1_apc_m15_attempt2_20260825/m15_off_d7_attempt2_error.log)
+- Next: remove `export CANON_CONTINUE_DECODE=8` from profile, re-render, and relaunch APC-off control.
+

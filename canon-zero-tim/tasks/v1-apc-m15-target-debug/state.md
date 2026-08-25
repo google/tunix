@@ -7,8 +7,9 @@
 - Current baseline: commit `d6629c8c9406c64e578aa84d22a68ed925d2156b`
 - Release state: Attempt 1 geometry mismatch preserved; bounded entrypoint repair is host-pass and uncommitted.
 - Current phase: Phase B ATTEMPT-1 GEOMETRY REPAIR HOST PASS / EXACT-IMAGE AND TARGET CONTROL NOT RUN, [freeze a replay carrier](phases/phase-b-replay-carrier.md)
-- Last verified fact: the entrypoint now distinguishes legacy P38 (`DP16`, 8 x 4-prompt units, token IS) from the exact M15 APC target carrier (`DP8`, 1 x 32-prompt unit, no IS); positives and adjacent negatives pass without changing any numerical path.
-- Next action after user approval: commit/push the bounded repair, then separately approve the pinned exact-image gate; only after that may a new APC-off control be rendered from the full source SHA.
-- Blockers: post-fix exact-image and fresh DP8xTP8 APC-off target control have not run.
-- Key artifacts: [Attempt-0 receipt](evidence/v1_apc_m15_attempt0_20260825/receipt.json), [Attempt-1 receipt](evidence/v1_apc_m15_attempt1_20260825/receipt.json), [Phase3 state](../v1-phase3-prefix-cache/state.md)
-- Updated: 2026-08-25T03:14:09Z
+- Last verified fact: Attempt 2 ran on 64 TPU (DP8xTP8) with commit `41a2043ca612eeb8dcf77ae1262d18471c26b479` and completed >95% of 15-turn FrozenLake rollout (1800+ calls, 760+ requests, 256 trajectories) before P38 serving capture halted due to `CANON_CONTINUE_DECODE=8` triggering `_execute_continue_decode` while asserting `EXPECTED_PATH="standard"`.
+- Next action after user approval: remove `CANON_CONTINUE_DECODE=8` from profile, re-render, and relaunch APC-off control.
+- Blockers: fresh DP8xTP8 APC-off target control with continue-decode disabled has not run.
+- Key artifacts: [Attempt-0 receipt](evidence/v1_apc_m15_attempt0_20260825/receipt.json), [Attempt-1 receipt](evidence/v1_apc_m15_attempt1_20260825/receipt.json), [Attempt-2 receipt](evidence/v1_apc_m15_attempt2_20260825/receipt.json), [Phase3 state](../v1-phase3-prefix-cache/state.md)
+- Updated: 2026-08-25T04:19:00Z
+

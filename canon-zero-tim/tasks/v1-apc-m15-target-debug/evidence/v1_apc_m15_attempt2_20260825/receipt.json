@@ -1,0 +1,14 @@
+{
+  "task": "v1_apc_m15_target_debug_attempt2",
+  "jobset_name": "canon-v1-apc-m15-off-d7-41a2043c",
+  "head_pod": "canon-v1-apc-m15-off-d7-41a2043c-pathways-head-0-0-4dps7",
+  "source_commit": "41a2043ca612eeb8dcf77ae1262d18471c26b479",
+  "date_utc": "2026-08-25T03:58:44Z",
+  "topology": "64 TPU (16 nodes, DP8xTP8)",
+  "workload": "frozenlake-dp8-tp8",
+  "arm": "off",
+  "stage": "backward-no-commit",
+  "exit_code": 1,
+  "verdict": "ATTEMPT2_FAILED_SERVING_CAPTURE_PROGRAM_PATH_MISMATCH",
+  "root_cause": "qwen3-8b-dp8-tp8-frozenlake-apc-debug.env:L32 had export CANON_CONTINUE_DECODE=8 set, triggering continue-decode execution inside vLLM while P38 serving capture hook asserted EXPECTED_PATH='standard'"
+}
