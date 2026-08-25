@@ -199,8 +199,9 @@ class AsyncTrajectoryLogger:
       try:
         signal.signal(signal.SIGINT, self._handle_signal)  # pyrefly: ignore[bad-argument-type]
         signal.signal(signal.SIGTERM, self._handle_signal)  # pyrefly: ignore[bad-argument-type]
-        signal.signal(signal.SIGHUP, self._handle_signal)  # pyrefly: ignore[bad-argument-type]
-      except ValueError:
+        if hasattr(signal, 'SIGHUP') and signal.getsignal(signal.SIGHUP) != signal.SIG_IGN:
+          signal.signal(signal.SIGHUP, self._handle_signal)  # pyrefly: ignore[bad-argument-type]
+      except (ValueError, AttributeError):
         logging.warning('Failed to register signal handlers.')
 
     logging.info('Started trajectory logging thread.')
