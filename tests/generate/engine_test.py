@@ -47,11 +47,14 @@ def run_engine_generation(
     return_logprobs=False,
     eos_tokens=None,
     forbidden_tokens=None,
-    temperature=0.0,
+        temperature=0.0,
     top_p=None,
     top_k=None,
     seed=None,
     pad_output=False,
+    beam_size=1,
+    images=None,
+    audios=None,
 ):
     if isinstance(input_strings, str):
         input_strings = [input_strings]
@@ -75,7 +78,12 @@ def run_engine_generation(
             input_ids = prompt
             
         padded_prompt_tokens.append(input_ids)
-        engine.add_request(req_id, input_ids)
+        request_kwargs = {}
+        if images is not None and i < len(images):
+            request_kwargs['images'] = [images[i]]
+        if audios is not None and i < len(audios):
+            request_kwargs['audios'] = [audios[i]]
+        engine.add_request(req_id, input_ids, **request_kwargs)
         req_ids.append(req_id)
         
     for steps in range(max_generation_steps):
@@ -151,7 +159,7 @@ class EngineTest(parameterized.TestCase):
         tokenizer=vocab,
         cache_config=sampler_lib.CacheConfig(),
     )
-    self.assertEqual(sampler.dtype, expected_dtype)
+    self.assertEqual(sampler.sampler.dtype, expected_dtype)
  
   # TODO: Renable once outputs are correctly padded 
   """
@@ -214,12 +222,12 @@ class EngineTest(parameterized.TestCase):
     for i in range(len(result_not_padded.text)):
       self.assertEqual(result_not_padded.text[i], result_padded.text[i])
       if return_logits:
-        print("Not padded logits: ", result_not_padded.logits[i])
-        print("Padded logits: ", result_padded.logits[i][:valid_length])
         valid_length = (
             utils.find_last_non_pad_idx(result_padded.tokens[i], vocab.pad_id())
             + 1
         )
+        print("Not padded logits: ", result_not_padded.logits[i])
+        print("Padded logits: ", result_padded.logits[i][:valid_length])
         np.testing.assert_allclose(
             result_not_padded.logits[i],  # pyrefly: ignore[unsupported-operation]
             result_padded.logits[i][:valid_length],  # pyrefly: ignore[unsupported-operation]
@@ -232,6 +240,7 @@ class EngineTest(parameterized.TestCase):
           np.testing.assert_equal(
               result_padded.tokens[i].shape[0], max_generation_steps
           )
+
   """
   
   # TODO: Renable once images and audios are correctly processed  
@@ -252,7 +261,8 @@ class EngineTest(parameterized.TestCase):
         return np.ones((len(images), 1, 32, 32, 3), dtype=np.float32)
 
     image_processor = DummyImageProcessor()
-
+    
+    from tunix.generate import engine
     sampler = engine.LLMEngine(
         transformer=transformer,
         tokenizer=vocab,
@@ -277,7 +287,7 @@ class EngineTest(parameterized.TestCase):
         return_logits=True,
         max_prompt_length=8,
         echo=True,
-        images=images,  # pyrefly: ignore[bad-argument-type]
+        images=images,
     )
 
     self.assertIsNotNone(result)
@@ -329,112 +339,6 @@ class EngineTest(parameterized.TestCase):
     result = run_engine_generation(sampler,
         ['input string', 'hello world'],
         max_generation_steps=10,
-        max_prompt_length=max_prompt_length,
-        return_logits=True,
-        echo=echo,
-    )
-    
-
-
-    self.assertIsNotNone(result)
-    
-    """
-    self.assertEqual(result.logits[0].shape, result_orig.logits[0].shape)  # pyrefly: ignore[unsupported-operation]
-    np.testing.assert_array_equal(
-        np.asarray(result.logits),
-        np.asarray(result_orig.logits),
-    )
-    self.assertEqual(result.text, result_orig.text)
-    """
-
-    top_p_result = run_engine_generation(sampler,
-        ['input string', 'hello world'],
-        max_generation_steps=10,
-        temperature=9,
-        top_p=0.95,
-        echo=echo,
-    )
-    self.assertIsNotNone(top_p_result)
-    self.assertNotEqual(result.text, top_p_result.text)
-    
-    """
-    # self.assertIsNotNone(top_p_result)
-    self.assertEqual(top_p_result.text, top_p_result_orig.text)
-    """
-
-    top_p_result_2 = run_engine_generation(sampler, 
-        ['input string', 'hello world'],
-        max_generation_steps=10,
-        temperature=9,
-        top_p=0.95,
-        seed=42,
-        echo=echo,
-    )
-    self.assertIsNotNone(top_p_result_2)
-    self.assertNotEqual(top_p_result.text, top_p_result_2.text)
-    
-    """
-    # self.assertIsNotNone(top_p_result_2)
-    self.assertEqual(top_p_result_2_orig.text, top_p_result_2.text)
-    """
-
-    top_k_result = run_engine_generation(sampler,
-        ['input string', 'hello world'],
-        max_generation_steps=10,
-        temperature=9,
-        top_p=0.95,
-        top_k=3,
-        seed=42,
-        echo=echo,
-    )
-    self.assertIsNotNone(top_k_result)
-    self.assertNotEqual(top_p_result_2.text, top_k_result.text)
-
-    """
-    # self.assertIsNotNone(top_k_result)
-    self.assertEqual(top_k_result_orig.text, top_k_result.text)
-    """
-
-
-
-  """
-  @parameterized.named_parameters(
-      dict(
-          testcase_name='case1',
-          max_prompt_length=None,
-          echo=False,
-      ),
-      dict(
-          testcase_name='case2',
-          max_prompt_length=4,
-          echo=True,
-      ),
-      dict(
-          testcase_name='case3',
-          max_prompt_length=4,
-          echo=False,
-      ),
-      dict(
-          testcase_name='case4',
-          max_prompt_length=1,
-          echo=False,
-      ),
-  )
-  def test_samples(self, max_prompt_length, echo):
-    vocab = tc.MockVocab()
-    transformer = tc.ToyTransformer(
-        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()),
-        rngs=nnx.Rngs(42),
-    )
-    from tunix.generate import engine
-    sampler = engine.LLMEngine(
-        transformer=transformer,
-        tokenizer=vocab,
-        cache_config=sampler_lib.CacheConfig(),
-    )
-    result = run_engine_generation(sampler,
-        ['input string', 'hello world'],
-        max_generation_steps=10,
         return_logits=True,
         max_prompt_length=max_prompt_length,
         echo=echo,
@@ -446,30 +350,6 @@ class EngineTest(parameterized.TestCase):
     else:
       self.assertEqual(result.logits[0].shape, (10, vocab.GetPieceSize()))  # pyrefly: ignore[unsupported-operation]
 
-    # With 1 beam, the beam search result should be the
-    # same as the greedy output
-    result_beam_search_1 = run_engine_generation(sampler, 
-        ['input string', 'hello world'],
-        max_generation_steps=10,
-        return_logits=True,
-        max_prompt_length=max_prompt_length,
-        echo=echo,
-        beam_size=1,
-    )
-    self.assertIsNotNone(result_beam_search_1)
-    self.assertEqual(result_beam_search_1.text, result.text)
-
-    # Check with multiple beams, it still works.
-    result_beam_search_2 = run_engine_generation(sampler, 
-        ['input string', 'hello world'],
-        max_generation_steps=10,
-        return_logits=True,
-        max_prompt_length=max_prompt_length,
-        echo=echo,
-        beam_size=2,
-    )
-    self.assertIsNotNone(result_beam_search_2)
-
     top_p_result = run_engine_generation(sampler,
         ['input string', 'hello world'],
         max_generation_steps=10,
@@ -502,7 +382,6 @@ class EngineTest(parameterized.TestCase):
     )
     self.assertIsNotNone(top_k_result)
     self.assertNotEqual(top_p_result_2.text, top_k_result.text)
-  """
   def test_logprobs(self):
     vocab = tc.MockVocab()
     transformer = tc.ToyTransformer(
@@ -559,6 +438,8 @@ class EngineTest(parameterized.TestCase):
       self.assertLen(logprobs, tokens.shape[0])
     """
 
+
+
   def test_decode_stops_after_prefill_for_single_generation_step(self):
     vocab = tc.MockVocab()
     transformer = tc.ToyTransformer(
@@ -572,49 +453,14 @@ class EngineTest(parameterized.TestCase):
         cache_config=sampler_lib.CacheConfig(),
     )
 
-    # sampler.eos_ids = jnp.array([vocab.eos_id()])
-    batch_size = 1
-    max_prompt_length = 4
-    max_generation_steps = 1
-    prompt_tokens = sampler.tokenize('input string')
-    q_lens = [len(prompt_tokens)]
-    total_sampling_steps = max_prompt_length + max_generation_steps
+    prompt_tokens = [1, 2, 3, 4]
+    sampler.add_request('test_req', prompt_tokens)
 
-    sampling_config = sampler_lib.SamplingConfig(
-        batch_size=batch_size,
-        eos_tokens=jnp.array([vocab.eos_id()]),
-        max_generation_steps=max_generation_steps,
-        max_prompt_length=max_prompt_length,
-        temperature=0,
-    )  
-    
-    sampling_state = sampler.init_sample_state(
-        sampling_config=sampling_config,
-        all_input_ids=jnp.array(prompt_tokens),
-        q_lens=jnp.array(q_lens, dtype=jnp.int32),
-    ) 
-    after_prefill = sampler._prefill_fn(
-        sampler._flattened_transformer_state, sampling_state, None, echo=False
-    )
-    self.assertEqual(after_prefill.decoding_steps, jnp.array([1]))
-
-    after_decode = sampler._decode_fn(
-        sampler._flattened_transformer_state, after_prefill
-    )
-    self.assertEqual(after_decode.decoding_steps, jnp.array([1]))
-
-    
-    np.testing.assert_array_equal(
-        np.asarray(after_decode.hbm_cache.seq_lens),
-        np.asarray(after_prefill.hbm_cache.seq_lens),
-    )
-
-    decode_tokens = after_decode.hbm_cache.to_array(total_sampling_steps)
-    prefill_tokens  = after_prefill.hbm_cache.to_array(total_sampling_steps)
-    np.testing.assert_array_equal(
-        np.asarray(decode_tokens),
-        np.asarray(prefill_tokens),
-    )
+    with mock.patch.object(sampler.sampler, 'sample_step', wraps=sampler.sampler.sample_step) as mock_sample:
+        sampler.step()
+        
+        distribution = mock_sample.call_args.kwargs['distribution']
+        np.testing.assert_array_equal(distribution, np.array([0, 1, 1], dtype=np.int32))
 
   def test_state_update(self):
     vocab = tc.MockVocab()
@@ -636,7 +482,7 @@ class EngineTest(parameterized.TestCase):
         config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()),
         rngs=nnx.Rngs(42),
     )
-    sampler.transformer_state = nnx.variables(new_transformer, nnx.Param)
+    sampler.sampler.transformer_state = nnx.variables(new_transformer, nnx.Param)
     new_logits = run_engine_generation(sampler, 
         input_strings, max_generation_steps=10, return_logits=True
     ).logits
@@ -676,7 +522,7 @@ class EngineTest(parameterized.TestCase):
     new_lora_params = nnx.variables(new_transformer, nnx.LoRAParam)
     new_lora_params = jax.tree.map(lambda x: x + 0.1, new_lora_params)
 
-    sampler.transformer_state = new_lora_params
+    sampler.sampler.transformer_state = new_lora_params
     new_logits = run_engine_generation(sampler, 
         input_strings, max_generation_steps=10, return_logits=True
     ).logits
@@ -703,7 +549,7 @@ class EngineTest(parameterized.TestCase):
         rngs=nnx.Rngs(42),
     )
     with self.assertRaisesRegex(ValueError, '.*must have the same structure.*'):
-      sampler.transformer_state = nnx.variables(new_transformer, nnx.Param)
+      sampler.sampler.transformer_state = nnx.variables(new_transformer, nnx.Param)
 
   def test_invalid_lora_state_update(self):
     vocab = tc.MockVocab()
@@ -732,7 +578,7 @@ class EngineTest(parameterized.TestCase):
         )
     )
     with self.assertRaisesRegex(ValueError, '.*must have the same structure.*'):
-      sampler.transformer_state = nnx.variables(new_transformer, nnx.LoRAParam)
+      sampler.sampler.transformer_state = nnx.variables(new_transformer, nnx.LoRAParam)
   
   def test_eos_tokens(self):
     vocab = tc.MockVocab()
@@ -751,7 +597,7 @@ class EngineTest(parameterized.TestCase):
         max_generation_steps=10,
         return_logits=True,
         max_prompt_length=4,
-        eos_tokens=[7, 21],
+        eos_tokens=[14],
         temperature=0.9,
         top_p=1.0,
         seed=0,

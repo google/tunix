@@ -54,8 +54,10 @@ class LLMEngine:
             max_num_batch_tokens=getattr(cache_config, "max_num_batch_tokens", 1024),
         )
         
-    def add_request(self, req_id: str, prompt_tokens: List[int]):
+    def add_request(self, req_id: str, prompt_tokens: List[int], **kwargs):
         req = scheduler.Request(req_id, prompt_tokens)
+        for k, v in kwargs.items():
+            setattr(req, k, v)
         self.scheduler._queue_new_requests([req])
         self.generated_tokens[req_id] = []
         self.generated_logprobs[req_id] = []
@@ -188,7 +190,7 @@ class LLMEngine:
             if completed >= len(r.token_ids):
                 r.num_completed_tokens += 1
             
-            if tok in self.eos_ids or (len(r.token_ids) + len(self.generated_tokens[r.request_id])) >= self.max_seq_len:
+            if tok in self.eos_ids or (eos_tokens and tok in eos_tokens) or (len(r.token_ids) + len(self.generated_tokens[r.request_id])) >= self.max_seq_len:
                 for pid in reversed(r.page_ids):
                     self.scheduler._release_page(pid)
                 self.scheduler.running_requests.remove(r)
