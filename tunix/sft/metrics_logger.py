@@ -213,6 +213,36 @@ def _calculate_geometric_mean(x: np.ndarray) -> np.ndarray:
   return np.exp(np.mean(np.log(x)))
 
 
+def extract_scalar(val: Any) -> float | None:
+  """Safely extracts a scalar float from arrays, tensors, or WeightedMetrics."""
+  if val is None:
+    return None
+  if hasattr(val, "compute") and callable(val.compute):
+    try:
+      val = val.compute()
+    except Exception:  # pylint: disable=broad-exception-caught
+      return None
+  if hasattr(val, "unreduced_sum") and hasattr(val, "denominator"):
+    try:
+      denom = float(np.sum(np.asarray(val.denominator)))
+      return (
+          float(np.sum(np.asarray(val.unreduced_sum)) / denom)
+          if denom > 0
+          else 0.0
+      )
+    except Exception:  # pylint: disable=broad-exception-caught
+      return None
+  try:
+    arr = np.asarray(val)
+    if arr.size == 1:
+      return float(arr.item())
+    elif arr.size > 1:
+      return float(np.mean(arr))
+  except Exception:  # pylint: disable=broad-exception-caught
+    return None
+  return None
+
+
 class MetricsLogger:
   """Simple Metrics logger.
 

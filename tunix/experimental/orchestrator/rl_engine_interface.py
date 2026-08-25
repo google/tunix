@@ -17,6 +17,7 @@
 from collections.abc import Mapping, Sequence
 from typing import Any, Protocol, runtime_checkable
 from tunix.experimental.common import datatypes
+from tunix.experimental.metrics import metrics as exp_metrics
 from tunix.experimental.worker import remote_execution
 
 @runtime_checkable
@@ -120,6 +121,21 @@ class AbstractRLEngine(Protocol):
     """Executes forward/backward gradient update on trainer workers."""
     ...
 
+  # TODO: b/552087289 - Generalize get_metrics to support querying metrics
+  # across all worker roles (trainer, rollout, critique) or worker pools.
+  async def get_metrics(
+      self,
+      role: datatypes.Role = datatypes.Role.ACTOR,
+      **kwargs: Any,
+  ) -> (
+      exp_metrics.MetricsBuffer
+      | Sequence[exp_metrics.MetricsBuffer]
+      | dict[str, Any]
+      | None
+  ):
+    """Retrieves step metrics from the worker for the specified role."""
+    ...
+
   async def sync_weights(
       self,
       role: datatypes.Role = datatypes.Role.ACTOR,
@@ -128,3 +144,4 @@ class AbstractRLEngine(Protocol):
   ) -> int:
     """Coordinates decentralized peer-to-peer weight sync across worker roles."""
     ...
+

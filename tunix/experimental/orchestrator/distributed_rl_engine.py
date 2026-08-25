@@ -28,6 +28,7 @@ import uuid
 
 import numpy as np
 from tunix.experimental.common import datatypes
+from tunix.experimental.metrics import metrics as exp_metrics
 from tunix.experimental.orchestrator import rl_engine_interface
 from tunix.experimental.worker import remote_execution
 
@@ -403,6 +404,36 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         "train_step": train_step,
         "accumulated": accumulate_gradients,
     }
+
+  async def get_metrics(
+      self,
+      role: datatypes.Role = datatypes.Role.ACTOR,
+      **kwargs: Any,
+  ) -> (
+      exp_metrics.MetricsBuffer
+      | Sequence[exp_metrics.MetricsBuffer]
+      | dict[str, Any]
+      | None
+  ):
+    """Retrieves step metrics from the worker(s) registered for the specified role."""
+    if role == datatypes.Role.ROLLOUT:
+      if not self._rollout_workers:
+        raise ValueError(f"No rollout workers registered for role {role}")
+      tasks = [
+          self._invoke_worker(w, "get_metrics", **kwargs)
+          for w in self._rollout_workers
+      ]
+      results = await asyncio.gather(*tasks, return_exceptions=True)
+      return [  # pyrefly: ignore[bad-return]
+          r for r in results if not isinstance(r, Exception) and r is not None
+      ]
+    else:
+      worker = self._trainer_workers.get(
+          role
+      ) or self._inference_workers.get(role)
+      if worker is None:
+        raise ValueError(f"No worker registered for role {role}")
+      return await self._invoke_worker(worker, "get_metrics", **kwargs)
 
   async def sync_weights(  # pyrefly: ignore[bad-override]
       self,

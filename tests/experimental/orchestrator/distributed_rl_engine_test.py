@@ -46,6 +46,7 @@ class MockActorHandle(mock.MagicMock):
     self.abort_weight_sync = mock.AsyncMock()
     self.score = mock.AsyncMock()
     self.per_token_logps = mock.AsyncMock()
+    self.get_metrics = mock.AsyncMock(return_value={})
 
   async def asubmit(self, method_name: str, *args, **kwargs):
     method = getattr(self, method_name)

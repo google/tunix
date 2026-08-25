@@ -274,11 +274,17 @@ class ClusterOrchestrator:
     active_assembler = assembler or batch_assembly.SequencePackedBatchAssembler(
         max_packed_len=getattr(algo, "max_packed_len", 8192)
     )
+    metrics_logging_options = getattr(
+        self.config, "metrics_logging_options", None
+    )
+    metrics_prefix = getattr(self.config, "metrics_prefix", "")
     active_program = program or rl_program.StandardRLProgram(
         dataset=dataset,
         algo=algo,
         reward_fns=reward_fns,
         assembler=active_assembler,
+        metrics_logging_options=metrics_logging_options,
+        metrics_prefix=metrics_prefix,
     )
     self.run_program(
         program=active_program,

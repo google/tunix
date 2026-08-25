@@ -143,6 +143,16 @@ class TrajectoryQueueManager(group_queue_manager.GroupQueueManager):
     # TODO: implement the commit and keep track of uncommited items. might be worth putting in parent class.
     pass
 
+  @property
+  def ready_groups_count(self) -> int:
+    """Returns the count of ready complete groups in the queue."""
+    return len(self._ready_groups)
+
+  @property
+  def incomplete_buckets_count(self) -> int:
+    """Returns the count of incomplete buckets currently buffering items."""
+    return len(self._buckets)
+
   async def abort(self, exc: BaseException) -> None:
     """Aborts queue and unblocks all waiting consumers with the given exception."""
     if isinstance(exc, Exception):
