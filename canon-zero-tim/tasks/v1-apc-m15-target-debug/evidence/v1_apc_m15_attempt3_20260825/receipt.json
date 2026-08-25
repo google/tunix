@@ -1,0 +1,14 @@
+{
+  "task": "v1_apc_m15_target_debug_attempt3",
+  "jobset_name": "canon-v1-apc-m15-on-d9b-cdd3987c",
+  "head_pod": "canon-v1-apc-m15-on-d9b-cdd3987c-pathways-head-0-0-zk6pk",
+  "source_commit": "cdd3987caa648e6112ee8fc184b2e3421de3a4b2",
+  "date_utc": "2026-08-25T06:50:00Z",
+  "topology": "64 TPU (16 nodes, DP8xTP8)",
+  "workload": "frozenlake-dp8-tp8",
+  "arm": "on",
+  "stage": "rollout-m15-apc-on",
+  "exit_code": 1,
+  "verdict": "ATTEMPT3_FAILED_SERVING_CAPTURE_PROGRAM_PATH_MISMATCH",
+  "root_cause": "RuntimeError: P38 serving capture reached an unexpected program path: expected=standard actual=continue_decode during multi-turn APC-on rollout"
+}

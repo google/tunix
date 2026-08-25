@@ -1,0 +1,433 @@
+[1;34mwandb[0m: 
+[1;34mwandb[0m: 🚀 View run [33mcanon-v1-apc-m15-on-d9b-cdd3987c[0m at: [34mhttps://wandb.ai/yuxzhang-google/zero-tim-frozenlake-dp8-tp8-resident/runs/d7xtai49[0m
+[1;34mwandb[0m: Find logs at: [1;35mwandb/run-20260825_060826-d7xtai49/logs[0m
+[rank0]: Traceback (most recent call last):
+[rank0]:   File "/usr/local/lib/python3.12/weakref.py", line 666, in _exitfunc
+[rank0]:     f()
+[rank0]:   File "/usr/local/lib/python3.12/weakref.py", line 590, in __call__
+[rank0]:     return info.func(*info.args, **(info.kwargs or {}))
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/usr/local/lib/python3.12/site-packages/vllm/v1/engine/llm_engine.py", line 441, in _cleanup_instance_caches
+[rank0]:     for module in model.modules():
+[rank0]:                   ^^^^^^^^^^^^^
+[rank0]: AttributeError: 'Qwen3ForCausalLM' object has no attribute 'modules'
+2026-08-25 06:16:34 - ERROR - [asyncio] Task exception was never retrieved
+future: <Task finished name='Task-17741' coro=<RolloutOrchestrator._runner() done, defined at /app/tunix/rl/agentic/pipeline/rollout_orchestrator.py:145> exception=RuntimeError('P38 serving capture reached an unexpected program path: expected=standard actual=continue_decode')>
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/app/examples/frozenlake/train_frozenlake_qwen3.py", line 2056, in <module>
+    grpo_trainer.train(
+  File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 3886, in train
+    _ = producer_future.result()
+        ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/concurrent/futures/_base.py", line 456, in result
+    return self.__get_result()
+           ^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/concurrent/futures/_base.py", line 401, in __get_result
+    raise self._exception
+  File "/app/tunix/rl/agentic/pipeline/rollout_orchestrator.py", line 206, in _runner
+    raise e
+  File "/usr/local/lib/python3.12/concurrent/futures/thread.py", line 59, in run
+    result = self.fn(*self.args, **self.kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/concurrent/futures/thread.py", line 59, in run
+    result = self.fn(*self.args, **self.kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/concurrent/futures/thread.py", line 59, in run
+    result = self.fn(*self.args, **self.kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  [Previous line repeated 252 more times]
+  File "/app/tunix/rl/agentic/pipeline/rollout_orchestrator.py", line 180, in _runner
+    episode_count = await self._run_and_queue_one_episode(
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/tunix/rl/agentic/pipeline/rollout_orchestrator.py", line 118, in _run_and_queue_one_episode
+    traj = await self._collect_trajectory(agent, env, mode=collect_mode)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/tunix/rl/agentic/pipeline/rollout_orchestrator.py", line 104, in _collect_trajectory
+    return await engine.collect(mode)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/tunix/rl/agentic/trajectory/trajectory_collect_engine.py", line 272, in collect
+    done = await self._one_step()
+           ^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/tunix/rl/agentic/trajectory/trajectory_collect_engine.py", line 695, in _one_step
+    rollout_output, _ = await self._run_with_timing(
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/tunix/rl/agentic/trajectory/trajectory_collect_engine.py", line 184, in _run_with_timing
+    result = await asyncio.wait_for(fut, timeout=timeout)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/asyncio/tasks.py", line 520, in wait_for
+    return await fut
+           ^^^^^^^^^
+  File "/usr/local/lib/python3.12/concurrent/futures/thread.py", line 59, in run
+    result = self.fn(*self.args, **self.kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/tunix/rl/agentic/trajectory/trajectory_collect_engine.py", line 681, in _safe_model_call
+    return self.model_call(
+           ^^^^^^^^^^^^^^^^
+  File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 2151, in _model_call
+    result = self.rl_cluster.generate(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/tunix/rl/rl_cluster.py", line 998, in generate
+    self.rollout.generate(
+  File "/app/tunix/rl/rollout/vllm_rollout.py", line 192, in generate
+    self.output = self._sampler(
+                  ^^^^^^^^^^^^^^
+  File "/app/tunix/generate/vllm_sampler.py", line 664, in __call__
+    outputs = self._generate_server_mode(
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/tunix/generate/vllm_sampler.py", line 467, in _generate_server_mode
+    result = future.result(timeout=remaining)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/concurrent/futures/_base.py", line 456, in result
+    return self.__get_result()
+           ^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/concurrent/futures/_base.py", line 401, in __get_result
+    raise self._exception
+  File "/app/tunix/rl/agentic/trajectory/trajectory_collect_engine.py", line 681, in _safe_model_call
+    return self.model_call(
+           ^^^^^^^^^^^^^^^^
+  File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 2151, in _model_call
+    result = self.rl_cluster.generate(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/tunix/rl/rl_cluster.py", line 998, in generate
+    self.rollout.generate(
+  File "/app/tunix/rl/rollout/vllm_rollout.py", line 192, in generate
+    self.output = self._sampler(
+                  ^^^^^^^^^^^^^^
+  File "/app/tunix/generate/vllm_sampler.py", line 664, in __call__
+    outputs = self._generate_server_mode(
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/tunix/generate/vllm_sampler.py", line 467, in _generate_server_mode
+    result = future.result(timeout=remaining)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/concurrent/futures/_base.py", line 456, in result
+    return self.__get_result()
+           ^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/concurrent/futures/_base.py", line 401, in __get_result
+    raise self._exception
+  File "/app/tunix/rl/perf_log.py", line 40, in phase
+    yield info
+  File "/app/tunix/rl/rl_cluster.py", line 998, in generate
+    self.rollout.generate(
+  File "/app/tunix/rl/rollout/vllm_rollout.py", line 192, in generate
+    self.output = self._sampler(
+                  ^^^^^^^^^^^^^^
+  File "/app/tunix/generate/vllm_sampler.py", line 664, in __call__
+    outputs = self._generate_server_mode(
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/tunix/generate/vllm_sampler.py", line 467, in _generate_server_mode
+    result = future.result(timeout=remaining)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/concurrent/futures/_base.py", line 456, in result
+    return self.__get_result()
+           ^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/concurrent/futures/_base.py", line 401, in __get_result
+    raise self._exception
+  File "/app/tunix/rl/perf_log.py", line 40, in phase
+    yield info
+  File "/app/tunix/rl/rl_cluster.py", line 998, in generate
+    self.rollout.generate(
+  File "/app/tunix/rl/rollout/vllm_rollout.py", line 192, in generate
+    self.output = self._sampler(
+                  ^^^^^^^^^^^^^^
+  File "/app/tunix/generate/vllm_sampler.py", line 664, in __call__
+    outputs = self._generate_server_mode(
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/tunix/generate/vllm_sampler.py", line 467, in _generate_server_mode
+    result = future.result(timeout=remaining)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/concurrent/futures/_base.py", line 456, in result
+    return self.__get_result()
+           ^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/concurrent/futures/_base.py", line 401, in __get_result
+    raise self._exception
+  File "/app/tunix/rl/perf_log.py", line 40, in phase
+    yield info
+  File "/app/tunix/rl/rl_cluster.py", line 998, in generate
+    self.rollout.generate(
+  File "/app/tunix/rl/rollout/vllm_rollout.py", line 192, in generate
+    self.output = self._sampler(
+                  ^^^^^^^^^^^^^^
+  File "/app/tunix/generate/vllm_sampler.py", line 664, in __call__
+    outputs = self._generate_server_mode(
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/tunix/generate/vllm_sampler.py", line 467, in _generate_server_mode
+    result = future.result(timeout=remaining)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/concurrent/futures/_base.py", line 456, in result
+    return self.__get_result()
+           ^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/concurrent/futures/_base.py", line 401, in __get_result
+    raise self._exception
+  File "/app/tunix/rl/perf_log.py", line 40, in phase
+    yield info
+  File "/app/tunix/rl/rl_cluster.py", line 998, in generate
+    self.rollout.generate(
+  File "/app/tunix/rl/rollout/vllm_rollout.py", line 192, in generate
+    self.output = self._sampler(
+                  ^^^^^^^^^^^^^^
+  File "/app/tunix/generate/vllm_sampler.py", line 664, in __call__
+    outputs = self._generate_server_mode(
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/tunix/generate/vllm_sampler.py", line 467, in _generate_server_mode
+    result = future.result(timeout=remaining)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/concurrent/futures/_base.py", line 456, in result
+    return self.__get_result()
+           ^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/concurrent/futures/_base.py", line 401, in __get_result
+    raise self._exception
+  File "/app/tunix/rl/perf_log.py", line 40, in phase
+    yield info
+  File "/app/tunix/rl/rl_cluster.py", line 998, in generate
+    self.rollout.generate(
+  File "/app/tunix/rl/rollout/vllm_rollout.py", line 192, in generate
+    self.output = self._sampler(
+                  ^^^^^^^^^^^^^^
+  File "/app/tunix/generate/vllm_sampler.py", line 664, in __call__
+    outputs = self._generate_server_mode(
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/tunix/generate/vllm_sampler.py", line 467, in _generate_server_mode
+    result = future.result(timeout=remaining)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/concurrent/futures/_base.py", line 456, in result
+    return self.__get_result()
+           ^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/concurrent/futures/_base.py", line 401, in __get_result
+    raise self._exception
+  File "/app/tunix/rl/perf_log.py", line 40, in phase
+    yield info
+  File "/app/tunix/rl/rl_cluster.py", line 998, in generate
+    self.rollout.generate(
+  File "/app/tunix/rl/rollout/vllm_rollout.py", line 192, in generate
+    self.output = self._sampler(
+                  ^^^^^^^^^^^^^^
+  File "/app/tunix/generate/vllm_sampler.py", line 664, in __call__
+    outputs = self._generate_server_mode(
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/tunix/generate/vllm_sampler.py", line 467, in _generate_server_mode
+    result = future.result(timeout=remaining)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/concurrent/futures/_base.py", line 456, in result
+    return self.__get_result()
+           ^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/concurrent/futures/_base.py", line 401, in __get_result
+    raise self._exception
+  File "/app/tunix/rl/perf_log.py", line 40, in phase
+    yield info
+  File "/app/tunix/rl/rl_cluster.py", line 998, in generate
+    self.rollout.generate(
+  File "/app/tunix/rl/rollout/vllm_rollout.py", line 192, in generate
+    self.output = self._sampler(
+                  ^^^^^^^^^^^^^^
+  File "/app/tunix/generate/vllm_sampler.py", line 664, in __call__
+    outputs = self._generate_server_mode(
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/tunix/generate/vllm_sampler.py", line 467, in _generate_server_mode
+    result = future.result(timeout=remaining)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/concurrent/futures/_base.py", line 456, in result
+    return self.__get_result()
+           ^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/concurrent/futures/_base.py", line 401, in __get_result
+    raise self._exception
+  File "/app/tunix/rl/agentic/trajectory/trajectory_collect_engine.py", line 681, in _safe_model_call
+    return self.model_call(
+           ^^^^^^^^^^^^^^^^
+  File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 2151, in _model_call
+    result = self.rl_cluster.generate(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/tunix/rl/rl_cluster.py", line 998, in generate
+    self.rollout.generate(
+  File "/app/tunix/rl/rollout/vllm_rollout.py", line 192, in generate
+    self.output = self._sampler(
+                  ^^^^^^^^^^^^^^
+  File "/app/tunix/generate/vllm_sampler.py", line 664, in __call__
+    outputs = self._generate_server_mode(
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/tunix/generate/vllm_sampler.py", line 467, in _generate_server_mode
+    result = future.result(timeout=remaining)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/concurrent/futures/_base.py", line 456, in result
+    return self.__get_result()
+           ^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/concurrent/futures/_base.py", line 401, in __get_result
+    raise self._exception
+  File "/app/tunix/rl/agentic/trajectory/trajectory_collect_engine.py", line 681, in _safe_model_call
+    return self.model_call(
+           ^^^^^^^^^^^^^^^^
+  File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 2151, in _model_call
+    result = self.rl_cluster.generate(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/tunix/rl/rl_cluster.py", line 998, in generate
+    self.rollout.generate(
+  File "/app/tunix/rl/rollout/vllm_rollout.py", line 192, in generate
+    self.output = self._sampler(
+                  ^^^^^^^^^^^^^^
+  File "/app/tunix/generate/vllm_sampler.py", line 664, in __call__
+    outputs = self._generate_server_mode(
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/tunix/generate/vllm_sampler.py", line 467, in _generate_server_mode
+    result = future.result(timeout=remaining)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/concurrent/futures/_base.py", line 456, in result
+    return self.__get_result()
+           ^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/concurrent/futures/_base.py", line 401, in __get_result
+    raise self._exception
+  File "/app/tunix/rl/perf_log.py", line 40, in phase
+    yield info
+  File "/app/tunix/rl/rl_cluster.py", line 998, in generate
+    self.rollout.generate(
+  File "/app/tunix/rl/rollout/vllm_rollout.py", line 192, in generate
+    self.output = self._sampler(
+                  ^^^^^^^^^^^^^^
+  File "/app/tunix/generate/vllm_sampler.py", line 664, in __call__
+    outputs = self._generate_server_mode(
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/tunix/generate/vllm_sampler.py", line 467, in _generate_server_mode
+    result = future.result(timeout=remaining)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/concurrent/futures/_base.py", line 456, in result
+    return self.__get_result()
+           ^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/concurrent/futures/_base.py", line 401, in __get_result
+    raise self._exception
+  File "/app/tunix/rl/agentic/trajectory/trajectory_collect_engine.py", line 681, in _safe_model_call
+    return self.model_call(
+           ^^^^^^^^^^^^^^^^
+  File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 2151, in _model_call
+    result = self.rl_cluster.generate(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/tunix/rl/rl_cluster.py", line 998, in generate
+    self.rollout.generate(
+  File "/app/tunix/rl/rollout/vllm_rollout.py", line 192, in generate
+    self.output = self._sampler(
+                  ^^^^^^^^^^^^^^
+  File "/app/tunix/generate/vllm_sampler.py", line 664, in __call__
+    outputs = self._generate_server_mode(
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/tunix/generate/vllm_sampler.py", line 467, in _generate_server_mode
+    result = future.result(timeout=remaining)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/concurrent/futures/_base.py", line 456, in result
+    return self.__get_result()
+           ^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/concurrent/futures/_base.py", line 401, in __get_result
+    raise self._exception
+  File "/app/tunix/rl/agentic/trajectory/trajectory_collect_engine.py", line 681, in _safe_model_call
+    return self.model_call(
+           ^^^^^^^^^^^^^^^^
+  File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 2151, in _model_call
+    result = self.rl_cluster.generate(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/tunix/rl/rl_cluster.py", line 998, in generate
+    self.rollout.generate(
+  File "/app/tunix/rl/rollout/vllm_rollout.py", line 192, in generate
+    self.output = self._sampler(
+                  ^^^^^^^^^^^^^^
+  File "/app/tunix/generate/vllm_sampler.py", line 664, in __call__
+    outputs = self._generate_server_mode(
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/tunix/generate/vllm_sampler.py", line 467, in _generate_server_mode
+    result = future.result(timeout=remaining)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/concurrent/futures/_base.py", line 456, in result
+    return self.__get_result()
+           ^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/concurrent/futures/_base.py", line 401, in __get_result
+    raise self._exception
+  File "/app/tunix/rl/agentic/trajectory/trajectory_collect_engine.py", line 681, in _safe_model_call
+    return self.model_call(
+           ^^^^^^^^^^^^^^^^
+  File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 2151, in _model_call
+    result = self.rl_cluster.generate(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/tunix/rl/rl_cluster.py", line 998, in generate
+    self.rollout.generate(
+  File "/app/tunix/rl/rollout/vllm_rollout.py", line 192, in generate
+    self.output = self._sampler(
+                  ^^^^^^^^^^^^^^
+  File "/app/tunix/generate/vllm_sampler.py", line 664, in __call__
+    outputs = self._generate_server_mode(
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/tunix/generate/vllm_sampler.py", line 467, in _generate_server_mode
+    result = future.result(timeout=remaining)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/concurrent/futures/_base.py", line 456, in result
+    return self.__get_result()
+           ^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/concurrent/futures/_base.py", line 401, in __get_result
+    raise self._exception
+  File "/app/tunix/rl/agentic/trajectory/trajectory_collect_engine.py", line 681, in _safe_model_call
+    return self.model_call(
+           ^^^^^^^^^^^^^^^^
+  File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 2151, in _model_call
+    result = self.rl_cluster.generate(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/tunix/rl/rl_cluster.py", line 998, in generate
+    self.rollout.generate(
+  File "/app/tunix/rl/rollout/vllm_rollout.py", line 192, in generate
+    self.output = self._sampler(
+                  ^^^^^^^^^^^^^^
+  File "/app/tunix/generate/vllm_sampler.py", line 664, in __call__
+    outputs = self._generate_server_mode(
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/tunix/generate/vllm_sampler.py", line 467, in _generate_server_mode
+    result = future.result(timeout=remaining)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/concurrent/futures/_base.py", line 456, in result
+    return self.__get_result()
+           ^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/concurrent/futures/_base.py", line 401, in __get_result
+    raise self._exception
+  File "/app/tunix/generate/vllm_async_driver.py", line 409, in _loop
+    outputs = self._step_engine()
+              ^^^^^^^^^^^^^^^^^^^
+  File "/app/tunix/generate/vllm_async_driver.py", line 455, in _step_engine
+    return self._llm_engine.step()
+           ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/vllm/v1/engine/llm_engine.py", line 304, in step
+    outputs = self.engine_core.get_output()
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/vllm/v1/engine/core_client.py", line 290, in get_output
+    outputs, model_executed = self.engine_core.step_fn()
+                              ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/vllm/v1/engine/core.py", line 491, in step
+    future = self.model_executor.execute_model(scheduler_output, non_block=True)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/vllm/v1/executor/uniproc_executor.py", line 120, in execute_model
+    output.result()
+  File "/usr/local/lib/python3.12/concurrent/futures/_base.py", line 449, in result
+    return self.__get_result()
+           ^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/concurrent/futures/_base.py", line 401, in __get_result
+    raise self._exception
+  File "/usr/local/lib/python3.12/site-packages/vllm/v1/executor/uniproc_executor.py", line 98, in collective_rpc
+    result = run_method(self.driver_worker, method, args, kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/vllm/v1/serial_utils.py", line 510, in run_method
+    return func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/vllm/v1/worker/worker_base.py", line 351, in execute_model
+    return self.worker.execute_model(scheduler_output)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/tpu_inference/worker/tpu_worker.py", line 499, in execute_model
+    output = self.model_runner.execute_model(scheduler_output,
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/tpu_inference/utils.py", line 404, in wrapper
+    result = func(*args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/tpu_inference/runner/tpu_runner.py", line 4063, in execute_model
+    output = self._execute_model(scheduler_output,
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/tpu_inference/runner/tpu_runner.py", line 4279, in _execute_model
+    return self._execute_continue_decode(scheduler_output)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/tpu_inference/runner/tpu_runner.py", line 4661, in _execute_continue_decode
+    p38_serving_seq = _p38_serving_begin(
+                      ^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/tpu_inference/runner/tpu_runner.py", line 3215, in _p38_serving_begin
+    raise RuntimeError(
+RuntimeError: P38 serving capture reached an unexpected program path: expected=standard actual=continue_decode
