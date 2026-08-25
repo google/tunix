@@ -24,6 +24,7 @@ import math
 import os
 from pathlib import Path
 import pickle
+import signal
 import sys
 from typing import Any
 
@@ -332,13 +333,27 @@ def main(argv: list[str], context: Any = None) -> None:
         })
     )
     logging.info("Trainer worker is registered.")
+    # Shut down gracefully on SIGTERM/SIGINT so that TrainerWorker.stop() ->
+    # PeftTrainerV2.close() runs and blocks until every in-flight async ops is finished.
+    stop_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+      try: 
+        loop.add_signal_handler(sig, stop_event.set)
+      except NotImplementedError:
+        pass
 
     try:
-      while True:
-        await asyncio.sleep(1)
+      await stop_event.wait()
     except asyncio.CancelledError:
       pass
     finally:
+      logging.info("Draining trainer worker...")
+      try:
+        worker_service.stop()
+        logging.info("Trainer worker drained.")
+      except Exception:
+        logging.exception("Failed to drain trainer worker cleanly.")
       await server.stop_serving()
 
   asyncio.run(grpc_server_main())

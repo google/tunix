@@ -48,6 +48,7 @@ WAIT_TIMEOUT_SECS=${WAIT_TIMEOUT_SECS:-1800}
 WAIT_POLL_SECS=${WAIT_POLL_SECS:-5}
 WAIT_DEBUG_EVERY_POLLS=${WAIT_DEBUG_EVERY_POLLS:-6}
 WAIT_LOG_TAIL_LINES=${WAIT_LOG_TAIL_LINES:-40}
+SHUTDOWN_GRACE_SECS=${SHUTDOWN_GRACE_SECS:-900}
 
 TRAINER_TPU_CHIPS=${TRAINER_TPU_CHIPS:-0,1}
 TRAINER_FSDP=${TRAINER_FSDP:-2}
@@ -408,10 +409,30 @@ echo "Rollout pid=$ROLLOUT_PID log=$ROLLOUT_LOG"
 print_process_debug "rollout" "$ROLLOUT_PID"
 
 cleanup() {
-  echo "Cleaning up worker processes (PIDs: $TRAINER_PID, $ROLLOUT_PID, ${INFERENCE_PID:-})..."
-  kill "$TRAINER_PID" "$ROLLOUT_PID" "${INFERENCE_PID:-}" 2>/dev/null || true
-  wait "$TRAINER_PID" "$ROLLOUT_PID" "${INFERENCE_PID:-}" 2>/dev/null || true
-  echo "Workers stopped."
+  local pids=()
+  for pid in "$TRAINER_PID" "$ROLLOUT_PID" "$INFERENCE_PID"; do
+    [[ -n "$pid" ]] && pids+=("$pid")
+  done
+  echo "Cleaning up worker processes: ${pids[*]}"
+  # SIGTERM only: the trainer installs a SIGTERM handler that finalizes any
+  # in-flight checkpoint before exiting. Wait (without a hard timeout, capped by
+  # SHUTDOWN_GRACE_SECS) so the checkpoint is not truncated to a tmp dir.
+  kill "${pids[@]}" 2>/dev/null || true
+  local waited=0
+  while (( waited < SHUTDOWN_GRACE_SECS )); do
+    local alive=0
+    for pid in "${pids[@]}"; do
+      if kill -0 "$pid" 2>/dev/null; then alive=1; fi
+    done
+    (( alive == 0 )) && break
+    sleep 2
+    waited=$((waited + 2))
+  done
+  for pid in "${pids[@]}"; do
+    kill -9 "$pid" 2>/dev/null || true
+  done
+  wait "${pids[@]}" 2>/dev/null || true
+  echo "Workers stopped after ${waited}s of graceful drain."
 }
 trap on_error ERR
 trap cleanup EXIT
@@ -480,6 +501,7 @@ ORCHESTRATOR_CMD=(
   --max_prompt_length="$MAX_PROMPT_LENGTH"
   --max_response_length="$MAX_RESPONSE_LENGTH"
   --train_micro_batch_size="$TRAIN_MICRO_BATCH_SIZE"
+  --stop_workers_on_exit
 )
 if [[ -n "$INFERENCE_ADDR" ]]; then
   ORCHESTRATOR_CMD+=(--inference_addr="$INFERENCE_ADDR")

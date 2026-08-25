@@ -95,6 +95,7 @@ class SyncRLProgram:
       on_step_begin: Callable[[int], None] | None = None,
       on_step_end: Callable[[int, Any], None] | None = None,
       sync_weights: bool = True,
+      initial_policy_version: int = 0,
   ):
     self.engine = engine
     self.algo = algo
@@ -105,7 +106,7 @@ class SyncRLProgram:
     self.on_step_begin = on_step_begin
     self.on_step_end = on_step_end
     self.sync_weights = sync_weights
-    self.policy_version = 0
+    self.policy_version = initial_policy_version
     # Debug/observability hook for examples and tests; not training state.
     self.last_step_result: RLStepResult | None = None
 
@@ -201,19 +202,6 @@ class SyncRLProgram:
               apply_optimizer=is_last,
           )
       )
-    
-    await _await_if_needed(
-      active_engine.save_checkpoint(
-        role=datatypes.Role.ACTOR,
-        step=current_step,
-        metadata={
-            "step": current_step,
-            "policy_version": self.policy_version,
-            "num_rollouts": len(rollouts),
-            "num_microbatches": len(microbatches),
-        },
-      )
-    )
 
 
     # 6. Sync weights to rollout replicas
@@ -229,7 +217,20 @@ class SyncRLProgram:
       self.policy_version = new_version
     else:
       self.policy_version = current_step + 1
-
+    # 7. Save Checkpoint.
+    await _await_if_needed(
+      active_engine.save_checkpoint(
+          role=datatypes.Role.ACTOR,
+          step=self.policy_version,
+          metadata={
+              "step": current_step,
+              "policy_version": self.policy_version,
+              "num_rollouts": len(rollouts),
+              "num_microbatches": len(microbatches),
+          },
+          **kwargs,
+      )
+    )
     self.last_step_result = RLStepResult(
         step=current_step,
         policy_version=self.policy_version,
