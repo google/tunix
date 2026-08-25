@@ -44,24 +44,18 @@ class LLMEngine:
         model_config = transformer.config if hasattr(transformer, "config") else getattr(transformer, "model_config", None)
         kv_dtype = getattr(model_config, 'dtype', jax.numpy.float32) if model_config else jax.numpy.float32
         
-        # Discover parallel axes if present on transformer params
-        dp_axis = None
-        tp_axis = None
-        dp_size = 1
-        tp_size = 1
-        try:
-            shd_config = getattr(model_config, "shd_config", None)
-            if shd_config is not None:
-                dp_axis = shd_config.act_btd[0]
-                tp_axis = shd_config.act_btnh[2]
-            
-            param_0 = jax.tree_util.tree_leaves(transformer.flax_module.params if hasattr(transformer, "flax_module") else transformer)[0]
-            if hasattr(param_0, "sharding") and hasattr(param_0.sharding, "mesh") and param_0.sharding.mesh is not None:
-                mesh = param_0.sharding.mesh
-                dp_size = mesh.shape.get(dp_axis, 1) if dp_axis else 1
-                tp_size = mesh.shape.get(tp_axis, 1) if tp_axis else 1
-        except Exception:
-            pass
+        # Derive DP and TP sizes directly from model architecture config overrides
+        dp_size = getattr(model_config, "dp_size", 1)
+        tp_size = getattr(model_config, "tp_size", 1)
+        
+        dp_axis = getattr(model_config, "dp_axis", None)
+        tp_axis = getattr(model_config, "tp_axis", None)
+        
+        # Fallback to defaults if missing from ModelConfig but shapes > 1
+        if dp_axis is None and dp_size > 1:
+            dp_axis = 'fsdp'
+        if tp_axis is None and tp_size > 1:
+            tp_axis = 'tp'
             
         self.cache_manager = batch_cache_manager_lib.init_cache_manager(
             cache_config=cache_config,
