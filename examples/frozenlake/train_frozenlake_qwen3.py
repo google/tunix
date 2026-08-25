@@ -267,6 +267,7 @@ if CANON_P57_WORKLOAD_CANDIDATE:
   if os.getenv("CANON_PROFILE_FILE", "") not in (
       "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env",
       "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env",
+      "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-apc-debug.env",
   ):
     raise ValueError("materialized P57 workloads require the P57 profile")
   p57_workload_spec = p57_workloads.candidate(
