@@ -286,11 +286,11 @@ Kubernetes, Docker, file I/O, or a tool call.
 ```mermaid
 sequenceDiagram
   participant Consumer as Training consumer
-  participant Actor as Actor trainer
+  participant Trainer as Actor trainer
   participant Lock as RolloutSyncLock
   participant Rollout as Rollout engine
 
-  Consumer->>Actor: update_actor(micro_batches)
+  Consumer->>Trainer: update_actor(micro_batches)
   Consumer->>Consumer: count training_units
   alt full batch reached
     Consumer->>Lock: acquire_weight_sync()
