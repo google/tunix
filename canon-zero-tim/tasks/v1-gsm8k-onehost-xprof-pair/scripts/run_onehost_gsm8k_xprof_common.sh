@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Matched Qwen3-1.7B GSM8K DP4xTP1 Native/Zero-HP update XProf carrier.
 set -euo pipefail
+trap '' HUP
 
 arm="${1:?usage: run_onehost_gsm8k_xprof_common.sh <native|zero-hp> <label>}"
 label="${2:?usage: run_onehost_gsm8k_xprof_common.sh <native|zero-hp> <label>}"

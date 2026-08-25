@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Container-side entrypoint shared by the matched GSM8K XProf arms.
 set -euo pipefail
+trap '' HUP
 
 : "${V1_GSM8K_XPROF_REPO:?V1_GSM8K_XPROF_REPO unset}"
 : "${V1_GSM8K_XPROF_ARM:?V1_GSM8K_XPROF_ARM unset}"
