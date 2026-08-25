@@ -475,6 +475,23 @@ class RaidenSynchronizer:
       self._sync.h2d()
       jax.block_until_ready(self.arrays)
 
+  def release_host_arrays(self) -> None:
+    """Drops this instance's host-staged array data once the transfer using it has completed.
+
+    d2h()'s data is safely inside the native transport's own persistent
+    buffer once d2h() returns (native rebind releases its hold on this
+    round's arrays atomically with acquiring the NEXT round's, not before --
+    see bind()'s rebind branch), so this call cannot itself shrink that
+    hold's lifetime. It only ensures Python's own reference doesn't linger
+    for the entire idle window between rounds on top of it, and keeps
+    checksums()/work_unit_metadata() (which read self.arrays/self.names)
+    working right up until release -- call this only once a round is truly
+    done with this synchronizer's data, e.g. from a release_weight_sync()
+    hook. self.names is left untouched so `bound` keeps reporting whether
+    bind() has ever run.
+    """
+    self.arrays = []
+
   def metrics(self) -> dict:
     return self._sync.get_metrics() if self._sync else {}
 
