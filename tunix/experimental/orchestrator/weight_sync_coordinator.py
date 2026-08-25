@@ -1043,21 +1043,50 @@ class WeightSyncCoordinator:
         # the round's req_id verbatim across chunks would silently transfer
         # only the first chunk and no-op the rest under an apparently
         # successful round.
+        # Retries below are bounded to the case where self._handler.transfer
+        # returns success=False *without* raising: that path only happens
+        # when RaidenController.start_transfer itself failed before ever
+        # returning a future (raiden_handler.py's `except (RuntimeError,
+        # TimeoutError): return TransferResult(success=False, ...)`), so no
+        # native transfer work was ever kicked off and a clean re-attempt
+        # can't race anything. A raised TransferOutcomeUnknownError means the
+        # opposite -- the native transfer's own completion could not be
+        # confirmed, i.e. it may still be writing -- and is deliberately NOT
+        # retried here: issuing a second native transfer for the same chunk
+        # while the first might still be active would risk two native writes
+        # racing each other, the same class of concurrent native activity
+        # that caused the segfault this per-chunk serialization exists to
+        # avoid. That case still propagates to the except clause below and
+        # parks the round in UNKNOWN_TRANSFER_STATE, unchanged from before.
+        max_attempts = 3
+        retry_backoff_s = 2.0
         transfer = None
         for chunk_idx, unit in enumerate(source_units):
-          transfer = await asyncio.wait_for(
-              loop.run_in_executor(
-                  None,
-                  functools.partial(
-                      self._handler.transfer,
-                      src_units=[unit],
-                      dst_units=list(destination_units),
-                      req_id=f"{req_id}-chunk{chunk_idx}",
-                      generation=uuid,
-                  ),
-              ),
-              self._timeouts.transfer,
-          )
+          for attempt in range(max_attempts):
+            transfer = await asyncio.wait_for(
+                loop.run_in_executor(
+                    None,
+                    functools.partial(
+                        self._handler.transfer,
+                        src_units=[unit],
+                        dst_units=list(destination_units),
+                        req_id=f"{req_id}-chunk{chunk_idx}-attempt{attempt}",
+                        generation=uuid,
+                    ),
+                ),
+                self._timeouts.transfer,
+            )
+            if transfer.success or attempt == max_attempts - 1:
+              break
+            logging.warning(
+                "[WeightSyncCoordinator] transfer for chunk %d failed"
+                " cleanly (%s), retrying (attempt %d/%d)",
+                chunk_idx,
+                transfer.message,
+                attempt + 2,
+                max_attempts,
+            )
+            await asyncio.sleep(retry_backoff_s)
           if not transfer.success:
             break
         transfer_in_flight = False
