@@ -251,17 +251,23 @@ class Tokenizer(TokenizerAdapter):
       )
     elif tokenizer_type == 'sentencepiece':
       model_proto = epath.Path(tokenizer_path).read_bytes()
-      tokenizer = spm.SentencePieceProcessor()
-      tokenizer.LoadFromSerializedProto(model_proto)
-      options = []
-      if add_bos:
-        options.append('bos')
-      if add_eos:
-        options.append('eos')
-
-      extra_options_str = ':'.join(options)
-      if extra_options_str:
-        tokenizer.SetEncodeExtraOptions(extra_options_str)
+      try:
+        tokenizer = spm.SentencePieceProcessor(
+            model_proto=model_proto,  # pyrefly: ignore[unexpected-keyword]
+            add_bos=bool(add_bos),  # pyrefly: ignore[unexpected-keyword]
+            add_eos=bool(add_eos),  # pyrefly: ignore[unexpected-keyword]
+        )
+      except TypeError:
+        tokenizer = spm.SentencePieceProcessor()
+        tokenizer.LoadFromSerializedProto(model_proto)
+        options = []
+        if add_bos:
+          options.append('bos')
+        if add_eos:
+          options.append('eos')
+        extra_options_str = ':'.join(options)
+        if extra_options_str:
+          tokenizer.SetEncodeExtraOptions(extra_options_str)
     else:
       raise ValueError(f'Unsupported tokenizer_type: {tokenizer_type}')
     super().__init__(tokenizer)

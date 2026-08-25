@@ -19,10 +19,15 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from tunix.rl import common
+from tunix.sft import utils
 from tunix.tests import test_common as tc
 
 jax.config.update("jax_threefry_partitionable", False)
 jax.config.update("jax_default_matmul_precision", "highest")
+
+def _compute_loss(*args, **kwargs):
+  out = getattr(common, "aggregate_loss")(*args, **kwargs)
+  return out.compute()
 
 
 class CommonTest(parameterized.TestCase):
@@ -565,16 +570,83 @@ class CommonTest(parameterized.TestCase):
   ):
     per_token_loss = jnp.array(per_token_loss_list)
     completion_mask = jnp.array(completion_mask_list)
-    actual_loss = common.aggregate_loss(
+    actual_loss = _compute_loss(
         per_token_loss, completion_mask, loss_agg_mode, **kwargs
     )
     np.testing.assert_allclose(actual_loss, expected_loss, rtol=1e-6, atol=1e-6)
+
+  @parameterized.named_parameters(
+      ("token_mean", "token-mean", {}),
+      ("seq_mean_token_mean", "sequence-mean-token-mean", {}),
+      ("seq_mean_token_scale", "sequence-mean-token-scale", {"norm": 5.0}),
+      ("seq_mean_token_sum", "seq-mean-token-sum", {}),
+      ("seq_mean_token_sum_norm", "sequence-mean-token-sum-norm", {"norm": 3.0}),
+  )
+  def test_reduced_equals_unreduced_compute(self, loss_agg_mode, kwargs):
+    # reduced_loss_agg (eager scalar) must equal aggregate_loss(...).compute()
+    # (deferred WeightedMetric) for every mode, including empty rows and
+    # varying lengths. This ties the two independent aggregations together so
+    # they cannot silently diverge.
+    per_token_loss = jnp.array([
+        [0.5, 1.5, 2.5, 0.0, 0.0],
+        [1.0, 1.0, 0.0, 0.0, 0.0],
+        [0.5, 0.5, 0.0, 0.0, 0.0],
+    ])
+    completion_mask = jnp.array([
+        [1.0, 1.0, 1.0, 0.0, 0.0],
+        [1.0, 1.0, 0.0, 0.0, 0.0],
+        [1.0, 1.0, 0.0, 0.0, 0.0],
+    ])
+    reduced = common.reduced_loss_agg(
+        per_token_loss, completion_mask, loss_agg_mode, **kwargs
+    )
+    unreduced = _compute_loss(
+        per_token_loss, completion_mask, loss_agg_mode, **kwargs
+    )
+    np.testing.assert_allclose(reduced, unreduced, rtol=1e-6, atol=1e-6)
+
+  def test_mean_of_means_matches_legacy_np_mean(self):
+    # mean_of_means computes each WeightedMetric then averages — exactly what
+    # the old pipeline did (pre-compute to scalar, then np.mean). No regression.
+    metrics = [
+        utils.WeightedMetric(jnp.array(6.0), jnp.array(3.0)),  # -> 2.0
+        utils.WeightedMetric(jnp.array(4.0), jnp.array(1.0)),  # -> 4.0
+    ]
+    legacy = np.mean([float(m.compute()) for m in metrics])
+    self.assertAlmostEqual(float(common.mean_of_means(metrics)), legacy, places=6)
+    self.assertAlmostEqual(float(common.mean_of_means(metrics)), 3.0, places=6)
+
+  def test_mean_of_means_is_np_mean_for_scalars(self):
+    # Safe drop-in for np.mean on plain scalars.
+    self.assertAlmostEqual(
+        float(common.mean_of_means([2.0, 4.0])), 3.0, places=6
+    )
+
+  def test_global_weighted_mean_is_sum_over_sum(self):
+    # Global sum(S)/sum(d), and it DIVERGES from mean_of_means when the
+    # denominator varies across micro-batches.
+    metrics = [
+        utils.WeightedMetric(jnp.array(10.0), jnp.array(4.0)),  # mean 2.5
+        utils.WeightedMetric(jnp.array(2.0), jnp.array(1.0)),   # mean 2.0
+    ]
+    self.assertAlmostEqual(
+        common.global_weighted_mean(metrics), 12.0 / 5.0, places=6
+    )
+    self.assertNotAlmostEqual(
+        common.global_weighted_mean(metrics),
+        float(common.mean_of_means(metrics)),  # 2.25
+        places=3,
+    )
+
+  def test_global_weighted_mean_zero_denominator(self):
+    metrics = [utils.WeightedMetric(jnp.array(0.0), jnp.array(0.0))]
+    self.assertEqual(common.global_weighted_mean(metrics), 0.0)
 
   def test_invalid_mode(self):
     with self.assertRaisesRegex(
         ValueError, "Unsupported loss aggregation mode"
     ):
-      common.aggregate_loss(jnp.ones((2, 2)), jnp.ones((2, 2)), "invalid-mode")
+      _compute_loss(jnp.ones((2, 2)), jnp.ones((2, 2)), "invalid-mode")
 
   @parameterized.named_parameters(
       dict(
@@ -610,7 +682,7 @@ class CommonTest(parameterized.TestCase):
   )
   def test_invalid_norm(self, norm_val, loss_agg_mode):
     with self.assertRaisesRegex(ValueError, "Invalid 'norm' value"):
-      common.aggregate_loss(
+      _compute_loss(
           jnp.ones((2, 2)),
           jnp.ones((2, 2)),
           loss_agg_mode,
@@ -707,11 +779,239 @@ class CommonTest(parameterized.TestCase):
     per_token_loss = jnp.array([1.0, 2.0, 3.0], dtype=jnp.bfloat16)
     completion_mask = jnp.array([1, 1, 0], dtype=jnp.int32)
 
-    loss = common.aggregate_loss(
+    loss = _compute_loss(
         per_token_loss, completion_mask, loss_agg_mode="token-mean"
     )
     self.assertEqual(loss.dtype, jnp.float32)
     self.assertAlmostEqual(loss, 1.5, places=5)
+
+  def test_model_call_contains(self):
+    class ModelWithSegIds:
+      def __call__(self, x, segment_ids=None):
+        pass
+
+    class ModelWithoutSegIds:
+      def __call__(self, x):
+        pass
+
+    class WrapperWithKwargs:
+      def __init__(self, transformer):
+        self.transformer = transformer
+
+      def __call__(self, *args, **kwargs):
+        pass
+
+    class ModelWithKwargsOnly:
+      def __call__(self, **kwargs):
+        pass
+
+    # 1. Test raw models
+    self.assertTrue(
+        common.model_call_contains(ModelWithSegIds(), "segment_ids")
+    )
+    self.assertFalse(
+        common.model_call_contains(ModelWithoutSegIds(), "segment_ids")
+    )
+
+    # 2. Test wrapped models (looks at model.transformer)
+    self.assertTrue(
+        common.model_call_contains(
+            WrapperWithKwargs(ModelWithSegIds()), "segment_ids"
+        )
+    )
+    self.assertFalse(
+        common.model_call_contains(
+            WrapperWithKwargs(ModelWithoutSegIds()), "segment_ids"
+        )
+    )
+
+    # 3. Test models with **kwargs
+    self.assertTrue(
+        common.model_call_contains(ModelWithKwargsOnly(), "segment_ids")
+    )
+
+  def test_compute_score_with_wrapped_model_without_segment_ids(self):
+    """Test that segment ids are not passed when a model doesn't accept segment_ids.
+
+    This test reproduces the GemmaWithScoreHead scenario where Gemma doesn't
+    accept segment_ids.
+    """
+
+    class ModelWithoutSegIds(nnx.Module):
+      def __call__(self, x, positions=None, cache=None, attention_mask=None):
+        return jnp.zeros((*x.shape, 1))
+
+    class ScoreHeadWrapper(nnx.Module):
+      def __init__(self, transformer):
+        self.transformer = transformer
+
+      def __call__(self, *args, **kwargs):
+        return self.transformer(*args, **kwargs)
+
+    wrapped_model = ScoreHeadWrapper(ModelWithoutSegIds())
+    prompt_tokens = jnp.array([[1, 2]])
+    completion_tokens = jnp.array([[3, 4]])
+
+    # Verifies score is computed cleanly without raising
+    # TypeError for segment_ids
+    scores = common.compute_score(
+        wrapped_model, prompt_tokens, completion_tokens, pad_id=0, eos_id=-1
+    )
+    self.assertEqual(scores.shape, (1, 4))
+
+  def test_compute_per_token_logps_segment_ids_fallback(self):
+    """Verifies compute_per_token_logps falls back cleanly if model doesn't support segment_ids."""
+
+    class ModelWithoutSegIds(nnx.Module):
+      def __call__(self, x, positions=None, cache=None, attention_mask=None):
+        return jnp.zeros((*x.shape, 10)), cache
+
+    model = ModelWithoutSegIds()
+    graphdef, state = nnx.split(model)
+
+    prompt_tokens = jnp.array([[1, 2]])
+    completion_tokens = jnp.array([[3, 4]])
+
+    # Packed mode on model without segment_ids should fall back
+    # gracefully without TypeError
+    logps_packed = common.compute_per_token_logps(
+        graphdef,
+        state,
+        prompt_tokens,
+        completion_tokens,
+        pad_id=0,
+        eos_id=-1,
+        segment_ids=jnp.ones((1, 4), dtype=jnp.int32),
+        segment_positions=jnp.arange(4, dtype=jnp.int32),
+    )
+    self.assertEqual(logps_packed.shape, (1, 4))
+
+  def test_compute_per_token_logps_segment_ids_supported(self):
+    """Verifies compute_per_token_logps passes segment_ids to model when supplied and supported."""
+
+    class ModelWithSegIds(nnx.Module):
+      def __call__(
+          self,
+          x,
+          segment_ids=None,
+          positions=None,
+          cache=None,
+          attention_mask=None,
+      ):
+        # Segment_ids should be passed when supplied and supported
+        if segment_ids is None:
+          raise ValueError("segment_ids should be passed when supported.")
+        return jnp.zeros((*x.shape, 10)), cache
+
+    model = ModelWithSegIds()
+    graphdef, state = nnx.split(model)
+
+    prompt_tokens = jnp.array([[1, 2]])
+    completion_tokens = jnp.array([[3, 4]])
+
+    # Verifies segment_ids are passed when supported and supplied
+    logps_packed = common.compute_per_token_logps(
+        graphdef,
+        state,
+        prompt_tokens,
+        completion_tokens,
+        pad_id=0,
+        eos_id=-1,
+        segment_ids=jnp.ones((1, 4), dtype=jnp.int32),
+        segment_positions=jnp.arange(4, dtype=jnp.int32),
+    )
+    self.assertEqual(logps_packed.shape, (1, 4))
+
+  def test_packed_logps_match_unpacked_per_segment(self):
+    """Packed segment-aware per-token logps == unpacked per-row logps.
+
+    Packs `num_seq` sequences into a single row and checks that
+    `compute_per_token_logps` with `segment_ids` reproduces, token-for-token,
+    the logps computed with each sequence on its own row. This is the core
+    correctness property of pack-first log-probs: the segment-aware forward must
+    not let one packed sequence leak into another. Uses a self-contained
+    segment-aware toy (attention confined to same-segment positions) so the
+    check runs on CPU with no real model. The first token of each packed segment
+    is a cross-segment-boundary prediction (masked out downstream by
+    `completion_mask`), so only positions `t >= 1` within each segment are
+    compared.
+    """
+
+    class _SegAwareToy(nnx.Module):
+      """Tiny model whose attention is confined to same-segment positions."""
+
+      def __init__(self, *, vocab, dim, rngs):
+        self.emb = nnx.Embed(vocab, dim, rngs=rngs)
+        self.attn = nnx.MultiHeadAttention(
+            num_heads=2,
+            in_features=dim,
+            qkv_features=dim,
+            use_bias=False,
+            decode=False,
+            rngs=rngs,
+        )
+        self.head = nnx.Linear(dim, vocab, rngs=rngs)
+
+      def __call__(
+          self,
+          x,
+          segment_ids=None,
+          positions=None,
+          cache=None,
+          attention_mask=None,
+      ):
+        h = self.emb(x)
+        if segment_ids is not None:
+          same_seg = segment_ids[:, :, None] == segment_ids[:, None, :]
+          h = self.attn(h, mask=same_seg[:, None, :, :]) + h
+        else:
+          h = self.attn(h) + h
+        return self.head(h), cache
+
+    model = _SegAwareToy(vocab=16, dim=16, rngs=nnx.Rngs(42))
+    graphdef, state = nnx.split(model)
+    num_seq, seq_len = 3, 4
+    tokens = (
+        np.random.default_rng(7)
+        .integers(1, 16, size=(num_seq, seq_len))
+        .astype(np.int32)
+    )
+
+    def _logps(completion_tokens, segment_ids, segment_positions):
+      return np.asarray(
+          common.compute_per_token_logps(
+              graphdef,
+              state,
+              jnp.zeros((completion_tokens.shape[0], 0), dtype=jnp.int32),
+              jnp.asarray(completion_tokens, jnp.int32),
+              pad_id=0,
+              eos_id=-1,
+              segment_ids=jnp.asarray(segment_ids, jnp.int32),
+              segment_positions=jnp.asarray(segment_positions, jnp.int32),
+          )
+      )
+
+    # Unpacked: [num_seq, seq_len], one segment per row.
+    unpacked = _logps(
+        tokens,
+        np.ones((num_seq, seq_len), np.int32),
+        np.broadcast_to(np.arange(seq_len, dtype=np.int32), (num_seq, seq_len)),
+    )
+
+    # Packed: [1, num_seq * seq_len], one row holding num_seq segments.
+    packed = _logps(
+        tokens.reshape(1, -1),
+        np.concatenate(
+            [np.full(seq_len, i + 1, np.int32) for i in range(num_seq)]
+        )[None, :],
+        np.concatenate(
+            [np.arange(seq_len, dtype=np.int32) for _ in range(num_seq)]
+        )[None, :],
+    ).reshape(num_seq, seq_len)
+
+    np.testing.assert_allclose(
+        packed[:, 1:], unpacked[:, 1:], atol=1e-4, rtol=1e-4
+    )
 
 
 if __name__ == "__main__":

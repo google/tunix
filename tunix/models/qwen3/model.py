@@ -106,6 +106,7 @@ class ShardingConfig:
   act_btnh: Tuple[str | None, ...]
   exp_weight_edf: Tuple[str | None, ...]
   exp_weight_efd: Tuple[str | None, ...]
+  score_weight_d1: Tuple[str | None, ...] | None = None
 
   @staticmethod
   def get_default_sharding(is_sampling: bool = False, enable_sp: bool = False):
@@ -114,19 +115,22 @@ class ShardingConfig:
     fsdp = (fsdp, sp) if fsdp and sp else fsdp
 
     return ShardingConfig(
-        emb_vd=('tp', fsdp),  # pyrefly: ignore[bad-argument-type]
-        emb_dv=(fsdp, 'tp'),  # pyrefly: ignore[bad-argument-type]
-        q_weight_dnh=(fsdp, 'tp', None),  # pyrefly: ignore[bad-argument-type]
-        kv_weight_dnh=(fsdp, 'tp', None),  # pyrefly: ignore[bad-argument-type]
-        o_weight_nhd=('tp', None, fsdp),  # pyrefly: ignore[bad-argument-type]
-        ffw_weight_df=(fsdp, 'tp'),  # pyrefly: ignore[bad-argument-type]
-        ffw_weight_fd=('tp', fsdp),  # pyrefly: ignore[bad-argument-type]
-        rms_norm_weight=('tp',),
-        act_btd=('fsdp', sp, None if is_sampling else 'tp'),
-        act_btf=('fsdp', sp, 'tp'),
-        act_btnh=('fsdp', sp, 'tp', None),
-        exp_weight_edf=('fsdp', None, 'tp'),
-        exp_weight_efd=('fsdp', 'tp', None),
+        emb_vd=P('tp', fsdp),  # pyrefly: ignore[bad-argument-type]
+        emb_dv=P(fsdp, 'tp'),  # pyrefly: ignore[bad-argument-type]
+        q_weight_dnh=P(fsdp, 'tp', None),  # pyrefly: ignore[bad-argument-type]
+        kv_weight_dnh=P(fsdp, 'tp', None),  # pyrefly: ignore[bad-argument-type]
+        o_weight_nhd=P('tp', None, fsdp),  # pyrefly: ignore[bad-argument-type]
+        ffw_weight_df=P(fsdp, 'tp'),  # pyrefly: ignore[bad-argument-type]
+        ffw_weight_fd=P('tp', fsdp),  # pyrefly: ignore[bad-argument-type]
+        rms_norm_weight=P(  # pyrefly: ignore[bad-argument-type]
+            'tp',
+        ),
+        act_btd=P('fsdp', sp, None if is_sampling else 'tp'),  # pyrefly: ignore[bad-argument-type]
+        act_btf=P('fsdp', sp, 'tp'),  # pyrefly: ignore[bad-argument-type]
+        act_btnh=P('fsdp', sp, 'tp', None),  # pyrefly: ignore[bad-argument-type]
+        score_weight_d1=P(fsdp, None),  # pyrefly: ignore[bad-argument-type]
+        exp_weight_edf=P('fsdp', None, 'tp'),  # pyrefly: ignore[bad-argument-type]
+        exp_weight_efd=P('fsdp', 'tp', None),  # pyrefly: ignore[bad-argument-type]
     )
 
 
@@ -152,7 +156,6 @@ class ModelConfig:
   param_dtype: jnp.dtype = jnp.float32
   use_flash_attention: bool = False
   flash_attention_block_size: int = 1024
-
 
   @classmethod
   def qwen3_0p6b(cls):  # qwen3-0.6B
@@ -290,6 +293,38 @@ class ModelConfig:
         rope_theta=1_000_000,
     )
 
+  @classmethod
+  def qwen3p5_35b_a3b(cls):  # Qwen3.5-35B-A3B
+    return cls(
+        num_layers=40,
+        vocab_size=248320,
+        embed_dim=2048,
+        hidden_dim=512,
+        num_heads=16,
+        head_dim=256,
+        num_kv_heads=2,
+        norm_eps=1e-06,
+        rope_theta=10_000_000,
+        num_experts=256,
+        num_experts_per_tok=8,
+    )
+
+  @classmethod
+  def qwen3p5_397b_a17b(cls):  # Qwen3.5-397B-A17B
+    return cls(
+        num_layers=60,
+        vocab_size=248320,
+        embed_dim=4096,
+        hidden_dim=1024,
+        num_heads=32,
+        head_dim=256,
+        num_kv_heads=2,
+        norm_eps=1e-06,
+        rope_theta=10_000_000,
+        num_experts=512,
+        num_experts_per_tok=10,
+    )
+
 
 def shard(x: jnp.ndarray, s: Tuple[str, ...]):
   mesh = pxla.thread_resources.env.physical_mesh
@@ -404,7 +439,9 @@ class RMSNorm(nnx.Module):
       param_dtype: jnp.dtype,
   ):
     self.w = nnx.Param(
-        nnx.initializers.ones_init()(rngs.params(), dim, param_dtype),  # pyrefly: ignore[bad-argument-type]
+        nnx.initializers.ones_init()(
+            rngs.params(), dim, param_dtype  # pyrefly: ignore[bad-argument-type]
+        ),  # pyrefly: ignore[bad-argument-type]
         sharding=shd_config.rms_norm_weight,
     )
     self.norm_eps = norm_eps
@@ -495,9 +532,15 @@ class Attention(nnx.Module):
     key_proj = self.k_norm(self.k_proj(x))
     value_proj = self.v_proj(x)
 
-    query_proj = shard(query_proj, self.shd_config.act_btnh)  # pyrefly: ignore[bad-argument-type]
-    key_proj = shard(key_proj, self.shd_config.act_btnh)  # pyrefly: ignore[bad-argument-type]
-    value_proj = shard(value_proj, self.shd_config.act_btnh)  # pyrefly: ignore[bad-argument-type]
+    query_proj = shard(
+        query_proj, self.shd_config.act_btnh  # pyrefly: ignore[bad-argument-type]
+    )  # pyrefly: ignore[bad-argument-type]
+    key_proj = shard(
+        key_proj, self.shd_config.act_btnh  # pyrefly: ignore[bad-argument-type]
+    )  # pyrefly: ignore[bad-argument-type]
+    value_proj = shard(
+        value_proj, self.shd_config.act_btnh  # pyrefly: ignore[bad-argument-type]
+    )  # pyrefly: ignore[bad-argument-type]
 
     query_proj = apply_rope(
         query_proj,
@@ -643,7 +686,9 @@ class Attention(nnx.Module):
       qkv = qkv.reshape((b, t, qh, d))
 
     outputs = self.o_proj(qkv)
-    outputs = shard(outputs, self.shd_config.act_btd)  # pyrefly: ignore[bad-argument-type]
+    outputs = shard(
+        outputs, self.shd_config.act_btd  # pyrefly: ignore[bad-argument-type]
+    )  # pyrefly: ignore[bad-argument-type]
 
     if cache is not None:
       new_cache = {
@@ -669,13 +714,19 @@ class Attention(nnx.Module):
         self.config.remat_config == RematConfig.BLOCK
         or self.config.remat_config == RematConfig.BLOCK.value
     ):
-      # nnx.remat needs to be applied to the unbound function and take self
-      # as the first argument.
-      return nnx.remat(self.block.__func__, graph_updates=False)(
-          self, x, segment_pos, cache, attn_mask, segment_ids
+      graphdef, state = nnx.split(self)
+
+      def _checkpointed_block(state, *args, **kwargs):
+        module = nnx.merge(graphdef, state)
+        return module.block(*args, **kwargs)
+
+      return jax.checkpoint(_checkpointed_block)(
+          state, x, segment_pos, cache, attn_mask, segment_ids=segment_ids
       )
     else:
-      return self.block(x, segment_pos, cache, attn_mask, segment_ids=segment_ids)
+      return self.block(
+          x, segment_pos, cache, attn_mask, segment_ids=segment_ids
+      )
 
   @property
   def head_dim(self):
@@ -736,7 +787,8 @@ class MoELayer(nnx.Module):
   def __call__(self, x, use_megablox=True):
     scores = self.router(x).astype(jnp.float32)  # [B,T,E]
     routing_weights, routing_idx = jax.lax.top_k(
-        jax.nn.softmax(scores, axis=-1), self.experts_per_tok  # pyrefly: ignore[bad-argument-type]
+        jax.nn.softmax(scores, axis=-1),
+        self.experts_per_tok,  # pyrefly: ignore[bad-argument-type]
     )
     routing_weights = (
         routing_weights / jnp.sum(routing_weights, axis=-1, keepdims=True)
@@ -751,7 +803,9 @@ class MoELayer(nnx.Module):
     # -------------------------------------------------------------
     if not use_megablox or (mesh.empty or jax.devices()[0].platform == 'cpu'):
       dispatch_mask = jax.nn.one_hot(
-          routing_idx, num_classes=self.num_experts, dtype=self.dtype  # pyrefly: ignore[bad-argument-type]
+          routing_idx,
+          num_classes=self.num_experts,  # pyrefly: ignore[bad-argument-type]
+          dtype=self.dtype,  # pyrefly: ignore[bad-argument-type]
       )  # [B, T, K, E]
       dispatch_mask = jnp.swapaxes(dispatch_mask, -1, -2)  # [B, T, E, K]
       dispatched_input = jnp.einsum(
@@ -824,10 +878,14 @@ class MoELayer(nnx.Module):
         num_ep = 1
         ep_shard_idx = 0
 
-      num_local_experts = self.num_experts // num_ep  # pyrefly: ignore[unsupported-operation]
+      num_local_experts = (
+          self.num_experts // num_ep  # pyrefly: ignore[unsupported-operation]
+      )  # pyrefly: ignore[unsupported-operation]
 
       flat_repeated_inputs = jnp.repeat(
-          inputs.reshape(B * T, D_global), self.experts_per_tok, axis=0  # pyrefly: ignore[bad-argument-type]
+          inputs.reshape(B * T, D_global),
+          self.experts_per_tok,  # pyrefly: ignore[bad-argument-type]
+          axis=0,  # pyrefly: ignore[bad-argument-type]
       )
       flat_selected_indices = indices.reshape(-1)
 
@@ -860,7 +918,10 @@ class MoELayer(nnx.Module):
         local_output_offsets = global_out_offsets[ep_shard_idx]
 
         output_buffer_size = (
-            min(self.experts_per_tok, num_local_experts) * B * T * num_ep  # pyrefly: ignore[bad-specialization]
+            min(self.experts_per_tok, num_local_experts)  # pyrefly: ignore[bad-specialization]
+            * B
+            * T
+            * num_ep  # pyrefly: ignore[bad-specialization]
         )
         output_buffer = jax.lax.empty(
             shape=(output_buffer_size, D_global), dtype=inputs.dtype
@@ -1033,7 +1094,9 @@ class MLP(nnx.Module):
       x: jaxtyping.Array,
   ) -> jaxtyping.Array:
     activations = nnx.silu(self.gate_proj(x)) * self.up_proj(x)
-    activations = shard(activations, self.shd_config.act_btf)  # pyrefly: ignore[bad-argument-type]
+    activations = shard(
+        activations, self.shd_config.act_btf  # pyrefly: ignore[bad-argument-type]
+    )  # pyrefly: ignore[bad-argument-type]
     outputs = self.down_proj(activations)
     return outputs
 
@@ -1043,7 +1106,13 @@ class MLP(nnx.Module):
         self.config.remat_config == RematConfig.BLOCK
         or self.config.remat_config == RematConfig.BLOCK.value
     ):
-      return nnx.remat(self.block.__func__, graph_updates=False)(self, x)
+      graphdef, state = nnx.split(self)
+
+      def _checkpointed_block(state, *args, **kwargs):
+        module = nnx.merge(graphdef, state)
+        return module.block(*args, **kwargs)
+
+      return jax.checkpoint(_checkpointed_block)(state, x)
     else:
       return self.block(x)  # pyrefly: ignore[bad-argument-type]
 
@@ -1124,8 +1193,14 @@ class DecoderLayer(nnx.Module):
         self.config.remat_config == RematConfig.DECODER
         or self.config.remat_config == RematConfig.DECODER.value
     ):
-      return nnx.remat(self.block.__func__, graph_updates=False)(
-          self, x, segment_pos, cache, attn_mask, segment_ids
+      graphdef, state = nnx.split(self)
+
+      def _checkpointed_block(state, *args, **kwargs):
+        module = nnx.merge(graphdef, state)
+        return module.block(*args, **kwargs)
+
+      return jax.checkpoint(_checkpointed_block)(
+          state, x, segment_pos, cache, attn_mask, segment_ids=segment_ids
       )
     else:
       return self.block(
@@ -1185,7 +1260,7 @@ class Qwen3(BackendMappingMixin, nnx.Module):
         f'layer_{i}': {
             'k': jnp.zeros(shape, dtype=config.dtype),
             'v': jnp.zeros(shape, dtype=config.dtype),
-            'end_index': jnp.zeros((batch_size,), dtype=jnp.int32)
+            'end_index': jnp.zeros((batch_size,), dtype=jnp.int32),
         }
         for i in range(config.num_layers)
     }

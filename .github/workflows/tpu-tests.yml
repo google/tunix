@@ -38,10 +38,10 @@ env:
 
 jobs:
   run_prod:
-    runs-on: [linux-x86-ct5lp-224-8tpu]
+    runs-on: [linux-x86-ct6e-180-8tpu]
     environment: testing
     container:
-      image: us-docker.pkg.dev/tpu-prod-env-multipod/jax-stable-stack/candidate/tpu:latest
+      image: us-docker.pkg.dev/tpu-prod-env-multipod/jax-stable-stack/candidate/tpu:latest # zizmor: ignore[unpinned-images]
       options: --privileged
       env:
         CLOUD_TPU_ACCELERATOR: v5e-8
@@ -50,7 +50,7 @@ jobs:
 
     # Cache Hugging Face hub
     - name: Cache HF hub
-      uses: actions/cache@v4
+      uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
       with:
         path: ~/.cache/huggingface
         key: hf-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'requirements*.txt', 'constraints*.txt') }}
@@ -58,14 +58,14 @@ jobs:
           hf-${{ runner.os }}-
 
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       with:
         fetch-depth: 0
 
     - name: Install tunix dependencies
       run: |
         pip install --upgrade pip
-        pip install -e ".[prod,test]" "safetensors<0.8" --force-reinstall
+        pip install -e ".[test]" "safetensors<0.8" --force-reinstall
 
     - name: Verify TPU availability
       run: |
@@ -120,7 +120,7 @@ jobs:
     - name: Run tunix tests not covered by the above categories
       run: |
         # This category is to catch tests added but not covered by CI yet. Whenever you add new folders under tests/, please add a new category above and skip those tests here.
-        python -m pytest tests/ -v --tb=short --ignore=tests/perf/ --ignore=tests/model_alignment/ --ignore=tests/models/ --ignore=tests/cli/ --ignore=tests/utils/mesh_utils_test.py --ignore=tests/utils/topology_test.py --ignore=tests/generate/ --ignore=tests/sft/ --ignore=tests/distillation/ --ignore=tests/rl/ --ignore=tests/smoke_tests/ || code=$?
+        python -m pytest tests/ -v --tb=short --ignore=tests/perf/ --ignore=tests/model_alignment/ --ignore=tests/models/ --ignore=tests/cli/ --ignore=tests/utils/mesh_utils_test.py --ignore=tests/utils/topology_test.py --ignore=tests/generate/ --ignore=tests/sft/ --ignore=tests/distillation/ --ignore=tests/rl/ --ignore=tests/smoke_tests/ --ignore=tests/experimental/ || code=$?
         if [ "${code:-0}" = "5" ]; then
           echo "No tests collected (expected)."
           exit 0
@@ -130,10 +130,10 @@ jobs:
 
   run_dev:
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
-    runs-on: [linux-x86-ct5lp-224-8tpu]
+    runs-on: [linux-x86-ct6e-180-8tpu]
     environment: testing
     container:
-      image: vllm/vllm-tpu:nightly-20260406-581c4d4-f6983f0
+      image: vllm/vllm-tpu:nightly-20260819-12eed6e-9842d70
       options: --privileged
       env:
         CLOUD_TPU_ACCELERATOR: v5e-8
@@ -141,7 +141,7 @@ jobs:
     steps:
       # Cache Hugging Face hub
       - name: Cache HF hub
-        uses: actions/cache@v4
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
         with:
           path: ~/.cache/huggingface
           key: hf-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'requirements*.txt', 'constraints*.txt') }}
@@ -149,7 +149,7 @@ jobs:
             hf-${{ runner.os }}-
 
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
 
@@ -160,7 +160,7 @@ jobs:
           python3 -m pip install --upgrade pip setuptools wheel
 
           # Install Tunix with dev and test dependencies without overwriting the vLLM dependencies.
-          python3 -m pip install -e .[dev,test]
+          python3 -m pip install -e .[test]
           # tpu-inference/Numba needs NumPy 2.3 or less.
           python3 -m pip install numpy==2.3.5 --force-reinstall
       - name: Run tunix model tests
@@ -205,6 +205,7 @@ jobs:
           git clone https://github.com/sgl-project/sglang-jax.git && cd sglang-jax/python && python3 -m pip install -e . --force-reinstall && cd ../..
           # SGLang Jax removed qwix dependency in https://github.com/sgl-project/sglang-jax/pull/734
           python3 -m pip install qwix --force-reinstall
+          python3 -m pip install 'jax[tpu]<0.11.0' --force-reinstall
           # TODO(b/470113586): Remove this test once the bug is fixed.
           python3 -m pip list | egrep 'jax|flax|libtpu'
 
@@ -216,14 +217,16 @@ jobs:
           EOF
           apt-get update; apt-get install -y less
 
-          cd tunix && python3 tests/generate/sglang_jax_sampler_test.py && python3 tests/generate/sglang_jax_lora_test.py
-          python3 tests/rl/rl_cluster_test.py
+          cd tunix 
+          python3 tests/generate/sglang_jax_sampler_test.py
+          python3 tests/generate/sglang_jax_lora_test.py
+          python3 -m pytest tests/rl/rl_cluster_test.py -v --tb=short -k "not vllm"
       - name: Run tunix SFT integration tests
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          # Reinstall Tunix with prod dependencies
-          python3 -m pip install -e .[prod] --force-reinstall
+          # Reinstall Tunix
+          python3 -m pip install -e . --force-reinstall
           python3 -m pip install --upgrade kagglehub kagglesdk
 
           # Loading tfds requires tensorflow.

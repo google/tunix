@@ -1,6 +1,6 @@
 [project]
 name = "google-tunix"
-version = "0.1.7"
+version = "0.1.8"
 authors = [
   { name = "Tunix Developers", email = "tunix-dev@google.com" },
 ]
@@ -26,6 +26,9 @@ dependencies = [
   "hf_transfer",  # Huggingface caching in CI
   "huggingface_hub",
   "importlib_resources",
+  # Jax 0.7.2 has performance regression on OSS
+  # Jax 0.11.1 removed jax.experimental.hijax.MutableHiType, which flax (through 0.12.8, the newest release) still subclasses
+  "jax[tpu]>=0.6.0,!=0.7.2,<0.11.1",
   "jaxtyping",
   "jinja2",  # Huggingface chat template
   "kagglehub",
@@ -59,7 +62,6 @@ docs = [
     "sphinx_contributors",
 ]
 prod = [
-  "jax[tpu]>=0.6.0,!=0.7.2", # Jax 0.7.2 has performance regression on OSS
 ]
 dev = [
   # Manully install vLLM & tpu-inferece, which depends on jax[tpu]==0.7.2
@@ -69,12 +71,25 @@ test = [
   "pytest-xdist",
   "gcsfs",
   "chex",
+  "opentelemetry-sdk>=1.25.0",
+  "wandb",  # Offline end-to-end test for the OpenTelemetry W&B exporter
 ]
 cli = [
   "tensorflow",
 ]
+otel = [
+  # Experimental OpenTelemetry double-write path for MetricsLogger.
+  "opentelemetry-api>=1.25.0",
+  "opentelemetry-sdk>=1.25.0",
+]
 frozenlake = [
   "gymnasium",
+]
+experimental = [
+  "cloudpickle",  # serialization envelope for the remote-execution actor protocol
+  "grpcio",  # transport for cross-process worker execution
+  "pydantic",  # data modeling and serialization for agent trajectories
+  "simple_parsing",  # Argument parsing for CLI
 ]
 
 [project.urls]

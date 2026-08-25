@@ -168,6 +168,45 @@ class SafetensorsLoaderTest(parameterized.TestCase):
         loaded_state,
     )
 
+  def test_load_and_create_model_raises_on_duplicate_key(self):
+    # Two distinct source keys that both map to the same jax key. In the
+    # 'original' loader these are processed on separate threads, so without a
+    # lock around the duplicate-key check and write the second write can
+    # silently overwrite the first (issue #1259). With the lock the duplicate
+    # is always detected.
+    try:
+      st_dir = self.create_tempdir().full_path
+    except Exception:  # pylint: disable=broad-except
+      st_dir = tempfile.TemporaryDirectory().name
+      os.makedirs(st_dir, exist_ok=True)
+
+    tensors = {
+        'lm_head.kernel': np.zeros((2, 2), dtype=np.float32),
+        'lm_head.weight': np.zeros((2, 2), dtype=np.float32),
+    }
+    filename = os.path.join(st_dir, 'model.safetensors')
+    stnp.save_file(tensors, filename)
+
+    def duplicate_key_mapping(config):
+      del config
+      return {
+          r'^lm_head\.kernel$': ('lm_head.kernel', None),
+          r'^lm_head\.weight$': ('lm_head.kernel', None),
+      }
+
+    # The duplicate ValueError is re-raised wrapped as RuntimeError by the
+    # loader, so match on RuntimeError. mode='original' is required because the
+    # default optimized path is single-threaded and does not run this check.
+    with self.assertRaisesRegex(RuntimeError, 'Duplicate key'):
+      safetensors_loader.load_and_create_model(
+          st_dir,
+          test_common.ToyTransformer,
+          self.model.config,
+          duplicate_key_mapping,
+          dtype=jnp.float32,
+          mode='original',
+      )
+
 
 if __name__ == '__main__':
   absltest.main()

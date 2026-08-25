@@ -7,7 +7,7 @@ from absl.testing import parameterized
 from flax import nnx
 import optax
 from tunix.rl import algorithm_config as algo_config_lib
-from tunix.rl import rl_cluster as rl_cluster_lib
+from tunix.rl import rl_cluster as rl_engine_lib
 from tunix.rl import rl_learner
 
 class DummyModel(nnx.Module):
@@ -52,7 +52,7 @@ class RLLearnerTest(parameterized.TestCase):
       expected_values,
       expect_failure,
   ):
-    config = rl_cluster_lib.RLTrainingConfig(
+    config = rl_engine_lib.RLTrainingConfig(
         actor_optimizer=optax.sgd(1e-3),
         mini_batch_size=mini_batch_size,
         train_micro_batch_size=train_micro_batch_size,
@@ -64,15 +64,15 @@ class RLLearnerTest(parameterized.TestCase):
 
     actor_model = DummyModel()
     rollout_model = DummyModel()
-    mock_cluster = mock.MagicMock()
-    mock_cluster.actor_trainer.model = actor_model
-    mock_cluster.rollout.model.return_value = rollout_model
-    mock_cluster.cluster_config.training_config = config
-    mock_cluster.actor_trainer.train_steps = 0
-    mock_cluster.actor_trainer.iter_steps = 0
+    mock_engine = mock.MagicMock()
+    mock_engine.actor_trainer.model = actor_model
+    mock_engine.rollout.model.return_value = rollout_model
+    mock_engine.cluster_config.training_config = config
+    mock_engine.actor_trainer.train_steps = 0
+    mock_engine.actor_trainer.iter_steps = 0
 
     learner = DummyLearner(
-        rl_cluster=mock_cluster,
+        rl_engine=mock_engine,
         algo_config=DummyConfig(),
         reward_fns=lambda prompts, completions, **kwargs: [1.0] * len(prompts),
     )

@@ -422,6 +422,8 @@ class AutoModel:
         **kwargs: Additional keyword arguments passed to the underlying model
           creation functions. - For ModelSource.KAGGLE, Gemma models:
           `intermediate_ckpt_dir` , `rng_seed`
+          - For ModelSource.MAXTEXT: `checkpoint_storage_use_ocdbt`,
+          `checkpoint_storage_use_zarr3`, `skip_jax_distributed_system`
 
     Returns:
         The loaded nnx.Module model.
@@ -433,42 +435,38 @@ class AutoModel:
     naming_info = naming.ModelNaming(model_id=model_id)
 
     # Download the model
-    if model_source in (
-        ModelSource.INTERNAL,
-        ModelSource.GCS,
-        ModelSource.KAGGLE,
-    ):
-      if model_path is None:
+    if model_path:
+      model_id_or_path = model_path
+    else:
+      if model_source in (
+          ModelSource.INTERNAL,
+          ModelSource.GCS,
+          ModelSource.KAGGLE,
+      ):
         raise ValueError(
             'model_path is required for model_source: '
             f'{model_source}. Please provide a valid model_path.'
         )
-      model_id_or_path = model_path
-    else:
       model_id_or_path = model_id
     resolved_model_path = download_model(
         model_id_or_path, model_download_path, model_source
     )
 
-    # Case 1: MaxText models
     if model_source == ModelSource.MAXTEXT:
-      try:
-        import maxtext.configs.pyconfig as pyconfig  # pylint: disable=g-import-not-at-top # pytype: disable=import-error
-        from maxtext.configs.types import MaxTextConfig  # pylint: disable=g-import-not-at-top # pytype: disable=import-error
-        from maxtext.utils import model_creation_utils as maxtext_model_creation_utils  # pylint: disable=g-import-not-at-top # pytype: disable=import-error
-      except ImportError:
-        from GOOGLE_INTERNAL_PACKAGE_PATH.third_party.py.maxtext.src.maxtext.configs import pyconfig  # pylint: disable=g-import-not-at-top
-        from GOOGLE_INTERNAL_PACKAGE_PATH.third_party.py.maxtext.src.maxtext.configs.types import MaxTextConfig  # pylint: disable=g-import-not-at-top
-        from GOOGLE_INTERNAL_PACKAGE_PATH.third_party.py.maxtext.src.maxtext.utils import model_creation_utils as maxtext_model_creation_utils  # pylint: disable=g-import-not-at-top
+      import maxtext  # pylint: disable=g-import-not-at-top
+
+      MaxTextConfig = maxtext.MaxTextConfig
+      pyconfig = maxtext.pyconfig
+      maxtext_model_creation_utils = maxtext.model_creation_utils
 
       # We provide load_parameters_path instead of model_path since that's what maxtext expects.
       argv = [
           '',
-          'base.yml',
+          'src/maxtext/configs/base.yml',
           f'model_name={naming_info.model_name}',
       ]
 
-      if model_path is not None:
+      if model_path:
         argv.append(f'load_parameters_path={resolved_model_path}')
 
       # We handle jax distribution outside or it's not needed by default.
@@ -483,6 +481,12 @@ class AutoModel:
         valid_keys = set(MaxTextConfig.model_fields.keys())
       elif hasattr(MaxTextConfig, '__annotations__'):
         valid_keys = set(MaxTextConfig.__annotations__.keys())
+
+      # Explicitly allow checkpoint storage format overrides if provided
+      valid_keys.update({
+          'checkpoint_storage_use_ocdbt',
+          'checkpoint_storage_use_zarr3',
+      })
 
       for k, v in kwargs.items():
         if v is not None and k in valid_keys:
@@ -571,7 +575,7 @@ class AutoModel:
       # Get load_dtype explicitly from kwargs
       load_dtype_str = kwargs.get('load_dtype')
       try:
-        load_dtype = getattr(jnp, load_dtype_str)
+        load_dtype = getattr(jnp, load_dtype_str)  # pyrefly: ignore[bad-argument-type]
       except AttributeError:
         raise ValueError(
             f"Invalid load_dtype: {load_dtype_str}. Must be a valid"
@@ -580,14 +584,13 @@ class AutoModel:
       except TypeError:
         load_dtype = load_dtype_str
 
-
       # Apply any model config field overrides passed via kwargs (e.g.
       # use_flash_attention, flash_attention_block_size).
       if dataclasses.is_dataclass(model_params):
         valid_fields = {f.name for f in dataclasses.fields(model_params)}
         overrides = {k: v for k, v in kwargs.items() if k in valid_fields and v is not None}
         if 'remat_config' in overrides and isinstance(overrides['remat_config'], str):
-          model_module = get_model_module(naming_info.model_name, ModelModule.MODEL)
+          model_module = get_model_module(naming_info.model_name, ModelModule.MODEL)  # pyrefly: ignore[bad-argument-type]
           if hasattr(model_module, 'RematConfig'):
             remat_cfg_str = overrides['remat_config']
             try:
