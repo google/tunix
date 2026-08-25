@@ -400,87 +400,42 @@ the complete-group invariant.
 
 ### Concrete Async Timeline
 
-Consider a run with:
+Example configuration:
 
 ```text
-batch_size = 8                  # original prompts per RL global step
-num_generations = 8             # trajectories per prompt
-max_concurrency = 64            # max active agent-env episodes
-train_micro_batch_size = 8      # actor update chunk size in trajectories
-mini_batch_size = 64            # one optimizer mini-batch per full RL batch
-full_batch_training_units = 8 * 8 = 64 trajectories
+batch_size = 8
+num_generations = 8
+max_concurrency = 64
+train_micro_batch_size = 8
+mini_batch_size = 64
+full_batch_training_units = 64 trajectories
 ```
 
-With `off_policy_steps=0`, the learner initially enqueues one prompt batch.
-Those 8 prompts expand into 64 independent agent-env episodes. Because
-`max_concurrency=64`, the rollout side can start the whole first RL batch at
-`policy_version=k`.
+With `off_policy_steps=0`, the learner enqueues one prompt batch. The 8 prompts
+expand into 64 rollout episodes, all tagged with the current `policy_version`.
+Because `max_concurrency=64`, the first full RL batch can be in flight at once.
+As soon as one prompt group finishes all 8 generations, `GroupQueueManager`
+emits that complete group and the trainer can run the first 8-trajectory actor
+micro-step. Other groups from the same full batch may still be rolling out.
 
-```text
-t0:
-  enqueue prompts p0..p7
-  start up to 64 rollout episodes:
-    p0 generation 0..7
-    ...
-    p7 generation 0..7
-  all started episodes carry policy_version=k
+The step boundary is reached only after all 64 trajectories from the full batch
+have been trained. At that point the learner acquires `RolloutSyncLock`, calls
+`RLCluster.sync_weights()`, increments the rollout `policy_version`, and then
+enqueues the next prompt batch.
 
-t1:
-  the first complete prompt group finishes, for example p3 generation 0..7
-  GroupQueueManager emits exactly 8 trajectories for group p3
-  GRPOLearner converts the group into TrainExample tensors
-  trainer can run the first actor micro-step on those 8 trajectories
+With `off_policy_steps=1`, the prompt queue initially contains two prompt
+batches. When rollout slots free up, episodes from the second batch may start
+under the old `policy_version` before the first full batch has synced. This
+improves rollout utilization but increases bounded policy lag.
 
-t2:
-  other groups from p0..p7 keep finishing while trainer consumes ready groups
-  actor_trainer.train_steps may advance several times
-  rl_cluster.global_steps is still k because the full 64 trajectories have not
-  all been trained yet
+Design implications:
 
-t3:
-  after 64 trajectories have been trained, one RL global step is complete
-  learner acquires RolloutSyncLock
-  RLCluster.sync_weights updates the rollout policy
-  policy_version becomes k + 1
-  only then does the learner enqueue the next 8 prompts
-```
-
-This is still on-policy at the full-batch boundary: no next-batch prompt is
-started with the old policy after the sync boundary is reached. However, actor
-micro-steps can happen while other trajectories from the same already-started
-full batch are still finishing. That is expected and is the practical overlap
-provided by async rollout.
-
-With `off_policy_steps=1`, the initial prompt queue contains two prompt
-batches, or 16 prompts. The same `max_concurrency=64` cap still allows only 64
-active episodes at once, but as soon as some first-batch episodes finish,
-concurrency slots can be refilled from the second prompt batch before the first
-RL global step has fully trained and synced.
-
-```text
-off_policy_steps=1:
-  initial queue = prompts p0..p15
-  active limit = 64 episodes
-  p0..p7 can occupy the first 64 slots
-  as slots free, p8..p15 can begin under policy_version=k
-  trainer may still be updating on p0..p7 while p8..p15 are being collected
-  rollout freshness is bounded by the one extra queued prompt batch plus active
-  in-flight episodes
-```
-
-Therefore:
-
-* `off_policy_steps=0` means at most the current full prompt batch is prefetched
-  ahead of training.
-* `off_policy_steps=1` allows one additional full prompt batch to be collected
-  ahead, improving rollout utilization but increasing stale-policy exposure.
-* `max_concurrency` controls how many expanded agent-env episodes can be active
-  at once; it does not change the number of trajectories required for one RL
-  global step.
-* `policy_version` changes only after the full batch of 64 trajectories has
-  been trained and rollout weights have been synchronized.
-* `actor_trainer.train_steps` can advance before `rl_cluster.global_steps`
-  changes, because global step is counted at the full-batch sync boundary.
+* `max_concurrency` controls active episodes, not the RL global-step size.
+* `actor_trainer.train_steps` can increase before `rl_cluster.global_steps`.
+* `policy_version` changes only after a full-batch train and weight-sync
+  boundary.
+* Lower `off_policy_steps` gives fresher trajectories; higher values hide more
+  environment latency.
 
 ### Backpressure and Policy Lag
 
@@ -1142,523 +1097,125 @@ from existing DeepSWE or agentic script:
 * Missing rollout logps are acceptable only when trainer-side recompute is used
   or when the algorithm does not require old logps.
 
-## Runtime Object Model
+## Core Implementation Notes
 
-### Agent
+This section keeps only the implementation details that materially affect the
+design. The full API surface is described earlier in the formal contracts.
 
-An agent is a Python object that owns conversation state and trajectory state.
-All agent implementations inherit from `LLMBaseAgent`, and chat-style agents
-usually inherit from `ConversationAgentBase`.
+### Runtime Objects
 
-The contract has four important methods and properties.
+Agentic RL is built from five task-level objects.
 
-| API | Meaning |
-|---|---|
-| `chat_completions` | Current list of chat messages to send to the model |
-| `trajectory` | The structured history of steps collected for training and logging |
-| `update_from_env(observation, reward, done, info)` | Incorporates environment feedback and usually appends a user or tool message |
-| `update_from_model(response, **kwargs)` | Parses the model output, records a `Step`, and returns an `Action` |
-
-`ConversationAgentBase` initializes messages with a system prompt, stores a
-`Trajectory`, and provides default observation-to-message behavior. It treats a
-dict with `prompts` or `question` as user content, and treats a string
-observation as user content.
-
-`ModelAgent` is the simplest implementation. It appends the model response as an
-assistant message, creates a single `Step`, and returns the response itself as
-the final action.
-
-`ToolAgent` injects tool schemas into the system prompt, parses model responses
-through a `ToolParser`, converts parsed calls to a common function-call shape,
-and falls back to a synthetic `finish` call when no tool call is found.
-
-### Environment
-
-An environment is a Python object that implements the RL interaction boundary.
-All environments inherit from `BaseEnv`; most task environments inherit from
-`BaseTaskEnv`.
-
-The contract has these operations.
-
-| API | Meaning |
-|---|---|
-| `reset()` | Returns the initial observation and reset metadata |
-| `step(action)` | Executes one action and returns observation, reward, done, info |
-| `close()` | Releases external resources |
-| `from_dict()` | Optional factory for config-driven construction |
-
-`BaseTaskEnv` adds a task dictionary, optional `reward_fn`, `max_steps`, and
-`step_count`. Subclasses implement `_initial_observation()` and `_step_impl()`;
-the base class increments the step counter and truncates at `max_steps`.
-
-`TaskEnvironment` is single-turn. It returns the task as the initial
-observation, evaluates the first action with `reward_fn` if present, and
-terminates.
-
-`ToolEnvironment` is multi-turn. It executes parsed tool calls through
-`ToolManager`, returns tool outputs as observations, and terminates when the
-agent emits a string answer, calls `finish`, or reaches `max_steps`.
-
-### Tool
-
-Tools inherit from `BaseTool`. A tool must provide a JSON schema and implement
-`apply()` or `apply_async()`.
-
-`ToolManager` owns instantiated tools and routes calls by name. It can execute
-multiple tool calls in parallel with a thread pool. Errors are converted to
-stringified `ToolOutput`s rather than escaping through the model-agent
-conversation by default.
-
-### Parser
-
-There are two parser families.
-
-* Chat template parsers convert message lists into model-specific strings.
-  `QwenChatTemplateParser`, `LlamaChatTemplateParser`, `GemmaChatTemplateParser`,
-  and `DefaultChatTemplateParser` live under
-  `tunix/rl/agentic/parser/chat_template_parser`.
-* Tool parsers convert model text into structured tool calls and generate tool
-  prompting text. `QwenToolParser` uses XML-like `<tool_call>` blocks around a
-  JSON object. `GeminiToolParser` is currently a minimal placeholder.
-
-The chat parser matters for training, not just prompting. The collection engine
-uses it to reconstruct token spans for prompts, assistant responses, and
-environment observations so that the final completion mask only trains on model
-emitted assistant tokens.
-
-### Trajectory Data
-
-The core dataclasses live in `tunix/rl/agentic/agents/agent_types.py`.
-
-| Type | Important fields |
-|---|---|
-| `Action` | Structured action payload |
-| `Step` | Chat messages, thought, action, observation, model response, reward, done, token spans, logprobs |
-| `Trajectory` | Original task, ordered steps, final status, cumulative reward |
-| `TrajectoryItem` | Group metadata plus collected trajectory dict |
-| `TrajectoryStatus` | `SUCCEEDED`, `RUNNING`, `MAX_STEPS_REACHED`, `MAX_CONTEXT_LIMIT_REACHED`, `TIMEOUT`, `ENV_TIMEOUT`, `FAILED` |
-
-The learner ultimately trains on `TrainExample`, imported from
-`tunix/rl/rl_learner.py`. In agentic GRPO, each `TrainExample` contains padded
-prompt ids, padded completion ids, completion mask, advantages, optional
-reference logps, optional old policy logps, policy version, and optional
-sampler-IS weights.
-
-## Trajectory Collection Engine
-
-`TrajectoryCollectEngine` runs one full episode for one agent-environment pair.
-It is deliberately Python-native because environments may call Docker,
-Kubernetes, file systems, tools, or other blocking systems.
-
-### Episode Lifecycle
-
-The engine lifecycle is:
-
-```text
-agent.reset()
-env.reset()
-agent.update_from_env(initial_observation)
-while not done:
-  render chat messages
-  call rollout model
-  agent.update_from_model(model_text)
-  env.step(action)
-  agent.update_from_env(next_observation, reward, done, info)
-compute trajectory reward
-compute Monte Carlo returns
-convert to requested output mode
-env.close()
-```
-
-The implementation tracks status and timing through the loop. It records reset
-latency, model latency, environment step latency, reward latency, and other
-per-trajectory timings in dictionaries that are later logged by the learner.
-
-### Model Call and Token Accounting
-
-For each model turn, the engine asks the learner's `_model_call` for generation.
-The learner sets `env.task["policy_version"]` before generation so the
-trajectory remembers which rollout policy produced it.
-
-If a `chat_parser` is configured, `_model_call` renders the messages itself and
-calls `rl_cluster.generate(apply_chat_template=False)`. Without a parser, it
-passes message lists to `rl_cluster.generate(apply_chat_template=True)`.
-
-The collection engine stores:
-
-* prompt tokens for the initial prompt side
-* assistant generated tokens
-* environment or tool observation tokens
-* assistant-vs-environment masks
-* rollout old logprobs when the rollout engine returns logprobs
-
-In `Token` mode, assistant and environment tokens are flattened into
-`conversation_tokens`. The corresponding `conversation_masks` mark assistant
-tokens as 1 and environment-injected tokens as 0. Environment tokens may still
-provide context to later turns, but they do not receive policy loss.
-
-### Status Handling
-
-The engine can end with several statuses.
-
-| Status | Typical cause | Training consequence |
+| Object | Owner | Design responsibility |
 |---|---|---|
-| `SUCCEEDED` | Environment returned `done=True` | Normal reward and masks |
-| `MAX_STEPS_REACHED` | `BaseTaskEnv.max_steps` truncated the episode | May be masked if overlong filtering applies |
-| `MAX_CONTEXT_LIMIT_REACHED` | Conversation exceeded context budget | May be masked if overlong filtering applies |
-| `TIMEOUT` | Episode-level timeout elapsed | May be filtered or logged as clipped |
-| `ENV_TIMEOUT` | Environment step timed out | May be filtered or logged as clipped |
-| `FAILED` | Collection failed | Exception usually propagates |
+| Agent | Task author | Owns conversation state, parses model output, returns environment actions |
+| Environment | Task author | Owns reset/step/close lifecycle, external resources, and task reward signal |
+| Parser | Framework or task author | Renders chat messages and, when needed, parses tool calls |
+| Tool | Task author | Executes bounded capabilities requested by tool-capable agents |
+| Trajectory | Framework | Records turns, tokens, masks, rewards, status, and timing |
 
-When `overlong_filter=True`, configured `filter_statuses` can cause the engine
-to zero out completion masks. This lets training skip loss on trajectories that
-were generated under undesirable truncation or timeout conditions while still
-keeping enough metadata for logging.
+The learner should not contain task-specific environment logic. For DeepSWE,
+repository setup, command execution, and final evaluation live in `SWEEnv`, while
+model-response parsing lives in `SWEAgent`.
 
-## Rollout Orchestration
+### Trajectory Collection
 
-`RolloutOrchestrator` manages many collection engines concurrently.
+`TrajectoryCollectEngine` runs one full agent-environment episode. Its main
+responsibilities are:
 
-The learner gives it a stream of `(agent, env)` pairs. The orchestrator keeps up
-to `max_concurrency` active collection tasks, wraps each result as a
-`TrajectoryItem`, and sends completed items into `GroupQueueManager`.
+* reset agent and environment state;
+* render the current conversation into a model prompt;
+* call the rollout model for one assistant response;
+* let the agent convert that response into an action;
+* call `env.step(action)` and feed the observation back to the agent;
+* terminate on `done`, timeout, max steps, context limit, or failure;
+* emit token ids, assistant-token masks, rollout logprobs when available,
+  rewards, status, and timing.
 
-### GroupQueueManager
+The most important training invariant is that `conversation_tokens` can contain
+both assistant tokens and environment/tool observation tokens, but
+`conversation_masks` marks only assistant-generated tokens as trainable.
 
-GRPO requires multiple completions for the same original prompt. The group
-queue buckets `TrajectoryItem`s by `group_id`. When a bucket reaches
-`group_size`, normally `num_generations`, it becomes ready. The consumer then
-receives complete prompt groups rather than arbitrary individual trajectories.
+### Rollout Orchestration
 
-This has two design benefits.
+`RolloutOrchestrator` runs many collection engines concurrently. It fills up to
+`max_concurrency` active tasks and waits with `FIRST_COMPLETED`, so slow
+sandboxes do not serialize the whole batch. Completed trajectories are sent to
+`GroupQueueManager`, which emits only complete GRPO groups of size
+`num_generations`.
 
-* Advantage computation never sees a partial GRPO group.
-* Slow or variable-length environments do not force the whole rollout stream to
-  execute in strict dataset order.
+`RolloutSyncLock` protects the rollout model during weight sync. Existing
+rollouts may finish, but once sync is waiting, new rollout starts block until
+sync completes.
 
-`get_batch()` drains ready groups and buffers leftovers internally. Exceptions
-from producer tasks are propagated into the consumer so failures are not hidden
-behind an empty queue.
+### Learner Loop
 
-### RolloutSyncLock
+`AgenticRLLearner` owns the algorithm-independent online loop. `GRPOLearner`
+adds the GRPO-specific conversion from complete trajectory groups into
+`TrainExample`s.
 
-`RolloutSyncLock` is a reader-writer style lock used by rollouts and weight
-sync. Many rollouts can run at the same time. A weight sync gets exclusive
-access.
+The high-level loop is:
 
-The implementation gives preference to waiting weight syncs. Once sync is
-waiting, new rollouts block until sync completes. This prevents a long tail of
-new rollouts from indefinitely delaying rollout weight updates.
+```text
+split dataset batches into single prompts
+prefill prompt_queue with (off_policy_steps + 1) prompt batches
+start async producer on a background event loop
 
-## AgenticRLLearner
+for each consumer batch from train_data_queue:
+  convert complete trajectory groups to TrainExample
+  merge and split by train_micro_batch_size trajectories
+  synchronously update actor, and critic if configured
+  after one full RL batch, sync rollout weights and advance policy_version
+```
 
-`AgenticRLLearner` is the algorithm-independent base class for agentic online
-RL. `GRPOLearner` subclasses it.
+Important counter semantics:
 
-### Configuration
-
-`AgenticRLConfig` provides rollout and agentic-loop settings.
-
-| Field | Meaning |
+| Counter | Advances when |
 |---|---|
-| `system_prompt` | Prompt passed to each agent by default |
-| `reward_manager` | Defaults to `agentic-sequence-level` |
-| `max_response_length` | Completion-side token budget and training padding length |
-| `max_concurrency` | Maximum concurrent agent-env episodes |
-| `off_policy_steps` | Number of full prompt batches to prefill ahead of current training |
-| `num_generations` | Number of trajectories per original prompt |
-| `num_iterations` | Number of training iterations over the same collected trajectories |
-| `episode_timeout` | Wall-clock timeout for a single episode |
-| `filter_statuses` | Statuses eligible for overlong filtering |
-| `overlong_filter` | Whether filtered statuses zero loss masks |
-| `use_rollout_logps` | Whether to use rollout-returned logprobs as old policy logps |
-| `group_clip_filter_threshold` | Optional threshold to skip a group with too many clipped trajectories |
+| `actor_trainer.train_steps` | Actor trainer performs optimizer/microbatch work |
+| `rl_cluster.global_steps` | One full RL batch has trained and reached the sync boundary |
+| `policy_version` | Updated actor weights have been synchronized into rollout |
 
-`GRPOConfig` adds algorithm-specific fields such as `beta`, `epsilon`,
-`epsilon_high`, `advantage_estimator`, `loss_agg_mode`, `force_compute_kl`,
-`degenerate_group_masking`, `sampler_is`, and `sampler_is_threshold`.
+### Batch Semantics
 
-### Rollout Config Validation
-
-The base learner validates the rollout config at construction time.
-
-* `RolloutConfig.max_tokens_to_generate` must match
-  `AgenticRLConfig.max_response_length`.
-* If `use_rollout_logps=True`, each rollout config must have
-  `return_logprobs=True`.
-* If the rollout engine is `vllm`, `rollout_vllm_server_mode=True` is required
-  for agentic learner support.
-
-The vLLM requirement exists because agentic rollouts call the engine repeatedly
-from Python episode loops rather than as one static JAX batch.
-
-### Pair Creation
-
-For each prompt, `_orchestrator_producer` creates `num_generations` independent
-agent-environment pairs. The prompt is deep-copied into each pair before
-rollout. This means GRPO group diversity comes from independently generated
-trajectories, not from copying a finished trajectory.
-
-The default `group_id` starts at:
+Agentic GRPO uses prompt-level rollout expansion and trajectory-level training.
 
 ```text
-rl_cluster.global_steps * full_batch_size
+full_batch_training_units = batch_size * num_generations
 ```
 
-Then it increments once per original prompt. Each trajectory in the group gets
-the same `group_id` and a `pair_index` from `0` to `num_generations - 1`.
+`batch_size` counts original prompts. `num_generations` counts independent
+rollouts per prompt. `mini_batch_size`, `train_micro_batch_size`, and
+`compute_logps_micro_batch_size` count flattened trajectories.
 
-If a group is skipped by group clip filtering, the learner can enqueue a
-replacement prompt with an explicit group id override so the expected step and
-metric grouping remain stable.
-
-### Producer and Consumer
-
-The learner uses two queues.
-
-| Queue | Producer | Consumer | Payload |
-|---|---|---|---|
-| `prompt_queue` | Training loop | Async producer | Single prompt examples |
-| `train_data_queue` | Async producer | Training loop | Raw groups, `TrainExample`s, or skipped-group markers |
-
-The training loop first splits dataset batches into single-prompt examples.
-Then it prefills `off_policy_steps + 1` full prompt batches into
-`prompt_queue`. This enables rollout collection to run ahead of training.
-
-The async producer consumes prompts, runs the orchestrator, and receives
-complete trajectory groups. Depending on logprob microbatch settings, it either
-converts groups to `TrainExample` immediately or leaves raw groups for the
-consumer to process.
-
-The consumer merges groups into train batches, optionally sequence-packs them,
-chunks them into actor micro-steps, calls `RLCluster.update_actor`, and syncs
-weights after one full batch worth of trajectories.
-
-The high-level control flow is:
+A common DeepSWE shape is:
 
 ```text
-initialize full_batch_size from first dataset batch
-full_batch_training_units = full_batch_size * num_generations
-
-prefill prompt_queue with (off_policy_steps + 1) * full_batch_size prompts
-start async producer(prompt_queue -> train_data_queue)
-
-for consumer_batch in train_data_queue:
-  if consumer_batch contains raw groups:
-    train_examples = process each group into TrainExample
-  else:
-    train_examples = consumer_batch
-
-  merged = merge_train_examples(train_examples)
-  chunks = split merged by train_micro_batch_size trajectories
-
-  repeat num_iterations if processing raw groups in consumer:
-    update_actor(chunks)
-    update_critic(chunks) if critic exists
-
-  training_units_since_last_sync += count_trajectories(chunks)
-  if training_units_since_last_sync >= full_batch_training_units:
-    sync rollout weights or increment global step
-    enqueue next full_batch_size prompts
+batch_size = 8
+num_generations = 8
+mini_batch_size = 64
+train_micro_batch_size = 8
+compute_logps_micro_batch_size = 8
+rollout_micro_batch_size = 1
 ```
 
-The producer side is:
+This means one RL global step contains 64 trajectories and the actor update is
+split into eight 8-trajectory micro-steps.
 
-```text
-for prompt in prompt_queue:
-  for pair_index in range(num_generations):
-    create independent agent-env pair
-    assign same group_id and unique pair_index
+### Iterations, Eval, and Resume
 
-  run pairs through RolloutOrchestrator
-  wait until GroupQueueManager yields a complete group
+`num_iterations` replays the same collected trajectories for multiple optimizer
+passes. It does not regenerate prompts. Therefore `num_iterations > 1` requires
+valid `old_per_token_logps`.
 
-  if group_clip_filter says skip:
-    enqueue skipped marker
-  elif logprob computation should happen in consumer:
-    enqueue raw trajectory group
-  else:
-    enqueue TrainExample once per requested iteration
-```
+Eval uses the same rollout and group-conversion path, but scheduling is based on
+actor trainer steps. This is why dashboard actor steps and RL global steps can
+legitimately differ.
 
-The queue boundary lets the rollout side run ahead while still preserving the
-complete-group unit needed by GRPO.
-
-### Batch Size Semantics
-
-Agentic training has two units that are easy to confuse.
-
-| Name | Unit | Example |
-|---|---|---|
-| dataset `batch_size` | original prompts | 8 prompts |
-| `num_generations` | trajectories per prompt | 8 trajectories per prompt |
-| full batch training units | trajectories | `batch_size * num_generations = 64` |
-| `mini_batch_size` | trajectories | 64 means one optimizer mini-batch per full batch |
-| `train_micro_batch_size` | trajectories | 8 means actor micro-steps of 8 trajectories |
-| `compute_logps_micro_batch_size` | trajectories | 8 means logprob forward batches of 8 trajectories |
-| `rollout_micro_batch_size` | forced to 1 prompt | agentic episodes process one prompt at a time |
-
-The current implementation interprets `train_micro_batch_size` as a flattened
-trajectory count. It can be smaller than `num_generations`. Because the
-producer emits complete prompt groups, the consumer may buffer several groups
-before splitting them into trajectory-counted actor micro-steps.
-
-The helper `_consumer_group_batch_size(train_micro_batch_size)` computes the
-smallest number of complete prompt groups whose flattened trajectory count can
-be split evenly into `train_micro_batch_size` chunks:
-
-```text
-train_micro_batch_size // gcd(train_micro_batch_size, num_generations)
-```
-
-For example, with `num_generations=8` and `train_micro_batch_size=4`, the
-consumer can process one group and split it into two 4-trajectory actor
-micro-steps. With `num_generations=8` and `train_micro_batch_size=6`, the
-consumer buffers three prompt groups, producing 24 trajectories, then splits
-them into four 6-trajectory actor micro-steps.
-
-The batch arithmetic can be summarized as:
-
-```text
-prompt_batch_size = B
-generations_per_prompt = G
-full_batch_training_units = B * G
-
-consumer_group_batch_size = train_micro_batch_size / gcd(train_micro_batch_size, G)
-consumer_trajectory_count = consumer_group_batch_size * G
-actor_micro_steps_per_consumer_batch =
-  consumer_trajectory_count / train_micro_batch_size
-```
-
-Example table:
-
-```text
-B=8, G=8
-
-train_micro_batch_size | groups buffered | trajectories buffered | actor micro-steps
-8                      | 1               | 8                     | 1
-4                      | 1               | 8                     | 2
-6                      | 3               | 24                    | 4
-16                     | 2               | 16                    | 1
-```
-
-The design allows `train_micro_batch_size < num_generations`, but it still keeps
-GRPO reward and advantage computation group-based.
-
-### Mini-batch and Full-batch Rules
-
-`RLTrainingConfig` derives gradient accumulation as:
-
-```text
-gradient_accumulation_steps = mini_batch_size // train_micro_batch_size
-```
-
-The config requires `mini_batch_size` to be a multiple of
-`train_micro_batch_size` when both are set. The agentic loop additionally
-checks that full batch training units are a multiple of `mini_batch_size`,
-`rollout_micro_batch_size`, and `compute_logps_micro_batch_size`.
-
-In practice, for DeepSWE-style runs with `batch_size=8` and
-`num_generations=8`, the full batch is 64 trajectories. A common low-HBM
-configuration is:
-
-```text
-mini_batch_size=64
-train_micro_batch_size=8
-compute_logps_micro_batch_size=8
-rollout_micro_batch_size=1
-```
-
-This performs one full-batch policy update composed of eight 8-trajectory actor
-micro-steps.
-
-### Iterations
-
-`num_iterations` controls how many training passes are run over already
-collected trajectories. It does not create new rollouts, and it does not copy
-prompts for regeneration.
-
-There are two code paths.
-
-* If processing happens in the producer, the producer converts each group once
-  and enqueues each resulting `TrainExample` `num_iterations` times.
-* If processing happens in the consumer, the consumer converts raw groups once,
-  then the training loop calls `update_actor` for the requested number of
-  iterations.
-
-`num_iterations > 1` requires valid `old_per_token_logps`. Without old logps,
-later passes would compute policy ratios against the wrong reference policy, so
-`GRPOLearner._process_results` raises a runtime error.
-
-Iteration behavior is intentionally replay-based:
-
-```text
-rollout once:
-  prompt -> G completed trajectories
-  trajectories -> one TrainExample group
-
-train:
-  for iteration in range(num_iterations):
-    update actor on the same TrainExample tensors
-```
-
-A regenerate-per-iteration algorithm would need a different loop:
-
-```text
-for iteration in range(num_iterations):
-  prompt -> new G trajectories under current rollout policy
-  trajectories -> TrainExample
-  update actor
-  sync rollout if policy changed
-```
-
-That alternative is intentionally not the meaning of `num_iterations` today.
-
-### Weight Sync and Global Step
-
-The actor trainer may execute many micro-steps inside one RL global step.
-`rl_cluster.global_steps` is the full-batch policy version step, not the actor
-trainer micro-step.
-
-After the learner consumes `full_batch_size * num_generations` training units,
-it completes one RL global step. If actor and rollout do not share weights, the
-learner acquires `RolloutSyncLock`, calls `RLCluster.sync_weights()`, increments
-`policy_version`, and enqueues the next full batch of prompts.
-
-`RLCluster.sync_weights()` updates the rollout model from actor trainer
-parameters and snapshots `_anchor_policy_state`. The anchor is the
-start-of-global-step policy state used for trainer-side old logprob
-recomputation.
-
-If actor and rollout share weights, the learner does not call rollout sync and
-increments `rl_cluster.global_steps` directly.
-
-### Eval Scheduling
-
-Eval uses the same orchestrator and `_batch_to_train_example` path, but it uses
-all eval prompts collected at startup. Eval is scheduled from
-`actor_trainer.train_steps` and guarded by `_last_eval_train_step`, not directly
-from `rl_cluster.global_steps`.
-
-This distinction matters for dashboards. It is normal for actor trainer step
-metrics and RL global step metrics to advance at different rates when
-microbatching or multiple iterations are enabled.
-
-The counter model is:
-
-```text
-actor_trainer.train_steps:
-  increments on actor optimizer/microbatch work
-
-rl_cluster.global_steps:
-  increments after one full RL batch worth of trajectories is trained
-
-policy_version:
-  increments after actor weights are synchronized into rollout
-```
-
-This is why a dashboard can show several actor steps before the first visible
-weight sync.
+Resume is anchored on the actor trainer's restored global step. The current
+implementation fast-forwards the dataset by full RL batches. Exact mid-step
+resume would require persisting dataset cursor, group cursor, consumed training
+units, and pending queue state.
 
 ## Performance Model and Resource Estimate
 
@@ -2722,202 +2279,71 @@ unbounded tail latency.
 
 ## Operational Design
 
-### Rollout Strategy
+A safe rollout plan should validate the task contract before scaling throughput:
 
-Agentic RL changes both training behavior and infrastructure behavior. A safe
-rollout plan should stage the risk.
+1. Run one prompt with a small `num_generations` and inspect the raw trajectory.
+2. Run one full batch and validate group ids, pair indexes, rewards, masks, and
+   `TrainExample` shapes.
+3. Move to the target sequence length and tune `train_micro_batch_size` plus
+   `compute_logps_micro_batch_size` until XLA compile and actor updates fit.
+4. Increase `max_concurrency` only after environment timeouts and clip rates are
+   understood.
+5. Run a checkpoint/resume smoke test from a clean full-step boundary.
 
-```text
-stage 0: single prompt, num_generations=2
-  validate agent/env contract
-  inspect raw trajectory log
-  ensure status and reward are populated
+Acceptance criteria:
 
-stage 1: one full batch, no checkpointing pressure
-  validate group ids and pair indexes
-  validate TrainExample shapes
-  validate reward and advantage metrics
+* every emitted group has exactly `num_generations` trajectories;
+* environment/tool tokens are masked out of policy loss;
+* old logps are present whenever replay semantics require them;
+* `trajectory_rewards` and generation metrics appear before relying on actor
+  loss metrics;
+* `policy_version` advances only after rollout weight sync.
 
-stage 2: low-HBM production shape
-  set target max_response_length
-  set train and logprob microbatch sizes
-  validate no compile-time OOM
-
-stage 3: async throughput tuning
-  increase max_concurrency
-  tune off_policy_steps
-  monitor env latency and global step time
-
-stage 4: long run with checkpoints
-  verify resume step
-  verify trajectory logging
-  verify rollout sync cadence
-```
-
-### Acceptance Criteria
-
-The design is considered healthy for a new task when the following checks pass.
-
-```text
-trajectory contract:
-  every item has group_id, pair_index, policy_version
-  every item has trajectory_reward, status, conversation_text
-  token arrays and masks have compatible lengths
-
-training contract:
-  every GRPO group has num_generations items
-  TrainExample batch dimension equals flattened trajectory count
-  completion_mask excludes environment tokens
-  old_per_token_logps is present when num_iterations > 1
-
-metrics contract:
-  trajectory_rewards appears in logging
-  generation/completions/* appears after _process_results
-  actor metrics and RL global step metrics can be explained separately
-
-sync contract:
-  policy_version increments after rollout sync
-  global_steps increments after full_batch_training_units
-  no rollout starts while weight sync is waiting
-```
-
-### Risk Matrix
+Main risks and mitigations:
 
 | Risk | Symptom | Mitigation |
 |---|---|---|
-| Compile-time HBM OOM | XLA compile fails before training step | Reduce train/logps microbatch, skip KL, reduce sequence length |
-| Rollout starvation | Actor waits for data | Increase `max_concurrency`, inspect env latency, reduce timeouts |
-| Environment tail latency | One group never becomes ready | Set episode and step timeouts, use group clip filtering |
-| Sampler-trainer mismatch | Large logp/prob diff metrics | Recompute old logps on trainer, enable sampler-IS, check templates |
-| Missing reward metrics | Dashboard only shows actor/loss | Confirm `_process_results` runs and metric logger flushes |
-| Stale trajectories | Policy version gap grows | Reduce `off_policy_steps`, inspect sync timing |
-| Degenerate rewards | Advantages all zero | Enable degenerate masking or improve reward signal |
+| Compile-time HBM OOM | XLA compile fails | Reduce train/logps microbatch, skip KL, shorten sequence length |
+| Rollout starvation | Actor waits for data | Increase `max_concurrency`, inspect env latency |
+| Environment tail latency | Groups never become ready | Add timeouts and group clip filtering |
+| Sampler-trainer mismatch | Large logp/prob diff | Use trainer recompute or sampler-IS, check templates |
+| Stale trajectories | Policy version lag grows | Reduce `off_policy_steps` or active rollout concurrency |
 
-### Debugging Checklist
+## Implementation Sketches
 
-```text
-if training produces no reward metrics:
-  check whether complete groups reach _process_results
-  check whether reward_fns=None is expected
-  look for trajectory_rewards rather than only rewards/*
+The examples below are intentionally schematic. They show extension points
+without turning this design doc into a tutorial.
 
-if first weight sync appears late:
-  compute full_batch_training_units = batch_size * num_generations
-  compute actor micro-steps per full batch
-  compare actor_trainer.train_steps against rl_cluster.global_steps
-
-if vLLM rollout works but logps are missing:
-  choose use_rollout_logps=false for trainer recompute
-  or enable return_logprobs and validate sampler/trainer diagnostics
-
-if group filtering skips too much:
-  inspect completion clip ratio
-  inspect statuses from trajectory logs
-  lower max concurrency only if environment pressure causes failures
-```
-
-## Prototype Sketches
-
-The snippets in this section are intentionally small design prototypes. They
-show the expected extension shape, not a complete runnable training script.
-For a full model, mesh, optimizer, tokenizer, and rollout setup, follow an
-existing script such as `examples/deepswe/train_deepswe_nb.py` or
-`examples/deepscaler/train_deepscaler_nb.py`.
-
-### Prototype 1: Minimal Task Environment
-
-Use this shape when the task has one prompt, one model answer, and a reward that
-can be computed immediately.
+### Minimal Task
 
 ```python
-from typing import Any
+class BinaryAnswerEnv(BaseTaskEnv):
+  def _initial_observation(self):
+    return {"prompt": self.task["question"]}
 
-from tunix.rl.agentic.environments import base_environment
-
-
-class BinaryAnswerEnv(base_environment.BaseTaskEnv):
-  """Single-turn environment for answer checking."""
-
-  def __init__(self, example: dict[str, Any], **kwargs):
-    super().__init__(task=example, max_steps=1, **kwargs)
-
-  def _initial_observation(self) -> dict[str, Any]:
-    return {"question": self.task["question"]}
-
-  def _step_impl(self, action: Any) -> base_environment.EnvStepResult:
+  def _step_impl(self, action):
     answer = getattr(action, "action", action)
-    score = 1.0 if str(answer).strip() == self.task["answer"] else 0.0
-    return base_environment.EnvStepResult(
-        observation={},
-        reward=score,
-        done=True,
-        info={"answer": answer},
-    )
+    reward = 1.0 if str(answer).strip() == self.task["answer"] else 0.0
+    return EnvStepResult(observation={}, reward=reward, done=True, info={})
 ```
 
-What this demonstrates:
-
-* Environment construction receives one dataset example plus framework-injected
-  metadata such as `group_id` and `pair_index`.
-* `_initial_observation()` returns the first user-facing task content.
-* `_step_impl()` converts the agent action into a reward and terminates.
-* The reward will flow into `trajectory_reward`, then into
-  `AgenticSequenceRewardManager`.
-
-### Prototype 2: Minimal Custom Agent
-
-Use this shape when the model output needs light parsing before the environment
-can execute it.
+### Minimal Agent
 
 ```python
-from typing import Any
-
-from tunix.rl.agentic.agents import agent_types
-from tunix.rl.agentic.agents import base_agent
-
-
-class FinalAnswerAgent(base_agent.ConversationAgentBase):
-  """Agent that extracts text after a FINAL: marker."""
-
-  def update_from_model(self, response: str, **kwargs) -> agent_types.Action:
+class FinalAnswerAgent(ConversationAgentBase):
+  def update_from_model(self, response: str, **kwargs):
     del kwargs
     self.chat_completions.append({"role": "assistant", "content": response})
-
-    if "FINAL:" in response:
-      answer = response.split("FINAL:", 1)[1].strip()
-    else:
-      answer = response.strip()
-
-    step = agent_types.Step(
-        chat_completions=list(self.chat_completions),
-        action=agent_types.Action(action=answer),
-        model_response=response,
-    )
-    self.trajectory.steps.append(step)
-    return agent_types.Action(action=answer)
+    answer = response.split("FINAL:", 1)[-1].strip()
+    action = Action(action=answer)
+    self.trajectory.steps.append(Step(model_response=response, action=action))
+    return action
 ```
 
-What this demonstrates:
-
-* The agent owns conversation history and appends assistant output.
-* The agent records a `Step`; this is what later becomes trajectory text and
-  debug output.
-* The returned `Action` is the environment-facing payload.
-* For multi-turn agents, `update_from_env()` can also be overridden to convert
-  observations into custom user or tool messages.
-
-### Prototype 3: Wiring a Custom Agent and Environment into GRPO
-
-The learner setup stays small because the task logic lives in the agent and
-environment.
+### GRPO Wiring
 
 ```python
-from tunix.rl.agentic import agentic_grpo_learner
-from tunix.rl.agentic.parser.chat_template_parser import parser
-
-
-algo_config = agentic_grpo_learner.GRPOConfig(
-    system_prompt="Answer the question. End with FINAL: <answer>.",
+algo_config = GRPOConfig(
     num_generations=4,
     num_iterations=1,
     max_response_length=512,
@@ -2926,12 +2352,7 @@ algo_config = agentic_grpo_learner.GRPOConfig(
     beta=0.0,
 )
 
-chat_parser = parser.QwenChatTemplateParser(
-    tokenizer=tokenizer,
-    enable_thinking=False,
-)
-
-learner = agentic_grpo_learner.GRPOLearner(
+learner = GRPOLearner(
     rl_cluster=rl_cluster,
     reward_fns=None,
     algo_config=algo_config,
@@ -2939,203 +2360,14 @@ learner = agentic_grpo_learner.GRPOLearner(
     agent_class=FinalAnswerAgent,
     env_class=BinaryAnswerEnv,
 )
-
-learner.train(train_dataset=train_dataset, eval_dataset=eval_dataset)
 ```
 
-What this demonstrates:
+Design points shown by this sketch:
 
-* `reward_fns=None` is valid when the environment already emits trajectory
-  rewards.
-* `use_rollout_logps=False` asks the trainer actor to recompute old logps from
-  the anchor policy. This is a robust default when rollout logps are missing or
-  not trusted.
-* `num_generations=4` means each prompt creates four independent agent-env
-  episodes with the same `group_id`.
-* `max_concurrency` controls rollout concurrency, not actor training
-  microbatch size.
-
-### Prototype 4: Optional Post-hoc Reward Function
-
-Use a reward function when environment reward is not enough or when a cheap
-completion-level metric should be added.
-
-```python
-def brevity_reward(prompts, completions, **kwargs):
-  del prompts, kwargs
-  scores = []
-  for text in completions:
-    scores.append(0.1 if len(text.split()) <= 128 else 0.0)
-  return scores
-
-
-learner = agentic_grpo_learner.GRPOLearner(
-    rl_cluster=rl_cluster,
-    reward_fns=[brevity_reward],
-    algo_config=algo_config,
-    chat_parser=chat_parser,
-    agent_class=FinalAnswerAgent,
-    env_class=BinaryAnswerEnv,
-)
-```
-
-What this demonstrates:
-
-* `AgenticSequenceRewardManager` adds `trajectory_rewards` and reward function
-  outputs.
-* Reward functions receive the prompt and completion lists for a complete GRPO
-  group.
-* The reward function should return one scalar per completion.
-* Additional keyword arguments come from merged original dataset fields.
-
-### Prototype 5: Custom Multi-turn Environment
-
-Use this shape for a stateful environment where intermediate actions do not
-finish the episode.
-
-```python
-from tunix.rl.agentic.environments import base_environment
-
-
-class SearchThenAnswerEnv(base_environment.BaseTaskEnv):
-  """Toy multi-turn environment with a fake search action."""
-
-  def __init__(self, example, **kwargs):
-    super().__init__(task=example, max_steps=3, **kwargs)
-    self._evidence = None
-
-  def _initial_observation(self):
-    return {"question": self.task["question"]}
-
-  def _step_impl(self, action):
-    action_text = getattr(action, "action", action)
-
-    if action_text.startswith("search:"):
-      query = action_text.removeprefix("search:").strip()
-      self._evidence = f"evidence for {query}"
-      return base_environment.EnvStepResult(
-          observation={"tool_outputs": {"search": self._evidence}},
-          reward=0.0,
-          done=False,
-          info={"kind": "search"},
-      )
-
-    is_correct = str(action_text).strip() == self.task["answer"]
-    return base_environment.EnvStepResult(
-        observation={},
-        reward=1.0 if is_correct else 0.0,
-        done=True,
-        info={"evidence": self._evidence},
-    )
-```
-
-What this demonstrates:
-
-* The environment can return intermediate observations with `done=False`.
-* Intermediate rewards can be zero while the final reward carries the training
-  signal.
-* The agent sees intermediate observations and can generate another model turn.
-* `max_steps` is still enforced by `BaseTaskEnv`.
-
-### Prototype 6: Custom Agentic Algorithm Subclass
-
-Most users should extend `GRPOLearner`, but a new algorithm can subclass
-`AgenticRLLearner` directly.
-
-`convert_group_to_tensors()` below is intentionally a placeholder. In a real
-algorithm this is where the subclass would do the same kind of padding, masking,
-logprob selection, and reward shaping that `GRPOLearner._process_results()`
-does today.
-
-```python
-import dataclasses
-
-import jax.numpy as jnp
-
-from tunix.rl import rl_cluster as rl_cluster_lib
-from tunix.rl.agentic import agentic_rl_learner
-
-
-@dataclasses.dataclass(kw_only=True)
-class ToyConfig(agentic_rl_learner.AgenticRLConfig):
-  advantage_scale: float = 1.0
-
-
-class ToyLearner(agentic_rl_learner.AgenticRLLearner):
-  """Sketch of a custom algorithm-specific learner."""
-
-  def _process_results(
-      self,
-      trajectories,
-      mode: rl_cluster_lib.Mode = rl_cluster_lib.Mode.TRAIN,
-      expected_step: int | None = None,
-  ):
-    del mode, expected_step
-
-    prompt_ids, completion_ids, completion_mask = convert_group_to_tensors(
-        trajectories,
-        pad_id=self.rl_cluster.rollout.pad_id(),
-        max_response_length=self.algo_config.max_response_length,
-    )
-    rewards = jnp.asarray(
-        [item.traj["trajectory_reward"] for item in trajectories],
-        dtype=jnp.float32,
-    )
-    advantages = rewards - rewards.mean()
-    advantages = advantages * self.algo_config.advantage_scale
-
-    return [
-        agentic_rl_learner.TrainExample(
-            prompt_ids=prompt_ids,
-            prompt_mask=prompt_ids != self.rl_cluster.rollout.pad_id(),
-            completion_ids=completion_ids,
-            completion_mask=completion_mask,
-            advantages=advantages,
-            ref_per_token_logps=None,
-            old_per_token_logps=None,
-        )
-    ]
-```
-
-What this demonstrates:
-
-* A new algorithm still reuses rollout orchestration, queueing, sync, eval, and
-  metrics infrastructure from `AgenticRLLearner`.
-* The subclass owns the group-to-trainer-input conversion.
-* A real implementation must wire an actor loss through
-  `rl_cluster.actor_trainer.with_loss_fn()`.
-* If the algorithm uses PPO-style ratios or multiple iterations, it must provide
-  valid `old_per_token_logps`.
-
-### Prototype 7: Microbatch Reasoning Helper
-
-This helper mirrors the current design rule and is useful when reviewing a
-training command.
-
-```python
-import math
-
-
-def explain_agentic_batching(batch_size, num_generations, train_micro_batch):
-  full_batch_trajectories = batch_size * num_generations
-  groups_per_consumer_batch = train_micro_batch // math.gcd(
-      train_micro_batch,
-      num_generations,
-  )
-  trajectories_per_consumer_batch = groups_per_consumer_batch * num_generations
-  actor_micro_steps = trajectories_per_consumer_batch // train_micro_batch
-  return {
-      "full_batch_trajectories": full_batch_trajectories,
-      "groups_per_consumer_batch": groups_per_consumer_batch,
-      "trajectories_per_consumer_batch": trajectories_per_consumer_batch,
-      "actor_micro_steps_per_consumer_batch": actor_micro_steps,
-  }
-```
-
-For `batch_size=8`, `num_generations=8`, and `train_micro_batch=8`, this gives
-64 trajectories per full RL step, one prompt group per consumer batch, and one
-actor micro-step per consumer batch. For `train_micro_batch=4`, it still consumes
-one prompt group at a time, but splits that group into two actor micro-steps.
+* task logic stays in agent and environment classes;
+* environment reward flows through `trajectory_reward`;
+* GRPO grouping is controlled by `num_generations`;
+* trainer-side old-logp recompute is enabled with `use_rollout_logps=False`.
 
 ## Extension Guide
 
@@ -3217,159 +2449,45 @@ most useful operational signals are global step time, rollout/environment
 latency, trajectory rewards, clip ratio, raw response length, sampler-trainer
 agreement, and actor loss metrics.
 
-## Detailed Testing Plan
+## Testing Plan
 
-The implementation already has targeted tests for important invariants. This
-section expands that into a design-level testing plan for future changes.
+Testing should focus on invariants rather than implementation details.
 
 ### Existing Coverage Map
 
-| Test area | Files |
+| Area | Representative tests |
 |---|---|
 | Config validation | `tests/rl/agentic/agentic_rl_learner_test.py` |
-| `num_iterations` replay | `tests/rl/agentic/agentic_grpo_learner_test.py` |
-| Trajectory-counted microbatching | `tests/rl/agentic/agentic_grpo_learner_test.py` |
-| Rollout vs trainer logprob selection | `tests/rl/agentic/agentic_grpo_learner_test.py` |
-| Checkpoint resume | `tests/rl/agentic/agentic_grpo_learner_test.py` |
-| Trajectory logging | `tests/rl/agentic/agentic_grpo_learner_test.py` |
-| Overlong filtering | `tests/rl/agentic/trajectory/trajectory_collect_engine_test.py` |
-| Orchestrator grouping and exceptions | `tests/rl/agentic/pipeline/rollout_orchestrator_test.py` |
+| GRPO conversion and replay | `tests/rl/agentic/agentic_grpo_learner_test.py` |
+| Trajectory collection | `tests/rl/agentic/trajectory/trajectory_collect_engine_test.py` |
+| Rollout orchestration | `tests/rl/agentic/pipeline/rollout_orchestrator_test.py` |
 
-### Unit Test Matrix
+### Required Invariants
 
-| Component | Mock strategy | Expected invariant |
-|---|---|---|
-| `ConversationAgentBase` | Mock observations and model responses | Messages and trajectory steps update in order |
-| `BaseTaskEnv` | Minimal env subclass | `max_steps` truncates and `step_count` increments |
-| `TrajectoryCollectEngine` | Mock agent, env, model_call, tokenizer/parser | Status, token masks, logprobs, reward, close behavior are correct |
-| `GroupQueueManager` | Synthetic `TrajectoryItem`s | Groups are yielded only when group size is reached |
-| `RolloutOrchestrator` | Mock `_collect_trajectory` | Concurrency, grouping, cancellation, and exception propagation work |
-| `RolloutSyncLock` | Concurrent rollout and sync coroutines | Existing rollouts finish, waiting sync blocks new rollouts, and sync is not starved |
-| `AgenticRLLearner` batch helpers | Synthetic `TrainExample`s | Training unit counts and trajectory chunking are correct |
-| `AgenticRLLearner` producer/consumer | Fake queues and fake orchestrator | Producer sentinel, skipped-group replacement, and consumer batching do not deadlock |
-| `GRPOLearner._process_results` | Synthetic trajectory groups | Padding, masks, rewards, advantages, logps, metrics are correct |
-| `RLCluster` logprob helpers | Toy model and mock rollout | Temperature, anchor state, and microbatch behavior are correct |
+Unit tests should verify:
 
-### Integration Test Matrix
+* complete groups are emitted only at `num_generations` items;
+* prompt ids, completion ids, masks, old logps, and ref logps have compatible
+  shapes;
+* environment/tool tokens have `completion_mask=0`;
+* `num_iterations` reuses collected trajectories and requires old logps when
+  needed;
+* producer exceptions do not deadlock the consumer;
+* `RolloutSyncLock` blocks new rollout starts while sync is waiting;
+* full-step resume restores `global_steps` and fast-forwards the dataset.
 
-```yaml
-integration_tests:
-  single_turn_grpo:
-    setup: ModelAgent + TaskEnvironment + toy model
-    validates:
-      - complete GRPO groups
-      - reward manager path
-      - actor update
+Integration tests should cover:
 
-  multi_turn_tool_env:
-    setup: ToolAgent + ToolEnvironment + deterministic tool
-    validates:
-      - tool output becomes observation
-      - env tokens are masked out
-      - episode terminates on finish
+* single-turn `ModelAgent + TaskEnvironment` GRPO;
+* multi-turn tool environment with masked tool observations;
+* DeepSWE smoke test with short timeouts;
+* vLLM rollout with trainer-side old-logp recompute;
+* async overlap with slow fake environments;
+* checkpoint/resume from a full global-step boundary.
 
-  deepswe_smoke:
-    setup: SWEAgent + SWEEnv with small dataset
-    validates:
-      - RepoEnv reset/step/close
-      - trajectory_reward path
-      - max_turn and timeout handling
-
-  vllm_recompute_smoke:
-    setup: rollout_engine=vllm, use_rollout_logps=false
-    validates:
-      - vLLM generation works in server mode
-      - trainer-side old logps are produced
-      - no dependency on vLLM exposing underlying model
-
-  async_overlap_smoke:
-    setup: slow fake envs + fast fake actor trainer
-    validates:
-      - first actor update can happen before all future rollouts finish
-      - complete GRPO groups are still required
-      - producer cleanup sends sentinels exactly once
-
-  sync_lock_smoke:
-    setup: fake long-running rollout tasks + forced full-batch sync
-    validates:
-      - active rollouts complete before sync
-      - new rollout starts wait behind sync
-      - policy_version increments only after sync
-```
-
-### Stress and Long-run Tests
-
-```yaml
-stress_tests:
-  high_concurrency_rollout:
-    vary: [max_concurrency, episode_timeout]
-    watch:
-      - group completion rate
-      - producer exceptions
-      - global_step_time
-      - first_actor_update_latency
-      - policy_version lag distribution
-
-  long_context_compile:
-    vary: [max_response_length, train_micro_batch_size, compute_logps_micro_batch_size]
-    watch:
-      - compile-time HBM
-      - actor update success
-      - logprob recompute success
-
-  group_clip_filter:
-    inject:
-      - max context trajectories
-      - all-zero masks
-      - timeout statuses
-    validate:
-      - skipped group metrics
-      - replacement prompt behavior
-      - no partial GRPO training
-
-  checkpoint_resume:
-    save_at: full global step boundary
-    resume_with:
-      - same dataset order
-      - same batch sizes
-    validate:
-      - restored global_steps
-      - continued training updates actor
-      - no duplicate obvious prompt groups at boundary
-```
-
-### Failure Injection Tests
-
-```text
-inject model_call exception:
-  expect orchestrator exception propagation and training abort
-
-inject async producer exception after partial group:
-  expect train consumer receives termination path and does not hang
-
-inject weight sync while rollouts are active:
-  expect active rollouts drain, new rollouts block, and sync eventually runs
-
-inject env.step timeout:
-  expect ENV_TIMEOUT status and no automatic retry
-
-inject reward_fn length mismatch:
-  expect RuntimeError from reward manager
-
-inject missing rollout logps with num_iterations > 1:
-  expect GRPOLearner runtime error
-
-inject unsupported vLLM non-server mode:
-  expect learner construction ValueError
-```
-
-### Test Data Requirements
-
-* Toy tests should avoid external services and run with small CPU/JAX models.
-* DeepSWE smoke tests should use tiny whitelisted tasks and short timeouts.
-* vLLM integration tests should be explicitly marked because they require a
-  rollout server/backend.
-* Long-context OOM tests should be opt-in, not part of fast presubmit.
+Stress tests should be opt-in and target high concurrency, long context,
+group-clip replacement, and failure injection. Long-context OOM tests should
+not run in fast presubmit.
 
 ### Regression Invariants
 
@@ -3377,14 +2495,12 @@ inject unsupported vLLM non-server mode:
 must_not_regress:
   - async rollout remains concurrent up to max_concurrency
   - actor optimizer updates remain ordered in the training consumer
-  - producer-consumer overlap does not train partial GRPO groups
-  - RolloutSyncLock prevents new rollout starts during waiting weight sync
+  - partial GRPO groups are never trained
   - train_micro_batch_size remains trajectory-counted
   - num_iterations does not regenerate trajectories
-  - vLLM recompute path works with use_rollout_logps=false
-  - complete GRPO groups are required for advantage computation
+  - vLLM recompute works with use_rollout_logps=false
   - environment tokens remain masked out of policy loss
-  - global_steps and actor_trainer.train_steps are allowed to differ
+  - global_steps and actor_trainer.train_steps may differ
 ```
 
 ## Open Issues
