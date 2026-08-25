@@ -65,6 +65,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument("--tokenizer_path", type=str, default="")
   parser.add_argument("--mesh_fsdp", type=int, default=2)
   parser.add_argument("--mesh_tp", type=int, default=1)
+  parser.add_argument("--mesh_expert", type=int, default=1)
   parser.add_argument("--max_prompt_length", type=int, default=512)
   parser.add_argument("--max_response_length", type=int, default=128)
   parser.add_argument("--mini_batch_size", type=int, default=1)
@@ -290,6 +291,14 @@ def _build_maxtext_config(args, num_devices: int) -> Any:
     argv.append(f"load_parameters_path={args.maxtext_load_parameters_path}")
   argv.extend([
       # checkpoint is scanned; weight-sync mapping converts to unscanned for rollout
+      #
+      # Confirmed NOT the cause of the native "Push range out of bounds"
+      # weight-sync error (tracked upstream with the Raiden team): the same
+      # error reproduces identically with scan_layers=False (genuine
+      # per-layer arrays straight from nnx.state(model), no raiden_unscan.py
+      # transform involved at all). Left at True since that's required for
+      # loading a scanned checkpoint anyway (MaxTextTrainingEngine's restore
+      # path has no scan->unscan remap, unlike the rollout/vLLM adapter's).
       "scan_layers=True",
       # with load_parameters_path set, from_pretrained must not fall back to HF conversion
       "convert_checkpoint_if_possible=False",
@@ -302,6 +311,7 @@ def _build_maxtext_config(args, num_devices: int) -> Any:
       "attention=dot_product",
       f"ici_fsdp_parallelism={args.mesh_fsdp}",
       f"ici_tensor_parallelism={args.mesh_tp}",
+      f"ici_expert_parallelism={args.mesh_expert}",
       f"learning_rate={args.learning_rate}",
       f"warmup_steps_fraction={args.maxtext_warmup_steps_fraction}",
       "dtype=float32",

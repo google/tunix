@@ -59,10 +59,28 @@ export TRAINER_ID=$USER-train
 export TRAINER_PORT=20002
 
 export CPU_MACHINE=${CPU_MACHINE:-n2-standard-64}
+export GCS_SCRATCH_LOCATION=${GCS_SCRATCH_LOCATION:-gs://cloud-pathways-staging/tmp}
+# Empty by default: yaml_generator.py's own defaults (the public
+# us-docker.pkg.dev/cloud-tpu-v2-images/pathways/{server,proxy_server}:latest
+# images) apply unless overridden.
+export PATHWAYS_SERVER_IMAGE=${PATHWAYS_SERVER_IMAGE:-}
+export PATHWAYS_PROXY_IMAGE=${PATHWAYS_PROXY_IMAGE:-}
 export TRAINER_JOBSET_YAML=${TRAINER_JOBSET_YAML:-jobset.pathways.yaml}
 export TRAINER_TPU_SLICE=${TRAINER_TPU_SLICE:-tpuv5:2x2x2}
 export TRAINER_MESH_FSDP=${TRAINER_MESH_FSDP:-8}
 export TRAINER_MESH_TP=${TRAINER_MESH_TP:-1}
+export TRAINER_MESH_EXPERT=${TRAINER_MESH_EXPERT:-1}
+export ROLLOUT_TPU_SLICE=${ROLLOUT_TPU_SLICE:-tpuv5:2x2x1}
+export ROLLOUT_TENSOR_PARALLEL_SIZE=${ROLLOUT_TENSOR_PARALLEL_SIZE:-4}
+# Number of independent rollout replicas (each its own TPU slice reservation
+# and JobSet, ${ROLLOUT_ID}-0, ${ROLLOUT_ID}-1, ...) for data-parallel
+# rollout. A single multi-host ROLLOUT_TPU_SLICE (e.g. tpuv5:2x2x2) is one
+# replica -- its pods share one JAX-distributed session and register under
+# one worker_id, so it does NOT need REPLICAS>1. Use REPLICAS>1 to instead
+# run N independent single-host (or smaller multi-host) slices, since a
+# single multi-host slice reservation can't be split into independent JAX
+# sessions (libtpu coordinates the whole physical slice as one session).
+export ROLLOUT_REPLICAS=${ROLLOUT_REPLICAS:-1}
 
 stop_orchestrator() {
   kubectl delete jobset "${ORCHESTRATOR_ID}" 2>/dev/null || true
@@ -88,6 +106,7 @@ start_orchestrator() {
         --max_prompt_length=${MAX_PROMPT_LENGTH} \
         --max_response_length=${MAX_RESPONSE_LENGTH} \
         --train_micro_batch_size=${TRAIN_MICRO_BATCH_SIZE} \
+        --num_rollout_workers=${ROLLOUT_REPLICAS} \
         --sync_weights \
         --stop_workers_on_exit \
     " \
@@ -103,6 +122,10 @@ start_trainer() {
     tunix/experimental/distributed/deployment/yamls/${TRAINER_JOBSET_YAML} \
     --jobset_name="${TRAINER_ID}" \
     --tpu_slice=${TRAINER_TPU_SLICE} \
+    --cpu_machine=${CPU_MACHINE} \
+    --pathways_gcs_scratch_location=${GCS_SCRATCH_LOCATION} \
+    ${PATHWAYS_SERVER_IMAGE:+--pathways_server_image=${PATHWAYS_SERVER_IMAGE}} \
+    ${PATHWAYS_PROXY_IMAGE:+--pathways_proxy_server_image=${PATHWAYS_PROXY_IMAGE}} \
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${TRAINER_PORT}" \
     --worker_startup_command=" \
@@ -114,6 +137,7 @@ start_trainer() {
         --port=${TRAINER_PORT} \
         --mesh_fsdp=${TRAINER_MESH_FSDP} \
         --mesh_tp=${TRAINER_MESH_TP} \
+        --mesh_expert=${TRAINER_MESH_EXPERT} \
         --trainer_backend=${TRAINER_BACKEND} \
         ${MAXTEXT_CKPT:+--maxtext_load_parameters_path=${MAXTEXT_CKPT}} \
         --model_name=${MODEL_NAME} \
@@ -133,34 +157,39 @@ start_trainer() {
 }
 
 stop_rollout() {
-  kubectl delete jobset "${ROLLOUT_ID}" 2>/dev/null || true
+  for i in $(seq 0 $((ROLLOUT_REPLICAS - 1))); do
+    kubectl delete jobset "${ROLLOUT_ID}-${i}" 2>/dev/null || true
+  done
 }
 
 start_rollout() {
-  python tunix/experimental/distributed/deployment/yaml_generator.py \
-    tunix/experimental/distributed/deployment/yamls/jobset.tpu.yaml \
-    --jobset_name="${ROLLOUT_ID}" \
-    --tpu_slice=tpuv5:2x2x1 \
-    --worker_container_image="${TUNIX_IMAGE}" \
-    --worker_container_port="${ROLLOUT_PORT}" \
-    --worker_startup_command=" \
-      SKIP_JAX_PRECOMPILE=1 VERIFY_WEIGHTS=${VERIFY_WEIGHTS} python -m tunix.experimental.distributed.runtime.main \
-        --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
-        --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
-        --process_main=tunix.experimental.examples.math_gsm8k_dist.run_rollout_node.main \
-        --worker_id=${ROLLOUT_ID} \
-        --port=${ROLLOUT_PORT} \
-        --model_id=${MODEL_ID} \
-        --model_dir=${MODEL_DIR} \
-        --tokenizer_path=${TOKENIZER_PATH} \
-        --max_prompt_length=${MAX_PROMPT_LENGTH} \
-        --max_response_length=${MAX_RESPONSE_LENGTH} \
-        --lora_rank=${LORA_RANK} \
-        --lora_alpha=${LORA_ALPHA} \
-        --tensor_parallel_size=4 \
-        --maxtext_model_name=${MAXTEXT_MODEL_NAME} \
-    " \
-    | kubectl apply -f -
+  for i in $(seq 0 $((ROLLOUT_REPLICAS - 1))); do
+    local replica_id="${ROLLOUT_ID}-${i}"
+    python tunix/experimental/distributed/deployment/yaml_generator.py \
+      tunix/experimental/distributed/deployment/yamls/jobset.tpu.yaml \
+      --jobset_name="${replica_id}" \
+      --tpu_slice=${ROLLOUT_TPU_SLICE} \
+      --worker_container_image="${TUNIX_IMAGE}" \
+      --worker_container_port="${ROLLOUT_PORT}" \
+      --worker_startup_command=" \
+        SKIP_JAX_PRECOMPILE=1 VERIFY_WEIGHTS=${VERIFY_WEIGHTS} python -m tunix.experimental.distributed.runtime.main \
+          --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
+          --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
+          --process_main=tunix.experimental.examples.math_gsm8k_dist.run_rollout_node.main \
+          --worker_id=${replica_id} \
+          --port=${ROLLOUT_PORT} \
+          --model_id=${MODEL_ID} \
+          --model_dir=${MODEL_DIR} \
+          --tokenizer_path=${TOKENIZER_PATH} \
+          --max_prompt_length=${MAX_PROMPT_LENGTH} \
+          --max_response_length=${MAX_RESPONSE_LENGTH} \
+          --lora_rank=${LORA_RANK} \
+          --lora_alpha=${LORA_ALPHA} \
+          --tensor_parallel_size=${ROLLOUT_TENSOR_PARALLEL_SIZE} \
+          --maxtext_model_name=${MAXTEXT_MODEL_NAME} \
+      " \
+      | kubectl apply -f -
+  done
 }
 
 source tunix/experimental/examples/math_gsm8k_dist/enter_kube_context.sh

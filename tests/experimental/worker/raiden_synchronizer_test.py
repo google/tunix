@@ -203,6 +203,7 @@ class RaidenSynchronizerTest(absltest.TestCase):
     self.assertEqual(md.shards, ("1.2.3.4:12345",) * 2)
     self.assertEqual(md.control_plane_rpc_address, "1.2.3.4:23456")
     self.assertLen(md.variables, 2)
+    # Positional index in sorted-key flatten order ("w1", "w2").
     self.assertEqual([v.layer_idx for v in md.variables], [0, 1])
     for v in md.variables:
       # Single-device arrays: every dim replicated, single-axis specs only.

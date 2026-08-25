@@ -35,6 +35,7 @@ import os
 import pickle
 import re
 import sys
+import threading
 from types import SimpleNamespace
 from typing import Any
 
@@ -140,6 +141,18 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   )
   parser.add_argument("--rpc_timeout_s", type=float, default=1800.0)
   parser.add_argument("--stop_workers_on_exit", action="store_true")
+  parser.add_argument(
+      "--num_rollout_workers",
+      type=int,
+      default=1,
+      help=(
+          "Number of independent rollout replicas (distinct worker_id) to"
+          " wait for and register, e.g. 2 for data-parallel rollout across"
+          " two single-host TPU slices. Multiple pods of the SAME replica"
+          " (one multihost rollout jobset) share one worker_id and are not"
+          " counted separately -- see accept_worker."
+      ),
+  )
   return parser.parse_args(argv)
 
 
@@ -272,7 +285,7 @@ class _CoordinatorWorkerShim:
   async def get_weight_sync_status(self, *args, **kwargs):
     return await self._handle.asubmit("get_weight_sync_status", *args, **kwargs)
 
-def _make_weight_sync_coordinator(trainer_handle, rollout_handle):
+def _make_weight_sync_coordinator(trainer_handle, rollout_handles):
   """Builds the weight sync coordinator over the configured transport."""
   from tunix.experimental.orchestrator import weight_sync  # pylint: disable=g-import-not-at-top
   from tunix.experimental.orchestrator import weight_sync_coordinator  # pylint: disable=g-import-not-at-top
@@ -292,9 +305,14 @@ def _make_weight_sync_coordinator(trainer_handle, rollout_handle):
   registry.register(
       _CoordinatorWorkerShim(trainer_handle, "trainer-0", {"trainer"})
   )
-  registry.register(
-      _CoordinatorWorkerShim(rollout_handle, "rollout-0", {"rollout"})
-  )
+  # WeightSyncCoordinator._destinations() already fans out to every worker
+  # registered under the rollout role, so registering N handles here is
+  # enough to broadcast weight sync to N independent rollout replicas -- no
+  # coordinator/registry changes needed.
+  for i, handle in enumerate(rollout_handles):
+    registry.register(
+        _CoordinatorWorkerShim(handle, f"rollout-{i}", {"rollout"})
+    )
 # TODO: standardize a handeler registry seperate from the worker registry.
   backend = os.getenv("WEIGHT_SYNC_BACKEND", "raiden").lower()
   if backend == "raiden":
@@ -322,8 +340,8 @@ def _register_workers(
     cluster: orchestrator.ClusterOrchestrator,
     trainer_handle: remote_execution.ActorHandle,
     trainer_addr: str,
-    rollout_handle: remote_execution.ActorHandle,
-    rollout_addr: str,
+    rollout_handles: list[remote_execution.ActorHandle],
+    rollout_addrs: list[str],
     inference_handle: remote_execution.ActorHandle | None,
     inference_addr: str | None,
 ) -> None:
@@ -334,12 +352,17 @@ def _register_workers(
       handle=trainer_handle,
       resources={"address": trainer_addr},
   )
-  cluster.register_worker_handle(
-      worker_id="rollout-0",
-      roles=[datatypes.Role.ROLLOUT, "rollout"],
-      handle=rollout_handle,
-      resources={"address": rollout_addr},
-  )
+  # ClusterOrchestrator._get_actor_handles(ROLLOUT) collects every worker
+  # registered under this role, and DistributedRLEngine's RoutingActorPool
+  # load-balances across all of them -- registering N handles here is
+  # enough for N-way data-parallel rollout, no engine/pool changes needed.
+  for i, (handle, addr) in enumerate(zip(rollout_handles, rollout_addrs)):
+    cluster.register_worker_handle(
+        worker_id=f"rollout-{i}",
+        roles=[datatypes.Role.ROLLOUT, "rollout"],
+        handle=handle,
+        resources={"address": addr},
+    )
   if inference_handle is not None:
     cluster.register_worker_handle(
         worker_id="reference-0",
@@ -438,8 +461,15 @@ def main(argv: list[str], context: Any = None) -> None:
   eos_id = tokenizer.eos_token_id if tokenizer.eos_token_id is not None else pad_id
 
   trainer_addr_future = futures.Future()
-  rollout_addr_future = futures.Future()
   inference_addr_future = futures.Future()
+  # Keyed by worker_id, not a single Future: a multihost rollout jobset has
+  # one pod per host all sharing one worker_id (that jobset's own
+  # JAX-distributed mesh coordinates the rest internally, so only one
+  # address per worker_id is kept), but N independent rollout replicas
+  # (e.g. two single-host TPU slices for data-parallel rollout) register
+  # under N distinct worker_ids and must all be kept and connected.
+  rollout_addrs_by_worker: dict[str, str] = {}
+  rollout_workers_ready = threading.Event()
 
   def accept_worker(hostname: str, _: int, metadata: bytes) -> None:
     md = pickle.loads(metadata)
@@ -455,13 +485,24 @@ def main(argv: list[str], context: Any = None) -> None:
         service_address,
     )
 
+    # A multihost trainer/rollout jobset has one pod per host, and every pod
+    # registers here independently. Only the first registration per
+    # worker_id is used to drive the RPC connection (that pod's own
+    # JAX-distributed mesh coordinates the rest of its jobset internally),
+    # so later registrations under an already-resolved worker_id are
+    # expected and must be no-ops rather than overwrite/crash.
     match service_type:
       case "trainer":
-        trainer_addr_future.set_result(service_address)
+        if not trainer_addr_future.done():
+          trainer_addr_future.set_result(service_address)
       case "rollout":
-        rollout_addr_future.set_result(service_address)
+        if worker_id not in rollout_addrs_by_worker:
+          rollout_addrs_by_worker[worker_id] = service_address
+          if len(rollout_addrs_by_worker) >= args.num_rollout_workers:
+            rollout_workers_ready.set()
       case "inference":
-        inference_addr_future.set_result(service_address)
+        if not inference_addr_future.done():
+          inference_addr_future.set_result(service_address)
       case _:
         raise RuntimeError(f"unknown service type {service_type}")
 
@@ -471,8 +512,18 @@ def main(argv: list[str], context: Any = None) -> None:
   logging.info("Waiting for workers to connect...")
   trainer_addr = trainer_addr_future.result()
   trainer_handle = _connect(trainer_addr, args.rpc_timeout_s)
-  rollout_addr = rollout_addr_future.result()
-  rollout_handle = _connect(rollout_addr, args.rpc_timeout_s)
+  rollout_workers_ready.wait(timeout=args.rpc_timeout_s)
+  if len(rollout_addrs_by_worker) < args.num_rollout_workers:
+    raise TimeoutError(
+        f"only {len(rollout_addrs_by_worker)}/{args.num_rollout_workers}"
+        " rollout workers registered within rpc_timeout_s"
+        f" ({args.rpc_timeout_s}s): {sorted(rollout_addrs_by_worker)}"
+    )
+  # Sorted for a deterministic worker_id -> handle order across runs.
+  rollout_entries = sorted(rollout_addrs_by_worker.items())
+  rollout_handles = [
+      _connect(addr, args.rpc_timeout_s) for _, addr in rollout_entries
+  ]
   inference_addr = None
   inference_handle = None
   if args.beta != 0.0:
@@ -491,7 +542,7 @@ def main(argv: list[str], context: Any = None) -> None:
 
   cluster = orchestrator.ClusterOrchestrator(
       weight_sync_coordinator=_make_weight_sync_coordinator(
-          trainer_handle, rollout_handle
+          trainer_handle, rollout_handles
       )
   )
 
@@ -500,8 +551,8 @@ def main(argv: list[str], context: Any = None) -> None:
       cluster=cluster,
       trainer_handle=trainer_handle,
       trainer_addr=trainer_addr,
-      rollout_handle=rollout_handle,
-      rollout_addr=rollout_addr,
+      rollout_handles=rollout_handles,
+      rollout_addrs=[addr for _, addr in rollout_entries],
       inference_handle=inference_handle,
       inference_addr=inference_addr,
   )

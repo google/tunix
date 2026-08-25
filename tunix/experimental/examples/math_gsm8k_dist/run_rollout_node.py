@@ -322,6 +322,21 @@ def main(argv: list[str], context: Any = None) -> None:
     await server.start_serving_async(args.port)
     logging.info("Serving vLLM rollout worker on port %d.", args.port)
 
+    if args.sampler != "vanilla":
+      # A multihost rollout jobset spans multiple pods, but the orchestrator
+      # only ever dispatches sample requests to one of them (its discovery
+      # future only ever resolves to the first-registered address). The
+      # sampler's underlying engine (and its JAX/TPU backend rendezvous)
+      # would otherwise only be started lazily on that one pod's first
+      # request, which hangs forever waiting for the other pod's hosts to
+      # join a JAX-distributed group they were never told to enter. Starting
+      # every pod's engine eagerly here, before registering, mirrors how the
+      # MaxText trainer eagerly builds its engine at node startup so every
+      # pod of a multihost jobset joins JAX-distributed together.
+      logging.info("Eagerly starting sampler engine...")
+      await worker_service.sampler.start()
+      logging.info("Sampler engine started.")
+
     context.ipc.discovery.register(
         metadata=pickle.dumps({
             "service_type": "rollout",

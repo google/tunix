@@ -2,7 +2,7 @@
 # --find-links https://storage.googleapis.com/jax-releases/libtpu_releases.html
 # --pre
 
-tpu-inference @ git+https://github.com/vllm-project/tpu-inference.git@20e4bd45b4eaf609e1e0250532d0e65b33633339
-maxtext @ git+https://github.com/AI-Hypercomputer/maxtext.git@1fe34528de9139991ccb061de0b2f075bebb8184
-maxtext-vllm-adapter @ git+https://github.com/AI-Hypercomputer/maxtext.git@1fe34528de9139991ccb061de0b2f075bebb8184#subdirectory=src/maxtext/integration/vllm
+tpu-inference @ git+https://github.com/vllm-project/tpu-inference.git@8d30921e602b01652ebe204c2d328251bfa2aff5
+maxtext @ git+https://github.com/AI-Hypercomputer/maxtext.git@5be6880204c3c0e40c7534c0a0f503f78bfad02e
+maxtext-vllm-adapter @ git+https://github.com/AI-Hypercomputer/maxtext.git@5be6880204c3c0e40c7534c0a0f503f78bfad02e#subdirectory=src/maxtext/integration/vllm
 

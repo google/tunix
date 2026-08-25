@@ -78,7 +78,10 @@ def _bindable(arr: Any) -> bool:
   """True if the native layer can bind this leaf.
 
   Binding an unsupported leaf (e.g. RNG keys) can SIGSEGV, so only
-  floating-point, rank>=1, fully TPU-resident arrays qualify.
+  floating-point, rank>=1, fully TPU- or CPU-resident arrays qualify. CPU is
+  allowed because host_stage deliberately copies proxy-backed (Pathways)
+  arrays to host CPU memory before bind() gets here -- rejecting "not TPU"
+  would drop every leaf it just staged.
   """
   try:
     if not hasattr(arr, "shape") or not hasattr(arr, "dtype"):
@@ -90,7 +93,7 @@ def _bindable(arr: Any) -> bool:
     devices = arr.devices()
     if not devices:
       return False
-    return all(getattr(d, "platform", "?") == "tpu" for d in devices)
+    return all(getattr(d, "platform", "?") in ("tpu", "cpu") for d in devices)
   except Exception:
     return False
 
@@ -260,6 +263,14 @@ class RaidenSynchronizer:
     return head
 
   def work_unit_metadata(self) -> weight_sync.WorkUnitMetadata:
+    # layer_idx must be a *unique* slot per tensor: the native transport
+    # indexes host buffers directly by it (layer_names_[l],
+    # GetHostPointer(layer_idx_to_use, i)). A name-derived index that
+    # defaults non-per-layer tensors (e.g. decoder_norm.scale, embeddings)
+    # to 0 collides them with layer 0's own tensors in that same slot,
+    # corrupting its buffer bookkeeping -- this was confirmed as the root
+    # cause of a native "Push range out of bounds" weight-sync error.
+    # Position in the (sorted-by-key) flatten order is what's unique here.
     variables = tuple(
         _tensor_metadata(name, arr, idx)
         for idx, (name, arr) in enumerate(zip(self.names, self.arrays))
