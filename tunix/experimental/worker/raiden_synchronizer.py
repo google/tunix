@@ -242,6 +242,15 @@ class RaidenSynchronizer:
     backed by the pathways proxy cannot bind in place.
     """
     _log_rss("bind:start")
+    # self.arrays/self.names hold the PREVIOUS bind's host-staged buffers.
+    # Dropping them before re-staging matters only on rebind (self._sync is
+    # already set): otherwise they stay alive through the entire new
+    # to_host_cpu_state() call below, so every rebind after the first needs
+    # ~2x one copy's worth of host memory (old + new simultaneously) instead
+    # of ~1x -- confirmed live on a 30B-A3B run where cycle 1 peaked at
+    # 242.8GB (fit) and cycle 2 climbed past 370GB and got evicted (didn't).
+    self.names = []
+    self.arrays = []
     if self._host_stage:
       state = to_host_cpu_state(state)
     _log_rss("bind:after_host_stage")
