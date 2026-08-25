@@ -51,16 +51,29 @@ def local_ip() -> str:
 
 
 def to_host_cpu_state(state: Any) -> Any:
-  """Pulls arrays to client host memory; proxy arrays cannot bind directly."""
-  cpu = jax.local_devices(backend="cpu")[0]
+  """Pulls arrays to client host memory; proxy arrays cannot bind directly.
 
-  def pull(leaf):
+  Drains the input tree's leaves as they're processed (rather than
+  `jax.tree_util.tree_map`, which holds the entire input tree alive while
+  building the entire output tree) so peak host memory stays close to one
+  copy of the state, not two -- at 30B-A3B scale, with padded MoE weights,
+  keeping both alive at once is the difference between fitting in host RAM
+  and an OOMKill during Raiden's D2H staging.
+  """
+  cpu = jax.local_devices(backend="cpu")[0]
+  leaves, treedef = jax.tree_util.tree_flatten(state)
+  del state
+  new_leaves = []
+  for i in range(len(leaves)):
+    leaf = leaves[i]
+    leaves[i] = None
     arr = getattr(leaf, "value", leaf)
     if hasattr(arr, "shape") and hasattr(arr, "dtype"):
-      return jax.device_put(jax.device_get(arr), cpu)
-    return leaf
-
-  return jax.tree_util.tree_map(pull, state)
+      new_leaves.append(jax.device_put(jax.device_get(arr), cpu))
+    else:
+      new_leaves.append(leaf)
+  del leaves
+  return jax.tree_util.tree_unflatten(treedef, new_leaves)
 
 
 def flatten_weights(state: Any) -> Tuple[List[str], List[Any]]:
