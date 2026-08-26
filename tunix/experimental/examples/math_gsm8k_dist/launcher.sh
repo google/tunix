@@ -1,3 +1,4 @@
+#!/bin/bash
 # Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -11,8 +12,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-#!/bin/bash
 
 set -Ee
 
@@ -37,12 +36,12 @@ MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-128}
 BATCH_SIZE=${BATCH_SIZE:-2}
 NUM_GENERATIONS=${NUM_GENERATIONS:-2}
 MAX_STEPS=${MAX_STEPS:-1}
-TRAIN_MICRO_BATCH_SIZE=${TRAIN_MICRO_BATCH_SIZE:-1}
 MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-$((BATCH_SIZE * NUM_GENERATIONS))}
 EVAL_EVERY_N_STEPS=${EVAL_EVERY_N_STEPS:-1000000}
 LORA_RANK=${LORA_RANK:-16}
 LORA_ALPHA=${LORA_ALPHA:-16.0}
 USE_LORA=${USE_LORA:-0}
+DEBUG=${DEBUG:-0}
 SAMPLER=${SAMPLER:-inprocess_vllm}
 PYTHON_BIN=${PYTHON_BIN:-python3}
 WAIT_TIMEOUT_SECS=${WAIT_TIMEOUT_SECS:-1800}
@@ -62,6 +61,17 @@ FORCE_KILL=0
 TRAINER_TPU_CHIPS=${TRAINER_TPU_CHIPS:-0,1}
 TRAINER_FSDP=${TRAINER_FSDP:-1}
 TRAINER_TP=${TRAINER_TP:-2}
+
+# peft runs tunix's PeftTrainer; maxtext runs MaxText's MaxTextTrainingEngine.
+TRAINER_BACKEND=${TRAINER_BACKEND:-peft}
+MAXTEXT_CKPT=${MAXTEXT_CKPT:-}
+# Both trainers shard the batch dimension of loss inputs across the FSDP axis.
+TRAIN_MICRO_BATCH_SIZE=${TRAIN_MICRO_BATCH_SIZE:-$TRAINER_FSDP}
+if [[ "$TRAINER_BACKEND" == "maxtext" && -z "$MAXTEXT_CKPT" ]]; then
+  echo "Error: TRAINER_BACKEND=maxtext requires MAXTEXT_CKPT (Orbax params-only checkpoint)."
+  exit 1
+fi
+
 ROLLOUT_TPU_CHIPS=${ROLLOUT_TPU_CHIPS:-2,3}
 ROLLOUT_FSDP=${ROLLOUT_FSDP:-1}
 ROLLOUT_TP=${ROLLOUT_TP:-2}
@@ -313,7 +323,10 @@ echo "  response len:   $MAX_RESPONSE_LENGTH"
 echo "  train micro:    $TRAIN_MICRO_BATCH_SIZE"
 echo "  mini batch:     $MINI_BATCH_SIZE"
 echo "  use lora:       $USE_LORA"
+echo "  debug:          $DEBUG"
 echo "  sampler:        $SAMPLER"
+echo "  trainer backend:$TRAINER_BACKEND"
+echo "  maxtext ckpt:   ${MAXTEXT_CKPT:-<unset>}"
 echo "  trainer chips:  $TRAINER_TPU_CHIPS"
 echo "  trainer mesh:   fsdp=$TRAINER_FSDP tp=$TRAINER_TP"
 echo "  rollout chips:  $ROLLOUT_TPU_CHIPS"
@@ -374,9 +387,16 @@ echo "Launching trainer node on TPU chips $TRAINER_TPU_CHIPS..."
     --eval_every_n_steps="$EVAL_EVERY_N_STEPS"
     --lora_rank="$LORA_RANK"
     --lora_alpha="$LORA_ALPHA"
+    --trainer_backend="$TRAINER_BACKEND"
   )
+  if [[ -n "$MAXTEXT_CKPT" ]]; then
+    TRAINER_CMD+=(--maxtext_load_parameters_path="$MAXTEXT_CKPT")
+  fi
   if [[ "$USE_LORA" == "1" || "$USE_LORA" == "true" || "$USE_LORA" == "True" ]]; then
     TRAINER_CMD+=(--use_lora)
+  fi
+  if [[ "$DEBUG" == "1" || "$DEBUG" == "true" || "$DEBUG" == "True" ]]; then
+    TRAINER_CMD+=(--debug)
   fi
 
   if [[ "${TRAINER_PATHWAYS:-0}" == "1" ]]; then
@@ -426,6 +446,9 @@ echo "Launching rollout node with sampler=$SAMPLER on TPU chips $ROLLOUT_TPU_CHI
   if [[ "$USE_LORA" == "1" || "$USE_LORA" == "true" || "$USE_LORA" == "True" ]]; then
     ROLLOUT_CMD+=(--use_lora)
   fi
+  if [[ "$DEBUG" == "1" || "$DEBUG" == "true" || "$DEBUG" == "True" ]]; then
+    ROLLOUT_CMD+=(--debug)
+  fi
 
   export JAX_PLATFORMS=tpu,cpu
   export SKIP_JAX_PRECOMPILE=1
@@ -443,14 +466,13 @@ ROLLOUT_PID=$!
 echo "Rollout pid=$ROLLOUT_PID log=$ROLLOUT_LOG"
 print_process_debug "rollout" "$ROLLOUT_PID"
 
-
 on_shutdown_signal() {
   SHUTDOWN_SIGNAL_COUNT=$((SHUTDOWN_SIGNAL_COUNT + 1))
   if (( SHUTDOWN_SIGNAL_COUNT == 1 )); then
-    DRAIN_START_SECONDS=$seconds
-    print_setion "graceful shutdown"
+    DRAIN_START_SECONDS=$SECONDS
+    print_section "graceful shutdown"
     echo "Received $1. Draining workers so the trainer can finalize its"
-    echo "checkpoint. Press Ctrl+C again (after ${FORCE_ARM_SECS}s) to ABADON"
+    echo "checkpoint. Press Ctrl+C again (after ${FORCE_ARM_SECS}s) to ABANDON"
     echo "the in-flight checkpoint and kill workers immediately."
     exit 130
   elif (( SECONDS - DRAIN_START_SECONDS < FORCE_ARM_SECS )); then
@@ -602,6 +624,9 @@ echo "Launching CPU orchestrator..."
   )
   if [[ -n "$INFERENCE_ADDR" ]]; then
     ORCHESTRATOR_CMD+=(--inference_addr="$INFERENCE_ADDR")
+  fi
+  if [[ "$DEBUG" == "1" || "$DEBUG" == "true" || "$DEBUG" == "True" ]]; then
+    ORCHESTRATOR_CMD+=(--debug)
   fi
 
   export JAX_PLATFORMS=cpu

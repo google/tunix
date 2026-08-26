@@ -35,6 +35,7 @@ import os
 import pickle
 import re
 import sys
+import threading
 from types import SimpleNamespace
 from typing import Any
 
@@ -140,6 +141,17 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   )
   parser.add_argument("--rpc_timeout_s", type=float, default=1800.0)
   parser.add_argument("--stop_workers_on_exit", action="store_true")
+  parser.add_argument(
+      "--num_rollout_workers",
+      type=int,
+      default=1,
+      help="Number of independent rollout replicas to register for rollout.",
+  )
+  parser.add_argument(
+      "--debug",
+      action="store_true",
+      help="Enable debug logging and print full sampler responses.",
+  )
   return parser.parse_args(argv)
 
 
@@ -159,17 +171,32 @@ def _extract_answer(text: str) -> str | None:
   return numeric[-1].replace(",", "") if numeric else None
 
 
-def _make_reward_fn(mode: str, num_generations: int):
+def _make_reward_fn(mode: str, num_generations: int, debug: bool = False):
   """Creates the per-trajectory reward function used by StandardRLProgram."""
 
   def reward_fn(item: datatypes.TrajectoryItem) -> float:
     metadata = dict(item.metadata or {})
-    if mode == "synthetic":
-      pair_index = int(metadata.get("pair_index", item.pair_index))
-      return pair_index / max(num_generations - 1, 1)
-
     text = str(metadata.get("text", ""))
     gold_answer = metadata.get("gold_answer")
+    prompt_id = metadata.get("prompt_id", getattr(item, "group_id", "unknown"))
+    pair_index = int(metadata.get("pair_index", item.pair_index))
+
+    if debug:
+      logging.info(
+          "[Orchestrator] Sampler response for %s (generation %d/%d):\n"
+          "--- [Sampled Response] ---\n%s\n--- [End Response] ---\n"
+          "Gold Answer: %s | Extracted Answer: %s",
+          prompt_id,
+          pair_index + 1,
+          num_generations,
+          text,
+          gold_answer,
+          _extract_answer(text),
+      )
+
+    if mode == "synthetic":
+      return pair_index / max(num_generations - 1, 1)
+
     return 1.0 if gold_answer and _extract_answer(text) == gold_answer else 0.0
 
   return reward_fn
@@ -272,11 +299,12 @@ class _CoordinatorWorkerShim:
   async def get_weight_sync_status(self, *args, **kwargs):
     return await self._handle.asubmit("get_weight_sync_status", *args, **kwargs)
 
-def _make_weight_sync_coordinator(trainer_handle, rollout_handle):
+def _make_weight_sync_coordinator(trainer_handle, rollout_handles):
   """Builds the weight sync coordinator over the configured transport."""
+  from tunix.experimental.orchestrator import worker_registry as registry_lib  # pylint: disable=g-import-not-at-top
+  from tunix.experimental.weight_sync import raiden_handler  # pylint: disable=g-import-not-at-top
   from tunix.experimental.weight_sync import weight_sync  # pylint: disable=g-import-not-at-top
   from tunix.experimental.weight_sync import weight_sync_coordinator  # pylint: disable=g-import-not-at-top
-  from tunix.experimental.orchestrator import worker_registry as registry_lib  # pylint: disable=g-import-not-at-top
 
   class _NullHandler(weight_sync.WeightSyncHandler):
     """Runs every phase without moving bytes."""
@@ -292,14 +320,14 @@ def _make_weight_sync_coordinator(trainer_handle, rollout_handle):
   registry.register(
       _CoordinatorWorkerShim(trainer_handle, "trainer-0", {"trainer"})
   )
-  registry.register(
-      _CoordinatorWorkerShim(rollout_handle, "rollout-0", {"rollout"})
-  )
+  # Register all rollout worker handles to broadcast weight sync across replicas.
+  for i, handle in enumerate(rollout_handles):
+    registry.register(
+        _CoordinatorWorkerShim(handle, f"rollout-{i}", {"rollout"})
+    )
 # TODO: standardize a handeler registry seperate from the worker registry.
   backend = os.getenv("WEIGHT_SYNC_BACKEND", "raiden").lower()
   if backend == "raiden":
-    from tunix.experimental.weight_sync import raiden_handler  # pylint: disable=g-import-not-at-top
-
     handler = raiden_handler.RaidenHandler(
         transfer_options=raiden_handler.make_host_staged_transfer_options()
     )
@@ -322,24 +350,26 @@ def _register_workers(
     cluster: orchestrator.ClusterOrchestrator,
     trainer_handle: remote_execution.ActorHandle,
     trainer_addr: str,
-    rollout_handle: remote_execution.ActorHandle,
-    rollout_addr: str,
+    rollout_handles: list[remote_execution.ActorHandle],
+    rollout_addrs: list[str],
     inference_handle: remote_execution.ActorHandle | None,
     inference_addr: str | None,
 ) -> None:
   """Registers gRPC-backed workers in the Orchestrator V2 registry."""
   cluster.register_worker_handle(
       worker_id="trainer-0",
-      roles=[datatypes.Role.ACTOR],
+      roles=[datatypes.Role.ACTOR, "trainer"],
       handle=trainer_handle,
       resources={"address": trainer_addr},
   )
-  cluster.register_worker_handle(
-      worker_id="rollout-0",
-      roles=[datatypes.Role.ROLLOUT],
-      handle=rollout_handle,
-      resources={"address": rollout_addr},
-  )
+  # Register all rollout worker handles for data-parallel rollout generation.
+  for i, (handle, addr) in enumerate(zip(rollout_handles, rollout_addrs)):
+    cluster.register_worker_handle(
+        worker_id=f"rollout-{i}",
+        roles=[datatypes.Role.ROLLOUT, "rollout"],
+        handle=handle,
+        resources={"address": addr},
+    )
   if inference_handle is not None:
     cluster.register_worker_handle(
         worker_id="reference-0",
@@ -421,7 +451,9 @@ def main(argv: list[str], context: Any = None) -> None:
     raise ValueError("offpolicy/max_staleness must be non-negative.")
 
   logging.basicConfig(
-      level=logging.INFO, format="%(asctime)s - [OrchestratorV2] %(message)s"
+      level=logging.DEBUG if args.debug else logging.INFO,
+      format="%(asctime)s - [OrchestratorV2] %(message)s",
+      force=True,
   )
   logging.info("Control-plane JAX backend: %s", jax.default_backend())
   logging.info(
@@ -438,8 +470,11 @@ def main(argv: list[str], context: Any = None) -> None:
   eos_id = tokenizer.eos_token_id if tokenizer.eos_token_id is not None else pad_id
 
   trainer_addr_future = futures.Future()
-  rollout_addr_future = futures.Future()
   inference_addr_future = futures.Future()
+  # Keyed by worker_id to track distinct rollout replicas while deduplicating
+  # hosts within the same multihost jobset.
+  rollout_addrs_by_worker: dict[str, str] = {}
+  rollout_workers_ready = threading.Event()
 
   def accept_worker(hostname: str, _: int, metadata: bytes) -> None:
     md = pickle.loads(metadata)
@@ -455,13 +490,20 @@ def main(argv: list[str], context: Any = None) -> None:
         service_address,
     )
 
+    # Use the first registration per worker_id to drive RPC connections and
+    # ignore subsequent registrations from other hosts in the same jobset.
     match service_type:
       case "trainer":
-        trainer_addr_future.set_result(service_address)
+        if not trainer_addr_future.done():
+          trainer_addr_future.set_result(service_address)
       case "rollout":
-        rollout_addr_future.set_result(service_address)
+        if worker_id not in rollout_addrs_by_worker:
+          rollout_addrs_by_worker[worker_id] = service_address
+          if len(rollout_addrs_by_worker) >= args.num_rollout_workers:
+            rollout_workers_ready.set()
       case "inference":
-        inference_addr_future.set_result(service_address)
+        if not inference_addr_future.done():
+          inference_addr_future.set_result(service_address)
       case _:
         raise RuntimeError(f"unknown service type {service_type}")
 
@@ -471,8 +513,18 @@ def main(argv: list[str], context: Any = None) -> None:
   logging.info("Waiting for workers to connect...")
   trainer_addr = trainer_addr_future.result()
   trainer_handle = _connect(trainer_addr, args.rpc_timeout_s)
-  rollout_addr = rollout_addr_future.result()
-  rollout_handle = _connect(rollout_addr, args.rpc_timeout_s)
+  rollout_workers_ready.wait(timeout=args.rpc_timeout_s)
+  if len(rollout_addrs_by_worker) < args.num_rollout_workers:
+    raise TimeoutError(
+        f"only {len(rollout_addrs_by_worker)}/{args.num_rollout_workers}"
+        " rollout workers registered within rpc_timeout_s"
+        f" ({args.rpc_timeout_s}s): {sorted(rollout_addrs_by_worker)}"
+    )
+  # Sorted for a deterministic worker_id -> handle order across runs.
+  rollout_entries = sorted(rollout_addrs_by_worker.items())
+  rollout_handles = [
+      _connect(addr, args.rpc_timeout_s) for _, addr in rollout_entries
+  ]
   inference_addr = None
   inference_handle = None
   if args.beta != 0.0:
@@ -491,7 +543,7 @@ def main(argv: list[str], context: Any = None) -> None:
 
   cluster = orchestrator.ClusterOrchestrator(
       weight_sync_coordinator=_make_weight_sync_coordinator(
-          trainer_handle, rollout_handle
+          trainer_handle, rollout_handles
       )
   )
 
@@ -500,8 +552,8 @@ def main(argv: list[str], context: Any = None) -> None:
       cluster=cluster,
       trainer_handle=trainer_handle,
       trainer_addr=trainer_addr,
-      rollout_handle=rollout_handle,
-      rollout_addr=rollout_addr,
+      rollout_handles=rollout_handles,
+      rollout_addrs=[addr for _, addr in rollout_entries],
       inference_handle=inference_handle,
       inference_addr=inference_addr,
   )
@@ -510,8 +562,11 @@ def main(argv: list[str], context: Any = None) -> None:
   program = rl_program.StandardRLProgram(
       algo=algo,
       dataset=_iter_prompt_items(args),
-      max_steps=args.max_steps,
-      reward_fns=[_make_reward_fn(args.reward_mode, args.num_generations)],
+      reward_fns=[
+          _make_reward_fn(
+              args.reward_mode, args.num_generations, debug=args.debug
+          )
+      ],
       assembler=batch_assembly.GRPOTrainExampleAssembler(
           batch_size=args.train_micro_batch_size,
           max_prompt_length=args.max_prompt_length,
@@ -538,6 +593,7 @@ def main(argv: list[str], context: Any = None) -> None:
     )
     cluster.run_program(
         program=program,
+        num_steps=args.max_steps,
         bring_up=False,
     )
   finally:
