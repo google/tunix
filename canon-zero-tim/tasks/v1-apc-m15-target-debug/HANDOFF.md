@@ -451,3 +451,19 @@ Attempt 8 dual-arm execution (`d14-3820b168`, source commit `3820b168e37080ea9c4
   - Terminal: Controlled exit code 42, zero backward, zero optimizer commits.
 - Retained evidence: `evidence/v1_apc_m15_attempt8_paired_d14_20260826/`.
 
+## Attempt 9 M15 Target Debug Runs (d15-3f159250 Phase D Wide Layer Observer)
+
+Attempt 9 dual-arm execution (`d15-3f159250`, source commit `3f159250917fa9ee6062fbe7554f67644fcffec9`) ran on dual 64-TPU allocations (DP8xTP8) with all 36-layer observers attached:
+- **Control Arm (`canon-v1-apc-m15-off-d15-3f159250`)**:
+  - Rollout: 256 trajectories completed, 0.0% prefix cache hit rate, solve rate 18.0%.
+  - Pre-alignment: `verdict=PASS`, 0 differing bytes on A-B and B-C.
+  - Terminal: Controlled exit code 42, zero backward, zero optimizer commits.
+- **Treatment Arm (`canon-v1-apc-m15-on-d15-3f159250`)**:
+  - Rollout: 256 trajectories completed, **92.9%** prefix cache hit rate, solve rate 17.2%.
+  - Pre-alignment: `[CANON_ALIGN_PRE] step=0 verdict=FAIL N_action=122082 bounds=[('S_decode_vs_S_prefill', 1329), ('S_prefill_vs_T_old', 0)]` (Reproduced 1,329 diff bytes between $S_{\text{decode}}$ and $S_{\text{prefill}}$ across 122,082 action tokens).
+  - Evidence: `evidence_sha256=9d523aa06af9ba5313729043b98d62d9c36135611450f9af7096aff5e068ae58`.
+  - Collected 2,313 seam and tail tensor records across all 36 layers (9,272 capture files total).
+  - Terminal: Controlled exit code 42, zero backward, zero optimizer commits.
+- Retained evidence: `evidence/v1_apc_m15_attempt9_paired_d15_20260826/`.
+
+
