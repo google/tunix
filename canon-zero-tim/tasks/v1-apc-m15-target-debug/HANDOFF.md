@@ -426,3 +426,11 @@ The new selector is default-off, so publication does not change production
 behavior. Reverting this bounded carrier must remove the
 renderer/profile/classifier/marker additions as one concern. Production
 recipes remain APC-off throughout.
+
+
+## Attempt 7 M15 Target Debug Runs (d13-663cb547)
+
+Attempt 7 dual-arm execution (`d13-663cb547`, source commit `663cb5474490173cfaf33fce3a323d95e5fc2ee1`) was launched on dual 64-TPU allocations:
+- **Control Arm (`canon-v1-apc-m15-off-d13-663cb547`)**: Successfully uploaded `PREFLIGHT.json`, terminated during startup.
+- **Treatment Arm (`canon-v1-apc-m15-on-d13-663cb547`)**: Successfully uploaded `PREFLIGHT.json`, terminated during startup.
+- Retained evidence: `evidence/v1_apc_m15_attempt7_d13_20260826/`.

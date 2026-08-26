@@ -1,0 +1,7 @@
+{
+  "attempt": "0",
+  "prefix": "gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-v1-apc-m15-on-d13-663cb547/attempt-0",
+  "schema": "canon-p38-gcs-preflight-v1",
+  "source_commit": "663cb5474490173cfaf33fce3a323d95e5fc2ee1",
+  "status": "writable"
+}

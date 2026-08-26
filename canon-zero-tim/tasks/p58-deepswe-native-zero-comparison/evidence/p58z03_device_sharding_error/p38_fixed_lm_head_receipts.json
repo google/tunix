@@ -1,0 +1,37 @@
+{
+  "endpoint": "tied_embed",
+  "foreign_endpoints": [],
+  "hidden": 2560,
+  "include_learner": true,
+  "learner_M": 4096,
+  "local_vocab": 18992,
+  "log_sha256": "df489743d2acc82db167fb14413deea95bb9a8c2e507e1a89c730a6d706b6169",
+  "matching_p59_local_primal_records": 0,
+  "matching_vjp_records": 0,
+  "missing_M": [
+    256,
+    4096
+  ],
+  "p59_local_M": null,
+  "p59_local_dp_size": null,
+  "padded_local_vocab": 19200,
+  "primal_records": 11,
+  "reasons": [
+    "missing_primal_M=256,4096",
+    "missing_fixed_order_vjp",
+    "missing_tied_embedding_adapter_marker"
+  ],
+  "request_M": [
+    16,
+    32,
+    64,
+    128,
+    256
+  ],
+  "require_vjp": true,
+  "schema": "p38-fixed-lm-head-receipts-v1",
+  "tied_marker_count": 0,
+  "tp_size": 8,
+  "verdict": "P38_FIXED_LM_HEAD_RECEIPTS_FAIL",
+  "vjp_records": 0
+}

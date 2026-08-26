@@ -1051,3 +1051,21 @@ informative diagnostic outcomes; neither is training certification.
 This single-arm P45/M15 launch matrix is superseded by the matched P45 pair in
 the top `START HERE` section. No local commit/push or target launch may occur
 without the user's separate approval.
+
+
+## 2026-08-26 Attempt 10 FrozenLake Full Runs (P45 & M15 Wave 01)
+
+Attempt 10 (wave 01 of commit `8eb65480d3705d96ab282799ad5a6c1901596248`) executed on dual 64-TPU (DP8xTP8) allocations alongside the active GSM8K full run (`canon-v1hp-gsm8k-g11-c2833eea`):
+
+- **GSM8K Full (`canon-v1hp-gsm8k-g11-c2833eea`)**: Actively training past Update 122/200 (61.0%), solve rate 72.7%-77.3%, 100% Zero-TIM compliance (`logp_diff=0.00000`).
+- **FrozenLake P45 Full (`canon-p57-fl-zero-f45w01-8eb65480`)**:
+  - Rollout: 256 trajectories completed (Solve rate 58.6%).
+  - Step-0 Pre-alignment: `[CANON_ALIGN_PRE] step=0 verdict=PASS N_action=48753 bounds=[('S_decode_vs_S_prefill', 0), ('S_prefill_vs_T_old', 0)]` (`0/0` differing bytes, 100% Zero-TIM pass).
+  - Backward pass: Successfully completed all 36 P59 backward layer VJPs.
+  - Step-0 Update contract fault: Raised `ValueError: P28 G6 canary requires checkpointing disabled unless the committed P45 checkpoint contract is admitted` at `tunix/sft/peft_trainer.py:945` in `_validate_precomputed_gradient_contract()`. `CANON_FROZENLAKE_CKPT_INTERVAL="300"` differed from the expected interval `"10"`.
+- **FrozenLake M15 Full (`canon-p57-fl-zero-m15-mw01-8eb65480`)**:
+  - Rollout: 256 trajectories completed, Rescore B completed.
+  - Step-0 Pre-alignment: `[CANON_ALIGN_PRE] step=0 verdict=PASS N_action=122162 bounds=[('S_decode_vs_S_prefill', 0), ('S_prefill_vs_T_old', 0)]` (`0/0` differing bytes, 100% Zero-TIM pass).
+  - Backward pass: Successfully completed all 36 P59 backward layer VJPs.
+  - Step-0 Update contract fault: Raised `ValueError: P28 G6 canary requires checkpointing disabled unless the committed P45 checkpoint contract is admitted` at `tunix/sft/peft_trainer.py:945` in `_validate_precomputed_gradient_contract()`.
+- Retained evidence: `evidence/v1_hp_three_full_attempt10_20260826/`.

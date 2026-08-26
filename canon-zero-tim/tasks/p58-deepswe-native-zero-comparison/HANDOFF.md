@@ -1087,3 +1087,15 @@ estimate a native-versus-zero effect, prove zero-TIM, isolate one kernel,
 reproduce DeepSWE-32B, prove packing, or establish 256-chip production
 behavior. No finite Native serving-path mismatch on either A-B or B-C is
 `NO_TREATMENT`; missing evidence or interrupted execution is inconclusive.
+
+
+## 2026-08-26 P58.14 Qwen3-4B 128-TPU Step-0 Device Sharding Collision
+
+Target run `p58z03` (`canon-p58-ds4b-zero-hp-full-p58z03`) was launched from commit `8eb65480d3705d96ab282799ad5a6c1901596248` on 128 TPU chips:
+
+- **Rollout & Backward**: Completed 128 trajectory rollouts and all 36 decoder layers of Pallas SwiGLU / RMSNorm / LM Head VJP passes (`semantic_M=2048` admitted for Qwen3-4B TP8).
+- **Logprob JIT Collision**: During old-policy logprob calculation in `get_actor_per_token_logps` -> `compute_per_token_logps`, JAX threw:
+  ```text
+  ValueError: Received incompatible devices for jitted computation. Got argument state['embedder']['input_embedding'].value of compute_per_token_logps with shape float32[151936,2560] and with device ids [2, 3, 18, 19, 34, 35, 50, 51, 66, 67, 82, 83, 98, 99, 114, 115, ...] on platform TPU and sharding_constraint inside jit with device ids [0, 4, 8, 12, 1, 5, 9, 13, 16, 20, 24, 28, ...] on platform TPU at /app/tunix/rl/canonical_qwen3_adapter.py:483:13 (_safe_sharding_constraint)
+  ```
+- Retained evidence: `evidence/p58z03_device_sharding_error/`.

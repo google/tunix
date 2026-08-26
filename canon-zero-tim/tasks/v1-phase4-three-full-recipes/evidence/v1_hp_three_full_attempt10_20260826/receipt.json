@@ -1,0 +1,22 @@
+{
+  "attempt": 10,
+  "campaign_root": "v1-hp-attempt10",
+  "source_commit": "8eb65480d3705d96ab282799ad5a6c1901596248",
+  "timestamp": "2026-08-26T20:15:00Z",
+  "jobsets": {
+    "gsm8k": "canon-v1hp-gsm8k-g11-c2833eea",
+    "frozenlake_p45": "canon-p57-fl-zero-f45w01-8eb65480",
+    "frozenlake_m15": "canon-p57-fl-zero-m15-mw01-8eb65480"
+  },
+  "verdicts": {
+    "gsm8k": "HEALTHY_ACTIVE_UPDATE122_RUNNING (100% Zero-TIM compliance, S_decode_vs_S_prefill=0, S_prefill_vs_T_old=0, solve_ratio up to 77.3%)",
+    "frozenlake_p45": "STEP0_PRE_ALIGNMENT_PASS_CHECKPOINT_CONTRACT_FAIL (S_decode_vs_S_prefill=0 bytes, S_prefill_vs_T_old=0 bytes across 48753 action tokens PASS; failed at peft_trainer.py:945 _validate_precomputed_gradient_contract due to CANON_FROZENLAKE_CKPT_INTERVAL=300 mismatch)",
+    "frozenlake_m15": "STEP0_PRE_ALIGNMENT_PASS_CHECKPOINT_CONTRACT_FAIL (S_decode_vs_S_prefill=0 bytes, S_prefill_vs_T_old=0 bytes across 122162 action tokens PASS; failed at peft_trainer.py:945 _validate_precomputed_gradient_contract due to CANON_FROZENLAKE_CKPT_INTERVAL=300 mismatch)"
+  },
+  "logs": {
+    "p45_error": "p45_full_w01_error.log",
+    "p45_pre_alignment": "p45_full_w01_pre_alignment.jsonl",
+    "m15_error": "m15_full_mw01_error.log",
+    "m15_pre_alignment": "m15_full_mw01_pre_alignment.jsonl"
+  }
+}
