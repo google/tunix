@@ -28,6 +28,14 @@ export NUM_GENERATIONS=${NUM_GENERATIONS:-2}
 export MAX_STEPS=${MAX_STEPS:-1}
 export TRAINER_FSDP=${TRAINER_FSDP:-8}
 
+# Cluster hardware. Defaults match trellis-demo-0810; override for other clusters
+# (e.g. mlperf-v5p has no n2-standard-64 pool and no 2x2x2 topology).
+export CPU_MACHINE=${CPU_MACHINE:-n2-standard-64}
+export TPU_SLICE=${TPU_SLICE:-tpuv5:2x2x1}
+# Pathways writes its persistent compilation cache here; the default shared bucket
+# is not writable from this project, which kills the compilation service.
+export GCS_SCRATCH_LOCATION=${GCS_SCRATCH_LOCATION:-gs://cloud-pathways-staging/tmp}
+
 # peft runs tunix's PeftTrainer; maxtext runs MaxText's MaxTextTrainingEngine.
 export TRAINER_BACKEND=${TRAINER_BACKEND:-peft}
 export MAXTEXT_CKPT=${MAXTEXT_CKPT:-}
@@ -65,7 +73,7 @@ start_orchestrator() {
   python tunix/experimental/distributed/deployment/yaml_generator.py \
     tunix/experimental/distributed/deployment/yamls/jobset.cpu.yaml \
     --jobset_name="${ORCHESTRATOR_ID}" \
-    --cpu_machine=n2-standard-64 \
+    --cpu_machine="${CPU_MACHINE}" \
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${ORCHESTRATOR_PORT}" \
     --worker_startup_command=" \
@@ -94,7 +102,8 @@ start_trainer() {
   python tunix/experimental/distributed/deployment/yaml_generator.py \
     tunix/experimental/distributed/deployment/yamls/jobset.pathways.yaml \
     --jobset_name="${TRAINER_ID}" \
-    --tpu_slice=tpuv5:2x2x2 \
+    --tpu_slice="${TPU_SLICE}" \
+    --pathways_gcs_scratch_location="${GCS_SCRATCH_LOCATION}" \
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${TRAINER_PORT}" \
     --worker_startup_command=" \
@@ -131,7 +140,8 @@ start_rollout() {
   python tunix/experimental/distributed/deployment/yaml_generator.py \
     tunix/experimental/distributed/deployment/yamls/jobset.tpu.yaml \
     --jobset_name="${ROLLOUT_ID}" \
-    --tpu_slice=tpuv5:2x2x1 \
+    --tpu_slice="${TPU_SLICE}" \
+    --pathways_gcs_scratch_location="${GCS_SCRATCH_LOCATION}" \
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${ROLLOUT_PORT}" \
     --worker_startup_command=" \
