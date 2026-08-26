@@ -2,5 +2,5 @@
 # --find-links https://storage.googleapis.com/jax-releases/libtpu_releases.html
 # --pre
 
-tpu-inference @ git+https://github.com/vllm-project/tpu-inference.git@12eed6e661a1ffacbce9d107a9894c1a471e7479
-
+# TODO: Update commit SHAs once https://github.com/vllm-project/tpu-inference/pull/3461 is merged.
+tpu-inference @ git+https://github.com/vllm-project/tpu-inference.git@8d30921e602b01652ebe204c2d328251bfa2aff5
