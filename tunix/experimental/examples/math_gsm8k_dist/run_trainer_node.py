@@ -29,7 +29,6 @@ import sys
 from typing import Any
 
 import jax
-from jax import numpy as jnp
 from jax.experimental import mesh_utils
 from jax.sharding import Mesh
 from orbax import checkpoint as ocp
@@ -53,7 +52,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument("--port", type=int, default=20000)
   parser.add_argument("--worker_id", type=str, default="trainer-0")
   parser.add_argument("--model_name", type=str, default="Qwen3-1.7B")
-  parser.add_argument("--model_id", type=str, default="Qwen/Qwen3-1.7B")
+  parser.add_argument("--model_id", type=str, default=os.getenv("MODEL_ID", ""))
+  models.add_model_source_args(parser)
   parser.add_argument(
       "--model_dir",
       type=str,
@@ -114,12 +114,22 @@ def _has_direct_safetensors(model_path: Path) -> bool:
   return any(model_path.glob("*.safetensors"))
 
 
-def _ensure_model_dir_for_trainer(model_dir: str, model_id: str) -> str:
+def _ensure_model_dir_for_trainer(
+    model_dir: str, model_id: str, model_source: str
+) -> str:
   if not model_dir:
     raise ValueError(
         "--model_dir is required for JAX trainer weights. Set MODEL_DIR or pass "
-        "--model_dir=/path/to/local/qwen3/safetensors."
+        "--model_dir=/path/to/local/qwen3/safetensors. For MaxText, set it "
+        "to the MaxText load_parameters_path."
     )
+
+  if models.is_maxtext_source(model_source):
+    logging.info(
+        "Using MaxText checkpoint path %s; skipping safetensors lookup.",
+        model_dir,
+    )
+    return model_dir
 
   model_path = Path(model_dir).expanduser()
   if model_path.exists() and not model_path.is_dir():
@@ -155,6 +165,7 @@ def _ensure_model_dir_for_trainer(model_dir: str, model_id: str) -> str:
       f"in --model_dir: {model_path}"
   )
 
+
 def _create_mesh(args) -> Mesh:
   shape = (args.mesh_fsdp, args.mesh_tp)
   if args.mesh_fsdp * args.mesh_tp != jax.device_count():
@@ -172,7 +183,14 @@ def _load_actor_model(args, mesh: Mesh, *, lora: bool):
         "--model_dir is required for JAX trainer weights. Set MODEL_DIR or pass "
         "--model_dir=/path/to/local/safetensors."
     )
-  model = models.create_model(args.model_name, args.model_dir, mesh)
+  model = models.create_model(
+      args.model_name,
+      args.model_dir,
+      mesh,
+      model_source=args.model_source,
+      model_id=args.model_id,
+      maxtext_kwargs=models.maxtext_kwargs_from_args(args, mesh),
+  )
   if not lora:
     return model
   lora_config = {
@@ -271,8 +289,10 @@ def main(argv: list[str], context: Any = None) -> None:
     sys.path.insert(0, REPO_ROOT)
   logging.info("Repo root inserted into sys.path: %s", REPO_ROOT)
 
-  args.model_dir = _ensure_model_dir_for_trainer(args.model_dir, args.model_id)
-  logging.info("Prepared trainer safetensors directory: %s", args.model_dir)
+  args.model_dir = _ensure_model_dir_for_trainer(
+      args.model_dir, args.model_id, args.model_source
+  )
+  logging.info("Prepared trainer model path: %s", args.model_dir)
 
   logging.info("Creating trainer mesh...")
   mesh = _create_mesh(args)
