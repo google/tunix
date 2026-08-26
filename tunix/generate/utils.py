@@ -1923,3 +1923,34 @@ def get_dtype_packing(dtype):
     """Returns the packing factor for the given dtype for TPU SRAM (4 bytes / itemsize)."""
     n_bytes = jnp.dtype(dtype).itemsize
     return 4 // n_bytes
+
+
+def _calculate_pages_for_capacity(
+    max_bytes: int, 
+    logical_sharding: tuple,
+    page_size: int,
+    page_subshape: tuple,
+    dp_size: int,
+    dtype: jnp.dtype,
+    partition_keys: tuple
+) -> int:
+    item_size = jnp.dtype(dtype).itemsize
+    page_shape = (page_size,) + page_subshape
+
+    block_subsharding = logical_sharding[1:]
+    elements = 1
+    for dim, shard in zip(page_shape, block_subsharding):
+        dim_size = (dim * dp_size) if shard == 'dp_axis' else dim
+        elements *= dim_size
+
+    page_bytes = elements * item_size * len(partition_keys)
+    if page_bytes == 0:
+        return 0
+    
+    print("Page bytes: ", page_bytes)
+    num_block_pages = max_bytes // page_bytes
+    page_sharding = logical_sharding[0]
+    if page_sharding == 'dp_axis':
+        num_block_pages = (num_block_pages // dp_size) * dp_size
+
+    return num_block_pages

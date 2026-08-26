@@ -5,6 +5,9 @@ from flax import nnx
 import numpy as np
 import jax
 import jax.numpy as jnp
+
+import jax
+import jax.numpy as jnp
 from tunix.generate import scheduler
 from tunix.generate import cache_manager as cache_manager_lib
 from tunix.generate import sampler_v2 as sampler_lib
@@ -25,6 +28,7 @@ class LLMEngine:
         self.tokenizer = tokenizer
         self.cache_config = cache_config
         self.max_seq_len = max_seq_len
+        self.max_num_batch_tokens = getattr(cache_config, 'max_num_batch_tokens', 1024)
         self.max_num_batch_tokens = getattr(cache_config, "max_num_batch_tokens", 1024)
         
         self.eos_ids = [tokenizer.eos_id() if hasattr(tokenizer, 'eos_id') else tokenizer.GetPieceSize()]
@@ -43,7 +47,7 @@ class LLMEngine:
         
         # Initialize scheduling and physical memory allocators
         model_config = self.transformer.config
-        shd_config = model_config.shd_config
+        shd_config = getattr(model_config, 'shd_config', None)
 
         kv_dtype = self.sampler.dtype
 
@@ -70,6 +74,14 @@ class LLMEngine:
         except Exception:
           pass
         
+        try:
+          import tunix.generate.utils as utils
+          num_tpu_pages, num_cpu_pages = utils._calculate_pages_for_capacity(
+              cache_config, model_config, kv_dtype, tp_size
+          )
+        except Exception:
+          num_tpu_pages, num_cpu_pages = 100, 100
+
         self.cache_manager = cache_manager_lib.init_cache_manager(
             cache_config=cache_config,
             model_config=model_config,
@@ -78,6 +90,8 @@ class LLMEngine:
             tp_axis=tp_axis,
             dp_size=dp_size,
             tp_size=tp_size,
+            num_tpu_pages=num_tpu_pages,
+            num_cpu_pages=num_cpu_pages,
         )
         
         self.scheduler = scheduler.Scheduler(
@@ -112,11 +126,13 @@ class LLMEngine:
         """One physical iteration of the continuous batch engine."""
         
         ordered_reqs, distribution_list = self.scheduler.schedule_step([])
+        ordered_reqs = list(ordered_reqs)
         if not ordered_reqs:
             return
             
         distribution = np.array(distribution_list, dtype=np.int32)
         j = distribution_list[1]
+        k = distribution_list[2]
         
         # Build 1D arrays
         # Build 1D arrays
@@ -150,14 +166,31 @@ class LLMEngine:
             phys_idxs.extend([0] * (max_pages - len(phys_idxs)))
             page_indices.append(phys_idxs)
             
-        metadata = sampler_lib.RPAMetadata(
-            page_indices=np.array(page_indices, dtype=np.int32),
-            seq_lens=np.array(seq_lens, dtype=np.int32),
-            active_seq_lens=np.array(active_seq_lens, dtype=np.int32),
-            distribution=np.array(distribution),
-        )
+        max_batch_tokens = getattr(self, 'max_num_batch_tokens', 1024)
+        max_seqs = getattr(self.cache_config, 'max_num_seqs', 256)
+        max_pages = max([len(p) for p in page_indices] + [1])
         
-        total_tokens = len(tokens)
+        seq_lens = seq_lens + [0] * (max_seqs - len(seq_lens))
+        active_seq_lens = active_seq_lens + [0] * (max_seqs - len(active_seq_lens))
+        
+        pad_amount = max_batch_tokens - len(tokens)
+        if pad_amount > 0:
+            tokens.extend([0] * pad_amount)
+            
+        for _ in range(max_seqs - len(page_indices)):
+            page_indices.append([0] * max_pages)
+            
+        for p in page_indices:
+            p.extend([0] * (max_pages - len(p)))
+            
+        metadata = sampler_lib.RPAMetadata(
+            page_indices=jnp.array(page_indices, dtype=jnp.int32),
+            seq_lens=jnp.array(seq_lens, dtype=jnp.int32),
+            active_seq_lens=jnp.array(active_seq_lens, dtype=jnp.int32),
+            distribution=jnp.array(distribution, dtype=jnp.int32),
+        )
+        tokens = jnp.array(tokens, dtype=jnp.int32)
+        total_tokens = max_batch_tokens
         
         gen_tokens, logits, logp, next_cache = self.sampler.sample_step(
             cache=self.cache_manager.tpu_block.partition_pages,

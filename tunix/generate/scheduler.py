@@ -256,7 +256,7 @@ class Scheduler:
       )
       n_tokens_to_compute = min(self._token_budget, max_n_tokens_to_compute)
         
-      seq_n_pages_required = utils.cdiv(n_tokens_to_compute, self.page_size)
+      seq_n_pages_required = max(0, utils.cdiv(candidate_req.num_completed_tokens + n_tokens_to_compute, self.page_size))
       seq_n_pages_allocated = len(candidate_req.page_ids)
       seq_n_new_pages_required = seq_n_pages_required - seq_n_pages_allocated 
       
@@ -270,7 +270,7 @@ class Scheduler:
       self._token_budget -= n_tokens_to_compute
       n_running_admitted += 1 
 
-      self._allocate(candidate_req, n_new_pages_required) 
+      self._allocate(candidate_req, seq_n_new_pages_required) 
     
     assert(len(self.running_requests) > 0)
 

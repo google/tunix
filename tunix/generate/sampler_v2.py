@@ -21,7 +21,7 @@ class RaggedArray:
     
     @property
     def row_idxs(self) -> jnp.ndarray:
-        return jnp.repeat(jnp.arange(len(self.lens)), self.lens)
+        return jnp.repeat(jnp.arange(len(self.lens)), self.lens, total_repeat_length=self.data.shape[0])
         
     @property
     def intra_offsets(self) -> jnp.ndarray:
@@ -102,7 +102,7 @@ def sample_best(
         return next_token, None
     logp = jax.nn.log_softmax(logits[:, -1].astype(jnp.float32), axis=-1)
     logp_sampled = jnp.take_along_axis(logp, next_token[:, None], axis=-1)
-    return next_token, logp_sampled
+    return next_token, logp_sampled if logp_sampled is None else jnp.squeeze(logp_sampled, axis=-1)
 
 
 class VanillaSampler:
@@ -160,6 +160,15 @@ class VanillaSampler:
 
     @transformer_state.setter
     def transformer_state(self, state: Any) -> None:
+        def get_all_param_types(tree):
+            param_types = set()
+            jax.tree_util.tree_map(
+                lambda x: param_types.add(type(x)),
+                tree,
+                is_leaf=lambda x: isinstance(x, nnx.Variable),
+            )
+            return param_types
+
         def check_tree_structure(tree1, tree2):
             if jax.tree_util.tree_structure(tree1) != jax.tree_util.tree_structure(tree2):
                 raise ValueError('New state must have the same structure as the old state.')
@@ -184,8 +193,25 @@ class VanillaSampler:
             if not all(jax.tree_util.tree_leaves(jax.tree_util.tree_map(check_shape_dtype_sharding, tree1, tree2))):
                 raise ValueError('New state must have the same shape, dtype and sharding as the old state.')
 
-        check_tree_structure(self._transformer_state, state)
-        self._transformer_state = state
+        from flax.nnx import statelib
+        from flax.nnx import filterlib
+
+        param_types = get_all_param_types(state)
+        
+        if nnx.Param in param_types:
+            # Full state replacement.
+            check_tree_structure(self._transformer_state, state)
+            self._transformer_state = state
+        else:
+            # LoRA state replacement.
+            if not (len(param_types) == 1 and nnx.LoRAParam in param_types):
+                raise ValueError(f'Only LoRAParam is supported. Received invalid `param_types`: {param_types}')
+                
+            original_lora_params = statelib.filter_state(self._transformer_state, nnx.LoRAParam)
+            check_tree_structure(original_lora_params, state)
+            base_state = statelib.filter_state(self._transformer_state, filterlib.Not(nnx.LoRAParam))
+            self._transformer_state = statelib.merge_state(base_state, state)
+
         self._flattened_transformer_state = jax.tree.leaves(
             self._transformer_state,
             is_leaf=lambda x: isinstance(x, nnx.Variable),
@@ -258,7 +284,7 @@ class VanillaSampler:
         tokens = tokens_ragged
         
         # The transformer natively supports receiving metadata (or None for non-ragged cases).
-        logits = transformer(
+        logits, updated_cache = transformer(
             tokens,
             global_positions, 
             cache=cache,
@@ -276,7 +302,7 @@ class VanillaSampler:
         
         last_token_logits = jnp.where(is_sampleable[:, None], last_token_logits, 0.0)
             
-        return last_token_logits, cache
+        return last_token_logits, updated_cache
 
 
 

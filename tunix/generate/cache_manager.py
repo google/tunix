@@ -118,37 +118,9 @@ class TieredMemoryConfig:
     return (tpu_block, cpu_block)
 
 
-def _calculate_pages_for_capacity(
-    max_bytes: int, 
-    logical_sharding: tuple,
-    page_size: int,
-    page_subshape: tuple,
-    dp_size: int,
-    dtype: jnp.dtype,
-    partition_keys: tuple
-) -> int:
-    item_size = jnp.dtype(dtype).itemsize
-    page_shape = (page_size,) + page_subshape
-
-    block_subsharding = logical_sharding[1:]
-    elements = 1
-    for dim, shard in zip(page_shape, block_subsharding):
-        dim_size = (dim * dp_size) if shard == 'dp_axis' else dim
-        elements *= dim_size
-
-    page_bytes = elements * item_size * len(partition_keys)
-    if page_bytes == 0:
-        return 0
-    
-    print("Page bytes: ", page_bytes)
-    num_block_pages = max_bytes // page_bytes
-    page_sharding = logical_sharding[0]
-    if page_sharding == 'dp_axis':
-        num_block_pages = (num_block_pages // dp_size) * dp_size
-
-    return num_block_pages
-
 def init_cache_manager(
+    num_tpu_pages: int,
+    num_cpu_pages: int,
     cache_config,
     model_config,
     kv_dtype: jnp.dtype,
@@ -172,30 +144,7 @@ def init_cache_manager(
     partition_keys = tuple(f"layer_{i}" for i in range(num_layers))
     page_subshape = (packed_kv_dim, kv_packing, head_dim)
     
-    # Calculate TPU pages
-    logical_sharding = ('dp_axis', None, 'tp_axis', None, None)
-    num_tpu_pages = _calculate_pages_for_capacity(
-        max_bytes=cache_config.max_tpu_bytes,
-        logical_sharding=logical_sharding,
-        page_size=cache_config.page_size,
-        page_subshape=page_subshape,
-        dp_size=dp_size,
-        dtype=kv_dtype,
-        partition_keys=partition_keys
-    )
-    print("Num tpu pages: ", num_tpu_pages)
-    
-    # Calculate CPU pages
-    sharding_len = 2 + len(page_subshape)
-    num_cpu_pages = _calculate_pages_for_capacity(
-        max_bytes=getattr(cache_config, 'max_cpu_bytes', 0),
-        logical_sharding=(None,) * sharding_len,
-        page_size=cache_config.page_size,
-        page_subshape=page_subshape,
-        dp_size=dp_size,
-        dtype=kv_dtype,
-        partition_keys=partition_keys
-    )
+
     
     tiered_memory_config = TieredMemoryConfig(
         page_size=cache_config.page_size,
