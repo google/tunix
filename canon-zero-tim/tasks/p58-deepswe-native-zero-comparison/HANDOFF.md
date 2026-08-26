@@ -2,9 +2,10 @@
 
 ## 2026-08-26 P58.13 Qwen3-4B M2048 + FrozenLake P59-only VMA override
 
-This is the highest-priority P58 handoff. Local implementation and the full
-pinned-image construction gate pass; the changes are not committed or pushed,
-and no matching target retry has run.
+This is the highest-priority P58 handoff. Implementation commit
+`bea1aabde39c43c13ca4eaefab989301c6e8b46c` is published and read back on
+`yuxzhang/canon-zero-tim`; the full pinned-image construction gate passes, and
+no matching target retry has run.
 
 Immutable `p58z02` facts:
 
@@ -58,9 +59,10 @@ convergence are not proven. Preserve `p58z02` under
 `7349c7965f31e2c84dfd98f8cb7fe175f9b2d4281759d0bb5c07bb336ef8784d`).
 It is not a resumable trainer checkpoint.
 
-Next execution sequence: obtain commit/push approval, prove exact remote SHA,
+Next execution sequence: fetch the operator branch and require it to contain
+implementation commit `bea1aabde39c43c13ca4eaefab989301c6e8b46c`, then
 build/pin the matching image, rerun the complete gate, pass sandbox capacity,
-then obtain separate launch approval and render fresh `p58z03` with
+obtain separate launch approval, and render fresh `p58z03` with
 `--stage full --arm zero --high-performance`. Never resume or overwrite
 `p58z01` or `p58z02`. See
 `phases/p58-13-backward-fixed-lm-head-m2048.md` for the target gates.

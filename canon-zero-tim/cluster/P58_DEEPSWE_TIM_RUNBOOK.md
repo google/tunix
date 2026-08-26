@@ -18,7 +18,7 @@ P58 does not modify `main`. Rendering and local validation do not authorize a
 Kubernetes apply. An operator must separately approve image publication and
 each launch.
 
-## 2026-08-26 P58.13 M2048/P59-only VMA retry override — local only
+## 2026-08-26 P58.13 M2048/P59-only VMA retry override — source published
 
 This section supersedes the P58.12 instruction to launch `p58z02`. That target
 already ran: it proved the engine-global seed route and returned all 128
@@ -58,10 +58,11 @@ Before any target, require the complete pinned-image marker:
 P58_EXACT_IMAGE_CPU_PASS ... qwen4b_fixed_head=1 checked_vma=1 vma_p59_only=1 first_update=1 ... regressions=1
 ```
 
-The current implementation is local and uncommitted. After explicit
-commit/push approval, exact remote readback, matching-image publication, and
-sandbox-capacity admission, obtain separate launch approval and use the same
-full renderer command below with a fresh run id `p58z03`. Do not reuse
+Implementation commit `bea1aabde39c43c13ca4eaefab989301c6e8b46c` is
+published and exact remote readback matched. Require the fetched operator tip
+to contain that commit, then publish/read back the matching image and pass
+sandbox-capacity admission. Obtain separate launch approval before using the
+same full renderer command below with a fresh run id `p58z03`. Do not reuse
 `p58z01`/`p58z02` roots or checkpoints. The fresh target must prove fixed-head
 global/local M=`2048/256`, strict A-B/B-C `0/0`, finite trainer forward and
 16-group backward, then exactly one coherent update-0 optimizer transaction.

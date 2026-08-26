@@ -952,3 +952,22 @@
   or convergence claim is made. No commit, push, image publication,
   Kubernetes mutation, TPU launch, model download, credential change, or
   artifact deletion occurred. A fresh `p58z03` remains separately gated.
+
+## 2026-08-26 UTC — P58.13 publication and latest FrozenLake reconciliation
+
+- The operator branch advanced to FrozenLake P67 full-run promotion
+  `c73c9a6c3676c9a1ba27e9b871b0f2e14ff6adb4` before publication. P58.13 was
+  rebased onto that exact commit; the conflict resolution preserves the new
+  P45/M15 full-run admission and adds the independently exact P58 Zero-HP
+  admission. Native/IS, non-HP Zero, GSM8K, Qwen3-32B, and neighboring tuples
+  remain fail-closed.
+- Post-rebase validation exits zero: V1 Phase4 89/89, P57 146/146, focused
+  fixed-head/profile 22/22, and the complete dependency-bearing image gate.
+  The terminal marker remains `P58_EXACT_IMAGE_CPU_PASS ...
+  qwen4b_fixed_head=1 checked_vma=1 vma_p59_only=1 ... regressions=1`.
+- Implementation commit `bea1aabde39c43c13ca4eaefab989301c6e8b46c` was
+  pushed only to `yuxzhang/canon-zero-tim`; local HEAD, FETCH_HEAD, and the
+  remote-tracking ref matched exactly with ahead/behind `0/0`. `main` was not
+  touched.
+- No image publication, Kubernetes mutation, TPU launch, or `p58z03` target
+  was authorized by this source publication. Those remain separately gated.

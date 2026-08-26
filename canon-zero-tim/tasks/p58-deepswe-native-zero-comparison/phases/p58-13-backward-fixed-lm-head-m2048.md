@@ -2,10 +2,11 @@
 
 ## Status
 
-`LOCAL IMPLEMENTATION + PINNED-IMAGE CONSTRUCTION PASS / TARGET RETRY NOT RUN`
+`IMPLEMENTATION PUBLISHED + PINNED-IMAGE CONSTRUCTION PASS / TARGET RETRY NOT RUN`
 
-The repair is uncommitted and unpushed. Image publication, Kubernetes apply,
-and a fresh target remain separately user-gated.
+Implementation commit `bea1aabde39c43c13ca4eaefab989301c6e8b46c` is
+published and exact remote readback matched. Matching-image publication,
+Kubernetes apply, and a fresh target remain separately user-gated.
 
 ## Immutable trigger
 
@@ -105,9 +106,10 @@ or convergence.
 
 ## Next target gate
 
-After explicit commit/push approval, exact remote readback, matching-image
-publication, sandbox-capacity admission, and separate launch approval, render
-a fresh `p58z03` with `--stage full --arm zero --high-performance`. Do not
+After verifying the operator tip contains implementation commit `bea1aabd`,
+publishing and reading back the matching image, passing sandbox-capacity
+admission, and obtaining separate launch approval, render a fresh `p58z03`
+with `--stage full --arm zero --high-performance`. Do not
 resume or overwrite `p58z01` or `p58z02`.
 
 The fresh target must first prove:

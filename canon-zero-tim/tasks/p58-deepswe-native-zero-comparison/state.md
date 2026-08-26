@@ -2,12 +2,16 @@
 
 ## Current P58.13 Qwen3-4B M2048/P59-only VMA checkpoint (2026-08-26)
 
-- Status: ACTIVE; local implementation and pinned-image construction PASS;
-  target retry not run. Changes are uncommitted and unpushed.
+- Status: ACTIVE; implementation published and pinned-image construction PASS;
+  target retry not run.
 - Source: worktree
   `/home/yuxuan/code_rl_repro/worktrees/p58_fixed_seed_0824`, branch
-  `local/p58-fixed-seed-0824`, based on exact fetched operator tip
-  `e5c596a4e7621e7442606cfc4dbbb39005eba4eb`. `main` is untouched.
+  `local/p58-fixed-seed-0824`. Implementation commit
+  `bea1aabde39c43c13ca4eaefab989301c6e8b46c` is published on
+  `yuxzhang/canon-zero-tim`, rebased over the latest FrozenLake P67 full-run
+  promotion `c73c9a6c3676c9a1ba27e9b871b0f2e14ff6adb4`, and exact
+  local/FETCH_HEAD/remote-tracking readback matched at `0/0`. `main` is
+  untouched.
 - Immutable target fact: `p58z02` proved the P58.12 global JAX seed route and
   returned all 128 Step-0 rows in one 1,514.2-second wave. It contained one
   `MODEL_TIMEOUT` and two `MAX_CONTEXT_LIMIT_REACHED` rows; those were compact
@@ -33,9 +37,10 @@
   exits zero with `P58_EXACT_IMAGE_CPU_PASS ... qwen4b_fixed_head=1
   checked_vma=1 vma_p59_only=1 first_update=1 ... regressions=1`. No
   `/dev/vfio` is visible, so no TPU target is claimed.
-- Next action: only after explicit commit/push approval, remote readback,
-  matching-image publication, sandbox admission, and separate launch approval,
-  render fresh `p58z03` using `--stage full --arm zero --high-performance`.
+- Next action: build and pin an image containing implementation commit
+  `bea1aabde39c43c13ca4eaefab989301c6e8b46c`, rerun the complete image gate,
+  pass sandbox admission, and obtain separate launch approval before rendering
+  fresh `p58z03` using `--stage full --arm zero --high-performance`.
   Never resume or overwrite `p58z01` or `p58z02`.
 - Evidence/phase: `evidence/p58z02_backward_fixed_lm_head_error/` and
   `phases/p58-13-backward-fixed-lm-head-m2048.md`.
