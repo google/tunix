@@ -1,0 +1,62 @@
+{
+  "schema": "canon-p66-g15-evidence-receipt-v1",
+  "verdict": "PASS",
+  "claim": "one-host DP1xTP4 full-Qwen group-0 same-point VJP oracle",
+  "claim_ceiling": "not DP8xTP8/DP16xTP4 target, optimizer-update, convergence, or performance certification",
+  "source": {
+    "head": "1e5f7e835f4babe43a50496a5b998ea32cffcf71",
+    "diff_sha256_at_launch": "b683b426ee21b1ad8a7005a824e196ed7b3f25f7cdba37936221e5b799d149c0",
+    "adapter_sha256": "d5f013912b236373bc6e0ad4a3f105675d646d69d27f030e8f41a623eb9177af",
+    "oracle_module_sha256": "c784eae8fbeb30f5e6a74385b28fcb67d0c66c5e86adee00fa29b2daa8a50003"
+  },
+  "host_gates": {
+    "p66": "16/16 PASS",
+    "p59": "37/37 PASS",
+    "flag_audit": "PASS",
+    "python_bash_diff_hygiene": "PASS"
+  },
+  "pinned_image": {
+    "id": "sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a",
+    "terminal": "P59_TP_SHIM_EXACT_IMAGE_PASS",
+    "manifests": "2x37/37",
+    "p66_unit_data_attention": 2,
+    "raw_log": null,
+    "raw_log_note": "terminal receipt observed directly; gate is reproducible from the checked-in command"
+  },
+  "onehost": {
+    "label": "p66o2_20260826t0010z",
+    "evidence_root": "/mnt/disks/tunix-data/logp_probe_1host/p66_tp4_tp4-vma-oracle_p66o2_20260826t0010z",
+    "zero_tim": "17/17 PASS, 0 FAIL",
+    "optimizer_commits": 0,
+    "engine_vjp_stable_norm": 6.057325839996338,
+    "mapped_gradient_stable_norm": 0.37858307361602783,
+    "oracle_endpoints": 6,
+    "oracle_verdict": "PASS",
+    "observer_neutrality": "PASS",
+    "observer_reasons": 0,
+    "input_reasons": 0,
+    "sha256": {
+      "driver_log": "7ed41661a7120245fd7ccf8ca3b431cf4903be28376eff7413f71c9e171afdf4",
+      "raw_log": "9acac40782e13ac7502df50fa2a962e8f99370b364bfab769e8e7bd2142623a3",
+      "classification": "cfc78137211609997860cb6ad251be1464b10ffde28e736ace720e14ebc6b8b5",
+      "oracle_neutrality": "d50d093754d07e9bc9bbe2d6d8429664808484e45586c0b0953d8530ba2be366",
+      "update": "31a485e3d019a42701488cb81ba000cd41f27aee618dbe0d155cd978b820ef96",
+      "pre_alignment": "12b7d798f3718a14159a8c71d9d6a7a43baafe42fa156683176c335dc46ba846",
+      "alignment": "380d7be21820b47662a6f8570ceb0a7973ca58956ad71d23dcdd8164701ea476"
+    }
+  },
+  "oracle_rel_l2": {
+    "head": 5.711423908790777e-7,
+    "norm": 0.0,
+    "layer_27": 0.0009492803605931642,
+    "layer_14": 0.003332496058949448,
+    "layer_0": 0.005256793921316256,
+    "embed": 0.0,
+    "cap": 0.04
+  },
+  "unverified": [
+    "signed P64 DP8xTP8 G2 replay because no target launch was authorized",
+    "real optimizer commit and convergence because G1.5 intentionally commits zero updates",
+    "production performance because the oracle arm is instrumentation-heavy and performance-ineligible"
+  ]
+}

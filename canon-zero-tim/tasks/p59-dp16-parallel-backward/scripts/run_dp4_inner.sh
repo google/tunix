@@ -10,6 +10,7 @@ set -euo pipefail
 : "${CANON_UPDATE_REPORT:?CANON_UPDATE_REPORT unset}"
 
 case "${CANON_P33_RUN_STAGE:-}:${CANON_P59_DP4_TAIL8:-0}" in
+  backward-no-commit:0) max_steps=1 ;;
   one-update:0) max_steps=1 ;;
   three-update:0) max_steps=3 ;;
   p59-eight-update:1) max_steps=8 ;;

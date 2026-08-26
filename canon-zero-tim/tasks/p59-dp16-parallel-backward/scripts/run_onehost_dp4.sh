@@ -2,8 +2,11 @@
 # Run one immutable Qwen3-1.7B DP4xTP1 P59 arm.
 set -euo pipefail
 
-kind="${1:?usage: run_onehost_dp4.sh <candidate|control|profile|tail|numerical-control|numerical-candidate|v1> <unique-label>}"
-label="${2:?usage: run_onehost_dp4.sh <candidate|control|profile|tail|numerical-control|numerical-candidate|v1> <unique-label>}"
+kind="${1:?usage: run_onehost_dp4.sh <candidate|control|profile|tail|numerical-control|numerical-candidate|p66-ordinary|p66-segmented|v1> <unique-label>}"
+label="${2:?usage: run_onehost_dp4.sh <candidate|control|profile|tail|numerical-control|numerical-candidate|p66-ordinary|p66-segmented|v1> <unique-label>}"
+p66_arm=
+p66=0
+no_commit=0
 case "$kind" in
   candidate) rank_parallel=1; capture=0; numerical=0; tail8=0; run_stage=three-update; expected_steps=3; expected_align=51; recipe=p59-p56-ab ;;
   control) rank_parallel=0; capture=0; numerical=0; tail8=0; run_stage=three-update; expected_steps=3; expected_align=51; recipe=p59-p56-ab ;;
@@ -11,6 +14,8 @@ case "$kind" in
   tail) rank_parallel=1; capture=0; numerical=0; tail8=1; run_stage=p59-eight-update; expected_steps=8; expected_align=136; recipe=p59-p56-ab ;;
   numerical-control) rank_parallel=0; capture=0; numerical=1; tail8=0; run_stage=one-update; expected_steps=1; expected_align=17; recipe=p59-p56-ab ;;
   numerical-candidate) rank_parallel=1; capture=0; numerical=1; tail8=0; run_stage=one-update; expected_steps=1; expected_align=17; recipe=p59-p56-ab ;;
+  p66-ordinary) rank_parallel=0; capture=0; numerical=0; tail8=0; run_stage=backward-no-commit; expected_steps=0; expected_align=17; recipe=p66-backward-gate; p66=1; p66_arm=ordinary; no_commit=1 ;;
+  p66-segmented) rank_parallel=0; capture=0; numerical=0; tail8=0; run_stage=backward-no-commit; expected_steps=0; expected_align=17; recipe=p66-backward-gate; p66=1; p66_arm=segmented; no_commit=1 ;;
   v1) rank_parallel=1; capture=0; numerical=0; tail8=0; run_stage=three-update; expected_steps=3; expected_align=51; recipe=v1-phase4-current-bundle ;;
   *) echo "[P59.DP4] invalid kind: $kind" >&2; exit 2 ;;
 esac
@@ -108,6 +113,7 @@ mkdir -p "$state/wandb" "$state/logs" "$xprof_dir" "$perf_dir"
   echo "[P59.DP4] zero_tim_gate=$expected_align/$expected_align strict expected_fail=0"
   echo "[P59.DP4] deterministic_ab=$deterministic_ab engine_seed=42 max_concurrency=$ab_concurrency max_response_length=$ab_response_length"
   echo "[P61.NUMERICAL] enabled=$numerical capture=$([ "$numerical" = 1 ] && echo full_gradient_and_update || echo none) performance_eligible=$([ "$numerical" = 1 ] && echo 0 || echo 1)"
+  echo "[P66.BACKWARD] enabled=$p66 arm=${p66_arm:-none} capture=$([ "$p66" = 1 ] && echo full_model_before_and_gradient || echo none) optimizer_commits=$([ "$p66" = 1 ] && echo 0 || echo production) performance_eligible=$([ "$p66" = 1 ] && echo 0 || echo 1)"
   echo "[P59.DP4] recipe=$recipe"
   if [ "$kind" = v1 ]; then
     echo "[V1.ONEHOST] bundle=gathered_logprobs,fixed_ar_gather,logprob_step_fusion,continue_decode8,batched_report,batched_evidence,p59_rank_parallel excluded=apc,fixed_lm_head"
@@ -169,13 +175,15 @@ sudo docker run --rm --privileged --net=host --name "$container" \
   -e CANON_P32_TRAIN_ADMITTED=1 \
   -e CANON_P32_DP_REDUCTION_ADMITTED=1 \
   -e CANON_P33_WORKLOAD_LAUNCH_ADMITTED=1 \
-  -e CANON_P33_RUN_STAGE="$run_stage" -e CANON_P33_NO_COMMIT=0 \
+  -e CANON_P33_RUN_STAGE="$run_stage" -e CANON_P33_NO_COMMIT="$no_commit" \
   -e CANON_OPT_STATE_RESIDENT=1 -e CANON_P30_OPT_STATE_OFFLOAD=0 \
   -e CANON_P59_RANK_PARALLEL_BACKWARD="$rank_parallel" \
   -e CANON_P59_DP4_SERIAL_MESH_BRIDGE=1 \
   -e CANON_P59_DP4_TAIL8="$tail8" \
   -e CANON_P60_DETERMINISTIC_AB="$deterministic_ab" \
   -e CANON_P61_BACKWARD_NUMERICAL_DIR="$([ "$numerical" = 1 ] && echo "$state/p61_numerical")" \
+  -e CANON_P66_BACKWARD_ARM="$p66_arm" \
+  -e CANON_P66_BACKWARD_CAPTURE_DIR="$([ "$p66" = 1 ] && echo "$state/p66_backward")" \
   -e CANON_WANDB_RUN_NAME="p59-dp4-${kind}-${label}" \
   -e CANON_PRE_ALIGN_REPORT="$pre" -e CANON_ALIGN_REPORT="$align" \
   -e CANON_UPDATE_REPORT="$update" \
@@ -221,7 +229,17 @@ if [ "$kind" = profile ]; then
   classifier_kind=profile
 fi
 classifier_rc=1
-if [ "$docker_rc" -eq 0 ]; then
+if [ "$docker_rc" -eq 0 ] && [ "$p66" = 1 ]; then
+  set +e
+  PYTHONPATH="$repo" python3 \
+    "$pkg/tests/p66_backward/classify_arm.py" \
+    --arm "$p66_arm" --run-log "$raw" \
+    --pre-alignment-report "$pre" --alignment-report "$align" \
+    --update-report "$update" --capture-root "$state/p66_backward" \
+    --output "$classification" >>"$driver" 2>&1
+  classifier_rc=$?
+  set -e
+elif [ "$docker_rc" -eq 0 ]; then
   set +e
   PYTHONPATH="$repo" python3 "$pkg/tests/p59_backward/classify_and_analyze.py" \
     --kind "$classifier_kind" --workload gsm8k-p59-dp4-tp1 \
@@ -275,6 +293,12 @@ fi
 } | tee -a "$driver"
 
 sha_inputs=("$raw" "$driver" "$pre" "$align" "$update" "$classification")
+if [ "$p66" = 1 ]; then
+  sha_inputs+=(
+    "$state/p66_backward/model_before/manifest.json"
+    "$state/p66_backward/gradient/manifest.json"
+  )
+fi
 if [ -e "$xprof_inspection" ]; then
   sha_inputs+=("$xprof_inspection")
 fi
