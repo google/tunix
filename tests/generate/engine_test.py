@@ -118,7 +118,7 @@ def run_engine_generation(
         out_logprobs.append(np.array(engine.generated_logprobs.get(req_id, [])))
         out_logits.append(np.array(engine.generated_logits.get(req_id, [])))
 
-    from tunix.generate import base_sampler
+    import tunix.generate.sampler_v2 as base_sampler
     return base_sampler.SamplerOutput(
         text=decoded_outputs,
         logits=out_logits if return_logits else [],
@@ -522,7 +522,7 @@ class EngineTest(parameterized.TestCase):
     new_lora_params = nnx.variables(new_transformer, nnx.LoRAParam)
     new_lora_params = jax.tree.map(lambda x: x + 0.1, new_lora_params)
 
-    sampler.sampler.transformer_state = nnx.State({**sampler.sampler.transformer_state, **new_lora_params})
+    sampler.sampler.transformer_state = new_lora_params
     new_logits = run_engine_generation(sampler, 
         input_strings, max_generation_steps=10, return_logits=True
     ).logits
