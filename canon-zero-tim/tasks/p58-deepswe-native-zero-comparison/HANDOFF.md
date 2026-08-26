@@ -1,11 +1,11 @@
 # P58 DeepSWE native-first training handoff
 
-## 2026-08-26 P58.14 disaggregated trainer-mesh override — local only
+## 2026-08-26 P58.14 disaggregated trainer-mesh override — source published
 
-This is the highest-priority P58 handoff. Do not launch the current operator
-tip unchanged. The P58.14 repair is present only as uncommitted work in
-`/home/yuxuan/code_rl_repro/worktrees/p58_fixed_seed_0824`; commit/push still
-requires explicit user approval.
+This is the highest-priority P58 handoff. Implementation commit
+`dce0e93777548b7623e4f41702144f8d00f242f5` is published on
+`yuxzhang/canon-zero-tim`. Do not launch an older operator tip or reuse the
+`p58z03` runtime image.
 
 Immutable `p58z03` facts:
 
@@ -38,11 +38,12 @@ negative, colocated regressions, and the complete dependency-image CPU gate:
 P58_EXACT_IMAGE_CPU_PASS ... disaggregated_trainer_mesh=3 ... regressions=1
 ```
 
-The local image has no `/dev/vfio`; this is not Pathways/TPU evidence. After
-explicit source-publication approval, the execution sequence is: fetch/read
-back the final operator SHA, build and pin its matching image, rerun the full
-gate, pass sandbox capacity, obtain separate launch approval, and render fresh
-`p58z04`. Require the same placement lines with `64/64`, then completed
+The local image has no `/dev/vfio`; this is not Pathways/TPU evidence. The
+execution sequence is: fetch/read back the final operator SHA and require it
+to contain `dce0e93777548b7623e4f41702144f8d00f242f5`, build and pin its
+matching image, rerun the full gate, pass sandbox capacity, obtain separate
+launch approval, and render fresh `p58z04`. Require the same placement lines
+with `64/64`, then completed
 trainer old/current logps, strict A=B=C, finite nonzero 16-group backward, and
 the coherent update-0 transaction. A passing first update continues the same
 1,000-update job. Never resume or overwrite `p58z01` through `p58z03`.

@@ -80,7 +80,7 @@ the existing numerical program.
 | P58.11 | Qwen3-4B strict Zero-HP checked-VMA admission | Exact P58 Zero/full profile alone derives checked-VMA, first-update, and overflow-safe clip; Native/neighbor negatives pass; complete pinned-image gate passes; target remains separately launch-gated | source/construction completed; `p58z01` target failed before first generation on seed route |
 | P58.12 | JAX engine seed route and bounded abort cleanup | P58 uses `EngineArgs.seed=42` with no JAX per-request seed; exact route/manifest/postflight and cleanup retry regressions plus complete pinned-image gate pass | completed source repair; `p58z02` proved route and reached trainer forward |
 | P58.13 | Qwen3-4B trainer-logprob M2048 and P59-only VMA scoping | Exact `(2560,8)` fixed-head registration, Qwen3-32B negative, FrozenLake Wave-5 P67 bundle, profile/environment/Python fail-closed gates, and complete pinned-image PASS | completed source repair; `p58z03` proved fixed-head admission and exposed P58.14 before execution |
-| P58.14 | Disaggregated canonical trainer-mesh binding | Adapter receives trainer state, executes differentiable forward on the matching trainer role, retains rollout serving placement, rejects DP/TP/partial-overlap drift, and passes disjoint plus colocated image regressions | active — local implementation and dependency-image CPU gate PASS; source uncommitted; target retry not run |
+| P58.14 | Disaggregated canonical trainer-mesh binding | Adapter receives trainer state, executes differentiable forward on the matching trainer role, retains rollout serving placement, rejects DP/TP/partial-overlap drift, and passes disjoint plus colocated image regressions | active — implementation `dce0e937` published; dependency-image CPU gate PASS; target retry not run |
 
 Exactly one phase may be active. Commit, push, image publication, Kubernetes
 render/application, and TPU execution each remain separately user-gated.
@@ -95,9 +95,9 @@ P58.7's historical target remains not run and is superseded for new Zero
 launches by P58.11 plus the P58.12 seed-route correction. P58.9 and P58.10
 source are published and read back. P58.13 implementation
 `bea1aabde39c43c13ca4eaefab989301c6e8b46c` is also published and read back;
-its `p58z03` target is immutable failure evidence. P58.14 remains local and
-uncommitted. A fresh `p58z04` target begins only after explicit source
-publication approval, exact matching-image readback, sandbox-capacity
+its `p58z03` target is immutable failure evidence. P58.14 implementation
+`dce0e93777548b7623e4f41702144f8d00f242f5` is published. A fresh `p58z04`
+target begins only after exact source/image readback, sandbox-capacity
 admission, and separate launch approval.
 No remote execution is authorized by this plan alone.
 

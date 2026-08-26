@@ -2,8 +2,9 @@
 
 ## Current P58.14 disaggregated trainer-mesh checkpoint (2026-08-26)
 
-- Status: local source repair and dependency-image CPU gate PASS; source is
-  uncommitted and no 128-TPU retry has run.
+- Status: source implementation
+  `dce0e93777548b7623e4f41702144f8d00f242f5` published and dependency-image
+  CPU gate PASS; no 128-TPU retry has run.
 - Source intake: clean worktree
   `/home/yuxuan/code_rl_repro/worktrees/p58_fixed_seed_0824`, branch
   `local/p58-fixed-seed-0824`, initially pulled at
@@ -39,9 +40,10 @@
   regressions=1`. The image has no `/dev/vfio`, so no TPU/Pathways claim is
   made. An unrelated pulled stale flag-count assertion was corrected from 385
   to the authoritative 386; its 31-test suite passes.
-- Next action: only after explicit approval, commit and push the source repair.
-  Then build/pin a matching image, rerun the complete gate, pass sandbox
-  admission, obtain separate launch approval, and render fresh `p58z04`.
+- Next action: fetch the final operator tip and prove it contains implementation
+  commit `dce0e93777548b7623e4f41702144f8d00f242f5`. Then build/pin a matching
+  image, rerun the complete gate, pass sandbox admission, obtain separate
+  launch approval, and render fresh `p58z04`.
   Require the two `[CANON_ADAPTER.PLACEMENT]` receipts, completed trainer
   logprobs, strict A=B=C, finite nonzero backward, and the coherent update-0
   transaction before continuing the same 1,000-update job. Never resume or

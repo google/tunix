@@ -1,7 +1,7 @@
 # P58.14 — DeepSWE Zero-HP disaggregated trainer-mesh binding
 
-Status: LOCAL IMPLEMENTATION + DEPENDENCY-IMAGE CPU GATE PASS; 128-TPU
-TARGET RETRY NOT RUN.
+Status: SOURCE PUBLISHED + DEPENDENCY-IMAGE CPU GATE PASS; 128-TPU TARGET
+RETRY NOT RUN.
 
 ## Trigger
 
@@ -90,11 +90,13 @@ full Qwen3-4B Pallas forward/backward, A=B=C, or an optimizer transaction.
 
 ## Next gate
 
-The repair is local and uncommitted. Commit/push, image publication,
-Kubernetes rendering/application, and TPU execution remain separately
-user-gated. After explicit source-publication approval, build and pin a
-matching image, rerun the complete image gate, pass sandbox admission, obtain
-separate launch approval, and use a fresh Attempt-0 id such as `p58z04`.
+Implementation commit
+`dce0e93777548b7623e4f41702144f8d00f242f5` is published on
+`yuxzhang/canon-zero-tim`. Image publication, Kubernetes
+rendering/application, and TPU execution remain separately user-gated. Build
+and pin a matching image, rerun the complete image gate, pass sandbox
+admission, obtain separate launch approval, and use fresh Attempt-0 id
+`p58z04`.
 Never resume or overwrite `p58z01`, `p58z02`, or `p58z03`.
 
 The fresh target must pass placement receipts, complete trainer old/current

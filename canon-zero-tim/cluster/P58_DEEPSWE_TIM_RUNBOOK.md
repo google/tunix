@@ -18,7 +18,7 @@ P58 does not modify `main`. Rendering and local validation do not authorize a
 Kubernetes apply. An operator must separately approve image publication and
 each launch.
 
-## 2026-08-26 P58.14 trainer-mesh retry override — local source only
+## 2026-08-26 P58.14 trainer-mesh retry override — source published
 
 This section supersedes the P58.13 instruction to launch `p58z03`. That target
 already ran from `8eb65480d3705d96ab282799ad5a6c1901596248`, completed all
@@ -48,11 +48,12 @@ The full local dependency-image CPU gate passes with:
 P58_EXACT_IMAGE_CPU_PASS ... disaggregated_trainer_mesh=3 ... regressions=1
 ```
 
-This does not prove 128-chip Pathways execution. The repair is currently
-uncommitted. Do not render or launch until the user separately approves source
-publication, the final operator SHA is read back, and a matching digest-pinned
-image passes the complete gate plus sandbox admission. Then obtain separate
-launch approval and use a fresh Attempt-0 id such as `p58z04`.
+This does not prove 128-chip Pathways execution. Implementation commit
+`dce0e93777548b7623e4f41702144f8d00f242f5` is published. Do not render or
+launch until the final operator SHA is read back and shown to contain that
+commit, and a matching digest-pinned image passes the complete gate plus
+sandbox admission. Then obtain separate launch approval and use fresh
+Attempt-0 id `p58z04`.
 
 At startup require exactly one of each:
 

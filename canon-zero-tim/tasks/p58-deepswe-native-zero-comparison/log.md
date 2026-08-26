@@ -30,10 +30,13 @@
   `P58_EXACT_IMAGE_CPU_PASS ... disaggregated_trainer_mesh=3 ...
   regressions=1`. The image reports no `/dev/vfio`; no Pathways/TPU target,
   Qwen3-4B full backward, alignment, or optimizer claim is made.
-- External boundary: local code, tests, phase ledger, runbook, and handoff
-  only. No commit, push, image publication, Kubernetes mutation, TPU launch,
-  credential access, or artifact deletion occurred. Fresh `p58z04` remains
-  separately publication/image/sandbox/launch gated.
+- Publication: the user explicitly approved commit/push. Implementation
+  commit `dce0e93777548b7623e4f41702144f8d00f242f5` was pushed only to
+  `yuxzhang/canon-zero-tim`; `main` remains untouched. Final remote readback
+  is recorded by the following documentation commit.
+- External boundary: source commit/push only. No image publication,
+  Kubernetes mutation, TPU launch, credential access, or artifact deletion
+  occurred. Fresh `p58z04` remains separately image/sandbox/launch gated.
 
 ## 2026-08-26 UTC — P58 Attempt 0 (`p58z01`) halted on Step 0 per-request seed rejection
 
