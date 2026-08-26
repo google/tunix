@@ -1,5 +1,23 @@
 # Log
 
+## 2026-08-26 UTC — P58 Attempt 0 (`p58z01`) halted on Step 0 per-request seed rejection
+
+- Type: target execution / root cause diagnosis / evidence preservation
+- Workload: `canon-p58-ds4b-zero-hp-full-p58z01` (Qwen3-4B-Instruct-2507, DP8xTP8 Rollout + DP8xTP8 Trainer = 128 TPU v5p chips, 1012 clean promoted R2E tasks, B8 x G16 = 128 trajectories per batch).
+- Milestones verified:
+  - 32/32 worker pods admitted and mesh-connected across 128 TPU v5p devices.
+  - 128 parallel `SWEEnv` / `RepoEnv` Kubernetes sandbox pods launched concurrently on `cpu-np`.
+  - vLLM warmup pass completed across 25 subgraphs (43.53s) and Hybrid KV Cache initialized (`num_blocks=1632956`).
+- Root cause:
+  - Step 0 first model generation call failed with `ValueError: JAX does not support per-request seed.`
+  - `base_rollout_dict["seed"] = SEED` was set in `train_deepswe_nb.py` and passed via `rollout_config.seed` to `vllm_rollout.py:199`, where `vllm_sampler.py:631` set `sampling_params.seed = seed`.
+  - vLLM's TPU/JAX backend explicitly rejects per-request `SamplingParams.seed`.
+  - During emergency trajectory engine abort cleanup, `r2egym_runtime_patch.py:delete_and_confirm` encountered `AttributeError: 'NoneType' object has no attribute 'decode'` due to empty error bodies in `kubernetes/client/api_client.py:190`.
+- Evidence preserved:
+  - `canon-zero-tim/tasks/p58-deepswe-native-zero-comparison/evidence/p58z01_attempt0_seed_exception/run.log` (16,656 lines)
+  - `canon-zero-tim/tasks/p58-deepswe-native-zero-comparison/evidence/p58z01_attempt0_seed_exception/INCIDENT_REPORT.md`
+  - `canon-zero-tim/tasks/p58-deepswe-native-zero-comparison/evidence/p58z01_attempt0_seed_exception/jobset_describe.txt`
+
 ## 2026-08-26 UTC — P58.11 checked-VMA Zero-HP implementation published
 
 - Type: strict Zero-HP production admission / numerical repair integration /
