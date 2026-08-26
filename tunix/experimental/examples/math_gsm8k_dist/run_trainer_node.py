@@ -347,7 +347,9 @@ def _build_maxtext_config(args, num_devices: int) -> Any:
       "dtype=bfloat16",
       "weight_dtype=bfloat16",
       "grad_dtype=float32",
-      "enable_tensorboard=False",
+      "enable_tensorboard=True",
+      "enable_wandb=True",
+      "wandb_project=qwen3-grpo",
       "record_internal_nn_metrics=False",
       "init_weights_seed=42",
   ])
