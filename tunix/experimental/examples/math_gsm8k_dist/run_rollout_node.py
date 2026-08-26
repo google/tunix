@@ -79,6 +79,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       "--model_dir", type=str, default=os.getenv("MODEL_DIR", "")
   )
   parser.add_argument("--tokenizer_path", type=str, default="")
+  parser.add_argument("--mesh_fsdp", type=int, default=1)
+  parser.add_argument("--mesh_tp", type=int, default=2)
   parser.add_argument("--max_prompt_length", type=int, default=512)
   parser.add_argument("--max_response_length", type=int, default=128)
   parser.add_argument("--use_lora", action="store_true")
@@ -105,14 +107,22 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   return parser.parse_args(argv)
 
 
-def _create_rollout_mesh() -> Mesh:
+def _create_rollout_mesh(args) -> Mesh:
   import jax  # pylint: disable=g-import-not-at-top
   from jax.experimental import mesh_utils  # pylint: disable=g-import-not-at-top
   from jax.sharding import Mesh  # pylint: disable=g-import-not-at-top
 
-  shape = (1, jax.device_count())
+  shape = (args.mesh_fsdp, args.mesh_tp)
+  if args.mesh_fsdp * args.mesh_tp != jax.device_count():
+    raise ValueError(
+        "Rollout mesh dimensions must match visible device count: "
+        f"mesh_fsdp={args.mesh_fsdp} mesh_tp={args.mesh_tp} "
+        f"device_count={jax.device_count()}"
+    )
   devices = mesh_utils.create_device_mesh(shape, jax.devices())
-  return Mesh(devices, axis_names=("fsdp", "tp"))
+  mesh = Mesh(devices, axis_names=("fsdp", "tp"))
+  logging.info("Rollout mesh: %s", mesh)
+  return mesh
 
 
 def _create_vanilla_worker(args, tokenizer):
@@ -134,7 +144,7 @@ def _create_vanilla_worker(args, tokenizer):
   )
 
   logging.info("Creating native sampler on the rollout mesh...")
-  mesh = _create_rollout_mesh()
+  mesh = _create_rollout_mesh(args)
   with mesh:
     model = models.create_model(
         args.model_name, args.model_dir or args.model_id, mesh
@@ -181,7 +191,6 @@ def _create_vanilla_worker(args, tokenizer):
 def _create_vllm_worker(args, tokenizer):
   """Creates an in-process vLLM sampler rollout worker instance."""
   vllm_sampler = _import_vllm_sampler()
-  import jax  # pylint: disable=g-import-not-at-top
   from tunix.experimental.rollout import (  # pylint: disable=g-import-not-at-top
       inprocess_vllm_sampler_adapter,
   )
@@ -209,14 +218,15 @@ def _create_vllm_worker(args, tokenizer):
       lora_to_hf_mappings=mapping_vllm_jax.LORA_TO_HF_MAPPINGS
   )
   vllm_model = args.model_dir or args.model_id
-  rollout_mesh = _create_rollout_mesh()
+  rollout_mesh = _create_rollout_mesh(args)
   max_model_len = args.max_prompt_length + args.max_response_length
   logging.info(
       "Creating vLLM config for model=%s mesh=%s tensor_parallel_size=%d "
-      "max_model_len=%d...",
+      "data_parallel_size=%d max_model_len=%d...",
       vllm_model,
       rollout_mesh,
-      jax.device_count(),
+      args.mesh_tp,
+      args.mesh_fsdp,
       max_model_len,
   )
   lora_config = None
@@ -227,8 +237,8 @@ def _create_vllm_worker(args, tokenizer):
     }
   vllm_config = vllm_sampler.VllmConfig(
       mesh=rollout_mesh,
-      tensor_parallel_size=jax.device_count(),
-      data_parallel_size=1,
+      tensor_parallel_size=args.mesh_tp,
+      data_parallel_size=args.mesh_fsdp,
       return_logprobs=True,
       lora_config=lora_config,
       mapping_config=mapping_config,

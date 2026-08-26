@@ -60,15 +60,21 @@ DRAIN_START_SECONDS=0
 FORCE_KILL=0
 
 TRAINER_TPU_CHIPS=${TRAINER_TPU_CHIPS:-0,1}
-TRAINER_FSDP=${TRAINER_FSDP:-2}
+TRAINER_FSDP=${TRAINER_FSDP:-1}
+TRAINER_TP=${TRAINER_TP:-2}
 ROLLOUT_TPU_CHIPS=${ROLLOUT_TPU_CHIPS:-2,3}
+ROLLOUT_FSDP=${ROLLOUT_FSDP:-1}
+ROLLOUT_TP=${ROLLOUT_TP:-2}
 INFERENCE_TPU_CHIPS=${INFERENCE_TPU_CHIPS:-}
 TPU_CHIPS_PER_HOST_BOUNDS=${TPU_CHIPS_PER_HOST_BOUNDS:-1,2,1}
 TPU_HOST_BOUNDS=${TPU_HOST_BOUNDS:-1,1,1}
 # If OOM, try the following settings (assume 8 chips per host):
 # TRAINER_TPU_CHIPS=${TRAINER_TPU_CHIPS:-0,1,2,3}
-# TRAINER_FSDP=${TRAINER_FSDP:-4}
+# TRAINER_FSDP=${TRAINER_FSDP:-1}
+# TRAINER_TP=${TRAINER_TP:-4}
 # ROLLOUT_TPU_CHIPS=${ROLLOUT_TPU_CHIPS:-4,5,6,7}
+# ROLLOUT_FSDP=${ROLLOUT_FSDP:-1}
+# ROLLOUT_TP=${ROLLOUT_TP:-4}
 # INFERENCE_TPU_CHIPS=${INFERENCE_TPU_CHIPS:-}
 # TPU_CHIPS_PER_HOST_BOUNDS=${TPU_CHIPS_PER_HOST_BOUNDS:-1,4,1}
 # TPU_HOST_BOUNDS=${TPU_HOST_BOUNDS:-1,1,1}
@@ -293,7 +299,7 @@ PY
 
 echo "=================================================="
 echo "Starting distributed GSM8K GRPO chain demo locally"
-echo "  rollout engine: vLLM"
+echo "  rollout sampler: $SAMPLER"
 echo "  model dir:      $MODEL_DIR"
 echo "  tokenizer path: $TOKENIZER_PATH"
 echo "  python:         $PYTHON_BIN"
@@ -309,7 +315,9 @@ echo "  mini batch:     $MINI_BATCH_SIZE"
 echo "  use lora:       $USE_LORA"
 echo "  sampler:        $SAMPLER"
 echo "  trainer chips:  $TRAINER_TPU_CHIPS"
+echo "  trainer mesh:   fsdp=$TRAINER_FSDP tp=$TRAINER_TP"
 echo "  rollout chips:  $ROLLOUT_TPU_CHIPS"
+echo "  rollout mesh:   fsdp=$ROLLOUT_FSDP tp=$ROLLOUT_TP"
 echo "  inference:      $RUN_INFERENCE_NODE"
 echo "  inference addr: ${INFERENCE_ADDR:-<none>}"
 echo "  inference chips:${INFERENCE_TPU_CHIPS:-<unset>}"
@@ -354,6 +362,7 @@ echo "Launching trainer node on TPU chips $TRAINER_TPU_CHIPS..."
 
     --port="$TRAINER_PORT"
     --mesh_fsdp="$TRAINER_FSDP"
+    --mesh_tp="$TRAINER_TP"
     --model_id="$MODEL_ID"
     --model_dir="$MODEL_DIR"
     --model_name="$MODEL_NAME"
@@ -394,7 +403,7 @@ TRAINER_PID=$!
 echo "Trainer pid=$TRAINER_PID log=$TRAINER_LOG"
 print_process_debug "trainer" "$TRAINER_PID"
 
-echo "Launching vLLM rollout node on TPU chips $ROLLOUT_TPU_CHIPS..."
+echo "Launching rollout node with sampler=$SAMPLER on TPU chips $ROLLOUT_TPU_CHIPS..."
 (
   ROLLOUT_CMD=(
     "$PYTHON_BIN" -m tunix.experimental.distributed.runtime.main
@@ -406,6 +415,8 @@ echo "Launching vLLM rollout node on TPU chips $ROLLOUT_TPU_CHIPS..."
     --model_dir="$MODEL_DIR"
     --model_name="$MODEL_NAME"
     --sampler="$SAMPLER"
+    --mesh_fsdp="$ROLLOUT_FSDP"
+    --mesh_tp="$ROLLOUT_TP"
     --tokenizer_path="$TOKENIZER_PATH"
     --max_prompt_length="$MAX_PROMPT_LENGTH"
     --max_response_length="$MAX_RESPONSE_LENGTH"
