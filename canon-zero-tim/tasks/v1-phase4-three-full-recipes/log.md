@@ -835,3 +835,14 @@
   convergence, performance, or XProf claim.
 - Documentation-only change. No runtime source, commit, push, render, JobSet,
   or TPU state changed.
+
+## 2026-08-26 — P4.10 runtime source frozen
+
+- Runtime/carrier/test/handoff CL:
+  `47219e0729d5bbdbe43bc407e19aa056c80f02c3` on fetched base
+  `ff0acaaa2ad6bbd9dcdf0589c343a7c13f242c9a`.
+- Commit drawback records that the two-arm carrier costs two 64-chip jobs and
+  remains construction-only: DP8×TP8 alignment, trainer forward/backward,
+  optimizer, convergence, performance, and XProf are target-unverified.
+- This follow-up changes registries and release ledgers only. No renderer was
+  executed from the commit, no JobSet was launched, and no TPU state changed.

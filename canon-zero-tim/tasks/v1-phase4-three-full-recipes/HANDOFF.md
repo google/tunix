@@ -7,6 +7,7 @@ This section supersedes every later `START HERE` block.
 - Worktree: `/mnt/disks/tunix-data/worktrees/v1_fl_tp8_ab_diag_0826`
 - Branch: `local/v1-fl-tp8-ab-diag-0826`
 - Development base: fetched operator tip `ff0acaaa2ad6bbd9dcdf0589c343a7c13f242c9a`
+- Runtime/source CL: `47219e0729d5bbdbe43bc407e19aa056c80f02c3`
 - Current phase: `phases/v1-p4-10-frozenlake-tp8-ab-recovery.md`
 - Publication state: the user approved this P4.10 CL for commit and push on
   2026-08-26. The exact published SHA is the remote branch tip containing this
