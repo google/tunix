@@ -22,6 +22,7 @@ the semantic Perfetto timeline.
 | V1.P4.9 | Promote the P66 checked-VMA repair into the three exact full recipes and prepare one simultaneous wave | exact-profile admission; first-update precommit/optimizer hard receipts; host and immutable-image gates; three fresh manifests only after publication | active; repair published through `299fca0c`, host/image and TP4 ring/gather green; user-owned P45/M15 DP8xTP8 full relaunch and classification pending |
 | V1.P4.10 | Localize the post-P66 FrozenLake TP8 forward regression with a production-geometry, pre-backward matched pair | P45 p66-off vs serving-scope render/resolved-env; finite A−B, exact B−C, depth floor, controlled zero-commit exit; scoped TP4/TP8 P59 and full pinned-image before publication | complete; Wave 5 both arms target-green at strict A−B/B−C `0/0`, serving-scope candidate accepted |
 | V1.P4.11 | Promote P67 P59-only VMA scoping into the exact P45 and M15 full recipes | two-manifest production admission, host/full-image gates, then independent 300-update target verdicts | implementation complete; host/full-image PASS, publication identity requires remote read-back, and both 300-update targets remain pending |
+| V1.P4.12 | Repair the stale G6 checkpoint admission exposed by Attempt 10 | one checkpoint source of truth; legacy-10 and primary-300 positives; wrong identity/cadence negatives; host and immutable-image gates; then fresh target first update | source published by current CL; host and immutable image PASS; target first gradient sink/AdamW not rerun |
 
 ## Decisions
 
@@ -72,3 +73,10 @@ the semantic Perfetto timeline.
   only the scoped candidate into the exact FrozenLake full profile. The user
   waived another M15 scope precheck; P45 and M15/main full runs are the first
   M15 serving and both-workload backward/optimizer/convergence target gates.
+- Decision (2026-08-26 Attempt 10): both FrozenLake full runs prove strict
+  Step-0 A-B/B-C `0/0`, then stop at the first of 32 gradient sinks because
+  the trainer duplicated a historical checkpoint-interval whitelist. This is
+  not a Zero-TIM or numerical backward red. Reuse the canonical checkpoint
+  parser in the G6 guard; do not change the final-only cadence or bypass the
+  guard. The full backward, AdamW, convergence, and checkpoint claims remain
+  target-unverified.

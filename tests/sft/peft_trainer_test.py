@@ -1437,10 +1437,48 @@ class PeftTrainerTest(parameterized.TestCase):
         make_trainer(None)._validate_precomputed_gradient_contract()
       make_trainer(p45_contract)._validate_precomputed_gradient_contract()
 
+    for candidate, split in (("", ""), ("m15", "main")):
+      primary = {
+          **env,
+          "CANON_P57_RUN_KIND": "train",
+          "CANON_P57_TIM_ARM": "zero",
+          "CANON_P57_EXPECTED_UPDATES": "300",
+          "CANON_P57_WORKLOAD_CANDIDATE": candidate,
+          "CANON_P57_DATA_SPLIT": split,
+          "CANON_FROZENLAKE_CKPT_INTERVAL": "300",
+          "CANON_FROZENLAKE_CKPT_MILESTONE_INTERVAL": "0",
+      }
+      with self.subTest(candidate=candidate or "p45"):
+        with mock.patch.dict(os.environ, primary, clear=True):
+          make_trainer(p45_contract)._validate_precomputed_gradient_contract()
+
     drifted = {**env, "CANON_FROZENLAKE_CKPT_INTERVAL": "11"}
     with mock.patch.dict(os.environ, drifted, clear=True):
       with self.assertRaisesRegex(ValueError, "checkpointing disabled"):
         make_trainer(p45_contract)._validate_precomputed_gradient_contract()
+
+    primary = {
+        **env,
+        "CANON_P57_RUN_KIND": "train",
+        "CANON_P57_TIM_ARM": "zero",
+        "CANON_P57_EXPECTED_UPDATES": "300",
+        "CANON_P57_WORKLOAD_CANDIDATE": "m15",
+        "CANON_P57_DATA_SPLIT": "main",
+        "CANON_FROZENLAKE_CKPT_INTERVAL": "300",
+        "CANON_FROZENLAKE_CKPT_MILESTONE_INTERVAL": "0",
+    }
+    for key, value in (
+        ("CANON_P32_WORKLOAD", "frozenlake"),
+        ("CANON_P57_RUN_KIND", "calibration"),
+        ("CANON_P57_EXPECTED_UPDATES", "200"),
+        ("CANON_P57_DATA_SPLIT", "selection"),
+        ("CANON_FROZENLAKE_CKPT_INTERVAL", "10"),
+    ):
+      with self.subTest(drift=key):
+        drifted = {**primary, key: value}
+        with mock.patch.dict(os.environ, drifted, clear=True):
+          with self.assertRaisesRegex(ValueError, "checkpointing disabled"):
+            make_trainer(p45_contract)._validate_precomputed_gradient_contract()
 
   def test_p31_precomputed_sixteen_microstep_update(self):
     config = peft_trainer.TrainingConfig(

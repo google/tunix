@@ -869,3 +869,37 @@
 - Claim ceiling: P45 serving-forward recovery is target-verified. M15 serving
   and both full backward/AdamW/performance/convergence paths remain target
   unverified. No commit, push, manifest render, JobSet or TPU full run occurred.
+
+## 2026-08-26T20:31:08Z — Attempt-10 checkpoint admission first red repaired locally
+
+- Type: target failure classification / control-contract repair / admission.
+- Evidence: source `8eb65480d3705d96ab282799ad5a6c1901596248`, immutable directory
+  `evidence/v1_hp_three_full_attempt10_20260826/`, all 5 checksum entries PASS.
+  P45 has 48,753 actions and M15 122,162; both strict Step-0 boundaries are
+  `0/0`. Each finishes reverse group 1/32 through all 36 layers, then stops at
+  the first gradient sink. No gradient accumulation, precommit, AdamW, weight
+  sync, or checkpoint ran.
+- Cause: the P57 checkpoint parser and renderer correctly register final-only
+  interval 300, but `peft_trainer.py` retained a second interval-10 whitelist.
+  The older handoff claim that `CANON_P32_WORKLOAD` was absent is withdrawn:
+  both logs prove DP8xTP8 P32 admission and the profile itself fail-closes on
+  that identity.
+- Action: bind the G6 guard to `frozenlake_checkpoint.from_env()` and
+  `require_p45()`. Preserve legacy interval 10; admit interval 300 only for
+  the exact P57 primary tuple. Add positive P45/M15-300 tests and wrong
+  workload/run-kind/horizon/split/cadence negatives.
+- Validation: pure checkpoint 15/15, Phase4 89/89, P57 146/146, syntax and
+  diff hygiene PASS. Bare-host trainer test is `INCONCLUSIVE_INFRASTRUCTURE`
+  because `chex` is absent; the immutable production image executes that real
+  trainer test successfully and ends the complete
+  `V1_HP_EXACT_IMAGE_PASS ... manifests=3`. Its raw output was not durably
+  saved, so the image result is admission-grade.
+- Claim boundary: this repair changes admission only, not forward, backward,
+  loss, gradient, optimizer, or checkpoint scheduling. Post-fix target first
+  sink, 32/32 reverse, AdamW, convergence, performance, and final checkpoint
+  remain unrun. No commit, push, render, launch, or TPU mutation occurred.
+- Downside/rollback: `PeftTrainer` gains a dependency on the pure FrozenLake
+  contract module and retains historical P45 private naming for a P45/M15
+  shared contract. Reverting the helper/test change is mechanically isolated,
+  but would deliberately restore the interval-300 launch blocker; never mask
+  it by changing the registered final-only cadence or disabling checkpoints.

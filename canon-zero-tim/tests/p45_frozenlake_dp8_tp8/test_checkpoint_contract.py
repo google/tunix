@@ -352,6 +352,10 @@ class FrozenLakeCheckpointContractTest(unittest.TestCase):
 
     trainer = (_ROOT / "tunix/sft/peft_trainer.py").read_text()
     self.assertIn("_p45_precomputed_checkpointing_admitted", trainer)
+    self.assertIn("frozenlake_checkpoint.from_env(environ)", trainer)
+    self.assertNotIn(
+        '"CANON_FROZENLAKE_CKPT_INTERVAL": "10"', trainer
+    )
     self.assertIn("committed ", trainer)
     self.assertIn("P45 checkpoint contract is admitted", trainer)
     self.assertIn("step=self.config.checkpoint_restore_step", trainer)

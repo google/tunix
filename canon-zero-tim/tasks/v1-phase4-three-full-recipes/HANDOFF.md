@@ -1,5 +1,47 @@
 # V1 Phase4 three-full handoff
 
+## START HERE — Attempt 10 checkpoint-admission repair; local gates green, target not rerun
+
+This section supersedes every later `START HERE` block.
+
+Attempt 10 launched P45 and M15/main from
+`8eb65480d3705d96ab282799ad5a6c1901596248`. Both Step-0 strict pre-alignment
+gates are real target greens: P45 has 48,753 action tokens and M15 has 122,162,
+with A-B/B-C `0/0` in both runs. Each run then completed the head and all 36
+decoder-layer VJPs for reverse group 1/32 and reached the first gradient sink.
+Neither completed the remaining 31 groups, gradient accumulation, the
+first-update precommit gate, AdamW, weight sync, evaluation, or checkpoint.
+
+The first red is a stale duplicated checkpoint admission in
+`tunix/sft/peft_trainer.py`: it still hard-coded the historical ten-update
+P45 cadence after `tunix/rl/frozenlake_checkpoint.py` and the exact P57
+profiles moved primary P45/M15 runs to final-only interval 300. Contrary to
+the older note at the end of this file, `CANON_P32_WORKLOAD` was present and
+correct; both raw logs print `P32 admission arithmetic OK: DP8xTP8`, and the
+profile could not otherwise have loaded.
+
+The local repair makes the G6 guard consume the existing fail-closed
+`frozenlake_checkpoint.from_env()` plus `require_p45()` source of truth. It
+retains the historical interval-10 contract, admits interval 300 only for the
+exact registered P57 primary identity, and rejects wrong workload, run kind,
+horizon, candidate/split, or cadence. It does not change loss, gradient,
+optimizer, checkpoint scheduling, forward kernels, or backward kernels.
+
+Local admission on base `3820b168` passes checkpoint contract 15/15, Phase4
+89/89, P57 146/146, Python syntax, and diff hygiene. The immutable image
+`sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`
+executes the real trainer positive/negative gate and ends with the complete
+`V1_HP_EXACT_IMAGE_PASS ... manifests=3`. The image output is an execution
+transcript without a durable raw-log SHA, so it is admission-grade only.
+
+This CL publishes the repair and its admission ledger; its authoritative
+identity is the exact remote-read SHA after push. No fresh render, relaunch, or
+optimizer target transaction has occurred for this repair. After remote exact
+SHA read-back, render fresh P45 and M15 full identities and launch both. The
+first required target evidence is one complete 32/32 reverse, finite/nonzero
+precommit receipt, valid AdamW receipt, weight sync, and policy step 1; strict
+Zero-TIM remains fatal at every step.
+
 ## START HERE — P4.11 P67 FrozenLake full promotion; prepare two jobs, not launched
 
 This section supersedes every later `START HERE` block.

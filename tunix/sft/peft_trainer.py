@@ -39,6 +39,7 @@ from tunix.perf import metrics as perf_metrics
 from tunix.perf import trace as perf_trace
 from tunix.perf.experimental import constants as perf_constants
 from tunix.perf.experimental import tracer as perf_tracer_lib
+from tunix.rl import frozenlake_checkpoint
 from tunix.sft import checkpoint_manager
 from tunix.sft import checkpoint_options
 from tunix.sft import hooks
@@ -53,10 +54,8 @@ _ModelInputT = Dict[str, ArrayLike]
 P = ParamSpec("P")
 MetricsLogger = sft_metrics_logger.MetricsLogger
 MetricsLoggerOptions = sft_metrics_logger.MetricsLoggerOptions
-_P45_PRECOMPUTED_CHECKPOINT_CONTRACT = "p45-frozenlake-checkpoint-v1"
-_P45_CHECKPOINT_ROOT = (
-    "gs://yuxzhang-tunix-models/canon-zero-tim/checkpoints/frozenlake"
-)
+_P45_PRECOMPUTED_CHECKPOINT_CONTRACT = frozenlake_checkpoint.SCHEMA
+_P45_CHECKPOINT_ROOT = frozenlake_checkpoint.GCS_ROOT
 
 
 @dataclasses.dataclass(slots=True, kw_only=True)
@@ -409,31 +408,22 @@ def _requires_precomputed_gradient_accumulator(environ) -> bool:
 
 
 def _p45_precomputed_checkpointing_admitted(config, environ) -> bool:
-  """Admits checkpoints only for the signed committed P45 transaction."""
+  """Admits checkpoints only for a registered FrozenLake transaction."""
   if (
       config.precomputed_gradient_checkpointing_contract
       != _P45_PRECOMPUTED_CHECKPOINT_CONTRACT
   ):
     return False
-  tag = environ.get("CANON_FROZENLAKE_CKPT_TAG", "")
-  mode = environ.get("CANON_FROZENLAKE_CKPT_MODE", "")
-  required = {
-      "CANON_P33_WORKLOAD_LAUNCH_ADMITTED": "1",
-      "CANON_P32_WORKLOAD": "frozenlake-dp8-tp8",
-      "CANON_P33_RUN_STAGE": "full",
-      "CANON_P33_NO_COMMIT": "0",
-      "CANON_OPT_STATE_RESIDENT": "1",
-      "CANON_P30_OPT_STATE_OFFLOAD": "0",
-      "CANON_FROZENLAKE_CKPT_ROOT": _P45_CHECKPOINT_ROOT,
-      "CANON_FROZENLAKE_CKPT_INTERVAL": "10",
-      "CANON_FROZENLAKE_CKPT_MAX_TO_KEEP": "1",
-      "ENABLE_PATHWAYS_PERSISTENCE": "1",
-  }
-  if mode not in ("new", "resume") or not tag:
+  if environ.get("CANON_P33_WORKLOAD_LAUNCH_ADMITTED", "") != "1":
     return False
-  if any(environ.get(key, "") != value for key, value in required.items()):
+  try:
+    checkpoint = frozenlake_checkpoint.from_env(environ)
+    frozenlake_checkpoint.require_p45(checkpoint, environ)
+  except ValueError:
     return False
-  expected_directory = f"{_P45_CHECKPOINT_ROOT}/{tag}/actor"
+  if not checkpoint.enabled:
+    return False
+  expected_directory = f"{checkpoint.directory}/actor"
   return config.checkpoint_root_directory == expected_directory
 
 
