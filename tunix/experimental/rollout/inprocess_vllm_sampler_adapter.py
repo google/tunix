@@ -18,6 +18,8 @@ import abc
 import numbers
 from typing import Any, List, Sequence
 from absl import logging
+from flax import nnx
+import jax
 import numpy as np
 from tunix.experimental.rollout import sampler as base_sampler_lib
 from tunix.experimental.weight_sync import raiden_weight_sync_delegate
@@ -346,6 +348,27 @@ class InprocessVllmSamplerAdapter(Sampler, abc.ABC):
           sync_request=sync_request, state=state, **kwargs
       )
     return None
+
+  def get_target_state(self) -> Any:
+    """Returns target state shape/dtype pytree for weight conversion."""
+    if self.vllm_sampler is None:
+      raise RuntimeError(
+          f"InprocessVllmSamplerAdapter [{self.server_id}] vllm_sampler is not"
+          " initialized."
+      )
+    if hasattr(self.vllm_sampler, "get_target_state"):
+      return self.vllm_sampler.get_target_state()
+    if hasattr(self.vllm_sampler, "transformer_state"):
+      state = self.vllm_sampler.transformer_state
+      return jax.tree.map(
+          lambda x: nnx.Param(jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype)),
+          state,
+          is_leaf=lambda x: isinstance(x, nnx.Variable),
+      )
+    raise AttributeError(
+        f"InprocessVllmSamplerAdapter [{self.server_id}] cannot extract"
+        " target_state."
+    )
 
   async def pre_weight_sync(
       self,

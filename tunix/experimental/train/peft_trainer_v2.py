@@ -430,6 +430,8 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
       perf_tracer: perf_trace.Tracer | None = None,
       perf_tracer_v2: perf_tracer_lib.Tracer | None = None,
       weight_sync_worker_factory: Callable[[], Any] | None = None,
+      target_state: Any = None,
+      sampler_type: str = "inprocess_vllm",
   ):
     # TODO(noghabi): Implement sequence packing for SFT and remove this check.
     if (
@@ -520,6 +522,8 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     self.data_hooks = None
     self._jit_cache = set()
     self._mini_batch_size = None
+    self._target_state = target_state
+    self._sampler_type = sampler_type
     self._weight_sync_worker: Any = None
     self._weight_sync_worker_factory = weight_sync_worker_factory
 
@@ -1177,7 +1181,39 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
       factory = self._weight_sync_worker_factory or _default_weight_sync_worker
       self._weight_sync_worker = factory()
     worker = self._weight_sync_worker
-    worker.bind(nnx.state(self.model))
+
+    backend = (
+        "vllm_jax" if "vllm" in self._sampler_type else self._sampler_type
+    )
+    mapping_config = getattr(self.config, "mapping_config", None)
+    if mapping_config is None and hasattr(self.model, "to_hf_mappings"):
+      try:
+        from tunix.generate import mappings as mappings_lib  # pylint: disable=g-import-not-at-top
+        mapping_config = mappings_lib.MappingConfig.build(
+            model=self.model, backend=backend
+        )
+      except Exception:  # pylint: disable=broad-exception-caught
+        mapping_config = None
+
+    if (
+        self._target_state is not None
+        and mapping_config is not None
+        and mapping_config.to_hf_mappings
+    ):
+      from tunix.generate import utils as gen_utils  # pylint: disable=g-import-not-at-top
+      converted_state = gen_utils.transfer_state_with_mappings(
+          src_state=nnx.state(self.model),
+          dst_state=self._target_state,
+          key_mappings=mapping_config.to_hf_mappings,
+          key_mapping_hook_fns=mapping_config.to_hf_hook_fns,
+          transpose_keys=mapping_config.to_hf_transpose_keys,
+          reshard_fn=None,
+          rollout_engine=backend,
+      )
+      worker.bind(converted_state)
+    else:
+      worker.bind(nnx.state(self.model))
+
     worker.d2h()
     if os.environ.get("VERIFY_WEIGHTS", "").lower() == "true":
       logging.info("source checksums: %s", worker.checksums())
