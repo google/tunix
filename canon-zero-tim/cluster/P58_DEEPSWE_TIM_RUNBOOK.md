@@ -18,6 +18,58 @@ P58 does not modify `main`. Rendering and local validation do not authorize a
 Kubernetes apply. An operator must separately approve image publication and
 each launch.
 
+## 2026-08-26 P58.15 nested-JIT retry override — source published
+
+This section supersedes the P58.14 instruction to launch `p58z04`. That target
+already ran from `3f159250c4781b3faafde238f768457a0478446b`, emitted the two
+P58.14 placement receipts, and completed all 128 Step-0 trajectories in 1,709
+seconds. Its eight `MODEL_TIMEOUT` and one `MAX_CONTEXT_LIMIT_REACHED` rows
+were compact-filter statuses, not the fatal event.
+
+The hard error occurred in the first trainer old-policy-logprob call:
+
+```text
+ValueError: Received incompatible devices for jitted computation.
+```
+
+Trainer state was correctly resident on the trainer 64-device role, but the
+`jit inside jit` device list was still the disjoint rollout role. P58.14
+rebound the adapter's explicit shardings but reused vLLM's `model_fn` and
+`compute_logits_fn`; those inner JITs captured rollout output shardings when
+the engine was initialized. Preserve `p58z04`; it has no optimizer checkpoint
+and is not resumable.
+
+P58.15 reconstructs the identical live NNX graph weight-free on the trainer
+mesh, validates exact tree/shape/dtype equality, rebuilds the two nested JITs
+on trainer devices, and uses that graph for segmented trainer backward.
+Serving remains rollout-bound. Native, colocated, strict A=B=C, loss,
+sampling, optimizer, and B8xG16 are unchanged.
+
+Before any target, the complete matching-image gate must end with:
+
+```text
+P58_EXACT_IMAGE_CPU_PASS ... disaggregated_trainer_mesh=4 ... regressions=1
+```
+
+This CPU gate is not Pathways/TPU proof. Implementation commit
+`f60cdd569c2737df6cb2968125c8e42680938981` is published only on
+`yuxzhang/canon-zero-tim`; `main` remains untouched. Fetch/read back the final
+operator tip and prove it contains that implementation. Image publication and
+Kubernetes launch remain separately approval-gated. After matching-image
+readback and sandbox admission, use fresh Attempt-0 id `p58z05` and require
+exactly one of each:
+
+```text
+[CANON_ADAPTER.PLACEMENT] PASS relation=disjoint rollout_devices=64 trainer_devices=64 execution_role=trainer
+[CANON_ADAPTER.PLACEMENT] trainer logprob scorer rebound relation=disjoint implementation=factory-identical mesh_bound_instances=2
+[CANON_ADAPTER.PLACEMENT] trainer model callables rebuilt relation=disjoint graph=abstract-clone mesh_bound_jits=2
+```
+
+The full classifier rejects missing/duplicate receipts. Next require completed
+trainer old/current logps, strict A=B=C, finite nonzero 16-group backward, and
+one coherent update-0 transaction. If it passes, continue the same full job to
+1,000 commits. Never resume or overwrite `p58z01` through `p58z04`.
+
 ## 2026-08-26 P58.14 trainer-mesh retry override — source published
 
 This section supersedes the P58.13 instruction to launch `p58z03`. That target

@@ -1,5 +1,55 @@
 # State
 
+## Current P58.15 nested-JIT trainer-mesh checkpoint (2026-08-26)
+
+- Status: implementation commit
+  `f60cdd569c2737df6cb2968125c8e42680938981` published and
+  dependency-image CPU gates PASS; 128-TPU retry not run.
+- Source intake: `git pull --ff-only` first advanced the isolated P58 worktree
+  to `a36cbd1b156e013a75af4071e91a238be49bc95b`, then reconciled the local
+  repair over `98a2dfd9e8ece301374fdfb55518b3bc9ebef4d4`. Immediately before
+  publication the remote advanced again to exact base
+  `be758e68faa9db5b06be153a0656c4c861e3119f`; that incoming commit contains
+  M15 evidence only. Neither intervening commit overlaps P58. The repair was
+  rebased, revalidated, committed as the exact implementation SHA above, and
+  published only to the operator branch; `main` is untouched.
+- Immutable target fact: `p58z04`, built from
+  `3f159250c4781b3faafde238f768457a0478446b`, emitted both P58.14 placement
+  receipts and completed all eight prompt groups / 128 Step-0 trajectories in
+  1,709 seconds. Eight `MODEL_TIMEOUT` and one
+  `MAX_CONTEXT_LIMIT_REACHED` rows were compact statuses. The first hard
+  failure was the first trainer old-policy-logprob call: trainer state occupied
+  one 64-device role while a `jit inside jit` still named the disjoint rollout
+  role. No trainer logprob, alignment, backward, AdamW, commit, or checkpoint
+  completed. Evidence checksum passes.
+- Root cause: P58.14 rebound explicit adapter shardings but reused vLLM
+  `model_fn` and `compute_logits_fn`. Both nested JITs were created at engine
+  initialization with rollout-mesh output shardings. Its prior CPU mock used
+  plain Python functions and therefore missed this captured-device closure.
+- Repair: disaggregated trainer execution reconstructs the same live NNX graph
+  weight-free with `nnx.eval_shape`, validates exact state tree/shape/dtype,
+  and rebuilds both nested JITs on the trainer execution mesh. The segmented
+  trainer forward/backward uses the same reconstructed graph. The fixed-AR
+  mesh global is rebound only inside a locked trace context and restored.
+  Native, colocated, serving, sampling, loss, strict A=B=C, optimizer, and the
+  signed B8xG16 recipe are unchanged.
+- Validation: forced 2-rollout + 2-trainer CPU tests execute the real
+  nested-JIT `value_and_grad` and segmented layer pullback with finite nonzero
+  gradients; partial overlap still fails closed. The complete pinned-image
+  gate exits zero with `P58_EXACT_IMAGE_CPU_PASS ...
+  disaggregated_trainer_mesh=4 ... regressions=1`. No `/dev/vfio` is present,
+  so this is construction evidence, not target proof.
+- Next action: fetch/read back the final operator tip and prove it contains
+  implementation `f60cdd569c2737df6cb2968125c8e42680938981`, build/read back
+  a matching image, rerun the complete
+  gate, pass sandbox admission, obtain separate launch approval, and render
+  fresh `p58z05`. Require exactly the original two placement receipts plus
+  `trainer model callables rebuilt ... mesh_bound_jits=2`, then trainer
+  old/current logps, strict A=B=C, finite nonzero 16-group backward, and one
+  coherent update-0 transaction. Never resume/overwrite `p58z01`-`p58z04`.
+- Evidence/phase: `evidence/p58z04_disaggregated_mesh_error/` and
+  `phases/p58-15-nested-jit-trainer-mesh.md`.
+
 ## Current P58.14 disaggregated trainer-mesh checkpoint (2026-08-26)
 
 - Status: source implementation

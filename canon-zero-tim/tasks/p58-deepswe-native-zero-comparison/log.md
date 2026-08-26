@@ -1,5 +1,45 @@
 # Log
 
+## 2026-08-26 UTC — P58.15 nested-JIT trainer-mesh repair, local only
+
+- Pulled the isolated P58 worktree first to operator source
+  `a36cbd1b156e013a75af4071e91a238be49bc95b`, verified
+  `p58z04_disaggregated_mesh_error/SHA256SUMS`, then reconciled over
+  `98a2dfd9e8ece301374fdfb55518b3bc9ebef4d4`. The final pre-push fetch
+  advanced to exact base `be758e68faa9db5b06be153a0656c4c861e3119f`, so
+  both P58 commits were rebased and focused gates rerun. The intervening
+  FrozenLake and M15-evidence commits do not overlap P58; `main` remains
+  untouched.
+- `p58z04` completed its 128-row rollout in 1,709 seconds. Eight model-timeout
+  and one max-context rows were compact statuses. The first hard error was the
+  first trainer-logprob call, where trainer-state arrays met an inner JIT still
+  fixed to the disjoint rollout devices. No trainer logprob, alignment,
+  backward, commit, or checkpoint completed.
+- Exact dependency source inspection showed vLLM constructs `model_fn` and
+  `compute_logits_fn` as nested JITs with mesh-bound output shardings. P58.14
+  rebound only outer adapter placement; its plain-function CPU mock did not
+  model the nested closure.
+- The repair reconstructs the live NNX graph with `nnx.eval_shape` on trainer
+  devices, validates exact state contract, rebuilds both JITs on that mesh,
+  scopes/restores the installed fixed-AR mesh global during tracing, and uses
+  the trainer graph for segmented forward/backward. Serving, Native,
+  colocated, and algorithmic semantics are unchanged.
+- Added disjoint 2+2 nested-JIT `value_and_grad`, segmented layer-pullback,
+  and partial-overlap regressions. The full classifier now requires all three
+  trainer-placement receipts.
+- Validation passes Python compilation, diff hygiene, focused dependency-image
+  regressions, and the complete pinned-image gate ending in
+  `P58_EXACT_IMAGE_CPU_PASS ... disaggregated_trainer_mesh=4 ...
+  regressions=1`. The image has no `/dev/vfio`; target remains not run.
+- Publication: the user explicitly approved commit/push. Implementation
+  commit `f60cdd569c2737df6cb2968125c8e42680938981` and this additive
+  documentation checkpoint are published together only to
+  `yuxzhang/canon-zero-tim`; `main` remains untouched.
+- External boundary: source commit/push only. No image publication,
+  Kubernetes mutation, TPU launch, model download, credential access, or
+  artifact deletion. Fresh `p58z05` remains separately
+  image/sandbox/launch gated.
+
 ## 2026-08-26 UTC — P58.14 disaggregated trainer-mesh repair, local only
 
 - Pulled exact operator tip `3820b168457830112e6ce4b505fcedc9691bd705`,

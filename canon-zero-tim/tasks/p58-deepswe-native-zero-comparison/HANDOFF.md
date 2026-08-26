@@ -1,5 +1,64 @@
 # P58 DeepSWE native-first training handoff
 
+## 2026-08-26 P58.15 nested-JIT trainer-mesh override — source published
+
+This is the highest-priority P58 handoff. `p58z04` already ran from source
+`3f159250c4781b3faafde238f768457a0478446b`; preserve it as immutable trigger
+evidence and do not reuse its image or artifact root.
+
+`p58z04` emitted both P58.14 placement receipts and completed all 128 Step-0
+trajectories in 1,709 seconds. Eight `MODEL_TIMEOUT` and one
+`MAX_CONTEXT_LIMIT_REACHED` rows were accepted compact statuses. The actual
+crash happened afterward, in the first trainer old-policy-logprob call:
+
+```text
+ValueError: Received incompatible devices for jitted computation.
+trainer state devices: one 64-device role
+jit inside jit devices: the disjoint rollout 64-device role
+```
+
+P58.14 moved the adapter's visible shardings to trainer devices, but vLLM's
+prebuilt `model_fn` and `compute_logits_fn` each contain an inner `jax.jit`
+whose output shardings captured rollout devices at engine initialization. The
+old CPU mock used plain functions and did not model that closure.
+
+The local P58.15 repair rebuilds the exact live model graph weight-free on the
+trainer mesh with `nnx.eval_shape`, rejects any state tree/shape/dtype drift,
+and constructs trainer-bound model/logits JITs with the original static and
+donation contract. The segmented forward/backward path uses the same graph.
+The installed fixed-AR mesh global is changed only during a locked trace and
+is restored immediately. Serving remains rollout-bound; Native and colocated
+behavior and all algorithmic settings are unchanged.
+
+Local dependency-image CPU validation covers both the nested model/logits JIT
+and segmented layer backward on disjoint 2+2 devices, finite nonzero gradients,
+and partial-overlap rejection. The terminal marker is:
+
+```text
+P58_EXACT_IMAGE_CPU_PASS ... disaggregated_trainer_mesh=4 ... regressions=1
+```
+
+This is not 128-chip proof. Implementation commit
+`f60cdd569c2737df6cb2968125c8e42680938981` is published on
+`yuxzhang/canon-zero-tim`. Fetch/read back the final operator tip and prove it
+contains that commit, build and pin the matching image, rerun the full gate,
+pass sandbox admission, and obtain separate Kubernetes launch approval. Use
+fresh id `p58z05`; never resume/overwrite `p58z01` through `p58z04`.
+
+At startup require exactly one each:
+
+```text
+[CANON_ADAPTER.PLACEMENT] PASS relation=disjoint rollout_devices=64 trainer_devices=64 execution_role=trainer
+[CANON_ADAPTER.PLACEMENT] trainer logprob scorer rebound relation=disjoint implementation=factory-identical mesh_bound_instances=2
+[CANON_ADAPTER.PLACEMENT] trainer model callables rebuilt relation=disjoint graph=abstract-clone mesh_bound_jits=2
+```
+
+The full classifier now fails if any receipt is missing or duplicated. Then
+require trainer old/current logps, strict A=B=C, finite nonzero 16-group
+backward, and one coherent update-0 commit. Passing update 0 continues the
+same 1,000-update job. See `phases/p58-15-nested-jit-trainer-mesh.md` and
+`evidence/p58z04_disaggregated_mesh_error/`.
+
 ## 2026-08-26 P58.14 disaggregated trainer-mesh override — source published
 
 This is the highest-priority P58 handoff. Implementation commit
