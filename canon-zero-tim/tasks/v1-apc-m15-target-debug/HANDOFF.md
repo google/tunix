@@ -434,3 +434,20 @@ Attempt 7 dual-arm execution (`d13-663cb547`, source commit `663cb5474490173cfaf
 - **Control Arm (`canon-v1-apc-m15-off-d13-663cb547`)**: Successfully uploaded `PREFLIGHT.json`, terminated during startup.
 - **Treatment Arm (`canon-v1-apc-m15-on-d13-663cb547`)**: Successfully uploaded `PREFLIGHT.json`, terminated during startup.
 - Retained evidence: `evidence/v1_apc_m15_attempt7_d13_20260826/`.
+
+## Attempt 8 M15 Target Debug Runs (d14-3820b168 Phase D Wide Layer Observer)
+
+Attempt 8 dual-arm execution (`d14-3820b168`, source commit `3820b168e37080ea9c4e2e2832810a950a7c493f`) ran on dual 64-TPU allocations (DP8xTP8) with all 36-layer observers attached:
+- **Control Arm (`canon-v1-apc-m15-off-d14-3820b168`)**:
+  - Rollout: 256 trajectories completed, 0.0% prefix cache hit rate, solve rate 15.2%.
+  - Pre-alignment: `verdict=PASS`, 0 differing bytes on A-B and B-C.
+  - Collected >2,420 wide observer records across all 36 layers.
+  - Terminal: Controlled exit code 42, zero backward, zero optimizer commits.
+- **Treatment Arm (`canon-v1-apc-m15-on-d14-3820b168`)**:
+  - Rollout: 256 trajectories completed, **93.1%** prefix cache hit rate, solve rate 20.7%.
+  - Pre-alignment: `[CANON_ALIGN_PRE] step=0 verdict=FAIL N_action=122951 bounds=[('S_decode_vs_S_prefill', 1191), ('S_prefill_vs_T_old', 0)]` (Reproduced 1,191 diff bytes between $S_{\text{decode}}$ and $S_{\text{prefill}}$).
+  - Evidence: `evidence_sha256=740a34978c4519a0cd696aa6dc283ad111dcdb8f0bf8cbbe02a4c62722426854`.
+  - Collected >2,112 wide observer records across all 36 layers.
+  - Terminal: Controlled exit code 42, zero backward, zero optimizer commits.
+- Retained evidence: `evidence/v1_apc_m15_attempt8_paired_d14_20260826/`.
+

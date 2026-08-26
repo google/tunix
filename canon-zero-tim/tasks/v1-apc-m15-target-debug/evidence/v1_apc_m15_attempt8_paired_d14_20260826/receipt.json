@@ -1,0 +1,40 @@
+{
+  "attempt": 8,
+  "campaign_root": "v1-apc-m15-attempt8-d14",
+  "source_commit": "3820b168e37080ea9c4e2e2832810a950a7c493f",
+  "timestamp": "2026-08-26T21:12:00Z",
+  "topology": "64 TPU (16 nodes, DP8xTP8) x 2",
+  "workload": "frozenlake-dp8-tp8",
+  "stage": "rollout-paired-apc-off-on-wide-layer-observer-complete",
+  "control_arm_off": {
+    "jobset_name": "canon-v1-apc-m15-off-d14-3820b168",
+    "prefix_cache_hit_rate": "0.0%",
+    "rollout_requests": 256,
+    "exit_code": 42,
+    "gcs_source_uri": "gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-v1-apc-m15-off-d14-3820b168/attempt-0",
+    "verdict": "CONTROL_GREEN",
+    "a_b_differing_bytes": 0,
+    "b_c_differing_bytes": 0,
+    "solve_rate": 0.152,
+    "terminal_state": "CONTROLLED_EXIT_CODE_42"
+  },
+  "treatment_arm_on": {
+    "jobset_name": "canon-v1-apc-m15-on-d14-3820b168",
+    "prefix_cache_hit_rate": "93.1%",
+    "rollout_requests": 256,
+    "exit_code": 42,
+    "gcs_source_uri": "gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-v1-apc-m15-on-d14-3820b168/attempt-0",
+    "verdict": "FRESH_TARGET_RED_FROZEN",
+    "a_b_differing_bytes": 1191,
+    "b_c_differing_bytes": 0,
+    "n_action": 122951,
+    "solve_rate": 0.207,
+    "evidence_sha256": "740a34978c4519a0cd696aa6dc283ad111dcdb8f0bf8cbbe02a4c62722426854",
+    "terminal_state": "CONTROLLED_EXIT_CODE_42"
+  },
+  "decision": {
+    "finding": "APC-On reproduced 1,191 diff bytes on S_decode vs S_prefill while APC-Off remained 100% exact (0 diff bytes). Wide layer observer collected >2,100 tensor records across all 36 layers.",
+    "claim_ceiling": "FULL_REPLAY_CARRIER_FROZEN_WIDE_LAYER_OBSERVER_COMPLETE",
+    "next_phase": "Phase D (Render full observer for isolated seam layer L)"
+  }
+}
