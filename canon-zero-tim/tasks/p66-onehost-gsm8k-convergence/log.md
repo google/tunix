@@ -442,3 +442,14 @@
   No commit, push, optimizer update, or full relaunch occurred during the
   measurements. The user subsequently authorized publication and runtime CL
   `41f50d23` was created; remote readback remains pending.
+
+## 2026-08-26 — RESULT: serving-scope repair published
+
+- Published runtime CL `41f50d23` and carrier/ledger CL `299fca0c` by ordinary
+  fast-forward from `e43a0fe2` under explicit user approval. Fresh fetch
+  readback equals `299fca0c9f2fff9679076c6d938185696c0f3d2d` exactly.
+- Committed-tree host gates pass V1 74/74, P59 37/37, P66 16/16, syntax,
+  clean status, and diff hygiene. No target was launched by this agent.
+- The user will launch P45 and M15 full trains. Each remains a first target
+  certification and must independently return strict A-B/B-C `0/0` before
+  backward/optimizer evidence is considered.

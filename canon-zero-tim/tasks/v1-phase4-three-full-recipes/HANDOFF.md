@@ -812,9 +812,11 @@ serving collective graph. The local repair additionally requires the live
 P59 outer manual data/model context before executing the `pmean`; every
 serving/global path now returns the historical fixed-order sum unchanged.
 
-The runtime repair is committed locally at `41f50d23`; its evidence/handoff CL
-and remote publication are still in progress under the user's explicit
-2026-08-26 approval. Host gates pass: V1 74/74, P59 37/37,
+The runtime repair CL `41f50d23` and evidence/handoff CL `299fca0c` were
+published by ordinary fast-forward under the user's explicit 2026-08-26
+approval. Remote readback exactly matched
+`299fca0c9f2fff9679076c6d938185696c0f3d2d`. Host gates pass: V1 74/74,
+P59 37/37,
 P66 16/16, syntax, manifest, and `git diff --check`. The immutable image
 `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`
 passes the installed-shim TP4/TP8 terminal with `manifests=2x37/37`; the new
@@ -839,3 +841,9 @@ P45 and M15 full trains as the user requested; each remains independently
 fail-closed at the strict pre-backward gate and must require both boundaries
 to be zero bytes. A CPU/image/TP4 result may not promote the failed Attempt 8
 target.
+
+Launch ownership: the user will start both FrozenLake full trains from the
+published repair stack. On first evidence pull, classify each recipe
+independently. Any `CANON_ALIGN_PRE` or `CANON_ALIGN` FAIL is fatal and stops
+that recipe; require A-B/B-C `0/0` before accepting backward/optimizer
+evidence. Do not infer M15 success from P45 or vice versa.

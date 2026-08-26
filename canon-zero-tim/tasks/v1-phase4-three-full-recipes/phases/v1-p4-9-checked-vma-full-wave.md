@@ -3,9 +3,10 @@
 Status: active; Attempt 8 launched from published source `c2833eea` and the
 strict gate stopped both FrozenLake recipes before backward. P45 reported
 `396/0` differing bytes and M15 reported `20/0` at the A-B/B-C boundaries.
-A local serving-scope repair is host/image green and passes bounded one-host
-TP4 ring and gather strict carriers, but has not restored the failed TP8
-executable. No relaunch is authorized by this phase file.
+The serving-scope repair is published through evidence CL `299fca0c`, is
+host/image green, and passes bounded one-host TP4 ring and gather strict
+carriers, but has not restored the failed TP8 executable. The user will launch
+fresh P45 and M15 full trains; this agent does not launch them.
 
 ## Objective
 
@@ -269,3 +270,17 @@ within the registered oracle envelope plus strict Zero-TIM forward identity.
   occurred. Runtime CL `41f50d23` was then created under explicit user
   approval; publication readback and both requested FrozenLake full launches
   remain pending.
+
+### 2026-08-26T02:31:00Z — Repair publication readback
+
+- Runtime CL `41f50d23` and carrier/ledger CL `299fca0c` were pushed by
+  ordinary fast-forward from remote base `e43a0fe2` after the user explicitly
+  approved commit/push. A fresh fetch read back
+  `299fca0c9f2fff9679076c6d938185696c0f3d2d` exactly.
+- The committed tree passes V1 74/74, P59 37/37, P66 16/16, Bash syntax,
+  clean status, and diff hygiene. The earlier immutable-image and one-host
+  receipts bind the same runtime bytes; the ledger changes do not alter the
+  shim.
+- The user, not this agent, will launch fresh P45 and M15 full trains. Each is
+  the first DP8xTP8 target revalidation for this repair and independently
+  requires strict A-B/B-C `0/0` before backward. No target success is claimed.
