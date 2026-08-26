@@ -342,6 +342,81 @@ def main() -> None:
   ) is not None:
     raise AssertionError("ordinary serving selected the P59 local split")
 
+  # P66's VMA ownership marker belongs only to the P59 outer manual map.  The
+  # process-wide flag is also present while serving decode and full-prefill
+  # rescore run, so execute a real installed contract-parallel projection with
+  # the flag on and make any attempted TP pmean fatal.  This is the exact
+  # branch that the earlier column-projection global negative did not cover.
+  contract_site = types.SimpleNamespace(
+      family="o_proj", contract_parallel=True
+  )
+  contract_input = jax.device_put(
+      (
+          jnp.arange(16 * TP_SIZE, dtype=jnp.float32).reshape(
+              16, TP_SIZE, 1
+          )
+          / 64
+      ).astype(jnp.bfloat16),
+      jax.sharding.NamedSharding(
+          engine_mesh, jax.sharding.PartitionSpec(None, "model", None)
+      ),
+  )
+  contract_weight = jax.device_put(
+      (
+          jnp.arange(TP_SIZE * 4, dtype=jnp.float32).reshape(
+              TP_SIZE, 1, 4
+          )
+          / 32
+      ).astype(jnp.bfloat16),
+      jax.sharding.NamedSharding(
+          engine_mesh, jax.sharding.PartitionSpec("model", None, None)
+      ),
+  )
+  old_vma = os.environ.get("CANON_P66_P59_CHECK_VMA")
+  old_gather = os.environ.get("CANON_FIXED_AR_GATHER")
+  old_pmean = xf.base.jax.lax.pmean
+
+  def serving_pmean_is_forbidden(*_args, **_kwargs):
+    raise AssertionError("ordinary serving projection entered P59 TP pmean")
+
+  try:
+    for gather_mode in ("0", "1"):
+      os.environ["CANON_FIXED_AR_GATHER"] = gather_mode
+      os.environ["CANON_P66_P59_CHECK_VMA"] = "0"
+      historical_contract = xf._contract_parallel(
+          contract_site,
+          "TNH,NHD->TD",
+          contract_input,
+          contract_weight,
+          f"ordinary.serving.o_proj.gather_{gather_mode}",
+      )
+      os.environ["CANON_P66_P59_CHECK_VMA"] = "1"
+      xf.base.jax.lax.pmean = serving_pmean_is_forbidden
+      ordinary_contract = xf._contract_parallel(
+          contract_site,
+          "TNH,NHD->TD",
+          contract_input,
+          contract_weight,
+          f"ordinary.serving.o_proj.gather_{gather_mode}",
+      )
+      if not np.array_equal(
+          np.asarray(ordinary_contract), np.asarray(historical_contract)
+      ):
+        raise AssertionError(
+            "ordinary contract-parallel serving values changed across P66 "
+            f"flag for gather_mode={gather_mode}"
+        )
+  finally:
+    xf.base.jax.lax.pmean = old_pmean
+    if old_vma is None:
+      os.environ.pop("CANON_P66_P59_CHECK_VMA", None)
+    else:
+      os.environ["CANON_P66_P59_CHECK_VMA"] = old_vma
+    if old_gather is None:
+      os.environ.pop("CANON_FIXED_AR_GATHER", None)
+    else:
+      os.environ["CANON_FIXED_AR_GATHER"] = old_gather
+
   poisoned = np.asarray(staged).copy()
   poisoned[0, 0, 0] = np.float32(poisoned[0, 0, 0]) + np.float32(1)
   if np.array_equal(poisoned, np.asarray(staged)):
@@ -350,6 +425,7 @@ def main() -> None:
       f"P59_TP{TP_SIZE}_INSTALLED_PROJECTION_PASS "
       f"topology=DP2xTP{TP_SIZE} q_proj_layout_shards=1 "
       "gate_up_layout_shards_one=2 wrong_width_negative=2 ordinary_global=1 "
+      "ordinary_contract_p66_global_negative=2 "
       "serial_parallel=exact optimizer_commits=0",
       flush=True,
   )

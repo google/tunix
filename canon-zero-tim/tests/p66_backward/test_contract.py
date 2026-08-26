@@ -258,11 +258,23 @@ class P66ContractTest(unittest.TestCase):
     self.assertIn("manual_axis_type.reduced", adapter)
     linear_shim = LINEAR_SHIM.read_text(encoding="utf-8")
     self.assertIn("def _p66_replicated_tp_value(value):", linear_shim)
+    p66_boundary = linear_shim[
+        linear_shim.index("def _p66_replicated_tp_value(value):"):
+        linear_shim.index("def _p59_local_fused_pieces(")
+    ]
+    self.assertIn("or not _p59_local_tp_context()", p66_boundary)
     self.assertIn(
         "base.jax.lax.pmean(value, base._CANON_TP_AXIS)", linear_shim
     )
     self.assertIn("return _p66_replicated_tp_value(acc)", linear_shim)
     self.assertIn("return _p66_replicated_tp_value(acc[0])", linear_shim)
+    projection_probe = (
+        PKG / "tests/p59_backward/probe_tp4_installed_shim_composition.py"
+    ).read_text(encoding="utf-8")
+    self.assertIn("ordinary_contract_p66_global_negative=2", projection_probe)
+    self.assertIn(
+        "ordinary serving projection entered P59 TP pmean", projection_probe
+    )
     embed_patch = EMBED_PATCH.read_text(encoding="utf-8")
     self.assertIn('CANON_P66_P59_CHECK_VMA", "0"', embed_patch)
     self.assertIn("jax.lax.pmean(result, _ax)", embed_patch)

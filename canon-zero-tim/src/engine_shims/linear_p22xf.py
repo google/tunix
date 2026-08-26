@@ -110,7 +110,7 @@ def _p59_fixed_order_tp_sum(value):
 
 
 def _p66_replicated_tp_value(value):
-    """Give VMA an honest replicated-TP boundary for a fixed-order sum.
+    """Give P59 VMA an honest replicated-TP boundary for a fixed-order sum.
 
     The fixed all-gather/ring reducers below produce the same completed sum on
     every TP rank, but ordinary elementwise additions leave JAX's manual-axis
@@ -120,12 +120,17 @@ def _p66_replicated_tp_value(value):
     every copy and can multiply gradients once per transformer layer.
 
     A TP pmean turns that already-identical value into an invariant value and
-    gives transpose the matching collective semantics.  TP4/TP8 are powers of
-    two, so averaging identical BF16/FP32 values is an exact identity at this
-    boundary.  Keep the extra collective behind P66's default-off diagnostic
-    flag until the target numerical and performance gates decide its fate.
+    gives transpose the matching collective semantics.  This annotation is
+    required only while the projection is executing directly inside P59's
+    outer manual data/model map.  Applying it to the ordinary serving map
+    changes its forward collective graph and broke the strict decode/prefill
+    identity on TP8.  Keep every non-P59 path on the historical fixed-order
+    sum, even when the process-wide P66 compatibility flag is enabled.
     """
-    if os.environ.get("CANON_P66_P59_CHECK_VMA", "0") != "1":
+    if (
+        os.environ.get("CANON_P66_P59_CHECK_VMA", "0") != "1"
+        or not _p59_local_tp_context()
+    ):
         return value
     return base.jax.lax.pmean(value, base._CANON_TP_AXIS)
 
