@@ -161,6 +161,7 @@ class ToyTransformer(nnx.Module):
       positions,
       cache=None,
       attention_mask=None,
+      metadata=None,
       seq_lens=None,
       distribution=None,
       soft_cap=None,
@@ -169,6 +170,8 @@ class ToyTransformer(nnx.Module):
       segment_ids: jax.Array | None = None,
       skip_lm_head: bool = False,
   ):
+    if metadata is not None:
+      seq_lens = metadata.active_seq_lens
     tokens = x
     x = self.emb(tokens)
     if images is not None:
