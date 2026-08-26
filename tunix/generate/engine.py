@@ -3,10 +3,11 @@ from typing import List, Any
 from flax import nnx
 
 import numpy as np
+import jax
+import jax.numpy as jnp
 from tunix.generate import scheduler
 from tunix.generate import cache_manager as cache_manager_lib
 from tunix.generate import sampler_v2 as sampler_lib
-from tunix.generate import cache_manager as batch_cache_manager_lib
 from tunix.tests import test_common as tc
 
 
@@ -24,13 +25,14 @@ class LLMEngine:
         self.tokenizer = tokenizer
         self.cache_config = cache_config
         self.max_seq_len = max_seq_len
+        self.max_num_batch_tokens = getattr(cache_config, "max_num_batch_tokens", 1024)
         
         self.eos_ids = [tokenizer.eos_id() if hasattr(tokenizer, 'eos_id') else tokenizer.GetPieceSize()]
         self.generated_tokens = {} # request_id -> list of ints
         self.generated_logprobs = {}
         self.generated_logits = {}
         
-        # 2. Own and Initialize the Sampler!
+        #  
         self.sampler = sampler_lib.VanillaSampler(
             transformer=transformer,
             tokenizer=tokenizer,
@@ -40,24 +42,35 @@ class LLMEngine:
         )
         
         # Initialize scheduling and physical memory allocators
+        model_config = self.transformer.config
+        shd_config = model_config.shd_config
+
+        kv_dtype = self.sampler.dtype
+
+        dp_size = 1
+        tp_size = 1
+        dp_axis = None
+        tp_axis = None
+
+        if shd_config is not None:
+          dp_axis = shd_config.act_btd[0]
+          tp_axis = shd_config.act_btnh[2]
+
+        try:
+          _, flat_transformer_state = self.sampler.model_def_and_state()
+          param_0 = jax.tree.leaves(flat_transformer_state)[0]
+          if (
+              hasattr(param_0, 'sharding')
+              and hasattr(param_0.sharding, 'mesh')
+              and param_0.sharding.mesh is not None
+          ):
+            mesh = param_0.sharding.mesh
+            dp_size = mesh.shape.get(dp_axis, 1) if dp_axis else 1
+            tp_size = mesh.shape.get(tp_axis, 1) if tp_axis else 1
+        except Exception:
+          pass
         
-        model_config = transformer.config if hasattr(transformer, "config") else getattr(transformer, "model_config", None)
-        kv_dtype = getattr(model_config, 'dtype', jax.numpy.float32) if model_config else jax.numpy.float32
-        
-        # Derive DP and TP sizes directly from model architecture config overrides
-        dp_size = getattr(model_config, "dp_size", 1)
-        tp_size = getattr(model_config, "tp_size", 1)
-        
-        dp_axis = getattr(model_config, "dp_axis", None)
-        tp_axis = getattr(model_config, "tp_axis", None)
-        
-        # Fallback to defaults if missing from ModelConfig but shapes > 1
-        if dp_axis is None and dp_size > 1:
-            dp_axis = 'fsdp'
-        if tp_axis is None and tp_size > 1:
-            tp_axis = 'tp'
-            
-        self.cache_manager = batch_cache_manager_lib.init_cache_manager(
+        self.cache_manager = cache_manager_lib.init_cache_manager(
             cache_config=cache_config,
             model_config=model_config,
             kv_dtype=kv_dtype,
@@ -69,7 +82,7 @@ class LLMEngine:
         
         self.scheduler = scheduler.Scheduler(
             cache_manager=self.cache_manager,
-            max_num_batch_tokens=getattr(cache_config, "max_num_batch_tokens", 1024),
+            max_num_batch_tokens=self.max_num_batch_tokens,
         )
         
     def add_request(self, req_id: str, prompt_tokens: List[int], **kwargs):
@@ -137,13 +150,11 @@ class LLMEngine:
             phys_idxs.extend([0] * (max_pages - len(phys_idxs)))
             page_indices.append(phys_idxs)
             
-        tokens = np.array(tokens, dtype=np.int32)
-        
         metadata = sampler_lib.RPAMetadata(
             page_indices=np.array(page_indices, dtype=np.int32),
             seq_lens=np.array(seq_lens, dtype=np.int32),
             active_seq_lens=np.array(active_seq_lens, dtype=np.int32),
-            distribution=distribution,
+            distribution=np.array(distribution),
         )
         
         total_tokens = len(tokens)
