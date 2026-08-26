@@ -325,6 +325,7 @@ class RolloutResponse(Response):
       traj: Trajectory,
       prompt_tokens: np.ndarray,
       policy_version: int,
+      metadata: dict[str, Any] | None = None,
   ) -> "RolloutResponse":
     """Constructs a wire-safe RolloutResponse from an internal Trajectory.
 
@@ -336,6 +337,7 @@ class RolloutResponse(Response):
       traj: The internal trajectory to convert.
       prompt_tokens: Array of prompt token ids.
       policy_version: Weight version used to generate the trajectory.
+      metadata: Optional response metadata dictionary to attach.
 
     Returns:
       A wire-safe RolloutResponse.
@@ -376,6 +378,13 @@ class RolloutResponse(Response):
       status_val = getattr(traj.status, "name", str(traj.status))
     else:
       status_val = "COMPLETED"
+
+    resp_metadata = {}
+    if hasattr(traj, "metadata") and isinstance(traj.metadata, dict):
+      resp_metadata.update(traj.metadata)
+    if metadata:
+      resp_metadata.update(metadata)
+
     return cls(
         request_id=request_id,
         status=status_val,
@@ -383,6 +392,7 @@ class RolloutResponse(Response):
         segments=segments,
         env_reward=getattr(traj, "reward", 0.0) or 0.0,
         policy_version=policy_version,
+        metadata=resp_metadata,
     )
 
 

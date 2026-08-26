@@ -214,6 +214,75 @@ class WireSerializationTest(absltest.TestCase):
     np.testing.assert_array_equal(result.segments[1].loss_mask, [0])
     self.assertIsNone(result.segments[1].logps)
 
+  def test_from_trajectory_preserves_metadata(self):
+    traj = datatypes.Trajectory(
+        steps=[],
+        reward=1.0,
+        status=datatypes.TrajectoryStatus.SUCCEEDED,
+    )
+    traj.metadata = {"traj_meta": "foo"}
+
+    result = datatypes.RolloutResponse.from_trajectory(
+        request_id="req-2",
+        traj=traj,
+        prompt_tokens=np.array([1, 2], dtype=np.int32),
+        policy_version=1,
+        metadata={"caller_meta": "bar"},
+    )
+
+    self.assertEqual(
+        result.metadata, {"caller_meta": "bar", "traj_meta": "foo"}
+    )
+
+  def test_from_trajectory_metadata_edge_cases(self):
+    # 1. Neither metadata nor traj.metadata provided
+    traj_none = datatypes.Trajectory(
+        steps=[], reward=1.0, status=datatypes.TrajectoryStatus.SUCCEEDED
+    )
+    res_none = datatypes.RolloutResponse.from_trajectory(
+        request_id="req-1",
+        traj=traj_none,
+        prompt_tokens=np.array([1], dtype=np.int32),
+        policy_version=1,
+        metadata=None,
+    )
+    self.assertEqual(res_none.metadata, {})
+
+    # 2. traj.metadata is non-dict (e.g., string or None)
+    traj_non_dict = datatypes.Trajectory(
+        steps=[], reward=1.0, status=datatypes.TrajectoryStatus.SUCCEEDED
+    )
+    traj_non_dict.metadata = "not-a-dict"  # pytype: disable=annotation-type-mismatch
+    res_non_dict = datatypes.RolloutResponse.from_trajectory(
+        request_id="req-2",
+        traj=traj_non_dict,
+        prompt_tokens=np.array([1], dtype=np.int32),
+        policy_version=1,
+        metadata={"key": "val"},
+    )
+    self.assertEqual(res_non_dict.metadata, {"key": "val"})
+
+    # 3. Caller metadata overrides traj.metadata on collision
+    traj_collision = datatypes.Trajectory(
+        steps=[], reward=1.0, status=datatypes.TrajectoryStatus.SUCCEEDED
+    )
+    traj_collision.metadata = {"shared_key": "traj_val", "traj_only": 123}
+    res_collision = datatypes.RolloutResponse.from_trajectory(
+        request_id="req-3",
+        traj=traj_collision,
+        prompt_tokens=np.array([1], dtype=np.int32),
+        policy_version=1,
+        metadata={"shared_key": "caller_val", "caller_only": 456},
+    )
+    self.assertEqual(
+        res_collision.metadata,
+        {
+            "shared_key": "caller_val",
+            "traj_only": 123,
+            "caller_only": 456,
+        },
+    )
+
   def test_health_report_defaults_heartbeat_unix_s_to_current_time(self):
     before = time.time()
     report = datatypes.HealthReport(state=WorkerState.READY)
