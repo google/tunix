@@ -28,6 +28,16 @@ capture="$state/capture"
 canon_out="$state/canon"
 container="p38_incident_${label}_${mode}"
 timeout_seconds="${P38_INCIDENT_ONEHOST_TIMEOUT_SECONDS:-3600}"
+p66_serving_scope="${P38_ONEHOST_P66_SERVING_SCOPE:-0}"
+fixed_ar_gather="${P38_ONEHOST_FIXED_AR_GATHER:-0}"
+case "$p66_serving_scope" in
+  0|1) ;;
+  *) echo "P38_ONEHOST_P66_SERVING_SCOPE must be exactly 0 or 1" >&2; exit 2 ;;
+esac
+case "$fixed_ar_gather" in
+  0|1) ;;
+  *) echo "P38_ONEHOST_FIXED_AR_GATHER must be exactly 0 or 1" >&2; exit 2 ;;
+esac
 
 source "$canon_env"
 canon_preflight
@@ -48,7 +58,7 @@ source_sha="$(git -C "$repo" rev-parse HEAD)"
 diff_sha="$(git -C "$repo" diff --binary HEAD | sha256sum | awk '{print $1}')"
 {
   echo "[P38.INCIDENT.ONEHOST] source=$source_sha diff_sha256=$diff_sha image=$image mode=$mode"
-  echo "[P38.INCIDENT.ONEHOST] topology=DP1xTP4 model=Qwen3-8B rounds=3 prefix_cache=disabled"
+  echo "[P38.INCIDENT.ONEHOST] topology=DP1xTP4 model=Qwen3-8B rounds=3 prefix_cache=disabled p66_serving_scope=$p66_serving_scope fixed_ar_gather=$fixed_ar_gather"
   echo "[P38.INCIDENT.ONEHOST] backward=0 optimizer_commits=0 wandb=disabled timeout=$timeout_seconds"
   sha256sum "$0" "$pkg/install.sh" "$repo/tunix/rl/alignment.py" \
     "$repo/tunix/rl/agentic/agentic_rl_learner.py" \
@@ -137,12 +147,15 @@ sudo docker run --rm --privileged --net=host --name "$container" \
   -e CANON_P38_DIAGNOSTIC_ROUND_FILE="$round_file" \
   -e CANON_P38_MISMATCH_CAPSULE="$capsule" \
   -e CANON_P38_MISMATCH_CAPSULE_MAX_ROWS=2 \
+  -e CANON_P59_RANK_PARALLEL_BACKWARD="$p66_serving_scope" \
+  -e CANON_P66_P59_CHECK_VMA="$p66_serving_scope" \
   -e CANON_DP_SIZE=1 -e CANON_TP_SIZE=4 -e CANON_TARGET_M=256 \
   -e CANON_P32_TRAIN_ADMITTED=0 -e FL_SHARED_MESH=1,4 \
   -e XLA_FLAGS="$XTRA_XLA" \
   -e CANON_RPA_D=128,512,128,512 -e CANON_RPA_P=128,512,128,512 \
   -e CANON_RPA_M=128,512,128,512 -e MIN_TOKEN_BUCKET=256 \
   -e CANON_FIXED_AR=1 -e CANON_FIXED_AR_EMBED=1 \
+  -e CANON_FIXED_AR_GATHER="$fixed_ar_gather" \
   -e CANON_RPA_VJP2=1 -e CANON_VJP2_MAX_SEQS=1 \
   -e CANON_ENGINE_MODULE_C=1 -e CANON_PROMPT_PROCESSED_LOGPROBS=1 \
   -e CANON_LOGPROB_M=256 -e CANON_PALLAS_LOGSOFTMAX=1 \
@@ -186,6 +199,35 @@ test "$round_markers" -eq 3
 test "$backward_markers" -eq 0
 test "$(tr -d '[:space:]' < "$round_file")" = 2
 test -s "$pre_report"
+python3 - "$pre_report" "$p66_serving_scope" "$fixed_ar_gather" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+p66_serving_scope = int(sys.argv[2])
+fixed_ar_gather = int(sys.argv[3])
+rows = [json.loads(line) for line in path.read_text().splitlines() if line]
+assert len(rows) == 3, len(rows)
+for index, row in enumerate(rows):
+  assert row["verdict"] == "PASS", (index, row["verdict"])
+  assert row["blocking_reds"] == [], (index, row["blocking_reds"])
+  assert row["N_action"] > 0, (index, row["N_action"])
+  assert row["context"]["mesh"] == "1,4", (index, row["context"])
+  for boundary_name in ("S_decode_vs_S_prefill", "S_prefill_vs_T_old"):
+    boundary = row["boundaries"][boundary_name]
+    assert boundary["valid"] is True, (index, boundary_name, boundary)
+    assert boundary["finite"] is True, (index, boundary_name, boundary)
+    assert boundary["differing_bytes"] == 0, (
+        index, boundary_name, boundary["differing_bytes"]
+    )
+print(
+    "[P38.INCIDENT.ONEHOST] P66_SCOPE_ALIGN_PASS "
+    f"p66_serving_scope={p66_serving_scope} rounds={len(rows)} "
+    f"actions={','.join(str(row['N_action']) for row in rows)} "
+    f"boundaries=0/0 topology=DP1xTP4 fixed_ar_gather={fixed_ar_gather}"
+)
+PY
 if [ "$mode" = on ]; then
   test -s "$capture/p38_incident_ledger.jsonl"
   grep -q '^\[CANON_P38_INCIDENT_LEDGER\]' "$raw"

@@ -1,8 +1,11 @@
 # V1.P4.9 — Checked-VMA three-full launch wave
 
-Status: active; runtime, host/image construction admission, and publication
-complete at `ff33ea1a38d1d75c2409ccf480c57e9ff0151075`. Final rendering and target launch remain unrun. No target launch
-is authorized by this phase file.
+Status: active; Attempt 8 launched from published source `c2833eea` and the
+strict gate stopped both FrozenLake recipes before backward. P45 reported
+`396/0` differing bytes and M15 reported `20/0` at the A-B/B-C boundaries.
+A local serving-scope repair is host/image green and passes bounded one-host
+TP4 ring and gather strict carriers, but has not restored the failed TP8
+executable. No relaunch is authorized by this phase file.
 
 ## Objective
 
@@ -127,7 +130,7 @@ launched run IDs.
 ## Claim ceiling
 
 Until target completion: `P66 SAME-POINT ORACLE PASS / HOST-IMAGE ADMISSION
-PASS / PUBLICATION PASS / TARGET NOT RUN`. Do not claim serial
+PASS / ATTEMPT 8 FROZENLAKE STRICT RED / LOCAL REPAIR TARGET NOT RUN`. Do not claim serial
 trajectory identity. The admitted claim is ordinary-JAX gradient correctness
 within the registered oracle envelope plus strict Zero-TIM forward identity.
 
@@ -202,3 +205,67 @@ within the registered oracle envelope plus strict Zero-TIM forward identity.
   publication-ledger follow-up is documentation-only and does not change the
   already tested runtime.
 - No manifest, JobSet, TPU workload, or target optimizer transaction occurred.
+
+### 2026-08-26T01:58:00Z — Attempt 8 P45/M15 strict reds and local repair
+
+- Pulled signed Attempt 8 evidence through `e43a0fe2`. At source
+  `c2833eea5a41438e454ac7e81e599d41fd739d87`, both FrozenLake DP8xTP8
+  jobs stopped at the step-0 pre-backward gate with APC disabled. P45 has
+  `N_action=44470`, A-B `396` differing bytes, and B-C `0`; M15 has
+  `N_action=123381`, A-B `20` differing bytes over `15` elements, max-abs
+  `0.007526397705078125`, and B-C `0`. M15's first mismatch is row 199,
+  position 5364, logical KV prefix 6544, turn 14. Verified by
+  `evidence/v1_hp_three_full_attempt8_20260826/receipt.json`, the two raw error
+  logs, the two pre-alignment JSONL files, and the passing `SHA256SUMS` ledger.
+- The shared signature is A decode versus B full prefill only; B full prefill
+  remains byte-identical to T-old. Both runs are APC-off and fail before any
+  backward or optimizer work. This classifies one P66 forward-scope
+  regression, not an M15-only APC or backward defect. GSM8K's TP4 pass does
+  not certify the distinct TP8 long-context serving executable.
+- Located the scope leak in `src/engine_shims/linear_p22xf.py`: the P66
+  completed-sum `pmean` was controlled by a process-wide flag and therefore
+  entered ordinary serving o_proj/down_proj graphs. The unpublished repair
+  additionally requires the live P59 manual data/model context, so the
+  checked-VMA annotation remains in trainer-local backward and ordinary
+  serving returns the historical fixed-order sum unchanged.
+- Verified by V1 74/74, P59 37/37, P66 16/16, syntax, manifest, and diff
+  hygiene. The immutable-image installed-shim TP4/TP8 gate passes and its new
+  real contract-parallel serving negative requires flag-off/on byte identity
+  while making any serving `pmean` fatal. Not verified because no repaired
+  TPU carrier has run: real DP8xTP8 P45/M15 `0/0`, optimizer correctness,
+  convergence, and performance. The user subsequently authorized this repair
+  publication batch; runtime CL `41f50d23` is local and remote readback is
+  pending.
+
+### 2026-08-26T02:19:00Z — Ring/gather one-host scope carriers
+
+- Expanded the installed-shim serving negative to execute both the ring
+  fixed-tree and production `CANON_FIXED_AR_GATHER=1` branches with the P66
+  process flag off/on. TP4 and TP8 both preserve the historical output
+  exactly, and any ordinary-serving `pmean` is fatal. The immutable image
+  `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`
+  passes with `ordinary_contract_p66_global_negative=2` for each topology and
+  terminal `manifests=2x37/37`. The raw image stream was not durably saved;
+  this is a reproducible admission receipt, not a signed raw artifact.
+- One-host Qwen3-8B DP1xTP4 ring carrier
+  `p66scopefix_20260826t0204z` completed three strict rounds with actions
+  `409,565,897`; both boundaries are `0/0` bytes in every round, backward and
+  optimizer commits are zero. Raw log SHA256 is
+  `9022cad0bcfa81595bd99f0847da1423012626b6157b4919da8218d66fcf3d04`;
+  pre-alignment SHA256 is
+  `6ec6cf96f337939f12805506b525de0bb34f6d4504cbc79944a491ca03953903`.
+- Fresh gather carrier `p66scopegather_20260826t0212z` executed 216
+  `gather-ordered-sum` PATHTRACEs and completed the same three strict action
+  counts with both boundaries `0/0`, zero backward, and zero commits. Raw log
+  SHA256 is
+  `601d0ffc3d6c0aabd517765f0c1352e92bdb75f59be1a3801a5ff713ffae9839`;
+  pre-alignment SHA256 is
+  `955ae87b9892ec3ac12a8245da3d970242242cf185ba628fb96a9b994d624306`.
+- Verified by real one-host v5p TP4 execution. Not verified because this host
+  exposes only four JAX TPU devices: the failed DP8xTP8 P45/M15 executable,
+  long prefixes beyond this carrier's envelope, backward, optimizer, and
+  convergence. Claim ceiling is `TP4 MECHANISM PASS / TP8 TARGET NOT RUN`.
+- At measurement time no commit, push, optimizer update, or full relaunch had
+  occurred. Runtime CL `41f50d23` was then created under explicit user
+  approval; publication readback and both requested FrozenLake full launches
+  remain pending.

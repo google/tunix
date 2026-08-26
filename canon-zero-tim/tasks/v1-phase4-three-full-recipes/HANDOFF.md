@@ -789,3 +789,53 @@ Any real `CANON_ALIGN` or `CANON_ALIGN_PRE verdict=FAIL` kills that recipe.
 Missing horizon, receipts, trace, checkpoint, or artifacts is INCONCLUSIVE,
 not PASS. Performance judgment comes from `[PERF]`; XProf/Perfetto provides
 operation attribution and never overrides the bitwise gate.
+
+## 2026-08-26 Attempt 8 regression and unpublished local repair
+
+Do not relaunch, render, commit, or push the three-full wave from published
+source `c2833eea`. Attempt 8 P45 failed the pre-backward hard gate at step 0:
+`S_decode_vs_S_prefill=396` differing bytes while
+`S_prefill_vs_T_old=0`. M15 independently failed the same boundary with
+`20` differing bytes over `15` elements and `S_prefill_vs_T_old=0` across
+`123381` action tokens; its first mismatch is at logical KV prefix `6544`,
+turn `14`, and its max-abs delta is `0.007526397705078125`. The retained evidence is
+`evidence/v1_hp_three_full_attempt8_20260826/`; the failure is before trainer
+backward and therefore does not invalidate the separate P66 gradient repair.
+Attempt 7's same P45/TP8 recipe had `0/0` bytes with APC disabled, so this is a
+new forward regression, not the experimental prefix-cache path.
+
+Leading causal mechanism (target confirmation pending): the P66 completed-sum `pmean` in
+`src/engine_shims/linear_p22xf.py` was guarded only by the process-wide
+`CANON_P66_P59_CHECK_VMA` flag. That flag is also present during serving, so
+the P59 backward ownership annotation changed the ordinary o_proj/down_proj
+serving collective graph. The local repair additionally requires the live
+P59 outer manual data/model context before executing the `pmean`; every
+serving/global path now returns the historical fixed-order sum unchanged.
+
+The runtime repair is committed locally at `41f50d23`; its evidence/handoff CL
+and remote publication are still in progress under the user's explicit
+2026-08-26 approval. Host gates pass: V1 74/74, P59 37/37,
+P66 16/16, syntax, manifest, and `git diff --check`. The immutable image
+`sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`
+passes the installed-shim TP4/TP8 terminal with `manifests=2x37/37`; the new
+negative executes both ring and production gather contract-parallel serving
+branches with the P66 flag off/on, requires byte-exact historical output, and
+makes any serving `pmean` fatal. The raw image stream was not durably saved,
+so this is a reproducible admission receipt rather than a signed raw artifact.
+
+Two real one-host v5p Qwen3-8B DP1xTP4 mechanisms are green. Ring label
+`p66scopefix_20260826t0204z` and gather label
+`p66scopegather_20260826t0212z` each completed three rounds with actions
+`409,565,897`, A-B/B-C `0/0` every round, and zero backward/optimizer commits.
+The gather log contains 216 `gather-ordered-sum` PATHTRACEs. Raw/prealignment
+SHA256 pairs are `9022cad0.../6ec6cf96...` and
+`601d0ffc.../955ae87b...`; full hashes and paths are recorded in the P4.9
+phase Result log. These are TP4 mechanism evidence only. The one-host exposes
+four JAX TPU devices and cannot certify the failed DP8xTP8 P45/M15 executable.
+
+Claim ceiling: `HOST PASS / PINNED-IMAGE PASS / TP4 MECHANISM PASS / TP8
+TARGET ZERO-TIM NOT YET REVERIFIED`. After exact remote readback, run fresh
+P45 and M15 full trains as the user requested; each remains independently
+fail-closed at the strict pre-backward gate and must require both boundaries
+to be zero bytes. A CPU/image/TP4 result may not promote the failed Attempt 8
+target.

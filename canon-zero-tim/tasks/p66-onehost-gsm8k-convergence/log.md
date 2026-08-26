@@ -380,3 +380,65 @@
   DP8xTP8 replay remains NOT RUN because no target launch was authorized. No
   optimizer update, convergence run, commit, push, or production promotion was
   performed.
+
+## 2026-08-26 — RESULT: Attempt 8 exposed a P66 serving-scope regression
+
+- Pulled publication tip `13c91423`; its retained Attempt 8 evidence records a
+  pre-backward P45/TP8 hard red at source `c2833eea`:
+  `S_decode_vs_S_prefill=396` bytes, `S_prefill_vs_T_old=0`, `N_action=44470`.
+  APC is disabled. Attempt 7's P45/TP8 evidence was `0/0`, so target evidence
+  rejects the claim that the P66 bundle is forward-neutral.
+- First red is the ordinary serving fixed reducer, not trainer VJP. The P66
+  helper in `src/engine_shims/linear_p22xf.py` applied TP `pmean` whenever the
+  process flag was enabled, including serving o_proj/down_proj. The repair now
+  also requires `_p59_local_tp_context()`, preserving P66's checked-VMA
+  backward ownership inside the outer P59 map while returning every global
+  serving path to the historical fixed-order graph.
+- Added the previously missing installed-shim negative for a real
+  contract-parallel serving projection. With P66 off/on it requires exact
+  equality to the historical path and turns any serving `pmean` into a hard
+  failure. The pinned image passes TP4 and TP8, backward positives and global
+  negatives, with `manifests=2x37/37`. Host gates pass: V1 74/74, P59 37/37,
+  P66 16/16, syntax, manifest, and diff hygiene.
+- Claim ceiling: local implementation and pinned-image construction PASS;
+  real-TPU strict Zero-TIM recovery NOT RUN. No commit, push, or full relaunch
+  is authorized until a fresh hardware carrier returns both boundaries at
+  zero bytes.
+
+## 2026-08-26 — CHECKPOINT: M15 confirms the same serving-scope regression
+
+- Pulled evidence tip `e43a0fe2`. M15 Attempt 8 at source `c2833eea` is a
+  second DP8xTP8 APC-off pre-backward hard red: `N_action=123381`, A-B `20`
+  differing bytes over `15` elements, max-abs `0.007526397705078125`, and B-C
+  exactly `0`. The first mismatch is logical KV prefix `6544`, turn `14`.
+- This is the same boundary signature as P45 (`396/0`), only sparser and later
+  in the long multi-turn stream. It strengthens the diagnosis that the
+  process-wide P66 completed-sum marker leaked into the TP8 serving graph; it
+  does not identify a second M15-only, APC, backward, or optimizer defect.
+- The existing local scope repair is unchanged. Host and pinned-image
+  positives/negatives are green, but repaired real-TPU strict alignment is
+  still unverified. The next bounded gate is a one-host TP4 mechanism carrier;
+  any pass is mechanism evidence only and cannot promote the failed TP8 target.
+
+## 2026-08-26 — RESULT: repaired TP4 ring/gather serving mechanisms are strict green
+
+- Expanded the installed-shim negative so real ordinary-serving o_proj runs
+  both ring and `CANON_FIXED_AR_GATHER=1` with the P66 process flag off/on.
+  TP4 and TP8 remain byte-exact, any serving `pmean` is fatal, and the pinned
+  image terminal passes with `ordinary_contract_p66_global_negative=2` per
+  topology and `manifests=2x37/37`.
+- One-host ring label `p66scopefix_20260826t0204z` and gather label
+  `p66scopegather_20260826t0212z` each ran Qwen3-8B DP1xTP4 for three strict
+  pre-alignment rounds. Actions were `409,565,897`; A-B and B-C are `0/0` in
+  every round; backward and optimizer commits are zero. The gather raw log
+  contains 216 production reducer PATHTRACEs.
+- Ring raw/prealignment SHA256:
+  `9022cad0bcfa81595bd99f0847da1423012626b6157b4919da8218d66fcf3d04` /
+  `6ec6cf96f337939f12805506b525de0bb34f6d4504cbc79944a491ca03953903`.
+  Gather raw/prealignment SHA256:
+  `601d0ffc3d6c0aabd517765f0c1352e92bdb75f59be1a3801a5ff713ffae9839` /
+  `955ae87b9892ec3ac12a8245da3d970242242cf185ba628fb96a9b994d624306`.
+- Claim ceiling remains TP4 mechanism PASS, not DP8xTP8 target restoration.
+  No commit, push, optimizer update, or full relaunch occurred during the
+  measurements. The user subsequently authorized publication and runtime CL
+  `41f50d23` was created; remote readback remains pending.

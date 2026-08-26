@@ -19,7 +19,7 @@ the semantic Perfetto timeline.
 | V1.P4.6 | Hybrid overflow-safe global-norm clipping for the three strict full recipes | stock-finite outputs remain byte-exact; finite-overflow matches FP64; NaN/Inf stays fatal; host and pinned-image gates pass | complete |
 | V1.P4.7 | Publish one reviewed immutable SHA and execute the three full target recipes | approved commit/push and remote readback; three fresh manifests; GSM8K 200 plus P45/M15 300 complete with zero strict FAIL and complete signed evidence | partial target evidence; superseded by recovery after GSM XProf infrastructure stop and P45 numerical stop |
 | V1.P4.8 | Recover Attempt 7 without weakening the numerical contract | GCS-backed XProf capture restores locally with signed artifacts; GSM scale carrier distinguishes topology/duplication from legitimate magnitude; a hash/model-bound P45 capsule accelerates first-red replay; P45 first-red carrier identifies the earliest non-finite boundary; host and pinned-image gates pass before any target relaunch | active; published at `548db7e9`; G1/G2/P64 construction PASS, real GCS transport and P45 target capture/observation pending; apply matrix awaiting user choice |
-| V1.P4.9 | Promote the P66 checked-VMA repair into the three exact full recipes and prepare one simultaneous wave | exact-profile admission; first-update precommit/optimizer hard receipts; host and immutable-image gates; three fresh manifests only after publication | active; implementation, host/image admission, and publication complete at `ff33ea1a`; render/target pending |
+| V1.P4.9 | Promote the P66 checked-VMA repair into the three exact full recipes and prepare one simultaneous wave | exact-profile admission; first-update precommit/optimizer hard receipts; host and immutable-image gates; three fresh manifests only after publication | active; Attempt 8 P45/M15 strict reds repaired locally; host/image and TP4 ring/gather green; runtime CL `41f50d23` committed under explicit publication approval, remote readback pending |
 
 ## Decisions
 
@@ -58,3 +58,10 @@ the semantic Perfetto timeline.
   finite/nonzero/`stable_norm <= 1e6` first-accumulator receipt and a valid
   first optimizer receipt before weight sync/checkpoint. One recipe's red does
   not cancel the other two.
+- Decision (2026-08-26 Attempt 8): P45 (`396/0` bytes) and M15 (`20/0`
+  bytes) share one APC-off, TP8, pre-backward signature: A decode differs from
+  B full prefill while B remains exact to T-old. The P66 checked-VMA
+  completed-sum marker must be scoped to the live P59 manual context and must
+  never enter ordinary serving. Hold all relaunches until the dirty repair
+  returns both strict boundaries to zero on real TPU; host/image negatives do
+  not certify target restoration.
