@@ -1,0 +1,219 @@
+{
+  "carrier": {
+    "payload_resolution": "slice producer prompt+completion history by num_tokens and verify token_history_sha256",
+    "producer_rows": 256,
+    "program_paths_by_arm": {
+      "A": [
+        "continue_decode",
+        "standard"
+      ],
+      "B": [
+        "standard"
+      ]
+    },
+    "replay_prefix_calls": 188,
+    "replay_prefix_end_call": 188,
+    "replay_prefix_reason": "cover every red row through first_request.first_call+1",
+    "replay_prefix_start_call": 1,
+    "requests": 1965,
+    "serving_calls": 3027
+  },
+  "claim_ceiling": "INPUT_PLAN_ONLY_MODEL_REPLAY_NOT_RUN",
+  "coordinates": {
+    "canonical_first_mismatch": {
+      "differing_elements": 327,
+      "first_completion_position": 0,
+      "first_logical_kv_prefix_length": 1066,
+      "first_request": {
+        "candidate_source_rows": [
+          201
+        ],
+        "first_call": 187,
+        "last_call": 243,
+        "max_num_tokens": 1155,
+        "observations": 57,
+        "program_paths": [
+          "continue_decode",
+          "standard"
+        ],
+        "request_id": "153-9b67b376"
+      },
+      "first_turn_index": 0,
+      "last_completion_position": 1667,
+      "last_logical_kv_prefix_length": 2733,
+      "request_count": 8,
+      "source_row": 201,
+      "turns_with_red": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ]
+    },
+    "canonical_first_mismatch_request": {
+      "candidate_source_rows": [
+        201
+      ],
+      "first_call": 187,
+      "last_call": 243,
+      "max_num_tokens": 1155,
+      "observations": 57,
+      "program_paths": [
+        "continue_decode",
+        "standard"
+      ],
+      "request_id": "153-9b67b376"
+    },
+    "earliest_red_request": {
+      "differing_elements": 421,
+      "first_completion_position": 0,
+      "first_logical_kv_prefix_length": 1010,
+      "first_request": {
+        "candidate_source_rows": [
+          245
+        ],
+        "first_call": 164,
+        "last_call": 238,
+        "max_num_tokens": 1138,
+        "observations": 75,
+        "program_paths": [
+          "continue_decode",
+          "standard"
+        ],
+        "request_id": "135-9a259c4a"
+      },
+      "first_turn_index": 0,
+      "last_completion_position": 1622,
+      "last_logical_kv_prefix_length": 2632,
+      "request_count": 9,
+      "source_row": 245,
+      "turns_with_red": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8
+      ]
+    },
+    "first_fully_captured_incident": {
+      "call_index": 565,
+      "completion_position": 238,
+      "dp_rank": 0,
+      "local_scheduler_slot": 29,
+      "num_computed_tokens": 1248,
+      "request_id": "400-bc7daec5",
+      "source_row": 245
+    }
+  },
+  "derived_bytes": {
+    "replay_prefix_plan": 3938394
+  },
+  "derived_sha256": {
+    "replay_prefix_plan": "b8c00fc704cdd698318a2088c70b9593737a996da8eda1e55d98986d5a8f30a7"
+  },
+  "input_sha256": {
+    "first_red_contract": "34be86c9b2bddae55115f6acf5e6e9f68de290ea672ed2930987c6ab5fd03924",
+    "m15_classification": "0ca210ee21acd3aab2fd6f7dadc7efbfb9f7997c25597cfeeadfe8b09b7411fb",
+    "producer_unit": "116f1e9e83e94db8642bf2eeb137df237ce01ed2466cc8f2f05288cef36a0ed7",
+    "replay_contract": "47ae30cd45fe7f7b06e2a3d584579b85af1044a5b5f09e0ed2d83daf62ae63a0",
+    "serving_envelope": "58a35c871244bde29049e20cbb20b6a1ca08e2af64829da6a344380b884bea60",
+    "upstream_audit_receipt": "557801a3d397a29ef4bfa69d8f678db9f66f90726ef51eed1faab870158a84ed"
+  },
+  "limitations": [
+    "the_saved_scheduler_chronology_has_not_been_forced_through_vllm",
+    "first_call_plus_one_is_a_replay_interval_not_an_attested_output_call",
+    "physical_page_ids_may_be_replaced_by_equivalent_fresh_geometry",
+    "no_tensor_boundary_or_root_cause_is_localized"
+  ],
+  "numerical": {
+    "a_b_differing_bytes": 1770,
+    "a_b_differing_elements": 748,
+    "a_b_max_abs": 6.479461669921875,
+    "b_c_differing_bytes": 0,
+    "b_c_differing_elements": 0,
+    "b_c_max_abs": 0.0,
+    "red_rows": [
+      {
+        "differing_elements": 327,
+        "first_completion_position": 0,
+        "first_logical_kv_prefix_length": 1066,
+        "first_request": {
+          "candidate_source_rows": [
+            201
+          ],
+          "first_call": 187,
+          "last_call": 243,
+          "max_num_tokens": 1155,
+          "observations": 57,
+          "program_paths": [
+            "continue_decode",
+            "standard"
+          ],
+          "request_id": "153-9b67b376"
+        },
+        "first_turn_index": 0,
+        "last_completion_position": 1667,
+        "last_logical_kv_prefix_length": 2733,
+        "request_count": 8,
+        "source_row": 201,
+        "turns_with_red": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7
+        ]
+      },
+      {
+        "differing_elements": 421,
+        "first_completion_position": 0,
+        "first_logical_kv_prefix_length": 1010,
+        "first_request": {
+          "candidate_source_rows": [
+            245
+          ],
+          "first_call": 164,
+          "last_call": 238,
+          "max_num_tokens": 1138,
+          "observations": 75,
+          "program_paths": [
+            "continue_decode",
+            "standard"
+          ],
+          "request_id": "135-9a259c4a"
+        },
+        "first_turn_index": 0,
+        "last_completion_position": 1622,
+        "last_logical_kv_prefix_length": 2632,
+        "request_count": 9,
+        "source_row": 245,
+        "turns_with_red": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8
+        ]
+      }
+    ]
+  },
+  "schema": "m15-apc-replay-input-analysis-v1",
+  "source_commit": "9f91d93001dd5b44659f062626eb93fc65e6fcb4",
+  "source_gcs_uri": "gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-v1-apc-m15-on-d12-9f91d930/attempt-0",
+  "status": "M15_REPLAY_INPUT_PLAN_READY_NOT_EXECUTED"
+}

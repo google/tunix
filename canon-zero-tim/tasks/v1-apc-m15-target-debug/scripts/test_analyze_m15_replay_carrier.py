@@ -363,7 +363,7 @@ raise SystemExit(f"unsupported fake gcloud invocation: {args}")
       environment = os.environ.copy()
       environment["FAKE_GCS_ROOT"] = str(fake_root)
       environment["PATH"] = (
-          f"{fake_bin}:{Path(sys.executable).resolve().parent}:"
+          f"{fake_bin}:{Path(sys.executable).parent}:"
           f"{environment.get('PATH', '')}"
       )
       command = [

@@ -1,6 +1,6 @@
 # M15 APC target-debug handoff
 
-## START HERE — Attempt 6 paired execution complete; target red frozen for Phase C/D
+## START HERE — Phase C replay input plan complete; ready for Phase D deterministic replay
 
 Attempt 6 paired execution (`d12-9f91d930`, source commit `9f91d93001dd5b44659f062626eb93fc65e6fcb4`) ran on 64 TPUs (DP8xTP8) for both control and treatment arms, persisted complete raw payloads to GCS Attempt-0 roots, and successfully passed the GCS replay audit `run_m15_replay_gcs_audit.sh`:
 
@@ -21,60 +21,29 @@ Attempt 6 paired execution (`d12-9f91d930`, source commit `9f91d93001dd5b44659f0
   - GCS Audit Verdict: `FRESH_TARGET_RED_FROZEN` (`receipt_sha256=557801a3...`, `manifest_sha256=93f56a0a...`).
   - Terminal: Controlled exit code 42, zero backward, zero optimizer commits.
 
-### Decision Table Rule
+### Phase C Execution Summary (Replay Input Plan Prepared)
 
-| Off result | On result | Decision |
-|---|---|---|
-| `CONTROL_GREEN` | `FRESH_TARGET_RED_FROZEN` | **Use the frozen carrier for exact replay and first-red localization; do not rerun rollout.** |
+`run_m15_replay_gcs_prepare.sh` was executed on `canon-v1-apc-m15-on-d12-9f91d930/attempt-0` and terminated with:
+```text
+[M15.APC.REPLAY.PREPARE] COMPLETE status=M15_REPLAY_INPUT_PLAN_READY_NOT_EXECUTED analysis_sha256=a3c381f8d5e8143ac266a96fb082679e86d85a96eb749255696aaebe649ceff0 manifest_sha256=ed0c67413e51acd639e79dbb95df8698ed8e0386ea606dfcfcb0b1a4fb3e2355 prefix_sha256=b8c00fc704cdd698318a2088c70b9593737a996da8eda1e55d98986d5a8f30a7 prefix_bytes=3938394 red_rows=201,245 replay_prefix_end_call=188 destination=gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-v1-apc-m15-on-d12-9f91d930/attempt-0/derived/m15-replay-input-plan-v1
+```
+
+Evidence sealed in `evidence/v1_apc_m15_attempt6_paired_d12_20260825/` and `evidence/v1_apc_m15_replay_input_plan_d12_20260826/`.
 
 Current claim ceiling:
 ```text
-FULL_REPLAY_CARRIER_FROZEN_REPLAY_NOT_RUN
+M15_REPLAY_INPUT_PLAN_READY_NOT_EXECUTED
 ```
 
-Evidence sealed in `evidence/v1_apc_m15_attempt6_paired_d12_20260825/`.
-Next phase: **Phase C/D (First-red localization and deterministic replay harness)**.
+Next phase: **Phase D (Deterministic replay and tensor-level tap)**.
 
-## NEXT ACTION — prepare the replay input on the bucket-capable host
+## NEXT ACTION — Phase D: Deterministic Replay Harness Execution
 
-The next agent does not rewrite an analyzer and does not launch another
-FrozenLake rollout. From a clean checkout containing these scripts, run exactly:
-
-```bash
-cd /home/yuxuan/code_rl_repro/sequence_packing/tunix
-bash canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/run_m15_replay_gcs_prepare.sh \
-  gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-v1-apc-m15-on-d12-9f91d930/attempt-0 \
-  /mnt/disks/tunix-data
-```
-
-Expected terminal marker:
-
-```text
-[M15.APC.REPLAY.PREPARE] COMPLETE status=M15_REPLAY_INPUT_PLAN_READY_NOT_EXECUTED ... red_rows=201,245 replay_prefix_end_call=188 ...
-```
-
-The agent must return all of the following small outputs:
-
-1. the complete terminal marker above;
-2. `REPLAY_ANALYSIS.json`, `UPSTREAM_AUDIT_RECEIPT.json`, and `SHA256SUMS` from
-   `derived/m15-replay-input-plan-v1/files/`;
-3. the GCS URI, SHA-256, and byte size of `replay-prefix-plan.jsonl` (the
-   terminal marker prints both values);
-4. the output of an independent `sha256sum -c SHA256SUMS` after downloading
-   the derived files to a fresh local directory;
-5. on failure, stderr plus the exact nonzero return code.
-
-Do not commit the large JSONL or original tar. The script downloads and audits
-the immutable Attempt-0 bundle, recomputes A-B/B-C from arrays, joins request
-history to producer rows, emits a calls-1-through-188 replay-prefix plan, and
-uploads only the derived self-hashed result. It deliberately records four
-coordinates: row 201 is the canonical first mismatch; row 245/call 164 is the
-earliest request belonging to any red row; row 201/call 187--188 is the
-canonical mismatch request interval; row 245/call 565 is the first later
-incident with the full tensor observer. Call 565 is not the onset.
-
-This command prepares replay input only. It does not execute the model, prove
-one-host reproduction, localize RoPE/KV/attention, or repair APC.
+The replay plan is prepared (`replay-prefix-plan.jsonl`, 188 calls, 3.94 MB).
+The next action is to execute the deterministic replay harness using the saved 188 prefix calls to:
+1. Prime the cache from Call 1 through Call 188.
+2. Verify reproduction of the exact 1,770 byte A-B mismatch on Row 201/245.
+3. Tap the attention / RoPE / block-table layers to pinpoint the exact numerical root cause.
 
 ## Scope and current ceiling
 

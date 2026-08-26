@@ -1,0 +1,87 @@
+{
+  "task": "v1_apc_m15_replay_input_plan",
+  "source_commit": "9f91d93001dd5b44659f062626eb93fc65e6fcb4",
+  "date_utc": "2026-08-26T00:40:00Z",
+  "topology": "64 TPU (16 nodes, DP8xTP8) Attempt-6 Treatment Arm",
+  "workload": "frozenlake-dp8-tp8",
+  "stage": "phase-c-replay-input-plan-prepared",
+  "source_gcs_uri": "gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-v1-apc-m15-on-d12-9f91d930/attempt-0",
+  "derived_gcs_uri": "gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-v1-apc-m15-on-d12-9f91d930/attempt-0/derived/m15-replay-input-plan-v1",
+  "status": "M15_REPLAY_INPUT_PLAN_READY_NOT_EXECUTED",
+  "claim_ceiling": "INPUT_PLAN_ONLY_MODEL_REPLAY_NOT_RUN",
+  "coordinates": {
+    "canonical_first_mismatch": {
+      "source_row": 201,
+      "first_completion_position": 0,
+      "first_logical_kv_prefix_length": 1066,
+      "differing_elements": 327,
+      "request_id": "153-9b67b376",
+      "turns_with_red": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ]
+    },
+    "earliest_red_request": {
+      "source_row": 245,
+      "first_call": 164,
+      "first_completion_position": 0,
+      "first_logical_kv_prefix_length": 1010,
+      "differing_elements": 421,
+      "request_id": "135-9a259c4a",
+      "turns_with_red": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8
+      ]
+    },
+    "canonical_first_mismatch_request": {
+      "source_row": 201,
+      "first_call": 187,
+      "last_call": 243,
+      "bounded_interval_end_call": 188,
+      "request_id": "153-9b67b376"
+    },
+    "first_fully_captured_incident": {
+      "source_row": 245,
+      "call_index": 565,
+      "dp_rank": 0,
+      "local_scheduler_slot": 29,
+      "num_computed_tokens": 1248,
+      "request_id": "400-bc7daec5",
+      "note": "Downstream observation, not onset"
+    }
+  },
+  "numerical": {
+    "a_b_differing_bytes": 1770,
+    "a_b_differing_elements": 748,
+    "a_b_max_abs": 6.479461669921875,
+    "b_c_differing_bytes": 0,
+    "b_c_differing_elements": 0
+  },
+  "carrier": {
+    "producer_rows": 256,
+    "requests": 1965,
+    "serving_calls": 3027,
+    "replay_prefix_start_call": 1,
+    "replay_prefix_end_call": 188,
+    "replay_prefix_calls": 188,
+    "replay_prefix_plan_sha256": "b8c00fc704cdd698318a2088c70b9593737a996da8eda1e55d98986d5a8f30a7",
+    "replay_prefix_plan_bytes": 3938394
+  },
+  "decision": {
+    "status": "M15_REPLAY_INPUT_PLAN_READY_NOT_EXECUTED",
+    "next_phase": "Phase D (Deterministic replay and tensor-level tap)"
+  }
+}
