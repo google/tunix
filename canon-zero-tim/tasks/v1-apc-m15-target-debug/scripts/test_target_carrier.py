@@ -72,6 +72,21 @@ admission_geometry, p38_batch_contract = _load_train_geometry_contracts()
 
 class TargetCarrierTest(unittest.TestCase):
 
+  def test_runner_uses_m15_classifier_and_compact_packager_without_replacing_legacy(self):
+    runner = (CANON / "cluster/steps/90_run.sh").read_text(encoding="utf-8")
+    env_step = (CANON / "cluster/steps/00_env.sh").read_text(encoding="utf-8")
+    self.assertIn("classify_m15_apc_wide_seam.py", runner)
+    self.assertIn("package_m15_apc_wide_seam.py", runner)
+    self.assertIn("--require-first-action", runner)
+    self.assertIn("classify_p38_seam.py", runner)
+    self.assertIn("M15 compact seam bundle failed", runner)
+    self.assertIn("M15 fixed lm-head seam runs", env_step)
+    self.assertIn("expected_p38_seam_min=960", env_step)
+    self.assertNotIn("m15-wide-seam-bundle.tar", (
+        CANON / "tasks/p38-pathways-decode-prefill-carrier/scripts/"
+        "persist_p38_gcs.sh"
+    ).read_text(encoding="utf-8"))
+
   def test_m15_capture_preserves_production_continue_decode_from_first_call(self):
     profile = (CANON / "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-apc-debug.env").read_text(
         encoding="utf-8"
@@ -181,7 +196,56 @@ class TargetCarrierTest(unittest.TestCase):
             base_path=BASE,
             output_dir=Path(directory),
             source_commit="abc",
-            run_id="bad-source",
+          run_id="bad-source",
+        )
+
+  def test_layer_observer_renders_bounded_off_on_pair(self):
+    with tempfile.TemporaryDirectory() as directory:
+      paths = renderer.render_all(
+          base_path=BASE,
+          output_dir=Path(directory),
+          source_commit=SOURCE,
+          run_id="layer-a",
+          observer="layer",
+      )
+      self.assertEqual([path.name for path in paths], [
+          "jobset-v1-apc-m15-off-layer.yaml",
+          "jobset-v1-apc-m15-on-layer.yaml",
+      ])
+      for path in paths:
+        document = yaml.safe_load(path.read_text(encoding="utf-8"))
+        env = renderer.p33._env_values(document)
+        self.assertEqual(env["CANON_P38_SEAM_OBSERVER"], "layer")
+        self.assertEqual(env["CANON_P38_SEAM_MIN_POSITION"], "960")
+        self.assertEqual(env["CANON_P38_SEAM_MAX_POSITION"], "4096")
+        self.assertEqual(env["CANON_P38_SEAM_MAX_BYTES"], "8589934592")
+        self.assertEqual(env["CANON_P38_TAIL_OBSERVER"], "1")
+        self.assertEqual(env["CANON_P38_TAIL_MAX_BYTES"], "268435456")
+        self.assertNotIn("CANON_P38_SEAM_LAYER", env)
+
+  def test_full_observer_requires_and_pins_one_layer(self):
+    with tempfile.TemporaryDirectory() as directory:
+      paths = renderer.render_all(
+          base_path=BASE,
+          output_dir=Path(directory),
+          source_commit=SOURCE,
+          run_id="full-a",
+          observer="full",
+          seam_layer=17,
+      )
+      for path in paths:
+        document = yaml.safe_load(path.read_text(encoding="utf-8"))
+        env = renderer.p33._env_values(document)
+        self.assertEqual(env["CANON_P38_SEAM_OBSERVER"], "full")
+        self.assertEqual(env["CANON_P38_SEAM_LAYER"], "17")
+        self.assertNotIn("CANON_P38_TAIL_OBSERVER", env)
+      with self.assertRaisesRegex(ValueError, "requires --seam-layer"):
+        renderer.render_all(
+            base_path=BASE,
+            output_dir=Path(directory) / "bad",
+            source_commit=SOURCE,
+            run_id="full-bad",
+            observer="full",
         )
 
   def test_m15_coverage_contract_uses_one_full_producer_unit(self):

@@ -68,6 +68,7 @@
 | Phase3 APC dirty-page negative | CANON_P3_APC_DIRTY_PAGE:布尔诊断旗标;缺省/空/0 不污染,仅 boundary dirty mode 的 writer 向直接 JAX/vLLM reader 透传 1;污染 A 确定会复用的 layer-0 单个真实 KV page,B 仍 full reset | G-D `p3gd1` 已命中;为 G-E 复验保留默认-off 载具,Phase3 最终结案 CL 退役 |
 | M15 target APC carrier | CANON_APC_M15_TARGET_DEBUG=`off\|on`:只准入 DP8×TP8、M15/main、单轮、zero-commit 的 bounded target reproducer；`off` 是 APC-off control，`on` 是 production cache-read treatment；两臂保留生产 `CANON_CONTINUE_DECODE=8` 和签名的 `sampler_is=None` rollout-logprob recipe，不允许 TIS weights；四个 tensor capture 仍限定 standard path；A 强制 `prompt_logprobs=None/logprobs=1/skip_reading_prefix_cache=False`，B 强制 `reset_prefix_cache=True` 且 cache tokens 全零 | fresh target red 冻结并完成首红定位、修复后 G-E 全零与脏页负控再次通过后退役；不得进入 full production profile |
 | M15 replay envelope | CANON_APC_M15_REPLAY_LEDGER=`<capture-dir>/m15_replay_envelope.jsonl`:仅与 `CANON_APC_M15_TARGET_DEBUG=off\|on` 成对启用；逐 serving call 保存 host 侧 dispatch/request/position/page 几何与 token-history SHA，不读取 device tensor；A 的冻结 carrier 必须机械证明 standard+continue-decode，B 必须只走 full-reset standard；路径直接位于 P38 capture 目录。M15 incident/replay 共享 2 GiB 单文件硬界（Attempt 2 在 call 326 已用 268,192,266 bytes，按 1,894-call 观测包络留有余量）；普通 P38 仍用其原 128 MiB renderer 界 | M15 target red 的完整 producer unit、serving chronology 与 first-red join 已冻结并完成 deterministic replay 后退役；不得单独开启 |
+| M15 wide seam bundle | CANON_APC_M15_SEAM_BUNDLE=`<state>/m15_wide_seam_bundle.tar`:仅在 M15 target 的 `layer\|full` seam observer 上启用；postflight 从 A/B 精确 join 选出的原始 seam/tail records、alignment、capsule、replay ledger 与 classifier 生成 deterministic SHA bundle。它含真实 token/capsule，默认只在 pod 本地生成，不扩大现有 GCS 上传集合 | 首红定位完成并把最小修复通过 G-E 后退役；远端上传该新 payload 需要单独明确批准 |
 | Attempt-7 backward first-red | CANON_P62_BACKWARD_NUMERIC_DEBUG:布尔诊断旗标；仅严格 GSM8K DP16xTP4、P59 fixed-head、`backward-no-commit` 载具可开，打印 loss/VJP/DP-reduce/scale/accumulator 紧凑数值 receipt，累加器最终丢弃且 optimizer commit 必须为 0；它不启用 stable clipping | 默认 off；首红根因定位并由独立修复通过 target 后退役，失败证据永久保留 |
 | Registered full-recipe overflow-safe clip | CANON_P63_OVERFLOW_SAFE_CLIP:数值布尔旗标；缺省/0 关闭、仅 1 开，空值或其他值 fatal。仅注册的 Phase4 committed full contexts 与精确 P58 Qwen3-4B strict Zero-HP full recipe 可开；stock norm finite 时逐位返回原 Optax transform，只有独立 `all_finite` 且 stock norm overflow 时才选 max-scaled L2；真实 NaN/Inf 永不 fallback。GSM8K 与 P58 max norm 1，P45/M15 max norm 100 | 默认 off；Phase4 host 372/372 与完整 pinned-image `p63_clip=1` 已绿；P58.11 construction validation in progress；所有 target optimizer commit/full horizon 均按 workload 独立认证，Phase4 证据不自动转移到 P58 |
 | P45 rank-1 first-red | CANON_P64_P45_NUMERIC_DEBUG 与 `CANON_P64_TRAINING_CAPSULE_{MODE,GCS_URI,SHA256}`、`CANON_P64_TRAINING_CAPSULE`、`CANON_P64_MODEL_BINDING_SHA256`:仅严格原始 P45 DP8xTP8、APC-off、P59 fixed-head、`backward-no-commit` 载具可开。capture 在 strict pre-alignment 后原子保存完整 tensorized train batch，并在 backward 前绑定 live model sample；replay 逐数组/文件/模型指纹验真，跳过 environment/rollout/B-rescore，只执行完整 trainer forward 与 group-0 backward，随后丢弃 accumulator。Replay 明示 `certification=0`，不能冒充新 Zero-TIM 认证；首次 NaN/Inf 立即停，绝不 clamp/cast/commit | 默认 off；定位 Attempt-7 P45 rank1 的首个 finite→non-finite 边界并完成根因修复后整体退役，所有 capsule、失败证据与 GCS 路径永久保留 |
@@ -122,6 +123,7 @@ CANON_ALIGN_REPORT
 CANON_ANCHOR_OVERLAP
 CANON_APC_M15_TARGET_DEBUG
 CANON_APC_M15_REPLAY_LEDGER
+CANON_APC_M15_SEAM_BUNDLE
 CANON_BATCHED_EVIDENCE
 CANON_CANONICAL_DEPTHS
 CANON_CHECKPOINT_CONTRACT_JSON
@@ -498,4 +500,4 @@ CANON_XPROF_STEPS
 CANON_XPROF_TPU_TRACE_MODE
 ```
 
-Count: 385 settable names (appendix inventory above; exclusions: none).
+Count: 386 settable names (appendix inventory above; exclusions: none).

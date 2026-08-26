@@ -1,6 +1,100 @@
 # M15 APC target-debug handoff
 
-## START HERE — Phase C replay input plan complete; ready for Phase D deterministic replay
+## START HERE — run the DP8xTP8 wide layer observer
+
+The one-host ladder is exhausted: real scheduler publication, 32-request
+composition, `continue_decode=8`, and full M15 chronology all stayed exact on
+DP1xTP4. The root remains a scale/topology seam. Do not run another one-host
+replay and do not guess a RoPE/page repair.
+
+This source prepares a known-red target localization run. It changes no model
+arithmetic and keeps production APC off. The first target run attaches one
+identical observer to an APC-off control and APC-on treatment:
+
+- all 36 layer input/output fingerprints;
+- final norm and terminal tail;
+- positions 960..4096, covering the historical 1226 and Attempt-6 prompt
+  boundaries;
+- exact request/call/token-prefix/page receipts;
+- automatic M15-aware classification and compact selected-record bundle.
+
+After the user explicitly approves commit/push and the exact source SHA is
+available, render only with:
+
+```bash
+cd /home/yuxuan/code_rl_repro/sequence_packing/tunix
+SOURCE_SHA=<40-character-published-sha>
+RUN_ID=<fresh-unique-label>
+OUT=/tmp/v1-apc-m15-wide-${RUN_ID}
+test ! -e "$OUT"
+python3 canon-zero-tim/cluster/render_v1_apc_m15_target_debug.py \
+  --source-commit "$SOURCE_SHA" \
+  --run-id "$RUN_ID" \
+  --observer layer \
+  --output-dir "$OUT"
+sha256sum "$OUT"/*.yaml
+```
+
+Expected manifests:
+
+```text
+jobset-v1-apc-m15-off-layer.yaml
+jobset-v1-apc-m15-on-layer.yaml
+```
+
+If both allocations are available, the user may submit the two standalone
+commands without waiting between them. Do not append pipes, `tee`, `&&`, or a
+monitor:
+
+```bash
+kubectl apply -f "$OUT/jobset-v1-apc-m15-off-layer.yaml"
+```
+
+```bash
+kubectl apply -f "$OUT/jobset-v1-apc-m15-on-layer.yaml"
+```
+
+Interpret control first. The off arm must remain A-B=0 and B-C=0. The on arm
+must keep B-C=0; if red, it must emit one of:
+
+```text
+M15_LAYER_FIRST_RED_LOCALIZED
+M15_HIDDEN_EXACT_TAIL_FIRST_RED_LOCALIZED
+```
+
+If the first result selects layer `L`, do not guess or edit YAML. A separately
+approved follow-up is rendered by:
+
+```bash
+python3 canon-zero-tim/cluster/render_v1_apc_m15_target_debug.py \
+  --source-commit "$SOURCE_SHA" \
+  --run-id "${RUN_ID}-full-l${L}" \
+  --observer full \
+  --seam-layer "$L" \
+  --output-dir "/tmp/v1-apc-m15-${RUN_ID}-full-l${L}"
+```
+
+Return exactly:
+
+1. full source SHA, both JobSet names, attempts, Kubernetes terminal states,
+   and both GCS Attempt-0 URIs;
+2. the complete `CANON_ALIGN_PRE` line for each arm;
+3. both `p38_seam.classification.json` files and their SHA-256;
+4. the `CANON_APC_M15_SEAM_BUNDLE` path/size/SHA marker for each arm;
+5. on red: `classification`, `gate`, `selected_layer`, `last_exact_boundary`,
+   `first_red_boundary`, `coverage`, and `source_interval` from the JSON;
+6. any nonzero return code plus complete stderr/raw-log tail.
+
+The compact bundle contains real token/capsule material and is generated in
+the pod, but this change does not automatically upload that new payload. Do
+not add it to GCS until the user explicitly authorizes that payload. Existing
+P38 root artifacts and seam classification follow the existing durability
+path unchanged.
+
+Current claim ceiling is `WIDE OBSERVER READY / TARGET NOT RUN / ROOT CAUSE
+NOT LOCALIZED`. See [Phase D](phases/phase-d-wide-target-observer.md).
+
+## Historical Phase C replay input and Attempt-6 evidence
 
 Attempt 6 paired execution (`d12-9f91d930`, source commit `9f91d93001dd5b44659f062626eb93fc65e6fcb4`) ran on 64 TPUs (DP8xTP8) for both control and treatment arms, persisted complete raw payloads to GCS Attempt-0 roots, and successfully passed the GCS replay audit `run_m15_replay_gcs_audit.sh`:
 

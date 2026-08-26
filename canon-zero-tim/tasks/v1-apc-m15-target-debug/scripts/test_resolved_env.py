@@ -43,9 +43,12 @@ class ResolvedEnvironmentTest(unittest.TestCase):
       self,
       arm: str,
       *,
+      observer: str = "none",
+      seam_layer: int | None = None,
       wrong_profile: bool = False,
       wrong_replay_path: bool = False,
       wrong_incident_bound: bool = False,
+      wrong_seam_bound: bool = False,
       wrong_workload_identity: bool = False,
       wrong_entrypoint: bool = False,
   ):
@@ -56,8 +59,11 @@ class ResolvedEnvironmentTest(unittest.TestCase):
           output_dir=Path(output),
           source_commit=SOURCE,
           run_id=run_id,
+          observer=observer,
+          seam_layer=seam_layer,
       )
-      path = next(path for path in paths if path.stem.endswith(f"-{arm}"))
+      expected_suffix = f"-{arm}" if observer == "none" else f"-{arm}-{observer}"
+      path = next(path for path in paths if path.stem.endswith(expected_suffix))
       document = yaml.safe_load(path.read_text(encoding="utf-8"))
       env = os.environ.copy()
       env.update(_literal_env(document))
@@ -81,6 +87,8 @@ class ResolvedEnvironmentTest(unittest.TestCase):
         )
       if wrong_incident_bound:
         env["CANON_P38_INCIDENT_MAX_BYTES"] = "268435456"
+      if wrong_seam_bound:
+        env["CANON_P38_SEAM_MIN_POSITION"] = "1400"
       if wrong_workload_identity:
         env["CANON_P57_DATA_SPLIT"] = "selection"
       if wrong_entrypoint:
@@ -121,6 +129,22 @@ class ResolvedEnvironmentTest(unittest.TestCase):
     self.assertIn("export CANON_P38_DIAGNOSTIC_ROUNDS=1", resolved)
     self.assertIn("export CANON_APC_M15_REPLAY_LEDGER=", resolved)
 
+  def test_layer_observer_resolves_with_m15_bounds_and_tail(self):
+    result, resolved = self._resolve("on", observer="layer")
+    self.assertEqual(result.returncode, 0, result.stdout)
+    self.assertIn("export CANON_P38_SEAM_OBSERVER=layer", resolved)
+    self.assertIn("export CANON_P38_SEAM_MIN_POSITION=960", resolved)
+    self.assertIn("export CANON_P38_SEAM_MAX_POSITION=4096", resolved)
+    self.assertIn("export CANON_P38_SEAM_MAX_BYTES=8589934592", resolved)
+    self.assertIn("export CANON_P38_TAIL_OBSERVER=1", resolved)
+
+  def test_full_observer_resolves_with_exact_layer(self):
+    result, resolved = self._resolve("off", observer="full", seam_layer=17)
+    self.assertEqual(result.returncode, 0, result.stdout)
+    self.assertIn("export CANON_P38_SEAM_OBSERVER=full", resolved)
+    self.assertIn("export CANON_P38_SEAM_LAYER=17", resolved)
+    self.assertNotIn("export CANON_P38_TAIL_OBSERVER=", resolved)
+
   def test_wrong_profile_is_rejected_before_runtime(self):
     result, resolved = self._resolve("on", wrong_profile=True)
     self.assertNotEqual(result.returncode, 0, result.stdout)
@@ -138,6 +162,14 @@ class ResolvedEnvironmentTest(unittest.TestCase):
     self.assertNotEqual(result.returncode, 0, result.stdout)
     self.assertFalse(resolved)
     self.assertIn("incident ledger bounds drifted", result.stdout)
+
+  def test_legacy_seam_bound_is_rejected(self):
+    result, resolved = self._resolve(
+        "on", observer="layer", wrong_seam_bound=True
+    )
+    self.assertNotEqual(result.returncode, 0, result.stdout)
+    self.assertFalse(resolved)
+    self.assertIn("seam observer bounds drifted", result.stdout)
 
   def test_cli_and_signed_workload_identity_cannot_diverge(self):
     result, resolved = self._resolve("off", wrong_workload_identity=True)

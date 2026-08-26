@@ -5,6 +5,86 @@ commands; it does not edit YAML, numerical code, or evidence. Large payloads
 remain in GCS exactly like the earlier P38/lm-head investigation. Only small
 machine-generated receipts are returned through Git or chat.
 
+## Current operation: DP8xTP8 wide first-red walk
+
+Do not run the older Phase-C preparation again. The one-host r10-r13c ladder
+was exact and did not reproduce the target. The next useful run is the known-
+red 64-chip M15 topology with the layer observer already attached.
+
+Preflight after a published source exists:
+
+```bash
+cd /home/yuxuan/code_rl_repro/sequence_packing/tunix
+git fetch origin yuxzhang/canon-zero-tim
+SOURCE_SHA=<full-published-sha>
+test "$(git rev-parse "$SOURCE_SHA")" = "$SOURCE_SHA"
+RUN_ID=<fresh-label>
+OUT=/tmp/v1-apc-m15-wide-${RUN_ID}
+test ! -e "$OUT"
+python3 canon-zero-tim/cluster/render_v1_apc_m15_target_debug.py \
+  --source-commit "$SOURCE_SHA" \
+  --run-id "$RUN_ID" \
+  --observer layer \
+  --output-dir "$OUT"
+python3 canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/test_target_carrier.py
+python3 canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/test_resolved_env.py
+sha256sum "$OUT"/*.yaml
+```
+
+The two expected files are `jobset-v1-apc-m15-off-layer.yaml` and
+`jobset-v1-apc-m15-on-layer.yaml`. Submit each with a standalone `kubectl
+apply`; they may be submitted concurrently when the user approves the pair.
+Never hand-edit a rendered environment.
+
+Postflight is automatic. `90_run.sh` runs
+`classify_m15_apc_wide_seam.py`, then
+`package_m15_apc_wide_seam.py`. Acceptance requires:
+
+- off: A-B=0, B-C=0, observer A/B records present;
+- on: B-C=0 and either exact treatment or a joined first-red classification;
+- a red on arm has at least one completion-position-zero standard-path join;
+- all raw selected NPZ files match their JSON SHA;
+- the compact tar's internal `SHA256SUMS` verifies;
+- zero backward and zero optimizer commits.
+
+Read `p38_seam.classification.json`, not a prose summary. If it reports
+`M15_LAYER_FIRST_RED_LOCALIZED`, take `selected_layer=L` and render the
+conditional full run:
+
+```bash
+FULL_OUT=/tmp/v1-apc-m15-${RUN_ID}-full-l${L}
+test ! -e "$FULL_OUT"
+python3 canon-zero-tim/cluster/render_v1_apc_m15_target_debug.py \
+  --source-commit "$SOURCE_SHA" \
+  --run-id "${RUN_ID}-full-l${L}" \
+  --observer full \
+  --seam-layer "$L" \
+  --output-dir "$FULL_OUT"
+```
+
+Do not launch full mode before layer mode chooses `L`. A full-mode PASS must
+say `FIRST_RED_LOCALIZED` and return a last exact/first red checkpoint plus
+source `file:line`. Only then may a repair phase begin.
+
+The local compact bundle contains true token/capsule data. This source does
+not add it to the existing automatic GCS upload set. Preserve the pod path and
+SHA marker, and request explicit authorization before uploading that new
+payload. The existing large observer archive and classification keep their
+registered durability behavior.
+
+### Current decision table
+
+| Observation | Decision |
+|---|---|
+| off red or B-C red | hard stop; carrier/shared contract invalid |
+| on exact | one target non-reproduction; no fix claim |
+| layer N red | full observer at mechanically selected layer only |
+| layer exact, tail red | localize reported LM-head/normalizer tail interval |
+| no first-action join | evidence incomplete; do not change numerics |
+| full `FIRST_RED_LOCALIZED` | open minimal Phase-E repair |
+
+Everything below is retained as historical carrier context.
+
 ## What this run is for
 
 One fresh target observation records enough information to replay a red

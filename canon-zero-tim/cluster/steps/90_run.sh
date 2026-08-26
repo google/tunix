@@ -139,6 +139,9 @@ if [ "${CANON_P33_WORKLOAD_LAUNCH_ADMITTED:-0}" = "1" ]; then
       report_keys+=(CANON_P38_KV_OBSERVER_CLASSIFICATION)
     elif [ -n "${CANON_P38_SEAM_OBSERVER:-}" ]; then
       report_keys+=(CANON_P38_SEAM_CLASSIFICATION)
+      if [ -n "${CANON_APC_M15_TARGET_DEBUG:-}" ]; then
+        report_keys+=(CANON_APC_M15_SEAM_BUNDLE)
+      fi
     fi
     if [ -e "$CANON_P38_SERVING_CAPTURE_DIR" ]; then
       echo "[run] FATAL: P38 serving-capture directory already exists: $CANON_P38_SERVING_CAPTURE_DIR" >&2
@@ -576,6 +579,7 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
     fi
   fi
   p38_seam_rc=0
+  p38_seam_bundle_rc=0
   if [ -n "${CANON_P38_SEAM_OBSERVER:-}" ]; then
     shopt -s nullglob
     p38_seam_round_capsules=(
@@ -594,24 +598,63 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
       [ -s "$p38_seam_capsule" ] || continue
       p38_seam_args+=(--capsule "$p38_seam_capsule")
     done
-    p38_seam_tail_args=()
-    if [ "${CANON_P38_TAIL_OBSERVER:-0}" = "1" ]; then
-      p38_seam_tail_args+=(--require-tail)
-    fi
     echo "[CANON_P38_SEAM_INPUTS] source=$p38_seam_capsule_source capsules=$((${#p38_seam_args[@]} / 2)) mode=$CANON_P38_SEAM_OBSERVER"
-    JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
-      python3 "$CANON_PKG/tasks/p38-pathways-decode-prefill-carrier/scripts/classify_p38_seam.py" \
-        --directory "$CANON_P38_SEAM_OBSERVER_DIR" \
-        "${p38_seam_args[@]}" \
-        --mode "$CANON_P38_SEAM_OBSERVER" \
-        "${p38_seam_tail_args[@]}" \
-        --output "$CANON_P38_SEAM_CLASSIFICATION" || \
-      p38_seam_rc=$?
+    if [ -n "${CANON_APC_M15_TARGET_DEBUG:-}" ]; then
+      p38_m15_seam_args=(
+        --directory "$CANON_P38_SEAM_OBSERVER_DIR"
+        --alignment-report "$CANON_PRE_ALIGN_REPORT"
+        "${p38_seam_args[@]}"
+        --mode "$CANON_P38_SEAM_OBSERVER"
+        --arm "$CANON_APC_M15_TARGET_DEBUG"
+        --replay-ledger "$CANON_APC_M15_REPLAY_LEDGER"
+      )
+      if [ "$CANON_APC_M15_TARGET_DEBUG" = "on" ]; then
+        p38_m15_seam_args+=(--require-first-action)
+      fi
+      if [ "$CANON_P38_SEAM_OBSERVER" = "full" ]; then
+        p38_m15_seam_args+=(--expected-layer "$CANON_P38_SEAM_LAYER")
+      fi
+      JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
+        python3 "$CANON_PKG/tasks/v1-apc-m15-target-debug/scripts/classify_m15_apc_wide_seam.py" \
+          "${p38_m15_seam_args[@]}" \
+          --output "$CANON_P38_SEAM_CLASSIFICATION" || \
+        p38_seam_rc=$?
+    else
+      p38_seam_tail_args=()
+      if [ "${CANON_P38_TAIL_OBSERVER:-0}" = "1" ]; then
+        p38_seam_tail_args+=(--require-tail)
+      fi
+      JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
+        python3 "$CANON_PKG/tasks/p38-pathways-decode-prefill-carrier/scripts/classify_p38_seam.py" \
+          --directory "$CANON_P38_SEAM_OBSERVER_DIR" \
+          "${p38_seam_args[@]}" \
+          --mode "$CANON_P38_SEAM_OBSERVER" \
+          "${p38_seam_tail_args[@]}" \
+          --output "$CANON_P38_SEAM_CLASSIFICATION" || \
+        p38_seam_rc=$?
+    fi
     if [ -s "$CANON_P38_SEAM_CLASSIFICATION" ]; then
       p38_seam_sha="$(sha256sum "$CANON_P38_SEAM_CLASSIFICATION" | awk '{print $1}')"
       echo "[CANON_P38_SEAM_CLASSIFICATION] path=$CANON_P38_SEAM_CLASSIFICATION sha256=$p38_seam_sha"
       sed 's/^/[CANON_P38_SEAM_CLASSIFICATION_JSON] /' \
         "$CANON_P38_SEAM_CLASSIFICATION"
+    fi
+    if [ -n "${CANON_APC_M15_TARGET_DEBUG:-}" ] && \
+       [ "${p38_seam_rc:-1}" -eq 0 ]; then
+      JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
+        python3 "$CANON_PKG/tasks/v1-apc-m15-target-debug/scripts/package_m15_apc_wide_seam.py" \
+          --directory "$CANON_P38_SEAM_OBSERVER_DIR" \
+          --classification "$CANON_P38_SEAM_CLASSIFICATION" \
+          --alignment-report "$CANON_PRE_ALIGN_REPORT" \
+          "${p38_seam_args[@]}" \
+          --replay-ledger "$CANON_APC_M15_REPLAY_LEDGER" \
+          --output "$CANON_APC_M15_SEAM_BUNDLE" || \
+        p38_seam_bundle_rc=$?
+      if [ -s "$CANON_APC_M15_SEAM_BUNDLE" ]; then
+        p38_seam_bundle_sha="$(sha256sum "$CANON_APC_M15_SEAM_BUNDLE" | awk '{print $1}')"
+        p38_seam_bundle_bytes="$(wc -c < "$CANON_APC_M15_SEAM_BUNDLE" | tr -d '[:space:]')"
+        echo "[CANON_APC_M15_SEAM_BUNDLE] path=$CANON_APC_M15_SEAM_BUNDLE bytes=$p38_seam_bundle_bytes sha256=$p38_seam_bundle_sha"
+      fi
     fi
   fi
   p38_terminal_rc=0
@@ -801,6 +844,13 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
        [ "${p38_seam_rc:-1}" -ne 0 ] || \
        [ ! -s "${CANON_P38_SEAM_CLASSIFICATION:-}" ]; }; then
     echo "[run] FATAL: P38 seam observer contract failed: init=$n_p38_seam_init records=$n_p38_seam_records classifier=${p38_seam_rc:-unset}" >&2
+    exit 1
+  fi
+  if [ -n "${CANON_APC_M15_TARGET_DEBUG:-}" ] && \
+     [ -n "${CANON_P38_SEAM_OBSERVER:-}" ] && \
+     { [ "${p38_seam_bundle_rc:-1}" -ne 0 ] || \
+       [ ! -s "${CANON_APC_M15_SEAM_BUNDLE:-}" ]; }; then
+    echo "[run] FATAL: M15 compact seam bundle failed: rc=${p38_seam_bundle_rc:-unset} path=${CANON_APC_M15_SEAM_BUNDLE:-unset}" >&2
     exit 1
   fi
   if [ "${CANON_P38_TAIL_OBSERVER:-0}" = "1" ] && \

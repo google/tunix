@@ -466,3 +466,39 @@
   Shell syntax, Python compile, secret scan, and `git diff --check` also pass.
 - No GCS target analysis or serving replay ran during integration. The claim
   ceiling remains `FULL_REPLAY_CARRIER_FROZEN_REPLAY_NOT_RUN`.
+
+## 2026-08-26T12:00:00Z — wide DP8xTP8 first-red observer prepared
+
+- Reconciled the known target red with the later one-host ladder. Attempt 6
+  remains APC-off exact and APC-on A-B red by 1,770 bytes / 748 elements with
+  B-C zero. The local r10-r13c ladder stayed exact through full M15 chronology,
+  so the next discriminating carrier is the known-red DP8xTP8 topology.
+- Added renderer modes `none|layer|full`. Layer mode captures all 36 layer
+  input/output fingerprints plus final norm and terminal-tail values over
+  positions 960..4096. Full mode captures 15 internal checkpoints at exactly
+  one layer selected by the layer classifier.
+- Added an M15-specific classifier. It does not require impossible coverage of
+  continue-decode-only actions. It joins only exact standard-path A/B records,
+  requires a completion-position-zero anchor on a red treatment, rejects any
+  B-C red, and reports all unobserved red points explicitly.
+- Added a deterministic compact bundle with selected raw A/B records,
+  mismatch capsule, pre-alignment, replay ledger, receipt, and internal
+  `SHA256SUMS`. The bundle contains real token material and is generated
+  locally; automatic upload of this new payload is intentionally not enabled
+  without separate authorization.
+- Host gates pass: classifier/packager 7/7, target renderer 13/13,
+  real Step-00 resolver 10/10, all focused M15 tests 59/59, Bash/Python
+  syntax, flag audit 386/386, and `git diff --check`.
+- The pinned production image aggregate gate also passes and terminates with
+  `V1_HP_EXACT_IMAGE_PASS ... apc_m15_carrier=59 ... manifests=3`. This admits
+  the renderer, classifier, compact packager, real Step-00 resolution, and
+  their negatives in the exact image. It is not a DP8xTP8 numerical result.
+- Before publication, the operator branch advanced from `e5c596a4` to
+  `8eb65480`. The three incoming CLs overlapped `FLAGS.md`, `00_env.sh`, and
+  the Phase4 exact-image runner, so the payload was restored on that latest
+  tip and all relevant gates were rerun rather than inheriting the older
+  receipt. The final combination passes 63/63 focused M15 tests and the same
+  aggregate exact-image marker with `apc_m15_carrier=59`.
+- No RoPE, attention/RPA, KV, LM-head, loss, backward, optimizer, B, or
+  production APC code changed. No TPU/Kubernetes launch, commit, or push
+  occurred.

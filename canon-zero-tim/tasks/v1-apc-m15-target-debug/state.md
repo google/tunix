@@ -1,16 +1,18 @@
 # State
 
-- Status: active
+- Status: active; wide observer implementation is host- and exact-image-admitted; target not run.
 - Objective: explain and repair the M15 DP8xTP8 APC-on A-vs-B byte mismatch without changing the independent full-reset B arm or any unrelated numerical path.
-- Definition of done: a deterministic clean-run reproducer reaches `FIRST_RED_LOCALIZED`; the smallest localized repair passes host, exact-image, one-host clean/dirty controls, deterministic repeat, and a separately approved DP8xTP8 target run with A-B=0 bytes and B-C=0 bytes.
-- Task directory: `canon-zero-tim/tasks/v1-apc-m15-target-debug`
-- Current baseline: operator tip `c74618b955a2379e94d9be5add1d23f77c86c682`; Attempt 6 paired run `d12-9f91d930` complete and audited.
-- Release state: Attempt 6 paired run complete on 64 TPUs (DP8xTP8). Off control classified `CONTROL_GREEN` ($A-B=0, B-C=0, N_{action}=117415$); On treatment classified `FRESH_TARGET_RED_FROZEN` ($A-B=1770\text{ bytes}, B-C=0, N_{action}=119565$, 748 differing elements). Replay carrier frozen with 256-row producer and 3,027 serving calls. Both arms passed upstream GCS audit `run_m15_replay_gcs_audit.sh`.
-- Current phase: Phase C, [prepare a replay-prefix input plan](phases/phase-c-replay-preparation.md)
-- Last verified fact: committed Attempt-6 evidence reanalysis identifies red producer rows 201 and 245. The canonical first mismatch is row 201/completion position 0; row 245's red request enters earliest at call 164; row 201's request begins at call 187, so the bounded chronology prefix ends at call 188. Row 245/call 565 is a later fully captured observer incident, not the onset. A host analyzer and one-command GCS wrapper encode these distinctions and pass synthetic positive/negative tests.
-- Next action: on a bucket-capable host, run `scripts/run_m15_replay_gcs_prepare.sh` against the on-arm Attempt-0 URI and return its self-hashed derived bundle. Do not launch a new rollout.
-- Blockers: this host cannot access the external GCS bucket, so the real 1.31-GiB carrier analysis must run on the other agent's bucket-capable host.
-- Key artifacts: [Attempt-0 receipt](evidence/v1_apc_m15_attempt0_20260825/receipt.json), [Attempt-1 receipt](evidence/v1_apc_m15_attempt1_20260825/receipt.json), [Attempt-2 receipt](evidence/v1_apc_m15_attempt2_20260825/receipt.json), [Attempt-3 receipt](evidence/v1_apc_m15_attempt3_20260825/receipt.json), [Attempt-4 receipt](evidence/v1_apc_m15_attempt4_20260825/receipt.json), [Attempt-5 paired receipt](evidence/v1_apc_m15_attempt5_paired_d11_20260825/receipt.json), [Attempt-6 paired receipt](evidence/v1_apc_m15_attempt6_paired_d12_20260825/receipt.json), [Phase3 state](../v1-phase3-prefix-cache/state.md)
-- Validation: final-tree Phase-C/M15 focused tests 50/50, including analyzer 4/4 with fake-GCS end-to-end and immutable-rerun negative; APC target-carrier 46/46; P38 classifier 37/37; Phase3 12/12; P57 146/146; V1 Phase4 CPU 67/67; flag audit 378/378; Python/shell syntax and `git diff --check` PASS. Attempt-6 GCS audits PASS with status `CONTROL_GREEN` and `FRESH_TARGET_RED_FROZEN`.
-- Limitation: the new output is only an executable chronology/input plan. It does not force scheduler state, execute serving A/B, reproduce the mismatch on one host, or localize a tensor boundary. Production recipes remain APC-off.
-- Updated: 2026-08-26T01:20:00Z
+- Definition of done: `FIRST_RED_LOCALIZED` names the last exact and first red tensor plus `file:line`; one localized repair then passes host, exact-image, one-host clean/dirty controls, deterministic repeat, and separately approved DP8xTP8 A-B/B-C zero.
+- Task directory: `canon-zero-tim/tasks/v1-apc-m15-target-debug`.
+- Release base: `8eb65480d3705d96ab282799ad5a6c1901596248` on `local/m15-wide-observer-0826`; the wide-observer payload is one additive CL on top.
+- Immutable target fact: Attempt 6 off=`CONTROL_GREEN`; on=`FRESH_TARGET_RED_FROZEN` with A-B 1,770 bytes / 748 elements and B-C zero on DP8xTP8.
+- One-host fact: local r10-r13c stayed exact through real scheduler publication, 32-request composition, `continue_decode=8`, and full M15 chronology. r13c APC-on reached 97.8% hits, 130,148 actions, and logical KV 988..7189. These receipts remain under `/mnt/disks/tunix-data`; they are not a target repair.
+- Current phase: [Phase D wide target observer](phases/phase-d-wide-target-observer.md).
+- Implemented: renderer `none|layer|full` modes; 36-layer coarse observer plus final norm/tail; one-layer 15-checkpoint observer; M15-aware first-red classifier; deterministic compact selected-record bundle with internal `SHA256SUMS`.
+- Numerical changes: none. RoPE, attention/RPA, KV values, LM head, loss, backward, optimizer, B full reset, and production APC are unchanged.
+- Next action after an explicitly approved publication: render the `layer` DP8xTP8 off/on pair from the exact full SHA and submit them independently; classification remains control-first.
+- Claim ceiling: `WIDE_OBSERVER_IMPLEMENTED / HOST PASS / EXACT_IMAGE PASS / DP8xTP8 TARGET NOT RUN / ROOT CAUSE NOT LOCALIZED`.
+- Sensitive evidence: the compact bundle contains real tokens/capsules. It is generated locally but is not automatically added to the GCS upload set; that new payload requires separate explicit approval.
+- Key artifacts: [Attempt-6 receipt](evidence/v1_apc_m15_attempt6_paired_d12_20260825/receipt.json), [Phase D observer](phases/phase-d-wide-target-observer.md), [Phase3 state](../v1-phase3-prefix-cache/state.md).
+- Publishing: stop before commit/push and wait for explicit user approval for this exact diff.
+- Updated: 2026-08-26 (latest-tip host and exact-image admission completed; no target launch).

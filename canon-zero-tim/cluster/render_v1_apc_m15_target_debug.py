@@ -26,6 +26,10 @@ _PREFIX_BOUNDS = (1152, 1216, 1280, 1408, 1696)
 _INCIDENT_MIN_PREFIX = 1152
 _INCIDENT_MAX_PREFIX = 7168
 _INCIDENT_MAX_BYTES = 2 * 1024 * 1024 * 1024
+_SEAM_MIN_POSITION = 960
+_SEAM_MAX_POSITION = 4096
+_SEAM_MAX_BYTES = 8 * 1024 * 1024 * 1024
+_TAIL_MAX_BYTES = 256 * 1024 * 1024
 _ARTIFACT_BUCKET = "gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38"
 _WORKLOAD_CANDIDATE = "m15"
 _DATA_SPLIT = "main"
@@ -88,12 +92,18 @@ def _replace_env(document: Mapping[str, Any], values: Mapping[str, str]) -> None
   p33._set_named_env(_container(document)["env"], values, remove=())
 
 
-def _capture_values(document: Mapping[str, Any], arm: str) -> dict[str, str]:
+def _capture_values(
+    document: Mapping[str, Any],
+    arm: str,
+    *,
+    observer: str = "none",
+    seam_layer: int | None = None,
+) -> dict[str, str]:
   env = p33._env_values(document)
   state = env["CANON_STATE"]
   name = document["metadata"]["name"]
   capture = f"{state}/p38_serving_capture"
-  return {
+  values = {
       "CANON_APC_M15_TARGET_DEBUG": arm,
       # train_frozenlake_qwen3 treats the CLI selector and these environment
       # fields as one signed workload identity.  Supplying only the CLI values
@@ -135,28 +145,73 @@ def _capture_values(document: Mapping[str, Any], arm: str) -> dict[str, str]:
       "CANON_P38_SERVING_CAPTURE_ARCHIVE": f"{state}/p38_serving_capture.tar",
       "CANON_P38_GCS_PREFIX": f"{_ARTIFACT_BUCKET}/{name}/attempt-0",
   }
+  if observer != "none":
+    values.update({
+        "CANON_P38_SEAM_OBSERVER": observer,
+        "CANON_P38_SEAM_OBSERVER_DIR": capture,
+        "CANON_P38_SEAM_MIN_POSITION": str(_SEAM_MIN_POSITION),
+        "CANON_P38_SEAM_MAX_POSITION": str(_SEAM_MAX_POSITION),
+        "CANON_P38_SEAM_MAX_BYTES": str(_SEAM_MAX_BYTES),
+        "CANON_P38_SEAM_CLASSIFICATION": f"{state}/p38_seam.classification.json",
+        "CANON_APC_M15_SEAM_BUNDLE": f"{state}/m15_wide_seam_bundle.tar",
+    })
+    if observer == "layer":
+      values.update({
+          "CANON_P38_TAIL_OBSERVER": "1",
+          "CANON_P38_TAIL_MAX_BYTES": str(_TAIL_MAX_BYTES),
+      })
+    elif observer == "full":
+      if seam_layer is None:
+        raise ValueError("full M15 seam observer requires --seam-layer")
+      values["CANON_P38_SEAM_LAYER"] = str(seam_layer)
+  return values
 
 
-def validate(document: Mapping[str, Any], *, arm: str, source_commit: str, run_id: str) -> None:
+def validate(
+    document: Mapping[str, Any],
+    *,
+    arm: str,
+    source_commit: str,
+    run_id: str,
+    observer: str = "none",
+    seam_layer: int | None = None,
+) -> None:
   spec = _spec(arm)
   p33.validate_jobset(
       document, spec, source_commit, run_id,
       fixed_lm_head=True, alignment_warning_only=False,
   )
   env = p33._env_values(document)
-  expected = _capture_values(document, arm)
+  expected = _capture_values(
+      document, arm, observer=observer, seam_layer=seam_layer
+  )
   wrong = {name: env.get(name) for name, value in expected.items() if env.get(name) != value}
   if wrong:
     raise ValueError(f"M15 APC capture env drifted: {wrong}")
   if document["spec"]["failurePolicy"].get("maxRestarts") != 0:
     raise ValueError("M15 APC target debug must not restart")
-  forbidden_prefixes = (
-      "CANON_" "P38_KV_OBSERVER",
-      "CANON_" "P38_SEAM",
-      "CANON_" "P38_TAIL",
-  )
-  if any(name.startswith(forbidden_prefixes) for name in env):
-    raise ValueError("Phase B must not attach a numerical observer")
+  if any(name.startswith("CANON_" "P38_KV_OBSERVER") for name in env):
+    raise ValueError("M15 wide seam runs must not attach the KV observer")
+  if observer == "none":
+    if any(
+        name.startswith(("CANON_" "P38_SEAM", "CANON_" "P38_TAIL"))
+        for name in env
+    ):
+      raise ValueError("observer=none must not attach a numerical observer")
+  elif observer == "layer":
+    if env.get("CANON_P38_SEAM_OBSERVER") != "layer" or \
+       env.get("CANON_P38_TAIL_OBSERVER") != "1" or \
+       "CANON_P38_SEAM_LAYER" in env:
+      raise ValueError("M15 layer observer contract drifted")
+  elif observer == "full":
+    if seam_layer is None or not 0 <= seam_layer < 36:
+      raise ValueError("M15 full seam layer must be in [0,36)")
+    if env.get("CANON_P38_SEAM_OBSERVER") != "full" or \
+       env.get("CANON_P38_SEAM_LAYER") != str(seam_layer) or \
+       "CANON_P38_TAIL_OBSERVER" in env:
+      raise ValueError("M15 full observer contract drifted")
+  else:
+    raise ValueError("observer must be none, layer, or full")
   command = shlex.split(env["CANON_RUN_CMD"])
   if tuple(command[:4]) != (
       "python3", "-u", "-m", "examples.frozenlake.train_frozenlake_qwen3"
@@ -178,30 +233,59 @@ def validate(document: Mapping[str, Any], *, arm: str, source_commit: str, run_i
     raise ValueError(f"M15 APC command drifted: {missing}")
 
 
-def render_all(*, base_path: Path, output_dir: Path, source_commit: str, run_id: str) -> tuple[Path, ...]:
+def render_all(
+    *,
+    base_path: Path,
+    output_dir: Path,
+    source_commit: str,
+    run_id: str,
+    observer: str = "none",
+    seam_layer: int | None = None,
+) -> tuple[Path, ...]:
   if len(source_commit) != 40 or any(c not in "0123456789abcdef" for c in source_commit):
     raise ValueError("source commit must be a full lowercase SHA")
+  if observer not in ("none", "layer", "full"):
+    raise ValueError("observer must be none, layer, or full")
+  if observer == "full" and (seam_layer is None or not 0 <= seam_layer < 36):
+    raise ValueError("full M15 seam observer requires --seam-layer in [0,36)")
+  if observer != "full" and seam_layer is not None:
+    raise ValueError("--seam-layer is valid only with --observer=full")
   base = p33.load_base(base_path)
   output_dir.mkdir(parents=True, exist_ok=True)
   paths = []
   for arm in ("off", "on"):
     spec = _spec(arm)
     document = p33.render_jobset(base, spec, source_commit, run_id)
-    _replace_env(document, _capture_values(document, arm))
+    _replace_env(
+        document,
+        _capture_values(
+            document, arm, observer=observer, seam_layer=seam_layer
+        ),
+    )
     labels = document["metadata"].setdefault("labels", {})
     labels.update({
+        # P33 keys the 256-row mismatch-capsule admission on this existing
+        # diagnostic identity.  Observer mode is carried separately below.
         "canon.zero-tim/diagnostic": "p38-serving-capture",
         "canon.zero-tim/apc-m15-arm": arm,
         "canon.zero-tim/kv-unified": "0",
-        "canon.zero-tim/seam-observer": "0",
-        "canon.zero-tim/terminal-tail": "0",
+        "canon.zero-tim/seam-observer": observer,
+        "canon.zero-tim/terminal-tail": "1" if observer == "layer" else "0",
         "canon.zero-tim/terminal-discriminator": "0",
         "canon.zero-tim/lm-head-algo": "0",
         "canon.zero-tim/fixed-lm-head": "1",
         "canon.zero-tim/durability-profile": "round-alignment-v1",
     })
-    validate(document, arm=arm, source_commit=source_commit, run_id=run_id)
-    path = output_dir / f"jobset-v1-apc-m15-{arm}.yaml"
+    validate(
+        document,
+        arm=arm,
+        source_commit=source_commit,
+        run_id=run_id,
+        observer=observer,
+        seam_layer=seam_layer,
+    )
+    suffix = "" if observer == "none" else f"-{observer}"
+    path = output_dir / f"jobset-v1-apc-m15-{arm}{suffix}.yaml"
     if path.exists():
       raise FileExistsError(f"refusing to overwrite {path}")
     path.write_text(
@@ -219,10 +303,15 @@ def main() -> None:
   parser.add_argument("--output-dir", required=True, type=Path)
   parser.add_argument("--source-commit", required=True)
   parser.add_argument("--run-id", required=True)
+  parser.add_argument(
+      "--observer", choices=("none", "layer", "full"), default="none"
+  )
+  parser.add_argument("--seam-layer", type=int)
   args = parser.parse_args()
   for path in render_all(
       base_path=args.base, output_dir=args.output_dir,
       source_commit=args.source_commit, run_id=args.run_id,
+      observer=args.observer, seam_layer=args.seam_layer,
   ):
     print(f"[V1.APC.M15] RENDERED path={path}")
 
