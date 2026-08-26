@@ -75,6 +75,7 @@ spec:
             #   operator: "Equal"
             #   value: "present"
             #   effect: "NoSchedule"
+            priorityClassName: very-high
             containers:
             - name: ${USER_CONTAINER}
               image: ${USER_CONTAINER_IMAGE}

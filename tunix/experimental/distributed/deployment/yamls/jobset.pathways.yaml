@@ -80,6 +80,7 @@ spec:
                     resources:
                       requests:
                         storage: 400Gi
+            priorityClassName: very-high
             containers:
             - name: pathways-rm
               image: ${SERVER_IMAGE}
@@ -271,6 +272,7 @@ spec:
             #   operator: "Equal"
             #   value: "present"
             #   effect: "NoSchedule"
+            priorityClassName: very-high
             containers:
             - name: pathways-worker
               image: ${SERVER_IMAGE}
