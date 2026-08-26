@@ -726,6 +726,222 @@ def _canonical_trainer_execution_mesh(runner_mesh, trainer_state, label: str):
   return execution_mesh, relation
 
 
+@dataclasses.dataclass(frozen=True)
+class _CanonicalExecutionModel:
+  """Weight-free Qwen graph rebuilt for one physical execution mesh."""
+
+  model: Any
+  graphdef: Any
+  state_treedef: Any
+
+
+def _canonical_execution_model(runner, execution_mesh, relation: str, label: str):
+  """Reconstructs the live model graph with trainer-role static mesh values.
+
+  The vLLM ``model_fn`` is not just a Python model call: ``get_flax_model``
+  creates a nested JIT whose output shardings close over the rollout mesh.
+  Rebinding only caller arrays therefore cannot relocate that executable.  A
+  disaggregated trainer needs the same Qwen graph reconstructed with the
+  trainer mesh, while the runtime parameter leaves continue to come from the
+  trainer-to-engine mapping.
+
+  ``nnx.eval_shape`` constructs graph/static metadata only.  It does not load
+  or retain a second parameter copy.  The exact state tree, leaf shapes, and
+  dtypes are checked against the live serving model before the graph is used.
+  """
+  if relation != "disjoint":
+    return None
+  if not hasattr(runner, "model") or not hasattr(runner, "vllm_config"):
+    raise FunctionalMappingError(
+        f"{label} disaggregated execution requires the live NNX model/config"
+    )
+
+  from flax import nnx  # pylint: disable=g-import-not-at-top
+
+  live_graphdef, live_state = nnx.split(runner.model)
+  del live_graphdef
+  live_treedef = jax.tree_util.tree_structure(live_state)
+  live_leaves = tuple(jax.tree_util.tree_leaves(live_state))
+  runner_leaves = tuple(jax.tree_util.tree_leaves(runner.state))
+  if live_treedef != jax.tree_util.tree_structure(runner.state):
+    raise FunctionalMappingError(
+        f"{label} live model/state trees differ before mesh reconstruction"
+    )
+  if len(live_leaves) != len(runner_leaves):
+    raise FunctionalMappingError(
+        f"{label} live model/state leaf counts differ before reconstruction"
+    )
+
+  vllm_config = runner.vllm_config
+  model_config = getattr(vllm_config, "model_config", None)
+  if model_config is None or not hasattr(model_config, "dtype"):
+    raise FunctionalMappingError(
+        f"{label} vLLM model config has no reconstructable dtype"
+    )
+  original_dtype = model_config.dtype
+  try:
+    model_dtype = jnp.dtype(original_dtype)
+  except (TypeError, ValueError):
+    from tpu_inference.models.common.model_loader import (  # pylint: disable=g-import-not-at-top
+        to_jax_dtype,
+    )
+
+    model_dtype = to_jax_dtype(original_dtype)
+  seed = int(getattr(model_config, "seed", 0) or 0)
+  model_class = type(runner.model)
+
+  with _P59_NESTED_SHARD_MAP_LOCK:
+    model_config.dtype = model_dtype
+    try:
+      with jax.set_mesh(execution_mesh):
+        execution_model = nnx.eval_shape(
+            lambda: model_class(
+                vllm_config, jax.random.key(seed), execution_mesh
+            )
+        )
+    except Exception as exc:
+      raise FunctionalMappingError(
+          f"{label} could not reconstruct the live model on trainer mesh"
+      ) from exc
+    finally:
+      model_config.dtype = original_dtype
+
+  graphdef, execution_state = nnx.split(execution_model)
+  execution_treedef = jax.tree_util.tree_structure(execution_state)
+  execution_leaves = tuple(jax.tree_util.tree_leaves(execution_state))
+  if execution_treedef != live_treedef:
+    raise FunctionalMappingError(
+        f"{label} trainer-mesh reconstruction changed the NNX state tree"
+    )
+  if len(execution_leaves) != len(runner_leaves):
+    raise FunctionalMappingError(
+        f"{label} trainer-mesh reconstruction changed the state leaf count"
+    )
+  for index, (execution_leaf, runner_leaf) in enumerate(
+      zip(execution_leaves, runner_leaves, strict=True)
+  ):
+    if (
+        tuple(execution_leaf.shape) != tuple(runner_leaf.shape)
+        or execution_leaf.dtype != runner_leaf.dtype
+    ):
+      raise FunctionalMappingError(
+          f"{label} trainer-mesh state contract changed at leaf {index}: "
+          f"{execution_leaf.shape}/{execution_leaf.dtype} != "
+          f"{runner_leaf.shape}/{runner_leaf.dtype}"
+      )
+  return _CanonicalExecutionModel(
+      model=execution_model,
+      graphdef=graphdef,
+      state_treedef=execution_treedef,
+  )
+
+
+@contextlib.contextmanager
+def _canonical_fixed_ar_execution_mesh(source_mesh, execution_mesh, label: str):
+  """Temporarily points fixed-order engine collectives at trainer devices.
+
+  The installed fixed-AR linear/embed implementation keeps the live runner
+  mesh in a module global.  JIT tracing reads that value while constructing
+  its shard_map.  A bounded, locked trace context lets the trainer callable
+  capture its own physical mesh, then restores the serving value immediately.
+  """
+  if tuple(source_mesh.devices.flat) == tuple(execution_mesh.devices.flat):
+    yield
+    return
+  try:
+    from tpu_inference.layers.jax import linear  # pylint: disable=g-import-not-at-top
+  except ImportError as exc:
+    raise FunctionalMappingError(
+        f"{label} cannot bind the fixed-AR execution mesh"
+    ) from exc
+
+  with _P59_NESTED_SHARD_MAP_LOCK:
+    original_mesh = getattr(linear, "_CANON_MESH", None)
+    if original_mesh is not None and (
+        tuple(original_mesh.axis_names) != tuple(source_mesh.axis_names)
+        or tuple(original_mesh.devices.flat) != tuple(source_mesh.devices.flat)
+    ):
+      raise FunctionalMappingError(
+          f"{label} fixed-AR source mesh differs from the live runner"
+      )
+    linear._CANON_MESH = execution_mesh  # pylint: disable=protected-access
+    try:
+      yield
+    finally:
+      changed_during_trace = (
+          linear._CANON_MESH is not execution_mesh  # pylint: disable=protected-access
+      )
+      linear._CANON_MESH = original_mesh  # pylint: disable=protected-access
+      if changed_during_trace:
+        raise FunctionalMappingError(
+            f"{label} fixed-AR execution mesh changed during tracing"
+        )
+
+
+def _canonical_execution_callables(
+    runner,
+    execution_mesh,
+    execution_model,
+    cache_sharding,
+    data_spec,
+    label: str,
+):
+  """Builds model/logits JITs whose explicit outputs use trainer devices."""
+  if execution_model is None:
+    return runner.model_fn, runner.compute_logits_fn
+
+  from flax import nnx  # pylint: disable=g-import-not-at-top
+
+  hidden_sharding = jax.sharding.NamedSharding(
+      execution_mesh, jax.sharding.PartitionSpec(data_spec, None)
+  )
+  logits_sharding = jax.sharding.NamedSharding(
+      execution_mesh, jax.sharding.PartitionSpec(data_spec, "model")
+  )
+  graphdef = execution_model.graphdef
+  state_treedef = execution_model.state_treedef
+
+  def run_model(state_leaves, *args):
+    state = jax.tree_util.tree_unflatten(state_treedef, state_leaves)
+    model = nnx.merge(graphdef, state)
+    return model(*args)
+
+  compiled_model = jax.jit(
+      run_model,
+      out_shardings=(
+          cache_sharding,
+          hidden_sharding,
+          hidden_sharding,
+          None,
+      ),
+      donate_argnums=1,
+      static_argnums=(6, 9, 10),
+  )
+
+  def run_compute_logits(state_leaves, hidden_states, *_):
+    state = jax.tree_util.tree_unflatten(state_treedef, state_leaves)
+    model = nnx.merge(graphdef, state)
+    return model.compute_logits(hidden_states)
+
+  compiled_logits = jax.jit(
+      run_compute_logits, out_shardings=logits_sharding
+  )
+
+  def invoke_model(*args):
+    with _canonical_fixed_ar_execution_mesh(
+        runner.mesh, execution_mesh, f"{label} model"
+    ):
+      return compiled_model(*args)
+
+  def invoke_logits(*args):
+    with _canonical_fixed_ar_execution_mesh(
+        runner.mesh, execution_mesh, f"{label} logits"
+    ):
+      return compiled_logits(*args)
+
+  return invoke_model, invoke_logits
+
+
 def _p59_manual_rank_axes(mesh, data_axis: str, label: str):
   """Makes unit TP manual when an explicit TP1 spec must be retained."""
   actual_data_axis, model_axis = _p59_mesh_roles(mesh, label)
@@ -2112,7 +2328,7 @@ class _P28SegmentedEngineForward:
   boundaries preserve the canonical whole-model value bitwise.
   """
 
-  def __init__(self, runner):
+  def __init__(self, runner, *, execution_mesh=None, execution_model=None):
     if os.environ.get("CANON_P28_SEGMENTED_FORWARD", "") != "1":
       raise FunctionalMappingError(
           "P28 segmented forward requires CANON_P28_SEGMENTED_FORWARD=1"
@@ -2129,13 +2345,25 @@ class _P28SegmentedEngineForward:
       raise FunctionalMappingError(
           "P28 segmented forward requires the concrete live engine mesh"
       )
-    self._engine_mesh = runner.mesh
+    self._source_engine_mesh = runner.mesh
+    self._engine_mesh = execution_mesh or runner.mesh
     self._engine_data_size = int(self._engine_mesh.shape.get("data", 1))
     self._engine_tp_size = int(self._engine_mesh.shape.get("model", 1))
 
+    disaggregated = (
+        tuple(self._source_engine_mesh.devices.flat)
+        != tuple(self._engine_mesh.devices.flat)
+    )
+    if disaggregated and execution_model is None:
+      raise FunctionalMappingError(
+          "P28 disaggregated segmented forward requires the reconstructed "
+          "trainer execution model"
+      )
+
     from flax import nnx  # pylint: disable=g-import-not-at-top
 
-    graphdef, live_state = nnx.split(runner.model)
+    model = execution_model.model if execution_model is not None else runner.model
+    graphdef, live_state = nnx.split(model)
     live_treedef = jax.tree_util.tree_structure(live_state)
     runner_treedef = jax.tree_util.tree_structure(runner.state)
     if live_treedef != runner_treedef:
@@ -2162,7 +2390,7 @@ class _P28SegmentedEngineForward:
         )
 
     try:
-      backbone = runner.model.model
+      backbone = model.model
       layers = tuple(backbone.layers)
       start_layer = int(backbone.start_layer)
       end_layer = int(backbone.end_layer)
@@ -2259,7 +2487,7 @@ class _P28SegmentedEngineForward:
       tied_word_embeddings = bool(
           getattr(hf_config, "tie_word_embeddings", False)
       )
-      if not tied_word_embeddings and not hasattr(runner.model, "lm_head"):
+      if not tied_word_embeddings and not hasattr(model, "lm_head"):
         raise FunctionalMappingError(
             "P28 G5c untied model requires an explicit lm_head"
         )
@@ -2290,7 +2518,7 @@ class _P28SegmentedEngineForward:
             head_treedef,
             head_local_leaves,
             head_full_indices,
-        ) = split_local(runner.model.lm_head, "lm head")
+        ) = split_local(model.lm_head, "lm head")
       if not embed_local_leaves or not norm_local_leaves or not head_local_leaves:
         raise FunctionalMappingError(
             "P28 G5c embed/norm/lm-head must each expose parameter leaves"
@@ -2588,6 +2816,75 @@ class _P28SegmentedEngineForward:
     self._full_state_leaves = tuple(live_leaves)
     self._num_state_leaves = len(live_leaves)
     self._captured_state_released = False
+    if disaggregated:
+
+      def bind_execution_mesh(fn, stage):
+        if fn is None:
+          return None
+
+        def invoke(*args, **kwargs):
+          with _canonical_fixed_ar_execution_mesh(
+              self._source_engine_mesh,
+              self._engine_mesh,
+              f"P28 segmented {stage}",
+          ):
+            return fn(*args, **kwargs)
+
+        return invoke
+
+      self._embed_fn = bind_execution_mesh(self._embed_fn, "embed-reference")
+      self._layer_fns = tuple(
+          bind_execution_mesh(fn, "layer-reference")
+          for fn in self._layer_fns
+      )
+      self._local_layer_fns = tuple(
+          bind_execution_mesh(fn, "layer-forward")
+          for fn in self._local_layer_fns
+      )
+      self._local_layer_vjp_fns = tuple(
+          bind_execution_mesh(fn, "layer-vjp")
+          for fn in self._local_layer_vjp_fns
+      )
+      self._local_layer_pullback_fns = tuple(
+          bind_execution_mesh(fn, "layer-pullback")
+          for fn in self._local_layer_pullback_fns
+      )
+      self._local_layer_pullback_vma_fns = tuple(
+          bind_execution_mesh(fn, "layer-pullback-vma")
+          for fn in self._local_layer_pullback_vma_fns
+      )
+      self._local_layer_pullback_tape_fns = tuple(
+          bind_execution_mesh(fn, "layer-pullback-tape")
+          for fn in self._local_layer_pullback_tape_fns
+      )
+      self._norm_fn = bind_execution_mesh(self._norm_fn, "norm-reference")
+      self._embed_local_fn = bind_execution_mesh(
+          self._embed_local_fn, "embed-forward"
+      )
+      self._embed_pullback_fn = bind_execution_mesh(
+          self._embed_pullback_fn, "embed-pullback"
+      )
+      self._embed_pullback_vma_fn = bind_execution_mesh(
+          self._embed_pullback_vma_fn, "embed-pullback-vma"
+      )
+      self._norm_local_fn = bind_execution_mesh(
+          self._norm_local_fn, "norm-forward"
+      )
+      self._norm_pullback_fn = bind_execution_mesh(
+          self._norm_pullback_fn, "norm-pullback"
+      )
+      self._norm_pullback_vma_fn = bind_execution_mesh(
+          self._norm_pullback_vma_fn, "norm-pullback-vma"
+      )
+      self._head_local_fn = bind_execution_mesh(
+          self._head_local_fn, "head-forward"
+      )
+      self._head_pullback_fn = bind_execution_mesh(
+          self._head_pullback_fn, "head-pullback"
+      )
+      self._head_pullback_vma_fn = bind_execution_mesh(
+          self._head_pullback_vma_fn, "head-pullback-vma"
+      )
     self._p30_sparse_grad_assembly = (
         os.environ.get("CANON_P30_SPARSE_GRAD_ASSEMBLY", "") == "1"
     )
@@ -2598,8 +2895,8 @@ class _P28SegmentedEngineForward:
       )
     self.contract = SegmentedForwardContract(
         implementation_id=(
-            f"{type(runner.model).__module__}."
-            f"{type(runner.model).__qualname__}:p28-segmented-layer1"
+            f"{type(model).__module__}."
+            f"{type(model).__qualname__}:p28-segmented-layer1"
         ),
         state_leaves=len(live_leaves),
         start_layer=start_layer,
@@ -3769,9 +4066,15 @@ class _P28SegmentedEngineForward:
     return tuple(full)
 
 
-def build_p28_segmented_engine_forward(runner):
+def build_p28_segmented_engine_forward(
+    runner, *, execution_mesh=None, execution_model=None
+):
   """Builds the default-off P28 forward-only depth-segmentation probe."""
-  return _P28SegmentedEngineForward(runner)
+  return _P28SegmentedEngineForward(
+      runner,
+      execution_mesh=execution_mesh,
+      execution_model=execution_model,
+  )
 
 
 def _weight_attestation_mesh_shape(runner: Any) -> tuple[tuple[str, int], ...]:
@@ -4115,6 +4418,29 @@ class Qwen3EngineForwardAdapter:
             data_spec,
         ),
     )
+    self._execution_model = _canonical_execution_model(
+        runner,
+        self._execution_mesh,
+        self._execution_mesh_relation,
+        "canonical trainer execution",
+    )
+    (
+        self._trainer_model_fn,
+        self._trainer_compute_logits_fn,
+    ) = _canonical_execution_callables(
+        runner,
+        self._execution_mesh,
+        self._execution_model,
+        self._cache_sharding,
+        data_spec,
+        "canonical trainer execution",
+    )
+    if self._execution_model is not None:
+      print(
+          "[CANON_ADAPTER.PLACEMENT] trainer model callables rebuilt "
+          "relation=disjoint graph=abstract-clone mesh_bound_jits=2",
+          flush=True,
+      )
     self._metadata_cls = getattr(
         runner, "_canonical_attention_metadata_cls", AttentionMetadata
     )
@@ -6917,7 +7243,11 @@ class Qwen3EngineForwardAdapter:
     engine_leaves = tuple(mapped.leaves)
     segmented = getattr(self, "_p32_d3b_segmented_engine", None)
     if segmented is None:
-      segmented = build_p28_segmented_engine_forward(self._runner)
+      segmented = build_p28_segmented_engine_forward(
+          self._runner,
+          execution_mesh=self._execution_mesh,
+          execution_model=self._execution_model,
+      )
       self._p32_d3b_segmented_engine = segmented
       phase = "P34" if p34 else "P33"
       print(
@@ -7861,7 +8191,11 @@ class Qwen3EngineForwardAdapter:
       )
     segmented = getattr(self, "_p30_segmented_engine", None)
     if not reuse_segmented or segmented is None:
-      segmented = build_p28_segmented_engine_forward(self._runner)
+      segmented = build_p28_segmented_engine_forward(
+          self._runner,
+          execution_mesh=self._execution_mesh,
+          execution_model=self._execution_model,
+      )
       if reuse_segmented:
         self._p30_segmented_engine = segmented
         print(
@@ -9132,7 +9466,7 @@ class Qwen3EngineForwardAdapter:
 
       def run_nonempty(active_caches):
         with self._set_forward_context(None, self._runner.vllm_config):
-          next_caches, hidden, _, _ = self._runner.model_fn(
+          next_caches, hidden, _, _ = self._trainer_model_fn(
               engine_leaves,
               active_caches,
               chunk_ids,
@@ -9145,7 +9479,7 @@ class Qwen3EngineForwardAdapter:
               bool(self._runner.is_first_rank),
               bool(self._runner.is_last_rank),
           )
-        logits = self._runner.compute_logits_fn(
+        logits = self._trainer_compute_logits_fn(
             engine_leaves, hidden, None
         ).astype(jnp.float32)
         if logits.shape != (self._bucket, self._vocab_size):

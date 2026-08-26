@@ -255,6 +255,19 @@ def classify(
   if re.search(r"^\[CANON_ALIGN(?:_PRE)?\].*verdict=FAIL", text, re.MULTILINE):
     reasons.append("strict_alignment_fail")
   marker_counts = {
+      "trainer_placement": text.count(
+          "[CANON_ADAPTER.PLACEMENT] PASS relation=disjoint "
+          "rollout_devices=64 trainer_devices=64 execution_role=trainer"
+      ),
+      "trainer_scorer": text.count(
+          "[CANON_ADAPTER.PLACEMENT] trainer logprob scorer rebound "
+          "relation=disjoint implementation=factory-identical "
+          "mesh_bound_instances=2"
+      ),
+      "trainer_model_jits": text.count(
+          "[CANON_ADAPTER.PLACEMENT] trainer model callables rebuilt "
+          "relation=disjoint graph=abstract-clone mesh_bound_jits=2"
+      ),
       "continue_decode": text.count(
           "[P57.CONTINUE_DECODE] on-device decode loop enabled"
       ),
@@ -293,6 +306,9 @@ def classify(
           f"[V1.PERFETTO] captured training_step={_PROFILED_STEP}"
       ),
   }
+  for name in ("trainer_placement", "trainer_scorer", "trainer_model_jits"):
+    if marker_counts[name] != 1:
+      reasons.append(f"marker.{name}={marker_counts[name]}")
   for name in (
       "continue_decode", "gathered_logprobs", "step_fusion",
       "fixed_ar_gather", "labels",

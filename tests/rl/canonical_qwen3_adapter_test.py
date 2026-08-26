@@ -97,6 +97,19 @@ class _AttentionMetadata:
   padded_num_reqs: int | None = None
 
 
+jax.tree_util.register_dataclass(
+    _AttentionMetadata,
+    data_fields=(
+        "input_positions",
+        "block_tables",
+        "seq_lens",
+        "query_start_loc",
+        "request_distribution",
+    ),
+    meta_fields=("padded_num_reqs",),
+)
+
+
 class _ForwardRunner(_Runner):
 
   def __init__(self, state, mesh, *, vocab_size=8):
@@ -198,6 +211,114 @@ class _ForwardRunner(_Runner):
     self.compute_logits_fn = compute_logits_fn
 
 
+class _MeshBoundEngineWeights(nnx.Module):
+
+  def __init__(self):
+    self.a = nnx.Param(jnp.zeros((3, 2), jnp.bfloat16))
+    self.b = nnx.Param(jnp.zeros((2,), jnp.bfloat16))
+
+
+class _MeshBoundForwardModel(nnx.Module):
+  """Tiny Qwen-shaped model whose static mesh participates in its program."""
+
+  def __init__(self, vllm_config, rng_key, mesh):
+    del vllm_config, rng_key
+    self.mesh = mesh
+    self.engine = _MeshBoundEngineWeights()
+
+  def __call__(
+      self,
+      caches,
+      input_ids,
+      metadata,
+      inputs_embeds,
+      positions,
+      static_kv_indices,
+      lora_metadata,
+      intermediate_tensors,
+      is_first_rank,
+      is_last_rank,
+  ):
+    del (
+        inputs_embeds,
+        positions,
+        static_kv_indices,
+        lora_metadata,
+        intermediate_tensors,
+        is_first_rank,
+        is_last_rank,
+    )
+    scale = (
+        jnp.sum(self.engine.a[...].astype(jnp.float32)) / 100
+        + self.engine.b[0].astype(jnp.float32)
+    )
+    hidden = input_ids.astype(jnp.float32)[:, None] * scale
+    hidden = jax.lax.with_sharding_constraint(
+        hidden,
+        jax.sharding.NamedSharding(
+            self.mesh, jax.sharding.PartitionSpec("data", None)
+        ),
+    )
+    return caches, hidden, None, None
+
+  def compute_logits(self, hidden):
+    columns = jnp.arange(1, 9, dtype=jnp.float32)
+    return hidden * columns[None, :] + self.engine.b[1].astype(jnp.float32)
+
+
+class _MeshBoundForwardRunner(_ForwardRunner):
+  """Models the nested rollout-bound JIT used by real tpu_inference."""
+
+  def __init__(self, mesh):
+    model_config = _ModelConfig(vocab_size=8)
+    model_config.dtype = jnp.bfloat16
+    model_config.seed = 0
+    vllm_config = types.SimpleNamespace(model_config=model_config)
+    model = _MeshBoundForwardModel(vllm_config, jax.random.key(0), mesh)
+    _, state = nnx.split(model)
+    super().__init__(state, mesh, vocab_size=8)
+    self.model = model
+    self.model_config = model_config
+    self.vllm_config = vllm_config
+
+    graphdef, live_state = nnx.split(model)
+    state_treedef = jax.tree_util.tree_structure(live_state)
+    hidden_sharding = jax.sharding.NamedSharding(
+        mesh, jax.sharding.PartitionSpec("data", None)
+    )
+    logits_sharding = jax.sharding.NamedSharding(
+        mesh, jax.sharding.PartitionSpec("data", "model")
+    )
+
+    @jax.jit(
+        out_shardings=(
+            self.kv_caches[0].sharding,
+            hidden_sharding,
+            hidden_sharding,
+            None,
+        ),
+        donate_argnums=1,
+        static_argnums=(6, 9, 10),
+    )
+    def rollout_bound_model_fn(state_leaves, *args):
+      current_state = jax.tree_util.tree_unflatten(
+          state_treedef, state_leaves
+      )
+      current_model = nnx.merge(graphdef, current_state)
+      return current_model(*args)
+
+    @jax.jit(out_shardings=logits_sharding)
+    def rollout_bound_logits_fn(state_leaves, hidden, _):
+      current_state = jax.tree_util.tree_unflatten(
+          state_treedef, state_leaves
+      )
+      current_model = nnx.merge(graphdef, current_state)
+      return current_model.compute_logits(hidden)
+
+    self.model_fn = rollout_bound_model_fn
+    self.compute_logits_fn = rollout_bound_logits_fn
+
+
 class _Sampler:
 
   def __init__(self, runner, mapping, *, driver_mode=False):
@@ -274,6 +395,15 @@ class _SegmentedModel(nnx.Module):
     self.lm_head = _SegmentedHead()
 
 
+class _MeshBoundSegmentedModel(_SegmentedModel):
+  """Qwen-shaped graph whose constructor records one physical role mesh."""
+
+  def __init__(self, vllm_config, rng_key, mesh):
+    del vllm_config, rng_key
+    super().__init__()
+    self.mesh = mesh
+
+
 class _SegmentedRunner:
 
   def __init__(self):
@@ -284,6 +414,35 @@ class _SegmentedRunner:
     self.is_first_rank = True
     self.is_last_rank = True
     self.compute_logits_fn = lambda leaves, hidden, _: hidden * leaves[-1]
+
+
+class _MeshBoundSegmentedRunner:
+  """Tiny segmented graph with the real execution-model constructor seam."""
+
+  def __init__(self, mesh):
+    self.mesh = mesh
+    model_config = _ModelConfig(vocab_size=3)
+    model_config.dtype = jnp.float32
+    model_config.seed = 0
+    model_config.hf_config = types.SimpleNamespace(
+        tie_word_embeddings=False
+    )
+    self.vllm_config = types.SimpleNamespace(model_config=model_config)
+    self.model_config = model_config
+    self.model = _MeshBoundSegmentedModel(
+        self.vllm_config, jax.random.key(0), mesh
+    )
+    _, self.state = nnx.split(self.model)
+    self.state_leaves = tuple(jax.tree.leaves(self.state))
+    replicated = jax.sharding.NamedSharding(
+        mesh, jax.sharding.PartitionSpec()
+    )
+    self.kv_caches = [
+        jax.device_put(jnp.asarray(0.0), replicated),
+        jax.device_put(jnp.asarray(0.0), replicated),
+    ]
+    self.is_first_rank = True
+    self.is_last_rank = True
 
 
 class _CompleteSegmentedHead(nnx.Module):
@@ -2756,7 +2915,7 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
             jnp.asarray([0.5, 0.25], jnp.float32), replicated
         ),
     }})
-    runner = _ForwardRunner(self.target, rollout_mesh)
+    runner = _MeshBoundForwardRunner(rollout_mesh)
     sampler = _Sampler(runner, self.mapping)
     sampler.args["tensor_parallel_size"] = 2
     env = {
@@ -2767,10 +2926,15 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
         "CANON_VJP2_MAX_SEQS": "1",
         "CANON_PALLAS_LOGSOFTMAX": "1",
     }
-    with mock.patch.dict(os.environ, env, clear=False), mock.patch.object(
-        canonical_qwen3_adapter.canonical_logsoftmax,
-        "log_softmax",
-        jax.nn.log_softmax,
+    output = io.StringIO()
+    with (
+        mock.patch.dict(os.environ, env, clear=False),
+        mock.patch.object(
+            canonical_qwen3_adapter.canonical_logsoftmax,
+            "log_softmax",
+            jax.nn.log_softmax,
+        ),
+        contextlib.redirect_stdout(output),
     ):
       adapter = canonical_qwen3_adapter.Qwen3EngineForwardAdapter(
           sampler=sampler, trainer_state=source
@@ -2801,6 +2965,89 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
     gradient_leaves = [np.asarray(value) for value in jax.tree.leaves(gradient)]
     self.assertTrue(all(np.isfinite(value).all() for value in gradient_leaves))
     self.assertGreater(sum(np.count_nonzero(x) for x in gradient_leaves), 0)
+    self.assertIn(
+        "trainer model callables rebuilt relation=disjoint "
+        "graph=abstract-clone mesh_bound_jits=2",
+        output.getvalue(),
+    )
+
+  def test_disaggregated_segmented_backward_uses_trainer_graph(self):
+    if len(jax.devices()) < 4:
+      self.skipTest("requires four forced CPU or accelerator devices")
+    engine_axes = (
+        "data",
+        "attn_dp",
+        "attn_dp_expert",
+        "expert",
+        "model",
+        "dcp",
+    )
+    rollout_mesh = jax.make_mesh(
+        (1, 1, 1, 1, 2, 1),
+        engine_axes,
+        devices=jax.devices()[:2],
+        axis_types=(jax.sharding.AxisType.Auto,) * 6,
+    )
+    trainer_mesh = jax.sharding.Mesh(
+        np.asarray(jax.devices()[2:4]).reshape(1, 2), ("dp", "tp")
+    )
+    execution_mesh = jax.make_mesh(
+        (1, 1, 1, 1, 2, 1),
+        engine_axes,
+        devices=jax.devices()[2:4],
+        axis_types=(jax.sharding.AxisType.Auto,) * 6,
+    )
+    runner = _MeshBoundSegmentedRunner(rollout_mesh)
+    execution_model = canonical_qwen3_adapter._canonical_execution_model(
+        runner,
+        execution_mesh,
+        "disjoint",
+        "test segmented execution",
+    )
+    replicated = jax.sharding.NamedSharding(
+        trainer_mesh, jax.sharding.PartitionSpec()
+    )
+    trainer_leaves = tuple(
+        jax.device_put(jnp.asarray(leaf), replicated)
+        for leaf in runner.state_leaves
+    )
+    env = {
+        "CANON_P28_SEGMENTED_FORWARD": "1",
+        "CANON_P28_SEGMENTED_TRAIN": "1",
+    }
+    with mock.patch.dict(os.environ, env, clear=False):
+      segmented = canonical_qwen3_adapter.build_p28_segmented_engine_forward(
+          runner,
+          execution_mesh=execution_mesh,
+          execution_model=execution_model,
+      )
+      token_ids = jax.device_put(jnp.asarray([1, 2], jnp.int32), replicated)
+      embedded = segmented.run_embed_forward(
+          token_ids, state_leaves=trainer_leaves
+      )
+      normalized = segmented.run_norm_forward(
+          embedded, state_leaves=trainer_leaves
+      )
+      logits = segmented.run_head_forward(
+          normalized, state_leaves=trainer_leaves
+      )
+      layer_grads, _, dhidden = segmented.run_block_pullback(
+          0,
+          jax.device_put(jnp.asarray(0.0), replicated),
+          embedded,
+          jax.device_put(jnp.asarray(0.125), replicated),
+          jax.device_put(jnp.asarray(0.0), replicated),
+          jax.device_put(jnp.ones_like(embedded), replicated),
+          state_leaves=trainer_leaves,
+      )
+
+    trainer_devices = set(trainer_mesh.devices.flat)
+    for value in (embedded, normalized, logits, dhidden, *layer_grads):
+      self.assertTrue(value.devices().issubset(trainer_devices))
+      self.assertTrue(np.isfinite(np.asarray(value)).all())
+    self.assertGreater(
+        sum(np.count_nonzero(np.asarray(value)) for value in layer_grads), 0
+    )
 
   def test_canonical_trainer_execution_mesh_rejects_partial_overlap(self):
     if len(jax.devices()) < 3:

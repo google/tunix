@@ -133,6 +133,13 @@ def _fixture(
       "checks": {"zero_all_boundaries_exact": True},
   }))
   lines = [
+      "[CANON_ADAPTER.PLACEMENT] PASS relation=disjoint "
+      "rollout_devices=64 trainer_devices=64 execution_role=trainer",
+      "[CANON_ADAPTER.PLACEMENT] trainer logprob scorer rebound "
+      "relation=disjoint implementation=factory-identical "
+      "mesh_bound_instances=2",
+      "[CANON_ADAPTER.PLACEMENT] trainer model callables rebuilt "
+      "relation=disjoint graph=abstract-clone mesh_bound_jits=2",
       "[P57.CONTINUE_DECODE] on-device decode loop enabled max_decode_steps=8 workload=deepswe",
       "[P56.GATHERED_LOGPROBS] installed",
       "[P56.LOGPROB_STEP_FUSION] active",
@@ -318,6 +325,27 @@ class ZeroHpFullClassifierTest(unittest.TestCase):
       self.assertTrue(any("p63_missing" in value for value in result["reasons"]))
       self.assertTrue(any("checked_vma" in value for value in result["reasons"]))
       self.assertTrue(any("first_update" in value for value in result["reasons"]))
+
+  def test_missing_trainer_model_jit_rebind_receipt_is_rejected(self):
+    with tempfile.TemporaryDirectory() as directory:
+      root = Path(directory)
+      log, updates, base = _fixture(root)
+      log.write_text(
+          "\n".join(
+              line
+              for line in log.read_text().splitlines()
+              if "trainer model callables rebuilt" not in line
+          )
+          + "\n"
+      )
+      result = classifier.classify(
+          state=root,
+          run_log=log,
+          update_report=updates,
+          base_classification=base,
+      )
+      self.assertEqual(result["verdict"], "FAIL")
+      self.assertIn("marker.trainer_model_jits=0", result["reasons"])
 
 
 if __name__ == "__main__":
