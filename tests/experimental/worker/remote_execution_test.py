@@ -909,7 +909,7 @@ class RemoteExecutionTest(absltest.TestCase):
   def test_grpc_options_tolerate_client_keepalive_pings(self):
     options = dict(remote_lib._grpc_options())
     self.assertEqual(
-        options["grpc.http2.min_recv_ping_interval_without_data_ms"], 10000
+        options["grpc.http2.min_recv_ping_interval_without_data_ms"], 5000
     )
     self.assertEqual(options["grpc.http2.max_ping_strikes"], 0)
 

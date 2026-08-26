@@ -88,8 +88,10 @@ def _grpc_options() -> List[Tuple[str, int]]:
       ("grpc.keepalive_time_ms", 20000),
       ("grpc.keepalive_timeout_ms", 10000),
       ("grpc.keepalive_permit_without_calls", 1),
-      ("grpc.http2.min_recv_ping_interval_without_data_ms", 10000),
+      ("grpc.http2.max_pings_without_data", 0),
       ("grpc.http2.max_ping_strikes", 0),
+      ("grpc.http2.min_ping_interval_without_data_ms", 5000),
+      ("grpc.http2.min_recv_ping_interval_without_data_ms", 5000),
   ]
 
 
@@ -246,7 +248,24 @@ class RemoteExecutionServer(abc.ABC):
     return request.request_id
 
   async def _run_and_enqueue(self, request: ExecutionRequest) -> None:
+    logging.debug(
+        "[RemoteExecutionServer] Starting task %s method=%s",
+        request.request_id,
+        request.method_name,
+    )
     response = await self.execute_request(request)
+    if response.error_message:
+      logging.error(
+          "[RemoteExecutionServer] Task %s failed: %s\n%s",
+          request.request_id,
+          response.error_message,
+          response.traceback,
+      )
+    else:
+      logging.debug(
+          "[RemoteExecutionServer] Task %s finished successfully",
+          request.request_id,
+      )
     await self._get_response_queue().put(response)
 
   async def poll_response(
