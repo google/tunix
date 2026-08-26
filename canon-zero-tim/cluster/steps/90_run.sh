@@ -638,6 +638,9 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
       echo "[CANON_P38_SEAM_CLASSIFICATION] path=$CANON_P38_SEAM_CLASSIFICATION sha256=$p38_seam_sha"
       sed 's/^/[CANON_P38_SEAM_CLASSIFICATION_JSON] /' \
         "$CANON_P38_SEAM_CLASSIFICATION"
+      if [ -n "${CANON_P38_GCS_PREFIX:-}" ]; then
+        gcloud storage cp "$CANON_P38_SEAM_CLASSIFICATION" "$CANON_P38_GCS_PREFIX/p38_seam.classification.json" 2>/dev/null || true
+      fi
     fi
     if [ -n "${CANON_APC_M15_TARGET_DEBUG:-}" ] && \
        [ "${p38_seam_rc:-1}" -eq 0 ]; then
@@ -654,6 +657,9 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
         p38_seam_bundle_sha="$(sha256sum "$CANON_APC_M15_SEAM_BUNDLE" | awk '{print $1}')"
         p38_seam_bundle_bytes="$(wc -c < "$CANON_APC_M15_SEAM_BUNDLE" | tr -d '[:space:]')"
         echo "[CANON_APC_M15_SEAM_BUNDLE] path=$CANON_APC_M15_SEAM_BUNDLE bytes=$p38_seam_bundle_bytes sha256=$p38_seam_bundle_sha"
+        if [ -n "${CANON_P38_GCS_PREFIX:-}" ]; then
+          gcloud storage cp "$CANON_APC_M15_SEAM_BUNDLE" "$CANON_P38_GCS_PREFIX/m15_wide_seam_bundle.tar" 2>/dev/null || true
+        fi
       fi
     fi
   fi
