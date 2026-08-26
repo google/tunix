@@ -1,0 +1,22 @@
+{
+  "attempt": 9,
+  "campaign_root": "v1-hp-attempt9",
+  "source_commit": "644beb38cee2388862941019269ad264a581064f",
+  "timestamp": "2026-08-26T04:28:00Z",
+  "jobsets": {
+    "gsm8k": "canon-v1hp-gsm8k-g11-c2833eea",
+    "frozenlake_f46s": "canon-p57-fl-zero-f46s-644beb38",
+    "frozenlake_m16s": "canon-p57-fl-zero-m15-m16s-644beb38"
+  },
+  "verdicts": {
+    "gsm8k": "HEALTHY_ACTIVE_UPDATE16_RUNNING (16/16 alignment steps PASS, stable_norm in [1.14, 2.04], all_finite=true, solve_ratio up to 41.0%)",
+    "frozenlake_f46s": "STEP0_PRE_BACKWARD_ALIGNMENT_FAIL (S_decode_vs_S_prefill=1755 bytes, S_prefill_vs_T_old=0 bytes exact across 46879 action tokens, AlignmentGateError raised)",
+    "frozenlake_m16s": "STEP0_PRE_BACKWARD_ALIGNMENT_FAIL (S_decode_vs_S_prefill=93 bytes, S_prefill_vs_T_old=0 bytes exact across 124308 action tokens, AlignmentGateError raised)"
+  },
+  "logs": {
+    "f46s_error": "f46s_p8_error.log",
+    "f46s_pre_alignment": "f46s_p8_pre_alignment.jsonl",
+    "m16s_error": "m16s_m8_error.log",
+    "m16s_pre_alignment": "m16s_m8_pre_alignment.jsonl"
+  }
+}
