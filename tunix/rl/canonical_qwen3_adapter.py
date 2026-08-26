@@ -662,6 +662,70 @@ def _p59_engine_data_model_mesh(mesh, label: str):
   return jax.sharding.Mesh(devices, ("data", "model"))
 
 
+def _canonical_trainer_execution_mesh(runner_mesh, trainer_state, label: str):
+  """Rebinds one engine-shaped mesh to the trainer role's devices.
+
+  The differentiable canonical forward consumes trainer parameters and must
+  therefore execute on the trainer role. In a colocated workload this is the
+  live runner mesh. In a disaggregated workload the two roles have disjoint
+  devices, so retaining ``runner_mesh`` in a sharding constraint makes one JIT
+  span incompatible device sets before it can execute.
+
+  This helper changes placement only. It preserves the live engine's axis
+  names, axis sizes, axis types, and device order within the trainer DP/TP
+  mesh. Partial overlap is rejected because it is neither a registered
+  colocated layout nor a clean role split.
+  """
+  if trainer_state is None:
+    return runner_mesh, "rollout-default"
+  if not isinstance(runner_mesh, jax.sharding.Mesh):
+    raise FunctionalMappingError(f"{label} runner mesh is not a JAX Mesh")
+  trainer_mesh, _ = _p59_replicated_data_mesh(trainer_state, label)
+  runner_data, runner_model = _p59_mesh_roles(runner_mesh, label)
+  trainer_data, trainer_model = _p59_mesh_roles(trainer_mesh, label)
+  runner_shape = (
+      int(runner_mesh.shape[runner_data]),
+      int(runner_mesh.shape[runner_model]),
+  )
+  trainer_shape = (
+      int(trainer_mesh.shape[trainer_data]),
+      int(trainer_mesh.shape[trainer_model]),
+  )
+  if trainer_shape != runner_shape:
+    raise FunctionalMappingError(
+        f"{label} trainer and rollout DP/TP dimensions differ: "
+        f"trainer={trainer_shape} rollout={runner_shape}"
+    )
+  runner_devices = tuple(runner_mesh.devices.flat)
+  trainer_devices = tuple(trainer_mesh.devices.flat)
+  if len(runner_devices) != len(trainer_devices):
+    raise FunctionalMappingError(
+        f"{label} trainer and rollout device counts differ: "
+        f"{len(trainer_devices)} != {len(runner_devices)}"
+    )
+  if trainer_devices == runner_devices:
+    relation = "colocated"
+  elif set(trainer_devices).isdisjoint(runner_devices):
+    relation = "disjoint"
+  else:
+    raise FunctionalMappingError(
+        f"{label} trainer and rollout devices partially overlap"
+    )
+  devices = np.asarray(trainer_mesh.devices, dtype=object).reshape(
+      runner_mesh.devices.shape
+  )
+  execution_mesh = jax.sharding.Mesh(
+      devices,
+      runner_mesh.axis_names,
+      axis_types=runner_mesh.axis_types,
+  )
+  if tuple(execution_mesh.devices.flat) != trainer_devices:
+    raise FunctionalMappingError(
+        f"{label} trainer device order changed during engine-mesh rebinding"
+    )
+  return execution_mesh, relation
+
+
 def _p59_manual_rank_axes(mesh, data_axis: str, label: str):
   """Makes unit TP manual when an explicit TP1 spec must be retained."""
   actual_data_axis, model_axis = _p59_mesh_roles(mesh, label)
@@ -3866,6 +3930,7 @@ class Qwen3EngineForwardAdapter:
       self,
       *,
       sampler: Any,
+      trainer_state: Any | None = None,
       sampling_kwargs: Mapping[str, Any] | None = None,
   ):
     try:
@@ -3932,6 +3997,32 @@ class Qwen3EngineForwardAdapter:
     )
 
     self._runner = runner
+    self._execution_mesh, self._execution_mesh_relation = (
+        _canonical_trainer_execution_mesh(
+            runner.mesh,
+            trainer_state,
+            "canonical trainer execution",
+        )
+    )
+    rollout_device_ids = tuple(
+        int(device.id) for device in runner.mesh.devices.flat
+    )
+    execution_device_ids = tuple(
+        int(device.id) for device in self._execution_mesh.devices.flat
+    )
+    execution_role = (
+        "rollout-fallback"
+        if self._execution_mesh_relation == "rollout-default"
+        else "trainer"
+    )
+    print(
+        "[CANON_ADAPTER.PLACEMENT] PASS "
+        f"relation={self._execution_mesh_relation} "
+        f"rollout_devices={len(rollout_device_ids)} "
+        f"trainer_devices={len(execution_device_ids)} "
+        f"execution_role={execution_role}",
+        flush=True,
+    )
     self._engine_state_contract = runner.state
     self._key_mappings = getattr(sampler, "to_hf_key_mappings", None) or {}
     self._transpose_keys = getattr(sampler, "to_hf_transpose_keys", None)
@@ -3998,8 +4089,15 @@ class Qwen3EngineForwardAdapter:
         self._data_size * self._blocks_per_req,
     ) + tuple(cache0.shape[1:])
     self._cache_dtype = cache0.dtype
-    self._cache_sharding = cache0.sharding
-    valid_mesh_axes = set(runner.mesh.axis_names)
+    if not isinstance(cache0.sharding, jax.sharding.NamedSharding):
+      raise FunctionalMappingError(
+          "canonical adapter requires NamedSharding for the live KV cache"
+      )
+    self._cache_sharding = jax.sharding.NamedSharding(
+        self._execution_mesh,
+        cache0.sharding.spec,
+    )
+    valid_mesh_axes = set(self._execution_mesh.axis_names)
     data_axes = tuple(
         ax
         for ax in ("data", "attn_dp", "attn_dp_expert")
@@ -4012,7 +4110,7 @@ class Qwen3EngineForwardAdapter:
     else:
       data_spec = None
     self._input_sharding = jax.sharding.NamedSharding(
-        runner.mesh,
+        self._execution_mesh,
         jax.sharding.PartitionSpec(
             data_spec,
         ),
@@ -4029,11 +4127,29 @@ class Qwen3EngineForwardAdapter:
         "_canonical_sampling_metadata_cls",
         TPUSupportedSamplingMetadata,
     )
-    self._compute_and_gather_logprobs = _install_shared_logprob_pipeline(
+    serving_compute_and_gather = _install_shared_logprob_pipeline(
         runner,
         stock_compute_and_gather=compute_and_gather_logprobs,
         gather_logprobs=gather_logprobs,
     )
+    if (
+        os.environ.get(canonical_logsoftmax.ENV, "") == "1"
+        and self._execution_mesh_relation == "disjoint"
+    ):
+      # ``shard_map`` closes over its physical mesh. Serving and trainer may
+      # share the exact scorer factory and math, but a disaggregated run cannot
+      # share the same mesh-bound callable instance.
+      self._compute_and_gather_logprobs = _make_canonical_compute_and_gather(
+          gather_logprobs, self._execution_mesh
+      )
+      print(
+          "[CANON_ADAPTER.PLACEMENT] trainer logprob scorer rebound "
+          "relation=disjoint implementation=factory-identical "
+          "mesh_bound_instances=2",
+          flush=True,
+      )
+    else:
+      self._compute_and_gather_logprobs = serving_compute_and_gather
     self._max_logprobs = int(runner.model_config.max_logprobs)
     self._processed_target_logprobs = _make_processed_target_logprob_vjp(
         self._compute_and_gather_logprobs, self._max_logprobs
@@ -4068,7 +4184,7 @@ class Qwen3EngineForwardAdapter:
       )
       _, processed_logits = self._sample(
           jax.random.PRNGKey(0),
-          self._runner.mesh,
+          self._execution_mesh,
           logits.astype(jnp.float32),
           sampling_metadata,
       )
@@ -4414,7 +4530,10 @@ class Qwen3EngineForwardAdapter:
           stage="logits",
       )
       _, processed_logits = self._sample(
-          jax.random.PRNGKey(0), self._runner.mesh, logits, sampling_metadata
+          jax.random.PRNGKey(0),
+          self._execution_mesh,
+          logits,
+          sampling_metadata,
       )
       _p35_wait_for_stage(
           processed_logits,
@@ -9037,7 +9156,7 @@ class Qwen3EngineForwardAdapter:
           )
         _, processed_logits = self._sample(
             jax.random.PRNGKey(0),
-            self._runner.mesh,
+            self._execution_mesh,
             logits,
             sampling_metadata,
         )
@@ -9270,7 +9389,7 @@ class Qwen3EngineForwardAdapter:
 
     if self._data_size == 1:
       replicated_sharding = jax.sharding.NamedSharding(
-          self._runner.mesh, jax.sharding.PartitionSpec(None, None)
+          self._execution_mesh, jax.sharding.PartitionSpec(None, None)
       )
       prompt_tokens = _safe_sharding_constraint(
           prompt_tokens, replicated_sharding
@@ -9323,7 +9442,7 @@ class Qwen3EngineForwardAdapter:
       logps = self._ungroup_batch_rows(grouped_logps)
       entropy = self._ungroup_batch_rows(grouped_entropy)
       output_sharding = jax.sharding.NamedSharding(
-          self._runner.mesh, jax.sharding.PartitionSpec("data", None)
+          self._execution_mesh, jax.sharding.PartitionSpec("data", None)
       )
       logps = _safe_sharding_constraint(logps, output_sharding)
       entropy = _safe_sharding_constraint(entropy, output_sharding)

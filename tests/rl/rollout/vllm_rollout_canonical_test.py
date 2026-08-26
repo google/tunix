@@ -71,6 +71,14 @@ class _RescoreSampler:
 
 class VllmRolloutCanonicalTest(absltest.TestCase):
 
+  def test_canonical_adapter_registration_passes_live_trainer_state(self):
+    constructor = inspect.getsource(vllm_rollout.VllmRollout.__init__)
+    adapter_registration = constructor.split(
+        "Qwen3EngineForwardAdapter(", 1
+    )[1].split(")", 1)[0]
+    self.assertIn("sampler=self._sampler", adapter_registration)
+    self.assertIn("trainer_state=state", adapter_registration)
+
   def test_jax_seed_route_uses_engine_global_and_rejects_per_request(self):
     self.assertIn("seed", inspect.signature(vllm_sampler.EngineArgs).parameters)
     config = types.SimpleNamespace(

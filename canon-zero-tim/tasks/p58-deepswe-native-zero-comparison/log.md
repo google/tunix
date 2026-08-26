@@ -1,5 +1,40 @@
 # Log
 
+## 2026-08-26 UTC — P58.14 disaggregated trainer-mesh repair, local only
+
+- Pulled exact operator tip `3820b168457830112e6ce4b505fcedc9691bd705`,
+  verified immutable `p58z03_device_sharding_error` checksums, then reconciled
+  the finished local repair over final tip
+  `bde8f4c6e055ff077b24af716857786ce967f422`, then publication-time tip
+  `9ae21d22c2c096d4c2b39724b40e87768ece8934`. The intervening commits were
+  FrozenLake source and M15 evidence only and did not overlap P58. `main` was
+  untouched.
+- `p58z03` returned all 128 trajectories and admitted fixed-head M=2,048, then
+  failed before trainer execution because trainer-state arrays and canonical
+  adapter constraints named disjoint 64-device roles. Earlier 36-layer
+  Pallas/VJP markers were emitted during JAX tracing and are not evidence of
+  completed forward/backward. No optimizer commit or checkpoint exists.
+- The adapter now receives live trainer state, derives an engine-axis mesh on
+  the exact trainer devices, and binds differentiable input/cache/sample/
+  output and trainer log-softmax placement there. Serving stays rollout-bound;
+  disaggregated serving/trainer scorers are separate mesh-bound instances from
+  the same factory/math. DP/TP drift and partial overlap fail closed. Native
+  and colocated paths are unchanged.
+- Added three exact-image regressions: live trainer-state registration,
+  disjoint-device `jax.jit(value_and_grad)` with finite nonzero gradient, and
+  partial-overlap rejection. Existing colocated regressions remain green.
+- The first full image run exposed an unrelated stale prefix-cache assertion:
+  `FLAGS.md` listed 386 flags while the test expected 385. The assertion was
+  updated to 386; that 31-test suite passes.
+- Final complete dependency-image CPU gate on the reconciled tip exits zero:
+  `P58_EXACT_IMAGE_CPU_PASS ... disaggregated_trainer_mesh=3 ...
+  regressions=1`. The image reports no `/dev/vfio`; no Pathways/TPU target,
+  Qwen3-4B full backward, alignment, or optimizer claim is made.
+- External boundary: local code, tests, phase ledger, runbook, and handoff
+  only. No commit, push, image publication, Kubernetes mutation, TPU launch,
+  credential access, or artifact deletion occurred. Fresh `p58z04` remains
+  separately publication/image/sandbox/launch gated.
+
 ## 2026-08-26 UTC — P58 Attempt 0 (`p58z01`) halted on Step 0 per-request seed rejection
 
 - Type: target execution / root cause diagnosis / evidence preservation

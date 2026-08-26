@@ -1,11 +1,61 @@
 # P58 DeepSWE native-first training handoff
 
+## 2026-08-26 P58.14 disaggregated trainer-mesh override — local only
+
+This is the highest-priority P58 handoff. Do not launch the current operator
+tip unchanged. The P58.14 repair is present only as uncommitted work in
+`/home/yuxuan/code_rl_repro/worktrees/p58_fixed_seed_0824`; commit/push still
+requires explicit user approval.
+
+Immutable `p58z03` facts:
+
+- source `8eb65480d3705d96ab282799ad5a6c1901596248`, Qwen3-4B-Instruct,
+  128 chips, disjoint rollout DP8xTP8 and trainer DP8xTP8 roles;
+- all 128 Step-0 trajectories returned and fixed-head global/local
+  M=`2048/256` was admitted;
+- the first canonical trainer old-policy-logprob JIT combined trainer-state
+  devices with rollout-bound sharding constraints and failed with
+  `Received incompatible devices for jitted computation`;
+- no trainer logprob completed, no alignment completed, no forward/backward
+  executed, and no optimizer commit or checkpoint exists. Pallas/VJP
+  `PATHTRACE` lines before the error are tracing evidence only.
+
+The repair passes trainer state into adapter construction, derives an
+engine-axis execution mesh on the exact trainer devices, and binds the
+differentiable input/cache/sample/output path there. Serving remains on
+rollout devices. The canonical log-softmax factory/math is unchanged, but
+serving and trainer receive separate mesh-bound instances because `shard_map`
+captures physical devices. DP/TP drift and partial overlap fail closed. Native
+and colocated paths remain unchanged.
+
+Local verification includes a forced four-CPU-device disaggregated
+`jax.jit(value_and_grad)` with finite nonzero gradient, its partial-overlap
+negative, colocated regressions, and the complete dependency-image CPU gate:
+
+```text
+[CANON_ADAPTER.PLACEMENT] PASS relation=disjoint rollout_devices=2 trainer_devices=2 execution_role=trainer
+[CANON_ADAPTER.PLACEMENT] trainer logprob scorer rebound relation=disjoint implementation=factory-identical mesh_bound_instances=2
+P58_EXACT_IMAGE_CPU_PASS ... disaggregated_trainer_mesh=3 ... regressions=1
+```
+
+The local image has no `/dev/vfio`; this is not Pathways/TPU evidence. After
+explicit source-publication approval, the execution sequence is: fetch/read
+back the final operator SHA, build and pin its matching image, rerun the full
+gate, pass sandbox capacity, obtain separate launch approval, and render fresh
+`p58z04`. Require the same placement lines with `64/64`, then completed
+trainer old/current logps, strict A=B=C, finite nonzero 16-group backward, and
+the coherent update-0 transaction. A passing first update continues the same
+1,000-update job. Never resume or overwrite `p58z01` through `p58z03`.
+
+See `phases/p58-14-device-sharding-mismatch.md`. Preserved evidence is under
+`evidence/p58z03_device_sharding_error/` and its `SHA256SUMS` verifies.
+
 ## 2026-08-26 P58.13 Qwen3-4B M2048 + FrozenLake P59-only VMA override
 
-This is the highest-priority P58 handoff. Implementation commit
+This is a completed historical source checkpoint. Implementation commit
 `bea1aabde39c43c13ca4eaefab989301c6e8b46c` is published and read back on
-`yuxzhang/canon-zero-tim`; the full pinned-image construction gate passes, and
-no matching target retry has run.
+`yuxzhang/canon-zero-tim`; the full pinned-image construction gate passed, and
+matching target `p58z03` subsequently exposed P58.14.
 
 Immutable `p58z02` facts:
 
@@ -59,13 +109,10 @@ convergence are not proven. Preserve `p58z02` under
 `7349c7965f31e2c84dfd98f8cb7fe175f9b2d4281759d0bb5c07bb336ef8784d`).
 It is not a resumable trainer checkpoint.
 
-Next execution sequence: fetch the operator branch and require it to contain
-implementation commit `bea1aabde39c43c13ca4eaefab989301c6e8b46c`, then
-build/pin the matching image, rerun the complete gate, pass sandbox capacity,
-obtain separate launch approval, and render fresh `p58z03` with
-`--stage full --arm zero --high-performance`. Never resume or overwrite
-`p58z01` or `p58z02`. See
-`phases/p58-13-backward-fixed-lm-head-m2048.md` for the target gates.
+Historical execution produced `p58z03`; do not rerun that source unchanged or
+resume its nonexistent trainer checkpoint. Follow the P58.14 section above
+for the fresh `p58z04` sequence. See
+`phases/p58-13-backward-fixed-lm-head-m2048.md` for the completed source gate.
 
 ## 2026-08-26 P58.12 JAX engine-seed/cleanup override — source published
 
@@ -1089,13 +1136,11 @@ behavior. No finite Native serving-path mismatch on either A-B or B-C is
 `NO_TREATMENT`; missing evidence or interrupted execution is inconclusive.
 
 
-## 2026-08-26 P58.14 Qwen3-4B 128-TPU Step-0 Device Sharding Collision
+## P58.14 historical append correction
 
-Target run `p58z03` (`canon-p58-ds4b-zero-hp-full-p58z03`) was launched from commit `8eb65480d3705d96ab282799ad5a6c1901596248` on 128 TPU chips:
-
-- **Rollout & Backward**: Completed 128 trajectory rollouts and all 36 decoder layers of Pallas SwiGLU / RMSNorm / LM Head VJP passes (`semantic_M=2048` admitted for Qwen3-4B TP8).
-- **Logprob JIT Collision**: During old-policy logprob calculation in `get_actor_per_token_logps` -> `compute_per_token_logps`, JAX threw:
-  ```text
-  ValueError: Received incompatible devices for jitted computation. Got argument state['embedder']['input_embedding'].value of compute_per_token_logps with shape float32[151936,2560] and with device ids [2, 3, 18, 19, 34, 35, 50, 51, 66, 67, 82, 83, 98, 99, 114, 115, ...] on platform TPU and sharding_constraint inside jit with device ids [0, 4, 8, 12, 1, 5, 9, 13, 16, 20, 24, 28, ...] on platform TPU at /app/tunix/rl/canonical_qwen3_adapter.py:483:13 (_safe_sharding_constraint)
-  ```
-- Retained evidence: `evidence/p58z03_device_sharding_error/`.
+The earlier append incorrectly described JAX tracing markers as completed
+36-layer VJP/backward execution. The authoritative P58.14 account is the
+highest-priority section at the top of this handoff and
+`phases/p58-14-device-sharding-mismatch.md`: rollout completed, but trainer
+execution did not begin before the disjoint-device JIT error. Retained
+evidence remains under `evidence/p58z03_device_sharding_error/`.

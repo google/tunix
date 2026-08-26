@@ -819,7 +819,9 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
         np.asarray(value) for value in reverse["engine_gradients"]
     ]
     self.assertTrue(all(np.isfinite(value).all() for value in gradient_leaves))
-    self.assertGreater(sum(np.count_nonzero(value) for value in gradient_leaves), 0)
+    self.assertGreater(
+        sum(np.count_nonzero(value) for value in gradient_leaves), 0
+    )
     self.assertGreater(
         sum(
             np.count_nonzero(np.asarray(value))
@@ -2721,6 +2723,115 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
     self.assertEqual(adapter._data_size, 1)
     self.assertEqual(adapter._tp_size, 4)
     self.assertEqual(adapter._bucket, 256)
+
+  def test_disaggregated_canonical_forward_executes_on_trainer_devices(self):
+    if len(jax.devices()) < 4:
+      self.skipTest("requires four forced CPU or accelerator devices")
+    engine_axes = (
+        "data",
+        "attn_dp",
+        "attn_dp_expert",
+        "expert",
+        "model",
+        "dcp",
+    )
+    rollout_mesh = jax.make_mesh(
+        (1, 1, 1, 1, 2, 1),
+        engine_axes,
+        devices=jax.devices()[:2],
+        axis_types=(jax.sharding.AxisType.Auto,) * 6,
+    )
+    trainer_mesh = jax.sharding.Mesh(
+        np.asarray(jax.devices()[2:4]).reshape(1, 2), ("dp", "tp")
+    )
+    replicated = jax.sharding.NamedSharding(
+        trainer_mesh, jax.sharding.PartitionSpec()
+    )
+    source = _state({"trainer": {
+        "w": jax.device_put(
+            jnp.arange(6, dtype=jnp.float32).reshape(2, 3) / 100,
+            replicated,
+        ),
+        "n": jax.device_put(
+            jnp.asarray([0.5, 0.25], jnp.float32), replicated
+        ),
+    }})
+    runner = _ForwardRunner(self.target, rollout_mesh)
+    sampler = _Sampler(runner, self.mapping)
+    sampler.args["tensor_parallel_size"] = 2
+    env = {
+        "CANON_P32_TRAIN_ADMITTED": "0",
+        "CANON_LOGPROB_M": "256",
+        "MIN_TOKEN_BUCKET": "256",
+        "CANON_RPA_VJP2": "1",
+        "CANON_VJP2_MAX_SEQS": "1",
+        "CANON_PALLAS_LOGSOFTMAX": "1",
+    }
+    with mock.patch.dict(os.environ, env, clear=False), mock.patch.object(
+        canonical_qwen3_adapter.canonical_logsoftmax,
+        "log_softmax",
+        jax.nn.log_softmax,
+    ):
+      adapter = canonical_qwen3_adapter.Qwen3EngineForwardAdapter(
+          sampler=sampler, trainer_state=source
+      )
+
+      def loss(state):
+        logps, entropy = adapter.compute_per_token_logps(
+            graphdef=None,
+            state=state,
+            prompt_tokens=jnp.asarray([[0, 1, 2]], jnp.int32),
+            completion_tokens=jnp.asarray([[3, 4, 0]], jnp.int32),
+            pad_id=0,
+            eos_id=7,
+            stop_gradient=False,
+            return_entropy=True,
+            temperature=1.0,
+        )
+        return jnp.sum(logps + entropy)
+
+      primal, gradient = jax.jit(jax.value_and_grad(loss))(source)
+
+    self.assertEqual(adapter._execution_mesh_relation, "disjoint")
+    self.assertEqual(
+        tuple(adapter._execution_mesh.devices.flat),
+        tuple(trainer_mesh.devices.flat),
+    )
+    self.assertTrue(np.isfinite(np.asarray(primal)))
+    gradient_leaves = [np.asarray(value) for value in jax.tree.leaves(gradient)]
+    self.assertTrue(all(np.isfinite(value).all() for value in gradient_leaves))
+    self.assertGreater(sum(np.count_nonzero(x) for x in gradient_leaves), 0)
+
+  def test_canonical_trainer_execution_mesh_rejects_partial_overlap(self):
+    if len(jax.devices()) < 3:
+      self.skipTest("requires three forced CPU or accelerator devices")
+    engine_axes = (
+        "data",
+        "attn_dp",
+        "attn_dp_expert",
+        "expert",
+        "model",
+        "dcp",
+    )
+    rollout_mesh = jax.make_mesh(
+        (1, 1, 1, 1, 2, 1),
+        engine_axes,
+        devices=jax.devices()[:2],
+        axis_types=(jax.sharding.AxisType.Auto,) * 6,
+    )
+    trainer_mesh = jax.sharding.Mesh(
+        np.asarray(jax.devices()[1:3]).reshape(1, 2), ("dp", "tp")
+    )
+    sharding = jax.sharding.NamedSharding(
+        trainer_mesh, jax.sharding.PartitionSpec()
+    )
+    state = _state({"value": jax.device_put(jnp.ones((2,)), sharding)})
+    with self.assertRaisesRegex(
+        canonical_qwen3_adapter.FunctionalMappingError, "partially overlap"
+    ):
+      canonical_qwen3_adapter._canonical_trainer_execution_mesh(
+          rollout_mesh, state, "test"
+      )
 
   def test_dp16_grouping_and_metadata_are_rank_major(self):
     adapter = object.__new__(

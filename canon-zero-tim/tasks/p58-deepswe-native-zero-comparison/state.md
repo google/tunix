@@ -1,9 +1,59 @@
 # State
 
+## Current P58.14 disaggregated trainer-mesh checkpoint (2026-08-26)
+
+- Status: local source repair and dependency-image CPU gate PASS; source is
+  uncommitted and no 128-TPU retry has run.
+- Source intake: clean worktree
+  `/home/yuxuan/code_rl_repro/worktrees/p58_fixed_seed_0824`, branch
+  `local/p58-fixed-seed-0824`, initially pulled at
+  `3820b168457830112e6ce4b505fcedc9691bd705` and finally reconciled to exact
+  operator tip `bde8f4c6e055ff077b24af716857786ce967f422`, then publication-time
+  tip `9ae21d22c2c096d4c2b39724b40e87768ece8934`. The intervening
+  FrozenLake source and M15 evidence commits did not overlap the P58 repair.
+  `main` is untouched.
+- Immutable target fact: `p58z03`, built from
+  `8eb65480d3705d96ab282799ad5a6c1901596248`, returned all 128 Step-0
+  trajectories and proved the P58.13 fixed-head M=`2048/256` admission. It
+  then failed while compiling the first canonical trainer old-policy-logprob
+  forward because trainer-state arrays and adapter sharding constraints named
+  disjoint 64-device role sets. It did not complete trainer logprobs,
+  alignment, forward execution, backward, AdamW, a commit, or a checkpoint.
+  Earlier Pallas/VJP markers were tracing receipts, not execution proof.
+- Root cause: the canonical adapter was constructed from the rollout runner
+  only, so its differentiable input/cache/output/sample constraints and
+  mesh-bound log-softmax scorer retained rollout devices while consuming
+  trainer-resident state.
+- Repair: adapter registration now supplies trainer state; the adapter derives
+  the exact trainer `dp,tp` mesh, preserves the engine axis topology on those
+  devices, and binds only the differentiable trainer forward there. Serving
+  remains rollout-bound. Disaggregated serving/trainer scorers are separate
+  mesh-bound instances from the same factory/math. DP/TP mismatch and partial
+  device overlap fail closed; colocated and Native paths retain their prior
+  behavior.
+- Validation: Python compilation and diff hygiene pass. A forced four-CPU
+  disaggregated `jax.jit(value_and_grad)` executes with finite primal,
+  finite/nonzero gradient, and a partial-overlap negative. Existing colocated
+  adapter regressions pass. The complete local dependency-image gate exits
+  zero with `P58_EXACT_IMAGE_CPU_PASS ... disaggregated_trainer_mesh=3 ...
+  regressions=1`. The image has no `/dev/vfio`, so no TPU/Pathways claim is
+  made. An unrelated pulled stale flag-count assertion was corrected from 385
+  to the authoritative 386; its 31-test suite passes.
+- Next action: only after explicit approval, commit and push the source repair.
+  Then build/pin a matching image, rerun the complete gate, pass sandbox
+  admission, obtain separate launch approval, and render fresh `p58z04`.
+  Require the two `[CANON_ADAPTER.PLACEMENT]` receipts, completed trainer
+  logprobs, strict A=B=C, finite nonzero backward, and the coherent update-0
+  transaction before continuing the same 1,000-update job. Never resume or
+  overwrite `p58z01` through `p58z03`.
+- Evidence/phase: `evidence/p58z03_device_sharding_error/` and
+  `phases/p58-14-device-sharding-mismatch.md`.
+
 ## Current P58.13 Qwen3-4B M2048/P59-only VMA checkpoint (2026-08-26)
 
-- Status: ACTIVE; implementation published and pinned-image construction PASS;
-  target retry not run.
+- Status: completed source repair; implementation published and pinned-image
+  construction PASS. Target `p58z03` proved M=2,048 admission and exposed the
+  P58.14 trainer-mesh bug before trainer execution.
 - Source: worktree
   `/home/yuxuan/code_rl_repro/worktrees/p58_fixed_seed_0824`, branch
   `local/p58-fixed-seed-0824`. Implementation commit
@@ -37,11 +87,9 @@
   exits zero with `P58_EXACT_IMAGE_CPU_PASS ... qwen4b_fixed_head=1
   checked_vma=1 vma_p59_only=1 first_update=1 ... regressions=1`. No
   `/dev/vfio` is visible, so no TPU target is claimed.
-- Next action: build and pin an image containing implementation commit
-  `bea1aabde39c43c13ca4eaefab989301c6e8b46c`, rerun the complete image gate,
-  pass sandbox admission, and obtain separate launch approval before rendering
-  fresh `p58z03` using `--stage full --arm zero --high-performance`.
-  Never resume or overwrite `p58z01` or `p58z02`.
+- Historical transition: the matching target was rendered as fresh `p58z03`.
+  Preserve it as immutable P58.14 trigger evidence; never resume or overwrite
+  `p58z01`, `p58z02`, or `p58z03`.
 - Evidence/phase: `evidence/p58z02_backward_fixed_lm_head_error/` and
   `phases/p58-13-backward-fixed-lm-head-m2048.md`.
 

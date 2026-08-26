@@ -18,6 +18,54 @@ P58 does not modify `main`. Rendering and local validation do not authorize a
 Kubernetes apply. An operator must separately approve image publication and
 each launch.
 
+## 2026-08-26 P58.14 trainer-mesh retry override — local source only
+
+This section supersedes the P58.13 instruction to launch `p58z03`. That target
+already ran from `8eb65480d3705d96ab282799ad5a6c1901596248`, completed all
+128 Step-0 trajectories, and proved fixed-head global/local M=`2048/256`.
+It then failed before trainer execution because the canonical differentiable
+adapter applied rollout-role sharding constraints to trainer-role state:
+
+```text
+ValueError: Received incompatible devices for jitted computation.
+```
+
+The two device-id lists are fully disjoint 64-device roles, not merely a
+different ordering. Pallas/VJP `PATHTRACE` lines before the exception were
+emitted during tracing and do not prove forward/backward execution. Preserve
+`p58z03`; it has no optimizer checkpoint and is not resumable.
+
+The local P58.14 repair passes trainer state into adapter construction and
+rebinds only the differentiable canonical forward to an engine-axis mesh over
+the trainer devices. Serving remains rollout-bound. The mesh-bound canonical
+log-softmax callable is instantiated once per role from the same factory and
+math. Exact DP/TP equality is required; partial device overlap fails closed.
+Native and colocated behavior are unchanged.
+
+The full local dependency-image CPU gate passes with:
+
+```text
+P58_EXACT_IMAGE_CPU_PASS ... disaggregated_trainer_mesh=3 ... regressions=1
+```
+
+This does not prove 128-chip Pathways execution. The repair is currently
+uncommitted. Do not render or launch until the user separately approves source
+publication, the final operator SHA is read back, and a matching digest-pinned
+image passes the complete gate plus sandbox admission. Then obtain separate
+launch approval and use a fresh Attempt-0 id such as `p58z04`.
+
+At startup require exactly one of each:
+
+```text
+[CANON_ADAPTER.PLACEMENT] PASS relation=disjoint rollout_devices=64 trainer_devices=64 execution_role=trainer
+[CANON_ADAPTER.PLACEMENT] trainer logprob scorer rebound relation=disjoint implementation=factory-identical mesh_bound_instances=2
+```
+
+Then require completed trainer old/current logps, strict A=B=C, finite
+nonzero 16-group backward, and one coherent update-0 transaction. If update 0
+passes, continue the same full job toward 1,000 commits. Never resume or
+overwrite `p58z01`, `p58z02`, or `p58z03`.
+
 ## 2026-08-26 P58.13 M2048/P59-only VMA retry override — source published
 
 This section supersedes the P58.12 instruction to launch `p58z02`. That target

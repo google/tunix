@@ -155,6 +155,7 @@ class VllmRollout(base_rollout.BaseRollout):
       adapter_sampling_kwargs.update(self._rollout_sampling_kwargs)
       adapter = canonical_qwen3_adapter.Qwen3EngineForwardAdapter(
           sampler=self._sampler,
+          trainer_state=state,
           sampling_kwargs=adapter_sampling_kwargs,
       )
       self._canonical_engine_adapter = adapter

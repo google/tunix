@@ -53,9 +53,13 @@ scope, require exact route provenance, and make the independent empty-body
 cleanup failure bounded and fail-closed. Target `p58z02` proved that repair by
 returning all 128 rollout rows, then failed in the first trainer-logprob
 forward because Qwen3-4B TP8 did not admit fixed-head semantic M=2,048.
-P58.13 is now the only active phase: add exact 4B geometry admission and import
-the latest FrozenLake P59-only checked-VMA scoping so ordinary serving remains
-the historical Zero-TIM graph.
+P58.13 admitted the exact 4B geometry and `p58z03` proved its M=2,048 path,
+but the same attempt exposed a role-placement error before trainer execution:
+the differentiable canonical adapter retained the rollout-role device mesh
+while consuming trainer-role state. P58.14 is now the only active phase. It
+rebinds only differentiable trainer execution to trainer devices, keeps
+serving on rollout devices, rejects ambiguous partial overlap, and preserves
+the existing numerical program.
 
 ## Phases
 
@@ -75,7 +79,8 @@ the historical Zero-TIM graph.
 | P58.10 | Fixed dataset and rollout seed | All three P58 recipes render exactly one `--seed=42`; training, W&B, manifests, classifiers, and first-batch marker agree; missing/duplicate/drifted values fail closed | implementation `9597de3d` published/read back; pinned-image PASS; target not run |
 | P58.11 | Qwen3-4B strict Zero-HP checked-VMA admission | Exact P58 Zero/full profile alone derives checked-VMA, first-update, and overflow-safe clip; Native/neighbor negatives pass; complete pinned-image gate passes; target remains separately launch-gated | source/construction completed; `p58z01` target failed before first generation on seed route |
 | P58.12 | JAX engine seed route and bounded abort cleanup | P58 uses `EngineArgs.seed=42` with no JAX per-request seed; exact route/manifest/postflight and cleanup retry regressions plus complete pinned-image gate pass | completed source repair; `p58z02` proved route and reached trainer forward |
-| P58.13 | Qwen3-4B trainer-logprob M2048 and P59-only VMA scoping | Exact `(2560,8)` fixed-head registration, Qwen3-32B negative, FrozenLake Wave-5 P67 bundle, profile/environment/Python fail-closed gates, and complete pinned-image PASS | active — implementation `bea1aabd` published/read back; construction PASS; target retry not run |
+| P58.13 | Qwen3-4B trainer-logprob M2048 and P59-only VMA scoping | Exact `(2560,8)` fixed-head registration, Qwen3-32B negative, FrozenLake Wave-5 P67 bundle, profile/environment/Python fail-closed gates, and complete pinned-image PASS | completed source repair; `p58z03` proved fixed-head admission and exposed P58.14 before execution |
+| P58.14 | Disaggregated canonical trainer-mesh binding | Adapter receives trainer state, executes differentiable forward on the matching trainer role, retains rollout serving placement, rejects DP/TP/partial-overlap drift, and passes disjoint plus colocated image regressions | active — local implementation and dependency-image CPU gate PASS; source uncommitted; target retry not run |
 
 Exactly one phase may be active. Commit, push, image publication, Kubernetes
 render/application, and TPU execution each remain separately user-gated.
@@ -85,13 +90,15 @@ P58.3 has CPU coverage for journal continuity and observer/classifier logic but
 no real Qwen/R2E one-host evidence; the user explicitly waived it rather than
 calling it PASS. P58.4N was superseded after p58c05 failed Kueue admission.
 P58.5N never completed and is not a valid full Native baseline. P58.6 through
-P58.13 are specified in their phase files; P58.13 is the only active phase.
+P58.14 are specified in their phase files; P58.14 is the only active phase.
 P58.7's historical target remains not run and is superseded for new Zero
 launches by P58.11 plus the P58.12 seed-route correction. P58.9 and P58.10
 source are published and read back. P58.13 implementation
-`bea1aabde39c43c13ca4eaefab989301c6e8b46c` is also published and read back.
-A fresh `p58z03` target begins only after exact matching-image readback,
-sandbox-capacity admission, and separate launch approval.
+`bea1aabde39c43c13ca4eaefab989301c6e8b46c` is also published and read back;
+its `p58z03` target is immutable failure evidence. P58.14 remains local and
+uncommitted. A fresh `p58z04` target begins only after explicit source
+publication approval, exact matching-image readback, sandbox-capacity
+admission, and separate launch approval.
 No remote execution is authorized by this plan alone.
 
 P58.5N attempts `p58f01` through `p58f11` remain `INCONCLUSIVE`. P58f01 exposed

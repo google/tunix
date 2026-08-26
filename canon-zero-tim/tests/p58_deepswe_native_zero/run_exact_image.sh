@@ -81,6 +81,7 @@ $DOCKER run --rm \
         vllm_rollout_canonical_test.VllmRolloutCanonicalTest.test_p58_zero_processed_rescore_keeps_canonical_processor \
         vllm_rollout_canonical_test.VllmRolloutCanonicalTest.test_processed_rescore_skips_engine_for_empty_completion_batch \
         vllm_rollout_canonical_test.VllmRolloutCanonicalTest.test_processed_rescore_still_requires_provenance_for_any_target \
+        vllm_rollout_canonical_test.VllmRolloutCanonicalTest.test_canonical_adapter_registration_passes_live_trainer_state \
         vllm_rollout_canonical_test.VllmRolloutCanonicalTest.test_jax_seed_route_uses_engine_global_and_rejects_per_request
     )
     (
@@ -94,6 +95,13 @@ $DOCKER run --rm \
       XLA_FLAGS=--xla_force_host_platform_device_count=16 \
         PYTHONPATH=/workspace python3 -m unittest \
         canonical_qwen3_adapter_test.CanonicalQwen3AdapterTest.test_p59_tp4_tp8_localizes_nested_engine_maps_and_collectives
+    )
+    (
+      cd tests/rl
+      XLA_FLAGS=--xla_force_host_platform_device_count=4 \
+        PYTHONPATH=/workspace python3 -m unittest \
+        canonical_qwen3_adapter_test.CanonicalQwen3AdapterTest.test_disaggregated_canonical_forward_executes_on_trainer_devices \
+        canonical_qwen3_adapter_test.CanonicalQwen3AdapterTest.test_canonical_trainer_execution_mesh_rejects_partial_overlap
     )
     PYTHONPATH=/workspace python3 \
       canon-zero-tim/tests/p33_workloads/test_dp_workloads.py \
@@ -163,5 +171,5 @@ $DOCKER run --rm \
       python3 \
       canon-zero-tim/tests/p58_deepswe_native_zero/probe_stock_prompt_observer.py
     rm -r "$observer_state"
-    echo "P58_EXACT_IMAGE_CPU_PASS loss_oracle=1 weighted_accumulation=1 compact_filter=1 durable_journal=1 paired_renderer=1 alignment_policy=1 stock_observer=1 onehost_xprof=1 zero_hp_full=1 qwen4b_fixed_head=1 checked_vma=1 vma_p59_only=1 first_update=1 stable_clip=1 apc=1 p59_tp4_tp8=2 p59_real_shim=4 p59_rpa=2 p59_fused_linear=2 p57_wandb=1 m15_token=1 regressions=1"
+    echo "P58_EXACT_IMAGE_CPU_PASS loss_oracle=1 weighted_accumulation=1 compact_filter=1 durable_journal=1 paired_renderer=1 alignment_policy=1 stock_observer=1 onehost_xprof=1 zero_hp_full=1 qwen4b_fixed_head=1 checked_vma=1 vma_p59_only=1 first_update=1 stable_clip=1 apc=1 p59_tp4_tp8=2 p59_real_shim=4 p59_rpa=2 p59_fused_linear=2 disaggregated_trainer_mesh=3 p57_wandb=1 m15_token=1 regressions=1"
   '
