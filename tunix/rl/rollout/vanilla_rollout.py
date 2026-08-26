@@ -17,6 +17,7 @@
 import dataclasses
 import functools
 import operator
+import random
 from typing import Any, Optional, Tuple
 
 from flax import nnx
@@ -51,6 +52,11 @@ class VanillaRollout(base_rollout.BaseRollout):
       **kwargs,
   ) -> base_rollout.RolloutOutput:
     """Generates samples from the model."""
+    seed = (
+        rollout_config.seed
+        if rollout_config.seed is not None
+        else random.randint(0, 2**31 - 1)
+    )
     output = self._sampler(
         input_strings=prompts,
         max_generation_steps=rollout_config.max_tokens_to_generate,
@@ -59,7 +65,7 @@ class VanillaRollout(base_rollout.BaseRollout):
         temperature=rollout_config.temperature,
         top_p=rollout_config.top_p,
         top_k=rollout_config.top_k,
-        seed=rollout_config.seed,  # pyrefly: ignore[bad-argument-type]
+        seed=seed,  # pyrefly: ignore[bad-argument-type]
         pad_output=False,
         eos_tokens=rollout_config.eos_tokens,
         return_logprobs=rollout_config.return_logprobs,
