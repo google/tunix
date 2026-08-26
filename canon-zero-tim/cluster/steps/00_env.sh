@@ -142,17 +142,49 @@ esac
 case "${CANON_P59_CHECKED_VMA:-0}" in
   0) ;;
   1)
+    _canon_p59_checked_context=""
     case "${CANON_PROFILE_FILE:-}:${CANON_PROFILE:-}:${CANON_P32_WORKLOAD:-}" in
       cluster/profiles/qwen3-1p7b-dp16-tp4-gsm8k-v1-hp.env:qwen3-1p7b-dp16-tp4-gsm8k-v1-hp:gsm8k|\
-      cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env:qwen3-8b-dp8-tp8-frozenlake-v1-hp:frozenlake-dp8-tp8) ;;
+      cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env:qwen3-8b-dp8-tp8-frozenlake-v1-hp:frozenlake-dp8-tp8)
+        _canon_p59_checked_context=phase4
+        ;;
+      cluster/profiles/qwen3-4b-dp8-tp8-deepswe-v1-hp.env:qwen3-4b-dp8-tp8-deepswe-v1-hp:)
+        _canon_p59_checked_context=p58
+        ;;
       *)
-        echo "[env] P59 checked VMA is restricted to exact Phase4 full profiles" >&2
+        echo "[env] P59 checked VMA is restricted to registered full profiles" >&2
         fail=1
         ;;
     esac
+    case "$_canon_p59_checked_context" in
+      phase4)
+        [ "${CANON_P33_RUN_STAGE:-}" = "full" ] && \
+        [ "${CANON_P33_NO_COMMIT:-1}" = "0" ] || {
+          echo "[env] P59 checked VMA Phase4 stage contract changed" >&2
+          fail=1
+        }
+        ;;
+      p58)
+        [ "${CANON_P34_DEEPSWE:-0}" = "1" ] && \
+        [ "${CANON_P58_DEEPSWE_TIM:-0}" = "1" ] && \
+        [ "${CANON_P58_TIM_ADMITTED:-0}" = "1" ] && \
+        [ "${CANON_P58_TIM_ARM:-}" = "zero" ] && \
+        [ "${CANON_P34_RUN_STAGE:-}" = "full" ] && \
+        [ "${CANON_P34_NO_COMMIT:-1}" = "0" ] && \
+        [ "${CANON_P58_EXPECTED_UPDATES:-}" = "1000" ] && \
+        [ "${CANON_P34_DISABLE_SAMPLER_IS:-0}" = "1" ] && \
+        [ "${CANON_P34_DISABLE_TIS:-0}" = "1" ] && \
+        [ "${CANON_PROMPT_PROCESSED_LOGPROBS:-0}" = "1" ] && \
+        [ "${CANON_ENGINE_MODULE_C:-0}" = "1" ] && \
+        [ "${CANON_OPT_STATE_RESIDENT:-0}" = "1" ] && \
+        [ "${CANON_P30_OPT_STATE_OFFLOAD:-1}" = "0" ] && \
+        [ "${CANON_DEEPSWE_ALIGNMENT_WARN_ONLY:-1}" = "0" ] || {
+          echo "[env] P59 checked VMA P58 Zero-HP contract changed" >&2
+          fail=1
+        }
+        ;;
+    esac
     [ "${CANON_V1_HP_FULL:-0}" = "1" ] && \
-    [ "${CANON_P33_RUN_STAGE:-}" = "full" ] && \
-    [ "${CANON_P33_NO_COMMIT:-1}" = "0" ] && \
     [ "${CANON_P59_RANK_PARALLEL_BACKWARD:-0}" = "1" ] || {
       echo "[env] P59 checked VMA requires exact committed P59 full training" >&2
       fail=1
@@ -165,6 +197,7 @@ case "${CANON_P59_CHECKED_VMA:-0}" in
         ;;
     esac
     echo "[env] P59 checked VMA backward enabled compatibility_alias=CANON_P66_P59_CHECK_VMA"
+    unset _canon_p59_checked_context
     ;;
   *)
     echo "[env] CANON_P59_CHECKED_VMA must be exactly 0 or 1" >&2
@@ -175,12 +208,24 @@ case "${CANON_V1_HP_FIRST_UPDATE_GATE:-0}" in
   0) ;;
   1)
     [ "${CANON_V1_HP_FULL:-0}" = "1" ] && \
-    [ "${CANON_P33_RUN_STAGE:-}" = "full" ] && \
-    [ "${CANON_P33_NO_COMMIT:-1}" = "0" ] && \
     [ "${CANON_P59_CHECKED_VMA:-0}" = "1" ] || {
       echo "[env] V1 first-update gate requires exact checked-VMA committed full training" >&2
       fail=1
     }
+    if [ "${CANON_P58_DEEPSWE_TIM:-0}" = "1" ]; then
+      [ "${CANON_P34_RUN_STAGE:-}" = "full" ] && \
+      [ "${CANON_P34_NO_COMMIT:-1}" = "0" ] && \
+      [ "${CANON_P58_TIM_ARM:-}" = "zero" ] || {
+        echo "[env] P58 first-update gate requires strict Zero full" >&2
+        fail=1
+      }
+    else
+      [ "${CANON_P33_RUN_STAGE:-}" = "full" ] && \
+      [ "${CANON_P33_NO_COMMIT:-1}" = "0" ] || {
+        echo "[env] Phase4 first-update gate requires committed full training" >&2
+        fail=1
+      }
+    fi
     echo "[env] V1 first-update precommit gate enabled stable_norm_max=1000000"
     ;;
   *)
@@ -204,18 +249,47 @@ case "${CANON_P63_OVERFLOW_SAFE_CLIP:-0}" in
           fail=1
         }
         ;;
+      cluster/profiles/qwen3-4b-dp8-tp8-deepswe-v1-hp.env:qwen3-4b-dp8-tp8-deepswe-v1-hp:)
+        [ "${CANON_P34_DEEPSWE:-0}" = "1" ] && \
+        [ "${CANON_P58_DEEPSWE_TIM:-0}" = "1" ] && \
+        [ "${CANON_P58_TIM_ADMITTED:-0}" = "1" ] && \
+        [ "${CANON_P58_TIM_ARM:-}" = "zero" ] && \
+        [ "${CANON_P34_DISABLE_SAMPLER_IS:-0}" = "1" ] && \
+        [ "${CANON_P34_DISABLE_TIS:-0}" = "1" ] && \
+        [ "${CANON_PROMPT_PROCESSED_LOGPROBS:-0}" = "1" ] && \
+        [ "${CANON_ENGINE_MODULE_C:-0}" = "1" ] && \
+        [ "${CANON_OPT_STATE_RESIDENT:-0}" = "1" ] && \
+        [ "${CANON_P30_OPT_STATE_OFFLOAD:-1}" = "0" ] && \
+        [ "${CANON_DEEPSWE_ALIGNMENT_WARN_ONLY:-1}" = "0" ] || {
+          echo "[env] P63 P58 overflow-safe clip requires strict Zero-HP" >&2
+          fail=1
+        }
+        ;;
       *)
-        echo "[env] P63 overflow-safe clip is restricted to exact Phase4 full profiles" >&2
+        echo "[env] P63 overflow-safe clip is restricted to registered full profiles" >&2
         fail=1
         ;;
     esac
+    if [ "${CANON_P58_DEEPSWE_TIM:-0}" = "1" ]; then
+      [ "${CANON_P34_RUN_STAGE:-}" = "full" ] && \
+      [ "${CANON_P34_NO_COMMIT:-1}" = "0" ] || {
+        echo "[env] P63 P58 clip requires committed full training" >&2
+        fail=1
+      }
+    else
+      [ "${CANON_P33_RUN_STAGE:-}" = "full" ] && \
+      [ "${CANON_P33_NO_COMMIT:-1}" = "0" ] || {
+        echo "[env] P63 Phase4 clip requires committed full training" >&2
+        fail=1
+      }
+    fi
     [ "${CANON_V1_HP_FULL:-0}" = "1" ] && \
     [ "${CANON_P33_WORKLOAD_LAUNCH_ADMITTED:-0}" = "1" ] && \
-    [ "${CANON_P33_RUN_STAGE:-}" = "full" ] && \
-    [ "${CANON_P33_NO_COMMIT:-1}" = "0" ] && \
     [ "${CANON_P28_SEGMENTED_TRAIN:-0}" = "1" ] && \
     [ "${CANON_P28_G6_UPDATE:-0}" = "1" ] && \
     [ "${CANON_P59_RANK_PARALLEL_BACKWARD:-0}" = "1" ] && \
+    [ "${CANON_P59_CHECKED_VMA:-0}" = "1" ] && \
+    [ "${CANON_V1_HP_FIRST_UPDATE_GATE:-0}" = "1" ] && \
     [ "${CANON_VLLM_ENABLE_PREFIX_CACHING:-1}" = "0" ] || {
       echo "[env] P63 overflow-safe clip requires strict committed P59 full training with APC off" >&2
       fail=1

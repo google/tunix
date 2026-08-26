@@ -244,6 +244,10 @@ class P58EnvironmentContractTest(unittest.TestCase):
         "CANON_P38_FIXED_LM_HEAD": "1",
         "CANON_CONTINUE_DECODE": "8",
         "CANON_P59_RANK_PARALLEL_BACKWARD": "1",
+        "CANON_P59_CHECKED_VMA": "1",
+        "CANON_P66_P59_CHECK_VMA": "1",
+        "CANON_V1_HP_FIRST_UPDATE_GATE": "1",
+        "CANON_P63_OVERFLOW_SAFE_CLIP": "1",
         "CANON_VLLM_ENABLE_PREFIX_CACHING": "0",
     }.items():
       self.assertEqual(values[key], expected)
@@ -251,10 +255,17 @@ class P58EnvironmentContractTest(unittest.TestCase):
     deepswe_contract.validate_environment(values)
 
   def test_zero_hp_partial_bundle_is_rejected_by_python_contract(self):
-    values = self._resolved("zero", "full", high_performance=True)
+    _, _, values = self._persisted(
+        "zero", "full", high_performance=True
+    )
+    deepswe_contract.validate_environment(values)
     for key, replacement in (
         ("CANON_CONTINUE_DECODE", "0"),
         ("CANON_P59_RANK_PARALLEL_BACKWARD", "0"),
+        ("CANON_P59_CHECKED_VMA", "0"),
+        ("CANON_P66_P59_CHECK_VMA", "0"),
+        ("CANON_V1_HP_FIRST_UPDATE_GATE", "0"),
+        ("CANON_P63_OVERFLOW_SAFE_CLIP", "0"),
         ("CANON_P38_FIXED_LM_HEAD", "0"),
         ("CANON_VLLM_ENABLE_PREFIX_CACHING", "1"),
     ):
@@ -282,6 +293,9 @@ class P58EnvironmentContractTest(unittest.TestCase):
             )
             self.assertEqual(values["CANON_P28_BATCHED_REVERSE"], "0")
             self.assertEqual(values["CANON_BATCHED_EVIDENCE"], "0")
+            self.assertNotIn("CANON_P59_CHECKED_VMA", values)
+            self.assertNotIn("CANON_V1_HP_FIRST_UPDATE_GATE", values)
+            self.assertNotIn("CANON_P63_OVERFLOW_SAFE_CLIP", values)
           else:
             self.assertEqual(values["CANON_FIXED_AR"], "1")
             self.assertEqual(values["CANON_LOGPROB_M"], "256")
@@ -289,6 +303,9 @@ class P58EnvironmentContractTest(unittest.TestCase):
             self.assertEqual(
                 values["CANON_P58_NATIVE_STOCK_PROMPT_OBSERVER"], "0"
             )
+            self.assertNotIn("CANON_P59_CHECKED_VMA", values)
+            self.assertNotIn("CANON_V1_HP_FIRST_UPDATE_GATE", values)
+            self.assertNotIn("CANON_P63_OVERFLOW_SAFE_CLIP", values)
 
   def test_prompt_observer_treatments_are_mutually_exclusive(self):
     native = self._resolved("native", "three-update")

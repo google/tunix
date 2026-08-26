@@ -178,17 +178,71 @@ def overflow_safe_clip_by_global_norm(
   return optax.GradientTransformation(stock.init, update_fn)
 
 
+_P63_COMMON_REQUIRED = {
+    "CANON_V1_HP_FULL": "1",
+    "CANON_P33_WORKLOAD_LAUNCH_ADMITTED": "1",
+    "CANON_P28_SEGMENTED_TRAIN": "1",
+    "CANON_P28_G6_UPDATE": "1",
+    "CANON_P59_RANK_PARALLEL_BACKWARD": "1",
+    "CANON_P59_CHECKED_VMA": "1",
+    "CANON_V1_HP_FIRST_UPDATE_GATE": "1",
+    "CANON_VLLM_ENABLE_PREFIX_CACHING": "0",
+}
+
+
 _P63_CONTEXTS = {
     (
         "cluster/profiles/qwen3-1p7b-dp16-tp4-gsm8k-v1-hp.env",
         "qwen3-1p7b-dp16-tp4-gsm8k-v1-hp",
         "gsm8k",
-    ): 1.0,
+    ): {
+        "max_norm": 1.0,
+        "alignment_flag": "CANON_GSM8K_ALIGNMENT_WARN_ONLY",
+        "required": {
+            "CANON_P33_RUN_STAGE": "full",
+            "CANON_P33_NO_COMMIT": "0",
+        },
+    },
     (
         "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env",
         "qwen3-8b-dp8-tp8-frozenlake-v1-hp",
         "frozenlake-dp8-tp8",
-    ): 100.0,
+    ): {
+        "max_norm": 100.0,
+        "alignment_flag": "CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY",
+        "required": {
+            "CANON_P33_RUN_STAGE": "full",
+            "CANON_P33_NO_COMMIT": "0",
+        },
+    },
+    (
+        "cluster/profiles/qwen3-4b-dp8-tp8-deepswe-v1-hp.env",
+        "qwen3-4b-dp8-tp8-deepswe-v1-hp",
+        "p58-qwen4b-tim-128",
+    ): {
+        "max_norm": 1.0,
+        "alignment_flag": "CANON_DEEPSWE_ALIGNMENT_WARN_ONLY",
+        "required": {
+            "CANON_P34_DEEPSWE": "1",
+            "CANON_P58_DEEPSWE_TIM": "1",
+            "CANON_P58_TIM_ADMITTED": "1",
+            "CANON_P58_TIM_ARM": "zero",
+            "CANON_P34_RUN_STAGE": "full",
+            "CANON_P34_NO_COMMIT": "0",
+            "CANON_P34_DISABLE_SAMPLER_IS": "1",
+            "CANON_P34_DISABLE_TIS": "1",
+            "CANON_PROMPT_PROCESSED_LOGPROBS": "1",
+            "CANON_ENGINE_MODULE_C": "1",
+            "CANON_P58_EXPECTED_UPDATES": "1000",
+            "CANON_OPT_STATE_RESIDENT": "1",
+            "CANON_P30_OPT_STATE_OFFLOAD": "0",
+            "CANON_DP_SIZE": "8",
+            "CANON_TP_SIZE": "8",
+            "CANON_LOCAL_TRAJECTORIES": "16",
+            "CANON_GLOBAL_TRAJECTORIES": "128",
+            "MIN_TOKEN_BUCKET": "2048",
+        },
+    },
 }
 
 
@@ -203,28 +257,25 @@ def canonical_overflow_safe_clip_max_norm(
     raise ValueError(
         "CANON_P63_OVERFLOW_SAFE_CLIP must be absent, 0, or 1"
     )
+  p58_raw = environ.get("CANON_P58_DEEPSWE_TIM", "0")
+  if p58_raw not in ("0", "1"):
+    raise ValueError("CANON_P58_DEEPSWE_TIM must be exactly 0 or 1")
+  p32_workload = environ.get("CANON_P32_WORKLOAD", "")
+  if p58_raw == "1" and p32_workload:
+    raise ValueError("P58 overflow-safe clip must not inherit a P32 workload")
+  workload = "p58-qwen4b-tim-128" if p58_raw == "1" else p32_workload
   key = (
       environ.get("CANON_PROFILE_FILE", ""),
       environ.get("CANON_PROFILE", ""),
-      environ.get("CANON_P32_WORKLOAD", ""),
+      workload,
   )
   if key not in _P63_CONTEXTS:
     raise ValueError(
-        "CANON_P63_OVERFLOW_SAFE_CLIP is restricted to the exact Phase4 "
-        f"GSM8K/FrozenLake profiles; found {key!r}"
+        "CANON_P63_OVERFLOW_SAFE_CLIP is restricted to registered full "
+        f"profiles; found {key!r}"
     )
-  required = {
-      "CANON_V1_HP_FULL": "1",
-      "CANON_P33_WORKLOAD_LAUNCH_ADMITTED": "1",
-      "CANON_P33_RUN_STAGE": "full",
-      "CANON_P33_NO_COMMIT": "0",
-      "CANON_P28_SEGMENTED_TRAIN": "1",
-      "CANON_P28_G6_UPDATE": "1",
-      "CANON_P59_RANK_PARALLEL_BACKWARD": "1",
-      "CANON_P59_CHECKED_VMA": "1",
-      "CANON_V1_HP_FIRST_UPDATE_GATE": "1",
-      "CANON_VLLM_ENABLE_PREFIX_CACHING": "0",
-  }
+  context = _P63_CONTEXTS[key]
+  required = {**_P63_COMMON_REQUIRED, **context["required"]}
   wrong = {
       name: environ.get(name)
       for name, expected in required.items()
@@ -235,17 +286,13 @@ def canonical_overflow_safe_clip_max_norm(
         "CANON_P63_OVERFLOW_SAFE_CLIP production contract changed: "
         f"{wrong}"
     )
-  warn_only_name = (
-      "CANON_GSM8K_ALIGNMENT_WARN_ONLY"
-      if key[2] == "gsm8k"
-      else "CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY"
-  )
+  warn_only_name = context["alignment_flag"]
   if environ.get(warn_only_name) != "0":
     raise ValueError(
         "CANON_P63_OVERFLOW_SAFE_CLIP requires strict alignment: "
         f"{warn_only_name}={environ.get(warn_only_name)!r}"
     )
-  return _P63_CONTEXTS[key]
+  return context["max_norm"]
 
 
 @jax.jit

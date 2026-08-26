@@ -17,6 +17,7 @@
 import asyncio
 import contextlib
 import functools
+import io
 import os
 import queue
 import random
@@ -56,6 +57,7 @@ from tunix.rl.queue import data_queue as queue_lib
 from tunix.rl.rollout import base_rollout
 from tunix.sft import metrics_logger
 from tunix.sft import peft_trainer
+from tunix.sft import utils as sft_utils
 from tunix.tests import test_common
 from tunix.utils import trajectory_logger
 from typing_extensions import override
@@ -503,6 +505,203 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
         result["commit_evidence"]["parameter_changed_elements"], 0
     )
     self.assertGreater(result["optimizer"]["changed_count"], 0)
+
+  def test_p58_checked_vma_first_update_commits_sixteen_groups(self):
+    class TinyModel(nnx.Module):
+
+      def __init__(self):
+        self.weight = nnx.Param(
+            jnp.arange(256, dtype=jnp.float32).reshape(16, 16)
+        )
+
+    class FakeAdapter:
+
+      def __init__(self, trainer):
+        self._trainer = trainer
+
+      def segmented_dp_grpo_value_and_grad(
+          self, *, gradient_microbatch_sink, **kwargs
+      ):
+        del kwargs
+        template = nnx.state(self._trainer.model, nnx.Param)
+        reports = []
+        for local_index in range(16):
+          gradient = jax.tree.map(
+              lambda value: type(value)(jnp.ones_like(value[...])),
+              template,
+              is_leaf=lambda value: isinstance(value, nnx.Variable),
+          )
+          gradient_microbatch_sink(
+              local_index, gradient, jnp.asarray(1.0, jnp.float32)
+          )
+          reports.append({
+              "trajectory_rows": tuple(
+                  local_index + 16 * rank for rank in range(8)
+              ),
+              "gradient_nonzero": 256,
+              "gradient_finite": True,
+          })
+        return {
+            "loss": jnp.asarray(1.0, jnp.float32),
+            "loss_output": types.SimpleNamespace(
+                primary_loss=types.SimpleNamespace(
+                    denominator=jnp.asarray(128.0, jnp.float32)
+                )
+            ),
+            "per_token_logps": jnp.zeros((128, 2), jnp.float32),
+            "gradient_microbatches": 16,
+            "reports": tuple(reports),
+            "replica_equality": True,
+            "dp_axis": "data",
+            "dp_reduction_transactions": 16,
+            "dp_reduction_rounds_per_transaction": 3,
+            "dp_rank_pullbacks_per_transaction": 8,
+            "dp_pullback_invocations_per_transaction": 1,
+        }
+
+    schedule = optax.constant_schedule(1.0e-3)
+    trainer = rl_trainer.Trainer(
+        TinyModel(),
+        optax.chain(
+            sft_utils.overflow_safe_clip_by_global_norm(1.0),
+            optax.adam(schedule),
+        ),
+        peft_trainer.TrainingConfig(
+            eval_every_n_steps=100,
+            max_steps=1000,
+            gradient_accumulation_steps=16,
+            optimizer_offload=False,
+            checkpoint_root_directory=None,
+        ),
+        custom_checkpoint_metadata_fn=lambda: {},
+    )
+    trainer.register_learning_rate_schedule(schedule)
+    buffered_metrics = []
+    cluster = types.SimpleNamespace(
+        actor_trainer=trainer,
+        rollout=types.SimpleNamespace(pad_id=lambda: 0, eos_id=lambda: 2),
+        reference=None,
+        inference_worker=None,
+        global_steps=0,
+        buffer_metrics_async=lambda metrics, **kwargs: buffered_metrics.append(
+            (metrics, kwargs)
+        ),
+        _get_mesh_and_logical_axis_rules_cm=(
+            lambda role: contextlib.nullcontext()
+        ),
+    )
+    learner = object.__new__(agentic_grpo_learner.GRPOLearner)
+    learner.rl_cluster = cluster
+    learner.algo_config = types.SimpleNamespace()
+    train_example = types.SimpleNamespace(
+        completion_ids=jnp.zeros((128, 2), jnp.int32)
+    )
+    sidecar = {"value": jnp.zeros((128, 2), jnp.float32)}
+    workload = types.SimpleNamespace(
+        contract_name="p58-qwen4b-tim-128",
+        global_trajectories=128,
+        local_trajectories=16,
+        dp_size=8,
+        tp_size=8,
+        global_m=2048,
+    )
+    env = {
+        "CANON_ALIGNMENT_GATE": "1",
+        "CANON_ALIGNMENT_TRAIN": "1",
+        "CANON_DEEPSWE_ALIGNMENT_WARN_ONLY": "0",
+        "CANON_P28_SEGMENTED_TRAIN": "1",
+        "CANON_P28_G5C_ONLY": "0",
+        "CANON_P28_G6_UPDATE": "1",
+        "CANON_P29_FULL_TRAIN": "1",
+        "CANON_P31_CONVERGENCE": "0",
+        "CANON_P33_WORKLOAD_LAUNCH_ADMITTED": "1",
+        "CANON_P34_DEEPSWE": "1",
+        "CANON_P34_RUN_STAGE": "full",
+        "CANON_P34_NO_COMMIT": "0",
+        "CANON_P34_DISABLE_SAMPLER_IS": "1",
+        "CANON_P34_DISABLE_TIS": "1",
+        "CANON_PROMPT_PROCESSED_LOGPROBS": "1",
+        "CANON_ENGINE_MODULE_C": "1",
+        "CANON_P58_DEEPSWE_TIM": "1",
+        "CANON_P58_TIM_ADMITTED": "1",
+        "CANON_P58_TIM_ARM": "zero",
+        "CANON_P58_EXPECTED_UPDATES": "1000",
+        "CANON_V1_HP_FULL": "1",
+        "CANON_P59_RANK_PARALLEL_BACKWARD": "1",
+        "CANON_P59_CHECKED_VMA": "1",
+        "CANON_P66_P59_CHECK_VMA": "1",
+        "CANON_V1_HP_FIRST_UPDATE_GATE": "1",
+        "CANON_P63_OVERFLOW_SAFE_CLIP": "1",
+        "CANON_VLLM_ENABLE_PREFIX_CACHING": "0",
+        "CANON_PROFILE_FILE": (
+            "cluster/profiles/qwen3-4b-dp8-tp8-deepswe-v1-hp.env"
+        ),
+        "CANON_PROFILE": "qwen3-4b-dp8-tp8-deepswe-v1-hp",
+        "CANON_DP_SIZE": "8",
+        "CANON_TP_SIZE": "8",
+        "CANON_LOCAL_TRAJECTORIES": "16",
+        "CANON_GLOBAL_TRAJECTORIES": "128",
+        "MIN_TOKEN_BUCKET": "2048",
+        "CANON_OPT_STATE_RESIDENT": "1",
+        "CANON_P30_OPT_STATE_OFFLOAD": "0",
+        "CANON_PERF_LOG": "0",
+    }
+    with tempfile.TemporaryDirectory() as directory:
+      env["CANON_UPDATE_REPORT"] = os.path.join(directory, "update.jsonl")
+      output = io.StringIO()
+      with (
+          mock.patch.dict(os.environ, env, clear=False),
+          mock.patch.object(alignment, "execution_mode", return_value="train"),
+          mock.patch.object(
+              alignment,
+              "unwrap_train_example",
+              return_value=(train_example, sidecar),
+          ),
+          mock.patch.object(
+              alignment,
+              "check_batch",
+              return_value={
+                  "hashes": {"all": "same"},
+                  "boundaries": {"exact": {"differing_bytes": 0}},
+              },
+          ),
+          mock.patch(
+              "tunix.rl.canonical_forward.require_registered",
+              return_value=FakeAdapter(trainer),
+          ),
+          mock.patch(
+              "tunix.rl.deepswe_contract.active_workload",
+              return_value=workload,
+          ),
+          mock.patch("tunix.rl.deepswe_contract.validate_environment"),
+          mock.patch(
+              "tunix.rl.dp_workloads.canonical_optimizer_placement",
+              return_value="device-resident",
+          ),
+          contextlib.redirect_stdout(output),
+      ):
+        result = learner._run_p28_g6_update(  # pylint: disable=protected-access
+            object()
+        )
+
+    self.assertEqual(result["verdict"], "PASS")
+    self.assertEqual(result["contract_name"], "p58-qwen4b-tim-128")
+    self.assertEqual(result["microsteps"], 16)
+    self.assertEqual(result["global_m"], 2048)
+    self.assertEqual(result["train_steps_before"], 0)
+    self.assertEqual(result["train_steps_after"], 1)
+    self.assertTrue(
+        result["commit_evidence"]["overflow_safe_clip"]["enabled"]
+    )
+    self.assertEqual(output.getvalue().count("[V1.FIRST_UPDATE] "), 2)
+    self.assertIn(
+        "[P59.CHECKED_VMA] enabled=1 workload=p58-qwen4b-tim-128 ",
+        output.getvalue(),
+    )
+    self.assertLen(buffered_metrics, 1)
+    self.assertIn(
+        "canonical/gradient_stable_norm", buffered_metrics[0][0]
+    )
 
   def test_p33_backward_no_commit_preserves_training_state(self):
     class TinyModel(nnx.Module):

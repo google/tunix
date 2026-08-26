@@ -818,6 +818,18 @@ if P34_DEEPSWE:
       flush=True,
   )
 
+P63_OVERFLOW_SAFE_CLIP_MAX_NORM = (
+    sft_utils.canonical_overflow_safe_clip_max_norm(os.environ)
+)
+if (
+    P63_OVERFLOW_SAFE_CLIP_MAX_NORM is not None
+    and P63_OVERFLOW_SAFE_CLIP_MAX_NORM != MAX_GRAD_NORM
+):
+  raise ValueError(
+      "P63 DeepSWE max-norm contract changed: "
+      f"{P63_OVERFLOW_SAFE_CLIP_MAX_NORM} != {MAX_GRAD_NORM}"
+  )
+
 P58_ONEHOST_XPROF_ARM = ""
 if ONEHOST_SMOKE:
   stage = os.environ.get("CANON_DEEPSWE_ONEHOST_STAGE", "")
@@ -1463,8 +1475,18 @@ optimizer = optax.schedules.inject_hyperparams(optax.adamw)(
 )
 
 if MAX_GRAD_NORM is not None:
+  clip = optax.clip_by_global_norm(max_norm=MAX_GRAD_NORM)
+  if P63_OVERFLOW_SAFE_CLIP_MAX_NORM is not None:
+    clip = sft_utils.overflow_safe_clip_by_global_norm(MAX_GRAD_NORM)
+    print(
+        "[P63.STABLE_CLIP] configured enabled=1 mode=hybrid "
+        "stock_finite=stock_exact overflow_fallback=max_scaled_l2 "
+        f"nonfinite=fatal max_norm={MAX_GRAD_NORM} "
+        "workload=p58-qwen4b-tim-128",
+        flush=True,
+    )
   optimizer = optax.chain(
-      optax.clip_by_global_norm(max_norm=MAX_GRAD_NORM),
+      clip,
       optimizer,
   )
 

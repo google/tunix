@@ -68,14 +68,46 @@ class UtilsTest(absltest.TestCase):
 class StableGlobalNormTest(absltest.TestCase):
 
   @staticmethod
-  def _p63_env(*, frozenlake: bool = False) -> dict[str, str]:
-    if frozenlake:
+  def _p63_env(
+      *, frozenlake: bool = False, p58: bool = False
+  ) -> dict[str, str]:
+    if frozenlake and p58:
+      raise ValueError("select exactly one P63 workload")
+    if p58:
+      profile_file = (
+          "cluster/profiles/qwen3-4b-dp8-tp8-deepswe-v1-hp.env"
+      )
+      profile = "qwen3-4b-dp8-tp8-deepswe-v1-hp"
+      workload = None
+      warn_only = {"CANON_DEEPSWE_ALIGNMENT_WARN_ONLY": "0"}
+      stage = {
+          "CANON_P34_DEEPSWE": "1",
+          "CANON_P58_DEEPSWE_TIM": "1",
+          "CANON_P58_TIM_ADMITTED": "1",
+          "CANON_P58_TIM_ARM": "zero",
+          "CANON_P34_RUN_STAGE": "full",
+          "CANON_P34_NO_COMMIT": "0",
+          "CANON_P34_DISABLE_SAMPLER_IS": "1",
+          "CANON_P34_DISABLE_TIS": "1",
+          "CANON_PROMPT_PROCESSED_LOGPROBS": "1",
+          "CANON_ENGINE_MODULE_C": "1",
+          "CANON_P58_EXPECTED_UPDATES": "1000",
+          "CANON_OPT_STATE_RESIDENT": "1",
+          "CANON_P30_OPT_STATE_OFFLOAD": "0",
+          "CANON_DP_SIZE": "8",
+          "CANON_TP_SIZE": "8",
+          "CANON_LOCAL_TRAJECTORIES": "16",
+          "CANON_GLOBAL_TRAJECTORIES": "128",
+          "MIN_TOKEN_BUCKET": "2048",
+      }
+    elif frozenlake:
       profile_file = (
           "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env"
       )
       profile = "qwen3-8b-dp8-tp8-frozenlake-v1-hp"
       workload = "frozenlake-dp8-tp8"
       warn_only = {"CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY": "0"}
+      stage = {"CANON_P33_RUN_STAGE": "full", "CANON_P33_NO_COMMIT": "0"}
     else:
       profile_file = (
           "cluster/profiles/qwen3-1p7b-dp16-tp4-gsm8k-v1-hp.env"
@@ -83,23 +115,25 @@ class StableGlobalNormTest(absltest.TestCase):
       profile = "qwen3-1p7b-dp16-tp4-gsm8k-v1-hp"
       workload = "gsm8k"
       warn_only = {"CANON_GSM8K_ALIGNMENT_WARN_ONLY": "0"}
-    return {
+      stage = {"CANON_P33_RUN_STAGE": "full", "CANON_P33_NO_COMMIT": "0"}
+    result = {
         "CANON_P63_OVERFLOW_SAFE_CLIP": "1",
         "CANON_PROFILE_FILE": profile_file,
         "CANON_PROFILE": profile,
-        "CANON_P32_WORKLOAD": workload,
         "CANON_V1_HP_FULL": "1",
         "CANON_P33_WORKLOAD_LAUNCH_ADMITTED": "1",
-        "CANON_P33_RUN_STAGE": "full",
-        "CANON_P33_NO_COMMIT": "0",
         "CANON_P28_SEGMENTED_TRAIN": "1",
         "CANON_P28_G6_UPDATE": "1",
         "CANON_P59_RANK_PARALLEL_BACKWARD": "1",
         "CANON_P59_CHECKED_VMA": "1",
         "CANON_V1_HP_FIRST_UPDATE_GATE": "1",
         "CANON_VLLM_ENABLE_PREFIX_CACHING": "0",
+        **stage,
         **warn_only,
     }
+    if workload is not None:
+      result["CANON_P32_WORKLOAD"] = workload
+    return result
 
   def test_finite_large_gradient_does_not_overflow(self):
     gradient = {"x": jnp.asarray([1.0e20, -1.0e20], jnp.float32)}
@@ -186,6 +220,12 @@ class StableGlobalNormTest(absltest.TestCase):
         ),
         100.0,
     )
+    self.assertEqual(
+        utils.canonical_overflow_safe_clip_max_norm(
+            self._p63_env(p58=True)
+        ),
+        1.0,
+    )
     for key, value in (
         ("CANON_P63_OVERFLOW_SAFE_CLIP", ""),
         ("CANON_PROFILE", "foreign-profile"),
@@ -198,6 +238,21 @@ class StableGlobalNormTest(absltest.TestCase):
         env = self._p63_env()
         env[key] = value
         with self.assertRaisesRegex(ValueError, "P63|OVERFLOW_SAFE_CLIP"):
+          utils.canonical_overflow_safe_clip_max_norm(env)
+
+    for key, value in (
+        ("CANON_P58_TIM_ARM", "native"),
+        ("CANON_P34_DISABLE_SAMPLER_IS", "0"),
+        ("CANON_OPT_STATE_RESIDENT", "0"),
+        ("CANON_P34_RUN_STAGE", "three-update"),
+        ("CANON_GLOBAL_TRAJECTORIES", "64"),
+        ("CANON_DEEPSWE_ALIGNMENT_WARN_ONLY", "1"),
+        ("CANON_P32_WORKLOAD", "gsm8k"),
+    ):
+      with self.subTest(p58_key=key):
+        env = self._p63_env(p58=True)
+        env[key] = value
+        with self.assertRaisesRegex(ValueError, "P58|P63|overflow-safe"):
           utils.canonical_overflow_safe_clip_max_norm(env)
 
   def test_numeric_stats_distinguish_finite_huge_from_nonfinite(self):

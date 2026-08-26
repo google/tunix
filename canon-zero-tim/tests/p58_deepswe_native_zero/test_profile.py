@@ -54,6 +54,10 @@ if [[ -v CANON_LOGPROB_M ]]; then printf 'logm=present\\n'; else printf 'logm=ab
 printf 'xla=%s\\n' "$XLA_FLAGS"
 printf 'sampler_disable=%s tis_disable=%s\\n' \
   "$CANON_P34_DISABLE_SAMPLER_IS" "$CANON_P34_DISABLE_TIS"
+printf 'checked_vma=%s first_update=%s p63_clip=%s\\n' \
+  "${{CANON_P59_CHECKED_VMA-absent}}" \
+  "${{CANON_V1_HP_FIRST_UPDATE_GATE-absent}}" \
+  "${{CANON_P63_OVERFLOW_SAFE_CLIP-absent}}"
 """
   return subprocess.run(
       ["bash", "-c", script],
@@ -77,6 +81,9 @@ class P58ProfileTest(unittest.TestCase):
     self.assertIn("xla=--xla_cpu_max_isa=AVX2", output)
     self.assertIn("reduction=0 l3=0 p27=0 flwarn=0", output)
     self.assertIn("sampler_disable=1 tis_disable=1", output)
+    self.assertIn(
+        "checked_vma=absent first_update=absent p63_clip=absent", output
+    )
 
   def test_native_is_preserves_stock_runtime_and_selects_exact_zero_tuple(self):
     output = _source("native", sampler_is=True)
@@ -88,6 +95,9 @@ class P58ProfileTest(unittest.TestCase):
     self.assertIn("fixed=absent", output)
     self.assertIn("logm=absent", output)
     self.assertIn("sampler_disable=0 tis_disable=0", output)
+    self.assertIn(
+        "checked_vma=absent first_update=absent p63_clip=absent", output
+    )
 
   def test_zero_retains_complete_numerical_bundle(self):
     output = _source("zero")
@@ -101,6 +111,9 @@ class P58ProfileTest(unittest.TestCase):
     self.assertIn("--xla_allow_excess_precision=false", output)
     self.assertIn("reduction=1 l3=0 p27=0 flwarn=0", output)
     self.assertIn("sampler_disable=1 tis_disable=1", output)
+    self.assertIn(
+        "checked_vma=absent first_update=absent p63_clip=absent", output
+    )
 
   def test_zero_rejects_native_is_tuple(self):
     with self.assertRaises(subprocess.CalledProcessError):
@@ -126,13 +139,13 @@ export CANON_P32_DP_REDUCTION_ADMITTED=1
 export CANON_P33_WORKLOAD_LAUNCH_ADMITTED=1
 source {CANON}
 source {HP_PROFILE}
-printf '%s\n' "$CANON_PROFILE|$CANON_CONTINUE_DECODE|$CANON_FIXED_AR_GATHER|$CANON_PALLAS_GATHERED_LOGPROBS|$CANON_LOGPROB_STEP_FUSION|$CANON_P59_RANK_PARALLEL_BACKWARD|$CANON_P38_FIXED_LM_HEAD|$CANON_VLLM_ENABLE_PREFIX_CACHING|$CANON_BATCHED_EVIDENCE"
+printf '%s\n' "$CANON_PROFILE|$CANON_CONTINUE_DECODE|$CANON_FIXED_AR_GATHER|$CANON_PALLAS_GATHERED_LOGPROBS|$CANON_LOGPROB_STEP_FUSION|$CANON_P59_RANK_PARALLEL_BACKWARD|$CANON_P59_CHECKED_VMA|$CANON_V1_HP_FIRST_UPDATE_GATE|$CANON_P63_OVERFLOW_SAFE_CLIP|$CANON_P38_FIXED_LM_HEAD|$CANON_VLLM_ENABLE_PREFIX_CACHING|$CANON_BATCHED_EVIDENCE"
 """
     output = subprocess.run(
         ["bash", "-c", script], check=True, text=True, capture_output=True
     ).stdout
     self.assertIn(
-        "qwen3-4b-dp8-tp8-deepswe-v1-hp|8|1|1|1|1|1|0|0",
+        "qwen3-4b-dp8-tp8-deepswe-v1-hp|8|1|1|1|1|1|1|1|1|0|0",
         output,
     )
 

@@ -1,5 +1,61 @@
 # State
 
+## Current P58.11 checked-VMA Zero-HP checkpoint (2026-08-26)
+
+- Status: ACTIVE; implementation published to the operator branch and local
+  construction gates pass; target not run.
+- Source intake: clean worktree
+  `/home/yuxuan/code_rl_repro/worktrees/p58_fixed_seed_0824`, branch
+  `local/p58-fixed-seed-0824`, constructed at fetched operator tip
+  `644beb38cee2388862941019269ad264a581064f`, then fast-forwarded without
+  overlap over V1-only evidence tip
+  `4003f61cabb6f2d5e43d4c217cebb4dca2c3d217` before publication.
+- Objective: admit the shared P66 checked-VMA P59 backward repair,
+  `CANON_V1_HP_FIRST_UPDATE_GATE`, and P63 overflow-safe global-norm clipping
+  into exactly the strict P58 Qwen3-4B Zero-HP full profile. Native raw,
+  Native+IS, ordinary Zero, P44/P46, and diagnostics remain unchanged.
+- Shape correction: P58 has eight outer 16-trajectory chunks but sixteen
+  rank-major DP8 gradient groups. The real accumulator denominator and
+  first-update microstep count are 16. Global canonical M is 2,048 and the
+  shard-local/kernel M is 256.
+- Frozen recipe: Qwen3-4B-Instruct-2507, clean 1,012 tasks, B8 x G16,
+  16K/50 turns, rollout DP8 x TP8 plus trainer DP8 x TP8, 128 chips,
+  optimizer resident, prefix cache/APC/sampler IS/group filtering off, strict
+  A=B=C, and exactly 1,000 committed updates.
+- Implementation: the exact Zero-HP profile derives checked-VMA, the internal
+  P66 compatibility alias, the first-update gate, and P63 max-norm 1.0. The
+  runtime uses `contract_name` as DeepSWE workload identity, executes the
+  16-group precommit/commit gate, persists P63 evidence, and exports stable
+  norm, naive-norm-finite, fallback, and clip-factor W&B metrics. Postflight
+  requires exactly 1,000 P63 commit receipts, P59/checked-VMA receipts for
+  every ordered attempt, and exactly two update-0 first-update receipts. A
+  legal all-compact attempt is reconciled as zero-commit and removed from
+  committed-step timing. Native, Native+IS, and non-HP Zero remain isolated.
+- Additional commit-boundary repair: P58 intentionally carries the shared P33
+  launch-admission bit, but `DeepSWEWorkload` has `contract_name`, not `name`.
+  The old unconditional schedule check would therefore fail at the first real
+  P58 optimizer commit. Schedule identity now uses the normalized workload
+  identity; a real CPU P58 16-group/0-to-1 commit regression covers it.
+- Validation: syntax, Python compilation, and diff hygiene pass. Focused
+  profile 7/7, classifier 5/5, first-update 6/6, stable-clip source 3/3,
+  exact-image environment 12/12, P63 validator/commit 10/10, and P58 real CPU
+  first-commit integration 1/1 pass. Adjacent P34 emits
+  `P34_STATIC_PASS suites=10`; P59 host 37/37, V1 Phase4 76/76, and P57
+  146/146 pass. Flag audit is 383/383 with `FLAG_AUDIT_PASS`. Complete pinned
+  image `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`
+  exits zero with `P58_EXACT_IMAGE_CPU_PASS ... zero_hp_full=1 checked_vma=1
+  first_update=1 stable_clip=1 ... regressions=1`.
+- Claim ceiling: the pinned container reports no `/dev/vfio`; no TPU,
+  Pathways, R2E sandbox, Kubernetes, or 128-chip target was run. This is local
+  construction and one CPU optimizer transaction only, not target evidence.
+- Next action: the remote executor fetches the exact current
+  `yuxzhang/canon-zero-tim` tip, records its 40-character SHA, builds and pins
+  the matching image, reruns the construction gate, and seeks separate launch
+  approval for a fresh Attempt-0 Zero-HP full campaign.
+- External effects: source commit/push only. No image publication, Kubernetes
+  mutation, TPU run, model download, credential change, or artifact deletion.
+- Phase: `phases/p58-11-qwen4b-zero-checked-vma.md`.
+
 ## Current P58.10 fixed-seed checkpoint (2026-08-24)
 
 - Status: implementation published and exact-read back; pinned-image

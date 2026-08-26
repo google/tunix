@@ -1523,8 +1523,11 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       )
     checked_vma_full = checked_vma_value == "1"
     first_update_gate_enabled = first_update_gate_value == "1"
+    workload_identity = (
+        workload.contract_name if p34_workload else workload.name
+    )
     if checked_vma_full or first_update_gate_enabled:
-      exact_v1_geometry = (
+      exact_checked_vma_geometry = (
           full_train
           and not p33_no_commit
           and os.environ.get("CANON_V1_HP_FULL", "0") == "1"
@@ -1533,27 +1536,39 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           and os.environ.get("CANON_P66_P59_CHECK_VMA", "0") == "1"
           and (
               (
-                  workload.name == "gsm8k"
+                  workload_identity == "gsm8k"
                   and (workload.dp_size, workload.tp_size) == (16, 4)
                   and workload.global_m == 4096
               )
               or (
-                  workload.name == "frozenlake-dp8-tp8"
+                  workload_identity == "frozenlake-dp8-tp8"
                   and (workload.dp_size, workload.tp_size) == (8, 8)
                   and workload.global_m == 2048
               )
+              or (
+                  workload_identity == "p58-qwen4b-tim-128"
+                  and (workload.dp_size, workload.tp_size) == (8, 8)
+                  and workload.global_m == 2048
+                  and run_stage == "full"
+                  and os.environ.get("CANON_P58_DEEPSWE_TIM", "0") == "1"
+                  and os.environ.get("CANON_P58_TIM_ADMITTED", "0") == "1"
+                  and os.environ.get("CANON_P58_TIM_ARM", "") == "zero"
+                  and os.environ.get(
+                      "CANON_DEEPSWE_ALIGNMENT_WARN_ONLY", "1"
+                  ) == "0"
+              )
           )
       )
-      if not exact_v1_geometry or not (
+      if not exact_checked_vma_geometry or not (
           checked_vma_full and first_update_gate_enabled
       ):
         raise alignment.AlignmentGateError(
             "checked-VMA/first-update gate requires the exact complete "
-            "Phase4 full bundle"
+            "registered full bundle"
         )
       print(
           "[P59.CHECKED_VMA] enabled=1 "
-          f"workload={workload.name} dp={workload.dp_size} "
+          f"workload={workload_identity} dp={workload.dp_size} "
           f"tp={workload.tp_size} global_M={workload.global_m} "
           "manual_axes=data,model compatibility_alias=1",
           flush=True,
@@ -1910,7 +1925,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       first_precommit_record = {
           "schema": "canon-v1-first-update-precommit-v1",
           "update": 0,
-          "workload": workload.name,
+          "workload": workload_identity,
           "dp": int(workload.dp_size),
           "tp": int(workload.tp_size),
           "microsteps": int(expected_microbatches),
@@ -1929,7 +1944,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       )
       first_precommit_reasons = v1_first_update_gate.validate_precommit(
           first_precommit_record,
-          workload=workload.name,
+          workload=workload_identity,
           dp=int(workload.dp_size),
           tp=int(workload.tp_size),
           microsteps=int(expected_microbatches),
@@ -2093,7 +2108,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     )
     has_learning_signal = any(activity)
     effective_learning_rate = commit_evidence["effective_learning_rate"]
-    schedule_required = p33_workload and workload.name == "gsm8k"
+    schedule_required = workload_identity == "gsm8k"
     schedule_known = effective_learning_rate is not None
     zero_learning_rate = schedule_known and effective_learning_rate == 0.0
     parameter_changed_elements = commit_evidence[
@@ -2212,30 +2227,49 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           for record in records
           for boundary in record["boundaries"].values()
       )
+      canonical_update_metrics = {
+          "canonical/segmented_loss": (
+              float(np.asarray(result["loss"])), np.mean
+          ),
+          "canonical/commit_gradient_norm": (
+              float(np.asarray(commit_norm)), np.mean
+          ),
+          "canonical/alignment_max_differing_bytes": (
+              max_differing_bytes, np.max
+          ),
+          "canonical/active_microbatches": (sum(activity), np.mean),
+          "canonical/effective_learning_rate": (
+              float(effective_learning_rate or 0.0), np.mean
+          ),
+          "canonical/parameter_changed_elements": (
+              parameter_changed_elements, np.mean
+          ),
+          "canonical/max_abs_parameter_delta": (
+              commit_evidence["parameter_delta_max_abs"], np.max
+          ),
+      }
+      p58_clip_evidence = (
+          commit_evidence.get("overflow_safe_clip")
+          if p34_workload
+          else None
+      )
+      if p58_clip_evidence is not None:
+        canonical_update_metrics.update({
+            "canonical/gradient_stable_norm": (
+                float(p58_clip_evidence["stable_norm"]), np.mean
+            ),
+            "canonical/gradient_naive_norm_finite": (
+                int(p58_clip_evidence["naive_norm_finite"]), np.mean
+            ),
+            "canonical/overflow_safe_clip_fallback": (
+                int(p58_clip_evidence["fallback_used"]), np.sum
+            ),
+            "canonical/gradient_clip_factor": (
+                float(p58_clip_evidence["clip_factor"]), np.mean
+            ),
+        })
       self.rl_cluster.buffer_metrics_async(
-          {
-              "canonical/segmented_loss": (
-                  float(np.asarray(result["loss"])), np.mean
-              ),
-              "canonical/commit_gradient_norm": (
-                  float(np.asarray(commit_norm)), np.mean
-              ),
-              "canonical/alignment_max_differing_bytes": (
-                  max_differing_bytes, np.max
-              ),
-              "canonical/active_microbatches": (
-                  sum(activity), np.mean
-              ),
-              "canonical/effective_learning_rate": (
-                  float(effective_learning_rate or 0.0), np.mean
-              ),
-              "canonical/parameter_changed_elements": (
-                  parameter_changed_elements, np.mean
-              ),
-              "canonical/max_abs_parameter_delta": (
-                  commit_evidence["parameter_delta_max_abs"], np.max
-              ),
-          },
+          canonical_update_metrics,
           mode=rl_cluster_lib.Mode.TRAIN,
           step=before["train_steps"],
       )
@@ -2257,7 +2291,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       first_commit_record = {
           "schema": "canon-v1-first-update-commit-v1",
           "update": 0,
-          "workload": workload.name,
+          "workload": workload_identity,
           "dp": int(workload.dp_size),
           "tp": int(workload.tp_size),
           "train_steps_before": int(before["train_steps"]),
@@ -2275,7 +2309,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       }
       first_commit_reasons = v1_first_update_gate.validate_commit(
           first_commit_record,
-          workload=workload.name,
+          workload=workload_identity,
           dp=int(workload.dp_size),
           tp=int(workload.tp_size),
       )

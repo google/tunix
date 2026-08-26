@@ -1,5 +1,65 @@
 # P58 DeepSWE native-first training handoff
 
+## 2026-08-26 P58.11 strict Zero-HP override — source published
+
+This is the highest-priority P58 source instruction. The user reactivated the
+Qwen3-4B-Instruct strict Zero-HP full campaign. P58.11 adds the shared
+checked-VMA backward repair, first-update admission, and overflow-safe clip to
+the existing `--arm zero --high-performance` recipe without changing its
+scientific workload:
+
+```text
+model/tasks:       Qwen/Qwen3-4B-Instruct-2507 / promoted 1,012 tasks
+batch:             B8 x G16 = 128 trajectories
+roles:             rollout DP8xTP8 + trainer DP8xTP8 (128 chips total)
+context/turns:     response 16,384 / max turns 50
+training:          1,000 commits, seed 42, TPU-resident AdamW
+alignment:         strict A=B=C; sampler IS/TIS and group filter off
+backward shape:    global M2048, local M256, 16 rank-major groups
+```
+
+The exact HP profile now derives this closed numerical bundle:
+
+```text
+CANON_P59_CHECKED_VMA=1
+CANON_P66_P59_CHECK_VMA=1        # internal derived compatibility alias
+CANON_V1_HP_FIRST_UPDATE_GATE=1
+CANON_P63_OVERFLOW_SAFE_CLIP=1   # max norm remains 1.0
+```
+
+The eight outer prompt chunks are not the accumulator denominator. Update 0
+must emit a precommit receipt with `microsteps=16` and
+`accumulator_denominator=16.0`, then a coherent `train_steps 0 -> 1` commit
+receipt before outer weight sync/checkpoint. Every update must carry checked-
+VMA and P63 evidence. More precisely, a legal all-compact backward attempt
+carries P59/checked-VMA receipts plus a zero-commit journal row, while P63 and
+global-step receipts occur only for commits. Postflight reconciles the ordered
+attempt stream and still requires exactly 1,000 commits. Native raw, Native+IS,
+ordinary non-HP Zero, and neighbor DeepSWE recipes must keep all three
+operator-facing flags absent.
+
+The implementation is published to `yuxzhang/canon-zero-tim`. It was
+constructed on `644beb38cee2388862941019269ad264a581064f` and fast-forwarded
+without overlap over V1-only evidence tip
+`4003f61cabb6f2d5e43d4c217cebb4dca2c3d217` before publication. Focused and
+adjacent CPU tests,
+the real P58 16-group/0-to-1 CPU commit regression, flag audit 383/383, and the
+complete pinned-image gate pass; its terminal includes
+`zero_hp_full=1 checked_vma=1 first_update=1 stable_clip=1`. The pinned image
+has no `/dev/vfio`, so this is construction evidence only. The execution agent
+must fetch `yuxzhang/canon-zero-tim`, read back the exact current 40-character
+tip, build/pin the matching image, rerun the complete P58
+exact-image gate, perform the existing sandbox-capacity admission, render a
+fresh Attempt-0 `--stage full --arm zero --high-performance` JobSet, and obtain
+separate launch approval. Source publication does not authorize image
+publication, Kubernetes apply, or TPU execution. A first-update PASS continues
+the same 1,000-update job; it is not a one- or three-update stop.
+
+Construction evidence cannot certify DP8xTP8 target behavior. Until a real
+run completes, report `TARGET NOT RUN`. See
+`phases/p58-11-qwen4b-zero-checked-vma.md` and the top P58.11 override in
+`cluster/P58_DEEPSWE_TIM_RUNBOOK.md`.
+
 ## 2026-08-25 P58.10 fixed-seed override — published, launch separately gated
 
 This is the newest source checkpoint. It adds one shared fixed-seed contract

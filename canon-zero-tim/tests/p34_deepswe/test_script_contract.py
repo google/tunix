@@ -119,7 +119,10 @@ class DeepSWEScriptContractTest(unittest.TestCase):
     learner = (ROOT / "tunix/rl/agentic/agentic_rl_learner.py").read_text()
     self.assertIn("deterministic_repeat_exact", adapter)
     self.assertIn("jnp.array_equal(first, second)", adapter)
-    self.assertIn("deterministic_repeat=(p34_workload and p33_no_commit)", learner)
+    self.assertIn(
+        '"deterministic_repeat": (p34_workload and p33_no_commit)', learner
+    )
+    self.assertIn("**segmented_kwargs", learner)
 
   def test_cross_role_weights_are_checked_before_rescore(self):
     learner = (

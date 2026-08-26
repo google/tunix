@@ -18,6 +18,85 @@ P58 does not modify `main`. Rendering and local validation do not authorize a
 Kubernetes apply. An operator must separately approve image publication and
 each launch.
 
+## 2026-08-26 P58.11 strict Zero-HP execution override
+
+This section supersedes older statements below that defer Zero-HP. The user
+has reactivated the P58 Qwen3-4B-Instruct strict Zero-HP full campaign. The
+published P58.11 implementation passes focused/adjacent CPU gates, a real
+16-group P58 CPU optimizer transaction, flag audit 383/383, and the complete
+pinned-image construction gate. Fetch and record the exact current operator
+tip; do not render or launch from an older SHA.
+
+P58.11 keeps the signed recipe unchanged: promoted 1,012 tasks, B8 x G16,
+16,384 response tokens, 50 turns, seed 42, rollout DP8 x TP8 plus trainer
+DP8 x TP8, TPU-resident AdamW, strict A=B=C, and 1,000 commits. It adds exactly
+three operator-facing production flags to the existing HP profile:
+
+```text
+CANON_P59_CHECKED_VMA=1
+CANON_V1_HP_FIRST_UPDATE_GATE=1
+CANON_P63_OVERFLOW_SAFE_CLIP=1
+```
+
+`00_env.sh` derives `CANON_P66_P59_CHECK_VMA=1` internally. Partial bundles,
+Native arms, non-HP Zero, warning-only alignment, wrong stage/horizon, or an
+inherited `CANON_P32_WORKLOAD` fail closed. The P63 max norm is the existing
+DeepSWE `1.0`: stock-finite norm behavior is unchanged; only independently
+all-finite FP32 norm overflow uses max-scaled L2; NaN/Inf remains fatal.
+
+Shape admission is exact:
+
+| Quantity | Value |
+|---|---:|
+| prompts x generations | 8 x 16 |
+| global / DP-local trajectories | 128 / 16 |
+| outer prompt chunks | 8 |
+| rank-major backward groups | 16 |
+| first-update denominator | 16.0 |
+| global / local canonical M | 2,048 / 256 |
+
+Before publication, run the focused host gates and the full dependency-bearing
+gate:
+
+```bash
+bash canon-zero-tim/tests/p58_deepswe_native_zero/run_exact_image.sh \
+  sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a
+```
+
+Fetch the final operator tip and prove the exact
+local/FETCH_HEAD/remote-tracking 40-character SHA. Build and pin the matching
+runtime image; do not reuse the construction image above as source provenance.
+After separate image-publication approval, the existing one-sandbox capacity
+gate, and separate launch approval, render only:
+
+```bash
+python3 canon-zero-tim/cluster/render_p58_deepswe_tim.py \
+  --base canon-zero-tim/cluster/jobset-64chip.yaml \
+  --output /tmp/p58-zero-hp-full.yaml \
+  --source-commit <exact-published-40-char-sha> \
+  --source-branch yuxzhang/canon-zero-tim \
+  --client-image <matching-digest-pinned-image> \
+  --run-id <fresh-attempt-0-id> \
+  --stage full --arm zero --high-performance \
+  --worker-nodepool <pool-or-auto>
+```
+
+At update 0 require exactly two `[V1.FIRST_UPDATE]` JSON receipts: precommit
+must show workload `p58-qwen4b-tim-128`, DP8/TP8, 16 microsteps, denominator
+16, all-finite/nonzero stable norm in `(0,1e6]`; commit must show one valid
+optimizer transaction and `train_steps 0 -> 1` before outer sync/checkpoint.
+Also require `[P59.CHECKED_VMA]` and `[P63.STABLE_CLIP]` receipts. If these pass,
+continue the same job to 1,000 commits. Do not stop at one or three updates.
+The P59/checked-VMA marker count follows ordered backward attempts, whereas
+P63/global-step/optimizer markers follow committed updates. A legal
+all-compact attempt therefore adds one zero-commit update-journal row and one
+P59/checked-VMA pair but no P63/global-step row. The P58.11 postflight
+reconciles these streams by journal order and excludes skipped-attempt PERF
+rows from committed-step timing; it still requires exactly 1,000 commits.
+Any strict alignment difference, nonfinite gradient, invalid transaction, or
+missing receipt is fatal. Construction PASS remains `TARGET NOT RUN` until the
+real DP8xTP8 campaign completes.
+
 ## 2026-08-24 P58.10 fixed-seed override
 
 P58 now signs one fixed seed across Native raw, Native+IS, and Zero-HP:

@@ -103,6 +103,51 @@ class FirstUpdateGateTest(unittest.TestCase):
         (),
     )
 
+  def test_p58_qwen4b_uses_rank_local_sixteen_group_denominator(self):
+    workload = "p58-qwen4b-tim-128"
+    precommit = {
+        **self._precommit(),
+        "workload": workload,
+        "dp": 8,
+        "tp": 8,
+        "microsteps": 16,
+        "accumulator_denominator": 16.0,
+    }
+    commit = {
+        **self._commit(),
+        "workload": workload,
+        "dp": 8,
+        "tp": 8,
+    }
+    self.assertEqual(
+        gate.validate_precommit(
+            precommit, workload=workload, dp=8, tp=8, microsteps=16
+        ),
+        (),
+    )
+    self.assertEqual(
+        gate.validate_commit(commit, workload=workload, dp=8, tp=8),
+        (),
+    )
+
+  def test_p58_qwen4b_rejects_outer_prompt_chunk_denominator(self):
+    workload = "p58-qwen4b-tim-128"
+    record = {
+        **self._precommit(),
+        "workload": workload,
+        "dp": 8,
+        "tp": 8,
+        "microsteps": 8,
+        "accumulator_denominator": 8.0,
+    }
+    reasons = gate.validate_precommit(
+        record, workload=workload, dp=8, tp=8, microsteps=16
+    )
+    self.assertTrue(any("microsteps" in reason for reason in reasons))
+    self.assertTrue(
+        any("accumulator_denominator" in reason for reason in reasons)
+    )
+
 
 if __name__ == "__main__":
   unittest.main()

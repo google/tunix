@@ -22,6 +22,7 @@ $DOCKER run --rm \
   "$IMAGE" \
   bash -euo pipefail -c '
     bash -n \
+      canon-zero-tim/cluster/steps/00_env.sh \
       canon-zero-tim/tests/p58_deepswe_native_zero/run_onehost_alignment_v5p.sh \
       canon-zero-tim/cluster/steps/p58_verify_sandbox_capacity.sh \
       canon-zero-tim/tasks/p58-deepswe-native-zero-comparison/scripts/run_onehost_deepswe_xprof_common.sh \
@@ -54,6 +55,10 @@ $DOCKER run --rm \
       canon-zero-tim/tests/p58_deepswe_native_zero/test_onehost_xprof_pair.py
     PYTHONPATH=/workspace python3 \
       canon-zero-tim/tests/p58_deepswe_native_zero/test_zero_hp_full_classifier.py
+    PYTHONPATH=/workspace python3 \
+      canon-zero-tim/tests/v1_phase4/test_first_update_gate.py
+    PYTHONPATH=/workspace python3 \
+      canon-zero-tim/tests/v1_phase4/test_stable_clip_contract.py
     PYTHONPATH=/workspace python3 -m unittest discover \
       -s canon-zero-tim/tests/p3_prefix_cache \
       -p "test_*.py"
@@ -112,6 +117,8 @@ $DOCKER run --rm \
     (
       cd tests/sft
       PYTHONPATH=/workspace python3 -m unittest \
+        sft_utils_test.StableGlobalNormTest \
+        peft_trainer_test.PeftTrainerTest.test_p63_finite_overflow_commits_nonzero_clipped_update \
         peft_trainer_test.PeftTrainerTest.test_denominator_weighted_accumulation_matches_concatenated_batch \
         peft_trainer_test.PeftTrainerTest.test_denominator_weighted_all_empty_skips_optimizer \
         peft_trainer_test.PeftTrainerTest.test_p58_precomputed_all_filtered_discard_resets_without_commit
@@ -125,6 +132,7 @@ $DOCKER run --rm \
         agentic_grpo_learner_test.AgenticGrpoLearnerTest.test_p58_sandbox_capacity_evidence_is_fail_closed \
         agentic_grpo_learner_test.AgenticGrpoLearnerTest.test_p58_all_filtered_no_commit_suppresses_step_advance \
         agentic_grpo_learner_test.AgenticGrpoLearnerTest.test_p58_all_filtered_no_commit_rejects_optimizer_advance \
+        agentic_grpo_learner_test.AgenticGrpoLearnerTest.test_p58_checked_vma_first_update_commits_sixteen_groups \
         trajectory.trajectory_collect_engine_test.TrajectoryCollectEngineTest.test_overlong_filter_masks_out_and_skips_reward \
         trajectory.trajectory_collect_engine_test.TrajectoryCollectEngineTest.test_reset_raised_timeout_is_env_timeout \
         trajectory.trajectory_collect_engine_test.TrajectoryCollectEngineTest.test_reset_scheduling_gate_is_distinct_env_timeout \
@@ -152,5 +160,5 @@ $DOCKER run --rm \
       python3 \
       canon-zero-tim/tests/p58_deepswe_native_zero/probe_stock_prompt_observer.py
     rm -r "$observer_state"
-    echo "P58_EXACT_IMAGE_CPU_PASS loss_oracle=1 weighted_accumulation=1 compact_filter=1 durable_journal=1 paired_renderer=1 alignment_policy=1 stock_observer=1 onehost_xprof=1 zero_hp_full=1 apc=1 p59_tp4_tp8=2 p59_real_shim=4 p59_rpa=2 p59_fused_linear=2 p57_wandb=1 m15_token=1 regressions=1"
+    echo "P58_EXACT_IMAGE_CPU_PASS loss_oracle=1 weighted_accumulation=1 compact_filter=1 durable_journal=1 paired_renderer=1 alignment_policy=1 stock_observer=1 onehost_xprof=1 zero_hp_full=1 checked_vma=1 first_update=1 stable_clip=1 apc=1 p59_tp4_tp8=2 p59_real_shim=4 p59_rpa=2 p59_fused_linear=2 p57_wandb=1 m15_token=1 regressions=1"
   '

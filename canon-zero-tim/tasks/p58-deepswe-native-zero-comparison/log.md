@@ -1,5 +1,53 @@
 # Log
 
+## 2026-08-26 UTC — P58.11 checked-VMA Zero-HP implementation published
+
+- Type: strict Zero-HP production admission / numerical repair integration /
+  tests / phase handoff. Source base is exact operator tip
+  `644beb38cee2388862941019269ad264a581064f` in isolated worktree
+  `/home/yuxuan/code_rl_repro/worktrees/p58_fixed_seed_0824`. Before the
+  approved publication, the worktree fast-forwarded without overlap over
+  V1-only evidence commit
+  `4003f61cabb6f2d5e43d4c217cebb4dca2c3d217`.
+- The P58 HP profile now selects the shared checked-VMA P59 backward repair,
+  first-update numerical gate, and P63 overflow-safe clip. `00_env.sh` admits
+  only exact P58 Zero/full/1,000-update strict geometry and derives the P66
+  spelling internally. Native raw, Native+IS, ordinary non-HP Zero, and
+  neighboring recipes retain absence/negative controls.
+- Shape contract is explicit: B8 x G16 gives 128 global trajectories, 16
+  DP-local trajectories and 16 rank-major gradient groups; the first-update
+  denominator is 16, not the eight outer prompt chunks. Global/local
+  canonical M remains 2,048/256.
+- Runtime wires P63 max norm 1.0 into the DeepSWE optimizer, keeps stock output
+  when the stock norm is finite, uses stable max-scaled L2 only for a proven
+  all-finite norm overflow, and leaves NaN/Inf fatal. Each update records the
+  clip receipt and W&B stable-norm/finiteness/fallback/factor metrics.
+- Commit-boundary bug found and repaired: P58 carries shared P33 launch
+  admission, but its workload exposes `contract_name` rather than `name`.
+  The old schedule probe would raise at the first P58 optimizer commit.
+  Schedule identity now uses the normalized workload identity. A new CPU
+  integration test executes all 16 groups, validates the denominator and two
+  first-update receipts, performs one finite parameter-changing commit, and
+  checks P63 metrics.
+- Postflight schema v2 now requires global M2,048, 16 microsteps, coherent
+  step transitions, exactly 1,000 P63 commit receipts, checked-VMA/P59
+  receipts matching every ordered backward attempt, exactly two first-update
+  receipts, and full P63 commit evidence. Legal all-compact attempts reconcile
+  to zero-commit journal rows and are excluded from committed-step timing;
+  missing, extra, or partial evidence fails.
+- Validation PASS: profile 7/7, classifier 5/5, first-update 6/6, stable-clip
+  source 3/3, exact-image environment 12/12, exact-image P63 validator/commit
+  10/10, P58 CPU first-commit integration 1/1, P34 static 10 suites, P59 host
+  37/37, V1 Phase4 76/76, P57 146/146, syntax/compile/diff hygiene, and flag
+  audit 383/383 (`FLAG_AUDIT_PASS`). The complete pinned-image gate at
+  `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`
+  exits zero with `P58_EXACT_IMAGE_CPU_PASS ... zero_hp_full=1 checked_vma=1
+  first_update=1 stable_clip=1 ... regressions=1`.
+- Publication/claim ceiling: the user explicitly authorized commit and push
+  to `yuxzhang/canon-zero-tim`; `main` remains untouched. The pinned container
+  reports no `/dev/vfio`. No direct TPU, Pathways, R2E, Kubernetes, 128-chip
+  target, image publication, model download, or credential mutation occurred.
+
 ## 2026-08-25 UTC — P58.10 fixed-seed implementation published
 
 - The user explicitly authorized commit and push. The local implementation
