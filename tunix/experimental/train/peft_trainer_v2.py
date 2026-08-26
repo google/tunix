@@ -1100,9 +1100,15 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     checkpointing will be added later once it is supported in the checkpoint
     manager.
     """
-    step = kwargs.pop("step", self._train_steps)
     if metadata is None:
       metadata = self.custom_checkpoint_metadata()
+    if isinstance(metadata, (dict, Mapping)):
+      step = metadata.get("step", self._train_steps)
+    elif hasattr(metadata, "step"):
+      step = getattr(metadata, "step")
+    if step is None:
+      step = self._train_steps
+    logging.warning(f"Saving checkpoint at step {step} with metadata: {metadata}")
     save_only_lora_params = kwargs.pop(
         "save_only_lora_params", self._lora_enabled
     )
@@ -1120,6 +1126,7 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     """Restores model, optimizer and step count from a checkpoint."""
     if kwargs:
       raise ValueError(f"Unexpected keyword arguments: {kwargs}")
+    logging.info(f"Restoring checkpoint at step {step} (train_steps={self._train_steps})")
     self._train_steps, self._restored_custom_metadata = (
         self.checkpoint_manager.maybe_restore(
             self.model,

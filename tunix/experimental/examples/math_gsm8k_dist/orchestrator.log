@@ -1,25 +1,27 @@
-2026-08-26 21:40:36,961 - [Orchestrator] Control-plane JAX backend: cpu
-2026-08-26 21:40:37,553 - [Orchestrator] discovery server started on port 30000
-2026-08-26 21:40:37,553 - [Orchestrator] Waiting for workers to connect...
-2026-08-26 21:40:40,475 - [Orchestrator] discovered rollout service vllm-rollout-0 at localhost:20001
-2026-08-26 21:40:44,865 - [Orchestrator] discovered trainer service trainer-0 at localhost:20000
-2026-08-26 21:40:44,865 - [Orchestrator] Configuring trainer-side GRPO loss via TrainerWorker RPC.
-2026-08-26 21:40:47,231 - [Orchestrator] Registered Orchestrator V2 workers: [WorkerInfo(worker_id='rollout-0', roles=frozenset({'rollout'}), resources={'remote': True, 'address': 'localhost:20001'}), WorkerInfo(worker_id='trainer-0', roles=frozenset({'actor'}), resources={'remote': True, 'address': 'localhost:20000'})]
-2026-08-26 21:40:47,232 - [Orchestrator] Bringing up remote workers through ClusterOrchestrator.
-2026-08-26 21:40:47,232 - [Orchestrator] Bringing up workers across cluster...
-2026-08-26 21:40:47,232 - [Orchestrator] Initializing remote worker rollout-0.
-2026-08-26 21:40:47,235 - [Orchestrator] Initializing remote worker trainer-0.
-2026-08-26 21:40:47,236 - [Orchestrator] Compiling remote worker rollout-0.
-2026-08-26 21:40:47,237 - [Orchestrator] Compiling remote worker trainer-0.
-2026-08-26 21:40:47,237 - [Orchestrator] Starting remote worker rollout-0.
-2026-08-26 21:40:47,238 - [Orchestrator] Starting remote worker trainer-0.
-2026-08-26 21:40:47,238 - [Orchestrator] Running SyncRLProgram through ClusterOrchestrator.run_program.
-2026-08-26 21:40:47,239 - [Orchestrator] ClusterOrchestrator executing program...
+2026-08-26 23:45:28,322 - [Orchestrator] Control-plane JAX backend: cpu
+2026-08-26 23:45:28,910 - [Orchestrator] discovery server started on port 30000
+2026-08-26 23:45:28,911 - [Orchestrator] Waiting for workers to connect...
+2026-08-26 23:45:34,092 - [Orchestrator] discovered trainer service trainer-0 at localhost:20000
+2026-08-26 23:45:34,660 - [Orchestrator] discovered rollout service vllm-rollout-0 at localhost:20001
+2026-08-26 23:45:34,660 - [Orchestrator] Configuring trainer-side GRPO loss via TrainerWorker RPC.
+2026-08-26 23:45:37,050 - [Orchestrator] Registered Orchestrator V2 workers: [WorkerInfo(worker_id='rollout-0', roles=frozenset({'rollout'}), resources={'remote': True, 'address': 'localhost:20001'}), WorkerInfo(worker_id='trainer-0', roles=frozenset({'actor'}), resources={'remote': True, 'address': 'localhost:20000'})]
+2026-08-26 23:45:37,051 - [Orchestrator] Bringing up remote workers through ClusterOrchestrator.
+2026-08-26 23:45:37,051 - [Orchestrator] Bringing up workers across cluster...
+2026-08-26 23:45:37,051 - [Orchestrator] Initializing remote worker rollout-0.
+2026-08-26 23:45:37,054 - [Orchestrator] Initializing remote worker trainer-0.
+2026-08-26 23:45:37,055 - [Orchestrator] Compiling remote worker rollout-0.
+2026-08-26 23:45:37,056 - [Orchestrator] Compiling remote worker trainer-0.
+2026-08-26 23:45:37,056 - [Orchestrator] Starting remote worker rollout-0.
+2026-08-26 23:45:37,057 - [Orchestrator] Starting remote worker trainer-0.
+2026-08-26 23:45:37,058 - [Orchestrator] Running SyncRLProgram through ClusterOrchestrator.run_program.
+2026-08-26 23:45:37,058 - [Orchestrator] ClusterOrchestrator executing program...
+SyncRLProgram.arun: num_steps=4
+2026-08-26 23:45:40,813 - [Orchestrator] No checkpoint to resume from; starting from step 0.
 prompt_batch length: 4
-2026-08-26 21:40:47,239 - [Orchestrator] RLProgram starting step 0
-2026-08-26 21:40:47,239 - [Orchestrator] GRPO step 0 starting.
-2026-08-26 21:41:37,211 - [Orchestrator] Shutting down ClusterOrchestrator...
-2026-08-26 21:41:37,215 - [Orchestrator] discovery server stopped
+2026-08-26 23:45:40,814 - [Orchestrator] RLProgram starting step 0
+2026-08-26 23:45:40,814 - [Orchestrator] GRPO step 0 starting.
+2026-08-26 23:45:50,622 - [Orchestrator] Shutting down ClusterOrchestrator...
+2026-08-26 23:45:50,626 - [Orchestrator] discovery server stopped
 Traceback (most recent call last):
   File "<frozen runpy>", line 198, in _run_module_as_main
   File "<frozen runpy>", line 88, in _run_code
@@ -48,16 +50,17 @@ Traceback (most recent call last):
   File "/mnt/disks/linchai-data/miniconda3/envs/tunix/lib/python3.12/asyncio/base_events.py", line 691, in run_until_complete
     return future.result()
            ^^^^^^^^^^^^^^^
-  File "/mnt/disks/linchai-data/tunix/tunix/experimental/orchestrator/rl_program.py", line 391, in arun
+  File "/mnt/disks/linchai-data/tunix/tunix/experimental/orchestrator/rl_program.py", line 390, in arun
     await self.astep_once(prompts=prompt_batch, **kwargs)
-  File "/mnt/disks/linchai-data/tunix/tunix/experimental/orchestrator/rl_program.py", line 273, in astep_once
-    await _await_if_needed(
+  File "/mnt/disks/linchai-data/tunix/tunix/experimental/orchestrator/rl_program.py", line 249, in astep_once
+    step_result = await _await_if_needed(
+                  ^^^^^^^^^^^^^^^^^^^^^^^
   File "/mnt/disks/linchai-data/tunix/tunix/experimental/orchestrator/rl_program.py", line 63, in _await_if_needed
     return await value
            ^^^^^^^^^^^
-  File "/mnt/disks/linchai-data/tunix/tunix/experimental/orchestrator/distributed_rl_engine.py", line 378, in save_checkpoint
-    return await self._invoke_worker(
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/disks/linchai-data/tunix/tunix/experimental/orchestrator/distributed_rl_engine.py", line 325, in train_step
+    fwd_bwd_result = await self._invoke_worker(
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^
   File "/mnt/disks/linchai-data/tunix/tunix/experimental/orchestrator/distributed_rl_engine.py", line 124, in _invoke_worker
     return await res
            ^^^^^^^^^
@@ -66,25 +69,44 @@ Traceback (most recent call last):
            ^^^^^^^^^^^^^^^^^
   File "/mnt/disks/linchai-data/tunix/tunix/experimental/worker/remote_execution.py", line 218, in unwrap
     raise RuntimeError(message)
-RuntimeError: RemoteExecutionError [StepAlreadyExistsError]: Step 1 already exists.
+RuntimeError: RemoteExecutionError [TypeError]: Cannot interpret value of type <class 'tunix.experimental.common.datatypes.RLTrainerPayload'> as an abstract array; it does not have a dtype attribute
 Remote traceback:
 Traceback (most recent call last):
   File "/mnt/disks/linchai-data/tunix/tunix/experimental/worker/remote_execution.py", line 341, in execute_request
     result = method(*request.args, **request.kwargs)
              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/mnt/disks/linchai-data/tunix/tunix/experimental/worker/trainer_worker.py", line 227, in save_checkpoint
-    self._trainer.save_checkpoint(metadata, **kwargs)
-  File "/mnt/disks/linchai-data/tunix/tunix/experimental/examples/math_gsm8k_dist/run_trainer_node.py", line 237, in save_checkpoint
-    self._trainer.save_checkpoint(metadata, **kwargs)
-  File "/mnt/disks/linchai-data/tunix/tunix/experimental/train/peft_trainer_v2.py", line 1109, in save_checkpoint
-    self.checkpoint_manager.save(
-  File "/mnt/disks/linchai-data/tunix/tunix/sft/checkpoint_manager.py", line 211, in save
-    return self._save_checkpointables(
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/mnt/disks/linchai-data/tunix/tunix/sft/checkpoint_manager.py", line 149, in _save_checkpointables
-    response = self._checkpointer.save_checkpointables_async(
-               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/mnt/disks/linchai-data/miniconda3/envs/tunix/lib/python3.12/site-packages/orbax/checkpoint/experimental/v1/_src/training/checkpointer.py", line 580, in save_checkpointables_async
-    raise errors.StepAlreadyExistsError(f'Step {step} already exists.')
-orbax.checkpoint.experimental.v1._src.training.errors.StepAlreadyExistsError: Step 1 already exists.
+  File "/mnt/disks/linchai-data/tunix/tunix/experimental/worker/trainer_worker.py", line 158, in fwd_bwd
+    self._trainer.fwd_bwd(payload, **kwargs)
+  File "/mnt/disks/linchai-data/tunix/tunix/experimental/examples/math_gsm8k_dist/run_trainer_node.py", line 211, in fwd_bwd
+    self._trainer.fwd_bwd(*args, **kwargs)
+  File "/mnt/disks/linchai-data/tunix/tunix/experimental/train/peft_trainer_v2.py", line 1014, in fwd_bwd
+    self._record_fwd_bwd(*fwd_bwd_step(inputs=self._prepare_payload(payload), model=self.model, grad_accumulator=self.grad_accumulator))
+                                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/disks/linchai-data/tunix/tunix/experimental/train/peft_trainer_v2.py", line 986, in _prepare_payload
+    return sharding_utils.shard_input(payload, self.config.data_sharding_axis)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/disks/linchai-data/tunix/tunix/sft/sharding_utils.py", line 68, in shard_input
+    return jax.tree.map(
+           ^^^^^^^^^^^^^
+  File "/mnt/disks/linchai-data/miniconda3/envs/tunix/lib/python3.12/site-packages/jax/_src/tree.py", line 156, in map
+    return tree_util.tree_map(f, tree, *rest, is_leaf=is_leaf)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/disks/linchai-data/miniconda3/envs/tunix/lib/python3.12/site-packages/jax/_src/tree_util.py", line 373, in tree_map
+    return treedef.unflatten(f(*xs) for xs in zip(*all_leaves))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/disks/linchai-data/miniconda3/envs/tunix/lib/python3.12/site-packages/jax/_src/tree_util.py", line 373, in <genexpr>
+    return treedef.unflatten(f(*xs) for xs in zip(*all_leaves))
+                             ^^^^^^
+  File "/mnt/disks/linchai-data/tunix/tunix/sft/sharding_utils.py", line 69, in <lambda>
+    lambda x: jax.make_array_from_process_local_data(
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/disks/linchai-data/miniconda3/envs/tunix/lib/python3.12/site-packages/jax/_src/array.py", line 983, in make_array_from_process_local_data
+    return api.device_put(local_data, sharding)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/disks/linchai-data/miniconda3/envs/tunix/lib/python3.12/site-packages/jax/_src/api.py", line 2685, in device_put
+    x_avals = [shaped_abstractify(x) for x in x_flat]
+               ^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/disks/linchai-data/miniconda3/envs/tunix/lib/python3.12/site-packages/jax/_src/core.py", line 1827, in shaped_abstractify
+    raise TypeError(
+TypeError: Cannot interpret value of type <class 'tunix.experimental.common.datatypes.RLTrainerPayload'> as an abstract array; it does not have a dtype attribute
 

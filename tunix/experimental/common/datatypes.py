@@ -483,8 +483,8 @@ class TrainerPayload:
     segment_positions: Optional [B, T] position indices within each segment.
   """
 
-  token_ids: ArrayLike
-  token_mask: ArrayLike
+  token_ids: ArrayLike | None = None
+  token_mask: ArrayLike | None = None
   segment_ids: ArrayLike | None = None
   segment_positions: ArrayLike | None = None
 

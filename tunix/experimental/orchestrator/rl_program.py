@@ -112,7 +112,7 @@ class SyncRLProgram:
     # of the dataset that has already been used for training.
     self._resumed_from_step = 0
     self._restored_checkpoint_metadata: dict[str, Any] = {}
-    self.mini_batch_size = None
+    self.mini_batch_size = 1 # hardcoded for the demo
     # Debug/observability hook for examples and tests; not training state.
     self.last_step_result: RLStepResult | None = None
 
@@ -254,6 +254,20 @@ class SyncRLProgram:
               apply_optimizer=is_last,
           )
       )
+      if is_last:
+        logging.warning(f"RLProgram.step_once: current_step={current_step} policy_version={self.policy_version}")
+        await _await_if_needed(
+          active_engine.save_checkpoint(
+              role=datatypes.Role.ACTOR,
+              metadata={
+                  "step": self.policy_version+1,
+                  "policy_version": self.policy_version+1,
+                  "num_rollouts": len(rollouts),
+                  "num_microbatches": len(microbatches),
+              },
+              **kwargs,
+          )
+        )
 
 
     # 6. Sync weights to rollout replicas
@@ -269,20 +283,6 @@ class SyncRLProgram:
       self.policy_version = new_version
     else:
       self.policy_version = current_step + 1
-    # 7. Save Checkpoint.
-    await _await_if_needed(
-      active_engine.save_checkpoint(
-          role=datatypes.Role.ACTOR,
-          step=self.policy_version,
-          metadata={
-              "step": current_step,
-              "policy_version": self.policy_version,
-              "num_rollouts": len(rollouts),
-              "num_microbatches": len(microbatches),
-          },
-          **kwargs,
-      )
-    )
     self.last_step_result = RLStepResult(
         step=current_step,
         policy_version=self.policy_version,
@@ -367,12 +367,13 @@ class SyncRLProgram:
       **kwargs: Any,
   ) -> None:
     """Async implementation of the RL program training loop."""
+    print(f"SyncRLProgram.arun: num_steps={num_steps}")
     active_engine = self._resolve_engine(engine)
     self.engine = active_engine
-    # # Must happen before any stage starts: train_stage reas `_step` for its
-    # # loop bound and rollout_dipatch_stage reads `_resumed_from_step` to skip
-    # # the dataset prefix the previous run alreayd consumed.
-    # await self._resume_from_checkpoint()
+    # Must happen before any stage starts: train_stage reas `_step` for its
+    # loop bound and rollout_dipatch_stage reads `_resumed_from_step` to skip
+    # the dataset prefix the previous run alreayd consumed.
+    await self._resume_from_checkpoint()
     if train_dataset is None:
       raise ValueError("SyncRLProgram.run requires a train_dataset.")
     for idx, prompt_batch in enumerate(train_dataset):
@@ -380,12 +381,10 @@ class SyncRLProgram:
       # global batch size. We should support the case that one global batch
       # contains multiple mini-batches.
       print(f"prompt_batch length: {len(prompt_batch)}")
-      if self.mini_batch_size is None:
-        self.mini_batch_size = len(prompt_batch)
       already_consumed = self._resumed_from_step * self.mini_batch_size
       if idx < already_consumed:
         continue
       if num_steps is not None and idx >= num_steps:
         break
-      logging.info("RLProgram starting step %d", self.step)
+      logging.info("RLProgram starting step %d", self.policy_version)
       await self.astep_once(prompts=prompt_batch, **kwargs)
