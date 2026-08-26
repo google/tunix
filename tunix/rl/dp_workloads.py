@@ -222,6 +222,7 @@ class DPWorkloadSpec:
   tp_size: int = 4
   local_m: int = 256
   four_chip_proxy: bool = False
+  unit_data_proxy: bool = False
 
   @property
   def total_devices(self) -> int:
@@ -257,6 +258,8 @@ class DPWorkloadSpec:
   def validate(self) -> None:
     """Rejects a workload that no longer matches the P32 release geometry."""
     self.training_contract()
+    if self.four_chip_proxy and self.unit_data_proxy:
+      raise ValueError("one workload cannot select both one-host proxies")
     if self.four_chip_proxy:
       expected = {
           "name": "gsm8k-p59-dp4-tp1",
@@ -280,6 +283,31 @@ class DPWorkloadSpec:
       if self.total_devices != 4 or self.global_m != 1024:
         raise ValueError(
             "P59 four-chip proxy requires four devices and global M1024"
+        )
+      return
+    if self.unit_data_proxy:
+      expected = {
+          "name": "gsm8k-p66-dp1-tp4",
+          "model_id": "Qwen/Qwen3-1.7B",
+          "dp_size": 1,
+          "tp_size": 4,
+          "global_prompts": 2,
+          "num_generations": 8,
+          "local_trajectories": 16,
+          "local_m": 256,
+          "periodic_evaluation": False,
+      }
+      actual = {name: getattr(self, name) for name in expected}
+      wrong = {
+          name: actual[name]
+          for name, expected_value in expected.items()
+          if actual[name] != expected_value
+      }
+      if wrong:
+        raise ValueError(f"P66 unit-data TP4 proxy geometry changed: {wrong}")
+      if self.total_devices != 4 or self.global_m != 256:
+        raise ValueError(
+            "P66 unit-data TP4 proxy requires four devices and global M256"
         )
       return
     if (self.dp_size, self.tp_size) not in ((16, 4), (8, 8)):
@@ -428,6 +456,28 @@ _WORKLOADS = {
         dp_size=4,
         tp_size=1,
         four_chip_proxy=True,
+    ),
+    "gsm8k-p66-dp1-tp4": DPWorkloadSpec(
+        name="gsm8k-p66-dp1-tp4",
+        model_id="Qwen/Qwen3-1.7B",
+        model_dir_name="qwen1p7b",
+        global_prompts=2,
+        num_generations=8,
+        local_trajectories=16,
+        max_prompt_length=1024,
+        max_response_length=256,
+        max_steps=1,
+        learning_rate=2.0e-7,
+        beta=0.04,
+        optimizer_b1=0.9,
+        optimizer_b2=0.999,
+        weight_decay=0.01,
+        temperature=1.0,
+        wandb_project="zero-tim-gsm8k-p66-dp1-tp4",
+        periodic_evaluation=False,
+        dp_size=1,
+        tp_size=4,
+        unit_data_proxy=True,
     ),
     "frozenlake": DPWorkloadSpec(
         name="frozenlake",
@@ -578,6 +628,7 @@ def requested_max_steps(
   if deterministic_ab == "1" and workload.name not in (
       "gsm8k-p59-dp4-tp1",
       "gsm8k-p60-dp2-tp2",
+      "gsm8k-p66-dp1-tp4",
   ):
     raise ValueError(
         "CANON_P60_DETERMINISTIC_AB requires an exact P60 one-host "
@@ -693,6 +744,7 @@ def expected_token_widths(
     if workload.name not in (
         "gsm8k-p59-dp4-tp1",
         "gsm8k-p60-dp2-tp2",
+        "gsm8k-p66-dp1-tp4",
     ):
       raise ValueError(
           "CANON_P60_DETERMINISTIC_AB requires an exact P60 one-host "

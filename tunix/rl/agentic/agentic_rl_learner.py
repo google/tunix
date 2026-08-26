@@ -63,6 +63,7 @@ from tunix.rl import function_registry
 from tunix.rl import gsm8k_xprof
 from tunix.rl import host_memory as host_memory_lib
 from tunix.rl import p64_training_capsule
+from tunix.rl import v1_first_update_gate
 from tunix.rl import perf_log
 from tunix.rl import reward_manager  # pylint: disable=unused-import
 from tunix.rl import rl_cluster as rl_cluster_lib
@@ -760,6 +761,298 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       raise alignment.AlignmentGateError(f"P28 G5c red: {result}")
     return result["all_alignment_pass"]
 
+  def _run_p66_backward_gate(self, observed_train_example) -> dict[str, Any]:
+    """Captures one ordinary or segmented full gradient without an update.
+
+    P66 deliberately bypasses both the optimizer and the persistent gradient
+    accumulator. The historical DP4xTP1 arms capture complete trees. The
+    full-depth TP4 discriminator instead captures bounded state fingerprints,
+    the complete layerwise max-abs profile, and the group-0 engine receipt so
+    a causal magnitude failure never spends tens of GiB on a dead arm.
+    """
+    from flax import nnx  # pylint: disable=g-import-not-at-top
+    from tunix.rl import canonical_forward  # pylint: disable=g-import-not-at-top
+
+    arm = os.environ.get("CANON_P66_BACKWARD_ARM", "")
+    capture_dir = os.environ.get("CANON_P66_BACKWARD_CAPTURE_DIR", "")
+    workload = dp_workloads.active_workload(os.environ)
+    required = {
+        "CANON_P32_TRAIN_ADMITTED": "1",
+        "CANON_P32_DP_REDUCTION_ADMITTED": "1",
+        "CANON_P33_WORKLOAD_LAUNCH_ADMITTED": "1",
+        "CANON_P33_RUN_STAGE": "backward-no-commit",
+        "CANON_P33_NO_COMMIT": "1",
+        "CANON_P28_SEGMENTED_TRAIN": "1",
+        "CANON_P28_G6_UPDATE": "1",
+        "CANON_P29_FULL_TRAIN": "1",
+        "CANON_ALIGNMENT_GATE": "1",
+        "CANON_ALIGNMENT_TRAIN": "1",
+        "CANON_PRE_ALIGN_GATE": "1",
+        "CANON_P60_DETERMINISTIC_AB": "1",
+    }
+    tp4_arm = arm in (
+        "tp4-serial",
+        "tp4-p59-old",
+        "tp4-p59",
+        "tp4-gather-off",
+        "tp4-vma-oracle",
+    )
+    arm_required = {
+        "ordinary": ("0", "0", "1"),
+        "segmented": ("0", "0", "1"),
+        "tp4-serial": ("0", "0", "1"),
+        "tp4-p59-old": ("1", "0", "1"),
+        "tp4-p59": ("1", "1", "1"),
+        "tp4-gather-off": ("1", "1", "0"),
+        "tp4-vma-oracle": ("1", "1", "1"),
+    }
+    rank_parallel, check_vma, fixed_gather = arm_required.get(
+        arm, (None, None, None)
+    )
+    required.update({
+        "CANON_P59_RANK_PARALLEL_BACKWARD": rank_parallel,
+        "CANON_P66_P59_CHECK_VMA": check_vma,
+        "CANON_FIXED_AR_GATHER": fixed_gather,
+    })
+    wrong = {
+        name: os.environ.get(name)
+        for name, expected in required.items()
+        if os.environ.get(name) != expected
+    }
+    if (
+        arm not in arm_required
+        or not capture_dir
+        or not os.path.isabs(capture_dir)
+        or workload is None
+        or (
+            (workload.name, workload.dp_size, workload.tp_size)
+            != (
+                ("gsm8k-p66-dp1-tp4", 1, 4)
+                if tp4_arm
+                else ("gsm8k-p59-dp4-tp1", 4, 1)
+            )
+        )
+        or os.environ.get("CANON_P61_BACKWARD_NUMERICAL_DIR", "")
+        or os.environ.get("CANON_P62_BACKWARD_NUMERIC_DEBUG", "0") != "0"
+        or os.environ.get("CANON_P64_P45_NUMERIC_DEBUG", "0") != "0"
+        or wrong
+    ):
+      raise alignment.AlignmentGateError(
+          "P66 backward gate requires one exact deterministic registered "
+          "GSM8K no-commit carrier: "
+          f"arm={arm!r} capture={capture_dir!r} "
+          f"workload={getattr(workload, 'name', None)!r} wrong={wrong}"
+      )
+
+    train_example, sidecar = alignment.unwrap_train_example(
+        observed_train_example
+    )
+    if sidecar is None:
+      raise alignment.AlignmentGateError(
+          "P66 backward gate requires an ObservedTrainExample sidecar"
+      )
+    actor_trainer = self.rl_cluster.actor_trainer
+    _, trainer_state = nnx.split(actor_trainer.model)
+    reference_state = _p28_reference_state(self.rl_cluster)
+
+    def fingerprint(value, *, min_elements=128):
+      return actor_trainer._canon_fingerprint_state(  # pylint: disable=protected-access
+          value, min_elements=min_elements
+      )
+
+    before = {
+        "model": fingerprint(nnx.state(actor_trainer.model, nnx.Param)),
+        "optimizer": fingerprint(
+            nnx.state(actor_trainer.optimizer, nnx.optimizer.OptState)
+        ),
+        "accumulator": fingerprint(
+            nnx.state(actor_trainer.grad_accumulator), min_elements=1
+        ),
+        "reference": (
+            fingerprint(reference_state) if reference_state is not None else None
+        ),
+        "train_steps": actor_trainer.train_steps,
+    }
+    if not tp4_arm:
+      _p61_capture_tree(
+          capture_dir,
+          "model_before",
+          nnx.state(actor_trainer.model, nnx.Param),
+      )
+
+    started = time.perf_counter()
+    with self.rl_cluster._get_mesh_and_logical_axis_rules_cm(  # pylint: disable=protected-access
+        rl_cluster_lib.Role.ACTOR
+    ):
+      if arm == "ordinary":
+
+        def ordinary_value_and_grad(model, current_train_example):
+          def diff_fn(differentiated_model):
+            output = actor_trainer.loss_fn(
+                differentiated_model,
+                train_example=current_train_example,
+                algo_config=self.algo_config,
+            )
+            if not isinstance(output, sft_utils.LossOutput):
+              raise TypeError(
+                  "P66 ordinary backward requires the GRPO LossOutput"
+              )
+            return output.primary_loss.unreduced_sum, output
+
+          grad_fn = nnx.value_and_grad(
+              diff_fn,
+              argnums=(
+                  nnx.DiffState(0, nnx.LoRAParam)
+                  if actor_trainer._lora_enabled  # pylint: disable=protected-access
+                  else 0
+              ),
+              has_aux=True,
+          )
+          return grad_fn(model)
+
+        compiled = nnx.jit(ordinary_value_and_grad)
+        (_, loss_output), gradients = compiled(
+            actor_trainer.model, train_example
+        )
+        scale = loss_output.primary_loss.compute_scale()
+        gradients = jax.tree.map(lambda value: value * scale, gradients)
+        per_token_logps = loss_output.aux_metrics.get("canon/T_current")
+      else:
+        adapter = canonical_forward.require_registered()
+        result = adapter.segmented_dp_grpo_value_and_grad(
+            trainer_state=trainer_state,
+            train_example=train_example,
+            algo_config=self.algo_config,
+            pad_id=self.rl_cluster.rollout.pad_id(),
+            eos_id=self.rl_cluster.rollout.eos_id(),
+            gradient_microbatch_sink=None,
+        )
+        gradients = result["gradients"]
+        per_token_logps = result["per_token_logps"]
+
+    if per_token_logps is None:
+      raise alignment.AlignmentGateError(
+          "P66 backward arm did not return canonical T_current"
+      )
+    gradient_stats = sft_utils.tree_numeric_receipt(gradients)
+    gradient_norm = jnp.asarray(
+        gradient_stats["stable_norm"], dtype=jnp.float32
+    )
+    if (
+        not gradient_stats["all_finite"]
+        or not gradient_stats["any_nonzero"]
+        or not np.isfinite(float(gradient_stats["stable_norm"]))
+        or (tp4_arm and gradient_stats["stable_norm"] > 1.0e6)
+    ):
+      raise alignment.AlignmentGateError(
+          f"P66 {arm} backward emitted an invalid gradient: {gradient_stats}"
+      )
+    gradient_sample = fingerprint(gradients)
+    if not tp4_arm:
+      _p61_capture_tree(capture_dir, "gradient", gradients)
+
+    contract = workload.training_contract()
+    records = []
+    for index, rows in enumerate(contract.rank_major_reverse_groups()):
+      row_indices = np.asarray(rows, dtype=np.int32)
+      group_sidecar = jax.tree.map(
+          lambda value: (
+              value[row_indices]
+              if hasattr(value, "shape")
+              and value.shape
+              and value.shape[0] == contract.global_trajectories
+              else value
+          ),
+          sidecar,
+      )
+      record = alignment.check_batch(
+          group_sidecar,
+          t_current=per_token_logps[row_indices],
+          gradient_norm=gradient_norm,
+          optimizer_skipped=jnp.asarray(1, jnp.int32),
+          step=index,
+          fail_closed=True,
+      )
+      records.append(record)
+
+    after = {
+        "model": fingerprint(nnx.state(actor_trainer.model, nnx.Param)),
+        "optimizer": fingerprint(
+            nnx.state(actor_trainer.optimizer, nnx.optimizer.OptState)
+        ),
+        "accumulator": fingerprint(
+            nnx.state(actor_trainer.grad_accumulator), min_elements=1
+        ),
+        "reference": (
+            fingerprint(_p28_reference_state(self.rl_cluster))
+            if reference_state is not None
+            else None
+        ),
+        "train_steps": actor_trainer.train_steps,
+    }
+    changed = {
+        name: actor_trainer._canon_changed_paths(  # pylint: disable=protected-access
+            before[name], after[name]
+        )
+        for name in ("model", "optimizer", "accumulator", "reference")
+        if before[name] is not None
+    }
+    unchanged = (
+        not any(changed.values())
+        and after["train_steps"] == before["train_steps"]
+    )
+    report = {
+        "schema": "canon-p66-backward-gate-v1",
+        "arm": arm,
+        "verdict": "PASS" if unchanged else "FAIL",
+        "commits": 0,
+        "dp_size": workload.dp_size,
+        "tp_size": workload.tp_size,
+        "global_trajectories": workload.global_trajectories,
+        "gradient_groups": workload.gradient_groups,
+        "gradient": gradient_stats,
+        "gradient_sample": gradient_sample,
+        "model_before_sample": before["model"],
+        "engine_vjp": result.get("p66_engine_receipt") if tp4_arm else None,
+        "layerwise_profile": (
+            result.get("p66_layerwise_profile") if tp4_arm else None
+        ),
+        "row_cotangent_summary": (
+            result.get("p66_row_cotangent_summary") if tp4_arm else None
+        ),
+        "vjp_oracle": (
+            result.get("p66_vjp_oracle") if tp4_arm else None
+        ),
+        "alignment_hashes": [record["hashes"] for record in records],
+        "alignment_verdicts": [record["verdict"] for record in records],
+        "state_changed_paths": changed,
+        "train_steps_before": before["train_steps"],
+        "train_steps_after": after["train_steps"],
+        "seconds": time.perf_counter() - started,
+    }
+    report_path = os.environ.get("CANON_UPDATE_REPORT", "")
+    if not report_path:
+      raise alignment.AlignmentGateError(
+          "P66 backward gate requires CANON_UPDATE_REPORT"
+      )
+    os.makedirs(os.path.dirname(report_path) or ".", exist_ok=True)
+    with open(report_path, "x", encoding="utf-8") as output_file:
+      json.dump(report, output_file, indent=2, sort_keys=True)
+      output_file.write("\n")
+    print(
+        "[P66.BACKWARD] "
+        f"arm={arm} verdict={report['verdict']} commits=0 "
+        f"alignments={len(records)}/{workload.gradient_groups} "
+        f"gradient_norm={gradient_stats['stable_norm']} "
+        f"seconds={report['seconds']:.3f}",
+        flush=True,
+    )
+    if not unchanged:
+      raise alignment.AlignmentGateError(
+          f"P66 {arm} backward mutated training state: {report}"
+      )
+    return report
+
   def _run_p28_g6_update(
       self, observed_train_example, *, xprof_train_schedule=None
   ) -> dict[str, Any]:
@@ -1216,6 +1509,55 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           f"result={result['gradient_microbatches']} "
           f"norms={len(micro_norms)} expected={expected_microbatches}"
       )
+    checked_vma_value = os.environ.get("CANON_P59_CHECKED_VMA", "0")
+    first_update_gate_value = os.environ.get(
+        "CANON_V1_HP_FIRST_UPDATE_GATE", "0"
+    )
+    if checked_vma_value not in ("0", "1"):
+      raise alignment.AlignmentGateError(
+          "CANON_P59_CHECKED_VMA must be exactly 0 or 1"
+      )
+    if first_update_gate_value not in ("0", "1"):
+      raise alignment.AlignmentGateError(
+          "CANON_V1_HP_FIRST_UPDATE_GATE must be exactly 0 or 1"
+      )
+    checked_vma_full = checked_vma_value == "1"
+    first_update_gate_enabled = first_update_gate_value == "1"
+    if checked_vma_full or first_update_gate_enabled:
+      exact_v1_geometry = (
+          full_train
+          and not p33_no_commit
+          and os.environ.get("CANON_V1_HP_FULL", "0") == "1"
+          and os.environ.get("CANON_P59_RANK_PARALLEL_BACKWARD", "0")
+          == "1"
+          and os.environ.get("CANON_P66_P59_CHECK_VMA", "0") == "1"
+          and (
+              (
+                  workload.name == "gsm8k"
+                  and (workload.dp_size, workload.tp_size) == (16, 4)
+                  and workload.global_m == 4096
+              )
+              or (
+                  workload.name == "frozenlake-dp8-tp8"
+                  and (workload.dp_size, workload.tp_size) == (8, 8)
+                  and workload.global_m == 2048
+              )
+          )
+      )
+      if not exact_v1_geometry or not (
+          checked_vma_full and first_update_gate_enabled
+      ):
+        raise alignment.AlignmentGateError(
+            "checked-VMA/first-update gate requires the exact complete "
+            "Phase4 full bundle"
+        )
+      print(
+          "[P59.CHECKED_VMA] enabled=1 "
+          f"workload={workload.name} dp={workload.dp_size} "
+          f"tp={workload.tp_size} global_M={workload.global_m} "
+          "manual_axes=data,model compatibility_alias=1",
+          flush=True,
+      )
     gradient_deterministic = result.get("gradient_deterministic_repeat")
     if p34_workload and p33_no_commit:
       if gradient_deterministic is not True:
@@ -1556,6 +1898,48 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         )
       return no_commit_record
 
+    first_update_admission = bool(
+        first_update_gate_enabled and before["train_steps"] == 0
+    )
+    if first_update_admission:
+      accumulator_tree = actor_trainer.grad_accumulator.get()
+      accumulator_receipt = sft_utils.tree_numeric_receipt(accumulator_tree)
+      accumulator_denominator = float(np.asarray(jax.device_get(
+          actor_trainer.grad_accumulator.denom[...]
+      )))
+      first_precommit_record = {
+          "schema": "canon-v1-first-update-precommit-v1",
+          "update": 0,
+          "workload": workload.name,
+          "dp": int(workload.dp_size),
+          "tp": int(workload.tp_size),
+          "microsteps": int(expected_microbatches),
+          "accumulator_denominator": accumulator_denominator,
+          "stable_norm_max": v1_first_update_gate.STABLE_NORM_MAX,
+          **accumulator_receipt,
+      }
+      print(
+          "[V1.FIRST_UPDATE] "
+          + json.dumps(
+              first_precommit_record,
+              sort_keys=True,
+              separators=(",", ":"),
+          ),
+          flush=True,
+      )
+      first_precommit_reasons = v1_first_update_gate.validate_precommit(
+          first_precommit_record,
+          workload=workload.name,
+          dp=int(workload.dp_size),
+          tp=int(workload.tp_size),
+          microsteps=int(expected_microbatches),
+      )
+      if first_precommit_reasons:
+        raise alignment.AlignmentGateError(
+            "V1 first-update precommit gradient gate failed before AdamW: "
+            f"reasons={first_precommit_reasons} record={first_precommit_record}"
+        )
+
     if p61_capture_dir:
       _p61_capture_tree(
           p61_capture_dir,
@@ -1869,6 +2253,47 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       raise alignment.AlignmentGateError(
           f"P28 G6 update transaction red: {update_record}"
       )
+    if first_update_admission:
+      first_commit_record = {
+          "schema": "canon-v1-first-update-commit-v1",
+          "update": 0,
+          "workload": workload.name,
+          "dp": int(workload.dp_size),
+          "tp": int(workload.tp_size),
+          "train_steps_before": int(before["train_steps"]),
+          "train_steps_after": int(actor_trainer.train_steps),
+          "optimizer_transaction_valid": bool(
+              optimizer_transaction_valid
+          ),
+          "gradient_finite": bool(commit_evidence["gradient_finite"]),
+          "parameter_delta_finite": bool(
+              commit_evidence["parameter_delta_finite"]
+          ),
+          "parameter_changed_elements": int(parameter_changed_elements),
+          "effective_learning_rate": effective_learning_rate,
+          "outer_weight_sync_pending": True,
+      }
+      first_commit_reasons = v1_first_update_gate.validate_commit(
+          first_commit_record,
+          workload=workload.name,
+          dp=int(workload.dp_size),
+          tp=int(workload.tp_size),
+      )
+      print(
+          "[V1.FIRST_UPDATE] "
+          + json.dumps(
+              first_commit_record,
+              sort_keys=True,
+              separators=(",", ":"),
+          ),
+          flush=True,
+      )
+      if first_commit_reasons:
+        raise alignment.AlignmentGateError(
+            "V1 first-update optimizer admission failed before outer weight "
+            f"sync/checkpoint: reasons={first_commit_reasons} "
+            f"record={first_commit_record}"
+        )
     return update_record
 
   def __init__(
@@ -3186,10 +3611,15 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
                       perf_constants.ROLE: "actor",
                   },
               ):
-                segmented_result = self._run_p28_g6_update(
-                    merged_train_micro_batch,
-                    xprof_train_schedule=xprof_train_schedule,
-                )
+                if os.environ.get("CANON_P66_BACKWARD_ARM", ""):
+                  segmented_result = self._run_p66_backward_gate(
+                      merged_train_micro_batch
+                  )
+                else:
+                  segmented_result = self._run_p28_g6_update(
+                      merged_train_micro_batch,
+                      xprof_train_schedule=xprof_train_schedule,
+                  )
         if (
             canonical_workload
             and (

@@ -49,6 +49,7 @@ from tunix.rl import dp_workloads
 from tunix.rl import deepswe_contract
 from tunix.rl import gsm8k_xprof
 from tunix.rl import p64_training_capsule
+from tunix.rl import p66_vjp_oracle
 from tunix.rl import p38_frozenlake_replay
 from tunix.sft import utils as sft_utils
 
@@ -212,6 +213,180 @@ def _p62_emit_loss_receipt(
         f"{marker} loss-scale contract failed: {record}"
     )
   return record
+
+
+def _p66_tp4_arm() -> str:
+  """Returns the exact default-off one-host TP4 discriminator arm."""
+  value = os.environ.get("CANON_P66_BACKWARD_ARM", "")
+  return value if value in (
+      "tp4-serial",
+      "tp4-p59-old",
+      "tp4-p59",
+      "tp4-gather-off",
+      "tp4-vma-oracle",
+  ) else ""
+
+
+def _p66_emit_layerwise_profile(segmented, engine_gradients, *, arm: str):
+  """Emits one full-depth max-abs fingerprint for a P66 group-0 VJP."""
+  leaves = tuple(engine_gradients)
+  groups = (
+      ("embed", tuple(segmented._embed_full_indices)),  # pylint: disable=protected-access
+      *tuple(
+          (f"layer_{index}", tuple(indices))
+          for index, indices in enumerate(
+              segmented._local_layer_full_indices  # pylint: disable=protected-access
+          )
+      ),
+      ("norm", tuple(segmented._norm_full_indices)),  # pylint: disable=protected-access
+      ("head", tuple(segmented._head_full_indices)),  # pylint: disable=protected-access
+  )
+  if any(not indices for _, indices in groups):
+    raise FunctionalMappingError("P66 layerwise profile has an empty group")
+
+  def profile(values):
+    maxima = []
+    for _, indices in groups:
+      maximum = jnp.max(jnp.abs(values[indices[0]].astype(jnp.float32)))
+      for index in indices[1:]:
+        maximum = jnp.maximum(
+            maximum,
+            jnp.max(jnp.abs(values[index].astype(jnp.float32))),
+        )
+      maxima.append(maximum)
+    return jnp.stack(maxima)
+
+  maxima = np.asarray(jax.device_get(jax.jit(profile)(leaves)), np.float32)
+  record = {
+      "schema": "canon-p66-full-depth-profile-v1",
+      "arm": arm,
+      "stage": "engine_vjp_group0",
+      "components": {
+          label: float(maximum)
+          for (label, _), maximum in zip(groups, maxima, strict=True)
+      },
+  }
+  print(
+      "[P66.TP4.PROFILE] "
+      + json.dumps(record, sort_keys=True, separators=(",", ":")),
+      flush=True,
+  )
+  return record
+
+
+def _p66_emit_row_cotangent_profile(
+    profiles, *, arm: str, host_n_real, sequence_bucket: int
+):
+  """Separates real/padding residual scale and cotangent in a P66 replay."""
+  host_profiles = jax.device_get(tuple(profiles))
+  records = []
+
+  def distribution(values):
+    values = np.asarray(values, np.float32).reshape(-1)
+    finite = values[np.isfinite(values)]
+    if not finite.size:
+      return {"min": None, "p01": None, "p50": None, "max": None}
+    return {
+        "min": float(np.min(finite)),
+        "p01": float(np.percentile(finite, 1.0)),
+        "p50": float(np.percentile(finite, 50.0)),
+        "max": float(np.max(finite)),
+    }
+
+  for chunk_index, layer_index, hidden_rms, dhidden_max in host_profiles:
+    hidden_rms = np.asarray(hidden_rms, np.float32)
+    dhidden_max = np.asarray(dhidden_max, np.float32)
+    if hidden_rms.shape != dhidden_max.shape or hidden_rms.shape != (
+        len(host_n_real), sequence_bucket
+    ):
+      raise FunctionalMappingError(
+          "P66 row profile shape mismatch: "
+          f"hidden={hidden_rms.shape} dhidden={dhidden_max.shape}"
+      )
+    chunk_start = int(chunk_index) * sequence_bucket
+    q_len = np.clip(
+        np.asarray(host_n_real, np.int32) - chunk_start,
+        0,
+        sequence_bucket,
+    )
+    row = np.arange(sequence_bucket, dtype=np.int32)[None, :]
+    real_mask = row < q_len[:, None]
+    padding_mask = ~real_mask
+    real_dhidden = dhidden_max[real_mask]
+    padding_dhidden = dhidden_max[padding_mask]
+    padding_nonzero = int(np.count_nonzero(padding_dhidden != 0.0))
+    record = {
+        "schema": "canon-p66-row-cotangent-v1",
+        "arm": arm,
+        "chunk": int(chunk_index),
+        "layer": int(layer_index),
+        "real_rows": int(np.count_nonzero(real_mask)),
+        "padding_rows": int(np.count_nonzero(padding_mask)),
+        "padding_token_id": 0,
+        "real_hidden_rms": distribution(hidden_rms[real_mask]),
+        "padding_hidden_rms": distribution(hidden_rms[padding_mask]),
+        "real_dhidden_max": distribution(real_dhidden),
+        "padding_dhidden_max": distribution(padding_dhidden),
+        "real_dhidden_nonzero_rows": int(
+            np.count_nonzero(real_dhidden != 0.0)
+        ),
+        "padding_dhidden_nonzero_rows": padding_nonzero,
+        "padding_dhidden_nonfinite_rows": int(
+            np.count_nonzero(~np.isfinite(padding_dhidden))
+        ),
+        "padding_hidden_below_0p05_rows": int(
+            np.count_nonzero(hidden_rms[padding_mask] < 0.05)
+        ),
+    }
+    records.append(record)
+    print(
+        "[P66.TP4.ROWS] "
+        + json.dumps(record, sort_keys=True, separators=(",", ":")),
+        flush=True,
+    )
+
+  nonzero = [
+      record
+      for record in records
+      if record["padding_dhidden_nonzero_rows"] > 0
+  ]
+  padding_hidden_minima = [
+      record["padding_hidden_rms"]["min"]
+      for record in records
+      if record["padding_hidden_rms"]["min"] is not None
+  ]
+  summary = {
+      "schema": "canon-p66-row-cotangent-summary-v1",
+      "arm": arm,
+      "records": len(records),
+      "chunks": len({record["chunk"] for record in records}),
+      "layers": sorted({record["layer"] for record in records}),
+      "padding_row_layer_nonzero": int(sum(
+          record["padding_dhidden_nonzero_rows"] for record in records
+      )),
+      "padding_row_layer_nonfinite": int(sum(
+          record["padding_dhidden_nonfinite_rows"] for record in records
+      )),
+      "padding_hidden_rms_min": (
+          float(min(padding_hidden_minima)) if padding_hidden_minima else None
+      ),
+      "first_nonzero_padding_cotangent": (
+          {
+              "chunk": nonzero[0]["chunk"],
+              "layer": nonzero[0]["layer"],
+              "rows": nonzero[0]["padding_dhidden_nonzero_rows"],
+              "max_abs": nonzero[0]["padding_dhidden_max"]["max"],
+          }
+          if nonzero
+          else None
+      ),
+  }
+  print(
+      "[P66.TP4.ROWS.SUMMARY] "
+      + json.dumps(summary, sort_keys=True, separators=(",", ":")),
+      flush=True,
+  )
+  return summary
 
 
 def _xprof_jit(fun, *, module_name: str, scope_name: str, **jit_kwargs):
@@ -913,6 +1088,30 @@ def _p59_localize_engine_shard_maps(target_mesh, label: str):
         localized_fun = bind_unit_axis(localized_fun, unit_axis)
     if target_tp == 1:
       localized_fun = bind_unit_axis(localized_fun, inner_model)
+
+    if (
+        target_tp > 1
+        and os.environ.get("CANON_P66_P59_CHECK_VMA", "0") == "1"
+    ):
+      # The surrounding P59 shard_map has already consumed the physical data
+      # and model partitions. Re-entering shard_map on that same AbstractMesh
+      # requires the nested specs to be erased to P(None); that erasure also
+      # lies about values which vary over the outer manual axes. With
+      # check_vma=False the lie was silent and its transpose produced the P66
+      # exploding-gradient regression. With check_vma=True it fails at the
+      # first endpoint whose cotangent remains V:data.
+      #
+      # Execute the already-local engine body directly instead. The outer map
+      # is the required manual/Mosaic boundary, its model axis remains bound
+      # for the engine collectives, and the size-one auxiliary axes above are
+      # still bound explicitly. No dimension is repartitioned here and VMA
+      # types now flow through the real local primitives into their VJPs.
+      print(
+          f"[P66.VMA] nested_engine_body_reuses_outer_map label={label} "
+          f"tp={target_tp}",
+          flush=True,
+      )
+      return localized_fun
 
     localized_kwargs = dict(kwargs)
     localized_kwargs["mesh"] = context_mesh
@@ -1867,6 +2066,8 @@ class _P28SegmentedEngineForward:
           "P28 segmented forward requires the concrete live engine mesh"
       )
     self._engine_mesh = runner.mesh
+    self._engine_data_size = int(self._engine_mesh.shape.get("data", 1))
+    self._engine_tp_size = int(self._engine_mesh.shape.get("model", 1))
 
     from flax import nnx  # pylint: disable=g-import-not-at-top
 
@@ -1969,10 +2170,13 @@ class _P28SegmentedEngineForward:
     endpoint_contract = None
     embed_local_fn = None
     embed_pullback_fn = None
+    embed_pullback_vma_fn = None
     norm_local_fn = None
     norm_pullback_fn = None
+    norm_pullback_vma_fn = None
     head_local_fn = None
     head_pullback_fn = None
+    head_pullback_vma_fn = None
     embed_full_indices = ()
     norm_full_indices = ()
     head_full_indices = ()
@@ -2055,6 +2259,10 @@ class _P28SegmentedEngineForward:
         _, pullback = jax.vjp(fwd_lm_head, leaves, hidden)
         return pullback(dlogits)
 
+      embed_pullback_vma_fn = bwd_embed
+      norm_pullback_vma_fn = bwd_norm
+      head_pullback_vma_fn = bwd_lm_head
+
       embed_local_fn = _xprof_jit(
           fwd_embed,
           module_name="zt_tr_fwd_embed",
@@ -2102,6 +2310,7 @@ class _P28SegmentedEngineForward:
     local_layer_defs = []
     local_layer_vjp_fns = []
     local_layer_pullback_fns = []
+    local_layer_pullback_vma_fns = []
     local_layer_pullback_tape_fns = []
     local_layer_leaves = []
     local_layer_contracts = []
@@ -2217,6 +2426,7 @@ class _P28SegmentedEngineForward:
               scope_name="zt/tr/layer/bwd",
           )
       )
+      local_layer_pullback_vma_fns.append(bwd_layer_block)
       local_layer_pullback_tape_fns.append(
           _xprof_jit(
               bwd_layer_block_tape,
@@ -2286,6 +2496,9 @@ class _P28SegmentedEngineForward:
     self._layer_scan_stack = None
     self._local_layer_vjp_fns = tuple(local_layer_vjp_fns)
     self._local_layer_pullback_fns = tuple(local_layer_pullback_fns)
+    self._local_layer_pullback_vma_fns = tuple(
+        local_layer_pullback_vma_fns
+    )
     self._local_layer_pullback_tape_fns = tuple(local_layer_pullback_tape_fns)
     self._local_layer_leaves = tuple(local_layer_leaves)
     self._local_layer_full_indices = tuple(local_layer_full_indices)
@@ -2293,10 +2506,13 @@ class _P28SegmentedEngineForward:
     self._norm_fn = jax.jit(norm)
     self._embed_local_fn = embed_local_fn
     self._embed_pullback_fn = embed_pullback_fn
+    self._embed_pullback_vma_fn = embed_pullback_vma_fn
     self._norm_local_fn = norm_local_fn
     self._norm_pullback_fn = norm_pullback_fn
+    self._norm_pullback_vma_fn = norm_pullback_vma_fn
     self._head_local_fn = head_local_fn
     self._head_pullback_fn = head_pullback_fn
+    self._head_pullback_vma_fn = head_pullback_vma_fn
     self._embed_local_leaves = tuple(embed_local_leaves)
     self._norm_local_leaves = tuple(norm_local_leaves)
     self._head_local_leaves = tuple(head_local_leaves)
@@ -2932,10 +3148,22 @@ class _P28SegmentedEngineForward:
         else trainer_mesh
     )
     data_axis, _ = _p59_mesh_roles(mesh, module_name)
+    _, model_axis = _p59_mesh_roles(mesh, module_name)
     aligned_args = tuple(
         _p59_align_to_mesh(value, mesh, module_name) for value in args
     )
-    if int(mesh.shape[data_axis]) <= 1:
+    p66_unit_data = (
+        int(mesh.shape[data_axis]) == 1
+        and int(mesh.shape[model_axis]) == 4
+        and _p66_tp4_arm()
+        in (
+            "tp4-p59-old",
+            "tp4-p59",
+            "tp4-gather-off",
+            "tp4-vma-oracle",
+        )
+    )
+    if int(mesh.shape[data_axis]) <= 1 and not p66_unit_data:
       raise FunctionalMappingError(
           f"{module_name} requires a multi-rank data mesh"
       )
@@ -2949,8 +3177,59 @@ class _P28SegmentedEngineForward:
             mesh, data_axis, module_name
         ))
     )
+    p66_check_vma_value = os.environ.get(
+        "CANON_P66_P59_CHECK_VMA", "0"
+    )
+    if p66_check_vma_value not in ("0", "1"):
+      raise FunctionalMappingError(
+          "CANON_P66_P59_CHECK_VMA must be exactly 0 or 1, got "
+          f"{p66_check_vma_value!r}"
+      )
+    p66_check_vma = p66_check_vma_value == "1"
+    if p66_check_vma:
+      print(
+          f"[P66.VMA] outer_check_enabled module={module_name} "
+          f"manual_axes={sorted(manual_axes)}",
+          flush=True,
+      )
+    mapped_local_fn = local_fn
+    if p66_check_vma:
+
+      def vma_local_fn(*local_args):
+        # Parameter/state arguments are physically replicated over DP, but
+        # P59 intentionally computes and stages one *local* parameter
+        # cotangent per DP rank. Tell the inner VJP that those values may vary
+        # over the manual data axis so reverse mode does not insert a DP psum
+        # before the leading-rank staging boundary. This pcast is a runtime
+        # no-op; TP placement and rank-local data arguments remain unchanged.
+        def mark_data_varying(leaf):
+          manual_axis_type = jax.typeof(leaf).mat
+          if data_axis in manual_axis_type.varying:
+            return leaf
+          if (
+              data_axis in manual_axis_type.unreduced
+              or data_axis in manual_axis_type.reduced
+          ):
+            raise FunctionalMappingError(
+                f"{module_name} cannot relabel {data_axis!r} from "
+                f"{manual_axis_type} to varying"
+            )
+          return jax.lax.pcast(leaf, data_axis, to="varying")
+
+        localized_args = tuple(
+            value
+            if index in rank_local_arg_indices
+            else jax.tree.map(
+                mark_data_varying,
+                value,
+            )
+            for index, value in enumerate(local_args)
+        )
+        return local_fn(*localized_args)
+
+      mapped_local_fn = vma_local_fn
     mapped = jax.shard_map(
-        local_fn,
+        mapped_local_fn,
         mesh=mesh,
         in_specs=tuple(
             _rank_local_leading_specs(
@@ -2968,7 +3247,7 @@ class _P28SegmentedEngineForward:
             data_axis, int(mesh.shape[data_axis]), aligned_args, manual_axes
         ),
         axis_names=manual_axes,
-        check_vma=False,
+        check_vma=p66_check_vma,
     )
     compiled = _xprof_jit(
         mapped, module_name=module_name, scope_name=scope_name
@@ -3018,9 +3297,16 @@ class _P28SegmentedEngineForward:
         "embed",
     )
     if getattr(self, "_p59_embed_pullback_fn", None) is None:
+      pullback_fn = (
+          getattr(
+              self, "_embed_pullback_vma_fn", self._embed_pullback_fn
+          )
+          if os.environ.get("CANON_P66_P59_CHECK_VMA", "0") == "1"
+          else self._embed_pullback_fn
+      )
 
       def local_pullback(local_leaves, local_ids, local_dhidden):
-        gradients = self._embed_pullback_fn(
+        gradients = pullback_fn(
             local_leaves, local_ids, local_dhidden
         )
         return self._p59_stage_rank_gradient(gradients)
@@ -3074,9 +3360,14 @@ class _P28SegmentedEngineForward:
         "final norm",
     )
     if getattr(self, "_p59_norm_pullback_fn", None) is None:
+      pullback_fn = (
+          getattr(self, "_norm_pullback_vma_fn", self._norm_pullback_fn)
+          if os.environ.get("CANON_P66_P59_CHECK_VMA", "0") == "1"
+          else self._norm_pullback_fn
+      )
 
       def local_pullback(local_leaves, local_hidden, local_dnormalized):
-        gradients, dhidden = self._norm_pullback_fn(
+        gradients, dhidden = pullback_fn(
             local_leaves, local_hidden, local_dnormalized
         )
         return self._p59_stage_rank_gradient(gradients), dhidden
@@ -3157,9 +3448,14 @@ class _P28SegmentedEngineForward:
           f"placement={data_axis},{model_axis}",
           flush=True,
       )
+      pullback_fn = (
+          getattr(self, "_head_pullback_vma_fn", self._head_pullback_fn)
+          if os.environ.get("CANON_P66_P59_CHECK_VMA", "0") == "1"
+          else self._head_pullback_fn
+      )
 
       def local_pullback(local_leaves, local_hidden, local_dlogits):
-        gradients, dhidden = self._head_pullback_fn(
+        gradients, dhidden = pullback_fn(
             local_leaves, local_hidden, local_dlogits
         )
         return self._p59_stage_rank_gradient(gradients), dhidden
@@ -3221,7 +3517,15 @@ class _P28SegmentedEngineForward:
       functions = [None] * len(self._local_layer_pullback_fns)
       self._p59_layer_pullback_fns = functions
     if functions[layer_index] is None:
-      pullback_fn = self._local_layer_pullback_fns[layer_index]
+      pullback_fn = (
+          getattr(
+              self,
+              "_local_layer_pullback_vma_fns",
+              self._local_layer_pullback_fns,
+          )[layer_index]
+          if os.environ.get("CANON_P66_P59_CHECK_VMA", "0") == "1"
+          else self._local_layer_pullback_fns[layer_index]
+      )
 
       def local_pullback(
           leaves,
@@ -3283,7 +3587,19 @@ class _P28SegmentedEngineForward:
     self._require_full_loss_endpoints()
     if rank_axis_size is not None:
       rank_axis_size = int(rank_axis_size)
-      if rank_axis_size <= 1:
+      p66_unit_rank = (
+          rank_axis_size == 1
+          and self._engine_data_size == 1
+          and self._engine_tp_size == 4
+          and _p66_tp4_arm()
+          in (
+              "tp4-p59-old",
+              "tp4-p59",
+              "tp4-gather-off",
+              "tp4-vma-oracle",
+          )
+      )
+      if rank_axis_size <= 1 and not p66_unit_rank:
         raise FunctionalMappingError(
             f"P59 staged rank axis must exceed one, got {rank_axis_size}"
         )
@@ -5653,10 +5969,22 @@ class Qwen3EngineForwardAdapter:
         and os.environ.get("CANON_P32_WORKLOAD", "")
         == "gsm8k-p59-dp4-tp1"
     )
-    if self._data_size not in (8, 16) and not p59_four_chip_proxy:
+    p66_tp4_proxy = (
+        self._data_size == 1
+        and self._tp_size == 4
+        and os.environ.get("CANON_P32_WORKLOAD", "")
+        == "gsm8k-p66-dp1-tp4"
+        and bool(_p66_tp4_arm())
+    )
+    if (
+        self._data_size not in (8, 16)
+        and not p59_four_chip_proxy
+        and not p66_tp4_proxy
+    ):
       raise FunctionalMappingError(
-          "P32 grouped reverse requires data size 8 or 16, or the exact "
-          f"P59 four-chip proxy; got {self._data_size}"
+          "P32 grouped reverse requires data size 8 or 16, the exact "
+          "P59 four-chip proxy, or the exact P66 DP1xTP4 proxy; got "
+          f"{self._data_size}"
       )
     prompt = jnp.asarray(prompt)
     completion = jnp.asarray(completion)
@@ -5943,7 +6271,20 @@ class Qwen3EngineForwardAdapter:
           f"got {parallel_value!r}"
       )
     rank_parallel = parallel_value == "1"
-    if rank_parallel and self._data_size <= 1:
+    p66_arm = _p66_tp4_arm()
+    p66_oracle = p66_arm == "tp4-vma-oracle"
+    p66_unit_data = (
+        self._data_size == 1
+        and self._tp_size == 4
+        and p66_arm
+        in (
+            "tp4-p59-old",
+            "tp4-p59",
+            "tp4-gather-off",
+            "tp4-vma-oracle",
+        )
+    )
+    if rank_parallel and self._data_size <= 1 and not p66_unit_data:
       raise FunctionalMappingError(
           "P59 rank-parallel backward requires more than one DP rank"
       )
@@ -6014,6 +6355,24 @@ class Qwen3EngineForwardAdapter:
         "head_pullback": 0,
         "processed_pullback": 0,
     })
+    p66_row_profiles = []
+    p66_oracle_records = []
+    if p66_arm:
+
+      @jax.jit
+      def p66_row_profile(hidden_value, dhidden_value):
+        hidden_rows = hidden_value.reshape(
+            self._data_size, self._sequence_bucket, -1
+        ).astype(jnp.float32)
+        dhidden_rows = dhidden_value.reshape(
+            self._data_size, self._sequence_bucket, -1
+        ).astype(jnp.float32)
+        return (
+            jnp.sqrt(jnp.mean(jnp.square(hidden_rows), axis=-1)),
+          jnp.max(jnp.abs(dhidden_rows), axis=-1),
+        )
+    if p66_oracle:
+      p66_vjp_oracle.negative_control()
 
     with self._set_forward_context(None, self._runner.vllm_config):
       for chunk_index in reversed(range(spec["num_chunks"])):
@@ -6067,6 +6426,22 @@ class Qwen3EngineForwardAdapter:
                   normalized, dlogits, state_leaves=engine_leaves
               )
           )
+          if p66_oracle and chunk_index == 0:
+            serial_head_grad, serial_dnormalized = (
+                segmented.run_head_pullback(
+                    normalized, dlogits, state_leaves=engine_leaves
+                )
+            )
+            p66_oracle_records.append(p66_vjp_oracle.compare(
+                (serial_head_grad, serial_dnormalized),
+                (
+                    p66_vjp_oracle.unstage_unit_rank(
+                        local_head_grad, endpoint="head"
+                    ),
+                    dnormalized,
+                ),
+                endpoint="head",
+            ))
         else:
           local_head_grad, dnormalized = segmented.run_head_pullback(
               normalized, dlogits, state_leaves=engine_leaves
@@ -6083,6 +6458,22 @@ class Qwen3EngineForwardAdapter:
                   pre_norm, dnormalized, state_leaves=engine_leaves
               )
           )
+          if p66_oracle and chunk_index == 0:
+            serial_norm_grad, serial_dhidden = (
+                segmented.run_norm_pullback(
+                    pre_norm, dnormalized, state_leaves=engine_leaves
+                )
+            )
+            p66_oracle_records.append(p66_vjp_oracle.compare(
+                (serial_norm_grad, serial_dhidden),
+                (
+                    p66_vjp_oracle.unstage_unit_rank(
+                        local_norm_grad, endpoint="norm"
+                    ),
+                    dhidden,
+                ),
+                endpoint="norm",
+            ))
         else:
           local_norm_grad, dhidden = segmented.run_norm_pullback(
               pre_norm, dnormalized, state_leaves=engine_leaves
@@ -6097,6 +6488,8 @@ class Qwen3EngineForwardAdapter:
         previous_cache_carry = [None] * len(layer_tape)
         for layer_index in reversed(range(len(layer_tape))):
           cache_in, hidden_in = layer_tape[layer_index]
+          incoming_dcache = dcache_carry[layer_index]
+          incoming_dhidden = dhidden
           if rank_parallel:
             local_grad, dcache, dhidden = (
                 segmented.run_block_pullback_rank_parallel(
@@ -6104,20 +6497,52 @@ class Qwen3EngineForwardAdapter:
                     cache_in,
                     hidden_in,
                     metadata,
-                    dcache_carry[layer_index],
-                    dhidden,
+                    incoming_dcache,
+                    incoming_dhidden,
                     state_leaves=engine_leaves,
                 )
             )
+            if (
+                p66_oracle
+                and chunk_index == 0
+                and layer_index in (27, 14, 0)
+            ):
+              serial_grad, serial_dcache, serial_dhidden = (
+                  segmented.run_block_pullback(
+                      layer_index,
+                      cache_in,
+                      hidden_in,
+                      metadata,
+                      incoming_dcache,
+                      incoming_dhidden,
+                      state_leaves=engine_leaves,
+                  )
+              )
+              p66_oracle_records.append(p66_vjp_oracle.compare(
+                  (serial_grad, serial_dcache, serial_dhidden),
+                  (
+                      p66_vjp_oracle.unstage_unit_rank(
+                          local_grad, endpoint=f"layer_{layer_index}"
+                      ),
+                      dcache,
+                      dhidden,
+                  ),
+                  endpoint=f"layer_{layer_index}",
+              ))
           else:
             local_grad, dcache, dhidden = segmented.run_block_pullback(
                 layer_index,
                 cache_in,
                 hidden_in,
                 metadata,
-                dcache_carry[layer_index],
-                dhidden,
+                incoming_dcache,
+                incoming_dhidden,
                 state_leaves=engine_leaves,
+            )
+          if p66_arm:
+            hidden_rms, dhidden_max = p66_row_profile(hidden_in, dhidden)
+            p66_row_profiles.append(
+                (chunk_index, layer_index, hidden_rms, dhidden_max)
             )
           layer_grads[layer_index] = (
               tree_start(local_grad)
@@ -6131,6 +6556,17 @@ class Qwen3EngineForwardAdapter:
           local_embed_grad = segmented.run_embed_pullback_rank_parallel(
               input_ids, dhidden, state_leaves=engine_leaves
           )
+          if p66_oracle and chunk_index == 0:
+            serial_embed_grad = segmented.run_embed_pullback(
+                input_ids, dhidden, state_leaves=engine_leaves
+            )
+            p66_oracle_records.append(p66_vjp_oracle.compare(
+                serial_embed_grad,
+                p66_vjp_oracle.unstage_unit_rank(
+                    local_embed_grad, endpoint="embed"
+                ),
+                endpoint="embed",
+            ))
         else:
           local_embed_grad = segmented.run_embed_pullback(
               input_ids, dhidden, state_leaves=engine_leaves
@@ -6147,6 +6583,46 @@ class Qwen3EngineForwardAdapter:
         for value in (embed_grad, norm_grad, head_grad, *layer_grads)
     ):
       raise FunctionalMappingError("P59 reverse emitted an empty gradient pack")
+    p66_row_summary = None
+    if p66_arm:
+      p66_row_summary = _p66_emit_row_cotangent_profile(
+          p66_row_profiles,
+          arm=p66_arm,
+          host_n_real=spec["host_n_real"],
+          sequence_bucket=self._sequence_bucket,
+      )
+    p66_oracle_summary = None
+    if p66_oracle:
+      expected_endpoints = {
+          "head", "norm", "layer_27", "layer_14", "layer_0", "embed"
+      }
+      observed_endpoints = [record["endpoint"] for record in p66_oracle_records]
+      p66_oracle_summary = {
+          "schema": "canon-p66-same-point-vjp-oracle-summary-v1",
+          "arm": p66_arm,
+          "negative_control_detected": True,
+          "expected_endpoints": sorted(expected_endpoints),
+          "observed_endpoints": observed_endpoints,
+          "records": p66_oracle_records,
+          "verdict": (
+              "PASS"
+              if set(observed_endpoints) == expected_endpoints
+              and len(observed_endpoints) == len(expected_endpoints)
+              and all(record["verdict"] == "PASS" for record in p66_oracle_records)
+              else "FAIL"
+          ),
+      }
+      print(
+          "[P66.ORACLE.SUMMARY] "
+          + json.dumps(
+              p66_oracle_summary, sort_keys=True, separators=(",", ":")
+          ),
+          flush=True,
+      )
+      if p66_oracle_summary["verdict"] != "PASS":
+        raise FunctionalMappingError(
+            f"P66 same-point VJP oracle failed: {p66_oracle_summary}"
+        )
     return {
         "engine_gradients": segmented.assemble_full_state_gradient(
             embed=embed_grad,
@@ -6159,6 +6635,8 @@ class Qwen3EngineForwardAdapter:
         "counts": counts,
         "replay_logps": replay["logps"],
         "replay_entropy": replay["entropy"],
+        "p66_row_cotangent_summary": p66_row_summary,
+        "p66_vjp_oracle": p66_oracle_summary,
     }
 
   def segmented_dp_grpo_value_and_grad(
@@ -6358,6 +6836,7 @@ class Qwen3EngineForwardAdapter:
           f"got {rank_parallel_value!r}"
       )
     rank_parallel_backward = rank_parallel_value == "1"
+    p66_tp4_arm = _p66_tp4_arm()
     numeric_debug_mode = _backward_numeric_debug_mode()
     numeric_debug = bool(numeric_debug_mode)
     p64_capsule_mode = (
@@ -6418,6 +6897,42 @@ class Qwen3EngineForwardAdapter:
       marker, _ = _numeric_debug_identity(numeric_debug_mode)
       print(
           f"[{marker}.NUMERIC] admission {admission}",
+          flush=True,
+      )
+    if p66_tp4_arm:
+      expected_rank_parallel = p66_tp4_arm != "tp4-serial"
+      expected_gather = p66_tp4_arm != "tp4-gather-off"
+      expected_vma = p66_tp4_arm in (
+          "tp4-p59", "tp4-gather-off", "tp4-vma-oracle"
+      )
+      p66_contract = (
+          not p34
+          and workload.name == "gsm8k-p66-dp1-tp4"
+          and (contract.dp_size, contract.tp_size) == (1, 4)
+          and contract.global_trajectories == 16
+          and contract.local_trajectories == 16
+          and self._bucket == 256
+          and rank_parallel_backward == expected_rank_parallel
+          and os.environ.get("CANON_FIXED_AR_GATHER", "0")
+          == ("1" if expected_gather else "0")
+          and os.environ.get("CANON_P66_P59_CHECK_VMA", "0")
+          == ("1" if expected_vma else "0")
+          and os.environ.get("CANON_P33_RUN_STAGE", "")
+          == "backward-no-commit"
+          and os.environ.get("CANON_P33_NO_COMMIT", "") == "1"
+          and os.environ.get("CANON_P38_FIXED_LM_HEAD", "") == "1"
+          and os.environ.get("CANON_P63_OVERFLOW_SAFE_CLIP", "0") == "0"
+          and not numeric_debug
+      )
+      if not p66_contract:
+        raise FunctionalMappingError(
+            "P66 TP4 discriminator requires exact DP1xTP4 group-0 "
+            "backward-no-commit geometry"
+        )
+      print(
+          f"[P66.TP4] admission arm={p66_tp4_arm} topology=DP1xTP4 "
+          "global_trajectories=16 local_M=256 global_M=256 "
+          "reverse_groups=1/16 optimizer_commits=0",
           flush=True,
       )
     p59_xprof_directory = _p59_xprof_backward_directory(
@@ -6515,6 +7030,82 @@ class Qwen3EngineForwardAdapter:
           per_token_logps, token_entropy, train_example, algo_config
       )
       scale = loss_output.primary_loss.compute_scale()
+    if p66_tp4_arm:
+      reverse = self._p32_reverse_group(
+          segmented,
+          engine_leaves,
+          specs[0],
+          grouped_dlogps[0],
+          grouped_dentropy[0],
+      )
+      if not bool(np.asarray(jnp.array_equal(
+          reverse["replay_logps"], grouped_logps[0]
+      ))):
+        raise FunctionalMappingError(
+            "P66 TP4 group-0 replay logprobs changed"
+        )
+      engine_receipt = sft_utils.tree_numeric_receipt(
+          reverse["engine_gradients"], ranked=rank_parallel_backward
+      )
+      print(
+          "[P66.TP4.NUMERIC] "
+          + json.dumps(
+              {
+                  "schema": "canon-p66-engine-vjp-v1",
+                  "arm": p66_tp4_arm,
+                  "stage": "engine_vjp",
+                  "group": 0,
+                  "groups": contract.local_trajectories,
+                  **engine_receipt,
+              },
+              sort_keys=True,
+              separators=(",", ":"),
+          ),
+          flush=True,
+      )
+      layerwise_profile = _p66_emit_layerwise_profile(
+          segmented, reverse["engine_gradients"], arm=p66_tp4_arm
+      )
+      if (
+          not engine_receipt["all_finite"]
+          or not engine_receipt["any_nonzero"]
+          or not np.isfinite(engine_receipt["stable_norm"])
+          or engine_receipt["stable_norm"] > 1.0e6
+      ):
+        raise FunctionalMappingError(
+            "P66 TP4 diagnostic-fatal engine VJP: "
+            f"arm={p66_tp4_arm} receipt={engine_receipt}"
+        )
+      engine_gradient = reverse["engine_gradients"]
+      if rank_parallel_backward:
+        engine_gradient = jax.tree.map(
+            lambda value: jnp.squeeze(value, axis=0), engine_gradient
+        )
+      trainer_gradient = self.map_engine_cotangents_to_trainer_state(
+          trainer_state, engine_gradient
+      )
+      trainer_gradient = jax.tree.map(
+          lambda value: value.astype(jnp.float32) * scale,
+          trainer_gradient,
+      )
+      return {
+          "loss_output": loss_output,
+          "loss": loss_output.primary_loss.compute(),
+          "per_token_logps": per_token_logps,
+          "token_entropy": token_entropy,
+          "gradients": trainer_gradient,
+          "gradient_microbatches": 0,
+          "reports": (),
+          "forward_counts": tuple(result["counts"] for result in forwards),
+          "dp_reduction_visibility": "P66_GROUP0_NO_REDUCTION",
+          "dp_axis": trainer_dp_axis,
+          "p66_engine_receipt": engine_receipt,
+          "p66_layerwise_profile": layerwise_profile,
+          "p66_row_cotangent_summary": reverse[
+              "p66_row_cotangent_summary"
+          ],
+          "p66_vjp_oracle": reverse["p66_vjp_oracle"],
+      }
     if numeric_debug:
       _p62_emit_loss_receipt(
           loss_output=loss_output,

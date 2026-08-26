@@ -35,8 +35,7 @@ def _load_installed_attention():
   return module
 
 
-def _inputs(mesh, *, wrong_cache: bool = False):
-  dp_size = 2
+def _inputs(mesh, *, dp_size: int = 2, wrong_cache: bool = False):
   tokens_per_rank = 4
   head_dim = 128
   local_q_heads = 4
@@ -65,14 +64,18 @@ def _inputs(mesh, *, wrong_cache: bool = False):
       ("data", "model", None),
   )
   cache = put(
-      jnp.zeros((4, 4, global_cache_heads, 2, head_dim), jnp.bfloat16),
+      jnp.zeros((dp_size * 2, 4, global_cache_heads, 2, head_dim), jnp.bfloat16),
       ("data", None, "model", None, None),
   )
-  kv_lens = put(jnp.asarray([4, 4], jnp.int32), ("data",))
-  page_indices = put(jnp.asarray([0, 1, 0, 1], jnp.int32), ("data",))
-  cu_q_lens = put(jnp.asarray([0, 4, 0, 4], jnp.int32), ("data",))
+  kv_lens = put(jnp.asarray([4] * dp_size, jnp.int32), ("data",))
+  page_indices = put(
+      jnp.asarray([0, 1] * dp_size, jnp.int32), ("data",)
+  )
+  cu_q_lens = put(
+      jnp.asarray([0, 4] * dp_size, jnp.int32), ("data",)
+  )
   distribution = put(
-      jnp.asarray([0, 0, 1, 0, 0, 1], jnp.int32), ("data",)
+      jnp.asarray([0, 0, 1] * dp_size, jnp.int32), ("data",)
   )
   return (
       q,
@@ -215,12 +218,40 @@ def main() -> None:
   else:
     raise AssertionError("P59 local attention wrong-cache negative did not fire")
 
+  unit_data = 0
+  if TP_SIZE == 4:
+    os.environ["CANON_P32_WORKLOAD"] = "gsm8k-p66-dp1-tp4"
+    unit_devices = devices[:TP_SIZE]
+    unit_outer_mesh = jax.sharding.Mesh(
+        unit_devices.reshape(1, TP_SIZE), ("data", "model")
+    )
+    unit_engine_mesh = jax.sharding.Mesh(
+        unit_devices.reshape(1, 1, 1, 1, TP_SIZE, 1),
+        ("data", "attn_dp", "attn_dp_expert", "expert", "model", "dcp"),
+    )
+    for arm in ("tp4-p59", "tp4-vma-oracle"):
+      os.environ["CANON_P66_BACKWARD_ARM"] = arm
+      unit_values = _inputs(unit_outer_mesh, dp_size=1)
+      unit_gradients = _p59_vjp(
+          attention, unit_engine_mesh, unit_outer_mesh, unit_values
+      )
+      jax.block_until_ready(unit_gradients)
+      if tuple(value.shape for value in unit_gradients) != tuple(
+          value.shape for value in unit_values[:4]
+      ):
+        raise AssertionError(
+            f"P66 {arm} unit-data installed attention VJP shape changed"
+        )
+      unit_data += 1
+    del os.environ["CANON_P32_WORKLOAD"]
+    del os.environ["CANON_P66_BACKWARD_ARM"]
+
   _ordinary_gqa(attention, engine_mesh)
   print(
       f"P59_TP{TP_SIZE}_INSTALLED_ATTENTION_PASS "
       f"topology=DP2xTP{TP_SIZE} local_kv_heads={values[-1]} "
       "rpa_vjp2=1 wrong_cache_negative=1 ordinary_global_gqa=1 "
-      "optimizer_commits=0",
+      f"p66_unit_data={unit_data} optimizer_commits=0",
       flush=True,
   )
 

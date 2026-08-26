@@ -4,6 +4,14 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 image_ref="${1:?usage: run_tp4_tp8_installed_shim_exact_image.sh IMAGE}"
 docker="${DOCKER:-sudo docker}"
+vma_check="${CANON_P66_P59_CHECK_VMA:-0}"
+case "$vma_check" in
+  0|1) ;;
+  *)
+    echo "CANON_P66_P59_CHECK_VMA must be exactly 0 or 1" >&2
+    exit 2
+    ;;
+esac
 
 image_id="$($docker image inspect "$image_ref" --format '{{.Id}}')"
 if [[ ! "$image_id" =~ ^sha256:[0-9a-f]{64}$ ]]; then
@@ -16,6 +24,7 @@ $docker run --rm \
   -v "$root:/workspace:ro" \
   -w /workspace \
   -e JAX_PLATFORMS=cpu \
+  -e CANON_P66_P59_CHECK_VMA="$vma_check" \
   "$image_id" \
   bash -euo pipefail -c '
     qwen1p7b_overlay="$(mktemp -d /tmp/p59-qwen1p7b-tp4.XXXXXX)"
@@ -50,16 +59,20 @@ $docker run --rm \
     bash canon-zero-tim/install.sh "$qwen1p7b_overlay" \
       --from-path /usr/local/lib/python3.12/site-packages/tpu_inference \
       --model qwen1p7b
-    XLA_FLAGS=--xla_force_host_platform_device_count=8 \
-      PYTHONPATH="$qwen1p7b_overlay:/workspace" python3 \
-        canon-zero-tim/tests/p59_backward/probe_tp4_installed_shim_composition.py
-    XLA_FLAGS=--xla_force_host_platform_device_count=8 \
-      PYTHONPATH="$qwen1p7b_overlay:/workspace" python3 \
-        canon-zero-tim/tests/p59_backward/probe_tp4_installed_attention_composition.py
-
     bash canon-zero-tim/install.sh "$qwen8b_overlay" \
       --from-path /usr/local/lib/python3.12/site-packages/tpu_inference \
       --model qwen8b_tp8
+    cmp "$qwen1p7b_overlay/rpa_kernel_p66.py" \
+      "$qwen8b_overlay/rpa_kernel_p66.py"
+    cp "$qwen1p7b_overlay/rpa_kernel_p66.py" \
+      /usr/local/lib/python3.12/site-packages/tpu_inference/kernels/ragged_paged_attention/v3/kernel.py
+    XLA_FLAGS=--xla_force_host_platform_device_count=8 \
+      PYTHONPATH="$qwen1p7b_overlay:/workspace" python3 \
+        canon-zero-tim/tests/p59_backward/probe_tp4_installed_shim_composition.py
+    XLA_FLAGS=--xla_force_host_platform_device_count=8 \
+      PYTHONPATH="$qwen1p7b_overlay:/workspace" python3 \
+        canon-zero-tim/tests/p59_backward/probe_tp4_installed_attention_composition.py
+
     P59_TEST_TP_SIZE=8 \
       XLA_FLAGS=--xla_force_host_platform_device_count=16 \
       PYTHONPATH="$qwen8b_overlay:/workspace" python3 \
@@ -69,5 +82,5 @@ $docker run --rm \
       PYTHONPATH="$qwen8b_overlay:/workspace" python3 \
         canon-zero-tim/tests/p59_backward/probe_tp4_installed_attention_composition.py
 
-    echo "P59_TP_SHIM_EXACT_IMAGE_PASS fixed_head=2 installed_projection=2 installed_attention=2 report_adjoint=2 staged_spec_restore=2 fixed_reducer=2 topologies=DP2xTP4,DP2xTP8 optimizer_commits=0 manifests=2x36/36"
+    echo "P59_TP_SHIM_EXACT_IMAGE_PASS fixed_head=2 installed_projection=2 installed_attention=2 p66_unit_data_attention=2 report_adjoint=2 staged_spec_restore=2 fixed_reducer=2 topologies=DP2xTP4,DP2xTP8 optimizer_commits=0 manifests=2x37/37"
   '

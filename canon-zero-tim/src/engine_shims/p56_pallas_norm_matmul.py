@@ -18,6 +18,8 @@ from __future__ import annotations
 import os
 
 from p22xh_contract import BF
+from p22_pallas_matmul import p66_vma_align_operands
+from p22_pallas_matmul import p66_vma_output_manual_axis_type
 
 
 def _imports():
@@ -71,6 +73,7 @@ def norm_matmul(
             "P56.4.6 shape must divide BM/BN/BK/BF="
             f"{block_m}/{block_n}/{block_k}/{BF}, got {(m, k, n)}"
         )
+    x, gamma, y = p66_vma_align_operands(jax, x, gamma, y)
 
     def _kernel(x_ref, gamma_ref, y_ref, out_ref, acc_ref, normed_ref):
         # P4.6b: the n dimension lives INSIDE the kernel as a static tile
@@ -118,7 +121,13 @@ def norm_matmul(
 
     return pl.pallas_call(
         _kernel,
-        out_shape=jax.ShapeDtypeStruct((m, n), jnp.bfloat16),
+        out_shape=jax.ShapeDtypeStruct(
+            (m, n),
+            jnp.bfloat16,
+            manual_axis_type=p66_vma_output_manual_axis_type(
+                jax, x, gamma, y
+            ),
+        ),
         grid_spec=pltpu.PrefetchScalarGridSpec(
             num_scalar_prefetch=0,
             in_specs=[

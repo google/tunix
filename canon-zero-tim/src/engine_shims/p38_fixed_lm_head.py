@@ -311,7 +311,18 @@ def _p59_local_contract(inputs, weight, *, mesh, tp_axis: str):
         )
     dp_size = int(context.shape["data"])
     tp_size = int(context.shape["model"])
-    if dp_size <= 1 or tp_size <= 1:
+    p66_unit_data = (
+        dp_size == 1
+        and tp_size == 4
+        and os.environ.get("CANON_P66_BACKWARD_ARM", "")
+        in (
+            "tp4-p59-old",
+            "tp4-p59",
+            "tp4-gather-off",
+            "tp4-vma-oracle",
+        )
+    )
+    if (dp_size <= 1 and not p66_unit_data) or tp_size <= 1:
         raise RuntimeError(
             "P59 local fixed lm_head requires non-unit DP and TP"
         )
@@ -340,11 +351,15 @@ def _p59_local_contract(inputs, weight, *, mesh, tp_axis: str):
             "P59 local fixed lm_head requires bf16 input/weight, got "
             f"{inputs.dtype}/{weight.dtype}"
         )
-    global_m = tuple(
-        candidate
-        for candidate in _learner_m_for_geometry(geometry)
-        if candidate % dp_size == 0 and candidate // dp_size == input_shape[0]
-    )
+    if p66_unit_data:
+        global_m = (256,) if input_shape[0] == 256 else ()
+    else:
+        global_m = tuple(
+            candidate
+            for candidate in _learner_m_for_geometry(geometry)
+            if candidate % dp_size == 0
+            and candidate // dp_size == input_shape[0]
+        )
     if len(global_m) != 1:
         raise ValueError(
             "P59 local fixed lm_head rows do not reconstruct one learner M: "
@@ -534,25 +549,36 @@ def fixed_lm_head(
             a_local, w_local = residual
             _, pullback = jax.vjp(local, a_local, w_local)
             da_local, dw_local = pullback(cotangent)
-            gathered = lax.all_gather(
-                da_local.astype(jnp.float32),
-                tp_axis,
-                axis=0,
-                tiled=False,
-            )
-            da = gathered[0]
-            for rank in range(1, tp_size):
-                da = (
-                    lax.optimization_barrier(da)
-                    + lax.optimization_barrier(gathered[rank])
+            if os.environ.get("CANON_P66_P59_CHECK_VMA", "0") == "1":
+                # With VMA tracking enabled, ``a_local`` is known to be
+                # invariant over TP. JAX transposes the implicit
+                # invariant->varying pcast in ``local`` into the required TP
+                # psum, so ``da_local`` already has the primal input's VMA
+                # type and global numerical value. Repeating the historical
+                # manual sum here multiplies the gradient by TP.
+                da = da_local
+                tp_input_reduction = "vma_autodiff_psum"
+            else:
+                gathered = lax.all_gather(
+                    da_local.astype(jnp.float32),
+                    tp_axis,
+                    axis=0,
+                    tiled=False,
                 )
-            da = da.astype(da_local.dtype)
+                da = gathered[0]
+                for rank in range(1, tp_size):
+                    da = (
+                        lax.optimization_barrier(da)
+                        + lax.optimization_barrier(gathered[rank])
+                    )
+                da = da.astype(da_local.dtype)
+                tp_input_reduction = "all_gather_rank_order_f32_barrier"
             print(
                 "[PATHTRACE] CANON_" "P38_FIXED_LM_HEAD_VJP=1 "
                 f"semantic_M={p59_global_m} local_M={semantic_m} "
                 f"fixed_M={FIXED_M} chunks={semantic_m // FIXED_M} "
                 "accumulation=lax.scan order=ascending "
-                "tp_input_reduction=all_gather_rank_order_f32_barrier "
+                f"tp_input_reduction={tp_input_reduction} "
                 f"K={hidden_size} "
                 f"TP={tp_size} local_N={geometry.local_vocab} "
                 f"fixed_N={geometry.padded_local_vocab} "

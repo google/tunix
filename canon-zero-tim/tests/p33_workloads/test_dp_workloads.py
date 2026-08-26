@@ -216,6 +216,25 @@ class DPWorkloadsTest(unittest.TestCase):
         (64, 4, "[CANON_P33_DP4]", True),
     )
 
+  def test_p66_unit_data_tp4_proxy_preserves_real_local_m(self):
+    workload = dp_workloads.get_workload("gsm8k-p66-dp1-tp4")
+    self.assertEqual((workload.dp_size, workload.tp_size), (1, 4))
+    self.assertEqual(workload.total_devices, 4)
+    self.assertEqual(workload.global_prompts, 2)
+    self.assertEqual(workload.global_trajectories, 16)
+    self.assertEqual(workload.local_trajectories, 16)
+    self.assertEqual(workload.global_m, 256)
+    command = workload.command(run_stage="backward-no-commit")
+    for argument in (
+        "--mesh_dp=1",
+        "--mesh_tp=4",
+        "--batch_size=2",
+        "--mini_batch_size=2",
+        "--train_trajectory_micro_batch_size=1",
+        "--max_steps=1",
+    ):
+      self.assertIn(argument, command)
+
   def test_p59_tail_stage_is_exact_workload_and_flag_scoped(self):
     workload = dp_workloads.get_workload("gsm8k-p59-dp4-tp1")
     self.assertIn(

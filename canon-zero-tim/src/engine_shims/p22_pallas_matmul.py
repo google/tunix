@@ -47,6 +47,45 @@ def _imports():
     return jax, jnp, pl, pltpu
 
 
+def p66_vma_align_operands(jax, *values):
+    """Give operands of a local Pallas operation one common VMA type.
+
+    JAX dot primitives require all operands to have matching varying manual
+    axes.  A pcast from replicated to varying is a runtime identity; its
+    transpose supplies the psum that the replicated operand needs.  P66 only
+    admits plain-varying state here, never an already reduced/unreduced value.
+    """
+    if os.environ.get("CANON_P66_P59_CHECK_VMA", "0") != "1":
+        return values
+    mats = tuple(jax.typeof(value).mat for value in values)
+    if any(mat.unreduced or mat.reduced for mat in mats):
+        raise ValueError(
+            "P66 Pallas VMA does not admit reduced/unreduced operands: "
+            + ", ".join(str(mat) for mat in mats)
+        )
+    varying = frozenset().union(*(mat.varying for mat in mats))
+    aligned = []
+    for value, mat in zip(values, mats, strict=True):
+        for axis in sorted(varying - mat.varying):
+            value = jax.lax.pcast(value, axis, to="varying")
+        aligned.append(value)
+    return tuple(aligned)
+
+
+def p66_vma_output_manual_axis_type(jax, *values):
+    """Return the explicit Pallas output VMA type for aligned operands."""
+    if os.environ.get("CANON_P66_P59_CHECK_VMA", "0") != "1":
+        return None
+    mats = tuple(jax.typeof(value).mat for value in values)
+    if any(mat.unreduced or mat.reduced for mat in mats):
+        raise ValueError(
+            "P66 Pallas VMA output does not admit reduced/unreduced operands: "
+            + ", ".join(str(mat) for mat in mats)
+        )
+    varying = frozenset().union(*(mat.varying for mat in mats))
+    return jax.sharding.ManualAxisType(varying=varying)
+
+
 def matmul(
     x,
     y,
@@ -74,6 +113,7 @@ def matmul(
             "P22.XE shape must divide BM/BN/BK="
             f"{block_m}/{block_n}/{block_k}, got {(m, k, n)}"
         )
+    x, y = p66_vma_align_operands(jax, x, y)
 
     def _kernel(x_ref, y_ref, out_ref, acc_ref):
         @pl.when(pl.program_id(2) == 0)
@@ -87,7 +127,11 @@ def matmul(
 
     return pl.pallas_call(
         _kernel,
-        out_shape=jax.ShapeDtypeStruct((m, n), jnp.bfloat16),
+        out_shape=jax.ShapeDtypeStruct(
+            (m, n),
+            jnp.bfloat16,
+            manual_axis_type=p66_vma_output_manual_axis_type(jax, x, y),
+        ),
         grid_spec=pltpu.PrefetchScalarGridSpec(
             num_scalar_prefetch=0,
             in_specs=[

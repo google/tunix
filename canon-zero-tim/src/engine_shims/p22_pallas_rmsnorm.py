@@ -6,6 +6,8 @@ from __future__ import annotations
 import os
 
 from p22xh_contract import BF, BM, validate_shape
+from p22_pallas_matmul import p66_vma_align_operands
+from p22_pallas_matmul import p66_vma_output_manual_axis_type
 
 
 def _imports():
@@ -54,6 +56,7 @@ def rmsnorm(
         raise ValueError(f"P22.XH requires bf16 inputs, got {x.dtype}, {weight.dtype}")
     if not float(epsilon) > 0.0:
         raise ValueError(f"P22.XH epsilon must be positive, got {epsilon}")
+    x, weight = p66_vma_align_operands(jax, x, weight)
 
     def _kernel(x_ref, weight_ref, out_ref):
         xb = x_ref[...].astype(jnp.float32).reshape(BM, f // BF, BF)
@@ -70,7 +73,13 @@ def rmsnorm(
 
     return pl.pallas_call(
         _kernel,
-        out_shape=jax.ShapeDtypeStruct((m, f), jnp.bfloat16),
+        out_shape=jax.ShapeDtypeStruct(
+            (m, f),
+            jnp.bfloat16,
+            manual_axis_type=p66_vma_output_manual_axis_type(
+                jax, x, weight
+            ),
+        ),
         grid_spec=pltpu.PrefetchScalarGridSpec(
             num_scalar_prefetch=0,
             in_specs=[

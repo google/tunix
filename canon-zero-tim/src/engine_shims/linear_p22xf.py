@@ -45,9 +45,22 @@ def _p59_local_tp_context() -> bool:
         raise RuntimeError(
             "P59 local projection requires engine data/model axes"
         )
+    data_size = int(context.shape["data"])
+    model_size = int(context.shape["model"])
+    p66_unit_data = (
+        data_size == 1
+        and model_size == 4
+        and os.environ.get("CANON_P66_BACKWARD_ARM", "")
+        in (
+            "tp4-p59-old",
+            "tp4-p59",
+            "tp4-gather-off",
+            "tp4-vma-oracle",
+        )
+    )
     if (
-        int(context.shape["data"]) <= 1
-        or int(context.shape["model"]) <= 1
+        (data_size <= 1 and not p66_unit_data)
+        or model_size <= 1
         or int(context.shape["data"]) != int(mesh.shape["data"])
         or int(context.shape["model"]) != int(mesh.shape["model"])
     ):
@@ -68,6 +81,18 @@ def _p59_fixed_order_tp_sum(value):
     source-level association instead of leaving the FP32 chain open to XLA
     reassociation.
     """
+    vma_check = os.environ.get("CANON_P66_P59_CHECK_VMA", "0")
+    if vma_check not in ("0", "1"):
+        raise RuntimeError(
+            "CANON_P66_P59_CHECK_VMA must be exactly 0 or 1"
+        )
+    if vma_check == "1":
+        # Under VMA tracking the replicated projection input is implicitly
+        # cast to varying over TP inside ``local``. JAX transposes that cast
+        # into the required TP psum, so the VJP result is already global and
+        # invariant over model. The historical manual sum would reduce it a
+        # second time.
+        return value
     count = int(base._CANON_MESH.shape[base._CANON_TP_AXIS])
     gathered = base.jax.lax.all_gather(
         value.astype(base.jnp.float32),
@@ -82,6 +107,27 @@ def _p59_fixed_order_tp_sum(value):
             + base.jax.lax.optimization_barrier(gathered[rank])
         )
     return total.astype(value.dtype)
+
+
+def _p66_replicated_tp_value(value):
+    """Give VMA an honest replicated-TP boundary for a fixed-order sum.
+
+    The fixed all-gather/ring reducers below produce the same completed sum on
+    every TP rank, but ordinary elementwise additions leave JAX's manual-axis
+    type as ``varying(model)``.  With ``check_vma=True`` that is intentionally
+    not interchangeable with the replicated hidden-state contract: treating
+    the copies as independent makes reverse mode feed the full cotangent to
+    every copy and can multiply gradients once per transformer layer.
+
+    A TP pmean turns that already-identical value into an invariant value and
+    gives transpose the matching collective semantics.  TP4/TP8 are powers of
+    two, so averaging identical BF16/FP32 values is an exact identity at this
+    boundary.  Keep the extra collective behind P66's default-off diagnostic
+    flag until the target numerical and performance gates decide its fate.
+    """
+    if os.environ.get("CANON_P66_P59_CHECK_VMA", "0") != "1":
+        return value
+    return base.jax.lax.pmean(value, base._CANON_TP_AXIS)
 
 
 def _p59_local_fused_pieces(
@@ -347,7 +393,7 @@ def _contract_parallel(site, equation, inputs, weight, prefix):
             acc = gathered[0]
             for part_index in range(1, count):
                 acc = acc + gathered[part_index]
-            return acc
+            return _p66_replicated_tp_value(acc)
         partial = pallas_matmul(a2, w2, block_n=BN, block_k=BK)[None]
         print(
             f"[PATHTRACE] CANON_PALLAS_ALL_PROJ=1 site={site.family} prefix={prefix} "
@@ -370,7 +416,7 @@ def _contract_parallel(site, equation, inputs, weight, prefix):
         acc = ordered[0]
         for part_index in range(1, count):
             acc = acc + ordered[part_index]
-        return acc[0]
+        return _p66_replicated_tp_value(acc[0])
 
     print(
         f"[PATHTRACE] CANON_FIXED_AR=1 "

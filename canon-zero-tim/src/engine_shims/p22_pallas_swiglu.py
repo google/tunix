@@ -6,6 +6,8 @@ from __future__ import annotations
 import os
 
 from p22xg_contract import BF, BM, validate_shape
+from p22_pallas_matmul import p66_vma_align_operands
+from p22_pallas_matmul import p66_vma_output_manual_axis_type
 
 
 def _imports():
@@ -24,6 +26,7 @@ def swiglu(gate, up, *, interpret: bool = False,
     m, f = validate_shape(gate.shape, up.shape)
     if gate.dtype != jnp.bfloat16 or up.dtype != jnp.bfloat16:
         raise ValueError(f"P22.XG requires bf16 inputs, got {gate.dtype}, {up.dtype}")
+    gate, up = p66_vma_align_operands(jax, gate, up)
 
     def _kernel(g_ref, u_ref, out_ref):
         g = g_ref[...]
@@ -32,7 +35,13 @@ def swiglu(gate, up, *, interpret: bool = False,
 
     return pl.pallas_call(
         _kernel,
-        out_shape=jax.ShapeDtypeStruct((m, f), jnp.bfloat16),
+        out_shape=jax.ShapeDtypeStruct(
+            (m, f),
+            jnp.bfloat16,
+            manual_axis_type=p66_vma_output_manual_axis_type(
+                jax, gate, up
+            ),
+        ),
         grid_spec=pltpu.PrefetchScalarGridSpec(
             num_scalar_prefetch=0,
             in_specs=[
@@ -56,4 +65,3 @@ def swiglu(gate, up, *, interpret: bool = False,
         interpret=interpret,
         name="canon_swiglu_bm128_bf256",
     )(gate, up)
-

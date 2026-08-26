@@ -27,6 +27,7 @@ overlay embed_patched.py       layers/jax/embed.py
 overlay tpu_runner_p21_l30.py  runner/tpu_runner.py
 overlay qwen3_p22xk.py         models/jax/qwen3.py
 overlay qwen2_p22xk.py         models/jax/qwen2.py
+overlay rpa_kernel_p66.py      kernels/ragged_paged_attention/v3/kernel.py
 
 # The chain members are imported by module name, so the install dir must be importable, and
 # by absolute sibling path, so CANON_SHIM_ROOT must point at it.

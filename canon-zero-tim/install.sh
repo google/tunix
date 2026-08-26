@@ -52,7 +52,8 @@ done
   echo "unknown model '$MODEL'; available: $(ls "$PKG/src/engine_shims/models")" >&2; exit 1; }
 
 FILES="layers/common/attention_interface.py layers/jax/embed.py layers/jax/linear.py
-       runner/tpu_runner.py models/jax/qwen3.py models/jax/qwen2.py"
+       runner/tpu_runner.py models/jax/qwen3.py models/jax/qwen2.py
+       kernels/ragged_paged_attention/v3/kernel.py"
 
 mkdir -p "$OUT"
 STOCK="$(mktemp -d)"
@@ -98,6 +99,7 @@ apply 03-linear.patch              layers/jax/linear.py                 linear_p
 apply 04-qwen3.patch               models/jax/qwen3.py                  qwen3.py
 apply 05-qwen2.patch               models/jax/qwen2.py                  qwen2_patched.py
 apply 06-tpu-runner.patch          runner/tpu_runner.py                 tpu_runner_p21_l30.py
+apply 29-rpa-p66-vma-output.patch  kernels/ragged_paged_attention/v3/kernel.py rpa_kernel_p66.py
 patch -s --no-backup-if-mismatch "$OUT/tpu_runner_p21_l30.py" \
   "$PKG/patches/tpu_inference/07-tpu-runner-p35-metadata.patch" || {
   echo "      PATCH FAILED: 07-tpu-runner-p35-metadata.patch" >&2
@@ -253,11 +255,12 @@ Container mounts -- target paths are under the engine's tpu_inference package
   \$OUT/tpu_runner_p21_l30.py   -> \$SP/runner/tpu_runner.py
   \$OUT/qwen3_p22xk.py          -> \$SP/models/jax/qwen3.py
   \$OUT/qwen2_p22xk.py          -> \$SP/models/jax/qwen2.py
+  \$OUT/rpa_kernel_p66.py       -> \$SP/kernels/ragged_paged_attention/v3/kernel.py
 
   PYTHONPATH=$OUT:\$PYTHONPATH
   CANON_SHIM_ROOT=$OUT          # optional; defaults to each shim's own directory
 
-Under Kubernetes there are no bind mounts: copy the six files over the target paths instead
+Under Kubernetes there are no bind mounts: copy the seven files over the target paths instead
 (cluster/steps/40_overlay_engine.sh does exactly that).
 
 The canonical switch set is in README.md.  A launch missing any of it is not a canonical run,

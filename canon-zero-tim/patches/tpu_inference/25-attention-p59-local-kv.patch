@@ -1,6 +1,6 @@
 --- attn_iface_p38_kv_unified.py
 +++ attn_iface_p59_local_kv.py
-@@ -384,3 +384,54 @@
+@@ -384,3 +384,69 @@
 +def _p59_local_attention_context(mesh):
 +    """Returns whether P59 has already sliced attention over DP and TP."""
 +    if os.environ.get("CANON_P59_RANK_PARALLEL_BACKWARD", "") != "1":
@@ -18,8 +18,23 @@
 +        raise RuntimeError(
 +            "P59 local attention requires engine data/model axes"
 +        )
++    p66_unit_data = (
++        int(context.shape["data"]) == 1
++        and int(context.shape["model"]) == 4
++        and int(mesh.shape["data"]) == 1
++        and int(mesh.shape["model"]) == 4
++        and os.environ.get("CANON_P32_WORKLOAD", "")
++        == "gsm8k-p66-dp1-tp4"
++        and os.environ.get("CANON_P66_BACKWARD_ARM", "")
++        in (
++            "tp4-p59-old",
++            "tp4-p59",
++            "tp4-gather-off",
++            "tp4-vma-oracle",
++        )
++    )
 +    if (
-+        int(context.shape["data"]) <= 1
++        (int(context.shape["data"]) <= 1 and not p66_unit_data)
 +        or int(context.shape["model"]) <= 1
 +        or int(context.shape["data"]) != int(mesh.shape["data"])
 +        or int(context.shape["model"]) != int(mesh.shape["model"])
@@ -55,7 +70,7 @@
  def sharded_ragged_paged_attention(
      mesh: Mesh,
      q: jax.Array,
-@@ -401,11 +452,14 @@
+@@ -401,11 +467,14 @@
      use_causal_mask: bool = True,
  ):
      """Shards along KV heads."""
