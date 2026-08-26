@@ -186,6 +186,79 @@ class WorkUnitMetadata:
   variables: tuple[TensorMetadata, ...] = ()
   mesh_axes: Optional[tuple[str, ...]] = None
 
+  @classmethod
+  def from_dict(cls, d: Any) -> WorkUnitMetadata:
+    """Reconstructs WorkUnitMetadata from a dictionary or returns metadata directly."""
+    if isinstance(d, cls):
+      return d
+    if not isinstance(d, dict):
+      raise TypeError(f"Expected WorkUnitMetadata or dict, got {type(d)}")
+
+    unit_raw = d.get("unit")
+    if isinstance(unit_raw, dict):
+      unit = WorkUnitId(**unit_raw)
+    elif isinstance(unit_raw, WorkUnitId):
+      unit = unit_raw
+    else:
+      unit = WorkUnitId(job_name=str(unit_raw or "destination"))
+
+    variables_raw = d.get("variables", ())
+    variables = []
+    for v in variables_raw:
+      if isinstance(v, TensorMetadata):
+        variables.append(v)
+      elif isinstance(v, dict):
+        variables.append(
+            TensorMetadata(
+                name=v["name"],
+                shape=tuple(v["shape"]),
+                mesh_shape=tuple(v["mesh_shape"]),
+                layout=tuple(v["layout"]),
+                item_size=int(v["item_size"]),
+                layer_idx=int(v.get("layer_idx", 0)),
+                sharding_spec=tuple(v.get("sharding_spec", ())),
+            )
+        )
+      elif hasattr(v, "name"):
+        variables.append(
+            TensorMetadata(
+                name=v.name,
+                shape=tuple(v.shape),
+                mesh_shape=tuple(v.mesh_shape),
+                layout=tuple(v.layout),
+                item_size=int(v.item_size),
+                layer_idx=int(getattr(v, "layer_idx", 0)),
+                sharding_spec=tuple(getattr(v, "sharding_spec", ())),
+            )
+        )
+
+    return cls(
+        unit=unit,
+        shards=tuple(d.get("shards", ())),
+        control_plane_rpc_address=str(d.get("control_plane_rpc_address", "")),
+        global_shape=(
+            tuple(d["global_shape"])
+            if d.get("global_shape") is not None
+            else None
+        ),
+        mesh_shape=(
+            tuple(d["mesh_shape"]) if d.get("mesh_shape") is not None else None
+        ),
+        layout=tuple(d["layout"]) if d.get("layout") is not None else None,
+        item_size=(
+            int(d["item_size"]) if d.get("item_size") is not None else None
+        ),
+        variables=tuple(variables),
+        mesh_axes=(
+            tuple(d["mesh_axes"]) if d.get("mesh_axes") is not None else None
+        ),
+    )
+
+
+def dict_to_metadata(d: Any) -> WorkUnitMetadata:
+  """Reconstructs WorkUnitMetadata from a dictionary (delegates to WorkUnitMetadata.from_dict)."""
+  return WorkUnitMetadata.from_dict(d)
+
 
 @dataclasses.dataclass(frozen=True)
 class TransferResult:

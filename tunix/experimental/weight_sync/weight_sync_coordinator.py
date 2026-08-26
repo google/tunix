@@ -889,8 +889,16 @@ class WeightSyncCoordinator:
             " quiesced; no rollback needed"
         ) from e
 
-      src_metadata = [m for per_source in src_meta_lists for m in per_source]
-      dst_metadata = [m for per_dest in dst_meta_lists for m in per_dest]
+      src_metadata = [
+          weight_sync.dict_to_metadata(m)
+          for per_source in src_meta_lists
+          for m in per_source
+      ]
+      dst_metadata = [
+          weight_sync.dict_to_metadata(m)
+          for per_dest in dst_meta_lists
+          for m in per_dest
+      ]
       if not src_metadata or not dst_metadata:
         failures.append(
             f"metadata: {len(src_metadata)} source, {len(dst_metadata)}"
