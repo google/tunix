@@ -117,10 +117,6 @@ def render(
       "canon.zero-tim/optimizer-commits": "0",
   })
   document["spec"]["failurePolicy"]["maxRestarts"] = 0
-  worker_template = document["spec"]["replicatedJobs"][1]["template"]["spec"]["template"]
-  worker_template.get("metadata", {}).get("annotations", {}).pop(
-      "alpha.jobset.sigs.k8s.io/exclusive-topology", None
-  )
   p33.validate_jobset(document, spec, source_commit, run_id)
   values = _env(document)
   required = {
