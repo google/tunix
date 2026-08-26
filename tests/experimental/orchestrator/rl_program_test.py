@@ -355,6 +355,7 @@ class RLProgramTest(absltest.TestCase):
       )
       program.engine = self.mock_engine
 
+      program._dispatch_capacity = asyncio.Semaphore(1)
       dispatch_task = asyncio.create_task(program.rollout_dispatch_stage())
 
       for _ in range(50):
@@ -374,6 +375,7 @@ class RLProgramTest(absltest.TestCase):
       )
 
       program.policy_version = 1
+      program._dispatch_capacity.release()
       await asyncio.wait_for(dispatch_task, timeout=1.0)
       self.assertEqual(
           dispatched,
@@ -415,6 +417,7 @@ class RLProgramTest(absltest.TestCase):
         ]
         await program.scored_q.put(item)
 
+      program._dispatch_capacity = asyncio.Semaphore(1)
       await program.train_stage()
 
       self.assertEqual(self.mock_engine.train_step.call_count, 2)
@@ -984,7 +987,9 @@ class RLProgramTest(absltest.TestCase):
           ],
           [],
       )
-      program = self._create_program(dataset=["prompt_0"], reward_fns=[])
+      program = self._create_program(
+          dataset=["prompt_0"], reward_fns=[], max_staleness=2
+      )
       program.policy_version = 5
 
       await program.run_async(self.mock_engine)

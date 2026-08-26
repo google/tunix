@@ -101,7 +101,7 @@ class StandardRLProgram(RLProgram):
       assembler: batch_assembly.BatchAssembler | None = None,
       group_size: int = 8,
       mini_batch_size: int = 4,
-      max_staleness: int | None = None,
+      max_staleness: int = 0,
       sync_weights: bool = True,
       metrics_logging_options: MetricsLoggerOptions | None = None,
       metrics_prefix: str = "",
@@ -111,8 +111,8 @@ class StandardRLProgram(RLProgram):
   ):
     super().__init__()
     self.engine: rl_engine_interface.AbstractRLEngine | None = None
-    if max_staleness is not None and max_staleness < 0:
-      raise ValueError("max_staleness must be non-negative or None.")
+    if max_staleness < 0:
+      raise ValueError("max_staleness must be non-negative.")
     self.dataset = dataset
     self.max_steps = max_steps
     self.algo = algo
@@ -129,6 +129,8 @@ class StandardRLProgram(RLProgram):
     self.mode = mode if isinstance(mode, Mode) else Mode(mode)
     self.on_step_begin = on_step_begin
     self.on_step_end = on_step_end
+    self._in_flight_rollouts = 0
+    self._dispatch_capacity: asyncio.Semaphore | None = None
 
     self.raw_q = trajectory_queue_manager.TrajectoryQueueManager.create(
         group_size=self.group_size,
@@ -144,16 +146,12 @@ class StandardRLProgram(RLProgram):
     if self.metrics_logger is not None:
       self.metrics_logger.close()
 
-  async def _wait_for_dispatch_window(self, prompt_idx: int) -> None:
-    """Applies policy-staleness backpressure before dispatching a prompt group."""
-    if self.max_staleness is None:
-      return
-    max_groups_ahead = self.mini_batch_size * (self.max_staleness + 1)
-    while (
-        prompt_idx - self.policy_version * self.mini_batch_size
-        >= max_groups_ahead
-    ):
-      await asyncio.sleep(0.05)
+  async def _wait_for_dispatch_window(self) -> None:
+    """Applies policy-staleness backpressure utilizing token buckets."""
+    assert (
+        self._dispatch_capacity is not None
+    ), "run_async must initialize capacity."
+    await self._dispatch_capacity.acquire()
 
   async def rollout_dispatch_stage(self) -> None:
     """Stage 1A: Dispatches rollout requests across workers asynchronously.
@@ -169,8 +167,9 @@ class StandardRLProgram(RLProgram):
       raise ValueError(
           "StandardRLProgram requires a dataset either at init or in run()."
       )
+
     for prompt_idx, prompt_item in enumerate(self.dataset):
-      await self._wait_for_dispatch_window(prompt_idx)
+      await self._wait_for_dispatch_window()
       if isinstance(prompt_item, dict):
         prompt_item = dict(prompt_item)
         prompt_item.setdefault("prompt_id", f"prompt_{prompt_idx}")
@@ -180,6 +179,7 @@ class StandardRLProgram(RLProgram):
             "prompt_id": f"prompt_{prompt_idx}",
         }
 
+      self._in_flight_rollouts += self.group_size
       await self.engine.dispatch_rollouts(
           [prompt_item],
           group_size=self.group_size,
@@ -195,7 +195,6 @@ class StandardRLProgram(RLProgram):
         if isinstance(completed, list) and completed:
           for item in completed:
             await self.raw_q.put(item)
-
       except asyncio.CancelledError:
         break
       except Exception as exc:  # pylint: disable=broad-exception-caught
@@ -576,11 +575,14 @@ class StandardRLProgram(RLProgram):
       num_microbatches = 0
       num_rollouts = 0
       all_step_items = []
+      scored_items = []
+      groups_consumed = 0
 
       for group_idx in range(self.mini_batch_size):
         scored_items = await self.scored_q.get_batch(num_groups=1)
         if not scored_items:
           break
+        groups_consumed += 1
         uncommitted_groups.append(scored_items)
         all_step_items.extend(scored_items)
         num_rollouts += len(scored_items)
@@ -650,6 +652,13 @@ class StandardRLProgram(RLProgram):
         self.policy_version += 1
 
       self.scored_q.commit(current_step, groups=uncommitted_groups)
+
+      assert (
+          self._dispatch_capacity is not None
+      ), "run_async must initialize capacity."
+      for _ in range(groups_consumed):
+        self._dispatch_capacity.release()
+
       step_time_sec = time.monotonic() - step_start_time
 
       metrics_summary = self._collect_and_log_step_metrics(
@@ -700,6 +709,9 @@ class StandardRLProgram(RLProgram):
     del kwargs
     self.engine = engine
     logging.info("Starting StandardRLProgram concurrent stages...")
+
+    max_groups_ahead = self.mini_batch_size * (self.max_staleness + 1)
+    self._dispatch_capacity = asyncio.Semaphore(max_groups_ahead)
 
     train_task = asyncio.create_task(self.train_stage())
     tasks = [
