@@ -52,6 +52,33 @@ def _convert_host_local_array(x: Any) -> Any:
   return x
 
 
+def _replicate_if_pspec_uses_unknown_mesh_axis(
+    pspec: jax.sharding.PartitionSpec | None,
+    mesh: jax.sharding.Mesh,
+) -> jax.sharding.PartitionSpec:
+  if pspec is None:
+    return jax.sharding.PartitionSpec()
+  for axis_name in pspec:
+    if axis_name is None:
+      continue
+    axis_names = axis_name if isinstance(axis_name, tuple) else (axis_name,)
+    if any(name is not None and name not in mesh.shape for name in axis_names):
+      return jax.sharding.PartitionSpec()
+  return pspec
+
+
+def _get_named_sharding(
+    state: Any, mesh: jax.sharding.Mesh
+) -> Any:
+  partition_specs = nnx.get_partition_spec(state)
+  return jax.tree_util.tree_map(
+      lambda pspec: jax.sharding.NamedSharding(
+          mesh, _replicate_if_pspec_uses_unknown_mesh_axis(pspec, mesh)
+      ),
+      partition_specs,
+  )
+
+
 def _fix_sharding(state: Any) -> Any:
   """Replicates scalar values in optimizer states that are SingleDeviceSharding.
 
@@ -82,7 +109,7 @@ def _fix_sharding(state: Any) -> Any:
     )
     return state
 
-  target_shardings = nnx.get_named_sharding(state, mesh)  # pyrefly: ignore[bad-argument-type]
+  target_shardings = _get_named_sharding(state, mesh)
   return jax.tree_util.tree_map(
       lambda x, shd: jax.ShapeDtypeStruct(
           getattr(x, 'shape', ()),

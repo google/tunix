@@ -130,6 +130,21 @@ class ShardingUtilsTest(parameterized.TestCase):
       x_resharded = sharding_utils.shard_input(x_sharded, ('tp',))
     self.assertIsNot(x_sharded, x_resharded)
 
+  def test_get_sharding_replicates_unknown_mesh_axis(self):
+    device_cnt = jax.device_count()
+    mesh = shd.Mesh(
+        np.array(jax.devices()).reshape(device_cnt, 1),
+        axis_names=('fsdp', 'tp'),
+    )
+    x = jnp.ones((device_cnt, 4, 8))
+
+    sharding = sharding_utils.get_sharding(
+        x, mesh, shd.PartitionSpec('norm')
+    )
+
+    self.assertEqual(sharding.mesh, mesh)
+    self.assertEqual(sharding.spec, shd.PartitionSpec())
+
   @mock.patch('tunix.sft.sharding_utils.jax.make_array_from_process_local_data')
   def test_global_array_noop(self, mock_make_array):
     mock_make_array.side_effect = ValueError(
