@@ -12,12 +12,11 @@ from typing import Mapping, Sequence
 
 
 EXPECTED_COUNTS = {
-    "train": 1,
+    "train": 16,
     "zero_tim_update": 1,
     "forward_groups": 1,
     "forward_group": 16,
     "loss_pullback": 1,
-    "reverse_groups": 1,
     "reverse_group": 16,
     "replay_forward": 16,
     "model_backward": 16,
@@ -26,6 +25,11 @@ EXPECTED_COUNTS = {
     "gradient_accumulate": 16,
     "optimizer_commit": 1,
 }
+COMPILER_EVENTS = (
+    "backend_compile_and_load",
+    "PJRT_Client_Compile",
+    "TpuCompiler::Compile",
+)
 GROUP_NAMES = (
     "forward_group",
     "reverse_group",
@@ -102,8 +106,10 @@ def validate_hierarchy(
     spans: Sequence[Span],
     *,
     device_step_counts: Mapping[str, int],
-    expected_step: int = 1,
+    compiler_counts: Mapping[str, int],
+    expected_update_step: int = 2,
     expected_groups: int = 16,
+    require_step_marker: bool = True,
 ) -> list[str]:
   """Pure interval/count validator used by real and synthetic censuses."""
   reasons = []
@@ -137,28 +143,50 @@ def validate_hierarchy(
     if count <= 0:
       reasons.append(f"device_steps:{plane}=empty")
 
-  train = _one(by_name, "train")
   update = _one(by_name, "zero_tim_update")
   forward_parent = _one(by_name, "forward_groups")
   loss = _one(by_name, "loss_pullback")
-  reverse_parent = _one(by_name, "reverse_groups")
   optimizer = _one(by_name, "optimizer_commit")
-  if train is not None:
+  trains = {}
+  first_train_step = expected_update_step * expected_groups
+  for train in by_name["train"]:
     try:
       step_num = int(train.stats.get("step_num", ""))
     except ValueError:
       step_num = None
-    if step_num != expected_step:
-      reasons.append(f"train:step_num={step_num} expected={expected_step}")
-    if train.stats.get("_r") != "1":
-      reasons.append("train:not_step_trace_annotation")
-  if train is not None and update is not None and not _contains(train, update):
-    reasons.append("zero_tim_update:outside_train")
+    micro_step = (
+        step_num - first_train_step if step_num is not None else None
+    )
+    if micro_step is None or not 0 <= micro_step < expected_groups:
+      reasons.append(
+          f"train:step_num={step_num} "
+          f"expected={first_train_step}.."
+          f"{first_train_step + expected_groups - 1}"
+      )
+    elif micro_step in trains:
+      reasons.append(f"train:duplicate_step_num={step_num}")
+    else:
+      trains[micro_step] = train
+    if require_step_marker and train.stats.get("_r") != "1":
+      reasons.append(f"train[{step_num}]:not_step_trace_annotation")
+  if set(trains) != set(range(expected_groups)):
+    reasons.append(
+        f"train:microsteps={sorted(trains)} expected=0..{expected_groups - 1}"
+    )
+  if update is not None:
+    try:
+      update_step = int(update.stats.get("update_step", ""))
+    except ValueError:
+      update_step = None
+    if update_step != expected_update_step:
+      reasons.append(
+          f"zero_tim_update:update_step={update_step} "
+          f"expected={expected_update_step}"
+      )
 
   for child_name, child in (
       ("forward_groups", forward_parent),
       ("loss_pullback", loss),
-      ("reverse_groups", reverse_parent),
       ("optimizer_commit", optimizer),
   ):
     if (
@@ -202,17 +230,20 @@ def validate_hierarchy(
       update_step = int(optimizer.stats.get("update_step", ""))
     except ValueError:
       update_step = None
-    if update_step != expected_step:
+    if update_step != expected_update_step:
       reasons.append(
           f"optimizer_commit:update_step={update_step} "
-          f"expected={expected_step}"
+          f"expected={expected_update_step}"
       )
   for index, span in grouped["forward_group"].items():
     if forward_parent is not None and not _contains(forward_parent, span):
       reasons.append(f"forward_group[{index}]:outside_forward_groups")
   for index, reverse in grouped["reverse_group"].items():
-    if reverse_parent is not None and not _contains(reverse_parent, reverse):
-      reasons.append(f"reverse_group[{index}]:outside_reverse_groups")
+    train = trains.get(index)
+    if train is not None and not _contains(train, reverse):
+      reasons.append(f"reverse_group[{index}]:outside_train")
+    if update is not None and not _contains(update, reverse):
+      reasons.append(f"reverse_group[{index}]:outside_zero_tim_update")
     stage_spans = []
     for stage in REVERSE_STAGES:
       child = grouped[stage].get(index)
@@ -229,19 +260,43 @@ def validate_hierarchy(
             f"reverse_group[{index}]:order={left_name}>{right_name}"
         )
 
-  if all(
-      value is not None
-      for value in (forward_parent, loss, reverse_parent, optimizer)
+  if update is not None:
+    for index, train in trains.items():
+      if not _contains(update, train):
+        reasons.append(f"train[{index}]:outside_zero_tim_update")
+  last_train = trains.get(expected_groups - 1)
+  if (
+      last_train is not None
+      and optimizer is not None
+      and not _contains(last_train, optimizer)
   ):
-    ordered = (
-        ("forward_groups", forward_parent),
-        ("loss_pullback", loss),
-        ("reverse_groups", reverse_parent),
-        ("optimizer_commit", optimizer),
-    )
+    reasons.append("optimizer_commit:outside_last_train")
+  last_accumulator = grouped["gradient_accumulate"].get(expected_groups - 1)
+  if (
+      last_accumulator is not None
+      and optimizer is not None
+      and last_accumulator.end_ns > optimizer.start_ns
+  ):
+    reasons.append("last_train:gradient_accumulate_overlaps_optimizer")
+
+  ordered = []
+  if forward_parent is not None:
+    ordered.append(("forward_groups", forward_parent))
+  if loss is not None:
+    ordered.append(("loss_pullback", loss))
+  ordered.extend(
+      (f"train[{index}]", trains[index])
+      for index in range(expected_groups)
+      if index in trains
+  )
+  if len(ordered) == expected_groups + 2:
     for (left_name, left), (right_name, right) in zip(ordered, ordered[1:]):
       if left.end_ns > right.start_ns:
         reasons.append(f"update:order={left_name}>{right_name}")
+  for name in COMPILER_EVENTS:
+    count = compiler_counts.get(name, 0)
+    if count:
+      reasons.append(f"captured_compile:{name}={count} expected=0")
   return reasons
 
 
@@ -264,7 +319,9 @@ def _resolve_xplane(path: Path) -> Path:
   return files[0]
 
 
-def read_xplane(path: Path) -> tuple[list[Span], dict[str, int]]:
+def read_xplane(
+    path: Path,
+) -> tuple[list[Span], dict[str, int], dict[str, int]]:
   """Reads only the host hierarchy and device Steps rows from a full XPlane."""
   from xprof import profile_data  # pylint: disable=g-import-not-at-top
 
@@ -278,17 +335,20 @@ def read_xplane(path: Path) -> tuple[list[Span], dict[str, int]]:
           f"expected one /host:CPU plane, found {len(host_planes)}"
       )
     spans = []
+    compiler_spans = []
     for line in host_planes[0].lines:
       for event in line.events:
-        if event.name not in EXPECTED_COUNTS:
-          continue
-        spans.append(Span(
+        span = Span(
             name=event.name,
             start_ns=float(event.start_ns),
             duration_ns=float(event.duration_ns),
             line_name=line.name,
             stats=dict(event.stats),
-        ))
+        )
+        if event.name in EXPECTED_COUNTS:
+          spans.append(span)
+        if event.name in COMPILER_EVENTS:
+          compiler_spans.append(span)
     device_step_counts = {}
     for plane in profile.planes:
       if not TPU_PLANE.fullmatch(plane.name):
@@ -296,7 +356,19 @@ def read_xplane(path: Path) -> tuple[list[Span], dict[str, int]]:
       device_step_counts[plane.name] = sum(
           len(line.events) for line in plane.lines if line.name == "Steps"
       )
-    return spans, device_step_counts
+    update = next(
+        (span for span in spans if span.name == "zero_tim_update"), None
+    )
+    compiler_counts = {
+        name: sum(
+            span.name == name
+            and update is not None
+            and _contains(update, span)
+            for span in compiler_spans
+        )
+        for name in COMPILER_EVENTS
+    }
+    return spans, device_step_counts, compiler_counts
   finally:
     profile.close()
 
@@ -304,14 +376,18 @@ def read_xplane(path: Path) -> tuple[list[Span], dict[str, int]]:
 def main() -> int:
   parser = argparse.ArgumentParser()
   parser.add_argument("--run-root", type=Path, required=True)
-  parser.add_argument("--expected-step", type=int, default=1)
+  parser.add_argument(
+      "--expected-update-step", "--expected-step",
+      dest="expected_update_step", type=int, default=2
+  )
   args = parser.parse_args()
   xplane = _resolve_xplane(args.run_root)
-  spans, device_step_counts = read_xplane(xplane)
+  spans, device_step_counts, compiler_counts = read_xplane(xplane)
   reasons = validate_hierarchy(
       spans,
       device_step_counts=device_step_counts,
-      expected_step=args.expected_step,
+      compiler_counts=compiler_counts,
+      expected_update_step=args.expected_update_step,
   )
   counts = {
       name: sum(span.name == name for span in spans)
@@ -319,6 +395,9 @@ def main() -> int:
   }
   print("hierarchy_counts=" + json.dumps(counts, sort_keys=True))
   print("device_steps=" + json.dumps(device_step_counts, sort_keys=True))
+  print("captured_compiler_events=" + json.dumps(
+      compiler_counts, sort_keys=True
+  ))
   if reasons:
     for reason in reasons:
       print("  RED " + reason)
@@ -328,10 +407,13 @@ def main() -> int:
     return 1
   print(
       "V1_GSM8K_XPROF_HIERARCHY_CENSUS_GREEN "
-      f"train_step={args.expected_step} host_plane=/host:CPU "
+      f"update_step={args.expected_update_step} "
+      f"train_steps={args.expected_update_step * 16}.."
+      f"{args.expected_update_step * 16 + 15} host_plane=/host:CPU "
       f"host_line={HOST_LINE_NAME} steps_planes=8 "
-      "forward_groups=16 reverse_groups=16 transactions=16 "
-      "micro_steps=0..15 last_accumulate=15 optimizer_update=1"
+      "forward_groups=16 reverse_transactions=16 "
+      "micro_steps=0..15 last_accumulate=15 optimizer_owned_by_last=1 "
+      "compiler_events=0"
   )
   return 0
 

@@ -1,13 +1,16 @@
 # Execution handoff: produce Native and Zero-HP backward XProf
 
-> **Active follow-up (P60-2):** the original pair below is complete, but the
-> Zero-HP view lacks a navigable host hierarchy. Do not rerun this two-arm
-> recipe as a readability fix. A new executor must first follow
-> [`HANDOFF_P60_2.md`](HANDOFF_P60_2.md). P60-2F has a historical clean-SHA
-> Zero-HP TARGET PASS at `5549b5b6`; the latest-tip integration `c87838d8` is
-> local/exact-image admitted but was not target-rerun. Do not rerun either arm
-> without new approval. The historical pair remains
-> `INCONCLUSIVE_INPUT_MISMATCH` for timing.
+> **Active follow-up is P60-2G. Do not execute the two-arm steps below.** The
+> only current carrier is the Zero-HP-only, warm update-2 command and fixed
+> 1.5-GB XProf budget in the authoritative
+> [`HANDOFF_P60_2.md`](HANDOFF_P60_2.md) quickstart. Its implementation is
+> presently local and uncommitted; a remote agent must wait for the approved
+> full source SHA. P60-2F remains a historical clean-SHA TARGET PASS for its
+> old whole-update contract, while its UI trace fails the new navigation gate.
+> The historical Native/Zero pair remains `INCONCLUSIVE_INPUT_MISMATCH` for
+> timing.
+
+## Historical two-arm procedure (do not use for P60-2G)
 
 This task is GSM8K, not DeepSWE. Do not run anything under
 `tasks/p58-deepswe-native-zero-comparison/`. The two authoritative launchers

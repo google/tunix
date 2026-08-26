@@ -48,6 +48,9 @@ perf_dir="$state/perf"
 xprof_census="$state/xprof_census.txt"
 semantic_census="$state/semantic_census.txt"
 hierarchy_census="$state/hierarchy_census.txt"
+trace_census="$state/trace_census.txt"
+size_census="$state/xprof_size_census.txt"
+size_receipt="$state/xprof_size_receipt.json"
 classification="$state/classification.json"
 canon_out="$root/canon"
 container="v1_gsm8k_xprof_${arm//-/_}_${label}"
@@ -62,6 +65,8 @@ runtime_files=(
   "$script_dir/finalize_gsm8k_xprof_evidence.sh"
   "$script_dir/classify_gsm8k_xprof_arm.py"
   "$script_dir/census_gsm8k_xprof_hierarchy.py"
+  "$script_dir/census_gsm8k_xprof_trace.py"
+  "$script_dir/census_gsm8k_xprof_size.py"
   "$script_dir/census_gsm8k_xprof_modules.py"
   "$script_dir/census_gsm8k_semantic_trace.py"
 )
@@ -132,7 +137,8 @@ mkdir -p "$state/wandb" "$state/logs" "$xprof_dir" "$perf_dir"
 {
   echo "[V1.GSM8K.XPROF] source=$source_sha diff_sha256=$source_diff_sha256 runtime_manifest_sha256=$runtime_manifest_sha256 image=$image image_id=$image_id model_snapshot=$hf_snapshot_sha"
   echo "[V1.GSM8K.XPROF] arm=$arm label=$label hostname=$expected_hostname topology=DP4xTP1"
-  echo "[V1.GSM8K.XPROF] work=prompts8_generations8_response256_concurrency1 steps=3 capture=update:1->2"
+  echo "[V1.GSM8K.XPROF] work=prompts8_generations8_response256_concurrency1 steps=3 capture=update:2->3"
+  echo "[V1.GSM8K.XPROF] tracers=host:1,python:0,tpu:TRACE_ONLY_XLA labels=1 xprof_budget=soft:1200000000,hard:1500000000,basis:logical_regular_file_bytes"
   echo "[V1.GSM8K.XPROF] treatment=$([ "$arm" = native ] && echo stock-vanilla || echo strict-zero-hp-v1)"
 } >"$driver"
 {
@@ -169,11 +175,11 @@ docker_args=(
   -e CANON_P60_DETERMINISTIC_AB=1
   -e CANON_EXPECT_TRAIN_MESH_IDS=0,2,1,3
   -e CANON_XPROF_DIR="$xprof_dir"
-  -e CANON_XPROF_SKIP_STEPS=1 -e CANON_XPROF_STEPS=1
+  -e CANON_XPROF_SKIP_STEPS=2 -e CANON_XPROF_STEPS=1
   -e CANON_XPROF_PHASE=update -e CANON_XPROF_HOST_TRACER=1
-  -e CANON_XPROF_PYTHON_TRACER=0 -e CANON_XPROF_TPU_TRACE_MODE=TRACE_COMPUTE
+  -e CANON_XPROF_PYTHON_TRACER=0 -e CANON_XPROF_TPU_TRACE_MODE=TRACE_ONLY_XLA
   -e CANON_XPROF_LABELS=1
-  -e CANON_PERF_TRACE_DIR="$perf_dir" -e CANON_PERF_TRACE_EXPORT_STEP=1
+  -e CANON_PERF_TRACE_DIR="$perf_dir" -e CANON_PERF_TRACE_EXPORT_STEP=2
   -w "$repo"
 )
 
@@ -249,6 +255,13 @@ fi
 xprof_census_rc=1
 semantic_census_rc=1
 hierarchy_census_rc=1
+trace_census_rc=1
+set +e
+python3 "$script_dir/census_gsm8k_xprof_size.py" \
+  --run-root "$root" --output "$size_receipt" \
+  >"$size_census" 2>&1
+size_census_rc=$?
+set -e
 if [ "$docker_rc" -eq 0 ]; then
   set +e
   python3 "$script_dir/census_gsm8k_xprof_modules.py" \
@@ -264,9 +277,13 @@ if [ "$docker_rc" -eq 0 ]; then
   semantic_census_rc=$?
   if [ "$arm" = zero-hp ]; then
     python3 "$script_dir/census_gsm8k_xprof_hierarchy.py" \
-      --run-root "$root" --expected-step 1 \
+      --run-root "$root" --expected-update-step 2 \
       >"$hierarchy_census" 2>&1
     hierarchy_census_rc=$?
+    python3 "$script_dir/census_gsm8k_xprof_trace.py" \
+      --run-root "$root" --expected-update-step 2 \
+      >"$trace_census" 2>&1
+    trace_census_rc=$?
   fi
   set -e
 fi
@@ -280,11 +297,13 @@ classifier_args=(
   --model-snapshot "$hf_snapshot_sha" --image-id "$image_id" \
   --xprof-census-rc "$xprof_census_rc" \
   --semantic-census-rc "$semantic_census_rc" \
+  --size-census-rc "$size_census_rc" \
   --output "$classification"
 )
 if [ "$arm" = zero-hp ]; then
   classifier_args+=(
     --require-hierarchy --hierarchy-census-rc "$hierarchy_census_rc"
+    --trace-census-rc "$trace_census_rc"
   )
 fi
 "${classifier_args[@]}" >>"$driver" 2>&1
@@ -294,9 +313,16 @@ set -e
 sha_inputs=("$raw" "$driver")
 for path in \
     "$xprof_census" "$semantic_census" "$classification" \
-    "$hierarchy_census" "$pre" "$align" "$update"; do
+    "$hierarchy_census" "$trace_census" "$size_census" "$size_receipt" \
+    "$pre" "$align" "$update"; do
   [ -e "$path" ] && sha_inputs+=("$path")
 done
+while IFS= read -r -d '' path; do
+  sha_inputs+=("$path")
+done < <(find "$xprof_dir" -type f -print0 | sort -z)
+while IFS= read -r -d '' path; do
+  sha_inputs+=("$path")
+done < <(find "$perf_dir" -type f -name 'perfetto_trace_v2_*.pb' -print0 | sort -z)
 if ! gsm8k_xprof_choose_terminal \
     "$arm" "$root" "$docker_rc" "$classifier_rc"; then
   echo "[V1.GSM8K.XPROF] SHA_LEDGER_RED stage=select root=$root" >&2

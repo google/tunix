@@ -1,5 +1,85 @@
 # P60-2 execution handoff: make P59 backward readable in XProf
 
+> **Current phase is P60-2G.** The original whole-update hierarchy below is
+> retained as historical context, not the current target. P60-2G uses one
+> Native API `train` span per real Zero-HP reverse/reduce/accumulate
+> transaction, train steps 32..47 for warm update 2. The last real span owns
+> optimizer commit; no synthetic terminal step is allowed. Read
+> [`p60-2g-native-train-steps.md`](phases/p60-2g-native-train-steps.md) before
+> operating this task.
+
+## P60-2G remote-operator quickstart (authoritative)
+
+The current implementation lives in
+`/home/yuxuan/code_rl_repro/worktrees/p60_2g_native_steps_0825` on
+`local/p60-2g-native-steps-0825`, based on `9f91d930`. The P60-2G change is
+still uncommitted. The current remote-tracking tip is one evidence-only commit
+ahead at `23e0bddfc4f742eecb66092db5bdc80def9571ca`; it changes only
+`tasks/v1-apc-m15-target-debug/` and has no path overlap with this 22-path
+concern. **Do not launch from either base SHA or from a reconstructed patch.**
+After explicit local-commit approval, rebase that implementation commit onto
+the then-current operator tip, rerun the required gates, and record the final
+full 40-character SHA here before a remote agent treats the run as clean-source
+acceptance evidence. Commit, push, and TPU launch remain separate approval
+boundaries.
+
+This is a Zero-HP-only fresh carrier. Do not rerun Native and do not run the
+historical two-arm procedure in `HANDOFF.md`. The signed capture tuple is
+fixed, not operator-tunable:
+
+| Field | Required value |
+|---|---|
+| Host/topology | one direct four-chip v5p, DP4×TP1, mesh ids `0,2,1,3` |
+| Work | Qwen3-1.7B GSM8K, 8 prompts, 8 generations, response 256, concurrency 1 |
+| Updates | 3 real optimizer updates |
+| Capture | `phase=update`, skip 2, steps 1, window `2->3` |
+| Tracers | host 1, Python 0, TPU `TRACE_ONLY_XLA`, labels 1 |
+| UI index | `train_32..train_47`; train 47 owns optimizer commit |
+| XProf budget | soft warning `1,200,000,000`; hard maximum `1,500,000,000` logical bytes |
+
+The runner generates both `train/xprof_size_census.txt` and
+`train/xprof_size_receipt.json`. `PASS` is at or below 1.2 GB; `WARN` is above
+1.2 GB but at or below 1.5 GB and remains admissible; `FAIL` or any total above
+1.5 GB makes the arm RED. The budget counts every regular file under
+`train/xprof` and never truncates, deletes, or rewrites an oversized capture.
+The raw XPlane, compressed trace JSON, semantic Perfetto, receipt, censuses,
+classification, alignment/update reports, and terminal logs enter the root
+`SHA256SUMS` before its immediate verification.
+
+On the remote v5p host, after receiving the approved implementation SHA:
+
+```bash
+cd <clean-worktree-at-the-delivered-p60-2g-sha>
+test -z "$(git status --porcelain)"
+git rev-parse HEAD
+python3 canon-zero-tim/.claude/skills/manage-canon-zero-tim-branch/scripts/preflight_runtime.py \
+  --repo . --require-clean
+
+unset V1_GSM8K_XPROF_ALLOW_DIRTY
+export V1_GSM8K_XPROF_EXPECT_HOSTNAME="$(hostname)"
+bash canon-zero-tim/tasks/v1-gsm8k-onehost-xprof-pair/scripts/run_onehost_gsm8k_xprof_zero_hp.sh \
+  'p60_2g_native_train_steps_zero_<unique-utc-date>'
+```
+
+With no evidence-root override, `<root>` below is
+`/mnt/disks/tunix-data/gsm8k-onehost-xprof/v1_zero-hp_<label>`. The label and
+root must be fresh; never reuse a failed or successful directory.
+
+Inspect and return the complete immutable root, including failed roots:
+
+```bash
+cat <root>/train/xprof_size_census.txt
+python3 -m json.tool <root>/train/xprof_size_receipt.json
+python3 -m json.tool <root>/train/classification.json
+sha256sum -c <root>/SHA256SUMS
+```
+
+The successful wrapper ends, in order, with `SHA_LEDGER_PASS` and the unique
+Zero-HP `GREEN` marker. The target is not accepted unless the size census is
+GREEN (`status=PASS|WARN`), classification is PASS, wrapper exit is zero, and
+the independent manifest check succeeds. Preserve and return the entire root
+on any RED, timeout, missing tail, size failure, or SHA failure.
+
 ## Mission
 
 Repair the **observability hierarchy** of the existing one-host GSM8K Zero-HP
@@ -248,3 +328,49 @@ packaging-RED root or creates a Native/Zero speed claim.
 Rollback is the single annotation/census/classifier CL. With
 `CANON_XPROF_LABELS` absent or `0`, runtime behavior must already be an exact
 no-op, so rollback must not touch P59, reducer, or optimizer code.
+
+## P60-2G current handoff
+
+The immutable P60-2F JSON has exactly 1,000,448 events and mechanically fails
+the new UI gate: `train=1`, `forward_group=16`, while loss, all reverse stages,
+all accumulators, and optimizer are absent. Its full XPlane remains complete.
+The first captured reverse group also contains first-use compiler work; update
+2 is selected because update 0 changes sharding at commit and update 1 compiles
+the stable post-commit identity.
+
+Current implementation contract:
+
+- `zero_tim_update(update_step=2)` owns forward, loss, train 32..47, and
+  optimizer;
+- every train owns its matching complete reverse transaction; train 47 stays
+  open through optimizer;
+- `TRACE_ONLY_XLA` is the low-density navigation carrier;
+- full XPlane separately requires 8/8 backward families, scaled-step x16,
+  commit x1, decode absent, non-empty Steps rows, and zero compiler events
+  inside the captured update;
+- streaming trace JSON separately requires all train/reverse spans and the
+  optimizer tail on the same host track;
+- the size census inventories all regular XProf files, permits a soft
+  `WARN` only through 1,500,000,000 bytes, and rejects a stale or oversized
+  receipt without deleting the run;
+- 3/3 updates, 51/51 alignment, semantic Perfetto, classification, and the
+  immutable SHA ledger remain mandatory; the ledger directly includes raw
+  XProf and semantic Perfetto.
+
+Current local receipt after the budget addendum: P60 13/13 and document set
+15/15, P59 37/37, V1/P64 67/67, and the complete pinned exact-image ladder all
+PASS. The pinned container reported zero TPU chips. A read-only replay of the
+historical P60-2F artifact totals 802,001,091 XProf bytes and returns size
+`status=PASS`. These are construction/tooling gates only; no fresh P60-2G v5p
+profile exists.
+
+No commit, push, or TPU launch is implied by this handoff. The current source
+line in the quickstart deliberately has no implementation SHA. After local
+commit approval, record that full SHA before a remote operator uses this
+one-host command; push and launch remain separate approval boundaries:
+
+```bash
+export V1_GSM8K_XPROF_EXPECT_HOSTNAME="$(hostname)"
+bash canon-zero-tim/tasks/v1-gsm8k-onehost-xprof-pair/scripts/run_onehost_gsm8k_xprof_zero_hp.sh \
+  'p60_2g_native_train_steps_zero_<unique-date>'
+```

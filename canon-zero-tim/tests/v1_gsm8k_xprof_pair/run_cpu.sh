@@ -25,6 +25,7 @@ docs=(
   phases/p60-2d-attribution-and-next-decision.md
   phases/p60-2e-microstep-readability.md
   phases/p60-2f-evidence-ledger-finalization.md
+  phases/p60-2g-native-train-steps.md
 )
 task="$repo/canon-zero-tim/tasks/v1-gsm8k-onehost-xprof-pair"
 for doc in "${docs[@]}"; do
@@ -41,5 +42,11 @@ grep -Fq 'jit__precomputed_gradient_scaled_step' "$task/phases/p60-2e-microstep-
 grep -Fq 'jit__precomputed_gradient_commit' "$task/phases/p60-2e-microstep-readability.md"
 grep -Fq 'SHA_LEDGER_PASS' "$task/phases/p60-2f-evidence-ledger-finalization.md"
 grep -Fq 'post-manifest tamper' "$task/phases/p60-2f-evidence-ledger-finalization.md"
-echo "P60_2_DOCSET_PASS files=${#docs[@]} phase=p60-2f"
+grep -Fq 'train_32..train_47' "$task/phases/p60-2g-native-train-steps.md"
+grep -Fq 'TRACE_ONLY_XLA' "$task/phases/p60-2g-native-train-steps.md"
+grep -Fq 'trace-JSON gate' "$task/phases/p60-2g-native-train-steps.md"
+grep -Fq 'xprof_size_receipt.json' "$task/phases/p60-2g-native-train-steps.md"
+grep -Fq '1,500,000,000' "$task/HANDOFF_P60_2.md"
+grep -Fq 'xprof_size_receipt.json' "$task/RUNBOOK.md"
+echo "P60_2_DOCSET_PASS files=${#docs[@]} phase=p60-2g"
 echo "V1_GSM8K_XPROF_CPU_PASS"

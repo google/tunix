@@ -3,10 +3,10 @@
 
 from __future__ import annotations
 
-import gzip
-import json
+import importlib.util
 import os
 from pathlib import Path
+import sys
 import tempfile
 
 import jax
@@ -15,29 +15,67 @@ import jax.numpy as jnp
 from tunix.rl import gsm8k_xprof
 
 
+def _load_trace_census():
+  path = (
+      Path(__file__).resolve().parents[2]
+      / "tasks/v1-gsm8k-onehost-xprof-pair/scripts"
+      / "census_gsm8k_xprof_trace.py"
+  )
+  spec = importlib.util.spec_from_file_location(
+      "p60_exact_image_trace_census", path
+  )
+  if spec is None or spec.loader is None:
+    raise RuntimeError(f"cannot load trace census: {path}")
+  module = importlib.util.module_from_spec(spec)
+  sys.modules[spec.name] = module
+  spec.loader.exec_module(module)
+  return module
+
+
 def main() -> None:
   os.environ["CANON_XPROF_LABELS"] = "1"
   with tempfile.TemporaryDirectory(prefix="p60-xprof-annotation-") as directory:
+    add_one = jax.jit(lambda value: value + 1)
+    add_one(jnp.arange(4, dtype=jnp.int32)).block_until_ready()
     options = jax.profiler.ProfileOptions()
     options.host_tracer_level = 1
     options.python_tracer_level = 0
     jax.profiler.start_trace(directory, profiler_options=options)
-    with gsm8k_xprof.train_step_annotation(step_num=1):
-      with gsm8k_xprof.trace_annotation("zero_tim_update"):
-        with gsm8k_xprof.trace_annotation("forward_group", group_index=3):
-          result = jax.jit(lambda value: value + 1)(
-              jnp.arange(4, dtype=jnp.int32)
-          )
-          result.block_until_ready()
+    with gsm8k_xprof.trace_annotation("zero_tim_update", update_step=2):
+      with gsm8k_xprof.trace_annotation("forward_groups"):
         for index in range(16):
           with gsm8k_xprof.trace_annotation(
-              "gradient_accumulate",
-              group_index=index,
-              micro_step=index,
-              is_last_accumulate=int(index == 15),
+              "forward_group", group_index=index
           ):
-            pass
-        with gsm8k_xprof.trace_annotation("optimizer_commit", update_step=1):
+            if index == 0:
+              add_one(jnp.arange(4, dtype=jnp.int32)).block_until_ready()
+      with gsm8k_xprof.trace_annotation("loss_pullback"):
+        pass
+      schedule = gsm8k_xprof.ZeroHpTrainMicrostepSchedule(update_step=2)
+      with schedule:
+        for index in range(16):
+          with schedule.transaction(index):
+            with gsm8k_xprof.trace_annotation(
+                "reverse_group", group_index=index
+            ):
+              for stage in (
+                  "replay_forward",
+                  "model_backward",
+                  "report_adjoint",
+                  "fixed_dp_reduce",
+              ):
+                with gsm8k_xprof.trace_annotation(
+                    stage, group_index=index
+                ):
+                  pass
+              with gsm8k_xprof.trace_annotation(
+                  "gradient_accumulate",
+                  group_index=index,
+                  micro_step=index,
+                  is_last_accumulate=int(index == 15),
+              ):
+                pass
+        with schedule.optimizer_commit():
           pass
     jax.profiler.stop_trace()
     root = Path(directory)
@@ -52,97 +90,18 @@ def main() -> None:
           f"annotation probe artifacts changed: xplanes={len(xplanes)} "
           f"traces={len(traces)}"
       )
-    with gzip.open(traces[0], "rt", encoding="utf-8") as stream:
-      events = json.load(stream)["traceEvents"]
-    selected_names = (
-        "train",
-        "zero_tim_update",
-        "forward_group",
-        "gradient_accumulate",
-        "optimizer_commit",
+    trace_census = _load_trace_census()
+    spans, compiler_counts, event_count = trace_census.read_trace(traces[0])
+    reasons = trace_census.validate_trace(
+        spans, compiler_counts=compiler_counts, expected_update_step=2
     )
-    selected_events = [
-        event for event in events if event.get("name") in selected_names
-    ]
-    singleton_names = (
-        "train",
-        "zero_tim_update",
-        "forward_group",
-        "optimizer_commit",
-    )
-    singleton_events = {
-        name: [
-            event.get("args") or {}
-            for event in selected_events
-            if event.get("name") == name
-        ]
-        for name in singleton_names
-    }
-    expected_singletons = {
-        "train": [{"step_num": "1"}],
-        "zero_tim_update": [{}],
-        "forward_group": [{"group_index": "3"}],
-        "optimizer_commit": [{"update_step": "1"}],
-    }
-    if singleton_events != expected_singletons:
-      raise RuntimeError(
-          "annotation singleton contract changed: "
-          f"{singleton_events}"
-      )
-    accumulators = [
-        event.get("args") or {}
-        for event in selected_events
-        if event.get("name") == "gradient_accumulate"
-    ]
-    try:
-      accumulators.sort(key=lambda item: int(item["group_index"]))
-    except (KeyError, TypeError, ValueError) as error:
-      raise RuntimeError(
-          "annotation accumulator metadata is not integer-valued: "
-          f"{accumulators}"
-      ) from error
-    expected_accumulators = [
-        {
-            "group_index": str(index),
-            "micro_step": str(index),
-            "is_last_accumulate": str(int(index == 15)),
-        }
-        for index in range(16)
-    ]
-    if accumulators != expected_accumulators:
-      raise RuntimeError(
-          "annotation accumulator contract changed: "
-          f"{accumulators}"
-      )
-    locations = {
-        (event.get("pid"), event.get("tid")) for event in selected_events
-    }
-    process_names = {
-        event.get("pid"): (event.get("args") or {}).get("name")
-        for event in events
-        if event.get("ph") == "M" and event.get("name") == "process_name"
-    }
-    thread_names = {
-        (event.get("pid"), event.get("tid")):
-            (event.get("args") or {}).get("name")
-        for event in events
-        if event.get("ph") == "M" and event.get("name") == "thread_name"
-    }
-    if len(locations) != 1:
-      raise RuntimeError(f"annotation events span multiple tracks: {locations}")
-    pid, tid = next(iter(locations))
-    if process_names.get(pid) != "/host:CPU" or thread_names.get(
-        (pid, tid)
-    ) != "python3":
-      raise RuntimeError(
-          "annotation host track changed: "
-          f"process={process_names.get(pid)} "
-          f"thread={thread_names.get((pid, tid))}"
-      )
+    if reasons:
+      raise RuntimeError(f"annotation trace contract changed: {reasons}")
   print(
       "P60_XPROF_ANNOTATION_API_PASS "
-      "step=train step_num=1 micro_steps=0..15 last_accumulate=15 "
-      "optimizer_update=1 metadata=integer "
+      "train_steps=32..47 micro_steps=0..15 last_accumulate=15 "
+      "optimizer_update=2 optimizer_owned_by_last=1 compiler_events=0 "
+      f"trace_events={event_count} metadata=integer "
       "host_plane=/host:CPU host_line=python3 xplane=1 trace=1"
   )
 

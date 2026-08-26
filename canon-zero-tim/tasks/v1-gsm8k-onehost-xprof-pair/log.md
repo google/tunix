@@ -429,3 +429,89 @@
   packaging-RED root remains immutable. This evidence-only concern is
   published as the third CL in the approved stack after all publication gates;
   no image publication, Native rerun, or extra TPU launch occurred.
+
+## 2026-08-25 — P60-2G Native-like train microsteps started
+
+- Created independent data-disk worktree
+  `local/p60-2g-native-steps-0825` at fetched operator tip `9f91d930`. The
+  phase is local and uncommitted; no TPU, commit, push, or remote mutation is
+  authorized.
+- Baseline diagnosis: Native full XPlane has 16 real train accumulation steps
+  16..31 plus terminal iterator probe 32. Historical P60-2F Zero-HP has one
+  62.66-second `train(1)`. Its first reverse/reduce transaction contains
+  first-use compilation; update 2 is the first warm post-sharding candidate.
+- Implemented a profiling-only lifecycle schedule for the signed Zero-HP arm:
+  the 16 real reverse/reduce/accumulate transactions become train 32..47 and
+  the last real train closes after optimizer commit. Other workloads retain
+  their existing envelope and labels-off remains a no-op.
+- Added full-XPlane warm compiler rejection and a streaming trace-JSON UI gate.
+  The immutable P60-2F JSON replay returned the expected RED:
+  `trace_event_count=1000448`, `train=1`, `forward_group=16`, and zero loss,
+  reverse, accumulator, or optimizer spans; 19 reasons before separating the
+  full-XPlane-only `_r` marker.
+- First focused CPU checkpoint: 12/12 tests PASS. Remaining work is the updated
+  classifier/runner fixture replay, P59/V1/P64/flag/static gates, pinned
+  exact-image probe, and final documentation closure.
+
+## 2026-08-25 — P60-2G local and exact-image gates closed
+
+- Host gates: P60 12/12 and document set 15/15, P59 37/37, V1/P64 67/67,
+  flag audit 378/378, branch preflight, syntax, `git diff --check`, changed-
+  diff secret scan, and no-new-sync token audit all PASS.
+- Full pinned image ladder passed on immutable image
+  `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`.
+  The container repeatedly reported zero TPU chips. Final P60 API receipt:
+  `train_steps=32..47`, microsteps 0..15, last 15, optimizer update 2 owned by
+  the last train, compiler events 0, one host track, XPlane and trace present.
+- Old immutable P60-2F JSON fails the new UI gate with 1,000,448 events and no
+  loss/reverse/optimizer tail. Its full XPlane preserves 8/8 Steps rows and all
+  old transactions but fails the new step/metadata contract and reports three
+  contained events in each of the three compiler families.
+- Verdict: `LOCAL/EXACT-IMAGE PASS / TARGET NOT RUN`. No commit, push, Native
+  rerun, TPU launch, image publication, or remote mutation occurred.
+
+## 2026-08-26 — P60-2G bounded XProf delivery gate closed locally
+
+- Type: additive artifact-budget hardening and remote handoff.
+- Decision: retain the complete update-2 XPlane and UI trace while fixing the
+  signed runner budget at soft 1,200,000,000 / hard 1,500,000,000 logical
+  bytes. No new environment flag or operator override was added.
+- Implementation: added `census_gsm8k_xprof_size.py`, a deterministic regular-
+  file inventory and JSON receipt. The arm classifier recomputes the current
+  file set, sizes, counts, limits, and status rather than trusting the census
+  return code. Above the hard maximum the arm is RED but the root is preserved.
+  The final manifest now directly covers every raw XProf file and semantic
+  Perfetto in addition to censuses, classification, reports, and logs.
+- Negative controls: PASS, soft-WARN, hard-RED, stale receipt, ordinary
+  post-manifest tamper, and raw-XPlane post-manifest tamper all fire as
+  intended. Focused P60 is 13/13 plus document set 15/15; P59 is 37/37; V1/P64
+  is 67/67.
+- Existing-artifact replay: immutable P60-2F resolves to exactly two XProf
+  files totaling 802,001,091 bytes: XPlane 768,320,714 and trace JSON
+  33,680,377. Marker:
+  `V1_GSM8K_XPROF_SIZE_CENSUS_GREEN status=PASS xprof_bytes=802001091
+  soft_warning_bytes=1200000000 hard_max_bytes=1500000000 files=2 xplanes=1
+  traces=1 reasons=[]`.
+- Exact-image: the complete aggregate ladder passed on pinned image
+  `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`;
+  the container repeatedly reported zero TPU chips and ended in
+  `V1_HP_EXACT_IMAGE_PASS`, the 13-test P60 CPU PASS, the full annotation API
+  receipt for train 32..47, and `P60_2B_EXACT_IMAGE_PASS ... tpu_devices=0`.
+- Final static gates: complete flag audit is 378/378/378 and
+  `FLAG_AUDIT_PASS`; branch preflight PASS reports the expected local branch,
+  base `9f91d930`, dirty=22, and zero remote credentials; `git diff --check`,
+  Python AST for ten files, shell syntax, changed-diff secret scan, and the
+  no-new-sync token audit all PASS.
+- Handoff: `HANDOFF_P60_2.md` now contains the clean-tree Zero-HP-only remote
+  command, fixed tracer tuple, size markers, inspection commands, and failure
+  preservation rules. It intentionally withholds a source SHA until a local
+  implementation commit is separately approved and created.
+- Boundary: `LOCAL/EXACT-IMAGE PASS / TARGET NOT RUN`. No commit, push, TPU or
+  Kubernetes launch, Native rerun, image publication, or remote mutation
+  occurred.
+- Integration check: remote-tracking tip advanced by one to
+  `23e0bddfc4f742eecb66092db5bdc80def9571ca`. The incoming evidence commit
+  changes only `tasks/v1-apc-m15-target-debug/`; its path intersection with the
+  P60-2G concern is empty. The dirty worktree was not rebased. After explicit
+  commit approval, rebase the clean implementation commit onto the then-current
+  tip and rerun the focused/static gates before recording a launchable SHA.

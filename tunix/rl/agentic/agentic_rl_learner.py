@@ -760,7 +760,9 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       raise alignment.AlignmentGateError(f"P28 G5c red: {result}")
     return result["all_alignment_pass"]
 
-  def _run_p28_g6_update(self, observed_train_example) -> dict[str, Any]:
+  def _run_p28_g6_update(
+      self, observed_train_example, *, xprof_train_schedule=None
+  ) -> dict[str, Any]:
     """Streams the proven segmented gradient into an attested real update."""
     import json  # pylint: disable=g-import-not-at-top
     from flax import nnx  # pylint: disable=g-import-not-at-top
@@ -1170,10 +1172,15 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       }
       value_and_grad_start = time.perf_counter()
       if canonical_workload:
+        segmented_kwargs = {
+            "gradient_microbatch_sink": consume_scaled,
+            "deterministic_repeat": (p34_workload and p33_no_commit),
+        }
+        if xprof_train_schedule is not None:
+          segmented_kwargs["xprof_train_schedule"] = xprof_train_schedule
         result = adapter.segmented_dp_grpo_value_and_grad(
             **common,
-            gradient_microbatch_sink=consume_scaled,
-            deterministic_repeat=(p34_workload and p33_no_commit),
+            **segmented_kwargs,
         )
       else:
         result = adapter.segmented_grpo_value_and_grad(
@@ -1555,9 +1562,14 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           "gradient",
           actor_trainer.grad_accumulator.get(),
       )
-    with gsm8k_xprof.trace_annotation(
-        "optimizer_commit", update_step=self.rl_cluster.global_steps
-    ):
+    optimizer_annotation = (
+        xprof_train_schedule.optimizer_commit()
+        if xprof_train_schedule is not None
+        else gsm8k_xprof.trace_annotation(
+            "optimizer_commit", update_step=self.rl_cluster.global_steps
+        )
+    )
+    with optimizer_annotation:
       with self.rl_cluster._get_mesh_and_logical_axis_rules_cm(  # pylint: disable=protected-access
           rl_cluster_lib.Role.ACTOR
       ):
@@ -3134,10 +3146,24 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         # not at __enter__. Construct both parents only after the update-only
         # profiler window is open; otherwise their children are captured but
         # the two outer intervals begin before start_trace() and disappear.
-        train_step_annotation = gsm8k_xprof.train_step_annotation(
-            step_num=self.rl_cluster.global_steps
+        xprof_train_schedule = (
+            gsm8k_xprof.zero_hp_train_microsteps(
+                update_step=self.rl_cluster.global_steps,
+                microsteps=expected_grad_acc,
+            )
+            if gsm8k_xprof.arm() == "zero-hp"
+            else None
         )
-        update_annotation = gsm8k_xprof.trace_annotation("zero_tim_update")
+        train_step_annotation = (
+            contextlib.nullcontext()
+            if xprof_train_schedule is not None
+            else gsm8k_xprof.train_step_annotation(
+                step_num=self.rl_cluster.global_steps
+            )
+        )
+        update_annotation = gsm8k_xprof.trace_annotation(
+            "zero_tim_update", update_step=self.rl_cluster.global_steps
+        )
         # One flat PEFT_TRAIN span for the whole G6 update, mirroring the
         # official peft_trainer usage: official vocabulary, no nesting, no
         # custom names. The official call ends with async_end([train_loss])
@@ -3147,17 +3173,23 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         # there is nothing asynchronous left to register.
         with train_step_annotation:
           with update_annotation:
-            with self.rl_cluster.perf_v2.span(
-                perf_constants.PEFT_TRAIN,
-                self.rl_cluster.perf_v2.all_devices,
-                tags={
-                    perf_constants.STEP: self.rl_cluster.global_steps,
-                    perf_constants.ROLE: "actor",
-                },
+            with (
+                xprof_train_schedule
+                if xprof_train_schedule is not None
+                else contextlib.nullcontext()
             ):
-              segmented_result = self._run_p28_g6_update(
-                  merged_train_micro_batch
-              )
+              with self.rl_cluster.perf_v2.span(
+                  perf_constants.PEFT_TRAIN,
+                  self.rl_cluster.perf_v2.all_devices,
+                  tags={
+                      perf_constants.STEP: self.rl_cluster.global_steps,
+                      perf_constants.ROLE: "actor",
+                  },
+              ):
+                segmented_result = self._run_p28_g6_update(
+                    merged_train_micro_batch,
+                    xprof_train_schedule=xprof_train_schedule,
+                )
         if (
             canonical_workload
             and (

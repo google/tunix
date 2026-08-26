@@ -40,6 +40,10 @@ MODULE_CENSUS = _load(
     "v1_gsm8k_xprof_module_census",
     SCRIPTS / "census_gsm8k_xprof_modules.py",
 )
+SIZE_CENSUS = _load(
+    "v1_gsm8k_xprof_size_census",
+    SCRIPTS / "census_gsm8k_xprof_size.py",
+)
 GSM8K_XPROF = _load("gsm8k_xprof", ROOT / "tunix/rl/gsm8k_xprof.py")
 
 
@@ -52,11 +56,12 @@ def _common_env(arm: str) -> dict[str, str]:
       "CANON_VLLM_ENABLE_PREFIX_CACHING": "0",
       "CANON_P60_DETERMINISTIC_AB": "1",
       "CANON_XPROF_PHASE": "update",
-      "CANON_XPROF_SKIP_STEPS": "1",
+      "CANON_XPROF_SKIP_STEPS": "2",
       "CANON_XPROF_STEPS": "1",
       "CANON_XPROF_HOST_TRACER": "1",
       "CANON_XPROF_PYTHON_TRACER": "0",
-      "CANON_XPROF_TPU_TRACE_MODE": "TRACE_COMPUTE",
+      "CANON_XPROF_TPU_TRACE_MODE": "TRACE_ONLY_XLA",
+      "CANON_XPROF_LABELS": "1",
       "CANON_XPROF_DIR": "/tmp/xprof",
       "CANON_PERF_TRACE_DIR": "/tmp/perf",
   }
@@ -100,9 +105,9 @@ def _fixture(root: Path, arm: str) -> None:
   (perf / "perfetto_trace_v2_1.pb").write_bytes(b"perfetto")
   lines = [
       "[V1.GSM8K.XPROF] RUN_BEGIN arm=" + arm,
-      f"[V1.GSM8K.XPROF] PREFLIGHT_PASS arm={arm} topology=DP4xTP1 mesh_ids=[0, 2, 1, 3] prompts=8 generations=8 trajectories=64 groups=16 capture=update:1->2",
-      "[P51.XPROF] phase=update started step=1 anchor=update_entry tpu_trace_mode=TRACE_COMPUTE",
-      "[P51.XPROF] phase=update stopped step=2 anchor=step_completed",
+      f"[V1.GSM8K.XPROF] PREFLIGHT_PASS arm={arm} topology=DP4xTP1 mesh_ids=[0, 2, 1, 3] prompts=8 generations=8 trajectories=64 groups=16 capture=update:2->3",
+      "[P51.XPROF] phase=update started step=2 anchor=update_entry tpu_trace_mode=TRACE_ONLY_XLA",
+      "[P51.XPROF] phase=update stopped step=3 anchor=step_completed",
   ]
   for step in range(3):
     lines.append(
@@ -128,9 +133,25 @@ def _fixture(root: Path, arm: str) -> None:
         "zt_tr_dp_parallel_bwd_layer_00\n"
         "optimizer_tail=scaled_step:16,commit:1\n"
     )
+    (state / "trace_census.txt").write_text(
+        "V1_GSM8K_XPROF_TRACE_CENSUS_GREEN "
+        "train_steps=32..47 reverse_transactions=16 "
+        "optimizer_visible=1 optimizer_owned_by_last=1 "
+        "same_host_track=1 compiler_events=0\n"
+    )
   (state / "xprof_census.txt").write_text(xprof_detail)
   (state / "semantic_census.txt").write_text(
       "CENSUS_GREEN peft_train placed like weight_sync, no custom spans\n"
+  )
+  size_receipt = SIZE_CENSUS.build_receipt(root)
+  (state / "xprof_size_receipt.json").write_text(
+      json.dumps(size_receipt, indent=2, sort_keys=True) + "\n"
+  )
+  (state / "xprof_size_census.txt").write_text(
+      "V1_GSM8K_XPROF_SIZE_CENSUS_GREEN status=PASS "
+      f"xprof_bytes={size_receipt['total_bytes']} "
+      f"soft_warning_bytes={SIZE_CENSUS.SOFT_WARNING_BYTES} "
+      f"hard_max_bytes={SIZE_CENSUS.HARD_MAX_BYTES}\n"
   )
 
 
@@ -147,24 +168,29 @@ tamper="$5"
 driver="$root/driver.log"
 raw="$root/raw.log"
 manifest="$root/SHA256SUMS"
+xplane="$root/device.xplane.pb"
 gsm8k_xprof_choose_terminal zero-hp "$root" "$docker_rc" "$classifier_rc"
 gsm8k_xprof_write_terminal_manifest \
-  "$GSM8K_XPROF_TERMINAL_MARKER" "$driver" "$manifest" "$driver" "$raw"
-if [ "$tamper" = 1 ]; then
+  "$GSM8K_XPROF_TERMINAL_MARKER" "$driver" "$manifest" \
+  "$driver" "$raw" "$xplane"
+if [ "$tamper" = raw ]; then
   printf 'post-manifest tamper\n' >>"$raw"
+elif [ "$tamper" = xprof ]; then
+  printf 'post-manifest xprof tamper\n' >>"$xplane"
 fi
 if ! gsm8k_xprof_verify_manifest "$manifest"; then
   printf '[V1.GSM8K.XPROF] SHA_LEDGER_RED stage=verify root=%s\n' "$root" >&2
   exit 98
 fi
-printf '[V1.GSM8K.XPROF] SHA_LEDGER_PASS entries=2 root=%s\n' "$root"
+printf '[V1.GSM8K.XPROF] SHA_LEDGER_PASS entries=3 root=%s\n' "$root"
 printf '%s\n' "$GSM8K_XPROF_TERMINAL_MARKER"
 exit "$GSM8K_XPROF_TERMINAL_RC"
 '''
     cases = (
-        ("green", "0", "0", "0", 0, "GREEN", True),
-        ("red", "7", "0", "0", 1, "RED", True),
-        ("tamper", "0", "0", "1", 98, "GREEN", False),
+        ("green", "0", "0", "none", 0, "GREEN", True),
+        ("red", "7", "0", "none", 1, "RED", True),
+        ("tamper", "0", "0", "raw", 98, "GREEN", False),
+        ("xprof_tamper", "0", "0", "xprof", 98, "GREEN", False),
     )
     with tempfile.TemporaryDirectory() as directory:
       base = Path(directory)
@@ -174,6 +200,7 @@ exit "$GSM8K_XPROF_TERMINAL_RC"
           root.mkdir()
           (root / "driver.log").write_text("driver preamble\n")
           (root / "raw.log").write_text("raw evidence\n")
+          (root / "device.xplane.pb").write_bytes(b"xplane evidence\n")
           result = subprocess.run(
               [
                   "bash", "-euo", "pipefail", "-c", harness, "ledger-test",
@@ -231,6 +258,67 @@ fi
       ]
       self.assertEqual(len(terminal_lines), 1)
       self.assertFalse((green_root / "duplicate-SHA256SUMS").exists())
+
+  def test_xprof_size_budget_pass_warn_and_hard_red(self):
+    cases = (
+        ("pass", 1024, 0, "PASS", "GREEN"),
+        (
+            "warn",
+            SIZE_CENSUS.SOFT_WARNING_BYTES,
+            0,
+            "WARN",
+            "GREEN",
+        ),
+        (
+            "hard_red",
+            SIZE_CENSUS.HARD_MAX_BYTES,
+            1,
+            "FAIL",
+            "RED",
+        ),
+    )
+    with tempfile.TemporaryDirectory() as directory:
+      base = Path(directory)
+      for name, xplane_bytes, expected_rc, status, marker in cases:
+        with self.subTest(name=name):
+          root = base / name
+          profile = root / "train/xprof/plugins/profile/run"
+          profile.mkdir(parents=True)
+          with (profile / "device.xplane.pb").open("wb") as stream:
+            stream.truncate(xplane_bytes)
+          (profile / "device.trace.json.gz").write_bytes(b"trace")
+          output = root / "train/xprof_size_receipt.json"
+          result = subprocess.run(
+              [
+                  "python3",
+                  str(SCRIPTS / "census_gsm8k_xprof_size.py"),
+                  "--run-root",
+                  str(root),
+                  "--output",
+                  str(output),
+              ],
+              capture_output=True,
+              text=True,
+              check=False,
+          )
+          self.assertEqual(result.returncode, expected_rc, result)
+          self.assertIn(
+              f"V1_GSM8K_XPROF_SIZE_CENSUS_{marker} status={status}",
+              result.stdout,
+          )
+          receipt = json.loads(output.read_text())
+          self.assertEqual(receipt["status"], status)
+          self.assertEqual(
+              receipt["total_bytes"], xplane_bytes + len(b"trace")
+          )
+          self.assertEqual(receipt["counts"]["xplane"], 1)
+          self.assertEqual(receipt["counts"]["trace_json_gz"], 1)
+          if status == "FAIL":
+            self.assertTrue(
+                any("exceeds_hard_max" in reason for reason in receipt["reasons"])
+            )
+          else:
+            self.assertEqual(receipt["reasons"], [])
 
   def test_zero_hp_module_census_requires_complete_optimizer_tail(self):
     counts = {
@@ -339,10 +427,11 @@ fi
       hierarchy = base / "zero-hp/train/hierarchy_census.txt"
       hierarchy.write_text(
           "V1_GSM8K_XPROF_HIERARCHY_CENSUS_GREEN "
-          "train_step=1 host_plane=/host:CPU host_line=python3 "
-          "steps_planes=8 forward_groups=16 reverse_groups=16 "
+          "update_step=2 train_steps=32..47 host_plane=/host:CPU "
+          "host_line=python3 steps_planes=8 forward_groups=16 "
+          "reverse_transactions=16 "
           "transactions=16 micro_steps=0..15 last_accumulate=15 "
-          "optimizer_update=1\n"
+          "optimizer_owned_by_last=1 compiler_events=0\n"
       )
       revised_zero = ARM_CLASSIFIER.classify(
           arm="zero-hp",
@@ -356,8 +445,36 @@ fi
           semantic_census_rc=0,
           require_hierarchy=True,
           hierarchy_census_rc=0,
+          trace_census_rc=0,
       )
       self.assertEqual(revised_zero["verdict"], "PASS", revised_zero)
+      size_receipt_path = base / "zero-hp/train/xprof_size_receipt.json"
+      original_size_receipt = size_receipt_path.read_text()
+      stale_size_receipt = json.loads(original_size_receipt)
+      stale_size_receipt["total_bytes"] += 1
+      size_receipt_path.write_text(json.dumps(stale_size_receipt) + "\n")
+      stale_size = ARM_CLASSIFIER.classify(
+          arm="zero-hp",
+          run_root=base / "zero-hp",
+          source_sha="1" * 40,
+          source_diff_sha256="2" * 64,
+          runtime_manifest_sha256="5" * 64,
+          model_snapshot="3" * 40,
+          image_id="sha256:" + "4" * 64,
+          xprof_census_rc=0,
+          semantic_census_rc=0,
+          size_census_rc=0,
+          require_hierarchy=True,
+          hierarchy_census_rc=0,
+          trace_census_rc=0,
+      )
+      self.assertEqual(stale_size["verdict"], "FAIL", stale_size)
+      self.assertTrue(
+          any("xprof_size_receipt.total_bytes=" in reason
+              for reason in stale_size["reasons"]),
+          stale_size,
+      )
+      size_receipt_path.write_text(original_size_receipt)
       forbidden_native = ARM_CLASSIFIER.classify(
           arm="native",
           run_root=base / "native",
@@ -370,6 +487,7 @@ fi
           semantic_census_rc=0,
           require_hierarchy=True,
           hierarchy_census_rc=0,
+          trace_census_rc=0,
       )
       self.assertEqual(forbidden_native["verdict"], "FAIL")
       self.assertIn(
@@ -418,10 +536,20 @@ fi
     self.assertIn("census_gsm8k_xprof_modules.py", common)
     self.assertIn("census_gsm8k_semantic_trace.py", common)
     self.assertIn("census_gsm8k_xprof_hierarchy.py", common)
+    self.assertIn("census_gsm8k_xprof_trace.py", common)
+    self.assertIn("census_gsm8k_xprof_size.py", common)
     self.assertIn("--require-hierarchy", common)
+    self.assertIn('--trace-census-rc "$trace_census_rc"', common)
+    self.assertIn('--size-census-rc "$size_census_rc"', common)
+    self.assertIn("-e CANON_XPROF_SKIP_STEPS=2", common)
+    self.assertIn("CANON_XPROF_TPU_TRACE_MODE=TRACE_ONLY_XLA", common)
+    self.assertIn("-e CANON_PERF_TRACE_EXPORT_STEP=2", common)
     self.assertIn("finalize_gsm8k_xprof_evidence.sh", common)
     self.assertIn('sha_inputs=("$raw" "$driver")', common)
     self.assertIn('"$xprof_census" "$semantic_census" "$classification"', common)
+    self.assertIn('"$size_census" "$size_receipt"', common)
+    self.assertIn('find "$xprof_dir" -type f', common)
+    self.assertIn("hard:1500000000", common)
     choose = common.index("gsm8k_xprof_choose_terminal")
     write = common.index("gsm8k_xprof_write_terminal_manifest")
     verify = common.index("gsm8k_xprof_verify_manifest")

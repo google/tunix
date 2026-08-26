@@ -29,6 +29,7 @@ Native-vs-Zero timing from the existing input-mismatched pair.
 | [P60-2D](phases/p60-2d-attribution-and-next-decision.md) | Deterministic hierarchy summary and performance follow-up decision | All-plane stage report produced; any optimization is split into a new single-variable phase | pending |
 | [P60-2E](phases/p60-2e-microstep-readability.md) | Truthful accumulator microstep and optimizer-update metadata without pretending Zero-HP is Native's monolithic graph | CPU/negative controls, exact-image 16-span receipt, old-artifact fail-closed hierarchy probe, 8/8 device planes with scaled-step×16 + commit×1, flag/diff/no-sync gates | core target gates pass; evidence packaging red |
 | [P60-2F](phases/p60-2f-evidence-ledger-finalization.md) | Fail-closed terminal marker and immutable evidence-ledger finalization | GREEN/RED/tamper CPU controls, immediate `sha256sum -c`, no post-manifest hashed writes, exact-image and static gates | historical clean-SHA target pass (`5549b5b6`); latest-tip integration exact-image admitted (`c87838d8`), target not rerun |
+| [P60-2G](phases/p60-2g-native-train-steps.md) | Native-like `train_N` navigation for the 16 real Zero-HP reverse/accumulate transactions and a warm update-2 UI carrier | train 32..47, last train owns optimizer, zero captured compiler events, full XPlane and trace-JSON tail gates | local/exact-image pass; target not run |
 
 ## Decisions
 
@@ -56,7 +57,8 @@ Native-vs-Zero timing from the existing input-mismatched pair.
 - Decision: do not add synchronization to make spans visually line up. If
   asynchronous issue intervals prove insufficient, fail P60-2C and build a
   derived view from timestamps rather than perturb the measured schedule.
-- Decision: do not fabricate Native's 16 monolithic `train` microsteps. Keep
+- Historical P60-2E decision, superseded for navigation by P60-2G: do not
+  fabricate Native's 16 monolithic `train` microsteps. Keep
   one whole-update `train(step_num=global_step)` and label the real Zero-HP
   accumulator sinks with `micro_step` plus a unique last-accumulator bit; keep
   optimizer commit separate and label it with `update_step`.
@@ -71,6 +73,20 @@ Native-vs-Zero timing from the existing input-mismatched pair.
 - Hypothesis: one top-level `StepTraceAnnotation` plus bounded group/stage
   `TraceAnnotation` scopes will restore navigation while adding only tens of
   host events to a capture that currently contains 59,028 TPU module events.
+- Superseding P60-2E navigation decision: for the signed Zero-HP XProf arm,
+  expose the 16 real reverse/reduce/accumulate transactions as Native API
+  `train` steps. Step number is `update_step * 16 + micro_step`; the last real
+  train span remains open through optimizer commit, and no synthetic terminal
+  step is emitted. Forward/loss remain truthful siblings under the update.
+- Decision: capture update 2 rather than update 1 because update 0 changes
+  sharding at commit and update 1 still compiles the stable post-commit
+  identity. Use `TRACE_ONLY_XLA` as the low-density UI carrier and separately
+  require the complete hierarchy/tail in both full XPlane and trace JSON.
+- Decision: do not add an operator-tunable size flag. The signed task runner
+  fixes the XProf logical-byte budget at soft 1.2 GB / hard 1.5 GB, records the
+  complete regular-file inventory, and preserves but rejects oversized roots.
+  Hash raw XProf and semantic Perfetto directly so a post-manifest artifact
+  mutation fails independent verification.
 
 ## Analysis authority
 

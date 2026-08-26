@@ -31,6 +31,10 @@ HIERARCHY = _load(
     "v1_gsm8k_xprof_hierarchy",
     TASK / "scripts/census_gsm8k_xprof_hierarchy.py",
 )
+TRACE_CENSUS = _load(
+    "v1_gsm8k_xprof_trace",
+    TASK / "scripts/census_gsm8k_xprof_trace.py",
+)
 GSM8K_XPROF = _load("p60_gsm8k_xprof", ROOT / "tunix/rl/gsm8k_xprof.py")
 
 
@@ -40,16 +44,19 @@ def _span(name, start, duration, *, line_name="python3", **stats):
 
 def _fixture():
   spans = [
-      _span("train", 0, 1000, _r="1", step_num="1"),
-      _span("zero_tim_update", 10, 980),
-      _span("forward_groups", 20, 180),
-      _span("loss_pullback", 210, 10),
-      _span("reverse_groups", 230, 620),
-      _span("optimizer_commit", 900, 50, update_step=1),
+      _span("zero_tim_update", 0, 1000, update_step=2),
+      _span("forward_groups", 10, 180),
+      _span("loss_pullback", 200, 10),
+      _span("optimizer_commit", 900, 50, update_step=2),
   ]
   for index in range(16):
     spans.append(_span("forward_group", 25 + index * 10, 5, group_index=index))
-    start = 240 + index * 35
+    train_start = 230 + index * 35
+    train_duration = 955 - train_start if index == 15 else 32
+    spans.append(_span(
+        "train", train_start, train_duration, _r="1", step_num=32 + index
+    ))
+    start = train_start + 1
     spans.extend((
         _span("reverse_group", start, 30, group_index=index),
         _span("replay_forward", start + 1, 4, group_index=index),
@@ -66,7 +73,8 @@ def _fixture():
         ),
     ))
   device_steps = {f"/device:TPU:{index}": 100 for index in range(8)}
-  return spans, device_steps
+  compiler_counts = {name: 0 for name in HIERARCHY.COMPILER_EVENTS}
+  return spans, device_steps, compiler_counts
 
 
 class HierarchyTest(unittest.TestCase):
@@ -75,12 +83,10 @@ class HierarchyTest(unittest.TestCase):
     learner = (
         ROOT / "tunix/rl/agentic/agentic_rl_learner.py"
     ).read_text()
-    end = learner.index(
-        "segmented_result = self._run_p28_g6_update(",
-        learner.index("train_step_annotation ="),
-    )
+    end = learner.index("segmented_result = self._run_p28_g6_update(")
     seam = learner[learner.rfind("marker_prefix", 0, end):end]
     start = seam.index("_canon_xprof_update_entry()")
+    self.assertLess(start, seam.index("xprof_train_schedule ="))
     self.assertLess(start, seam.index("train_step_annotation ="))
     self.assertLess(start, seam.index("update_annotation ="))
 
@@ -124,6 +130,18 @@ class HierarchyTest(unittest.TestCase):
         optimizer_metadata,
         {"update_step": "self.rl_cluster.global_steps"},
     )
+    adapter = (
+        ROOT / "tunix/rl/canonical_qwen3_adapter.py"
+    ).read_text()
+    self.assertIn("xprof_train_schedule.transaction(index)", adapter)
+    self.assertNotIn(
+        'with gsm8k_xprof.trace_annotation("reverse_groups"):',
+        adapter[adapter.index("  def segmented_dp_grpo_value_and_grad("):],
+    )
+    learner = (
+        ROOT / "tunix/rl/agentic/agentic_rl_learner.py"
+    ).read_text()
+    self.assertIn("xprof_train_schedule.optimizer_commit()", learner)
 
   def test_label_flag_noop_positive_and_fail_closed(self):
     for value in (None, "", "0"):
@@ -162,8 +180,8 @@ class HierarchyTest(unittest.TestCase):
           micro_step=15,
           is_last_accumulate=1,
       )
-      GSM8K_XPROF.trace_annotation("optimizer_commit", update_step=1)
-      GSM8K_XPROF.train_step_annotation(step_num=1)
+      GSM8K_XPROF.trace_annotation("optimizer_commit", update_step=2)
+      GSM8K_XPROF.train_step_annotation(step_num=32)
     self.assertEqual(calls, [
         ("trace", "reverse_group", {"group_index": 3}),
         (
@@ -175,8 +193,8 @@ class HierarchyTest(unittest.TestCase):
                 "is_last_accumulate": 1,
             },
         ),
-        ("trace", "optimizer_commit", {"update_step": 1}),
-        ("step", "train", {"step_num": 1}),
+        ("trace", "optimizer_commit", {"update_step": 2}),
+        ("step", "train", {"step_num": 32}),
     ])
 
     with mock.patch.dict(
@@ -193,16 +211,25 @@ class HierarchyTest(unittest.TestCase):
         GSM8K_XPROF.trace_annotation("forward_group", group_index="3")
 
   def test_pure_hierarchy_validator_positive(self):
-    spans, device_steps = _fixture()
+    spans, device_steps, compiler_counts = _fixture()
     self.assertEqual(
         HIERARCHY.validate_hierarchy(
-            spans, device_step_counts=device_steps, expected_step=1
+            spans,
+            device_step_counts=device_steps,
+            compiler_counts=compiler_counts,
+            expected_update_step=2,
+        ),
+        [],
+    )
+    self.assertEqual(
+        TRACE_CENSUS.validate_trace(
+            spans, compiler_counts=compiler_counts, expected_update_step=2
         ),
         [],
     )
 
   def test_pure_hierarchy_validator_strong_negatives(self):
-    spans, device_steps = _fixture()
+    spans, device_steps, compiler_counts = _fixture()
     cases = {}
     cases["missing_parent"] = [
         span for span in spans if span.name != "zero_tim_update"
@@ -211,7 +238,7 @@ class HierarchyTest(unittest.TestCase):
         _span("forward_group", 25, 5, group_index=0)
     ]
     cases["orphan_optimizer"] = [
-        _span("optimizer_commit", 995, 1)
+        _span("optimizer_commit", 970, 1, update_step=2)
         if span.name == "optimizer_commit" else span
         for span in spans
     ]
@@ -258,7 +285,7 @@ class HierarchyTest(unittest.TestCase):
         for span in spans
     ]
     cases["wrong_optimizer_update"] = [
-        _span("optimizer_commit", 900, 50, update_step=2)
+        _span("optimizer_commit", 900, 50, update_step=3)
         if span.name == "optimizer_commit" else span
         for span in spans
     ]
@@ -278,24 +305,115 @@ class HierarchyTest(unittest.TestCase):
     for name, changed in cases.items():
       with self.subTest(name=name):
         self.assertTrue(HIERARCHY.validate_hierarchy(
-            changed, device_step_counts=device_steps, expected_step=1
+            changed,
+            device_step_counts=device_steps,
+            compiler_counts=compiler_counts,
+            expected_update_step=2,
         ))
 
     missing_steps = dict(device_steps)
     missing_steps["/device:TPU:7"] = 0
     reasons = HIERARCHY.validate_hierarchy(
-        spans, device_step_counts=missing_steps, expected_step=1
+        spans,
+        device_step_counts=missing_steps,
+        compiler_counts=compiler_counts,
+        expected_update_step=2,
     )
     self.assertIn("device_steps:/device:TPU:7=empty", reasons)
 
     wrong_track = cases["wrong_host_track"]
     reasons = HIERARCHY.validate_hierarchy(
-        wrong_track, device_step_counts=device_steps, expected_step=1
+        wrong_track,
+        device_step_counts=device_steps,
+        compiler_counts=compiler_counts,
+        expected_update_step=2,
     )
     self.assertIn(
         "model_backward[3]:host_line=worker expected=python3",
         reasons,
     )
+
+    compile_reasons = HIERARCHY.validate_hierarchy(
+        spans,
+        device_step_counts=device_steps,
+        compiler_counts={
+            **compiler_counts,
+            "PJRT_Client_Compile": 1,
+        },
+        expected_update_step=2,
+    )
+    self.assertIn(
+        "captured_compile:PJRT_Client_Compile=1 expected=0",
+        compile_reasons,
+    )
+
+  def test_train_microstep_schedule_keeps_last_open_through_optimizer(self):
+    calls = []
+
+    class RecordingContext:
+
+      def __init__(self, kind, name, stats):
+        self.record = (kind, name, stats)
+
+      def __enter__(self):
+        calls.append(("enter",) + self.record)
+        return self
+
+      def __exit__(self, exc_type, exc_value, traceback):
+        del exc_type, exc_value, traceback
+        calls.append(("exit",) + self.record)
+        return False
+
+    fake_jax = types.SimpleNamespace(
+        profiler=types.SimpleNamespace(
+            TraceAnnotation=lambda name, **stats: RecordingContext(
+                "trace", name, stats
+            ),
+            StepTraceAnnotation=lambda name, **stats: RecordingContext(
+                "step", name, stats
+            ),
+        )
+    )
+    with mock.patch.dict(
+        os.environ, {"CANON_XPROF_LABELS": "1"}, clear=True
+    ), mock.patch.dict(sys.modules, {"jax": fake_jax}):
+      schedule = GSM8K_XPROF.ZeroHpTrainMicrostepSchedule(update_step=2)
+      with schedule:
+        for index in range(16):
+          with schedule.transaction(index):
+            calls.append(("body", index))
+        with schedule.optimizer_commit():
+          calls.append(("optimizer_body",))
+    entered_steps = [
+        item[3]["step_num"]
+        for item in calls
+        if item[:3] == ("enter", "step", "train")
+    ]
+    self.assertEqual(entered_steps, list(range(32, 48)))
+    last_exit = calls.index(
+        ("exit", "step", "train", {"step_num": 47})
+    )
+    optimizer_exit = calls.index(
+        ("exit", "trace", "optimizer_commit", {"update_step": 2})
+    )
+    self.assertGreater(last_exit, optimizer_exit)
+    self.assertFalse(any(
+        item[:3] == ("enter", "step", "train")
+        and item[3]["step_num"] == 48
+        for item in calls
+    ))
+
+    with mock.patch.dict(
+        os.environ, {"CANON_XPROF_LABELS": "1"}, clear=True
+    ), mock.patch.dict(sys.modules, {"jax": fake_jax}):
+      with self.assertRaisesRegex(RuntimeError, "before all transactions"):
+        with GSM8K_XPROF.ZeroHpTrainMicrostepSchedule(update_step=2):
+          pass
+      schedule = GSM8K_XPROF.ZeroHpTrainMicrostepSchedule(update_step=2)
+      with self.assertRaisesRegex(RuntimeError, "16 completed"):
+        with schedule:
+          with schedule.optimizer_commit():
+            pass
 
 
 if __name__ == "__main__":

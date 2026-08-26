@@ -1,25 +1,23 @@
 # GSM8K one-host Native vs Zero-HP XProf runbook
 
-> **P60-2 readability target has a historical clean-SHA pass.** P60-2E's first
-> clean-SHA Zero-HP
-> run passed its runtime, hierarchy, all-plane, optimizer-tail, alignment, and
-> classifier gates, but its old runner hashed `driver.log` before appending the
-> final GREEN line. Its strongest claim is therefore `CORE TARGET GATES PASS /
-> EVIDENCE PACKAGING RED`, not TARGET PASS. P60-2F repairs that ordering;
-> historical clean source `5549b5b6` has a fresh TARGET PASS, while the
-> latest-tip integration `c87838d8` is local/exact-image admitted and was not
-> target-rerun. Before any new run, read
-> [`HANDOFF_P60_2.md`](HANDOFF_P60_2.md) and all `phases/p60-2*.md`. Do not
-> rerun Native. A fresh Zero-HP canary is allowed only after P60-2B's
-> host/static/exact-image gates and explicit user approval. The revised census
-> also requires the Native API-compatible host `train(step_num=1)` event, the
-> complete hierarchy on one `/host:CPU` `python3` track, non-empty device
-> `Steps` rows on 8/8 TPU planes, `micro_step=0..15`, exactly one last
-> accumulator at 15, optimizer `update_step=1`, and, on every device plane,
-> `jit__precomputed_gradient_scaled_step`×16 plus
-> `jit__precomputed_gradient_commit`×1. API-compatible does not
-> mean Native-compatible cadence, cardinality, or monolithic program shape:
-> Zero-HP intentionally retains one whole-update `train` parent.
+> **P60-2G supersedes the historical whole-update navigation contract.**
+> Historical clean source `5549b5b6` remains TARGET PASS for P60-2F's original
+> full-XPlane contract, but its exported UI trace has only one 62.66-second
+> `train(1)` and omits the reverse/optimizer tail. Under P60-2G it is
+> `NUMERICAL/FULL-XPLANE PASS / NATIVE-LIKE UI FAIL / PERFORMANCE
+> INCONCLUSIVE`. The current local change captures warm update 2 and emits the
+> 16 real reverse/reduce/accumulate transactions as Native API train steps
+> 32..47; train 47 owns the real optimizer commit and there is no synthetic
+> train 48. A fresh Zero-HP run requires clean local and exact-image gates,
+> then separate explicit launch approval. Do not rerun Native.
+
+P60-2G fixes the signed artifact budget as well: every regular file under
+`train/xprof` contributes its logical byte size, with a soft warning at
+`1,200,000,000` bytes and a hard RED above `1,500,000,000` bytes. The runner
+does not truncate an oversized artifact. It writes a machine-readable
+`xprof_size_receipt.json`, verifies it against the current files in the arm
+classifier, and directly hashes every raw XProf file plus semantic Perfetto in
+the final root manifest.
 
 The primary analysis method is
 `/home/yuxuan/code_rl_repro/.claude/skills/read-xprof/SKILL.md`: trainer work
@@ -42,18 +40,16 @@ aggregate-plus-P60 pinned exact-image ladder was rerun on the final rebased
 three-commit tree before publication rather than admitted by byte identity.
 The registry contains 378 flags, including P64.
 
-Run from the exact worktree on the direct four-chip v5p. Do not run the two
-arms concurrently. During development only, the dirty-tree override is
-explicit; acceptance evidence requires a clean committed tree.
+Run P60-2G from the exact worktree on the direct four-chip v5p. The target is
+Zero-HP only; do not run Native. During development only, the dirty-tree
+override is explicit; acceptance evidence requires a clean committed tree.
 
 ```bash
 export V1_GSM8K_XPROF_EXPECT_HOSTNAME="$(hostname)"
-export V1_GSM8K_XPROF_ALLOW_DIRTY=1
+unset V1_GSM8K_XPROF_ALLOW_DIRTY
 
-bash canon-zero-tim/tasks/v1-gsm8k-onehost-xprof-pair/scripts/run_onehost_gsm8k_xprof_native.sh \
-  '<fresh-native-label>'
 bash canon-zero-tim/tasks/v1-gsm8k-onehost-xprof-pair/scripts/run_onehost_gsm8k_xprof_zero_hp.sh \
-  '<fresh-zero-label>'
+  'p60_2g_native_train_steps_zero_<unique-date>'
 ```
 
 Each successful arm must end on stdout in this order:
@@ -67,6 +63,17 @@ The wrapper must return 0, and `sha256sum -c <root>/SHA256SUMS` must
 independently return 0. `driver.log` contains exactly one terminal GREEN or
 RED marker and is never changed after manifest construction. A standalone
 GREEN marker without `SHA_LEDGER_PASS` is not acceptance evidence.
+
+The remote operator must also require:
+
+```text
+V1_GSM8K_XPROF_SIZE_CENSUS_GREEN status=<PASS|WARN> ... hard_max_bytes=1500000000
+```
+
+`PASS` means at most 1.2 GB; `WARN` is admissible only while the exact total is
+at most 1.5 GB. Inspect `train/xprof_size_receipt.json` for per-file sizes. Any
+size census RED, stale receipt, symlink, missing raw profile, or total above
+the hard maximum forces arm classification FAIL while preserving the root.
 
 The runners set `CANON_P60_DETERMINISTIC_AB=1` in both arms. This is a
 diagnostic input-control flag: it pins engine seed 42, serial scheduling,
@@ -111,10 +118,11 @@ backward-capture proof. The postflight returns 0 for a matched PASS and 3 for
 a scientifically valid input mismatch; both write the complete output
 directory. Any other nonzero return is a tooling/capture failure.
 
-The arm classifier already requires one non-empty XPlane, one non-empty trace,
-all TPU planes arm-specific-backward-present/decode-absent, and a valid
-one-update semantic Perfetto. The summary is additional attribution, not a
-substitute for those gates.
+The Zero-HP arm classifier requires one non-empty XPlane, one non-empty trace,
+all TPU planes backward-present/decode-absent, a valid one-update semantic
+Perfetto, the full-XPlane hierarchy/warm-compile gate, and the independent UI
+trace-JSON gate. The summary is additional attribution, not a substitute for
+those gates.
 
 Artifact authority is ordered as follows:
 
@@ -122,9 +130,13 @@ Artifact authority is ordered as follows:
    complete backward was captured;
 2. the semantic Perfetto decides whether the requested update window opened
    and closed around the intended training transaction;
-3. `trace.json.gz` is a convenient operation-attribution view only. Its trace
-   buffer can omit modules even when the XPlane is complete, so never use a
-   raw module count from this file as the backward-completeness gate.
+3. `trace.json.gz` decides the P60-2G UI-navigation claim: train 32..47, all
+   reverse transactions, and optimizer containment must be visible. It still
+   cannot replace the full-XPlane module/backward completeness gate.
+4. `xprof_size_receipt.json` decides the transfer-size contract and must match
+   every current regular file under `train/xprof`; the manifest directly
+   covers those raw files rather than relying only on hashes copied into the
+   classification record.
 
 Certified one-host development evidence from 2026-08-24 demonstrates this
 distinction: Native has 16/16 `jit__train_step` modules on every one of eight

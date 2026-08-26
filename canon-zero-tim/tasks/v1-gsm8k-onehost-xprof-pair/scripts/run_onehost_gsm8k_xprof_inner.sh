@@ -65,7 +65,7 @@ print(
     "[V1.GSM8K.XPROF] PREFLIGHT_PASS "
     f"arm={selected} topology=DP4xTP1 mesh_ids={actual_ids} "
     "prompts=8 generations=8 trajectories=64 groups=16 "
-    "capture=update:1->2",
+    "capture=update:2->3",
     flush=True,
 )
 PY

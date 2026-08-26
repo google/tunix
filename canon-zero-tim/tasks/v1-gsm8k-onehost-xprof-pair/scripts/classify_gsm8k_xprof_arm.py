@@ -14,6 +14,9 @@ import re
 _WORK_PREFIX = "[V1.GSM8K.XPROF.WORK] "
 _ALIGN_RE = re.compile(r"^\[CANON_ALIGN(?:_PRE)?\].*\bverdict=(PASS|FAIL)\b")
 _CANON_ADAPTER_MARKER = "[CANON_" "ADAPTER]"
+_SIZE_SCHEMA = "canon.v1.gsm8k-onehost-xprof.size.v1"
+_SIZE_SOFT_WARNING_BYTES = 1_200_000_000
+_SIZE_HARD_MAX_BYTES = 1_500_000_000
 
 
 def _sha256(path: Path) -> str:
@@ -41,6 +44,114 @@ def _work_receipts(text: str, reasons: list[str]) -> list[dict]:
   return rows
 
 
+def _size_receipt(
+    path: Path, xprof_root: Path, reasons: list[str]
+) -> dict | None:
+  """Validates that the immutable budget receipt matches current files."""
+  try:
+    receipt = json.loads(path.read_text(encoding="utf-8"))
+  except (OSError, json.JSONDecodeError) as exc:
+    reasons.append(f"xprof_size_receipt:{type(exc).__name__}")
+    return None
+  if not isinstance(receipt, dict):
+    reasons.append("xprof_size_receipt:not_object")
+    return None
+  expected = {
+      "schema": _SIZE_SCHEMA,
+      "xprof_root": "train/xprof",
+      "byte_basis": "sum_of_logical_bytes_for_regular_files",
+      "soft_warning_bytes": _SIZE_SOFT_WARNING_BYTES,
+      "hard_max_bytes": _SIZE_HARD_MAX_BYTES,
+  }
+  for key, value in expected.items():
+    if receipt.get(key) != value:
+      reasons.append(f"xprof_size_receipt.{key}={receipt.get(key)!r}")
+
+  actual_files = {}
+  if xprof_root.is_dir():
+    for candidate in xprof_root.rglob("*"):
+      if candidate.is_symlink():
+        reasons.append(
+            "xprof_size_receipt.symlink="
+            + candidate.relative_to(xprof_root).as_posix()
+        )
+      elif candidate.is_file():
+        actual_files[candidate.relative_to(xprof_root).as_posix()] = (
+            candidate.stat().st_size
+        )
+  recorded_files = {}
+  rows = receipt.get("files")
+  if not isinstance(rows, list):
+    reasons.append("xprof_size_receipt.files:not_list")
+    rows = []
+  for row in rows:
+    if not isinstance(row, dict):
+      reasons.append("xprof_size_receipt.files:not_object")
+      continue
+    relative = row.get("path")
+    size = row.get("bytes")
+    if (
+        not isinstance(relative, str)
+        or not relative
+        or Path(relative).is_absolute()
+        or ".." in Path(relative).parts
+        or not isinstance(size, int)
+        or isinstance(size, bool)
+        or size < 0
+    ):
+      reasons.append(f"xprof_size_receipt.file={row!r}")
+      continue
+    if relative in recorded_files:
+      reasons.append(f"xprof_size_receipt.duplicate={relative}")
+    recorded_files[relative] = size
+  if recorded_files != actual_files:
+    reasons.append("xprof_size_receipt.files_mismatch")
+
+  total_bytes = sum(actual_files.values())
+  actual_counts = {
+      "xplane": sum(name.endswith(".xplane.pb") for name in actual_files),
+      "trace_json_gz": sum(
+          name.endswith(".trace.json.gz") for name in actual_files
+      ),
+      "other": sum(
+          not name.endswith((".xplane.pb", ".trace.json.gz"))
+          for name in actual_files
+      ),
+  }
+  if receipt.get("counts") != actual_counts:
+    reasons.append(
+        f"xprof_size_receipt.counts={receipt.get('counts')!r} "
+        f"actual={actual_counts!r}"
+    )
+  if receipt.get("total_bytes") != total_bytes:
+    reasons.append(
+        "xprof_size_receipt.total_bytes="
+        f"{receipt.get('total_bytes')!r} actual={total_bytes}"
+    )
+  if receipt.get("file_count") != len(actual_files):
+    reasons.append(
+        "xprof_size_receipt.file_count="
+        f"{receipt.get('file_count')!r} actual={len(actual_files)}"
+    )
+  if total_bytes > _SIZE_HARD_MAX_BYTES:
+    reasons.append(
+        f"xprof_bytes={total_bytes} exceeds_hard_max={_SIZE_HARD_MAX_BYTES}"
+    )
+  expected_status = (
+      "FAIL" if total_bytes > _SIZE_HARD_MAX_BYTES
+      else "WARN" if total_bytes > _SIZE_SOFT_WARNING_BYTES
+      else "PASS"
+  )
+  if receipt.get("status") != expected_status:
+    reasons.append(
+        f"xprof_size_receipt.status={receipt.get('status')!r} "
+        f"expected={expected_status}"
+    )
+  if receipt.get("reasons") != []:
+    reasons.append("xprof_size_receipt.reasons_nonempty")
+  return receipt
+
+
 def classify(
     *,
     arm: str,
@@ -52,8 +163,10 @@ def classify(
     image_id: str,
     xprof_census_rc: int,
     semantic_census_rc: int,
+    size_census_rc: int = 0,
     require_hierarchy: bool = False,
     hierarchy_census_rc: int | None = None,
+    trace_census_rc: int | None = None,
 ) -> dict:
   if arm not in ("native", "zero-hp"):
     raise ValueError(f"invalid arm: {arm!r}")
@@ -63,10 +176,20 @@ def classify(
   xprof_census_path = state / "xprof_census.txt"
   semantic_census_path = state / "semantic_census.txt"
   hierarchy_census_path = state / "hierarchy_census.txt"
+  trace_census_path = state / "trace_census.txt"
+  size_census_path = state / "xprof_size_census.txt"
+  size_receipt_path = state / "xprof_size_receipt.json"
   reasons = []
-  required = [raw_path, driver_path, xprof_census_path, semantic_census_path]
+  required = [
+      raw_path,
+      driver_path,
+      xprof_census_path,
+      semantic_census_path,
+      size_census_path,
+      size_receipt_path,
+  ]
   if require_hierarchy:
-    required.append(hierarchy_census_path)
+    required.extend((hierarchy_census_path, trace_census_path))
   for path in required:
     if not path.is_file() or path.stat().st_size == 0:
       reasons.append(f"missing_or_empty:{path.name}")
@@ -86,6 +209,21 @@ def classify(
       if hierarchy_census_path.is_file()
       else ""
   )
+  trace_text = (
+      trace_census_path.read_text(encoding="utf-8", errors="replace")
+      if trace_census_path.is_file()
+      else ""
+  )
+  size_text = (
+      size_census_path.read_text(encoding="utf-8", errors="replace")
+      if size_census_path.is_file()
+      else ""
+  )
+  size_receipt = (
+      _size_receipt(size_receipt_path, state / "xprof", reasons)
+      if size_receipt_path.is_file()
+      else None
+  )
 
   steps = len(re.findall(r"Global step \d+ completed in", text))
   if steps != 3:
@@ -94,10 +232,10 @@ def classify(
       f"[V1.GSM8K.XPROF] PREFLIGHT_PASS arm={arm} topology=DP4xTP1"
   ) != 1:
     reasons.append("preflight_marker")
-  if text.count("[P51.XPROF] phase=update started step=1 ") != 1:
+  if text.count("[P51.XPROF] phase=update started step=2 ") != 1:
     reasons.append("xprof_start_step")
   if text.count(
-      "[P51.XPROF] phase=update stopped step=2 anchor=step_completed"
+      "[P51.XPROF] phase=update stopped step=3 anchor=step_completed"
   ) != 1:
     reasons.append("xprof_stop_step")
   if text.count(
@@ -137,6 +275,10 @@ def classify(
     reasons.append(f"xprof_census_rc={xprof_census_rc}")
   if semantic_census_rc != 0 or "CENSUS_GREEN" not in semantic_text:
     reasons.append(f"semantic_census_rc={semantic_census_rc}")
+  if size_census_rc != 0 or (
+      "V1_GSM8K_XPROF_SIZE_CENSUS_GREEN" not in size_text
+  ):
+    reasons.append(f"size_census_rc={size_census_rc}")
   if require_hierarchy:
     if arm != "zero-hp":
       reasons.append("hierarchy_requirement_is_zero_hp_only")
@@ -144,6 +286,10 @@ def classify(
         "V1_GSM8K_XPROF_HIERARCHY_CENSUS_GREEN" not in hierarchy_text
     ):
       reasons.append(f"hierarchy_census_rc={hierarchy_census_rc}")
+    if trace_census_rc != 0 or (
+        "V1_GSM8K_XPROF_TRACE_CENSUS_GREEN" not in trace_text
+    ):
+      reasons.append(f"trace_census_rc={trace_census_rc}")
 
   align_verdicts = [
       match.group(1)
@@ -170,7 +316,7 @@ def classify(
     if "zt_tr_dp_parallel_bwd_" not in xprof_text:
       reasons.append("zero_semantic_parallel_backward_absent")
 
-  profiled_work = work_by_step.get(1)
+  profiled_work = work_by_step.get(2)
   comparable_work = None
   if isinstance(profiled_work, dict):
     comparable_work = {
@@ -202,10 +348,26 @@ def classify(
       "topology": {"dp": 4, "tp": 1, "devices": 4},
       "capture": {
           "phase": "update",
-          "start_step": 1,
-          "stop_step": 2,
+          "start_step": 2,
+          "stop_step": 3,
           "hierarchy_required": require_hierarchy,
       },
+      "xprof_budget": (
+          {
+              key: size_receipt.get(key)
+              for key in (
+                  "status",
+                  "byte_basis",
+                  "soft_warning_bytes",
+                  "hard_max_bytes",
+                  "total_bytes",
+                  "file_count",
+                  "counts",
+              )
+          }
+          if isinstance(size_receipt, dict)
+          else None
+      ),
       "profiled_work": comparable_work,
       "artifacts": artifacts,
       "reasons": reasons,
@@ -223,8 +385,10 @@ def main() -> int:
   parser.add_argument("--image-id", required=True)
   parser.add_argument("--xprof-census-rc", type=int, required=True)
   parser.add_argument("--semantic-census-rc", type=int, required=True)
+  parser.add_argument("--size-census-rc", type=int, required=True)
   parser.add_argument("--require-hierarchy", action="store_true")
   parser.add_argument("--hierarchy-census-rc", type=int)
+  parser.add_argument("--trace-census-rc", type=int)
   parser.add_argument("--output", type=Path, required=True)
   args = parser.parse_args()
   if args.output.exists():
@@ -239,8 +403,10 @@ def main() -> int:
       image_id=args.image_id,
       xprof_census_rc=args.xprof_census_rc,
       semantic_census_rc=args.semantic_census_rc,
+      size_census_rc=args.size_census_rc,
       require_hierarchy=args.require_hierarchy,
       hierarchy_census_rc=args.hierarchy_census_rc,
+      trace_census_rc=args.trace_census_rc,
   )
   args.output.write_text(
       json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8"

@@ -6171,6 +6171,7 @@ class Qwen3EngineForwardAdapter:
       eos_id,
       gradient_microbatch_sink=None,
       deterministic_repeat=False,
+      xprof_train_schedule=None,
   ):
     """Runs rank-local DP reverse and one fixed reduction per group.
 
@@ -6848,11 +6849,23 @@ class Qwen3EngineForwardAdapter:
           "selected=group0 optimizer_commits=0",
           flush=True,
       )
-    with gsm8k_xprof.trace_annotation("reverse_groups"):
+    reverse_parent = (
+        contextlib.nullcontext()
+        if xprof_train_schedule is not None
+        else gsm8k_xprof.trace_annotation("reverse_groups")
+    )
+    with reverse_parent:
       for index, spec in enumerate(reverse_specs):
-        with gsm8k_xprof.trace_annotation(
-            "reverse_group", group_index=index
-        ):
+        train_transaction = (
+            xprof_train_schedule.transaction(index)
+            if xprof_train_schedule is not None
+            else contextlib.nullcontext()
+        )
+        with contextlib.ExitStack() as transaction_stack:
+          transaction_stack.enter_context(train_transaction)
+          transaction_stack.enter_context(gsm8k_xprof.trace_annotation(
+              "reverse_group", group_index=index
+          ))
           p32_group_start = time.perf_counter()
           one_gradient, report = reverse_reduce_group(index, spec)
           p32_reverse_durations.append(time.perf_counter() - p32_group_start)

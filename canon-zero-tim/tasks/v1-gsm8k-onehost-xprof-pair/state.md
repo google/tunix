@@ -1,44 +1,57 @@
 # State
 
-- Status: P60-2F historical CLEAN-SHA ZERO-HP TARGET PASS at `5549b5b6`;
-  latest-tip integration `c87838d8` is LOCAL/EXACT-IMAGE PASS / TARGET NOT
-  RERUN. The earlier P60-2E root remains EVIDENCE PACKAGING RED.
-- Objective: make the Zero-HP P59 update capture human-readable as one training
-  step with stable update, group, backward, reducer, and optimizer hierarchy,
-  without changing its numerical program or adding synchronization.
+- Status: P60-2G LOCAL/EXACT-IMAGE PASS / TARGET NOT RUN on operator tip
+  `9f91d930`. P60-2F remains a historical CLEAN-SHA ZERO-HP TARGET PASS at
+  `5549b5b6`, but under the new navigation criterion that artifact is
+  `NUMERICAL/FULL-XPLANE PASS / NATIVE-LIKE UI FAIL / PERFORMANCE
+  INCONCLUSIVE`.
+- Objective: make the 16 real Zero-HP reverse/accumulate transactions visible
+  as Native API train steps 32..47 in a warm update-2 UI capture, with the last
+  real train owning optimizer commit and no numerical or synchronization
+  change.
 - Definition of done for P60-2B: host/static, numerical-neutrality,
   exact-image, flag, diff, and P60-2 document gates pass locally. The separately
   authorized P60-2C one-host certification has now passed its machine and
   full-XPlane readability gates.
-- Worktree entry: `/home/yuxuan/code_rl_repro/worktrees/p60_2f_integrated_0825`
+- Worktree entry: `/home/yuxuan/code_rl_repro/worktrees/p60_2g_native_steps_0825`
   (data-disk-backed because the root filesystem was full).
-- Branch: `local/p60-2f-integrated-0825`
-- Base: `a909fda18ce97c885f9e5dcbd687e0b62c808c91` from the publication-time operator tip.
-  P60 implementation is integrated as local commit
-  `9493928fda4fac3186d4a7eaa49ad33ba59c8162`; the ledger change is replayed
-  as local commit `c87838d8a77ddca33800df024b3fef9edc503327`. The immutable
-  target below correctly retains its historical source `5549b5b6...`.
-- Current phase: [P60-2F — evidence-ledger finalization](phases/p60-2f-evidence-ledger-finalization.md).
-  Historical source `5549b5b6...` has a clean committed-tree Zero-HP TARGET
-  PASS. The integrated source has host/exact-image admission only. P60-2D
-  remains pending.
-- Implemented contract: labels-off is an exact no-op; labels-on adds the
-  Native API-compatible `StepTraceAnnotation("train", step_num=1)` envelope
-  and bounded update/group/transaction annotations. This is API compatibility
-  only: Zero-HP keeps one whole-update parent and does not reproduce Native's
-  microstep cadence, cardinality, or monolithic graph. Accumulator spans expose
-  `micro_step=0..15` and one `is_last_accumulate=1`; optimizer commit exposes
-  `update_step=1`. The full-XPlane census requires all hierarchy spans on the
-  same `/host:CPU` `python3` track, all metadata, and non-empty `Steps` rows on
-  all 8 TPU device planes. The device-module census separately requires the
-  exact eight TPU planes and, on each, scaled-step×16 plus commit×1.
+- Branch: `local/p60-2g-native-steps-0825`
+- Base: `9f91d93001dd5b44659f062626eb93fc65e6fcb4`, the fetched operator tip at
+  phase start. P60-2G changes are local and uncommitted. Historical target
+  facts below retain their actual source SHAs.
+- Integration drift: the current remote-tracking tip is
+  `23e0bddfc4f742eecb66092db5bdc80def9571ca`, one commit ahead. Its changed
+  paths are confined to `tasks/v1-apc-m15-target-debug/` and do not overlap
+  this 22-path concern. Do not rebase the dirty tree; after local-commit
+  approval, rebase onto the then-current tip and rerun focused/static gates.
+- Current phase: [P60-2G — Native-like train microsteps and warm UI capture](phases/p60-2g-native-train-steps.md).
+  The implementation is local and uncommitted; 13/13 P60, 37/37 P59, 67/67
+  V1/P64, 378/378 flags, static gates, and the full pinned exact-image ladder
+  pass. Target is not run. Historical P60-2F evidence is preserved without
+  relabeling its original acceptance.
+- Current contract: labels-off remains an exact no-op. On the signed Zero-HP
+  arm only, each real reverse/reduce/accumulate transaction owns one
+  `StepTraceAnnotation("train")` with step 32..47 for captured update 2; the
+  final train closes only after real optimizer commit. Forward/loss remain
+  truthful update siblings, and the crossing aggregate `reverse_groups` span
+  is omitted. Full XPlane requires same-track hierarchy, 8/8 Steps rows, exact
+  backward/optimizer tail and zero captured compiler events. A separate
+  streaming trace-JSON gate requires every train/reverse span and the optimizer
+  tail to be UI-visible.
+- Current artifact budget: the signed runner has no budget override. It records
+  every regular `train/xprof` file by logical byte size, warns above
+  1,200,000,000 bytes, and makes the arm RED above 1,500,000,000 bytes without
+  truncating or deleting the artifact. The classifier recomputes the receipt,
+  and the root SHA ledger directly covers raw XProf and semantic Perfetto.
 - Preserved fact: the historical Native and Zero-HP captures are complete; the
   historical pair remains `INCONCLUSIVE_INPUT_MISMATCH` and cannot support a
   causal timing ratio.
-- Next action: after the separately approved rebase, validation, and
-  fast-forward publication, stop. The historical-source claim needs no
-  additional TPU run. Calling the integrated SHA itself TARGET PASS would
-  require a separately approved fresh run. Do not rerun Native.
+- Next action: review the complete local diff and, only after explicit approval,
+  create the implementation commit, rebase it onto the then-current operator
+  tip, and rerun focused/static gates. Update `HANDOFF_P60_2.md` with that final
+  full commit SHA before a remote operator runs the clean-tree Zero-HP-only
+  command. Push and TPU launch each remain separate approval boundaries. Do
+  not rerun Native.
 - Current integrated result on `c87838d8...`: P60 task suite 11/11, document
   set 14/14, P59 37/37, V1/P64 67/67, complete 378/378 flag audit, branch
   preflight, syntax, diff, secret, P59 DP4 exact-image, and full
@@ -125,4 +138,4 @@
   authorized P60-2F historical run, evidence-doc commit, rebase, validation,
   and fast-forward push have been consumed. No image publication, Native
   rerun, further TPU launch, or additional remote mutation is authorized.
-- Updated: 2026-08-25.
+- Updated: 2026-08-26.
