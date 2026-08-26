@@ -1,5 +1,28 @@
 # V1 Phase4 three-full handoff
 
+## START HERE — P4.10 FrozenLake TP8 Wave 5 dual-arm recovery verified GREEN (0/0 differing bytes)
+
+This section supersedes every later `START HERE` block.
+
+Wave 5 target bisection on dual 64-TPU allocations completed and verified:
+1. `p66-off` (`canon-v1fl-ab-p45-off1-5ade89aa`):
+   - Completed 256 trajectories, $N_{\text{action}}=42,149$, max depth 2,135 ($\ge 1686$).
+   - $A-B = 0$, $B-C = 0$ differing bytes, Max abs = 0.0.
+   - Masked hash: `c882114e27f53e1672656bf6d0350b4e3973003e7e36d18d594ec4df52df3e9a` across all 3 terms.
+   - Controlled exit 42, `backward=0 optimizer_commits=0`.
+   - Classification verdict: `PASS`, outcome: `ZERO_TIM_RECOVERED`.
+2. `serving-scope` (`canon-v1fl-ab-p45-scp1-5ade89aa`):
+   - Completed 256 trajectories, $N_{\text{action}}=48,594$, max depth 2,472 ($\ge 1686$).
+   - $A-B = 0$, $B-C = 0$ differing bytes, Max abs = 0.0.
+   - Masked hash: `40589a703447199dd0bd28b4817f120204ad5d261086d8362a15be06b10bf844` across all 3 terms.
+   - Controlled exit 42, `backward=0 optimizer_commits=0`.
+   - Classification verdict: `PASS`, outcome: `ZERO_TIM_RECOVERED`.
+
+Paired Decision: `CAUSE_FAMILY_CONFIRMED / SCOPE_CANDIDATE_GREEN`.
+Both arms recovered strict 0/0 differing bytes, confirming that checked-VMA serving leakage was the root cause of Attempt 9's 1,755 differing bytes drift, and that `serving-scope` (`CANON_P67_P66_VMA_P59_ONLY=1`) cleanly eliminates serving leakage while retaining the P59 backward checked-VMA implementation.
+
+Durable evidence archived under `tasks/v1-phase4-three-full-recipes/evidence/v1_fl_tp8_ab_diagnostic_w05/` (`SHA256SUMS`).
+
 ## START HERE — P4.10 FrozenLake TP8 dual-arm recovery publication contract; target not run
 
 This section supersedes every later `START HERE` block.

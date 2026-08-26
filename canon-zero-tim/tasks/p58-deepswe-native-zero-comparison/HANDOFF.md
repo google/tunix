@@ -1,5 +1,34 @@
 # P58 DeepSWE native-first training handoff
 
+## 2026-08-26 P58.13 DeepSWE 4B TP8 Step-0 backward fixed LM head M=2048 diagnosis
+
+This is the highest-priority P58 handoff. Target JobSet
+`canon-p58-ds4b-zero-hp-full-p58z02` (Qwen3-4B-Instruct DP8xTP8, 128 TPU chips)
+completed all 128 Step-0 RepoEnv trajectories in 1 wave without timeout,
+validating the P58.12 engine-seed repair.
+
+At Step 0 learner backward pass (`_process_results` ->
+`get_actor_per_token_logps` -> `compute_per_token_logps` -> `compute_logits`),
+execution stopped at `fixed_lm_head`:
+
+```text
+ValueError: P38 fixed lm_head requires semantic M in (8, 16, 32, 64, 128, 256, 4096), got (2048, 2560)
+```
+
+Root cause analysis:
+- Geometry: Qwen3-4B has `hidden_size=2560`, `vocab_size=151936`.
+  On TP8, `tp_size=8`, so `(hidden_size, tp_size) = (2560, 8)`.
+- Learner microbatch: 16 trajectories per DP rank x 128 tokens chunk = 2048 tokens ($M=2048$).
+- In `p38_fixed_lm_head.py`, `_semantic_m_for_geometry(geometry)` only checked
+  `if geometry == (4096, 8): return QWEN8B_TP8_LEARNER_M` (which had `(2048, 4096)`),
+  while for 4B TP8 `geometry == (2560, 8)`, it fell back to default `LEARNER_M = (4096,)`,
+  causing $M=2048$ to be rejected with `ValueError`.
+
+Preserved evidence:
+- Full error log: `evidence/p58z02_backward_fixed_lm_head_error/run.log`
+  (SHA256 `7349c7965f31e2c84dfd98f8cb7fe175f9b2d4281759d0bb5c07bb336ef8784d`, 2.1 MB)
+- Phase document: `phases/p58-13-backward-fixed-lm-head-m2048.md`
+
 ## 2026-08-26 P58.12 JAX engine-seed/cleanup override — source published
 
 This is the highest-priority P58 handoff. Implementation commit

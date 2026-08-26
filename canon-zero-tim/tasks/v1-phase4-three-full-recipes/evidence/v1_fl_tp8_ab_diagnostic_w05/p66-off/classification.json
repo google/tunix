@@ -1,0 +1,14 @@
+{
+  "A_B_differing_bytes": 0,
+  "B_C_differing_bytes": 0,
+  "N_action": 42149,
+  "arm": "p66-off",
+  "backward": 0,
+  "errors": [],
+  "max_logical_kv_prefix_length": 2135,
+  "optimizer_commits": 0,
+  "outcome": "ZERO_TIM_RECOVERED",
+  "schema": "v1-fl-tp8-ab-diagnostic-v1",
+  "verdict": "PASS",
+  "workload": "p45"
+}

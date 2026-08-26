@@ -82,6 +82,9 @@ or default behavior is changed. All failed target directories remain.
   attention, report-adjoint, staged-spec and reducer gate exits zero. The full
   exact-image regression also exits zero with
   `V1_HP_EXACT_IMAGE_PASS ... p59_checked_vma_real_shim=4 ... manifests=3`.
-  Its execution transcript was observed directly but was not durably saved as
-  a raw-log artifact. Not verified on TPU because no JobSet was launched. No
-  optimizer transaction, commit, push, or Kubernetes mutation was performed.
+- 2026-08-26: Wave 5 target execution completed on dual 64-TPU allocations:
+  - `p66-off` (`canon-v1fl-ab-p45-off1-5ade89aa`): 256 trajectories, $N_{\text{action}}=42,149$, max depth 2,135 ($\ge 1686$), A-B differing bytes = 0, B-C differing bytes = 0, Max abs = 0.0, masked hash `c882114e27f53e1672656bf6d0350b4e3973003e7e36d18d594ec4df52df3e9a` across all 3 terms, exit code 42, `backward=0 optimizer_commits=0`, verdict `PASS`, outcome `ZERO_TIM_RECOVERED`.
+  - `serving-scope` (`canon-v1fl-ab-p45-scp1-5ade89aa`): 256 trajectories, $N_{\text{action}}=48,594$, max depth 2,472 ($\ge 1686$), A-B differing bytes = 0, B-C differing bytes = 0, Max abs = 0.0, masked hash `40589a703447199dd0bd28b4817f120204ad5d261086d8362a15be06b10bf844` across all 3 terms, exit code 42, `backward=0 optimizer_commits=0`, verdict `PASS`, outcome `ZERO_TIM_RECOVERED`.
+  - Paired Decision: `CAUSE_FAMILY_CONFIRMED / SCOPE_CANDIDATE_GREEN`. Both arms recovered strict 0/0 differing bytes, proving that checked-VMA serving leakage was the root cause of Attempt 9's 1,755 differing bytes drift, and that `serving-scope` (`CANON_P67_P66_VMA_P59_ONLY=1`) cleanly eliminates serving leakage while retaining the P59 backward checked-VMA implementation.
+  - Evidence archived: `tasks/v1-phase4-three-full-recipes/evidence/v1_fl_tp8_ab_diagnostic_w05/` (`SHA256SUMS`).
+
