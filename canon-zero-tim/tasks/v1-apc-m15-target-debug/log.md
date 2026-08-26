@@ -431,3 +431,38 @@
 - Decision table applied: Off=`CONTROL_GREEN` and On=`FRESH_TARGET_RED_FROZEN` -> **Use the frozen carrier for exact replay and first-red localization; do not rerun rollout.**
 - Small machine return bundles archived under `evidence/v1_apc_m15_attempt6_paired_d12_20260825/` with verified `SHA256SUMS` (24 items).
 - Claim ceiling promoted to `FULL_REPLAY_CARRIER_FROZEN_REPLAY_NOT_RUN`.
+
+## 2026-08-26T01:20:00Z — Phase-C replay-input preparation made executable
+
+- Reanalysis of the complete Attempt-6 small return corrects an ambiguity in
+  the earlier wording. Red producer rows are 201 and 245. The canonical first
+  mismatch is row 201/completion position 0; row 245's request enters earliest
+  at call 164; row 201's request begins at call 187, so the bounded inclusive
+  replay prefix contains calls 1 through 188. Row 245/call 565 is the first
+  later incident with a complete tensor observer, not the onset.
+- Added `scripts/analyze_m15_replay_carrier.py`. It verifies source identity,
+  producer/envelope/full-carrier contracts, recomputes byte-level A-B/B-C,
+  rejects classification count drift or any B-C red, rejoins token histories,
+  and emits `REPLAY_ANALYSIS.json` plus `replay-prefix-plan.jsonl`.
+- Added `scripts/run_m15_replay_gcs_prepare.sh`. A bucket-capable executor can
+  run one command against the immutable on-arm Attempt-0 URI; it verifies the
+  root bundle, extracts and audits the carrier, runs the analyzer, then uploads
+  only a versioned derived result with its manifest last.
+- Synthetic tests cover the onset/captured-incident distinction and prove that
+  A-B classification drift and B-C red are fatal. Shell syntax, Python compile,
+  and `git diff --check` pass locally.
+- Claim ceiling is unchanged:
+  `FULL_REPLAY_CARRIER_FROZEN_REPLAY_NOT_RUN`. The scripts prepare input; they
+  do not execute a model replay, localize a tensor boundary, or repair APC.
+
+## 2026-08-26T01:45:00Z — Phase-C CL integrated on the latest operator tip
+
+- Final release base is operator tip `c74618b955a2379e94d9be5add1d23f77c86c682`.
+  Its two incoming P60/XProf commits do not overlap the M15 target-debug task.
+- The Phase-C payload was replayed as one CL in a fresh clean worktree rather
+  than inheriting any pre-integration test result.
+- Final-tree focused result: 50/50 M15 task tests pass, including the four-test
+  analyzer suite with a fake-GCS upload/download/immutable-rerun control.
+  Shell syntax, Python compile, secret scan, and `git diff --check` also pass.
+- No GCS target analysis or serving replay ran during integration. The claim
+  ceiling remains `FULL_REPLAY_CARRIER_FROZEN_REPLAY_NOT_RUN`.

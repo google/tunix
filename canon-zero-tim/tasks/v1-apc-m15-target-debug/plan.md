@@ -19,9 +19,9 @@ B - C = 0 bytes
 
 | Phase | Deliverable | Exit gate | Status |
 |---|---|---|---|
-| A | `M15_FIRST_RED_INPUT_CONTRACT` with mismatch distribution, identity hashes, and artifact-completeness matrix | every field is traced to immutable `file:line` or explicitly marked missing | complete: audit PASS, replay inputs missing |
-| B | fresh captured-red replay carrier and APC-off/APC-on decision table | static/host carrier tests prove full 256-row producer, mixed standard/continue A chronology, standard-only full-reset B, exact first-red join, GCS durability, zero backward/commit | Attempt 5 off/on snapshots are present, but the authoritative GCS classifications and carrier manifests have not been audited or returned |
-| C | single-variable reproduction ladder | control A-B=0; treatment either reproduces red or is classified `ONEHOST_NOT_REPRODUCED` without mechanism claims | pending |
+| A | `M15_FIRST_RED_INPUT_CONTRACT` with mismatch distribution, identity hashes, and artifact-completeness matrix | every field is traced to immutable `file:line` or explicitly marked missing | complete |
+| B | fresh captured-red replay carrier and APC-off/APC-on decision table | full 256-row producer, mixed standard/continue A chronology, standard-only full-reset B, exact request joins, GCS durability, zero backward/commit | complete: Attempt 6 off=`CONTROL_GREEN`, on=`FRESH_TARGET_RED_FROZEN` |
+| C | executable replay-prefix input plan followed by a single-variable reproduction ladder | saved bytes and chronology revalidate; true onset and later fully captured incident remain distinct; control A-B=0; treatment either reproduces red or is `ONEHOST_NOT_REPRODUCED` | active: host analyzer implemented; real GCS preparation and model replay not run |
 | D | observer-neutral coarse-to-fine first-red walk | `FIRST_RED_LOCALIZED` names last exact and first red tensor, shape ledger, request/token/cache coordinate, and `file:line` | pending |
 | E | minimal localized repair, default off or experiment-bound | reproducer flips red to zero; APC-off and B are unchanged; adjacent and dirty-page negatives fire | pending |
 | F | certification ladder | host -> exact-image -> one-host clean/repeat/dirty -> matched profile -> separately approved DP8xTP8 G-E | pending |
@@ -101,3 +101,13 @@ B - C = 0 bytes
   paired decision. The newly rendered off/on arms may execute concurrently
   from one source SHA; only their interpretation is ordered. Classify off
   first, and use on for an APC-specific claim only after `CONTROL_GREEN`.
+- Confirmed: Attempt 6 satisfies that paired decision. The off arm is
+  `CONTROL_GREEN`; the on arm is `FRESH_TARGET_RED_FROZEN` with A-B=1,770
+  bytes / 748 elements and B-C=0. No additional FrozenLake rollout is needed
+  to prepare the next replay input.
+- Decision: preserve four coordinates rather than collapsing them: the
+  canonical first mismatch (row 201, completion position 0), the earliest
+  request belonging to any red row (row 245, call 164), the request containing
+  the canonical mismatch (row 201, call 187; its first output interval ends at
+  call 188), and the later first fully captured tensor incident (row 245, call
+  565). Call 565 is useful for tensor evidence but is not the mismatch onset.

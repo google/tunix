@@ -1,6 +1,6 @@
 # Phase B — freeze a strict replay carrier
 
-- Status: Attempt-5 rollout snapshots present; paired GCS audit and A/B/C verdict pending
+- Status: complete; Attempt 6 paired target carrier is frozen and audited
 
 ## Finding
 
@@ -67,12 +67,20 @@ or the B-arm reset.
 
 ## Claim ceiling
 
-Until the Attempt-5 off/on GCS roots pass the checked-in audit, the ceiling is
-`ATTEMPT5_ROLLOUT_SNAPSHOTS_PRESENT_GCS_AUDIT_PENDING`. A newly captured
-trajectory is not historical `m15i`; only its source/model/config and red
-signature may be compared with `m15i`. The committed snapshots do not contain
-the alignment, controlled-exit, classification, or terminal-marker records
-needed to decide whether a replayable red was captured.
+Attempt 6 closed this phase. Its off root is `CONTROL_GREEN`; its on root is
+`FRESH_TARGET_RED_FROZEN` with A-B=1,770 bytes / 748 elements and B-C=0. Both
+roots passed the checked-in GCS audit, and the on root contains the complete
+256-row producer plus 3,027-call serving chronology. The current ceiling is
+`FULL_REPLAY_CARRIER_FROZEN_REPLAY_NOT_RUN`: the bytes needed to build replay
+input exist, but no model replay or first-red tensor localization has run.
+
+The fully captured tensor incident at row 245/call 565 must not be relabeled as
+the onset. Reanalysis of the complete producer and request joins places the
+canonical first mismatch at row 201/completion position 0 and its request at
+serving call 187. A different red row, row 245, entered earlier at call 164.
+Phase C therefore prepares calls 1 through 188 to cover every red row through
+its first post-dispatch interval, while retaining call 565 as a later
+observer-rich incident.
 
 ## Static result
 

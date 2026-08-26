@@ -12,7 +12,9 @@ Attempt 6 paired execution (`d12-9f91d930`, source commit `9f91d93001dd5b44659f0
 - **Treatment Arm (`canon-v1-apc-m15-on-d12-9f91d930`)**:
   - Rollout: 2,560 requests completed, **92.9%** prefix cache hit rate.
   - JAX Pre-alignment: `[CANON_ALIGN_PRE] step=0 verdict=FAIL N_action=119565 bounds=[('S_decode_vs_S_prefill', 1770), ('S_prefill_vs_T_old', 0)]` (**Captured exact mismatch of 1,770 bytes / 748 elements**).
-  - First-red Incident: Source row 245, request `400-bc7daec5`, serving call 565 (first mismatch call 188), DP rank 0, slot 29, `num_computed_tokens=1248`, 296 exact joins.
+  - Canonical first mismatch: row 201, completion position 0, logical prefix 1066; its request starts at call 187 and the bounded interval ends at call 188.
+  - Earliest request belonging to any red row: row 245 at call 164.
+  - First fully captured tensor incident: row 245, request `400-bc7daec5`, serving call 565, DP rank 0, slot 29, `num_computed_tokens=1248`, 296 exact joins. This is not the onset.
   - Mismatch Capsule: 15,148 bytes (`sha256:9e79a18d...`).
   - Producer Unit: 762 KB, 256 rows (`m15_producer_unit.npz`).
   - Replay Envelope: 103.7 MB, 3,027 calls (`m15_replay_envelope.jsonl`).
@@ -32,6 +34,47 @@ FULL_REPLAY_CARRIER_FROZEN_REPLAY_NOT_RUN
 
 Evidence sealed in `evidence/v1_apc_m15_attempt6_paired_d12_20260825/`.
 Next phase: **Phase C/D (First-red localization and deterministic replay harness)**.
+
+## NEXT ACTION — prepare the replay input on the bucket-capable host
+
+The next agent does not rewrite an analyzer and does not launch another
+FrozenLake rollout. From a clean checkout containing these scripts, run exactly:
+
+```bash
+cd /home/yuxuan/code_rl_repro/sequence_packing/tunix
+bash canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/run_m15_replay_gcs_prepare.sh \
+  gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-v1-apc-m15-on-d12-9f91d930/attempt-0 \
+  /mnt/disks/tunix-data
+```
+
+Expected terminal marker:
+
+```text
+[M15.APC.REPLAY.PREPARE] COMPLETE status=M15_REPLAY_INPUT_PLAN_READY_NOT_EXECUTED ... red_rows=201,245 replay_prefix_end_call=188 ...
+```
+
+The agent must return all of the following small outputs:
+
+1. the complete terminal marker above;
+2. `REPLAY_ANALYSIS.json`, `UPSTREAM_AUDIT_RECEIPT.json`, and `SHA256SUMS` from
+   `derived/m15-replay-input-plan-v1/files/`;
+3. the GCS URI, SHA-256, and byte size of `replay-prefix-plan.jsonl` (the
+   terminal marker prints both values);
+4. the output of an independent `sha256sum -c SHA256SUMS` after downloading
+   the derived files to a fresh local directory;
+5. on failure, stderr plus the exact nonzero return code.
+
+Do not commit the large JSONL or original tar. The script downloads and audits
+the immutable Attempt-0 bundle, recomputes A-B/B-C from arrays, joins request
+history to producer rows, emits a calls-1-through-188 replay-prefix plan, and
+uploads only the derived self-hashed result. It deliberately records four
+coordinates: row 201 is the canonical first mismatch; row 245/call 164 is the
+earliest request belonging to any red row; row 201/call 187--188 is the
+canonical mismatch request interval; row 245/call 565 is the first later
+incident with the full tensor observer. Call 565 is not the onset.
+
+This command prepares replay input only. It does not execute the model, prove
+one-host reproduction, localize RoPE/KV/attention, or repair APC.
 
 ## Scope and current ceiling
 
@@ -94,7 +137,7 @@ Current immutable facts:
   controlled-exit, classification, or GCS-terminal markers.  The accompanying
   receipt is an unverified summary until the GCS-side audit returns.
 
-Claim ceiling: `ATTEMPT5_ROLLOUT_SNAPSHOTS_PRESENT_GCS_AUDIT_PENDING`.
+Claim ceiling: `FULL_REPLAY_CARRIER_FROZEN_REPLAY_NOT_RUN`.
 
 The exact remote procedure is in [RUNBOOK.md](RUNBOOK.md). The execution agent
 must run those commands rather than constructing a new carrier by hand.

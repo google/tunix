@@ -22,6 +22,66 @@ still execute the real serving decode and independent full-reset B arm.
 This carrier does not modify or repair RoPE, attention, KV values, lm-head,
 loss, backward, or optimizer. Both JobSets stop before backward and commit.
 
+## Attempt 6 is complete — prepare Phase-C input without a new rollout
+
+Attempt 6 supplied the required matched pair. Off is `CONTROL_GREEN`; on is
+`FRESH_TARGET_RED_FROZEN` with A-B=1,770 bytes / 748 elements and B-C=0. The
+large on-arm carrier remains in its immutable GCS Attempt-0 root. A
+bucket-capable agent prepares the next small input plan with one checked-in
+command:
+
+```bash
+cd /home/yuxuan/code_rl_repro/sequence_packing/tunix
+bash canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/run_m15_replay_gcs_prepare.sh \
+  gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-v1-apc-m15-on-d12-9f91d930/attempt-0 \
+  /mnt/disks/tunix-data
+```
+
+The wrapper performs, in order:
+
+1. root `SHA256SUMS` validation and terminal-state checks;
+2. safe extraction of `serving-capture.tar`;
+3. the existing full replay-carrier audit;
+4. independent byte-level A-B/B-C recomputation from `m15_producer_unit.npz`;
+5. exact request-history joins and separation of onset from the later captured
+   incident;
+6. generation of `replay-prefix-plan.jsonl` for calls 1 through 188;
+7. upload of only the derived self-hashed files under
+   `derived/m15-replay-input-plan-v1/files/`, with `SHA256SUMS` uploaded last.
+
+Success is exactly:
+
+```text
+[M15.APC.REPLAY.PREPARE] COMPLETE status=M15_REPLAY_INPUT_PLAN_READY_NOT_EXECUTED ... red_rows=201,245 replay_prefix_end_call=188 ...
+```
+
+Fetch the small return into a fresh directory and independently verify it:
+
+```bash
+DERIVED=gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-v1-apc-m15-on-d12-9f91d930/attempt-0/derived/m15-replay-input-plan-v1/files
+RETURN=/tmp/m15-replay-input-plan-v1-return
+test ! -e "$RETURN"
+mkdir -p "$RETURN"
+gcloud storage cp "$DERIVED/REPLAY_ANALYSIS.json" "$RETURN/"
+gcloud storage cp "$DERIVED/UPSTREAM_AUDIT_RECEIPT.json" "$RETURN/"
+gcloud storage cp "$DERIVED/replay-prefix-plan.jsonl" "$RETURN/"
+gcloud storage cp "$DERIVED/SHA256SUMS" "$RETURN/"
+(cd "$RETURN" && sha256sum -c SHA256SUMS)
+```
+
+Return the terminal marker, `REPLAY_ANALYSIS.json`,
+`UPSTREAM_AUDIT_RECEIPT.json`, `SHA256SUMS`, and the URI/SHA/size of the JSONL.
+The terminal marker prints the JSONL SHA and byte size. On failure, return
+stderr and the exact return code. Do not commit the large JSONL or original
+tar.
+
+Interpretation is fail-closed: row 201/completion position 0 is the canonical
+first mismatch; row 245/call 164 is the earliest request belonging to any red
+row; row 201's request starts at call 187, so the plan covers its first output
+interval through call 188; row 245/call 565 is the first later fully captured
+tensor incident. The plan is input evidence, not a model replay or a root-cause
+verdict.
+
 ## Attempt-0 through Attempt-4 incidents
 
 Never relaunch source `eb58954f...`. That Attempt-0 command carried
