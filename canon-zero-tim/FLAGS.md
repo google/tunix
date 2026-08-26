@@ -38,7 +38,8 @@
 | Flag | 语义 | 生命周期 | 日落 |
 |---|---|---|---|
 | CANON_PERF_LOG | [PERF] 分段计时(=0 静音) | 默认开 | 长期保留(观测契约) |
-| CANON_BATCHED_EVIDENCE | 证据取回批量化(-6s/步) | GSM8K 默认;FL/DS 待 verify | 全负载转正后焊死 |
+| CANON_BATCHED_EVIDENCE | 证据取回批量化(-6s/步) | GSM8K 默认;FL/DS 待 verify;P68 补 grouped mirror(DP16 反向收据),配对 verify 待跑 | 全负载转正后焊死 |
+| CANON_DP_COLLECTIVE_REDUCE | P69 刀2:DP 梯度归约 collective 选择器,只作用于 `FixedDPRankGradientReducer` 的 reduce transaction。缺省/空/0=历史 fixed ppermute 树(reduce+broadcast、operand barrier 逐对相加)原函数对象直调,程序逐字节不变;1=A 案:sub-32bit 浮点 leaf 升 FP32 后每 leaf 单次原生 `jax.lax.psum`(既有 shard_map check_vma=False 内),cast 回原 dtype;tree=B 案:all_gather 后每 rank 以 registered `fixed_dp_sum` 固定二叉树本地相加(与历史树同配对同序,host 上与历史逐位同值);其他值 fatal。前向零接触,`compare_local` 看门狗、staged 写路径与 receipt schema 全不变(`reduction_rounds` 仍报历史 ppermute 轮数) | off | 试验;scratch host 门(pinned image CPU):FP64 包络、×2 双计负控、flag-off bitwise 冻结指纹、receipt 不变已绿;one-host/target 未跑 | P69 Lane1 前向指纹 + Lane2 全套 + Lane3 material 判词后按 workload 转正;任一红退役,判决记录保留 |
 | CANON_P28_BATCHED_REPORT(=1/=verify) | report 窗合并+remap jit 化(FL -14.5%) | GSM8K 默认;DP16 待验 | 同上 |
 | CANON_P28_BATCHED_REVERSE(=1/=verify) | P52 反向脚手架合并(-13.3%) | 一宿主认证;DP16 等 grouped 移植 | 同上 |
 | CANON_P28_LAYER_SCAN | =verify 恒等仪器/=verify_rev THIRDPROG 演示 | **=1 否决(净负 -5%)** | 仪器保留;=1 进否决区 |
@@ -125,6 +126,7 @@ CANON_APC_M15_TARGET_DEBUG
 CANON_APC_M15_REPLAY_LEDGER
 CANON_APC_M15_SEAM_BUNDLE
 CANON_BATCHED_EVIDENCE
+CANON_DP_COLLECTIVE_REDUCE
 CANON_CANONICAL_DEPTHS
 CANON_CHECKPOINT_CONTRACT_JSON
 CANON_CLIENT_IMAGE

@@ -19,6 +19,7 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import math
+import os
 from typing import Any, Sequence
 
 import jax
@@ -467,6 +468,76 @@ def fixed_dp2_collective(local_value: Any, axis_name: str = 'dp') -> Any:
   return fixed_dp_collective(local_value, dp_size=2, axis_name=axis_name)
 
 
+def dp_collective_reduce_mode() -> str:
+  """Returns the validated CANON_DP_COLLECTIVE_REDUCE selector value."""
+  value = os.environ.get('CANON_DP_COLLECTIVE_REDUCE', '')
+  if value not in ('', '0', '1', 'tree'):
+    raise ValueError(
+        f'CANON_DP_COLLECTIVE_REDUCE must be unset/0/1/tree, got {value!r}'
+    )
+  return '' if value == '0' else value
+
+
+def psum_dp_collective(
+    local_value: Any, *, dp_size: int, axis_name: str = 'dp'
+) -> Any:
+  """Sums DP rank contributions with one native psum per leaf.
+
+  Floating leaves below 32-bit precision accumulate in float32 and cast back
+  to their original dtype; float32 and wider leaves reduce in their own
+  dtype. ``dp_size`` is accepted for reducer-signature parity only; the
+  native collective derives the participant set from the mapped axis.
+  """
+  del dp_size
+
+  def reduce_leaf(leaf):
+    original_dtype = leaf.dtype
+    if (
+        jnp.issubdtype(original_dtype, jnp.floating)
+        and jnp.dtype(original_dtype).itemsize < 4
+    ):
+      leaf = leaf.astype(jnp.float32)
+    return jax.lax.psum(leaf, axis_name).astype(original_dtype)
+
+  return jax.tree.map(reduce_leaf, local_value)
+
+
+def gathered_tree_dp_collective(
+    local_value: Any, *, dp_size: int, axis_name: str = 'dp'
+) -> Any:
+  """Sums DP rank contributions by all-gather then the registered fixed tree.
+
+  Every rank gathers all ``dp_size`` contributions and adds them locally with
+  ``fixed_dp_sum``, whose explicit rank pairing and operand optimization
+  barriers pin the same binary association order as the registered ppermute
+  tree, so every replica computes one identical fixed-order sum.
+  """
+  gathered = jax.tree.map(
+      lambda leaf: jax.lax.all_gather(leaf, axis_name, axis=0), local_value
+  )
+  rank_values = tuple(
+      jax.tree.map(
+          lambda table, rank=rank: jax.lax.index_in_dim(
+              table, rank, axis=0, keepdims=False
+          ),
+          gathered,
+      )
+      for rank in range(dp_size)
+  )
+  return fixed_dp_sum(rank_values)
+
+
+def select_dp_collective(mode: str) -> Any:
+  """Returns the DP-sum callable registered for one validated reduce mode."""
+  if mode == '1':
+    return psum_dp_collective
+  if mode == 'tree':
+    return gathered_tree_dp_collective
+  if mode not in ('', '0'):
+    raise ValueError(f'unknown DP collective reduce mode: {mode!r}')
+  return fixed_dp_collective
+
+
 def _contains_axis(spec: jax.sharding.PartitionSpec, axis_name: str) -> bool:
   for entry in tuple(spec):
     if entry == axis_name:
@@ -584,11 +655,13 @@ class FixedDPRankGradientReducer:
           contribution,
       )
 
+    reduce_collective = select_dp_collective(dp_collective_reduce_mode())
+
     def reduce_local(local_staged):
       local_value = jax.tree.map(
           lambda value: jnp.squeeze(value, axis=0), local_staged
       )
-      return fixed_dp_collective(
+      return reduce_collective(
           local_value, dp_size=dp_size, axis_name=dp_axis
       )
 
