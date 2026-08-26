@@ -1816,6 +1816,56 @@ def _canonical_logprob_row_spec(mesh) -> jax.sharding.PartitionSpec:
 
 _ISSUE_ANATOMY = {"prep": 0.0, "call": 0.0, "n": 0}
 
+_P68_NONZERO_COUNTS_FN = None
+
+
+def _p68_batched_nonzero_counts(leaves):
+  """One-dispatch per-leaf nonzero counts for one receipt scan.
+
+  The eager receipt body issues one ``jit_count_nonzero`` program plus one
+  synchronous D2H scalar read per leaf.  This stacks the same per-leaf
+  counts into a single int32 vector so the caller retrieves the whole scan
+  with one ``jax.device_get``.
+  """
+  global _P68_NONZERO_COUNTS_FN
+  leaves = tuple(leaves)
+  for position, value in enumerate(leaves):
+    if not isinstance(value, (jax.Array, np.ndarray)):
+      raise FunctionalMappingError(
+          "P68 nonzero scan expects a flat sequence of arrays, got "
+          f"{type(value).__name__} at position {position}"
+      )
+  if _P68_NONZERO_COUNTS_FN is None:
+    # Named so profiles show bwd_nonzero_counts instead of jit__lambda.
+    def bwd_nonzero_counts(leaves):
+      if not leaves:
+        return jnp.zeros((0,), jnp.int32)
+      return jnp.stack([jnp.count_nonzero(value) for value in leaves])
+
+    _P68_NONZERO_COUNTS_FN = _xprof_jit(
+        bwd_nonzero_counts,
+        module_name="zt_tr_bwd_nonzero_counts",
+        scope_name="zt/tr/report/nonzero_counts",
+    )
+  return _P68_NONZERO_COUNTS_FN(leaves)
+
+
+def _p68_receipt_nonzero(leaves, *, batched_evidence):
+  """Exact python-int nonzero total for one receipt scan.
+
+  ``batched_evidence=False`` runs the original per-leaf synchronous reads
+  unchanged.  ``batched_evidence=True`` fetches the same counts through one
+  transfer and reduces on host in int64, so every receipt value matches the
+  per-leaf path exactly (totals exceed float32's 2**24 integer range; no
+  float summation anywhere).
+  """
+  if batched_evidence:
+    counts = jax.device_get(_p68_batched_nonzero_counts(leaves))
+    return int(np.sum(counts, dtype=np.int64))
+  return sum(
+      int(np.asarray(jnp.count_nonzero(value))) for value in leaves
+  )
+
 
 @functools.partial(jax.jit, static_argnums=(3, 4, 5, 6))
 def _fused_p28_chunk_inputs(
@@ -7276,6 +7326,14 @@ class Qwen3EngineForwardAdapter:
       )
     batched_report = report_mode == "1"
     report_verify = report_mode == "verify"
+    # CANON_BATCHED_EVIDENCE=1 keeps every receipt VALUE identical (same
+    # per-leaf counts, same python-side sums) but collects each grouped
+    # nonzero scan through one device_get instead of one per leaf.  The
+    # per-leaf int32 vector is fetched raw and reduced on host with int64,
+    # so counts match the original python-int sums exactly.
+    batched_evidence = (
+        os.environ.get("CANON_BATCHED_EVIDENCE", "") == "1"
+    )
     rank_parallel_value = os.environ.get(
         "CANON_P59_RANK_PARALLEL_BACKWARD", ""
     )
@@ -7668,11 +7726,9 @@ class Qwen3EngineForwardAdapter:
               "staging=parallel_table",
               flush=True,
           )
-        cache_nonzero = sum(
-            int(np.asarray(jnp.count_nonzero(value)))
-            for value in jax.tree.leaves(
-                reverse["initial_cache_cotangents"]
-            )
+        cache_nonzero = _p68_receipt_nonzero(
+            jax.tree.leaves(reverse["initial_cache_cotangents"]),
+            batched_evidence=batched_evidence,
         )
         with gsm8k_xprof.trace_annotation(
             "fixed_dp_reduce", group_index=index
@@ -7706,8 +7762,8 @@ class Qwen3EngineForwardAdapter:
             "rank_counts": (reverse["counts"],),
             "pullback_invocations": 1,
             "gradient_finite": bool(reduction_finite),
-            "gradient_nonzero": sum(
-                int(np.asarray(jnp.count_nonzero(value))) for value in leaves
+            "gradient_nonzero": _p68_receipt_nonzero(
+                leaves, batched_evidence=batched_evidence
             ),
             "initial_cache_cotangent_nonzero": cache_nonzero,
             "dp_reduction": reduction_report,
