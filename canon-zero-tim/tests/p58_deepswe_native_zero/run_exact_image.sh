@@ -10,6 +10,8 @@ if [[ ! "$IMAGE" =~ ^sha256:[0-9a-f]{64}$ ]]; then
   exit 2
 fi
 
+bash "$ROOT/canon-zero-tim/tests/p44_deepswe_qwen4b_parity/run_exact_image.sh" \
+  "$IMAGE"
 bash "$ROOT/canon-zero-tim/tests/p59_backward/run_tp4_tp8_installed_shim_exact_image.sh" \
   "$IMAGE"
 
@@ -161,5 +163,5 @@ $DOCKER run --rm \
       python3 \
       canon-zero-tim/tests/p58_deepswe_native_zero/probe_stock_prompt_observer.py
     rm -r "$observer_state"
-    echo "P58_EXACT_IMAGE_CPU_PASS loss_oracle=1 weighted_accumulation=1 compact_filter=1 durable_journal=1 paired_renderer=1 alignment_policy=1 stock_observer=1 onehost_xprof=1 zero_hp_full=1 checked_vma=1 first_update=1 stable_clip=1 apc=1 p59_tp4_tp8=2 p59_real_shim=4 p59_rpa=2 p59_fused_linear=2 p57_wandb=1 m15_token=1 regressions=1"
+    echo "P58_EXACT_IMAGE_CPU_PASS loss_oracle=1 weighted_accumulation=1 compact_filter=1 durable_journal=1 paired_renderer=1 alignment_policy=1 stock_observer=1 onehost_xprof=1 zero_hp_full=1 qwen4b_fixed_head=1 checked_vma=1 vma_p59_only=1 first_update=1 stable_clip=1 apc=1 p59_tp4_tp8=2 p59_real_shim=4 p59_rpa=2 p59_fused_linear=2 p57_wandb=1 m15_token=1 regressions=1"
   '

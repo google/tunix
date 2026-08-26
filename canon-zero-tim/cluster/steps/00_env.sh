@@ -203,39 +203,66 @@ esac
 case "${CANON_P67_P66_VMA_P59_ONLY:-0}" in
   0) ;;
   1)
+    _canon_p67_context=""
     case "${CANON_V1_FL_TP8_AB_ARM:-}" in
-      serving-scope) ;;
+      serving-scope)
+        _canon_p67_context=v1-fl-serving-scope
+        ;;
       "")
-        [ "${CANON_PROFILE_FILE:-}" = \
-          "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env" ] && \
-        [ "${CANON_PROFILE:-}" = \
-          "qwen3-8b-dp8-tp8-frozenlake-v1-hp" ] && \
-        [ "${CANON_P32_WORKLOAD:-}" = "frozenlake-dp8-tp8" ] && \
-        [ "${CANON_P33_SHARED_MESH:-}" = "8,8" ] && \
-        [ "${CANON_P57_RUN_KIND:-}" = "train" ] && \
-        [ "${CANON_P57_TIM_ARM:-}" = "zero" ] && \
-        [ "${CANON_P57_EXPECTED_UPDATES:-}" = "300" ] && \
-        [ "${CANON_P33_RUN_STAGE:-}" = "full" ] && \
-        [ "${CANON_P33_NO_COMMIT:-1}" = "0" ] && \
-        [ "${CANON_V1_HP_FULL:-0}" = "1" ] && \
-        [ "${CANON_P59_RANK_PARALLEL_BACKWARD:-0}" = "1" ] && \
-        [ "${CANON_P59_CHECKED_VMA:-0}" = "1" ] || {
-          echo "[env] P67 VMA scoping is restricted to the exact FrozenLake V1 full profile or serving-scope diagnostic" >&2
-          fail=1
-        }
-        case "${CANON_P57_WORKLOAD_CANDIDATE:-}:${CANON_P57_DATA_SPLIT:-}" in
-          :|m15:main) ;;
-          *)
-            echo "[env] P67 FrozenLake full workload identity drifted" >&2
-            fail=1
-            ;;
-        esac
+        if [ "${CANON_PROFILE_FILE:-}" = \
+               "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env" ] && \
+           [ "${CANON_PROFILE:-}" = \
+               "qwen3-8b-dp8-tp8-frozenlake-v1-hp" ] && \
+           [ "${CANON_P32_WORKLOAD:-}" = "frozenlake-dp8-tp8" ] && \
+           [ "${CANON_P33_SHARED_MESH:-}" = "8,8" ] && \
+           [ "${CANON_P57_RUN_KIND:-}" = "train" ] && \
+           [ "${CANON_P57_TIM_ARM:-}" = "zero" ] && \
+           [ "${CANON_P57_EXPECTED_UPDATES:-}" = "300" ] && \
+           [ "${CANON_P33_RUN_STAGE:-}" = "full" ] && \
+           [ "${CANON_P33_NO_COMMIT:-1}" = "0" ] && \
+           [ "${CANON_V1_HP_FULL:-0}" = "1" ] && \
+           [ "${CANON_P59_RANK_PARALLEL_BACKWARD:-0}" = "1" ] && \
+           [ "${CANON_P59_CHECKED_VMA:-0}" = "1" ]; then
+          _canon_p67_context=v1-fl-full
+          case "${CANON_P57_WORKLOAD_CANDIDATE:-}:${CANON_P57_DATA_SPLIT:-}" in
+            :|m15:main) ;;
+            *)
+              echo "[env] P67 FrozenLake full workload identity drifted" >&2
+              fail=1
+              ;;
+          esac
+        elif [ "${CANON_PROFILE_FILE:-}" = \
+                 "cluster/profiles/qwen3-4b-dp8-tp8-deepswe-v1-hp.env" ] && \
+             [ "${CANON_PROFILE:-}" = \
+                 "qwen3-4b-dp8-tp8-deepswe-v1-hp" ] && \
+             [ "${CANON_P34_DEEPSWE:-0}" = "1" ] && \
+             [ "${CANON_P58_DEEPSWE_TIM:-0}" = "1" ] && \
+             [ "${CANON_P58_TIM_ADMITTED:-0}" = "1" ] && \
+             [ "${CANON_P58_TIM_ARM:-}" = "zero" ] && \
+             [ "${CANON_P34_RUN_STAGE:-}" = "full" ] && \
+             [ "${CANON_P34_NO_COMMIT:-1}" = "0" ] && \
+             [ "${CANON_P58_EXPECTED_UPDATES:-}" = "1000" ] && \
+             [ "${CANON_V1_HP_FULL:-0}" = "1" ] && \
+             [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "1" ] && \
+             [ "${CANON_P59_CHECKED_VMA:-0}" = "1" ] && \
+             [ "${CANON_P59_RANK_PARALLEL_BACKWARD:-0}" = "1" ] && \
+             [ "${CANON_P34_DISABLE_SAMPLER_IS:-0}" = "1" ] && \
+             [ "${CANON_P34_DISABLE_TIS:-0}" = "1" ] && \
+             [ "${CANON_PROMPT_PROCESSED_LOGPROBS:-0}" = "1" ] && \
+             [ "${CANON_ENGINE_MODULE_C:-0}" = "1" ] && \
+             [ "${CANON_OPT_STATE_RESIDENT:-0}" = "1" ] && \
+             [ "${CANON_P30_OPT_STATE_OFFLOAD:-1}" = "0" ] && \
+             [ "${CANON_DEEPSWE_ALIGNMENT_WARN_ONLY:-1}" = "0" ]; then
+          _canon_p67_context=p58
+        fi
         ;;
-      *)
-        echo "[env] P67 VMA scoping is restricted to the exact FrozenLake V1 full profile or serving-scope diagnostic" >&2
-        fail=1
-        ;;
+      *) ;;
     esac
+    [ -n "$_canon_p67_context" ] || {
+      echo "[env] P67 VMA scoping is restricted to exact FrozenLake or P58 Zero-HP contexts" >&2
+      fail=1
+    }
+    unset _canon_p67_context
     ;;
   *)
     echo "[env] CANON_P67_P66_VMA_P59_ONLY must be exactly 0 or 1" >&2

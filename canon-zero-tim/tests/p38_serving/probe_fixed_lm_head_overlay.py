@@ -135,7 +135,21 @@ fixed.validate_global_contract(
     "bfloat16",
     tp_size=tp_size,
 )
-if (args.hidden_size, tp_size) == (4096, 8):
+if (args.hidden_size, tp_size) == (2560, 8):
+  if fixed.QWEN4B_TP8_LEARNER_M != (2048, 4096):
+    raise AssertionError(
+        "Qwen3-4B TP8 learner rows drifted: "
+        f"{fixed.QWEN4B_TP8_LEARNER_M}"
+    )
+  fixed.validate_global_contract(
+      (2048, args.hidden_size),
+      (args.hidden_size, fixed.VOCAB),
+      "bfloat16",
+      "bfloat16",
+      tp_size=tp_size,
+  )
+  learner_m = fixed.QWEN4B_TP8_LEARNER_M
+elif (args.hidden_size, tp_size) == (4096, 8):
   if fixed.QWEN8B_TP8_LEARNER_M != (2048, 4096):
     raise AssertionError(
         "Qwen3-8B TP8 learner rows drifted: "
@@ -149,6 +163,22 @@ if (args.hidden_size, tp_size) == (4096, 8):
       tp_size=tp_size,
   )
   learner_m = fixed.QWEN8B_TP8_LEARNER_M
+else:
+  try:
+    fixed.validate_global_contract(
+        (2048, args.hidden_size),
+        (args.hidden_size, fixed.VOCAB),
+        "bfloat16",
+        "bfloat16",
+        tp_size=tp_size,
+    )
+  except ValueError:
+    pass
+  else:
+    raise AssertionError(
+        f"P38 unregistered learner M=2048 admitted for K={args.hidden_size} "
+        f"TP={tp_size}"
+    )
 geometry = fixed.resolve_geometry(args.hidden_size, tp_size, endpoint=endpoint)
 if (
     geometry.local_vocab != local_vocab

@@ -16,6 +16,7 @@ ENV = "CANON_P38_FIXED_LM_HEAD"
 # retracing.
 REQUEST_M = (8, 16, 32, 64, 128, 256)
 LEARNER_M = (4096,)
+QWEN4B_TP8_LEARNER_M = (2048, 4096)
 QWEN8B_TP8_LEARNER_M = (2048, 4096)
 # Union retained for static registries; runtime admission remains geometry-
 # specific through _semantic_m_for_geometry.
@@ -155,11 +156,10 @@ def resolve_geometry(
 
 
 def _semantic_m_for_geometry(geometry: Geometry) -> tuple[int, ...]:
-    learner_m = (
-        QWEN8B_TP8_LEARNER_M
-        if (geometry.hidden, geometry.tp_size) == (4096, 8)
-        else LEARNER_M
-    )
+    learner_m = {
+        (2560, 8): QWEN4B_TP8_LEARNER_M,
+        (4096, 8): QWEN8B_TP8_LEARNER_M,
+    }.get((geometry.hidden, geometry.tp_size), LEARNER_M)
     return REQUEST_M + learner_m
 
 

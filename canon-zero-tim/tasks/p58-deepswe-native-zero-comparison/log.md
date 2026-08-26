@@ -923,3 +923,32 @@
 - No image was published, no Kubernetes object was changed, and no TPU target
   was launched. Matching-image publication and fresh `p58z02` execution remain
   separately user-gated.
+
+## 2026-08-26 UTC — P58.13 Qwen3-4B M2048 and P59-only VMA repair
+
+- Pulled/rebased to exact operator tip
+  `e5c596a4e7621e7442606cfc4dbbb39005eba4eb`; local and tracked branch were
+  ahead/behind `0/0` before edits. `main` was not touched.
+- Verified immutable `p58z02` evidence SHA-256. The global JAX seed repair
+  worked and all 128 rollout rows returned in 1,514.2 seconds. One
+  `MODEL_TIMEOUT` and two `MAX_CONTEXT_LIMIT_REACHED` rows were compact
+  statuses. The fatal error was a later fixed-head rejection in trainer
+  per-token-logprob forward, before backward or optimizer commit.
+- Registered M `(2048,4096)` only for Qwen3-4B TP8 `(2560,8)` while retaining
+  the existing Qwen3-8B mapping. Qwen3-32B TP8 and other geometries retain
+  M `(4096,)` and explicitly reject M=2,048.
+- Imported the latest target-proven FrozenLake Wave-5 scoping repair into only
+  the strict P58 Zero/full HP profile with
+  `CANON_P67_P66_VMA_P59_ONLY=1`. Profile, `00_env.sh`, Python contract, and
+  negative controls form one fail-closed bundle. Native raw, Native+IS,
+  non-HP Zero, Qwen3-32B, and unrelated profiles remain off.
+- Focused host tests pass 50/50; P34 static passes 10 suites, P57 passes
+  146/146, and the flag-registry regression passes. The installed Qwen3-4B overlay matches 37/37
+  and reports `learner_M=2048,4096`; the independent Qwen3-32B image gate
+  reports `learner_M=4096`. The complete pinned-image suite exits zero with
+  `P58_EXACT_IMAGE_CPU_PASS ... qwen4b_fixed_head=1 checked_vma=1
+  vma_p59_only=1 first_update=1 ... regressions=1`.
+- The pinned image had no `/dev/vfio`; no target A=B=C, backward, optimizer,
+  or convergence claim is made. No commit, push, image publication,
+  Kubernetes mutation, TPU launch, model download, credential change, or
+  artifact deletion occurred. A fresh `p58z03` remains separately gated.

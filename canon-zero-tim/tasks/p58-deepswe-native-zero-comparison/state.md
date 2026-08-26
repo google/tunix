@@ -1,9 +1,49 @@
 # State
 
+## Current P58.13 Qwen3-4B M2048/P59-only VMA checkpoint (2026-08-26)
+
+- Status: ACTIVE; local implementation and pinned-image construction PASS;
+  target retry not run. Changes are uncommitted and unpushed.
+- Source: worktree
+  `/home/yuxuan/code_rl_repro/worktrees/p58_fixed_seed_0824`, branch
+  `local/p58-fixed-seed-0824`, based on exact fetched operator tip
+  `e5c596a4e7621e7442606cfc4dbbb39005eba4eb`. `main` is untouched.
+- Immutable target fact: `p58z02` proved the P58.12 global JAX seed route and
+  returned all 128 Step-0 rows in one 1,514.2-second wave. It contained one
+  `MODEL_TIMEOUT` and two `MAX_CONTEXT_LIMIT_REACHED` rows; those were compact
+  statuses, not the crash. The first hard failure was later in trainer
+  canonical per-token-logprob forward, before alignment completion, backward,
+  AdamW, or any optimizer commit.
+- Root error: Qwen3-4B TP8 produced caller-global fixed-head semantic M=2,048
+  (`data=8`, local M=256), but the fixed-head registry admitted M=2,048 only
+  for Qwen3-8B TP8. Qwen3-4B `(hidden=2560,tp=8)` fell back to learner
+  M=`(4096,)` and rejected shape `(2048,2560)`.
+- Fixed-head repair: register learner M `(2048,4096)` only for exact Qwen3-4B
+  TP8 and retain the existing exact Qwen3-8B TP8 registration. Every other
+  geometry retains `(4096,)`; Qwen3-32B TP8 remains a negative for M=2,048.
+- Shared FrozenLake repair: Wave 5 proved strict A-B/B-C `0/0` with
+  checked-VMA scoped to P59 backward. Exact P58 Zero-HP now derives
+  `CANON_P67_P66_VMA_P59_ONLY=1` together with checked-VMA. Native raw,
+  Native+IS, non-HP Zero, Qwen3-32B, and unrelated profiles remain off. This
+  preserves the serving graph; it does not relax the strict A=B=C gate.
+- Validation: 50/50 focused host tests, P34 static 10 suites, P57 146/146,
+  and the flag-registry regression pass. The Qwen3-4B installed overlay
+  matches 37/37 files and reports `learner_M=2048,4096`; the independent
+  Qwen3-32B image gate reports `learner_M=4096`. The complete pinned image
+  exits zero with `P58_EXACT_IMAGE_CPU_PASS ... qwen4b_fixed_head=1
+  checked_vma=1 vma_p59_only=1 first_update=1 ... regressions=1`. No
+  `/dev/vfio` is visible, so no TPU target is claimed.
+- Next action: only after explicit commit/push approval, remote readback,
+  matching-image publication, sandbox admission, and separate launch approval,
+  render fresh `p58z03` using `--stage full --arm zero --high-performance`.
+  Never resume or overwrite `p58z01` or `p58z02`.
+- Evidence/phase: `evidence/p58z02_backward_fixed_lm_head_error/` and
+  `phases/p58-13-backward-fixed-lm-head-m2048.md`.
+
 ## Current P58.12 JAX engine-seed/cleanup checkpoint (2026-08-26)
 
-- Status: ACTIVE; latest target failure diagnosed; source published and exact
-  implementation readback PASS; target retry not run.
+- Status: completed source repair; `p58z02` target proved the engine-global
+  seed route and exposed the later P58.13 trainer-logprob fixed-head failure.
 - Source: worktree
   `/home/yuxuan/code_rl_repro/worktrees/p58_fixed_seed_0824`, branch
   `local/p58-fixed-seed-0824`. The repair was built on exact pulled base

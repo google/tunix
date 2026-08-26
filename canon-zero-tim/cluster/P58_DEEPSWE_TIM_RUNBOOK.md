@@ -18,6 +18,55 @@ P58 does not modify `main`. Rendering and local validation do not authorize a
 Kubernetes apply. An operator must separately approve image publication and
 each launch.
 
+## 2026-08-26 P58.13 M2048/P59-only VMA retry override — local only
+
+This section supersedes the P58.12 instruction to launch `p58z02`. That target
+already ran: it proved the engine-global seed route and returned all 128
+Step-0 rows in 1,514.2 seconds, then stopped in the first trainer canonical
+per-token-logprob forward before backward or AdamW:
+
+```text
+[PATHTRACE] CANON_ADAPTER_DP_FIXED_M_CHUNKS data=8 static_width=20480 chunks=80 global_M=2048 local_M=256
+ValueError: P38 fixed lm_head requires semantic M in (8, 16, 32, 64, 128, 256, 4096), got (2048, 2560)
+```
+
+The batch included one `MODEL_TIMEOUT` and two
+`MAX_CONTEXT_LIMIT_REACHED` rows. Those statuses were retained under the
+signed compact filter and were not the fatal error. Preserve `p58z02`; it has
+no optimizer commit or resumable trainer checkpoint.
+
+P58.13 admits M=2,048 only for Qwen3-4B TP8 `(hidden=2560,tp=8)`. Qwen3-8B
+keeps its existing admission; Qwen3-32B and every other geometry remain at
+learner M=4,096. It also imports the target-proven FrozenLake Wave-5 serving
+repair into only the strict P58 Zero-HP full profile:
+
+```text
+CANON_P59_CHECKED_VMA=1
+CANON_P66_P59_CHECK_VMA=1       # internal derived alias
+CANON_P67_P66_VMA_P59_ONLY=1
+```
+
+P67 prevents checked-VMA metadata from leaking into ordinary serving and
+keeps it inside the exact P59 manual data/model backward. It must remain
+absent from Native raw, Native+IS, three-update/non-HP Zero, Qwen3-32B, and
+unrelated profiles. It does not weaken alignment: Zero-HP still hard-stops on
+any A-B or B-C differing byte.
+
+Before any target, require the complete pinned-image marker:
+
+```text
+P58_EXACT_IMAGE_CPU_PASS ... qwen4b_fixed_head=1 checked_vma=1 vma_p59_only=1 first_update=1 ... regressions=1
+```
+
+The current implementation is local and uncommitted. After explicit
+commit/push approval, exact remote readback, matching-image publication, and
+sandbox-capacity admission, obtain separate launch approval and use the same
+full renderer command below with a fresh run id `p58z03`. Do not reuse
+`p58z01`/`p58z02` roots or checkpoints. The fresh target must prove fixed-head
+global/local M=`2048/256`, strict A-B/B-C `0/0`, finite trainer forward and
+16-group backward, then exactly one coherent update-0 optimizer transaction.
+If those pass, continue the same job toward 1,000 commits.
+
 ## 2026-08-26 P58.12 JAX engine-seed retry override — source published
 
 This is the highest-priority execution instruction. `p58z01` proved 128-device
@@ -67,11 +116,13 @@ tip; do not render or launch from an older SHA.
 
 P58.11 keeps the signed recipe unchanged: promoted 1,012 tasks, B8 x G16,
 16,384 response tokens, 50 turns, seed 42, rollout DP8 x TP8 plus trainer
-DP8 x TP8, TPU-resident AdamW, strict A=B=C, and 1,000 commits. It adds exactly
-three operator-facing production flags to the existing HP profile:
+DP8 x TP8, TPU-resident AdamW, strict A=B=C, and 1,000 commits. With the later
+P58.13 serving-scope repair, the HP profile derives four operator-facing
+production flags:
 
 ```text
 CANON_P59_CHECKED_VMA=1
+CANON_P67_P66_VMA_P59_ONLY=1
 CANON_V1_HP_FIRST_UPDATE_GATE=1
 CANON_P63_OVERFLOW_SAFE_CLIP=1
 ```

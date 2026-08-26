@@ -41,6 +41,7 @@ class FixedLmHeadContractTest(unittest.TestCase):
   def test_registered_production_shape(self):
     self.assertEqual(fixed.REQUEST_M, (8, 16, 32, 64, 128, 256))
     self.assertEqual(fixed.LEARNER_M, (4096,))
+    self.assertEqual(fixed.QWEN4B_TP8_LEARNER_M, (2048, 4096))
     self.assertEqual(fixed.QWEN8B_TP8_LEARNER_M, (2048, 4096))
     self.assertEqual(
         fixed.SEMANTIC_M, (8, 16, 32, 64, 128, 256, 2048, 4096)
@@ -59,11 +60,10 @@ class FixedLmHeadContractTest(unittest.TestCase):
           (geometry.model, geometry.local_vocab, geometry.padded_local_vocab),
           (model, local_vocab, padded_local_vocab),
       )
-      learner_m = (
-          fixed.QWEN8B_TP8_LEARNER_M
-          if (hidden, tp_size) == (4096, 8)
-          else fixed.LEARNER_M
-      )
+      learner_m = {
+          (2560, 8): fixed.QWEN4B_TP8_LEARNER_M,
+          (4096, 8): fixed.QWEN8B_TP8_LEARNER_M,
+      }.get((hidden, tp_size), fixed.LEARNER_M)
       for m in (*fixed.REQUEST_M, *learner_m):
         with self.subTest(hidden=hidden, tp=tp_size, m=m):
           self.assertEqual(
@@ -82,7 +82,7 @@ class FixedLmHeadContractTest(unittest.TestCase):
               ),
               m,
           )
-      if (hidden, tp_size) != (4096, 8):
+      if (hidden, tp_size) not in ((2560, 8), (4096, 8)):
         with self.subTest(hidden=hidden, tp=tp_size, m=2048):
           with self.assertRaisesRegex(ValueError, "requires semantic M"):
             fixed.validate_global_contract(

@@ -1,33 +1,69 @@
 # P58 DeepSWE native-first training handoff
 
-## 2026-08-26 P58.13 DeepSWE 4B TP8 Step-0 backward fixed LM head M=2048 diagnosis
+## 2026-08-26 P58.13 Qwen3-4B M2048 + FrozenLake P59-only VMA override
 
-This is the highest-priority P58 handoff. Target JobSet
-`canon-p58-ds4b-zero-hp-full-p58z02` (Qwen3-4B-Instruct DP8xTP8, 128 TPU chips)
-completed all 128 Step-0 RepoEnv trajectories in 1 wave without timeout,
-validating the P58.12 engine-seed repair.
+This is the highest-priority P58 handoff. Local implementation and the full
+pinned-image construction gate pass; the changes are not committed or pushed,
+and no matching target retry has run.
 
-At Step 0 learner backward pass (`_process_results` ->
-`get_actor_per_token_logps` -> `compute_per_token_logps` -> `compute_logits`),
-execution stopped at `fixed_lm_head`:
+Immutable `p58z02` facts:
+
+- Qwen3-4B-Instruct-2507, clean 1,012 tasks, B8 x G16, rollout DP8xTP8 plus
+  trainer DP8xTP8 on 128 chips;
+- the P58.12 engine-global seed route passed;
+- all 128 Step-0 collector rows returned in one 1,514.2-second wave;
+- one `MODEL_TIMEOUT` and two `MAX_CONTEXT_LIMIT_REACHED` rows were retained
+  under the compact-status policy, so the batch was not timeout-free;
+- the hard failure came later in trainer canonical per-token-logprob forward,
+  before alignment completion, backward, AdamW, or an optimizer commit:
 
 ```text
+[PATHTRACE] CANON_ADAPTER_DP_FIXED_M_CHUNKS data=8 static_width=20480 chunks=80 global_M=2048 local_M=256
 ValueError: P38 fixed lm_head requires semantic M in (8, 16, 32, 64, 128, 256, 4096), got (2048, 2560)
 ```
 
-Root cause analysis:
-- Geometry: Qwen3-4B has `hidden_size=2560`, `vocab_size=151936`.
-  On TP8, `tp_size=8`, so `(hidden_size, tp_size) = (2560, 8)`.
-- Learner microbatch: 16 trajectories per DP rank x 128 tokens chunk = 2048 tokens ($M=2048$).
-- In `p38_fixed_lm_head.py`, `_semantic_m_for_geometry(geometry)` only checked
-  `if geometry == (4096, 8): return QWEN8B_TP8_LEARNER_M` (which had `(2048, 4096)`),
-  while for 4B TP8 `geometry == (2560, 8)`, it fell back to default `LEARNER_M = (4096,)`,
-  causing $M=2048$ to be rejected with `ValueError`.
+The repair registers learner M `(2048,4096)` only for exact Qwen3-4B TP8
+`(hidden=2560,tp=8)`, retains the existing Qwen3-8B TP8 registration, and
+keeps every other geometry at `(4096,)`. Qwen3-32B TP8 remains a negative for
+M=2,048; do not broaden this to all TP8 models.
 
-Preserved evidence:
-- Full error log: `evidence/p58z02_backward_fixed_lm_head_error/run.log`
-  (SHA256 `7349c7965f31e2c84dfd98f8cb7fe175f9b2d4281759d0bb5c07bb336ef8784d`, 2.1 MB)
-- Phase document: `phases/p58-13-backward-fixed-lm-head-m2048.md`
+The Zero-HP profile also imports the latest FrozenLake Wave-5 repair:
+
+```text
+CANON_P59_CHECKED_VMA=1
+CANON_P66_P59_CHECK_VMA=1       # internal alias derived by 00_env
+CANON_P67_P66_VMA_P59_ONLY=1   # scope metadata to exact P59 backward
+```
+
+Wave 5 proved strict A-B=0/B-C=0 for both `p66-off` and `serving-scope`; the
+scoped arm is preferred because it preserves checked-VMA backward while
+restoring the historical ordinary-serving graph. P67 is admitted only for
+the exact P58 Zero/full, Qwen3-4B DP8xTP8, 1,000-update HP tuple. Native raw,
+Native+IS, non-HP Zero, Qwen3-32B, and unrelated profiles remain off. This is
+a numerical graph repair, not a warning-only gate: fresh DeepSWE Zero still
+requires A=B=C exactly.
+
+Construction evidence:
+
+- 50/50 focused host tests pass;
+- installed Qwen3-4B overlay matches 37/37 and reports
+  `learner_M=2048,4096`;
+- independent Qwen3-32B exact-image gate reports `learner_M=4096`;
+- complete gate ends with `P58_EXACT_IMAGE_CPU_PASS ...
+  qwen4b_fixed_head=1 checked_vma=1 vma_p59_only=1 first_update=1 ...`.
+
+The image had no `/dev/vfio`; target A=B=C, backward, optimizer, and
+convergence are not proven. Preserve `p58z02` under
+`evidence/p58z02_backward_fixed_lm_head_error/` (run-log SHA-256
+`7349c7965f31e2c84dfd98f8cb7fe175f9b2d4281759d0bb5c07bb336ef8784d`).
+It is not a resumable trainer checkpoint.
+
+Next execution sequence: obtain commit/push approval, prove exact remote SHA,
+build/pin the matching image, rerun the complete gate, pass sandbox capacity,
+then obtain separate launch approval and render fresh `p58z03` with
+`--stage full --arm zero --high-performance`. Never resume or overwrite
+`p58z01` or `p58z02`. See
+`phases/p58-13-backward-fixed-lm-head-m2048.md` for the target gates.
 
 ## 2026-08-26 P58.12 JAX engine-seed/cleanup override — source published
 
@@ -99,6 +135,7 @@ The exact HP profile now derives this closed numerical bundle:
 ```text
 CANON_P59_CHECKED_VMA=1
 CANON_P66_P59_CHECK_VMA=1        # internal derived compatibility alias
+CANON_P67_P66_VMA_P59_ONLY=1    # P58.13 serving-scope repair
 CANON_V1_HP_FIRST_UPDATE_GATE=1
 CANON_P63_OVERFLOW_SAFE_CLIP=1   # max norm remains 1.0
 ```
@@ -111,7 +148,7 @@ VMA and P63 evidence. More precisely, a legal all-compact backward attempt
 carries P59/checked-VMA receipts plus a zero-commit journal row, while P63 and
 global-step receipts occur only for commits. Postflight reconciles the ordered
 attempt stream and still requires exactly 1,000 commits. Native raw, Native+IS,
-ordinary non-HP Zero, and neighbor DeepSWE recipes must keep all three
+ordinary non-HP Zero, and neighbor DeepSWE recipes must keep all four
 operator-facing flags absent.
 
 The implementation is published to `yuxzhang/canon-zero-tim`. It was

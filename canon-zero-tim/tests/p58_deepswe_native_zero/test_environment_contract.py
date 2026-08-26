@@ -246,6 +246,7 @@ class P58EnvironmentContractTest(unittest.TestCase):
         "CANON_P59_RANK_PARALLEL_BACKWARD": "1",
         "CANON_P59_CHECKED_VMA": "1",
         "CANON_P66_P59_CHECK_VMA": "1",
+        "CANON_P67_P66_VMA_P59_ONLY": "1",
         "CANON_V1_HP_FIRST_UPDATE_GATE": "1",
         "CANON_P63_OVERFLOW_SAFE_CLIP": "1",
         "CANON_VLLM_ENABLE_PREFIX_CACHING": "0",
@@ -264,6 +265,7 @@ class P58EnvironmentContractTest(unittest.TestCase):
         ("CANON_P59_RANK_PARALLEL_BACKWARD", "0"),
         ("CANON_P59_CHECKED_VMA", "0"),
         ("CANON_P66_P59_CHECK_VMA", "0"),
+        ("CANON_P67_P66_VMA_P59_ONLY", "0"),
         ("CANON_V1_HP_FIRST_UPDATE_GATE", "0"),
         ("CANON_P63_OVERFLOW_SAFE_CLIP", "0"),
         ("CANON_P38_FIXED_LM_HEAD", "0"),
@@ -271,6 +273,17 @@ class P58EnvironmentContractTest(unittest.TestCase):
     ):
       with self.subTest(key=key), self.assertRaises(ValueError):
         deepswe_contract.validate_environment({**values, key: replacement})
+
+  def test_p67_is_rejected_outside_zero_hp(self):
+    for arm in ("native", "zero"):
+      with self.subTest(arm=arm):
+        values = self._resolved(arm, "three-update")
+        deepswe_contract.validate_environment(values)
+        with self.assertRaises(ValueError):
+          deepswe_contract.validate_environment({
+              **values,
+              "CANON_P67_P66_VMA_P59_ONLY": "1",
+          })
 
   def test_both_arms_resolve_to_the_signed_contract(self):
     for arm in ("native", "zero"):
@@ -294,6 +307,7 @@ class P58EnvironmentContractTest(unittest.TestCase):
             self.assertEqual(values["CANON_P28_BATCHED_REVERSE"], "0")
             self.assertEqual(values["CANON_BATCHED_EVIDENCE"], "0")
             self.assertNotIn("CANON_P59_CHECKED_VMA", values)
+            self.assertNotIn("CANON_P67_P66_VMA_P59_ONLY", values)
             self.assertNotIn("CANON_V1_HP_FIRST_UPDATE_GATE", values)
             self.assertNotIn("CANON_P63_OVERFLOW_SAFE_CLIP", values)
           else:
@@ -304,6 +318,7 @@ class P58EnvironmentContractTest(unittest.TestCase):
                 values["CANON_P58_NATIVE_STOCK_PROMPT_OBSERVER"], "0"
             )
             self.assertNotIn("CANON_P59_CHECKED_VMA", values)
+            self.assertNotIn("CANON_P67_P66_VMA_P59_ONLY", values)
             self.assertNotIn("CANON_V1_HP_FIRST_UPDATE_GATE", values)
             self.assertNotIn("CANON_P63_OVERFLOW_SAFE_CLIP", values)
 

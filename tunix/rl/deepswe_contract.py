@@ -915,6 +915,7 @@ def validate_environment(values: Mapping[str, str]) -> None:
         ),
         "CANON_ENGINE_MODULE_C": "0" if p58_arm == "native" else "1",
         "CANON_V1_HP_FULL": "1" if p58_hp else "0",
+        "CANON_P67_P66_VMA_P59_ONLY": "1" if p58_hp else None,
     })
     if p58_hp:
       expected.update({

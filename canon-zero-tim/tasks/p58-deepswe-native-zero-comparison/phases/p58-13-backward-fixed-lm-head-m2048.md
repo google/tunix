@@ -1,106 +1,124 @@
-# P58.13 — DeepSWE 4B TP8 Step-0 backward fixed LM head M=2048 diagnosis
+# P58.13 — Qwen3-4B trainer-logprob M2048 and P59-only VMA repair
 
 ## Status
 
-`DIAGNOSIS COMPLETE / ERROR PRESERVED / EVIDENCE RECORDED / TARGET NOT RUN`
+`LOCAL IMPLEMENTATION + PINNED-IMAGE CONSTRUCTION PASS / TARGET RETRY NOT RUN`
 
-## Trigger
+The repair is uncommitted and unpushed. Image publication, Kubernetes apply,
+and a fresh target remain separately user-gated.
 
-Target JobSet `canon-p58-ds4b-zero-hp-full-p58z02` (Qwen3-4B-Instruct DP8xTP8, 128 TPU chips) executed Step 0.
-All 128 SWE-bench RepoEnv trajectories completed generation in 1 wave without timeouts, verifying the P58.12 engine-seed repair.
+## Immutable trigger
 
-At Step 0 learner backward pass (`_process_results` -> `get_actor_per_token_logps` -> `compute_per_token_logps` -> `compute_logits`), execution failed at `fixed_lm_head`:
+Target `canon-p58-ds4b-zero-hp-full-p58z02` ran the signed Qwen3-4B-Instruct
+DP8xTP8 recipe on 128 TPU chips. The P58.12 seed route worked:
 
 ```text
-[rank0]: Traceback (most recent call last):
-[rank0]:   File "/app/examples/deepswe/canonical_entrypoint.py", line 36, in <module>
-[rank0]:     main()
-[rank0]:   File "/app/examples/deepswe/canonical_entrypoint.py", line 32, in main
-[rank0]:     runpy.run_module("examples.deepswe.train_deepswe_nb", run_name="__main__")
-[rank0]:   File "<frozen runpy>", line 229, in run_module
-[rank0]:   File "<frozen runpy>", line 88, in _run_code
-[rank0]:   File "/app/examples/deepswe/train_deepswe_nb.py", line 1812, in <module>
-[rank0]:     agentic_grpo_learner.train(train_dataset=train_dataset)
-[rank0]:   File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 3489, in train
-[rank0]:     train_examples = self._batch_to_train_example(
-[rank0]:                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-[rank0]:   File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 2866, in _batch_to_train_example
-[rank0]:     return self._process_results(
-[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^
-[rank0]:   File "/app/tunix/rl/agentic/agentic_grpo_learner.py", line 862, in _process_results
-[rank0]:     trainer_per_token_logps = self.rl_cluster.get_actor_per_token_logps(
-[rank0]:                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-[rank0]:   File "/app/tunix/rl/rl_cluster.py", line 1335, in get_actor_per_token_logps
-[rank0]:     common.compute_per_token_logps(
-[rank0]:   File "/app/tunix/rl/common.py", line 394, in compute_per_token_logps
-[rank0]:     return canonical_forward.compute_per_token_logps(
-[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-[rank0]:   File "/app/tunix/rl/canonical_forward.py", line 83, in compute_per_token_logps
-[rank0]:     return require_registered().compute_per_token_logps(**kwargs)
-[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-[rank0]:   File "/app/tunix/rl/canonical_qwen3_adapter.py", line 9320, in compute_per_token_logps
-[rank0]:     grouped_logps, grouped_entropy = jax.lax.map(
-[rank0]:                                      ^^^^^^^^^^^^
-[rank0]:   File "/app/tunix/rl/canonical_qwen3_adapter.py", line 9310, in grouped_body
-[rank0]:     return self._sequence_group(
-[rank0]:            ^^^^^^^^^^^^^^^^^^^^^
-[rank0]:   File "/app/tunix/rl/canonical_qwen3_adapter.py", line 9125, in _sequence_group
-[rank0]:     caches, chunk_output = jax.lax.cond(
-[rank0]:                            ^^^^^^^^^^^^^
-[rank0]:   File "/app/tunix/rl/canonical_qwen3_adapter.py", line 9029, in run_nonempty
-[rank0]:     logits = self._runner.compute_logits_fn(
-[rank0]:              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-[rank0]:   File "/usr/local/lib/python3.12/site-packages/tpu_inference/models/common/model_loader.py", line 414, in run_compute_logits
-[rank0]:     return model.compute_logits(hidden_state)
-[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-[rank0]:   File "/mnt/disks/linchai_data/deepswe_zero_tim/canon-p58-ds4b-zero-hp-full-p58z02/canon/qwen3.py", line 672, in compute_logits
-[rank0]:     return self.model.embed_tokens.decode(hidden_states)
-[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-[rank0]:   File "/usr/local/lib/python3.12/site-packages/tpu_inference/layers/jax/linear.py", line 130, in _p38_fixed_tied_head_decode
-[rank0]:     return _p38_fixed_lm_head(
-[rank0]:            ^^^^^^^^^^^^^^^^^^^
-[rank0]:   File "/mnt/disks/linchai_data/deepswe_zero_tim/canon-p58-ds4b-zero-hp-full-p58z02/canon/p38_fixed_lm_head.py", line 405, in fixed_lm_head
-[rank0]:     semantic_m = validate_global_contract(
-[rank0]:                  ^^^^^^^^^^^^^^^^^^^^^^^^^
-[rank0]:   File "/mnt/disks/linchai_data/deepswe_zero_tim/canon-p58-ds4b-zero-hp-full-p58z02/canon/p38_fixed_lm_head.py", line 237, in validate_global_contract
-[rank0]:     raise ValueError(
-[rank0]: ValueError: P38 fixed lm_head requires semantic M in (8, 16, 32, 64, 128, 256, 4096), got (2048, 2560)
+[P58.SEED] ... scope=engine-global
+[VLLM.JAX_SEED] ... engine_seed=42 request_seed=none
+[DEEPSWE.ROLLOUT_DEADLINE] batch_complete prompt_groups=8 elapsed_secs=1514.2
+[P58.LOGPS_BATCH] configured_prompts=8 generations=16 execution_trajectories=128 observed_trajectories=128
 ```
 
-## Root Cause Analysis
+All 128 collector rows returned in one wave inside the 3,600-second batch
+deadline. This was not a timeout-free batch: one row was `MODEL_TIMEOUT` and
+two rows were `MAX_CONTEXT_LIMIT_REACHED`. The signed compact-status policy
+retained them; they did not cause the process failure.
 
-1. Geometry: Qwen3-4B has `hidden_size=2560`, `vocab_size=151936`.
-   On TP8, `tp_size=8`, so `(hidden_size, tp_size) = (2560, 8)`.
-2. Learner Microbatching:
-   - Batch size: 128 trajectories across 8 DP ranks = 16 trajectories per DP rank.
-   - Microbatch chunk length: 128 tokens.
-   - Total batch tokens per microbatch: $16 \times 128 = 2048$ tokens ($M = 2048$).
-3. Shape Validation:
-   - `validate_global_contract` calls `_semantic_m_for_geometry(geometry)` where `geometry = (hidden_size, tp_size) = (2560, 8)`.
-   - `_semantic_m_for_geometry` contained:
-     ```python
-     if geometry == (4096, 8):
-       return QWEN8B_TP8_LEARNER_M  # (2048, 4096)
-     return LEARNER_M  # (4096,)
-     ```
-   - Because `(2560, 8) != (4096, 8)`, it returned `LEARNER_M = (4096,)`, which caused $M=2048$ to be rejected with `ValueError`.
+After rollout, the first trainer canonical per-token-logprob forward emitted:
 
-## Planned Resolution (For Implementation Phase)
+```text
+[PATHTRACE] CANON_ADAPTER_DP_FIXED_M_CHUNKS data=8 static_width=20480 chunks=80 global_M=2048 local_M=256
+ValueError: P38 fixed lm_head requires semantic M in (8, 16, 32, 64, 128, 256, 4096), got (2048, 2560)
+```
 
-1. Generalize learner semantic M admission for all TP8 geometries:
-   ```python
-   TP8_LEARNER_M = (2048, 4096)
-   QWEN8B_TP8_LEARNER_M = TP8_LEARNER_M
-   ```
-   In `_semantic_m_for_geometry(geometry)`:
-   ```python
-   learner_m = TP8_LEARNER_M if geometry.tp_size == 8 else LEARNER_M
-   ```
-2. Update tests in `test_fixed_lm_head.py` and `probe_fixed_lm_head_overlay.py` to assert $M \in (2048, 4096)$ for 4B TP8 `(2560, 8)` and 8B TP8 `(4096, 8)`.
-3. Add `CANON_P67_P66_VMA_P59_ONLY=1` to `cluster/profiles/qwen3-4b-dp8-tp8-deepswe-v1-hp.env`.
+The failure occurred in `_process_results -> get_actor_per_token_logps ->
+compute_per_token_logps -> canonical adapter -> compute_logits -> tied embed
+fixed lm_head`. It was before alignment completion, backward, gradient
+accumulation, AdamW, or any optimizer commit. Therefore `p58z02` is immutable
+failure evidence, not a resumable training checkpoint.
 
-## Preserved Evidence
+Preserved evidence:
 
-- Error log: `evidence/p58z02_backward_fixed_lm_head_error/run.log`
-  - SHA256: `7349c7965f31e2c84dfd98f8cb7fe175f9b2d4281759d0bb5c07bb336ef8784d`
-  - Size: 2.1 MB
+- `evidence/p58z02_backward_fixed_lm_head_error/run.log`
+- SHA-256 `7349c7965f31e2c84dfd98f8cb7fe175f9b2d4281759d0bb5c07bb336ef8784d`
+
+## Root cause and exact shape ledger
+
+Qwen3-4B has hidden width 2,560 and TP=8. The caller-global learner program
+has semantic M=2,048, composed as eight data ranks times the DP-local sequence
+bucket M=256. The canonical fixed kernel still executes eight deterministic
+M=256 chunks. The fixed-head registry admitted M=2,048 only for the existing
+Qwen3-8B `(hidden=4096, tp=8)` geometry, so Qwen3-4B `(2560, 8)` incorrectly
+fell back to the generic learner admission `(4096,)`.
+
+The repair is geometry-exact:
+
+- `(2560, 8)` Qwen3-4B admits learner M `(2048, 4096)`;
+- `(4096, 8)` Qwen3-8B keeps learner M `(2048, 4096)`;
+- every other geometry keeps learner M `(4096,)`.
+
+In particular Qwen3-32B `(5120, 8)` does not inherit M=2,048 without its own
+signed target evidence. The implementation does not generalize admission to
+all TP8 models.
+
+## FrozenLake Wave-5 repair imported into DeepSWE
+
+FrozenLake Wave 5 independently proved that the process-wide P66 checked-VMA
+compatibility alias leaked VMA metadata into ordinary serving. Both the
+`p66-off` and `serving-scope` arms recovered A-B=0 and B-C=0; the preferred
+`serving-scope` arm retains checked-VMA inside the exact P59 backward while
+preserving the historical serving graph.
+
+P58 Zero-HP now imports that shared numerical repair with:
+
+```text
+CANON_P59_CHECKED_VMA=1
+CANON_P66_P59_CHECK_VMA=1       # derived compatibility alias
+CANON_P67_P66_VMA_P59_ONLY=1   # serving graph unchanged; P59 backward only
+```
+
+Admission remains fail-closed to the exact Qwen3-4B P58 Zero/full,
+DP8xTP8, 1,000-update, strict-alignment HP profile. Native raw, Native+IS,
+ordinary three-update/non-HP Zero, Qwen3-32B, and unrelated profiles do not
+receive P67. P67 is a graph-scoping repair, not a relaxed alignment threshold;
+the target still requires A=B=C exactly.
+
+## Validation
+
+- Focused host tests: 50/50 PASS across the P58 profile/renderer, fixed-head
+  geometry, and FrozenLake P67 red/recovery/B-C-negative controls.
+- Adjacent host gates: P34 static 10 suites, P57 146/146, and the flag-registry
+  regression PASS.
+- Qwen3-4B installed overlay: all 37 manifest files match and the real endpoint
+  reports `learner_M=2048,4096`.
+- Qwen3-32B installed overlay: exact-image gate exits zero and continues to
+  report `learner_M=4096`.
+- Complete dependency-bearing P58 pinned-image gate exits zero with:
+
+```text
+P58_EXACT_IMAGE_CPU_PASS ... qwen4b_fixed_head=1 checked_vma=1 vma_p59_only=1 first_update=1 ... regressions=1
+```
+
+The pinned container has no `/dev/vfio`; this proves construction and installed
+shim behavior only. It does not prove target TPU A=B=C, backward, optimizer,
+or convergence.
+
+## Next target gate
+
+After explicit commit/push approval, exact remote readback, matching-image
+publication, sandbox-capacity admission, and separate launch approval, render
+a fresh `p58z03` with `--stage full --arm zero --high-performance`. Do not
+resume or overwrite `p58z01` or `p58z02`.
+
+The fresh target must first prove:
+
+1. all 128 rows return inside the signed batch deadline;
+2. installed Qwen3-4B fixed-head accepts global M=2,048/local M=256;
+3. A-B and B-C are byte-exact with P67 enabled;
+4. trainer forward and the 16-group backward are finite;
+5. update 0 emits the checked-VMA, first-update, stable-clip, and exactly-one
+   optimizer transaction receipts.
+
+If those gates pass, the same job continues toward 1,000 commits. Any finite
+alignment difference remains a hard Zero-HP failure; no warning-only fallback
+or gate deletion is admitted.
