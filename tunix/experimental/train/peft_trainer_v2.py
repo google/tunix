@@ -14,10 +14,11 @@
 
 """PEFT trainer."""
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 import contextlib
 import dataclasses
 import functools
+import os
 import time
 from typing import Any, Callable, Concatenate, Dict, List, ParamSpec, Tuple
 
@@ -33,7 +34,6 @@ from jax.typing import DTypeLike  # pylint: disable=g-importing-member
 import numpy as np
 import optax
 import orbax.checkpoint as ocp
-import os
 from tunix.experimental.common import datatypes
 from tunix.experimental.metrics import metrics as exp_metrics
 from tunix.experimental.train import abstract_trainer
@@ -1143,9 +1143,16 @@ class PeftTrainer(abstract_trainer.AbstractTrainer):
     checkpointing will be added later once it is supported in the checkpoint
     manager.
     """
-    step = kwargs.pop("step", self._train_steps)
     if metadata is None:
       metadata = self.custom_checkpoint_metadata()
+    step = kwargs.pop("step", None)
+    if step is None:
+      if isinstance(metadata, (dict, Mapping)):
+        step = metadata.get("step", self._train_steps)
+      elif hasattr(metadata, "step"):
+        step = getattr(metadata, "step")
+    if step is None:
+      step = self._train_steps
     save_only_lora_params = kwargs.pop(
         "save_only_lora_params", self._lora_enabled
     )

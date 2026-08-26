@@ -458,3 +458,17 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     )
     self._policy_version = result.policy_version
     return result.policy_version
+
+  async def save_checkpoint(
+      self,
+      role: datatypes.Role = datatypes.Role.ACTOR,
+      metadata: Any = None,
+      **kwargs: Any,
+  ) -> Any:
+    """Requests the trainer worker for `role` to save a checkpoint."""
+    worker = self._trainer_workers.get(role)
+    if worker is None:
+      raise ValueError(f"No trainer worker registered for role {role}")
+    return await self._invoke_worker(
+        worker, "save_checkpoint", metadata=metadata, **kwargs
+    )

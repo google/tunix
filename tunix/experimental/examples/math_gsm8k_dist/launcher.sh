@@ -49,6 +49,15 @@ WAIT_TIMEOUT_SECS=${WAIT_TIMEOUT_SECS:-1800}
 WAIT_POLL_SECS=${WAIT_POLL_SECS:-5}
 WAIT_DEBUG_EVERY_POLLS=${WAIT_DEBUG_EVERY_POLLS:-6}
 WAIT_LOG_TAIL_LINES=${WAIT_LOG_TAIL_LINES:-40}
+TRAINER_SHUTDOWN_GRACE_SECS=${TRAINER_SHUTDOWN_GRACE_SECS:-900}
+WORKER_SHUTDOWN_GRACE_SECS=${WORKER_SHUTDOWN_GRACE_SECS:-10}
+# Time after the first interrupt. During this time, a second one is gnored.
+# So a double-tapped Ctrl+C cannot discard a checkpoint that is still being
+# written.
+FORCE_ARM_SECS=${FORCE_ARM_SECS:-5}
+SHUTDOWN_SIGNAL_COUNT=0
+DRAIN_START_SECONDS=0
+FORCE_KILL=0
 
 TRAINER_TPU_CHIPS=${TRAINER_TPU_CHIPS:-0,1}
 TRAINER_FSDP=${TRAINER_FSDP:-2}
@@ -423,14 +432,97 @@ ROLLOUT_PID=$!
 echo "Rollout pid=$ROLLOUT_PID log=$ROLLOUT_LOG"
 print_process_debug "rollout" "$ROLLOUT_PID"
 
+
+on_shutdown_signal() {
+  SHUTDOWN_SIGNAL_COUNT=$((SHUTDOWN_SIGNAL_COUNT + 1))
+  if (( SHUTDOWN_SIGNAL_COUNT == 1 )); then
+    DRAIN_START_SECONDS=$seconds
+    print_setion "graceful shutdown"
+    echo "Received $1. Draining workers so the trainer can finalize its"
+    echo "checkpoint. Press Ctrl+C again (after ${FORCE_ARM_SECS}s) to ABADON"
+    echo "the in-flight checkpoint and kill workers immediately."
+    exit 130
+  elif (( SECONDS - DRAIN_START_SECONDS < FORCE_ARM_SECS )); then
+    echo "Ignoring rapid $1 (within the ${FORCE_ARM_SECS}s grace period)."
+    echo "Press Ctrl+C again if you really want to abandon the checkpoint."
+  else
+    echo "Received $1. Killing workers immediately."
+    FORCE_KILL=1
+  fi
+}
+
 cleanup() {
-  echo "Cleaning up worker processes (PIDs: $TRAINER_PID, $ROLLOUT_PID, ${INFERENCE_PID:-})..."
-  kill "$TRAINER_PID" "$ROLLOUT_PID" "${INFERENCE_PID:-}" 2>/dev/null || true
-  wait "$TRAINER_PID" "$ROLLOUT_PID" "${INFERENCE_PID:-}" 2>/dev/null || true
-  echo "Workers stopped."
+  trap - EXIT ERR
+  local trainer_pids=()
+  local worker_pids=()
+  local all_pids=()
+
+  if [[ -n "${TRAINER_PID:-}" ]]; then
+    trainer_pids+=("$TRAINER_PID")
+    all_pids+=("$TRAINER_PID")
+  fi
+  for pid in "${ROLLOUT_PID:-}" "${INFERENCE_PID:-}"; do
+    if [[ -n "$pid" ]]; then
+      worker_pids+=("$pid")
+      all_pids+=("$pid")
+    fi
+  done
+
+  if (( ${#all_pids[@]} == 0 )); then
+    return
+  fi
+
+  echo "Cleaning up worker processes: ${all_pids[*]}"
+  echo "Waiting worker processes shutdown (grace period: ${TRAINER_SHUTDOWN_GRACE_SECS} seconds)"
+  # SIGTERM only: the trainer installs a SIGTERM handler that finalizes any
+  # in-flight checkpoint before exiting. Wait (without a hard timeout, capped by
+  # TRAINER_SHUTDOWN_GRACE_SECS) so the checkpoint can be finalized.
+  # Non-trainer workers (rollout, inference) do not perform checkpoint
+  # finalization and are forcefully killed after WORKER_SHUTDOWN_GRACE_SECS if
+  # they fail to exit promptly.
+  kill "${all_pids[@]}" 2>/dev/null || true
+  local waited=0
+  local poll_interval=2
+  while true; do
+    if (( FORCE_KILL == 1 )); then
+      echo "Aborting after ${waited}s at user request."
+      break
+    fi
+    local alive=0
+    for pid in "${worker_pids[@]}"; do
+      if kill -0 "$pid" 2>/dev/null; then
+        if (( waited >= WORKER_SHUTDOWN_GRACE_SECS )); then
+          kill -9 "$pid" 2>/dev/null || true
+        else
+          alive=1
+        fi
+      fi
+    done
+    for pid in "${trainer_pids[@]}"; do
+      if kill -0 "$pid" 2>/dev/null; then
+        if (( waited >= TRAINER_SHUTDOWN_GRACE_SECS )); then
+          kill -9 "$pid" 2>/dev/null || true
+        else
+          alive=1
+        fi
+      fi
+    done
+    if (( alive == 0 )); then
+      break
+    fi
+    sleep "$poll_interval" || true
+    waited=$((waited + poll_interval))
+  done
+  for pid in "${all_pids[@]}"; do
+    kill -9 "$pid" 2>/dev/null || true
+  done
+  wait "${all_pids[@]}" 2>/dev/null || true
+  echo "Workers stopped after ${waited}s of graceful drain."
 }
 trap on_error ERR
 trap cleanup EXIT
+trap 'on_shutdown_signal SIGINT' INT
+trap 'on_shutdown_signal SIGTERM' TERM
 
 if [[ "$RUN_INFERENCE_NODE" == "1" || "$RUN_INFERENCE_NODE" == "true" || "$RUN_INFERENCE_NODE" == "True" ]]; then
   if [[ -z "$INFERENCE_TPU_CHIPS" ]]; then
@@ -495,6 +587,7 @@ echo "Launching CPU orchestrator..."
     --max_prompt_length="$MAX_PROMPT_LENGTH"
     --max_response_length="$MAX_RESPONSE_LENGTH"
     --train_micro_batch_size="$TRAIN_MICRO_BATCH_SIZE"
+    --stop_workers_on_exit
   )
   if [[ -n "$INFERENCE_ADDR" ]]; then
     ORCHESTRATOR_CMD+=(--inference_addr="$INFERENCE_ADDR")

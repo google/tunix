@@ -170,6 +170,9 @@ class RLProgramTest(absltest.TestCase):
     )
     self.mock_engine.dispatch_rollouts = mock.AsyncMock()
     self.mock_engine.train_step = mock.AsyncMock(return_value="step_done")
+    self.mock_engine.save_checkpoint = mock.AsyncMock(
+        return_value={"checkpoint_saved": True}
+    )
 
     async def _mock_poll(*args, **kwargs):
       del args, kwargs
@@ -271,6 +274,15 @@ class RLProgramTest(absltest.TestCase):
           policy_version=0,
       )
       self.mock_engine.train_step.assert_called_once()
+      self.mock_engine.save_checkpoint.assert_called_once_with(
+          role=datatypes.Role.ACTOR,
+          metadata={
+              "step": 1,
+              "policy_version": 0,
+              "num_rollouts": 2,
+              "num_microbatches": 1,
+          },
+      )
       self.mock_engine.sync_weights.assert_called_once_with(
           role=datatypes.Role.ACTOR
       )
@@ -291,9 +303,36 @@ class RLProgramTest(absltest.TestCase):
       await program.run_async(self.mock_engine)
 
       self.assertEqual(program.step, 1)
+      self.mock_engine.save_checkpoint.assert_called_once()
       self.mock_engine.sync_weights.assert_not_called()
       self.assertIsNotNone(program.last_step_result)
       self.assertEqual(program.last_step_result.policy_version, 1)
+
+    asyncio.run(_run())
+
+  def test_checkpoint_called_before_sync_weights(self):
+    async def _run():
+      call_order = []
+
+      async def mock_save_checkpoint(*args, **kwargs):
+        del args, kwargs
+        call_order.append("save_checkpoint")
+        return {"checkpoint_saved": True}
+
+      async def mock_sync_weights(*args, **kwargs):
+        del args, kwargs
+        call_order.append("sync_weights")
+        return 1
+
+      self.mock_engine.save_checkpoint.side_effect = mock_save_checkpoint
+      self.mock_engine.sync_weights.side_effect = mock_sync_weights
+
+      _set_mock_poll_batches(self.mock_engine, _make_trajectory_group())
+      program = self._create_program(sync_weights=True)
+
+      await program.run_async(self.mock_engine, num_steps=1)
+
+      self.assertEqual(call_order, ["save_checkpoint", "sync_weights"])
 
     asyncio.run(_run())
 
@@ -565,6 +604,59 @@ class RLProgramTest(absltest.TestCase):
       self.assertIn("Training worker OOM", str(cm.exception))
 
     asyncio.run(_run())
+
+  def test_run_async_propagates_save_checkpoint_exception_and_skips_weight_sync(
+      self,
+  ):
+    async def _run():
+      _set_mock_poll_batches(self.mock_engine, _make_trajectory_group())
+      self.mock_engine.save_checkpoint.side_effect = RuntimeError(
+          "Checkpoint save failed: disk full"
+      )
+      self.mock_engine.sync_weights = mock.AsyncMock()
+
+      end_steps = []
+
+      def on_end(step, result):
+        end_steps.append((step, result))
+
+      program = self._create_program(
+          max_steps=1,
+          sync_weights=True,
+          on_step_end=on_end,
+      )
+
+      with self.assertRaises(RuntimeError) as cm:
+        await program.run_async(self.mock_engine)
+
+      self.assertIn("Checkpoint save failed: disk full", str(cm.exception))
+      self.mock_engine.save_checkpoint.assert_called_once()
+      self.mock_engine.sync_weights.assert_not_called()
+      self.assertEqual(program.step, 0)
+      self.assertIsNone(program.last_step_result)
+      self.assertEmpty(end_steps)
+
+    asyncio.run(_run())
+
+  def test_run_async_save_checkpoint_io_error(self):
+    async def _run():
+      _set_mock_poll_batches(self.mock_engine, _make_trajectory_group())
+      self.mock_engine.save_checkpoint.side_effect = IOError(
+          "Storage quota exceeded"
+      )
+      self.mock_engine.sync_weights = mock.AsyncMock()
+
+      program = self._create_program(max_steps=1, sync_weights=True)
+
+      with self.assertRaises(IOError) as cm:
+        await program.run_async(self.mock_engine)
+
+      self.assertIn("Storage quota exceeded", str(cm.exception))
+      self.mock_engine.sync_weights.assert_not_called()
+      self.assertEqual(program.step, 0)
+
+    asyncio.run(_run())
+
 
   def test_run_async_propagates_critique_stage_exception(self):
     async def _run():

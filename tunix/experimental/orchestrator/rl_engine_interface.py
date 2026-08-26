@@ -20,6 +20,7 @@ from tunix.experimental.common import datatypes
 from tunix.experimental.metrics import metrics as exp_metrics
 from tunix.experimental.worker import remote_execution
 
+
 @runtime_checkable
 class AbstractRLEngine(Protocol):
   """Stateless compute primitives for distributed worker meshes."""
@@ -145,3 +146,11 @@ class AbstractRLEngine(Protocol):
     """Coordinates decentralized peer-to-peer weight sync across worker roles."""
     ...
 
+  async def save_checkpoint(
+      self,
+      role: datatypes.Role = datatypes.Role.ACTOR,
+      metadata: Any = None,
+      **kwargs: Any,
+  ) -> Any:
+    """Requests the trainer worker for `role` to save a checkpoint."""
+    ...

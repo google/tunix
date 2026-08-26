@@ -625,14 +625,80 @@ class PeftTrainerTest(parameterized.TestCase):
     model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=rngs)
     trainer = peft_trainer_v2.PeftTrainer(model, optax.sgd(1e-3), config)
 
-    custom_metadata = {'global_step': 42, 'role': 'actor'}
-    trainer.save_checkpoint(metadata=custom_metadata, step=10, force=True)
+    custom_metadata = {'step': 10, 'global_step': 42, 'role': 'actor'}
+    trainer.save_checkpoint(metadata=custom_metadata, force=True)
 
     mock_cm.save.assert_called_once_with(
         10,
         trainer.model,
         trainer.optimizer,
         save_only_lora_params=False,
+        custom_metadata=custom_metadata,
+        force=True,
+    )
+
+  @mock.patch.object(checkpoint_manager, 'CheckpointManager')
+  def test_save_checkpoint_default_step_from_train_steps(
+      self, mock_checkpoint_manager_init
+  ):
+    mock_cm = mock.MagicMock()
+    mock_checkpoint_manager_init.return_value = mock_cm
+    mock_cm.save.return_value = True
+    mock_cm.maybe_restore.return_value = (0, {})
+
+    config = peft_trainer_v2.TrainingConfig(
+        eval_every_n_steps=2,
+        max_steps=100,
+        checkpoint_root_directory='/tmp/checkpoint',
+        checkpointing_options=ocp.CheckpointManagerOptions(),
+    )
+    rngs = nnx.Rngs(0)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=rngs)
+    trainer = peft_trainer_v2.PeftTrainer(model, optax.sgd(1e-3), config)
+
+    trainer.save_checkpoint(force=True)
+
+    mock_cm.save.assert_called_once_with(
+        0,
+        trainer.model,
+        trainer.optimizer,
+        save_only_lora_params=False,
+        custom_metadata={},
+        force=True,
+    )
+
+  @mock.patch.object(checkpoint_manager, 'CheckpointManager')
+  def test_save_checkpoint_step_kwarg_and_optional_params(
+      self, mock_checkpoint_manager_init
+  ):
+    mock_cm = mock.MagicMock()
+    mock_checkpoint_manager_init.return_value = mock_cm
+    mock_cm.save.return_value = True
+    mock_cm.maybe_restore.return_value = (0, {})
+
+    config = peft_trainer_v2.TrainingConfig(
+        eval_every_n_steps=2,
+        max_steps=100,
+        checkpoint_root_directory='/tmp/checkpoint',
+        checkpointing_options=ocp.CheckpointManagerOptions(),
+    )
+    rngs = nnx.Rngs(0)
+    model = tc.ToyTransformer(config=tc.ModelConfig(), rngs=rngs)
+    trainer = peft_trainer_v2.PeftTrainer(model, optax.sgd(1e-3), config)
+
+    custom_metadata = {'policy_version': 3}
+    trainer.save_checkpoint(
+        metadata=custom_metadata,
+        step=25,
+        save_only_lora_params=True,
+        force=True,
+    )
+
+    mock_cm.save.assert_called_once_with(
+        25,
+        trainer.model,
+        trainer.optimizer,
+        save_only_lora_params=True,
         custom_metadata=custom_metadata,
         force=True,
     )

@@ -156,13 +156,15 @@ class StandardRLProgram(RLProgram):
       await asyncio.sleep(0.05)
 
   async def rollout_dispatch_stage(self) -> None:
-    assert self.engine is not None
     """Stage 1A: Dispatches rollout requests across workers asynchronously.
 
     Ensures that all dataset items carry unique, collision-free `prompt_id`s
     (e.g., `f"prompt_{prompt_idx}"`) before dispatching to the engine layer,
     satisfying the engine's strict `prompt_id` contract.
     """
+    assert self.engine is not None
+    # TODO(tunix-dev): Skip already trained datasets when resuming from
+    # checkpoints.
     if self.dataset is None:
       raise ValueError(
           "StandardRLProgram requires a dataset either at init or in run()."
@@ -617,8 +619,26 @@ class StandardRLProgram(RLProgram):
               apply_optimizer=is_final_batch,
           )
           if is_final_batch:
+            # TODO(tunix-dev): Current checkpoint and metrics logic only works
+            # for fully on-policy. We need to come up with a solution for
+            # semi-off-policy where a single full batch has multiple mini
+            # batches.
             trainer_metrics = await self.engine.get_metrics(
                 role=datatypes.Role.ACTOR
+            )
+            # TODO(tunix-dev): Configurable checkpointing frequency. Today we
+            # checkpoint at the same frequency as the weight update.
+            # TODO(tunix-dev): For now any failures in save_checkpoint will
+            # abort the entire program. Make it configurable on whether to fail
+            # or continue.
+            await self.engine.save_checkpoint(
+                role=datatypes.Role.ACTOR,
+                metadata={
+                    "step": self.step + 1,
+                    "policy_version": self.policy_version,
+                    "num_rollouts": num_rollouts,
+                    "num_microbatches": num_microbatches,
+                },
             )
 
       if self.sync_weights:

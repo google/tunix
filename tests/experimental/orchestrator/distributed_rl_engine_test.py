@@ -46,6 +46,8 @@ class MockActorHandle(mock.MagicMock):
     self.abort_weight_sync = mock.AsyncMock()
     self.score = mock.AsyncMock()
     self.per_token_logps = mock.AsyncMock()
+    self.save_checkpoint = mock.AsyncMock()
+    self.restore_checkpoint = mock.AsyncMock()
     self.get_metrics = mock.AsyncMock(return_value={})
 
   async def asubmit(self, method_name: str, *args, **kwargs):
@@ -234,6 +236,139 @@ class DistributedRLEngineTest(absltest.TestCase):
       self.mock_actor.update.assert_called_once_with()
 
     asyncio.run(_run())
+
+  def test_save_checkpoint_delegates_to_trainer_worker(self):
+    async def _run():
+      self.mock_actor.save_checkpoint.return_value = datatypes.Response(
+          metadata={"checkpoint_saved": True}
+      )
+      metadata = {"step": 5, "policy_version": 2}
+      res = await self.engine.save_checkpoint(
+          role=datatypes.Role.ACTOR, metadata=metadata
+      )
+      self.assertEqual(res, datatypes.Response(metadata={"checkpoint_saved": True}))
+      self.mock_actor.save_checkpoint.assert_called_once_with(
+          metadata=metadata
+      )
+
+    asyncio.run(_run())
+
+  def test_save_checkpoint_propagates_step_and_optional_kwargs(self):
+    async def _run():
+      self.mock_actor.save_checkpoint.return_value = datatypes.Response(
+          metadata={"checkpoint_saved": True}
+      )
+      metadata = {"policy_version": 2}
+      res = await self.engine.save_checkpoint(
+          role=datatypes.Role.ACTOR,
+          metadata=metadata,
+          step=10,
+          force=True,
+          save_only_lora_params=True,
+          custom_flag="custom_val",
+      )
+      self.assertEqual(
+          res, datatypes.Response(metadata={"checkpoint_saved": True})
+      )
+      self.mock_actor.save_checkpoint.assert_called_once_with(
+          metadata=metadata,
+          step=10,
+          force=True,
+          save_only_lora_params=True,
+          custom_flag="custom_val",
+      )
+
+    asyncio.run(_run())
+
+  def test_save_checkpoint_propagates_step_kwarg_without_metadata(self):
+    async def _run():
+      self.mock_actor.save_checkpoint.return_value = datatypes.Response(
+          metadata={"checkpoint_saved": True}
+      )
+      res = await self.engine.save_checkpoint(step=42, force=True)
+      self.assertEqual(
+          res, datatypes.Response(metadata={"checkpoint_saved": True})
+      )
+      self.mock_actor.save_checkpoint.assert_called_once_with(
+          metadata=None, step=42, force=True
+      )
+
+    asyncio.run(_run())
+
+  def test_train_step_propagates_optional_kwargs(self):
+    async def _run():
+      self.mock_actor.fwd_bwd.return_value = {"loss": 0.5}
+      mock_payload = mock.MagicMock(spec=datatypes.RLTrainerPayload)
+
+      res = await self.engine.train_step(
+          mock_payload,
+          role=datatypes.Role.ACTOR,
+          accumulate_gradients=True,
+          apply_optimizer=False,
+          custom_arg="test_arg",
+      )
+      self.assertEqual(res, {"loss": 0.5})
+      self.mock_actor.fwd_bwd.assert_called_once()
+      call_kwargs = self.mock_actor.fwd_bwd.call_args.kwargs
+      self.assertEqual(call_kwargs["skip_jit"], False)
+      self.assertEqual(call_kwargs["custom_arg"], "test_arg")
+      self.assertIsInstance(call_kwargs["request"], datatypes.TrainRequest)
+      self.assertIs(call_kwargs["request"].payload, mock_payload)
+
+    asyncio.run(_run())
+
+  def test_per_token_logps_propagates_optional_kwargs(self):
+    async def _run():
+      self.mock_ref.per_token_logps.return_value = [0.1, 0.2]
+      res = await self.engine.per_token_logps(
+          datatypes.Role.REFERENCE,
+          items="test_items",
+          chunk_size=8,
+          custom_opt=True,
+      )
+      self.assertEqual(res, [0.1, 0.2])
+      self.mock_ref.per_token_logps.assert_called_once_with(
+          items="test_items",
+          chunk_size=8,
+          custom_opt=True,
+      )
+
+    asyncio.run(_run())
+
+  def test_score_propagates_optional_kwargs(self):
+    async def _run():
+      self.mock_ref.score.return_value = [1.0, 2.0]
+      res = await self.engine.score(
+          datatypes.Role.REFERENCE,
+          items=["i1", "i2"],
+          normalize=True,
+      )
+      self.assertEqual(res, [1.0, 2.0])
+      self.mock_ref.score.assert_called_once_with(
+          items=["i1", "i2"],
+          normalize=True,
+      )
+
+    asyncio.run(_run())
+
+  def test_get_metrics_propagates_optional_kwargs(self):
+    async def _run():
+      self.mock_actor.get_metrics.return_value = {"metric_a": 1.0}
+      res = await self.engine.get_metrics(
+          datatypes.Role.ACTOR, reset=True
+      )
+      self.assertEqual(res, {"metric_a": 1.0})
+      self.mock_actor.get_metrics.assert_called_once_with(reset=True)
+
+    asyncio.run(_run())
+
+  def test_save_checkpoint_raises_on_missing_worker(self):
+    async def _run():
+      with self.assertRaises(ValueError):
+        await self.engine.save_checkpoint(role=datatypes.Role.CRITIC)
+
+    asyncio.run(_run())
+
 
   def test_sync_weights_delegates_to_coordinator(self):
     async def _run():

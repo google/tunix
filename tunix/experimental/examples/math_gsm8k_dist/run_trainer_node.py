@@ -24,6 +24,7 @@ import math
 import os
 from pathlib import Path
 import pickle
+import signal
 import sys
 from typing import Any
 
@@ -31,6 +32,7 @@ import jax
 from jax import numpy as jnp
 from jax.experimental import mesh_utils
 from jax.sharding import Mesh
+from orbax import checkpoint as ocp
 import optax
 from tunix.cli.utils import model as model_utils
 from tunix.experimental.examples.math_gsm8k_dist import models
@@ -74,6 +76,16 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument("--use_lora", action="store_true")
   parser.add_argument("--lora_rank", type=int, default=16)
   parser.add_argument("--lora_alpha", type=float, default=16.0)
+  parser.add_argument("--checkpoint_save_interval_steps", type=int, default=1)
+  parser.add_argument("--checkpoint_max_to_keep", type=int, default=10)
+  parser.add_argument(
+      "--checkpoint_root_directory",
+      type=str,
+      default=os.getenv(
+          "CHECKPOINT_ROOT_DIRECTORY",
+          os.path.join(REPO_ROOT, "checkpoints"),
+      ),
+  )
   return parser.parse_args(argv)
 
 
@@ -212,6 +224,10 @@ class _MeshBoundTrainer:
     with self._mesh:
       return self._trainer.prepare_weight_sync(**kwargs)
 
+  def save_checkpoint(self, metadata: Any = None, **kwargs) -> None:
+    with self._mesh:
+      self._trainer.save_checkpoint(metadata, **kwargs)
+
   def close(self) -> None:
     with self._mesh:
       self._trainer.close()
@@ -271,12 +287,18 @@ def main(argv: list[str], context: Any = None) -> None:
   grad_accumulation_steps = max(
       1, math.ceil(args.mini_batch_size / args.train_micro_batch_size)
   )
+  checkpointing_options = ocp.CheckpointManagerOptions(
+      save_interval_steps=args.checkpoint_save_interval_steps,
+      max_to_keep=args.checkpoint_max_to_keep,
+  )
   training_config = peft_trainer_v2.TrainingConfig(
       eval_every_n_steps=args.eval_every_n_steps,
       gradient_accumulation_steps=grad_accumulation_steps,
       metrics_prefix="actor",
       pbar_description="Actor Training",
       data_sharding_axis=("fsdp",),
+      checkpointing_options=checkpointing_options,
+      checkpoint_root_directory=args.checkpoint_root_directory,
   )
   logging.info(
       "PeftTrainer v2 gradient_accumulation_steps=%d.",
@@ -285,7 +307,7 @@ def main(argv: list[str], context: Any = None) -> None:
 
   logging.info("Creating generic TrainerWorker and gRPC server...")
   worker_service = trainer_worker.TrainerWorker(
-      trainer_factory=lambda: _create_trainer(
+      trainer_factory=lambda: _create_trainer(  # pyrefly: ignore[bad-argument-type]
           args, actor_model, training_config, mesh
       ),
       worker_id=args.worker_id,
@@ -304,13 +326,28 @@ def main(argv: list[str], context: Any = None) -> None:
         })
     )
     logging.info("Trainer worker is registered.")
+    # Shut down gracefully on SIGTERM/SIGINT so that TrainerWorker.stop() ->
+    # PeftTrainerV2.close() runs and blocks until every in-flight async ops is
+    # finished.
+    stop_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+      try:
+        loop.add_signal_handler(sig, stop_event.set)
+      except NotImplementedError:
+        pass
 
     try:
-      while True:
-        await asyncio.sleep(1)
+      await stop_event.wait()
     except asyncio.CancelledError:
       pass
     finally:
+      logging.info("Draining trainer worker...")
+      try:
+        worker_service.stop()
+        logging.info("Trainer worker drained.")
+      except Exception:
+        logging.exception("Failed to drain trainer worker cleanly.")
       await server.stop_serving()
 
   asyncio.run(grpc_server_main())
