@@ -83,6 +83,12 @@ spec:
                   exit $$EXIT_CODE
               env:
               # Injects the JobSet Name
+              - name: HF_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: anisha-hf-token
+                    key: HF_TOKEN
+                    optional: true
               - name: JOBSET_NAME
                 valueFrom:
                   fieldRef:
