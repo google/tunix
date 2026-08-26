@@ -378,3 +378,13 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
     return await self._invoke_worker(
         worker, "save_checkpoint", metadata=metadata, **kwargs
     )
+
+  async def restore_checkpoint(
+      self,
+      role: datatypes.Role = datatypes.Role.ACTOR,
+      **kwargs: Any,
+  ) -> Any:
+    worker = self._trainer_workers.get(role)
+    if worker is None:
+      raise ValueError(f"No trainer worker registered for role {role}")
+    return await self._invoke_worker(worker, "restore_checkpoint", **kwargs)

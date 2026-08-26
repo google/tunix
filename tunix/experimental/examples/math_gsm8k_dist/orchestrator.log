@@ -1,24 +1,90 @@
-2026-08-25 00:31:28,999 - [Orchestrator] Control-plane JAX backend: cpu
-2026-08-25 00:31:29,583 - [Orchestrator] discovery server started on port 30000
-2026-08-25 00:31:29,584 - [Orchestrator] Waiting for workers to connect...
-2026-08-25 00:31:34,102 - [Orchestrator] discovered rollout service vllm-rollout-0 at localhost:20001
-2026-08-25 00:31:39,194 - [Orchestrator] discovered trainer service trainer-0 at localhost:20000
-2026-08-25 00:31:39,195 - [Orchestrator] Configuring trainer-side GRPO loss via TrainerWorker RPC.
-2026-08-25 00:31:41,604 - [Orchestrator] Registered Orchestrator V2 workers: [WorkerInfo(worker_id='rollout-0', roles=frozenset({'rollout'}), resources={'remote': True, 'address': 'localhost:20001'}), WorkerInfo(worker_id='trainer-0', roles=frozenset({'actor'}), resources={'remote': True, 'address': 'localhost:20000'})]
-2026-08-25 00:31:41,605 - [Orchestrator] Bringing up remote workers through ClusterOrchestrator.
-2026-08-25 00:31:41,605 - [Orchestrator] Bringing up workers across cluster...
-2026-08-25 00:31:41,605 - [Orchestrator] Initializing remote worker rollout-0.
-2026-08-25 00:31:41,608 - [Orchestrator] Initializing remote worker trainer-0.
-2026-08-25 00:31:41,609 - [Orchestrator] Compiling remote worker rollout-0.
-2026-08-25 00:31:41,610 - [Orchestrator] Compiling remote worker trainer-0.
-2026-08-25 00:31:41,610 - [Orchestrator] Starting remote worker rollout-0.
-2026-08-25 00:31:41,611 - [Orchestrator] Starting remote worker trainer-0.
-2026-08-25 00:31:41,612 - [Orchestrator] Running SyncRLProgram through ClusterOrchestrator.run_program.
-2026-08-25 00:31:41,612 - [Orchestrator] ClusterOrchestrator executing program...
-2026-08-25 00:31:41,612 - [Orchestrator] RLProgram starting step 0
-2026-08-25 00:31:41,612 - [Orchestrator] GRPO step 0 starting.
-2026-08-25 00:32:33,884 - [Orchestrator] GRPO advanced to policy_version=1 train_result={'fwd_bwd': Response(request_id='', error=None, metadata={'worker_id': 'trainer-0', 'state': 'READY', 'policy_version': 0, 'queued': True}), 'updated': True, 'train_step': 1, 'accumulated': True}.
-2026-08-25 00:32:33,884 - [Orchestrator] Shutting down ClusterOrchestrator...
-2026-08-25 00:32:54,088 - [Orchestrator] Final step summary: step=0 policy_version=1 rollouts=4 microbatches=4 reward_mean=0.500 reward_std=0.500.
-2026-08-25 00:32:54,088 - [Orchestrator] Distributed GSM8K GRPO Orchestrator V2 demo finished.
-2026-08-25 00:32:54,107 - [Orchestrator] discovery server stopped
+2026-08-26 21:40:36,961 - [Orchestrator] Control-plane JAX backend: cpu
+2026-08-26 21:40:37,553 - [Orchestrator] discovery server started on port 30000
+2026-08-26 21:40:37,553 - [Orchestrator] Waiting for workers to connect...
+2026-08-26 21:40:40,475 - [Orchestrator] discovered rollout service vllm-rollout-0 at localhost:20001
+2026-08-26 21:40:44,865 - [Orchestrator] discovered trainer service trainer-0 at localhost:20000
+2026-08-26 21:40:44,865 - [Orchestrator] Configuring trainer-side GRPO loss via TrainerWorker RPC.
+2026-08-26 21:40:47,231 - [Orchestrator] Registered Orchestrator V2 workers: [WorkerInfo(worker_id='rollout-0', roles=frozenset({'rollout'}), resources={'remote': True, 'address': 'localhost:20001'}), WorkerInfo(worker_id='trainer-0', roles=frozenset({'actor'}), resources={'remote': True, 'address': 'localhost:20000'})]
+2026-08-26 21:40:47,232 - [Orchestrator] Bringing up remote workers through ClusterOrchestrator.
+2026-08-26 21:40:47,232 - [Orchestrator] Bringing up workers across cluster...
+2026-08-26 21:40:47,232 - [Orchestrator] Initializing remote worker rollout-0.
+2026-08-26 21:40:47,235 - [Orchestrator] Initializing remote worker trainer-0.
+2026-08-26 21:40:47,236 - [Orchestrator] Compiling remote worker rollout-0.
+2026-08-26 21:40:47,237 - [Orchestrator] Compiling remote worker trainer-0.
+2026-08-26 21:40:47,237 - [Orchestrator] Starting remote worker rollout-0.
+2026-08-26 21:40:47,238 - [Orchestrator] Starting remote worker trainer-0.
+2026-08-26 21:40:47,238 - [Orchestrator] Running SyncRLProgram through ClusterOrchestrator.run_program.
+2026-08-26 21:40:47,239 - [Orchestrator] ClusterOrchestrator executing program...
+prompt_batch length: 4
+2026-08-26 21:40:47,239 - [Orchestrator] RLProgram starting step 0
+2026-08-26 21:40:47,239 - [Orchestrator] GRPO step 0 starting.
+2026-08-26 21:41:37,211 - [Orchestrator] Shutting down ClusterOrchestrator...
+2026-08-26 21:41:37,215 - [Orchestrator] discovery server stopped
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/mnt/disks/linchai-data/tunix/tunix/experimental/distributed/runtime/main.py", line 260, in <module>
+    main(sys.argv)
+  File "/mnt/disks/linchai-data/tunix/tunix/experimental/distributed/runtime/main.py", line 224, in main
+    process_executor.run(prepared.main_fn, prepared.argv, prepared.context_args)
+  File "/mnt/disks/linchai-data/tunix/tunix/experimental/distributed/runtime/executors/local_executor.py", line 41, in run
+    process_main(process_argv, context)
+  File "/mnt/disks/linchai-data/tunix/tunix/experimental/examples/math_gsm8k_dist/run_gsm8k_dist_grpo.py", line 443, in main
+    cluster.run_program(
+  File "/mnt/disks/linchai-data/tunix/tunix/experimental/orchestrator/orchestrator.py", line 242, in run_program
+    program.run(engine=engine, train_dataset=train_dataset, num_steps=num_steps, **kwargs)
+  File "/mnt/disks/linchai-data/tunix/tunix/experimental/orchestrator/rl_program.py", line 353, in run
+    return _sync_or_async(
+           ^^^^^^^^^^^^^^^
+  File "/mnt/disks/linchai-data/tunix/tunix/experimental/orchestrator/rl_program.py", line 56, in _sync_or_async
+    return asyncio.run(coro)
+           ^^^^^^^^^^^^^^^^^
+  File "/mnt/disks/linchai-data/miniconda3/envs/tunix/lib/python3.12/asyncio/runners.py", line 195, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/mnt/disks/linchai-data/miniconda3/envs/tunix/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/disks/linchai-data/miniconda3/envs/tunix/lib/python3.12/asyncio/base_events.py", line 691, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/mnt/disks/linchai-data/tunix/tunix/experimental/orchestrator/rl_program.py", line 391, in arun
+    await self.astep_once(prompts=prompt_batch, **kwargs)
+  File "/mnt/disks/linchai-data/tunix/tunix/experimental/orchestrator/rl_program.py", line 273, in astep_once
+    await _await_if_needed(
+  File "/mnt/disks/linchai-data/tunix/tunix/experimental/orchestrator/rl_program.py", line 63, in _await_if_needed
+    return await value
+           ^^^^^^^^^^^
+  File "/mnt/disks/linchai-data/tunix/tunix/experimental/orchestrator/distributed_rl_engine.py", line 378, in save_checkpoint
+    return await self._invoke_worker(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/disks/linchai-data/tunix/tunix/experimental/orchestrator/distributed_rl_engine.py", line 124, in _invoke_worker
+    return await res
+           ^^^^^^^^^
+  File "/mnt/disks/linchai-data/tunix/tunix/experimental/worker/remote_execution.py", line 663, in asubmit
+    return response.unwrap()
+           ^^^^^^^^^^^^^^^^^
+  File "/mnt/disks/linchai-data/tunix/tunix/experimental/worker/remote_execution.py", line 218, in unwrap
+    raise RuntimeError(message)
+RuntimeError: RemoteExecutionError [StepAlreadyExistsError]: Step 1 already exists.
+Remote traceback:
+Traceback (most recent call last):
+  File "/mnt/disks/linchai-data/tunix/tunix/experimental/worker/remote_execution.py", line 341, in execute_request
+    result = method(*request.args, **request.kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/disks/linchai-data/tunix/tunix/experimental/worker/trainer_worker.py", line 227, in save_checkpoint
+    self._trainer.save_checkpoint(metadata, **kwargs)
+  File "/mnt/disks/linchai-data/tunix/tunix/experimental/examples/math_gsm8k_dist/run_trainer_node.py", line 237, in save_checkpoint
+    self._trainer.save_checkpoint(metadata, **kwargs)
+  File "/mnt/disks/linchai-data/tunix/tunix/experimental/train/peft_trainer_v2.py", line 1109, in save_checkpoint
+    self.checkpoint_manager.save(
+  File "/mnt/disks/linchai-data/tunix/tunix/sft/checkpoint_manager.py", line 211, in save
+    return self._save_checkpointables(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/disks/linchai-data/tunix/tunix/sft/checkpoint_manager.py", line 149, in _save_checkpointables
+    response = self._checkpointer.save_checkpointables_async(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/disks/linchai-data/miniconda3/envs/tunix/lib/python3.12/site-packages/orbax/checkpoint/experimental/v1/_src/training/checkpointer.py", line 580, in save_checkpointables_async
+    raise errors.StepAlreadyExistsError(f'Step {step} already exists.')
+orbax.checkpoint.experimental.v1._src.training.errors.StepAlreadyExistsError: Step 1 already exists.
+

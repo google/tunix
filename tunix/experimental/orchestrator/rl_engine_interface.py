@@ -86,3 +86,11 @@ class AbstractRLEngine(Protocol):
   ) -> Any:
     """Requests the trainer worker for `role` to save a checkpoint."""
     ...
+
+  async def restore_checkpoint(
+      self,
+      role: datatypes.Role == datatypes.Role.ACTOR,
+      **kwargs: Any,
+  ) -> Any:
+    """Requests the trainer worker for `role` to restore a checkpoint."""
+    ...

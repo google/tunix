@@ -107,6 +107,12 @@ class SyncRLProgram:
     self.on_step_end = on_step_end
     self.sync_weights = sync_weights
     self.policy_version = initial_policy_version
+    # Number of train steps already completed by a previous run and recovered
+    # from the trainer's checkpoint. 0 fro a fresh run. Used to skip the slice
+    # of the dataset that has already been used for training.
+    self._resumed_from_step = 0
+    self._restored_checkpoint_metadata: dict[str, Any] = {}
+    self.mini_batch_size = None
     # Debug/observability hook for examples and tests; not training state.
     self.last_step_result: RLStepResult | None = None
 
@@ -140,6 +146,52 @@ class SyncRLProgram:
             route_metadata=route_metadata,
             **kwargs,
         )
+    )
+
+  async def _resume_from_checkpoint(self) -> None:
+    """Realigns the program state with a trainer's restored checkpoint."""
+    assert self.engine is not None
+    metadata = await self.engine.restore_checkpoint(role=datatypes.Role.ACTOR)
+    if not isinstance(metadata, Mapping):
+      if metadata is not None:
+        logging.warning(
+            "restore_checkpoint returned %s, not a mapping; starting from fresh"
+            " run.",
+            type(metadata).__name__,
+        )
+      return
+    metadata = dict(metadata)
+    try:
+      restored_step = int(metadata.get("step", 0) or 0)
+    except (TypeError, ValueError):
+      logging.warning(
+          "restore_checkpoint returned a non-integer step %r; starting from"
+          " fresh run."
+      )
+      return
+    if restored_step <= 0:
+      logging.info("No checkpoint to resume from; starting from step 0.")
+      return
+
+    self._restored_checkpoint_metadata = metadata
+    self._resumed_from_step = restored_step
+    self._step = restored_step
+    self.policy_version = restored_step
+    recorded_version = metadata.get("policy_version")
+    if recorded_version is not None and recorded_version != restored_step:
+      logging.info(
+          "Checkpoint recorded mid-step policy_version=%s; resuming at the"
+          " step-boundary value %d",
+          recorded_version,
+          restored_step,
+      )
+    logging.info(
+        "Resuming from checkpoint: step=%d policy_version=%d (skipping %d)"
+        " already-trained dataset items). Metadata: %s",
+        self._step,
+        self.policy_version,
+        self._resumed_from_step * self.mini_batch_size,
+        metadata,
     )
 
   async def astep_once(
@@ -317,9 +369,22 @@ class SyncRLProgram:
     """Async implementation of the RL program training loop."""
     active_engine = self._resolve_engine(engine)
     self.engine = active_engine
+    # # Must happen before any stage starts: train_stage reas `_step` for its
+    # # loop bound and rollout_dipatch_stage reads `_resumed_from_step` to skip
+    # # the dataset prefix the previous run alreayd consumed.
+    # await self._resume_from_checkpoint()
     if train_dataset is None:
       raise ValueError("SyncRLProgram.run requires a train_dataset.")
     for idx, prompt_batch in enumerate(train_dataset):
+      # TODO(tunix-dev): current skip logic assumes mini_batch_size is the same as
+      # global batch size. We should support the case that one global batch
+      # contains multiple mini-batches.
+      print(f"prompt_batch length: {len(prompt_batch)}")
+      if self.mini_batch_size is None:
+        self.mini_batch_size = len(prompt_batch)
+      already_consumed = self._resumed_from_step * self.mini_batch_size
+      if idx < already_consumed:
+        continue
       if num_steps is not None and idx >= num_steps:
         break
       logging.info("RLProgram starting step %d", self.step)

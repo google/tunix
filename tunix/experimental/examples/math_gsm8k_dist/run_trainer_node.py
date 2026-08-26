@@ -236,6 +236,10 @@ class _MeshBoundTrainer:
     with self._mesh:
       self._trainer.save_checkpoint(metadata, **kwargs)
 
+  def restore_checkpoint(self, **kwargs) -> Any:
+    with self._mesh:
+      return self._trainer.restore_checkpoint(**kwargs)
+
   def close(self) -> None:
     with self._mesh:
       self._trainer.close()
@@ -306,6 +310,10 @@ def main(argv: list[str], context: Any = None) -> None:
       data_sharding_axis=("fsdp",),
       checkpoint_root_directory=os.path.join("/mnt/disks/linchai-data/tmp_ckpt", "tunix_trainer_checkpoints"),
       checkpointing_options=checkpointing_options,
+      # The orchestrator owns resume: it calls restore_checkpoint() explicitly.
+      # Orchestrator needs to realigns itw step/policy_version from the returned
+      # metadata.
+      resume_from_checkpoint_on_init=False,
   )
   logging.info(
       "PeftTrainer v2 gradient_accumulation_steps=%d.",
