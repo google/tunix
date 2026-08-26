@@ -1,9 +1,83 @@
 # V1 Phase4 three-full handoff
 
-## START HERE — P64 remote 64-TPU diagnostic completed & non-finite boundary localized
+## START HERE — checked-VMA three-full wave prepared, not published or launched
 
-This section is the current source of truth. Everything below it is historical
-context unless explicitly linked from here.
+This section supersedes every later `START HERE` block. The older sections are
+an append-only history of Attempt 7 and P64; do not follow their launch matrix.
+
+- Worktree: `/home/yuxuan/code_rl_repro/worktrees/p66_gsm8k_convergence_0825`
+- Branch: `local/p66-gsm8k-onehost-convergence`
+- Rebase base: fetched operator tip
+  `75e97a1db4a4bb328fa174f75869f039defc4b98`.
+- Tree state: four local, independently revertible CLs are rebased onto that
+  tip and pass post-rebase admission. Publication is pending. No final YAML, JobSet, TPU launch,
+  optimizer target result, or performance result has been produced by P4.9.
+- Current phase: `phases/v1-p4-9-checked-vma-full-wave.md`.
+
+P66 G1 identified the old P59 TP>1 backward regression as erased
+varying-manual-axis/replication ownership under the unchecked nested
+`shard_map`. G1.5 compared the repaired, source-frozen pullback with ordinary
+JAX at the same model/input/cache/cotangent at six full-Qwen endpoints. All
+registered envelopes passed; worst relative-L2 was `0.0052568`. This supersedes
+the old padding/RMS hypothesis but remains one-host evidence, not target
+certification.
+
+P4.9 promotes that exact repaired core into only the three production full
+profiles behind default-off `CANON_P59_CHECKED_VMA=1`. The P66 spelling is an
+internal compatibility alias so the adapter/shim bytes tested by the oracle
+are unchanged. Each first update now fails before AdamW unless the complete
+accumulator has the exact microstep count and denominator, is finite and
+nonzero, and has stable-L2 in `(0, 1e6]`. After AdamW, a second receipt must
+show a valid `0 -> 1` optimizer step, finite gradient/delta, and parameter
+change coherent with the learning rate before outer weight sync or checkpoint.
+
+The prepared concurrent wave is exactly:
+
+1. GSM8K Qwen3-1.7B DP16xTP4, 200 full updates;
+2. FrozenLake P45 Qwen3-8B DP8xTP8, 300 full updates; and
+3. FrozenLake M15/main Qwen3-8B DP8xTP8, 300 full updates.
+
+All three remain strict Zero-TIM, APC-off, full B-arm rescore, JAX persistent
+cache, XProf, Perfetto, evaluation, and checkpoint carriers. They are
+independent: a red freezes only that recipe while the two healthy jobs keep
+running. Any real `CANON_ALIGN_PRE`/`CANON_ALIGN verdict=FAIL`, first-update
+gradient red, or optimizer-admission red is fatal and evidence must be kept.
+
+Admission completed on the final rebased runtime tree:
+
+- V1 74/74, P57 146/146, P59 37/37, P66 16/16, P61 6/6,
+  APC 31/31;
+- flag audit 383/383 with `FLAG_AUDIT_PASS`;
+- syntax and diff hygiene pass; and
+- immutable image
+  `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`
+  exited zero with one terminal containing
+  `p59_checked_vma_real_shim=4`, `first_update_gate=4`,
+  `apc_m15_carrier=46`, and `manifests=3`.
+
+The image result is an execution-transcript receipt; no durable raw image log
+was saved for this invocation. It is construction admission only. DP16xTP4
+and DP8xTP8 optimizer correctness, convergence, and performance are unrun.
+
+Next boundary:
+
+1. Fetch once more and require the operator tip is still
+   `75e97a1db4a4bb328fa174f75869f039defc4b98`.
+2. Push the four-CL stack and read back one exact 40-character SHA.
+3. From that clean exact SHA, run the render-only wrapper at the top of
+   `RUNBOOK.md`. It refuses a dirty tree, mismatched HEAD, reused output root,
+   or duplicate IDs and never launches.
+4. Review `manifest-index.json` and the three printed apply commands. The user
+   launches all three together. Never attach a pipe to an apply command.
+5. Watch each job's first-update precommit and commit receipts immediately.
+   Preserve a FrozenLake red without cancelling another healthy recipe.
+6. Performance and XProf comparison begin only after the user supplies the
+   launched run IDs and logs.
+
+## Historical — P64 remote 64-TPU diagnostic and old launch decision
+
+This section records the pre-P66 source of truth. It is historical context
+unless explicitly linked from the current P4.9 section above.
 
 - Worktree: `/home/yuxuan/code_rl_repro/worktrees/v1_stable_clip_0825`
 - Local branch: `local/v1-stable-clip-0825`

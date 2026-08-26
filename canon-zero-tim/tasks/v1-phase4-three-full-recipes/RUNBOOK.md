@@ -1,6 +1,51 @@
 # V1 high-performance three-full runbook
 
-## Current boundary — P64 P45 capture, then optional diagnostic replay
+## Current — render all three checked-VMA full jobs, never launch from here
+
+P4.9 prepares exactly three independent full jobs. Final manifests do not
+exist yet because the runtime is intentionally uncommitted. After explicit
+commit/push approval, remote read-back, and checkout of the exact clean
+published SHA, use fresh IDs and a never-used output directory:
+
+```bash
+bash canon-zero-tim/tasks/v1-phase4-three-full-recipes/scripts/prepare_checked_vma_three_full_wave.sh \
+  <approved-40-character-sha> \
+  /tmp/v1-hp-checked-vma-<fresh-wave-id> \
+  <fresh-campaign-root> \
+  <fresh-gsm8k-run-id> \
+  <fresh-p45-run-id> \
+  <fresh-m15-run-id>
+```
+
+The wrapper refuses a dirty worktree, `HEAD`/approved-SHA mismatch, reused
+output root, or duplicate run IDs. It renders and hashes exactly three YAMLs,
+emits `V1_HP_CHECKED_VMA_WAVE_READY ... launch=not-executed`, and only prints
+the three `kubectl apply` commands. It never executes them. Review
+`manifest-index.json`, confirm the published SHA by remote read-back, check
+that no conflicting P51/P59/P62/P64/Phase4 workload is live, and obtain launch
+approval. Apply the three YAMLs without any pipe. The user may apply all three
+in one wave; no recipe waits for another recipe's first update.
+
+For each job, inspect the raw log immediately. Before accepting update 0 it
+must contain:
+
+- no real `CANON_ALIGN_PRE` or `CANON_ALIGN verdict=FAIL`;
+- exactly one `[P59.CHECKED_VMA]` receipt for the expected topology;
+- one `canon-v1-first-update-precommit-v1` receipt with all elements finite,
+  at least one nonzero, `0 < stable_norm <= 1e6`, `microsteps=16` and
+  `denominator=16` for GSM8K, or `microsteps=32` and `denominator=32` for
+  either FrozenLake recipe; and
+- one `canon-v1-first-update-commit-v1` receipt proving valid `0 -> 1`, finite
+  gradient/delta, and learning-rate/parameter-change coherence.
+
+The existing P59 reduction, P63, optimizer, strict alignment, APC-off, XProf,
+Perfetto, JAX-cache, evaluation, checkpoint, and full-horizon receipts remain
+mandatory. A missing or duplicate first-update receipt is fatal. If one
+FrozenLake job is red, freeze and retain its complete evidence but leave the
+other healthy jobs running. Do not start performance attribution or XProf
+comparison until the user supplies run IDs after launch.
+
+## Historical — P64 P45 capture, then optional diagnostic replay
 
 The recovery chain is published and exactly read back at
 `548db7e9f014def3cb2b37e66c6f0e62c2041f1d`. Do not launch from a dirty,

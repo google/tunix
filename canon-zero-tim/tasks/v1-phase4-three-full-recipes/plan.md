@@ -19,6 +19,7 @@ the semantic Perfetto timeline.
 | V1.P4.6 | Hybrid overflow-safe global-norm clipping for the three strict full recipes | stock-finite outputs remain byte-exact; finite-overflow matches FP64; NaN/Inf stays fatal; host and pinned-image gates pass | complete |
 | V1.P4.7 | Publish one reviewed immutable SHA and execute the three full target recipes | approved commit/push and remote readback; three fresh manifests; GSM8K 200 plus P45/M15 300 complete with zero strict FAIL and complete signed evidence | partial target evidence; superseded by recovery after GSM XProf infrastructure stop and P45 numerical stop |
 | V1.P4.8 | Recover Attempt 7 without weakening the numerical contract | GCS-backed XProf capture restores locally with signed artifacts; GSM scale carrier distinguishes topology/duplication from legitimate magnitude; a hash/model-bound P45 capsule accelerates first-red replay; P45 first-red carrier identifies the earliest non-finite boundary; host and pinned-image gates pass before any target relaunch | active; published at `548db7e9`; G1/G2/P64 construction PASS, real GCS transport and P45 target capture/observation pending; apply matrix awaiting user choice |
+| V1.P4.9 | Promote the P66 checked-VMA repair into the three exact full recipes and prepare one simultaneous wave | exact-profile admission; first-update precommit/optimizer hard receipts; host and immutable-image gates; three fresh manifests only after publication | active; implementation plus host/image construction admission complete, publication/render/target pending |
 
 ## Decisions
 
@@ -47,3 +48,13 @@ the semantic Perfetto timeline.
   rendering may proceed, but applying the two known-red full recipes requires
   a final explicit matrix choice; do not describe them as expected-green
   production runs.
+- Decision (2026-08-26 P66 recovery): P66 G1/G1.5 supersedes the old
+  padding/RMS hypothesis and localizes the Attempt-7 TP>1 gradient explosion to
+  erased VMA/replication ownership in old P59. Promote the repaired path only
+  behind the exact three full profiles and treat their full runs as first
+  target-topology optimizer/convergence certification.
+- Decision (2026-08-26 launch matrix): prepare GSM8K, P45, and M15 as three
+  simultaneous full-horizon jobs. Each independently requires a pre-AdamW
+  finite/nonzero/`stable_norm <= 1e6` first-accumulator receipt and a valid
+  first optimizer receipt before weight sync/checkpoint. One recipe's red does
+  not cancel the other two.

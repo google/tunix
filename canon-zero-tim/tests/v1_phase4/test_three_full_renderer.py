@@ -18,6 +18,11 @@ _SCRIPT = (
     / "canon-zero-tim/tasks/v1-phase4-three-full-recipes/scripts"
     / "render_three_full_recipes.py"
 )
+_PREPARE = (
+    _REPO
+    / "canon-zero-tim/tasks/v1-phase4-three-full-recipes/scripts"
+    / "prepare_checked_vma_three_full_wave.sh"
+)
 _SPEC = importlib.util.spec_from_file_location("v1_phase4_renderer", _SCRIPT)
 assert _SPEC is not None and _SPEC.loader is not None
 renderer = importlib.util.module_from_spec(_SPEC)
@@ -55,6 +60,29 @@ class ThreeFullRendererTest(unittest.TestCase):
     ).read_text(encoding="utf-8")
     self.assertIn('-v "$root:/workspace:ro"', script)
     self.assertIn("-e PYTHONPATH=/workspace", script)
+
+  def test_wave_wrapper_is_render_only_and_binds_clean_head(self):
+    script = _PREPARE.read_text(encoding="utf-8")
+    self.assertIn('git -C "$REPO_ROOT" rev-parse HEAD', script)
+    self.assertIn(
+        'git -C "$REPO_ROOT" status --porcelain --untracked-files=all',
+        script,
+    )
+    self.assertIn("refusing to render from a dirty worktree", script)
+    self.assertIn("V1_HP_CHECKED_VMA_WAVE_READY", script)
+    self.assertIn("launch=not-executed", script)
+    self.assertEqual(script.count('"kubectl apply -f '), 3)
+    self.assertFalse(
+        any(line.strip().startswith("kubectl apply") for line in script.splitlines())
+    )
+    completed = subprocess.run(
+        ["bash", "-n", str(_PREPARE)],
+        cwd=_REPO,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    self.assertEqual(completed.returncode, 0, msg=completed.stderr)
 
   def test_renders_exactly_three_strict_full_recipes(self):
     with tempfile.TemporaryDirectory() as tmp:
@@ -95,6 +123,8 @@ class ThreeFullRendererTest(unittest.TestCase):
       for values in envs:
         self.assertEqual(values["CANON_V1_HP_FULL"], "1")
         self.assertEqual(values["CANON_P59_RANK_PARALLEL_BACKWARD"], "1")
+        self.assertEqual(values["CANON_P59_CHECKED_VMA"], "1")
+        self.assertEqual(values["CANON_V1_HP_FIRST_UPDATE_GATE"], "1")
         self.assertEqual(values["CANON_P33_RUN_STAGE"], "full")
         self.assertEqual(values["CANON_P33_NO_COMMIT"], "0")
         self.assertEqual(
@@ -126,6 +156,8 @@ class ThreeFullRendererTest(unittest.TestCase):
             "test \"$CANON_PALLAS_GATHERED_LOGPROBS\" = 1; "
             "test \"$CANON_LOGPROB_STEP_FUSION\" = 1; "
             "test \"$CANON_P59_RANK_PARALLEL_BACKWARD\" = 1; "
+            "test \"$CANON_P59_CHECKED_VMA\" = 1; "
+            "test \"$CANON_V1_HP_FIRST_UPDATE_GATE\" = 1; "
             "test \"$CANON_P63_OVERFLOW_SAFE_CLIP\" = 1; "
             "test \"$CANON_P28_BATCHED_REPORT\" = 1; "
             "test \"$CANON_XPROF_PHASE\" = update; "
@@ -291,6 +323,9 @@ class ThreeFullRendererTest(unittest.TestCase):
         snapshot = (state / "env.sh").read_text(encoding="utf-8")
         self.assertIn("export CANON_V1_HP_FULL=1", snapshot)
         self.assertIn("export CANON_P59_RANK_PARALLEL_BACKWARD=1", snapshot)
+        self.assertIn("export CANON_P59_CHECKED_VMA=1", snapshot)
+        self.assertIn("export CANON_P66_P59_CHECK_VMA=1", snapshot)
+        self.assertIn("export CANON_V1_HP_FIRST_UPDATE_GATE=1", snapshot)
         self.assertIn("export CANON_P63_OVERFLOW_SAFE_CLIP=1", snapshot)
         self.assertIn("export CANON_PERF_TRACE_EXPORT_STEP=2", snapshot)
         expected_xprof = (

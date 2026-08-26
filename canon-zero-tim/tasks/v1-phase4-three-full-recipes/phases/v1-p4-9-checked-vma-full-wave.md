@@ -148,7 +148,7 @@ within the registered oracle envelope plus strict Zero-TIM forward identity.
 - Added pure positive/negative gates plus full-log classifier negatives for
   wrong topology/profile/chunks, missing/duplicate receipts, non-finite,
   zero, over-threshold, and incoherent optimizer evidence.
-- Verified by V1 74/74, P57 144/144, P59 37/37, P66 16/16, APC 31/31, and
+- Verified by V1 74/74, P57 146/146, P59 37/37, P66 16/16, APC 31/31, and
   flag audit 383/383. No target behavior is verified by these host tests.
 
 ### 2026-08-26T00:50:00Z — Fixed-image construction admission
@@ -174,3 +174,21 @@ within the registered oracle envelope plus strict Zero-TIM forward identity.
 - No final manifest was rendered because the current tree is dirty and
   uncommitted. No commit, push, JobSet, TPU workload, or optimizer target
   transaction occurred.
+
+### 2026-08-26T00:59:00Z — Latest-tip rebase admission
+
+- Rebased the four local CLs onto operator tip
+  `cb5b4df38410852033291c35083bf15cac6c7652`, then fast-forward rebased once
+  more onto evidence-only tip
+  `75e97a1db4a4bb328fa174f75869f039defc4b98`. Conflict resolution retained
+  the upstream train-step XProf hierarchy, P64 64-TPU first-red evidence, and
+  the expanded M15 APC fixed-image suite.
+- Post-rebase host gates pass V1 74/74, P57 146/146, P59 37/37, P66 16/16,
+  P61 6/6, APC 31/31, and flags 383/383.
+- The complete immutable-image gate exited zero with one terminal containing
+  `p59_checked_vma_real_shim=4`, `first_update_gate=4`,
+  `apc_m15_carrier=46`, and `manifests=3`. The output was not durably saved,
+  so this remains an execution-transcript receipt rather than a signed raw
+  artifact.
+- No target was launched and no final manifest was rendered. Publication and
+  exact remote read-back remain pending.

@@ -685,3 +685,70 @@
 - Rollback: revert only this documentation refresh; no runtime blob changed.
 - Next: obtain the launch-matrix choice, render fresh never-reused manifests,
   audit their hashes, then request approval for the exact apply set.
+## 2026-08-26T00:30:00Z — P66 repair bound to a new three-full admission phase
+
+- Type: decision / pre-registration.
+- Fact: P66 G1 supports erased VMA/replication ownership as the old P59 TP>1
+  gradient-amplification cause; G1.5 passes a same-point ordinary-JAX oracle at
+  six full-Qwen endpoints with worst relative-L2 `0.0052568`. Target topology,
+  optimizer commit, convergence, and production performance remain unrun.
+- Decision: prepare GSM8K 200, P45 300, and M15/main 300 as three simultaneous
+  full jobs. Each independently gates the first AdamW call on a finite,
+  nonzero, correctly accumulated gradient with stable-L2 at most `1e6`, then
+  requires the existing finite/material optimizer evidence before any outer
+  weight synchronization or checkpoint.
+- Action: opened `phases/v1-p4-9-checked-vma-full-wave.md` before runtime
+  promotion. The phase retains strict Zero-TIM, APC-off, full B rescore,
+  append-only evidence, and separate launch/commit/push approval boundaries.
+- Result: `PRE-REGISTERED / IMPLEMENTATION PENDING / NO LAUNCH`.
+- Rollback: revert this ledger-only checkpoint; no runtime behavior changed.
+## 2026-08-26T00:52:00Z — P4.9 construction admission and render-only handoff
+
+- Type: implementation / verification / handoff.
+- Action: promoted the source-frozen P66 checked-VMA core into exactly the
+  three high-performance full profiles; added fail-closed first-update
+  precommit and optimizer receipts, classifier negatives, renderer assertions,
+  and a clean-SHA render-only three-wave wrapper.
+- Result: V1 74/74, P57 144/144, P59 37/37, P66 16/16, APC 31/31, flags
+  383/383, syntax, and diff hygiene pass. The fixed image
+  `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`
+  exits zero with terminal fields `p59_checked_vma_real_shim=4`,
+  `first_update_gate=4`, and `manifests=3`.
+- Evidence boundary: the image result is an execution-transcript receipt; its
+  raw stream was not durably preserved. It proves construction only. Target
+  optimizer correctness, convergence, GCS XProf restoration, and performance
+  remain unverified because no target was launched.
+- Launch boundary: no final YAML exists because the worktree is dirty and
+  uncommitted. After explicit commit/push approval and exact remote read-back,
+  the wrapper prepares GSM8K/P45/M15 together and never executes `kubectl`.
+- Rollback: remove the two production selectors and first-update observer,
+  revert the classifier/renderer assertions, and retain all P66/P4.9 evidence.
+## 2026-08-26T00:59:00Z — P4.9 rebased and re-admitted on latest operator tip
+
+- Type: integration / verification.
+- Action: rebased the four P66/P4.9 CLs onto
+  `cb5b4df38410852033291c35083bf15cac6c7652`. The two runtime conflicts were
+  merged by retaining upstream train-step/loss-pullback XProf spans around the
+  checked-VMA/P66 branches. The exact-image conflict retained upstream M15 APC
+  tests while adding checked-VMA and first-update terminal fields.
+- Result: V1 74/74, P57 146/146, P59 37/37, P66 16/16, P61 6/6, APC 31/31,
+  flags 383/383, syntax, and diff hygiene pass. The complete fixed image exits
+  zero with terminal fields `p59_checked_vma_real_shim=4`,
+  `first_update_gate=4`, `apc_m15_carrier=46`, and `manifests=3`.
+- Evidence boundary: the fixed-image stream was not durably saved. It is a
+  post-rebase execution receipt, not a signed raw artifact and not target
+  optimizer/convergence evidence.
+- Next: confirm the remote tip has not moved, push/read back the exact stack,
+  then render but do not launch the three fresh manifests.
+## 2026-08-26T01:01:00Z — Evidence-only remote tip incorporated
+
+- Type: integration checkpoint.
+- Fact: the final pre-push fetch advanced the operator branch from `cb5b4df3`
+  to `75e97a1d`. The single new commit adds only two M15 APC replay NPZs plus
+  their receipt/checksums; it changes no runtime, profile, runner, test, or
+  manifest code.
+- Action: rebased the four local CLs again without conflict. The already green
+  post-rebase host and fixed-image runtime evidence remains applicable because
+  the intervening upstream diff is evidence-only.
+- Result: publication is again fast-forward eligible; final remote-tip check
+  and exact read-back still required.
