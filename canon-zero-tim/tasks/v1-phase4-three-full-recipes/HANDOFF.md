@@ -1,5 +1,103 @@
 # V1 Phase4 three-full handoff
 
+## START HERE — P4.10 FrozenLake TP8 dual-arm recovery publication contract; target not run
+
+This section supersedes every later `START HERE` block.
+
+- Worktree: `/mnt/disks/tunix-data/worktrees/v1_fl_tp8_ab_diag_0826`
+- Branch: `local/v1-fl-tp8-ab-diag-0826`
+- Development base: fetched operator tip `ff0acaaa2ad6bbd9dcdf0589c343a7c13f242c9a`
+- Current phase: `phases/v1-p4-10-frozenlake-tp8-ab-recovery.md`
+- Publication state: the user approved this P4.10 CL for commit and push on
+  2026-08-26. The exact published SHA is the remote branch tip containing this
+  block and must be read back before rendering. No JobSet launch has occurred.
+
+Attempt 9 stopped before backward with P45 A−B/B−C `1755/0` and M15/main
+`93/0`. P4.10 prepares a matched P45 DP8×TP8, full-32-prompt,
+256-trajectory, one-round, zero-backward, zero-optimizer pair:
+
+1. `p66-off`: disables checked-VMA and its P66 alias as a cause-family arm;
+2. `serving-scope`: keeps checked-VMA for P59 but sets the default-off
+   `CANON_P67_P66_VMA_P59_ONLY=1`, restoring the historical ordinary-serving
+   graph across fixed-AR embed, Pallas operands/out-shapes, and RPA out-shapes.
+
+Both arms retain fixed-AR gather, continue-decode 8, gathered logprobs, step
+fusion, fixed LM head, APC-off, seed 42, strict A/B/C, and exit 42 before
+backward. B−C must remain exactly zero. The classifier permits either A−B zero
+or a preserved positive red as a diagnostic outcome, but any B−C red,
+insufficient deep-prefix coverage, backward marker, or optimizer activity is
+fatal.
+
+Host admission is Phase4 82/82, P57 146/146, P59 37/37, P66 16/16, APC
+31/31, flags 385/385. Rebuilt qwen8b_tp8 shim manifest is 37/37. With
+checked-VMA plus P59-only scoping, the immutable image passes the installed
+DP2×TP4/TP8 P59 shim gate. The complete image regression also exits zero
+with `V1_HP_EXACT_IMAGE_PASS ... p59_checked_vma_real_shim=4 ...
+manifests=3`. That invocation is an execution-transcript receipt; no durable
+raw image log was saved. Real DP8×TP8 target is unrun.
+
+After remote read-back and clean checkout of the exact published SHA, use the
+first block in `RUNBOOK.md`. The wrapper renders the P45 pair and only prints
+apply commands. It never launches. Launch commands must not have a pipe. With
+only 64 chips, run `p66-off` first; with 128 chips, the user may launch both
+together.
+
+### Exact operator procedure after publication
+
+1. Confirm the checkout is clean and `HEAD` is the exact 40-character SHA
+   read back from `origin/yuxzhang/canon-zero-tim`. Never render from this
+   dirty preparation tree.
+2. Run the first render-only command in `RUNBOOK.md` with one never-used
+   output directory and two never-used IDs. Review both YAML hashes and
+   `render-receipt.json` files. The renderer must report `backward=0
+   optimizer_commits=0` for both arms.
+3. Confirm no conflicting P51/P59/P62/P64/Phase4 workload is live. The user,
+   not the renderer, applies the printed commands with no pipe. With 128 chips
+   the pair may run together; with 64 chips complete `p66-off` first and then
+   render `serving-scope` again with a new ID.
+4. Preserve each complete run directory and raw log, including failures. Do
+   not reuse a run label, retry into the same evidence path, or delete an
+   inconclusive result.
+5. Classify each arm from its generated
+   `v1_fl_tp8_ab.classification.json`. A Kubernetes `Complete` condition or
+   runner exit zero is transport evidence only; it is not the numerical
+   verdict.
+
+### Required return bundle
+
+Return one record per arm containing all of the following, then one paired
+decision:
+
+- exact published source SHA, JobSet/run ID, arm name, rendered YAML SHA256,
+  and whether the job had any retry or replacement pod;
+- durable `run.log` path and SHA256;
+- durable pre-alignment JSONL path and SHA256;
+- durable `v1_fl_tp8_ab.classification.json` path and SHA256;
+- the exact `V1_FL_TP8_AB_CLASSIFICATION` terminal plus the exact
+  `[V1.FL.AB] DIAGNOSTIC_COMPLETE` terminal;
+- `verdict`, `outcome`, `N_action`, `max_logical_kv_prefix_length`,
+  `A_B_differing_bytes`, `B_C_differing_bytes`, `backward`,
+  `optimizer_commits`, and the complete `errors` array from the JSON;
+- confirmation that the exact profile marker occurred once, P38 completed
+  exactly one round, controlled exit 42 occurred once, and no backward or
+  optimizer marker occurred.
+
+The paired decision must use only this matrix:
+
+| `p66-off` | `serving-scope` | Return verdict and next action |
+|---|---|---|
+| `ZERO_TIM_RECOVERED` | `ZERO_TIM_RECOVERED` | `CAUSE_FAMILY_CONFIRMED / SCOPE_CANDIDATE_GREEN`; next gate is TP8 trainer-forward and backward certification before any full train. |
+| `ZERO_TIM_RECOVERED` | `A_B_RED_REPRODUCED` | `SCOPE_INCOMPLETE`; retain both logs and bisect the four registered serving leak sites. |
+| `A_B_RED_REPRODUCED` | `A_B_RED_REPRODUCED` | `CHECKED_VMA_EXONERATED`; preserve the frozen contract and next bisect fixed-AR gather or continue-decode. |
+| any other pair | any other pair | `INCONCLUSIVE`; do not train or infer a fix. |
+
+Any arm with classifier `verdict=FAIL`, nonzero B−C, non-finite evidence,
+insufficient depth, missing/duplicate terminal, retry contamination, backward,
+or optimizer activity makes the pair `INCONCLUSIVE/FATAL`. Return the first
+failing condition and its raw-log line together with all preserved artifacts.
+This carrier intentionally returns no optimizer, convergence, performance, or
+XProf claim.
+
 ## START HERE — checked-VMA three-full wave published, ready to render, not launched
 
 This section supersedes every later `START HERE` block. The older sections are
@@ -847,3 +945,21 @@ published repair stack. On first evidence pull, classify each recipe
 independently. Any `CANON_ALIGN_PRE` or `CANON_ALIGN` FAIL is fatal and stops
 that recipe; require A-B/B-C `0/0` before accepting backward/optimizer
 evidence. Do not infer M15 success from P45 or vice versa.
+
+## Historical — 2026-08-26 Attempt 9 single-arm first screen
+
+Attempt 9 proves the published serving-scope repair did not restore TP8
+Zero-TIM: P45 is A−B/B−C `1755/0` bytes and M15/main is `93/0`; both are
+APC-off and stop before backward. Do not relaunch either full train yet.
+
+The then-active bounded recovery was
+`phases/v1-p4-10-frozenlake-tp8-ab-recovery.md`. Its first arm is
+`CANON_V1_FL_TP8_AB_ARM=p66-off`: exact production serving geometry with only
+checked-VMA/P66 compatibility selection disabled. It runs one full producer
+unit, requires deep-prefix coverage and B−C exactness, then exits before
+backward/optimizer. `ZERO_TIM_RECOVERED` and `A_B_RED_REPRODUCED` are both
+informative diagnostic outcomes; neither is training certification.
+
+This single-arm P45/M15 launch matrix is superseded by the matched P45 pair in
+the top `START HERE` section. No local commit/push or target launch may occur
+without the user's separate approval.

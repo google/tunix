@@ -1,13 +1,13 @@
 # State
 
-- Status: active; P66 serving-scope repair published, P45/M15 DP8xTP8 revalidation pending
-- Objective: publish and render one simultaneous three-recipe full wave using the P66 checked-VMA backward repair, with an independent fail-closed first-update gate on every recipe.
+- Status: active; P4.10 source freeze is host/full-image green and publication-approved, while the Attempt 9 TP8 forward regression remains target-unresolved
+- Objective: recover FrozenLake DP8xTP8 strict Zero-TIM before any new full train by testing whether process-wide P66 VMA mutations leaked into ordinary serving.
 - Definition of done: GSM8K DP16xTP4 plus P45/M15 DP8xTP8 complete their signed horizons with every strict Zero-TIM gate green and durable optimizer, timing, XProf, Perfetto, cache, evaluation, and checkpoint evidence.
 - Task directory: `canon-zero-tim/tasks/v1-phase4-three-full-recipes`
-- Directory state: clean isolated worktree at `/home/yuxuan/code_rl_repro/worktrees/p66_gsm8k_convergence_0825`, branch `local/p66-gsm8k-onehost-convergence`. Runtime CL `41f50d23` plus carrier/ledger CL `299fca0c` were pushed by ordinary fast-forward and read back exactly at `299fca0c9f2fff9679076c6d938185696c0f3d2d`. No repaired DP8xTP8 or full-recipe result exists yet.
-- Current phase: evaluate the user-launched P45 and M15 full trains independently at the strict pre-backward and optimizer gates.
-- Last verified fact: published source `c2833eea` makes P45/TP8 fail at step 0 with A-B/B-C `396/0` bytes and M15/TP8 fail with `20/0` across 123381 action tokens. Both are APC-off and stop before backward. The local fix scopes the P66 completed-sum `pmean` to the live P59 manual data/model context. V1 74/74, P59 37/37, P66 16/16 and the pinned-image installed TP4/TP8 ring/gather negative pass. Real one-host TP4 ring and gather carriers each pass three strict rounds at `0/0`; the failed real TP8 executable is not yet reverified.
-- Next action: wait for the user's fresh P45/M15 run IDs, pull their logs, and require strict A-B/B-C `0/0` per recipe before assessing backward or optimizer evidence.
-- Blockers: the Attempt 8 target hard-red has not yet been reverified on repaired runtime bytes. DP16xTP4/DP8xTP8 optimizer correctness, convergence, performance, and GCS XProf transport remain target-unverified.
-- Key artifacts: `phases/v1-p4-9-checked-vma-full-wave.md`; `scripts/prepare_checked_vma_three_full_wave.sh`; `RUNBOOK.md`; `evidence/v1_hp_p64_remote_64tpu_20260825/`; `../p66-onehost-gsm8k-convergence/evidence/p66-g15-onehost-20260826/receipt.json`.
-- Updated: 2026-08-26T02:31:00Z
+- Directory state: isolated publication worktree `/mnt/disks/tunix-data/worktrees/v1_fl_tp8_ab_diag_0826`, branch `local/v1-fl-tp8-ab-diag-0826`, based on fetched operator tip `ff0acaaa`. The user authorized this P4.10 CL for commit and push on 2026-08-26; no JobSet launch occurred.
+- Current phase: V1.P4.10 publication and target handoff for a zero-backward P45 matched pair.
+- Last verified fact: Attempt 9 P45 failed A-B/B-C `1755/0` bytes across 46,879 actions; M15 failed `93/0` across 124,308. Phase4 82/82, P57 146/146, P59 37/37, P66 16/16, APC 31/31, flags 385/385, both P45 arm env resolutions, shim manifest 37/37, scoped DP2×TP4/TP8 installed-shim image gates, and complete exact-image regression pass. The final terminal is `V1_HP_EXACT_IMAGE_PASS ... p59_checked_vma_real_shim=4 ... manifests=3`. `HANDOFF.md` now contains the complete operator procedure and per-arm/paired return contract.
+- Next action: after exact remote read-back, render fresh P45 p66-off and serving-scope IDs for user launch, then classify the paired target artifacts under the handoff matrix.
+- Blockers: real DP8xTP8 target is unrun. Dirty-source YAML is not launchable. Optimizer/convergence/performance claims are out of scope because the carrier exits before backward.
+- Key artifacts: `phases/v1-p4-10-frozenlake-tp8-ab-recovery.md`; `scripts/prepare_fl_tp8_ab_wave.sh`; Attempt-9 evidence directory; `RUNBOOK.md`.
+- Updated: 2026-08-26T05:28:52Z

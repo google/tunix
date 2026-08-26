@@ -4,7 +4,7 @@
  import functools
 +import os
  from enum import Enum
-@@ -1854,9 +1855,21 @@
+@@ -1854,9 +1855,67 @@
                  pltpu.HBM(shape=q.shape, dtype=q.dtype),
                  pltpu.HBM(shape=kv_cache.shape, dtype=kv_cache.dtype),
              ] if tpu_version >= 7 else [
@@ -14,16 +14,62 @@
 +                    dtype=q.dtype,
 +                    manual_axis_type=(
 +                        jax.typeof(q).mat
-+                        if os.environ.get("CANON_P66_P59_CHECK_VMA", "0") == "1"
++                        if (
++                            os.environ.get(
++                                "CANON_P66_P59_CHECK_VMA", "0") == "1"
++                            and (
++                                os.environ.get(
++                                    "CANON_P67_P66_VMA_P59_ONLY", "0") != "1"
++                                or (
++                                    os.environ.get(
++                                        "CANON_P59_RANK_PARALLEL_BACKWARD", "")
++                                    == "1"
++                                    and tuple(
++                                        jax.sharding.get_abstract_mesh().axis_names)
++                                    == ("data", "model")
++                                    and all(
++                                        axis_type
++                                        is jax.sharding.AxisType.Manual
++                                        for axis_type in
++                                        jax.sharding.get_abstract_mesh().axis_types)
++                                    and int(
++                                        jax.sharding.get_abstract_mesh().shape[
++                                            "data"]) > 1
++                                    and int(
++                                        jax.sharding.get_abstract_mesh().shape[
++                                            "model"]) > 1)))
 +                        else None)),
                  jax.ShapeDtypeStruct(shape=kv_cache.shape,
 -                                     dtype=kv_cache.dtype),
 +                                     dtype=kv_cache.dtype,
 +                                     manual_axis_type=(
 +                                         jax.typeof(kv_cache).mat
-+                                         if os.environ.get(
-+                                             "CANON_P66_P59_CHECK_VMA", "0"
-+                                         ) == "1"
++                                         if (
++                                             os.environ.get(
++                                                 "CANON_P66_P59_CHECK_VMA", "0"
++                                             ) == "1"
++                                             and (
++                                                 os.environ.get(
++                                                     "CANON_P67_P66_VMA_P59_ONLY",
++                                                     "0") != "1"
++                                                 or (
++                                                     os.environ.get(
++                                                         "CANON_P59_RANK_PARALLEL_BACKWARD",
++                                                         "") == "1"
++                                                     and tuple(
++                                                         jax.sharding.get_abstract_mesh().axis_names)
++                                                     == ("data", "model")
++                                                     and all(
++                                                         axis_type
++                                                         is jax.sharding.AxisType.Manual
++                                                         for axis_type in
++                                                         jax.sharding.get_abstract_mesh().axis_types)
++                                                     and int(
++                                                         jax.sharding.get_abstract_mesh().shape[
++                                                             "data"]) > 1
++                                                     and int(
++                                                         jax.sharding.get_abstract_mesh().shape[
++                                                             "model"]) > 1)))
 +                                         else None)),
              ],
              input_output_aliases={

@@ -139,6 +139,80 @@ case "${CANON_P59_RANK_PARALLEL_BACKWARD:-0}" in
     fail=1
     ;;
 esac
+case "${CANON_V1_FL_TP8_AB_ARM:-}" in
+  "") ;;
+  p66-off)
+    [ "${CANON_PROFILE_FILE:-}" = \
+      "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-ab-debug.env" ] && \
+    [ "${CANON_PROFILE:-}" = \
+      "qwen3-8b-dp8-tp8-frozenlake-v1-ab-debug" ] && \
+    [ "${CANON_P32_WORKLOAD:-}" = "frozenlake-dp8-tp8" ] && \
+    [ "${CANON_P33_RUN_STAGE:-}" = "backward-no-commit" ] && \
+    [ "${CANON_P33_NO_COMMIT:-}" = "1" ] && \
+    [ "${CANON_P38_PRECHECK_ONLY:-}" = "1" ] && \
+    [ "${CANON_P38_CONTROLLED_EXIT:-}" = "1" ] && \
+    [ "${CANON_P38_DIAGNOSTIC_ROUNDS:-}" = "1" ] && \
+    [ "${CANON_P59_CHECKED_VMA:-0}" = "0" ] && \
+    [ "${CANON_P66_P59_CHECK_VMA:-0}" = "0" ] && \
+    [ "${CANON_P67_P66_VMA_P59_ONLY:-0}" = "0" ] && \
+    [ "${CANON_P59_RANK_PARALLEL_BACKWARD:-0}" = "1" ] && \
+    [ "${CANON_V1_HP_FULL:-0}" = "0" ] || {
+      echo "[env] V1 FrozenLake TP8 A/B p66-off contract drifted" >&2
+      fail=1
+    }
+    case "${CANON_P57_WORKLOAD_CANDIDATE:-}:${CANON_P57_DATA_SPLIT:-}" in
+      :|m15:main) ;;
+      *)
+        echo "[env] V1 FrozenLake TP8 A/B workload identity drifted" >&2
+        fail=1
+        ;;
+    esac
+    ;;
+  serving-scope)
+    [ "${CANON_PROFILE_FILE:-}" = \
+      "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-ab-debug.env" ] && \
+    [ "${CANON_PROFILE:-}" = \
+      "qwen3-8b-dp8-tp8-frozenlake-v1-ab-debug" ] && \
+    [ "${CANON_P32_WORKLOAD:-}" = "frozenlake-dp8-tp8" ] && \
+    [ "${CANON_P33_RUN_STAGE:-}" = "backward-no-commit" ] && \
+    [ "${CANON_P33_NO_COMMIT:-}" = "1" ] && \
+    [ "${CANON_P38_PRECHECK_ONLY:-}" = "1" ] && \
+    [ "${CANON_P38_CONTROLLED_EXIT:-}" = "1" ] && \
+    [ "${CANON_P38_DIAGNOSTIC_ROUNDS:-}" = "1" ] && \
+    [ "${CANON_P59_CHECKED_VMA:-0}" = "1" ] && \
+    [ "${CANON_P66_P59_CHECK_VMA:-0}" = "1" ] && \
+    [ "${CANON_P67_P66_VMA_P59_ONLY:-0}" = "1" ] && \
+    [ "${CANON_P59_RANK_PARALLEL_BACKWARD:-0}" = "1" ] && \
+    [ "${CANON_V1_HP_FULL:-0}" = "0" ] || {
+      echo "[env] V1 FrozenLake TP8 A/B serving-scope contract drifted" >&2
+      fail=1
+    }
+    case "${CANON_P57_WORKLOAD_CANDIDATE:-}:${CANON_P57_DATA_SPLIT:-}" in
+      :|m15:main) ;;
+      *)
+        echo "[env] V1 FrozenLake TP8 A/B workload identity drifted" >&2
+        fail=1
+        ;;
+    esac
+    ;;
+  *)
+    echo "[env] CANON_V1_FL_TP8_AB_ARM must be unset, p66-off, or serving-scope" >&2
+    fail=1
+    ;;
+esac
+case "${CANON_P67_P66_VMA_P59_ONLY:-0}" in
+  0) ;;
+  1)
+    [ "${CANON_V1_FL_TP8_AB_ARM:-}" = "serving-scope" ] || {
+      echo "[env] P67 VMA scoping is restricted to the signed serving-scope diagnostic" >&2
+      fail=1
+    }
+    ;;
+  *)
+    echo "[env] CANON_P67_P66_VMA_P59_ONLY must be exactly 0 or 1" >&2
+    fail=1
+    ;;
+esac
 case "${CANON_P59_CHECKED_VMA:-0}" in
   0) ;;
   1)
@@ -150,6 +224,9 @@ case "${CANON_P59_CHECKED_VMA:-0}" in
         ;;
       cluster/profiles/qwen3-4b-dp8-tp8-deepswe-v1-hp.env:qwen3-4b-dp8-tp8-deepswe-v1-hp:)
         _canon_p59_checked_context=p58
+        ;;
+      cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-ab-debug.env:qwen3-8b-dp8-tp8-frozenlake-v1-ab-debug:frozenlake-dp8-tp8)
+        _canon_p59_checked_context=v1-fl-serving-scope
         ;;
       *)
         echo "[env] P59 checked VMA is restricted to registered full profiles" >&2
@@ -183,12 +260,25 @@ case "${CANON_P59_CHECKED_VMA:-0}" in
           fail=1
         }
         ;;
+      v1-fl-serving-scope)
+        [ "${CANON_V1_FL_TP8_AB_ARM:-}" = "serving-scope" ] && \
+        [ "${CANON_P33_RUN_STAGE:-}" = "backward-no-commit" ] && \
+        [ "${CANON_P33_NO_COMMIT:-}" = "1" ] && \
+        [ "${CANON_P38_PRECHECK_ONLY:-}" = "1" ] && \
+        [ "${CANON_P67_P66_VMA_P59_ONLY:-0}" = "1" ] && \
+        [ "${CANON_V1_HP_FULL:-0}" = "0" ] || {
+          echo "[env] P59 checked VMA serving-scope diagnostic changed" >&2
+          fail=1
+        }
+        ;;
     esac
-    [ "${CANON_V1_HP_FULL:-0}" = "1" ] && \
-    [ "${CANON_P59_RANK_PARALLEL_BACKWARD:-0}" = "1" ] || {
-      echo "[env] P59 checked VMA requires exact committed P59 full training" >&2
-      fail=1
-    }
+    if [ "$_canon_p59_checked_context" != "v1-fl-serving-scope" ]; then
+      [ "${CANON_V1_HP_FULL:-0}" = "1" ] && \
+      [ "${CANON_P59_RANK_PARALLEL_BACKWARD:-0}" = "1" ] || {
+        echo "[env] P59 checked VMA requires exact committed P59 full training" >&2
+        fail=1
+      }
+    fi
     case "${CANON_P66_P59_CHECK_VMA:-}" in
       ""|1) export CANON_P66_P59_CHECK_VMA=1 ;;
       *)
@@ -805,6 +895,19 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
     fi
   done
   echo "[env] P38 serving capture enabled: kv_unified=${CANON_KV_UNIFIED:-0} path=${CANON_P38_SERVING_CAPTURE_EXPECTED_PATH:-missing}"
+elif [ -n "${CANON_V1_FL_TP8_AB_ARM:-}" ]; then
+  for k in CANON_P38_PRECHECK_ONLY CANON_P38_CONTROLLED_EXIT \
+           CANON_P38_DIAGNOSTIC_ROUNDS CANON_P38_DIAGNOSTIC_ROUND_FILE \
+           CANON_P38_MIN_ACTION_KV; do
+    req "$k"
+  done
+  [ "${CANON_KV_UNIFIED:-0}" = "0" ] && \
+  [ "${CANON_P38_ONEHOST_REHEARSAL:-0}" = "0" ] && \
+  [ "${CANON_VLLM_ENABLE_PREFIX_CACHING:-0}" = "0" ] || {
+    echo "[env] V1 FrozenLake TP8 A/B carrier drifted" >&2
+    fail=1
+  }
+  echo "[env] V1 FrozenLake TP8 A/B precheck admitted arm=$CANON_V1_FL_TP8_AB_ARM"
 elif [ "${CANON_KV_UNIFIED:-0}" = "1" ]; then
   echo "[env] CANON_KV_UNIFIED is admitted only with bounded P38 serving capture" >&2
   fail=1
@@ -971,6 +1074,19 @@ elif [ "${CANON_PROFILE_FILE:-}" = \
     echo "[env] M15 APC target debug P57 identity drifted" >&2
     fail=1
   }
+elif [ "${CANON_PROFILE_FILE:-}" = \
+       "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-ab-debug.env" ]; then
+  case "${CANON_P57_WORKLOAD_CANDIDATE:-}:${CANON_P57_DATA_SPLIT:-}" in
+    :|m15:main) ;;
+    *)
+      echo "[env] V1 FrozenLake TP8 A/B P57 identity drifted" >&2
+      fail=1
+      ;;
+  esac
+  [ -z "${CANON_P57_TIM_ARM:-}${CANON_P57_RUN_KIND:-}${CANON_P57_INFERENCE_REGIME:-}${CANON_P57_EXPECTED_UPDATES:-}${CANON_P57_STOP_AFTER_STEP:-}${CANON_P57_EVAL_CHECKPOINT_STEP:-}${CANON_P57_EVAL_OUTPUT:-}${CANON_P57_CALIBRATION_MODE:-}${CANON_P57_CALIBRATION_OUTPUT:-}${CANON_P57_CALIBRATION_RECIPES:-}" ] || {
+    echo "[env] V1 FrozenLake TP8 A/B forbids P57 train/eval state" >&2
+    fail=1
+  }
 elif [ -n "${CANON_P57_TIM_ARM:-}${CANON_P57_RUN_KIND:-}${CANON_P57_INFERENCE_REGIME:-}${CANON_P57_EXPECTED_UPDATES:-}${CANON_P57_STOP_AFTER_STEP:-}${CANON_P57_EVAL_CHECKPOINT_STEP:-}${CANON_P57_EVAL_OUTPUT:-}${CANON_P57_CALIBRATION_MODE:-}${CANON_P57_CALIBRATION_OUTPUT:-}${CANON_P57_CALIBRATION_RECIPES:-}${CANON_P57_WORKLOAD_CANDIDATE:-}${CANON_P57_DATA_SPLIT:-}" ]; then
   echo "[env] P57 fields require the P57 profile" >&2
   fail=1
@@ -1084,12 +1200,21 @@ if [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "1" ] && \
       }
       echo "[env] P64 numeric debug fixed lm-head enabled"
       ;;
+    frozenlake-dp8-tp8:backward-no-commit:1:cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-ab-debug.env)
+      [ -n "${CANON_V1_FL_TP8_AB_ARM:-}" ] && \
+      [ "${CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY:-0}" = "0" ] || {
+        echo "[env] V1 FrozenLake TP8 A/B fixed-head contract drifted" >&2
+        fail=1
+      }
+      echo "[env] V1 FrozenLake TP8 A/B fixed lm-head enabled"
+      ;;
     *)
       echo "[env] fixed lm-head is not admitted for this workload/stage/profile" >&2
       fail=1
       ;;
     esac
   fi
+  [ -n "${CANON_V1_FL_TP8_AB_ARM:-}" ] || \
   [ -z "${CANON_MM_ALGO:-}${CANON_P38_PRECHECK_ONLY:-}${CANON_P38_CONTROLLED_EXIT:-}${CANON_P38_DIAGNOSTIC_ROUNDS:-}${CANON_P38_KV_OBSERVER_DIR:-}${CANON_P38_SEAM_OBSERVER:-}${CANON_P38_TAIL_OBSERVER:-}${CANON_P38_TERMINAL_DISCRIMINATOR:-}" ] || {
     echo "[env] fixed lm-head backward conflicts with diagnostic/algorithm env" >&2
     fail=1
@@ -2176,6 +2301,8 @@ if [ "${CANON_P32_DP_ADMISSION:-0}" = "1" ]; then
       fi
       if { [ "${CANON_P32_WORKLOAD:-}" = "frozenlake" ] || \
            { [ "$APC_M15_TARGET_DEBUG" = "1" ] && \
+             [ "${CANON_P32_WORKLOAD:-}" = "frozenlake-dp8-tp8" ]; } || \
+           { [ -n "${CANON_V1_FL_TP8_AB_ARM:-}" ] && \
              [ "${CANON_P32_WORKLOAD:-}" = "frozenlake-dp8-tp8" ]; }; } && \
          [ "${CANON_P33_RUN_STAGE:-}" = "backward-no-commit" ]; then
         req CANON_P38_MISMATCH_CAPSULE

@@ -1250,6 +1250,28 @@ elif [ "${CANON_P35_ENVELOPE:-0}" = "1" ]; then
     echo "[run] P35 expected diagnostic exit=1 accepted after COMPLETE classification"
     rc=0
   fi
+elif [ "${CANON_V1_FL_TP8_AB_ARM:-}" = "p66-off" ] || \
+     [ "${CANON_V1_FL_TP8_AB_ARM:-}" = "serving-scope" ]; then
+  if [ "$rc" -ne 42 ] || [ "$n_p38_precheck" -ne 1 ] || \
+     [ "$n_p38_rounds" -ne 1 ] || [ "$n_p38_controlled_exit" -ne 1 ]; then
+    echo "[run] FATAL: V1 FrozenLake TP8 A/B precheck is incomplete: rc=$rc precheck=$n_p38_precheck rounds=$n_p38_rounds controlled_exit=$n_p38_controlled_exit" >&2
+    exit 1
+  fi
+  v1_fl_tp8_ab_classification="$CANON_STATE/v1_fl_tp8_ab.classification.json"
+  if [ -e "$v1_fl_tp8_ab_classification" ]; then
+    echo "[run] FATAL: V1 FrozenLake TP8 A/B classification already exists: $v1_fl_tp8_ab_classification" >&2
+    exit 1
+  fi
+  v1_fl_tp8_ab_workload="${CANON_P57_WORKLOAD_CANDIDATE:-p45}"
+  JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
+    python3 "$CANON_PKG/tasks/v1-phase4-three-full-recipes/scripts/classify_fl_tp8_ab_diagnostic.py" \
+      --raw "$LOG" \
+      --pre-alignment "$CANON_PRE_ALIGN_REPORT" \
+      --workload "$v1_fl_tp8_ab_workload" \
+      --arm "$CANON_V1_FL_TP8_AB_ARM" \
+      --output "$v1_fl_tp8_ab_classification" || exit 1
+  echo "[V1.FL.AB] DIAGNOSTIC_COMPLETE arm=$CANON_V1_FL_TP8_AB_ARM workload=$v1_fl_tp8_ab_workload backward=0 optimizer_commits=0"
+  rc=0
 elif [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ] && \
      [ "$n_p38_precheck" -gt 0 ]; then
   p38_expected_rc=1

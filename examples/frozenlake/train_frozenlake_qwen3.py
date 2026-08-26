@@ -62,6 +62,7 @@ def _canonical_frozenlake_admission_geometry(
     p57_tim_arm: str,
     p57_run_kind: str,
     p64_numeric_debug: bool = False,
+    v1_tp8_ab_arm: str = "",
 ) -> tuple[int, str]:
   """Returns the signed mini-batch and sampler admission values.
 
@@ -76,6 +77,16 @@ def _canonical_frozenlake_admission_geometry(
     raise ValueError(
         "CANON_APC_M15_TARGET_DEBUG must be unset, off, or on"
     )
+  if v1_tp8_ab_arm not in ("", "p66-off", "serving-scope"):
+    raise ValueError(
+        "CANON_V1_FL_TP8_AB_ARM must be unset, p66-off, or serving-scope"
+    )
+  if v1_tp8_ab_arm:
+    if not p38_precheck_only:
+      raise ValueError("V1 TP8 A/B diagnostic requires P38 precheck-only mode")
+    if apc_m15_target_arm or p57_tim_arm or p57_run_kind or p64_numeric_debug:
+      raise ValueError("V1 TP8 A/B diagnostic cannot overlap another carrier")
+    return 32, "none"
   if apc_m15_target_arm:
     if not p38_precheck_only:
       raise ValueError("M15 APC target debug requires P38 precheck-only mode")
@@ -103,6 +114,7 @@ def _canonical_frozenlake_p38_batch_contract(
     batch_size: int,
     mini_batch_size: int,
     num_generations: int,
+    v1_tp8_ab_arm: str = "",
 ) -> tuple[int, int, int]:
   """Validates the legacy-P38 or M15-target producer-unit geometry."""
   if not p38_precheck_only:
@@ -113,9 +125,15 @@ def _canonical_frozenlake_p38_batch_contract(
     raise ValueError(
         "CANON_APC_M15_TARGET_DEBUG must be unset, off, or on"
     )
+  if v1_tp8_ab_arm not in ("", "p66-off", "serving-scope"):
+    raise ValueError(
+        "CANON_V1_FL_TP8_AB_ARM must be unset, p66-off, or serving-scope"
+    )
+  if v1_tp8_ab_arm and apc_m15_target_arm:
+    raise ValueError("V1 TP8 A/B diagnostic cannot overlap M15 APC debug")
   expected = (
       ("frozenlake-dp8-tp8", 8, 32, 1, 256)
-      if apc_m15_target_arm
+      if apc_m15_target_arm or v1_tp8_ab_arm
       else ("frozenlake", 16, 4, 8, 32)
   )
   (
@@ -420,6 +438,20 @@ CANON_APC_M15_TARGET_DEBUG = os.getenv("CANON_APC_M15_TARGET_DEBUG", "")
 CANON_P64_P45_NUMERIC_DEBUG = (
     os.getenv("CANON_P64_P45_NUMERIC_DEBUG", "0") == "1"
 )
+CANON_V1_FL_TP8_AB_ARM = os.getenv("CANON_V1_FL_TP8_AB_ARM", "")
+if CANON_V1_FL_TP8_AB_ARM:
+  _v1_fl_checked_vma = os.getenv("CANON_P59_CHECKED_VMA", "0")
+  _v1_fl_vma_p59_only = os.getenv("CANON_P67_P66_VMA_P59_ONLY", "0")
+  print(
+      "[V1.FL.AB] profile_resolved "
+      f"arm={CANON_V1_FL_TP8_AB_ARM} "
+      f"workload={os.getenv('CANON_P57_WORKLOAD_CANDIDATE') or 'p45'} "
+      f"dp=8 tp=8 checked_vma={_v1_fl_checked_vma} "
+      f"vma_p59_only={_v1_fl_vma_p59_only} "
+      "fixed_ar_gather=1 continue_decode=8 "
+      "prefix_cache=0 backward=0 optimizer_commits=0",
+      flush=True,
+  )
 CANON_ALIGNMENT_TRAIN_MODE = dp_workloads.requires_alignment_train_mode(
     os.environ
 )
@@ -645,6 +677,7 @@ if CANON_P32_WORKLOAD:
           p57_tim_arm=CANON_P57_TIM_ARM,
           p57_run_kind=CANON_P57_RUN_KIND,
           p64_numeric_debug=CANON_P64_P45_NUMERIC_DEBUG,
+          v1_tp8_ab_arm=CANON_V1_FL_TP8_AB_ARM,
       )
   )
   dp_workloads.validate_frozenlake_max_concurrency(
@@ -780,6 +813,7 @@ if CANON_P32_WORKLOAD:
             batch_size=BATCH_SIZE,
             mini_batch_size=MINI_BATCH_SIZE,
             num_generations=NUM_GENERATIONS,
+            v1_tp8_ab_arm=CANON_V1_FL_TP8_AB_ARM,
         )
     )
     print(
@@ -906,6 +940,7 @@ if (
     _P32_WORKLOAD_NAME == "frozenlake-dp8-tp8"
     and not CANON_APC_M15_TARGET_DEBUG
     and not CANON_P64_P45_NUMERIC_DEBUG
+    and not CANON_V1_FL_TP8_AB_ARM
 ):
   frozenlake_checkpoint.require_p45(P45_CHECKPOINT, os.environ)
 elif P45_CHECKPOINT.enabled:

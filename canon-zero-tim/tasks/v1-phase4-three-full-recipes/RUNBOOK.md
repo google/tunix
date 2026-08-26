@@ -1,5 +1,39 @@
 # V1 high-performance three-full runbook
 
+## Current — render the P45 TP8 matched diagnostic pair, never launch from here
+
+Never render launch YAML from a dirty or merely local worktree. After exact
+remote read-back and checkout of the clean published P4.10 SHA, use fresh IDs
+and a never-used output directory:
+
+```bash
+bash canon-zero-tim/tasks/v1-phase4-three-full-recipes/scripts/prepare_fl_tp8_ab_wave.sh \
+  <approved-40-character-sha> \
+  /tmp/v1-fl-tp8-ab-<fresh-wave-id> \
+  <fresh-p66-off-run-id> \
+  <fresh-serving-scope-run-id>
+```
+
+The wrapper refuses a dirty tree, SHA mismatch, reused output root, or
+duplicate IDs. It hashes exactly two P45 DP8×TP8 YAMLs and only prints two
+unpiped `kubectl apply` commands. It never executes them. Both jobs use the
+complete P45 rollout geometry and stop after one strict precheck with zero
+backward and zero optimizer commits.
+
+If 128 chips are intentionally allocated, launch the pair together. With only
+64 chips, launch `p66-off` first; later `serving-scope` must use a new run ID.
+Preserve all run directories. For each arm require one exact profile marker,
+one P38 round, controlled exit 42, sufficient prefix depth, finite A−B, and
+B−C exactly zero. Interpret the two-arm matrix only as written in
+`phases/v1-p4-10-frozenlake-tp8-ab-recovery.md`; no result authorizes a full
+train until the follow-up TP8 trainer-forward and backward gates pass.
+
+After both jobs finish, return the per-arm artifact hashes, exact classifier
+terminals, JSON fields, and paired matrix verdict listed under `Required
+return bundle` in `HANDOFF.md`. Do not report Kubernetes `Complete` as
+`ZERO_TIM_RECOVERED`; only the persisted classification JSON supplies that
+outcome.
+
 ## Current — render all three checked-VMA full jobs, never launch from here
 
 P4.9 prepares exactly three independent full jobs. Final manifests do not
@@ -336,3 +370,22 @@ profile/bucket/local-path identity. Finally it requires one XPlane plus UI
 trace and exactly one semantic Perfetto file. Use `xprof-trace-analysis`
 after packaging each returned run; operation attribution is a separate claim
 from the `[PERF]` timing verdict.
+
+## Historical — superseded single-arm FrozenLake TP8 carrier
+
+Do not follow this block. The P45/M15 p66-off wrapper described here was
+superseded by the matched P45 pair at the top of this file.
+
+```bash
+# historical only; do not execute
+```
+
+The retained text below describes the old single-arm classifier semantics.
+
+Each JobSet executes the full production rollout/rescore producer unit but
+stops at the pre-backward gate. Require exactly one controlled exit and one
+classification artifact. `ZERO_TIM_RECOVERED` means A−B/B−C `0/0` for that
+workload. `A_B_RED_REPRODUCED` means the single p66-off bisection did not fix
+the red. Any B−C drift, depth miss, non-finite record, backward, optimizer
+commit, retry, or reused evidence path is fatal. Neither outcome permits a
+full train until the forward regression is repaired and re-certified.

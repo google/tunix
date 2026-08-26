@@ -10,7 +10,7 @@
  class JaxEmbed(nnx.Embed, JaxModule):
      """Embedding layer for JAX."""
  
-@@ -57,6 +60,67 @@
+@@ -57,6 +60,91 @@
              return self.weight
  
      def __call__(self, x) -> jax.Array:
@@ -50,7 +50,31 @@
 +                    for k in range(1, _n):
 +                        acc = acc + ordered[k]
 +                    result = acc[0]
-+                    if _os_e.environ.get("CANON_P66_P59_CHECK_VMA", "0") == "1":
++                    _p67_scope = _os_e.environ.get(
++                        "CANON_P67_P66_VMA_P59_ONLY", "0")
++                    if _p67_scope not in ("0", "1"):
++                        raise RuntimeError(
++                            "CANON_P67_P66_VMA_P59_ONLY must be exactly 0 or 1")
++                    _p67_p59_context = True
++                    if _p67_scope == "1":
++                        _context = jax.sharding.get_abstract_mesh()
++                        _axis_types = dict(zip(
++                            _context.axis_names, _context.axis_types))
++                        _p67_p59_context = (
++                            _os_e.environ.get(
++                                "CANON_P59_RANK_PARALLEL_BACKWARD", "") == "1"
++                            and tuple(_context.axis_names) == ("data", "model")
++                            and _axis_types.get("data")
++                            is jax.sharding.AxisType.Manual
++                            and _axis_types.get("model")
++                            is jax.sharding.AxisType.Manual
++                            and int(_context.shape["data"]) > 1
++                            and int(_context.shape["model"]) > 1)
++                    if (
++                        _os_e.environ.get(
++                            "CANON_P66_P59_CHECK_VMA", "0") == "1"
++                        and _p67_p59_context
++                    ):
 +                        # The fixed ring has completed the global vocab sum on
 +                        # every TP rank, but elementwise additions remain typed
 +                        # model-varying.  Register the already-identical hidden

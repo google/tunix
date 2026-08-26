@@ -763,3 +763,75 @@
   SHA; do not substitute this later documentation-only ledger commit.
 - Result: `PUBLISHED / READY TO RENDER / TARGET NOT RUN`. No YAML, JobSet, TPU
   workload, or optimizer target transaction was created.
+
+## 2026-08-26T05:45:00Z — Attempt 9 frozen; TP8 forward bisection implemented
+
+- Type: evidence / pre-registration / implementation.
+- Fact: Attempt 9 preserves APC-off and exact B−C but P45 A−B is 1755 bytes
+  and M15 A−B is 93 bytes, both before backward. The earlier single linear
+  scope repair therefore did not close the complete serving regression.
+- Decision: first isolate the process-wide checked-VMA/P66 selector with an
+  exact DP8×TP8 production-geometry `p66-off` arm. It consumes one full
+  producer unit and exits code 42 with zero backward and zero optimizer
+  commits; it cannot be promoted as a training result.
+- Result: Phase4 host 77/77, P45/M15 Attempt-9 fixture classification, recovery
+  and B−C negative controls, renderer, and exact `00_env.sh` resolution pass.
+  Pinned image and target are not yet run. No JobSet, commit, or push occurred.
+- Rollback: revert V1.P4.10 profile/runner/renderer/classifier/learner admission
+  and flag entry together; production profiles and defaults are unchanged.
+
+## 2026-08-26T05:02:00Z — V1.P4.10 pinned-image admission green
+
+- Type: verification.
+- Result: the immutable production image
+  `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`
+  exits zero with the complete `V1_HP_EXACT_IMAGE_PASS` terminal. The image
+  runs Phase4 77/77 including the new three-test TP8 A/B carrier, as well as
+  the installed TP4/TP8 fixed-head/projection/attention shim gates.
+- Evidence boundary: the tool transcript is green but was not durably saved as
+  a raw log artifact. This is construction admission, not a TPU target result.
+- Next: audit the final diff and remote tip, then obtain explicit local
+  commit/push approval before rendering any launchable JobSet.
+## 2026-08-26T07:25:00Z — P4.10 expanded to matched checked-VMA serving-scope arm
+
+- User authorized preparation of a second 64-chip candidate arm alongside the
+  planned p66-off diagnostic. Source audit confirmed the reported Pallas and
+  RPA leaks and found one omitted process-wide site: fixed-AR embed pmean.
+- Added default-off `CANON_P67_P66_VMA_P59_ONLY`. The serving-scope arm keeps
+  P59 checked-VMA enabled but admits embed/Pallas/RPA VMA mutations only in an
+  exact outer manual DP/TP P59 context. Both P45 arms are full 32-prompt,
+  256-trajectory, one-round, pre-backward controlled-exit carriers.
+- Verified by host Phase4 82/82, P57 146/146, P59 37/37, P66 16/16, APC 31/31,
+  flags 385/385, syntax/diff hygiene and both real profile resolutions. Rebuilt
+  qwen8b_tp8 manifest is 37/37. With checked-VMA plus P59-only scoping, the
+  fixed image passes DP2×TP4/TP8 installed head/projection/attention/reducer
+  gates. The complete exact-image regression exits zero with
+  `V1_HP_EXACT_IMAGE_PASS ... p59_checked_vma_real_shim=4 ... manifests=3`.
+  Its output was observed as an execution transcript but not durably saved as
+  a raw-log artifact. Target is unrun.
+- No TPU JobSet, optimizer commit, git commit, or push occurred.
+- Release-base audit: remote advanced by one non-overlapping P58 Kueue renderer
+  commit. The isolated branch was safely fast-forwarded to `4755840c`; P4.10
+  changes were restored from a retained stash with no conflict. The remote
+  delta does not touch any P4.10 runtime, carrier, test, or ledger file, so it
+  does not invalidate the image-tested runtime bytes.
+- Final publication audit: remote then advanced to `ff0acaaa` with only P58
+  Attempt-0 seed-rejection evidence and its owning log. The branch was again
+  fast-forwarded and the P4.10 stash restored without conflict. Those failed
+  P58 artifacts remain intact; no P4.10 source, carrier, test, or ledger file
+  overlaps the remote delta.
+
+## 2026-08-26 — P4.10 operator return contract made self-contained
+
+- `HANDOFF.md` now gives an exact post-publication sequence from clean-SHA
+  render through user-owned unpiped launch and immutable evidence retention.
+- It defines the required per-arm return bundle: identities and YAML hash,
+  retry state, raw/pre-alignment/classification paths and hashes, exact
+  terminals, every classifier decision field, and zero-backward/zero-commit
+  marker counts.
+- It also fixes the only admitted paired decision matrix and states that a
+  Kubernetes `Complete` condition is not a numerical verdict. Any malformed
+  arm returns `INCONCLUSIVE/FATAL`; this carrier returns no optimizer,
+  convergence, performance, or XProf claim.
+- Documentation-only change. No runtime source, commit, push, render, JobSet,
+  or TPU state changed.

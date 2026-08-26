@@ -5,6 +5,7 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 image_ref="${1:?usage: run_tp4_tp8_installed_shim_exact_image.sh IMAGE}"
 docker="${DOCKER:-sudo docker}"
 vma_check="${CANON_P66_P59_CHECK_VMA:-0}"
+vma_p59_only="${CANON_P67_P66_VMA_P59_ONLY:-0}"
 case "$vma_check" in
   0|1) ;;
   *)
@@ -12,6 +13,17 @@ case "$vma_check" in
     exit 2
     ;;
 esac
+case "$vma_p59_only" in
+  0|1) ;;
+  *)
+    echo "CANON_P67_P66_VMA_P59_ONLY must be exactly 0 or 1" >&2
+    exit 2
+    ;;
+esac
+[ "$vma_p59_only" = "0" ] || [ "$vma_check" = "1" ] || {
+  echo "P67 P59-only scoping requires checked VMA" >&2
+  exit 2
+}
 
 image_id="$($docker image inspect "$image_ref" --format '{{.Id}}')"
 if [[ ! "$image_id" =~ ^sha256:[0-9a-f]{64}$ ]]; then
@@ -25,6 +37,7 @@ $docker run --rm \
   -w /workspace \
   -e JAX_PLATFORMS=cpu \
   -e CANON_P66_P59_CHECK_VMA="$vma_check" \
+  -e CANON_P67_P66_VMA_P59_ONLY="$vma_p59_only" \
   "$image_id" \
   bash -euo pipefail -c '
     qwen1p7b_overlay="$(mktemp -d /tmp/p59-qwen1p7b-tp4.XXXXXX)"

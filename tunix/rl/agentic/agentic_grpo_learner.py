@@ -141,6 +141,22 @@ def _m15_apc_target_alignment_enabled(env: Mapping[str, str]) -> bool:
   )
 
 
+def _v1_fl_tp8_ab_alignment_enabled(env: Mapping[str, str]) -> bool:
+  """Return whether the zero-commit TP8 serving bisection is active."""
+  return (
+      env.get("CANON_V1_FL_TP8_AB_ARM") in ("p66-off", "serving-scope")
+      and env.get("CANON_PROFILE_FILE")
+      == "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-ab-debug.env"
+      and env.get("CANON_P32_WORKLOAD") == "frozenlake-dp8-tp8"
+      and env.get("CANON_P38_PRECHECK_ONLY") == "1"
+      and env.get("CANON_P38_CONTROLLED_EXIT") == "1"
+      and env.get("CANON_P33_RUN_STAGE") == "backward-no-commit"
+      and env.get("CANON_P33_NO_COMMIT") == "1"
+      and env.get("CANON_DP_SIZE") == "8"
+      and env.get("CANON_TP_SIZE") == "8"
+  )
+
+
 def _canonical_alignment_sampler_is_valid(
     sampler_is: str | None,
     workload_name: str,
@@ -152,6 +168,7 @@ def _canonical_alignment_sampler_is_valid(
     p58_onehost_xprof: bool = False,
     m15_apc_target: bool = False,
     p64_numeric_debug: bool = False,
+    v1_fl_tp8_ab: bool = False,
 ) -> bool:
   """Return whether sampler IS preserves the workload contract."""
   if sampler_is == "token":
@@ -163,6 +180,7 @@ def _canonical_alignment_sampler_is_valid(
       or p57_tim_study
       or m15_apc_target
       or p64_numeric_debug
+      or v1_fl_tp8_ab
   ):
     return True
   return (
@@ -1496,6 +1514,7 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
       return [combined_batch]
     if alignment.enabled():
       m15_apc_target_alignment = _m15_apc_target_alignment_enabled(os.environ)
+      v1_fl_tp8_ab_alignment = _v1_fl_tp8_ab_alignment_enabled(os.environ)
       if not self.algo_config.use_rollout_logps:
         raise alignment.AlignmentGateError(
             "FrozenLake alignment requires use_rollout_logps=True"
@@ -1521,11 +1540,22 @@ class GRPOLearner(agentic_rl_learner.AgenticRLLearner[TGrpoConfig]):
           p64_numeric_debug=(
               os.environ.get("CANON_P64_P45_NUMERIC_DEBUG", "") == "1"
           ),
+          v1_fl_tp8_ab=v1_fl_tp8_ab_alignment,
       ):
         raise alignment.AlignmentGateError(
             "canonical alignment requires sampler_is='token'; sampler_is=None "
             "is admitted only by the signed GSM8K, P34 DeepSWE, P57 "
             "causal-study, M15 APC target-debug, or P64 numeric-debug contract"
+        )
+      if v1_fl_tp8_ab_alignment:
+        if self.algo_config.sampler_is is not None or sampler_is_weights is not None:
+          raise alignment.AlignmentGateError(
+              "V1 TP8 A/B diagnostic requires sampler_is=None and no TIS weights"
+          )
+        print(
+            "[V1.FL.AB] sampler_contract verdict=PASS sampler_is=none "
+            "use_rollout_logps=1 tis_weights=absent",
+            flush=True,
         )
       if rollout_per_token_logps is None or trainer_per_token_logps is None:
         raise alignment.AlignmentGateError(

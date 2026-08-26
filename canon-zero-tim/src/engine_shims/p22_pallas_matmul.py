@@ -22,6 +22,34 @@ CONFLICTS = (
 BM = 128
 BN = 256
 BK = 256
+P67_SCOPE_ENV = "CANON_P67_P66_VMA_P59_ONLY"
+
+
+def p67_p59_vma_context(jax) -> bool:
+    """Return whether a P67-scoped VMA mutation is inside P59's outer map.
+
+    P66's compatibility flag is process-wide, while the engine's serving and
+    trainer programs share that process.  The repair candidate must therefore
+    preserve the historical serving program and retain VMA annotations only
+    while P59 is tracing its exact manual DP/TP pullback.
+    """
+    scope = os.environ.get(P67_SCOPE_ENV, "0")
+    if scope not in ("0", "1"):
+        raise ValueError(f"{P67_SCOPE_ENV} must be exactly 0 or 1")
+    if scope != "1":
+        return True
+    if os.environ.get("CANON_P59_RANK_PARALLEL_BACKWARD", "") != "1":
+        return False
+    context = jax.sharding.get_abstract_mesh()
+    if tuple(context.axis_names) != ("data", "model"):
+        return False
+    axis_types = dict(zip(context.axis_names, context.axis_types))
+    return (
+        axis_types.get("data") is jax.sharding.AxisType.Manual
+        and axis_types.get("model") is jax.sharding.AxisType.Manual
+        and int(context.shape["data"]) > 1
+        and int(context.shape["model"]) > 1
+    )
 
 
 def preflight(*, require_enabled: bool) -> None:
@@ -55,7 +83,10 @@ def p66_vma_align_operands(jax, *values):
     transpose supplies the psum that the replicated operand needs.  P66 only
     admits plain-varying state here, never an already reduced/unreduced value.
     """
-    if os.environ.get("CANON_P66_P59_CHECK_VMA", "0") != "1":
+    if (
+        os.environ.get("CANON_P66_P59_CHECK_VMA", "0") != "1"
+        or not p67_p59_vma_context(jax)
+    ):
         return values
     mats = tuple(jax.typeof(value).mat for value in values)
     if any(mat.unreduced or mat.reduced for mat in mats):
@@ -74,7 +105,10 @@ def p66_vma_align_operands(jax, *values):
 
 def p66_vma_output_manual_axis_type(jax, *values):
     """Return the explicit Pallas output VMA type for aligned operands."""
-    if os.environ.get("CANON_P66_P59_CHECK_VMA", "0") != "1":
+    if (
+        os.environ.get("CANON_P66_P59_CHECK_VMA", "0") != "1"
+        or not p67_p59_vma_context(jax)
+    ):
         return None
     mats = tuple(jax.typeof(value).mat for value in values)
     if any(mat.unreduced or mat.reduced for mat in mats):
