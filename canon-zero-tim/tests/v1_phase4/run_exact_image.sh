@@ -8,6 +8,7 @@ docker="${DOCKER:-sudo docker}"
 bash "$root/canon-zero-tim/tests/p33_workloads/run_exact_image.sh" "$image_ref"
 bash "$root/canon-zero-tim/tests/p45_frozenlake_dp8_tp8/run_exact_image.sh" "$image_ref"
 CANON_P66_P59_CHECK_VMA=1 \
+  CANON_P67_P66_VMA_P59_ONLY=1 \
   bash "$root/canon-zero-tim/tests/p59_backward/run_tp4_tp8_installed_shim_exact_image.sh" \
   "$image_ref"
 

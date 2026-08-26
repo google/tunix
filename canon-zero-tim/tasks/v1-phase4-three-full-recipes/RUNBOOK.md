@@ -1,6 +1,49 @@
 # V1 high-performance three-full runbook
 
-## Current — render the P45 TP8 matched diagnostic pair, never launch from here
+## Current — render the P67 P45/M15 full pair, never launch from here
+
+The user waived another M15 scope precheck and selected direct P45 plus
+M15/main full trains. First finish source review, pinned-image admission,
+explicit commit/push approval, remote SHA read-back, and a clean checkout at
+that exact SHA. Then use fresh IDs and a never-used output directory:
+
+```bash
+bash canon-zero-tim/tasks/v1-phase4-three-full-recipes/scripts/prepare_p67_frozenlake_two_full_wave.sh \
+  <approved-40-character-sha> \
+  /tmp/v1-p67-frozenlake-full-<fresh-wave-id> \
+  <fresh-campaign-root> \
+  <fresh-p45-run-id> \
+  <fresh-m15-run-id>
+```
+
+The wrapper refuses a dirty tree, SHA mismatch, reused output root, or
+duplicate IDs. It hashes exactly two immutable manifests, preserves the P57
+64-chip autoscale/exclusive-topology carrier, emits
+`V1_P67_FROZENLAKE_WAVE_READY ... manifests=2 ... launch=not-executed`, and
+only prints two unpiped `kubectl apply` commands. It never executes them.
+
+After reviewing `manifest-index.json`, confirm both YAMLs and their profile
+resolution contain the same published source SHA, `CANON_P59_CHECKED_VMA=1`,
+`CANON_P67_P66_VMA_P59_ONLY=1`, `CANON_V1_HP_FIRST_UPDATE_GATE=1`, strict
+alignment, APC-off, full/300 updates, final-only checkpointing, and the correct
+P45 versus M15/main identity. Check no conflicting workload is live. The user
+may apply both YAMLs together; never append a pipe to either launch command.
+
+Watch both raw logs immediately. For each recipe, update 0 must pass strict
+prealignment, one checked-VMA/P67 resolved-env contract, one first-update
+precommit receipt (`microsteps=32`, denominator 32, finite, nonzero,
+`stable_norm <= 1e6`), and one valid `0 -> 1` AdamW commit receipt before
+weight sync. Any mismatch, non-finite gradient, missing/duplicate receipt, or
+invalid optimizer transaction is fatal for that recipe. Preserve all evidence
+and let the other independently healthy recipe continue.
+
+Do not call either run certified until the in-container full classifier passes
+all 300 updates, all strict alignment records, seven rollout-only evaluations,
+final checkpoint, P59/fixed-head/reduction evidence, JAX-cache receipts, XProf,
+Perfetto, and artifact hashes. Return the complete bundle listed in the first
+section of `HANDOFF.md`.
+
+## Historical — render the P45 TP8 matched diagnostic pair, never launch from here
 
 Never render launch YAML from a dirty or merely local worktree. After exact
 remote read-back and checkout of the clean published P4.10 SHA, use fresh IDs

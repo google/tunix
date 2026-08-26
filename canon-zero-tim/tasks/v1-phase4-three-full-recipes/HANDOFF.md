@@ -1,5 +1,69 @@
 # V1 Phase4 three-full handoff
 
+## START HERE — P4.11 P67 FrozenLake full promotion; prepare two jobs, not launched
+
+This section supersedes every later `START HERE` block.
+
+Wave 5 resolved the FrozenLake TP8 forward regression. The P45
+`serving-scope` arm retained P59 checked VMA with
+`CANON_P67_P66_VMA_P59_ONLY=1` and produced strict A-B/B-C `0/0` over 48,594
+action tokens to depth 2,472, then exited before backward with zero optimizer
+commits. The user accepted this candidate and explicitly waived another M15
+scope precheck. The next target wave is exactly two direct 300-update full
+trains: P45 and M15/main.
+
+P4.11 makes P67 mandatory only for the exact FrozenLake V1 high-performance
+full profile. GSM8K does not receive the flag. P67 restores the historical
+ordinary-serving graph while retaining checked-VMA ownership inside the P59
+manual DP/TP pullback. It does not change serving mathematics or fixed TP
+reduction order. APC remains off for both FrozenLake recipes. Evaluation stays
+rollout-only at policy steps `0,50,100,150,200,250,300`; checkpointing stays
+final-only at step 300 with latest-1 retention. The base 64-chip YAML,
+autoscaling, worker node selector, and `exclusive-topology` annotation are
+unchanged.
+
+Publication contract: P4.11 was prepared and verified on base
+`e5c596a4e7621e7442606cfc4dbbb39005eba4eb`. Host gates pass Phase4 89/89,
+P57 146/146, P59 37/37, P66 16/16, APC 31/31, and flags 385/385. The immutable
+image passes the P67-enabled installed DP2xTP4/TP8 ladder and complete
+`V1_HP_EXACT_IMAGE_PASS ... manifests=3`; this was observed in the execution
+transcript and has no durable raw-log SHA. The authoritative publication
+identity is the exact 40-character SHA read back from the remote branch after
+the approved push; the development base above is not launchable. No manifest
+render, JobSet, or TPU full run has occurred. Do not render or launch until a
+clean checkout is at the remote-read SHA. The user waived only the extra M15
+precheck—not strict Zero-TIM, backward-health, or full postflight gates.
+
+After publication, use only the first procedure in `RUNBOOK.md`. The wrapper
+must produce exactly two manifest hashes and two unpiped apply commands; it
+never launches. P45 and M15 may then be applied together from the same SHA
+with fresh, never-reused IDs. One run's red does not cancel the other healthy
+run, but it is fatal for that recipe.
+
+### What must be returned from each full run
+
+- exact source SHA, run/JobSet ID, rendered YAML path and SHA256, retry or
+  replacement-pod status, and durable run directory;
+- resolved `env.sh` proving the exact FrozenLake profile,
+  `CANON_P59_CHECKED_VMA=1`, `CANON_P66_P59_CHECK_VMA=1`,
+  `CANON_P67_P66_VMA_P59_ONLY=1`, P59 parallel backward, APC-off, strict mode,
+  full/300-update identity, and the correct P45 or M15/main workload tuple;
+- first-update precommit and commit JSON receipts proving the expected 32
+  microsteps/denominator, finite nonzero gradient, `0 < stable_norm <= 1e6`,
+  valid AdamW transaction, finite parameter delta, and train step `0 -> 1`;
+- complete strict alignment counts with zero real FAIL, 300 update rows,
+  complete P59/fixed-head/reduction receipts, and no non-finite sentinel;
+- held-out evaluation records for policy steps `0,50,100,150,200,250,300`,
+  final step-300 checkpoint, JAX-cache restore/save receipts, XProf XPlane and
+  trace JSON, Perfetto, and the final full-classification JSON plus SHA256;
+- `[PERF]` steady steps 2+ mean excluding the profiled update and direct eval
+  enclosing cycles, reported separately from raw wall time.
+
+Claim ceiling before the two full runs finish: P45 serving-forward recovery is
+target-verified; M15 serving-forward and both recipes' P59 backward, AdamW,
+performance, convergence, full evaluation, and checkpoint contracts are
+target-unverified.
+
 ## START HERE — P4.10 FrozenLake TP8 Wave 5 dual-arm recovery verified GREEN (0/0 differing bytes)
 
 This section supersedes every later `START HERE` block.

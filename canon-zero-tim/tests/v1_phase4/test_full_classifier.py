@@ -266,6 +266,28 @@ class FullClassifierTest(unittest.TestCase):
       self.assertEqual(record["verdict"], "FAIL")
       self.assertIn("canon_align_fail=1 expected=0", record["reasons"])
 
+  def test_gsm8k_rejects_frozenlake_p67_scope(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      state, run_log, updates, base = self._evidence(Path(tmp))
+      env = state / "env.sh"
+      env.write_text(
+          env.read_text(encoding="utf-8")
+          + "export CANON_P67_P66_VMA_P59_ONLY=1\n",
+          encoding="utf-8",
+      )
+      record = classifier.classify(
+          recipe="gsm8k",
+          state=state,
+          run_log=run_log,
+          update_report=updates,
+          base_classification=base,
+      )
+      self.assertEqual(record["verdict"], "FAIL")
+      self.assertIn(
+          "resolved_env.CANON_P67_P66_VMA_P59_ONLY_unexpected",
+          record["reasons"],
+      )
+
   def test_missing_first_update_precommit_is_fatal(self):
     with tempfile.TemporaryDirectory() as tmp:
       state, run_log, updates, base = self._evidence(Path(tmp))
@@ -447,6 +469,19 @@ class FullClassifierTest(unittest.TestCase):
       )
     self.assertFalse(classifier._RECIPES["p45"]["apc"])
     self.assertFalse(classifier._RECIPES["m15"]["apc"])
+    self.assertNotIn(
+        "CANON_P67_P66_VMA_P59_ONLY",
+        classifier._required_recipe_env(
+            "gsm8k", classifier._RECIPES["gsm8k"]
+        ),
+    )
+    for recipe in ("p45", "m15"):
+      self.assertEqual(
+          classifier._required_recipe_env(
+              recipe, classifier._RECIPES[recipe]
+          )["CANON_P67_P66_VMA_P59_ONLY"],
+          "1",
+      )
 
   def test_wrong_jax_cache_bucket_is_fatal(self):
     with tempfile.TemporaryDirectory() as tmp:

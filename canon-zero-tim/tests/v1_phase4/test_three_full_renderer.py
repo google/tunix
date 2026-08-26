@@ -99,6 +99,7 @@ class ThreeFullRendererTest(unittest.TestCase):
       self.assertEqual(gsm8k["CANON_P33_SHARED_MESH"], "16,4")
       self.assertEqual(gsm8k["CANON_GSM8K_ALIGNMENT_WARN_ONLY"], "0")
       self.assertEqual(gsm8k["CANON_P38_FIXED_LM_HEAD"], "1")
+      self.assertNotIn("CANON_P67_P66_VMA_P59_ONLY", gsm8k)
       self.assertIn("--max_steps=200", gsm8k["CANON_RUN_CMD"])
 
       for frozen in (p45, m15):
@@ -110,6 +111,7 @@ class ThreeFullRendererTest(unittest.TestCase):
         self.assertEqual(frozen["CANON_P33_DISABLE_EVAL"], "0")
         self.assertEqual(frozen["CANON_P31_ENABLE_EVAL"], "1")
         self.assertEqual(frozen["CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY"], "0")
+        self.assertEqual(frozen["CANON_P67_P66_VMA_P59_ONLY"], "1")
         self.assertEqual(
             frozen["CANON_FROZENLAKE_CKPT_MILESTONE_INTERVAL"], "0"
         )
@@ -157,6 +159,8 @@ class ThreeFullRendererTest(unittest.TestCase):
             "test \"$CANON_LOGPROB_STEP_FUSION\" = 1; "
             "test \"$CANON_P59_RANK_PARALLEL_BACKWARD\" = 1; "
             "test \"$CANON_P59_CHECKED_VMA\" = 1; "
+            f"test \"${{CANON_P67_P66_VMA_P59_ONLY:-0}}\" = "
+            f"{'0' if values['CANON_PROFILE_FILE'] == renderer._GSM8K_PROFILE else '1'}; "
             "test \"$CANON_V1_HP_FIRST_UPDATE_GATE\" = 1; "
             "test \"$CANON_P63_OVERFLOW_SAFE_CLIP\" = 1; "
             "test \"$CANON_P28_BATCHED_REPORT\" = 1; "
@@ -325,6 +329,12 @@ class ThreeFullRendererTest(unittest.TestCase):
         self.assertIn("export CANON_P59_RANK_PARALLEL_BACKWARD=1", snapshot)
         self.assertIn("export CANON_P59_CHECKED_VMA=1", snapshot)
         self.assertIn("export CANON_P66_P59_CHECK_VMA=1", snapshot)
+        if index == 0:
+          self.assertNotIn("export CANON_P67_P66_VMA_P59_ONLY=", snapshot)
+        else:
+          self.assertIn(
+              "export CANON_P67_P66_VMA_P59_ONLY=1", snapshot
+          )
         self.assertIn("export CANON_V1_HP_FIRST_UPDATE_GATE=1", snapshot)
         self.assertIn("export CANON_P63_OVERFLOW_SAFE_CLIP=1", snapshot)
         self.assertIn("export CANON_PERF_TRACE_EXPORT_STEP=2", snapshot)

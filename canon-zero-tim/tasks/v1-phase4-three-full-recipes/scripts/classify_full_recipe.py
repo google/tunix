@@ -329,6 +329,56 @@ def _steady_timing_rows(
   )
 
 
+def _required_recipe_env(recipe: str, contract: dict[str, Any]) -> dict[str, str]:
+  required = {
+      "CANON_PROFILE_FILE": str(contract["profile"]),
+      "CANON_V1_HP_FULL": "1",
+      "CANON_P33_RUN_STAGE": "full",
+      "CANON_P33_NO_COMMIT": "0",
+      "CANON_P59_RANK_PARALLEL_BACKWARD": "1",
+      "CANON_P59_CHECKED_VMA": "1",
+      "CANON_V1_HP_FIRST_UPDATE_GATE": "1",
+      "CANON_P63_OVERFLOW_SAFE_CLIP": "1",
+      "CANON_CONTINUE_DECODE": "8",
+      "CANON_FIXED_AR_GATHER": "1",
+      "CANON_PALLAS_GATHERED_LOGPROBS": "1",
+      "CANON_LOGPROB_STEP_FUSION": "1",
+      "CANON_P28_BATCHED_REPORT": "1",
+      "CANON_P28_BATCHED_REVERSE": "0",
+      "CANON_FUSED_TREE_OPS": "0",
+      "CANON_XPROF_PHASE": "update",
+      "CANON_XPROF_SKIP_STEPS": str(_PROFILED_STEP),
+      "CANON_XPROF_STEPS": "1",
+      "CANON_XPROF_PYTHON_TRACER": "0",
+      "CANON_XPROF_HOST_TRACER": "1",
+      "CANON_XPROF_TPU_TRACE_MODE": "TRACE_COMPUTE",
+      "CANON_XPROF_LABELS": "1",
+      "CANON_PERF_TRACE_EXPORT_STEP": str(_PROFILED_STEP),
+      "CANON_VLLM_ENABLE_PREFIX_CACHING": "1" if contract["apc"] else "0",
+      **_JAX_CACHE_ENV,
+  }
+  if recipe == "gsm8k":
+    required.update({
+        "CANON_GSM8K_ALIGNMENT_WARN_ONLY": "0",
+        "CANON_BATCHED_EVIDENCE": "1",
+    })
+  else:
+    required.update({
+        "CANON_P67_P66_VMA_P59_ONLY": "1",
+        "CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY": "0",
+        "CANON_BATCHED_EVIDENCE": "0",
+        "CANON_P57_TIM_ARM": "zero",
+        "CANON_P57_EXPECTED_UPDATES": "300",
+        "CANON_P57_WORKLOAD_CANDIDATE": str(contract["candidate"]),
+        "CANON_P57_DATA_SPLIT": str(contract["split"]),
+        "CANON_P33_ENABLE_EVAL": "1",
+        "CANON_P33_DISABLE_EVAL": "0",
+        "CANON_P31_ENABLE_EVAL": "1",
+        "CANON_FROZENLAKE_CKPT_MILESTONE_INTERVAL": "0",
+    })
+  return required
+
+
 def classify(
     *,
     recipe: str,
@@ -364,51 +414,13 @@ def classify(
     return {"schema": "v1-hp-full-classification-v1", "verdict": "FAIL", "recipe": recipe, "reasons": reasons}
 
   env = _resolved_env(env_path)
-  required_env = {
-      "CANON_PROFILE_FILE": str(contract["profile"]),
-      "CANON_V1_HP_FULL": "1",
-      "CANON_P33_RUN_STAGE": "full",
-      "CANON_P33_NO_COMMIT": "0",
-      "CANON_P59_RANK_PARALLEL_BACKWARD": "1",
-      "CANON_P59_CHECKED_VMA": "1",
-      "CANON_V1_HP_FIRST_UPDATE_GATE": "1",
-      "CANON_P63_OVERFLOW_SAFE_CLIP": "1",
-      "CANON_CONTINUE_DECODE": "8",
-      "CANON_FIXED_AR_GATHER": "1",
-      "CANON_PALLAS_GATHERED_LOGPROBS": "1",
-      "CANON_LOGPROB_STEP_FUSION": "1",
-      "CANON_P28_BATCHED_REPORT": "1",
-      "CANON_P28_BATCHED_REVERSE": "0",
-      "CANON_FUSED_TREE_OPS": "0",
-      "CANON_XPROF_PHASE": "update",
-      "CANON_XPROF_SKIP_STEPS": str(_PROFILED_STEP),
-      "CANON_XPROF_STEPS": "1",
-      "CANON_XPROF_PYTHON_TRACER": "0",
-      "CANON_XPROF_HOST_TRACER": "1",
-      "CANON_XPROF_TPU_TRACE_MODE": "TRACE_COMPUTE",
-      "CANON_XPROF_LABELS": "1",
-      "CANON_PERF_TRACE_EXPORT_STEP": str(_PROFILED_STEP),
-      "CANON_VLLM_ENABLE_PREFIX_CACHING": "1" if contract["apc"] else "0",
-      **_JAX_CACHE_ENV,
-  }
+  required_env = _required_recipe_env(recipe, contract)
   if recipe == "gsm8k":
-    required_env.update({
-        "CANON_GSM8K_ALIGNMENT_WARN_ONLY": "0",
-        "CANON_BATCHED_EVIDENCE": "1",
-    })
-  else:
-    required_env.update({
-        "CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY": "0",
-        "CANON_BATCHED_EVIDENCE": "0",
-        "CANON_P57_TIM_ARM": "zero",
-        "CANON_P57_EXPECTED_UPDATES": "300",
-        "CANON_P57_WORKLOAD_CANDIDATE": str(contract["candidate"]),
-        "CANON_P57_DATA_SPLIT": str(contract["split"]),
-        "CANON_P33_ENABLE_EVAL": "1",
-        "CANON_P33_DISABLE_EVAL": "0",
-        "CANON_P31_ENABLE_EVAL": "1",
-        "CANON_FROZENLAKE_CKPT_MILESTONE_INTERVAL": "0",
-    })
+    _require(
+        env.get("CANON_P67_P66_VMA_P59_ONLY") in (None, "", "0"),
+        "resolved_env.CANON_P67_P66_VMA_P59_ONLY_unexpected",
+        reasons,
+    )
   wrong_env = {
       name: env.get(name)
       for name, value in required_env.items()

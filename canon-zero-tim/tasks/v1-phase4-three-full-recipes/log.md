@@ -846,3 +846,26 @@
   optimizer, convergence, performance, and XProf are target-unverified.
 - This follow-up changes registries and release ledgers only. No renderer was
   executed from the commit, no JobSet was launched, and no TPU state changed.
+
+## 2026-08-26T08:58:18Z — P4.11 P67 FrozenLake full promotion prepared
+
+- User decision: accept the Wave 5 P45 serving-scope `0/0` result, waive a
+  second M15 scope precheck, and make the next target wave exactly P45 plus
+  M15/main direct full trains.
+- Implementation: the exact FrozenLake V1 full profile now requires P67
+  P59-only VMA scope; admission is closed to P45-readiness/M15-main DP8xTP8
+  strict zero 300-update full identities. GSM8K remains a P67-off negative.
+  The full classifier mirrors that split.
+- Delivery: added a clean-SHA render-only two-manifest carrier. It preserves
+  the reviewed P57 64-chip YAML, autoscaling, worker 4x4x4 selector,
+  exclusive-topology annotation, evaluation schedule and final-only
+  checkpoint cadence; it prints exactly two unpiped apply commands and never
+  launches.
+- Verification: Phase4 89/89, P57 146/146, P59 37/37, P66 16/16, APC 31/31,
+  flags 385/385, syntax and diff hygiene pass. Pinned image
+  `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`
+  passed P67-enabled installed TP4/TP8 shims and the full V1 image ladder.
+  The image result is an execution-transcript receipt without durable raw log.
+- Claim ceiling: P45 serving-forward recovery is target-verified. M15 serving
+  and both full backward/AdamW/performance/convergence paths remain target
+  unverified. No commit, push, manifest render, JobSet or TPU full run occurred.
