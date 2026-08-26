@@ -306,3 +306,16 @@ class VanillaSampler:
 
 
 
+
+import dataclasses
+from typing import Optional, List, Any
+import jax
+
+@dataclasses.dataclass
+class SamplerOutput:
+    """Output of the sampler."""
+    text: List[str]
+    logits: Optional[List[Any]]
+    tokens: List[Any]
+    padded_prompt_tokens: Optional[List[List[int]]] = None
+    logprobs: Optional[List[Any]] = None
