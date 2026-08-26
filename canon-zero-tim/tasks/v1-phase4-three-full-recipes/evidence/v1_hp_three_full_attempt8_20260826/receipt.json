@@ -1,0 +1,20 @@
+{
+  "attempt": 8,
+  "campaign_root": "v1hp-att8",
+  "source_commit": "c2833eea5a41438e454ac7e81e599d41fd739d87",
+  "timestamp": "2026-08-26T01:36:00Z",
+  "jobsets": {
+    "gsm8k": "canon-v1hp-gsm8k-g11-c2833eea",
+    "frozenlake_f45s": "canon-p57-fl-zero-f45s-c2833eea",
+    "frozenlake_m15s": "canon-p57-fl-zero-m15-m15s-c2833eea"
+  },
+  "verdicts": {
+    "gsm8k": "STEP0_PASS_UPDATE1_RUNNING (16/16 alignment steps PASS, stable_norm=1.4454, all_finite=true, P66 VMA TP>1 backward fix verified)",
+    "frozenlake_f45s": "STEP0_PRE_BACKWARD_ALIGNMENT_FAIL (S_decode_vs_S_prefill=396 bytes, S_prefill_vs_T_old=0 bytes exact, AlignmentGateError raised)",
+    "frozenlake_m15s": "STEP0_ROLLOUT_COMPLETE_PREFILL_RESCORE_ACTIVE"
+  },
+  "logs": {
+    "f45s_error": "f45s_p8_error.log",
+    "f45s_pre_alignment": "f45s_p8_pre_alignment.jsonl"
+  }
+}
