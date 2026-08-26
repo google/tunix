@@ -321,6 +321,9 @@ def render(
     # node-pool affinity.  Serializing the sentinel as a literal nodeSelector
     # made p58c05 incompatible with every available flavor.
     worker_pod["nodeSelector"].pop("cloud.google.com/gke-nodepool", None)
+    worker["template"]["metadata"].get("annotations", {}).pop(
+        "alpha.jobset.sigs.k8s.io/exclusive-topology", None
+    )
   worker_pod["nodeSelector"]["cloud.google.com/gke-tpu-topology"] = TOPOLOGY
   worker_container = p34._container(worker_pod["containers"], "pathways-worker")
   p34._replace_arg(
