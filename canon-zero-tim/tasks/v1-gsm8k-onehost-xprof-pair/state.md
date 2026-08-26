@@ -1,7 +1,9 @@
 # State
 
-- Status: P60-2G LOCAL/EXACT-IMAGE PASS / TARGET NOT RUN on operator tip
-  `9f91d930`. P60-2F remains a historical CLEAN-SHA ZERO-HP TARGET PASS at
+- Status: P60-2G LOCAL/EXACT-IMAGE PASS / TARGET NOT RUN at verified runtime
+  commit `fe94345c84c2181ed99997c6768f78d913b2da94` on operator base
+  `23e0bddfc4f742eecb66092db5bdc80def9571ca`. P60-2F remains a historical
+  CLEAN-SHA ZERO-HP TARGET PASS at
   `5549b5b6`, but under the new navigation criterion that artifact is
   `NUMERICAL/FULL-XPLANE PASS / NATIVE-LIKE UI FAIL / PERFORMANCE
   INCONCLUSIVE`.
@@ -16,19 +18,18 @@
 - Worktree entry: `/home/yuxuan/code_rl_repro/worktrees/p60_2g_native_steps_0825`
   (data-disk-backed because the root filesystem was full).
 - Branch: `local/p60-2g-native-steps-0825`
-- Base: `9f91d93001dd5b44659f062626eb93fc65e6fcb4`, the fetched operator tip at
-  phase start. P60-2G changes are local and uncommitted. Historical target
-  facts below retain their actual source SHAs.
-- Integration drift: the current remote-tracking tip is
-  `23e0bddfc4f742eecb66092db5bdc80def9571ca`, one commit ahead. Its changed
-  paths are confined to `tasks/v1-apc-m15-target-debug/` and do not overlap
-  this 22-path concern. Do not rebase the dirty tree; after local-commit
-  approval, rebase onto the then-current tip and rerun focused/static gates.
+- Base: `23e0bddfc4f742eecb66092db5bdc80def9571ca`. The exact 22-path P60-2G
+  implementation is locally committed at
+  `fe94345c84c2181ed99997c6768f78d913b2da94`; its rebase was conflict-free
+  because the incoming base commit is confined to
+  `tasks/v1-apc-m15-target-debug/`. Historical target facts below retain their
+  actual source SHAs.
 - Current phase: [P60-2G — Native-like train microsteps and warm UI capture](phases/p60-2g-native-train-steps.md).
-  The implementation is local and uncommitted; 13/13 P60, 37/37 P59, 67/67
-  V1/P64, 378/378 flags, static gates, and the full pinned exact-image ladder
-  pass. Target is not run. Historical P60-2F evidence is preserved without
-  relabeling its original acceptance.
+  The implementation is committed and clean; after rebase, 13/13 P60, 37/37
+  P59, 67/67 V1/P64, 378/378 flags, static gates, and the full pinned
+  exact-image ladder pass. The container reported zero TPU chips. Target is
+  not run. Historical P60-2F evidence is preserved without relabeling its
+  original acceptance.
 - Current contract: labels-off remains an exact no-op. On the signed Zero-HP
   arm only, each real reverse/reduce/accumulate transaction owns one
   `StepTraceAnnotation("train")` with step 32..47 for captured update 2; the
@@ -135,7 +136,9 @@
   [P60-2B phase](phases/p60-2b-hierarchy-instrumentation.md), and
   [operator runbook](RUNBOOK.md).
 - All prior roots and the clean-SHA packaging-RED root remain preserved. The
-  authorized P60-2F historical run, evidence-doc commit, rebase, validation,
-  and fast-forward push have been consumed. No image publication, Native
-  rerun, further TPU launch, or additional remote mutation is authorized.
+  authorized P60-2G implementation commit, rebase, local validation, and
+  handoff preparation have been consumed. Publication requires a final
+  remote-tip equality check and ordinary fast-forward push; the push receipt
+  is external to this static ledger. No image publication, Native rerun, or
+  TPU launch is authorized.
 - Updated: 2026-08-26.

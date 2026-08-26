@@ -10,18 +10,16 @@
 
 ## P60-2G remote-operator quickstart (authoritative)
 
-The current implementation lives in
-`/home/yuxuan/code_rl_repro/worktrees/p60_2g_native_steps_0825` on
-`local/p60-2g-native-steps-0825`, based on `9f91d930`. The P60-2G change is
-still uncommitted. The current remote-tracking tip is one evidence-only commit
-ahead at `23e0bddfc4f742eecb66092db5bdc80def9571ca`; it changes only
-`tasks/v1-apc-m15-target-debug/` and has no path overlap with this 22-path
-concern. **Do not launch from either base SHA or from a reconstructed patch.**
-After explicit local-commit approval, rebase that implementation commit onto
-the then-current operator tip, rerun the required gates, and record the final
-full 40-character SHA here before a remote agent treats the run as clean-source
-acceptance evidence. Commit, push, and TPU launch remain separate approval
-boundaries.
+The verified runtime implementation is
+`fe94345c84c2181ed99997c6768f78d913b2da94`, rebased onto operator base
+`23e0bddfc4f742eecb66092db5bdc80def9571ca`. It is the exact 22-path P60-2G
+concern; the base commit changes only `tasks/v1-apc-m15-target-debug/` and has
+no path overlap. Host, static, and the complete pinned exact-image ladder were
+rerun from this clean implementation commit. **Do not launch from the base
+SHA, a reconstructed patch, or an unverified descendant.** This handoff-only
+descendant may be the published branch tip, but the remote target source of
+record is the full implementation SHA above. Push and TPU launch remain
+separate approval boundaries; this handoff does not authorize a launch.
 
 This is a Zero-HP-only fresh carrier. Do not rerun Native and do not run the
 historical two-arm procedure in `HANDOFF.md`. The signed capture tuple is
@@ -50,8 +48,8 @@ On the remote v5p host, after receiving the approved implementation SHA:
 
 ```bash
 cd <clean-worktree-at-the-delivered-p60-2g-sha>
-test -z "$(git status --porcelain)"
-git rev-parse HEAD
+test "$(git rev-parse HEAD)" = fe94345c84c2181ed99997c6768f78d913b2da94
+test -z "$(git status --porcelain --untracked-files=all)"
 python3 canon-zero-tim/.claude/skills/manage-canon-zero-tim-branch/scripts/preflight_runtime.py \
   --repo . --require-clean
 
@@ -250,8 +248,8 @@ bash canon-zero-tim/tasks/v1-gsm8k-onehost-xprof-pair/scripts/run_onehost_gsm8k_
   '<fresh-p60-readable-zero-label>'
 ```
 
-For this uncommitted executor worktree, the exact proposed development-grade
-command is:
+For the historical uncommitted P60-2C executor worktree, the exact proposed
+development-grade command was:
 
 ```bash
 export V1_GSM8K_XPROF_EXPECT_HOSTNAME="$(hostname)"
@@ -364,10 +362,13 @@ historical P60-2F artifact totals 802,001,091 XProf bytes and returns size
 `status=PASS`. These are construction/tooling gates only; no fresh P60-2G v5p
 profile exists.
 
-No commit, push, or TPU launch is implied by this handoff. The current source
-line in the quickstart deliberately has no implementation SHA. After local
-commit approval, record that full SHA before a remote operator uses this
-one-host command; push and launch remain separate approval boundaries:
+The clean source of record for a fresh P60-2G target is
+`fe94345c84c2181ed99997c6768f78d913b2da94`. It passed P60 13/13 plus the
+15-file document gate, P59 37/37, V1/P64 67/67, flags 378/378, clean branch
+preflight, diff/static/neutrality gates, and the complete pinned exact-image
+ladder after rebase. The pinned container reported `tpu_devices=0`; therefore
+the verdict remains `LOCAL/EXACT-IMAGE PASS / TARGET NOT RUN`. A remote
+operator still needs separate launch approval before using this command:
 
 ```bash
 export V1_GSM8K_XPROF_EXPECT_HOSTNAME="$(hostname)"

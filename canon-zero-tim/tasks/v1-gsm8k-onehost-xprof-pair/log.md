@@ -515,3 +515,26 @@
   P60-2G concern is empty. The dirty worktree was not rebased. After explicit
   commit approval, rebase the clean implementation commit onto the then-current
   tip and rerun the focused/static gates before recording a launchable SHA.
+
+## 2026-08-26 — P60-2G clean implementation commit and rebase validation
+
+- The exact 22-path implementation concern was committed, then rebased
+  conflict-free onto operator base
+  `23e0bddfc4f742eecb66092db5bdc80def9571ca`. The verified runtime commit is
+  `fe94345c84c2181ed99997c6768f78d913b2da94`; the incoming base paths remain
+  confined to `tasks/v1-apc-m15-target-debug/`.
+- Clean host rerun: P60 13/13 plus document set 15/15, P59 37/37, V1/P64
+  67/67, complete flag audit 378/378/378, clean branch preflight, diff, Python
+  AST, shell syntax, changed-diff secret scan, and no-new-sync token audit all
+  PASS.
+- The complete pinned exact-image ladder exited zero on immutable image
+  `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`.
+  It ended in `V1_HP_EXACT_IMAGE_PASS`,
+  `P60_XPROF_ANNOTATION_API_PASS train_steps=32..47 micro_steps=0..15
+  last_accumulate=15 optimizer_update=2 optimizer_owned_by_last=1
+  compiler_events=0 trace_events=166`, and `P60_2B_EXACT_IMAGE_PASS ...
+  tpu_devices=0`.
+- Verdict remains `LOCAL/EXACT-IMAGE PASS / TARGET NOT RUN`. The exact remote
+  Zero-HP command and source SHA are recorded in `HANDOFF_P60_2.md`. This
+  ledger entry prepares the separately authorized ordinary fast-forward push;
+  it does not authorize TPU, Kubernetes, Native, or image activity.
