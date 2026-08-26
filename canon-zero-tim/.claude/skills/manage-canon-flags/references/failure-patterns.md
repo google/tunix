@@ -20,6 +20,8 @@ marker named by the current workload; paths can evolve.
 | Native is “fixed” by enabling canonical processing | the control treatment is contaminated | stop; do not trade experiment identity for progress | contract rejects mixed Native/Zero tuple |
 | Grep finds no marker in a live log | control characters made grep treat it as binary | use `grep -a`; confirm negative claims independently | postflight marker count |
 
+| Both env-toggled A/B arms return identical results | in-container inner script sourced a profile that re-`export`ed the flag, silently overriding the launcher `docker -e` value (2026-08-26: `CANON_BATCHED_EVIDENCE` off-arm defeated by `qwen3-1p7b-dp4-tp1-gsm8k-v1-hp.env`) | trace the full in-container chain including sourced profile re-exports before designing the arm; attest the executed path with a runtime fingerprint (xplane collective/module census), never env text | pre-launch `rg` for profile re-exports of the toggled key plus per-arm path-fingerprint diff |
+
 ## Debug order
 
 1. Find the first failure, not the final derivative exception.

@@ -31,7 +31,11 @@ renderer/raw environment
 
 Use `rg` to find every writer, unset, default, parser, reader, and marker. A
 value visible in the launcher does not prove it reached the process that uses
-it.
+it. One-host docker runners have their own chain — launch env prefix ->
+runner script -> `docker -e` array -> in-container inner script -> **sourced
+profile re-exports** -> reader — and a profile `export` OVERRIDES the
+`docker -e` value; an env-toggled arm designed without tracing this chain can
+silently run both arms identically.
 
 Read [references/flag-model.md](references/flag-model.md) when classifying or
 designing flags. Read
@@ -100,7 +104,11 @@ changes:
    environment and run the Python contract;
 4. opposite arm and neighboring workload negative controls;
 5. exact-image installer/import/value probes;
-6. target runtime marker and arm-aware postflight.
+6. target runtime marker and arm-aware postflight;
+7. for flags that select between lowered programs (reducer modes, kernel
+   paths): a runtime path-fingerprint attestation per arm — xplane
+   collective/module census (e.g. ppermute vs all-gather vs all-reduce
+   counts) or jit module names — proving each arm executed its own path.
 
 Use the deterministic registry helper before publication:
 
