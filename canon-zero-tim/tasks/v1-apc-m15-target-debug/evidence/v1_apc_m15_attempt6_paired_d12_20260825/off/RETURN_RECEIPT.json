@@ -1,0 +1,14 @@
+{
+  "claim_ceiling": "TARGET_OBSERVATION_ONLY",
+  "full_replay": null,
+  "large_artifacts_retained_in_gcs": {
+    "run_log": "gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-v1-apc-m15-off-d12-9f91d930/attempt-0/run.log",
+    "serving_capture_tar": "gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-v1-apc-m15-off-d12-9f91d930/attempt-0/serving-capture.tar"
+  },
+  "nested_manifest_members": 0,
+  "root_manifest_members": 4,
+  "schema": "m15-apc-gcs-return-receipt-v1",
+  "source_commit": "9f91d93001dd5b44659f062626eb93fc65e6fcb4",
+  "source_gcs_uri": "gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-v1-apc-m15-off-d12-9f91d930/attempt-0",
+  "status": "CONTROL_GREEN"
+}

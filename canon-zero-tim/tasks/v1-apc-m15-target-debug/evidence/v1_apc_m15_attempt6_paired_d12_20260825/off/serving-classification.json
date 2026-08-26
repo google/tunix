@@ -1,0 +1,97 @@
+{
+  "incident_exact_joins": [],
+  "incident_ledger_records": 97929,
+  "incident_missing_joins": [],
+  "joined_source_rows": [],
+  "mismatch_capsule": null,
+  "prefix_bounds": [
+    1152,
+    1216,
+    1280,
+    1408,
+    1696
+  ],
+  "program_path": "standard",
+  "records": [
+    {
+      "actual_steps": 1,
+      "capture_anchor_prefix": 1152,
+      "capture_anchor_request_id": "0-85af8b70",
+      "capture_stratum": [
+        1152,
+        1216
+      ],
+      "capture_stratum_index": 0,
+      "kv_unified": false,
+      "mismatch_join": null,
+      "mismatch_joins": [],
+      "observed_max_prefix": 1152,
+      "observed_min_prefix": 233,
+      "program_path": "standard",
+      "requests": 32,
+      "seq": 0
+    },
+    {
+      "actual_steps": 1,
+      "capture_anchor_prefix": 1226,
+      "capture_anchor_request_id": "77-a72a882a",
+      "capture_stratum": [
+        1216,
+        1280
+      ],
+      "capture_stratum_index": 1,
+      "kv_unified": false,
+      "mismatch_join": null,
+      "mismatch_joins": [],
+      "observed_max_prefix": 1226,
+      "observed_min_prefix": 15,
+      "program_path": "standard",
+      "requests": 80,
+      "seq": 1
+    },
+    {
+      "actual_steps": 1,
+      "capture_anchor_prefix": 1280,
+      "capture_anchor_request_id": "77-a72a882a",
+      "capture_stratum": [
+        1280,
+        1408
+      ],
+      "capture_stratum_index": 2,
+      "kv_unified": false,
+      "mismatch_join": null,
+      "mismatch_joins": [],
+      "observed_max_prefix": 1280,
+      "observed_min_prefix": 0,
+      "program_path": "standard",
+      "requests": 138,
+      "seq": 2
+    },
+    {
+      "actual_steps": 1,
+      "capture_anchor_prefix": 1431,
+      "capture_anchor_request_id": "258-bc9debc6",
+      "capture_stratum": [
+        1408,
+        1696
+      ],
+      "capture_stratum_index": 3,
+      "kv_unified": false,
+      "mismatch_join": null,
+      "mismatch_joins": [],
+      "observed_max_prefix": 1431,
+      "observed_min_prefix": 0,
+      "program_path": "standard",
+      "requests": 152,
+      "seq": 3
+    }
+  ],
+  "request_journal_joined_source_rows": [],
+  "request_journal_joins": [],
+  "request_journal_records": 761,
+  "schema_version": 1,
+  "scope": "p38-serving-capture",
+  "source_commit": "9f91d93001dd5b44659f062626eb93fc65e6fcb4",
+  "successful_mismatch_joins": 0,
+  "verdict": "PASS"
+}

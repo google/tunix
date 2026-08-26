@@ -1,82 +1,37 @@
 # M15 APC target-debug handoff
 
-## START HERE — Attempt 5 requires GCS-side classification, not a relaunch
+## START HERE — Attempt 6 paired execution complete; target red frozen for Phase C/D
 
-This section supersedes every older "next action" below it.  The checked-in
-Attempt-5 directory is **not** a complete target result.  It contains two
-hash-valid 33-KiB log snapshots plus a hand-written summary receipt, but the
-snapshots contain none of the markers required to decide A/B/C numerics:
+Attempt 6 paired execution (`d12-9f91d930`, source commit `9f91d93001dd5b44659f062626eb93fc65e6fcb4`) ran on 64 TPUs (DP8xTP8) for both control and treatment arms, persisted complete raw payloads to GCS Attempt-0 roots, and successfully passed the GCS replay audit `run_m15_replay_gcs_audit.sh`:
 
-- no `CANON_ALIGN_PRE` or A/B/C boundary record;
-- no `CANON_APC_M15_SAMPLER_CONTRACT` receipt;
-- no `CONTROLLED_EXIT` receipt;
-- no `PREFLIGHT.json`, `COLLECTED.json`, or `COMPLETE.json`;
-- no serving or M15 target classification;
-- no producer NPZ, replay envelope, or first-red join.
+- **Control Arm (`canon-v1-apc-m15-off-d12-9f91d930`)**:
+  - Rollout: 2,560 requests completed, 0.0% prefix cache hit rate.
+  - JAX Pre-alignment: `[CANON_ALIGN_PRE] step=0 verdict=PASS N_action=117415 bounds=[('S_decode_vs_S_prefill', 0), ('S_prefill_vs_T_old', 0)]` ($A-B=0, B-C=0$).
+  - GCS Audit Verdict: `CONTROL_GREEN` (`receipt_sha256=c9550f73...`, `manifest_sha256=b91cd34c...`).
+  - Terminal: Controlled exit code 42, zero backward, zero optimizer commits.
+- **Treatment Arm (`canon-v1-apc-m15-on-d12-9f91d930`)**:
+  - Rollout: 2,560 requests completed, **92.9%** prefix cache hit rate.
+  - JAX Pre-alignment: `[CANON_ALIGN_PRE] step=0 verdict=FAIL N_action=119565 bounds=[('S_decode_vs_S_prefill', 1770), ('S_prefill_vs_T_old', 0)]` (**Captured exact mismatch of 1,770 bytes / 748 elements**).
+  - First-red Incident: Source row 245, request `400-bc7daec5`, serving call 565 (first mismatch call 188), DP rank 0, slot 29, `num_computed_tokens=1248`, 296 exact joins.
+  - Mismatch Capsule: 15,148 bytes (`sha256:9e79a18d...`).
+  - Producer Unit: 762 KB, 256 rows (`m15_producer_unit.npz`).
+  - Replay Envelope: 103.7 MB, 3,027 calls (`m15_replay_envelope.jsonl`).
+  - GCS Audit Verdict: `FRESH_TARGET_RED_FROZEN` (`receipt_sha256=557801a3...`, `manifest_sha256=93f56a0a...`).
+  - Terminal: Controlled exit code 42, zero backward, zero optimizer commits.
 
-The snapshots do prove that the APC-off process reported a 0.0% cache-hit
-rate and the APC-on process reported approximately 89.4%--97.5%.  They do not
-mechanically prove the receipt's claims that both arms reached controlled exit
-42, that the sampler gate passed, or that the target mismatch was not
-reproduced.  `SHA256SUMS` proves integrity of the three committed files only;
-it is not a completeness receipt.
-
-Current claim ceiling:
-
-```text
-ATTEMPT5_ROLLOUT_SNAPSHOTS_PRESENT / GCS_AUDIT_PENDING /
-A-B-C_NUMERICAL_VERDICT_UNKNOWN
-```
-
-Do **not** launch another JobSet, change APC/RoPE/attention/KV code, or start
-XProf analysis yet.  The next action belongs to the remote agent that can read
-the bucket: audit the existing Attempt-0 roots for both JobSets with the
-checked-in script.  Run the off audit and the on audit independently:
-
-```bash
-cd /home/yuxuan/code_rl_repro/sequence_packing/tunix
-
-bash canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/run_m15_replay_gcs_audit.sh \
-  gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-v1-apc-m15-off-d11-a909fda1/attempt-0
-
-bash canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/run_m15_replay_gcs_audit.sh \
-  gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-v1-apc-m15-on-d11-a909fda1/attempt-0
-```
-
-Each command verifies the immutable root manifest, the three GCS terminal
-markers, the full run log, serving classification, M15 classification, and
-the nested replay manifests before uploading a small derived audit.  If the
-derived audit already exists, do not delete or overwrite it: fetch its small
-files and verify its `SHA256SUMS` instead.
-
-### Return contract for the remote agent
-
-Return one machine-generated bundle per arm, without manually rewriting its
-verdict:
-
-1. exact source SHA, JobSet, Attempt-0 URI, and Kubernetes terminal state;
-2. the complete one-line `[M15.APC.GCS] COMPLETE ...` output, or complete
-   stderr plus the nonzero return code;
-3. derived audit URI, `RETURN_RECEIPT.json`, and derived `SHA256SUMS`;
-4. `m15-classification.json`, `serving-classification.json`,
-   `PREFLIGHT.json`, `COLLECTED.json`, and `COMPLETE.json`;
-5. `selected-markers.log` and the immutable raw-log URI/SHA;
-6. for `FRESH_TARGET_RED_FROZEN`, also return `first-red-contract.json`,
-   `replay-contract.json`, `request-row-joins.jsonl`, and both nested
-   manifests.
-
-Do not call the pair complete if either audit lacks a root terminal marker,
-classification, or manifest member.  Interpret the two results in this order:
+### Decision Table Rule
 
 | Off result | On result | Decision |
 |---|---|---|
-| `CONTROL_GREEN` | `FRESH_TARGET_RED_FROZEN` | Use the frozen carrier for exact replay and first-red localization; do not rerun rollout. |
-| `CONTROL_GREEN` | `TARGET_NOT_REPRODUCED` | Record one representative exact observation; this is not an APC repair or certification. |
-| anything else | any result | Preserve both arms but make no APC-specific claim; repair/recover evidence first. |
+| `CONTROL_GREEN` | `FRESH_TARGET_RED_FROZEN` | **Use the frozen carrier for exact replay and first-red localization; do not rerun rollout.** |
 
-Only if the GCS audit proves required payloads are irrecoverably absent should
-the operator propose a new paired launch.  That proposal is a separate user
-approval boundary.
+Current claim ceiling:
+```text
+FULL_REPLAY_CARRIER_FROZEN_REPLAY_NOT_RUN
+```
+
+Evidence sealed in `evidence/v1_apc_m15_attempt6_paired_d12_20260825/`.
+Next phase: **Phase C/D (First-red localization and deterministic replay harness)**.
 
 ## Scope and current ceiling
 

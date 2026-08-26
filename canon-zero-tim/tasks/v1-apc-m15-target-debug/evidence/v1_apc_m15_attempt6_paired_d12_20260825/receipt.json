@@ -1,0 +1,52 @@
+{
+  "task": "v1_apc_m15_target_debug_attempt6_paired",
+  "source_commit": "9f91d93001dd5b44659f062626eb93fc65e6fcb4",
+  "date_utc": "2026-08-25T23:56:30Z",
+  "topology": "64 TPU (16 nodes, DP8xTP8) x 2",
+  "workload": "frozenlake-dp8-tp8",
+  "stage": "rollout-paired-apc-off-on-audit-complete",
+  "sampler_admission": "PASS",
+  "control_arm_off": {
+    "jobset_name": "canon-v1-apc-m15-off-d12-9f91d930",
+    "prefix_cache_hit_rate": "0.0%",
+    "rollout_requests": 2560,
+    "exit_code": 42,
+    "gcs_source_uri": "gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-v1-apc-m15-off-d12-9f91d930/attempt-0",
+    "gcs_derived_uri": "gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-v1-apc-m15-off-d12-9f91d930/attempt-0/derived/m15-replay-audit-v1",
+    "status": "CONTROL_GREEN",
+    "a_b_differing_bytes": 0,
+    "b_c_differing_bytes": 0,
+    "n_action": 117415,
+    "receipt_sha256": "c9550f730bebd3ad37696c52f7365ebac2a6b6fea9382426eec52548eb05c717",
+    "manifest_sha256": "b91cd34c78da6f8ce49a02926a1a27e3dde1583733733603a96160c793254a7b"
+  },
+  "treatment_arm_on": {
+    "jobset_name": "canon-v1-apc-m15-on-d12-9f91d930",
+    "prefix_cache_hit_rate": "92.9%",
+    "rollout_requests": 2560,
+    "exit_code": 42,
+    "gcs_source_uri": "gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-v1-apc-m15-on-d12-9f91d930/attempt-0",
+    "gcs_derived_uri": "gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-v1-apc-m15-on-d12-9f91d930/attempt-0/derived/m15-replay-audit-v1",
+    "status": "FRESH_TARGET_RED_FROZEN",
+    "a_b_differing_bytes": 1770,
+    "b_c_differing_bytes": 0,
+    "n_action": 119565,
+    "differing_elements": 748,
+    "mismatch_capsule_sha256": "9e79a18de18c88a2c16b7c6d509198bd141077f7cba466b33602d98eb1c4db77",
+    "first_red": {
+      "source_row": 245,
+      "request_id": "400-bc7daec5",
+      "call_index": 565,
+      "dp_rank": 0,
+      "local_scheduler_slot": 29,
+      "num_computed_tokens": 1248
+    },
+    "receipt_sha256": "557801a3d397a29ef4bfa69d8f678db9f66f90726ef51eed1faab870158a84ed",
+    "manifest_sha256": "93f56a0a3c970a72907d6f10c9da264158e09557bcadfd7f4d5c4c1d51134e9d"
+  },
+  "decision": {
+    "decision_table_rule": "Off=CONTROL_GREEN, On=FRESH_TARGET_RED_FROZEN => Use the frozen carrier for exact replay and first-red localization; do not rerun rollout.",
+    "claim_ceiling": "FULL_REPLAY_CARRIER_FROZEN_REPLAY_NOT_RUN",
+    "next_phase": "Phase C/D (First-red localization and deterministic replay harness)"
+  }
+}

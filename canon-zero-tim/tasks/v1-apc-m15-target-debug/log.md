@@ -409,3 +409,25 @@
 - The preceding checkpoint's statements about sampler PASS, controlled exit 42, zero commits, and `TARGET_NOT_REPRODUCED` came from the summary receipt and are not reproducible from the committed raw subset. They remain unverified rather than erased.
 - Decision: demote the claim to `ATTEMPT5_ROLLOUT_SNAPSHOTS_PRESENT / GCS_AUDIT_PENDING / A-B-C_NUMERICAL_VERDICT_UNKNOWN`. Do not launch, profile, or change numerical code yet.
 - Next gate: a bucket-capable executor must run the checked-in `run_m15_replay_gcs_audit.sh` independently on the off and on Attempt-0 roots and return the two machine-generated small bundles. Control must classify `CONTROL_GREEN` before the on arm supports any APC-specific interpretation.
+
+## 2026-08-26T00:05:00Z — Attempt 6 paired execution complete and upstream GCS replay audit PASS
+
+- Hardware execution: Paired DP8xTP8 64-TPU JobSets `canon-v1-apc-m15-off-d12-9f91d930` (control) and `canon-v1-apc-m15-on-d12-9f91d930` (treatment) rendered and launched from committed source `9f91d93001dd5b44659f062626eb93fc65e6fcb4`.
+- Control Arm (`off-d12`):
+  - 2,560 requests completed across 15 turns with 0.0% prefix cache hit rate.
+  - JAX pre-alignment verified: `[CANON_ALIGN_PRE] step=0 verdict=PASS N_action=117415 bounds=[('S_decode_vs_S_prefill', 0), ('S_prefill_vs_T_old', 0)]` ($A-B=0, B-C=0$).
+  - Controlled exit 42 executed with zero backward and zero optimizer commits.
+  - Full evidence package persisted to `gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-v1-apc-m15-off-d12-9f91d930/attempt-0/` (8 objects, 2.18 GiB).
+  - GCS audit `run_m15_replay_gcs_audit.sh` verified and uploaded derived receipts to `derived/m15-replay-audit-v1` with `status=CONTROL_GREEN` (`receipt_sha256=c9550f730bebd3ad37696c52f7365ebac2a6b6fea9382426eec52548eb05c717`, `manifest_sha256=b91cd34c78da6f8ce49a02926a1a27e3dde1583733733603a96160c793254a7b`).
+- Treatment Arm (`on-d12`):
+  - 2,560 requests completed across 15 turns with **92.9%** prefix cache hit rate.
+  - JAX pre-alignment captured exact mismatch: `[CANON_ALIGN_PRE] step=0 verdict=FAIL N_action=119565 bounds=[('S_decode_vs_S_prefill', 1770), ('S_prefill_vs_T_old', 0)]` (**1,770 differing bytes / 748 elements**).
+  - Mismatch capsule: 15,148 bytes (`sha256:9e79a18de18c88a2c16b7c6d509198bd141077f7cba466b33602d98eb1c4db77`).
+  - Producer unit: 256 rows, 762 KB (`m15_producer_unit.npz`).
+  - Serving replay envelope: 3,027 calls, 103.7 MB (`m15_replay_envelope.jsonl`).
+  - First-red Incident: Source row 245, request `400-bc7daec5`, serving call 565 (first mismatch call 188), DP rank 0, slot 29, `num_computed_tokens=1248`, 296 exact joins.
+  - Full evidence package persisted to `gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-v1-apc-m15-on-d12-9f91d930/attempt-0/` (9 objects, 1.31 GiB).
+  - GCS audit `run_m15_replay_gcs_audit.sh` verified and uploaded derived receipts to `derived/m15-replay-audit-v1` with `status=FRESH_TARGET_RED_FROZEN` (`receipt_sha256=557801a3d397a29ef4bfa69d8f678db9f66f90726ef51eed1faab870158a84ed`, `manifest_sha256=93f56a0a3c970a72907d6f10c9da264158e09557bcadfd7f4d5c4c1d51134e9d`).
+- Decision table applied: Off=`CONTROL_GREEN` and On=`FRESH_TARGET_RED_FROZEN` -> **Use the frozen carrier for exact replay and first-red localization; do not rerun rollout.**
+- Small machine return bundles archived under `evidence/v1_apc_m15_attempt6_paired_d12_20260825/` with verified `SHA256SUMS` (24 items).
+- Claim ceiling promoted to `FULL_REPLAY_CARRIER_FROZEN_REPLAY_NOT_RUN`.

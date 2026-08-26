@@ -1,0 +1,7 @@
+{
+  "schema": "p38-gcs-collected-v1",
+  "prefix": "gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-v1-apc-m15-on-d12-9f91d930/attempt-0",
+  "source_commit": "9f91d93001dd5b44659f062626eb93fc65e6fcb4",
+  "manifest_sha256": "b696948db104a93f8b61d25e82654f8d43eb1dfb1281c008398f51c74f4e62a3",
+  "member_count": 5
+}
