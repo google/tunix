@@ -1679,6 +1679,14 @@ rl_cluster = rl_cluster_lib.RLCluster(
     cluster_config=cluster_config,
     perf_config=perf_config,
 )
+# Optax does not retain a scalar learning rate in the AdamW state, so the
+# trainer cannot recover it through ``_try_get_learning_rate()``.  Register an
+# observation-only schedule with the same constant value used above.  This
+# does not replace or wrap the optimizer transform and therefore cannot change
+# the update; it only makes the applied rate available to fail-closed receipts.
+rl_cluster.actor_trainer.register_learning_rate_schedule(
+    optax.constant_schedule(LEARNING_RATE)
+)
 show_hbm_usage("after RLCluster creation")
 if P45_CHECKPOINT.enabled:
   restored_checkpoint_step = rl_cluster.actor_trainer.restored_global_step()

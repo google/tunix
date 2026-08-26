@@ -1,5 +1,48 @@
 # V1 Phase4 three-full handoff
 
+## START HERE — P45 Wave 02 reached AdamW; LR receipt wiring repaired locally
+
+This section supersedes every later `START HERE` block.
+
+P45 Wave 02 ran source `bde8f4c6e055ff077b24af716857786ce967f422`
+as `canon-p57-fl-zero-f45w02-bde8f4c6`. Its raw head-container log is
+`../p57-frozenlake-tim-causal-study/evidence/f45w02_head_container.log`
+(SHA-256 `1f5455b707599ff7fcff6976b980a441434479c4ee27621744808faa19bdff20`).
+The target passed strict Step-0 pre-alignment over 45,727 action tokens, then
+all 32/32 post-backward alignment records were PASS with all three byte
+boundaries zero. The complete accumulator was finite and nonzero with
+`stable_norm=0.6722502708435059`, denominator 32, and 399/399 nonzero leaves.
+AdamW completed in 73.546 seconds, advanced trainer step 0 to 1, and changed
+6,950,316,141 parameter elements with finite deltas.
+
+The first red happened after that trainer-local commit but before outer weight
+sync or checkpoint. The first-update receipt reported
+`effective_learning_rate=None`, so the fail-closed gate rejected it. This was
+not a missing optimizer learning rate: FrozenLake constructed AdamW with the
+constant scalar `LEARNING_RATE`, but unlike GSM8K it never registered that
+same value with `PeftTrainer.effective_learning_rate()`. Plain scalar Optax
+transforms do not retain a readable hyperparameter field, so the observer
+returned `None` even though the update used the configured rate.
+
+The local repair leaves the scalar AdamW transform unchanged and registers
+`optax.constant_schedule(LEARNING_RATE)` only with the trainer's observation
+API. A syntax/AST negative pins both facts: one registration must exist and
+AdamW must still receive scalar `LEARNING_RATE`. P57 passes 147/147 and Phase4
+passes 89/89. The latter first encountered host `/tmp` ENOSPC and passed
+unchanged after directing test temporaries to the work disk; that is an
+infrastructure incident, not a product red. Immutable image
+`sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`
+passes the new regression plus the complete P45 gate and ends
+`P45_EXACT_IMAGE_CPU_PASS overlay=qwen8b_tp8`. The image output is not stored
+as a durable raw artifact.
+
+This CL publishes the repair and admission ledger; its authoritative identity
+is the exact remote-read SHA after push. No post-fix TPU run, render, launch,
+weight sync, policy step 1, evaluation, or checkpoint exists. Use only that
+remote-read exact SHA and fresh P45/M15 identities. The first target gate must report the configured
+positive effective learning rate, complete outer weight sync, and enter policy
+step 1; strict Zero-TIM and all backward-health gates remain unchanged.
+
 ## START HERE — Attempt 10 checkpoint-admission repair; local gates green, target not rerun
 
 This section supersedes every later `START HERE` block.

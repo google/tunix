@@ -903,3 +903,24 @@
   shared contract. Reverting the helper/test change is mechanically isolated,
   but would deliberately restore the interval-300 launch blocker; never mask
   it by changing the registered final-only cadence or disabling checkpoints.
+
+## 2026-08-26T22:43:00Z — P45 Wave 02 LR receipt first red repaired locally
+
+- Source/evidence: Wave 02 ran `bde8f4c6e055ff077b24af716857786ce967f422`;
+  raw log SHA-256 is
+  `1f5455b707599ff7fcff6976b980a441434479c4ee27621744808faa19bdff20`.
+- Target fact: 45,727-action strict pre-alignment PASS; 32/32 post-backward
+  three-boundary-zero records; finite/nonzero denominator-32 accumulator with
+  stable norm 0.6722502708435059; finite AdamW changed 6,950,316,141 elements.
+- First red: after trainer step advanced to 1 and before outer weight sync,
+  the first-update gate rejected `effective_learning_rate=None`.
+- Cause: FrozenLake's scalar AdamW rate is not recoverable from Optax state,
+  and the entrypoint omitted the observer registration already used by GSM8K.
+- Repair: retain scalar AdamW exactly and register a same-value constant
+  schedule only with `PeftTrainer` receipts. Add an AST positive/negative and
+  execute it in the pinned-image gate.
+- Validation: focused 8/8, P57 147/147, Phase4 89/89, pinned P45 image PASS.
+  One Phase4 invocation hit host `/tmp` ENOSPC and passed unchanged with a
+  work-disk `TMPDIR`; it is classified infrastructure-only.
+- Claim boundary: local and image admission only. No post-fix TPU, weight sync,
+  policy step 1, evaluation, checkpoint, commit, push, render, or launch.

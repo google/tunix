@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import copy
 from pathlib import Path
 import unittest
@@ -29,6 +30,52 @@ class P57WorkloadsTest(unittest.TestCase):
         'next_action = "complete" if completed_step == MAX_STEPS else "isolated-eval"',
         entrypoint,
     )
+
+  def test_primary_entrypoint_registers_constant_learning_rate_receipt(self):
+    entrypoint_path = (
+        Path(__file__).resolve().parents[3]
+        / "examples/frozenlake/train_frozenlake_qwen3.py"
+    )
+    tree = ast.parse(entrypoint_path.read_text(), filename=str(entrypoint_path))
+
+    registrations = []
+    scalar_adamw_rates = []
+    for node in ast.walk(tree):
+      if not isinstance(node, ast.Call):
+        continue
+      if (
+          isinstance(node.func, ast.Attribute)
+          and node.func.attr == "register_learning_rate_schedule"
+      ):
+        registrations.append(node)
+      if (
+          isinstance(node.func, ast.Attribute)
+          and isinstance(node.func.value, ast.Name)
+          and node.func.value.id == "optax"
+          and node.func.attr == "adamw"
+      ):
+        scalar_adamw_rates.extend(
+            keyword.value
+            for keyword in node.keywords
+            if keyword.arg == "learning_rate"
+        )
+
+    self.assertEqual(len(registrations), 1)
+    registration = registrations[0]
+    self.assertEqual(len(registration.args), 1)
+    schedule = registration.args[0]
+    self.assertIsInstance(schedule, ast.Call)
+    self.assertIsInstance(schedule.func, ast.Attribute)
+    self.assertIsInstance(schedule.func.value, ast.Name)
+    self.assertEqual(schedule.func.value.id, "optax")
+    self.assertEqual(schedule.func.attr, "constant_schedule")
+    self.assertEqual(len(schedule.args), 1)
+    self.assertIsInstance(schedule.args[0], ast.Name)
+    self.assertEqual(schedule.args[0].id, "LEARNING_RATE")
+
+    self.assertEqual(len(scalar_adamw_rates), 1)
+    self.assertIsInstance(scalar_adamw_rates[0], ast.Name)
+    self.assertEqual(scalar_adamw_rates[0].id, "LEARNING_RATE")
 
   def test_registered_recipe_table(self):
     self.assertEqual(tuple(p57_workloads.RECIPES), ("l0", "m10", "m15", "m20"))

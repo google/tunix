@@ -23,6 +23,7 @@ the semantic Perfetto timeline.
 | V1.P4.10 | Localize the post-P66 FrozenLake TP8 forward regression with a production-geometry, pre-backward matched pair | P45 p66-off vs serving-scope render/resolved-env; finite A−B, exact B−C, depth floor, controlled zero-commit exit; scoped TP4/TP8 P59 and full pinned-image before publication | complete; Wave 5 both arms target-green at strict A−B/B−C `0/0`, serving-scope candidate accepted |
 | V1.P4.11 | Promote P67 P59-only VMA scoping into the exact P45 and M15 full recipes | two-manifest production admission, host/full-image gates, then independent 300-update target verdicts | implementation complete; host/full-image PASS, publication identity requires remote read-back, and both 300-update targets remain pending |
 | V1.P4.12 | Repair the stale G6 checkpoint admission exposed by Attempt 10 | one checkpoint source of truth; legacy-10 and primary-300 positives; wrong identity/cadence negatives; host and immutable-image gates; then fresh target first update | source published by current CL; host and immutable image PASS; target first gradient sink/AdamW not rerun |
+| V1.P4.13 | Repair the missing FrozenLake effective-learning-rate observation exposed by P45 Wave 02 | keep scalar AdamW unchanged; register the same constant only for receipts; pin entrypoint structure; host and P45 immutable-image gates; then fresh target weight sync | source published by current CL; P57 147/147, Phase4 89/89, P45 exact image PASS; post-fix target not run |
 
 ## Decisions
 
@@ -80,3 +81,10 @@ the semantic Perfetto timeline.
   parser in the G6 guard; do not change the final-only cadence or bypass the
   guard. The full backward, AdamW, convergence, and checkpoint claims remain
   target-unverified.
+- Decision (2026-08-26 P45 Wave 02): checkpoint admission is fixed and the
+  target now proves all 32 reverse groups, a finite/nonzero denominator-32
+  accumulator, and one finite AdamW mutation. The subsequent
+  `effective_learning_rate=None` red is an observer-registration omission:
+  preserve scalar AdamW and register the identical constant with the receipt
+  API. Do not weaken the first-update gate or claim outer weight sync/policy
+  step 1 until a fresh target crosses them.
