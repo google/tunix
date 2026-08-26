@@ -20,7 +20,6 @@ from typing import Any, List, Sequence
 from absl import logging
 import numpy as np
 from tunix.experimental.rollout import sampler as base_sampler_lib
-from tunix.experimental.weight_sync import raiden_weight_sync_delegate
 from tunix.experimental.weight_sync import weight_sync
 
 Sampler = base_sampler_lib.Sampler
@@ -65,6 +64,8 @@ class InprocessVllmSamplerAdapter(Sampler, abc.ABC):
       )
 
       if self.raiden_sync_delegate is None:
+        from tunix.experimental.weight_sync import raiden_weight_sync_delegate  # pylint: disable=g-import-not-at-top
+
         self.raiden_sync_delegate = (
             raiden_weight_sync_delegate.RaidenWeightSyncDelegate()
         )
