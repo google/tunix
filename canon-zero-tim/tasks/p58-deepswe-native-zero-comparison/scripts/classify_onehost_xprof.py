@@ -126,7 +126,7 @@ def classify(
       "max_response_length": 512,
       "dataset_seed": 42,
       "rollout_seed": 42,
-      "seed_scope": "config-level; async completion order not claimed",
+      "seed_scope": "engine-global; async completion order not claimed",
       "expected_hostname": expected_hostname,
   }
   wrong_manifest = {

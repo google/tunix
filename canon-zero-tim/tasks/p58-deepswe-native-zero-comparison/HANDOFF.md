@@ -1,5 +1,52 @@
 # P58 DeepSWE native-first training handoff
 
+## 2026-08-26 P58.12 JAX engine-seed/cleanup override — construction PASS, not published
+
+This is the highest-priority P58 handoff. The latest pulled operator tip is
+`7f6fc071082f291bf926b1c5bc79021733628c2e` and preserves immutable Zero-HP
+Attempt-0 evidence under
+`evidence/p58z01_attempt0_seed_exception/`. `p58z01` admitted all 128 TPU
+devices, loaded 1,012 clean tasks, launched 128 R2E sandboxes, and initialized
+vLLM. The first Step-0 model call then failed before any trajectory:
+
+```text
+ValueError: JAX does not support per-request seed.
+```
+
+P58.10 had put seed 42 in `RolloutConfig.seed`, which Tunix forwarded to
+`SamplingParams.seed`. The P58.12 local repair instead passes the same signed
+42 through global vLLM `EngineArgs.seed` and rejects any JAX per-request seed
+before generation. Require both startup receipts exactly once:
+
+```text
+[P58.SEED] PASS dataset_seed=42 rollout_seed=42 scope=engine-global async_completion_order=not-claimed
+[VLLM.JAX_SEED] PASS engine_seed=42 request_seed=none scope=engine-global
+```
+
+W&B, durable manifests, one-host artifacts, classifiers, and postflight use
+the same engine-global scope. Async sandbox completion order remains explicitly
+unclaimed. This preserves the fixed-seed comparison across Native raw,
+Native+IS, and Zero; it does not change sampling parameters or the Zero
+numerical bundle.
+
+Abort cleanup also hit kubernetes-client's exact empty-body
+`AttributeError: 'NoneType' object has no attribute 'decode'`. The local patch
+treats only that exact defect as an ambiguous response, reads until confirmed
+404, and reissues the same exactly-scoped DELETE if the Pod is still present.
+Every other AttributeError/API failure or an unconfirmed deletion remains
+fatal; no namespace-wide cleanup is introduced.
+
+Current status is `LOCAL CONSTRUCTION PASS / UNCOMMITTED / UNPUSHED`. Focused
+P58, P34, P57, flag-audit, and complete digest-pinned image gates pass; the
+image exposes no `/dev/vfio`, so this is not target evidence. Another agent
+must not launch from it yet. Wait for explicit commit/push approval, require
+exact remote SHA and matching image readback, then launch fresh `p58z02` only
+after separate launch approval.
+Do not resume/overwrite `p58z01`: it has no trajectory or trainer checkpoint.
+P58.11's unchanged strict A=B=C, checked-VMA, first-update, stable-clip, and
+1,000-commit gates apply after Step 0 begins. See
+`phases/p58-12-jax-engine-seed-cleanup.md` and the top P58.12 runbook override.
+
 ## 2026-08-26 P58.11 strict Zero-HP override — source published
 
 This is the highest-priority P58 source instruction. The user reactivated the

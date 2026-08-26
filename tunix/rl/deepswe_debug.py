@@ -514,7 +514,7 @@ def _manifest(
           42 if mode == "p58" or bool(xprof_arm) else None
       ),
       "seed_scope": (
-          "config-level; async completion order not claimed"
+          "engine-global; async completion order not claimed"
           if mode == "p58" or bool(xprof_arm)
           else "dataset-only"
       ),

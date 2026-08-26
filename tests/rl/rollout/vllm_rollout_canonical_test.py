@@ -14,6 +14,7 @@
 
 """CPU contracts for canonical re-score through both in-process vLLM modes."""
 
+import inspect
 import os
 from itertools import count
 from absl.testing import absltest
@@ -69,6 +70,27 @@ class _RescoreSampler:
 
 
 class VllmRolloutCanonicalTest(absltest.TestCase):
+
+  def test_jax_seed_route_uses_engine_global_and_rejects_per_request(self):
+    self.assertIn("seed", inspect.signature(vllm_sampler.EngineArgs).parameters)
+    config = types.SimpleNamespace(
+        seed=None,
+        rollout_vllm_tpu_backend_type="jax",
+        rollout_vllm_kwargs={"seed": 42},
+    )
+    self.assertEqual(
+        vllm_rollout._validated_vllm_seed_route(config),  # pylint: disable=protected-access
+        (None, 42),
+    )
+
+    config.seed = 42
+    with self.assertRaisesRegex(ValueError, "does not support per-request"):
+      vllm_rollout._validated_vllm_seed_route(config)  # pylint: disable=protected-access
+
+    config.seed = None
+    config.rollout_vllm_kwargs["seed"] = 42.0
+    with self.assertRaisesRegex(ValueError, "must be an integer"):
+      vllm_rollout._validated_vllm_seed_route(config)  # pylint: disable=protected-access
 
   def test_p28_full_chain_is_forwarded(self):
     rollout = object.__new__(vllm_rollout.VllmRollout)

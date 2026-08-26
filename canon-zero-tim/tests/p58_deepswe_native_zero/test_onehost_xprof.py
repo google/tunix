@@ -56,7 +56,7 @@ def _write_fixture(root: Path, arm: str, *, exact: bool = True) -> None:
       "max_response_length": 512,
       "dataset_seed": 42,
       "rollout_seed": 42,
-      "seed_scope": "config-level; async completion order not claimed",
+      "seed_scope": "engine-global; async completion order not claimed",
   }
   work_hashes = {
       "prompt_ids": "a" * 64,

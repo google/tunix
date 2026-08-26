@@ -78,7 +78,8 @@ $DOCKER run --rm \
         vllm_rollout_canonical_test.VllmRolloutCanonicalTest.test_p58_zero_processed_rescore_rejects_native_observer \
         vllm_rollout_canonical_test.VllmRolloutCanonicalTest.test_p58_zero_processed_rescore_keeps_canonical_processor \
         vllm_rollout_canonical_test.VllmRolloutCanonicalTest.test_processed_rescore_skips_engine_for_empty_completion_batch \
-        vllm_rollout_canonical_test.VllmRolloutCanonicalTest.test_processed_rescore_still_requires_provenance_for_any_target
+        vllm_rollout_canonical_test.VllmRolloutCanonicalTest.test_processed_rescore_still_requires_provenance_for_any_target \
+        vllm_rollout_canonical_test.VllmRolloutCanonicalTest.test_jax_seed_route_uses_engine_global_and_rejects_per_request
     )
     (
       cd tests/rl

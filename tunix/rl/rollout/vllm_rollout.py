@@ -33,6 +33,25 @@ from vllm.inputs import TokensPrompt
 from vllm.sampling_params import SamplingParams
 
 
+def _validated_vllm_seed_route(
+    rollout_config: base_rollout.RolloutConfig,
+) -> tuple[Any, Any]:
+  """Returns request/engine seeds after enforcing the JAX seed contract."""
+  request_seed = rollout_config.seed
+  engine_seed = rollout_config.rollout_vllm_kwargs.get("seed")
+  if rollout_config.rollout_vllm_tpu_backend_type == "jax":
+    if request_seed is not None:
+      raise ValueError(
+          "vLLM JAX does not support per-request seed; set "
+          "rollout_vllm_kwargs['seed'] for the global engine seed"
+      )
+    if engine_seed is not None and (
+        not isinstance(engine_seed, int) or isinstance(engine_seed, bool)
+    ):
+      raise ValueError("vLLM JAX global engine seed must be an integer")
+  return request_seed, engine_seed
+
+
 class VllmRollout(base_rollout.BaseRollout):
   """vLLM rollout worker."""
 
@@ -44,6 +63,7 @@ class VllmRollout(base_rollout.BaseRollout):
       mesh: jax.sharding.Mesh,
       rollout_config: base_rollout.RolloutConfig,
   ):
+    _, engine_seed = _validated_vllm_seed_route(rollout_config)
     mapping_config = mappings.MappingConfig.build(
         mapping_obj=rollout_config.rollout_mapping_config,
         model=model,
@@ -93,6 +113,15 @@ class VllmRollout(base_rollout.BaseRollout):
             sampling_kwargs=rollout_config.rollout_vllm_sampling_kwargs,
         ),
     )
+    if (
+        rollout_config.rollout_vllm_tpu_backend_type == "jax"
+        and engine_seed is not None
+    ):
+      print(
+          "[VLLM.JAX_SEED] PASS "
+          f"engine_seed={engine_seed} request_seed=none scope=engine-global",
+          flush=True,
+      )
     self._rollout_sampling_kwargs = dict(
         rollout_config.rollout_vllm_sampling_kwargs
     )
@@ -179,6 +208,7 @@ class VllmRollout(base_rollout.BaseRollout):
       **kwargs,
   ) -> base_rollout.RolloutOutput:
     """Generates samples from the model."""
+    request_seed, _ = _validated_vllm_seed_route(rollout_config)
     effective_sampling = {
         "temperature": rollout_config.temperature,
         "top_p": rollout_config.top_p,
@@ -196,7 +226,7 @@ class VllmRollout(base_rollout.BaseRollout):
         temperature=rollout_config.temperature,
         top_p=rollout_config.top_p,
         top_k=rollout_config.top_k,
-        seed=rollout_config.seed,
+        seed=request_seed,
         echo=False,
         pad_output=True,
         request_timeout_s=request_timeout_s,

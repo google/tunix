@@ -867,3 +867,46 @@
   ahead/behind `0/0`. `main` was neither modified nor pushed.
 - No image was published, no Kubernetes resource was applied/deleted, no live
   Native job was stopped, and no TPU target was executed by this agent.
+
+## 2026-08-26 UTC — P58.12 JAX engine-seed and abort-cleanup repair admitted locally
+
+- Type: target failure repair / seed-route contract / cleanup hardening /
+  construction validation.
+- Source: exact pulled operator tip
+  `7f6fc071082f291bf926b1c5bc79021733628c2e` in worktree
+  `/home/yuxuan/code_rl_repro/worktrees/p58_fixed_seed_0824`. Immutable
+  `p58z01` evidence remains unchanged. `main` was not touched.
+- Root cause: P58.10 placed signed seed 42 in `RolloutConfig.seed`; the vLLM
+  wrapper copied it into per-request `SamplingParams.seed`, which TPU/JAX
+  rejects. `p58z01` therefore stopped on the first Step-0 model call after
+  successful 128-device/128-sandbox/vLLM admission. No trajectory, backward,
+  optimizer transaction, or resumable checkpoint exists. Abort cleanup then
+  independently hit kubernetes-client's exact empty-body `None.decode` defect.
+- Repair: P58 keeps the same dataset/rollout seed 42 but carries the rollout
+  value through global `EngineArgs.seed`. The JAX wrapper rejects any
+  per-request seed before engine use and emits a separate exact route receipt.
+  W&B, manifests, classifiers, and postflight now require engine-global scope.
+  No async completion-order identity is claimed.
+- Cleanup repair: only the exact `AttributeError: 'NoneType' object has no
+  attribute 'decode'` is treated as an ambiguous Kubernetes response. The
+  bounded loop confirms deletion by 404 and reissues the same exact Pod DELETE
+  when the first request outcome is unknown and the Pod remains present.
+  Unrelated exceptions, API errors, and unconfirmed deletion remain fatal.
+- Validation PASS: Bash/Python syntax and diff hygiene; P58 sampler 7/7;
+  one-host artifact 5/5; bounded cleanup regression; P34 static 10 suites;
+  P57 146/146; latest-tip flags 385/385. The complete dependency-bearing image
+  `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`
+  exits zero with `P58_EXACT_IMAGE_CPU_PASS ... zero_hp_full=1 checked_vma=1
+  first_update=1 stable_clip=1 ... regressions=1`. Its vLLM test confirms the
+  installed `EngineArgs` exposes `seed` and the request/engine route is
+  `(None, 42)`.
+- Latest-tip reconciliation: the operator branch advanced during validation by
+  three P4.10/P66 commits. The branch fast-forwarded from `ff0acaaa` to
+  `7f6fc071`; local changes replayed cleanly, including shared `90_run.sh`.
+  Final syntax/focused/exact-image gates are run on `7f6fc071`, not inferred
+  from the older tree.
+- Claim/external boundary: the pinned image reports no `/dev/vfio`; no TPU,
+  Pathways, R2E target, Kubernetes mutation, image publication, commit, push,
+  credential access, or artifact deletion occurred. The repair is local and
+  uncommitted. After explicit publication/readback and separate launch
+  approval, use fresh `p58z02`; never resume or overwrite `p58z01`.

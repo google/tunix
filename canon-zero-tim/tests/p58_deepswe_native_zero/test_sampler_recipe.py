@@ -64,11 +64,13 @@ class P58SamplerRecipeTest(unittest.TestCase):
     self.assertIn('"sampler_is": SAMPLER_IS', script)
     self.assertIn('"sampler_is_threshold": SAMPLER_IS_THRESHOLD', script)
     self.assertNotIn('"--group_clip_filter_threshold"', script)
+    self.assertIn("P58_FIXED_SEED = bool(", script)
     self.assertIn(
-        "if P58_ONEHOST_XPROF_ARM or (P34_DEEPSWE and p58_tim):",
+        'vllm_rollout_dict["rollout_vllm_kwargs"]["seed"] = SEED',
         script,
     )
-    self.assertIn('base_rollout_dict["seed"] = SEED', script)
+    self.assertNotIn('base_rollout_dict["seed"] = SEED', script)
+    self.assertIn("scope=engine-global", script)
     self.assertIn("[P58.SEED] PASS", script)
 
   def test_postflight_requires_exactly_one_signed_recipe_marker(self):
@@ -78,6 +80,9 @@ class P58SamplerRecipeTest(unittest.TestCase):
     self.assertIn("n_p58_recipe_raw", postflight)
     self.assertIn("n_p58_recipe_is", postflight)
     self.assertIn("n_p58_seed", postflight)
+    self.assertIn("n_p58_seed_route", postflight)
+    self.assertIn("VLLM.JAX_SEED", postflight)
+    self.assertIn("request_seed=none scope=engine-global", postflight)
     self.assertIn("P58 fixed-seed marker contract failed", postflight)
     self.assertIn("P58 native-raw recipe marker contract failed", postflight)
     self.assertIn("P58 native-is recipe marker contract failed", postflight)

@@ -197,6 +197,107 @@ class R2egymOptionalContractTest(unittest.TestCase):
       self.assertEqual(runtime.original_start_calls, 0)
       self.assertEqual(runtime.original_stop_calls, 1)
 
+      class EmptyBodyDeleteClient(FakeClient):
+
+        def delete_namespaced_pod(self, **kwargs):
+          del kwargs
+          self.deleted = True
+          raise AttributeError("'NoneType' object has no attribute 'decode'")
+
+      empty_body = FakeDockerRuntime()
+      empty_body.client = EmptyBodyDeleteClient()
+      empty_body.logger = mock.Mock()
+      empty_body.backend = "kubernetes"
+      empty_body.container = None
+      empty_body._tunix_kubernetes_pod_name = "pod-empty"
+      empty_body.original_start_calls = 0
+      empty_body.original_stop_calls = 0
+      empty_body.stop()
+      self.assertTrue(empty_body.client.deleted)
+      self.assertEqual(empty_body.original_stop_calls, 1)
+      empty_body.logger.warning.assert_called_once()
+
+      class AmbiguousDeleteClient(FakeClient):
+
+        def __init__(self):
+          super().__init__()
+          self.delete_calls = 0
+
+        def delete_namespaced_pod(self, **kwargs):
+          del kwargs
+          self.delete_calls += 1
+          if self.delete_calls == 1:
+            raise AttributeError("'NoneType' object has no attribute 'decode'")
+          self.deleted = True
+
+        def read_namespaced_pod(self, **kwargs):
+          del kwargs
+          self.reads += 1
+          if self.deleted:
+            raise FakeApiException(404)
+          return types.SimpleNamespace(
+              metadata=types.SimpleNamespace(name="pod-ambiguous"),
+              status=types.SimpleNamespace(phase="Running"),
+          )
+
+      ambiguous = FakeDockerRuntime()
+      ambiguous.client = AmbiguousDeleteClient()
+      ambiguous.logger = mock.Mock()
+      ambiguous.backend = "kubernetes"
+      ambiguous.container = None
+      ambiguous._tunix_kubernetes_pod_name = "pod-ambiguous"
+      ambiguous.original_start_calls = 0
+      ambiguous.original_stop_calls = 0
+      with mock.patch.object(module.time, "sleep", return_value=None):
+        ambiguous.stop()
+      self.assertEqual(ambiguous.client.delete_calls, 2)
+      self.assertTrue(ambiguous.client.deleted)
+      self.assertEqual(ambiguous.original_stop_calls, 1)
+
+      class EmptyBodyReadClient(FakeClient):
+
+        def delete_namespaced_pod(self, **kwargs):
+          del kwargs
+
+        def read_namespaced_pod(self, **kwargs):
+          del kwargs
+          self.reads += 1
+          if self.reads == 1:
+            raise AttributeError("'NoneType' object has no attribute 'decode'")
+          raise FakeApiException(404)
+
+      empty_read = FakeDockerRuntime()
+      empty_read.client = EmptyBodyReadClient()
+      empty_read.logger = mock.Mock()
+      empty_read.backend = "kubernetes"
+      empty_read.container = None
+      empty_read._tunix_kubernetes_pod_name = "pod-empty-read"
+      empty_read.original_start_calls = 0
+      empty_read.original_stop_calls = 0
+      with mock.patch.object(module.time, "sleep", return_value=None):
+        empty_read.stop()
+      self.assertEqual(empty_read.client.reads, 2)
+      self.assertEqual(empty_read.original_stop_calls, 1)
+      empty_read.logger.warning.assert_called_once()
+
+      class UnexpectedAttributeClient(FakeClient):
+
+        def delete_namespaced_pod(self, **kwargs):
+          del kwargs
+          raise AttributeError("unrelated cleanup defect")
+
+      unexpected = FakeDockerRuntime()
+      unexpected.client = UnexpectedAttributeClient()
+      unexpected.logger = mock.Mock()
+      unexpected.backend = "kubernetes"
+      unexpected.container = None
+      unexpected._tunix_kubernetes_pod_name = "pod-unexpected"
+      unexpected.original_start_calls = 0
+      unexpected.original_stop_calls = 0
+      with self.assertRaisesRegex(AttributeError, "unrelated cleanup defect"):
+        unexpected.stop()
+      self.assertEqual(unexpected.original_stop_calls, 0)
+
       invalid_queue = FakeDockerRuntime()
       invalid_queue.client = FakeClient()
       invalid_queue.logger = mock.Mock()

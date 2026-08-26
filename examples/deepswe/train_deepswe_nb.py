@@ -1506,13 +1506,9 @@ base_rollout_dict = {
     "return_logprobs": USE_ROLLOUT_LOGPS,
     "max_tokens_to_generate": MAX_RESPONSE_LENGTH,
 }
-if P58_ONEHOST_XPROF_ARM or (P34_DEEPSWE and p58_tim):
-  base_rollout_dict["seed"] = SEED
-  print(
-      f"[P58.SEED] PASS dataset_seed={SEED} rollout_seed={SEED} "
-      "scope=config-level async_completion_order=not-claimed",
-      flush=True,
-  )
+P58_FIXED_SEED = bool(
+    P58_ONEHOST_XPROF_ARM or (P34_DEEPSWE and p58_tim)
+)
 
 sglang_jax_rollout_dict = {
     "rollout_sglang_jax_model_version": MODEL_PATH,  # Uses local absolute path
@@ -1544,6 +1540,19 @@ vllm_rollout_dict = {
         "enable_prefix_caching": not P34_DEEPSWE,
     },
 }
+
+if P58_FIXED_SEED:
+  # TPU/JAX vLLM rejects SamplingParams.seed.  Route the signed P58 seed
+  # through EngineArgs instead, so all three P58 arms share the same global
+  # engine seed without issuing an unsupported per-request override.
+  if base_rollout_dict.get("seed") is not None:
+    raise ValueError("P58 JAX rollout forbids a per-request seed")
+  vllm_rollout_dict["rollout_vllm_kwargs"]["seed"] = SEED
+  print(
+      f"[P58.SEED] PASS dataset_seed={SEED} rollout_seed={SEED} "
+      "scope=engine-global async_completion_order=not-claimed",
+      flush=True,
+  )
 
 if ONEHOST_SMOKE:
   # Preserve the signed P34 production expression above; the local colocated
@@ -1745,10 +1754,14 @@ def initialize_wandb():
       "kv_cache_size": KV_CACHE_SIZE,
       "vllm_max_num_seqs": VLLM_MAX_NUM_SEQS,
       "vllm_max_batched_tokens": VLLM_MAX_BATCHED_TOKENS,
-      "rollout_seed": base_rollout_dict.get("seed"),
+      "rollout_seed": (
+          vllm_rollout_dict["rollout_vllm_kwargs"].get("seed")
+          if P58_FIXED_SEED
+          else None
+      ),
       "seed_scope": (
-          "config-level; async completion order not claimed"
-          if "seed" in base_rollout_dict
+          "engine-global; async completion order not claimed"
+          if P58_FIXED_SEED
           else "dataset-only"
       ),
       # Stringify set so wandb can serialize it

@@ -1,5 +1,10 @@
 # P58.10 — fixed dataset and rollout seed
 
+> Historical design note: `p58z01` proved that the original
+> `RolloutConfig.seed` route becomes an unsupported per-request seed on vLLM
+> JAX. P58.12 supersedes only that transport: seed 42 remains signed, but is
+> carried by global `EngineArgs.seed`. Preserve this file as P58.10 history.
+
 ## Status
 
 `IMPLEMENTED / PINNED-IMAGE PASS / PUBLISHED / TARGET NOT RUN`

@@ -18,6 +18,42 @@ P58 does not modify `main`. Rendering and local validation do not authorize a
 Kubernetes apply. An operator must separately approve image publication and
 each launch.
 
+## 2026-08-26 P58.12 JAX engine-seed retry override — construction PASS, not published
+
+This is the highest-priority execution instruction. `p58z01` proved 128-device
+admission, clean-data loading, 128 sandbox launches, and vLLM initialization,
+then failed on its first Step-0 generation because JAX rejects a per-request
+`SamplingParams.seed`. Its abort cleanup separately encountered the
+kubernetes-client empty-response `None.decode` defect. The run produced no
+trajectory, backward, optimizer transaction, or resumable trainer checkpoint.
+Preserve it and do not relaunch the published tip unchanged.
+
+The local P58.12 repair keeps seed 42 but routes it only through global vLLM
+`EngineArgs.seed`. It fails early if a JAX caller supplies a per-request seed.
+Every P58 target must emit exactly one of each:
+
+```text
+[P58.SEED] PASS dataset_seed=42 rollout_seed=42 scope=engine-global async_completion_order=not-claimed
+[VLLM.JAX_SEED] PASS engine_seed=42 request_seed=none scope=engine-global
+```
+
+W&B and `run_manifest.json` must use
+`seed_scope=engine-global; async completion order not claimed`. This fixes the
+shared RNG configuration, not asynchronous R2E completion order. Cleanup may
+tolerate only the exact client-side `None.decode` exception and must still
+confirm the exact run-owned Pod reaches 404 within its bounded deadline;
+unrelated errors and unconfirmed deletion remain fatal.
+
+This repair passes focused, adjacent, flag-audit, and complete pinned-image
+construction gates, but remains uncommitted/unpushed. Before target use:
+obtain explicit commit/push approval, fetch and exactly read back the resulting
+operator SHA, build and pin its matching image, rerun the full P58 exact-image
+gate, and pass the existing sandbox-capacity gate. Then render a fresh run id
+such as `p58z02` using the unchanged command below (`--stage full --arm zero
+--high-performance`). Do not resume or overwrite `p58z01`. After the two seed
+receipts pass, retain every P58.11 strict alignment, checked-VMA, first-update,
+stable-clip, and 1,000-commit requirement.
+
 ## 2026-08-26 P58.11 strict Zero-HP execution override
 
 This section supersedes older statements below that defer Zero-HP. The user

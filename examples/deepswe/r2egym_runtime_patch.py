@@ -13,6 +13,14 @@ _KUBERNETES_DNS_LABEL = re.compile(
 )
 
 
+def _is_empty_kubernetes_error_body_decode(error: BaseException) -> bool:
+  """Identifies kubernetes-client's transient ``None.decode`` defect."""
+  return (
+      isinstance(error, AttributeError)
+      and str(error) == "'NoneType' object has no attribute 'decode'"
+  )
+
+
 def _kubernetes_label(value: str, *, fallback: str) -> str:
   """Returns a bounded Kubernetes label value without leaking raw metadata."""
   normalized = re.sub(r"[^a-z0-9_.-]+", "-", value.lower()).strip("-_.")
@@ -165,6 +173,7 @@ def apply_repoenv_kubernetes_poll_patch() -> str:
     """Deletes one known R2E pod and waits until the API reports 404."""
     if not pod_name:
       return
+    delete_response_ambiguous = False
     try:
       runtime.client.delete_namespaced_pod(
           name=pod_name,
@@ -177,6 +186,15 @@ def apply_repoenv_kubernetes_poll_patch() -> str:
     except docker_mod.client.ApiException as error:
       if error.status != 404:
         raise
+    except AttributeError as error:
+      if not _is_empty_kubernetes_error_body_decode(error):
+        raise
+      delete_response_ambiguous = True
+      runtime.logger.warning(
+          "Kubernetes delete returned an undecodable empty error body for "
+          "%s; confirming pod state before deciding cleanup outcome",
+          pod_name,
+      )
     timeout = int(os.environ.get("R2E_POD_DELETE_TIMEOUT_SECONDS", "300"))
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -193,6 +211,47 @@ def apply_repoenv_kubernetes_poll_patch() -> str:
           )
           return
         raise
+      except AttributeError as error:
+        if not _is_empty_kubernetes_error_body_decode(error):
+          raise
+        runtime.logger.warning(
+            "Kubernetes read returned an undecodable empty error body for "
+            "%s; retrying until the bounded deletion deadline",
+            pod_name,
+        )
+      else:
+        # The client-side None.decode failure does not reveal whether the API
+        # server accepted the original DELETE.  If the Pod still exists,
+        # retry that same idempotent, exactly-scoped request within the
+        # existing bounded confirmation loop.
+        if delete_response_ambiguous:
+          try:
+            runtime.client.delete_namespaced_pod(
+                name=pod_name,
+                namespace=namespace,
+                grace_period_seconds=0,
+                propagation_policy="Background",
+                _request_timeout=60,
+            )
+            delete_response_ambiguous = False
+            runtime.logger.info(
+                "Retried deletion of Kubernetes pod: %s", pod_name
+            )
+          except docker_mod.client.ApiException as error:
+            if error.status == 404:
+              runtime.logger.info(
+                  "Confirmed deletion of Kubernetes pod: %s", pod_name
+              )
+              return
+            raise
+          except AttributeError as error:
+            if not _is_empty_kubernetes_error_body_decode(error):
+              raise
+            runtime.logger.warning(
+                "Kubernetes delete retry returned an undecodable empty error "
+                "body for %s; continuing bounded confirmation",
+                pod_name,
+            )
       time.sleep(2)
     raise TimeoutError(
         f"Kubernetes pod {pod_name!r} still exists {timeout}s after deletion"
