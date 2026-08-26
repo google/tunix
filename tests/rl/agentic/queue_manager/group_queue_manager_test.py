@@ -200,6 +200,31 @@ class GroupQueueManagerTest(absltest.TestCase):
 
     asyncio.run(_run_test())
 
+  def test_close(self):
+    """Tests that close unblocks consumers and returns empty lists."""
+
+    async def _run_test():
+      manager = _create_manager(group_size=2)
+
+      # Start a consumer waiting for a batch
+      consumer_task = asyncio.create_task(manager.get_batch(2))
+      await asyncio.sleep(0.01)
+
+      # Close unblocks consumer returning empty list
+      await manager.close()
+      batch = await asyncio.wait_for(consumer_task, timeout=1.0)
+      self.assertEmpty(batch)
+
+      # Subsequent gets return early with empty lists
+      batch2 = await manager.get_batch(2)
+      self.assertEmpty(batch2)
+
+      # Attempting to put into a closed queue should raise a RuntimeError
+      with self.assertRaisesRegex(RuntimeError, "Cannot put into a closed"):
+        await manager.put(_create_item("g1", 0))
+
+    asyncio.run(_run_test())
+
   def test_custom_key_fn(self):
     """Tests that a custom key_fn correctly groups items."""
 

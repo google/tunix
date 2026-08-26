@@ -230,6 +230,35 @@ class RLProgramTest(absltest.TestCase):
     )
     return program
 
+  def test_dataset_exhausted_before_max_steps(self):
+    async def _run():
+      _set_mock_poll_batches(
+          self.mock_engine,
+          _make_trajectory_group(prompt_id="p0", group_id="g0", group_size=2),
+          [],
+      )
+
+      p = self._create_program(
+          dataset=(
+              "p0",
+          ),  # Just 1 prompt. Dispatches 2 rollouts since group_size=2.
+          group_size=2,
+          mini_batch_size=1,
+          max_steps=10,
+      )
+
+      # Since group size is 2, it dispatches 2 rollouts.
+      # These 2 rollouts will form 1 group.
+      # Train stage needs 1 minibatches = 1 group per step.
+      # Step 0 will process 1 group.
+      # Step 1 will ask for a group, but dataset is exhausted and dispatch loop finished!
+      # It should cleanly break and exit run_async!
+
+      await p.run_async(engine=self.mock_engine)
+      self.assertEqual(p.step, 1)
+
+    asyncio.run(_run())
+
   def test_initialization(self):
     program = rl_program.StandardRLProgram(
         dataset=["prompt_1"],

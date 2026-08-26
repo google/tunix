@@ -93,6 +93,7 @@ class GroupQueueManager(Generic[_T]):
     self._ready_groups: Deque[List[_T]] = collections.deque()
     self._filtered_groups: Deque[List[_T]] = collections.deque()
     self._clearing = False
+    self._closed = False
     self._exc: Optional[Exception] = None
     self._lock = asyncio.Lock()
     self._have_ready = asyncio.Event()
@@ -133,12 +134,16 @@ class GroupQueueManager(Generic[_T]):
     Raises:
       Exception: If an exception has been set via `put_exception`.
     """
+    if self._closed:
+      raise RuntimeError("Cannot put into a closed GroupQueueManager.")
     if self._clearing:
       return
     if self._exc:
       raise self._exc
 
     async with self._lock:
+      if self._closed:
+        raise RuntimeError("Cannot put into a closed GroupQueueManager.")
       if self._clearing:
         return
       if self._exc:
@@ -168,6 +173,12 @@ class GroupQueueManager(Generic[_T]):
           self._ready_groups.append(valid_group)
           self._have_ready.set()
 
+  async def close(self):
+    """Gracefully marks the queue as closed (EOF)."""
+    async with self._lock:
+      self._closed = True
+      self._have_ready.set()
+
   async def _get_one_ready_group(self) -> List[_T]:
     while True:
       if self._exc:
@@ -177,6 +188,8 @@ class GroupQueueManager(Generic[_T]):
       async with self._lock:
         if self._ready_groups:
           return self._ready_groups.popleft()
+        if self._closed:
+          return []
       await self._have_ready.wait()
       self._have_ready.clear()
 
