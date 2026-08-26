@@ -158,7 +158,7 @@ start_trainer() {
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${TRAINER_PORT}" \
     --worker_startup_command=" \
-      RAIDEN_WEIGHT_SYNC_CHUNKS=${RAIDEN_WEIGHT_SYNC_CHUNKS} VERIFY_WEIGHTS=${VERIFY_WEIGHTS} python3 -m tunix.experimental.distributed.runtime.main \
+      WANDB_API_KEY=${WANDB_API_KEY} RAIDEN_WEIGHT_SYNC_CHUNKS=${RAIDEN_WEIGHT_SYNC_CHUNKS} VERIFY_WEIGHTS=${VERIFY_WEIGHTS} python3 -m tunix.experimental.distributed.runtime.main \
         --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
         --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
         --process_main=tunix.experimental.examples.math_gsm8k_dist.run_trainer_node.main \
@@ -202,7 +202,7 @@ start_rollout() {
       --worker_container_image="${TUNIX_IMAGE}" \
       --worker_container_port="${ROLLOUT_PORT}" \
       --worker_startup_command=" \
-        SKIP_JAX_PRECOMPILE=1 RAIDEN_WEIGHT_SYNC_CHUNKS=${RAIDEN_WEIGHT_SYNC_CHUNKS} VERIFY_WEIGHTS=${VERIFY_WEIGHTS} ${ROLLOUT_USE_BATCHED_RPA:+USE_BATCHED_RPA_KERNEL=1} python3 -m tunix.experimental.distributed.runtime.main \
+        SKIP_JAX_PRECOMPILE=1 WANDB_API_KEY=${WANDB_API_KEY} RAIDEN_WEIGHT_SYNC_CHUNKS=${RAIDEN_WEIGHT_SYNC_CHUNKS} VERIFY_WEIGHTS=${VERIFY_WEIGHTS} ${ROLLOUT_USE_BATCHED_RPA:+USE_BATCHED_RPA_KERNEL=1} python3 -m tunix.experimental.distributed.runtime.main \
           --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
           --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
           --process_main=tunix.experimental.examples.math_gsm8k_dist.run_rollout_node.main \
