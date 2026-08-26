@@ -83,6 +83,7 @@ _STEP_RE = re.compile(r"Global step (\d+) completed in ([0-9.]+) seconds\.")
 _ALIGN_RE = re.compile(
     r"^\[CANON_ALIGN(?:_PRE)?\].*\bverdict=(PASS|FAIL)\b"
 )
+_FIRST_UPDATE_PREFIX = "[V1.FIRST_UPDATE] "
 
 
 def _require(condition: bool, reason: str, reasons: list[str]) -> None:
@@ -369,6 +370,8 @@ def classify(
       "CANON_P33_RUN_STAGE": "full",
       "CANON_P33_NO_COMMIT": "0",
       "CANON_P59_RANK_PARALLEL_BACKWARD": "1",
+      "CANON_P59_CHECKED_VMA": "1",
+      "CANON_V1_HP_FIRST_UPDATE_GATE": "1",
       "CANON_P63_OVERFLOW_SAFE_CLIP": "1",
       "CANON_CONTINUE_DECODE": "8",
       "CANON_FIXED_AR_GATHER": "1",
@@ -537,6 +540,110 @@ def classify(
       f"canon_align_fail={align_verdicts.count('FAIL')} expected=0",
       reasons,
   )
+
+  first_update_records = []
+  for number, line in enumerate(text.splitlines(), 1):
+    stripped = line.strip()
+    if not stripped.startswith(_FIRST_UPDATE_PREFIX):
+      continue
+    try:
+      record = json.loads(stripped.removeprefix(_FIRST_UPDATE_PREFIX))
+    except json.JSONDecodeError:
+      reasons.append(f"first_update_malformed_json_line={number}")
+      continue
+    if not isinstance(record, dict):
+      reasons.append(f"first_update_non_object_line={number}")
+      continue
+    first_update_records.append(record)
+  precommit_records = [
+      record for record in first_update_records
+      if record.get("schema") == "canon-v1-first-update-precommit-v1"
+  ]
+  commit_records = [
+      record for record in first_update_records
+      if record.get("schema") == "canon-v1-first-update-commit-v1"
+  ]
+  _require(
+      len(first_update_records) == 2,
+      f"first_update_records={len(first_update_records)} expected=2",
+      reasons,
+  )
+  _require(
+      len(precommit_records) == 1,
+      f"first_update_precommit={len(precommit_records)} expected=1",
+      reasons,
+  )
+  _require(
+      len(commit_records) == 1,
+      f"first_update_commit={len(commit_records)} expected=1",
+      reasons,
+  )
+  if len(precommit_records) == 1:
+    precommit = precommit_records[0]
+    expected_precommit = {
+        "update": 0,
+        "workload": contract["workload"],
+        "dp": dp_size,
+        "tp": tp_size,
+        "microsteps": local_groups,
+        "accumulator_denominator": float(local_groups),
+        "stable_norm_max": 1.0e6,
+        "all_finite": True,
+        "any_nonzero": True,
+    }
+    wrong = {
+        name: precommit.get(name)
+        for name, value in expected_precommit.items()
+        if precommit.get(name) != value
+    }
+    stable_norm = precommit.get("stable_norm")
+    stable_norm_valid = (
+        isinstance(stable_norm, (int, float))
+        and not isinstance(stable_norm, bool)
+        and math.isfinite(float(stable_norm))
+        and 0.0 < float(stable_norm) <= 1.0e6
+    )
+    _require(
+        not wrong and stable_norm_valid,
+        f"first_update_precommit_invalid={wrong or precommit}",
+        reasons,
+    )
+  if len(commit_records) == 1:
+    commit = commit_records[0]
+    expected_commit = {
+        "update": 0,
+        "workload": contract["workload"],
+        "dp": dp_size,
+        "tp": tp_size,
+        "train_steps_before": 0,
+        "train_steps_after": 1,
+        "optimizer_transaction_valid": True,
+        "gradient_finite": True,
+        "parameter_delta_finite": True,
+        "outer_weight_sync_pending": True,
+    }
+    wrong = {
+        name: commit.get(name)
+        for name, value in expected_commit.items()
+        if commit.get(name) != value
+    }
+    changed = commit.get("parameter_changed_elements")
+    lr = commit.get("effective_learning_rate")
+    material_valid = (
+        isinstance(changed, int)
+        and not isinstance(changed, bool)
+        and changed >= 0
+        and isinstance(lr, (int, float))
+        and not isinstance(lr, bool)
+        and math.isfinite(float(lr))
+        and float(lr) >= 0.0
+        and (float(lr) == 0.0 or changed > 0)
+    )
+    _require(
+        not wrong and material_valid,
+        f"first_update_commit_invalid={wrong or commit}",
+        reasons,
+    )
 
   global_m = int(contract["global_m"])
   local_m = int(contract["local_m"])
@@ -769,6 +876,11 @@ def classify(
       "p59_rpa_local_kv": len(rpa_receipts),
       "p59_local_fused_linear": len(fused_linear_records),
       "p59_parallel": text.count(f"[P59.DP{dp_size}] gradient_reducer_ready"),
+      "p59_checked_vma": text.count(
+          "[P59.CHECKED_VMA] enabled=1 "
+          f"workload={contract['workload']} dp={dp_size} tp={tp_size} "
+          f"global_M={global_m} manual_axes=data,model compatibility_alias=1"
+      ),
       "p63_configured": text.count(
           "[P63.STABLE_CLIP] configured enabled=1 mode=hybrid "
       ),
@@ -800,6 +912,12 @@ def classify(
       reasons,
   )
   _require(marker_counts["p59_parallel"] == expected_updates, f"marker.p59_parallel={marker_counts['p59_parallel']} expected={expected_updates}", reasons)
+  _require(
+      marker_counts["p59_checked_vma"] == expected_updates,
+      "marker.p59_checked_vma="
+      f"{marker_counts['p59_checked_vma']} expected={expected_updates}",
+      reasons,
+  )
   _require(
       marker_counts["p63_configured"] == 1,
       f"marker.p63_configured={marker_counts['p63_configured']} expected=1",
@@ -932,6 +1050,11 @@ def classify(
           "claim_level": "strict-zero-tim",
       },
       "p59_acceptance": "ordinary-jax-fp64-gradient-correctness",
+      "first_update_admission": {
+          "precommit": precommit_records[0] if len(precommit_records) == 1 else None,
+          "commit": commit_records[0] if len(commit_records) == 1 else None,
+          "stable_norm_max": 1.0e6,
+      },
       "p59_fixed_head_contract": {
           "profile": contract["profile"],
           "global_shape": [global_m, 151936],

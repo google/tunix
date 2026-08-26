@@ -1592,6 +1592,8 @@ class PeftTrainerTest(parameterized.TestCase):
         "CANON_P33_RUN_STAGE": "full",
         "CANON_P33_NO_COMMIT": "0",
         "CANON_P59_RANK_PARALLEL_BACKWARD": "1",
+        "CANON_P59_CHECKED_VMA": "1",
+        "CANON_V1_HP_FIRST_UPDATE_GATE": "1",
         "CANON_VLLM_ENABLE_PREFIX_CACHING": "0",
         "CANON_GSM8K_ALIGNMENT_WARN_ONLY": "0",
         "CANON_PERF_LOG": "0",

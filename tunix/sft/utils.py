@@ -221,6 +221,8 @@ def canonical_overflow_safe_clip_max_norm(
       "CANON_P28_SEGMENTED_TRAIN": "1",
       "CANON_P28_G6_UPDATE": "1",
       "CANON_P59_RANK_PARALLEL_BACKWARD": "1",
+      "CANON_P59_CHECKED_VMA": "1",
+      "CANON_V1_HP_FIRST_UPDATE_GATE": "1",
       "CANON_VLLM_ENABLE_PREFIX_CACHING": "0",
   }
   wrong = {

@@ -54,6 +54,17 @@ def _env(document: dict) -> dict[str, str]:
   }
 
 
+def _set_env(document: dict, values: dict[str, str]) -> None:
+  entries = _container(document)["env"]
+  existing = {entry["name"] for entry in entries}
+  overlap = existing & values.keys()
+  if overlap:
+    raise ValueError(f"refusing to overwrite rendered env: {sorted(overlap)}")
+  entries.extend(
+      {"name": name, "value": value} for name, value in values.items()
+  )
+
+
 def _sha256(path: Path) -> str:
   digest = hashlib.sha256()
   with path.open("rb") as source:
@@ -148,6 +159,13 @@ def render_three(
   outputs = (gsm_path, *p45_outputs, *m15_outputs)
   if len(outputs) != 3:
     raise ValueError(f"Phase4 must render exactly three manifests, got {len(outputs)}")
+  for path in outputs:
+    document = yaml.safe_load(path.read_text(encoding="utf-8"))
+    _set_env(document, {
+        "CANON_P59_CHECKED_VMA": "1",
+        "CANON_V1_HP_FIRST_UPDATE_GATE": "1",
+    })
+    _write_yaml(path, document)
 
   expected_profiles = {
       "gsm8k": _GSM8K_PROFILE,
@@ -162,6 +180,8 @@ def render_three(
         "CANON_PROFILE_FILE": expected_profiles[label],
         "CANON_V1_HP_FULL": "1",
         "CANON_P59_RANK_PARALLEL_BACKWARD": "1",
+        "CANON_P59_CHECKED_VMA": "1",
+        "CANON_V1_HP_FIRST_UPDATE_GATE": "1",
         "CANON_P33_RUN_STAGE": "full",
         "CANON_P33_NO_COMMIT": "0",
         **_JAX_CACHE_ENV,

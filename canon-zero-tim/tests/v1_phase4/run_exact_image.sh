@@ -7,7 +7,8 @@ docker="${DOCKER:-sudo docker}"
 
 bash "$root/canon-zero-tim/tests/p33_workloads/run_exact_image.sh" "$image_ref"
 bash "$root/canon-zero-tim/tests/p45_frozenlake_dp8_tp8/run_exact_image.sh" "$image_ref"
-bash "$root/canon-zero-tim/tests/p59_backward/run_tp4_tp8_installed_shim_exact_image.sh" \
+CANON_P66_P59_CHECK_VMA=1 \
+  bash "$root/canon-zero-tim/tests/p59_backward/run_tp4_tp8_installed_shim_exact_image.sh" \
   "$image_ref"
 
 image_id="$($docker image inspect "$image_ref" --format '{{.Id}}')"
@@ -71,5 +72,5 @@ $docker run --rm \
     python3 canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/test_package_full_replay_carrier.py
     python3 canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/test_target_carrier.py
     python3 canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/test_resolved_env.py
-    echo "V1_HP_EXACT_IMAGE_PASS dp16_gathered=1 dp2tp2_parallel=2 p59_tp4_tp8=2 p59_real_shim=4 p59_rpa=2 p59_fused_linear=2 p62_numeric=6 p64_numeric=4 p64_capsule=3 p63_clip=1 gsm_scale_replay=1 p57_wandb=1 m15_token=1 apc_m15_carrier=46 perfetto_window=1 manifests=3"
+    echo "V1_HP_EXACT_IMAGE_PASS dp16_gathered=1 dp2tp2_parallel=2 p59_tp4_tp8=2 p59_checked_vma_real_shim=4 p59_rpa=2 p59_fused_linear=2 p62_numeric=6 p64_numeric=4 p64_capsule=3 p63_clip=1 first_update_gate=4 gsm_scale_replay=1 p57_wandb=1 m15_token=1 apc_m15_carrier=46 perfetto_window=1 manifests=3"
   '

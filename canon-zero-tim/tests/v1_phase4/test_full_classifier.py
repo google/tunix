@@ -42,6 +42,8 @@ class FullClassifierTest(unittest.TestCase):
         "CANON_P33_RUN_STAGE": "full",
         "CANON_P33_NO_COMMIT": "0",
         "CANON_P59_RANK_PARALLEL_BACKWARD": "1",
+        "CANON_P59_CHECKED_VMA": "1",
+        "CANON_V1_HP_FIRST_UPDATE_GATE": "1",
         "CANON_P63_OVERFLOW_SAFE_CLIP": "1",
         "CANON_CONTINUE_DECODE": "8",
         "CANON_FIXED_AR_GATHER": "1",
@@ -120,6 +122,34 @@ class FullClassifierTest(unittest.TestCase):
         "[P63.STABLE_CLIP] configured enabled=1 mode=hybrid "
         "stock_finite=stock_exact overflow_fallback=max_scaled_l2 "
         "nonfinite=fatal max_norm=1.0 workload=gsm8k",
+        "[V1.FIRST_UPDATE] " + json.dumps({
+            "schema": "canon-v1-first-update-precommit-v1",
+            "update": 0,
+            "workload": "gsm8k",
+            "dp": 16,
+            "tp": 4,
+            "microsteps": 16,
+            "accumulator_denominator": 16.0,
+            "stable_norm_max": 1.0e6,
+            "all_finite": True,
+            "any_nonzero": True,
+            "stable_norm": 2.0,
+        }, sort_keys=True, separators=(",", ":")),
+        "[V1.FIRST_UPDATE] " + json.dumps({
+            "schema": "canon-v1-first-update-commit-v1",
+            "update": 0,
+            "workload": "gsm8k",
+            "dp": 16,
+            "tp": 4,
+            "train_steps_before": 0,
+            "train_steps_after": 1,
+            "optimizer_transaction_valid": True,
+            "gradient_finite": True,
+            "parameter_delta_finite": True,
+            "parameter_changed_elements": 12,
+            "effective_learning_rate": 1.0e-6,
+            "outer_weight_sync_pending": True,
+        }, sort_keys=True, separators=(",", ":")),
     ]
     for step in range(4):
       fallback = step == 0
@@ -143,6 +173,8 @@ class FullClassifierTest(unittest.TestCase):
           },
       })
       log.extend([
+          "[P59.CHECKED_VMA] enabled=1 workload=gsm8k dp=16 tp=4 "
+          "global_M=4096 manual_axes=data,model compatibility_alias=1",
           "[P59.DP16] gradient_reducer_ready dp_axis=data dp_size=16 staging=parallel_table",
           "[P63.STABLE_CLIP] "
           f"update={step} all_finite=1 "
@@ -233,6 +265,42 @@ class FullClassifierTest(unittest.TestCase):
       )
       self.assertEqual(record["verdict"], "FAIL")
       self.assertIn("canon_align_fail=1 expected=0", record["reasons"])
+
+  def test_missing_first_update_precommit_is_fatal(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      state, run_log, updates, base = self._evidence(Path(tmp))
+      run_log.write_text(
+          "\n".join(
+              line for line in run_log.read_text(encoding="utf-8").splitlines()
+              if "canon-v1-first-update-precommit-v1" not in line
+          ) + "\n",
+          encoding="utf-8",
+      )
+      record = classifier.classify(
+          recipe="gsm8k", state=state, run_log=run_log,
+          update_report=updates, base_classification=base,
+      )
+      self.assertEqual(record["verdict"], "FAIL")
+      self.assertIn("first_update_precommit=0 expected=1", record["reasons"])
+
+  def test_over_threshold_first_update_precommit_is_fatal(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      state, run_log, updates, base = self._evidence(Path(tmp))
+      run_log.write_text(
+          run_log.read_text(encoding="utf-8").replace(
+              '"stable_norm":2.0', '"stable_norm":1.0e+21'
+          ),
+          encoding="utf-8",
+      )
+      record = classifier.classify(
+          recipe="gsm8k", state=state, run_log=run_log,
+          update_report=updates, base_classification=base,
+      )
+      self.assertEqual(record["verdict"], "FAIL")
+      self.assertTrue(any(
+          reason.startswith("first_update_precommit_invalid=")
+          for reason in record["reasons"]
+      ))
 
   def test_missing_profile_artifact_is_fatal(self):
     with tempfile.TemporaryDirectory() as tmp:
@@ -558,6 +626,15 @@ class FullClassifierTest(unittest.TestCase):
     try:
       with tempfile.TemporaryDirectory() as tmp:
         state, run_log, updates, base = self._evidence(Path(tmp))
+        run_log.write_text(
+            run_log.read_text(encoding="utf-8")
+            .replace('"workload":"gsm8k"', '"workload":"frozenlake-dp8-tp8"')
+            .replace(
+                "[P59.CHECKED_VMA] enabled=1 workload=gsm8k ",
+                "[P59.CHECKED_VMA] enabled=1 workload=frozenlake-dp8-tp8 ",
+            ),
+            encoding="utf-8",
+        )
         record = classifier.classify(
             recipe="gsm8k",
             state=state,

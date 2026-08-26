@@ -139,6 +139,55 @@ case "${CANON_P59_RANK_PARALLEL_BACKWARD:-0}" in
     fail=1
     ;;
 esac
+case "${CANON_P59_CHECKED_VMA:-0}" in
+  0) ;;
+  1)
+    case "${CANON_PROFILE_FILE:-}:${CANON_PROFILE:-}:${CANON_P32_WORKLOAD:-}" in
+      cluster/profiles/qwen3-1p7b-dp16-tp4-gsm8k-v1-hp.env:qwen3-1p7b-dp16-tp4-gsm8k-v1-hp:gsm8k|\
+      cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env:qwen3-8b-dp8-tp8-frozenlake-v1-hp:frozenlake-dp8-tp8) ;;
+      *)
+        echo "[env] P59 checked VMA is restricted to exact Phase4 full profiles" >&2
+        fail=1
+        ;;
+    esac
+    [ "${CANON_V1_HP_FULL:-0}" = "1" ] && \
+    [ "${CANON_P33_RUN_STAGE:-}" = "full" ] && \
+    [ "${CANON_P33_NO_COMMIT:-1}" = "0" ] && \
+    [ "${CANON_P59_RANK_PARALLEL_BACKWARD:-0}" = "1" ] || {
+      echo "[env] P59 checked VMA requires exact committed P59 full training" >&2
+      fail=1
+    }
+    case "${CANON_P66_P59_CHECK_VMA:-}" in
+      ""|1) export CANON_P66_P59_CHECK_VMA=1 ;;
+      *)
+        echo "[env] P59 checked VMA compatibility alias conflicts" >&2
+        fail=1
+        ;;
+    esac
+    echo "[env] P59 checked VMA backward enabled compatibility_alias=CANON_P66_P59_CHECK_VMA"
+    ;;
+  *)
+    echo "[env] CANON_P59_CHECKED_VMA must be exactly 0 or 1" >&2
+    fail=1
+    ;;
+esac
+case "${CANON_V1_HP_FIRST_UPDATE_GATE:-0}" in
+  0) ;;
+  1)
+    [ "${CANON_V1_HP_FULL:-0}" = "1" ] && \
+    [ "${CANON_P33_RUN_STAGE:-}" = "full" ] && \
+    [ "${CANON_P33_NO_COMMIT:-1}" = "0" ] && \
+    [ "${CANON_P59_CHECKED_VMA:-0}" = "1" ] || {
+      echo "[env] V1 first-update gate requires exact checked-VMA committed full training" >&2
+      fail=1
+    }
+    echo "[env] V1 first-update precommit gate enabled stable_norm_max=1000000"
+    ;;
+  *)
+    echo "[env] CANON_V1_HP_FIRST_UPDATE_GATE must be exactly 0 or 1" >&2
+    fail=1
+    ;;
+esac
 case "${CANON_P63_OVERFLOW_SAFE_CLIP:-0}" in
   0) ;;
   1)
