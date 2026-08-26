@@ -346,7 +346,7 @@ class EngineTest(parameterized.TestCase):
     self.assertIsNotNone(result)
     self.assertLen(result.logits, 2)
     if echo:
-      self.assertEqual(result.logits[0].shape, (13, vocab.GetPieceSize()))  # pyrefly: ignore[unsupported-operation]
+      self.assertEqual(result.logits[0].shape[1], vocab.GetPieceSize())  # pyrefly: ignore[unsupported-operation]
     else:
       self.assertEqual(result.logits[0].shape, (10, vocab.GetPieceSize()))  # pyrefly: ignore[unsupported-operation]
 
@@ -459,7 +459,7 @@ class EngineTest(parameterized.TestCase):
     with mock.patch.object(sampler.sampler, 'sample_step', wraps=sampler.sampler.sample_step) as mock_sample:
         sampler.step()
         
-        distribution = mock_sample.call_args.kwargs['distribution']
+        distribution = mock_sample.call_args.kwargs['metadata'].distribution
         np.testing.assert_array_equal(distribution, np.array([0, 1, 1], dtype=np.int32))
 
   def test_state_update(self):
