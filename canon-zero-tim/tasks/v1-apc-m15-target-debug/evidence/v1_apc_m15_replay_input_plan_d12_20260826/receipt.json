@@ -1,14 +1,45 @@
 {
   "task": "v1_apc_m15_replay_input_plan",
   "source_commit": "9f91d93001dd5b44659f062626eb93fc65e6fcb4",
-  "date_utc": "2026-08-26T00:40:00Z",
+  "date_utc": "2026-08-26T00:54:00Z",
   "topology": "64 TPU (16 nodes, DP8xTP8) Attempt-6 Treatment Arm",
   "workload": "frozenlake-dp8-tp8",
-  "stage": "phase-c-replay-input-plan-prepared",
+  "stage": "phase-c-replay-input-plan-prepared-with-npz-capsules",
   "source_gcs_uri": "gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-v1-apc-m15-on-d12-9f91d930/attempt-0",
   "derived_gcs_uri": "gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-v1-apc-m15-on-d12-9f91d930/attempt-0/derived/m15-replay-input-plan-v1",
   "status": "M15_REPLAY_INPUT_PLAN_READY_NOT_EXECUTED",
   "claim_ceiling": "INPUT_PLAN_ONLY_MODEL_REPLAY_NOT_RUN",
+  "sealed_artifacts": {
+    "producer_unit": {
+      "filename": "m15_producer_unit.npz",
+      "bytes": 762286,
+      "sha256": "116f1e9e83e94db8642bf2eeb137df237ce01ed2466cc8f2f05288cef36a0ed7",
+      "rows": 256
+    },
+    "mismatch_capsule": {
+      "filename": "mismatch-capsule.npz",
+      "bytes": 15148,
+      "sha256": "9e79a18de18c88a2c16b7c6d509198bd141077f7cba466b33602d98eb1c4db77",
+      "rows": [
+        201,
+        245
+      ]
+    },
+    "replay_prefix_plan": {
+      "filename": "replay-prefix-plan.jsonl",
+      "bytes": 3938394,
+      "sha256": "b8c00fc704cdd698318a2088c70b9593737a996da8eda1e55d98986d5a8f30a7",
+      "calls": 188
+    },
+    "replay_analysis": {
+      "filename": "REPLAY_ANALYSIS.json",
+      "sha256": "a3c381f8d5e8143ac266a96fb082679e86d85a96eb749255696aaebe649ceff0"
+    },
+    "upstream_audit_receipt": {
+      "filename": "UPSTREAM_AUDIT_RECEIPT.json",
+      "sha256": "557801a3d397a29ef4bfa69d8f678db9f66f90726ef51eed1faab870158a84ed"
+    }
+  },
   "coordinates": {
     "canonical_first_mismatch": {
       "source_row": 201,
@@ -69,16 +100,6 @@
     "a_b_max_abs": 6.479461669921875,
     "b_c_differing_bytes": 0,
     "b_c_differing_elements": 0
-  },
-  "carrier": {
-    "producer_rows": 256,
-    "requests": 1965,
-    "serving_calls": 3027,
-    "replay_prefix_start_call": 1,
-    "replay_prefix_end_call": 188,
-    "replay_prefix_calls": 188,
-    "replay_prefix_plan_sha256": "b8c00fc704cdd698318a2088c70b9593737a996da8eda1e55d98986d5a8f30a7",
-    "replay_prefix_plan_bytes": 3938394
   },
   "decision": {
     "status": "M15_REPLAY_INPUT_PLAN_READY_NOT_EXECUTED",
