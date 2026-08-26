@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import os
@@ -16,6 +17,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[3]
 TASK = ROOT / "canon-zero-tim/tasks/v1-phase4-three-full-recipes"
 EVIDENCE = TASK / "evidence/v1_hp_three_full_attempt9_20260826"
+LEARNER_PATH = ROOT / "tunix/rl/agentic/agentic_rl_learner.py"
 
 
 def _load(name: str, path: Path):
@@ -24,6 +26,20 @@ def _load(name: str, path: Path):
   assert spec.loader is not None
   spec.loader.exec_module(module)
   return module
+
+
+def _load_consumer_contract():
+  tree = ast.parse(LEARNER_PATH.read_text(encoding="utf-8"))
+  function = next(
+      node
+      for node in tree.body
+      if isinstance(node, ast.FunctionDef)
+      and node.name == "_p38_diagnostic_consumer_contract"
+  )
+  module = ast.Module(body=[function], type_ignores=[])
+  namespace = {}
+  exec(compile(ast.fix_missing_locations(module), str(LEARNER_PATH), "exec"), namespace)
+  return namespace["_p38_diagnostic_consumer_contract"]
 
 
 CLASSIFIER = _load(
@@ -36,6 +52,7 @@ PALLAS_MATMUL = _load(
     "p22_pallas_matmul",
     ROOT / "canon-zero-tim/src/engine_shims/p22_pallas_matmul.py",
 )
+CONSUMER_CONTRACT = _load_consumer_contract()
 SOURCE = "0a30e6064555bcb42a36cd50b1386aa07f6fea9f"
 
 
@@ -247,6 +264,31 @@ class FrozenLakeTp8AbDiagnosticTest(unittest.TestCase):
           output=root / "wrong.json",
       )
       self.assertEqual(wrong["verdict"], "FAIL")
+
+  def test_v1_fl_tp8_ab_consumer_contract(self):
+    self.assertEqual(
+        CONSUMER_CONTRACT(
+            enabled=True,
+            full_batch_size=32,
+            mini_batch_size=32,
+            train_micro_batch_size=8,
+            num_generations=8,
+            process_in_consumer=True,
+            v1_fl_tp8_ab=True,
+        ),
+        (32, True, 1),
+    )
+    with self.assertRaisesRegex(ValueError, "not a one-host rehearsal"):
+      CONSUMER_CONTRACT(
+          enabled=True,
+          full_batch_size=2,
+          mini_batch_size=2,
+          train_micro_batch_size=2,
+          num_generations=2,
+          process_in_consumer=True,
+          onehost_rehearsal=True,
+          v1_fl_tp8_ab=True,
+      )
 
 
 if __name__ == "__main__":

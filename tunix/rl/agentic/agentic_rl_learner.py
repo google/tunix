@@ -195,24 +195,27 @@ def _p38_diagnostic_consumer_contract(
     process_in_consumer: bool,
     onehost_rehearsal: bool = False,
     m15_target_debug: bool = False,
+    v1_fl_tp8_ab: bool = False,
 ) -> tuple[int, bool, int]:
   """Return the P38 full-coverage consumer geometry.
 
   Historical P38 keeps four prompts per producer unit and consumes all eight
-  units.  The M15 target carrier instead preserves the production 32-prompt
-  unit and consumes that one complete unit.  Both paths cover all 256
-  trajectories before calling ``_process_results``; neither admits a partial
-  tail or the old P38s10 first-four-prompt subset.
+  units.  The M15 target carrier and V1 FrozenLake TP8 A/B diagnostic instead
+  preserve the production 32-prompt unit and consume that one complete unit.
+  Both paths cover all 256 trajectories before calling ``_process_results``;
+  neither admits a partial tail or the old P38s10 first-four-prompt subset.
   """
   if not enabled:
     return train_micro_batch_size, False, 0
   if onehost_rehearsal and m15_target_debug:
     raise ValueError("M15 target debug is not a one-host rehearsal")
+  if onehost_rehearsal and v1_fl_tp8_ab:
+    raise ValueError("V1 FrozenLake TP8 A/B is not a one-host rehearsal")
   expected = (
       (2, 2, 2)
       if onehost_rehearsal
       else (32, 32, 8)
-      if m15_target_debug
+      if (m15_target_debug or v1_fl_tp8_ab)
       else (32, 4, 8)
   )
   observed = (full_batch_size, mini_batch_size, num_generations)
@@ -3374,6 +3377,8 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     p38_precheck_only = (
         os.environ.get("CANON_P38_PRECHECK_ONLY", "0") == "1"
     )
+    v1_fl_tp8_ab_arm = os.environ.get("CANON_V1_FL_TP8_AB_ARM", "")
+    v1_fl_tp8_ab = v1_fl_tp8_ab_arm in ("p66-off", "serving-scope")
     (
         consumer_batch_size,
         require_full_consumer_batch,
@@ -3392,6 +3397,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             os.environ.get("CANON_APC_M15_TARGET_DEBUG", "")
             in ("off", "on")
         ),
+        v1_fl_tp8_ab=v1_fl_tp8_ab,
     )
     if p38_precheck_only:
       m15_debug_arm = os.environ.get("CANON_APC_M15_TARGET_DEBUG", "")
@@ -3400,6 +3406,13 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             "[CAN" "ON_APC_M15_TARGET_CONTRACT] "
             f"arm={m15_debug_arm} topology=DP8xTP8 "
             "workload=m15/main backward=0 optimizer_commits=0",
+            flush=True,
+        )
+      if v1_fl_tp8_ab:
+        print(
+            "[V1.FL.AB] "
+            f"arm={v1_fl_tp8_ab_arm} topology=DP8xTP8 "
+            "workload=p45/frozenlake backward=0 optimizer_commits=0",
             flush=True,
         )
       print(
