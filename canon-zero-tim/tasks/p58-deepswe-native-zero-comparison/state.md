@@ -2,13 +2,16 @@
 
 ## Current P58.12 JAX engine-seed/cleanup checkpoint (2026-08-26)
 
-- Status: ACTIVE; latest target failure diagnosed; local construction PASS;
-  uncommitted/unpushed; target retry not run.
+- Status: ACTIVE; latest target failure diagnosed; source published and exact
+  implementation readback PASS; target retry not run.
 - Source: worktree
   `/home/yuxuan/code_rl_repro/worktrees/p58_fixed_seed_0824`, branch
-  `local/p58-fixed-seed-0824`, exact pulled HEAD
-  `7f6fc071082f291bf926b1c5bc79021733628c2e`. The tip preserves immutable
-  `p58z01` Attempt-0 evidence. `main` is untouched.
+  `local/p58-fixed-seed-0824`. The repair was built on exact pulled base
+  `7f6fc071082f291bf926b1c5bc79021733628c2e`; implementation commit
+  `c10fbe0487d1f6635975b84806f1efdce6bc95c1` was pushed only to
+  `yuxzhang/canon-zero-tim` and immediate local/FETCH_HEAD/remote-tracking
+  readback matched with ahead/behind `0/0`. The published history preserves
+  immutable `p58z01` Attempt-0 evidence. `main` is untouched.
 - Last verified target fact: `p58z01` admitted 128 TPU devices, the exact
   DP8xTP8 roles, 1,012 clean tasks, 128 R2E sandboxes, and a compiled vLLM
   engine. The first Step-0 generation failed because P58.10 routed seed 42 to
@@ -38,9 +41,11 @@
   `7f6fc071082f291bf926b1c5bc79021733628c2e`; shared `90_run.sh` retained both
   the new FrozenLake diagnostics and the P58 seed receipts without conflict.
   Final gates are rerun on that exact tip.
-- Next action: await explicit commit/push approval. Matching image publication,
-  Kubernetes application, and a fresh `p58z02` target each require their
-  separate approval. Never resume or overwrite `p58z01`.
+- Next action: the execution agent fetches the final operator tip, proves it
+  contains implementation commit `c10fbe0487d1f6635975b84806f1efdce6bc95c1`,
+  and builds/pins the matching image. Image publication, Kubernetes
+  application, and a fresh `p58z02` target each require their separate
+  approval. Never resume or overwrite `p58z01`.
 - Phase: `phases/p58-12-jax-engine-seed-cleanup.md`.
 
 ## Current P58.11 checked-VMA Zero-HP checkpoint (2026-08-26)
@@ -93,9 +98,10 @@
 - Claim ceiling: the pinned container reports no `/dev/vfio`; no TPU,
   Pathways, R2E sandbox, Kubernetes, or 128-chip target was run. This is local
   construction and one CPU optimizer transaction only, not target evidence.
-- Next action: complete and publish P58.12 only after explicit approval, then
-  use the corrected engine-global seed route for a fresh `p58z02` JobSet. The
-  P58.11 first-update and 1,000-commit gates remain unchanged.
+- Next action: P58.12 source is published. After matching-image readback,
+  sandbox-capacity admission, and separate launch approval, use the corrected
+  engine-global seed route for a fresh `p58z02` JobSet. The P58.11
+  first-update and 1,000-commit gates remain unchanged.
 - External effects: source commit/push only. No image publication, Kubernetes
   mutation, TPU run, model download, credential change, or artifact deletion.
 - Phase: `phases/p58-11-qwen4b-zero-checked-vma.md`.

@@ -1,10 +1,10 @@
 # P58 DeepSWE native-first training handoff
 
-## 2026-08-26 P58.12 JAX engine-seed/cleanup override — construction PASS, not published
+## 2026-08-26 P58.12 JAX engine-seed/cleanup override — source published
 
-This is the highest-priority P58 handoff. The latest pulled operator tip is
-`7f6fc071082f291bf926b1c5bc79021733628c2e` and preserves immutable Zero-HP
-Attempt-0 evidence under
+This is the highest-priority P58 handoff. Implementation commit
+`c10fbe0487d1f6635975b84806f1efdce6bc95c1` is published on
+`yuxzhang/canon-zero-tim` and preserves immutable Zero-HP Attempt-0 evidence under
 `evidence/p58z01_attempt0_seed_exception/`. `p58z01` admitted all 128 TPU
 devices, loaded 1,012 clean tasks, launched 128 R2E sandboxes, and initialized
 vLLM. The first Step-0 model call then failed before any trajectory:
@@ -14,7 +14,7 @@ ValueError: JAX does not support per-request seed.
 ```
 
 P58.10 had put seed 42 in `RolloutConfig.seed`, which Tunix forwarded to
-`SamplingParams.seed`. The P58.12 local repair instead passes the same signed
+`SamplingParams.seed`. The P58.12 published repair instead passes the same signed
 42 through global vLLM `EngineArgs.seed` and rejects any JAX per-request seed
 before generation. Require both startup receipts exactly once:
 
@@ -36,12 +36,12 @@ treats only that exact defect as an ambiguous response, reads until confirmed
 Every other AttributeError/API failure or an unconfirmed deletion remains
 fatal; no namespace-wide cleanup is introduced.
 
-Current status is `LOCAL CONSTRUCTION PASS / UNCOMMITTED / UNPUSHED`. Focused
-P58, P34, P57, flag-audit, and complete digest-pinned image gates pass; the
-image exposes no `/dev/vfio`, so this is not target evidence. Another agent
-must not launch from it yet. Wait for explicit commit/push approval, require
-exact remote SHA and matching image readback, then launch fresh `p58z02` only
-after separate launch approval.
+Current status is `SOURCE PUBLISHED / CONSTRUCTION PASS / TARGET RETRY NOT
+RUN`. Focused P58, P34, P57, flag-audit, and complete digest-pinned image gates
+pass; the image exposes no `/dev/vfio`, so this is not target evidence. The
+execution agent must fetch the final operator tip, prove it contains
+`c10fbe0487d1f6635975b84806f1efdce6bc95c1`, build and pin the matching image,
+then launch fresh `p58z02` only after separate image/launch approvals.
 Do not resume/overwrite `p58z01`: it has no trajectory or trainer checkpoint.
 P58.11's unchanged strict A=B=C, checked-VMA, first-update, stable-clip, and
 1,000-commit gates apply after Step 0 begins. See

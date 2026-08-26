@@ -2,7 +2,7 @@
 
 ## Status
 
-`ACTIVE / LOCAL CONSTRUCTION PASS / UNCOMMITTED / TARGET RETRY NOT RUN`
+`ACTIVE / SOURCE PUBLISHED / CONSTRUCTION PASS / TARGET RETRY NOT RUN`
 
 ## Trigger
 
@@ -90,6 +90,15 @@ P58_EXACT_IMAGE_CPU_PASS ... zero_hp_full=1 checked_vma=1 first_update=1 stable_
 ```
 
 The image reports no `/dev/vfio`; no real JAX TPU generation was executed.
+
+## Publication checkpoint
+
+Implementation commit
+`c10fbe0487d1f6635975b84806f1efdce6bc95c1` was pushed only to
+`yuxzhang/canon-zero-tim`. Immediate local, `FETCH_HEAD`, and remote-tracking
+readback matched that full SHA with ahead/behind `0/0`. `main` was not
+modified or pushed. This publication does not authorize image publication,
+Kubernetes mutation, or the fresh `p58z02` target.
 
 ## Claim ceiling
 

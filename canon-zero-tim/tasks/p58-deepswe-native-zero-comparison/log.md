@@ -910,3 +910,16 @@
   credential access, or artifact deletion occurred. The repair is local and
   uncommitted. After explicit publication/readback and separate launch
   approval, use fresh `p58z02`; never resume or overwrite `p58z01`.
+
+## 2026-08-26 UTC — P58.12 implementation published and read back
+
+- The user explicitly authorized commit and push. Implementation commit
+  `c10fbe0487d1f6635975b84806f1efdce6bc95c1` was pushed only to
+  `yuxzhang/canon-zero-tim`; immediate local, `FETCH_HEAD`, and
+  remote-tracking readback matched with ahead/behind `0/0`.
+- Publication preserves the engine-global seed route, exact JAX route receipt,
+  bounded exact-Pod cleanup retry, tests, runbook, handoff, and immutable
+  `p58z01` failure evidence. `main` was not modified or pushed.
+- No image was published, no Kubernetes object was changed, and no TPU target
+  was launched. Matching-image publication and fresh `p58z02` execution remain
+  separately user-gated.

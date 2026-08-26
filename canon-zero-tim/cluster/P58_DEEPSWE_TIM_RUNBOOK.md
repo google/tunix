@@ -18,7 +18,7 @@ P58 does not modify `main`. Rendering and local validation do not authorize a
 Kubernetes apply. An operator must separately approve image publication and
 each launch.
 
-## 2026-08-26 P58.12 JAX engine-seed retry override — construction PASS, not published
+## 2026-08-26 P58.12 JAX engine-seed retry override — source published
 
 This is the highest-priority execution instruction. `p58z01` proved 128-device
 admission, clean-data loading, 128 sandbox launches, and vLLM initialization,
@@ -28,7 +28,7 @@ kubernetes-client empty-response `None.decode` defect. The run produced no
 trajectory, backward, optimizer transaction, or resumable trainer checkpoint.
 Preserve it and do not relaunch the published tip unchanged.
 
-The local P58.12 repair keeps seed 42 but routes it only through global vLLM
+The published P58.12 repair keeps seed 42 but routes it only through global vLLM
 `EngineArgs.seed`. It fails early if a JAX caller supplies a per-request seed.
 Every P58 target must emit exactly one of each:
 
@@ -45,14 +45,16 @@ confirm the exact run-owned Pod reaches 404 within its bounded deadline;
 unrelated errors and unconfirmed deletion remain fatal.
 
 This repair passes focused, adjacent, flag-audit, and complete pinned-image
-construction gates, but remains uncommitted/unpushed. Before target use:
-obtain explicit commit/push approval, fetch and exactly read back the resulting
-operator SHA, build and pin its matching image, rerun the full P58 exact-image
-gate, and pass the existing sandbox-capacity gate. Then render a fresh run id
-such as `p58z02` using the unchanged command below (`--stage full --arm zero
---high-performance`). Do not resume or overwrite `p58z01`. After the two seed
-receipts pass, retain every P58.11 strict alignment, checked-VMA, first-update,
-stable-clip, and 1,000-commit requirement.
+construction gates. Implementation commit
+`c10fbe0487d1f6635975b84806f1efdce6bc95c1` is published and read back. Before
+target use, fetch the final operator tip and prove it contains that commit,
+build and pin its matching image, rerun the full P58 exact-image gate, and pass
+the existing sandbox-capacity gate. Then obtain separate launch approval and
+render a fresh run id such as `p58z02` using the unchanged command below
+(`--stage full --arm zero --high-performance`). Do not resume or overwrite
+`p58z01`. After the two seed receipts pass, retain every P58.11 strict
+alignment, checked-VMA, first-update, stable-clip, and 1,000-commit
+requirement.
 
 ## 2026-08-26 P58.11 strict Zero-HP execution override
 

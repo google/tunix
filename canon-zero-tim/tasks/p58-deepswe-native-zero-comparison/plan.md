@@ -69,7 +69,7 @@ cleanup failure bounded and fail-closed before a fresh target retry.
 | P58.9 | Native token-IS plus Attempt-0 refinement | Native raw/IS and Zero-HP render as a closed set; partial/mixed tuples fail; runtime proves old-logp/TIS provenance; JobSet retry and unconsumed keepalive overrides are absent; full pinned-image gate passes | implementation `2aedd73c` published/read back; Native-IS selected after operator-observed Native-raw reward collapse; onset step unknown, target not run |
 | P58.10 | Fixed dataset and rollout seed | All three P58 recipes render exactly one `--seed=42`; training, W&B, manifests, classifiers, and first-batch marker agree; missing/duplicate/drifted values fail closed | implementation `9597de3d` published/read back; pinned-image PASS; target not run |
 | P58.11 | Qwen3-4B strict Zero-HP checked-VMA admission | Exact P58 Zero/full profile alone derives checked-VMA, first-update, and overflow-safe clip; Native/neighbor negatives pass; complete pinned-image gate passes; target remains separately launch-gated | source/construction completed; `p58z01` target failed before first generation on seed route |
-| P58.12 | JAX engine seed route and bounded abort cleanup | P58 uses `EngineArgs.seed=42` with no JAX per-request seed; exact route/manifest/postflight and cleanup retry regressions plus complete pinned-image gate pass | active — local construction PASS; uncommitted; target retry not run |
+| P58.12 | JAX engine seed route and bounded abort cleanup | P58 uses `EngineArgs.seed=42` with no JAX per-request seed; exact route/manifest/postflight and cleanup retry regressions plus complete pinned-image gate pass | active — implementation `c10fbe0487d1f6635975b84806f1efdce6bc95c1` published/read back; target retry not run |
 
 Exactly one phase may be active. Commit, push, image publication, Kubernetes
 render/application, and TPU execution each remain separately user-gated.
@@ -83,9 +83,8 @@ P58.12 are specified in their phase files; P58.12 is the only active phase.
 P58.7's historical target remains not run and is superseded for new Zero
 launches by P58.11 plus the P58.12 seed-route correction. P58.9 and P58.10
 source are published and read back. A fresh target retry begins only after
-P58.12 construction gates, separately approved publication, exact
-source/image readback, sandbox-capacity admission, and separate launch
-approval.
+P58.12 construction gates, published implementation readback, exact matching
+image readback, sandbox-capacity admission, and separate launch approval.
 No remote execution is authorized by this plan alone.
 
 P58.5N attempts `p58f01` through `p58f11` remain `INCONCLUSIVE`. P58f01 exposed
