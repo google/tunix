@@ -1,7 +1,7 @@
 # V1.P4.9 — Checked-VMA three-full launch wave
 
-Status: active; runtime and host/image construction admission complete.
-Publication, final rendering, and target launch remain unrun. No target launch
+Status: active; runtime, host/image construction admission, and publication
+complete at `ff33ea1a38d1d75c2409ccf480c57e9ff0151075`. Final rendering and target launch remain unrun. No target launch
 is authorized by this phase file.
 
 ## Objective
@@ -127,7 +127,7 @@ launched run IDs.
 ## Claim ceiling
 
 Until target completion: `P66 SAME-POINT ORACLE PASS / HOST-IMAGE ADMISSION
-PASS / PUBLICATION AND TARGET NOT RUN`. Do not claim serial
+PASS / PUBLICATION PASS / TARGET NOT RUN`. Do not claim serial
 trajectory identity. The admitted claim is ordinary-JAX gradient correctness
 within the registered oracle envelope plus strict Zero-TIM forward identity.
 
@@ -192,3 +192,13 @@ within the registered oracle envelope plus strict Zero-TIM forward identity.
   artifact.
 - No target was launched and no final manifest was rendered. Publication and
   exact remote read-back remain pending.
+
+### 2026-08-26T01:04:00Z — Approved source published and read back
+
+- Pushed the four-CL stack by ordinary fast-forward and read back
+  `refs/heads/yuxzhang/canon-zero-tim` exactly at
+  `ff33ea1a38d1d75c2409ccf480c57e9ff0151075`.
+- Freeze that SHA as the approved source for all three final manifests. This
+  publication-ledger follow-up is documentation-only and does not change the
+  already tested runtime.
+- No manifest, JobSet, TPU workload, or target optimizer transaction occurred.

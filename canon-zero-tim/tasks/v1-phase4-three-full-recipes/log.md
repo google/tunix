@@ -752,3 +752,14 @@
   the intervening upstream diff is evidence-only.
 - Result: publication is again fast-forward eligible; final remote-tip check
   and exact read-back still required.
+## 2026-08-26T01:04:00Z — Four-CL stack published and read back
+
+- Type: publication.
+- Fact: ordinary fast-forward push advanced the operator branch from
+  `75e97a1d` to `ff33ea1a38d1d75c2409ccf480c57e9ff0151075`; `git ls-remote`
+  returned that exact 40-character SHA.
+- Decision: freeze `ff33ea1a38d1d75c2409ccf480c57e9ff0151075` as the approved
+  source for the three final manifests. Render from a clean worktree at that
+  SHA; do not substitute this later documentation-only ledger commit.
+- Result: `PUBLISHED / READY TO RENDER / TARGET NOT RUN`. No YAML, JobSet, TPU
+  workload, or optimizer target transaction was created.

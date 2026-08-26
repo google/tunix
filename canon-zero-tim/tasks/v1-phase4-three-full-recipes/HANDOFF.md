@@ -1,6 +1,6 @@
 # V1 Phase4 three-full handoff
 
-## START HERE — checked-VMA three-full wave prepared, not published or launched
+## START HERE — checked-VMA three-full wave published, ready to render, not launched
 
 This section supersedes every later `START HERE` block. The older sections are
 an append-only history of Attempt 7 and P64; do not follow their launch matrix.
@@ -9,8 +9,11 @@ an append-only history of Attempt 7 and P64; do not follow their launch matrix.
 - Branch: `local/p66-gsm8k-onehost-convergence`
 - Rebase base: fetched operator tip
   `75e97a1db4a4bb328fa174f75869f039defc4b98`.
-- Tree state: four local, independently revertible CLs are rebased onto that
-  tip and pass post-rebase admission. Publication is pending. No final YAML, JobSet, TPU launch,
+- Approved launch source: the four-CL runtime/launch stack was pushed and
+  exactly read back at
+  `ff33ea1a38d1d75c2409ccf480c57e9ff0151075`.
+- Tree state: this follow-up is a documentation-only publication ledger. No
+  final YAML, JobSet, TPU launch,
   optimizer target result, or performance result has been produced by P4.9.
 - Current phase: `phases/v1-p4-9-checked-vma-full-wave.md`.
 
@@ -61,17 +64,16 @@ and DP8xTP8 optimizer correctness, convergence, and performance are unrun.
 
 Next boundary:
 
-1. Fetch once more and require the operator tip is still
-   `75e97a1db4a4bb328fa174f75869f039defc4b98`.
-2. Push the four-CL stack and read back one exact 40-character SHA.
-3. From that clean exact SHA, run the render-only wrapper at the top of
+1. Create or use a clean worktree whose HEAD is exactly
+   `ff33ea1a38d1d75c2409ccf480c57e9ff0151075`.
+2. From that exact SHA, run the render-only wrapper at the top of
    `RUNBOOK.md`. It refuses a dirty tree, mismatched HEAD, reused output root,
    or duplicate IDs and never launches.
-4. Review `manifest-index.json` and the three printed apply commands. The user
+3. Review `manifest-index.json` and the three printed apply commands. The user
    launches all three together. Never attach a pipe to an apply command.
-5. Watch each job's first-update precommit and commit receipts immediately.
+4. Watch each job's first-update precommit and commit receipts immediately.
    Preserve a FrozenLake red without cancelling another healthy recipe.
-6. Performance and XProf comparison begin only after the user supplies the
+5. Performance and XProf comparison begin only after the user supplies the
    launched run IDs and logs.
 
 ## Historical — P64 remote 64-TPU diagnostic and old launch decision
