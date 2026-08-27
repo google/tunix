@@ -4098,6 +4098,27 @@ class _P28SegmentedEngineForward:
           f"{len(layers)} != {len(self._local_layer_full_indices)}"
       )
     if self._p30_sparse_grad_assembly:
+      # P70.1: the sparse assembly used to dispatch one tiny eager program
+      # per full-state leaf (312 `0 + cast` adds plus 310 scalar-zero
+      # converts per group, ~150 ms of host-dispatch span).  Route it
+      # through one jitted program instead.  Every per-leaf expression is
+      # kept exactly (`value.astype(target.dtype)` then `0 + cast`, tied
+      # merge included; no cross-leaf math exists to reassociate) and the
+      # scalar zero is threaded as a RUNTIME operand: as a trace-time
+      # constant XLA folds `add(0, x) -> x`, which would drop the legacy
+      # signed-zero canonicalization (+0.0 out of a -0.0 cotangent) that
+      # the optimizer/update bit contract depends on.  Host validation
+      # runs first, unchanged, and raises before any program is built.
+      # The eager expressions below remain the legacy-branch/reference
+      # implementation.
+      return self._p70_sparse_assembly(
+          embed=embed,
+          layers=layers,
+          norm=norm,
+          head=head,
+          rank_axis_size=rank_axis_size,
+      )
+    if self._p30_sparse_grad_assembly:
       # The endpoint/layer construction already proves exact disjoint cover.
       # Avoid keeping a second full zero tree alive while the local VJP trees
       # are assembled.  Scalar +0 deliberately preserves the legacy signed-
@@ -4187,6 +4208,210 @@ class _P28SegmentedEngineForward:
             f"P30 G2 missing full-state cotangents: {missing}"
         )
     return tuple(full)
+
+  def _p70_target_shape(self, index, rank_axis_size):
+    target = self._full_state_leaves[index]
+    return (
+        target.shape
+        if rank_axis_size is None
+        else (rank_axis_size,) + target.shape
+    )
+
+  def _p70_validate_sparse_assembly(
+      self, embed_values, layer_values, norm_values, head_values,
+      rank_axis_size,
+  ):
+    """Replays the sparse assembly's host checks before any device program.
+
+    Same checks, same order, same messages as the eager reference body in
+    ``assemble_full_state_gradient``; nothing here touches the device.
+    """
+    filled = [False] * len(self._full_state_leaves)
+
+    def check(indices, shapes, label):
+      if len(indices) != len(shapes):
+        raise FunctionalMappingError(
+            f"P28 G5c {label} cotangent count changed: "
+            f"{len(shapes)} != {len(indices)}"
+        )
+      for index, shape in zip(indices, shapes, strict=True):
+        target_shape = self._p70_target_shape(index, rank_axis_size)
+        if shape != target_shape:
+          raise FunctionalMappingError(
+              f"P28 G5c {label} cotangent shape changed at full leaf "
+              f"{index}: {shape} != {target_shape}"
+          )
+        if filled[index]:
+          raise FunctionalMappingError(
+              f"P30 G2 duplicate cotangent at full leaf {index}"
+          )
+        filled[index] = True
+
+    if self._tied_word_embeddings:
+      if (
+          len(embed_values) != len(self._embed_full_indices)
+          or len(head_values) != len(self._embed_full_indices)
+      ):
+        raise FunctionalMappingError(
+            "P28 G5c tied embed/head cotangent count changed"
+        )
+      for index, embed_value, head_value in zip(
+          self._embed_full_indices,
+          embed_values,
+          head_values,
+          strict=True,
+      ):
+        target_shape = self._p70_target_shape(index, rank_axis_size)
+        if (
+            embed_value.shape != target_shape
+            or head_value.shape != target_shape
+        ):
+          raise FunctionalMappingError(
+              "P28 G5c tied embed/head cotangent shape changed at full leaf "
+              f"{index}: {embed_value.shape}/{head_value.shape} != "
+              f"{target_shape}"
+          )
+      check(
+          self._embed_full_indices,
+          tuple(
+              self._p70_target_shape(index, rank_axis_size)
+              for index in self._embed_full_indices
+          ),
+          "tied embed/head",
+      )
+    else:
+      check(
+          self._embed_full_indices,
+          tuple(value.shape for value in embed_values),
+          "embed",
+      )
+    for layer_index, (indices, values) in enumerate(
+        zip(self._local_layer_full_indices, layer_values, strict=True)
+    ):
+      check(
+          indices,
+          tuple(value.shape for value in values),
+          f"layer {layer_index}",
+      )
+    check(
+        self._norm_full_indices,
+        tuple(value.shape for value in norm_values),
+        "norm",
+    )
+    if not self._tied_word_embeddings:
+      check(
+          self._head_full_indices,
+          tuple(value.shape for value in head_values),
+          "head",
+      )
+    missing = [index for index, value in enumerate(filled) if not value]
+    if missing:
+      raise FunctionalMappingError(
+          f"P30 G2 missing full-state cotangents: {missing}"
+      )
+
+  def _p70_sparse_assembly(
+      self, *, embed, layers, norm, head, rank_axis_size
+  ):
+    """One jitted program for the whole sparse full-state assembly.
+
+    The per-leaf op sequence is exactly the eager reference: cast to the
+    target dtype, then `0 + cast` (tied leaves first sum
+    `embed.astype + head.astype`).  The scalar zeros are runtime operands
+    so XLA cannot fold the add away.  Built once and cached on this
+    instance behind a structure/shape/dtype signature guard, following
+    the `_p59_report_adjoint_fn` lazy-build pattern.
+    """
+    embed_values = tuple(jax.tree_util.tree_leaves(embed))
+    head_values = tuple(jax.tree_util.tree_leaves(head))
+    norm_values = tuple(jax.tree_util.tree_leaves(norm))
+    layer_values = tuple(
+        tuple(jax.tree_util.tree_leaves(values)) for values in layers
+    )
+    self._p70_validate_sparse_assembly(
+        embed_values, layer_values, norm_values, head_values, rank_axis_size
+    )
+
+    def spec(values):
+      return tuple(
+          (tuple(value.shape), str(value.dtype)) for value in values
+      )
+
+    signature = (
+        bool(self._tied_word_embeddings),
+        None if rank_axis_size is None else int(rank_axis_size),
+        spec(embed_values),
+        tuple(spec(values) for values in layer_values),
+        spec(norm_values),
+        spec(head_values),
+    )
+    if getattr(self, "_p70_assembly_fn", None) is None:
+      slot_dtypes = tuple(leaf.dtype for leaf in self._full_state_leaves)
+      zero_dtypes = []
+      for dtype in slot_dtypes:
+        if dtype not in zero_dtypes:
+          zero_dtypes.append(dtype)
+      slot_zero_index = tuple(
+          zero_dtypes.index(dtype) for dtype in slot_dtypes
+      )
+      tied = bool(self._tied_word_embeddings)
+      embed_full_indices = self._embed_full_indices
+      local_layer_full_indices = self._local_layer_full_indices
+      norm_full_indices = self._norm_full_indices
+      head_full_indices = self._head_full_indices
+      num_slots = len(self._full_state_leaves)
+
+      def compute(zeros, embed_values, layer_values, norm_values,
+                  head_values):
+        full = [None] * num_slots
+
+        def add(indices, values):
+          for index, value in zip(indices, values, strict=True):
+            cast = value.astype(slot_dtypes[index])
+            full[index] = zeros[slot_zero_index[index]] + cast
+
+        if tied:
+          tied_values = tuple(
+              embed_value.astype(slot_dtypes[index])
+              + head_value.astype(slot_dtypes[index])
+              for index, embed_value, head_value in zip(
+                  embed_full_indices, embed_values, head_values,
+                  strict=True,
+              )
+          )
+          add(embed_full_indices, tied_values)
+        else:
+          add(embed_full_indices, embed_values)
+        for indices, values in zip(
+            local_layer_full_indices, layer_values, strict=True
+        ):
+          add(indices, values)
+        add(norm_full_indices, norm_values)
+        if not tied:
+          add(head_full_indices, head_values)
+        return tuple(full)
+
+      self._p70_assembly_signature = signature
+      self._p70_assembly_zeros = tuple(
+          jnp.asarray(0, dtype) for dtype in zero_dtypes
+      )
+      self._p70_assembly_fn = _xprof_jit(
+          compute,
+          module_name="zt_tr_grad_assembly",
+          scope_name="zt/tr/grad/assembly",
+      )
+    elif self._p70_assembly_signature != signature:
+      raise FunctionalMappingError(
+          "P70 sparse-assembly cotangent signature changed after the "
+          "jitted program was built"
+      )
+    return self._p70_assembly_fn(
+        self._p70_assembly_zeros,
+        embed_values,
+        layer_values,
+        norm_values,
+        head_values,
+    )
 
 
 def build_p28_segmented_engine_forward(
@@ -6828,6 +7053,92 @@ class Qwen3EngineForwardAdapter:
         "counts": counts,
     }
 
+  def _p70_grad_tree_signature(self, tree):
+    leaves, treedef = jax.tree_util.tree_flatten(tree)
+    return (
+        treedef,
+        tuple((tuple(leaf.shape), str(leaf.dtype)) for leaf in leaves),
+    )
+
+  def _p70_grad_tree_start(self, pack):
+    """One jitted `0 + x` start over the whole per-chunk gradient pack.
+
+    Replaces the per-leaf eager `jnp.asarray(0, dtype) + value` strip
+    (310 leaf dispatches per group).  Each leaf's expression is unchanged
+    and the scalar zeros are runtime operands: a trace-time constant zero
+    lets XLA fold `add(0, x) -> x`, which would drop the legacy
+    signed-zero canonicalization of the first microbatch's cotangents.
+    Built once, cached on this instance behind a structure/shape/dtype
+    signature guard (the `_p59_report_adjoint_fn` lazy-build pattern).
+    """
+    signature = self._p70_grad_tree_signature(pack)
+    if getattr(self, "_p70_tree_start_fn", None) is None:
+      leaves = jax.tree_util.tree_leaves(pack)
+      zero_dtypes = []
+      for leaf in leaves:
+        if leaf.dtype not in zero_dtypes:
+          zero_dtypes.append(leaf.dtype)
+      leaf_zero_index = tuple(
+          zero_dtypes.index(leaf.dtype) for leaf in leaves
+      )
+
+      def start(zeros, tree):
+        tree_leaves, treedef = jax.tree_util.tree_flatten(tree)
+        return jax.tree_util.tree_unflatten(
+            treedef,
+            [
+                zeros[leaf_zero_index[index]] + leaf
+                for index, leaf in enumerate(tree_leaves)
+            ],
+        )
+
+      self._p70_tree_start_signature = signature
+      self._p70_tree_start_zeros = tuple(
+          jnp.asarray(0, dtype) for dtype in zero_dtypes
+      )
+      self._p70_tree_start_fn = _xprof_jit(
+          start,
+          module_name="zt_tr_grad_tree_start",
+          scope_name="zt/tr/grad/tree_start",
+      )
+    elif self._p70_tree_start_signature != signature:
+      raise FunctionalMappingError(
+          "P70 tree-start gradient pack signature changed after the "
+          "jitted program was built"
+      )
+    return self._p70_tree_start_fn(self._p70_tree_start_zeros, pack)
+
+  def _p70_grad_tree_add(self, accumulator, pack):
+    """One jitted `a + b` accumulate over the whole gradient pack.
+
+    Replaces the per-leaf eager `a + b` strip (310 leaf dispatches per
+    group); each leaf's elementwise add is unchanged and no cross-leaf
+    math exists to reassociate.  The consumed accumulator is donated: the
+    only call site immediately rebinds the accumulator to this call's
+    result, so the pre-add value is never read again (verified against
+    the whole `_p32_reverse_group` body; the P66 oracle only reads the
+    fresh per-chunk locals, i.e. the second operand).
+    """
+    signature = self._p70_grad_tree_signature((accumulator, pack))
+    if getattr(self, "_p70_tree_add_fn", None) is None:
+
+      def add(left, right):
+        return jax.tree.map(lambda a, b: a + b, left, right)
+
+      self._p70_tree_add_signature = signature
+      self._p70_tree_add_fn = _xprof_jit(
+          add,
+          module_name="zt_tr_grad_tree_add",
+          scope_name="zt/tr/grad/tree_add",
+          donate_argnums=(0,),
+      )
+    elif self._p70_tree_add_signature != signature:
+      raise FunctionalMappingError(
+          "P70 tree-add gradient pack signature changed after the "
+          "jitted program was built"
+      )
+    return self._p70_tree_add_fn(accumulator, pack)
+
   def _p32_reverse_group(
       self, segmented, engine_leaves, spec, dlogps, dentropy, replay=None
   ):
@@ -6877,41 +7188,31 @@ class Qwen3EngineForwardAdapter:
     def tree_zeros(tree):
       return jax.tree.map(jnp.zeros_like, tree)
 
-    def tree_add(left, right):
-      return jax.tree.map(lambda a, b: a + b, left, right)
-
-    def tree_start(right):
-      return jax.tree.map(
-          lambda value: jnp.asarray(0, value.dtype) + value, right
-      )
-
-    # Un-jitted, these dispatch one tiny program per leaf: the gradient
-    # accumulation of a ~310-leaf state walks head/norm/embed plus 28
-    # layers x 16 chunks and shows up in a profile as tens of thousands
-    # of jit_add launches per update, all host dispatch overhead. Jitting
-    # the whole-tree op keeps every leaf's elementwise a + b exactly as
-    # it was (no cross-leaf math exists to reassociate), so the committed
-    # gradient stays bitwise identical; the 51/51 alignment gate is the
-    # judge, and the flag keeps the certified recipe untouched until it
-    # rules.
+    # P70.1: the per-endpoint `tree_start` (`0 + x`) and `tree_add`
+    # (`a + b`) accumulates used to dispatch one tiny eager program per
+    # leaf (310 + 310 leaf dispatches per group).  They now run as one
+    # whole-pack jitted program per chunk each — _p70_grad_tree_start /
+    # _p70_grad_tree_add — with every leaf's elementwise expression
+    # unchanged (no cross-leaf math exists to reassociate) and the scalar
+    # zero threaded as a runtime operand so XLA cannot fold `0 + x` away
+    # (folding would drop the legacy signed-zero canonicalization).  The
+    # per-chunk pack keeps the exact per-leaf add order: one start on the
+    # first reversed chunk, one accumulate per later chunk, same operand
+    # values.  CANON_FUSED_TREE_OPS keeps its remaining tree_zeros arm.
     if os.environ.get("CANON_FUSED_TREE_OPS", "") == "1":
       tree_zeros = jax.jit(tree_zeros)
-      tree_add = jax.jit(tree_add)
-      tree_start = jax.jit(tree_start)
     if rank_parallel:
-      layer_grads = [
-          None
-          for _ in segmented._local_layer_leaves  # pylint: disable=protected-access
-      ]
-      embed_grad = norm_grad = head_grad = None
+      grad_pack = None
     else:
-      layer_grads = [
-          tree_zeros(leaves)
-          for leaves in segmented._local_layer_leaves  # pylint: disable=protected-access
-      ]
-      embed_grad = tree_zeros(segmented._embed_local_leaves)  # pylint: disable=protected-access
-      norm_grad = tree_zeros(segmented._norm_local_leaves)  # pylint: disable=protected-access
-      head_grad = tree_zeros(segmented._head_local_leaves)  # pylint: disable=protected-access
+      grad_pack = (
+          tree_zeros(segmented._embed_local_leaves),  # pylint: disable=protected-access
+          tuple(
+              tree_zeros(leaves)
+              for leaves in segmented._local_layer_leaves  # pylint: disable=protected-access
+          ),
+          tree_zeros(segmented._norm_local_leaves),  # pylint: disable=protected-access
+          tree_zeros(segmented._head_local_leaves),  # pylint: disable=protected-access
+      )
     dcache_carry = tuple(
         tree_zeros(cache) for cache in replay["final_caches"]
     )
@@ -7015,11 +7316,6 @@ class Qwen3EngineForwardAdapter:
               normalized, dlogits, state_leaves=engine_leaves
           )
         counts["head_pullback"] += 1
-        head_grad = (
-            tree_start(local_head_grad)
-            if head_grad is None
-            else tree_add(head_grad, local_head_grad)
-        )
         if rank_parallel:
           local_norm_grad, dhidden = (
               segmented.run_norm_pullback_rank_parallel(
@@ -7047,13 +7343,9 @@ class Qwen3EngineForwardAdapter:
               pre_norm, dnormalized, state_leaves=engine_leaves
           )
         counts["norm_pullback"] += 1
-        norm_grad = (
-            tree_start(local_norm_grad)
-            if norm_grad is None
-            else tree_add(norm_grad, local_norm_grad)
-        )
 
         previous_cache_carry = [None] * len(layer_tape)
+        chunk_layer_grads = [None] * len(layer_tape)
         for layer_index in reversed(range(len(layer_tape))):
           cache_in, hidden_in = layer_tape[layer_index]
           incoming_dcache = dcache_carry[layer_index]
@@ -7112,11 +7404,7 @@ class Qwen3EngineForwardAdapter:
             p66_row_profiles.append(
                 (chunk_index, layer_index, hidden_rms, dhidden_max)
             )
-          layer_grads[layer_index] = (
-              tree_start(local_grad)
-              if layer_grads[layer_index] is None
-              else tree_add(layer_grads[layer_index], local_grad)
-          )
+          chunk_layer_grads[layer_index] = local_grad
           previous_cache_carry[layer_index] = dcache
           counts["layer_pullback"] += 1
         dcache_carry = tuple(previous_cache_carry)
@@ -7139,18 +7427,22 @@ class Qwen3EngineForwardAdapter:
           local_embed_grad = segmented.run_embed_pullback(
               input_ids, dhidden, state_leaves=engine_leaves
           )
-        embed_grad = (
-            tree_start(local_embed_grad)
-            if embed_grad is None
-            else tree_add(embed_grad, local_embed_grad)
-        )
         counts["embed_pullback"] += 1
+        chunk_pack = (
+            local_embed_grad,
+            tuple(chunk_layer_grads),
+            local_norm_grad,
+            local_head_grad,
+        )
+        grad_pack = (
+            self._p70_grad_tree_start(chunk_pack)
+            if grad_pack is None
+            else self._p70_grad_tree_add(grad_pack, chunk_pack)
+        )
 
-    if any(
-        value is None
-        for value in (embed_grad, norm_grad, head_grad, *layer_grads)
-    ):
+    if grad_pack is None:
       raise FunctionalMappingError("P59 reverse emitted an empty gradient pack")
+    embed_grad, layer_grads, norm_grad, head_grad = grad_pack
     p66_row_summary = None
     if p66_arm:
       p66_row_summary = _p66_emit_row_cotangent_profile(
