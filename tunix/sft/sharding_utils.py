@@ -66,8 +66,12 @@ def shard_input(
 
   with jax.transfer_guard("allow"):
     return jax.tree.map(
-        lambda x: jax.make_array_from_process_local_data(
-            get_sharding(x, mesh=mesh, pspec=pspec), x
+        lambda x: (
+           jax.make_array_from_process_local_data(
+               get_sharding(x, mesh=mesh, pspec=pspec), x
+           )
+           if isinstance(x, (np.ndarray, jax.Array))
+           else x
         ),
         input_data,
     )
