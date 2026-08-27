@@ -90,6 +90,7 @@ class RolloutManager:
             tokenizer=tokenizer,
             config=config,
             raiden_sync_delegate=raiden_delegate,
+            weight_sync_mode=weight_sync_mode,
         )
       elif "vanilla" in sampler_type:
         raiden_delegate = None
