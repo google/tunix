@@ -63,6 +63,10 @@ Acceptance anchors (cross-machine, same topology/image/data):
 commit_gradient_norm per update must be bitwise
 1.4907878637313843 / 2.2041752338409424 / 2.6263937950134277;
 warm update wall ~15.7-16.0 s; the only expected classifier red in
-backward mode is trace_census (trace.json export truncation, benign) plus
-xprof_census when bwd blocks are on (census still expects per-layer
-module names; instrument follow-up).
+backward mode is trace_census (trace.json export truncation, benign).
+The module census takes the launched CANON_P71_SCAN value and asserts
+that rung's backward inventory: off/fwd must show the per-layer
+pullbacks (28 x 32 executions) and no block program, bwd must show
+exactly ceil(28 / 7) = 4 `bwd_block_NN` programs at 32 executions each
+and no per-layer program.  Either family appearing in the other mode is
+a red, so a silent fallback cannot pass.

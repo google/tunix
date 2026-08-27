@@ -79,6 +79,27 @@ def _common_env(arm: str) -> dict[str, str]:
   return values
 
 
+def _zero_module_counts(p71_scan: str) -> dict[str, int]:
+  """A minimal green zero-HP plane inventory for one P71 scan rung."""
+  counts = {pattern.pattern: 1 for pattern in MODULE_CENSUS.ZERO_REQUIRED}
+  counts.update(MODULE_CENSUS.ZERO_TAIL_EXACT)
+  if p71_scan == "bwd":
+    counts.update({
+        f"jit_zt_tr_dp_parallel_bwd_block_{index:02d}":
+            MODULE_CENSUS.ZERO_BACKWARD_EXECS
+        for index in MODULE_CENSUS.expected_block_indices()
+    })
+  else:
+    # XLA folds the identically shaped per-layer pullbacks onto a single
+    # module name; both landed captures show one name at 28 x 32 events.
+    counts["jit_zt_tr_dp_parallel_bwd_layer_27"] = (
+        MODULE_CENSUS.ZERO_LAYER_COUNT * MODULE_CENSUS.ZERO_BACKWARD_EXECS
+    )
+  if p71_scan in ("fwd", "bwd"):
+    counts[MODULE_CENSUS.FWD_TAPE_SCAN] = MODULE_CENSUS.ZERO_BACKWARD_EXECS
+  return counts
+
+
 def _work(arm: str, step: int) -> dict:
   fields = {
       name: {"dtype": "int32", "shape": [64, 8], "sha256": name * 4}
@@ -321,26 +342,38 @@ fi
             self.assertEqual(receipt["reasons"], [])
 
   def test_zero_hp_module_census_requires_complete_optimizer_tail(self):
-    counts = {
-        pattern.pattern: 1 for pattern in MODULE_CENSUS.ZERO_REQUIRED
-    }
-    counts.update(MODULE_CENSUS.ZERO_TAIL_EXACT)
+    counts = _zero_module_counts("off")
     self.assertEqual(
-        MODULE_CENSUS.validate_module_counts("zero-hp", counts), []
+        MODULE_CENSUS.validate_module_counts(
+            "zero-hp", counts, p71_scan="off"
+        ),
+        [],
     )
 
     without_commit = dict(counts)
     del without_commit["jit__precomputed_gradient_commit"]
     self.assertIn(
         "jit__precomputed_gradient_commit=0!=1",
-        MODULE_CENSUS.validate_module_counts("zero-hp", without_commit),
+        MODULE_CENSUS.validate_module_counts(
+            "zero-hp", without_commit, p71_scan="off"
+        ),
     )
 
     short_scaled_step = dict(counts)
     short_scaled_step["jit__precomputed_gradient_scaled_step"] = 15
     self.assertIn(
         "jit__precomputed_gradient_scaled_step=15!=16",
-        MODULE_CENSUS.validate_module_counts("zero-hp", short_scaled_step),
+        MODULE_CENSUS.validate_module_counts(
+            "zero-hp", short_scaled_step, p71_scan="off"
+        ),
+    )
+    missing_boundary = dict(counts)
+    del missing_boundary["zt_tr_dp_parallel_bwd_adjoint"]
+    self.assertIn(
+        "missing_backward=zt_tr_dp_parallel_bwd_adjoint",
+        MODULE_CENSUS.validate_module_counts(
+            "zero-hp", missing_boundary, p71_scan="off"
+        ),
     )
     self.assertEqual(
         MODULE_CENSUS.validate_plane_names(
@@ -353,6 +386,112 @@ fi
             [f"/device:TPU:{index}" for index in range(7)]
         )
     )
+
+  def test_module_census_backward_inventory_is_p71_mode_aware(self):
+    """The census must red on the wrong program family in BOTH directions."""
+    self.assertEqual(MODULE_CENSUS.p71_scan_mode(None), "off")
+    for spelling in ("", "0", "off"):
+      self.assertEqual(MODULE_CENSUS.p71_scan_mode(spelling), "off")
+    self.assertEqual(MODULE_CENSUS.p71_scan_mode("fwd"), "fwd")
+    self.assertEqual(MODULE_CENSUS.p71_scan_mode("bwd"), "bwd")
+    with self.assertRaisesRegex(ValueError, "reserved"):
+      MODULE_CENSUS.p71_scan_mode("full")
+    with self.assertRaisesRegex(ValueError, "unset/0/off/fwd/bwd"):
+      MODULE_CENSUS.p71_scan_mode("yes")
+
+    # The block partition must track _P71_BWD_BLOCK_LAYERS' 7 -> 4 -> 2
+    # fallback ladder, ceil(L / B) with a smaller remainder block.
+    for block_layers, expected in ((7, 4), (4, 7), (2, 14), (1, 28)):
+      self.assertEqual(
+          MODULE_CENSUS.expected_block_indices(28, block_layers),
+          tuple(range(expected)),
+      )
+    self.assertEqual(MODULE_CENSUS.expected_block_indices(29, 7), tuple(range(5)))
+    with self.assertRaises(ValueError):
+      MODULE_CENSUS.expected_block_indices(28, 0)
+
+    for mode in MODULE_CENSUS.P71_SCAN_MODES:
+      with self.subTest(mode=mode):
+        self.assertEqual(
+            MODULE_CENSUS.validate_module_counts(
+                "zero-hp", _zero_module_counts(mode), p71_scan=mode
+            ),
+            [],
+        )
+
+    block_counts = _zero_module_counts("bwd")
+    layer_counts = _zero_module_counts("off")
+    for mode in ("off", "fwd"):
+      with self.subTest(claimed=mode, ran="bwd"):
+        reasons = MODULE_CENSUS.validate_module_counts(
+            "zero-hp", block_counts, p71_scan=mode
+        )
+        self.assertIn(f"p71={mode}_unexpected_bwd_block=00,01,02,03", reasons)
+        self.assertIn("missing_backward=zt_tr_dp_parallel_bwd_layer", reasons)
+    reasons = MODULE_CENSUS.validate_module_counts(
+        "zero-hp", layer_counts, p71_scan="bwd"
+    )
+    self.assertIn("p71=bwd_unexpected_bwd_layer=27", reasons)
+    self.assertIn("missing_backward=zt_tr_dp_parallel_bwd_block", reasons)
+
+    short_block_set = dict(block_counts)
+    del short_block_set["jit_zt_tr_dp_parallel_bwd_block_03"]
+    self.assertIn(
+        "bwd_block_indices=00,01,02 expected=00,01,02,03",
+        MODULE_CENSUS.validate_module_counts(
+            "zero-hp", short_block_set, p71_scan="bwd"
+        ),
+    )
+    short_block_execs = dict(block_counts)
+    short_block_execs["jit_zt_tr_dp_parallel_bwd_block_01"] = 31
+    self.assertIn(
+        "bwd_block_01=31!=32",
+        MODULE_CENSUS.validate_module_counts(
+            "zero-hp", short_block_execs, p71_scan="bwd"
+        ),
+    )
+    short_layer_execs = dict(layer_counts)
+    short_layer_execs["jit_zt_tr_dp_parallel_bwd_layer_27"] = 864
+    self.assertIn(
+        "bwd_layer_execs=864!=896",
+        MODULE_CENSUS.validate_module_counts(
+            "zero-hp", short_layer_execs, p71_scan="off"
+        ),
+    )
+    overflowing_layer = dict(layer_counts)
+    del overflowing_layer["jit_zt_tr_dp_parallel_bwd_layer_27"]
+    overflowing_layer["jit_zt_tr_dp_parallel_bwd_layer_28"] = 896
+    self.assertIn(
+        "bwd_layer_index_overflow=28 layers=28",
+        MODULE_CENSUS.validate_module_counts(
+            "zero-hp", overflowing_layer, p71_scan="off"
+        ),
+    )
+    for mode in ("fwd", "bwd"):
+      without_scan = dict(_zero_module_counts(mode))
+      del without_scan[MODULE_CENSUS.FWD_TAPE_SCAN]
+      self.assertIn(
+          f"missing_forward_tape_scan={MODULE_CENSUS.FWD_TAPE_SCAN}",
+          MODULE_CENSUS.validate_module_counts(
+              "zero-hp", without_scan, p71_scan=mode
+          ),
+      )
+
+    # CANON_P71_SCAN steers only the canonical adapter, so the stock arm
+    # keeps its monolithic train_step contract under every rung.
+    for mode in MODULE_CENSUS.P71_SCAN_MODES:
+      self.assertEqual(
+          MODULE_CENSUS.validate_module_counts(
+              "native", {"jit__train_step": 16}, p71_scan=mode
+          ),
+          [],
+      )
+
+    # The carrier must hand the census the value it launched with, or the
+    # census would assert an inventory nobody asked for.
+    common = (SCRIPTS / "run_onehost_gsm8k_xprof_common.sh").read_text()
+    self.assertIn('--p71-scan "${CANON_P71_SCAN:-}"', common)
+    self.assertIn('-e CANON_P71_SCAN="${CANON_P71_SCAN:-}"', common)
 
   def test_arm_selector_is_default_off_and_treatment_exact(self):
     self.assertEqual(GSM8K_XPROF.arm({}), "")

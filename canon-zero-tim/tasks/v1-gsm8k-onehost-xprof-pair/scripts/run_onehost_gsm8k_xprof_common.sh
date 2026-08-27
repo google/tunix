@@ -271,7 +271,7 @@ set -e
 if [ "$docker_rc" -eq 0 ]; then
   set +e
   python3 "$script_dir/census_gsm8k_xprof_modules.py" \
-    --arm "$arm" --run-root "$root" \
+    --arm "$arm" --run-root "$root" --p71-scan "${CANON_P71_SCAN:-}" \
     >"$xprof_census" 2>&1
   xprof_census_rc=$?
   sudo docker run --rm --ipc=host \
