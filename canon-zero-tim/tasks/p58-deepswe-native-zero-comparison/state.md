@@ -3,12 +3,11 @@
 ## Current P58.17 decode-vs-prefill seam checkpoint (2026-08-27)
 
 - Status: one-host diagnostic complete; exact-geometry checked-VMA-off
-  discriminator implemented and host-tested, target not run. Source remains
-  dirty/uncommitted after a user-approved rebase onto operator tip
-  `9177b00b62d07a7d26a292126ba37b42f174f6de`; local HEAD and the fetched
-  remote-tracking ref match with ahead/behind `0/0`. No commit, push, image
-  publication, or Kubernetes mutation occurred. One real direct-attached
-  four-chip v5p carrier ran locally.
+  discriminator implemented and host-tested, target not run. Implementation
+  `b54bd81a26e418ef3ff32f34d25ae8d81d9ac3f9` is published on the operator
+  branch and its first remote readback matched HEAD/FETCH_HEAD/tracking with
+  ahead/behind `0/0`. No image publication or Kubernetes mutation occurred.
+  One real direct-attached four-chip v5p carrier ran locally.
 - Immutable target fact: `p58z07` ran source
   `ef46b0b3a5d8754160f0cce323ec3861b04dccdc` on disjoint rollout/trainer
   DP8xTP8 roles. It returned 121 `SUCCEEDED` and seven `MODEL_TIMEOUT` rows,

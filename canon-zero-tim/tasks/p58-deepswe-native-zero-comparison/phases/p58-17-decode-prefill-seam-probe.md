@@ -1,8 +1,9 @@
 # P58.17 — Decode-vs-prefill seam probe
 
 Status: one-host diagnostic complete and exact DP8xTP8 mechanism discriminator
-implemented/host-tested locally; source remains uncommitted/unpublished;
-target not run; no remote mutation.
+implemented/host-tested and published as
+`b54bd81a26e418ef3ff32f34d25ae8d81d9ac3f9`; matching image not published;
+target not run; no Kubernetes/TPU mutation.
 
 ## Trigger
 

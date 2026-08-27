@@ -18,7 +18,7 @@ P58 does not modify `main`. Rendering and local validation do not authorize a
 Kubernetes apply. An operator must separately approve image publication and
 each launch.
 
-## 2026-08-27 P58.17 exact-geometry checked-VMA-off diagnostic — local source ready
+## 2026-08-27 P58.17 exact-geometry checked-VMA-off diagnostic — source published
 
 The next target is not another 1,000-update retry. It is one real Step-0
 Qwen3-4B-Instruct-2507 diagnostic on the exact 128-chip disaggregated geometry:
@@ -34,13 +34,13 @@ combined with `--high-performance`, Native, three-update, warning-only, or
 manually supplied subordinate values. When it is absent, the production
 Zero-HP tuple stays unchanged at checked-VMA/P67/first-gate/P63 = 1/1/1/1.
 
-The implementation is presently dirty/unpublished on top of operator tip
-`9177b00b62d07a7d26a292126ba37b42f174f6de`; the user-approved rebase left
-local HEAD and the fetched remote-tracking ref equal at ahead/behind `0/0`.
-That base SHA still does not contain the uncommitted P58.17 implementation.
-Do not render from it or improvise the flags in YAML. After the user separately
-approves source publication and a matching digest-pinned image exists, fetch
-the published operator tip and use:
+The implementation is published as
+`b54bd81a26e418ef3ff32f34d25ae8d81d9ac3f9`; its first remote readback
+matched HEAD/FETCH_HEAD/tracking with ahead/behind `0/0`. The older base
+`9177b00b62d07a7d26a292126ba37b42f174f6de` does not contain P58.17. Fetch the
+final operator tip after the publication checkpoint and never improvise the
+flags in YAML. After the user separately approves a matching digest-pinned
+image, use:
 
 ```bash
 export P58_EXPECT_SOURCE_SHA=<exact-published-40-character-sha>
@@ -97,10 +97,10 @@ export P58_ONEHOST_EXPECT_HOSTNAME=THE_EXACT_OUTPUT_OF_HOSTNAME
 bash canon-zero-tim/tasks/p58-deepswe-native-zero-comparison/scripts/run_onehost_deepswe_seam_probe_docker.sh p58s01
 ```
 
-Run only from the eventual published operator tip on a clean named `local/*`
-branch and one direct-attached four-chip v5p host. The source is presently
-local/unpublished, so no executor may use base
-`019d7a7e1cb7763b2ad4ffdc35e84bf9c217afe4` as though it contained P58.17.
+Run only from the final published operator tip on a clean named `local/*`
+branch and one direct-attached four-chip v5p host. Implementation
+`b54bd81a26e418ef3ff32f34d25ae8d81d9ac3f9` contains P58.17; no executor may
+use historical base `019d7a7e1cb7763b2ad4ffdc35e84bf9c217afe4` as though it did.
 The script performs read-only prerequisite/identity checks, installs the
 canonical overlay into the fresh artifact root, launches one real signed
 Pillow task with Qwen3-4B DP1xTP4/G2/4K/16 turns, preserves full trajectories,

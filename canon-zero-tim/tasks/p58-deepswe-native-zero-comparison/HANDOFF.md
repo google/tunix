@@ -1,6 +1,6 @@
 # P58 DeepSWE native-first training handoff
 
-## 2026-08-27 P58.17 exact-geometry selector — implemented locally, target not run
+## 2026-08-27 P58.17 exact-geometry selector — source published, target not run
 
 Supersede the last sentence of the one-host section below: the production
 renderer now has a dedicated default-off exact-geometry discriminator. Do not
@@ -15,15 +15,13 @@ checked VMA, its P66 alias, P67 scoping, first-update gate, and P63 clip. After
 one real Step-0 rollout and strict A/B/C pre-alignment it exits code 42 before
 fixed-head VJP, P59/P66 backward, or any optimizer commit.
 
-The source is still dirty and unpublished in
-`/home/yuxuan/code_rl_repro/worktrees/p58_fixed_seed_0824`, based on
-`9177b00b62d07a7d26a292126ba37b42f174f6de`. The local branch and the fetched
-operator tracking ref are equal at that SHA (ahead/behind `0/0`); the P58.17
-changes remain uncommitted on top. The base SHA does not contain this
-implementation. Wait for
-explicit commit/push approval, then fetch the resulting operator tip and
-record its actual 40-character SHA. Build/publish a matching image only after
-separate approval.
+The implementation is published as
+`b54bd81a26e418ef3ff32f34d25ae8d81d9ac3f9` on the operator branch and its
+first remote readback matched HEAD/FETCH_HEAD/tracking with ahead/behind
+`0/0`. Fetch the final operator tip after this documentation checkpoint and
+record that actual 40-character SHA; never substitute the older base
+`9177b00b62d07a7d26a292126ba37b42f174f6de`. No matching image or target run
+exists yet. Build/publish a matching image only after separate approval.
 
 On the remote operator checkout, after source/image publication and readback:
 
@@ -55,7 +53,7 @@ supports the topology-shaped checked-VMA leak hypothesis; the second says
 checked VMA is not a sufficient cause and promotes seam replay. Neither is a
 full-training or Zero-TIM certification.
 
-## 2026-08-27 P58.17 decode-vs-prefill seam probe — locally executed, not published
+## 2026-08-27 P58.17 decode-vs-prefill seam probe — locally executed, source published
 
 This section supersedes the P58.16 instruction to launch another full training
 retry. Immutable `p58z07` already proved the loader-metadata repair and
@@ -68,11 +66,11 @@ shift discriminator refutes a simple one-token offset.
 
 The local P58.17 source adds a single-task DP1xTP4 Zero-HP carrier and an
 automatic artifact classifier/bundler. The carrier has now run locally, but
-the source remains uncommitted and unpublished. Do not run from base commit
-`019d7a7e1cb7763b2ad4ffdc35e84bf9c217afe4`; it does not contain these dirty
-changes. Wait until the user explicitly authorizes source publication, then
-fetch the final operator tip and record its actual 40-character SHA. Never
-substitute an older publication SHA.
+that run remains development evidence. The source is published in
+`b54bd81a26e418ef3ff32f34d25ae8d81d9ac3f9`. Fetch the final operator tip
+containing the publication checkpoint and record its actual 40-character SHA;
+do not run from historical base
+`019d7a7e1cb7763b2ad4ffdc35e84bf9c217afe4` or substitute another SHA.
 
 On one direct-attached four-chip v5p host, use a fresh clean `local/*` branch.
 Do not use Pathways or Kubernetes. Confirm the default local Qwen3-4B snapshot,

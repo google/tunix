@@ -1238,3 +1238,20 @@
   retained as a recovery point. No commit, push, image publication,
   Kubernetes/TPU launch, credential access, or remote artifact mutation
   occurred.
+
+## 2026-08-27T19:20:00Z — P58.17 implementation published
+
+- Type: user-approved implementation commit / operator-branch publication /
+  remote readback.
+- Commit: `b54bd81a26e418ef3ff32f34d25ae8d81d9ac3f9` (`P58: add
+  exact-geometry checked-VMA diagnostic`) contains the one-host seam evidence
+  tooling and the exact DP8xTP8+DP8xTP8 checked-VMA-off discriminator.
+- Validation carried into publication: complete pinned-image gate exits zero
+  with `P58_EXACT_IMAGE_CPU_PASS ... checked_vma_diagnostic=1 ...
+  regressions=1`; flag audit is `393/393/393`; staged diff hygiene passed.
+- Readback: local HEAD, `FETCH_HEAD`, and the operator remote-tracking ref all
+  resolved to the implementation commit with ahead/behind `0/0`. `main` was
+  neither modified nor pushed.
+- Boundary: source publication is complete. Matching image publication,
+  Kubernetes dry-run/apply, and the 128-chip target remain separately
+  approval-gated and NOT RUN.
