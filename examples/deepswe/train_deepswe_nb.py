@@ -17,6 +17,7 @@ from flax import nnx
 import grain
 from huggingface_hub import snapshot_download
 import jax
+from jax.experimental import mesh_utils
 import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 try:
@@ -698,6 +699,14 @@ if P34_DEEPSWE:
       if p58_tim
       else "native-raw"
   )
+  if os.environ.get("CANON_P58_CHECKED_VMA_DIAGNOSTIC", "") == "off":
+    print(
+        "[P58.VMA.DIAGNOSTIC] profile_resolved selector=off dp=8 tp=8 "
+        "checked_vma=0 compatibility_alias=0 vma_p59_only=0 "
+        "fixed_ar_gather=1 continue_decode=8 prefix_cache=0 backward=0 "
+        "optimizer_commits=0",
+        flush=True,
+    )
   p58_filter_statuses = {
       agent_types.TrajectoryStatus.MAX_STEPS_REACHED,
       agent_types.TrajectoryStatus.MAX_CONTEXT_LIMIT_REACHED,
@@ -831,6 +840,7 @@ if (
   )
 
 P58_ONEHOST_XPROF_ARM = ""
+P58_ONEHOST_SEAM_PROBE = False
 if ONEHOST_SMOKE:
   stage = os.environ.get("CANON_DEEPSWE_ONEHOST_STAGE", "")
   if stage not in ("rollout-only", "backward-no-commit", "one-update"):
@@ -853,6 +863,7 @@ if ONEHOST_SMOKE:
   ):
     raise ValueError("one-host stage selectors are inconsistent")
   P58_ONEHOST_XPROF_ARM = deepswe_debug.onehost_xprof_arm(os.environ)
+  P58_ONEHOST_SEAM_PROBE = deepswe_debug.onehost_seam_probe(os.environ)
   if P58_ONEHOST_XPROF_ARM:
     common_xprof = {
         "CANON_XPROF_PHASE": "update",
@@ -930,6 +941,10 @@ if ONEHOST_SMOKE:
       raise ValueError(
           f"P58 one-host XProf numerical arm drifted: {wrong}"
       )
+  expected_prompt_length = 4096 if P58_ONEHOST_SEAM_PROBE else 3584
+  expected_response_length = 4096 if P58_ONEHOST_SEAM_PROBE else 512
+  expected_turns = 16 if P58_ONEHOST_SEAM_PROBE else 2
+  expected_batched_tokens = 256 if P58_ONEHOST_SEAM_PROBE else 512
   onehost_exact = {
       "model_version": MODEL_VERSION == "Qwen3-4B-Instruct-2507",
       "local_model": bool(MODEL_ABSOLUTE_PATH)
@@ -940,15 +955,17 @@ if ONEHOST_SMOKE:
       "compute_logps_micro_batch_size": COMPUTE_LOGPS_MICRO_BATCH_SIZE == 1,
       "rollout_micro_batch_size": ROLLOUT_MICRO_BATCH_SIZE == 1,
       "num_generations": NUM_GENERATIONS == 2,
-      "max_prompt_length": MAX_PROMPT_LENGTH == 3584,
-      "max_response_length": MAX_RESPONSE_LENGTH == 512,
-      "max_turns": MAX_TURNS == 2,
+      "max_prompt_length": MAX_PROMPT_LENGTH == expected_prompt_length,
+      "max_response_length": MAX_RESPONSE_LENGTH == expected_response_length,
+      "max_turns": MAX_TURNS == expected_turns,
       "max_steps": MAX_STEPS == 1,
       "num_iterations": NUM_ITERATIONS == 1,
       "rollout_engine": ROLLOUT_ENGINE == "vllm",
       "use_rollout_logps": USE_ROLLOUT_LOGPS is True,
       "max_num_seqs": VLLM_MAX_NUM_SEQS == 2,
-      "max_batched_tokens": VLLM_MAX_BATCHED_TOKENS == 512,
+      "max_batched_tokens": (
+          VLLM_MAX_BATCHED_TOKENS == expected_batched_tokens
+      ),
       "optimizer_device_resident": OPTIMIZER_OFFLOAD is False,
       "checkpoint_disabled": CKPT_DIR is None,
       "gold_whitelist": bool(args.gold_whitelist),
@@ -957,10 +974,18 @@ if ONEHOST_SMOKE:
   failures = [name for name, passed in onehost_exact.items() if not passed]
   if failures:
     raise ValueError(f"one-host DeepSWE CLI mismatch: {failures}")
+  probe_name = "smoke"
+  if P58_ONEHOST_XPROF_ARM:
+    probe_name = "xprof"
+  if P58_ONEHOST_SEAM_PROBE:
+    probe_name = "seam"
   print(
       "[DEEPSWE.ONEHOST.CLI] PASS model=Qwen3-4B-Instruct-2507 "
-      f"stage={stage} prompts=1 generations=2 prompt=3584 response=512 "
-      "train_sequence=4096 turns=2 "
+      f"stage={stage} prompts=1 generations=2 "
+      f"probe={probe_name} "
+      f"prompt={expected_prompt_length} response={expected_response_length} "
+      f"train_sequence={expected_prompt_length + expected_response_length} "
+      f"turns={expected_turns} "
       "optimizer=device checkpoint=off",
       flush=True,
   )
@@ -1337,12 +1362,16 @@ if P34_DEEPSWE:
       flush=True,
   )
 elif ONEHOST_SMOKE:
-  shared_devices = np.asarray(devices, dtype=object).reshape((1, 4))
+  shared_devices = mesh_utils.create_device_mesh(
+      (1, 4), devices, allow_split_physical_axes=True
+  )
   rollout_devices = shared_devices
   train_devices = shared_devices
+  shared_device_ids = tuple(int(device.id) for device in shared_devices.flat)
   print(
       "[DEEPSWE.ONEHOST.TOPOLOGY] PASS devices=4 "
-      "rollout=DP1xTP4 trainer=DP1xTP4 colocated=1 pathways=0",
+      "rollout=DP1xTP4 trainer=DP1xTP4 colocated=1 pathways=0 "
+      f"device_ids={shared_device_ids}",
       flush=True,
   )
 else:

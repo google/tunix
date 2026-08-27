@@ -129,6 +129,28 @@ class AlignmentTest(absltest.TestCase):
       with open(report, encoding="utf-8") as report_file:
         self.assertEqual(json.loads(report_file.readline())["verdict"], "PASS")
 
+  def test_wrap_normalizes_inactive_optional_sampling_transforms(self):
+    wrapped = self._wrapped(rows=1)
+    wrapped = alignment.wrap_train_example(
+        wrapped.train_example,
+        s_decode=wrapped.s_decode,
+        s_prefill=wrapped.s_prefill.copy(),
+        t_old=wrapped.t_old.copy(),
+        action_mask=wrapped.action_mask,
+        completion_valid_mask=wrapped.completion_valid_mask,
+        prompt_mask=wrapped.prompt_mask,
+        tokens=wrapped.tokens,
+        policy_version=wrapped.policy_version,
+        temperature=0.7,
+        top_k=None,
+        top_p=None,
+        s_prefill_source=_real_rescore,
+    )
+    np.testing.assert_array_equal(
+        wrapped.sampling_values,
+        np.asarray([[0.7, 0.0, 1.0]], dtype=np.float32),
+    )
+
   def test_pre_backward_gate_passes_and_writes_two_boundaries(self):
     wrapped = self._wrapped()
     with tempfile.TemporaryDirectory() as tmpdir:

@@ -649,8 +649,8 @@ def wrap_train_example(
     tokens: Any,
     policy_version: Any,
     temperature: float,
-    top_k: int,
-    top_p: float,
+    top_k: int | None,
+    top_p: float | None,
     s_prefill_source: Any,
     all_compact_filtered: bool = False,
 ) -> ObservedTrainExample:
@@ -703,6 +703,12 @@ def wrap_train_example(
     raise AlignmentGateError(
         "S_prefill aliases S_decode; the decode-vs-rescore gate would be vacuous"
     )
+  # vLLM represents an inactive top-k/top-p transform as None in some model
+  # generation configs.  The real prefill rescore normalizes those values to
+  # the neutral sampling contract (top_k=0, top_p=1.0); persist that same
+  # contract in the sidecar instead of attempting float(None).
+  normalized_top_k = 0 if top_k is None else int(top_k)
+  normalized_top_p = 1.0 if top_p is None else float(top_p)
   return ObservedTrainExample(
       train_example=train_example,
       s_decode=sd.copy(),
@@ -715,7 +721,8 @@ def wrap_train_example(
       policy_version=np.asarray(policy_version).copy(),
       sampling_values=np.repeat(
           np.asarray(
-              [[temperature, float(top_k), top_p]], dtype=np.float32
+              [[temperature, float(normalized_top_k), normalized_top_p]],
+              dtype=np.float32,
           ),
           expected[0],
           axis=0,

@@ -35,6 +35,7 @@ MAX_CONCURRENCY = GLOBAL_PROMPTS * GENERATIONS
 FIXED_SEED = 42
 _STAGE_STEPS = {"three-update": 3, "full": 1000}
 _ARMS = ("native", "zero")
+_CHECKED_VMA_DIAGNOSTIC = "off"
 _KUEUE_MANAGED_WORKER_POOLS = frozenset({
     "auto",
     "none",
@@ -143,6 +144,7 @@ def render(
     whitelist_sha256: str = CLEAN_WHITELIST_SHA256,
     sampler_is: bool = False,
     high_performance: bool = False,
+    checked_vma_off_diagnostic: bool = False,
 ) -> dict[str, Any]:
   """Returns one immutable P58 native or zero JobSet."""
   if stage not in _STAGE_STEPS:
@@ -151,6 +153,12 @@ def render(
     raise ValueError("P58 arm must be native or zero")
   if high_performance and (arm != "zero" or stage != "full"):
     raise ValueError("P58 high-performance is admitted only for Zero full")
+  if checked_vma_off_diagnostic and (
+      arm != "zero" or stage != "full" or high_performance
+  ):
+    raise ValueError(
+        "P58 checked-VMA-off diagnostic is its own Zero/full HP selector"
+    )
   if sampler_is and arm != "native":
     raise ValueError("P58 sampler IS is admitted only for the native arm")
   if sampler_is and high_performance:
@@ -177,7 +185,16 @@ def render(
       fixed_lm_head=False,
   )
 
-  treatment = "zero-hp" if high_performance else "native-is" if sampler_is else arm
+  hp_bundle = high_performance or checked_vma_off_diagnostic
+  treatment = (
+      "zero-hp-vmaoff-precheck"
+      if checked_vma_off_diagnostic
+      else "zero-hp"
+      if high_performance
+      else "native-is"
+      if sampler_is
+      else arm
+  )
   name = (
       f"canon-p58-ds4b-{treatment}-"
       f"{'three' if stage == 'three-update' else 'full'}-{run_id}"
@@ -191,11 +208,18 @@ def render(
       "canon.zero-tim/stage": stage,
       "canon.zero-tim/arm": arm,
       "canon.zero-tim/topology": "128",
+      "canon.zero-tim/fixed-lm-head": "1" if hp_bundle else "0",
   })
   if sampler_is:
     document["metadata"]["labels"]["canon.zero-tim/sampler-recipe"] = (
         "token-is"
     )
+  if checked_vma_off_diagnostic:
+    document["metadata"]["labels"].update({
+        "canon.zero-tim/diagnostic": "p58-checked-vma-off",
+        "canon.zero-tim/backward": "0",
+        "canon.zero-tim/optimizer-commits": "0",
+    })
   queue_name = str(
       document["metadata"]["labels"].get(_KUEUE_QUEUE_LABEL, "")
   )
@@ -249,7 +273,7 @@ def render(
       "restartStrategy": "Recreate",
   }
   p34._set_env(main, {
-      "CANON_PROFILE_FILE": HP_PROFILE if high_performance else PROFILE,
+      "CANON_PROFILE_FILE": HP_PROFILE if hp_bundle else PROFILE,
       "CANON_STATE": run_root,
       "CANON_P34_RUN_STAGE": stage,
       "CANON_P34_NO_COMMIT": "0",
@@ -273,8 +297,8 @@ def render(
       "CANON_P34_DISABLE_TIS": "0" if sampler_is else "1",
       "CANON_P58_EXPECTED_UPDATES": str(_STAGE_STEPS[stage]),
       "CANON_P58_DEBUG_DIR": f"{run_root}/debug",
-      "CANON_V1_HP_FULL": "1" if high_performance else "0",
-      "CANON_P38_FIXED_LM_HEAD": "1" if high_performance else "0",
+      "CANON_V1_HP_FULL": "1" if hp_bundle else "0",
+      "CANON_P38_FIXED_LM_HEAD": "1" if hp_bundle else "0",
       "CANON_P34_CLEAN_ROWS": str(CLEAN_ROWS),
       "CANON_DEEPSWE_ALIGNMENT_WARN_ONLY": "1" if arm == "native" else "0",
       "CANON_OPT_STATE_RESIDENT": "1",
@@ -311,6 +335,16 @@ def render(
       ),
       "CANON_OPTIMIZER_HBM_MIN_FREE_BYTES": str(8 * 1024**3),
   })
+  if checked_vma_off_diagnostic:
+    p34._set_env(main, {
+        "CANON_P58_CHECKED_VMA_DIAGNOSTIC": _CHECKED_VMA_DIAGNOSTIC,
+        "CANON_P38_PRECHECK_ONLY": "1",
+        "CANON_P38_CONTROLLED_EXIT": "1",
+        "CANON_P38_DIAGNOSTIC_ROUNDS": "1",
+        "CANON_P38_DIAGNOSTIC_ROUND_FILE": (
+            f"{run_root}/p38_diagnostic_round"
+        ),
+    })
 
   worker = p34._worker(document)
   worker["completions"] = WORKERS
@@ -347,6 +381,7 @@ def render(
       worker_nodepool=worker_nodepool,
       sampler_is=sampler_is,
       high_performance=high_performance,
+      checked_vma_off_diagnostic=checked_vma_off_diagnostic,
   )
   return document
 
@@ -391,6 +426,9 @@ def treatment_signature(document: Mapping[str, Any]) -> dict[str, Any]:
       "alignment_warning_only": env["CANON_DEEPSWE_ALIGNMENT_WARN_ONLY"],
       "proxy_xla": proxy_xla,
       "high_performance": env.get("CANON_V1_HP_FULL", "0"),
+      "checked_vma_diagnostic": env.get(
+          "CANON_P58_CHECKED_VMA_DIAGNOSTIC", ""
+      ),
       "disable_sampler_is": env["CANON_P34_DISABLE_SAMPLER_IS"],
       "disable_tis": env["CANON_P34_DISABLE_TIS"],
       "sampler_is": tuple(
@@ -411,9 +449,11 @@ def validate(
     worker_nodepool: str,
     sampler_is: bool = False,
     high_performance: bool = False,
+    checked_vma_off_diagnostic: bool = False,
 ) -> None:
   if stage not in _STAGE_STEPS or arm not in _ARMS:
     raise ValueError("invalid P58 stage or arm")
+  hp_bundle = high_performance or checked_vma_off_diagnostic
   head = p34._head(document)
   cpu_nodepool = head.get("nodeSelector", {}).get(
       "cloud.google.com/gke-nodepool", ""
@@ -427,6 +467,10 @@ def validate(
   }
   if document["spec"].get("failurePolicy") != expected_failure_policy:
     raise ValueError("P58 requires exact Attempt-0 failure policy")
+  if document["metadata"]["labels"].get(
+      "canon.zero-tim/fixed-lm-head"
+  ) != ("1" if hp_bundle else "0"):
+    raise ValueError("P58 fixed lm-head label drifted from the selected bundle")
   if cpu_nodepool != _CPU_NODEPOOL:
     raise ValueError("P58 CPU head lost the admitted cpu-np node pool")
   if (
@@ -453,7 +497,7 @@ def validate(
     raise ValueError("P58 client image is not digest-pinned")
   expected = {
       "CANON_EXPECT_COMMIT": source_commit,
-      "CANON_PROFILE_FILE": HP_PROFILE if high_performance else PROFILE,
+      "CANON_PROFILE_FILE": HP_PROFILE if hp_bundle else PROFILE,
       "CANON_P34_RUN_STAGE": stage,
       "CANON_P34_NO_COMMIT": "0",
       "CANON_P58_DEEPSWE_TIM": "1",
@@ -462,8 +506,8 @@ def validate(
       "CANON_P34_DISABLE_SAMPLER_IS": "0" if sampler_is else "1",
       "CANON_P34_DISABLE_TIS": "0" if sampler_is else "1",
       "CANON_P58_EXPECTED_UPDATES": str(_STAGE_STEPS[stage]),
-      "CANON_V1_HP_FULL": "1" if high_performance else "0",
-      "CANON_P38_FIXED_LM_HEAD": "1" if high_performance else "0",
+      "CANON_V1_HP_FULL": "1" if hp_bundle else "0",
+      "CANON_P38_FIXED_LM_HEAD": "1" if hp_bundle else "0",
       "CANON_P34_CLEAN_ROWS": str(CLEAN_ROWS),
       "CANON_DEEPSWE_ALIGNMENT_WARN_ONLY": "1" if arm == "native" else "0",
       "CANON_OPT_STATE_RESIDENT": "1",
@@ -475,6 +519,18 @@ def validate(
       ),
       "NODE_SELECTOR_VAL": cpu_nodepool,
   }
+  if checked_vma_off_diagnostic:
+    expected.update({
+        "CANON_P58_CHECKED_VMA_DIAGNOSTIC": _CHECKED_VMA_DIAGNOSTIC,
+        "CANON_P38_PRECHECK_ONLY": "1",
+        "CANON_P38_CONTROLLED_EXIT": "1",
+        "CANON_P38_DIAGNOSTIC_ROUNDS": "1",
+        "CANON_P38_DIAGNOSTIC_ROUND_FILE": (
+            f"{env['CANON_STATE']}/p38_diagnostic_round"
+        ),
+    })
+  elif "CANON_P58_CHECKED_VMA_DIAGNOSTIC" in env:
+    raise ValueError("P58 production render contains a diagnostic selector")
   wrong = {
       key: env.get(key) for key, value in expected.items()
       if env.get(key) != value
@@ -625,6 +681,7 @@ def main() -> None:
   parser.add_argument("--whitelist-sha256", default=CLEAN_WHITELIST_SHA256)
   parser.add_argument("--sampler-is", action="store_true")
   parser.add_argument("--high-performance", action="store_true")
+  parser.add_argument("--checked-vma-off-diagnostic", action="store_true")
   args = parser.parse_args()
   if args.output.exists():
     raise FileExistsError(f"refusing to overwrite JobSet: {args.output}")
@@ -643,10 +700,13 @@ def main() -> None:
       whitelist_sha256=args.whitelist_sha256,
       sampler_is=args.sampler_is,
       high_performance=args.high_performance,
+      checked_vma_off_diagnostic=args.checked_vma_off_diagnostic,
   )
   args.output.write_text(p34.dump_jobset(document))
   recipe = (
-      "native-is"
+      "zero-hp-vmaoff-precheck"
+      if args.checked_vma_off_diagnostic
+      else "native-is"
       if args.sampler_is
       else "zero-hp"
       if args.high_performance

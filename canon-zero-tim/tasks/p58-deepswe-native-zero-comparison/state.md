@@ -1,6 +1,74 @@
 # State
 
-## Current P58.16 NNX loader-metadata checkpoint (2026-08-27)
+## Current P58.17 decode-vs-prefill seam checkpoint (2026-08-27)
+
+- Status: one-host diagnostic complete; exact-geometry checked-VMA-off
+  discriminator implemented and host-tested, target not run. Source remains
+  dirty/uncommitted after a user-approved rebase onto operator tip
+  `9177b00b62d07a7d26a292126ba37b42f174f6de`; local HEAD and the fetched
+  remote-tracking ref match with ahead/behind `0/0`. No commit, push, image
+  publication, or Kubernetes mutation occurred. One real direct-attached
+  four-chip v5p carrier ran locally.
+- Immutable target fact: `p58z07` ran source
+  `ef46b0b3a5d8754160f0cce323ec3861b04dccdc` on disjoint rollout/trainer
+  DP8xTP8 roles. It returned 121 `SUCCEEDED` and seven `MODEL_TIMEOUT` rows,
+  six solved trajectories, and 31 admitted nonzero advantages. The
+  P58.16 four placement/state/JIT/scorer contracts passed. The strict
+  pre-backward gate then stopped before VJP/AdamW/checkpoint.
+- Numerical fact: `N_action=379496`; `S_prefill_vs_T_old` is exact;
+  `S_decode_vs_S_prefill` has 32,952 differing elements and 71,797 differing
+  serialized bytes. The earlier log entry calling 71,797 a token count is
+  corrected here. First mismatch absolute delta is `0.00435257`; maximum is
+  `11.87498` later in the trajectory.
+- Artifact join: all 1,024 reported mismatches exactly match durable token ID,
+  action mask, and decode logprob. They map to trajectory rows 49 and 62, the
+  same signed Pillow task. Shift-0 median absolute delta is `0.0040245`; -1/+1
+  medians are about `0.4952/0.4922`, refuting a simple token offset.
+- Implementation: `classify_decode_prefill_probe.py` fails closed on missing,
+  non-finite, count-drifted, or unjoinable evidence. The default-off seam
+  selector extends only the Zero-HP DP1xTP4 backward-no-commit carrier to the
+  frozen task, G2, 4K response, 16 turns, serial scheduling, strict alignment,
+  durable trajectory output, and automatic return bundle.
+- Local result: `p58s17` returned two successful real R2E trajectories,
+  `N_action=4808`, and diagnostic `PASS / FINITE_RED_REPRODUCED` with zero
+  optimizer commits. A-B differs at 2,488 elements (`max_abs=1.3662147522`),
+  and B-C differs at 988 elements. Shift 0 is decisively closer than shifts
+  -1/+1, so a simple token displacement is rejected.
+- Evidence: bundle
+  `/mnt/disks/tunix-data/deepswe-onehost-xprof/p58_zero-hp_p58s17_20260827t1045z/P58_SEAM_PROBE_RETURN.tar.gz`
+  has SHA-256
+  `6285b5d2e8958ee85bd4b4190beaa240c7239ad6d07165a0948d7ba7f2b32eee`.
+- Repair intake: the one-host trainer now uses topology-aware device order;
+  the Zero path installs the generated runner as a real package overlay;
+  alignment normalizes inactive `top_k/top_p=None`; and the final runner pins
+  the frozen whitelist SHA in its manifest. TP8-only model/kernel overlays are
+  excluded from TP4 by construction.
+- Validation: focused probe/one-host tests pass 11/11; the pinned-image
+  alignment suite passes 43/43; and the complete P58 exact-image gate ends in
+  `P58_EXACT_IMAGE_CPU_PASS ... onehost_xprof=1 ...
+  disaggregated_trainer_mesh=4 ... regressions=1`.
+- Claim boundary: this carrier does not match `p58z07` exactly because local
+  B-C is also RED. It is not forced-token replay and cannot certify
+  TP8, DP8, disaggregated Pathways, backward, optimizer correctness, or
+  convergence. The next decisive experiment is an admitted, Step-0/no-commit
+  checked-VMA-off selector on the exact DP8xTP8+DP8xTP8 carrier; do not
+  improvise the selector against the production full profile.
+- Exact-geometry implementation: renderer flag
+  `--checked-vma-off-diagnostic` creates a 128-chip Zero/full HP carrier and
+  sets the single selector `CANON_P58_CHECKED_VMA_DIAGNOSTIC=off`. The profile,
+  `00_env.sh`, authoritative `env.sh` reload, Python contract, runtime marker,
+  controlled-exit postflight, durable classifier, flag registry, and
+  render-only preparation wrapper all fail closed. The selector derives
+  checked VMA/P66 alias/P67/first-update gate/P63 to zero and preserves every
+  other signed P58 Zero-HP serving/data/geometry field. Production default is
+  unchanged when absent.
+- Target evidence contract: 128 durable rows; finite positive action count;
+  exact B-C; either exact or finite-red A-B classification; exactly one Step-0
+  precheck and code-42 exit; no fixed-head VJP, P59/P66 backward, global step,
+  or optimizer update. The full run root is returned. Target remains NOT RUN.
+- Phase: `phases/p58-17-decode-prefill-seam-probe.md`.
+
+## Historical P58.16 pre-target NNX loader-metadata checkpoint (2026-08-27)
 
 - Status: implementation commit
   `dba5211ac4945fefb50337603c800d9f8e3d37b5` is published and read back on

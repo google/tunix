@@ -153,6 +153,34 @@ printf '%s\n' "$CANON_PROFILE|$CANON_CONTINUE_DECODE|$CANON_FIXED_AR_GATHER|$CAN
         output,
     )
 
+  def test_zero_hp_checked_vma_off_diagnostic_resolves_exact_tuple(self):
+    script = f"""
+set -euo pipefail
+export CANON_STATE=/tmp/p58-vmaoff-test
+export CANON_V1_HP_FULL=1
+export CANON_P58_TIM_ARM=zero
+export CANON_P58_DEEPSWE_TIM=1
+export CANON_P58_TIM_ADMITTED=1
+export CANON_P34_RUN_STAGE=full
+export CANON_P34_NO_COMMIT=0
+export CANON_P58_EXPECTED_UPDATES=1000
+export CANON_P32_TRAIN_ADMITTED=1
+export CANON_P32_DP_REDUCTION_ADMITTED=1
+export CANON_P33_WORKLOAD_LAUNCH_ADMITTED=1
+export CANON_P58_CHECKED_VMA_DIAGNOSTIC=off
+export CANON_P38_PRECHECK_ONLY=1
+export CANON_P38_CONTROLLED_EXIT=1
+export CANON_P38_DIAGNOSTIC_ROUNDS=1
+export CANON_P38_DIAGNOSTIC_ROUND_FILE=/tmp/p58-vmaoff-test/round
+source {CANON}
+source {HP_PROFILE}
+printf '%s\n' "$CANON_P58_CHECKED_VMA_DIAGNOSTIC|$CANON_P59_CHECKED_VMA|$CANON_P66_P59_CHECK_VMA|$CANON_P67_P66_VMA_P59_ONLY|$CANON_V1_HP_FIRST_UPDATE_GATE|$CANON_P63_OVERFLOW_SAFE_CLIP|$CANON_FIXED_AR_GATHER|$CANON_CONTINUE_DECODE|$CANON_VLLM_ENABLE_PREFIX_CACHING"
+"""
+    output = subprocess.run(
+        ["bash", "-c", script], check=True, text=True, capture_output=True
+    ).stdout
+    self.assertIn("off|0|0|0|0|0|1|8|0", output)
+
   def test_zero_hp_profile_rejects_unsigned_or_native_entry(self):
     for v1, arm in (("0", "zero"), ("1", "native")):
       with self.subTest(v1=v1, arm=arm):

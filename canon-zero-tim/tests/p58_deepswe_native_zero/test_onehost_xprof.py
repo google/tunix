@@ -166,6 +166,31 @@ class OnehostXprofTest(unittest.TestCase):
       deepswe_debug.onehost_xprof_arm(
           {**self._env("native"), "CANON_P58_ONEHOST_XPROF_ARM": "other"}
       )
+    self.assertFalse(deepswe_debug.onehost_seam_probe(self._env("zero-hp")))
+    self.assertTrue(deepswe_debug.onehost_seam_probe({
+        **self._env("zero-hp"),
+        "CANON_P58_ONEHOST_SEAM_PROBE": "1",
+    }))
+    seam_manifest = deepswe_debug._manifest(
+        {
+            **self._env("zero-hp"),
+            "CANON_P58_ONEHOST_SEAM_PROBE": "1",
+        },
+        model_id="Qwen/Qwen3-4B-Instruct-2507",
+        output_dir=Path("/tmp/p58-seam-probe"),
+    )
+    self.assertEqual(
+        seam_manifest["contract_name"],
+        "local-qwen4b-dp1-tp4-seam-probe",
+    )
+    self.assertEqual(seam_manifest["global_trajectories"], 2)
+    self.assertEqual(seam_manifest["max_response_length"], 4096)
+    self.assertEqual(seam_manifest["max_turns"], 16)
+    with self.assertRaises(ValueError):
+      deepswe_debug.onehost_seam_probe({
+          **self._env("native"),
+          "CANON_P58_ONEHOST_SEAM_PROBE": "1",
+      })
 
   def test_arm_classifier_accepts_complete_native_and_zero_packages(self):
     for arm in ("native", "zero-hp"):
@@ -205,9 +230,62 @@ class OnehostXprofTest(unittest.TestCase):
         "CANON_P38_FIXED_LM_HEAD=0",
         "CANON_P59_RANK_PARALLEL_BACKWARD=0",
         "--max_concurrency 1",
+        "P58_ONEHOST_PROBE_PROFILE",
+        "CANON_P58_ONEHOST_SEAM_PROBE",
+        "classify_decode_prefill_probe.py",
+        "P58_SEAM_PROBE_RETURN.tar.gz",
+        "max_response_length=4096",
+        "An 8,192-token train width",
+        "--expected_filtered_rows 1",
         "--from-path \"$tpu_inference_path\" --model qwen4b",
+        'importlib.util.find_spec("tpu_inference")',
+        '"$r2egym_root/src/r2egym/__init__.py"',
+        'PYTHONPATH="$repo:$r2egym_root/src',
+        "P58_ONEHOST_R2EGYM_HOST_SITE",
+        'git -C "$r2egym_runtime_root" apply "$r2egym_patch"',
+        "r2egym_patch_sha256=",
+        "python_dep_overlay=",
+        "never expose the Python 3.11 venv's binary",
+        'python_overlay/swebench/__init__.py',
+        'gold_whitelist_sha256=',
+        'export CANON_P34_WHITELIST_SHA256="$gold_whitelist_sha256"',
+        "7294da90559ebace771b7bd3fd8be01de87e0ae9bcb7ae1e317dbe5a6ed0db9f",
+        '--metric_logger_dir "$artifact_dir/metrics"',
+        'zero_overlay_root="$artifact_dir/install/zero-overlay"',
+        'cp -a "$tpu_inference_path/." "$zero_package/"',
+        "zero_overlay_sources=(",
+        "zero_overlay_targets=(",
+        (
+            "[P58.ONEHOST.ZERO_OVERLAY] PASS files=1 scope=runner-only "
+            "qwen4b_tp8_model_shims=excluded"
+        ),
+        'importlib.util.find_spec("tpu_inference")',
+        'root / "runner/tpu_runner.py"',
+        'export PYTHONPATH="$zero_overlay_root:$shim_root',
     ):
       self.assertIn(marker, common)
+    zero_block = common.split('if [ "$arm" = "zero-hp" ]; then', 1)[1].split(
+        "else", 1
+    )[0]
+    self.assertIn("tpu_runner_p21_l30.py", zero_block)
+    for excluded in (
+        "attn_iface_patched.py",
+        "linear_p22xk.py",
+        "embed_patched.py",
+        "qwen3_p22xk.py",
+        "qwen2_p22xk.py",
+        "rpa_kernel_p66.py",
+    ):
+      self.assertNotIn(excluded, zero_block)
+    train_source = (ROOT / "examples/deepswe/train_deepswe_nb.py").read_text()
+    self.assertIn("from jax.experimental import mesh_utils", train_source)
+    self.assertIn(
+        "mesh_utils.create_device_mesh(\n"
+        "      (1, 4), devices, allow_split_physical_axes=True\n"
+        "  )",
+        train_source,
+    )
+    self.assertIn("device_ids={shared_device_ids}", train_source)
     launch = common.split("timeout --signal=TERM", 1)[1].split(
         "run_status=$?", 1
     )[0]
@@ -215,8 +293,20 @@ class OnehostXprofTest(unittest.TestCase):
     self.assertIn('>> "$raw_log" 2>&1', launch)
     native = (SCRIPTS / "run_onehost_deepswe_xprof_native.sh").read_text()
     zero = (SCRIPTS / "run_onehost_deepswe_xprof_zero_hp.sh").read_text()
+    seam = (SCRIPTS / "run_onehost_deepswe_seam_probe.sh").read_text()
+    docker = (
+        SCRIPTS / "run_onehost_deepswe_seam_probe_docker.sh"
+    ).read_text()
     self.assertIn("common.sh\" native", native)
     self.assertIn("common.sh\" zero-hp", zero)
+    self.assertIn("P58_ONEHOST_PROBE_PROFILE=seam", seam)
+    self.assertIn("p58z07_group3_pillow.jsonl", seam)
+    self.assertIn("--privileged --net=host --ipc=host --uts=host", docker)
+    self.assertIn("/var/run/docker.sock:/var/run/docker.sock", docker)
+    self.assertIn("P58_ONEHOST_DOCKER_SDK_PATH", docker)
+    self.assertIn("-e PYTHONPATH=/opt/p58-deps", docker)
+    self.assertIn("P58_ONEHOST_ALLOW_DIRTY", docker)
+    self.assertIn('safe.directory "$2/.git"', docker)
 
   def test_stock_observer_overlay_admits_only_exact_onehost_native(self):
     installer = (

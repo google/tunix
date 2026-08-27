@@ -1,5 +1,152 @@
 # P58 DeepSWE native-first training handoff
 
+## 2026-08-27 P58.17 exact-geometry selector — implemented locally, target not run
+
+Supersede the last sentence of the one-host section below: the production
+renderer now has a dedicated default-off exact-geometry discriminator. Do not
+launch another full 1,000-update retry and do not hand-edit the Zero-HP YAML.
+
+The target is Qwen3-4B-Instruct-2507 on 128 TPU chips with disjoint rollout
+DP8xTP8 and trainer DP8xTP8 roles. It keeps the 1,012-task clean whitelist,
+B8xG16, 16K response, 50 turns, seed 42, 128 rollout concurrency, prefix cache
+off, fixed lm-head, continue-decode 8, and full trajectory/debug journals.
+One selector, `CANON_P58_CHECKED_VMA_DIAGNOSTIC=off`, atomically disables
+checked VMA, its P66 alias, P67 scoping, first-update gate, and P63 clip. After
+one real Step-0 rollout and strict A/B/C pre-alignment it exits code 42 before
+fixed-head VJP, P59/P66 backward, or any optimizer commit.
+
+The source is still dirty and unpublished in
+`/home/yuxuan/code_rl_repro/worktrees/p58_fixed_seed_0824`, based on
+`9177b00b62d07a7d26a292126ba37b42f174f6de`. The local branch and the fetched
+operator tracking ref are equal at that SHA (ahead/behind `0/0`); the P58.17
+changes remain uncommitted on top. The base SHA does not contain this
+implementation. Wait for
+explicit commit/push approval, then fetch the resulting operator tip and
+record its actual 40-character SHA. Build/publish a matching image only after
+separate approval.
+
+On the remote operator checkout, after source/image publication and readback:
+
+```bash
+export P58_EXPECT_SOURCE_SHA=<exact-published-40-character-sha>
+bash canon-zero-tim/tasks/p58-deepswe-native-zero-comparison/scripts/prepare_p58_checked_vma_off_diagnostic.sh \
+  <short-fresh-run-id> \
+  <matching-image@sha256:...> \
+  <worker-nodepool-or-auto> \
+  /tmp/p58-checked-vma-off.yaml
+```
+
+The wrapper only renders. It requires a clean tree and exact equality among
+HEAD, `P58_EXPECT_SOURCE_SHA`, and `origin/yuxzhang/canon-zero-tim`; it never
+calls Kubernetes. Server dry-run and apply remain separately user-approved
+actions. A valid render contains `zero-hp-vmaoff-precheck`, profile
+`qwen3-4b-dp8-tp8-deepswe-v1-hp.env`, and diagnostic/backward/optimizer labels
+`p58-checked-vma-off/0/0`.
+
+Return the complete persistent run root, not selected log snippets. Required
+files are `env.sh`, `run.log`, `weight_attestation.jsonl`,
+`pre_alignment.jsonl`, `debug/run_manifest.json`, the Step-0 compressed
+trajectory journal, `debug/batch_metrics.jsonl`, and
+`p58_checked_vma_off.classification.json`. `updates.jsonl` must be absent or
+empty. The classifier requires exactly 128 durable rows, finite A/B/C, exact
+B-C, one precheck round, and zero VJP/backward/commit evidence. It returns
+`A_B_EXACT_WITH_CHECKED_VMA_OFF` or `A_B_RED_WITH_CHECKED_VMA_OFF`. The first
+supports the topology-shaped checked-VMA leak hypothesis; the second says
+checked VMA is not a sufficient cause and promotes seam replay. Neither is a
+full-training or Zero-TIM certification.
+
+## 2026-08-27 P58.17 decode-vs-prefill seam probe — locally executed, not published
+
+This section supersedes the P58.16 instruction to launch another full training
+retry. Immutable `p58z07` already proved the loader-metadata repair and
+returned all 128 Step-0 slots. It stopped before backward because
+`S_decode_vs_S_prefill` had 32,952 differing elements / 71,797 differing
+bytes over 379,496 action tokens; `S_prefill_vs_T_old` was exact. The first
+delta was `4.35257e-3`, not the later `11.87498` maximum. All 1,024 bounded
+mismatch records join exactly to durable artifact rows 49 and 62, and a
+shift discriminator refutes a simple one-token offset.
+
+The local P58.17 source adds a single-task DP1xTP4 Zero-HP carrier and an
+automatic artifact classifier/bundler. The carrier has now run locally, but
+the source remains uncommitted and unpublished. Do not run from base commit
+`019d7a7e1cb7763b2ad4ffdc35e84bf9c217afe4`; it does not contain these dirty
+changes. Wait until the user explicitly authorizes source publication, then
+fetch the final operator tip and record its actual 40-character SHA. Never
+substitute an older publication SHA.
+
+On one direct-attached four-chip v5p host, use a fresh clean `local/*` branch.
+Do not use Pathways or Kubernetes. Confirm the default local Qwen3-4B snapshot,
+R2E-Gym checkout, dataset cache, and Pillow Docker image already exist. Then:
+
+```bash
+git fetch origin yuxzhang/canon-zero-tim
+git switch -c local/p58-seam-p58s01 origin/yuxzhang/canon-zero-tim
+git rev-parse HEAD
+git status --short --branch
+export P58_ONEHOST_EXPECT_HOSTNAME=THE_EXACT_OUTPUT_OF_HOSTNAME
+bash canon-zero-tim/tasks/p58-deepswe-native-zero-comparison/scripts/run_onehost_deepswe_seam_probe_docker.sh p58s01
+```
+
+Optional path overrides are `DEEPSWE_TRAIN_PYTHON`,
+`DEEPSWE_QWEN4B_MODEL_PATH`, `DEEPSWE_DATASET_CACHE`,
+`DEEPSWE_R2EGYM_ROOT`, and `P58_ONEHOST_EVIDENCE_ROOT`. Do not set
+`P58_ONEHOST_ALLOW_DIRTY=1` for returned evidence. The runner requires a clean
+tracked tree, exact hostname, four TPU devices, local Qwen3-4B snapshot,
+R2E-Gym commit `0d94c4eb9431cd195c55a7ea3abd54006c9a1735`, and the immutable local task
+image. It launches one real task with G2, response 4,096, 16 turns, serial
+scheduling, prefix cache off, strict pre-alignment, and zero optimizer commits.
+Its outer timeout is two hours; per-trajectory and batch deadlines remain
+3,000 and 3,600 seconds.
+
+The host-side Docker wrapper is required on this machine: host Python cannot
+resolve TPU metadata, while the pinned privileged image consumes the four
+`/dev/vfio` devices. It uses host network/IPC/UTS and mounts the Docker socket
+so R2E creates sibling sandbox containers. It does not use Kubernetes.
+
+Return exactly these two files named by the final `RETURN_FILES` marker; do
+not manually select individual JSON/log files:
+
+```text
+P58_SEAM_PROBE_RETURN.tar.gz
+P58_SEAM_PROBE_RETURN.tar.gz.sha256
+```
+
+The completed local development run is:
+
+```text
+artifact=/mnt/disks/tunix-data/deepswe-onehost-xprof/p58_zero-hp_p58s17_20260827t1045z
+outcome=FINITE_RED_REPRODUCED
+trajectories=2 SUCCEEDED=2 N_action=4808 optimizer_commits=0
+A-B differing_elements=2488 max_abs=1.3662147521972656
+B-C differing_elements=988
+bundle_sha256=6285b5d2e8958ee85bd4b4190beaa240c7239ad6d07165a0948d7ba7f2b32eee
+```
+
+Shift 0 is much closer than shifts -1/+1, so the carrier refutes a simple
+token offset. It does not reproduce the exact `p58z07` signature: the remote
+DP8xTP8 run had a small first A-B delta and exact B-C, while this TP4 run has
+a larger first A-B delta and finite B-C RED. The one-host result therefore
+proves the real pipeline and a finite seam failure, but it cannot adjudicate
+the P67 topology-shaped checked-VMA hypothesis. The runner-only overlay is
+intentional: the remaining generated Qwen3/linear/embed/attention/RPA shims
+are signed for TP8 and are excluded rather than falsely exercised on TP4.
+
+`FINITE_RED_REPRODUCED` is diagnostic PASS evidence only.
+`EXACT_ON_THIS_CARRIER` would be useful TP4 non-reproduction evidence.
+`MALFORMED_OR_INCOMPLETE_EVIDENCE` or `INCONCLUSIVE_NO_ACTION_TOKENS` is not a
+pass. This is not forced-token decode replay: the public serving API cannot
+force the historical sampled IDs through incremental decode. It cannot
+certify TP8, disaggregated Pathways, backward, optimizer, or convergence.
+
+The next remote experiment is the admitted, zero-commit Step-0 selector
+documented in the newer section above. Compare it against the immutable
+`p58z07` signature and return pre-alignment plus full trajectory evidence.
+Do not edit environment variables after rendering and do not launch another
+1,000-update full run for this diagnosis.
+
+See `phases/p58-17-decode-prefill-seam-probe.md`. No image publication,
+Kubernetes mutation, TPU launch, commit, or push is authorized by this text.
+
 ## 2026-08-27 P58.16 loader-metadata override — source published
 
 This section supersedes P58.15's `p58z05` launch instruction. The latest

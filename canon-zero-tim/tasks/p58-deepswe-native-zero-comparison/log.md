@@ -1097,3 +1097,144 @@
 - Gate failure: Pre-backward alignment gate failed with `AlignmentGateError: pre-backward alignment gate RED: ['S_decode_vs_S_prefill']` due to 71,797 mismatch tokens between decode and prefill logprobs.
 - Classification: `PRE_BACKWARD_ALIGNMENT_GATE_RED`. Authoritative raw log archived at `canon-zero-tim/debug_logs/p58_p58z07_deepswe_s_decode_vs_prefill_gate.raw.log` and incident report under `evidence/p58z07_s_decode_vs_prefill_gate/`.
 - Next: use native warning-only alignment or investigate decode-vs-prefill attention divergence in Qwen3-4B.
+
+## 2026-08-27T07:03:10Z — P58.17 bounded seam carrier prepared locally
+
+- Type: phase transition / diagnostic implementation / local verification.
+- Source intake: local worktree fast-forwarded to exact operator tip
+  `76d3942c4a60e0738440c22623886e03e2fc0494` before edits. The two incoming
+  commits were unrelated P57 test and M15 handoff changes. `main` was not
+  touched.
+- Evidence correction: the prior `71,797 mismatch tokens` wording was wrong.
+  P58z07 has 32,952 differing elements and 71,797 differing serialized bytes
+  over 379,496 action tokens. Its first absolute delta is `0.00435257`; the
+  `11.87498` value is the later maximum.
+- Exact artifact audit: all 1,024 bounded mismatch records join to durable
+  trajectory rows 49 and 62 with exact token ID, action mask, and decode
+  logprob. Shift-0 median absolute delta is `0.0040245`; shifts -1/+1 are
+  about `0.4952/0.4922`, refuting a simple one-token displacement. Both rows
+  are the signed Pillow task frozen for the new carrier.
+- Implementation: added the default-off `CANON_P58_ONEHOST_SEAM_PROBE`
+  extension of the existing Zero-HP DP1xTP4 no-commit carrier, a one-task
+  tracked whitelist, strict durable-evidence classifier, and automatic
+  `P58_SEAM_PROBE_RETURN.tar.gz` plus checksum. The carrier uses real R2E,
+  Qwen3-4B, G2, response 8,192, 16 turns, serial scheduling, prefix cache off,
+  continue-decode 8, and no optimizer commit.
+- Fail-closed behavior: malformed/non-finite evidence, `N_action=0`, manifest
+  or journal count drift, checksum/path drift, or any mismatch that does not
+  join exactly one durable row fails. Finite RED and exact TP4 are separately
+  named bounded outcomes. Neither certifies TP8/DP8/Pathways/backward/optimizer.
+- Validation: Python compilation, Bash syntax, five new classifier tests,
+  five one-host selector/manifest tests, 21 renderer, seven profile, seven
+  sampler, two paired-XProf, seven Zero-HP classifier, four sandbox-capacity,
+  and 12 flag-registry-adjacent tests pass (70 focused tests). Deterministic
+  flag audit reports declared/actual/unique `388/388/388`; real immutable
+  P58z07 evidence reports
+  `P58_DECODE_PREFILL_REAL_ARTIFACT_PASS action=379496 differing=32952 joined=1024`;
+  `git diff --check` passes. Additional dependency-bearing suites cannot load
+  on this bare host because `metrax` is absent; the exact-image gate and real
+  one-host TPU carrier are not run and remain required target evidence.
+- Publication boundary: implementation is local and uncommitted. No commit,
+  push, image publication, Kubernetes mutation, TPU launch, model download,
+  credential access, or remote artifact mutation occurred.
+
+## 2026-08-27T11:30:00Z — P58.17 real one-host carrier completed
+
+- Type: direct-v5p diagnostic / launch-path repair / evidence packaging.
+- Source: dirty development tree based on
+  `019d7a7e1cb7763b2ad4ffdc35e84bf9c217afe4`; source-diff provenance is in
+  the manifest. This is development evidence, not published-source evidence.
+- Hardware/workload: one direct-attached four-device v5p host, Qwen3-4B-
+  Instruct-2507, DP1xTP4 colocated, one frozen real R2E Pillow task, G2,
+  response 4,096, 16 turns, prefix cache off, strict pre-alignment, and zero
+  optimizer commits.
+- Repairs exposed by staged carriers: topology-aware JAX device mesh matches
+  the vLLM `0,2,1,3` physical order; the generated canonical runner is now a
+  real private `tpu_inference` package overlay rather than an ineffective flat
+  `PYTHONPATH` directory; and alignment maps inactive `top_k/top_p=None` to
+  the same `0/1.0` values already used by prompt rescore. The one-host overlay
+  intentionally excludes Qwen3/linear/embed/attention/RPA files signed for
+  TP8.
+- Final carrier `p58s17`: both trajectories are `SUCCEEDED`; no timeout or
+  compact row exists; `N_action=4,808`. A-B differs at 2,488 elements with
+  first mismatch `0.0` versus `-0.08071136474609375` at prefix 1,737 and
+  `max_abs=1.3662147521972656`. B-C differs at 988 elements. Shift-0 median
+  absolute delta `0.02804` is much smaller than shift -1/+1
+  `0.18280/0.19583`, refuting a simple token offset.
+- Classification: `PASS / FINITE_RED_REPRODUCED` is a diagnostic pass only.
+  It does not match p58z07's exact B-C and small-first-delta signature, so it
+  neither proves nor refutes the topology-shaped P67 checked-VMA leak.
+- Artifact: `P58_SEAM_PROBE_RETURN.tar.gz` SHA-256 is
+  `6285b5d2e8958ee85bd4b4190beaa240c7239ad6d07165a0948d7ba7f2b32eee` under
+  `/mnt/disks/tunix-data/deepswe-onehost-xprof/p58_zero-hp_p58s17_20260827t1045z/`.
+- Post-run provenance hardening: the final runner requires and records the
+  frozen whitelist SHA-256
+  `7294da90559ebace771b7bd3fd8be01de87e0ae9bcb7ae1e317dbe5a6ed0db9f`;
+  the return protocol is exactly tarball plus adjacent checksum. This change
+  is focused-test covered but was made after `p58s17`, so the immutable local
+  bundle retains its empty whitelist field.
+- Validation: focused probe/one-host tests pass 11/11, the dependency-image
+  alignment suite passes 43/43, and the complete pinned-image gate exits zero
+  with `P58_EXACT_IMAGE_CPU_PASS ... onehost_xprof=1 ...
+  disaggregated_trainer_mesh=4 ... regressions=1`. Expected negative timeout
+  test logs are followed by suite `OK` markers and are not runtime failures.
+- Next: prepare an explicitly admitted exact-geometry P58 Step-0/no-commit
+  checked-VMA selector before asking a remote operator to run. Do not mutate
+  the production full profile by hand and do not spend a 1,000-update launch
+  on a pre-backward discriminator.
+- Boundary: no commit, push, image publication, Kubernetes mutation, remote
+  artifact mutation, or credential access occurred.
+
+## 2026-08-27T19:10:00Z — P58.17 exact-geometry checked-VMA discriminator implemented
+
+- Type: phase continuation / exact-geometry diagnostic implementation / local
+  contract verification.
+- Decision: do not spend a 1,000-update retry on the pre-backward `p58z07`
+  seam. Add one default-off selector on the exact 128-chip rollout DP8xTP8 +
+  trainer DP8xTP8 carrier and stop after Step-0 pre-alignment.
+- Implementation: `CANON_P58_CHECKED_VMA_DIAGNOSTIC=off` is accepted only by
+  the P58 Zero/full HP renderer. It derives checked VMA, P66 compatibility
+  alias, P67 scoping, first-update gate, and P63 clip to zero while retaining
+  fixed lm-head, continue-decode, Fixed-AR, the 1,012-task clean list, B8xG16,
+  16K/50 turns, seed 42, and full durable trajectory capture.
+- Runtime: one real rollout/prefill/trainer-old precheck is followed by
+  controlled exit 42. The full-training fixed-head receipt classifier is
+  skipped only for this selector because VJP is forbidden; the diagnostic
+  classifier independently rejects any fixed-head VJP, P59/P66 backward,
+  nonempty update report, global step, nonfinite value, malformed row, or B-C
+  drift.
+- Launch preparation: added a render-only wrapper that requires a clean tree,
+  exact published SHA equality with the operator remote-tracking ref, a
+  digest-pinned image, a fresh output path, and never calls Kubernetes.
+- Validation: Python/Bash syntax pass; focused renderer/profile/classifier/
+  seam/flag suites pass 56 tests; the real pinned-image environment suite
+  passes 15/15 after adding explicit P58 P38-precheck admission. The complete
+  pinned-image gate exits zero with terminal marker
+  `P58_EXACT_IMAGE_CPU_PASS ... zero_hp_full=1
+  checked_vma_diagnostic=1 qwen4b_fixed_head=1 checked_vma=1
+  vma_p59_only=1 first_update=1 stable_clip=1 ... regressions=1`.
+- Boundary: worktree remains dirty on local branch and behind the operator
+  branch. No fetch/rebase, commit, push, image publication, Kubernetes/TPU
+  launch, credential access, or remote mutation occurred.
+
+## 2026-08-27T19:15:00Z — P58.17 rebased onto current operator tip
+
+- Type: user-approved source synchronization / conflict reconciliation /
+  post-rebase regression verification.
+- Source: fetched and rebased the isolated local work branch from
+  `019d7a7e1cb7763b2ad4ffdc35e84bf9c217afe4` onto
+  `9177b00b62d07a7d26a292126ba37b42f174f6de`. Local HEAD and
+  `origin/yuxzhang/canon-zero-tim` now match with ahead/behind `0/0`; `main`
+  was not touched.
+- Recovery: all tracked and untracked P58.17 changes were preserved through a
+  named stash. Restore auto-merged every code file; the only conflict was the
+  `FLAGS.md` declared count. The merged appendix contains 393 unique names,
+  so the registry declaration and adjacency test were reconciled to 393.
+- Validation: flag audit passes declared/actual/unique `393/393/393`;
+  `git diff --check` passes; and the complete pinned-image gate exits zero
+  with `P58_EXACT_IMAGE_CPU_PASS ... zero_hp_full=1
+  checked_vma_diagnostic=1 ... regressions=1`.
+- Boundary: source remains dirty and unpublished. The temporary named stash is
+  retained as a recovery point. No commit, push, image publication,
+  Kubernetes/TPU launch, credential access, or remote artifact mutation
+  occurred.

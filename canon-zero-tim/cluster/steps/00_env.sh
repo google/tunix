@@ -200,6 +200,43 @@ case "${CANON_V1_FL_TP8_AB_ARM:-}" in
     fail=1
     ;;
 esac
+case "${CANON_P58_CHECKED_VMA_DIAGNOSTIC:-}" in
+  "") ;;
+  off)
+    [ "${CANON_PROFILE_FILE:-}" = \
+      "cluster/profiles/qwen3-4b-dp8-tp8-deepswe-v1-hp.env" ] && \
+    [ "${CANON_PROFILE:-}" = \
+      "qwen3-4b-dp8-tp8-deepswe-v1-hp" ] && \
+    [ "${CANON_P34_DEEPSWE:-0}" = "1" ] && \
+    [ "${CANON_P58_DEEPSWE_TIM:-0}" = "1" ] && \
+    [ "${CANON_P58_TIM_ADMITTED:-0}" = "1" ] && \
+    [ "${CANON_P58_TIM_ARM:-}" = "zero" ] && \
+    [ "${CANON_P34_RUN_STAGE:-}" = "full" ] && \
+    [ "${CANON_P34_NO_COMMIT:-1}" = "0" ] && \
+    [ "${CANON_P58_EXPECTED_UPDATES:-}" = "1000" ] && \
+    [ "${CANON_V1_HP_FULL:-0}" = "1" ] && \
+    [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "1" ] && \
+    [ "${CANON_P38_PRECHECK_ONLY:-0}" = "1" ] && \
+    [ "${CANON_P38_CONTROLLED_EXIT:-0}" = "1" ] && \
+    [ "${CANON_P38_DIAGNOSTIC_ROUNDS:-0}" = "1" ] && \
+    [ -n "${CANON_P38_DIAGNOSTIC_ROUND_FILE:-}" ] && \
+    [ "${CANON_P59_RANK_PARALLEL_BACKWARD:-0}" = "1" ] && \
+    [ "${CANON_P59_CHECKED_VMA:-1}" = "0" ] && \
+    [ "${CANON_P66_P59_CHECK_VMA:-1}" = "0" ] && \
+    [ "${CANON_P67_P66_VMA_P59_ONLY:-1}" = "0" ] && \
+    [ "${CANON_V1_HP_FIRST_UPDATE_GATE:-1}" = "0" ] && \
+    [ "${CANON_P63_OVERFLOW_SAFE_CLIP:-1}" = "0" ] && \
+    [ "${CANON_DEEPSWE_ALIGNMENT_WARN_ONLY:-1}" = "0" ] || {
+      echo "[env] P58 checked-VMA-off diagnostic contract drifted" >&2
+      fail=1
+    }
+    echo "[env] P58 checked-VMA-off precheck admitted: DP8xTP8 roles, backward=0 optimizer_commits=0"
+    ;;
+  *)
+    echo "[env] CANON_P58_CHECKED_VMA_DIAGNOSTIC must be unset or off" >&2
+    fail=1
+    ;;
+esac
 case "${CANON_P67_P66_VMA_P59_ONLY:-0}" in
   0) ;;
   1)
@@ -984,6 +1021,20 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
     fi
   done
   echo "[env] P38 serving capture enabled: kv_unified=${CANON_KV_UNIFIED:-0} path=${CANON_P38_SERVING_CAPTURE_EXPECTED_PATH:-missing}"
+elif [ "${CANON_P58_CHECKED_VMA_DIAGNOSTIC:-}" = "off" ]; then
+  for k in CANON_P38_PRECHECK_ONLY CANON_P38_CONTROLLED_EXIT \
+           CANON_P38_DIAGNOSTIC_ROUNDS CANON_P38_DIAGNOSTIC_ROUND_FILE; do
+    req "$k"
+  done
+  [ "${CANON_KV_UNIFIED:-0}" = "0" ] && \
+  [ "${CANON_P38_ONEHOST_REHEARSAL:-0}" = "0" ] && \
+  [ "${CANON_VLLM_ENABLE_PREFIX_CACHING:-0}" = "0" ] && \
+  [ "${CANON_P38_DIAGNOSTIC_ROUND_FILE:-}" = \
+      "${CANON_STATE%/}/p38_diagnostic_round" ] || {
+    echo "[env] P58 checked-VMA-off precheck carrier drifted" >&2
+    fail=1
+  }
+  echo "[env] P58 checked-VMA-off P38 precheck admitted"
 elif [ -n "${CANON_V1_FL_TP8_AB_ARM:-}" ]; then
   for k in CANON_P38_PRECHECK_ONLY CANON_P38_CONTROLLED_EXIT \
            CANON_P38_DIAGNOSTIC_ROUNDS CANON_P38_DIAGNOSTIC_ROUND_FILE \
@@ -1304,6 +1355,7 @@ if [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "1" ] && \
     esac
   fi
   [ -n "${CANON_V1_FL_TP8_AB_ARM:-}" ] || \
+  [ "${CANON_P58_CHECKED_VMA_DIAGNOSTIC:-}" = "off" ] || \
   [ -z "${CANON_MM_ALGO:-}${CANON_P38_PRECHECK_ONLY:-}${CANON_P38_CONTROLLED_EXIT:-}${CANON_P38_DIAGNOSTIC_ROUNDS:-}${CANON_P38_KV_OBSERVER_DIR:-}${CANON_P38_SEAM_OBSERVER:-}${CANON_P38_TAIL_OBSERVER:-}${CANON_P38_TERMINAL_DISCRIMINATOR:-}" ] || {
     echo "[env] fixed lm-head backward conflicts with diagnostic/algorithm env" >&2
     fail=1

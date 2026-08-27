@@ -4,7 +4,7 @@
 > 焊死数值类 flag = 删代码路径 = 程序变更,走与开启同级认证门(verify+ALIGN+canary)。
 > 生命周期档位:试验 → 已认证 → 默认开 → 焊死(开关可删)→ 退役/否决。
 > 普查基点 a94d6c0c(285 个可设置 env flag,与 ebba4850 普查零漂移);普查后续现役附录
-> 当前 385 个;本表分层登记,D 层按前缀组、语义欠账标"待考古"。
+> 当前 389 个;本表分层登记,D 层按前缀组、语义欠账标"待考古"。
 > 全量机器清单:落地 CL 时由 `grep -rhoE` 生成为附录,条目数必须 == 普查数(排除项列明)。
 
 ## A 层 · 数值语义类(动它 = 动程序身份;焊死走认证门)
@@ -61,6 +61,8 @@
 | CANON_XPROF_LABELS | 为 rollout model/logits/sample 与 trainer fwd/bwd/report JIT 写语义名称；P60-2B/2E 历史合同是一个 whole-update `train` 加 accumulator/optimizer metadata；P60-2G 对签名 Zero-HP arm 将 16 个真实 reverse/reduce/accumulate transaction 映射为 Native API `train_(update*16+micro)`，末个真实 train 跨到 optimizer 结束，无 synthetic terminal step，不改数值、JIT、同步或 Perfetto 词汇 | 仪器；V1 full 开；P56 r21/r22 已认证；P60-2F 历史 clean source `5549b5b6` 仍为其原合同 TARGET PASS，但新 UI 判据为 Native-like FAIL；P60-2G local implementation，TARGET NOT RUN | XProf 原生提供等价稳定命名后退役 |
 | CANON_P59_XPROF_BACKWARD_DIR / CANON_P59_DP4_TAIL8 / CANON_P60_DETERMINISTIC_AB | P59/P60 DP4 专用 profile、tail 与跨臂载具 | off | 历史载具完成，不进入 V1 full | 证据交付后退役 |
 | CANON_V1_GSM8K_XPROF_ARM | `native|zero-hp` 的 one-host GSM8K matched-work/XProf 观测 selector；固定 DP4×TP1、3 commits、warm update 2→3 capture，打印 profiled batch token/advantage hashes；Native 必须 vanilla stock trainer，Zero-HP 必须 strict V1/P59 bundle；P60-2G 只重跑 Zero-HP | 空/off；仅两条薄 wrapper 设置；P60-2G local，TARGET NOT RUN | pair XProf 归档后退役；不得进入 full recipe |
+| CANON_P58_ONEHOST_XPROF_ARM / CANON_P58_ONEHOST_SEAM_PROBE | P58 Qwen3-4B one-host mutation-free 诊断载具。`XPROF_ARM=native\|zero-hp` 固定 DP1×TP4/backward-no-commit；`SEAM_PROBE=1` 只允许 Zero-HP arm，并把同一载具扩展为单个已签名 Pillow task、G2、8K response、16 turns、serial scheduler。它保留真实 rollout/durable trajectory/strict decode-vs-prefill gate；有限 RED 与 exact 都只描述该 TP4 carrier，绝不认证 DP8×TP8/TP8 | 空/0；仅 tracked thin wrapper 设置；生产 P58 selector 必须 0 | TP4 首差分类和必要的 DP8×TP8 exact-geometry follow-up 结案后整体退役；不得进入 full recipe |
+| CANON_P58_CHECKED_VMA_DIAGNOSTIC | P58.17 exact-geometry 单选择器；唯一合法值 `off`。只准入 Qwen3-4B Zero-HP/full 的 128-chip disaggregated DP8×TP8+DP8×TP8 carrier，并原子派生 `P59_CHECKED_VMA=0`、P66 compatibility alias=0、P67 scoping=0、first-update gate=0、P63 clip=0 与一轮 Step-0 controlled precheck。保留 fixed-head/continue-decode/Fixed-AR/serving HP bundle，写完整 trajectory + pre-alignment，随后在 backward 和 optimizer commit 前退出 | 缺省 absent；仅 P58.17 因果诊断可设 `off`；不得与 normal Zero-HP 或 native recipe 混用 | `p58z07` checked-VMA 因果裁决与证据归档后退役；不得成为 full-training 默认值 |
 | CANON_XPROF_PHASE | 捕获窗模式:step=整步(device 缓冲 ~283 万事件/核,decode ~25s 填满,实为 engine 前 25s 织物)/ update=G6 update 入口→步完成(rollout 不入镜,缓冲装下完整 backward)/ diagnostic=冻结权重 precheck 的一个完整 A-rollout/B-full-rescore/C-old-forward round | 仪器;载具旋钮 P51_XPROF_PHASE;Phase3 profile 固定 diagnostic skip=1 steps=1 | 长期保留 |
 | CANON_UPDATE_REPORT / CANON_PRE_ALIGN_REPORT / CANON_ALIGN_REPORT | 对齐/更新报告选通 | 默认开(监控契约) | 长期保留;A−B 哨兵不可撤(用户裁决 2026-08-15) |
 | JAX_COMPILATION_CACHE_DIR(非 CANON) | 持久编译缓存(-72s/重启) | 一宿主认证；Phase4 三个 full manifest 已锁定本地目录与 GCS root，restore/save 回执 host 绿；**Pathways target hit 未验** | 三个 full target 记录 hit/miss 与 JIT 后决定是否推广 |
@@ -396,12 +398,14 @@ CANON_P57_RUN_KIND
 CANON_P57_STOP_AFTER_STEP
 CANON_P57_TIM_ARM
 CANON_P57_WORKLOAD_CANDIDATE
+CANON_P58_CHECKED_VMA_DIAGNOSTIC
 CANON_P58_DEBUG_DIR
 CANON_P58_DEEPSWE_TIM
 CANON_P58_EXPECTED_UPDATES
 CANON_P58_EXPECT_HOSTNAME
 CANON_P58_MODEL_SNAPSHOT
 CANON_P58_NATIVE_STOCK_PROMPT_OBSERVER
+CANON_P58_ONEHOST_SEAM_PROBE
 CANON_P58_ONEHOST_XPROF_ARM
 CANON_P58_R2EGYM_COMMIT
 CANON_P58_RUNNER_SHA256
@@ -513,4 +517,4 @@ CANON_XPROF_STEPS
 CANON_XPROF_TPU_TRACE_MODE
 ```
 
-Count: 391 settable names (appendix inventory above; exclusions: none).
+Count: 393 settable names (appendix inventory above; exclusions: none).

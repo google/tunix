@@ -186,6 +186,31 @@ def onehost_xprof_arm(
   return arm
 
 
+def onehost_seam_probe(
+    values: Mapping[str, str] | None = None,
+) -> bool:
+  """Returns the exclusive long-context P58 Zero-HP one-host probe.
+
+  This is a diagnostic extension of the mutation-free one-host carrier.  It
+  may reproduce a finite decode-vs-prefill RED, but it cannot certify TP8 or
+  the disaggregated DP8xTP8 production geometry.
+  """
+  environ = os.environ if values is None else values
+  raw = environ.get("CANON_P58_ONEHOST_SEAM_PROBE", "0")
+  if raw not in ("0", "1"):
+    raise ValueError(
+        "CANON_P58_ONEHOST_SEAM_PROBE must be exactly 0 or 1"
+    )
+  if raw == "0":
+    return False
+  if onehost_xprof_arm(environ) != "zero-hp":
+    raise ValueError(
+        "P58 one-host seam probe requires the exclusive Zero-HP "
+        "backward-no-commit carrier"
+    )
+  return True
+
+
 def artifact_directory(values: Mapping[str, str] | None = None) -> str:
   environ = os.environ if values is None else values
   key = {
@@ -401,13 +426,18 @@ def _manifest(
           "one-host DeepSWE artifacts require "
           "Qwen/Qwen3-4B-Instruct-2507"
       )
-    contract_name = "local-qwen4b-dp1-tp4"
+    seam_probe = onehost_seam_probe(values)
+    contract_name = (
+        "local-qwen4b-dp1-tp4-seam-probe"
+        if seam_probe
+        else "local-qwen4b-dp1-tp4"
+    )
     slice_topology = "direct-attached-v5p-4"
     role_topology = {"dp": 1, "tp": 4, "devices": 4}
     global_prompts = 1
     generations = 2
-    max_turns = 2
-    max_response_length = 512
+    max_turns = 16 if seam_probe else 2
+    max_response_length = 4096 if seam_probe else 512
     stage = values.get("CANON_DEEPSWE_ONEHOST_STAGE", "")
     xprof_arm = onehost_xprof_arm(values)
   elif mode == "p34":
@@ -501,7 +531,13 @@ def _manifest(
       "model_id": model_id,
       "contract_name": contract_name,
       "tim_arm": values.get("CANON_P58_TIM_ARM", "none"),
+      "checked_vma_diagnostic": values.get(
+          "CANON_P58_CHECKED_VMA_DIAGNOSTIC", "none"
+      ),
       "onehost_xprof_arm": xprof_arm if mode == "onehost" else "none",
+      "onehost_seam_probe": (
+          onehost_seam_probe(values) if mode == "onehost" else False
+      ),
       "slice_topology": slice_topology,
       "role_topology": role_topology,
       "global_prompts": global_prompts,

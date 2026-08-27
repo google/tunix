@@ -61,11 +61,22 @@ closure: vLLM's nested model/logits JITs still named rollout devices. P58.15
 reconstructed the same weight-free model graph and nested JITs on trainer
 devices. `p58z06` reached that reconstruction before rollout and exposed that
 Pathways dummy loading adds `_is_loaded=True` provenance to the live NNX State
-while the abstract clone has no loader marker. P58.16 is now the only active
-phase. It normalizes only that exact true-valued marker while retaining exact
+while the abstract clone has no loader marker. P58.16 then became the only
+active phase. It normalizes only that exact true-valued marker while retaining exact
 logical tree, metadata, leaf, shape, and dtype checks in both full and
 segmented trainer paths. Every serving and numerical/algorithmic contract is
 unchanged.
+
+`p58z07` subsequently proved P58.16 and completed Step-0 rollout, then exposed
+a finite strict pre-backward `S_decode_vs_S_prefill` RED while
+`S_prefill_vs_T_old` remained exact. P58.17 is now the only active phase. Its
+bounded DP1xTP4 same-task Zero-HP carrier has run and automatically joined,
+classified, and packaged the returned trajectory/alignment evidence. The
+carrier reproduced finite RED but also found B-C RED, so it is not the exact
+remote signature. The phase does not claim fixed-token replay or use TP4 to
+certify the production DP8xTP8 geometry. Its remaining deliverable is a
+default-off exact-geometry Step-0/no-commit checked-VMA discriminator, not a
+new full-training retry.
 
 ## Phases
 
@@ -88,7 +99,8 @@ unchanged.
 | P58.13 | Qwen3-4B trainer-logprob M2048 and P59-only VMA scoping | Exact `(2560,8)` fixed-head registration, Qwen3-32B negative, FrozenLake Wave-5 P67 bundle, profile/environment/Python fail-closed gates, and complete pinned-image PASS | completed source repair; `p58z03` proved fixed-head admission and exposed P58.14 before execution |
 | P58.14 | Disaggregated canonical trainer-mesh binding | Adapter receives trainer state, executes differentiable forward on the matching trainer role, retains rollout serving placement, rejects DP/TP/partial-overlap drift, and passes disjoint plus colocated image regressions | completed source repair; `p58z04` proved explicit placement and exposed P58.15 nested JIT closure |
 | P58.15 | Disaggregated nested model/logits JIT and segmented-backward binding | Reconstructed graph is state-contract exact, both hidden JITs and segmented backward execute on trainer devices, three placement receipts are classifier-enforced, and dependency-image regressions pass | completed source repair; `p58z06` exposed P58.16 loader-metadata admission before rollout |
-| P58.16 | Loader-metadata-aware NNX logical State contract | Only exact `_is_loaded=True` provenance is normalized; every other metadata/path/type/leaf/shape/dtype contract stays exact; full and segmented forced-device tests plus classifier and complete image gate pass | active — implementation `dba5211ac4945fefb50337603c800d9f8e3d37b5` published/read back; matching image and 128-TPU retry not run |
+| P58.16 | Loader-metadata-aware NNX logical State contract | Only exact `_is_loaded=True` provenance is normalized; every other metadata/path/type/leaf/shape/dtype contract stays exact; full and segmented forced-device tests plus classifier and complete image gate pass | completed — implementation published/read back; `p58z07` proved the state/JIT/scorer contracts and exposed P58.17 after rollout |
+| P58.17 | Decode-vs-prefill seam probe | Exact historical mismatch join plus one real-task DP1xTP4 Zero-HP carrier, followed by a single-selector 128-chip DP8xTP8+DP8xTP8 checked-VMA-off Step-0 discriminator with durable 128-row evidence and zero VJP/backward/commit | implementation complete locally — `p58s17` returned finite A-B and B-C RED over 4,808 action tokens; exact-geometry selector passes focused and pinned-image construction gates; source not published and target not run |
 
 Exactly one phase may be active. Commit, push, image publication, Kubernetes
 render/application, and TPU execution each remain separately user-gated.
@@ -98,7 +110,7 @@ P58.3 has CPU coverage for journal continuity and observer/classifier logic but
 no real Qwen/R2E one-host evidence; the user explicitly waived it rather than
 calling it PASS. P58.4N was superseded after p58c05 failed Kueue admission.
 P58.5N never completed and is not a valid full Native baseline. P58.6 through
-P58.16 are specified in their phase files; P58.16 is the only active phase.
+P58.17 are specified in their phase files; P58.17 is the only active phase.
 P58.7's historical target remains not run and is superseded for new Zero
 launches by P58.11 plus the P58.12 seed-route correction. P58.9 and P58.10
 source are published and read back. P58.13 implementation
@@ -108,9 +120,9 @@ its `p58z03` target is immutable failure evidence. P58.14 implementation
 immutable P58.15 trigger evidence. P58.15 implementation
 `f60cdd569c2737df6cb2968125c8e42680938981` is published, and `p58z06` is
 immutable P58.16 trigger evidence. P58.16 implementation
-`dba5211ac4945fefb50337603c800d9f8e3d37b5` is published/read back. A fresh
-`p58z07` target begins only after matching-image publication/readback,
-sandbox-capacity admission, and separate launch approval.
+`dba5211ac4945fefb50337603c800d9f8e3d37b5` is published/read back, and
+immutable `p58z07` proved it before triggering P58.17. The P58.17 one-host
+carrier and any later DP8xTP8 follow-up remain separately execution-gated.
 No remote execution is authorized by this plan alone.
 
 P58.5N attempts `p58f01` through `p58f11` remain `INCONCLUSIVE`. P58f01 exposed

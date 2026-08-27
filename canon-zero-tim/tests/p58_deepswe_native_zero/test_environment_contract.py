@@ -74,6 +74,7 @@ class P58EnvironmentContractTest(unittest.TestCase):
       *,
       sampler_is: bool = False,
       high_performance: bool = False,
+      checked_vma_off_diagnostic: bool = False,
   ) -> dict[str, str]:
     base = yaml.safe_load((PKG / "cluster/jobset-64chip.yaml").read_text())
     document = renderer.render(
@@ -89,6 +90,7 @@ class P58EnvironmentContractTest(unittest.TestCase):
         model_pvc="model-pvc",
         sampler_is=sampler_is,
         high_performance=high_performance,
+        checked_vma_off_diagnostic=checked_vma_off_diagnostic,
     )
     return dict(renderer.p34._env(document))
 
@@ -99,6 +101,7 @@ class P58EnvironmentContractTest(unittest.TestCase):
       *,
       sampler_is: bool = False,
       high_performance: bool = False,
+      checked_vma_off_diagnostic: bool = False,
   ) -> dict[str, str]:
     supplied = os.environ.copy()
     supplied.update(
@@ -107,6 +110,7 @@ class P58EnvironmentContractTest(unittest.TestCase):
             stage,
             sampler_is=sampler_is,
             high_performance=high_performance,
+            checked_vma_off_diagnostic=checked_vma_off_diagnostic,
         )
     )
     profile = supplied["CANON_PROFILE_FILE"]
@@ -135,6 +139,7 @@ class P58EnvironmentContractTest(unittest.TestCase):
       *,
       sampler_is: bool = False,
       high_performance: bool = False,
+      checked_vma_off_diagnostic: bool = False,
   ):
     supplied = os.environ.copy()
     supplied.update(
@@ -143,6 +148,7 @@ class P58EnvironmentContractTest(unittest.TestCase):
             stage,
             sampler_is=sampler_is,
             high_performance=high_performance,
+            checked_vma_off_diagnostic=checked_vma_off_diagnostic,
         )
     )
     supplied.update({
@@ -154,14 +160,24 @@ class P58EnvironmentContractTest(unittest.TestCase):
     })
     with tempfile.TemporaryDirectory() as state_dir:
       supplied["CANON_STATE"] = state_dir
+      if checked_vma_off_diagnostic:
+        supplied["CANON_P38_DIAGNOSTIC_ROUND_FILE"] = str(
+            Path(state_dir) / "p38_diagnostic_round"
+        )
       completed = subprocess.run(
           ["bash", str(PKG / "cluster/steps/00_env.sh")],
           cwd=ROOT,
           env=supplied,
-          check=True,
+          check=False,
           text=True,
           capture_output=True,
       )
+      if completed.returncode != 0:
+        self.fail(
+            "00_env.sh rejected the rendered contract:\n"
+            f"stdout:\n{completed.stdout}\n"
+            f"stderr:\n{completed.stderr}"
+        )
       resolved = (Path(state_dir) / "env.sh").read_text()
       reloaded = subprocess.run(
           [
@@ -270,6 +286,45 @@ class P58EnvironmentContractTest(unittest.TestCase):
         ("CANON_P63_OVERFLOW_SAFE_CLIP", "0"),
         ("CANON_P38_FIXED_LM_HEAD", "0"),
         ("CANON_VLLM_ENABLE_PREFIX_CACHING", "1"),
+    ):
+      with self.subTest(key=key), self.assertRaises(ValueError):
+        deepswe_contract.validate_environment({**values, key: replacement})
+
+  def test_checked_vma_off_diagnostic_survives_real_env_contract(self):
+    completed, resolved, values = self._persisted(
+        "zero", "full", checked_vma_off_diagnostic=True
+    )
+    self.assertIn(
+        "P58 checked-VMA-off precheck admitted", completed.stdout
+    )
+    for key, expected in {
+        "CANON_P58_CHECKED_VMA_DIAGNOSTIC": "off",
+        "CANON_P59_CHECKED_VMA": "0",
+        "CANON_P66_P59_CHECK_VMA": "0",
+        "CANON_P67_P66_VMA_P59_ONLY": "0",
+        "CANON_V1_HP_FIRST_UPDATE_GATE": "0",
+        "CANON_P63_OVERFLOW_SAFE_CLIP": "0",
+        "CANON_P38_PRECHECK_ONLY": "1",
+        "CANON_P38_CONTROLLED_EXIT": "1",
+        "CANON_P38_DIAGNOSTIC_ROUNDS": "1",
+    }.items():
+      self.assertEqual(values[key], expected)
+      self.assertIn(f"export {key}={expected}", resolved)
+    deepswe_contract.validate_environment(values)
+
+  def test_checked_vma_off_diagnostic_rejects_partial_tuple(self):
+    _, _, values = self._persisted(
+        "zero", "full", checked_vma_off_diagnostic=True
+    )
+    for key, replacement in (
+        ("CANON_P59_CHECKED_VMA", "1"),
+        ("CANON_P66_P59_CHECK_VMA", "1"),
+        ("CANON_P67_P66_VMA_P59_ONLY", "1"),
+        ("CANON_V1_HP_FIRST_UPDATE_GATE", "1"),
+        ("CANON_P63_OVERFLOW_SAFE_CLIP", "1"),
+        ("CANON_P38_PRECHECK_ONLY", "0"),
+        ("CANON_P38_CONTROLLED_EXIT", "0"),
+        ("CANON_P38_DIAGNOSTIC_ROUNDS", "2"),
     ):
       with self.subTest(key=key), self.assertRaises(ValueError):
         deepswe_contract.validate_environment({**values, key: replacement})

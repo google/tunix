@@ -985,7 +985,8 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
     exit 1
   fi
 fi
-if [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "1" ]; then
+if [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "1" ] && \
+   [ "${CANON_P58_CHECKED_VMA_DIAGNOSTIC:-}" != "off" ]; then
   case "${CANON_PROFILE_FILE:-}" in
     cluster/profiles/qwen3-1p7b-dp16-tp4-gsm8k.env|\
     cluster/profiles/qwen3-1p7b-dp16-tp4-gsm8k-v1-hp.env|\
@@ -1083,6 +1084,9 @@ if [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "1" ]; then
     cp -- "$p38_fixed_receipt_report" \
       "$attempt_evidence_dir/p38_fixed_lm_head_receipts.json"
   fi
+fi
+if [ "${CANON_P58_CHECKED_VMA_DIAGNOSTIC:-}" = "off" ]; then
+  echo "[P58.VMA.DIAGNOSTIC] fixed_lm_head_receipt_postflight=skipped_pre_backward"
 fi
 if [ "${CANON_P35_EXACT_REPLAY:-0}" = "1" ] && \
    [ -s "${CANON_P35_PRE_REPLAY_REPORT:-}" ]; then
@@ -1366,6 +1370,22 @@ elif [ "${CANON_P35_ENVELOPE:-0}" = "1" ]; then
     echo "[run] P35 expected diagnostic exit=1 accepted after COMPLETE classification"
     rc=0
   fi
+elif [ "${CANON_P58_CHECKED_VMA_DIAGNOSTIC:-}" = "off" ]; then
+  if [ "$rc" -ne 42 ] || [ "$n_p38_precheck" -ne 1 ] || \
+     [ "$n_p38_rounds" -ne 1 ] || [ "$n_p38_controlled_exit" -ne 1 ]; then
+    echo "[run] FATAL: P58 checked-VMA-off precheck is incomplete: rc=$rc precheck=$n_p38_precheck rounds=$n_p38_rounds controlled_exit=$n_p38_controlled_exit" >&2
+    exit 1
+  fi
+  p58_vma_classification="$CANON_STATE/p58_checked_vma_off.classification.json"
+  JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
+    python3 "$CANON_PKG/tasks/p58-deepswe-native-zero-comparison/scripts/classify_p58_checked_vma_diagnostic.py" \
+      --run-log "$LOG" \
+      --pre-alignment "$CANON_PRE_ALIGN_REPORT" \
+      --debug-dir "$CANON_P58_DEBUG_DIR" \
+      --update-report "$CANON_UPDATE_REPORT" \
+      --output "$p58_vma_classification" || exit 1
+  echo "[P58.VMA.DIAGNOSTIC] DIAGNOSTIC_COMPLETE selector=off backward=0 optimizer_commits=0 classification=$p58_vma_classification"
+  rc=0
 elif [ "${CANON_V1_FL_TP8_AB_ARM:-}" = "p66-off" ] || \
      [ "${CANON_V1_FL_TP8_AB_ARM:-}" = "serving-scope" ]; then
   if [ "$rc" -ne 42 ] || [ "$n_p38_precheck" -ne 1 ] || \

@@ -157,6 +157,7 @@ class P58RendererTest(unittest.TestCase):
         "alignment_warning_only": "1",
         "proxy_xla": [],
         "high_performance": "0",
+        "checked_vma_diagnostic": "",
         "disable_sampler_is": "1",
         "disable_tis": "1",
         "sampler_is": (),
@@ -166,6 +167,7 @@ class P58RendererTest(unittest.TestCase):
         "alignment_warning_only": "0",
         "proxy_xla": [renderer.p34.PROXY_XLA_FLAG],
         "high_performance": "0",
+        "checked_vma_diagnostic": "",
         "disable_sampler_is": "1",
         "disable_tis": "1",
         "sampler_is": (),
@@ -179,11 +181,84 @@ class P58RendererTest(unittest.TestCase):
     self.assertEqual(env["CANON_PROFILE_FILE"], renderer.HP_PROFILE)
     self.assertEqual(env["CANON_V1_HP_FULL"], "1")
     self.assertEqual(env["CANON_P38_FIXED_LM_HEAD"], "1")
+    self.assertEqual(
+        document["metadata"]["labels"]["canon.zero-tim/fixed-lm-head"],
+        "1",
+    )
     self.assertIn("zero-hp-full", document["metadata"]["name"])
     for arm, stage in (("native", "full"), ("zero", "three-update")):
       with self.subTest(arm=arm, stage=stage):
         with self.assertRaisesRegex(ValueError, "only for Zero full"):
           self._render(arm, stage, high_performance=True)
+
+  def test_checked_vma_off_diagnostic_is_exact_zero_hp_step0_selector(self):
+    production = self._render(
+        "zero", "full", high_performance=True, run_id="hp-prod"
+    )
+    diagnostic = self._render(
+        "zero",
+        "full",
+        checked_vma_off_diagnostic=True,
+        run_id="vmaoff",
+    )
+    env = renderer.p34._env(diagnostic)
+    self.assertEqual(env["CANON_PROFILE_FILE"], renderer.HP_PROFILE)
+    self.assertEqual(env["CANON_V1_HP_FULL"], "1")
+    self.assertEqual(env["CANON_P38_FIXED_LM_HEAD"], "1")
+    self.assertEqual(
+        diagnostic["metadata"]["labels"]["canon.zero-tim/fixed-lm-head"],
+        "1",
+    )
+    self.assertEqual(env["CANON_P58_CHECKED_VMA_DIAGNOSTIC"], "off")
+    self.assertEqual(env["CANON_P38_PRECHECK_ONLY"], "1")
+    self.assertEqual(env["CANON_P38_CONTROLLED_EXIT"], "1")
+    self.assertEqual(env["CANON_P38_DIAGNOSTIC_ROUNDS"], "1")
+    self.assertEqual(
+        diagnostic["metadata"]["labels"]["canon.zero-tim/backward"], "0"
+    )
+    self.assertEqual(
+        diagnostic["metadata"]["labels"]["canon.zero-tim/optimizer-commits"],
+        "0",
+    )
+    self.assertIn("zero-hp-vmaoff-precheck", diagnostic["metadata"]["name"])
+    self.assertEqual(
+        renderer.recipe_signature(production),
+        renderer.recipe_signature(diagnostic),
+    )
+    self.assertEqual(
+        renderer.treatment_signature(diagnostic)["checked_vma_diagnostic"],
+        "off",
+    )
+
+  def test_checked_vma_off_diagnostic_rejects_other_recipes(self):
+    for arm, stage, high_performance in (
+        ("native", "full", False),
+        ("zero", "three-update", False),
+        ("zero", "full", True),
+    ):
+      with self.subTest(
+          arm=arm, stage=stage, high_performance=high_performance
+      ):
+        with self.assertRaisesRegex(ValueError, "its own Zero/full HP"):
+          self._render(
+              arm,
+              stage,
+              high_performance=high_performance,
+              checked_vma_off_diagnostic=True,
+          )
+
+  def test_checked_vma_prepare_wrapper_is_render_only(self):
+    path = (
+        PKG
+        / "tasks/p58-deepswe-native-zero-comparison/scripts"
+        / "prepare_p58_checked_vma_off_diagnostic.sh"
+    )
+    source = path.read_text()
+    self.assertIn("--checked-vma-off-diagnostic", source)
+    self.assertIn("--stage full", source)
+    self.assertIn("--arm zero", source)
+    self.assertIn("origin/yuxzhang/canon-zero-tim", source)
+    self.assertNotIn("kubectl ", source)
 
   def test_optional_algorithm_interventions_are_absent(self):
     for arm in ("native", "zero"):

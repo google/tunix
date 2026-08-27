@@ -783,6 +783,22 @@ def validate_environment(values: Mapping[str, str]) -> None:
     raise ValueError("CANON_P58_TIM_ARM must be native or zero")
   p58_recipe = p58_sampler_recipe(values) if p58_tim else ""
   p58_hp = values.get("CANON_V1_HP_FULL", "0") == "1"
+  p58_vma_diagnostic = values.get(
+      "CANON_P58_CHECKED_VMA_DIAGNOSTIC", ""
+  )
+  if p58_vma_diagnostic not in ("", "off"):
+    raise ValueError(
+        "CANON_P58_CHECKED_VMA_DIAGNOSTIC must be absent or off"
+    )
+  if p58_vma_diagnostic and (
+      not p58_hp
+      or not p58_tim
+      or p58_arm != "zero"
+      or values.get("CANON_P34_RUN_STAGE", "") != "full"
+  ):
+    raise ValueError(
+        "P58 checked-VMA diagnostic requires the exact Zero/full HP carrier"
+    )
   if p58_hp and (
       not p58_tim
       or p58_arm != "zero"
@@ -915,7 +931,12 @@ def validate_environment(values: Mapping[str, str]) -> None:
         ),
         "CANON_ENGINE_MODULE_C": "0" if p58_arm == "native" else "1",
         "CANON_V1_HP_FULL": "1" if p58_hp else "0",
-        "CANON_P67_P66_VMA_P59_ONLY": "1" if p58_hp else None,
+        "CANON_P58_CHECKED_VMA_DIAGNOSTIC": (
+            "off" if p58_vma_diagnostic else None
+        ),
+        "CANON_P67_P66_VMA_P59_ONLY": (
+            "0" if p58_vma_diagnostic else "1" if p58_hp else None
+        ),
     })
     if p58_hp:
       expected.update({
@@ -926,10 +947,18 @@ def validate_environment(values: Mapping[str, str]) -> None:
           "CANON_LOGPROB_STEP_FUSION": "1",
           "CANON_VLLM_ENABLE_PREFIX_CACHING": "0",
           "CANON_P59_RANK_PARALLEL_BACKWARD": "1",
-          "CANON_P59_CHECKED_VMA": "1",
-          "CANON_P66_P59_CHECK_VMA": "1",
-          "CANON_V1_HP_FIRST_UPDATE_GATE": "1",
-          "CANON_P63_OVERFLOW_SAFE_CLIP": "1",
+          "CANON_P59_CHECKED_VMA": (
+              "0" if p58_vma_diagnostic else "1"
+          ),
+          "CANON_P66_P59_CHECK_VMA": (
+              "0" if p58_vma_diagnostic else "1"
+          ),
+          "CANON_V1_HP_FIRST_UPDATE_GATE": (
+              "0" if p58_vma_diagnostic else "1"
+          ),
+          "CANON_P63_OVERFLOW_SAFE_CLIP": (
+              "0" if p58_vma_diagnostic else "1"
+          ),
           "CANON_P28_BATCHED_REPORT": "1",
           "CANON_P28_BATCHED_REVERSE": "0",
           "CANON_BATCHED_EVIDENCE": "0",
@@ -948,6 +977,24 @@ def validate_environment(values: Mapping[str, str]) -> None:
           "CANON_XPROF_LABELS": "1",
           "CANON_PERF_TRACE_EXPORT_STEP": "2",
       })
+      if p58_vma_diagnostic:
+        expected.update({
+            "CANON_P38_PRECHECK_ONLY": "1",
+            "CANON_P38_CONTROLLED_EXIT": "1",
+            "CANON_P38_DIAGNOSTIC_ROUNDS": "1",
+        })
+        round_file = values.get("CANON_P38_DIAGNOSTIC_ROUND_FILE", "")
+        if not round_file or not os.path.isabs(round_file):
+          raise ValueError(
+              "P58 checked-VMA diagnostic round file must be absolute"
+          )
+      else:
+        expected.update({
+            "CANON_P38_PRECHECK_ONLY": None,
+            "CANON_P38_CONTROLLED_EXIT": None,
+            "CANON_P38_DIAGNOSTIC_ROUNDS": None,
+            "CANON_P38_DIAGNOSTIC_ROUND_FILE": None,
+        })
   if pilot or debug or parity or p58_tim:
     expected.update({
         "CANON_OPT_STATE_RESIDENT": "1",
