@@ -68,6 +68,8 @@ EVAL_EVERY_N_STEPS=${EVAL_EVERY_N_STEPS:-1000000}
 LORA_RANK=${LORA_RANK:-16}
 LORA_ALPHA=${LORA_ALPHA:-16.0}
 USE_LORA=${USE_LORA:-0}
+SYNC_WEIGHTS=${SYNC_WEIGHTS:-1}
+WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-raiden}
 SAMPLER=${SAMPLER:-inprocess_vllm}
 VLLM_INIT_WITH_RANDOM_WEIGHTS=${VLLM_INIT_WITH_RANDOM_WEIGHTS:-false}
 MAXTEXT_DTYPE=${MAXTEXT_DTYPE:-bfloat16}
@@ -386,6 +388,8 @@ echo "  train response: $TRAIN_MAX_RESPONSE_LENGTH"
 echo "  train micro:    $TRAIN_MICRO_BATCH_SIZE"
 echo "  mini batch:     $MINI_BATCH_SIZE"
 echo "  use lora:       $USE_LORA"
+echo "  sync weights:   $SYNC_WEIGHTS"
+echo "  sync mode:      $WEIGHT_SYNC_MODE"
 echo "  sampler:        $SAMPLER"
 echo "  vLLM dummy load:$VLLM_INIT_WITH_RANDOM_WEIGHTS"
 echo "  trainer chips:  $TRAINER_TPU_CHIPS"
@@ -498,6 +502,7 @@ echo "Launching rollout node with sampler=$SAMPLER on TPU chips $ROLLOUT_TPU_CHI
     --max_prompt_length="$MAX_PROMPT_LENGTH"
     --max_response_length="$MAX_RESPONSE_LENGTH"
     --vllm_init_with_random_weights="$VLLM_INIT_WITH_RANDOM_WEIGHTS"
+    --weight_sync_mode="$WEIGHT_SYNC_MODE"
     --lora_rank="$LORA_RANK"
     --lora_alpha="$LORA_ALPHA"
   )
@@ -683,6 +688,9 @@ echo "Launching CPU orchestrator..."
   )
   if [[ -n "$INFERENCE_ADDR" ]]; then
     ORCHESTRATOR_CMD+=(--inference_addr="$INFERENCE_ADDR")
+  fi
+  if [[ "$SYNC_WEIGHTS" == "1" || "$SYNC_WEIGHTS" == "true" || "$SYNC_WEIGHTS" == "True" ]]; then
+    ORCHESTRATOR_CMD+=(--sync_weights)
   fi
 
   export JAX_PLATFORMS=cpu
