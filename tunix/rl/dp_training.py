@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import collections
 import dataclasses
 import hashlib
 import math
@@ -716,6 +717,324 @@ def _tree_dual_checksums(tree: Any) -> jax.Array:
   )
 
 
+# P70.5 reducer program cache. The production adapter constructs one
+# FixedDPRankGradientReducer per optimizer update, and every construction
+# used to build fresh ``jax.jit`` wrappers, so the host re-traced every
+# reducer-scope program on every update (~2.2 s/update for the legacy
+# diagnostics/reduce/compare closures plus ~1.8 s/update for the P70.4
+# fingerprint program; P70.B attribution, cycle g00). Every one of those
+# programs depends only on static construction identity — template
+# structure, per-leaf shape/dtype/sharding, mesh, DP geometry, and the
+# validated mode selectors — so constructions with an identical identity
+# share one program bundle. Bundle closures never capture device arrays
+# (the template is reduced to ``jax.ShapeDtypeStruct`` leaves before
+# tracing) and cache keys never include array values, so a cache hit
+# returns byte-for-byte the same traced programs a fresh build would
+# produce: zero numerical change, host re-trace cost removed.
+_REDUCER_PROGRAM_CACHE_LIMIT = 4
+_reducer_program_cache: collections.OrderedDict = collections.OrderedDict()
+_reducer_program_cache_stats = {'hits': 0, 'misses': 0, 'uncacheable': 0}
+
+
+def reset_reducer_program_cache_for_tests() -> None:
+  """Clears the process-level reducer program cache; test isolation only."""
+  _reducer_program_cache.clear()
+  for key in _reducer_program_cache_stats:
+    _reducer_program_cache_stats[key] = 0
+
+
+@dataclasses.dataclass(frozen=True)
+class _ReducerPrograms:
+  """One reducer construction's jitted programs and staged shardings.
+
+  A bundle may outlive the reducer that built it (process-level cache), so
+  every field must be static configuration or a jitted callable whose
+  closure captures only static configuration — never a device array.
+  """
+
+  staged_shardings: Any
+  initialize: Any
+  write: Any
+  reduce: Any
+  compare: Any
+  signature: Any
+  finite_flags: Any
+  batched_diagnostics: Any
+  compare_fingerprint: Any
+  batched_finite: Any
+
+
+def _reducer_program_cache_key(
+    template: Any,
+    *,
+    dp_size: int,
+    dp_axis: str,
+    reduce_mode: str,
+    compare_mode: str,
+    distinct_schedule: str,
+    finite_fetch: str,
+    require_distinct_fingerprints: bool,
+) -> Any:
+  """Builds the full static identity of one reducer program bundle.
+
+  The key covers everything a bundle program can depend on: tree structure,
+  per-leaf shape/dtype/weak-type/partition-spec/memory-kind, mesh identity
+  (axis names, axis sizes, device platform+id order, axis types), DP
+  geometry, and every validated mode selector read at construction time
+  (``finite_fetch`` and ``require_distinct_fingerprints`` shape no traced
+  program today; they stay in the key so a future program that reads them
+  can never be shared across differing values). Raises when any component
+  is not hashable; the caller treats that as uncacheable and builds a
+  fresh bundle — programs are never shared on an ambiguous identity.
+  """
+  leaves, treedef = jax.tree_util.tree_flatten(template)
+  mesh = leaves[0].sharding.mesh
+  mesh_key = (
+      tuple(mesh.axis_names),
+      tuple((str(name), int(size)) for name, size in mesh.shape.items()),
+      tuple(
+          (str(device.platform), int(device.id))
+          for device in mesh.devices.flat
+      ),
+      getattr(mesh, 'axis_types', None),
+  )
+  leaf_key = tuple(
+      (
+          tuple(int(dim) for dim in leaf.shape),
+          jnp.dtype(leaf.dtype),
+          bool(getattr(leaf, 'weak_type', False)),
+          leaf.sharding.spec,
+          getattr(leaf.sharding, 'memory_kind', None),
+      )
+      for leaf in leaves
+  )
+  key = (
+      treedef,
+      leaf_key,
+      mesh_key,
+      int(dp_size),
+      str(dp_axis),
+      str(reduce_mode),
+      str(compare_mode),
+      str(distinct_schedule),
+      str(finite_fetch),
+      bool(require_distinct_fingerprints),
+  )
+  hash(key)  # every component must hash, or the bundle is uncacheable
+  return key
+
+
+def _build_reducer_programs(
+    spec_template: Any,
+    *,
+    dp_size: int,
+    dp_axis: str,
+    reduce_mode: str,
+    compare_mode: str,
+    distinct_schedule: str,
+) -> _ReducerPrograms:
+  """Traces one program bundle from a metadata-only template.
+
+  ``spec_template`` must hold ``jax.ShapeDtypeStruct`` leaves carrying the
+  original ``NamedSharding``s: the bundle can outlive the constructing
+  reducer inside the process-level cache, so its closures capture shapes,
+  dtypes, and shardings — never device buffers.
+  """
+  mesh = jax.tree.leaves(spec_template)[0].sharding.mesh
+  base_specs = jax.tree.map(
+      lambda leaf: leaf.sharding.spec, spec_template
+  )
+  staged_specs = jax.tree.map(
+      lambda spec: jax.sharding.PartitionSpec(dp_axis, *tuple(spec)),
+      base_specs,
+  )
+  staged_shardings = jax.tree.map(
+      lambda spec: jax.sharding.NamedSharding(mesh, spec), staged_specs
+  )
+
+  def initialize():
+    return jax.tree.map(
+        lambda leaf: jnp.zeros((dp_size,) + leaf.shape, leaf.dtype),
+        spec_template,
+    )
+
+  def write(staged, contribution, rank):
+    return jax.tree.map(
+        lambda table, value: jax.lax.dynamic_update_index_in_dim(
+            table, jnp.expand_dims(value, 0), rank, axis=0
+        ),
+        staged,
+        contribution,
+    )
+
+  reduce_collective = select_dp_collective(reduce_mode)
+
+  def reduce_local(local_staged):
+    local_value = jax.tree.map(
+        lambda value: jnp.squeeze(value, axis=0), local_staged
+    )
+    return reduce_collective(
+        local_value, dp_size=dp_size, axis_name=dp_axis
+    )
+
+  shard_map_kwargs = {
+      'mesh': mesh,
+      'in_specs': (staged_specs,),
+      'out_specs': base_specs,
+  }
+  try:
+    reduce_mapped = jax.shard_map(
+        reduce_local, check_vma=False, **shard_map_kwargs
+    )
+  except TypeError:
+    reduce_mapped = jax.shard_map(
+        reduce_local, check_rep=False, **shard_map_kwargs
+    )
+
+  permutation = tuple(
+      (rank, (rank + 1) % dp_size) for rank in range(dp_size)
+  )
+
+  def compare_local(local_tree):
+    peer_tree = jax.tree.map(
+        lambda leaf: jax.lax.ppermute(
+            leaf, axis_name=dp_axis, perm=permutation
+        ),
+        local_tree,
+    )
+    exact = jnp.asarray(True)
+    for local_leaf, peer_leaf in zip(
+        jax.tree.leaves(local_tree),
+        jax.tree.leaves(peer_tree),
+        strict=True,
+    ):
+      exact = jnp.logical_and(exact, jnp.array_equal(local_leaf, peer_leaf))
+    return jnp.reshape(exact, (1,))
+
+  compare_kwargs = {
+      'mesh': mesh,
+      'in_specs': (base_specs,),
+      'out_specs': jax.sharding.PartitionSpec(dp_axis),
+  }
+  try:
+    compare_mapped = jax.shard_map(
+        compare_local, check_vma=False, **compare_kwargs
+    )
+  except TypeError:
+    compare_mapped = jax.shard_map(
+        compare_local, check_rep=False, **compare_kwargs
+    )
+
+  signature_sharding = jax.sharding.NamedSharding(
+      mesh, jax.sharding.PartitionSpec(dp_axis, None)
+  )
+  compare_fingerprint = None
+  if compare_mode == 'fingerprint-hybrid':
+
+    def compare_fingerprint_local(local_tree):
+      fingerprints = _tree_dual_checksums(local_tree)
+      peer_fingerprints = jax.lax.ppermute(
+          fingerprints, axis_name=dp_axis, perm=permutation
+      )
+      matches = jnp.all(fingerprints == peer_fingerprints, axis=1)
+      return jnp.reshape(matches, (1, matches.shape[0]))
+
+    compare_fingerprint_kwargs = {
+        'mesh': mesh,
+        'in_specs': (base_specs,),
+        'out_specs': jax.sharding.PartitionSpec(dp_axis, None),
+    }
+    try:
+      compare_fingerprint_mapped = jax.shard_map(
+          compare_fingerprint_local,
+          check_vma=False,
+          **compare_fingerprint_kwargs,
+      )
+    except TypeError:
+      compare_fingerprint_mapped = jax.shard_map(
+          compare_fingerprint_local,
+          check_rep=False,
+          **compare_fingerprint_kwargs,
+      )
+    compare_fingerprint = jax.jit(compare_fingerprint_mapped)
+  batched_finite = None
+  if distinct_schedule == 'first-group-warmup':
+    batched_finite = jax.jit(
+        jax.vmap(_gradient_finite_flags),
+        out_shardings=signature_sharding,
+    )
+  return _ReducerPrograms(
+      staged_shardings=staged_shardings,
+      initialize=jax.jit(initialize, out_shardings=staged_shardings),
+      write=jax.jit(write, donate_argnums=(0,)),
+      reduce=jax.jit(reduce_mapped, donate_argnums=(0,)),
+      compare=jax.jit(compare_mapped),
+      signature=jax.jit(_gradient_signature),
+      finite_flags=jax.jit(_gradient_finite_flags),
+      batched_diagnostics=jax.jit(
+          jax.vmap(_gradient_diagnostics),
+          out_shardings=(signature_sharding, signature_sharding),
+      ),
+      compare_fingerprint=compare_fingerprint,
+      batched_finite=batched_finite,
+  )
+
+
+def _reducer_programs_for(
+    template: Any,
+    *,
+    dp_size: int,
+    dp_axis: str,
+    reduce_mode: str,
+    compare_mode: str,
+    distinct_schedule: str,
+    finite_fetch: str,
+    require_distinct_fingerprints: bool,
+) -> _ReducerPrograms:
+  """Returns the cached program bundle for one identity, building on miss."""
+  try:
+    key = _reducer_program_cache_key(
+        template,
+        dp_size=dp_size,
+        dp_axis=dp_axis,
+        reduce_mode=reduce_mode,
+        compare_mode=compare_mode,
+        distinct_schedule=distinct_schedule,
+        finite_fetch=finite_fetch,
+        require_distinct_fingerprints=require_distinct_fingerprints,
+    )
+  except (TypeError, ValueError, AttributeError):
+    # Fail closed: an identity this key cannot express is never shared.
+    key = None
+    _reducer_program_cache_stats['uncacheable'] += 1
+  if key is not None:
+    cached = _reducer_program_cache.get(key)
+    if cached is not None:
+      _reducer_program_cache.move_to_end(key)
+      _reducer_program_cache_stats['hits'] += 1
+      return cached
+  spec_template = jax.tree.map(
+      lambda leaf: jax.ShapeDtypeStruct(
+          leaf.shape, leaf.dtype, sharding=leaf.sharding
+      ),
+      template,
+  )
+  programs = _build_reducer_programs(
+      spec_template,
+      dp_size=dp_size,
+      dp_axis=dp_axis,
+      reduce_mode=reduce_mode,
+      compare_mode=compare_mode,
+      distinct_schedule=distinct_schedule,
+  )
+  if key is not None:
+    _reducer_program_cache_stats['misses'] += 1
+    _reducer_program_cache[key] = programs
+    while len(_reducer_program_cache) > _REDUCER_PROGRAM_CACHE_LIMIT:
+      _reducer_program_cache.popitem(last=False)
+  return programs
+
+
 class FixedDPRankGradientReducer:
   """Stages one contribution per DP rank and reduces it with a fixed tree.
 
@@ -767,103 +1086,40 @@ class FixedDPRankGradientReducer:
             'DP gradient inputs must be replicated over the DP axis: '
             f'{spec}'
         )
-    staged_specs = jax.tree.map(
-        lambda spec: jax.sharding.PartitionSpec(dp_axis, *tuple(spec)),
-        base_specs,
-    )
-    staged_shardings = jax.tree.map(
-        lambda spec: jax.sharding.NamedSharding(mesh, spec), staged_specs
-    )
-
-    def initialize():
-      return jax.tree.map(
-          lambda leaf: jnp.zeros((dp_size,) + leaf.shape, leaf.dtype),
-          template,
-      )
-
-    def write(staged, contribution, rank):
-      return jax.tree.map(
-          lambda table, value: jax.lax.dynamic_update_index_in_dim(
-              table, jnp.expand_dims(value, 0), rank, axis=0
-          ),
-          staged,
-          contribution,
-      )
-
-    reduce_collective = select_dp_collective(dp_collective_reduce_mode())
-
-    def reduce_local(local_staged):
-      local_value = jax.tree.map(
-          lambda value: jnp.squeeze(value, axis=0), local_staged
-      )
-      return reduce_collective(
-          local_value, dp_size=dp_size, axis_name=dp_axis
-      )
-
-    shard_map_kwargs = {
-        'mesh': mesh,
-        'in_specs': (staged_specs,),
-        'out_specs': base_specs,
-    }
-    try:
-      reduce_mapped = jax.shard_map(
-          reduce_local, check_vma=False, **shard_map_kwargs
-      )
-    except TypeError:
-      reduce_mapped = jax.shard_map(
-          reduce_local, check_rep=False, **shard_map_kwargs
-      )
-
-    permutation = tuple(
-        (rank, (rank + 1) % dp_size) for rank in range(dp_size)
-    )
-
-    def compare_local(local_tree):
-      peer_tree = jax.tree.map(
-          lambda leaf: jax.lax.ppermute(
-              leaf, axis_name=dp_axis, perm=permutation
-          ),
-          local_tree,
-      )
-      exact = jnp.asarray(True)
-      for local_leaf, peer_leaf in zip(
-          jax.tree.leaves(local_tree),
-          jax.tree.leaves(peer_tree),
-          strict=True,
-      ):
-        exact = jnp.logical_and(exact, jnp.array_equal(local_leaf, peer_leaf))
-      return jnp.reshape(exact, (1,))
-
-    compare_kwargs = {
-        'mesh': mesh,
-        'in_specs': (base_specs,),
-        'out_specs': jax.sharding.PartitionSpec(dp_axis),
-    }
-    try:
-      compare_mapped = jax.shard_map(
-          compare_local, check_vma=False, **compare_kwargs
-      )
-    except TypeError:
-      compare_mapped = jax.shard_map(
-          compare_local, check_rep=False, **compare_kwargs
-      )
 
     self._dp_size = dp_size
     self._dp_axis = dp_axis
     self._require_distinct = require_distinct_fingerprints
-    self._initialize = jax.jit(initialize, out_shardings=staged_shardings)
-    self._write = jax.jit(write, donate_argnums=(0,))
-    self._reduce = jax.jit(reduce_mapped, donate_argnums=(0,))
-    self._compare = jax.jit(compare_mapped)
-    self._signature = jax.jit(_gradient_signature)
-    self._finite_flags = jax.jit(_gradient_finite_flags)
-    signature_sharding = jax.sharding.NamedSharding(
-        mesh, jax.sharding.PartitionSpec(dp_axis, None)
+    reduce_mode = dp_collective_reduce_mode()
+    # P70.4 receipt-lightening wiring. Every mode defaults to the legacy
+    # behavior; with all three flags unset the bundle below only records
+    # the legacy mode names and never builds a new program.
+    self._compare_mode = dp_compare_mode()
+    self._distinct_schedule = dp_distinct_schedule_mode()
+    self._finite_fetch = dp_finite_fetch_mode()
+    # P70.5: one construction per optimizer update used to re-trace every
+    # reducer-scope jax.jit program; constructions with an identical static
+    # identity now share one cached bundle (see _reducer_programs_for).
+    programs = _reducer_programs_for(
+        template,
+        dp_size=dp_size,
+        dp_axis=dp_axis,
+        reduce_mode=reduce_mode,
+        compare_mode=self._compare_mode,
+        distinct_schedule=self._distinct_schedule,
+        finite_fetch=self._finite_fetch,
+        require_distinct_fingerprints=require_distinct_fingerprints,
     )
-    self._batched_diagnostics = jax.jit(
-        jax.vmap(_gradient_diagnostics),
-        out_shardings=(signature_sharding, signature_sharding),
-    )
+    self._programs = programs
+    self._initialize = programs.initialize
+    self._write = programs.write
+    self._reduce = programs.reduce
+    self._compare = programs.compare
+    self._signature = programs.signature
+    self._finite_flags = programs.finite_flags
+    self._batched_diagnostics = programs.batched_diagnostics
+    self._compare_fingerprint = programs.compare_fingerprint
+    self._batched_finite = programs.batched_finite
     self._template_structure = jax.tree.structure(template)
     self._leaf_paths = tuple(
         jax.tree_util.keystr(path)
@@ -876,18 +1132,12 @@ class FixedDPRankGradientReducer:
             sharding,
         )
         for leaf, sharding in zip(
-            leaves, jax.tree.leaves(staged_shardings), strict=True
+            leaves, jax.tree.leaves(programs.staged_shardings), strict=True
         )
     )
     self._staged = None
     self._next_rank = 0
     self._fingerprints = []
-    # P70.4 receipt-lightening wiring. Every mode defaults to the legacy
-    # behavior; with all three flags unset the construction below only
-    # records the legacy mode names and never builds a new program.
-    self._compare_mode = dp_compare_mode()
-    self._distinct_schedule = dp_distinct_schedule_mode()
-    self._finite_fetch = dp_finite_fetch_mode()
     self._group_index = 0
     self._pending_finite_receipts = []
     self._update_index = (
@@ -895,41 +1145,6 @@ class FixedDPRankGradientReducer:
         if self._distinct_schedule == 'first-group-warmup'
         else None
     )
-    self._compare_fingerprint = None
-    if self._compare_mode == 'fingerprint-hybrid':
-
-      def compare_fingerprint_local(local_tree):
-        fingerprints = _tree_dual_checksums(local_tree)
-        peer_fingerprints = jax.lax.ppermute(
-            fingerprints, axis_name=dp_axis, perm=permutation
-        )
-        matches = jnp.all(fingerprints == peer_fingerprints, axis=1)
-        return jnp.reshape(matches, (1, matches.shape[0]))
-
-      compare_fingerprint_kwargs = {
-          'mesh': mesh,
-          'in_specs': (base_specs,),
-          'out_specs': jax.sharding.PartitionSpec(dp_axis, None),
-      }
-      try:
-        compare_fingerprint_mapped = jax.shard_map(
-            compare_fingerprint_local,
-            check_vma=False,
-            **compare_fingerprint_kwargs,
-        )
-      except TypeError:
-        compare_fingerprint_mapped = jax.shard_map(
-            compare_fingerprint_local,
-            check_rep=False,
-            **compare_fingerprint_kwargs,
-        )
-      self._compare_fingerprint = jax.jit(compare_fingerprint_mapped)
-    self._batched_finite = None
-    if self._distinct_schedule == 'first-group-warmup':
-      self._batched_finite = jax.jit(
-          jax.vmap(_gradient_finite_flags),
-          out_shardings=signature_sharding,
-      )
 
   def _distinct_fingerprint_scheduled(self) -> bool:
     """True when this group must compute real per-rank fingerprints."""
