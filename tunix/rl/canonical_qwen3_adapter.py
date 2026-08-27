@@ -3571,6 +3571,145 @@ class _P28SegmentedEngineForward:
     _ISSUE_ANATOMY["n"] += 1
     return result
 
+  def prepare_block_pullback_group(self, state_leaves=None, *, label="P28"):
+    """Hoists the per-layer pullback python prep to one call per group.
+
+    P70.3: the issue-anatomy timers above pinned the reverse issue
+    segment on host python that repeats identically for every one of the
+    28 x chunks pullback dispatches -- the state tuple
+    canonicalization, the leaf-count validation, and the per-layer leaf
+    gather over _local_layer_full_indices.  All of it depends only on
+    the state tuple, which is fixed for a whole reverse group, so one
+    prepare call replaces every per-dispatch repetition.  The gathered
+    tuples hold exactly the leaf objects the per-call path gathers, in
+    the same order, so every downstream dispatch sees identical operands
+    and the compiled programs are untouched.  The prepare cost is timed
+    into the same [PERF] vag_reverse blk_prep sum the per-call prep fed.
+    """
+    _prep_t0 = time.perf_counter()
+    if state_leaves is None:
+      if self._captured_state_released:
+        raise FunctionalMappingError(
+            "P30 pullback requires explicit current state after captured "
+            "state was released"
+        )
+      prepared = self._local_layer_leaves
+    else:
+      state_leaves = tuple(state_leaves)
+      if len(state_leaves) != self._num_state_leaves:
+        raise FunctionalMappingError(
+            f"{label} pullback state leaf count changed: "
+            f"{len(state_leaves)} != {self._num_state_leaves}"
+        )
+      prepared = tuple(
+          tuple(state_leaves[index] for index in indices)
+          for indices in self._local_layer_full_indices
+      )
+    _ISSUE_ANATOMY["prep"] += time.perf_counter() - _prep_t0
+    return prepared
+
+  def check_pullback_group_boundary(self, *trees):
+    """Runs the host-boundary check once for one reverse group's seeds.
+
+    The per-call _reject_outer_transform walk detects one failure mode:
+    the reverse loop being traced by an outer jax transform.  Under such
+    a trace every value in the enclosing frame is a Tracer, so checking
+    the loop's seed trees once fires in exactly the situations in which
+    any of the per-call walks would have fired; loop-carried cotangents
+    are outputs of compiled functions applied to these checked seeds and
+    cannot be Tracers unless the seeds already were.  Timed into the
+    [PERF] vag_reverse blk_prep sum like the per-call walks it replaces.
+    """
+    _prep_t0 = time.perf_counter()
+    self._reject_outer_transform(*trees)
+    _ISSUE_ANATOMY["prep"] += time.perf_counter() - _prep_t0
+
+  def run_block_pullback_prepared(
+      self,
+      prepared,
+      layer_index,
+      cache,
+      hidden,
+      attention_metadata,
+      dnext_cache,
+      dnext_hidden,
+  ):
+    """Dispatches one layer pullback from a prepared per-layer leaf pack.
+
+    The per-dispatch body is the P70.3 target shape: fetch the
+    precomputed leaf tuple, dispatch the jitted pullback.  Validation
+    lives in prepare_block_pullback_group and
+    check_pullback_group_boundary at the group boundary; the [PERF]
+    anatomy split keeps reporting prep vs call so the hoist shows up as
+    blk_prep collapsing toward zero on an unchanged blk_n.
+    """
+    _anatomy_t0 = time.perf_counter()
+    layer_index = int(layer_index)
+    if layer_index < 0 or layer_index >= len(self._local_layer_pullback_fns):
+      raise FunctionalMappingError(
+          f"P28 pullback layer index out of range: {layer_index}"
+      )
+    if len(prepared) != len(self._local_layer_pullback_fns):
+      raise FunctionalMappingError(
+          "P28 prepared pullback group has wrong layer count: "
+          f"{len(prepared)} != {len(self._local_layer_pullback_fns)}"
+      )
+    local_leaves = prepared[layer_index]
+    _anatomy_t1 = time.perf_counter()
+    result = self._local_layer_pullback_fns[layer_index](
+        local_leaves,
+        cache,
+        hidden,
+        attention_metadata,
+        dnext_cache,
+        dnext_hidden,
+    )
+    _anatomy_t2 = time.perf_counter()
+    _ISSUE_ANATOMY["prep"] += _anatomy_t1 - _anatomy_t0
+    _ISSUE_ANATOMY["call"] += _anatomy_t2 - _anatomy_t1
+    _ISSUE_ANATOMY["n"] += 1
+    return result
+
+  def run_block_pullback_tape_prepared(
+      self,
+      prepared,
+      layer_index,
+      stacked_caches,
+      stacked_hidden,
+      attention_metadata,
+      dnext_cache,
+      dnext_hidden,
+  ):
+    """Tape-slicing pullback dispatch from a prepared per-layer pack."""
+    _anatomy_t0 = time.perf_counter()
+    layer_index = int(layer_index)
+    if layer_index < 0 or layer_index >= len(
+        self._local_layer_pullback_tape_fns
+    ):
+      raise FunctionalMappingError(
+          f"P28 tape pullback layer index out of range: {layer_index}"
+      )
+    if len(prepared) != len(self._local_layer_pullback_tape_fns):
+      raise FunctionalMappingError(
+          "P28 prepared pullback group has wrong layer count: "
+          f"{len(prepared)} != {len(self._local_layer_pullback_tape_fns)}"
+      )
+    local_leaves = prepared[layer_index]
+    _anatomy_t1 = time.perf_counter()
+    result = self._local_layer_pullback_tape_fns[layer_index](
+        local_leaves,
+        stacked_caches,
+        stacked_hidden,
+        attention_metadata,
+        dnext_cache,
+        dnext_hidden,
+    )
+    _anatomy_t2 = time.perf_counter()
+    _ISSUE_ANATOMY["prep"] += _anatomy_t1 - _anatomy_t0
+    _ISSUE_ANATOMY["call"] += _anatomy_t2 - _anatomy_t1
+    _ISSUE_ANATOMY["n"] += 1
+    return result
+
   def _require_full_loss_endpoints(self):
     if self._endpoint_contract is None:
       raise FunctionalMappingError(
@@ -3996,6 +4135,42 @@ class _P28SegmentedEngineForward:
           state_leaves[index]
           for index in self._local_layer_full_indices[layer_index]
       )
+    mapped_fn = self._p59_block_pullback_fn(
+        layer_index,
+        local_leaves,
+        cache,
+        hidden,
+        attention_metadata,
+        dnext_cache,
+        dnext_hidden,
+    )
+    return mapped_fn(
+        local_leaves,
+        cache,
+        hidden,
+        attention_metadata,
+        dnext_cache,
+        dnext_hidden,
+    )
+
+  def _p59_block_pullback_fn(
+      self,
+      layer_index,
+      local_leaves,
+      cache,
+      hidden,
+      attention_metadata,
+      dnext_cache,
+      dnext_hidden,
+  ):
+    """Returns the lazily built P59 mapped pullback for one layer.
+
+    P70.3 pure code motion: this is run_block_pullback_rank_parallel's
+    build-on-first-use block, extracted unchanged so the prepared
+    dispatch path below shares one builder instead of duplicating it.
+    The sample arguments only shape the first build; steady-state calls
+    return the cached mapped callable.
+    """
     functions = getattr(self, "_p59_layer_pullback_fns", None)
     if functions is None:
       functions = [None] * len(self._local_layer_pullback_fns)
@@ -4054,7 +4229,46 @@ class _P28SegmentedEngineForward:
           module_name=f"zt_tr_dp_parallel_bwd_layer_{layer_index:02d}",
           scope_name=f"zt/tr/dp_parallel/layer/{layer_index:02d}/bwd",
       )
-    return functions[layer_index](
+    return functions[layer_index]
+
+  def run_block_pullback_rank_parallel_prepared(
+      self,
+      prepared,
+      layer_index,
+      cache,
+      hidden,
+      attention_metadata,
+      dnext_cache,
+      dnext_hidden,
+  ):
+    """Rank-parallel pullback dispatch from a prepared per-layer pack.
+
+    P70.3 twin of run_block_pullback_prepared for the P59 branch: the
+    host-boundary walk and per-layer leaf gather live at the group
+    boundary; the per-dispatch body fetches the precomputed tuple and
+    dispatches the cached mapped callable.
+    """
+    layer_index = int(layer_index)
+    if layer_index < 0 or layer_index >= len(self._local_layer_pullback_fns):
+      raise FunctionalMappingError(
+          f"P59 pullback layer index out of range: {layer_index}"
+      )
+    if len(prepared) != len(self._local_layer_pullback_fns):
+      raise FunctionalMappingError(
+          "P59 prepared pullback group has wrong layer count: "
+          f"{len(prepared)} != {len(self._local_layer_pullback_fns)}"
+      )
+    local_leaves = prepared[layer_index]
+    mapped_fn = self._p59_block_pullback_fn(
+        layer_index,
+        local_leaves,
+        cache,
+        hidden,
+        attention_metadata,
+        dnext_cache,
+        dnext_hidden,
+    )
+    return mapped_fn(
         local_leaves,
         cache,
         hidden,
@@ -6485,6 +6699,12 @@ class Qwen3EngineForwardAdapter:
         "head_pullback": 0,
         "processed_pullback": 0,
     })
+    # P70.3: the pullback prep repeated per layer dispatch is
+    # layer-invariant for this group's fixed engine_leaves -- hoist it
+    # to one prepare per group plus one host-boundary check per chunk;
+    # each per-layer body shrinks to fetch + jitted dispatch on
+    # identical operands.
+    pullback_prepared = segmented.prepare_block_pullback_group(engine_leaves)
 
     with self._set_forward_context(None, self._runner.vllm_config):
       for chunk_index in reversed(range(spec["num_chunks"])):
@@ -6594,16 +6814,21 @@ class Qwen3EngineForwardAdapter:
         if layer_scan_mode == "1":
           chunk_grads = []
           previous_cache_carry = [None] * layer_count
+          segmented.check_pullback_group_boundary(
+              layer_tape, metadata, dcache_carry, dhidden
+          )
           for layer_index in reversed(range(layer_count)):
             cache_in, hidden_in = layer_tape[layer_index]
-            local_grad, dcache, dhidden = segmented.run_block_pullback(
-                layer_index,
-                cache_in,
-                hidden_in,
-                metadata,
-                dcache_carry[layer_index],
-                dhidden,
-                state_leaves=engine_leaves,
+            local_grad, dcache, dhidden = (
+                segmented.run_block_pullback_prepared(
+                    pullback_prepared,
+                    layer_index,
+                    cache_in,
+                    hidden_in,
+                    metadata,
+                    dcache_carry[layer_index],
+                    dhidden,
+                )
             )
             chunk_grads.append(local_grad)
             previous_cache_carry[layer_index] = dcache
@@ -6629,27 +6854,43 @@ class Qwen3EngineForwardAdapter:
               [] if batched_reverse or reverse_verify else None
           )
           previous_cache_carry = [None] * len(layer_tape)
+          if scan_fwd_reverse:
+            segmented.check_pullback_group_boundary(
+                scan_stacked_caches,
+                scan_stacked_hidden,
+                metadata,
+                dcache_carry,
+                dhidden,
+            )
+          else:
+            segmented.check_pullback_group_boundary(
+                layer_tape, metadata, dcache_carry, dhidden
+            )
           for layer_index in reversed(range(len(layer_tape))):
             if scan_fwd_reverse:
-              local_grad, dcache, dhidden = segmented.run_block_pullback_tape(
-                  layer_index,
-                  scan_stacked_caches,
-                  scan_stacked_hidden,
-                  metadata,
-                  dcache_carry[layer_index],
-                  dhidden,
-                  state_leaves=engine_leaves,
+              local_grad, dcache, dhidden = (
+                  segmented.run_block_pullback_tape_prepared(
+                      pullback_prepared,
+                      layer_index,
+                      scan_stacked_caches,
+                      scan_stacked_hidden,
+                      metadata,
+                      dcache_carry[layer_index],
+                      dhidden,
+                  )
               )
             else:
               cache_in, hidden_in = layer_tape[layer_index]
-              local_grad, dcache, dhidden = segmented.run_block_pullback(
-                  layer_index,
-                  cache_in,
-                  hidden_in,
-                  metadata,
-                  dcache_carry[layer_index],
-                  dhidden,
-                  state_leaves=engine_leaves,
+              local_grad, dcache, dhidden = (
+                  segmented.run_block_pullback_prepared(
+                      pullback_prepared,
+                      layer_index,
+                      cache_in,
+                      hidden_in,
+                      metadata,
+                      dcache_carry[layer_index],
+                      dhidden,
+                  )
               )
             if chunk_layer_grads is not None:
               chunk_layer_grads.append(local_grad)
@@ -7242,6 +7483,16 @@ class Qwen3EngineForwardAdapter:
         )
     if p66_oracle:
       p66_vjp_oracle.negative_control()
+    # P70.3: hoist the layer-invariant pullback prep (host-boundary
+    # walk, state canonicalization, per-layer leaf gather) out of the
+    # per-layer backward dispatch loop -- one prepare per group, one
+    # boundary check per chunk, identical operands per dispatch.  The
+    # p66 same-point oracle below keeps calling the unprepared
+    # run_block_pullback on purpose: it is a cross-check and stays
+    # independent of the prepared path.
+    pullback_prepared = segmented.prepare_block_pullback_group(
+        engine_leaves, label="P59" if rank_parallel else "P28"
+    )
 
     with self._set_forward_context(None, self._runner.vllm_config):
       for chunk_index in reversed(range(spec["num_chunks"])):
@@ -7344,6 +7595,9 @@ class Qwen3EngineForwardAdapter:
           )
         counts["norm_pullback"] += 1
 
+        segmented.check_pullback_group_boundary(
+            layer_tape, metadata, dcache_carry, dhidden
+        )
         previous_cache_carry = [None] * len(layer_tape)
         chunk_layer_grads = [None] * len(layer_tape)
         for layer_index in reversed(range(len(layer_tape))):
@@ -7352,14 +7606,14 @@ class Qwen3EngineForwardAdapter:
           incoming_dhidden = dhidden
           if rank_parallel:
             local_grad, dcache, dhidden = (
-                segmented.run_block_pullback_rank_parallel(
+                segmented.run_block_pullback_rank_parallel_prepared(
+                    pullback_prepared,
                     layer_index,
                     cache_in,
                     hidden_in,
                     metadata,
                     incoming_dcache,
                     incoming_dhidden,
-                    state_leaves=engine_leaves,
                 )
             )
             if (
@@ -7390,14 +7644,16 @@ class Qwen3EngineForwardAdapter:
                   endpoint=f"layer_{layer_index}",
               ))
           else:
-            local_grad, dcache, dhidden = segmented.run_block_pullback(
-                layer_index,
-                cache_in,
-                hidden_in,
-                metadata,
-                incoming_dcache,
-                incoming_dhidden,
-                state_leaves=engine_leaves,
+            local_grad, dcache, dhidden = (
+                segmented.run_block_pullback_prepared(
+                    pullback_prepared,
+                    layer_index,
+                    cache_in,
+                    hidden_in,
+                    metadata,
+                    incoming_dcache,
+                    incoming_dhidden,
+                )
             )
           if p66_arm:
             hidden_rms, dhidden_max = p66_row_profile(hidden_in, dhidden)
