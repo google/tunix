@@ -149,8 +149,11 @@ def _spec(
     workload_candidate: str,
     data_split: str,
     high_performance: bool = False,
+    disable_eval: bool = False,
 ) -> p33.JobSpec:
-  enable_train_evaluation = run_kind == "train" and data_split != "selection"
+  enable_train_evaluation = (
+      run_kind == "train" and data_split != "selection" and not disable_eval
+  )
   command = list(
       p33._frozenlake_command(  # pylint: disable=protected-access
           expected_updates, dp_size=_DP_SIZE, tp_size=_TP_SIZE
@@ -287,6 +290,7 @@ def render_all(
     arm: str = "",
     stop_after_step: int | None = None,
     high_performance: bool = False,
+    disable_eval: bool = False,
 ) -> tuple[Path, ...]:
   if expected_updates not in _ALLOWED_UPDATES:
     raise ValueError(
@@ -420,6 +424,7 @@ def render_all(
         workload_candidate=workload_candidate,
         data_split=data_split,
         high_performance=high_performance,
+        disable_eval=disable_eval,
     )
     path = output_dir / f"jobset-{spec.key}.yaml"
     if path.exists():
@@ -587,6 +592,7 @@ def main() -> int:
   parser.add_argument("--arm", choices=tuple(_ARM_BY_NAME), default="")
   parser.add_argument("--stop-after-step", type=int)
   parser.add_argument("--high-performance", action="store_true")
+  parser.add_argument("--disable-eval", action="store_true")
   parser.add_argument(
       "--base", type=Path, default=Path(__file__).with_name("jobset-64chip.yaml")
   )
@@ -607,6 +613,7 @@ def main() -> int:
       arm=args.arm,
       stop_after_step=args.stop_after_step,
       high_performance=args.high_performance,
+      disable_eval=args.disable_eval,
   )
   print(
       "[P57.JOBSET] VERDICT PASS "
