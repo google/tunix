@@ -1,0 +1,5 @@
+M15 wide-seam GCS salvage return
+status=INCOMPLETE
+next_action=return a valid APC-off wide-seam classification
+token_bearing_bundle_returned=0
+remote_state_mutated=0

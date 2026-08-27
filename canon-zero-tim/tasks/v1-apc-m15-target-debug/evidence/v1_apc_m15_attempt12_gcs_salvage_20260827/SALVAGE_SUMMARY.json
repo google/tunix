@@ -1,0 +1,85 @@
+{
+  "attempt": 12,
+  "campaign_root": "v1-apc-m15-attempt12-d20",
+  "claim_ceiling": "This return audits already-persisted small evidence only; it does not rerun TPU inference or repair APC numerics.",
+  "next_action": "return a valid APC-off wide-seam classification",
+  "off": {
+    "arm": "off",
+    "bundle": {
+      "present": false
+    },
+    "classification": {
+      "candidate_names": [],
+      "present": false
+    },
+    "evidence_bound": false,
+    "markers": {
+      "COLLECTED.json": {
+        "present": false
+      },
+      "COMPLETE.json": {
+        "present": false
+      },
+      "PREFLIGHT.json": {
+        "present": true,
+        "schema": "canon-p38-gcs-preflight-v1",
+        "sha256": "db8de28cb2016919fc048f57162b17340311968f80d5ce02987ee24f04ecacc7",
+        "source_commit": "395c0e0de8626c96e85457b997efddd2dd2dec48",
+        "status": "writable-and-source-verified"
+      }
+    },
+    "remote_inventory": [
+      "PREFLIGHT.json present",
+      "COLLECTED.json absent",
+      "COMPLETE.json absent",
+      "SHA256SUMS absent",
+      "seam-classification.json absent",
+      "p38_seam.classification.json absent",
+      "m15_wide_seam_bundle.tar absent"
+    ],
+    "root_manifest_entries": 0,
+    "root_manifest_present": false
+  },
+  "on": {
+    "arm": "on",
+    "bundle": {
+      "present": false
+    },
+    "classification": {
+      "candidate_names": [],
+      "present": false
+    },
+    "evidence_bound": false,
+    "markers": {
+      "COLLECTED.json": {
+        "present": false
+      },
+      "COMPLETE.json": {
+        "present": false
+      },
+      "PREFLIGHT.json": {
+        "present": true,
+        "schema": "canon-p38-gcs-preflight-v1",
+        "sha256": "36eaf3d785da260faf48a4843b431ab8e675fa80f7a5aedf4ac11852f4c12e3f",
+        "source_commit": "395c0e0de8626c96e85457b997efddd2dd2dec48",
+        "status": "writable-and-source-verified"
+      }
+    },
+    "remote_inventory": [
+      "PREFLIGHT.json present",
+      "COLLECTED.json absent",
+      "COMPLETE.json absent",
+      "SHA256SUMS absent",
+      "seam-classification.json absent",
+      "p38_seam.classification.json absent",
+      "m15_wide_seam_bundle.tar absent"
+    ],
+    "root_manifest_entries": 0,
+    "root_manifest_present": false
+  },
+  "receipt_sha256": "9c79e56e1ac5570ad99786516215488f8c4d20e18b779ae02232270a7a3995ef",
+  "schema": "m15-apc-wide-seam-gcs-salvage-v1",
+  "source_commit": "395c0e0de8626c96e85457b997efddd2dd2dec48",
+  "source_commit_conflicts": [],
+  "status": "INCOMPLETE"
+}
