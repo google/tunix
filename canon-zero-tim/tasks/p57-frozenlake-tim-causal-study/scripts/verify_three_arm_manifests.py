@@ -12,7 +12,11 @@ import tempfile
 import yaml
 
 
-PROFILE = "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env"
+BASE_PROFILE = "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env"
+ZERO_HP_PROFILE = (
+    "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env"
+)
+WANDB_PROJECT = "zero-tim-p57-frozenlake-tim"
 ARMS = {
     "native": ("mismatch", "none", "stock-fast", "0", "1"),
     "is": ("is", "token", "stock-fast", "0", "1"),
@@ -46,7 +50,10 @@ def verify(path: Path, *, wave: str, workload: str, source: str) -> None:
   env = _env(document)
   expected = {
       "CANON_EXPECT_COMMIT": source,
-      "CANON_PROFILE_FILE": PROFILE,
+      "CANON_PROFILE_FILE": (
+          ZERO_HP_PROFILE if wave == "zero" else BASE_PROFILE
+      ),
+      "CANON_V1_HP_FULL": "1" if wave == "zero" else "0",
       "CANON_P57_TIM_ARM": arm,
       "CANON_P57_RUN_KIND": "train",
       "CANON_P57_INFERENCE_REGIME": regime,
@@ -65,6 +72,8 @@ def verify(path: Path, *, wave: str, workload: str, source: str) -> None:
       "CANON_FROZENLAKE_CKPT_MAX_TO_KEEP": "1",
       "CANON_FROZENLAKE_CKPT_MILESTONE_INTERVAL": "0",
   }
+  if wave == "zero":
+    expected["CANON_P59_RANK_PARALLEL_BACKWARD"] = "1"
   wrong = {
       name: env.get(name)
       for name, value in expected.items()
@@ -112,15 +121,34 @@ def verify(path: Path, *, wave: str, workload: str, source: str) -> None:
         capture_output=True,
         check=False,
     )
-  if result.returncode:
-    raise ValueError(
-        f"{path}: resolved-env preflight failed:\n{result.stdout}\n{result.stderr}"
-    )
+    if result.returncode:
+      raise ValueError(
+          f"{path}: resolved-env preflight failed:\n"
+          f"{result.stdout}\n{result.stderr}"
+      )
+    snapshot = (state / "env.sh").read_text(encoding="utf-8")
   stock_marker = "[P57.STOCK_FAST] ZERO_TIM_OFF_PASS mode=train"
   if wave in ("native", "is") and stock_marker not in result.stdout:
     raise ValueError(f"{path}: native zero-TIM-off receipt is absent")
   if wave == "zero" and stock_marker in result.stdout:
     raise ValueError(f"{path}: zero arm incorrectly selected stock-fast")
+  if f"export CANON_WANDB_PROJECT={WANDB_PROJECT}" not in snapshot:
+    raise ValueError(f"{path}: P57 W&B project drifted")
+  expected_group = f"p57-{arm}"
+  if candidate:
+    expected_group += f"-{candidate}-{split}"
+  if f"export CANON_WANDB_GROUP={expected_group}" not in snapshot:
+    raise ValueError(f"{path}: P57 W&B group drifted")
+  if wave == "zero":
+    for receipt in (
+        "export CANON_P59_RANK_PARALLEL_BACKWARD=1",
+        "export CANON_P59_CHECKED_VMA=1",
+        "export CANON_P66_P59_CHECK_VMA=1",
+        "export CANON_P67_P66_VMA_P59_ONLY=1",
+        "export CANON_V1_HP_FIRST_UPDATE_GATE=1",
+    ):
+      if receipt not in snapshot:
+        raise ValueError(f"{path}: optimized zero receipt absent: {receipt}")
   print(
       "P57_THREE_ARM_MANIFEST_PASS "
       f"wave={wave} workload={workload} arm={arm} sampler_is={sampler} "

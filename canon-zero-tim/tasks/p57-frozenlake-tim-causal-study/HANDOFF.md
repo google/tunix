@@ -1,5 +1,45 @@
 # P57 300-update execution handoff
 
+## START HERE — Zero reference must use the registered optimized path
+
+This section supersedes the older statement that the Zero-TIM pair is merely
+deferred on the baseline P57 profile.
+
+Wave 04 P45 ran source `f7adb4e6fb4b86698c0386079b3a17da031a4578`
+as `canon-p57-fl-zero-f45w04-f7adb4e6`, but its resolved log selected
+`qwen3-8b-dp8-tp8-frozenlake-tim`, not the registered
+`qwen3-8b-dp8-tp8-frozenlake-v1-hp` profile. Step-0 strict pre-alignment was
+real and green over 47,169 action tokens with A-B/B-C `0/0`, but the baseline
+profile left P59 rank-parallel backward off. The serial report adjoint returned
+an engine six-axis `data/.../model` gradient and then passed it to a trainer
+reducer expecting axis `dp`; construction stopped before DP reduction, AdamW,
+weight sync, evaluation, or checkpoint.
+
+The incident report's proposed `_p59_replicated_data_mesh` six-axis whitelist
+is not the fix for the active Zero reference: the failing source line is the
+serial reducer branch and that helper is not on the traceback. Preserve the
+failed run and report unchanged as historical evidence.
+
+The active decision is now fail-closed: every primary P45 or M15/main
+300-update `zero` train must use the V1 high-performance profile and its P59
+rank-parallel backward, checked-VMA repair, P67 serving scope, first-update
+gate, strict alignment, APC-off contract, final-only checkpoint, and existing
+evaluation schedule. `render_three_arm_wave.sh zero ...` supplies the HP mode;
+the renderer and base P57 profile independently reject a baseline zero train,
+and the manifest verifier checks the resolved P59/P66/P67 receipts.
+
+W&B comparison identity remains unchanged. Native/no-IS, native/IS, and the
+optimized Zero reference all write to project
+`zero-tim-p57-frozenlake-tim`; groups and run names continue to distinguish
+the arm and workload. Do not move Zero to a V1-specific project.
+
+No Wave 05 manifest or TPU run exists yet. After publication approval, render
+fresh P45 and M15 Zero manifests from the exact pushed SHA, return both YAML
+hashes plus resolved-env receipts, and obtain separate launch approval. The
+first target acceptance remains one complete 32-group P59 backward, finite
+nonzero first-update receipt, valid AdamW `0 -> 1`, weight sync, and policy
+step 1 with no strict alignment failure.
+
 ## Assignment
 
 You are the execution agent. Run reviewed scripts; do not edit code, profiles,

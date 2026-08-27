@@ -31,6 +31,11 @@ def _module(name, path):
 
 calibration = _module("p57_calibration_renderer", CLUSTER / "render_p57_calibration.py")
 paired = _module("p57_paired_renderer", CLUSTER / "render_p57_frozenlake_tim.py")
+THREE_ARM_WRAPPER = (
+    ROOT
+    / "canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts"
+    / "render_three_arm_wave.sh"
+)
 manifest_preflight = _module(
     "p57_calibration_manifest_preflight",
     ROOT
@@ -303,8 +308,8 @@ class P57RendererTest(unittest.TestCase):
       with self.assertRaisesRegex(ValueError, "manifest drifted"):
         manifest_preflight.verify(bad)
 
-  def test_selected_main_recipe_can_render_stock_or_paired_training(self):
-    for stock_only, expected_count in ((True, 1), (False, 2)):
+  def test_selected_main_recipe_can_render_stock_or_native_training(self):
+    for stock_only, expected_count in ((True, 1), (False, 1)):
       with self.subTest(stock_only=stock_only), tempfile.TemporaryDirectory() as tmp:
         data_split = "selection" if stock_only else "main"
         expected_updates = 200 if stock_only else 300
@@ -319,6 +324,7 @@ class P57RendererTest(unittest.TestCase):
             workload_candidate="m15",
             data_split=data_split,
             stock_only=stock_only,
+            arm="" if stock_only else "mismatch",
         )
         self.assertEqual(len(paths), expected_count)
         for path in paths:
@@ -494,6 +500,7 @@ class P57RendererTest(unittest.TestCase):
                 workload_candidate=candidate,
                 data_split=split,
                 arm=arm,
+                high_performance=arm == "zero",
             )[0]
             env = _env(yaml.safe_load(path.read_text()))
             command = env["CANON_RUN_CMD"].split()
@@ -506,6 +513,17 @@ class P57RendererTest(unittest.TestCase):
             self.assertIn(f"--env_max_steps={turns}", command)
             self.assertIn(f"--max_response_length={response}", command)
             self.assertEqual(env["CANON_P57_TIM_ARM"], arm)
+            self.assertEqual(
+                env["CANON_PROFILE_FILE"],
+                paired._V1_HP_PROFILE if arm == "zero" else paired._PROFILE,
+            )
+            self.assertEqual(
+                env["CANON_V1_HP_FULL"], "1" if arm == "zero" else "0"
+            )
+            self.assertEqual(
+                env["CANON_P59_RANK_PARALLEL_BACKWARD"],
+                "1" if arm == "zero" else "0",
+            )
             self.assertEqual(env["CANON_P57_INFERENCE_REGIME"], regime)
             self.assertEqual(env["CANON_P38_FIXED_LM_HEAD"], fixed_head)
             self.assertEqual(
@@ -526,11 +544,56 @@ class P57RendererTest(unittest.TestCase):
                 env, root / f"state-{workload}-{arm}"
             )
             self.assertEqual(preflight.returncode, 0, preflight.stderr)
+            resolved = (root / f"state-{workload}-{arm}" / "env.sh").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn(
+                "export CANON_WANDB_PROJECT=zero-tim-p57-frozenlake-tim",
+                resolved,
+            )
+            expected_group = f"p57-{arm}"
+            if candidate:
+              expected_group += f"-{candidate}-{split}"
+            self.assertIn(
+                f"export CANON_WANDB_GROUP={expected_group}",
+                resolved,
+            )
+            if arm == "zero":
+              for receipt in (
+                  "export CANON_P59_CHECKED_VMA=1",
+                  "export CANON_P66_P59_CHECK_VMA=1",
+                  "export CANON_P67_P66_VMA_P59_ONLY=1",
+                  "export CANON_V1_HP_FIRST_UPDATE_GATE=1",
+              ):
+                self.assertIn(receipt, resolved)
             if regime == "stock-fast":
               self.assertIn(
                   "[P57.STOCK_FAST] ZERO_TIM_OFF_PASS mode=train",
                   preflight.stdout,
               )
+
+  def test_primary_zero_train_rejects_baseline_profile(self):
+    with tempfile.TemporaryDirectory() as tmp, self.assertRaisesRegex(
+        ValueError, "requires the registered v1 high-performance path"
+    ):
+      paired.render_all(
+          base_path=BASE,
+          output_dir=Path(tmp),
+          source_commit="a" * 40,
+          run_id="p57zerobad",
+          campaign_tag="p57-zero-baseline-negative",
+          checkpoint_mode="new",
+          expected_updates=300,
+          run_kind="train",
+          arm="zero",
+      )
+
+  def test_three_arm_wrapper_routes_zero_to_hp_and_requires_clean_exact_sha(self):
+    script = THREE_ARM_WRAPPER.read_text(encoding="utf-8")
+    self.assertIn("renderer_mode+=(--high-performance)", script)
+    self.assertEqual(script.count('"${renderer_mode[@]}"'), 2)
+    self.assertIn('git -C "$repo" rev-parse HEAD', script)
+    self.assertIn("refusing to render from a dirty worktree", script)
 
   def test_paired_arms_reject_unregistered_200_step_horizon(self):
     workloads = (

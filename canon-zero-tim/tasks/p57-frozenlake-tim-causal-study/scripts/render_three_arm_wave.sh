@@ -19,6 +19,10 @@ case "$wave" in
   zero) arm=zero ;;
   *) echo "wave must be native, is, or zero" >&2; exit 2 ;;
 esac
+renderer_mode=()
+if [ "$wave" = "zero" ]; then
+  renderer_mode+=(--high-performance)
+fi
 [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]] || {
   echo "source SHA must be exactly 40 lowercase hex characters" >&2
   exit 2
@@ -27,11 +31,19 @@ esac
   echo "refusing to overwrite output root: $output_root" >&2
   exit 2
 }
-git cat-file -e "$source_sha^{commit}"
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$script_dir/../../../.." && pwd)"
 renderer="$repo/canon-zero-tim/cluster/render_p57_frozenlake_tim.py"
+git -C "$repo" cat-file -e "$source_sha^{commit}"
+[ "$(git -C "$repo" rev-parse HEAD)" = "$source_sha" ] || {
+  echo "refusing to render from a checkout that is not the requested source SHA" >&2
+  exit 2
+}
+[ -z "$(git -C "$repo" status --porcelain --untracked-files=all)" ] || {
+  echo "refusing to render from a dirty worktree" >&2
+  exit 2
+}
 expected_updates=300
 mkdir -p "$output_root"
 
@@ -43,7 +55,8 @@ python3 "$renderer" \
   --checkpoint-mode new \
   --expected-updates "$expected_updates" \
   --run-kind train \
-  --arm "$arm"
+  --arm "$arm" \
+  "${renderer_mode[@]}"
 
 python3 "$renderer" \
   --source-commit "$source_sha" \
@@ -55,7 +68,8 @@ python3 "$renderer" \
   --run-kind train \
   --workload-candidate m15 \
   --data-split main \
-  --arm "$arm"
+  --arm "$arm" \
+  "${renderer_mode[@]}"
 
 p45_manifest="$(find "$output_root/p45" -maxdepth 1 -name 'jobset-*.yaml' -print)"
 m15_manifest="$(find "$output_root/m15" -maxdepth 1 -name 'jobset-*.yaml' -print)"

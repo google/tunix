@@ -306,6 +306,17 @@ def render_all(
     raise ValueError(
         "P57 v1 high-performance mode requires a new 300-update zero train"
     )
+  primary_zero_requested = (
+      not stock_only
+      and run_kind == "train"
+      and expected_updates == _PAIRED_ARM_UPDATES
+      and arm in ("", "zero")
+  )
+  if primary_zero_requested and not high_performance:
+    raise ValueError(
+        "P57 primary zero reference requires the registered v1 "
+        "high-performance path"
+    )
   if run_kind == "train" and checkpoint_step is not None:
     raise ValueError("P57 training must not name an evaluation checkpoint")
   if bool(workload_candidate) != bool(data_split):
