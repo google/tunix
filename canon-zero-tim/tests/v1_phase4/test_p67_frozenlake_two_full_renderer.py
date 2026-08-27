@@ -144,9 +144,17 @@ class P67FrozenLakeTwoFullRendererTest(unittest.TestCase):
           yaml.safe_load(self._render(root / "rendered")[0].read_text(encoding="utf-8"))
       )
       env_step = _REPO / "canon-zero-tim/cluster/steps/00_env.sh"
-      for label, mutation in (
-          ("wrong-profile", {"CANON_PROFILE_FILE": "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env"}),
-          ("wrong-mesh", {"CANON_P33_SHARED_MESH": "16,4"}),
+      for label, mutation, expected_error in (
+          (
+              "wrong-profile",
+              {"CANON_PROFILE_FILE": "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env"},
+              "P57 primary zero train requires the registered v1 high-performance profile",
+          ),
+          (
+              "wrong-mesh",
+              {"CANON_P33_SHARED_MESH": "16,4"},
+              "P67 VMA scoping is restricted",
+          ),
       ):
         with self.subTest(label=label):
           state = root / label
@@ -167,7 +175,7 @@ class P67FrozenLakeTwoFullRendererTest(unittest.TestCase):
               check=False,
           )
           self.assertNotEqual(completed.returncode, 0)
-          self.assertIn("P67 VMA scoping is restricted", completed.stderr)
+          self.assertIn(expected_error, completed.stderr)
 
   def test_wrapper_is_render_only_and_emits_two_unpiped_launch_commands(self):
     script = _PREPARE.read_text(encoding="utf-8")
