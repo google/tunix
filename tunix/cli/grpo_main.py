@@ -194,6 +194,8 @@ def main(argv, **kwargs):
       pipeline.config,
   )
   pipeline.run_trainer()
+  return
+
 
 if __name__ == "__main__":
   app.run(main)
