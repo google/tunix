@@ -23,7 +23,7 @@ _PRIORITY_CLASS = "very-high"
 
 
 def _str_representer(dumper: yaml.SafeDumper, data: str) -> yaml.ScalarNode:
-  if re.match(r"^[0-9]+[eE][0-9]+$", data):
+  if re.match(r"^([0-9]+|[0-9]+[eE][0-9]+|true|false|yes|no|on|off)$", data, re.IGNORECASE):
     return dumper.represent_scalar("tag:yaml.org,2002:str", data, style='"')
   return dumper.represent_scalar("tag:yaml.org,2002:str", data)
 
