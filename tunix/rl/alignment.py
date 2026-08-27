@@ -1135,9 +1135,14 @@ def _persist_m15_producer_unit_carrier(
     raise AlignmentGateError(
         "M15 producer-unit capture is restricted to P38 precheck-only runs"
     )
-  if p38_diagnostic_rounds() != 1 or p38_diagnostic_round_index() != 0:
+  diagnostic_rounds = p38_diagnostic_rounds()
+  diagnostic_round = p38_diagnostic_round_index()
+  if (
+      not 1 <= diagnostic_rounds <= 8
+      or not 0 <= diagnostic_round < diagnostic_rounds
+  ):
     raise AlignmentGateError(
-        "M15 producer-unit capture currently requires exactly one round"
+        "M15 producer-unit capture requires a valid bounded diagnostic round"
     )
   row_arrays = _p38_replay_row_arrays(sidecar)
   batch_rows = int(np.asarray(sidecar.tokens).shape[0])
@@ -1162,7 +1167,7 @@ def _persist_m15_producer_unit_carrier(
       "schema": "m15-apc-producer-unit-v1",
       "arm": arm,
       "step": int(record["step"]),
-      "diagnostic_round": 0,
+      "diagnostic_round": diagnostic_round,
       "source": sidecar.source_name,
       "source_commit": os.environ.get("CANON_EXPECT_COMMIT", ""),
       "rows": batch_rows,
@@ -1190,13 +1195,20 @@ def _persist_m15_producer_unit_carrier(
   metadata_json = json.dumps(
       metadata, sort_keys=True, separators=(",", ":"), allow_nan=False
   ).encode()
-  path = os.path.join(capture_dir, "m15_producer_unit.npz")
+  immutable_path = os.path.join(
+      capture_dir, f"m15_producer_unit.round-{diagnostic_round:06d}.npz"
+  )
+  path = (
+      os.path.join(capture_dir, "m15_producer_unit.npz")
+      if diagnostic_rounds == 1 else immutable_path
+  )
   os.makedirs(capture_dir, exist_ok=True)
   if os.path.exists(path):
     raise AlignmentGateError(
         f"M15 producer-unit carrier path already exists: {path}"
     )
   temporary = f"{path}.tmp"
+  alias_temporary = ""
   try:
     with open(temporary, "xb") as carrier_file:
       np.savez_compressed(
@@ -1208,9 +1220,18 @@ def _persist_m15_producer_unit_carrier(
       carrier_file.flush()
       os.fsync(carrier_file.fileno())
     os.replace(temporary, path)
+    if diagnostic_rounds > 1:
+      alias = os.path.join(capture_dir, "m15_producer_unit.npz")
+      alias_temporary = f"{alias}.tmp"
+      if os.path.lexists(alias_temporary):
+        os.unlink(alias_temporary)
+      os.link(path, alias_temporary)
+      os.replace(alias_temporary, alias)
   finally:
     if os.path.exists(temporary):
       os.unlink(temporary)
+    if alias_temporary and os.path.lexists(alias_temporary):
+      os.unlink(alias_temporary)
   result = {
       "path": path,
       "sha256": _report_sha256(path),

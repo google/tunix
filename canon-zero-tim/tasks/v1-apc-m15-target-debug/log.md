@@ -667,3 +667,41 @@
   observer launch or numerical repair.
 - No numerical/runtime source, flag, remote state, TPU/Kubernetes job, commit,
   or push was changed in this correction.
+
+## 2026-08-27 — Phase D3 three-round durability implementation started
+
+- The user's early-exit hypothesis is operationally plausible: a useful round
+  can finish before root collection, so waiting for only the final root aliases
+  leaves one avoidable loss window. Merely increasing training steps would not
+  solve it and could change weights.
+- The M15 wide renderer now requests exactly three diagnostic rounds for both
+  layer and full observer modes; observer-none remains one round. Every round
+  is a real rollout/evaluation against frozen weights and must receive a
+  remote read-back ACK before the learner advances.
+- Fixed four latent single-round assumptions: local shards are isolated by
+  round, cumulative replay ledgers are filtered to the current round,
+  classifier/receipt/completion round identities are cross-checked, and root
+  collection selects the final round instead of hardcoded round 0.
+- Added patch 31 to reset only the seam/tail byte budget at a strictly
+  increasing M15-wide round transition. Record indices remain process-global,
+  preventing filename reuse or overwrite. No model tensor arithmetic changed.
+- Multi-round producer units are immutable round-named files with an atomic
+  latest alias. The old one-round filename and behavior remain unchanged.
+- Added `prepare_m15_multiround_pair.sh` to render and hash the exact off/on
+  full-Layer-0 pair without launching it, and
+  `run_m15_multiround_gcs_return.sh` to recover per-round small evidence
+  directly from GCS without downloading token-bearing tars.
+- New return states distinguish complete roots, all rounds recovered despite
+  root failure, partial round recovery, and no durable round. This preserves
+  useful data without weakening the signed TARGET PASS contract.
+- Final host gates: task-local suite 82/82 PASS; target carrier 15/15;
+  resolved-env 10/10; fake-GCS persistence PASS including a second-round
+  isolated shard and forced-death survival; flag audit 393/393; flag-auditor
+  tests 2/2; shell/Python syntax and `git diff --check` PASS.
+- A real final installed runner whose pre-patch SHA matches the registered
+  manifest accepted patch 31, compiled, and produced the new registered SHA
+  `558e5e2afecdeffd096dfcd9f23d5f2552fbc3dcbd784d29c38bb15ab329a8f8`.
+- The preparation wrapper rendered the exact two full-Layer-0 YAMLs and a
+  self-hashed contract with two arms, three rounds, and zero backward/commit;
+  it did not launch them.
+- No commit, push, GCS access, pinned image, TPU, or Kubernetes launch occurred.

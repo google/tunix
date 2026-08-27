@@ -708,7 +708,12 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
     fail=1
   }
   expected_p38_rounds=3
-  [ "$APC_M15_TARGET_DEBUG" = "0" ] || expected_p38_rounds=1
+  if [ "$APC_M15_TARGET_DEBUG" = "1" ]; then
+    expected_p38_rounds=1
+    if [ "${CANON_P38_DURABILITY_PROFILE:-}" = "m15-wide-v1" ]; then
+      expected_p38_rounds=3
+    fi
+  fi
   [ "${CANON_P38_DIAGNOSTIC_ROUNDS:-}" = "$expected_p38_rounds" ] || {
     echo "[env] P38 diagnostic round count drifted: expected=$expected_p38_rounds" >&2
     fail=1

@@ -198,8 +198,9 @@ if [ "$mode" = m15-shard ]; then
       exit 2
       ;;
   esac
+  printf -v round_sequence '%06d' "$((10#$round_text))"
   shard_prefix="$CANON_P38_GCS_PREFIX/wide/shards/$snapshot_sequence"
-  shard_root="$CANON_STATE/p38_m15_wide_shards"
+  shard_root="$CANON_STATE/p38_m15_wide_shards/round-$round_sequence"
   shard_stage="$shard_root/$snapshot_sequence"
   for remote_name in SHARD_ARCHIVE.tar SHA256SUMS SHARD_COMPLETE.json; do
     if gcs_exists "$shard_prefix/$remote_name"; then
@@ -301,7 +302,8 @@ if [ "$mode" = m15-round ]; then
   round_prefix="$CANON_P38_GCS_PREFIX/wide/rounds/$snapshot_sequence"
   round_root="$CANON_STATE/p38_m15_wide_rounds"
   round_stage="$round_root/$snapshot_sequence"
-  shard_root="$CANON_STATE/p38_m15_wide_shards"
+  printf -v round_sequence '%06d' "$round_index"
+  shard_root="$CANON_STATE/p38_m15_wide_shards/round-$round_sequence"
   if [ -e "$round_stage" ]; then
     echo "[P38.GCS] REFUSING: M15 wide round already exists: $snapshot_sequence" >&2
     exit 2
@@ -725,7 +727,19 @@ if [ "$mode" = collect ]; then
   fi
 
   if [ "$CANON_P38_DURABILITY_PROFILE" = m15-wide-v1 ]; then
-    wide_round="$CANON_STATE/p38_m15_wide_rounds/000000"
+    case "${CANON_P38_DIAGNOSTIC_ROUNDS:-}" in
+      ''|*[!0-9]*)
+        echo "[P38.GCS] REFUSING: M15 diagnostic round count is invalid" >&2
+        exit 2
+        ;;
+    esac
+    [ "$CANON_P38_DIAGNOSTIC_ROUNDS" -ge 1 ] && \
+      [ "$CANON_P38_DIAGNOSTIC_ROUNDS" -le 8 ] || {
+      echo "[P38.GCS] REFUSING: M15 diagnostic round count must be in [1,8]" >&2
+      exit 2
+    }
+    printf -v wide_round_text '%06d' "$((CANON_P38_DIAGNOSTIC_ROUNDS - 1))"
+    wide_round="$CANON_STATE/p38_m15_wide_rounds/$wide_round_text"
     copy_required "${CANON_RUN_LOG:?}" run.log
     copy_required "${CANON_PRE_ALIGN_REPORT:?}" pre-alignment.jsonl
     copy_required "${CANON_P38_SEAM_CLASSIFICATION:?}" \

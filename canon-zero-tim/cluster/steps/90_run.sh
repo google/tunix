@@ -597,7 +597,9 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
   p38_seam_bundle_rc=0
   if [ -n "${CANON_P38_SEAM_OBSERVER:-}" ]; then
     if [ "$p38_m15_wide" -eq 1 ]; then
-      p38_m15_round_dir="$CANON_STATE/p38_m15_wide_rounds/000000"
+      printf -v p38_m15_final_round '%06d' \
+        "$((CANON_P38_DIAGNOSTIC_ROUNDS - 1))"
+      p38_m15_round_dir="$CANON_STATE/p38_m15_wide_rounds/$p38_m15_final_round"
       p38_runtime_source_commit="$(git -C "$CANON_PKG/.." rev-parse HEAD)" || \
         p38_seam_rc=$?
       if [ "$p38_seam_rc" -eq 0 ]; then

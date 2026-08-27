@@ -6,6 +6,7 @@ from __future__ import annotations
 import ast
 import copy
 import importlib.util
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -72,6 +73,43 @@ admission_geometry, p38_batch_contract = _load_train_geometry_contracts()
 
 class TargetCarrierTest(unittest.TestCase):
 
+  def test_m15_round_budget_resets_bytes_without_reusing_record_indices(self):
+    patch = (
+        CANON / "patches/tpu_inference/31-tpu-runner-m15-multiround-budget.patch"
+    ).read_text(encoding="utf-8").splitlines()
+    start = next(
+        index for index, line in enumerate(patch)
+        if line.startswith("+def _p38_begin_observer_round")
+    )
+    body = []
+    for line in patch[start:]:
+      if line.startswith(" _P38_TAIL_GATHER_FNS"):
+        break
+      if line.startswith("+"):
+        body.append(line[1:])
+    namespace = {"os": os}
+    exec("\n".join(body), namespace)  # pylint: disable=exec-used
+    begin = namespace["_p38_begin_observer_round"]
+    previous = os.environ.get("CANON_P38_DURABILITY_PROFILE")
+    os.environ["CANON_P38_DURABILITY_PROFILE"] = "m15-wide-v1"
+    try:
+      state = {"records": 17, "bytes": 1234}
+      begin(state, 0, "seam")
+      self.assertEqual(state, {
+          "records": 17, "bytes": 1234, "diagnostic_round": 0
+      })
+      begin(state, 1, "seam")
+      self.assertEqual(state, {
+          "records": 17, "bytes": 0, "diagnostic_round": 1
+      })
+      with self.assertRaisesRegex(ValueError, "increase by one"):
+        begin(state, 3, "seam")
+    finally:
+      if previous is None:
+        os.environ.pop("CANON_P38_DURABILITY_PROFILE", None)
+      else:
+        os.environ["CANON_P38_DURABILITY_PROFILE"] = previous
+
   def test_runner_uses_sealed_m15_shards_without_replacing_legacy(self):
     runner = (CANON / "cluster/steps/90_run.sh").read_text(encoding="utf-8")
     env_step = (CANON / "cluster/steps/00_env.sh").read_text(encoding="utf-8")
@@ -126,6 +164,13 @@ class TargetCarrierTest(unittest.TestCase):
     self.assertIn("28-tpu-runner-m15-mixed-program-path.patch", installer)
     self.assertIn("CANON_P38_INCIDENT_LEDGER_BYPASS", durability_patch)
     self.assertIn("30-tpu-runner-m15-wide-incident-bypass.patch", installer)
+    budget_patch = (
+        CANON / "patches/tpu_inference/31-tpu-runner-m15-multiround-budget.patch"
+    ).read_text(encoding="utf-8")
+    self.assertIn("31-tpu-runner-m15-multiround-budget.patch", installer)
+    self.assertIn('state["bytes"] = 0', budget_patch)
+    self.assertNotIn('state["records"] = 0', budget_patch)
+    self.assertIn("diagnostic_round != int(previous) + 1", budget_patch)
 
   def test_renders_exact_off_on_pair(self):
     with tempfile.TemporaryDirectory() as directory:
@@ -222,9 +267,14 @@ class TargetCarrierTest(unittest.TestCase):
         document = yaml.safe_load(path.read_text(encoding="utf-8"))
         env = renderer.p33._env_values(document)
         self.assertEqual(env["CANON_P38_DURABILITY_PROFILE"], "m15-wide-v1")
+        self.assertEqual(env["CANON_P38_DIAGNOSTIC_ROUNDS"], "3")
         self.assertEqual(
             document["metadata"]["labels"]["canon.zero-tim/durability-profile"],
             "m15-wide-v1",
+        )
+        self.assertEqual(
+            document["metadata"]["labels"]["canon.zero-tim/diagnostic-rounds"],
+            "3",
         )
 
   def test_rejects_short_source_sha(self):
@@ -259,6 +309,7 @@ class TargetCarrierTest(unittest.TestCase):
         self.assertEqual(env["CANON_P38_SEAM_MAX_BYTES"], "8589934592")
         self.assertEqual(env["CANON_P38_TAIL_OBSERVER"], "1")
         self.assertEqual(env["CANON_P38_TAIL_MAX_BYTES"], "268435456")
+        self.assertEqual(env["CANON_P38_DIAGNOSTIC_ROUNDS"], "3")
         self.assertNotIn("CANON_P38_SEAM_LAYER", env)
 
   def test_full_observer_requires_and_pins_one_layer(self):
@@ -276,6 +327,7 @@ class TargetCarrierTest(unittest.TestCase):
         env = renderer.p33._env_values(document)
         self.assertEqual(env["CANON_P38_SEAM_OBSERVER"], "full")
         self.assertEqual(env["CANON_P38_SEAM_LAYER"], "17")
+        self.assertEqual(env["CANON_P38_DIAGNOSTIC_ROUNDS"], "3")
         self.assertNotIn("CANON_P38_TAIL_OBSERVER", env)
       with self.assertRaisesRegex(ValueError, "requires --seam-layer"):
         renderer.render_all(

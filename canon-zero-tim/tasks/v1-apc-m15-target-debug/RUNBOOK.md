@@ -5,7 +5,38 @@ commands; it does not edit YAML, numerical code, or evidence. Large payloads
 remain in GCS exactly like the earlier P38/lm-head investigation. Only small
 machine-generated receipts are returned through Git or chat.
 
-## Current operation: publish Phase D2; target launch remains approval-gated
+## Current operation: three frozen Layer-0 rounds with per-round durability
+
+Do not run the old one-round command below.  After the source is reviewed,
+committed, pushed, and target launch is separately approved, use the two
+checked-in wrappers from the top of `HANDOFF.md`:
+
+```bash
+bash canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/prepare_m15_multiround_pair.sh \
+  "$SOURCE_SHA" "$RUN_ID" "$OUT" full 0
+```
+
+Submit the generated off/on YAMLs concurrently with standalone `kubectl
+apply` commands.  Each arm performs exactly three real M15 rollouts/evaluation
+rounds against frozen weights.  Every round is independently sealed and read
+back before the next starts.  No backward or optimizer commit is allowed.
+
+Post-run, do not manually copy a classifier and do not wait for a multi-GiB tar
+to travel through Git/chat.  Run:
+
+```bash
+bash canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/run_m15_multiround_gcs_return.sh \
+  "$OUT" "$RETURN" /mnt/disks/tunix-data
+(cd "$RETURN" && sha256sum -c SHA256SUMS)
+```
+
+This queries every per-round prefix directly and returns only hash-bound small
+JSON.  It preserves earlier sealed rounds even if root `COLLECTED`/`COMPLETE`
+is absent.  Read `MULTIROUND_SUMMARY.json`; status meanings and the exact
+return checklist are in the first section of `HANDOFF.md` and
+`phases/phase-d3-multiround-durable-rerun.md`.
+
+## Historical operation: publish Phase D2; target launch remained approval-gated
 
 Do not launch a JobSet. The checked-in bounded-shard host gates in the first
 section of `HANDOFF.md` and the pinned exact-image aggregate gate pass. The forced-death
@@ -44,10 +75,9 @@ Do not run the older Phase-C preparation again. The one-host r10-r13c ladder
 was exact and did not reproduce the target. The next useful run is the known-
 red 64-chip M15 topology with the layer observer already attached.
 
-This section is frozen until Phase D2 passes exact-image, is published, and the
-user gives a separate target-launch approval. Do not increase diagnostic rounds: the
-current renderer and classifier intentionally admit one round only, and d17
-already proved the 2-GiB legacy incident ledger is the limiting resource.
+This one-round section is superseded by Phase D3.  It is retained only to
+explain older run receipts.  Do not copy its renderer command for the next
+launch; use `prepare_m15_multiround_pair.sh` above.
 
 Preflight after a published source exists:
 

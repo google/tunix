@@ -24,6 +24,7 @@ B - C = 0 bytes
 | C | executable replay-prefix input plan followed by a single-variable reproduction ladder | saved bytes and chronology revalidate; control A-B=0; treatment either reproduces red or is `ONEHOST_NOT_REPRODUCED` | complete: r10-r13c one-host ladder exact through full chronology; scale/topology remains |
 | D | observer-neutral coarse-to-fine first-red walk on known-red DP8xTP8 | `FIRST_RED_LOCALIZED` names last exact and first red tensor, shape ledger, request/token/cache coordinate, and `file:line` | Attempt-12 coarse summary returned; blocked on remote evidence binding before the conditional Layer-0 full run |
 | D2 | M15-only incremental observer shards, sealed-input classifier, terminal ordering, and source self-verification | forced death preserves a verified shard; unsealed/tampered/source-mismatched inputs fail closed | host and exact-image pass; Attempt-12 runtime used this path, but its committed return omitted the remote binding audit |
+| D3 | three frozen-weight full Layer-0 rounds per arm plus a small per-round GCS return | each round seals before the next; root-incomplete and partial-round returns remain mechanically distinguishable | implemented; host PASS, exact-image and target not run |
 | E | minimal localized repair, default off or experiment-bound | reproducer flips red to zero; APC-off and B are unchanged; adjacent and dirty-page negatives fire | pending |
 | F | certification ladder | host -> exact-image -> one-host clean/repeat/dirty -> matched profile -> separately approved DP8xTP8 G-E | pending |
 
@@ -121,9 +122,12 @@ B - C = 0 bytes
   launching again. Its receipt claims a completed one-round wide observation;
   the checked-in salvage script returns any real machine classifier and bundle
   verification without returning token-bearing payloads.
-- Decision: do not add diagnostic rounds now. The renderer is one-round, the
-  M15 classifier admits diagnostic round zero only, and extra rounds would
-  multiply the storage failure rather than improve localization.
+- Superseded decision: the pre-Attempt-12 one-round rule was correct while the
+  classifier, shard root, replay copy and observer byte budget were all
+  single-round. Attempt 12 exposed a distinct terminal-return risk. Phase D3
+  therefore admits exactly three rounds only after isolating per-round shards,
+  filtering cumulative ledgers, binding every receipt to its round, resetting
+  only the per-round byte budget, and adding a small GCS recovery audit.
 - Confirmed: the committed Attempt-12 return verifies only four derived files.
   It omits the three remote terminal markers, root manifest, compact-bundle
   binding, raw-log identity, and canonical on-arm classifier fields needed to

@@ -1,6 +1,87 @@
 # M15 APC target-debug handoff
 
-## START HERE — audit Attempt 12 before launching the Layer-0 full observer
+## START HERE — prepare the three-round Layer-0 pair; do not hand-edit YAML
+
+The current source prepares the next run but does not authorize it.  The next
+approved target operation is one matched APC-off/APC-on pair, each containing
+three evaluation-only rounds with frozen weights, zero backward, and zero
+optimizer commits.  The full observer is pinned to Layer 0 because Attempt 12
+placed the analysis-grade coarse interval between Layer-0 input and output.
+
+This is not “run longer and hope the final upload works.”  At the end of each
+round the learner blocks until the live worker has:
+
+```text
+sealed bounded shards -> uploaded them -> downloaded and verified them
+-> classified the sealed union -> written WIDE_ROUND_COMPLETE -> ACKed the learner
+```
+
+Only then may the next evaluation begin.  Therefore a death after round 1
+cannot erase round 0.  `COLLECTED.json` and `COMPLETE.json` are still required
+for a full signed run, but the new small-return script can recover every sealed
+round even when that final root close is missing.
+
+After the reviewed source is separately committed and pushed, the remote
+executor must fetch it and use exactly:
+
+```bash
+cd /home/yuxuan/code_rl_repro/sequence_packing/tunix
+git fetch origin yuxzhang/canon-zero-tim
+git pull --ff-only origin yuxzhang/canon-zero-tim
+SOURCE_SHA="$(git rev-parse HEAD)"
+RUN_ID=<fresh-label>
+OUT=/tmp/v1-apc-m15-${RUN_ID}
+test ! -e "$OUT"
+
+bash canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/prepare_m15_multiround_pair.sh \
+  "$SOURCE_SHA" "$RUN_ID" "$OUT" full 0
+(cd "$OUT" && sha256sum -c SHA256SUMS)
+```
+
+The renderer must produce exactly:
+
+- `jobset-v1-apc-m15-off-full.yaml`;
+- `jobset-v1-apc-m15-on-full.yaml`;
+- `RUN_CONTRACT.json` with `diagnostic_rounds=3`, `observer=full`,
+  `seam_layer=0`, zero backward, and zero optimizer commit.
+
+After separate launch approval, both standalone `kubectl apply` commands may
+be issued concurrently.  Do not pipeline either command and do not reuse a run
+label.  When both JobSets terminate, the same bucket-capable executor runs:
+
+```bash
+RETURN=/tmp/v1-apc-m15-${RUN_ID}-small-return
+test ! -e "$RETURN"
+bash canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/run_m15_multiround_gcs_return.sh \
+  "$OUT" "$RETURN" /mnt/disks/tunix-data
+(cd "$RETURN" && sha256sum -c SHA256SUMS)
+```
+
+Return the complete small `$RETURN` directory unchanged, the wrapper's final
+`[M15.MULTIROUND] COMPLETE ...` line, independent `sha256sum -c` output, both
+JobSet terminal statuses, and each immutable raw-log object identity/SHA/size.
+Do not return the token-bearing tars.  The directory itself contains:
+
+- `MULTIROUND_SUMMARY.json`;
+- `off.round-000000..000002.classification.json` for sealed off rounds;
+- `on.round-000000..000002.classification.json` for sealed on rounds;
+- `PACKAGING.txt` and `SHA256SUMS`.
+
+Interpretation is mechanical:
+
+- `COMPLETE`: all six rounds sealed and both roots terminal;
+- `ROUNDS_RECOVERED_ROOT_INCOMPLETE`: all six classifiers survived, but the
+  overall run is analysis-grade because root finalization died;
+- `PARTIAL_ROUNDS_RECOVERED`: at least one round survived; use it, but do not
+  call the paired target run complete;
+- `NO_DURABLE_ROUND`: fix worker/upload before another launch;
+- any off-arm red, B-C red, source/round/hash mismatch: hard stop.
+
+The script deliberately queries `wide/rounds/000000..000002`; it does not rely
+on the root aliases that an early exit may omit.  This is the required answer
+to the previous “run finished but wanted data did not return” failure mode.
+
+## Historical — Attempt 12 audit before the Layer-0 full observer
 
 Attempt 12 (`d20-395c0e0d`) is currently **analysis-grade**, not signed target
 evidence.  The checked-in five-file return is internally intact (`4/4` entries

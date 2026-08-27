@@ -1,0 +1,65 @@
+--- tpu_runner_p21_l30.py
++++ tpu_runner_p21_l30.py
+@@ -1180,6 +1180,34 @@
+     str(256 * 1024 * 1024))
+ _P38_TAIL_STATE = {"records": 0, "bytes": 0}
+ _P38_TAIL_PENDING = None
++
++
++def _p38_begin_observer_round(state, diagnostic_round, label):
++    """Give each sealed M15 round its own byte budget without reusing names."""
++    if os.environ.get("CANON_P38_DURABILITY_PROFILE", "") != "m15-wide-v1":
++        return
++    diagnostic_round = int(diagnostic_round)
++    previous = state.get("diagnostic_round")
++    changed = False
++    if previous is None:
++        state["diagnostic_round"] = diagnostic_round
++        changed = True
++    elif diagnostic_round != previous:
++        if diagnostic_round != int(previous) + 1:
++            raise ValueError(
++                "M15 observer diagnostic rounds must increase by one: "
++                f"label={label} previous={previous} current={diagnostic_round}"
++            )
++        state["diagnostic_round"] = diagnostic_round
++        state["bytes"] = 0
++        changed = True
++    if changed:
++        print(
++            "[P38_OBSERVER_ROUND_BUDGET] "
++            f"label={label} round={diagnostic_round} "
++            f"records={state['records']} bytes={state['bytes']}",
++            flush=True,
++        )
+ _P38_TAIL_GATHER_FNS = {}
+ _P38_TERMINAL_DISCRIMINATOR = os.environ.get(
+     "CANON_P38_TERMINAL_DISCRIMINATOR", "")
+@@ -2540,13 +2563,15 @@
+         "final_norm_fingerprints": final_rows,
+     }
+     arm = "B" if runner.input_batch.num_prompt_logprobs else "A"
++    diagnostic_round = _p38_seam_round()
++    _p38_begin_observer_round(_P38_SEAM_STATE, diagnostic_round, "seam")
+     call_index = int(_P38_REQUEST_JOURNAL_STATE["calls"])
+     record_index, npz_sha256 = write_seam_record(
+         _P38_SEAM_OBSERVER_DIR,
+         _P38_SEAM_STATE,
+         arrays,
+         {
+             "arm": arm,
+-            "diagnostic_round": _p38_seam_round(),
++            "diagnostic_round": diagnostic_round,
+             "call_index": call_index,
+             "program_path": "standard",
+             "checkpoint_names": checkpoint_names,
+@@ -2713,6 +2738,9 @@
+         "target_ids": np.asarray(target_ids, dtype=np.int32)[order],
+         "tail_values": np.asarray(values)[order],
+     })
++    _p38_begin_observer_round(
++        _P38_TAIL_STATE, pending["diagnostic_round"], "tail"
++    )
+     record_index, digest = write_tail_record(
+         _P38_SEAM_OBSERVER_DIR,
+         _P38_TAIL_STATE,

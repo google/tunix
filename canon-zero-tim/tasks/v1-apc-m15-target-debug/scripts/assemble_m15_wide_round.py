@@ -52,11 +52,14 @@ def _copy_replay(source: Path, output: Path, round_index: int) -> int:
       record = json.loads(line)
       _require(record.get("schema") == "m15-apc-serving-envelope-v1",
                f"replay schema drifted at line {line_number}")
-      _require(int(record.get("diagnostic_round", -1)) == round_index,
-               f"replay round drifted at line {line_number}")
+      record_round = int(record.get("diagnostic_round", -1))
+      _require(0 <= record_round < 8,
+               f"replay round is invalid at line {line_number}")
+      if record_round != round_index:
+        continue
       output_stream.write(json.dumps(record, sort_keys=True) + "\n")
       count += 1
-  _require(count > 0, "M15 replay ledger contains no records")
+  _require(count > 0, f"M15 replay ledger contains no records for round {round_index}")
   return count
 
 
@@ -108,6 +111,8 @@ def assemble(
     inventory = json.loads(
         (shard_dir / "SHARD_INVENTORY.json").read_text(encoding="utf-8")
     )
+    _require(int(inventory.get("diagnostic_round", -1)) == round_index,
+             f"assembled shard round drifted: {shard_dir}")
     rows = _manifest(shard_dir / "SHA256SUMS")
     manifest_sha = _sha256(shard_dir / "SHA256SUMS")
     for name in inventory["files"]:

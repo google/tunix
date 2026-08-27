@@ -38,7 +38,13 @@ class M15WideDurabilityTest(unittest.TestCase):
   def tearDown(self) -> None:
     self.temp.cleanup()
 
-  def _pair(self, prefix: str, index: int, payload_bytes: int = 32) -> None:
+  def _pair(
+      self,
+      prefix: str,
+      index: int,
+      payload_bytes: int = 32,
+      diagnostic_round: int = 0,
+  ) -> None:
     schema = {
         "p38_seam": "p38-seam-fingerprint-v1",
         "p38_tail": "p38-tail-values-v1",
@@ -47,7 +53,7 @@ class M15WideDurabilityTest(unittest.TestCase):
     npz_path.write_bytes(bytes([index % 251 + 1]) * payload_bytes)
     record = {
         "schema": schema,
-        "diagnostic_round": 0,
+        "diagnostic_round": diagnostic_round,
         "record_index": index,
         "npz_sha256": hashlib.sha256(npz_path.read_bytes()).hexdigest(),
     }
@@ -76,13 +82,16 @@ class M15WideDurabilityTest(unittest.TestCase):
         json.dumps(completion, sort_keys=True) + "\n", encoding="utf-8"
     )
 
-  def _stage(self, sequence: int, max_records: int = 2):
-    output = self.shards / f"{sequence:06d}"
+  def _stage(
+      self, sequence: int, max_records: int = 2, diagnostic_round: int = 0
+  ):
+    round_root = self.shards / f"round-{diagnostic_round:06d}"
+    output = round_root / f"{sequence:06d}"
     result = stage(
         directory=self.live,
-        shard_root=self.shards,
+        shard_root=round_root,
         output=output,
-        round_index=0,
+        round_index=diagnostic_round,
         sequence=sequence,
         max_records=max_records,
         max_bytes=1024 * 1024,
@@ -91,11 +100,11 @@ class M15WideDurabilityTest(unittest.TestCase):
     )
     return output, result
 
-  def _round_inputs(self) -> tuple[Path, Path]:
+  def _round_inputs(self, diagnostic_round: int = 0) -> tuple[Path, Path]:
     pre = self.root / "pre.jsonl"
     replay = self.root / "replay.jsonl"
     pre.write_text(json.dumps({
-        "diagnostic_round": 0,
+        "diagnostic_round": diagnostic_round,
         "boundaries": {
             "S_decode_vs_S_prefill": {"differing_bytes": 0},
             "S_prefill_vs_T_old": {"differing_bytes": 0},
@@ -103,7 +112,7 @@ class M15WideDurabilityTest(unittest.TestCase):
     }) + "\n", encoding="utf-8")
     replay.write_text(json.dumps({
         "schema": "m15-apc-serving-envelope-v1",
-        "diagnostic_round": 0,
+        "diagnostic_round": diagnostic_round,
     }) + "\n", encoding="utf-8")
     return pre, replay
 
@@ -139,7 +148,7 @@ class M15WideDurabilityTest(unittest.TestCase):
     pre, replay = self._round_inputs()
     receipt = assemble(
         live_directory=self.live,
-        shard_root=self.shards,
+        shard_root=self.shards / "round-000000",
         output=self.root / "round",
         round_index=0,
         pre_alignment=pre,
@@ -163,7 +172,7 @@ class M15WideDurabilityTest(unittest.TestCase):
     with self.assertRaisesRegex(M15WideShardError, "failed SHA"):
       assemble(
           live_directory=self.live,
-          shard_root=self.shards,
+          shard_root=self.shards / "round-000000",
           output=self.root / "round",
           round_index=0,
           pre_alignment=pre,
@@ -194,7 +203,7 @@ class M15WideDurabilityTest(unittest.TestCase):
     with self.assertRaisesRegex(M15WideShardError, "runtime source"):
       assemble(
           live_directory=self.live,
-          shard_root=self.shards,
+          shard_root=self.shards / "round-000000",
           output=self.root / "round",
           round_index=0,
           pre_alignment=pre,
@@ -217,6 +226,49 @@ class M15WideDurabilityTest(unittest.TestCase):
     with self.assertRaisesRegex(M15WideShardError, "already exists"):
       self._stage(0)
 
+  def test_second_round_uses_isolated_shards_and_filters_combined_ledger(self):
+    self._pair("p38_seam", 0, diagnostic_round=0)
+    shard0, _ = self._stage(0, diagnostic_round=0)
+    self._complete(shard0)
+    self._pair("p38_seam", 1, diagnostic_round=1)
+    shard1, _ = self._stage(1, diagnostic_round=1)
+    self._complete(shard1)
+    pre = self.root / "pre-rounds.jsonl"
+    replay = self.root / "replay-rounds.jsonl"
+    pre.write_text("".join(
+        json.dumps({
+            "diagnostic_round": round_index,
+            "boundaries": {
+                "S_decode_vs_S_prefill": {"differing_bytes": 0},
+                "S_prefill_vs_T_old": {"differing_bytes": 0},
+            },
+        }) + "\n" for round_index in (0, 1)
+    ), encoding="utf-8")
+    replay.write_text("".join(
+        json.dumps({
+            "schema": "m15-apc-serving-envelope-v1",
+            "diagnostic_round": round_index,
+        }) + "\n" for round_index in (0, 1)
+    ), encoding="utf-8")
+    receipt = assemble(
+        live_directory=self.live,
+        shard_root=self.shards / "round-000001",
+        output=self.root / "round-1",
+        round_index=1,
+        pre_alignment=pre,
+        capsule=self.root / "absent.npz",
+        replay_ledger=replay,
+        observer_mode="full",
+        expected_commit=COMMIT,
+        runtime_commit=COMMIT,
+    )
+    self.assertEqual(receipt["diagnostic_round"], 1)
+    replay_rows = (self.root / "round-1/m15-replay-envelope.jsonl").read_text(
+        encoding="utf-8"
+    ).splitlines()
+    self.assertEqual(len(replay_rows), 1)
+    self.assertEqual(json.loads(replay_rows[0])["diagnostic_round"], 1)
+
   def test_round_verifier_rejects_published_output_drift(self) -> None:
     self._pair("p38_seam", 0)
     shard, _ = self._stage(0)
@@ -237,7 +289,7 @@ class M15WideDurabilityTest(unittest.TestCase):
     round_dir = self.root / "round"
     receipt = assemble(
         live_directory=self.live,
-        shard_root=self.shards,
+        shard_root=self.shards / "round-000000",
         output=round_dir,
         round_index=0,
         pre_alignment=pre,
@@ -250,7 +302,9 @@ class M15WideDurabilityTest(unittest.TestCase):
     classification = round_dir / "p38_seam.classification.json"
     bundle = round_dir / "m15_wide_seam_bundle.tar"
     classification.write_text(json.dumps({
+        "status": "PASS",
         "classification": "FIRST_RED_LOCALIZED",
+        "diagnostic_round": 0,
     }) + "\n", encoding="utf-8")
     bundle.write_bytes(b"bundle")
     members = [
@@ -265,6 +319,7 @@ class M15WideDurabilityTest(unittest.TestCase):
     completion = {
         "schema": "m15-wide-round-completion-v1",
         "status": "classified-and-uploaded",
+        "diagnostic_round": 0,
         "classification": "FIRST_RED_LOCALIZED",
         "record_pairs": receipt["record_pairs"],
         "shards": receipt["shards"],

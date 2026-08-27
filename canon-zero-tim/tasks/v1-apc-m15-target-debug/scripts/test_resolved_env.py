@@ -138,6 +138,7 @@ class ResolvedEnvironmentTest(unittest.TestCase):
     self.assertIn("export CANON_P38_SEAM_MAX_BYTES=8589934592", resolved)
     self.assertIn("export CANON_P38_TAIL_OBSERVER=1", resolved)
     self.assertIn("export CANON_P38_DURABILITY_PROFILE=m15-wide-v1", resolved)
+    self.assertIn("export CANON_P38_DIAGNOSTIC_ROUNDS=3", resolved)
 
   def test_full_observer_resolves_with_exact_layer(self):
     result, resolved = self._resolve("off", observer="full", seam_layer=17)
@@ -146,6 +147,7 @@ class ResolvedEnvironmentTest(unittest.TestCase):
     self.assertIn("export CANON_P38_SEAM_LAYER=17", resolved)
     self.assertNotIn("export CANON_P38_TAIL_OBSERVER=", resolved)
     self.assertIn("export CANON_P38_DURABILITY_PROFILE=m15-wide-v1", resolved)
+    self.assertIn("export CANON_P38_DIAGNOSTIC_ROUNDS=3", resolved)
 
   def test_wrong_profile_is_rejected_before_runtime(self):
     result, resolved = self._resolve("on", wrong_profile=True)

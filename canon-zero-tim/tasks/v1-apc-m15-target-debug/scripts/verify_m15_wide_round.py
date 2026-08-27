@@ -75,6 +75,19 @@ def verify(
            and int(receipt.get("replay_records", 0)) > 0
            and len(receipt.get("shards", ())) > 0,
            "wide-round input receipt is empty")
+  diagnostic_round = int(receipt.get("diagnostic_round", -1))
+  _require(0 <= diagnostic_round < 8,
+           "wide-round input diagnostic round is invalid")
+
+  classification_record = json.loads(
+      (round_directory / "p38_seam.classification.json").read_text(
+          encoding="utf-8"
+      )
+  )
+  _require(classification_record.get("status") == "PASS"
+           and int(classification_record.get("diagnostic_round", -1))
+           == diagnostic_round,
+           "wide-round classification diagnostic round drifted")
 
   completion = json.loads(
       (round_directory / "WIDE_ROUND_COMPLETE.json").read_text(encoding="utf-8")
@@ -85,6 +98,11 @@ def verify(
   _require(completion.get("expected_source_commit") == expected_commit
            and completion.get("runtime_source_commit") == runtime_commit,
            "wide-round completion source drifted")
+  _require(int(completion.get("diagnostic_round", -1)) == diagnostic_round,
+           "wide-round completion diagnostic round drifted")
+  _require(completion.get("classification")
+           == classification_record.get("classification"),
+           "wide-round completion classification drifted")
   _require(completion.get("manifest_sha256") == _sha256(manifest),
            "wide-round completion manifest SHA drifted")
   _require(int(completion.get("record_pairs", -1)) == receipt["record_pairs"]
@@ -99,6 +117,7 @@ def verify(
   _require(bundle.is_file() and bundle.read_bytes() == canonical_bundle.read_bytes(),
            "published bundle differs from sealed-round output")
   return {
+      "diagnostic_round": diagnostic_round,
       "classification": completion["classification"],
       "record_pairs": receipt["record_pairs"],
       "replay_records": receipt["replay_records"],

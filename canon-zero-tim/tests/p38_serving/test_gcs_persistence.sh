@@ -440,8 +440,29 @@ m15_empty_rc=0
 bash "$PERSIST" m15-shard 000002 \
   > "$tmp/m15-wide/shard-empty.log" 2>&1 || m15_empty_rc=$?
 test "$m15_empty_rc" -eq 3
+# Advance the live round and prove that the same worker can seal a fresh local
+# shard union without rereading round 0 or colliding with its global indices.
+printf '1\n' > "$CANON_P38_DIAGNOSTIC_ROUND_FILE"
+python3 - "$CANON_P38_SEAM_OBSERVER_DIR" <<'PY'
+import hashlib
+import json
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1])
+index = 40
+npz = root / f"p38_seam_{index:06d}.npz"
+npz.write_bytes(b"seam-round-1\n")
+(root / f"p38_seam_{index:06d}.json").write_text(json.dumps({
+    "diagnostic_round": 1,
+    "npz_sha256": hashlib.sha256(npz.read_bytes()).hexdigest(),
+    "record_index": index,
+    "schema": "p38-seam-fingerprint-v1",
+}, sort_keys=True) + "\n", encoding="utf-8")
+PY
+bash "$PERSIST" m15-shard 000002 > "$tmp/m15-wide/shard-round-1.log"
 m15_wide_remote="$FAKE_GCS_ROOT/yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-p38-test-m15-wide/attempt-0"
-for sequence in 000000 000001; do
+for sequence in 000000 000001 000002; do
   shard_remote="$m15_wide_remote/wide/shards/$sequence"
   test "$(find "$shard_remote" -maxdepth 1 -type f | wc -l)" -eq 3
   for name in SHARD_ARCHIVE.tar SHA256SUMS SHARD_COMPLETE.json; do
@@ -466,9 +487,10 @@ import sys
 root = pathlib.Path(sys.argv[1]) / "wide" / "shards"
 receipts = [
     json.loads((root / sequence / "SHARD_COMPLETE.json").read_text())
-    for sequence in ("000000", "000001")
+    for sequence in ("000000", "000001", "000002")
 ]
-assert [row["record_pairs"] for row in receipts] == [32, 8], receipts
+assert [row["record_pairs"] for row in receipts] == [32, 8, 1], receipts
+assert [row["diagnostic_round"] for row in receipts] == [0, 0, 1], receipts
 assert all(row["status"] == "sealed-uploaded-verified" for row in receipts)
 assert all(row["claim_ceiling"] ==
            "INCONCLUSIVE_PARTIAL_LIVE_EVIDENCE_UNTIL_WIDE_ROUND_COMPLETE"

@@ -107,7 +107,7 @@ def _load_npz(path: Path) -> dict[str, np.ndarray]:
 
 
 def _load_seam_candidates(
-    directory: Path, mode: str
+    directory: Path, mode: str, expected_round: int
 ) -> tuple[dict[tuple[int, bytes, str], list[dict[str, Any]]], dict[str, Any]]:
   paths = sorted(directory.glob("p38_seam_*.json"))
   _require(paths, "M15 wide seam observer produced no records")
@@ -162,7 +162,8 @@ def _load_seam_candidates(
     arm = str(record.get("arm"))
     diagnostic_round = int(record.get("diagnostic_round", -1))
     call_index = int(record.get("call_index", -1))
-    _require(arm in ("A", "B") and diagnostic_round == 0 and call_index >= 0,
+    _require(arm in ("A", "B") and diagnostic_round == expected_round
+             and call_index >= 0,
              f"M15 seam provenance drifted: {path.name}")
     arms.add(arm)
     for offset in range(rows.size):
@@ -208,6 +209,7 @@ def _load_seam_candidates(
 
 def _load_tail_candidates(
     directory: Path,
+    expected_round: int,
 ) -> tuple[dict[tuple[int, bytes, str, int], list[dict[str, Any]]], dict[str, Any]]:
   paths = sorted(directory.glob("p38_tail_*.json"))
   _require(paths, "M15 terminal-tail observer produced no records")
@@ -246,7 +248,8 @@ def _load_tail_candidates(
     arm = str(record.get("arm"))
     diagnostic_round = int(record.get("diagnostic_round", -1))
     call_index = int(record.get("call_index", -1))
-    _require(arm in ("A", "B") and diagnostic_round == 0 and call_index >= 0,
+    _require(arm in ("A", "B") and diagnostic_round == expected_round
+             and call_index >= 0,
              f"M15 tail provenance drifted: {path.name}")
     arms.add(arm)
     for offset in range(rows.size):
@@ -403,12 +406,18 @@ def classify(
     _require(expected_layer is None,
              "M15 layer seam mode must not set an expected layer")
   alignment = _load_alignment(alignment_report)
+  diagnostic_round = int(alignment.get("diagnostic_round", -1))
+  _require(0 <= diagnostic_round < 8,
+           "M15 alignment diagnostic round is invalid")
   ab = alignment["boundaries"]["S_decode_vs_S_prefill"]
   ab_bytes = int(ab["differing_bytes"])
-  seam, seam_inventory = _load_seam_candidates(directory, mode)
+  seam, seam_inventory = _load_seam_candidates(
+      directory, mode, diagnostic_round
+  )
   require_tail = mode == "layer"
   tails, tail_inventory = (
-      _load_tail_candidates(directory) if require_tail else ({}, None)
+      _load_tail_candidates(directory, diagnostic_round)
+      if require_tail else ({}, None)
   )
 
   if ab_bytes == 0:
@@ -421,6 +430,7 @@ def classify(
             else "M15_OBSERVER_TREATMENT_EXACT"
         ),
         "arm": arm,
+        "diagnostic_round": diagnostic_round,
         "observer_mode": mode,
         "alignment": {
             "a_b_differing_bytes": 0,
@@ -439,6 +449,11 @@ def classify(
   _require(arm == "on", "APC-off control became A-B red under observation")
   _require(capsules, "red M15 observer arm has no mismatch capsule")
   red_points = P38._red_points(capsules)  # pylint: disable=protected-access
+  _require(
+      all(int(point["diagnostic_round"]) == diagnostic_round
+          for point in red_points),
+      "M15 capsule diagnostic round differs from alignment",
+  )
   joins = []
   for point in sorted(
       red_points,
@@ -537,6 +552,7 @@ def classify(
       "classification": classification,
       "gate": gate,
       "arm": arm,
+      "diagnostic_round": diagnostic_round,
       "observer_mode": mode,
       "expected_layer": expected_layer,
       "alignment": {

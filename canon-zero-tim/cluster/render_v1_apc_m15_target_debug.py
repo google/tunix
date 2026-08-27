@@ -30,6 +30,7 @@ _SEAM_MIN_POSITION = 960
 _SEAM_MAX_POSITION = 4096
 _SEAM_MAX_BYTES = 8 * 1024 * 1024 * 1024
 _TAIL_MAX_BYTES = 256 * 1024 * 1024
+_WIDE_DIAGNOSTIC_ROUNDS = 3
 _ARTIFACT_BUCKET = "gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38"
 _WORKLOAD_CANDIDATE = "m15"
 _DATA_SPLIT = "main"
@@ -114,7 +115,9 @@ def _capture_values(
       "CANON_KV_UNIFIED": "0",
       "CANON_P38_PRECHECK_ONLY": "1",
       "CANON_P38_CONTROLLED_EXIT": "1",
-      "CANON_P38_DIAGNOSTIC_ROUNDS": "1",
+      "CANON_P38_DIAGNOSTIC_ROUNDS": (
+          str(_WIDE_DIAGNOSTIC_ROUNDS) if observer != "none" else "1"
+      ),
       "CANON_P38_DIAGNOSTIC_ROUND_FILE": f"{state}/p38_diagnostic_round",
       "CANON_P38_ROUND_SEAL_REQUEST_DIR": f"{state}/p38_round_seal_requests",
       "CANON_P38_ROUND_SEAL_ACK_DIR": f"{state}/p38_round_seal_acks",
@@ -278,6 +281,9 @@ def render_all(
         "canon.zero-tim/fixed-lm-head": "1",
         "canon.zero-tim/durability-profile": (
             "m15-wide-v1" if observer != "none" else "round-alignment-v1"
+        ),
+        "canon.zero-tim/diagnostic-rounds": (
+            str(_WIDE_DIAGNOSTIC_ROUNDS) if observer != "none" else "1"
         ),
     })
     validate(

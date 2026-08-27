@@ -40,7 +40,13 @@ def _prefix(values: list[int]) -> bytes:
 
 class Fixture:
 
-  def __init__(self, *, mode: str = "layer", completion_position: int = 0):
+  def __init__(
+      self,
+      *,
+      mode: str = "layer",
+      completion_position: int = 0,
+      diagnostic_round: int = 0,
+  ):
     self.holder = tempfile.TemporaryDirectory()
     self.root = Path(self.holder.name)
     self.capture = self.root / "capture"
@@ -49,6 +55,7 @@ class Fixture:
     self.capsule = self.root / "mismatch.npz"
     self.ledger = self.capture / "m15_replay_envelope.jsonl"
     self.mode = mode
+    self.diagnostic_round = diagnostic_round
     self.completion_position = completion_position
     self.expected_layer = 5 if mode == "full" else None
     prompt = np.asarray([[10, 11, 12]], dtype=np.int32)
@@ -59,7 +66,9 @@ class Fixture:
     np.savez(
         self.capsule,
         metadata_json=np.frombuffer(
-            json.dumps({"diagnostic_round": 0}).encode(), dtype=np.uint8),
+            json.dumps({"diagnostic_round": diagnostic_round}).encode(),
+            dtype=np.uint8,
+        ),
         selected_rows=np.asarray([201], dtype=np.int32),
         prompt_ids=prompt,
         prompt_mask=np.asarray([[1, 1, 1]], dtype=np.bool_),
@@ -84,7 +93,7 @@ class Fixture:
 
   def _write_report(self, *, ab_bytes: int, bc_bytes: int):
     row = {
-        "diagnostic_round": 0,
+        "diagnostic_round": self.diagnostic_round,
         "N_action": 2,
         "boundaries": {
             "S_decode_vs_S_prefill": {
@@ -145,7 +154,7 @@ class Fixture:
           index,
           {
               "arm": arm,
-              "diagnostic_round": 0,
+              "diagnostic_round": self.diagnostic_round,
               "call_index": 10 + index,
               "observer_mode": self.mode,
               "checkpoint_names": list(checkpoints),
@@ -183,7 +192,7 @@ class Fixture:
             index,
             {
                 "arm": arm,
-                "diagnostic_round": 0,
+                "diagnostic_round": self.diagnostic_round,
                 "call_index": 10 + index,
                 "checkpoint_names": list(MODULE._TAIL_CHECKPOINTS),  # pylint: disable=protected-access
             },
@@ -205,7 +214,7 @@ class Fixture:
       request_id = f"request-{arm.lower()}"
       rows.append({
           "schema": "m15-apc-serving-envelope-v1",
-          "diagnostic_round": 0,
+          "diagnostic_round": self.diagnostic_round,
           "arm": "on",
           "serving_arm": arm,
           "call_index": 10 + index,
@@ -261,6 +270,11 @@ class M15WideSeamClassifierTest(unittest.TestCase):
     self.assertEqual(result["selected_layer"], 5)
     self.assertEqual(result["first_red_boundary"]["checkpoint"], "q_post_rope")
     self.assertEqual(result["last_exact_boundary"]["checkpoint"], "k_norm")
+
+  def test_nonzero_diagnostic_round_is_bound_end_to_end(self):
+    result = self._fixture(diagnostic_round=2).classify()
+    self.assertEqual(result["diagnostic_round"], 2)
+    self.assertEqual(result["coverage"]["first_action_joinable_red_points"], 1)
 
   def test_exact_control_is_reachability_not_localization(self):
     fixture = self._fixture()
@@ -402,6 +416,7 @@ class M15WideSeamClassifierTest(unittest.TestCase):
     (round_dir / "WIDE_ROUND_COMPLETE.json").write_text(json.dumps({
         "schema": "m15-wide-round-completion-v1",
         "status": "classified-and-uploaded",
+        "diagnostic_round": 0,
         "classification": result["classification"],
         "record_pairs": receipt["record_pairs"],
         "shards": receipt["shards"],
