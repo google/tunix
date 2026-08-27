@@ -187,7 +187,7 @@ def render(
 
   hp_bundle = high_performance or checked_vma_off_diagnostic
   treatment = (
-      "zero-hp-vmaoff-precheck"
+      "vmaoff"
       if checked_vma_off_diagnostic
       else "zero-hp"
       if high_performance

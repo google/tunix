@@ -220,7 +220,7 @@ class P58RendererTest(unittest.TestCase):
         diagnostic["metadata"]["labels"]["canon.zero-tim/optimizer-commits"],
         "0",
     )
-    self.assertIn("zero-hp-vmaoff-precheck", diagnostic["metadata"]["name"])
+    self.assertIn("vmaoff", diagnostic["metadata"]["name"])
     self.assertEqual(
         renderer.recipe_signature(production),
         renderer.recipe_signature(diagnostic),
