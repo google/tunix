@@ -40,6 +40,9 @@
 | CANON_PERF_LOG | [PERF] 分段计时(=0 静音) | 默认开 | 长期保留(观测契约) |
 | CANON_BATCHED_EVIDENCE | 证据取回批量化(-6s/步) | GSM8K 默认;FL/DS 待 verify;P68 补 grouped mirror(DP16 反向收据),配对 verify 待跑 | 全负载转正后焊死 |
 | CANON_DP_COLLECTIVE_REDUCE | P69 刀2:DP 梯度归约 collective 选择器,只作用于 `FixedDPRankGradientReducer` 的 reduce transaction。缺省/空/0=历史 fixed ppermute 树(reduce+broadcast、operand barrier 逐对相加)原函数对象直调,程序逐字节不变;1=A 案:sub-32bit 浮点 leaf 升 FP32 后每 leaf 单次原生 `jax.lax.psum`(既有 shard_map check_vma=False 内),cast 回原 dtype;tree=B 案:all_gather 后每 rank 以 registered `fixed_dp_sum` 固定二叉树本地相加(与历史树同配对同序,host 上与历史逐位同值);其他值 fatal。前向零接触,`compare_local` 看门狗、staged 写路径与 receipt schema 全不变(`reduction_rounds` 仍报历史 ppermute 轮数) | off | 试验;scratch host 门(pinned image CPU):FP64 包络、×2 双计负控、flag-off bitwise 冻结指纹、receipt 不变已绿;one-host DP4 E3 已测(psum 归约段 −62%、warm −9%,commit 范数与 legacy 逐位同;tree 结构性逐位同);dp4 one-host profile 条件默认 1(`:-1`,可覆盖);dp16/target 未跑 | P69 Lane1 前向指纹 + Lane2 全套 + Lane3 material 判词后按 workload 转正;任一红退役,判决记录保留 |
+| CANON_DP_COMPARE_MODE | P70.4 刀1:DP reduce 后 replica 看门狗选择器,只作用于 `FixedDPRankGradientReducer` 的 replica compare。缺省/空/0/full=历史全量逐元素 ppermute 比对(整棵 reduced 树过邻居,程序与 receipt 逐字节不变);fingerprint-hybrid=每 reducer 生命周期(生产=每 update)前 `HYBRID_FULL_COMPARE_GROUPS`(=2)组保留全量比对且同组跑指纹程序作自检(指纹与全量判决不一致即红停),其余组只 ppermute 每 leaf 双独立 uint32 校验和(rot-add + rot-xor 两混合器,位精确 bitcast,2×N_leaf 标量)并在 mismatch 时报 rank/leaf/path;其他值 fatal。检出弱化:同内容不同位置的补偿性篡改需同时碰撞两个代数独立混合器(NOTES 碰撞论证);−0.0/+0.0 分歧从漏放变为检出(更严),同位 NaN 分歧交给有限位门(顺序与历史一致) | off | 试验;scratch host 门(pinned image CPU):kill-test 单比特翻转必响并指认 leaf、补偿双元素 swap 骗过 naive sum 但双校验和必响、flag-off 冻结 jaxpr/receipt 逐字节同、p69 冻结指纹回归绿;one-host/target 未跑 | P70.4 GATE(kill-test 双项+one-host 配对 walls/范数锚逐位/strict 绿/程序清单 diff)后按 workload 转正;任一红退役,判决记录保留 |
+| CANON_DP_DISTINCT_SCHEDULE | P70.4 刀2:per-rank distinct-fingerprint 签名的计算降频。缺省/空/0/every-group=历史每组每 rank 全量 `_gradient_signature`+sha256(receipt 逐字节不变);first-group-warmup=每 update 首组 + 进程前 `DISTINCT_FINGERPRINT_WARMUP_UPDATES`(=3)个 update 的所有组照旧计算,其余组跳过签名(receipt 指纹置 `skipped:receipt-schedule` 并加 `rank_local_fingerprint_mode=skipped`,distinctness 检查在 skipped 组不判);接线正确性属程序级性质:调度/staging/归约程序不随组变,首组+暖机组的检出对 wiring 类故障延迟有界(≤1 update);其他值 fatal。与 deterministic_repeat 互斥(adapter 显式红停) | off | 试验;scratch host 门:调度正确性 kill-test(首组/暖机/skip 序列断言)、flag-off 逐字节同、p69 回归绿;one-host/target 未跑 | 同 CANON_DP_COMPARE_MODE 的 P70.4 GATE;任一红退役,判决记录保留 |
+| CANON_DP_FINITE_FETCH | P70.4 刀3:isfinite 位取回的同步点。缺省/空/0/sync=历史逐组同步 device_get+立即 raise(程序与 receipt 逐字节不变);batched-commit=有限位仍逐组在设备端计算(staged+reduced 两段),host 取回合并为 commit 点前单次 int32 向量 `jax.device_get`(P68 批量收据通道),`drain_deferred_finite_receipts()` 在任何梯度进 optimizer commit 前校验全部收据,violation 在 commit 门 raise(带 group/stage/rank/leaf/path);fail-closed 语义不变,只移动 host 同步点(检出延迟 ≤1 update,仍先于 commit);receipt `post_reduction_all_finite=deferred-commit` 字符串逐 receipt 传播,严禁在 drain 前宣称 finite;其他值 fatal。与 deterministic_repeat 互斥 | off | 试验;scratch host 门:非有限注入 kill-test(commit 前必拦、commit callback 零调用)、flag-off 逐字节同、p68/p69 回归绿;one-host/target 未跑 | 同 CANON_DP_COMPARE_MODE 的 P70.4 GATE;任一红退役,判决记录保留 |
 | CANON_P28_BATCHED_REPORT(=1/=verify) | report 窗合并+remap jit 化(FL -14.5%) | GSM8K 默认;DP16 待验 | 同上 |
 | CANON_P28_BATCHED_REVERSE(=1/=verify) | P52 反向脚手架合并(-13.3%) | 一宿主认证;DP16 等 grouped 移植 | 同上 |
 | CANON_P28_LAYER_SCAN | =verify 恒等仪器/=verify_rev THIRDPROG 演示 | **=1 否决(净负 -5%)** | 仪器保留;=1 进否决区 |
@@ -130,6 +133,9 @@ CANON_APC_M15_REPLAY_LEDGER
 CANON_APC_M15_SEAM_BUNDLE
 CANON_BATCHED_EVIDENCE
 CANON_DP_COLLECTIVE_REDUCE
+CANON_DP_COMPARE_MODE
+CANON_DP_DISTINCT_SCHEDULE
+CANON_DP_FINITE_FETCH
 CANON_CANONICAL_DEPTHS
 CANON_CHECKPOINT_CONTRACT_JSON
 CANON_CLIENT_IMAGE
@@ -505,4 +511,4 @@ CANON_XPROF_STEPS
 CANON_XPROF_TPU_TRACE_MODE
 ```
 
-Count: 387 settable names (appendix inventory above; exclusions: none).
+Count: 390 settable names (appendix inventory above; exclusions: none).

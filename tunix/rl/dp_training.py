@@ -581,6 +581,141 @@ def _signature_sha256(signature: Any) -> str:
   return hashlib.sha256(value.view(np.uint8)).hexdigest()
 
 
+# P70.4 receipt-lightening schedule constants. The hybrid compare keeps the
+# legacy full elementwise replica compare on the first
+# ``HYBRID_FULL_COMPARE_GROUPS`` groups of every reducer lifetime (one
+# reducer serves exactly one optimizer update in the production adapter);
+# the distinct-fingerprint schedule keeps the full per-rank signature
+# computation on the first group of every update and on every group of the
+# first ``DISTINCT_FINGERPRINT_WARMUP_UPDATES`` updates of the process.
+HYBRID_FULL_COMPARE_GROUPS = 2
+DISTINCT_FINGERPRINT_WARMUP_UPDATES = 3
+_SKIPPED_FINGERPRINT = 'skipped:receipt-schedule'
+_CHECKSUM_SALT_STRIDE = 0x9E3779B9
+
+
+def dp_compare_mode() -> str:
+  """Returns the validated CANON_DP_COMPARE_MODE selector value."""
+  value = os.environ.get('CANON_DP_COMPARE_MODE', '')
+  if value not in ('', '0', 'full', 'fingerprint-hybrid'):
+    raise ValueError(
+        'CANON_DP_COMPARE_MODE must be unset/0/full/fingerprint-hybrid, '
+        f'got {value!r}'
+    )
+  return 'fingerprint-hybrid' if value == 'fingerprint-hybrid' else 'full'
+
+
+def dp_distinct_schedule_mode() -> str:
+  """Returns the validated CANON_DP_DISTINCT_SCHEDULE selector value."""
+  value = os.environ.get('CANON_DP_DISTINCT_SCHEDULE', '')
+  if value not in ('', '0', 'every-group', 'first-group-warmup'):
+    raise ValueError(
+        'CANON_DP_DISTINCT_SCHEDULE must be unset/0/every-group/'
+        f'first-group-warmup, got {value!r}'
+    )
+  return 'first-group-warmup' if value == 'first-group-warmup' else 'every-group'
+
+
+def dp_finite_fetch_mode() -> str:
+  """Returns the validated CANON_DP_FINITE_FETCH selector value."""
+  value = os.environ.get('CANON_DP_FINITE_FETCH', '')
+  if value not in ('', '0', 'sync', 'batched-commit'):
+    raise ValueError(
+        'CANON_DP_FINITE_FETCH must be unset/0/sync/batched-commit, '
+        f'got {value!r}'
+    )
+  return 'batched-commit' if value == 'batched-commit' else 'sync'
+
+
+_receipt_schedule_update_counter = [0]
+
+
+def _next_receipt_schedule_update_index() -> int:
+  value = _receipt_schedule_update_counter[0]
+  _receipt_schedule_update_counter[0] = value + 1
+  return value
+
+
+def reset_receipt_schedule_update_counter_for_tests() -> None:
+  """Rewinds the process-level update counter; test isolation only."""
+  _receipt_schedule_update_counter[0] = 0
+
+
+def _leaf_checksum_words(leaf: jax.Array) -> jax.Array:
+  """Reinterprets one leaf's exact payload bits as uint32 lanes.
+
+  Sub-32-bit dtypes zero-extend after the bitcast, so the mapping from leaf
+  bytes to lanes stays a bijection: any single changed payload bit changes
+  exactly one lane. No floating-point value math is performed anywhere.
+  """
+  flat = jnp.ravel(leaf)
+  itemsize = jnp.dtype(leaf.dtype).itemsize
+  if itemsize == 8:
+    return jnp.ravel(jax.lax.bitcast_convert_type(flat, jnp.uint32))
+  if itemsize == 4:
+    return jax.lax.bitcast_convert_type(flat, jnp.uint32)
+  if itemsize == 2:
+    return jax.lax.bitcast_convert_type(flat, jnp.uint16).astype(jnp.uint32)
+  if itemsize == 1:
+    return jax.lax.bitcast_convert_type(flat, jnp.uint8).astype(jnp.uint32)
+  raise ValueError(f'unsupported DP checksum leaf dtype: {leaf.dtype}')
+
+
+def _leaf_dual_checksum(leaf: jax.Array) -> jax.Array:
+  """Two structurally independent uint32 checksums over one leaf's bits.
+
+  Mixer A (rot-add): every lane is XORed with a Weyl position salt
+  (``index * 0x9E3779B9 mod 2**32``), rotated left by a position-derived
+  amount in [1, 31], then summed with uint32 wraparound. Carry propagation
+  makes the sum mix bits across lane positions; the position salt and
+  rotation make it order-sensitive, unlike a naive lane sum.
+
+  Mixer B (rot-xor fold): every lane ADDS the same Weyl salt (wraparound),
+  is rotated by a different position-derived schedule, and the lanes are
+  folded with carry-free XOR. No hash-state multiplication is used
+  (product-free); the mixer lives in GF(2), algebraically independent from
+  mixer A's modular-addition group, so a crafted compensating perturbation
+  that preserves A must simultaneously solve an unrelated XOR system to
+  also preserve B.
+
+  Both mixers are deterministic, associative-reduction safe (wraparound add
+  and XOR are exactly associative and commutative), and read every payload
+  bit exactly once. An all-zero and an empty leaf checksum to fixed values.
+  """
+  words = _leaf_checksum_words(leaf)
+  if words.shape[0] == 0:
+    return jnp.zeros((2,), jnp.uint32)
+  index = jnp.arange(words.shape[0], dtype=jnp.uint32)
+  salt = index * jnp.uint32(_CHECKSUM_SALT_STRIDE)
+  rotation_a = (index % jnp.uint32(31)) + jnp.uint32(1)
+  mixed_a = words ^ salt
+  rotated_a = (mixed_a << rotation_a) | (
+      mixed_a >> (jnp.uint32(32) - rotation_a)
+  )
+  checksum_a = jnp.sum(rotated_a, dtype=jnp.uint32)
+  rotation_b = (
+      (index * jnp.uint32(7) + jnp.uint32(3)) % jnp.uint32(31)
+  ) + jnp.uint32(1)
+  mixed_b = words + salt
+  rotated_b = (mixed_b << rotation_b) | (
+      mixed_b >> (jnp.uint32(32) - rotation_b)
+  )
+  checksum_b = jax.lax.reduce(
+      rotated_b,
+      jnp.uint32(0),
+      lambda accumulator, lane: jax.lax.bitwise_xor(accumulator, lane),
+      (0,),
+  )
+  return jnp.stack((checksum_a, checksum_b))
+
+
+def _tree_dual_checksums(tree: Any) -> jax.Array:
+  """Stacks the per-leaf dual checksums into one ``(n_leaf, 2)`` vector."""
+  return jnp.stack(
+      tuple(_leaf_dual_checksum(leaf) for leaf in jax.tree.leaves(tree))
+  )
+
+
 class FixedDPRankGradientReducer:
   """Stages one contribution per DP rank and reduces it with a fixed tree.
 
@@ -747,6 +882,181 @@ class FixedDPRankGradientReducer:
     self._staged = None
     self._next_rank = 0
     self._fingerprints = []
+    # P70.4 receipt-lightening wiring. Every mode defaults to the legacy
+    # behavior; with all three flags unset the construction below only
+    # records the legacy mode names and never builds a new program.
+    self._compare_mode = dp_compare_mode()
+    self._distinct_schedule = dp_distinct_schedule_mode()
+    self._finite_fetch = dp_finite_fetch_mode()
+    self._group_index = 0
+    self._pending_finite_receipts = []
+    self._update_index = (
+        _next_receipt_schedule_update_index()
+        if self._distinct_schedule == 'first-group-warmup'
+        else None
+    )
+    self._compare_fingerprint = None
+    if self._compare_mode == 'fingerprint-hybrid':
+
+      def compare_fingerprint_local(local_tree):
+        fingerprints = _tree_dual_checksums(local_tree)
+        peer_fingerprints = jax.lax.ppermute(
+            fingerprints, axis_name=dp_axis, perm=permutation
+        )
+        matches = jnp.all(fingerprints == peer_fingerprints, axis=1)
+        return jnp.reshape(matches, (1, matches.shape[0]))
+
+      compare_fingerprint_kwargs = {
+          'mesh': mesh,
+          'in_specs': (base_specs,),
+          'out_specs': jax.sharding.PartitionSpec(dp_axis, None),
+      }
+      try:
+        compare_fingerprint_mapped = jax.shard_map(
+            compare_fingerprint_local,
+            check_vma=False,
+            **compare_fingerprint_kwargs,
+        )
+      except TypeError:
+        compare_fingerprint_mapped = jax.shard_map(
+            compare_fingerprint_local,
+            check_rep=False,
+            **compare_fingerprint_kwargs,
+        )
+      self._compare_fingerprint = jax.jit(compare_fingerprint_mapped)
+    self._batched_finite = None
+    if self._distinct_schedule == 'first-group-warmup':
+      self._batched_finite = jax.jit(
+          jax.vmap(_gradient_finite_flags),
+          out_shardings=signature_sharding,
+      )
+
+  def _distinct_fingerprint_scheduled(self) -> bool:
+    """True when this group must compute real per-rank fingerprints."""
+    if self._distinct_schedule != 'first-group-warmup':
+      return True
+    return (
+        self._group_index == 0
+        or self._update_index < DISTINCT_FINGERPRINT_WARMUP_UPDATES
+    )
+
+  @property
+  def pending_finite_receipt_count(self) -> int:
+    """Deferred finite receipts that a commit-gate drain must validate."""
+    return len(self._pending_finite_receipts)
+
+  def drain_deferred_finite_receipts(self) -> dict[str, Any]:
+    """Validates every deferred isfinite receipt in one batched fetch.
+
+    With ``CANON_DP_FINITE_FETCH=batched-commit`` the per-group synchronous
+    host reads are replaced by device-resident flag vectors staged on this
+    reducer. The optimizer commit MUST NOT consume any gradient this
+    reducer produced until this method returns: a non-finite receipt raises
+    here, before the commit, naming the group, stage, rank, and leaf path —
+    the same fail-closed verdict the legacy per-group check raised, moved
+    to the commit gate. The fetch concatenates every pending flag vector
+    into one int32 vector and issues a single ``jax.device_get`` (the P68
+    batched-evidence receipt channel pattern).
+    """
+    pending = self._pending_finite_receipts
+    self._pending_finite_receipts = []
+    if not pending:
+      return {
+          'deferred_finite_receipt_groups': 0,
+          'deferred_finite_receipts': 0,
+          'deferred_finite_flags_checked': 0,
+          'all_finite': True,
+      }
+    vector = jnp.concatenate(
+        tuple(
+            jnp.ravel(flags).astype(jnp.int32) for _, _, flags in pending
+        )
+    )
+    fetched = np.asarray(jax.device_get(vector), dtype=np.int32)
+    offset = 0
+    groups = set()
+    for group, stage, flags in pending:
+      size = math.prod(flags.shape)
+      values = fetched[offset:offset + size].reshape(flags.shape)
+      offset += size
+      groups.add(group)
+      if bool(np.all(values != 0)):
+        continue
+      if values.ndim == 2:
+        bad = np.argwhere(values == 0)
+        examples = [
+            {
+                'rank': int(rank),
+                'leaf': int(leaf),
+                'path': self._leaf_paths[int(leaf)],
+            }
+            for rank, leaf in bad[:16]
+        ]
+      else:
+        bad = np.flatnonzero(values == 0)
+        examples = [
+            {'leaf': int(leaf), 'path': self._leaf_paths[int(leaf)]}
+            for leaf in bad[:16].tolist()
+        ]
+      raise ValueError(
+          'deferred DP gradient finite receipts failed before the '
+          f'optimizer commit: group={group} stage={stage} '
+          f'examples={examples} total={len(bad)}'
+      )
+    if offset != int(fetched.size):
+      raise ValueError(
+          'deferred DP gradient finite receipts lost coverage: '
+          f'{offset} != {int(fetched.size)}'
+      )
+    return {
+        'deferred_finite_receipt_groups': len(groups),
+        'deferred_finite_receipts': len(pending),
+        'deferred_finite_flags_checked': int(fetched.size),
+        'all_finite': True,
+    }
+
+  def _check_replicas_elementwise(self, reduced: Any) -> int:
+    """Runs the legacy full elementwise replica compare; returns flag count."""
+    flags = np.asarray(jax.device_get(self._compare(reduced)), dtype=np.bool_)
+    if flags.size != self._dp_size or not bool(np.all(flags)):
+      raise ValueError(
+          'fixed DP gradient reduction produced unequal replicas: '
+          f'flags={flags.astype(np.int32).tolist()}'
+      )
+    return int(flags.size)
+
+  def _fingerprint_replica_matches(self, reduced: Any) -> np.ndarray:
+    """Fetches the per-rank, per-leaf dual-checksum match matrix."""
+    matches = np.asarray(
+        jax.device_get(self._compare_fingerprint(reduced)), dtype=np.bool_
+    )
+    expected_shape = (self._dp_size, len(self._staged_metadata))
+    if matches.shape != expected_shape:
+      raise ValueError(
+          'DP fingerprint replica compare changed shape: '
+          f'{matches.shape} != {expected_shape}'
+      )
+    return matches
+
+  def _assert_fingerprint_replicas_equal(self, reduced: Any) -> None:
+    """Raises with rank/leaf/path evidence when fingerprints mismatch."""
+    matches = self._fingerprint_replica_matches(reduced)
+    if bool(np.all(matches)):
+      return
+    bad = np.argwhere(~matches)
+    examples = [
+        {
+            'rank': int(rank),
+            'leaf': int(leaf),
+            'path': self._leaf_paths[int(leaf)],
+        }
+        for rank, leaf in bad[:16]
+    ]
+    raise ValueError(
+        'fixed DP gradient reduction produced unequal replicas '
+        f'(dual-checksum fingerprint): examples={examples} '
+        f'total={len(bad)}'
+    )
 
   def begin(self) -> None:
     """Starts one reduction transaction with an empty rank table."""
@@ -766,7 +1076,10 @@ class FixedDPRankGradientReducer:
           'DP gradient contribution cadence changed: '
           f'expected rank {self._next_rank}, got {rank}'
       )
-    fingerprint = _signature_sha256(self._signature(contribution))
+    if self._distinct_fingerprint_scheduled():
+      fingerprint = _signature_sha256(self._signature(contribution))
+    else:
+      fingerprint = _SKIPPED_FINGERPRINT
     self._staged = self._write(
         self._staged, contribution, jnp.asarray(rank, jnp.int32)
     )
@@ -781,36 +1094,71 @@ class FixedDPRankGradientReducer:
       fingerprints: Sequence[str],
       *,
       staging_mode: str,
+      fingerprints_computed: bool = True,
   ) -> tuple[Any, dict[str, Any]]:
     """Reduces one validated rank table and emits common evidence."""
     unique_fingerprints = len(set(fingerprints))
-    if self._require_distinct and unique_fingerprints != self._dp_size:
+    if (
+        self._require_distinct
+        and fingerprints_computed
+        and unique_fingerprints != self._dp_size
+    ):
       raise ValueError('DP rank-local gradient fingerprints are not distinct')
     reduced = self._reduce(staged)
-    finite_flags = np.asarray(
-        jax.device_get(self._finite_flags(reduced)), dtype=np.bool_
-    )
-    if finite_flags.shape != (len(self._staged_metadata),):
-      raise ValueError(
-          'reduced DP gradient finite flags changed shape: '
-          f'{finite_flags.shape} != {(len(self._staged_metadata),)}'
+    if self._finite_fetch == 'batched-commit':
+      # P70.4 knife 3: keep the finite bits on device; the commit-gate
+      # drain validates them in one batched fetch before any optimizer
+      # commit may consume this gradient.
+      self._pending_finite_receipts.append(
+          (self._group_index, 'reduced', self._finite_flags(reduced))
       )
-    if not bool(np.all(finite_flags)):
-      bad_leaves = np.flatnonzero(~finite_flags).astype(np.int32).tolist()
-      examples = [
-          {'leaf': index, 'path': self._leaf_paths[index]}
-          for index in bad_leaves[:16]
-      ]
-      raise ValueError(
-          'fixed DP gradient reduction produced non-finite values: '
-          f'examples={examples} total={len(bad_leaves)}'
+      finite_flag_count = len(self._staged_metadata)
+      post_reduction_all_finite = 'deferred-commit'
+    else:
+      finite_flags = np.asarray(
+          jax.device_get(self._finite_flags(reduced)), dtype=np.bool_
       )
-    flags = np.asarray(jax.device_get(self._compare(reduced)), dtype=np.bool_)
-    if flags.size != self._dp_size or not bool(np.all(flags)):
-      raise ValueError(
-          'fixed DP gradient reduction produced unequal replicas: '
-          f'flags={flags.astype(np.int32).tolist()}'
-      )
+      if finite_flags.shape != (len(self._staged_metadata),):
+        raise ValueError(
+            'reduced DP gradient finite flags changed shape: '
+            f'{finite_flags.shape} != {(len(self._staged_metadata),)}'
+        )
+      if not bool(np.all(finite_flags)):
+        bad_leaves = np.flatnonzero(~finite_flags).astype(np.int32).tolist()
+        examples = [
+            {'leaf': index, 'path': self._leaf_paths[index]}
+            for index in bad_leaves[:16]
+        ]
+        raise ValueError(
+            'fixed DP gradient reduction produced non-finite values: '
+            f'examples={examples} total={len(bad_leaves)}'
+        )
+      finite_flag_count = int(finite_flags.size)
+      post_reduction_all_finite = True
+    if self._compare_mode == 'fingerprint-hybrid':
+      if self._group_index < HYBRID_FULL_COMPARE_GROUPS:
+        # Full-compare group: the exact elementwise compare stays the
+        # verdict; the fingerprint program runs alongside it as a per-update
+        # self-check of the lightened instrument against ground truth.
+        fingerprint_matches = self._fingerprint_replica_matches(reduced)
+        replica_flag_count = self._check_replicas_elementwise(reduced)
+        if not bool(np.all(fingerprint_matches)):
+          diverged = np.flatnonzero(
+              ~np.all(fingerprint_matches, axis=0)
+          ).tolist()
+          raise ValueError(
+              'DP fingerprint replica compare diverged from the exact '
+              f'elementwise compare on leaves {diverged[:16]} '
+              f'total={len(diverged)}'
+          )
+        replica_check_mode = 'full+fingerprint-selfcheck'
+      else:
+        self._assert_fingerprint_replicas_equal(reduced)
+        replica_flag_count = self._dp_size
+        replica_check_mode = 'fingerprint'
+    else:
+      replica_flag_count = self._check_replicas_elementwise(reduced)
+      replica_check_mode = 'full'
     report = {
         'dp_size': self._dp_size,
         'dp_axis': self._dp_axis,
@@ -824,11 +1172,29 @@ class FixedDPRankGradientReducer:
         'rank_gradient_staging_mode': staging_mode,
         'reduction_transactions': 1,
         'reduction_rounds': fixed_dp_collective_count(self._dp_size),
-        'replica_check_flags': int(flags.size),
-        'finite_leaf_flags': int(finite_flags.size),
-        'post_reduction_all_finite': True,
+        'replica_check_flags': replica_flag_count,
+        'finite_leaf_flags': finite_flag_count,
+        'post_reduction_all_finite': post_reduction_all_finite,
         'post_reduction_replicas_exact': True,
       }
+    if (
+        self._compare_mode != 'full'
+        or self._distinct_schedule != 'every-group'
+        or self._finite_fetch != 'sync'
+    ):
+      # Additive receipt keys, emitted only when a P70.4 mode is active so
+      # the default-mode report stays byte-identical to the legacy schema.
+      report['replica_check_mode'] = replica_check_mode
+      report['rank_local_fingerprint_mode'] = (
+          'computed' if fingerprints_computed else 'skipped'
+      )
+      report['finite_check_mode'] = (
+          'deferred-commit'
+          if self._finite_fetch == 'batched-commit'
+          else 'sync'
+      )
+      report['pending_finite_receipts'] = len(self._pending_finite_receipts)
+    self._group_index += 1
     return reduced, report
 
   def finalize(self) -> tuple[Any, dict[str, Any]]:
@@ -844,6 +1210,7 @@ class FixedDPRankGradientReducer:
         self._staged,
         self._fingerprints,
         staging_mode='serial_add',
+        fingerprints_computed=_SKIPPED_FINGERPRINT not in self._fingerprints,
     )
     self._staged = None
     self._next_rank = 0
@@ -879,43 +1246,73 @@ class FixedDPRankGradientReducer:
             f'staged DP gradient leaf {index} sharding changed: '
             f'{leaf.sharding} != {expected_sharding}'
         )
-    signatures_device, staged_finite_device = self._batched_diagnostics(staged)
-    signatures, staged_finite = jax.device_get(
-        (signatures_device, staged_finite_device)
-    )
-    signatures = np.asarray(signatures, dtype=np.float32)
-    if signatures.shape != (self._dp_size, 5):
-      raise ValueError(
-          'staged DP gradient signatures changed shape: '
-          f'{signatures.shape} != {(self._dp_size, 5)}'
+    distinct_scheduled = self._distinct_fingerprint_scheduled()
+    deferred_finite = self._finite_fetch == 'batched-commit'
+    signatures = None
+    staged_finite = None
+    if distinct_scheduled:
+      signatures_device, staged_finite_device = self._batched_diagnostics(
+          staged
       )
-    staged_finite = np.asarray(staged_finite, dtype=np.bool_)
-    expected_finite_shape = (self._dp_size, len(self._staged_metadata))
-    if staged_finite.shape != expected_finite_shape:
-      raise ValueError(
-          'staged DP gradient finite flags changed shape: '
-          f'{staged_finite.shape} != {expected_finite_shape}'
+      if deferred_finite:
+        self._pending_finite_receipts.append(
+            (self._group_index, 'staged', staged_finite_device)
+        )
+        signatures = jax.device_get(signatures_device)
+      else:
+        signatures, staged_finite = jax.device_get(
+            (signatures_device, staged_finite_device)
+        )
+      signatures = np.asarray(signatures, dtype=np.float32)
+      if signatures.shape != (self._dp_size, 5):
+        raise ValueError(
+            'staged DP gradient signatures changed shape: '
+            f'{signatures.shape} != {(self._dp_size, 5)}'
+        )
+    else:
+      # P70.4 knife 2: an unscheduled group computes no per-rank signature;
+      # only the finite bits are produced, on the same vmapped layout.
+      staged_finite_device = self._batched_finite(staged)
+      if deferred_finite:
+        self._pending_finite_receipts.append(
+            (self._group_index, 'staged', staged_finite_device)
+        )
+      else:
+        staged_finite = jax.device_get(staged_finite_device)
+    if staged_finite is not None:
+      staged_finite = np.asarray(staged_finite, dtype=np.bool_)
+      expected_finite_shape = (self._dp_size, len(self._staged_metadata))
+      if staged_finite.shape != expected_finite_shape:
+        raise ValueError(
+            'staged DP gradient finite flags changed shape: '
+            f'{staged_finite.shape} != {expected_finite_shape}'
+        )
+      if not bool(np.all(staged_finite)):
+        bad = np.argwhere(~staged_finite)
+        examples = [
+            {
+                'rank': int(rank),
+                'leaf': int(leaf),
+                'path': self._leaf_paths[int(leaf)],
+            }
+            for rank, leaf in bad[:16]
+        ]
+        raise ValueError(
+            'staged DP gradient contains non-finite values: '
+            f'examples={examples} total={len(bad)}'
+        )
+    if signatures is not None:
+      fingerprints = tuple(
+          _signature_sha256(signatures[rank])
+          for rank in range(self._dp_size)
       )
-    if not bool(np.all(staged_finite)):
-      bad = np.argwhere(~staged_finite)
-      examples = [
-          {
-              'rank': int(rank),
-              'leaf': int(leaf),
-              'path': self._leaf_paths[int(leaf)],
-          }
-          for rank, leaf in bad[:16]
-      ]
-      raise ValueError(
-          'staged DP gradient contains non-finite values: '
-          f'examples={examples} total={len(bad)}'
-      )
-    fingerprints = tuple(
-        _signature_sha256(signatures[rank])
-        for rank in range(self._dp_size)
-    )
+    else:
+      fingerprints = (_SKIPPED_FINGERPRINT,) * self._dp_size
     return self._finalize_staged(
-        staged, fingerprints, staging_mode='parallel_table'
+        staged,
+        fingerprints,
+        staging_mode='parallel_table',
+        fingerprints_computed=signatures is not None,
     )
 
 

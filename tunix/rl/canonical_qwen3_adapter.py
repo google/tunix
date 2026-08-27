@@ -7817,6 +7817,20 @@ class Qwen3EngineForwardAdapter:
           "P33 rank-local reverse requires admitted reduction and workload "
           "launch gates"
       )
+    if deterministic_repeat and (
+        dp_training.dp_compare_mode() != "full"
+        or dp_training.dp_distinct_schedule_mode() != "every-group"
+        or dp_training.dp_finite_fetch_mode() != "sync"
+    ):
+      # deterministic_repeat re-invokes every group, which would shift the
+      # P70.4 receipt schedules and compare placeholder fingerprints against
+      # computed ones. Repeat certification must run against the legacy
+      # receipt semantics it certifies.
+      raise FunctionalMappingError(
+          "P70.4 receipt-lightening flags are incompatible with "
+          "deterministic_repeat; rerun with CANON_DP_COMPARE_MODE, "
+          "CANON_DP_DISTINCT_SCHEDULE, and CANON_DP_FINITE_FETCH unset"
+      )
     if p34:
       deepswe_contract.validate_environment(os.environ)
       contract = workload
@@ -8382,7 +8396,15 @@ class Qwen3EngineForwardAdapter:
             "n_real": spec["host_n_real"],
             "rank_counts": (reverse["counts"],),
             "pullback_invocations": 1,
-            "gradient_finite": bool(reduction_finite),
+            # P70.4: with CANON_DP_FINITE_FETCH=batched-commit the reducer
+            # reports the string 'deferred-commit'; the receipt propagates
+            # verbatim so no group claims finiteness before the commit-gate
+            # drain has validated it.
+            "gradient_finite": (
+                reduction_finite
+                if isinstance(reduction_finite, str)
+                else bool(reduction_finite)
+            ),
             "gradient_nonzero": _p68_receipt_nonzero(
                 leaves, batched_evidence=batched_evidence
             ),
@@ -8699,6 +8721,26 @@ class Qwen3EngineForwardAdapter:
                 seen.add(id(value))
                 if not value.is_deleted():
                   value.delete()
+    deferred_finite_receipts = None
+    if reducer is not None and getattr(
+        reducer, "pending_finite_receipt_count", 0
+    ):
+      # P70.4 commit gate: every finite receipt deferred by
+      # CANON_DP_FINITE_FETCH=batched-commit is validated in one batched
+      # fetch HERE, before any gradient from this update escapes to the
+      # optimizer commit. A non-finite receipt raises and no gradient is
+      # returned; the fail-closed verdict is unchanged, only its host
+      # synchronization point moved from per-group to per-update.
+      with gsm8k_xprof.trace_annotation("deferred_finite_receipts"):
+        deferred_finite_receipts = reducer.drain_deferred_finite_receipts()
+      print(
+          f"[P70.4.DP{contract.dp_size}] deferred_finite_receipts "
+          f"groups={deferred_finite_receipts['deferred_finite_receipt_groups']} "
+          f"receipts={deferred_finite_receipts['deferred_finite_receipts']} "
+          f"flags={deferred_finite_receipts['deferred_finite_flags_checked']} "
+          f"all_finite={int(deferred_finite_receipts['all_finite'])}",
+          flush=True,
+      )
     if gradient_microbatch_sink is None:
       if trainer_gradients is None:
         raise FunctionalMappingError("P32 D3b0 emitted no grouped gradient")
@@ -8707,6 +8749,7 @@ class Qwen3EngineForwardAdapter:
       )
     return {
         "loss_output": loss_output,
+        "deferred_finite_receipts": deferred_finite_receipts,
         "loss": loss_output.primary_loss.compute(),
         "per_token_logps": per_token_logps,
         "token_entropy": token_entropy,
