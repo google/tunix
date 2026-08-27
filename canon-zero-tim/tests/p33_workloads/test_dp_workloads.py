@@ -260,6 +260,65 @@ class DPWorkloadsTest(unittest.TestCase):
           run_stage="p59-eight-update"
       )
 
+  def test_six_update_stage_is_committed_and_horizon_exact(self):
+    """six-update is three-update's admission with a 6-update budget."""
+    workload = dp_workloads.get_workload("gsm8k-p59-dp4-tp1")
+    self.assertIn("--max_steps=3", workload.command(run_stage="three-update"))
+    self.assertIn("--max_steps=6", workload.command(run_stage="six-update"))
+    for stage, steps in (("three-update", 3), ("six-update", 6)):
+      with self.subTest(stage=stage):
+        environ = _environment(workload.name)
+        environ.update({
+            "CANON_P33_RUN_STAGE": stage,
+            "CANON_P33_NO_COMMIT": "0",
+            "CANON_P59_DP4_TAIL8": "0",
+        })
+        budget = dp_workloads.requested_max_steps(workload, environ)
+        self.assertEqual(budget, steps)
+        # The recipe accepts exactly this stage's budget, so three-update
+        # rejects 6 and six-update rejects 3 by the same comparison.
+        for candidate in (1, 3, 6, 8):
+          self.assertEqual(candidate == steps, candidate == budget)
+        # Both are committed stages: the no-commit exemption stays refused.
+        rejected = dict(environ)
+        rejected["CANON_P33_NO_COMMIT"] = "1"
+        with self.assertRaisesRegex(ValueError, "run stage/no-commit"):
+          dp_workloads.requested_max_steps(workload, rejected)
+        # The stage is not a P59 tail-8 alias either.
+        tail8 = dict(environ)
+        tail8["CANON_P59_DP4_TAIL8"] = "1"
+        with self.assertRaisesRegex(ValueError, "p59-eight-update"):
+          dp_workloads.requested_max_steps(workload, tail8)
+    unknown = _environment(workload.name)
+    unknown.update({
+        "CANON_P33_RUN_STAGE": "seven-update",
+        "CANON_P33_NO_COMMIT": "0",
+    })
+    with self.assertRaisesRegex(ValueError, "unknown P33 run stage"):
+      dp_workloads.requested_max_steps(workload, unknown)
+    with self.assertRaisesRegex(ValueError, "unknown P33 run stage"):
+      workload.command(run_stage="seven-update")
+    # The GSM8K recipe still cross-checks the launched --max_steps against
+    # the stage budget rather than trusting the command line.
+    demo = (
+        Path(__file__).parents[3]
+        / "examples/math_gsm8k/qwen3_grpo_demo.py"
+    ).read_text()
+    self.assertIn(
+        "if CANON_P32_WORKLOAD and args.max_steps != MAX_STEPS:", demo
+    )
+    self.assertIn(
+        "P33 GSM8K --max_steps does not match CANON_P33_RUN_STAGE", demo
+    )
+    # The one-host carrier admits the same two committed horizons.
+    profile = (
+        Path(__file__).parents[3]
+        / "canon-zero-tim/cluster/profiles"
+        / "qwen3-1p7b-dp4-tp1-gsm8k-v1-hp.env"
+    ).read_text()
+    self.assertIn('!= "three-update" ]', profile)
+    self.assertIn('!= "six-update" ]', profile)
+
   def test_p62_numeric_debug_is_exact_no_commit_geometry(self):
     workload = dp_workloads.get_workload("gsm8k")
     environ = _environment("gsm8k")

@@ -15,6 +15,21 @@ case "$label" in
     exit 2
     ;;
 esac
+# CANON_P33_RUN_STAGE is the registered stage selector, so the carrier
+# reuses it instead of shadowing it with a second flag.  It admits exactly
+# the two committed update horizons: the frozen three-update capture and
+# the six-update horizon the dark-time and first-group-warmup studies
+# need.  Every other stage (full, the no-commit diagnostics) is rejected
+# here rather than 20 minutes later inside the container.
+run_stage="${CANON_P33_RUN_STAGE:-three-update}"
+case "$run_stage" in
+  three-update) max_steps=3 ;;
+  six-update) max_steps=6 ;;
+  *)
+    echo "[V1.GSM8K.XPROF] unsupported CANON_P33_RUN_STAGE: $run_stage" >&2
+    exit 2
+    ;;
+esac
 
 script_dir="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck disable=SC1091
@@ -137,7 +152,7 @@ mkdir -p "$state/wandb" "$state/logs" "$xprof_dir" "$perf_dir"
 {
   echo "[V1.GSM8K.XPROF] source=$source_sha diff_sha256=$source_diff_sha256 runtime_manifest_sha256=$runtime_manifest_sha256 image=$image image_id=$image_id model_snapshot=$hf_snapshot_sha"
   echo "[V1.GSM8K.XPROF] arm=$arm label=$label hostname=$expected_hostname topology=DP4xTP1"
-  echo "[V1.GSM8K.XPROF] work=prompts8_generations8_response256_concurrency1 steps=3 capture=update:2->3"
+  echo "[V1.GSM8K.XPROF] work=prompts8_generations8_response256_concurrency1 stage=$run_stage steps=$max_steps capture=update:2->3"
   echo "[V1.GSM8K.XPROF] tracers=host:1,python:0,tpu:TRACE_ONLY_XLA labels=1 xprof_budget=soft:1200000000,hard:1500000000,basis:logical_regular_file_bytes"
   echo "[V1.GSM8K.XPROF] treatment=$([ "$arm" = native ] && echo stock-vanilla || echo strict-zero-hp-v1)"
 } >"$driver"
@@ -167,6 +182,7 @@ docker_args=(
   -e V1_GSM8K_XPROF_REPO="$repo"
   -e V1_GSM8K_XPROF_ARM="$arm"
   -e V1_GSM8K_XPROF_LABEL="$label"
+  -e V1_GSM8K_XPROF_RUN_STAGE="$run_stage"
   -e V1_GSM8K_XPROF_XLA_FLAGS="$XTRA_XLA"
   -e CANON_V1_GSM8K_XPROF_ARM="$arm"
   -e CANON_GSM8K_TRAIN=1 -e CANON_GSM8K_L3=0 -e CANON_GSM8K_GRAD_PROBE=0
@@ -205,7 +221,7 @@ if [ "$arm" = zero-hp ]; then
     -e CANON_P32_TRAIN_ADMITTED=1
     -e CANON_P32_DP_REDUCTION_ADMITTED=1
     -e CANON_P33_WORKLOAD_LAUNCH_ADMITTED=1
-    -e CANON_P33_RUN_STAGE=three-update -e CANON_P33_NO_COMMIT=0
+    -e CANON_P33_RUN_STAGE="$run_stage" -e CANON_P33_NO_COMMIT=0
     -e CANON_P59_KIND=v1 -e CANON_P59_DP4_SERIAL_MESH_BRIDGE=1
     -e CANON_P59_DP4_TAIL8=0 -e CANON_P59_RANK_PARALLEL_BACKWARD=1
     -e CANON_GSM8K_ALIGNMENT_WARN_ONLY=0
@@ -301,6 +317,7 @@ classifier_args=(
   --source-diff-sha256 "$source_diff_sha256" \
   --runtime-manifest-sha256 "$runtime_manifest_sha256" \
   --model-snapshot "$hf_snapshot_sha" --image-id "$image_id" \
+  --expected-updates "$max_steps" \
   --xprof-census-rc "$xprof_census_rc" \
   --semantic-census-rc "$semantic_census_rc" \
   --size-census-rc "$size_census_rc" \

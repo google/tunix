@@ -33,6 +33,26 @@ case "$V1_GSM8K_XPROF_ARM" in
     ;;
 esac
 
+# The update horizon comes from the P33 stage, never from a literal.  The
+# zero-hp arm additionally receives CANON_P33_RUN_STAGE, and the recipe
+# derives its own budget from tunix.rl.dp_workloads, so a disagreement
+# between the two derivations is a fatal --max_steps mismatch rather than
+# a silently shortened run.
+run_stage="${V1_GSM8K_XPROF_RUN_STAGE:-three-update}"
+case "$run_stage" in
+  three-update) max_steps=3 ;;
+  six-update) max_steps=6 ;;
+  *)
+    echo "[V1.GSM8K.XPROF] unsupported run stage: $run_stage" >&2
+    exit 2
+    ;;
+esac
+if [ "$V1_GSM8K_XPROF_ARM" = zero-hp ] && \
+   [ "${CANON_P33_RUN_STAGE:-}" != "$run_stage" ]; then
+  echo "[V1.GSM8K.XPROF] stage disagreement: carrier=$run_stage container=${CANON_P33_RUN_STAGE:-unset}" >&2
+  exit 2
+fi
+
 export XLA_FLAGS="$V1_GSM8K_XPROF_XLA_FLAGS"
 
 python3 - <<'PY'
@@ -75,7 +95,7 @@ python3 -u examples/math_gsm8k/qwen3_grpo_demo.py \
   --mesh_dp=4 --mesh_tp=1 --batch_size=8 --mini_batch_size=8 \
   --train_micro_batch_size=8 --compute_logps_micro_batch_size=8 \
   --train_trajectory_micro_batch_size=4 \
-  --max_steps=3 --num_generations=8 --max_prompt_length=1024 \
+  --max_steps="$max_steps" --num_generations=8 --max_prompt_length=1024 \
   --max_response_length=256 --max_concurrency=1 \
   --rollout_vllm_hbm_utilization=0.20 \
   --rollout_vllm_max_num_seqs=16 \

@@ -33,6 +33,12 @@ _RUN_STAGE_STEPS = {
     "backward-no-commit": 1,
     "one-update": 1,
     "three-update": 3,
+    # Committed six-update horizon for the one-host GSM8K XProf carrier:
+    # a three-update run cannot exercise CANON_DP_DISTINCT_SCHEDULE=
+    # first-group-warmup (its warmup covers updates 0..2) and cannot tell a
+    # recurring dark-time stall from a one-off.  Same admission properties
+    # as three-update -- committed, no diagnostic no-commit exemption.
+    "six-update": 6,
     "p59-eight-update": 8,
 }
 

@@ -115,7 +115,7 @@ def _work(arm: str, step: int) -> dict:
   }
 
 
-def _fixture(root: Path, arm: str) -> None:
+def _fixture(root: Path, arm: str, updates: int = 3) -> None:
   state = root / "train"
   xprof = state / "xprof/plugins/profile/run"
   perf = state / "perf"
@@ -130,7 +130,7 @@ def _fixture(root: Path, arm: str) -> None:
       "[P51.XPROF] phase=update started step=2 anchor=update_entry tpu_trace_mode=TRACE_ONLY_XLA",
       "[P51.XPROF] phase=update stopped step=3 anchor=step_completed",
   ]
-  for step in range(3):
+  for step in range(updates):
     lines.append(
         "[V1.GSM8K.XPROF.WORK] "
         + json.dumps(_work(arm, step), sort_keys=True, separators=(",", ":"))
@@ -143,7 +143,8 @@ def _fixture(root: Path, arm: str) -> None:
     ))
   else:
     lines.extend(
-        f"[CANON_ALIGN] index={index} verdict=PASS" for index in range(51)
+        f"[CANON_ALIGN] index={index} verdict=PASS"
+        for index in range(ARM_CLASSIFIER._ALIGN_VERDICTS_PER_UPDATE * updates)
     )
   lines.append(f"[V1.GSM8K.XPROF] RUN_END arm={arm} docker_exit=0 elapsed_seconds=10")
   (state / "raw.log").write_text("\n".join(lines) + "\n")
@@ -510,6 +511,127 @@ fi
           {**_common_env("zero-hp"), "CANON_GSM8K_VANILLA": "1"}
       )
 
+  def test_run_stage_selects_the_update_horizon_fail_closed(self):
+    """CANON_P33_RUN_STAGE, not a literal, sets the carrier's horizon."""
+    common = (SCRIPTS / "run_onehost_gsm8k_xprof_common.sh").read_text()
+    inner = (SCRIPTS / "run_onehost_gsm8k_xprof_inner.sh").read_text()
+    # The registered stage flag is reused as the selector; no second flag.
+    self.assertIn('run_stage="${CANON_P33_RUN_STAGE:-three-update}"', common)
+    self.assertIn('-e CANON_P33_RUN_STAGE="$run_stage"', common)
+    self.assertIn('-e V1_GSM8K_XPROF_RUN_STAGE="$run_stage"', common)
+    self.assertIn('--expected-updates "$max_steps"', common)
+    self.assertNotIn("CANON_P33_RUN_STAGE=three-update", common)
+    self.assertIn('run_stage="${V1_GSM8K_XPROF_RUN_STAGE:-three-update}"', inner)
+    for script in (common, inner):
+      self.assertIn("  three-update) max_steps=3 ;;", script)
+      self.assertIn("  six-update) max_steps=6 ;;", script)
+
+    # An unknown stage is rejected before the carrier reads an asset, runs
+    # git, checks the hostname, or touches docker and the TPU lane.  The
+    # hostname and artifact-root guards below keep an admitted stage from
+    # ever reaching a launch, whatever host runs this test.
+    env = dict(os.environ)
+    env["V1_GSM8K_XPROF_EXPECT_HOSTNAME"] = "__no_such_host__"
+    env["V1_GSM8K_XPROF_ARTIFACT_DIR"] = str(SCRIPTS)
+    for stage, rejected in (
+        (None, False),
+        ("three-update", False),
+        ("six-update", False),
+        ("full", True),
+        ("backward-no-commit", True),
+        ("p59-eight-update", True),
+        ("seven-update", True),
+    ):
+      with self.subTest(stage=stage):
+        case_env = dict(env)
+        if stage is None:
+          case_env.pop("CANON_P33_RUN_STAGE", None)
+        else:
+          case_env["CANON_P33_RUN_STAGE"] = stage
+        result = subprocess.run(
+            [
+                "bash",
+                str(SCRIPTS / "run_onehost_gsm8k_xprof_common.sh"),
+                "zero-hp",
+                "stagecontract",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            env=case_env,
+        )
+        self.assertNotEqual(result.returncode, 0, result)
+        if rejected:
+          self.assertEqual(result.returncode, 2, result)
+          self.assertIn(
+              f"unsupported CANON_P33_RUN_STAGE: {stage}", result.stderr
+          )
+        else:
+          self.assertNotIn(
+              "unsupported CANON_P33_RUN_STAGE", result.stderr, result
+          )
+
+  def test_arm_classifier_horizon_follows_the_stage(self):
+    """The evidence gate counts the stage's updates, not a frozen 3."""
+    keys = dict(
+        source_sha="1" * 40,
+        source_diff_sha256="2" * 64,
+        runtime_manifest_sha256="5" * 64,
+        model_snapshot="3" * 40,
+        image_id="sha256:" + "4" * 64,
+        xprof_census_rc=0,
+        semantic_census_rc=0,
+    )
+    with tempfile.TemporaryDirectory() as directory:
+      base = Path(directory)
+      for updates in (3, 6):
+        with self.subTest(updates=updates):
+          root = base / f"zero-hp-{updates}"
+          _fixture(root, "zero-hp", updates=updates)
+          matched = ARM_CLASSIFIER.classify(
+              arm="zero-hp",
+              run_root=root,
+              expected_updates=updates,
+              **keys,
+          )
+          self.assertEqual(matched["verdict"], "PASS", matched)
+          self.assertEqual(matched["capture"]["updates"], updates)
+          other = 6 if updates == 3 else 3
+          mismatched = ARM_CLASSIFIER.classify(
+              arm="zero-hp",
+              run_root=root,
+              expected_updates=other,
+              **keys,
+          )
+          self.assertEqual(mismatched["verdict"], "FAIL", mismatched)
+          self.assertIn(
+              f"global_steps={updates} expected={other}",
+              mismatched["reasons"],
+          )
+          self.assertIn(
+              f"work_receipts={updates} expected={other}",
+              mismatched["reasons"],
+          )
+          self.assertTrue(
+              any(
+                  reason.startswith("zero_alignment=")
+                  for reason in mismatched["reasons"]
+              ),
+              mismatched,
+          )
+      # The default stays three-update so an unchanged launcher is unmoved.
+      default_root = base / "zero-hp-3"
+      self.assertEqual(
+          ARM_CLASSIFIER.classify(
+              arm="zero-hp", run_root=default_root, **keys
+          )["verdict"],
+          "PASS",
+      )
+      with self.assertRaises(ValueError):
+        ARM_CLASSIFIER.classify(
+            arm="zero-hp", run_root=default_root, expected_updates=0, **keys
+        )
+
   def test_work_receipt_hashes_required_arrays(self):
     train_example = types.SimpleNamespace(
         prompt_ids=np.arange(8, dtype=np.int32).reshape(2, 4),
@@ -670,7 +792,8 @@ fi
     self.assertIn("--model qwen1p7b_tp1", common)
     self.assertIn("examples/math_gsm8k/qwen3_grpo_demo.py", inner)
     self.assertIn("--mesh_dp=4 --mesh_tp=1", inner)
-    self.assertIn("--max_steps=3", inner)
+    self.assertIn('--max_steps="$max_steps"', inner)
+    self.assertNotIn("--max_steps=3", inner)
     self.assertIn("-e CANON_P60_DETERMINISTIC_AB=1", common)
     self.assertIn("census_gsm8k_xprof_modules.py", common)
     self.assertIn("census_gsm8k_semantic_trace.py", common)

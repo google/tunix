@@ -17,6 +17,12 @@ _CANON_ADAPTER_MARKER = "[CANON_" "ADAPTER]"
 _SIZE_SCHEMA = "canon.v1.gsm8k-onehost-xprof.size.v1"
 _SIZE_SOFT_WARNING_BYTES = 1_200_000_000
 _SIZE_HARD_MAX_BYTES = 1_500_000_000
+# Every committed update emits one pre-alignment verdict plus one per
+# gradient group, and the DP4xTP1 carrier has 16 groups.  Measured on
+# .../v1_zero-hp_p70bc_final_20260827: 3 [CANON_ALIGN_PRE] + 48
+# [CANON_ALIGN] = 51 verdicts over three updates.
+_ALIGN_VERDICTS_PER_UPDATE = 17
+_DEFAULT_EXPECTED_UPDATES = 3
 
 
 def _sha256(path: Path) -> str:
@@ -164,12 +170,15 @@ def classify(
     xprof_census_rc: int,
     semantic_census_rc: int,
     size_census_rc: int = 0,
+    expected_updates: int = _DEFAULT_EXPECTED_UPDATES,
     require_hierarchy: bool = False,
     hierarchy_census_rc: int | None = None,
     trace_census_rc: int | None = None,
 ) -> dict:
   if arm not in ("native", "zero-hp"):
     raise ValueError(f"invalid arm: {arm!r}")
+  if expected_updates < 1:
+    raise ValueError(f"invalid expected updates: {expected_updates!r}")
   state = run_root / "train"
   raw_path = state / "raw.log"
   driver_path = run_root / "driver.log"
@@ -226,8 +235,8 @@ def classify(
   )
 
   steps = len(re.findall(r"Global step \d+ completed in", text))
-  if steps != 3:
-    reasons.append(f"global_steps={steps} expected=3")
+  if steps != expected_updates:
+    reasons.append(f"global_steps={steps} expected={expected_updates}")
   if text.count(
       f"[V1.GSM8K.XPROF] PREFLIGHT_PASS arm={arm} topology=DP4xTP1"
   ) != 1:
@@ -244,10 +253,10 @@ def classify(
     reasons.append("run_end")
 
   work = _work_receipts(text, reasons)
-  if len(work) != 3:
-    reasons.append(f"work_receipts={len(work)} expected=3")
+  if len(work) != expected_updates:
+    reasons.append(f"work_receipts={len(work)} expected={expected_updates}")
   work_by_step = {row.get("train_step"): row for row in work}
-  if set(work_by_step) != {0, 1, 2}:
+  if set(work_by_step) != set(range(expected_updates)):
     reasons.append(f"work_steps={sorted(str(value) for value in work_by_step)}")
   for step, row in work_by_step.items():
     if row.get("arm") != arm:
@@ -308,10 +317,15 @@ def classify(
   else:
     if "[P56.VANILLA]" in text:
       reasons.append("zero_inherited_vanilla")
-    if align_verdicts.count("PASS") != 51 or align_verdicts.count("FAIL") != 0:
+    expected_verdicts = _ALIGN_VERDICTS_PER_UPDATE * expected_updates
+    if (
+        align_verdicts.count("PASS") != expected_verdicts
+        or align_verdicts.count("FAIL") != 0
+    ):
       reasons.append(
           "zero_alignment="
-          f"{align_verdicts.count('PASS')}/51 fail={align_verdicts.count('FAIL')}"
+          f"{align_verdicts.count('PASS')}/{expected_verdicts} "
+          f"fail={align_verdicts.count('FAIL')}"
       )
     if "zt_tr_dp_parallel_bwd_" not in xprof_text:
       reasons.append("zero_semantic_parallel_backward_absent")
@@ -350,6 +364,7 @@ def classify(
           "phase": "update",
           "start_step": 2,
           "stop_step": 3,
+          "updates": expected_updates,
           "hierarchy_required": require_hierarchy,
       },
       "xprof_budget": (
@@ -383,6 +398,12 @@ def main() -> int:
   parser.add_argument("--runtime-manifest-sha256", required=True)
   parser.add_argument("--model-snapshot", required=True)
   parser.add_argument("--image-id", required=True)
+  parser.add_argument(
+      "--expected-updates",
+      type=int,
+      default=_DEFAULT_EXPECTED_UPDATES,
+      help="committed updates implied by CANON_P33_RUN_STAGE",
+  )
   parser.add_argument("--xprof-census-rc", type=int, required=True)
   parser.add_argument("--semantic-census-rc", type=int, required=True)
   parser.add_argument("--size-census-rc", type=int, required=True)
@@ -401,6 +422,7 @@ def main() -> int:
       runtime_manifest_sha256=args.runtime_manifest_sha256,
       model_snapshot=args.model_snapshot,
       image_id=args.image_id,
+      expected_updates=args.expected_updates,
       xprof_census_rc=args.xprof_census_rc,
       semantic_census_rc=args.semantic_census_rc,
       size_census_rc=args.size_census_rc,
