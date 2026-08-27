@@ -1,6 +1,6 @@
 # P58 DeepSWE native-first training handoff
 
-## 2026-08-27 P58.16 loader-metadata override — local, not published
+## 2026-08-27 P58.16 loader-metadata override — source published
 
 This section supersedes P58.15's `p58z05` launch instruction. The latest
 immutable target is `p58z06`. It admitted 128 devices, the clean 1,012-task
@@ -20,11 +20,13 @@ no such marker. P58.15 compared raw treedefs and falsely rejected the otherwise
 matching logical 398-leaf state; segmented backward contained the same latent
 check.
 
-The local P58.16 diff removes only exact `_is_loaded=True` from copied
-Variables for contract comparison. A false/non-boolean marker fails, while all
-other metadata, paths/types, leaf count, shapes, and dtypes remain exact. It
-does not change data, B8xG16, seed, 16K/50-turn horizon, sampling, loss,
-strict A=B=C, optimizer, compact filtering, or any Native/Zero selector.
+Published implementation
+`dba5211ac4945fefb50337603c800d9f8e3d37b5` removes only exact
+`_is_loaded=True` from copied Variables for contract comparison. A
+false/non-boolean marker fails, while all other metadata, paths/types, leaf
+count, shapes, and dtypes remain exact. It does not change data, B8xG16, seed,
+16K/50-turn horizon, sampling, loss, strict A=B=C, optimizer, compact
+filtering, or any Native/Zero selector.
 
 Focused forced-device tests and the complete pinned-image gate pass with:
 
@@ -32,11 +34,12 @@ Focused forced-device tests and the complete pinned-image gate pass with:
 P58_EXACT_IMAGE_CPU_PASS ... disaggregated_trainer_mesh=4 ... regressions=1
 ```
 
-This worktree is dirty and the fix is not committed or pushed. Do not launch
-it remotely. After the user separately approves publication, fetch/read back
-the exact remote source, build/read back a matching image, rerun the full gate,
-and pass sandbox admission. A Kubernetes launch needs another approval and
-must use fresh id `p58z07`; never resume/overwrite `p58z01`-`p58z06`.
+The exact source commit above is published and read back from
+`yuxzhang/canon-zero-tim`. No matching image was published and no remote target
+was launched. After the user separately approves image publication, build/read
+back that exact source image, rerun the full gate, and pass sandbox admission.
+A Kubernetes launch needs another approval and must use fresh id `p58z07`;
+never resume/overwrite `p58z01`-`p58z06`.
 
 At startup require exactly one each:
 

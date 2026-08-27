@@ -18,7 +18,7 @@ P58 does not modify `main`. Rendering and local validation do not authorize a
 Kubernetes apply. An operator must separately approve image publication and
 each launch.
 
-## 2026-08-27 P58.16 NNX loader-metadata retry override — local only
+## 2026-08-27 P58.16 NNX loader-metadata retry override — source published
 
 Do not follow the older P58.15 instruction to launch `p58z05`. Immutable
 `p58z06` completed model load/warmup on the exact 128-device Qwen3-4B Zero-HP
@@ -38,11 +38,12 @@ pinned-image gate passes:
 P58_EXACT_IMAGE_CPU_PASS ... disaggregated_trainer_mesh=4 ... regressions=1
 ```
 
-The fix is currently uncommitted/unpublished. Stop here until the user
-separately approves commit/push. After publication, require exact remote SHA
-and matching-image readback, rerun the complete gate, and pass sandbox
-capacity. A later separately approved launch must use fresh `p58z07` and
-require exactly one of all four receipts:
+Implementation `dba5211ac4945fefb50337603c800d9f8e3d37b5` is published and
+read back from `yuxzhang/canon-zero-tim`. No matching image was published.
+Stop here until the user separately approves image publication. Require exact
+source/image readback, rerun the complete gate, and pass sandbox capacity. A
+later separately approved launch must use fresh `p58z07` and require exactly
+one of all four receipts:
 
 ```text
 [CANON_ADAPTER.PLACEMENT] PASS relation=disjoint rollout_devices=64 trainer_devices=64 execution_role=trainer

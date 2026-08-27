@@ -2,10 +2,11 @@
 
 ## Current P58.16 NNX loader-metadata checkpoint (2026-08-27)
 
-- Status: local implementation on pulled operator base
-  `959a3258fe70230c483cec9a25b191b7b3d4ab4b`; pinned dependency-image CPU
-  gates PASS. The worktree is intentionally uncommitted/unpublished and no
-  128-TPU retry has run. `main` is untouched.
+- Status: implementation commit
+  `dba5211ac4945fefb50337603c800d9f8e3d37b5` is published and read back on
+  `yuxzhang/canon-zero-tim`; pinned dependency-image CPU gates PASS. No
+  matching image was published and no 128-TPU retry has run. `main` is
+  untouched.
 - Source intake: the clean isolated worktree fast-forwarded from
   `a04b65febcb5e163bf1f30bf33065decbe29651f` through five remote commits to
   `959a3258fe70230c483cec9a25b191b7b3d4ab4b`. The incoming P58 artifact is
@@ -34,9 +35,9 @@
   pinned-image gate exits zero with `P58_EXACT_IMAGE_CPU_PASS ...
   disaggregated_trainer_mesh=4 ... regressions=1`. No TPU is exposed locally,
   so this is construction evidence only.
-- Next action: review this dirty diff. Commit/push, image publication,
+- Next action: source publication is complete. Matching-image publication,
   Kubernetes apply, and target launch remain separately approval-gated. Once
-  published and read back with a matching image plus sandbox admission, use
+  the matching image is published/read back and sandbox admission passes, use
   fresh `p58z07`; never resume/overwrite `p58z01`-`p58z06`. Require four
   placement/state/JIT/scorer receipts, trainer old/current logps, strict
   A=B=C, finite nonzero 16-group backward, and one coherent update-0 commit.

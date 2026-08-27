@@ -88,7 +88,7 @@ unchanged.
 | P58.13 | Qwen3-4B trainer-logprob M2048 and P59-only VMA scoping | Exact `(2560,8)` fixed-head registration, Qwen3-32B negative, FrozenLake Wave-5 P67 bundle, profile/environment/Python fail-closed gates, and complete pinned-image PASS | completed source repair; `p58z03` proved fixed-head admission and exposed P58.14 before execution |
 | P58.14 | Disaggregated canonical trainer-mesh binding | Adapter receives trainer state, executes differentiable forward on the matching trainer role, retains rollout serving placement, rejects DP/TP/partial-overlap drift, and passes disjoint plus colocated image regressions | completed source repair; `p58z04` proved explicit placement and exposed P58.15 nested JIT closure |
 | P58.15 | Disaggregated nested model/logits JIT and segmented-backward binding | Reconstructed graph is state-contract exact, both hidden JITs and segmented backward execute on trainer devices, three placement receipts are classifier-enforced, and dependency-image regressions pass | completed source repair; `p58z06` exposed P58.16 loader-metadata admission before rollout |
-| P58.16 | Loader-metadata-aware NNX logical State contract | Only exact `_is_loaded=True` provenance is normalized; every other metadata/path/type/leaf/shape/dtype contract stays exact; full and segmented forced-device tests plus classifier and complete image gate pass | active — local implementation + CPU gates PASS; uncommitted/unpublished; 128-TPU retry not run |
+| P58.16 | Loader-metadata-aware NNX logical State contract | Only exact `_is_loaded=True` provenance is normalized; every other metadata/path/type/leaf/shape/dtype contract stays exact; full and segmented forced-device tests plus classifier and complete image gate pass | active — implementation `dba5211ac4945fefb50337603c800d9f8e3d37b5` published/read back; matching image and 128-TPU retry not run |
 
 Exactly one phase may be active. Commit, push, image publication, Kubernetes
 render/application, and TPU execution each remain separately user-gated.
@@ -107,10 +107,10 @@ its `p58z03` target is immutable failure evidence. P58.14 implementation
 `dce0e93777548b7623e4f41702144f8d00f242f5` is published and `p58z04` is
 immutable P58.15 trigger evidence. P58.15 implementation
 `f60cdd569c2737df6cb2968125c8e42680938981` is published, and `p58z06` is
-immutable P58.16 trigger evidence. P58.16 remains an uncommitted local diff.
-A fresh `p58z07` target begins only after explicit source publication, exact
-source/image readback, sandbox-capacity admission, and separate launch
-approval.
+immutable P58.16 trigger evidence. P58.16 implementation
+`dba5211ac4945fefb50337603c800d9f8e3d37b5` is published/read back. A fresh
+`p58z07` target begins only after matching-image publication/readback,
+sandbox-capacity admission, and separate launch approval.
 No remote execution is authorized by this plan alone.
 
 P58.5N attempts `p58f01` through `p58f11` remain `INCONCLUSIVE`. P58f01 exposed

@@ -1,6 +1,6 @@
 # Log
 
-## 2026-08-27 UTC — P58.16 NNX loader-metadata repair admitted locally
+## 2026-08-27 UTC — P58.16 NNX loader-metadata repair published
 
 - Source intake: clean isolated worktree fast-forwarded from
   `a04b65febcb5e163bf1f30bf33065decbe29651f` to exact operator tip
@@ -31,9 +31,11 @@
   Complete pinned-image gate exits zero with
   `P58_EXACT_IMAGE_CPU_PASS ... disaggregated_trainer_mesh=4 ...
   regressions=1`. No TPU target was run.
-- State: uncommitted and unpublished by design. The next eligible target is
-  fresh `p58z07` only after separate commit/push, matching-image,
-  sandbox-admission, and launch approvals. `p58z06` is not resumable.
+- Publication: implementation commit
+  `dba5211ac4945fefb50337603c800d9f8e3d37b5` was pushed to and read back from
+  `yuxzhang/canon-zero-tim`. `main` remains untouched. The next eligible target
+  is fresh `p58z07` only after separately approved matching-image publication,
+  sandbox admission, and launch. `p58z06` is not resumable.
 
 ## 2026-08-26 UTC — P58.15 nested-JIT trainer-mesh repair, local only
 

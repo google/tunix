@@ -1,7 +1,8 @@
 # P58.16 — DeepSWE NNX loader-metadata state contract
 
-Status: LOCAL IMPLEMENTATION + DEPENDENCY-IMAGE CPU GATES PASS; UNCOMMITTED,
-UNPUBLISHED, AND 128-TPU RETRY NOT RUN.
+Status: IMPLEMENTATION `dba5211ac4945fefb50337603c800d9f8e3d37b5`
+PUBLISHED/READ BACK + DEPENDENCY-IMAGE CPU GATES PASS; MATCHING IMAGE AND
+128-TPU RETRY NOT RUN.
 
 ## Trigger
 
@@ -80,10 +81,10 @@ Pathways or 128-chip training PASS.
 
 ## Next gate
 
-Do not launch from this dirty worktree. Commit/push, matching-image
-publication, Kubernetes apply, and target execution each require their own
-user approval. After exact remote source and image readback plus sandbox
-admission, use fresh Attempt-0 id `p58z07`; never resume or overwrite
+Do not launch from a mutable worktree. Exact source publication/readback is
+complete. Matching-image publication, Kubernetes apply, and target execution
+each require their own user approval. After exact source/image readback plus
+sandbox admission, use fresh Attempt-0 id `p58z07`; never resume or overwrite
 `p58z01` through `p58z06`.
 
 Require exactly one each of trainer placement, trainer state contract,
