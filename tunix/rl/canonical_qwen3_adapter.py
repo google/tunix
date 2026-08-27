@@ -233,23 +233,66 @@ def _p71_scan_mode() -> str:
   '' (off; absent, empty, '0' and 'off' are all off) | 'fwd' (E1: the
   grouped reverse pass rebuilds its per-chunk forward tape as ONE scanned
   program instead of one jitted fwd_layer program per layer; every
-  pullback keeps its legacy per-layer program).  'bwd' and 'full' are the
-  reserved E2/E3 rungs of the ladder (reverse scan, then carry-absorbed
-  accumulation) and fail closed until those segments land.
+  pullback keeps its legacy per-layer program) | 'bwd' (E2', includes
+  fwd: the rank-parallel per-layer pullbacks additionally collapse into
+  ceil(L / _P71_BWD_BLOCK_LAYERS) UNROLLED multi-layer block programs per
+  chunk — plain Python loops traced into straight-line graphs, no
+  lax.scan and no lax.fori_loop anywhere in the block bodies; requires
+  CANON_P59_RANK_PARALLEL_BACKWARD=1 and TP1).  'full' is the reserved
+  E3 rung of the ladder (carry-absorbed accumulation) and fails closed
+  until that segment lands.
   """
   value = os.environ.get("CANON_P71_SCAN", "")
   if value in ("", "0", "off"):
     return ""
-  if value == "fwd":
-    return "fwd"
-  if value in ("bwd", "full"):
+  if value in ("fwd", "bwd"):
+    return value
+  if value == "full":
     raise FunctionalMappingError(
-        f"CANON_P71_SCAN={value!r} is reserved for the unimplemented "
-        "E2/E3 scan segments; only off/fwd exist in E1"
+        "CANON_P71_SCAN='full' is reserved for the unimplemented E3 "
+        "segment; only off/fwd/bwd exist in E2'"
     )
   raise FunctionalMappingError(
-      "CANON_P71_SCAN must be unset/0/off/fwd (bwd/full reserved), "
+      "CANON_P71_SCAN must be unset/0/off/fwd/bwd (full reserved), "
       f"got {value!r}"
+  )
+
+
+# P71-E2' unrolled-block size for the grouped rank-parallel backward.
+#
+# Under CANON_P71_SCAN=bwd the per-layer backward programs of one chunk
+# are concatenated into ceil(layer_count / _P71_BWD_BLOCK_LAYERS)
+# straight-line block programs (a 28-layer stack at B=7 gives exactly 4).
+# The preregistered fallback ladder is 7 -> 4 -> 2 (shrinking the block
+# on a memory or numerics red; B=1 degenerates to the per-layer path
+# itself), so the retreat is continuous rather than a cliff.  Any layer
+# count is legal: consecutive spans of B layers with one smaller
+# remainder span at the top of the stack (divide-or-remainder, never a
+# padded or wrapped block).  Module-level on purpose so the block-size
+# ladder is one documented constant, not a new runtime flag.
+_P71_BWD_BLOCK_LAYERS = 7
+
+
+def _p71_bwd_block_spans(layer_count):
+  """Returns the consecutive [start, stop) layer spans of the E2' blocks.
+
+  Reads _P71_BWD_BLOCK_LAYERS at call time (not at import) so the
+  documented fallback ladder is exercisable without reloading the
+  module.
+  """
+  block = int(_P71_BWD_BLOCK_LAYERS)
+  if block < 1:
+    raise FunctionalMappingError(
+        f"_P71_BWD_BLOCK_LAYERS must be >= 1, got {block}"
+    )
+  layer_count = int(layer_count)
+  if layer_count < 1:
+    raise FunctionalMappingError(
+        f"P71 block partition requires >= 1 layer, got {layer_count}"
+    )
+  return tuple(
+      (start, min(start + block, layer_count))
+      for start in range(0, layer_count, block)
   )
 
 
@@ -609,6 +652,59 @@ def _rank_local_leading_specs(
         axis_name
         if not first_axes
         else tuple(dict.fromkeys((axis_name, *first_axes)))
+    )
+    return jax.sharding.PartitionSpec(*retained)
+
+  return jax.tree.map(spec, tree)
+
+
+def _p71_stacked_rank_local_specs(
+    tree,
+    axis_name: str,
+    axis_size: int,
+    label: str,
+    manual_axes: frozenset[str] | None = None,
+):
+  """Partitions per-rank rows on axis 1 of layer-stacked tape operands.
+
+  The P71-E2' stacked-tape operands carry the layer axis at axis 0 and
+  the semantic per-rank rows at axis 1, so the data partition moves to
+  axis 1 while the layer axis must stay unpartitioned by data
+  (`_rank_local_leading_specs` hardwires axis 0 and is wrong for this
+  layout).  Retained manual TP axes keep their original positions.
+  """
+  axis_size = int(axis_size)
+
+  def entry_names(entry):
+    if entry is None:
+      return ()
+    return (entry,) if isinstance(entry, str) else tuple(entry)
+
+  def spec(value):
+    if getattr(value, "ndim", 0) < 2:
+      raise FunctionalMappingError(
+          f"{label} requires a layer axis plus rank-local rows: "
+          f"shape={getattr(value, 'shape', None)}"
+      )
+    if int(value.shape[1]) % axis_size:
+      raise FunctionalMappingError(
+          f"{label} rank-local rows are not divisible by {axis_name}: "
+          f"shape={value.shape} size={axis_size}"
+      )
+    retained = list(
+        _manual_axis_partition_spec(value, axis_name, manual_axes)
+    )
+    retained.extend(None for _ in range(value.ndim - len(retained)))
+    if axis_name in entry_names(retained[0]):
+      raise FunctionalMappingError(
+          f"{label} layer axis cannot carry the data partition: "
+          f"shape={value.shape}"
+      )
+    rows_axes = entry_names(retained[1])
+    retained[1] = (
+        axis_name
+        if not rows_axes
+        else tuple(dict.fromkeys((axis_name, *rows_axes)))
     )
     return jax.sharding.PartitionSpec(*retained)
 
@@ -2937,6 +3033,8 @@ class _P28SegmentedEngineForward:
     self._layer_scan_stack = None
     self._p71_fwd_scan_fn = None
     self._p71_fwd_scan_signature = None
+    self._p71_bwd_block_fns = {}
+    self._p71_bwd_block_signatures = {}
     self._local_layer_vjp_fns = tuple(local_layer_vjp_fns)
     self._local_layer_pullback_fns = tuple(local_layer_pullback_fns)
     self._local_layer_pullback_vma_fns = tuple(
@@ -3850,8 +3948,30 @@ class _P28SegmentedEngineForward:
       rank_local_arg_indices,
       module_name,
       scope_name,
+      stacked_rank_local_arg_indices=frozenset(),
   ):
-    """Maps one pullback manually over DP while non-unit TP stays automatic."""
+    """Maps one pullback manually over DP while non-unit TP stays automatic.
+
+    ``stacked_rank_local_arg_indices`` (P71-E2', default empty so every
+    existing per-layer map is byte-identical) marks rank-local args whose
+    leading axis is the layer axis of the E1 stacked tape: their
+    rank-local rows sit at axis 1 and take the
+    `_p71_stacked_rank_local_specs` partition instead of the leading-axis
+    one.  Everything else — mesh selection, manual axes, the check-vma
+    pcast wrapper, and the localized-engine invoke context — is shared
+    unchanged with the per-layer maps.
+    """
+    stacked_rank_local_arg_indices = frozenset(
+        stacked_rank_local_arg_indices
+    )
+    if not stacked_rank_local_arg_indices <= frozenset(
+        rank_local_arg_indices
+    ):
+      raise FunctionalMappingError(
+          f"{module_name} stacked rank-local args must be rank-local: "
+          f"{sorted(stacked_rank_local_arg_indices)} vs "
+          f"{sorted(rank_local_arg_indices)}"
+      )
     trainer_mesh, _ = _p59_replicated_data_mesh(
         args[0], module_name
     )
@@ -3951,7 +4071,15 @@ class _P28SegmentedEngineForward:
         mapped_local_fn,
         mesh=mesh,
         in_specs=tuple(
-            _rank_local_leading_specs(
+            _p71_stacked_rank_local_specs(
+                value,
+                data_axis,
+                int(mesh.shape[data_axis]),
+                module_name,
+                manual_axes,
+            )
+            if index in stacked_rank_local_arg_indices
+            else _rank_local_leading_specs(
                 value,
                 data_axis,
                 int(mesh.shape[data_axis]),
@@ -4372,6 +4500,239 @@ class _P28SegmentedEngineForward:
         dnext_cache,
         dnext_hidden,
     )
+
+  def _p71_bwd_block_pullback_fn(
+      self, start_layer, stop_layer, block_index, operands, *, stacked_tape
+  ):
+    """Returns the lazily built E2' unrolled block pullback program.
+
+    The block body is a plain Python loop over layers [start_layer,
+    stop_layer) calling THE SAME per-layer pullback function objects the
+    per-layer maps trace (`_local_layer_pullback_fns`, or the raw
+    `bwd_layer_block` closures under CANON_P66_P59_CHECK_VMA=1 — the
+    exact selection `_p59_block_pullback_fn` makes), from the top layer
+    down, with each layer's dcache/dhidden feeding the next in-graph.
+    Tracing unrolls the loop into ONE straight-line program: no lax.scan
+    and no lax.fori_loop exist anywhere in the body, so the scan loop's
+    reduction-re-association entry point (the P71-E2 NUMERICAL_REJECT
+    culprit) does not exist — the graph is the per-layer programs'
+    graphs concatenated, operand for operand, op for op, dtype for
+    dtype.
+
+    Tape sources, mirroring what the per-layer path supports today:
+    ``stacked_tape=True`` takes the FULL E1 stacked (cache, hidden) tape
+    and slices this block's layers with static `jax.lax.index_in_dim`
+    INSIDE the program (`bwd_layer_block_tape`'s pattern — the slice is
+    exact, and no standalone unstack dispatch exists);
+    ``stacked_tape=False`` takes this block's per-layer (cache, hidden)
+    operands directly (the P71-fwd-off source).
+
+    The map is built by `_p59_parallel_map` itself, so mesh selection,
+    manual axes, the check-vma pcast wrapper
+    (`rank_local_arg_indices=(1, 2, 4, 5)` is identical to the per-layer
+    maps'), and the localized-engine invoke context are the very same
+    code paths; only the layer-stacked tape operands take the axis-1
+    data partition.  TP1 only: a non-unit model axis fails closed (the
+    multi-layer body around nested engine shard_maps is unproven, the
+    same refusal the sealed E2 chose).  Outputs are per-layer objects —
+    a tuple of staged layer gradients and a tuple of incoming cache
+    cotangents in layer order plus the block-bottom dhidden — so the
+    caller's Python collection and everything downstream (P70.1
+    accumulate, P70.1 assembly, the per-layer cache-cotangent contract)
+    are untouched.  Built once per (span, tape source) and cached behind
+    a structure/shape/dtype signature guard (the `_p59_report_adjoint_fn`
+    lazy-build pattern) under XProf module name
+    zt_tr_dp_parallel_bwd_block_NN.
+    """
+    key = (int(start_layer), int(stop_layer), bool(stacked_tape))
+    signature = (
+        jax.tree_util.tree_structure(operands),
+        tuple(
+            (tuple(leaf.shape), str(leaf.dtype))
+            for leaf in jax.tree_util.tree_leaves(operands)
+        ),
+    )
+    cached = self._p71_bwd_block_fns.get(key)
+    if cached is not None:
+      if self._p71_bwd_block_signatures[key] != signature:
+        raise FunctionalMappingError(
+            "P71 bwd-block operand signature changed after the block "
+            f"program was built: layers [{key[0]}, {key[1]})"
+        )
+      return cached
+    probe_mesh, _ = _p59_replicated_data_mesh(
+        operands[0], "P71 bwd block"
+    )
+    _, probe_model_axis = _p59_mesh_roles(probe_mesh, "P71 bwd block")
+    if int(probe_mesh.shape[probe_model_axis]) > 1:
+      raise FunctionalMappingError(
+          "P71 bwd block supports TP1 only: a multi-layer body around "
+          "nested engine shard_maps is unproven "
+          f"({probe_model_axis}={int(probe_mesh.shape[probe_model_axis])})"
+      )
+    span = int(stop_layer) - int(start_layer)
+    pullback_source = (
+        getattr(
+            self,
+            "_local_layer_pullback_vma_fns",
+            self._local_layer_pullback_fns,
+        )
+        if os.environ.get("CANON_P66_P59_CHECK_VMA", "0") == "1"
+        else self._local_layer_pullback_fns
+    )
+    pullback_fns = tuple(
+        pullback_source[index]
+        for index in range(int(start_layer), int(stop_layer))
+    )
+    stage_rank_gradient = self._p59_stage_rank_gradient
+    start = int(start_layer)
+    use_stacked_tape = bool(stacked_tape)
+
+    def local_block_pullback(
+        block_leaves,
+        cache_tape,
+        hidden_tape,
+        metadata,
+        block_dcaches,
+        dhidden,
+    ):
+      staged = [None] * span
+      dcache_ins = [None] * span
+      for position in reversed(range(span)):
+        global_index = start + position
+        with jax.named_scope(f"p71_bwd_layer_{global_index:02d}"):
+          if use_stacked_tape:
+            cache_in = jax.tree.map(
+                lambda x, _i=global_index: jax.lax.index_in_dim(
+                    x, _i, 0, keepdims=False
+                ),
+                cache_tape,
+            )
+            hidden_in = jax.lax.index_in_dim(
+                hidden_tape, global_index, 0, keepdims=False
+            )
+          else:
+            cache_in = cache_tape[position]
+            hidden_in = hidden_tape[position]
+          gradients, dcache, dhidden = pullback_fns[position](
+              block_leaves[position],
+              cache_in,
+              hidden_in,
+              metadata,
+              block_dcaches[position],
+              dhidden,
+          )
+          staged[position] = stage_rank_gradient(gradients)
+          dcache_ins[position] = dcache
+      return tuple(staged), tuple(dcache_ins), dhidden
+
+    mapped = self._p59_parallel_map(
+        local_block_pullback,
+        operands,
+        lambda data_axis, axis_size, aligned, manual_axes: (
+            _rank_staged_specs(aligned[0], data_axis, manual_axes),
+            _rank_local_leading_specs(
+                aligned[4], data_axis, axis_size,
+                "P71 block cache output", manual_axes,
+            ),
+            _rank_local_leading_specs(
+                aligned[5], data_axis, axis_size,
+                "P71 block hidden output", manual_axes,
+            ),
+        ),
+        rank_local_arg_indices=(1, 2, 4, 5),
+        stacked_rank_local_arg_indices=(
+            (1, 2) if use_stacked_tape else frozenset()
+        ),
+        module_name=f"zt_tr_dp_parallel_bwd_block_{int(block_index):02d}",
+        scope_name=(
+            f"zt/tr/dp_parallel/layers/bwd_block_{int(block_index):02d}"
+        ),
+    )
+    self._p71_bwd_block_signatures[key] = signature
+    self._p71_bwd_block_fns[key] = mapped
+    return mapped
+
+  def run_bwd_block_pullback_rank_parallel_prepared(
+      self,
+      prepared,
+      start_layer,
+      stop_layer,
+      cache_tape,
+      hidden_tape,
+      attention_metadata,
+      block_dcaches,
+      dnext_hidden,
+      *,
+      stacked_tape=True,
+  ):
+    """E2' dispatch of one unrolled multi-layer block from the P70.3 pack.
+
+    The span must be one of the current `_p71_bwd_block_spans` partition
+    members, so caller and builder always agree on the block layout.
+    Leaf operands come from the prepared per-layer pack exactly as the
+    per-layer dispatch fetches them; with ``stacked_tape`` the
+    cache/hidden tape operands are the FULL E1 stacks (sliced statically
+    inside the program), otherwise they are this block's per-layer
+    operand tuples in layer order.  ``block_dcaches`` is this block's
+    layers' incoming cache cotangents in layer order.  Returns
+    (staged layer gradients, incoming cache cotangents, dhidden below
+    the block) with the two tuples in layer order — the same per-layer
+    objects the per-layer loop produces one at a time.
+    """
+    _anatomy_t0 = time.perf_counter()
+    start_layer = int(start_layer)
+    stop_layer = int(stop_layer)
+    layer_count = len(self._local_layer_pullback_fns)
+    spans = _p71_bwd_block_spans(layer_count)
+    if (start_layer, stop_layer) not in spans:
+      raise FunctionalMappingError(
+          f"P71 bwd block span [{start_layer}, {stop_layer}) is not a "
+          f"member of the current block partition {spans}"
+      )
+    if len(prepared) != layer_count:
+      raise FunctionalMappingError(
+          "P59 prepared pullback group has wrong layer count: "
+          f"{len(prepared)} != {layer_count}"
+      )
+    span = stop_layer - start_layer
+    block_dcaches = tuple(block_dcaches)
+    if len(block_dcaches) != span:
+      raise FunctionalMappingError(
+          f"P71 bwd block expects {span} incoming cache cotangents, "
+          f"got {len(block_dcaches)}"
+      )
+    if not stacked_tape:
+      cache_tape = tuple(cache_tape)
+      hidden_tape = tuple(hidden_tape)
+      if len(cache_tape) != span or len(hidden_tape) != span:
+        raise FunctionalMappingError(
+            f"P71 bwd block expects {span} per-layer tape entries, got "
+            f"{len(cache_tape)}/{len(hidden_tape)}"
+        )
+    block_leaves = tuple(prepared[start_layer:stop_layer])
+    operands = (
+        block_leaves,
+        cache_tape,
+        hidden_tape,
+        attention_metadata,
+        block_dcaches,
+        dnext_hidden,
+    )
+    mapped_fn = self._p71_bwd_block_pullback_fn(
+        start_layer,
+        stop_layer,
+        spans.index((start_layer, stop_layer)),
+        operands,
+        stacked_tape=bool(stacked_tape),
+    )
+    _anatomy_t1 = time.perf_counter()
+    result = mapped_fn(*operands)
+    _anatomy_t2 = time.perf_counter()
+    _ISSUE_ANATOMY["prep"] += _anatomy_t1 - _anatomy_t0
+    _ISSUE_ANATOMY["call"] += _anatomy_t2 - _anatomy_t1
+    _ISSUE_ANATOMY["n"] += 1
+    return result
 
   def assemble_full_state_gradient(
       self, *, embed, layers, norm, head, rank_axis_size=None
@@ -7513,18 +7874,35 @@ class Qwen3EngineForwardAdapter:
     # keeps its mapped per-layer pullbacks on per-layer operands (the
     # hidden tape is unstacked by one jitted program; the cache tape
     # entries are the replay's own per-layer objects, never restacked).
-    # Diagnostic arms stay pinned to the certified per-layer build, and
-    # the vetoed P28 layer scan must stay off so exactly one scan owner
-    # exists.
-    p71_scan_fwd = _p71_scan_mode() == "fwd"
+    # P71-E2': 'bwd' (which includes 'fwd') additionally concatenates
+    # the rank-parallel per-layer pullbacks into ceil(L/B) UNROLLED
+    # multi-layer block programs per chunk (zt_tr_dp_parallel_bwd_block
+    # family, B = _P71_BWD_BLOCK_LAYERS) — plain Python loops traced
+    # into straight-line graphs, no lax.scan anywhere — consuming the
+    # stacked tape directly with static in-program slices, so neither
+    # the hidden unstack nor the per-layer dispatches exist; the
+    # per-layer staged gradients and cache cotangents leave each block
+    # as the same per-layer objects the per-layer loop collects, and
+    # everything downstream of the loop is untouched.  Diagnostic arms
+    # stay pinned to the certified per-layer build, and the vetoed P28
+    # layer scan must stay off so exactly one scan owner exists.
+    p71_mode = _p71_scan_mode()
+    p71_scan_fwd = p71_mode in ("fwd", "bwd")
+    p71_block_bwd = p71_mode == "bwd"
     if p71_scan_fwd and p66_arm:
       raise FunctionalMappingError(
-          "CANON_P71_SCAN=fwd cannot combine with CANON_P66_BACKWARD_ARM "
-          "diagnostics"
+          f"CANON_P71_SCAN={p71_mode} cannot combine with "
+          "CANON_P66_BACKWARD_ARM diagnostics"
       )
     if p71_scan_fwd and segmented.layer_scan_mode():
       raise FunctionalMappingError(
-          "CANON_P71_SCAN=fwd requires CANON_P28_LAYER_SCAN unset"
+          f"CANON_P71_SCAN={p71_mode} requires CANON_P28_LAYER_SCAN unset"
+      )
+    if p71_block_bwd and not rank_parallel:
+      raise FunctionalMappingError(
+          "CANON_P71_SCAN=bwd requires the P59 rank-parallel backward "
+          "(CANON_P59_RANK_PARALLEL_BACKWARD=1); the serial branch keeps "
+          "its per-layer pullback programs"
       )
     if replay is None:
       replay = self._p32_forward_group(
@@ -7630,7 +8008,7 @@ class Qwen3EngineForwardAdapter:
               )
           )
           counts["layer_forward"] += len(caches)
-          if rank_parallel:
+          if rank_parallel and not p71_block_bwd:
             hidden_ins = segmented.unstack_hidden_ins(
                 engine_leaves, stacked_hidden_ins
             )
@@ -7745,7 +8123,44 @@ class Qwen3EngineForwardAdapter:
           )
         previous_cache_carry = [None] * tape_depth
         chunk_layer_grads = [None] * tape_depth
-        for layer_index in reversed(range(tape_depth)):
+        if p71_block_bwd:
+          # E2': ceil(L/B) unrolled block dispatches replace the L
+          # per-layer dispatches below.  Blocks run top-down (the same
+          # order reversed(range(tape_depth)) walks), dcache/dhidden
+          # chain through each block in-graph and pass between blocks
+          # exactly where they passed between per-layer dispatches, and
+          # each block returns the same per-layer staged objects this
+          # loop's collection expects — so the accumulate, the P70.1
+          # assembly, and the cache-cotangent contract downstream are
+          # byte-identical.  The per-layer loop below is kept
+          # byte-identical for the legacy branches and runs zero
+          # iterations here.
+          for block_start, block_stop in reversed(
+              _p71_bwd_block_spans(tape_depth)
+          ):
+            block_staged, block_dcache_ins, dhidden = (
+                segmented.run_bwd_block_pullback_rank_parallel_prepared(
+                    pullback_prepared,
+                    block_start,
+                    block_stop,
+                    stacked_cache_ins,
+                    stacked_hidden_ins,
+                    metadata,
+                    dcache_carry[block_start:block_stop],
+                    dhidden,
+                )
+            )
+            for position in range(block_stop - block_start):
+              chunk_layer_grads[block_start + position] = block_staged[
+                  position
+              ]
+              previous_cache_carry[block_start + position] = (
+                  block_dcache_ins[position]
+              )
+            counts["layer_pullback"] += block_stop - block_start
+        for layer_index in reversed(
+            range(0 if p71_block_bwd else tape_depth)
+        ):
           if layer_tape is not None:
             cache_in, hidden_in = layer_tape[layer_index]
           incoming_dcache = dcache_carry[layer_index]

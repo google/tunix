@@ -261,12 +261,18 @@ def test_flag_ladder_off_synonyms_fwd_and_reserved_fatal():
       os.environ, {"CANON_P71_SCAN": "fwd"}, clear=False
   ):
     assert parse() == "fwd"
-  for reserved in ("bwd", "full"):
+  # E2-prime landed: bwd is a valid ladder value (unrolled blocks);
+  # full remains reserved.
+  with mock.patch.dict(
+      os.environ, {"CANON_P71_SCAN": "bwd"}, clear=False
+  ):
+    assert parse() == "bwd"
+  for reserved in ("full",):
     with mock.patch.dict(
         os.environ, {"CANON_P71_SCAN": reserved}, clear=False
     ):
       with pytest.raises(
-          FunctionalMappingError, match="reserved for the unimplemented"
+          FunctionalMappingError, match="reserved"
       ):
         parse()
   with mock.patch.dict(
