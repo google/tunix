@@ -1081,7 +1081,7 @@ if [ "${CANON_PROFILE_FILE:-}" = \
   p57_expected_eval_enabled=0
   case "${CANON_P57_WORKLOAD_CANDIDATE:-}:${CANON_P57_DATA_SPLIT:-}:${CANON_P57_EXPECTED_UPDATES:-}" in
     ::300|m15:main:300)
-      p57_expected_eval_enabled=1
+      p57_expected_eval_enabled="${CANON_P33_ENABLE_EVAL:-1}"
       p57_expected_checkpoint_interval=300
       ;;
   esac
@@ -1284,12 +1284,16 @@ if [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "1" ] && \
     frozenlake-dp8-tp8:full:0:cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env)
       case "${CANON_P57_RUN_KIND:-}:${CANON_P57_TIM_ARM:-}" in
         train:zero)
+          _p57_zero_eval_enabled="${CANON_P33_ENABLE_EVAL:-1}"
+          _p57_zero_eval_disabled=$((1 - _p57_zero_eval_enabled))
           [ "${CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY:-0}" = "0" ] && \
-          [ "${CANON_P33_ENABLE_EVAL:-0}" = "1" ] && \
-          [ "${CANON_P33_DISABLE_EVAL:-}" = "0" ] || {
+          [ "${CANON_P33_ENABLE_EVAL:-0}" = "$_p57_zero_eval_enabled" ] && \
+          [ "${CANON_P33_DISABLE_EVAL:-}" = "$_p57_zero_eval_disabled" ] || {
             echo "[env] P57 zero arm requires strict full training with rollout-only evaluation" >&2
             fail=1
           }
+          unset _p57_zero_eval_enabled
+          unset _p57_zero_eval_disabled
           echo "[env] P57 zero-TIM fixed lm-head training enabled"
           ;;
         eval:zero)
