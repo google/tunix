@@ -196,12 +196,6 @@ def _create_vllm_worker(args, tokenizer):
   from tunix.experimental.rollout import (  # pylint: disable=g-import-not-at-top
       inprocess_vllm_sampler_adapter,
   )
-  from tunix.experimental.weight_sync import (  # pylint: disable=g-import-not-at-top
-      raiden_weight_sync_delegate,
-  )
-  from tunix.experimental.weight_sync import (  # pylint: disable=g-import-not-at-top
-      weight_sync,
-  )
   from tunix.experimental.worker import (  # pylint: disable=g-import-not-at-top
       rollout_worker,
   )
@@ -249,16 +243,10 @@ def _create_vllm_worker(args, tokenizer):
           "max_model_len": max_model_len,
       },
   )
-  raiden_delegate = (
-      raiden_weight_sync_delegate.RaidenWeightSyncDelegate()
-      if args.weight_sync_mode == weight_sync.WeightSyncMode.RAIDEN
-      else None
-  )
   sampler_adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
       server_id=args.worker_id,
       tokenizer=tokenizer,
       config=vllm_config,
-      raiden_sync_delegate=raiden_delegate,
   )
   rollout_tokenizer = tokenizer_adapter_lib.TokenizerAdapter(tokenizer)
   chat_parser = _chat_parser_for(args.model_id or args.model_name, tokenizer)
