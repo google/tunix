@@ -1,0 +1,21 @@
+{
+  "object_counts": {
+    "off": 1,
+    "on": 1
+  },
+  "objects": {
+    "off": [
+      "PREFLIGHT.json"
+    ],
+    "on": [
+      "PREFLIGHT.json"
+    ]
+  },
+  "payloads_downloaded": false,
+  "receipt_sha256": "cd6f7fe836cd190eeb49473bcaeaf5180e85aa27975b983f701acfadf5156ead",
+  "receipt_source_commit": "3f159250917fa9ee6062fbe7554f67644fcffec9",
+  "remote_state_mutated": false,
+  "runtime_source_commit": "3f159250c4781b3faafde238f768457a0478446b",
+  "schema": "m15-apc-attempt9-full-object-inventory-v1",
+  "source_identity_matches": false
+}

@@ -1,0 +1,4 @@
+M15 Attempt-9 full object-name inventory
+payloads_downloaded=0
+remote_state_mutated=0
+source_identity_matches=0

@@ -562,3 +562,12 @@
   incrementally persist bounded shards, classify from persisted input, and
   write terminal markers manifest-last from the surviving worker. A new
   one-round DP8xTP8 pair remains separately approval-gated.
+
+## 2026-08-27T08:15:00Z — Attempt-9 full GCS object inventory completed; declared irrecoverable
+
+- Executed read-only recursive GCS object name inventory (`gcloud storage ls --recursive`) across both Attempt-9 roots (`gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-v1-apc-m15-off-d15-3f159250/attempt-0` and `...-on-...`).
+- Output sealed under `evidence/v1_apc_m15_attempt9_gcs_full_inventory_20260827/` with `OBJECT_INVENTORY.json`, `PACKAGING.txt`, and `SHA256SUMS` (2/2 OK).
+- Result: exactly `{"off": 1, "on": 1}` with only `PREFLIGHT.json` in each root. No surviving tensor shards, raw NPZs, or classifiers exist on GCS.
+- Interpretation: Attempt 9 is confirmed irrecoverable from registered GCS roots.
+- Next: implement the 4 durability repairs (bypass 2GB legacy incident ledger, stream/incremental shard persistence, classifier from persisted shards, runtime source verification) before requesting user approval for fresh Attempt 12 (`d18`).
+
