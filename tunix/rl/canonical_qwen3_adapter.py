@@ -227,6 +227,32 @@ def _p66_tp4_arm() -> str:
   ) else ""
 
 
+def _p71_scan_mode() -> str:
+  """Returns the CANON_P71_SCAN mode for the grouped reverse pass.
+
+  '' (off; absent, empty, '0' and 'off' are all off) | 'fwd' (E1: the
+  grouped reverse pass rebuilds its per-chunk forward tape as ONE scanned
+  program instead of one jitted fwd_layer program per layer; every
+  pullback keeps its legacy per-layer program).  'bwd' and 'full' are the
+  reserved E2/E3 rungs of the ladder (reverse scan, then carry-absorbed
+  accumulation) and fail closed until those segments land.
+  """
+  value = os.environ.get("CANON_P71_SCAN", "")
+  if value in ("", "0", "off"):
+    return ""
+  if value == "fwd":
+    return "fwd"
+  if value in ("bwd", "full"):
+    raise FunctionalMappingError(
+        f"CANON_P71_SCAN={value!r} is reserved for the unimplemented "
+        "E2/E3 scan segments; only off/fwd exist in E1"
+    )
+  raise FunctionalMappingError(
+      "CANON_P71_SCAN must be unset/0/off/fwd (bwd/full reserved), "
+      f"got {value!r}"
+  )
+
+
 def _p66_emit_layerwise_profile(segmented, engine_gradients, *, arm: str):
   """Emits one full-depth max-abs fingerprint for a P66 group-0 VJP."""
   leaves = tuple(engine_gradients)
@@ -2909,6 +2935,8 @@ class _P28SegmentedEngineForward:
     self._layer_unstack_fn = None
     self._layer_acc_fn = None
     self._layer_scan_stack = None
+    self._p71_fwd_scan_fn = None
+    self._p71_fwd_scan_signature = None
     self._local_layer_vjp_fns = tuple(local_layer_vjp_fns)
     self._local_layer_pullback_fns = tuple(local_layer_pullback_fns)
     self._local_layer_pullback_vma_fns = tuple(
@@ -3436,6 +3464,74 @@ class _P28SegmentedEngineForward:
     """Adds one chunk's per-layer gradients in a single elementwise call."""
     self._ensure_layer_scan(engine_leaves)
     return self._layer_acc_fn(layer_grads, chunk_grads)
+
+  def run_layers_fwd_tape_scan(self, engine_leaves, caches, hidden, metadata):
+    """P71-E1: rebuilds one chunk's layer tape as one scanned program.
+
+    The scan body is fwd_layer's exact composition (unflatten ->
+    nnx.merge -> layer(cache, hidden, metadata)) with layer 0's
+    graphdef/treedef; the uniform-stack precondition and the stacked
+    parameter layout are the P50 machinery's (_ensure_layer_scan), so no
+    second parameter stack is materialized beyond the one that machinery
+    already caches.  ys carries (hidden_in, new_cache) per layer: the
+    hidden tape is the scan output, the cache tape is the pre-stacked
+    input stack itself, and new_caches are returned (then dropped on the
+    host) so the scanned program keeps the per-layer loop's
+    materialization obligations.  The compiled callable is built once and
+    cached behind a structure/shape/dtype signature guard (the
+    _p59_report_adjoint_fn lazy-build pattern) under XProf module name
+    zt_tr_fwd_scan; jax.named_scope keeps an addressable per-stage HLO
+    hierarchy inside the single program (P60-2G coordination: one
+    zt_tr_fwd_scan module replaces the per-layer zt_tr_fwd_layer
+    modules in any census of this pass).
+    """
+    stacked_leaves = self._ensure_layer_scan(engine_leaves)
+    stacked_cache_ins = jax.tree.map(lambda *xs: jnp.stack(xs), *caches)
+    operands = (stacked_leaves, stacked_cache_ins, hidden, metadata)
+    signature = (
+        jax.tree_util.tree_structure(operands),
+        tuple(
+            (tuple(leaf.shape), str(leaf.dtype))
+            for leaf in jax.tree_util.tree_leaves(operands)
+        ),
+    )
+    if self._p71_fwd_scan_fn is None:
+      from flax import nnx  # pylint: disable=g-import-not-at-top
+
+      graphdef0, treedef0 = self._local_layer_defs[0]
+
+      def fwd_scan(stacked_leaves, stacked_caches, hidden, metadata):
+        def body(h, xs):
+          leaves, cache = xs
+          with jax.named_scope("p71_params_merge"):
+            state = jax.tree_util.tree_unflatten(treedef0, tuple(leaves))
+            layer = nnx.merge(graphdef0, state)
+          with jax.named_scope("p71_layer_fwd"):
+            new_cache, new_h = layer(cache, h, metadata)
+          return new_h, (h, new_cache)
+
+        with jax.named_scope("p71_fwd_tape_scan"):
+          hidden_out, (hidden_ins, new_caches) = jax.lax.scan(
+              body, hidden, (list(stacked_leaves), stacked_caches)
+          )
+        return hidden_ins, new_caches, hidden_out
+
+      self._p71_fwd_scan_signature = signature
+      self._p71_fwd_scan_fn = _xprof_jit(
+          fwd_scan,
+          module_name="zt_tr_fwd_scan",
+          scope_name="zt/tr/layers/fwd_scan",
+      )
+    elif self._p71_fwd_scan_signature != signature:
+      raise FunctionalMappingError(
+          "P71 fwd-scan operand signature changed after the scanned "
+          "program was built"
+      )
+    stacked_hidden_ins, new_caches, hidden_out = self._p71_fwd_scan_fn(
+        stacked_leaves, stacked_cache_ins, hidden, metadata
+    )
+    del new_caches
+    return stacked_cache_ins, stacked_hidden_ins, hidden_out
 
   def zero_gradient_pack(self, final_caches):
     """Returns the cached zero accumulators (values are literal zeros)."""
@@ -7408,6 +7504,28 @@ class Qwen3EngineForwardAdapter:
       raise FunctionalMappingError(
           "P59 rank-parallel backward requires more than one DP rank"
       )
+    # P71-E1: 'fwd' rebuilds each chunk's forward tape as ONE scanned
+    # program (zt_tr_fwd_scan) instead of one jitted fwd_layer program
+    # per layer.  Every pullback below keeps its legacy per-layer
+    # program: the serial branch consumes the stacked tape through the
+    # existing static-index-slicing tape pullbacks (bwd_layer_block_tape,
+    # designed for exactly this stack), and the rank-parallel branch
+    # keeps its mapped per-layer pullbacks on per-layer operands (the
+    # hidden tape is unstacked by one jitted program; the cache tape
+    # entries are the replay's own per-layer objects, never restacked).
+    # Diagnostic arms stay pinned to the certified per-layer build, and
+    # the vetoed P28 layer scan must stay off so exactly one scan owner
+    # exists.
+    p71_scan_fwd = _p71_scan_mode() == "fwd"
+    if p71_scan_fwd and p66_arm:
+      raise FunctionalMappingError(
+          "CANON_P71_SCAN=fwd cannot combine with CANON_P66_BACKWARD_ARM "
+          "diagnostics"
+      )
+    if p71_scan_fwd and segmented.layer_scan_mode():
+      raise FunctionalMappingError(
+          "CANON_P71_SCAN=fwd requires CANON_P28_LAYER_SCAN unset"
+      )
     if replay is None:
       replay = self._p32_forward_group(
           segmented, engine_leaves, spec, keep_cache_inputs=True
@@ -7504,17 +7622,35 @@ class Qwen3EngineForwardAdapter:
             input_ids, state_leaves=engine_leaves
         )
         counts["embed_forward"] += 1
-        layer_tape = []
-        for layer_index, cache in enumerate(caches):
-          layer_tape.append((cache, hidden))
-          _, hidden = segmented.run_layer_forward(
-              layer_index,
-              engine_leaves,
-              cache,
-              hidden,
-              metadata,
+        stacked_cache_ins = stacked_hidden_ins = None
+        if p71_scan_fwd:
+          stacked_cache_ins, stacked_hidden_ins, hidden = (
+              segmented.run_layers_fwd_tape_scan(
+                  engine_leaves, caches, hidden, metadata
+              )
           )
-          counts["layer_forward"] += 1
+          counts["layer_forward"] += len(caches)
+          if rank_parallel:
+            hidden_ins = segmented.unstack_hidden_ins(
+                engine_leaves, stacked_hidden_ins
+            )
+            layer_tape = list(zip(caches, hidden_ins))
+          else:
+            layer_tape = None
+          tape_depth = len(caches)
+        else:
+          layer_tape = []
+          for layer_index, cache in enumerate(caches):
+            layer_tape.append((cache, hidden))
+            _, hidden = segmented.run_layer_forward(
+                layer_index,
+                engine_leaves,
+                cache,
+                hidden,
+                metadata,
+            )
+            counts["layer_forward"] += 1
+          tape_depth = len(layer_tape)
         pre_norm = hidden
         normalized = segmented.run_norm_forward(
             pre_norm, state_leaves=engine_leaves
@@ -7595,13 +7731,23 @@ class Qwen3EngineForwardAdapter:
           )
         counts["norm_pullback"] += 1
 
-        segmented.check_pullback_group_boundary(
-            layer_tape, metadata, dcache_carry, dhidden
-        )
-        previous_cache_carry = [None] * len(layer_tape)
-        chunk_layer_grads = [None] * len(layer_tape)
-        for layer_index in reversed(range(len(layer_tape))):
-          cache_in, hidden_in = layer_tape[layer_index]
+        if layer_tape is None:
+          segmented.check_pullback_group_boundary(
+              stacked_cache_ins,
+              stacked_hidden_ins,
+              metadata,
+              dcache_carry,
+              dhidden,
+          )
+        else:
+          segmented.check_pullback_group_boundary(
+              layer_tape, metadata, dcache_carry, dhidden
+          )
+        previous_cache_carry = [None] * tape_depth
+        chunk_layer_grads = [None] * tape_depth
+        for layer_index in reversed(range(tape_depth)):
+          if layer_tape is not None:
+            cache_in, hidden_in = layer_tape[layer_index]
           incoming_dcache = dcache_carry[layer_index]
           incoming_dhidden = dhidden
           if rank_parallel:
@@ -7643,6 +7789,18 @@ class Qwen3EngineForwardAdapter:
                   ),
                   endpoint=f"layer_{layer_index}",
               ))
+          elif layer_tape is None:
+            local_grad, dcache, dhidden = (
+                segmented.run_block_pullback_tape_prepared(
+                    pullback_prepared,
+                    layer_index,
+                    stacked_cache_ins,
+                    stacked_hidden_ins,
+                    metadata,
+                    incoming_dcache,
+                    incoming_dhidden,
+                )
+            )
           else:
             local_grad, dcache, dhidden = (
                 segmented.run_block_pullback_prepared(

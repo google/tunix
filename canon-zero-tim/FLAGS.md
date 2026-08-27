@@ -46,6 +46,7 @@
 | CANON_P28_BATCHED_REPORT(=1/=verify) | report 窗合并+remap jit 化(FL -14.5%) | GSM8K 默认;DP16 待验 | 同上 |
 | CANON_P28_BATCHED_REVERSE(=1/=verify) | P52 反向脚手架合并(-13.3%) | 一宿主认证;DP16 等 grouped 移植 | 同上 |
 | CANON_P28_LAYER_SCAN | =verify 恒等仪器/=verify_rev THIRDPROG 演示 | **=1 否决(净负 -5%)** | 仪器保留;=1 进否决区 |
+| CANON_P71_SCAN | P71 scan-over-layers 阶梯选择器,仅 grouped reverse(`_p32_reverse_group`)消费,enum 解析:缺省/空/`0`/`off` 同义=历史逐层路径(原函数对象直调,程序逐字节不变);`fwd`=E1:每 chunk 的反向 forward tape 由单个 `zt_tr_fwd_scan` scan 程序重建(scan body 复用 fwd_layer 同一组成与 P50 `_ensure_layer_scan` stacked 参数布局,不新增第二份参数栈;scan 体内 `jax.named_scope` 保留 p71_params_merge/p71_layer_fwd/p71_fwd_tape_scan 分段层级供 xplane 寻址),serial 分支 pullback 走既有 `bwd_layer_block_tape` 栈内静态切片程序,rank-parallel 分支保留原 mapped 逐层 pullback(hidden tape 一次 jitted unstack,cache tape 即 replay 自身逐层对象,mapped 程序与操作数值不变);`bwd`/`full`=E2/E3 预留档,fatal;其他值 fatal;与 CANON_P66_BACKWARD_ARM、CANON_P28_LAYER_SCAN 互斥 fail-closed。前向 pass 零接触(scan 全在反向 tape 侧);梯度验收按 `tasks/v1_hp_zero_tim/phases/v1-p71-scan-fusion.md` 预注册两级(一级 bitwise 锚,二级降档五项全绿自动接受制) | off;试验(E1 scratch 草案,host CPU 门已绿,target 未跑);阶梯 off→fwd→bwd→full 逐级包含,回滚按段 | E1/E2/E3 各段两基准硬门+梯度锚(或二级五项)+显存 +5% 红线绿后按段转正;任一段 NUMERICAL_REJECT 封存该段草案并保持 default off |
 | CANON_CONTINUE_DECODE(=K) | 设备内 `lax.while_loop` 连续 decode，摊薄逐 token host 往返；async scheduling 必须关 | off；V1/P58.7 profiles 固定 K=8；M15 target-debug 也保留 K=8 以复刻生产程序，其 replay envelope 从首个 registered continue-decode call 记录 mixed chronology，四个 tensor strata 仍仅由 standard path 产生；一宿主 r20c/r20y KEEP；DeepSWE reader 已接线但 target 未跑 | Phase4 三个 full recipe 与 P58.7 各自 target 绿后按 workload 转正；新 K/尾桶重认证 |
 | CANON_FIXED_AR_GATHER | fixed TP reduction 的三轮 ppermute 传输换成一次 all-gather，本地仍按相同 rank 顺序相加 | off；一宿主 r11 KEEP；P58.7 target 未跑 | DP16/DP8 full strict 绿后按 workload 转正 |
 | CANON_PALLAS_GATHERED_LOGPROBS | Pallas scorer 片上直接产 selected logprob/top1/rank，避免全词表 logprob 物化；Phase4 新增 DP8/DP16 row-sharding 与每-rank M256 padding | off；一宿主 r10 KEEP；DP port IMPLEMENTED/TARGET NOT RUN，含 P58.7 Qwen3-4B | Phase4 三个 full 与 P58.7 target 的 exact gate/XProf 绿后转正；任一形状红回到 materialized scorer |
@@ -431,6 +432,7 @@ CANON_P66_BACKWARD_ARM
 CANON_P66_BACKWARD_CAPTURE_DIR
 CANON_P66_P59_CHECK_VMA
 CANON_P67_P66_VMA_P59_ONLY
+CANON_P71_SCAN
 CANON_V1_HP_FIRST_UPDATE_GATE
 CANON_PALLAS_ALL_PROJ
 CANON_PALLAS_ALL_RMSNORM
@@ -511,4 +513,4 @@ CANON_XPROF_STEPS
 CANON_XPROF_TPU_TRACE_MODE
 ```
 
-Count: 390 settable names (appendix inventory above; exclusions: none).
+Count: 391 settable names (appendix inventory above; exclusions: none).
