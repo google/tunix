@@ -67,6 +67,26 @@ class InprocessVllmSamplerAdapterTest(absltest.TestCase):
   def test_implements_sampler_protocol(self):
     self.assertIsInstance(self.sampler_adapter, base_sampler_lib.Sampler)
 
+  def test_explicit_weight_sync_mode_overrides_config(self):
+    fallback_config = mock.MagicMock()
+    fallback_config.weight_sync_mode = weight_sync.WeightSyncMode.FALLBACK
+    mock_delegate = mock.MagicMock(
+        spec=raiden_weight_sync_delegate.RaidenWeightSyncDelegate
+    )
+
+    adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
+        server_id="vllm_raiden_slice",
+        tokenizer=self.mock_tokenizer,
+        config=fallback_config,
+        raiden_sync_delegate=mock_delegate,
+        weight_sync_mode=weight_sync.WeightSyncMode.RAIDEN,
+    )
+
+    self.assertEqual(
+        adapter.weight_sync_mode, weight_sync.WeightSyncMode.RAIDEN
+    )
+    self.assertTrue(adapter.enable_raiden)
+
   def test_lifecycle_methods(self):
     self.assertTrue(asyncio.run(self.sampler_adapter.start()))
     self.assertTrue(asyncio.run(self.sampler_adapter.pause()))

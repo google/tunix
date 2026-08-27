@@ -317,11 +317,11 @@ def _create_vllm_worker(args, tokenizer):
       additional_config=additional_config,
       engine_kwargs=engine_kwargs,
   )
-  setattr(vllm_config, "weight_sync_mode", args.weight_sync_mode)
   sampler_adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
       server_id=args.worker_id,
       tokenizer=tokenizer,
       config=vllm_config,
+      weight_sync_mode=args.weight_sync_mode,
   )
   rollout_tokenizer = tokenizer_adapter_lib.TokenizerAdapter(tokenizer)
   chat_parser = chat_parser_lib.QwenChatTemplateParser(
