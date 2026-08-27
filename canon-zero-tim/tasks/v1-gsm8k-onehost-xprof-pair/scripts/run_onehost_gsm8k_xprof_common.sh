@@ -30,6 +30,42 @@ case "$run_stage" in
     exit 2
     ;;
 esac
+# V1_GSM8K_XPROF_GEOMETRY selects one of the two registered carrier
+# geometries on the same four chips.  The default keeps the DP4xTP1 carrier
+# byte-identical (no geometry env enters the container, the label is
+# untouched, and every derived value below renders today's literal).  The
+# dp2-tp2 variant re-cuts the identical global work (prompts 8, generations
+# 8, trajectories 64) as data=2 x model=2 so TP collectives are present.
+# Expected mesh-id orders are the topology-aware create_device_mesh results
+# on this host: (4,1) measured [0,2,1,3]; (2,2) derived offline on the
+# pinned image's jax from the unique id->coords mapping consistent with
+# that measurement -- the preflight fails closed with both lists printed if
+# the first real run disagrees.
+geometry="${V1_GSM8K_XPROF_GEOMETRY:-dp4-tp1}"
+case "$geometry" in
+  dp4-tp1)
+    topology=DP4xTP1
+    expected_train_mesh_ids=0,2,1,3
+    zero_model_overlay=qwen1p7b_tp1
+    zero_profile=qwen3-1p7b-dp4-tp1-gsm8k-v1-hp.env
+    serial_mesh_bridge=1
+    ;;
+  dp2-tp2)
+    topology=DP2xTP2
+    expected_train_mesh_ids=0,1,2,3
+    zero_model_overlay=qwen1p7b_tp2
+    zero_profile=qwen3-1p7b-dp2-tp2-gsm8k-v1-hp.env
+    serial_mesh_bridge=0
+    # A dp2 run must never be mistaken for a dp4 run: the geometry is
+    # welded into the immutable label, so the artifact root, container
+    # name, and W&B run name all carry it.
+    label="dp2tp2-${label}"
+    ;;
+  *)
+    echo "[V1.GSM8K.XPROF] unsupported V1_GSM8K_XPROF_GEOMETRY: $geometry" >&2
+    exit 2
+    ;;
+esac
 
 script_dir="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck disable=SC1091
@@ -74,7 +110,7 @@ runtime_files=(
   "$repo/tunix/rl/canonical_qwen3_adapter.py"
   "$repo/tunix/rl/gsm8k_xprof.py"
   "$repo/examples/math_gsm8k/qwen3_grpo_demo.py"
-  "$repo/canon-zero-tim/cluster/profiles/qwen3-1p7b-dp4-tp1-gsm8k-v1-hp.env"
+  "$repo/canon-zero-tim/cluster/profiles/$zero_profile"
   "$script_dir/run_onehost_gsm8k_xprof_common.sh"
   "$script_dir/run_onehost_gsm8k_xprof_inner.sh"
   "$script_dir/finalize_gsm8k_xprof_evidence.sh"
@@ -151,7 +187,7 @@ fi
 mkdir -p "$state/wandb" "$state/logs" "$xprof_dir" "$perf_dir"
 {
   echo "[V1.GSM8K.XPROF] source=$source_sha diff_sha256=$source_diff_sha256 runtime_manifest_sha256=$runtime_manifest_sha256 image=$image image_id=$image_id model_snapshot=$hf_snapshot_sha"
-  echo "[V1.GSM8K.XPROF] arm=$arm label=$label hostname=$expected_hostname topology=DP4xTP1"
+  echo "[V1.GSM8K.XPROF] arm=$arm label=$label hostname=$expected_hostname topology=$topology"
   echo "[V1.GSM8K.XPROF] work=prompts8_generations8_response256_concurrency1 stage=$run_stage steps=$max_steps capture=update:2->3"
   echo "[V1.GSM8K.XPROF] tracers=host:1,python:0,tpu:TRACE_ONLY_XLA labels=1 xprof_budget=soft:1200000000,hard:1500000000,basis:logical_regular_file_bytes"
   echo "[V1.GSM8K.XPROF] treatment=$([ "$arm" = native ] && echo stock-vanilla || echo strict-zero-hp-v1)"
@@ -195,7 +231,7 @@ docker_args=(
   -e CANON_DP_DISTINCT_SCHEDULE="${CANON_DP_DISTINCT_SCHEDULE:-}"
   -e CANON_DP_FINITE_FETCH="${CANON_DP_FINITE_FETCH:-}"
   -e CANON_P71_SCAN="${CANON_P71_SCAN:-}"
-  -e CANON_EXPECT_TRAIN_MESH_IDS=0,2,1,3
+  -e CANON_EXPECT_TRAIN_MESH_IDS="$expected_train_mesh_ids"
   -e CANON_XPROF_DIR="$xprof_dir"
   -e CANON_XPROF_SKIP_STEPS=2 -e CANON_XPROF_STEPS=1
   -e CANON_XPROF_PHASE="${CANON_XPROF_PHASE:-update}" -e CANON_XPROF_HOST_TRACER=1
@@ -204,9 +240,15 @@ docker_args=(
   -e CANON_PERF_TRACE_DIR="$perf_dir" -e CANON_PERF_TRACE_EXPORT_STEP=2
   -w "$repo"
 )
+if [ "$geometry" != dp4-tp1 ]; then
+  docker_args+=(
+    -e V1_GSM8K_XPROF_GEOMETRY="$geometry"
+    -e CANON_V1_GSM8K_XPROF_GEOMETRY="$geometry"
+  )
+fi
 
 if [ "$arm" = zero-hp ]; then
-  bash "$pkg/install.sh" "$canon_out" --from-image "$image" --model qwen1p7b_tp1 \
+  bash "$pkg/install.sh" "$canon_out" --from-image "$image" --model "$zero_model_overlay" \
     >>"$driver" 2>&1
   docker_args+=(
     -v "$canon_out":"$canon_out":ro
@@ -222,12 +264,22 @@ if [ "$arm" = zero-hp ]; then
     -e CANON_P32_DP_REDUCTION_ADMITTED=1
     -e CANON_P33_WORKLOAD_LAUNCH_ADMITTED=1
     -e CANON_P33_RUN_STAGE="$run_stage" -e CANON_P33_NO_COMMIT=0
-    -e CANON_P59_KIND=v1 -e CANON_P59_DP4_SERIAL_MESH_BRIDGE=1
+    -e CANON_P59_KIND=v1 -e CANON_P59_DP4_SERIAL_MESH_BRIDGE="$serial_mesh_bridge"
     -e CANON_P59_DP4_TAIL8=0 -e CANON_P59_RANK_PARALLEL_BACKWARD=1
     -e CANON_GSM8K_ALIGNMENT_WARN_ONLY=0
     -e CANON_PRE_ALIGN_REPORT="$pre" -e CANON_ALIGN_REPORT="$align"
     -e CANON_UPDATE_REPORT="$update"
   )
+  # Checked-VMA geometries need the p66 RPA kernel shim: its gated
+  # manual_axis_type annotation is what lets the pallas out_shape trace
+  # under check_vma=True.  The dp4 arm keeps its historical mount set
+  # byte-identical (standing follow-up: dp4 silently runs the stock
+  # kernel, numerically inert at flag-off).
+  if [ "$geometry" != dp4-tp1 ]; then
+    docker_args+=(
+      -v "$canon_out/rpa_kernel_p66.py":"$sp/kernels/ragged_paged_attention/v3/kernel.py":ro
+    )
+  fi
 else
   docker_args+=(
     -e PYTHONPATH="$repo"
@@ -287,23 +339,26 @@ set -e
 if [ "$docker_rc" -eq 0 ]; then
   set +e
   python3 "$script_dir/census_gsm8k_xprof_modules.py" \
-    --arm "$arm" --run-root "$root" --p71-scan "${CANON_P71_SCAN:-}" \
+    --arm "$arm" --run-root "$root" --geometry "$geometry" \
+    --p71-scan "${CANON_P71_SCAN:-}" \
     >"$xprof_census" 2>&1
   xprof_census_rc=$?
   sudo docker run --rm --ipc=host \
     -v "$repo":"$repo":ro -v /mnt/disks/tunix-data:/mnt/disks/tunix-data \
     -w "$repo" "$image" \
     python3 "$script_dir/census_gsm8k_semantic_trace.py" \
-      --arm "$arm" --run-root "$root" \
+      --arm "$arm" --run-root "$root" --geometry "$geometry" \
     >"$semantic_census" 2>&1
   semantic_census_rc=$?
   if [ "$arm" = zero-hp ]; then
     python3 "$script_dir/census_gsm8k_xprof_hierarchy.py" \
       --run-root "$root" --expected-update-step 2 \
+      --geometry "$geometry" \
       >"$hierarchy_census" 2>&1
     hierarchy_census_rc=$?
     python3 "$script_dir/census_gsm8k_xprof_trace.py" \
       --run-root "$root" --expected-update-step 2 \
+      --geometry "$geometry" \
       >"$trace_census" 2>&1
     trace_census_rc=$?
   fi
@@ -318,6 +373,7 @@ classifier_args=(
   --runtime-manifest-sha256 "$runtime_manifest_sha256" \
   --model-snapshot "$hf_snapshot_sha" --image-id "$image_id" \
   --expected-updates "$max_steps" \
+  --geometry "$geometry" \
   --xprof-census-rc "$xprof_census_rc" \
   --semantic-census-rc "$semantic_census_rc" \
   --size-census-rc "$size_census_rc" \

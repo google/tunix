@@ -47,7 +47,7 @@ SIZE_CENSUS = _load(
 GSM8K_XPROF = _load("gsm8k_xprof", ROOT / "tunix/rl/gsm8k_xprof.py")
 
 
-def _common_env(arm: str) -> dict[str, str]:
+def _common_env(arm: str, geometry: str = "dp4-tp1") -> dict[str, str]:
   values = {
       "CANON_V1_GSM8K_XPROF_ARM": arm,
       "CANON_GSM8K_TRAIN": "1",
@@ -65,13 +65,21 @@ def _common_env(arm: str) -> dict[str, str]:
       "CANON_XPROF_DIR": "/tmp/xprof",
       "CANON_PERF_TRACE_DIR": "/tmp/perf",
   }
+  if geometry != "dp4-tp1":
+    # The default geometry stays byte-identical: an unchanged launcher
+    # sends no geometry env at all, so the tests only set it off-default.
+    values["CANON_V1_GSM8K_XPROF_GEOMETRY"] = geometry
+  workload = {
+      "dp4-tp1": "gsm8k-p59-dp4-tp1",
+      "dp2-tp2": "gsm8k-p59-dp2-tp2",
+  }.get(geometry, geometry)
   if arm == "native":
     values["CANON_GSM8K_VANILLA"] = "1"
     values["CANON_P59_RANK_PARALLEL_BACKWARD"] = "0"
     values["CANON_P28_G6_UPDATE"] = "0"
   else:
     values.update({
-        "CANON_P32_WORKLOAD": "gsm8k-p59-dp4-tp1",
+        "CANON_P32_WORKLOAD": workload,
         "CANON_P59_RANK_PARALLEL_BACKWARD": "1",
         "CANON_P28_G6_UPDATE": "1",
         "CANON_GSM8K_ALIGNMENT_WARN_ONLY": "0",
@@ -115,7 +123,11 @@ def _work(arm: str, step: int) -> dict:
   }
 
 
-def _fixture(root: Path, arm: str, updates: int = 3) -> None:
+def _fixture(
+    root: Path, arm: str, updates: int = 3, geometry: str = "dp4-tp1"
+) -> None:
+  shape = ARM_CLASSIFIER._GEOMETRIES[geometry]
+  groups = shape["groups"]
   state = root / "train"
   xprof = state / "xprof/plugins/profile/run"
   perf = state / "perf"
@@ -124,9 +136,10 @@ def _fixture(root: Path, arm: str, updates: int = 3) -> None:
   (xprof / "device.xplane.pb").write_bytes(b"xplane")
   (xprof / "device.trace.json.gz").write_bytes(b"trace")
   (perf / "perfetto_trace_v2_1.pb").write_bytes(b"perfetto")
+  mesh_ids = "[0, 2, 1, 3]" if geometry == "dp4-tp1" else "[0, 1, 2, 3]"
   lines = [
       "[V1.GSM8K.XPROF] RUN_BEGIN arm=" + arm,
-      f"[V1.GSM8K.XPROF] PREFLIGHT_PASS arm={arm} topology=DP4xTP1 mesh_ids=[0, 2, 1, 3] prompts=8 generations=8 trajectories=64 groups=16 capture=update:2->3",
+      f"[V1.GSM8K.XPROF] PREFLIGHT_PASS arm={arm} topology={shape['topology']} mesh_ids={mesh_ids} prompts=8 generations=8 trajectories=64 groups={groups} capture=update:2->3",
       "[P51.XPROF] phase=update started step=2 anchor=update_entry tpu_trace_mode=TRACE_ONLY_XLA",
       "[P51.XPROF] phase=update stopped step=3 anchor=step_completed",
   ]
@@ -144,7 +157,7 @@ def _fixture(root: Path, arm: str, updates: int = 3) -> None:
   else:
     lines.extend(
         f"[CANON_ALIGN] index={index} verdict=PASS"
-        for index in range(ARM_CLASSIFIER._ALIGN_VERDICTS_PER_UPDATE * updates)
+        for index in range((1 + groups) * updates)
     )
   lines.append(f"[V1.GSM8K.XPROF] RUN_END arm={arm} docker_exit=0 elapsed_seconds=10")
   (state / "raw.log").write_text("\n".join(lines) + "\n")
@@ -153,11 +166,12 @@ def _fixture(root: Path, arm: str, updates: int = 3) -> None:
   if arm == "zero-hp":
     xprof_detail += (
         "zt_tr_dp_parallel_bwd_layer_00\n"
-        "optimizer_tail=scaled_step:16,commit:1\n"
+        f"optimizer_tail=scaled_step:{groups},commit:1\n"
     )
     (state / "trace_census.txt").write_text(
         "V1_GSM8K_XPROF_TRACE_CENSUS_GREEN "
-        "train_steps=32..47 reverse_transactions=16 "
+        f"train_steps={2 * groups}..{3 * groups - 1} "
+        f"reverse_transactions={groups} "
         "optimizer_visible=1 optimizer_owned_by_last=1 "
         "same_host_track=1 compiler_events=0\n"
     )
@@ -511,6 +525,98 @@ fi
           {**_common_env("zero-hp"), "CANON_GSM8K_VANILLA": "1"}
       )
 
+  def test_arm_contract_is_a_signed_two_geometry_contract(self):
+    """dp4 binds the dp4 workload, dp2 the dp2 workload; the rest refuses."""
+    # Positive controls: the dp4 default parses exactly as before (no
+    # geometry env at all), and both arms parse under the registered
+    # second geometry.
+    dp4_zero = _common_env("zero-hp")
+    self.assertNotIn("CANON_V1_GSM8K_XPROF_GEOMETRY", dp4_zero)
+    self.assertEqual(GSM8K_XPROF.arm(dp4_zero), "zero-hp")
+    self.assertEqual(
+        GSM8K_XPROF.arm(_common_env("zero-hp", geometry="dp2-tp2")),
+        "zero-hp",
+    )
+    self.assertEqual(
+        GSM8K_XPROF.arm(_common_env("native", geometry="dp2-tp2")),
+        "native",
+    )
+    self.assertEqual(GSM8K_XPROF.geometry({}), "dp4-tp1")
+    self.assertEqual(
+        GSM8K_XPROF.geometry({"CANON_V1_GSM8K_XPROF_GEOMETRY": "dp2-tp2"}),
+        "dp2-tp2",
+    )
+    self.assertEqual(GSM8K_XPROF.geometry_groups({}), 16)
+    self.assertEqual(
+        GSM8K_XPROF.geometry_groups(
+            {"CANON_V1_GSM8K_XPROF_GEOMETRY": "dp2-tp2"}
+        ),
+        32,
+    )
+
+    # Junk geometry refuses for both arms and for the bare accessor.
+    for arm in ("native", "zero-hp"):
+      junk = _common_env(arm)
+      junk["CANON_V1_GSM8K_XPROF_GEOMETRY"] = "dp8-tp8"
+      with self.assertRaisesRegex(ValueError, "CANON_V1_GSM8K_XPROF_GEOMETRY"):
+        GSM8K_XPROF.arm(junk)
+    with self.assertRaisesRegex(ValueError, "CANON_V1_GSM8K_XPROF_GEOMETRY"):
+      GSM8K_XPROF.geometry({"CANON_V1_GSM8K_XPROF_GEOMETRY": "dp1-tp4"})
+
+    # Mismatched geometry/workload pairings refuse in both directions,
+    # and an absent geometry with the dp2 workload refuses (absent means
+    # the dp4 default).
+    dp2_workload_no_geometry = _common_env("zero-hp")
+    dp2_workload_no_geometry["CANON_P32_WORKLOAD"] = "gsm8k-p59-dp2-tp2"
+    with self.assertRaisesRegex(ValueError, "DP4xTP1"):
+      GSM8K_XPROF.arm(dp2_workload_no_geometry)
+    dp2_geometry_dp4_workload = _common_env("zero-hp", geometry="dp2-tp2")
+    dp2_geometry_dp4_workload["CANON_P32_WORKLOAD"] = "gsm8k-p59-dp4-tp1"
+    with self.assertRaisesRegex(ValueError, "DP2xTP2"):
+      GSM8K_XPROF.arm(dp2_geometry_dp4_workload)
+    dp4_geometry_dp2_workload = _common_env("zero-hp")
+    dp4_geometry_dp2_workload["CANON_V1_GSM8K_XPROF_GEOMETRY"] = "dp4-tp1"
+    dp4_geometry_dp2_workload["CANON_P32_WORKLOAD"] = "gsm8k-p59-dp2-tp2"
+    with self.assertRaisesRegex(ValueError, "DP4xTP1"):
+      GSM8K_XPROF.arm(dp4_geometry_dp2_workload)
+
+  def test_microstep_schedule_counts_are_geometry_registered(self):
+    """16 and 32 are the two registered counts; the factory binds them."""
+    for count in (16, 32):
+      schedule = GSM8K_XPROF.ZeroHpTrainMicrostepSchedule(
+          update_step=2, microsteps=count
+      )
+      self.assertEqual(schedule.microsteps, count)
+    for count in (8, 24, 48, 0):
+      with self.assertRaisesRegex(ValueError, "registered per-geometry"):
+        GSM8K_XPROF.ZeroHpTrainMicrostepSchedule(
+            update_step=2, microsteps=count
+        )
+    import unittest.mock as mock
+
+    with mock.patch.dict(
+        os.environ, _common_env("zero-hp"), clear=True
+    ):
+      self.assertEqual(
+          GSM8K_XPROF.zero_hp_train_microsteps(
+              update_step=2, microsteps=16
+          ).microsteps,
+          16,
+      )
+      with self.assertRaisesRegex(RuntimeError, "signed geometry"):
+        GSM8K_XPROF.zero_hp_train_microsteps(update_step=2, microsteps=32)
+    with mock.patch.dict(
+        os.environ, _common_env("zero-hp", geometry="dp2-tp2"), clear=True
+    ):
+      self.assertEqual(
+          GSM8K_XPROF.zero_hp_train_microsteps(
+              update_step=2, microsteps=32
+          ).microsteps,
+          32,
+      )
+      with self.assertRaisesRegex(RuntimeError, "signed geometry"):
+        GSM8K_XPROF.zero_hp_train_microsteps(update_step=2, microsteps=16)
+
   def test_run_stage_selects_the_update_horizon_fail_closed(self):
     """CANON_P33_RUN_STAGE, not a literal, sets the carrier's horizon."""
     common = (SCRIPTS / "run_onehost_gsm8k_xprof_common.sh").read_text()
@@ -785,13 +891,316 @@ fi
           mismatch["mismatched_profiled_work_arrays"], ["completion_ids"]
       )
 
+  def test_arm_classifier_derives_the_geometry_expectations(self):
+    """dp2 runs classify against dp2 counts and never against dp4 counts."""
+    keys = dict(
+        source_sha="1" * 40,
+        source_diff_sha256="2" * 64,
+        runtime_manifest_sha256="5" * 64,
+        model_snapshot="3" * 40,
+        image_id="sha256:" + "4" * 64,
+        xprof_census_rc=0,
+        semantic_census_rc=0,
+    )
+    with tempfile.TemporaryDirectory() as directory:
+      base = Path(directory)
+      records = {}
+      for arm in ("native", "zero-hp"):
+        root = base / arm
+        _fixture(root, arm, geometry="dp2-tp2")
+        record = ARM_CLASSIFIER.classify(
+            arm=arm, run_root=root, geometry="dp2-tp2", **keys
+        )
+        self.assertEqual(record["verdict"], "PASS", record)
+        self.assertEqual(
+            record["topology"], {"dp": 2, "tp": 2, "devices": 4}
+        )
+        records[arm] = record
+      pair = PAIR_CLASSIFIER.classify(records["native"], records["zero-hp"])
+      self.assertEqual(pair["verdict"], "PASS", pair)
+      self.assertEqual(pair["topology"], {"dp": 2, "tp": 2, "devices": 4})
+
+      # The same dp2 capture judged as dp4 rings on the preflight marker
+      # and (zero arm) on the derived verdict count; a dp4 capture judged
+      # as dp2 rings the same way.  Nothing silently passes across.
+      cross = ARM_CLASSIFIER.classify(
+          arm="zero-hp", run_root=base / "zero-hp", **keys
+      )
+      self.assertEqual(cross["verdict"], "FAIL")
+      self.assertIn("preflight_marker", cross["reasons"])
+      self.assertTrue(
+          any(
+              reason.startswith("zero_alignment=99/51")
+              for reason in cross["reasons"]
+          ),
+          cross["reasons"],
+      )
+      dp4_root = base / "dp4-zero"
+      _fixture(dp4_root, "zero-hp")
+      cross = ARM_CLASSIFIER.classify(
+          arm="zero-hp", run_root=dp4_root, geometry="dp2-tp2", **keys
+      )
+      self.assertEqual(cross["verdict"], "FAIL")
+      self.assertIn("preflight_marker", cross["reasons"])
+      self.assertTrue(
+          any(
+              reason.startswith("zero_alignment=51/99")
+              for reason in cross["reasons"]
+          ),
+          cross["reasons"],
+      )
+      # A dp2-native x dp4-zero pair can never claim a matched capture.
+      mixed = PAIR_CLASSIFIER.classify(
+          records["native"],
+          ARM_CLASSIFIER.classify(arm="zero-hp", run_root=dp4_root, **keys),
+      )
+      self.assertNotEqual(mixed["verdict"], "PASS")
+      self.assertIn("topology", mixed["reasons"])
+      with self.assertRaisesRegex(ValueError, "invalid geometry"):
+        ARM_CLASSIFIER.classify(
+            arm="zero-hp",
+            run_root=base / "zero-hp",
+            geometry="dp8-tp8",
+            **keys,
+        )
+
+  def test_module_census_derives_geometry_counts(self):
+    """Native train_steps, the optimizer tail, and the dp2 backward
+    execution envelope all follow the geometry."""
+    self.assertEqual(
+        MODULE_CENSUS.validate_module_counts(
+            "native", {"jit__train_step": 32}, geometry="dp2-tp2"
+        ),
+        [],
+    )
+    self.assertIn(
+        "jit__train_step=16!=32",
+        MODULE_CENSUS.validate_module_counts(
+            "native", {"jit__train_step": 16}, geometry="dp2-tp2"
+        ),
+    )
+    self.assertIn(
+        "jit__train_step=32!=16",
+        MODULE_CENSUS.validate_module_counts(
+            "native", {"jit__train_step": 32}
+        ),
+    )
+    with self.assertRaisesRegex(ValueError, "unknown geometry"):
+      MODULE_CENSUS.validate_module_counts(
+          "native", {"jit__train_step": 32}, geometry="dp8-tp8"
+      )
+
+    self.assertEqual(MODULE_CENSUS.expected_backward_execs("dp4-tp1"), 32)
+    self.assertIsNone(MODULE_CENSUS.expected_backward_execs("dp2-tp2"))
+    self.assertEqual(MODULE_CENSUS.backward_exec_bounds("dp2-tp2"), (32, 160))
+
+    def dp2_counts(execs, p71_scan="off"):
+      counts = {
+          pattern.pattern: 1 for pattern in MODULE_CENSUS.ZERO_REQUIRED
+      }
+      counts["jit__precomputed_gradient_scaled_step"] = 32
+      counts["jit__precomputed_gradient_commit"] = 1
+      if p71_scan == "bwd":
+        counts.update({
+            f"jit_zt_tr_dp_parallel_bwd_block_{index:02d}": execs
+            for index in MODULE_CENSUS.expected_block_indices()
+        })
+      else:
+        counts["jit_zt_tr_dp_parallel_bwd_layer_27"] = (
+            MODULE_CENSUS.ZERO_LAYER_COUNT * execs
+        )
+      if p71_scan in ("fwd", "bwd"):
+        counts[MODULE_CENSUS.FWD_TAPE_SCAN] = execs
+      return counts
+
+    # The dp2 execution count is calibration-pending: any internally
+    # consistent count inside groups x [1, 5] chunks passes, and the
+    # first green capture pins the constant.
+    for execs in (32, 64, 160):
+      for mode in MODULE_CENSUS.P71_SCAN_MODES:
+        with self.subTest(execs=execs, mode=mode):
+          self.assertEqual(
+              MODULE_CENSUS.validate_module_counts(
+                  "zero-hp",
+                  dp2_counts(execs, mode),
+                  p71_scan=mode,
+                  geometry="dp2-tp2",
+              ),
+              [],
+          )
+    self.assertIn(
+        "bwd_layer_execs_per_layer=31 outside=32..160",
+        MODULE_CENSUS.validate_module_counts(
+            "zero-hp", dp2_counts(31), geometry="dp2-tp2"
+        ),
+    )
+    self.assertIn(
+        "bwd_layer_execs=897 not_a_multiple_of=28",
+        MODULE_CENSUS.validate_module_counts(
+            "zero-hp",
+            {**dp2_counts(32), "jit_zt_tr_dp_parallel_bwd_layer_27": 897},
+            geometry="dp2-tp2",
+        ),
+    )
+    inconsistent = dp2_counts(64, "bwd")
+    inconsistent["jit_zt_tr_dp_parallel_bwd_block_01"] = 63
+    self.assertIn(
+        "bwd_block_execs_inconsistent=63,64",
+        MODULE_CENSUS.validate_module_counts(
+            "zero-hp", inconsistent, p71_scan="bwd", geometry="dp2-tp2"
+        ),
+    )
+    wrong_tape = dp2_counts(64, "fwd")
+    wrong_tape[MODULE_CENSUS.FWD_TAPE_SCAN] = 32
+    self.assertIn(
+        "forward_tape_scan=32!=64",
+        MODULE_CENSUS.validate_module_counts(
+            "zero-hp", wrong_tape, p71_scan="fwd", geometry="dp2-tp2"
+        ),
+    )
+    # dp2 never inherits the dp4 tail: 16 scaled steps red under dp2.
+    dp4_tail = dp2_counts(64)
+    dp4_tail["jit__precomputed_gradient_scaled_step"] = 16
+    self.assertIn(
+        "jit__precomputed_gradient_scaled_step=16!=32",
+        MODULE_CENSUS.validate_module_counts(
+            "zero-hp", dp4_tail, geometry="dp2-tp2"
+        ),
+    )
+    # And the dp4 contract is untouched: the frozen 16 x 2 = 32 pin holds,
+    # including the newly pinned forward-tape count measured on every
+    # landed fwd/bwd capture.
+    self.assertEqual(
+        MODULE_CENSUS.validate_module_counts(
+            "zero-hp", _zero_module_counts("off"), p71_scan="off"
+        ),
+        [],
+    )
+    short_tape = _zero_module_counts("fwd")
+    short_tape[MODULE_CENSUS.FWD_TAPE_SCAN] = 31
+    self.assertIn(
+        "forward_tape_scan=31!=32",
+        MODULE_CENSUS.validate_module_counts(
+            "zero-hp", short_tape, p71_scan="fwd"
+        ),
+    )
+
+  def test_semantic_census_peft_expectation_follows_geometry(self):
+    SEMANTIC_CENSUS = _load(
+        "v1_gsm8k_semantic_census",
+        SCRIPTS / "census_gsm8k_semantic_trace.py",
+    )
+    self.assertEqual(SEMANTIC_CENSUS.expected_peft_train("native", "dp4-tp1"), 32)
+    self.assertEqual(SEMANTIC_CENSUS.expected_peft_train("native", "dp2-tp2"), 64)
+    self.assertEqual(SEMANTIC_CENSUS.expected_peft_train("zero-hp", "dp4-tp1"), 2)
+    self.assertEqual(SEMANTIC_CENSUS.expected_peft_train("zero-hp", "dp2-tp2"), 2)
+    with self.assertRaisesRegex(ValueError, "unknown geometry"):
+      SEMANTIC_CENSUS.expected_peft_train("native", "dp8-tp8")
+
+  def test_launcher_carries_the_geometry_and_refuses_junk(self):
+    """The selector, its container passthrough, the label marking, and the
+    per-geometry tables are all present; junk refuses before any launch."""
+    common = (SCRIPTS / "run_onehost_gsm8k_xprof_common.sh").read_text()
+    inner = (SCRIPTS / "run_onehost_gsm8k_xprof_inner.sh").read_text()
+    self.assertIn('geometry="${V1_GSM8K_XPROF_GEOMETRY:-dp4-tp1}"', common)
+    self.assertIn('geometry="${V1_GSM8K_XPROF_GEOMETRY:-dp4-tp1}"', inner)
+    # The container passthrough exists for the non-default geometry (the
+    # dp4 docker env block stays byte-identical), and both spellings ride
+    # along: the bash entrypoint reads V1_*, the Python contract CANON_*.
+    self.assertIn('-e V1_GSM8K_XPROF_GEOMETRY="$geometry"', common)
+    self.assertIn('-e CANON_V1_GSM8K_XPROF_GEOMETRY="$geometry"', common)
+    self.assertIn('if [ "$geometry" != dp4-tp1 ]; then', common)
+    # A dp2 run is never confusable with a dp4 run.
+    self.assertIn('label="dp2tp2-${label}"', common)
+    # Per-geometry tables: profile, engine overlay, mesh-id expectation,
+    # serial-bridge selection.
+    self.assertIn("zero_profile=qwen3-1p7b-dp4-tp1-gsm8k-v1-hp.env", common)
+    self.assertIn("zero_profile=qwen3-1p7b-dp2-tp2-gsm8k-v1-hp.env", common)
+    self.assertIn("zero_model_overlay=qwen1p7b_tp1", common)
+    self.assertIn("zero_model_overlay=qwen1p7b_tp2", common)
+    self.assertIn('--model "$zero_model_overlay"', common)
+    self.assertIn("expected_train_mesh_ids=0,2,1,3", common)
+    self.assertIn("expected_train_mesh_ids=0,1,2,3", common)
+    self.assertIn(
+        '-e CANON_EXPECT_TRAIN_MESH_IDS="$expected_train_mesh_ids"', common
+    )
+    self.assertIn("serial_mesh_bridge=1", common)
+    self.assertIn("serial_mesh_bridge=0", common)
+    self.assertIn(
+        '-e CANON_P59_DP4_SERIAL_MESH_BRIDGE="$serial_mesh_bridge"', common
+    )
+    self.assertIn('topology=$topology', common)
+    # Every geometry-sensitive judge receives the launched geometry.
+    self.assertIn('--geometry "$geometry"', common)
+    for tool in (
+        "census_gsm8k_xprof_modules.py",
+        "census_gsm8k_semantic_trace.py",
+        "census_gsm8k_xprof_hierarchy.py",
+        "census_gsm8k_xprof_trace.py",
+        "classify_gsm8k_xprof_arm.py",
+    ):
+      # Each tool is named twice (runtime manifest, then its invocation);
+      # the invocation is the last occurrence.
+      block = common[common.rindex(tool):]
+      self.assertIn('--geometry "$geometry"', block[:600], tool)
+    # The inner entrypoint derives mesh, microbatch, and rollout budgets
+    # from the same selector and sources the per-geometry profile.
+    self.assertIn("mesh_dp=4; mesh_tp=1; trajectory_micro=4; vllm_max_seqs=16", inner)
+    self.assertIn("mesh_dp=2; mesh_tp=2; trajectory_micro=2; vllm_max_seqs=32", inner)
+    self.assertIn('--mesh_dp="$mesh_dp" --mesh_tp="$mesh_tp"', inner)
+    self.assertIn('--train_trajectory_micro_batch_size="$trajectory_micro"', inner)
+    self.assertIn('--rollout_vllm_max_num_seqs="$vllm_max_seqs"', inner)
+    self.assertIn("profiles/$zero_profile", inner)
+    self.assertIn("unsupported V1_GSM8K_XPROF_GEOMETRY", inner)
+
+    # Junk refuses in the launcher before assets, git, hostname, or docker.
+    env = dict(os.environ)
+    env["V1_GSM8K_XPROF_EXPECT_HOSTNAME"] = "__no_such_host__"
+    env["V1_GSM8K_XPROF_ARTIFACT_DIR"] = str(SCRIPTS)
+    for geometry, rejected in (
+        (None, False),
+        ("dp4-tp1", False),
+        ("dp2-tp2", False),
+        ("dp8-tp8", True),
+        ("junk", True),
+    ):
+      with self.subTest(geometry=geometry):
+        case_env = dict(env)
+        if geometry is None:
+          case_env.pop("V1_GSM8K_XPROF_GEOMETRY", None)
+        else:
+          case_env["V1_GSM8K_XPROF_GEOMETRY"] = geometry
+        result = subprocess.run(
+            [
+                "bash",
+                str(SCRIPTS / "run_onehost_gsm8k_xprof_common.sh"),
+                "zero-hp",
+                "geometrycontract",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            env=case_env,
+        )
+        self.assertNotEqual(result.returncode, 0, result)
+        if rejected:
+          self.assertEqual(result.returncode, 2, result)
+          self.assertIn(
+              f"unsupported V1_GSM8K_XPROF_GEOMETRY: {geometry}",
+              result.stderr,
+          )
+        else:
+          self.assertNotIn(
+              "unsupported V1_GSM8K_XPROF_GEOMETRY", result.stderr, result
+          )
+
   def test_static_runner_is_gsm8k_and_wrappers_select_one_arm(self):
     common = (SCRIPTS / "run_onehost_gsm8k_xprof_common.sh").read_text()
     inner = (SCRIPTS / "run_onehost_gsm8k_xprof_inner.sh").read_text()
     self.assertIn("models--Qwen--Qwen3-1.7B", common)
-    self.assertIn("--model qwen1p7b_tp1", common)
+    self.assertIn('--model "$zero_model_overlay"', common)
     self.assertIn("examples/math_gsm8k/qwen3_grpo_demo.py", inner)
-    self.assertIn("--mesh_dp=4 --mesh_tp=1", inner)
+    self.assertIn('--mesh_dp="$mesh_dp" --mesh_tp="$mesh_tp"', inner)
     self.assertIn('--max_steps="$max_steps"', inner)
     self.assertNotIn("--max_steps=3", inner)
     self.assertIn("-e CANON_P60_DETERMINISTIC_AB=1", common)

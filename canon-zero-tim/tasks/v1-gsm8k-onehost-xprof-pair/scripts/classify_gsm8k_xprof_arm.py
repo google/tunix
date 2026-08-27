@@ -17,11 +17,22 @@ _CANON_ADAPTER_MARKER = "[CANON_" "ADAPTER]"
 _SIZE_SCHEMA = "canon.v1.gsm8k-onehost-xprof.size.v1"
 _SIZE_SOFT_WARNING_BYTES = 1_200_000_000
 _SIZE_HARD_MAX_BYTES = 1_500_000_000
+# The two registered carrier geometries on the same four chips.  One
+# committed update owns one gradient group per local trajectory, and the
+# carriers share the global work (64 trajectories), so groups =
+# 64 / dp_size.
+_GEOMETRIES = {
+    "dp4-tp1": {"dp": 4, "tp": 1, "topology": "DP4xTP1", "groups": 16},
+    "dp2-tp2": {"dp": 2, "tp": 2, "topology": "DP2xTP2", "groups": 32},
+}
+_DEFAULT_GEOMETRY = "dp4-tp1"
 # Every committed update emits one pre-alignment verdict plus one per
-# gradient group, and the DP4xTP1 carrier has 16 groups.  Measured on
+# gradient group.  Measured on the DP4xTP1 carrier (16 groups) at
 # .../v1_zero-hp_p70bc_final_20260827: 3 [CANON_ALIGN_PRE] + 48
-# [CANON_ALIGN] = 51 verdicts over three updates.
-_ALIGN_VERDICTS_PER_UPDATE = 17
+# [CANON_ALIGN] = 51 verdicts over three updates; the dp2-tp2 expectation
+# (1 + 32 = 33 per update) is the same derivation at 32 groups.
+_ALIGN_VERDICTS_PER_UPDATE = 1 + _GEOMETRIES[_DEFAULT_GEOMETRY]["groups"]
+assert _ALIGN_VERDICTS_PER_UPDATE == 17
 _DEFAULT_EXPECTED_UPDATES = 3
 
 
@@ -171,6 +182,7 @@ def classify(
     semantic_census_rc: int,
     size_census_rc: int = 0,
     expected_updates: int = _DEFAULT_EXPECTED_UPDATES,
+    geometry: str = _DEFAULT_GEOMETRY,
     require_hierarchy: bool = False,
     hierarchy_census_rc: int | None = None,
     trace_census_rc: int | None = None,
@@ -179,6 +191,11 @@ def classify(
     raise ValueError(f"invalid arm: {arm!r}")
   if expected_updates < 1:
     raise ValueError(f"invalid expected updates: {expected_updates!r}")
+  if geometry not in _GEOMETRIES:
+    raise ValueError(
+        f"invalid geometry {geometry!r}; expected {sorted(_GEOMETRIES)}"
+    )
+  shape = _GEOMETRIES[geometry]
   state = run_root / "train"
   raw_path = state / "raw.log"
   driver_path = run_root / "driver.log"
@@ -238,7 +255,8 @@ def classify(
   if steps != expected_updates:
     reasons.append(f"global_steps={steps} expected={expected_updates}")
   if text.count(
-      f"[V1.GSM8K.XPROF] PREFLIGHT_PASS arm={arm} topology=DP4xTP1"
+      "[V1.GSM8K.XPROF] PREFLIGHT_PASS "
+      f"arm={arm} topology={shape['topology']}"
   ) != 1:
     reasons.append("preflight_marker")
   if text.count("[P51.XPROF] phase=update started step=2 ") != 1:
@@ -317,7 +335,7 @@ def classify(
   else:
     if "[P56.VANILLA]" in text:
       reasons.append("zero_inherited_vanilla")
-    expected_verdicts = _ALIGN_VERDICTS_PER_UPDATE * expected_updates
+    expected_verdicts = (1 + shape["groups"]) * expected_updates
     if (
         align_verdicts.count("PASS") != expected_verdicts
         or align_verdicts.count("FAIL") != 0
@@ -359,7 +377,11 @@ def classify(
       "runtime_manifest_sha256": runtime_manifest_sha256,
       "model_snapshot": model_snapshot,
       "image_id": image_id,
-      "topology": {"dp": 4, "tp": 1, "devices": 4},
+      "topology": {
+          "dp": shape["dp"],
+          "tp": shape["tp"],
+          "devices": shape["dp"] * shape["tp"],
+      },
       "capture": {
           "phase": "update",
           "start_step": 2,
@@ -404,6 +426,12 @@ def main() -> int:
       default=_DEFAULT_EXPECTED_UPDATES,
       help="committed updates implied by CANON_P33_RUN_STAGE",
   )
+  parser.add_argument(
+      "--geometry",
+      choices=tuple(sorted(_GEOMETRIES)),
+      default=_DEFAULT_GEOMETRY,
+      help="registered carrier geometry the run was launched with",
+  )
   parser.add_argument("--xprof-census-rc", type=int, required=True)
   parser.add_argument("--semantic-census-rc", type=int, required=True)
   parser.add_argument("--size-census-rc", type=int, required=True)
@@ -423,6 +451,7 @@ def main() -> int:
       model_snapshot=args.model_snapshot,
       image_id=args.image_id,
       expected_updates=args.expected_updates,
+      geometry=args.geometry,
       xprof_census_rc=args.xprof_census_rc,
       semantic_census_rc=args.semantic_census_rc,
       size_census_rc=args.size_census_rc,

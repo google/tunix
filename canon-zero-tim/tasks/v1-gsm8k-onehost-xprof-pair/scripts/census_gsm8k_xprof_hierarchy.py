@@ -11,6 +11,13 @@ import re
 from typing import Mapping, Sequence
 
 
+# The registered carrier geometries: one committed update owns one
+# transaction per gradient group (64 global trajectories / dp_size).
+GEOMETRIES = {
+    "dp4-tp1": {"groups": 16},
+    "dp2-tp2": {"groups": 32},
+}
+DEFAULT_GEOMETRY = "dp4-tp1"
 EXPECTED_COUNTS = {
     "train": 16,
     "zero_tim_update": 1,
@@ -380,7 +387,14 @@ def main() -> int:
       "--expected-update-step", "--expected-step",
       dest="expected_update_step", type=int, default=2
   )
+  parser.add_argument(
+      "--geometry",
+      choices=tuple(sorted(GEOMETRIES)),
+      default=DEFAULT_GEOMETRY,
+      help="registered carrier geometry the run was launched with",
+  )
   args = parser.parse_args()
+  expected_groups = GEOMETRIES[args.geometry]["groups"]
   xplane = _resolve_xplane(args.run_root)
   spans, device_step_counts, compiler_counts = read_xplane(xplane)
   reasons = validate_hierarchy(
@@ -388,6 +402,7 @@ def main() -> int:
       device_step_counts=device_step_counts,
       compiler_counts=compiler_counts,
       expected_update_step=args.expected_update_step,
+      expected_groups=expected_groups,
   )
   counts = {
       name: sum(span.name == name for span in spans)
@@ -405,14 +420,17 @@ def main() -> int:
         f"V1_GSM8K_XPROF_HIERARCHY_CENSUS_RED reasons={len(reasons)}"
     )
     return 1
+  first_step = args.expected_update_step * expected_groups
   print(
       "V1_GSM8K_XPROF_HIERARCHY_CENSUS_GREEN "
       f"update_step={args.expected_update_step} "
-      f"train_steps={args.expected_update_step * 16}.."
-      f"{args.expected_update_step * 16 + 15} host_plane=/host:CPU "
+      f"train_steps={first_step}.."
+      f"{first_step + expected_groups - 1} host_plane=/host:CPU "
       f"host_line={HOST_LINE_NAME} steps_planes=8 "
-      "forward_groups=16 reverse_transactions=16 "
-      "micro_steps=0..15 last_accumulate=15 optimizer_owned_by_last=1 "
+      f"forward_groups={expected_groups} "
+      f"reverse_transactions={expected_groups} "
+      f"micro_steps=0..{expected_groups - 1} "
+      f"last_accumulate={expected_groups - 1} optimizer_owned_by_last=1 "
       "compiler_events=0"
   )
   return 0

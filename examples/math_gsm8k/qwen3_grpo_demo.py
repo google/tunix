@@ -219,6 +219,7 @@ if (
     CANON_P60_DETERMINISTIC_AB
     and _P32_WORKLOAD_NAME not in (
         "gsm8k-p59-dp4-tp1",
+        "gsm8k-p59-dp2-tp2",
         "gsm8k-p60-dp2-tp2",
         "gsm8k-p66-dp1-tp4",
     )

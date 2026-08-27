@@ -23,6 +23,15 @@ ZERO_TAIL_EXACT = {
     "jit__precomputed_gradient_scaled_step": 16,
     "jit__precomputed_gradient_commit": 1,
 }
+# The two registered carrier geometries share the global work (64
+# trajectories), so one committed update owns 64 / dp_size gradient groups:
+# the scaled-step count, the native train_step count, and the per-group
+# backward executions all derive from it.
+GEOMETRIES = {
+    "dp4-tp1": {"groups": 16},
+    "dp2-tp2": {"groups": 32},
+}
+DEFAULT_GEOMETRY = "dp4-tp1"
 # The two mutually exclusive layer-depth backward families.  `_base` has
 # already stripped the XLA fingerprint suffix, so these anchor the whole
 # module name and expose the family index.
@@ -38,6 +47,33 @@ FWD_TAPE_SCAN = "jit_zt_tr_fwd_scan"
 # the P33 run stage.
 ZERO_LAYER_COUNT = 28
 ZERO_BACKWARD_EXECS = 32
+# Chunk policy: one backward program runs per (gradient group, chunk) where
+# a group's chunk count is ceil(max-per-rank real tokens / local M=256).  On
+# the frozen dp4 captures every group measured exactly 2 chunks (all rows
+# 349..460 real tokens), pinning 16 x 2 = 32.  A dp2 group draws only 2
+# rows from the same length distribution, so its chunk count is data
+# dependent (1..5 at the 1024+256 envelope); until a first dp2 capture pins
+# the constant, the census requires internal consistency (one shared count
+# across the block family / a layer total divisible by the layer count /
+# a matching forward-tape count) inside the derived floor and ceiling
+# instead of guessing one number.
+PER_GROUP_CHUNK_BOUNDS = (1, 5)
+
+
+def expected_backward_execs(geometry: str) -> int | None:
+  """Returns the pinned per-update executions, or None when unpinned."""
+  if geometry not in GEOMETRIES:
+    raise ValueError(f"unknown geometry: {geometry!r}")
+  if geometry == DEFAULT_GEOMETRY:
+    return ZERO_BACKWARD_EXECS
+  return None
+
+
+def backward_exec_bounds(geometry: str) -> tuple[int, int]:
+  """Returns the admissible per-update execution range for one geometry."""
+  groups = GEOMETRIES[geometry]["groups"]
+  low, high = PER_GROUP_CHUNK_BOUNDS
+  return (groups * low, groups * high)
 # Mirrors _P71_BWD_BLOCK_LAYERS in tunix/rl/canonical_qwen3_adapter.py.
 # That constant has a documented fallback ladder 7 -> 4 -> 2, so the
 # census exposes it as a flag rather than welding 4 blocks into the code.
@@ -107,29 +143,37 @@ def validate_backward_family(
     *,
     layer_count: int = ZERO_LAYER_COUNT,
     block_layers: int = P71_BWD_BLOCK_LAYERS,
+    geometry: str = DEFAULT_GEOMETRY,
 ) -> list[str]:
   """Returns fail-closed reasons for one mode's backward program inventory.
 
-  Exactly one layer-depth family may exist, and its size is pinned:
+  Exactly one layer-depth family may exist.  On the dp4 geometry its size
+  is pinned to the measured `ZERO_BACKWARD_EXECS`; on a geometry without a
+  frozen capture the per-update execution count E must instead be
+  internally consistent (one shared block count / a layer total divisible
+  by the layer count / a matching forward-tape count) inside
+  `backward_exec_bounds`:
 
-    off / fwd  per-layer pullbacks, `layer_count * ZERO_BACKWARD_EXECS`
-               executions in total.  XLA folds the identically shaped
-               layers onto a single module name, so the census pins the
-               family's total execution count and index range rather than
-               its name cardinality.
+    off / fwd  per-layer pullbacks, `layer_count * E` executions in
+               total.  XLA folds the identically shaped layers onto a
+               single module name, so the census pins the family's total
+               execution count and index range rather than its name
+               cardinality.
     bwd        the P71-E2' unrolled blocks: exactly
                `ceil(layer_count / block_layers)` programs with
-               contiguous indices from 00, each executed exactly
-               `ZERO_BACKWARD_EXECS` times.
+               contiguous indices from 00, each executed exactly E times.
 
   Seeing the other family is a red in both directions, so a silent
   fallback (or a silent fusion) cannot pass as the requested mode.
   """
   if p71_scan not in P71_SCAN_MODES:
     raise ValueError(f"unknown P71 scan mode: {p71_scan!r}")
+  pinned_execs = expected_backward_execs(geometry)
+  low, high = backward_exec_bounds(geometry)
   layers = _family(names, BWD_LAYER)
   blocks = _family(names, BWD_BLOCK)
   reasons = []
+  observed_execs = None
   if p71_scan == "bwd":
     expected = expected_block_indices(layer_count, block_layers)
     if layers:
@@ -141,11 +185,25 @@ def validate_backward_family(
           f"bwd_block_indices={_indices(blocks)} "
           f"expected={_indices(expected)}"
       )
-    reasons.extend(
-        f"bwd_block_{index:02d}={blocks[index]}!={ZERO_BACKWARD_EXECS}"
-        for index in sorted(set(blocks) & set(expected))
-        if blocks[index] != ZERO_BACKWARD_EXECS
-    )
+    if pinned_execs is not None:
+      reasons.extend(
+          f"bwd_block_{index:02d}={blocks[index]}!={pinned_execs}"
+          for index in sorted(set(blocks) & set(expected))
+          if blocks[index] != pinned_execs
+      )
+    elif blocks:
+      counts = sorted(set(blocks.values()))
+      if len(counts) != 1:
+        reasons.append(
+            "bwd_block_execs_inconsistent="
+            + ",".join(str(count) for count in counts)
+        )
+      else:
+        observed_execs = counts[0]
+        if not low <= observed_execs <= high:
+          reasons.append(
+              f"bwd_block_execs={observed_execs} outside={low}..{high}"
+          )
   else:
     if blocks:
       reasons.append(
@@ -161,13 +219,37 @@ def validate_backward_family(
             f"layers={layer_count}"
         )
       total = sum(layers.values())
-      expected_total = layer_count * ZERO_BACKWARD_EXECS
-      if total != expected_total:
-        reasons.append(f"bwd_layer_execs={total}!={expected_total}")
+      if pinned_execs is not None:
+        expected_total = layer_count * pinned_execs
+        if total != expected_total:
+          reasons.append(f"bwd_layer_execs={total}!={expected_total}")
+      elif total % layer_count:
+        reasons.append(
+            f"bwd_layer_execs={total} not_a_multiple_of={layer_count}"
+        )
+      else:
+        observed_execs = total // layer_count
+        if not low <= observed_execs <= high:
+          reasons.append(
+              f"bwd_layer_execs_per_layer={observed_execs} "
+              f"outside={low}..{high}"
+          )
   # E1 rebuilds the per-chunk forward tape as one scanned program and E2'
   # inherits it, so its absence means the requested rung did not run.
-  if p71_scan in ("fwd", "bwd") and FWD_TAPE_SCAN not in names:
-    reasons.append(f"missing_forward_tape_scan={FWD_TAPE_SCAN}")
+  if p71_scan in ("fwd", "bwd"):
+    if FWD_TAPE_SCAN not in names:
+      reasons.append(f"missing_forward_tape_scan={FWD_TAPE_SCAN}")
+    else:
+      tape_expected = (
+          pinned_execs if pinned_execs is not None else observed_execs
+      )
+      if (
+          tape_expected is not None
+          and names[FWD_TAPE_SCAN] != tape_expected
+      ):
+        reasons.append(
+            f"forward_tape_scan={names[FWD_TAPE_SCAN]}!={tape_expected}"
+        )
   return reasons
 
 
@@ -197,15 +279,21 @@ def validate_module_counts(
     p71_scan: str = "off",
     layer_count: int = ZERO_LAYER_COUNT,
     block_layers: int = P71_BWD_BLOCK_LAYERS,
+    geometry: str = DEFAULT_GEOMETRY,
 ) -> list[str]:
   """Returns fail-closed reasons for one TensorCore TPU plane."""
+  if geometry not in GEOMETRIES:
+    raise ValueError(f"unknown geometry: {geometry!r}")
+  groups = GEOMETRIES[geometry]["groups"]
   reasons = []
   if any(DECODE.search(name) for name in names):
     reasons.append("decode=present")
   if arm == "native":
+    # The stock learner runs one monolithic train_step per gradient
+    # accumulation microbatch: 64 global trajectories / dp_size = groups.
     count = names.get("jit__train_step", 0)
-    if count != 16:
-      reasons.append(f"jit__train_step={count}!=16")
+    if count != groups:
+      reasons.append(f"jit__train_step={count}!={groups}")
     return reasons
   if arm != "zero-hp":
     raise ValueError(f"unknown arm: {arm}")
@@ -220,11 +308,16 @@ def validate_module_counts(
           names,
           layer_count=layer_count,
           block_layers=block_layers,
+          geometry=geometry,
       )
   )
+  tail_exact = {
+      "jit__precomputed_gradient_scaled_step": groups,
+      "jit__precomputed_gradient_commit": 1,
+  }
   reasons.extend(
       f"{name}={names.get(name, 0)}!={expected}"
-      for name, expected in ZERO_TAIL_EXACT.items()
+      for name, expected in tail_exact.items()
       if names.get(name, 0) != expected
   )
   return reasons
@@ -248,6 +341,12 @@ def main() -> None:
   parser = argparse.ArgumentParser()
   parser.add_argument("--arm", choices=("native", "zero-hp"), required=True)
   parser.add_argument("--run-root", required=True)
+  parser.add_argument(
+      "--geometry",
+      choices=tuple(sorted(GEOMETRIES)),
+      default=DEFAULT_GEOMETRY,
+      help="registered carrier geometry the run was launched with",
+  )
   parser.add_argument(
       "--p71-scan",
       default="",
@@ -295,23 +394,29 @@ def main() -> None:
         tmax = end if tmax is None else max(tmax, end)
     span = 0.0 if tmin is None or tmax is None else (tmax - tmin) / 1e9
     has_decode = any(DECODE.search(name) for name in names)
+    groups = GEOMETRIES[args.geometry]["groups"]
     reasons = validate_module_counts(
         args.arm,
         names,
         p71_scan=p71_scan,
         layer_count=args.p71_layers,
         block_layers=args.p71_block_layers,
+        geometry=args.geometry,
     )
     if args.arm == "native":
-      # The stock learner runs one monolithic forward/backward train_step for
-      # each of the 16 trajectory groups.  It does not expose pullback-named
-      # modules, so a P55 segmented-backward census is the wrong contract.
+      # The stock learner runs one monolithic forward/backward train_step
+      # per trajectory group.  It does not expose pullback-named modules,
+      # so a P55 segmented-backward census is the wrong contract.
       count = names.get("jit__train_step", 0)
-      summary = f"train_step={count}/16"
+      summary = f"train_step={count}/{groups}"
     else:
       backward_missing = any(
           reason.startswith("missing_backward=") for reason in reasons
       )
+      tail_exact = {
+          "jit__precomputed_gradient_scaled_step": groups,
+          "jit__precomputed_gradient_commit": 1,
+      }
       summary = (
           f"p71_scan={p71_scan} required="
           + ("MISSING" if backward_missing else "present")
@@ -320,7 +425,7 @@ def main() -> None:
           + ",".join(
               f"{name.removeprefix('jit__precomputed_gradient_')}="
               f"{names.get(name, 0)}/{expected}"
-              for name, expected in ZERO_TAIL_EXACT.items()
+              for name, expected in tail_exact.items()
           )
       )
     print(
@@ -348,7 +453,8 @@ def main() -> None:
     raise SystemExit(1)
   tail = (
       f" p71_scan={p71_scan}"
-      " optimizer_tail=scaled_step:16,commit:1"
+      f" optimizer_tail=scaled_step:{GEOMETRIES[args.geometry]['groups']}"
+      ",commit:1"
       if args.arm == "zero-hp" else ""
   )
   print(

@@ -6,8 +6,8 @@
 #   --from-image   development host: pull the six stock files out of a pinned image via docker
 #   --from-path    inside a container: read them straight off the filesystem (no docker, no
 #                  network, no image on disk).  This is the mode a GKE pod uses.
-#   --model        qwen1p7b (default) | qwen1p7b_tp1 | qwen4b | qwen8b |
-#                  qwen8b_tp8 | qwen32b
+#   --model        qwen1p7b (default) | qwen1p7b_tp1 | qwen1p7b_tp2 |
+#                  qwen4b | qwen8b | qwen8b_tp8 | qwen32b
 #                  -- selects model modules
 #
 # Steps: extract stock -> apply patches/tpu_inference/*.patch -> lay down the shim chain ->
@@ -223,10 +223,10 @@ patch -s --no-backup-if-mismatch "$OUT/tpu_runner_p21_l30.py" \
 
 echo "[3/4] laying down the shim chain (model=$MODEL)"
 cp "$PKG"/src/engine_shims/*.py "$OUT/"
-if [ "$MODEL" = qwen1p7b_tp1 ]; then
+if [ "$MODEL" = qwen1p7b_tp1 ] || [ "$MODEL" = qwen1p7b_tp2 ]; then
   # The RMSNorm wrapper is width-specific but not TP-width-specific. Keep one
-  # implementation and pair it with the separately manifested TP1 projection
-  # contract instead of forking an identical 215-line shim.
+  # implementation and pair it with the separately manifested TP1/TP2
+  # projection contract instead of forking an identical 215-line shim.
   cp "$PKG/src/engine_shims/models/qwen1p7b/qwen3_p22xh.py" "$OUT/"
 fi
 cp "$PKG/src/engine_shims/models/$MODEL"/*.py "$OUT/"

@@ -59,7 +59,9 @@ docker -e is impossible by design). CANON_P71_SCAN=fwd if the bwd block
 stage is not desired; CANON_DP_COLLECTIVE_REDUCE defaults to psum on the
 DP4 one-host profile only.
 
-Acceptance anchors (cross-machine, same topology/image/data):
+Acceptance anchors (cross-machine, same topology/image/data —
+**DP4xTP1 only**; a DP2xTP2 run must never be compared against these
+norms, its own anchors are established by its first green capture):
 commit_gradient_norm per update must be bitwise
 1.4907878637313843 / 2.2041752338409424 / 2.6263937950134277;
 warm update wall ~15.7-16.0 s; the only expected classifier red in
@@ -70,3 +72,23 @@ pullbacks (28 x 32 executions) and no block program, bwd must show
 exactly ceil(28 / 7) = 4 `bwd_block_NN` programs at 32 executions each
 and no per-layer program.  Either family appearing in the other mode is
 a red, so a silent fallback cannot pass.
+
+## Mesh geometry selector (P72)
+
+`V1_GSM8K_XPROF_GEOMETRY` selects the carrier mesh on the same four chips
+for BOTH arms; it is orthogonal to the backward/rollout x native/zero
+matrix above ("2x2" in this file's title is that matrix, not the mesh):
+
+| value | mesh | zero workload | groups/update | zero engine overlay |
+|---|---|---|---|---|
+| unset / `dp4-tp1` | data=4 x model=1 | gsm8k-p59-dp4-tp1 | 16 | qwen1p7b_tp1 |
+| `dp2-tp2` | data=2 x model=2 | gsm8k-p59-dp2-tp2 | 32 | qwen1p7b_tp2 |
+
+The default is byte-identical to the pre-P72 launcher.  A dp2-tp2 label is
+automatically prefixed `dp2tp2-` so its runs can never be confused with
+dp4 runs; every other value refuses in the launcher, the container
+entrypoint, and the arm contract.  Global work is identical (prompts 8,
+generations 8, trajectories 64, max_steps per stage); only the cut
+changes: each dp2 rank carries twice the rows and the model shards across
+model=2, so TP collectives are present in rollout and training.  The
+DP4 norm anchors above and the DP4 warm-wall expectation do not transfer.

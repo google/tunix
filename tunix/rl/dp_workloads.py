@@ -228,6 +228,7 @@ class DPWorkloadSpec:
   tp_size: int = 4
   local_m: int = 256
   four_chip_proxy: bool = False
+  four_chip_2x2_proxy: bool = False
   unit_data_proxy: bool = False
 
   @property
@@ -264,8 +265,13 @@ class DPWorkloadSpec:
   def validate(self) -> None:
     """Rejects a workload that no longer matches the P32 release geometry."""
     self.training_contract()
-    if self.four_chip_proxy and self.unit_data_proxy:
-      raise ValueError("one workload cannot select both one-host proxies")
+    proxies = (
+        self.four_chip_proxy,
+        self.four_chip_2x2_proxy,
+        self.unit_data_proxy,
+    )
+    if sum(proxies) > 1:
+      raise ValueError("one workload cannot select two one-host proxies")
     if self.four_chip_proxy:
       expected = {
           "name": "gsm8k-p59-dp4-tp1",
@@ -289,6 +295,34 @@ class DPWorkloadSpec:
       if self.total_devices != 4 or self.global_m != 1024:
         raise ValueError(
             "P59 four-chip proxy requires four devices and global M1024"
+        )
+      return
+    if self.four_chip_2x2_proxy:
+      # Same four chips and the same global work as the DP4xTP1 carrier
+      # (prompts 8, generations 8, trajectories 64), re-cut as data=2 x
+      # model=2 so real TP collectives are present in rollout and training.
+      expected = {
+          "name": "gsm8k-p59-dp2-tp2",
+          "model_id": "Qwen/Qwen3-1.7B",
+          "dp_size": 2,
+          "tp_size": 2,
+          "global_prompts": 8,
+          "num_generations": 8,
+          "local_trajectories": 32,
+          "local_m": 256,
+          "periodic_evaluation": False,
+      }
+      actual = {name: getattr(self, name) for name in expected}
+      wrong = {
+          name: actual[name]
+          for name, expected_value in expected.items()
+          if actual[name] != expected_value
+      }
+      if wrong:
+        raise ValueError(f"P59 2x2 one-host proxy geometry changed: {wrong}")
+      if self.total_devices != 4 or self.global_m != 512:
+        raise ValueError(
+            "P59 2x2 one-host proxy requires four devices and global M512"
         )
       return
     if self.unit_data_proxy:
@@ -463,6 +497,28 @@ _WORKLOADS = {
         tp_size=1,
         four_chip_proxy=True,
     ),
+    "gsm8k-p59-dp2-tp2": DPWorkloadSpec(
+        name="gsm8k-p59-dp2-tp2",
+        model_id="Qwen/Qwen3-1.7B",
+        model_dir_name="qwen1p7b",
+        global_prompts=8,
+        num_generations=8,
+        local_trajectories=32,
+        max_prompt_length=1024,
+        max_response_length=1024,
+        max_steps=3,
+        learning_rate=2.0e-7,
+        beta=0.04,
+        optimizer_b1=0.9,
+        optimizer_b2=0.999,
+        weight_decay=0.01,
+        temperature=1.0,
+        wandb_project="zero-tim-gsm8k-p59-dp2-tp2",
+        periodic_evaluation=False,
+        dp_size=2,
+        tp_size=2,
+        four_chip_2x2_proxy=True,
+    ),
     "gsm8k-p66-dp1-tp4": DPWorkloadSpec(
         name="gsm8k-p66-dp1-tp4",
         model_id="Qwen/Qwen3-1.7B",
@@ -633,6 +689,7 @@ def requested_max_steps(
     raise ValueError("CANON_P60_DETERMINISTIC_AB must be exactly 0 or 1")
   if deterministic_ab == "1" and workload.name not in (
       "gsm8k-p59-dp4-tp1",
+      "gsm8k-p59-dp2-tp2",
       "gsm8k-p60-dp2-tp2",
       "gsm8k-p66-dp1-tp4",
   ):
@@ -749,6 +806,7 @@ def expected_token_widths(
   if deterministic_ab == "1":
     if workload.name not in (
         "gsm8k-p59-dp4-tp1",
+        "gsm8k-p59-dp2-tp2",
         "gsm8k-p60-dp2-tp2",
         "gsm8k-p66-dp1-tp4",
     ):

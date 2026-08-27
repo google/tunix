@@ -161,6 +161,7 @@ def validate_trace(
     *,
     compiler_counts,
     expected_update_step: int = 2,
+    expected_groups: int = 16,
 ) -> list[str]:
   """Applies hierarchy semantics without pretending JSON has device planes."""
   synthetic_device_steps = {
@@ -171,6 +172,7 @@ def validate_trace(
       device_step_counts=synthetic_device_steps,
       compiler_counts=compiler_counts,
       expected_update_step=expected_update_step,
+      expected_groups=expected_groups,
       require_step_marker=False,
   )
 
@@ -179,13 +181,21 @@ def main() -> int:
   parser = argparse.ArgumentParser()
   parser.add_argument("--run-root", type=Path, required=True)
   parser.add_argument("--expected-update-step", type=int, default=2)
+  parser.add_argument(
+      "--geometry",
+      choices=tuple(sorted(HIERARCHY.GEOMETRIES)),
+      default=HIERARCHY.DEFAULT_GEOMETRY,
+      help="registered carrier geometry the run was launched with",
+  )
   args = parser.parse_args()
+  expected_groups = HIERARCHY.GEOMETRIES[args.geometry]["groups"]
   trace = _resolve_trace(args.run_root)
   spans, compiler_counts, total = read_trace(trace)
   reasons = validate_trace(
       spans,
       compiler_counts=compiler_counts,
       expected_update_step=args.expected_update_step,
+      expected_groups=expected_groups,
   )
   counts = {
       name: sum(span.name == name for span in spans)
@@ -201,10 +211,11 @@ def main() -> int:
       print("  RED " + reason)
     print(f"V1_GSM8K_XPROF_TRACE_CENSUS_RED reasons={len(reasons)}")
     return 1
-  start = args.expected_update_step * 16
+  start = args.expected_update_step * expected_groups
   print(
       "V1_GSM8K_XPROF_TRACE_CENSUS_GREEN "
-      f"train_steps={start}..{start + 15} reverse_transactions=16 "
+      f"train_steps={start}..{start + expected_groups - 1} "
+      f"reverse_transactions={expected_groups} "
       "optimizer_visible=1 optimizer_owned_by_last=1 same_host_track=1 "
       "compiler_events=0"
   )

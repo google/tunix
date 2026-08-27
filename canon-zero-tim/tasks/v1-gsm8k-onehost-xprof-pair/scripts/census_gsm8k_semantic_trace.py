@@ -8,8 +8,6 @@ import collections
 import glob
 import re
 
-from perfetto.protos.perfetto.trace.perfetto_trace_pb2 import Trace
-
 
 COMMON_EXACT_COUNTS = {
     "data_loading": 1,
@@ -17,13 +15,42 @@ COMMON_EXACT_COUNTS = {
     "advantage_computation": 1,
     "weight_sync": 2,
 }
+# One committed update owns 64 / dp_size gradient groups on either
+# registered geometry; the rollout span count (2 per trajectory) follows
+# the shared 64-trajectory global work and does not move.
+GEOMETRIES = {
+    "dp4-tp1": {"groups": 16},
+    "dp2-tp2": {"groups": 32},
+}
+DEFAULT_GEOMETRY = "dp4-tp1"
+
+
+def expected_peft_train(arm: str, geometry: str) -> int:
+  """Stock emits two span events per train_step (one per group); G6/P59
+  wraps the complete grouped update once (two events)."""
+  if geometry not in GEOMETRIES:
+    raise ValueError(f"unknown geometry: {geometry!r}")
+  if arm == "native":
+    return 2 * GEOMETRIES[geometry]["groups"]
+  if arm == "zero-hp":
+    return 2
+  raise ValueError(f"unknown arm: {arm!r}")
 
 
 def main() -> None:
   parser = argparse.ArgumentParser()
   parser.add_argument("--arm", choices=("native", "zero-hp"), required=True)
   parser.add_argument("--run-root", required=True)
+  parser.add_argument(
+      "--geometry",
+      choices=tuple(sorted(GEOMETRIES)),
+      default=DEFAULT_GEOMETRY,
+      help="registered carrier geometry the run was launched with",
+  )
   args = parser.parse_args()
+  # Imported here so the geometry helpers stay importable on hosts without
+  # the perfetto wheel; the census itself always runs inside the image.
+  from perfetto.protos.perfetto.trace.perfetto_trace_pb2 import Trace
 
   files = glob.glob(
       f"{args.run_root.rstrip('/')}/train/perf/perfetto_trace_v2_*.pb"
@@ -46,10 +73,10 @@ def main() -> None:
   for name, expected in COMMON_EXACT_COUNTS.items():
     if counts[name] != expected:
       errors.append(f"{name}={counts[name]}!={expected}")
-  # Stock invokes the ordinary train_step once for each of 16 groups, while
+  # Stock invokes the ordinary train_step once per gradient group, while
   # G6/P59 wraps the complete grouped update once.  Track placement therefore
   # differs by construction; the exact event count is the stable arm contract.
-  expected_peft = 32 if args.arm == "native" else 2
+  expected_peft = expected_peft_train(args.arm, args.geometry)
   if counts["peft_train"] != expected_peft:
     errors.append(f"peft_train={counts['peft_train']}!={expected_peft}")
   if counts["rollout"] != 128:

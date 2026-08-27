@@ -216,6 +216,95 @@ class DPWorkloadsTest(unittest.TestCase):
         (64, 4, "[CANON_P33_DP4]", True),
     )
 
+  def test_p59_two_by_two_proxy_preserves_the_dp4_global_work(self):
+    """The dp2-tp2 carrier keeps 8 prompts x 8 generations = 64 global
+    trajectories and re-cuts them as 32 groups of one row per rank."""
+    workload = dp_workloads.get_workload("gsm8k-p59-dp2-tp2")
+    self.assertEqual((workload.dp_size, workload.tp_size), (2, 2))
+    self.assertEqual(workload.total_devices, 4)
+    self.assertEqual(workload.global_prompts, 8)
+    self.assertEqual(workload.local_prompts, 4)
+    self.assertEqual(workload.global_trajectories, 64)
+    self.assertEqual(workload.local_trajectories, 32)
+    self.assertEqual(workload.gradient_groups, 32)
+    self.assertEqual(workload.global_m, 512)
+    self.assertEqual(workload.local_m, 256)
+    self.assertFalse(workload.periodic_evaluation)
+    command = workload.command(run_stage="three-update")
+    for argument in (
+        "--mesh_dp=2",
+        "--mesh_tp=2",
+        "--batch_size=8",
+        "--mini_batch_size=8",
+        "--train_trajectory_micro_batch_size=2",
+        "--max_steps=3",
+        "--num_generations=8",
+        "--rollout_vllm_max_num_seqs=32",
+        "--rollout_vllm_max_num_batched_tokens=256",
+    ):
+      self.assertIn(argument, command)
+    six_update = workload.command(run_stage="six-update")
+    self.assertIn("--max_steps=6", six_update)
+
+    environ = _environment(workload.name)
+    environ.update({
+        "CANON_OPT_STATE_RESIDENT": "1",
+        "CANON_P30_OPT_STATE_OFFLOAD": "0",
+        "CANON_P32_TRAIN_ADMITTED": "1",
+        "CANON_P32_DP_REDUCTION_ADMITTED": "1",
+        "CANON_P33_WORKLOAD_LAUNCH_ADMITTED": "1",
+        "CANON_P33_RUN_STAGE": "three-update",
+        "FL_SHARED_MESH": "2,2",
+    })
+    dp_workloads.validate_environment(
+        workload, environ, require_reduction_admission=True
+    )
+    self.assertEqual(
+        agentic_rl_learner._segmented_update_geometry(environ),
+        (64, 2, "[CANON_P33_DP2]", True),
+    )
+    self.assertEqual(
+        dp_workloads.requested_max_steps(
+            workload,
+            {
+                "CANON_P33_RUN_STAGE": "three-update",
+                "CANON_P33_NO_COMMIT": "0",
+                "CANON_P60_DETERMINISTIC_AB": "1",
+            },
+        ),
+        3,
+    )
+    self.assertEqual(
+        dp_workloads.expected_token_widths(
+            workload, {"CANON_P60_DETERMINISTIC_AB": "1"}
+        ),
+        (1024, 256),
+    )
+    # The dp4-only diagnostics stay dp4-only.
+    with self.assertRaisesRegex(ValueError, "p59-eight-update"):
+      dp_workloads.requested_max_steps(
+          workload,
+          {
+              "CANON_P33_RUN_STAGE": "p59-eight-update",
+              "CANON_P59_DP4_TAIL8": "1",
+          },
+      )
+    with self.assertRaisesRegex(ValueError, "p59-eight-update"):
+      workload.command(run_stage="p59-eight-update")
+    # A bent registration cannot validate: the pinned dp2-tp2 geometry
+    # rejects a drifted local-trajectory cut and a drifted mesh.
+    import dataclasses
+
+    bent = dataclasses.replace(workload, local_trajectories=16)
+    with self.assertRaises(ValueError):
+      bent.validate()
+    bent = dataclasses.replace(workload, dp_size=4, tp_size=1)
+    with self.assertRaises(ValueError):
+      bent.validate()
+    bent = dataclasses.replace(workload, four_chip_proxy=True)
+    with self.assertRaises(ValueError):
+      bent.validate()
+
   def test_p66_unit_data_tp4_proxy_preserves_real_local_m(self):
     workload = dp_workloads.get_workload("gsm8k-p66-dp1-tp4")
     self.assertEqual((workload.dp_size, workload.tp_size), (1, 4))

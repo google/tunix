@@ -27,6 +27,25 @@ from typing import Any, Mapping
 
 ARM_ENV = "CANON_V1_GSM8K_XPROF_ARM"
 _ARMS = ("native", "zero-hp")
+GEOMETRY_ENV = "CANON_V1_GSM8K_XPROF_GEOMETRY"
+# The signed carrier geometries.  Absent means dp4-tp1 so an unchanged
+# launcher keeps today's behavior byte-for-byte; every other value is a
+# registered second geometry or a refusal.  Each geometry binds the zero
+# arm to exactly one registered P32 workload name and fixes the number of
+# gradient groups one committed update owns (64 global trajectories /
+# dp_size ranks).
+_GEOMETRIES = {
+    "dp4-tp1": {
+        "workload": "gsm8k-p59-dp4-tp1",
+        "topology": "DP4xTP1",
+        "groups": 16,
+    },
+    "dp2-tp2": {
+        "workload": "gsm8k-p59-dp2-tp2",
+        "topology": "DP2xTP2",
+        "groups": 32,
+    },
+}
 _WORK_FIELDS = (
     "prompt_ids",
     "prompt_mask",
@@ -87,11 +106,20 @@ def train_step_annotation(*, step_num: int):
   return jax.profiler.StepTraceAnnotation("train", **normalized)
 
 
-class ZeroHpTrainMicrostepSchedule:
-  """Owns the 16 real Zero-HP train annotations through optimizer commit.
+# One committed update owns one train annotation per gradient group, so the
+# schedule admits exactly the registered per-geometry group counts.
+_MICROSTEPS = tuple(
+    sorted({item["groups"] for item in _GEOMETRIES.values()})
+)
 
-  The final train annotation deliberately outlives its reverse transaction so
-  the real optimizer commit is its child, as in Native. The schedule is
+
+class ZeroHpTrainMicrostepSchedule:
+  """Owns the per-group Zero-HP train annotations through optimizer commit.
+
+  One committed update owns one train annotation per gradient group: 16 on
+  the DP4xTP1 carrier and 32 on the DP2xTP2 carrier.  The final train
+  annotation deliberately outlives its reverse transaction so the real
+  optimizer commit is its child, as in Native. The schedule is
   profiling-only: it owns context-manager lifetimes and never touches arrays.
   """
 
@@ -100,9 +128,10 @@ class ZeroHpTrainMicrostepSchedule:
         update_step, numbers.Integral
     ):
       raise ValueError("Zero-HP XProf update_step must be an integer")
-    if microsteps != 16:
+    if microsteps not in _MICROSTEPS:
       raise ValueError(
-          f"Zero-HP XProf requires exactly 16 microsteps, got {microsteps}"
+          "Zero-HP XProf requires a registered per-geometry microstep "
+          f"count {_MICROSTEPS}, got {microsteps}"
       )
     self.update_step = int(update_step)
     self.microsteps = microsteps
@@ -172,7 +201,8 @@ class ZeroHpTrainMicrostepSchedule:
         or not self._last_open
     ):
       raise RuntimeError(
-          "Zero-HP XProf optimizer requires 16 completed transactions"
+          f"Zero-HP XProf optimizer requires {self.microsteps} completed "
+          "transactions"
       )
     if self._optimizer_seen:
       raise RuntimeError("Zero-HP XProf optimizer annotation is duplicated")
@@ -216,9 +246,33 @@ def zero_hp_train_microsteps(
         "Native-like Zero-HP train microsteps require the signed arm and "
         "CANON_XPROF_LABELS=1"
     )
+  expected_microsteps = geometry_groups()
+  if microsteps != expected_microsteps:
+    raise RuntimeError(
+        "Zero-HP XProf microsteps do not match the signed geometry: "
+        f"geometry={geometry()} expected={expected_microsteps} "
+        f"got={microsteps}"
+    )
   return ZeroHpTrainMicrostepSchedule(
       update_step=update_step, microsteps=microsteps
   )
+
+
+def geometry(values: Mapping[str, str] | None = None) -> str:
+  """Returns the signed carrier geometry; unset means the DP4xTP1 default."""
+  values = os.environ if values is None else values
+  selected = values.get(GEOMETRY_ENV, "") or "dp4-tp1"
+  if selected not in _GEOMETRIES:
+    raise ValueError(
+        f"{GEOMETRY_ENV} must be unset or one of "
+        f"{sorted(_GEOMETRIES)}, got {selected!r}"
+    )
+  return selected
+
+
+def geometry_groups(values: Mapping[str, str] | None = None) -> int:
+  """Returns the gradient-group count one committed update owns."""
+  return _GEOMETRIES[geometry(values)]["groups"]
 
 
 def arm(values: Mapping[str, str] | None = None) -> str:
@@ -272,6 +326,14 @@ def arm(values: Mapping[str, str] | None = None) -> str:
         f"{ARM_ENV}={selected} has an invalid common capture contract: {wrong}"
     )
 
+  # The geometry is part of the signed contract for both arms: a junk
+  # value refuses before any per-arm check, and the zero arm below binds
+  # the geometry to exactly one registered workload name (so dp2-tp2 with
+  # the dp4 workload, dp4-tp1 or an absent geometry with the dp2 workload,
+  # and every unregistered pairing all reject).
+  selected_geometry = geometry(values)
+  geometry_workload = _GEOMETRIES[selected_geometry]["workload"]
+  topology = _GEOMETRIES[selected_geometry]["topology"]
   vanilla = values.get("CANON_GSM8K_VANILLA", "")
   workload = values.get("CANON_P32_WORKLOAD", "")
   rank_parallel = values.get("CANON_P59_RANK_PARALLEL_BACKWARD", "")
@@ -290,13 +352,13 @@ def arm(values: Mapping[str, str] | None = None) -> str:
   else:
     if (
         vanilla
-        or workload != "gsm8k-p59-dp4-tp1"
+        or workload != geometry_workload
         or rank_parallel != "1"
         or g6_update != "1"
         or values.get("CANON_GSM8K_ALIGNMENT_WARN_ONLY") != "0"
     ):
       raise ValueError(
-          "zero-hp GSM8K XProf requires strict V1 DP4xTP1 P59 training"
+          f"zero-hp GSM8K XProf requires strict V1 {topology} P59 training"
       )
   return selected
 

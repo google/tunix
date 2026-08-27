@@ -7460,6 +7460,12 @@ class Qwen3EngineForwardAdapter:
         and os.environ.get("CANON_P32_WORKLOAD", "")
         == "gsm8k-p59-dp4-tp1"
     )
+    p59_two_by_two_proxy = (
+        self._data_size == 2
+        and self._tp_size == 2
+        and os.environ.get("CANON_P32_WORKLOAD", "")
+        == "gsm8k-p59-dp2-tp2"
+    )
     p66_tp4_proxy = (
         self._data_size == 1
         and self._tp_size == 4
@@ -7470,12 +7476,13 @@ class Qwen3EngineForwardAdapter:
     if (
         self._data_size not in (8, 16)
         and not p59_four_chip_proxy
+        and not p59_two_by_two_proxy
         and not p66_tp4_proxy
     ):
       raise FunctionalMappingError(
           "P32 grouped reverse requires data size 8 or 16, the exact "
-          "P59 four-chip proxy, or the exact P66 DP1xTP4 proxy; got "
-          f"{self._data_size}"
+          "P59 four-chip proxy, the exact P59 DP2xTP2 proxy, or the "
+          f"exact P66 DP1xTP4 proxy; got {self._data_size}"
       )
     prompt = jnp.asarray(prompt)
     completion = jnp.asarray(completion)

@@ -42,19 +42,37 @@ def _span(name, start, duration, *, line_name="python3", **stats):
   return HIERARCHY.Span(name, start, duration, line_name, stats)
 
 
-def _fixture():
+def _fixture(groups: int = 16):
+  """One synthetic well-formed update at the requested group count.
+
+  Every offset derives from `groups` so the same builder exercises the
+  16-group DP4xTP1 layout and the 32-group DP2xTP2 layout: the forward
+  parent closes before loss_pullback, which closes before the first train,
+  and the optimizer commit is owned by the last train.
+  """
+  forward_end = 30 + groups * 10
+  loss_start = forward_end + 10
+  train_base = loss_start + 30
+  optimizer_start = train_base + groups * 35 + 5
+  update_end = optimizer_start + 70
   spans = [
-      _span("zero_tim_update", 0, 1000, update_step=2),
-      _span("forward_groups", 10, 180),
-      _span("loss_pullback", 200, 10),
-      _span("optimizer_commit", 900, 50, update_step=2),
+      _span("zero_tim_update", 0, update_end, update_step=2),
+      _span("forward_groups", 10, forward_end - 10),
+      _span("loss_pullback", loss_start, 10),
+      _span("optimizer_commit", optimizer_start, 50, update_step=2),
   ]
-  for index in range(16):
+  for index in range(groups):
     spans.append(_span("forward_group", 25 + index * 10, 5, group_index=index))
-    train_start = 230 + index * 35
-    train_duration = 955 - train_start if index == 15 else 32
+    train_start = train_base + index * 35
+    train_duration = (
+        optimizer_start + 55 - train_start if index == groups - 1 else 32
+    )
     spans.append(_span(
-        "train", train_start, train_duration, _r="1", step_num=32 + index
+        "train",
+        train_start,
+        train_duration,
+        _r="1",
+        step_num=2 * groups + index,
     ))
     start = train_start + 1
     spans.extend((
@@ -69,7 +87,7 @@ def _fixture():
             4,
             group_index=index,
             micro_step=index,
-            is_last_accumulate=int(index == 15),
+            is_last_accumulate=int(index == groups - 1),
         ),
     ))
   device_steps = {f"/device:TPU:{index}": 100 for index in range(8)}
@@ -227,6 +245,49 @@ class HierarchyTest(unittest.TestCase):
         ),
         [],
     )
+
+  def test_pure_hierarchy_validator_covers_the_dp2_geometry(self):
+    """The same interval semantics hold at the registered 32-group count."""
+    spans, device_steps, compiler_counts = _fixture(groups=32)
+    self.assertEqual(
+        HIERARCHY.validate_hierarchy(
+            spans,
+            device_step_counts=device_steps,
+            compiler_counts=compiler_counts,
+            expected_update_step=2,
+            expected_groups=32,
+        ),
+        [],
+    )
+    self.assertEqual(
+        TRACE_CENSUS.validate_trace(
+            spans,
+            compiler_counts=compiler_counts,
+            expected_update_step=2,
+            expected_groups=32,
+        ),
+        [],
+    )
+    # A dp2 capture judged with the dp4 expectation (and the reverse)
+    # rings instead of passing: count mismatches on every grouped name
+    # plus the train step-number window.
+    cross = HIERARCHY.validate_hierarchy(
+        spans,
+        device_step_counts=device_steps,
+        compiler_counts=compiler_counts,
+        expected_update_step=2,
+        expected_groups=16,
+    )
+    self.assertIn("train:count=32 expected=16", cross)
+    dp4_spans, dp4_steps, dp4_compilers = _fixture(groups=16)
+    cross = HIERARCHY.validate_hierarchy(
+        dp4_spans,
+        device_step_counts=dp4_steps,
+        compiler_counts=dp4_compilers,
+        expected_update_step=2,
+        expected_groups=32,
+    )
+    self.assertIn("train:count=16 expected=32", cross)
 
   def test_pure_hierarchy_validator_strong_negatives(self):
     spans, device_steps, compiler_counts = _fixture()
