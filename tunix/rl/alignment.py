@@ -48,6 +48,7 @@ P38_DIAGNOSTIC_ROUND_FILE_ENV = "CANON_P38_DIAGNOSTIC_ROUND_FILE"
 P38_ROUND_SEAL_REQUEST_DIR_ENV = "CANON_P38_ROUND_SEAL_REQUEST_DIR"
 P38_ROUND_SEAL_ACK_DIR_ENV = "CANON_P38_ROUND_SEAL_ACK_DIR"
 P38_ONEHOST_REHEARSAL_ENV = "CANON_P38_ONEHOST_REHEARSAL"
+P38_DURABILITY_PROFILE_ENV = "CANON_P38_DURABILITY_PROFILE"
 P38_MISMATCH_CAPSULE_ENV = "CANON_P38_MISMATCH_CAPSULE"
 P38_MISMATCH_CAPSULE_MAX_ROWS_ENV = "CANON_P38_MISMATCH_CAPSULE_MAX_ROWS"
 GSM8K_AB_REPORT_ONLY_ENV = "CANON_GSM8K_AB_REPORT_ONLY"
@@ -333,7 +334,8 @@ def stop_after_diagnostic_precheck(record: dict[str, Any]) -> None:
       "backward=0 optimizer_commits=0",
       flush=True,
   )
-  if rounds > 1:
+  durability_profile = os.environ.get(P38_DURABILITY_PROFILE_ENV, "")
+  if rounds > 1 or durability_profile in ("m15-wide-v1", "round-alignment-v1"):
     _seal_p38_diagnostic_round(round_index)
   if round_index + 1 < rounds:
     _P38_DIAGNOSTIC_ROUNDS_COMPLETED += 1
