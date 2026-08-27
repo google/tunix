@@ -105,6 +105,16 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument("--max_steps", type=int, default=1)
   parser.add_argument("--max_prompt_length", type=int, default=512)
   parser.add_argument("--max_response_length", type=int, default=128)
+  parser.add_argument(
+      "--train_max_response_length",
+      type=int,
+      default=0,
+      help=(
+          "Static completion length used for trainer/logprob batches. Defaults "
+          "to max_response_length; the launcher pads this for MaxText splash "
+          "attention when needed."
+      ),
+  )
   parser.add_argument("--train_micro_batch_size", type=int, default=1)
   parser.add_argument("--model_id", type=str, default="Qwen/Qwen3-1.7B")
   parser.add_argument("--tokenizer_path", type=str, default="")
@@ -195,7 +205,7 @@ def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:
   algo = algorithm_adapter.GRPOAdapter(
       group_size=args.num_generations,
       mini_batch_size=args.batch_size,
-      max_packed_len=args.max_prompt_length + args.max_response_length,
+      max_packed_len=args.max_prompt_length + args.train_max_response_length,
       clip_epsilon=args.epsilon,
       beta_kl=args.beta,
   )
@@ -417,6 +427,13 @@ def main(argv: list[str], context: Any = None) -> None:
     raise ValueError("num_generations must be greater than 1 for GRPO.")
   if args.train_micro_batch_size <= 0:
     raise ValueError("train_micro_batch_size must be positive.")
+  if args.train_max_response_length <= 0:
+    args.train_max_response_length = args.max_response_length
+  if args.train_max_response_length < args.max_response_length:
+    raise ValueError(
+        "train_max_response_length must be >= max_response_length so generated "
+        "tokens are not truncated before training."
+    )
   if args.max_staleness < 0:
     raise ValueError("offpolicy/max_staleness must be non-negative.")
 
@@ -429,6 +446,12 @@ def main(argv: list[str], context: Any = None) -> None:
       args.max_staleness,
   )
   logging.info("Weight sync enabled: %s", args.sync_weights)
+  logging.info(
+      "Generation max_response_length=%d; trainer/logprob "
+      "train_max_response_length=%d.",
+      args.max_response_length,
+      args.train_max_response_length,
+  )
 
   tokenizer_path = args.tokenizer_path or os.getenv("MODEL_DIR") or args.model_id
   tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
@@ -515,7 +538,7 @@ def main(argv: list[str], context: Any = None) -> None:
       assembler=batch_assembly.GRPOTrainExampleAssembler(
           batch_size=args.train_micro_batch_size,
           max_prompt_length=args.max_prompt_length,
-          max_response_length=args.max_response_length,
+          max_response_length=args.train_max_response_length,
           pad_id=pad_id,
       ),
       max_staleness=args.max_staleness,

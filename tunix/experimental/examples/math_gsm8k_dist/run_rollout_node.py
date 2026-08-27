@@ -36,8 +36,8 @@ REPO_ROOT = os.path.abspath(
 SAMPLERS = ("inprocess_vllm",)
 
 # This must be set before the first vLLM import. Keep vLLM imports lazy so the
-# rollout process can start with non-vLLM samplers in environments where vLLM is
-# not installed.
+# runtime context and logging are already configured if TPU/vLLM initialization
+# fails.
 os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 
 CHAT_PARSERS = {
@@ -48,6 +48,7 @@ CHAT_PARSERS = {
 
 
 def _import_vllm_sampler():
+  """Imports Tunix's vLLM sampler before rollout-side sync adapters."""
   logging.info(
       "Importing tunix.generate.vllm_sampler before rollout adapters..."
   )
@@ -67,6 +68,17 @@ def _chat_parser_for(model_id: str, tokenizer):
   )
 
 
+def _str_to_bool(value: str | bool) -> bool:
+  if isinstance(value, bool):
+    return value
+  normalized = value.lower()
+  if normalized in ("1", "true", "t", "yes", "y"):
+    return True
+  if normalized in ("0", "false", "f", "no", "n"):
+    return False
+  raise argparse.ArgumentTypeError(f"invalid boolean value: {value!r}")
+
+
 def _parse_args(argv: list[str]) -> argparse.Namespace:
   """Parses command line arguments for the rollout worker process."""
   from tunix.experimental.weight_sync import (  # pylint: disable=g-import-not-at-top
@@ -76,7 +88,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser = argparse.ArgumentParser(description="vLLM rollout worker process")
   parser.add_argument("--port", type=int, default=20001)
   parser.add_argument("--worker_id", type=str, default="vllm-rollout-0")
-  parser.add_argument("--model_id", type=str, default="Qwen/Qwen3-1.7B")
+  parser.add_argument("--model_id", type=str, default=os.getenv("MODEL_ID", ""))
+  models.add_model_source_args(parser)
   parser.add_argument(
       "--model_dir", type=str, default=os.getenv("MODEL_DIR", "")
   )
@@ -106,6 +119,11 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       choices=list(weight_sync.WeightSyncMode),
       help="Weight sync mode (e.g. raiden, fallback).",
   )
+  parser.add_argument(
+      "--vllm_init_with_random_weights",
+      type=_str_to_bool,
+      default=_str_to_bool(os.getenv("VLLM_INIT_WITH_RANDOM_WEIGHTS", "false")),
+  )
   return parser.parse_args(argv)
 
 
@@ -128,6 +146,31 @@ def _create_rollout_mesh(args) -> Any:
   return mesh
 
 
+def _tokenizer_path(args) -> str:
+  if args.tokenizer_path:
+    return args.tokenizer_path
+  if models.is_maxtext_source(args.model_source):
+    return args.model_id
+  return args.model_dir or args.model_id
+
+
+def _register_maxtext_vllm_adapter() -> None:
+  try:
+    from maxtext.integration.vllm import (  # pylint: disable=g-import-not-at-top
+        maxtext_vllm_adapter,
+    )
+  except ImportError as exc:
+    raise RuntimeError(
+        "MaxText rollout requires maxtext.integration.vllm. Install MaxText "
+        "with its vLLM integration before running MODEL_SOURCE=maxtext."
+    ) from exc
+
+  maxtext_vllm_adapter.register()
+  logging.info(
+      "Registered %s with vLLM.", models.MAXTEXT_VLLM_ARCHITECTURE
+  )
+
+
 def _create_vanilla_worker(args, tokenizer):
   """Creates a vanilla sampler rollout worker instance."""
   from tunix.experimental.rollout import (  # pylint: disable=g-import-not-at-top
@@ -145,7 +188,6 @@ def _create_vanilla_worker(args, tokenizer):
   from tunix.generate import (  # pylint: disable=g-import-not-at-top
       tokenizer_adapter as tokenizer_adapter_lib,
   )
-
   logging.info("Creating native sampler on the rollout mesh...")
   mesh = _create_rollout_mesh(args)
   with mesh:
@@ -192,7 +234,6 @@ def _create_vanilla_worker(args, tokenizer):
 def _create_vllm_worker(args, tokenizer):
   """Creates an in-process vLLM sampler rollout worker instance."""
   vllm_sampler = _import_vllm_sampler()
-  import jax  # pylint: disable=g-import-not-at-top
   from tunix.experimental.rollout import (  # pylint: disable=g-import-not-at-top
       inprocess_vllm_sampler_adapter,
   )
@@ -209,21 +250,53 @@ def _create_vllm_worker(args, tokenizer):
       mapping_vllm_jax,
   )
 
-  logging.info("Creating vLLM mapping config...")
-  mapping_config = mappings_lib.MappingConfig(
-      lora_to_hf_mappings=mapping_vllm_jax.LORA_TO_HF_MAPPINGS
-  )
-  vllm_model = args.model_dir or args.model_id
   rollout_mesh = _create_rollout_mesh(args)
+  is_maxtext = models.is_maxtext_source(args.model_source)
+  if is_maxtext:
+    _register_maxtext_vllm_adapter()
+
+  logging.info("Creating vLLM mapping config...")
+  mapping_config = (
+      mappings_lib.MappingConfig()
+      if is_maxtext
+      else mappings_lib.MappingConfig(
+          lora_to_hf_mappings=mapping_vllm_jax.LORA_TO_HF_MAPPINGS
+      )
+  )
+  vllm_model = (
+      _tokenizer_path(args) if is_maxtext else args.model_dir or args.model_id
+  )
   max_model_len = args.max_prompt_length + args.max_response_length
+  engine_kwargs = {
+      "model": vllm_model,
+      "max_model_len": max_model_len,
+  }
+  additional_config = {}
+  if is_maxtext:
+    engine_kwargs.update({
+        "tokenizer": _tokenizer_path(args),
+        "dtype": args.maxtext_dtype,
+        "hf_overrides": {
+            "architectures": [models.MAXTEXT_VLLM_ARCHITECTURE]
+        },
+    })
+    additional_config = models.maxtext_vllm_additional_config(
+        mesh=rollout_mesh,
+        max_prompt_length=args.max_prompt_length,
+        max_response_length=args.max_response_length,
+        model_name=args.model_name,
+        model_dir=args.model_dir,
+        dtype=args.maxtext_dtype,
+    )
   logging.info(
       "Creating vLLM config for model=%s mesh=%s tensor_parallel_size=%d "
-      "data_parallel_size=%d max_model_len=%d...",
+      "data_parallel_size=%d max_model_len=%d model_source=%s...",
       vllm_model,
       rollout_mesh,
       args.mesh_tp,
       args.mesh_fsdp,
       max_model_len,
+      args.model_source,
   )
   lora_config = None
   if args.use_lora:
@@ -235,13 +308,15 @@ def _create_vllm_worker(args, tokenizer):
       mesh=rollout_mesh,
       tensor_parallel_size=args.mesh_tp,
       data_parallel_size=args.mesh_fsdp,
+      # MaxText's vLLM inference config uses singleton attn_dp mesh axes in its
+      # logical axis rules. This asks tpu-inference to materialize those axes.
+      enable_dp_attention=is_maxtext,
       return_logprobs=True,
+      init_with_random_weights=args.vllm_init_with_random_weights,
       lora_config=lora_config,
       mapping_config=mapping_config,
-      engine_kwargs={
-          "model": vllm_model,
-          "max_model_len": max_model_len,
-      },
+      additional_config=additional_config,
+      engine_kwargs=engine_kwargs,
   )
   sampler_adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
       server_id=args.worker_id,
@@ -289,20 +364,30 @@ def main(argv: list[str], context: Any = None) -> None:
 
   args = _parse_args(argv)
   logging.info("Parsed args: %s", args)
-
+  if args.sampler == "vanilla" and models.is_maxtext_source(args.model_source):
+    raise ValueError(
+        "MODEL_SOURCE=maxtext is not supported with SAMPLER=vanilla. The "
+        "MaxText Tunix adapter is intended for trainer/full-forward use and "
+        "MaxText vLLM rollout, but the vanilla sampler runs a compiled "
+        "autoregressive decode loop that is incompatible with MaxText's "
+        "mutable NNX state updates. Use SAMPLER=inprocess_vllm for MaxText "
+        "rollout, or use MODEL_SOURCE=safetensors with SAMPLER=vanilla."
+    )
   if context:
     context.jax.initialize()
   os.environ.setdefault("VLLM_ALLOW_LONG_MAX_MODEL_LEN", "1")
   os.environ.setdefault("VLLM_TPU_RPA_VERSION", "2")
   os.environ.setdefault("DISABLE_MOSAIC_ATTN", "1")
   os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+  if models.is_maxtext_source(args.model_source):
+    os.environ.setdefault("NEW_MODEL_DESIGN", "1")
   if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
   logging.info("Repo root inserted into sys.path: %s", REPO_ROOT)
 
   from transformers import AutoTokenizer  # pylint: disable=g-import-not-at-top
 
-  tokenizer_path = args.tokenizer_path or args.model_dir or args.model_id
+  tokenizer_path = _tokenizer_path(args)
   logging.info("Loading tokenizer from %s...", tokenizer_path)
   tokenizer: Any = AutoTokenizer.from_pretrained(
       tokenizer_path, trust_remote_code=True
