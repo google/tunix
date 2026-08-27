@@ -542,7 +542,14 @@ fi
     self.assertIn('--trace-census-rc "$trace_census_rc"', common)
     self.assertIn('--size-census-rc "$size_census_rc"', common)
     self.assertIn("-e CANON_XPROF_SKIP_STEPS=2", common)
-    self.assertIn("CANON_XPROF_TPU_TRACE_MODE=TRACE_ONLY_XLA", common)
+    # The TPU trace mode is passed through with the update-phase default so
+    # the rollout wrappers can clear it; the arm contract enforces the
+    # phase/trace-mode pairing.
+    self.assertIn(
+        'CANON_XPROF_TPU_TRACE_MODE="${CANON_XPROF_TPU_TRACE_MODE'
+        '-TRACE_ONLY_XLA}"',
+        common,
+    )
     self.assertIn("-e CANON_PERF_TRACE_EXPORT_STEP=2", common)
     self.assertIn("finalize_gsm8k_xprof_evidence.sh", common)
     self.assertIn('sha_inputs=("$raw" "$driver")', common)

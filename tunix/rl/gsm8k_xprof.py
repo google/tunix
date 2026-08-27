@@ -238,12 +238,10 @@ def arm(values: Mapping[str, str] | None = None) -> str:
       "CANON_P30_OPT_STATE_OFFLOAD": "0",
       "CANON_VLLM_ENABLE_PREFIX_CACHING": "0",
       "CANON_P60_DETERMINISTIC_AB": "1",
-      "CANON_XPROF_PHASE": "update",
       "CANON_XPROF_SKIP_STEPS": "2",
       "CANON_XPROF_STEPS": "1",
       "CANON_XPROF_HOST_TRACER": "1",
       "CANON_XPROF_PYTHON_TRACER": "0",
-      "CANON_XPROF_TPU_TRACE_MODE": "TRACE_ONLY_XLA",
       "CANON_XPROF_LABELS": "1",
   }
   wrong = {
@@ -251,6 +249,20 @@ def arm(values: Mapping[str, str] | None = None) -> str:
       for name, expected in common.items()
       if values.get(name) != expected
   }
+  # The capture phase is a signed two-value contract paired with the TPU
+  # trace mode: update (backward window, the certification default) takes
+  # TRACE_ONLY_XLA, while step (rollout diagnostic window) must leave the
+  # TPU trace mode empty -- the learner admits it only for update.
+  phase = values.get("CANON_XPROF_PHASE")
+  tpu_trace_mode = values.get("CANON_XPROF_TPU_TRACE_MODE")
+  if phase == "update":
+    if tpu_trace_mode != "TRACE_ONLY_XLA":
+      wrong["CANON_XPROF_TPU_TRACE_MODE"] = tpu_trace_mode
+  elif phase == "step":
+    if tpu_trace_mode not in ("", None):
+      wrong["CANON_XPROF_TPU_TRACE_MODE"] = tpu_trace_mode
+  else:
+    wrong["CANON_XPROF_PHASE"] = phase
   if not values.get("CANON_XPROF_DIR"):
     wrong["CANON_XPROF_DIR"] = values.get("CANON_XPROF_DIR")
   if not values.get("CANON_PERF_TRACE_DIR"):
