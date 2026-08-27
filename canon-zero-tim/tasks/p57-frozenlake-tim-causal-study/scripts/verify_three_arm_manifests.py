@@ -105,7 +105,8 @@ def verify(path: Path, *, wave: str, workload: str, source: str) -> None:
 
   package = Path(__file__).resolve().parents[3]
   with tempfile.TemporaryDirectory(prefix=f"p57-{workload}-{wave}-") as tmp:
-    state = Path(tmp)
+    state = Path(tmp) / "state"
+    state.mkdir()
     result = subprocess.run(
         ["bash", "cluster/steps/00_env.sh"],
         cwd=package,
