@@ -254,6 +254,88 @@ class ClusterOrchestratorTest(absltest.TestCase):
         engine=mock_engine,
     )
 
+  def test_run_auto_instantiated_program_closes_on_success(self):
+    mock_algo = mock.MagicMock(spec=algorithm_adapter.AlgorithmAdapter)
+    self.orch.run_program = mock.MagicMock()
+
+    with mock.patch.object(
+        rl_program.StandardRLProgram, "close", autospec=True
+    ) as mock_close:
+      self.orch.run(
+          algo=mock_algo,
+          dataset=["prompt_1"],
+          program=None,
+          max_steps=1,
+      )
+      self.orch.run_program.assert_called_once()
+      created_program = self.orch.run_program.call_args.kwargs["program"]
+      self.assertIsInstance(created_program, rl_program.StandardRLProgram)
+      mock_close.assert_called_once_with(created_program)
+
+  def test_run_auto_instantiated_program_closes_on_exception(self):
+    mock_algo = mock.MagicMock(spec=algorithm_adapter.AlgorithmAdapter)
+    self.orch.run_program = mock.MagicMock(
+        side_effect=RuntimeError("Engine failure")
+    )
+
+    with mock.patch.object(
+        rl_program.StandardRLProgram, "close", autospec=True
+    ) as mock_close:
+      with self.assertRaises(RuntimeError):
+        self.orch.run(
+            algo=mock_algo,
+            dataset=["prompt_1"],
+            program=None,
+            max_steps=1,
+        )
+      self.orch.run_program.assert_called_once()
+      created_program = self.orch.run_program.call_args.kwargs["program"]
+      mock_close.assert_called_once_with(created_program)
+
+  def test_run_caller_supplied_program_preserves_external_ownership(self):
+    mock_algo = mock.MagicMock(spec=algorithm_adapter.AlgorithmAdapter)
+    caller_program = mock.MagicMock(spec=rl_program.RLProgram)
+    self.orch.run_program = mock.MagicMock()
+
+    self.orch.run(
+        algo=mock_algo,
+        dataset=["prompt_1"],
+        program=caller_program,
+        max_steps=1,
+    )
+    self.orch.run_program.assert_called_once_with(
+        program=caller_program,
+        bring_up=False,
+    )
+    caller_program.close.assert_not_called()
+
+  def test_run_auto_instantiated_program_defers_close_for_running_bg_task(self):
+    mock_algo = mock.MagicMock(spec=algorithm_adapter.AlgorithmAdapter)
+    mock_task = mock.MagicMock()
+    mock_task.done.return_value = False
+
+    def mock_run_program(program, **kwargs):
+      del kwargs
+      program._bg_task = mock_task
+
+    self.orch.run_program = mock.MagicMock(side_effect=mock_run_program)
+
+    with mock.patch.object(
+        rl_program.StandardRLProgram, "close", autospec=True
+    ) as mock_close:
+      self.orch.run(
+          algo=mock_algo,
+          dataset=["prompt_1"],
+          program=None,
+          max_steps=1,
+      )
+      self.orch.run_program.assert_called_once()
+      # Ensure close() was NOT called prematurely
+      mock_close.assert_not_called()
+      # Ensure done callback was registered
+      mock_task.add_done_callback.assert_called_once()
+
+
 
 if __name__ == "__main__":
   absltest.main()

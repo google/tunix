@@ -283,7 +283,15 @@ class ClusterOrchestrator:
         metrics_logging_options=metrics_logging_options,
         metrics_prefix=metrics_prefix,
     )
-    self.run_program(
-        program=active_program,
-        bring_up=False,
-    )
+    try:
+      self.run_program(
+          program=active_program,
+          bring_up=False,
+      )
+    finally:
+      if program is None:
+        bg_task = getattr(active_program, "_bg_task", None)
+        if bg_task is not None and not bg_task.done():
+          bg_task.add_done_callback(lambda _: active_program.close())
+        else:
+          active_program.close()
