@@ -127,3 +127,44 @@ State the resolved tuple, absence-sensitive keys, exact reader process,
 positive/negative tests, terminal markers, and what remains target-unverified.
 Update `FLAGS.md` and the owning phase/runbook/handoff in the same concern.
 Never claim Native/Zero isolation from environment text alone.
+
+## System-optimization flag family (P68-P71)
+
+The 2026-08 reverse-path optimization wave left three classes of switch.
+Classify a new optimization flag into one of them before designing it.
+
+**Flagless (no switch at all).** The jitted gradient assembly and tree
+programs, the per-group dispatch-prep hoist, and the reducer program
+cache changed dispatch packaging only: same operations, same order, same
+dtypes, one program instead of many. Bitwise identity is structural, so
+a switch would only add a way to be wrong. Prefer this class whenever
+the change cannot alter a value — and prove it (norm anchor plus module
+fingerprints), never assert it.
+
+**Selector with a proven geometry (`CANON_DP_COLLECTIVE_REDUCE`,
+`CANON_P71_SCAN`).** These change how a computation is expressed, so
+their verdict is geometry-scoped and the ledger must say where. Record
+the topology each value was proven on, not just "green": psum is
+bitwise-verified at DP4xTP1 and unverified against the FP64 oracle at
+DP16; `fwd` is bitwise at DP4xTP1 and DP16xTP1 and untested at TP>1;
+`bwd` fails closed on a non-unit model axis by construction. A value
+that cannot run on a topology must refuse, not degrade.
+
+**Receipt selector (`CANON_DP_COMPARE_MODE`,
+`CANON_DP_DISTINCT_SCHEDULE`, `CANON_DP_FINITE_FETCH`).** These leave
+every gradient bit alone and change only how often, and how thoroughly,
+a receipt is taken. Each needs its own R1 conservation argument, its own
+kill-test in the bench registry, and its own retirement path — which is
+why they are three enums and not one mode. Never fold receipt selectors
+into a performance selector: a future retirement of one must not rename
+the values of another.
+
+Delivery differs by lane and is the usual place these break. One-host
+docker carriers need an explicit `-e` per flag in the runner *and* the
+launch prefix; a workload profile sourced inside the container overrides
+both. Target JobSets take neither: the pod environment is assembled by
+the renderer's env dict plus the profile's `export` lines, so a flag
+that only exists in a docker runner silently does not reach the target.
+Add the passthrough in the same change as the flag, and verify delivery
+by a runtime fingerprint (module or collective census), never by
+reading the launch command.
