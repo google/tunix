@@ -1255,3 +1255,35 @@
 - Boundary: source publication is complete. Matching image publication,
   Kubernetes dry-run/apply, and the 128-chip target remain separately
   approval-gated and NOT RUN.
+
+## 2026-08-27T20:54:15Z — p58z08 classified as wrong-arm evidence
+
+- Type: source synchronization / target evidence analysis / handoff
+  correction.
+- Source: a fresh fast-forward pull found no newer operator commit; HEAD
+  remains `5d4f2fceb6996bb0a5e2149a21c8fd846d89dcb5`. The analyzed `p58z08`
+  target used source `395c0e0de8626c96e85457b997efddd2dd2dec48`.
+- Result: 128 trajectories completed (120 succeeded, five model-timeout,
+  three context-limit), with four solves, two effective groups, and 30
+  admitted nonzero advantages. The first hard failure was strict Step-0
+  pre-backward A-B alignment; no backward or optimizer transaction occurred.
+- Numerical evidence: `N_action=389067`; B-C exact; A-B differs in 17,507
+  elements / 39,031 bytes, first finite delta `0.02544403076171875` at an
+  environment-to-action boundary, later maximum `9.499740600585938`. This
+  corrects the incident report's byte-count-as-token wording without
+  rewriting the immutable report.
+- Arm classification: the raw log has no P58.17 selector, diagnostic job
+  identity, controlled precheck exit, or diagnostic classifier. It explicitly
+  enables checked VMA, the first-update gate, and P63. `p58z08` is therefore
+  a repeated ordinary Zero-HP full arm, not a failed checked-VMA-off arm.
+- Validation: current-tip renderer 24/24, profile 8/8, and diagnostic
+  classifier 6/6 focused tests pass; `git diff --check` passes. The broader
+  environment-contract test cannot import the optional host dependency
+  `metrax` in this checkout, so it is not claimed here; the previously
+  recorded pinned-image construction result remains the applicable gate.
+- Next gate: use only the render-only P58.17 wrapper, verify the rendered
+  `zero-hp-vmaoff-precheck` identity and all five derived-off receipts, then
+  obtain separate approval for one exact-geometry Step-0 launch. Exact A-B
+  selects an explicit P59 pullback-identity repair for P67; finite-red A-B
+  with exact B-C selects seam replay. No code fix, image publication,
+  Kubernetes mutation, TPU launch, commit, or push occurred here.

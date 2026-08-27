@@ -1,5 +1,34 @@
 # State
 
+## Current p58z08 intake correction (2026-08-27)
+
+- Status: analysis complete; P58.17 exact-geometry checked-VMA-off target is
+  still NOT RUN. A fresh pull left the operator worktree at
+  `5d4f2fceb6996bb0a5e2149a21c8fd846d89dcb5` with no newer target artifact.
+- `p58z08` used source `395c0e0de8626c96e85457b997efddd2dd2dec48`
+  and the ordinary `zero-hp-full` job identity. It did not contain the P58.17
+  selector, diagnostic job name, precheck marker, controlled exit, or
+  diagnostic classification. Checked VMA, the first-update gate, and P63 were
+  enabled. Therefore it is not a failed checked-VMA-off arm.
+- Rollout/data fact: 128 rows; 120 succeeded, five model-timeout, three
+  context-limit; four solved trajectories; two effective prompt groups; 30
+  admitted nonzero advantages. This is not an all-zero or sandbox-capacity
+  failure.
+- Numerical fact: `N_action=389067`; B-C (`S_prefill_vs_T_old`) is exact; A-B
+  has 17,507 differing elements and 39,031 differing bytes. First delta is
+  `0.02544403076171875` at an environment-to-action boundary; later maximum is
+  `9.499740600585938`. The incident report incorrectly labels the byte count
+  as token differences; preserve the report and use this correction.
+- First failing boundary: strict pre-backward A-B gate. No VJP, backward,
+  optimizer update, or checkpoint commit executed. The archived raw
+  log/report lack a complete packaged run and classifier, so the evidence is
+  analysis-grade.
+- Next action: render and, only after separate approval, run the exact P58.17
+  128-chip `zero-hp-vmaoff-precheck` discriminator. Exact A-B implicates the
+  topology-shaped P67/VMA scope and triggers an explicit pullback-identity
+  repair; finite-red A-B with exact B-C promotes seam replay. Do not launch
+  another ordinary 1,000-update Zero-HP job before this gate.
+
 ## Current P58.17 decode-vs-prefill seam checkpoint (2026-08-27)
 
 - Status: one-host diagnostic complete; exact-geometry checked-VMA-off

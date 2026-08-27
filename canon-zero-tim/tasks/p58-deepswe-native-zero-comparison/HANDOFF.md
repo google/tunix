@@ -1,5 +1,86 @@
 # P58 DeepSWE native-first training handoff
 
+## 2026-08-27 p58z08 intake — wrong arm for P58.17; rerun only the discriminator
+
+The operator branch is still at
+`5d4f2fceb6996bb0a5e2149a21c8fd846d89dcb5` after a fresh pull. There is no
+newer target log. The newly archived `p58z08` run used source
+`395c0e0de8626c96e85457b997efddd2dd2dec48` and the ordinary job identity
+`canon-p58-ds4b-zero-hp-full-p58z08`. It is useful analysis-grade evidence,
+but it is **not** the P58.17 checked-VMA-off discriminator and must not be
+reported as a failed discriminator.
+
+The log proves a healthy Step-0 rollout/data path: 128 durable trajectories,
+120 `SUCCEEDED`, five `MODEL_TIMEOUT`, three `MAX_CONTEXT_LIMIT_REACHED`, four
+solved trajectories, two effective prompt groups, and 30 admitted nonzero
+advantages. The strict pre-backward gate then stopped before VJP, backward,
+AdamW, update, or checkpoint commit. Over `N_action=389067`,
+`S_prefill_vs_T_old` is exact while `S_decode_vs_S_prefill` differs in 17,507
+logprob elements / 39,031 serialized bytes. The first finite delta is
+`0.02544403076171875` at logical prefix 2,141, turn 1, immediately after an
+environment token; the later maximum is `9.499740600585938`.
+
+The incident report's phrase "39,031 token logprob differences" is a metric
+label error: 39,031 is the byte count; 17,507 is the differing-element count.
+Keep the immutable report and use this correction in all later claims.
+
+Most importantly, the raw log contains zero occurrences of all of the
+following:
+
+```text
+CANON_P58_CHECKED_VMA_DIAGNOSTIC
+P58_CHECKED_VMA_DIAGNOSTIC_CLASSIFICATION
+zero-hp-vmaoff-precheck
+CANON_P38_PRECHECK_ONLY
+CANON_P38_PRECHECK_CONTROLLED_EXIT
+```
+
+It instead says that P59 checked VMA, the first-update gate, and P63 clipping
+were enabled. This is an arm-selection failure: an ordinary 1,000-update
+Zero-HP YAML was launched after P58.17 had already supplied a dedicated
+Step-0 diagnostic renderer.
+
+### Exact next run
+
+Do not rerun `zero-hp-full`, do not hand-edit its YAML, and do not switch the
+strict Zero lane to warning-only. Fetch the final operator tip, build/read
+back the matching digest-pinned image as required by the run contract, then
+use only the render-only wrapper documented below:
+
+```bash
+export P58_EXPECT_SOURCE_SHA=<exact-current-published-40-character-sha>
+bash canon-zero-tim/tasks/p58-deepswe-native-zero-comparison/scripts/prepare_p58_checked_vma_off_diagnostic.sh \
+  <fresh-short-run-id> \
+  <matching-image@sha256:...> \
+  <worker-nodepool-or-auto> \
+  /tmp/p58-checked-vma-off.yaml
+```
+
+Before any separately approved apply, inspect the rendered artifact. Its name
+must contain `zero-hp-vmaoff-precheck`; its labels must state
+`diagnostic=p58-checked-vma-off`, `backward=0`, and `optimizer-commits=0`.
+The runtime must print the selector and its derived tuple with checked VMA,
+P66 alias, P67 scoping, first-update gate, and P63 all zero. Absence of any of
+those receipts is a wrong-arm result and must stop before spending TPU time.
+
+Return the complete run root and classifier. The decision is deliberately
+binary:
+
+- `A_B_EXACT_WITH_CHECKED_VMA_OFF`, with B-C exact: checked-VMA/P67 scoping is
+  causally implicated. Repair P67 by keying the four VMA consumers to an
+  explicit P59 pullback identity, never to abstract-mesh shape. Add serving
+  negatives for DP1xTP8 and DP8xTP8 plus trainer positives, then rerun one
+  checked-VMA-on Step-0 strict gate before any full training.
+- `A_B_RED_WITH_CHECKED_VMA_OFF`, with B-C exact: checked VMA is not a
+  sufficient cause. Preserve the result and promote exact-geometry
+  decode/prefill seam replay, beginning at the first environment-to-action
+  boundary; do not weaken the gate or change optimizer/loss/sampling.
+
+Either outcome is a diagnostic result only. A full 1,000-update Zero-HP run
+becomes eligible only after the selected repair has passed a fresh strict
+Step-0 A=B=C gate. Image publication, Kubernetes dry-run/apply, and TPU launch
+remain separately approval-gated.
+
 ## 2026-08-27 P58.17 exact-geometry selector — source published, target not run
 
 Supersede the last sentence of the one-host section below: the production
