@@ -1,0 +1,30 @@
+{
+  "attempt": 11,
+  "run_id": "d17",
+  "source_commit": "f7adb4e6fb4b86698c0386079b3a17da031a4578",
+  "source_branch": "yuxzhang/canon-zero-tim",
+  "workload": "v1-apc-m15-wide-target-debug",
+  "topology": "DP8xTP8 (64 chips per arm)",
+  "verdict": "INCONCLUSIVE_INCIDENT_LEDGER_SATURATION",
+  "control": {
+    "jobset": "canon-v1-apc-m15-off-d17-f7adb4e6",
+    "prefix_cache_hit_rate": 0.0,
+    "prompt_throughput_tok_per_sec": 458.0,
+    "solve_rate": 0.188,
+    "seam_records": 2153,
+    "layers_completed": 36
+  },
+  "treatment": {
+    "jobset": "canon-v1-apc-m15-on-d17-f7adb4e6",
+    "prefix_cache_hit_rate": 0.931,
+    "prompt_throughput_tok_per_sec": 4179.0,
+    "solve_rate": 0.188,
+    "seam_records": 2104,
+    "layers_completed": 36
+  },
+  "failure": {
+    "boundary": "90_run.sh serving capture stage=begin",
+    "exception": "RuntimeError: P38 incident ledger exceeded its registered byte bound",
+    "consequence": "Script exited before classify_m15_apc_wide_seam.py and GCS upload"
+  }
+}

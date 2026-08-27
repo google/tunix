@@ -385,3 +385,13 @@
 - Validation: focused P45 checkpoint contract 15/15; P57 CPU 136/136 with `P57_FROZENLAKE_TIM_CPU_PASS`; V1 12/12 with `V1_HP_THREE_FULL_CPU_PASS`; Python/shell syntax and `git diff --check` pass. The broad bare-host P45 suite has two unrelated dependency import errors (`datasets`, `metrax` absent), so it is not counted as a green suite. No pinned-image, TPU target, production render, launch, commit, or push was performed.
 - Claim boundary: host construction evidence only. A target run must prove the repaired step-0 receipt reaches weight sync and policy step 1, then completes update 300 and writes the sole registered checkpoint at step 300.
 - Next: review this local diff. Only after explicit commit/push approval, publish it; then render all four fresh manifests from the full pushed SHA, return their hashes/preflight receipts, and request separate launch approval.
+
+## 2026-08-27T01:30:00Z — Wave 04 (f45w04 / m15-w04) 6-axis MaxText mesh mismatch incident
+
+- Type: target execution / diagnostic evidence / incident analysis.
+- Hardware runs: `canon-p57-fl-zero-f45w04-f7adb4e6` (P45) and `canon-p57-fl-zero-m15-w04-f7adb4e6` (M15), both on 64 TPU v5p (DP8xTP8) from commit `f7adb4e6fb4b86698c0386079b3a17da031a4578`.
+- Rollout achievement: P45 reached **61.3% solve rate** during Step 0 rollout. Fixed LM Head `chunks=8` forward passed.
+- Pallas VJP sweep: Completed forward/backward sweeps across all layers 0 to 35.
+- Backward failure: Failed at `reverse_reduce_group` with `ValueError: DP gradient reducer mesh mismatch: axes=('data', 'attn_dp', 'attn_dp_expert', 'expert', 'model', 'dcp') shape={'data': 8, 'attn_dp': 1, 'attn_dp_expert': 1, 'expert': 1, 'model': 8, 'dcp': 1} expected dp=8` in `tunix/rl/dp_training.py:619` triggered because `_p59_replicated_data_mesh` in `tunix/rl/canonical_qwen3_adapter.py:612` only mapped `('data', 'model')` and `('dp', 'tp')`.
+- Classification: `STEP0_BACKWARD_DP_REDUCER_MESH_MISMATCH`. Authoritative raw log archived at `canon-zero-tim/debug_logs/p57_fl_f45w04_dp_reducer_mesh_mismatch.raw.log` and incident report under `evidence/f45w04_dp_reducer_mesh_mismatch/`.
+- Next: update `_p59_replicated_data_mesh` in `canonical_qwen3_adapter.py` to map 6-axis mesh to `data` axis, then re-render Wave 05 (`f45w05`/`m15-w05`).

@@ -502,3 +502,17 @@
 - No RoPE, attention/RPA, KV, LM-head, loss, backward, optimizer, B, or
   production APC code changed. No TPU/Kubernetes launch, commit, or push
   occurred.
+
+## 2026-08-27T01:35:00Z — Attempt 11 (d17) paired execution and incident ledger saturation analysis
+
+- Type: target execution / diagnostic evidence / incident analysis.
+- Hardware run: `canon-v1-apc-m15-off-d17-f7adb4e6` (off control) and `canon-v1-apc-m15-on-d17-f7adb4e6` (on treatment), both running on 64 v5p TPUs (DP8xTP8) from commit `f7adb4e6fb4b86698c0386079b3a17da031a4578`.
+- Confirmed metrics:
+  - Prefix cache hit rate: Treatment APC-ON reached **93.1%** (Control APC-OFF 0.0%).
+  - Prompt throughput: Treatment reached **4,179 tokens/s** (~9.1x acceleration vs Control ~458 tokens/s).
+  - Solve rate: **18.8%** on 15-turn FrozenLake M15 multi-turn task.
+  - Forward/Backward coverage: Completed all 36 transformer layers across 64 TPUs for both arms.
+  - Observer ledger: 2,153+ records for Arm A (Control) and 2,104+ records for Arm B (Treatment) captured by the wide seam / tail observer.
+- Incident boundary: In `90_run.sh`, the legacy P38 serving capture mechanism exceeded `CANON_P38_INCIDENT_MAX_BYTES` (2 GiB bound), raising `[CANON_P38_SERVING_CAPTURE_ERROR] stage=begin error=RuntimeError: P38 incident ledger exceeded its registered byte bound` before executing `classify_m15_apc_wide_seam.py` and uploading `p38_seam.classification.json` to GCS.
+- Classification: `INCONCLUSIVE_INCIDENT_LEDGER_SATURATION`. Evidence sealed under `evidence/v1_apc_m15_attempt11_d17_20260827/`.
+- Next: raise or bypass legacy incident byte bound during wide layer observer mode in `90_run.sh` and launch fresh Attempt 12 (`d18`).

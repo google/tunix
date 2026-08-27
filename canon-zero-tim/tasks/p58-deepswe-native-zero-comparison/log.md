@@ -1086,3 +1086,14 @@
   touched.
 - No image publication, Kubernetes mutation, TPU launch, or `p58z03` target
   was authorized by this source publication. Those remain separately gated.
+
+## 2026-08-27T02:25:00Z — P58z07 NNX fix validation and pre-backward alignment gate halt
+
+- Type: target execution / diagnostic evidence / incident analysis.
+- Hardware run: `canon-p58-ds4b-zero-hp-full-p58z07` running on 128 TPU v5p (DP8xTP8 Rollout + DP8xTP8 Trainer) from commit `ef46b0b3a5d8754160f0cce323ec3861b04dccdc`.
+- P58.16 NNX Loader Metadata validation: `_canonical_nnx_state_treedef()` successfully passed State treedef contract with 398 leaves, completely resolving the prior `FunctionalMappingError`.
+- Rollout completion: Step 0 completed all 128 trajectories (379,496 Action Tokens) across 128 R2E docker sandboxes.
+- Alignment precheck: `bounds=[('S_decode_vs_S_prefill', 71797), ('S_prefill_vs_T_old', 0)]`. Prefill vs Token Old logprob was bitwise exact (`S_prefill_vs_T_old = 0`).
+- Gate failure: Pre-backward alignment gate failed with `AlignmentGateError: pre-backward alignment gate RED: ['S_decode_vs_S_prefill']` due to 71,797 mismatch tokens between decode and prefill logprobs.
+- Classification: `PRE_BACKWARD_ALIGNMENT_GATE_RED`. Authoritative raw log archived at `canon-zero-tim/debug_logs/p58_p58z07_deepswe_s_decode_vs_prefill_gate.raw.log` and incident report under `evidence/p58z07_s_decode_vs_prefill_gate/`.
+- Next: use native warning-only alignment or investigate decode-vs-prefill attention divergence in Qwen3-4B.
