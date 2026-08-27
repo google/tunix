@@ -1,5 +1,47 @@
 # State
 
+## Current P58.16 NNX loader-metadata checkpoint (2026-08-27)
+
+- Status: local implementation on pulled operator base
+  `959a3258fe70230c483cec9a25b191b7b3d4ab4b`; pinned dependency-image CPU
+  gates PASS. The worktree is intentionally uncommitted/unpublished and no
+  128-TPU retry has run. `main` is untouched.
+- Source intake: the clean isolated worktree fast-forwarded from
+  `a04b65febcb5e163bf1f30bf33065decbe29651f` through five remote commits to
+  `959a3258fe70230c483cec9a25b191b7b3d4ab4b`. The incoming P58 artifact is
+  the 7,958-line `p58z06` raw log; the other incoming runtime changes belong
+  to P68/DP-collective and M15 concerns and do not repair this failure.
+- Immutable target fact: `p58z06` loaded the exact 1,012-task clean list,
+  admitted 128 TPU devices with disjoint DP8xTP8 rollout/trainer roles, and
+  completed vLLM model warmup. It then failed during adapter initialization
+  after the first placement receipt, before rollout. No trajectory, trainer
+  logprob, alignment, backward, AdamW, commit, or checkpoint exists. The raw
+  log lacks a source SHA; none is inferred. Evidence checksums pass under
+  `evidence/p58z06_nnx_loader_metadata_error/`.
+- Root cause: Pathways dummy loading adds `_is_loaded=True` to every one of
+  the 398 live NNX parameters. Flax includes variable metadata in State
+  treedefs, while the weight-free trainer `nnx.eval_shape` reconstruction has
+  no loader marker. P58.15 compared raw treedefs and rejected this provenance
+  difference; segmented backward contained the same latent comparison.
+- Repair: compare logical NNX treedefs after removing only exact
+  `_is_loaded=True` from copied Variables. False/non-boolean values fail;
+  every other metadata field, path/type, leaf count, shape, and dtype remains
+  exact. The same check guards segmented backward. The full classifier now
+  requires exactly one 398-leaf state-contract receipt.
+- Validation: Python compilation and diff hygiene PASS; forced four-CPU-device
+  nested-JIT forward/backward, segmented pullback, partial-overlap negative,
+  and false-marker negative PASS; Zero-HP classifier 7/7 PASS. The complete
+  pinned-image gate exits zero with `P58_EXACT_IMAGE_CPU_PASS ...
+  disaggregated_trainer_mesh=4 ... regressions=1`. No TPU is exposed locally,
+  so this is construction evidence only.
+- Next action: review this dirty diff. Commit/push, image publication,
+  Kubernetes apply, and target launch remain separately approval-gated. Once
+  published and read back with a matching image plus sandbox admission, use
+  fresh `p58z07`; never resume/overwrite `p58z01`-`p58z06`. Require four
+  placement/state/JIT/scorer receipts, trainer old/current logps, strict
+  A=B=C, finite nonzero 16-group backward, and one coherent update-0 commit.
+- Phase: `phases/p58-16-nnx-loader-metadata.md`.
+
 ## Current P58.15 nested-JIT trainer-mesh checkpoint (2026-08-26)
 
 - Status: implementation commit

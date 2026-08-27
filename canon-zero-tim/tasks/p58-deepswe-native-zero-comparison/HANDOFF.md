@@ -1,5 +1,58 @@
 # P58 DeepSWE native-first training handoff
 
+## 2026-08-27 P58.16 loader-metadata override — local, not published
+
+This section supersedes P58.15's `p58z05` launch instruction. The latest
+immutable target is `p58z06`. It admitted 128 devices, the clean 1,012-task
+list, disjoint DP8xTP8 rollout/trainer roles, and completed vLLM warmup, then
+failed during adapter initialization before any rollout:
+
+```text
+[CANON_ADAPTER] live engine contract ... state_leaves=398 ...
+[CANON_ADAPTER.PLACEMENT] PASS relation=disjoint rollout_devices=64 trainer_devices=64 execution_role=trainer
+FunctionalMappingError: canonical trainer execution trainer-mesh reconstruction changed the NNX state tree
+```
+
+This was not a bad trajectory or training collapse. Pathways dummy loading
+adds `_is_loaded=True` to every live parameter, and Flax includes that loader
+provenance in the State treedef. The weight-free trainer clone correctly has
+no such marker. P58.15 compared raw treedefs and falsely rejected the otherwise
+matching logical 398-leaf state; segmented backward contained the same latent
+check.
+
+The local P58.16 diff removes only exact `_is_loaded=True` from copied
+Variables for contract comparison. A false/non-boolean marker fails, while all
+other metadata, paths/types, leaf count, shapes, and dtypes remain exact. It
+does not change data, B8xG16, seed, 16K/50-turn horizon, sampling, loss,
+strict A=B=C, optimizer, compact filtering, or any Native/Zero selector.
+
+Focused forced-device tests and the complete pinned-image gate pass with:
+
+```text
+P58_EXACT_IMAGE_CPU_PASS ... disaggregated_trainer_mesh=4 ... regressions=1
+```
+
+This worktree is dirty and the fix is not committed or pushed. Do not launch
+it remotely. After the user separately approves publication, fetch/read back
+the exact remote source, build/read back a matching image, rerun the full gate,
+and pass sandbox admission. A Kubernetes launch needs another approval and
+must use fresh id `p58z07`; never resume/overwrite `p58z01`-`p58z06`.
+
+At startup require exactly one each:
+
+```text
+[CANON_ADAPTER.PLACEMENT] PASS relation=disjoint rollout_devices=64 trainer_devices=64 execution_role=trainer
+[CANON_ADAPTER.PLACEMENT] trainer state contract PASS relation=disjoint leaves=398 normalized_loader_metadata=_is_loaded live_markers=398 reconstruction_markers=0
+[CANON_ADAPTER.PLACEMENT] trainer model callables rebuilt relation=disjoint graph=abstract-clone mesh_bound_jits=2
+[CANON_ADAPTER.PLACEMENT] trainer logprob scorer rebound relation=disjoint implementation=factory-identical mesh_bound_instances=2
+```
+
+Then require trainer old/current logps, strict A=B=C, finite nonzero 16-group
+backward, and one coherent update-0 transaction before continuing the same
+1,000-update job. Evidence is under
+`evidence/p58z06_nnx_loader_metadata_error/`; see
+`phases/p58-16-nnx-loader-metadata.md`.
+
 ## 2026-08-26 P58.15 nested-JIT trainer-mesh override — source published
 
 This is the highest-priority P58 handoff. `p58z04` already ran from source

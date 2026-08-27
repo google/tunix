@@ -18,6 +18,43 @@ P58 does not modify `main`. Rendering and local validation do not authorize a
 Kubernetes apply. An operator must separately approve image publication and
 each launch.
 
+## 2026-08-27 P58.16 NNX loader-metadata retry override — local only
+
+Do not follow the older P58.15 instruction to launch `p58z05`. Immutable
+`p58z06` completed model load/warmup on the exact 128-device Qwen3-4B Zero-HP
+geometry, then failed before rollout because the live Pathways dummy loader
+adds `_is_loaded=True` to all 398 NNX parameters while the weight-free trainer
+clone does not. Flax includes this provenance in raw State treedef equality.
+No trajectory, backward, optimizer commit, or checkpoint exists; the run is
+not resumable. The evidence log does not embed its source SHA, so do not infer
+one.
+
+P58.16 normalizes only exact `_is_loaded=True` on copied Variables. Any other
+marker value and every other metadata/path/type/leaf/shape/dtype drift remain
+fatal. The same contract protects segmented backward. The local complete
+pinned-image gate passes:
+
+```text
+P58_EXACT_IMAGE_CPU_PASS ... disaggregated_trainer_mesh=4 ... regressions=1
+```
+
+The fix is currently uncommitted/unpublished. Stop here until the user
+separately approves commit/push. After publication, require exact remote SHA
+and matching-image readback, rerun the complete gate, and pass sandbox
+capacity. A later separately approved launch must use fresh `p58z07` and
+require exactly one of all four receipts:
+
+```text
+[CANON_ADAPTER.PLACEMENT] PASS relation=disjoint rollout_devices=64 trainer_devices=64 execution_role=trainer
+[CANON_ADAPTER.PLACEMENT] trainer state contract PASS relation=disjoint leaves=398 normalized_loader_metadata=_is_loaded live_markers=398 reconstruction_markers=0
+[CANON_ADAPTER.PLACEMENT] trainer model callables rebuilt relation=disjoint graph=abstract-clone mesh_bound_jits=2
+[CANON_ADAPTER.PLACEMENT] trainer logprob scorer rebound relation=disjoint implementation=factory-identical mesh_bound_instances=2
+```
+
+Only after those receipts may the operator wait for trainer old/current logps,
+strict A=B=C, finite nonzero 16-group backward, and the coherent update-0
+transaction. `p58z01`-`p58z06` remain immutable and must not be resumed.
+
 ## 2026-08-26 P58.15 nested-JIT retry override — source published
 
 This section supersedes the P58.14 instruction to launch `p58z04`. That target

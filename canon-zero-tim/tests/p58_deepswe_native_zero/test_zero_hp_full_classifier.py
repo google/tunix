@@ -140,6 +140,10 @@ def _fixture(
       "mesh_bound_instances=2",
       "[CANON_ADAPTER.PLACEMENT] trainer model callables rebuilt "
       "relation=disjoint graph=abstract-clone mesh_bound_jits=2",
+      "[CANON_ADAPTER.PLACEMENT] trainer state contract PASS "
+      "relation=disjoint leaves=398 "
+      "normalized_loader_metadata=_is_loaded live_markers=398 "
+      "reconstruction_markers=0",
       "[P57.CONTINUE_DECODE] on-device decode loop enabled max_decode_steps=8 workload=deepswe",
       "[P56.GATHERED_LOGPROBS] installed",
       "[P56.LOGPROB_STEP_FUSION] active",
@@ -346,6 +350,27 @@ class ZeroHpFullClassifierTest(unittest.TestCase):
       )
       self.assertEqual(result["verdict"], "FAIL")
       self.assertIn("marker.trainer_model_jits=0", result["reasons"])
+
+  def test_missing_trainer_state_contract_receipt_is_rejected(self):
+    with tempfile.TemporaryDirectory() as directory:
+      root = Path(directory)
+      log, updates, base = _fixture(root)
+      log.write_text(
+          "\n".join(
+              line
+              for line in log.read_text().splitlines()
+              if "trainer state contract PASS" not in line
+          )
+          + "\n"
+      )
+      result = classifier.classify(
+          state=root,
+          run_log=log,
+          update_report=updates,
+          base_classification=base,
+      )
+      self.assertEqual(result["verdict"], "FAIL")
+      self.assertIn("marker.trainer_state_contract=0", result["reasons"])
 
 
 if __name__ == "__main__":

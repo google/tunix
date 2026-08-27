@@ -1,5 +1,40 @@
 # Log
 
+## 2026-08-27 UTC — P58.16 NNX loader-metadata repair admitted locally
+
+- Source intake: clean isolated worktree fast-forwarded from
+  `a04b65febcb5e163bf1f30bf33065decbe29651f` to exact operator tip
+  `959a3258fe70230c483cec9a25b191b7b3d4ab4b`. The five commits add P68/DP
+  collective work, M15 evidence, and the immutable `p58z06` raw log. `main`
+  was not touched.
+- Reached boundary: `p58z06` admitted the exact 128-device Qwen3-4B Zero-HP
+  geometry and clean 1,012-task data, then completed vLLM warmup. Canonical
+  adapter initialization emitted disjoint 64/64 placement and immediately
+  raised `FunctionalMappingError: ... changed the NNX state tree`. No rollout,
+  trajectory, trainer logprob, alignment, backward, AdamW, commit, or
+  checkpoint occurred. The later finalizer exception is shutdown noise. Raw
+  log SHA-256 is
+  `4f271091120a98d11721b8a18422f8aa07bb2be2d33ff842d06bfcf156daf1ee`;
+  its absent source SHA is not inferred.
+- Root cause: the pinned Pathways dummy loader marks all 398 populated NNX
+  parameters `_is_loaded=True`. Flax includes that loader provenance in the
+  State treedef, but the P58.15 weight-free trainer clone does not have it.
+  The raw-tree equality was therefore stricter than the parameter contract.
+  The segmented trainer path carried the same latent comparison.
+- Repair: normalize only exact true-valued `_is_loaded` on copied Variables;
+  false/non-boolean markers fail. Every other NNX metadata/path/type plus leaf
+  count/shape/dtype remains exact. Apply the same contract to segmented
+  backward and require the fixed 398-leaf receipt in postflight.
+- Validation: Python compilation and diff hygiene PASS. Pinned-image forced
+  disjoint nested-JIT/segmented/partial-overlap tests 3/3 PASS with finite
+  nonzero gradients and a false-marker negative; Zero-HP classifier 7/7 PASS.
+  Complete pinned-image gate exits zero with
+  `P58_EXACT_IMAGE_CPU_PASS ... disaggregated_trainer_mesh=4 ...
+  regressions=1`. No TPU target was run.
+- State: uncommitted and unpublished by design. The next eligible target is
+  fresh `p58z07` only after separate commit/push, matching-image,
+  sandbox-admission, and launch approvals. `p58z06` is not resumable.
+
 ## 2026-08-26 UTC — P58.15 nested-JIT trainer-mesh repair, local only
 
 - Pulled the isolated P58 worktree first to operator source

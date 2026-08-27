@@ -275,6 +275,11 @@ class _MeshBoundForwardRunner(_ForwardRunner):
     model_config.seed = 0
     vllm_config = types.SimpleNamespace(model_config=model_config)
     model = _MeshBoundForwardModel(vllm_config, jax.random.key(0), mesh)
+    # The real Pathways dummy loader adds this provenance marker after
+    # populating each parameter.  It is part of the NNX State treedef even
+    # though it has no effect on the model graph or parameter values.
+    model.engine.a.set_metadata("_is_loaded", True)
+    model.engine.b.set_metadata("_is_loaded", True)
     _, state = nnx.split(model)
     super().__init__(state, mesh, vocab_size=8)
     self.model = model
@@ -432,6 +437,11 @@ class _MeshBoundSegmentedRunner:
     self.model = _MeshBoundSegmentedModel(
         self.vllm_config, jax.random.key(0), mesh
     )
+    self.model.model.embed_tokens.scale.set_metadata("_is_loaded", True)
+    for layer in self.model.model.layers:
+      layer.scale.set_metadata("_is_loaded", True)
+    self.model.model.norm.scale.set_metadata("_is_loaded", True)
+    self.model.lm_head.scale.set_metadata("_is_loaded", True)
     _, self.state = nnx.split(self.model)
     self.state_leaves = tuple(jax.tree.leaves(self.state))
     replicated = jax.sharding.NamedSharding(
@@ -2966,10 +2976,27 @@ class CanonicalQwen3AdapterTest(absltest.TestCase):
     self.assertTrue(all(np.isfinite(value).all() for value in gradient_leaves))
     self.assertGreater(sum(np.count_nonzero(x) for x in gradient_leaves), 0)
     self.assertIn(
+        "trainer state contract PASS relation=disjoint leaves=2 "
+        "normalized_loader_metadata=_is_loaded live_markers=2 "
+        "reconstruction_markers=0",
+        output.getvalue(),
+    )
+    self.assertIn(
         "trainer model callables rebuilt relation=disjoint "
         "graph=abstract-clone mesh_bound_jits=2",
         output.getvalue(),
     )
+    runner.model.engine.a.set_metadata("_is_loaded", False)
+    _, invalid_loader_state = nnx.split(runner.model)
+    with self.assertRaisesRegex(
+        canonical_qwen3_adapter.FunctionalMappingError,
+        "invalid _is_loaded=False",
+    ):
+      canonical_qwen3_adapter._canonical_nnx_state_treedef(
+          invalid_loader_state,
+          nnx=nnx,
+          label="test invalid loader marker",
+      )
 
   def test_disaggregated_segmented_backward_uses_trainer_graph(self):
     if len(jax.devices()) < 4:

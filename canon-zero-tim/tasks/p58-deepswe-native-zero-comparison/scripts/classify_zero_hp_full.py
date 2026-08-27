@@ -268,6 +268,12 @@ def classify(
           "[CANON_ADAPTER.PLACEMENT] trainer model callables rebuilt "
           "relation=disjoint graph=abstract-clone mesh_bound_jits=2"
       ),
+      "trainer_state_contract": text.count(
+          "[CANON_ADAPTER.PLACEMENT] trainer state contract PASS "
+          "relation=disjoint leaves=398 "
+          "normalized_loader_metadata=_is_loaded live_markers=398 "
+          "reconstruction_markers=0"
+      ),
       "continue_decode": text.count(
           "[P57.CONTINUE_DECODE] on-device decode loop enabled"
       ),
@@ -306,7 +312,12 @@ def classify(
           f"[V1.PERFETTO] captured training_step={_PROFILED_STEP}"
       ),
   }
-  for name in ("trainer_placement", "trainer_scorer", "trainer_model_jits"):
+  for name in (
+      "trainer_placement",
+      "trainer_scorer",
+      "trainer_model_jits",
+      "trainer_state_contract",
+  ):
     if marker_counts[name] != 1:
       reasons.append(f"marker.{name}={marker_counts[name]}")
   for name in (

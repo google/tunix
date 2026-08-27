@@ -735,6 +735,50 @@ class _CanonicalExecutionModel:
   state_treedef: Any
 
 
+_P58_LOADER_STATE_MARKER = "_is_loaded"
+
+
+def _canonical_nnx_state_treedef(state, *, nnx, label: str):
+  """Returns a logical NNX treedef without loader-only provenance.
+
+  TPU inference's Pathways dummy loader marks every populated ``nnx.Param``
+  with ``_is_loaded=True``.  Flax includes variable metadata in a State's
+  PyTree auxiliary data, so that provenance bit makes a loaded live state and
+  a weight-free ``nnx.eval_shape`` reconstruction have unequal treedefs even
+  when their paths, variable types, parameter metadata, shapes, and dtypes are
+  identical.
+
+  Remove only that exact true-valued loader marker from copied Variables
+  before comparing treedefs.  Every other piece of NNX metadata remains in
+  the comparison.  The input State is never mutated.
+  """
+  normalized = []
+  marker_count = 0
+  for path, variable in nnx.to_flat_state(state):
+    if not (
+        hasattr(variable, "replace")
+        and hasattr(variable, "get_metadata")
+        and hasattr(variable, "del_metadata")
+    ):
+      raise FunctionalMappingError(
+          f"{label} contains a non-NNX variable at path {path!r}"
+      )
+    variable = variable.replace()
+    metadata = variable.get_metadata()
+    if _P58_LOADER_STATE_MARKER in metadata:
+      marker = metadata[_P58_LOADER_STATE_MARKER]
+      if marker is not True:
+        raise FunctionalMappingError(
+            f"{label} has invalid {_P58_LOADER_STATE_MARKER}={marker!r} "
+            f"at path {path!r}"
+        )
+      variable.del_metadata(_P58_LOADER_STATE_MARKER)
+      marker_count += 1
+    normalized.append((path, variable))
+  normalized_state = nnx.from_flat_state(normalized)
+  return jax.tree_util.tree_structure(normalized_state), marker_count
+
+
 def _canonical_execution_model(runner, execution_mesh, relation: str, label: str):
   """Reconstructs the live model graph with trainer-role static mesh values.
 
@@ -809,9 +853,24 @@ def _canonical_execution_model(runner, execution_mesh, relation: str, label: str
   graphdef, execution_state = nnx.split(execution_model)
   execution_treedef = jax.tree_util.tree_structure(execution_state)
   execution_leaves = tuple(jax.tree_util.tree_leaves(execution_state))
-  if execution_treedef != live_treedef:
+  logical_live_treedef, live_loader_markers = _canonical_nnx_state_treedef(
+      live_state, nnx=nnx, label=f"{label} live state"
+  )
+  (
+      logical_execution_treedef,
+      execution_loader_markers,
+  ) = _canonical_nnx_state_treedef(
+      execution_state, nnx=nnx, label=f"{label} reconstructed state"
+  )
+  if execution_loader_markers:
     raise FunctionalMappingError(
-        f"{label} trainer-mesh reconstruction changed the NNX state tree"
+        f"{label} weight-free reconstruction unexpectedly contains "
+        f"{execution_loader_markers} {_P58_LOADER_STATE_MARKER} markers"
+    )
+  if logical_execution_treedef != logical_live_treedef:
+    raise FunctionalMappingError(
+        f"{label} trainer-mesh reconstruction changed the logical NNX "
+        f"state tree after normalizing {_P58_LOADER_STATE_MARKER}"
     )
   if len(execution_leaves) != len(runner_leaves):
     raise FunctionalMappingError(
@@ -829,6 +888,14 @@ def _canonical_execution_model(runner, execution_mesh, relation: str, label: str
           f"{execution_leaf.shape}/{execution_leaf.dtype} != "
           f"{runner_leaf.shape}/{runner_leaf.dtype}"
       )
+  print(
+      "[CANON_ADAPTER.PLACEMENT] trainer state contract PASS "
+      f"relation=disjoint leaves={len(execution_leaves)} "
+      f"normalized_loader_metadata={_P58_LOADER_STATE_MARKER} "
+      f"live_markers={live_loader_markers} "
+      f"reconstruction_markers={execution_loader_markers}",
+      flush=True,
+  )
   return _CanonicalExecutionModel(
       model=execution_model,
       graphdef=graphdef,
@@ -2415,10 +2482,16 @@ class _P28SegmentedEngineForward:
     model = execution_model.model if execution_model is not None else runner.model
     graphdef, live_state = nnx.split(model)
     live_treedef = jax.tree_util.tree_structure(live_state)
-    runner_treedef = jax.tree_util.tree_structure(runner.state)
-    if live_treedef != runner_treedef:
+    logical_live_treedef, _ = _canonical_nnx_state_treedef(
+        live_state, nnx=nnx, label="P28 execution model state"
+    )
+    logical_runner_treedef, _ = _canonical_nnx_state_treedef(
+        runner.state, nnx=nnx, label="P28 runner state"
+    )
+    if logical_live_treedef != logical_runner_treedef:
       raise FunctionalMappingError(
-          "runner.model and runner.state have different NNX state trees"
+          "runner.model and runner.state have different logical NNX state "
+          f"trees after normalizing {_P58_LOADER_STATE_MARKER}"
       )
     live_leaves = tuple(jax.tree_util.tree_leaves(live_state))
     runner_leaves = tuple(jax.tree_util.tree_leaves(runner.state))
