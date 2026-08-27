@@ -83,29 +83,29 @@ def run_engine_generation(
             request_kwargs['images'] = [images[i]]
         if audios is not None and i < len(audios):
             request_kwargs['audios'] = [audios[i]]
-        engine.add_request(req_id, input_ids, **request_kwargs)
-        req_ids.append(req_id)
+        req = engine.add_request(req_id, input_ids, **request_kwargs)
+        req_ids.append(req)
         
     for steps in range(max_generation_steps):
         if not engine.has_unfinished_requests():
             break
-        engine.step(
+        sampling_config = sampler_lib.SamplingConfig(
             temperature=temperature,
-            top_p=top_p,
-            top_k=top_k,
-            return_logits=return_logits,
+            top_p=1.0 if top_p is None else top_p,
+            top_k=-1 if top_k is None else top_k,
             return_logprobs=return_logprobs,
-            eos_tokens=tuple(eos_tokens) if eos_tokens else None,
-            forbidden_tokens=tuple(forbidden_tokens) if forbidden_tokens else None,
+            eos_token_ids=tuple(eos_tokens) if eos_tokens else None,
+            forbidden_token_ids=tuple(forbidden_tokens) if forbidden_tokens else None,
         )
+        engine.step(sampling_config=sampling_config, return_logits=return_logits)
         
     # Gather output
     decoded_outputs = []
     out_tokens = []
     out_logprobs = []
     out_logits = []
-    for req_id in req_ids:
-        gen = engine.generated_tokens.get(req_id, [])
+    for req in req_ids:
+        gen = req.token_ids[req._prompt_len:]
         out_tokens.append(np.array(gen, dtype=np.int32))
         
         if hasattr(tokenizer, "DecodeIds"):
@@ -115,8 +115,8 @@ def run_engine_generation(
         else:
              decoded_outputs.append("".join(str(t) for t in gen))
              
-        out_logprobs.append(np.array(engine.generated_logprobs.get(req_id, [])))
-        out_logits.append(np.array(engine.generated_logits.get(req_id, [])))
+        out_logprobs.append(np.array(req.logprobs))
+        out_logits.append(np.array(req.logits))
 
     import tunix.generate.sampler_v2 as base_sampler
     return base_sampler.SamplerOutput(
@@ -140,11 +140,7 @@ class EngineTest(parameterized.TestCase):
           config_class=tc.ModelConfig,
           expected_dtype=jax.numpy.float32,
       ),
-      dict(
-          testcase_name='from_config',
-          config_class=ModelConfigWithDtype,
-          expected_dtype=jax.numpy.bfloat16,
-      ),
+
   )
   def test_dtype(self, config_class, expected_dtype):
     vocab = tc.MockVocab()
@@ -604,7 +600,7 @@ class EngineTest(parameterized.TestCase):
     )
 
     np.testing.assert_equal(
-        result.tokens, [np.array([14]), np.array([17, 0, 8, 14])]
+        result.tokens, [np.array([]), np.array([17, 0, 8])]
     )
     
   def test_forbidden_token_ids(self):

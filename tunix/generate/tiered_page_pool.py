@@ -122,7 +122,7 @@ class TieredPagePoolManager:
   """Manager for tiered TPU/CPU memory."""
   def __init__(
       self,
-      tiered_config: TieredMemoryConfig,
+      tiered_config: TieredPagePoolConfig,
       tpu_pool: PagePool,
       cpu_pool: PagePool | None,
       max_num_seqs: int = 256,
@@ -255,3 +255,8 @@ class TieredPagePoolManager:
 
       del self._page_location[pid]
       del self._page_id_to_idx[pid]
+      
+    if cpu_idxs_to_evict and self.cpu_pool:
+      self.cpu_pool.free(cpu_idxs_to_evict)
+    if tpu_idxs_to_evict and self.tpu_pool:
+      self.tpu_pool.free(tpu_idxs_to_evict)

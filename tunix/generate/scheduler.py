@@ -16,7 +16,7 @@
 
 import collections
 from typing import List, Dict, Tuple
-from tunix.generate.tiered_page_pool.py import TieredPagePoolManager
+from tunix.generate.tiered_page_pool import TieredPagePoolManager
 from tunix.generate import utils
 
 class Request:
@@ -24,7 +24,8 @@ class Request:
     self.request_id = req_id
     self.token_ids = prompt_token_ids
     self.page_ids = []
-    
+    self.logprobs = []
+    self.logits = []
     self.last_page_hash = 0 
     self.num_completed_tokens = 0
     self.num_in_flight_tokens = 0
@@ -168,7 +169,7 @@ class Scheduler:
         
     self._kv_cache_manager.evict(pages_to_evict)
 
-  def schedule_step(self) -> Tuple[List[Request], List[int]]:
+  def schedule_step(self, new_requests: List[Request]) -> Tuple[List[Request], List[int]]:
     """
     Select the requests to sample in the next step, and ensure their pages are loaded
     on to the TPU.
@@ -179,8 +180,9 @@ class Scheduler:
     
     self._token_budget = self.max_num_batch_tokens
     self._deduplicate_and_cache_full_pages()
-
+    
     self._queue_new_requests(new_requests)
+
     self._schedule_running_sequences()
     self._schedule_pending_sequences()
 
@@ -213,34 +215,36 @@ class Scheduler:
     deduplicates the page and returns the number of freed physical pages.
     """
 
-    # TODO: We are not handling duplications that occur during prefill
-    # when multiple pages are completed at once. 
     for req in self._running_requests:
       n_tokens = len(req.token_ids)
-      is_empty = (n_tokens == 0)
-      is_partially_full = (n_tokens % self._page_size != 0)
-      
-      # We only hash full pages 
-      if is_empty or is_partially_full:
-          continue
-      
       n_full_pages = n_tokens // self._page_size 
-      last_full_idx = n_full_pages - 1
-      pid = req.page_ids[last_full_idx]
+      if n_full_pages == 0:
+          continue
+          
+      hashes = self._chunk_and_hash(req.token_ids[:n_full_pages * self._page_size])
       
-      chunk = tuple(req.token_ids[-self._page_size:])
-      chunk_hash = hash((req.last_page_hash, chunk))
-      req.last_page_hash = chunk_hash 
-      
-      if chunk_hash in self._prefix_hash_to_page_id:
-        cached_pid = self._prefix_hash_to_page_id[chunk_hash]
-        if cached_pid != pid:
-          # Deduplicate page in case of cache hit
-          req.page_ids[last_full_idx] = cached_pid
-          self._release_page(pid)
-          self._touch_page(cached_pid)
-      else:
-        self._prefix_hash_to_page_id[chunk_hash] = pid
+      for i, chunk_hash in enumerate(hashes):
+          pid = req.page_ids[i]
+          
+          if getattr(req, '_hashed_pages', None) is None:
+              req._hashed_pages = set()
+              
+          if i in req._hashed_pages:
+              continue
+              
+          if chunk_hash in self._prefix_hash_to_page_id:
+            cached_pid = self._prefix_hash_to_page_id[chunk_hash]
+            if cached_pid != pid:
+              # Deduplicate page in case of cache hit
+              req.page_ids[i] = cached_pid
+              self._release_page(pid)
+              self._touch_page(cached_pid)
+          else:
+            self._prefix_hash_to_page_id[chunk_hash] = pid
+            
+          req._hashed_pages.add(i)
+          
+      req.last_page_hash = hashes[-1] if hashes else getattr(req, 'last_page_hash', 0)
             
   def _queue_new_requests(self, new_requests: List[Request]):
     """Insert new requests into the pending queue."""
@@ -265,7 +269,7 @@ class Scheduler:
       req = self._running_requests[n_running_admitted]
       
       # --- Compute page requirements ---  
-      n_tokens_remaining = 1 + len(req.token_ids) - req.num_completed_tokens
+      n_tokens_remaining = len(req.token_ids) - req.num_completed_tokens
       n_tokens_to_compute = min(self._token_budget, n_tokens_remaining)
       
       n_total_pages_needed = utils.cdiv(
@@ -347,7 +351,7 @@ class Scheduler:
       n_tokens = len(req.token_ids)
       n_matched_tokens = len(matched_page_ids) * self._page_size
 
-      n_tokens_remaining = 1 + n_tokens - n_matched_tokens
+      n_tokens_remaining = n_tokens - n_matched_tokens
       n_tokens_to_compute = min(self._token_budget, n_tokens_remaining)
       
       n_tokens_to_load = n_tokens_to_compute + n_matched_tokens

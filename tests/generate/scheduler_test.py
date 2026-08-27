@@ -11,25 +11,40 @@ class MockCacheManager:
         self.next_id = 9000
         self.page_size = 2
         self.max_num_seqs = 10
+        self.num_free_tpu_pages = tpu_cap
+        self.num_free_cpu_pages = cpu_cap
+        self.page_location = {}
+
+    def get_page_location(self, pid):
+        return self.page_location.get(pid, None)
     
     def offload(self, pids):
         self.offloaded.extend(pids)
         self.available_tpu_pages += len(pids)
         self.available_cpu_pages -= len(pids)
+        for pid in pids:
+            self.page_location[pid] = 'cpu'
         
     def evict(self, pids):
         self.evicted.extend(pids)
         self.available_cpu_pages += len(pids)
+        for pid in pids:
+            if pid in self.page_location:
+                del self.page_location[pid]
         
     def load(self, pids):
         self.loaded.extend(pids)
         self.available_tpu_pages -= len(pids)
         self.available_cpu_pages += len(pids)
+        for pid in pids:
+            self.page_location[pid] = 'tpu'
 
     def allocate_tpu_pages(self, num_pages):
         res = [self.next_id + i for i in range(num_pages)]
         self.next_id += num_pages
         self.available_tpu_pages -= num_pages
+        for pid in res:
+            self.page_location[pid] = 'tpu'
         return res
         
     def assign(self, idxs, ids):
@@ -39,27 +54,27 @@ class SchedulerTest(unittest.TestCase):
     def setUp(self):
         self.cache_mgr = MockCacheManager(tpu_cap=5, cpu_cap=10)
         self.cache_mgr.max_num_seqs = 10
-        self.scheduler = Scheduler(cache_manager=self.cache_mgr, max_num_batch_tokens=8)
+        self.scheduler = Scheduler(kv_cache_manager=self.cache_mgr, max_num_batch_tokens=8, max_seqs_per_batch=4)
 
     def test_lru_state_transitions(self):
         """Tests that releasing pages gracefully falls them into unreferenced tracking."""
-        self.scheduler.page_ref_counts[100] = 1
-        self.scheduler.page_location[100] = "tpu"
+        self.scheduler._page_ref_counts[100] = 1
+        self.cache_mgr.page_location[100] = "tpu"
         
         # Test release places in unreferenced TPU
         self.scheduler._release_page(100)
-        self.assertIn(100, self.scheduler.unreferenced_tpu_pages)
-        self.assertEqual(len(self.scheduler.unreferenced_tpu_pages), 1)
+        self.assertIn(100, self.scheduler._unreferenced_tpu_pages)
+        self.assertEqual(len(self.scheduler._unreferenced_tpu_pages), 1)
         
         # Freeing 1 page of TPU should migrate it to CPU LRU
         self.scheduler._free_up_unreferenced_tpu_space(1)
-        self.assertNotIn(100, self.scheduler.unreferenced_tpu_pages)
-        self.assertIn(100, self.scheduler.unreferenced_cpu_pages)
+        self.assertNotIn(100, self.scheduler._unreferenced_tpu_pages)
+        self.assertIn(100, self.scheduler._unreferenced_cpu_pages)
         self.assertIn(100, self.cache_mgr.offloaded)
         
         # Evicting 1 page of CPU should remove it completely
         self.scheduler._free_up_unreferenced_cpu_space(1)
-        self.assertNotIn(100, self.scheduler.unreferenced_cpu_pages)
+        self.assertNotIn(100, self.scheduler._unreferenced_cpu_pages)
         self.assertIn(100, self.cache_mgr.evicted)
 
     def test_prefix_caching(self):
@@ -69,21 +84,21 @@ class SchedulerTest(unittest.TestCase):
         
         
         # req-1 should be able to run immediately (requires 3 blocks since it evaluates 4 tokens + space for 1 decode token)
-        self.assertEqual(len(self.scheduler.running_requests), 1)
+        self.assertEqual(len(self.scheduler._running_requests), 1)
         # Needs 3 pages to be physically sourced
         self.assertEqual(len(r1.page_ids), 3)
         
         # Manually distribute allocations as if step progressed
         
         
-        self.assertEqual(len(self.scheduler.prefix_hash_to_page_id), 2, "Prefix cache should track exactly 2 chunks (the 3rd block is an empty decode buffer and unhashable).")
+        self.assertEqual(len(self.scheduler._prefix_hash_to_page_id), 2, "Prefix cache should track exactly 2 chunks (the 3rd block is an empty decode buffer and unhashable).")
         
         # Send identical request mapping over same hashes
         r2 = Request("req-2", prompt_token_ids=[10, 20, 30, 40])
         self.scheduler.schedule_step([r2])
         
         
-        self.assertEqual(len(self.scheduler.running_requests), 2)
+        self.assertEqual(len(self.scheduler._running_requests), 2)
         # It matches the 2 prompt blocks precisely, but still strictly needs 1 fresh block for its own independent decode boundary!
 
     def test_preemption_due_to_hbm_limits(self):
@@ -98,7 +113,7 @@ class SchedulerTest(unittest.TestCase):
             
         self.scheduler.schedule_step(reqs)
          # all 4 can fit in TPU initially (requires 4 x 1 pages)
-        self.assertEqual(len(self.scheduler.running_requests), 4)
+        self.assertEqual(len(self.scheduler._running_requests), 4)
         
         # Artificially limit HBM fully to test 
         self.cache_mgr.available_tpu_pages = 0
@@ -107,66 +122,66 @@ class SchedulerTest(unittest.TestCase):
         # Actually it no longer requires new pages for 1-token prompts with page size 2! 
         self.scheduler.schedule_step([])
         
-        self.assertEqual(len(self.scheduler.running_requests), 4)
+        self.assertEqual(len(self.scheduler._running_requests), 4)
 
     def test_touch_page_new(self):
         self.scheduler._touch_page(200)
-        self.assertEqual(self.scheduler.page_ref_counts[200], 1)
+        self.assertEqual(self.scheduler._page_ref_counts[200], 1)
 
     def test_touch_page_existing(self):
-        self.scheduler.page_ref_counts[200] = 1
+        self.scheduler._page_ref_counts[200] = 1
         self.scheduler._touch_page(200)
-        self.assertEqual(self.scheduler.page_ref_counts[200], 2)
+        self.assertEqual(self.scheduler._page_ref_counts[200], 2)
 
     def test_release_page_ref_gt_1(self):
-        self.scheduler.page_ref_counts[300] = 2
-        self.scheduler.page_location[300] = "tpu"
+        self.scheduler._page_ref_counts[300] = 2
+        self.cache_mgr.page_location[300] = "tpu"
         self.scheduler._release_page(300)
-        self.assertNotIn(300, self.scheduler.unreferenced_tpu_pages)
-        self.assertEqual(self.scheduler.page_ref_counts[300], 1)
+        self.assertNotIn(300, self.scheduler._unreferenced_tpu_pages)
+        self.assertEqual(self.scheduler._page_ref_counts[300], 1)
 
     def test_release_page_tpu_to_unref(self):
-        self.scheduler.page_ref_counts[301] = 1
-        self.scheduler.page_location[301] = "tpu"
+        self.scheduler._page_ref_counts[301] = 1
+        self.cache_mgr.page_location[301] = "tpu"
         self.scheduler._release_page(301)
-        self.assertIn(301, self.scheduler.unreferenced_tpu_pages)
+        self.assertIn(301, self.scheduler._unreferenced_tpu_pages)
 
     def test_release_page_cpu_to_unref(self):
-        self.scheduler.page_ref_counts[302] = 1
-        self.scheduler.page_location[302] = "cpu"
+        self.scheduler._page_ref_counts[302] = 1
+        self.cache_mgr.page_location[302] = "cpu"
         self.scheduler._release_page(302)
-        self.assertIn(302, self.scheduler.unreferenced_cpu_pages)
+        self.assertIn(302, self.scheduler._unreferenced_cpu_pages)
 
     def test_tpu_evict_beyond_capacity_throws(self):
-        with self.assertRaises(RuntimeError):
+        with self.assertRaises(AssertionError):
             self.scheduler._free_up_unreferenced_tpu_space(5)
 
     def test_freed_tpu_pages_end_up_on_cpu(self):
-        self.scheduler.page_ref_counts[400] = 1
-        self.scheduler.page_location[400] = "tpu"
+        self.scheduler._page_ref_counts[400] = 1
+        self.cache_mgr.page_location[400] = "tpu"
         self.scheduler._release_page(400)
         self.scheduler._free_up_unreferenced_tpu_space(1)
-        self.assertIn(400, self.scheduler.unreferenced_cpu_pages)
-        self.assertEqual(self.scheduler.page_location[400], "cpu")
+        self.assertIn(400, self.scheduler._unreferenced_cpu_pages)
+        self.assertEqual(self.cache_mgr.page_location[400], "cpu")
 
     def test_cpu_evict_beyond_capacity_throws(self):
-        with self.assertRaises(RuntimeError):
+        with self.assertRaises(AssertionError):
             self.scheduler._free_up_unreferenced_cpu_space(5)
             
     def test_evicted_pages_removed_completely(self):
-        self.scheduler.page_ref_counts[401] = 1
-        self.scheduler.page_location[401] = "cpu"
+        self.scheduler._page_ref_counts[401] = 1
+        self.cache_mgr.page_location[401] = "cpu"
         self.scheduler._release_page(401)
         self.scheduler._free_up_unreferenced_cpu_space(1)
-        self.assertNotIn(401, self.scheduler.page_location)
-        self.assertNotIn(401, self.scheduler.page_ref_counts)
+        self.assertNotIn(401, self.cache_mgr.page_location)
+        self.assertNotIn(401, self.scheduler._page_ref_counts)
 
     def test_chunked_prefill_clip(self):
         req = Request("r-clip", [1]*100)
         self.scheduler.schedule_step([req])
         
         # token budget is 8. Should only load up to 8 tokens
-        self.assertEqual(self.scheduler.running_requests[0].num_in_flight_tokens, 8)
+        self.assertEqual(self.scheduler._running_requests[0].num_in_flight_tokens, 8)
 
     def test_full_and_partial_prefix_match(self):
         r1 = Request("r-1", [10, 20, 30, 40])
@@ -203,19 +218,19 @@ class SchedulerTest(unittest.TestCase):
         
         # prefix for [10,20] is hashed because it is page_size
         h1 = self.scheduler._chunk_and_hash([10, 20])[0]
-        self.assertIn(h1, self.scheduler.prefix_hash_to_page_id)
+        self.assertIn(h1, self.scheduler._prefix_hash_to_page_id)
         
         # full array [10,20,30] (the 3rd element is a partial block!) 
         # should NOT be hashed
         h2 = self.scheduler._chunk_and_hash([10, 20, 30])[-1]
-        self.assertNotIn(h2, self.scheduler.prefix_hash_to_page_id)
+        self.assertNotIn(h2, self.scheduler._prefix_hash_to_page_id)
 
 
     def test_cpu_pages_incur_budget_tpu_do_not(self):
         # Create a TPU cache of 2 and CPU cache of 10
         self.cache_mgr = MockCacheManager(tpu_cap=3, cpu_cap=10)
         self.cache_mgr.max_num_seqs = 10
-        self.scheduler = Scheduler(cache_manager=self.cache_mgr, max_num_batch_tokens=8)
+        self.scheduler = Scheduler(kv_cache_manager=self.cache_mgr, max_num_batch_tokens=8, max_seqs_per_batch=4)
         
         # Load sequence A to TPU, then evict
         rA = Request("rA", [10, 20]) # 1 page
@@ -240,20 +255,20 @@ class SchedulerTest(unittest.TestCase):
         matched = self.scheduler._get_matched_pages(rB)
         self.assertEqual(len(matched), 1)
 
-        self.assertEqual(self.scheduler.page_location[matched[0]], "tpu")
+        self.assertEqual(self.cache_mgr.page_location[matched[0]], "tpu")
         
     def test_first_in_first_scheduled(self):
         r1 = Request("r1", [10, 20])
         r2 = Request("r2", [30, 40])
         self.scheduler.schedule_step([r1, r2])
                         
-        self.assertEqual(self.scheduler.running_requests[0].request_id, "r1")
-        self.assertEqual(self.scheduler.running_requests[1].request_id, "r2")
+        self.assertEqual(self.scheduler._running_requests[0].request_id, "r1")
+        self.assertEqual(self.scheduler._running_requests[1].request_id, "r2")
 
     def test_len_running_requests_less_than_max(self):
         # Make max_num_seqs small
         self.cache_mgr.max_num_seqs = 10
-        self.scheduler = Scheduler(cache_manager=self.cache_mgr, max_num_batch_tokens=8)
+        self.scheduler = Scheduler(kv_cache_manager=self.cache_mgr, max_num_batch_tokens=8, max_seqs_per_batch=4)
         self.scheduler._queue_new_requests([
             Request("r1", [10]), Request("r2", [10]), Request("r3", [10])
         ])

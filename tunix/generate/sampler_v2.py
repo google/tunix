@@ -1,17 +1,17 @@
+from flax import nnx
 import dataclasses
 from typing import Any, Sequence, Tuple, Optional, Iterable, Dict, List
 import jax
 import jax.numpy as jnp
 import numpy as np
-from flax import nnx
 from flax import struct
 
 @struct.dataclass
 class RPAMetadata:
     """Encapsulates execution metadata arrays for the Ragged Page Attention kernel."""
     page_indices: np.ndarray | jnp.ndarray
-    seq_lens: np.ndarray | jnp.ndarray
-    active_seq_lens: np.ndarray | jnp.ndarray
+    kv_lens: np.ndarray | jnp.ndarray
+    query_lens: np.ndarray | jnp.ndarray
     distribution: np.ndarray | jnp.ndarray
 
 @struct.dataclass
@@ -32,6 +32,18 @@ class RaggedArray:
             starts = starts.at[1:].set(jnp.cumsum(self.lens)[:-1])
         return positions - starts[self.row_idxs]
 
+import dataclasses
+
+@dataclasses.dataclass
+class SamplingConfig:
+    temperature: float = 0.0
+    top_p: float = 1.0
+    top_k: int = -1
+    forbidden_token_ids: tuple[int, ...] | None = None
+    eos_token_ids: tuple[int, ...] | None = None
+    return_logprobs: bool = False
+
+
 @dataclasses.dataclass
 class CacheConfig:
   """Serving & execution config (decoupled from ModelConfig)."""
@@ -41,6 +53,7 @@ class CacheConfig:
   max_tokens_to_generate: int = 1000
   max_tpu_bytes: int = 5 * 1024 ** 3
   max_cpu_bytes: int = 0
+  max_num_batch_tokens: int = 2048
 
 
 from tunix.generate import cache_manager as cache_manager_lib
@@ -133,7 +146,22 @@ class VanillaSampler:
         self.tokenizer = tokenizer
 
         config = transformer.config if hasattr(transformer, "config") else getattr(transformer, "model_config", None)
-        self.dtype = getattr(config, 'dtype', jnp.float32) if config else jnp.float32
+        
+        default_dtype = jnp.float32
+        try:
+            leaves = jax.tree.leaves(self._transformer_state, is_leaf=lambda x: isinstance(x, nnx.Variable))
+            for leaf in leaves:
+                if isinstance(leaf, nnx.Variable):
+                    val = leaf.get_value() if hasattr(leaf, 'get_value') else getattr(leaf, 'value', None)
+                    if val is not None and hasattr(val, 'dtype'):
+                        default_dtype = val.dtype
+                        if default_dtype != jnp.float32:
+                            break
+        except Exception:
+            pass
+
+        # We inherently trust the physical transformer types (if assigned) over the abstract config fallback
+        self.dtype = default_dtype
 
         self.cache_config = cache_config
         self.max_seq_len = max_seq_len
@@ -222,16 +250,12 @@ class VanillaSampler:
         cache: Any,
         tokens: np.ndarray,
         metadata: RPAMetadata,
+        sampling_config: SamplingConfig,
         static_token_capacity: int = 1000,
-        temperature: float = 0.0,
-        top_p: float = 1.0,
-        top_k: int = -1,
-        forbidden_token_ids: list[int] | None = None,
-        return_logprobs: bool = False,
         step: int = 0
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray | None, Any]:
         
-        batch_size = len(metadata.seq_lens)
+        batch_size = len(metadata.kv_lens)
         
         logits, updated_cache = self._compiled_sample_step(
             self._flattened_transformer_state, 
@@ -242,23 +266,23 @@ class VanillaSampler:
             static_token_capacity=static_token_capacity
         )
         
-        if forbidden_token_ids:
-            logits = logits.at[:, forbidden_token_ids].set(-jnp.inf)
+        if sampling_config.forbidden_token_ids:
+            logits = logits.at[:, sampling_config.forbidden_token_ids].set(-jnp.inf)
             
         key = jax.random.fold_in(jax.random.PRNGKey(self.seed), step)
         
         tokens, logp = jax.jit(sample_top_p, static_argnames=["temperature", "top_p", "top_k", "return_logprobs"])(
             logits[:, None, :], 
             key, 
-            temperature=temperature, 
-            top_p=top_p, 
-            top_k=top_k,
-            return_logprobs=return_logprobs,
+            temperature=sampling_config.temperature, 
+            top_p=sampling_config.top_p, 
+            top_k=sampling_config.top_k,
+            return_logprobs=sampling_config.return_logprobs,
         )
         
         tokens_cpu = jax.device_get(tokens)
         logits_cpu = jax.device_get(logits)
-        logp_cpu = jax.device_get(logp) if return_logprobs else None
+        logp_cpu = jax.device_get(logp) if sampling_config.return_logprobs else None
         
         return tokens_cpu, logits_cpu, logp_cpu, updated_cache
 
@@ -276,11 +300,11 @@ class VanillaSampler:
         
         ragged = RaggedArray(
             data=tokens_ragged,
-            lens=metadata.active_seq_lens,
+            lens=metadata.query_lens,
         )
         seq_idxs = ragged.row_idxs
         positions = ragged.intra_offsets
-        global_positions = positions + (metadata.seq_lens[seq_idxs] - metadata.active_seq_lens[seq_idxs])
+        global_positions = positions + (metadata.kv_lens[seq_idxs] - metadata.query_lens[seq_idxs])
         tokens = tokens_ragged
         
         # The transformer natively supports receiving metadata (or None for non-ragged cases).
@@ -292,7 +316,7 @@ class VanillaSampler:
             soft_cap=None, 
         )
         
-        last_token_idxs = jnp.cumsum(metadata.active_seq_lens) - 1
+        last_token_idxs = jnp.cumsum(metadata.query_lens) - 1
         valid_idxs = jnp.maximum(0, last_token_idxs)
         last_token_logits = logits[valid_idxs]
         
