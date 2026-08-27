@@ -72,7 +72,7 @@ class RolloutWorkerTest(parameterized.TestCase):
           max_turns=5,
       )
       trajectory = await self.actor_handle.asubmit("generate", req)
-      self.assertEqual(trajectory.request_id, "traj_prompt_single")
+      self.assertEqual(trajectory.request_id, "traj_prompt_single_g0")
       self.assertNotEmpty(trajectory.segments)
 
     asyncio.run(_run_test())
@@ -88,7 +88,7 @@ class RolloutWorkerTest(parameterized.TestCase):
       )
       trajectory = await self.actor_handle.asubmit("generate", req)
       self.assertIsInstance(trajectory, datatypes.RolloutResponse)
-      self.assertEqual(trajectory.request_id, "traj_prompt_async")
+      self.assertEqual(trajectory.request_id, "traj_prompt_async_g0")
 
     asyncio.run(_run_test())
 
@@ -107,7 +107,7 @@ class RolloutWorkerTest(parameterized.TestCase):
       ):
         res = await self.actor_handle.asubmit("generate", req)
       self.assertIsInstance(res, datatypes.RolloutResponse)
-      self.assertEqual(res.request_id, "traj_prompt_error")
+      self.assertEqual(res.request_id, "traj_prompt_error_g0")
       self.assertEqual(res.status, "ERROR")
       self.assertEqual(res.error, "Simulated episode execution error")
 
@@ -144,7 +144,7 @@ class RolloutWorkerTest(parameterized.TestCase):
         completed_order.append(traj.request_id)
 
       self.assertEqual(
-          completed_order, ["traj_fast_B", "traj_med_C", "traj_slow_A"]
+          completed_order, ["traj_fast_B_g0", "traj_med_C_g0", "traj_slow_A_g0"]
       )
 
     asyncio.run(_run_test())
@@ -213,11 +213,11 @@ class RolloutWorkerTest(parameterized.TestCase):
         traj = await completed_future
         received_trajectories[traj.request_id] = traj
 
-      self.assertIn("traj_req_worker_1", received_trajectories)
-      self.assertIn("traj_req_worker_2", received_trajectories)
+      self.assertIn("traj_req_worker_1_g0", received_trajectories)
+      self.assertIn("traj_req_worker_2_g0", received_trajectories)
 
-      traj_1 = received_trajectories["traj_req_worker_1"]
-      traj_2 = received_trajectories["traj_req_worker_2"]
+      traj_1 = received_trajectories["traj_req_worker_1_g0"]
+      traj_2 = received_trajectories["traj_req_worker_2_g0"]
 
       self.assertNotEmpty(traj_1.segments)
       self.assertNotEmpty(traj_2.segments)
@@ -251,7 +251,7 @@ class RolloutWorkerTest(parameterized.TestCase):
       )
       traj = await handle.asubmit("generate", req)
       self.assertIsInstance(traj, datatypes.RolloutResponse)
-      self.assertEqual(traj.request_id, "traj_prompt_native_actor")
+      self.assertEqual(traj.request_id, "traj_prompt_native_actor_g0")
 
       # Direct RoutingActorPool out-of-order streaming and string URI support
       pool = remote_execution.RoutingActorPool([handle])
@@ -261,7 +261,7 @@ class RolloutWorkerTest(parameterized.TestCase):
       async for res in pool.as_completed_stream(tasks):
         results.append(res)
       self.assertLen(results, 1)
-      self.assertEqual(results[0].request_id, "traj_prompt_native_actor")
+      self.assertEqual(results[0].request_id, "traj_prompt_native_actor_g0")
 
     asyncio.run(_run_test())
 

@@ -165,8 +165,7 @@ def _make_reward_fn(mode: str, num_generations: int):
   def reward_fn(item: datatypes.TrajectoryItem) -> float:
     metadata = dict(item.metadata or {})
     if mode == "synthetic":
-      pair_index = int(metadata.get("pair_index", item.pair_index))
-      return pair_index / max(num_generations - 1, 1)
+      return float(item.group_index) / max(num_generations - 1, 1)
 
     text = str(metadata.get("text", ""))
     gold_answer = metadata.get("gold_answer")
@@ -363,7 +362,6 @@ def _build_prompt_item(
   return {
       "prompt": prompt,
       "prompt_id": prompt_id,
-      "group_id": prompt_id,
       "generation_kwargs": {
           "max_generation_steps": max_response_length,
           "temperature": temperature,
@@ -377,7 +375,6 @@ def _build_prompt_item(
           "env_config": {
               "prompt": prompt,
               "gold_answer": gold_answer,
-              "group_id": prompt_id,
               "max_steps": 1,
           },
       },

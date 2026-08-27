@@ -62,6 +62,20 @@ class _MockWorkerHandle(mock.MagicMock):
       **kwargs: Any,
   ) -> str:
     self.dispatched_requests.append((request_id, method_name, args, kwargs))
+    if method_name == "generate":
+      reqs = kwargs.get("requests", [])
+      if reqs:
+        resps = [
+            _create_rollout_response(
+                request_id=req.request_id,
+                prompt_id=req.prompt_id,
+                group_index=req.group_index,
+                policy_version=req.target_policy_version,
+                reward=1.0 + float(req.group_index or 0),
+            )
+            for req in reqs
+        ]
+        self.responses.append(resps)
     return request_id or "task_ack"
 
   async def poll_responses(
@@ -95,14 +109,14 @@ class _MockWorkerHandle(mock.MagicMock):
 def _create_rollout_response(
     request_id: str,
     prompt_id: str,
-    group_id: str,
-    pair_index: int = 0,
+    group_index: int = 0,
     policy_version: int = 0,
     reward: float = 1.0,
 ) -> datatypes.RolloutResponse:
   return datatypes.RolloutResponse(
       request_id=request_id,
       prompt_id=prompt_id,
+      group_index=group_index,
       status="COMPLETED",
       env_reward=reward,
       policy_version=policy_version,
@@ -114,16 +128,12 @@ def _create_rollout_response(
               loss_mask=np.array([1, 1], dtype=np.int32),
           )
       ],
-      metadata={
-          "group_id": group_id,
-          "pair_index": pair_index,
-      },
+      metadata={},
   )
 
 
 def _make_trajectory_group(
     prompt_id: str = "prompt_0",
-    group_id: str = "group_0",
     group_size: int = 2,
     reward: float = 1.0,
 ) -> list[datatypes.TrajectoryItem]:
@@ -132,8 +142,7 @@ def _make_trajectory_group(
           _create_rollout_response(
               f"req_{prompt_id}_{idx}",
               prompt_id,
-              group_id,
-              pair_index=idx,
+              group_index=idx,
               reward=reward,
           )
       )
@@ -234,7 +243,7 @@ class RLProgramTest(absltest.TestCase):
     async def _run():
       _set_mock_poll_batches(
           self.mock_engine,
-          _make_trajectory_group(prompt_id="p0", group_id="g0", group_size=2),
+          _make_trajectory_group(prompt_id="p0", group_size=2),
           [],
       )
 
@@ -434,15 +443,15 @@ class RLProgramTest(absltest.TestCase):
       )
       program.engine = self.mock_engine
 
-      for pair_index in range(2):
+      for group_index in range(2):
         item = datatypes.TrajectoryItem(
-            pair_index=pair_index,
-            group_id="group_0",
+            group_index=group_index,
+            prompt_id="prompt_0",
             start_step=0,
             traj=datatypes.Trajectory(reward=1.0),
         )
         item.payload = self.mock_algo.create_trainer_payloads.return_value[
-            pair_index
+            group_index
         ]
         await program.scored_q.put(item)
 
@@ -522,20 +531,14 @@ class RLProgramTest(absltest.TestCase):
     async def _run():
       _set_mock_poll_batches(
           self.mock_engine,
-          _make_trajectory_group(prompt_id="custom_p0", group_id="custom_g0"),
+          _make_trajectory_group(prompt_id="custom_p0"),
       )
       dict_item = {
           "prompt_id": "custom_p0",
-          "group_id": "custom_g0",
           "data": "test",
       }
       program = self._create_program(dataset=[dict_item])
 
-      dict_item = {
-          "prompt_id": "custom_p0",
-          "group_id": "custom_g0",
-          "data": "test",
-      }
       await program.run_async(self.mock_engine)
 
       self.mock_engine.dispatch_rollouts.assert_called_once_with(
@@ -546,13 +549,113 @@ class RLProgramTest(absltest.TestCase):
 
     asyncio.run(_run())
 
+  def test_prompt_id_and_group_index_propagation_end_to_end(self):
+    """Verifies that prompt_id and group_index are automatically built and propagated:
+
+    1. Raw dataset string prompt (without manual prompt_id) -> RLProgram builds prompt_0
+    2. Engine dispatch -> assigns group_index (0, 1) and creates deterministic request_ids
+    3. Rollout worker -> creates RolloutResponse inheriting prompt_id and group_index
+    4. Queue manager -> groups by prompt_0, delivers complete group
+    5. Reward function -> receives items with prompt_id='prompt_0' and group_index=(0, 1)
+    6. Batch assembly -> receives reconstructed items with prompt_id and group_index preserved
+    7. Trainer step -> executed with batch
+    """
+    async def _run():
+      mock_rollout = _MockWorkerHandle(role=datatypes.Role.ROLLOUT)
+      mock_actor = _MockWorkerHandle(role=datatypes.Role.ACTOR)
+      mock_coordinator = mock.MagicMock()
+      mock_coordinator.sync = mock.AsyncMock(
+          return_value=mock.MagicMock(policy_version=1)
+      )
+      engine = distributed_rl_engine.DistributedRLEngine(
+          rollout_workers=[mock_rollout],
+          trainer_workers={datatypes.Role.ACTOR: mock_actor},
+          weight_sync_coordinator=mock_coordinator,
+      )
+
+      # 1. Raw prompt dataset (prompt_id not preconfigured; built automatically by program)
+      dataset = ["What is 2+2?"]
+
+      # 2. Track items observed in reward_fn
+      observed_in_reward = []
+      def tracking_reward_fn(it: datatypes.TrajectoryItem) -> float:
+        observed_in_reward.append({
+            "prompt_id": it.prompt_id,
+            "group_index": it.group_index,
+        })
+        return 1.0
+
+      # 3. Track items passed to algo.create_trainer_payloads
+      passed_to_algo = []
+      def tracking_create_payloads(step_items, **kwargs):
+        del kwargs
+        for it in step_items:
+          passed_to_algo.append({
+              "prompt_id": it.prompt_id,
+              "group_index": it.group_index,
+          })
+        mock_p = datatypes.RLTrainerPayload(
+            token_ids=np.array([1, 2, 3, 4], dtype=np.int32),
+            token_mask=np.array([0, 0, 1, 1], dtype=np.float32),
+            loss_mask=np.array([0, 0, 1, 1], dtype=np.float32),
+            advantages=np.full(4, 1.0, dtype=np.float32),
+            action_mask=np.array([0, 0, 1, 1], dtype=np.float32),
+        )
+        return [mock_p, mock_p]
+
+      self.mock_algo.create_trainer_payloads = tracking_create_payloads
+
+      program = self._create_program(
+          dataset=dataset,
+          reward_fns=[tracking_reward_fn],
+          group_size=2,
+          mini_batch_size=1,
+          max_steps=1,
+      )
+
+      await program.run_async(engine)
+
+      # 4. Verify RolloutRequests dispatched to worker
+      self.assertEqual(len(mock_rollout.dispatched_requests), 2)
+      req_0 = mock_rollout.dispatched_requests[0][3]["requests"][0]
+      req_1 = mock_rollout.dispatched_requests[1][3]["requests"][0]
+      self.assertEqual(req_0.prompt_id, "prompt_0")
+      self.assertEqual(req_0.group_index, 0)
+      self.assertEqual(req_0.request_id, "req_prompt_0_g0_v0")
+      self.assertEqual(req_1.prompt_id, "prompt_0")
+      self.assertEqual(req_1.group_index, 1)
+      self.assertEqual(req_1.request_id, "req_prompt_0_g1_v0")
+
+      # 5. Verify items observed in reward_fn
+      self.assertEqual(
+          observed_in_reward,
+          [
+              {"prompt_id": "prompt_0", "group_index": 0},
+              {"prompt_id": "prompt_0", "group_index": 1},
+          ],
+      )
+
+      # 6. Verify items passed to algo.create_trainer_payloads
+      self.assertEqual(
+          passed_to_algo,
+          [
+              {"prompt_id": "prompt_0", "group_index": 0},
+              {"prompt_id": "prompt_0", "group_index": 1},
+          ],
+      )
+
+      # 7. Verify trainer step executed
+      self.assertEqual(mock_actor.train_step_count, 1)
+
+    asyncio.run(_run())
+
   def test_multi_group_mini_batch_gradient_accumulation(self):
     async def _run():
       self.mock_algo.mini_batch_size = 2
       _set_mock_poll_batches(
           self.mock_engine,
-          _make_trajectory_group("prompt_0", "group_0"),
-          _make_trajectory_group("prompt_1", "group_1"),
+          _make_trajectory_group("prompt_0"),
+          _make_trajectory_group("prompt_1"),
       )
       program = self._create_program(dataset=["p0", "p1"])
 
@@ -741,15 +844,13 @@ class RLProgramTest(absltest.TestCase):
               _create_rollout_response(
                   "req_0",
                   "prompt_data_0",
-                  "group_0",
-                  pair_index=0,
+                  group_index=0,
                   reward=2.5,
               ),
               _create_rollout_response(
                   "req_1",
                   "prompt_data_0",
-                  "group_0",
-                  pair_index=1,
+                  group_index=1,
                   reward=2.5,
               ),
           ],
@@ -1003,10 +1104,10 @@ class RLProgramTest(absltest.TestCase):
   def test_staleness_computation_with_nonzero_policy_version(self):
     async def _run():
       resp_v3_0 = _create_rollout_response(
-          "req_0", "prompt_0", "group_0", pair_index=0, policy_version=3
+          "req_0", "prompt_0", group_index=0, policy_version=3
       )
       resp_v3_1 = _create_rollout_response(
-          "req_1", "prompt_0", "group_0", pair_index=1, policy_version=3
+          "req_1", "prompt_0", group_index=1, policy_version=3
       )
       _set_mock_poll_batches(
           self.mock_engine,
@@ -1056,8 +1157,8 @@ class RLProgramTest(absltest.TestCase):
           action_mask=np.ones(10, dtype=np.float32),
       )
       traj_item_0 = datatypes.TrajectoryItem(
-          pair_index=0,
-          group_id="group_0",
+          group_index=0,
+          prompt_id="prompt_0",
           start_step=0,
           prompt_tokens=None,
           completion_tokens=None,
@@ -1065,8 +1166,8 @@ class RLProgramTest(absltest.TestCase):
       )
       traj_item_0.payload = payload_0
       traj_item_1 = datatypes.TrajectoryItem(
-          pair_index=1,
-          group_id="group_0",
+          group_index=1,
+          prompt_id="prompt_0",
           start_step=0,
           prompt_tokens=None,
           completion_tokens=None,
@@ -1099,16 +1200,16 @@ class RLProgramTest(absltest.TestCase):
   def test_rollouts_without_status_omits_success_rate(self):
     async def _run():
       traj_item_0 = datatypes.TrajectoryItem(
-          pair_index=0,
-          group_id="group_0",
+          group_index=0,
+          prompt_id="prompt_0",
           start_step=0,
           prompt_tokens=np.array([1, 2], dtype=np.int32),
           completion_tokens=np.array([3, 4], dtype=np.int32),
           traj=datatypes.Trajectory(reward=1.0, status=None),
       )
       traj_item_1 = datatypes.TrajectoryItem(
-          pair_index=1,
-          group_id="group_0",
+          group_index=1,
+          prompt_id="prompt_0",
           start_step=0,
           prompt_tokens=np.array([1, 2], dtype=np.int32),
           completion_tokens=np.array([3, 4], dtype=np.int32),
@@ -1179,16 +1280,16 @@ class RLProgramTest(absltest.TestCase):
     async def _run():
       mock_step = datatypes.Step()
       traj_item_0 = datatypes.TrajectoryItem(
-          pair_index=0,
-          group_id="group_0",
+          group_index=0,
+          prompt_id="prompt_0",
           start_step=0,
           prompt_tokens=np.array([1, 2], dtype=np.int32),
           completion_tokens=np.array([3, 4], dtype=np.int32),
           traj=datatypes.Trajectory(reward=1.0, steps=[mock_step, mock_step]),
       )
       traj_item_1 = datatypes.TrajectoryItem(
-          pair_index=1,
-          group_id="group_0",
+          group_index=1,
+          prompt_id="prompt_0",
           start_step=0,
           prompt_tokens=np.array([1, 2], dtype=np.int32),
           completion_tokens=np.array([3, 4], dtype=np.int32),
@@ -1232,16 +1333,14 @@ class RLProgramTest(absltest.TestCase):
         r1 = _create_rollout_response(
             f"req_{step_idx}_0",
             "p0",
-            f"g_{step_idx}",
-            pair_index=0,
+            group_index=0,
             reward=float(1.5 + 2.5 * (1.0 - np.exp(-step_idx / 6.0))),
             policy_version=max(0, step_idx - 1),
         )
         r2 = _create_rollout_response(
             f"req_{step_idx}_1",
             "p0",
-            f"g_{step_idx}",
-            pair_index=1,
+            group_index=1,
             reward=float(1.5 + 2.5 * (1.0 - np.exp(-step_idx / 6.0))),
             policy_version=max(0, step_idx - 1),
         )
@@ -1313,10 +1412,10 @@ class RLProgramTest(absltest.TestCase):
         )
 
         r1 = _create_rollout_response(
-            "req_0", "p0", "g0", pair_index=0, reward=2.5, policy_version=0
+            "req_0", "p0", group_index=0, reward=2.5, policy_version=0
         )
         r2 = _create_rollout_response(
-            "req_1", "p0", "g0", pair_index=1, reward=1.5, policy_version=0
+            "req_1", "p0", group_index=1, reward=1.5, policy_version=0
         )
         _set_mock_poll_batches(
             self.mock_engine,

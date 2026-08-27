@@ -316,6 +316,7 @@ class RolloutWorker(abstract_worker.Worker):
           policy_version=policy_version,
       )
       response.prompt_id = str(extra.get("prompt_id", response.prompt_id))
+      response.group_index = int(extra.get("group_index", response.group_index) or 0)
       response.env_reward = float(extra.get("reward", response.env_reward))
       response.metadata.update(
           {k: v for k, v in extra.items() if k != "prompt_tokens"}
@@ -354,6 +355,7 @@ class RolloutWorker(abstract_worker.Worker):
     return datatypes.RolloutResponse(
         request_id=request.request_id or request.traj_id,
         prompt_id=request.prompt_id,
+        group_index=request.group_index,
         status="COMPLETED",
         prompt_tokens=prompt_token_arr,
         segments=[

@@ -259,8 +259,8 @@ class StandardRLProgram(RLProgram):
           src_metadata = getattr(src_item, "metadata", None)
           metadata = dict(src_metadata) if src_metadata else {}
           item = datatypes.TrajectoryItem(
-              pair_index=idx,
-              group_id=getattr(group[0], "group_id", "default"),
+              prompt_id=getattr(src_item, "prompt_id", ""),
+              group_index=getattr(src_item, "group_index", 0),
               start_step=0,
               traj=datatypes.Trajectory(
                   reward=reward_val,

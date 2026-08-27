@@ -481,7 +481,8 @@ class DistributedRLEngineTest(absltest.TestCase):
           total_dispatched += len(reqs)
           for r in reqs:
             self.assertEqual(r.target_policy_version, 5)
-            self.assertIn(r.metadata["pair_index"], (0, 1, 2))
+            self.assertIn(r.group_index, (0, 1, 2))
+            self.assertIn(r.metadata["group_index"], (0, 1, 2))
       self.assertEqual(total_dispatched, 6)
 
     asyncio.run(_run())
@@ -491,11 +492,8 @@ class DistributedRLEngineTest(absltest.TestCase):
       dict_item = {
           "prompt": "Solve math",
           "prompt_id": "math_1",
-          "group_id": "grp_1",
           "generation_kwargs": {"max_generation_steps": 32},
           "metadata": {
-              "group_id": "grp_1",
-              "pair_index": 99,
               "env_config": {"gold_answer": "42"},
           },
       }
@@ -510,8 +508,8 @@ class DistributedRLEngineTest(absltest.TestCase):
           all_dispatched.extend(c.kwargs["requests"])
 
       self.assertLen(all_dispatched, 2)
-      pair_indices = {r.metadata["pair_index"] for r in all_dispatched}
-      self.assertEqual(pair_indices, {0, 1})
+      group_indices = {r.group_index for r in all_dispatched}
+      self.assertEqual(group_indices, {0, 1})
       self.assertTrue(all(r.prompt_id == "math_1" for r in all_dispatched))
       self.assertTrue(all(r.prompt == "Solve math" for r in all_dispatched))
       self.assertTrue(
@@ -520,12 +518,20 @@ class DistributedRLEngineTest(absltest.TestCase):
               for r in all_dispatched
           )
       )
-      self.assertTrue(
-          all(r.metadata["group_id"] == "grp_1" for r in all_dispatched)
-      )
       self.assertEqual(
-          {r.metadata["env_config"]["pair_index"] for r in all_dispatched},
+          {r.metadata["group_index"] for r in all_dispatched},
           {0, 1},
+      )
+      self.assertTrue(all(r.metadata["group_size"] == 2 for r in all_dispatched))
+      self.assertEqual(
+          {r.metadata["env_config"]["group_index"] for r in all_dispatched},
+          {0, 1},
+      )
+      self.assertTrue(
+          all(
+              r.metadata["env_config"]["group_size"] == 2
+              for r in all_dispatched
+          )
       )
       self.assertTrue(
           all(
@@ -569,7 +575,7 @@ class DistributedRLEngineTest(absltest.TestCase):
           group_size=2,
           policy_version=3,
       )
-      self.assertEqual(req_ids, ["req_p_123_0_v3", "req_p_123_1_v3"])
+      self.assertEqual(req_ids, ["req_p_123_g0_v3", "req_p_123_g1_v3"])
 
     asyncio.run(_run())
 

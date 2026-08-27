@@ -40,10 +40,7 @@ def _response_to_trajectory_item(resp: Any) -> datatypes.TrajectoryItem:
     return resp
 
   if isinstance(resp, datatypes.RolloutResponse):
-    prompt_id = resp.prompt_id or "default_prompt"
     metadata = dict(resp.metadata) if resp.metadata else {}
-    group_id = metadata.get("group_id", prompt_id)
-    pair_index = metadata.get("pair_index", 0)
     success_statuses = {"COMPLETED", "SUCCEEDED"}
     traj = datatypes.Trajectory(
         reward=resp.env_reward,
@@ -54,8 +51,8 @@ def _response_to_trajectory_item(resp: Any) -> datatypes.TrajectoryItem:
         ),
     )
     item = datatypes.TrajectoryItem(
-        pair_index=pair_index,
-        group_id=group_id,
+        prompt_id=resp.prompt_id,
+        group_index=resp.group_index,
         start_step=0,
         traj=traj,
         metadata=metadata,
@@ -79,14 +76,24 @@ def _response_to_trajectory_item(resp: Any) -> datatypes.TrajectoryItem:
 
   if isinstance(resp, datatypes.Trajectory):
     item = datatypes.TrajectoryItem(
-        pair_index=0,
-        group_id=getattr(resp, "task", "default_group"),
+        prompt_id=getattr(resp, "prompt_id", ""),
+        group_index=getattr(resp, "group_index", 0),
         start_step=0,
         traj=resp,
         policy_version=getattr(resp, "policy_version", 0),
-        prompt_tokens=getattr(resp, "prompt_tokens", np.zeros(0, dtype=np.int32)),
-        completion_tokens=getattr(resp, "completion_tokens", np.zeros(0, dtype=np.int32)),
-        action_mask=getattr(resp, "action_mask", np.ones(len(getattr(resp, "completion_tokens", [])), dtype=np.float32)),
+        prompt_tokens=getattr(
+            resp, "prompt_tokens", np.zeros(0, dtype=np.int32)
+        ),
+        completion_tokens=getattr(
+            resp, "completion_tokens", np.zeros(0, dtype=np.int32)
+        ),
+        action_mask=getattr(
+            resp,
+            "action_mask",
+            np.ones(
+                len(getattr(resp, "completion_tokens", [])), dtype=np.float32
+            ),
+        ),
     )
     return item
 
@@ -193,12 +200,6 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         )
 
       prompt_id = str(prompt_id)
-      group_id = str(
-          getattr(p, "group_id", None)
-          or (p.get("group_id") if isinstance(p, dict) else None)
-          or item_metadata.get("group_id")
-          or prompt_id
-      )
       raw_prompt = (
           p.get("prompt", p)
           if isinstance(p, Mapping)
@@ -208,16 +209,16 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       if isinstance(p, Mapping):
         max_turns = p.get("max_turns", max_turns)
 
-      for g_idx in range(group_size):
+      for group_index in range(group_size):
         request_metadata = dict(base_metadata)
         request_metadata.update(item_metadata)
-        request_metadata["group_id"] = group_id
-        request_metadata["pair_index"] = g_idx
-        request_metadata.setdefault("prefix_hash", group_id)
+        request_metadata["group_index"] = group_index
+        request_metadata["group_size"] = group_size
+        request_metadata.setdefault("prefix_hash", prompt_id)
         if isinstance(request_metadata.get("env_config"), Mapping):
           env_config = dict(request_metadata["env_config"])
-          env_config.setdefault("group_id", group_id)
-          env_config["pair_index"] = g_idx
+          env_config["group_index"] = group_index
+          env_config["group_size"] = group_size
           env_config["policy_version"] = version
           request_metadata["env_config"] = env_config
 
@@ -226,10 +227,10 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
 
         rollout_reqs.append(
             datatypes.RolloutRequest(
-                request_id=f"req_{prompt_id}_{g_idx}_v{version}",
+                request_id=f"req_{prompt_id}_g{group_index}_v{version}",
                 prompt=raw_prompt,
                 prompt_id=prompt_id,
-                group_offset_id=str(g_idx),
+                group_index=group_index,
                 target_policy_version=version,
                 generation_kwargs=generation_kwargs,
                 max_turns=max_turns,
@@ -309,9 +310,9 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         worker_to_requests[worker].append(p)
         continue
 
-      route_key = route_metadata_map.get("prefix_hash")
-      if route_key is None:
-        route_key = route_metadata_map.get("prompt_id")
+      route_key = route_metadata_map.get("prefix_hash") or getattr(
+          p, "prompt_id", p.get("prompt_id") if isinstance(p, dict) else None
+      )
       worker = self._rollout_pool._get_next_actor(
           kwargs={"route_key": route_key}
       )

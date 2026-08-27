@@ -563,7 +563,7 @@ class TrajectoryTest(trajectory_testing.TrajectoryTestCase):
         trajectory_id="traj_1",
         agent=trajectory.Agent(name="agent_test", version="1.0"),
         prompt_id="prompt_abc",
-        group_offset_id="group_xyz",
+        group_index=2,
         status="COMPLETED",
         total_reward=4.2,
         hyperparams={"temperature": 0.7},
@@ -575,7 +575,7 @@ class TrajectoryTest(trajectory_testing.TrajectoryTestCase):
     self.assertIsInstance(meta, trajectory.TrajectoryMetadata)
     self.assertEqual(meta.trajectory_id, "traj_1")
     self.assertEqual(meta.prompt_id, "prompt_abc")
-    self.assertEqual(meta.group_offset_id, "group_xyz")
+    self.assertEqual(meta.group_index, 2)
     self.assertEqual(meta.status, "COMPLETED")
     self.assertEqual(meta.total_reward, 4.2)
     self.assertEqual(meta.hyperparams, {"temperature": 0.7})
@@ -588,7 +588,7 @@ class TrajectoryTest(trajectory_testing.TrajectoryTestCase):
         trajectory_id="traj_1",
         agent=trajectory.Agent(name="agent_test", version="1.0"),
         prompt_id="prompt_abc",
-        group_offset_id="group_xyz",
+        group_index=2,
         status="COMPLETED",
         total_reward=4.2,
         hyperparams={"top_p": 0.9},
@@ -608,7 +608,7 @@ class TrajectoryTest(trajectory_testing.TrajectoryTestCase):
     self.assertIsInstance(meta, trajectory.TrajectoryMetadata)
     self.assertEqual(meta.trajectory_id, "traj_1")
     self.assertEqual(meta.prompt_id, "prompt_abc")
-    self.assertEqual(meta.group_offset_id, "group_xyz")
+    self.assertEqual(meta.group_index, 2)
     self.assertEqual(meta.status, "COMPLETED")
     self.assertEqual(meta.total_reward, 4.2)
     self.assertEqual(meta.hyperparams, {"top_p": 0.9})
@@ -623,7 +623,7 @@ class TrajectoryTest(trajectory_testing.TrajectoryTestCase):
         trajectory_id="traj_roundtrip",
         agent=trajectory.Agent(name="agent_test", version="1.0"),
         prompt_id="p1",
-        group_offset_id="g1",
+        group_index=1,
         status="RUNNING",
         total_reward=1.0,
         hyperparams={"temperature": 0.5},
@@ -642,7 +642,7 @@ class TrajectoryTest(trajectory_testing.TrajectoryTestCase):
     restored = trajectory.TunixTrajectory.from_json_dict(data)
     self.assertEqual(restored.trajectory_id, traj.trajectory_id)
     self.assertEqual(restored.prompt_id, "p1")
-    self.assertEqual(restored.group_offset_id, "g1")
+    self.assertEqual(restored.group_index, 1)
     self.assertEqual(restored.status, "RUNNING")
     self.assertEqual(restored.total_reward, 1.0)
     self.assertEqual(restored.hyperparams, {"temperature": 0.5})
@@ -655,7 +655,7 @@ class TrajectoryTest(trajectory_testing.TrajectoryTestCase):
     # 1. Create a mock trajectory metadata via create_trajectory_metadata()
     class MockRolloutRequest:
       prompt_id = "prompt_123"
-      group_offset_id = "group_offset_abc"
+      group_index = 0
       generation_kwargs = {"temperature": 0.7, "top_p": 0.9}
       metadata = {"req_key": "req_val"}
 

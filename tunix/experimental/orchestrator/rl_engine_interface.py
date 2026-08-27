@@ -60,10 +60,8 @@ class AbstractRLEngine(Protocol):
          The engine does not synthesize fallback IDs; missing IDs raise a
          `ValueError` immediately.
       2. The engine expands each prompt into `group_size` independent rollout
-         requests with deterministic IDs `req_{prompt_id}_{g_idx}_v{version}`
-         and sets `pair_index = g_idx` (0..G-1).
-      3. `group_id` defaults to `prompt_id` unless an explicit `group_id` is
-         provided on the prompt item.
+         requests with deterministic IDs `req_{prompt_id}_g{g_idx}_v{version}`
+         and sets `group_index = g_idx` (0..G-1).
 
     Args:
       prompts: Sequence of prompt items (dicts, objects, or RolloutRequests).

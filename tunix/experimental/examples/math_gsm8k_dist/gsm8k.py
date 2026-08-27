@@ -31,8 +31,8 @@ class GSM8KEnv(base_environment.BaseTaskEnv):
       self,
       prompt: str = "",
       gold_answer: str = "",
-      group_id: str = "",
-      pair_index: int = 0,
+      prompt_id: str = "",
+      group_index: int = 0,
       policy_version: int = 0,
       max_steps: int = 1,
       **kwargs: Any,
@@ -44,8 +44,8 @@ class GSM8KEnv(base_environment.BaseTaskEnv):
             "policy_version": policy_version,
         },
         max_steps=max_steps,
-        group_id=group_id,
-        pair_index=pair_index,
+        prompt_id=prompt_id,
+        group_index=group_index,
         **kwargs,
     )
 

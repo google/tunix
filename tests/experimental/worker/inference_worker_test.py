@@ -129,8 +129,8 @@ class InferenceWorkerTest(absltest.TestCase):
 
   def test_per_token_logps_rejects_unpadded_trajectory_items(self):
     item = datatypes.TrajectoryItem(
-        pair_index=0,
-        group_id="g1",
+        group_index=0,
+        prompt_id="g1",
         start_step=0,
         traj=datatypes.Trajectory(
             reward=1.0,

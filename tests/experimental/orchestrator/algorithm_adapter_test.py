@@ -35,8 +35,8 @@ class AlgorithmAdapterTest(absltest.TestCase):
   def test_grpo_create_trainer_payloads(self):
     adapter = algorithm_adapter.GRPOAdapter(group_size=2)
     item1 = datatypes.TrajectoryItem(
-        pair_index=0,
-        group_id="g1",
+        group_index=0,
+        prompt_id="g1",
         start_step=0,
         traj=datatypes.Trajectory(reward=1.0),
     )
@@ -45,8 +45,8 @@ class AlgorithmAdapterTest(absltest.TestCase):
     item1.action_mask = np.array([1, 1], dtype=np.float32)
 
     item2 = datatypes.TrajectoryItem(
-        pair_index=1,
-        group_id="g1",
+        group_index=1,
+        prompt_id="g1",
         start_step=0,
         traj=datatypes.Trajectory(reward=2.0),
     )
@@ -64,8 +64,8 @@ class AlgorithmAdapterTest(absltest.TestCase):
   def test_ppo_advantages_and_trainer_payloads(self):
     adapter = algorithm_adapter.PPOAdapter(group_size=2, gamma=0.99, lam=0.95)
     item = datatypes.TrajectoryItem(
-        pair_index=0,
-        group_id="g1",
+        group_index=0,
+        prompt_id="g1",
         start_step=0,
         traj=datatypes.Trajectory(reward=1.0),
     )

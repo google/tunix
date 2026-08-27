@@ -43,15 +43,12 @@ class TrajectoryQueueManager(group_queue_manager.GroupQueueManager):
       group_fn: Optional custom grouping function. If None, `group_size` must be
         provided.
       filter_fn: Optional pluggable function to filter candidate groups.
-      key_fn: Optional function to extract grouping key. Defaults to
-        group_id/prompt_id fallback.
+      key_fn: Optional function to extract grouping key. Defaults to prompt_id
+        fallback.
     """
     if key_fn is None and group_fn is None:
 
       def _default_key_fn(item: datatypes.TrajectoryItem) -> Hashable:
-        group_id = getattr(item, "group_id", None)
-        if group_id is not None and group_id != "":
-          return group_id
         prompt_id = getattr(item, "prompt_id", None)
         if prompt_id is not None and prompt_id != "":
           return prompt_id
@@ -140,7 +137,8 @@ class TrajectoryQueueManager(group_queue_manager.GroupQueueManager):
 
   def commit(self, step: int, groups: Sequence[Any] | None = None) -> None:
     """Commits in-flight groups after a successful global step boundary."""
-    # TODO: implement the commit and keep track of uncommited items. might be worth putting in parent class.
+    # TODO: implement the commit and keep track of uncommited items.
+    # might be worth putting in parent class.
     pass
 
   @property

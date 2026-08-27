@@ -1068,7 +1068,7 @@ class CreateTrajectoryMetadataTest(parameterized.TestCase):
     self.assertEqual(meta.agent.version, "1.0")
     self.assertEqual(meta.status, "RUNNING")
     self.assertIsNone(meta.prompt_id)
-    self.assertIsNone(meta.group_offset_id)
+    self.assertEqual(meta.group_index, 0)
     self.assertIsNone(meta.target_policy_versions)
     self.assertIsNone(meta.total_reward)
     self.assertIsNone(meta.hyperparams)
@@ -1077,7 +1077,7 @@ class CreateTrajectoryMetadataTest(parameterized.TestCase):
   def test_create_trajectory_metadata_from_request_and_agent(self):
     class MockRolloutRequest:
       prompt_id = "prompt_123"
-      group_offset_id = "group_offset_abc"
+      group_index = 4
       generation_kwargs = {"temperature": 0.8, "top_k": 40}
       metadata = {"experiment": "exp_v1"}
 
@@ -1104,7 +1104,7 @@ class CreateTrajectoryMetadataTest(parameterized.TestCase):
     self.assertEqual(meta.agent.name, "custom_agent")
     self.assertEqual(meta.agent.version, "2.1")
     self.assertEqual(meta.prompt_id, "prompt_123")
-    self.assertEqual(meta.group_offset_id, "group_offset_abc")
+    self.assertEqual(meta.group_index, 4)
     self.assertEqual(meta.target_policy_versions, [1, 2, 3])
     self.assertEqual(meta.status, "SUCCEEDED")
     self.assertEqual(meta.total_reward, 8.5)

@@ -415,7 +415,7 @@ def create_trajectory_metadata(
       trajectory_id=traj_id,
       agent=agent_obj,
       prompt_id=getattr(request, "prompt_id", None),
-      group_offset_id=getattr(request, "group_offset_id", None),
+      group_index=getattr(request, "group_index", 0),
       target_policy_versions=target_policy_versions,
       status=status,
       total_reward=getattr(traj_obj, "reward", None),

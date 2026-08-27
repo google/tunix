@@ -53,7 +53,7 @@ def _rollout_request_dto() -> datatypes.RolloutRequest:
       request_id="req-123",
       prompt="Solve 2+2",
       prompt_id="req-rollout-42",
-      group_offset_id="group-1",
+      group_index=1,
       generation_kwargs={"max_tokens": 128, "temperature": 0.5},
       max_turns=5,
       target_policy_version=3,
@@ -71,7 +71,7 @@ class WireSerializationTest(absltest.TestCase):
     self.assertEqual(restored.request_id, original.request_id)
     self.assertEqual(restored.prompt, original.prompt)
     self.assertEqual(restored.prompt_id, original.prompt_id)
-    self.assertEqual(restored.group_offset_id, original.group_offset_id)
+    self.assertEqual(restored.group_index, original.group_index)
     self.assertEqual(restored.generation_kwargs, original.generation_kwargs)
     self.assertEqual(restored.max_turns, original.max_turns)
     self.assertEqual(
@@ -289,6 +289,51 @@ class WireSerializationTest(absltest.TestCase):
     after = time.time()
     self.assertGreaterEqual(report.heartbeat_unix_s, before)
     self.assertLessEqual(report.heartbeat_unix_s, after)
+
+  def test_request_defaults_request_id_to_uuid(self):
+    req1 = datatypes.Request()
+    req2 = datatypes.Request()
+    self.assertTrue(req1.request_id.startswith("req_"))
+    self.assertTrue(req2.request_id.startswith("req_"))
+    self.assertNotEqual(req1.request_id, req2.request_id)
+
+  def test_rollout_request_traj_id_formatting(self):
+    # Default group_index is 0
+    r_default = datatypes.RolloutRequest(prompt_id="42")
+    self.assertEqual(r_default.traj_id, "traj_42_g0")
+
+    # String prompt ID
+    r_str = datatypes.RolloutRequest(prompt_id="math_101")
+    self.assertEqual(r_str.traj_id, "traj_math_101_g0")
+
+    # Grouped at index 1
+    r_grouped_1 = datatypes.RolloutRequest(prompt_id="42", group_index=1)
+    self.assertEqual(r_grouped_1.traj_id, "traj_42_g1")
+
+  def test_from_trajectory_populates_prompt_id_and_group_index(self):
+    traj = datatypes.Trajectory(
+        steps=[],
+        reward=2.0,
+        status=datatypes.TrajectoryStatus.SUCCEEDED,
+    )
+    resp = datatypes.RolloutResponse.from_trajectory(
+        request_id="req_test",
+        traj=traj,
+        prompt_tokens=np.array([1, 2], dtype=np.int32),
+        policy_version=2,
+        metadata={"prompt_id": "math_42", "group_index": 3},
+    )
+    self.assertEqual(resp.prompt_id, "math_42")
+    self.assertEqual(resp.group_index, 3)
+
+  def test_trajectory_item_fields(self):
+    item = datatypes.TrajectoryItem(prompt_id="prompt_88", group_index=4)
+    self.assertEqual(item.prompt_id, "prompt_88")
+    self.assertEqual(item.group_index, 4)
+
+    item_default = datatypes.TrajectoryItem(prompt_id="prompt_99")
+    self.assertEqual(item_default.prompt_id, "prompt_99")
+    self.assertEqual(item_default.group_index, 0)
 
 
 if __name__ == "__main__":

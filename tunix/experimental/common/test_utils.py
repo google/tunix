@@ -360,11 +360,13 @@ class MockGlobalOrchestrator:
 
     fanned_out_requests = []
     for req in requests:
-      for g_idx in range(group_size):
-        gid = str(g_idx) if group_size > 1 else req.group_offset_id
-        fanned_out_requests.append(
-            dataclasses.replace(req, group_offset_id=gid)
-        )
+      if group_size > 1:
+        for group_index in range(group_size):
+          fanned_out_requests.append(
+              dataclasses.replace(req, group_index=group_index)
+          )
+      else:
+        fanned_out_requests.append(req)
     tasks: List[Tuple[str, str, Sequence[Any], Dict[str, Any]]] = [
         (req.request_id or "req", "generate", (req,), {})
         for req in fanned_out_requests

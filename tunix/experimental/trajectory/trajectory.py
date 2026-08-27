@@ -589,9 +589,9 @@ class TunixTrajectoryMetadata(TrajectoryMetadata):
       default=None,
       description="Identifier for the initial prompt/task.",
   )
-  group_offset_id: str | None = pydantic.Field(
-      default=None,
-      description="Group or batch offset identifier for rollouts.",
+  group_index: int = pydantic.Field(
+      default=0,
+      description="Sample index within group for rollouts.",
   )
   target_policy_versions: list[int] | None = pydantic.Field(
       default=None,

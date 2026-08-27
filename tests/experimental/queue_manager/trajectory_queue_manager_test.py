@@ -23,16 +23,16 @@ from tunix.rl.agentic.queue_manager import group_queue_manager
 
 
 def _create_item(
-    group_id: str,
-    pair_index: int = 0,
+    prompt_id: str,
+    group_index: int = 0,
     task_id: str = "",
     reward: float = 1.0,
 ) -> datatypes.TrajectoryItem:
   """Helper to create a TrajectoryItem for testing."""
   traj = datatypes.Trajectory(reward=reward)
   return datatypes.TrajectoryItem(
-      pair_index=pair_index,
-      group_id=group_id,
+      group_index=group_index,
+      prompt_id=prompt_id,
       start_step=0,
       traj=traj,
       metadata={"task_id": task_id},
@@ -42,14 +42,14 @@ def _create_item(
 class QueueManagerTest(absltest.TestCase):
 
   def test_default_trajectory_grouping(self):
-    """Tests default trajectory grouping by group_id/prompt_id up to group_size."""
+    """Tests default trajectory grouping by prompt_id up to group_size."""
 
     async def _run_test():
       manager = trajectory_queue_manager.TrajectoryQueueManager(
           group_size=2
       )
-      item1 = _create_item("g1", pair_index=0)
-      item2 = _create_item("g1", pair_index=1)
+      item1 = _create_item("g1", group_index=0)
+      item2 = _create_item("g1", group_index=1)
 
       await manager.put(item1)
       self.assertEmpty(manager._ready_groups)
@@ -110,8 +110,8 @@ class QueueManagerTest(absltest.TestCase):
           group_fn=custom_builder
       )
 
-      item1 = _create_item("g1", pair_index=0)
-      item2 = _create_item("g2", pair_index=0)
+      item1 = _create_item("g1", group_index=0)
+      item2 = _create_item("g2", group_index=0)
 
       await manager.put(item1)
       self.assertEmpty(manager._ready_groups)
@@ -137,8 +137,8 @@ class QueueManagerTest(absltest.TestCase):
           group_size=2, filter_fn=positive_reward_filter_fn
       )
 
-      item_good = _create_item("g1", pair_index=0, reward=1.0)
-      item_bad = _create_item("g1", pair_index=1, reward=-1.0)
+      item_good = _create_item("g1", group_index=0, reward=1.0)
+      item_bad = _create_item("g1", group_index=1, reward=-1.0)
 
       await manager.put(item_good)
       await manager.put(item_bad)
@@ -159,7 +159,7 @@ class QueueManagerTest(absltest.TestCase):
       manager = trajectory_queue_manager.TrajectoryQueueManager(
           group_size=3
       )
-      items = [_create_item("g1", pair_index=i) for i in range(3)]
+      items = [_create_item("g1", group_index=i) for i in range(3)]
       for item in items:
         await manager.put(item)
 

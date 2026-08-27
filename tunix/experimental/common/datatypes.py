@@ -23,6 +23,7 @@ import dataclasses
 import enum
 import time
 from typing import Any, Dict
+import uuid
 from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 import numpy as np
 from tunix.common import datatypes as common_datatypes
@@ -39,14 +40,19 @@ Role = common_datatypes.Role
 
 # TODO(tunix-dev): Unify this extended TrajectoryItem back into
 # agent_types.TrajectoryItem so that all agentic workflows share the same strict
-# token array fields.
+# token array fields. Also standardize to prompt_id, group_index
 @dataclasses.dataclass(kw_only=True)
-class TrajectoryItem(agent_types.TrajectoryItem):
+class TrajectoryItem:
   """Extended TrajectoryItem for Orchestrator with token arrays."""
+  prompt_id: str = ""
+  group_index: int = 0
+  start_step: int = 0
+  traj: Any = None
   prompt_tokens: np.ndarray | None = None
   completion_tokens: np.ndarray | None = None
   action_mask: np.ndarray | None = None
   policy_version: int = 0
+  metadata: dict[str, Any] = dataclasses.field(default_factory=dict)
 
 
 ##### Common DTOs (Data Transfer Objects) #####
@@ -69,6 +75,10 @@ class ErrorInfo:
   traceback: str = ""
 
 
+def _generate_request_id() -> str:
+  return f"req_{uuid.uuid4().hex[:12]}"
+
+
 @dataclasses.dataclass(kw_only=True)
 class Request:
   """Standard base for generic RPC requests.
@@ -79,7 +89,7 @@ class Request:
     metadata: Optional free-form data attached to the request.
   """
 
-  request_id: str = ""
+  request_id: str = dataclasses.field(default_factory=_generate_request_id)
   metadata: dict[str, Any] = dataclasses.field(default_factory=dict)
 
 
@@ -227,8 +237,8 @@ class RolloutRequest(Request):
     prompt: The prompt to generate from (e.g. formatted string, token array, or
       chat dictionary).
     prompt_id: Unique identifier for this prompt within a task or dataset.
-    group_offset_id: Optional identifier for grouping related rollout requests
-      (e.g. for GRPO).
+    group_index: Optional index within a group for group-based algorithms (e.g.,
+      GRPO). Defaults to 0 for ungrouped.
     generation_kwargs: Additional keyword arguments for generation (e.g.
       sampling parameters like max_tokens and temperature).
     max_turns: Maximum number of conversation turns for environment interaction.
@@ -237,20 +247,16 @@ class RolloutRequest(Request):
   """
 
   prompt: Any = ""
-  prompt_id: str = "default_prompt"
-  group_offset_id: str = ""
+  prompt_id: str = ""
+  group_index: int = 0
   generation_kwargs: dict[str, Any] = dataclasses.field(default_factory=dict)
   max_turns: int = 10
   target_policy_version: int = 0
 
   @property
   def traj_id(self) -> str:
-    """Standardized semantic trajectory identifier computed from prompt_id and group_offset_id."""
-    return (
-        f"traj_{self.prompt_id}_{self.group_offset_id}"
-        if self.group_offset_id
-        else f"traj_{self.prompt_id}"
-    )
+    """Standardized trajectory identifier: traj_{prompt_id}_g{group_index}."""
+    return f"traj_{self.prompt_id}_g{self.group_index}"
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -297,6 +303,8 @@ class RolloutResponse(Response):
 
   Attributes:
     prompt_id: Unique identifier for this prompt within a task or dataset.
+    group_index: Optional index within a group for group-based algorithms (e.g.,
+      GRPO). If None, the rollout is ungrouped.
     status: Terminal status name (e.g. a rollout trajectory status, or
       "CANCELLED").
     prompt_tokens: Array of prompt token ids, unpadded, as tokenized by the
@@ -309,6 +317,7 @@ class RolloutResponse(Response):
   """
 
   prompt_id: str = ""
+  group_index: int = 0
   status: str
   prompt_tokens: np.ndarray = dataclasses.field(
       default_factory=lambda: np.zeros(0, dtype=np.int32)
@@ -385,8 +394,13 @@ class RolloutResponse(Response):
     if metadata:
       resp_metadata.update(metadata)
 
+    prompt_id = str(resp_metadata.get("prompt_id", ""))
+    group_index = int(resp_metadata.get("group_index", 0))
+
     return cls(
         request_id=request_id,
+        prompt_id=prompt_id,
+        group_index=group_index,
         status=status_val,
         prompt_tokens=prompt_tokens,
         segments=segments,

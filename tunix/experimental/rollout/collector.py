@@ -131,15 +131,14 @@ class TrajectoryCollectorEngine:
   def _convert_to_trajectory(self, rl_traj: Any) -> trajectory_lib.Trajectory:
     """Converts internal rollout trajectory to standardized Trajectory format."""
     metadata = dict(self.request.metadata or {})
+    metadata["prompt_id"] = self.request.prompt_id
+    metadata["group_index"] = self.request.group_index
     assistant_text = "\n".join(
         str(getattr(step, "model_response", ""))
         for step in getattr(rl_traj, "steps", [])
         if getattr(step, "model_response", "")
     )
     metadata.setdefault("text", assistant_text)
-    metadata.setdefault("prompt_id", self.request.prompt_id)
-    metadata.setdefault("group_id", self.request.prompt_id)
-    metadata.setdefault("pair_index", self.request.group_offset_id or 0)
     metadata["prompt_tokens"] = np.asarray(
         getattr(rl_traj, "prompt_tokens", np.zeros(0, dtype=np.int32)),
         dtype=np.int32,
