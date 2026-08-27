@@ -26,10 +26,6 @@ import jax.numpy as jnp
 from tunix.experimental.weight_sync import weight_sync
 
 _ws_lib: Any = None
-try:
-  from tpu_sync.api.jax import weight_synchronizer as _ws_lib  # pytype: disable=import-error  pylint: disable=g-import-not-at-top
-except ImportError:
-  _ws_lib = None
 
 
 def local_ip() -> str:
@@ -189,11 +185,16 @@ class RaidenSynchronizer:
     With host_stage the arrays are copied to local CPU memory first; arrays
     backed by the pathways proxy cannot bind in place.
     """
+    global _ws_lib
     if self._host_stage:
       state = to_host_cpu_state(state)
     self.names, self.arrays = _filter_bindable(*flatten_weights(state))
     if _ws_lib is None:
-      return
+      try:
+        from tpu_sync.api.jax import weight_synchronizer as ws_lib  # pytype: disable=import-error  pylint: disable=g-import-not-at-top
+      except ImportError:
+        return
+      _ws_lib = ws_lib
     if self._sync is None:
       self._sync = _ws_lib.WeightSynchronizer(
           self.arrays,

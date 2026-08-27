@@ -62,20 +62,6 @@ class InprocessVllmSamplerAdapter(Sampler, abc.ABC):
         self.weight_sync_mode == weight_sync.WeightSyncMode.RAIDEN
     )
 
-    if self.enable_raiden:
-      logging.info(
-          "InprocessVllmSamplerAdapter [%s] weight_sync: initializing Raiden"
-          " delegate",
-          self.server_id,
-      )
-
-      if self.raiden_sync_delegate is None:
-        from tunix.experimental.weight_sync import raiden_weight_sync_delegate  # pylint: disable=g-import-not-at-top
-
-        self.raiden_sync_delegate = (
-            raiden_weight_sync_delegate.RaidenWeightSyncDelegate()
-        )
-
     if not self.enable_raiden and self.raiden_sync_delegate:
       logging.warning(
           "InprocessVllmSamplerAdapter [%s] raiden_sync_delegate is set but"
@@ -312,6 +298,12 @@ class InprocessVllmSamplerAdapter(Sampler, abc.ABC):
     if not self.enable_raiden:
       return
 
+    if self.raiden_sync_delegate is None:
+      raise RuntimeError(
+          f"InprocessVllmSamplerAdapter [{self.server_id}] weight sync delegate"
+          " is not initialized; bind_weight_sync must run first."
+      )
+
     if not self.raiden_sync_delegate.is_bounded():
       raise RuntimeError(
           f"InprocessVllmSamplerAdapter [{self.server_id}] weight sync delegate"
@@ -336,6 +328,18 @@ class InprocessVllmSamplerAdapter(Sampler, abc.ABC):
   ) -> Any:
     """Binds destination-side transport resources."""
     if self.enable_raiden:
+      if self.raiden_sync_delegate is None:
+        logging.info(
+            "InprocessVllmSamplerAdapter [%s] weight_sync: initializing Raiden"
+            " delegate",
+            self.server_id,
+        )
+        from tunix.experimental.weight_sync import raiden_weight_sync_delegate  # pylint: disable=g-import-not-at-top
+
+        self.raiden_sync_delegate = (
+            raiden_weight_sync_delegate.RaidenWeightSyncDelegate()
+        )
+
       if not hasattr(self.vllm_sampler, "transformer_state"):
         raise RuntimeError(
             f"InprocessVllmSamplerAdapter [{self.server_id}] does not expose"

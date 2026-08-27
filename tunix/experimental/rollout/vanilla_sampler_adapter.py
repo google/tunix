@@ -69,13 +69,6 @@ class VanillaSamplerAdapter(Sampler, abc.ABC):
         self.weight_sync_mode == weight_sync.WeightSyncMode.RAIDEN
     )
 
-    if self.enable_raiden and self.raiden_sync_delegate is None:
-      from tunix.experimental.weight_sync import raiden_weight_sync_delegate  # pylint: disable=g-import-not-at-top
-
-      self.raiden_sync_delegate = (
-          raiden_weight_sync_delegate.RaidenWeightSyncDelegate()
-      )
-
     if not self.enable_raiden and self.raiden_sync_delegate:
       logging.warning(
           "VanillaSamplerAdapter [%s] raiden_sync_delegate is set but"
@@ -332,6 +325,12 @@ class VanillaSamplerAdapter(Sampler, abc.ABC):
     if not self.enable_raiden:
       return
 
+    if self.raiden_sync_delegate is None:
+      raise RuntimeError(
+          f"VanillaSamplerAdapter [{self.server_id}] weight sync delegate is"
+          " not initialized; bind_weight_sync must run first."
+      )
+
     if not self.raiden_sync_delegate.is_bounded():
       raise RuntimeError(
           f"VanillaSamplerAdapter [{self.server_id}] weight sync delegate"
@@ -360,6 +359,18 @@ class VanillaSamplerAdapter(Sampler, abc.ABC):
   ) -> Any:
     """Binds destination-side transport resources for weight transfer."""
     if self.enable_raiden:
+      if self.raiden_sync_delegate is None:
+        logging.info(
+            "VanillaSamplerAdapter [%s] weight_sync: initializing Raiden"
+            " delegate",
+            self.server_id,
+        )
+        from tunix.experimental.weight_sync import raiden_weight_sync_delegate  # pylint: disable=g-import-not-at-top
+
+        self.raiden_sync_delegate = (
+            raiden_weight_sync_delegate.RaidenWeightSyncDelegate()
+        )
+
       # In Raiden mode, register destination sampler transformer_state memory
       # buffers.
       if not hasattr(self.sampler, "transformer_state"):
