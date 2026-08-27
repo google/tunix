@@ -204,27 +204,10 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       if preprocess_fn:
         updated_weights = preprocess_fn(updated_weights)
 
-      utils.transfer_state_with_mappings(
-          src_state=updated_weights,
-          dst_state=self.transformer_state,
-          key_mappings=self.to_hf_key_mappings,
-          key_mapping_hook_fns=self.to_hf_hook_fns,
-          transpose_keys=self.to_hf_transpose_keys,
-          reshard_fn=reshard.reshard_pytree,
-          delete_dst_buffers=self.config.delete_dst_buffers,
-          reshard_chunk_size=self.config.reshard_chunk_size,
-          num_kv_heads=(
-              None
-              if not self._model_runner
-              else self._model_runner.model_config.get_total_num_kv_heads()
-          ),
-          head_dim=(
-              None
-              if not self._model_runner
-              else self._model_runner.model_config.get_head_size()
-          ),
-          tp_size=self.args.get("tensor_parallel_size", 1),
-      )
+      if self._is_torchax_backend():
+        self._update_params_torchax(updated_weights)
+      else:
+        self._update_params_jax(updated_weights)
     else:
       # Direct Weight Sync (e.g. MaxText -> MaxText)
       logging.debug(
@@ -262,6 +245,71 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     elif self._driver is not None:
       self._driver.llm_engine.collective_rpc("reinitialize_kv_cache")
 
+  def _is_torchax_backend(self) -> bool:
+    """True when tpu-inference runs the vLLM (torchax) model implementation.
+
+    That path keeps the weights in a flat ``{name: jax.Array}`` dict in an
+    internal, tp-dependent layout and exposes `load_canonical_weights` on the
+    model wrapper to accept weights in vLLM's canonical (TP=1) layout.
+    """
+    runner = self._model_runner
+    return isinstance(getattr(runner, "state", None), dict) and hasattr(
+        getattr(runner, "model", None), "load_canonical_weights"
+    )
+
+  def _update_params_torchax(self, updated_weights: jaxtyping.PyTree) -> None:
+    """Mapped weight sync into the tpu-inference torchax model.
+
+    The mapping targets are the canonical vLLM parameter names/shapes
+    (`canonical_weight_specs`), not the runner's internal layout, so the
+    mapping stays independent of tensor parallelism and MoE backend. The
+    resharding and layout processing is delegated to tpu-inference.
+    """
+    runner = self._model_runner
+    specs = runner.model.canonical_weight_specs(runner.state)
+    mapped = utils.transfer_state_with_mappings(
+        src_state=updated_weights,
+        dst_state=specs,
+        key_mappings=self.to_hf_key_mappings,
+        key_mapping_hook_fns=self.to_hf_hook_fns,
+        transpose_keys=self.to_hf_transpose_keys,
+        reshard_fn=None,
+        num_kv_heads=runner.model_config.get_total_num_kv_heads(),
+        head_dim=runner.model_config.get_head_size(),
+        tp_size=self.args.get("tensor_parallel_size", 1),
+    )
+    # Untouched targets are still their ShapeDtypeStruct placeholders.
+    canonical = {
+        k: v
+        for k, v in mapped.items()
+        if not isinstance(v, jax.ShapeDtypeStruct)
+    }
+    runner.model.load_canonical_weights(canonical, runner.state)
+
+  def _update_params_jax(self, updated_weights: jaxtyping.PyTree) -> None:
+    """Mapped weight sync into the tpu-inference flax/nnx model state."""
+    utils.transfer_state_with_mappings(
+        src_state=updated_weights,
+        dst_state=self.transformer_state,
+        key_mappings=self.to_hf_key_mappings,
+        key_mapping_hook_fns=self.to_hf_hook_fns,
+        transpose_keys=self.to_hf_transpose_keys,
+        reshard_fn=reshard.reshard_pytree,
+        delete_dst_buffers=self.config.delete_dst_buffers,
+        reshard_chunk_size=self.config.reshard_chunk_size,
+        num_kv_heads=(
+            None
+            if not self._model_runner
+            else self._model_runner.model_config.get_total_num_kv_heads()
+        ),
+        head_dim=(
+            None
+            if not self._model_runner
+            else self._model_runner.model_config.get_head_size()
+        ),
+        tp_size=self.args.get("tensor_parallel_size", 1),
+    )
+
   def load_checkpoint(self, path_or_weights: str | jaxtyping.PyTree):
     # TODO(b/434741253): Consider support orbax checkpoint loading
     if isinstance(path_or_weights, jaxtyping.PyTree):
@@ -296,13 +344,18 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
 
     assert config.mesh is not None
     device_indexes = config.mesh.device_ids.flatten().tolist()
-    args["additional_config"]["sharding"] = {
-        "sharding_strategy": {
-            "expert_parallelism": ep,
-            "device_indexes": device_indexes,
-            "enable_dp_attention": config.enable_dp_attention,
-        }
-    }
+    # Merge with any sharding settings the caller put in `additional_config`
+    # (e.g. tpu-inference's `attn_dp_size`) instead of dropping them.
+    sharding = dict(args["additional_config"].get("sharding") or {})
+    strategy = dict(sharding.get("sharding_strategy") or {})
+    strategy.setdefault("expert_parallelism", ep)
+    strategy.setdefault("enable_dp_attention", config.enable_dp_attention)
+    if config.enable_dp_attention:
+      strategy["enable_dp_attention"] = True
+    strategy["device_indexes"] = device_indexes
+    sharding["sharding_strategy"] = strategy
+    args["additional_config"] = dict(args["additional_config"])
+    args["additional_config"]["sharding"] = sharding
 
     return args
 
