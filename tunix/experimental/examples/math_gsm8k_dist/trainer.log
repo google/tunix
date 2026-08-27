@@ -1,48 +1,325 @@
-2026-08-27 00:16:43,710 - [TrainerNode] Parsed args: Namespace(port=20000, worker_id='trainer-0', model_name='Qwen3-1.7B', model_id='Qwen/Qwen3-1.7B', model_dir='/mnt/disks/linchai-data/huggingface/hub/models--Qwen--Qwen3-1.7B/snapshots/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e', tokenizer_path='/mnt/disks/linchai-data/huggingface/hub/models--Qwen--Qwen3-1.7B/snapshots/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e', mesh_fsdp=2, mesh_tp=1, max_prompt_length=512, max_response_length=128, mini_batch_size=4, train_micro_batch_size=1, compute_logps_micro_batch_size=1, compute_logps_chunk_size=0, eval_every_n_steps=1000000, learning_rate=2e-07, use_lora=False, lora_rank=16, lora_alpha=16.0)
-2026-08-27 00:16:43,710 - [TrainerNode] Repo root inserted into sys.path: /mnt/disks/linchai-data/tunix
-2026-08-27 00:16:43,711 - [TrainerNode] Prepared trainer safetensors directory: /mnt/disks/linchai-data/huggingface/hub/models--Qwen--Qwen3-1.7B/snapshots/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e
-2026-08-27 00:16:43,711 - [TrainerNode] Creating trainer mesh...
-Traceback (most recent call last):
-  File "/mnt/disks/linchai-data/miniconda3/envs/tunix/lib/python3.12/site-packages/jax/_src/xla_bridge.py", line 812, in backends
-    backend = _init_backend(platform)
-              ^^^^^^^^^^^^^^^^^^^^^^^
-  File "/mnt/disks/linchai-data/miniconda3/envs/tunix/lib/python3.12/site-packages/jax/_src/xla_bridge.py", line 896, in _init_backend
-    backend = registration.factory()
-              ^^^^^^^^^^^^^^^^^^^^^^
-  File "/mnt/disks/linchai-data/miniconda3/envs/tunix/lib/python3.12/site-packages/jax/_src/xla_bridge.py", line 230, in tpu_client_timer_callback
-    client = make_tpu_client(
-             ^^^^^^^^^^^^^^^^
-  File "/mnt/disks/linchai-data/miniconda3/envs/tunix/lib/python3.12/site-packages/jax/_src/xla_bridge.py", line 207, in make_tpu_client
-    return _jax.get_c_api_client(
-           ^^^^^^^^^^^^^^^^^^^^^^
-jax.errors.JaxRuntimeError: FAILED_PRECONDITION: TPU initialization failed: open(/dev/vfio/1): Device or resource busy: Device or resource busy; Couldn't open iommu group /dev/vfio/1
-
-During handling of the above exception, another exception occurred:
-
-Traceback (most recent call last):
-  File "<frozen runpy>", line 198, in _run_module_as_main
-  File "<frozen runpy>", line 88, in _run_code
-  File "/mnt/disks/linchai-data/tunix/tunix/experimental/distributed/runtime/main.py", line 260, in <module>
-    main(sys.argv)
-  File "/mnt/disks/linchai-data/tunix/tunix/experimental/distributed/runtime/main.py", line 224, in main
-    process_executor.run(prepared.main_fn, prepared.argv, prepared.context_args)
-  File "/mnt/disks/linchai-data/tunix/tunix/experimental/distributed/runtime/executors/local_executor.py", line 41, in run
-    process_main(process_argv, context)
-  File "/mnt/disks/linchai-data/tunix/tunix/experimental/examples/math_gsm8k_dist/run_trainer_node.py", line 290, in main
-    mesh = _create_mesh(args)
-           ^^^^^^^^^^^^^^^^^^
-  File "/mnt/disks/linchai-data/tunix/tunix/experimental/examples/math_gsm8k_dist/run_trainer_node.py", line 167, in _create_mesh
-    if args.mesh_fsdp * args.mesh_tp != jax.device_count():
-                                        ^^^^^^^^^^^^^^^^^^
-  File "/mnt/disks/linchai-data/miniconda3/envs/tunix/lib/python3.12/site-packages/jax/_src/xla_bridge.py", line 975, in device_count
-    return int(get_backend(backend).device_count())
-               ^^^^^^^^^^^^^^^^^^^^
-  File "/mnt/disks/linchai-data/miniconda3/envs/tunix/lib/python3.12/site-packages/jax/_src/xla_bridge.py", line 944, in get_backend
-    return _get_backend_uncached(platform)
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  File "/mnt/disks/linchai-data/miniconda3/envs/tunix/lib/python3.12/site-packages/jax/_src/xla_bridge.py", line 923, in _get_backend_uncached
-    bs = backends()
-         ^^^^^^^^^^
-  File "/mnt/disks/linchai-data/miniconda3/envs/tunix/lib/python3.12/site-packages/jax/_src/xla_bridge.py", line 828, in backends
-    raise RuntimeError(err_msg)
-RuntimeError: Unable to initialize backend 'tpu': FAILED_PRECONDITION: TPU initialization failed: open(/dev/vfio/1): Device or resource busy: Device or resource busy; Couldn't open iommu group /dev/vfio/1 (set JAX_PLATFORMS='' to automatically choose an available backend)
+2026-08-27 00:46:13,814 - [TrainerNode] Parsed args: Namespace(port=20000, worker_id='trainer-0', model_name='Qwen3-1.7B', model_id='Qwen/Qwen3-1.7B', model_dir='/mnt/disks/linchai-data/huggingface/hub/models--Qwen--Qwen3-1.7B/snapshots/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e', tokenizer_path='/mnt/disks/linchai-data/huggingface/hub/models--Qwen--Qwen3-1.7B/snapshots/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e', mesh_fsdp=2, mesh_tp=1, max_prompt_length=512, max_response_length=128, mini_batch_size=4, train_micro_batch_size=1, compute_logps_micro_batch_size=1, compute_logps_chunk_size=0, eval_every_n_steps=1000000, learning_rate=2e-07, use_lora=False, lora_rank=16, lora_alpha=16.0)
+2026-08-27 00:46:13,814 - [TrainerNode] Repo root inserted into sys.path: /mnt/disks/linchai-data/tunix
+2026-08-27 00:46:13,814 - [TrainerNode] Prepared trainer safetensors directory: /mnt/disks/linchai-data/huggingface/hub/models--Qwen--Qwen3-1.7B/snapshots/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e
+2026-08-27 00:46:13,814 - [TrainerNode] Creating trainer mesh...
+2026-08-27 00:46:20,453 - [TrainerNode] Trainer mesh: Mesh('fsdp': 2, 'tp': 1, axis_types=(Auto, Auto))
+2026-08-27 00:46:20,453 - [TrainerNode] Loading actor model with use_lora=False...
+2026-08-27 00:46:23,362 - [TrainerNode] Building PeftTrainer v2 config...
+2026-08-27 00:46:23,362 - [TrainerNode] PeftTrainer v2 gradient_accumulation_steps=4.
+2026-08-27 00:46:23,362 - [TrainerNode] Creating generic TrainerWorker and gRPC server...
+2026-08-27 00:46:24,740 - [TrainerNode] Using v0 ocp.CheckpointManagerOptions is deprecated, along with save_interval_steps. Please use a checkpointing_options with save_decision_policy instead.
+2026-08-27 00:46:24,740 - [TrainerNode] Using v0 ocp.CheckpointManagerOptions is deprecated, along with max_to_keep. Please use a checkpointing_options with preservation_policy instead.
+2026-08-27 00:46:24,741 - [TrainerNode] [thread=MainThread] Failed to get flag value for EXPERIMENTAL_ORBAX_USE_DISTRIBUTED_PROCESS_ID.
+2026-08-27 00:46:24,741 - [TrainerNode] [process=0][thread=MainThread] CheckpointManager init: checkpointers=None, item_names=None, item_handlers=None, handler_registry=None
+2026-08-27 00:46:24,741 - [TrainerNode] Initialized registry DefaultCheckpointHandlerRegistry({('metrics', <class 'orbax.checkpoint._src.handlers.json_checkpoint_handler.JsonSaveArgs'>): <orbax.checkpoint._src.handlers.json_checkpoint_handler.JsonCheckpointHandler object at 0x7faabaf59160>, ('metrics', <class 'orbax.checkpoint._src.handlers.json_checkpoint_handler.JsonRestoreArgs'>): <orbax.checkpoint._src.handlers.json_checkpoint_handler.JsonCheckpointHandler object at 0x7faabaf59160>}).
+2026-08-27 00:46:24,741 - [TrainerNode] orbax-checkpoint version: 0.12.4
+2026-08-27 00:46:24,741 - [TrainerNode] [process=0][thread=MainThread] Using barrier_sync_fn: <function get_barrier_sync_fn.<locals>.<lambda> at 0x7faaacba8180> timeout: 1200 secs and primary_host=0 for async checkpoint writes
+2026-08-27 00:46:24,744 - [TrainerNode] Read Metadata={'item_handlers': {'model_params': 'orbax.checkpoint.experimental.v1._src.handlers.pytree_handler.PyTreeHandler', 'optimizer_state': 'orbax.checkpoint.experimental.v1._src.handlers.pytree_handler.PyTreeHandler'}, 'metrics': {}, 'performance_metrics': {}, 'init_timestamp_nsecs': 1787787760598914619, 'commit_timestamp_nsecs': 1787787770318856889, 'custom_metadata': {}} from /mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/0/_CHECKPOINT_METADATA
+2026-08-27 00:46:24,746 - [TrainerNode] Missing metrics for step 0
+2026-08-27 00:46:24,747 - [TrainerNode] Found 1 checkpoint steps in /mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints
+2026-08-27 00:46:24,747 - [TrainerNode] [process=0][thread=MainThread] CheckpointManager created,  primary_host=0, CheckpointManagerOptions=CheckpointManagerOptions(save_interval_steps=1, max_to_keep=None, keep_time_interval=None, keep_period=None, best_fn=None, best_mode='max', keep_checkpoints_without_metrics=True, step_prefix=None, step_format_fixed_length=None, step_name_format=<orbax.checkpoint.experimental.v1._src.path.step._StandardNameFormat object at 0x7fb007447e90>, create=True, cleanup_tmp_directories=False, save_on_steps=frozenset(), single_host_load_and_broadcast=False, todelete_subdir=None, todelete_full_path=None, enable_background_delete=False, num_deletion_threads=None, read_only=False, enable_async_checkpointing=True, async_options=AsyncOptions(timeout_secs=1200, barrier_sync_fn=None, post_finalization_callback=None, create_directories_asynchronously=True), multiprocessing_options=MultiprocessingOptions(primary_host=0, active_processes=None, barrier_sync_key_prefix=None), should_save_fn=None, file_options=FileOptions(path_permission_mode=None), atomicity_options=AtomicityOptions(mode=<AtomicityMode.AUTO: 'auto'>, allow_legacy_atomic_rename=False), save_root_metadata=True, temporary_path_class=None, save_decision_policy=FixedIntervalPolicy(interval=1), preservation_policy=LatestN(n=5), prevent_write_metrics=True, enable_should_save_is_saving_in_progress_check=True, enable_per_process_directory_creation=False, lightweight_initialize=False), root_directory=/mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints: <orbax.checkpoint.checkpoint_manager.CheckpointManager object at 0x7faabad75b20>
+2026-08-27 00:46:24,749 - [TrainerNode] Serving trainer worker on port 20000.
+2026-08-27 00:46:24,749 - [TrainerNode] register to discovery server at localhost:30000
+2026-08-27 00:47:06,769 - [TrainerNode] registered to discovery server at localhost:30000
+2026-08-27 00:47:06,769 - [TrainerNode] Trainer worker is registered.
+2026-08-27 00:47:09,148 - [TrainerNode] Restoring checkpoint at step None (train_steps=0)
+2026-08-27 00:47:09,154 - [TrainerNode] Created BasePyTreeCheckpointHandler: use_ocdbt=True, use_zarr3=True, pytree_metadata_options=PyTreeMetadataOptions(support_rich_types=False), array_metadata_store=<orbax.checkpoint._src.metadata.array_metadata_store.Store object at 0x7faabb1739e0>, enable_pinned_host_transfer=False, save_concurrent_bytes: None, restore_concurrent_bytes: None
+2026-08-27 00:47:09,155 - [TrainerNode] Created BasePyTreeCheckpointHandler: use_ocdbt=True, use_zarr3=True, pytree_metadata_options=PyTreeMetadataOptions(support_rich_types=False), array_metadata_store=<orbax.checkpoint._src.metadata.array_metadata_store.Store object at 0x7faabb1739e0>, enable_pinned_host_transfer=False, save_concurrent_bytes: None, restore_concurrent_bytes: None
+2026-08-27 00:47:09,696 - [TrainerNode] [process=0] [sync] Started load checkpoint @ /mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/0.
+2026-08-27 00:47:09,706 - [TrainerNode] Created BasePyTreeCheckpointHandler: use_ocdbt=True, use_zarr3=True, pytree_metadata_options=PyTreeMetadataOptions(support_rich_types=False), array_metadata_store=<orbax.checkpoint._src.metadata.array_metadata_store.Store object at 0x7fb007572210>, enable_pinned_host_transfer=False, save_concurrent_bytes: None, restore_concurrent_bytes: None
+2026-08-27 00:47:09,710 - [TrainerNode] Created BasePyTreeCheckpointHandler: use_ocdbt=True, use_zarr3=True, pytree_metadata_options=PyTreeMetadataOptions(support_rich_types=False), array_metadata_store=<orbax.checkpoint._src.metadata.array_metadata_store.Store object at 0x7fb007572210>, enable_pinned_host_transfer=False, save_concurrent_bytes: None, restore_concurrent_bytes: None
+2026-08-27 00:47:09,727 - [TrainerNode] [process=0] [sync] Finished blocking load in 0.03 seconds. Continuing load @ /mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/0.
+2026-08-27 00:47:10,671 - [TrainerNode] [process=0] /jax/orbax/read/worker/io/requested throughput: 3.628 GiB/s (total gbytes: 3.2 GiB) (time elapsed: 0.8833563327789307 s) (per-host)
+2026-08-27 00:47:10,672 - [TrainerNode] [process=0] Raw /jax/orbax/read/worker/io/raw throughput: 2.838 GiB/s (total gbytes: 2.5 GiB) (time elapsed: 0.8833563327789307 s) (per-host)
+2026-08-27 00:47:10,672 - [TrainerNode] [process=0] Read ratio (raw/logical): 0.782 (2.5 GiB / 3.2 GiB)
+2026-08-27 00:47:10,677 - [TrainerNode] [process=0] /jax/checkpoint/read/gbytes_per_sec: 3.384 GiB/s (total size: 3.2 GiB) (time elapsed: 0.9470882415771484 s) (global)
+2026-08-27 00:47:12,611 - [TrainerNode] [process=0] /jax/orbax/read/worker/io/requested throughput: 4.040 GiB/s (total gbytes: 6.4 GiB) (time elapsed: 1.5866799354553223 s) (per-host)
+2026-08-27 00:47:12,612 - [TrainerNode] [process=0] Raw /jax/orbax/read/worker/io/raw throughput: 24.351 KiB/s (total gbytes: 38.6 KiB) (time elapsed: 1.5866799354553223 s) (per-host)
+2026-08-27 00:47:12,612 - [TrainerNode] [process=0] Read ratio (raw/logical): 0.000 (38.6 KiB / 6.4 GiB)
+2026-08-27 00:47:12,622 - [TrainerNode] [process=0] /jax/checkpoint/read/gbytes_per_sec: 3.309 GiB/s (total size: 6.4 GiB) (time elapsed: 1.9368817806243896 s) (global)
+2026-08-27 00:47:12,625 - [TrainerNode] [process=0] [sync] Finished load in 2.93 seconds @ /mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/0
+2026-08-27 00:47:12,654 - [TrainerNode] Restored params from step: 0 in 3.505 seconds
+2026-08-27 00:47:12,656 - [TrainerNode] restore_checkpoint restored step=0 (requested step=latest).
+TrainerWorker trainer-0 saving checkpoint with metadata: {'step': 1, 'policy_version': 1, 'num_rollouts': 4, 'num_microbatches': 4}
+2026-08-27 00:48:03,397 - [TrainerNode] Saving checkpoint at step 1 with metadata: {'step': 1, 'policy_version': 1, 'num_rollouts': 4, 'num_microbatches': 4}
+2026-08-27 00:48:03,425 - [TrainerNode] Created BasePyTreeCheckpointHandler: use_ocdbt=True, use_zarr3=True, pytree_metadata_options=PyTreeMetadataOptions(support_rich_types=False), array_metadata_store=<orbax.checkpoint._src.metadata.array_metadata_store.Store object at 0x7faabb1739e0>, enable_pinned_host_transfer=False, save_concurrent_bytes: None, restore_concurrent_bytes: None
+2026-08-27 00:48:03,426 - [TrainerNode] Created BasePyTreeCheckpointHandler: use_ocdbt=True, use_zarr3=True, pytree_metadata_options=PyTreeMetadataOptions(support_rich_types=False), array_metadata_store=<orbax.checkpoint._src.metadata.array_metadata_store.Store object at 0x7faabb1739e0>, enable_pinned_host_transfer=False, save_concurrent_bytes: None, restore_concurrent_bytes: None
+2026-08-27 00:48:03,428 - [TrainerNode] Created BasePyTreeCheckpointHandler: use_ocdbt=True, use_zarr3=True, pytree_metadata_options=PyTreeMetadataOptions(support_rich_types=False), array_metadata_store=<orbax.checkpoint._src.metadata.array_metadata_store.Store object at 0x7faabb1739e0>, enable_pinned_host_transfer=False, save_concurrent_bytes: None, restore_concurrent_bytes: None
+2026-08-27 00:48:03,429 - [TrainerNode] Created BasePyTreeCheckpointHandler: use_ocdbt=True, use_zarr3=True, pytree_metadata_options=PyTreeMetadataOptions(support_rich_types=False), array_metadata_store=<orbax.checkpoint._src.metadata.array_metadata_store.Store object at 0x7faabb1739e0>, enable_pinned_host_transfer=False, save_concurrent_bytes: None, restore_concurrent_bytes: None
+2026-08-27 00:48:03,432 - [TrainerNode] Initialized registry DefaultCheckpointHandlerRegistry({('model_params', <class 'orbax.checkpoint.experimental.v1._src.handlers.compatibility.Args'>): CompatibilityCheckpointHandler(orbax.checkpoint.experimental.v1._src.handlers.pytree_handler.PyTreeHandler), ('optimizer_state', <class 'orbax.checkpoint.experimental.v1._src.handlers.compatibility.Args'>): CompatibilityCheckpointHandler(orbax.checkpoint.experimental.v1._src.handlers.pytree_handler.PyTreeHandler)}).
+2026-08-27 00:48:03,433 - [TrainerNode] [process=0][thread=MainThread] Using barrier_sync_fn: <function get_barrier_sync_fn.<locals>.<lambda> at 0x7faa966e54e0> timeout: 1200 secs and primary_host=0 for async checkpoint writes
+2026-08-27 00:48:03,433 - [TrainerNode] [process=0][thread=MainThread][wait_until_finished] No Save Finalize thread to wait for. Returning.
+2026-08-27 00:48:03,433 - [TrainerNode] [process=0] Saving checkpoint at step 1
+2026-08-27 00:48:03,433 - [TrainerNode] [process=0] [async] Started save checkpoint @ /mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/1.
+2026-08-27 00:48:03,435 - [TrainerNode] Using ThreadSafeKeyValueSignalingClient
+2026-08-27 00:48:03,467 - [TrainerNode] Creating tmp directory /mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/1.orbax-checkpoint-tmp
+2026-08-27 00:48:03,524 - [TrainerNode] Scheduling D2H of 310 prioritized jax.Array.
+2026-08-27 00:48:03,524 - [TrainerNode] Wrote Metadata={'item_handlers': None, 'metrics': {}, 'performance_metrics': {}, 'init_timestamp_nsecs': 1787791683513281630, 'commit_timestamp_nsecs': None, 'custom_metadata': {}}, json={"item_handlers": null, "metrics": {}, "performance_metrics": {}, "init_timestamp_nsecs": 1787791683513281630, "commit_timestamp_nsecs": null, "custom_metadata": {}} to /mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/1.orbax-checkpoint-tmp/_CHECKPOINT_METADATA
+2026-08-27 00:48:03,525 - [TrainerNode] Transferring arrays to host memory with options: use_replica_parallel=True, min_slice_bytes_for_replica_parallel=None, max_replicas_for_replica_parallel=None, enable_pinned_host_transfer=None
+2026-08-27 00:48:03,546 - [TrainerNode] Creating tmp directory /mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/1.orbax-checkpoint-tmp/model_params.orbax-checkpoint-tmp
+2026-08-27 00:48:03,546 - [TrainerNode] Creating tmp directory /mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/1.orbax-checkpoint-tmp/optimizer_state.orbax-checkpoint-tmp
+2026-08-27 00:48:03,942 - [TrainerNode] [process=0][thread=Thread-18 (_run_event_loop)] Initiated "orbax.checkpoint.experimental.v1._src.serialization.compatibility.CompatibleTypeHandler".serialize. Time taken: 0.427750s
+2026-08-27 00:48:03,994 - [TrainerNode] Scheduling D2H of 622 prioritized jax.Array.
+2026-08-27 00:48:03,994 - [TrainerNode] Transferring arrays to host memory with options: use_replica_parallel=True, min_slice_bytes_for_replica_parallel=None, max_replicas_for_replica_parallel=None, enable_pinned_host_transfer=None
+2026-08-27 00:48:04,129 - [TrainerNode] [process=0][thread=array_type_handler] Wrote 310 array_metadata.ArrayMetadata to /mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/1.orbax-checkpoint-tmp/model_params.orbax-checkpoint-tmp/array_metadatas/process_0
+2026-08-27 00:48:04,939 - [TrainerNode] [process=0][thread=Thread-18 (_run_event_loop)] Initiated "orbax.checkpoint.experimental.v1._src.serialization.compatibility.CompatibleTypeHandler".serialize. Time taken: 0.986558s
+2026-08-27 00:48:04,944 - [TrainerNode] MemoryRegulated: Peak usage: 0.000000 GiB
+2026-08-27 00:48:04,956 - [TrainerNode] [process=0] /jax/orbax/write/blocking_gbytes_per_sec: 2.113 GiB/s (total size: 3.2 GiB) (time elapsed: 1.516422986984253 s) (global)
+2026-08-27 00:48:04,961 - [TrainerNode] [process=0][thread=Thread-18 (_run_event_loop)] Initiated Pytree async_save. Time taken: 1.521651s (batch_requests_ready=0.021127s, total_serialization_initiated=1.489032s, others=0.011492s)
+2026-08-27 00:48:04,978 - [TrainerNode] MemoryRegulated: Peak usage: 0.000000 GiB
+2026-08-27 00:48:04,999 - [TrainerNode] [process=0] /jax/orbax/write/blocking_gbytes_per_sec: 4.190 GiB/s (total size: 6.4 GiB) (time elapsed: 1.5298147201538086 s) (global)
+2026-08-27 00:48:05,005 - [TrainerNode] [process=0][thread=Thread-18 (_run_event_loop)] Initiated Pytree async_save. Time taken: 1.535099s (batch_requests_ready=0.044121s, total_serialization_initiated=1.469383s, others=0.021594s)
+2026-08-27 00:48:05,016 - [TrainerNode] [process=0][thread=Thread-18 (_run_event_loop)] Initiated CompositeCheckpointHandler.async_save. Time taken: 1.580845s (all_items=0.000022s, per_item={'model_params': '0.00001526', 'optimizer_state': '0.00000644'}, temp_paths=1.580823)
+2026-08-27 00:48:05,055 - [TrainerNode] [process=0] [async] Finished blocking save in 1.62 seconds. Continuing save @ /mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/1.
+2026-08-27 00:48:05,079 - [TrainerNode] [process=0][thread=async_save] Background save thread started. Deadline for this save operation is 2026-08-27 01:08:05.079009
+2026-08-27 00:48:05,091 - [TrainerNode] [process=0][thread=MainThread][step=1] Starting CheckpointManager Save Finalize thread=save_finalize
+2026-08-27 00:48:05,094 - [TrainerNode] [process=0][thread=save_finalize] Waiting for background save thread=async_save.
+2026-08-27 00:48:05,095 - [TrainerNode] {'step': 1, 'event_type': 'save', 'directory': '/mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints', 'reached_preemption': False, 'preemption_received_at': None, 'synchronous': False, 'wait_for_prev_start_time': 1787791683.4333801, 'wait_for_prev_duration_secs': 4.482269287109375e-05, 'time_between_consecutive_saves_sec': None, 'checkpointer_blocking_start_time': 1787791683.4336202, 'checkpointer_blocking_duration_secs': 1.6575498580932617, 'get_old_steps_start_time': 1787791685.0911963, 'get_old_steps_duration_secs': 3.9577484130859375e-05, 'checkpoint_manager_blocking_start_time': 1787791683.433264, 'checkpoint_manager_blocking_duration_secs': 1.6621735095977783}
+2026-08-27 00:48:05,109 - [TrainerNode] [process=0][thread=Thread-27 (_run_loop)][step=1][wait_until_finished] Waiting for Save Finalize thread (save_finalize) to complete.
+2026-08-27 00:48:05,305 - [TrainerNode] [process=0][thread=array_type_handler] Wrote 622 array_metadata.ArrayMetadata to /mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/1.orbax-checkpoint-tmp/optimizer_state.orbax-checkpoint-tmp/array_metadatas/process_0
+2026-08-27 00:48:21,561 - [TrainerNode] [process=0] /jax/orbax/write/worker/io/requested throughput: 186.270 MiB/s (total gbytes: 3.2 GiB) (time elapsed: 17.6182119846344 s) (per-host)
+2026-08-27 00:48:21,561 - [TrainerNode] [process=0] Raw /jax/orbax/write/worker/io/raw throughput: 378.502 MiB/s (total gbytes: 6.5 GiB) (time elapsed: 17.6182119846344 s) (per-host)
+2026-08-27 00:48:21,561 - [TrainerNode] [process=0] Write ratio (raw/logical): 2.032 (6.5 GiB / 3.2 GiB)
+2026-08-27 00:48:21,585 - [TrainerNode] [process=0][thread=write_metadata_after_commits] Commit + Array metadata written. Time taken: 16.617185s (commit=16.600808s, array_metadata_write=0.016377s)
+2026-08-27 00:48:21,586 - [TrainerNode] [process=0] /jax/orbax/write/gbytes_per_sec: 180.845 MiB/s (total size: 3.2 GiB) (time elapsed: 18.146676063537598 s) (global)
+2026-08-27 00:48:21,590 - [TrainerNode] [process=0][thread=Thread-25 (_target_setting_result)] Skipped cross-host ArrayMetadata validation because only one process is found: process_index=0.
+2026-08-27 00:48:21,590 - [TrainerNode] Param validation support for Zarr3 will be added later (b/362328389).
+2026-08-27 00:48:22,116 - [TrainerNode] Merged 1 TensorStore OCDBT files under directory /mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/1.orbax-checkpoint-tmp/model_params.orbax-checkpoint-tmp in 0.53s.
+2026-08-27 00:48:22,116 - [TrainerNode] [process=0][thread=Thread-25 (_target_setting_result)] Pytree save finalize (merge_ocdbt + ArrayMetadata validation) completed. Time taken: 0.529080s. use_zarr3=True, enable_post_merge_validation=True, directory=/mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/1.orbax-checkpoint-tmp/model_params.orbax-checkpoint-tmp
+2026-08-27 00:48:24,750 - [TrainerNode] [process=0] /jax/orbax/write/worker/io/requested throughput: 331.322 MiB/s (total gbytes: 6.4 GiB) (time elapsed: 19.80994963645935 s) (per-host)
+2026-08-27 00:48:24,750 - [TrainerNode] [process=0] Raw /jax/orbax/write/worker/io/raw throughput: 381.063 MiB/s (total gbytes: 7.4 GiB) (time elapsed: 19.80994963645935 s) (per-host)
+2026-08-27 00:48:24,750 - [TrainerNode] [process=0] Write ratio (raw/logical): 1.150 (7.4 GiB / 6.4 GiB)
+2026-08-27 00:48:24,799 - [TrainerNode] [process=0][thread=write_metadata_after_commits] Commit + Array metadata written. Time taken: 19.788078s (commit=19.751152s, array_metadata_write=0.036926s)
+2026-08-27 00:48:24,800 - [TrainerNode] [process=0] /jax/orbax/write/gbytes_per_sec: 307.701 MiB/s (total size: 6.4 GiB) (time elapsed: 21.330700874328613 s) (global)
+2026-08-27 00:48:24,804 - [TrainerNode] [process=0][thread=Thread-26 (_target_setting_result)] Skipped cross-host ArrayMetadata validation because only one process is found: process_index=0.
+2026-08-27 00:48:24,804 - [TrainerNode] Param validation support for Zarr3 will be added later (b/362328389).
+2026-08-27 00:48:24,813 - [TrainerNode] Merged 1 TensorStore OCDBT files under directory /mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/1.orbax-checkpoint-tmp/optimizer_state.orbax-checkpoint-tmp in 0.01s.
+2026-08-27 00:48:24,813 - [TrainerNode] [process=0][thread=Thread-26 (_target_setting_result)] Pytree save finalize (merge_ocdbt + ArrayMetadata validation) completed. Time taken: 0.012492s. use_zarr3=True, enable_post_merge_validation=True, directory=/mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/1.orbax-checkpoint-tmp/optimizer_state.orbax-checkpoint-tmp
+2026-08-27 00:48:24,814 - [TrainerNode] [process=0][thread=async_save] 4 Handler Commit operations completed. Time taken: 19.733382s.
+2026-08-27 00:48:24,815 - [TrainerNode] Renaming /mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/1.orbax-checkpoint-tmp/model_params.orbax-checkpoint-tmp to /mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/1.orbax-checkpoint-tmp/model_params
+2026-08-27 00:48:24,816 - [TrainerNode] Updated Metadata={'item_handlers': {'model_params': 'orbax.checkpoint.experimental.v1._src.handlers.pytree_handler.PyTreeHandler', 'optimizer_state': 'orbax.checkpoint.experimental.v1._src.handlers.pytree_handler.PyTreeHandler'}, 'metrics': {}, 'performance_metrics': {}, 'init_timestamp_nsecs': 1787791683513281630, 'commit_timestamp_nsecs': None, 'custom_metadata': {'step': 1, 'policy_version': 1, 'num_rollouts': 4, 'num_microbatches': 4}} to /mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/1.orbax-checkpoint-tmp/_CHECKPOINT_METADATA
+2026-08-27 00:48:24,817 - [TrainerNode] Renaming /mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/1.orbax-checkpoint-tmp/optimizer_state.orbax-checkpoint-tmp to /mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/1.orbax-checkpoint-tmp/optimizer_state
+2026-08-27 00:48:24,817 - [TrainerNode] Renaming /mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/1.orbax-checkpoint-tmp to /mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/1
+2026-08-27 00:48:24,819 - [TrainerNode] [process=0][thread=async_save] Finished saving checkpoint (finalized tmp dir) to `/mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/1`.
+2026-08-27 00:48:24,819 - [TrainerNode] [process=0] [async] Finished save (blocking + background) in 21.39 seconds @ /mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/1
+2026-08-27 00:48:24,819 - [TrainerNode] [process=0][thread=async_save] Background save thread done. Time taken: 19.738434s.
+2026-08-27 00:48:24,819 - [TrainerNode] [process=0][thread=save_finalize] Done with waiting for background save thread=async_save.
+2026-08-27 00:48:24,819 - [TrainerNode] [process=0][thread=save_finalize] No errors found in background save thread=async_save.
+2026-08-27 00:48:24,819 - [TrainerNode] Queuing deletion of steps: [].
+2026-08-27 00:48:24,819 - [TrainerNode] [process=0][thread=save_finalize][step=1] CheckpointManager Save Finalize is syncing with other hosts...
+2026-08-27 00:48:24,820 - [TrainerNode] [process=0][thread=save_finalize][step=1] CheckpointManager Save Finalize is done on all hosts.
+2026-08-27 00:48:24,820 - [TrainerNode] [process=0][thread=Thread-27 (_run_loop)][step=1][wait_until_finished] Done waiting for Save Finalize thread (save_finalize) running at step=1.
+2026-08-27 00:48:36,275 - [TrainerNode] Train step 1 training loss: 0.000000  - training perplexity: 1.000000
+TrainerWorker trainer-0 saving checkpoint with metadata: {'step': 2, 'policy_version': 2, 'num_rollouts': 4, 'num_microbatches': 4}
+2026-08-27 00:48:36,276 - [TrainerNode] Saving checkpoint at step 2 with metadata: {'step': 2, 'policy_version': 2, 'num_rollouts': 4, 'num_microbatches': 4}
+2026-08-27 00:48:36,303 - [TrainerNode] Created BasePyTreeCheckpointHandler: use_ocdbt=True, use_zarr3=True, pytree_metadata_options=PyTreeMetadataOptions(support_rich_types=False), array_metadata_store=<orbax.checkpoint._src.metadata.array_metadata_store.Store object at 0x7faabb1739e0>, enable_pinned_host_transfer=False, save_concurrent_bytes: None, restore_concurrent_bytes: None
+2026-08-27 00:48:36,304 - [TrainerNode] Created BasePyTreeCheckpointHandler: use_ocdbt=True, use_zarr3=True, pytree_metadata_options=PyTreeMetadataOptions(support_rich_types=False), array_metadata_store=<orbax.checkpoint._src.metadata.array_metadata_store.Store object at 0x7faabb1739e0>, enable_pinned_host_transfer=False, save_concurrent_bytes: None, restore_concurrent_bytes: None
+2026-08-27 00:48:36,306 - [TrainerNode] Created BasePyTreeCheckpointHandler: use_ocdbt=True, use_zarr3=True, pytree_metadata_options=PyTreeMetadataOptions(support_rich_types=False), array_metadata_store=<orbax.checkpoint._src.metadata.array_metadata_store.Store object at 0x7faabb1739e0>, enable_pinned_host_transfer=False, save_concurrent_bytes: None, restore_concurrent_bytes: None
+2026-08-27 00:48:36,307 - [TrainerNode] Created BasePyTreeCheckpointHandler: use_ocdbt=True, use_zarr3=True, pytree_metadata_options=PyTreeMetadataOptions(support_rich_types=False), array_metadata_store=<orbax.checkpoint._src.metadata.array_metadata_store.Store object at 0x7faabb1739e0>, enable_pinned_host_transfer=False, save_concurrent_bytes: None, restore_concurrent_bytes: None
+2026-08-27 00:48:36,310 - [TrainerNode] Initialized registry DefaultCheckpointHandlerRegistry({('model_params', <class 'orbax.checkpoint.experimental.v1._src.handlers.compatibility.Args'>): CompatibilityCheckpointHandler(orbax.checkpoint.experimental.v1._src.handlers.pytree_handler.PyTreeHandler), ('optimizer_state', <class 'orbax.checkpoint.experimental.v1._src.handlers.compatibility.Args'>): CompatibilityCheckpointHandler(orbax.checkpoint.experimental.v1._src.handlers.pytree_handler.PyTreeHandler)}).
+2026-08-27 00:48:36,310 - [TrainerNode] [process=0][thread=MainThread] Using barrier_sync_fn: <function get_barrier_sync_fn.<locals>.<lambda> at 0x7faa74e8ba60> timeout: 1200 secs and primary_host=0 for async checkpoint writes
+2026-08-27 00:48:36,311 - [TrainerNode] [process=0][thread=MainThread][wait_until_finished] No Save Finalize thread to wait for. Returning.
+2026-08-27 00:48:36,311 - [TrainerNode] Waiting for previous save to complete took 19.711239 seconds. If this number is high, consider checkpointing less frequently.
+2026-08-27 00:48:36,311 - [TrainerNode] [process=0] Saving checkpoint at step 2
+2026-08-27 00:48:36,311 - [TrainerNode] [process=0] [async] Started save checkpoint @ /mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/2.
+2026-08-27 00:48:36,349 - [TrainerNode] Creating tmp directory /mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/2.orbax-checkpoint-tmp
+2026-08-27 00:48:36,401 - [TrainerNode] Scheduling D2H of 310 prioritized jax.Array.
+2026-08-27 00:48:36,401 - [TrainerNode] Transferring arrays to host memory with options: use_replica_parallel=True, min_slice_bytes_for_replica_parallel=None, max_replicas_for_replica_parallel=None, enable_pinned_host_transfer=None
+2026-08-27 00:48:36,415 - [TrainerNode] Creating tmp directory /mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/2.orbax-checkpoint-tmp/model_params.orbax-checkpoint-tmp
+2026-08-27 00:48:36,415 - [TrainerNode] Creating tmp directory /mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/2.orbax-checkpoint-tmp/optimizer_state.orbax-checkpoint-tmp
+2026-08-27 00:48:36,915 - [TrainerNode] [process=0][thread=Thread-39 (_run_event_loop)] Initiated "orbax.checkpoint.experimental.v1._src.serialization.compatibility.CompatibleTypeHandler".serialize. Time taken: 0.524262s
+2026-08-27 00:48:36,962 - [TrainerNode] Scheduling D2H of 622 prioritized jax.Array.
+2026-08-27 00:48:36,962 - [TrainerNode] Transferring arrays to host memory with options: use_replica_parallel=True, min_slice_bytes_for_replica_parallel=None, max_replicas_for_replica_parallel=None, enable_pinned_host_transfer=None
+2026-08-27 00:48:37,442 - [TrainerNode] [process=0][thread=array_type_handler] Wrote 310 array_metadata.ArrayMetadata to /mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/2.orbax-checkpoint-tmp/model_params.orbax-checkpoint-tmp/array_metadatas/process_0
+2026-08-27 00:48:38,130 - [TrainerNode] [process=0][thread=Thread-39 (_run_event_loop)] Initiated "orbax.checkpoint.experimental.v1._src.serialization.compatibility.CompatibleTypeHandler".serialize. Time taken: 1.204446s
+2026-08-27 00:48:38,151 - [TrainerNode] MemoryRegulated: Peak usage: 0.000000 GiB
+2026-08-27 00:48:38,183 - [TrainerNode] [process=0] /jax/orbax/write/blocking_gbytes_per_sec: 1.717 GiB/s (total size: 3.2 GiB) (time elapsed: 1.8663694858551025 s) (global)
+2026-08-27 00:48:38,189 - [TrainerNode] [process=0][thread=Thread-39 (_run_event_loop)] Initiated Pytree async_save. Time taken: 1.871843s (batch_requests_ready=0.020404s, total_serialization_initiated=1.829571s, others=0.021868s)
+2026-08-27 00:48:38,200 - [TrainerNode] MemoryRegulated: Peak usage: 0.000000 GiB
+2026-08-27 00:48:38,207 - [TrainerNode] [process=0] /jax/orbax/write/blocking_gbytes_per_sec: 3.445 GiB/s (total size: 6.4 GiB) (time elapsed: 1.8603589534759521 s) (global)
+2026-08-27 00:48:38,212 - [TrainerNode] [process=0][thread=Thread-39 (_run_event_loop)] Initiated Pytree async_save. Time taken: 1.865766s (batch_requests_ready=0.044218s, total_serialization_initiated=1.809864s, others=0.011684s)
+2026-08-27 00:48:38,222 - [TrainerNode] [process=0][thread=Thread-39 (_run_event_loop)] Initiated CompositeCheckpointHandler.async_save. Time taken: 1.908865s (all_items=0.000019s, per_item={'model_params': '0.00001502', 'optimizer_state': '0.00000405'}, temp_paths=1.908846)
+2026-08-27 00:48:38,246 - [TrainerNode] [process=0] [async] Finished blocking save in 1.94 seconds. Continuing save @ /mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/2.
+2026-08-27 00:48:38,251 - [TrainerNode] [process=0][thread=async_save] Background save thread started. Deadline for this save operation is 2026-08-27 01:08:38.251762
+2026-08-27 00:48:38,253 - [TrainerNode] [process=0][thread=MainThread][step=2] Starting CheckpointManager Save Finalize thread=save_finalize
+2026-08-27 00:48:38,255 - [TrainerNode] [process=0][thread=save_finalize] Waiting for background save thread=async_save.
+2026-08-27 00:48:38,264 - [TrainerNode] {'step': 2, 'event_type': 'save', 'directory': '/mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints', 'reached_preemption': False, 'preemption_received_at': None, 'synchronous': False, 'wait_for_prev_start_time': 1787791716.3110888, 'wait_for_prev_duration_secs': 19.711238861083984, 'time_between_consecutive_saves_sec': 11.491052627563477, 'checkpointer_blocking_start_time': 1787791716.3114529, 'checkpointer_blocking_duration_secs': 1.9418931007385254, 'get_old_steps_start_time': 1787791718.2533836, 'get_old_steps_duration_secs': 5.1975250244140625e-05, 'checkpoint_manager_blocking_start_time': 1787791716.3109765, 'checkpoint_manager_blocking_duration_secs': 1.9535491466522217}
+2026-08-27 00:48:38,297 - [TrainerNode] [process=0][thread=Thread-48 (_run_loop)][step=2][wait_until_finished] Waiting for Save Finalize thread (save_finalize) to complete.
+2026-08-27 00:48:38,545 - [TrainerNode] [process=0][thread=array_type_handler] Wrote 622 array_metadata.ArrayMetadata to /mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/2.orbax-checkpoint-tmp/optimizer_state.orbax-checkpoint-tmp/array_metadatas/process_0
+2026-08-27 00:48:40,682 - [TrainerNode] Train step 2 training loss: 0.000000  - training perplexity: 1.000000
+TrainerWorker trainer-0 saving checkpoint with metadata: {'step': 3, 'policy_version': 3, 'num_rollouts': 4, 'num_microbatches': 4}
+2026-08-27 00:48:40,683 - [TrainerNode] Saving checkpoint at step 3 with metadata: {'step': 3, 'policy_version': 3, 'num_rollouts': 4, 'num_microbatches': 4}
+2026-08-27 00:48:40,711 - [TrainerNode] Created BasePyTreeCheckpointHandler: use_ocdbt=True, use_zarr3=True, pytree_metadata_options=PyTreeMetadataOptions(support_rich_types=False), array_metadata_store=<orbax.checkpoint._src.metadata.array_metadata_store.Store object at 0x7faabb1739e0>, enable_pinned_host_transfer=False, save_concurrent_bytes: None, restore_concurrent_bytes: None
+2026-08-27 00:48:40,712 - [TrainerNode] Created BasePyTreeCheckpointHandler: use_ocdbt=True, use_zarr3=True, pytree_metadata_options=PyTreeMetadataOptions(support_rich_types=False), array_metadata_store=<orbax.checkpoint._src.metadata.array_metadata_store.Store object at 0x7faabb1739e0>, enable_pinned_host_transfer=False, save_concurrent_bytes: None, restore_concurrent_bytes: None
+2026-08-27 00:48:40,714 - [TrainerNode] Created BasePyTreeCheckpointHandler: use_ocdbt=True, use_zarr3=True, pytree_metadata_options=PyTreeMetadataOptions(support_rich_types=False), array_metadata_store=<orbax.checkpoint._src.metadata.array_metadata_store.Store object at 0x7faabb1739e0>, enable_pinned_host_transfer=False, save_concurrent_bytes: None, restore_concurrent_bytes: None
+2026-08-27 00:48:40,715 - [TrainerNode] Created BasePyTreeCheckpointHandler: use_ocdbt=True, use_zarr3=True, pytree_metadata_options=PyTreeMetadataOptions(support_rich_types=False), array_metadata_store=<orbax.checkpoint._src.metadata.array_metadata_store.Store object at 0x7faabb1739e0>, enable_pinned_host_transfer=False, save_concurrent_bytes: None, restore_concurrent_bytes: None
+2026-08-27 00:48:40,718 - [TrainerNode] Initialized registry DefaultCheckpointHandlerRegistry({('model_params', <class 'orbax.checkpoint.experimental.v1._src.handlers.compatibility.Args'>): CompatibilityCheckpointHandler(orbax.checkpoint.experimental.v1._src.handlers.pytree_handler.PyTreeHandler), ('optimizer_state', <class 'orbax.checkpoint.experimental.v1._src.handlers.compatibility.Args'>): CompatibilityCheckpointHandler(orbax.checkpoint.experimental.v1._src.handlers.pytree_handler.PyTreeHandler)}).
+2026-08-27 00:48:40,718 - [TrainerNode] [process=0][thread=MainThread] Using barrier_sync_fn: <function get_barrier_sync_fn.<locals>.<lambda> at 0x7faa78adb1a0> timeout: 1200 secs and primary_host=0 for async checkpoint writes
+2026-08-27 00:48:40,719 - [TrainerNode] [process=0][thread=MainThread][step=2][wait_until_finished] Waiting for Save Finalize thread (save_finalize) to complete.
+2026-08-27 00:48:55,557 - [TrainerNode] [process=0] /jax/orbax/write/worker/io/requested throughput: 176.041 MiB/s (total gbytes: 3.2 GiB) (time elapsed: 18.641834497451782 s) (per-host)
+2026-08-27 00:48:55,558 - [TrainerNode] [process=0] Raw /jax/orbax/write/worker/io/raw throughput: 357.744 MiB/s (total gbytes: 6.5 GiB) (time elapsed: 18.641834497451782 s) (per-host)
+2026-08-27 00:48:55,558 - [TrainerNode] [process=0] Write ratio (raw/logical): 2.032 (6.5 GiB / 3.2 GiB)
+2026-08-27 00:48:55,599 - [TrainerNode] [process=0][thread=write_metadata_after_commits] Commit + Array metadata written. Time taken: 17.415281s (commit=17.395607s, array_metadata_write=0.019674s)
+2026-08-27 00:48:55,600 - [TrainerNode] [process=0] /jax/orbax/write/gbytes_per_sec: 170.185 MiB/s (total size: 3.2 GiB) (time elapsed: 19.283364057540894 s) (global)
+2026-08-27 00:48:55,604 - [TrainerNode] [process=0][thread=Thread-46 (_target_setting_result)] Skipped cross-host ArrayMetadata validation because only one process is found: process_index=0.
+2026-08-27 00:48:55,604 - [TrainerNode] Param validation support for Zarr3 will be added later (b/362328389).
+2026-08-27 00:48:55,612 - [TrainerNode] Merged 1 TensorStore OCDBT files under directory /mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/2.orbax-checkpoint-tmp/model_params.orbax-checkpoint-tmp in 0.01s.
+2026-08-27 00:48:55,612 - [TrainerNode] [process=0][thread=Thread-46 (_target_setting_result)] Pytree save finalize (merge_ocdbt + ArrayMetadata validation) completed. Time taken: 0.011489s. use_zarr3=True, enable_post_merge_validation=True, directory=/mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/2.orbax-checkpoint-tmp/model_params.orbax-checkpoint-tmp
+2026-08-27 00:48:58,699 - [TrainerNode] [process=0] /jax/orbax/write/worker/io/requested throughput: 319.098 MiB/s (total gbytes: 6.4 GiB) (time elapsed: 20.568827152252197 s) (per-host)
+2026-08-27 00:48:58,700 - [TrainerNode] [process=0] Raw /jax/orbax/write/worker/io/raw throughput: 375.986 MiB/s (total gbytes: 7.6 GiB) (time elapsed: 20.568827152252197 s) (per-host)
+2026-08-27 00:48:58,700 - [TrainerNode] [process=0] Write ratio (raw/logical): 1.178 (7.6 GiB / 6.4 GiB)
+2026-08-27 00:48:58,763 - [TrainerNode] [process=0][thread=write_metadata_after_commits] Commit + Array metadata written. Time taken: 20.546295s (commit=20.508700s, array_metadata_write=0.037596s)
+2026-08-27 00:48:58,765 - [TrainerNode] [process=0] /jax/orbax/write/gbytes_per_sec: 292.765 MiB/s (total size: 6.4 GiB) (time elapsed: 22.41890525817871 s) (global)
+2026-08-27 00:48:58,769 - [TrainerNode] [process=0][thread=Thread-47 (_target_setting_result)] Skipped cross-host ArrayMetadata validation because only one process is found: process_index=0.
+2026-08-27 00:48:58,769 - [TrainerNode] Param validation support for Zarr3 will be added later (b/362328389).
+2026-08-27 00:48:58,779 - [TrainerNode] Merged 1 TensorStore OCDBT files under directory /mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/2.orbax-checkpoint-tmp/optimizer_state.orbax-checkpoint-tmp in 0.01s.
+2026-08-27 00:48:58,779 - [TrainerNode] [process=0][thread=Thread-47 (_target_setting_result)] Pytree save finalize (merge_ocdbt + ArrayMetadata validation) completed. Time taken: 0.013703s. use_zarr3=True, enable_post_merge_validation=True, directory=/mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/2.orbax-checkpoint-tmp/optimizer_state.orbax-checkpoint-tmp
+2026-08-27 00:48:58,780 - [TrainerNode] [process=0][thread=async_save] 4 Handler Commit operations completed. Time taken: 20.526853s.
+2026-08-27 00:48:58,781 - [TrainerNode] Renaming /mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/2.orbax-checkpoint-tmp/model_params.orbax-checkpoint-tmp to /mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/2.orbax-checkpoint-tmp/model_params
+2026-08-27 00:48:58,783 - [TrainerNode] Renaming /mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/2.orbax-checkpoint-tmp/optimizer_state.orbax-checkpoint-tmp to /mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/2.orbax-checkpoint-tmp/optimizer_state
+2026-08-27 00:48:58,784 - [TrainerNode] Renaming /mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/2.orbax-checkpoint-tmp to /mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/2
+2026-08-27 00:48:58,785 - [TrainerNode] [process=0][thread=async_save] Finished saving checkpoint (finalized tmp dir) to `/mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/2`.
+2026-08-27 00:48:58,785 - [TrainerNode] [process=0] [async] Finished save (blocking + background) in 22.47 seconds @ /mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/2
+2026-08-27 00:48:58,786 - [TrainerNode] [process=0][thread=async_save] Background save thread done. Time taken: 20.532451s.
+2026-08-27 00:48:58,786 - [TrainerNode] [process=0][thread=save_finalize] Done with waiting for background save thread=async_save.
+2026-08-27 00:48:58,786 - [TrainerNode] [process=0][thread=save_finalize] No errors found in background save thread=async_save.
+2026-08-27 00:48:58,786 - [TrainerNode] Queuing deletion of steps: [].
+2026-08-27 00:48:58,786 - [TrainerNode] [process=0][thread=save_finalize][step=2] CheckpointManager Save Finalize is syncing with other hosts...
+2026-08-27 00:48:58,786 - [TrainerNode] [process=0][thread=save_finalize][step=2] CheckpointManager Save Finalize is done on all hosts.
+2026-08-27 00:48:58,786 - [TrainerNode] [process=0][thread=Thread-48 (_run_loop)][step=2][wait_until_finished] Done waiting for Save Finalize thread (save_finalize) running at step=2.
+2026-08-27 00:48:58,786 - [TrainerNode] [process=0][thread=MainThread][step=2][wait_until_finished] Done waiting for Save Finalize thread (save_finalize) running at step=2.
+2026-08-27 00:48:58,787 - [TrainerNode] Waiting for previous save to complete took 38.557507 seconds. If this number is high, consider checkpointing less frequently.
+2026-08-27 00:48:58,787 - [TrainerNode] [process=0] Saving checkpoint at step 3
+2026-08-27 00:48:58,787 - [TrainerNode] [process=0] [async] Started save checkpoint @ /mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/3.
+2026-08-27 00:48:58,830 - [TrainerNode] Creating tmp directory /mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/3.orbax-checkpoint-tmp
+2026-08-27 00:48:58,879 - [TrainerNode] Scheduling D2H of 310 prioritized jax.Array.
+2026-08-27 00:48:58,879 - [TrainerNode] Transferring arrays to host memory with options: use_replica_parallel=True, min_slice_bytes_for_replica_parallel=None, max_replicas_for_replica_parallel=None, enable_pinned_host_transfer=None
+2026-08-27 00:48:58,894 - [TrainerNode] Creating tmp directory /mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/3.orbax-checkpoint-tmp/model_params.orbax-checkpoint-tmp
+2026-08-27 00:48:58,895 - [TrainerNode] Creating tmp directory /mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/3.orbax-checkpoint-tmp/optimizer_state.orbax-checkpoint-tmp
+2026-08-27 00:48:59,069 - [TrainerNode] [process=0][thread=Thread-60 (_run_event_loop)] Initiated "orbax.checkpoint.experimental.v1._src.serialization.compatibility.CompatibleTypeHandler".serialize. Time taken: 0.200297s
+2026-08-27 00:48:59,106 - [TrainerNode] Scheduling D2H of 622 prioritized jax.Array.
+2026-08-27 00:48:59,111 - [TrainerNode] Transferring arrays to host memory with options: use_replica_parallel=True, min_slice_bytes_for_replica_parallel=None, max_replicas_for_replica_parallel=None, enable_pinned_host_transfer=None
+2026-08-27 00:48:59,428 - [TrainerNode] [process=0][thread=array_type_handler] Wrote 310 array_metadata.ArrayMetadata to /mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/3.orbax-checkpoint-tmp/model_params.orbax-checkpoint-tmp/array_metadatas/process_0
+2026-08-27 00:48:59,660 - [TrainerNode] [process=0][thread=Thread-60 (_run_event_loop)] Initiated "orbax.checkpoint.experimental.v1._src.serialization.compatibility.CompatibleTypeHandler".serialize. Time taken: 0.590851s
+2026-08-27 00:48:59,666 - [TrainerNode] MemoryRegulated: Peak usage: 0.000000 GiB
+2026-08-27 00:48:59,698 - [TrainerNode] [process=0] /jax/orbax/write/blocking_gbytes_per_sec: 3.543 GiB/s (total size: 3.2 GiB) (time elapsed: 0.9046392440795898 s) (global)
+2026-08-27 00:48:59,703 - [TrainerNode] [process=0][thread=Thread-60 (_run_event_loop)] Initiated Pytree async_save. Time taken: 0.910005s (batch_requests_ready=0.021203s, total_serialization_initiated=0.856870s, others=0.031932s)
+2026-08-27 00:48:59,725 - [TrainerNode] MemoryRegulated: Peak usage: 0.000000 GiB
+2026-08-27 00:48:59,742 - [TrainerNode] [process=0] /jax/orbax/write/blocking_gbytes_per_sec: 6.979 GiB/s (total size: 6.4 GiB) (time elapsed: 0.9183967113494873 s) (global)
+2026-08-27 00:48:59,746 - [TrainerNode] [process=0][thread=Thread-60 (_run_event_loop)] Initiated Pytree async_save. Time taken: 0.922041s (batch_requests_ready=0.045169s, total_serialization_initiated=0.861396s, others=0.015476s)
+2026-08-27 00:48:59,755 - [TrainerNode] [process=0][thread=Thread-60 (_run_event_loop)] Initiated CompositeCheckpointHandler.async_save. Time taken: 0.966518s (all_items=0.000021s, per_item={'model_params': '0.00001454', 'optimizer_state': '0.00000644'}, temp_paths=0.966497)
+2026-08-27 00:48:59,789 - [TrainerNode] [process=0] [async] Finished blocking save in 1.00 seconds. Continuing save @ /mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/3.
+2026-08-27 00:48:59,790 - [TrainerNode] [process=0][thread=async_save] Background save thread started. Deadline for this save operation is 2026-08-27 01:08:59.790506
+2026-08-27 00:48:59,791 - [TrainerNode] [process=0][thread=MainThread][step=3] Starting CheckpointManager Save Finalize thread=save_finalize
+2026-08-27 00:48:59,792 - [TrainerNode] [process=0][thread=save_finalize] Waiting for background save thread=async_save.
+2026-08-27 00:48:59,805 - [TrainerNode] {'step': 3, 'event_type': 'save', 'directory': '/mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints', 'reached_preemption': False, 'preemption_received_at': None, 'synchronous': False, 'wait_for_prev_start_time': 1787791720.7190006, 'wait_for_prev_duration_secs': 38.557507038116455, 'time_between_consecutive_saves_sec': 15.898964405059814, 'checkpointer_blocking_start_time': 1787791738.7873747, 'checkpointer_blocking_duration_secs': 1.0036985874176025, 'get_old_steps_start_time': 1787791739.7910914, 'get_old_steps_duration_secs': 2.6464462280273438e-05, 'checkpoint_manager_blocking_start_time': 1787791720.7189152, 'checkpoint_manager_blocking_duration_secs': 19.086581707000732}
+2026-08-27 00:48:59,838 - [TrainerNode] [process=0][thread=Thread-69 (_run_loop)][step=3][wait_until_finished] Waiting for Save Finalize thread (save_finalize) to complete.
+2026-08-27 00:49:00,123 - [TrainerNode] [process=0][thread=array_type_handler] Wrote 622 array_metadata.ArrayMetadata to /mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/3.orbax-checkpoint-tmp/optimizer_state.orbax-checkpoint-tmp/array_metadatas/process_0
+2026-08-27 00:49:02,122 - [TrainerNode] Train step 3 training loss: 0.000000  - training perplexity: 1.000000
+TrainerWorker trainer-0 saving checkpoint with metadata: {'step': 4, 'policy_version': 4, 'num_rollouts': 4, 'num_microbatches': 4}
+2026-08-27 00:49:02,124 - [TrainerNode] Saving checkpoint at step 4 with metadata: {'step': 4, 'policy_version': 4, 'num_rollouts': 4, 'num_microbatches': 4}
+2026-08-27 00:49:02,152 - [TrainerNode] Created BasePyTreeCheckpointHandler: use_ocdbt=True, use_zarr3=True, pytree_metadata_options=PyTreeMetadataOptions(support_rich_types=False), array_metadata_store=<orbax.checkpoint._src.metadata.array_metadata_store.Store object at 0x7faabb1739e0>, enable_pinned_host_transfer=False, save_concurrent_bytes: None, restore_concurrent_bytes: None
+2026-08-27 00:49:02,152 - [TrainerNode] Created BasePyTreeCheckpointHandler: use_ocdbt=True, use_zarr3=True, pytree_metadata_options=PyTreeMetadataOptions(support_rich_types=False), array_metadata_store=<orbax.checkpoint._src.metadata.array_metadata_store.Store object at 0x7faabb1739e0>, enable_pinned_host_transfer=False, save_concurrent_bytes: None, restore_concurrent_bytes: None
+2026-08-27 00:49:02,155 - [TrainerNode] Created BasePyTreeCheckpointHandler: use_ocdbt=True, use_zarr3=True, pytree_metadata_options=PyTreeMetadataOptions(support_rich_types=False), array_metadata_store=<orbax.checkpoint._src.metadata.array_metadata_store.Store object at 0x7faabb1739e0>, enable_pinned_host_transfer=False, save_concurrent_bytes: None, restore_concurrent_bytes: None
+2026-08-27 00:49:02,155 - [TrainerNode] Created BasePyTreeCheckpointHandler: use_ocdbt=True, use_zarr3=True, pytree_metadata_options=PyTreeMetadataOptions(support_rich_types=False), array_metadata_store=<orbax.checkpoint._src.metadata.array_metadata_store.Store object at 0x7faabb1739e0>, enable_pinned_host_transfer=False, save_concurrent_bytes: None, restore_concurrent_bytes: None
+2026-08-27 00:49:02,159 - [TrainerNode] Initialized registry DefaultCheckpointHandlerRegistry({('model_params', <class 'orbax.checkpoint.experimental.v1._src.handlers.compatibility.Args'>): CompatibilityCheckpointHandler(orbax.checkpoint.experimental.v1._src.handlers.pytree_handler.PyTreeHandler), ('optimizer_state', <class 'orbax.checkpoint.experimental.v1._src.handlers.compatibility.Args'>): CompatibilityCheckpointHandler(orbax.checkpoint.experimental.v1._src.handlers.pytree_handler.PyTreeHandler)}).
+2026-08-27 00:49:02,159 - [TrainerNode] [process=0][thread=MainThread] Using barrier_sync_fn: <function get_barrier_sync_fn.<locals>.<lambda> at 0x7faabae484a0> timeout: 1200 secs and primary_host=0 for async checkpoint writes
+2026-08-27 00:49:02,159 - [TrainerNode] [process=0][thread=MainThread][step=3][wait_until_finished] Waiting for Save Finalize thread (save_finalize) to complete.
+2026-08-27 00:49:17,348 - [TrainerNode] [process=0] /jax/orbax/write/worker/io/requested throughput: 179.744 MiB/s (total gbytes: 3.2 GiB) (time elapsed: 18.257860898971558 s) (per-host)
+2026-08-27 00:49:17,349 - [TrainerNode] [process=0] Raw /jax/orbax/write/worker/io/raw throughput: 365.521 MiB/s (total gbytes: 6.5 GiB) (time elapsed: 18.257860898971558 s) (per-host)
+2026-08-27 00:49:17,349 - [TrainerNode] [process=0] Write ratio (raw/logical): 2.034 (6.5 GiB / 3.2 GiB)
+2026-08-27 00:49:17,382 - [TrainerNode] [process=0][thread=write_metadata_after_commits] Commit + Array metadata written. Time taken: 17.695069s (commit=17.678052s, array_metadata_write=0.017017s)
+2026-08-27 00:49:17,384 - [TrainerNode] [process=0] /jax/orbax/write/gbytes_per_sec: 176.529 MiB/s (total size: 3.2 GiB) (time elapsed: 18.590369701385498 s) (global)
+2026-08-27 00:49:17,387 - [TrainerNode] [process=0][thread=Thread-67 (_target_setting_result)] Skipped cross-host ArrayMetadata validation because only one process is found: process_index=0.
+2026-08-27 00:49:17,387 - [TrainerNode] Param validation support for Zarr3 will be added later (b/362328389).
+2026-08-27 00:49:17,394 - [TrainerNode] Merged 1 TensorStore OCDBT files under directory /mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/3.orbax-checkpoint-tmp/model_params.orbax-checkpoint-tmp in 0.01s.
+2026-08-27 00:49:17,395 - [TrainerNode] [process=0][thread=Thread-67 (_target_setting_result)] Pytree save finalize (merge_ocdbt + ArrayMetadata validation) completed. Time taken: 0.010323s. use_zarr3=True, enable_post_merge_validation=True, directory=/mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/3.orbax-checkpoint-tmp/model_params.orbax-checkpoint-tmp
+2026-08-27 00:49:20,525 - [TrainerNode] [process=0] /jax/orbax/write/worker/io/requested throughput: 314.583 MiB/s (total gbytes: 6.4 GiB) (time elapsed: 20.86403727531433 s) (per-host)
+2026-08-27 00:49:20,526 - [TrainerNode] [process=0] Raw /jax/orbax/write/worker/io/raw throughput: 369.384 MiB/s (total gbytes: 7.5 GiB) (time elapsed: 20.86403727531433 s) (per-host)
+2026-08-27 00:49:20,526 - [TrainerNode] [process=0] Write ratio (raw/logical): 1.174 (7.5 GiB / 6.4 GiB)
+2026-08-27 00:49:20,589 - [TrainerNode] [process=0][thread=write_metadata_after_commits] Commit + Array metadata written. Time taken: 20.836414s (commit=20.797810s, array_metadata_write=0.038604s)
+2026-08-27 00:49:20,590 - [TrainerNode] [process=0] /jax/orbax/write/gbytes_per_sec: 301.537 MiB/s (total size: 6.4 GiB) (time elapsed: 21.7667498588562 s) (global)
+2026-08-27 00:49:20,594 - [TrainerNode] [process=0][thread=Thread-68 (_target_setting_result)] Skipped cross-host ArrayMetadata validation because only one process is found: process_index=0.
+2026-08-27 00:49:20,594 - [TrainerNode] Param validation support for Zarr3 will be added later (b/362328389).
+2026-08-27 00:49:20,605 - [TrainerNode] Merged 1 TensorStore OCDBT files under directory /mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/3.orbax-checkpoint-tmp/optimizer_state.orbax-checkpoint-tmp in 0.01s.
+2026-08-27 00:49:20,605 - [TrainerNode] [process=0][thread=Thread-68 (_target_setting_result)] Pytree save finalize (merge_ocdbt + ArrayMetadata validation) completed. Time taken: 0.013921s. use_zarr3=True, enable_post_merge_validation=True, directory=/mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/3.orbax-checkpoint-tmp/optimizer_state.orbax-checkpoint-tmp
+2026-08-27 00:49:20,606 - [TrainerNode] [process=0][thread=async_save] 4 Handler Commit operations completed. Time taken: 20.814888s.
+2026-08-27 00:49:20,607 - [TrainerNode] Renaming /mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/3.orbax-checkpoint-tmp/model_params.orbax-checkpoint-tmp to /mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/3.orbax-checkpoint-tmp/model_params
+2026-08-27 00:49:20,608 - [TrainerNode] Renaming /mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/3.orbax-checkpoint-tmp/optimizer_state.orbax-checkpoint-tmp to /mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/3.orbax-checkpoint-tmp/optimizer_state
+2026-08-27 00:49:20,609 - [TrainerNode] Renaming /mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/3.orbax-checkpoint-tmp to /mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/3
+2026-08-27 00:49:20,611 - [TrainerNode] [process=0][thread=async_save] Finished saving checkpoint (finalized tmp dir) to `/mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/3`.
+2026-08-27 00:49:20,611 - [TrainerNode] [process=0] [async] Finished save (blocking + background) in 21.82 seconds @ /mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/3
+2026-08-27 00:49:20,611 - [TrainerNode] [process=0][thread=async_save] Background save thread done. Time taken: 20.820596s.
+2026-08-27 00:49:20,611 - [TrainerNode] [process=0][thread=save_finalize] Done with waiting for background save thread=async_save.
+2026-08-27 00:49:20,612 - [TrainerNode] [process=0][thread=save_finalize] No errors found in background save thread=async_save.
+2026-08-27 00:49:20,612 - [TrainerNode] Queuing deletion of steps: [].
+2026-08-27 00:49:20,612 - [TrainerNode] [process=0][thread=save_finalize][step=3] CheckpointManager Save Finalize is syncing with other hosts...
+2026-08-27 00:49:20,612 - [TrainerNode] [process=0][thread=save_finalize][step=3] CheckpointManager Save Finalize is done on all hosts.
+2026-08-27 00:49:20,612 - [TrainerNode] [process=0][thread=Thread-69 (_run_loop)][step=3][wait_until_finished] Done waiting for Save Finalize thread (save_finalize) running at step=3.
+2026-08-27 00:49:20,612 - [TrainerNode] [process=0][thread=MainThread][step=3][wait_until_finished] Done waiting for Save Finalize thread (save_finalize) running at step=3.
+2026-08-27 00:49:20,612 - [TrainerNode] Waiting for previous save to complete took 39.227598 seconds. If this number is high, consider checkpointing less frequently.
+2026-08-27 00:49:20,612 - [TrainerNode] [process=0] Saving checkpoint at step 4
+2026-08-27 00:49:20,612 - [TrainerNode] [process=0] [async] Started save checkpoint @ /mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/4.
+2026-08-27 00:49:20,660 - [TrainerNode] Creating tmp directory /mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/4.orbax-checkpoint-tmp
+2026-08-27 00:49:20,702 - [TrainerNode] Scheduling D2H of 310 prioritized jax.Array.
+2026-08-27 00:49:20,702 - [TrainerNode] Transferring arrays to host memory with options: use_replica_parallel=True, min_slice_bytes_for_replica_parallel=None, max_replicas_for_replica_parallel=None, enable_pinned_host_transfer=None
+2026-08-27 00:49:20,717 - [TrainerNode] Creating tmp directory /mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/4.orbax-checkpoint-tmp/model_params.orbax-checkpoint-tmp
+2026-08-27 00:49:20,718 - [TrainerNode] Creating tmp directory /mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/4.orbax-checkpoint-tmp/optimizer_state.orbax-checkpoint-tmp
+2026-08-27 00:49:21,052 - [TrainerNode] [process=0][thread=Thread-81 (_run_event_loop)] Initiated "orbax.checkpoint.experimental.v1._src.serialization.compatibility.CompatibleTypeHandler".serialize. Time taken: 0.360628s
+2026-08-27 00:49:21,139 - [TrainerNode] Scheduling D2H of 622 prioritized jax.Array.
+2026-08-27 00:49:21,142 - [TrainerNode] Transferring arrays to host memory with options: use_replica_parallel=True, min_slice_bytes_for_replica_parallel=None, max_replicas_for_replica_parallel=None, enable_pinned_host_transfer=None
+2026-08-27 00:49:21,422 - [TrainerNode] [process=0][thread=array_type_handler] Wrote 310 array_metadata.ArrayMetadata to /mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/4.orbax-checkpoint-tmp/model_params.orbax-checkpoint-tmp/array_metadatas/process_0
+2026-08-27 00:49:21,543 - [TrainerNode] [process=0][thread=Thread-81 (_run_event_loop)] Initiated "orbax.checkpoint.experimental.v1._src.serialization.compatibility.CompatibleTypeHandler".serialize. Time taken: 0.480350s
+2026-08-27 00:49:21,559 - [TrainerNode] MemoryRegulated: Peak usage: 0.000000 GiB
+2026-08-27 00:49:21,572 - [TrainerNode] [process=0] /jax/orbax/write/blocking_gbytes_per_sec: 3.360 GiB/s (total size: 3.2 GiB) (time elapsed: 0.9539361000061035 s) (global)
+2026-08-27 00:49:21,578 - [TrainerNode] [process=0][thread=Thread-81 (_run_event_loop)] Initiated Pytree async_save. Time taken: 0.959483s (batch_requests_ready=0.020656s, total_serialization_initiated=0.925278s, others=0.013549s)
+2026-08-27 00:49:21,609 - [TrainerNode] MemoryRegulated: Peak usage: 0.000000 GiB
+2026-08-27 00:49:21,632 - [TrainerNode] [process=0] /jax/orbax/write/blocking_gbytes_per_sec: 6.510 GiB/s (total size: 6.4 GiB) (time elapsed: 0.9846179485321045 s) (global)
+2026-08-27 00:49:21,637 - [TrainerNode] [process=0][thread=Thread-81 (_run_event_loop)] Initiated Pytree async_save. Time taken: 0.989861s (batch_requests_ready=0.044326s, total_serialization_initiated=0.928474s, others=0.017061s)
+2026-08-27 00:49:21,683 - [TrainerNode] [process=0][thread=Thread-81 (_run_event_loop)] Initiated CompositeCheckpointHandler.async_save. Time taken: 1.069175s (all_items=0.000019s, per_item={'model_params': '0.00001407', 'optimizer_state': '0.00000453'}, temp_paths=1.069156)
+2026-08-27 00:49:21,695 - [TrainerNode] [process=0] [async] Finished blocking save in 1.08 seconds. Continuing save @ /mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/4.
+2026-08-27 00:49:21,696 - [TrainerNode] [process=0][thread=async_save] Background save thread started. Deadline for this save operation is 2026-08-27 01:09:21.696559
+2026-08-27 00:49:21,697 - [TrainerNode] [process=0][thread=MainThread][step=4] Starting CheckpointManager Save Finalize thread=save_finalize
+2026-08-27 00:49:21,700 - [TrainerNode] [process=0][thread=save_finalize] Waiting for background save thread=async_save.
+2026-08-27 00:49:21,706 - [TrainerNode] {'step': 4, 'event_type': 'save', 'directory': '/mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints', 'reached_preemption': False, 'preemption_received_at': None, 'synchronous': False, 'wait_for_prev_start_time': 1787791742.1593783, 'wait_for_prev_duration_secs': 39.22759819030762, 'time_between_consecutive_saves_sec': 3.3726072311401367, 'checkpointer_blocking_start_time': 1787791760.6128955, 'checkpointer_blocking_duration_secs': 1.084277868270874, 'get_old_steps_start_time': 1787791761.6971936, 'get_old_steps_duration_secs': 3.0994415283203125e-05, 'checkpoint_manager_blocking_start_time': 1787791742.159296, 'checkpoint_manager_blocking_duration_secs': 19.546650886535645}
+2026-08-27 00:49:21,738 - [TrainerNode] [process=0][thread=Thread-90 (_run_loop)][step=4][wait_until_finished] Waiting for Save Finalize thread (save_finalize) to complete.
+2026-08-27 00:49:21,760 - [TrainerNode] Train step 4 training loss: 0.000000  - training perplexity: 1.000000
+2026-08-27 00:49:21,777 - [TrainerNode] [process=0][thread=MainThread][step=4][wait_until_finished] Waiting for Save Finalize thread (save_finalize) to complete.
+2026-08-27 00:49:22,024 - [TrainerNode] [process=0][thread=array_type_handler] Wrote 622 array_metadata.ArrayMetadata to /mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/4.orbax-checkpoint-tmp/optimizer_state.orbax-checkpoint-tmp/array_metadatas/process_0
+2026-08-27 00:49:38,792 - [TrainerNode] [process=0] /jax/orbax/write/worker/io/requested throughput: 185.003 MiB/s (total gbytes: 3.2 GiB) (time elapsed: 17.7387957572937 s) (per-host)
+2026-08-27 00:49:38,792 - [TrainerNode] [process=0] Raw /jax/orbax/write/worker/io/raw throughput: 393.727 MiB/s (total gbytes: 6.8 GiB) (time elapsed: 17.7387957572937 s) (per-host)
+2026-08-27 00:49:38,792 - [TrainerNode] [process=0] Write ratio (raw/logical): 2.128 (6.8 GiB / 3.2 GiB)
+2026-08-27 00:49:38,817 - [TrainerNode] [process=0][thread=write_metadata_after_commits] Commit + Array metadata written. Time taken: 17.208252s (commit=17.191522s, array_metadata_write=0.016730s)
+2026-08-27 00:49:38,818 - [TrainerNode] [process=0] /jax/orbax/write/gbytes_per_sec: 180.316 MiB/s (total size: 3.2 GiB) (time elapsed: 18.19992446899414 s) (global)
+2026-08-27 00:49:38,821 - [TrainerNode] [process=0][thread=Thread-88 (_target_setting_result)] Skipped cross-host ArrayMetadata validation because only one process is found: process_index=0.
+2026-08-27 00:49:38,822 - [TrainerNode] Param validation support for Zarr3 will be added later (b/362328389).
+2026-08-27 00:49:38,830 - [TrainerNode] Merged 1 TensorStore OCDBT files under directory /mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/4.orbax-checkpoint-tmp/model_params.orbax-checkpoint-tmp in 0.01s.
+2026-08-27 00:49:38,830 - [TrainerNode] [process=0][thread=Thread-88 (_target_setting_result)] Pytree save finalize (merge_ocdbt + ArrayMetadata validation) completed. Time taken: 0.010947s. use_zarr3=True, enable_post_merge_validation=True, directory=/mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/4.orbax-checkpoint-tmp/model_params.orbax-checkpoint-tmp
+2026-08-27 00:49:41,660 - [TrainerNode] [process=0] /jax/orbax/write/worker/io/requested throughput: 326.273 MiB/s (total gbytes: 6.4 GiB) (time elapsed: 20.116509199142456 s) (per-host)
+2026-08-27 00:49:41,661 - [TrainerNode] [process=0] Raw /jax/orbax/write/worker/io/raw throughput: 382.294 MiB/s (total gbytes: 7.5 GiB) (time elapsed: 20.116509199142456 s) (per-host)
+2026-08-27 00:49:41,661 - [TrainerNode] [process=0] Write ratio (raw/logical): 1.172 (7.5 GiB / 6.4 GiB)
+2026-08-27 00:49:42,027 - [TrainerNode] [process=0][thread=write_metadata_after_commits] Commit + Array metadata written. Time taken: 20.389646s (commit=20.036163s, array_metadata_write=0.353483s)
+2026-08-27 00:49:42,029 - [TrainerNode] [process=0] /jax/orbax/write/gbytes_per_sec: 306.967 MiB/s (total size: 6.4 GiB) (time elapsed: 21.38166832923889 s) (global)
+2026-08-27 00:49:42,033 - [TrainerNode] [process=0][thread=Thread-89 (_target_setting_result)] Skipped cross-host ArrayMetadata validation because only one process is found: process_index=0.
+2026-08-27 00:49:42,033 - [TrainerNode] Param validation support for Zarr3 will be added later (b/362328389).
+2026-08-27 00:49:42,045 - [TrainerNode] Merged 1 TensorStore OCDBT files under directory /mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/4.orbax-checkpoint-tmp/optimizer_state.orbax-checkpoint-tmp in 0.01s.
+2026-08-27 00:49:42,045 - [TrainerNode] [process=0][thread=Thread-89 (_target_setting_result)] Pytree save finalize (merge_ocdbt + ArrayMetadata validation) completed. Time taken: 0.015297s. use_zarr3=True, enable_post_merge_validation=True, directory=/mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/4.orbax-checkpoint-tmp/optimizer_state.orbax-checkpoint-tmp
+2026-08-27 00:49:42,046 - [TrainerNode] [process=0][thread=async_save] 4 Handler Commit operations completed. Time taken: 20.348194s.
+2026-08-27 00:49:42,047 - [TrainerNode] Renaming /mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/4.orbax-checkpoint-tmp/model_params.orbax-checkpoint-tmp to /mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/4.orbax-checkpoint-tmp/model_params
+2026-08-27 00:49:42,048 - [TrainerNode] Renaming /mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/4.orbax-checkpoint-tmp/optimizer_state.orbax-checkpoint-tmp to /mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/4.orbax-checkpoint-tmp/optimizer_state
+2026-08-27 00:49:42,049 - [TrainerNode] Renaming /mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/4.orbax-checkpoint-tmp to /mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/4
+2026-08-27 00:49:42,050 - [TrainerNode] [process=0][thread=async_save] Finished saving checkpoint (finalized tmp dir) to `/mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/4`.
+2026-08-27 00:49:42,051 - [TrainerNode] [process=0] [async] Finished save (blocking + background) in 21.44 seconds @ /mnt/disks/linchai-data/tmp_ckpt/tunix_trainer_checkpoints/4
+2026-08-27 00:49:42,051 - [TrainerNode] [process=0][thread=async_save] Background save thread done. Time taken: 20.353368s.
+2026-08-27 00:49:42,051 - [TrainerNode] [process=0][thread=save_finalize] Done with waiting for background save thread=async_save.
+2026-08-27 00:49:42,051 - [TrainerNode] [process=0][thread=save_finalize] No errors found in background save thread=async_save.
+2026-08-27 00:49:42,051 - [TrainerNode] Queuing deletion of steps: [].
+2026-08-27 00:49:42,051 - [TrainerNode] [process=0][thread=save_finalize][step=4] CheckpointManager Save Finalize is syncing with other hosts...
+2026-08-27 00:49:42,051 - [TrainerNode] [process=0][thread=save_finalize][step=4] CheckpointManager Save Finalize is done on all hosts.
+2026-08-27 00:49:42,051 - [TrainerNode] [process=0][thread=Thread-90 (_run_loop)][step=4][wait_until_finished] Done waiting for Save Finalize thread (save_finalize) running at step=4.
+2026-08-27 00:49:42,051 - [TrainerNode] [process=0][thread=MainThread][step=4][wait_until_finished] Done waiting for Save Finalize thread (save_finalize) running at step=4.
+2026-08-27 00:49:42,051 - [TrainerNode] Closing _NonBlockingMetadataStore(enable_write=True, _write_lock=<locked _thread.RLock object owner=140401921087488 count=1 at 0x7faa9430f840>, _store_impl=<orbax.checkpoint._src.metadata.checkpoint._MetadataStoreImpl object at 0x7faa94355280>, _single_thread_executor=<concurrent.futures.thread.ThreadPoolExecutor object at 0x7faa943564e0>, _write_futures=[])
+2026-08-27 00:49:42,052 - [TrainerNode] Closing _NonBlockingMetadataStore(enable_write=True, _write_lock=<locked _thread.RLock object owner=140401921087488 count=1 at 0x7faa9430f840>, _store_impl=<orbax.checkpoint._src.metadata.checkpoint._MetadataStoreImpl object at 0x7faa94355280>, _single_thread_executor=<concurrent.futures.thread.ThreadPoolExecutor object at 0x7faa943564e0>, _write_futures=[])
+2026-08-27 00:49:42,052 - [TrainerNode] Closing _NonBlockingMetadataStore(enable_write=True, _write_lock=<locked _thread.RLock object owner=140401921087488 count=1 at 0x7faabb2ed600>, _store_impl=<orbax.checkpoint._src.metadata.checkpoint._MetadataStoreImpl object at 0x7faffe6f0ec0>, _single_thread_executor=<concurrent.futures.thread.ThreadPoolExecutor object at 0x7faabaf026c0>, _write_futures=[])
+2026-08-27 00:49:43,091 - [TrainerNode] Draining trainer worker...
+2026-08-27 00:49:43,091 - [TrainerNode] Trainer worker drained.

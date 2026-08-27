@@ -1,0 +1,43 @@
+2026-08-27 00:46:52,852 - [Orchestrator] Control-plane JAX backend: cpu
+2026-08-27 00:46:53,463 - [Orchestrator] discovery server started on port 30000
+2026-08-27 00:46:53,463 - [Orchestrator] Waiting for workers to connect...
+2026-08-27 00:46:55,061 - [Orchestrator] discovered rollout service vllm-rollout-0 at localhost:20001
+2026-08-27 00:47:06,768 - [Orchestrator] discovered trainer service trainer-0 at localhost:20000
+2026-08-27 00:47:06,768 - [Orchestrator] Configuring trainer-side GRPO loss via TrainerWorker RPC.
+2026-08-27 00:47:09,140 - [Orchestrator] Registered Orchestrator V2 workers: [WorkerInfo(worker_id='rollout-0', roles=frozenset({'rollout'}), resources={'remote': True, 'address': 'localhost:20001'}), WorkerInfo(worker_id='trainer-0', roles=frozenset({'actor'}), resources={'remote': True, 'address': 'localhost:20000'})]
+2026-08-27 00:47:09,141 - [Orchestrator] Bringing up remote workers through ClusterOrchestrator.
+2026-08-27 00:47:09,141 - [Orchestrator] Bringing up workers across cluster...
+2026-08-27 00:47:09,141 - [Orchestrator] Initializing remote worker rollout-0.
+2026-08-27 00:47:09,144 - [Orchestrator] Initializing remote worker trainer-0.
+2026-08-27 00:47:09,145 - [Orchestrator] Compiling remote worker rollout-0.
+2026-08-27 00:47:09,145 - [Orchestrator] Compiling remote worker trainer-0.
+2026-08-27 00:47:09,146 - [Orchestrator] Starting remote worker rollout-0.
+2026-08-27 00:47:09,147 - [Orchestrator] Starting remote worker trainer-0.
+2026-08-27 00:47:09,147 - [Orchestrator] Running SyncRLProgram through ClusterOrchestrator.run_program.
+2026-08-27 00:47:09,147 - [Orchestrator] ClusterOrchestrator executing program...
+SyncRLProgram.arun: num_steps=4
+2026-08-27 00:47:12,657 - [Orchestrator] No checkpoint to resume from; starting from step 0.
+prompt_batch length: 4
+2026-08-27 00:47:12,657 - [Orchestrator] RLProgram starting step 0
+2026-08-27 00:47:12,657 - [Orchestrator] GRPO step 0 starting.
+2026-08-27 00:48:03,396 - [Orchestrator] RLProgram.step_once: current_step=0 policy_version=0
+2026-08-27 00:48:05,109 - [Orchestrator] GRPO advanced to policy_version=1 train_result={'fwd_bwd': Response(request_id='', error=None, metadata={'worker_id': 'trainer-0', 'state': 'READY', 'policy_version': 0, 'queued': True}), 'updated': True, 'train_step': 1, 'accumulated': True}.
+prompt_batch length: 4
+2026-08-27 00:48:05,110 - [Orchestrator] RLProgram starting step 1
+2026-08-27 00:48:05,110 - [Orchestrator] GRPO step 1 starting.
+2026-08-27 00:48:36,275 - [Orchestrator] RLProgram.step_once: current_step=1 policy_version=1
+2026-08-27 00:48:38,303 - [Orchestrator] GRPO advanced to policy_version=2 train_result={'fwd_bwd': Response(request_id='', error=None, metadata={'worker_id': 'trainer-0', 'state': 'READY', 'policy_version': 0, 'queued': True}), 'updated': True, 'train_step': 2, 'accumulated': True}.
+prompt_batch length: 4
+2026-08-27 00:48:38,304 - [Orchestrator] RLProgram starting step 2
+2026-08-27 00:48:38,304 - [Orchestrator] GRPO step 2 starting.
+2026-08-27 00:48:40,683 - [Orchestrator] RLProgram.step_once: current_step=2 policy_version=2
+2026-08-27 00:48:59,838 - [Orchestrator] GRPO advanced to policy_version=3 train_result={'fwd_bwd': Response(request_id='', error=None, metadata={'worker_id': 'trainer-0', 'state': 'READY', 'policy_version': 0, 'queued': True}), 'updated': True, 'train_step': 3, 'accumulated': True}.
+prompt_batch length: 4
+2026-08-27 00:48:59,838 - [Orchestrator] RLProgram starting step 3
+2026-08-27 00:48:59,839 - [Orchestrator] GRPO step 3 starting.
+2026-08-27 00:49:02,123 - [Orchestrator] RLProgram.step_once: current_step=3 policy_version=3
+2026-08-27 00:49:21,735 - [Orchestrator] GRPO advanced to policy_version=4 train_result={'fwd_bwd': Response(request_id='', error=None, metadata={'worker_id': 'trainer-0', 'state': 'READY', 'policy_version': 0, 'queued': True}), 'updated': True, 'train_step': 4, 'accumulated': True}.
+2026-08-27 00:49:21,736 - [Orchestrator] Shutting down ClusterOrchestrator...
+2026-08-27 00:49:42,053 - [Orchestrator] Final step summary: step=3 policy_version=4 rollouts=4 microbatches=4 reward_mean=0.500 reward_std=0.500.
+2026-08-27 00:49:42,053 - [Orchestrator] Distributed GSM8K GRPO Orchestrator V2 demo finished.
+2026-08-27 00:49:42,072 - [Orchestrator] discovery server stopped

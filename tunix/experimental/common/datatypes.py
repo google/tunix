@@ -22,6 +22,7 @@ This module centralizes type aliases and dataclasses used for:
 import dataclasses
 import enum
 import time
+import flax
 from typing import Any, Dict
 from jax.typing import ArrayLike  # pylint: disable=g-importing-member
 import numpy as np
@@ -469,7 +470,7 @@ class WeightSyncMetadata:
 ##### Training DTOs #####
 
 
-@dataclasses.dataclass(kw_only=True)
+@flax.struct.dataclass
 class TrainerPayload:
   """Generic trainer payload.
 
@@ -490,7 +491,7 @@ class TrainerPayload:
 
 
 # TODO: Introduce PPOTrainerPayload to replace generic RLTrainerPayload when PPO specific fields are needed.
-@dataclasses.dataclass(kw_only=True)
+@flax.struct.dataclass
 class RLTrainerPayload(TrainerPayload):
   """RL training payload.
 
@@ -512,8 +513,8 @@ class RLTrainerPayload(TrainerPayload):
     metadata: Extra payload metadata dictionary.
   """
 
-  advantages: ArrayLike
-  loss_mask: ArrayLike
+  loss_mask: ArrayLike | None = None
+  advantages: ArrayLike | None = None
   action_mask: ArrayLike | None = None
   prompt_ids: ArrayLike | None = None
   prompt_mask: ArrayLike | None = None
@@ -524,7 +525,9 @@ class RLTrainerPayload(TrainerPayload):
   sampler_is_weights: ArrayLike | None = None
   returns: ArrayLike | None = None
   old_values: ArrayLike | None = None
-  metadata: dict[str, Any] = dataclasses.field(default_factory=dict)
+  metadata: dict[str, Any] = flax.struct.field(
+     default_factory=dict, pytree_node=False
+  ) 
   # TODO: add ppo sepcific fields in a PPO specific fields in  PPORLTrainerPayload
 
 
