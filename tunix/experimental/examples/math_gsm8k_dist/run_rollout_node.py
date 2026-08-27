@@ -322,6 +322,7 @@ def _create_vllm_worker(args, tokenizer):
       server_id=args.worker_id,
       tokenizer=tokenizer,
       config=vllm_config,
+      weight_sync_mode=args.weight_sync_mode,
   )
   rollout_tokenizer = tokenizer_adapter_lib.TokenizerAdapter(tokenizer)
   chat_parser = _chat_parser_for(args.model_id or args.model_name, tokenizer)
