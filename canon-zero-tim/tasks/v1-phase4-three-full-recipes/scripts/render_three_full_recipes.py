@@ -166,6 +166,15 @@ def render_three(
     additions = {
         "CANON_P59_CHECKED_VMA": "1",
         "CANON_V1_HP_FIRST_UPDATE_GATE": "1",
+        # Receipt-lightening selectors: gradient values are unchanged
+        # bitwise by construction (only the cadence and the fetch point of
+        # the watchdogs move), kill-tested for single-bit and non-finite
+        # detection, and validated end to end at DP4xTP1.  The reduction
+        # selector stays absent until the DP16 oracle runs, and the scan
+        # ladder is set below per topology.
+        "CANON_DP_COMPARE_MODE": "fingerprint-hybrid",
+        "CANON_DP_DISTINCT_SCHEDULE": "first-group-warmup",
+        "CANON_DP_FINITE_FETCH": "batched-commit",
     }
     if label != "gsm8k":
       additions["CANON_P67_P66_VMA_P59_ONLY"] = "1"

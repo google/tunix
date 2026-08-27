@@ -135,6 +135,16 @@ class ThreeFullRendererTest(unittest.TestCase):
         self.assertEqual(values["CANON_V1_HP_FIRST_UPDATE_GATE"], "1")
         self.assertEqual(values["CANON_P33_RUN_STAGE"], "full")
         self.assertEqual(values["CANON_P33_NO_COMMIT"], "0")
+        # Receipt selectors ride every Phase4 recipe; the reduction
+        # selector must stay absent until its DP16 oracle runs.
+        self.assertEqual(
+            values["CANON_DP_COMPARE_MODE"], "fingerprint-hybrid"
+        )
+        self.assertEqual(
+            values["CANON_DP_DISTINCT_SCHEDULE"], "first-group-warmup"
+        )
+        self.assertEqual(values["CANON_DP_FINITE_FETCH"], "batched-commit")
+        self.assertNotIn("CANON_DP_COLLECTIVE_REDUCE", values)
         self.assertEqual(
             values["JAX_COMPILATION_CACHE_DIR"],
             "/tmp/jax_compilation_cache",
