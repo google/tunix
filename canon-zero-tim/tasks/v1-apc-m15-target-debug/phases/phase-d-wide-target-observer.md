@@ -128,3 +128,18 @@ automatically added to the GCS upload set without separate authorization.
 - No `FIRST_RED_LOCALIZED` means no numerical repair.
 - No target run implies no root-cause claim.
 - This phase never enables production APC.
+
+## 2026-08-27 evidence-recovery checkpoint
+
+Attempt 11/d17 is not a layer verdict. The wide observer produced thousands
+of records, but the independent legacy incident ledger exceeded its 2-GiB
+bound before classification and compact packaging completed. More frozen
+rounds would increase that pressure and are not admitted by the current M15
+classifier.
+
+Before another target launch, a bucket-capable executor must run
+`scripts/run_m15_wide_seam_gcs_salvage.sh` on the committed Attempt-9 receipt.
+If a valid control/treatment classifier pair already exists, it supersedes a
+new coarse layer run. If the result is `INCOMPLETE`, the next implementation
+task is durability/ledger separation, not a numerical fix and not a blind
+multi-round retry.

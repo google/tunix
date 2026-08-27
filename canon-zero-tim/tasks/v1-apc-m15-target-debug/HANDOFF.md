@@ -1,6 +1,90 @@
 # M15 APC target-debug handoff
 
-## START HERE — run the DP8xTP8 wide layer observer
+## START HERE — salvage Attempt 9 from GCS before any new TPU run
+
+This is a read-only bucket audit. Do not render or launch another JobSet, edit
+YAML, or infer a layer from the prose receipt. Attempt 9 reported a completed
+off/on wide-layer run but returned only `receipt.json` to Git. The first action
+is to ask the registered Attempt-0 roots whether the machine classifier and
+compact bundle already exist.
+
+From a bucket-capable checkout of the published operator branch, run exactly:
+
+```bash
+cd /home/yuxuan/code_rl_repro/sequence_packing/tunix
+git fetch origin yuxzhang/canon-zero-tim
+BASE_SHA="$(git rev-parse origin/yuxzhang/canon-zero-tim)"
+WORKTREE=/mnt/disks/tunix-data/worktrees/m15_attempt9_gcs_salvage_20260827
+test ! -e "$WORKTREE"
+git worktree add --detach "$WORKTREE" "$BASE_SHA"
+cd "$WORKTREE"
+
+RECEIPT=canon-zero-tim/tasks/v1-apc-m15-target-debug/evidence/v1_apc_m15_attempt9_paired_d15_20260826/receipt.json
+RETURN=canon-zero-tim/tasks/v1-apc-m15-target-debug/evidence/v1_apc_m15_attempt9_gcs_salvage_20260827
+test -f "$RECEIPT"
+test ! -e "$RETURN"
+
+bash canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/run_m15_wide_seam_gcs_salvage.sh \
+  "$RECEIPT" "$RETURN" /mnt/disks/tunix-data
+
+(cd "$RETURN" && sha256sum -c SHA256SUMS)
+python3 - "$RETURN/SALVAGE_SUMMARY.json" <<'PY'
+import json
+import sys
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+print(json.dumps({
+    "status": value["status"],
+    "next_action": value["next_action"],
+    "off_classification": value["off"]["classification"],
+    "on_classification": value["on"]["classification"],
+}, sort_keys=True, indent=2))
+PY
+```
+
+The script reads both GCS roots from the committed receipt, downloads only
+known small terminal/classifier objects plus the compact tar, verifies the tar
+entirely in scratch, and deletes scratch on exit. The tar may contain real
+tokens, so it is **not** copied into the return directory. The return contains
+only:
+
+```text
+SALVAGE_SUMMARY.json
+PACKAGING.txt
+SHA256SUMS
+off.classification.json   # only if a valid off classifier exists
+on.classification.json    # only if a valid on classifier exists
+```
+
+Return every file that exists in that directory, the terminal
+`[M15.WIDE.SALVAGE] COMPLETE ...` line, and `git status --short`. Do not return
+the compact tar, raw NPZ files, credentials, environment dumps, or manually
+written conclusions. Do not commit or push unless the user separately
+authorizes that exact evidence-only action.
+
+Interpretation is mechanical:
+
+| `status` | What the execution agent does |
+|---|---|
+| `LAYER_SELECTED` | stop and return the package; the analysis owner decides whether to render `full` at the selected layer |
+| `TAIL_SELECTED` | stop and return the package; no layer guess |
+| `TREATMENT_EXACT` | stop and return the package; this is one exact observation, not a repair |
+| `INCOMPLETE` | stop and return the package; do not launch d18 |
+| `SOURCE_MISMATCH` | stop and return the package; preserve both source identities for review |
+| `CONTROL_RED` / `REVIEW_REQUIRED` | hard stop and return the package |
+
+Attempt 11/d17 does not replace this salvage step. It collected roughly 2,100
+observer records per arm but the legacy incident ledger exceeded 2 GiB before
+a classifier/bundle could be sealed. Adding diagnostic rounds under the
+current carrier would multiply that failure. If Attempt 9 salvage is
+`INCOMPLETE`, the analysis owner will first remove that redundant wide-mode
+ledger dependency and harden manifest-last GCS persistence; only then may a
+fresh one-round pair be considered.
+
+## CONDITIONAL ONLY — run the DP8xTP8 wide layer observer
+
+Do not use this section until the Attempt-9 salvage package has been reviewed
+and the user explicitly approves a new target run. In particular, do not
+raise `CANON_P38_DIAGNOSTIC_ROUNDS` by hand.
 
 The one-host ladder is exhausted: real scheduler publication, 32-request
 composition, `continue_decode=8`, and full M15 chronology all stayed exact on
@@ -465,5 +549,3 @@ Attempt 9 dual-arm execution (`d15-3f159250`, source commit `3f159250917fa9ee606
   - Collected 2,313 seam and tail tensor records across all 36 layers (9,272 capture files total).
   - Terminal: Controlled exit code 42, zero backward, zero optimizer commits.
 - Retained evidence: `evidence/v1_apc_m15_attempt9_paired_d15_20260826/`.
-
-

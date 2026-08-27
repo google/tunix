@@ -516,3 +516,25 @@
 - Incident boundary: In `90_run.sh`, the legacy P38 serving capture mechanism exceeded `CANON_P38_INCIDENT_MAX_BYTES` (2 GiB bound), raising `[CANON_P38_SERVING_CAPTURE_ERROR] stage=begin error=RuntimeError: P38 incident ledger exceeded its registered byte bound` before executing `classify_m15_apc_wide_seam.py` and uploading `p38_seam.classification.json` to GCS.
 - Classification: `INCONCLUSIVE_INCIDENT_LEDGER_SATURATION`. Evidence sealed under `evidence/v1_apc_m15_attempt11_d17_20260827/`.
 - Next: raise or bypass legacy incident byte bound during wide layer observer mode in `90_run.sh` and launch fresh Attempt 12 (`d18`).
+
+## 2026-08-27T07:10:00Z — Attempt-9 GCS salvage made the next gate
+
+- Review corrected the immediate ordering after d17. A fresh target retry is
+  not yet justified: Attempt 9 claims a completed paired wide-layer run, while
+  Git contains only its prose receipt. Its registered GCS roots may already
+  contain the missing machine classifiers and compact bundle.
+- Added `scripts/run_m15_wide_seam_gcs_salvage.sh` and the host-only analyzer
+  `audit_m15_wide_seam_gcs_salvage.py`. The wrapper reads both roots from the
+  committed receipt, downloads only registered small objects plus the compact
+  tar, verifies classifier aliases/root-manifest binding/terminal markers and
+  the tar's internal SHA manifest, then deletes private scratch.
+- The return package deliberately excludes the token-bearing tar and raw NPZs.
+  It contains only classifier JSONs when valid, a mechanical summary,
+  packaging receipt, and `SHA256SUMS`.
+- Host tests cover selected-layer success, missing-classifier `INCOMPLETE`,
+  conflicting classifier aliases, source-identity conflict, and a fake-GCS
+  end-to-end read-only wrapper run. No real GCS access, TPU launch, runtime
+  numerical edit, commit, or push occurred in this implementation step.
+- Next: bucket-capable execution of the checked-in read-only salvage command;
+  return the self-hashed package for analysis. Do not launch d18 or add
+  diagnostic rounds before that review.

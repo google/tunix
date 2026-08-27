@@ -22,7 +22,7 @@ B - C = 0 bytes
 | A | `M15_FIRST_RED_INPUT_CONTRACT` with mismatch distribution, identity hashes, and artifact-completeness matrix | every field is traced to immutable `file:line` or explicitly marked missing | complete |
 | B | fresh captured-red replay carrier and APC-off/APC-on decision table | full 256-row producer, mixed standard/continue A chronology, standard-only full-reset B, exact request joins, GCS durability, zero backward/commit | complete: Attempt 6 off=`CONTROL_GREEN`, on=`FRESH_TARGET_RED_FROZEN` |
 | C | executable replay-prefix input plan followed by a single-variable reproduction ladder | saved bytes and chronology revalidate; control A-B=0; treatment either reproduces red or is `ONEHOST_NOT_REPRODUCED` | complete: r10-r13c one-host ladder exact through full chronology; scale/topology remains |
-| D | observer-neutral coarse-to-fine first-red walk on known-red DP8xTP8 | `FIRST_RED_LOCALIZED` names last exact and first red tensor, shape ledger, request/token/cache coordinate, and `file:line` | active: [wide layer/full observer](phases/phase-d-wide-target-observer.md) implemented; target not run |
+| D | observer-neutral coarse-to-fine first-red walk on known-red DP8xTP8 | `FIRST_RED_LOCALIZED` names last exact and first red tensor, shape ledger, request/token/cache coordinate, and `file:line` | active: Attempt 9 GCS classifier salvage first; d17 inconclusive after 2-GiB legacy incident-ledger saturation |
 | E | minimal localized repair, default off or experiment-bound | reproducer flips red to zero; APC-off and B are unchanged; adjacent and dirty-page negatives fire | pending |
 | F | certification ladder | host -> exact-image -> one-host clean/repeat/dirty -> matched profile -> separately approved DP8xTP8 G-E | pending |
 
@@ -111,3 +111,15 @@ B - C = 0 bytes
   the canonical mismatch (row 201, call 187; its first output interval ends at
   call 188), and the later first fully captured tensor incident (row 245, call
   565). Call 565 is useful for tensor evidence but is not the mismatch onset.
+- Confirmed: Attempt 11/d17 did not produce a first-red classification. Its
+  wide observer accumulated roughly 2,100 records per arm, but the separate
+  legacy incident ledger exceeded 2 GiB before A/B/C evidence and compact
+  output could be sealed. The committed receipt/report do not substitute for
+  classifier JSON or GCS terminal markers.
+- Decision: inspect Attempt 9's registered GCS roots before changing code or
+  launching again. Its receipt claims a completed one-round wide observation;
+  the checked-in salvage script returns any real machine classifier and bundle
+  verification without returning token-bearing payloads.
+- Decision: do not add diagnostic rounds now. The renderer is one-round, the
+  M15 classifier admits diagnostic round zero only, and extra rounds would
+  multiply the storage failure rather than improve localization.

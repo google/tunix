@@ -5,11 +5,33 @@ commands; it does not edit YAML, numerical code, or evidence. Large payloads
 remain in GCS exactly like the earlier P38/lm-head investigation. Only small
 machine-generated receipts are returned through Git or chat.
 
-## Current operation: DP8xTP8 wide first-red walk
+## Current operation: read-only Attempt-9 GCS salvage
+
+Do not launch TPU work. Run the checked-in salvage command from the top of
+`HANDOFF.md`. It derives both registered Attempt-0 roots from the committed
+Attempt-9 receipt, verifies classifier aliases, root-manifest binding,
+terminal markers, and the compact bundle's internal SHA manifest. It never
+uploads or changes a GCS object.
+
+The return directory is intentionally small and token-safe. Return its
+`SALVAGE_SUMMARY.json`, `PACKAGING.txt`, `SHA256SUMS`, and whichever of
+`off.classification.json` / `on.classification.json` exist. The compact tar is
+inspected in private scratch and must not be copied into Git.
+
+An `INCOMPLETE` result is a successful audit of missing evidence, not
+permission to relaunch. Stop and let the analysis owner decide whether the
+wide-mode incident ledger and durability code must change.
+
+## Conditional operation after salvage: DP8xTP8 wide first-red walk
 
 Do not run the older Phase-C preparation again. The one-host r10-r13c ladder
 was exact and did not reproduce the target. The next useful run is the known-
 red 64-chip M15 topology with the layer observer already attached.
+
+This section is frozen until the salvage result is reviewed and the user gives
+a separate target-launch approval. Do not increase diagnostic rounds: the
+current renderer and classifier intentionally admit one round only, and d17
+already proved the 2-GiB legacy incident ledger is the limiting resource.
 
 Preflight after a published source exists:
 
