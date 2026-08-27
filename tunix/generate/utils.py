@@ -1925,7 +1925,7 @@ def get_dtype_packing(dtype):
     return 4 // n_bytes
 
 
-def _calculate_pages_for_capacity(
+def calculate_pages_for_capacity(
     max_bytes: int, 
     logical_sharding: tuple,
     page_size: int,
@@ -1947,7 +1947,6 @@ def _calculate_pages_for_capacity(
     if page_bytes == 0:
         return 0
     
-    print("Page bytes: ", page_bytes)
     num_block_pages = max_bytes // page_bytes
     page_sharding = logical_sharding[0]
     if page_sharding == 'dp_axis':

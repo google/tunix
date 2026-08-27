@@ -9,40 +9,118 @@ import jax.numpy as jnp
 import jax
 import jax.numpy as jnp
 from tunix.generate import scheduler
-from tunix.generate import cache_manager as cache_manager_lib
+from tunix.generate import tiered_page_manager as tiered_page_lib
 from tunix.generate import sampler_v2 as sampler_lib
 from tunix.tests import test_common as tc
+"""Core orchestration engine for continuous batching."""
 
+def create_kv_page_manager(
+    num_tpu_pages: int,
+    num_cpu_pages: int,
+    cache_config,
+    model_config,
+    kv_dtype: jnp.dtype,
+    dp_axis: str | None = None,
+    tp_axis: str | None = None,
+    dp_size: int = 1,
+    tp_size: int = 1,
+) -> tiered_page_lib.TieredPageManager:
+    """
+    Initializes a TieredPageManager for the KV Cache.
+    """
+
+    num_layers = model_config.num_layers
+    num_kv_heads = model_config.num_kv_heads
+    head_dim = model_config.head_dim
+    kv_packing = utils.get_dtype_packing(kv_dtype)
+
+    assert((2 * num_kv_heads) % kv_packing == 0)
+    packed_kv_dim = 2 * num_kv_heads // kv_packing
+    
+    # TODO: Check if a model defines an init cache function.
+    # If so, use it to initalize the cache.
+    # TODO: Utilizing this function should throw a deprecated warning.
+    partition_keys = tuple(f"layer_{i}" for i in range(num_layers))
+    page_subshape = (packed_kv_dim, kv_packing, head_dim)
+    logical_subsharding = ('tp_axis', None, None)
+    logical_page_sharding = 'dp_axis'
+    
+    # TODO: This should be cleaner.
+    logical_tpu_sharding = (logical_page_sharding, None) + logical_subsharding
+    num_tpu_pages = utils.calculate_pages_for_capacity(
+      max_tpu_bytes,
+      logical_tpu_sharding,
+      config.page_size,
+      page_subshape,
+      dp_size,
+      kv_dtype,
+      partition_keys
+    )
+    
+    logical_cpu_sharding = (None,) * len(logical_tpu_sharding)
+    num_cpu_pages = utils.calculate_pages_for_capacity(
+      max_cpu_bytes,
+      logical_cpu_sharding,
+      config.page_size,
+      page_subshape,
+      dp_size,
+      kv_dtype,
+      partition_keys
+    )
+      
+    config = tiered_page_lib.TieredPagePoolConfig(
+        page_size=cache_config.page_size,
+        page_subshape=page_subshape,
+        dtype=kv_dtype,
+        partition_keys=partition_keys,
+        num_tpu_pages=num_tpu_pages,
+        num_cpu_pages=num_cpu_pages,
+        logical_page_sharding=logical_page_sharding,
+        logical_subsharding=logical_subsharding,
+        dp_axis=dp_axis,
+        tp_axis=tp_axis,
+        dp_size=dp_size,
+        tp_size=tp_size,
+    )
+
+    tpu_pool, cpu_pool = config.init()
+    return TieredPageManager(
+        tiered_config=tiered_memory_config,
+        tpu_pool=tpu_pool,
+        cpu_pool=cpu_pool,
+        max_num_seqs=cache_config.max_num_seqs,
+    )
 
 class LLMEngine:
     """Core Continuous Batching Engine orchestration layer."""
     def __init__(
-        self, 
-        transformer: "nnx.Module", 
-        tokenizer: Any, 
-        cache_config: Any,
-        image_processor: Any | None = None,
-        max_seq_len: int = 1000,
+      self, 
+      transformer: "nnx.Module", 
+      tokenizer: Any, 
+      cache_config: Any,
+      image_processor: Any | None = None,
     ):
         self.transformer = transformer
         self.tokenizer = tokenizer
         self.cache_config = cache_config
-        self.max_seq_len = max_seq_len
-        self.max_num_batch_tokens = getattr(cache_config, 'max_num_batch_tokens', 1024)
-        self.max_num_batch_tokens = getattr(cache_config, "max_num_batch_tokens", 1024)
+        self.max_num_batch_tokens = cache_config.max_num_batch_tokens
         
         self.eos_ids = [tokenizer.eos_id() if hasattr(tokenizer, 'eos_id') else tokenizer.GetPieceSize()]
-        self.generated_tokens = {} # request_id -> list of ints
         self.generated_logprobs = {}
         self.generated_logits = {}
         
-        #  
+        # TODO (AGT): Properly wire this (maybe pull it out into a seperate func, and add a sampling config) 
         self.sampler = sampler_lib.VanillaSampler(
             transformer=transformer,
             tokenizer=tokenizer,
             cache_config=cache_config,
             image_processor=image_processor,
-            max_seq_len=max_seq_len,
+            static_token_capacity=self.max_num_batch_tokens, 
+            temperature=temperature,
+            top_p=top_p if top_p is not None else 1.0,
+            top_k=top_k if top_k is not None else -1,
+            return_logprobs=return_logprobs,
+            forbidden_token_ids=list(forbidden_tokens) if forbidden_tokens else None,
         )
         
         # Initialize scheduling and physical memory allocators
@@ -50,7 +128,8 @@ class LLMEngine:
         shd_config = getattr(model_config, 'shd_config', None)
 
         kv_dtype = self.sampler.dtype
-
+        
+        # TODO (AGT): Move kv_cache initalization into a seperate function.
         dp_size = 1
         tp_size = 1
         dp_axis = None
@@ -74,15 +153,7 @@ class LLMEngine:
         except Exception:
           pass
         
-        try:
-          import tunix.generate.utils as utils
-          num_tpu_pages, num_cpu_pages = utils._calculate_pages_for_capacity(
-              cache_config, model_config, kv_dtype, tp_size
-          )
-        except Exception:
-          num_tpu_pages, num_cpu_pages = 100, 100
-
-        self.cache_manager = cache_manager_lib.init_cache_manager(
+        self.kv_cache_manager = create_kv_cache_manager(
             cache_config=cache_config,
             model_config=model_config,
             kv_dtype=kv_dtype,
@@ -95,7 +166,7 @@ class LLMEngine:
         )
         
         self.scheduler = scheduler.Scheduler(
-            cache_manager=self.cache_manager,
+            kv_cache_manager=self.cache_manager,
             max_num_batch_tokens=self.max_num_batch_tokens,
         )
         
@@ -112,7 +183,6 @@ class LLMEngine:
     def has_unfinished_requests(self) -> bool:
         return len(self.scheduler.pending_requests) > 0 or len(self.scheduler.running_requests) > 0
         
-
     def step(
         self,
         temperature: float = 0.0,
@@ -120,129 +190,93 @@ class LLMEngine:
         top_k: int | None = None,
         return_logits: bool = False,
         return_logprobs: bool = False,
-        eos_tokens: tuple[int, ...] | None = None,
-        forbidden_tokens: tuple[int, ...] | None = None,
     ):
         """One physical iteration of the continuous batch engine."""
         
-        ordered_reqs, distribution_list = self.scheduler.schedule_step([])
-        ordered_reqs = list(ordered_reqs)
+        ordered_reqs, distribution_list = self.scheduler.schedule_step()
         if not ordered_reqs:
             return
             
+        j = distribution_list[1] # num_decode + num full prefill.
+        k = distribution_list[2] # j + num partial (chunked) prefill.
+        
+        # --- Form ragged inputs for the attention kernel --- 
+        max_n_batch_tokens = self.max_num_batch_tokens # TODO (AGT): Move to and get from sampling config
+        max_n_seqs = self.cache_config.max_num_seqs
+        max_seq_len = self.max_seq_len # TODO (AGT): Move to and get from sampling config
+        max_n_pages_per_seq = utils.cdiv(max_seq_len, self.cache_config.page_size)
+
+        tokens = np.zeros(max_n_batch_tokens, dtype=np.int32) 
+        query_lens = np.zeros(max_n_seqs, dtype=np.int32) 
+        kv_lens = np.zeros(max_n_seqs, dtype=np.int32) 
+        page_indices = np.zeros((max_n_seqs, max_n_pages_per_seq), dtype=np.int32) # (max_n_seqs, max_n_pages)
         distribution = np.array(distribution_list, dtype=np.int32)
-        j = distribution_list[1]
-        k = distribution_list[2]
-        
-        # Build 1D arrays
-        # Build 1D arrays
-        tokens = []
-        active_seq_lens = []
-        seq_lens = []
-        page_indices = []
-        
-        max_pages = max([len(r.page_ids) for r in ordered_reqs] + [1])
-        
-        for r in ordered_reqs:
-            completed = getattr(r, 'num_completed_tokens', 0)
-            in_flight = getattr(r, 'num_in_flight_tokens', 0)
-            
-            # Sub-slice the token_ids block. If it's decoding, we append the generated token.
-            if completed >= len(r.token_ids):
-                # Decoding: append last generated token
-                last_tok = self.generated_tokens[r.request_id][-1] if self.generated_tokens[r.request_id] else r.token_ids[-1]
-                toks = [last_tok]
-            else:
-                # Prefill: append in-flight prompt block
-                toks = r.token_ids[completed : completed + in_flight]
+
+        total_n_batch_tokens = 0
+        for i,req in enumerate(ordered_reqs):
+          n_completed = req.num_completed_tokens
+          n_in_flight = req.num_in_flight_tokens
+          
+          in_flight = req.token_ids[n_completed : n_completed + n_in_flight]
+          start_idx = total_n_batch_tokens 
+          end_idx = total_n_batch_tokens + n_in_flight
+          tokens[start_idx: end_idx] = in_flight
+
+          kv_lens[i] = n_completed
+          query_lens[i] = n_in_flight
+                          
+          phys_idxs = [self.kv_cache_manager.get_page_idx(pid) for pid in req.page_ids]
+          page_indices[i, :len(phys_idxs)] = phys_idxs
+
+          total_n_batch_tokens += n_in_flight 
                 
-            tokens.extend(toks)
-            active_seq_lens.append(len(toks))
-            seq_lens.append(completed + len(toks))
-            
-            # Map logical page IDs to physical hardware indices
-            phys_idxs = [self.cache_manager._page_id_to_idx[pid] for pid in r.page_ids]
-            # Pad indices for batch uniformity
-            phys_idxs.extend([0] * (max_pages - len(phys_idxs)))
-            page_indices.append(phys_idxs)
-            
-        max_batch_tokens = getattr(self, 'max_num_batch_tokens', 1024)
-        max_seqs = getattr(self.cache_config, 'max_num_seqs', 256)
-        max_pages = max([len(p) for p in page_indices] + [1])
-        
-        seq_lens = seq_lens + [0] * (max_seqs - len(seq_lens))
-        active_seq_lens = active_seq_lens + [0] * (max_seqs - len(active_seq_lens))
-        
-        pad_amount = max_batch_tokens - len(tokens)
-        if pad_amount > 0:
-            tokens.extend([0] * pad_amount)
-            
-        for _ in range(max_seqs - len(page_indices)):
-            page_indices.append([0] * max_pages)
-            
-        for p in page_indices:
-            p.extend([0] * (max_pages - len(p)))
-            
         metadata = sampler_lib.RPAMetadata(
-            page_indices=jnp.array(page_indices, dtype=jnp.int32),
-            seq_lens=jnp.array(seq_lens, dtype=jnp.int32),
-            active_seq_lens=jnp.array(active_seq_lens, dtype=jnp.int32),
-            distribution=jnp.array(distribution, dtype=jnp.int32),
+            page_indices=jnp.array(page_indices),
+            query_lens=jnp.array(query_lens),
+            kv_lens=jnp.array(kv_lens),
+            distribution=jnp.array(distribution),
         )
-        tokens = jnp.array(tokens, dtype=jnp.int32)
-        total_tokens = max_batch_tokens
+        tokens = jnp.array(tokens)
         
+        # --- Sample input tokens --- 
         gen_tokens, logits, logp, next_cache = self.sampler.sample_step(
-            cache=self.cache_manager.tpu_block.partition_pages,
+            cache=self.kv_cache_manager.tpu_pool.partition_pages,
             tokens=tokens,
             metadata=metadata,
-            static_token_capacity=total_tokens, 
-            temperature=temperature,
-            top_p=top_p if top_p is not None else 1.0,
-            top_k=top_k if top_k is not None else -1,
-            return_logprobs=return_logprobs,
-            forbidden_token_ids=list(forbidden_tokens) if forbidden_tokens else None,
+            
+            
         )
         
-        self.cache_manager.tpu_block.partition_pages = next_cache
+        # Since JAX expects no-side effects, we must update pages outside of the sampler
+        self.kv_manager.update_tpu_pool(next_cache)
         
-        # We only sampled for indices < j (decodes and prefills_completing)
+        # TODO: handle echo 
+        # --- Update requests with generated tokens ---
+        # Update decode and full prefill requests 
         for idx in range(j):
-            r = ordered_reqs[idx]
-            tok = int(gen_tokens[idx])
-            self.generated_tokens[r.request_id].append(tok)
-            if logp is not None:
-                try:
-                    self.generated_logprobs[r.request_id].append(float(logp[idx]))
-                except Exception as e:
-                    print(f"Logprobs Exception: {e}")
-            if logits is not None:
-                try:
-                    self.generated_logits[r.request_id].append(list(logits[idx]))
-                except Exception:
-                    pass
-            r.token_ids.append(tok)
-            
-            if not hasattr(r, 'num_completed_tokens'):
-                r.num_completed_tokens = 0
-            if not hasattr(r, 'num_in_flight_tokens'):
-                r.num_in_flight_tokens = 0
+          r = ordered_reqs[idx]
+          new_token = r.token_ids[-1]
+                      
+          r.num_completed_tokens += r.num_in_flight_tokens
+          r.num_in_flight_tokens = 0
+          
+          terminated = new_token in self.eos_ids or (eos_tokens and new_token in eos_tokens)
+          truncated = (len(self.generated_tokens[r.request_id]) >= r.max_tokens_to_generate
+          if terminated or truncated:
+              for pid in reversed(r.page_ids):
+                  self.scheduler._release_page(pid)
+              self.scheduler.running_requests.remove(r)
+
+          self.generated_tokens[r.request_id].append(tok)
+          if logp is not None:
+              self.generated_logprobs[r.request_id].append(float(logp[idx]))
+          if logits is not None:
+              self.generated_logits[r.request_id].append(list(logits[idx]))
+          r.token_ids.append(tok)
+
                 
-            r.num_completed_tokens += r.num_in_flight_tokens
-            # A decode token counts as 1 completed token on the next tick
-            # But wait, num_completed_tokens tracks prompt tokens... wait!
-            # The scheduler `n_new_pages` uses `r.num_completed_tokens`. It must track total context tokens!
-            if completed >= len(r.token_ids):
-                r.num_completed_tokens += 1
-            
-            if tok in self.eos_ids or (eos_tokens and tok in eos_tokens) or (len(r.token_ids) + len(self.generated_tokens[r.request_id])) >= self.max_seq_len:
-                for pid in reversed(r.page_ids):
-                    self.scheduler._release_page(pid)
-                self.scheduler.running_requests.remove(r)
-                
-        # for chunked prefills, update their completed tokens
+        # Update chunked prefill requests
         for idx in range(j, k):
             r = ordered_reqs[idx]
-            if not hasattr(r, 'num_completed_tokens'):
-                 r.num_completed_tokens = 0
-            r.num_completed_tokens += getattr(r, 'num_in_flight_tokens', 0)
+            r.num_completed_tokens += r.num_in_flight_tokens
+            r.num_in_flight_tokens = 0
