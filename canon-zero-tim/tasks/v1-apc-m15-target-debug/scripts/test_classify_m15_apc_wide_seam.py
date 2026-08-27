@@ -14,6 +14,10 @@ import unittest
 
 import numpy as np
 
+from assemble_m15_wide_round import assemble
+from stage_m15_wide_shard import _sha256, stage
+from verify_m15_wide_round import verify
+
 
 MODULE_PATH = Path(__file__).with_name("classify_m15_apc_wide_seam.py")
 SPEC = importlib.util.spec_from_file_location("classify_m15_apc_wide_seam", MODULE_PATH)
@@ -80,6 +84,7 @@ class Fixture:
 
   def _write_report(self, *, ab_bytes: int, bc_bytes: int):
     row = {
+        "diagnostic_round": 0,
         "N_action": 2,
         "boundaries": {
             "S_decode_vs_S_prefill": {
@@ -200,6 +205,7 @@ class Fixture:
       request_id = f"request-{arm.lower()}"
       rows.append({
           "schema": "m15-apc-serving-envelope-v1",
+          "diagnostic_round": 0,
           "arm": "on",
           "serving_arm": arm,
           "call_index": 10 + index,
@@ -318,6 +324,100 @@ class M15WideSeamClassifierTest(unittest.TestCase):
             hashlib.sha256(archive.extractfile(name).read()).hexdigest(),
             expected,
         )
+
+  def test_classifier_and_bundle_run_only_from_completed_shard_union(self):
+    fixture = self._fixture()
+    commit = "9" * 40
+    shards = fixture.root / "shards"
+    shard = shards / "000000"
+    inventory = stage(
+        directory=fixture.capture,
+        shard_root=shards,
+        output=shard,
+        round_index=0,
+        sequence=0,
+        max_records=32,
+        max_bytes=256 * 1024 * 1024,
+        expected_commit=commit,
+        runtime_commit=commit,
+    )
+    completion = {
+        "schema": "m15-wide-observer-shard-completion-v1",
+        "status": "sealed-uploaded-verified",
+        "claim_ceiling": (
+            "INCONCLUSIVE_PARTIAL_LIVE_EVIDENCE_UNTIL_WIDE_ROUND_COMPLETE"
+        ),
+        "sequence": 0,
+        "diagnostic_round": 0,
+        "record_pairs": inventory["record_pairs"],
+        "manifest_sha256": _sha256(shard / "SHA256SUMS"),
+        "expected_source_commit": commit,
+        "runtime_source_commit": commit,
+    }
+    (shard / "SHARD_COMPLETE.json").write_text(
+        json.dumps(completion, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    round_dir = fixture.root / "round"
+    receipt = assemble(
+        live_directory=fixture.capture,
+        shard_root=shards,
+        output=round_dir,
+        round_index=0,
+        pre_alignment=fixture.report,
+        capsule=fixture.capsule,
+        replay_ledger=fixture.ledger,
+        observer_mode="layer",
+        expected_commit=commit,
+        runtime_commit=commit,
+    )
+    result = MODULE.classify(
+        directory=round_dir,
+        alignment_report=round_dir / "pre-alignment.jsonl",
+        capsules=[round_dir / "mismatch-capsule.npz"],
+        mode="layer",
+        arm="on",
+        replay_ledger=round_dir / "m15-replay-envelope.jsonl",
+        require_first_action=True,
+    )
+    classification = round_dir / "p38_seam.classification.json"
+    classification.write_text(json.dumps(result), encoding="utf-8")
+    bundle = round_dir / "m15_wide_seam_bundle.tar"
+    PACKAGER.package(
+        directory=round_dir,
+        classification_path=classification,
+        alignment_report=round_dir / "pre-alignment.jsonl",
+        capsules=[round_dir / "mismatch-capsule.npz"],
+        replay_ledger=round_dir / "m15-replay-envelope.jsonl",
+        output=bundle,
+    )
+    members = [
+        "ROUND_INPUT_RECEIPT.json",
+        "p38_seam.classification.json",
+        "m15_wide_seam_bundle.tar",
+    ]
+    manifest = round_dir / "WIDE_SHA256SUMS"
+    manifest.write_text("".join(
+        f"{_sha256(round_dir / name)}  {name}\n" for name in members
+    ), encoding="ascii")
+    (round_dir / "WIDE_ROUND_COMPLETE.json").write_text(json.dumps({
+        "schema": "m15-wide-round-completion-v1",
+        "status": "classified-and-uploaded",
+        "classification": result["classification"],
+        "record_pairs": receipt["record_pairs"],
+        "shards": receipt["shards"],
+        "manifest_sha256": _sha256(manifest),
+        "expected_source_commit": commit,
+        "runtime_source_commit": commit,
+    }, sort_keys=True) + "\n", encoding="utf-8")
+    verified = verify(
+        round_directory=round_dir,
+        classification=classification,
+        bundle=bundle,
+        expected_commit=commit,
+        runtime_commit=commit,
+    )
+    self.assertEqual(verified["classification"], "M15_LAYER_FIRST_RED_LOCALIZED")
+    self.assertEqual(verified["record_pairs"], 4)
 
 
 if __name__ == "__main__":

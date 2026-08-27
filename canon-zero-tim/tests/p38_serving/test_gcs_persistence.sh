@@ -46,7 +46,7 @@ make_case() {
   export CANON_P38_SERVING_CAPTURE_ARCHIVE="$root/state/capture.tar"
   export CANON_P38_GCS_PREFIX="gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/$job/attempt-0"
   export CANON_P38_DURABILITY_PROFILE=full-v1
-  export CANON_EXPECT_COMMIT="$(printf 'a%.0s' {1..40})"
+  export CANON_EXPECT_COMMIT="$(git -C "$ROOT/.." rev-parse HEAD)"
   export CANON_POD_NAME="$job-head"
   export JOBSET_RESTART_ATTEMPT=0
 }
@@ -405,6 +405,89 @@ test -s "$alignment_remote/COMPLETE.json"
 test ! -e "$alignment_remote/mismatch-capsule.npz"
 (cd "$alignment_remote" && sha256sum -c SHA256SUMS --quiet)
 
+# The M15 wide observer never waits for a terminal multi-GiB tar.  Completed
+# JSON/NPZ pairs are copied into bounded shards and each shard publishes its
+# completion marker only after a remote download-and-verify round trip.
+install_fake_gcloud "$tmp/m15-wide"
+make_case "$tmp/m15-wide" canon-p38-test-m15-wide
+export CANON_P38_DURABILITY_PROFILE=m15-wide-v1
+export CANON_P38_SEAM_OBSERVER_DIR="$tmp/m15-wide/state/capture"
+export CANON_P38_SEAM_OBSERVER=full
+bash "$PERSIST" probe > "$tmp/m15-wide/probe.log"
+grep -q 'RUNTIME_SOURCE_PASS' "$tmp/m15-wide/probe.log"
+for index in $(seq 0 39); do
+  python3 - "$CANON_P38_SEAM_OBSERVER_DIR" "$index" <<'PY'
+import hashlib
+import json
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1])
+index = int(sys.argv[2])
+npz = root / f"p38_seam_{index:06d}.npz"
+npz.write_bytes((f"seam-{index}\n" * 32).encode())
+(root / f"p38_seam_{index:06d}.json").write_text(json.dumps({
+    "diagnostic_round": 0,
+    "npz_sha256": hashlib.sha256(npz.read_bytes()).hexdigest(),
+    "record_index": index,
+    "schema": "p38-seam-fingerprint-v1",
+}, sort_keys=True) + "\n", encoding="utf-8")
+PY
+done
+bash "$PERSIST" m15-shard 000000 > "$tmp/m15-wide/shard-0.log"
+bash "$PERSIST" m15-shard 000001 > "$tmp/m15-wide/shard-1.log"
+m15_empty_rc=0
+bash "$PERSIST" m15-shard 000002 \
+  > "$tmp/m15-wide/shard-empty.log" 2>&1 || m15_empty_rc=$?
+test "$m15_empty_rc" -eq 3
+m15_wide_remote="$FAKE_GCS_ROOT/yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-p38-test-m15-wide/attempt-0"
+for sequence in 000000 000001; do
+  shard_remote="$m15_wide_remote/wide/shards/$sequence"
+  test "$(find "$shard_remote" -maxdepth 1 -type f | wc -l)" -eq 3
+  for name in SHARD_ARCHIVE.tar SHA256SUMS SHARD_COMPLETE.json; do
+    test -s "$shard_remote/$name"
+  done
+  python3 "$ARCHIVE_TOOL" extract \
+    --archive "$shard_remote/SHARD_ARCHIVE.tar" \
+    --output "$tmp/m15-wide/extracted-$sequence" \
+    > "$tmp/m15-wide/extract-$sequence.log"
+  (cd "$tmp/m15-wide/extracted-$sequence" && \
+    sha256sum -c SHA256SUMS --quiet)
+done
+# This is the forced-death state: useful observer shards are already durable,
+# while terminal publication correctly has not happened.
+test ! -e "$m15_wide_remote/COLLECTED.json"
+test ! -e "$m15_wide_remote/COMPLETE.json"
+python3 - "$m15_wide_remote" <<'PY'
+import json
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1]) / "wide" / "shards"
+receipts = [
+    json.loads((root / sequence / "SHARD_COMPLETE.json").read_text())
+    for sequence in ("000000", "000001")
+]
+assert [row["record_pairs"] for row in receipts] == [32, 8], receipts
+assert all(row["status"] == "sealed-uploaded-verified" for row in receipts)
+assert all(row["claim_ceiling"] ==
+           "INCONCLUSIVE_PARTIAL_LIVE_EVIDENCE_UNTIL_WIDE_ROUND_COMPLETE"
+           for row in receipts)
+assert all(row["expected_source_commit"] == row["runtime_source_commit"]
+           for row in receipts)
+PY
+
+install_fake_gcloud "$tmp/m15-source-mismatch"
+make_case "$tmp/m15-source-mismatch" canon-p38-test-m15-source-mismatch
+export CANON_P38_DURABILITY_PROFILE=m15-wide-v1
+export CANON_EXPECT_COMMIT="$(printf 'a%.0s' {1..40})"
+if bash "$PERSIST" probe > "$tmp/m15-source-mismatch/run.log" 2>&1; then
+  echo "[P38.GCS] mismatched M15 runtime source was accepted" >&2
+  exit 1
+fi
+grep -q 'runtime source mismatch' "$tmp/m15-source-mismatch/run.log"
+test ! -e "$FAKE_GCS_ROOT/yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-p38-test-m15-source-mismatch"
+
 install_fake_gcloud "$tmp/out-of-order"
 make_case "$tmp/out-of-order" canon-p38-test-out-of-order
 bash "$PERSIST" probe > "$tmp/out-of-order/probe.log"
@@ -432,4 +515,4 @@ grep -q 'completion requested before collection acknowledgement' \
 test ! -e "$CANON_P38_LIVE_COMPLETE_ACK_FILE"
 test ! -e "$FAKE_GCS_ROOT/yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-p38-test-out-of-order/attempt-0/COMPLETE.json"
 
-echo "[P38.GCS] PERSISTENCE_TEST_PASS probe=verified prefix_reuse=rejected live=immutable bounded_objects=3 round_request=priority alignment_round=periodic_snapshot_disabled minimal_payload=verified worker=durable round_bundles=survive_abrupt_exit collected=verified complete=last out_of_order=rejected missing=rejected upload_failure=rejected"
+echo "[P38.GCS] PERSISTENCE_TEST_PASS probe=verified prefix_reuse=rejected live=immutable bounded_objects=3 round_request=priority alignment_round=periodic_snapshot_disabled minimal_payload=verified worker=durable round_bundles=survive_abrupt_exit m15_shards=bounded-survive-abrupt-exit source_mismatch=rejected collected=verified complete=last out_of_order=rejected missing=rejected upload_failure=rejected"

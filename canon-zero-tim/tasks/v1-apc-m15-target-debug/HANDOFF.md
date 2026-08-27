@@ -1,6 +1,70 @@
 # M15 APC target-debug handoff
 
-## START HERE — complete the Attempt-9 read-only GCS inventory
+## START HERE — Phase D2 is exact-image admitted; do not launch target yet
+
+The active worktree is implementing an evidence-transport repair, not an APC
+numerical fix. The intended runtime contract is:
+
+```text
+observer JSON+NPZ complete
+  -> bounded shard (<=32 pairs, <=256 MiB)
+  -> upload archive+SHA
+  -> remote read-back verify
+  -> SHARD_COMPLETE
+  -> classifier reads sealed shard union only
+  -> WIDE_ROUND_COMPLETE
+  -> COLLECTED
+  -> postflight COMPLETE
+```
+
+`m15-wide-v1` also bypasses the redundant legacy incident ledger. The replay
+envelope, request journal, seam/tail pairs, pre-alignment record and capsule
+remain authoritative. No RoPE, attention, KV, LM-head, loss, backward,
+optimizer, B-arm reset, or production APC behavior changes.
+
+The Phase D2 source has passed host and pinned exact-image gates. The following
+host gates must be rerun after any further edit:
+
+```bash
+cd /mnt/disks/tunix-data/worktrees/m15_wide_observer_0826
+
+python3 -m unittest discover \
+  -s canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts \
+  -p 'test_*.py'
+bash canon-zero-tim/tests/p38_serving/test_gcs_persistence.sh
+python3 canon-zero-tim/.claude/skills/manage-canon-flags/scripts/audit_flag_registry.py \
+  --repo . --changed-base origin/yuxzhang/canon-zero-tim
+python3 canon-zero-tim/tests/manage_canon_flags/test_audit_flag_registry.py
+bash -n canon-zero-tim/cluster/steps/00_env.sh \
+  canon-zero-tim/cluster/steps/90_run.sh \
+  canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/persist_p38_gcs.sh \
+  canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/p38_live_snapshot_worker.sh
+git diff --check
+```
+
+The fake-GCS persistence test is the required forced-death gate. It must report
+`m15_shards=bounded-survive-abrupt-exit`, and both `COLLECTED.json` and
+`COMPLETE.json` must be absent in that simulated interrupted run. The source
+mismatch negative must report `source_mismatch=rejected`.
+
+Pinned image `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`
+terminated with `V1_HP_EXACT_IMAGE_PASS ... apc_m15_carrier=66
+m15_durability=1 ...`. The image gate uses a read-only Git common-directory
+mount so the existing live `git rev-parse HEAD` source check runs inside the
+container; no receipt-only provenance shortcut was admitted. Commit/push is
+authorized for this payload. A DP8xTP8 off/on launch remains a separate later
+approval boundary.
+
+Claim ceiling now:
+
+```text
+DURABILITY_IMPLEMENTED_HOST_PASS /
+EXACT_IMAGE_PASS / TARGET_NOT_RUN / ROOT_CAUSE_NOT_LOCALIZED
+```
+
+See [Phase D2](phases/phase-d2-durable-wide-shards.md).
+
+## Historical — Attempt-9 read-only GCS inventory (complete)
 
 The first salvage pass is complete and self-verifies 2/2 files under
 `evidence/v1_apc_m15_attempt9_gcs_salvage_20260827/`. It established two
@@ -17,8 +81,9 @@ separate defects:
 Therefore the receipt's claimed `0/1329` byte verdict and 2,313 tensor records
 are not signed or reproducible evidence. Do not infer a layer from them. The
 salvage wrapper checked seven exact object names; it did **not** enumerate
-other objects that might survive under those roots. The next action is one
-complete, read-only name inventory before declaring Attempt 9 irrecoverable.
+other objects that might survive under those roots. The later full inventory
+did enumerate them and found only `PREFLIGHT.json` in each arm, so Attempt 9
+is irrecoverable. The command below is retained only as historical provenance.
 
 From a bucket-capable checkout of the latest published operator branch, run
 exactly. This command downloads no object payload and mutates no GCS state:
@@ -145,7 +210,7 @@ inconclusive: it collected roughly 2,100 observer records per arm in the pod,
 but the legacy incident ledger exceeded 2 GiB before classifier/bundle
 persistence. No current result selects a layer or authorizes a numerical fix.
 
-## BLOCKED — do not rerun the DP8xTP8 observer yet
+## Historical decision — do not rerun before Phase D2 certification
 
 Before any new target run, implement and certify all four durability changes:
 
@@ -246,11 +311,10 @@ Return exactly:
    `first_red_boundary`, `coverage`, and `source_interval` from the JSON;
 6. any nonzero return code plus complete stderr/raw-log tail.
 
-The compact bundle contains real token/capsule material and is generated in
-the pod, but this change does not automatically upload that new payload. Do
-not add it to GCS until the user explicitly authorizes that payload. Existing
-P38 root artifacts and seam classification follow the existing durability
-path unchanged.
+The compact bundle contains real token/capsule material. Under the dedicated
+`m15-wide-v1` contract it is uploaded only to the task's already authorized
+P38 evidence prefix, after classification from sealed shards. Do not copy it
+to any other location or return it through chat/Git.
 
 Current claim ceiling is `WIDE OBSERVER READY / TARGET NOT RUN / ROOT CAUSE
 NOT LOCALIZED`. See [Phase D](phases/phase-d-wide-target-observer.md).
@@ -292,7 +356,7 @@ M15_REPLAY_INPUT_PLAN_READY_NOT_EXECUTED
 
 Next phase: **Phase D (Deterministic replay and tensor-level tap)**.
 
-## NEXT ACTION — Phase D: Deterministic Replay Harness Execution
+## Historical Phase-D replay proposal — superseded by the target observer
 
 The replay plan is prepared (`replay-prefix-plan.jsonl`, 188 calls, 3.94 MB).
 The next action is to execute the deterministic replay harness using the saved 188 prefix calls to:

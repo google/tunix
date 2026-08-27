@@ -128,7 +128,9 @@ def _capture_values(
       "CANON_P38_INCIDENT_MAX_PREFIX": str(_INCIDENT_MAX_PREFIX),
       "CANON_P38_INCIDENT_MAX_BYTES": str(_INCIDENT_MAX_BYTES),
       "CANON_P38_LIVE_SNAPSHOT_INTERVAL_SECONDS": "30",
-      "CANON_P38_DURABILITY_PROFILE": "round-alignment-v1",
+      "CANON_P38_DURABILITY_PROFILE": (
+          "m15-wide-v1" if observer != "none" else "round-alignment-v1"
+      ),
       "CANON_P38_LIVE_SNAPSHOT_STOP_FILE": f"{state}/p38_live.stop",
       "CANON_P38_LIVE_SNAPSHOT_WORKER_LOG": f"{state}/p38_live_worker.log",
       "CANON_P38_LIVE_COLLECT_REQUEST_FILE": f"{state}/p38_collect.request",
@@ -274,7 +276,9 @@ def render_all(
         "canon.zero-tim/terminal-discriminator": "0",
         "canon.zero-tim/lm-head-algo": "0",
         "canon.zero-tim/fixed-lm-head": "1",
-        "canon.zero-tim/durability-profile": "round-alignment-v1",
+        "canon.zero-tim/durability-profile": (
+            "m15-wide-v1" if observer != "none" else "round-alignment-v1"
+        ),
     })
     validate(
         document,

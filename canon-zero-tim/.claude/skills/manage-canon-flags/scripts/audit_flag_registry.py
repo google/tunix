@@ -44,6 +44,15 @@ def _inventory(flags_path: Path) -> tuple[list[str], int]:
   return names, int(match.group(1))
 
 
+def _marker_inventory(flags_path: Path) -> set[str]:
+  text = flags_path.read_text()
+  try:
+    section = text.split("## MARKERS", 1)[1].split("\n## ", 1)[0]
+  except IndexError as exc:
+    raise ValueError("FLAGS.md MARKERS section is missing") from exc
+  return set(FLAG_RE.findall(section))
+
+
 def _added_flags(repo: Path, base: str) -> set[str]:
   completed = subprocess.run(
       ["git", "diff", "--unified=0", base, "--", *CHANGED_FLAG_PATHS],
@@ -87,6 +96,7 @@ def main() -> int:
 
   try:
     names, declared = _inventory(flags_path)
+    markers = _marker_inventory(flags_path)
   except ValueError as exc:
     print(f"FLAG_AUDIT_FAIL reason={exc}", file=sys.stderr)
     return 2
@@ -107,7 +117,7 @@ def main() -> int:
       print(exc.stderr, file=sys.stderr, end="")
       print("FLAG_AUDIT_FAIL reason=git-diff", file=sys.stderr)
       return 2
-    unregistered = sorted(changed - set(names))
+    unregistered = sorted(changed - set(names) - markers)
     if unregistered:
       failures.append("unregistered=" + ",".join(unregistered))
 
@@ -120,6 +130,7 @@ def main() -> int:
       "FLAG_AUDIT "
       f"declared={declared} actual={len(names)} unique={len(set(names))} "
       f"ordering_inversions={inversions} changed_names={len(changed)} "
+      f"registered_markers={len(markers)} "
       f"prefixes={prefix_summary}"
   )
   if failures:

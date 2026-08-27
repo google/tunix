@@ -5,7 +5,21 @@ commands; it does not edit YAML, numerical code, or evidence. Large payloads
 remain in GCS exactly like the earlier P38/lm-head investigation. Only small
 machine-generated receipts are returned through Git or chat.
 
-## Current operation: read-only Attempt-9 full object inventory
+## Current operation: publish Phase D2; target launch remains approval-gated
+
+Do not launch a JobSet. The checked-in bounded-shard host gates in the first
+section of `HANDOFF.md` and the pinned exact-image aggregate gate pass. The forced-death
+fake-GCS case is not optional: a completed shard must remain independently
+extractable and SHA-valid while root `COLLECTED.json` and `COMPLETE.json` are
+absent. Also require the runtime-source mismatch negative, published-output
+drift negative, missing-pair negative and tampered-shard negative.
+
+The exact-image terminal marker is `V1_HP_EXACT_IMAGE_PASS ...
+apc_m15_carrier=66 m15_durability=1 ...`. Publish the reviewed source only.
+Do not access real GCS or launch TPU/Kubernetes until the user separately
+approves the DP8xTP8 pair.
+
+## Historical operation: read-only Attempt-9 full object inventory (complete)
 
 Do not launch TPU work and do not rerun the earlier exact-name salvage. That
 audit is complete: its 2/2 returned files verify, both arms expose only
@@ -24,14 +38,14 @@ roots contain only `PREFLIGHT.json`, Attempt 9 is irrecoverable from its
 registered GCS roots. Neither outcome permits a target relaunch or numerical
 repair.
 
-## Conditional operation after salvage: DP8xTP8 wide first-red walk
+## Conditional operation after Phase D2 publication: DP8xTP8 first-red walk
 
 Do not run the older Phase-C preparation again. The one-host r10-r13c ladder
 was exact and did not reproduce the target. The next useful run is the known-
 red 64-chip M15 topology with the layer observer already attached.
 
-This section is frozen until the salvage result is reviewed and the user gives
-a separate target-launch approval. Do not increase diagnostic rounds: the
+This section is frozen until Phase D2 passes exact-image, is published, and the
+user gives a separate target-launch approval. Do not increase diagnostic rounds: the
 current renderer and classifier intentionally admit one round only, and d17
 already proved the 2-GiB legacy incident ledger is the limiting resource.
 
@@ -60,15 +74,21 @@ The two expected files are `jobset-v1-apc-m15-off-layer.yaml` and
 apply`; they may be submitted concurrently when the user approves the pair.
 Never hand-edit a rendered environment.
 
-Postflight is automatic. `90_run.sh` runs
-`classify_m15_apc_wide_seam.py`, then
-`package_m15_apc_wide_seam.py`. Acceptance requires:
+Postflight is automatic. The live worker first seals bounded observer shards,
+then runs `classify_m15_apc_wide_seam.py` and
+`package_m15_apc_wide_seam.py` from their sealed union. `90_run.sh` only
+verifies that sealed output and asks the live worker for terminal publication.
+Acceptance requires:
 
 - off: A-B=0, B-C=0, observer A/B records present;
 - on: B-C=0 and either exact treatment or a joined first-red classification;
 - a red on arm has at least one completion-position-zero standard-path join;
 - all raw selected NPZ files match their JSON SHA;
-- the compact tar's internal `SHA256SUMS` verifies;
+- each shard, the wide-round receipt, root manifest, and compact tar internal
+  `SHA256SUMS` verify;
+- runtime checkout SHA equals the full rendered source SHA;
+- the legacy incident ledger is absent and exactly one signed bypass marker is
+  present;
 - zero backward and zero optimizer commits.
 
 Read `p38_seam.classification.json`, not a prose summary. If it reports
@@ -90,11 +110,10 @@ Do not launch full mode before layer mode chooses `L`. A full-mode PASS must
 say `FIRST_RED_LOCALIZED` and return a last exact/first red checkpoint plus
 source `file:line`. Only then may a repair phase begin.
 
-The local compact bundle contains true token/capsule data. This source does
-not add it to the existing automatic GCS upload set. Preserve the pod path and
-SHA marker, and request explicit authorization before uploading that new
-payload. The existing large observer archive and classification keep their
-registered durability behavior.
+The compact bundle contains true token/capsule data. `m15-wide-v1` stores it
+under the registered Attempt-0 evidence root but never creates or uploads the
+old whole-capture tar. Return only its path/size/SHA and classifier fields;
+never place token data in Git or chat.
 
 ### Current decision table
 

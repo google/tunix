@@ -456,8 +456,22 @@ if [ "$rc" -ne 0 ] && [ -s "${CANON_P38_MISMATCH_CAPSULE:-}" ]; then
   fi
 fi
 if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
+  p38_m15_wide=0
+  if [ "${CANON_P38_DURABILITY_PROFILE:-}" = "m15-wide-v1" ]; then
+    p38_m15_wide=1
+  fi
+  if [ "$p38_m15_wide" -eq 1 ]; then
+    p38_capture_rc=0
+    m15_apc_rc=0
+    m15_replay_bundle_rc=0
+    m15_full_replay_rc=0
+    m15_apc_classification=""
+    m15_replay_bundle_dir=""
+    m15_full_replay_dir=""
+  else
   p38_join_args=()
-  if [ -n "${CANON_APC_M15_TARGET_DEBUG:-}" ] && \
+  if [ "$p38_m15_wide" -eq 0 ] && \
+     [ -n "${CANON_APC_M15_TARGET_DEBUG:-}" ] && \
      [ -s "${CANON_P38_MISMATCH_CAPSULE:-}" ]; then
     p38_join_args+=(--require-mismatch-join)
   elif [ -z "${CANON_APC_M15_TARGET_DEBUG:-}" ] && \
@@ -541,6 +555,7 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
       fi
     fi
   fi
+  fi
   p38_kv_observer_rc=0
   if [ -n "${CANON_P38_KV_OBSERVER_DIR:-}" ]; then
     shopt -s nullglob
@@ -581,6 +596,33 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
   p38_seam_rc=0
   p38_seam_bundle_rc=0
   if [ -n "${CANON_P38_SEAM_OBSERVER:-}" ]; then
+    if [ "$p38_m15_wide" -eq 1 ]; then
+      p38_m15_round_dir="$CANON_STATE/p38_m15_wide_rounds/000000"
+      p38_runtime_source_commit="$(git -C "$CANON_PKG/.." rev-parse HEAD)" || \
+        p38_seam_rc=$?
+      if [ "$p38_seam_rc" -eq 0 ]; then
+        JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
+          python3 "$CANON_PKG/tasks/v1-apc-m15-target-debug/scripts/verify_m15_wide_round.py" \
+            --round-directory "$p38_m15_round_dir" \
+            --classification "$CANON_P38_SEAM_CLASSIFICATION" \
+            --bundle "$CANON_APC_M15_SEAM_BUNDLE" \
+            --expected-commit "$CANON_EXPECT_COMMIT" \
+            --runtime-commit "$p38_runtime_source_commit" || \
+          p38_seam_rc=$?
+      fi
+      p38_seam_bundle_rc="$p38_seam_rc"
+      if [ -s "$CANON_P38_SEAM_CLASSIFICATION" ]; then
+        p38_seam_sha="$(sha256sum "$CANON_P38_SEAM_CLASSIFICATION" | awk '{print $1}')"
+        echo "[CANON_P38_SEAM_CLASSIFICATION] path=$CANON_P38_SEAM_CLASSIFICATION sha256=$p38_seam_sha source=sealed-shards"
+        sed 's/^/[CANON_P38_SEAM_CLASSIFICATION_JSON] /' \
+          "$CANON_P38_SEAM_CLASSIFICATION"
+      fi
+      if [ -s "$CANON_APC_M15_SEAM_BUNDLE" ]; then
+        p38_seam_bundle_sha="$(sha256sum "$CANON_APC_M15_SEAM_BUNDLE" | awk '{print $1}')"
+        p38_seam_bundle_bytes="$(wc -c < "$CANON_APC_M15_SEAM_BUNDLE" | tr -d '[:space:]')"
+        echo "[CANON_APC_M15_SEAM_BUNDLE] path=$CANON_APC_M15_SEAM_BUNDLE bytes=$p38_seam_bundle_bytes sha256=$p38_seam_bundle_sha source=sealed-shards"
+      fi
+    else
     shopt -s nullglob
     p38_seam_round_capsules=(
       "${CANON_P38_MISMATCH_CAPSULE%.npz}".round-*.npz
@@ -662,6 +704,7 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
         fi
       fi
     fi
+    fi
   fi
   p38_terminal_rc=0
   if [ "${CANON_P38_TERMINAL_DISCRIMINATOR:-0}" = "1" ]; then
@@ -679,7 +722,11 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
         "$CANON_P38_TERMINAL_CLASSIFICATION"
     fi
   fi
-  if [ -d "$CANON_P38_SERVING_CAPTURE_DIR" ]; then
+  if [ -d "$CANON_P38_SERVING_CAPTURE_DIR" ] && [ "$p38_m15_wide" -eq 1 ]; then
+    p38_persist_rc=0
+    p38_request_live_action collect || p38_persist_rc=$?
+    echo "[CANON_P38_DURABLE_COLLECTION] profile=m15-wide-v1 archive=bounded-shards"
+  elif [ -d "$CANON_P38_SERVING_CAPTURE_DIR" ]; then
     tar --sort=name --mtime=@0 --owner=0 --group=0 \
       -C "$CANON_P38_SERVING_CAPTURE_DIR" \
       -cf "$CANON_P38_SERVING_CAPTURE_ARCHIVE" .
@@ -736,6 +783,7 @@ n_p38_capture_observe=$(grep -ac '^\[CANON_P38_SERVING_CAPTURE_OBSERVE\]' "$LOG"
 n_p38_capture_error=$(grep -ac '^\[CANON_P38_SERVING_CAPTURE_ERROR\]' "$LOG" || true)
 n_p38_request_journal=$(grep -ac '^\[CANON_P38_REQUEST_JOURNAL\]' "$LOG" || true)
 n_p38_incident_ledger=$(grep -ac '^\[CANON_P38_INCIDENT_LEDGER\]' "$LOG" || true)
+n_p38_incident_bypass=$(grep -ac '^\[CANON_P38_INCIDENT_LEDGER_BYPASS\] profile=m15-wide-v1' "$LOG" || true)
 n_m15_replay_ledger=$(grep -ac '^\[CAN''ON_APC_M15_REPLAY_LEDGER\]' "$LOG" || true)
 n_m15_producer_carrier=$(grep -ac '^\[CAN''ON_APC_M15_PRODUCER_CARRIER\]' "$LOG" || true)
 n_p38_kv_observer_init=$(grep -ac '^\[CANON_P38_KV_OBSERVER_INIT\]' "$LOG" || true)
@@ -769,7 +817,7 @@ n_p57_tim_purity_none=$(grep -ac '^\[P57.TIM_PURITY\] PASS sampler_is=none old_l
 n_p57_tim_purity_is=$(grep -ac '^\[P57.TIM_PURITY\] PASS sampler_is=token old_logps=trainer tis_weights=present trainer_rescore=training-input$' "$LOG" || true)
 n_p38_standard_init=$(grep -ac '^\[CANON_P38_SERVING_CAPTURE_INIT\].*expected_path=standard' "$LOG" || true)
 n_p38_standard_observe=$(grep -aEc '^\[CANON_P38_SERVING_CAPTURE_OBSERVE\].*"program_path"[[:space:]]*:[[:space:]]*"standard"' "$LOG" || true)
-echo "[run] PATHTRACE fixed_ar=$n_ar embed=$n_emb logprob_m=$n_lp wandb_online=$n_wandb p34_wandb_online=$n_wandb_p34 eval_off=$n_eval_off eval_on=$n_eval_on p35_base=$n_p35_base p35_stop=$n_p35_stop p35_replay=$n_p35_replay p35_stage_begin=$n_p35_stage_begin p35_stage_ready=$n_p35_stage_ready p35_stage_complete=$n_p35_stage_complete p38_precheck=$n_p38_precheck p38_rounds=$n_p38_rounds p38_controlled_exit=$n_p38_controlled_exit p38_fixed_primal=$n_p38_fixed_primal p38_fixed_vjp=$n_p38_fixed_vjp p38_kv_unified=$n_p38_kv_unified p38_capture_init=$n_p38_capture_init p38_capture_observe=$n_p38_capture_observe p38_capture_error=$n_p38_capture_error p38_request_journal=$n_p38_request_journal p38_incident_ledger=$n_p38_incident_ledger p38_kv_observer_init=$n_p38_kv_observer_init p38_kv_observer_candidate=$n_p38_kv_observer_candidate p38_kv_observer_a=$n_p38_kv_observer_a p38_kv_observer_b=$n_p38_kv_observer_b p38_seam_init=$n_p38_seam_init p38_seam_records=$n_p38_seam_records p38_tail_init=$n_p38_tail_init p38_tail_a=$n_p38_tail_a p38_tail_b=$n_p38_tail_b p38_terminal_init=$n_p38_terminal_init p38_terminal_a=$n_p38_terminal_a p38_terminal_b=$n_p38_terminal_b p38_coverage=$n_p38_coverage p57_stock_sync=$n_p57_stock_sync p57_stock_train_runtime=$n_p57_stock_train_runtime p57_stock_observer=$n_p57_stock_observer p57_tim_purity_none=$n_p57_tim_purity_none p57_tim_purity_is=$n_p57_tim_purity_is p58_stock_observer=$n_p58_stock_observer p58_seed=$n_p58_seed p58_seed_route=$n_p58_seed_route p58_recipe_raw=$n_p58_recipe_raw p58_recipe_is=$n_p58_recipe_is p57_stock_segment_preflight=$n_p57_stock_segment_preflight p57_stock_segment_complete=$n_p57_stock_segment_complete"
+echo "[run] PATHTRACE fixed_ar=$n_ar embed=$n_emb logprob_m=$n_lp wandb_online=$n_wandb p34_wandb_online=$n_wandb_p34 eval_off=$n_eval_off eval_on=$n_eval_on p35_base=$n_p35_base p35_stop=$n_p35_stop p35_replay=$n_p35_replay p35_stage_begin=$n_p35_stage_begin p35_stage_ready=$n_p35_stage_ready p35_stage_complete=$n_p35_stage_complete p38_precheck=$n_p38_precheck p38_rounds=$n_p38_rounds p38_controlled_exit=$n_p38_controlled_exit p38_fixed_primal=$n_p38_fixed_primal p38_fixed_vjp=$n_p38_fixed_vjp p38_kv_unified=$n_p38_kv_unified p38_capture_init=$n_p38_capture_init p38_capture_observe=$n_p38_capture_observe p38_capture_error=$n_p38_capture_error p38_request_journal=$n_p38_request_journal p38_incident_ledger=$n_p38_incident_ledger p38_incident_bypass=$n_p38_incident_bypass p38_kv_observer_init=$n_p38_kv_observer_init p38_kv_observer_candidate=$n_p38_kv_observer_candidate p38_kv_observer_a=$n_p38_kv_observer_a p38_kv_observer_b=$n_p38_kv_observer_b p38_seam_init=$n_p38_seam_init p38_seam_records=$n_p38_seam_records p38_tail_init=$n_p38_tail_init p38_tail_a=$n_p38_tail_a p38_tail_b=$n_p38_tail_b p38_terminal_init=$n_p38_terminal_init p38_terminal_a=$n_p38_terminal_a p38_terminal_b=$n_p38_terminal_b p38_coverage=$n_p38_coverage p57_stock_sync=$n_p57_stock_sync p57_stock_train_runtime=$n_p57_stock_train_runtime p57_stock_observer=$n_p57_stock_observer p57_tim_purity_none=$n_p57_tim_purity_none p57_tim_purity_is=$n_p57_tim_purity_is p58_stock_observer=$n_p58_stock_observer p58_seed=$n_p58_seed p58_seed_route=$n_p58_seed_route p58_recipe_raw=$n_p58_recipe_raw p58_recipe_is=$n_p58_recipe_is p57_stock_segment_preflight=$n_p57_stock_segment_preflight p57_stock_segment_complete=$n_p57_stock_segment_complete"
 
 if [ "${CANON_P57_RUN_KIND:-}" = "train" ]; then
   case "${CANON_P57_TIM_ARM:-}" in
@@ -802,13 +850,15 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
     echo "[run] FATAL: P38 serving capture reported internal errors: $n_p38_capture_error" >&2
     exit 1
   fi
-  if [ -n "${CANON_APC_M15_TARGET_DEBUG:-}" ] && \
+  if [ "$p38_m15_wide" -eq 0 ] && \
+     [ -n "${CANON_APC_M15_TARGET_DEBUG:-}" ] && \
      { [ "${m15_apc_rc:-1}" -ne 0 ] || \
        [ ! -s "${m15_apc_classification:-}" ]; }; then
     echo "[run] FATAL: M15 APC target classification failed: rc=${m15_apc_rc:-unset} artifact=${m15_apc_classification:-unset}" >&2
     exit 1
   fi
-  if [ -n "${CANON_APC_M15_TARGET_DEBUG:-}" ] && \
+  if [ "$p38_m15_wide" -eq 0 ] && \
+     [ -n "${CANON_APC_M15_TARGET_DEBUG:-}" ] && \
      [ -s "${CANON_P38_MISMATCH_CAPSULE:-}" ] && \
      { [ "${m15_replay_bundle_rc:-1}" -ne 0 ] || \
        [ ! -s "${m15_replay_bundle_dir:-}/first_red_capsule.npz" ] || \
@@ -817,7 +867,8 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
     echo "[run] FATAL: M15 first-red replay bundle failed: rc=${m15_replay_bundle_rc:-unset} directory=${m15_replay_bundle_dir:-unset}" >&2
     exit 1
   fi
-  if [ -n "${CANON_APC_M15_TARGET_DEBUG:-}" ] && \
+  if [ "$p38_m15_wide" -eq 0 ] && \
+     [ -n "${CANON_APC_M15_TARGET_DEBUG:-}" ] && \
      { [ "$n_m15_replay_ledger" -le 0 ] || \
        [ "$n_m15_producer_carrier" -ne 1 ] || \
        [ ! -s "${CANON_APC_M15_REPLAY_LEDGER:-}" ] || \
@@ -825,7 +876,8 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
     echo "[run] FATAL: M15 full replay inputs are incomplete: ledger_markers=$n_m15_replay_ledger producer_markers=$n_m15_producer_carrier ledger=${CANON_APC_M15_REPLAY_LEDGER:-unset}" >&2
     exit 1
   fi
-  if [ -n "${CANON_APC_M15_TARGET_DEBUG:-}" ] && \
+  if [ "$p38_m15_wide" -eq 0 ] && \
+     [ -n "${CANON_APC_M15_TARGET_DEBUG:-}" ] && \
      [ -s "${CANON_P38_MISMATCH_CAPSULE:-}" ] && \
      { [ "${m15_full_replay_rc:-1}" -ne 0 ] || \
        [ ! -s "${m15_full_replay_dir:-}/replay_contract.json" ] || \
@@ -890,8 +942,15 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
     echo "[run] FATAL: P38 request journal is absent: markers=$n_p38_request_journal" >&2
     exit 1
   fi
-  if [ "$n_p38_incident_ledger" -le 0 ] || \
-     [ ! -s "${CANON_P38_INCIDENT_LEDGER:-}" ]; then
+  if [ "$p38_m15_wide" -eq 1 ]; then
+    if [ "$n_p38_incident_bypass" -ne 1 ] || \
+       [ "$n_p38_incident_ledger" -ne 0 ] || \
+       [ -s "${CANON_P38_INCIDENT_LEDGER:-}" ]; then
+      echo "[run] FATAL: M15 wide run did not bypass the redundant incident ledger: bypass=$n_p38_incident_bypass incident_markers=$n_p38_incident_ledger" >&2
+      exit 1
+    fi
+  elif [ "$n_p38_incident_ledger" -le 0 ] || \
+       [ ! -s "${CANON_P38_INCIDENT_LEDGER:-}" ]; then
     echo "[run] FATAL: P38 incident ledger is absent: markers=$n_p38_incident_ledger" >&2
     exit 1
   fi

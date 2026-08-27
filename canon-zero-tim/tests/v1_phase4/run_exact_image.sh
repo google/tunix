@@ -4,6 +4,15 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 image_ref="${1:-tunix_frozenlake_image:vllm-tpu0.25.0}"
 docker="${DOCKER:-sudo docker}"
+git_common_dir="$(git -C "$root" rev-parse --git-common-dir)"
+case "$git_common_dir" in
+  /*) ;;
+  *) git_common_dir="$root/$git_common_dir" ;;
+esac
+if [ ! -d "$git_common_dir" ]; then
+  echo "V1 exact-image gate could not resolve Git common directory" >&2
+  exit 2
+fi
 
 bash "$root/canon-zero-tim/tests/p33_workloads/run_exact_image.sh" "$image_ref"
 bash "$root/canon-zero-tim/tests/p45_frozenlake_dp8_tp8/run_exact_image.sh" "$image_ref"
@@ -21,9 +30,13 @@ echo "V1_HP_EXACT_IMAGE image_ref=$image_ref image_id=$image_id"
 
 $docker run --rm \
   -v "$root:/workspace:ro" \
+  -v "$git_common_dir:$git_common_dir:ro" \
   -w /workspace \
   -e JAX_PLATFORMS=cpu \
   -e PYTHONPATH=/workspace \
+  -e GIT_CONFIG_COUNT=1 \
+  -e GIT_CONFIG_KEY_0=safe.directory \
+  -e GIT_CONFIG_VALUE_0=/workspace \
   "$image_id" \
   bash -euo pipefail -c '
     XLA_FLAGS=--xla_force_host_platform_device_count=64 \
@@ -74,5 +87,7 @@ $docker run --rm \
     python3 canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/test_target_carrier.py
     python3 canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/test_resolved_env.py
     python3 canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/test_classify_m15_apc_wide_seam.py
-    echo "V1_HP_EXACT_IMAGE_PASS dp16_gathered=1 dp2tp2_parallel=2 p59_tp4_tp8=2 p59_checked_vma_real_shim=4 p59_rpa=2 p59_fused_linear=2 p62_numeric=6 p64_numeric=4 p64_capsule=3 p63_clip=1 first_update_gate=4 gsm_scale_replay=1 p57_wandb=1 m15_token=1 apc_m15_carrier=59 perfetto_window=1 manifests=3"
+    python3 canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/test_m15_wide_durability.py
+    bash canon-zero-tim/tests/p38_serving/test_gcs_persistence.sh
+    echo "V1_HP_EXACT_IMAGE_PASS dp16_gathered=1 dp2tp2_parallel=2 p59_tp4_tp8=2 p59_checked_vma_real_shim=4 p59_rpa=2 p59_fused_linear=2 p62_numeric=6 p64_numeric=4 p64_capsule=3 p63_clip=1 first_update_gate=4 gsm_scale_replay=1 p57_wandb=1 m15_token=1 apc_m15_carrier=66 m15_durability=1 perfetto_window=1 manifests=3"
   '

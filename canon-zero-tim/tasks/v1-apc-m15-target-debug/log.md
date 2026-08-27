@@ -571,3 +571,50 @@
 - Interpretation: Attempt 9 is confirmed irrecoverable from registered GCS roots.
 - Next: implement the 4 durability repairs (bypass 2GB legacy incident ledger, stream/incremental shard persistence, classifier from persisted shards, runtime source verification) before requesting user approval for fresh Attempt 12 (`d18`).
 
+## 2026-08-27 — Phase D2 durability implementation host pass
+
+- Added the M15-only `m15-wide-v1` durability profile. It bypasses the
+  redundant legacy incident ledger with a signed runtime marker; it does not
+  alter APC, RoPE, attention, KV, LM-head, B, loss, backward, or optimizer.
+- Complete seam/tail JSON+NPZ pairs are copied into immutable shards bounded
+  to 32 pairs and 256 MiB, uploaded, downloaded, SHA-verified, and only then
+  marked complete. Periodic ticks examine only unsealed records; final round
+  assembly re-hashes the entire sealed union before classification.
+- The live worker now seals the round and publishes its classifier plus compact
+  bundle before acknowledging the learner. Root `COLLECTED` and `COMPLETE`
+  remain manifest-last; partial remote names cannot be overwritten.
+- Every persistence action resolves the executing Git checkout and requires it
+  to equal the full rendered source SHA. Classifier output is accepted only if
+  it byte-matches the sealed-round output.
+- Host results: task discovery 75/75; durability 5/5; wide classifier 8/8;
+  target carrier 14/14; resolved env 10/10; fake-GCS persistence PASS including
+  forced death, source mismatch and terminal ordering; flag audit 387/387;
+  flag-auditor tests 2/2; Bash/Python syntax and `git diff --check` pass.
+- The standalone repository renderer test is host-blocked by absent `metrax`;
+  task-local renderer coverage passes. The real import remains for the pinned
+  exact-image gate.
+- No exact-image, GCS, TPU/Kubernetes, commit, or push action ran. Claim ceiling:
+  `DURABILITY_IMPLEMENTED_HOST_PASS / EXACT_IMAGE_NOT_RUN / TARGET_NOT_RUN /
+  ROOT_CAUSE_NOT_LOCALIZED`.
+
+## 2026-08-27 — Phase D2 pinned exact-image pass
+
+- Rebased the uncommitted Phase D2 payload onto current operator tip
+  `2655471c004fc5a245ea79e3b44617ded06699f2`; the two incoming performance
+  commits did not overlap this task's runtime files.
+- The first aggregate run found two harness/test issues rather than an M15
+  durability failure: a stale P67 wrong-profile expected string and an
+  inaccessible host worktree Git path inside the read-only container.
+- Corrected the P67 negative to require the actual stronger profile-admission
+  rejection. The exact-image runner now mounts the Git common directory
+  read-only and marks `/workspace` safe. Runtime source verification remains a
+  live `git rev-parse HEAD` comparison; no mutable receipt substitute exists.
+- The isolated fake-GCS test then passed in the image, including forced death,
+  source mismatch, bounded shard recovery, manifest-last collection and
+  terminal ordering. The full aggregate terminated with
+  `V1_HP_EXACT_IMAGE_PASS ... apc_m15_carrier=66 m15_durability=1 ...` on the
+  immutable image digest
+  `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`.
+- No TPU/Kubernetes launch or real GCS mutation occurred. Claim ceiling:
+  `DURABILITY_IMPLEMENTED_HOST_PASS / EXACT_IMAGE_PASS / TARGET_NOT_RUN /
+  ROOT_CAUSE_NOT_LOCALIZED`.

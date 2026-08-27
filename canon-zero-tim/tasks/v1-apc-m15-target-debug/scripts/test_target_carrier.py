@@ -72,20 +72,34 @@ admission_geometry, p38_batch_contract = _load_train_geometry_contracts()
 
 class TargetCarrierTest(unittest.TestCase):
 
-  def test_runner_uses_m15_classifier_and_compact_packager_without_replacing_legacy(self):
+  def test_runner_uses_sealed_m15_shards_without_replacing_legacy(self):
     runner = (CANON / "cluster/steps/90_run.sh").read_text(encoding="utf-8")
     env_step = (CANON / "cluster/steps/00_env.sh").read_text(encoding="utf-8")
+    persist = (
+        CANON / "tasks/p38-pathways-decode-prefill-carrier/scripts/"
+        "persist_p38_gcs.sh"
+    ).read_text(encoding="utf-8")
+    worker = (
+        CANON / "tasks/p38-pathways-decode-prefill-carrier/scripts/"
+        "p38_live_snapshot_worker.sh"
+    ).read_text(encoding="utf-8")
     self.assertIn("classify_m15_apc_wide_seam.py", runner)
     self.assertIn("package_m15_apc_wide_seam.py", runner)
+    self.assertIn("verify_m15_wide_round.py", runner)
+    self.assertIn("archive=bounded-shards", runner)
     self.assertIn("--require-first-action", runner)
     self.assertIn("classify_p38_seam.py", runner)
     self.assertIn("M15 compact seam bundle failed", runner)
     self.assertIn("M15 fixed lm-head seam runs", env_step)
     self.assertIn("expected_p38_seam_min=960", env_step)
-    self.assertNotIn("m15-wide-seam-bundle.tar", (
-        CANON / "tasks/p38-pathways-decode-prefill-carrier/scripts/"
-        "persist_p38_gcs.sh"
-    ).read_text(encoding="utf-8"))
+    self.assertIn("m15-shard", persist)
+    self.assertIn("m15-round", persist)
+    self.assertIn("WIDE_ROUND_COMPLETE.json", persist)
+    self.assertIn("flush_m15_shards", worker)
+    self.assertNotIn(
+        'tar --sort=name --mtime=@0 --owner=0 --group=0 \\\n+      -C "$CANON_P38_SERVING_CAPTURE_DIR"',
+        runner.split("archive=bounded-shards", maxsplit=1)[0],
+    )
 
   def test_m15_capture_preserves_production_continue_decode_from_first_call(self):
     profile = (CANON / "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-apc-debug.env").read_text(
@@ -95,6 +109,9 @@ class TargetCarrierTest(unittest.TestCase):
         encoding="utf-8"
     )
     path_patch = (CANON / "patches/tpu_inference/28-tpu-runner-m15-mixed-program-path.patch").read_text(
+        encoding="utf-8"
+    )
+    durability_patch = (CANON / "patches/tpu_inference/30-tpu-runner-m15-wide-incident-bypass.patch").read_text(
         encoding="utf-8"
     )
     installer = (CANON / "install.sh").read_text(encoding="utf-8")
@@ -107,6 +124,8 @@ class TargetCarrierTest(unittest.TestCase):
     self.assertIn('+    if not m15_continue_path:', path_patch)
     self.assertIn("27-tpu-runner-m15-mixed-program-tail.patch", installer)
     self.assertIn("28-tpu-runner-m15-mixed-program-path.patch", installer)
+    self.assertIn("CANON_P38_INCIDENT_LEDGER_BYPASS", durability_patch)
+    self.assertIn("30-tpu-runner-m15-wide-incident-bypass.patch", installer)
 
   def test_renders_exact_off_on_pair(self):
     with tempfile.TemporaryDirectory() as directory:
@@ -133,6 +152,7 @@ class TargetCarrierTest(unittest.TestCase):
       for document, env in zip(documents, envs, strict=True):
         self.assertEqual(env["CANON_PROFILE_FILE"], renderer._PROFILE)
         self.assertEqual(env["CANON_P38_DIAGNOSTIC_ROUNDS"], "1")
+        self.assertEqual(env["CANON_P38_DURABILITY_PROFILE"], "round-alignment-v1")
         self.assertEqual(env["CANON_P38_SERVING_CAPTURE_PREFIX_BOUNDS"], "1152,1216,1280,1408,1696")
         self.assertEqual(env["CANON_P38_INCIDENT_MIN_PREFIX"], "1152")
         self.assertEqual(env["CANON_P38_INCIDENT_MAX_PREFIX"], "7168")
@@ -188,6 +208,24 @@ class TargetCarrierTest(unittest.TestCase):
         candidate["metadata"]["labels"]["canon.zero-tim/apc-m15-arm"] = "<ARM>"
         normalized.append(normalize_strings(candidate, arm))
       self.assertEqual(normalized[0], normalized[1])
+
+  def test_observer_pair_uses_m15_wide_durability(self):
+    with tempfile.TemporaryDirectory() as directory:
+      paths = renderer.render_all(
+          base_path=BASE,
+          output_dir=Path(directory),
+          source_commit=SOURCE,
+          run_id="wide-a",
+          observer="layer",
+      )
+      for path in paths:
+        document = yaml.safe_load(path.read_text(encoding="utf-8"))
+        env = renderer.p33._env_values(document)
+        self.assertEqual(env["CANON_P38_DURABILITY_PROFILE"], "m15-wide-v1")
+        self.assertEqual(
+            document["metadata"]["labels"]["canon.zero-tim/durability-profile"],
+            "m15-wide-v1",
+        )
 
   def test_rejects_short_source_sha(self):
     with tempfile.TemporaryDirectory() as directory:

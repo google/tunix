@@ -2,13 +2,14 @@
 # Persist the in-pod P38 evidence before a controlled diagnostic exit.
 set -euo pipefail
 
-mode="${1:?usage: persist_p38_gcs.sh probe|snapshot|round|collect|complete [sequence]}"
+mode="${1:?usage: persist_p38_gcs.sh probe|snapshot|round|m15-shard|m15-round|collect|complete [sequence]}"
 case "$mode" in
-  probe|snapshot|round|collect|complete) ;;
+  probe|snapshot|round|m15-shard|m15-round|collect|complete) ;;
   *) echo "[P38.GCS] REFUSING: invalid mode: $mode" >&2; exit 2 ;;
 esac
 snapshot_sequence="${2:-}"
-if [ "$mode" = snapshot ] || [ "$mode" = round ]; then
+if [ "$mode" = snapshot ] || [ "$mode" = round ] || \
+   [ "$mode" = m15-shard ] || [ "$mode" = m15-round ]; then
   case "$snapshot_sequence" in
     [0-9][0-9][0-9][0-9][0-9][0-9]) ;;
     *)
@@ -25,12 +26,32 @@ fi
 : "${CANON_P38_GCS_PREFIX:?CANON_P38_GCS_PREFIX unset}"
 : "${CANON_P38_DURABILITY_PROFILE:?CANON_P38_DURABILITY_PROFILE unset}"
 case "$CANON_P38_DURABILITY_PROFILE" in
-  full-v1|round-alignment-v1) ;;
+  full-v1|round-alignment-v1|m15-wide-v1) ;;
   *)
     echo "[P38.GCS] REFUSING: invalid durability profile: $CANON_P38_DURABILITY_PROFILE" >&2
     exit 2
     ;;
 esac
+
+: "${CANON_EXPECT_COMMIT:?CANON_EXPECT_COMMIT unset}"
+: "${CANON_PKG:?CANON_PKG unset}"
+case "$CANON_EXPECT_COMMIT" in
+  [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]\
+[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]\
+[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]\
+[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]\
+[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+  *) echo "[P38.GCS] REFUSING: expected source is not a full SHA" >&2; exit 2 ;;
+esac
+runtime_source_commit="$(git -C "$CANON_PKG/.." rev-parse HEAD)" || {
+  echo "[P38.GCS] REFUSING: executing checkout has no Git source identity" >&2
+  exit 2
+}
+if [ "$runtime_source_commit" != "$CANON_EXPECT_COMMIT" ]; then
+  echo "[P38.GCS] REFUSING: runtime source mismatch expected=$CANON_EXPECT_COMMIT observed=$runtime_source_commit" >&2
+  exit 2
+fi
+echo "[P38.GCS] RUNTIME_SOURCE_PASS expected=$CANON_EXPECT_COMMIT observed=$runtime_source_commit"
 
 bucket_root="gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/"
 case "$CANON_P38_GCS_PREFIX" in
@@ -135,7 +156,7 @@ if [ "$mode" = probe ]; then
       exit 1
     fi
   done
-  python3 - "$stage/PREFLIGHT.json.partial" <<'PY'
+  python3 - "$stage/PREFLIGHT.json.partial" "$runtime_source_commit" <<'PY'
 import json
 import os
 import pathlib
@@ -147,7 +168,9 @@ record = {
     "prefix": os.environ["CANON_P38_GCS_PREFIX"],
     "schema": "canon-p38-gcs-preflight-v1",
     "source_commit": os.environ.get("CANON_EXPECT_COMMIT", "unknown"),
-    "status": "writable",
+    "runtime_source_commit": sys.argv[2],
+    "source_verified": True,
+    "status": "writable-and-source-verified",
 }
 target.write_text(json.dumps(record, sort_keys=True) + "\n", encoding="utf-8")
 PY
@@ -158,6 +181,248 @@ PY
   gcs_cp "$CANON_P38_GCS_PREFIX/PREFLIGHT.json" "$verify"
   cmp -- "$stage/PREFLIGHT.json" "$verify"
   echo "[P38.GCS] PREFLIGHT_PASS prefix=$CANON_P38_GCS_PREFIX"
+  exit 0
+fi
+
+if [ "$mode" = m15-shard ]; then
+  [ "$CANON_P38_DURABILITY_PROFILE" = m15-wide-v1 ] || {
+    echo "[P38.GCS] REFUSING: m15-shard requires m15-wide-v1" >&2
+    exit 2
+  }
+  : "${CANON_P38_SEAM_OBSERVER_DIR:?}"
+  : "${CANON_P38_DIAGNOSTIC_ROUND_FILE:?}"
+  round_text="$(tr -d '[:space:]' < "$CANON_P38_DIAGNOSTIC_ROUND_FILE")"
+  case "$round_text" in
+    ''|*[!0-9]*)
+      echo "[P38.GCS] REFUSING: M15 shard round is invalid" >&2
+      exit 2
+      ;;
+  esac
+  shard_prefix="$CANON_P38_GCS_PREFIX/wide/shards/$snapshot_sequence"
+  shard_root="$CANON_STATE/p38_m15_wide_shards"
+  shard_stage="$shard_root/$snapshot_sequence"
+  for remote_name in SHARD_ARCHIVE.tar SHA256SUMS SHARD_COMPLETE.json; do
+    if gcs_exists "$shard_prefix/$remote_name"; then
+      echo "[P38.GCS] REFUSING: remote M15 shard object already exists: $snapshot_sequence/$remote_name" >&2
+      exit 2
+    fi
+  done
+  mkdir -p "$shard_root"
+  shard_rc=0
+  python3 "$CANON_PKG/tasks/v1-apc-m15-target-debug/scripts/stage_m15_wide_shard.py" \
+    --directory "$CANON_P38_SEAM_OBSERVER_DIR" \
+    --shard-root "$shard_root" \
+    --output "$shard_stage" \
+    --round "$round_text" \
+    --sequence "$((10#$snapshot_sequence))" \
+    --max-records 32 \
+    --max-bytes $((256 * 1024 * 1024)) \
+    --expected-commit "$CANON_EXPECT_COMMIT" \
+    --runtime-commit "$runtime_source_commit" || shard_rc=$?
+  if [ "$shard_rc" -eq 3 ]; then
+    exit 3
+  elif [ "$shard_rc" -ne 0 ]; then
+    exit "$shard_rc"
+  fi
+  shard_archive="$shard_root/$snapshot_sequence.tar"
+  python3 "$archive_tool" create \
+    --root "$shard_stage" \
+    --manifest "$shard_stage/SHA256SUMS" \
+    --output "$shard_archive"
+  shard_archive_sha="$(sha256sum "$shard_archive" | awk '{print $1}')"
+  shard_manifest_sha="$(sha256sum "$shard_stage/SHA256SUMS" | awk '{print $1}')"
+  gcs_cp "$shard_archive" "$shard_prefix/SHARD_ARCHIVE.tar"
+  gcs_cp "$shard_stage/SHA256SUMS" "$shard_prefix/SHA256SUMS"
+  verify_dir="$(mktemp -d)"
+  trap 'rm -rf "$verify_dir"' EXIT
+  gcs_cp "$shard_prefix/SHARD_ARCHIVE.tar" "$verify_dir/SHARD_ARCHIVE.tar"
+  gcs_cp "$shard_prefix/SHA256SUMS" "$verify_dir/SHA256SUMS"
+  python3 "$archive_tool" verify \
+    --archive "$verify_dir/SHARD_ARCHIVE.tar" \
+    --expected-sha256 "$shard_archive_sha"
+  cmp -- "$shard_stage/SHA256SUMS" "$verify_dir/SHA256SUMS"
+  python3 - "$shard_stage/SHARD_COMPLETE.json.partial" \
+    "$snapshot_sequence" "$round_text" "$shard_archive_sha" \
+    "$shard_manifest_sha" "$runtime_source_commit" <<'PY'
+import json
+import os
+import pathlib
+import sys
+
+inventory = json.loads(
+    pathlib.Path(sys.argv[1]).with_name("SHARD_INVENTORY.json").read_text(
+        encoding="utf-8"
+    )
+)
+record = {
+    "schema": "m15-wide-observer-shard-completion-v1",
+    "status": "sealed-uploaded-verified",
+    "claim_ceiling": "INCONCLUSIVE_PARTIAL_LIVE_EVIDENCE_UNTIL_WIDE_ROUND_COMPLETE",
+    "sequence": int(sys.argv[2]),
+    "diagnostic_round": int(sys.argv[3]),
+    "archive_sha256": sys.argv[4],
+    "manifest_sha256": sys.argv[5],
+    "record_pairs": int(inventory["record_pairs"]),
+    "payload_bytes": int(inventory["payload_bytes"]),
+    "expected_source_commit": os.environ["CANON_EXPECT_COMMIT"],
+    "runtime_source_commit": sys.argv[6],
+}
+pathlib.Path(sys.argv[1]).write_text(
+    json.dumps(record, sort_keys=True) + "\n", encoding="utf-8"
+)
+PY
+  mv -- "$shard_stage/SHARD_COMPLETE.json.partial" \
+    "$shard_stage/SHARD_COMPLETE.json"
+  gcs_cp "$shard_stage/SHARD_COMPLETE.json" \
+    "$shard_prefix/SHARD_COMPLETE.json"
+  gcs_cp "$shard_prefix/SHARD_COMPLETE.json" \
+    "$verify_dir/SHARD_COMPLETE.json"
+  cmp -- "$shard_stage/SHARD_COMPLETE.json" \
+    "$verify_dir/SHARD_COMPLETE.json"
+  shard_pairs="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["record_pairs"])' "$shard_stage/SHARD_INVENTORY.json")"
+  echo "[P38.GCS] M15_SHARD_COMPLETE sequence=$snapshot_sequence round=$round_text pairs=$shard_pairs archive_sha256=$shard_archive_sha manifest_sha256=$shard_manifest_sha"
+  exit 0
+fi
+
+if [ "$mode" = m15-round ]; then
+  [ "$CANON_P38_DURABILITY_PROFILE" = m15-wide-v1 ] || {
+    echo "[P38.GCS] REFUSING: m15-round requires m15-wide-v1" >&2
+    exit 2
+  }
+  : "${CANON_APC_M15_TARGET_DEBUG:?}"
+  : "${CANON_P38_SEAM_OBSERVER:?}"
+  : "${CANON_P38_SEAM_OBSERVER_DIR:?}"
+  : "${CANON_P38_SEAM_CLASSIFICATION:?}"
+  : "${CANON_APC_M15_SEAM_BUNDLE:?}"
+  : "${CANON_PRE_ALIGN_REPORT:?}"
+  : "${CANON_P38_MISMATCH_CAPSULE:?}"
+  : "${CANON_APC_M15_REPLAY_LEDGER:?}"
+  round_index=$((10#$snapshot_sequence))
+  round_prefix="$CANON_P38_GCS_PREFIX/wide/rounds/$snapshot_sequence"
+  round_root="$CANON_STATE/p38_m15_wide_rounds"
+  round_stage="$round_root/$snapshot_sequence"
+  shard_root="$CANON_STATE/p38_m15_wide_shards"
+  if [ -e "$round_stage" ]; then
+    echo "[P38.GCS] REFUSING: M15 wide round already exists: $snapshot_sequence" >&2
+    exit 2
+  fi
+  for remote_name in ROUND_INPUT_RECEIPT.json p38_seam.classification.json \
+      m15_wide_seam_bundle.tar WIDE_SHA256SUMS WIDE_ROUND_COMPLETE.json; do
+    if gcs_exists "$round_prefix/$remote_name"; then
+      echo "[P38.GCS] REFUSING: remote M15 wide-round object already exists: $snapshot_sequence/$remote_name" >&2
+      exit 2
+    fi
+  done
+  mkdir -p "$round_root"
+  python3 "$CANON_PKG/tasks/v1-apc-m15-target-debug/scripts/assemble_m15_wide_round.py" \
+    --live-directory "$CANON_P38_SEAM_OBSERVER_DIR" \
+    --shard-root "$shard_root" \
+    --output "$round_stage" \
+    --round "$round_index" \
+    --pre-alignment "$CANON_PRE_ALIGN_REPORT" \
+    --capsule "$CANON_P38_MISMATCH_CAPSULE" \
+    --replay-ledger "$CANON_APC_M15_REPLAY_LEDGER" \
+    --observer-mode "$CANON_P38_SEAM_OBSERVER" \
+    --expected-commit "$CANON_EXPECT_COMMIT" \
+    --runtime-commit "$runtime_source_commit"
+  m15_round_args=(
+    --directory "$round_stage"
+    --alignment-report "$round_stage/pre-alignment.jsonl"
+    --mode "$CANON_P38_SEAM_OBSERVER"
+    --arm "$CANON_APC_M15_TARGET_DEBUG"
+    --replay-ledger "$round_stage/m15-replay-envelope.jsonl"
+  )
+  if [ "$CANON_APC_M15_TARGET_DEBUG" = on ]; then
+    m15_round_args+=(--require-first-action)
+  fi
+  if [ -s "$round_stage/mismatch-capsule.npz" ]; then
+    m15_round_args+=(--capsule "$round_stage/mismatch-capsule.npz")
+  fi
+  if [ "$CANON_P38_SEAM_OBSERVER" = full ]; then
+    : "${CANON_P38_SEAM_LAYER:?}"
+    m15_round_args+=(--expected-layer "$CANON_P38_SEAM_LAYER")
+  fi
+  python3 "$CANON_PKG/tasks/v1-apc-m15-target-debug/scripts/classify_m15_apc_wide_seam.py" \
+    "${m15_round_args[@]}" \
+    --output "$round_stage/p38_seam.classification.json"
+  package_args=()
+  if [ -s "$round_stage/mismatch-capsule.npz" ]; then
+    package_args+=(--capsule "$round_stage/mismatch-capsule.npz")
+  fi
+  python3 "$CANON_PKG/tasks/v1-apc-m15-target-debug/scripts/package_m15_apc_wide_seam.py" \
+    --directory "$round_stage" \
+    --classification "$round_stage/p38_seam.classification.json" \
+    --alignment-report "$round_stage/pre-alignment.jsonl" \
+    "${package_args[@]}" \
+    --replay-ledger "$round_stage/m15-replay-envelope.jsonl" \
+    --output "$round_stage/m15_wide_seam_bundle.tar"
+  cp -- "$round_stage/p38_seam.classification.json" \
+    "$CANON_P38_SEAM_CLASSIFICATION"
+  cp -- "$round_stage/m15_wide_seam_bundle.tar" \
+    "$CANON_APC_M15_SEAM_BUNDLE"
+  round_files=(
+    ROUND_INPUT_RECEIPT.json
+    p38_seam.classification.json
+    m15_wide_seam_bundle.tar
+  )
+  (
+    cd "$round_stage"
+    sha256sum "${round_files[@]}" > WIDE_SHA256SUMS
+    sha256sum -c WIDE_SHA256SUMS --quiet
+  )
+  for name in "${round_files[@]}" WIDE_SHA256SUMS; do
+    gcs_cp "$round_stage/$name" "$round_prefix/$name"
+  done
+  verify_dir="$(mktemp -d)"
+  trap 'rm -rf "$verify_dir"' EXIT
+  gcs_cp "$round_prefix/WIDE_SHA256SUMS" "$verify_dir/WIDE_SHA256SUMS"
+  cmp -- "$round_stage/WIDE_SHA256SUMS" "$verify_dir/WIDE_SHA256SUMS"
+  for name in "${round_files[@]}"; do
+    gcs_cp "$round_prefix/$name" "$verify_dir/$name"
+  done
+  (cd "$verify_dir" && sha256sum -c WIDE_SHA256SUMS --quiet)
+  round_manifest_sha="$(sha256sum "$round_stage/WIDE_SHA256SUMS" | awk '{print $1}')"
+  python3 - "$round_stage/WIDE_ROUND_COMPLETE.json.partial" \
+    "$round_index" "$round_manifest_sha" "$runtime_source_commit" <<'PY'
+import json
+import os
+import pathlib
+import sys
+
+classification = json.loads(
+    pathlib.Path(sys.argv[1]).with_name("p38_seam.classification.json").read_text(
+        encoding="utf-8"
+    )
+)
+receipt = json.loads(
+    pathlib.Path(sys.argv[1]).with_name("ROUND_INPUT_RECEIPT.json").read_text(
+        encoding="utf-8"
+    )
+)
+record = {
+    "schema": "m15-wide-round-completion-v1",
+    "status": "classified-and-uploaded",
+    "diagnostic_round": int(sys.argv[2]),
+    "manifest_sha256": sys.argv[3],
+    "classification": classification["classification"],
+    "record_pairs": int(receipt["record_pairs"]),
+    "shards": receipt["shards"],
+    "expected_source_commit": os.environ["CANON_EXPECT_COMMIT"],
+    "runtime_source_commit": sys.argv[4],
+}
+pathlib.Path(sys.argv[1]).write_text(
+    json.dumps(record, sort_keys=True) + "\n", encoding="utf-8"
+)
+PY
+  mv -- "$round_stage/WIDE_ROUND_COMPLETE.json.partial" \
+    "$round_stage/WIDE_ROUND_COMPLETE.json"
+  gcs_cp "$round_stage/WIDE_ROUND_COMPLETE.json" \
+    "$round_prefix/WIDE_ROUND_COMPLETE.json"
+  gcs_cp "$round_prefix/WIDE_ROUND_COMPLETE.json" \
+    "$verify_dir/WIDE_ROUND_COMPLETE.json"
+  cmp -- "$round_stage/WIDE_ROUND_COMPLETE.json" \
+    "$verify_dir/WIDE_ROUND_COMPLETE.json"
+  echo "[P38.GCS] M15_WIDE_ROUND_COMPLETE round=$round_index prefix=$round_prefix manifest_sha256=$round_manifest_sha"
   exit 0
 fi
 
@@ -459,6 +724,75 @@ if [ "$mode" = collect ]; then
     exit 1
   fi
 
+  if [ "$CANON_P38_DURABILITY_PROFILE" = m15-wide-v1 ]; then
+    wide_round="$CANON_STATE/p38_m15_wide_rounds/000000"
+    copy_required "${CANON_RUN_LOG:?}" run.log
+    copy_required "${CANON_PRE_ALIGN_REPORT:?}" pre-alignment.jsonl
+    copy_required "${CANON_P38_SEAM_CLASSIFICATION:?}" \
+      p38_seam.classification.json
+    copy_required "${CANON_APC_M15_SEAM_BUNDLE:?}" \
+      m15_wide_seam_bundle.tar
+    copy_required "$wide_round/WIDE_ROUND_COMPLETE.json" \
+      WIDE_ROUND_COMPLETE.json
+    collected_files=(
+      run.log pre-alignment.jsonl p38_seam.classification.json
+      m15_wide_seam_bundle.tar WIDE_ROUND_COMPLETE.json
+    )
+    if [ -s "${CANON_P38_MISMATCH_CAPSULE:?}" ]; then
+      copy_required "$CANON_P38_MISMATCH_CAPSULE" mismatch-capsule.npz
+      collected_files+=(mismatch-capsule.npz)
+    fi
+    for remote_name in "${collected_files[@]}" SHA256SUMS COLLECTED.json; do
+      if gcs_exists "$CANON_P38_GCS_PREFIX/$remote_name"; then
+        echo "[P38.GCS] REFUSING: remote M15 collection object already exists: $remote_name" >&2
+        exit 2
+      fi
+    done
+    (
+      cd "$stage"
+      sha256sum "${collected_files[@]}" > SHA256SUMS
+      sha256sum -c SHA256SUMS --quiet
+    )
+    python3 - "$stage/COLLECTED.json.partial" "$runtime_source_commit" <<'PY'
+import json
+import os
+import pathlib
+import sys
+
+target = pathlib.Path(sys.argv[1])
+record = {
+    "attempt": os.environ.get("JOBSET_RESTART_ATTEMPT", "unknown"),
+    "jobset": os.environ["CANON_P38_GCS_PREFIX"].split("/")[-2],
+    "pod": os.environ.get("CANON_POD_NAME", "unknown"),
+    "prefix": os.environ["CANON_P38_GCS_PREFIX"],
+    "schema": "m15-wide-gcs-collection-v1",
+    "source_commit": os.environ["CANON_EXPECT_COMMIT"],
+    "runtime_source_commit": sys.argv[2],
+    "status": "collected-from-sealed-shards",
+}
+target.write_text(json.dumps(record, sort_keys=True) + "\n", encoding="utf-8")
+PY
+    mv -- "$stage/COLLECTED.json.partial" "$stage/COLLECTED.json"
+    for name in "${collected_files[@]}" SHA256SUMS; do
+      upload "$stage/$name" "$name"
+    done
+    upload "$stage/COLLECTED.json" COLLECTED.json
+    verify_dir="$(mktemp -d)"
+    trap 'rm -rf "$verify_dir"' EXIT
+    gcs_cp "$CANON_P38_GCS_PREFIX/SHA256SUMS" \
+      "$verify_dir/SHA256SUMS"
+    cmp -- "$stage/SHA256SUMS" "$verify_dir/SHA256SUMS"
+    for name in "${collected_files[@]}"; do
+      gcs_cp "$CANON_P38_GCS_PREFIX/$name" "$verify_dir/$name"
+    done
+    (cd "$verify_dir" && sha256sum -c SHA256SUMS --quiet)
+    gcs_cp "$CANON_P38_GCS_PREFIX/COLLECTED.json" \
+      "$verify_dir/COLLECTED.json"
+    cmp -- "$stage/COLLECTED.json" "$verify_dir/COLLECTED.json"
+    echo "[P38.GCS] COLLECTED prefix=$CANON_P38_GCS_PREFIX profile=m15-wide-v1 manifest_sha256=$(sha256sum "$stage/SHA256SUMS" | awk '{print $1}')"
+    exit 0
+  fi
+
   copy_required "${CANON_RUN_LOG:?}" run.log
   copy_required "${CANON_PRE_ALIGN_REPORT:?}" pre-alignment.jsonl
   if [ "$CANON_P38_DURABILITY_PROFILE" = full-v1 ]; then
@@ -505,7 +839,7 @@ if [ "$mode" = collect ]; then
     sha256sum "${collected_files[@]}" > SHA256SUMS
     sha256sum -c SHA256SUMS --quiet
   )
-  python3 - "$stage/COLLECTED.json.partial" <<'PY'
+  python3 - "$stage/COLLECTED.json.partial" "$runtime_source_commit" <<'PY'
 import json
 import os
 import pathlib
@@ -519,6 +853,7 @@ record = {
     "prefix": os.environ["CANON_P38_GCS_PREFIX"],
     "schema": "canon-p38-gcs-collection-v1",
     "source_commit": os.environ.get("CANON_EXPECT_COMMIT", "unknown"),
+    "runtime_source_commit": sys.argv[2],
     "status": "collected",
 }
 target.write_text(json.dumps(record, sort_keys=True) + "\n", encoding="utf-8")
@@ -552,7 +887,8 @@ if gcs_exists "$CANON_P38_GCS_PREFIX/COMPLETE.json"; then
 fi
 
 manifest_sha="$(sha256sum "$stage/SHA256SUMS" | awk '{print $1}')"
-python3 - "$stage/COMPLETE.json.partial" "$manifest_sha" <<'PY'
+python3 - "$stage/COMPLETE.json.partial" "$manifest_sha" \
+  "$runtime_source_commit" <<'PY'
 import json
 import os
 import pathlib
@@ -565,6 +901,7 @@ record = {
     "prefix": os.environ["CANON_P38_GCS_PREFIX"],
     "schema": "canon-p38-gcs-completion-v1",
     "source_commit": os.environ.get("CANON_EXPECT_COMMIT", "unknown"),
+    "runtime_source_commit": sys.argv[3],
     "status": "postflight-accepted",
 }
 target.write_text(json.dumps(record, sort_keys=True) + "\n", encoding="utf-8")

@@ -688,9 +688,9 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
       ;;
   esac
   case "${CANON_P38_DURABILITY_PROFILE:-}" in
-    full-v1|round-alignment-v1) ;;
+    full-v1|round-alignment-v1|m15-wide-v1) ;;
     *)
-      echo "[env] P38 durability profile must be full-v1 or round-alignment-v1" >&2
+      echo "[env] P38 durability profile must be full-v1, round-alignment-v1, or m15-wide-v1" >&2
       fail=1
       ;;
   esac
@@ -712,17 +712,25 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
       echo "[env] P38 fixed lm-head conflicts with CANON_MM_ALGO" >&2
       fail=1
     }
-    [ "${CANON_P38_DURABILITY_PROFILE:-}" = "round-alignment-v1" ] || {
-      echo "[env] P38 fixed lm-head requires round-alignment-v1 durability" >&2
-      fail=1
-    }
     if [ "$APC_M15_TARGET_DEBUG" = "1" ] && \
        [ -n "${CANON_P38_SEAM_OBSERVER:-}" ]; then
+      [ "${CANON_P38_DURABILITY_PROFILE:-}" = "m15-wide-v1" ] || {
+        echo "[env] M15 seam observer requires m15-wide-v1 durability" >&2
+        fail=1
+      }
       [ -z "${CANON_P38_KV_OBSERVER_DIR:-}${CANON_P38_KV_OBSERVER_CLASSIFICATION:-}${CANON_P38_TERMINAL_DISCRIMINATOR:-}" ] || {
         echo "[env] M15 fixed lm-head seam runs must not attach KV or terminal-discriminator observers" >&2
         fail=1
       }
-    elif [ -n "${CANON_P38_KV_OBSERVER_DIR:-}${CANON_P38_KV_OBSERVER_CLASSIFICATION:-}${CANON_P38_SEAM_OBSERVER:-}${CANON_P38_TAIL_OBSERVER:-}${CANON_P38_TERMINAL_DISCRIMINATOR:-}" ]; then
+    else
+      [ "${CANON_P38_DURABILITY_PROFILE:-}" = "round-alignment-v1" ] || {
+        echo "[env] fixed lm-head without M15 seam observation requires round-alignment-v1 durability" >&2
+        fail=1
+      }
+    fi
+    if { [ "$APC_M15_TARGET_DEBUG" != "1" ] || \
+         [ -z "${CANON_P38_SEAM_OBSERVER:-}" ]; } && \
+       [ -n "${CANON_P38_KV_OBSERVER_DIR:-}${CANON_P38_KV_OBSERVER_CLASSIFICATION:-}${CANON_P38_SEAM_OBSERVER:-}${CANON_P38_TAIL_OBSERVER:-}${CANON_P38_TERMINAL_DISCRIMINATOR:-}" ]; then
       echo "[env] P38 fixed lm-head diagnostic observers are admitted only on the M15 seam carrier" >&2
       fail=1
     fi
@@ -736,7 +744,7 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
       }
     done
   elif [ "${CANON_P38_DURABILITY_PROFILE:-}" != "full-v1" ]; then
-    echo "[env] round-alignment-v1 durability is exclusive to fixed lm-head" >&2
+    echo "[env] specialized durability profiles are exclusive to fixed lm-head" >&2
     fail=1
   fi
   [ "${CANON_P38_DIAGNOSTIC_ROUND_FILE:-}" = \

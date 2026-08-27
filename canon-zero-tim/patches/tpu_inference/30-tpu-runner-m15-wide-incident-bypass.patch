@@ -1,0 +1,33 @@
+--- tpu_runner_p21_l30.py
++++ tpu_runner_p21_l30.py
+@@ -1141,6 +1141,8 @@
+ _P38_INCIDENT_STATE = {"records": 0, "bytes": 0}
+ _P38_M15_TARGET_DEBUG = os.environ.get(
+     "CANON_APC_M15_TARGET_DEBUG", "")
++_P38_DURABILITY_PROFILE = os.environ.get(
++    "CANON_P38_DURABILITY_PROFILE", "")
+ _P38_M15_REPLAY_LEDGER = os.environ.get(
+     "CANON_APC_M15_REPLAY_LEDGER", "")
+ _P38_M15_REPLAY_STATE = {"records": 0, "bytes": 0}
+@@ -1207,0 +1210,5 @@
++if _P38_DURABILITY_PROFILE == "m15-wide-v1" and (
++        _P38_M15_TARGET_DEBUG not in ("off", "on")
++        or _P38_SEAM_OBSERVER not in ("layer", "full")):
++    raise RuntimeError(
++        "m15-wide-v1 requires the signed M15 target and seam observer")
+@@ -1855,6 +1862,15 @@
+         call_index, input_ids, input_positions, attn_metadata,
+         padded_rows_per_dp):
+     """Append one bounded exact-call record using host scheduler metadata."""
++    if _P38_DURABILITY_PROFILE == "m15-wide-v1":
++        if not _P38_INCIDENT_STATE.get("bypass_reported", False):
++            _P38_INCIDENT_STATE["bypass_reported"] = True
++            print(
++                "[CANON_P38_INCIDENT_LEDGER_BYPASS] "
++                "profile=m15-wide-v1 replacement=replay-envelope+sealed-seam-shards",
++                flush=True,
++            )
++        return
+     import json as _json
+     import os as _os
+     from pathlib import Path as _Path

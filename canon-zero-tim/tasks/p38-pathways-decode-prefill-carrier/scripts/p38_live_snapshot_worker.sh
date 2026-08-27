@@ -20,7 +20,7 @@ set -euo pipefail
 : "${CANON_PKG:?CANON_PKG unset}"
 
 case "$CANON_P38_DURABILITY_PROFILE" in
-  full-v1|round-alignment-v1) ;;
+  full-v1|round-alignment-v1|m15-wide-v1) ;;
   *)
     echo "[P38.GCS] REFUSING: invalid durability profile: $CANON_P38_DURABILITY_PROFILE" >&2
     exit 2
@@ -54,6 +54,32 @@ sequence=0
 last_signature=""
 last_observer_signature=""
 next_round_to_seal=0
+
+seal_m15_shard_once() {
+  local sequence_text rc=0
+  printf -v sequence_text '%06d' "$sequence"
+  bash "$persist" m15-shard "$sequence_text" || rc=$?
+  if [ "$rc" -eq 3 ]; then
+    return 3
+  elif [ "$rc" -ne 0 ]; then
+    echo "[P38.GCS] FATAL: M15 shard failed sequence=$sequence_text rc=$rc" >&2
+    return "$rc"
+  fi
+  sequence=$((sequence + 1))
+  return 0
+}
+
+flush_m15_shards() {
+  local rc=0
+  while true; do
+    seal_m15_shard_once || rc=$?
+    if [ "$rc" -eq 3 ]; then
+      return 0
+    elif [ "$rc" -ne 0 ]; then
+      return "$rc"
+    fi
+  done
+}
 
 observer_signature_for_round() {
   local observer_dir="$1" round_value="$2"
@@ -94,6 +120,14 @@ snapshot_if_changed() {
   # can starve a later round request past the learner's 900-second deadline.
   if [ "$CANON_P38_DURABILITY_PROFILE" = round-alignment-v1 ]; then
     return 0
+  fi
+  if [ "$CANON_P38_DURABILITY_PROFILE" = m15-wide-v1 ]; then
+    rc=0
+    seal_m15_shard_once || rc=$?
+    if [ "$rc" -eq 3 ]; then
+      return 0
+    fi
+    return "$rc"
   fi
   [ ! -e "$CANON_RUN_LOG" ] || run_size="$(wc -c < "$CANON_RUN_LOG" | tr -d '[:space:]')"
   [ ! -e "$CANON_P38_REQUEST_JOURNAL" ] || journal_size="$(wc -c < "$CANON_P38_REQUEST_JOURNAL" | tr -d '[:space:]')"
@@ -194,13 +228,19 @@ expected = {
 if record != expected:
   raise SystemExit(f"round-seal request drifted: {record!r} != {expected!r}")
 PY
-    bash "$persist" round "$round_text"
+    if [ "$CANON_P38_DURABILITY_PROFILE" = m15-wide-v1 ]; then
+      flush_m15_shards
+      bash "$persist" m15-round "$round_text"
+    else
+      bash "$persist" round "$round_text"
+    fi
     # The learner is still blocked here, so every record for this round is
     # already inside the verified round archive.  Mark that observer state as
     # durable before publishing the ACK; the next periodic snapshot then does
     # not redundantly archive the just-sealed round.
     observer_dir="${CANON_P38_SEAM_OBSERVER_DIR:-${CANON_P38_KV_OBSERVER_DIR:-}}"
-    if [ -n "$observer_dir" ] && [ -d "$observer_dir" ]; then
+    if [ "$CANON_P38_DURABILITY_PROFILE" != m15-wide-v1 ] && \
+       [ -n "$observer_dir" ] && [ -d "$observer_dir" ]; then
       last_observer_signature="$(observer_signature_for_round \
         "$observer_dir" "$next_round_to_seal" | tr '\n' ',')"
     fi

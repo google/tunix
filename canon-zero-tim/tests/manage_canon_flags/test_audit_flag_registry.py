@@ -19,6 +19,25 @@ SPEC.loader.exec_module(AUDIT)
 
 class AddedFlagPathsTest(unittest.TestCase):
 
+  def test_marker_inventory_is_separate_from_settable_flags(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      flags = Path(tmp) / "FLAGS.md"
+      marker = "CANON_" + "RUNTIME_MARKER"
+      flag = "CANON_" + "RUNTIME_FLAG"
+      flags.write_text(
+          "## MARKERS\n\n"
+          f"`[{marker}]` is observational.\n\n"
+          "## Appendix\n\n"
+          "Count: 1 settable names\n\n"
+          f"```text\n{flag}\n```\n"
+      )
+      self.assertEqual(
+          AUDIT._marker_inventory(flags), {marker}
+      )
+      self.assertEqual(
+          AUDIT._inventory(flags), ([flag], 1)
+      )
+
   def test_ignores_documentation_and_immutable_evidence_markers(self):
     with tempfile.TemporaryDirectory() as tmp:
       repo = Path(tmp)
