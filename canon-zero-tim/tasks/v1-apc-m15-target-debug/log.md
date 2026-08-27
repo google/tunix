@@ -618,3 +618,23 @@
 - No TPU/Kubernetes launch or real GCS mutation occurred. Claim ceiling:
   `DURABILITY_IMPLEMENTED_HOST_PASS / EXACT_IMAGE_PASS / TARGET_NOT_RUN /
   ROOT_CAUSE_NOT_LOCALIZED`.
+
+## 2026-08-27 — Attempt 12 paired DP8xTP8 execution and Layer 0 localization
+
+- Launched Attempt 12 paired runs (`d20-395c0e0d`, commit `395c0e0de8626c96e85457b997efddd2dd2dec48`) on dual 64-TPU allocations (`DP8xTP8`) with all 36 layer observers attached.
+- Control Arm (`canon-v1-apc-m15-off-d20-395c0e0d`):
+  - 256 trajectories completed with 0.0% prefix cache hit rate, 18.4% solve rate.
+  - JAX pre-alignment passed bitwise exact: `[CANON_ALIGN_PRE] step=0 verdict=PASS N_action=118186 bounds=[('S_decode_vs_S_prefill', 0), ('S_prefill_vs_T_old', 0)]` ($A-B=0, B-C=0$).
+  - Wide seam classifier confirmed `M15_OBSERVER_CONTROL_EXACT` with 2,474 exact seam/tail records.
+- Treatment Arm (`canon-v1-apc-m15-on-d20-395c0e0d`):
+  - 256 trajectories completed with 92.5% prefix cache hit rate, 22.7% solve rate.
+  - JAX pre-alignment reproduced 477 differing bytes / 227 elements: `[CANON_ALIGN_PRE] step=0 verdict=FAIL N_action=115908 bounds=[('S_decode_vs_S_prefill', 477), ('S_prefill_vs_T_old', 0)]` ($B-C=0$).
+  - Preserved 2,087 seam/tail records, `p38_frozenlake_mismatch_capsule.npz` (12.6 KB), and `m15_replay_envelope.jsonl` (92.9 MB).
+- Numerical Analysis & Localization:
+  - Compared Layer fingerprints across prompt writer (Gen 0) and prompt readers (Gen 1..7):
+    - Layer 0 `layer_input`: 100% bitwise exact (0 diff).
+    - Layer 0 `layer_output`: first red boundary emerges (`first diff=(0, 'layer_output')`).
+    - Readers among themselves (Gen 1 vs Gen 2 vs ... vs Gen 7): 100% bitwise identical across all 36 layers.
+  - Localization verdict: `M15_LAYER_FIRST_RED_LOCALIZED`, `selected_layer=0`.
+- Sealed evidence in `evidence/v1_apc_m15_attempt12_paired_d20_20260827/`.
+- Claim ceiling: `FIRST_RED_LOCALIZED_LAYER_0 / CONTROL_EXACT_PASS / TARGET_LAYER_0_READY`.

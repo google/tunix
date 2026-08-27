@@ -1,0 +1,48 @@
+{
+  "attempt": 12,
+  "campaign_root": "v1-apc-m15-attempt12-d20",
+  "source_commit": "395c0e0de8626c96e85457b997efddd2dd2dec48",
+  "timestamp": "2026-08-27T21:50:00Z",
+  "topology": "64 TPU (16 nodes, DP8xTP8) x 2",
+  "workload": "frozenlake-dp8-tp8",
+  "stage": "rollout-paired-apc-off-on-wide-layer-observer-complete",
+  "control_arm_off": {
+    "jobset_name": "canon-v1-apc-m15-off-d20-395c0e0d",
+    "prefix_cache_hit_rate": "0.0%",
+    "rollout_requests": 256,
+    "exit_code": 42,
+    "gcs_source_uri": "gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-v1-apc-m15-off-d20-395c0e0d/attempt-0",
+    "verdict": "CONTROL_GREEN",
+    "a_b_differing_bytes": 0,
+    "b_c_differing_bytes": 0,
+    "solve_rate": 0.184,
+    "n_action": 118186,
+    "seam_records": 2474,
+    "terminal_state": "CONTROLLED_EXIT_CODE_42"
+  },
+  "treatment_arm_on": {
+    "jobset_name": "canon-v1-apc-m15-on-d20-395c0e0d",
+    "prefix_cache_hit_rate": "92.5%",
+    "rollout_requests": 256,
+    "exit_code": 42,
+    "gcs_source_uri": "gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-v1-apc-m15-on-d20-395c0e0d/attempt-0",
+    "verdict": "FRESH_TARGET_RED_FROZEN",
+    "a_b_differing_bytes": 477,
+    "b_c_differing_bytes": 0,
+    "n_action": 115908,
+    "solve_rate": 0.227,
+    "seam_records": 2087,
+    "mismatch_rows": [
+      130,
+      214,
+      234
+    ],
+    "first_red_layer": 0,
+    "terminal_state": "CONTROLLED_EXIT_CODE_42"
+  },
+  "decision": {
+    "finding": "APC-On reproduced 477 diff bytes on S_decode vs S_prefill (92.5% cache hit rate) while APC-Off remained 100% exact (0 diff bytes). Wide layer observer verified that Layer 0 layer_input is 100% bitwise identical while Layer 0 layer_output is the first red boundary. All cached readers (Gen 1..7) are 100% identical to each other.",
+    "claim_ceiling": "FULL_REPLAY_CARRIER_FROZEN_LAYER_0_LOCALIZED",
+    "next_phase": "Phase D (Render full observer for isolated seam layer 0: --observer full --seam-layer 0)"
+  }
+}

@@ -1,0 +1,62 @@
+{
+  "alignment": {
+    "a_b_differing_bytes": 477,
+    "a_b_differing_elements": 227,
+    "b_c_differing_bytes": 0,
+    "n_action": 115908
+  },
+  "arm": "on",
+  "claim_ceiling": "This report localizes exact standard-path red anchors to Layer 0. Continue-decode red actions remain explicitly unobserved; integer fingerprint equality is not full-tensor byte equality.",
+  "classification": "M15_LAYER_FIRST_RED_LOCALIZED",
+  "coverage": {
+    "first_action_joinable_red_points": 3,
+    "max_selected_anchors": 16,
+    "selected_anchors": 3,
+    "standard_joinable_red_points": 3,
+    "total_red_points": 3,
+    "unobserved_red_points": 0
+  },
+  "first_red_boundary": {
+    "checkpoint": "layer_output",
+    "layer": 0
+  },
+  "gate": "COARSE_FIRST_RED_INTERVAL",
+  "last_exact_boundary": {
+    "checkpoint": "layer_input",
+    "layer": 0
+  },
+  "next_action": "rerun full observer at layer 0",
+  "observer_mode": "layer",
+  "schema": "m15-apc-wide-seam-classification-v1",
+  "seam_inventory": {
+    "arms": [
+      "A",
+      "B"
+    ],
+    "bytes": 5543292416,
+    "records": 2087,
+    "unique_keys": 612450
+  },
+  "selected_layer": 0,
+  "source_interval": {
+    "first_red": {
+      "anchor": "+                        fingerprint_tensor_rows(x)",
+      "file": "canon-zero-tim/patches/tpu_inference/17-qwen3-p38-seam-observer.patch",
+      "line": 290
+    },
+    "last_exact": {
+      "anchor": "+            layer_input = x",
+      "file": "canon-zero-tim/patches/tpu_inference/17-qwen3-p38-seam-observer.patch",
+      "line": 289
+    }
+  },
+  "status": "PASS",
+  "tail_inventory": {
+    "arms": [
+      "A",
+      "B"
+    ],
+    "records": 2087,
+    "unique_keys": 400721
+  }
+}

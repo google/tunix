@@ -58,8 +58,7 @@ approval boundary.
 Claim ceiling now:
 
 ```text
-DURABILITY_IMPLEMENTED_HOST_PASS /
-EXACT_IMAGE_PASS / TARGET_NOT_RUN / ROOT_CAUSE_NOT_LOCALIZED
+FIRST_RED_LOCALIZED_LAYER_0 / CONTROL_EXACT_PASS / TARGET_LAYER_0_READY
 ```
 
 See [Phase D2](phases/phase-d2-durable-wide-shards.md).
@@ -694,3 +693,34 @@ currently verified. The historical numerical values must not select a layer,
 close a gate, or justify a repair. See
 `evidence/v1_apc_m15_attempt9_gcs_salvage_20260827/`; the full object-name
 inventory at the top of this handoff is the only admitted next operation.
+
+## Attempt 12 M15 Target Debug Runs (d20-395c0e0d Phase D Wide Layer Observer)
+
+Attempt 12 paired dual-arm execution (`d20-395c0e0d`, source commit `395c0e0de8626c96e85457b997efddd2dd2dec48`) ran on dual 64-TPU allocations (DP8xTP8) with all 36-layer observers attached:
+- **Control Arm (`canon-v1-apc-m15-off-d20-395c0e0d`)**:
+  - Rollout: 256 trajectories completed, **0.0%** prefix cache hit rate, solve rate **18.4%** (47/256).
+  - Pre-alignment: `[CANON_ALIGN_PRE] step=0 verdict=PASS N_action=118186 bounds=[('S_decode_vs_S_prefill', 0), ('S_prefill_vs_T_old', 0)]` ($A-B=0, B-C=0$).
+  - Classification: `M15_OBSERVER_CONTROL_EXACT`, `gate=OBSERVER_REACHED_EXACT_ENDPOINT`.
+  - Seam records: 2,474 pairs across all 36 layers verified bitwise exact.
+  - Terminal: Controlled exit code 42, zero backward, zero optimizer commits.
+- **Treatment Arm (`canon-v1-apc-m15-on-d20-395c0e0d`)**:
+  - Rollout: 256 trajectories completed, **92.5%** prefix cache hit rate, solve rate **22.7%** (58/256).
+  - Pre-alignment: `[CANON_ALIGN_PRE] step=0 verdict=FAIL N_action=115908 bounds=[('S_decode_vs_S_prefill', 477), ('S_prefill_vs_T_old', 0)]` ($B-C=0$ exact, captured 477 differing bytes across 227 elements).
+  - Layer Fingerprint Comparison:
+    - Layer 0 `layer_input`: 100% bitwise exact between uncached prefill writer (Gen 0) and cached readers (Gen 1..7).
+    - Layer 0 `layer_output`: First red boundary identified (`first diff=(0, 'layer_output')`).
+    - Cached readers (Gen 1 vs Gen 2 vs ... vs Gen 7): 100% bitwise identical to each other (`total differing = 0`).
+  - Classification: `M15_LAYER_FIRST_RED_LOCALIZED`, `gate=COARSE_FIRST_RED_INTERVAL`, `selected_layer=0`.
+  - Terminal: Controlled exit code 42, zero backward, zero optimizer commits.
+- Retained evidence: `evidence/v1_apc_m15_attempt12_paired_d20_20260827/`.
+
+### Follow-up Action
+Render and launch the Layer 0 full 15-checkpoint observer:
+```bash
+python3 canon-zero-tim/cluster/render_v1_apc_m15_target_debug.py \
+  --source-commit "395c0e0de8626c96e85457b997efddd2dd2dec48" \
+  --run-id "d21-full-l0" \
+  --observer full \
+  --seam-layer 0 \
+  --output-dir "/tmp/v1-apc-m15-d21-full-l0"
+```
