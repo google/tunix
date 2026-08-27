@@ -1,0 +1,5 @@
+M15 wide-seam GCS salvage return
+status=SOURCE_MISMATCH
+next_action=verify the runtime source identity before using either classifier
+token_bearing_bundle_returned=0
+remote_state_mutated=0
