@@ -87,5 +87,5 @@ jobs:
 
       - name: Run experimental tests
         run: |
-          # TODO(tunix-dev): add back raiden_handler_test.py after tpu_sync lib is ready.
-          python -m pytest tests/experimental/ -v --tb=short --ignore-glob='*/raiden_handler_test.py'
+          # TODO(tunix-dev): add back raiden tests after tpu_sync lib is ready.
+          python -m pytest tests/experimental/ -v --tb=short --ignore-glob='*/raiden_handler_test.py' --ignore-glob='*/raiden_integration_test.py'
