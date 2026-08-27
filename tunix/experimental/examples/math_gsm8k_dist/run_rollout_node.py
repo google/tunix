@@ -18,28 +18,15 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import importlib
 import logging
 import os
 import pickle
 import sys
 from typing import Any
 
-import jax
-from jax.experimental import mesh_utils
-from jax.sharding import Mesh
-from transformers import AutoTokenizer
 from tunix.experimental.examples.math_gsm8k_dist import gsm8k
 from tunix.experimental.examples.math_gsm8k_dist import models
-from tunix.experimental.rollout import inprocess_vllm_sampler_adapter
-from tunix.experimental.rollout import vanilla_sampler_adapter
-from tunix.experimental.weight_sync import raiden_weight_sync_delegate
-from tunix.experimental.weight_sync import weight_sync
-from tunix.experimental.worker import remote_execution
-from tunix.experimental.worker import rollout_worker
-from tunix.generate import mappings as mappings_lib
-from tunix.generate import tokenizer_adapter as tokenizer_adapter_lib
-from tunix.generate import vllm_sampler
-from tunix.models.qwen3 import mapping_vllm_jax
 from tunix.rl.agentic.parser.chat_template_parser import parser as chat_parser_lib
 
 REPO_ROOT = os.path.abspath(
@@ -48,11 +35,25 @@ REPO_ROOT = os.path.abspath(
 
 SAMPLERS = ("inprocess_vllm",)
 
+# This must be set before the first vLLM import. Keep vLLM imports lazy so the
+# rollout process can start with non-vLLM samplers in environments where vLLM is
+# not installed.
+os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+
 CHAT_PARSERS = {
     "qwen": chat_parser_lib.QwenChatTemplateParser,
     "llama": chat_parser_lib.LlamaChatTemplateParser,
     "gemma": chat_parser_lib.GemmaChatTemplateParser,
 }
+
+
+def _import_vllm_sampler():
+  logging.info(
+      "Importing tunix.generate.vllm_sampler before rollout adapters..."
+  )
+  vllm_sampler = importlib.import_module("tunix.generate.vllm_sampler")
+  logging.info("Finished importing tunix.generate.vllm_sampler.")
+  return vllm_sampler
 
 
 def _chat_parser_for(model_id: str, tokenizer):
@@ -68,6 +69,10 @@ def _chat_parser_for(model_id: str, tokenizer):
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
   """Parses command line arguments for the rollout worker process."""
+  from tunix.experimental.weight_sync import (  # pylint: disable=g-import-not-at-top
+      weight_sync,
+  )
+
   parser = argparse.ArgumentParser(description="vLLM rollout worker process")
   parser.add_argument("--port", type=int, default=20001)
   parser.add_argument("--worker_id", type=str, default="vllm-rollout-0")
@@ -102,7 +107,11 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   return parser.parse_args(argv)
 
 
-def _create_rollout_mesh() -> Mesh:
+def _create_rollout_mesh() -> Any:
+  import jax  # pylint: disable=g-import-not-at-top
+  from jax.experimental import mesh_utils  # pylint: disable=g-import-not-at-top
+  from jax.sharding import Mesh  # pylint: disable=g-import-not-at-top
+
   shape = (1, jax.device_count())
   devices = mesh_utils.create_device_mesh(shape, jax.devices())
   return Mesh(devices, axis_names=("fsdp", "tp"))
@@ -110,6 +119,22 @@ def _create_rollout_mesh() -> Mesh:
 
 def _create_vanilla_worker(args, tokenizer):
   """Creates a vanilla sampler rollout worker instance."""
+  from tunix.experimental.rollout import (  # pylint: disable=g-import-not-at-top
+      vanilla_sampler_adapter,
+  )
+  from tunix.experimental.weight_sync import (  # pylint: disable=g-import-not-at-top
+      raiden_weight_sync_delegate,
+  )
+  from tunix.experimental.weight_sync import (  # pylint: disable=g-import-not-at-top
+      weight_sync,
+  )
+  from tunix.experimental.worker import (  # pylint: disable=g-import-not-at-top
+      rollout_worker,
+  )
+  from tunix.generate import (  # pylint: disable=g-import-not-at-top
+      tokenizer_adapter as tokenizer_adapter_lib,
+  )
+
   logging.info("Creating native sampler on the rollout mesh...")
   mesh = _create_rollout_mesh()
   with mesh:
@@ -142,9 +167,7 @@ def _create_vanilla_worker(args, tokenizer):
   )
 
   rollout_tokenizer = tokenizer_adapter_lib.TokenizerAdapter(tokenizer)
-  chat_parser = chat_parser_lib.QwenChatTemplateParser(
-      tokenizer, enable_thinking=False
-  )
+  chat_parser = _chat_parser_for(args.model_id or args.model_name, tokenizer)
   return rollout_worker.RolloutWorker(
       worker_id=args.worker_id,
       config=config,
@@ -157,6 +180,30 @@ def _create_vanilla_worker(args, tokenizer):
 
 def _create_vllm_worker(args, tokenizer):
   """Creates an in-process vLLM sampler rollout worker instance."""
+  vllm_sampler = _import_vllm_sampler()
+  import jax  # pylint: disable=g-import-not-at-top
+  from tunix.experimental.rollout import (  # pylint: disable=g-import-not-at-top
+      inprocess_vllm_sampler_adapter,
+  )
+  from tunix.experimental.weight_sync import (  # pylint: disable=g-import-not-at-top
+      raiden_weight_sync_delegate,
+  )
+  from tunix.experimental.weight_sync import (  # pylint: disable=g-import-not-at-top
+      weight_sync,
+  )
+  from tunix.experimental.worker import (  # pylint: disable=g-import-not-at-top
+      rollout_worker,
+  )
+  from tunix.generate import (  # pylint: disable=g-import-not-at-top
+      mappings as mappings_lib,
+  )
+  from tunix.generate import (  # pylint: disable=g-import-not-at-top
+      tokenizer_adapter as tokenizer_adapter_lib,
+  )
+  from tunix.models.qwen3 import (  # pylint: disable=g-import-not-at-top
+      mapping_vllm_jax,
+  )
+
   logging.info("Creating vLLM mapping config...")
   mapping_config = mappings_lib.MappingConfig(
       lora_to_hf_mappings=mapping_vllm_jax.LORA_TO_HF_MAPPINGS
@@ -202,9 +249,7 @@ def _create_vllm_worker(args, tokenizer):
       raiden_sync_delegate=raiden_delegate,
   )
   rollout_tokenizer = tokenizer_adapter_lib.TokenizerAdapter(tokenizer)
-  chat_parser = chat_parser_lib.QwenChatTemplateParser(
-      tokenizer, enable_thinking=False
-  )
+  chat_parser = _chat_parser_for(args.model_id or args.model_name, tokenizer)
   logging.info("Creating RolloutWorker wrapper...")
   config = rollout_worker.RolloutConfig(
       sampler_type="inprocess_vllm",
@@ -250,9 +295,12 @@ def main(argv: list[str], context: Any = None) -> None:
   os.environ.setdefault("VLLM_ALLOW_LONG_MAX_MODEL_LEN", "1")
   os.environ.setdefault("VLLM_TPU_RPA_VERSION", "2")
   os.environ.setdefault("DISABLE_MOSAIC_ATTN", "1")
+  os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
   if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
   logging.info("Repo root inserted into sys.path: %s", REPO_ROOT)
+
+  from transformers import AutoTokenizer  # pylint: disable=g-import-not-at-top
 
   tokenizer_path = args.tokenizer_path or args.model_dir or args.model_id
   logging.info("Loading tokenizer from %s...", tokenizer_path)
@@ -268,6 +316,10 @@ def main(argv: list[str], context: Any = None) -> None:
       worker_service = _create_vanilla_worker(args, tokenizer)
     else:
       worker_service = _create_vllm_worker(args, tokenizer)
+
+    from tunix.experimental.worker import (  # pylint: disable=g-import-not-at-top
+        remote_execution,
+    )
 
     logging.info("Creating rollout gRPC server...")
     server = remote_execution.GrpcRemoteExecutionServer(worker_service)
