@@ -22,8 +22,8 @@ B - C = 0 bytes
 | A | `M15_FIRST_RED_INPUT_CONTRACT` with mismatch distribution, identity hashes, and artifact-completeness matrix | every field is traced to immutable `file:line` or explicitly marked missing | complete |
 | B | fresh captured-red replay carrier and APC-off/APC-on decision table | full 256-row producer, mixed standard/continue A chronology, standard-only full-reset B, exact request joins, GCS durability, zero backward/commit | complete: Attempt 6 off=`CONTROL_GREEN`, on=`FRESH_TARGET_RED_FROZEN` |
 | C | executable replay-prefix input plan followed by a single-variable reproduction ladder | saved bytes and chronology revalidate; control A-B=0; treatment either reproduces red or is `ONEHOST_NOT_REPRODUCED` | complete: r10-r13c one-host ladder exact through full chronology; scale/topology remains |
-| D | observer-neutral coarse-to-fine first-red walk on known-red DP8xTP8 | `FIRST_RED_LOCALIZED` names last exact and first red tensor, shape ledger, request/token/cache coordinate, and `file:line` | blocked on Phase D2 exact-image/publication and a separately approved one-round target pair |
-| D2 | M15-only incremental observer shards, sealed-input classifier, terminal ordering, and source self-verification | forced death preserves a verified shard; unsealed/tampered/source-mismatched inputs fail closed | host pass; exact-image pass; target not run |
+| D | observer-neutral coarse-to-fine first-red walk on known-red DP8xTP8 | `FIRST_RED_LOCALIZED` names last exact and first red tensor, shape ledger, request/token/cache coordinate, and `file:line` | Attempt-12 coarse summary returned; blocked on remote evidence binding before the conditional Layer-0 full run |
+| D2 | M15-only incremental observer shards, sealed-input classifier, terminal ordering, and source self-verification | forced death preserves a verified shard; unsealed/tampered/source-mismatched inputs fail closed | host and exact-image pass; Attempt-12 runtime used this path, but its committed return omitted the remote binding audit |
 | E | minimal localized repair, default off or experiment-bound | reproducer flips red to zero; APC-off and B are unchanged; adjacent and dirty-page negatives fire | pending |
 | F | certification ladder | host -> exact-image -> one-host clean/repeat/dirty -> matched profile -> separately approved DP8xTP8 G-E | pending |
 
@@ -124,3 +124,13 @@ B - C = 0 bytes
 - Decision: do not add diagnostic rounds now. The renderer is one-round, the
   M15 classifier admits diagnostic round zero only, and extra rounds would
   multiply the storage failure rather than improve localization.
+- Confirmed: the committed Attempt-12 return verifies only four derived files.
+  It omits the three remote terminal markers, root manifest, compact-bundle
+  binding, raw-log identity, and canonical on-arm classifier fields needed to
+  reproduce the coarse verdict. This is an analysis-grade return, not proof
+  that the runtime failed to upload those objects.
+- Decision: before rendering the Layer-0 full observer, a bucket-capable
+  executor must run the checked-in wide-seam GCS audit against the Attempt-12
+  receipt. Only `LAYER_SELECTED` with both arms evidence-bound and no source
+  conflict admits the next target run. `INCOMPLETE` or `SOURCE_MISMATCH` means
+  evidence recovery, not a numerical fix and not another rollout.

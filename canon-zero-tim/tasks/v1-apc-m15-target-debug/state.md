@@ -1,18 +1,18 @@
 # State
 
-- Status: active; Attempt 12 paired dual-arm execution on DP8xTP8 (64 TPUs per arm) completed with 92.5% cache hit rate on treatment and 0.0% on control. Control verified M15_OBSERVER_CONTROL_EXACT (0 diff bytes). Treatment reproduced 477 diff bytes and localized the first red boundary to Layer 0 between layer_input (exact) and layer_output.
+- Status: active; Attempt 12 returned an internally hashed analysis-grade summary: APC-off reports A-B/B-C zero, APC-on reports A-B 477 bytes / 227 elements and B-C zero, and the coarse fingerprint interval is Layer 0 input-to-output. The checked-in return does not bind the classifiers to the remote shards, terminal markers, root manifest, or compact bundle, so a read-only GCS audit is required before the Layer-0 full observer.
 - Objective: explain and repair the M15 DP8xTP8 APC-on A-vs-B byte mismatch without changing the independent full-reset B arm or any unrelated numerical path.
 - Definition of done: `FIRST_RED_LOCALIZED` names the last exact and first red tensor plus `file:line`; one localized repair then passes host, exact-image, one-host clean/dirty controls, deterministic repeat, and separately approved DP8xTP8 A-B/B-C zero.
 - Task directory: `canon-zero-tim/tasks/v1-apc-m15-target-debug`.
 - Release base: `395c0e0de8626c96e85457b997efddd2dd2dec48` on `origin/yuxzhang/canon-zero-tim`.
-- Immutable target fact: Attempt 12 off=`CONTROL_GREEN` (0/0 diff bytes, 18.4% solve rate); on=`FRESH_TARGET_RED_FROZEN` with A-B 477 bytes / 227 elements, B-C zero, and 92.5% cache hit rate on DP8xTP8. Layer 0 layer_input is 100% bitwise exact while Layer 0 layer_output is first red. All cached readers (Gen 1..7) are 100% bitwise identical to each other.
+- Analysis-grade target fact: Attempt 12 summaries report off=`CONTROL_GREEN` (0/0 diff bytes, 18.4% solve rate); on=`FRESH_TARGET_RED_FROZEN` with A-B 477 bytes / 227 elements, B-C zero, and 92.5% cache hit rate on DP8xTP8. The coarse classifier reports equal Layer-0 input fingerprints and a red Layer-0 output fingerprint. Fingerprint equality is not full-tensor byte equality, and the minimized return is not independently classifier-replayable.
 - One-host fact: local r10-r13c stayed exact through real scheduler publication, 32-request composition, `continue_decode=8`, and full M15 chronology. r13c APC-on reached 97.8% hits, 130,148 actions, and logical KV 988..7189. These receipts remain under `/mnt/disks/tunix-data`; they are not a target repair.
-- Current phase: [Phase D Full Layer 0 Observer](phases/phase-d-wide-target-observer.md).
+- Current phase: Attempt-12 remote evidence binding, then the conditional [Phase D Full Layer 0 Observer](phases/phase-d-wide-target-observer.md).
 - Implemented: renderer `none|layer|full` modes; 36-layer coarse observer plus final norm/tail; one-layer 15-checkpoint observer; M15-aware first-red classifier; bounded immutable observer shards; classifier input assembled only from their verified union; deterministic compact selected-record bundle; runtime source self-verification; manifest-last terminal publication.
 - Numerical changes: none. RoPE, attention/RPA, KV values, LM head, loss, backward, optimizer, B full reset, and production APC are unchanged.
-- Next action: render and execute Layer 0 Full Observer (`--observer full --seam-layer 0`) with run_id `d21-full-l0`.
-- Claim ceiling: `FIRST_RED_LOCALIZED_LAYER_0 / CONTROL_EXACT_PASS / TARGET_LAYER_0_READY`.
+- Next action: on a bucket-capable machine, run `scripts/run_m15_wide_seam_gcs_salvage.sh` against the committed Attempt-12 receipt and return the complete self-hashed small audit. Require `status=LAYER_SELECTED`, both arms `evidence_bound=true`, no source conflict, and independently verified SHA before rendering any new target run.
+- Claim ceiling: `ANALYSIS_GRADE_COARSE_LAYER_0 / REMOTE_EVIDENCE_BINDING_PENDING / NUMERICAL_FIX_NOT_AUTHORIZED`.
 - Sensitive evidence: the compact bundle contains real tokens/capsules. `m15-wide-v1` publishes it only under the already registered per-run P38 GCS root after sealed-union classification; never return the payload through Git or chat.
 - Key artifacts: [Attempt-12 receipt](evidence/v1_apc_m15_attempt12_paired_d20_20260827/receipt.json), [Attempt-12 incident report](evidence/v1_apc_m15_attempt12_paired_d20_20260827/INCIDENT_REPORT.md), [Attempt-6 receipt](evidence/v1_apc_m15_attempt6_paired_d12_20260825/receipt.json), [Phase D observer](phases/phase-d-wide-target-observer.md), [Phase3 state](../v1-phase3-prefix-cache/state.md).
-- Publishing: commit and push Attempt 12 evidence and handoff updates.
-- Updated: 2026-08-27 (Attempt 12 completed: Layer 0 localized as first red boundary).
+- Publishing: the Attempt-12 summary commit is already published; this evidence-grade correction is local and awaits separate commit/push approval.
+- Updated: 2026-08-27 (Attempt-12 small return audited locally; remote evidence binding is the next gate).

@@ -638,3 +638,32 @@
   - Localization verdict: `M15_LAYER_FIRST_RED_LOCALIZED`, `selected_layer=0`.
 - Sealed evidence in `evidence/v1_apc_m15_attempt12_paired_d20_20260827/`.
 - Claim ceiling: `FIRST_RED_LOCALIZED_LAYER_0 / CONTROL_EXACT_PASS / TARGET_LAYER_0_READY`.
+
+## 2026-08-27 — Attempt-12 evidence-grade correction before Layer-0 full run
+
+- Independently verified the checked-in Attempt-12 `SHA256SUMS`: all four
+  listed members pass. The source commit exists, is an ancestor of the current
+  branch, and contains the single-round durability seal fix.
+- The package is nevertheless analysis-grade. It does not return or bind the
+  remote `PREFLIGHT.json`, `COLLECTED.json`, `COMPLETE.json`, root manifest,
+  compact bundle, raw log identity, or Kubernetes terminal state. The on-arm
+  JSON also omits five fields emitted by the canonical classifier: `anchors`,
+  `expected_layer`, `first_difference_signatures`,
+  `mixed_first_difference_signatures`, and `replay_ledger_receipts`.
+- Corrected the claim from full localization to a coarse fingerprint interval:
+  Layer-0 input fingerprint equal, Layer-0 output fingerprint red. Exact
+  fingerprints are not full-tensor byte equality; the reported source lines
+  are observer anchors, not the causal model operator.
+- The likely omission is in post-run return packaging, not necessarily runtime
+  durability: multi-GiB token evidence correctly remained in GCS, while the
+  executor committed a manually minimized four-member summary instead of the
+  checked-in GCS audit return. The prior Handoff mixed stale D2 publication,
+  replay-audit, and Attempt-12 launch instructions without an adjacent
+  fail-closed return checklist.
+- Next gate is read-only and uses zero TPU: run
+  `run_m15_wide_seam_gcs_salvage.sh` on the Attempt-12 receipt from a
+  bucket-capable machine. Require `LAYER_SELECTED`, both arms evidence-bound,
+  no source conflict, and a self-verifying return before any Layer-0 full
+  observer launch or numerical repair.
+- No numerical/runtime source, flag, remote state, TPU/Kubernetes job, commit,
+  or push was changed in this correction.

@@ -1,8 +1,130 @@
 # M15 APC target-debug handoff
 
-## START HERE — Phase D2 is exact-image admitted; do not launch target yet
+## START HERE — audit Attempt 12 before launching the Layer-0 full observer
 
-The active worktree is implementing an evidence-transport repair, not an APC
+Attempt 12 (`d20-395c0e0d`) is currently **analysis-grade**, not signed target
+evidence.  The checked-in five-file return is internally intact (`4/4` entries
+listed by its `SHA256SUMS` verify), and its summaries report:
+
+```text
+off: A-B=0 bytes, B-C=0 bytes
+on:  A-B=477 bytes / 227 elements, B-C=0 bytes
+coarse interval: Layer 0 layer_input fingerprint exact -> layer_output fingerprint red
+```
+
+That package does **not** bind those summaries to the remote bounded shards.
+It omits the remote `PREFLIGHT.json`, `COLLECTED.json`, `COMPLETE.json`, root
+`SHA256SUMS`, compact-bundle verification, raw-log identity, and Kubernetes
+terminal receipt.  The returned on-arm classification is also a minimized
+copy: it omits the canonical classifier's `anchors`,
+`first_difference_signatures`, `mixed_first_difference_signatures`,
+`replay_ledger_receipts`, and `expected_layer` fields.  Therefore its current
+gate is only `COARSE_FIRST_RED_INTERVAL`; it is not the final
+`FIRST_RED_LOCALIZED` gate and it does not authorize a numerical repair.
+
+### Why the previous return did not contain the complete evidence chain
+
+Do not describe this as proof that the runtime failed to upload its data.  The
+large seam JSON/NPZ payloads were intentionally left in GCS because the two
+arms report approximately 6.6 GiB and 5.5 GiB of observer data.  The missing
+step was the **post-run return audit**: the executor committed a manually
+minimized receipt plus two classifier summaries and hashed only those four
+small files.  It did not run the checked-in wide-seam GCS audit and return the
+audit package that proves the classifiers are bound to the remote root or the
+compact bundle.
+
+The old Handoff made this mistake easier: its top `START HERE` section still
+described Phase D2 publication, a later generic section referred to the older
+replay audit, and the Attempt-12 entry jumped directly to the next launch.
+There was no fail-closed Attempt-12 return checklist adjacent to that entry.
+This section supersedes those stale operational instructions.  It does not
+assert that the remote terminal objects are present or absent; the audit below
+answers that question mechanically.
+
+### Bucket-capable executor: perform this read-only audit now
+
+Do not launch TPU/Kubernetes and do not retain, return, or commit the
+token-bearing bundle.  The checked-in audit may fetch that compact tar into a
+temporary directory solely to verify its internal manifest, then deletes the
+scratch directory.  Use a clean checkout containing the published Attempt-12
+receipt and run:
+
+```bash
+cd /home/yuxuan/code_rl_repro/sequence_packing/tunix
+test -z "$(git status --porcelain)"
+git fetch origin yuxzhang/canon-zero-tim
+git pull --ff-only origin yuxzhang/canon-zero-tim
+
+RECEIPT=canon-zero-tim/tasks/v1-apc-m15-target-debug/evidence/v1_apc_m15_attempt12_paired_d20_20260827/receipt.json
+RETURN=/tmp/v1-apc-m15-attempt12-d20-gcs-audit
+test -f "$RECEIPT"
+test ! -e "$RETURN"
+
+bash canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/run_m15_wide_seam_gcs_salvage.sh \
+  "$RECEIPT" "$RETURN" /mnt/disks/tunix-data
+(cd "$RETURN" && sha256sum -c SHA256SUMS)
+```
+
+Despite the historical `salvage` name, this wrapper accepts the two roots from
+the supplied receipt and is the correct read-only verifier for Attempt 12.  It
+checks both classifier aliases, all three terminal markers, the root manifest,
+the compact bundle's internal manifest, and source identity.  The
+token-bearing tar is verified in scratch space and excluded from the return.
+
+### Exact return contract
+
+Return the complete small `$RETURN` directory without editing or reformatting
+any JSON.  It must contain:
+
+1. `SALVAGE_SUMMARY.json`;
+2. `PACKAGING.txt`;
+3. `SHA256SUMS`;
+4. `off.classification.json` and `on.classification.json` when present.
+
+Also return, without copying token arrays:
+
+5. the terminal line printed by the wrapper, including `status`, summary SHA,
+   manifest SHA, and return path;
+6. independent `sha256sum -c SHA256SUMS` output;
+7. the exact full source SHA, both JobSet names, Attempt number, and the
+   Kubernetes terminal status for each arm;
+8. for each arm, either the immutable raw-log object identity plus SHA/size or
+   a self-hashed text excerpt containing every line with `CANON_ALIGN_PRE`,
+   `P3_APC_CONFIG`, `Prefix cache hit rate`, `CONTROLLED_EXIT`, `FATAL`, or
+   `Traceback`.
+
+The audit summary must mechanically report the presence/hash/source fields for
+`PREFLIGHT.json`, `COLLECTED.json`, and `COMPLETE.json`, whether a root
+manifest exists, whether the classifier is manifest-bound, and whether the
+compact bundle's internal manifest passes.  A prose statement or a new
+four-file summary is not an acceptable substitute.
+
+Acceptance is exactly:
+
+```text
+status=LAYER_SELECTED
+next_action=render full observer only at layer 0
+off classifier=M15_OBSERVER_CONTROL_EXACT
+on classifier=M15_LAYER_FIRST_RED_LOCALIZED
+source conflicts=[]
+both arms evidence_bound=true
+```
+
+`INCOMPLETE`, `SOURCE_MISMATCH`, missing terminal markers, missing manifest
+binding, a failed hash, off-arm red, or B-C red is a hard stop.  Preserve the
+return and repair/recover only the missing evidence; do not launch `d21` and do
+not change model numerics.
+
+Only after this audit passes may a separately approved paired Layer-0 full
+observer run be rendered from the exact Attempt-12 source.  That run must use
+all 15 checkpoints listed in the Phase-D document, rerun both APC-off and
+APC-on arms, and reach `M15_INTERNAL_FIRST_RED_LOCALIZED` /
+`FIRST_RED_LOCALIZED` before Phase E may propose a repair.  More diagnostic
+rounds are not a substitute for the full Layer-0 checkpoint walk.
+
+## Background — Phase D2 durability contract
+
+The published source implements an evidence-transport repair, not an APC
 numerical fix. The intended runtime contract is:
 
 ```text
@@ -51,14 +173,13 @@ Pinned image `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d
 terminated with `V1_HP_EXACT_IMAGE_PASS ... apc_m15_carrier=66
 m15_durability=1 ...`. The image gate uses a read-only Git common-directory
 mount so the existing live `git rev-parse HEAD` source check runs inside the
-container; no receipt-only provenance shortcut was admitted. Commit/push is
-authorized for this payload. A DP8xTP8 off/on launch remains a separate later
-approval boundary.
+container; no receipt-only provenance shortcut was admitted.
 
 Claim ceiling now:
 
 ```text
-FIRST_RED_LOCALIZED_LAYER_0 / CONTROL_EXACT_PASS / TARGET_LAYER_0_READY
+ANALYSIS_GRADE_COARSE_LAYER_0 / REMOTE_EVIDENCE_BINDING_PENDING /
+NUMERICAL_FIX_NOT_AUTHORIZED
 ```
 
 See [Phase D2](phases/phase-d2-durable-wide-shards.md).
@@ -517,7 +638,10 @@ branch later advanced through `ff913a84` to `9f79cc56`; the intervening raw-log,
 P58 seed, and P64 shared-entrypoint changes were reviewed, then the release
 commit was rebased without conflict before the final aggregate gate.
 
-## Next action before any launch
+## Historical — Attempt-4 next-launch instructions (superseded)
+
+This section records how the earlier paired carrier was admitted.  It is not
+the current operation.  Follow the `START HERE` Attempt-12 GCS audit instead.
 
 Do not relaunch source `eb58954f...`; its missing signed identity is
 deterministically invalid. Patch 28 has passed the targeted and aggregate
@@ -580,7 +704,7 @@ Do not relaunch Attempt-4 source `618eb775...`: it deterministically lacks the
 new sampler admission. Attempt 4 has no matched fresh APC-off arm, so it cannot
 substitute for either member of the new pair below.
 
-## Paired launch — submit both without waiting
+## Historical — paired-launch contract used by Attempt 12
 
 After one explicit paired-launch approval, issue both standalone commands
 immediately. Do not append a pipe, `tee`, `&&`, or a monitor to either command:
@@ -612,7 +736,7 @@ After a green control, the treatment has two admissible outcomes:
 Any `INCONCLUSIVE`, B-C red, missing join, missing GCS terminal marker, or
 unexpected optimizer/backward evidence is a hard stop.
 
-## What the remote execution agent must return
+## Historical — generic replay return contract
 
 Large GCS evidence remains durable and must not be added wholesale to Git. On
 the machine that can read the bucket, run the checked-in GCS audit:
@@ -714,7 +838,12 @@ Attempt 12 paired dual-arm execution (`d20-395c0e0d`, source commit `395c0e0de86
   - Terminal: Controlled exit code 42, zero backward, zero optimizer commits.
 - Retained evidence: `evidence/v1_apc_m15_attempt12_paired_d20_20260827/`.
 
-### Follow-up Action
+### Follow-up action after the `START HERE` audit passes
+
+Do not run the command below from the currently checked-in four-member summary
+alone.  The read-only Attempt-12 GCS audit at the top of this Handoff must first
+return `LAYER_SELECTED`, both arms evidence-bound, and no source conflict.
+Only then, with separate user approval for the paired target launch, render:
 Render and launch the Layer 0 full 15-checkpoint observer:
 ```bash
 python3 canon-zero-tim/cluster/render_v1_apc_m15_target_debug.py \
