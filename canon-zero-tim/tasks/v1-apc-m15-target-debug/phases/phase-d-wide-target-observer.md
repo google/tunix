@@ -143,3 +143,12 @@ If a valid control/treatment classifier pair already exists, it supersedes a
 new coarse layer run. If the result is `INCOMPLETE`, the next implementation
 task is durability/ledger separation, not a numerical fix and not a blind
 multi-round retry.
+
+The expected-object salvage subsequently returned a self-hashed
+`SOURCE_MISMATCH`: both arms had only `PREFLIGHT.json` among the seven queried
+objects, and those runtime markers agreed on the valid source
+`3f159250c4781b3faafde238f768457a0478446b` rather than the nonexistent full
+SHA recorded later in the prose receipt. Because that wrapper queried exact
+names instead of recursively enumerating each root, Phase D now requires the
+token-safe full object-name inventory at the top of `HANDOFF.md`. No layer is
+selected and no target rerun is admitted by this result.

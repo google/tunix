@@ -1,90 +1,167 @@
 # M15 APC target-debug handoff
 
-## START HERE — salvage Attempt 9 from GCS before any new TPU run
+## START HERE — complete the Attempt-9 read-only GCS inventory
 
-This is a read-only bucket audit. Do not render or launch another JobSet, edit
-YAML, or infer a layer from the prose receipt. Attempt 9 reported a completed
-off/on wide-layer run but returned only `receipt.json` to Git. The first action
-is to ask the registered Attempt-0 roots whether the machine classifier and
-compact bundle already exist.
+The first salvage pass is complete and self-verifies 2/2 files under
+`evidence/v1_apc_m15_attempt9_gcs_salvage_20260827/`. It established two
+separate defects:
 
-From a bucket-capable checkout of the published operator branch, run exactly:
+1. both registered Attempt-0 roots contain `PREFLIGHT.json`, but the six
+   expected post-preflight objects (`COLLECTED.json`, `COMPLETE.json`, root
+   `SHA256SUMS`, both classifier aliases, and the compact bundle) are absent;
+2. both runtime preflight markers name source
+   `3f159250c4781b3faafde238f768457a0478446b`, while the later prose receipt
+   names the nonexistent full SHA
+   `3f159250917fa9ee6062fbe7554f67644fcffec9`.
+
+Therefore the receipt's claimed `0/1329` byte verdict and 2,313 tensor records
+are not signed or reproducible evidence. Do not infer a layer from them. The
+salvage wrapper checked seven exact object names; it did **not** enumerate
+other objects that might survive under those roots. The next action is one
+complete, read-only name inventory before declaring Attempt 9 irrecoverable.
+
+From a bucket-capable checkout of the latest published operator branch, run
+exactly. This command downloads no object payload and mutates no GCS state:
 
 ```bash
 cd /home/yuxuan/code_rl_repro/sequence_packing/tunix
 git fetch origin yuxzhang/canon-zero-tim
 BASE_SHA="$(git rev-parse origin/yuxzhang/canon-zero-tim)"
-WORKTREE=/mnt/disks/tunix-data/worktrees/m15_attempt9_gcs_salvage_20260827
+WORKTREE=/mnt/disks/tunix-data/worktrees/m15_attempt9_full_inventory_20260827
 test ! -e "$WORKTREE"
 git worktree add --detach "$WORKTREE" "$BASE_SHA"
 cd "$WORKTREE"
 
 RECEIPT=canon-zero-tim/tasks/v1-apc-m15-target-debug/evidence/v1_apc_m15_attempt9_paired_d15_20260826/receipt.json
-RETURN=canon-zero-tim/tasks/v1-apc-m15-target-debug/evidence/v1_apc_m15_attempt9_gcs_salvage_20260827
+RETURN=canon-zero-tim/tasks/v1-apc-m15-target-debug/evidence/v1_apc_m15_attempt9_gcs_full_inventory_20260827
 test -f "$RECEIPT"
 test ! -e "$RETURN"
+command -v gcloud >/dev/null
 
-bash canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/run_m15_wide_seam_gcs_salvage.sh \
-  "$RECEIPT" "$RETURN" /mnt/disks/tunix-data
+python3 - "$RECEIPT" "$RETURN" <<'PY'
+import hashlib
+import json
+from pathlib import Path
+import subprocess
+import sys
+
+receipt_path = Path(sys.argv[1])
+output = Path(sys.argv[2])
+receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+output.mkdir(parents=True)
+records = {}
+for arm, key in (("off", "control_arm_off"), ("on", "treatment_arm_on")):
+  root = receipt[key]["gcs_source_uri"].rstrip("/")
+  completed = subprocess.run(
+      ["gcloud", "storage", "ls", "--recursive", root + "/**"],
+      check=False,
+      capture_output=True,
+      text=True,
+  )
+  if completed.returncode:
+    raise SystemExit(
+        f"GCS inventory failed for {arm}: rc={completed.returncode} "
+        f"stderr={completed.stderr[-500:]}"
+    )
+  prefix = root + "/"
+  relative = []
+  for raw in completed.stdout.splitlines():
+    value = raw.strip()
+    if not value or value.endswith(":"):
+      continue
+    if not value.startswith(prefix):
+      raise SystemExit(f"unexpected inventory entry outside {arm} root")
+    relative.append(value[len(prefix):])
+  records[arm] = sorted(set(relative))
+
+summary = {
+    "schema": "m15-apc-attempt9-full-object-inventory-v1",
+    "receipt_sha256": hashlib.sha256(receipt_path.read_bytes()).hexdigest(),
+    "receipt_source_commit": receipt["source_commit"],
+    "runtime_source_commit": "3f159250c4781b3faafde238f768457a0478446b",
+    "source_identity_matches": False,
+    "payloads_downloaded": False,
+    "remote_state_mutated": False,
+    "objects": records,
+    "object_counts": {arm: len(values) for arm, values in records.items()},
+}
+inventory = output / "OBJECT_INVENTORY.json"
+inventory.write_text(
+    json.dumps(summary, sort_keys=True, indent=2) + "\n", encoding="utf-8"
+)
+packaging = output / "PACKAGING.txt"
+packaging.write_text(
+    "M15 Attempt-9 full object-name inventory\n"
+    "payloads_downloaded=0\n"
+    "remote_state_mutated=0\n"
+    "source_identity_matches=0\n",
+    encoding="utf-8",
+)
+manifest = output / "SHA256SUMS"
+manifest.write_text(
+    "".join(
+        f"{hashlib.sha256((output / name).read_bytes()).hexdigest()}  {name}\n"
+        for name in ("OBJECT_INVENTORY.json", "PACKAGING.txt")
+    ),
+    encoding="ascii",
+)
+print(json.dumps(summary["object_counts"], sort_keys=True))
+PY
 
 (cd "$RETURN" && sha256sum -c SHA256SUMS)
-python3 - "$RETURN/SALVAGE_SUMMARY.json" <<'PY'
+python3 - "$RETURN/OBJECT_INVENTORY.json" <<'PY'
 import json
 import sys
 value = json.load(open(sys.argv[1], encoding="utf-8"))
-print(json.dumps({
-    "status": value["status"],
-    "next_action": value["next_action"],
-    "off_classification": value["off"]["classification"],
-    "on_classification": value["on"]["classification"],
-}, sort_keys=True, indent=2))
+print(json.dumps(value["objects"], sort_keys=True, indent=2))
 PY
 ```
 
-The script reads both GCS roots from the committed receipt, downloads only
-known small terminal/classifier objects plus the compact tar, verifies the tar
-entirely in scratch, and deletes scratch on exit. The tar may contain real
-tokens, so it is **not** copied into the return directory. The return contains
-only:
+Return exactly these three small files, the two printed object counts, the
+independent `sha256sum -c` output, and `git status --short`:
 
 ```text
-SALVAGE_SUMMARY.json
+OBJECT_INVENTORY.json
 PACKAGING.txt
 SHA256SUMS
-off.classification.json   # only if a valid off classifier exists
-on.classification.json    # only if a valid on classifier exists
 ```
 
-Return every file that exists in that directory, the terminal
-`[M15.WIDE.SALVAGE] COMPLETE ...` line, and `git status --short`. Do not return
-the compact tar, raw NPZ files, credentials, environment dumps, or manually
-written conclusions. Do not commit or push unless the user separately
-authorizes that exact evidence-only action.
+Do not return full bucket roots, credentials, environment dumps, raw logs,
+NPZs, compact bundles, or token contents. Do not download anything yet. Do not
+commit or push unless the user separately authorizes that exact evidence-only
+action.
 
 Interpretation is mechanical:
 
-| `status` | What the execution agent does |
+| Full inventory | What the execution agent does |
 |---|---|
-| `LAYER_SELECTED` | stop and return the package; the analysis owner decides whether to render `full` at the selected layer |
-| `TAIL_SELECTED` | stop and return the package; no layer guess |
-| `TREATMENT_EXACT` | stop and return the package; this is one exact observation, not a repair |
-| `INCOMPLETE` | stop and return the package; do not launch d18 |
-| `SOURCE_MISMATCH` | stop and return the package; preserve both source identities for review |
-| `CONTROL_RED` / `REVIEW_REQUIRED` | hard stop and return the package |
+| Any object other than `PREFLIGHT.json` exists | stop and return the inventory; the analysis owner prepares a narrowly scoped downloader/classifier for those exact names |
+| Each arm contains only `PREFLIGHT.json` | stop and return the inventory; classify Attempt 9 as irrecoverable from its registered GCS roots |
+| Listing fails or contains an out-of-root entry | hard stop; return stderr and do not retry with broader permissions |
 
-Attempt 11/d17 does not replace this salvage step. It collected roughly 2,100
-observer records per arm but the legacy incident ledger exceeded 2 GiB before
-a classifier/bundle could be sealed. Adding diagnostic rounds under the
-current carrier would multiply that failure. If Attempt 9 salvage is
-`INCOMPLETE`, the analysis owner will first remove that redundant wide-mode
-ledger dependency and harden manifest-last GCS persistence; only then may a
-fresh one-round pair be considered.
+Regardless of inventory outcome, the later receipt's source SHA remains
+invalid and cannot authenticate the run. Attempt 11/d17 also remains
+inconclusive: it collected roughly 2,100 observer records per arm in the pod,
+but the legacy incident ledger exceeded 2 GiB before classifier/bundle
+persistence. No current result selects a layer or authorizes a numerical fix.
 
-## CONDITIONAL ONLY — run the DP8xTP8 wide layer observer
+## BLOCKED — do not rerun the DP8xTP8 observer yet
 
-Do not use this section until the Attempt-9 salvage package has been reviewed
-and the user explicitly approves a new target run. In particular, do not
-raise `CANON_P38_DIAGNOSTIC_ROUNDS` by hand.
+Before any new target run, implement and certify all four durability changes:
+
+1. wide mode must bypass the redundant legacy P38 incident ledger rather than
+   raising its byte bound;
+2. bounded observer shards must upload incrementally while the worker is
+   alive;
+3. the classifier must run from persisted shards and write `COLLECTED`, then a
+   self-hashed manifest, then `COMPLETE` from the surviving worker;
+4. runtime source identity must come from the executing checkout and agree
+   with the rendered source SHA.
+
+Rehearse forced failure after one shard and require that the shard, source
+marker, and an `INCONCLUSIVE` terminal receipt survive. Keep one diagnostic
+round only. After host/exact-image packaging gates pass, a new DP8xTP8 off/on
+pair still requires separate user approval.
 
 The one-host ladder is exhausted: real scheduler publication, 32-request
 composition, `continue_decode=8`, and full M15 chronology all stayed exact on
@@ -537,15 +614,19 @@ Attempt 8 dual-arm execution (`d14-3820b168`, source commit `3820b168e37080ea9c4
 
 ## Attempt 9 M15 Target Debug Runs (d15-3f159250 Phase D Wide Layer Observer)
 
-Attempt 9 dual-arm execution (`d15-3f159250`, source commit `3f159250917fa9ee6062fbe7554f67644fcffec9`) ran on dual 64-TPU allocations (DP8xTP8) with all 36-layer observers attached:
-- **Control Arm (`canon-v1-apc-m15-off-d15-3f159250`)**:
-  - Rollout: 256 trajectories completed, 0.0% prefix cache hit rate, solve rate 18.0%.
-  - Pre-alignment: `verdict=PASS`, 0 differing bytes on A-B and B-C.
-  - Terminal: Controlled exit code 42, zero backward, zero optimizer commits.
-- **Treatment Arm (`canon-v1-apc-m15-on-d15-3f159250`)**:
-  - Rollout: 256 trajectories completed, **92.9%** prefix cache hit rate, solve rate 17.2%.
-  - Pre-alignment: `[CANON_ALIGN_PRE] step=0 verdict=FAIL N_action=122082 bounds=[('S_decode_vs_S_prefill', 1329), ('S_prefill_vs_T_old', 0)]` (Reproduced 1,329 diff bytes between $S_{\text{decode}}$ and $S_{\text{prefill}}$ across 122,082 action tokens).
-  - Evidence: `evidence_sha256=9d523aa06af9ba5313729043b98d62d9c36135611450f9af7096aff5e068ae58`.
-  - Collected 2,313 seam and tail tensor records across all 36 layers (9,272 capture files total).
-  - Terminal: Controlled exit code 42, zero backward, zero optimizer commits.
-- Retained evidence: `evidence/v1_apc_m15_attempt9_paired_d15_20260826/`.
+The historical receipt under
+`evidence/v1_apc_m15_attempt9_paired_d15_20260826/` claimed a completed paired
+run, APC-off `0/0`, APC-on A-B red by 1,329 bytes, and 2,313 tensor records.
+That claim is **superseded as unsigned prose**:
+
+- its full source SHA does not exist in the repository;
+- both real GCS preflight markers instead identify the valid commit
+  `3f159250c4781b3faafde238f768457a0478446b`;
+- the expected-object GCS audit found no `COLLECTED`, `COMPLETE`, root manifest,
+  classifier, or compact bundle in either arm.
+
+Only bucket writability at startup and the runtime-marker source identity are
+currently verified. The historical numerical values must not select a layer,
+close a gate, or justify a repair. See
+`evidence/v1_apc_m15_attempt9_gcs_salvage_20260827/`; the full object-name
+inventory at the top of this handoff is the only admitted next operation.

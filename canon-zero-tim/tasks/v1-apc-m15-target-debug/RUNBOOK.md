@@ -5,22 +5,24 @@ commands; it does not edit YAML, numerical code, or evidence. Large payloads
 remain in GCS exactly like the earlier P38/lm-head investigation. Only small
 machine-generated receipts are returned through Git or chat.
 
-## Current operation: read-only Attempt-9 GCS salvage
+## Current operation: read-only Attempt-9 full object inventory
 
-Do not launch TPU work. Run the checked-in salvage command from the top of
-`HANDOFF.md`. It derives both registered Attempt-0 roots from the committed
-Attempt-9 receipt, verifies classifier aliases, root-manifest binding,
-terminal markers, and the compact bundle's internal SHA manifest. It never
-uploads or changes a GCS object.
+Do not launch TPU work and do not rerun the earlier exact-name salvage. That
+audit is complete: its 2/2 returned files verify, both arms expose only
+`PREFLIGHT.json` among the seven queried names, and the later receipt's full
+source SHA conflicts with both runtime markers and does not exist in the Git
+object database.
 
-The return directory is intentionally small and token-safe. Return its
-`SALVAGE_SUMMARY.json`, `PACKAGING.txt`, `SHA256SUMS`, and whichever of
-`off.classification.json` / `on.classification.json` exist. The compact tar is
-inspected in private scratch and must not be copied into Git.
+Follow the exact command at the top of `HANDOFF.md`. It recursively lists names
+under both registered roots, strips the bucket roots from the return, downloads
+no payload, mutates no remote state, and emits only `OBJECT_INVENTORY.json`,
+`PACKAGING.txt`, and `SHA256SUMS`.
 
-An `INCOMPLETE` result is a successful audit of missing evidence, not
-permission to relaunch. Stop and let the analysis owner decide whether the
-wide-mode incident ledger and durability code must change.
+If any object other than `PREFLIGHT.json` exists, return the inventory and stop;
+the analysis owner will prepare a downloader for only those names. If both
+roots contain only `PREFLIGHT.json`, Attempt 9 is irrecoverable from its
+registered GCS roots. Neither outcome permits a target relaunch or numerical
+repair.
 
 ## Conditional operation after salvage: DP8xTP8 wide first-red walk
 

@@ -538,3 +538,27 @@
 - Next: bucket-capable execution of the checked-in read-only salvage command;
   return the self-hashed package for analysis. Do not launch d18 or add
   diagnostic rounds before that review.
+
+## 2026-08-27T08:05:00Z — Attempt-9 expected-object salvage is insufficient
+
+- The committed return under
+  `evidence/v1_apc_m15_attempt9_gcs_salvage_20260827/` verifies 2/2 manifest
+  members and is internally complete as a small audit package.
+- Both arms contain a writable `PREFLIGHT.json`, but lack every queried
+  terminal marker, root manifest, classifier alias, and compact bundle. No
+  machine verdict or tensor boundary was recovered.
+- Both preflight markers identify the valid runtime commit
+  `3f159250c4781b3faafde238f768457a0478446b`; the later Attempt-9 receipt names
+  a different full SHA that does not exist in this repository. The result is
+  therefore `SOURCE_MISMATCH`, and the receipt's numerical prose is not signed
+  evidence.
+- Correction: the salvage wrapper checked seven exact names and did not list
+  every object under either root. Before declaring Attempt 9 irrecoverable, a
+  bucket-capable executor must return a self-hashed, relative-name-only full
+  inventory. It must not download token payloads or launch TPU work.
+- If the inventory finds other objects, stop for a narrowly scoped offline
+  downloader/classifier. If each arm contains only `PREFLIGHT.json`, proceed
+  to wide-mode durability repair: bypass the redundant legacy ledger,
+  incrementally persist bounded shards, classify from persisted input, and
+  write terminal markers manifest-last from the surviving worker. A new
+  one-round DP8xTP8 pair remains separately approval-gated.
