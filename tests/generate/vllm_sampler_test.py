@@ -269,7 +269,7 @@ class VllmSamplerTest(absltest.TestCase):
         "Summarize the plot of Romeo and Juliet.",
         "Give me a recipe for pancakes.",
         "What is the boiling point of water at sea level?",
-        "Share a motivational quote about perseverance.",
+        "What is the largest planet in our solar system?",
     ]
     prompts = list(base_prompts)
     templated_prompts = tc.batch_templatize(prompts, tokenizer)
@@ -284,7 +284,7 @@ class VllmSamplerTest(absltest.TestCase):
         base_prompts[6]: ["romeo", "juliet"],
         base_prompts[7]: ["pancake"],
         base_prompts[8]: ["100", "212"],
-        base_prompts[9]: ["Fall", "stand"],
+        base_prompts[9]: ["Jupiter"],
     }
     prompt_expectations = [
         (prompt, expected_keywords.get(prompt, [])) for prompt in prompts

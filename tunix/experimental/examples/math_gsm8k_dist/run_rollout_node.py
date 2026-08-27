@@ -34,8 +34,8 @@ REPO_ROOT = os.path.abspath(
 )
 
 # This must be set before the first vLLM import. Keep vLLM imports lazy so the
-# runtime context and logging are already configured if TPU/vLLM initialization
-# fails.
+# rollout process can start with non-vLLM samplers in environments where vLLM is
+# not installed.
 os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 
 CHAT_PARSERS = {
@@ -125,7 +125,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   return parser.parse_args(argv)
 
 
-def _create_rollout_mesh(args):
+def _create_rollout_mesh(args) -> Any:
   import jax  # pylint: disable=g-import-not-at-top
   from jax.experimental import mesh_utils  # pylint: disable=g-import-not-at-top
   from jax.sharding import Mesh  # pylint: disable=g-import-not-at-top
@@ -217,9 +217,7 @@ def _create_vanilla_worker(args, tokenizer):
   )
 
   rollout_tokenizer = tokenizer_adapter_lib.TokenizerAdapter(tokenizer)
-  chat_parser = chat_parser_lib.QwenChatTemplateParser(
-      tokenizer, enable_thinking=False
-  )
+  chat_parser = _chat_parser_for(args.model_id or args.model_name, tokenizer)
   return rollout_worker.RolloutWorker(
       worker_id=args.worker_id,
       config=config,
@@ -324,9 +322,7 @@ def _create_vllm_worker(args, tokenizer):
       weight_sync_mode=args.weight_sync_mode,
   )
   rollout_tokenizer = tokenizer_adapter_lib.TokenizerAdapter(tokenizer)
-  chat_parser = chat_parser_lib.QwenChatTemplateParser(
-      tokenizer, enable_thinking=False
-  )
+  chat_parser = _chat_parser_for(args.model_id or args.model_name, tokenizer)
   logging.info("Creating RolloutWorker wrapper...")
   config = rollout_worker.RolloutConfig(
       sampler_type="inprocess_vllm",

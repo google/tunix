@@ -54,7 +54,7 @@ def _convert_host_local_array(x: Any) -> Any:
 
 def _replicate_if_pspec_uses_unknown_mesh_axis(
     pspec: jax.sharding.PartitionSpec | None,
-    mesh: jax.sharding.Mesh,
+    mesh: jax.sharding.Mesh | jax.sharding.AbstractMesh,
 ) -> jax.sharding.PartitionSpec:
   if pspec is None:
     return jax.sharding.PartitionSpec()
@@ -68,7 +68,7 @@ def _replicate_if_pspec_uses_unknown_mesh_axis(
 
 
 def _get_named_sharding(
-    state: Any, mesh: jax.sharding.Mesh
+    state: Any, mesh: jax.sharding.Mesh | jax.sharding.AbstractMesh
 ) -> Any:
   partition_specs = nnx.get_partition_spec(state)
   return jax.tree_util.tree_map(

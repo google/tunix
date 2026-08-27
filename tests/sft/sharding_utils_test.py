@@ -137,11 +137,9 @@ class ShardingUtilsTest(parameterized.TestCase):
         axis_names=('fsdp', 'tp'),
     )
     x = jnp.ones((device_cnt, 4, 8))
-
     sharding = sharding_utils.get_sharding(
         x, mesh, shd.PartitionSpec('norm')
     )
-
     self.assertEqual(sharding.mesh, mesh)
     self.assertEqual(sharding.spec, shd.PartitionSpec())
 

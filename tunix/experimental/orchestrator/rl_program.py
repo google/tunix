@@ -131,6 +131,7 @@ class StandardRLProgram(RLProgram):
     self.on_step_end = on_step_end
     self._in_flight_rollouts = 0
     self._dispatch_capacity: asyncio.Semaphore | None = None
+    self._dispatch_done = asyncio.Event()
 
     self.raw_q = trajectory_queue_manager.TrajectoryQueueManager.create(
         group_size=self.group_size,
@@ -168,103 +169,116 @@ class StandardRLProgram(RLProgram):
           "StandardRLProgram requires a dataset either at init or in run()."
       )
 
-    for prompt_idx, prompt_item in enumerate(self.dataset):
-      await self._wait_for_dispatch_window()
-      if isinstance(prompt_item, dict):
-        prompt_item = dict(prompt_item)
-        prompt_item.setdefault("prompt_id", f"prompt_{prompt_idx}")
-      elif not hasattr(prompt_item, "prompt_id"):
-        prompt_item = {
-            "prompt": prompt_item,
-            "prompt_id": f"prompt_{prompt_idx}",
-        }
+    try:
+      for prompt_idx, prompt_item in enumerate(self.dataset):
+        await self._wait_for_dispatch_window()
+        if isinstance(prompt_item, dict):
+          prompt_item = dict(prompt_item)
+          prompt_item.setdefault("prompt_id", f"prompt_{prompt_idx}")
+        elif not hasattr(prompt_item, "prompt_id"):
+          prompt_item = {
+              "prompt": prompt_item,
+              "prompt_id": f"prompt_{prompt_idx}",
+          }
 
-      self._in_flight_rollouts += self.group_size
-      await self.engine.dispatch_rollouts(
-          [prompt_item],
-          group_size=self.group_size,
-          policy_version=self.policy_version,
-      )
+        self._in_flight_rollouts += self.group_size
+        await self.engine.dispatch_rollouts(
+            [prompt_item],
+            group_size=self.group_size,
+            policy_version=self.policy_version,
+        )
+    finally:
+      self._dispatch_done.set()
 
   async def polling_stage(self) -> None:
     """Stage 1B: Long-polls completed worker rollout responses into the queue."""
     assert self.engine is not None
-    while True:
-      try:
-        completed = await self.engine.poll_rollouts()
-        if isinstance(completed, list) and completed:
-          for item in completed:
-            await self.raw_q.put(item)
-      except asyncio.CancelledError:
-        break
-      except Exception as exc:  # pylint: disable=broad-exception-caught
-        logging.warning("Error in polling_stage: %s", exc)
-        await asyncio.sleep(0.01)
+    try:
+      while not self._dispatch_done.is_set() or self._in_flight_rollouts > 0:
+
+        try:
+          completed = await self.engine.poll_rollouts()
+          if isinstance(completed, list) and completed:
+            # TODO: Fault-tolerance must either decrement `_in_flight_rollouts` for failed
+            # requests or retry them internally. Otherwise, a dropped RPC will cause
+            # `_in_flight_rollouts` to never reach 0, hanging the EOF cascade.
+            self._in_flight_rollouts -= len(completed)
+            for item in completed:
+              await self.raw_q.put(item)
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+          logging.warning("Error in polling_stage: %s", exc)
+          await asyncio.sleep(0.01)
+    finally:
+      # NB: We currently assume it's safe to silently drop partial groups upon EOF.
+      await self.raw_q.close()
 
   async def critique_stage(self) -> None:
     """Stage 2: Scores rewards, PRMs, and reference KL logprobs."""
     assert self.engine is not None
-    while True:
-      try:
-        group = await self.raw_q.get_group()
-      except asyncio.CancelledError:
-        break
-      except Exception:
-        break
+    try:
+      while True:
+        try:
+          group = await self.raw_q.get_group()
+          if not group:
+            break
+        except Exception:
+          break
 
-      rewards = []
-      for item in group:
-        if self.reward_fns:
-          r = sum(fn(item) for fn in self.reward_fns)
-        else:
-          r = getattr(item.traj, "reward", 0.0)
-        rewards.append(float(r))
+        rewards = []
+        for item in group:
+          if self.reward_fns:
+            r = sum(fn(item) for fn in self.reward_fns)
+          else:
+            r = getattr(item.traj, "reward", 0.0)
+          rewards.append(float(r))
 
-      trainer_payloads = self.algo.create_trainer_payloads(
-          group, rewards=rewards
-      )
-      for idx, payload in enumerate(trainer_payloads):
-        reward_val = rewards[idx] if idx < len(rewards) else 0.0
-        src_item = group[idx] if idx < len(group) else None
-        src_traj = getattr(src_item, "traj", None)
-        raw_status = (
-            getattr(src_traj, "status", None) if src_traj else None
-        ) or getattr(src_item, "status", None)
-        if isinstance(raw_status, datatypes.TrajectoryStatus):
-          status = raw_status
-        elif isinstance(raw_status, str):
-          status = getattr(
-              datatypes.TrajectoryStatus,
-              raw_status.upper(),
-              datatypes.TrajectoryStatus.SUCCEEDED
-              if raw_status.upper() in ("COMPLETED", "SUCCESS")
-              else datatypes.TrajectoryStatus.RUNNING,
-          )
-        else:
-          status = datatypes.TrajectoryStatus.RUNNING
-        raw_steps = getattr(src_traj, "steps", None) if src_traj else None
-        steps = raw_steps if isinstance(raw_steps, list) else []
-        src_metadata = getattr(src_item, "metadata", None)
-        metadata = dict(src_metadata) if src_metadata else {}
-        item = datatypes.TrajectoryItem(
-            pair_index=idx,
-            group_id=getattr(group[0], "group_id", "default"),
-            start_step=0,
-            traj=datatypes.Trajectory(
-                reward=reward_val,
-                status=status,
-                steps=steps,
-            ),
-            prompt_tokens=getattr(src_item, "prompt_tokens", None),
-            completion_tokens=getattr(src_item, "completion_tokens", None),
-            action_mask=getattr(src_item, "action_mask", None),
-            policy_version=getattr(src_item, "policy_version", 0),
-            metadata=metadata,
-            # TODO: b/552087289 - Stream RLTrainerPayload directly instead of
-            # re-wrapping in TrajectoryItem.
+        trainer_payloads = self.algo.create_trainer_payloads(
+            group, rewards=rewards
         )
-        item.payload = payload  # pyrefly: ignore[missing-attribute]
-        await self.scored_q.put(item)
+        for idx, payload in enumerate(trainer_payloads):
+          reward_val = rewards[idx] if idx < len(rewards) else 0.0
+          src_item = group[idx] if idx < len(group) else None
+          src_traj = getattr(src_item, "traj", None)
+          raw_status = (
+              getattr(src_traj, "status", None) if src_traj else None
+          ) or getattr(src_item, "status", None)
+          if isinstance(raw_status, datatypes.TrajectoryStatus):
+            status = raw_status
+          elif isinstance(raw_status, str):
+            status = getattr(
+                datatypes.TrajectoryStatus,
+                raw_status.upper(),
+                datatypes.TrajectoryStatus.SUCCEEDED
+                if raw_status.upper() in ("COMPLETED", "SUCCESS")
+                else datatypes.TrajectoryStatus.RUNNING,
+            )
+          else:
+            status = datatypes.TrajectoryStatus.RUNNING
+          raw_steps = getattr(src_traj, "steps", None) if src_traj else None
+          steps = raw_steps if isinstance(raw_steps, list) else []
+          src_metadata = getattr(src_item, "metadata", None)
+          metadata = dict(src_metadata) if src_metadata else {}
+          item = datatypes.TrajectoryItem(
+              pair_index=idx,
+              group_id=getattr(group[0], "group_id", "default"),
+              start_step=0,
+              traj=datatypes.Trajectory(
+                  reward=reward_val,
+                  status=status,
+                  steps=steps,
+              ),
+              prompt_tokens=getattr(src_item, "prompt_tokens", None),
+              completion_tokens=getattr(src_item, "completion_tokens", None),
+              action_mask=getattr(src_item, "action_mask", None),
+              policy_version=getattr(src_item, "policy_version", 0),
+              metadata=metadata,
+              # TODO: b/552087289 - Stream RLTrainerPayload directly instead of
+              # re-wrapping in TrajectoryItem.
+          )
+          item.payload = payload  # pyrefly: ignore[missing-attribute]
+          await self.scored_q.put(item)
+    finally:
+      await self.scored_q.close()
 
   def _collect_and_log_step_metrics(
       self,
@@ -565,8 +579,6 @@ class StandardRLProgram(RLProgram):
       current_step = self._step
       step_start_time = time.monotonic()
       consumed_policy_version = self.policy_version
-      if self.on_step_begin:
-        self.on_step_begin(current_step)
 
       uncommitted_groups = []
       step_result = None
@@ -582,6 +594,10 @@ class StandardRLProgram(RLProgram):
         scored_items = await self.scored_q.get_batch(num_groups=1)
         if not scored_items:
           break
+
+        if group_idx == 0 and self.on_step_begin:
+          self.on_step_begin(current_step)
+
         groups_consumed += 1
         uncommitted_groups.append(scored_items)
         all_step_items.extend(scored_items)
@@ -642,6 +658,14 @@ class StandardRLProgram(RLProgram):
                     "num_microbatches": num_microbatches,
                 },
             )
+
+      if not scored_items:
+        # TODO: We currently silently drop in-progress partial microbatch accumulators if
+        # the dataset ends early. We may need to force-apply gradients here instead.
+        logging.info(
+            "Dataset exhausted at step %d before max_steps.", current_step
+        )
+        break
 
       if self.sync_weights:
         new_version = await self.engine.sync_weights(role=datatypes.Role.ACTOR)

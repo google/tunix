@@ -523,7 +523,8 @@ class CheckpointManagerTest(parameterized.TestCase):
         nnx.state(new_optimizer, nnx.optimizer.OptState),
     )
     if errors:
-      self.fail(f'Found sharding mismatches:\n{"\n".join(errors)}')
+      joined_errors = "\n".join(errors)
+      self.fail(f"Found sharding mismatches:\n{joined_errors}")
 
   def test_restore_without_optimizer(self):
     cp_path = f'{self.temp_path}/{self.id()}'
@@ -657,11 +658,9 @@ class CheckpointManagerTest(parameterized.TestCase):
 
   def test_unknown_partition_spec_axis_is_replicated_for_restore(self):
     pspec = shd.PartitionSpec('norm')
-
     fixed_pspec = checkpoint_manager._replicate_if_pspec_uses_unknown_mesh_axis(
         pspec, self.mesh
     )
-
     self.assertEqual(fixed_pspec, shd.PartitionSpec())
 
   def test_save_with_host_local_optimizer_state(self):
