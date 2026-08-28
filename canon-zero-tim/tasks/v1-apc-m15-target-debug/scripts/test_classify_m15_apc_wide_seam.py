@@ -12,7 +12,6 @@ import tempfile
 import tarfile
 import unittest
 
-import numpy as np
 
 from assemble_m15_wide_round import assemble
 from stage_m15_wide_shard import _sha256, stage
