@@ -193,7 +193,7 @@ def render(
 
   hp_bundle = high_performance or bool(checked_vma_diagnostic)
   treatment = (
-      f"zero-hp-vma{checked_vma_diagnostic}-precheck"
+      f"vma{checked_vma_diagnostic}"
       if checked_vma_diagnostic
       else "zero-hp"
       if high_performance
@@ -202,9 +202,13 @@ def render(
       else arm
   )
   name = (
-      f"canon-p58-ds4b-{treatment}-"
+      f"canon-p58-{treatment}-"
+      f"{'three' if stage == 'three-update' else 'full'}-{run_id}"
+      if checked_vma_diagnostic
+      else f"canon-p58-ds4b-{treatment}-"
       f"{'three' if stage == 'three-update' else 'full'}-{run_id}"
   )
+
   if len(name) > 63:
     raise ValueError("rendered P58 JobSet name exceeds 63 characters")
   run_root = f"/mnt/disks/linchai_data/deepswe_zero_tim/{name}"
