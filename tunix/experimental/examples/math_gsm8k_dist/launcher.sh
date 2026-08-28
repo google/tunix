@@ -43,6 +43,16 @@ LORA_RANK=${LORA_RANK:-16}
 LORA_ALPHA=${LORA_ALPHA:-16.0}
 USE_LORA=${USE_LORA:-0}
 SAMPLER=${SAMPLER:-inprocess_vllm}
+# Derived from MODEL_NAME rather than defaulted independently: MaxText's
+# config names are the lowercase form (Qwen3-0.6B -> qwen3-0.6b), and both
+# the trainer and the rollout are passed THIS one value below. Defaulting the
+# two sides separately is how they drift, and a trainer/rollout disagreement
+# here is not a clean failure -- Raiden pairs tensors by exact name, so a
+# MaxText trainer against a non-MaxText rollout means zero names match.
+# Set it explicitly to override; set it empty to force the rollout back onto
+# tpu-inference's own model implementation.
+MAXTEXT_MODEL_NAME=${MAXTEXT_MODEL_NAME-$(printf '%s' "$MODEL_NAME" | tr '[:upper:]' '[:lower:]')}
+MAXTEXT_ATTENTION=${MAXTEXT_ATTENTION:-}
 PYTHON_BIN=${PYTHON_BIN:-python3}
 WAIT_TIMEOUT_SECS=${WAIT_TIMEOUT_SECS:-1800}
 WAIT_POLL_SECS=${WAIT_POLL_SECS:-5}
@@ -386,6 +396,11 @@ echo "Launching trainer node on TPU chips $TRAINER_TPU_CHIPS..."
   if [[ -n "$MAXTEXT_CKPT" ]]; then
     TRAINER_CMD+=(--maxtext_load_parameters_path="$MAXTEXT_CKPT")
   fi
+  # Same value the rollout gets below, so the two sides cannot disagree about
+  # which MaxText model they are building.
+  if [[ -n "$MAXTEXT_MODEL_NAME" ]]; then
+    TRAINER_CMD+=(--maxtext_model_name="$MAXTEXT_MODEL_NAME")
+  fi
   if [[ "$USE_LORA" == "1" || "$USE_LORA" == "true" || "$USE_LORA" == "True" ]]; then
     TRAINER_CMD+=(--use_lora)
   fi
@@ -432,6 +447,14 @@ echo "Launching vLLM rollout node on TPU chips $ROLLOUT_TPU_CHIPS..."
     --lora_rank="$LORA_RANK"
     --lora_alpha="$LORA_ALPHA"
   )
+  # Only the MaxText-native rollout produces tensor names the MaxText trainer
+  # can match, so weight sync needs this whenever SAMPLER=vllm.
+  if [[ -n "$MAXTEXT_MODEL_NAME" ]]; then
+    ROLLOUT_CMD+=( --maxtext_model_name="$MAXTEXT_MODEL_NAME" )
+  fi
+  if [[ -n "$MAXTEXT_ATTENTION" ]]; then
+    ROLLOUT_CMD+=( --maxtext_attention="$MAXTEXT_ATTENTION" )
+  fi
   if [[ "$USE_LORA" == "1" || "$USE_LORA" == "true" || "$USE_LORA" == "True" ]]; then
     ROLLOUT_CMD+=(--use_lora)
   fi
