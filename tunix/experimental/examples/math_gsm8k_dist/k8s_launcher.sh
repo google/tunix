@@ -64,6 +64,7 @@ export USE_LORA=${USE_LORA:-0}
 # Logs source/destination Raiden tensor checksums on both the trainer and
 # rollout sides during weight sync, for cross-verification of a real run.
 export VERIFY_WEIGHTS=${VERIFY_WEIGHTS:-false}
+export RAIDEN_WEIGHT_SYNC_CHUNKS=${RAIDEN_WEIGHT_SYNC_CHUNKS:-}
 
 export ORCHESTRATOR_ID=$USER-orch
 export ORCHESTRATOR_PORT=20000
@@ -158,7 +159,7 @@ start_trainer() {
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${TRAINER_PORT}" \
     --worker_startup_command=" \
-      VERIFY_WEIGHTS=${VERIFY_WEIGHTS} python -m tunix.experimental.distributed.runtime.main \
+      VERIFY_WEIGHTS=${VERIFY_WEIGHTS} ${RAIDEN_WEIGHT_SYNC_CHUNKS:+RAIDEN_WEIGHT_SYNC_CHUNKS=${RAIDEN_WEIGHT_SYNC_CHUNKS}} python -m tunix.experimental.distributed.runtime.main \
         --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
         --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
         --process_main=tunix.experimental.examples.math_gsm8k_dist.run_trainer_node.main \
