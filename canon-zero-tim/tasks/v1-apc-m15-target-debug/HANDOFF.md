@@ -128,25 +128,37 @@ The renderer must produce exactly:
 
 After separate launch approval, both standalone `kubectl apply` commands may
 be issued concurrently.  Do not pipeline either command and do not reuse a run
-label.  When both JobSets terminate, the same bucket-capable executor runs:
+label.  When both JobSets terminate, the same executor must have read-only
+Kubernetes access plus bucket access and run exactly one return wrapper:
 
 ```bash
 RETURN=/tmp/v1-apc-m15-${RUN_ID}-small-return
 test ! -e "$RETURN"
-bash canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/run_m15_multiround_gcs_return.sh \
-  "$OUT" "$RETURN" /mnt/disks/tunix-data
+bash canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/run_m15_multiround_operator_return.sh \
+  "$OUT" "$RETURN" /mnt/disks/tunix-data default
 (cd "$RETURN" && sha256sum -c SHA256SUMS)
 ```
 
+Do not separately run `run_m15_multiround_gcs_return.sh`; the operator wrapper
+calls it internally.  It performs only `kubectl get` and GCS reads.  It does not
+delete a JobSet, mutate GCS, download `run.log`, or return a token-bearing tar.
+It reads the root manifest and object metadata to bind each remote `run.log` by
+sanitized identity, SHA-256, and byte size.
+
 Return the complete small `$RETURN` directory unchanged, the wrapper's final
-`[M15.MULTIROUND] COMPLETE ...` line, independent `sha256sum -c` output, both
-JobSet terminal statuses, and each immutable raw-log object identity/SHA/size.
-Do not return the token-bearing tars.  The directory itself contains:
+`[M15.OPERATOR.RETURN] COMPLETE ...` line, and independent
+`sha256sum -c SHA256SUMS` output.  Do not manually transcribe statuses or JSON.
+The directory itself must contain:
 
 - `MULTIROUND_SUMMARY.json`;
 - `off.round-000000..000002.classification.json` for sealed off rounds;
 - `on.round-000000..000002.classification.json` for sealed on rounds;
-- `PACKAGING.txt` and `SHA256SUMS`.
+- `JOBSET_STATUS.json`, containing the sanitized terminal condition for both
+  exact JobSet names;
+- `RAW_LOG_RECEIPTS.json`, containing each immutable `run.log` identity,
+  SHA-256, and byte size without the log payload or GCS root;
+- `OPERATOR_RETURN_SUMMARY.json` and `OPERATOR_PACKAGING.txt`;
+- `PACKAGING.txt` and one final `SHA256SUMS` covering every returned file.
 
 Interpretation is mechanical:
 
@@ -157,6 +169,13 @@ Interpretation is mechanical:
   call the paired target run complete;
 - `NO_DURABLE_ROUND`: fix worker/upload before another launch;
 - any off-arm red, B-C red, source/round/hash mismatch: hard stop.
+
+`OPERATOR_RETURN_SUMMARY.json.status` equals the numerical core status only
+when both JobSets are terminal (`Completed` or controlled-exit `Failed`) and
+both raw-log receipts are present.  Otherwise it appends
+`_OPERATOR_RECEIPTS_INCOMPLETE` while preserving any sealed numerical rounds.
+The operator status never upgrades the numerical status in
+`MULTIROUND_SUMMARY.json`.
 
 The script deliberately queries `wide/rounds/000000..000002`; it does not rely
 on the root aliases that an early exit may omit.  This is the required answer

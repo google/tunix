@@ -865,3 +865,22 @@ is not a current fact or launch authority.
 - Validation: `sha256sum -c SHA256SUMS` in evidence directory 4/4 OK; `git diff --check` clean.
 - Next: review sealed d33 contract package; after separate launch approval and TPU allocation, launch both standalone JobSets concurrently.
 
+## 2026-08-28 — Phase D3 operator return made single-command
+
+- Found a real handoff gap: `run_m15_multiround_gcs_return.sh` automatically
+  returned the six numerical classifier JSONs, but `HANDOFF.md` still required
+  the remote executor to manually transcribe two JobSet terminal states and two
+  remote `run.log` identities/SHA/size values.
+- Added a read-only operator wrapper. It calls the existing GCS numerical
+  return, uses `kubectl get` for the exact rendered JobSets, reads each root
+  manifest plus object size without downloading `run.log`, sanitizes the
+  receipts, and emits one final self-hashed small directory.
+- Added a pure packager with five positive/negative tests: complete return,
+  nonterminal preservation, wrong-JobSet rejection, and tampered-core
+  rejection, plus an end-to-end fake-GCS/fake-Kubernetes wrapper run. The
+  latter verifies the final manifest and proves large logs, token tars, bucket
+  roots, and raw Kubernetes objects are excluded from the return.
+- Local focused gates: 5/5 new tests PASS; task discovery 110/110 PASS;
+  `PERSISTENCE_TEST_PASS`; flag registry 393/393 PASS; Python compilation,
+  Bash syntax, and `git diff --check` PASS. No real GCS, Kubernetes, TPU,
+  commit, or push action occurred.

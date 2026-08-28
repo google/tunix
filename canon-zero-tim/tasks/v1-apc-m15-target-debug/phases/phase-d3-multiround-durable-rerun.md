@@ -61,7 +61,8 @@ bash -n \
   canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/persist_p38_gcs.sh \
   canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/p38_live_snapshot_worker.sh \
   canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/prepare_m15_multiround_pair.sh \
-  canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/run_m15_multiround_gcs_return.sh
+  canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/run_m15_multiround_gcs_return.sh \
+  canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/run_m15_multiround_operator_return.sh
 git diff --check
 ```
 
@@ -80,16 +81,20 @@ bash canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/prepare_m15_multiround
 ```
 
 The pair may be submitted concurrently.  Every `kubectl apply` is standalone.
-After both jobs terminate, the bucket-capable executor runs:
+After both jobs terminate, an executor with read-only Kubernetes and bucket
+access runs:
 
 ```bash
-bash canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/run_m15_multiround_gcs_return.sh \
-  "$OUT" "$RETURN" /mnt/disks/tunix-data
+bash canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/run_m15_multiround_operator_return.sh \
+  "$OUT" "$RETURN" /mnt/disks/tunix-data default
 (cd "$RETURN" && sha256sum -c SHA256SUMS)
 ```
 
-The return contains only the six small classifier JSONs, summary, packaging
-receipt, and hashes.  It never downloads or returns the token-bearing tars.
+The return contains the six small classifier JSONs, numerical summary,
+sanitized JobSet terminal receipts, remote raw-log SHA/size receipts, packaging
+receipts, and one final manifest.  It never downloads or returns `run.log` or
+the token-bearing tars.  The underlying GCS-only wrapper remains an internal
+primitive and must not be run separately by the remote executor.
 
 ## Target gate and decision table
 
@@ -100,6 +105,10 @@ receipt, and hashes.  It never downloads or returns the token-bearing tars.
 | One to five rounds sealed | `PARTIAL_ROUNDS_RECOVERED` | use recovered rounds, but do not claim paired target completion |
 | No sealed round | `NO_DURABLE_ROUND` | debug worker/upload before another launch |
 | off red, any B-C red, source/round/hash mismatch | hard RED | do not interpret APC mechanism |
+
+The operator summary adds `_OPERATOR_RECEIPTS_INCOMPLETE` when a JobSet is not
+terminal or a raw-log manifest/size receipt is absent.  That suffix never
+discards recovered rounds and never upgrades the numerical core status.
 
 Stable full-observer first-red signatures across independent on rounds support
 a deterministic Layer-0 program/cache-read seam.  Different signatures imply

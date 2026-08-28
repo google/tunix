@@ -21,20 +21,24 @@ apply` commands.  Each arm performs exactly three real M15 rollouts/evaluation
 rounds against frozen weights.  Every round is independently sealed and read
 back before the next starts.  No backward or optimizer commit is allowed.
 
-Post-run, do not manually copy a classifier and do not wait for a multi-GiB tar
-to travel through Git/chat.  Run:
+Post-run, do not manually copy a classifier, JobSet condition, or log hash, and
+do not wait for a multi-GiB tar to travel through Git/chat.  From an executor
+with read-only Kubernetes access and bucket access, run one command:
 
 ```bash
-bash canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/run_m15_multiround_gcs_return.sh \
-  "$OUT" "$RETURN" /mnt/disks/tunix-data
+bash canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/run_m15_multiround_operator_return.sh \
+  "$OUT" "$RETURN" /mnt/disks/tunix-data default
 (cd "$RETURN" && sha256sum -c SHA256SUMS)
 ```
 
-This queries every per-round prefix directly and returns only hash-bound small
-JSON.  It preserves earlier sealed rounds even if root `COLLECTED`/`COMPLETE`
-is absent.  Read `MULTIROUND_SUMMARY.json`; status meanings and the exact
-return checklist are in the first section of `HANDOFF.md` and
-`phases/phase-d3-multiround-durable-rerun.md`.
+The wrapper internally runs the core GCS return, queries every per-round prefix,
+reads both exact JobSet statuses, and binds each root `run.log` by manifest SHA
+and object size without downloading the log.  It returns only hash-bound small
+JSON.  Earlier sealed rounds survive even if root `COLLECTED`/`COMPLETE` or a
+Kubernetes receipt is absent.  Read both `MULTIROUND_SUMMARY.json` (numerical
+status) and `OPERATOR_RETURN_SUMMARY.json` (transport/operator completeness).
+Status meanings and the exact return checklist are in the first section of
+`HANDOFF.md` and `phases/phase-d3-multiround-durable-rerun.md`.
 
 ## Historical operation: publish Phase D2; target launch remained approval-gated
 
