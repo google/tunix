@@ -348,12 +348,12 @@ class RolloutWorker(abstract_worker.Worker):
     if prompt_token_arr.size == 0:
       raise RuntimeError(
           "Sampler response is missing prompt_token_ids for "
-          f"{request.request_id or request.traj_id}."
+          f"{request.request_id}."
       )
     metadata = dict(request.metadata or {})
     metadata.setdefault("text", text)
     return datatypes.RolloutResponse(
-        request_id=request.request_id or request.traj_id,
+        request_id=request.request_id,
         prompt_id=request.prompt_id,
         group_index=request.group_index,
         status="COMPLETED",
@@ -384,7 +384,7 @@ class RolloutWorker(abstract_worker.Worker):
       sample_kwargs.update(generation_kwargs)
       sampling_requests.append(
           sampler_lib.SamplingRequest(
-              request_id=req.request_id or req.traj_id,
+              request_id=req.request_id,
               prompt=req.prompt,
               metadata=sample_kwargs,
               sampling_params=sampler_lib.SamplingParams(
