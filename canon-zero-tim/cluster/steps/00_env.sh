@@ -132,6 +132,24 @@ case "${CANON_APC_M15_TARGET_DEBUG:-}" in
     fail=1
     ;;
 esac
+case "${CANON_P58_SEAM_LOCALIZATION:-}" in
+  "") P58_SEAM_LOCALIZATION=0 ;;
+  coarse)
+    P58_SEAM_LOCALIZATION=1
+    [ "${CANON_PROFILE_FILE:-}" = \
+        "cluster/profiles/qwen3-4b-dp8-tp8-deepswe-v1-hp.env" ] && \
+    [ "${CANON_P58_DEEPSWE_TIM:-0}" = "1" ] && \
+    [ "${CANON_P58_TIM_ARM:-}" = "zero" ] || {
+      echo "[env] P58 seam localization requires its exact Zero-HP profile" >&2
+      fail=1
+    }
+    ;;
+  *)
+    P58_SEAM_LOCALIZATION=0
+    echo "[env] CANON_P58_SEAM_LOCALIZATION must be unset or coarse" >&2
+    fail=1
+    ;;
+esac
 case "${CANON_P59_RANK_PARALLEL_BACKWARD:-0}" in
   0) ;;
   1)
@@ -247,6 +265,19 @@ case "${CANON_P58_CHECKED_VMA_DIAGNOSTIC:-}" in
     fail=1
     ;;
 esac
+if [ "$P58_SEAM_LOCALIZATION" = "1" ]; then
+  [ -z "${CANON_P58_CHECKED_VMA_DIAGNOSTIC:-}" ] && \
+  [ "${CANON_P34_RUN_STAGE:-}" = "full" ] && \
+  [ "${CANON_P58_EXPECTED_UPDATES:-}" = "1000" ] && \
+  [ "${CANON_P38_PRECHECK_ONLY:-0}" = "1" ] && \
+  [ "${CANON_P38_CONTROLLED_EXIT:-0}" = "1" ] && \
+  [ "${CANON_P38_DIAGNOSTIC_ROUNDS:-0}" = "3" ] && \
+  [ "${CANON_P38_DURABILITY_PROFILE:-}" = "p58-seam-v1" ] || {
+    echo "[env] P58 coarse seam three-round carrier drifted" >&2
+    fail=1
+  }
+  echo "[env] P58 coarse seam precheck admitted: DP8xTP8 roles rounds=3 backward=0 optimizer_commits=0"
+fi
 case "${CANON_P67_P66_VMA_P59_ONLY:-0}" in
   0) ;;
   1)
@@ -693,14 +724,21 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
     req CANON_APC_M15_REPLAY_LEDGER
   fi
   { [ "$APC_M15_TARGET_DEBUG" = "0" ] && \
+    [ "$P58_SEAM_LOCALIZATION" = "0" ] && \
     [ "${CANON_P32_WORKLOAD:-}" = "frozenlake" ]; } || \
   { [ "$APC_M15_TARGET_DEBUG" = "1" ] && \
-    [ "${CANON_P32_WORKLOAD:-}" = "frozenlake-dp8-tp8" ]; } || {
+    [ "${CANON_P32_WORKLOAD:-}" = "frozenlake-dp8-tp8" ]; } || \
+  { [ "$P58_SEAM_LOCALIZATION" = "1" ] && \
+    [ "${CANON_P58_DEEPSWE_TIM:-0}" = "1" ]; } || {
     echo "[env] P38 serving capture workload identity drifted" >&2
     fail=1
   }
-  [ "${CANON_P33_RUN_STAGE:-}" = "backward-no-commit" ] && \
-  [ "${CANON_P33_NO_COMMIT:-}" = "1" ] || {
+  { [ "$P58_SEAM_LOCALIZATION" = "0" ] && \
+    [ "${CANON_P33_RUN_STAGE:-}" = "backward-no-commit" ] && \
+    [ "${CANON_P33_NO_COMMIT:-}" = "1" ]; } || \
+  { [ "$P58_SEAM_LOCALIZATION" = "1" ] && \
+    [ "${CANON_P34_RUN_STAGE:-}" = "full" ] && \
+    [ "${CANON_P34_NO_COMMIT:-1}" = "0" ]; } || {
     echo "[env] P38 serving capture requires backward-no-commit" >&2
     fail=1
   }
@@ -740,23 +778,27 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
       ;;
   esac
   case "${CANON_P38_DURABILITY_PROFILE:-}" in
-    full-v1|round-alignment-v1|m15-wide-v1) ;;
+    full-v1|round-alignment-v1|m15-wide-v1|p58-seam-v1) ;;
     *)
-      echo "[env] P38 durability profile must be full-v1, round-alignment-v1, or m15-wide-v1" >&2
+      echo "[env] P38 durability profile is not admitted" >&2
       fail=1
       ;;
   esac
   if [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "1" ]; then
-    [ "${CANON_KV_UNIFIED:-}" = "0" ] || {
-      echo "[env] P38 fixed lm-head is admitted only on the stock arm" >&2
+    [ "${CANON_KV_UNIFIED:-0}" = "0" ] || {
+      echo "[env] P38 fixed lm-head requires the stock KV path" >&2
       fail=1
     }
     { [ "$APC_M15_TARGET_DEBUG" = "0" ] && \
+      [ "$P58_SEAM_LOCALIZATION" = "0" ] && \
       [ "${CANON_PROFILE_FILE:-}" = \
         "cluster/profiles/qwen3-8b-dp16-tp4-frozenlake.env" ]; } || \
     { [ "$APC_M15_TARGET_DEBUG" = "1" ] && \
       [ "${CANON_PROFILE_FILE:-}" = \
-        "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-apc-debug.env" ]; } || {
+        "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-apc-debug.env" ]; } || \
+    { [ "$P58_SEAM_LOCALIZATION" = "1" ] && \
+      [ "${CANON_PROFILE_FILE:-}" = \
+        "cluster/profiles/qwen3-4b-dp8-tp8-deepswe-v1-hp.env" ]; } || {
       echo "[env] P38 fixed lm-head profile identity drifted" >&2
       fail=1
     }
@@ -764,7 +806,14 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
       echo "[env] P38 fixed lm-head conflicts with CANON_MM_ALGO" >&2
       fail=1
     }
-    if [ "$APC_M15_TARGET_DEBUG" = "1" ] && \
+    if [ "$P58_SEAM_LOCALIZATION" = "1" ]; then
+      [ "${CANON_P38_DURABILITY_PROFILE:-}" = "p58-seam-v1" ] && \
+      [ "${CANON_P38_SEAM_OBSERVER:-}" = "layer" ] && \
+      [ "${CANON_P38_TAIL_OBSERVER:-0}" = "1" ] || {
+        echo "[env] P58 fixed lm-head seam run requires p58-seam-v1" >&2
+        fail=1
+      }
+    elif [ "$APC_M15_TARGET_DEBUG" = "1" ] && \
        [ -n "${CANON_P38_SEAM_OBSERVER:-}" ]; then
       [ "${CANON_P38_DURABILITY_PROFILE:-}" = "m15-wide-v1" ] || {
         echo "[env] M15 seam observer requires m15-wide-v1 durability" >&2
@@ -782,8 +831,10 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
     fi
     if { [ "$APC_M15_TARGET_DEBUG" != "1" ] || \
          [ -z "${CANON_P38_SEAM_OBSERVER:-}" ]; } && \
+       { [ "$P58_SEAM_LOCALIZATION" != "1" ] || \
+         [ -z "${CANON_P38_SEAM_OBSERVER:-}" ]; } && \
        [ -n "${CANON_P38_KV_OBSERVER_DIR:-}${CANON_P38_KV_OBSERVER_CLASSIFICATION:-}${CANON_P38_SEAM_OBSERVER:-}${CANON_P38_TAIL_OBSERVER:-}${CANON_P38_TERMINAL_DISCRIMINATOR:-}" ]; then
-      echo "[env] P38 fixed lm-head diagnostic observers are admitted only on the M15 seam carrier" >&2
+      echo "[env] P38 fixed lm-head diagnostic observers are not admitted on this carrier" >&2
       fail=1
     fi
     for k in CANON_FIXED_AR CANON_FIXED_AR_EMBED \
@@ -814,12 +865,16 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
     echo "[env] P38 round-seal acknowledgement directory drifted" >&2
     fail=1
   }
-  expected_p38_gcs_prefix="gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/${CANON_STATE##*/}/attempt-0"
+  expected_p38_gcs_root=p38
+  [ "$P58_SEAM_LOCALIZATION" = "0" ] || expected_p38_gcs_root=p58
+  expected_p38_gcs_prefix="gs://yuxzhang-tunix-models/canon-zero-tim/evidence/$expected_p38_gcs_root/${CANON_STATE##*/}/attempt-0"
   [ "${CANON_P38_GCS_PREFIX:-}" = "$expected_p38_gcs_prefix" ] || {
     echo "[env] P38 GCS evidence prefix drifted: expected=$expected_p38_gcs_prefix" >&2
     fail=1
   }
-  [ "${CANON_P38_MIN_ACTION_KV:-}" = "1686" ] || {
+  expected_p38_min_action_kv=1686
+  [ "$P58_SEAM_LOCALIZATION" = "0" ] || expected_p38_min_action_kv=3072
+  [ "${CANON_P38_MIN_ACTION_KV:-}" = "$expected_p38_min_action_kv" ] || {
     echo "[env] P38 serving capture depth-sufficiency contract drifted" >&2
     fail=1
   }
@@ -832,6 +887,10 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
   if [ "$APC_M15_TARGET_DEBUG" = "1" ]; then
     expected_p38_capture_min=1152
     expected_p38_capture_bounds=1152,1216,1280,1408,1696
+  fi
+  if [ "$P58_SEAM_LOCALIZATION" = "1" ]; then
+    expected_p38_capture_min=3072
+    expected_p38_capture_bounds=3072,3456,3840,4224,4608
   fi
   [ "${CANON_P38_SERVING_CAPTURE_MIN_PREFIX:-}" = \
       "$expected_p38_capture_min" ] && \
@@ -871,6 +930,11 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
     expected_p38_incident_min=1152
     expected_p38_incident_max=7168
     expected_p38_incident_bytes=2147483648
+  fi
+  if [ "$P58_SEAM_LOCALIZATION" = "1" ]; then
+    expected_p38_incident_min=3072
+    expected_p38_incident_max=4608
+    expected_p38_incident_bytes=134217728
   fi
   [ "${CANON_P38_INCIDENT_MIN_PREFIX:-}" = \
       "$expected_p38_incident_min" ] && \
@@ -922,6 +986,11 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
       expected_p38_seam_max=4096
       expected_p38_seam_bytes=8589934592
     fi
+    if [ "$P58_SEAM_LOCALIZATION" = "1" ]; then
+      expected_p38_seam_min=3072
+      expected_p38_seam_max=4608
+      expected_p38_seam_bytes=1073741824
+    fi
     [ "${CANON_P38_SEAM_MIN_POSITION:-}" = "$expected_p38_seam_min" ] && \
     [ "${CANON_P38_SEAM_MAX_POSITION:-}" = "$expected_p38_seam_max" ] && \
     [ "${CANON_P38_SEAM_MAX_BYTES:-}" = "$expected_p38_seam_bytes" ] || {
@@ -945,20 +1014,27 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
       echo "[env] P38 seam and KV observers may not share one target run" >&2
       fail=1
     fi
+    expected_p38_concurrency=256
+    [ "$P58_SEAM_LOCALIZATION" = "0" ] || expected_p38_concurrency=128
     case " ${CANON_RUN_CMD:-} " in
-      *" --max_concurrency=256 "*) ;;
-      *) echo "[env] P38 seam observer requires max concurrency 256" >&2; fail=1;;
+      *" --max_concurrency=$expected_p38_concurrency "*) ;;
+      *) echo "[env] P38 seam observer concurrency drifted" >&2; fail=1;;
     esac
+    expected_p38_seam_classification="${CANON_STATE%/}/p38_seam.classification.json"
+    [ "$P58_SEAM_LOCALIZATION" = "0" ] || \
+      expected_p38_seam_classification="${CANON_STATE%/}/p58_seam.classification.json"
     [ "${CANON_P38_SEAM_CLASSIFICATION:-}" = \
-        "${CANON_STATE%/}/p38_seam.classification.json" ] || {
+        "$expected_p38_seam_classification" ] || {
       echo "[env] P38 seam classification path drifted" >&2
       fail=1
     }
     if [ -n "${CANON_P38_TAIL_OBSERVER:-}" ]; then
       req CANON_P38_TAIL_MAX_BYTES
+      expected_p38_tail_bytes=268435456
+      [ "$P58_SEAM_LOCALIZATION" = "0" ] || expected_p38_tail_bytes=67108864
       [ "${CANON_P38_SEAM_OBSERVER:-}" = "layer" ] && \
       [ "${CANON_P38_TAIL_OBSERVER:-}" = "1" ] && \
-      [ "${CANON_P38_TAIL_MAX_BYTES:-}" = "268435456" ] || {
+      [ "${CANON_P38_TAIL_MAX_BYTES:-}" = "$expected_p38_tail_bytes" ] || {
         echo "[env] P38 terminal tail requires bounded layer seam mode" >&2
         fail=1
       }

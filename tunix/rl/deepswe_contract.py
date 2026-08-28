@@ -790,6 +790,13 @@ def validate_environment(values: Mapping[str, str]) -> None:
     raise ValueError(
         "CANON_P58_CHECKED_VMA_DIAGNOSTIC must be absent, off, or on"
     )
+  p58_seam_localization = values.get("CANON_P58_SEAM_LOCALIZATION", "")
+  if p58_seam_localization not in ("", "coarse"):
+    raise ValueError(
+        "CANON_P58_SEAM_LOCALIZATION must be absent or coarse"
+    )
+  if p58_vma_diagnostic and p58_seam_localization:
+    raise ValueError("P58 checked-VMA and seam diagnostics are exclusive")
   if p58_vma_diagnostic and (
       not p58_hp
       or not p58_tim
@@ -798,6 +805,15 @@ def validate_environment(values: Mapping[str, str]) -> None:
   ):
     raise ValueError(
         "P58 checked-VMA diagnostic requires the exact Zero/full HP carrier"
+    )
+  if p58_seam_localization and (
+      not p58_hp
+      or not p58_tim
+      or p58_arm != "zero"
+      or values.get("CANON_P34_RUN_STAGE", "") != "full"
+  ):
+    raise ValueError(
+        "P58 seam localization requires the exact Zero/full HP carrier"
     )
   if p58_hp and (
       not p58_tim
@@ -934,6 +950,9 @@ def validate_environment(values: Mapping[str, str]) -> None:
         "CANON_P58_CHECKED_VMA_DIAGNOSTIC": (
             p58_vma_diagnostic if p58_vma_diagnostic else None
         ),
+        "CANON_P58_SEAM_LOCALIZATION": (
+            p58_seam_localization if p58_seam_localization else None
+        ),
         "CANON_P67_P66_VMA_P59_ONLY": (
             "0" if p58_vma_diagnostic == "off" else
             "1" if p58_hp else None
@@ -989,6 +1008,18 @@ def validate_environment(values: Mapping[str, str]) -> None:
           raise ValueError(
               "P58 checked-VMA diagnostic round file must be absolute"
           )
+      elif p58_seam_localization:
+        expected.update({
+            "CANON_P38_PRECHECK_ONLY": "1",
+            "CANON_P38_CONTROLLED_EXIT": "1",
+            "CANON_P38_DIAGNOSTIC_ROUNDS": "3",
+            "CANON_P38_DURABILITY_PROFILE": "p58-seam-v1",
+            "CANON_P38_SEAM_OBSERVER": "layer",
+            "CANON_P38_TAIL_OBSERVER": "1",
+        })
+        round_file = values.get("CANON_P38_DIAGNOSTIC_ROUND_FILE", "")
+        if not round_file or not os.path.isabs(round_file):
+          raise ValueError("P58 seam diagnostic round file must be absolute")
       else:
         expected.update({
             "CANON_P38_PRECHECK_ONLY": None,

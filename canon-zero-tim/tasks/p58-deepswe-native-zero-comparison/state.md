@@ -1,5 +1,36 @@
 # State
 
+## Current P58.19 three-round coarse seam-localization checkpoint (2026-08-28)
+
+- Status: local construction complete on branch base
+  `7fed8307a6bdf9f5887593b83dcd5dc83051b1f0`; target not run.  The operator
+  branch is one non-overlapping M15 documentation/packaging commit ahead, so
+  this dirty worktree was not rebased.  No image, Kubernetes object, TPU work,
+  commit, or push has been created in this phase.
+- Reconciled target fact: sealed P58.18 `p58aba01` returned finite A-B RED and
+  exact B-C in ON-A/OFF/ON-B, with controlled exit and zero backward/optimizer
+  commits.  Its classifier decision is `CHECKED_VMA_NOT_SUFFICIENT`.
+- Interpretation correction: the result proves only that checked-VMA is not a
+  sufficient cause of the DeepSWE decode/prefill seam.  It does not prove the
+  seam is independent of checked-VMA and does not authorize a P67 repair.
+- Active deliverable: one default-off P58 selector prepares a single 128-chip
+  DP8xTP8 rollout + DP8xTP8 trainer JobSet containing three sequential
+  frozen-weight coarse layer-observer rounds.  Every round must be classified,
+  sealed, uploaded, read-back verified, and acknowledged before the next.
+- Signed carrier stays Qwen3-4B-Instruct-2507, clean 1,012 tasks, B8xG16,
+  16K/50 turns, seed 42, concurrency 128, fixed lm-head, continue-decode 8,
+  prefix cache off, strict B-C, resident optimizer but zero commits.
+- Phase: `phases/p58-19-three-round-coarse-seam.md`.
+- Validation: host renderer 30/30, profile 11/11, classifier 4/4, shared fake
+  GCS persistence PASS (three-round collection plus missing-selector
+  negative), deterministic flag audit 394/394/394, and the complete pinned
+  dependency-image gate PASS.  Its terminal marker includes
+  `checked_vma_aba=1 coarse_seam=1 ... regressions=1`.
+- Exact-image recovery: the gate found that the fixed-head sub-check treated
+  unset `CANON_KV_UNIFIED` differently from the global unset-is-zero contract;
+  the check now uses the same default while still rejecting explicit `1`.
+  The new flag also advanced the prefix-cache adjacency count from 393 to 394.
+
 ## Current P58.18 checked-VMA matched-triplicate checkpoint (2026-08-28)
 
 - Status: ON-A/OFF/ON-B exact-geometry implementation and construction gates

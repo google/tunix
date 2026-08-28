@@ -4,7 +4,7 @@
 > 焊死数值类 flag = 删代码路径 = 程序变更,走与开启同级认证门(verify+ALIGN+canary)。
 > 生命周期档位:试验 → 已认证 → 默认开 → 焊死(开关可删)→ 退役/否决。
 > 普查基点 a94d6c0c(285 个可设置 env flag,与 ebba4850 普查零漂移);普查后续现役附录
-> 当前 389 个;本表分层登记,D 层按前缀组、语义欠账标"待考古"。
+> 当前 394 个;本表分层登记,D 层按前缀组、语义欠账标"待考古"。
 > 全量机器清单:落地 CL 时由 `grep -rhoE` 生成为附录,条目数必须 == 普查数(排除项列明)。
 
 ## A 层 · 数值语义类(动它 = 动程序身份;焊死走认证门)
@@ -63,6 +63,7 @@
 | CANON_V1_GSM8K_XPROF_ARM | `native|zero-hp` 的 one-host GSM8K matched-work/XProf 观测 selector；固定 DP4×TP1、3 commits、warm update 2→3 capture，打印 profiled batch token/advantage hashes；Native 必须 vanilla stock trainer，Zero-HP 必须 strict V1/P59 bundle；P60-2G 只重跑 Zero-HP | 空/off；仅两条薄 wrapper 设置；P60-2G local，TARGET NOT RUN | pair XProf 归档后退役；不得进入 full recipe |
 | CANON_P58_ONEHOST_XPROF_ARM / CANON_P58_ONEHOST_SEAM_PROBE | P58 Qwen3-4B one-host mutation-free 诊断载具。`XPROF_ARM=native\|zero-hp` 固定 DP1×TP4/backward-no-commit；`SEAM_PROBE=1` 只允许 Zero-HP arm，并把同一载具扩展为单个已签名 Pillow task、G2、8K response、16 turns、serial scheduler。它保留真实 rollout/durable trajectory/strict decode-vs-prefill gate；有限 RED 与 exact 都只描述该 TP4 carrier，绝不认证 DP8×TP8/TP8 | 空/0；仅 tracked thin wrapper 设置；生产 P58 selector 必须 0 | TP4 首差分类和必要的 DP8×TP8 exact-geometry follow-up 结案后整体退役；不得进入 full recipe |
 | CANON_P58_CHECKED_VMA_DIAGNOSTIC | P58.18 exact-geometry matched-control selector；合法值仅 `off\|on`。只准入 Qwen3-4B Zero-HP/full 的 128-chip disaggregated DP8×TP8+DP8×TP8 Step-0 carrier。`off` 原子派生 checked-VMA/P66 alias/P67 scoping=`0/0/0`；`on` 派生 `1/1/1`。两者都把 first-update gate/P63 clip 固定为 `0/0`，保留 fixed-head/continue-decode/Fixed-AR/serving HP、完整 trajectory + pre-alignment，并在 backward/optimizer 前受控退出。生产 selector 缺省 absent 时仍是完整 `1/1/1/1/1`，不受诊断影响 | 缺省 absent；仅 P58.18 ON-A/OFF/ON-B 三臂诊断可设；不得与 normal Zero-HP、native recipe 或 subordinate 手工 override 混用 | 三臂因果裁决与 fresh checked-VMA-on strict Step-0 修复复验归档后退役；不得成为 full-training 默认值 |
+| CANON_P58_SEAM_LOCALIZATION | P58.19 exact-geometry coarse seam selector；合法值仅 `coarse`。只准入 Qwen3-4B Zero-HP/full 的 128-chip disaggregated DP8×TP8+DP8×TP8 frozen Step-0 carrier；单一 selector 派生 P38 layer seam + terminal-tail、位置窗 `[3072,4608)`、三轮 per-round seal/classify/ACK 与 `p58-seam-v1` durability。保留 production checked-VMA/P67/first-update/clip tuple，backward 与 optimizer commit 均不可达 | 缺省 absent；仅 P58.19 三轮粗定位可设；与 checked-VMA diagnostic、native、普通 Zero-HP full、M15 wide 及 subordinate 手工 override 互斥 | 三轮给出可重复 coarse first-red signature 并完成后续 fine localization 后退役；任何无 join、B-C red、非重复 boundary 或 observer-neutrality red 均只得 INCONCLUSIVE/FAIL，不得转为训练开关 |
 | CANON_XPROF_PHASE | 捕获窗模式:step=整步(device 缓冲 ~283 万事件/核,decode ~25s 填满,实为 engine 前 25s 织物)/ update=G6 update 入口→步完成(rollout 不入镜,缓冲装下完整 backward)/ diagnostic=冻结权重 precheck 的一个完整 A-rollout/B-full-rescore/C-old-forward round | 仪器;载具旋钮 P51_XPROF_PHASE;Phase3 profile 固定 diagnostic skip=1 steps=1 | 长期保留 |
 | CANON_UPDATE_REPORT / CANON_PRE_ALIGN_REPORT / CANON_ALIGN_REPORT | 对齐/更新报告选通 | 默认开(监控契约) | 长期保留;A−B 哨兵不可撤(用户裁决 2026-08-15) |
 | JAX_COMPILATION_CACHE_DIR(非 CANON) | 持久编译缓存(-72s/重启) | 一宿主认证；Phase4 三个 full manifest 已锁定本地目录与 GCS root，restore/save 回执 host 绿；**Pathways target hit 未验** | 三个 full target 记录 hit/miss 与 JIT 后决定是否推广 |
@@ -409,6 +410,7 @@ CANON_P58_ONEHOST_SEAM_PROBE
 CANON_P58_ONEHOST_XPROF_ARM
 CANON_P58_R2EGYM_COMMIT
 CANON_P58_RUNNER_SHA256
+CANON_P58_SEAM_LOCALIZATION
 CANON_P58_SOURCE_DIFF_SHA256
 CANON_P58_TASK_IMAGE_ID
 CANON_P58_TIM_ADMITTED
@@ -517,4 +519,4 @@ CANON_XPROF_STEPS
 CANON_XPROF_TPU_TRACE_MODE
 ```
 
-Count: 393 settable names (appendix inventory above; exclusions: none).
+Count: 394 settable names (appendix inventory above; exclusions: none).

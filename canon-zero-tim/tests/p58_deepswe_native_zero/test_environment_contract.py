@@ -76,6 +76,7 @@ class P58EnvironmentContractTest(unittest.TestCase):
       high_performance: bool = False,
       checked_vma_off_diagnostic: bool = False,
       checked_vma_on_diagnostic: bool = False,
+      seam_localization: str = "",
   ) -> dict[str, str]:
     base = yaml.safe_load((PKG / "cluster/jobset-64chip.yaml").read_text())
     document = renderer.render(
@@ -93,6 +94,7 @@ class P58EnvironmentContractTest(unittest.TestCase):
         high_performance=high_performance,
         checked_vma_off_diagnostic=checked_vma_off_diagnostic,
         checked_vma_on_diagnostic=checked_vma_on_diagnostic,
+        seam_localization=seam_localization,
     )
     return dict(renderer.p34._env(document))
 
@@ -105,6 +107,7 @@ class P58EnvironmentContractTest(unittest.TestCase):
       high_performance: bool = False,
       checked_vma_off_diagnostic: bool = False,
       checked_vma_on_diagnostic: bool = False,
+      seam_localization: str = "",
   ) -> dict[str, str]:
     supplied = os.environ.copy()
     supplied.update(
@@ -115,6 +118,7 @@ class P58EnvironmentContractTest(unittest.TestCase):
             high_performance=high_performance,
             checked_vma_off_diagnostic=checked_vma_off_diagnostic,
             checked_vma_on_diagnostic=checked_vma_on_diagnostic,
+            seam_localization=seam_localization,
         )
     )
     profile = supplied["CANON_PROFILE_FILE"]
@@ -145,18 +149,19 @@ class P58EnvironmentContractTest(unittest.TestCase):
       high_performance: bool = False,
       checked_vma_off_diagnostic: bool = False,
       checked_vma_on_diagnostic: bool = False,
+      seam_localization: str = "",
   ):
     supplied = os.environ.copy()
-    supplied.update(
-        self._rendered_env(
-            arm,
-            stage,
-            sampler_is=sampler_is,
-            high_performance=high_performance,
-            checked_vma_off_diagnostic=checked_vma_off_diagnostic,
-            checked_vma_on_diagnostic=checked_vma_on_diagnostic,
-        )
+    rendered = self._rendered_env(
+        arm,
+        stage,
+        sampler_is=sampler_is,
+        high_performance=high_performance,
+        checked_vma_off_diagnostic=checked_vma_off_diagnostic,
+        checked_vma_on_diagnostic=checked_vma_on_diagnostic,
+        seam_localization=seam_localization,
     )
+    supplied.update(rendered)
     supplied.update({
         "CANON_PKG": str(PKG),
         "HF_TOKEN": "test-hf-runtime-token",
@@ -166,6 +171,15 @@ class P58EnvironmentContractTest(unittest.TestCase):
     })
     with tempfile.TemporaryDirectory() as state_dir:
       supplied["CANON_STATE"] = state_dir
+      if seam_localization:
+        rendered_state = rendered["CANON_STATE"]
+        for key, value in tuple(supplied.items()):
+          if isinstance(value, str) and value.startswith(rendered_state):
+            supplied[key] = state_dir + value[len(rendered_state):]
+        supplied["CANON_P38_GCS_PREFIX"] = (
+            "gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p58/"
+            f"{Path(state_dir).name}/attempt-0"
+        )
       if checked_vma_off_diagnostic or checked_vma_on_diagnostic:
         supplied["CANON_P38_DIAGNOSTIC_ROUND_FILE"] = str(
             Path(state_dir) / "p38_diagnostic_round"
@@ -370,6 +384,41 @@ class P58EnvironmentContractTest(unittest.TestCase):
         ("CANON_P38_PRECHECK_ONLY", "0"),
         ("CANON_P38_CONTROLLED_EXIT", "0"),
         ("CANON_P38_DIAGNOSTIC_ROUNDS", "2"),
+    ):
+      with self.subTest(key=key), self.assertRaises(ValueError):
+        deepswe_contract.validate_environment({**values, key: replacement})
+
+  def test_coarse_seam_survives_real_env_and_python_contract(self):
+    completed, resolved, values = self._persisted(
+        "zero", "full", seam_localization="coarse"
+    )
+    self.assertIn("P58 coarse seam precheck admitted", completed.stdout)
+    for key, expected in {
+        "CANON_P58_SEAM_LOCALIZATION": "coarse",
+        "CANON_P38_DIAGNOSTIC_ROUNDS": "3",
+        "CANON_P38_DURABILITY_PROFILE": "p58-seam-v1",
+        "CANON_P38_SEAM_OBSERVER": "layer",
+        "CANON_P38_SEAM_MIN_POSITION": "3072",
+        "CANON_P38_SEAM_MAX_POSITION": "4608",
+        "CANON_P38_TAIL_OBSERVER": "1",
+        "CANON_P59_CHECKED_VMA": "1",
+        "CANON_P67_P66_VMA_P59_ONLY": "1",
+        "CANON_V1_HP_FIRST_UPDATE_GATE": "1",
+        "CANON_P63_OVERFLOW_SAFE_CLIP": "1",
+    }.items():
+      self.assertEqual(values[key], expected)
+      self.assertIn(f"export {key}={expected}", resolved)
+    deepswe_contract.validate_environment(values)
+
+  def test_coarse_seam_rejects_partial_tuple(self):
+    _, _, values = self._persisted(
+        "zero", "full", seam_localization="coarse"
+    )
+    for key, replacement in (
+        ("CANON_P38_DIAGNOSTIC_ROUNDS", "1"),
+        ("CANON_P38_DURABILITY_PROFILE", "full-v1"),
+        ("CANON_P38_SEAM_OBSERVER", "full"),
+        ("CANON_P38_TAIL_OBSERVER", "0"),
     ):
       with self.subTest(key=key), self.assertRaises(ValueError):
         deepswe_contract.validate_environment({**values, key: replacement})

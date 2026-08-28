@@ -26,7 +26,7 @@ fi
 : "${CANON_P38_GCS_PREFIX:?CANON_P38_GCS_PREFIX unset}"
 : "${CANON_P38_DURABILITY_PROFILE:?CANON_P38_DURABILITY_PROFILE unset}"
 case "$CANON_P38_DURABILITY_PROFILE" in
-  full-v1|round-alignment-v1|m15-wide-v1) ;;
+  full-v1|round-alignment-v1|m15-wide-v1|p58-seam-v1) ;;
   *)
     echo "[P38.GCS] REFUSING: invalid durability profile: $CANON_P38_DURABILITY_PROFILE" >&2
     exit 2
@@ -53,7 +53,15 @@ if [ "$runtime_source_commit" != "$CANON_EXPECT_COMMIT" ]; then
 fi
 echo "[P38.GCS] RUNTIME_SOURCE_PASS expected=$CANON_EXPECT_COMMIT observed=$runtime_source_commit"
 
-bucket_root="gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/"
+bucket_namespace=p38
+if [ "$CANON_P38_DURABILITY_PROFILE" = p58-seam-v1 ]; then
+  [ "${CANON_P58_SEAM_LOCALIZATION:-}" = coarse ] || {
+    echo "[P38.GCS] REFUSING: p58-seam-v1 requires the coarse selector" >&2
+    exit 2
+  }
+  bucket_namespace=p58
+fi
+bucket_root="gs://yuxzhang-tunix-models/canon-zero-tim/evidence/$bucket_namespace/"
 case "$CANON_P38_GCS_PREFIX" in
   "$bucket_root"*/attempt-0) ;;
   *)
@@ -649,6 +657,18 @@ if [ "$mode" = round ]; then
     --incident-ledger "${CANON_P38_INCIDENT_LEDGER:?}" \
     --observer-dir "$observer_dir" \
     "${round_args[@]}"
+  if [ "$CANON_P38_DURABILITY_PROFILE" = p58-seam-v1 ]; then
+    p58_round_args=()
+    if [ -s "$round_stage/mismatch-capsule.npz" ]; then
+      p58_round_args+=(--capsule "$round_stage/mismatch-capsule.npz")
+    fi
+    JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
+      python3 "$CANON_PKG/tasks/p58-deepswe-native-zero-comparison/scripts/classify_p58_coarse_seam_round.py" \
+        --directory "$round_stage" \
+        --alignment-report "$round_stage/pre-alignment.jsonl" \
+        "${p58_round_args[@]}" \
+        --output "$round_stage/p58-seam.round.classification.json"
+  fi
   mapfile -t round_files < <(
     cd "$round_stage"
     find . -maxdepth 1 -type f ! -name 'SHA256SUMS' \
@@ -702,6 +722,13 @@ record = {
     "status": "sealed-and-verified",
     "transport": "single-deterministic-tar-v1",
 }
+classification = target.with_name("p58-seam.round.classification.json")
+if classification.is_file():
+  payload = json.loads(classification.read_text(encoding="utf-8"))
+  record["classification"] = payload["outcome"]
+  record["classification_sha256"] = __import__("hashlib").sha256(
+      classification.read_bytes()
+  ).hexdigest()
 target.write_text(json.dumps(record, sort_keys=True) + "\n", encoding="utf-8")
 PY
   mv -- "$round_stage/ROUND_COMPLETE.json.partial" \
@@ -804,6 +831,78 @@ PY
       "$verify_dir/COLLECTED.json"
     cmp -- "$stage/COLLECTED.json" "$verify_dir/COLLECTED.json"
     echo "[P38.GCS] COLLECTED prefix=$CANON_P38_GCS_PREFIX profile=m15-wide-v1 manifest_sha256=$(sha256sum "$stage/SHA256SUMS" | awk '{print $1}')"
+    exit 0
+  fi
+
+  if [ "$CANON_P38_DURABILITY_PROFILE" = p58-seam-v1 ]; then
+    [ "${CANON_P38_DIAGNOSTIC_ROUNDS:-}" = 3 ] || {
+      echo "[P38.GCS] REFUSING: P58 seam collection requires three rounds" >&2
+      exit 2
+    }
+    copy_required "${CANON_RUN_LOG:?}" run.log
+    copy_required "${CANON_PRE_ALIGN_REPORT:?}" pre-alignment.jsonl
+    copy_required "${CANON_P38_SEAM_CLASSIFICATION:?}" \
+      p58-seam.classification.json
+    collected_files=(run.log pre-alignment.jsonl p58-seam.classification.json)
+    for round_index in 0 1 2; do
+      printf -v round_text '%06d' "$round_index"
+      round_root="$CANON_STATE/p38_gcs_rounds/$round_text"
+      copy_required "$round_root/ROUND_COMPLETE.json" \
+        "ROUND_COMPLETE.$round_text.json"
+      copy_required "$round_root/p58-seam.round.classification.json" \
+        "p58-seam.round.$round_text.classification.json"
+      collected_files+=(
+        "ROUND_COMPLETE.$round_text.json"
+        "p58-seam.round.$round_text.classification.json"
+      )
+    done
+    for remote_name in "${collected_files[@]}" SHA256SUMS COLLECTED.json; do
+      if gcs_exists "$CANON_P38_GCS_PREFIX/$remote_name"; then
+        echo "[P38.GCS] REFUSING: remote P58 seam object already exists: $remote_name" >&2
+        exit 2
+      fi
+    done
+    (
+      cd "$stage"
+      sha256sum "${collected_files[@]}" > SHA256SUMS
+      sha256sum -c SHA256SUMS --quiet
+    )
+    python3 - "$stage/COLLECTED.json.partial" "$runtime_source_commit" <<'PY'
+import json
+import os
+import pathlib
+import sys
+
+target = pathlib.Path(sys.argv[1])
+record = {
+    "attempt": os.environ.get("JOBSET_RESTART_ATTEMPT", "unknown"),
+    "diagnostic_rounds": 3,
+    "jobset": os.environ["CANON_P38_GCS_PREFIX"].split("/")[-2],
+    "prefix": os.environ["CANON_P38_GCS_PREFIX"],
+    "schema": "canon-p58-seam-gcs-collection-v1",
+    "source_commit": os.environ["CANON_EXPECT_COMMIT"],
+    "runtime_source_commit": sys.argv[2],
+    "status": "collected-from-three-sealed-rounds",
+}
+target.write_text(json.dumps(record, sort_keys=True) + "\n", encoding="utf-8")
+PY
+    mv -- "$stage/COLLECTED.json.partial" "$stage/COLLECTED.json"
+    for name in "${collected_files[@]}" SHA256SUMS; do
+      upload "$stage/$name" "$name"
+    done
+    upload "$stage/COLLECTED.json" COLLECTED.json
+    verify_dir="$(mktemp -d)"
+    trap 'rm -rf "$verify_dir"' EXIT
+    gcs_cp "$CANON_P38_GCS_PREFIX/SHA256SUMS" "$verify_dir/SHA256SUMS"
+    cmp -- "$stage/SHA256SUMS" "$verify_dir/SHA256SUMS"
+    for name in "${collected_files[@]}"; do
+      gcs_cp "$CANON_P38_GCS_PREFIX/$name" "$verify_dir/$name"
+    done
+    (cd "$verify_dir" && sha256sum -c SHA256SUMS --quiet)
+    gcs_cp "$CANON_P38_GCS_PREFIX/COLLECTED.json" \
+      "$verify_dir/COLLECTED.json"
+    cmp -- "$stage/COLLECTED.json" "$verify_dir/COLLECTED.json"
+    echo "[P38.GCS] COLLECTED prefix=$CANON_P38_GCS_PREFIX profile=p58-seam-v1 rounds=3"
     exit 0
   fi
 

@@ -457,10 +457,14 @@ if [ "$rc" -ne 0 ] && [ -s "${CANON_P38_MISMATCH_CAPSULE:-}" ]; then
 fi
 if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
   p38_m15_wide=0
+  p38_p58_seam=0
   if [ "${CANON_P38_DURABILITY_PROFILE:-}" = "m15-wide-v1" ]; then
     p38_m15_wide=1
   fi
-  if [ "$p38_m15_wide" -eq 1 ]; then
+  if [ "${CANON_P38_DURABILITY_PROFILE:-}" = "p58-seam-v1" ]; then
+    p38_p58_seam=1
+  fi
+  if [ "$p38_m15_wide" -eq 1 ] || [ "$p38_p58_seam" -eq 1 ]; then
     p38_capture_rc=0
     m15_apc_rc=0
     m15_replay_bundle_rc=0
@@ -624,6 +628,25 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
         p38_seam_bundle_bytes="$(wc -c < "$CANON_APC_M15_SEAM_BUNDLE" | tr -d '[:space:]')"
         echo "[CANON_APC_M15_SEAM_BUNDLE] path=$CANON_APC_M15_SEAM_BUNDLE bytes=$p38_seam_bundle_bytes sha256=$p38_seam_bundle_sha source=sealed-shards"
       fi
+    elif [ "$p38_p58_seam" -eq 1 ]; then
+      p58_round_args=()
+      for p58_round_index in 0 1 2; do
+        printf -v p58_round_text '%06d' "$p58_round_index"
+        p58_round_report="$CANON_STATE/p38_gcs_rounds/$p58_round_text/p58-seam.round.classification.json"
+        p58_round_args+=(--round "$p58_round_report")
+      done
+      JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
+        python3 "$CANON_PKG/tasks/p58-deepswe-native-zero-comparison/scripts/classify_p58_coarse_seam_three_round.py" \
+          "${p58_round_args[@]}" \
+          --run-log "$LOG" \
+          --output "$CANON_P38_SEAM_CLASSIFICATION" || \
+        p38_seam_rc=$?
+      if [ -s "$CANON_P38_SEAM_CLASSIFICATION" ]; then
+        p38_seam_sha="$(sha256sum "$CANON_P38_SEAM_CLASSIFICATION" | awk '{print $1}')"
+        echo "[P58.SEAM] THREE_ROUND_CLASSIFICATION path=$CANON_P38_SEAM_CLASSIFICATION sha256=$p38_seam_sha backward=0 optimizer_commits=0"
+        sed 's/^/[P58.SEAM.CLASSIFICATION_JSON] /' \
+          "$CANON_P38_SEAM_CLASSIFICATION"
+      fi
     else
     shopt -s nullglob
     p38_seam_round_capsules=(
@@ -724,10 +747,11 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
         "$CANON_P38_TERMINAL_CLASSIFICATION"
     fi
   fi
-  if [ -d "$CANON_P38_SERVING_CAPTURE_DIR" ] && [ "$p38_m15_wide" -eq 1 ]; then
+  if [ -d "$CANON_P38_SERVING_CAPTURE_DIR" ] && \
+     { [ "$p38_m15_wide" -eq 1 ] || [ "$p38_p58_seam" -eq 1 ]; }; then
     p38_persist_rc=0
     p38_request_live_action collect || p38_persist_rc=$?
-    echo "[CANON_P38_DURABLE_COLLECTION] profile=m15-wide-v1 archive=bounded-shards"
+    echo "[CANON_P38_DURABLE_COLLECTION] profile=${CANON_P38_DURABILITY_PROFILE} archive=sealed-rounds"
   elif [ -d "$CANON_P38_SERVING_CAPTURE_DIR" ]; then
     tar --sort=name --mtime=@0 --owner=0 --group=0 \
       -C "$CANON_P38_SERVING_CAPTURE_DIR" \
@@ -802,6 +826,8 @@ n_p38_terminal_a=$(grep -ac '^\[CANON_P38_TERMINAL_DISCRIMINATOR_RECORD\] .* arm
 n_p38_terminal_b=$(grep -ac '^\[CANON_P38_TERMINAL_DISCRIMINATOR_RECORD\] .* arm=B ' "$LOG" || true)
 if [ -n "${CANON_APC_M15_TARGET_DEBUG:-}" ]; then
   n_p38_coverage=$(grep -ac '^\[CANON_P38\] DIAGNOSTIC_COVERAGE_CONTRACT .*prompt_groups=32 .*unit_prompts=32 .*units=1 .*trajectories=256 .*partial_tail=reject verdict=PASS' "$LOG" || true)
+elif [ "${CANON_P58_SEAM_LOCALIZATION:-}" = "coarse" ]; then
+  n_p38_coverage=$(grep -ac '^\[CANON_P38\] DIAGNOSTIC_COVERAGE_CONTRACT .*prompt_groups=8 .*unit_prompts=8 .*units=1 .*trajectories=128 .*partial_tail=reject verdict=PASS' "$LOG" || true)
 else
   n_p38_coverage=$(grep -ac '^\[CANON_P38\] DIAGNOSTIC_COVERAGE_CONTRACT .*prompt_groups=32 .*unit_prompts=4 .*units=8 .*trajectories=256 .*partial_tail=reject verdict=PASS' "$LOG" || true)
 fi
@@ -957,7 +983,7 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
     exit 1
   fi
   if [ "$n_p38_coverage" -ne 1 ]; then
-    echo "[run] FATAL: P38 diagnostic did not attest full 32-prompt coverage: $n_p38_coverage" >&2
+    echo "[run] FATAL: P38 diagnostic did not attest its full prompt coverage: $n_p38_coverage" >&2
     exit 1
   fi
   if [ "$n_p38_precheck" -gt 0 ] && \
@@ -988,7 +1014,8 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
   fi
 fi
 if [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "1" ] && \
-   [ -z "${CANON_P58_CHECKED_VMA_DIAGNOSTIC:-}" ]; then
+   [ -z "${CANON_P58_CHECKED_VMA_DIAGNOSTIC:-}" ] && \
+   [ -z "${CANON_P58_SEAM_LOCALIZATION:-}" ]; then
   case "${CANON_PROFILE_FILE:-}" in
     cluster/profiles/qwen3-1p7b-dp16-tp4-gsm8k.env|\
     cluster/profiles/qwen3-1p7b-dp16-tp4-gsm8k-v1-hp.env|\
@@ -1089,6 +1116,9 @@ if [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "1" ] && \
 fi
 if [ -n "${CANON_P58_CHECKED_VMA_DIAGNOSTIC:-}" ]; then
   echo "[P58.VMA.DIAGNOSTIC] fixed_lm_head_receipt_postflight=skipped_pre_backward selector=${CANON_P58_CHECKED_VMA_DIAGNOSTIC}"
+fi
+if [ -n "${CANON_P58_SEAM_LOCALIZATION:-}" ]; then
+  echo "[P58.SEAM] fixed_lm_head_receipt_postflight=skipped_pre_backward selector=${CANON_P58_SEAM_LOCALIZATION}"
 fi
 if [ "${CANON_P35_EXACT_REPLAY:-0}" = "1" ] && \
    [ -s "${CANON_P35_PRE_REPLAY_REPORT:-}" ]; then
@@ -1372,6 +1402,15 @@ elif [ "${CANON_P35_ENVELOPE:-0}" = "1" ]; then
     echo "[run] P35 expected diagnostic exit=1 accepted after COMPLETE classification"
     rc=0
   fi
+elif [ -n "${CANON_P58_SEAM_LOCALIZATION:-}" ]; then
+  if [ "$rc" -ne 42 ] || [ "$n_p38_precheck" -ne 1 ] || \
+     [ "$n_p38_rounds" -ne 3 ] || [ "$n_p38_controlled_exit" -ne 1 ] || \
+     [ "${p38_seam_rc:-1}" -ne 0 ]; then
+    echo "[run] FATAL: P58 seam diagnostic is incomplete: rc=$rc precheck=$n_p38_precheck rounds=$n_p38_rounds controlled_exit=$n_p38_controlled_exit classifier=${p38_seam_rc:-unset}" >&2
+    exit 1
+  fi
+  echo "[P58.SEAM] DIAGNOSTIC_COMPLETE mode=${CANON_P58_SEAM_LOCALIZATION} rounds=3 backward=0 optimizer_commits=0 classification=$CANON_P38_SEAM_CLASSIFICATION"
+  rc=0
 elif [ -n "${CANON_P58_CHECKED_VMA_DIAGNOSTIC:-}" ]; then
   if [ "$rc" -ne 42 ] || [ "$n_p38_precheck" -ne 1 ] || \
      [ "$n_p38_rounds" -ne 1 ] || [ "$n_p38_controlled_exit" -ne 1 ]; then

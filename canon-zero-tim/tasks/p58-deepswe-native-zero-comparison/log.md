@@ -1,5 +1,50 @@
 # Log
 
+## 2026-08-28 UTC — P58.19 three-round coarse seam implementation, local only
+
+- Source: opened on exact local base
+  `7fed8307a6bdf9f5887593b83dcd5dc83051b1f0`.  The operator branch later
+  advanced by one M15 documentation/packaging commit only; it does not overlap
+  P58.19 source paths.  The dirty P58 worktree was not rebased or published.
+- Decision: P58.18 sealed `CHECKED_VMA_NOT_SUFFICIENT`; replace another full
+  retry with one default-off, exact-geometry, three-round frozen-weight coarse
+  localization carrier.  One 128-chip JobSet performs all three rounds
+  sequentially; it never enters VJP/backward/optimizer commit.
+- Contract: `CANON_P58_SEAM_LOCALIZATION=coarse` is the single source of
+  truth.  Renderer, profile, Python contract, and real `00_env.sh` derive and
+  verify the P38 observer, `[3072,4608)` bounds, `p58-seam-v1` durability,
+  three rounds, B8xG16, 128 trajectories/round, strict B-C, and unchanged
+  production Zero-HP fields.  Partial tuples and neighboring workloads fail
+  closed.
+- Durability: each round is classified before archive/manifest/upload/readback
+  and `ROUND_COMPLETE`; the next ACK is impossible before that seal.  The
+  aggregate classifier requires three PASS rounds, exact B-C, finite positive
+  A-B, one common first-red coarse signature, exactly three precheck markers,
+  one controlled exit, and zero backward/commit markers.
+- Launch preparation: added a clean-tree/SHA/digest-pinned render-only wrapper.
+  It never invokes Kubernetes and refuses output overwrite.  Image
+  publication, server dry-run, apply, and TPU work remain separately gated.
+- Validation: renderer 30/30, profile 11/11, new classifiers 4/4,
+  checked-VMA classifier 7/7, ABA classifier 4/4, shared fake-GCS persistence,
+  syntax, diff hygiene, and flag registry `394/394/394` pass.  The complete
+  pinned dependency-image gate also exits zero with
+  `P58_EXACT_IMAGE_CPU_PASS ... checked_vma_aba=1 coarse_seam=1 ...
+  regressions=1`.
+- Exact-image findings: the first run exposed a real `00_env.sh` admission
+  inconsistency: the global contract treats unset `CANON_KV_UNIFIED` as zero,
+  while one fixed-head sub-check required an explicit zero.  That sub-check
+  now uses the same unset-is-zero semantic and still rejects explicit one;
+  environment contract is 19/19.  The gate also exposed the stale prefix-cache
+  adjacency expectation, updated from 393 to the audited 394 flags.  A
+  container-only repeat of the host GCS test was removed because a linked Git
+  worktree mounted read-only cannot resolve its external gitdir; the actual
+  host fake-GCS suite independently passes, including P58 three-round collect
+  and the missing-selector negative.
+- Claim ceiling: no v5p/Pathways target ran.  The legacy DP1xTP4 one-host seam
+  carrier does not exercise the new TP8 layer observer, so it is not observer
+  neutrality or production-localization evidence.  No commit, push, image
+  publication, Kubernetes mutation, TPU launch, or credential access occurred.
+
 ## 2026-08-28 UTC — P58.18 Checked-VMA matched triplicate executed and classified (Case 2: CHECKED_VMA_NOT_SUFFICIENT)
 
 - Execution: Ran three independent exact-geometry Step-0 diagnostic JobSets on the 128 TPU slice (`haoyugao-cpu-np-pvc`): `ON-A` (`canon-p58-vmaon-full-p58aba01-ona`), `OFF` (`canon-p58-vmaoff-full-p58aba01-off`), and `ON-B` (`canon-p58-vmaon-full-p58aba01-onb`).

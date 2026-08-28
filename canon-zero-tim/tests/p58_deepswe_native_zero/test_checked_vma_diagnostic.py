@@ -189,10 +189,8 @@ class P58CheckedVmaDiagnosticTest(unittest.TestCase):
     postflight = (
         ROOT / "canon-zero-tim/cluster/steps/90_run.sh"
     ).read_text()
-    self.assertIn(
-        'if [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "1" ] && \\\n   [ -z "${CANON_P58_CHECKED_VMA_DIAGNOSTIC:-}" ]; then',
-        postflight,
-    )
+    self.assertIn('CANON_P58_CHECKED_VMA_DIAGNOSTIC:-}" ] &&', postflight)
+    self.assertIn('CANON_P58_SEAM_LOCALIZATION:-}" ]; then', postflight)
     self.assertIn("classify_p58_checked_vma_diagnostic.py", postflight)
 
 

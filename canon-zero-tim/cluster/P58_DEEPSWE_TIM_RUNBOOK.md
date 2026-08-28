@@ -18,7 +18,77 @@ P58 does not modify `main`. Rendering and local validation do not authorize a
 Kubernetes apply. An operator must separately approve image publication and
 each launch.
 
-## P58.18 checked-VMA matched triplicate — current launch recipe
+## P58.19 three-round coarse seam localization — render-only recipe
+
+The current diagnostic is one 128-chip JobSet with three sequential
+frozen-weight rounds.  It is not three jobs and it is not training.  Every
+round uses rollout DP8xTP8 plus trainer DP8xTP8, B8xG16 (128 trajectories),
+Qwen3-4B-Instruct-2507, the reviewed 1,012-task list, 16K response, 50 turns,
+seed 42, concurrency 128, prefix cache off, fixed lm-head, continue-decode 8,
+and strict B-C.  Backward and optimizer commit remain zero.
+
+Prepare from a clean checkout only after the source and matching digest-pinned
+image have each been published with explicit approval:
+
+```bash
+export P58_EXPECT_SOURCE_SHA=<exact-published-40-character-sha>
+bash canon-zero-tim/tasks/p58-deepswe-native-zero-comparison/scripts/prepare_p58_coarse_seam_localization.sh \
+  <fresh-run-id> \
+  <matching-image@sha256:...> \
+  <worker-nodepool-or-auto> \
+  /tmp/p58-coarse-seam.yaml
+```
+
+Required render marker:
+
+```text
+P58_COARSE_SEAM_PREPARE_PASS ... rounds=3 backward=0 optimizer_commits=0
+```
+
+The wrapper only renders YAML.  Before any separately approved apply, inspect
+the rendered identity: `diagnostic=p58-seam-localization`,
+`diagnostic-rounds=3`, `backward=0`, `optimizer-commits=0`, exactly one
+`CANON_P58_SEAM_LOCALIZATION=coarse`, and no P58.18 checked-VMA selector.  Do
+not hand-set subordinate P38 fields; `00_env.sh` must attest the derived
+`p58-seam-v1` durability profile and bounded `[3072,4608)` layer observer.
+
+During execution, a round may advance only after its P58 round classifier is
+PASS and the archive has passed upload/read-back verification.  A completed
+return contains three distinct `ROUND_COMPLETE` receipts, their three
+`p58-seam-round.classification.json` files, and the aggregate
+`p58-seam.classification.json`.  The aggregate requires exactly three
+precheck markers, one controlled exit, finite positive A-B in each round,
+exact B-C, a common first-red coarse signature, and no VJP/backward/commit.
+
+Decision routing:
+
+| Result | Next action |
+|---|---|
+| same first-red layer/checkpoint in all rounds | prepare a separately reviewed 15-checkpoint fine scan of that layer |
+| different checkpoints but a common interval | retain evidence and refine only that interval |
+| backbone exact; terminal path first red | route to the LM-head/log-normalizer discriminator |
+| layer-0 input already red | inspect embedding, position, and KV handoff |
+| missing join/round, B-C red, endpoint drift, or training activity | INCONCLUSIVE/FAIL; repair the prerequisite only |
+
+Return the entire persistent or verified GCS run root, including `run.log`,
+`pre_alignment.jsonl`, full debug trajectories, per-round seals, and the
+aggregate classification.  The legacy DP1xTP4 one-host carrier does not
+exercise this TP8 layer observer, so its result cannot substitute for the
+exact target.  No construction marker authorizes image publication,
+Kubernetes apply, or a TPU launch.
+
+Local construction gate:
+
+```bash
+bash canon-zero-tim/tests/p58_deepswe_native_zero/run_exact_image.sh \
+  sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a
+```
+
+Required terminal substring is `checked_vma_aba=1 coarse_seam=1 ...
+regressions=1`.  This CPU dependency-image result checks contracts and
+neighboring workloads; it does not run Qwen3 on TPU and is not target evidence.
+
+## Historical: P58.18 checked-VMA matched triplicate — completed recipe
 
 The next Zero diagnostic is three separate 128-chip Step-0 JobSets, logically
 named `ON-A/OFF/ON-B`. Each uses rollout DP8xTP8 plus trainer DP8xTP8,

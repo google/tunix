@@ -1,5 +1,83 @@
 # P58 DeepSWE native-first training handoff
 
+## 2026-08-28 UTC — P58.19 coarse seam localization prepared; target NOT RUN
+
+P58.18 is closed by the sealed `p58aba01` result: ON-A, OFF, and ON-B all
+returned finite A-B RED, exact B-C, controlled exit, and zero backward/commit.
+The only supported conclusion is `CHECKED_VMA_NOT_SUFFICIENT`.  Do not ship a
+P67-only repair and do not spend another 1,000-update training run on the same
+pre-backward failure.
+
+P58.19 prepares one default-off diagnostic selector,
+`CANON_P58_SEAM_LOCALIZATION=coarse`.  It renders exactly one 128-chip JobSet,
+not three JobSets: rollout DP8xTP8 and trainer DP8xTP8 remain disjoint, while
+the same process executes three sequential frozen-weight Step-0 rounds.  Each
+round keeps Qwen3-4B-Instruct-2507, the reviewed 1,012-task list, B8xG16 (128
+trajectories), 16,384 response tokens, 50 turns, temperature/top-p/top-k
+`1.0/1.0/0`, seed 42, concurrency 128, fixed lm-head, continue-decode 8,
+prefix cache off, exact B-C, and the production Zero-HP numerical tuple.  VJP,
+backward, optimizer commit, and checkpoint advancement are unreachable.
+
+The selector derives the complete observer/durability tuple.  It records
+bounded coarse fingerprints for every Transformer block input/output, final
+norm, and the terminal logprob path over logical KV prefixes `[3072,4608)`.
+Never hand-edit subordinate P38/M15 fields and never combine this selector
+with Native, three-update, warning-only, checked-VMA diagnostic, or partial
+observer settings.  Selector absence leaves production P58 Zero/full
+unchanged.
+
+After this source is separately approved, committed, pushed, and paired with
+a separately approved digest-pinned image, an executor starts from a clean
+checkout of the exact published SHA and runs only the render wrapper:
+
+```bash
+export P58_EXPECT_SOURCE_SHA=<exact-published-40-character-sha>
+bash canon-zero-tim/tasks/p58-deepswe-native-zero-comparison/scripts/prepare_p58_coarse_seam_localization.sh \
+  <fresh-run-id> \
+  <matching-image@sha256:...> \
+  <worker-nodepool-or-auto> \
+  /tmp/p58-coarse-seam.yaml
+```
+
+The wrapper refuses a dirty checkout, SHA drift, a mutable image tag, or an
+existing output file.  It contains no `kubectl` call.  Image publication,
+server dry-run, apply, and target monitoring remain separate explicit
+approvals.  Do not launch from the current dirty local worktree.
+
+A return is complete only when the persistent run root contains all three
+round seals and the aggregate result:
+
+```text
+run.log
+pre_alignment.jsonl
+debug/*.trajectories.jsonl.gz
+p58-seam.classification.json
+p38_gcs_rounds/000000/ROUND_COMPLETE.json
+p38_gcs_rounds/000000/p58-seam.round.classification.json
+p38_gcs_rounds/000001/ROUND_COMPLETE.json
+p38_gcs_rounds/000001/p58-seam.round.classification.json
+p38_gcs_rounds/000002/ROUND_COMPLETE.json
+p38_gcs_rounds/000002/p58-seam.round.classification.json
+```
+
+Return the full persistent root or its verified GCS run root, not a copied log
+excerpt.  Every round is classified, archived, uploaded, read back, and ACKed
+before the next begins.  Missing joins/rounds, B-C drift, nonfinite values,
+observer endpoint drift, or any backward/commit evidence is INCONCLUSIVE or
+FAIL, never PASS.  The aggregate classifier requires one common first-red
+coarse signature across all three rounds; otherwise preserve the evidence and
+refine only the common interval if one exists.
+
+Local host tests cover selector truth tables, renderer/profile rejection,
+classification, and durability wiring.  The existing DP1xTP4 one-host seam
+carrier does **not** execute the new Qwen3 TP8 layer observer and therefore
+cannot certify observer neutrality for the exact DP8xTP8 carrier.  A real
+v5p/Pathways target has not been launched.  The complete local
+dependency-image gate exits zero with `P58_EXACT_IMAGE_CPU_PASS ...
+checked_vma_aba=1 coarse_seam=1 ... regressions=1`; this is construction
+evidence only.  P58.19 cannot certify backward, optimizer correctness, full
+training, convergence, or general Zero-TIM readiness.
+
 ## 2026-08-28 UTC — P58.18 triplicate complete: Case 2 (CHECKED_VMA_NOT_SUFFICIENT) sealed
 
 The three independent exact-geometry Step-0 diagnostic JobSets (`p58aba01`: `ON-A`, `OFF`, `ON-B`) on 128 TPU chips have all completed with Controlled Exit 42:
@@ -15,7 +93,7 @@ P58_CHECKED_VMA_ABA_CLASSIFICATION verdict=PASS decision=CHECKED_VMA_NOT_SUFFICI
 
 ### Interpretation & Next Action:
 1. **Case 2 triggered**: Checked-VMA is not sufficient to explain the decode-vs-prefill divergence in DeepSWE Qwen3-4B.
-2. **Do NOT ship a P67 repair**: Since `checked_vma=off` produces the exact same A-B RED pattern with exact B-C, the seam does not stem from checked-VMA ownership.
+2. **Do NOT ship a P67-only repair**: Since `checked_vma=off` also produces A-B RED with exact B-C, checked-VMA is not sufficient. This does not prove the seam is independent of checked-VMA.
 3. **Evidence sealed**: Complete self-hashed package is sealed in `evidence/p58aba01_checked_vma_aba_wave/`.
 4. **Next phase**: Promote exact-geometry decode/prefill seam replay on DeepSWE to isolate whether rotary embeddings, ragged paged attention kernel, or tensor parallel communication is the source of the token logprob divergence.
 

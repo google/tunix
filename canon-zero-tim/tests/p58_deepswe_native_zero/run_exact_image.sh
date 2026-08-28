@@ -34,6 +34,9 @@ $DOCKER run --rm \
       canon-zero-tim/tasks/p58-deepswe-native-zero-comparison/scripts/run_onehost_deepswe_seam_probe_docker.sh \
       canon-zero-tim/tasks/p58-deepswe-native-zero-comparison/scripts/prepare_p58_checked_vma_off_diagnostic.sh \
       canon-zero-tim/tasks/p58-deepswe-native-zero-comparison/scripts/prepare_p58_checked_vma_aba_wave.sh \
+      canon-zero-tim/tasks/p58-deepswe-native-zero-comparison/scripts/prepare_p58_coarse_seam_localization.sh \
+      canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/persist_p38_gcs.sh \
+      canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/p38_live_snapshot_worker.sh \
       canon-zero-tim/cluster/profiles/qwen3-4b-dp8-tp8-deepswe-v1-hp.env
     PYTHONPATH=/workspace python3 \
       canon-zero-tim/tests/p58_deepswe_native_zero/test_loss_contract.py
@@ -67,6 +70,8 @@ $DOCKER run --rm \
       canon-zero-tim/tests/p58_deepswe_native_zero/test_checked_vma_aba_wave.py
     PYTHONPATH=/workspace python3 \
       canon-zero-tim/tests/p58_deepswe_native_zero/test_zero_hp_full_classifier.py
+    PYTHONPATH=/workspace python3 \
+      canon-zero-tim/tests/p58_deepswe_native_zero/test_coarse_seam_classifier.py
     PYTHONPATH=/workspace python3 \
       canon-zero-tim/tests/v1_phase4/test_first_update_gate.py
     PYTHONPATH=/workspace python3 \
@@ -148,6 +153,7 @@ $DOCKER run --rm \
     (
       cd tests/rl/agentic
       PYTHONPATH=/workspace python3 -m unittest \
+        agentic_rl_learner_test.AgenticRLLearnerTest.test_p38_diagnostic_consumer_admits_p58_seam_localization \
         agentic_grpo_learner_test.AgenticGrpoLearnerTest.test_environment_is_seeded_with_policy_version_before_reset \
         agentic_grpo_learner_test.AgenticGrpoLearnerTest.test_p58_all_sandbox_timeout_blocks_after_durable_journal \
         agentic_grpo_learner_test.AgenticGrpoLearnerTest.test_non_infrastructure_all_filtered_batch_does_not_capacity_block \
@@ -182,5 +188,5 @@ $DOCKER run --rm \
       python3 \
       canon-zero-tim/tests/p58_deepswe_native_zero/probe_stock_prompt_observer.py
     rm -r "$observer_state"
-    echo "P58_EXACT_IMAGE_CPU_PASS loss_oracle=1 weighted_accumulation=1 compact_filter=1 durable_journal=1 paired_renderer=1 alignment_policy=1 stock_observer=1 onehost_xprof=1 zero_hp_full=1 checked_vma_diagnostic=1 checked_vma_aba=1 qwen4b_fixed_head=1 checked_vma=1 vma_p59_only=1 first_update=1 stable_clip=1 apc=1 p59_tp4_tp8=2 p59_real_shim=4 p59_rpa=2 p59_fused_linear=2 disaggregated_trainer_mesh=4 p57_wandb=1 m15_token=1 regressions=1"
+    echo "P58_EXACT_IMAGE_CPU_PASS loss_oracle=1 weighted_accumulation=1 compact_filter=1 durable_journal=1 paired_renderer=1 alignment_policy=1 stock_observer=1 onehost_xprof=1 zero_hp_full=1 checked_vma_diagnostic=1 checked_vma_aba=1 coarse_seam=1 qwen4b_fixed_head=1 checked_vma=1 vma_p59_only=1 first_update=1 stable_clip=1 apc=1 p59_tp4_tp8=2 p59_real_shim=4 p59_rpa=2 p59_fused_linear=2 disaggregated_trainer_mesh=4 p57_wandb=1 m15_token=1 regressions=1"
   '

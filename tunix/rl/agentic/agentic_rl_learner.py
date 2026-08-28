@@ -197,6 +197,7 @@ def _p38_diagnostic_consumer_contract(
     m15_target_debug: bool = False,
     v1_fl_tp8_ab: bool = False,
     p58_vma_diagnostic: bool = False,
+    p58_seam_localization: bool = False,
 ) -> tuple[int, bool, int]:
   """Return the P38 full-coverage consumer geometry.
 
@@ -214,11 +215,13 @@ def _p38_diagnostic_consumer_contract(
     raise ValueError("V1 FrozenLake TP8 A/B is not a one-host rehearsal")
   if onehost_rehearsal and p58_vma_diagnostic:
     raise ValueError("P58 VMA diagnostic is not a one-host rehearsal")
+  if onehost_rehearsal and p58_seam_localization:
+    raise ValueError("P58 seam localization is not a one-host rehearsal")
   expected = (
       (2, 2, 2)
       if onehost_rehearsal
       else (8, 8, 16)
-      if p58_vma_diagnostic
+      if (p58_vma_diagnostic or p58_seam_localization)
       else (32, 32, 8)
       if (m15_target_debug or v1_fl_tp8_ab)
       else (32, 4, 8)
@@ -3387,6 +3390,9 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     p58_vma_diagnostic = (
         os.environ.get("CANON_P58_CHECKED_VMA_DIAGNOSTIC", "") in ("off", "on")
     )
+    p58_seam_localization = (
+        os.environ.get("CANON_P58_SEAM_LOCALIZATION", "") == "coarse"
+    )
     (
         consumer_batch_size,
         require_full_consumer_batch,
@@ -3407,6 +3413,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
         ),
         v1_fl_tp8_ab=v1_fl_tp8_ab,
         p58_vma_diagnostic=p58_vma_diagnostic,
+        p58_seam_localization=p58_seam_localization,
     )
     if p38_precheck_only:
       m15_debug_arm = os.environ.get("CANON_APC_M15_TARGET_DEBUG", "")

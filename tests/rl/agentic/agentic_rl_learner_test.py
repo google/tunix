@@ -288,6 +288,20 @@ class AgenticRLLearnerTest(parameterized.TestCase):
         (8, True, 1),
     )
 
+  def test_p38_diagnostic_consumer_admits_p58_seam_localization(self):
+    self.assertEqual(
+        agentic_rl_learner._p38_diagnostic_consumer_contract(
+            enabled=True,
+            full_batch_size=8,
+            mini_batch_size=8,
+            train_micro_batch_size=8,
+            num_generations=16,
+            process_in_consumer=True,
+            p58_seam_localization=True,
+        ),
+        (8, True, 1),
+    )
+
   def test_p38_diagnostic_consumer_rejects_subset_geometry(self):
     with self.assertRaisesRegex(ValueError, "coverage geometry changed"):
       agentic_rl_learner._p38_diagnostic_consumer_contract(

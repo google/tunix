@@ -20,7 +20,7 @@ set -euo pipefail
 : "${CANON_PKG:?CANON_PKG unset}"
 
 case "$CANON_P38_DURABILITY_PROFILE" in
-  full-v1|round-alignment-v1|m15-wide-v1) ;;
+  full-v1|round-alignment-v1|m15-wide-v1|p58-seam-v1) ;;
   *)
     echo "[P38.GCS] REFUSING: invalid durability profile: $CANON_P38_DURABILITY_PROFILE" >&2
     exit 2
@@ -118,7 +118,8 @@ snapshot_if_changed() {
   # alignment bundle at every round.  Periodic snapshots use the same worker
   # and cannot be preempted once a GCS transfer starts, so running them here
   # can starve a later round request past the learner's 900-second deadline.
-  if [ "$CANON_P38_DURABILITY_PROFILE" = round-alignment-v1 ]; then
+  if [ "$CANON_P38_DURABILITY_PROFILE" = round-alignment-v1 ] || \
+     [ "$CANON_P38_DURABILITY_PROFILE" = p58-seam-v1 ]; then
     return 0
   fi
   if [ "$CANON_P38_DURABILITY_PROFILE" = m15-wide-v1 ]; then

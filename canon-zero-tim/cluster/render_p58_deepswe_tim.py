@@ -57,6 +57,14 @@ _FILTER_STATUSES = (
     "MODEL_TIMEOUT",
     "REWARD_TIMEOUT",
 )
+_SEAM_LOCALIZATION_MODES = ("", "coarse")
+_SEAM_DIAGNOSTIC_ROUNDS = 3
+_SEAM_MIN_POSITION = 3072
+_SEAM_MAX_POSITION = 4608
+_SEAM_MAX_BYTES = 1024 * 1024 * 1024
+_SEAM_TAIL_MAX_BYTES = 64 * 1024 * 1024
+_SEAM_INCIDENT_MAX_BYTES = 128 * 1024 * 1024
+_SEAM_CAPTURE_BOUNDS = (3072, 3456, 3840, 4224, 4608)
 
 
 def _service_containers(head: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -145,6 +153,7 @@ def render(
     high_performance: bool = False,
     checked_vma_off_diagnostic: bool = False,
     checked_vma_on_diagnostic: bool = False,
+    seam_localization: str = "",
 ) -> dict[str, Any]:
   """Returns one immutable P58 native or zero JobSet."""
   if stage not in _STAGE_STEPS:
@@ -155,6 +164,8 @@ def render(
     raise ValueError("P58 high-performance is admitted only for Zero full")
   if checked_vma_off_diagnostic and checked_vma_on_diagnostic:
     raise ValueError("P58 checked-VMA diagnostic selectors are mutually exclusive")
+  if seam_localization not in _SEAM_LOCALIZATION_MODES:
+    raise ValueError("P58 seam localization must be empty or coarse")
   checked_vma_diagnostic = (
       "off" if checked_vma_off_diagnostic else
       "on" if checked_vma_on_diagnostic else ""
@@ -164,6 +175,15 @@ def render(
   ):
     raise ValueError(
         "P58 checked-VMA diagnostic is its own Zero/full HP selector"
+    )
+  if seam_localization and (
+      arm != "zero"
+      or stage != "full"
+      or high_performance
+      or bool(checked_vma_diagnostic)
+  ):
+    raise ValueError(
+        "P58 seam localization is its own Zero/full HP diagnostic selector"
     )
   if sampler_is and arm != "native":
     raise ValueError("P58 sampler IS is admitted only for the native arm")
@@ -191,9 +211,13 @@ def render(
       fixed_lm_head=False,
   )
 
-  hp_bundle = high_performance or bool(checked_vma_diagnostic)
+  hp_bundle = high_performance or bool(checked_vma_diagnostic) or bool(
+      seam_localization
+  )
   treatment = (
-      f"vma{checked_vma_diagnostic}"
+      f"seam{seam_localization}"
+      if seam_localization
+      else f"vma{checked_vma_diagnostic}"
       if checked_vma_diagnostic
       else "zero-hp"
       if high_performance
@@ -230,6 +254,14 @@ def render(
             f"p58-checked-vma-{checked_vma_diagnostic}"
         ),
         "canon.zero-tim/diagnostic-selector": checked_vma_diagnostic,
+        "canon.zero-tim/backward": "0",
+        "canon.zero-tim/optimizer-commits": "0",
+    })
+  if seam_localization:
+    document["metadata"]["labels"].update({
+        "canon.zero-tim/diagnostic": "p58-seam-localization",
+        "canon.zero-tim/seam-observer": seam_localization,
+        "canon.zero-tim/diagnostic-rounds": str(_SEAM_DIAGNOSTIC_ROUNDS),
         "canon.zero-tim/backward": "0",
         "canon.zero-tim/optimizer-commits": "0",
     })
@@ -358,6 +390,74 @@ def render(
             f"{run_root}/p38_diagnostic_round"
         ),
     })
+  if seam_localization:
+    capture = f"{run_root}/p38_serving_capture"
+    p34._set_env(main, {
+        "CANON_P58_SEAM_LOCALIZATION": seam_localization,
+        "CANON_P38_PRECHECK_ONLY": "1",
+        "CANON_P38_CONTROLLED_EXIT": "1",
+        "CANON_P38_DIAGNOSTIC_ROUNDS": str(_SEAM_DIAGNOSTIC_ROUNDS),
+        "CANON_P38_DIAGNOSTIC_ROUND_FILE": (
+            f"{run_root}/p38_diagnostic_round"
+        ),
+        "CANON_P38_ROUND_SEAL_REQUEST_DIR": (
+            f"{run_root}/p38_round_seal_requests"
+        ),
+        "CANON_P38_ROUND_SEAL_ACK_DIR": (
+            f"{run_root}/p38_round_seal_acks"
+        ),
+        "CANON_P38_MISMATCH_CAPSULE": f"{run_root}/p38_mismatch_capsule.npz",
+        "CANON_P38_MISMATCH_CAPSULE_MAX_ROWS": "256",
+        "CANON_P38_DURABILITY_PROFILE": "p58-seam-v1",
+        "CANON_P38_SERVING_CAPTURE_DIR": capture,
+        "CANON_P38_REQUEST_JOURNAL": f"{capture}/p38_request_journal.jsonl",
+        "CANON_P38_INCIDENT_LEDGER": f"{capture}/p38_incident_ledger.jsonl",
+        "CANON_P38_INCIDENT_MIN_PREFIX": str(_SEAM_MIN_POSITION),
+        "CANON_P38_INCIDENT_MAX_PREFIX": str(_SEAM_MAX_POSITION),
+        "CANON_P38_INCIDENT_MAX_BYTES": str(_SEAM_INCIDENT_MAX_BYTES),
+        "CANON_P38_LIVE_SNAPSHOT_INTERVAL_SECONDS": "30",
+        "CANON_P38_LIVE_SNAPSHOT_STOP_FILE": f"{run_root}/p38_live.stop",
+        "CANON_P38_LIVE_SNAPSHOT_WORKER_LOG": (
+            f"{run_root}/p38_live_worker.log"
+        ),
+        "CANON_P38_LIVE_COLLECT_REQUEST_FILE": (
+            f"{run_root}/p38_collect.request"
+        ),
+        "CANON_P38_LIVE_COLLECT_ACK_FILE": f"{run_root}/p38_collect.ack",
+        "CANON_P38_LIVE_COMPLETE_REQUEST_FILE": (
+            f"{run_root}/p38_complete.request"
+        ),
+        "CANON_P38_LIVE_COMPLETE_ACK_FILE": f"{run_root}/p38_complete.ack",
+        "CANON_P38_SERVING_CAPTURE_MAX_CALLS": "4",
+        "CANON_P38_SERVING_CAPTURE_MIN_PREFIX": str(_SEAM_CAPTURE_BOUNDS[0]),
+        "CANON_P38_SERVING_CAPTURE_PREFIX_BOUNDS": ",".join(
+            map(str, _SEAM_CAPTURE_BOUNDS)
+        ),
+        "CANON_P38_SERVING_CAPTURE_FREE_SPACE_MULTIPLIER": "5",
+        "CANON_P38_SERVING_CAPTURE_EXPECTED_PATH": "standard",
+        "CANON_P38_SERVING_CAPTURE_EXPECTED_RECORDS": "4",
+        "CANON_P38_MIN_ACTION_KV": str(_SEAM_MIN_POSITION),
+        "CANON_P38_SERVING_CAPTURE_CLASSIFICATION": (
+            f"{run_root}/p38_serving_capture.classification.json"
+        ),
+        "CANON_P38_SERVING_CAPTURE_ARCHIVE": (
+            f"{run_root}/p38_serving_capture.tar"
+        ),
+        "CANON_P38_GCS_PREFIX": (
+            "gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p58/"
+            f"{name}/attempt-0"
+        ),
+        "CANON_P38_SEAM_OBSERVER": "layer",
+        "CANON_P38_SEAM_OBSERVER_DIR": capture,
+        "CANON_P38_SEAM_MIN_POSITION": str(_SEAM_MIN_POSITION),
+        "CANON_P38_SEAM_MAX_POSITION": str(_SEAM_MAX_POSITION),
+        "CANON_P38_SEAM_MAX_BYTES": str(_SEAM_MAX_BYTES),
+        "CANON_P38_SEAM_CLASSIFICATION": (
+            f"{run_root}/p58_seam.classification.json"
+        ),
+        "CANON_P38_TAIL_OBSERVER": "1",
+        "CANON_P38_TAIL_MAX_BYTES": str(_SEAM_TAIL_MAX_BYTES),
+    })
 
   worker = p34._worker(document)
   worker["completions"] = WORKERS
@@ -396,6 +496,7 @@ def render(
       high_performance=high_performance,
       checked_vma_off_diagnostic=checked_vma_off_diagnostic,
       checked_vma_on_diagnostic=checked_vma_on_diagnostic,
+      seam_localization=seam_localization,
   )
   return document
 
@@ -443,6 +544,7 @@ def treatment_signature(document: Mapping[str, Any]) -> dict[str, Any]:
       "checked_vma_diagnostic": env.get(
           "CANON_P58_CHECKED_VMA_DIAGNOSTIC", ""
       ),
+      "seam_localization": env.get("CANON_P58_SEAM_LOCALIZATION", ""),
       "disable_sampler_is": env["CANON_P34_DISABLE_SAMPLER_IS"],
       "disable_tis": env["CANON_P34_DISABLE_TIS"],
       "sampler_is": tuple(
@@ -465,16 +567,21 @@ def validate(
     high_performance: bool = False,
     checked_vma_off_diagnostic: bool = False,
     checked_vma_on_diagnostic: bool = False,
+    seam_localization: str = "",
 ) -> None:
   if stage not in _STAGE_STEPS or arm not in _ARMS:
     raise ValueError("invalid P58 stage or arm")
   if checked_vma_off_diagnostic and checked_vma_on_diagnostic:
     raise ValueError("P58 checked-VMA diagnostic selectors are mutually exclusive")
+  if seam_localization not in _SEAM_LOCALIZATION_MODES:
+    raise ValueError("P58 seam localization must be empty or coarse")
   checked_vma_diagnostic = (
       "off" if checked_vma_off_diagnostic else
       "on" if checked_vma_on_diagnostic else ""
   )
-  hp_bundle = high_performance or bool(checked_vma_diagnostic)
+  hp_bundle = high_performance or bool(checked_vma_diagnostic) or bool(
+      seam_localization
+  )
   head = p34._head(document)
   cpu_nodepool = head.get("nodeSelector", {}).get(
       "cloud.google.com/gke-nodepool", ""
@@ -552,6 +659,37 @@ def validate(
     })
   elif "CANON_P58_CHECKED_VMA_DIAGNOSTIC" in env:
     raise ValueError("P58 production render contains a diagnostic selector")
+  if seam_localization:
+    capture = f"{env['CANON_STATE']}/p38_serving_capture"
+    expected.update({
+        "CANON_P58_SEAM_LOCALIZATION": seam_localization,
+        "CANON_P38_PRECHECK_ONLY": "1",
+        "CANON_P38_CONTROLLED_EXIT": "1",
+        "CANON_P38_DIAGNOSTIC_ROUNDS": str(_SEAM_DIAGNOSTIC_ROUNDS),
+        "CANON_P38_DIAGNOSTIC_ROUND_FILE": (
+            f"{env['CANON_STATE']}/p38_diagnostic_round"
+        ),
+        "CANON_P38_ROUND_SEAL_REQUEST_DIR": (
+            f"{env['CANON_STATE']}/p38_round_seal_requests"
+        ),
+        "CANON_P38_ROUND_SEAL_ACK_DIR": (
+            f"{env['CANON_STATE']}/p38_round_seal_acks"
+        ),
+        "CANON_P38_MISMATCH_CAPSULE_MAX_ROWS": "256",
+        "CANON_P38_DURABILITY_PROFILE": "p58-seam-v1",
+        "CANON_P38_SERVING_CAPTURE_DIR": capture,
+        "CANON_P38_SERVING_CAPTURE_EXPECTED_PATH": "standard",
+        "CANON_P38_MIN_ACTION_KV": str(_SEAM_MIN_POSITION),
+        "CANON_P38_SEAM_OBSERVER": "layer",
+        "CANON_P38_SEAM_OBSERVER_DIR": capture,
+        "CANON_P38_SEAM_MIN_POSITION": str(_SEAM_MIN_POSITION),
+        "CANON_P38_SEAM_MAX_POSITION": str(_SEAM_MAX_POSITION),
+        "CANON_P38_SEAM_MAX_BYTES": str(_SEAM_MAX_BYTES),
+        "CANON_P38_TAIL_OBSERVER": "1",
+        "CANON_P38_TAIL_MAX_BYTES": str(_SEAM_TAIL_MAX_BYTES),
+    })
+  elif "CANON_P58_SEAM_LOCALIZATION" in env:
+    raise ValueError("P58 production render contains a seam selector")
   wrong = {
       key: env.get(key) for key, value in expected.items()
       if env.get(key) != value
@@ -704,6 +842,9 @@ def main() -> None:
   parser.add_argument("--high-performance", action="store_true")
   parser.add_argument("--checked-vma-off-diagnostic", action="store_true")
   parser.add_argument("--checked-vma-on-diagnostic", action="store_true")
+  parser.add_argument(
+      "--seam-localization", choices=("coarse",), default=""
+  )
   args = parser.parse_args()
   if args.output.exists():
     raise FileExistsError(f"refusing to overwrite JobSet: {args.output}")
@@ -724,10 +865,13 @@ def main() -> None:
       high_performance=args.high_performance,
       checked_vma_off_diagnostic=args.checked_vma_off_diagnostic,
       checked_vma_on_diagnostic=args.checked_vma_on_diagnostic,
+      seam_localization=args.seam_localization,
   )
   args.output.write_text(p34.dump_jobset(document))
   recipe = (
-      "zero-hp-vmaoff-precheck"
+      "zero-hp-seam-coarse"
+      if args.seam_localization
+      else "zero-hp-vmaoff-precheck"
       if args.checked_vma_off_diagnostic
       else "zero-hp-vmaon-precheck"
       if args.checked_vma_on_diagnostic

@@ -209,6 +209,63 @@ printf '%s\n' "$CANON_P58_CHECKED_VMA_DIAGNOSTIC|$CANON_P59_CHECKED_VMA|$CANON_P
     ).stdout
     self.assertIn("on|1|1|1|0|0|1|8|0", output)
 
+  def test_zero_hp_coarse_seam_resolves_three_round_frozen_tuple(self):
+    script = f"""
+set -euo pipefail
+export CANON_STATE=/tmp/p58-seam-test
+export CANON_V1_HP_FULL=1
+export CANON_P58_TIM_ARM=zero
+export CANON_P58_DEEPSWE_TIM=1
+export CANON_P58_TIM_ADMITTED=1
+export CANON_P34_RUN_STAGE=full
+export CANON_P34_NO_COMMIT=0
+export CANON_P58_EXPECTED_UPDATES=1000
+export CANON_P32_TRAIN_ADMITTED=1
+export CANON_P32_DP_REDUCTION_ADMITTED=1
+export CANON_P33_WORKLOAD_LAUNCH_ADMITTED=1
+export CANON_P58_SEAM_LOCALIZATION=coarse
+export CANON_P38_PRECHECK_ONLY=1
+export CANON_P38_CONTROLLED_EXIT=1
+export CANON_P38_DIAGNOSTIC_ROUNDS=3
+export CANON_P38_DURABILITY_PROFILE=p58-seam-v1
+export CANON_P38_DIAGNOSTIC_ROUND_FILE=/tmp/p58-seam-test/round
+export CANON_P38_SEAM_OBSERVER=layer
+export CANON_P38_TAIL_OBSERVER=1
+export CANON_P38_SEAM_OBSERVER_DIR=/tmp/p58-seam-test/observer
+export CANON_P38_SEAM_CLASSIFICATION=/tmp/p58-seam-test/classification.json
+source {CANON}
+source {HP_PROFILE}
+printf '%s\n' "$CANON_P58_SEAM_LOCALIZATION|$CANON_P38_DIAGNOSTIC_ROUNDS|$CANON_P38_DURABILITY_PROFILE|$CANON_P38_SEAM_OBSERVER|$CANON_P38_TAIL_OBSERVER|$CANON_P59_CHECKED_VMA|$CANON_P67_P66_VMA_P59_ONLY|$CANON_V1_HP_FIRST_UPDATE_GATE|$CANON_P63_OVERFLOW_SAFE_CLIP"
+"""
+    output = subprocess.run(
+        ["bash", "-c", script], check=True, text=True, capture_output=True
+    ).stdout
+    self.assertIn("coarse|3|p58-seam-v1|layer|1|1|1|1|1", output)
+
+  def test_zero_hp_coarse_seam_rejects_checked_vma_selector(self):
+    script = f"""
+set -euo pipefail
+export CANON_STATE=/tmp/p58-seam-negative
+export CANON_V1_HP_FULL=1
+export CANON_P58_TIM_ARM=zero
+export CANON_P58_DEEPSWE_TIM=1
+export CANON_P58_TIM_ADMITTED=1
+export CANON_P34_RUN_STAGE=full
+export CANON_P34_NO_COMMIT=0
+export CANON_P58_EXPECTED_UPDATES=1000
+export CANON_P32_TRAIN_ADMITTED=1
+export CANON_P32_DP_REDUCTION_ADMITTED=1
+export CANON_P33_WORKLOAD_LAUNCH_ADMITTED=1
+export CANON_P58_CHECKED_VMA_DIAGNOSTIC=on
+export CANON_P58_SEAM_LOCALIZATION=coarse
+source {CANON}
+source {HP_PROFILE}
+"""
+    result = subprocess.run(
+        ["bash", "-c", script], check=False, text=True, capture_output=True
+    )
+    self.assertNotEqual(result.returncode, 0)
+
   def test_zero_hp_profile_rejects_unsigned_or_native_entry(self):
     for v1, arm in (("0", "zero"), ("1", "native")):
       with self.subTest(v1=v1, arm=arm):

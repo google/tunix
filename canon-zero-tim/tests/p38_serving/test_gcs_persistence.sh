@@ -537,4 +537,51 @@ grep -q 'completion requested before collection acknowledgement' \
 test ! -e "$CANON_P38_LIVE_COMPLETE_ACK_FILE"
 test ! -e "$FAKE_GCS_ROOT/yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-p38-test-out-of-order/attempt-0/COMPLETE.json"
 
-echo "[P38.GCS] PERSISTENCE_TEST_PASS probe=verified prefix_reuse=rejected live=immutable bounded_objects=3 round_request=priority alignment_round=periodic_snapshot_disabled minimal_payload=verified worker=durable round_bundles=survive_abrupt_exit m15_shards=bounded-survive-abrupt-exit source_mismatch=rejected collected=verified complete=last out_of_order=rejected missing=rejected upload_failure=rejected"
+install_fake_gcloud "$tmp/p58-seam"
+make_case "$tmp/p58-seam" canon-p58-test-seam
+export CANON_P38_DURABILITY_PROFILE=p58-seam-v1
+export CANON_P58_SEAM_LOCALIZATION=coarse
+export CANON_P38_DIAGNOSTIC_ROUNDS=3
+export CANON_P38_GCS_PREFIX="gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p58/canon-p58-test-seam/attempt-0"
+export CANON_P38_SEAM_CLASSIFICATION="$tmp/p58-seam/state/p58-seam.classification.json"
+printf '{"schema":"canon.p58.coarse-seam-three-round-classification.v1","verdict":"PASS"}\n' \
+  > "$CANON_P38_SEAM_CLASSIFICATION"
+for round_index in 0 1 2; do
+  printf -v round_text '%06d' "$round_index"
+  round_root="$tmp/p58-seam/state/p38_gcs_rounds/$round_text"
+  mkdir -p "$round_root"
+  printf '{"diagnostic_round":%s,"schema":"canon-p38-round-completion-v1","status":"sealed-and-verified"}\n' \
+    "$round_index" > "$round_root/ROUND_COMPLETE.json"
+  printf '{"diagnostic_round":%s,"schema":"canon.p58.coarse-seam-round-classification.v1","verdict":"PASS"}\n' \
+    "$round_index" > "$round_root/p58-seam.round.classification.json"
+done
+bash "$PERSIST" probe > "$tmp/p58-seam/probe.log"
+bash "$PERSIST" collect > "$tmp/p58-seam/collect.log"
+p58_remote="$FAKE_GCS_ROOT/yuxzhang-tunix-models/canon-zero-tim/evidence/p58/canon-p58-test-seam/attempt-0"
+for name in PREFLIGHT.json run.log pre-alignment.jsonl \
+    p58-seam.classification.json \
+    ROUND_COMPLETE.000000.json ROUND_COMPLETE.000001.json \
+    ROUND_COMPLETE.000002.json \
+    p58-seam.round.000000.classification.json \
+    p58-seam.round.000001.classification.json \
+    p58-seam.round.000002.classification.json SHA256SUMS COLLECTED.json; do
+  test -s "$p58_remote/$name"
+done
+(cd "$p58_remote" && sha256sum -c SHA256SUMS --quiet)
+grep -q '"schema": "canon-p58-seam-gcs-collection-v1"' \
+  "$p58_remote/COLLECTED.json"
+grep -q 'profile=p58-seam-v1 rounds=3' "$tmp/p58-seam/collect.log"
+
+install_fake_gcloud "$tmp/p58-seam-missing-selector"
+make_case "$tmp/p58-seam-missing-selector" canon-p58-test-seam-missing-selector
+export CANON_P38_DURABILITY_PROFILE=p58-seam-v1
+unset CANON_P58_SEAM_LOCALIZATION
+export CANON_P38_GCS_PREFIX="gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p58/canon-p58-test-seam-missing-selector/attempt-0"
+if bash "$PERSIST" probe > "$tmp/p58-seam-missing-selector/run.log" 2>&1; then
+  echo "[P38.GCS] P58 seam profile accepted a missing selector" >&2
+  exit 1
+fi
+grep -q 'p58-seam-v1 requires the coarse selector' \
+  "$tmp/p58-seam-missing-selector/run.log"
+
+echo "[P38.GCS] PERSISTENCE_TEST_PASS probe=verified prefix_reuse=rejected live=immutable bounded_objects=3 round_request=priority alignment_round=periodic_snapshot_disabled minimal_payload=verified worker=durable round_bundles=survive_abrupt_exit m15_shards=bounded-survive-abrupt-exit p58_three_round_collection=verified p58_missing_selector=rejected source_mismatch=rejected collected=verified complete=last out_of_order=rejected missing=rejected upload_failure=rejected"

@@ -158,6 +158,7 @@ class P58RendererTest(unittest.TestCase):
         "proxy_xla": [],
         "high_performance": "0",
         "checked_vma_diagnostic": "",
+        "seam_localization": "",
         "disable_sampler_is": "1",
         "disable_tis": "1",
         "sampler_is": (),
@@ -168,6 +169,7 @@ class P58RendererTest(unittest.TestCase):
         "proxy_xla": [renderer.p34.PROXY_XLA_FLAG],
         "high_performance": "0",
         "checked_vma_diagnostic": "",
+        "seam_localization": "",
         "disable_sampler_is": "1",
         "disable_tis": "1",
         "sampler_is": (),
@@ -287,6 +289,56 @@ class P58RendererTest(unittest.TestCase):
           checked_vma_on_diagnostic=True,
       )
 
+  def test_coarse_seam_is_three_round_frozen_zero_hp_selector(self):
+    production = self._render(
+        "zero", "full", high_performance=True, run_id="hp-prod"
+    )
+    diagnostic = self._render(
+        "zero", "full", seam_localization="coarse", run_id="seam"
+    )
+    env = renderer.p34._env(diagnostic)
+    self.assertEqual(env["CANON_P58_SEAM_LOCALIZATION"], "coarse")
+    self.assertEqual(env["CANON_P38_DIAGNOSTIC_ROUNDS"], "3")
+    self.assertEqual(env["CANON_P38_DURABILITY_PROFILE"], "p58-seam-v1")
+    self.assertEqual(env["CANON_P38_SEAM_OBSERVER"], "layer")
+    self.assertEqual(env["CANON_P38_SEAM_MIN_POSITION"], "3072")
+    self.assertEqual(env["CANON_P38_SEAM_MAX_POSITION"], "4608")
+    self.assertEqual(env["CANON_P38_TAIL_OBSERVER"], "1")
+    self.assertEqual(env["CANON_P38_MIN_ACTION_KV"], "3072")
+    self.assertEqual(
+        diagnostic["metadata"]["labels"]["canon.zero-tim/backward"], "0"
+    )
+    self.assertEqual(
+        diagnostic["metadata"]["labels"]["canon.zero-tim/optimizer-commits"],
+        "0",
+    )
+    self.assertEqual(
+        renderer.recipe_signature(production),
+        renderer.recipe_signature(diagnostic),
+    )
+    self.assertEqual(
+        renderer.treatment_signature(diagnostic)["seam_localization"],
+        "coarse",
+    )
+
+  def test_coarse_seam_rejects_foreign_and_checked_vma_recipes(self):
+    for kwargs in (
+        {"arm": "native", "stage": "full"},
+        {"arm": "zero", "stage": "three-update"},
+        {"arm": "zero", "stage": "full", "high_performance": True},
+        {
+            "arm": "zero",
+            "stage": "full",
+            "checked_vma_on_diagnostic": True,
+        },
+    ):
+      with self.subTest(kwargs=kwargs), self.assertRaisesRegex(
+          ValueError, "its own Zero/full HP"
+      ):
+        arm = kwargs.pop("arm")
+        stage = kwargs.pop("stage")
+        self._render(arm, stage, seam_localization="coarse", **kwargs)
+
   def test_checked_vma_prepare_wrapper_is_render_only(self):
     path = (
         PKG
@@ -310,6 +362,18 @@ class P58RendererTest(unittest.TestCase):
     self.assertIn("render_p58_checked_vma_aba_wave.py", source)
     self.assertIn("verify_p58_checked_vma_aba_wave.py", source)
     self.assertIn("origin/yuxzhang/canon-zero-tim", source)
+    self.assertNotIn("kubectl ", source)
+
+  def test_coarse_seam_prepare_wrapper_is_render_only(self):
+    path = (
+        PKG
+        / "tasks/p58-deepswe-native-zero-comparison/scripts"
+        / "prepare_p58_coarse_seam_localization.sh"
+    )
+    source = path.read_text()
+    self.assertIn("--seam-localization coarse", source)
+    self.assertIn("--stage full", source)
+    self.assertIn("--arm zero", source)
     self.assertNotIn("kubectl ", source)
 
   def test_optional_algorithm_interventions_are_absent(self):
