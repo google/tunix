@@ -1,0 +1,28 @@
+{
+  "off": {
+    "run_log_stat": {
+      "exit_code": 1,
+      "outcome": "NOT_FOUND",
+      "sanitized_stderr": "ERROR: (gcloud.storage.objects.describe) <SANATIZED_GCS_URI>%2Fevidence%2Fp38%2Fcanon-v1-apc-m15-off-d33-003276a3%2Fattempt-0%2Frun.log not found: 404.",
+      "size_bytes": null,
+      "stderr_bytes": 174,
+      "stderr_sha256": "5578229db8519d71cbd0aa97c0bced01b294cc8240245006626734d2e4219634",
+      "stdout_bytes": 0,
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "tool": "gcloud-storage"
+    }
+  },
+  "on": {
+    "run_log_stat": {
+      "exit_code": 1,
+      "outcome": "NOT_FOUND",
+      "sanitized_stderr": "ERROR: (gcloud.storage.objects.describe) <SANATIZED_GCS_URI>%2Fevidence%2Fp38%2Fcanon-v1-apc-m15-on-d33-003276a3%2Fattempt-0%2Frun.log not found: 404.",
+      "size_bytes": null,
+      "stderr_bytes": 173,
+      "stderr_sha256": "e8ce49832cc10dc73f32ca2301601429105f40353700e4a27c48fef9b8d93ac3",
+      "stdout_bytes": 0,
+      "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "tool": "gcloud-storage"
+    }
+  }
+}

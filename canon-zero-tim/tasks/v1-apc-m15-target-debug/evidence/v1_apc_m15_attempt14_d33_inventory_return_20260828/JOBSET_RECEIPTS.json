@@ -1,0 +1,14 @@
+{
+  "off": {
+    "exit_code": 1,
+    "sanitized_stderr": "Error from server (NotFound): jobsets.jobset.x-k8s.io \"canon-v1-apc-m15-off-d33-003276a3\" not found",
+    "status": "NOT_FOUND",
+    "terminal_state": null
+  },
+  "on": {
+    "exit_code": 1,
+    "sanitized_stderr": "Error from server (NotFound): jobsets.jobset.x-k8s.io \"canon-v1-apc-m15-on-d33-003276a3\" not found",
+    "status": "NOT_FOUND",
+    "terminal_state": null
+  }
+}

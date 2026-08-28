@@ -936,3 +936,16 @@ is not a current fact or launch authority.
   receipt-bound read-only inventory that distinguishes not-found from query
   failure and extracts the round-seal handshake markers without returning the
   raw log. No TPU launch, GCS mutation, or numerical repair occurred.
+
+## 2026-08-28 — Attempt 14 (d33) read-only inventory audit executed and sealed
+
+- Type: audit / inventory; zero TPU; read-only.
+- Fact: implemented `audit_m15_attempt14_d33_inventory.py` and unit tests in `test_audit_m15_attempt14_d33_inventory.py` (118/118 tests PASS).
+- Fact: executed inventory audit against registered receipt `RECOVERY_INPUT_RECEIPT.json`:
+  - Recursive GCS queries succeeded (`outcome=PASS`, exit 0) for both arms:
+    - Control arm (`off`): 265 total objects (`PREFLIGHT.json` + 88 flat shards `000000..000087` x 3 members).
+    - Treatment arm (`on`): 223 total objects (`PREFLIGHT.json` + 74 flat shards `000000..000073` x 3 members).
+    - `wide/rounds/` is physically empty in GCS; d33 runtime uploaded directly to `wide/shards/` (flat-shard layout).
+    - `run.log` stat returned `NOT_FOUND` (404).
+    - Kubernetes JobSet query returned `NOT_FOUND` (clean lifecycle termination).
+- Fact: sealed 6-member inventory return in `evidence/v1_apc_m15_attempt14_d33_inventory_return_20260828/` with verified `SHA256SUMS`.
