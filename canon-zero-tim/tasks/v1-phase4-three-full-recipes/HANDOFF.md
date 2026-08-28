@@ -13,9 +13,9 @@ low-level `--disable-eval` selector. The eval rescore failed with `row 7:
 engine returned 1 prompt logprobs for 1025 tokens`. The raw incident head log
 is `evidence/incident_20260828_failures/f45w09_head.log`.
 
-The current local repair is based on
-`54d9f4234bbad8308e5277754c14637684728c8c` and is not committed, pushed,
-rendered, or target-run. It fixes the launch identity rather than the eval
+The repair was published and exactly read back as runtime source
+`a8449b3ddc2187806341b280f9d659028b3936c6`; no launch manifest or TPU target
+run exists for it yet. It fixes the launch identity rather than the eval
 algorithm: both optimized Zero full recipes—P45 and M15/main—now require
 evaluation disabled and checkpoint mode `disabled`. All checkpoint residual
 fields (root, tag, interval, max-to-keep, milestone) must be empty. Native/IS,
@@ -32,8 +32,8 @@ Zero-TIM evidence, optimizer receipts, timing, XProf/Perfetto, and the full
 300-update completion remain required. A failed or interrupted run must start
 again from step 0 with a fresh run ID.
 
-After an explicitly approved commit/push and exact remote SHA read-back,
-render fresh P45 and M15 identities with the two-full wrapper in `RUNBOOK.md`.
+From the clean published runtime source above, render fresh P45 and M15
+identities with the two-full wrapper in `RUNBOOK.md`.
 The two jobs may be launched together by the other operator. Do not reuse any
 prior run label or manifest. Before launch, the manifest/resolved-env gate must
 show:

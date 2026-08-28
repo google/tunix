@@ -956,3 +956,17 @@
 - Next: review the intent diff and obtain explicit commit/push approval. After
   exact remote SHA read-back, render two fresh immutable manifests and let the
   other operator launch P45 and M15 together.
+
+## 2026-08-28T01:10:29Z — P4.14 runtime published and exactly read back
+
+- Type: publication.
+- Fact: ordinary fast-forward push advanced the publication branch from
+  `54d9f4234bbad8308e5277754c14637684728c8c` to runtime commit
+  `a8449b3ddc2187806341b280f9d659028b3936c6`; independent remote read-back
+  returned that exact 40-character SHA.
+- Scope: the runtime commit is the exact no-eval/no-checkpoint P45+M15 CL
+  described above. This follow-up changes only handoff/plan/state/log records;
+  runtime, profiles, runners, tests, and the fixed-image-admitted bytes are
+  unchanged.
+- Result: `PUBLISHED / READY FOR CLEAN-SHA RENDER / TPU TARGET NOT RUN`. No
+  manifest was rendered for launch and no JobSet or TPU state changed.
