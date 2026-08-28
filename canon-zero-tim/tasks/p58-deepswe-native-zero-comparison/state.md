@@ -2,9 +2,10 @@
 
 ## Current P58.19 three-round coarse seam-localization checkpoint (2026-08-28)
 
-- Current status: P58.19d observer-path repair is implemented locally on
-  source base `61d7baf4027b02a1ffb51c45441dffee4f58b14a`, not committed or
-  published.  P58.19c execution and incident remain sealed in
+- Current status: P58.19d observer-path repair is published as
+  `ed8ce99a0fa4187e0619237e071990b90d453d72` on source base
+  `57d9ab8e25de3b2404e983e9a139d78b151a58f8` and was read back after a
+  fast-forward push.  P58.19c execution and incident remain sealed in
   `evidence/p58s19c_continue_decode_incident/`. Seam window coverage
   `[1686, 4096)` is verified functional (`p38_seam_records=113`).
 - Target Incident (p58s19c): Attempt `canon-p58-seamcoarse-full-p58s19c` (128 TPU v5p)
@@ -28,6 +29,8 @@
   tensor_capture=standard-only` plus `P58_EXACT_IMAGE_CPU_PASS ...
   continue_decode_observer=1 ... regressions=1`.  All 37 installed Qwen3-4B
   overlay files match MANIFEST.  No Pathways or TP8 target claim exists.
+  Publication does not authorize an image build, Kubernetes mutation, or
+  target rerun.
 - P58.19c validation: Python compilation and diff hygiene pass; focused
   renderer/profile/classifier tests pass 45/45; P34 static passes 10 suites;
   deterministic flag audit passes declared/actual/unique 394/394/394; and the

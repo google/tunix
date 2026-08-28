@@ -1,9 +1,10 @@
 # P58 DeepSWE native-first training handoff
 
-## 2026-08-28 UTC — P58.19d continue-decode observer repair (local only)
+## 2026-08-28 UTC — P58.19d continue-decode observer repair (published)
 
-The latest operator source was synchronized to
-`61d7baf4027b02a1ffb51c45441dffee4f58b14a`.  The sealed `p58s19c`
+The repair was rebased onto operator source
+`57d9ab8e25de3b2404e983e9a139d78b151a58f8` and published as
+`ed8ce99a0fa4187e0619237e071990b90d453d72`.  The sealed `p58s19c`
 incident proves the repaired `[1686,4096)` window emitted 113 seam records,
 then the observer rejected `program_path=continue_decode` while configured
 for standard-path tensor capture.  Its `RAW_ERROR.log` is a short incident
@@ -25,9 +26,9 @@ tensor_capture=standard-only` and `P58_EXACT_IMAGE_CPU_PASS ...
 continue_decode_observer=1 ... regressions=1`; all 37 Qwen3-4B overlay files
 match MANIFEST.  Focused P58 suites pass 52/52, P34 static passes 10 suites,
 and the deterministic flag audit passes 394/394/394 with the new runtime name
-registered as a marker rather than a settable flag.  This local work has not
-been committed or pushed; no image, Kubernetes object, Pathways run, or TPU
-target was created.
+registered as a marker rather than a settable flag.  The implementation was
+read back from the operator branch after a fast-forward push.  No image,
+Kubernetes object, Pathways run, or TPU target was created.
 
 ## 2026-08-28 UTC — DeepSWE P58.19c incident intake (`canon-p58-seamcoarse-full-p58s19c`, 128 TPU)
 

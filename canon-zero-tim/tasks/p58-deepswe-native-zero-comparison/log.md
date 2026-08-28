@@ -1508,3 +1508,19 @@
   and observer neutrality remain unverified on target hardware.
 - Boundary remains local-only: no commit, push, image publication, Kubernetes
   mutation, TPU/Pathways execution, credential access, or target rerun.
+
+## 2026-08-28 UTC — P58.19d source publication
+
+- Type: user-approved implementation commit / operator-branch publication
+  ledger.
+- The repair was rebased without conflict onto
+  `57d9ab8e25de3b2404e983e9a139d78b151a58f8` and published as
+  `ed8ce99a0fa4187e0619237e071990b90d453d72` (`P58: admit continue-decode
+  chronology in seam observer`).
+- Rebase validation: focused P58 suites 52/52, P34 static 10 suites, flag
+  registry 394/394/394, diff hygiene, and a fresh pinned-image install of all
+  37 Qwen3-4B overlay files plus
+  `P58_CONTINUE_DECODE_OVERLAY_PASS cases=5
+  tensor_capture=standard-only`.
+- Boundary: this is source publication only.  No image publication,
+  Kubernetes mutation, Pathways/TPU execution, or target rerun occurred.
