@@ -94,6 +94,32 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
       self.initialize()
     return await self.sampler.start(**kwargs)
 
+  async def _ensure_started(self) -> None:
+    """Brings the engine up if nothing has needed it yet.
+
+    RLVllmSampler builds its AsyncLLM lazily, and `sample()` is the only thing
+    that calls `start()`. Weight sync needs the engine too -- it owns the TPU
+    worker, and therefore the Raiden binding -- and it can legitimately run
+    before the first sample, because the orchestrator pushes the trainer's
+    starting weights out before dispatching any rollouts. Without this the
+    round finds no worker, reports an empty destination manifest, and the run
+    deadlocks: the engine is waiting for a sample that dispatch is waiting on
+    the sync to allow.
+
+    Keys off the sampler's own `_is_running` rather than calling `start()`
+    unconditionally, since `start()` logs a warning when already running and
+    this runs on every sync round.
+    """
+    if self.sampler is None:
+      self.initialize()
+    if not getattr(self.sampler, "_is_running", False):
+      logging.info(
+          "VllmSamplerAdapter [%s] starting engine for weight sync (no"
+          " sample has forced it up yet).",
+          self.server_id,
+      )
+      await self.sampler.start()
+
   async def stop(self, **kwargs) -> Any:
     """Stops the underlying sampler engine."""
     if self.sampler is None:
@@ -215,6 +241,7 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
 
   async def bind_weight_sync(self) -> None:
     """Idempotent transport binding called while the worker is STILL SERVING."""
+    await self._ensure_started()
     if not hasattr(self.sampler, "bind_raiden_sync"):
       raise RuntimeError(
           f"VllmSamplerAdapter [{self.server_id}] requires a sampler with"
@@ -226,6 +253,7 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
 
   async def get_weight_sync_metadata(self) -> Sequence[weight_sync.WorkUnitMetadata]:
     """Returns transport metadata with Raiden endpoints and TensorMetadata."""
+    await self._ensure_started()
     if not hasattr(self.sampler, "get_raiden_metadata"):
       raise RuntimeError(
           f"VllmSamplerAdapter [{self.server_id}] requires a sampler with"
