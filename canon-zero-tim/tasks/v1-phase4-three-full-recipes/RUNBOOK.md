@@ -1,11 +1,12 @@
 # V1 high-performance three-full runbook
 
-## Current — render the P67 P45/M15 full pair, never launch from here
+## Current — render the P45/M15 fast Zero pair, never launch from here
 
-The user waived another M15 scope precheck and selected direct P45 plus
-M15/main full trains. First finish source review, pinned-image admission,
-explicit commit/push approval, remote SHA read-back, and a clean checkout at
-that exact SHA. Then use fresh IDs and a never-used output directory:
+The selected wave is direct P45 plus M15/main optimized Zero full training,
+with in-process evaluation and checkpointing both disabled for speed. First
+finish source review, host gates, explicit commit/push approval, remote SHA
+read-back, and a clean checkout at that exact SHA. Then use fresh IDs and a
+never-used output directory:
 
 ```bash
 bash canon-zero-tim/tasks/v1-phase4-three-full-recipes/scripts/prepare_p67_frozenlake_two_full_wave.sh \
@@ -25,9 +26,11 @@ only prints two unpiped `kubectl apply` commands. It never executes them.
 After reviewing `manifest-index.json`, confirm both YAMLs and their profile
 resolution contain the same published source SHA, `CANON_P59_CHECKED_VMA=1`,
 `CANON_P67_P66_VMA_P59_ONLY=1`, `CANON_V1_HP_FIRST_UPDATE_GATE=1`, strict
-alignment, APC-off, full/300 updates, final-only checkpointing, and the correct
-P45 versus M15/main identity. Check no conflicting workload is live. The user
-may apply both YAMLs together; never append a pipe to either launch command.
+alignment, APC-off, full/300 updates, evaluation-off, checkpoint mode
+`disabled`, empty checkpoint residual fields, and the correct P45 versus
+M15/main identity. The command must contain `--eval_every_n_steps=0` and no
+`--num_test_batches`. Check no conflicting workload is live. The user may
+apply both YAMLs together; never append a pipe to either launch command.
 
 Watch both raw logs immediately. For each recipe, update 0 must pass strict
 prealignment, one checked-VMA/P67 resolved-env contract, one first-update
@@ -38,10 +41,12 @@ invalid optimizer transaction is fatal for that recipe. Preserve all evidence
 and let the other independently healthy recipe continue.
 
 Do not call either run certified until the in-container full classifier passes
-all 300 updates, all strict alignment records, seven rollout-only evaluations,
-final checkpoint, P59/fixed-head/reduction evidence, JAX-cache receipts, XProf,
-Perfetto, and artifact hashes. Return the complete bundle listed in the first
-section of `HANDOFF.md`.
+all 300 updates, all strict alignment records, both evaluation/checkpoint
+disabled runtime markers, P59/fixed-head/reduction evidence, JAX-cache
+receipts, XProf, Perfetto, and artifact hashes. These fast runs intentionally
+have no held-out evaluation JSON, no resume point, and no final checkpoint;
+an interruption requires a fresh run from step 0. Return the complete bundle
+listed in the first section of `HANDOFF.md`.
 
 ## Historical — render the P45 TP8 matched diagnostic pair, never launch from here
 

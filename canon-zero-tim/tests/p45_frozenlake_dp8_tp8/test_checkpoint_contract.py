@@ -65,6 +65,63 @@ class FrozenLakeCheckpointContractTest(unittest.TestCase):
           {"CANON_FROZENLAKE_CKPT_TAG": "fl-prod-001"}
       )
 
+  def test_fast_zero_no_checkpoint_is_exactly_scoped_to_p45_and_m15(self):
+    for candidate, split in (("", ""), ("m15", "main")):
+      with self.subTest(candidate=candidate):
+        env = {
+            "CANON_FROZENLAKE_CKPT_MODE": "disabled",
+            "CANON_PROFILE_FILE": (
+                "cluster/profiles/"
+                "qwen3-8b-dp8-tp8-frozenlake-v1-hp.env"
+            ),
+            "CANON_V1_HP_FULL": "1",
+            "CANON_P32_WORKLOAD": "frozenlake-dp8-tp8",
+            "CANON_P33_RUN_STAGE": "full",
+            "CANON_P33_NO_COMMIT": "0",
+            "CANON_OPT_STATE_RESIDENT": "1",
+            "CANON_P30_OPT_STATE_OFFLOAD": "0",
+            "CANON_P57_RUN_KIND": "train",
+            "CANON_P57_TIM_ARM": "zero",
+            "CANON_P57_EXPECTED_UPDATES": "300",
+            "CANON_P57_WORKLOAD_CANDIDATE": candidate,
+            "CANON_P57_DATA_SPLIT": split,
+            "CANON_P33_ENABLE_EVAL": "0",
+            "CANON_P33_DISABLE_EVAL": "1",
+            "CANON_P31_ENABLE_EVAL": "0",
+        }
+        config = frozenlake_checkpoint.from_env(env)
+        frozenlake_checkpoint.require_p57_fast_no_checkpoint(config, env)
+
+        bad = dict(env)
+        bad["CANON_P57_TIM_ARM"] = "mismatch"
+        with self.assertRaisesRegex(ValueError, "contract drifted"):
+          frozenlake_checkpoint.require_p57_fast_no_checkpoint(config, bad)
+
+  def test_fast_no_checkpoint_rejects_unregistered_workload(self):
+    env = {
+        "CANON_FROZENLAKE_CKPT_MODE": "disabled",
+        "CANON_PROFILE_FILE": (
+            "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env"
+        ),
+        "CANON_V1_HP_FULL": "1",
+        "CANON_P32_WORKLOAD": "frozenlake-dp8-tp8",
+        "CANON_P33_RUN_STAGE": "full",
+        "CANON_P33_NO_COMMIT": "0",
+        "CANON_OPT_STATE_RESIDENT": "1",
+        "CANON_P30_OPT_STATE_OFFLOAD": "0",
+        "CANON_P57_RUN_KIND": "train",
+        "CANON_P57_TIM_ARM": "zero",
+        "CANON_P57_EXPECTED_UPDATES": "300",
+        "CANON_P57_WORKLOAD_CANDIDATE": "m20",
+        "CANON_P57_DATA_SPLIT": "main",
+        "CANON_P33_ENABLE_EVAL": "0",
+        "CANON_P33_DISABLE_EVAL": "1",
+        "CANON_P31_ENABLE_EVAL": "0",
+    }
+    config = frozenlake_checkpoint.from_env(env)
+    with self.assertRaisesRegex(ValueError, "contract drifted"):
+      frozenlake_checkpoint.require_p57_fast_no_checkpoint(config, env)
+
   def test_rejects_drifted_bounds_and_storage(self):
     cases = (
         ("CANON_FROZENLAKE_CKPT_ROOT", "gs://wrong", "root drifted"),

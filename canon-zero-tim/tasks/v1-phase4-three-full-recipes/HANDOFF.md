@@ -1,5 +1,78 @@
 # V1 Phase4 three-full handoff
 
+## START HERE — optimized P45 and M15 are no-eval/no-checkpoint fast concept runs
+
+This section supersedes every later `START HERE` block.
+
+Latest incident source `19d105377197e9299ae8f93096627a18a130cf33`
+(`f45w09`) did not fail Zero-TIM or backward. Step-0 training completed strict
+pre-alignment, all 32/32 post-backward alignment records, finite healthy
+gradients, AdamW, and the first optimizer commit. It then launched held-out
+evaluation because the standard wave wrapper had never forwarded the existing
+low-level `--disable-eval` selector. The eval rescore failed with `row 7:
+engine returned 1 prompt logprobs for 1025 tokens`. The raw incident head log
+is `evidence/incident_20260828_failures/f45w09_head.log`.
+
+The current local repair is based on
+`54d9f4234bbad8308e5277754c14637684728c8c` and is not committed, pushed,
+rendered, or target-run. It fixes the launch identity rather than the eval
+algorithm: both optimized Zero full recipes—P45 and M15/main—now require
+evaluation disabled and checkpoint mode `disabled`. All checkpoint residual
+fields (root, tag, interval, max-to-keep, milestone) must be empty. Native/IS,
+historical discovery, and isolated evaluation paths retain their existing
+evaluation/checkpoint contracts. The Python trainer admits checkpoint-free
+execution only for the exact `frozenlake-v1-hp`, Zero, 300-update, P45 or
+M15/main, no-eval identity and prints `[P45.CHECKPOINT] DISABLED ...`.
+
+This is deliberately an efficiency-first concept run. It removes held-out
+evaluation work and Orbax/GCS checkpoint I/O from the training process. The
+tradeoff is explicit: there is no resume point after a failure, no final model
+checkpoint, and no in-process held-out curve. W&B training metrics, strict
+Zero-TIM evidence, optimizer receipts, timing, XProf/Perfetto, and the full
+300-update completion remain required. A failed or interrupted run must start
+again from step 0 with a fresh run ID.
+
+After an explicitly approved commit/push and exact remote SHA read-back,
+render fresh P45 and M15 identities with the two-full wrapper in `RUNBOOK.md`.
+The two jobs may be launched together by the other operator. Do not reuse any
+prior run label or manifest. Before launch, the manifest/resolved-env gate must
+show:
+
+- `CANON_P33_ENABLE_EVAL=0`, `CANON_P33_DISABLE_EVAL=1`,
+  `CANON_P31_ENABLE_EVAL=0`, `--eval_every_n_steps=0`, and no
+  `--num_test_batches`;
+- `CANON_FROZENLAKE_CKPT_MODE=disabled` and all five residual checkpoint
+  fields empty for both P45 and M15/main;
+- the exact v1-hp Zero/P59/P66/P67/full-300 workload identity, APC-off, and
+  strict alignment.
+
+### What the relaunch operator must return
+
+- exact published source SHA, fresh run/JobSet IDs, YAML paths and SHA256s,
+  retry status, and durable run directories;
+- resolved `env.sh` plus the evaluation-disabled and checkpoint-disabled
+  runtime markers;
+- first-update precommit/commit receipts, complete P59/fixed-head/reduction
+  receipts, 300 update rows, and zero real alignment FAIL;
+- W&B run links/identities, raw and steady step timing, JAX-cache receipts,
+  XProf/Perfetto artifacts, and final classifier JSON plus SHA256.
+
+Do not request evaluation JSON or checkpoint paths from these two optimized
+Zero runs; their absence is the signed fast-run contract, not missing evidence.
+No target claim exists until fresh P45 and M15 runs pass their full gates.
+
+Local validation on the dirty implementation tree: P57 155/155, Phase4
+90/90, the four P45-owned suites 32/32, and flag audit 393/393 pass. The P45
+aggregate runner additionally imports two cross-suite modules that cannot load
+in this host Python because `datasets` and `metrax` are absent; those are host
+dependency errors, not test assertions, and the affected P45-owned tests pass
+when invoked directly. The complete exact-image gate against immutable image
+`sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`
+exited zero with terminal `V1_HP_EXACT_IMAGE_PASS ... manifests=3`, including
+the P45 overlay and P59 TP4/TP8 real-shim gates. This is an execution-transcript
+admission receipt only; no durable raw image log was saved. No TPU target has
+run for this repair.
+
 ## START HERE — P45 Wave 02 reached AdamW; LR receipt wiring repaired locally
 
 This section supersedes every later `START HERE` block.

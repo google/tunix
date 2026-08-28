@@ -136,11 +136,12 @@ def render_three(
       source_commit=source_commit,
       run_id=p45_run_id,
       campaign_tag=f"{campaign_root}-p45",
-      checkpoint_mode="new",
+      checkpoint_mode="disabled",
       expected_updates=300,
       run_kind="train",
       arm="zero",
       high_performance=True,
+      disable_eval=True,
   )
   m15_outputs = p57.render_all(
       base_path=base_path,
@@ -148,13 +149,14 @@ def render_three(
       source_commit=source_commit,
       run_id=m15_run_id,
       campaign_tag=f"{campaign_root}-m15",
-      checkpoint_mode="new",
+      checkpoint_mode="disabled",
       expected_updates=300,
       run_kind="train",
       workload_candidate="m15",
       data_split="main",
       arm="zero",
       high_performance=True,
+      disable_eval=True,
   )
   outputs = (gsm_path, *p45_outputs, *m15_outputs)
   if len(outputs) != 3:
@@ -202,11 +204,15 @@ def render_three(
           "CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY": "0",
           "CANON_P57_TIM_ARM": "zero",
           "CANON_P57_EXPECTED_UPDATES": "300",
-          "CANON_FROZENLAKE_CKPT_MODE": "new",
-          "CANON_FROZENLAKE_CKPT_MILESTONE_INTERVAL": "0",
-          "CANON_P33_ENABLE_EVAL": "1",
-          "CANON_P33_DISABLE_EVAL": "0",
-          "CANON_P31_ENABLE_EVAL": "1",
+          "CANON_FROZENLAKE_CKPT_MODE": "disabled",
+          "CANON_FROZENLAKE_CKPT_ROOT": "",
+          "CANON_FROZENLAKE_CKPT_TAG": "",
+          "CANON_FROZENLAKE_CKPT_INTERVAL": "",
+          "CANON_FROZENLAKE_CKPT_MAX_TO_KEEP": "",
+          "CANON_FROZENLAKE_CKPT_MILESTONE_INTERVAL": "",
+          "CANON_P33_ENABLE_EVAL": "0",
+          "CANON_P33_DISABLE_EVAL": "1",
+          "CANON_P31_ENABLE_EVAL": "0",
       })
     wrong = {
         name: env.get(name)

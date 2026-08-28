@@ -936,13 +936,20 @@ if (
 
 # ====== Checkpoint saving ======
 P45_CHECKPOINT = frozenlake_checkpoint.from_env(os.environ)
+P57_FAST_NO_CHECKPOINT = False
 if (
     _P32_WORKLOAD_NAME == "frozenlake-dp8-tp8"
     and not CANON_APC_M15_TARGET_DEBUG
     and not CANON_P64_P45_NUMERIC_DEBUG
     and not CANON_V1_FL_TP8_AB_ARM
 ):
-  frozenlake_checkpoint.require_p45(P45_CHECKPOINT, os.environ)
+  if P45_CHECKPOINT.enabled:
+    frozenlake_checkpoint.require_p45(P45_CHECKPOINT, os.environ)
+  else:
+    frozenlake_checkpoint.require_p57_fast_no_checkpoint(
+        P45_CHECKPOINT, os.environ
+    )
+    P57_FAST_NO_CHECKPOINT = True
 elif P45_CHECKPOINT.enabled:
   raise ValueError(
       "the GCS FrozenLake checkpoint contract is isolated to P45 DP8xTP8"
@@ -1107,6 +1114,13 @@ if CKPT_DIR:
   )
 else:
   checkpointing_options = None
+  if P57_FAST_NO_CHECKPOINT:
+    print(
+        "[P45.CHECKPOINT] DISABLED "
+        f"workload_candidate={os.getenv('CANON_P57_WORKLOAD_CANDIDATE', '') or 'p45'} "
+        "reason=v1-hp-fast-concept",
+        flush=True,
+    )
 
 
 # ====== Build the single shared mesh ======

@@ -1,13 +1,13 @@
 # State
 
-- Status: active; P45 Wave 02 passed strict alignment, all 32 reverse groups, the precommit gradient gate, and one trainer-local AdamW transaction, then failed before outer weight sync because the effective-learning-rate observer was unregistered; the current CL publishes the host/P45-image-green repair
-- Objective: admit P67 P59-only VMA scoping into the exact P45/M15 FrozenLake full profiles, then run both 300-update targets with strict Zero-TIM and backward-health gates unchanged.
-- Definition of done: GSM8K DP16xTP4 plus P45/M15 DP8xTP8 complete their signed horizons with every strict Zero-TIM gate green and durable optimizer, timing, XProf, Perfetto, cache, evaluation, and checkpoint evidence.
+- Status: active; f45w09 completed a healthy strict Step-0 train/update and then failed only in held-out eval because the standard wrapper had not actually selected eval-off; local no-eval/no-checkpoint P45+M15 fast-run repair is host- and exact-image-green but uncommitted and unpublished
+- Objective: run optimized Zero P45 and M15/main for 300 updates with eval and checkpoint I/O removed, while preserving strict Zero-TIM, backward-health, optimizer, timing, W&B, cache, XProf, and Perfetto gates.
+- Definition of done: both P45/M15 DP8xTP8 fast concept runs complete 300 updates with zero strict alignment FAIL, healthy optimizer receipts, complete timing/profile artifacts, and explicit evaluation/checkpoint-disabled receipts. Evaluation curves, resume points, and final checkpoints are intentionally out of scope.
 - Task directory: `canon-zero-tim/tasks/v1-phase4-three-full-recipes`
-- Directory state: isolated worktree `/mnt/disks/tunix-data/worktrees/v1_fl_tp8_ab_diag_0826`, branch `local/v1-autoscale-recovery-0826`; the current CL is rebased onto fetched remote `a36cbd1b`. Only its final remote-read exact SHA is launchable.
-- Current phase: V1.P4.13 effective-learning-rate receipt recovery.
-- Last verified fact: Wave 02 P45 has strict pre-alignment and 32/32 three-boundary-zero post-backward records, `stable_norm=0.6722502708435059`, one finite AdamW transaction and 6,950,316,141 changed elements. It then fails because the receipt sees `effective_learning_rate=None`; local code registers the existing scalar rate for observation without changing AdamW. P57 147/147, Phase4 89/89, and P45 pinned image pass.
-- Next action: after remote SHA read-back, render fresh P45/M15 identities when separately authorized; launch still requires separate authorization.
-- Blockers: no post-fix target has proved a numeric learning-rate receipt, outer weight sync, policy step 1, convergence, evaluation, or final checkpoint. M15 has not target-run this repair.
-- Key artifacts: `phases/v1-p4-13-frozenlake-learning-rate-receipt.md`; Wave 02 raw log in the P57 evidence directory; `RUNBOOK.md`; the two-full renderer.
-- Updated: 2026-08-26T22:43:00Z
+- Directory state: writable worktree `/home/yuxuan/code_rl_repro/worktrees/p57_zero_noeval_0828`, branch `local/p57-zero-noeval-0828`, based on fetched `54d9f4234bbad8308e5277754c14637684728c8c`; current changes are uncommitted and only a future remote-read exact SHA is launchable.
+- Current phase: fast concept-run admission for no-eval/no-checkpoint optimized Zero P45+M15.
+- Last verified fact: f45w09 source `19d10537` passed strict Step-0 train/backward/AdamW and failed after commit in eval rescore; local implementation scopes eval-off and checkpoint-disabled to both optimized Zero workloads. P57 155/155, Phase4 90/90, P45-owned 32/32, flags 393/393, and the complete immutable-image gate pass with terminal `V1_HP_EXACT_IMAGE_PASS ... manifests=3`; the image transcript is not a durable raw artifact and no TPU result exists for this repair.
+- Next action: finish intent diff and request explicit commit/push approval. After exact remote SHA read-back, the other operator renders and launches fresh P45+M15 together.
+- Blockers: publication and target validation are pending. Checkpoint-free runs cannot resume and produce no held-out/final-checkpoint evidence by design.
+- Key artifacts: incident log `evidence/incident_20260828_failures/f45w09_head.log`; `HANDOFF.md`; `RUNBOOK.md`; the two-full renderer.
+- Updated: 2026-08-28T01:07:29Z

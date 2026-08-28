@@ -297,18 +297,32 @@ def render_all(
         f"P57 expected updates must be one of {_ALLOWED_UPDATES}, "
         f"got {expected_updates}"
     )
-  if checkpoint_mode not in ("new", "resume"):
-    raise ValueError("P57 checkpoint mode must be new or resume")
+  if checkpoint_mode not in ("disabled", "new", "resume"):
+    raise ValueError("P57 checkpoint mode must be disabled, new, or resume")
   if run_kind not in ("train", "eval"):
     raise ValueError("P57 run kind must be train or eval")
   if high_performance and (
       run_kind != "train"
       or arm != "zero"
-      or checkpoint_mode != "new"
+      or checkpoint_mode != "disabled"
       or expected_updates != _PAIRED_ARM_UPDATES
   ):
     raise ValueError(
-        "P57 v1 high-performance mode requires a new 300-update zero train"
+        "P57 v1 high-performance mode requires a checkpoint-disabled "
+        "300-update zero train"
+    )
+  if checkpoint_mode == "disabled" and not high_performance:
+    raise ValueError(
+        "P57 checkpoint-disabled mode is admitted only for the v1 "
+        "high-performance zero train"
+    )
+  if disable_eval and not high_performance:
+    raise ValueError(
+        "P57 disable-eval is admitted only for the v1 high-performance zero train"
+    )
+  if high_performance and not disable_eval:
+    raise ValueError(
+        "P57 v1 high-performance zero train requires in-process evaluation disabled"
     )
   primary_zero_requested = (
       not stock_only
@@ -436,15 +450,23 @@ def render_all(
     main["resources"]["limits"]["memory"] = _P57_MEMORY
     job_name = document["metadata"]["name"]
     state = f"/tmp/canon-state/{job_name}"
-    checkpoint_tag = f"{campaign_tag}-{arm.name}"
-    # Active P57 evaluates in-process and needs only the final recovery
-    # checkpoint; historical discovery carriers keep the 10-step cadence.
-    milestone_interval = "0"
+    checkpoint_disabled = checkpoint_mode == "disabled"
+    checkpoint_tag = "" if checkpoint_disabled else f"{campaign_tag}-{arm.name}"
+    # The optimized Zero concept run removes checkpoint I/O entirely. Native,
+    # IS, eval, and historical discovery carriers retain their registered
+    # checkpoint contracts.
+    checkpoint_root = "" if checkpoint_disabled else _CHECKPOINT_ROOT
+    milestone_interval = "" if checkpoint_disabled else "0"
     checkpoint_interval = (
-        "300"
-        if not stock_only and expected_updates == _PAIRED_ARM_UPDATES
-        else "10"
+        ""
+        if checkpoint_disabled
+        else (
+            "300"
+            if not stock_only and expected_updates == _PAIRED_ARM_UPDATES
+            else "10"
+        )
     )
+    checkpoint_max_to_keep = "" if checkpoint_disabled else "1"
     _replace_env(
         document,
         {
@@ -471,10 +493,10 @@ def render_all(
                 f"{state}/p57_evaluation.json" if run_kind == "eval" else ""
             ),
             "CANON_FROZENLAKE_CKPT_MODE": checkpoint_mode,
-            "CANON_FROZENLAKE_CKPT_ROOT": _CHECKPOINT_ROOT,
+            "CANON_FROZENLAKE_CKPT_ROOT": checkpoint_root,
             "CANON_FROZENLAKE_CKPT_TAG": checkpoint_tag,
             "CANON_FROZENLAKE_CKPT_INTERVAL": checkpoint_interval,
-            "CANON_FROZENLAKE_CKPT_MAX_TO_KEEP": "1",
+            "CANON_FROZENLAKE_CKPT_MAX_TO_KEEP": checkpoint_max_to_keep,
             "CANON_FROZENLAKE_CKPT_MILESTONE_INTERVAL": milestone_interval,
             "ENABLE_PATHWAYS_PERSISTENCE": "1",
             "CANON_STATE": state,
@@ -523,10 +545,10 @@ def render_all(
         "CANON_P33_DISABLE_EVAL": "0" if spec.enable_evaluation else "1",
         "CANON_P31_ENABLE_EVAL": "1" if spec.enable_evaluation else "0",
         "CANON_FROZENLAKE_CKPT_MODE": checkpoint_mode,
-        "CANON_FROZENLAKE_CKPT_ROOT": _CHECKPOINT_ROOT,
+        "CANON_FROZENLAKE_CKPT_ROOT": checkpoint_root,
         "CANON_FROZENLAKE_CKPT_TAG": checkpoint_tag,
         "CANON_FROZENLAKE_CKPT_INTERVAL": checkpoint_interval,
-        "CANON_FROZENLAKE_CKPT_MAX_TO_KEEP": "1",
+        "CANON_FROZENLAKE_CKPT_MAX_TO_KEEP": checkpoint_max_to_keep,
         "CANON_FROZENLAKE_CKPT_MILESTONE_INTERVAL": milestone_interval,
     }
     if run_kind == "eval":
@@ -582,7 +604,11 @@ def main() -> int:
   parser.add_argument("--run-id", required=True)
   parser.add_argument("--output-dir", required=True, type=Path)
   parser.add_argument("--campaign-tag", required=True)
-  parser.add_argument("--checkpoint-mode", choices=("new", "resume"), default="new")
+  parser.add_argument(
+      "--checkpoint-mode",
+      choices=("disabled", "new", "resume"),
+      default="new",
+  )
   parser.add_argument("--expected-updates", type=int, required=True)
   parser.add_argument("--run-kind", choices=("train", "eval"), default="train")
   parser.add_argument("--checkpoint-step", type=int)

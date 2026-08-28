@@ -227,6 +227,46 @@ def require_p45(config: Config, env: Mapping[str, str]) -> None:
     raise ValueError(f"P45 checkpoint workload contract drifted: {wrong}")
 
 
+def require_p57_fast_no_checkpoint(
+    config: Config, env: Mapping[str, str]
+) -> None:
+  """Admits checkpoint-free execution only for the optimized Zero concept run."""
+  if config.enabled:
+    raise ValueError("P57 fast no-checkpoint contract requires disabled mode")
+  required = {
+      "CANON_PROFILE_FILE": (
+          "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env"
+      ),
+      "CANON_V1_HP_FULL": "1",
+      "CANON_P32_WORKLOAD": "frozenlake-dp8-tp8",
+      "CANON_P33_RUN_STAGE": "full",
+      "CANON_P33_NO_COMMIT": "0",
+      "CANON_OPT_STATE_RESIDENT": "1",
+      "CANON_P30_OPT_STATE_OFFLOAD": "0",
+      "CANON_P57_RUN_KIND": "train",
+      "CANON_P57_TIM_ARM": "zero",
+      "CANON_P57_EXPECTED_UPDATES": "300",
+      "CANON_P33_ENABLE_EVAL": "0",
+      "CANON_P33_DISABLE_EVAL": "1",
+      "CANON_P31_ENABLE_EVAL": "0",
+  }
+  wrong = {
+      key: env.get(key, "")
+      for key, expected in required.items()
+      if env.get(key, "") != expected
+  }
+  workload = (
+      env.get("CANON_P57_WORKLOAD_CANDIDATE", ""),
+      env.get("CANON_P57_DATA_SPLIT", ""),
+  )
+  if workload not in (("", ""), ("m15", "main")):
+    wrong["CANON_P57_WORKLOAD_CANDIDATE:CANON_P57_DATA_SPLIT"] = (
+        f"{workload[0]}:{workload[1]}"
+    )
+  if wrong:
+    raise ValueError(f"P57 fast no-checkpoint contract drifted: {wrong}")
+
+
 def build_contract(config: Config, values: Mapping[str, Any]) -> dict[str, Any]:
   """Builds the exact metadata stored with every P45 actor checkpoint."""
   if not config.enabled:

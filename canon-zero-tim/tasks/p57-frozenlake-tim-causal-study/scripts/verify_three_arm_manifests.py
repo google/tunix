@@ -46,6 +46,7 @@ def _env(document: dict) -> dict[str, str]:
 def verify(path: Path, *, wave: str, workload: str, source: str) -> None:
   arm, sampler, regime, fixed, warning = ARMS[wave]
   updates, turns, response, candidate, split = WORKLOADS[workload]
+  evaluation_enabled = wave != "zero"
   document = yaml.safe_load(path.read_text(encoding="utf-8"))
   env = _env(document)
   expected = {
@@ -63,17 +64,29 @@ def verify(path: Path, *, wave: str, workload: str, source: str) -> None:
       "CANON_P57_DATA_SPLIT": split,
       "CANON_P38_FIXED_LM_HEAD": fixed,
       "CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY": warning,
-      "CANON_P33_ENABLE_EVAL": "1",
-      "CANON_P33_DISABLE_EVAL": "0",
-      "CANON_P31_ENABLE_EVAL": "1",
+      "CANON_P33_ENABLE_EVAL": "1" if evaluation_enabled else "0",
+      "CANON_P33_DISABLE_EVAL": "0" if evaluation_enabled else "1",
+      "CANON_P31_ENABLE_EVAL": "1" if evaluation_enabled else "0",
       "CANON_OPT_STATE_RESIDENT": "1",
       "CANON_P30_OPT_STATE_OFFLOAD": "0",
-      "CANON_FROZENLAKE_CKPT_INTERVAL": "300",
-      "CANON_FROZENLAKE_CKPT_MAX_TO_KEEP": "1",
-      "CANON_FROZENLAKE_CKPT_MILESTONE_INTERVAL": "0",
   }
   if wave == "zero":
-    expected["CANON_P59_RANK_PARALLEL_BACKWARD"] = "1"
+    expected.update({
+        "CANON_P59_RANK_PARALLEL_BACKWARD": "1",
+        "CANON_FROZENLAKE_CKPT_MODE": "disabled",
+        "CANON_FROZENLAKE_CKPT_ROOT": "",
+        "CANON_FROZENLAKE_CKPT_TAG": "",
+        "CANON_FROZENLAKE_CKPT_INTERVAL": "",
+        "CANON_FROZENLAKE_CKPT_MAX_TO_KEEP": "",
+        "CANON_FROZENLAKE_CKPT_MILESTONE_INTERVAL": "",
+    })
+  else:
+    expected.update({
+        "CANON_FROZENLAKE_CKPT_MODE": "new",
+        "CANON_FROZENLAKE_CKPT_INTERVAL": "300",
+        "CANON_FROZENLAKE_CKPT_MAX_TO_KEEP": "1",
+        "CANON_FROZENLAKE_CKPT_MILESTONE_INTERVAL": "0",
+    })
   wrong = {
       name: env.get(name)
       for name, value in expected.items()
@@ -89,9 +102,14 @@ def verify(path: Path, *, wave: str, workload: str, source: str) -> None:
       "--max_prompt_length=4096",
       f"--max_response_length={response}",
       f"--sampler_is={sampler}",
-      "--num_test_batches=4",
-      "--eval_every_n_steps=50",
   }
+  required.add(
+      "--eval_every_n_steps=50"
+      if evaluation_enabled
+      else "--eval_every_n_steps=0"
+  )
+  if evaluation_enabled:
+    required.add("--num_test_batches=4")
   missing = sorted(required - set(command))
   sampler_args = [value for value in command if value.startswith("--sampler_is=")]
   if missing or sampler_args != [f"--sampler_is={sampler}"]:
@@ -100,6 +118,10 @@ def verify(path: Path, *, wave: str, workload: str, source: str) -> None:
     )
   if "--evaluation_only" in command:
     raise ValueError(f"{path}: full training unexpectedly requests evaluation-only")
+  if not evaluation_enabled and any(
+      value.startswith("--num_test_batches=") for value in command
+  ):
+    raise ValueError(f"{path}: zero no-eval training retained eval batches")
   if _container(document)["resources"]["limits"].get("memory") != "350G":
     raise ValueError(f"{path}: P57 memory contract drifted")
 
@@ -136,6 +158,8 @@ def verify(path: Path, *, wave: str, workload: str, source: str) -> None:
   if f"export CANON_WANDB_PROJECT={WANDB_PROJECT}" not in snapshot:
     raise ValueError(f"{path}: P57 W&B project drifted")
   expected_group = f"p57-{arm}"
+  if not evaluation_enabled:
+    expected_group += "-noeval"
   if candidate:
     expected_group += f"-{candidate}-{split}"
   if f"export CANON_WANDB_GROUP={expected_group}" not in snapshot:
@@ -153,7 +177,8 @@ def verify(path: Path, *, wave: str, workload: str, source: str) -> None:
   print(
       "P57_THREE_ARM_MANIFEST_PASS "
       f"wave={wave} workload={workload} arm={arm} sampler_is={sampler} "
-      f"updates={updates} path={path}",
+      f"updates={updates} evaluation={int(evaluation_enabled)} "
+      f"checkpoint={int(wave != 'zero')} path={path}",
       flush=True,
   )
 

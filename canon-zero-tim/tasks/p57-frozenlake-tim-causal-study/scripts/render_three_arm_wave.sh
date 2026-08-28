@@ -20,8 +20,10 @@ case "$wave" in
   *) echo "wave must be native, is, or zero" >&2; exit 2 ;;
 esac
 renderer_mode=()
+checkpoint_mode=new
 if [ "$wave" = "zero" ]; then
-  renderer_mode+=(--high-performance)
+  renderer_mode+=(--high-performance --disable-eval)
+  checkpoint_mode=disabled
 fi
 [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]] || {
   echo "source SHA must be exactly 40 lowercase hex characters" >&2
@@ -52,7 +54,7 @@ python3 "$renderer" \
   --run-id "$p45_run_id" \
   --output-dir "$output_root/p45" \
   --campaign-tag "${campaign_root}-p45" \
-  --checkpoint-mode new \
+  --checkpoint-mode "$checkpoint_mode" \
   --expected-updates "$expected_updates" \
   --run-kind train \
   --arm "$arm" \
@@ -63,7 +65,7 @@ python3 "$renderer" \
   --run-id "$m15_run_id" \
   --output-dir "$output_root/m15" \
   --campaign-tag "${campaign_root}-m15" \
-  --checkpoint-mode new \
+  --checkpoint-mode "$checkpoint_mode" \
   --expected-updates "$expected_updates" \
   --run-kind train \
   --workload-candidate m15 \

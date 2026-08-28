@@ -107,16 +107,22 @@ class ThreeFullRendererTest(unittest.TestCase):
         self.assertEqual(frozen["CANON_P33_SHARED_MESH"], "8,8")
         self.assertEqual(frozen["CANON_P57_TIM_ARM"], "zero")
         self.assertEqual(frozen["CANON_P57_EXPECTED_UPDATES"], "300")
-        self.assertEqual(frozen["CANON_P33_ENABLE_EVAL"], "1")
-        self.assertEqual(frozen["CANON_P33_DISABLE_EVAL"], "0")
-        self.assertEqual(frozen["CANON_P31_ENABLE_EVAL"], "1")
+        self.assertEqual(frozen["CANON_P33_ENABLE_EVAL"], "0")
+        self.assertEqual(frozen["CANON_P33_DISABLE_EVAL"], "1")
+        self.assertEqual(frozen["CANON_P31_ENABLE_EVAL"], "0")
         self.assertEqual(frozen["CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY"], "0")
         self.assertEqual(frozen["CANON_P67_P66_VMA_P59_ONLY"], "1")
-        self.assertEqual(
-            frozen["CANON_FROZENLAKE_CKPT_MILESTONE_INTERVAL"], "0"
-        )
-        self.assertIn("--eval_every_n_steps=50", frozen["CANON_RUN_CMD"])
-        self.assertIn("--num_test_batches=4", frozen["CANON_RUN_CMD"])
+        self.assertEqual(frozen["CANON_FROZENLAKE_CKPT_MODE"], "disabled")
+        for name in (
+            "CANON_FROZENLAKE_CKPT_ROOT",
+            "CANON_FROZENLAKE_CKPT_TAG",
+            "CANON_FROZENLAKE_CKPT_INTERVAL",
+            "CANON_FROZENLAKE_CKPT_MAX_TO_KEEP",
+            "CANON_FROZENLAKE_CKPT_MILESTONE_INTERVAL",
+        ):
+          self.assertEqual(frozen[name], "")
+        self.assertIn("--eval_every_n_steps=0", frozen["CANON_RUN_CMD"])
+        self.assertNotIn("--num_test_batches=", frozen["CANON_RUN_CMD"])
       self.assertNotIn("--p57_workload_candidate=", p45["CANON_RUN_CMD"])
       self.assertIn("--p57_workload_candidate=m15", m15["CANON_RUN_CMD"])
       self.assertIn("--p57_data_split=main", m15["CANON_RUN_CMD"])
@@ -281,7 +287,7 @@ class ThreeFullRendererTest(unittest.TestCase):
 
   def test_p57_high_performance_rejects_nonzero_or_short_job(self):
     with tempfile.TemporaryDirectory() as tmp:
-      with self.assertRaisesRegex(ValueError, "requires a new 300-update zero"):
+      with self.assertRaisesRegex(ValueError, "requires a checkpoint-disabled"):
         renderer.p57.render_all(
             base_path=_REPO / "canon-zero-tim/cluster/jobset-64chip.yaml",
             output_dir=Path(tmp) / "bad",

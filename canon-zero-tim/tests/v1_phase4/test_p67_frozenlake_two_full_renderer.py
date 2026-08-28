@@ -85,9 +85,20 @@ class P67FrozenLakeTwoFullRendererTest(unittest.TestCase):
         self.assertEqual(values["CANON_P67_P66_VMA_P59_ONLY"], "1")
         self.assertEqual(values["CANON_V1_HP_FIRST_UPDATE_GATE"], "1")
         self.assertEqual(values["CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY"], "0")
-        self.assertEqual(values["CANON_P33_ENABLE_EVAL"], "1")
-        self.assertEqual(values["CANON_FROZENLAKE_CKPT_INTERVAL"], "300")
-        self.assertEqual(values["CANON_FROZENLAKE_CKPT_MAX_TO_KEEP"], "1")
+        self.assertEqual(values["CANON_P33_ENABLE_EVAL"], "0")
+        self.assertEqual(values["CANON_P33_DISABLE_EVAL"], "1")
+        self.assertEqual(values["CANON_P31_ENABLE_EVAL"], "0")
+        self.assertIn("--eval_every_n_steps=0", values["CANON_RUN_CMD"])
+        self.assertNotIn("--num_test_batches=", values["CANON_RUN_CMD"])
+        self.assertEqual(values["CANON_FROZENLAKE_CKPT_MODE"], "disabled")
+        for name in (
+            "CANON_FROZENLAKE_CKPT_ROOT",
+            "CANON_FROZENLAKE_CKPT_TAG",
+            "CANON_FROZENLAKE_CKPT_INTERVAL",
+            "CANON_FROZENLAKE_CKPT_MAX_TO_KEEP",
+            "CANON_FROZENLAKE_CKPT_MILESTONE_INTERVAL",
+        ):
+          self.assertEqual(values[name], "")
         worker = _worker_template(document)
         annotations = worker["metadata"]["annotations"]
         self.assertEqual(
@@ -148,7 +159,7 @@ class P67FrozenLakeTwoFullRendererTest(unittest.TestCase):
           (
               "wrong-profile",
               {"CANON_PROFILE_FILE": "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env"},
-              "P57 primary zero train requires the registered v1 high-performance profile",
+              "P45 checkpoint-disabled mode is isolated to the optimized P45/M15 zero concept run",
           ),
           (
               "wrong-mesh",

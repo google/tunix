@@ -2,10 +2,10 @@
 
 ## Outcome
 
-Prepare exactly three uninterrupted 64-chip Zero-TIM full trains. A full run is
-the first target-topology certification; there is no separate short canary.
-Every run stays strict and carries one warmed update-window XProf capture plus
-the semantic Perfetto timeline.
+Prepare the optimized P45 and M15/main 64-chip Zero-TIM full trains as direct
+300-update efficiency-first concept runs. Both remain strict and retain
+backward-health, optimizer, timing, W&B, JAX-cache, XProf, and Perfetto gates,
+but deliberately omit in-process held-out evaluation and all checkpoint I/O.
 
 ## Phases
 
@@ -18,12 +18,13 @@ the semantic Perfetto timeline.
 | V1.P4.5 | Attempt-7 first-red numerical localization for P59 grouped backward | a complete durable DP16xTP4 no-commit log passes the profile/alignment/16-group/reduction/scaling/accumulator/discard contract and explains the extreme magnitude | complete |
 | V1.P4.6 | Hybrid overflow-safe global-norm clipping for the three strict full recipes | stock-finite outputs remain byte-exact; finite-overflow matches FP64; NaN/Inf stays fatal; host and pinned-image gates pass | complete |
 | V1.P4.7 | Publish one reviewed immutable SHA and execute the three full target recipes | approved commit/push and remote readback; three fresh manifests; GSM8K 200 plus P45/M15 300 complete with zero strict FAIL and complete signed evidence | partial target evidence; superseded by recovery after GSM XProf infrastructure stop and P45 numerical stop |
-| V1.P4.8 | Recover Attempt 7 without weakening the numerical contract | GCS-backed XProf capture restores locally with signed artifacts; GSM scale carrier distinguishes topology/duplication from legitimate magnitude; a hash/model-bound P45 capsule accelerates first-red replay; P45 first-red carrier identifies the earliest non-finite boundary; host and pinned-image gates pass before any target relaunch | active; published at `548db7e9`; G1/G2/P64 construction PASS, real GCS transport and P45 target capture/observation pending; apply matrix awaiting user choice |
-| V1.P4.9 | Promote the P66 checked-VMA repair into the three exact full recipes and prepare one simultaneous wave | exact-profile admission; first-update precommit/optimizer hard receipts; host and immutable-image gates; three fresh manifests only after publication | active; repair published through `299fca0c`, host/image and TP4 ring/gather green; user-owned P45/M15 DP8xTP8 full relaunch and classification pending |
+| V1.P4.8 | Recover Attempt 7 without weakening the numerical contract | GCS-backed XProf capture restores locally with signed artifacts; GSM scale carrier distinguishes topology/duplication from legitimate magnitude; a hash/model-bound P45 capsule accelerates first-red replay; P45 first-red carrier identifies the earliest non-finite boundary; host and pinned-image gates pass before any target relaunch | superseded by the P66/P67 recovery phases; construction and failure evidence preserved |
+| V1.P4.9 | Promote the P66 checked-VMA repair into the three exact full recipes and prepare one simultaneous wave | exact-profile admission; first-update precommit/optimizer hard receipts; host and immutable-image gates; three fresh manifests only after publication | implementation complete; original three-job target sequence superseded by P4.10-P4.14; evidence preserved |
 | V1.P4.10 | Localize the post-P66 FrozenLake TP8 forward regression with a production-geometry, pre-backward matched pair | P45 p66-off vs serving-scope render/resolved-env; finite A−B, exact B−C, depth floor, controlled zero-commit exit; scoped TP4/TP8 P59 and full pinned-image before publication | complete; Wave 5 both arms target-green at strict A−B/B−C `0/0`, serving-scope candidate accepted |
 | V1.P4.11 | Promote P67 P59-only VMA scoping into the exact P45 and M15 full recipes | two-manifest production admission, host/full-image gates, then independent 300-update target verdicts | implementation complete; host/full-image PASS, publication identity requires remote read-back, and both 300-update targets remain pending |
 | V1.P4.12 | Repair the stale G6 checkpoint admission exposed by Attempt 10 | one checkpoint source of truth; legacy-10 and primary-300 positives; wrong identity/cadence negatives; host and immutable-image gates; then fresh target first update | source published by current CL; host and immutable image PASS; target first gradient sink/AdamW not rerun |
 | V1.P4.13 | Repair the missing FrozenLake effective-learning-rate observation exposed by P45 Wave 02 | keep scalar AdamW unchanged; register the same constant only for receipts; pin entrypoint structure; host and P45 immutable-image gates; then fresh target weight sync | source published by current CL; P57 147/147, Phase4 89/89, P45 exact image PASS; post-fix target not run |
+| V1.P4.14 | Admit exact no-eval/no-checkpoint P45+M15 Zero fast concept runs after f45w09 | both manifests fail closed on eval disabled, checkpoint mode disabled, and empty residual fields; host plus immutable-image gates; then two fresh 300-update targets | active; implementation host/exact-image PASS, uncommitted and unpublished; TPU target not run |
 
 ## Decisions
 
@@ -31,7 +32,7 @@ the semantic Perfetto timeline.
 - Decision: attempt-2 target evidence VETOES APC for M15/main; user elected the same APC-off production policy for P45. All three full recipes are APC-off. B rescore always resets the cache and the strict gate is unchanged.
 - Decision: all three manifests retain the P33 JAX persistent-cache bucket. Exact restore/save receipts are mandatory carrier evidence; miss/error remains a performance limitation, not a numerical verdict.
 - Decision: the profiled update is excluded from steady-state performance means.
-- Decision: launch all three full-horizon jobs in one wave with no short canary and no cross-recipe first-commit dependency. Each recipe independently passes strict alignment plus its registered P59-local/fixed-head/token/APC/optimizer receipts while the other healthy runs continue from the same exact source SHA.
+- Historical decision (superseded by P4.14): launch all three full-horizon jobs in one wave with no short canary and no cross-recipe first-commit dependency. The current launch set is the two optimized FrozenLake fast runs only.
 - Decision correction (2026-08-25): max-scaled L2 is an overflow-safe observer, not an admitted optimizer repair. Attempt 7 did not establish that the finite gradient magnitude was legitimate. No full recipe may use stable clipping to turn an unexplained `norm=inf` into an optimizer transaction; first localize the earliest bad numerical boundary in a zero-commit carrier.
 - Decision correction (2026-08-25 G5a): the six-line `p62d3` excerpt is an incomplete observation, not a classified G5 result. `all_finite=true` for group 0 distinguishes NaN/Inf from finite values but does not validate a `5.38e22` gradient norm. A fresh G5b must preserve the full raw log and zero-commit terminal before any numerical repair.
 - Decision (2026-08-25 G5b): the complete 16-group DP16xTP4 carrier proves every pre-optimizer gradient boundary and the final accumulator finite with exact denominator 16. The remaining `naive_norm=inf` is FP32 sum-of-squares overflow. Admit a default-off hybrid repair: preserve the stock transform when its norm is finite; use max-scaled L2 only when the stock norm is non-finite and an independent all-finite predicate is true. A real NaN/Inf never takes the fallback.
@@ -88,3 +89,10 @@ the semantic Perfetto timeline.
   preserve scalar AdamW and register the identical constant with the receipt
   API. Do not weaken the first-update gate or claim outer weight sync/policy
   step 1 until a fresh target crosses them.
+- Decision (2026-08-28 f45w09): the optimized Zero P45 and M15/main recipes
+  are efficiency-first 300-update concept runs. Disable held-out evaluation
+  and checkpoint creation only for their exact v1-hp identities; retain all
+  strict Zero-TIM, backward-health, optimizer, timing, W&B, cache, XProf, and
+  Perfetto gates. Native/IS and historical/evaluation carriers keep their
+  existing contracts. A failed fast run has no resume point and must restart
+  at step 0 with a fresh identity.

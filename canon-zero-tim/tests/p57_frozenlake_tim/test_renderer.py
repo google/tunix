@@ -494,13 +494,14 @@ class P57RendererTest(unittest.TestCase):
                 source_commit="a" * 40,
                 run_id=f"p57{workload[:3]}{arm[:2]}",
                 campaign_tag=f"p57-{workload}-{arm}",
-                checkpoint_mode="new",
+                checkpoint_mode="disabled" if arm == "zero" else "new",
                 expected_updates=updates,
                 run_kind="train",
                 workload_candidate=candidate,
                 data_split=split,
                 arm=arm,
                 high_performance=arm == "zero",
+                disable_eval=arm == "zero",
             )[0]
             env = _env(yaml.safe_load(path.read_text()))
             command = env["CANON_RUN_CMD"].split()
@@ -530,16 +531,43 @@ class P57RendererTest(unittest.TestCase):
                 env["CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY"], warning_only
             )
             self.assertEqual(env["CANON_P57_STOP_AFTER_STEP"], str(updates))
+            checkpoint_enabled = arm != "zero"
             self.assertEqual(
-                env["CANON_FROZENLAKE_CKPT_MILESTONE_INTERVAL"], "0"
+                env["CANON_FROZENLAKE_CKPT_MODE"],
+                "new" if checkpoint_enabled else "disabled",
             )
-            self.assertEqual(env["CANON_FROZENLAKE_CKPT_INTERVAL"], "300")
-            self.assertEqual(env["CANON_FROZENLAKE_CKPT_MAX_TO_KEEP"], "1")
-            self.assertEqual(env["CANON_P33_ENABLE_EVAL"], "1")
-            self.assertEqual(env["CANON_P33_DISABLE_EVAL"], "0")
-            self.assertEqual(env["CANON_P31_ENABLE_EVAL"], "1")
-            self.assertIn("--num_test_batches=4", command)
-            self.assertIn("--eval_every_n_steps=50", command)
+            self.assertEqual(
+                env["CANON_FROZENLAKE_CKPT_MILESTONE_INTERVAL"],
+                "0" if checkpoint_enabled else "",
+            )
+            self.assertEqual(
+                env["CANON_FROZENLAKE_CKPT_INTERVAL"],
+                "300" if checkpoint_enabled else "",
+            )
+            self.assertEqual(
+                env["CANON_FROZENLAKE_CKPT_MAX_TO_KEEP"],
+                "1" if checkpoint_enabled else "",
+            )
+            evaluation_enabled = arm != "zero"
+            self.assertEqual(
+                env["CANON_P33_ENABLE_EVAL"],
+                "1" if evaluation_enabled else "0",
+            )
+            self.assertEqual(
+                env["CANON_P33_DISABLE_EVAL"],
+                "0" if evaluation_enabled else "1",
+            )
+            self.assertEqual(
+                env["CANON_P31_ENABLE_EVAL"],
+                "1" if evaluation_enabled else "0",
+            )
+            self.assertEqual("--num_test_batches=4" in command, evaluation_enabled)
+            self.assertIn(
+                "--eval_every_n_steps=50"
+                if evaluation_enabled
+                else "--eval_every_n_steps=0",
+                command,
+            )
             preflight = _run_env_preflight(
                 env, root / f"state-{workload}-{arm}"
             )
@@ -552,6 +580,8 @@ class P57RendererTest(unittest.TestCase):
                 resolved,
             )
             expected_group = f"p57-{arm}"
+            if arm == "zero":
+              expected_group += "-noeval"
             if candidate:
               expected_group += f"-{candidate}-{split}"
             self.assertIn(
@@ -590,10 +620,81 @@ class P57RendererTest(unittest.TestCase):
 
   def test_three_arm_wrapper_routes_zero_to_hp_and_requires_clean_exact_sha(self):
     script = THREE_ARM_WRAPPER.read_text(encoding="utf-8")
-    self.assertIn("renderer_mode+=(--high-performance)", script)
+    self.assertIn(
+        "renderer_mode+=(--high-performance --disable-eval)", script
+    )
     self.assertEqual(script.count('"${renderer_mode[@]}"'), 2)
+    self.assertIn("checkpoint_mode=disabled", script)
     self.assertIn('git -C "$repo" rev-parse HEAD', script)
     self.assertIn("refusing to render from a dirty worktree", script)
+
+  def test_high_performance_zero_rejects_eval_on(self):
+    with tempfile.TemporaryDirectory() as tmp, self.assertRaisesRegex(
+        ValueError, "requires in-process evaluation disabled"
+    ):
+      paired.render_all(
+          base_path=BASE,
+          output_dir=Path(tmp),
+          source_commit="a" * 40,
+          run_id="p57zeroevalon",
+          campaign_tag="p57-zero-eval-on-negative",
+          checkpoint_mode="disabled",
+          expected_updates=300,
+          run_kind="train",
+          arm="zero",
+          high_performance=True,
+      )
+
+  def test_high_performance_zero_rejects_checkpoint_enabled(self):
+    with tempfile.TemporaryDirectory() as tmp, self.assertRaisesRegex(
+        ValueError, "requires a checkpoint-disabled"
+    ):
+      paired.render_all(
+          base_path=BASE,
+          output_dir=Path(tmp),
+          source_commit="a" * 40,
+          run_id="p57zerockpton",
+          campaign_tag="p57-zero-checkpoint-on-negative",
+          checkpoint_mode="new",
+          expected_updates=300,
+          run_kind="train",
+          arm="zero",
+          high_performance=True,
+          disable_eval=True,
+      )
+
+  def test_disable_eval_rejects_native_arm(self):
+    with tempfile.TemporaryDirectory() as tmp, self.assertRaisesRegex(
+        ValueError, "admitted only for the v1 high-performance zero train"
+    ):
+      paired.render_all(
+          base_path=BASE,
+          output_dir=Path(tmp),
+          source_commit="a" * 40,
+          run_id="p57nativeevaloff",
+          campaign_tag="p57-native-eval-off-negative",
+          checkpoint_mode="new",
+          expected_updates=300,
+          run_kind="train",
+          arm="mismatch",
+          disable_eval=True,
+      )
+
+  def test_disable_checkpoint_rejects_native_arm(self):
+    with tempfile.TemporaryDirectory() as tmp, self.assertRaisesRegex(
+        ValueError, "admitted only for the v1 high-performance zero train"
+    ):
+      paired.render_all(
+          base_path=BASE,
+          output_dir=Path(tmp),
+          source_commit="a" * 40,
+          run_id="p57nativeckptoff",
+          campaign_tag="p57-native-checkpoint-off-negative",
+          checkpoint_mode="disabled",
+          expected_updates=300,
+          run_kind="train",
+          arm="mismatch",
+      )
 
   def test_paired_arms_reject_unregistered_200_step_horizon(self):
     workloads = (

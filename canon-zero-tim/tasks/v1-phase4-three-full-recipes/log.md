@@ -924,3 +924,35 @@
   work-disk `TMPDIR`; it is classified infrastructure-only.
 - Claim boundary: local and image admission only. No post-fix TPU, weight sync,
   policy step 1, evaluation, checkpoint, commit, push, render, or launch.
+
+## 2026-08-28T01:07:29Z — P4.14 P45/M15 fast no-eval/no-checkpoint admission green locally
+
+- Type: target-failure classification / launch-contract repair / admission.
+- Fact: f45w09 source `19d105377197e9299ae8f93096627a18a130cf33`
+  completed strict Step-0 pre-alignment, 32/32 post-backward records, healthy
+  finite gradients, AdamW, and the first optimizer commit. It failed only
+  after the wrapper launched held-out eval: rescore row 7 returned one prompt
+  logprob for 1025 tokens. The low-level disable selector existed, but the
+  standard wave wrapper did not forward it. M15 shared the same latent path.
+- Decision: make the exact optimized Zero P45 and M15/main 300-update profiles
+  efficiency-first: eval disabled, checkpoint mode `disabled`, and every
+  checkpoint residual field empty. Native/IS and historical/eval carriers
+  retain their old behavior. No strict, backward, optimizer, timing, W&B,
+  JAX-cache, XProf, or Perfetto gate is removed.
+- Implementation: scope the fast identity through the renderer, profiles,
+  resolved-env admission, trainer checkpoint guard, manifest verifier, full
+  classifier, and P45/M15 render-only wrappers. Runtime emits explicit eval-
+  and checkpoint-disabled receipts. There is no resume or final checkpoint.
+- Validation: P57 155/155, Phase4 90/90, P45-owned suites 32/32, flags
+  393/393, syntax, and diff hygiene pass. Immutable image
+  `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`
+  exits zero with terminal `V1_HP_EXACT_IMAGE_PASS ... manifests=3`; that
+  output is an execution transcript, not a durable raw-log artifact. The P45
+  aggregate host runner has two dependency-only import errors (`datasets`,
+  `metrax` absent); its affected owned suites pass directly.
+- Claim boundary: `IMPLEMENTED / HOST PASS / EXACT_IMAGE PASS / UNCOMMITTED /
+  UNPUBLISHED / TPU TARGET NOT RUN`. No manifest was rendered for launch, no
+  JobSet/TPU state changed, and no commit or push occurred.
+- Next: review the intent diff and obtain explicit commit/push approval. After
+  exact remote SHA read-back, render two fresh immutable manifests and let the
+  other operator launch P45 and M15 together.

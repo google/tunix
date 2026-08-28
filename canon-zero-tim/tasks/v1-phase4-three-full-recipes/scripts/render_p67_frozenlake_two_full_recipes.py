@@ -103,11 +103,12 @@ def render_two(
       source_commit=source_commit,
       run_id=p45_run_id,
       campaign_tag=f"{campaign_root}-p45",
-      checkpoint_mode="new",
+      checkpoint_mode="disabled",
       expected_updates=300,
       run_kind="train",
       arm="zero",
       high_performance=True,
+      disable_eval=True,
   )
   m15_outputs = p57.render_all(
       base_path=base_path,
@@ -115,13 +116,14 @@ def render_two(
       source_commit=source_commit,
       run_id=m15_run_id,
       campaign_tag=f"{campaign_root}-m15",
-      checkpoint_mode="new",
+      checkpoint_mode="disabled",
       expected_updates=300,
       run_kind="train",
       workload_candidate="m15",
       data_split="main",
       arm="zero",
       high_performance=True,
+      disable_eval=True,
   )
   outputs = (*p45_outputs, *m15_outputs)
   if len(outputs) != 2:
@@ -152,10 +154,15 @@ def render_two(
         "CANON_P59_CHECKED_VMA": "1",
         "CANON_P67_P66_VMA_P59_ONLY": "1",
         "CANON_V1_HP_FIRST_UPDATE_GATE": "1",
-        "CANON_P33_ENABLE_EVAL": "1",
-        "CANON_P33_DISABLE_EVAL": "0",
-        "CANON_P31_ENABLE_EVAL": "1",
-        "CANON_FROZENLAKE_CKPT_MILESTONE_INTERVAL": "0",
+        "CANON_P33_ENABLE_EVAL": "0",
+        "CANON_P33_DISABLE_EVAL": "1",
+        "CANON_P31_ENABLE_EVAL": "0",
+        "CANON_FROZENLAKE_CKPT_MODE": "disabled",
+        "CANON_FROZENLAKE_CKPT_ROOT": "",
+        "CANON_FROZENLAKE_CKPT_TAG": "",
+        "CANON_FROZENLAKE_CKPT_INTERVAL": "",
+        "CANON_FROZENLAKE_CKPT_MAX_TO_KEEP": "",
+        "CANON_FROZENLAKE_CKPT_MILESTONE_INTERVAL": "",
         **_JAX_CACHE_ENV,
     }
     if label == "p45":

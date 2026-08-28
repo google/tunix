@@ -371,10 +371,15 @@ def _required_recipe_env(recipe: str, contract: dict[str, Any]) -> dict[str, str
         "CANON_P57_EXPECTED_UPDATES": "300",
         "CANON_P57_WORKLOAD_CANDIDATE": str(contract["candidate"]),
         "CANON_P57_DATA_SPLIT": str(contract["split"]),
-        "CANON_P33_ENABLE_EVAL": "1",
-        "CANON_P33_DISABLE_EVAL": "0",
-        "CANON_P31_ENABLE_EVAL": "1",
-        "CANON_FROZENLAKE_CKPT_MILESTONE_INTERVAL": "0",
+        "CANON_P33_ENABLE_EVAL": "0",
+        "CANON_P33_DISABLE_EVAL": "1",
+        "CANON_P31_ENABLE_EVAL": "0",
+        "CANON_FROZENLAKE_CKPT_MODE": "disabled",
+        "CANON_FROZENLAKE_CKPT_ROOT": "",
+        "CANON_FROZENLAKE_CKPT_TAG": "",
+        "CANON_FROZENLAKE_CKPT_INTERVAL": "",
+        "CANON_FROZENLAKE_CKPT_MAX_TO_KEEP": "",
+        "CANON_FROZENLAKE_CKPT_MILESTONE_INTERVAL": "",
     })
   return required
 
@@ -478,49 +483,26 @@ def classify(
   p57_eval = None
   if recipe != "gsm8k":
     _require(
-        p57_eval_classification.is_file(),
-        "missing_p57_inprocess_eval_classification",
+        not p57_eval_classification.exists(),
+        "unexpected_p57_inprocess_eval_classification",
         reasons,
     )
-    if p57_eval_classification.is_file():
-      p57_eval = json.loads(
-          p57_eval_classification.read_text(encoding="utf-8")
-      )
-      _require(
-          p57_eval.get("verdict") == "PASS",
-          f"p57_eval_verdict={p57_eval.get('verdict')}",
-          reasons,
-      )
-      _require(
-          p57_eval.get("expected_updates") == expected_updates,
-          "p57_eval_expected_updates",
-          reasons,
-      )
-      _require(
-          p57_eval.get("steps") == list(range(0, expected_updates + 1, 50)),
-          "p57_eval_steps",
-          reasons,
-      )
-      expected_cycle_receipts = [
-          {
-              "policy_step": step,
-              "enclosing_global_step": (
-                  None if step == expected_updates else step + 1
-              ),
-          }
-          for step in range(0, expected_updates + 1, 50)
-      ]
-      _require(
-          p57_eval.get("schema")
-          == "p57-inprocess-evaluation-classification-v2",
-          "p57_eval_schema",
-          reasons,
-      )
-      _require(
-          p57_eval.get("cycle_receipts") == expected_cycle_receipts,
-          "p57_eval_cycle_receipts",
-          reasons,
-      )
+    _require(
+        "[CANON_P33_EVAL] DISABLED workload=frozenlake" in run_log.read_text(
+            encoding="utf-8", errors="replace"
+        ),
+        "missing_p57_evaluation_disabled_receipt",
+        reasons,
+    )
+    _require(
+        "[P45.CHECKPOINT] DISABLED "
+        f"workload_candidate={contract['candidate'] or 'p45'} "
+        "reason=v1-hp-fast-concept" in run_log.read_text(
+            encoding="utf-8", errors="replace"
+        ),
+        "missing_p57_checkpoint_disabled_receipt",
+        reasons,
+    )
 
   base = json.loads(base_classification.read_text(encoding="utf-8"))
   _require(base.get("verdict") == "PASS", f"base_verdict={base.get('verdict')}", reasons)

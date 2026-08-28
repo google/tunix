@@ -251,6 +251,23 @@ class FullClassifierTest(unittest.TestCase):
           8.0,
       )
 
+  def test_frozenlake_contract_requires_eval_off(self):
+    required = classifier._required_recipe_env(
+        "p45", classifier._RECIPES["p45"]
+    )
+    self.assertEqual(required["CANON_P33_ENABLE_EVAL"], "0")
+    self.assertEqual(required["CANON_P33_DISABLE_EVAL"], "1")
+    self.assertEqual(required["CANON_P31_ENABLE_EVAL"], "0")
+    self.assertEqual(required["CANON_FROZENLAKE_CKPT_MODE"], "disabled")
+    for name in (
+        "CANON_FROZENLAKE_CKPT_ROOT",
+        "CANON_FROZENLAKE_CKPT_TAG",
+        "CANON_FROZENLAKE_CKPT_INTERVAL",
+        "CANON_FROZENLAKE_CKPT_MAX_TO_KEEP",
+        "CANON_FROZENLAKE_CKPT_MILESTONE_INTERVAL",
+    ):
+      self.assertEqual(required[name], "")
+
   def test_any_real_alignment_fail_is_fatal(self):
     with tempfile.TemporaryDirectory() as tmp:
       state, run_log, updates, base = self._evidence(
