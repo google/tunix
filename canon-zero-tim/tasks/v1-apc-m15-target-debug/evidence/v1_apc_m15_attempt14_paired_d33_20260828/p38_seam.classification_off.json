@@ -1,0 +1,11 @@
+{
+  "arm": "off",
+  "attempt": 14,
+  "campaign_root": "v1-apc-m15-attempt14-d33",
+  "classification": "M15_OBSERVER_CONTROL_EXACT",
+  "gate": "OBSERVER_REACHED_EXACT_ENDPOINT",
+  "jobset_name": "canon-v1-apc-m15-off-d33-003276a3",
+  "n_action": 124673,
+  "source_commit": "003276a3fe2a0ceeaa95a7d940550dab627b8324",
+  "verdict": "PASS"
+}

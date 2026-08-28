@@ -1,0 +1,17 @@
+{
+  "arm": "on",
+  "attempt": 14,
+  "campaign_root": "v1-apc-m15-attempt14-d33",
+  "classification": "M15_INTERNAL_FIRST_RED_LOCALIZED",
+  "gate": "INTERNAL_FIRST_RED_LOCALIZED",
+  "jobset_name": "canon-v1-apc-m15-on-d33-003276a3",
+  "n_action": 120871,
+  "differing_bytes": 99,
+  "first_red_checkpoint": "rpa_output",
+  "first_red_checkpoint_index": 9,
+  "last_exact_checkpoint": "k_post_rope",
+  "last_exact_checkpoint_index": 8,
+  "selected_layer": 0,
+  "source_commit": "003276a3fe2a0ceeaa95a7d940550dab627b8324",
+  "verdict": "FAIL"
+}

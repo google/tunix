@@ -1,6 +1,27 @@
 # M15 APC target-debug handoff
 
-## START HERE — offline-review d32, then render d33; do not launch implicitly
+## START HERE — Attempt 14 (d33) confirms RPA Output Seam (99 mismatches ON vs 0 OFF); enter Phase E offline repair
+
+Attempt 14 paired dual-arm execution was conducted on dual 64-TPU allocations (`DP8xTP8`) using source commit `003276a3fe2a0ceeaa95a7d940550dab627b8324` with the fine-grained 15-checkpoint Full Observer attached to Layer 0:
+
+- **Control Arm (`canon-v1-apc-m15-off-d33-003276a3`)**:
+  - Rollout: 256 trajectories completed, **0.0%** prefix cache hit rate, solve rate **23.8%** (61/256).
+  - Pre-alignment: `[CANON_ALIGN_PRE] step=0 verdict=PASS N_action=124673 bounds=[('S_decode_vs_S_prefill', 0), ('S_prefill_vs_T_old', 0)]` ($A-B=0, B-C=0$).
+  - Classification: `M15_OBSERVER_CONTROL_EXACT`, `gate=OBSERVER_REACHED_EXACT_ENDPOINT`.
+  - Terminal: Controlled exit code 42, zero backward, zero optimizer commits.
+
+- **Treatment Arm (`canon-v1-apc-m15-on-d33-003276a3`)**:
+  - Rollout: 256 trajectories completed, **92.8%** prefix cache hit rate, solve rate **16.8%** (43/256, -7.0% degradation).
+  - Pre-alignment: `[CANON_ALIGN_PRE] step=0 verdict=FAIL N_action=120871 bounds=[('S_decode_vs_S_prefill', 99), ('S_prefill_vs_T_old', 0)]` ($B-C=0$ exact, captured 99 differing bytes).
+  - Classification: `M15_INTERNAL_FIRST_RED_LOCALIZED`, `gate=INTERNAL_FIRST_RED_LOCALIZED`, `selected_layer=0`.
+  - First red checkpoint: `rpa_output` (Checkpoint index 9). Checkpoints 0..8 (`layer_input` through `k_post_rope`) are 100% bitwise exact (0.0 diff).
+  - Terminal: Controlled exit code 42, zero backward, zero optimizer commits.
+
+Evidence is sealed in `evidence/v1_apc_m15_attempt14_paired_d33_20260828/` (`SHA256SUMS`).
+
+Phase D (Target Seam Localization) is officially complete. Next action is **Phase E: Targeted offline numerical repair of RPA / KV Cache block-table lookup in `rpa_kernel_p66.py`**. Retain `APC-OFF` in all production full training workloads until Phase E passes strict 0-mismatch verification.
+
+## Historical — offline-review d32, then render d33; do not launch implicitly
 
 The seven-file Attempt-13 (`d32`) inventory is transport-complete and proves
 that both recursive listings succeeded and both registered roots contain no
