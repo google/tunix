@@ -50,7 +50,11 @@ the rendered identity: `diagnostic=p58-seam-localization`,
 `diagnostic-rounds=3`, `backward=0`, `optimizer-commits=0`, exactly one
 `CANON_P58_SEAM_LOCALIZATION=coarse`, and no P58.18 checked-VMA selector.  Do
 not hand-set subordinate P38 fields; `00_env.sh` must attest the derived
-`p58-seam-v1` durability profile and bounded `[3072,4608)` layer observer.
+`p58-seam-v1` durability profile and bounded `[1686,4096)` layer observer,
+with capture strata `1686,2512,3072,3584,4096`. These values cover the five
+known first-red prefixes from p58z07 and P58.18. A repeat with `records=0`
+remains INCONCLUSIVE and must return the complete log plus request journal;
+do not lower the window ad hoc in rendered YAML.
 
 During execution, a round may advance only after its P58 round classifier is
 PASS and the archive has passed upload/read-back verification.  A completed

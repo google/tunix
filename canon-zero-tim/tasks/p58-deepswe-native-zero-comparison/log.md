@@ -1400,3 +1400,37 @@
   selects an explicit P59 pullback-identity repair for P67; finite-red A-B
   with exact B-C selects seam replay. No code fix, image publication,
   Kubernetes mutation, TPU launch, commit, or push occurred here.
+
+## 2026-08-28 UTC — P58.19c local seam-window coverage repair
+
+- Type: latest-source synchronization / immutable incident intake / local
+  observer-coverage repair / construction verification.
+- Source: the worktree first fast-forwarded from
+  `4bdabb2d84b18f517f51c74f4c9a15c218cd45d1` to
+  `8dc0a67fd60029b8058c76bc05d21964589341d1`, then incorporated two unrelated
+  three M15-only commits and now rests on
+  `117386387a7b6408089309f9c39a01113758ece8`. Local P58 changes were preserved
+  and restored; the operator branch had not yet been pushed at this checkpoint
+  and `main` was not touched.
+- Incident fact: `p58s19b` proves `init=1 records=0 classifier=1` for the old
+  `[3072,4608)` observer interval. Its sealed `RAW_ERROR.log` is a 26-line
+  incident excerpt, so the report's prompt-length explanation is not treated
+  as proven without the complete raw log and request/scheduler journal.
+- Repair: the single P58 seam selector now derives `[1686,4096)` and serving
+  strata `1686,2512,3072,3584,4096`. The interval covers all five exact known
+  first-red logical-KV prefixes: p58z07 2,513/3,715 and P58.18
+  3,438/3,880/4,032. Production and neighboring workload defaults are
+  unchanged; model, data, sampling, loss, optimizer, geometry, and numerical
+  treatments are unchanged.
+- Validation: Python compilation and `git diff --check` pass; focused
+  renderer/profile/classifier suites pass 45/45; P34 static passes 10 suites;
+  deterministic flag audit passes 394/394/394; the complete digest-pinned
+  dependency-image suite exits zero with `P58_EXACT_IMAGE_CPU_PASS ...
+  coarse_seam=1 ... regressions=1`. The bare-host environment-contract import
+  is blocked by missing optional `metrax` and is not claimed as a host PASS;
+  the contract is covered by the passing pinned-image suite.
+- Boundary: source remains uncommitted and unpublished. No image publication,
+  Kubernetes mutation, TPU/Pathways execution, credential access, commit, or
+  push occurred. A separately approved target retry must return the complete
+  raw log and request/scheduler journal and must emit observer records plus all
+  three round classifications.

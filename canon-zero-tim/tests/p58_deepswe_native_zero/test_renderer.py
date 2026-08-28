@@ -301,10 +301,17 @@ class P58RendererTest(unittest.TestCase):
     self.assertEqual(env["CANON_P38_DIAGNOSTIC_ROUNDS"], "3")
     self.assertEqual(env["CANON_P38_DURABILITY_PROFILE"], "p58-seam-v1")
     self.assertEqual(env["CANON_P38_SEAM_OBSERVER"], "layer")
-    self.assertEqual(env["CANON_P38_SEAM_MIN_POSITION"], "3072")
-    self.assertEqual(env["CANON_P38_SEAM_MAX_POSITION"], "4608")
+    self.assertEqual(env["CANON_P38_SEAM_MIN_POSITION"], "1686")
+    self.assertEqual(env["CANON_P38_SEAM_MAX_POSITION"], "4096")
     self.assertEqual(env["CANON_P38_TAIL_OBSERVER"], "1")
-    self.assertEqual(env["CANON_P38_MIN_ACTION_KV"], "3072")
+    self.assertEqual(env["CANON_P38_MIN_ACTION_KV"], "1686")
+    self.assertEqual(
+        env["CANON_P38_SERVING_CAPTURE_PREFIX_BOUNDS"],
+        "1686,2512,3072,3584,4096",
+    )
+    for onset in (2513, 3438, 3715, 3880, 4032):
+      self.assertLessEqual(int(env["CANON_P38_SEAM_MIN_POSITION"]), onset)
+      self.assertLess(onset, int(env["CANON_P38_SEAM_MAX_POSITION"]))
     self.assertEqual(
         diagnostic["metadata"]["labels"]["canon.zero-tim/backward"], "0"
     )

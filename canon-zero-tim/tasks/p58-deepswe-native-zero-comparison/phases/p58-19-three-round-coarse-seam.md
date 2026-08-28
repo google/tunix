@@ -25,6 +25,11 @@ optimizer state.  It does not reuse the P58.18 ON/OFF selector.
   logical KV prefixes 3,438, 3,880, and 4,032 and at action-run starts after an
   environment token.  This justifies a bounded initial coarse observation
   band; absence of a join remains INCONCLUSIVE rather than evidence of repair.
+- Historical `p58z07` additionally proves first-red onsets at logical KV
+  prefixes 2,513 and 3,715. `p58s19b` then initialized the observer but emitted
+  zero records from `[3072,4608)`. Its returned excerpt does not prove the
+  proposed prompt-length root cause, but it does prove the old window was not
+  a reachable carrier in that attempt.
 
 ## Shape and program ledger
 
@@ -49,7 +54,10 @@ and output-path field.  Hand-setting a partial tuple fails closed.  Selector
 absence leaves production P58 Zero-HP unchanged, and every non-P58 workload
 must reject the selector.
 
-The initial observation window is `[3072, 4608)`.  Coarse layer fingerprints
+The repaired observation window is `[1686, 4096)`, with serving-capture strata
+`1686,2512,3072,3584,4096`. It covers all five known P58 first-red prefixes
+without adopting the ungrounded 512/1024 values proposed by the incident
+summary. Coarse layer fingerprints
 are diagnostic, non-cryptographic summaries; equality is not promoted to
 full-tensor byte equality.  The independent endpoint gate remains the source
 of truth for A-B/B-C.

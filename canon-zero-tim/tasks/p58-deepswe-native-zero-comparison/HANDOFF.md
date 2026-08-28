@@ -1,16 +1,49 @@
 # P58 DeepSWE native-first training handoff
 
-## 2026-08-28 UTC — DeepSWE P58.19b Incident Report & Handoff for Fix
+## 2026-08-28 UTC — P58.19c local seam-window coverage repair
+
+`p58s19b` proves only that the observer initialized but emitted zero records:
+`init=1 records=0 classifier=1`. Its sealed `RAW_ERROR.log` is a 26-line
+incident excerpt, not the complete run log, so the earlier statement that all
+initial prompts were shorter than 3,072 is not promoted to a runtime fact.
+The immutable incident files remain unchanged.
+
+The local repair replaces the zero-hit `[3072,4608)` window with the
+evidence-derived `[1686,4096)` window and serving-capture strata
+`1686,2512,3072,3584,4096`. This one window contains every known first-red
+prefix available to this lane: 2,513 and 3,715 from `p58z07`, plus 3,438,
+3,880, and 4,032 from the P58.18 ON-A/OFF/ON-B evidence. It does not change
+the model, data, sampling, numerical treatment, geometry, backward, or
+optimizer contract. Source is local and unpublished until the user approves
+a separate commit/push; that source publication is approved for this delivery,
+but no target retry is authorized by this handoff.
+
+Construction validation is complete on source base
+`117386387a7b6408089309f9c39a01113758ece8`: focused renderer/profile/
+classifier tests pass 45/45, P34 static passes 10 suites, flag audit passes
+394/394/394, diff hygiene passes, and the complete digest-pinned image gate
+ends in `P58_EXACT_IMAGE_CPU_PASS ... coarse_seam=1 ... regressions=1`. The
+bare host lacks optional `metrax`, so its environment-contract import is not
+claimed as a PASS; the same contract passes in the pinned dependency image.
+No Pathways/TP8 target has been run. A separately approved retry must return
+the complete raw log and request/scheduler journal, not another short excerpt,
+and must show observer records plus one classification for every round.
+
+## 2026-08-28 UTC — DeepSWE P58.19b incident intake
 
 ### Incident Summary (`canon-p58-seamcoarse-full-p58s19b`, 128 TPU)
 Target run `canon-p58-seamcoarse-full-p58s19b` failed at the Step 0 postflight gate:
 - Error: `FATAL: P38 seam observer contract failed: init=1 records=0 classifier=1`
-- Cause: `_SEAM_MIN_POSITION = 3072` in `render_p58_deepswe_tim.py` exceeded the SWE-bench Step 0 prompt prefix lengths, resulting in 0 captured seam records.
+- Proven boundary: the configured `[3072,4608)` standard-path window emitted
+  no seam record in this attempt. The incident's prompt-length explanation is
+  a hypothesis because the returned artifact does not contain the full log or
+  per-request scheduler journal.
 - Sealed incident artifacts: `evidence/p58s19b_seam_observer_contract_incident/` (`INCIDENT_REPORT.md`, `RAW_ERROR.log`, `SHA256SUMS`).
 
-### Action Required for Collaborator Repair
-1. Modify `_SEAM_MIN_POSITION` and `_SEAM_CAPTURE_BOUNDS` in `canon-zero-tim/cluster/render_p58_deepswe_tim.py` to match the actual initial prompt lengths of the dataset split (e.g., lower bound to 512 / 1024).
-2. Re-render the JobSet YAML via `prepare_p58_coarse_seam_localization.sh` and re-apply to cluster.
+### Action Required After Publication
+Render a fresh JobSet with the registered selector and verify the resolved
+`[1686,4096)` tuple. Image publication and Kubernetes apply remain separately
+approval-gated.
 
 ---
 
@@ -43,7 +76,7 @@ backward, optimizer commit, and checkpoint advancement are unreachable.
 
 The selector derives the complete observer/durability tuple.  It records
 bounded coarse fingerprints for every Transformer block input/output, final
-norm, and the terminal logprob path over logical KV prefixes `[3072,4608)`.
+norm, and the terminal logprob path over logical KV prefixes `[1686,4096)`.
 Never hand-edit subordinate P38/M15 fields and never combine this selector
 with Native, three-update, warning-only, checked-VMA diagnostic, or partial
 observer settings.  Selector absence leaves production P58 Zero/full

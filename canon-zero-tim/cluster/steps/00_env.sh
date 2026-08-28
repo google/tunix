@@ -873,7 +873,7 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
     fail=1
   }
   expected_p38_min_action_kv=1686
-  [ "$P58_SEAM_LOCALIZATION" = "0" ] || expected_p38_min_action_kv=3072
+  [ "$P58_SEAM_LOCALIZATION" = "0" ] || expected_p38_min_action_kv=1686
   [ "${CANON_P38_MIN_ACTION_KV:-}" = "$expected_p38_min_action_kv" ] || {
     echo "[env] P38 serving capture depth-sufficiency contract drifted" >&2
     fail=1
@@ -889,8 +889,8 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
     expected_p38_capture_bounds=1152,1216,1280,1408,1696
   fi
   if [ "$P58_SEAM_LOCALIZATION" = "1" ]; then
-    expected_p38_capture_min=3072
-    expected_p38_capture_bounds=3072,3456,3840,4224,4608
+    expected_p38_capture_min=1686
+    expected_p38_capture_bounds=1686,2512,3072,3584,4096
   fi
   [ "${CANON_P38_SERVING_CAPTURE_MIN_PREFIX:-}" = \
       "$expected_p38_capture_min" ] && \
@@ -932,8 +932,8 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
     expected_p38_incident_bytes=2147483648
   fi
   if [ "$P58_SEAM_LOCALIZATION" = "1" ]; then
-    expected_p38_incident_min=3072
-    expected_p38_incident_max=4608
+    expected_p38_incident_min=1686
+    expected_p38_incident_max=4096
     expected_p38_incident_bytes=134217728
   fi
   [ "${CANON_P38_INCIDENT_MIN_PREFIX:-}" = \
@@ -987,8 +987,8 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
       expected_p38_seam_bytes=8589934592
     fi
     if [ "$P58_SEAM_LOCALIZATION" = "1" ]; then
-      expected_p38_seam_min=3072
-      expected_p38_seam_max=4608
+      expected_p38_seam_min=1686
+      expected_p38_seam_max=4096
       expected_p38_seam_bytes=1073741824
     fi
     [ "${CANON_P38_SEAM_MIN_POSITION:-}" = "$expected_p38_seam_min" ] && \

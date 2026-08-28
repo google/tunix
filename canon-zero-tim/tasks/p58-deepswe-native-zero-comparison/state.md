@@ -2,17 +2,33 @@
 
 ## Current P58.19 three-round coarse seam-localization checkpoint (2026-08-28)
 
+- Current status: local P58.19c coverage repair is implemented on top of
+  `117386387a7b6408089309f9c39a01113758ece8`; construction validation is
+  complete and source publication is approved for this delivery. No image,
+  Kubernetes object, or TPU work has been created.
 - Target Incident (p58s19b): Attempt `canon-p58-seamcoarse-full-p58s19b` (128 TPU v5p)
   executed Step-0 multi-turn rollouts, but terminated at the postflight gate with
-  `FATAL: P38 seam observer contract failed: init=1 records=0 classifier=1` because
-  the initial SWE-bench batch prompt prefix lengths did not reach the hardcoded
-  `_SEAM_MIN_POSITION = 3072` boundary.
+  `FATAL: P38 seam observer contract failed: init=1 records=0 classifier=1`.
+  The returned 26-line excerpt proves a zero-hit `[3072,4608)` observer window;
+  it does not contain the full log or scheduler journal needed to prove the
+  incident report's prompt-length attribution.
 - Sealed incident package: `evidence/p58s19b_seam_observer_contract_incident/`
   with `RAW_ERROR.log`, `INCIDENT_REPORT.md`, and verified `SHA256SUMS`.
-- Required remediation for collaborators: expand `_SEAM_MIN_POSITION` / `_SEAM_CAPTURE_BOUNDS`
-  in `render_p58_deepswe_tim.py` (e.g. to `512` or `1024`) to cover the true SWE-bench
-  Step 0 prompt length distribution, re-render, and re-apply.
-- Status: implementation
+- Repair: derive `[1686,4096)` and strata
+  `1686,2512,3072,3584,4096` through the single P58 selector. The interval
+  covers all five known first-red prefixes: p58z07 2,513/3,715 and P58.18
+  3,438/3,880/4,032. Production and neighboring workload defaults are
+  unchanged.
+- P58.19c validation: Python compilation and diff hygiene pass; focused
+  renderer/profile/classifier tests pass 45/45; P34 static passes 10 suites;
+  deterministic flag audit passes declared/actual/unique 394/394/394; and the
+  complete digest-pinned dependency-image gate exits zero with terminal
+  `P58_EXACT_IMAGE_CPU_PASS ... coarse_seam=1 ... regressions=1`. The bare-host
+  environment-contract module cannot import optional dependency `metrax`, so
+  it is not claimed as a host PASS; that contract passes inside the pinned
+  dependency image. These are construction results, not a Pathways/TP8 target
+  result.
+- Prior P58.19 implementation status:
   `f58a97748a8895835fba4944f5c5a34ba8bee352` is published on
   `yuxzhang/canon-zero-tim` and immediately read back at ahead/behind `0/0`.
 - Reconciled target fact: sealed P58.18 `p58aba01` returned finite A-B RED and
