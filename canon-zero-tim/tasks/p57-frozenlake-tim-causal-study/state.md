@@ -6,8 +6,8 @@
 - Task directory: `canon-zero-tim/tasks/p57-frozenlake-tim-causal-study`
 - Directory state: tracked
 - Current phase: [P57.1b — three-arm baselines](phases/p57-1b-three-arm-baselines.md)
-- Last verified fact: P45 native attempt `canon-p57-fl-mism-n45j-2a89eef3` completed its first real optimizer transaction, then the step-0 evaluation receipt read the deliberately deferred `rl_cluster.global_steps=0` instead of the committed `actor_trainer.train_steps=1` and false-red before weight sync. The attempt is `INCONCLUSIVE`, not a numerical failure. The local repair validates both lifecycle counters. The active P57 checkpoint contract is final-only (`interval=300`, `LatestN(1)`), while historical P45/M15-selection remains interval 10. P57 passes 136/136 and V1 passes 12/12; target rerun is not yet performed.
-- Next action: review the local receipt/cadence repair. After separate commit/push approval, render all four fresh P45/M15 native-no-IS/token-IS JobSets from one immutable pushed SHA and request launch approval. Do not resume or reuse any earlier attempt.
-- Blockers: code review and commit/push approval, then separate cluster launch approval. The repaired evaluation receipt and final-only target checkpoint are `TARGET NOT RUN`; old partial attempts are immutable failed evidence and are not resume sources.
-- Key artifacts: [plan.md](plan.md); [active phase](phases/p57-1b-three-arm-baselines.md); [RUNBOOK.md](RUNBOOK.md); [HANDOFF.md](HANDOFF.md)
-- Updated: 2026-08-23T19:05:00Z
+- Last verified fact: Wave 10 P45 full training (`canon-p57-fl-zero-f45w10-96544812`, 64 TPU) ran through Step 63/300 (solve rate 44.5%) before encountering a worker-to-worker client pipe timeout (`DEADLINE_EXCEEDED` between worker 13 and worker 2), triggering fail-closed termination. Error logs archived under `evidence/f45w10_worker_pipe_timeout/`. M15 Full Wave 10 (`canon-p57-fl-zero-m15-mw10-96544812`, 64 TPU) is unaffected and training normally.
+- Next action: preserve f45w10 error evidence; monitor M15 Wave 10 training; relaunch P45 Wave 10 upon authorization.
+- Blockers: none.
+- Key artifacts: [plan.md](plan.md); [active phase](phases/p57-1b-three-arm-baselines.md); [RUNBOOK.md](RUNBOOK.md); [HANDOFF.md](HANDOFF.md); [Wave 10 Incident](evidence/f45w10_worker_pipe_timeout/incident_summary.md)
+- Updated: 2026-08-28T04:23:00Z

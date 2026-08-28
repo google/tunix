@@ -405,3 +405,12 @@
 - W&B contract: all three P57 treatments remain in `zero-tim-p57-frozenlake-tim`; arm/workload differences remain in group and run name so native/no-IS, native/IS, and optimized Zero are directly filterable in one project.
 - Validation: the complete P57 unittest matrix passes 149/149; the focused renderer matrix passes 20/20 after adding the W&B group receipt; the P3/flag-registry contract passes 12/12 and the deterministic registry audit passes 387/387. Six disposable `/tmp` manifests (P45/M15 x native/IS/zero) pass the real `00_env.sh` resolved-env verifier. All six resolve `CANON_WANDB_PROJECT=zero-tim-p57-frozenlake-tim`; groups distinguish arm/workload, while both Zero manifests additionally resolve the V1-HP profile and P59/P66/P67/first-update receipts. Shell syntax and `git diff --check` pass.
 - Claim boundary: source and disposable host manifests only. The local tree is uncommitted; no production Wave 05 manifest, pinned-image run, TPU rerun, optimizer commit, commit, push, or launch is claimed.
+
+## 2026-08-28T03:32:51Z — Wave 10 (f45w10) Step-63 Worker-to-Worker Pipe Timeout Incident
+
+- Type: target incident / hardware communication failure.
+- Fact: `canon-p57-fl-zero-f45w10-96544812` (P45 Full Wave 10, Qwen3-8B on 64 TPU v5p, DP8xTP8) ran stably through Step 63/300 (~44.5% solve rate, ~2.9m/step), then aborted during Step 63 gradient accumulation when `worker-0-13` (`gke-tpu-3a97861b-1vp4`) lost its client pipe connection to `worker-0-2` (`gke-tpu-3a97861b-qbx9:29000`).
+- Error trace: `INTERNAL: Client pipe .../worker_to_worker broke with error: DEADLINE_EXCEEDED: lost connection to peer at gke-tpu-3a97861b-qbx9 since 10.047667564s ago; this usually means that the peer has unexpectedly gone away (pipe.cc:307, worker_message_distributor.cc:1842)`. Pathways Cloud/OSS fail-closed abort at `quick_restart.cc:40`.
+- Evidence: Full error logs and pod traces archived at `canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/evidence/f45w10_worker_pipe_timeout/`.
+- Classification: `DEADLINE_EXCEEDED_WORKER_PIPE_TIMEOUT`. The parallel M15 Full Wave 10 run (`canon-p57-fl-zero-m15-mw10-96544812`) is unaffected and continuing.
+- Next: preserve raw logs; restart P45 Full Wave 10 on clean/ready 64 TPU slice upon authorization.
