@@ -80,13 +80,14 @@ Every return records `three_round_repeat=NOT_PERFORMED` and
 `numerical_repair_authorized=false`.  A reproduced attention-call interval is
 an observer boundary, not proof that `rpa_kernel_p66.py` is the causal line.
 
-## DEFERRED — d33 is only a repeat/fallback after the flat-shard replay
+## ACTIVE FALLBACK — d33 3-round Layer-0 matched pair after flat-shard live audit
 
-Do not launch d33 merely because the obsolete multiround wrapper reported
-`NO_DURABLE_ROUND`.  First run the flat-shard replay above.  d33 is useful only
-if the required d32 live snapshot is genuinely absent after the corrected
-audit, or if the user wants a fresh three-round repeat after reviewing the
-single-round result.  Either case requires separate launch approval.
+The corrected flat-shard audit was executed against real GCS (`recover_m15_attempt13_d32.sh`).
+All 77 Control shards (`000000..000076`) successfully downloaded and verified intact
+(`[M15.ATTEMPT13] FLAT_SHARDS_READY arm=off shards=77`, 2474 record pairs, exact SHA256 match).
+The audit failed closed at `fetch_live` (`[M15.ATTEMPT13] REFUSING: off live-snapshot GCS listing failed`)
+because Attempt 13 (`d32`) physically contains no `live/` snapshot directory in GCS.
+Therefore, per the protocol above, d33 is now the active, verified fallback path for complete 3-round Layer-0 durable evidence.
 
 d33 is one matched APC-off/APC-on pair, each containing three evaluation-only
 rounds with frozen weights, zero backward, and zero optimizer commits.  The

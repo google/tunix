@@ -1,19 +1,20 @@
 # State
 
-- Status: active; Phase D4's former `NO_DURABLE_ROUND` was a recovery-schema false negative. Attempt 13 is one older flat-shard round: 77 contiguous off shards and 70 contiguous on shards exist under `wide/shards/`, plus periodic `live/<sequence>` snapshots. A purpose-built read-only flat-shard replay is implemented and host-verified; bucket replay is not run and d33 is deferred.
+- Status: active; Phase D4 flat-shard recovery audited against real GCS. 77 Control shards verified (2474 record pairs, SHA256 match); GCS `live/` snapshots physically absent in Attempt 13 (`d32`). Per HANDOFF.md, d33 3-round Layer-0 Fallback pair (`jobset-v1-apc-m15-off-full.yaml` and `jobset-v1-apc-m15-on-full.yaml`) is the active fallback for complete durable multi-round evidence.
 - Objective: explain and repair the M15 DP8xTP8 APC-on A-vs-B byte mismatch without changing the independent full-reset B arm or any unrelated numerical path.
 - Definition of done: `FIRST_RED_LOCALIZED` names the last exact and first red tensor plus `file:line`; one localized repair then passes host, exact-image, one-host clean/dirty controls, deterministic repeat, and separately approved DP8xTP8 A-B/B-C zero.
 - Task directory: `canon-zero-tim/tasks/v1-apc-m15-target-debug`.
-- Release base: `f580564c` on `origin/yuxzhang/canon-zero-tim`.
+- Release base: `34f9b2ac` on `origin/yuxzhang/canon-zero-tim`.
 - Analysis-grade target fact: Attempt 12 summaries report off=`CONTROL_GREEN` (0/0 diff bytes, 18.4% solve rate); on=`FRESH_TARGET_RED_FROZEN` with A-B 477 bytes / 227 elements, B-C zero, and 92.5% cache hit rate on DP8xTP8. Attempt 13 fine 15-checkpoint localization narrowed first divergence to Layer-0 `rpa_output` (Checkpoints 0..8 exact).
-- Real GCS Artifact Fact: Attempt-13 GCS bucket contains genuine verified shards: `canon-v1-apc-m15-off-d32-7d30f382` has 77 shards (232 objects); `canon-v1-apc-m15-on-d32-7d30f382` has 70 shards (211 objects), each with `SHA256SUMS`, `SHARD_ARCHIVE.tar`, `SHARD_COMPLETE.json`. Shards were written to `wide/shards/` rather than `wide/rounds/`.
+- Real GCS Artifact Fact: Attempt-13 GCS bucket contains genuine verified shards: `canon-v1-apc-m15-off-d32-7d30f382` has 77 shards (232 objects); `canon-v1-apc-m15-on-d32-7d30f382` has 70 shards (211 objects), each with `SHA256SUMS`, `SHARD_ARCHIVE.tar`, `SHARD_COMPLETE.json`. Shards were written to `wide/shards/` without `live/` snapshot directory.
 - One-host fact: local r10-r13c stayed exact through real scheduler publication, 32-request composition, `continue_decode=8`, and full M15 chronology. r13c APC-on reached 97.8% hits, 130,148 actions, and logical KV 988..7189. These receipts remain under `/mnt/disks/tunix-data`; they are not a target repair.
-- Current phase: Phase D4 flat-shard adapter and official single-round replay.
-- Implemented: renderer `none|layer|full` modes; 36-layer coarse observer plus final norm/tail; one-layer 15-checkpoint observer; M15-aware first-red classifier; bounded immutable observer shards; classifier input assembled only from their verified union; deterministic compact selected-record bundle; runtime source self-verification; manifest-last terminal publication.
+- Current phase: Phase D4 flat-shard audit completed; Phase D5 / d33 3-round Layer-0 fallback.
+- Implemented: renderer `none|layer|full` modes; 36-layer coarse observer plus final norm/tail; one-layer 15-checkpoint observer; M15-aware first-red classifier; bounded immutable observer shards; classifier input assembled only from their verified union; deterministic compact selected-record bundle; runtime source self-verification; manifest-last terminal publication; pure Python `.npz` archive parsing.
 - Numerical changes: none. RoPE, attention/RPA, KV values, LM head, loss, backward, optimizer, B full reset, and production APC are unchanged.
-- Next action: after review and publication approval, a bucket-capable executor runs `recover_m15_attempt13_d32.sh`, returns the seven-file self-hashed directory, and reports its two terminal marker lines plus independent manifest verification. No TPU is needed. d33 remains a separately approved repeat/fallback only after this replay.
+- Next action: execute separately approved matched pair `d33` on two 64-TPU slices for 3-round durable Layer-0 evaluation.
 - Claim ceiling: `ATTEMPT13_SUBSET_HASH_VALID / OFFICIAL_CLASSIFIER_NOT_REPLAYABLE / RPA_ATTENTION_CALL_INTERVAL_HYPOTHESIS / NUMERICAL_FIX_NOT_AUTHORIZED`.
 - Sensitive evidence: the compact bundle contains real tokens/capsules. `m15-wide-v1` publishes it only under the already registered per-run P38 GCS root after sealed-union classification; never return the payload through Git or chat.
 - Key artifacts: [Attempt-13 receipt](evidence/v1_apc_m15_attempt13_paired_d32_20260828/receipt.json), [Attempt-13 incident report](evidence/v1_apc_m15_attempt13_paired_d32_20260828/INCIDENT_REPORT.md), [Attempt-12 receipt](evidence/v1_apc_m15_attempt12_paired_d20_20260827/receipt.json), [Attempt-12 incident report](evidence/v1_apc_m15_attempt12_paired_d20_20260827/INCIDENT_REPORT.md), [Phase D observer](phases/phase-d-wide-target-observer.md).
-- Publishing: local changes only; no commit, push, GCS access, target launch, or numerical repair in this revision.
-- Updated: 2026-08-28 (flat-shard schema correction and offline replay implementation).
+- Publishing: local changes committed and pushed.
+- Updated: 2026-08-28 (Attempt 13 flat-shard audit and pure Python fallback).
+

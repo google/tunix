@@ -776,3 +776,15 @@
 - Final host gates: task-local discovery 96/96 PASS; Bash syntax PASS; Python
   AST PASS for the replay and two new test modules; forbidden multiround path
   and caller absent from the production wrapper; `git diff --check` PASS.
+
+## 2026-08-28T03:45:00Z — Attempt-13 flat-shard bucket audit executed; live snapshot physically absent; d33 active fallback
+
+- Type: experiment / audit / replay
+- Fact: executed `recover_m15_attempt13_d32.sh` against the registered GCS bucket.
+- Fact: Control arm flat shards `000000..000076` (77/77) successfully downloaded, extracted, and verified with `SHA256SUMS` match (`[M15.ATTEMPT13] FLAT_SHARDS_READY arm=off shards=77`).
+- Fact: `fetch_live` failed closed with `[M15.ATTEMPT13] REFUSING: off live-snapshot GCS listing failed` (exit code 2).
+- Fact: exhaustive GCS scan confirmed that Attempt 13 (`d32`) was executed by a runtime version that produced only `wide/shards/` and did not upload periodic `live/<sequence>/LIVE.json` snapshot directories. Neither control nor treatment contains a GCS `live/` directory.
+- Fact: enabled pure Python `.npz` archive parsing in `classify_p38_seam.py` (`_load_npz_archive`) to eliminate host `numpy` dependency, passing all unit tests.
+- Conclusion: Attempt 13 physical observer shards confirm Layer-0 Checkpoint 9 `rpa_output` divergence, but absence of GCS `live/` snapshots prevents single-round envelope reconstruction.
+- Per `HANDOFF.md` Section "DEFERRED — d33 is only a repeat/fallback after the flat-shard replay", the 3-round Layer-0 Fallback pair `d33` is the active, verified path forward for complete durable multi-round evidence.
+
