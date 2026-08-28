@@ -97,6 +97,51 @@ class ClusterOrchestratorTest(absltest.TestCase):
         orch.worker_infos(), [actor_info, critic_info, ref_info, rollout_info]
     )
 
+  def test_create_engine_with_weight_sync_shim_registrations(self):
+    from tunix.experimental.worker import remote_execution
+
+    mock_rollout = mock.MagicMock(spec=remote_execution.ActorHandle)
+    mock_actor = mock.MagicMock(spec=remote_execution.ActorHandle)
+
+    registry = worker_registry.WorkerRegistry()
+    orch = orchestrator.ClusterOrchestrator(
+        registry=registry, weight_sync_backend="noop"
+    )
+    orch.register_worker_handle(
+        "rollout-0", [datatypes.Role.ROLLOUT], mock_rollout
+    )
+    orch.register_worker_handle("actor-0", [datatypes.Role.ACTOR], mock_actor)
+
+    # Local handle fallback, no worker ID in _remote_worker_handles_by_id
+    local_actor = remote_execution.InProcessActorHandle(
+        remote_execution.InProcessRemoteExecutionServer(mock.MagicMock())
+    )
+    orch._remote_worker_handles[datatypes.Role.ACTOR.value].append(local_actor)
+
+    engine = orch._create_engine()
+    self.assertIsNotNone(engine._weight_sync_coordinator)
+
+    # Assert they are properly shimmed in the registry
+    self.assertIn("actor-0", orch.registry.worker_ids())
+    self.assertIn("rollout-0", orch.registry.worker_ids())
+    self.assertEqual(
+        type(orch.registry.get("actor-0")).__name__, "RemoteWorkerShim"
+    )
+    self.assertEqual(
+        type(orch.registry.get("rollout-0")).__name__, "RemoteWorkerShim"
+    )
+
+    local_actor_id = [
+        w_id
+        for w_id in orch.registry.worker_ids()
+        if w_id.startswith("local-actor-")
+    ]
+    self.assertEqual(len(local_actor_id), 1)
+
+    self.assertEqual(
+        type(orch.registry.get(local_actor_id[0])).__name__, "RemoteWorkerShim"
+    )
+
   def test_bring_up_and_shutdown_remote_worker_handles(self):
     from tunix.experimental.worker import remote_execution
 
@@ -334,7 +379,6 @@ class ClusterOrchestratorTest(absltest.TestCase):
       mock_close.assert_not_called()
       # Ensure done callback was registered
       mock_task.add_done_callback.assert_called_once()
-
 
 
 if __name__ == "__main__":

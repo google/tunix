@@ -126,6 +126,7 @@ import dataclasses
 import enum
 import functools
 import logging
+import os
 import threading
 from typing import Any, Optional, Sequence
 
@@ -134,8 +135,89 @@ from tunix.experimental.orchestrator import worker_registry
 from tunix.experimental.weight_sync import weight_sync
 
 
-TRAINER_ROLE = "trainer"
-ROLLOUT_ROLE = "rollout"
+class NullHandler(weight_sync.WeightSyncHandler):
+  """Runs every phase without moving bytes."""
+
+  def register_work_unit(self, metadata: Any) -> None:
+    del metadata
+
+  def transfer(
+      self,
+      src_units: Any,
+      dst_units: Any,
+      req_id: str | None = None,
+      generation: Any = None,
+  ) -> weight_sync.TransferResult:
+    del src_units, dst_units, generation
+    return weight_sync.TransferResult(req_id=req_id or "", success=True)
+
+
+def create_default_handler(
+    backend: str | None = None,
+) -> weight_sync.WeightSyncHandler:
+  """Creates the default weight sync handler based on options or env vars."""
+  backend_name = backend or os.getenv("WEIGHT_SYNC_BACKEND", "raiden")
+  backend_name = backend_name.lower()
+  if backend_name == "raiden":
+    from tunix.experimental.weight_sync import raiden_handler
+
+    handler = raiden_handler.RaidenHandler(
+        transfer_options=raiden_handler.make_host_staged_transfer_options()
+    )
+    logging.info("Built RaidenHandler natively; port %d", handler.port)
+    return handler
+  elif backend_name in ("noop", "no-op"):
+    logging.info(
+        "Built fallback NullHandler; weight sync running protocol-only."
+    )
+    return NullHandler()
+  else:
+    raise ValueError(f"Unknown weight sync backend: {backend_name!r}")
+
+
+class RemoteWorkerShim:
+  """Presents a generic remote RPC handle as a weight sync participant."""
+
+  def __init__(self, handle: Any, info: datatypes.WorkerInfo):
+    self._handle = handle
+    self._info = info
+
+  def info(self) -> datatypes.WorkerInfo:
+    return self._info
+
+  async def prepare_weight_sync(self, *args, **kwargs) -> Any:
+    return await self._handle.asubmit("prepare_weight_sync", *args, **kwargs)
+
+  async def release_weight_sync(self, *args, **kwargs) -> Any:
+    return await self._handle.asubmit("release_weight_sync", *args, **kwargs)
+
+  async def bind_weight_sync(self, *args, **kwargs) -> Any:
+    return await self._handle.asubmit("bind_weight_sync", *args, **kwargs)
+
+  async def get_weight_sync_metadata(self, *args, **kwargs) -> Any:
+    return await self._handle.asubmit(
+        "get_weight_sync_metadata", *args, **kwargs
+    )
+
+  async def pre_weight_sync(self, *args, **kwargs) -> Any:
+    return await self._handle.asubmit("pre_weight_sync", *args, **kwargs)
+
+  async def weight_sync(self, *args, **kwargs) -> Any:
+    return await self._handle.asubmit("weight_sync", *args, **kwargs)
+
+  async def post_weight_sync(self, *args, **kwargs) -> Any:
+    return await self._handle.asubmit("post_weight_sync", *args, **kwargs)
+
+  async def abort_weight_sync(self, *args, **kwargs) -> Any:
+    return await self._handle.asubmit("abort_weight_sync", *args, **kwargs)
+
+  async def get_weight_sync_status(self, *args, **kwargs) -> Any:
+    return await self._handle.asubmit("get_weight_sync_status", *args, **kwargs)
+
+
+weight_sync.WeightSyncSource.register(RemoteWorkerShim)  # pyrefly: ignore[missing-attribute]
+weight_sync.WeightSyncDestination.register(RemoteWorkerShim)  # pyrefly: ignore[missing-attribute]
+
 
 # The worker-report phases a failed RPC may be reconciled against, per
 # coordinator call: exactly the states proving THIS call's work happened (or
@@ -402,7 +484,10 @@ WeightSyncDestination = weight_sync.WeightSyncDestination
 
 
 class RoundState(enum.Enum):
-  """Round-level summary. Per-worker truth lives in `WeightSyncResult.workers`."""
+  """Round-level summary.
+
+  Per-worker truth lives in `WeightSyncResult.workers`.
+  """
 
   IDLE = "idle"
   PREPARING = "preparing"
@@ -533,8 +618,8 @@ class WeightSyncCoordinator:
       self,
       registry: worker_registry.WorkerRegistry,
       handler: weight_sync.WeightSyncHandler,
-      source_role: str = TRAINER_ROLE,
-      destination_role: str = ROLLOUT_ROLE,
+      source_role: str = datatypes.Role.ACTOR.value,
+      destination_role: str = datatypes.Role.ROLLOUT.value,
       controller_id: str = "",
       req_id_prefix: str = "wsync",
       first_uuid: int = 1,
@@ -648,10 +733,9 @@ class WeightSyncCoordinator:
       )
     except Exception:  # pylint: disable=broad-except
       return None
-    if (
-        report.get("req_id") == request.extra_config.get("req_id")
-        and report.get("uuid") == request.extra_config.get("uuid")
-    ):
+    if report.get("req_id") == request.extra_config.get(
+        "req_id"
+    ) and report.get("uuid") == request.extra_config.get("uuid"):
       return report.get("phase")
     return None
 
@@ -701,8 +785,7 @@ class WeightSyncCoordinator:
       timeout: float,
   ) -> list[tuple[WeightSyncDestination, Optional[BaseException]]]:
     errors = await asyncio.gather(*[
-        self._call_phase(d, method_name, request, timeout)
-        for d in destinations
+        self._call_phase(d, method_name, request, timeout) for d in destinations
     ])
     return list(zip(destinations, errors))
 
@@ -839,7 +922,9 @@ class WeightSyncCoordinator:
         wid = _worker_id(destination)
         if wid in worker_reports:
           continue
-        phase = await self._worker_phase(destination, prepared_request or request)
+        phase = await self._worker_phase(
+            destination, prepared_request or request
+        )
         worker_reports[wid] = WorkerRoundReport(
             worker_id=wid,
             phase=phase or "unknown",
@@ -1079,22 +1164,24 @@ class WeightSyncCoordinator:
 
       state = RoundState.PENDING_COMMIT
       post_results = await self._phase_results(
-          destinations, "post_weight_sync", prepared_request, self._timeouts.post
+          destinations,
+          "post_weight_sync",
+          prepared_request,
+          self._timeouts.post,
       )
-      failed_posts = [
-          (d, e) for d, e in post_results if e is not None
-      ]
+      failed_posts = [(d, e) for d, e in post_results if e is not None]
       if failed_posts:
         state = await self._resolve_post_failures(
-            destinations, failed_posts, prepared_request, failures,
+            destinations,
+            failed_posts,
+            prepared_request,
+            failures,
             worker_reports,
         )
         if state is not RoundState.COMMITTED:
           poison_if_needed()
           await record_workers("post_weight_sync failed")
-          raise fail(
-              f"post_weight_sync did not commit everywhere; see workers"
-          )
+          raise fail(f"post_weight_sync did not commit everywhere; see workers")
 
       state = RoundState.COMMITTED
       self._last_committed_version = policy_version
@@ -1128,8 +1215,10 @@ class WeightSyncCoordinator:
         raise
       # Quiesced destinations must not be stranded unserving; the recovery is
       # shielded from the cancellation so it actually runs.
-      if quiesce_attempted and prepared_request is not None and state not in (
-          RoundState.UNKNOWN_TRANSFER_STATE,
+      if (
+          quiesce_attempted
+          and prepared_request is not None
+          and state not in (RoundState.UNKNOWN_TRANSFER_STATE,)
       ):
         if state is RoundState.PENDING_COMMIT:
           # Post RPCs were in flight: some workers may already have
@@ -1184,9 +1273,9 @@ class WeightSyncCoordinator:
               # post that finished between classification and the abort), so
               # the reports are re-read: without this, an actually-committed
               # fleet would end unrecorded and unpoisoned.
-              recheck = await asyncio.gather(*[
-                  self._worker_phase(d, prepared_request) for d in abortable
-              ])
+              recheck = await asyncio.gather(
+                  *[self._worker_phase(d, prepared_request) for d in abortable]
+              )
               rechecked = list(zip(abortable, recheck))
               abortable = []
               for destination, phase in rechecked:
@@ -1518,11 +1607,13 @@ class WeightSyncCoordinator:
         *[self._worker_phase(d, request) for d in destinations]
     )
     published = [
-        _worker_id(d) for d, phase in zip(destinations, phases)
+        _worker_id(d)
+        for d, phase in zip(destinations, phases)
         if phase == "committed"
     ]
     unconfirmed = [
-        _worker_id(d) for d, phase in zip(destinations, phases)
+        _worker_id(d)
+        for d, phase in zip(destinations, phases)
         if phase not in ("committed", "aborted")
     ]
     if published:

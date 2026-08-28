@@ -68,26 +68,40 @@ class WorkerRegistry:
     self._infos: dict[str, datatypes.WorkerInfo] = {}
     self._role_to_ids: dict[str, set[str]] = collections.defaultdict(set)
 
-  def register(self, worker: abstract_worker.Worker) -> datatypes.WorkerInfo:
+  def register(
+      self, worker: abstract_worker.Worker, override: bool = False
+  ) -> datatypes.WorkerInfo:
     """Registers a worker under its declared id and roles.
 
     Args:
       worker: The worker to register; its `info()` supplies id and roles.
+      override: If true, silently overwrites an existing registration with the
+        same id.
 
     Returns:
       The snapshotted `WorkerInfo`.
 
     Raises:
       ValueError: If the worker declares no roles, or its id is already
-        registered.
+        registered (and override is False).
     """
     info = worker.info()
     worker_id = info.worker_id
     with self._lock:
-      if worker_id in self._workers:
+      if worker_id in self._workers and not override:
         raise ValueError(f"duplicate worker_id: {worker_id!r}")
       if not info.roles:
         raise ValueError(f"worker {worker_id!r} declares no roles")
+
+      # If overriding, clean up old role indexing for this worker
+      if worker_id in self._infos:
+        old_info = self._infos[worker_id]
+        for role in old_info.roles:
+          if role in self._role_to_ids:
+            self._role_to_ids[role].discard(worker_id)
+            if not self._role_to_ids[role]:
+              del self._role_to_ids[role]
+
       self._workers[worker_id] = worker
       self._infos[worker_id] = info
       for role in info.roles:

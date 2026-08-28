@@ -39,6 +39,7 @@ from tunix.experimental.worker import remote_execution
 
 _STOP_TIMEOUT_S = 60.0  # Timeout for stopping remote workers. 60 should not be touched for any healthy stop.
 
+
 class ClusterOrchestrator:
   """Supervises cluster hardware, health monitoring, and program execution."""
 
@@ -48,7 +49,7 @@ class ClusterOrchestrator:
       registry: worker_registry.WorkerRegistry | None = None,
       lifecycle_driver: lifecycle.LifecycleDriver | None = None,
       monitor: health_monitor.HealthMonitor | None = None,
-      weight_sync_coordinator: Any = None,
+      weight_sync_backend: str | None = None,
   ):
     """Initializes ClusterOrchestrator."""
     self.config = config
@@ -65,7 +66,7 @@ class ClusterOrchestrator:
     ] = {}
     self._remote_worker_infos: dict[str, datatypes.WorkerInfo] = {}
     self.engine: distributed_rl_engine.DistributedRLEngine | None = None
-    self._weight_sync_coordinator = weight_sync_coordinator
+    self._weight_sync_backend = weight_sync_backend
 
   def __enter__(self) -> "ClusterOrchestrator":
     """Interactive context manager bring-up."""
@@ -134,9 +135,11 @@ class ClusterOrchestrator:
 
   def worker_infos(self) -> list[datatypes.WorkerInfo]:
     """Returns local and remote worker metadata registered with the orchestrator."""
+    registry_ids = self.registry.worker_ids()
     return self.registry.infos() + [
         self._remote_worker_infos[worker_id]
         for worker_id in sorted(self._remote_worker_infos)
+        if worker_id not in registry_ids
     ]
 
   def bring_up_workers(self, dummy_data: Any = None) -> None:
@@ -227,11 +230,39 @@ class ClusterOrchestrator:
     if reference_workers:
       inference_workers[datatypes.Role.REFERENCE] = reference_workers[0]
 
+    coordinator = None
+    if self._weight_sync_backend is not None:
+      from tunix.experimental.weight_sync import weight_sync_coordinator
+
+      handler = weight_sync_coordinator.create_default_handler(
+          backend=self._weight_sync_backend
+      )
+
+      handle_to_id = {
+          v: k for k, v in self._remote_worker_handles_by_id.items()
+      }
+      for role, handles in [
+          (datatypes.Role.ACTOR, actor_workers),
+          (datatypes.Role.ROLLOUT, rollout_workers),
+      ]:
+        for h in handles:
+          w_id = handle_to_id.get(h, f"local-{role.value}-{id(h)}")
+          info = self._remote_worker_infos.get(w_id) or datatypes.WorkerInfo(
+              worker_id=w_id, roles=frozenset({role.value})
+          )
+          self.registry.register(weight_sync_coordinator.RemoteWorkerShim(h, info), override=True)  # pyrefly: ignore[bad-argument-type]
+
+      coordinator = weight_sync_coordinator.WeightSyncCoordinator(
+          registry=self.registry,
+          handler=handler,
+          controller_id="auto-coordinator",
+      )
+
     return distributed_rl_engine.DistributedRLEngine(
         rollout_workers=rollout_workers,
         trainer_workers=trainer_workers,
         inference_workers=inference_workers,
-        weight_sync_coordinator=self._weight_sync_coordinator,
+        weight_sync_coordinator=coordinator,
     )
 
   def run_program(

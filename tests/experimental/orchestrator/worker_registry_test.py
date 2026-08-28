@@ -136,6 +136,31 @@ class WorkerRegistryTest(absltest.TestCase):
     self.assertEqual(registry.workers(), [r0, t0])
     self.assertEqual(registry.infos(), [r0.info(), t0.info()])
 
+  def test_register_override_cleans_up_empty_roles(self):
+    registry = worker_registry.WorkerRegistry()
+    t0 = mock_worker.MockWorker(worker_id="t0", roles={"trainer"})
+    t1 = mock_worker.MockWorker(worker_id="t1", roles={"trainer"})
+    registry.register(t0)
+    registry.register(t1)
+
+    # Override t0 with a new worker that no longer has the "trainer" role
+    t0_new = mock_worker.MockWorker(worker_id="t0", roles={"rollout"})
+    registry.register(t0_new, override=True)
+
+    # The new t0_new should be removed from the "trainer" group
+    self.assertNotIn(t0_new, registry.group("trainer").members())
+    self.assertEqual(registry.group("trainer").members(), [t1])
+    self.assertIn("trainer", registry.roles())
+
+    # Then override t1 to rollout as well to empty the role
+    t1_new = mock_worker.MockWorker(worker_id="t1", roles={"rollout"})
+    registry.register(t1_new, override=True)
+    self.assertNotIn("trainer", registry.roles())
+
+    # The worker should just be "rollout" now
+    self.assertEqual(registry.roles(), {"rollout"})
+    self.assertCountEqual(registry.group("rollout").members(), [t0_new, t1_new])
+
 
 if __name__ == "__main__":
   absltest.main()

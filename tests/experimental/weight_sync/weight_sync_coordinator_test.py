@@ -78,7 +78,7 @@ class FakeSource:
       prepare_delay: float = 0.0,
   ):
     self._info = datatypes.WorkerInfo(
-        worker_id=worker_id, roles=frozenset({"trainer"})
+        worker_id=worker_id, roles=frozenset({datatypes.Role.ACTOR.value})
     )
     self._wire = wire
     self._log = log
@@ -161,7 +161,7 @@ class FakeDestination:
       status_unreachable: bool = False,
   ):
     self._info = datatypes.WorkerInfo(
-        worker_id=worker_id, roles=frozenset({"rollout"})
+        worker_id=worker_id, roles=frozenset({datatypes.Role.ROLLOUT.value})
     )
     self._log = log
     self._variables = tuple(variables)
@@ -913,7 +913,7 @@ class ProtocolRejectionTest(CoordinatorTestBase):
     class Bare:
       def info(self):
         return datatypes.WorkerInfo(
-            worker_id="bare", roles=frozenset({"trainer"})
+            worker_id="bare", roles=frozenset({datatypes.Role.ACTOR.value})
         )
 
     dest = FakeDestination("sampler", [])
@@ -932,7 +932,7 @@ class ProtocolRejectionTest(CoordinatorTestBase):
     class MetadataOnly:
       def info(self):
         return datatypes.WorkerInfo(
-            worker_id="half", roles=frozenset({"rollout"})
+            worker_id="half", roles=frozenset({datatypes.Role.ROLLOUT.value})
         )
 
       async def get_weight_sync_metadata(self):
