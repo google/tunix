@@ -56,6 +56,7 @@ from tunix.experimental.orchestrator import batch_assembly  # pylint: disable=g-
 from tunix.experimental.orchestrator import orchestrator  # pylint: disable=g-import-not-at-top
 from tunix.experimental.orchestrator import rl_program  # pylint: disable=g-import-not-at-top
 from tunix.experimental.worker import remote_execution  # pylint: disable=g-import-not-at-top
+from tunix.sft import metrics_logger as metrics_logger_lib  # pylint: disable=g-import-not-at-top
 
 
 PROMPT_TEMPLATE = """Solve the following math problem.
@@ -137,6 +138,24 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       choices=("synthetic", "exact"),
       default="synthetic",
       help="synthetic proves the distributed chain without relying on quality.",
+  )
+  parser.add_argument(
+      "--log_dir",
+      type=str,
+      default=os.getenv("LOG_DIR", "/tmp/trellis_gsm8k"),
+      help="Directory for local event logging (TensorBoard/CLU).",
+  )
+  parser.add_argument(
+      "--wandb_project",
+      type=str,
+      default=os.getenv("WANDB_PROJECT", "trellis-gsm8k"),
+      help="W&B project name.",
+  )
+  parser.add_argument(
+      "--wandb_run_name",
+      type=str,
+      default=os.getenv("WANDB_RUN_NAME", ""),
+      help="W&B run name. Defaults to timestamp-based name if unset.",
   )
   parser.add_argument("--rpc_timeout_s", type=float, default=1800.0)
   parser.add_argument("--stop_workers_on_exit", action="store_true")
@@ -504,6 +523,18 @@ def main(argv: list[str], context: Any = None) -> None:
   )
   logging.info("Registered Orchestrator V2 workers: %s", cluster.worker_infos())
 
+  metrics_logging_options = metrics_logger_lib.MetricsLoggerOptions(
+      log_dir=args.log_dir,
+      project_name=args.wandb_project,
+      run_name=args.wandb_run_name,
+      flush_every_n_steps=1,
+      backend_kwargs={
+          "wandb": {
+              "config": vars(args),
+          }
+      },
+  )
+
   program = rl_program.StandardRLProgram(
       algo=algo,
       dataset=_iter_prompt_items(args),
@@ -515,6 +546,7 @@ def main(argv: list[str], context: Any = None) -> None:
           max_response_length=args.max_response_length,
           pad_id=pad_id,
       ),
+      metrics_logging_options=metrics_logging_options,
       max_staleness=args.max_staleness,
       sync_weights=True,
       on_step_begin=lambda step: logging.info(
@@ -538,6 +570,7 @@ def main(argv: list[str], context: Any = None) -> None:
         bring_up=False,
     )
   finally:
+    program.close()
     if args.stop_workers_on_exit:
       cluster.shutdown()
     else:

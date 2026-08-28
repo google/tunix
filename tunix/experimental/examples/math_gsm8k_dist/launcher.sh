@@ -43,6 +43,9 @@ EVAL_EVERY_N_STEPS=${EVAL_EVERY_N_STEPS:-1000000}
 LORA_RANK=${LORA_RANK:-16}
 LORA_ALPHA=${LORA_ALPHA:-16.0}
 USE_LORA=${USE_LORA:-0}
+WANDB_PROJECT=${WANDB_PROJECT:-trellis-gsm8k}
+WANDB_RUN_NAME=${WANDB_RUN_NAME:-}
+WANDB_API_KEY=${WANDB_API_KEY:-}
 SAMPLER=${SAMPLER:-inprocess_vllm}
 PYTHON_BIN=${PYTHON_BIN:-python3}
 WAIT_TIMEOUT_SECS=${WAIT_TIMEOUT_SECS:-1800}
@@ -326,6 +329,8 @@ echo "  host bounds:    $TPU_HOST_BOUNDS"
 echo "  wait timeout:   ${WAIT_TIMEOUT_SECS}s"
 echo "  wait poll:      ${WAIT_POLL_SECS}s"
 echo "  log tail lines: $WAIT_LOG_TAIL_LINES"
+echo "  wandb project:  ${WANDB_PROJECT:-<none>}"
+echo "  wandb run name: ${WANDB_RUN_NAME:-<auto>}"
 echo "  trainer log:    $TRAINER_LOG"
 echo "  rollout log:    $ROLLOUT_LOG"
 echo "  orch log:       $ORCHESTRATOR_LOG"
@@ -606,6 +611,9 @@ echo "Launching CPU orchestrator..."
 
   export JAX_PLATFORMS=cpu
   export PYTHONUNBUFFERED=1
+  export WANDB_PROJECT="$WANDB_PROJECT"
+  export WANDB_RUN_NAME="$WANDB_RUN_NAME"
+  export WANDB_API_KEY="$WANDB_API_KEY"
   env | egrep 'JAX|TPU'
   print_command "Orchestrator command" "${ORCHESTRATOR_CMD[@]}"
   "${ORCHESTRATOR_CMD[@]}" > "$ORCHESTRATOR_LOG" 2>&1

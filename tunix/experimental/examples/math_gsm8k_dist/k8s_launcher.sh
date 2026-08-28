@@ -33,6 +33,10 @@ export LORA_RANK=${LORA_RANK:-16}
 export LORA_ALPHA=${LORA_ALPHA:-16.0}
 export USE_LORA=${USE_LORA:-0}
 
+export WANDB_PROJECT=${WANDB_PROJECT:-trellis-gsm8k}
+export WANDB_RUN_NAME=${WANDB_RUN_NAME:-}
+export WANDB_API_KEY=${WANDB_API_KEY:-}
+
 export ORCHESTRATOR_ID=$USER-orch
 export ORCHESTRATOR_PORT=20000
 
@@ -54,6 +58,9 @@ start_orchestrator() {
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${ORCHESTRATOR_PORT}" \
     --worker_startup_command=" \
+      ${WANDB_API_KEY:+WANDB_API_KEY=\"${WANDB_API_KEY}\"} \
+      WANDB_PROJECT=\"${WANDB_PROJECT}\" \
+      WANDB_RUN_NAME=\"${WANDB_RUN_NAME}\" \
       python -m tunix.experimental.distributed.runtime.main \
         --discovery_id=${ORCHESTRATOR_ID} \
         --discovery_port=${ORCHESTRATOR_PORT} \
@@ -66,6 +73,8 @@ start_orchestrator() {
         --max_prompt_length=${MAX_PROMPT_LENGTH} \
         --max_response_length=${MAX_RESPONSE_LENGTH} \
         --train_micro_batch_size=${TRAIN_MICRO_BATCH_SIZE} \
+        --wandb_project=\"${WANDB_PROJECT}\" \
+        --wandb_run_name=\"${WANDB_RUN_NAME}\" \
         --stop_workers_on_exit \
     " \
     | kubectl apply -f -
