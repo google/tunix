@@ -19,6 +19,10 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR))
 
 from assemble_m15_wide_round import assemble  # noqa: E402
+from checkpoint_m15_classifier_input import (  # noqa: E402
+    M15ClassifierInputError,
+    checkpoint,
+)
 from stage_m15_wide_shard import (  # noqa: E402
     M15WideShardError,
     _sha256,
@@ -436,6 +440,63 @@ class M15WideDurabilityTest(unittest.TestCase):
           expected_commit=COMMIT,
           runtime_commit=COMMIT,
       )
+
+
+class M15ClassifierInputCheckpointTest(unittest.TestCase):
+
+  def setUp(self) -> None:
+    self.temp = tempfile.TemporaryDirectory()
+    self.root = Path(self.temp.name)
+    (self.root / "ROUND_INPUT_RECEIPT.json").write_text(json.dumps({
+        "schema": "m15-wide-sealed-input-v1",
+        "status": "PASS",
+        "diagnostic_round": 0,
+        "record_pairs": 7,
+        "shards": [{"sequence": 0}],
+        "expected_source_commit": COMMIT,
+        "runtime_source_commit": COMMIT,
+    }) + "\n", encoding="utf-8")
+    (self.root / "m15-replay-envelope.jsonl").write_text(
+        '{"schema":"m15-apc-serving-envelope-v1","diagnostic_round":0}\n',
+        encoding="utf-8",
+    )
+
+  def tearDown(self) -> None:
+    self.temp.cleanup()
+
+  def _alignment(self, differing_bytes: int) -> None:
+    (self.root / "pre-alignment.jsonl").write_text(json.dumps({
+        "diagnostic_round": 0,
+        "boundaries": {
+            "S_decode_vs_S_prefill": {
+                "differing_bytes": differing_bytes,
+            },
+        },
+    }) + "\n", encoding="utf-8")
+
+  def test_exact_input_checkpoint_is_self_hashed(self) -> None:
+    self._alignment(0)
+    receipt = checkpoint(self.root, arm="off")
+    self.assertEqual(receipt["status"], "prepared-for-durable-upload")
+    self.assertEqual(receipt["record_pairs"], 7)
+    self.assertNotIn("mismatch-capsule.npz", receipt["files"])
+    self.assertEqual(
+        receipt["manifest_sha256"],
+        _sha256(self.root / "CLASSIFIER_INPUT_SHA256SUMS"),
+    )
+
+  def test_red_input_checkpoint_requires_and_hashes_capsule(self) -> None:
+    self._alignment(1)
+    (self.root / "mismatch-capsule.npz").write_bytes(b"capsule")
+    receipt = checkpoint(self.root, arm="on")
+    self.assertIn("mismatch-capsule.npz", receipt["files"])
+    rows = (self.root / "CLASSIFIER_INPUT_SHA256SUMS").read_text().splitlines()
+    self.assertEqual(len(rows), 4)
+
+  def test_red_input_without_capsule_fails_closed(self) -> None:
+    self._alignment(1)
+    with self.assertRaisesRegex(M15ClassifierInputError, "capsule presence"):
+      checkpoint(self.root, arm="on")
 
 
 if __name__ == "__main__":

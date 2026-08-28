@@ -99,6 +99,9 @@ def package(
     for anchor in anchors:
       for arm in ("a", "b"):
         seam_indices.append(int(anchor[arm]["record_index"]))
+      for key in ("a_observation_candidates", "b_observation_candidates"):
+        for candidate in anchor.get(key, ()):
+          seam_indices.append(int(candidate["record_index"]))
       for key in ("a_tail_record_index", "b_tail_record_index"):
         value = anchor.get(key)
         if value is not None:

@@ -5,22 +5,47 @@ commands; it does not edit YAML, numerical code, or evidence. Large payloads
 remain in GCS exactly like the earlier P38/lm-head investigation. Only small
 machine-generated receipts are returned through Git or chat.
 
-## Current operation: review Phase D3b; no remote execution yet
+## Current operation: review Phase D3c; no remote execution yet
 
-Phase D3b has passed host tests only. It adds the missing live round identity
-to every replay-envelope row using additive patch 33; published patch 26 is
-unchanged. An AST probe requires the final installed runner to use exactly
-`int(_p38_seam_round())` and rejects a missing or hard-coded round. Do not
-launch, render, mutate GCS, or reuse a historical label from this local result.
+Attempt 16 reproduced APC-on A-B=1,711 bytes / 786 elements with B-C=0, then
+failed in analysis because different requests sharing one token prefix were
+treated as aliases. Phase D3c is an analysis/durability repair:
 
-The next gates are deliberately separate: review the diff; obtain commit
-approval; run the pinned exact-image gate with approval; obtain push approval;
-then separately request a fresh matched APC-off/APC-on target pair. The
-exact-image result must include `M15_REPLAY_ROUND_PROVENANCE_PASS` and
-`V1_HP_EXACT_IMAGE_PASS ... apc_m15_carrier=68 ...
-m15_round_provenance=1 ...`. The existing operator-return command below is the
-only return command for that future pair; it includes stage receipts and still
-avoids token-bearing tars.
+- serving identity includes request and call;
+- same-prefix requests remain a candidate set;
+- conflicting duplicates within one request and multiple numerical B variants
+  still fail closed;
+- mixed A first-red signatures return `FIRST_RED_CANDIDATE_SET` and no fake
+  interval;
+- every selected candidate enters the compact bundle;
+- after assemble, stage 15 durably uploads and remotely re-verifies the
+  classifier's host-only inputs before stage 20 runs analysis.
+
+The stage-15 checkpoint contains true request/capsule data and must remain
+under the registered per-run evidence root. Never copy it into Git or chat.
+The observer arrays remain in the existing immutable wide shards. Together,
+those two sets are sufficient for offline reclassification if later analysis
+code fails.
+
+No remote command is authorized from the dirty worktree. The next gates are
+separate: review; approved pinned exact-image; approved commit; approved push;
+then a separately approved fresh matched APC-off/APC-on target pair if the
+Attempt-16 pod-local assembled round is no longer available. Reuse neither the
+d35 labels nor their roots.
+
+For the future target run, acceptance requires all of the following:
+
+- `STAGE_10_assemble_PASS` followed by `STAGE_15_checkpoint-input_PASS`;
+- the remote `classifier-input/CLASSIFIER_INPUT_RECEIPT.json` and manifest
+  independently verify;
+- off remains A-B=0 and B-C=0;
+- on preserves B-C=0 and emits either a unique `FIRST_RED_LOCALIZED` or an
+  explicit candidate set;
+- every completed round reaches package, upload, remote verify, completion,
+  and ACK.
+
+`FIRST_RED_CANDIDATE_SET` is not Phase-E admission. It means tensor candidates
+were safely preserved but a stable source-row/request join is still required.
 
 ## Historical operation: recover the already-run d33 pair
 

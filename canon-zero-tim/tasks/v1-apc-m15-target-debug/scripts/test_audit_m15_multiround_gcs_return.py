@@ -37,10 +37,18 @@ class MultiRoundReturnTest(unittest.TestCase):
   def tearDown(self) -> None:
     self.holder.cleanup()
 
-  def _round(self, arm: str, round_index: int, *, red: bool = False) -> None:
+  def _round(
+      self,
+      arm: str,
+      round_index: int,
+      *,
+      red: bool = False,
+      candidate: bool = False,
+  ) -> None:
     root = (self.off if arm == "off" else self.on) / f"round-{round_index:06d}"
     classification_name = (
-        "M15_LAYER_FIRST_RED_LOCALIZED"
+        "M15_LAYER_FIRST_RED_CANDIDATE_SET"
+        if candidate else "M15_LAYER_FIRST_RED_LOCALIZED"
         if red else (
             "M15_OBSERVER_CONTROL_EXACT"
             if arm == "off" else "M15_OBSERVER_TREATMENT_EXACT"
@@ -144,8 +152,10 @@ class MultiRoundReturnTest(unittest.TestCase):
       stream.write(f"stages/{name} present\n")
 
   def _completed_stages(self, arm: str, round_index: int) -> None:
+    self._classifier_input(arm, round_index)
     for ordinal, stage in (
         (10, "assemble"),
+        (15, "checkpoint-input"),
         (20, "classify"),
         (30, "package"),
         (35, "local-export"),
@@ -156,6 +166,50 @@ class MultiRoundReturnTest(unittest.TestCase):
     ):
       self._stage(arm, round_index, ordinal, stage, "STARTED")
       self._stage(arm, round_index, ordinal, stage, "PASS")
+
+  def _classifier_input(self, arm: str, round_index: int) -> None:
+    root = (self.off if arm == "off" else self.on) / f"round-{round_index:06d}"
+    receipt = json.loads((root / "ROUND_INPUT_RECEIPT.json").read_text())
+    classification = json.loads(
+        (root / "p38_seam.classification.json").read_text()
+    )
+    ab_bytes = int(classification["alignment"]["a_b_differing_bytes"])
+    classifier_input = root / "classifier-input"
+    classifier_input.mkdir()
+    input_names = [
+        "ROUND_INPUT_RECEIPT.json",
+        "m15-replay-envelope.jsonl",
+        "pre-alignment.jsonl",
+    ]
+    if ab_bytes > 0:
+      input_names.append("mismatch-capsule.npz")
+    input_names.sort()
+    input_manifest = classifier_input / "CLASSIFIER_INPUT_SHA256SUMS"
+    input_manifest.write_text(
+        "".join(f"{'1' * 64}  {name}\n" for name in input_names),
+        encoding="ascii",
+    )
+    input_receipt = {
+        "schema": "m15-wide-classifier-input-v1",
+        "status": "prepared-for-durable-upload",
+        "arm": arm,
+        "diagnostic_round": round_index,
+        "a_b_differing_bytes": ab_bytes,
+        "files": input_names,
+        "manifest_sha256": _sha(input_manifest),
+        "record_pairs": 2,
+        "shards": receipt["shards"],
+        "expected_source_commit": SOURCE,
+        "runtime_source_commit": SOURCE,
+    }
+    (classifier_input / "CLASSIFIER_INPUT_RECEIPT.json").write_text(
+        json.dumps(input_receipt), encoding="utf-8"
+    )
+    with (root / "remote-inventory.txt").open("a", encoding="utf-8") as stream:
+      for name in input_names:
+        stream.write(f"classifier-input/{name} present\n")
+      stream.write("classifier-input/CLASSIFIER_INPUT_SHA256SUMS present\n")
+      stream.write("classifier-input/CLASSIFIER_INPUT_RECEIPT.json present\n")
 
   def _all_rounds(self) -> None:
     for round_index in range(3):
@@ -179,7 +233,30 @@ class MultiRoundReturnTest(unittest.TestCase):
     )
     self.assertEqual(result["status"], "COMPLETE")
     self.assertEqual(len(list(output.glob("*.classification.json"))), 6)
-    self.assertEqual(len(list(output.glob("*.stage-*.json"))), 96)
+    self.assertEqual(len(list(output.glob("*.stage-*.json"))), 108)
+
+  def test_candidate_set_is_preserved_without_becoming_pipeline_failure(self) -> None:
+    for round_index in range(3):
+      self._round("off", round_index)
+      self._round(
+          "on", round_index, red=round_index == 1, candidate=round_index == 1
+      )
+      self._completed_stages("off", round_index)
+      self._completed_stages("on", round_index)
+    self._markers(self.off, terminal=True)
+    self._markers(self.on, terminal=True)
+    result = audit(
+        source_commit=SOURCE,
+        rounds=3,
+        off_root=self.off,
+        on_root=self.on,
+        output=self.root / "return-candidates",
+    )
+    self.assertEqual(result["status"], "COMPLETE")
+    self.assertEqual(
+        result["arms"]["on"]["rounds"][1]["classification"],
+        "M15_LAYER_FIRST_RED_CANDIDATE_SET",
+    )
 
   def test_all_rounds_survive_missing_root_terminal_markers(self) -> None:
     self._all_rounds()
@@ -223,6 +300,8 @@ class MultiRoundReturnTest(unittest.TestCase):
   def test_explicit_stage_failure_is_returned_without_numerical_claim(self) -> None:
     self._stage("off", 0, 10, "assemble", "STARTED")
     self._stage("off", 0, 10, "assemble", "PASS")
+    self._stage("off", 0, 15, "checkpoint-input", "STARTED")
+    self._stage("off", 0, 15, "checkpoint-input", "PASS")
     self._stage("off", 0, 20, "classify", "STARTED")
     self._stage("off", 0, 20, "classify", "FAIL", exit_code=17)
     result = audit(

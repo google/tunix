@@ -410,7 +410,8 @@ if [ "$mode" = m15-round ]; then
     exit 2
   fi
   for remote_name in ROUND_INPUT_RECEIPT.json p38_seam.classification.json \
-      m15_wide_seam_bundle.tar WIDE_SHA256SUMS WIDE_ROUND_COMPLETE.json; do
+      m15_wide_seam_bundle.tar WIDE_SHA256SUMS WIDE_ROUND_COMPLETE.json \
+      classifier-input/CLASSIFIER_INPUT_RECEIPT.json; do
     if gcs_exists "$round_prefix/$remote_name"; then
       echo "[P38.GCS] REFUSING: remote M15 wide-round object already exists: $snapshot_sequence/$remote_name" >&2
       exit 2
@@ -431,6 +432,64 @@ if [ "$mode" = m15-round ]; then
     --expected-commit "$CANON_EXPECT_COMMIT" \
     --runtime-commit "$runtime_source_commit" || stage_rc=$?
   finish_m15_round_stage 10 assemble "$stage_rc" || exit $?
+  # The immutable observer values already live in verified wide shards.  Seal
+  # the remaining host-only classifier inputs before running analysis code so
+  # a classifier defect cannot force another 64-TPU rollout.
+  begin_m15_round_stage 15 checkpoint-input || exit $?
+  stage_rc=0
+  python3 "$CANON_PKG/tasks/v1-apc-m15-target-debug/scripts/checkpoint_m15_classifier_input.py" \
+    --directory "$round_stage" \
+    --arm "$CANON_APC_M15_TARGET_DEBUG" \
+    --output "$round_stage/CLASSIFIER_INPUT_RECEIPT.json" || stage_rc=$?
+  classifier_input_prefix="$round_prefix/classifier-input"
+  classifier_input_files=(
+    ROUND_INPUT_RECEIPT.json
+    m15-replay-envelope.jsonl
+    pre-alignment.jsonl
+  )
+  if [ -s "$round_stage/mismatch-capsule.npz" ]; then
+    classifier_input_files+=(mismatch-capsule.npz)
+  fi
+  if [ "$stage_rc" -eq 0 ]; then
+    for name in "${classifier_input_files[@]}"; do
+      gcs_cp "$round_stage/$name" "$classifier_input_prefix/$name" || stage_rc=$?
+      [ "$stage_rc" -eq 0 ] || break
+    done
+  fi
+  if [ "$stage_rc" -eq 0 ]; then
+    for name in CLASSIFIER_INPUT_SHA256SUMS CLASSIFIER_INPUT_RECEIPT.json; do
+      gcs_cp "$round_stage/$name" "$classifier_input_prefix/$name" || stage_rc=$?
+      [ "$stage_rc" -eq 0 ] || break
+    done
+  fi
+  classifier_verify_dir=""
+  if [ "$stage_rc" -eq 0 ]; then
+    classifier_verify_dir="$(mktemp -d)" || stage_rc=$?
+  fi
+  if [ "$stage_rc" -eq 0 ]; then
+    for name in "${classifier_input_files[@]}" \
+        CLASSIFIER_INPUT_SHA256SUMS CLASSIFIER_INPUT_RECEIPT.json; do
+      gcs_cp "$classifier_input_prefix/$name" \
+        "$classifier_verify_dir/$name" || stage_rc=$?
+      [ "$stage_rc" -eq 0 ] || break
+    done
+  fi
+  if [ "$stage_rc" -eq 0 ]; then
+    cmp -- "$round_stage/CLASSIFIER_INPUT_SHA256SUMS" \
+      "$classifier_verify_dir/CLASSIFIER_INPUT_SHA256SUMS" || stage_rc=$?
+  fi
+  if [ "$stage_rc" -eq 0 ]; then
+    cmp -- "$round_stage/CLASSIFIER_INPUT_RECEIPT.json" \
+      "$classifier_verify_dir/CLASSIFIER_INPUT_RECEIPT.json" || stage_rc=$?
+  fi
+  if [ "$stage_rc" -eq 0 ]; then
+    (cd "$classifier_verify_dir" && \
+      sha256sum -c CLASSIFIER_INPUT_SHA256SUMS --quiet) || stage_rc=$?
+  fi
+  if [ -n "$classifier_verify_dir" ]; then
+    rm -rf -- "$classifier_verify_dir"
+  fi
+  finish_m15_round_stage 15 checkpoint-input "$stage_rc" || exit $?
   m15_round_args=(
     --directory "$round_stage"
     --alignment-report "$round_stage/pre-alignment.jsonl"

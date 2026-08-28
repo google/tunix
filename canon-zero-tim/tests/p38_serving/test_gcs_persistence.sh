@@ -499,6 +499,81 @@ assert all(row["expected_source_commit"] == row["runtime_source_commit"]
            for row in receipts)
 PY
 
+# A classifier defect must happen only after the exact host inputs needed for
+# offline reclassification are uploaded and independently read back.  The fake
+# seam payloads are intentionally not valid NumPy archives, so this arm reaches
+# stage 15 and then fails at stage 20 without publishing a round completion.
+export CANON_APC_M15_TARGET_DEBUG=off
+export CANON_P38_SEAM_CLASSIFICATION="$tmp/m15-wide/state/m15.classification.json"
+export CANON_APC_M15_SEAM_BUNDLE="$tmp/m15-wide/state/m15.bundle.tar"
+export CANON_APC_M15_REPLAY_LEDGER="$tmp/m15-wide/state/capture/m15-replay-envelope.jsonl"
+export CANON_P38_MISMATCH_CAPSULE="$tmp/m15-wide/state/absent-capsule.npz"
+export CANON_P38_SEAM_LAYER=0
+printf '{"diagnostic_round":0,"schema":"m15-apc-serving-envelope-v1"}\n' \
+  > "$CANON_APC_M15_REPLAY_LEDGER"
+python3 - "$CANON_P38_MISMATCH_CAPSULE" <<'PY'
+import json
+import numpy as np
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+np.savez(
+    path,
+    metadata_json=np.frombuffer(
+        json.dumps({"diagnostic_round": 0}).encode(), dtype=np.uint8
+    ),
+    selected_rows=np.asarray([0], dtype=np.int32),
+    prompt_ids=np.asarray([[10, 11]], dtype=np.int32),
+    prompt_mask=np.asarray([[True, True]], dtype=np.bool_),
+    completion_ids=np.asarray([[12]], dtype=np.int32),
+    completion_valid_mask=np.asarray([[True]], dtype=np.bool_),
+    action_mask=np.asarray([[True]], dtype=np.bool_),
+    s_decode=np.asarray([[-2.0]], dtype=np.float32),
+    s_prefill=np.asarray([[-1.0]], dtype=np.float32),
+)
+PY
+cat > "$CANON_PRE_ALIGN_REPORT" <<'JSON'
+{"N_action":1,"boundaries":{"S_decode_vs_S_prefill":{"differing_bytes":1,"differing_elements":1,"finite":true,"valid":true},"S_prefill_vs_T_old":{"differing_bytes":0,"differing_elements":0,"finite":true,"valid":true}},"diagnostic_round":0}
+JSON
+m15_classifier_fail_rc=0
+bash "$PERSIST" m15-round 000000 \
+  > "$tmp/m15-wide/classifier-fail.log" 2>&1 || m15_classifier_fail_rc=$?
+test "$m15_classifier_fail_rc" -ne 0
+m15_round_zero="$m15_wide_remote/wide/rounds/000000"
+test -s "$m15_round_zero/stages/STAGE_10_assemble_PASS.json"
+test -s "$m15_round_zero/stages/STAGE_15_checkpoint-input_PASS.json"
+if [ ! -s "$m15_round_zero/stages/STAGE_20_classify_FAIL.json" ]; then
+  cat "$tmp/m15-wide/classifier-fail.log" >&2
+  find "$m15_round_zero" -maxdepth 3 -type f -print >&2
+  exit 1
+fi
+classifier_input_remote="$m15_round_zero/classifier-input"
+for name in ROUND_INPUT_RECEIPT.json m15-replay-envelope.jsonl \
+    pre-alignment.jsonl CLASSIFIER_INPUT_SHA256SUMS \
+    CLASSIFIER_INPUT_RECEIPT.json; do
+  test -s "$classifier_input_remote/$name"
+done
+(cd "$classifier_input_remote" && \
+  sha256sum -c CLASSIFIER_INPUT_SHA256SUMS --quiet)
+python3 - "$classifier_input_remote/CLASSIFIER_INPUT_RECEIPT.json" <<'PY'
+import json
+import pathlib
+import sys
+
+receipt = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert receipt["status"] == "prepared-for-durable-upload", receipt
+assert receipt["diagnostic_round"] == 0, receipt
+assert receipt["a_b_differing_bytes"] == 1, receipt
+assert receipt["files"] == [
+    "ROUND_INPUT_RECEIPT.json",
+    "m15-replay-envelope.jsonl",
+    "mismatch-capsule.npz",
+    "pre-alignment.jsonl",
+], receipt
+PY
+test ! -e "$m15_round_zero/WIDE_ROUND_COMPLETE.json"
+
 # A failed M15 round assembly must leave both a durable remote sub-stage and a
 # local failure receipt that the blocked learner can observe immediately.
 export CANON_APC_M15_TARGET_DEBUG=off

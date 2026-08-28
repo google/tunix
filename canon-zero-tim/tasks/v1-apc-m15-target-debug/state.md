@@ -1,25 +1,45 @@
 # State
 
-- Status: active; Phase D3b replay-round provenance is LOCAL PASS. Attempt 15 executed an exact Round-0 precheck on both arms, then correctly failed closed at assembly because replay rows lacked `diagnostic_round`. This is an instrumentation repair, not a prefix-cache numerical fix.
-- Sealed incident package: `evidence/v1_apc_m15_attempt15_d34_20260828/`.
-- Objective: explain and repair the M15 DP8xTP8 APC-on A-vs-B byte mismatch without changing the independent full-reset B arm or any unrelated numerical path.
-- Definition of done: `FIRST_RED_LOCALIZED` names the last exact and first red tensor plus `file:line`; one localized repair then passes host, exact-image, one-host clean/dirty controls, deterministic repeat, and separately approved DP8xTP8 A-B/B-C zero.
-- Task directory: `canon-zero-tim/tasks/v1-apc-m15-target-debug`.
-- Working base: `4c117d2324b1c2340bf54eaf519f9559742c0ced` on `origin/yuxzhang/canon-zero-tim`; Attempt-15 runtime source independently verified as `57d9ab8e25de3b2404e983e9a139d78b151a58f8`.
-- Shard Content Audit Fact:
-  - Off control arm: 88 flat shards (`wide/shards/000000..000087`), all `diagnostic_round: 0`, 2,780 total record pairs, 1,792,189,157 payload bytes.
-  - On treatment arm: 74 flat shards (`wide/shards/000000..000073`), all `diagnostic_round: 0`, 2,302 total record pairs, 472,614,342 payload bytes.
-  - Every listed shard directory contains `SHARD_COMPLETE.json`, `SHA256SUMS`, and `SHARD_ARCHIVE.tar`; all completion receipts bind to their manifests. Archive digests are producer attestations only because the small audit did not download/re-hash the tar payloads.
-  - Round histogram is 100% round 0 for both arms (`rounds=[0]`); neither arm crossed the first seal to emit round 1 or round 2.
-  - Machine decision: `D33_FLAT_SHARDS_ROUND0_ONLY`.
-- Recovered operator return: `evidence/v1_apc_m15_attempt14_d33_operator_return_20260828/`, `evidence/v1_apc_m15_attempt14_d33_inventory_return_20260828/`, and `evidence/v1_apc_m15_attempt14_d33_flat_shard_audit_20260828/`.
-- One-host fact: local r10-r13c stayed exact through real scheduler publication, 32-request composition, `continue_decode=8`, and full M15 chronology. r13c APC-on reached 97.8% hits, 130,148 actions, and logical KV 988..7189.
-- Current phase: Phase D3b adds replay-round provenance after Phase D3a's stage receipts and fail-fast seal failure handling. No multiround target run is authorized by this local result.
-- Implemented: additive patch 33 serializes `diagnostic_round=int(_p38_seam_round())`; the installed-source AST probe rejects a missing or hard-coded round; the cumulative assembler remains fail-closed and round-selective.
-- Local gates: M15 task suite 139/139 PASS; focused target carrier 17/17; wide durability 8/8; wide classifier 10/10; P38 persistence PASS; flags 395/395 PASS; patch application, installed-source compilation/probe, syntax and diff checks PASS.
-- Numerical changes: none. RoPE, attention/RPA, KV values, LM head, loss, backward, optimizer, B full reset, and production APC are unchanged (APC-OFF retained in production full recipes).
-- Next action: review this local diff. Pinned exact-image, commit, push, and a fresh matched target pair each remain separate user approval boundaries.
-- Claim ceiling: `REPLAY_ROUND_PROVENANCE_LOCAL_PASS / EXACT_IMAGE_NOT_RUN / TARGET_NOT_RUN / NUMERICAL_PATH_UNCHANGED / ROUND0_STOCHASTIC_EXACT_ONLY / FIRST_RED_NOT_LOCALIZED / NUMERICAL_FIX_NOT_AUTHORIZED`.
-- Sensitive evidence: the compact bundle contains real tokens/capsules. `m15-wide-v1` publishes it only under the already registered per-run P38 GCS root after sealed-union classification; never return the payload through Git or chat.
-- Key artifacts: [Attempt-14 flat shard summary](evidence/v1_apc_m15_attempt14_d33_flat_shard_audit_20260828/FLAT_SHARD_AUDIT_SUMMARY.json), [Attempt-14 inventory summary](evidence/v1_apc_m15_attempt14_d33_inventory_return_20260828/INVENTORY_SUMMARY.json), [Attempt-14 operator return](evidence/v1_apc_m15_attempt14_d33_operator_return_20260828/OPERATOR_RETURN_SUMMARY.json).
-- Updated: 2026-08-28 (Phase D3b host gates passed; exact-image, commit/push, and target not run).
+- Status: active; Phase D3c request-aware candidate classification and
+  pre-classification input durability are LOCAL PASS. No numerical APC repair
+  has been made.
+- Working base: pulled cleanly to
+  `fbc4fa03cdb35ac519d183b03ecd25ede485a5e3` on
+  `origin/yuxzhang/canon-zero-tim` before the Phase D3c implementation. The
+  delivered source identity is always the actual branch `HEAD`.
+- Attempt-16 evidence:
+  `evidence/v1_apc_m15_attempt16_d35_20260828/`; all eight manifest members
+  verify.
+- Target fact: APC-on Round 0 reached 92.5% hits and A-B=1,711 bytes / 786
+  elements while B-C=0. The numerical APC defect remains real and unfixed.
+- Control fact: three APC-off numerical rounds were exact. Returned evidence
+  proves complete seal/upload/ACK for rounds 0 and 1 only; round 2 is shown as
+  requested, not terminally complete.
+- Failure fact: Round-0 assembly passed (70 shards / 2,187 pairs). The
+  classifier then conflated distinct requests sharing one token-prefix hash
+  and failed on an alias conflict. The tuple's first value was diagnostic
+  round 0, not position 0.
+- Implemented locally: request-aware observation identity, exact numeric
+  candidate grouping, fail-closed B and same-request duplicates, mixed
+  candidate-set verdicts without a fake interval, unique red-point coverage,
+  complete candidate packaging, and a self-hashed classifier-input GCS
+  checkpoint before analysis.
+- Local gates: task discovery PASS; classifier/packager 18/18;
+  durability/checkpoint 11/11; P38 persistence PASS; Python/Bash syntax and
+  `git diff --check` PASS.
+- Numerical changes: none. RoPE, attention/RPA, KV values, LM head, loss,
+  backward, optimizer, B full reset, and production APC-off defaults are
+  unchanged.
+- Attempt-16 recovery ceiling: its incident subset is integrity-complete for
+  the eight listed files but lacks the assembled classifier input. Unless the
+  original pod-local round still exists, it cannot be reclassified offline.
+  Future runs checkpoint those inputs before classification.
+- Next experiment action: pinned exact-image. A fresh matched target pair is a
+  separate user approval boundary after the published source passes that gate.
+- Claim ceiling:
+  `REQUEST_AWARE_CLASSIFIER_LOCAL_PASS /
+  PRECLASSIFY_INPUT_DURABILITY_LOCAL_PASS / NUMERICAL_PATH_UNCHANGED /
+  ATTEMPT16_TARGET_RED_PRESERVED / FIRST_RED_NOT_YET_LOCALIZED /
+  APC_NUMERICAL_FIX_NOT_IMPLEMENTED / EXACT_IMAGE_NOT_RUN /
+  TARGET_NOT_RERUN / PHASE_E_CLOSED`.
+- Updated: 2026-08-28.

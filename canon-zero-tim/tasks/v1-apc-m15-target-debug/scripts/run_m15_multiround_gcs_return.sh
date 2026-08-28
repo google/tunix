@@ -86,8 +86,26 @@ for row in "${arm_rows[@]}"; do
         printf '%s absent\n' "$name" >> "$local_round/remote-inventory.txt"
       fi
     done
+    mkdir "$local_round/classifier-input"
+    for name in ROUND_INPUT_RECEIPT.json m15-replay-envelope.jsonl \
+        pre-alignment.jsonl mismatch-capsule.npz \
+        CLASSIFIER_INPUT_SHA256SUMS CLASSIFIER_INPUT_RECEIPT.json; do
+      if gcs_exists "$remote/classifier-input/$name"; then
+        printf 'classifier-input/%s present\n' "$name" \
+          >> "$local_round/remote-inventory.txt"
+        case "$name" in
+          CLASSIFIER_INPUT_SHA256SUMS|CLASSIFIER_INPUT_RECEIPT.json)
+            gcs_cp "$remote/classifier-input/$name" \
+              "$local_round/classifier-input/$name"
+            ;;
+        esac
+      else
+        printf 'classifier-input/%s absent\n' "$name" \
+          >> "$local_round/remote-inventory.txt"
+      fi
+    done
     for stage_spec in \
-        10:assemble 20:classify 30:package 35:local-export \
+        10:assemble 15:checkpoint-input 20:classify 30:package 35:local-export \
         40:manifest 50:upload 60:remote-verify 70:completion; do
       ordinal="${stage_spec%%:*}"
       stage_name="${stage_spec#*:}"

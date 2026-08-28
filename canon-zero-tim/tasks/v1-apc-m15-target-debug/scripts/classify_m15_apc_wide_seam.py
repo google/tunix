@@ -91,6 +91,38 @@ def _same_candidate(left: dict[str, Any], right: dict[str, Any]) -> bool:
   return True
 
 
+def _same_numeric_candidate(
+    left: dict[str, Any], right: dict[str, Any]
+) -> bool:
+  """Compare values without pretending two requests are one observation."""
+  scalar_keys = (
+      "position", "token_id", "checkpoint_names", "layer_indices",
+      "target_id", "source_token_id",
+  )
+  for key in scalar_keys:
+    if left.get(key) != right.get(key):
+      return False
+  for key in ("layer_fingerprints", "final_norm_fingerprints", "values"):
+    if key in left or key in right:
+      if key not in left or key not in right:
+        return False
+      if not np.array_equal(left[key], right[key]):
+        return False
+  return True
+
+
+def _observation_identity(candidate: dict[str, Any]) -> tuple[Any, ...]:
+  """Return the serving identity of one measured tensor row."""
+  return (
+      str(candidate.get("request_id", "")),
+      int(candidate["call_index"]),
+      int(candidate["position"]),
+      candidate.get("token_id"),
+      candidate.get("source_token_id"),
+      candidate.get("target_id"),
+  )
+
+
 def _resolve_aliases(candidates: list[dict[str, Any]], label: str) -> dict[str, Any]:
   _require(candidates, f"no candidates for {label}")
   first = candidates[0]
@@ -99,6 +131,34 @@ def _resolve_aliases(candidates: list[dict[str, Any]], label: str) -> dict[str, 
       f"numerically conflicting aliases for {label}",
   )
   return min(candidates, key=lambda item: (item["call_index"], item["record_index"]))
+
+
+def _resolve_observations(
+    candidates: list[dict[str, Any]], label: str
+) -> list[dict[str, Any]]:
+  """Resolve duplicate records only within one serving observation."""
+  grouped: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
+  for candidate in candidates:
+    grouped.setdefault(_observation_identity(candidate), []).append(candidate)
+  return [
+      _resolve_aliases(grouped[key], f"{label} observation {key}")
+      for key in sorted(grouped)
+  ]
+
+
+def _numeric_variants(
+    observations: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+  """Group distinct observations by exact measured payload."""
+  variants: list[dict[str, Any]] = []
+  for observation in observations:
+    for variant in variants:
+      if _same_numeric_candidate(variant["selected"], observation):
+        variant["observations"].append(observation)
+        break
+    else:
+      variants.append({"selected": observation, "observations": [observation]})
+  return variants
 
 
 def _load_npz(path: Path) -> dict[str, np.ndarray]:
@@ -354,8 +414,13 @@ def _ledger_receipts(
   wanted = {}
   for anchor in anchors:
     for arm in ("A", "B"):
-      item = anchor[arm.lower()]
-      wanted[(arm, int(item["call_index"]), str(item["request_id"]))] = None
+      key = arm.lower()
+      items = [
+          anchor[key],
+          *anchor.get(f"{key}_observation_candidates", ()),
+      ]
+      for item in items:
+        wanted[(arm, int(item["call_index"]), str(item["request_id"]))] = None
   with path.open(encoding="utf-8") as handle:
     for line in handle:
       if not line.strip():
@@ -387,6 +452,56 @@ def _public_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
       )
       if key in candidate
   }
+
+
+def _public_observations(
+    observations: Iterable[dict[str, Any]],
+) -> list[dict[str, Any]]:
+  return [
+      _public_candidate(item)
+      for item in sorted(observations, key=_observation_identity)
+  ]
+
+
+def _matching_tail(
+    observations: list[dict[str, Any]],
+    seam_observations: list[dict[str, Any]],
+    expected_logprob: float,
+) -> tuple[dict[str, Any], dict[str, Any]] | None:
+  """Join a seam observation to its own endpoint receipt."""
+  tail_by_call: dict[int, list[dict[str, Any]]] = {}
+  for item in observations:
+    if float(item["values"][-1]) == expected_logprob:
+      tail_by_call.setdefault(int(item["call_index"]), []).append(item)
+  by_call = {
+      call_index: _resolve_aliases(
+          candidates, f"terminal-tail call {call_index}"
+      )
+      for call_index, candidates in tail_by_call.items()
+  }
+  matches = [
+      (seam, by_call[int(seam["call_index"])])
+      for seam in seam_observations
+      if int(seam["call_index"]) in by_call
+  ]
+  if not matches:
+    return None
+  first_seam, first_tail = matches[0]
+  _require(
+      all(
+          _same_numeric_candidate(first_seam, seam)
+          and _same_numeric_candidate(first_tail, tail)
+          for seam, tail in matches[1:]
+      ),
+      "one numeric seam variant maps to conflicting terminal-tail values",
+  )
+  return min(
+      matches,
+      key=lambda pair: (
+          pair[0]["call_index"], pair[0]["record_index"],
+          pair[1]["record_index"],
+      ),
+  )
 
 
 def classify(
@@ -466,51 +581,105 @@ def classify(
     seam_keys = ((*base, "A"), (*base, "B"))
     if not all(key in seam for key in seam_keys):
       continue
-    a = _resolve_aliases(seam[seam_keys[0]], f"A seam {base}")
-    b = _resolve_aliases(seam[seam_keys[1]], f"B seam {base}")
-    _require(a["position"] == b["position"] == int(point["source_position"]),
-             "M15 joined seam source position drifted")
+    a_observations = _resolve_observations(
+        seam[seam_keys[0]], f"A seam {base}"
+    )
+    b_observations = _resolve_observations(
+        seam[seam_keys[1]], f"B seam {base}"
+    )
+    _require(
+        all(
+            item["position"] == int(point["source_position"])
+            for item in (*a_observations, *b_observations)
+        ),
+        "M15 joined seam source position drifted",
+    )
+    b_variants = _numeric_variants(b_observations)
+    _require(
+        len(b_variants) == 1,
+        "full-reset B produced multiple numeric variants for one token prefix",
+    )
+    b_variant = b_variants[0]
+    b = b_variant["selected"]
     if mode == "full":
-      _require(a["layer_indices"] == b["layer_indices"] == [expected_layer],
-               "M15 full seam observed the wrong layer")
-    first = P38._first_difference(a, b)  # pylint: disable=protected-access
-    tail_a = tail_b = None
+      _require(
+          all(
+              item["layer_indices"] == [expected_layer]
+              for item in (*a_observations, *b_observations)
+          ),
+          "M15 full seam observed the wrong layer",
+      )
+    tail_a_observations = tail_b_observations = []
     if require_tail:
       target = int(point["target_id"])
       tail_keys = ((*base, "A", target), (*base, "B", target))
       if not all(key in tails for key in tail_keys):
         continue
-      tail_a = _resolve_aliases(tails[tail_keys[0]], f"A tail {base}/{target}")
-      tail_b = _resolve_aliases(tails[tail_keys[1]], f"B tail {base}/{target}")
+      tail_a_observations = _resolve_observations(
+          tails[tail_keys[0]], f"A tail {base}/{target}"
+      )
+      tail_b_observations = _resolve_observations(
+          tails[tail_keys[1]], f"B tail {base}/{target}"
+      )
       _require(
-          tail_a["position"] == tail_b["position"] == int(point["source_position"]),
+          all(
+              item["position"] == int(point["source_position"])
+              for item in (*tail_a_observations, *tail_b_observations)
+          ),
           "M15 joined tail source position drifted",
       )
-      _require(
-          float(tail_a["values"][-1]) == float(point["decode_logprob"])
-          and float(tail_b["values"][-1]) == float(point["prefill_logprob"]),
-          "M15 terminal production logprob differs from the capsule",
-      )
-      if first is None:
+    point_joins = []
+    for a_variant in _numeric_variants(a_observations):
+      a = a_variant["selected"]
+      tail_a = tail_b = None
+      if require_tail:
+        a_match = _matching_tail(
+            tail_a_observations,
+            a_variant["observations"],
+            float(point["decode_logprob"]),
+        )
+        b_match = _matching_tail(
+            tail_b_observations,
+            b_variant["observations"],
+            float(point["prefill_logprob"]),
+        )
+        if a_match is None or b_match is None:
+          continue
+        a, tail_a = a_match
+        b, tail_b = b_match
+      first = P38._first_difference(a, b)  # pylint: disable=protected-access
+      if require_tail and first is None:
         first = P38._tail_first_difference(  # pylint: disable=protected-access
             tail_a, tail_b
         )
-    _require(first is not None,
-             "M15 red anchor stayed exact through every observed checkpoint")
-    joins.append({
-        "source_row": int(point["source_row"]),
-        "completion_position": int(point["completion_position"]),
-        "source_position": int(point["source_position"]),
-        "target_id": int(point["target_id"]),
-        "token_prefix_sha256": point["token_prefix_sha256"].decode("ascii"),
-        "decode_logprob": float(point["decode_logprob"]),
-        "prefill_logprob": float(point["prefill_logprob"]),
-        "a": _public_candidate(a),
-        "b": _public_candidate(b),
-        "a_tail_record_index": tail_a["record_index"] if tail_a else None,
-        "b_tail_record_index": tail_b["record_index"] if tail_b else None,
-        "first_difference": first,
-    })
+      point_joins.append({
+          "source_row": int(point["source_row"]),
+          "completion_position": int(point["completion_position"]),
+          "source_position": int(point["source_position"]),
+          "target_id": int(point["target_id"]),
+          "token_prefix_sha256": point["token_prefix_sha256"].decode("ascii"),
+          "decode_logprob": float(point["decode_logprob"]),
+          "prefill_logprob": float(point["prefill_logprob"]),
+          "a": _public_candidate(a),
+          "b": _public_candidate(b),
+          "a_observation_candidates": _public_observations(
+              a_variant["observations"]
+          ),
+          "b_observation_candidates": _public_observations(
+              b_variant["observations"]
+          ),
+          "a_tail_record_index": tail_a["record_index"] if tail_a else None,
+          "b_tail_record_index": tail_b["record_index"] if tail_b else None,
+          "candidate_ambiguous": (
+              len(a_observations) > 1 or len(b_observations) > 1
+          ),
+          "candidate_outcome": (
+              "FIRST_DIFFERENCE" if first is not None
+              else "EXACT_THROUGH_OBSERVER"
+          ),
+          "first_difference": first,
+      })
+    joins.extend(point_joins)
   _require(joins, "no A-B-red M15 action joined exact standard-path seam records")
   first_action_joins = [join for join in joins if join["completion_position"] == 0]
   if require_first_action:
@@ -519,14 +688,34 @@ def classify(
   preferred = first_action_joins or joins
   anchors = preferred[:_MAX_ANCHORS]
   ledger = _ledger_receipts(replay_ledger, anchors)
+  joined_points = {
+      (join["source_row"], join["completion_position"])
+      for join in joins
+  }
+  first_action_points = {
+      (join["source_row"], join["completion_position"])
+      for join in first_action_joins
+  }
   signatures = sorted({
-      (join["first_difference"].get("layer"),
-       str(join["first_difference"]["checkpoint"]))
-      for join in anchors
+      (
+          join["first_difference"].get("layer"),
+          str(join["first_difference"]["checkpoint"]),
+      ) if join["first_difference"] is not None else (None, "EXACT_THROUGH_OBSERVER")
+      for join in joins
   }, key=lambda item: (10**9 if item[0] is None else int(item[0]), item[1]))
-  first = anchors[0]["first_difference"]
-  last_exact = _last_exact_before(first, mode)
-  first_anchor = _source_anchor(str(first["checkpoint"]))
+  exact_candidate_anchors = sum(
+      join["first_difference"] is None for join in joins
+  )
+  red_signatures = {
+      signature for signature in signatures
+      if signature[1] != "EXACT_THROUGH_OBSERVER"
+  }
+  unique_signature = len(red_signatures) == 1 and exact_candidate_anchors == 0
+  first = anchors[0]["first_difference"] if unique_signature else None
+  last_exact = _last_exact_before(first, mode) if first is not None else None
+  first_anchor = (
+      _source_anchor(str(first["checkpoint"])) if first is not None else None
+  )
   last_anchor = (
       _source_anchor(str(last_exact["checkpoint"])) if last_exact else None
   )
@@ -534,21 +723,38 @@ def classify(
       int(layer) for layer, _ in signatures if layer is not None
   })
   if mode == "layer":
-    gate = "COARSE_FIRST_RED_INTERVAL"
+    gate = (
+        "COARSE_FIRST_RED_INTERVAL"
+        if unique_signature else "COARSE_FIRST_RED_CANDIDATE_SET"
+    )
     classification = (
         "M15_LAYER_FIRST_RED_LOCALIZED"
-        if numeric_layers
+        if unique_signature and numeric_layers
         else "M15_HIDDEN_EXACT_TAIL_FIRST_RED_LOCALIZED"
+        if unique_signature
+        else "M15_LAYER_FIRST_RED_CANDIDATE_SET"
     )
     next_action = (
         f"rerun full observer at layer {numeric_layers[0]}"
-        if numeric_layers
+        if unique_signature and numeric_layers
         else "localize the measured terminal-tail interval"
+        if unique_signature
+        else "join the candidate set to a stable source-row/request identity"
     )
   else:
-    gate = "FIRST_RED_LOCALIZED"
-    classification = "M15_INTERNAL_FIRST_RED_LOCALIZED"
-    next_action = "test one bit-relevant degree of freedom inside the interval"
+    gate = (
+        "FIRST_RED_LOCALIZED"
+        if unique_signature else "FIRST_RED_CANDIDATE_SET"
+    )
+    classification = (
+        "M15_INTERNAL_FIRST_RED_LOCALIZED"
+        if unique_signature else "M15_INTERNAL_FIRST_RED_CANDIDATE_SET"
+    )
+    next_action = (
+        "test one bit-relevant degree of freedom inside the interval"
+        if unique_signature
+        else "join the candidate set to a stable source-row/request identity"
+    )
   return {
       "schema": "m15-apc-wide-seam-classification-v1",
       "status": "PASS",
@@ -566,11 +772,22 @@ def classify(
       },
       "coverage": {
           "total_red_points": len(red_points),
-          "standard_joinable_red_points": len(joins),
-          "unobserved_red_points": len(red_points) - len(joins),
-          "first_action_joinable_red_points": len(first_action_joins),
+          "standard_joinable_red_points": len(joined_points),
+          "unobserved_red_points": len(red_points) - len(joined_points),
+          "first_action_joinable_red_points": len(first_action_points),
+          "candidate_anchors": len(joins),
           "selected_anchors": len(anchors),
           "max_selected_anchors": _MAX_ANCHORS,
+          "candidate_observations": sum(
+              len(join["a_observation_candidates"])
+              + len(join["b_observation_candidates"])
+              for join in joins
+          ),
+          "ambiguous_joined_anchors": sum(
+              bool(join["candidate_ambiguous"]) for join in joins
+          ),
+          "exact_through_observer_candidate_anchors": exact_candidate_anchors,
+          "selected_anchor_truncated": len(preferred) > _MAX_ANCHORS,
       },
       "seam_inventory": seam_inventory,
       "tail_inventory": tail_inventory,
@@ -579,7 +796,10 @@ def classify(
           for layer, checkpoint in signatures
       ],
       "mixed_first_difference_signatures": len(signatures) > 1,
-      "selected_layer": numeric_layers[0] if numeric_layers else None,
+      "selected_layer": (
+          numeric_layers[0]
+          if unique_signature and len(numeric_layers) == 1 else None
+      ),
       "last_exact_boundary": last_exact,
       "first_red_boundary": first,
       "source_interval": {
@@ -590,7 +810,9 @@ def classify(
       "replay_ledger_receipts": ledger,
       "next_action": next_action,
       "claim_ceiling": (
-          "This report localizes exact standard-path red anchors only. "
+          "This report localizes exact standard-path red candidates only. "
+          "Distinct requests sharing a token prefix remain distinct; a mixed "
+          "candidate signature is not promoted to one tensor interval. "
           "Continue-decode red actions remain explicitly unobserved; integer "
           "fingerprint equality is not full-tensor byte equality."
       ),

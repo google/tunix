@@ -32,12 +32,15 @@ _CLASSIFICATIONS = {
     "on": {
         "M15_OBSERVER_TREATMENT_EXACT",
         "M15_LAYER_FIRST_RED_LOCALIZED",
+        "M15_LAYER_FIRST_RED_CANDIDATE_SET",
         "M15_HIDDEN_EXACT_TAIL_FIRST_RED_LOCALIZED",
         "M15_INTERNAL_FIRST_RED_LOCALIZED",
+        "M15_INTERNAL_FIRST_RED_CANDIDATE_SET",
     },
 }
 _STAGE_SPECS = (
     (10, "assemble"),
+    (15, "checkpoint-input"),
     (20, "classify"),
     (30, "package"),
     (35, "local-export"),
@@ -93,6 +96,87 @@ def _inventory(path: Path) -> dict[str, bool]:
     _require(separator == " " and status in ("present", "absent"),
              f"invalid remote inventory row: {line!r}")
     rows[name] = status == "present"
+  return rows
+
+
+def _audit_classifier_input(
+    directory: Path,
+    *,
+    arm: str,
+    round_index: int,
+    source_commit: str,
+    ab_bytes: int,
+    record_pairs: int,
+    shards: list[Any],
+    stage_state: dict[str, Any],
+) -> dict[str, Any] | None:
+  checkpoint_instrumented = any(
+      receipt["stage"] == "checkpoint-input"
+      for receipt in stage_state["receipts"]
+  )
+  root = directory / "classifier-input"
+  if not checkpoint_instrumented:
+    _require(not root.exists() or not any(root.iterdir()),
+             f"{arm} round {round_index} has unbound classifier inputs")
+    return None
+  _require(root.is_dir(),
+           f"{arm} round {round_index} classifier-input return is absent")
+  receipt_path = root / "CLASSIFIER_INPUT_RECEIPT.json"
+  manifest_path = root / "CLASSIFIER_INPUT_SHA256SUMS"
+  _require(receipt_path.is_file() and manifest_path.is_file(),
+           f"{arm} round {round_index} classifier-input receipt is partial")
+  receipt = _json(receipt_path)
+  _require(
+      receipt.get("schema") == "m15-wide-classifier-input-v1"
+      and receipt.get("status") == "prepared-for-durable-upload"
+      and receipt.get("arm") == arm
+      and int(receipt.get("diagnostic_round", -1)) == round_index
+      and int(receipt.get("a_b_differing_bytes", -1)) == ab_bytes
+      and int(receipt.get("record_pairs", -1)) == record_pairs
+      and receipt.get("shards") == shards
+      and receipt.get("expected_source_commit") == source_commit
+      and receipt.get("runtime_source_commit") == source_commit
+      and receipt.get("manifest_sha256") == _sha256(manifest_path),
+      f"{arm} round {round_index} classifier-input receipt drifted",
+  )
+  manifest_rows = _manifest_rows(manifest_path)
+  expected = {
+      "ROUND_INPUT_RECEIPT.json",
+      "m15-replay-envelope.jsonl",
+      "pre-alignment.jsonl",
+  }
+  if ab_bytes > 0:
+    expected.add("mismatch-capsule.npz")
+  _require(set(manifest_rows) == expected and set(receipt.get("files", ())) == expected,
+           f"{arm} round {round_index} classifier-input members drifted")
+  inventory = _inventory(directory / "remote-inventory.txt")
+  for name in expected:
+    _require(inventory.get(f"classifier-input/{name}") is True,
+             f"{arm} round {round_index} classifier input is absent: {name}")
+  for name in ("CLASSIFIER_INPUT_RECEIPT.json", "CLASSIFIER_INPUT_SHA256SUMS"):
+    _require(inventory.get(f"classifier-input/{name}") is True,
+             f"{arm} round {round_index} classifier checkpoint is absent: {name}")
+  return {
+      "status": "REMOTE_VERIFIED_BEFORE_CLASSIFY",
+      "files": sorted(expected),
+      "manifest_sha256": _sha256(manifest_path),
+      "receipt_sha256": _sha256(receipt_path),
+  }
+
+
+def _manifest_rows(path: Path) -> dict[str, str]:
+  rows: dict[str, str] = {}
+  for line in path.read_text(encoding="ascii").splitlines():
+    digest, separator, name = line.partition("  ")
+    _require(
+        separator == "  "
+        and re.fullmatch(r"[0-9a-f]{64}", digest) is not None
+        and "/" not in name
+        and name not in rows,
+        f"invalid classifier-input manifest row: {line!r}",
+    )
+    rows[name] = digest
+  _require(rows, "classifier-input manifest is empty")
   return rows
 
 
@@ -302,6 +386,16 @@ def _audit_round(
   else:
     _require(ab_bytes > 0,
              f"{arm} round {round_index} red classifier has no A-B bytes")
+  classifier_input = _audit_classifier_input(
+      directory,
+      arm=arm,
+      round_index=round_index,
+      source_commit=source_commit,
+      ab_bytes=ab_bytes,
+      record_pairs=int(receipt["record_pairs"]),
+      shards=receipt.get("shards", []),
+      stage_state=stage_state,
+  )
   _require(
       completion.get("schema") == "m15-wide-round-completion-v1"
       and completion.get("status") == "classified-and-uploaded"
@@ -335,6 +429,7 @@ def _audit_round(
       "manifest_sha256": _sha256(manifest_path),
       "bundle_sha256": manifest["m15_wide_seam_bundle.tar"],
       "bundle_downloaded": False,
+      "classifier_input": classifier_input,
       "stage_state": stage_state,
   }
 

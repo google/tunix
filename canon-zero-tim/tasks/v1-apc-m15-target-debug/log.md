@@ -1043,3 +1043,41 @@ is not a current fact or launch authority.
   Claim ceiling: `REPLAY_ROUND_PROVENANCE_LOCAL_PASS /
   EXACT_IMAGE_NOT_RUN / TARGET_NOT_RUN / ROUND0_STOCHASTIC_EXACT_ONLY /
   FIRST_RED_NOT_LOCALIZED / NUMERICAL_FIX_NOT_AUTHORIZED / PHASE_E_CLOSED`.
+
+## 2026-08-28 — Attempt 16 reviewed; Phase D3c request-aware classifier local pass
+
+- Pulled the operator branch cleanly to
+  `fbc4fa03cdb35ac519d183b03ecd25ede485a5e3` and verified all eight members
+  listed by the Attempt-16 incident manifest.
+- Attempt 16 confirms the replay-round repair: APC-on Round 0 assembled 70
+  shards / 2,187 record pairs. It also reproduces the serving defect with
+  92.5% cache hits, A-B=1,711 bytes / 786 elements, and B-C=0.
+- Corrected two evidence overclaims without editing the immutable incident:
+  the `0` in the alias key is diagnostic round 0 rather than position 0, and
+  the returned APC-off evidence proves three exact numerical rounds but only
+  two complete seal/upload/ACK cycles; round 2 is merely requested.
+- Root cause of the execution failure is the classifier identity model. Its
+  prefix key admitted several distinct concurrent requests, then the alias
+  comparator rejected their different request IDs. This is not the root cause
+  of the APC numerical mismatch.
+- Implemented request-aware observation resolution and exact numeric candidate
+  groups. Full-reset B must remain a single numerical variant. Conflicting
+  duplicates within one request stay fail-closed. Mixed A signatures produce
+  an explicit candidate set with no invented first-red boundary.
+- Fixed candidate coverage accounting to count red coordinates separately
+  from observation variants, and made the compact package preserve every
+  selected candidate plus replay-ledger receipt.
+- Added a pre-classifier durability stage. After assembly, the round receipt,
+  pre-alignment, replay envelope, and optional mismatch capsule are
+  self-hashed, uploaded under `classifier-input`, downloaded, and independently
+  verified before analysis begins. Observer values remain in verified shards.
+- Local validation: full M15 task discovery PASS; focused classifier 18/18;
+  durability/checkpoint 11/11; P38 persistence PASS; Python/Bash syntax
+  and `git diff --check` PASS.
+- No numerical code, pinned image, TPU, Kubernetes, GCS object, commit, or push
+  was executed. Claim ceiling:
+  `REQUEST_AWARE_CLASSIFIER_LOCAL_PASS /
+  PRECLASSIFY_INPUT_DURABILITY_LOCAL_PASS / NUMERICAL_PATH_UNCHANGED /
+  ATTEMPT16_TARGET_RED_PRESERVED / FIRST_RED_NOT_YET_LOCALIZED /
+  APC_NUMERICAL_FIX_NOT_IMPLEMENTED / EXACT_IMAGE_NOT_RUN /
+  TARGET_NOT_RERUN / PHASE_E_CLOSED`.

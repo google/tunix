@@ -232,6 +232,92 @@ class Fixture:
         "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
     )
 
+  def duplicate_seam(
+      self,
+      *,
+      arm: str,
+      request_id: str,
+      call_index: int,
+      mutate_checkpoint: str | None = None,
+      preserve_observation_identity: bool = False,
+      numeric_source_arm: str | None = None,
+  ) -> int:
+    """Add one same-prefix observation without changing the capsule."""
+    source_index = 0 if arm == "A" else 1
+    source_json = self.capture / f"p38_seam_{source_index:06d}.json"
+    numeric_source_index = (
+        source_index
+        if numeric_source_arm is None else 0 if numeric_source_arm == "A" else 1
+    )
+    source_npz = self.capture / f"p38_seam_{numeric_source_index:06d}.npz"
+    record = json.loads(source_json.read_text(encoding="utf-8"))
+    with np.load(source_npz, allow_pickle=False) as archive:
+      arrays = {name: np.array(archive[name], copy=True) for name in archive.files}
+    if mutate_checkpoint is not None:
+      checkpoint = list(record["checkpoint_names"]).index(mutate_checkpoint)
+      arrays["layer_fingerprints"][0, 0, :, :] = 0
+      arrays["layer_fingerprints"][0, 0, checkpoint, 0] = 1
+    existing = [
+        int(path.stem.rsplit("_", 1)[1])
+        for path in self.capture.glob("p38_seam_*.json")
+    ]
+    index = max(existing, default=-1) + 1
+    original_request = record["requests"][0]
+    actual_call = int(record["call_index"]) if preserve_observation_identity else call_index
+    actual_request = (
+        str(original_request["request_id"])
+        if preserve_observation_identity else request_id
+    )
+    metadata = {
+        key: value
+        for key, value in record.items()
+        if key not in ("schema", "record_index", "array_keys", "npz_sha256")
+    }
+    metadata["call_index"] = actual_call
+    metadata["requests"] = [{**original_request, "request_id": actual_request}]
+    self._write_npz_record("p38_seam", index, metadata, arrays)
+    with self.ledger.open("a", encoding="utf-8") as stream:
+      stream.write(json.dumps({
+          "schema": "m15-apc-serving-envelope-v1",
+          "diagnostic_round": self.diagnostic_round,
+          "arm": "on",
+          "serving_arm": arm,
+          "call_index": actual_call,
+          "program_path": "standard",
+          "request_order": [actual_request],
+          "requests": [{
+              "request_id": actual_request,
+              "num_computed_tokens": self.source_position,
+              "scheduled_tokens": 1,
+              "physical_pages": [5, 6],
+              "block_size": 16,
+          }],
+      }) + "\n")
+    return index
+
+  def duplicate_tail(self, *, arm: str, change_value: bool) -> int:
+    """Duplicate one endpoint receipt in the same serving call."""
+    source_index = 0 if arm == "A" else 1
+    source_json = self.capture / f"p38_tail_{source_index:06d}.json"
+    source_npz = self.capture / f"p38_tail_{source_index:06d}.npz"
+    record = json.loads(source_json.read_text(encoding="utf-8"))
+    with np.load(source_npz, allow_pickle=False) as archive:
+      arrays = {name: np.array(archive[name], copy=True) for name in archive.files}
+    if change_value:
+      arrays["tail_values"][0, 0] = np.float32(1.0)
+    existing = [
+        int(path.stem.rsplit("_", 1)[1])
+        for path in self.capture.glob("p38_tail_*.json")
+    ]
+    index = max(existing, default=-1) + 1
+    metadata = {
+        key: value
+        for key, value in record.items()
+        if key not in ("schema", "record_index", "array_keys", "npz_sha256")
+    }
+    self._write_npz_record("p38_tail", index, metadata, arrays)
+    return index
+
   def classify(self, *, arm: str = "on", require_first_action: bool = True):
     return MODULE.classify(
         directory=self.capture,
@@ -270,6 +356,105 @@ class M15WideSeamClassifierTest(unittest.TestCase):
     self.assertEqual(result["selected_layer"], 5)
     self.assertEqual(result["first_red_boundary"]["checkpoint"], "q_post_rope")
     self.assertEqual(result["last_exact_boundary"]["checkpoint"], "k_norm")
+
+  def test_distinct_requests_with_same_prefix_are_candidates_not_aliases(self):
+    fixture = self._fixture(mode="full")
+    duplicate = fixture.duplicate_seam(
+        arm="A", request_id="request-a-second", call_index=20
+    )
+    result = fixture.classify()
+    self.assertEqual(result["classification"], "M15_INTERNAL_FIRST_RED_LOCALIZED")
+    self.assertFalse(result["mixed_first_difference_signatures"])
+    self.assertGreater(result["coverage"]["ambiguous_joined_anchors"], 0)
+    self.assertEqual(result["coverage"]["standard_joinable_red_points"], 1)
+    self.assertEqual(result["coverage"]["unobserved_red_points"], 0)
+    self.assertEqual(result["coverage"]["candidate_anchors"], 1)
+    self.assertEqual(
+        {item["record_index"] for item in result["anchors"][0]["a_observation_candidates"]},
+        {0, duplicate},
+    )
+
+  def test_mixed_request_candidates_are_not_promoted_to_one_interval(self):
+    fixture = self._fixture(mode="full")
+    fixture.duplicate_seam(
+        arm="A",
+        request_id="request-a-earlier-red",
+        call_index=20,
+        mutate_checkpoint="input_norm",
+    )
+    result = fixture.classify()
+    self.assertEqual(
+        result["classification"], "M15_INTERNAL_FIRST_RED_CANDIDATE_SET"
+    )
+    self.assertEqual(result["gate"], "FIRST_RED_CANDIDATE_SET")
+    self.assertTrue(result["mixed_first_difference_signatures"])
+    self.assertIsNone(result["first_red_boundary"])
+    self.assertIsNone(result["source_interval"]["first_red"])
+    self.assertEqual(result["coverage"]["standard_joinable_red_points"], 1)
+    self.assertEqual(result["coverage"]["unobserved_red_points"], 0)
+    self.assertEqual(result["coverage"]["candidate_anchors"], 2)
+
+  def test_exact_same_prefix_candidate_blocks_false_localization(self):
+    fixture = self._fixture(mode="full")
+    fixture.duplicate_seam(
+        arm="A",
+        request_id="request-a-exact",
+        call_index=20,
+        numeric_source_arm="B",
+    )
+    result = fixture.classify()
+    self.assertEqual(
+        result["classification"], "M15_INTERNAL_FIRST_RED_CANDIDATE_SET"
+    )
+    self.assertIsNone(result["first_red_boundary"])
+    self.assertEqual(
+        result["coverage"]["exact_through_observer_candidate_anchors"], 1
+    )
+    self.assertIn(
+        {"layer": None, "checkpoint": "EXACT_THROUGH_OBSERVER"},
+        result["first_difference_signatures"],
+    )
+
+  def test_same_request_conflicting_duplicate_remains_fail_closed(self):
+    fixture = self._fixture(mode="full")
+    fixture.duplicate_seam(
+        arm="A",
+        request_id="ignored",
+        call_index=20,
+        mutate_checkpoint="input_norm",
+        preserve_observation_identity=True,
+    )
+    with self.assertRaisesRegex(
+        MODULE.M15WideSeamError, "numerically conflicting aliases"
+    ):
+      fixture.classify()
+
+  def test_full_reset_b_numeric_variants_remain_fail_closed(self):
+    fixture = self._fixture(mode="full")
+    fixture.duplicate_seam(
+        arm="B",
+        request_id="request-b-second",
+        call_index=21,
+        mutate_checkpoint="input_norm",
+    )
+    with self.assertRaisesRegex(
+        MODULE.M15WideSeamError, "full-reset B produced multiple"
+    ):
+      fixture.classify()
+
+  def test_same_call_identical_tail_alias_is_accepted(self):
+    fixture = self._fixture()
+    fixture.duplicate_tail(arm="A", change_value=False)
+    result = fixture.classify()
+    self.assertEqual(result["classification"], "M15_LAYER_FIRST_RED_LOCALIZED")
+
+  def test_same_call_conflicting_tail_alias_remains_fail_closed(self):
+    fixture = self._fixture()
+    fixture.duplicate_tail(arm="A", change_value=True)
+    with self.assertRaisesRegex(
+        MODULE.M15WideSeamError, "numerically conflicting aliases"
+    ):
+      fixture.classify()
 
   def test_nonzero_diagnostic_round_is_bound_end_to_end(self):
     result = self._fixture(diagnostic_round=2).classify()
@@ -347,6 +532,25 @@ class M15WideSeamClassifierTest(unittest.TestCase):
             hashlib.sha256(archive.extractfile(name).read()).hexdigest(),
             expected,
         )
+
+  def test_compact_bundle_preserves_all_same_prefix_request_candidates(self):
+    fixture = self._fixture(mode="full")
+    duplicate = fixture.duplicate_seam(
+        arm="A", request_id="request-a-second", call_index=20
+    )
+    classification = fixture.classify()
+    classification_path = fixture.root / "classification-candidates.json"
+    classification_path.write_text(json.dumps(classification), encoding="utf-8")
+    output = fixture.root / "candidate-bundle.tar"
+    receipt = PACKAGER.package(
+        directory=fixture.capture,
+        classification_path=classification_path,
+        alignment_report=fixture.report,
+        capsules=[fixture.capsule],
+        replay_ledger=fixture.ledger,
+        output=output,
+    )
+    self.assertEqual(receipt["selected_seam_records"], [0, 1, duplicate])
 
   def test_classifier_and_bundle_run_only_from_completed_shard_union(self):
     fixture = self._fixture()
