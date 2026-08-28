@@ -110,6 +110,7 @@ spec:
                 - --node_type=resource_manager
                 - --instance_count=1
                 - --instance_type=tpuv5:4x4x4
+                - --pathways_pipe_unreachable_timeout=300s
               env:
                 - name: HOST_ADDRESS
                   value: localhost
@@ -260,9 +261,20 @@ spec:
                 - --resource_manager_address=canon-zero-tim-v5p-64-pathways-head-0-0.canon-zero-tim-v5p-64:29001
                 - --node_type=worker
                 - --instance_type=tpuv5:4x4x4
+                - --pathways_pipe_unreachable_timeout=300s
               env:
                 - name: PATHWAYS_HEAD
                   value: canon-zero-tim-v5p-64-pathways-head-0-0.canon-zero-tim-v5p-64
+                - name: PATHWAYS_PIPE_UNREACHABLE_TIMEOUT
+                  value: "300s"
+                - name: GRPC_KEEPALIVE_TIME_MS
+                  value: "10000"
+                - name: GRPC_KEEPALIVE_TIMEOUT_MS
+                  value: "30000"
+                - name: GRPC_KEEPALIVE_PERMIT_WITHOUT_CALLS
+                  value: "1"
+                - name: TPU_PREMAPPED_BUFFER_SIZE
+                  value: "8589934592"
                 - name: TPU_MIN_LOG_LEVEL
                   value: "0"
                 - name: TF_CPP_MIN_LOG_LEVEL

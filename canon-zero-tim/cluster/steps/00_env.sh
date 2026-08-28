@@ -98,6 +98,14 @@ export TPU_STDERR_LOG_LEVEL="${TPU_STDERR_LOG_LEVEL:-0}"
 export PYTHONDONTWRITEBYTECODE=1
 export CANON_TPU_INFERENCE_PATH="${CANON_TPU_INFERENCE_PATH:-/usr/local/lib/python3.12/site-packages/tpu_inference}"
 
+# Pathways & gRPC peer communication timeouts & buffers (mitigating worker-to-worker pipe timeouts during long JIT compilation)
+export PATHWAYS_PIPE_UNREACHABLE_TIMEOUT="${PATHWAYS_PIPE_UNREACHABLE_TIMEOUT:-300s}"
+export JAX_PATHWAYS_PIPE_UNREACHABLE_TIMEOUT="${JAX_PATHWAYS_PIPE_UNREACHABLE_TIMEOUT:-300s}"
+export GRPC_KEEPALIVE_TIME_MS="${GRPC_KEEPALIVE_TIME_MS:-10000}"
+export GRPC_KEEPALIVE_TIMEOUT_MS="${GRPC_KEEPALIVE_TIMEOUT_MS:-30000}"
+export GRPC_KEEPALIVE_PERMIT_WITHOUT_CALLS="${GRPC_KEEPALIVE_PERMIT_WITHOUT_CALLS:-1}"
+export TPU_PREMAPPED_BUFFER_SIZE="${TPU_PREMAPPED_BUFFER_SIZE:-8589934592}"
+
 # Pathways backend configuration is activated in Step 70/90 to keep preflight 00..60 100% CPU isolated.
 export JAX_PLATFORMS="cpu"
 export JAX_BACKEND_TARGET=""
@@ -2643,7 +2651,7 @@ fi
 # Replace the managed environment instead of layering it over the caller's raw JobSet env.
 for canon_env_key in $(compgen -e); do
   case "$canon_env_key" in
-    CANON_*|R2E_*|WANDB_*|HF_*|MIN_TOKEN_BUCKET|NEW_MODEL_DESIGN|VLLM_*|ROLLOUT_ENGINE|XLA_FLAGS|JAX_*|FL_SHARED_MESH|TPU_*|TF_CPP*|ENABLE_PATHWAYS|PYTHONDONTWRITEBYTECODE)
+    CANON_*|R2E_*|WANDB_*|HF_*|MIN_TOKEN_BUCKET|NEW_MODEL_DESIGN|VLLM_*|ROLLOUT_ENGINE|XLA_FLAGS|JAX_*|FL_SHARED_MESH|TPU_*|TF_CPP*|ENABLE_PATHWAYS|PYTHONDONTWRITEBYTECODE|PATHWAYS_*|GRPC_*)
       case "$canon_env_key" in
         HF_TOKEN|WANDB_API_KEY|INJECTED_*) ;;
         *) unset "$canon_env_key" ;;
@@ -2653,7 +2661,7 @@ for canon_env_key in $(compgen -e); do
 done
 unset canon_env_key
 EOF
-  for k in $(compgen -e | grep -E '^(CANON_|R2E_|WANDB_|HF_|MIN_TOKEN_BUCKET|NEW_MODEL_DESIGN|VLLM_|ROLLOUT_ENGINE|XLA_FLAGS|JAX_|FL_SHARED_MESH|TPU_|TF_CPP|ENABLE_PATHWAYS|PYTHONDONTWRITEBYTECODE)' | sort); do
+  for k in $(compgen -e | grep -E '^(CANON_|R2E_|WANDB_|HF_|MIN_TOKEN_BUCKET|NEW_MODEL_DESIGN|VLLM_|ROLLOUT_ENGINE|XLA_FLAGS|JAX_|FL_SHARED_MESH|TPU_|TF_CPP|ENABLE_PATHWAYS|PYTHONDONTWRITEBYTECODE|PATHWAYS_|GRPC_)' | sort); do
     case "$k" in
       HF_TOKEN|WANDB_API_KEY|INJECTED_*) continue ;;
     esac
