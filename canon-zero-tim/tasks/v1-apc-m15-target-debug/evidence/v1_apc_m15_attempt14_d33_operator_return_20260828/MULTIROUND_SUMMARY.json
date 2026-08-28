@@ -1,0 +1,72 @@
+{
+  "arms": {
+    "off": {
+      "root_markers": {
+        "COLLECTED.json": {
+          "present": false
+        },
+        "COMPLETE.json": {
+          "present": false
+        },
+        "PREFLIGHT.json": {
+          "present": true,
+          "sha256": "4216eda30c56f8eeee36a11b5f31a9aa4c8965d7c28788161f7b132ccee121b3",
+          "source_commit": "003276a3fe2a0ceeaa95a7d940550dab627b8324",
+          "status": "writable-and-source-verified"
+        }
+      },
+      "rounds": [
+        {
+          "diagnostic_round": 0,
+          "status": "ABSENT"
+        },
+        {
+          "diagnostic_round": 1,
+          "status": "ABSENT"
+        },
+        {
+          "diagnostic_round": 2,
+          "status": "ABSENT"
+        }
+      ],
+      "sealed_rounds": 0
+    },
+    "on": {
+      "root_markers": {
+        "COLLECTED.json": {
+          "present": false
+        },
+        "COMPLETE.json": {
+          "present": false
+        },
+        "PREFLIGHT.json": {
+          "present": true,
+          "sha256": "d389e5657622f82290320db2d1660555f066ba8a62c144dca5ded42561619788",
+          "source_commit": "003276a3fe2a0ceeaa95a7d940550dab627b8324",
+          "status": "writable-and-source-verified"
+        }
+      },
+      "rounds": [
+        {
+          "diagnostic_round": 0,
+          "status": "ABSENT"
+        },
+        {
+          "diagnostic_round": 1,
+          "status": "ABSENT"
+        },
+        {
+          "diagnostic_round": 2,
+          "status": "ABSENT"
+        }
+      ],
+      "sealed_rounds": 0
+    }
+  },
+  "claim_ceiling": "Per-round classifiers are independently durable. Root COLLECTED/COMPLETE are still required for a full signed target PASS.",
+  "expected_rounds_per_arm": 3,
+  "next_action": "inspect worker/upload failure before another target launch",
+  "schema": "m15-apc-multiround-small-return-v1",
+  "source_commit": "003276a3fe2a0ceeaa95a7d940550dab627b8324",
+  "status": "NO_DURABLE_ROUND"
+}

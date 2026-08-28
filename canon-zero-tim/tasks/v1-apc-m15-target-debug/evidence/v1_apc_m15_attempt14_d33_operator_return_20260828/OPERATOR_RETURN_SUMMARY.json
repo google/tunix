@@ -1,0 +1,56 @@
+{
+  "claim_ceiling": "Numerical status comes only from MULTIROUND_SUMMARY.json. JobSet and raw-log receipts establish operator completeness, not numerical equality.",
+  "core_status": "NO_DURABLE_ROUND",
+  "jobsets": {
+    "off": {
+      "arm": "off",
+      "conditions": [],
+      "jobset": "canon-v1-apc-m15-off-d33-003276a3",
+      "query_exit_code": 1,
+      "query_status": "QUERY_FAILED",
+      "schema": "m15-apc-jobset-status-v1",
+      "source_commit": "003276a3fe2a0ceeaa95a7d940550dab627b8324",
+      "terminal_condition": null
+    },
+    "on": {
+      "arm": "on",
+      "conditions": [],
+      "jobset": "canon-v1-apc-m15-on-d33-003276a3",
+      "query_exit_code": 1,
+      "query_status": "QUERY_FAILED",
+      "schema": "m15-apc-jobset-status-v1",
+      "source_commit": "003276a3fe2a0ceeaa95a7d940550dab627b8324",
+      "terminal_condition": null
+    }
+  },
+  "jobsets_terminal": false,
+  "raw_logs": {
+    "off": {
+      "arm": "off",
+      "bytes": null,
+      "jobset": "canon-v1-apc-m15-off-d33-003276a3",
+      "object_identity": "canon-v1-apc-m15-off-d33-003276a3/attempt-0/run.log",
+      "payload_returned": false,
+      "schema": "m15-apc-raw-log-receipt-v1",
+      "sha256": null,
+      "source_commit": "003276a3fe2a0ceeaa95a7d940550dab627b8324",
+      "status": "ABSENT"
+    },
+    "on": {
+      "arm": "on",
+      "bytes": null,
+      "jobset": "canon-v1-apc-m15-on-d33-003276a3",
+      "object_identity": "canon-v1-apc-m15-on-d33-003276a3/attempt-0/run.log",
+      "payload_returned": false,
+      "schema": "m15-apc-raw-log-receipt-v1",
+      "sha256": null,
+      "source_commit": "003276a3fe2a0ceeaa95a7d940550dab627b8324",
+      "status": "ABSENT"
+    }
+  },
+  "raw_logs_present": false,
+  "recovery_input_bound": true,
+  "schema": "m15-apc-multiround-operator-return-v1",
+  "source_commit": "003276a3fe2a0ceeaa95a7d940550dab627b8324",
+  "status": "NO_DURABLE_ROUND_OPERATOR_RECEIPTS_INCOMPLETE"
+}

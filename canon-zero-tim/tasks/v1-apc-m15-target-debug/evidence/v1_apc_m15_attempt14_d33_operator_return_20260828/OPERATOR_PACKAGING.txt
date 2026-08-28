@@ -1,0 +1,9 @@
+M15 multiround operator return
+status=NO_DURABLE_ROUND_OPERATOR_RECEIPTS_INCOMPLETE
+core_status=NO_DURABLE_ROUND
+jobsets_terminal=0
+raw_logs_present=0
+recovery_input_bound=1
+raw_log_payload_returned=0
+token_bearing_bundle_returned=0
+remote_state_mutated=0

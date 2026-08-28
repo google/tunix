@@ -1,0 +1,13 @@
+{
+  "campaign_root": "v1-apc-m15-attempt14-d33",
+  "claim_ceiling": "This receipt locates the immutable d33 operator artifacts only. Numerical claims come exclusively from the recovered official classifiers.",
+  "jobsets": {
+    "off": "canon-v1-apc-m15-off-d33-003276a3",
+    "on": "canon-v1-apc-m15-on-d33-003276a3"
+  },
+  "schema": "m15-apc-attempt14-recovery-input-v1",
+  "source_commit": "003276a3fe2a0ceeaa95a7d940550dab627b8324",
+  "status": "LOCATOR_ONLY",
+  "submitted_manifest_sha256": "f0bb33c2949a439e9fa4185adbbec179f1e50775a45b74515224abd219d96274",
+  "submitted_receipt_sha256": "3062ac7a4f40d7c4e0cb29b012bf5141f3b07dd466d4c5e3e6058ad51c28c757"
+}

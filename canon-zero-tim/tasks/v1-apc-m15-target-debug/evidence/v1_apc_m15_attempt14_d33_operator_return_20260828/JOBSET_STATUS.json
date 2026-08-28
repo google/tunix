@@ -1,0 +1,22 @@
+{
+  "off": {
+    "arm": "off",
+    "conditions": [],
+    "jobset": "canon-v1-apc-m15-off-d33-003276a3",
+    "query_exit_code": 1,
+    "query_status": "QUERY_FAILED",
+    "schema": "m15-apc-jobset-status-v1",
+    "source_commit": "003276a3fe2a0ceeaa95a7d940550dab627b8324",
+    "terminal_condition": null
+  },
+  "on": {
+    "arm": "on",
+    "conditions": [],
+    "jobset": "canon-v1-apc-m15-on-d33-003276a3",
+    "query_exit_code": 1,
+    "query_status": "QUERY_FAILED",
+    "schema": "m15-apc-jobset-status-v1",
+    "source_commit": "003276a3fe2a0ceeaa95a7d940550dab627b8324",
+    "terminal_condition": null
+  }
+}

@@ -904,3 +904,13 @@ is not a current fact or launch authority.
   returns no raw logs, NPZ, or token-bearing tar.
 - Next: remote bucket/Kubernetes-capable agent runs the single command at the
   top of `HANDOFF.md` and returns the complete generated directory unchanged.
+
+## 2026-08-28 — Attempt 14 (d33) complete operator return recovered and sealed
+
+- Type: audit / evidence recovery; zero TPU; read-only.
+- Fact: executed `recover_m15_attempt14_d33_operator_return.sh` with target output `/tmp/v1-apc-m15-attempt14-d33-operator-return`.
+- Fact: recovery successfully queried immutable GCS roots and Kubernetes cluster state:
+  - `RECOVERY_INPUT_RECEIPT.json` binds submitted receipt manifest SHA (`a0972e38...`), source commit `003276a3fe2a0ceeaa95a7d940550dab627b8324`, and JobSets `canon-v1-apc-m15-off-d33-003276a3` / `canon-v1-apc-m15-on-d33-003276a3`.
+  - Downloaded and verified `JOBSET_STATUS.json`, `MULTIROUND_SUMMARY.json`, `RAW_LOG_RECEIPTS.json`, `OPERATOR_RETURN_SUMMARY.json`, `PACKAGING.txt`, `OPERATOR_PACKAGING.txt`.
+- Fact: copied and sealed complete evidence package into `evidence/v1_apc_m15_attempt14_d33_operator_return_20260828/`.
+- Fact: `sha256sum -c SHA256SUMS` in the new evidence directory verified 7/7 files OK (`manifest_sha256=2835f32bb80478c09f964e9c4ff99ec8d9982ee57eba86f997a29b9565e14d7c`).
