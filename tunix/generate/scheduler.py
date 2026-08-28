@@ -22,15 +22,20 @@ from tunix.generate import utils
 class Request:
   def __init__(self, req_id: str, prompt_token_ids: List[int]):
     self.request_id = req_id
+    self.prompt_length = len(prompt_token_ids)
+
     self.token_ids = prompt_token_ids
-    self.page_ids = []
     self.logprobs = []
     self.logits = []
+
     self.last_page_hash = 0 
+    self.page_ids = []
+
     self.num_completed_tokens = 0
     self.num_in_flight_tokens = 0
+
     self.is_decode = False
-    self.is_chunked_prefill = True 
+    self.is_chunked_prefill = False 
     self.is_prefill = True
 
 class Scheduler:
@@ -41,20 +46,24 @@ class Scheduler:
     max_num_batch_tokens: int,
     max_seqs_per_batch: int,
   ):
-    self._kv_cache_manager = kv_cache_manager
+    # --- Scheduling parameters --
+    self.max_seqs_per_batch: int = max_seqs_per_batch 
+    self.max_num_batch_tokens: int = max_num_batch_tokens
     
-    self.max_seqs_per_batch = max_seqs_per_batch 
-    self.max_num_batch_tokens = max_num_batch_tokens
+    # --- Seq state --- 
+    self._running_requests: Deque[Request] = collections.deque()
+    self._pending_requests: Deque[Request] = collections.deque()
     
-    self._running_requests = collections.deque()
-    self._pending_requests = collections.deque()
-    
+    # --- KV cache state --- 
+    self._kv_cache_manager: TieredPagePoolManager = kv_cache_manager
+
     self._prefix_hash_to_page_id: Dict[int, int] = {}
     self._page_ref_counts: Dict[int, int] = {}
     
-    self._unreferenced_tpu_pages = collections.OrderedDict()
-    self._unreferenced_cpu_pages = collections.OrderedDict()
-
+    self._unreferenced_tpu_page_ids: OrderedDict[int, int] = collections.OrderedDict()
+    self._unreferenced_cpu_page_ids: OrderedDict[int, int] = collections.OrderedDict()
+  
+  # ----------- Page state getters ----------- 
   @property
   def _num_free_tpu_pages(self):
     return self._kv_cache_manager.num_free_tpu_pages
@@ -69,17 +78,18 @@ class Scheduler:
 
   def _get_page_location(self, page_id):
     return self._kv_cache_manager.get_page_location(page_id)
-
+  
+  # ----------- Page management ----------- 
   def _touch_page(self, page_id: int):
     """Mark that a page was referenced."""
     if page_id not in self._page_ref_counts:
       self._page_ref_counts[page_id] = 1
     else:
       self._page_ref_counts[page_id] += 1
-      if page_id in self._unreferenced_tpu_pages:
-          del self._unreferenced_tpu_pages[page_id]
-      elif page_id in self._unreferenced_cpu_pages:
-          del self._unreferenced_cpu_pages[page_id]
+      if page_id in self._unreferenced_tpu_page_ids:
+          del self._unreferenced_tpu_page_ids[page_id]
+      elif page_id in self._unreferenced_cpu_page_ids:
+          del self._unreferenced_cpu_page_ids[page_id]
 
   def _release_page(self, page_id: int):
     """Release a reference to a page."""
@@ -89,10 +99,10 @@ class Scheduler:
       return 
     
     if self._get_page_location(page_id) == "tpu":
-      self._unreferenced_tpu_pages[page_id] = None
+      self._unreferenced_tpu_page_ids[page_id] = None
     
     else:
-      self._unreferenced_cpu_pages[page_id] = None
+      self._unreferenced_cpu_page_ids[page_id] = None
 
   def _allocate(self, request: Request, num_pages: int):
     """Allocate TPU pages for a request."""
@@ -111,40 +121,27 @@ class Scheduler:
       request.page_ids.append(pid)
       self._touch_page(pid)
 
-  def _preempt(self):
-    """Remove the newest-request from the active batch."""
-    preempted_request = self._running_requests.pop()
-    preempted_request.is_prefill = True
-    preempted_request.last_page_hash = 0 
-
-    # Release pages in reverse order so that right-most pages are reused 
-    # first (this allows left-most pages to still be prefixed-matched).
-    for pid in reversed(preempted_request.page_ids):
-        self._release_page(pid)
-    
-    self._pending_requests.appendleft(preempted_request)
-
   def _free_up_unreferenced_tpu_space(self, num_pages: int):
     """Free unreferenced TPU pages, offloading to CPU where possible."""
     if num_pages <= 0: 
         return
     
-    assert(num_pages <= len(self._unreferenced_tpu_pages))
+    assert(num_pages <= len(self._unreferenced_tpu_page_ids))
 
     cpu_shortfall = num_pages - self._num_free_cpu_pages
     if cpu_shortfall > 0:
-        evictable = min(cpu_shortfall, len(self._unreferenced_cpu_pages))
+        evictable = min(cpu_shortfall, len(self._unreferenced_cpu_page_ids))
         self._free_up_unreferenced_cpu_space(evictable)
 
     pages_to_offload = []
     pages_to_discard = []
     
     for _ in range(num_pages):
-        pid, _ = self._unreferenced_tpu_pages.popitem(last=False)
+        pid, _ = self._unreferenced_tpu_page_ids.popitem(last=False)
         
         if self._num_free_cpu_pages > 0:
             pages_to_offload.append(pid)
-            self._unreferenced_cpu_pages[pid] = None
+            self._unreferenced_cpu_page_ids[pid] = None
         else:
           pages_to_discard.append(pid)
 
@@ -158,16 +155,90 @@ class Scheduler:
     """Free unreferenced cpu pages."""
     if num_pages <= 0: return
     
-    n_unref_pages = len(self._unreferenced_cpu_pages)
+    n_unref_pages = len(self._unreferenced_cpu_page_ids)
     assert(num_pages <= n_unref_pages)
     
     pages_to_evict = []
     for _ in range(num_pages):
-      pid, _ = self._unreferenced_cpu_pages.popitem(last=False)
+      pid, _ = self._unreferenced_cpu_page_ids.popitem(last=False)
       pages_to_evict.append(pid)
       del self._page_ref_counts[pid]
         
     self._kv_cache_manager.evict(pages_to_evict)
+  
+  # ----------- Request helpers ----------- 
+  def _chunk_and_hash(self, tokens: List[int]) -> List[int]:
+    """Returns the list of block hashes for a full sequence of tokens."""
+    hashes = []
+    parent_hash = 0
+    for i in range(0, len(tokens), self._page_size):
+        chunk = tuple(tokens[i:i+self._page_size])
+        parent_hash = hash((parent_hash, chunk))
+        hashes.append(parent_hash)
+    return hashes
+
+  def _get_matched_pages(self, request: Request):
+    """Returns a list of matched prefix pages for a request."""
+    req_hashes = self._chunk_and_hash(request.token_ids)
+    matched_page_ids = []
+
+    for h in req_hashes:
+      if h not in self._prefix_hash_to_page_id:
+        break 
+      
+      pid = self._prefix_hash_to_page_id[h]
+      
+      if self._get_page_location(pid) is None:
+        del self._prefix_hash_to_page_id[h]
+        break
+
+      matched_page_ids.append(pid)
+      request.last_page_hash = h 
+
+    return matched_page_ids
+
+  def _deduplicate_and_cache_full_pages(self) -> int:
+    """
+    Hashes newly completed pages. If a collision is found in the cache, 
+    deduplicates the page and returns the number of freed physical pages.
+    """
+
+    for req in self._running_requests:
+      n_tokens = len(req.token_ids)
+      n_full_pages = n_tokens // self._page_size 
+      if n_full_pages == 0:
+          continue
+      
+      full_page_tokens = req.token_ids[:n_full_pages * self._page_size]
+      hashes = self._chunk_and_hash(full_page_tokens)
+      
+      # TODO: Only new full pages need to be checked for duplications.
+      for i, chunk_hash in enumerate(hashes):
+          pid = req.page_ids[i]
+          
+          if chunk_hash in self._prefix_hash_to_page_id:
+            cached_pid = self._prefix_hash_to_page_id[chunk_hash]
+            if cached_pid != pid:
+              # Deduplicate page in case of cache hit.
+              req.page_ids[i] = cached_pid
+              self._release_page(pid)
+              self._touch_page(cached_pid)
+          else:
+            self._prefix_hash_to_page_id[chunk_hash] = pid
+
+  # ----------- Scheduling ----------- 
+  def _preempt(self):
+    """Remove the newest-request from the active batch."""
+    preempted_request = self._running_requests.pop()
+    preempted_request.is_prefill = True
+    preempted_request.last_page_hash = 0 
+
+    # Release pages in reverse order so that right-most pages are reused 
+    # first (this allows left-most pages to still be prefixed-matched).
+    for pid in reversed(preempted_request.page_ids):
+        self._release_page(pid)
+    
+    self._pending_requests.appendleft(preempted_request)
 
   def schedule_step(self, new_requests: List[Request]) -> Tuple[List[Request], List[int]]:
     """
@@ -208,44 +279,7 @@ class Scheduler:
     distribution = [i, j, k]
 
     return list(self._running_requests), distribution
-
-  def _deduplicate_and_cache_full_pages(self) -> int:
-    """
-    Hashes newly completed pages. If a collision is found in the cache, 
-    deduplicates the page and returns the number of freed physical pages.
-    """
-
-    for req in self._running_requests:
-      n_tokens = len(req.token_ids)
-      n_full_pages = n_tokens // self._page_size 
-      if n_full_pages == 0:
-          continue
-          
-      hashes = self._chunk_and_hash(req.token_ids[:n_full_pages * self._page_size])
-      
-      for i, chunk_hash in enumerate(hashes):
-          pid = req.page_ids[i]
-          
-          if getattr(req, '_hashed_pages', None) is None:
-              req._hashed_pages = set()
               
-          if i in req._hashed_pages:
-              continue
-              
-          if chunk_hash in self._prefix_hash_to_page_id:
-            cached_pid = self._prefix_hash_to_page_id[chunk_hash]
-            if cached_pid != pid:
-              # Deduplicate page in case of cache hit
-              req.page_ids[i] = cached_pid
-              self._release_page(pid)
-              self._touch_page(cached_pid)
-          else:
-            self._prefix_hash_to_page_id[chunk_hash] = pid
-            
-          req._hashed_pages.add(i)
-          
-      req.last_page_hash = hashes[-1] if hashes else getattr(req, 'last_page_hash', 0)
-            
   def _queue_new_requests(self, new_requests: List[Request]):
     """Insert new requests into the pending queue."""
     for req in new_requests:
@@ -259,7 +293,7 @@ class Scheduler:
     if len(self._running_requests) == 0:
       return
 
-    n_pages_available = self._num_free_tpu_pages + len(self._unreferenced_tpu_pages)
+    n_pages_available = self._num_free_tpu_pages + len(self._unreferenced_tpu_page_ids)
 
     n_running_admitted = 0
     while n_running_admitted < len(self._running_requests):
@@ -300,43 +334,12 @@ class Scheduler:
     
     # Verify that deadlock did not occur 
     assert(len(self._running_requests) > 0)
-
-  def _chunk_and_hash(self, tokens: List[int]) -> List[int]:
-    """Returns the list of block hashes for a full sequence of tokens."""
-    hashes = []
-    parent_hash = 0
-    for i in range(0, len(tokens), self._page_size):
-        chunk = tuple(tokens[i:i+self._page_size])
-        parent_hash = hash((parent_hash, chunk))
-        hashes.append(parent_hash)
-    return hashes
-
-
-  def _get_matched_pages(self, request: Request):
-    """Returns a list of matched prefix pages for a request."""
-    req_hashes = self._chunk_and_hash(request.token_ids)
-    matched_page_ids = []
-
-    for h in req_hashes:
-      if h not in self._prefix_hash_to_page_id:
-        break 
-      
-      pid = self._prefix_hash_to_page_id[h]
-      
-      if self._get_page_location(pid) is None:
-        del self._prefix_hash_to_page_id[h]
-        break
-
-      matched_page_ids.append(pid)
-      request.last_page_hash = h 
-
-    return matched_page_ids
-
+  
   def _schedule_pending_sequences(self):
     """
     Admit pending sequences while TPU space is available.
     """
-    n_free_tpu = self._num_free_tpu_pages + len(self._unreferenced_tpu_pages)
+    n_free_tpu = self._num_free_tpu_pages + len(self._unreferenced_tpu_page_ids)
     pages_to_load = set()
 
     while self._pending_requests:
@@ -383,7 +386,7 @@ class Scheduler:
       self._running_requests.append(req)
 
       self._token_budget -= n_tokens_to_compute
-      req.num_in_flight_tokens = n_tokens_to_load
+      req.num_in_flight_tokens = n_tokens_to_compute
 
       n_free_tpu -= n_total_tpu_cost
 

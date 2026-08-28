@@ -11,21 +11,34 @@ from tunix.generate import utils
 @dataclasses.dataclass(kw_only=True)
 class PagePool:
   partition_pages: dict[str, jax.Array]
-  available_page_indices: collections.deque
-  num_free_pages: int
+  available_page_indices: List[int] 
+  allocated_pages: set = dataclasses.field(default_factory=set)
 
   def allocate(self, num_pages: int) -> list[int]:
-    """Allocates physical indices from the pool."""
-    assert num_pages <= self.num_free_pages, "Not enough physical pages"
-    indices = [self.available_page_indices.popleft() for _ in range(num_pages)]
-    self.num_free_pages -= num_pages
+    """Allocates pages in the pool."""
+    assert num_pages <= self.num_free_pages
+
+    indices = self.available_page_indices[-num_pages:]
+    del self.available_page_indices[-num_pages:]
+
+    if __debug__:
+      self.allocated_pages.update(indices)
+
     return indices
 
   def free(self, indices: list[int]):
-    """Frees physical indices logically."""
-    for idx in indices:
-        self.available_page_indices.append(idx)
-    self.num_free_pages += len(indices)
+    """Frees pages in the pool."""
+    if __debug__:
+      for idx in indices:
+        assert(idx in self.allocated_pages)
+        self.allocated_pages.remove(idx)        
+
+    self.available_page_indices.extend(indices)
+
+  @property
+  def num_free_pages(self):
+    return len(self.available_page_indices)
+    
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class TieredPagePoolConfig:
@@ -81,24 +94,23 @@ class TieredPagePoolConfig:
     num_pages: int,
     sharding=None,
     device: jax.Device = None
-    ) -> PagePool:
+  ) -> PagePool:
     with jax.default_device(device) if device else contextlib.nullcontext():
       shape = (num_pages, self.page_size) + self.page_subshape
 
       pages_dict = {}
       for k in self.partition_keys:
-          arr = jnp.zeros(shape, dtype=self.dtype)
-          if sharding is not None:
-              arr = utils.shard(arr, sharding)
-          pages_dict[k] = arr
+        arr = jnp.zeros(shape, dtype=self.dtype)
+        if sharding is not None:
+            arr = utils.shard(arr, sharding)
+        pages_dict[k] = arr
 
-      init_page_indices = range(num_pages)
-      avail_indices = collections.deque(init_page_indices)
+    init_page_indices = range(num_pages)
+    avail_indices = list(init_page_indices)
 
     return PagePool(
       partition_pages=pages_dict,
       available_page_indices=avail_indices,
-      num_free_pages=num_pages,
     )
 
   def init(self) -> tuple[PagePool, PagePool | None]:
@@ -125,13 +137,11 @@ class TieredPagePoolManager:
       tiered_config: TieredPagePoolConfig,
       tpu_pool: PagePool,
       cpu_pool: PagePool | None,
-      max_num_seqs: int = 256,
   ):
     self.config = tiered_config
     self.tpu_pool = tpu_pool
     self.cpu_pool = cpu_pool
     self.page_size = tiered_config.page_size
-    self.max_num_seqs = max_num_seqs
 
     self._next_page_id: int = 0
     self._page_id_to_idx: Dict[int, int] = {}
@@ -145,7 +155,6 @@ class TieredPagePoolManager:
   def num_free_cpu_pages(self):
     if self.cpu_pool:
       return self.cpu_pool.num_free_pages
-
     return 0
 
   def get_page_location(self, page_id):
@@ -186,25 +195,29 @@ class TieredPagePoolManager:
 
     # Caller should verify that sufficent pages are available
     assert(len(page_ids) <= self.num_free_tpu_pages)
-
+    
+    # --- Gather physical CPU idxs ---
     physical_cpu_idxs = []
     for pid in page_ids:
       assert(self._page_location.get(pid) == "cpu")
       physical_cpu_idxs.append(self._page_id_to_idx[pid])
-
+    
+    # --- Copy CPU pages into new TPU pages --- 
     physical_hbm_idxs = self.tpu_pool.allocate(len(page_ids))
-    self.cpu_pool.free(physical_cpu_idxs)
     
     cpu_indices_arr = jnp.array(physical_cpu_idxs, dtype=jnp.int32)
     tpu_indices_arr = jnp.array(physical_hbm_idxs, dtype=jnp.int32)
 
     for layer_name in self.tpu_pool.partition_pages.keys():
-       cpu_tensor = self.cpu_pool.partition_pages[layer_name]
-       source_data = cpu_tensor[cpu_indices_arr]
-       
-       tpu_tensor = self.tpu_pool.partition_pages[layer_name]
-       self.tpu_pool.partition_pages[layer_name] = tpu_tensor.at[tpu_indices_arr].set(source_data)
-
+      self.tpu_pool.partition_pages[layer_name] = copy_physical_pages(
+          src_pages=self.cpu_pool.partition_pages[layer_name],
+          dst_pages=self.tpu_pool.partition_pages[layer_name],
+          src_idxs=cpu_indices_arr,
+          dst_idxs=tpu_indices_arr,
+      )
+    
+    # --- Update page states ---
+    self.cpu_pool.free(physical_cpu_idxs)
     for pid, p_idx in zip(page_ids, physical_hbm_idxs):
       self._page_id_to_idx[pid] = p_idx
       self._page_location[pid] = "tpu"
@@ -215,25 +228,32 @@ class TieredPagePoolManager:
 
     if not page_ids:
       return
-
+    
+    # Caller should verify that sufficent pages are available
+    assert(len(page_ids) <= self.num_free_cpu_pages)
+    
+    # --- Gather physical TPU idxs ---
     physical_tpu_idxs = []
     for pid in page_ids:
       assert(self._page_location.get(pid) == "tpu")
       physical_tpu_idxs.append(self._page_id_to_idx[pid])
 
     physical_cpu_idxs = self.cpu_pool.allocate(len(page_ids))
-    self.tpu_pool.free(physical_tpu_idxs)
     
+    # --- Copy TPU pages into new CPU pages ---  
     cpu_indices_arr = jnp.array(physical_cpu_idxs, dtype=jnp.int32)
     tpu_indices_arr = jnp.array(physical_tpu_idxs, dtype=jnp.int32)
 
     for layer_name in self.tpu_pool.partition_pages.keys():
-       tpu_tensor = self.tpu_pool.partition_pages[layer_name]
-       source_data = tpu_tensor[tpu_indices_arr]
-       
-       cpu_tensor = self.cpu_pool.partition_pages[layer_name]
-       self.cpu_pool.partition_pages[layer_name] = cpu_tensor.at[cpu_indices_arr].set(source_data)
-
+      self.cpu_pool.partition_pages[layer_name] = copy_physical_pages(
+        src_pages=self.tpu_pool.partition_pages[layer_name],
+        dst_pages=self.cpu_pool.partition_pages[layer_name],
+        src_idxs=tpu_indices_arr,
+        dst_idxs=cpu_indices_arr,
+      )   
+    
+    # --- Update page states ---
+    self.tpu_pool.free(physical_tpu_idxs)
     for pid, p_idx in zip(page_ids, physical_cpu_idxs):
       self._page_id_to_idx[pid] = p_idx
       self._page_location[pid] = "cpu"
@@ -260,3 +280,36 @@ class TieredPagePoolManager:
       self.cpu_pool.free(cpu_idxs_to_evict)
     if tpu_idxs_to_evict and self.tpu_pool:
       self.tpu_pool.free(tpu_idxs_to_evict)
+
+
+def _put_on_target_device(tensor: jax.Array,
+                          target_tensor: jax.Array) -> jax.Array:
+  if hasattr(target_tensor, 'sharding') and target_tensor.sharding is not None:
+    sharding = target_tensor.sharding
+    if isinstance(sharding, jax.sharding.NamedSharding):
+      safe_spec = _remove_dp_spec(sharding.spec)
+      target_sharding = jax.sharding.NamedSharding(sharding.mesh, safe_spec)
+      return jax.device_put(tensor, target_sharding)
+    elif isinstance(sharding, jax.sharding.SingleDeviceSharding):
+      return jax.device_put(tensor, sharding)
+
+  if hasattr(target_tensor, 'devices') and len(target_tensor.devices()) > 0:
+    return jax.device_put(tensor, list(target_tensor.devices())[0])
+
+  return tensor
+
+
+def copy_physical_pages(
+    src_pages: jax.Array,
+    dst_pages: jax.Array,
+    src_idxs: jax.Array,
+    dst_idxs: jax.Array,
+) -> jax.Array:
+  if len(src_idxs) == 0:
+    return dst_pages
+
+  src_slice = src_pages[src_idxs]
+  src_slice = _put_on_target_device(src_slice, dst_pages)
+
+  dst_pages = dst_pages.at[dst_idxs].set(src_slice)
+  return dst_pages

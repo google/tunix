@@ -6,15 +6,14 @@ import numpy as np
 import builtins
 import jax
 import jax.numpy as jnp
-
-import jax
-import jax.numpy as jnp
+import numpy as np
 from tunix.generate import scheduler
 from tunix.generate import tiered_page_pool as tiered_page_lib
 from tunix.generate import sampler_v2 as sampler_lib
 from tunix.tests import test_common as tc
 from tunix.generate import utils
 """Core orchestration engine for continuous batching."""
+
 
 def create_kv_page_manager(
     cache_config,
@@ -88,7 +87,6 @@ def create_kv_page_manager(
         tiered_config=config,
         tpu_pool=tpu_pool,
         cpu_pool=cpu_pool,
-        max_num_seqs=cache_config.max_num_seqs,
     )
 
 class LLMEngine:
@@ -106,16 +104,12 @@ class LLMEngine:
         self.max_num_batch_tokens = cache_config.max_num_batch_tokens
         
         self.eos_ids = [tokenizer.eos_id() if hasattr(tokenizer, 'eos_id') else tokenizer.GetPieceSize()]
-
-
-
         self._new_requests = []
         self.max_seq_len = cache_config.max_prompt_length + cache_config.max_tokens_to_generate
         
         # TODO (AGT): Properly wire this (maybe pull it out into a seperate func, and add a sampling config) 
         self.sampler = sampler_lib.VanillaSampler(
             transformer=transformer,
-            tokenizer=tokenizer,
             cache_config=cache_config,
             image_processor=image_processor,
         )
@@ -125,6 +119,7 @@ class LLMEngine:
         shd_config = getattr(model_config, 'shd_config', None)
 
         kv_dtype = self.sampler.dtype
+        print("Dtype: ", kv_dtype)
         
         # TODO (AGT): Move kv_cache initalization into a seperate function.
         dp_size = 1
@@ -165,14 +160,23 @@ class LLMEngine:
             max_num_batch_tokens=self.max_num_batch_tokens, max_seqs_per_batch=self.cache_config.max_num_seqs,
         )
         
-    def add_request(self, req_id: str, prompt_tokens: List[int], **kwargs):
-        req = scheduler.Request(req_id, prompt_tokens)
-        req._prompt_len = len(prompt_tokens)
-        for k, v in kwargs.items():
-            setattr(req, k, v)
-        self._new_requests.append(req)
+    def tokenize(self, input_string: str) -> np.ndarray | list[int]:
+      """Tokenizes the input string."""
+      input_ids = self.tokenizer.encode(input_string)
+      bos_tok = [self.tokenizer.bos_id()] if self.tokenizer.bos_id() else []
+      input_ids = np.array(
+          self.tokenizer.dedup_bos_ids(bos_tok + input_ids), dtype=np.int32
+      )
+      return input_ids
+     
+    def add_request(self, req_id: str, prompt: str, **kwargs):
+      token_ids = self.tokenize(prompt)
+      req = scheduler.Request(req_id, token_ids)
+      for k, v in kwargs.items():
+          setattr(req, k, v)
+      self._new_requests.append(req)
 
-        return req
+      return req
         
     def has_unfinished_requests(self) -> bool:
         return len(self._new_requests) > 0 or len(self.scheduler._pending_requests) > 0 or len(self.scheduler._running_requests) > 0
@@ -256,7 +260,7 @@ class LLMEngine:
           r.num_in_flight_tokens = 0
           
           terminated = new_token in self.eos_ids or (sampling_config.eos_token_ids and new_token in sampling_config.eos_token_ids)
-          truncated = (len(r.token_ids) - getattr(r, '_prompt_len', 0)) >= self.cache_config.max_tokens_to_generate
+          truncated = (len(r.token_ids) - r.prompt_length) >= self.cache_config.max_tokens_to_generate
           if terminated or truncated:
               for pid in reversed(r.page_ids):
                   self.scheduler._release_page(pid)
