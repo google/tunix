@@ -1017,6 +1017,29 @@ class WeightSyncCoordinator:
       preflight_problems = _manifest_mismatches(src_metadata, dst_metadata)
       if preflight_problems:
         failures.extend(preflight_problems)
+        # As with registration below: the failures ride on `WeightSyncError`
+        # structurally, but the default renderer prints only the outer
+        # message, so a mismatch would otherwise report "preflight failed"
+        # with nothing naming the offending variable.
+        # Problems are name-sorted, so a total naming-convention mismatch
+        # fills the head of the list with one side only. Sample both
+        # manifests explicitly -- that is what identifies the convention
+        # gap, which the problem lines alone cannot show.
+        src_names = sorted(v.name for m in src_metadata for v in m.variables)
+        dst_names = sorted(v.name for m in dst_metadata for v in m.variables)
+        logging.error(
+            "manifest preflight failed: %d source var(s), %d destination"
+            " var(s), %d problem(s)\n"
+            "  source sample:\n    %s\n"
+            "  destination sample:\n    %s\n"
+            "  problems (first 20):\n    %s",
+            len(src_names),
+            len(dst_names),
+            len(preflight_problems),
+            "\n    ".join(src_names[:8]),
+            "\n    ".join(dst_names[:8]),
+            "\n    ".join(preflight_problems[:20]),
+        )
         raise fail(
             "manifest preflight failed before any destination was quiesced;"
             " no rollback needed"
