@@ -123,10 +123,12 @@ probe maps every non-zero query to `absent` and derives log absence from the
 root-manifest probe rather than an independent log stat, this is a durability
 audit failure, not certified physical absence and not a numerical result.
 
-The active D3 gate is therefore a receipt-bound, read-only recursive inventory
-with three-way `PASS|NOT_FOUND|QUERY_FAILED` semantics and sanitized
-round-handshake marker extraction. The exact contract is at the top of
-`HANDOFF.md`. Phase E remains closed.
+That recursive inventory is now complete and proves that both roots use the
+old flat `wide/shards/` layout: 88 contiguous off triples and 74 contiguous on
+triples. It did not inspect any shard content. The active D3 gate is now the
+receipt-bound flat-shard content audit described at the top of `HANDOFF.md`:
+verify every completion receipt and manifest, then derive the diagnostic-round
+histogram before downloading archive payloads. Phase E remains closed.
 
 ## Target gate and decision table
 
@@ -154,7 +156,7 @@ red checkpoint.
 After the current d33 recovery return:
 
 ```text
-TARGET_EXECUTED / RETURN_FILE_INTEGRITY_PASS /
-NO_DURABLE_ROUND_REPORTED / DURABILITY_AUDIT_INCONCLUSIVE /
+TARGET_EXECUTED / INVENTORY_RETURN_HASH_PASS /
+FLAT_SHARD_OBJECT_GEOMETRY_PRESENT / SHARD_CONTENT_NOT_VERIFIED /
 FIRST_RED_NOT_LOCALIZED / NUMERICAL_FIX_NOT_AUTHORIZED
 ```

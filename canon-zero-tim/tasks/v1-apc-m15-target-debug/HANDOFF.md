@@ -1,115 +1,103 @@
 # M15 APC target-debug handoff
 
-## START HERE — audit d33 durability; do not launch or repair
+## START HERE — validate the d33 flat shards; do not launch or repair
 
-The Attempt-14 (`d33`) recovery has already run and its returned directory is
-sealed at
-`evidence/v1_apc_m15_attempt14_d33_operator_return_20260828/`. Independent
-`sha256sum -c SHA256SUMS` verifies all seven listed payloads. File integrity is
-green; scientific completeness is red. The machine statuses are:
+Attempt 14 (`d33`) now has two immutable small returns:
 
-```text
-MULTIROUND_SUMMARY.status=NO_DURABLE_ROUND
-off.sealed_rounds=0
-on.sealed_rounds=0
-OPERATOR_RETURN_SUMMARY.status=NO_DURABLE_ROUND_OPERATOR_RECEIPTS_INCOMPLETE
-off.jobset.query_status=QUERY_FAILED
-on.jobset.query_status=QUERY_FAILED
-off.raw_log.status=ABSENT
-on.raw_log.status=ABSENT
-```
+- `evidence/v1_apc_m15_attempt14_d33_operator_return_20260828/` records the
+  original `NO_DURABLE_ROUND_OPERATOR_RECEIPTS_INCOMPLETE` result;
+- `evidence/v1_apc_m15_attempt14_d33_inventory_return_20260828/` resolves the
+  query ambiguity and proves both recursive listings succeeded.
 
-Both arms have source-verified `PREFLIGHT.json`, but neither arm has a returned
-per-round classifier, `COLLECTED.json`, or `COMPLETE.json`. There is therefore
-no new numerical evidence in this recovery. The older manually minimized d33
-subset still reports off-exact/on-red, endpoint A-B=99 bytes, B-C=0, and the
-analysis-grade interval `k_post_rope -> rpa_output`; none of those statements
-has been reproduced from an official per-round classifier.
+The inventory manifest verifies all six listed payloads. Its exact transport
+facts are:
+
+| Arm | Objects | Flat shard triples | Sequence | Other durable objects |
+|---|---:|---:|---|---|
+| APC off | 265 | 88 | `000000..000087` | root `PREFLIGHT.json` only |
+| APC on | 223 | 74 | `000000..000073` | root `PREFLIGHT.json` only |
+
+Every listed shard directory has the three expected object names:
+`SHA256SUMS`, `SHARD_ARCHIVE.tar`, and `SHARD_COMPLETE.json`. There are no
+objects under `wide/rounds/` or `live/`. Direct `run.log` stat returned a real
+provider `404/NOT_FOUND`; both JobSets also return `NOT_FOUND`, with no
+recoverable terminal state.
+
+This proves that the previous multiround recovery queried the wrong physical
+layout: d33 uploaded observer shards to `wide/shards/`, while the recovery
+looked only under `wide/rounds/000000..000002/`. It does **not** yet prove the
+contents of any shard. The current inventory tool lists object names only; it
+does not download or verify the shard completion receipt, manifest, archive
+digest, diagnostic round, record counts, or JSON/NPZ payload.
 
 The strict status is:
 
 ```text
-RETURN_FILE_INTEGRITY_PASS / DURABILITY_AUDIT_INCONCLUSIVE /
-NO_DURABLE_ROUND_REPORTED / OPERATOR_RECEIPTS_INCOMPLETE /
-RPA_OUTPUT_FIRST_RED_REPORTED_ONLY / FIRST_RED_NOT_LOCALIZED /
-PHASE_E_CLOSED / NUMERICAL_REPAIR_NOT_AUTHORIZED
+INVENTORY_RETURN_HASH_PASS / GCS_LIST_PASS /
+FLAT_SHARD_OBJECT_GEOMETRY_PRESENT /
+SHARD_CONTENT_NOT_VERIFIED / OFFICIAL_CLASSIFIER_MISSING /
+FIRST_RED_NOT_LOCALIZED / PHASE_E_CLOSED /
+NUMERICAL_REPAIR_NOT_AUTHORIZED
 ```
 
-### Why `ABSENT` is not yet proof of physical absence
+The manually minimized d33 package still reports off A-B/B-C exact, on
+endpoint A-B=99 bytes with B-C=0, and the analysis-grade interval
+`k_post_rope -> rpa_output`. It is not bound to a reproducible official
+per-round classifier. Do not describe the RPA tensor itself as having 99 red
+bytes and do not modify `rpa_kernel_p66.py` from that report.
 
-The current audit collapses every non-zero object query into `absent`:
+### Next agent work order — flat-shard content audit, then stop
 
-- `run_m15_multiround_gcs_return.sh` uses a boolean `gcs_exists`; permission,
-  transient, path, and not-found failures all become the same inventory word;
-- `run_m15_multiround_operator_return.sh` reports `run.log` as `ABSENT` when
-  the root `SHA256SUMS` query fails. It does not independently stat `run.log`;
-- both `kubectl get jobset` calls returned exit code 1 and discarded stderr,
-  so no terminal JobSet fact was recovered.
+Use a fresh `local/*` worktree from the latest operator tip. First implement
+and host-test a receipt-bound flat-shard audit; stop for user approval before
+any GCS query, commit, push, or target launch.
 
-The returned `NO_DURABLE_ROUND` is the valid result of the current audit, but
-it is not yet a certified statement that every remote round/log object is
-physically absent. Do not repair `rpa_kernel_p66.py`, do not open Phase E, and
-do not spend another 64-TPU run until this ambiguity is removed.
+1. Derive source, campaign, JobSet names, and registered roots only from the
+   sealed `RECOVERY_INPUT_RECEIPT.json`. No hand-entered root is accepted.
+2. Reuse the fail-closed flat-shard rules from the Attempt-13 audit rather than
+   trusting the new inventory's counts. For all 88 off and 74 on sequences,
+   fetch the small `SHARD_COMPLETE.json` and `SHA256SUMS` files.
+3. Verify for every sequence:
+   - contiguous, unique sequence number and exactly three remote members;
+   - expected full source SHA and durability schema;
+   - completion-receipt status and manifest SHA;
+   - archive SHA recorded by the completion receipt equals the archive entry
+     in the shard manifest;
+   - `diagnostic_round`, record-pair count, payload bytes, and archive bytes.
+4. Produce a round histogram per arm. Do not assume flat sequence equals
+   round. This is the next decisive fact:
+   - only round 0 means the run never durably crossed its first seal;
+   - rounds 0/1/2 mean the flat shards may be regrouped and salvaged;
+   - missing/invalid round metadata is an evidence-contract RED.
+5. Initially do not download the archives. Return one self-hashed small
+   package containing the per-shard completion receipts or a normalized
+   receipt ledger, per-arm round histograms, record/byte totals, query
+   receipts, and a machine decision.
+6. Required negative tests: missing triple member, non-contiguous sequence,
+   duplicate sequence, source mismatch, manifest mismatch, archive-digest
+   mismatch, invalid round, query failure, and one-bit receipt mutation.
 
-### Next agent work order — one read-only inventory, then stop
+The machine decision must be one of:
 
-Use a fresh `local/*` branch/worktree from the latest operator tip. Do not
-launch TPU/Kubernetes, alter GCS, or fetch token/NPZ/tar payloads. Make an
-additive audit CL with tests; do not rewrite the sealed return.
-
-1. Add a d33 receipt-driven inventory entrypoint. It must derive both exact
-   object roots, source SHA, and JobSet names from
-   `RECOVERY_INPUT_RECEIPT.json`; no hand-entered remote path is accepted.
-2. Perform one recursive listing per arm and preserve the query outcome as
-   `PASS`, `NOT_FOUND`, or `QUERY_FAILED`. A non-zero command may not be
-   relabeled `NOT_FOUND` without a provider-specific not-found classification.
-   Record the exit code plus a sanitized stderr SHA/excerpt; never return a
-   credential, signed URL, or bucket root.
-3. Return sanitized relative object names and counts for root aliases,
-   `wide/rounds/`, `wide/shards/`, and `live/`. Direct-stat `run.log`
-   independently from root `SHA256SUMS` and record its SHA/size only.
-4. Query both exact JobSets independently. Preserve sanitized stderr when the
-   query fails instead of discarding it.
-5. If `run.log` exists, extract only these marker families into a small,
-   self-hashed text/JSON receipt; do not return the full log:
-
-   ```text
-   LIVE_WORKER_START
-   ROUND_SEAL_REQUESTED
-   M15_WIDE_ROUND_COMPLETE
-   LIVE_ROUND_PASS
-   ROUND_SEAL_ACKNOWLEDGED
-   CONTROLLED_EXIT
-   FATAL
-   Traceback
-   ```
-
-6. Package one immutable small return with a self-excluding `SHA256SUMS` and
-   negative tests for permission failure, not-found, partial listing, wrong
-   source/root, missing log manifest, and a one-bit receipt mutation.
-7. Update this task's `state.md`, `plan.md`, `log.md`, and Phase D3 only after
-   the machine return is classified. Stop and report before any commit, push,
-   GCS query, Kubernetes query, or relaunch unless the user separately
-   authorizes that action.
-
-Interpret the new inventory mechanically:
-
-| Observed markers/objects | Meaning | Next action |
+| Decision | Meaning | Next action |
 |---|---|---|
-| no `ROUND_SEAL_REQUESTED` in either existing log | learner never entered the published round handshake, or the wrong runtime/log was inspected | bind the real runtime path before changing durability code |
-| seal requested, no `M15_WIDE_ROUND_COMPLETE` | worker assemble/classify/upload failed before ACK | localize that worker stage; do not rerun yet |
-| round-complete marker exists, remote round object absent | publication/root-path defect | repair only the durability path and test forced death |
-| per-round objects exist under another registered layout | current recovery queried the wrong schema | extend the read-only classifier; no numerical code change |
-| both recursive inventories succeed and truly contain only `PREFLIGHT.json` | d33 produced no durable round | repair and certify durability, then request one matched off/on rerun |
-| any official red classifier is recovered | numerical evidence becomes usable at that round only | compare its exact first-red signatures before deciding Phase D |
+| `D33_FLAT_SHARDS_THREE_ROUNDS_VERIFIED` | all shard receipts and manifests verify and cover rounds 0/1/2 | prepare a scratch-only archive download/grouping plan; still do not claim numerical localization |
+| `D33_FLAT_SHARDS_ROUND0_ONLY` | valid content exists only for round 0 | inspect/fix the first seal/ACK path before any rerun |
+| `D33_FLAT_SHARDS_METADATA_INSUFFICIENT` | shards verify but cannot be assigned to a round | determine whether a source-compatible reconstruction is possible; do not relabel them |
+| `D33_FLAT_SHARD_AUDIT_RED` | any query, sequence, receipt, manifest, source, or digest check fails | repair only the audit/transport boundary |
 
-More rollout steps alone do not fix this failure: d33 already required every
-round to be sealed and ACKed before advancing. If no round survived, the
-failure is in handshake/publication or the audit's path semantics, not in an
-insufficient number of evaluation steps.
+Only after content verification may an operator download the tar archives into
+scratch and assess whether they contain enough seam records to re-run the
+official classifier. The current remote inventory has no `live/` snapshot,
+root alignment report, replay ledger, capsule, or raw log. If those inputs are
+not inside the verified archives, the historical first-red claim remains
+unreconstructable and a repaired durability carrier must be certified before
+requesting exactly one new matched off/on run.
 
-Production APC remains off. B remains independent full-reset. No numerical
-code, TPU launch, Kubernetes mutation, or GCS mutation is authorized here.
+More rollout steps are not the remedy: the D3 contract was supposed to seal
+and ACK each round before advancing. The next question is which rounds are in
+the flat shards, not how long to run. Production APC stays off; B remains an
+independent full-reset computation.
 
 ## Historical — offline-review d32, then render d33; do not launch implicitly
 

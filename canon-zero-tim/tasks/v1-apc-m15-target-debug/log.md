@@ -949,3 +949,22 @@ is not a current fact or launch authority.
     - `run.log` stat returned `NOT_FOUND` (404).
     - Kubernetes JobSet query returned `NOT_FOUND` (clean lifecycle termination).
 - Fact: sealed 6-member inventory return in `evidence/v1_apc_m15_attempt14_d33_inventory_return_20260828/` with verified `SHA256SUMS`.
+
+## 2026-08-28 — CORRECTION: d33 inventory proves names, not shard contents
+
+- Independently verified the inventory return manifest and re-derived its
+  geometry: off has 88 contiguous object triples (`000000..000087`) and on
+  has 74 (`000000..000073`); both recursive queries exited 0.
+- The inventory tool categorizes remote object names only. It does not fetch
+  `SHARD_COMPLETE.json` or `SHA256SUMS`, verify archive digests, inspect
+  diagnostic-round metadata, or validate record/byte counts. The previous
+  wording “all 162 observer shards physically present and verified” is demoted
+  to “162 complete object-name triples are listed.”
+- Both JobSets and both `run.log` objects are `NOT_FOUND`; no terminal JobSet
+  state or marker timeline was recovered. JobSet absence is not treated as
+  proof of clean completion.
+- Decision: keep Phase D3 active and Phase E closed. The next deliverable is a
+  small-receipt flat-shard audit that validates every completion/manifest and
+  reports the real round distribution before any archive download or rerun.
+  No GCS access, TPU launch, numerical edit, commit, or push occurred in this
+  documentation correction.
