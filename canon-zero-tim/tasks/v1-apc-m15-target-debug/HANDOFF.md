@@ -1,103 +1,46 @@
 # M15 APC target-debug handoff
 
-## START HERE — validate the d33 flat shards; do not launch or repair
+## START HERE — d33 flat-shard content audit verified Round 0 only; fix first seal/ACK before rerun
 
-Attempt 14 (`d33`) now has two immutable small returns:
+Attempt 14 (`d33`) now has three immutable small returns:
 
 - `evidence/v1_apc_m15_attempt14_d33_operator_return_20260828/` records the
   original `NO_DURABLE_ROUND_OPERATOR_RECEIPTS_INCOMPLETE` result;
 - `evidence/v1_apc_m15_attempt14_d33_inventory_return_20260828/` resolves the
-  query ambiguity and proves both recursive listings succeeded.
+  query ambiguity and proves both recursive listings succeeded (265 off / 223 on objects);
+- `evidence/v1_apc_m15_attempt14_d33_flat_shard_audit_20260828/` completes the
+  receipt-bound flat-shard content audit for all 162 shards.
 
-The inventory manifest verifies all six listed payloads. Its exact transport
-facts are:
+The flat-shard content audit verified:
 
-| Arm | Objects | Flat shard triples | Sequence | Other durable objects |
-|---|---:|---:|---|---|
-| APC off | 265 | 88 | `000000..000087` | root `PREFLIGHT.json` only |
-| APC on | 223 | 74 | `000000..000073` | root `PREFLIGHT.json` only |
+| Arm | Shards | Record pairs | Payload bytes | Diagnostic rounds | Manifest & Archive Hash |
+|---|---:|---:|---:|---|---|
+| APC off | 88 (`000000..000087`) | 2,780 | 1,792,189,157 | Round 0: 88 (100%) | 88/88 OK |
+| APC on | 74 (`000000..000073`) | 2,302 | 472,614,342 | Round 0: 74 (100%) | 74/74 OK |
 
-Every listed shard directory has the three expected object names:
-`SHA256SUMS`, `SHARD_ARCHIVE.tar`, and `SHARD_COMPLETE.json`. There are no
-objects under `wide/rounds/` or `live/`. Direct `run.log` stat returned a real
-provider `404/NOT_FOUND`; both JobSets also return `NOT_FOUND`, with no
-recoverable terminal state.
+Every listed shard directory contains valid `SHARD_COMPLETE.json`, `SHA256SUMS`, and `SHARD_ARCHIVE.tar` with matching manifest SHA and archive digest. However, **100% of shards belong to diagnostic round 0**. Neither arm crossed the first round 0 seal to emit round 1 or round 2.
 
-This proves that the previous multiround recovery queried the wrong physical
-layout: d33 uploaded observer shards to `wide/shards/`, while the recovery
-looked only under `wide/rounds/000000..000002/`. It does **not** yet prove the
-contents of any shard. The current inventory tool lists object names only; it
-does not download or verify the shard completion receipt, manifest, archive
-digest, diagnostic round, record counts, or JSON/NPZ payload.
+The machine decision is:
+
+```text
+AUDIT_M15_ATTEMPT14_D33_FLAT_SHARDS decision=D33_FLAT_SHARDS_ROUND0_ONLY rounds=[0] off_shards=88 on_shards=74
+```
 
 The strict status is:
 
 ```text
-INVENTORY_RETURN_HASH_PASS / GCS_LIST_PASS /
-FLAT_SHARD_OBJECT_GEOMETRY_PRESENT /
-SHARD_CONTENT_NOT_VERIFIED / OFFICIAL_CLASSIFIER_MISSING /
-FIRST_RED_NOT_LOCALIZED / PHASE_E_CLOSED /
-NUMERICAL_REPAIR_NOT_AUTHORIZED
+FLAT_SHARD_AUDIT_PASS / D33_FLAT_SHARDS_ROUND0_ONLY /
+ARCHIVE_CONTENTS_ROUND0_VERIFIED / ROUND1_2_NOT_REACHED /
+OFFICIAL_CLASSIFIER_MISSING / FIRST_RED_NOT_LOCALIZED /
+PHASE_E_CLOSED / NUMERICAL_REPAIR_NOT_AUTHORIZED
 ```
 
-The manually minimized d33 package still reports off A-B/B-C exact, on
-endpoint A-B=99 bytes with B-C=0, and the analysis-grade interval
-`k_post_rope -> rpa_output`. It is not bound to a reproducible official
-per-round classifier. Do not describe the RPA tensor itself as having 99 red
-bytes and do not modify `rpa_kernel_p66.py` from that report.
+### Next agent work order — inspect first seal/ACK coordination before any rerun
 
-### Next agent work order — flat-shard content audit, then stop
-
-Use a fresh `local/*` worktree from the latest operator tip. First implement
-and host-test a receipt-bound flat-shard audit; stop for user approval before
-any GCS query, commit, push, or target launch.
-
-1. Derive source, campaign, JobSet names, and registered roots only from the
-   sealed `RECOVERY_INPUT_RECEIPT.json`. No hand-entered root is accepted.
-2. Reuse the fail-closed flat-shard rules from the Attempt-13 audit rather than
-   trusting the new inventory's counts. For all 88 off and 74 on sequences,
-   fetch the small `SHARD_COMPLETE.json` and `SHA256SUMS` files.
-3. Verify for every sequence:
-   - contiguous, unique sequence number and exactly three remote members;
-   - expected full source SHA and durability schema;
-   - completion-receipt status and manifest SHA;
-   - archive SHA recorded by the completion receipt equals the archive entry
-     in the shard manifest;
-   - `diagnostic_round`, record-pair count, payload bytes, and archive bytes.
-4. Produce a round histogram per arm. Do not assume flat sequence equals
-   round. This is the next decisive fact:
-   - only round 0 means the run never durably crossed its first seal;
-   - rounds 0/1/2 mean the flat shards may be regrouped and salvaged;
-   - missing/invalid round metadata is an evidence-contract RED.
-5. Initially do not download the archives. Return one self-hashed small
-   package containing the per-shard completion receipts or a normalized
-   receipt ledger, per-arm round histograms, record/byte totals, query
-   receipts, and a machine decision.
-6. Required negative tests: missing triple member, non-contiguous sequence,
-   duplicate sequence, source mismatch, manifest mismatch, archive-digest
-   mismatch, invalid round, query failure, and one-bit receipt mutation.
-
-The machine decision must be one of:
-
-| Decision | Meaning | Next action |
-|---|---|---|
-| `D33_FLAT_SHARDS_THREE_ROUNDS_VERIFIED` | all shard receipts and manifests verify and cover rounds 0/1/2 | prepare a scratch-only archive download/grouping plan; still do not claim numerical localization |
-| `D33_FLAT_SHARDS_ROUND0_ONLY` | valid content exists only for round 0 | inspect/fix the first seal/ACK path before any rerun |
-| `D33_FLAT_SHARDS_METADATA_INSUFFICIENT` | shards verify but cannot be assigned to a round | determine whether a source-compatible reconstruction is possible; do not relabel them |
-| `D33_FLAT_SHARD_AUDIT_RED` | any query, sequence, receipt, manifest, source, or digest check fails | repair only the audit/transport boundary |
-
-Only after content verification may an operator download the tar archives into
-scratch and assess whether they contain enough seam records to re-run the
-official classifier. The current remote inventory has no `live/` snapshot,
-root alignment report, replay ledger, capsule, or raw log. If those inputs are
-not inside the verified archives, the historical first-red claim remains
-unreconstructable and a repaired durability carrier must be certified before
-requesting exactly one new matched off/on run.
-
-More rollout steps are not the remedy: the D3 contract was supposed to seal
-and ACK each round before advancing. The next question is which rounds are in
-the flat shards, not how long to run. Production APC stays off; B remains an
-independent full-reset computation.
+Per the decision table:
+- `D33_FLAT_SHARDS_ROUND0_ONLY`: "valid content exists only for round 0 -> inspect/fix the first seal/ACK path before any rerun".
+- Do not launch a new TPU run or add rollout steps until the seal/ACK transition logic in the D3 runner/collector is analyzed and verified to advance across rounds properly.
+- Phase E remains closed; production APC stays off; B remains an independent full-reset computation.
 
 ## Historical — offline-review d32, then render d33; do not launch implicitly
 

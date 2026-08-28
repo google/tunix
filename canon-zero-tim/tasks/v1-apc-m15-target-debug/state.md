@@ -1,22 +1,23 @@
 # State
 
-- Status: active; Attempt 14 (d33) read-only inventory audit completed and sealed in `evidence/v1_apc_m15_attempt14_d33_inventory_return_20260828/`. Independent `sha256sum -c SHA256SUMS` verifies 6/6 members.
+- Status: active; Attempt 14 (d33) read-only flat-shard content audit completed and sealed in `evidence/v1_apc_m15_attempt14_d33_flat_shard_audit_20260828/`. Independent `sha256sum -c SHA256SUMS` verifies 5/5 summary members across all 88 off + 74 on shards (162 total shards).
 - Objective: explain and repair the M15 DP8xTP8 APC-on A-vs-B byte mismatch without changing the independent full-reset B arm or any unrelated numerical path.
 - Definition of done: `FIRST_RED_LOCALIZED` names the last exact and first red tensor plus `file:line`; one localized repair then passes host, exact-image, one-host clean/dirty controls, deterministic repeat, and separately approved DP8xTP8 A-B/B-C zero.
 - Task directory: `canon-zero-tim/tasks/v1-apc-m15-target-debug`.
-- Documentation base: `6a8251b48676c093c3a0261298c6f38872caa828` on `origin/yuxzhang/canon-zero-tim`; d33 runtime source reported as `003276a3fe2a0ceeaa95a7d940550dab627b8324`.
-- Inventory fact: recursive GCS listing succeeded (`outcome=PASS`, exit 0) for both arms:
-  - Off control arm contains `PREFLIGHT.json` + 88 flat shards (`wide/shards/000000..000087`), 265 total objects.
-  - On treatment arm contains `PREFLIGHT.json` + 74 flat shards (`wide/shards/000000..000073`), 223 total objects.
-  - `wide/rounds/` is empty because d33 runtime uploaded to `wide/shards/` (flat layout).
-  - Direct stat of `run.log` confirmed `NOT_FOUND` (404); both Kubernetes JobSets are also `NOT_FOUND`, but no terminal state was recovered and clean completion is not inferred.
-- Recovered operator return: `evidence/v1_apc_m15_attempt14_d33_operator_return_20260828/` and `evidence/v1_apc_m15_attempt14_d33_inventory_return_20260828/`.
+- Documentation base: `cb38cf67ec9f7ca9fd0bfc4d01e36b098ca0d344` on `origin/yuxzhang/canon-zero-tim`; d33 runtime source reported as `003276a3fe2a0ceeaa95a7d940550dab627b8324`.
+- Shard Content Audit Fact:
+  - Off control arm: 88 flat shards (`wide/shards/000000..000087`), all `diagnostic_round: 0`, 2,780 total record pairs, 1,792,189,157 payload bytes.
+  - On treatment arm: 74 flat shards (`wide/shards/000000..000073`), all `diagnostic_round: 0`, 2,302 total record pairs, 472,614,342 payload bytes.
+  - Every listed shard directory contains valid `SHARD_COMPLETE.json`, `SHA256SUMS`, and `SHARD_ARCHIVE.tar` with matching manifest SHA and archive digest.
+  - Round histogram is 100% round 0 for both arms (`rounds=[0]`); neither arm crossed the first seal to emit round 1 or round 2.
+  - Machine decision: `D33_FLAT_SHARDS_ROUND0_ONLY`.
+- Recovered operator return: `evidence/v1_apc_m15_attempt14_d33_operator_return_20260828/`, `evidence/v1_apc_m15_attempt14_d33_inventory_return_20260828/`, and `evidence/v1_apc_m15_attempt14_d33_flat_shard_audit_20260828/`.
 - One-host fact: local r10-r13c stayed exact through real scheduler publication, 32-request composition, `continue_decode=8`, and full M15 chronology. r13c APC-on reached 97.8% hits, 130,148 actions, and logical KV 988..7189.
-- Current phase: Phase D3 flat-shard content audit. The object-list false negative is explained by layout divergence (`wide/shards/` vs `wide/rounds/`), but the 162 shard contents, completion receipts, manifests, round identities, and archives are not yet verified.
-- Implemented: `audit_m15_attempt14_d33_inventory.py`, `test_audit_m15_attempt14_d33_inventory.py` (118/118 tests PASS).
+- Current phase: Phase D3 flat-shard content audit complete (`D33_FLAT_SHARDS_ROUND0_ONLY`). The first seal/ACK transition path must be inspected before any new multiround carrier run is authorized.
+- Implemented: `audit_m15_attempt14_d33_flat_shards.py`, `test_audit_m15_attempt14_d33_flat_shards.py` (11/11 tests PASS, full M15 suite 129/129 PASS).
 - Numerical changes: none. RoPE, attention/RPA, KV values, LM head, loss, backward, optimizer, B full reset, and production APC are unchanged (APC-OFF retained in production full recipes).
-- Next action: implement and host-test the receipt-bound flat-shard content audit specified at the top of `HANDOFF.md`; stop before GCS access unless separately approved.
-- Claim ceiling: `INVENTORY_RETURN_HASH_PASS / FLAT_SHARD_OBJECT_GEOMETRY_PRESENT (88 off + 74 on) / SHARD_CONTENT_NOT_VERIFIED / FIRST_RED_NOT_LOCALIZED / NUMERICAL_FIX_NOT_AUTHORIZED`.
+- Next action: inspect and fix the round advance / seal / ACK coordination logic in the D3 runner prior to any further multi-round execution.
+- Claim ceiling: `FLAT_SHARD_AUDIT_PASS / D33_FLAT_SHARDS_ROUND0_ONLY (88 off + 74 on) / ROUND1_2_NOT_REACHED / FIRST_RED_NOT_LOCALIZED / NUMERICAL_FIX_NOT_AUTHORIZED`.
 - Sensitive evidence: the compact bundle contains real tokens/capsules. `m15-wide-v1` publishes it only under the already registered per-run P38 GCS root after sealed-union classification; never return the payload through Git or chat.
-- Key artifacts: [Attempt-14 inventory summary](evidence/v1_apc_m15_attempt14_d33_inventory_return_20260828/INVENTORY_SUMMARY.json), [Attempt-14 operator return](evidence/v1_apc_m15_attempt14_d33_operator_return_20260828/OPERATOR_RETURN_SUMMARY.json), [Attempt-14 paired evidence](evidence/v1_apc_m15_attempt14_paired_d33_20260828/receipt.json).
-- Updated: 2026-08-28 (Attempt 14 inventory interpreted as object geometry only; flat-shard content audit is active).
+- Key artifacts: [Attempt-14 flat shard summary](evidence/v1_apc_m15_attempt14_d33_flat_shard_audit_20260828/FLAT_SHARD_AUDIT_SUMMARY.json), [Attempt-14 inventory summary](evidence/v1_apc_m15_attempt14_d33_inventory_return_20260828/INVENTORY_SUMMARY.json), [Attempt-14 operator return](evidence/v1_apc_m15_attempt14_d33_operator_return_20260828/OPERATOR_RETURN_SUMMARY.json).
+- Updated: 2026-08-28 (Attempt 14 flat-shard content audit completed: 88 off and 74 on shards verified, decision=D33_FLAT_SHARDS_ROUND0_ONLY).

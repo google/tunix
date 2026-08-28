@@ -1,0 +1,26 @@
+{
+  "off": {
+    "list_query": {
+      "exit_code": 0,
+      "outcome": "PASS",
+      "sanitized_stderr": "",
+      "stderr_bytes": 0,
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_bytes": 35578,
+      "stdout_sha256": "1eeb4f520a0339af6d3a42147472ca8fb2c77b9e1f6845544981ce832c3947f0",
+      "tool": "gcloud-storage"
+    }
+  },
+  "on": {
+    "list_query": {
+      "exit_code": 0,
+      "outcome": "PASS",
+      "sanitized_stderr": "",
+      "stderr_bytes": 0,
+      "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "stdout_bytes": 29713,
+      "stdout_sha256": "b5cf1ba9861852d0a1b5d4d757382d073a0cebc258fb775bfbe3beb5e5cffc2a",
+      "tool": "gcloud-storage"
+    }
+  }
+}

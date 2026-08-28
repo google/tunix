@@ -968,3 +968,17 @@ is not a current fact or launch authority.
   reports the real round distribution before any archive download or rerun.
   No GCS access, TPU launch, numerical edit, commit, or push occurred in this
   documentation correction.
+
+## 2026-08-28 — Attempt 14 (d33) read-only flat-shard content audit executed and sealed
+
+- Type: audit / flat-shard content verification; zero TPU; read-only.
+- Fact: implemented `audit_m15_attempt14_d33_flat_shards.py` and comprehensive unit test suite in `test_audit_m15_attempt14_d33_flat_shards.py` (11/11 tests PASS, full M15 suite 129/129 PASS).
+- Fact: executed flat-shard content audit against registered receipt `RECOVERY_INPUT_RECEIPT.json` on GCS data:
+  - Validated all 88 off shards (`000000..000087`) and 74 on shards (`000000..000073`) (162 total shards).
+  - Every shard completion receipt `SHARD_COMPLETE.json` has `schema=m15-wide-observer-shard-completion-v1`, `manifest_sha256` matching `SHA256SUMS`, and matching archive SHA in the manifest.
+  - Off control arm: 2,780 total record pairs, 1,792,189,157 payload bytes, 100% round 0 (`rounds_histogram: {"0": 88}`).
+  - On treatment arm: 2,302 total record pairs, 472,614,342 payload bytes, 100% round 0 (`rounds_histogram: {"0": 74}`).
+  - Machine decision: `D33_FLAT_SHARDS_ROUND0_ONLY`.
+- Fact: sealed 5 summary/manifest members + 162 per-shard receipt folders under `evidence/v1_apc_m15_attempt14_d33_flat_shard_audit_20260828/` with independently verified `SHA256SUMS`.
+- Fact: Phase D3 status remains `D33_FLAT_SHARDS_ROUND0_ONLY`. Before any rerun or carrier update, the first seal/ACK transition coordination in the D3 runner must be analyzed and repaired. Phase E remains closed.
+

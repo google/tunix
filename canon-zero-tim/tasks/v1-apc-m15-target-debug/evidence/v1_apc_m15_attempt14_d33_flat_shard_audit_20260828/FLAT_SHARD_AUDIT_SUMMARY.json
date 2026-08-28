@@ -1,0 +1,29 @@
+{
+  "all_rounds_observed": [
+    0
+  ],
+  "arms": {
+    "off": {
+      "jobset": "canon-v1-apc-m15-off-d33-003276a3",
+      "rounds_histogram": {
+        "0": 88
+      },
+      "total_payload_bytes": 1792189157,
+      "total_record_pairs": 2780,
+      "total_shards": 88
+    },
+    "on": {
+      "jobset": "canon-v1-apc-m15-on-d33-003276a3",
+      "rounds_histogram": {
+        "0": 74
+      },
+      "total_payload_bytes": 472614342,
+      "total_record_pairs": 2302,
+      "total_shards": 74
+    }
+  },
+  "campaign_root": "v1-apc-m15-attempt14-d33",
+  "decision": "D33_FLAT_SHARDS_ROUND0_ONLY",
+  "schema": "m15-apc-attempt14-flat-shard-audit-v1",
+  "source_commit": "003276a3fe2a0ceeaa95a7d940550dab627b8324"
+}
