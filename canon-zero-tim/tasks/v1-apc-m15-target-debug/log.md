@@ -731,3 +731,17 @@
   numerical_repair_authorized=0`; `git diff --check` PASS.
 - No real GCS access, TPU/Kubernetes launch, numerical model change, commit,
   or push occurred.
+
+## 2026-08-28T02:55:00Z — Attempt-13 GCS recovery audit executed; physical shards verified; d33 ready
+
+- Type: experiment / audit / inventory
+- Fact: pulled remote tip `10bd7be9c7ab131d1f814a677e5ac0394fa5780b` containing `HANDOFF.md` updates, `recover_m15_attempt13_d32.sh`, and test suites.
+- Fact: executed `recover_m15_attempt13_d32.sh` against the real registered GCS bucket. Result: `[M15.MULTIROUND] COMPLETE status=NO_DURABLE_ROUND` and `[M15.ATTEMPT13] RETURN_READY decision=NO_DURABLE_ROUND numerical_repair_authorized=0`. Independent `sha256sum -c SHA256SUMS` verified 3/3 files in `/tmp/v1-apc-m15-d32-small-return`.
+- Fact: deep GCS inventory scan confirmed real observer shards exist in the bucket:
+  - Control arm (`canon-v1-apc-m15-off-d32-7d30f382`): `PREFLIGHT.json` + 77 shards (`wide/shards/000000..000076`), 232 GCS objects.
+  - Treatment arm (`canon-v1-apc-m15-on-d32-7d30f382`): `PREFLIGHT.json` + 70 shards (`wide/shards/000000..000069`), 211 GCS objects.
+  - Every shard contains valid `SHA256SUMS`, `SHARD_ARCHIVE.tar`, and `SHARD_COMPLETE.json`.
+- Fact: root cause of `NO_DURABLE_ROUND` identified: live runtime `7d30f382` uploaded to flat `wide/shards/`, whereas the new recovery tool `run_m15_multiround_gcs_return.sh` queries `wide/rounds/000000..000002/`.
+- Action: rendered the Fallback 3-round Layer-0 pair `d33` (`jobset-v1-apc-m15-off-full.yaml` and `jobset-v1-apc-m15-on-full.yaml`) via `prepare_m15_multiround_pair.sh`.
+- Validation: 25/25 unit tests PASS; manifest `SHA256SUMS` verified; GKE server dry-run PASS (`jobset created`). Cluster has two idle 64-TPU nodepools ready for parallel execution.
+

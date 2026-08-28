@@ -109,6 +109,26 @@ Interpret the return mechanically:
 | `PARTIAL_ROUNDS_RECOVERED` | one or more rounds survived | preserve and analyze recovered rounds; do not call the pair complete |
 | `NO_DURABLE_ROUND` | no sealed round is recoverable | repair worker/upload durability before another launch |
 
+### Attempt-13 GCS Real Artifact Inventory & Layout Distinction
+
+Physical inspection of the GCS bucket for Attempt 13 confirms that all observer shard data was successfully written and uploaded by the live worker runtime (`7d30f382`):
+
+- **Control Arm (`canon-v1-apc-m15-off-d32-7d30f382`)**:
+  - `gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-v1-apc-m15-off-d32-7d30f382/attempt-0/PREFLIGHT.json`
+  - 77 Shards: `wide/shards/000000/` through `wide/shards/000076/` (232 total GCS objects).
+  - Each shard directory contains valid `SHA256SUMS`, `SHARD_ARCHIVE.tar`, and `SHARD_COMPLETE.json`.
+- **Treatment Arm (`canon-v1-apc-m15-on-d32-7d30f382`)**:
+  - `gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-v1-apc-m15-on-d32-7d30f382/attempt-0/PREFLIGHT.json`
+  - 70 Shards: `wide/shards/000000/` through `wide/shards/000069/` (211 total GCS objects).
+  - Each shard directory contains valid `SHA256SUMS`, `SHARD_ARCHIVE.tar`, and `SHARD_COMPLETE.json`.
+
+**Root cause of `NO_DURABLE_ROUND` mechanical verdict**:
+The Attempt-13 runtime uploaded shards under the single-round directory structure `wide/shards/000000..000076/`, whereas the new recovery tool `run_m15_multiround_gcs_return.sh` specifically expects the multi-round format `wide/rounds/000000..000002/ROUND_INPUT_RECEIPT.json`.
+
+**Two valid execution paths for downstream processing**:
+1. **Offline Adapter Path**: An offline script can be written to aggregate existing Attempt-13 `wide/shards/` into `round-000000` without any TPU compute.
+2. **Standard Fallback Launch Path (`d33`)**: Launch the prepared 3-round Layer-0 pair `d33` below, which natively executes the `wide/rounds/` protocol on TPU.
+
 Any off-arm red, B-C red, source/round/hash mismatch, or failed manifest is a
 hard stop.  The current source now resolves the classifier's `rpa_output`
 anchor to the real observer patch rather than inventing a line in the RPA
