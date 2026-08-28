@@ -20,22 +20,6 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${DIR}/../../../.." && pwd)"
 LOG_ROOT=${LOG_ROOT:-"${DIR}"}
 
-default_model_id_from_name() {
-  local normalized
-  normalized="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
-  case "$normalized" in
-    qwen3-0.6b) echo "Qwen/Qwen3-0.6B" ;;
-    qwen3-0.6b-base) echo "Qwen/Qwen3-0.6B-Base" ;;
-    qwen3-1.7b) echo "Qwen/Qwen3-1.7B" ;;
-    qwen3-1.7b-base) echo "Qwen/Qwen3-1.7B-Base" ;;
-    qwen3-4b) echo "Qwen/Qwen3-4B" ;;
-    qwen3-8b) echo "Qwen/Qwen3-8B" ;;
-    qwen3-14b) echo "Qwen/Qwen3-14B" ;;
-    qwen3-32b) echo "Qwen/Qwen3-32B" ;;
-    *) echo "$1" ;;
-  esac
-}
-
 ORCHESTRATOR_ID=${ORCHESTRATOR_ID:-orchestrator}
 ORCHESTRATOR_PORT=${ORCHESTRATOR_PORT:-30000}
 TRAINER_PORT=${TRAINER_PORT:-20000}
@@ -43,52 +27,26 @@ ROLLOUT_PORT=${ROLLOUT_PORT:-20001}
 INFERENCE_PORT=${INFERENCE_PORT:-20002}
 RUN_INFERENCE_NODE=${RUN_INFERENCE_NODE:-0}
 INFERENCE_ADDR=${INFERENCE_ADDR:-}
-MODEL_SOURCE=${MODEL_SOURCE:-safetensors}
 MODEL_NAME=${MODEL_NAME:-Qwen3-1.7B}
-MODEL_ID=${MODEL_ID:-$(default_model_id_from_name "$MODEL_NAME")}
+MODEL_ID=${MODEL_ID:-Qwen/Qwen3-1.7B}
 ARTIFACT_ROOT=${ARTIFACT_ROOT:-"${REPO_ROOT}/artifacts/qwen3_dist_gsm8k"}
 MODEL_DIR=${MODEL_DIR:-${MODEL_DOWNLOAD_DIR:-"${ARTIFACT_ROOT}/models"}}
-CHECKPOINT_ROOT_DIRECTORY=${CHECKPOINT_ROOT_DIRECTORY:-"${ARTIFACT_ROOT}/checkpoints"}
-if [[ -z "${TOKENIZER_PATH:-}" ]]; then
-  if [[ "$MODEL_SOURCE" == "maxtext" ]]; then
-    TOKENIZER_PATH="$MODEL_ID"
-  else
-    TOKENIZER_PATH="$MODEL_DIR"
-  fi
-fi
-MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-1024}
-MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-1024}
-TRAIN_MAX_RESPONSE_LENGTH=${TRAIN_MAX_RESPONSE_LENGTH:-}
-BATCH_SIZE=${BATCH_SIZE:-4}
-NUM_GENERATIONS=${NUM_GENERATIONS:-8}
+TOKENIZER_PATH=${TOKENIZER_PATH:-$MODEL_DIR}
+MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-512}
+MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-128}
+BATCH_SIZE=${BATCH_SIZE:-2}
+NUM_GENERATIONS=${NUM_GENERATIONS:-2}
 MAX_STEPS=${MAX_STEPS:-1}
 TRAIN_MICRO_BATCH_SIZE=${TRAIN_MICRO_BATCH_SIZE:-1}
-COMPUTE_LOGPS_MICRO_BATCH_SIZE=${COMPUTE_LOGPS_MICRO_BATCH_SIZE:-1}
-MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-2}
-MAX_CONCURRENCY=${MAX_CONCURRENCY:-$((BATCH_SIZE * NUM_GENERATIONS))}
-TFDS_DATA_DIR=${TFDS_DATA_DIR:-"${ARTIFACT_ROOT}/data"}
-TFDS_SPLIT=${TFDS_SPLIT:-train}
-SEED=${SEED:-42}
-SHUFFLE=${SHUFFLE:-true}
-REWARD_MODE=${REWARD_MODE:-env}
-BETA=${BETA:-0.04}
-EPSILON=${EPSILON:-0.2}
-EVAL_EVERY_N_STEPS=${EVAL_EVERY_N_STEPS:-50}
-LORA_RANK=${LORA_RANK:-64}
-LORA_ALPHA=${LORA_ALPHA:-64.0}
+MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-$((BATCH_SIZE * NUM_GENERATIONS))}
+EVAL_EVERY_N_STEPS=${EVAL_EVERY_N_STEPS:-1000000}
+LORA_RANK=${LORA_RANK:-16}
+LORA_ALPHA=${LORA_ALPHA:-16.0}
 USE_LORA=${USE_LORA:-0}
-SYNC_WEIGHTS=${SYNC_WEIGHTS:-0}
-WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-raiden}
 WANDB_PROJECT=${WANDB_PROJECT:-trellis-gsm8k}
 WANDB_RUN_NAME=${WANDB_RUN_NAME:-}
 WANDB_API_KEY=${WANDB_API_KEY:-}
 SAMPLER=${SAMPLER:-inprocess_vllm}
-VLLM_INIT_WITH_RANDOM_WEIGHTS=${VLLM_INIT_WITH_RANDOM_WEIGHTS:-false}
-ROLLOUT_VLLM_HBM_UTILIZATION=${ROLLOUT_VLLM_HBM_UTILIZATION:-0.6}
-ROLLOUT_VLLM_MAX_NUM_SEQS=${ROLLOUT_VLLM_MAX_NUM_SEQS:-}
-ROLLOUT_VLLM_MAX_NUM_BATCHED_TOKENS=${ROLLOUT_VLLM_MAX_NUM_BATCHED_TOKENS:-}
-MAXTEXT_DTYPE=${MAXTEXT_DTYPE:-bfloat16}
-MAXTEXT_REPO_ROOT=${MAXTEXT_REPO_ROOT:-}
 PYTHON_BIN=${PYTHON_BIN:-python3}
 WAIT_TIMEOUT_SECS=${WAIT_TIMEOUT_SECS:-1800}
 WAIT_POLL_SECS=${WAIT_POLL_SECS:-5}
@@ -123,38 +81,6 @@ TPU_HOST_BOUNDS=${TPU_HOST_BOUNDS:-1,1,1}
 # INFERENCE_TPU_CHIPS=${INFERENCE_TPU_CHIPS:-}
 # TPU_CHIPS_PER_HOST_BOUNDS=${TPU_CHIPS_PER_HOST_BOUNDS:-1,4,1}
 # TPU_HOST_BOUNDS=${TPU_HOST_BOUNDS:-1,1,1}
-
-if [[ -z "$TRAIN_MAX_RESPONSE_LENGTH" ]]; then
-  TRAIN_MAX_RESPONSE_LENGTH="$MAX_RESPONSE_LENGTH"
-  if [[ "$MODEL_SOURCE" == "maxtext" ]]; then
-    maxtext_train_seq_block_size=512
-    train_seq_len=$((MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH))
-    train_seq_blocks=$(((train_seq_len + maxtext_train_seq_block_size - 1) / maxtext_train_seq_block_size))
-    aligned_train_seq_len=$((train_seq_blocks * maxtext_train_seq_block_size))
-    TRAIN_MAX_RESPONSE_LENGTH=$((aligned_train_seq_len - MAX_PROMPT_LENGTH))
-  fi
-fi
-
-if (( TRAIN_MAX_RESPONSE_LENGTH < MAX_RESPONSE_LENGTH )); then
-  echo "Error: TRAIN_MAX_RESPONSE_LENGTH must be >= MAX_RESPONSE_LENGTH."
-  echo "Got TRAIN_MAX_RESPONSE_LENGTH=$TRAIN_MAX_RESPONSE_LENGTH MAX_RESPONSE_LENGTH=$MAX_RESPONSE_LENGTH"
-  exit 1
-fi
-
-if (( BATCH_SIZE % MINI_BATCH_SIZE != 0 )); then
-  echo "Error: MINI_BATCH_SIZE must divide BATCH_SIZE to match qwen3_grpo_demo.py."
-  echo "Got BATCH_SIZE=$BATCH_SIZE MINI_BATCH_SIZE=$MINI_BATCH_SIZE"
-  exit 1
-fi
-
-if [[ "$BETA" != "0" && "$BETA" != "0.0" && -z "$INFERENCE_ADDR" ]]; then
-  if [[ "$RUN_INFERENCE_NODE" != "1" && "$RUN_INFERENCE_NODE" != "true" && "$RUN_INFERENCE_NODE" != "True" ]]; then
-    echo "Error: BETA=$BETA requires reference log-probs."
-    echo "Set RUN_INFERENCE_NODE=1 with INFERENCE_TPU_CHIPS=..., set INFERENCE_ADDR=host:port,"
-    echo "or set BETA=0 for a rollout/trainer-only smoke test."
-    exit 1
-  fi
-fi
 
 TRAINER_LOG="${LOG_ROOT}/trainer.log"
 ROLLOUT_LOG="${LOG_ROOT}/rollout.log"
@@ -288,26 +214,6 @@ PY
 }
 
 ensure_model_dir() {
-  if [[ "$MODEL_SOURCE" == "maxtext" ]]; then
-    if [[ -z "$MODEL_DIR" ]]; then
-      echo "Error: MODEL_DIR is required for MODEL_SOURCE=maxtext."
-      echo "Set it to a MaxText output root or to the load_parameters_path checkpoint."
-      exit 1
-    fi
-    local resolved_file
-    resolved_file="$(mktemp "${TMPDIR:-/tmp}/tunix-maxtext-model-dir.XXXXXX")"
-    "$PYTHON_BIN" "${DIR}/prepare_maxtext_checkpoint.py" \
-      --model_name="$MODEL_NAME" \
-      --model_id="$MODEL_ID" \
-      --model_dir="$MODEL_DIR" \
-      --maxtext_repo_root="$MAXTEXT_REPO_ROOT" \
-      --resolved_model_dir_file="$resolved_file"
-    MODEL_DIR="$(<"$resolved_file")"
-    rm -f "$resolved_file"
-    echo "Using MaxText checkpoint path: $MODEL_DIR"
-    return
-  fi
-
   if [[ -e "$MODEL_DIR" && ! -d "$MODEL_DIR" ]]; then
     echo "Error: MODEL_DIR exists but is not a directory: $MODEL_DIR"
     exit 1
@@ -339,11 +245,6 @@ dump_logs() {
   print_section "orchestrator.log tail"
   tail -n 200 "$ORCHESTRATOR_LOG" 2>/dev/null || true
 }
-
-MODEL_ARGS=(
-  --model_source="$MODEL_SOURCE"
-  --maxtext_dtype="$MAXTEXT_DTYPE"
-)
 
 check_process_alive() {
   local name="$1"
@@ -401,10 +302,8 @@ PY
 
 echo "=================================================="
 echo "Starting distributed GSM8K GRPO chain demo locally"
-echo "  rollout sampler: $SAMPLER"
-echo "  model source:   $MODEL_SOURCE"
+echo "  rollout engine: vLLM"
 echo "  model dir:      $MODEL_DIR"
-echo "  checkpoint dir: $CHECKPOINT_ROOT_DIRECTORY"
 echo "  tokenizer path: $TOKENIZER_PATH"
 echo "  python:         $PYTHON_BIN"
 echo "  trajectories:   $((BATCH_SIZE * NUM_GENERATIONS)) per step"
@@ -412,24 +311,12 @@ echo "  batch size:     $BATCH_SIZE"
 echo "  generations:    $NUM_GENERATIONS"
 echo "  max steps:      $MAX_STEPS"
 echo "  eval interval:  $EVAL_EVERY_N_STEPS"
-echo "  beta:           $BETA"
-echo "  epsilon:        $EPSILON"
-echo "  max concurrency:$MAX_CONCURRENCY"
-echo "  vLLM HBM util:  $ROLLOUT_VLLM_HBM_UTILIZATION"
-echo "  tfds split:     $TFDS_SPLIT"
-echo "  tfds data dir:  $TFDS_DATA_DIR"
-echo "  shuffle:        $SHUFFLE"
-echo "  reward mode:    $REWARD_MODE"
 echo "  prompt length:  $MAX_PROMPT_LENGTH"
 echo "  response len:   $MAX_RESPONSE_LENGTH"
-echo "  train response: $TRAIN_MAX_RESPONSE_LENGTH"
 echo "  train micro:    $TRAIN_MICRO_BATCH_SIZE"
 echo "  mini batch:     $MINI_BATCH_SIZE"
 echo "  use lora:       $USE_LORA"
-echo "  sync weights:   $SYNC_WEIGHTS"
-echo "  sync mode:      $WEIGHT_SYNC_MODE"
 echo "  sampler:        $SAMPLER"
-echo "  vLLM dummy load:$VLLM_INIT_WITH_RANDOM_WEIGHTS"
 echo "  trainer chips:  $TRAINER_TPU_CHIPS"
 echo "  trainer mesh:   fsdp=$TRAINER_FSDP tp=$TRAINER_TP"
 echo "  rollout chips:  $ROLLOUT_TPU_CHIPS"
@@ -465,7 +352,6 @@ git -C "$DIR" rev-parse --short HEAD 2>/dev/null || true
 git -C "$DIR" status --short --branch 2>/dev/null || true
 echo "MODEL_DIR exists? $(if [[ -d "$MODEL_DIR" ]]; then echo yes; else echo no; fi)"
 echo "TOKENIZER_PATH exists? $(if [[ -d "$TOKENIZER_PATH" ]]; then echo yes; else echo no; fi)"
-echo "MODEL_SOURCE=$MODEL_SOURCE"
 echo "Initial LIBTPU_INIT_ARGS=${LIBTPU_INIT_ARGS:-}"
 print_related_processes
 print_port_debug "$TRAINER_PORT"
@@ -487,16 +373,13 @@ echo "Launching trainer node on TPU chips $TRAINER_TPU_CHIPS..."
     --model_name="$MODEL_NAME"
     --tokenizer_path="$TOKENIZER_PATH"
     --max_prompt_length="$MAX_PROMPT_LENGTH"
-    --max_response_length="$TRAIN_MAX_RESPONSE_LENGTH"
+    --max_response_length="$MAX_RESPONSE_LENGTH"
     --mini_batch_size="$MINI_BATCH_SIZE"
     --train_micro_batch_size="$TRAIN_MICRO_BATCH_SIZE"
-    --compute_logps_micro_batch_size="$COMPUTE_LOGPS_MICRO_BATCH_SIZE"
     --eval_every_n_steps="$EVAL_EVERY_N_STEPS"
-    --checkpoint_root_directory="$CHECKPOINT_ROOT_DIRECTORY"
     --lora_rank="$LORA_RANK"
     --lora_alpha="$LORA_ALPHA"
   )
-  TRAINER_CMD+=("${MODEL_ARGS[@]}")
   if [[ "$USE_LORA" == "1" || "$USE_LORA" == "true" || "$USE_LORA" == "True" ]]; then
     TRAINER_CMD+=(--use_lora)
   fi
@@ -542,20 +425,9 @@ echo "Launching rollout node with sampler=$SAMPLER on TPU chips $ROLLOUT_TPU_CHI
     --tokenizer_path="$TOKENIZER_PATH"
     --max_prompt_length="$MAX_PROMPT_LENGTH"
     --max_response_length="$MAX_RESPONSE_LENGTH"
-    --max_concurrency="$MAX_CONCURRENCY"
-    --rollout_vllm_hbm_utilization="$ROLLOUT_VLLM_HBM_UTILIZATION"
-    --vllm_init_with_random_weights="$VLLM_INIT_WITH_RANDOM_WEIGHTS"
-    --weight_sync_mode="$WEIGHT_SYNC_MODE"
     --lora_rank="$LORA_RANK"
     --lora_alpha="$LORA_ALPHA"
   )
-  if [[ -n "$ROLLOUT_VLLM_MAX_NUM_SEQS" ]]; then
-    ROLLOUT_CMD+=(--rollout_vllm_max_num_seqs="$ROLLOUT_VLLM_MAX_NUM_SEQS")
-  fi
-  if [[ -n "$ROLLOUT_VLLM_MAX_NUM_BATCHED_TOKENS" ]]; then
-    ROLLOUT_CMD+=(--rollout_vllm_max_num_batched_tokens="$ROLLOUT_VLLM_MAX_NUM_BATCHED_TOKENS")
-  fi
-  ROLLOUT_CMD+=("${MODEL_ARGS[@]}")
   if [[ "$USE_LORA" == "1" || "$USE_LORA" == "true" || "$USE_LORA" == "True" ]]; then
     ROLLOUT_CMD+=(--use_lora)
   fi
@@ -685,11 +557,10 @@ if [[ "$RUN_INFERENCE_NODE" == "1" || "$RUN_INFERENCE_NODE" == "true" || "$RUN_I
       --model_id="$MODEL_ID"
       --model_dir="$MODEL_DIR"
       --tokenizer_path="$TOKENIZER_PATH"
-      --compute_logps_micro_batch_size="$COMPUTE_LOGPS_MICRO_BATCH_SIZE"
+      --compute_logps_micro_batch_size="$TRAIN_MICRO_BATCH_SIZE"
       --max_prompt_length="$MAX_PROMPT_LENGTH"
-      --max_response_length="$TRAIN_MAX_RESPONSE_LENGTH"
+      --max_response_length="$MAX_RESPONSE_LENGTH"
     )
-    INFERENCE_CMD+=("${MODEL_ARGS[@]}")
 
     export JAX_PLATFORMS=tpu,cpu
     export TPU_VISIBLE_DEVICES=${INFERENCE_TPU_CHIPS}
@@ -727,29 +598,15 @@ echo "Launching CPU orchestrator..."
     --model_id="$MODEL_ID"
     --tokenizer_path="$TOKENIZER_PATH"
     --batch_size="$BATCH_SIZE"
-    --mini_batch_size="$MINI_BATCH_SIZE"
     --num_generations="$NUM_GENERATIONS"
     --max_steps="$MAX_STEPS"
     --max_prompt_length="$MAX_PROMPT_LENGTH"
     --max_response_length="$MAX_RESPONSE_LENGTH"
-    --train_max_response_length="$TRAIN_MAX_RESPONSE_LENGTH"
     --train_micro_batch_size="$TRAIN_MICRO_BATCH_SIZE"
-    --beta="$BETA"
-    --epsilon="$EPSILON"
-    --tfds_data_dir="$TFDS_DATA_DIR"
-    --tfds_split="$TFDS_SPLIT"
-    --seed="$SEED"
-    --reward_mode="$REWARD_MODE"
     --stop_workers_on_exit
   )
-  if [[ "$SHUFFLE" == "0" || "$SHUFFLE" == "false" || "$SHUFFLE" == "False" ]]; then
-    ORCHESTRATOR_CMD+=(--no-shuffle)
-  fi
   if [[ -n "$INFERENCE_ADDR" ]]; then
     ORCHESTRATOR_CMD+=(--inference_addr="$INFERENCE_ADDR")
-  fi
-  if [[ "$SYNC_WEIGHTS" == "1" || "$SYNC_WEIGHTS" == "true" || "$SYNC_WEIGHTS" == "True" ]]; then
-    ORCHESTRATOR_CMD+=(--sync_weights)
   fi
 
   export JAX_PLATFORMS=cpu

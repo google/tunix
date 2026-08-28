@@ -60,8 +60,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument("--mesh_fsdp", type=int, default=2)
   parser.add_argument("--mesh_tp", type=int, default=1)
   parser.add_argument("--compute_logps_micro_batch_size", type=int, default=1)
-  parser.add_argument("--max_prompt_length", type=int, default=1024)
-  parser.add_argument("--max_response_length", type=int, default=1024)
+  parser.add_argument("--max_prompt_length", type=int, default=512)
+  parser.add_argument("--max_response_length", type=int, default=128)
   parser.add_argument("--temperature", type=float, default=1.0)
   return parser.parse_args(argv)
 
@@ -105,9 +105,6 @@ def _qwen3_config(model_name: str) -> qwen3_model_lib.ModelConfig:
   else:
     raise ValueError(f"Unsupported demo model_name: {model_name!r}")
   config.shd_config = qwen3_model_lib.ShardingConfig.get_default_sharding()
-  config.remat_config = qwen3_model_lib.RematConfig.NONE
-  config.use_flash_attention = True
-  config.flash_attention_block_size = 256
   config.dtype = jnp.bfloat16
   config.param_dtype = jnp.float32
   return config

@@ -46,27 +46,18 @@ def _qwen3_config(model_name: str) -> qwen3_model_lib.ModelConfig:
   else:
     raise ValueError(f"Unsupported qwen3 model_name: {model_name!r}")
   config.shd_config = qwen3_model_lib.ShardingConfig.get_default_sharding()
-  config.remat_config = qwen3_model_lib.RematConfig.NONE
-  config.use_flash_attention = True
-  config.flash_attention_block_size = 256
   config.dtype = jnp.bfloat16
   config.param_dtype = jnp.float32
   return config
 
 
-def create_model(
-    model_name: str,
-    model_dir: str,
-    mesh: Mesh,
-    dtype: jnp.dtype | None = None,
-):
+def create_model(model_name: str, model_dir: str, mesh: Mesh):
   """Builds the demo model on the given mesh.
 
   Args:
     model_name: Demo model selector, e.g. "gemma-2-2b" or "Qwen3-1.7B".
     model_dir: Directory holding the safetensors shards.
     mesh: Device mesh the parameters are sharded over.
-    dtype: Optional safetensors load dtype.
 
   Returns:
     An nnx module ready for training or serving.
@@ -78,6 +69,6 @@ def create_model(
     )
   if "qwen3" in normalized:
     return qwen3_params_lib.create_model_from_safe_tensors(
-        model_dir, _qwen3_config(model_name), mesh, dtype=dtype or jnp.bfloat16
+        model_dir, _qwen3_config(model_name), mesh, dtype=jnp.bfloat16
     )
   raise ValueError(f"Unsupported demo model_name: {model_name!r}")

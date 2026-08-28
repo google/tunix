@@ -34,7 +34,6 @@ REPO_ROOT = os.path.abspath(
 )
 
 SAMPLERS = ("inprocess_vllm",)
-KV_CACHE_EXTRA_TOKENS = 256
 
 # This must be set before the first vLLM import. Keep vLLM imports lazy so the
 # rollout process can start with non-vLLM samplers in environments where vLLM is
@@ -84,19 +83,11 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument("--tokenizer_path", type=str, default="")
   parser.add_argument("--mesh_fsdp", type=int, default=1)
   parser.add_argument("--mesh_tp", type=int, default=2)
-  parser.add_argument("--max_prompt_length", type=int, default=1024)
-  parser.add_argument("--max_response_length", type=int, default=1024)
-  parser.add_argument("--max_concurrency", type=int, default=32)
-  parser.add_argument(
-      "--rollout_vllm_hbm_utilization", type=float, default=0.6
-  )
-  parser.add_argument("--rollout_vllm_max_num_seqs", type=int, default=0)
-  parser.add_argument(
-      "--rollout_vllm_max_num_batched_tokens", type=int, default=0
-  )
+  parser.add_argument("--max_prompt_length", type=int, default=512)
+  parser.add_argument("--max_response_length", type=int, default=128)
   parser.add_argument("--use_lora", action="store_true")
-  parser.add_argument("--lora_rank", type=int, default=64)
-  parser.add_argument("--lora_alpha", type=float, default=64.0)
+  parser.add_argument("--lora_rank", type=int, default=16)
+  parser.add_argument("--lora_alpha", type=float, default=16.0)
   parser.add_argument(
       "--model_name", type=str, default=os.getenv("MODEL_NAME", "Qwen3-1.7B")
   )
@@ -194,7 +185,7 @@ def _create_vanilla_worker(args, tokenizer):
       sampler=sampler_adapter,
       tokenizer=rollout_tokenizer,
       chat_parser=chat_parser,
-      max_concurrency=args.max_concurrency,
+      max_concurrency=64,
   )
 
 
@@ -224,9 +215,7 @@ def _create_vllm_worker(args, tokenizer):
   )
   vllm_model = args.model_dir or args.model_id
   rollout_mesh = _create_rollout_mesh(args)
-  max_model_len = (
-      args.max_prompt_length + args.max_response_length + KV_CACHE_EXTRA_TOKENS
-  )
+  max_model_len = args.max_prompt_length + args.max_response_length
   logging.info(
       "Creating vLLM config for model=%s mesh=%s tensor_parallel_size=%d "
       "data_parallel_size=%d max_model_len=%d...",
@@ -242,33 +231,17 @@ def _create_vllm_worker(args, tokenizer):
         "max_lora_rank": args.lora_rank,
         "max_loras": 1,
     }
-  max_num_seqs = (
-      args.rollout_vllm_max_num_seqs
-      if args.rollout_vllm_max_num_seqs > 0
-      else args.max_concurrency
-  )
-  max_num_batched_tokens = (
-      args.rollout_vllm_max_num_batched_tokens
-      if args.rollout_vllm_max_num_batched_tokens > 0
-      else (max_num_seqs * max_model_len) // 8
-  )
-  engine_kwargs = {
-      "model": vllm_model,
-      "max_model_len": max_model_len,
-      "max_num_seqs": max_num_seqs,
-      "max_num_batched_tokens": max_num_batched_tokens,
-      "disable_log_stats": False,
-      "dtype": "bfloat16",
-  }
   vllm_config = vllm_sampler.VllmConfig(
       mesh=rollout_mesh,
       tensor_parallel_size=args.mesh_tp,
       data_parallel_size=args.mesh_fsdp,
       return_logprobs=True,
-      hbm_utilization=args.rollout_vllm_hbm_utilization,
       lora_config=lora_config,
       mapping_config=mapping_config,
-      engine_kwargs=engine_kwargs,
+      engine_kwargs={
+          "model": vllm_model,
+          "max_model_len": max_model_len,
+      },
   )
   sampler_adapter = inprocess_vllm_sampler_adapter.InprocessVllmSamplerAdapter(
       server_id=args.worker_id,
@@ -297,7 +270,7 @@ def _create_vllm_worker(args, tokenizer):
       sampler=sampler_adapter,
       tokenizer=rollout_tokenizer,
       chat_parser=chat_parser,
-      max_concurrency=args.max_concurrency,
+      max_concurrency=64,
   )
 
 

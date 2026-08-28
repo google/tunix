@@ -33,18 +33,15 @@ import functools
 import logging
 import os
 import pickle
+import re
 import sys
 from types import SimpleNamespace
 from typing import Any
 
 os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
-import grain  # pylint: disable=g-import-not-at-top
 import jax  # pylint: disable=g-import-not-at-top
 import numpy as np  # pylint: disable=g-import-not-at-top
-import tensorflow_datasets as tfds  # pylint: disable=g-import-not-at-top
-# pylint: disable-next=unused-import,g-import-not-at-top
-import tensorflow_datasets.text.gsm8k
 from transformers import AutoTokenizer  # pylint: disable=g-import-not-at-top
 
 REPO_ROOT = os.path.abspath(
@@ -54,60 +51,68 @@ if REPO_ROOT not in sys.path:
   sys.path.insert(0, REPO_ROOT)
 
 from tunix.experimental.common import datatypes  # pylint: disable=g-import-not-at-top
-from tunix.experimental.examples.math_gsm8k_dist import (  # pylint: disable=g-import-not-at-top
-    gsm8k,
-)
-from tunix.experimental.orchestrator import (  # pylint: disable=g-import-not-at-top
-    algorithm_adapter,
-)
-from tunix.experimental.orchestrator import (  # pylint: disable=g-import-not-at-top
-    batch_assembly,
-)
-from tunix.experimental.orchestrator import (  # pylint: disable=g-import-not-at-top
-    orchestrator,
-)
-from tunix.experimental.orchestrator import (  # pylint: disable=g-import-not-at-top
-    rl_program,
-)
-from tunix.experimental.worker import (  # pylint: disable=g-import-not-at-top
-    remote_execution,
-)
+from tunix.experimental.orchestrator import algorithm_adapter  # pylint: disable=g-import-not-at-top
+from tunix.experimental.orchestrator import batch_assembly  # pylint: disable=g-import-not-at-top
+from tunix.experimental.orchestrator import orchestrator  # pylint: disable=g-import-not-at-top
+from tunix.experimental.orchestrator import rl_program  # pylint: disable=g-import-not-at-top
+from tunix.experimental.worker import remote_execution  # pylint: disable=g-import-not-at-top
 from tunix.sft import metrics_logger as metrics_logger_lib  # pylint: disable=g-import-not-at-top
 
+
+PROMPT_TEMPLATE = """Solve the following math problem.
+First, put your detailed step-by-step reasoning process inside <reasoning>...</reasoning> tags.
+Then, put your final numerical answer inside <answer>\\boxed{{}}</answer> tags.
+
+Problem: {question}
+<reasoning>
+"""
+
+DEMO_TASKS = (
+    (
+        "Natalia sold clips to 48 friends in April, and then she sold half as "
+        "many clips in May. How many clips did Natalia sell altogether in "
+        "April and May?",
+        "72",
+    ),
+    (
+        "Weng earns $12 an hour for babysitting. Yesterday, she babysat for 3 "
+        "hours. How much did she earn?",
+        "36",
+    ),
+    (
+        "A robe takes 2 bolts of blue fiber and half that much white fiber. "
+        "How many bolts of fiber does it take?",
+        "3",
+    ),
+    (
+        "Betty is saving money for a wallet which costs $100. She has $15 "
+        "saved. How much more does she need?",
+        "85",
+    ),
+)
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser = argparse.ArgumentParser(
-      description="Orchestrator V2 Qwen3 GSM8K GRPO demo."
+      description="Minimal Orchestrator V2 Qwen3 GSM8K GRPO demo."
   )
   parser.add_argument(
       "--batch_size",
       type=int,
-      default=4,
-      help="Number of prompt groups per rollout batch.",
+      default=2,
+      help="Number of prompt groups per step.",
   )
-  parser.add_argument("--mini_batch_size", type=int, default=2)
-  parser.add_argument("--num_generations", type=int, default=8)
+  parser.add_argument("--num_generations", type=int, default=2)
   parser.add_argument("--max_steps", type=int, default=1)
-  parser.add_argument("--max_prompt_length", type=int, default=1024)
-  parser.add_argument("--max_response_length", type=int, default=1024)
-  parser.add_argument(
-      "--train_max_response_length",
-      type=int,
-      default=0,
-      help=(
-          "Static completion length used for trainer/logprob batches. Defaults "
-          "to max_response_length; the launcher pads this for MaxText splash "
-          "attention when needed."
-      ),
-  )
+  parser.add_argument("--max_prompt_length", type=int, default=512)
+  parser.add_argument("--max_response_length", type=int, default=128)
   parser.add_argument("--train_micro_batch_size", type=int, default=1)
   parser.add_argument("--model_id", type=str, default="Qwen/Qwen3-1.7B")
   parser.add_argument("--tokenizer_path", type=str, default="")
   parser.add_argument("--temperature", type=float, default=1.0)
   parser.add_argument("--top_p", type=float, default=1.0)
   parser.add_argument("--top_k", type=int, default=-1)
-  parser.add_argument("--beta", type=float, default=0.04)
+  parser.add_argument("--beta", type=float, default=0.0)
   parser.add_argument("--epsilon", type=float, default=0.2)
   parser.add_argument(
       "--offpolicy",
@@ -131,22 +136,9 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   )
   parser.add_argument(
       "--reward_mode",
-      choices=("env", "exact"),
-      default="env",
-      help=(
-          "env uses the rollout environment reward; exact recomputes the same "
-          "GSM8K reward in the orchestrator from returned trajectory text."
-      ),
-  )
-  parser.add_argument(
-      "--tfds_data_dir",
-      type=str,
-      default=os.getenv("TFDS_DATA_DIR", "/tmp/gsm8k_data"),
-  )
-  parser.add_argument("--tfds_split", type=str, default="train")
-  parser.add_argument("--seed", type=int, default=42)
-  parser.add_argument(
-      "--shuffle", action=argparse.BooleanOptionalAction, default=True
+      choices=("synthetic", "exact"),
+      default="synthetic",
+      help="synthetic proves the distributed chain without relying on quality.",
   )
   parser.add_argument(
       "--log_dir",
@@ -167,7 +159,6 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       help="W&B run name. Defaults to timestamp-based name if unset.",
   )
   parser.add_argument("--rpc_timeout_s", type=float, default=1800.0)
-  parser.add_argument("--inference_addr", type=str, default="")
   parser.add_argument("--stop_workers_on_exit", action="store_true")
   return parser.parse_args(argv)
 
@@ -178,64 +169,27 @@ def _connect(addr: str, timeout_s: float) -> remote_execution.ActorHandle:
   )
 
 
-def _normalize_example_value(value: Any) -> Any:
-  if isinstance(value, np.ndarray):
-    flat = value.reshape(-1).tolist()
-    if len(flat) == 1:
-      return _normalize_example_value(flat[0])
-    return [_normalize_example_value(v) for v in flat]
-  if isinstance(value, np.bytes_):
-    return value.tobytes().decode("utf-8")
-  if isinstance(value, bytes):
-    return value.decode("utf-8")
-  return value
+def _extract_answer(text: str) -> str | None:
+  answer_blocks = re.findall(r"<answer>(.*?)</answer>", text, re.DOTALL)
+  content = answer_blocks[-1] if answer_blocks else text
+  boxed = re.search(r"\\boxed\s*\{([^{}]+)\}", content)
+  if boxed:
+    return boxed.group(1).strip().replace(",", "")
+  numeric = re.findall(r"-?\d+(?:\.\d+)?", content)
+  return numeric[-1].replace(",", "") if numeric else None
 
 
-def _as_text(value: Any) -> str:
-  normalized = _normalize_example_value(value)
-  return normalized if isinstance(normalized, str) else str(normalized)
-
-
-def _build_gsm8k_dataset(args: argparse.Namespace) -> grain.MapDataset:
-  """Loads the real GSM8K split and maps examples to prompt/answer records."""
-  logging.info(
-      "Loading GSM8K TFDS split=%s data_dir=%s shuffle=%s seed=%d.",
-      args.tfds_split,
-      args.tfds_data_dir,
-      args.shuffle,
-      args.seed,
-  )
-  data = tfds.data_source(
-      "gsm8k",
-      split=args.tfds_split,
-      data_dir=args.tfds_data_dir,
-      builder_kwargs={"file_format": tfds.core.FileFormat.ARRAY_RECORD},
-      download=True,
-  )
-  dataset = grain.MapDataset.source(data)
-  if args.shuffle:
-    dataset = dataset.shuffle(seed=args.seed)
-  return dataset.map(
-      lambda x: {
-          "prompts": gsm8k.build_prompt(_as_text(x["question"])),
-          "question": _as_text(x["question"]),
-          "answer": gsm8k.extract_hash_answer(_as_text(x["answer"])),
-      }
-  )
-
-
-def _make_reward_fn(mode: str):
-  """Creates the optional orchestrator-side reward function."""
-  if mode == "env":
-    return None
+def _make_reward_fn(mode: str, num_generations: int):
+  """Creates the per-trajectory reward function used by StandardRLProgram."""
 
   def reward_fn(item: datatypes.TrajectoryItem) -> float:
     metadata = dict(item.metadata or {})
+    if mode == "synthetic":
+      return float(item.group_index) / max(num_generations - 1, 1)
+
     text = str(metadata.get("text", ""))
-    reward, _ = gsm8k.score_gsm8k_completion(
-        text, metadata.get("answer", metadata.get("gold_answer"))
-    )
-    return reward
+    gold_answer = metadata.get("gold_answer")
+    return 1.0 if gold_answer and _extract_answer(text) == gold_answer else 0.0
 
   return reward_fn
 
@@ -259,8 +213,8 @@ def _grpo_model_input(
 def _build_algo(args: argparse.Namespace) -> algorithm_adapter.GRPOAdapter:
   algo = algorithm_adapter.GRPOAdapter(
       group_size=args.num_generations,
-      mini_batch_size=args.mini_batch_size,
-      max_packed_len=args.max_prompt_length + args.train_max_response_length,
+      mini_batch_size=args.batch_size,
+      max_packed_len=args.max_prompt_length + args.max_response_length,
       clip_epsilon=args.epsilon,
       beta_kl=args.beta,
   )
@@ -334,21 +288,18 @@ def _register_workers(
 
 def _build_prompt_item(
     *,
-    example: dict[str, Any],
     prompt_idx: int,
     max_response_length: int,
     temperature: float,
     top_p: float,
     top_k: int | None,
 ) -> dict[str, Any]:
-  prompt = _as_text(example["prompts"])
-  question = _as_text(example["question"])
-  answer = _normalize_example_value(example["answer"])
+  question, gold_answer = DEMO_TASKS[prompt_idx % len(DEMO_TASKS)]
+  prompt = PROMPT_TEMPLATE.format(question=question)
   prompt_id = f"prompt_{prompt_idx}"
   return {
       "prompt": prompt,
       "prompt_id": prompt_id,
-      "group_id": prompt_id,
       "generation_kwargs": {
           "max_generation_steps": max_response_length,
           "temperature": temperature,
@@ -357,14 +308,11 @@ def _build_prompt_item(
           "return_logprobs": True,
       },
       "metadata": {
-          "answer": answer,
-          "question": question,
+          "gold_answer": gold_answer,
           "prefix_hash": prompt_id,
           "env_config": {
               "prompt": prompt,
-              "question": question,
-              "answer": answer,
-              "group_id": prompt_id,
+              "gold_answer": gold_answer,
               "max_steps": 1,
           },
       },
@@ -375,14 +323,8 @@ def _iter_prompt_items(
     args: argparse.Namespace,
 ) -> Iterator[dict[str, Any]]:
   top_k = None if args.top_k < 0 else args.top_k
-  dataset = _build_gsm8k_dataset(args)
-  dataset_size = len(dataset)
-  if dataset_size == 0:
-    raise ValueError("GSM8K dataset is empty.")
   for prompt_idx in range(args.max_steps * args.batch_size):
-    example = dataset[prompt_idx % dataset_size]
     yield _build_prompt_item(
-        example=example,
         prompt_idx=prompt_idx,
         max_response_length=args.max_response_length,
         temperature=args.temperature,
@@ -408,25 +350,8 @@ def main(argv: list[str], context: Any = None) -> None:
   args = _parse_args(argv)
   if args.num_generations <= 1:
     raise ValueError("num_generations must be greater than 1 for GRPO.")
-  if args.batch_size <= 0:
-    raise ValueError("batch_size must be positive.")
-  if args.mini_batch_size <= 0:
-    raise ValueError("mini_batch_size must be positive.")
-  if args.batch_size % args.mini_batch_size != 0:
-    raise ValueError(
-        "mini_batch_size must divide batch_size to match the "
-        "qwen3_grpo_demo.py recipe semantics. Got "
-        f"batch_size={args.batch_size}, mini_batch_size={args.mini_batch_size}."
-    )
   if args.train_micro_batch_size <= 0:
     raise ValueError("train_micro_batch_size must be positive.")
-  if args.train_max_response_length <= 0:
-    args.train_max_response_length = args.max_response_length
-  if args.train_max_response_length < args.max_response_length:
-    raise ValueError(
-        "train_max_response_length must be >= max_response_length so generated "
-        "tokens are not truncated before training."
-    )
   if args.max_staleness < 0:
     raise ValueError("offpolicy/max_staleness must be non-negative.")
 
@@ -438,7 +363,7 @@ def main(argv: list[str], context: Any = None) -> None:
       "Async rollout max_staleness=%d (0 means queue-level on-policy).",
       args.max_staleness,
   )
-  logging.info("Weight sync enabled: %s", args.sync_weights)
+  logging.info("Weight sync backend: %s", args.weight_sync_backend)
 
   tokenizer_path = args.tokenizer_path or os.getenv("MODEL_DIR") or args.model_id
   tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
@@ -486,11 +411,7 @@ def main(argv: list[str], context: Any = None) -> None:
   inference_addr = None
   inference_handle = None
   if args.beta != 0.0:
-    inference_addr = (
-        args.inference_addr
-        if args.inference_addr
-        else inference_addr_future.result(timeout=args.rpc_timeout_s)
-    )
+    inference_addr = inference_addr_future.result()
     inference_handle = _connect(inference_addr, args.rpc_timeout_s)
 
   algo = _build_algo(args)
@@ -505,9 +426,7 @@ def main(argv: list[str], context: Any = None) -> None:
 
   weight_sync_backend = None if args.weight_sync_backend == "none" else args.weight_sync_backend
   cluster = orchestrator.ClusterOrchestrator(
-      weight_sync_coordinator=_make_weight_sync_coordinator(
-          trainer_handle, rollout_handle
-      )
+      weight_sync_backend=weight_sync_backend
   )
 
   _register_workers(
@@ -534,21 +453,20 @@ def main(argv: list[str], context: Any = None) -> None:
       },
   )
 
-  reward_fn = _make_reward_fn(args.reward_mode)
   program = rl_program.StandardRLProgram(
       algo=algo,
       dataset=_iter_prompt_items(args),
       max_steps=args.max_steps,
-      reward_fns=[reward_fn] if reward_fn is not None else None,
+      reward_fns=[_make_reward_fn(args.reward_mode, args.num_generations)],
       assembler=batch_assembly.GRPOTrainExampleAssembler(
           batch_size=args.train_micro_batch_size,
           max_prompt_length=args.max_prompt_length,
-          max_response_length=args.train_max_response_length,
+          max_response_length=args.max_response_length,
           pad_id=pad_id,
       ),
       metrics_logging_options=metrics_logging_options,
       max_staleness=args.max_staleness,
-      sync_weights=True,
+      sync_weights=(weight_sync_backend is not None),
       on_step_begin=lambda step: logging.info(
           "Async GRPO step %d starting.", step
       ),
