@@ -1,0 +1,32 @@
+{
+  "alignment": {
+    "a_b_differing_bytes": 0,
+    "b_c_differing_bytes": 0,
+    "n_action": 112544
+  },
+  "arm": "off",
+  "claim_ceiling": "The observer reached both serving arms and the endpoint stayed exact; this arm contains no first-red interval.",
+  "classification": "M15_OBSERVER_CONTROL_EXACT",
+  "gate": "OBSERVER_REACHED_EXACT_ENDPOINT",
+  "observer_mode": "full",
+  "schema": "m15-apc-wide-seam-classification-v1",
+  "seam_inventory": {
+    "arms": [
+      "A",
+      "B"
+    ],
+    "bytes": 6556578861,
+    "records": 2474,
+    "unique_keys": 724075
+  },
+  "selected_layer": 0,
+  "status": "PASS",
+  "tail_inventory": {
+    "arms": [
+      "A",
+      "B"
+    ],
+    "records": 2474,
+    "unique_keys": 472313
+  }
+}

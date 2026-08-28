@@ -934,3 +934,39 @@ python3 canon-zero-tim/cluster/render_v1_apc_m15_target_debug.py \
   --seam-layer 0 \
   --output-dir "/tmp/v1-apc-m15-d21-full-l0"
 ```
+
+## Attempt 13 M15 Target Debug Runs (d32-7d30f382 Phase D Layer-0 Full Observer)
+
+Attempt 13 paired dual-arm execution (`d32-7d30f382`, source commit `7d30f3827480e6f9d5ae972f55ca4d16f07de6df`) was executed on dual 64-TPU allocations (DP8xTP8) with the 15-checkpoint Full Observer attached to Layer 0:
+
+- **Control Arm (`canon-v1-apc-m15-off-d32-7d30f382`)**:
+  - Rollout: 256 trajectories completed, **0.0%** prefix cache hit rate, solve rate **16.0%** (41/256).
+  - Pre-alignment: `[CANON_ALIGN_PRE] step=0 verdict=PASS N_action=112544 bounds=[('S_decode_vs_S_prefill', 0), ('S_prefill_vs_T_old', 0)]` ($A-B=0, B-C=0$).
+  - Classification: `M15_OBSERVER_CONTROL_EXACT`, `gate=OBSERVER_REACHED_EXACT_ENDPOINT`.
+  - Seam records: 2,474 pairs across Layer 0 verified bitwise exact.
+  - Terminal: Controlled exit code 42, zero backward, zero optimizer commits.
+
+- **Treatment Arm (`canon-v1-apc-m15-on-d32-7d30f382`)**:
+  - Rollout: 256 trajectories completed, **92.7%** prefix cache hit rate, solve rate **19.9%** (51/256).
+  - Pre-alignment: `[CANON_ALIGN_PRE] step=0 verdict=FAIL N_action=115396 bounds=[('S_decode_vs_S_prefill', 239), ('S_prefill_vs_T_old', 0)]` ($B-C=0$ exact, captured 239 differing bytes).
+  - Intra-Layer Checkpoint Localization:
+    - `[0] layer_input`: 🟢 EXACT MATCH ($\Delta = 0.0$)
+    - `[1] input_norm`: 🟢 EXACT MATCH ($\Delta = 0.0$)
+    - `[2] q_proj`: 🟢 EXACT MATCH ($\Delta = 0.0$)
+    - `[3] k_proj`: 🟢 EXACT MATCH ($\Delta = 0.0$)
+    - `[4] v_proj`: 🟢 EXACT MATCH ($\Delta = 0.0$)
+    - `[5] q_norm`: 🟢 EXACT MATCH ($\Delta = 0.0$)
+    - `[6] k_norm`: 🟢 EXACT MATCH ($\Delta = 0.0$)
+    - `[7] q_post_rope`: 🟢 EXACT MATCH ($\Delta = 0.0$)
+    - `[8] k_post_rope`: 🟢 EXACT MATCH ($\Delta = 0.0$)
+    - **`[9] rpa_output`**: 🔴 **FIRST RED** ($\Delta_{\max} = 7.1857 \times 10^8$)
+    - `[10..14] o_proj, residual, post_norm, mlp, layer_output`: 🔴 RED (downstream propagation).
+  - Classification: `M15_INTERNAL_FIRST_RED_LOCALIZED`, `gate=INTERNAL_FIRST_RED_LOCALIZED`, `selected_layer=0`.
+  - Terminal: Controlled exit code 42, zero backward, zero optimizer commits.
+- Retained evidence: `evidence/v1_apc_m15_attempt13_paired_d32_20260828/`.
+
+### Current Claim Ceiling and Next Action
+
+- **Claim Ceiling**: `FIRST_RED_LOCALIZED` (Gate: `INTERNAL_FIRST_RED_LOCALIZED`).
+- **Defect Localization**: Query/Key projections and RoPE are 100% bitwise exact. Divergence originates directly in TPU Ragged Paged Attention (`tunix/models/qwen3/tpu_inference/rpa_kernel_p66.py` / `sharded_ragged_paged_attention`) when fetching cached prefix KV blocks.
+- **Next Step (Phase E)**: Numerical repair of `rpa_kernel_p66.py` block-table indexing and paged KV cache read logic.

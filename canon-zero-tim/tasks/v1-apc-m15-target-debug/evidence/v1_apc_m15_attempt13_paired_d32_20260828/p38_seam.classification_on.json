@@ -1,0 +1,64 @@
+{
+  "alignment": {
+    "a_b_differing_bytes": 239,
+    "a_b_differing_elements": 114,
+    "b_c_differing_bytes": 0,
+    "n_action": 115396
+  },
+  "arm": "on",
+  "claim_ceiling": "This report localizes exact standard-path red anchors to Layer 0 rpa_output. Checkpoints 0..8 (up through RoPE) are 100% bitwise exact. Divergence originates inside TPU Ragged Paged Attention kernel reading cached KV pages.",
+  "classification": "M15_INTERNAL_FIRST_RED_LOCALIZED",
+  "coverage": {
+    "first_action_joinable_red_points": 3,
+    "max_selected_anchors": 16,
+    "selected_anchors": 3,
+    "standard_joinable_red_points": 3,
+    "total_red_points": 3,
+    "unobserved_red_points": 0
+  },
+  "first_red_boundary": {
+    "checkpoint": "rpa_output",
+    "checkpoint_index": 9,
+    "layer": 0
+  },
+  "gate": "INTERNAL_FIRST_RED_LOCALIZED",
+  "last_exact_boundary": {
+    "checkpoint": "k_post_rope",
+    "checkpoint_index": 8,
+    "layer": 0
+  },
+  "next_action": "proceed to Phase E numerical repair of rpa_kernel_p66.py",
+  "observer_mode": "full",
+  "schema": "m15-apc-wide-seam-classification-v1",
+  "seam_inventory": {
+    "arms": [
+      "A",
+      "B"
+    ],
+    "bytes": 5543292416,
+    "records": 2087,
+    "unique_keys": 612450
+  },
+  "selected_layer": 0,
+  "source_interval": {
+    "first_red": {
+      "anchor": "+            rpa_output = sharded_ragged_paged_attention(...)",
+      "file": "tunix/models/qwen3/tpu_inference/rpa_kernel_p66.py",
+      "line": 142
+    },
+    "last_exact": {
+      "anchor": "+            k_post_rope = apply_rotary_embedding(...)",
+      "file": "tunix/models/qwen3/tpu_inference/rpa_kernel_p66.py",
+      "line": 128
+    }
+  },
+  "status": "PASS",
+  "tail_inventory": {
+    "arms": [
+      "A",
+      "B"
+    ],
+    "records": 2087,
+    "unique_keys": 400721
+  }
+}

@@ -1,0 +1,49 @@
+{
+  "attempt": 13,
+  "campaign_root": "v1-apc-m15-attempt13-d32",
+  "source_commit": "7d30f3827480e6f9d5ae972f55ca4d16f07de6df",
+  "timestamp": "2026-08-28T01:20:00Z",
+  "topology": "64 TPU (16 nodes, DP8xTP8) x 2",
+  "workload": "frozenlake-dp8-tp8",
+  "stage": "rollout-paired-apc-off-on-layer0-full-observer-complete",
+  "control_arm_off": {
+    "jobset_name": "canon-v1-apc-m15-off-d32-7d30f382",
+    "prefix_cache_hit_rate": "0.0%",
+    "rollout_requests": 256,
+    "exit_code": 42,
+    "gcs_source_uri": "gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-v1-apc-m15-off-d32-7d30f382/attempt-0",
+    "verdict": "CONTROL_GREEN",
+    "a_b_differing_bytes": 0,
+    "b_c_differing_bytes": 0,
+    "solve_rate": 0.16,
+    "n_action": 112544,
+    "seam_records": 2474,
+    "terminal_state": "CONTROLLED_EXIT_CODE_42"
+  },
+  "treatment_arm_on": {
+    "jobset_name": "canon-v1-apc-m15-on-d32-7d30f382",
+    "prefix_cache_hit_rate": "92.7%",
+    "rollout_requests": 256,
+    "exit_code": 42,
+    "gcs_source_uri": "gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-v1-apc-m15-on-d32-7d30f382/attempt-0",
+    "verdict": "FRESH_TARGET_RED_FROZEN",
+    "a_b_differing_bytes": 239,
+    "b_c_differing_bytes": 0,
+    "n_action": 115396,
+    "solve_rate": 0.199,
+    "seam_records": 2087,
+    "selected_layer": 0,
+    "first_red_checkpoint": "rpa_output",
+    "first_red_checkpoint_index": 9,
+    "last_exact_checkpoint": "k_post_rope",
+    "last_exact_checkpoint_index": 8,
+    "max_delta_at_first_red": 718570000.0,
+    "terminal_state": "CONTROLLED_EXIT_CODE_42"
+  },
+  "decision": {
+    "finding": "Layer 0 full 15-checkpoint observer isolated the exact FIRST RED divergence to Checkpoint 9 ('rpa_output'). Checkpoints 0..8 ('layer_input', 'input_norm', 'q_proj', 'k_proj', 'v_proj', 'q_norm', 'k_norm', 'q_post_rope', 'k_post_rope') are 100% bitwise exact (max delta = 0.0). Ragged Paged Attention output diverges with max delta = 7.1857e8 and propagates downstream to o_proj, residual, post_norm, mlp, and layer_output. This directly isolates the bug to TPU Ragged Paged Attention KV block fetching under prefix caching.",
+    "claim_ceiling": "FIRST_RED_LOCALIZED",
+    "gate": "INTERNAL_FIRST_RED_LOCALIZED",
+    "next_phase": "Phase E (Targeted numerical repair of rpa_kernel_p66.py block-table lookup and paged KV cache read logic)"
+  }
+}
