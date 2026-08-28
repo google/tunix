@@ -216,6 +216,64 @@ CANON_FROZENLAKE_CKPT_MILESTONE_INTERVAL=0
 --eval_every_n_steps=50
 ~~~
 
+## External worker-log collection
+
+The Wave 10 P45 failure lost precisely the source worker's log and termination
+metadata. Before applying a fresh JobSet, start one collector for that exact
+JobSet in a persistent operator terminal. Use a fresh local directory and a
+fresh, attempt-specific GCS prefix for every run; neither may be reused.
+
+~~~bash
+JOBSET=<exact-rendered-jobset-name>
+SOURCE=<approved-pushed-full-40-character-sha>
+LOCAL_EVIDENCE=<new-persistent-local-directory>
+GCS_PREFIX=<new-run-specific-gcs-prefix>
+
+python3 \
+  canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts/collect_jobset_logs_to_gcs.py \
+  --jobset "$JOBSET" \
+  --source-sha "$SOURCE" \
+  --attempt 0 \
+  --expected-workers 16 \
+  --output-dir "$LOCAL_EVIDENCE" \
+  --gcs-prefix "$GCS_PREFIX"
+~~~
+
+The collector may start before `kubectl apply`; a missing JobSet is polled and
+does not create or alter anything. Keep it alive until it emits one terminal
+marker. Never run two collectors against the same local directory or GCS
+prefix. The collector only issues read-only Kubernetes calls (`get` and
+`logs`) plus Cloud Storage uploads. It must never be used as a wrapper around
+the apply command.
+
+During the run, `live/LIVE.json` records discovered worker indices and stream
+state. `live/logs/worker-02/`, for example, contains the continuously mirrored
+worker-2 log, while `live/logs/head/` contains the trainer/head and Pathways
+head-sidecar logs. Kubernetes snapshots are content-addressed under
+`live/snapshots/`, so changed Pod termination state, JobSet conditions, events,
+and node conditions are retained rather than overwritten.
+
+At `Completed=True` or `Failed=True`, the collector waits its terminal grace
+period, takes a final snapshot, stops only its own `kubectl logs` subprocesses,
+and writes `sealed/COLLECTED.json`, gzip logs, final metadata, and a
+self-excluding `sealed/SHA256SUMS`. Download the sealed directory and verify
+the manifest before cleanup:
+
+~~~bash
+RETURN=<new-local-return-directory>
+gcloud storage rsync --recursive "$GCS_PREFIX/sealed" "$RETURN"
+cd "$RETURN"
+sha256sum --check SHA256SUMS --quiet
+~~~
+
+`P57_JOBSET_LOG_COLLECTOR_PASS workers=16/16` certifies evidence completeness,
+not training success. A failed JobSet can have a valid collector package.
+Missing worker/head logs, incomplete terminal metadata, interruption, or any
+upload failure emits `INCONCLUSIVE`; preserve both local and GCS evidence and
+do not infer a numerical failure. The host gate covers collector construction,
+but its live target status remains `TARGET COLLECTOR NOT RUN` until the first
+real attempt returns a sealed package.
+
 ## Launch
 
 Only after separate user approval:
@@ -276,6 +334,8 @@ one block per JobSet containing:
 - training solve/reward, eval solve/reward, step timing, sampled tokens/s,
   gradient/update norms, and IS mean/max/clip fraction where applicable;
 - every infrastructure event or restart.
+- collector terminal marker, `COLLECTED.json`, `SHA256SUMS`, all 16 worker-log
+  paths, head/sidecar-log paths, and final JobSet/Pod/event/node JSON paths.
 
 Do not summarize away failure. If a large artifact cannot be committed, run
 the checked-in classifier beside it and return the complete classifier JSON,

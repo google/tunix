@@ -1,5 +1,55 @@
 # P57 300-update execution handoff
 
+## START HERE — f45w10 is an unresolved source-worker loss, not a training-math red
+
+This section supersedes every later `START HERE` block for the next P45 action.
+
+Published source `96544812026677c7aeb5bb08b24d1ec1d554d3bd` ran optimized
+Zero P45 as `canon-p57-fl-zero-f45w10-96544812`. The committed incident
+summary reports Step 63/300, 44.5% solve, and about 2.9 minutes per step before
+failure. All 14 retained non-source Pathways worker logs independently report
+that worker 2 stopped sending at about 03:32:41; the 10-second pipe deadline
+then caused distributed fail-closed teardown. The concurrent M15 run was
+reported unaffected and continuing.
+
+The evidence is incomplete at the decisive boundary: worker-2 stdout/stderr,
+its Pod termination reason and exit code, Pod/JobSet events, node conditions,
+the head log, terminal package, and SHA ledger are absent. Therefore the
+correct classification is analysis-grade `INCONCLUSIVE_INFRA_SOURCE_MISSING`,
+not a proven network/hardware fault and not a Zero-TIM/backward/loss/optimizer
+failure. Do not increase the Pathways deadline or alter training mathematics
+from this evidence.
+
+Before another P45 launch, the user must choose one contract:
+
+- maximum throughput: keep eval and checkpoint disabled, use a fresh run ID,
+  and accept that any infrastructure loss restarts from step 0;
+- resilient full train: implement a separately registered latest-1 rolling
+  checkpoint/resume mode, measure its I/O cost, and rerun host/image admission
+  before target use.
+
+For either contract, arrange failure-time capture of the first disappearing
+worker's current/previous logs, Pod termination JSON, events, node conditions,
+and the head log before cleanup. No relaunch is authorized by this handoff.
+
+The operator-side collector implementing that requirement is
+`scripts/collect_jobset_logs_to_gcs.py`. Before applying any fresh P45 or M15
+JobSet, start one collector per JobSet in its own persistent terminal with a
+never-used local output directory and run-specific GCS prefix. It may start
+before the JobSet exists and will wait without mutating the cluster. It follows
+the head, both Pathways head sidecars, and worker indices `0..15`; snapshots
+JobSet/Pod/event/node state; mirrors open files under `live/`; and seals a
+checksummed terminal package under `sealed/`. Exact commands and acceptance
+criteria are in `RUNBOOK.md` under `External worker-log collection`.
+
+Collector `PASS` means only that the evidence package is complete. A failed
+training JobSet can and should still have collector `PASS`. A missing worker
+log, missing head log, nonterminal interruption, or upload error is collector
+`INCONCLUSIVE`; it must never be rewritten as a training or numerical verdict.
+The collector is host-tested only and remains `TARGET COLLECTOR NOT RUN` until
+a real JobSet exercises it. This handoff does not authorize a launch, commit,
+push, Pod restart, or cleanup.
+
 ## START HERE — Zero reference must use the registered optimized path
 
 This section supersedes the older statement that the Zero-TIM pair is merely

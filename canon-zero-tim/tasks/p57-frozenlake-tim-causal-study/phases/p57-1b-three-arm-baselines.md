@@ -125,3 +125,69 @@ The first six one-seed curves are a concept study. A positive result supports
 that zero-TIM or token TIS changes learning under these exact recipes; a null
 supports only robustness to the measured dose. A campaign-level stability
 claim requires preregistered paired seeds and counterbalanced launch order.
+
+## Wave 10 infrastructure recovery decision
+
+The retained `f45w10` evidence proves a common peer-loss symptom, not the
+reason the peer disappeared. Fourteen surviving worker logs independently
+name worker 2 as the silent peer and converge on the same approximately
+10-second interval. The package omits precisely the source worker's log, Pod
+termination status, events, and the head log. Therefore classify the run
+`INCONCLUSIVE_INFRA_SOURCE_MISSING`; do not call it a confirmed network or
+hardware fault and do not alter Zero-TIM, backward, loss, optimizer, or pipe
+timeout semantics from this evidence.
+
+| Recovery choice | Training contract | Benefit | Cost / limit |
+|---|---|---|---|
+| Maximum throughput | Keep exact optimized Zero eval-off/checkpoint-off and relaunch from step 0 with a fresh identity | No evaluation or checkpoint I/O | Every worker loss discards all progress; no software change can provide resume without durable state |
+| Resilient full train | Add an exact-workload rolling checkpoint mode, retain latest 1, and resume only from a signed optimizer+actor checkpoint under a fresh attempt identity | Bounds lost work after an infrastructure failure | Adds synchronous checkpoint I/O and changes the registered fast-run carrier; requires implementation, host/image gates, and a fresh target measurement |
+
+For either choice, the launch operator must collect the first disappearing
+worker's current/previous logs, Pod JSON termination reason and exit code,
+JobSet/Pod events, node conditions, and the head log before cleanup. A longer
+pipe timeout is admissible only if that evidence proves the worker remained
+alive and resumed after the old deadline; it cannot repair an exited peer.
+
+## Wave 10 external worker-log collector preregistration
+
+The next fresh P45/M15 JobSet may be observed by an operator-side collector.
+This collector is evidence infrastructure only: it must not run in a training
+Pod, alter a rendered manifest, restart or delete a Pod, change the Pathways
+pipe deadline, or change any numerical/profile/checkpoint setting.
+
+The collector contract is:
+
+1. bind one attempt-zero JobSet name, one full 40-character source SHA, one
+   never-reused local evidence directory, and one run-specific GCS prefix;
+2. continuously follow every discovered `jax-tpu`, `pathways-worker`,
+   `pathways-proxy`, and `pathways-rm` container by Pod UID while separately
+   snapshotting the JobSet, Pods, events, and participating Nodes;
+3. periodically upload the still-open evidence tree under `live/` without
+   deleting either local or remote artifacts;
+4. after the JobSet reports `Completed=True` or `Failed=True`, take final
+   snapshots, stop only the local log-follow processes, gzip the retained
+   logs, write a self-excluding `SHA256SUMS`, and upload an immutable `sealed/`
+   package; and
+5. emit `PASS` only when worker indices `0..15` all have nonempty main logs,
+   a nonempty head log exists, and final JobSet/Pod/event/node metadata is
+   present. Missing source-worker evidence, collector interruption, upload
+   failure, or an incomplete terminal bundle is `INCONCLUSIVE`, never a
+   training or numerical verdict.
+
+Host tests must prove argument validation, Pod/index discovery, terminal-state
+classification, missing-worker fail-closed behavior, checksum self-exclusion,
+and command construction without invoking a real cluster or GCS. Until a live
+attempt exercises the collector, its claim is `HOST PASS / TARGET COLLECTOR
+NOT RUN`.
+
+Result (2026-08-28): implemented the external collector in
+`scripts/collect_jobset_logs_to_gcs.py` and its host contract in
+`tests/p57_frozenlake_tim/test_jobset_log_collector.py`. The focused collector
+suite passed 12/12 and the complete P57 host suite passed 167/167 with
+`P57_FROZENLAKE_TIM_CPU_PASS`. The collector uses Pod UID plus worker index,
+captures current and restarted-container `--previous` logs, retains
+content-addressed Kubernetes snapshots, refuses a reused local/GCS identity,
+and fail-closes incomplete evidence. Verified by host tests; target collector
+not verified because this host has no `kubectl` and its snap-packaged `gcloud`
+cannot execute under the available capability profile. No JobSet, GCS object,
+TPU, training code, manifest, commit, or remote branch was changed.

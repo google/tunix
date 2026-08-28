@@ -414,3 +414,58 @@
 - Evidence: Full error logs and pod traces archived at `canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/evidence/f45w10_worker_pipe_timeout/`.
 - Classification: `DEADLINE_EXCEEDED_WORKER_PIPE_TIMEOUT`. The parallel M15 Full Wave 10 run (`canon-p57-fl-zero-m15-mw10-96544812`) is unaffected and continuing.
 - Next: preserve raw logs; restart P45 Full Wave 10 on clean/ready 64 TPU slice upon authorization.
+
+## 2026-08-28T04:47:14Z — Wave 10 root-cause claim demoted; recovery choice required
+
+- Type: evidence audit / correction / recovery pre-registration.
+- Confirmed: all 14 retained worker logs name worker 2 as the peer that stopped
+  sending at approximately 03:32:41; Pathways breaks the pipe after its
+  10-second deadline and Cloud/OSS cannot quick-restart the distributed job.
+  The committed summary reports Step 63/300 and 44.5% solve before the stop.
+- Missing: the evidence directory has no worker-2 log, Pod termination reason
+  or exit code, Pod/JobSet events, node-condition snapshot, head log, terminal
+  package, or SHA ledger. The current host lacks `kubectl`, so the vanished
+  Pod could not be queried from this worktree.
+- Correction: `DEADLINE_EXCEEDED_WORKER_PIPE_TIMEOUT` is the common teardown
+  symptom, not a proven root cause. Network interruption, worker process crash
+  or OOM, eviction/preemption, and node failure remain live explanations.
+  Classify this run analysis-grade `INCONCLUSIVE_INFRA_SOURCE_MISSING`.
+- Numerical boundary: no retained log identifies a Zero-TIM, backward, loss,
+  gradient, optimizer, or non-finite first red. The reported 63-update reach
+  and unaffected concurrent M15 run argue against changing training math, but
+  the missing head log prevents promotion to a signed training result.
+- Decision required: keep the user's no-eval/no-checkpoint maximum-throughput
+  carrier and accept fresh step-0 restarts, or introduce an exact rolling
+  latest-1 checkpoint/resume carrier and measure its I/O cost. Do not increase
+  the pipe deadline unless source-worker evidence proves a recoverable pause.
+- External mutations: pulled the publication branch by fast-forward only. No
+  JobSet, TPU, checkpoint, commit, push, or remote workload was changed.
+
+## 2026-08-28T05:23:19Z — external JobSet worker-log collector built and host-gated
+
+- Type: evidence-infrastructure implementation / failure-source preservation.
+- Cause: the `f45w10` package retained 14 peer observers but omitted the exact
+  worker-2 source log, head log, Pod termination state, events, node state, and
+  a sealed SHA ledger. The pipe timeout is therefore only a common teardown
+  symptom and cannot identify the infrastructure root cause.
+- Action: added an operator-side collector that binds one attempt-zero JobSet,
+  full source SHA, fresh local directory, and fresh GCS prefix. It follows the
+  head, head sidecars, and workers 0..15 by Pod UID; captures `--previous` logs
+  after a container restart; content-addresses JobSet/Pod/event/node snapshots;
+  mirrors open evidence under `live/`; and seals gzip logs, final metadata,
+  `COLLECTED.json`, and a self-excluding `SHA256SUMS` under `sealed/`.
+- Safety: the collector contains no apply/delete/rollout/restart operation and
+  never runs in a training Pod. Collector failure cannot cancel or modify the
+  JobSet. Evidence completeness is distinct from the training verdict: a
+  terminal failed JobSet may still have collector `PASS`, while a missing
+  worker/head/metadata file or upload failure is `INCONCLUSIVE`.
+- Validation: focused collector tests passed 12/12; the complete P57 host gate
+  passed 167/167 and emitted `P57_FROZENLAKE_TIM_CPU_PASS`; Python compilation
+  and `git diff --check` passed. Tests cover identity negatives, worker-index
+  discovery, terminal conditions, current/previous command vectors, event
+  filtering, complete and missing-worker classifications, upload-failure
+  fail-closed behavior, actual sealing, and checksum self-exclusion.
+- Claim boundary: `HOST PASS / TARGET COLLECTOR NOT RUN`. This host has no
+  `kubectl`; its snap-packaged `gcloud` also cannot execute under the current
+  capability profile. No real Kubernetes read, GCS upload, JobSet/TPU launch,
+  commit, push, or remote mutation occurred.
