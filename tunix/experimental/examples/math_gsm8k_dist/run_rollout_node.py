@@ -26,7 +26,6 @@ import sys
 from typing import Any
 
 from tunix.experimental.examples.math_gsm8k_dist import gsm8k
-from tunix.experimental.examples.math_gsm8k_dist import models
 from tunix.rl.agentic.parser.chat_template_parser import parser as chat_parser_lib
 
 REPO_ROOT = os.path.abspath(
@@ -35,6 +34,8 @@ REPO_ROOT = os.path.abspath(
 
 SAMPLERS = ("inprocess_vllm",)
 KV_CACHE_EXTRA_TOKENS = 256
+MODEL_SOURCE_CHOICES = ("safetensors", "huggingface", "hf", "maxtext")
+MAXTEXT_MODEL_SOURCE = "maxtext"
 
 # This must be set before the first vLLM import. Keep vLLM imports lazy so the
 # runtime context and logging are already configured if TPU/vLLM initialization
@@ -56,6 +57,39 @@ def _import_vllm_sampler():
   vllm_sampler = importlib.import_module("tunix.generate.vllm_sampler")
   logging.info("Finished importing tunix.generate.vllm_sampler.")
   return vllm_sampler
+
+
+def _import_models():
+  return importlib.import_module(
+      "tunix.experimental.examples.math_gsm8k_dist.models"
+  )
+
+
+def _is_maxtext_source(model_source: str) -> bool:
+  return model_source.lower() == MAXTEXT_MODEL_SOURCE
+
+
+def _preimport_raiden_if_needed(weight_sync_mode: Any) -> None:
+  """Imports Raiden before JAX/tpu-inference can initialize TPU runtime."""
+  from tunix.experimental.weight_sync import (  # pylint: disable=g-import-not-at-top
+      weight_sync,
+  )
+
+  if weight_sync_mode != weight_sync.WeightSyncMode.RAIDEN:
+    return
+
+  logging.info("Pre-importing Raiden before JAX/vLLM initialization...")
+  try:
+    importlib.import_module("tpu_sync.api.jax.weight_synchronizer")
+    importlib.import_module("tpu_sync.rpc.raiden_controller")
+  except ModuleNotFoundError as exc:
+    if exc.name and exc.name.startswith("tpu_sync"):
+      raise RuntimeError(
+          "WEIGHT_SYNC_MODE=raiden requires the tpu_sync/Raiden package to be "
+          "installed before starting the rollout worker."
+      ) from exc
+    raise
+  logging.info("Finished pre-importing Raiden.")
 
 
 def _chat_parser_for(model_id: str, tokenizer):
@@ -90,7 +124,17 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument("--port", type=int, default=20001)
   parser.add_argument("--worker_id", type=str, default="vllm-rollout-0")
   parser.add_argument("--model_id", type=str, default=os.getenv("MODEL_ID", ""))
-  models.add_model_source_args(parser)
+  parser.add_argument(
+      "--model_source",
+      type=str,
+      default=os.getenv("MODEL_SOURCE", "safetensors"),
+      choices=MODEL_SOURCE_CHOICES,
+  )
+  parser.add_argument(
+      "--maxtext_dtype",
+      type=str,
+      default=os.getenv("MAXTEXT_DTYPE", "bfloat16"),
+  )
   parser.add_argument(
       "--model_dir", type=str, default=os.getenv("MODEL_DIR", "")
   )
@@ -158,7 +202,7 @@ def _create_rollout_mesh(args) -> Any:
 def _tokenizer_path(args) -> str:
   if args.tokenizer_path:
     return args.tokenizer_path
-  if models.is_maxtext_source(args.model_source):
+  if _is_maxtext_source(args.model_source):
     return args.model_id
   return args.model_dir or args.model_id
 
@@ -175,6 +219,7 @@ def _register_maxtext_vllm_adapter() -> None:
     ) from exc
 
   maxtext_vllm_adapter.register()
+  models = _import_models()
   logging.info(
       "Registered %s with vLLM.", models.MAXTEXT_VLLM_ARCHITECTURE
   )
@@ -186,9 +231,6 @@ def _create_vanilla_worker(args, tokenizer):
       vanilla_sampler_adapter,
   )
   from tunix.experimental.weight_sync import (  # pylint: disable=g-import-not-at-top
-      raiden_weight_sync_delegate,
-  )
-  from tunix.experimental.weight_sync import (  # pylint: disable=g-import-not-at-top
       weight_sync,
   )
   from tunix.experimental.worker import (  # pylint: disable=g-import-not-at-top
@@ -197,17 +239,21 @@ def _create_vanilla_worker(args, tokenizer):
   from tunix.generate import (  # pylint: disable=g-import-not-at-top
       tokenizer_adapter as tokenizer_adapter_lib,
   )
+  models = _import_models()
+
   logging.info("Creating native sampler on the rollout mesh...")
   mesh = _create_rollout_mesh(args)
   with mesh:
     model = models.create_model(
         args.model_name, args.model_dir or args.model_id, mesh
     )
-  raiden_delegate = (
-      raiden_weight_sync_delegate.RaidenWeightSyncDelegate()
-      if args.weight_sync_mode == weight_sync.WeightSyncMode.RAIDEN
-      else None
-  )
+  raiden_delegate = None
+  if args.weight_sync_mode == weight_sync.WeightSyncMode.RAIDEN:
+    from tunix.experimental.weight_sync import (  # pylint: disable=g-import-not-at-top
+        raiden_weight_sync_delegate,
+    )
+
+    raiden_delegate = raiden_weight_sync_delegate.RaidenWeightSyncDelegate()
   config = rollout_worker.RolloutConfig(
       sampler_type="vanilla",
       weight_sync_mode=args.weight_sync_mode,
@@ -258,9 +304,10 @@ def _create_vllm_worker(args, tokenizer):
   from tunix.models.qwen3 import (  # pylint: disable=g-import-not-at-top
       mapping_vllm_jax,
   )
+  models = _import_models()
 
   rollout_mesh = _create_rollout_mesh(args)
-  is_maxtext = models.is_maxtext_source(args.model_source)
+  is_maxtext = _is_maxtext_source(args.model_source)
   if is_maxtext:
     _register_maxtext_vllm_adapter()
 
@@ -391,7 +438,8 @@ def main(argv: list[str], context: Any = None) -> None:
 
   args = _parse_args(argv)
   logging.info("Parsed args: %s", args)
-  if args.sampler == "vanilla" and models.is_maxtext_source(args.model_source):
+  _preimport_raiden_if_needed(args.weight_sync_mode)
+  if args.sampler == "vanilla" and _is_maxtext_source(args.model_source):
     raise ValueError(
         "MODEL_SOURCE=maxtext is not supported with SAMPLER=vanilla. The "
         "MaxText Tunix adapter is intended for trainer/full-forward use and "
@@ -406,7 +454,7 @@ def main(argv: list[str], context: Any = None) -> None:
   os.environ.setdefault("VLLM_TPU_RPA_VERSION", "2")
   os.environ.setdefault("DISABLE_MOSAIC_ATTN", "1")
   os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
-  if models.is_maxtext_source(args.model_source):
+  if _is_maxtext_source(args.model_source):
     os.environ.setdefault("NEW_MODEL_DESIGN", "1")
   if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)

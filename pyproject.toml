@@ -26,9 +26,9 @@ dependencies = [
   "hf_transfer",  # Huggingface caching in CI
   "huggingface_hub",
   "importlib_resources",
-  # Jax 0.7.2 has performance regression on OSS
+  # Keep aligned with the current Raiden/tpu-inference stack.
   # Jax 0.11.1 removed jax.experimental.hijax.MutableHiType, which flax (through 0.12.8, the newest release) still subclasses
-  "jax[tpu]>=0.6.0,!=0.7.2,<0.11.1",
+  "jax[tpu]>=0.11.0,<0.11.1",
   "jaxtyping",
   "jinja2",  # Huggingface chat template
   "kagglehub",
@@ -64,7 +64,7 @@ docs = [
 prod = [
 ]
 dev = [
-  # Manully install vLLM & tpu-inferece, which depends on jax[tpu]==0.7.2
+  # Manually install vLLM & tpu-inference from requirements/special_requirements.txt.
 ]
 test = [
   "pytest",

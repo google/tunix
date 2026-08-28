@@ -14,8 +14,26 @@
 
 """Tunix API."""
 
+import importlib
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version
+import os
+
+if os.getenv("TUNIX_PREIMPORT_RAIDEN_BEFORE_JAX", "").lower() in (
+    "1",
+    "true",
+    "yes",
+):
+  try:
+    importlib.import_module("tpu_sync.api.jax.weight_synchronizer")
+    importlib.import_module("tpu_sync.rpc.raiden_controller")
+  except ModuleNotFoundError as exc:
+    if exc.name and exc.name.startswith("tpu_sync"):
+      raise RuntimeError(
+          "TUNIX_PREIMPORT_RAIDEN_BEFORE_JAX=1 requires the tpu_sync/Raiden "
+          "package to be installed."
+      ) from exc
+    raise
 
 try:
   __version__ = version("google-tunix")  # match the name in pyproject.toml

@@ -273,7 +273,7 @@ jobs:
         run_and_log "grpo_demo_llama3_qwen2.py (disaggregated-2-way)" python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 --cluster-setup=disaggregated-2-way
         run_and_log "grpo_demo_llama3_qwen2.py (disaggregated-3-way)" python scripts/grpo_demo_llama3_qwen2.py --root-dir=/tmp/grpo_test --num-batches=20 --cluster-setup=disaggregated-3-way
 
-        pip install 'jax[tpu]<0.11.0'
+        pip install 'jax[tpu]>=0.11.0,<0.11.1'
         run_and_log "math_eval_nb.py" bash -c "NUM_BATCHES=1 python examples/deepscaler/math_eval_nb.py"
 
         # TODO(b/508252632): Re-enable once the bug is fixed.
@@ -444,6 +444,5 @@ jobs:
     #     model_name="qwen3-0.6b" model_id="Qwen/Qwen3-0.6B" tokenizer_path="Qwen/Qwen3-0.6B" base_emb_dim=1024 \
     #     checkpoint_dir="/tmp/qwen3_maxtext_ckpts_server" num_batches=2 num_train_epochs=1 total_tpus=8 train_mesh="(4,1)" rollout_mesh="(4,1)" \
     #       bash examples/rl/grpo/gsm8k/run_qwen3_8b_disagg_maxtext.sh
-
 
 

@@ -79,6 +79,11 @@ LORA_ALPHA=${LORA_ALPHA:-64.0}
 USE_LORA=${USE_LORA:-0}
 SYNC_WEIGHTS=${SYNC_WEIGHTS:-0}
 WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-raiden}
+EFFECTIVE_WEIGHT_SYNC_MODE="$WEIGHT_SYNC_MODE"
+case "$SYNC_WEIGHTS" in
+  1|true|True|TRUE|yes|Yes|YES) ;;
+  *) EFFECTIVE_WEIGHT_SYNC_MODE=fallback ;;
+esac
 SAMPLER=${SAMPLER:-inprocess_vllm}
 VLLM_INIT_WITH_RANDOM_WEIGHTS=${VLLM_INIT_WITH_RANDOM_WEIGHTS:-false}
 ROLLOUT_VLLM_HBM_UTILIZATION=${ROLLOUT_VLLM_HBM_UTILIZATION:-0.6}
@@ -425,6 +430,7 @@ echo "  mini batch:     $MINI_BATCH_SIZE"
 echo "  use lora:       $USE_LORA"
 echo "  sync weights:   $SYNC_WEIGHTS"
 echo "  sync mode:      $WEIGHT_SYNC_MODE"
+echo "  rollout sync:   $EFFECTIVE_WEIGHT_SYNC_MODE"
 echo "  sampler:        $SAMPLER"
 echo "  vLLM dummy load:$VLLM_INIT_WITH_RANDOM_WEIGHTS"
 echo "  trainer chips:  $TRAINER_TPU_CHIPS"
@@ -540,7 +546,7 @@ echo "Launching rollout node with sampler=$SAMPLER on TPU chips $ROLLOUT_TPU_CHI
     --max_concurrency="$MAX_CONCURRENCY"
     --rollout_vllm_hbm_utilization="$ROLLOUT_VLLM_HBM_UTILIZATION"
     --vllm_init_with_random_weights="$VLLM_INIT_WITH_RANDOM_WEIGHTS"
-    --weight_sync_mode="$WEIGHT_SYNC_MODE"
+    --weight_sync_mode="$EFFECTIVE_WEIGHT_SYNC_MODE"
     --lora_rank="$LORA_RANK"
     --lora_alpha="$LORA_ALPHA"
   )
@@ -562,8 +568,13 @@ echo "Launching rollout node with sampler=$SAMPLER on TPU chips $ROLLOUT_TPU_CHI
   export TPU_CHIPS_PER_HOST_BOUNDS=${TPU_CHIPS_PER_HOST_BOUNDS}
   export TPU_HOST_BOUNDS=${TPU_HOST_BOUNDS}
   export LIBTPU_INIT_ARGS=deepsea_chips_per_host_bounds=${TPU_CHIPS_PER_HOST_BOUNDS},deepsea_host_bounds=${TPU_HOST_BOUNDS}
+  if [[ "$EFFECTIVE_WEIGHT_SYNC_MODE" == "raiden" ]]; then
+    export TUNIX_PREIMPORT_RAIDEN_BEFORE_JAX=1
+  else
+    unset TUNIX_PREIMPORT_RAIDEN_BEFORE_JAX
+  fi
   export PYTHONUNBUFFERED=1
-  env | egrep 'JAX|TPU'
+  env | egrep 'JAX|TPU|RAIDEN'
   print_command "Rollout command" "${ROLLOUT_CMD[@]}"
   exec "${ROLLOUT_CMD[@]}" > "$ROLLOUT_LOG" 2>&1
 ) &
