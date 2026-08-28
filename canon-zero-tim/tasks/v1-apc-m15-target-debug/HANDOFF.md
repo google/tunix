@@ -1,8 +1,29 @@
 # M15 APC target-debug handoff
 
-## START HERE — Phase D3b fixes Attempt-15 replay round provenance locally; exact-image and target remain unrun
+## START HERE — Attempt 16 (d35) validates Round 0 assemble fix, captures 1,711 differing bytes in APC-on, and isolates classify-stage alias conflict
 
-### Incident Summary (Attempt 15 / d34)
+### Incident Summary (Attempt 16 / d35)
+Matched pair on 64 TPU each (`canon-v1-apc-m15-off-d35-af006872` and `canon-v1-apc-m15-on-d35-af006872`):
+- **Round 0 Assemble Fix (Verified PASS)**:
+  - Patch 33 (`33-tpu-runner-m15-replay-round-provenance.patch`) successfully resolved the Attempt-15 assemble failure: `[M15.WIDE.ROUND] INPUT_READY round=0 shards=70 pairs=2187` and `STAGE_10_assemble_PASS.json` written.
+- **Control Arm (APC-Off)**:
+  - Completed all 3 continuous diagnostic rounds with 100% Zero-TIM compliance: Round 0 ACKed, Round 1 ACKed, Round 2 precheck PASS (`N_action: 119,648`, `differing_bytes: 0`).
+  - Emitted 184+ bounded shards, 6,630+ seam records, and `m15_wide_seam_bundle.tar` (119 MB).
+- **Treatment Arm (APC-On)**:
+  - Rollout achieved `92.5%` prefix cache hit rate.
+  - Pre-alignment precheck captured exact mismatch: `S_decode_vs_S_prefill differing_bytes: 1,711`, `S_prefill_vs_T_old differing_bytes: 0` ($A-B=1711, B-C=0$).
+  - 70 shards (`000000..000069`), 2,187 record pairs staged and uploaded.
+- **Fatal Failure Point in Treatment Arm**:
+  - At Round 0 seal `stage=classify`, `classify_m15_apc_wide_seam.py` threw:
+    ```text
+    M15WideSeamError: numerically conflicting aliases for A seam (0, b'fde77c0f519800922348535c428c0b8aefc4e70db583ae5e6859df658acbf077')
+    [P38.GCS] M15_ROUND_STAGE round=0 stage=classify status=FAIL exit_code=1
+    ```
+  - Root cause: with 92.5% cache hit rate, multiple concurrent requests share `token_prefix_sha256` at `position=0`. `_resolve_aliases` requires all candidate records sharing a prefix hash to match identical `request_id`s, causing conflict.
+  - Learner failed fast on `round-000000.failure.json`: `tunix.rl.alignment.AlignmentGateError: P38 round-seal worker failed before acknowledgement: round=0 stage=classify exit_code=1`.
+- **Sealed Incident Package**: `evidence/v1_apc_m15_attempt16_d35_20260828/` (`INCIDENT_REPORT.md`, `m15_off_d35_attempt16_tail.log`, `m15_on_d35_attempt16_tail.log`, `p38_live_worker_off.log`, `p38_live_worker_on.log`, `round-000000.failure.json`, `STAGE_20_classify_FAIL.json`, `env.sh`, `SHA256SUMS`).
+
+### Historical — Incident Summary (Attempt 15 / d34)
 Matched pair on 64 TPU each (`canon-v1-apc-m15-off-d34-57d9ab8e` and `canon-v1-apc-m15-on-d34-57d9ab8e`):
 - **Round 0 Prefill Rescore Alignment (Verified PASS)**:
   - **APC-Off**: `Prefix cache hit rate: 0.0%`, `N_action: 120,889`, `S_decode_vs_S_prefill differing_bytes: 0`, `Pre-alignment verdict: PASS`. 85 shards staged and uploaded.

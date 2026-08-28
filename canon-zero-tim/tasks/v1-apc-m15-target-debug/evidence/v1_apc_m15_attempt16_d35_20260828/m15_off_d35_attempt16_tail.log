@@ -1,0 +1,200 @@
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=2048
+[CANON_P38_SEAM_OBSERVER_RECORD] record=6884 arm=B call=7269 rows=1337 bucket=2048 npz_sha256=1d4f373ac6b2cc60ab77b81da0abde2f1144340516306dc9406299616cf1f622
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=2048
+[CANON_P38_SEAM_OBSERVER_RECORD] record=6885 arm=B call=7270 rows=1280 bucket=2048 npz_sha256=2c293e243ff9c0f28ad0728e07b8d6f52217ff33965a4033677370b01909219d
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=2048
+[CANON_P38_SEAM_OBSERVER_RECORD] record=6886 arm=B call=7271 rows=1280 bucket=2048 npz_sha256=e73a895742f44d244b0ff298a07193a00658063068c72d7db87a70d027f91da0
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=2048
+[CANON_P38_SEAM_OBSERVER_RECORD] record=6887 arm=B call=7272 rows=1428 bucket=2048 npz_sha256=7cf39bebcf82450610bfd2b8057198e7431631dce4c5a90a2b1669423960ffe3
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=2048
+INFO 08-28 23:03:26 [loggers.py:273] Engine 000: Avg prompt throughput: 2662.1 tokens/s, Avg generation throughput: 0.7 tokens/s, Running: 8 reqs, Waiting: 14 reqs, GPU KV cache usage: 0.4%, Prefix cache hit rate: 0.0%
+[CANON_P38_SEAM_OBSERVER_RECORD] record=6888 arm=B call=7273 rows=1302 bucket=2048 npz_sha256=8c2ec0c707094c2b37afcfa5f60cb15e491dd6a2005144b7661731775a748c41
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=2048
+[CANON_P38_SEAM_OBSERVER_RECORD] record=6889 arm=B call=7274 rows=1127 bucket=2048 npz_sha256=502b7decfa2da2efa32bf7027bd337179eb4502c71438bdcc26d312e3d9791c9
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=2048
+[CANON_P38_SEAM_OBSERVER_RECORD] record=6890 arm=B call=7275 rows=1024 bucket=1024 npz_sha256=5b2484b12a4f95b0bba704abf210e6cd5b64757236ff1d585fedeb2fd9efc72d
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=2048
+[CANON_P38_SEAM_OBSERVER_RECORD] record=6891 arm=B call=7276 rows=927 bucket=1024 npz_sha256=8188dfce81267e71e5ac2f4652a3b5778f844fb186a3778129b2941b66176082
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=2048
+[CANON_P38_SEAM_OBSERVER_RECORD] record=6892 arm=B call=7277 rows=1280 bucket=2048 npz_sha256=cace911d2c2d50c1dfe249243aea263e37b0f40064d2b4c726bed8e24cda6691
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=2048
+[CANON_P38_SEAM_OBSERVER_RECORD] record=6893 arm=B call=7278 rows=1256 bucket=2048 npz_sha256=329d69865ea49bf90067cfd2a11bdd88db37d78f706ca3840fdc66af53432a1e
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=2048
+[CANON_P38_SEAM_OBSERVER_RECORD] record=6894 arm=B call=7279 rows=1086 bucket=2048 npz_sha256=ebf9ba1a1237f98e0358234e66c601a2d0dd728c7a81038b115e35b3d85b0198
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=2048
+[CANON_P38_SEAM_OBSERVER_RECORD] record=6895 arm=B call=7280 rows=1129 bucket=2048 npz_sha256=914e8e6b9e524f22bd5b7d5cce27a8d5dc99262b06e48018a62d226a273df368
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=2048
+[CANON_P38_SEAM_OBSERVER_RECORD] record=6896 arm=B call=7281 rows=1024 bucket=1024 npz_sha256=f60fdfb6800a350f69eb3d45c03ea63f9370630b059b85c6c869e2749d9e59f2
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=2048
+[CANON_P38_SEAM_OBSERVER_RECORD] record=6897 arm=B call=7282 rows=1024 bucket=1024 npz_sha256=0da2d69a46f520d39f3948942d5a9158ea2960b56f02b3076acb323c9ac78a48
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=2048
+[CANON_P38_SEAM_OBSERVER_RECORD] record=6898 arm=B call=7283 rows=1073 bucket=2048 npz_sha256=45d83c16350a5ad9e84f645d50d59c6fbd590c51468e38608876112a15050970
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=2048
+[CANON_P38_SEAM_OBSERVER_RECORD] record=6899 arm=B call=7284 rows=1060 bucket=2048 npz_sha256=d042fc4e85fec1322ec34731450949c2cb178b0f9782bdae1d167d93245bc789
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=2048
+[CANON_P38_SEAM_OBSERVER_RECORD] record=6900 arm=B call=7285 rows=1024 bucket=1024 npz_sha256=54427420efcdc7b01009dfa9359ab00b49399d25c11fd9fd11eca5033795ea4f
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=2048
+[CANON_P38_SEAM_OBSERVER_RECORD] record=6901 arm=B call=7286 rows=1024 bucket=1024 npz_sha256=b717ff93be66627d5cb35ffd19f4923161f10b28d1c390be133c2f79d436b050
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=2048
+[CANON_P38_SEAM_OBSERVER_RECORD] record=6902 arm=B call=7287 rows=1052 bucket=2048 npz_sha256=d09c032f41cef70764d03d13cc57f1385d843170a07c1e5002cd4144534ef311
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=2048
+INFO 08-28 23:03:32 [loggers.py:273] Engine 000: Avg prompt throughput: 4221.7 tokens/s, Avg generation throughput: 1.2 tokens/s, Running: 8 reqs, Waiting: 7 reqs, GPU KV cache usage: 0.4%, Prefix cache hit rate: 0.0%
+[CANON_P38_SEAM_OBSERVER_RECORD] record=6903 arm=B call=7288 rows=1280 bucket=2048 npz_sha256=78986e0061b2213d8886905c3c68a9997ae3b8a337d2ad9021414dabdc68769f
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=2048
+[CANON_P38_SEAM_OBSERVER_RECORD] record=6904 arm=B call=7289 rows=1473 bucket=2048 npz_sha256=37ff99acd419180076f35d4be58c58414a0dbcde6316294655e9d3bc94344a60
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=2048
+[CANON_P38_SEAM_OBSERVER_RECORD] record=6905 arm=B call=7290 rows=1127 bucket=2048 npz_sha256=abef0d6caf4dd69383451c5241c273d70651f2758774c5d1e82131f21b840adc
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=2048
+[CANON_P38_SEAM_OBSERVER_RECORD] record=6906 arm=B call=7291 rows=969 bucket=1024 npz_sha256=1335a6d8cf00dbcb878fd36efbc78db5bad628e3b35e0db4db6873e6ad952792
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=2048
+[CANON_P38_SEAM_OBSERVER_RECORD] record=6907 arm=B call=7292 rows=770 bucket=1024 npz_sha256=74942ee2bac75c8858e9b374b3cfca615d60103ac253df837d14189fc3c98e20
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=2048
+[CANON_P38_SEAM_OBSERVER_RECORD] record=6908 arm=B call=7293 rows=627 bucket=1024 npz_sha256=d1df0c5a8c7bc0acd399006a067f4fd355c97f5b52998dc63022702060b8c9d0
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=2048
+[CANON_P38_SEAM_OBSERVER_RECORD] record=6909 arm=B call=7294 rows=877 bucket=1024 npz_sha256=d9439926c0c9b8557bf93f236b37f0a7b648e2bb365d2ff68564eb4aa86d4baf
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=2048
+[CANON_P38_SEAM_OBSERVER_RECORD] record=6910 arm=B call=7295 rows=961 bucket=1024 npz_sha256=970c3a848e08b49daefcb058400e321607d3cf8ebaa7d4bf7f1bf27b38f935e1
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=2048
+[CANON_P38_SEAM_OBSERVER_RECORD] record=6911 arm=B call=7296 rows=834 bucket=1024 npz_sha256=7b31a7a06e42ed3d46099d9cbc4020147c75fe4c64e4db7f6d52d809c2492266
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=1602
+[CANON_P38_SEAM_OBSERVER_RECORD] record=6912 arm=B call=7297 rows=1024 bucket=1024 npz_sha256=2f39f51ac9f72a88de64319e06670ac48eafef389c4c5bdbcad599b29fa444af
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=1338
+INFO 08-28 23:03:38 [loggers.py:273] Engine 000: Avg prompt throughput: 6561.3 tokens/s, Avg generation throughput: 1.8 tokens/s, Running: 5 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.2%, Prefix cache hit rate: 0.0%
+[CANON_P38_SEAM_OBSERVER_RECORD] record=6913 arm=B call=7298 rows=1081 bucket=2048 npz_sha256=63d41f4d4f3e9ad538e425879148917b7c1264767b95fd9fbb18ad5b62fdf386
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=1280
+[CANON_P38_SEAM_OBSERVER_RECORD] record=6914 arm=B call=7299 rows=1280 bucket=2048 npz_sha256=260e25b7791fd052a3e80f99bcc7bddbe24697cb761694e37ca184ca652b07ba
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=1280
+[CANON_P38_SEAM_OBSERVER_RECORD] record=6915 arm=B call=7300 rows=1060 bucket=2048 npz_sha256=9b1a67cfa052bfec69c353b57de565837ea226ab045891eaf8670fb86a965abc
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=1280
+[CANON_P38_SEAM_OBSERVER_RECORD] record=6916 arm=B call=7301 rows=1016 bucket=1024 npz_sha256=02f3cb79fe37c1586cc423ca0e0372aace79796a9bf846aef1ffd0db6fa95b27
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=1272
+[CANON_P38_SEAM_OBSERVER_RECORD] record=6917 arm=B call=7302 rows=768 bucket=1024 npz_sha256=887fc140dc5bfaf7bca1eb1e4f33c503975ef1f44ffd70ea9eb609a6d81d1307
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=1024
+[CANON_P38_SEAM_OBSERVER_RECORD] record=6918 arm=B call=7303 rows=768 bucket=1024 npz_sha256=f61a28bceb30271529fb0c3bfdb018dabe859f6fe6c7a079bfb101659db0f62b
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=1024
+[CANON_P38_SEAM_OBSERVER_RECORD] record=6919 arm=B call=7304 rows=636 bucket=1024 npz_sha256=30344728073b277c285e6bc0de9661e3adcebd75ff44073748e013710363afb9
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=892
+[CANON_P38_SEAM_OBSERVER_RECORD] record=6920 arm=B call=7305 rows=512 bucket=512 npz_sha256=51ced0a73f9b9d72d80cd036a27b9ce646e2dbf8f870edcfdb2d6e31cdf2122e
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=599
+[CANON_P38_SEAM_OBSERVER_RECORD] record=6921 arm=B call=7306 rows=512 bucket=512 npz_sha256=014e931349ce0c6fd9540ffe67d239c14596646b5d6e48e96a579ab5d8796b67
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=512
+[CANON_P38_SEAM_OBSERVER_RECORD] record=6922 arm=B call=7307 rows=512 bucket=512 npz_sha256=3793fd20cc6336e3cda6e02818ec72a1c860af6123240ad4416d187445ef616a
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=512
+[CANON_P38_SEAM_OBSERVER_RECORD] record=6923 arm=B call=7308 rows=436 bucket=512 npz_sha256=ca94c936e9908d42d2b0c8f709cb961f2516166c5b118af2ea8866e598f55dac
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=436
+[CANON_P38_SEAM_OBSERVER_RECORD] record=6924 arm=B call=7309 rows=256 bucket=256 npz_sha256=271a2865a9e6842e531e89844b2a98251bed53588be28114cdf7cc23b6bc4692
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=256
+INFO 08-28 23:03:42 [loggers.py:273] Engine 000: Avg prompt throughput: 3387.3 tokens/s, Avg generation throughput: 0.9 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.1%, Prefix cache hit rate: 0.0%
+[CANON_P38_SEAM_OBSERVER_RECORD] record=6925 arm=B call=7310 rows=256 bucket=256 npz_sha256=943af8b6be5ff314c7f5b4f8dcd082bf01dd59eb3d41e4c1e6dd8f22f339e4ea
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=256
+[CANON_P38_SEAM_OBSERVER_RECORD] record=6926 arm=B call=7311 rows=7 bucket=8 npz_sha256=bd2e11e89b213ef5feeb09eeb1ffd54260d12611fd6f0636e409ee49ae0f9eb6
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=256
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=256
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=256
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=256
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=2048 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=2048
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=2048 populated=30
+[CANON_APC_M15_B_CONTRACT] reset_prefix_cache=True all_num_cached_tokens_zero=True
+[PERF] step=0 stage=rescore_b seconds=139.835 rows=256
+2026-08-28 23:03:45 - INFO - [absl] [CANON_ALIGN] attached host sidecar rows=256 completion_width=8192
+[CANON_APC_M15_PRODUCER_CARRIER] arm=off path=/tmp/canon-state/canon-v1-apc-m15-off-d35-af006872/p38_serving_capture/m15_producer_unit.round-000002.npz sha256=f394ee8e830adcb86862adbc81efc9c97f4e5bfc5fc4f57bdda9c03d80c4713e rows=256 logical_bytes=42995712
+[CANON_ALIGN_PRE_JSON] {"N_action":119648,"action_geometry":{"max_logical_kv_prefix_length":8028,"min_logical_kv_prefix_length":988,"rows_reaching_1686":168,"valid":true},"admission_policy":{"bounded_ab_only":false,"byte_fraction_limit":0.004,"claim_level":"strict-zero-tim","enabled":false,"id":"gsm8k-full-ab-report-v1","max_abs_limit":0.0001,"stage":"backward-no-commit","warning_boundaries":null,"warning_only":false,"workload":"frozenlake-dp8-tp8"},"all_compact_filtered":false,"blocking_reds":[],"boundaries":{"S_decode_vs_S_prefill":{"byte_fraction":0.0,"differing_bytes":0,"differing_elements":0,"element_fraction":0.0,"finite":true,"first_mismatch":null,"max_abs":0.0,"max_abs_mismatch":null,"mismatches":[],"mismatches_truncated":false,"reported_mismatches":0,"total_bytes":478592,"total_elements":119648,"valid":true},"S_prefill_vs_T_old":{"byte_fraction":0.0,"differing_bytes":0,"differing_elements":0,"element_fraction":0.0,"finite":true,"first_mismatch":null,"max_abs":0.0,"max_abs_mismatch":null,"mismatches":[],"mismatches_truncated":false,"reported_mismatches":0,"total_bytes":478592,"total_elements":119648,"valid":true}},"context":{"bucket":"2048","mesh":"8,8","run_stage":"backward-no-commit","source":"VllmRollout.get_prefill_rescore_logps"},"diagnostic_round":2,"hashes":{"S_decode":"fcdb03b65392f609cd1c6cbf854c8350db69975b5f7fb8dd4520f3aea5a8304a","S_prefill":"a69c4edaafbd837f47178ab5c70bf73a8729f3597fec5ffae606c8e8a4abe67f","T_old":"a69c4edaafbd837f47178ab5c70bf73a8729f3597fec5ffae606c8e8a4abe67f","action_mask":"4052b3673a54a6d4744d266651f0b3ef577e48c6567c4ba8f9c81355c01588d0","policy_version":"5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef","tokens":"4abc427ec8b1cd7bd667b7063d179ffc52970e266878c22c2ef43c7abc2d5f30"},"m15_producer_unit":{"logical_bytes":42995712,"path":"/tmp/canon-state/canon-v1-apc-m15-off-d35-af006872/p38_serving_capture/m15_producer_unit.round-000002.npz","rows":256,"sha256":"f394ee8e830adcb86862adbc81efc9c97f4e5bfc5fc4f57bdda9c03d80c4713e"},"masked_hashes":{"S_decode":"bf2f3137024831fe7df2fa75418960284626d142e88cb9a71e89c4ff9500f509","S_prefill":"bf2f3137024831fe7df2fa75418960284626d142e88cb9a71e89c4ff9500f509","T_old":"bf2f3137024831fe7df2fa75418960284626d142e88cb9a71e89c4ff9500f509"},"no_signal_admitted":false,"reds":[],"reported_reds":[],"step":2,"timestamp":1787958225.4101424,"verdict":"PASS","warning_reds":[]}
+[CANON_ALIGN_PRE_EVIDENCE] path=/tmp/canon-state/canon-v1-apc-m15-off-d35-af006872/pre_alignment.jsonl sha256=36ae2536ff7007469f190625bde3fe74f70a2b35adc0b284e6d87438c4b1fffa
+[CANON_ALIGN_PRE] step=2 verdict=PASS N_action=119648 bounds=[('S_decode_vs_S_prefill', 0), ('S_prefill_vs_T_old', 0)]
+[CANON_P38] PRECHECK_ROUND_COMPLETE round=3/3 step=2 N_action=119648 verdict=PASS a_b_differing_bytes=0 backward=0 optimizer_commits=0
+[CANON_P38] ROUND_SEAL_REQUESTED round=2 request=/tmp/canon-state/canon-v1-apc-m15-off-d35-af006872/p38_round_seal_requests/round-000002.request
+INFO 08-28 23:03:52 [loggers.py:273] Engine 000: Avg prompt throughput: 514.3 tokens/s, Avg generation throughput: 0.1 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
+INFO 08-28 23:04:02 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
