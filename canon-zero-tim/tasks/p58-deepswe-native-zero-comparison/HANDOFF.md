@@ -1,6 +1,27 @@
 # P58 DeepSWE native-first training handoff
 
-## 2026-08-28 P58.18 next run — prepare three concurrent matched diagnostics
+## 2026-08-28 UTC — P58.18 triplicate complete: Case 2 (CHECKED_VMA_NOT_SUFFICIENT) sealed
+
+The three independent exact-geometry Step-0 diagnostic JobSets (`p58aba01`: `ON-A`, `OFF`, `ON-B`) on 128 TPU chips have all completed with Controlled Exit 42:
+
+- **ON-A (`canon-p58-vmaon-full-p58aba01-ona`)**: 128 trajectories (3 solved / 120 complete). Alignment: $S_{decode} - S_{prefill} = 47,645$ B (21,717 elements), $S_{prefill} - T_{old} = 0$ B. Verdict: `A_B_RED_WITH_CHECKED_VMA_ON`.
+- **OFF (`canon-p58-vmaoff-full-p58aba01-off`)**: 128 trajectories (6 solved / 118 complete). Alignment: $S_{decode} - S_{prefill} = 39,787$ B (18,068 elements), $S_{prefill} - T_{old} = 0$ B. Verdict: `A_B_RED_WITH_CHECKED_VMA_OFF`.
+- **ON-B (`canon-p58-vmaon-full-p58aba01-onb`)**: 128 trajectories (3 solved / 120 complete). Alignment: $S_{decode} - S_{prefill} = 36,323$ B (16,653 elements), $S_{prefill} - T_{old} = 0$ B. Verdict: `A_B_RED_WITH_CHECKED_VMA_ON`.
+
+### Wave-level classification result:
+```text
+P58_CHECKED_VMA_ABA_CLASSIFICATION verdict=PASS decision=CHECKED_VMA_NOT_SUFFICIENT backward=0 optimizer_commits=0
+```
+
+### Interpretation & Next Action:
+1. **Case 2 triggered**: Checked-VMA is not sufficient to explain the decode-vs-prefill divergence in DeepSWE Qwen3-4B.
+2. **Do NOT ship a P67 repair**: Since `checked_vma=off` produces the exact same A-B RED pattern with exact B-C, the seam does not stem from checked-VMA ownership.
+3. **Evidence sealed**: Complete self-hashed package is sealed in `evidence/p58aba01_checked_vma_aba_wave/`.
+4. **Next phase**: Promote exact-geometry decode/prefill seam replay on DeepSWE to isolate whether rotary embeddings, ragged paged attention kernel, or tensor parallel communication is the source of the token logprob divergence.
+
+---
+
+## Historical — 2026-08-28 P58.18 triplicate preparation (complete)
 
 This section supersedes the single checked-VMA-off launch instruction below.
 The next numerical experiment is three independent exact-geometry Step-0

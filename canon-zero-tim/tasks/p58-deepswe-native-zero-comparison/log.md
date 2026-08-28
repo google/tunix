@@ -1,5 +1,20 @@
 # Log
 
+## 2026-08-28 UTC — P58.18 Checked-VMA matched triplicate executed and classified (Case 2: CHECKED_VMA_NOT_SUFFICIENT)
+
+- Execution: Ran three independent exact-geometry Step-0 diagnostic JobSets on the 128 TPU slice (`haoyugao-cpu-np-pvc`): `ON-A` (`canon-p58-vmaon-full-p58aba01-ona`), `OFF` (`canon-p58-vmaoff-full-p58aba01-off`), and `ON-B` (`canon-p58-vmaon-full-p58aba01-onb`).
+- Results:
+  - `ON-A`: 128 trajectories (3 solved / 120 completed). Strict pre-alignment: $S_{decode} - S_{prefill} = 47,645$ bytes (21,717 elements, max delta 14.50), $S_{prefill} - T_{old} = 0$ bytes (B-C exact). Verdict: `A_B_RED_WITH_CHECKED_VMA_ON`.
+  - `OFF`: 128 trajectories (6 solved / 118 completed). Strict pre-alignment: $S_{decode} - S_{prefill} = 39,787$ bytes (18,068 elements, max delta 10.50), $S_{prefill} - T_{old} = 0$ bytes (B-C exact). Verdict: `A_B_RED_WITH_CHECKED_VMA_OFF`.
+  - `ON-B`: 128 trajectories (3 solved / 120 completed). Strict pre-alignment: $S_{decode} - S_{prefill} = 36,323$ bytes (16,653 elements, max delta 7.80), $S_{prefill} - T_{old} = 0$ bytes (B-C exact). Verdict: `A_B_RED_WITH_CHECKED_VMA_ON`.
+- Classification: `classify_p58_checked_vma_aba_wave.py` evaluated the triplicate:
+  `P58_CHECKED_VMA_ABA_CLASSIFICATION verdict=PASS decision=CHECKED_VMA_NOT_SUFFICIENT backward=0 optimizer_commits=0`.
+- Decision & Next Phase:
+  - Case 2 triggered: checked-VMA is not sufficient to resolve the decode-vs-prefill divergence in DeepSWE Qwen3-4B DP8xTP8.
+  - Do not ship a P67 ownership repair, as the OFF control reproduces the exact same RED pattern.
+  - Evidence sealed under `evidence/p58aba01_checked_vma_aba_wave/`.
+  - Next step: advance to exact-geometry decode/prefill seam replay to isolate underlying rotary embeddings, paged attention kernel, or tensor parallel communication.
+
 ## 2026-08-27 UTC — P58.16 NNX loader-metadata repair published
 
 - Source intake: clean isolated worktree fast-forwarded from
