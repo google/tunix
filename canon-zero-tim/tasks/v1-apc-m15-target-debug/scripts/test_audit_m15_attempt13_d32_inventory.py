@@ -29,7 +29,7 @@ class FakeStorageClient:
     self.fail_arm: str | None = None
     self.live_arm: str | None = None
     self.missing_member_arm: str | None = None
-    self.pair_drift_arm: str | None = None
+    self.observed_totals = {"off": 2445, "on": 2188}
     self.list_calls: list[str] = []
 
   @staticmethod
@@ -75,10 +75,8 @@ class FakeStorageClient:
     assert match is not None
     sequence = int(match.group(1))
     count = int(ARM_CONTRACTS[arm]["shards"])
-    total = int(ARM_CONTRACTS[arm]["record_pairs"])
+    total = int(self.observed_totals[arm])
     record_pairs = total // count + (1 if sequence < total % count else 0)
-    if self.pair_drift_arm == arm and sequence == 0:
-      record_pairs += 1
     completion = {
         "schema": "m15-wide-observer-shard-completion-v1",
         "status": "sealed-uploaded-verified",
@@ -115,10 +113,17 @@ class Attempt13InventoryAuditTest(unittest.TestCase):
 
   def test_successful_recursive_inventory_proves_both_live_roots_absent(self) -> None:
     result = self._audit()
-    self.assertEqual(result["decision"], "D32_LIVE_ABSENT_CONFIRMED")
+    self.assertEqual(result["decision"], "D32_LIVE_ABSENT_WITH_COUNT_DRIFT")
+    self.assertEqual(result["count_contract_status"], "DRIFT")
+    self.assertTrue(result["d33_preparation_eligible"])
+    self.assertFalse(result["d33_launch_authorized"])
     self.assertEqual(self.client.list_calls, ["off", "on"])
-    self.assertEqual(result["arms"]["off"]["record_pairs"], 2445)
-    self.assertEqual(result["arms"]["on"]["record_pairs"], 2188)
+    self.assertEqual(result["arms"]["off"]["shard_record_pairs"], 2445)
+    self.assertEqual(result["arms"]["off"]["receipt_seam_records"], 2474)
+    self.assertEqual(result["arms"]["off"]["record_count_delta"], -29)
+    self.assertEqual(result["arms"]["on"]["shard_record_pairs"], 2188)
+    self.assertEqual(result["arms"]["on"]["receipt_seam_records"], 2087)
+    self.assertEqual(result["arms"]["on"]["record_count_delta"], 101)
     output = self.root / "return"
     self.assertEqual(len(list(output.iterdir())), 7)
     self.assertNotIn("gs://", "".join(
@@ -134,7 +139,7 @@ class Attempt13InventoryAuditTest(unittest.TestCase):
     self.client.live_arm = "on"
     result = self._audit()
     self.assertEqual(
-        result["decision"], "D32_LIVE_PRESENT_REPLAY_SHOULD_CONTINUE"
+        result["decision"], "D32_LIVE_PRESENT_WITH_COUNT_DRIFT"
     )
     self.assertFalse(result["arms"]["on"]["live_absence_proven"])
 
@@ -153,11 +158,13 @@ class Attempt13InventoryAuditTest(unittest.TestCase):
     self.assertEqual(result["status"], "RED")
     self.assertIn("triples", result["arms"]["on"]["failure"])
 
-  def test_record_pair_total_drift_is_red(self) -> None:
-    self.client.pair_drift_arm = "off"
+  def test_matching_metrics_are_reported_without_moving_the_gate(self) -> None:
+    self.client.observed_totals = {"off": 2474, "on": 2087}
     result = self._audit()
-    self.assertEqual(result["status"], "RED")
-    self.assertIn("record-pair total", result["arms"]["off"]["failure"])
+    self.assertEqual(result["decision"], "D32_LIVE_ABSENT_COUNTS_MATCH")
+    self.assertEqual(result["count_contract_status"], "MATCH")
+    self.assertEqual(result["arms"]["off"]["record_count_delta"], 0)
+    self.assertEqual(result["arms"]["on"]["record_count_delta"], 0)
 
 
 if __name__ == "__main__":

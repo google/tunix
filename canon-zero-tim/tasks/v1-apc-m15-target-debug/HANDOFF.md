@@ -1,26 +1,36 @@
 # M15 APC target-debug handoff
 
-## START HERE — render and review Attempt 14 (`d33`) three-round matched pair
+## START HERE — offline-review d32, then render d33; do not launch implicitly
 
-Attempt 13 (`d32`) inventory audit has completed and is sealed under
-`evidence/v1_apc_m15_attempt13_d32_inventory_20260828/`. Both recursive queries
-succeeded, flat-shard sequences (77 off, 70 on) and physical record pairs
-(2,445 off, 2,188 on) verified, and both roots confirmed `live/` absence
-(`D32_LIVE_ABSENT_CONFIRMED`).
+The seven-file Attempt-13 (`d32`) inventory is transport-complete and proves
+that both recursive listings succeeded and both registered roots contain no
+`live/` or `wide/rounds/` objects. It also exposes an unresolved count drift:
 
-Per the gate rules below, Attempt 14 (`d33`) is now active for preparation
-and separate review/approval. d33 is one matched APC-off/APC-on pair, each
-containing three evaluation-only rounds with frozen weights, zero backward,
-and zero optimizer commits. The full observer is pinned to Layer 0.
+| Arm | Physical shard completion `record_pairs` | Immutable receipt/classifier `seam_records` | Delta |
+|---|---:|---:|---:|
+| APC off | 2,445 | 2,474 | -29 |
+| APC on | 2,188 | 2,087 | +101 |
 
-### Remote executor command for d33 preparation:
+These field names are not assumed to be the same metric. The checked-in
+inventory was produced by changing the expected values after observing GCS, so
+its old generic `PASS` is accepted only as an object-transport fact. It is not
+an official classifier replay and does not authorize an RPA repair.
+
+`prepare_m15_multiround_pair.sh` now reruns a checked-in offline validator
+before rendering. The validator verifies every member of the immutable
+seven-file return, re-derives both object geometries and count deltas, and emits
+`D32_LIVE_ABSENT_WITH_COUNT_DRIFT`. The renderer embeds that review in its
+self-hashed run contract. A reviewer may prepare d33; only the user may approve
+the two 64-TPU launches.
+
+### Remote executor command for d33 review and preparation
 
 ```bash
 cd /home/yuxuan/code_rl_repro/sequence_packing/tunix
 git fetch origin yuxzhang/canon-zero-tim
 git pull --ff-only origin yuxzhang/canon-zero-tim
 SOURCE_SHA="$(git rev-parse HEAD)"
-RUN_ID=<fresh-label>
+RUN_ID=<fresh-1-to-16-char-lowercase-dns-label>
 OUT=/tmp/v1-apc-m15-${RUN_ID}
 test ! -e "$OUT"
 
@@ -32,33 +42,40 @@ bash canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/prepare_m15_multiround
 The renderer must produce exactly:
 - `jobset-v1-apc-m15-off-full.yaml`
 - `jobset-v1-apc-m15-on-full.yaml`
+- `D32_REVIEW.json` with `live_absence_status=CONFIRMED`,
+  `count_contract_status=DRIFT`, `d33_preparation_eligible=true`, and both
+  authorization booleans false;
 - `RUN_CONTRACT.json` with `diagnostic_rounds=3`, `observer=full`,
-  `seam_layer=0`, zero backward, and zero optimizer commit.
+  `seam_layer=0`, zero backward/commit, and the exact D32 review SHA;
+- `SHA256SUMS` covering the two YAMLs, review, and run contract.
 
 After separate launch approval, both standalone `kubectl apply` commands may
-be issued concurrently.
+be issued concurrently. Preparation is not launch authority.
 
 ---
 
-## Historical — Attempt 13 (`d32`) sealed inventory audit (complete)
+## Historical — Attempt 13 (`d32`) object inventory (transport-complete)
 
 Attempt 13 (`d32`) was a **single diagnostic round** produced by the older
 flat-shard runtime. The registered roots contain 77 contiguous control shards
-(2,445 record pairs) and 70 contiguous treatment shards (2,188 record pairs).
+whose completion receipts sum to 2,445 record pairs and 70 contiguous treatment
+shards whose receipts sum to 2,188. The historical classifier receipts instead
+report 2,474 and 2,087 seam records; that difference remains explicit.
 
 The self-hashed read-only inventory completed with:
 ```text
-M15_ATTEMPT13_INVENTORY_PASS decision=D32_LIVE_ABSENT_CONFIRMED remote_state_mutated=0 numerical_repair_authorized=0
+M15_ATTEMPT13_REVIEW_PASS decision=D32_LIVE_ABSENT_WITH_COUNT_DRIFT count_contract_status=DRIFT d33_preparation_eligible=1 d33_launch_authorized=0 numerical_repair_authorized=0
 ```
 Evidence is sealed in `evidence/v1_apc_m15_attempt13_d32_inventory_20260828/`.
-Because no `live/` directory exists, historical flat replay is unviable and d33
-is the authoritative path forward.
+Because no `live/` directory exists, historical flat replay is unviable. d33 is
+the next evidence-producing experiment after separate review and launch
+approval; it is not a numerical repair.
 
 ### Mechanical interpretation reference
 
 | Decision | Meaning | Next action |
 |---|---|---|
-| `D32_LIVE_ABSENT_CONFIRMED` | both recursive queries succeeded, exact shard triples/receipts verified, and neither root listed a `live/` object | d33 becomes eligible for separate review and launch approval (ACTIVE) |
+| `D32_LIVE_ABSENT_WITH_COUNT_DRIFT` | both recursive queries succeeded and neither root listed a `live/` object, while shard and classifier counts disagree | d33 preparation is eligible; preserve the drift and require separate launch approval |
 | `D32_LIVE_PRESENT_REPLAY_SHOULD_CONTINUE` | the registered roots contain at least one `live/` object | run the existing flat replay only after inspecting this return; do not launch d33 first |
 | `D32_INVENTORY_AUDIT_RED` or non-zero exit | a query, identity, shard geometry, completion receipt, or count failed | fix only the read-only inventory path; absence is unproven and d33 remains blocked |
 
@@ -91,7 +108,7 @@ cd /home/yuxuan/code_rl_repro/sequence_packing/tunix
 git fetch origin yuxzhang/canon-zero-tim
 git pull --ff-only origin yuxzhang/canon-zero-tim
 SOURCE_SHA="$(git rev-parse HEAD)"
-RUN_ID=<fresh-label>
+RUN_ID=<fresh-1-to-16-char-lowercase-dns-label>
 OUT=/tmp/v1-apc-m15-${RUN_ID}
 test ! -e "$OUT"
 
@@ -104,8 +121,10 @@ The renderer must produce exactly:
 
 - `jobset-v1-apc-m15-off-full.yaml`;
 - `jobset-v1-apc-m15-on-full.yaml`;
+- `D32_REVIEW.json` preserving the count drift and both false authorization
+  fields;
 - `RUN_CONTRACT.json` with `diagnostic_rounds=3`, `observer=full`,
-  `seam_layer=0`, zero backward, and zero optimizer commit.
+  `seam_layer=0`, zero backward/commit, and the D32 review SHA.
 
 After separate launch approval, both standalone `kubectl apply` commands may
 be issued concurrently.  Do not pipeline either command and do not reuse a run

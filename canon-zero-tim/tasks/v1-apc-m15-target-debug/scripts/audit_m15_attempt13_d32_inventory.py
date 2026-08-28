@@ -27,13 +27,11 @@ ARM_CONTRACTS = {
         "field": "control_arm_off",
         "jobset": "canon-v1-apc-m15-off-d32-7d30f382",
         "shards": 77,
-        "record_pairs": 2445,
     },
     "on": {
         "field": "treatment_arm_on",
         "jobset": "canon-v1-apc-m15-on-d32-7d30f382",
         "shards": 70,
-        "record_pairs": 2188,
     },
 }
 _SHARD_MEMBERS = {"SHARD_ARCHIVE.tar", "SHA256SUMS", "SHARD_COMPLETE.json"}
@@ -174,6 +172,7 @@ def _audit_arm(
     arm: str,
     root: str,
     contract: dict[str, Any],
+    receipt_seam_records: int,
     client: Any,
     scratch: Path,
 ) -> tuple[dict[str, Any], dict[str, bytes]]:
@@ -223,10 +222,10 @@ def _audit_arm(
       completions.append(_validate_completion(
           destination, sequence=sequence, expected_source=SOURCE_COMMIT
       ))
-    record_pairs = sum(item["record_pairs"] for item in completions)
+    shard_record_pairs = sum(item["record_pairs"] for item in completions)
     payload_bytes = sum(item["payload_bytes"] for item in completions)
-    _require(record_pairs == int(contract["record_pairs"]),
-             f"{arm} flat-shard record-pair total drifted")
+    _require(receipt_seam_records > 0,
+             f"{arm} receipt seam-record count is invalid")
     live_objects = [row for row in rows if row.startswith("live/")]
     round_objects = [row for row in rows if row.startswith("wide/rounds/")]
     objects_text = ("\n".join(rows) + "\n").encode("utf-8")
@@ -241,7 +240,12 @@ def _audit_arm(
         "object_inventory_sha256": _sha_bytes(objects_text),
         "flat_shards": expected_shards,
         "flat_shard_required_objects": expected_shards * 3,
-        "record_pairs": record_pairs,
+        "shard_record_pairs": shard_record_pairs,
+        "receipt_seam_records": receipt_seam_records,
+        "record_count_delta": shard_record_pairs - receipt_seam_records,
+        "record_count_relation": (
+            "EQUAL" if shard_record_pairs == receipt_seam_records else "DRIFT"
+        ),
         "payload_bytes": payload_bytes,
         "completion_receipts_sha256": _sha_bytes(completions_text),
         "live_objects": len(live_objects),
@@ -286,10 +290,16 @@ def audit(
              and value.get("jobset_name") == contract["jobset"],
              f"Attempt-13 {arm} JobSet identity drifted")
     root = str(value.get("gcs_source_uri", ""))
+    receipt_seam_records = int(value.get("seam_records", -1))
     _require(root.startswith("gs://") and root.endswith("/attempt-0"),
              f"Attempt-13 {arm} registered root drifted")
     arms[arm], arm_files = _audit_arm(
-        arm=arm, root=root, contract=contract, client=client, scratch=scratch
+        arm=arm,
+        root=root,
+        contract=contract,
+        receipt_seam_records=receipt_seam_records,
+        client=client,
+        scratch=scratch,
     )
     files.update(arm_files)
 
@@ -298,12 +308,21 @@ def audit(
       value["live_absence_proven"] for value in arms.values()
   )
   any_live = all_pass and any(value["live_objects"] for value in arms.values())
+  count_drift = all_pass and any(
+      value["record_count_relation"] != "EQUAL" for value in arms.values()
+  )
   if not all_pass:
     decision = "D32_INVENTORY_AUDIT_RED"
   elif both_live_absent:
-    decision = "D32_LIVE_ABSENT_CONFIRMED"
+    decision = (
+        "D32_LIVE_ABSENT_WITH_COUNT_DRIFT"
+        if count_drift else "D32_LIVE_ABSENT_COUNTS_MATCH"
+    )
   elif any_live:
-    decision = "D32_LIVE_PRESENT_REPLAY_SHOULD_CONTINUE"
+    decision = (
+        "D32_LIVE_PRESENT_WITH_COUNT_DRIFT"
+        if count_drift else "D32_LIVE_PRESENT_REPLAY_SHOULD_CONTINUE"
+    )
   else:
     decision = "D32_INVENTORY_INCONSISTENT"
   result = {
@@ -313,14 +332,19 @@ def audit(
       "source_commit": SOURCE_COMMIT,
       "receipt_sha256": RECEIPT_SHA256,
       "decision": decision,
+      "count_contract_status": "DRIFT" if count_drift else "MATCH",
+      "d33_preparation_eligible": bool(both_live_absent),
+      "d33_launch_authorized": False,
       "arms": arms,
       "remote_state_mutated": False,
       "official_classifier_replay": "NOT_PERFORMED",
       "numerical_repair_authorized": False,
       "claim_ceiling": (
           "This inventory proves registered object presence or absence and "
-          "validates flat-shard completion receipts. It does not verify shard "
-          "archive payload bytes or replay the numerical classifier."
+          "validates flat-shard completion receipts. Shard record-pair totals "
+          "and classifier seam-record totals are reported as distinct metrics. "
+          "It does not verify shard archive payload bytes or replay the "
+          "numerical classifier."
       ),
   }
   for name, payload in files.items():
@@ -330,6 +354,9 @@ def audit(
       "M15 Attempt-13 registered-root inventory\n"
       f"decision={decision}\n"
       f"status={result['status']}\n"
+      f"count_contract_status={result['count_contract_status']}\n"
+      f"d33_preparation_eligible={int(result['d33_preparation_eligible'])}\n"
+      "d33_launch_authorized=0\n"
       "remote_state_mutated=0\n"
       "official_classifier_replay=NOT_PERFORMED\n"
       "numerical_repair_authorized=0\n",

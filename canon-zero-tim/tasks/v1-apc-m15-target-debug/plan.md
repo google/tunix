@@ -24,8 +24,8 @@ B - C = 0 bytes
 | C | executable replay-prefix input plan followed by a single-variable reproduction ladder | saved bytes and chronology revalidate; control A-B=0; treatment either reproduces red or is `ONEHOST_NOT_REPRODUCED` | complete: r10-r13c one-host ladder exact through full chronology; scale/topology remains |
 | D | observer-neutral coarse-to-fine first-red walk on known-red DP8xTP8 | `FIRST_RED_LOCALIZED` names last exact and first red tensor, shape ledger, request/token/cache coordinate, and `file:line` | Attempt-12 coarse summary returned; blocked on remote evidence binding before the conditional Layer-0 full run |
 | D2 | M15-only incremental observer shards, sealed-input classifier, terminal ordering, and source self-verification | forced death preserves a verified shard; unsealed/tampered/source-mismatched inputs fail closed | host and exact-image pass; Attempt-12 runtime used this path, but its committed return omitted the remote binding audit |
-| D3 | three frozen-weight full Layer-0 rounds per arm plus a small per-round GCS return | each round seals before the next; root-incomplete and partial-round returns remain mechanically distinguishable | protocol implemented, but Attempt 13 predates it and is not a D3-format run |
-| D4 | Attempt-13 two-arm registered-root inventory, then conditional flat replay | both listings are distinguishable from query failure; exact 77/70 shard triples and 2,474/2,087 completion totals verify; seven-file inventory self-verifies | inventory implemented; host 101/101 PASS; bucket audit and official replay not run |
+| D3 | three frozen-weight full Layer-0 rounds per arm plus a small per-round GCS return | each round seals before the next; root-incomplete and partial-round returns remain mechanically distinguishable | protocol implemented; d33 render rehearsal PASS with D32 review SHA embedded; target not launched |
+| D4 | Attempt-13 two-arm registered-root inventory and offline semantic review | both listings succeed; exact 77/70 shard triples verify; physical shard counts and immutable classifier counts remain separate; seven-file inventory self-verifies | transport complete; no-live confirmed; count drift -29/+101 preserved; official replay impossible |
 | E | minimal localized repair, default off or experiment-bound | reproducer flips red to zero; APC-off and B are unchanged; adjacent and dirty-page negatives fire | pending |
 | F | certification ladder | host -> exact-image -> one-host clean/repeat/dirty -> matched profile -> separately approved DP8xTP8 G-E | pending |
 
@@ -152,7 +152,15 @@ B - C = 0 bytes
   `live/` listing. It did not audit treatment or run the official classifier.
   Non-zero is not equivalent to absence. The new read-only inventory queries
   both arms independently, validates only object geometry and small completion
-  receipts, and emits a self-hashed `D32_INVENTORY.json`. Only
-  `D32_LIVE_ABSENT_CONFIRMED` makes d33 eligible for separate approval;
+  receipts, and emits a self-hashed `D32_INVENTORY.json`. Only a successful
+  no-live review (currently `D32_LIVE_ABSENT_WITH_COUNT_DRIFT`) makes d33
+  preparation eligible for separate review;
   `D32_LIVE_PRESENT_REPLAY_SHOULD_CONTINUE` returns to the flat replay; any
   query failure leaves both paths blocked.
+- Correction after the sealed return: both recursive queries did succeed and
+  prove that the roots contain no replayable `live/` objects. The shard
+  completion totals are 2,445/2,188, while the immutable receipt's classifier
+  seam totals are 2,474/2,087. These are now separate named metrics; neither is
+  rewritten to match the other. d33 preparation is eligible because historical
+  replay is physically impossible, not because d32 passed an official
+  classifier. Launch and numerical repair remain unauthorized.

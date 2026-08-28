@@ -804,10 +804,12 @@ is not a current fact or launch authority.
   their global NumPy import while still executing `np` calls. The task suite
   failed with 14 `NameError` errors. Restored the prior canonical NumPy
   classifier implementation; no numerical classifier semantics were changed.
-- Added `audit_m15_attempt13_d32_inventory.py`, a read-only two-arm audit. It
+- Initially added `audit_m15_attempt13_d32_inventory.py` as a read-only
+  two-arm audit. It
   distinguishes query failure from successful absence, validates the exact
-  77/70 flat-shard object triples and all small completion receipts, requires
-  record-pair totals 2,474/2,087, removes remote roots from returned object
+  77/70 flat-shard object triples and all small completion receipts, initially
+  treated record-pair totals 2,474/2,087 as the same metric, removed remote
+  roots from returned object
   names, and emits a seven-file self-hashed package. It does not download
   archive payloads, run the official classifier, mutate GCS, or authorize a
   numerical repair.
@@ -819,3 +821,35 @@ is not a current fact or launch authority.
   classifier files are byte-for-byte equal to their pre-regression revision;
   Python compilation, branch preflight, and `git diff --check` PASS. The audit
   return test also proves no `gs://` root enters the seven-file package.
+
+## 2026-08-28 — D32 sealed inventory reviewed without moving the count gate
+
+- Verified the returned `SHA256SUMS`: all six listed members pass. The off
+  object inventory is exactly `PREFLIGHT + 77x3` and the on inventory exactly
+  `PREFLIGHT + 70x3`; both recursive query receipts have exit 0, empty stderr,
+  zero `live/`, and zero `wide/rounds/` objects.
+- Preserved a real count drift instead of changing the expected value after
+  observation: physical shard completion receipts sum to 2,445 off and 2,188
+  on, while the immutable receipt/classifier reports 2,474 and 2,087 seam
+  records. The two fields may represent different stages, but the relationship
+  is not proven and may not be called exact.
+- Updated the inventory schema to report both metrics, their -29/+101 deltas,
+  and a distinct `D32_LIVE_ABSENT_WITH_COUNT_DRIFT` decision. Object transport
+  can pass while official replay remains `NOT_PERFORMED`.
+- Added a standard-library offline reviewer for the checked-in seven-file
+  return. It verifies every SHA, exact object geometry, contiguous completion
+  sequences, successful no-live query receipts, and immutable receipt counts;
+  it emits a three-file self-hashed review and never accesses GCS.
+- Hardened `prepare_m15_multiround_pair.sh` to run that reviewer first and bind
+  the exact D32 review SHA/decision into the d33 render contract. Preparation
+  remains zero-TPU and explicitly records launch and numerical repair as
+  unauthorized.
+- Host gates: task-local discovery 105/105 PASS; Python compilation, Bash
+  syntax, and `git diff --check` PASS. The offline reviewer reproduced
+  `D32_LIVE_ABSENT_WITH_COUNT_DRIFT` and its three-file manifest verified.
+  A full zero-TPU d33 render rehearsal produced exactly two YAMLs,
+  `D32_REVIEW.json`, `RUN_CONTRACT.json`, and a four-member passing manifest;
+  embedded contracts record three rounds, Layer 0 full observer, zero
+  backward/commit, and both authorization booleans false. An intentionally
+  overlong rehearsal label was rejected before render, confirming the existing
+  1-16-character DNS label gate; the valid short-label rehearsal passed.
