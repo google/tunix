@@ -76,6 +76,14 @@ exact bypass receipts across the worker set, skip incident/tensor payloads,
 and return before candidate capture.  The same bypass is forbidden outside
 this selector; unknown paths retain the existing hard error.
 
+`p58s19d` then proved that the 1 GiB byte bound was cumulative and exhausted
+during round 0 after 635+ records.  P58.19e assigns seam and tail an independent
+4 GiB budget in each diagnostic round.  The existing monotonically increasing
+record indices remain unchanged, while the byte counter resets only at the
+exact `0→1→2` round transitions.  The installed runner and postflight must
+prove all six `(seam|tail) × (0|1|2)` zero-byte round-start receipts; foreign
+durability profiles remain outside this repair.
+
 ## Phases and gates
 
 ### L0 — ledger reconciliation
@@ -105,6 +113,12 @@ admits only `(p58-seam-v1, expected=standard, actual=continue_decode)` and that
 its early return precedes tensor candidate construction.  This is a source
 and dependency-image contract, not a runtime-neutrality claim.
 
+Construction checkpoint (2026-08-28): on operator base
+`af006872b64c2d6327588b4d4cef757242ddc222`, upstream M15 patch 33 and local
+P58 patch 34 assemble 37/37 Qwen3-4B overlay files.  The P58/M15 round probes
+and complete pinned-image P58 gate pass.  This does not satisfy L3 or authorize
+publication, image mutation, Kubernetes work, or a target rerun.
+
 ### L2 — exact-geometry three-round carrier
 
 - Render exactly one 128-chip Zero/full JobSet with three sequential precheck
@@ -115,6 +129,8 @@ and dependency-image contract, not a runtime-neutrality claim.
   read-back verification, `ROUND_COMPLETE`, and only then a round ACK.
 - Avoid periodic multi-GiB observer snapshots; the round seal is the durability
   boundary.
+- Keep every local record until the three-round terminal collection completes;
+  per-round reset is quota accounting, not deletion or record reuse.
 
 Exit gate: renderer/profile/real `00_env.sh` contracts and synthetic
 three-round sealing/classification tests pass.

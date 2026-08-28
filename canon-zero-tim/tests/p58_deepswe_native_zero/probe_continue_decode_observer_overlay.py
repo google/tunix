@@ -6,6 +6,7 @@ import argparse
 import ast
 import contextlib
 import io
+import os
 from pathlib import Path
 
 
@@ -29,6 +30,7 @@ def main() -> None:
   tree = ast.parse(source, filename=str(args.runner))
   predicate = _function(tree, "_p38_p58_continue_program_path")
   begin = _function(tree, "_p38_serving_begin")
+  round_budget = _function(tree, "_p38_begin_observer_round")
 
   namespace = {}
   exec(
@@ -141,9 +143,55 @@ def main() -> None:
     if events[offset + 3] != ("replay", 7, "continue_decode"):
       raise AssertionError(f"chronology replay hook drifted: {events!r}")
 
+  round_namespace = {"os": os}
+  exec(
+      compile(
+          ast.Module(body=[round_budget], type_ignores=[]),
+          filename=str(args.runner),
+          mode="exec",
+      ),
+      round_namespace,
+  )
+  begin_round = round_namespace["_p38_begin_observer_round"]
+  prior_profile = os.environ.get("CANON_P38_DURABILITY_PROFILE")
+  try:
+    for profile in ("m15-wide-v1", "p58-seam-v1"):
+      os.environ["CANON_P38_DURABILITY_PROFILE"] = profile
+      state = {"records": 7, "bytes": 0}
+      receipts = io.StringIO()
+      with contextlib.redirect_stdout(receipts):
+        begin_round(state, 0, "seam")
+        state["bytes"] = 123
+        begin_round(state, 1, "seam")
+      if state != {"records": 7, "bytes": 0, "diagnostic_round": 1}:
+        raise AssertionError(f"round budget did not reset for {profile}: {state}")
+      if receipts.getvalue().count("bytes=0") != 2:
+        raise AssertionError(
+            f"round budget receipts drifted for {profile}: {receipts.getvalue()!r}"
+        )
+      try:
+        begin_round(state, 3, "seam")
+      except ValueError as error:
+        if "P38 observer diagnostic rounds must increase by one" not in str(error):
+          raise
+      else:
+        raise AssertionError(f"round jump was admitted for {profile}")
+
+    os.environ["CANON_P38_DURABILITY_PROFILE"] = "foreign-profile"
+    foreign = {"records": 7, "bytes": 123}
+    begin_round(foreign, 1, "seam")
+    if foreign != {"records": 7, "bytes": 123}:
+      raise AssertionError(f"foreign profile received a round budget: {foreign}")
+  finally:
+    if prior_profile is None:
+      os.environ.pop("CANON_P38_DURABILITY_PROFILE", None)
+    else:
+      os.environ["CANON_P38_DURABILITY_PROFILE"] = prior_profile
+
   print(
       "P58_CONTINUE_DECODE_OVERLAY_PASS "
-      f"cases={len(cases)} tensor_capture=standard-only"
+      f"cases={len(cases)} tensor_capture=standard-only "
+      "round_budget=p58+m15"
   )
 
 

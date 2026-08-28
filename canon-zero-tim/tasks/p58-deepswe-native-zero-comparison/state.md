@@ -2,10 +2,14 @@
 
 ## Current P58.19 three-round coarse seam-localization checkpoint (2026-08-28)
 
-- Current status: Target incident `canon-p58-seamcoarse-full-p58s19d` (128 TPU v5p)
-  is sealed in `evidence/p58s19d_byte_bound_incident/`. Continue-decode observer
-  bypass (commit `cf56b21a`) is verified functional with 635+ records captured
-  across `[1686, 4096)`. The run terminated due to exceeding `_SEAM_MAX_BYTES` (1 GiB).
+- Current status: target incident `canon-p58-seamcoarse-full-p58s19d` (128 TPU
+  v5p) is sealed in `evidence/p58s19d_byte_bound_incident/`.  On source base
+  `af006872b64c2d6327588b4d4cef757242ddc222`, P58.19e is implemented locally
+  but not committed or published: the selector now derives 4 GiB per round,
+  and append-only runner patch 34 extends the existing monotonic observer
+  budget reset from `m15-wide-v1` to exact `p58-seam-v1`.  Continue-decode
+  bypass remains verified with 635+ records across `[1686,4096)`; the target
+  has not been rerun.
 - Target Incident (p58s19d): Attempt `canon-p58-seamcoarse-full-p58s19d` (128 TPU v5p)
   executed Step 0 rollout and tool actions up to Step 4, covering bands `[12, 15]`,
   before hitting `P38 seam evidence exceeded its registered output byte bound`.
@@ -32,6 +36,15 @@
   overlay files match MANIFEST.  No Pathways or TP8 target claim exists.
   Publication does not authorize an image build, Kubernetes mutation, or
   target rerun.
+- P58.19e construction checkpoint: after reconciling upstream M15 patch 33
+  with P58 patch 34, pinned-image overlay assembly installs all 37 Qwen3-4B
+  files.  The dynamic probes prove P58/M15 per-round budget reset, M15 replay
+  round provenance, round-jump rejection, and a foreign-profile no-op.  The
+  complete digest-pinned suite exits zero with
+  `P58_CONTINUE_DECODE_OVERLAY_PASS cases=5 tensor_capture=standard-only
+  round_budget=p58+m15` followed by `P58_EXACT_IMAGE_CPU_PASS ...
+  continue_decode_observer=1 ... m15_token=1 regressions=1`.  This remains
+  construction evidence; the 128-chip target has not been rerun.
 - P58.19c validation: Python compilation and diff hygiene pass; focused
   renderer/profile/classifier tests pass 45/45; P34 static passes 10 suites;
   deterministic flag audit passes declared/actual/unique 394/394/394; and the

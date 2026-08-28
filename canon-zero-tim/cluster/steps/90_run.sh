@@ -872,6 +872,14 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
       echo "[run] FATAL: P58 continue-decode observer bypass was not observed" >&2
       exit 1
     fi
+    for p58_observer_label in seam tail; do
+      for p58_observer_round in 0 1 2; do
+        if ! grep -aq "^\[P38_OBSERVER_ROUND_BUDGET\] label=$p58_observer_label round=$p58_observer_round records=[0-9][0-9]* bytes=0$" "$LOG"; then
+          echo "[run] FATAL: P58 observer round budget receipt is absent: label=$p58_observer_label round=$p58_observer_round" >&2
+          exit 1
+        fi
+      done
+    done
   elif [ "$n_p58_continue_decode_observer_bypass" -ne 0 ]; then
     echo "[run] FATAL: foreign P58 continue-decode observer bypass marker: $n_p58_continue_decode_observer_bypass" >&2
     exit 1

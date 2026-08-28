@@ -400,6 +400,7 @@ class P58EnvironmentContractTest(unittest.TestCase):
         "CANON_P38_SEAM_OBSERVER": "layer",
         "CANON_P38_SEAM_MIN_POSITION": "1686",
         "CANON_P38_SEAM_MAX_POSITION": "4096",
+        "CANON_P38_SEAM_MAX_BYTES": "4294967296",
         "CANON_P38_TAIL_OBSERVER": "1",
         "CANON_P59_CHECKED_VMA": "1",
         "CANON_P67_P66_VMA_P59_ONLY": "1",
@@ -418,6 +419,7 @@ class P58EnvironmentContractTest(unittest.TestCase):
         ("CANON_P38_DIAGNOSTIC_ROUNDS", "1"),
         ("CANON_P38_DURABILITY_PROFILE", "full-v1"),
         ("CANON_P38_SEAM_OBSERVER", "full"),
+        ("CANON_P38_SEAM_MAX_BYTES", "1073741824"),
         ("CANON_P38_TAIL_OBSERVER", "0"),
     ):
       with self.subTest(key=key), self.assertRaises(ValueError):

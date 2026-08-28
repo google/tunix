@@ -1530,3 +1530,50 @@
   tensor_capture=standard-only`.
 - Boundary: this is source publication only.  No image publication,
   Kubernetes mutation, Pathways/TPU execution, or target rerun occurred.
+
+## 2026-08-28 UTC — P58.19e per-round observer budget repair, local only
+
+- Type: latest-source synchronization / sealed-incident diagnosis /
+  append-only overlay repair / construction validation in progress.
+- Source: clean P58 worktree fast-forwarded to
+  `2dc0e8f88e71335351a8511992a73a1ff344f9af`; `main` was not touched.
+- Diagnosis: `p58s19d` is an instrumentation-capacity failure.  The P58
+  selector derived a cumulative 1 GiB seam budget, while patch 31 reset the
+  byte counter only for `m15-wide-v1`; `p58-seam-v1` was omitted.  Merely
+  raising the cumulative value would leave the three-round failure mode.
+- Repair: derive 4 GiB per P58 diagnostic round and apply new runner patch 33
+  after patch 32.  The existing monotonic `0→1→2` reset now admits exact
+  `p58-seam-v1`; record indices stay cumulative, records are retained, M15
+  stays admitted, and foreign profiles remain no-op.  Postflight requires all
+  six seam/tail round-start receipts.
+- Validation checkpoint: renderer 30/30, profile 11/11, postflight static
+  contracts 7/7, Python/Bash syntax, and diff hygiene pass.  A fresh pinned
+  image assembly installs all 37 Qwen3-4B files and emits
+  `P58_CONTINUE_DECODE_OVERLAY_PASS cases=5 tensor_capture=standard-only
+  round_budget=p58+m15`.  Bare-host environment-contract import remains
+  blocked by absent optional `metrax`; the complete pinned-image gate is
+  pending.
+- Boundary: no commit, push, image publication, Kubernetes mutation,
+  Pathways/TPU execution, credential access, or target rerun occurred.
+
+## 2026-08-28 UTC — P58.19e latest-tip construction gate complete, local only
+
+- Source reconciliation: while the P58 gate ran, the operator tip advanced to
+  `af006872b64c2d6327588b4d4cef757242ddc222` and added M15 replay-round
+  provenance as runner patch 33.  The P58 reset repair moved to patch 34; both
+  patches are applied in order and the merged runner manifest is
+  `b03394c5ea75f1d5dbaaf05daa352e273f55fd1c68ae705766e82334620a005c`.
+- Cross-lane verification: all 37 Qwen3-4B overlay files match.  The P58 probe
+  emits `P58_CONTINUE_DECODE_OVERLAY_PASS cases=5
+  tensor_capture=standard-only round_budget=p58+m15`, and the upstream M15
+  probe emits `M15_REPLAY_ROUND_PROVENANCE_PASS ...` against the same merged
+  installed runner.
+- Complete gate: the digest-pinned P58 suite exits zero with
+  `P58_EXACT_IMAGE_CPU_PASS ... continue_decode_observer=1 ... m15_token=1
+  regressions=1`.  Synthetic alignment FAIL and timeout lines in that suite
+  are negative controls whose enclosing tests pass.
+- Claim ceiling: this proves source/package construction only.  It does not
+  prove three-round completion, observer neutrality, 128-chip Pathways/TP8
+  behavior, training, backward, or an optimizer commit.
+- Boundary: no commit, push, image publication, Kubernetes mutation,
+  Pathways/TPU execution, credential access, or target rerun occurred.

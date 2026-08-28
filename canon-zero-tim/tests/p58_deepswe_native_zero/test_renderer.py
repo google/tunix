@@ -303,6 +303,7 @@ class P58RendererTest(unittest.TestCase):
     self.assertEqual(env["CANON_P38_SEAM_OBSERVER"], "layer")
     self.assertEqual(env["CANON_P38_SEAM_MIN_POSITION"], "1686")
     self.assertEqual(env["CANON_P38_SEAM_MAX_POSITION"], "4096")
+    self.assertEqual(env["CANON_P38_SEAM_MAX_BYTES"], "4294967296")
     self.assertEqual(env["CANON_P38_TAIL_OBSERVER"], "1")
     self.assertEqual(env["CANON_P38_MIN_ACTION_KV"], "1686")
     self.assertEqual(

@@ -193,6 +193,7 @@ class P58CheckedVmaDiagnosticTest(unittest.TestCase):
     self.assertIn('CANON_P58_SEAM_LOCALIZATION:-}" ]; then', postflight)
     self.assertIn("classify_p58_checked_vma_diagnostic.py", postflight)
     self.assertIn("n_p58_continue_decode_observer_bypass", postflight)
+    self.assertIn("P58 observer round budget receipt is absent", postflight)
     self.assertIn(
         "P58 continue-decode observer bypass was not observed", postflight
     )

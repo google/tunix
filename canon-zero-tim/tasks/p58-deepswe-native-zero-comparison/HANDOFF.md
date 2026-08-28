@@ -1,5 +1,30 @@
 # P58 DeepSWE native-first training handoff
 
+## 2026-08-28 UTC — P58.19e per-round observer budget repair (local only)
+
+The sealed `p58s19d` failure is an instrumentation-capacity failure, not a
+model, R2E, alignment, or training result.  It proves the continue-decode
+bypass and `[1686,4096)` coverage with 635+ records, then the P58 observer
+exhausted its cumulative 1 GiB limit during round 0.
+
+The local repair on base `af006872b64c2d6327588b4d4cef757242ddc222`
+derives 4 GiB per diagnostic round and adds append-only runner patch 34 after
+the upstream M15 replay-provenance patch 33.  The P58 patch
+patch extends the already shipped monotonic round-budget reset to exact
+`p58-seam-v1`; M15 behavior remains admitted, foreign profiles remain no-op,
+record indices never reset, and no records are deleted.  Postflight requires
+all six seam/tail round-start receipts.  Model, data, sampling, loss,
+alignment, checked-VMA, continue-decode, backward, and optimizer contracts are
+unchanged.
+
+Pinned-image assembly installs all 37 Qwen3-4B files.  The P58 and M15
+dynamic probes both pass, and the complete pinned-image gate emits
+`P58_CONTINUE_DECODE_OVERLAY_PASS cases=5 tensor_capture=standard-only
+round_budget=p58+m15` followed by `P58_EXACT_IMAGE_CPU_PASS ...
+continue_decode_observer=1 ... m15_token=1 regressions=1`.  This work is not
+committed or pushed, and no image, Kubernetes object, Pathways run, or TPU
+target was created.  A fresh 128-chip rerun remains separately approval-gated.
+
 ## 2026-08-28 UTC — DeepSWE P58.19d incident intake (`canon-p58-seamcoarse-full-p58s19d`, 128 TPU)
 
 ### Incident Summary
@@ -12,9 +37,12 @@ Target run `canon-p58-seamcoarse-full-p58s19d` executed Step 0 multi-turn rollou
   ```
 - **Sealed Incident Package**: `evidence/p58s19d_byte_bound_incident/` (`INCIDENT_REPORT.md`, `RAW_ERROR.log`, `SHA256SUMS`).
 
-### Action Plan for p58s19e
-1. In `cluster/render_p58_deepswe_tim.py`, increase `_SEAM_MAX_BYTES` (e.g. to 4 GiB) or enable rolling shard persistence.
-2. Re-render, dry-run, and launch `canon-p58-seamcoarse-full-p58s19e` on 128 TPU.
+### Reconciled action for p58s19e
+
+Use the scoped per-round 4 GiB repair above; a cumulative 4 GiB value alone is
+insufficient for three rounds.  Source publication, matching image
+publication, render/server dry-run, and launching
+`canon-p58-seamcoarse-full-p58s19e` each remain separately approval-gated.
 
 ## 2026-08-28 UTC — P58.19d continue-decode observer repair (published)
 

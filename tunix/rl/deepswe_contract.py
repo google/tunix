@@ -1015,6 +1015,7 @@ def validate_environment(values: Mapping[str, str]) -> None:
             "CANON_P38_DIAGNOSTIC_ROUNDS": "3",
             "CANON_P38_DURABILITY_PROFILE": "p58-seam-v1",
             "CANON_P38_SEAM_OBSERVER": "layer",
+            "CANON_P38_SEAM_MAX_BYTES": "4294967296",
             "CANON_P38_TAIL_OBSERVER": "1",
         })
         round_file = values.get("CANON_P38_DIAGNOSTIC_ROUND_FILE", "")

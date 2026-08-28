@@ -989,7 +989,7 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
     if [ "$P58_SEAM_LOCALIZATION" = "1" ]; then
       expected_p38_seam_min=1686
       expected_p38_seam_max=4096
-      expected_p38_seam_bytes=1073741824
+      expected_p38_seam_bytes=4294967296
     fi
     [ "${CANON_P38_SEAM_MIN_POSITION:-}" = "$expected_p38_seam_min" ] && \
     [ "${CANON_P38_SEAM_MAX_POSITION:-}" = "$expected_p38_seam_max" ] && \

@@ -36,6 +36,15 @@ before incident/tensor capture.  Postflight requires at least one exact bypass
 marker for this selector and rejects the marker for every other workload.
 Unknown program paths still fail closed.
 
+The seam/tail observer budget is 4 GiB **per diagnostic round**, not one
+cumulative run budget.  Record indices remain monotonic across rounds; only
+the byte counter resets after a sealed `0→1` or `1→2` transition.  Before a
+successful postflight, require one exact
+`[P38_OBSERVER_ROUND_BUDGET] ... bytes=0` receipt for each
+`label={seam,tail}` and `round={0,1,2}`.  Missing receipts, a round jump, or a
+foreign profile receiving this reset is fatal.  Do not raise the value in a
+rendered YAML or delete earlier records to recover space.
+
 Prepare from a clean checkout only after the source and matching digest-pinned
 image have each been published with explicit approval:
 
@@ -59,7 +68,8 @@ the rendered identity: `diagnostic=p58-seam-localization`,
 `diagnostic-rounds=3`, `backward=0`, `optimizer-commits=0`, exactly one
 `CANON_P58_SEAM_LOCALIZATION=coarse`, and no P58.18 checked-VMA selector.  Do
 not hand-set subordinate P38 fields; `00_env.sh` must attest the derived
-`p58-seam-v1` durability profile and bounded `[1686,4096)` layer observer,
+`p58-seam-v1` durability profile, per-round 4 GiB byte budget, and bounded
+`[1686,4096)` layer observer,
 with capture strata `1686,2512,3072,3584,4096`. These values cover the five
 known first-red prefixes from p58z07 and P58.18. A repeat with `records=0`
 remains INCONCLUSIVE and must return the complete log plus request journal;

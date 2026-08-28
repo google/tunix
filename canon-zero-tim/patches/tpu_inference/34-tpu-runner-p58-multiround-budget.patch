@@ -1,0 +1,21 @@
+--- tpu_runner_p21_l30.py
++++ tpu_runner_p21_l30.py
+@@ -1186,6 +1186,8 @@
+ def _p38_begin_observer_round(state, diagnostic_round, label):
+-    """Give each sealed M15 round its own byte budget without reusing names."""
+-    if os.environ.get("CANON_P38_DURABILITY_PROFILE", "") != "m15-wide-v1":
++    """Give each sealed observer round its own budget without reusing names."""
++    durability_profile = os.environ.get("CANON_P38_DURABILITY_PROFILE", "")
++    if durability_profile not in (
++            "m15-wide-v1", "p58-seam-v1"):
+         return
+     diagnostic_round = int(diagnostic_round)
+     previous = state.get("diagnostic_round")
+@@ -1197,6 +1199,6 @@
+         if diagnostic_round != int(previous) + 1:
+             raise ValueError(
+-                "M15 observer diagnostic rounds must increase by one: "
++                "P38 observer diagnostic rounds must increase by one: "
+                 f"label={label} previous={previous} current={diagnostic_round}"
+             )
+         state["diagnostic_round"] = diagnostic_round
