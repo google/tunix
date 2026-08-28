@@ -65,17 +65,17 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument("--tokenizer_path", type=str, default="")
   parser.add_argument("--mesh_fsdp", type=int, default=2)
   parser.add_argument("--mesh_tp", type=int, default=1)
-  parser.add_argument("--max_prompt_length", type=int, default=512)
-  parser.add_argument("--max_response_length", type=int, default=128)
-  parser.add_argument("--mini_batch_size", type=int, default=1)
+  parser.add_argument("--max_prompt_length", type=int, default=1024)
+  parser.add_argument("--max_response_length", type=int, default=1024)
+  parser.add_argument("--mini_batch_size", type=int, default=2)
   parser.add_argument("--train_micro_batch_size", type=int, default=1)
   parser.add_argument("--compute_logps_micro_batch_size", type=int, default=1)
   parser.add_argument("--compute_logps_chunk_size", type=int, default=0)
   parser.add_argument("--eval_every_n_steps", type=int, default=1000000)
   parser.add_argument("--learning_rate", type=float, default=2.0e-7)
   parser.add_argument("--use_lora", action="store_true")
-  parser.add_argument("--lora_rank", type=int, default=16)
-  parser.add_argument("--lora_alpha", type=float, default=16.0)
+  parser.add_argument("--lora_rank", type=int, default=64)
+  parser.add_argument("--lora_alpha", type=float, default=64.0)
   parser.add_argument("--checkpoint_save_interval_steps", type=int, default=1)
   parser.add_argument("--checkpoint_max_to_keep", type=int, default=10)
   parser.add_argument(
@@ -172,7 +172,9 @@ def _load_actor_model(args, mesh: Mesh, *, lora: bool):
         "--model_dir is required for JAX trainer weights. Set MODEL_DIR or pass "
         "--model_dir=/path/to/local/safetensors."
     )
-  model = models.create_model(args.model_name, args.model_dir, mesh)
+  model = models.create_model(
+      args.model_name, args.model_dir, mesh, dtype=jnp.float32
+  )
   if not lora:
     return model
   lora_config = {
