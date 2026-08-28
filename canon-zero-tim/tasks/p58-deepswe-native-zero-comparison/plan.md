@@ -78,6 +78,13 @@ certify the production DP8xTP8 geometry. Its remaining deliverable is a
 default-off exact-geometry Step-0/no-commit checked-VMA discriminator, not a
 new full-training retry.
 
+The exact-geometry discriminator is refined in P58.18 into three independent,
+matched Step-0 JobSets: logical `ON-A/OFF/ON-B`. Per the operator's capacity
+plan they are prepared for concurrent submission. Concurrent execution makes
+the two ON arms replication controls around one matched OFF treatment; it is
+not a temporal ABA sandwich. All three retain the same frozen recipe and stop
+before backward or optimizer state mutation.
+
 ## Phases
 
 | Phase | Deliverable | Exit gate | Status |
@@ -101,6 +108,7 @@ new full-training retry.
 | P58.15 | Disaggregated nested model/logits JIT and segmented-backward binding | Reconstructed graph is state-contract exact, both hidden JITs and segmented backward execute on trainer devices, three placement receipts are classifier-enforced, and dependency-image regressions pass | completed source repair; `p58z06` exposed P58.16 loader-metadata admission before rollout |
 | P58.16 | Loader-metadata-aware NNX logical State contract | Only exact `_is_loaded=True` provenance is normalized; every other metadata/path/type/leaf/shape/dtype contract stays exact; full and segmented forced-device tests plus classifier and complete image gate pass | completed — implementation published/read back; `p58z07` proved the state/JIT/scorer contracts and exposed P58.17 after rollout |
 | P58.17 | Decode-vs-prefill seam probe | Exact historical mismatch join plus one real-task DP1xTP4 Zero-HP carrier, followed by a single-selector 128-chip DP8xTP8+DP8xTP8 checked-VMA-off Step-0 discriminator with durable 128-row evidence and zero VJP/backward/commit | implementation `b54bd81a` published/read back — `p58s17` returned finite A-B and B-C RED over 4,808 action tokens; `p58z08` reran the ordinary checked-VMA-on full arm and is not discriminator evidence; exact-geometry selector passes construction gates, target still not run |
+| P58.18 | Exact-geometry checked-VMA matched triplicate | Render and verify three independent ON-A/OFF/ON-B 128-chip Step-0 carriers whose recipe and treatment signatures differ only in the selector; each returns 128 durable rows, exact B-C, one finite/exact A-B classification, controlled exit, and zero VJP/backward/commit | implementation complete; full pinned-image construction gate PASS; source publication approved for this delivery; target not run |
 
 Exactly one phase may be active. Commit, push, image publication, Kubernetes
 render/application, and TPU execution each remain separately user-gated.
@@ -110,7 +118,8 @@ P58.3 has CPU coverage for journal continuity and observer/classifier logic but
 no real Qwen/R2E one-host evidence; the user explicitly waived it rather than
 calling it PASS. P58.4N was superseded after p58c05 failed Kueue admission.
 P58.5N never completed and is not a valid full Native baseline. P58.6 through
-P58.17 are specified in their phase files; P58.17 is the only active phase.
+P58.18 is the only active phase; P58.6 through P58.17 retain their historical
+phase records.
 P58.7's historical target remains not run and is superseded for new Zero
 launches by P58.11 plus the P58.12 seed-route correction. P58.9 and P58.10
 source are published and read back. P58.13 implementation
@@ -122,7 +131,7 @@ immutable P58.15 trigger evidence. P58.15 implementation
 immutable P58.16 trigger evidence. P58.16 implementation
 `dba5211ac4945fefb50337603c800d9f8e3d37b5` is published/read back, and
 immutable `p58z07` proved it before triggering P58.17. The P58.17 one-host
-carrier and any later DP8xTP8 follow-up remain separately execution-gated.
+carrier and the P58.18 DP8xTP8 triplicate remain separately execution-gated.
 No remote execution is authorized by this plan alone.
 
 P58.5N attempts `p58f01` through `p58f11` remain `INCONCLUSIVE`. P58f01 exposed

@@ -35,7 +35,6 @@ MAX_CONCURRENCY = GLOBAL_PROMPTS * GENERATIONS
 FIXED_SEED = 42
 _STAGE_STEPS = {"three-update": 3, "full": 1000}
 _ARMS = ("native", "zero")
-_CHECKED_VMA_DIAGNOSTIC = "off"
 _KUEUE_MANAGED_WORKER_POOLS = frozenset({
     "auto",
     "none",
@@ -145,6 +144,7 @@ def render(
     sampler_is: bool = False,
     high_performance: bool = False,
     checked_vma_off_diagnostic: bool = False,
+    checked_vma_on_diagnostic: bool = False,
 ) -> dict[str, Any]:
   """Returns one immutable P58 native or zero JobSet."""
   if stage not in _STAGE_STEPS:
@@ -153,11 +153,17 @@ def render(
     raise ValueError("P58 arm must be native or zero")
   if high_performance and (arm != "zero" or stage != "full"):
     raise ValueError("P58 high-performance is admitted only for Zero full")
-  if checked_vma_off_diagnostic and (
+  if checked_vma_off_diagnostic and checked_vma_on_diagnostic:
+    raise ValueError("P58 checked-VMA diagnostic selectors are mutually exclusive")
+  checked_vma_diagnostic = (
+      "off" if checked_vma_off_diagnostic else
+      "on" if checked_vma_on_diagnostic else ""
+  )
+  if checked_vma_diagnostic and (
       arm != "zero" or stage != "full" or high_performance
   ):
     raise ValueError(
-        "P58 checked-VMA-off diagnostic is its own Zero/full HP selector"
+        "P58 checked-VMA diagnostic is its own Zero/full HP selector"
     )
   if sampler_is and arm != "native":
     raise ValueError("P58 sampler IS is admitted only for the native arm")
@@ -185,10 +191,10 @@ def render(
       fixed_lm_head=False,
   )
 
-  hp_bundle = high_performance or checked_vma_off_diagnostic
+  hp_bundle = high_performance or bool(checked_vma_diagnostic)
   treatment = (
-      "vmaoff"
-      if checked_vma_off_diagnostic
+      f"zero-hp-vma{checked_vma_diagnostic}-precheck"
+      if checked_vma_diagnostic
       else "zero-hp"
       if high_performance
       else "native-is"
@@ -214,9 +220,12 @@ def render(
     document["metadata"]["labels"]["canon.zero-tim/sampler-recipe"] = (
         "token-is"
     )
-  if checked_vma_off_diagnostic:
+  if checked_vma_diagnostic:
     document["metadata"]["labels"].update({
-        "canon.zero-tim/diagnostic": "p58-checked-vma-off",
+        "canon.zero-tim/diagnostic": (
+            f"p58-checked-vma-{checked_vma_diagnostic}"
+        ),
+        "canon.zero-tim/diagnostic-selector": checked_vma_diagnostic,
         "canon.zero-tim/backward": "0",
         "canon.zero-tim/optimizer-commits": "0",
     })
@@ -335,9 +344,9 @@ def render(
       ),
       "CANON_OPTIMIZER_HBM_MIN_FREE_BYTES": str(8 * 1024**3),
   })
-  if checked_vma_off_diagnostic:
+  if checked_vma_diagnostic:
     p34._set_env(main, {
-        "CANON_P58_CHECKED_VMA_DIAGNOSTIC": _CHECKED_VMA_DIAGNOSTIC,
+        "CANON_P58_CHECKED_VMA_DIAGNOSTIC": checked_vma_diagnostic,
         "CANON_P38_PRECHECK_ONLY": "1",
         "CANON_P38_CONTROLLED_EXIT": "1",
         "CANON_P38_DIAGNOSTIC_ROUNDS": "1",
@@ -382,6 +391,7 @@ def render(
       sampler_is=sampler_is,
       high_performance=high_performance,
       checked_vma_off_diagnostic=checked_vma_off_diagnostic,
+      checked_vma_on_diagnostic=checked_vma_on_diagnostic,
   )
   return document
 
@@ -450,10 +460,17 @@ def validate(
     sampler_is: bool = False,
     high_performance: bool = False,
     checked_vma_off_diagnostic: bool = False,
+    checked_vma_on_diagnostic: bool = False,
 ) -> None:
   if stage not in _STAGE_STEPS or arm not in _ARMS:
     raise ValueError("invalid P58 stage or arm")
-  hp_bundle = high_performance or checked_vma_off_diagnostic
+  if checked_vma_off_diagnostic and checked_vma_on_diagnostic:
+    raise ValueError("P58 checked-VMA diagnostic selectors are mutually exclusive")
+  checked_vma_diagnostic = (
+      "off" if checked_vma_off_diagnostic else
+      "on" if checked_vma_on_diagnostic else ""
+  )
+  hp_bundle = high_performance or bool(checked_vma_diagnostic)
   head = p34._head(document)
   cpu_nodepool = head.get("nodeSelector", {}).get(
       "cloud.google.com/gke-nodepool", ""
@@ -519,9 +536,9 @@ def validate(
       ),
       "NODE_SELECTOR_VAL": cpu_nodepool,
   }
-  if checked_vma_off_diagnostic:
+  if checked_vma_diagnostic:
     expected.update({
-        "CANON_P58_CHECKED_VMA_DIAGNOSTIC": _CHECKED_VMA_DIAGNOSTIC,
+        "CANON_P58_CHECKED_VMA_DIAGNOSTIC": checked_vma_diagnostic,
         "CANON_P38_PRECHECK_ONLY": "1",
         "CANON_P38_CONTROLLED_EXIT": "1",
         "CANON_P38_DIAGNOSTIC_ROUNDS": "1",
@@ -682,6 +699,7 @@ def main() -> None:
   parser.add_argument("--sampler-is", action="store_true")
   parser.add_argument("--high-performance", action="store_true")
   parser.add_argument("--checked-vma-off-diagnostic", action="store_true")
+  parser.add_argument("--checked-vma-on-diagnostic", action="store_true")
   args = parser.parse_args()
   if args.output.exists():
     raise FileExistsError(f"refusing to overwrite JobSet: {args.output}")
@@ -701,11 +719,14 @@ def main() -> None:
       sampler_is=args.sampler_is,
       high_performance=args.high_performance,
       checked_vma_off_diagnostic=args.checked_vma_off_diagnostic,
+      checked_vma_on_diagnostic=args.checked_vma_on_diagnostic,
   )
   args.output.write_text(p34.dump_jobset(document))
   recipe = (
       "zero-hp-vmaoff-precheck"
       if args.checked_vma_off_diagnostic
+      else "zero-hp-vmaon-precheck"
+      if args.checked_vma_on_diagnostic
       else "native-is"
       if args.sampler_is
       else "zero-hp"

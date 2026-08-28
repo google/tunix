@@ -1185,6 +1185,34 @@
 - Boundary: no commit, push, image publication, Kubernetes mutation, remote
   artifact mutation, or credential access occurred.
 
+## 2026-08-28 — P58.18 checked-VMA matched-triplicate implementation
+
+- Type: exact-geometry diagnostic refinement / render-only parallel campaign
+  preparation / no target execution.
+- Source intake: local work was safely rebased onto the current operator tip;
+  the one incoming commit touched only M15 evidence and did not overlap P58.
+- Design: replace an isolated OFF discriminator with three independently named
+  ON-A/OFF/ON-B Step-0 JobSets. They share source, image, Qwen3-4B clean-data
+  recipe, DP8xTP8 role geometry, B8xG16, 16K/50-turn bounds, seed 42, fixed
+  head, prefix-cache-off, and durable trajectory contract. Only the registered
+  `on|off` selector differs. Concurrent execution is two ON replicates plus a
+  matched OFF control, not temporal ABA evidence.
+- Safety: each arm executes one precheck and controlled exit with backward=0
+  and optimizer_commits=0. ON derives checked-VMA/P66/P67=`1/1/1`, OFF
+  derives `0/0/0`, and both hold first-update/P63 at `0/0`. The absent
+  production tuple remains unchanged.
+- Artifacts: added render, re-parse verifier, aggregate classifier, and a
+  render-only wrapper. Three YAMLs have unique JobSet identities and persistent
+  roots; the receipt makes the 384-TPU, three-head, 384-sandbox aggregate
+  requirement explicit.
+- Validation: syntax passes; focused renderer 27/27, profile 9/9, per-arm
+  classifier 7/7, and ABA wave 4/4 pass; deterministic flag audit is
+  `393/393/393`; and the complete pinned-image CPU gate exits zero with
+  `P58_EXACT_IMAGE_CPU_PASS ... checked_vma_diagnostic=1
+  checked_vma_aba=1 ... regressions=1`.
+- Boundary: target not run. No commit, push, image publication, Kubernetes
+  mutation, TPU work, credential access, or remote artifact mutation occurred.
+
 ## 2026-08-27T19:10:00Z — P58.17 exact-geometry checked-VMA discriminator implemented
 
 - Type: phase continuation / exact-geometry diagnostic implementation / local

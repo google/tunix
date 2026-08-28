@@ -222,6 +222,10 @@ class P58RendererTest(unittest.TestCase):
     )
     self.assertIn("vmaoff", diagnostic["metadata"]["name"])
     self.assertEqual(
+        diagnostic["metadata"]["labels"]["canon.zero-tim/diagnostic"],
+        "p58-checked-vma-off",
+    )
+    self.assertEqual(
         renderer.recipe_signature(production),
         renderer.recipe_signature(diagnostic),
     )
@@ -247,6 +251,42 @@ class P58RendererTest(unittest.TestCase):
               checked_vma_off_diagnostic=True,
           )
 
+  def test_checked_vma_on_diagnostic_is_matched_zero_commit_control(self):
+    off = self._render(
+        "zero", "full", checked_vma_off_diagnostic=True, run_id="vmaoff"
+    )
+    on = self._render(
+        "zero", "full", checked_vma_on_diagnostic=True, run_id="vmaon"
+    )
+    env = renderer.p34._env(on)
+    self.assertEqual(env["CANON_P58_CHECKED_VMA_DIAGNOSTIC"], "on")
+    self.assertEqual(env["CANON_P38_PRECHECK_ONLY"], "1")
+    self.assertEqual(env["CANON_P38_CONTROLLED_EXIT"], "1")
+    self.assertEqual(
+        on["metadata"]["labels"]["canon.zero-tim/diagnostic"],
+        "p58-checked-vma-on",
+    )
+    self.assertEqual(
+        on["metadata"]["labels"]["canon.zero-tim/backward"], "0"
+    )
+    self.assertEqual(renderer.recipe_signature(off), renderer.recipe_signature(on))
+    off_treatment = renderer.treatment_signature(off)
+    on_treatment = renderer.treatment_signature(on)
+    self.assertEqual(off_treatment["checked_vma_diagnostic"], "off")
+    self.assertEqual(on_treatment["checked_vma_diagnostic"], "on")
+    off_treatment.pop("checked_vma_diagnostic")
+    on_treatment.pop("checked_vma_diagnostic")
+    self.assertEqual(off_treatment, on_treatment)
+
+  def test_checked_vma_diagnostic_selectors_are_mutually_exclusive(self):
+    with self.assertRaisesRegex(ValueError, "mutually exclusive"):
+      self._render(
+          "zero",
+          "full",
+          checked_vma_off_diagnostic=True,
+          checked_vma_on_diagnostic=True,
+      )
+
   def test_checked_vma_prepare_wrapper_is_render_only(self):
     path = (
         PKG
@@ -257,6 +297,18 @@ class P58RendererTest(unittest.TestCase):
     self.assertIn("--checked-vma-off-diagnostic", source)
     self.assertIn("--stage full", source)
     self.assertIn("--arm zero", source)
+    self.assertIn("origin/yuxzhang/canon-zero-tim", source)
+    self.assertNotIn("kubectl ", source)
+
+  def test_checked_vma_aba_wrapper_is_render_only(self):
+    path = (
+        PKG
+        / "tasks/p58-deepswe-native-zero-comparison/scripts"
+        / "prepare_p58_checked_vma_aba_wave.sh"
+    )
+    source = path.read_text()
+    self.assertIn("render_p58_checked_vma_aba_wave.py", source)
+    self.assertIn("verify_p58_checked_vma_aba_wave.py", source)
     self.assertIn("origin/yuxzhang/canon-zero-tim", source)
     self.assertNotIn("kubectl ", source)
 

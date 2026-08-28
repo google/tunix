@@ -1,5 +1,159 @@
 # P58 DeepSWE native-first training handoff
 
+## 2026-08-28 P58.18 next run — prepare three concurrent matched diagnostics
+
+This section supersedes the single checked-VMA-off launch instruction below.
+The next numerical experiment is three independent exact-geometry Step-0
+JobSets: logical `ON-A/OFF/ON-B`. They use identical published source,
+digest-pinned image, Qwen3-4B recipe, clean data, geometry, seed, and artifact
+contract. Only `CANON_P58_CHECKED_VMA_DIAGNOSTIC=on|off` differs. All three
+exit before VJP/backward/optimizer commit; none is a training run.
+
+The operator requested concurrent submission. This needs 384 TPU chips in
+aggregate, three CPU head nodes (required anti-affinity), and up to 384 R2E
+sandboxes. At the signed sandbox request that is 768 CPU and 1,536 GiB of
+sandbox memory, excluding head containers. If Kueue or the CPU pool cannot
+admit all three together, preserve Pending/admission evidence; do not silently
+call a staggered run temporal ABA evidence.
+
+After this approved source commit/push and a separately approved matching image
+publication, the remote executor must fetch the final tip, verify a clean
+checkout, and run the render-only wrapper:
+
+```bash
+export P58_EXPECT_SOURCE_SHA=<exact-published-40-character-sha>
+bash canon-zero-tim/tasks/p58-deepswe-native-zero-comparison/scripts/prepare_p58_checked_vma_aba_wave.sh \
+  <fresh-wave-id-at-most-12-chars> \
+  <matching-image@sha256:...> \
+  <worker-nodepool> \
+  /tmp/<fresh-p58-aba-output-dir>
+```
+
+The wrapper creates and independently verifies:
+
+```text
+jobsets/01-on-a.yaml
+jobsets/02-off.yaml
+jobsets/03-on-b.yaml
+wave-render-receipt.json
+wave-verify.json
+```
+
+It contains no `kubectl` call. Inspect `wave-verify.json` for `PASS`, source
+and image identity, three unique JobSet names/roots, `aggregate_tpu_chips=384`,
+`backward=0`, and `optimizer_commits=0`. Server dry-run and applying the three
+files remain separate, explicitly approved operations. Applying all three
+objects makes them eligible concurrently; actual concurrency must be proved
+from Kueue admission and start timestamps, not inferred from submission.
+
+Return each complete persistent run root and its
+`p58_checked_vma_{on|off}.classification.json`. Then run the local aggregate
+classifier against the three returned classifications and the original
+`wave-verify.json`:
+
+```bash
+python3 canon-zero-tim/tasks/p58-deepswe-native-zero-comparison/scripts/classify_p58_checked_vma_aba_wave.py \
+  --wave-verify <wave-output>/wave-verify.json \
+  --on-a <on-a-root>/p58_checked_vma_on.classification.json \
+  --off <off-root>/p58_checked_vma_off.classification.json \
+  --on-b <on-b-root>/p58_checked_vma_on.classification.json \
+  --output <fresh-output>/p58_checked_vma_aba.classification.json
+```
+
+The decisive pattern is ON RED / OFF exact / ON RED with B-C exact in every
+arm. RED/RED/RED means checked VMA is not sufficient. Different ON outcomes
+are inconclusive. Do not require cross-run token identity, average away a
+nonreplicating ON arm, loosen B-C, or continue into backward.
+
+Local construction validation is complete in the dependency-bearing pinned
+CPU image: the full suite ends with `P58_EXACT_IMAGE_CPU_PASS ...
+checked_vma_diagnostic=1 checked_vma_aba=1 ... regressions=1`. This does not
+authorize or substitute for the three real 128-chip target arms.
+
+### Resolution after the triplicate returns
+
+Judge each arm with its committed classifier before choosing a repair. Never
+infer the result from the JobSet exit code or from a maximum delta alone.
+
+#### Case 1 — ON RED / OFF exact / ON RED: repair P67 identity scoping
+
+This pattern, with exact B-C in all three arms, reproduces checked VMA as the
+causal discriminator. It does **not** justify leaving checked VMA disabled:
+OFF is a diagnostic control, while P59 backward still needs the checked-VMA
+ownership repair. The production fix is to stop using abstract-mesh shape as
+the identity of a P59 pullback.
+
+Implement one internal, non-user-settable P59 pullback-scope API. Enter it in
+`tunix/rl/canonical_qwen3_adapter.py` only while `_p59_parallel_map` traces the
+registered local pullback, and reset it in `finally`. The serving/decode and
+prefill paths must never enter this scope, even when their live abstract mesh
+is exactly `(data,model)=(8,8)` with both axes Manual. Do not add another
+independently combinable environment flag and do not key the scope to DP/TP
+sizes, axis names, `CANON_P59_RANK_PARALLEL_BACKWARD`, or the presence of a
+trainer-shaped mesh.
+
+Replace the topology-shaped P67 decisions at every checked-VMA consumer, not
+only the first helper found:
+
+- `canon-zero-tim/src/engine_shims/p22_pallas_matmul.py`: operand pcasts and
+  output `ManualAxisType`;
+- `canon-zero-tim/src/engine_shims/linear_p22xf.py`: the replicated-TP pmean
+  path (and audit every `_p59_local_tp_context` caller so topology is not used
+  as treatment identity);
+- `canon-zero-tim/patches/tpu_inference/02-embed.patch`: embedding pmean;
+- `canon-zero-tim/patches/tpu_inference/29-rpa-p66-vma-output.patch`: RPA
+  output-shape VMA annotations.
+
+The internal scope must fail closed on nesting/ownership drift and emit
+trace-time receipts naming the P59 module and whether each consumer observed
+the scope. Receipts are observation only; they must not add device reads or
+JAX program boundaries.
+
+Required repair gates, in order:
+
+1. Host truth-table tests over identity=`serving|trainer-pullback`,
+   data=`1|2|8`, and model=`4|8`: every serving case is scope-off; every
+   registered trainer pullback is scope-on. Shape alone must never flip it.
+2. Forced-device positive tests prove checked VMA still owns the P59 local
+   pullback and its transpose collectives. DP1xTP8 and DP8xTP8 serving
+   negatives prove no pcast, pmean, or RPA output annotation is activated.
+3. Re-run the complete pinned-image and installed-shim gates. Preserve exact
+   Native/Zero treatment isolation and the production selector-absent tuple.
+4. Publish a matching source/image only with separate approval, then run one
+   fresh exact-geometry `checked-VMA=on` Step-0/no-commit arm. Require strict
+   A-B=0, B-C=0, 128 durable rows, and zero VJP/backward/commit.
+5. Only after that fresh ON arm is exact may a selector-absent Zero-HP full
+   job start. Its first strict Step-0 gate, checked-VMA backward receipts,
+   finite nonzero gradients, first-update transaction, and checkpoint remain
+   hard gates. Never resume a pre-repair checkpoint.
+
+#### Case 2 — ON RED / OFF RED / ON RED: do not ship a P67 repair
+
+Checked VMA is not sufficient to explain the seam. Freeze the triplicate and
+promote exact-geometry decode/prefill seam replay. Join the first A-B mismatch
+to its durable trajectory, verify token/action-mask and `i±1` shift controls,
+then instrument the smallest existing seam around that call. Reuse the
+lm-head/prefix-cache three-run methodology: two identical baseline replicates
+around one single-selector treatment, immutable per-run roots, and a
+classifier that requires B-C exact. Do not change precision, sampling, loss,
+prefix cache, optimizer, or alignment gates to make the seam disappear.
+
+#### Case 3 — both ON arms exact and OFF exact: baseline RED not reproduced
+
+Do not claim a repair. Preserve the result as a non-reproduction and compare
+source/image provenance plus per-arm trajectory identities against p58z07 and
+p58z08. A full training run remains blocked until one fresh selector-absent
+Step-0 strict gate is exact on the final source/image.
+
+#### Case 4 — ON arms disagree, B-C is RED, or an arm is incomplete
+
+The aggregate result is inconclusive/invalid. Do not average the ON arms and
+do not reinterpret an infrastructure failure as numerical evidence. First
+repair only the missing durability/admission/infra prerequisite, then rerun
+the missing or nonreplicating zero-commit arm from a fresh root. Any B-C RED,
+nonfinite value, malformed artifact, VJP/backward evidence, or optimizer
+activity remains a hard classifier failure.
+
 ## 2026-08-27 p58z08 intake — wrong arm for P58.17; rerun only the discriminator
 
 The operator branch is still at

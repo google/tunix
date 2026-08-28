@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Classify the exact-geometry P58 checked-VMA-off Step-0 diagnostic."""
+"""Classify one exact-geometry P58 checked-VMA Step-0 diagnostic arm."""
 
 from __future__ import annotations
 
@@ -25,12 +25,19 @@ _SOURCE_SHA = re.compile(r"[0-9a-f]{40}")
 _WHITELIST_SHA256 = (
     "ec297c9cbc39cd67db15b0b9db6a229b15671b848df5ec3101de9ef8df7c9973"
 )
-_PROFILE_MARKER = (
-    "[P58.VMA.DIAGNOSTIC] profile_resolved selector=off dp=8 tp=8 "
-    "checked_vma=0 compatibility_alias=0 vma_p59_only=0 "
-    "fixed_ar_gather=1 continue_decode=8 prefix_cache=0 backward=0 "
-    "optimizer_commits=0"
-)
+def _profile_marker(selector: str) -> str:
+  value = "0" if selector == "off" else "1"
+  return (
+      "[P58.VMA.DIAGNOSTIC] profile_resolved "
+      f"selector={selector} dp=8 tp=8 checked_vma={value} "
+      f"compatibility_alias={value} vma_p59_only={value} "
+      "fixed_ar_gather=1 continue_decode=8 prefix_cache=0 backward=0 "
+      "optimizer_commits=0"
+  )
+
+
+# Backward-compatible fixture constant for the original single off arm.
+_PROFILE_MARKER = _profile_marker("off")
 _CONTROLLED_EXIT = (
     "[CANON_P38] CONTROLLED_EXIT code=42 backward=0 optimizer_commits=0"
 )
@@ -53,8 +60,11 @@ def _jsonl(path: Path) -> list[dict[str, Any]]:
 
 
 def classify(
-    *, run_log: Path, pre_alignment: Path, debug_dir: Path, update_report: Path
+    *, run_log: Path, pre_alignment: Path, debug_dir: Path, update_report: Path,
+    selector: str = "off",
 ) -> dict[str, Any]:
+  if selector not in ("off", "on"):
+    raise ValueError("P58 checked-VMA diagnostic selector must be off or on")
   reasons: list[str] = []
   text = run_log.read_text(encoding="utf-8", errors="replace")
   records = _jsonl(pre_alignment)
@@ -76,7 +86,7 @@ def classify(
     reasons.append("source_commit")
   expected_provenance = {
       "stage": "full",
-      "checked_vma_diagnostic": "off",
+      "checked_vma_diagnostic": selector,
       "whitelist_sha256": _WHITELIST_SHA256,
   }
   wrong_provenance = {
@@ -110,7 +120,7 @@ def classify(
     reasons.append(f"N_action={n_action}")
 
   marker_counts = {
-      "profile": text.count(_PROFILE_MARKER),
+      "profile": text.count(_profile_marker(selector)),
       "precheck_round": text.count("[CANON_P38] PRECHECK_ROUND_COMPLETE "),
       "controlled_exit": text.count(_CONTROLLED_EXIT),
   }
@@ -120,13 +130,14 @@ def classify(
   if wrong_markers:
     reasons.append(f"marker_counts={wrong_markers}")
   forbidden = {
-      "checked_vma_enabled": "[P59.CHECKED_VMA] enabled=1",
       "p59_backward": "[P59.BACKWARD]",
       "p66_backward": "[P66.BACKWARD]",
       "fixed_lm_head_vjp": "CANON_P38_FIXED_LM_HEAD_VJP=1",
       "optimizer_commit": "optimizer_commits=1",
       "global_step_1": "Global step 1 completed",
   }
+  if selector == "off":
+    forbidden["checked_vma_enabled"] = "[P59.CHECKED_VMA] enabled=1"
   present_forbidden = [
       name for name, marker in forbidden.items() if marker in text
   ]
@@ -137,17 +148,18 @@ def classify(
 
   a_b_bytes = a_b.get("differing_bytes")
   outcome = (
-      "A_B_EXACT_WITH_CHECKED_VMA_OFF"
+      f"A_B_EXACT_WITH_CHECKED_VMA_{selector.upper()}"
       if a_b_bytes == 0
-      else "A_B_RED_WITH_CHECKED_VMA_OFF"
+      else f"A_B_RED_WITH_CHECKED_VMA_{selector.upper()}"
       if isinstance(a_b_bytes, int) and a_b_bytes > 0
       else "INVALID"
   )
   verdict = "PASS" if not reasons and outcome != "INVALID" else "FAIL"
   return {
-      "schema": "canon.p58.checked-vma-off-diagnostic.v1",
+      "schema": "canon.p58.checked-vma-diagnostic.v2",
       "verdict": verdict,
       "outcome": outcome,
+      "selector": selector,
       "source_commit": probe.get("source_commit"),
       "model_id": probe.get("model_id"),
       "role_topology": probe.get("role_topology"),
@@ -164,9 +176,9 @@ def classify(
       "durable_probe": probe,
       "reasons": reasons,
       "claim": (
-          "This exact DP8xTP8 Step-0 selector discriminates whether disabling "
-          "the process-wide checked-VMA family removes the p58z07 A-B seam. "
-          "It does not certify backward, optimizer, or full training."
+          "This exact DP8xTP8 Step-0 arm observes the checked-VMA selector "
+          f"set to {selector}. It does not certify backward, optimizer, or "
+          "full training."
       ),
   }
 
@@ -177,6 +189,7 @@ def main() -> int:
   parser.add_argument("--pre-alignment", required=True, type=Path)
   parser.add_argument("--debug-dir", required=True, type=Path)
   parser.add_argument("--update-report", required=True, type=Path)
+  parser.add_argument("--selector", required=True, choices=("off", "on"))
   parser.add_argument("--output", required=True, type=Path)
   args = parser.parse_args()
   result = classify(
@@ -184,6 +197,7 @@ def main() -> int:
       pre_alignment=args.pre_alignment,
       debug_dir=args.debug_dir,
       update_report=args.update_report,
+      selector=args.selector,
   )
   if args.output.exists():
     raise FileExistsError(
@@ -195,7 +209,8 @@ def main() -> int:
   )
   print(
       "P58_CHECKED_VMA_DIAGNOSTIC_CLASSIFICATION "
-      f"verdict={result['verdict']} outcome={result['outcome']} "
+      f"selector={result['selector']} verdict={result['verdict']} "
+      f"outcome={result['outcome']} "
       f"a_b_bytes={result['A_B_differing_bytes']} "
       f"b_c_bytes={result['B_C_differing_bytes']} "
       "backward=0 optimizer_commits=0",

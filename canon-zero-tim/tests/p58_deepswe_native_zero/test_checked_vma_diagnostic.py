@@ -24,7 +24,10 @@ CLASSIFIER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(CLASSIFIER)
 
 
-def _fixture(root: Path, *, a_b_bytes: int = 2, b_c_bytes: int = 0) -> dict:
+def _fixture(
+    root: Path, *, selector: str = "off", a_b_bytes: int = 2,
+    b_c_bytes: int = 0,
+) -> dict:
   debug = root / "debug"
   debug.mkdir()
   manifest = {
@@ -35,7 +38,7 @@ def _fixture(root: Path, *, a_b_bytes: int = 2, b_c_bytes: int = 0) -> dict:
       "model_id": "Qwen/Qwen3-4B-Instruct-2507",
       "contract_name": "p58-qwen4b-tim-128",
       "tim_arm": "zero",
-      "checked_vma_diagnostic": "off",
+      "checked_vma_diagnostic": selector,
       "stage": "full",
       "slice_topology": "4x4x8",
       "role_topology": {"dp": 8, "tp": 8, "devices": 64},
@@ -111,7 +114,7 @@ def _fixture(root: Path, *, a_b_bytes: int = 2, b_c_bytes: int = 0) -> dict:
   }) + "\n")
   run_log = root / "run.log"
   run_log.write_text(
-      CLASSIFIER._PROFILE_MARKER + "\n"
+      CLASSIFIER._profile_marker(selector) + "\n"
       "[CANON_P38] PRECHECK_ROUND_COMPLETE round=0 step=0 N_action=128 "
       "verdict=PASS backward=0 optimizer_commits=0\n"
       "[CANON_P38] PRECHECK_COMPLETE STOP_BEFORE_BACKWARD rounds=1 step=0 "
@@ -123,6 +126,7 @@ def _fixture(root: Path, *, a_b_bytes: int = 2, b_c_bytes: int = 0) -> dict:
       "pre_alignment": prealignment,
       "debug_dir": debug,
       "update_report": root / "updates.jsonl",
+      "selector": selector,
   }
 
 
@@ -142,6 +146,15 @@ class P58CheckedVmaDiagnosticTest(unittest.TestCase):
       )
       self.assertEqual(result["verdict"], "PASS")
       self.assertEqual(result["outcome"], "A_B_EXACT_WITH_CHECKED_VMA_OFF")
+
+  def test_on_arm_is_a_valid_zero_commit_control(self):
+    with tempfile.TemporaryDirectory() as directory:
+      result = CLASSIFIER.classify(
+          **_fixture(Path(directory), selector="on")
+      )
+      self.assertEqual(result["verdict"], "PASS")
+      self.assertEqual(result["selector"], "on")
+      self.assertEqual(result["outcome"], "A_B_RED_WITH_CHECKED_VMA_ON")
 
   def test_b_c_drift_fails_closed(self):
     with tempfile.TemporaryDirectory() as directory:
@@ -177,7 +190,7 @@ class P58CheckedVmaDiagnosticTest(unittest.TestCase):
         ROOT / "canon-zero-tim/cluster/steps/90_run.sh"
     ).read_text()
     self.assertIn(
-        'if [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "1" ] && \\\n   [ "${CANON_P58_CHECKED_VMA_DIAGNOSTIC:-}" != "off" ]; then',
+        'if [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "1" ] && \\\n   [ -z "${CANON_P58_CHECKED_VMA_DIAGNOSTIC:-}" ]; then',
         postflight,
     )
     self.assertIn("classify_p58_checked_vma_diagnostic.py", postflight)

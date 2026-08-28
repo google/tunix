@@ -786,9 +786,9 @@ def validate_environment(values: Mapping[str, str]) -> None:
   p58_vma_diagnostic = values.get(
       "CANON_P58_CHECKED_VMA_DIAGNOSTIC", ""
   )
-  if p58_vma_diagnostic not in ("", "off"):
+  if p58_vma_diagnostic not in ("", "off", "on"):
     raise ValueError(
-        "CANON_P58_CHECKED_VMA_DIAGNOSTIC must be absent or off"
+        "CANON_P58_CHECKED_VMA_DIAGNOSTIC must be absent, off, or on"
     )
   if p58_vma_diagnostic and (
       not p58_hp
@@ -932,10 +932,11 @@ def validate_environment(values: Mapping[str, str]) -> None:
         "CANON_ENGINE_MODULE_C": "0" if p58_arm == "native" else "1",
         "CANON_V1_HP_FULL": "1" if p58_hp else "0",
         "CANON_P58_CHECKED_VMA_DIAGNOSTIC": (
-            "off" if p58_vma_diagnostic else None
+            p58_vma_diagnostic if p58_vma_diagnostic else None
         ),
         "CANON_P67_P66_VMA_P59_ONLY": (
-            "0" if p58_vma_diagnostic else "1" if p58_hp else None
+            "0" if p58_vma_diagnostic == "off" else
+            "1" if p58_hp else None
         ),
     })
     if p58_hp:
@@ -948,10 +949,10 @@ def validate_environment(values: Mapping[str, str]) -> None:
           "CANON_VLLM_ENABLE_PREFIX_CACHING": "0",
           "CANON_P59_RANK_PARALLEL_BACKWARD": "1",
           "CANON_P59_CHECKED_VMA": (
-              "0" if p58_vma_diagnostic else "1"
+              "0" if p58_vma_diagnostic == "off" else "1"
           ),
           "CANON_P66_P59_CHECK_VMA": (
-              "0" if p58_vma_diagnostic else "1"
+              "0" if p58_vma_diagnostic == "off" else "1"
           ),
           "CANON_V1_HP_FIRST_UPDATE_GATE": (
               "0" if p58_vma_diagnostic else "1"

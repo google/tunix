@@ -699,10 +699,16 @@ if P34_DEEPSWE:
       if p58_tim
       else "native-raw"
   )
-  if os.environ.get("CANON_P58_CHECKED_VMA_DIAGNOSTIC", "") == "off":
+  p58_vma_diagnostic = os.environ.get(
+      "CANON_P58_CHECKED_VMA_DIAGNOSTIC", ""
+  )
+  if p58_vma_diagnostic in ("off", "on"):
     print(
-        "[P58.VMA.DIAGNOSTIC] profile_resolved selector=off dp=8 tp=8 "
-        "checked_vma=0 compatibility_alias=0 vma_p59_only=0 "
+        "[P58.VMA.DIAGNOSTIC] profile_resolved "
+        f"selector={p58_vma_diagnostic} dp=8 tp=8 "
+        f"checked_vma={os.environ['CANON_P59_CHECKED_VMA']} "
+        f"compatibility_alias={os.environ['CANON_P66_P59_CHECK_VMA']} "
+        f"vma_p59_only={os.environ['CANON_P67_P66_VMA_P59_ONLY']} "
         "fixed_ar_gather=1 continue_decode=8 prefix_cache=0 backward=0 "
         "optimizer_commits=0",
         flush=True,

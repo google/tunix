@@ -18,6 +18,71 @@ P58 does not modify `main`. Rendering and local validation do not authorize a
 Kubernetes apply. An operator must separately approve image publication and
 each launch.
 
+## P58.18 checked-VMA matched triplicate — current launch recipe
+
+The next Zero diagnostic is three separate 128-chip Step-0 JobSets, logically
+named `ON-A/OFF/ON-B`. Each uses rollout DP8xTP8 plus trainer DP8xTP8,
+Qwen3-4B-Instruct-2507, the reviewed 1,012-task list, B8xG16, 16K response,
+50 turns, seed 42, concurrency 128, fixed lm-head, continue-decode 8, prefix
+cache off, and complete trajectory/pre-alignment artifacts. Every arm exits
+code 42 before VJP/backward/optimizer.
+
+`on` derives checked-VMA/P66/P67=`1/1/1`; `off` derives `0/0/0`. Both derive
+first-update/P63=`0/0`, keeping the zero-commit controls matched. With the
+selector absent, the production Zero-HP profile remains `1/1/1/1/1`. Never
+set the five subordinate flags by hand.
+
+Prepare all three from one clean published revision:
+
+```bash
+export P58_EXPECT_SOURCE_SHA=<exact-published-40-character-sha>
+bash canon-zero-tim/tasks/p58-deepswe-native-zero-comparison/scripts/prepare_p58_checked_vma_aba_wave.sh \
+  <fresh-wave-id-at-most-12-chars> \
+  <matching-image@sha256:...> \
+  <worker-nodepool> \
+  /tmp/<fresh-p58-aba-output-dir>
+```
+
+This is render-only. It refuses a dirty checkout, source/origin mismatch,
+unpinned image, or existing output root. It writes three YAMLs beneath
+`jobsets/`, plus render and verify receipts. Required terminal markers are:
+
+```text
+P58_CHECKED_VMA_ABA_RENDER_PASS ... jobs=3 tpu_request=384 ...
+P58_CHECKED_VMA_ABA_VERIFY_PASS jobs=3 selectors=on,off,on ...
+P58_CHECKED_VMA_ABA_WAVE_READY ... jobs=3 tpu_request=384 ...
+```
+
+Concurrent submission requires aggregate capacity, not three independent
+per-job assumptions: 384 TPU chips, three anti-affined CPU head nodes, and
+384 sandbox slots (768 CPU and 1,536 GiB requested memory at the signed
+per-sandbox contract). Server-side dry-run, aggregate capacity inspection,
+and apply are separate user-approved steps. A directory apply makes all three
+eligible concurrently, but only Kueue admission and Pod start timestamps prove
+that all three actually overlapped.
+
+After completion, keep each full run root. Every per-arm classifier must be
+PASS, exact B-C, one valid A-B outcome, exactly 128 durable trajectories, and
+zero VJP/backward/commit. Aggregate with:
+
+```bash
+python3 canon-zero-tim/tasks/p58-deepswe-native-zero-comparison/scripts/classify_p58_checked_vma_aba_wave.py \
+  --wave-verify <wave-output>/wave-verify.json \
+  --on-a <on-a-root>/p58_checked_vma_on.classification.json \
+  --off <off-root>/p58_checked_vma_off.classification.json \
+  --on-b <on-b-root>/p58_checked_vma_on.classification.json \
+  --output <fresh-output>/p58_checked_vma_aba.classification.json
+```
+
+Concurrent ON-A/OFF/ON-B is a matched OFF control with two ON replicates, not
+a temporal ABA sandwich. ON RED / OFF exact / ON RED supports the selector as
+the reproduced discriminator. RED/RED/RED rejects checked VMA as sufficient.
+Nonreplicating ON controls are inconclusive. Cross-run token identity is not a
+hard gate; per-arm durability, finiteness, exact B-C, and zero training are.
+The local dependency-image construction gate is green only when its terminal
+marker contains `checked_vma_diagnostic=1 checked_vma_aba=1`; it is not TPU
+target evidence.
+
 ## 2026-08-27 P58.17 exact-geometry checked-VMA-off diagnostic — source published
 
 The next target is not another 1,000-update retry. It is one real Step-0

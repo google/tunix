@@ -1,5 +1,36 @@
 # State
 
+## Current P58.18 checked-VMA matched-triplicate checkpoint (2026-08-28)
+
+- Status: ON-A/OFF/ON-B exact-geometry implementation and construction gates
+  are complete; source publication is approved for this delivery. The remote
+  executor must fetch and record the final operator-branch tip. Target not run;
+  no image, Kubernetes object, or TPU work was created.
+- Each independent JobSet keeps the signed Qwen3-4B-Instruct-2507 carrier:
+  128 chips split into rollout DP8xTP8 and trainer DP8xTP8, clean 1,012 tasks,
+  B8xG16, 16K, 50 turns, seed 42, concurrency 128, fixed lm-head,
+  continue-decode 8, prefix cache off, strict Step-0 A/B/C, full trajectory
+  journal, then controlled exit before VJP/backward/optimizer.
+- Selector contract: `on` derives checked-VMA/P66/P67=`1/1/1`; `off` derives
+  `0/0/0`. Both diagnostic arms force first-update/P63=`0/0` because backward
+  is forbidden. Selector absent leaves production Zero-HP `1/1/1/1/1`
+  unchanged.
+- Parallel plan: three JobSets request 384 TPU chips, three anti-affined CPU
+  heads, and aggregate sandbox concurrency 384 (768 requested CPU and 1,536
+  GiB at the signed per-sandbox requests). Render PASS is not aggregate
+  capacity or Kueue admission evidence.
+- Interpretation: concurrent ON-A/OFF/ON-B is one matched OFF control plus two
+  ON replicates, not a temporal ABA sandwich. Cross-run token identity is not
+  required. Each arm must independently return exact B-C and valid finite or
+  exact A-B evidence with zero training activity.
+- Validation: Python/shell syntax; focused renderer 27/27, profile 9/9,
+  per-arm classifier 7/7, and wave-contract 4/4; deterministic flag audit
+  `393/393/393`; and the complete pinned dependency-image gate all pass. The
+  terminal image marker includes `checked_vma_diagnostic=1
+  checked_vma_aba=1 ... regressions=1`. This is construction evidence, not a
+  Pathways/TP8 target result.
+- Phase: `phases/p58-18-checked-vma-aba-wave.md`.
+
 ## Current p58z08 intake correction (2026-08-27)
 
 - Status: analysis complete; P58.17 exact-geometry checked-VMA-off target is
