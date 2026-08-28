@@ -853,3 +853,15 @@ is not a current fact or launch authority.
   backward/commit, and both authorization booleans false. An intentionally
   overlong rehearsal label was rejected before render, confirming the existing
   1-16-character DNS label gate; the valid short-label rehearsal passed.
+
+## 2026-08-28T07:10:00Z — Phase D3: Attempt 14 (d33) matched pair prepared and sealed
+
+- Type: implementation / preparation; zero TPU; no numerical repair.
+- Fact: executed `prepare_m15_multiround_pair.sh` with source HEAD `5afd6bb0cf016e8a1faf4dc171ba20352a91a017`, run ID `d33-5afd6bb0`, observer `full`, seam layer `0`.
+- Fact: offline validator verified the sealed D32 inventory package (`46f222b0...`) with status `PASS`, `decision=D32_LIVE_ABSENT_WITH_COUNT_DRIFT`, `count_contract_status=DRIFT`, `d33_preparation_eligible=true`, `d33_launch_authorized=false`, and `numerical_repair_authorized=false`.
+- Fact: renderer generated exactly `jobset-v1-apc-m15-off-full.yaml`, `jobset-v1-apc-m15-on-full.yaml`, `D32_REVIEW.json`, `RUN_CONTRACT.json`, and `SHA256SUMS` (4/4 OK).
+- Fact: target carrier contract tests (`test_target_carrier.py`, `test_resolved_env.py`) passed 25/25.
+- Fact: sealed 5-file return package in `evidence/v1_apc_m15_attempt14_d33_preparation_20260828/`.
+- Validation: `sha256sum -c SHA256SUMS` in evidence directory 4/4 OK; `git diff --check` clean.
+- Next: review sealed d33 contract package; after separate launch approval and TPU allocation, launch both standalone JobSets concurrently.
+

@@ -1,0 +1,37 @@
+{
+  "arms": {
+    "off": {
+      "live_objects": 0,
+      "object_count": 232,
+      "observed_shard_record_pairs": 2445,
+      "receipt_classifier_seam_records": 2474,
+      "record_count_delta": -29,
+      "record_count_relation": "DRIFT",
+      "shards": 77
+    },
+    "on": {
+      "live_objects": 0,
+      "object_count": 211,
+      "observed_shard_record_pairs": 2188,
+      "receipt_classifier_seam_records": 2087,
+      "record_count_delta": 101,
+      "record_count_relation": "DRIFT",
+      "shards": 70
+    }
+  },
+  "attempt": 13,
+  "claim_ceiling": "The returned object inventory is complete and both registered roots lack live replay inputs. The shard and classifier counts use unreconciled metrics, so Attempt 13 is not an official numerical replay and cannot authorize a repair.",
+  "count_contract_status": "DRIFT",
+  "d33_launch_authorized": false,
+  "d33_preparation_eligible": true,
+  "decision": "D32_LIVE_ABSENT_WITH_COUNT_DRIFT",
+  "historical_official_replay_possible": false,
+  "inventory_transport_status": "PASS",
+  "live_absence_status": "CONFIRMED",
+  "numerical_repair_authorized": false,
+  "receipt_sha256": "d1941c2de85050a5652bc5c6e809987f6bf72b996aa817371b08b43870835f95",
+  "schema": "m15-attempt13-inventory-review-v1",
+  "source_commit": "7d30f3827480e6f9d5ae972f55ca4d16f07de6df",
+  "source_inventory_manifest_sha256": "e1c464c8efd4eb3c77e5e7958b1154ddaa02f95f589f7fb30f5c87a8ef5f30d4",
+  "status": "PASS"
+}

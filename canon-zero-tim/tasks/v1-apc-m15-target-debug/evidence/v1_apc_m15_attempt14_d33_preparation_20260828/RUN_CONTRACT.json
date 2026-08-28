@@ -1,0 +1,33 @@
+{
+  "arms": [
+    {
+      "arm": "off",
+      "diagnostic_rounds": 3,
+      "jobset": "canon-v1-apc-m15-off-d33-5afd6bb0-5afd6bb0",
+      "sha256": "e6fd1cbc718d94134415eec1276263588f0862b3bd02863d3e3b43e29f4061b1",
+      "yaml": "jobset-v1-apc-m15-off-full.yaml"
+    },
+    {
+      "arm": "on",
+      "diagnostic_rounds": 3,
+      "jobset": "canon-v1-apc-m15-on-d33-5afd6bb0-5afd6bb0",
+      "sha256": "ca10b01ce5b574e6e4c17318d7809950e9ba5a7b5cab3e202a80ca8768969217",
+      "yaml": "jobset-v1-apc-m15-on-full.yaml"
+    }
+  ],
+  "d32_review": {
+    "count_contract_status": "DRIFT",
+    "d33_launch_authorized": false,
+    "d33_preparation_eligible": true,
+    "decision": "D32_LIVE_ABSENT_WITH_COUNT_DRIFT",
+    "numerical_repair_authorized": false,
+    "review_sha256": "46f222b0578bce6fde50fb5cc3cc7bc3602fad5f71cd02549e998801d8723756"
+  },
+  "observer": "full",
+  "run_id": "d33-5afd6bb0",
+  "schema": "m15-apc-three-round-render-v1",
+  "seam_layer": 0,
+  "source_commit": "5afd6bb0cf016e8a1faf4dc171ba20352a91a017",
+  "zero_backward": true,
+  "zero_optimizer_commit": true
+}
