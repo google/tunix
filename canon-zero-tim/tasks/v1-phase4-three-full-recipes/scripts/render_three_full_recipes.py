@@ -175,6 +175,11 @@ def render_three(
         "CANON_DP_COMPARE_MODE": "fingerprint-hybrid",
         "CANON_DP_DISTINCT_SCHEDULE": "first-group-warmup",
         "CANON_DP_FINITE_FETCH": "batched-commit",
+        # Forward tape scan: bitwise on the norm anchor at DP4xTP1,
+        # DP16xTP1, and -- the axis the target adds -- DP2xTP2 (first
+        # TP>1 hardware certification, 2026-08-28).  bwd stays absent:
+        # the unrolled blocks fail closed on a non-unit model axis.
+        "CANON_P71_SCAN": "fwd",
     }
     if label != "gsm8k":
       additions["CANON_P67_P66_VMA_P59_ONLY"] = "1"

@@ -145,6 +145,7 @@ class ThreeFullRendererTest(unittest.TestCase):
         )
         self.assertEqual(values["CANON_DP_FINITE_FETCH"], "batched-commit")
         self.assertNotIn("CANON_DP_COLLECTIVE_REDUCE", values)
+        self.assertEqual(values["CANON_P71_SCAN"], "fwd")
         self.assertEqual(
             values["JAX_COMPILATION_CACHE_DIR"],
             "/tmp/jax_compilation_cache",
