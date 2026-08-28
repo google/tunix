@@ -124,7 +124,7 @@ class TargetCarrierTest(unittest.TestCase):
     self.assertIn("classify_m15_apc_wide_seam.py", runner)
     self.assertIn("package_m15_apc_wide_seam.py", runner)
     self.assertIn("verify_m15_wide_round.py", runner)
-    self.assertIn("archive=bounded-shards", runner)
+    self.assertIn("archive=sealed-rounds", runner)
     self.assertIn("--require-first-action", runner)
     self.assertIn("classify_p38_seam.py", runner)
     self.assertIn("M15 compact seam bundle failed", runner)
@@ -136,7 +136,7 @@ class TargetCarrierTest(unittest.TestCase):
     self.assertIn("flush_m15_shards", worker)
     self.assertNotIn(
         'tar --sort=name --mtime=@0 --owner=0 --group=0 \\\n+      -C "$CANON_P38_SERVING_CAPTURE_DIR"',
-        runner.split("archive=bounded-shards", maxsplit=1)[0],
+        runner.split("archive=sealed-rounds", maxsplit=1)[0],
     )
 
   def test_m15_capture_preserves_production_continue_decode_from_first_call(self):
