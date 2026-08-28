@@ -281,7 +281,6 @@ class RolloutWorker(abstract_worker.Worker):
       item: Any,
       request_id: str = "",
       prompt_tokens: np.ndarray | None = None,
-      policy_version: int = 0,
   ) -> datatypes.RolloutResponse:
     """Converts internal Trajectory or TrajectoryError to wire-safe RolloutResponse."""
     if isinstance(item, datatypes.RolloutResponse):
@@ -298,7 +297,7 @@ class RolloutWorker(abstract_worker.Worker):
               if prompt_tokens is not None
               else np.zeros(0, dtype=np.int32)
           ),
-          policy_version=policy_version,
+          policy_version=self._policy_version,
       )
     if isinstance(item, trajectory_lib.Trajectory):
       req_id = request_id or getattr(item, "trajectory_id", "default")
@@ -313,10 +312,12 @@ class RolloutWorker(abstract_worker.Worker):
           request_id=req_id,
           traj=item,  # pyrefly: ignore[bad-argument-type]
           prompt_tokens=prompt_tokens,
-          policy_version=policy_version,
+          policy_version=self._policy_version,
       )
       response.prompt_id = str(extra.get("prompt_id", response.prompt_id))
-      response.group_index = int(extra.get("group_index", response.group_index) or 0)
+      response.group_index = int(
+          extra.get("group_index", response.group_index) or 0
+      )
       response.env_reward = float(extra.get("reward", response.env_reward))
       response.metadata.update(
           {k: v for k, v in extra.items() if k != "prompt_tokens"}
