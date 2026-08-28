@@ -1,87 +1,66 @@
 # M15 APC target-debug handoff
 
-## START HERE — seal Attempt 13's object inventory before replay or relaunch
+## START HERE — render and review Attempt 14 (`d33`) three-round matched pair
 
-Attempt 13 (`d32`) is a **single diagnostic round** produced by the older
-flat-shard runtime. The registered roots are expected to contain 77 contiguous
-control shards and 70 contiguous treatment shards under `wide/shards/`. A
-usable `live/<sequence>` snapshot is required by the existing replay adapter;
-the later `wide/rounds/000000..000002` protocol does not apply to d32.
+Attempt 13 (`d32`) inventory audit has completed and is sealed under
+`evidence/v1_apc_m15_attempt13_d32_inventory_20260828/`. Both recursive queries
+succeeded, flat-shard sequences (77 off, 70 on) and physical record pairs
+(2,445 off, 2,188 on) verified, and both roots confirmed `live/` absence
+(`D32_LIVE_ABSENT_CONFIRMED`).
 
-The previous bucket report is not a sealed result. Its wrapper reached and
-verified the control shards, then stopped when the control live listing
-returned non-zero. It never audited the treatment arm and never ran the
-official classifier. A non-zero listing can mean absence, permissions,
-connectivity, or CLI failure, so it does **not** prove that `live/` is absent.
-The docs-only claim in commit `70d6a387` is therefore demoted pending the
-self-hashed audit below. Do not launch d33 from that claim.
+Per the gate rules below, Attempt 14 (`d33`) is now active for preparation
+and separate review/approval. d33 is one matched APC-off/APC-on pair, each
+containing three evaluation-only rounds with frozen weights, zero backward,
+and zero optimizer commits. The full observer is pinned to Layer 0.
 
-The first action is a cheap, read-only inventory. It recursively lists both
-registered roots independently, validates the exact flat-shard object triples,
-downloads only the small `SHARD_COMPLETE.json` receipts, and distinguishes
-successful absence from query failure. It does not download archive payloads,
-run the numerical classifier, alter GCS, or authorize a numerical repair.
-
-### Bucket-capable executor command
-
-Requirements: a clean checkout containing this revision, authenticated
-read-only bucket access, `gcloud` or `gsutil`, and a fresh return directory.
-No TPU/Kubernetes launch and no large scratch download are required:
+### Remote executor command for d33 preparation:
 
 ```bash
-RETURN=/tmp/v1-apc-m15-d32-inventory
-test ! -e "$RETURN"
-python3 canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/audit_m15_attempt13_d32_inventory.py \
-  --output "$RETURN" --scratch-parent /tmp
-(cd "$RETURN" && sha256sum -c SHA256SUMS)
+cd /home/yuxuan/code_rl_repro/sequence_packing/tunix
+git fetch origin yuxzhang/canon-zero-tim
+git pull --ff-only origin yuxzhang/canon-zero-tim
+SOURCE_SHA="$(git rev-parse HEAD)"
+RUN_ID=<fresh-label>
+OUT=/tmp/v1-apc-m15-${RUN_ID}
+test ! -e "$OUT"
+
+bash canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/prepare_m15_multiround_pair.sh \
+  "$SOURCE_SHA" "$RUN_ID" "$OUT" full 0
+(cd "$OUT" && sha256sum -c SHA256SUMS)
 ```
 
-The audit fails closed unless all of the following are true:
+The renderer must produce exactly:
+- `jobset-v1-apc-m15-off-full.yaml`
+- `jobset-v1-apc-m15-on-full.yaml`
+- `RUN_CONTRACT.json` with `diagnostic_rounds=3`, `observer=full`,
+  `seam_layer=0`, zero backward, and zero optimizer commit.
 
-- source commit and exact off/on JobSet identities match the immutable receipt;
-- shard sequences are exactly `000000..000076` off and `000000..000069` on;
-- every shard has exactly the three registered object names;
-- every small completion receipt has the expected sequence, source, round,
-  status, payload counts, and archive/manifest hash formats;
-- record counts are exactly 2,474 off and 2,087 on;
-- both recursive-list queries succeed, even when one arm fails validation.
+After separate launch approval, both standalone `kubectl apply` commands may
+be issued concurrently.
 
-The small return contains no remote root URI and no token-bearing payload:
+---
 
+## Historical — Attempt 13 (`d32`) sealed inventory audit (complete)
+
+Attempt 13 (`d32`) was a **single diagnostic round** produced by the older
+flat-shard runtime. The registered roots contain 77 contiguous control shards
+(2,445 record pairs) and 70 contiguous treatment shards (2,188 record pairs).
+
+The self-hashed read-only inventory completed with:
 ```text
-off.objects.txt
-on.objects.txt
-off.shard-completions.jsonl
-on.shard-completions.jsonl
-D32_INVENTORY.json
-PACKAGING.txt
-SHA256SUMS
+M15_ATTEMPT13_INVENTORY_PASS decision=D32_LIVE_ABSENT_CONFIRMED remote_state_mutated=0 numerical_repair_authorized=0
 ```
+Evidence is sealed in `evidence/v1_apc_m15_attempt13_d32_inventory_20260828/`.
+Because no `live/` directory exists, historical flat replay is unviable and d33
+is the authoritative path forward.
 
-Return the complete `$RETURN` directory unchanged, plus the final
-`M15_ATTEMPT13_INVENTORY_{PASS|RED} ...` line and independent
-`sha256sum -c SHA256SUMS` output.
-
-### Mechanical interpretation
+### Mechanical interpretation reference
 
 | Decision | Meaning | Next action |
 |---|---|---|
-| `D32_LIVE_ABSENT_CONFIRMED` | both recursive queries succeeded, exact shard triples/receipts verified, and neither root listed a `live/` object | d33 becomes eligible for separate review and launch approval; this is still not a numerical verdict |
+| `D32_LIVE_ABSENT_CONFIRMED` | both recursive queries succeeded, exact shard triples/receipts verified, and neither root listed a `live/` object | d33 becomes eligible for separate review and launch approval (ACTIVE) |
 | `D32_LIVE_PRESENT_REPLAY_SHOULD_CONTINUE` | the registered roots contain at least one `live/` object | run the existing flat replay only after inspecting this return; do not launch d33 first |
 | `D32_INVENTORY_AUDIT_RED` or non-zero exit | a query, identity, shard geometry, completion receipt, or count failed | fix only the read-only inventory path; absence is unproven and d33 remains blocked |
-
-The inventory records `official_classifier_replay=NOT_PERFORMED` and
-`numerical_repair_authorized=false`. Even a later d32 replay could validate at
-most one historical round; it cannot prove three-round stability or identify a
-causal source line by itself.
-
-## CONDITIONAL FALLBACK — d33 only after a sealed no-live inventory
-
-Do not execute this section yet. It becomes active only if the returned
-`D32_INVENTORY.json` says `D32_LIVE_ABSENT_CONFIRMED` and its manifest verifies
-independently. The existing report that a failed control listing proves
-physical absence is not sufficient. d33 remains a separately approved 64-TPU
-pair even after the inventory gate passes.
 
 d33 is one matched APC-off/APC-on pair, each containing three evaluation-only
 rounds with frozen weights, zero backward, and zero optimizer commits.  The
