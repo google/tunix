@@ -119,6 +119,36 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       help="Orbax params-only checkpoint for the MaxText trainer, e.g. gs://...",
   )
   parser.add_argument(
+      "--maxtext_dtype",
+      type=str,
+      default="float32",
+      help=(
+          "MaxText dtype/weight_dtype for the trainer. float32 is the verified"
+          " default for dense Qwen3-0.6B; bfloat16 is what Qwen3-30B-A3B needs"
+          " to fit in HBM. grad_dtype stays float32 regardless -- it governs"
+          " the gradient accumulation buffer, where low precision accumulates"
+          " rounding error across micro-steps."
+      ),
+  )
+  parser.add_argument(
+      "--maxtext_padded_moe_mlp_dim",
+      type=int,
+      default=0,
+      help=(
+          "Explicit padded_base_moe_mlp_dim override for MoE models. The"
+          " rollout side (maxtext_vllm_adapter.generate_maxtext_config) pads"
+          " moe_intermediate_size up automatically to satisfy the GMM"
+          " kernel's tile-alignment requirement whenever it doesn't divide"
+          " evenly by rollout tensor_parallel_size * 2 * num_lanes; the"
+          " trainer never applies this padding on its own, so Raiden's"
+          " weight-sync preflight fails on a global-shape mismatch for"
+          " every MoE MLP tensor. Must match whatever the rollout side"
+          " actually computes for its own tensor_parallel_size -- 0 leaves"
+          " padding off (correct for dense models, or a rollout TP where no"
+          " padding is needed)."
+      ),
+  )
+  parser.add_argument(
       "--maxtext_warmup_steps_fraction",
       type=float,
       default=0.0,
@@ -325,9 +355,14 @@ def _build_maxtext_config(args, num_devices: int) -> Any:
       f"ici_tensor_parallelism={args.mesh_tp}",
       f"learning_rate={args.learning_rate}",
       f"warmup_steps_fraction={args.maxtext_warmup_steps_fraction}",
-      "dtype=float32",
-      "weight_dtype=float32",
+      f"dtype={args.maxtext_dtype}",
+      f"weight_dtype={args.maxtext_dtype}",
       "grad_dtype=float32",
+      *(
+          [f"padded_base_moe_mlp_dim={args.maxtext_padded_moe_mlp_dim}"]
+          if args.maxtext_padded_moe_mlp_dim
+          else []
+      ),
       "enable_tensorboard=False",
       "record_internal_nn_metrics=False",
       "init_weights_seed=42",
