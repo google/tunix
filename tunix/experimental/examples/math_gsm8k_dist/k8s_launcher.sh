@@ -53,6 +53,8 @@ export TRAIN_MICRO_BATCH_SIZE=${TRAIN_MICRO_BATCH_SIZE:-8}
 export REWARD_MODE=${REWARD_MODE:-exact}
 export DATASET_SOURCE=${DATASET_SOURCE:-huggingface}
 export LEARNING_RATE=${LEARNING_RATE:-2e-6}
+export TEMPERATURE=${TEMPERATURE:-0.7}
+export TOP_P=${TOP_P:-0.95}
 
 # peft runs tunix's PeftTrainer; maxtext runs MaxText's MaxTextTrainingEngine.
 export TRAINER_BACKEND=${TRAINER_BACKEND:-maxtext}
@@ -102,8 +104,8 @@ export ROLLOUT_TENSOR_PARALLEL_SIZE=${ROLLOUT_TENSOR_PARALLEL_SIZE:-4}
 # USE_BATCHED_RPA_KERNEL=1 as a pod env var (must be pre-import, since
 # attention_interface.py picks the kernel at module-import time -- MaxText's
 # own self-set of this var, gated on maxtext_attention, happens too late).
-export ROLLOUT_USE_BATCHED_RPA=${ROLLOUT_USE_BATCHED_RPA:-}
-export ROLLOUT_MAXTEXT_ATTENTION=${ROLLOUT_MAXTEXT_ATTENTION:-}
+export ROLLOUT_USE_BATCHED_RPA=${ROLLOUT_USE_BATCHED_RPA:-1}
+export ROLLOUT_MAXTEXT_ATTENTION=${ROLLOUT_MAXTEXT_ATTENTION:-vllm_batched_rpa}
 # Number of independent rollout replicas (each its own TPU slice reservation
 # and JobSet, ${ROLLOUT_ID}-0, ${ROLLOUT_ID}-1, ...) for data-parallel
 # rollout. A single multi-host ROLLOUT_TPU_SLICE (e.g. tpuv5:2x2x2) is one
@@ -144,6 +146,8 @@ start_orchestrator() {
         --num_rollout_workers=${ROLLOUT_REPLICAS} \
         --reward_mode=${REWARD_MODE} \
         --dataset_source=${DATASET_SOURCE} \
+        --temperature=${TEMPERATURE} \
+        --top_p=${TOP_P} \
         --sync_weights \
         --stop_workers_on_exit \
     " \
@@ -229,6 +233,8 @@ start_rollout() {
           --lora_alpha=${LORA_ALPHA} \
           --tensor_parallel_size=${ROLLOUT_TENSOR_PARALLEL_SIZE} \
           --maxtext_model_name=${MAXTEXT_MODEL_NAME} \
+          --temperature=${TEMPERATURE} \
+          --top_p=${TOP_P} \
           ${ROLLOUT_MAXTEXT_ATTENTION:+--maxtext_attention=${ROLLOUT_MAXTEXT_ATTENTION}} \
       " \
       | kubectl apply -f -

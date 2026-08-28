@@ -91,6 +91,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument("--use_lora", action="store_true")
   parser.add_argument("--lora_rank", type=int, default=16)
   parser.add_argument("--lora_alpha", type=float, default=16.0)
+  parser.add_argument("--temperature", type=float, default=0.7)
+  parser.add_argument("--top_p", type=float, default=0.95)
   parser.add_argument(
       "--model_name", type=str, default=os.getenv("MODEL_NAME", "Qwen3-1.7B")
   )
@@ -267,8 +269,8 @@ def _create_vllm_worker(args, tokenizer):
         sampler_type="vllm",
         max_prompt_length=args.max_prompt_length,
         max_tokens_to_generate=args.max_response_length,
-        temperature=1.0,
-        top_p=1.0,
+        temperature=args.temperature,
+        top_p=args.top_p,
         return_logprobs=True,
         rollout_vllm_model_version=vllm_model,
     )
