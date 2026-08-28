@@ -14,6 +14,7 @@
 
 """Trajectory Collector Engine wrapping TrajectoryCollectEngine with pause/resume/cancel control."""
 
+import logging
 from typing import Any, List
 import numpy as np
 from tunix.experimental.common import datatypes
@@ -103,6 +104,20 @@ class TrajectoryCollectorEngine:
         prompt_tokens = prompt_tokens.reshape(1, -1)
       else:
         prompt_tokens = np.array([[0]], dtype=np.int32)
+
+      # TEMPORARY instrumentation: nothing else on this path records what the
+      # sampler actually produced, so a run of empty completions reports the
+      # same "rollouts=N" summary as a real one. Remove once the vllm sampler
+      # path is trusted.
+      logging.info(
+          "[collector] traj=%s completion_tokens=%d prompt_tokens=%d"
+          " logprobs=%s text=%r",
+          self.traj_id,
+          np.asarray(tokens).size,
+          prompt_tokens.size,
+          "none" if logprobs is None else np.asarray(logprobs).size,
+          text[:160],
+      )
 
       return base_rollout.RolloutOutput(
           text=[text],
