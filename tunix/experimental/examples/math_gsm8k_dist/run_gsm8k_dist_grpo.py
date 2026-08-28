@@ -487,8 +487,10 @@ def main(argv: list[str], context: Any = None) -> None:
   )
 
   cluster = orchestrator.ClusterOrchestrator(
-      weight_sync_coordinator=_make_weight_sync_coordinator(
-          trainer_handle, rollout_handle
+      weight_sync_coordinator=(
+          _make_weight_sync_coordinator(trainer_handle, rollout_handle)
+          if args.sync_weights
+          else None
       )
   )
 
@@ -516,7 +518,7 @@ def main(argv: list[str], context: Any = None) -> None:
           pad_id=pad_id,
       ),
       max_staleness=args.max_staleness,
-      sync_weights=True,
+      sync_weights=args.sync_weights,
       on_step_begin=lambda step: logging.info(
           "Async GRPO step %d starting.", step
       ),
