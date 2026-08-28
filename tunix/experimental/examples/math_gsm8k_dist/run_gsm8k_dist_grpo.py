@@ -66,13 +66,14 @@ from tunix.experimental.orchestrator import rl_program  # pylint: disable=g-impo
 from tunix.experimental.worker import remote_execution  # pylint: disable=g-import-not-at-top
 
 
-PROMPT_TEMPLATE = """Solve the following math problem step by step.
+PROMPT_TEMPLATE = """<|im_start|>user
+Solve the following math problem step by step.
 First, put your detailed step-by-step reasoning process inside <reasoning>...</reasoning> tags.
 Then, put your final numerical answer inside <answer>\\boxed{{}}</answer> tags.
 
-Problem: {question}
-
-Solution:"""
+Problem: {question}<|im_end|>
+<|im_start|>assistant
+"""
 
 DEMO_TASKS = (
     (
