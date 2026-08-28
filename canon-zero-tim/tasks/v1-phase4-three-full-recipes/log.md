@@ -970,3 +970,11 @@
   unchanged.
 - Result: `PUBLISHED / READY FOR CLEAN-SHA RENDER / TPU TARGET NOT RUN`. No
   manifest was rendered for launch and no JobSet or TPU state changed.
+
+## 2026-08-28T21:20:00Z — GSM8K Zero-TIM Full (canon-v1hp-gsm8k-gfull1-799a0bd1) step 64 rescore alignment failure sealed
+
+- Source/evidence: `evidence/v1_hp_gsm8k_gfull1_step64_incident_20260828/` (source commit `799a0bd1ed5ecfd7a2f6e42eeaced82886fec76c`).
+- Verified facts: `canon-v1hp-gsm8k-gfull1-799a0bd1` (64 TPU v5p, DP16xTP4) executed 64 full train updates with 100% Zero-TIM compliance (`alignment_max_differing_bytes=0`). Solve ratio progressed monotonically from 34.8% to 77.7% (reward mean 0.792).
+- Terminal error: At step 64 rollout call 65, multi-turn trajectory clipping triggered `MAX_CONTEXT_LIMIT_REACHED` on row 255 (1130 total tokens). During `get_prefill_rescore_logps` in `vllm_rollout.py:526`, vLLM returned 1 prompt logprob for 1130 tokens, triggering `RuntimeError: row 255: engine returned 1 prompt logprobs for 1130 tokens; cannot align the re-score`.
+- Evidence sealed: `run.log`, `RAW_ERROR.log`, `pre_alignment.jsonl`, `updates.jsonl`, `env.sh`, `receipt.json`, `SHA256SUMS`.
+

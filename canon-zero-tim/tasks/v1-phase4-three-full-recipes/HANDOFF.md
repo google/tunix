@@ -1,5 +1,25 @@
 # V1 Phase4 three-full handoff
 
+## START HERE — GSM8K Zero-TIM Full (`gfull1`) step 64 rescore incident sealed
+
+This section supersedes every later `START HERE` block.
+
+GSM8K full target run `canon-v1hp-gsm8k-gfull1-799a0bd1` (64 TPU v5p, DP16xTP4, source commit `799a0bd1ed5ecfd7a2f6e42eeaced82886fec76c`) executed 64 continuous full train updates at ~46s/step with 100% Zero-TIM compliance (`alignment_max_differing_bytes=0`). Solve ratio progressed from 34.8% to 77.7% (reward mean 0.792).
+
+At step 64, rollout batch generation completed call 65. Multi-turn trajectory clipping triggered `MAX_CONTEXT_LIMIT_REACHED` on row 255 (total length 1130 tokens). During `get_prefill_rescore_logps` (`tunix/rl/rollout/vllm_rollout.py:526`), vLLM evaluated the request under `prompt_logprobs=0` and returned only 1 prompt logprob element. The strict fail-closed assertion in `vllm_rollout.py` failed:
+`RuntimeError: row 255: engine returned 1 prompt logprobs for 1130 tokens; cannot align the re-score`
+
+Raw evidence package sealed in `evidence/v1_hp_gsm8k_gfull1_step64_incident_20260828/`:
+- `run.log` (60,072 lines, 6.9 MiB)
+- `RAW_ERROR.log`
+- `pre_alignment.jsonl`
+- `updates.jsonl`
+- `env.sh`
+- `receipt.json`
+- `SHA256SUMS`
+
+Next action: clamp prompt + completion lengths in prefill rescore to avoid exceeding vLLM context bounds, and relaunch alongside M15 and DeepSWE.
+
 ## START HERE — optimized P45 and M15 are no-eval/no-checkpoint fast concept runs
 
 This section supersedes every later `START HERE` block.

@@ -1,0 +1,19 @@
+{
+  "workload": "gsm8k",
+  "jobset": "canon-v1hp-gsm8k-gfull1-799a0bd1",
+  "source_commit": "799a0bd1ed5ecfd7a2f6e42eeaced82886fec76c",
+  "profile": "cluster/profiles/qwen3-1p7b-dp16-tp4-gsm8k-v1-hp.env",
+  "terminal_step": 64,
+  "solve_ratio": 0.777,
+  "alignment_max_differing_bytes": 0,
+  "wandb_url": "https://wandb.ai/yuxzhang-google/zero-tim-gsm8k-dp16-tp4/runs/fmrug2iu",
+  "verdict": "STEP64_RESCORE_PROMPT_LOGPROBS_LENGTH_MISMATCH_RED",
+  "files": [
+    "INCIDENT_REPORT.md",
+    "RAW_ERROR.log",
+    "env.sh",
+    "pre_alignment.jsonl",
+    "run.log",
+    "updates.jsonl"
+  ]
+}

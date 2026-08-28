@@ -1,0 +1,250 @@
+WARNING 08-28 18:23:05 [dp_scheduler.py:580] Long wait time (2.00s) for rank 9/16 response to 'get_num_unfinished_requests' command at step 13027 (pipe_wait=2.00s, deserialize=0.0000s, gc_re_enable=0.0000s, 5 bytes).
+INFO 08-28 18:23:05 [loggers.py:273] Engine 000: Avg prompt throughput: 3183.4 tokens/s, Avg generation throughput: 6732.7 tokens/s, Running: 58 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.3%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=10.161 rows=1
+[PERF] stage=rollout_generate seconds=9.938 rows=1
+[PERF] stage=rollout_generate seconds=9.752 rows=1
+[PERF] stage=rollout_generate seconds=9.765 rows=1
+[PERF] stage=rollout_generate seconds=10.220 rows=1
+[PERF] stage=rollout_generate seconds=9.854 rows=1
+[PERF] stage=rollout_generate seconds=10.308 rows=1
+[PERF] stage=rollout_generate seconds=10.081 rows=1
+[PERF] stage=rollout_generate seconds=10.493 rows=1
+[PERF] stage=rollout_generate seconds=10.547 rows=1
+INFO 08-28 18:23:06 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 4299.6 tokens/s, Running: 44 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.3%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=10.278 rows=1
+[PERF] stage=rollout_generate seconds=10.127 rows=1
+[PERF] stage=rollout_generate seconds=10.289 rows=1
+[PERF] stage=rollout_generate seconds=10.368 rows=1
+[PERF] stage=rollout_generate seconds=10.380 rows=1
+[PERF] stage=rollout_generate seconds=10.678 rows=1
+[PERF] stage=rollout_generate seconds=10.607 rows=1
+[PERF] stage=rollout_generate seconds=10.325 rows=1
+[PERF] stage=rollout_generate seconds=10.480 rows=1
+[PERF] stage=rollout_generate seconds=10.776 rows=1
+[PERF] stage=rollout_generate seconds=10.786 rows=1
+[PERF] stage=rollout_generate seconds=10.848 rows=1
+[PERF] stage=rollout_generate seconds=10.425 rows=1
+[PERF] stage=rollout_generate seconds=10.964 rows=1
+[PERF] stage=rollout_generate seconds=11.118 rows=1
+[PERF] stage=rollout_generate seconds=11.129 rows=1
+[PERF] stage=rollout_generate seconds=11.164 rows=1
+[PERF] stage=rollout_generate seconds=10.717 rows=1
+[PERF] stage=rollout_generate seconds=11.447 rows=1
+[PERF] stage=rollout_generate seconds=11.139 rows=1
+[PERF] stage=rollout_generate seconds=11.435 rows=1
+[PERF] stage=rollout_generate seconds=11.491 rows=1
+[PERF] stage=rollout_generate seconds=11.086 rows=1
+[PERF] stage=rollout_generate seconds=11.605 rows=1
+[PERF] stage=rollout_generate seconds=11.465 rows=1
+[PERF] stage=rollout_generate seconds=12.415 rows=1
+[PERF] stage=rollout_generate seconds=12.798 rows=1
+[PERF] stage=rollout_generate seconds=13.301 rows=1
+[PERF] stage=rollout_generate seconds=14.175 rows=1
+[PERF] stage=rollout_generate seconds=16.873 rows=1
+[PERF] stage=rollout_generate seconds=16.962 rows=1
+[PERF] stage=rollout_generate seconds=17.138 rows=1
+[PERF] stage=rollout_generate seconds=17.117 rows=1
+[PERF] stage=rollout_generate seconds=16.978 rows=1
+WARNING 08-28 18:23:13 [dp_scheduler.py:580] Long wait time (0.02s) for rank 1/16 response to 'get_num_unfinished_requests' command at step 13112 (pipe_wait=0.02s, deserialize=0.0000s, gc_re_enable=0.0000s, 5 bytes).
+[PERF] stage=rollout_generate seconds=16.983 rows=1
+2026-08-28 18:23:13 - WARNING - [absl] [step_idx=1, pair_index=6, group_id=2060] trajectory clipped: MAX_CONTEXT_LIMIT_REACHED
+2026-08-28 18:23:13 - WARNING - [absl] [step_idx=1, pair_index=5, group_id=2050] trajectory clipped: MAX_CONTEXT_LIMIT_REACHED
+2026-08-28 18:23:13 - WARNING - [absl] [step_idx=1, pair_index=3, group_id=2051] trajectory clipped: MAX_CONTEXT_LIMIT_REACHED
+2026-08-28 18:23:13 - WARNING - [absl] [step_idx=1, pair_index=4, group_id=2060] trajectory clipped: MAX_CONTEXT_LIMIT_REACHED
+2026-08-28 18:23:13 - WARNING - [absl] [step_idx=1, pair_index=1, group_id=2060] trajectory clipped: MAX_CONTEXT_LIMIT_REACHED
+[PERF] stage=rollout_generate seconds=17.170 rows=1
+[PERF] stage=rollout_generate seconds=17.101 rows=1
+[PERF] stage=rollout_generate seconds=17.156 rows=1
+2026-08-28 18:23:13 - WARNING - [absl] [step_idx=1, pair_index=6, group_id=2049] trajectory clipped: MAX_CONTEXT_LIMIT_REACHED
+[PERF] stage=rollout_generate seconds=17.168 rows=1
+[PERF] stage=rollout_generate seconds=17.206 rows=1
+[PERF] stage=rollout_generate seconds=17.091 rows=1
+2026-08-28 18:23:13 - WARNING - [absl] [step_idx=1, pair_index=5, group_id=2053] trajectory clipped: MAX_CONTEXT_LIMIT_REACHED
+2026-08-28 18:23:13 - WARNING - [absl] [step_idx=1, pair_index=6, group_id=2050] trajectory clipped: MAX_CONTEXT_LIMIT_REACHED
+2026-08-28 18:23:13 - WARNING - [absl] [step_idx=1, pair_index=0, group_id=2050] trajectory clipped: MAX_CONTEXT_LIMIT_REACHED
+2026-08-28 18:23:13 - WARNING - [absl] [step_idx=1, pair_index=3, group_id=2048] trajectory clipped: MAX_CONTEXT_LIMIT_REACHED
+2026-08-28 18:23:13 - WARNING - [absl] [step_idx=1, pair_index=4, group_id=2054] trajectory clipped: MAX_CONTEXT_LIMIT_REACHED
+[PERF] stage=rollout_generate seconds=16.984 rows=1
+2026-08-28 18:23:13 - WARNING - [absl] [step_idx=1, pair_index=6, group_id=2067] trajectory clipped: MAX_CONTEXT_LIMIT_REACHED
+[PERF] stage=rollout_generate seconds=16.912 rows=1
+[PERF] stage=rollout_generate seconds=16.891 rows=1
+[PERF] stage=rollout_generate seconds=16.971 rows=1
+[PERF] stage=rollout_generate seconds=16.929 rows=1
+2026-08-28 18:23:13 - WARNING - [absl] [step_idx=1, pair_index=1, group_id=2072] trajectory clipped: MAX_CONTEXT_LIMIT_REACHED
+2026-08-28 18:23:13 - WARNING - [absl] [step_idx=1, pair_index=5, group_id=2073] trajectory clipped: MAX_CONTEXT_LIMIT_REACHED
+[PERF] stage=rollout_generate seconds=16.863 rows=1
+2026-08-28 18:23:13 - WARNING - [absl] [step_idx=1, pair_index=6, group_id=2068] trajectory clipped: MAX_CONTEXT_LIMIT_REACHED
+2026-08-28 18:23:13 - WARNING - [absl] [step_idx=1, pair_index=1, group_id=2071] trajectory clipped: MAX_CONTEXT_LIMIT_REACHED
+2026-08-28 18:23:13 - WARNING - [absl] [step_idx=1, pair_index=3, group_id=2075] trajectory clipped: MAX_CONTEXT_LIMIT_REACHED
+[PERF] stage=rollout_generate seconds=16.827 rows=1
+2026-08-28 18:23:13 - WARNING - [absl] [step_idx=1, pair_index=7, group_id=2077] trajectory clipped: MAX_CONTEXT_LIMIT_REACHED
+2026-08-28 18:23:13 - INFO - [absl] [DEEPSWE.ROLLOUT_DEADLINE] batch_complete prompt_groups=32 elapsed_secs=443.2 deadline_secs=None
+INFO 08-28 18:23:16 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 1438.6 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
+2026-08-28 18:23:20 - INFO - [absl] sampler-trainer: logp_diff=(0.00000,0.00000) prob_diff=(0.00000,0.00000) pearson=1.00000
+2026-08-28 18:23:20 - INFO - [absl] [rollout-metric] call=65 n=256 solve_ratio=0.777 reward_mean=0.792 reward_max=1.000 solve_all=0 solve_none=0
+INFO 08-28 18:23:21 [block_pool.py:768] Successfully reset prefix cache
+INFO 08-28 18:23:21 [block_pool.py:768] Successfully reset prefix cache
+INFO 08-28 18:23:21 [block_pool.py:768] Successfully reset prefix cache
+INFO 08-28 18:23:21 [block_pool.py:768] Successfully reset prefix cache
+INFO 08-28 18:23:21 [block_pool.py:768] Successfully reset prefix cache
+INFO 08-28 18:23:21 [block_pool.py:768] Successfully reset prefix cache
+INFO 08-28 18:23:21 [block_pool.py:768] Successfully reset prefix cache
+INFO 08-28 18:23:21 [block_pool.py:768] Successfully reset prefix cache
+INFO 08-28 18:23:21 [block_pool.py:768] Successfully reset prefix cache
+INFO 08-28 18:23:21 [block_pool.py:768] Successfully reset prefix cache
+INFO 08-28 18:23:21 [block_pool.py:768] Successfully reset prefix cache
+INFO 08-28 18:23:21 [block_pool.py:768] Successfully reset prefix cache
+INFO 08-28 18:23:21 [block_pool.py:768] Successfully reset prefix cache
+INFO 08-28 18:23:21 [block_pool.py:768] Successfully reset prefix cache
+INFO 08-28 18:23:21 [block_pool.py:768] Successfully reset prefix cache
+INFO 08-28 18:23:21 [block_pool.py:768] Successfully reset prefix cache
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=4096 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=4096
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=4096 populated=4096
+INFO 08-28 18:23:21 [loggers.py:273] Engine 000: Avg prompt throughput: 299.7 tokens/s, Avg generation throughput: 1.3 tokens/s, Running: 16 reqs, Waiting: 233 reqs, GPU KV cache usage: 0.1%, Prefix cache hit rate: 0.0%
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=4096 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=4096
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=4096 populated=4096
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=4096 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=4096
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=4096 populated=4096
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=4096 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=4096
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=4096 populated=4096
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=4096 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=4096
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=4096 populated=4096
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=4096 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=4096
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=4096 populated=4096
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=4096 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=4096
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=4096 populated=4096
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=4096 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=4096
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=4096 populated=4096
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=4096 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=4096
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=4096 populated=4096
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=4096 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=4096
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=4096 populated=4096
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=4096 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=4096
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=4096 populated=4096
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=4096 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=4096
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=4096 populated=4096
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=4096 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=4096
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=4096 populated=4096
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=4096 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=4096
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=4096 populated=4096
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=4096 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=4096
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=4096 populated=4096
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=4096 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=4096
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=4096 populated=4096
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=4096 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=4096
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=4096 populated=4096
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=4096 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=4096
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=4096 populated=4096
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=4096 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=4096
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=4096 populated=4096
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=4096 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=4096
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=4096 populated=4096
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=4096 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=4096
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=4096 populated=4096
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=4096 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=4096
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=4096 populated=4096
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=4096 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=4096
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=4096 populated=4096
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=4096 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=4096
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=4096 populated=4096
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=4096 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=4096
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=4096 populated=4096
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=4096 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=4096
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=4096 populated=3985
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=4096 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=4096
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=4096 populated=2499
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=4096 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=4096
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=4096 populated=940
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=4096 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=4096
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=4096 populated=556
+[PATHTRACE] CANON_PROMPT_DIRECT_LOGPROBS on rows=4096 rows_per_dp=256 canonical_rows=256 chunks=1
+[PATHTRACE] CANON_PROMPT_ABSOLUTE_TARGET_IDS on rows=4096
+[PATHTRACE] CANON_PROMPT_PROCESSED_LOGPROBS on rows=4096 populated=256
+INFO 08-28 18:23:26 [loggers.py:273] Engine 000: Avg prompt throughput: 23854.7 tokens/s, Avg generation throughput: 54.8 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
+INFO 08-28 18:23:36 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 1 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
+INFO 08-28 18:23:37 [loggers.py:273] Engine 000: Avg prompt throughput: 874.0 tokens/s, Avg generation throughput: 0.8 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
+[PERF] step=64 stage=rescore_b seconds=16.544 rows=256
+wandb: updating run metadata
+wandb: uploading output.log; uploading wandb-summary.json; uploading config.yaml
+wandb: uploading output.log
+wandb: 
+wandb: Run history:
+wandb:           canonical/train/active_microbatches ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
+wandb: canonical/train/alignment_max_differing_bytes ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
+wandb:          canonical/train/commit_gradient_norm ▅█▇▆▄▆▆▆▆▅▅█▄▆▅▇▄▆▅▅▅▅▅▆▇▄▄▄▃▃▂▂▁▂▂▁▃▂▁▁
+wandb:       canonical/train/effective_learning_rate ▁▁▁▂▂▂▂▃▃▃▄▄▄▄▄▅▅▅▅▅▆▆▆▆▇▇▇▇████████████
+wandb:       canonical/train/max_abs_parameter_delta ▁▁▁▁▁▂▂▂▂▂▃▃▃▃▃▃▄▄▄▄▄▄▄▄▄▄▄▄▄▄▅████████▅
+wandb:    canonical/train/parameter_changed_elements ▁▇▇▇▇███████████████████████████████████
+wandb:                canonical/train/segmented_loss ▁▁▁▃▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▂▂▂▁▂▃▄▄▅▆▆██▅█▆
+wandb:       generation/train/completions/clip_ratio ▇▇▇▇██▇▇█▇▇▆▇▇▇▆▇▆▆▆▆▆▅▅▆▅▅▄▄▃▂▂▁▁▁▂▁▁▁▁
+wandb:       generation/train/completions/max_length ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
+wandb:   generation/train/completions/max_raw_length ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
+wandb:                                           +44 ...
+wandb: 
+wandb: Run summary:
+wandb:           canonical/train/active_microbatches 16
+wandb: canonical/train/alignment_max_differing_bytes 0
+wandb:          canonical/train/commit_gradient_norm 0.59602
+wandb:       canonical/train/effective_learning_rate 0.0
+wandb:       canonical/train/max_abs_parameter_delta 0.0
+wandb:    canonical/train/parameter_changed_elements 1470004216.0
+wandb:                canonical/train/segmented_loss 0.00041
+wandb:       generation/train/completions/clip_ratio 0.07031
+wandb:       generation/train/completions/max_length 1024
+wandb:   generation/train/completions/max_raw_length 1024
+wandb:                                           +44 ...
+wandb: 
+wandb: 🚀 View run canon-v1hp-gsm8k-gfull1-799a0bd1 at: https://wandb.ai/yuxzhang-google/zero-tim-gsm8k-dp16-tp4/runs/fmrug2iu
+wandb: ⭐️ View project at: https://wandb.ai/yuxzhang-google/zero-tim-gsm8k-dp16-tp4
+wandb: Synced 5 W&B file(s), 0 media file(s), 0 artifact file(s) and 0 other file(s)
+wandb: Find logs at: ./wandb/run-20260828_082438-fmrug2iu/logs
+[CANON_P31_METRICS] monotonic_direct last_step=64 events=3496 regressions=0
+[rank0]: Traceback (most recent call last):
+[rank0]:   File "/app/examples/math_gsm8k/qwen3_grpo_demo.py", line 1342, in <module>
+[rank0]:     main()
+[rank0]:   File "/app/examples/math_gsm8k/qwen3_grpo_demo.py", line 1305, in main
+[rank0]:     grpo_trainer.train(
+[rank0]:   File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 3505, in train
+[rank0]:     train_examples = self._batch_to_train_example(
+[rank0]:                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 2874, in _batch_to_train_example
+[rank0]:     return self._process_results(
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/rl/agentic/agentic_grpo_learner.py", line 1615, in _process_results
+[rank0]:     s_prefill = self.rl_cluster.get_prefill_rescore_logps(
+[rank0]:                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/rl/rl_cluster.py", line 1164, in get_prefill_rescore_logps
+[rank0]:     source(
+[rank0]:   File "/app/tunix/rl/rollout/vllm_rollout.py", line 526, in get_prefill_rescore_logps
+[rank0]:     raise RuntimeError(
+[rank0]: RuntimeError: row 255: engine returned 1 prompt logprobs for 1130 tokens; cannot align the re-score
+INFO 08-28 18:23:46 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 0.0 tokens/s, Running: 0 reqs, Waiting: 0 reqs, GPU KV cache usage: 0.0%, Prefix cache hit rate: 0.0%
