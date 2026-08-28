@@ -745,3 +745,34 @@
 - Action: rendered the Fallback 3-round Layer-0 pair `d33` (`jobset-v1-apc-m15-off-full.yaml` and `jobset-v1-apc-m15-on-full.yaml`) via `prepare_m15_multiround_pair.sh`.
 - Validation: 25/25 unit tests PASS; manifest `SHA256SUMS` verified; GKE server dry-run PASS (`jobset created`). Cluster has two idle 64-TPU nodepools ready for parallel execution.
 
+## 2026-08-28 — Attempt-13 recovery schema corrected; flat-shard replay implemented
+
+- Re-audited the physical d32 inventory against the recovery code. Attempt 13
+  has one diagnostic round in the older `wide/shards/<sequence>` layout, not
+  three `wide/rounds/<round>` roots. The prior wrapper fabricated `rounds=3`
+  and delegated to the wrong protocol; its `NO_DURABLE_ROUND` was therefore a
+  recovery-schema false negative.
+- Replaced that wrapper with a read-only flat-shard adapter. It pins the
+  immutable receipt/source/JobSet identities; requires exactly 77 contiguous
+  off and 70 contiguous on shards; validates every archive, manifest,
+  completion receipt and member; and selects the newest verified matching
+  `live/<sequence>` snapshot containing alignment, replay, round and treatment
+  capsule inputs.
+- Added a local replay tool that assembles the verified union, builds a compact
+  bundle only in scratch, runs the current official classifier, and emits a
+  seven-file self-hashed return. Token-bearing inputs never enter the return.
+- The official hard gates remain pinned to the historical d32 receipts: 2,474
+  off and 2,087 on seam/tail pairs; off A-B/B-C exact; on A-B 239 bytes / 114
+  elements and B-C exact. Source, record count, shard sequence, live manifest,
+  capsule, and classifier disagreements fail closed.
+- Added transport and replay negatives for wrong path generation, missing
+  sequence, tampered shard, and missing treatment capsule. The returned claim
+  is limited to one round and always records
+  `three_round_repeat=NOT_PERFORMED` and
+  `numerical_repair_authorized=false`.
+- No real GCS access, TPU/Kubernetes launch, numerical source change, commit,
+  or push occurred. d33 is no longer the immediate action; first replay and
+  review d32's surviving flat evidence.
+- Final host gates: task-local discovery 96/96 PASS; Bash syntax PASS; Python
+  AST PASS for the replay and two new test modules; forbidden multiround path
+  and caller absent from the production wrapper; `git diff --check` PASS.

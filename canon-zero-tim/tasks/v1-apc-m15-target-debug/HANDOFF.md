@@ -1,156 +1,100 @@
 # M15 APC target-debug handoff
 
-## START HERE — recover Attempt 13 from GCS; do not relaunch or repair RPA
+## START HERE — replay Attempt 13's real flat shards; do not relaunch or repair numerics
 
-This section supersedes the older Attempt-13 localization and Phase-E prose
-later in this file.  The checked-in Attempt-13 directory is a hash-valid
-**five-file subset**, not the complete three-round return required by the
-published source.  It is analysis-grade and does not authorize a numerical
-change.
+Attempt 13 (`d32`) is a **single diagnostic round** produced by the older
+flat-shard runtime.  The registered roots contain 77 contiguous control shards
+and 70 contiguous treatment shards under `wide/shards/`, plus periodic
+`live/<sequence>` snapshots.  They do not contain the later
+`wide/rounds/000000..000002` protocol.
 
-The subset verifies its own `SHA256SUMS` (`4/4` entries), and its summaries
-report the following candidate observation:
+The former recovery wrapper was wrong for this evidence generation: it
+fabricated `rounds=3` and delegated to the multiround return tool.  Its
+`NO_DURABLE_ROUND` result was therefore a schema false negative, not proof that
+Attempt 13 lost its observer data.  Do not use that old result to launch d33.
 
-```text
-off: A-B=0 bytes, B-C=0 bytes
-on:  A-B=239 bytes / 114 elements, B-C=0 bytes
-reported fingerprint interval: Layer-0 k_post_rope -> rpa_output
-```
+This revision adds a purpose-built read-only adapter.  It verifies and extracts
+the immutable flat shards, selects the newest source- and JobSet-matching live
+snapshot with the required alignment/replay/capsule files, assembles exactly
+one round, and reruns the checked-in official classifier.  It does not alter
+RPA, RoPE, attention, KV, LM-head, APC, B, or any model tensor.
 
-Those numbers have not yet been bound to the official per-round classifier
-outputs.  The directory contains only:
+### Bucket-capable executor command
 
-- `INCIDENT_REPORT.md`;
-- `receipt.json`;
-- one minimized off classifier and one minimized on classifier;
-- `SHA256SUMS` covering those four files.
-
-It does **not** contain `MULTIROUND_SUMMARY.json`, `PACKAGING.txt`, the six
-per-round classifiers, `PREFLIGHT.json`, `COLLECTED.json`, `COMPLETE.json`,
-`ROUND_INPUT_RECEIPT.json`, `WIDE_ROUND_COMPLETE.json`, raw-log identity, or
-the JobSet terminal receipts.  Neither minimized classifier has a
-`diagnostic_round`; the on classifier also omits the official classifier's
-`anchors`, `expected_layer`, `first_difference_signatures`,
-`mixed_first_difference_signatures`, and `replay_ledger_receipts`.
-
-There is a second fail-closed inconsistency.  At the claimed runtime source
-`7d30f3827480e6f9d5ae972f55ca4d16f07de6df`, the official classifier requires
-`diagnostic_round` and emits the fields above, but its
-`_source_anchor("rpa_output")` raises `source anchor is absent`.  This local
-change corrects that observer anchor; it does not retroactively make the
-submitted `source_interval` into runtime output.  In particular, the claimed
-direct `rpa_kernel_p66.py` line cannot be reproduced from the published
-runtime source.
-
-The observer stores eight `uint32` fingerprints per checkpoint.  It does not
-store full tensors for bytewise comparison.  The reported `7.1857e8` is a
-fingerprint-integer difference from the minimized receipt, not a measured
-activation `max_abs`, and must not be described as the numerical magnitude of
-the RPA output error.
-
-Current claim ceiling:
-
-```text
-ATTEMPT13_SUBSET_HASH_VALID
-OFFICIAL_CLASSIFIER_NOT_REPLAYABLE
-RPA_ATTENTION_CALL_INTERVAL_HYPOTHESIS
-NUMERICAL_REPAIR_NOT_AUTHORIZED
-```
-
-### Bucket-capable executor: recover the existing d32 rounds now
-
-Do not launch TPU/Kubernetes.  Do not edit RPA, RoPE, KV, attention, or APC
-numerics.  On the executor that can read the registered bucket, run the
-Attempt-13 wrapper from a clean checkout:
+Requirements: a clean checkout containing this revision, authenticated
+read-only bucket access, `gcloud`, and at least 32 GiB free scratch space.  Do
+not launch TPU/Kubernetes.  Use a fresh return directory:
 
 ```bash
-RETURN=/tmp/v1-apc-m15-d32-small-return
+RETURN=/tmp/v1-apc-m15-d32-flat-return
 test ! -e "$RETURN"
 bash canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/recover_m15_attempt13_d32.sh \
   "$RETURN" /mnt/disks/tunix-data
 (cd "$RETURN" && sha256sum -c SHA256SUMS)
 ```
 
-The wrapper pins the checked-in receipt SHA, source commit, two exact JobSet
-names, `rounds=3`, `observer=full`, and `seam_layer=0`.  It derives the two GCS
-roots from that receipt, creates a temporary read-only audit contract, calls
-the generic multiround return tool, verifies the first manifest, validates the
-official per-round classifier schema and numerical hard gates, writes
-`ATTEMPT13_ANALYSIS.json`, regenerates the final manifest, and verifies it
-again.  It neither renders nor launches a JobSet and does not mutate GCS.
+The wrapper fails closed unless all of the following are true:
 
-Return the complete small `$RETURN` directory unchanged, plus:
+- source commit and exact off/on JobSet identities match the immutable receipt;
+- shard sequences are exactly `000000..000076` off and `000000..000069` on;
+- every shard archive, manifest, completion receipt, sequence, source and file
+  member verifies;
+- the newest usable live snapshot verifies and contains pre-alignment,
+  replay-envelope, diagnostic-round, and treatment mismatch-capsule inputs;
+- record counts are exactly 2,474 off and 2,087 on;
+- control has A-B=0 and B-C=0; treatment has A-B=239 bytes / 114 elements and
+  B-C=0;
+- the corrected official classifier accepts the sealed union.
 
-1. the wrapper's final `[M15.MULTIROUND] COMPLETE ...` line;
-2. its final `[M15.ATTEMPT13] RETURN_READY ...` line;
-3. independent `sha256sum -c SHA256SUMS` output;
-4. both JobSet terminal statuses;
-5. each immutable raw-log object identity, SHA-256, and byte size.
-
-The directory must contain `MULTIROUND_SUMMARY.json`, `PACKAGING.txt`,
-`ATTEMPT13_ANALYSIS.json`, `SHA256SUMS`, and these six official outputs when
-all rounds survived:
+Large archives, token histories and the compact classifier bundle remain only
+in scratch and are deleted on exit.  The small return must contain exactly the
+analysis artifacts needed for review:
 
 ```text
 off.round-000000.classification.json
-off.round-000001.classification.json
-off.round-000002.classification.json
 on.round-000000.classification.json
-on.round-000001.classification.json
-on.round-000002.classification.json
+off.round-000000.input-receipt.json
+on.round-000000.input-receipt.json
+ATTEMPT13_FLAT_REPLAY.json
+PACKAGING.txt
+SHA256SUMS
 ```
 
-Interpret the return mechanically:
+Return the complete `$RETURN` directory unchanged, plus the final
+`M15_ATTEMPT13_FLAT_REPLAY_COMPLETE ...` and
+`[M15.ATTEMPT13] RETURN_READY ... rounds=1 ...` lines and independent
+`sha256sum -c SHA256SUMS` output.  Do not return the scratch directory or any
+token-bearing archive.
 
-| Status | Meaning | Next action |
+### Mechanical interpretation
+
+| Decision | Meaning | Next action |
 |---|---|---|
-| `COMPLETE` | all six rounds and both terminal roots are present | replay the official classifier from sealed inputs |
-| `ROUNDS_RECOVERED_ROOT_INCOMPLETE` | all six rounds survived but root close is absent | analyze as analysis-grade; repair only root finalization |
-| `PARTIAL_ROUNDS_RECOVERED` | one or more rounds survived | preserve and analyze recovered rounds; do not call the pair complete |
-| `NO_DURABLE_ROUND` | no sealed round is recoverable | repair worker/upload durability before another launch |
+| `SINGLE_ROUND_ATTENTION_INTERVAL_REPRODUCED` | the sealed d32 control is exact and the treatment's last-exact/first-red pair is again Layer-0 `k_post_rope -> rpa_output` | accept one historical localization round; inspect the returned official fields and design the next finer RPA sub-boundary observer |
+| `SINGLE_ROUND_OFFICIAL_REPLAY_DISAGREES` | sealed inputs replay, but the official boundary differs from the minimized report | preserve both outputs and review classifier/source anchors before any experiment |
+| wrapper exits non-zero | a shard, live input, identity, manifest, count, or numerical hard gate failed | fix only the recovery/return defect; do not claim a numerical result |
 
-### Attempt-13 GCS Real Artifact Inventory & Layout Distinction
+One d32 replay can validate the historical single round; it cannot prove
+three-round stability and can never authorize a numerical repair by itself.
+Every return records `three_round_repeat=NOT_PERFORMED` and
+`numerical_repair_authorized=false`.  A reproduced attention-call interval is
+an observer boundary, not proof that `rpa_kernel_p66.py` is the causal line.
 
-Physical inspection of the GCS bucket for Attempt 13 confirms that all observer shard data was successfully written and uploaded by the live worker runtime (`7d30f382`):
+## DEFERRED — d33 is only a repeat/fallback after the flat-shard replay
 
-- **Control Arm (`canon-v1-apc-m15-off-d32-7d30f382`)**:
-  - `gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-v1-apc-m15-off-d32-7d30f382/attempt-0/PREFLIGHT.json`
-  - 77 Shards: `wide/shards/000000/` through `wide/shards/000076/` (232 total GCS objects).
-  - Each shard directory contains valid `SHA256SUMS`, `SHARD_ARCHIVE.tar`, and `SHARD_COMPLETE.json`.
-- **Treatment Arm (`canon-v1-apc-m15-on-d32-7d30f382`)**:
-  - `gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-v1-apc-m15-on-d32-7d30f382/attempt-0/PREFLIGHT.json`
-  - 70 Shards: `wide/shards/000000/` through `wide/shards/000069/` (211 total GCS objects).
-  - Each shard directory contains valid `SHA256SUMS`, `SHARD_ARCHIVE.tar`, and `SHARD_COMPLETE.json`.
+Do not launch d33 merely because the obsolete multiround wrapper reported
+`NO_DURABLE_ROUND`.  First run the flat-shard replay above.  d33 is useful only
+if the required d32 live snapshot is genuinely absent after the corrected
+audit, or if the user wants a fresh three-round repeat after reviewing the
+single-round result.  Either case requires separate launch approval.
 
-**Root cause of `NO_DURABLE_ROUND` mechanical verdict**:
-The Attempt-13 runtime uploaded shards under the single-round directory structure `wide/shards/000000..000076/`, whereas the new recovery tool `run_m15_multiround_gcs_return.sh` specifically expects the multi-round format `wide/rounds/000000..000002/ROUND_INPUT_RECEIPT.json`.
-
-**Two valid execution paths for downstream processing**:
-1. **Offline Adapter Path**: An offline script can be written to aggregate existing Attempt-13 `wide/shards/` into `round-000000` without any TPU compute.
-2. **Standard Fallback Launch Path (`d33`)**: Launch the prepared 3-round Layer-0 pair `d33` below, which natively executes the `wide/rounds/` protocol on TPU.
-
-Any off-arm red, B-C red, source/round/hash mismatch, or failed manifest is a
-hard stop.  The current source now resolves the classifier's `rpa_output`
-anchor to the real observer patch rather than inventing a line in the RPA
-implementation.  The small return still does not contain the token-bearing
-compact bundles, so it records
-`official_classifier_replay=NOT_PERFORMED_FROM_SMALL_RETURN`.  If all three on
-rounds independently place the same fingerprint transition in the
-attention-call interval while all off rounds remain exact, the next
-scientific phase is bucket-local replay of those compact bundles followed by
-an RPA sub-boundary observer: block table and attention metadata, actual K/V
-read fingerprints, kernel input, reduction, and output.  It is not an
-immediate edit to `rpa_kernel_p66.py`.
-
-## DEFERRED — prepare a new three-round Layer-0 pair only if d32 is unrecoverable
-
-This launch contract is a fallback only if the d32 recovery above returns
-`NO_DURABLE_ROUND` and the user separately approves a fresh target run.  The
-current source prepares the run but does not authorize it.  The fallback is
-one matched APC-off/APC-on pair, each containing three evaluation-only rounds
-with frozen weights, zero backward, and zero optimizer commits.  The full
-observer is pinned to Layer 0 because Attempt 12 placed the analysis-grade
-coarse interval between Layer-0 input and output.
+d33 is one matched APC-off/APC-on pair, each containing three evaluation-only
+rounds with frozen weights, zero backward, and zero optimizer commits.  The
+full observer is pinned to Layer 0 because Attempt 12 placed the analysis-grade
+coarse interval between Layer-0 input and output.  A previously rendered
+`/tmp` directory is not a durable source artifact and is not launch authority;
+render again from the reviewed, published full SHA when that experiment is
+approved.
 
 This is not “run longer and hope the final upload works.”  At the end of each
 round the learner blocks until the live worker has:

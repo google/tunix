@@ -24,8 +24,8 @@ B - C = 0 bytes
 | C | executable replay-prefix input plan followed by a single-variable reproduction ladder | saved bytes and chronology revalidate; control A-B=0; treatment either reproduces red or is `ONEHOST_NOT_REPRODUCED` | complete: r10-r13c one-host ladder exact through full chronology; scale/topology remains |
 | D | observer-neutral coarse-to-fine first-red walk on known-red DP8xTP8 | `FIRST_RED_LOCALIZED` names last exact and first red tensor, shape ledger, request/token/cache coordinate, and `file:line` | Attempt-12 coarse summary returned; blocked on remote evidence binding before the conditional Layer-0 full run |
 | D2 | M15-only incremental observer shards, sealed-input classifier, terminal ordering, and source self-verification | forced death preserves a verified shard; unsealed/tampered/source-mismatched inputs fail closed | host and exact-image pass; Attempt-12 runtime used this path, but its committed return omitted the remote binding audit |
-| D3 | three frozen-weight full Layer-0 rounds per arm plus a small per-round GCS return | each round seals before the next; root-incomplete and partial-round returns remain mechanically distinguishable | Attempt 13 claims execution, but only a five-file minimized subset returned |
-| D4 | one-command Attempt-13 GCS recovery and official-field audit | self-hashed return reports six sealed official classifiers or a mechanical partial/no-round status; minimized classifiers fail closed | implemented; host PASS, real GCS not run |
+| D3 | three frozen-weight full Layer-0 rounds per arm plus a small per-round GCS return | each round seals before the next; root-incomplete and partial-round returns remain mechanically distinguishable | protocol implemented, but Attempt 13 predates it and is not a D3-format run |
+| D4 | one-command Attempt-13 flat-shard recovery and official single-round replay | exact 77/70 contiguous shards and matching live inputs verify; official off/on classifiers replay; seven-file small return self-verifies | implemented; host 96/96 PASS; bucket replay not run |
 | E | minimal localized repair, default off or experiment-bound | reproducer flips red to zero; APC-off and B are unchanged; adjacent and dirty-page negatives fire | pending |
 | F | certification ladder | host -> exact-image -> one-host clean/repeat/dirty -> matched profile -> separately approved DP8xTP8 G-E | pending |
 
@@ -139,3 +139,12 @@ B - C = 0 bytes
   receipt. Only `LAYER_SELECTED` with both arms evidence-bound and no source
   conflict admits the next target run. `INCOMPLETE` or `SOURCE_MISMATCH` means
   evidence recovery, not a numerical fix and not another rollout.
+- Corrected by the real Attempt-13 inventory: d32 is a single-round
+  flat-shard generation, not a three-round `wide/rounds` generation. The old
+  wrapper's `NO_DURABLE_ROUND` was a path/schema false negative. Phase D4 now
+  verifies all `wide/shards` objects, selects a matching `live` snapshot, and
+  replays exactly round 0 with the official classifier.
+- Decision: d32 can establish at most one historical localization round. It
+  cannot satisfy the three-round repeat gate or authorize a numerical repair.
+  d33 is deferred until the flat replay is reviewed, unless that replay proves
+  the required live input is genuinely absent.
