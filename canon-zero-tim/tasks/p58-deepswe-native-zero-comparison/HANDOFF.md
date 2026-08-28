@@ -1,5 +1,17 @@
 # P58 DeepSWE native-first training handoff
 
+## 2026-08-28 UTC — DeepSWE P58.19e incident intake (`canon-p58-seamcoarse-full-p58s19e`, 128 TPU)
+
+### Incident Summary
+Target run `canon-p58-seamcoarse-full-p58s19e` executed Step 0 multi-turn rollout on 128 TPU v5p (33 Pods):
+- **Patch 34 Single-Round Dynamic Budget Extension (Verified PASS)**: Scaled from 635 to **1,790+ Seam and Tail Observer Records** (`arm=A`) with 1,007+ request journals without continue-decode or tensor-strata exceptions.
+- **Deep Multi-Turn Tool Calling (Verified PASS)**: Context lengths reaching 3,769+ tokens, tool calls deepened up to step 10 across 128 RepoEnv sandboxes.
+- **Fatal Error**: At step 0 rollout, the accumulated `.npz` records reached 4.3 GiB, crossing the registered `_SEAM_MAX_BYTES` (4 GiB) limit in `p38_seam_capture.py` -> `RuntimeError: P38 seam evidence exceeded its registered output byte bound`.
+- **Sealed Incident Package**: `evidence/p58s19e_byte_bound_incident/` (`INCIDENT_REPORT.md`, `RAW_ERROR.log`, `run.log`, `env.sh`, `SHA256SUMS`).
+
+### Reconciled action for p58s19f
+Raise `_SEAM_MAX_BYTES` to 16 GiB (or 32 GiB) per round to accommodate the full completion of all 128 multi-turn trajectories across 3 sequential rounds.
+
 ## 2026-08-28 UTC — P58.19e per-round observer budget repair (local only)
 
 The sealed `p58s19d` failure is an instrumentation-capacity failure, not a

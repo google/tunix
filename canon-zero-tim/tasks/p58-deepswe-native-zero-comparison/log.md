@@ -1,5 +1,11 @@
 # Log
 
+## 2026-08-28 UTC — DeepSWE P58.19e incident intake sealed
+
+- Workload: `canon-p58-seamcoarse-full-p58s19e` (128 TPU v5p).
+- Outcome: Patch 34 single-round dynamic budget extension 100% verified. Seam window `[1686, 4096)` covered with **1,790+ records** (4.3 GiB total written), 1,007+ request journals, and multi-turn tool execution up to step 10 across 128 sandboxes. Terminated when total `.npz` records reached 4.3 GiB, exceeding registered `_SEAM_MAX_BYTES` (4 GiB) with `RuntimeError: P38 seam evidence exceeded its registered output byte bound`.
+- Evidence: Sealed in `evidence/p58s19e_byte_bound_incident/` (`INCIDENT_REPORT.md`, `RAW_ERROR.log`, `run.log`, `env.sh`, `SHA256SUMS`).
+
 ## 2026-08-28 UTC — DeepSWE P58.19d incident intake sealed
 
 - Workload: `canon-p58-seamcoarse-full-p58s19d` (128 TPU v5p).
