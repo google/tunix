@@ -1013,3 +1013,33 @@ is not a current fact or launch authority.
   Bash syntax, Python compilation, and `git diff --check` PASS.
 - Claim ceiling: `DURABILITY_REPAIR_LOCAL_PASS / EXACT_IMAGE_NOT_RUN /
   TARGET_NOT_RUN / FIRST_RED_NOT_LOCALIZED / PHASE_E_CLOSED`.
+
+## 2026-08-28 — CORRECTION and Phase D3b replay-round provenance local pass
+
+- Independently verified all six Attempt-15 incident payloads against their
+  manifest and bound the runtime source from both live-worker logs to
+  `57d9ab8e25de3b2404e983e9a139d78b151a58f8`.
+- Corrected the Attempt-15 execution claim: both arms completed the Round-0
+  rollout and prefill/trainer pre-alignment comparison, but the runtime marker
+  is explicit: `backward=0 optimizer_commits=0`. The earlier statement that
+  backward Pallas hot paths ran is withdrawn.
+- Both arms were exact in this stochastic Round 0 (off `N_action=120889`, on
+  `N_action=130468`, A-B=0 and B-C=0), then the learner requested the seal.
+  This does not close the historical APC red and is not a numerical fix.
+- The returned replay head contains 20/20 schema-valid rows and 20/20 omit
+  `diagnostic_round`. Assembly correctly failed closed at line 1; the D3a
+  stage receipt and learner fail-fast channel worked as designed.
+- Preserved patch-chain immutability by adding patch 33 after patch 32. It
+  serializes `diagnostic_round=int(_p38_seam_round())` in each host-only replay
+  row. No device value, cache state, request chronology, A/B/C arithmetic,
+  backward, or optimizer path changed.
+- Added an installed-runner AST probe with missing-field and hard-coded-zero
+  negative controls. Registered runner SHA
+  `c527d31a6343c673a3c93988b15db37d85000956098a737136bac9af8387bc81`.
+- Local validation: 139/139 M15 tests, focused carrier 17/17, durability 8/8,
+  classifier 10/10, P38 persistence PASS, flag audit 395/395, patch
+  apply/compile/probe PASS, and syntax/diff checks PASS.
+- No pinned image, TPU, Kubernetes, GCS mutation, commit, or push occurred.
+  Claim ceiling: `REPLAY_ROUND_PROVENANCE_LOCAL_PASS /
+  EXACT_IMAGE_NOT_RUN / TARGET_NOT_RUN / ROUND0_STOCHASTIC_EXACT_ONLY /
+  FIRST_RED_NOT_LOCALIZED / NUMERICAL_FIX_NOT_AUTHORIZED / PHASE_E_CLOSED`.

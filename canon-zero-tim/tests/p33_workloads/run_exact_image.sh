@@ -108,5 +108,8 @@ $DOCKER run --rm \
       canon-zero-tim/tests/p38_serving/probe_fixed_lm_head_overlay.py
     python3 canon-zero-tim/tests/p33_workloads/test_decode_logprob_chunking.py \
       --overlay "$qwen8b_overlay"
-    echo "P33_EXACT_IMAGE_PASS decode_chunk_cases=5 prompt_chunk_cases=5 runner_tests_per_overlay=35 overlays=2"
+    python3 \
+      canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/probe_m15_replay_round_provenance.py \
+      "$qwen8b_overlay/tpu_runner_p21_l30.py"
+    echo "P33_EXACT_IMAGE_PASS decode_chunk_cases=5 prompt_chunk_cases=5 runner_tests_per_overlay=35 m15_round_provenance=1 overlays=2"
   '

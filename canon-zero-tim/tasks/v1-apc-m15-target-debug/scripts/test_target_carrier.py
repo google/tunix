@@ -21,6 +21,10 @@ RENDERER_PATH = ROOT / "canon-zero-tim/cluster/render_v1_apc_m15_target_debug.py
 LEARNER_PATH = ROOT / "tunix/rl/agentic/agentic_rl_learner.py"
 GRPO_LEARNER_PATH = ROOT / "tunix/rl/agentic/agentic_grpo_learner.py"
 TRAIN_PATH = ROOT / "examples/frozenlake/train_frozenlake_qwen3.py"
+PROVENANCE_PROBE_PATH = (
+    ROOT / "canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/"
+    "probe_m15_replay_round_provenance.py"
+)
 BASE = ROOT / "canon-zero-tim/cluster/jobset-64chip.yaml"
 SOURCE = "6" * 40
 SPEC = importlib.util.spec_from_file_location("render_v1_apc_m15_target_debug", RENDERER_PATH)
@@ -28,6 +32,14 @@ assert SPEC and SPEC.loader
 renderer = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = renderer
 SPEC.loader.exec_module(renderer)
+
+PROVENANCE_SPEC = importlib.util.spec_from_file_location(
+    "probe_m15_replay_round_provenance", PROVENANCE_PROBE_PATH
+)
+assert PROVENANCE_SPEC and PROVENANCE_SPEC.loader
+provenance_probe = importlib.util.module_from_spec(PROVENANCE_SPEC)
+sys.modules[PROVENANCE_SPEC.name] = provenance_probe
+PROVENANCE_SPEC.loader.exec_module(provenance_probe)
 
 
 def _load_consumer_contract():
@@ -72,6 +84,51 @@ admission_geometry, p38_batch_contract = _load_train_geometry_contracts()
 
 
 class TargetCarrierTest(unittest.TestCase):
+
+  def test_m15_replay_round_provenance_patch_is_additive(self):
+    patch = (
+        CANON / "patches/tpu_inference/33-tpu-runner-m15-replay-round-provenance.patch"
+    ).read_text(encoding="utf-8")
+    installer = (CANON / "install.sh").read_text(encoding="utf-8")
+    self.assertIn(
+        '"diagnostic_round": int(_p38_seam_round())', patch
+    )
+    self.assertIn(
+        "33-tpu-runner-m15-replay-round-provenance.patch", installer
+    )
+    self.assertLess(
+        installer.index("32-tpu-runner-p58-mixed-program-path.patch"),
+        installer.index("33-tpu-runner-m15-replay-round-provenance.patch"),
+    )
+
+  def test_m15_replay_round_provenance_probe_rejects_missing_or_stale_round(self):
+    good = '''\
+def _p38_m15_replay_ledger():
+  record = {
+      "schema": "m15-apc-serving-envelope-v1",
+      "diagnostic_round": int(_p38_seam_round()),
+  }
+'''
+    missing = good.replace(
+        '      "diagnostic_round": int(_p38_seam_round()),\n', ""
+    )
+    stale = good.replace("int(_p38_seam_round())", "0")
+    with tempfile.TemporaryDirectory() as directory:
+      source = Path(directory) / "tpu_runner_p21_l30.py"
+      source.write_text(good, encoding="utf-8")
+      provenance_probe.verify_runner_source(source)
+      source.write_text(missing, encoding="utf-8")
+      with self.assertRaisesRegex(
+          provenance_probe.ReplayRoundProvenanceError,
+          "absent or not live-bound",
+      ):
+        provenance_probe.verify_runner_source(source)
+      source.write_text(stale, encoding="utf-8")
+      with self.assertRaisesRegex(
+          provenance_probe.ReplayRoundProvenanceError,
+          "absent or not live-bound",
+      ):
+        provenance_probe.verify_runner_source(source)
 
   def test_m15_round_budget_resets_bytes_without_reusing_record_indices(self):
     patch = (

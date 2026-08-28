@@ -1,6 +1,6 @@
 # M15 APC target-debug handoff
 
-## START HERE — Attempt 15 (d34) executed Round 0 with exact numerical PASS; assemble failed on missing diagnostic_round in replay envelope
+## START HERE — Phase D3b fixes Attempt-15 replay round provenance locally; exact-image and target remain unrun
 
 ### Incident Summary (Attempt 15 / d34)
 Matched pair on 64 TPU each (`canon-v1-apc-m15-off-d34-57d9ab8e` and `canon-v1-apc-m15-on-d34-57d9ab8e`):
@@ -13,13 +13,44 @@ Matched pair on 64 TPU each (`canon-v1-apc-m15-off-d34-57d9ab8e` and `canon-v1-a
   [M15.WIDE.ROUND] RED replay round is invalid at line 1
   tunix.rl.alignment.AlignmentGateError: P38 round-seal worker failed before acknowledgement: round=0 stage=assemble exit_code=2
   ```
-- **Root Cause**: `patches/tpu_inference/26-tpu-runner-m15-replay-envelope.patch` omits `"diagnostic_round"` in the JSON envelope record. `assemble_m15_wide_round.py` expects `record["diagnostic_round"] == round_index`, evaluating to `-1` and asserting out.
+- **Execution boundary**: both raw precheck markers say `backward=0 optimizer_commits=0`. The immutable incident report's claim that backward Pallas hot paths executed is withdrawn.
+- **Runtime source**: both live-worker logs independently attest `57d9ab8e25de3b2404e983e9a139d78b151a58f8`. This supersedes the different full SHA printed in the incident prose.
+- **Debug-control root cause**: published patch 26 omitted `"diagnostic_round"` in the JSON envelope record. `assemble_m15_wide_round.py` correctly evaluated the missing value as `-1` and failed closed. This explains the seal failure only; it does not explain or repair the stochastic APC mismatch.
 - **Sealed Incident Package**: `evidence/v1_apc_m15_attempt15_d34_20260828/` (`INCIDENT_REPORT.md`, `m15_off_d34_attempt15_tail.log`, `m15_on_d34_attempt15_tail.log`, `p38_live_worker_off.log`, `p38_live_worker_on.log`, `m15_replay_envelope_head.jsonl`, `SHA256SUMS`).
 
-### Action Plan for Attempt 16 (d35)
-1. Add `"diagnostic_round": int(_p38_seam_round())` (or `diagnostic_round`) to `patches/tpu_inference/26-tpu-runner-m15-replay-envelope.patch`.
-2. Run test suites (`test_target_carrier.py`, `test_m15_wide_durability.py`, `test_classify_m15_apc_wide_seam.py`).
-3. Re-render, dry-run, and launch Attempt 16 (`d35`) matched pair on 64 TPU.
+### Implemented locally
+
+1. Kept published patch 26 immutable and added
+   `33-tpu-runner-m15-replay-round-provenance.patch` after patch 32.
+2. Every replay row now writes
+   `"diagnostic_round": int(_p38_seam_round())` at serialization time.
+3. Added an installed-source AST probe. It rejects both the Attempt-15 missing
+   field and a hard-coded round-0 false fix.
+4. Registered the resulting runner manifest and wired the probe into the
+   pinned exact-image gate.
+5. Host result: 139/139 M15 tests, P38 persistence, patch application,
+   compilation, and diff checks pass.
+
+### Next approval gates
+
+1. Review the local diff. Do not launch or render from the dirty worktree.
+2. With separate approval, form a clean local commit and run the pinned
+   exact-image gate. Require both `M15_REPLAY_ROUND_PROVENANCE_PASS` and the
+   aggregate marker containing
+   `apc_m15_carrier=68 m15_round_provenance=1`.
+3. Push requires another explicit approval.
+4. Only after publication and another explicit launch approval, render a fresh
+   three-round matched pair. Both arms may launch concurrently; acceptance
+   requires three sealed/ACKed rounds and official classifiers, not merely a
+   Round-0 zero.
+
+Current claim ceiling:
+
+```text
+REPLAY_ROUND_PROVENANCE_LOCAL_PASS / NUMERICAL_PATH_UNCHANGED /
+EXACT_IMAGE_NOT_RUN / TARGET_NOT_RUN / ROUND0_STOCHASTIC_EXACT_ONLY /
+FIRST_RED_NOT_LOCALIZED / NUMERICAL_FIX_NOT_AUTHORIZED / PHASE_E_CLOSED
+```
 
 ## d33 flat-shard content audit verified Round 0 only; fix first seal/ACK before rerun
 

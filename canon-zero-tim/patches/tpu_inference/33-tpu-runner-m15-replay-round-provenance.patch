@@ -1,0 +1,10 @@
+--- tpu_runner_p21_l30.py
++++ tpu_runner_p21_l30.py
+@@ -1849,6 +1849,7 @@
+     record = {
+         "schema": "m15-apc-serving-envelope-v1",
+         "arm": _P38_M15_TARGET_DEBUG,
++        "diagnostic_round": int(_p38_seam_round()),
+         "serving_arm": (
+             "B" if runner.input_batch.num_prompt_logprobs else "A"),
+         "call_index": int(call_index),

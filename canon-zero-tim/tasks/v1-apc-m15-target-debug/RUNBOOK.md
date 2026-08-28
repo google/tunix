@@ -5,18 +5,22 @@ commands; it does not edit YAML, numerical code, or evidence. Large payloads
 remain in GCS exactly like the earlier P38/lm-head investigation. Only small
 machine-generated receipts are returned through Git or chat.
 
-## Current operation: no remote execution yet
+## Current operation: review Phase D3b; no remote execution yet
 
-Phase D3a has passed host tests only.  It adds ordered round-stage receipts,
-an atomic learner-visible failure channel, and a return audit that reports the
-last completed/failed stage even when no classifier sealed.  Do not launch,
-render, mutate GCS, or reuse a historical label from this local result.
+Phase D3b has passed host tests only. It adds the missing live round identity
+to every replay-envelope row using additive patch 33; published patch 26 is
+unchanged. An AST probe requires the final installed runner to use exactly
+`int(_p38_seam_round())` and rejects a missing or hard-coded round. Do not
+launch, render, mutate GCS, or reuse a historical label from this local result.
 
-The next gates are deliberately separate: review the diff, obtain commit/push
-approval, run the exact-image gate after approval, and only then request a
-fresh matched APC-off/APC-on target pair.  The existing operator-return command
-below is the only return command for that future pair; it now includes stage
-receipts automatically and still avoids token-bearing tars.
+The next gates are deliberately separate: review the diff; obtain commit
+approval; run the pinned exact-image gate with approval; obtain push approval;
+then separately request a fresh matched APC-off/APC-on target pair. The
+exact-image result must include `M15_REPLAY_ROUND_PROVENANCE_PASS` and
+`V1_HP_EXACT_IMAGE_PASS ... apc_m15_carrier=68 ...
+m15_round_provenance=1 ...`. The existing operator-return command below is the
+only return command for that future pair; it includes stage receipts and still
+avoids token-bearing tars.
 
 ## Historical operation: recover the already-run d33 pair
 

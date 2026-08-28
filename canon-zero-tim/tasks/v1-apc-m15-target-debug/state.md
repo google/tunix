@@ -1,11 +1,11 @@
 # State
 
-- Status: active; Attempt 15 (d34) matched pair executed Round 0 with exact numerical PASS (APC-Off N_action=120,889, APC-On N_action=130,468, differing_bytes=0). Terminated at Round 0 seal due to `RED replay round is invalid at line 1` caused by missing `diagnostic_round` in `26-tpu-runner-m15-replay-envelope.patch`.
+- Status: active; Phase D3b replay-round provenance is LOCAL PASS. Attempt 15 executed an exact Round-0 precheck on both arms, then correctly failed closed at assembly because replay rows lacked `diagnostic_round`. This is an instrumentation repair, not a prefix-cache numerical fix.
 - Sealed incident package: `evidence/v1_apc_m15_attempt15_d34_20260828/`.
 - Objective: explain and repair the M15 DP8xTP8 APC-on A-vs-B byte mismatch without changing the independent full-reset B arm or any unrelated numerical path.
 - Definition of done: `FIRST_RED_LOCALIZED` names the last exact and first red tensor plus `file:line`; one localized repair then passes host, exact-image, one-host clean/dirty controls, deterministic repeat, and separately approved DP8xTP8 A-B/B-C zero.
 - Task directory: `canon-zero-tim/tasks/v1-apc-m15-target-debug`.
-- Documentation base: `cb38cf67ec9f7ca9fd0bfc4d01e36b098ca0d344` on `origin/yuxzhang/canon-zero-tim`; d33 runtime source reported as `003276a3fe2a0ceeaa95a7d940550dab627b8324`.
+- Working base: `4c117d2324b1c2340bf54eaf519f9559742c0ced` on `origin/yuxzhang/canon-zero-tim`; Attempt-15 runtime source independently verified as `57d9ab8e25de3b2404e983e9a139d78b151a58f8`.
 - Shard Content Audit Fact:
   - Off control arm: 88 flat shards (`wide/shards/000000..000087`), all `diagnostic_round: 0`, 2,780 total record pairs, 1,792,189,157 payload bytes.
   - On treatment arm: 74 flat shards (`wide/shards/000000..000073`), all `diagnostic_round: 0`, 2,302 total record pairs, 472,614,342 payload bytes.
@@ -14,12 +14,12 @@
   - Machine decision: `D33_FLAT_SHARDS_ROUND0_ONLY`.
 - Recovered operator return: `evidence/v1_apc_m15_attempt14_d33_operator_return_20260828/`, `evidence/v1_apc_m15_attempt14_d33_inventory_return_20260828/`, and `evidence/v1_apc_m15_attempt14_d33_flat_shard_audit_20260828/`.
 - One-host fact: local r10-r13c stayed exact through real scheduler publication, 32-request composition, `continue_decode=8`, and full M15 chronology. r13c APC-on reached 97.8% hits, 130,148 actions, and logical KV 988..7189.
-- Current phase: Phase D3a has host-validated stage receipts, fail-fast seal failure handling, three-round ACK progression, and stage-aware small-return collection. No new multiround carrier run is authorized by this local result.
-- Implemented: eight ordered publisher stages; atomic `round-N.failure.json`; learner failure polling; stage-aware small-return audit; corrected Attempt-14 receipt/manifest claim and independent per-arm round gate.
-- Local gates: M15 task suite 137/137 PASS; small-return audit/wrapper 10/10 PASS; P38 persistence PASS; flat-shard audit 12/12 PASS; flags 394/394 PASS; syntax/compile/diff checks PASS.
+- Current phase: Phase D3b adds replay-round provenance after Phase D3a's stage receipts and fail-fast seal failure handling. No multiround target run is authorized by this local result.
+- Implemented: additive patch 33 serializes `diagnostic_round=int(_p38_seam_round())`; the installed-source AST probe rejects a missing or hard-coded round; the cumulative assembler remains fail-closed and round-selective.
+- Local gates: M15 task suite 139/139 PASS; focused target carrier 17/17; wide durability 8/8; wide classifier 10/10; P38 persistence PASS; flags 395/395 PASS; patch application, installed-source compilation/probe, syntax and diff checks PASS.
 - Numerical changes: none. RoPE, attention/RPA, KV values, LM head, loss, backward, optimizer, B full reset, and production APC are unchanged (APC-OFF retained in production full recipes).
-- Next action: review this local diff. Commit/push, exact-image, and a fresh matched target pair each remain separate user approval boundaries.
-- Claim ceiling: `DURABILITY_REPAIR_LOCAL_PASS / EXACT_IMAGE_NOT_RUN / TARGET_NOT_RUN / NUMERICAL_PATH_UNCHANGED / FIRST_RED_NOT_LOCALIZED / NUMERICAL_FIX_NOT_AUTHORIZED`.
+- Next action: review this local diff. Pinned exact-image, commit, push, and a fresh matched target pair each remain separate user approval boundaries.
+- Claim ceiling: `REPLAY_ROUND_PROVENANCE_LOCAL_PASS / EXACT_IMAGE_NOT_RUN / TARGET_NOT_RUN / NUMERICAL_PATH_UNCHANGED / ROUND0_STOCHASTIC_EXACT_ONLY / FIRST_RED_NOT_LOCALIZED / NUMERICAL_FIX_NOT_AUTHORIZED`.
 - Sensitive evidence: the compact bundle contains real tokens/capsules. `m15-wide-v1` publishes it only under the already registered per-run P38 GCS root after sealed-union classification; never return the payload through Git or chat.
 - Key artifacts: [Attempt-14 flat shard summary](evidence/v1_apc_m15_attempt14_d33_flat_shard_audit_20260828/FLAT_SHARD_AUDIT_SUMMARY.json), [Attempt-14 inventory summary](evidence/v1_apc_m15_attempt14_d33_inventory_return_20260828/INVENTORY_SUMMARY.json), [Attempt-14 operator return](evidence/v1_apc_m15_attempt14_d33_operator_return_20260828/OPERATOR_RETURN_SUMMARY.json).
-- Updated: 2026-08-28 (Phase D3a host gates passed; exact-image, commit/push, and target not run).
+- Updated: 2026-08-28 (Phase D3b host gates passed; exact-image, commit/push, and target not run).
