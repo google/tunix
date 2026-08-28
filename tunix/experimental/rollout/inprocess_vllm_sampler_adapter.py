@@ -42,6 +42,7 @@ class InprocessVllmSamplerAdapter(Sampler, abc.ABC):
       config: Any = None,
       model_name: str = "",
       raiden_sync_delegate: Any = None,
+      weight_sync_mode: weight_sync.WeightSyncMode | str | None = None,
       **kwargs,
   ):
     self.server_id = server_id
@@ -50,9 +51,14 @@ class InprocessVllmSamplerAdapter(Sampler, abc.ABC):
     self.model_name = model_name or kwargs.get("model", "")
     self.vllm_sampler = None
     self.raiden_sync_delegate = raiden_sync_delegate
-    self.weight_sync_mode = getattr(
-        config, "weight_sync_mode", weight_sync.WeightSyncMode.FALLBACK
-    )
+    if weight_sync_mode is None:
+      weight_sync_mode = getattr(config, "weight_sync_mode", None)
+    if isinstance(weight_sync_mode, weight_sync.WeightSyncMode):
+      self.weight_sync_mode = weight_sync_mode
+    elif isinstance(weight_sync_mode, str):
+      self.weight_sync_mode = weight_sync.WeightSyncMode(weight_sync_mode)
+    else:
+      self.weight_sync_mode = weight_sync.WeightSyncMode.FALLBACK
     self.enable_raiden = (
         self.weight_sync_mode == weight_sync.WeightSyncMode.RAIDEN
     )
