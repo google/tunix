@@ -169,6 +169,11 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument("--rpc_timeout_s", type=float, default=1800.0)
   parser.add_argument("--inference_addr", type=str, default="")
   parser.add_argument("--stop_workers_on_exit", action="store_true")
+  parser.add_argument(
+      "--debug",
+      action="store_true",
+      help="Enable debug logging and print full sampler responses.",
+  )
   return parser.parse_args(argv)
 
 
@@ -224,7 +229,7 @@ def _build_gsm8k_dataset(args: argparse.Namespace) -> grain.MapDataset:
   )
 
 
-def _make_reward_fn(mode: str):
+def _make_reward_fn(mode: str, debug: bool = False):
   """Creates the optional orchestrator-side reward function."""
   if mode == "env":
     return None
@@ -235,6 +240,17 @@ def _make_reward_fn(mode: str):
     reward, _ = gsm8k.score_gsm8k_completion(
         text, metadata.get("answer", metadata.get("gold_answer"))
     )
+    if debug:
+      prompt_id = metadata.get("prompt_id", getattr(item, "group_id", "unknown"))
+      gold_answer = metadata.get("gold_answer")
+      logging.debug(
+          "[Orchestrator] Sampler response for %s:\n"
+          "[Sampled Response] ---\n%s\n--- [End Response] ---\n"
+          "Gold Answer: %s",
+          prompt_id,
+          text,
+          gold_answer,
+      )
     return reward
 
   return reward_fn
@@ -467,11 +483,14 @@ def main(argv: list[str], context: Any = None) -> None:
 
     match service_type:
       case "trainer":
-        trainer_addr_future.set_result(service_address)
+        if not trainer_addr_future.done():
+          trainer_addr_future.set_result(service_address)
       case "rollout":
-        rollout_addr_future.set_result(service_address)
+        if not rollout_addr_future.done():
+          rollout_addr_future.set_result(service_address)
       case "inference":
-        inference_addr_future.set_result(service_address)
+        if not inference_addr_future.done():
+          inference_addr_future.set_result(service_address)
       case _:
         raise RuntimeError(f"unknown service type {service_type}")
 
@@ -534,7 +553,7 @@ def main(argv: list[str], context: Any = None) -> None:
       },
   )
 
-  reward_fn = _make_reward_fn(args.reward_mode)
+  reward_fn = _make_reward_fn(args.reward_mode, args.debug)
   program = rl_program.StandardRLProgram(
       algo=algo,
       dataset=_iter_prompt_items(args),
@@ -567,6 +586,7 @@ def main(argv: list[str], context: Any = None) -> None:
     )
     cluster.run_program(
         program=program,
+        num_steps=args.max_steps,
         bring_up=False,
     )
   finally:
