@@ -45,11 +45,14 @@ export TOKENIZER_PATH=${TOKENIZER_PATH:-${MODEL_ID}}
 export MAXTEXT_MODEL_NAME=${MAXTEXT_MODEL_NAME:-qwen3-1.7b}
 
 export MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-512}
-export MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-128}
-export BATCH_SIZE=${BATCH_SIZE:-2}
-export NUM_GENERATIONS=${NUM_GENERATIONS:-2}
-export MAX_STEPS=${MAX_STEPS:-1}
-export TRAIN_MICRO_BATCH_SIZE=${TRAIN_MICRO_BATCH_SIZE:-1}
+export MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-512}
+export BATCH_SIZE=${BATCH_SIZE:-8}
+export NUM_GENERATIONS=${NUM_GENERATIONS:-4}
+export MAX_STEPS=${MAX_STEPS:-100}
+export TRAIN_MICRO_BATCH_SIZE=${TRAIN_MICRO_BATCH_SIZE:-8}
+export REWARD_MODE=${REWARD_MODE:-exact}
+export DATASET_SOURCE=${DATASET_SOURCE:-huggingface}
+export LEARNING_RATE=${LEARNING_RATE:-2e-6}
 
 # peft runs tunix's PeftTrainer (default, matches this script's prior
 # behavior); maxtext runs MaxText's MaxTextTrainingEngine.
@@ -64,6 +67,7 @@ export USE_LORA=${USE_LORA:-0}
 # Logs source/destination Raiden tensor checksums on both the trainer and
 # rollout sides during weight sync, for cross-verification of a real run.
 export VERIFY_WEIGHTS=${VERIFY_WEIGHTS:-false}
+export RAIDEN_WEIGHT_SYNC_CHUNKS=${RAIDEN_WEIGHT_SYNC_CHUNKS:-}
 
 export ORCHESTRATOR_ID=$USER-orch
 export ORCHESTRATOR_PORT=20000
@@ -111,6 +115,8 @@ export ROLLOUT_MAXTEXT_ATTENTION=${ROLLOUT_MAXTEXT_ATTENTION:-}
 # sessions (libtpu coordinates the whole physical slice as one session).
 export ROLLOUT_REPLICAS=${ROLLOUT_REPLICAS:-1}
 
+export SYNC_GIT_BRANCH=${SYNC_GIT_BRANCH:-atwigg/gsm8k-dist}
+
 stop_orchestrator() {
   kubectl delete jobset "${ORCHESTRATOR_ID}" 2>/dev/null || true
 }
@@ -123,6 +129,7 @@ start_orchestrator() {
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${ORCHESTRATOR_PORT}" \
     --worker_startup_command=" \
+      cd /app && git fetch https://github.com/google/tunix.git ${SYNC_GIT_BRANCH} && git checkout FETCH_HEAD -- examples/math_gsm8k tunix/experimental/examples/math_gsm8k_dist/run_gsm8k_dist_grpo.py && \
       python -m tunix.experimental.distributed.runtime.main \
         --discovery_id=${ORCHESTRATOR_ID} \
         --discovery_port=${ORCHESTRATOR_PORT} \
@@ -136,6 +143,8 @@ start_orchestrator() {
         --max_response_length=${MAX_RESPONSE_LENGTH} \
         --train_micro_batch_size=${TRAIN_MICRO_BATCH_SIZE} \
         --num_rollout_workers=${ROLLOUT_REPLICAS} \
+        --reward_mode=${REWARD_MODE} \
+        --dataset_source=${DATASET_SOURCE} \
         --sync_weights \
         --stop_workers_on_exit \
     " \
@@ -158,7 +167,7 @@ start_trainer() {
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${TRAINER_PORT}" \
     --worker_startup_command=" \
-      VERIFY_WEIGHTS=${VERIFY_WEIGHTS} python -m tunix.experimental.distributed.runtime.main \
+      VERIFY_WEIGHTS=${VERIFY_WEIGHTS} ${RAIDEN_WEIGHT_SYNC_CHUNKS:+RAIDEN_WEIGHT_SYNC_CHUNKS=${RAIDEN_WEIGHT_SYNC_CHUNKS}} python -m tunix.experimental.distributed.runtime.main \
         --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
         --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
         --process_main=tunix.experimental.examples.math_gsm8k_dist.run_trainer_node.main \
@@ -178,6 +187,8 @@ start_trainer() {
         --max_response_length=${MAX_RESPONSE_LENGTH} \
         --mini_batch_size=${MINI_BATCH_SIZE} \
         --train_micro_batch_size=${TRAIN_MICRO_BATCH_SIZE} \
+        --learning_rate=${LEARNING_RATE} \
+        --log_train_steps \
         --eval_every_n_steps=${EVAL_EVERY_N_STEPS} \
         --lora_rank=${LORA_RANK} \
         --lora_alpha=${LORA_ALPHA} \
