@@ -228,7 +228,7 @@ def render(
   name = (
       f"canon-p58-{treatment}-"
       f"{'three' if stage == 'three-update' else 'full'}-{run_id}"
-      if checked_vma_diagnostic
+      if checked_vma_diagnostic or seam_localization
       else f"canon-p58-ds4b-{treatment}-"
       f"{'three' if stage == 'three-update' else 'full'}-{run_id}"
   )
