@@ -1,12 +1,136 @@
 # M15 APC target-debug handoff
 
-## START HERE — prepare the three-round Layer-0 pair; do not hand-edit YAML
+## START HERE — recover Attempt 13 from GCS; do not relaunch or repair RPA
 
-The current source prepares the next run but does not authorize it.  The next
-approved target operation is one matched APC-off/APC-on pair, each containing
-three evaluation-only rounds with frozen weights, zero backward, and zero
-optimizer commits.  The full observer is pinned to Layer 0 because Attempt 12
-placed the analysis-grade coarse interval between Layer-0 input and output.
+This section supersedes the older Attempt-13 localization and Phase-E prose
+later in this file.  The checked-in Attempt-13 directory is a hash-valid
+**five-file subset**, not the complete three-round return required by the
+published source.  It is analysis-grade and does not authorize a numerical
+change.
+
+The subset verifies its own `SHA256SUMS` (`4/4` entries), and its summaries
+report the following candidate observation:
+
+```text
+off: A-B=0 bytes, B-C=0 bytes
+on:  A-B=239 bytes / 114 elements, B-C=0 bytes
+reported fingerprint interval: Layer-0 k_post_rope -> rpa_output
+```
+
+Those numbers have not yet been bound to the official per-round classifier
+outputs.  The directory contains only:
+
+- `INCIDENT_REPORT.md`;
+- `receipt.json`;
+- one minimized off classifier and one minimized on classifier;
+- `SHA256SUMS` covering those four files.
+
+It does **not** contain `MULTIROUND_SUMMARY.json`, `PACKAGING.txt`, the six
+per-round classifiers, `PREFLIGHT.json`, `COLLECTED.json`, `COMPLETE.json`,
+`ROUND_INPUT_RECEIPT.json`, `WIDE_ROUND_COMPLETE.json`, raw-log identity, or
+the JobSet terminal receipts.  Neither minimized classifier has a
+`diagnostic_round`; the on classifier also omits the official classifier's
+`anchors`, `expected_layer`, `first_difference_signatures`,
+`mixed_first_difference_signatures`, and `replay_ledger_receipts`.
+
+There is a second fail-closed inconsistency.  At the claimed runtime source
+`7d30f3827480e6f9d5ae972f55ca4d16f07de6df`, the official classifier requires
+`diagnostic_round` and emits the fields above, but its
+`_source_anchor("rpa_output")` raises `source anchor is absent`.  This local
+change corrects that observer anchor; it does not retroactively make the
+submitted `source_interval` into runtime output.  In particular, the claimed
+direct `rpa_kernel_p66.py` line cannot be reproduced from the published
+runtime source.
+
+The observer stores eight `uint32` fingerprints per checkpoint.  It does not
+store full tensors for bytewise comparison.  The reported `7.1857e8` is a
+fingerprint-integer difference from the minimized receipt, not a measured
+activation `max_abs`, and must not be described as the numerical magnitude of
+the RPA output error.
+
+Current claim ceiling:
+
+```text
+ATTEMPT13_SUBSET_HASH_VALID
+OFFICIAL_CLASSIFIER_NOT_REPLAYABLE
+RPA_ATTENTION_CALL_INTERVAL_HYPOTHESIS
+NUMERICAL_REPAIR_NOT_AUTHORIZED
+```
+
+### Bucket-capable executor: recover the existing d32 rounds now
+
+Do not launch TPU/Kubernetes.  Do not edit RPA, RoPE, KV, attention, or APC
+numerics.  On the executor that can read the registered bucket, run the
+Attempt-13 wrapper from a clean checkout:
+
+```bash
+RETURN=/tmp/v1-apc-m15-d32-small-return
+test ! -e "$RETURN"
+bash canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/recover_m15_attempt13_d32.sh \
+  "$RETURN" /mnt/disks/tunix-data
+(cd "$RETURN" && sha256sum -c SHA256SUMS)
+```
+
+The wrapper pins the checked-in receipt SHA, source commit, two exact JobSet
+names, `rounds=3`, `observer=full`, and `seam_layer=0`.  It derives the two GCS
+roots from that receipt, creates a temporary read-only audit contract, calls
+the generic multiround return tool, verifies the first manifest, validates the
+official per-round classifier schema and numerical hard gates, writes
+`ATTEMPT13_ANALYSIS.json`, regenerates the final manifest, and verifies it
+again.  It neither renders nor launches a JobSet and does not mutate GCS.
+
+Return the complete small `$RETURN` directory unchanged, plus:
+
+1. the wrapper's final `[M15.MULTIROUND] COMPLETE ...` line;
+2. its final `[M15.ATTEMPT13] RETURN_READY ...` line;
+3. independent `sha256sum -c SHA256SUMS` output;
+4. both JobSet terminal statuses;
+5. each immutable raw-log object identity, SHA-256, and byte size.
+
+The directory must contain `MULTIROUND_SUMMARY.json`, `PACKAGING.txt`,
+`ATTEMPT13_ANALYSIS.json`, `SHA256SUMS`, and these six official outputs when
+all rounds survived:
+
+```text
+off.round-000000.classification.json
+off.round-000001.classification.json
+off.round-000002.classification.json
+on.round-000000.classification.json
+on.round-000001.classification.json
+on.round-000002.classification.json
+```
+
+Interpret the return mechanically:
+
+| Status | Meaning | Next action |
+|---|---|---|
+| `COMPLETE` | all six rounds and both terminal roots are present | replay the official classifier from sealed inputs |
+| `ROUNDS_RECOVERED_ROOT_INCOMPLETE` | all six rounds survived but root close is absent | analyze as analysis-grade; repair only root finalization |
+| `PARTIAL_ROUNDS_RECOVERED` | one or more rounds survived | preserve and analyze recovered rounds; do not call the pair complete |
+| `NO_DURABLE_ROUND` | no sealed round is recoverable | repair worker/upload durability before another launch |
+
+Any off-arm red, B-C red, source/round/hash mismatch, or failed manifest is a
+hard stop.  The current source now resolves the classifier's `rpa_output`
+anchor to the real observer patch rather than inventing a line in the RPA
+implementation.  The small return still does not contain the token-bearing
+compact bundles, so it records
+`official_classifier_replay=NOT_PERFORMED_FROM_SMALL_RETURN`.  If all three on
+rounds independently place the same fingerprint transition in the
+attention-call interval while all off rounds remain exact, the next
+scientific phase is bucket-local replay of those compact bundles followed by
+an RPA sub-boundary observer: block table and attention metadata, actual K/V
+read fingerprints, kernel input, reduction, and output.  It is not an
+immediate edit to `rpa_kernel_p66.py`.
+
+## DEFERRED — prepare a new three-round Layer-0 pair only if d32 is unrecoverable
+
+This launch contract is a fallback only if the d32 recovery above returns
+`NO_DURABLE_ROUND` and the user separately approves a fresh target run.  The
+current source prepares the run but does not authorize it.  The fallback is
+one matched APC-off/APC-on pair, each containing three evaluation-only rounds
+with frozen weights, zero backward, and zero optimizer commits.  The full
+observer is pinned to Layer 0 because Attempt 12 placed the analysis-grade
+coarse interval between Layer-0 input and output.
 
 This is not “run longer and hope the final upload works.”  At the end of each
 round the learner blocks until the live worker has:
@@ -937,7 +1061,10 @@ python3 canon-zero-tim/cluster/render_v1_apc_m15_target_debug.py \
 
 ## Attempt 13 M15 Target Debug Runs (d32-7d30f382 Phase D Layer-0 Full Observer)
 
-Attempt 13 paired dual-arm execution (`d32-7d30f382`, source commit `7d30f3827480e6f9d5ae972f55ca4d16f07de6df`) was executed on dual 64-TPU allocations (DP8xTP8) with the 15-checkpoint Full Observer attached to Layer 0:
+The five checked-in files report that Attempt 13 (`d32-7d30f382`, source
+commit `7d30f3827480e6f9d5ae972f55ca4d16f07de6df`) executed a paired dual-arm
+DP8xTP8 Layer-0 full-observer run.  The following values are retained as the
+submitted summary, not as a replayed official classification:
 
 - **Control Arm (`canon-v1-apc-m15-off-d32-7d30f382`)**:
   - Rollout: 256 trajectories completed, **0.0%** prefix cache hit rate, solve rate **16.0%** (41/256).
@@ -949,7 +1076,7 @@ Attempt 13 paired dual-arm execution (`d32-7d30f382`, source commit `7d30f382748
 - **Treatment Arm (`canon-v1-apc-m15-on-d32-7d30f382`)**:
   - Rollout: 256 trajectories completed, **92.7%** prefix cache hit rate, solve rate **19.9%** (51/256).
   - Pre-alignment: `[CANON_ALIGN_PRE] step=0 verdict=FAIL N_action=115396 bounds=[('S_decode_vs_S_prefill', 239), ('S_prefill_vs_T_old', 0)]` ($B-C=0$ exact, captured 239 differing bytes).
-  - Intra-Layer Checkpoint Localization:
+  - Submitted fingerprint checkpoint summary:
     - `[0] layer_input`: 🟢 EXACT MATCH ($\Delta = 0.0$)
     - `[1] input_norm`: 🟢 EXACT MATCH ($\Delta = 0.0$)
     - `[2] q_proj`: 🟢 EXACT MATCH ($\Delta = 0.0$)
@@ -959,14 +1086,30 @@ Attempt 13 paired dual-arm execution (`d32-7d30f382`, source commit `7d30f382748
     - `[6] k_norm`: 🟢 EXACT MATCH ($\Delta = 0.0$)
     - `[7] q_post_rope`: 🟢 EXACT MATCH ($\Delta = 0.0$)
     - `[8] k_post_rope`: 🟢 EXACT MATCH ($\Delta = 0.0$)
-    - **`[9] rpa_output`**: 🔴 **FIRST RED** ($\Delta_{\max} = 7.1857 \times 10^8$)
+    - **`[9] rpa_output`**: red fingerprint; the reported
+      `7.1857e8` is an integer-fingerprint delta, not an activation `max_abs`.
     - `[10..14] o_proj, residual, post_norm, mlp, layer_output`: 🔴 RED (downstream propagation).
   - Classification: `M15_INTERNAL_FIRST_RED_LOCALIZED`, `gate=INTERNAL_FIRST_RED_LOCALIZED`, `selected_layer=0`.
   - Terminal: Controlled exit code 42, zero backward, zero optimizer commits.
 - Retained evidence: `evidence/v1_apc_m15_attempt13_paired_d32_20260828/`.
 
-### Current Claim Ceiling and Next Action
+### Evaluator correction — Attempt 13 is not classifier-replayable yet
 
-- **Claim Ceiling**: `FIRST_RED_LOCALIZED` (Gate: `INTERNAL_FIRST_RED_LOCALIZED`).
-- **Defect Localization**: Query/Key projections and RoPE are 100% bitwise exact. Divergence originates directly in TPU Ragged Paged Attention (`tunix/models/qwen3/tpu_inference/rpa_kernel_p66.py` / `sharded_ragged_paged_attention`) when fetching cached prefix KV blocks.
-- **Next Step (Phase E)**: Numerical repair of `rpa_kernel_p66.py` block-table indexing and paged KV cache read logic.
+- The local subset's four hashed payloads are intact, but the complete
+  three-round and terminal evidence chain is absent.
+- Both submitted classifiers omit `diagnostic_round`; the on-arm classifier
+  also omits the official anchor/signature/replay-ledger fields.
+- The classifier in the claimed runtime source fails while resolving the
+  reported `rpa_output` source anchor.  The local correction points to the
+  observer patch, but has not yet been run against the private compact bundle;
+  the submitted `source_interval` therefore remains unverified.
+- Fingerprint equality is not full-tensor byte equality.  The available subset
+  supports only an RPA/attention-call **interval hypothesis**, not a proven
+  block-table or cached-KV-read defect.
+- Claim ceiling:
+  `ATTEMPT13_SUBSET_HASH_VALID / OFFICIAL_CLASSIFIER_NOT_REPLAYABLE /
+  RPA_ATTENTION_CALL_INTERVAL_HYPOTHESIS`.
+- Next action: follow the top `START HERE` section and recover d32's six
+  per-round classifiers from GCS.  Do not launch again and do not enter Phase E
+  until that return is independently hashed and the official classifier can be
+  replayed.

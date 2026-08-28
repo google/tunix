@@ -307,6 +307,15 @@ class M15WideSeamClassifierTest(unittest.TestCase):
     fields = result["first_red_boundary"]["differing_fingerprint_fields"]
     self.assertEqual(fields, [2])
 
+  def test_full_observer_source_anchors_resolve_from_observer_patch(self):
+    for checkpoint in MODULE._FULL_CHECKPOINTS:  # pylint: disable=protected-access
+      anchor = MODULE._source_anchor(checkpoint)  # pylint: disable=protected-access
+      self.assertEqual(
+          anchor["file"],
+          "canon-zero-tim/patches/tpu_inference/17-qwen3-p38-seam-observer.patch",
+      )
+      self.assertGreater(anchor["line"], 0)
+
   def test_compact_bundle_contains_selected_raw_inputs_and_valid_manifest(self):
     fixture = self._fixture()
     classification = fixture.classify()

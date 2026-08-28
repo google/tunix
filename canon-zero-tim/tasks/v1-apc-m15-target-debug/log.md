@@ -705,3 +705,29 @@
   self-hashed contract with two arms, three rounds, and zero backward/commit;
   it did not launch them.
 - No commit, push, GCS access, pinned image, TPU, or Kubernetes launch occurred.
+
+## 2026-08-28 — Attempt-13 one-command GCS recovery and analysis prepared
+
+- Corrected the checked-in Attempt-13 claim from `FIRST_RED_LOCALIZED` to
+  `ATTEMPT13_SUBSET_HASH_VALID / OFFICIAL_CLASSIFIER_NOT_REPLAYABLE /
+  RPA_ATTENTION_CALL_INTERVAL_HYPOTHESIS`. The five-file subset verifies its
+  four listed hashes but omits the six per-round official classifiers and the
+  terminal evidence chain.
+- Added `recover_m15_attempt13_d32.sh`. It pins the immutable Attempt-13
+  receipt SHA, source commit and JobSet identities, derives the registered GCS
+  roots without a hand-written render directory, runs the existing small
+  return audit, and performs independent manifest checks before and after
+  analysis. It never launches Kubernetes or mutates GCS.
+- Added `analyze_m15_attempt13_return.py`. It requires exact off controls,
+  B-C zero, round identity, and the complete full-observer anchor/signature/
+  replay-ledger fields. A manually minimized classifier now fails closed. The
+  result always records `numerical_repair_authorized=false`.
+- Corrected `_source_anchor("rpa_output")` to the real output-fingerprint use
+  in patch 17. The prior needle did not exist and the submitted direct
+  `rpa_kernel_p66.py` source interval could not be produced by official code.
+- Host evidence: task-local discovery 89/89 PASS; Bash syntax PASS; a complete
+  fake-GCS no-durable-round wrapper run reached
+  `[M15.ATTEMPT13] RETURN_READY decision=NO_DURABLE_ROUND
+  numerical_repair_authorized=0`; `git diff --check` PASS.
+- No real GCS access, TPU/Kubernetes launch, numerical model change, commit,
+  or push occurred.

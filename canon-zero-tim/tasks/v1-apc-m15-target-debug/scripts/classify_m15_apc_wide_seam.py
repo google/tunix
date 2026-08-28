@@ -307,7 +307,10 @@ def _source_anchor(checkpoint: str) -> dict[str, Any]:
         "k_norm": "_seam_k_norm = k",
         "q_post_rope": "_seam_q_post_rope = q",
         "k_post_rope": "_seam_k_post_rope = k",
-        "rpa_output": "outputs, kv_cache = self.attention",
+        # The attention call itself is unchanged context in patch 17.  Anchor
+        # the first observer use of its output instead of inventing a line in
+        # the installed RPA implementation.
+        "rpa_output": "+                outputs,",
         "o_proj": "o = self.o_proj(outputs)",
         "attention_residual": "attention_residual = attn_projected + x",
         "post_attention_norm": "post_attention_norm = self.post_attention_layernorm",
