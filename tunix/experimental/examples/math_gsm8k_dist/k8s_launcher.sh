@@ -129,7 +129,7 @@ start_orchestrator() {
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${ORCHESTRATOR_PORT}" \
     --worker_startup_command=" \
-      cd /app && git fetch https://github.com/google/tunix.git ${SYNC_GIT_BRANCH} && git checkout FETCH_HEAD -- examples/math_gsm8k tunix/experimental/examples/math_gsm8k_dist/run_gsm8k_dist_grpo.py && \
+      cd /app && git fetch https://github.com/google/tunix.git ${SYNC_GIT_BRANCH} && git checkout FETCH_HEAD -- examples/math_gsm8k tunix/experimental/examples/math_gsm8k_dist/run_gsm8k_dist_grpo.py tunix/experimental/orchestrator/distributed_rl_engine.py && \
       python -m tunix.experimental.distributed.runtime.main \
         --discovery_id=${ORCHESTRATOR_ID} \
         --discovery_port=${ORCHESTRATOR_PORT} \

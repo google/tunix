@@ -239,44 +239,70 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
 
     return await self.dispatch_rollout_requests(rollout_reqs)
 
+  def _unpack_poll_response(self, resp: Any) -> list[datatypes.TrajectoryItem]:
+    if isinstance(resp, Exception) or resp is None:
+      return []
+    unwrap_fn = getattr(resp, "unwrap", None)
+    res = unwrap_fn() if callable(unwrap_fn) else getattr(resp, "result", resp)
+    if res is None:
+      return []
+    items = res if isinstance(res, list) else [res]
+    unpacked = []
+    for it in items:
+      if isinstance(it, dict):
+        it = datatypes.RolloutResponse(**it)
+      item = _response_to_trajectory_item(it)
+      logging.debug(
+          "[DistributedRLEngine] poll_rollouts received trajectory item:"
+          " prompt_id=%s group_id=%s pair_index=%s tokens=%d",
+          getattr(item, "prompt_id", ""),
+          getattr(item, "group_id", ""),
+          getattr(item, "pair_index", ""),
+          len(getattr(item, "completion_tokens", [])),
+      )
+      unpacked.append(item)
+    return unpacked
+
   async def poll_rollouts(
       self, timeout_s: float = remote_execution.LONG_POLL_TIMEOUT_S
   ) -> list[datatypes.TrajectoryItem]:
-    """Concurrently long-polls completed rollout responses across all workers."""
+    """Concurrently polls completed rollout responses across all workers without blocking stalls."""
     if not self._rollout_workers:
       return []
 
-    async def _poll_worker(worker: remote_execution.ActorHandle) -> Any:
-      res = worker.poll_responses(timeout_s=timeout_s)
+    async def _poll_worker(
+        worker: remote_execution.ActorHandle, timeout: float
+    ) -> Any:
+      res = worker.poll_responses(timeout_s=timeout)
       if inspect.isawaitable(res):
         return await res
       return res
 
-    tasks = [_poll_worker(w) for w in self._rollout_workers]
-    responses = await asyncio.gather(*tasks, return_exceptions=True)
     completed: list[datatypes.TrajectoryItem] = []
 
-    for i, resp in enumerate(responses):
-      if isinstance(resp, Exception) or resp is None:
-        continue
-      unwrap_fn = getattr(resp, "unwrap", None)
-      res = (
-          unwrap_fn() if callable(unwrap_fn) else getattr(resp, "result", resp)
-      )
-      if res is not None:
-        items = res if isinstance(res, list) else [res]
-        for it in items:
-          if isinstance(it, dict):
-            it = datatypes.RolloutResponse(**it)
-          item = _response_to_trajectory_item(it)
-          logging.debug(
-              "[DistributedRLEngine] poll_rollouts received trajectory item: prompt_id=%s group_id=%s pair_index=%s tokens=%d",
-              getattr(item, "prompt_id", ""),
-              getattr(item, "group_id", ""),
-              getattr(item, "pair_index", ""),
-              len(getattr(item, "completion_tokens", [])),
-          )
-          completed.append(item)
+    # 1. Non-blocking drain loop: collect all completed responses waiting in worker queues.
+    while True:
+      tasks = [_poll_worker(w, 0.0) for w in self._rollout_workers]
+      responses = await asyncio.gather(*tasks, return_exceptions=True)
+      batch = []
+      for resp in responses:
+        batch.extend(self._unpack_poll_response(resp))
+      if not batch:
+        break
+      completed.extend(batch)
+
+    if completed:
+      return completed
+
+    # 2. If all workers were empty, wait with a short timeout (max 1.0s) so an empty worker
+    # doesn't block the gather for long when another worker has completed results arriving.
+    wait_timeout = min(timeout_s, 1.0) if timeout_s > 0 else 0.0
+    if wait_timeout > 0:
+      tasks = [_poll_worker(w, wait_timeout) for w in self._rollout_workers]
+      responses = await asyncio.gather(*tasks, return_exceptions=True)
+      for resp in responses:
+        completed.extend(self._unpack_poll_response(resp))
+
     return completed
 
   async def generate(

@@ -72,13 +72,13 @@ DEFAULT_SYSTEM_PROMPT: str = (
     "Then, put your final numerical answer inside <answer>\\boxed{}</answer> tags."
 )
 
-DEFAULT_PROMPT_TEMPLATE: str = """Solve the following math problem.
+DEFAULT_PROMPT_TEMPLATE: str = """Solve the following math problem step by step.
 First, put your detailed step-by-step reasoning process inside <reasoning>...</reasoning> tags.
 Then, put your final numerical answer inside <answer>\\boxed{{}}</answer> tags. Do not put anything else in the answer tags.
 
 Problem: {question}
-<reasoning>
-"""
+
+Solution:"""
 
 
 # ==============================================================================
@@ -184,7 +184,8 @@ def normalize_answer(text: str | None) -> str | None:
 def is_format_correct(text: str) -> bool:
   """Checks if the completion satisfies required XML reasoning and answer tags.
 
-  Accepts either (<reasoning> and </reasoning>) or (<think> and </think>),
+  Accepts either (<reasoning> and </reasoning>) or </reasoning> boundary,
+  or (<think> and </think>) or </think> boundary,
   and requires either (<answer> and </answer>) or \\boxed.
 
   Args:
@@ -195,11 +196,16 @@ def is_format_correct(text: str) -> bool:
   """
   if not text:
     return False
-  has_reasoning = ("<reasoning>" in text and "</reasoning>" in text) or (
-      "<think>" in text and "</think>" in text
+  has_reasoning = (
+      ("<reasoning>" in text and "</reasoning>" in text)
+      or ("</reasoning>" in text)
+      or ("<think>" in text and "</think>" in text)
+      or ("</think>" in text)
   )
-  has_answer = (r"\boxed" in text) or (
-      "<answer>" in text and "</answer>" in text
+  has_answer = (
+      (r"\boxed" in text)
+      or ("<answer>" in text and "</answer>" in text)
+      or ("</answer>" in text)
   )
   return bool(has_reasoning and has_answer)
 
