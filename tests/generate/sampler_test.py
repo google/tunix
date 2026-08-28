@@ -22,15 +22,11 @@ from flax import nnx
 import jax
 import jax.numpy as jnp
 import numpy as np
+from tunix.generate import base_sampler
 from tunix.generate import sampler as sampler_lib
 from tunix.generate import utils
 from tunix.models.gemma4 import model as gemma4_model_lib
 from tunix.tests import test_common as tc
-
-
-@dataclasses.dataclass(kw_only=True)
-class ModelConfigWithDtype(tc.ModelConfig):
-  dtype: jax.numpy.dtype = jax.numpy.bfloat16
 
 
 class SamplerTest(parameterized.TestCase):
@@ -42,20 +38,18 @@ class SamplerTest(parameterized.TestCase):
 
   @parameterized.named_parameters(
       dict(
-          testcase_name='fallback',
-          config_class=tc.ModelConfig,
-          expected_dtype=jax.numpy.float32,
+          testcase_name='default_float32',
+          model_dtype=jax.numpy.float32,
       ),
       dict(
-          testcase_name='from_config',
-          config_class=ModelConfigWithDtype,
-          expected_dtype=jax.numpy.bfloat16,
+          testcase_name='bfloat16',
+          model_dtype=jax.numpy.bfloat16,
       ),
   )
-  def test_dtype(self, config_class, expected_dtype):
+  def test_dtype(self, model_dtype):
     vocab = tc.MockVocab()
     transformer = tc.ToyTransformer(
-        config=config_class(vocab_size=vocab.GetPieceSize()),
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize(), dtype=model_dtype),
         rngs=nnx.Rngs(42),
     )
 
@@ -69,7 +63,7 @@ class SamplerTest(parameterized.TestCase):
             head_dim=16,
         ),
     )
-    self.assertEqual(sampler.dtype, expected_dtype)
+    self.assertEqual(sampler.dtype, model_dtype)
 
   @parameterized.named_parameters(
       dict(
@@ -857,6 +851,151 @@ class SamplerTest(parameterized.TestCase):
     self.assertIsNotNone(result)
     self.assertIsNotNone(result.tokens)
     self.assertGreater(len(result.tokens[0]), 0)
+
+  def test_update_params(self):
+    vocab = tc.MockVocab()
+    transformer = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(0),
+    )
+
+    sampler = sampler_lib.Sampler(
+        transformer=transformer,
+        tokenizer=vocab,
+        cache_config=sampler_lib.CacheConfig(
+            cache_size=64,
+            num_layers=4,
+            num_kv_heads=4,
+            head_dim=16,
+        ),
+    )
+
+    # Create a source model with modified weights
+    source_model = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(1),
+    )
+    new_embedding = jnp.ones_like(source_model.emb.embedding.value) * 123.0
+    source_model.emb.embedding.value = new_embedding
+    new_state = nnx.state(source_model)
+
+    # Execute update_params
+    sampler.update_params(new_state)
+
+    # Verify that the sampler's transformer state and module received the updated parameters
+    state_dict = {
+        ".".join(str(p) for p in path): var
+        for path, var in sampler.transformer_state.flat_state()
+    }
+    np.testing.assert_allclose(
+        np.array(state_dict["emb.embedding"].value),
+        np.array(new_embedding),
+    )
+
+  def test_update_params_with_filter_types(self):
+    vocab = tc.MockVocab()
+    transformer = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(0),
+    )
+
+    sampler = sampler_lib.Sampler(
+        transformer=transformer,
+        tokenizer=vocab,
+        cache_config=sampler_lib.CacheConfig(
+            cache_size=64,
+            num_layers=4,
+            num_kv_heads=4,
+            head_dim=16,
+        ),
+    )
+
+    # Source model with new weights
+    source_model = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize()),
+        rngs=nnx.Rngs(2),
+    )
+    new_embedding = jnp.ones_like(source_model.emb.embedding.value) * 77.0
+    source_model.emb.embedding.value = new_embedding
+    new_state = nnx.state(source_model, nnx.Param)
+
+    # Execute update_params with explicit filter_types
+    sampler.update_params(new_state, filter_types=(nnx.Param,))
+
+    state_dict = {
+        ".".join(str(p) for p in path): var
+        for path, var in sampler.transformer_state.flat_state()
+    }
+    np.testing.assert_allclose(
+        np.array(state_dict["emb.embedding"].value),
+        np.array(new_embedding),
+    )
+
+  def test_update_params_precision_conversion(self):
+    vocab = tc.MockVocab()
+    transformer = tc.ToyTransformer(
+        config=tc.ModelConfig(vocab_size=vocab.GetPieceSize(), dtype=jnp.float32),
+        rngs=nnx.Rngs(0),
+    )
+
+    sampler = sampler_lib.Sampler(
+        transformer=transformer,
+        tokenizer=vocab,
+        cache_config=sampler_lib.CacheConfig(
+            cache_size=64,
+            num_layers=4,
+            num_kv_heads=4,
+            head_dim=16,
+        ),
+    )
+
+    # Source model configured with bfloat16 parameters
+    source_model = tc.ToyTransformer(
+        config=tc.ModelConfig(
+            vocab_size=vocab.GetPieceSize(), dtype=jnp.bfloat16
+        ),
+        rngs=nnx.Rngs(1),
+    )
+    new_embedding = jnp.ones_like(source_model.emb.embedding.value) * 42.0
+    source_model.emb.embedding.value = new_embedding
+    new_state = nnx.state(source_model)
+
+    # Execute update_params with bfloat16 params into float32 sampler
+    sampler.update_params(new_state)
+
+    # Verify that updated weights were cast to float32 (sampler rollout precision)
+    state_dict = {
+        ".".join(str(p) for p in path): var
+        for path, var in sampler.transformer_state.flat_state()
+    }
+    self.assertEqual(state_dict["emb.embedding"].value.dtype, jnp.float32)
+    np.testing.assert_allclose(
+        np.array(state_dict["emb.embedding"].value),
+        np.array(jnp.ones_like(state_dict["emb.embedding"].value) * 42.0),
+    )
+
+  def test_base_sampler_update_params_raises_not_implemented(self):
+    class _DummySampler(base_sampler.BaseSampler):
+
+      @property
+      def transformer(self):
+        return None
+
+      @property
+      def transformer_state(self):
+        return None
+
+      def tokenize(self, input_string: str):
+        return []
+
+      def __call__(self, input_strings, **kwargs):
+        return base_sampler.SamplerOutput(
+            text=[], logits=None, tokens=[], padded_prompt_tokens=np.array([]), logprobs=None
+        )
+
+    dummy = _DummySampler()
+    with self.assertRaises(NotImplementedError):
+      dummy.update_params({})
 
 
 if __name__ == '__main__':

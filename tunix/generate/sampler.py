@@ -18,8 +18,10 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 import dataclasses
+import functools
 import inspect
-from typing import Any, Optional
+import operator
+from typing import Any, Optional, Tuple
 import warnings
 
 from absl import logging
@@ -39,6 +41,8 @@ import tunix.generate.beam_search as beam_search_lib
 import tunix.generate.tokenizer_adapter as tok_adapter
 from tunix.processors import audio_processor
 from tunix.processors import image_processor
+from tunix.rl import reshard
+from tunix.rl import utils as rl_utils
 
 CacheConfig = configs.CacheConfig
 
@@ -350,6 +354,39 @@ class Sampler(base_sampler.BaseSampler):
         self._transformer_state,
         is_leaf=lambda x: isinstance(x, nnx.Variable),
     )
+
+  def update_params(
+      self,
+      updated_weights: jaxtyping.PyTree,
+      filter_types: Optional[Tuple[Any, ...]] = None,
+  ) -> None:
+    """Updates model parameters in the sampler."""
+    if filter_types is not None:
+      dst_params = nnx.state(self.transformer, filter_types)
+      try:
+        resharded_params = reshard.reshard_pytree(updated_weights, dst_params)
+      except (AttributeError, ValueError):
+        resharded_params = updated_weights
+    else:
+      resharded_params = updated_weights
+    flat_new_params, _ = rl_utils.to_flat_dict(resharded_params)
+    # TODO(linchai): Cast on rollout devices when from lower precision to
+    # higher precision.
+    new_params_precision = jax.tree.leaves(flat_new_params)[0].dtype
+    rollout_precision = jax.tree.leaves(self.transformer_state)[0].dtype
+    if new_params_precision != rollout_precision:
+      flat_new_params = jax.tree.map(
+          lambda x: x.astype(rollout_precision), flat_new_params
+      )
+    flat_old_params, tree_def = rl_utils.to_flat_dict(
+        self.transformer_state
+    )
+    merged_params = functools.reduce(
+        operator.ior, [flat_old_params, flat_new_params], {}
+    )
+    merged_params = jax.tree.unflatten(tree_def, merged_params.values())
+    new_model = nnx.merge(self._transformer_graphdef, merged_params)  # pyrefly: ignore[no-matching-overload]
+    self.transformer_state = nnx.variables(new_model, nnx.Param)
 
   @property
   def dtype(self) -> jnp.dtype:

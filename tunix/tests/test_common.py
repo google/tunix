@@ -78,26 +78,34 @@ def assert_close(path, x, y, atol=1e-5, rtol=1e-5):
 class Decoder(nnx.Module):
   """Toy decoder for testing."""
 
-  def __init__(self, rngs: nnx.Rngs):
+  def __init__(self, rngs: nnx.Rngs, dtype: jnp.dtype = jnp.float32):
     self.attn = nnx.MultiHeadAttention(
         num_heads=4,
         in_features=16,
         qkv_features=16,
         use_bias=False,
         decode=False,
+        dtype=dtype,
+        param_dtype=dtype,
         rngs=rngs,
     )
     kernel_init_fn = nnx.initializers.lecun_normal()
     self.w1 = nnx.Linear(
         in_features=16,
         out_features=32,
+        dtype=dtype,
+        param_dtype=dtype,
         rngs=rngs,
         kernel_init=nnx.with_partitioning(kernel_init_fn, ('fsdp', 'tp')),
-        bias_init=nnx.with_partitioning(nnx.initializers.zeros_init(), ('tp',)),
+        bias_init=nnx.with_partitioning(
+            nnx.initializers.zeros_init(), ('tp',)
+        ),
     )
     self.w2 = nnx.Linear(
         in_features=32,
         out_features=16,
+        dtype=dtype,
+        param_dtype=dtype,
         rngs=rngs,
         kernel_init=nnx.with_partitioning(kernel_init_fn, ('tp', 'fsdp')),
         bias_init=nnx.with_partitioning(
@@ -133,6 +141,7 @@ class ModelConfig:
   vocab_size: int = 256
   vision_config: VisionConfig | None = None
   remat_config: int | None = None
+  dtype: jnp.dtype = jnp.float32
 
 
 class ToyTransformer(nnx.Module):
@@ -145,12 +154,19 @@ class ToyTransformer(nnx.Module):
       rngs: nnx.Rngs,
   ):
     self.config = config
-    self.emb = nnx.Embed(config.vocab_size, 16, rngs=rngs)
+    dtype = config.dtype
+    self.emb = nnx.Embed(
+        config.vocab_size, 16, dtype=dtype, param_dtype=dtype, rngs=rngs
+    )
     self.layers = nnx.List(
-        [Decoder(rngs=rngs) for _ in range(config.num_layers)]
+        [Decoder(rngs=rngs, dtype=dtype) for _ in range(config.num_layers)]
     )
     self.lm_head = nnx.Linear(
-        in_features=16, out_features=config.vocab_size, rngs=rngs
+        in_features=16,
+        out_features=config.vocab_size,
+        dtype=dtype,
+        param_dtype=dtype,
+        rngs=rngs,
     )
 
     self.head_dim = 16
