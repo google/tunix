@@ -2,15 +2,19 @@
 
 ## Current P58.19 three-round coarse seam-localization checkpoint (2026-08-28)
 
+- Target Incident (p58s19b): Attempt `canon-p58-seamcoarse-full-p58s19b` (128 TPU v5p)
+  executed Step-0 multi-turn rollouts, but terminated at the postflight gate with
+  `FATAL: P38 seam observer contract failed: init=1 records=0 classifier=1` because
+  the initial SWE-bench batch prompt prefix lengths did not reach the hardcoded
+  `_SEAM_MIN_POSITION = 3072` boundary.
+- Sealed incident package: `evidence/p58s19b_seam_observer_contract_incident/`
+  with `RAW_ERROR.log`, `INCIDENT_REPORT.md`, and verified `SHA256SUMS`.
+- Required remediation for collaborators: expand `_SEAM_MIN_POSITION` / `_SEAM_CAPTURE_BOUNDS`
+  in `render_p58_deepswe_tim.py` (e.g. to `512` or `1024`) to cover the true SWE-bench
+  Step 0 prompt length distribution, re-render, and re-apply.
 - Status: implementation
   `f58a97748a8895835fba4944f5c5a34ba8bee352` is published on
-  `yuxzhang/canon-zero-tim` and immediately read back at ahead/behind `0/0`;
-  target not run. Before publication, the local work was rebased from
-  `7fed8307a6bdf9f5887593b83dcd5dc83051b1f0` over the nine intervening
-  operator commits to base `fa752a034a401fafcf70a74b880e0cdbd3f5d114`.
-  The only overlapping shared file, `cluster/steps/00_env.sh`, retained the
-  incoming Pathways pipe-timeout configuration and passed the complete
-  pinned-image gate. No image, Kubernetes object, or TPU work was created.
+  `yuxzhang/canon-zero-tim` and immediately read back at ahead/behind `0/0`.
 - Reconciled target fact: sealed P58.18 `p58aba01` returned finite A-B RED and
   exact B-C in ON-A/OFF/ON-B, with controlled exit and zero backward/optimizer
   commits.  Its classifier decision is `CHECKED_VMA_NOT_SUFFICIENT`.

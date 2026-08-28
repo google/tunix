@@ -1,6 +1,20 @@
 # P58 DeepSWE native-first training handoff
 
-## 2026-08-28 UTC — P58.19 coarse seam localization published; target NOT RUN
+## 2026-08-28 UTC — DeepSWE P58.19b Incident Report & Handoff for Fix
+
+### Incident Summary (`canon-p58-seamcoarse-full-p58s19b`, 128 TPU)
+Target run `canon-p58-seamcoarse-full-p58s19b` failed at the Step 0 postflight gate:
+- Error: `FATAL: P38 seam observer contract failed: init=1 records=0 classifier=1`
+- Cause: `_SEAM_MIN_POSITION = 3072` in `render_p58_deepswe_tim.py` exceeded the SWE-bench Step 0 prompt prefix lengths, resulting in 0 captured seam records.
+- Sealed incident artifacts: `evidence/p58s19b_seam_observer_contract_incident/` (`INCIDENT_REPORT.md`, `RAW_ERROR.log`, `SHA256SUMS`).
+
+### Action Required for Collaborator Repair
+1. Modify `_SEAM_MIN_POSITION` and `_SEAM_CAPTURE_BOUNDS` in `canon-zero-tim/cluster/render_p58_deepswe_tim.py` to match the actual initial prompt lengths of the dataset split (e.g., lower bound to 512 / 1024).
+2. Re-render the JobSet YAML via `prepare_p58_coarse_seam_localization.sh` and re-apply to cluster.
+
+---
+
+## 2026-08-28 UTC — P58.19 coarse seam localization published
 
 The implementation commit is
 `f58a97748a8895835fba4944f5c5a34ba8bee352` on

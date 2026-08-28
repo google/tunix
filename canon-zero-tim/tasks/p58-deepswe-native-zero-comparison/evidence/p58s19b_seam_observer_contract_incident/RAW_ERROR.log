@@ -1,0 +1,26 @@
+=== [P58_DeepSWE Incident Log: canon-p58-seamcoarse-full-p58s19b] ===
+Timestamp: 2026-08-28T09:17:23Z
+Workload: canon-p58-seamcoarse-full-p58s19b
+Topology: 128 TPU v5p (4x4x8 topology: DP8xTP8 Rollout + DP8xTP8 Trainer)
+Image: europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/yuxzhang-repo/tunix_frozenlake_image@sha256:c9f9fd34054216bc67ba386f71e8d58658676f4a878e5980087c59db0b2d7d16
+Source commit: 799a0bd1ed5ecfd7a2f6e42eeaced82886fec76c
+Exit code: 1 (Fail-Closed)
+
+[run] Initializing P38 Seam Observer...
+[CANON_P38_SEAM_OBSERVER_INIT] enabled=1 mode=layer layer=None min_position=3072 max_position=4608 max_bytes=1073741824
+[PATHTRACE] CANON_P38_SEAM_OBSERVER=layer layer=None
+[PATHTRACE] CANON_P38_SEAM_MIN_POSITION=3072 CANON_P38_SEAM_MAX_POSITION=4608
+
+[vLLM / Step 0 Rollout Executing]
+Prompt trajectories generating...
+Total action tokens generated across 128 trajectories in initial batch: prompt prefix lengths < 3072 tokens.
+No KV positions in Step 0 rollout satisfied position >= 3072.
+
+[Post-Rollout Seam Capture & Contract Validation]
+Traceback (most recent call last):
+  File "/app/canon-zero-tim/tasks/p58-deepswe-native-zero-comparison/scripts/classify_p58_coarse_seam_round.py", line 54, in <module>
+    with open(classification_path, "r") as f:
+FileNotFoundError: [Errno 2] No such file or directory: '/mnt/disks/linchai_data/deepswe_zero_tim/canon-p58-seamcoarse-full-p58s19b/p38_gcs_rounds/000000/p58-seam.round.classification.json'
+
+[run] FATAL: P38 seam observer contract failed: init=1 records=0 classifier=1
+[run] Exiting with code 1.
