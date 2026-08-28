@@ -304,6 +304,10 @@ class RaidenSynchronizer:
         for name, arr in list(zip(self.names, self.arrays))[:sample]
     }
     head["__grand_total__"] = float(sum(total(a) for a in self.arrays))
+    # Only comparable to the destination's grand total if both sides bound the
+    # same tensors; count and element total make that checkable, not assumed.
+    head["__tensor_count__"] = len(self.arrays)
+    head["__element_count__"] = int(sum(a.size for a in self.arrays))
     return head
 
   def work_unit_metadata(self) -> weight_sync.WorkUnitMetadata:
