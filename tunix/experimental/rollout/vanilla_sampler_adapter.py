@@ -369,10 +369,9 @@ class VanillaSamplerAdapter(Sampler, abc.ABC):
         )
 
       if self.raiden_sync_delegate.is_bounded():
-        raise RuntimeError(
-            f"VanillaSamplerAdapter [{self.server_id}] weight sync delegate is"
-            " already bounded before bind_weight_sync."
-        )
+        # TODO(tunix-dev): bind_weight_sync should be called once, currently
+        # it's called every time in weight_sync_coordinator, need to fix it.
+        return True
 
       state = self.sampler.transformer_state
       return await self.raiden_sync_delegate.bind_weight_sync(
