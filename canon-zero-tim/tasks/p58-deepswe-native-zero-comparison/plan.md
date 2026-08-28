@@ -117,7 +117,7 @@ commit remain unreachable.
 | P58.16 | Loader-metadata-aware NNX logical State contract | Only exact `_is_loaded=True` provenance is normalized; every other metadata/path/type/leaf/shape/dtype contract stays exact; full and segmented forced-device tests plus classifier and complete image gate pass | completed — implementation published/read back; `p58z07` proved the state/JIT/scorer contracts and exposed P58.17 after rollout |
 | P58.17 | Decode-vs-prefill seam probe | Exact historical mismatch join plus one real-task DP1xTP4 Zero-HP carrier, followed by a single-selector 128-chip DP8xTP8+DP8xTP8 checked-VMA-off Step-0 discriminator with durable 128-row evidence and zero VJP/backward/commit | implementation `b54bd81a` published/read back — `p58s17` returned finite A-B and B-C RED over 4,808 action tokens; `p58z08` reran the ordinary checked-VMA-on full arm and is not discriminator evidence; exact-geometry selector passes construction gates, target still not run |
 | P58.18 | Exact-geometry checked-VMA matched triplicate | Render and verify three independent ON-A/OFF/ON-B 128-chip Step-0 carriers whose recipe and treatment signatures differ only in the selector; each returns 128 durable rows, exact B-C, one finite/exact A-B classification, controlled exit, and zero VJP/backward/commit | completed — sealed `p58aba01` PASS / `CHECKED_VMA_NOT_SUFFICIENT`; all arms A-B RED, B-C exact, backward/commits zero |
-| P58.19 | Three-round coarse decode/prefill seam localization | One default-off selector renders one exact 128-chip carrier with three sequential frozen-weight layer/tail observation rounds; every round has finite A-B, exact B-C, bounded classification, verified durable seal, and zero VJP/backward/commit | active — local construction and complete pinned-image gate PASS; target not run |
+| P58.19 | Three-round coarse decode/prefill seam localization | One default-off selector renders one exact 128-chip carrier with three sequential frozen-weight layer/tail observation rounds; every round has finite A-B, exact B-C, bounded classification, verified durable seal, and zero VJP/backward/commit | active — implementation `f58a97748a8895835fba4944f5c5a34ba8bee352` published/read back; complete pinned-image gate PASS; target not run |
 
 Exactly one phase may be active. Commit, push, image publication, Kubernetes
 render/application, and TPU execution each remain separately user-gated.
@@ -140,7 +140,9 @@ immutable P58.16 trigger evidence. P58.16 implementation
 `dba5211ac4945fefb50337603c800d9f8e3d37b5` is published/read back, and
 immutable `p58z07` proved it before triggering P58.17. The P58.17 one-host
 carrier is historical diagnostic evidence, and P58.18 is sealed target
-evidence.  The P58.19 exact-geometry carrier remains separately launch-gated.
+evidence. P58.19 implementation
+`f58a97748a8895835fba4944f5c5a34ba8bee352` is published/read back; its
+exact-geometry carrier remains separately launch-gated.
 No remote execution is authorized by this plan alone.
 
 P58.5N attempts `p58f01` through `p58f11` remain `INCONCLUSIVE`. P58f01 exposed

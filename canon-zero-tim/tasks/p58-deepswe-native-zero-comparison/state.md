@@ -2,11 +2,15 @@
 
 ## Current P58.19 three-round coarse seam-localization checkpoint (2026-08-28)
 
-- Status: local construction complete on branch base
-  `7fed8307a6bdf9f5887593b83dcd5dc83051b1f0`; target not run.  The operator
-  branch is one non-overlapping M15 documentation/packaging commit ahead, so
-  this dirty worktree was not rebased.  No image, Kubernetes object, TPU work,
-  commit, or push has been created in this phase.
+- Status: implementation
+  `f58a97748a8895835fba4944f5c5a34ba8bee352` is published on
+  `yuxzhang/canon-zero-tim` and immediately read back at ahead/behind `0/0`;
+  target not run. Before publication, the local work was rebased from
+  `7fed8307a6bdf9f5887593b83dcd5dc83051b1f0` over the nine intervening
+  operator commits to base `fa752a034a401fafcf70a74b880e0cdbd3f5d114`.
+  The only overlapping shared file, `cluster/steps/00_env.sh`, retained the
+  incoming Pathways pipe-timeout configuration and passed the complete
+  pinned-image gate. No image, Kubernetes object, or TPU work was created.
 - Reconciled target fact: sealed P58.18 `p58aba01` returned finite A-B RED and
   exact B-C in ON-A/OFF/ON-B, with controlled exit and zero backward/optimizer
   commits.  Its classifier decision is `CHECKED_VMA_NOT_SUFFICIENT`.

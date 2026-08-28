@@ -1,6 +1,12 @@
 # P58 DeepSWE native-first training handoff
 
-## 2026-08-28 UTC — P58.19 coarse seam localization prepared; target NOT RUN
+## 2026-08-28 UTC — P58.19 coarse seam localization published; target NOT RUN
+
+The implementation commit is
+`f58a97748a8895835fba4944f5c5a34ba8bee352` on
+`yuxzhang/canon-zero-tim`. Immediate post-push readback matched local HEAD and
+the operator remote-tracking ref with ahead/behind `0/0`. Fetch this exact
+40-character SHA into a clean checkout; do not substitute an older P58 tip.
 
 P58.18 is closed by the sealed `p58aba01` result: ON-A, OFF, and ON-B all
 returned finite A-B RED, exact B-C, controlled exit, and zero backward/commit.
@@ -26,9 +32,9 @@ with Native, three-update, warning-only, checked-VMA diagnostic, or partial
 observer settings.  Selector absence leaves production P58 Zero/full
 unchanged.
 
-After this source is separately approved, committed, pushed, and paired with
-a separately approved digest-pinned image, an executor starts from a clean
-checkout of the exact published SHA and runs only the render wrapper:
+After this published source is paired with a separately approved digest-pinned
+image, an executor starts from a clean checkout of the exact published SHA and
+runs only the render wrapper:
 
 ```bash
 export P58_EXPECT_SOURCE_SHA=<exact-published-40-character-sha>
@@ -42,7 +48,7 @@ bash canon-zero-tim/tasks/p58-deepswe-native-zero-comparison/scripts/prepare_p58
 The wrapper refuses a dirty checkout, SHA drift, a mutable image tag, or an
 existing output file.  It contains no `kubectl` call.  Image publication,
 server dry-run, apply, and target monitoring remain separate explicit
-approvals.  Do not launch from the current dirty local worktree.
+approvals. Do not launch from a development worktree.
 
 A return is complete only when the persistent run root contains all three
 round seals and the aggregate result:

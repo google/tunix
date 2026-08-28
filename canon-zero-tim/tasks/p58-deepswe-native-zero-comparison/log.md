@@ -1,5 +1,30 @@
 # Log
 
+## 2026-08-28 UTC — P58.19 implementation published and read back
+
+- Type: user-approved implementation commit / operator-branch publication /
+  remote readback.
+- Reconciliation: the dirty local work was preserved, then rebased from
+  `7fed8307a6bdf9f5887593b83dcd5dc83051b1f0` over nine operator commits to
+  `fa752a034a401fafcf70a74b880e0cdbd3f5d114`. The shared
+  `cluster/steps/00_env.sh` auto-merge retained the incoming Pathways pipe
+  timeout and keepalive configuration alongside the P58 selector.
+- Commit: `f58a97748a8895835fba4944f5c5a34ba8bee352` (`Add three-round P58 seam
+  localization`).
+- Post-rebase validation: renderer 30/30, profile 11/11, coarse classifier
+  4/4, checked-VMA classifier 7/7, shared fake-GCS persistence, P34 static,
+  prefix-cache adjacency 12/12, flag registry `394/394/394`, syntax, secret
+  scan, and diff hygiene pass. The complete pinned-image gate exits zero with
+  `P58_EXACT_IMAGE_CPU_PASS ... checked_vma_aba=1 coarse_seam=1 ...
+  regressions=1`. The bare-host environment import remains unavailable
+  because `metrax` is absent; the same contract passes in the pinned image.
+- Readback: local HEAD and the operator remote-tracking ref both resolved to
+  the implementation commit with ahead/behind `0/0` immediately after the
+  normal non-force push. `main` was neither modified nor pushed.
+- Boundary: source publication is complete. Matching-image publication,
+  render/server dry-run, Kubernetes apply, and the 128-chip target remain
+  separately approval-gated and NOT RUN.
+
 ## 2026-08-28 UTC — P58.19 three-round coarse seam implementation, local only
 
 - Source: opened on exact local base
