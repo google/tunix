@@ -1,0 +1,59 @@
+{
+  "arm_order": [
+    "on-a",
+    "off",
+    "on-b"
+  ],
+  "arms": [
+    {
+      "arm": "on-a",
+      "classification": "/mnt/disks/linchai_data/deepswe_zero_tim/canon-p58-vmaon-full-p58aba01-ona/p58_checked_vma_on.classification.json",
+      "jobset": "canon-p58-vmaon-full-p58aba01-ona",
+      "run_id": "p58aba01-ona",
+      "selector": "on",
+      "state": "/mnt/disks/linchai_data/deepswe_zero_tim/canon-p58-vmaon-full-p58aba01-ona",
+      "yaml": "/tmp/p58-checked-vma-aba-p58aba01/jobsets/01-on-a.yaml",
+      "yaml_sha256": "01f515f148da26f78e693c62c72adf8719c0821e5994ef29267b5864b301456c"
+    },
+    {
+      "arm": "off",
+      "classification": "/mnt/disks/linchai_data/deepswe_zero_tim/canon-p58-vmaoff-full-p58aba01-off/p58_checked_vma_off.classification.json",
+      "jobset": "canon-p58-vmaoff-full-p58aba01-off",
+      "run_id": "p58aba01-off",
+      "selector": "off",
+      "state": "/mnt/disks/linchai_data/deepswe_zero_tim/canon-p58-vmaoff-full-p58aba01-off",
+      "yaml": "/tmp/p58-checked-vma-aba-p58aba01/jobsets/02-off.yaml",
+      "yaml_sha256": "a6ffa082f44e34bc590fd0becef7523e0bf4bc83528490aca3465c0d9413d7a8"
+    },
+    {
+      "arm": "on-b",
+      "classification": "/mnt/disks/linchai_data/deepswe_zero_tim/canon-p58-vmaon-full-p58aba01-onb/p58_checked_vma_on.classification.json",
+      "jobset": "canon-p58-vmaon-full-p58aba01-onb",
+      "run_id": "p58aba01-onb",
+      "selector": "on",
+      "state": "/mnt/disks/linchai_data/deepswe_zero_tim/canon-p58-vmaon-full-p58aba01-onb",
+      "yaml": "/tmp/p58-checked-vma-aba-p58aba01/jobsets/03-on-b.yaml",
+      "yaml_sha256": "175a07d63794ee7a551a5836235710370412e28711787f3409e972c706290bc1"
+    }
+  ],
+  "backward": 0,
+  "claim": "Render/construction evidence only. ON-A/OFF/ON-B is a logical arm order; a concurrent launch is a matched OFF control with two ON replicates, not a temporal ABA sandwich. Parallel target execution still requires TPU quota, three distinct head nodes, aggregate sandbox capacity, server dry-run, and explicit launch approval.",
+  "client_image": "europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/yuxzhang-repo/tunix_frozenlake_image@sha256:c9f9fd34054216bc67ba386f71e8d58658676f4a878e5980087c59db0b2d7d16",
+  "execution_mode": "parallel-requested",
+  "optimizer_commits": 0,
+  "parallel_capacity": {
+    "aggregate_sandbox_concurrency": 384,
+    "aggregate_tpu_chips": 384,
+    "head_nodes": 3,
+    "jobsets": 3,
+    "sandbox_concurrency_per_jobset": 128,
+    "sandbox_cpu_requests": 768,
+    "sandbox_memory_requests_gib": 1536,
+    "tpu_chips_per_jobset": 128
+  },
+  "schema": "canon.p58.checked-vma-aba-render.v1",
+  "source_branch": "yuxzhang/canon-zero-tim",
+  "source_commit": "cd1c2be07979691ea336bcb0d6083f7fb9cda05d",
+  "wave_id": "p58aba01",
+  "worker_nodepool": "tpu-v5p-slice"
+}

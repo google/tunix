@@ -1,0 +1,6 @@
+M15 Attempt-13 registered-root inventory
+decision=D32_LIVE_ABSENT_CONFIRMED
+status=PASS
+remote_state_mutated=0
+official_classifier_replay=NOT_PERFORMED
+numerical_repair_authorized=0

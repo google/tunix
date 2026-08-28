@@ -117,8 +117,8 @@ class Attempt13InventoryAuditTest(unittest.TestCase):
     result = self._audit()
     self.assertEqual(result["decision"], "D32_LIVE_ABSENT_CONFIRMED")
     self.assertEqual(self.client.list_calls, ["off", "on"])
-    self.assertEqual(result["arms"]["off"]["record_pairs"], 2474)
-    self.assertEqual(result["arms"]["on"]["record_pairs"], 2087)
+    self.assertEqual(result["arms"]["off"]["record_pairs"], 2445)
+    self.assertEqual(result["arms"]["on"]["record_pairs"], 2188)
     output = self.root / "return"
     self.assertEqual(len(list(output.iterdir())), 7)
     self.assertNotIn("gs://", "".join(

@@ -1,0 +1,150 @@
+{
+  "A_B_differing_bytes": 47645,
+  "A_B_differing_elements": 21717,
+  "A_B_max_abs": 14.500003814697266,
+  "B_C_differing_bytes": 0,
+  "N_action": 402856,
+  "backward": 0,
+  "claim": "This exact DP8xTP8 Step-0 arm observes the checked-VMA selector set to on. It does not certify backward, optimizer, or full training.",
+  "compact_filtered_rows": 5,
+  "durable_probe": {
+    "N_action": 402856,
+    "S_decode_vs_S_prefill": {
+      "byte_fraction": 0.029567016502174474,
+      "differing_bytes": 47645,
+      "differing_elements": 21717,
+      "element_fraction": 0.0539075997378716,
+      "first_mismatch": {
+        "a": -0.045501708984375,
+        "a_bits": "0xbd3a6000",
+        "abs_delta": 0.001018524169921875,
+        "action_run_end": false,
+        "action_run_start": true,
+        "b": -0.046520233154296875,
+        "b_bits": "0xbd3e8c00",
+        "completion_chunk_index": 8,
+        "completion_position": 2232,
+        "completion_valid_length": 2628,
+        "coordinate": [
+          0,
+          2232
+        ],
+        "differing_byte_offsets": [
+          1,
+          2
+        ],
+        "distance_to_next_sequence_chunk": 64,
+        "logical_kv_prefix_length": 4032,
+        "masked_index": 1777,
+        "offset_in_action_run": 0,
+        "offset_in_sequence_chunk": 192,
+        "previous_token_is_environment": true,
+        "prompt_length": 1800,
+        "sequence_chunk_index": 15,
+        "sequence_row": 0,
+        "token_id": 785,
+        "turn_index": 9,
+        "ulp_distance": 273408,
+        "xor_bits": "0x0004ec00"
+      },
+      "joined_artifact_rows": {
+        "11": 732,
+        "14": 292
+      },
+      "max_abs": 14.500003814697266,
+      "mismatches_truncated": true,
+      "reported_action_run_starts": 14,
+      "reported_mismatches": 1024,
+      "reported_previous_environment": 14,
+      "shift_discriminator": [
+        {
+          "mean_abs": 1.0427029468682925,
+          "median_abs": 0.5861701965332031,
+          "p90_abs": 2.6488399505615234,
+          "pairs": 859,
+          "shift": -1
+        },
+        {
+          "mean_abs": 0.030400827527046204,
+          "median_abs": 0.0048313140869140625,
+          "p90_abs": 0.09982490539550781,
+          "pairs": 1024,
+          "shift": 0
+        },
+        {
+          "mean_abs": 1.0425004503918471,
+          "median_abs": 0.5953903198242188,
+          "p90_abs": 2.6967735290527344,
+          "pairs": 859,
+          "shift": 1
+        }
+      ],
+      "total_elements": 402856
+    },
+    "artifacts": {
+      "batch_metrics": "batch_metrics.jsonl",
+      "batch_metrics_sha256": "8f47dae6331f842eabd7206e4cf84c85bf89678d66e0f7fc2595c50da789c7fe",
+      "manifest": "run_manifest.json",
+      "manifest_sha256": "bca9fe4e2f2850e865c6d23c50ba138c76bd0f0ea12bb3d1fc14c0ccebd3bfbd",
+      "pre_alignment": "/mnt/disks/linchai_data/deepswe_zero_tim/canon-p58-vmaon-full-p58aba01-ona/pre_alignment.jsonl",
+      "pre_alignment_sha256": "8ccb20f2192342d079cf6c35e13237580c9575f24b3c591f07dce3fbf6678289",
+      "trajectory": "batch-000000.trajectories.jsonl.gz",
+      "trajectory_sha256": "0a62f5e2c0660d33a7140d6d1167ece93db34e6d85a9874a55d4408499851377"
+    },
+    "carrier_provenance": {
+      "checked_vma_diagnostic": "on",
+      "expected_hostname": "",
+      "max_response_length": 16384,
+      "max_turns": 50,
+      "model_snapshot": "",
+      "onehost_seam_probe": false,
+      "onehost_xprof_arm": "none",
+      "r2egym_commit": "",
+      "run_id": "p58aba01-ona",
+      "runner_sha256": "",
+      "stage": "full",
+      "task_image": "",
+      "task_image_id": "",
+      "whitelist_sha256": "ec297c9cbc39cd67db15b0b9db6a229b15671b848df5ec3101de9ef8df7c9973"
+    },
+    "claim": "A finite RED reproduces decode-vs-prefill divergence on this exact carrier only. An exact result does not certify other TP/DP geometry.",
+    "compact_filtered_rows": 5,
+    "contract_name": "p58-qwen4b-tim-128",
+    "model_id": "Qwen/Qwen3-4B-Instruct-2507",
+    "outcome": "FINITE_RED_REPRODUCED",
+    "process_status": null,
+    "role_topology": {
+      "devices": 64,
+      "dp": 8,
+      "tp": 8
+    },
+    "schema": "canon.p58.decode-prefill-probe.classification.v1",
+    "source_commit": "cd1c2be07979691ea336bcb0d6083f7fb9cda05d",
+    "status_histogram": {
+      "MAX_CONTEXT_LIMIT_REACHED": 1,
+      "MODEL_TIMEOUT": 4,
+      "SUCCEEDED": 123
+    },
+    "trajectory_rows": 128,
+    "verdict": "PASS"
+  },
+  "marker_counts": {
+    "controlled_exit": 1,
+    "precheck_round": 1,
+    "profile": 1
+  },
+  "model_id": "Qwen/Qwen3-4B-Instruct-2507",
+  "optimizer_commits": 0,
+  "outcome": "A_B_RED_WITH_CHECKED_VMA_ON",
+  "reasons": [],
+  "role_topology": {
+    "devices": 64,
+    "dp": 8,
+    "tp": 8
+  },
+  "schema": "canon.p58.checked-vma-diagnostic.v2",
+  "selector": "on",
+  "source_commit": "cd1c2be07979691ea336bcb0d6083f7fb9cda05d",
+  "trajectory_rows": 128,
+  "verdict": "PASS"
+}

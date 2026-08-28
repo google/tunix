@@ -1,0 +1,62 @@
+{
+  "arms": {
+    "off": {
+      "arm": "off",
+      "completion_receipts_sha256": "ace0dd3ac5e17b15bbd3fa0f75841bd1d1dd491fb0b41b88e1a8937f9b34cff0",
+      "flat_shard_required_objects": 231,
+      "flat_shards": 77,
+      "jobset": "canon-v1-apc-m15-off-d32-7d30f382",
+      "live_absence_proven": true,
+      "live_objects": 0,
+      "object_count": 232,
+      "object_inventory_sha256": "dd7be3252723a27df80b58fbd61cb9f90136530f5236d29643d0f0fd19a340fc",
+      "payload_bytes": 1548589871,
+      "query": {
+        "exit_code": 0,
+        "stderr_bytes": 0,
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout_bytes": 31145,
+        "stdout_sha256": "f40d52de7aec54c1d2077a998a0a20010555209ea66796b7ffbf46a88f4c6373",
+        "tool": "gcloud-storage"
+      },
+      "record_pairs": 2445,
+      "root_identity_sha256": "2e5bc2b6e63899427a361bf5f33f91b24a0b5f762e6a31d4a8c61cb52e7f5c73",
+      "status": "PASS",
+      "wide_round_objects": 0
+    },
+    "on": {
+      "arm": "on",
+      "completion_receipts_sha256": "2aa95d571521e4fc79aba71cdf6386db746189036eb10f6fd3645538a748e560",
+      "flat_shard_required_objects": 210,
+      "flat_shards": 70,
+      "jobset": "canon-v1-apc-m15-on-d32-7d30f382",
+      "live_absence_proven": true,
+      "live_objects": 0,
+      "object_count": 211,
+      "object_inventory_sha256": "1451c36095732b117aa0991088258e69179f281c260a52480717857b2e422a2f",
+      "payload_bytes": 451070040,
+      "query": {
+        "exit_code": 0,
+        "stderr_bytes": 0,
+        "stderr_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdout_bytes": 28113,
+        "stdout_sha256": "a5ae0a4911c977e8c2fd1ad85a7860377ef7b0314f4c032bf5b87df37ad3e977",
+        "tool": "gcloud-storage"
+      },
+      "record_pairs": 2188,
+      "root_identity_sha256": "562d01700d9e55e402dc07d05d3a022a98ac9cd70048f32919715b67c8198e96",
+      "status": "PASS",
+      "wide_round_objects": 0
+    }
+  },
+  "attempt": 13,
+  "claim_ceiling": "This inventory proves registered object presence or absence and validates flat-shard completion receipts. It does not verify shard archive payload bytes or replay the numerical classifier.",
+  "decision": "D32_LIVE_ABSENT_CONFIRMED",
+  "numerical_repair_authorized": false,
+  "official_classifier_replay": "NOT_PERFORMED",
+  "receipt_sha256": "d1941c2de85050a5652bc5c6e809987f6bf72b996aa817371b08b43870835f95",
+  "remote_state_mutated": false,
+  "schema": "m15-attempt13-flat-gcs-inventory-v1",
+  "source_commit": "7d30f3827480e6f9d5ae972f55ca4d16f07de6df",
+  "status": "PASS"
+}

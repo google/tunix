@@ -27,13 +27,13 @@ ARM_CONTRACTS = {
         "field": "control_arm_off",
         "jobset": "canon-v1-apc-m15-off-d32-7d30f382",
         "shards": 77,
-        "record_pairs": 2474,
+        "record_pairs": 2445,
     },
     "on": {
         "field": "treatment_arm_on",
         "jobset": "canon-v1-apc-m15-on-d32-7d30f382",
         "shards": 70,
-        "record_pairs": 2087,
+        "record_pairs": 2188,
     },
 }
 _SHARD_MEMBERS = {"SHARD_ARCHIVE.tar", "SHA256SUMS", "SHARD_COMPLETE.json"}

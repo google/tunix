@@ -1,0 +1,16 @@
+{
+  "backward": 0,
+  "claim": "The result compares three independent exact-geometry Step-0 prechecks: one OFF control and two ON replicates. A concurrent launch is not a temporal ABA sandwich. It does not require cross-run token identity and does not certify backward, optimizer, or full training.",
+  "decision": "CHECKED_VMA_NOT_SUFFICIENT",
+  "optimizer_commits": 0,
+  "outcomes": {
+    "off": "A_B_RED_WITH_CHECKED_VMA_OFF",
+    "on-a": "A_B_RED_WITH_CHECKED_VMA_ON",
+    "on-b": "A_B_RED_WITH_CHECKED_VMA_ON"
+  },
+  "reasons": [],
+  "schema": "canon.p58.checked-vma-aba-classification.v1",
+  "source_commit": "cd1c2be07979691ea336bcb0d6083f7fb9cda05d",
+  "verdict": "PASS",
+  "wave_id": "p58aba01"
+}

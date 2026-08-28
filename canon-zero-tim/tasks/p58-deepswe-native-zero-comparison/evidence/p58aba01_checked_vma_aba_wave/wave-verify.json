@@ -1,0 +1,27 @@
+{
+  "aggregate_sandbox_concurrency": 384,
+  "aggregate_tpu_chips": 384,
+  "arm_order": [
+    "on-a",
+    "off",
+    "on-b"
+  ],
+  "backward": 0,
+  "client_image": "europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/yuxzhang-repo/tunix_frozenlake_image@sha256:c9f9fd34054216bc67ba386f71e8d58658676f4a878e5980087c59db0b2d7d16",
+  "execution_mode": "parallel-requested",
+  "jobsets": [
+    "canon-p58-vmaoff-full-p58aba01-off",
+    "canon-p58-vmaon-full-p58aba01-ona",
+    "canon-p58-vmaon-full-p58aba01-onb"
+  ],
+  "optimizer_commits": 0,
+  "persistent_roots": [
+    "/mnt/disks/linchai_data/deepswe_zero_tim/canon-p58-vmaoff-full-p58aba01-off",
+    "/mnt/disks/linchai_data/deepswe_zero_tim/canon-p58-vmaon-full-p58aba01-ona",
+    "/mnt/disks/linchai_data/deepswe_zero_tim/canon-p58-vmaon-full-p58aba01-onb"
+  ],
+  "schema": "canon.p58.checked-vma-aba-verify.v1",
+  "source_commit": "cd1c2be07979691ea336bcb0d6083f7fb9cda05d",
+  "verdict": "PASS",
+  "wave_id": "p58aba01"
+}
