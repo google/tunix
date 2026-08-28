@@ -1,6 +1,27 @@
 # M15 APC target-debug handoff
 
-## START HERE — d33 flat-shard content audit verified Round 0 only; fix first seal/ACK before rerun
+## START HERE — Attempt 15 (d34) executed Round 0 with exact numerical PASS; assemble failed on missing diagnostic_round in replay envelope
+
+### Incident Summary (Attempt 15 / d34)
+Matched pair on 64 TPU each (`canon-v1-apc-m15-off-d34-57d9ab8e` and `canon-v1-apc-m15-on-d34-57d9ab8e`):
+- **Round 0 Prefill Rescore Alignment (Verified PASS)**:
+  - **APC-Off**: `Prefix cache hit rate: 0.0%`, `N_action: 120,889`, `S_decode_vs_S_prefill differing_bytes: 0`, `Pre-alignment verdict: PASS`. 85 shards staged and uploaded.
+  - **APC-On**: `Prefix cache hit rate: 93.2%`, `N_action: 130,468`, `S_decode_vs_S_prefill differing_bytes: 0`, `Pre-alignment verdict: PASS`. 72 shards staged and uploaded.
+- **Fatal Failure Point**:
+  At round 0 completion, `_seal_p38_diagnostic_round(round_index=0)` triggered the background round sealer. `assemble_m15_wide_round.py` failed with:
+  ```text
+  [M15.WIDE.ROUND] RED replay round is invalid at line 1
+  tunix.rl.alignment.AlignmentGateError: P38 round-seal worker failed before acknowledgement: round=0 stage=assemble exit_code=2
+  ```
+- **Root Cause**: `patches/tpu_inference/26-tpu-runner-m15-replay-envelope.patch` omits `"diagnostic_round"` in the JSON envelope record. `assemble_m15_wide_round.py` expects `record["diagnostic_round"] == round_index`, evaluating to `-1` and asserting out.
+- **Sealed Incident Package**: `evidence/v1_apc_m15_attempt15_d34_20260828/` (`INCIDENT_REPORT.md`, `m15_off_d34_attempt15_tail.log`, `m15_on_d34_attempt15_tail.log`, `p38_live_worker_off.log`, `p38_live_worker_on.log`, `m15_replay_envelope_head.jsonl`, `SHA256SUMS`).
+
+### Action Plan for Attempt 16 (d35)
+1. Add `"diagnostic_round": int(_p38_seam_round())` (or `diagnostic_round`) to `patches/tpu_inference/26-tpu-runner-m15-replay-envelope.patch`.
+2. Run test suites (`test_target_carrier.py`, `test_m15_wide_durability.py`, `test_classify_m15_apc_wide_seam.py`).
+3. Re-render, dry-run, and launch Attempt 16 (`d35`) matched pair on 64 TPU.
+
+## d33 flat-shard content audit verified Round 0 only; fix first seal/ACK before rerun
 
 Attempt 14 (`d33`) now has three immutable small returns:
 

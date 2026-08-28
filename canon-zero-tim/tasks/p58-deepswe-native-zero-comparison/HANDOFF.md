@@ -1,5 +1,21 @@
 # P58 DeepSWE native-first training handoff
 
+## 2026-08-28 UTC — DeepSWE P58.19d incident intake (`canon-p58-seamcoarse-full-p58s19d`, 128 TPU)
+
+### Incident Summary
+Target run `canon-p58-seamcoarse-full-p58s19d` executed Step 0 multi-turn rollout on 128 TPU v5p (33 Pods):
+- **Continue-Decode Observer Bypass (Verified PASS)**: Commit `cf56b21a` containing `32-tpu-runner-p58-mixed-program-path.patch` successfully bypassed `continue_decode` without throwing `expected=standard actual=continue_decode`.
+- **Target Seam Window Coverage (Verified PASS)**: Multi-turn tool execution (`search`, `file_editor` up to step 4) covered bands `[12, 15]` (`3072..4095`), emitting over **635 Seam Observer Records** (`arm=A`) and **Tail Observer Records** with valid SHA256 checksums.
+- **Fatal Error**: At step 0 rollout, the accumulated `.npz` records crossed the registered `_SEAM_MAX_BYTES` (1 GiB) limit in `p38_seam_capture.py`:
+  ```text
+  RuntimeError: P38 seam evidence exceeded its registered output byte bound
+  ```
+- **Sealed Incident Package**: `evidence/p58s19d_byte_bound_incident/` (`INCIDENT_REPORT.md`, `RAW_ERROR.log`, `SHA256SUMS`).
+
+### Action Plan for p58s19e
+1. In `cluster/render_p58_deepswe_tim.py`, increase `_SEAM_MAX_BYTES` (e.g. to 4 GiB) or enable rolling shard persistence.
+2. Re-render, dry-run, and launch `canon-p58-seamcoarse-full-p58s19e` on 128 TPU.
+
 ## 2026-08-28 UTC — P58.19d continue-decode observer repair (published)
 
 The repair was rebased onto operator source

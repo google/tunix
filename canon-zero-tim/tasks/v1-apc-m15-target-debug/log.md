@@ -1,5 +1,11 @@
 # Log
 
+## 2026-08-28 UTC — Attempt 15 (d34) incident intake sealed
+
+- Workload: `canon-v1-apc-m15-off-d34-57d9ab8e` and `canon-v1-apc-m15-on-d34-57d9ab8e` (64 TPU v5p each).
+- Outcome: Complete Round 0 long-horizon multi-turn rollouts, forward/backward Pallas hot paths, and prefill rescoring executed 100% PASS with differing_bytes=0 on both arms. At round 0 completion, `_seal_p38_diagnostic_round(round_index=0)` triggered the background round sealer. `assemble_m15_wide_round.py` failed with `[M15.WIDE.ROUND] RED replay round is invalid at line 1` because `m15_replay_envelope.jsonl` produced by `26-tpu-runner-m15-replay-envelope.patch` lacked `"diagnostic_round"`.
+- Evidence: Sealed in `evidence/v1_apc_m15_attempt15_d34_20260828/` (`INCIDENT_REPORT.md`, `m15_off_d34_attempt15_tail.log`, `m15_on_d34_attempt15_tail.log`, `p38_live_worker_off.log`, `p38_live_worker_on.log`, `m15_replay_envelope_head.jsonl`, `SHA256SUMS`).
+
 ## 2026-08-24T23:20:18Z — Phase A: immutable target evidence admitted
 
 - Type: experiment / handoff

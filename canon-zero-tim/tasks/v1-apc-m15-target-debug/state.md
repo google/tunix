@@ -1,6 +1,7 @@
 # State
 
-- Status: active; Phase D3a seal/ACK hardening is local PASS after Attempt 14 proved that all 88 off + 74 on completion receipts belong to round 0. Exact-image and target gates have not run.
+- Status: active; Attempt 15 (d34) matched pair executed Round 0 with exact numerical PASS (APC-Off N_action=120,889, APC-On N_action=130,468, differing_bytes=0). Terminated at Round 0 seal due to `RED replay round is invalid at line 1` caused by missing `diagnostic_round` in `26-tpu-runner-m15-replay-envelope.patch`.
+- Sealed incident package: `evidence/v1_apc_m15_attempt15_d34_20260828/`.
 - Objective: explain and repair the M15 DP8xTP8 APC-on A-vs-B byte mismatch without changing the independent full-reset B arm or any unrelated numerical path.
 - Definition of done: `FIRST_RED_LOCALIZED` names the last exact and first red tensor plus `file:line`; one localized repair then passes host, exact-image, one-host clean/dirty controls, deterministic repeat, and separately approved DP8xTP8 A-B/B-C zero.
 - Task directory: `canon-zero-tim/tasks/v1-apc-m15-target-debug`.

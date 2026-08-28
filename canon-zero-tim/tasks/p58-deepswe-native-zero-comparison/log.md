@@ -1,5 +1,11 @@
 # Log
 
+## 2026-08-28 UTC — DeepSWE P58.19d incident intake sealed
+
+- Workload: `canon-p58-seamcoarse-full-p58s19d` (128 TPU v5p).
+- Outcome: Continue-decode observer bypass (commit `cf56b21a`) 100% verified. Seam window `[1686, 4096)` covered with 635+ records and multi-turn tool execution up to step 4. Terminated when total `.npz` records exceeded `_SEAM_MAX_BYTES` (1 GiB) with `RuntimeError: P38 seam evidence exceeded its registered output byte bound`.
+- Evidence: Sealed in `evidence/p58s19d_byte_bound_incident/` (`INCIDENT_REPORT.md`, `RAW_ERROR.log`, `SHA256SUMS`).
+
 ## 2026-08-28 UTC — P58.19 implementation published and read back
 
 - Type: user-approved implementation commit / operator-branch publication /

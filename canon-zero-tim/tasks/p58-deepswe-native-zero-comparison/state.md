@@ -2,17 +2,18 @@
 
 ## Current P58.19 three-round coarse seam-localization checkpoint (2026-08-28)
 
-- Current status: P58.19d observer-path repair is published as
-  `ed8ce99a0fa4187e0619237e071990b90d453d72` on source base
-  `57d9ab8e25de3b2404e983e9a139d78b151a58f8` and was read back after a
-  fast-forward push.  P58.19c execution and incident remain sealed in
-  `evidence/p58s19c_continue_decode_incident/`. Seam window coverage
-  `[1686, 4096)` is verified functional (`p38_seam_records=113`).
-- Target Incident (p58s19c): Attempt `canon-p58-seamcoarse-full-p58s19c` (128 TPU v5p)
-  executed Step 0 rollout and successfully captured 113 records in `[1686, 4096)`, but terminated
-  due to a program path assertion conflict in TPU runner (`continue_decode` vs `expected=standard`).
-- Sealed incident package: `evidence/p58s19c_continue_decode_incident/`
+- Current status: Target incident `canon-p58-seamcoarse-full-p58s19d` (128 TPU v5p)
+  is sealed in `evidence/p58s19d_byte_bound_incident/`. Continue-decode observer
+  bypass (commit `cf56b21a`) is verified functional with 635+ records captured
+  across `[1686, 4096)`. The run terminated due to exceeding `_SEAM_MAX_BYTES` (1 GiB).
+- Target Incident (p58s19d): Attempt `canon-p58-seamcoarse-full-p58s19d` (128 TPU v5p)
+  executed Step 0 rollout and tool actions up to Step 4, covering bands `[12, 15]`,
+  before hitting `P38 seam evidence exceeded its registered output byte bound`.
+- Sealed incident package (p58s19d): `evidence/p58s19d_byte_bound_incident/`
   with `RAW_ERROR.log`, `INCIDENT_REPORT.md`, and verified `SHA256SUMS`.
+- Prior Incident (p58s19c): Attempt `canon-p58-seamcoarse-full-p58s19c` (128 TPU v5p)
+  terminated due to `expected=standard actual=continue_decode`.
+- Sealed incident package (p58s19c): `evidence/p58s19c_continue_decode_incident/`.
 - Prior Incident (p58s19b): Attempt `canon-p58-seamcoarse-full-p58s19b` (128 TPU v5p)
   terminated with `records=0` under the old `[3072, 4608)` window.
 - Sealed incident package (p58s19b): `evidence/p58s19b_seam_observer_contract_incident/`.
