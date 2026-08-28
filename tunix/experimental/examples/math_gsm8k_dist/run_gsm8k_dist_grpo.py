@@ -66,14 +66,14 @@ from tunix.experimental.orchestrator import rl_program  # pylint: disable=g-impo
 from tunix.experimental.worker import remote_execution  # pylint: disable=g-import-not-at-top
 
 
-PROMPT_TEMPLATE = """<|im_start|>user
-Solve the following math problem step by step.
-First, put your detailed step-by-step reasoning process inside <reasoning>...</reasoning> tags.
-Then, put your final numerical answer inside <answer>\\boxed{{}}</answer> tags.
-
-Problem: {question}<|im_end|>
-<|im_start|>assistant
-"""
+PROMPT_TEMPLATE = (
+    "<|im_start|>user\n"
+    "Solve the following math problem step by step. "
+    "Put your final numerical answer inside <answer>\\boxed{{}}</answer> tags.\n\n"
+    "Problem: {question}<|im_end|>\n"
+    "<|im_start|>assistant\n"
+    "<think>\n"
+)
 
 DEMO_TASKS = (
     (
@@ -213,6 +213,8 @@ def _make_reward_fn(
   def reward_fn(item: datatypes.TrajectoryItem) -> float:
     metadata = dict(item.metadata or {})
     text = str(metadata.get("text", ""))
+    if text and not text.startswith("<think>") and "</think>" in text:
+      text = "<think>\n" + text
     gold_answer = metadata.get("gold_answer")
     prompt_id = metadata.get("prompt_id", getattr(item, "group_id", "unknown"))
     pair_index = int(metadata.get("pair_index", item.pair_index or 0))

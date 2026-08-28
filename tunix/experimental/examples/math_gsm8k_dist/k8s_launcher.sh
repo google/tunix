@@ -56,7 +56,7 @@ export LEARNING_RATE=${LEARNING_RATE:-2e-6}
 
 # peft runs tunix's PeftTrainer; maxtext runs MaxText's MaxTextTrainingEngine.
 export TRAINER_BACKEND=${TRAINER_BACKEND:-maxtext}
-export MAXTEXT_CKPT=${MAXTEXT_CKPT:-}
+export MAXTEXT_CKPT=${MAXTEXT_CKPT:-gs://cloud-tpu-multipod-dev-bucket-europe-west4/users/atwigg/checkpoints/qwen3_1.7b/0/items}
 export MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-$((BATCH_SIZE * NUM_GENERATIONS))}
 export EVAL_EVERY_N_STEPS=${EVAL_EVERY_N_STEPS:-1000000}
 export LORA_RANK=${LORA_RANK:-16}
@@ -212,6 +212,7 @@ start_rollout() {
       --worker_container_image="${TUNIX_IMAGE}" \
       --worker_container_port="${ROLLOUT_PORT}" \
       --worker_startup_command=" \
+        ${SYNC_GIT_BRANCH:+cd /app && git fetch https://github.com/google/tunix.git ${SYNC_GIT_BRANCH} && git checkout FETCH_HEAD -- tunix/experimental/examples/math_gsm8k_dist/run_rollout_node.py &&} \
         SKIP_JAX_PRECOMPILE=1 VERIFY_WEIGHTS=${VERIFY_WEIGHTS} ${ROLLOUT_USE_BATCHED_RPA:+USE_BATCHED_RPA_KERNEL=1} python -m tunix.experimental.distributed.runtime.main \
           --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
           --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
@@ -228,6 +229,7 @@ start_rollout() {
           --lora_alpha=${LORA_ALPHA} \
           --tensor_parallel_size=${ROLLOUT_TENSOR_PARALLEL_SIZE} \
           --maxtext_model_name=${MAXTEXT_MODEL_NAME} \
+          ${MAXTEXT_CKPT:+--maxtext_load_parameters_path=${MAXTEXT_CKPT}} \
           ${ROLLOUT_MAXTEXT_ATTENTION:+--maxtext_attention=${ROLLOUT_MAXTEXT_ATTENTION}} \
       " \
       | kubectl apply -f -

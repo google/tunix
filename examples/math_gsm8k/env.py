@@ -72,14 +72,14 @@ DEFAULT_SYSTEM_PROMPT: str = (
     "Then, put your final numerical answer inside <answer>\\boxed{}</answer> tags."
 )
 
-DEFAULT_PROMPT_TEMPLATE: str = """<|im_start|>user
-Solve the following math problem step by step.
-First, put your detailed step-by-step reasoning process inside <reasoning>...</reasoning> tags.
-Then, put your final numerical answer inside <answer>\\boxed{{}}</answer> tags. Do not put anything else in the answer tags.
-
-Problem: {question}<|im_end|>
-<|im_start|>assistant
-"""
+DEFAULT_PROMPT_TEMPLATE: str = (
+    "<|im_start|>user\n"
+    "Solve the following math problem step by step. "
+    "Put your final numerical answer inside <answer>\\boxed{{}}</answer> tags.\n\n"
+    "Problem: {question}<|im_end|>\n"
+    "<|im_start|>assistant\n"
+    "<think>\n"
+)
 
 
 # ==============================================================================

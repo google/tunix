@@ -132,6 +132,12 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
           " construction) happens too late for that check."
       ),
   )
+  parser.add_argument(
+      "--maxtext_load_parameters_path",
+      type=str,
+      default=os.getenv("MAXTEXT_CKPT", ""),
+      help="Optional path to Orbax parameters checkpoint for MaxText model.",
+  )
   return parser.parse_args(argv)
 
 
@@ -243,6 +249,10 @@ def _create_vllm_worker(args, tokenizer):
       }
       if args.maxtext_attention:
         maxtext_config_overrides["attention"] = args.maxtext_attention
+      if args.maxtext_load_parameters_path:
+        maxtext_config_overrides["load_parameters_path"] = (
+            args.maxtext_load_parameters_path
+        )
       engine_kwargs["additional_config"] = {
           "maxtext_config": maxtext_config_overrides
       }
