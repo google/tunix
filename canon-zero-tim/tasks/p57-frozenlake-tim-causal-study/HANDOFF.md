@@ -1,5 +1,49 @@
 # P57 300-update execution handoff
 
+## START HERE — P57.1c Perf v2 step-boundary repair passed one-host G4
+
+This section supersedes the Wave 15 incident queue below.
+
+Wave 15's Step-1 crash is localized to the learner publishing the next prompt
+batch before committing the completed step's Perf v2 timeline.  The producer
+opened a new `rollout` span, then the old `Timeline.commit_step()` purged it;
+the context later exited against an empty stack.  This was an observer
+lifecycle failure after one valid strict update, not a numerical or Pathways
+failure.
+
+P57.1c source CL `ec9884e9` now:
+
+1. loads the next batch but exports/commits Perf v2 before publishing it to the
+   asynchronous producer;
+2. publishes the next batch before P45 host GC, preserving the existing GC /
+   rollout overlap;
+3. serializes host span entry/exit with step commit; and
+4. rejects an active-span commit before mutating the timeline instead of
+   purging the span and creating a delayed underflow.
+
+Local gates are green: the old learner-order contract reproduced RED, the
+repaired contract passes 2/2, P57 CPU passes 172/172, the pinned image passes
+the new `P57_PERF_V2_STEP_BOUNDARY_PASS` and the complete
+`P45_EXACT_IMAGE_CPU_PASS`, full pinned-image timeline/tracer suites pass
+17/17 and 34/34, V1 Phase4 passes 90/90, flag audit passes 395/395, and diff
+hygiene passes.
+
+Approved one-host v5p G4 is also green.  Fresh `r7` completed three optimizer
+commits, 12/12 strict alignment rows with zero differing bytes, finite nonzero
+updates, and Step-1 rollout without purge/underflow.  Its target-step Perfetto
+is readable and contains the five semantic operations executed by this beta-0
+workload.  `reference_inference` is correctly absent because beta and forced KL
+are both disabled; the classifier now requires that absence instead of
+inventing an operation.  The add-only PASS is
+`/mnt/disks/tunix-data/logp_probe_1host/p57_perf_v2_p57c_g4_cb38cf67_r7/classification.beta0.json`.
+The original over-constrained RED classifier is preserved.
+
+Claim ceiling: `IMPLEMENTED / HOST + PINNED-IMAGE + ONE-HOST G4 PASS / FULL
+TARGET NOT RUN / SOURCE CL ec9884e9`.  Commit/push approval applies
+only to this source-and-ledger stack.  Fresh P45/M15 full render and launch
+remain separate later approvals.  Do not render a production manifest or
+launch a full target from this handoff alone.
+
 ## START HERE — f45w15 Step-1 Timeline Tracer Underflow Incident Sealed
 
 This section supersedes every later `START HERE` block for the next P45 action.
@@ -279,6 +323,6 @@ an input inventory and SHA ledger.
 
 The 300-update contract, rollout-only evaluation path, final step-300 eval,
 seven-point classifier, renderer/profile/env gates, and documentation are
-implemented in the working tree. At handoff-writing time they are uncommitted
-and unpushed; the user must explicitly approve commit/push before any render
-uses them as a source SHA.
+implemented.  The P57.1c source-and-ledger stack has explicit publication
+approval.  Any production render must still use the verified published source
+SHA, and a full-target launch requires a separate explicit approval.

@@ -37,3 +37,17 @@
   even if the surrounding optimizer recipe is identical. Pin the correction
   off in both arms and prove the actual `TrainExample` uses rollout A with no
   sampler weights; retain ordinary PPO/GSPO clipping as shared base behavior.
+- A step-scoped observer must close and commit the completed step before the
+  asynchronous producer can see the next prompt batch. Loading the batch is
+  harmless; publishing it can immediately open a new rollout span. Timeline
+  commit must reject active synchronous spans before mutation, never purge a
+  live context and leave a delayed stack underflow.
+- A semantic trace contract must follow the workload's executed objective.
+  FrozenLake beta zero deliberately skips reference inference; requiring that
+  event makes a valid trace falsely red, while adding a fake span would make
+  attribution dishonest. Sign disabled operations explicitly and add the
+  inverse negative control that rejects their unexpected appearance.
+- A legacy bounded carrier that deliberately omits the registered P33/P34
+  workload still needs an explicit identity at shared receipt callsites. Use a
+  truthful `legacy-segmented` fallback; never dereference or synthesize a
+  production workload merely to satisfy instrumentation.

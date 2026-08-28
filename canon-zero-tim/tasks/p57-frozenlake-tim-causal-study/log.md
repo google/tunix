@@ -477,3 +477,91 @@
 - Preservation: all 19 component logs (3 head logs + 16 worker logs), `RAW_ERROR.log`, and `INCIDENT_REPORT.md` are sealed under `evidence/f45w15_timeline_tracer_incident/` with verified `SHA256SUMS`.
 - GCS mirror: `gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p57/f45w15-799a0bd1/` contains the identical 19 log objects.
 - Consequence: Step 0 numerical integrity is proven; the failure is an asynchronous tracer concurrency underflow bug in Step 1 rollout.
+
+## 2026-08-28T10:54:53Z — P57.1c Perf v2 step boundary repaired and host-gated
+
+- Type: target-incident repair / observer lifecycle / local and pinned-image
+  validation.
+- Corrected cause: the failure was not arbitrary cross-thread stack sharing.
+  The learner published the next prompt batch before the prior step's Perf v2
+  export. The asynchronous producer opened Step 1 `rollout`; Step 0 commit
+  then purged that live span, and its later context exit underflowed.
+- Action: resolve but do not publish the next batch; commit/export the completed
+  Perf v2 step; publish the batch; then run host GC so GC/rollout overlap is
+  preserved. PerfTracer host span entry/exit and commit now share an RLock,
+  and active-span commit raises before timeline mutation. No catch-and-ignore
+  path was added. Numerical programs, flags, data, rollout, backward, reducer,
+  optimizer, and Zero-TIM gates are untouched.
+- Negative/positive evidence: the new source ordering gate failed 1/2 on the
+  old code with `Perf v2 export must precede every next-step queue`, then passed
+  2/2 after repair. A threaded tracer control proves rejected active commit
+  leaves the rollout span intact, lets it close, and allows the next commit.
+- Validation: P57 CPU 169/169; full pinned-image timeline 17/17 and tracer
+  34/34; complete exact-image gate emitted
+  `P57_PERF_V2_STEP_BOUNDARY_PASS` and `P45_EXACT_IMAGE_CPU_PASS`; V1 Phase4
+  90/90; flag audit 394/394; Python compilation and `git diff --check` pass.
+- Claim boundary: `IMPLEMENTED / HOST + PINNED-IMAGE PASS / ONE-HOST TARGET NOT
+  RUN / FULL TARGET NOT RUN`. No TPU, JobSet, production render, commit, push,
+  or remote state mutation occurred.
+- Next: after separate user approval, run G4 on one-host v5p for at least two
+  FrozenLake optimizer commits with production-like rollout concurrency;
+  require strict alignment zero failures, finite updates, no tracer boundary
+  error, and a readable semantic Perfetto artifact.
+
+## 2026-08-28T11:56:00Z — P57.1c one-host G4 passed
+
+- Type: approved one-host target admission / three real optimizer transactions.
+- Vehicle: Qwen3-8B DP1xTP4 FrozenLake, eight trajectories, four gradient
+  microbatches, concurrency two, three updates, target semantic step two,
+  pinned image
+  `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`.
+- Preserved non-admitting attempts: r1 infrastructure busy; r2 wrong
+  concurrency; r3/r4 local mesh and sharding carrier construction; r5 real
+  reverse followed by an unbound legacy workload receipt; r6 preflight-only
+  container-exit race. No failed evidence directory was deleted or reused.
+- Target result: fresh r7 completed 3/3 AdamW transactions, 12/12 strict
+  alignment rows, zero differing bytes at all A/B/C boundaries, finite nonzero
+  commit gradients, and material parameter changes. Step 1 crossed the exact
+  former purge/underflow boundary without a tracer error.
+- Timing: cold Step 0 419.70s; steady Steps 1/2 36.93s and 35.98s. Reverse
+  18.449s/17.726s and optimizer 0.624s/0.420s at steady state. Following
+  weight sync was 35.646s/39.398s and remains a separate performance target.
+- Semantic correction: the first classifier was over-constrained because it
+  required reference inference even though the registered FrozenLake objective
+  is beta zero. The original RED is preserved. A workload-exact negative
+  contract now requires reference inference to be absent and all five executed
+  semantic phases to be present. Add-only beta-zero census/classification PASS
+  with SHA-256
+  `02c51f1d7a8abc8a01bf27feb99372a0b2ce4a779f892d50a48c15ec522d26f1`
+  and `a1544f4d2f1094a71924cf63c753ff272fe3f3d0fb497d73e07ab01541e734b2`.
+- Final gates: P57 172/172, P45 pinned-image exact gate terminal PASS, V1
+  Phase4 90/90, flag audit 394/394, Python compilation and diff hygiene PASS.
+- Claim boundary: `ONE-HOST G4 PASS / FULL P45-M15 TARGET NOT RUN / LOCAL
+  UNCOMMITTED`. No commit, push, production render, or full JobSet launch.
+
+## 2026-08-28T20:49:00Z — P57.1c publication stack rebased and sealed
+
+- Type: publication rebase / deterministic registry admission / final gate
+  replay.
+- Base movement: the integration branch advanced five commits from
+  `cb38cf67` to `cf56b21a`. The two P57.1c concerns rebased without conflict;
+  the final runtime-and-carrier source CL is `ec9884e9`, followed by this
+  evidence/handoff CL.
+- Flag audit correction: the changed-file audit exposed six historical names
+  copied into the new carrier but absent from the authoritative registry. Five
+  were redundant at their existing defaults or superseded by VJP2 and were
+  removed from the carrier. The one real path override,
+  `CANON_P29_LOG_DIR`, is now registered as an observational/infrastructure
+  JAX-client path with a positive and redundant-key negative control. This
+  changes neither the admitted r7 program nor training math.
+- Final validation on the rebased tree: P57 172/172 with
+  `P57_FROZENLAKE_TIM_CPU_PASS`; V1 Phase4 90/90 with
+  `V1_HP_THREE_FULL_CPU_PASS`; deterministic registry 395/395 with
+  `FLAG_AUDIT_PASS`; Python compilation and `git diff --check` PASS. The full
+  pinned image
+  `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`
+  matched 37/37 installed files and emitted
+  `P57_PERF_V2_STEP_BOUNDARY_PASS` plus `P45_EXACT_IMAGE_CPU_PASS`.
+- Claim boundary: `SOURCE CL ec9884e9 / HOST + PINNED-IMAGE + ONE-HOST G4
+  PASS / FULL P45-M15 TARGET NOT RUN`. Commit/push is explicitly authorized;
+  production render and full JobSet launch are not.

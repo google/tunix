@@ -30,7 +30,8 @@ launch decision after the first four runs are packaged.
 |---|---|---|---|
 | P57.0 | Stock-fast calibration and M15 selection | `p57cal6` classifier PASS/FREEZE_M15 | complete |
 | P57.1 | Former selection-only native curve | Preserved historical evidence | superseded |
-| P57.1b | Four native-program cells | CPU + exact-image gates; P45 and M15 native/no-IS plus native/token-IS complete full horizons | active |
+| P57.1b | Four native-program cells | CPU + exact-image gates; P45 and M15 native/no-IS plus native/token-IS complete full horizons | blocked by P57.1c |
+| P57.1c | Perf v2 step-boundary isolation | deterministic race, learner-order, pinned-image, and one-host G4 gates pass | complete — G4 pass; full target not run |
 | P57.2 | Deferred complete Zero-TIM pair | Separate user launch decision; P45 and M15 zero/no-IS cells complete with strict receipts | pending |
 | P57.3 | In-process held-out evaluation and within-workload contrasts | Exact rollout-only evaluations at 0,50,...,300 and preregistered contrast table | pending |
 | P57.4 | Replication/claim decision | Either stop at concept-study ceiling or run paired multi-seed campaign | pending |
