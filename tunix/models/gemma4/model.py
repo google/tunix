@@ -354,6 +354,7 @@ class DecoderLayer(nnx.Module):
 
 class Gemma4(BackendMappingMixin, nnx.Module):
   """Gemma4 model."""
+  BACKEND_PACKAGE_PATH = __name__
 
   def __init__(
       self, config: ModelConfig, *, rngs: nnx.Rngs, text_only: bool = True
