@@ -185,6 +185,12 @@ class RemoteWorkerShim:
   def info(self) -> datatypes.WorkerInfo:
     return self._info
 
+  def heartbeat(self, *args, **kwargs) -> Any:
+    return self._handle.submit("heartbeat", *args, **kwargs)
+
+  def stop(self, *args, **kwargs) -> Any:
+    return self._handle.submit("stop", *args, **kwargs)
+
   async def prepare_weight_sync(self, *args, **kwargs) -> Any:
     return await self._handle.asubmit("prepare_weight_sync", *args, **kwargs)
 
