@@ -43,23 +43,28 @@ spec:
             restartPolicy: Never
             terminationGracePeriodSeconds: 10
             nodeSelector:
-              cloud.google.com/gke-tpu-accelerator: ${TPU_TYPE}
-              cloud.google.com/gke-tpu-topology: ${TPU_TOPOLOGY}
-            affinity:
-              podAffinity:
-                requiredDuringSchedulingIgnoredDuringExecution:
-                # place on one of the pathways-worker nodes
-                - topologyKey: kubernetes.io/hostname
-                  labelSelector:
-                    matchExpressions:
-                    - key: jobset.sigs.k8s.io/jobset-name
-                      operator: In
-                      values:
-                      - ${JOBSET_NAME}
-                    - key: jobset.sigs.k8s.io/replicatedjob-name
-                      operator: In
-                      values:
-                      - pw-node
+              node.kubernetes.io/instance-type: ${CPU_MACHINE}
+            volumes:
+            # Generic ephemeral volume (PD-backed, created/deleted with the
+            # pod): the ${USER_CONTAINER} main process has no volume mount at
+            # all otherwise, so anything it writes locally (crash core dumps
+            # in particular) lands on the node's own small boot disk and can
+            # evict the pod on ephemeral-storage pressure well before the
+            # write finishes -- confirmed the hard way when a segfault during
+            # Raiden weight-sync transfer triggered a 50GB+ core dump that
+            # filled a TPU worker node's ~44GB allocatable disk. Sized near
+            # the container's own memory limit below so a full-RSS core dump
+            # can complete without evicting the node.
+            - name: scratch-disk
+              ephemeral:
+                volumeClaimTemplate:
+                  spec:
+                    accessModes: ["ReadWriteOnce"]
+                    storageClassName: premium-rwo
+                    resources:
+                      requests:
+                        storage: 400Gi
+            priorityClassName: high-priority
             containers:
             - name: pathways-rm
               image: ${SERVER_IMAGE}
@@ -68,10 +73,13 @@ spec:
               resources:
                 limits:
                   cpu: "24"
-                  memory: 32G
+                  memory: 8G
               args:
               - --server_port=29001
+              - --pathways_persistent_compilation_cache=false
               - --gcs_scratch_location=${GCS_SCRATCH_LOCATION}
+              - --pathways_persistent_compilation_cache=false
+              - --pathways_persistent_compilation_cache=false
               - --node_type=resource_manager
               - --instance_count=${REPLICAS}
               - --instance_type=${PW_INSTANCE_TYPE}:${TPU_TOPOLOGY}
@@ -121,10 +129,21 @@ spec:
               imagePullPolicy: Always
               securityContext:
                 privileged: true
-              # resources:
-              #   limits:
-              #     cpu: "24"
-              #     memory: 32G
+              # Without an explicit request, this container has no memory
+              # guarantee and kubelet can OOM-kill it under any transient
+              # pressure even when the node has ample free capacity --
+              # confirmed the hard way: OOMKilled here during Raiden's D2H
+              # host-staging of a ~30B param MoE model with padded MoE MLP
+              # weights (~80GB of host-resident bf16 params), on a node that
+              # `kubectl describe node` showed had 300+GB free at the time.
+              resources:
+                requests:
+                  memory: 64G
+                limits:
+                  memory: 150G
+              volumeMounts:
+              - name: scratch-disk
+                mountPath: /scratch
               command:
                 - bash
                 - -c
@@ -136,6 +155,14 @@ spec:
                   echo "Program Start: $$(date)"
                   _sigterm() (kill -SIGTERM $$! 2>/dev/null)
                   trap _sigterm SIGTERM
+
+                  # Best-effort: redirect crash core dumps onto the scratch-disk
+                  # volume instead of the node's own small boot disk. core_pattern
+                  # is a host-wide (not per-container) sysctl, so this only takes
+                  # effect when the container can write /proc/sys/kernel -- true
+                  # here since the container runs privileged -- and is harmless
+                  # (STARTUP_COMMAND still proceeds) if it can't.
+                  echo "/scratch/core.%e.%p.%t" > /proc/sys/kernel/core_pattern 2>/dev/null || true
 
                   (
                     ${STARTUP_COMMAND}
@@ -206,15 +233,6 @@ spec:
               cloud.google.com/gke-tpu-topology: ${TPU_TOPOLOGY}
             affinity:
               # place on nodes in the same nodepool
-              podAffinity:
-                requiredDuringSchedulingIgnoredDuringExecution:
-                - topologyKey: cloud.google.com/gke-nodepool
-                  labelSelector:
-                    matchExpressions:
-                    - key: jobset.sigs.k8s.io/jobset-name
-                      operator: In
-                      values:
-                      - ${JOBSET_NAME}
               # ensure exclusive access to the nodepool (among all jobsets created with this yaml)
               podAntiAffinity:
                 requiredDuringSchedulingIgnoredDuringExecution:
@@ -232,6 +250,7 @@ spec:
             #   operator: "Equal"
             #   value: "present"
             #   effect: "NoSchedule"
+            priorityClassName: high-priority
             containers:
             - name: pathways-worker
               image: ${SERVER_IMAGE}

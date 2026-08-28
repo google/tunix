@@ -72,7 +72,7 @@ if [[ "$TRAINER_BACKEND" == "maxtext" && -z "$MAXTEXT_CKPT" ]]; then
   echo "Error: TRAINER_BACKEND=maxtext requires MAXTEXT_CKPT (Orbax params-only checkpoint)."
   exit 1
 fi
-export MAXTEXT_OUTPUT_DIR=${MAXTEXT_OUTPUT_DIR:-artifacts/math_gsm8k_dist/maxtext}
+export MAXTEXT_OUTPUT_DIR=${MAXTEXT_OUTPUT_DIR:-artifacts/deepswe_dist/maxtext}
 export TRAINER_MESH_TP=${TRAINER_MESH_TP:-1}
 export TRAINER_MESH_EXPERT=${TRAINER_MESH_EXPERT:-1}
 # Padded MoE MLP intermediate dimension; must match rollout TP padding for MoE models.
@@ -149,7 +149,7 @@ start_orchestrator() {
       python3 -m tunix.experimental.distributed.runtime.main \
         --discovery_id=${ORCHESTRATOR_ID} \
         --discovery_port=${ORCHESTRATOR_PORT} \
-        --process_main=tunix.experimental.examples.math_gsm8k_dist.run_gsm8k_dist_grpo.main \
+        --process_main=tunix.experimental.examples.deepswe_dist.run_gsm8k_dist_grpo.main \
         --model_id=${MODEL_ID} \
         --tokenizer_path=${TOKENIZER_PATH} \
         --batch_size=${BATCH_SIZE} \
@@ -196,7 +196,7 @@ start_trainer() {
       VERIFY_WEIGHTS=${VERIFY_WEIGHTS} ${RAIDEN_WEIGHT_SYNC_CHUNKS:+RAIDEN_WEIGHT_SYNC_CHUNKS=${RAIDEN_WEIGHT_SYNC_CHUNKS}} python -m tunix.experimental.distributed.runtime.main \
         --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
         --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
-        --process_main=tunix.experimental.examples.math_gsm8k_dist.run_trainer_node.main \
+        --process_main=tunix.experimental.examples.deepswe_dist.run_trainer_node.main \
         --worker_id=${TRAINER_ID} \
         --port=${TRAINER_PORT} \
         --mesh_fsdp=${TRAINER_MESH_FSDP} \
@@ -252,7 +252,7 @@ start_rollout() {
         SKIP_JAX_PRECOMPILE=1 VERIFY_WEIGHTS=${VERIFY_WEIGHTS} ${ROLLOUT_USE_BATCHED_RPA:+USE_BATCHED_RPA_KERNEL=1} python -m tunix.experimental.distributed.runtime.main \
           --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
           --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
-          --process_main=tunix.experimental.examples.math_gsm8k_dist.run_rollout_node.main \
+          --process_main=tunix.experimental.examples.deepswe_dist.run_rollout_node.main \
           --worker_id=${replica_id} \
           --worker_index=$((i + 1)) \
           --port=${ROLLOUT_PORT} \
@@ -273,7 +273,7 @@ start_rollout() {
   done
 }
 
-source tunix/experimental/examples/math_gsm8k_dist/enter_kube_context.sh
+source tunix/experimental/examples/deepswe_dist/enter_kube_context.sh
 
 while [[ $# -gt 0 ]]; do
   case "$1" in

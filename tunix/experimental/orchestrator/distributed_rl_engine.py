@@ -23,13 +23,13 @@ import asyncio
 import collections
 from collections.abc import Mapping, Sequence
 import inspect
+import logging
 from typing import Any
 import uuid
 
 from absl import logging
 import numpy as np
 from tunix.experimental.common import datatypes
-from tunix.experimental.metrics import metrics as exp_metrics
 from tunix.experimental.orchestrator import rl_engine_interface
 from tunix.experimental.worker import remote_execution
 
@@ -48,7 +48,10 @@ def _response_to_trajectory_item(resp: Any) -> datatypes.TrajectoryItem:
     return resp
 
   if isinstance(resp, datatypes.RolloutResponse):
+    prompt_id = resp.prompt_id or "default_prompt"
     metadata = dict(resp.metadata) if resp.metadata else {}
+    group_id = metadata.get("group_id", prompt_id)
+    pair_index = metadata.get("pair_index", 0)
     success_statuses = {"COMPLETED", "SUCCEEDED"}
     traj = datatypes.Trajectory(
         reward=resp.env_reward,
@@ -59,8 +62,8 @@ def _response_to_trajectory_item(resp: Any) -> datatypes.TrajectoryItem:
         ),
     )
     item = datatypes.TrajectoryItem(
-        prompt_id=resp.prompt_id,
-        group_index=resp.group_index,
+        pair_index=pair_index,
+        group_id=group_id,
         start_step=0,
         traj=traj,
         metadata=metadata,
@@ -84,24 +87,14 @@ def _response_to_trajectory_item(resp: Any) -> datatypes.TrajectoryItem:
 
   if isinstance(resp, datatypes.Trajectory):
     item = datatypes.TrajectoryItem(
-        prompt_id=getattr(resp, "prompt_id", ""),
-        group_index=getattr(resp, "group_index", 0),
+        pair_index=0,
+        group_id=getattr(resp, "task", "default_group"),
         start_step=0,
         traj=resp,
         policy_version=getattr(resp, "policy_version", 0),
-        prompt_tokens=getattr(
-            resp, "prompt_tokens", np.zeros(0, dtype=np.int32)
-        ),
-        completion_tokens=getattr(
-            resp, "completion_tokens", np.zeros(0, dtype=np.int32)
-        ),
-        action_mask=getattr(
-            resp,
-            "action_mask",
-            np.ones(
-                len(getattr(resp, "completion_tokens", [])), dtype=np.float32
-            ),
-        ),
+        prompt_tokens=getattr(resp, "prompt_tokens", np.zeros(0, dtype=np.int32)),
+        completion_tokens=getattr(resp, "completion_tokens", np.zeros(0, dtype=np.int32)),
+        action_mask=getattr(resp, "action_mask", np.ones(len(getattr(resp, "completion_tokens", [])), dtype=np.float32)),
     )
     return item
 
@@ -222,6 +215,12 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         )
 
       prompt_id = str(prompt_id)
+      group_id = str(
+          getattr(p, "group_id", None)
+          or (p.get("group_id") if isinstance(p, dict) else None)
+          or item_metadata.get("group_id")
+          or prompt_id
+      )
       raw_prompt = (
           p.get("prompt", p)
           if isinstance(p, Mapping)
@@ -231,16 +230,16 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
       if isinstance(p, Mapping):
         max_turns = p.get("max_turns", max_turns)
 
-      for group_index in range(group_size):
+      for g_idx in range(group_size):
         request_metadata = dict(base_metadata)
         request_metadata.update(item_metadata)
-        request_metadata["group_index"] = group_index
-        request_metadata["group_size"] = group_size
-        request_metadata.setdefault("prefix_hash", prompt_id)
+        request_metadata["group_id"] = group_id
+        request_metadata["pair_index"] = g_idx
+        request_metadata.setdefault("prefix_hash", group_id)
         if isinstance(request_metadata.get("env_config"), Mapping):
           env_config = dict(request_metadata["env_config"])
-          env_config["group_index"] = group_index
-          env_config["group_size"] = group_size
+          env_config.setdefault("group_id", group_id)
+          env_config["pair_index"] = g_idx
           env_config["policy_version"] = version
           request_metadata["env_config"] = env_config
 
@@ -249,10 +248,10 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
 
         rollout_reqs.append(
             datatypes.RolloutRequest(
-                request_id=f"req_{prompt_id}_g{group_index}_v{version}",
+                request_id=f"req_{prompt_id}_{g_idx}_v{version}",
                 prompt=raw_prompt,
                 prompt_id=prompt_id,
-                group_index=group_index,
+                group_offset_id=str(g_idx),
                 target_policy_version=version,
                 generation_kwargs=generation_kwargs,
                 max_turns=max_turns,
@@ -301,13 +300,15 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         for it in items:
           if isinstance(it, dict):
             it = datatypes.RolloutResponse(**it)
-          traj_item = _response_to_trajectory_item(it)
+          item = _response_to_trajectory_item(it)
           logging.debug(
-              "Received rollout response (prompt_id=%s, group_index=%d).",
-              traj_item.prompt_id,
-              traj_item.group_index,
+              "[DistributedRLEngine] poll_rollouts received trajectory item: prompt_id=%s group_id=%s pair_index=%s tokens=%d",
+              getattr(item, "prompt_id", ""),
+              getattr(item, "group_id", ""),
+              getattr(item, "pair_index", ""),
+              len(getattr(item, "completion_tokens", [])),
           )
-          completed.append(traj_item)
+          completed.append(item)
     return completed
 
   async def generate(
@@ -354,9 +355,9 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         worker_to_requests[worker].append(p)
         continue
 
-      route_key = route_metadata_map.get("prefix_hash") or getattr(
-          p, "prompt_id", p.get("prompt_id") if isinstance(p, dict) else None
-      )
+      route_key = route_metadata_map.get("prefix_hash")
+      if route_key is None:
+        route_key = route_metadata_map.get("prompt_id")
       worker = self._rollout_pool._get_next_actor(
           kwargs={"route_key": route_key}
       )
@@ -463,16 +464,10 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         accumulate_gradients,
         apply_optimizer,
     )
-    metadata = dict(getattr(payload, "metadata", {}) or {})
-    request = datatypes.TrainRequest(
-        request_id=f"train_{uuid.uuid4().hex[:8]}",
-        payload=payload,
-        metadata=metadata,
-    )
     fwd_bwd_result = await self._invoke_worker(
         worker,
         "fwd_bwd",
-        request=request,
+        payload=payload,
         skip_jit=skip_jit,
         **kwargs,
     )
@@ -485,36 +480,6 @@ class DistributedRLEngine(rl_engine_interface.AbstractRLEngine):
         "train_step": train_step,
         "accumulated": accumulate_gradients,
     }
-
-  async def get_metrics(
-      self,
-      role: datatypes.Role = datatypes.Role.ACTOR,
-      **kwargs: Any,
-  ) -> (
-      exp_metrics.MetricsBuffer
-      | Sequence[exp_metrics.MetricsBuffer]
-      | dict[str, Any]
-      | None
-  ):
-    """Retrieves step metrics from the worker(s) registered for the specified role."""
-    if role == datatypes.Role.ROLLOUT:
-      if not self._rollout_workers:
-        raise ValueError(f"No rollout workers registered for role {role}")
-      tasks = [
-          self._invoke_worker(w, "get_metrics", **kwargs)
-          for w in self._rollout_workers
-      ]
-      results = await asyncio.gather(*tasks, return_exceptions=True)
-      return [  # pyrefly: ignore[bad-return]
-          r for r in results if not isinstance(r, Exception) and r is not None
-      ]
-    else:
-      worker = self._trainer_workers.get(
-          role
-      ) or self._inference_workers.get(role)
-      if worker is None:
-        raise ValueError(f"No worker registered for role {role}")
-      return await self._invoke_worker(worker, "get_metrics", **kwargs)
 
   async def sync_weights(  # pyrefly: ignore[bad-override]
       self,

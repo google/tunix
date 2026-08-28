@@ -15,13 +15,13 @@
 """Top-level RolloutWorker abstractions (Service vs Client Driver)."""
 
 import dataclasses
+import logging
 from typing import Any, AsyncIterator, Callable, List, Optional, Sequence, Union
 import numpy as np
 from tunix.experimental.common import datatypes
 from tunix.experimental.rollout import manager as manager_lib
 from tunix.experimental.rollout import sampler as sampler_lib
 from tunix.experimental.trajectory import trajectory as trajectory_lib
-from tunix.experimental.weight_sync import weight_sync
 from tunix.experimental.worker import abstract_worker
 from tunix.rl.rollout import base_rollout
 
@@ -33,8 +33,6 @@ class RolloutConfig(base_rollout.RolloutConfig):
   Attributes:
     sampler_type: Type of sampler adapter to construct ("vanilla",
       "inprocess_vllm", "vllm").
-    weight_sync_mode: Mode of weight synchronization ("none", "fallback",
-      "raiden").
     env_name: Registered name of environment class in ENV_REGISTRY.
     agent_name: Registered name of agent class in AGENT_REGISTRY.
     env_config: Configuration dictionary passed to environment constructor.
@@ -42,7 +40,6 @@ class RolloutConfig(base_rollout.RolloutConfig):
   """
 
   sampler_type: str = "vanilla"
-  weight_sync_mode: weight_sync.WeightSyncMode = weight_sync.WeightSyncMode.NONE
   env_name: str = ""
   agent_name: str = ""
   env_config: dict[str, Any] = dataclasses.field(default_factory=dict)
@@ -228,9 +225,7 @@ class RolloutWorker(abstract_worker.Worker):
             if max_generation_steps is not None
             else config.max_tokens_to_generate
         ),
-        temperature=(
-            temperature if temperature is not None else config.temperature
-        ),
+        temperature=temperature if temperature is not None else config.temperature,
         top_p=top_p if top_p is not None else config.top_p,
         top_k=top_k if top_k is not None else config.top_k,
         seed=seed if seed is not None else config.seed,  # pyrefly: ignore[bad-argument-type]
@@ -279,6 +274,7 @@ class RolloutWorker(abstract_worker.Worker):
       item: Any,
       request_id: str = "",
       prompt_tokens: np.ndarray | None = None,
+      policy_version: int = 0,
   ) -> datatypes.RolloutResponse:
     """Converts internal Trajectory or TrajectoryError to wire-safe RolloutResponse."""
     if isinstance(item, datatypes.RolloutResponse):
@@ -295,7 +291,7 @@ class RolloutWorker(abstract_worker.Worker):
               if prompt_tokens is not None
               else np.zeros(0, dtype=np.int32)
           ),
-          policy_version=self._policy_version,
+          policy_version=policy_version,
       )
     if isinstance(item, trajectory_lib.Trajectory):
       req_id = request_id or getattr(item, "trajectory_id", "default")
@@ -310,12 +306,9 @@ class RolloutWorker(abstract_worker.Worker):
           request_id=req_id,
           traj=item,  # pyrefly: ignore[bad-argument-type]
           prompt_tokens=prompt_tokens,
-          policy_version=self._policy_version,
+          policy_version=policy_version,
       )
       response.prompt_id = str(extra.get("prompt_id", response.prompt_id))
-      response.group_index = int(
-          extra.get("group_index", response.group_index) or 0
-      )
       response.env_reward = float(extra.get("reward", response.env_reward))
       response.metadata.update(
           {k: v for k, v in extra.items() if k != "prompt_tokens"}
@@ -343,18 +336,30 @@ class RolloutWorker(abstract_worker.Worker):
         and completion_logps.shape != completion_tokens.shape
     ):
       completion_logps = None
-    prompt_token_arr = np.asarray(prompt_tokens, dtype=np.int32).reshape(-1)
+    prompt_token_arr = (
+        np.asarray(prompt_tokens, dtype=np.int32).reshape(-1)
+        if prompt_tokens is not None
+        else np.zeros(0, dtype=np.int32)
+    )
     if prompt_token_arr.size == 0:
-      raise RuntimeError(
-          "Sampler response is missing prompt_token_ids for "
-          f"{request.request_id}."
-      )
+      if (
+          self.manager.tokenizer is not None
+          and hasattr(self.manager.tokenizer, "encode")
+          and getattr(request, "prompt", None)
+      ):
+        prompt_token_arr = np.asarray(
+            self.manager.tokenizer.encode(request.prompt), dtype=np.int32
+        ).reshape(-1)
+      else:
+        raise RuntimeError(
+            "Sampler response is missing prompt_token_ids for "
+            f"{request.request_id or request.traj_id}."
+        )
     metadata = dict(request.metadata or {})
     metadata.setdefault("text", text)
     return datatypes.RolloutResponse(
-        request_id=request.request_id,
+        request_id=request.request_id or request.traj_id,
         prompt_id=request.prompt_id,
-        group_index=request.group_index,
         status="COMPLETED",
         prompt_tokens=prompt_token_arr,
         segments=[
@@ -383,16 +388,14 @@ class RolloutWorker(abstract_worker.Worker):
       sample_kwargs.update(generation_kwargs)
       sampling_requests.append(
           sampler_lib.SamplingRequest(
-              request_id=req.request_id,
+              request_id=req.request_id or req.traj_id,
               prompt=req.prompt,
               metadata=sample_kwargs,
               sampling_params=sampler_lib.SamplingParams(
                   max_tokens=sample_kwargs.get(
                       "max_generation_steps", config.max_tokens_to_generate
                   ),
-                  temperature=(
-                      sample_kwargs.get("temperature", config.temperature)
-                  ),
+                  temperature=sample_kwargs.get("temperature", config.temperature),
                   top_p=sample_kwargs.get("top_p", config.top_p),
                   top_k=sample_kwargs.get("top_k", config.top_k),
                   seed=sample_kwargs.get("seed", config.seed),
@@ -400,8 +403,16 @@ class RolloutWorker(abstract_worker.Worker):
               ),
           )
       )
+    logging.info(
+        "[RolloutWorker] Dispatching %d requests to sampler.",
+        len(sampling_requests),
+    )
     responses = self._as_sampling_response_list(
         await self.sampler.sample(sampling_requests)
+    )
+    logging.info(
+        "[RolloutWorker] Received %d responses from sampler.",
+        len(responses),
     )
     if len(responses) != len(requests):
       raise RuntimeError(
@@ -412,7 +423,7 @@ class RolloutWorker(abstract_worker.Worker):
         self._sampling_to_rollout_response(
             request=req,
             text=responses[i].text,
-            prompt_tokens=responses[i].prompt_token_ids,
+            prompt_tokens=getattr(responses[i], "prompt_token_ids", None),
             token_ids=responses[i].token_ids,
             logprobs=responses[i].logprobs,
         )
@@ -438,6 +449,25 @@ class RolloutWorker(abstract_worker.Worker):
         and all(isinstance(req, str) for req in requests)
     ):
       return await self.sample_prompts(requests, **generation_kwargs)  # pyrefly: ignore[bad-argument-type]
+
+    req_list = (
+        [requests] if not isinstance(requests, (list, tuple)) else list(requests)
+    )
+    env_name = getattr(self.config, "env_name", "")
+    if (
+        not env_name
+        and self.manager.env_pool is None
+        and self.manager.agent_factory is None
+    ):
+      res = await self._generate_rollout_requests_direct(
+          req_list, **generation_kwargs
+      )
+      if on_complete is not None:
+        for item in res:
+          on_complete(item)
+      if not isinstance(requests, (list, tuple)):
+        return res[0] if res else None
+      return res
 
     cb = None
     if on_complete is not None:

@@ -1,0 +1,13 @@
+aqtp
+tokamax>=0.0.4
+qwix>=0.1.6
+drjax>=0.1.4
+ml-goodput-measurement
+cloud-accelerator-diagnostics
+cloud-tpu-diagnostics
+google-cloud-mldiagnostics>=0.5.10
+google-cloud-monitoring
+einshape
+typeguard
+xprof
+cheroot

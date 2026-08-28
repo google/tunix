@@ -384,7 +384,7 @@ echo "Launching trainer node on TPU chips $TRAINER_TPU_CHIPS..."
   TRAINER_CMD=(
     "$PYTHON_BIN" -m tunix.experimental.distributed.runtime.main
     --discovery_addrs="${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT}"
-    --process_main=tunix.experimental.examples.math_gsm8k_dist.run_trainer_node.main
+    --process_main=tunix.experimental.examples.deepswe_dist.run_trainer_node.main
 
     --port="$TRAINER_PORT"
     --mesh_fsdp="$TRAINER_FSDP"
@@ -438,7 +438,7 @@ echo "Launching vLLM rollout node on TPU chips $ROLLOUT_TPU_CHIPS..."
   ROLLOUT_CMD=(
     "$PYTHON_BIN" -m tunix.experimental.distributed.runtime.main
     --discovery_addrs="${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT}"
-    --process_main=tunix.experimental.examples.math_gsm8k_dist.run_rollout_node.main
+    --process_main=tunix.experimental.examples.deepswe_dist.run_rollout_node.main
 
     --port="$ROLLOUT_PORT"
     --model_id="$MODEL_ID"
@@ -490,7 +490,7 @@ if [[ "$RUN_INFERENCE_NODE" == "1" || "$RUN_INFERENCE_NODE" == "true" || "$RUN_I
     INFERENCE_CMD=(
       "$PYTHON_BIN" -m tunix.experimental.distributed.runtime.main
       --discovery_addrs="${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT}"
-      --process_main=tunix.experimental.examples.math_gsm8k_dist.run_inference_node.main
+      --process_main=tunix.experimental.examples.deepswe_dist.run_inference_node.main
 
       --port="$INFERENCE_PORT"
       --model_name="$MODEL_NAME"
@@ -532,7 +532,7 @@ ORCHESTRATOR_CMD=(
   "$PYTHON_BIN" -m tunix.experimental.distributed.runtime.main
   --discovery_id="${ORCHESTRATOR_ID}"
   --discovery_port="${ORCHESTRATOR_PORT}"
-  --process_main=tunix.experimental.examples.math_gsm8k_dist.run_gsm8k_dist_grpo.main
+  --process_main=tunix.experimental.examples.deepswe_dist.run_gsm8k_dist_grpo.main
 
   --model_id="$MODEL_ID"
   --tokenizer_path="$TOKENIZER_PATH"

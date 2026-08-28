@@ -115,7 +115,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument(
       "--maxtext_output_directory",
       type=str,
-      default=os.getenv("MAXTEXT_OUTPUT_DIR", os.path.join(REPO_ROOT, "artifacts", "math_gsm8k_dist", "maxtext")),
+      default=os.getenv("MAXTEXT_OUTPUT_DIR", os.path.join(REPO_ROOT, "artifacts", "deepswe_dist", "maxtext")),
       help="Base directory for MaxText trainer outputs.",
   )
   parser.add_argument(
@@ -141,7 +141,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument(
       "--checkpoint_root_directory",
       type=str,
-      default=os.path.join(REPO_ROOT, "artifacts", "math_gsm8k_dist", "checkpoints"),
+      default=os.path.join(REPO_ROOT, "artifacts", "deepswe_dist", "checkpoints"),
       help="Root directory for saving checkpoints.",
   )
   return parser.parse_args(argv)
