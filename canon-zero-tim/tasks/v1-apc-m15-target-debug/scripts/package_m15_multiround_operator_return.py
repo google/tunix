@@ -120,6 +120,35 @@ def _render_contract(root: Path) -> dict[str, dict[str, str]]:
   return result
 
 
+def _recovery_input(
+    root: Path, contract: dict[str, dict[str, str]]
+) -> dict[str, Any] | None:
+  path = root / "RECOVERY_INPUT_RECEIPT.json"
+  if not path.exists():
+    return None
+  receipt = _json(path)
+  _require(
+      receipt.get("schema") == "m15-apc-attempt14-recovery-input-v1"
+      and receipt.get("status") == "LOCATOR_ONLY",
+      "recovery input schema/status drifted",
+  )
+  _require(
+      receipt.get("source_commit") == contract["off"]["source_commit"],
+      "recovery input source drifted",
+  )
+  _require(
+      receipt.get("jobsets")
+      == {arm: contract[arm]["jobset"] for arm in ("off", "on")},
+      "recovery input JobSets drifted",
+  )
+  for field in ("submitted_manifest_sha256", "submitted_receipt_sha256"):
+    _require(
+        _SHA256.fullmatch(str(receipt.get(field, ""))) is not None,
+        f"recovery input {field} drifted",
+    )
+  return receipt
+
+
 def _load_receipts(
     root: Path,
     *,
@@ -155,6 +184,7 @@ def package(
   partial = output.with_name(output.name + ".partial")
   _require(not partial.exists(), f"stale partial return exists: {partial}")
   contract = _render_contract(render_dir)
+  recovery_input = _recovery_input(render_dir, contract)
   core = _verify_core(core_return)
   source = contract["off"]["source_commit"]
   _require(core.get("source_commit") == source, "core/render source mismatch")
@@ -201,6 +231,7 @@ def package(
       "raw_logs_present": raw_logs_present,
       "jobsets": jobsets,
       "raw_logs": raw_logs,
+      "recovery_input_bound": recovery_input is not None,
       "claim_ceiling": (
           "Numerical status comes only from MULTIROUND_SUMMARY.json. JobSet and "
           "raw-log receipts establish operator completeness, not numerical equality."
@@ -220,12 +251,18 @@ def package(
     (partial / "OPERATOR_RETURN_SUMMARY.json").write_text(
         json.dumps(summary, sort_keys=True, indent=2) + "\n", encoding="utf-8"
     )
+    if recovery_input is not None:
+      (partial / "RECOVERY_INPUT_RECEIPT.json").write_text(
+          json.dumps(recovery_input, sort_keys=True, indent=2) + "\n",
+          encoding="utf-8",
+      )
     (partial / "OPERATOR_PACKAGING.txt").write_text(
         "M15 multiround operator return\n"
         f"status={status}\n"
         f"core_status={core_status}\n"
         f"jobsets_terminal={int(jobsets_terminal)}\n"
         f"raw_logs_present={int(raw_logs_present)}\n"
+        f"recovery_input_bound={int(recovery_input is not None)}\n"
         "raw_log_payload_returned=0\n"
         "token_bearing_bundle_returned=0\n"
         "remote_state_mutated=0\n",

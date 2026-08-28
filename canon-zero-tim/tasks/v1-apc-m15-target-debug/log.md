@@ -884,3 +884,23 @@ is not a current fact or launch authority.
   `PERSISTENCE_TEST_PASS`; flag registry 393/393 PASS; Python compilation,
   Bash syntax, and `git diff --check` PASS. No real GCS, Kubernetes, TPU,
   commit, or push action occurred.
+
+## 2026-08-28 — Attempt-14 completeness corrected; d33 recovery made OUT-free
+
+- Evaluated the committed d33 return before interpreting its numbers. Its
+  four-member manifest verifies, but the directory omits all six per-round
+  official classifiers, both numerical/operator summaries, JobSet status,
+  raw-log receipts, and operator packaging. The prior `Phase D complete` and
+  `RPA block-table defect` wording is demoted to an analysis-grade reported
+  interval; Phase E is closed again.
+- Identified why the published wrapper was bypassed: it required the original
+  render directory, while the returned package did not preserve that `/tmp`
+  path. The checked-in preparation artifact belongs to a different source and
+  cannot substitute silently.
+- Added a d33-specific read-only recovery entrypoint. It verifies the immutable
+  submitted subset, reconstructs only the exact source/JobSet/object locators,
+  binds a `LOCATOR_ONLY` receipt into the final operator manifest, and calls
+  the existing official GCS/operator audits. It launches no TPU work and
+  returns no raw logs, NPZ, or token-bearing tar.
+- Next: remote bucket/Kubernetes-capable agent runs the single command at the
+  top of `HANDOFF.md` and returns the complete generated directory unchanged.

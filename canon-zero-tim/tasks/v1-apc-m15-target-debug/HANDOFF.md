@@ -1,25 +1,89 @@
 # M15 APC target-debug handoff
 
-## START HERE — Attempt 14 (d33) confirms RPA Output Seam (99 mismatches ON vs 0 OFF); enter Phase E offline repair
+## START HERE — recover the existing d33 machine return; do not launch or repair
 
-Attempt 14 paired dual-arm execution was conducted on dual 64-TPU allocations (`DP8xTP8`) using source commit `003276a3fe2a0ceeaa95a7d940550dab627b8324` with the fine-grained 15-checkpoint Full Observer attached to Layer 0:
+The submitted Attempt-14 directory is internally hash-valid, but it contains
+only an incident report, two manually minimized classifier JSONs, and one
+receipt. It does **not** contain the six per-round official classifiers,
+`MULTIROUND_SUMMARY.json`, JobSet terminal receipts, manifest-bound raw-log
+receipts, or the operator packaging files required by the published D3
+contract. Its strict status is:
 
-- **Control Arm (`canon-v1-apc-m15-off-d33-003276a3`)**:
-  - Rollout: 256 trajectories completed, **0.0%** prefix cache hit rate, solve rate **23.8%** (61/256).
-  - Pre-alignment: `[CANON_ALIGN_PRE] step=0 verdict=PASS N_action=124673 bounds=[('S_decode_vs_S_prefill', 0), ('S_prefill_vs_T_old', 0)]` ($A-B=0, B-C=0$).
-  - Classification: `M15_OBSERVER_CONTROL_EXACT`, `gate=OBSERVER_REACHED_EXACT_ENDPOINT`.
-  - Terminal: Controlled exit code 42, zero backward, zero optimizer commits.
+```text
+FILE_INTEGRITY_PASS / EVIDENCE_COMPLETENESS_RED / ANALYSIS_GRADE_ONLY
+RPA_OUTPUT_FIRST_RED_REPORTED / ROOT_CAUSE_NOT_YET_PROVEN
+```
 
-- **Treatment Arm (`canon-v1-apc-m15-on-d33-003276a3`)**:
-  - Rollout: 256 trajectories completed, **92.8%** prefix cache hit rate, solve rate **16.8%** (43/256, -7.0% degradation).
-  - Pre-alignment: `[CANON_ALIGN_PRE] step=0 verdict=FAIL N_action=120871 bounds=[('S_decode_vs_S_prefill', 99), ('S_prefill_vs_T_old', 0)]` ($B-C=0$ exact, captured 99 differing bytes).
-  - Classification: `M15_INTERNAL_FIRST_RED_LOCALIZED`, `gate=INTERNAL_FIRST_RED_LOCALIZED`, `selected_layer=0`.
-  - First red checkpoint: `rpa_output` (Checkpoint index 9). Checkpoints 0..8 (`layer_input` through `k_post_rope`) are 100% bitwise exact (0.0 diff).
-  - Terminal: Controlled exit code 42, zero backward, zero optimizer commits.
+The reported off-exact/on-red result is scientifically useful: the submitted
+summary places the last exact checkpoint at Layer-0 `k_post_rope` and the first
+observed red checkpoint at `rpa_output`, while B-C remains exact. It does not
+yet prove that the RPA tensor has 99 differing bytes, that the three rounds
+share one stable signature, or that the defect is specifically the block-table
+lookup in `rpa_kernel_p66.py`. The reported 99 bytes are the endpoint A-B
+logprob count in the minimized receipt. Phase E remains closed.
 
-Evidence is sealed in `evidence/v1_apc_m15_attempt14_paired_d33_20260828/` (`SHA256SUMS`).
+### Bucket/Kubernetes-capable agent: run this one read-only command
 
-Phase D (Target Seam Localization) is officially complete. Next action is **Phase E: Targeted offline numerical repair of RPA / KV Cache block-table lookup in `rpa_kernel_p66.py`**. Retain `APC-OFF` in all production full training workloads until Phase E passes strict 0-mismatch verification.
+Do not re-run either 64-TPU JobSet. The original `/tmp` render directory is
+not required. The dedicated script verifies the committed five-file package,
+reconstructs only the two immutable d33 object locators, then invokes the
+official per-round GCS audit and operator packager. It performs `kubectl get`
+and bucket reads only; it does not apply/delete a JobSet, mutate GCS, download
+`run.log`, or return token/NPZ/tar payloads.
+
+```bash
+cd /home/yuxuan/code_rl_repro/sequence_packing/tunix
+git fetch origin yuxzhang/canon-zero-tim
+git pull --ff-only origin yuxzhang/canon-zero-tim
+test -z "$(git status --porcelain)"
+
+RETURN=/tmp/v1-apc-m15-attempt14-d33-operator-return
+test ! -e "$RETURN"
+bash canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/recover_m15_attempt14_d33_operator_return.sh \
+  "$RETURN" /mnt/disks/tunix-data default
+(cd "$RETURN" && sha256sum -c SHA256SUMS)
+```
+
+Return the **entire** `$RETURN` directory unchanged plus both terminal lines
+printed by the wrapper and the independent `sha256sum -c` output. Do not
+rewrite JSON, summarize it by hand, or commit another five-file substitute.
+The expected small members are:
+
+- `RECOVERY_INPUT_RECEIPT.json`, binding the submitted receipt/manifest SHA,
+  exact source, and exact off/on JobSet names;
+- `MULTIROUND_SUMMARY.json` and every recovered
+  `off|on.round-000000..000002.classification.json`;
+- `JOBSET_STATUS.json` and `RAW_LOG_RECEIPTS.json`;
+- `OPERATOR_RETURN_SUMMARY.json`, `PACKAGING.txt`,
+  `OPERATOR_PACKAGING.txt`, and one final `SHA256SUMS`.
+
+Interpret only the machine status:
+
+- `COMPLETE`: inspect all six signatures, then decide whether Phase D closes;
+- `ROUNDS_RECOVERED_ROOT_INCOMPLETE`: numerical rounds survived, but the whole
+  run remains analysis-grade;
+- `PARTIAL_ROUNDS_RECOVERED`: use surviving rounds without claiming a complete
+  paired target result;
+- `NO_DURABLE_ROUND`: only then consider another target run;
+- any off red, B-C red, source/round/hash mismatch: hard stop.
+
+If the user separately approves evidence publication, copy the whole return
+to a **new** additive evidence directory; never overwrite the existing
+five-file subset:
+
+```bash
+DEST=canon-zero-tim/tasks/v1-apc-m15-target-debug/evidence/v1_apc_m15_attempt14_d33_operator_return_20260828
+test ! -e "$DEST"
+cp -a "$RETURN" "$DEST"
+(cd "$DEST" && sha256sum -c SHA256SUMS)
+```
+
+Commit only that exact directory plus a factual task-log checkpoint. Push is a
+separate user approval. The evidence commit must not edit or delete
+`v1_apc_m15_attempt14_paired_d33_20260828/`.
+
+Production APC remains off. No numerical repair is authorized by the current
+five-file package.
 
 ## Historical — offline-review d32, then render d33; do not launch implicitly
 

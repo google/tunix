@@ -22,9 +22,9 @@ B - C = 0 bytes
 | A | `M15_FIRST_RED_INPUT_CONTRACT` with mismatch distribution, identity hashes, and artifact-completeness matrix | every field is traced to immutable `file:line` or explicitly marked missing | complete |
 | B | fresh captured-red replay carrier and APC-off/APC-on decision table | full 256-row producer, mixed standard/continue A chronology, standard-only full-reset B, exact request joins, GCS durability, zero backward/commit | complete: Attempt 6 off=`CONTROL_GREEN`, on=`FRESH_TARGET_RED_FROZEN` |
 | C | executable replay-prefix input plan followed by a single-variable reproduction ladder | saved bytes and chronology revalidate; control A-B=0; treatment either reproduces red or is `ONEHOST_NOT_REPRODUCED` | complete: r10-r13c one-host ladder exact through full chronology; scale/topology remains |
-| D | observer-neutral coarse-to-fine first-red walk on known-red DP8xTP8 | `FIRST_RED_LOCALIZED` names last exact and first red tensor, shape ledger, request/token/cache coordinate, and `file:line` | Attempt-12 coarse summary returned; blocked on remote evidence binding before the conditional Layer-0 full run |
+| D | observer-neutral coarse-to-fine first-red walk on known-red DP8xTP8 | `FIRST_RED_LOCALIZED` names last exact and first red tensor, shape ledger, request/token/cache coordinate, and `file:line` | d33 five-file subset reports `k_post_rope -> rpa_output`, but official per-round classifiers/operator receipts are missing; not complete |
 | D2 | M15-only incremental observer shards, sealed-input classifier, terminal ordering, and source self-verification | forced death preserves a verified shard; unsealed/tampered/source-mismatched inputs fail closed | host and exact-image pass; Attempt-12 runtime used this path, but its committed return omitted the remote binding audit |
-| D3 | three frozen-weight full Layer-0 rounds per arm plus one self-hashed numerical/operator return | each round seals before the next; root-incomplete, partial-round, missing JobSet terminal, and missing raw-log receipt remain mechanically distinguishable | protocol implemented; d33 render rehearsal PASS with D32 review SHA embedded; one-command operator return locally prepared; target not launched |
+| D3 | three frozen-weight full Layer-0 rounds per arm plus one self-hashed numerical/operator return | each round seals before the next; root-incomplete, partial-round, missing JobSet terminal, and missing raw-log receipt remain mechanically distinguishable | d33 ran, but its submitted package bypassed the wrapper; dedicated zero-TPU recovery from the existing roots is the active gate |
 | D4 | Attempt-13 two-arm registered-root inventory and offline semantic review | both listings succeed; exact 77/70 shard triples verify; physical shard counts and immutable classifier counts remain separate; seven-file inventory self-verifies | transport complete; no-live confirmed; count drift -29/+101 preserved; official replay impossible |
 | E | minimal localized repair, default off or experiment-bound | reproducer flips red to zero; APC-off and B are unchanged; adjacent and dirty-page negatives fire | pending |
 | F | certification ladder | host -> exact-image -> one-host clean/repeat/dirty -> matched profile -> separately approved DP8xTP8 G-E | pending |
@@ -164,3 +164,11 @@ B - C = 0 bytes
   rewritten to match the other. d33 preparation is eligible because historical
   replay is physically impossible, not because d32 passed an official
   classifier. Launch and numerical repair remain unauthorized.
+- Confirmed: the submitted d33 manifest is internally valid but covers only
+  four derived files. It omits the six per-round official classifiers and all
+  operator receipts required by D3. Therefore the reported
+  `k_post_rope -> rpa_output` interval is analysis-grade and does not yet prove
+  a particular RPA sub-operation or authorize Phase E.
+- Decision: recover d33 in place before any relaunch. The submitted receipt is
+  used only to locate the immutable source, JobSets, and object roots; all
+  numerical claims must be regenerated from the official per-round artifacts.

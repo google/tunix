@@ -1,19 +1,19 @@
 # State
 
-- Status: active; Attempt 14 (d33) paired DP8xTP8 execution completed and proved on clean codebase that APC-OFF achieves strict 0-mismatch alignment (23.8% solve rate), while APC-ON achieves 92.8% prefix cache hit rate but produces 99 differing bytes in Layer 0 Checkpoint 9 (`rpa_output`) and drops solve rate to 16.8% (-7.0% degradation). Checkpoints 0..8 (`layer_input` through `k_post_rope`) are 100% bitwise exact (0.0 diff).
+- Status: active; Attempt 14 (d33) has a hash-valid five-file analysis subset reporting APC-off exact and APC-on first observed red at Layer-0 `rpa_output`, but the official six per-round classifiers and operator receipts were not returned. Evidence completeness is RED and Phase E is not open.
 - Objective: explain and repair the M15 DP8xTP8 APC-on A-vs-B byte mismatch without changing the independent full-reset B arm or any unrelated numerical path.
 - Definition of done: `FIRST_RED_LOCALIZED` names the last exact and first red tensor plus `file:line`; one localized repair then passes host, exact-image, one-host clean/dirty controls, deterministic repeat, and separately approved DP8xTP8 A-B/B-C zero.
 - Task directory: `canon-zero-tim/tasks/v1-apc-m15-target-debug`.
-- Release base: `003276a3` on `origin/yuxzhang/canon-zero-tim`.
-- Target fact: Attempt 14 (d33) confirmed off=`CONTROL_GREEN` (0/0 diff bytes, 23.8% solve rate); on=`FRESH_TARGET_RED_FROZEN` with A-B 99 differing bytes, B-C zero, 92.8% cache hit rate on DP8xTP8, and 16.8% solve rate. Fine 15-checkpoint localization narrowed first divergence to Layer-0 `rpa_output` (Checkpoints 0..8 exact).
-- Real GCS artifact fact: Attempt 14 evidence is sealed under `evidence/v1_apc_m15_attempt14_paired_d33_20260828/` (`SHA256SUMS`).
+- Release base: `8dc0a67fd60029b8058c76bc05d21964589341d1` on `origin/yuxzhang/canon-zero-tim`; d33 runtime source reported as `003276a3fe2a0ceeaa95a7d940550dab627b8324`.
+- Analysis-grade target report: the submitted d33 subset reports off A-B/B-C zero and on A-B 99 endpoint bytes with B-C zero; its minimized checkpoint summary names `k_post_rope` last exact and `rpa_output` first red. The six official per-round outputs are still unreviewed.
+- Submitted artifact fact: `evidence/v1_apc_m15_attempt14_paired_d33_20260828/` verifies 4/4 listed members, but those members omit the D3 numerical and operator return contract. Hash validity does not establish collection completeness.
 - One-host fact: local r10-r13c stayed exact through real scheduler publication, 32-request composition, `continue_decode=8`, and full M15 chronology. r13c APC-on reached 97.8% hits, 130,148 actions, and logical KV 988..7189.
-- Current phase: Phase D (Seam Localization) completed; entering Phase E (Targeted offline repair of RPA / KV Cache block-table lookup in `rpa_kernel_p66.py`).
-- Implemented: renderer `none|layer|full` modes; 36-layer coarse observer plus final norm/tail; one-layer 15-checkpoint observer; M15-aware first-red classifier; bounded immutable observer shards; classifier input assembled only from their verified union; deterministic compact selected-record bundle; runtime source self-verification; manifest-last terminal publication; and sealed Attempt-14 d33 evidence package.
+- Current phase: Phase D3 return recovery. Phase D localization and Phase E repair remain blocked until the existing d33 per-round machine return is recovered and reviewed.
+- Implemented: all prior observer/durability machinery plus a d33-specific read-only recovery entrypoint that reconstructs the missing operator locator from the committed receipt, invokes the official GCS/operator wrapper, and binds that locator into the final manifest.
 - Numerical changes: none. RoPE, attention/RPA, KV values, LM head, loss, backward, optimizer, B full reset, and production APC are unchanged (APC-OFF retained in production full recipes).
-- Next action: build single-host offline replay harness for RPA Kernel / KV Cache block lookup in Phase E.
-- Claim ceiling: `FIRST_RED_LOCALIZED / RPA_ATTENTION_KV_READ_DEFECT / NUMERICAL_FIX_PENDING_PHASE_E`.
+- Next action: a bucket/Kubernetes-capable executor runs `recover_m15_attempt14_d33_operator_return.sh` once against the existing d33 artifacts and returns the complete small directory unchanged. No TPU launch is required.
+- Claim ceiling: `FILE_INTEGRITY_PASS / EVIDENCE_COMPLETENESS_RED / ANALYSIS_GRADE_ONLY / RPA_OUTPUT_FIRST_RED_REPORTED / ROOT_CAUSE_NOT_YET_PROVEN / NUMERICAL_FIX_NOT_AUTHORIZED`.
 - Sensitive evidence: the compact bundle contains real tokens/capsules. `m15-wide-v1` publishes it only under the already registered per-run P38 GCS root after sealed-union classification; never return the payload through Git or chat.
 - Key artifacts: [Attempt-14 receipt](evidence/v1_apc_m15_attempt14_paired_d33_20260828/receipt.json), [Attempt-14 incident report](evidence/v1_apc_m15_attempt14_paired_d33_20260828/INCIDENT_REPORT.md), [Attempt-13 receipt](evidence/v1_apc_m15_attempt13_paired_d32_20260828/receipt.json), [Attempt-13 incident report](evidence/v1_apc_m15_attempt13_paired_d32_20260828/INCIDENT_REPORT.md), [Attempt-12 receipt](evidence/v1_apc_m15_attempt12_paired_d20_20260827/receipt.json), [Attempt-12 incident report](evidence/v1_apc_m15_attempt12_paired_d20_20260827/INCIDENT_REPORT.md), [Phase D observer](phases/phase-d-wide-target-observer.md).
-- Publishing: Attempt 14 d33 evidence is sealed under `evidence/v1_apc_m15_attempt14_paired_d33_20260828/`.
-- Updated: 2026-08-28 (Attempt 14 d33 completed and sealed, transitioning to Phase E).
+- Publishing: the five-file d33 subset is immutable. Recovery tooling and this wording correction are local and uncommitted; no remote or TPU action was performed.
+- Updated: 2026-08-28 (d33 completeness demoted; dedicated read-only operator recovery prepared locally).

@@ -132,6 +132,40 @@ class OperatorReturnTest(unittest.TestCase):
     with self.assertRaisesRegex(OperatorReturnError, "core return SHA failed"):
       self._package()
 
+  def test_recovery_input_is_bound_and_returned(self) -> None:
+    receipt = {
+        "schema": "m15-apc-attempt14-recovery-input-v1",
+        "status": "LOCATOR_ONLY",
+        "source_commit": SOURCE,
+        "submitted_manifest_sha256": "c" * 64,
+        "submitted_receipt_sha256": "d" * 64,
+        "jobsets": {
+            arm: f"canon-v1-apc-m15-{arm}-test-aaaaaaaa"
+            for arm in ("off", "on")
+        },
+    }
+    (self.render / "RECOVERY_INPUT_RECEIPT.json").write_text(
+        json.dumps(receipt), encoding="utf-8"
+    )
+    result = self._package()
+    self.assertTrue(result["recovery_input_bound"])
+    self.assertTrue((self.root / "return" / "RECOVERY_INPUT_RECEIPT.json").is_file())
+
+  def test_recovery_input_wrong_source_is_rejected(self) -> None:
+    (self.render / "RECOVERY_INPUT_RECEIPT.json").write_text(json.dumps({
+        "schema": "m15-apc-attempt14-recovery-input-v1",
+        "status": "LOCATOR_ONLY",
+        "source_commit": "f" * 40,
+        "submitted_manifest_sha256": "c" * 64,
+        "submitted_receipt_sha256": "d" * 64,
+        "jobsets": {
+            arm: f"canon-v1-apc-m15-{arm}-test-aaaaaaaa"
+            for arm in ("off", "on")
+        },
+    }), encoding="utf-8")
+    with self.assertRaisesRegex(OperatorReturnError, "recovery input source"):
+      self._package()
+
   def _fake_remote_round(self, remote: Path, arm: str, round_index: int) -> None:
     root = remote / "wide" / "rounds" / f"{round_index:06d}"
     root.mkdir(parents=True)

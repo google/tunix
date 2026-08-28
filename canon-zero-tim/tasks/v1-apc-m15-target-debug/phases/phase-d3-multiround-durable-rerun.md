@@ -62,7 +62,8 @@ bash -n \
   canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/p38_live_snapshot_worker.sh \
   canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/prepare_m15_multiround_pair.sh \
   canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/run_m15_multiround_gcs_return.sh \
-  canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/run_m15_multiround_operator_return.sh
+  canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/run_m15_multiround_operator_return.sh \
+  canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/recover_m15_attempt14_d33_operator_return.sh
 git diff --check
 ```
 
@@ -96,6 +97,25 @@ receipts, and one final manifest.  It never downloads or returns `run.log` or
 the token-bearing tars.  The underlying GCS-only wrapper remains an internal
 primitive and must not be run separately by the remote executor.
 
+## Attempt-14 return recovery (active)
+
+d33 has already run. Its submitted five-file directory did not use the
+operator wrapper above and therefore does not satisfy this phase gate. Do not
+relaunch it and do not require its vanished original render directory. A
+bucket/Kubernetes-capable executor now runs:
+
+```bash
+bash canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/recover_m15_attempt14_d33_operator_return.sh \
+  "$RETURN" /mnt/disks/tunix-data default
+(cd "$RETURN" && sha256sum -c SHA256SUMS)
+```
+
+The recovery script treats the committed subset only as a locator: it verifies
+the subset manifest, derives the exact source/JobSet identities, emits
+`RECOVERY_INPUT_RECEIPT.json`, and then runs the official per-round and
+operator audits. It never uses the subset's numerical prose as a classifier.
+Phase D3 remains open until the recovered machine package is reviewed.
+
 ## Target gate and decision table
 
 | Observation | Status | Decision |
@@ -119,9 +139,10 @@ red checkpoint.
 
 ## Claim ceiling
 
-Before a fresh target run:
+After d33 execution but before a complete operator return:
 
 ```text
-MULTIROUND_DURABILITY_IMPLEMENTED / HOST_PASS /
-EXACT_IMAGE_NOT_RUN / TARGET_NOT_RUN / NUMERICAL_FIX_NOT_AUTHORIZED
+TARGET_EXECUTED / SUBMITTED_SUBSET_HASH_VALID /
+EVIDENCE_COMPLETENESS_RED / ANALYSIS_GRADE_ONLY /
+NUMERICAL_FIX_NOT_AUTHORIZED
 ```

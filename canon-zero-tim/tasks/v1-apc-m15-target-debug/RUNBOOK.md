@@ -5,40 +5,52 @@ commands; it does not edit YAML, numerical code, or evidence. Large payloads
 remain in GCS exactly like the earlier P38/lm-head investigation. Only small
 machine-generated receipts are returned through Git or chat.
 
-## Current operation: three frozen Layer-0 rounds with per-round durability
+## Current operation: recover the already-run d33 pair
 
-Do not run the old one-round command below.  After the source is reviewed,
-committed, pushed, and target launch is separately approved, use the two
-checked-in wrappers from the top of `HANDOFF.md`:
+Do not render, apply, restart, or delete a JobSet. The submitted d33 package is
+only a five-file analysis subset, so the current operation is a read-only
+recovery of the per-round objects that the runtime already attempted to seal.
+The remote agent needs a clean current checkout, read-only access to the two
+existing JobSets, and read access to their registered bucket roots.
+
+```bash
+RETURN=/tmp/v1-apc-m15-attempt14-d33-operator-return
+test ! -e "$RETURN"
+bash canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/recover_m15_attempt14_d33_operator_return.sh \
+  "$RETURN" /mnt/disks/tunix-data default
+(cd "$RETURN" && sha256sum -c SHA256SUMS)
+```
+
+This dedicated entrypoint removes the missing-original-`$OUT` ambiguity. It
+verifies the committed Attempt-14 subset, derives the exact source and two
+JobSet/object identities, emits a `LOCATOR_ONLY` recovery receipt, and calls
+the existing official operator-return wrapper. The final package binds the
+locator receipt, all recovered official classifiers, numerical summary,
+sanitized JobSet status, and remote `run.log` SHA/size receipts under one
+manifest. It never downloads or returns the large logs or token-bearing
+archives.
+
+Return the directory unchanged. A hand-written classification or receipt is
+not acceptable. `COMPLETE` admits six-round scientific review;
+`ROUNDS_RECOVERED_ROOT_INCOMPLETE` and `PARTIAL_ROUNDS_RECOVERED` remain
+analysis-grade; `NO_DURABLE_ROUND` is the only status that makes a fresh target
+run worth discussing. Phase E and all APC numerical edits remain blocked until
+the machine return is reviewed.
+
+Evidence publication, if separately approved, is additive: copy the entire
+return into a new `v1_apc_m15_attempt14_d33_operator_return_20260828/`
+directory, verify its manifest in place, and leave the prior five-file subset
+untouched. Do not select or rename individual classifier files.
+
+## Historical operation: launch the three-round pair
+
+The already-completed d33 launch used the three-round durability path below.
+Do not run it again for the current task. It is retained for provenance:
 
 ```bash
 bash canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/prepare_m15_multiround_pair.sh \
   "$SOURCE_SHA" "$RUN_ID" "$OUT" full 0
 ```
-
-Submit the generated off/on YAMLs concurrently with standalone `kubectl
-apply` commands.  Each arm performs exactly three real M15 rollouts/evaluation
-rounds against frozen weights.  Every round is independently sealed and read
-back before the next starts.  No backward or optimizer commit is allowed.
-
-Post-run, do not manually copy a classifier, JobSet condition, or log hash, and
-do not wait for a multi-GiB tar to travel through Git/chat.  From an executor
-with read-only Kubernetes access and bucket access, run one command:
-
-```bash
-bash canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/run_m15_multiround_operator_return.sh \
-  "$OUT" "$RETURN" /mnt/disks/tunix-data default
-(cd "$RETURN" && sha256sum -c SHA256SUMS)
-```
-
-The wrapper internally runs the core GCS return, queries every per-round prefix,
-reads both exact JobSet statuses, and binds each root `run.log` by manifest SHA
-and object size without downloading the log.  It returns only hash-bound small
-JSON.  Earlier sealed rounds survive even if root `COLLECTED`/`COMPLETE` or a
-Kubernetes receipt is absent.  Read both `MULTIROUND_SUMMARY.json` (numerical
-status) and `OPERATOR_RETURN_SUMMARY.json` (transport/operator completeness).
-Status meanings and the exact return checklist are in the first section of
-`HANDOFF.md` and `phases/phase-d3-multiround-durable-rerun.md`.
 
 ## Historical operation: publish Phase D2; target launch remained approval-gated
 
