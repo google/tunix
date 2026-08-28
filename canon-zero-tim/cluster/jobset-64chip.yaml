@@ -110,7 +110,7 @@ spec:
                 - --node_type=resource_manager
                 - --instance_count=1
                 - --instance_type=tpuv5:4x4x4
-                - --pathways_pipe_unreachable_timeout=300s
+                - --temporary_flags_for_debugging=temporary_flag_for_debugging_pipe_unreachable_timeout=300s
               env:
                 - name: HOST_ADDRESS
                   value: localhost
@@ -261,7 +261,7 @@ spec:
                 - --resource_manager_address=canon-zero-tim-v5p-64-pathways-head-0-0.canon-zero-tim-v5p-64:29001
                 - --node_type=worker
                 - --instance_type=tpuv5:4x4x4
-                - --pathways_pipe_unreachable_timeout=300s
+                - --temporary_flags_for_debugging=temporary_flag_for_debugging_pipe_unreachable_timeout=300s
               env:
                 - name: PATHWAYS_HEAD
                   value: canon-zero-tim-v5p-64-pathways-head-0-0.canon-zero-tim-v5p-64
