@@ -67,13 +67,14 @@ class TrajectoryQueueManager(group_queue_manager.GroupQueueManager):
   def create(
       cls,
       group_size: int = 1,
-      max_staleness: int | None = None,
+      max_staleness: int = 0,
       current_policy_version: Callable[[], int] | None = None,
       filter_fn: Any | None = None,
   ) -> "TrajectoryQueueManager":
     """Creates a grouped trajectory queue with optional policy staleness filtering."""
+    assert max_staleness >= 0, "max_staleness must be non-negative."
     combined_filter = filter_fn
-    if max_staleness is not None and current_policy_version is not None:
+    if max_staleness > 0 and current_policy_version is not None:
 
       def _staleness_filter(group: Sequence[Any]) -> Any:
         min_allowed = current_policy_version() - max_staleness
