@@ -255,7 +255,7 @@ class RemoteExecutionServer(abc.ABC):
     )
     response = await self.execute_request(request)
     if response.error_message:
-      logging.error(
+      logging.debug(
           "[RemoteExecutionServer] Task %s failed: %s\n%s",
           request.request_id,
           response.error_message,
