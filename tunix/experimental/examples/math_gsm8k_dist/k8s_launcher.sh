@@ -128,7 +128,7 @@ start_orchestrator() {
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${ORCHESTRATOR_PORT}" \
     --worker_startup_command=" \
-      cd /app && git fetch https://github.com/google/tunix.git ${SYNC_GIT_BRANCH} && git checkout FETCH_HEAD -- examples/math_gsm8k tunix/experimental/examples/math_gsm8k_dist/run_gsm8k_dist_grpo.py tunix/experimental/orchestrator/distributed_rl_engine.py && \
+      cd /app && git fetch https://github.com/google/tunix.git ${SYNC_GIT_BRANCH} && git checkout FETCH_HEAD -- examples/math_gsm8k tunix/experimental/examples/math_gsm8k_dist/run_gsm8k_dist_grpo.py tunix/experimental/orchestrator/distributed_rl_engine.py tunix/experimental/orchestrator/rl_program.py && \
       python -m tunix.experimental.distributed.runtime.main \
         --discovery_id=${ORCHESTRATOR_ID} \
         --discovery_port=${ORCHESTRATOR_PORT} \
@@ -229,7 +229,6 @@ start_rollout() {
           --lora_alpha=${LORA_ALPHA} \
           --tensor_parallel_size=${ROLLOUT_TENSOR_PARALLEL_SIZE} \
           --maxtext_model_name=${MAXTEXT_MODEL_NAME} \
-          ${MAXTEXT_CKPT:+--maxtext_load_parameters_path=${MAXTEXT_CKPT}} \
           ${ROLLOUT_MAXTEXT_ATTENTION:+--maxtext_attention=${ROLLOUT_MAXTEXT_ATTENTION}} \
       " \
       | kubectl apply -f -
