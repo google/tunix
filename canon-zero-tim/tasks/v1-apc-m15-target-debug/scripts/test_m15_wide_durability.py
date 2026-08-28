@@ -160,6 +160,24 @@ class M15WideDurabilityTest(unittest.TestCase):
     )
     self.assertEqual(receipt["record_pairs"], 5)
 
+  def test_absent_observer_directory_returns_empty(self) -> None:
+    absent_dir = self.root / "does_not_exist"
+    round_root = self.shards / "round-000000"
+    output = round_root / "000000"
+    result = stage(
+        directory=absent_dir,
+        shard_root=round_root,
+        output=output,
+        round_index=0,
+        sequence=0,
+        max_records=2,
+        max_bytes=1024 * 1024,
+        expected_commit=COMMIT,
+        runtime_commit=COMMIT,
+    )
+    self.assertIsNone(result)
+    self.assertFalse(output.exists())
+
   def test_unsealed_stage_is_not_accepted_and_tamper_is_rejected(self) -> None:
     self._pair("p38_seam", 0)
     shard0, _ = self._stage(0)

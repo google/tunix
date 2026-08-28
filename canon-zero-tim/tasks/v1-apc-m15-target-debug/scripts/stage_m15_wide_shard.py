@@ -167,7 +167,8 @@ def stage(
     expected_commit: str,
     runtime_commit: str,
 ) -> dict[str, Any] | None:
-  _require(directory.is_dir(), f"observer directory is absent: {directory}")
+  if not directory.is_dir():
+    return None
   _require(0 <= round_index < 8, "diagnostic round must be in [0,8)")
   _require(sequence >= 0, "shard sequence must be nonnegative")
   _require(1 <= max_records <= 256, "shard record cap must be in [1,256]")
