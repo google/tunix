@@ -2,10 +2,10 @@
 
 ## Current P58.19 three-round coarse seam-localization checkpoint (2026-08-28)
 
-- Current status: local P58.19c coverage repair is implemented on top of
-  `117386387a7b6408089309f9c39a01113758ece8`; construction validation is
-  complete and source publication is approved for this delivery. No image,
-  Kubernetes object, or TPU work has been created.
+- Current status: P58.19c coverage repair implementation
+  `b231ef39d0d2f5c270561f9acd1a26a6b0503654` is the approved source
+  publication for this delivery. Construction validation is complete. No
+  image, Kubernetes object, or TPU work has been created.
 - Target Incident (p58s19b): Attempt `canon-p58-seamcoarse-full-p58s19b` (128 TPU v5p)
   executed Step-0 multi-turn rollouts, but terminated at the postflight gate with
   `FATAL: P38 seam observer contract failed: init=1 records=0 classifier=1`.

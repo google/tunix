@@ -14,12 +14,13 @@ evidence-derived `[1686,4096)` window and serving-capture strata
 prefix available to this lane: 2,513 and 3,715 from `p58z07`, plus 3,438,
 3,880, and 4,032 from the P58.18 ON-A/OFF/ON-B evidence. It does not change
 the model, data, sampling, numerical treatment, geometry, backward, or
-optimizer contract. Source is local and unpublished until the user approves
-a separate commit/push; that source publication is approved for this delivery,
-but no target retry is authorized by this handoff.
+optimizer contract. Source publication required a separate user-approved
+commit/push. That approval is complete: implementation
+`b231ef39d0d2f5c270561f9acd1a26a6b0503654` is the P58.19c source
+publication for this delivery. No target retry is authorized by this handoff.
 
 Construction validation is complete on source base
-`117386387a7b6408089309f9c39a01113758ece8`: focused renderer/profile/
+`b231ef39d0d2f5c270561f9acd1a26a6b0503654`: focused renderer/profile/
 classifier tests pass 45/45, P34 static passes 10 suites, flag audit passes
 394/394/394, diff hygiene passes, and the complete digest-pinned image gate
 ends in `P58_EXACT_IMAGE_CPU_PASS ... coarse_seam=1 ... regressions=1`. The

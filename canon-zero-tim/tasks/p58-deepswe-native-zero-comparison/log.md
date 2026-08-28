@@ -1429,8 +1429,25 @@
   coarse_seam=1 ... regressions=1`. The bare-host environment-contract import
   is blocked by missing optional `metrax` and is not claimed as a host PASS;
   the contract is covered by the passing pinned-image suite.
-- Boundary: source remains uncommitted and unpublished. No image publication,
-  Kubernetes mutation, TPU/Pathways execution, credential access, commit, or
-  push occurred. A separately approved target retry must return the complete
-  raw log and request/scheduler journal and must emit observer records plus all
-  three round classifications.
+- Boundary at construction checkpoint: source was uncommitted and unpublished.
+  No image publication, Kubernetes mutation, TPU/Pathways execution, or
+  credential access occurred. A separately approved target retry must return
+  the complete raw log and request/scheduler journal and must emit observer
+  records plus all three round classifications.
+
+## 2026-08-28 UTC — P58.19c source publication
+
+- Type: user-approved implementation commit / operator-branch publication
+  ledger.
+- Implementation: `b231ef39d0d2f5c270561f9acd1a26a6b0503654`
+  (`P58: repair coarse seam observer coverage`) contains the evidence-derived
+  window, environment contract, regressions, flag registry entry, runbook, and
+  resumable P58 phase records.
+- Validation carried into publication: focused P58 tests 45/45, P34 static 10
+  suites, flag audit 394/394/394, diff hygiene, and complete digest-pinned
+  image gate with `P58_EXACT_IMAGE_CPU_PASS ... coarse_seam=1 ...
+  regressions=1`.
+- Boundary: source publication does not authorize image publication,
+  Kubernetes mutation, or TPU/Pathways execution. The P58.19c target retry is
+  NOT RUN and remains separately approval-gated. `main` is not a publication
+  target.
