@@ -33,6 +33,24 @@ reds; the xprof/trace/perf artifacts under
 /mnt/disks/tunix-data/gsm8k-onehost-xprof/<run>/train/ are the deliverable.
 Host tracer and the engine [PERF] spans cover the full phase in all modes.
 
+## Geometry: two registered one-host geometries
+
+`V1_GSM8K_XPROF_GEOMETRY` selects the carrier mesh for BOTH arms; labels
+are auto-prefixed `dp2tp2-` so runs can never be confused.
+
+| geometry | mesh | why | warm update | commit-norm anchor (bitwise) |
+|---|---|---|---|---|
+| `dp4-tp1` (default) | data4 | fastest backward; the only geometry where `CANON_P71_SCAN=bwd` runs | ~15.7-16.0 s | 1.4907878637313843 / 2.2041752338409424 / 2.6263937950134277 |
+| `dp2-tp2` | data2 x model2 | representative (TP collectives present, like the DP16xTP4 target); 32 groups of one row per rank | ~26.7-30.2 s | 1.6838101148605347 / 3.3025829792022705 / 1.8203867673873901 |
+
+The anchors are geometry-scoped: never compare one geometry's norms (or
+walls) to the other's. At dp2-tp2 the profile force-enables
+`CANON_P66_P59_CHECK_VMA=1` (TP>1 transpose correctness; the drift guard
+refuses to launch without it) and the launcher mounts the seventh
+engine shim (the annotated RPA kernel) — both are automatic.
+`CANON_P71_SCAN=bwd` at dp2-tp2 refuses by design ("P71 bwd block
+supports TP1 only"); use `fwd` there.
+
 ## Running the LATEST optimized zero-TIM backward (this is the current recipe)
 
 Prereqs on a fresh host: pinned image
@@ -51,6 +69,18 @@ never append a pipe to the launch command):
     CANON_DP_FINITE_FETCH=batched-commit \
     CANON_P71_SCAN=bwd \
     bash canon-zero-tim/tasks/v1-gsm8k-onehost-xprof-pair/scripts/run_onehost_xprof_backward_zero.sh "<host>_<date>"
+
+Representative-geometry variant (TP present; swap the scan rung to fwd):
+
+    V1_GSM8K_XPROF_GEOMETRY=dp2-tp2 V1_GSM8K_XPROF_ALLOW_DIRTY=1 \
+    CANON_DP_COMPARE_MODE=fingerprint-hybrid \
+    CANON_DP_DISTINCT_SCHEDULE=first-group-warmup \
+    CANON_DP_FINITE_FETCH=batched-commit \
+    CANON_P71_SCAN=fwd \
+    bash canon-zero-tim/tasks/v1-gsm8k-onehost-xprof-pair/scripts/run_onehost_xprof_backward_zero.sh "<host>_<date>"
+
+A six-update horizon (dark-time and warmup-knife studies) is available
+on either geometry with CANON_P33_RUN_STAGE=six-update.
 
 Flag notes: the P68 batched receipts, the P70 jitted strips, the prep
 hoist, and the reducer program cache are flagless and always on; the
