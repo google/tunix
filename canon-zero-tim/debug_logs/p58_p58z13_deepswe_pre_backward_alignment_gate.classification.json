@@ -1,0 +1,32 @@
+{
+  "artifact_name": "p58_p58z13_deepswe_pre_backward_alignment_gate",
+  "workload": "canon-p58-ds4b-zero-hp-full-p58z13",
+  "failure_category": "PRE_BACKWARD_ALIGNMENT_GATE_RED",
+  "step_index": 0,
+  "action_tokens_total": 432921,
+  "s_prefill_vs_t_old": {
+    "differing_bytes": 0,
+    "differing_elements": 0,
+    "max_abs": 0.0,
+    "verdict": "EXACT"
+  },
+  "s_decode_vs_s_prefill": {
+    "differing_bytes": 66392,
+    "differing_elements": 30250,
+    "element_fraction": 0.069874,
+    "max_abs": 15.125,
+    "verdict": "RED"
+  },
+  "batch_metrics": {
+    "trajectories_total": 128,
+    "complete_trajectories": 119,
+    "timeout_trajectories": 9,
+    "solved_trajectories": 3,
+    "solve_ratio": 0.0234375,
+    "prompt_groups": 8,
+    "effective_prompt_groups": 1,
+    "nonzero_advantages": 16
+  },
+  "root_cause": "DeepSWE Zero-HP full training Step 0 completed 128 long-horizon multi-turn trajectories with 3 solves. In strict Zero arm, CANON_DEEPSWE_ALIGNMENT_WARN_ONLY is 0. S_decode_vs_S_prefill exhibited 30,250 differing elements across 16K response tokens due to decode-versus-chunked-prefill floating point accumulation, triggering AlignmentGateError before backward and optimizer commit.",
+  "status": "ROOT_CAUSE_ISOLATED"
+}
