@@ -25,7 +25,7 @@ B - C = 0 bytes
 | D | observer-neutral coarse-to-fine first-red walk on known-red DP8xTP8 | `FIRST_RED_LOCALIZED` names last exact and first red tensor, shape ledger, request/token/cache coordinate, and `file:line` | Attempt-12 coarse summary returned; blocked on remote evidence binding before the conditional Layer-0 full run |
 | D2 | M15-only incremental observer shards, sealed-input classifier, terminal ordering, and source self-verification | forced death preserves a verified shard; unsealed/tampered/source-mismatched inputs fail closed | host and exact-image pass; Attempt-12 runtime used this path, but its committed return omitted the remote binding audit |
 | D3 | three frozen-weight full Layer-0 rounds per arm plus a small per-round GCS return | each round seals before the next; root-incomplete and partial-round returns remain mechanically distinguishable | protocol implemented, but Attempt 13 predates it and is not a D3-format run |
-| D4 | one-command Attempt-13 flat-shard recovery and official single-round replay | exact 77/70 contiguous shards and matching live inputs verify; official off/on classifiers replay; seven-file small return self-verifies | implemented; host 96/96 PASS; bucket replay not run |
+| D4 | Attempt-13 two-arm registered-root inventory, then conditional flat replay | both listings are distinguishable from query failure; exact 77/70 shard triples and 2,474/2,087 completion totals verify; seven-file inventory self-verifies | inventory implemented; host 101/101 PASS; bucket audit and official replay not run |
 | E | minimal localized repair, default off or experiment-bound | reproducer flips red to zero; APC-off and B are unchanged; adjacent and dirty-page negatives fire | pending |
 | F | certification ladder | host -> exact-image -> one-host clean/repeat/dirty -> matched profile -> separately approved DP8xTP8 G-E | pending |
 
@@ -148,3 +148,11 @@ B - C = 0 bytes
   cannot satisfy the three-round repeat gate or authorize a numerical repair.
   d33 is deferred until the flat replay is reviewed, unless that replay proves
   the required live input is genuinely absent.
+- Correction: the 2026-08-28 executor stopped after a non-zero control
+  `live/` listing. It did not audit treatment or run the official classifier.
+  Non-zero is not equivalent to absence. The new read-only inventory queries
+  both arms independently, validates only object geometry and small completion
+  receipts, and emits a self-hashed `D32_INVENTORY.json`. Only
+  `D32_LIVE_ABSENT_CONFIRMED` makes d33 eligible for separate approval;
+  `D32_LIVE_PRESENT_REPLAY_SHOULD_CONTINUE` returns to the flat replay; any
+  query failure leaves both paths blocked.

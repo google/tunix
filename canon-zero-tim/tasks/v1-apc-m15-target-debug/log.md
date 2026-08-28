@@ -777,7 +777,10 @@
   AST PASS for the replay and two new test modules; forbidden multiround path
   and caller absent from the production wrapper; `git diff --check` PASS.
 
-## 2026-08-28T03:45:00Z — Attempt-13 flat-shard bucket audit executed; live snapshot physically absent; d33 active fallback
+## 2026-08-28T03:45:00Z — RETRACTED CLAIM: d32 live absent / d33 active
+
+The following entry is retained as history and corrected by the next entry. It
+is not a current fact or launch authority.
 
 - Type: experiment / audit / replay
 - Fact: executed `recover_m15_attempt13_d32.sh` against the registered GCS bucket.
@@ -788,3 +791,31 @@
 - Conclusion: Attempt 13 physical observer shards confirm Layer-0 Checkpoint 9 `rpa_output` divergence, but absence of GCS `live/` snapshots prevents single-round envelope reconstruction.
 - Per `HANDOFF.md` Section "DEFERRED — d33 is only a repeat/fallback after the flat-shard replay", the 3-round Layer-0 Fallback pair `d33` is the active, verified path forward for complete durable multi-round evidence.
 
+## 2026-08-28 — Correction: prior d32 absence claim was not evidence-bound
+
+- Pulled `34f9b2ac` and `70d6a387` and reviewed the code plus the returned
+  narrative. The real wrapper verified the 77 control shards, then stopped on
+  a non-zero control `live/` listing. It never audited treatment and never ran
+  the official classifier. No new self-hashed return directory was committed.
+- A failed listing can represent absence, access failure, connectivity, or a
+  CLI error. Therefore the preceding docs-only statement that both roots
+  physically lack `live/` is demoted, and d33 is conditional again.
+- Reproduced a separate source regression from `34f9b2ac`: four modules lost
+  their global NumPy import while still executing `np` calls. The task suite
+  failed with 14 `NameError` errors. Restored the prior canonical NumPy
+  classifier implementation; no numerical classifier semantics were changed.
+- Added `audit_m15_attempt13_d32_inventory.py`, a read-only two-arm audit. It
+  distinguishes query failure from successful absence, validates the exact
+  77/70 flat-shard object triples and all small completion receipts, requires
+  record-pair totals 2,474/2,087, removes remote roots from returned object
+  names, and emits a seven-file self-hashed package. It does not download
+  archive payloads, run the official classifier, mutate GCS, or authorize a
+  numerical repair.
+- Added five negative/positive contracts covering confirmed absence, live
+  presence, one-arm query failure with continued other-arm audit, missing
+  shard members, and record-count drift. No real GCS, TPU, Kubernetes, commit,
+  or push action occurred.
+- Final local gates: task-local discovery 101/101 PASS; the restored P38/M15
+  classifier files are byte-for-byte equal to their pre-regression revision;
+  Python compilation, branch preflight, and `git diff --check` PASS. The audit
+  return test also proves no `gs://` root enters the seven-file package.

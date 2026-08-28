@@ -1,93 +1,87 @@
 # M15 APC target-debug handoff
 
-## START HERE — replay Attempt 13's real flat shards; do not relaunch or repair numerics
+## START HERE — seal Attempt 13's object inventory before replay or relaunch
 
 Attempt 13 (`d32`) is a **single diagnostic round** produced by the older
-flat-shard runtime.  The registered roots contain 77 contiguous control shards
-and 70 contiguous treatment shards under `wide/shards/`, plus periodic
-`live/<sequence>` snapshots.  They do not contain the later
-`wide/rounds/000000..000002` protocol.
+flat-shard runtime. The registered roots are expected to contain 77 contiguous
+control shards and 70 contiguous treatment shards under `wide/shards/`. A
+usable `live/<sequence>` snapshot is required by the existing replay adapter;
+the later `wide/rounds/000000..000002` protocol does not apply to d32.
 
-The former recovery wrapper was wrong for this evidence generation: it
-fabricated `rounds=3` and delegated to the multiround return tool.  Its
-`NO_DURABLE_ROUND` result was therefore a schema false negative, not proof that
-Attempt 13 lost its observer data.  Do not use that old result to launch d33.
+The previous bucket report is not a sealed result. Its wrapper reached and
+verified the control shards, then stopped when the control live listing
+returned non-zero. It never audited the treatment arm and never ran the
+official classifier. A non-zero listing can mean absence, permissions,
+connectivity, or CLI failure, so it does **not** prove that `live/` is absent.
+The docs-only claim in commit `70d6a387` is therefore demoted pending the
+self-hashed audit below. Do not launch d33 from that claim.
 
-This revision adds a purpose-built read-only adapter.  It verifies and extracts
-the immutable flat shards, selects the newest source- and JobSet-matching live
-snapshot with the required alignment/replay/capsule files, assembles exactly
-one round, and reruns the checked-in official classifier.  It does not alter
-RPA, RoPE, attention, KV, LM-head, APC, B, or any model tensor.
+The first action is a cheap, read-only inventory. It recursively lists both
+registered roots independently, validates the exact flat-shard object triples,
+downloads only the small `SHARD_COMPLETE.json` receipts, and distinguishes
+successful absence from query failure. It does not download archive payloads,
+run the numerical classifier, alter GCS, or authorize a numerical repair.
 
 ### Bucket-capable executor command
 
 Requirements: a clean checkout containing this revision, authenticated
-read-only bucket access, `gcloud`, and at least 32 GiB free scratch space.  Do
-not launch TPU/Kubernetes.  Use a fresh return directory:
+read-only bucket access, `gcloud` or `gsutil`, and a fresh return directory.
+No TPU/Kubernetes launch and no large scratch download are required:
 
 ```bash
-RETURN=/tmp/v1-apc-m15-d32-flat-return
+RETURN=/tmp/v1-apc-m15-d32-inventory
 test ! -e "$RETURN"
-bash canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/recover_m15_attempt13_d32.sh \
-  "$RETURN" /mnt/disks/tunix-data
+python3 canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/audit_m15_attempt13_d32_inventory.py \
+  --output "$RETURN" --scratch-parent /tmp
 (cd "$RETURN" && sha256sum -c SHA256SUMS)
 ```
 
-The wrapper fails closed unless all of the following are true:
+The audit fails closed unless all of the following are true:
 
 - source commit and exact off/on JobSet identities match the immutable receipt;
 - shard sequences are exactly `000000..000076` off and `000000..000069` on;
-- every shard archive, manifest, completion receipt, sequence, source and file
-  member verifies;
-- the newest usable live snapshot verifies and contains pre-alignment,
-  replay-envelope, diagnostic-round, and treatment mismatch-capsule inputs;
+- every shard has exactly the three registered object names;
+- every small completion receipt has the expected sequence, source, round,
+  status, payload counts, and archive/manifest hash formats;
 - record counts are exactly 2,474 off and 2,087 on;
-- control has A-B=0 and B-C=0; treatment has A-B=239 bytes / 114 elements and
-  B-C=0;
-- the corrected official classifier accepts the sealed union.
+- both recursive-list queries succeed, even when one arm fails validation.
 
-Large archives, token histories and the compact classifier bundle remain only
-in scratch and are deleted on exit.  The small return must contain exactly the
-analysis artifacts needed for review:
+The small return contains no remote root URI and no token-bearing payload:
 
 ```text
-off.round-000000.classification.json
-on.round-000000.classification.json
-off.round-000000.input-receipt.json
-on.round-000000.input-receipt.json
-ATTEMPT13_FLAT_REPLAY.json
+off.objects.txt
+on.objects.txt
+off.shard-completions.jsonl
+on.shard-completions.jsonl
+D32_INVENTORY.json
 PACKAGING.txt
 SHA256SUMS
 ```
 
 Return the complete `$RETURN` directory unchanged, plus the final
-`M15_ATTEMPT13_FLAT_REPLAY_COMPLETE ...` and
-`[M15.ATTEMPT13] RETURN_READY ... rounds=1 ...` lines and independent
-`sha256sum -c SHA256SUMS` output.  Do not return the scratch directory or any
-token-bearing archive.
+`M15_ATTEMPT13_INVENTORY_{PASS|RED} ...` line and independent
+`sha256sum -c SHA256SUMS` output.
 
 ### Mechanical interpretation
 
 | Decision | Meaning | Next action |
 |---|---|---|
-| `SINGLE_ROUND_ATTENTION_INTERVAL_REPRODUCED` | the sealed d32 control is exact and the treatment's last-exact/first-red pair is again Layer-0 `k_post_rope -> rpa_output` | accept one historical localization round; inspect the returned official fields and design the next finer RPA sub-boundary observer |
-| `SINGLE_ROUND_OFFICIAL_REPLAY_DISAGREES` | sealed inputs replay, but the official boundary differs from the minimized report | preserve both outputs and review classifier/source anchors before any experiment |
-| wrapper exits non-zero | a shard, live input, identity, manifest, count, or numerical hard gate failed | fix only the recovery/return defect; do not claim a numerical result |
+| `D32_LIVE_ABSENT_CONFIRMED` | both recursive queries succeeded, exact shard triples/receipts verified, and neither root listed a `live/` object | d33 becomes eligible for separate review and launch approval; this is still not a numerical verdict |
+| `D32_LIVE_PRESENT_REPLAY_SHOULD_CONTINUE` | the registered roots contain at least one `live/` object | run the existing flat replay only after inspecting this return; do not launch d33 first |
+| `D32_INVENTORY_AUDIT_RED` or non-zero exit | a query, identity, shard geometry, completion receipt, or count failed | fix only the read-only inventory path; absence is unproven and d33 remains blocked |
 
-One d32 replay can validate the historical single round; it cannot prove
-three-round stability and can never authorize a numerical repair by itself.
-Every return records `three_round_repeat=NOT_PERFORMED` and
-`numerical_repair_authorized=false`.  A reproduced attention-call interval is
-an observer boundary, not proof that `rpa_kernel_p66.py` is the causal line.
+The inventory records `official_classifier_replay=NOT_PERFORMED` and
+`numerical_repair_authorized=false`. Even a later d32 replay could validate at
+most one historical round; it cannot prove three-round stability or identify a
+causal source line by itself.
 
-## ACTIVE FALLBACK — d33 3-round Layer-0 matched pair after flat-shard live audit
+## CONDITIONAL FALLBACK — d33 only after a sealed no-live inventory
 
-The corrected flat-shard audit was executed against real GCS (`recover_m15_attempt13_d32.sh`).
-All 77 Control shards (`000000..000076`) successfully downloaded and verified intact
-(`[M15.ATTEMPT13] FLAT_SHARDS_READY arm=off shards=77`, 2474 record pairs, exact SHA256 match).
-The audit failed closed at `fetch_live` (`[M15.ATTEMPT13] REFUSING: off live-snapshot GCS listing failed`)
-because Attempt 13 (`d32`) physically contains no `live/` snapshot directory in GCS.
-Therefore, per the protocol above, d33 is now the active, verified fallback path for complete 3-round Layer-0 durable evidence.
+Do not execute this section yet. It becomes active only if the returned
+`D32_INVENTORY.json` says `D32_LIVE_ABSENT_CONFIRMED` and its manifest verifies
+independently. The existing report that a failed control listing proves
+physical absence is not sufficient. d33 remains a separately approved 64-TPU
+pair even after the inventory gate passes.
 
 d33 is one matched APC-off/APC-on pair, each containing three evaluation-only
 rounds with frozen weights, zero backward, and zero optimizer commits.  The
