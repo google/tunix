@@ -5,8 +5,11 @@
 The implementation commit is
 `f58a97748a8895835fba4944f5c5a34ba8bee352` on
 `yuxzhang/canon-zero-tim`. Immediate post-push readback matched local HEAD and
-the operator remote-tracking ref with ahead/behind `0/0`. Fetch this exact
-40-character SHA into a clean checkout; do not substitute an older P58 tip.
+the operator remote-tracking ref with ahead/behind `0/0`. The publication
+ledger is a later documentation-only tip. Fetch the current operator tip into
+a clean checkout, prove that it contains the implementation commit, and
+record that checkout's actual 40-character HEAD; do not silently substitute
+an older P58 tip.
 
 P58.18 is closed by the sealed `p58aba01` result: ON-A, OFF, and ON-B all
 returned finite A-B RED, exact B-C, controlled exit, and zero backward/commit.
@@ -37,7 +40,9 @@ image, an executor starts from a clean checkout of the exact published SHA and
 runs only the render wrapper:
 
 ```bash
-export P58_EXPECT_SOURCE_SHA=<exact-published-40-character-sha>
+git merge-base --is-ancestor \
+  f58a97748a8895835fba4944f5c5a34ba8bee352 HEAD
+export P58_EXPECT_SOURCE_SHA="$(git rev-parse HEAD)"
 bash canon-zero-tim/tasks/p58-deepswe-native-zero-comparison/scripts/prepare_p58_coarse_seam_localization.sh \
   <fresh-run-id> \
   <matching-image@sha256:...> \
