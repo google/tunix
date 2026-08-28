@@ -54,9 +54,8 @@ export REWARD_MODE=${REWARD_MODE:-exact}
 export DATASET_SOURCE=${DATASET_SOURCE:-huggingface}
 export LEARNING_RATE=${LEARNING_RATE:-2e-6}
 
-# peft runs tunix's PeftTrainer (default, matches this script's prior
-# behavior); maxtext runs MaxText's MaxTextTrainingEngine.
-export TRAINER_BACKEND=${TRAINER_BACKEND:-peft}
+# peft runs tunix's PeftTrainer; maxtext runs MaxText's MaxTextTrainingEngine.
+export TRAINER_BACKEND=${TRAINER_BACKEND:-maxtext}
 export MAXTEXT_CKPT=${MAXTEXT_CKPT:-}
 export MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-$((BATCH_SIZE * NUM_GENERATIONS))}
 export EVAL_EVERY_N_STEPS=${EVAL_EVERY_N_STEPS:-1000000}
