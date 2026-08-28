@@ -519,6 +519,48 @@ class VllmRollout(base_rollout.BaseRollout):
           flush=True,
       )
 
+    # A short prompt-logprob array is an engine accounting failure, not a
+    # numerical one: the TPU runner accumulates prompt logprobs across
+    # prefill chunks and emits them once, on the chunk it marks last, so a
+    # request whose registration is lost before that chunk yields the
+    # processor's bare seed (length one) with no tensors at all.  Retry the
+    # affected rows alone -- a single-row batch is scheduled differently and
+    # the value, if produced, is the same deterministic prefill -- and keep
+    # the fail-closed length check on the retry.  Rows that answered
+    # correctly the first time are never resubmitted.
+    outputs = list(outputs)
+    short_rows = [
+        i
+        for i, (out_i, seq) in enumerate(zip(outputs, seqs))
+        if out_i.prompt_logprobs is None
+        or len(out_i.prompt_logprobs) != len(seq)
+    ]
+    if short_rows:
+      print(
+          "[RESCORE.RETRY] rows="
+          + ",".join(
+              f"{i}:{None if outputs[i].prompt_logprobs is None else len(outputs[i].prompt_logprobs)}"
+              f"/{len(seqs[i])}"
+              for i in short_rows
+          ),
+          flush=True,
+      )
+      for i in short_rows:
+        retry = self._sampler.generate_request_outputs(
+            [TokensPrompt(prompt_token_ids=seqs[i])],
+            SamplingParams(
+                max_tokens=1,
+                temperature=temperature,
+                top_p=top_p,
+                top_k=top_k,
+                prompt_logprobs=0,
+                detokenize=False,
+            ),
+            reset_prefix_cache=reset_prefix_cache,
+        )
+        outputs[i] = retry[0]
+      self._last_prefill_rescore_provenance["retried_rows"] = tuple(short_rows)
+
     out = np.zeros(comps.shape, np.float32)
     for i, (out_i, seq, (n_p, n_c)) in enumerate(zip(outputs, seqs, meta)):
       plp = out_i.prompt_logprobs
@@ -526,6 +568,7 @@ class VllmRollout(base_rollout.BaseRollout):
         raise RuntimeError(
             f"row {i}: engine returned {None if plp is None else len(plp)} prompt logprobs "
             f"for {len(seq)} tokens; cannot align the re-score"
+            + (" (persisted after a single-row retry)" if i in short_rows else "")
         )
       if n_c:
         out[i, :n_c] = np.asarray(

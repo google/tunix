@@ -182,6 +182,76 @@ class VllmRolloutCanonicalTest(absltest.TestCase):
         [[1, 2, 3, 4], [5, 6]],
     )
 
+  def test_short_prompt_logprobs_row_is_retried_alone_and_recovers(self):
+    """The engine's chunked prompt-logprob accounting can drop a request's
+    tensors entirely, leaving the processor's bare seed; the row is resubmitted
+    on its own and the recovered value is used."""
+
+    class _DropsFirstRowOnce(_RescoreSampler):
+
+      def generate_request_outputs(
+          self, prompts, sampling_params, *, reset_prefix_cache=False
+      ):
+        outputs = super().generate_request_outputs(
+            prompts, sampling_params, reset_prefix_cache=reset_prefix_cache
+        )
+        if len(self.prompt_batches) == 1:
+          outputs[0] = types.SimpleNamespace(
+              prompt_logprobs=[None], num_cached_tokens=0
+          )
+        return outputs
+
+    rollout = object.__new__(vllm_rollout.VllmRollout)
+    rollout._sampler = _DropsFirstRowOnce()
+    rollout._last_prefill_rescore_provenance = None
+    result = rollout.get_prefill_rescore_logps(
+        prompt_tokens=np.asarray([[0, 1, 2], [0, 0, 5]], np.int32),
+        completion_tokens=np.asarray([[3, 4, 0], [6, 0, 0]], np.int32),
+        processed=False,
+        completion_lengths=np.asarray([2, 1], np.int32),
+    )
+
+    # Identical to the no-failure expectation: the retry recovers the same
+    # deterministic prefill, and the healthy row is never resubmitted.
+    np.testing.assert_array_equal(
+        result, np.asarray([[-3.0, -4.0, 0.0], [-6.0, 0.0, 0.0]], np.float32)
+    )
+    self.assertEqual(len(rollout._sampler.prompt_batches), 2)
+    self.assertEqual(
+        [prompt["prompt_token_ids"] for prompt in
+         rollout._sampler.prompt_batches[1]],
+        [[1, 2, 3, 4]],
+    )
+    self.assertEqual(
+        rollout._last_prefill_rescore_provenance["retried_rows"], (0,)
+    )
+
+  def test_short_prompt_logprobs_still_fails_closed_when_retry_repeats(self):
+
+    class _AlwaysDropsFirstRow(_RescoreSampler):
+
+      def generate_request_outputs(
+          self, prompts, sampling_params, *, reset_prefix_cache=False
+      ):
+        outputs = super().generate_request_outputs(
+            prompts, sampling_params, reset_prefix_cache=reset_prefix_cache
+        )
+        outputs[0] = types.SimpleNamespace(
+            prompt_logprobs=[None], num_cached_tokens=0
+        )
+        return outputs
+
+    rollout = object.__new__(vllm_rollout.VllmRollout)
+    rollout._sampler = _AlwaysDropsFirstRow()
+    rollout._last_prefill_rescore_provenance = None
+    with self.assertRaisesRegex(RuntimeError, "persisted after a single-row retry"):
+      rollout.get_prefill_rescore_logps(
+          prompt_tokens=np.asarray([[0, 1, 2], [0, 0, 5]], np.int32),
+          completion_tokens=np.asarray([[3, 4, 0], [6, 0, 0]], np.int32),
+          processed=False,
+          completion_lengths=np.asarray([2, 1], np.int32),
+      )
+
   def test_processed_rescore_skips_engine_for_empty_completion_batch(self):
     rollout = object.__new__(vllm_rollout.VllmRollout)
     rollout._sampler = _RescoreSampler()
