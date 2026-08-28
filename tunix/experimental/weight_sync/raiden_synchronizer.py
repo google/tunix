@@ -191,7 +191,7 @@ class RaidenSynchronizer:
     self.names, self.arrays = _filter_bindable(*flatten_weights(state))
     if _ws_lib is None:
       try:
-        from tpu_sync.api.jax import weight_synchronizer as ws_lib  # pytype: disable=import-error  pylint: disable=g-import-not-at-top
+        from tpu_raiden.api.jax import weight_synchronizer as ws_lib  # pytype: disable=import-error  pylint: disable=g-import-not-at-top
       except ImportError:
         return
       _ws_lib = ws_lib

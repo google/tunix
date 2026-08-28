@@ -79,17 +79,28 @@ def _preimport_raiden_if_needed(weight_sync_mode: Any) -> None:
     return
 
   logging.info("Pre-importing Raiden before JAX/vLLM initialization...")
-  try:
-    importlib.import_module("tpu_sync.api.jax.weight_synchronizer")
-    importlib.import_module("tpu_sync.rpc.raiden_controller")
-  except ModuleNotFoundError as exc:
-    if exc.name and exc.name.startswith("tpu_sync"):
-      raise RuntimeError(
-          "WEIGHT_SYNC_MODE=raiden requires the tpu_sync/Raiden package to be "
-          "installed before starting the rollout worker."
-      ) from exc
-    raise
-  logging.info("Finished pre-importing Raiden.")
+  imported = []
+  for module_name in (
+      "tpu_raiden",
+      "tpu_raiden.api.jax.kv_cache_manager",
+  ):
+    root_name = module_name.split(".", maxsplit=1)[0]
+    try:
+      importlib.import_module(module_name)
+      imported.append(module_name)
+    except ModuleNotFoundError as exc:
+      if exc.name and (
+          exc.name == root_name or exc.name.startswith(f"{root_name}.")
+      ):
+        logging.info("Raiden preimport skipped missing module: %s", module_name)
+        continue
+      raise
+  if not imported:
+    raise RuntimeError(
+        "WEIGHT_SYNC_MODE=raiden requires tpu_raiden/Raiden to be "
+        "installed before starting the rollout worker."
+    )
+  logging.info("Finished pre-importing Raiden modules: %s", imported)
 
 
 def _chat_parser_for(model_id: str, tokenizer):

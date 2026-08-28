@@ -19,21 +19,37 @@ from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version
 import os
 
+
+def _preimport_raiden_before_jax() -> None:
+  """Loads tpu-inference Raiden hooks before Tunix can initialize JAX."""
+  imported = []
+  for module_name in (
+      "tpu_raiden",
+      "tpu_raiden.api.jax.kv_cache_manager",
+  ):
+    root_name = module_name.split(".", maxsplit=1)[0]
+    try:
+      importlib.import_module(module_name)
+      imported.append(module_name)
+    except ModuleNotFoundError as exc:
+      if exc.name and (
+          exc.name == root_name or exc.name.startswith(f"{root_name}.")
+      ):
+        continue
+      raise
+  if not imported:
+    raise RuntimeError(
+        "TUNIX_PREIMPORT_RAIDEN_BEFORE_JAX=1 requires tpu_raiden or "
+        "Raiden to be installed."
+    )
+
+
 if os.getenv("TUNIX_PREIMPORT_RAIDEN_BEFORE_JAX", "").lower() in (
     "1",
     "true",
     "yes",
 ):
-  try:
-    importlib.import_module("tpu_sync.api.jax.weight_synchronizer")
-    importlib.import_module("tpu_sync.rpc.raiden_controller")
-  except ModuleNotFoundError as exc:
-    if exc.name and exc.name.startswith("tpu_sync"):
-      raise RuntimeError(
-          "TUNIX_PREIMPORT_RAIDEN_BEFORE_JAX=1 requires the tpu_sync/Raiden "
-          "package to be installed."
-      ) from exc
-    raise
+  _preimport_raiden_before_jax()
 
 try:
   __version__ = version("google-tunix")  # match the name in pyproject.toml
