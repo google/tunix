@@ -1,6 +1,23 @@
 # P57 300-update execution handoff
 
-## START HERE — f45w10 is an unresolved source-worker loss, not a training-math red
+## START HERE — f45w15 Step-1 Timeline Tracer Underflow Incident Sealed
+
+This section supersedes every later `START HERE` block for the next P45 action.
+
+Wave 15 P45 (`canon-p57-fl-zero-f45w15-799a0bd1`, 64 TPU v5p) completed Step 0
+with bitwise exact pre-alignment (0 differing bytes over 46,596 elements,
+`verdict: PASS`) and optimizer commit 1 (`stable_norm=0.5510`). During Step 1
+Rollout, parallel trajectory workers threw `ValueError: host-139531592390336: no
+more spans to end.` from `tunix/perf/experimental/tracer.py:346` / `timeline.py:236`
+due to an asynchronous span stack underflow under multi-threaded rollout.
+
+All 19 component logs (3 head logs + 16 worker logs), `RAW_ERROR.log`, and
+`INCIDENT_REPORT.md` are sealed under
+`evidence/f45w15_timeline_tracer_incident/` with verified `SHA256SUMS`.
+GCS mirror: `gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p57/f45w15-799a0bd1/`.
+
+## Historical — f45w10 is an unresolved source-worker loss, not a training-math red
+
 
 This section supersedes every later `START HERE` block for the next P45 action.
 

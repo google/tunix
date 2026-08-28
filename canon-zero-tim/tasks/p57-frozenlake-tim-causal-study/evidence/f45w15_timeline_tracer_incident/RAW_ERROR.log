@@ -1,0 +1,114 @@
+2026-08-28T10:26:49.316798837Z [PERF] stage=rollout_generate seconds=21.248 rows=1
+2026-08-28T10:26:49.997991039Z [PERF] stage=rollout_generate seconds=21.581 rows=1
+2026-08-28T10:26:51.695764724Z [PERF] stage=rollout_generate seconds=23.621 rows=1
+2026-08-28T10:26:52.038879244Z INFO 08-28 10:26:52 [loggers.py:273] Engine 000: Avg prompt throughput: 6679.2 tokens/s, Avg generation throughput: 345.4 tokens/s, Running: 124 reqs, Waiting: 131 reqs, GPU KV cache usage: 2.9%, Prefix cache hit rate: 0.0%
+2026-08-28T10:26:52.382154226Z [PERF] stage=rollout_generate seconds=24.329 rows=1
+2026-08-28T10:26:52.385542095Z [PERF] stage=rollout_generate seconds=24.179 rows=1
+2026-08-28T10:26:52.397807885Z 2026-08-28 10:26:52 - ERROR - [absl] Caught exception inside model_call: host-139531592390336: no more spans to end.
+2026-08-28T10:26:52.397841265Z Traceback (most recent call last):
+2026-08-28T10:26:52.397849705Z   File "/app/tunix/rl/agentic/trajectory/trajectory_collect_engine.py", line 681, in _safe_model_call
+2026-08-28T10:26:52.397857315Z     return self.model_call(
+2026-08-28T10:26:52.397863795Z            ^^^^^^^^^^^^^^^^
+2026-08-28T10:26:52.397907705Z   File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 2685, in _model_call
+2026-08-28T10:26:52.397916455Z     result = self.rl_cluster.generate(
+2026-08-28T10:26:52.397922265Z              ^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-08-28T10:26:52.397927475Z   File "/app/tunix/rl/rl_cluster.py", line 985, in generate
+2026-08-28T10:26:52.397932585Z     ) as span, self._perf_v2.span(
+2026-08-28T10:26:52.397937715Z                ^^^^^^^^^^^^^^^^^^^
+2026-08-28T10:26:52.397943465Z   File "/usr/local/lib/python3.12/contextlib.py", line 144, in __exit__
+2026-08-28T10:26:52.397948195Z     next(self.gen)
+2026-08-28T10:26:52.397953065Z   File "/app/tunix/perf/experimental/tracer.py", line 346, in span
+2026-08-28T10:26:52.397957635Z     host_timeline.stop_span(end)
+2026-08-28T10:26:52.397962325Z   File "/app/tunix/perf/experimental/timeline.py", line 236, in stop_span
+2026-08-28T10:26:52.397967415Z     raise ValueError(f"{self.id}: no more spans to end.")
+2026-08-28T10:26:52.397972195Z ValueError: host-139531592390336: no more spans to end.
+2026-08-28T10:26:52.400203135Z 2026-08-28 10:26:52 - ERROR - [absl] Fatal error in runner for pair 0: host-139531592390336: no more spans to end.
+2026-08-28T10:26:52.409678725Z Traceback (most recent call last):
+2026-08-28T10:26:52.410308845Z   File "/app/tunix/rl/agentic/pipeline/rollout_orchestrator.py", line 180, in _runner
+2026-08-28T10:26:52.410345015Z     episode_count = await self._run_and_queue_one_episode(
+2026-08-28T10:26:52.410352905Z                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-08-28T10:26:52.410424865Z   File "/app/tunix/rl/agentic/pipeline/rollout_orchestrator.py", line 118, in _run_and_queue_one_episode
+2026-08-28T10:26:52.410450255Z     traj = await self._collect_trajectory(agent, env, mode=collect_mode)
+2026-08-28T10:26:52.410457485Z            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-08-28T10:26:52.411076145Z   File "/app/tunix/rl/agentic/pipeline/rollout_orchestrator.py", line 104, in _collect_trajectory
+2026-08-28T10:26:52.411098755Z     return await engine.collect(mode)
+2026-08-28T10:26:52.411104795Z            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-08-28T10:26:52.411270965Z   File "/app/tunix/rl/agentic/trajectory/trajectory_collect_engine.py", line 272, in collect
+2026-08-28T10:26:52.411298205Z     done = await self._one_step()
+2026-08-28T10:26:52.411305295Z            ^^^^^^^^^^^^^^^^^^^^^^
+2026-08-28T10:26:52.411417105Z   File "/app/tunix/rl/agentic/trajectory/trajectory_collect_engine.py", line 695, in _one_step
+2026-08-28T10:26:52.411433275Z     rollout_output, _ = await self._run_with_timing(
+2026-08-28T10:26:52.411438845Z                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-08-28T10:26:52.411600405Z   File "/app/tunix/rl/agentic/trajectory/trajectory_collect_engine.py", line 184, in _run_with_timing
+2026-08-28T10:26:52.411637985Z     result = await asyncio.wait_for(fut, timeout=timeout)
+2026-08-28T10:26:52.411646805Z              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-08-28T10:26:52.411801865Z   File "/usr/local/lib/python3.12/asyncio/tasks.py", line 520, in wait_for
+2026-08-28T10:26:52.411829035Z     return await fut
+2026-08-28T10:26:52.411836165Z            ^^^^^^^^^
+2026-08-28T10:26:52.411931105Z   File "/usr/local/lib/python3.12/concurrent/futures/thread.py", line 59, in run
+2026-08-28T10:26:52.411947665Z     result = self.fn(*self.args, **self.kwargs)
+2026-08-28T10:26:52.411953755Z              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-08-28T10:26:52.412086545Z   File "/app/tunix/rl/agentic/trajectory/trajectory_collect_engine.py", line 681, in _safe_model_call
+2026-08-28T10:26:52.412097785Z     return self.model_call(
+2026-08-28T10:26:52.412103135Z            ^^^^^^^^^^^^^^^^
+2026-08-28T10:26:52.412190705Z   File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 2685, in _model_call
+2026-08-28T10:26:52.412201315Z     result = self.rl_cluster.generate(
+2026-08-28T10:26:52.412206625Z              ^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-08-28T10:26:52.412322305Z   File "/app/tunix/rl/rl_cluster.py", line 985, in generate
+2026-08-28T10:26:52.412333755Z     ) as span, self._perf_v2.span(
+2026-08-28T10:26:52.412338785Z                ^^^^^^^^^^^^^^^^^^^
+2026-08-28T10:26:52.412408405Z   File "/usr/local/lib/python3.12/contextlib.py", line 144, in __exit__
+2026-08-28T10:26:52.412417835Z     next(self.gen)
+2026-08-28T10:26:52.412571765Z   File "/app/tunix/perf/experimental/tracer.py", line 346, in span
+2026-08-28T10:26:52.412582325Z     host_timeline.stop_span(end)
+2026-08-28T10:26:52.412705334Z   File "/app/tunix/perf/experimental/timeline.py", line 236, in stop_span
+2026-08-28T10:26:52.412713174Z     raise ValueError(f"{self.id}: no more spans to end.")
+2026-08-28T10:26:52.412834934Z ValueError: host-139531592390336: no more spans to end.
+2026-08-28T10:26:52.413161705Z 2026-08-28 10:26:52 - ERROR - [absl] Error yielding batches: host-139531592390336: no more spans to end.
+2026-08-28T10:26:52.450999384Z [rank0]: Traceback (most recent call last):
+2026-08-28T10:26:52.451034454Z [rank0]:   File "<frozen runpy>", line 198, in _run_module_as_main
+2026-08-28T10:26:52.451042194Z [rank0]:   File "<frozen runpy>", line 88, in _run_code
+2026-08-28T10:26:52.451048244Z [rank0]:   File "/app/examples/frozenlake/train_frozenlake_qwen3.py", line 2124, in <module>
+2026-08-28T10:26:52.451053264Z [rank0]:     grpo_trainer.train(
+2026-08-28T10:26:52.451059554Z [rank0]:   File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 4515, in train
+2026-08-28T10:26:52.451066834Z [rank0]:     _ = producer_future.result()
+2026-08-28T10:26:52.451072524Z [rank0]:         ^^^^^^^^^^^^^^^^^^^^^^^^
+2026-08-28T10:26:52.451099134Z [rank0]:   File "/usr/local/lib/python3.12/concurrent/futures/_base.py", line 456, in result
+2026-08-28T10:26:52.451107984Z [rank0]:     return self.__get_result()
+2026-08-28T10:26:52.451115194Z [rank0]:            ^^^^^^^^^^^^^^^^^^^
+2026-08-28T10:26:52.451120434Z [rank0]:   File "/usr/local/lib/python3.12/concurrent/futures/_base.py", line 401, in __get_result
+2026-08-28T10:26:52.451125254Z [rank0]:     raise self._exception
+2026-08-28T10:26:52.451130904Z [rank0]:   File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 2925, in _producer
+2026-08-28T10:26:52.451135724Z [rank0]:     async for batch in self._orchestrator_producer(
+2026-08-28T10:26:52.451140304Z [rank0]:   File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 2811, in _orchestrator_producer
+2026-08-28T10:26:52.451144854Z [rank0]:     group = await anext(stream)
+2026-08-28T10:26:52.451155024Z [rank0]:             ^^^^^^^^^^^^^^^^^^^
+2026-08-28T10:26:52.451159994Z [rank0]:   File "/app/tunix/rl/agentic/pipeline/rollout_orchestrator.py", line 381, in yield_batches
+2026-08-28T10:26:52.451164614Z [rank0]:     batch = await self._group_queue_manager.get_batch(batch_size)
+2026-08-28T10:26:52.451170244Z [rank0]:             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-08-28T10:26:52.451187474Z [rank0]:   File "/app/tunix/rl/agentic/queue_manager/group_queue_manager.py", line 133, in get_batch
+2026-08-28T10:26:52.451192464Z [rank0]:     group = await self._get_one_ready_group()
+2026-08-28T10:26:52.451196834Z [rank0]:             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-08-28T10:26:52.451246754Z [rank0]:   File "/app/tunix/rl/agentic/queue_manager/group_queue_manager.py", line 105, in _get_one_ready_group
+2026-08-28T10:26:52.451252684Z [rank0]:     raise self._exc
+2026-08-28T10:26:52.451257304Z [rank0]:   File "/app/tunix/rl/agentic/pipeline/rollout_orchestrator.py", line 206, in _runner
+2026-08-28T10:26:52.451262204Z [rank0]:     raise e
+2026-08-28T10:26:52.451269384Z [rank0]:   File "/app/tunix/rl/agentic/pipeline/rollout_orchestrator.py", line 180, in _runner
+2026-08-28T10:26:52.451274364Z [rank0]:     episode_count = await self._run_and_queue_one_episode(
+2026-08-28T10:26:52.451279444Z [rank0]:                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-08-28T10:26:52.451284674Z [rank0]:   File "/app/tunix/rl/agentic/pipeline/rollout_orchestrator.py", line 118, in _run_and_queue_one_episode
+2026-08-28T10:26:52.451290014Z [rank0]:     traj = await self._collect_trajectory(agent, env, mode=collect_mode)
+2026-08-28T10:26:52.451294584Z [rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-08-28T10:26:52.451301774Z [rank0]:   File "/app/tunix/rl/agentic/pipeline/rollout_orchestrator.py", line 104, in _collect_trajectory
+2026-08-28T10:26:52.451306384Z [rank0]:     return await engine.collect(mode)
+2026-08-28T10:26:52.451310854Z [rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-08-28T10:26:52.451315424Z [rank0]:   File "/app/tunix/rl/agentic/trajectory/trajectory_collect_engine.py", line 272, in collect
+2026-08-28T10:26:52.451320114Z [rank0]:     done = await self._one_step()
+2026-08-28T10:26:52.451326044Z [rank0]:            ^^^^^^^^^^^^^^^^^^^^^^
+2026-08-28T10:26:52.451330714Z [rank0]:   File "/app/tunix/rl/agentic/trajectory/trajectory_collect_engine.py", line 695, in _one_step
+2026-08-28T10:26:52.451335634Z [rank0]:     rollout_output, _ = await self._run_with_timing(
+2026-08-28T10:26:52.451341664Z [rank0]:                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-08-28T10:26:52.451347314Z [rank0]:   File "/app/tunix/rl/agentic/trajectory/trajectory_collect_engine.py", line 184, in _run_with_timing
+2026-08-28T10:26:52.451352114Z [rank0]:     result = await asyncio.wait_for(fut, timeout=timeout)
+2026-08-28T10:26:52.451357174Z [rank0]:              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+2026-08-28T10:26:52.451361904Z [rank0]:   File "/usr/local/lib/python3.12/asyncio/tasks.py", line 520, in wait_for

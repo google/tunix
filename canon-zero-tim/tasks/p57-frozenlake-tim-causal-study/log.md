@@ -469,3 +469,11 @@
   `kubectl`; its snap-packaged `gcloud` also cannot execute under the current
   capability profile. No real Kubernetes read, GCS upload, JobSet/TPU launch,
   commit, push, or remote mutation occurred.
+
+## 2026-08-28T10:35:00Z — Wave 15 P45 Step-1 Timeline Span Stack Underflow Sealed
+
+- Type: incident intake / failure evidence preservation.
+- Fact: `canon-p57-fl-zero-f45w15-799a0bd1` (64 TPU v5p, DP8xTP8) executed Step 0 with bitwise exact pre-alignment (0 differing bytes over 46,596 elements) and successful optimizer commit 1 (`stable_norm=0.5510`). During Step 1 Rollout, parallel trajectory worker threads threw `ValueError: host-139531592390336: no more spans to end.` from `tunix/perf/experimental/tracer.py:346` / `timeline.py:236`.
+- Preservation: all 19 component logs (3 head logs + 16 worker logs), `RAW_ERROR.log`, and `INCIDENT_REPORT.md` are sealed under `evidence/f45w15_timeline_tracer_incident/` with verified `SHA256SUMS`.
+- GCS mirror: `gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p57/f45w15-799a0bd1/` contains the identical 19 log objects.
+- Consequence: Step 0 numerical integrity is proven; the failure is an asynchronous tracer concurrency underflow bug in Step 1 rollout.
