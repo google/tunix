@@ -56,22 +56,34 @@ if [[ -z "${TOKENIZER_PATH:-}" ]]; then
     TOKENIZER_PATH="$MODEL_DIR"
   fi
 fi
-MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-512}
-MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-128}
+MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-1024}
+MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-1024}
 TRAIN_MAX_RESPONSE_LENGTH=${TRAIN_MAX_RESPONSE_LENGTH:-}
-BATCH_SIZE=${BATCH_SIZE:-2}
-NUM_GENERATIONS=${NUM_GENERATIONS:-2}
+BATCH_SIZE=${BATCH_SIZE:-4}
+NUM_GENERATIONS=${NUM_GENERATIONS:-8}
 MAX_STEPS=${MAX_STEPS:-1}
 TRAIN_MICRO_BATCH_SIZE=${TRAIN_MICRO_BATCH_SIZE:-1}
-MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-$((BATCH_SIZE * NUM_GENERATIONS))}
-EVAL_EVERY_N_STEPS=${EVAL_EVERY_N_STEPS:-1000000}
-LORA_RANK=${LORA_RANK:-16}
-LORA_ALPHA=${LORA_ALPHA:-16.0}
+COMPUTE_LOGPS_MICRO_BATCH_SIZE=${COMPUTE_LOGPS_MICRO_BATCH_SIZE:-1}
+MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-2}
+MAX_CONCURRENCY=${MAX_CONCURRENCY:-$((BATCH_SIZE * NUM_GENERATIONS))}
+TFDS_DATA_DIR=${TFDS_DATA_DIR:-"${ARTIFACT_ROOT}/data"}
+TFDS_SPLIT=${TFDS_SPLIT:-train}
+SEED=${SEED:-42}
+SHUFFLE=${SHUFFLE:-true}
+REWARD_MODE=${REWARD_MODE:-env}
+BETA=${BETA:-0.04}
+EPSILON=${EPSILON:-0.2}
+EVAL_EVERY_N_STEPS=${EVAL_EVERY_N_STEPS:-50}
+LORA_RANK=${LORA_RANK:-64}
+LORA_ALPHA=${LORA_ALPHA:-64.0}
 USE_LORA=${USE_LORA:-0}
-SYNC_WEIGHTS=${SYNC_WEIGHTS:-1}
+SYNC_WEIGHTS=${SYNC_WEIGHTS:-0}
 WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-raiden}
 SAMPLER=${SAMPLER:-inprocess_vllm}
 VLLM_INIT_WITH_RANDOM_WEIGHTS=${VLLM_INIT_WITH_RANDOM_WEIGHTS:-false}
+ROLLOUT_VLLM_HBM_UTILIZATION=${ROLLOUT_VLLM_HBM_UTILIZATION:-0.6}
+ROLLOUT_VLLM_MAX_NUM_SEQS=${ROLLOUT_VLLM_MAX_NUM_SEQS:-}
+ROLLOUT_VLLM_MAX_NUM_BATCHED_TOKENS=${ROLLOUT_VLLM_MAX_NUM_BATCHED_TOKENS:-}
 MAXTEXT_DTYPE=${MAXTEXT_DTYPE:-bfloat16}
 MAXTEXT_REPO_ROOT=${MAXTEXT_REPO_ROOT:-}
 PYTHON_BIN=${PYTHON_BIN:-python3}
@@ -124,6 +136,21 @@ if (( TRAIN_MAX_RESPONSE_LENGTH < MAX_RESPONSE_LENGTH )); then
   echo "Error: TRAIN_MAX_RESPONSE_LENGTH must be >= MAX_RESPONSE_LENGTH."
   echo "Got TRAIN_MAX_RESPONSE_LENGTH=$TRAIN_MAX_RESPONSE_LENGTH MAX_RESPONSE_LENGTH=$MAX_RESPONSE_LENGTH"
   exit 1
+fi
+
+if (( BATCH_SIZE % MINI_BATCH_SIZE != 0 )); then
+  echo "Error: MINI_BATCH_SIZE must divide BATCH_SIZE to match qwen3_grpo_demo.py."
+  echo "Got BATCH_SIZE=$BATCH_SIZE MINI_BATCH_SIZE=$MINI_BATCH_SIZE"
+  exit 1
+fi
+
+if [[ "$BETA" != "0" && "$BETA" != "0.0" && -z "$INFERENCE_ADDR" ]]; then
+  if [[ "$RUN_INFERENCE_NODE" != "1" && "$RUN_INFERENCE_NODE" != "true" && "$RUN_INFERENCE_NODE" != "True" ]]; then
+    echo "Error: BETA=$BETA requires reference log-probs."
+    echo "Set RUN_INFERENCE_NODE=1 with INFERENCE_TPU_CHIPS=..., set INFERENCE_ADDR=host:port,"
+    echo "or set BETA=0 for a rollout/trainer-only smoke test."
+    exit 1
+  fi
 fi
 
 TRAINER_LOG="${LOG_ROOT}/trainer.log"
@@ -382,6 +409,14 @@ echo "  batch size:     $BATCH_SIZE"
 echo "  generations:    $NUM_GENERATIONS"
 echo "  max steps:      $MAX_STEPS"
 echo "  eval interval:  $EVAL_EVERY_N_STEPS"
+echo "  beta:           $BETA"
+echo "  epsilon:        $EPSILON"
+echo "  max concurrency:$MAX_CONCURRENCY"
+echo "  vLLM HBM util:  $ROLLOUT_VLLM_HBM_UTILIZATION"
+echo "  tfds split:     $TFDS_SPLIT"
+echo "  tfds data dir:  $TFDS_DATA_DIR"
+echo "  shuffle:        $SHUFFLE"
+echo "  reward mode:    $REWARD_MODE"
 echo "  prompt length:  $MAX_PROMPT_LENGTH"
 echo "  response len:   $MAX_RESPONSE_LENGTH"
 echo "  train response: $TRAIN_MAX_RESPONSE_LENGTH"
@@ -450,6 +485,7 @@ echo "Launching trainer node on TPU chips $TRAINER_TPU_CHIPS..."
     --max_response_length="$TRAIN_MAX_RESPONSE_LENGTH"
     --mini_batch_size="$MINI_BATCH_SIZE"
     --train_micro_batch_size="$TRAIN_MICRO_BATCH_SIZE"
+    --compute_logps_micro_batch_size="$COMPUTE_LOGPS_MICRO_BATCH_SIZE"
     --eval_every_n_steps="$EVAL_EVERY_N_STEPS"
     --checkpoint_root_directory="$CHECKPOINT_ROOT_DIRECTORY"
     --lora_rank="$LORA_RANK"
@@ -501,11 +537,19 @@ echo "Launching rollout node with sampler=$SAMPLER on TPU chips $ROLLOUT_TPU_CHI
     --tokenizer_path="$TOKENIZER_PATH"
     --max_prompt_length="$MAX_PROMPT_LENGTH"
     --max_response_length="$MAX_RESPONSE_LENGTH"
+    --max_concurrency="$MAX_CONCURRENCY"
+    --rollout_vllm_hbm_utilization="$ROLLOUT_VLLM_HBM_UTILIZATION"
     --vllm_init_with_random_weights="$VLLM_INIT_WITH_RANDOM_WEIGHTS"
     --weight_sync_mode="$WEIGHT_SYNC_MODE"
     --lora_rank="$LORA_RANK"
     --lora_alpha="$LORA_ALPHA"
   )
+  if [[ -n "$ROLLOUT_VLLM_MAX_NUM_SEQS" ]]; then
+    ROLLOUT_CMD+=(--rollout_vllm_max_num_seqs="$ROLLOUT_VLLM_MAX_NUM_SEQS")
+  fi
+  if [[ -n "$ROLLOUT_VLLM_MAX_NUM_BATCHED_TOKENS" ]]; then
+    ROLLOUT_CMD+=(--rollout_vllm_max_num_batched_tokens="$ROLLOUT_VLLM_MAX_NUM_BATCHED_TOKENS")
+  fi
   ROLLOUT_CMD+=("${MODEL_ARGS[@]}")
   if [[ "$USE_LORA" == "1" || "$USE_LORA" == "true" || "$USE_LORA" == "True" ]]; then
     ROLLOUT_CMD+=(--use_lora)
@@ -636,7 +680,7 @@ if [[ "$RUN_INFERENCE_NODE" == "1" || "$RUN_INFERENCE_NODE" == "true" || "$RUN_I
       --model_id="$MODEL_ID"
       --model_dir="$MODEL_DIR"
       --tokenizer_path="$TOKENIZER_PATH"
-      --compute_logps_micro_batch_size="$TRAIN_MICRO_BATCH_SIZE"
+      --compute_logps_micro_batch_size="$COMPUTE_LOGPS_MICRO_BATCH_SIZE"
       --max_prompt_length="$MAX_PROMPT_LENGTH"
       --max_response_length="$TRAIN_MAX_RESPONSE_LENGTH"
     )
@@ -678,14 +722,24 @@ echo "Launching CPU orchestrator..."
     --model_id="$MODEL_ID"
     --tokenizer_path="$TOKENIZER_PATH"
     --batch_size="$BATCH_SIZE"
+    --mini_batch_size="$MINI_BATCH_SIZE"
     --num_generations="$NUM_GENERATIONS"
     --max_steps="$MAX_STEPS"
     --max_prompt_length="$MAX_PROMPT_LENGTH"
     --max_response_length="$MAX_RESPONSE_LENGTH"
     --train_max_response_length="$TRAIN_MAX_RESPONSE_LENGTH"
     --train_micro_batch_size="$TRAIN_MICRO_BATCH_SIZE"
+    --beta="$BETA"
+    --epsilon="$EPSILON"
+    --tfds_data_dir="$TFDS_DATA_DIR"
+    --tfds_split="$TFDS_SPLIT"
+    --seed="$SEED"
+    --reward_mode="$REWARD_MODE"
     --stop_workers_on_exit
   )
+  if [[ "$SHUFFLE" == "0" || "$SHUFFLE" == "false" || "$SHUFFLE" == "False" ]]; then
+    ORCHESTRATOR_CMD+=(--no-shuffle)
+  fi
   if [[ -n "$INFERENCE_ADDR" ]]; then
     ORCHESTRATOR_CMD+=(--inference_addr="$INFERENCE_ADDR")
   fi

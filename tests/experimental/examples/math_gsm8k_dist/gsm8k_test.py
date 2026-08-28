@@ -27,15 +27,29 @@ class GSM8KTest(absltest.TestCase):
         registry.AGENT_REGISTRY.get(gsm8k.GSM8K_AGENT_NAME), gsm8k.GSM8KAgent
     )
 
-  def test_env_scores_answer_containing_gold_answer(self):
-    env = gsm8k.GSM8KEnv(prompt="What is 2+2?", gold_answer="4")
+  def test_extracts_hash_answer(self):
+    self.assertEqual(gsm8k.extract_hash_answer("reasoning #### 72"), "72")
+
+  def test_env_scores_gsm8k_answer(self):
+    env = gsm8k.GSM8KEnv(prompt="What is 2+2?", answer="4")
     obs, _ = env.reset()
     self.assertEqual(obs, {"prompts": "What is 2+2?"})
-    next_obs, reward, done, info = env.step("The answer is 4.")
+    next_obs, reward, done, info = env.step(
+        "</reasoning><answer>\\boxed{4}</answer>"
+    )
     self.assertEqual(next_obs["gold_answer"], "4")
     self.assertEqual(reward, 1.0)
     self.assertTrue(done)
-    self.assertTrue(info["correct"])
+    self.assertTrue(info["format_correct"])
+    self.assertTrue(info["answer_correct"])
+
+  def test_env_gives_partial_credit_for_unformatted_correct_answer(self):
+    env = gsm8k.GSM8KEnv(prompt="What is 2+2?", answer="4")
+    _, _ = env.reset()
+    _, reward, _, info = env.step("\\boxed{4}")
+    self.assertEqual(reward, 0.5)
+    self.assertFalse(info["format_correct"])
+    self.assertTrue(info["answer_correct"])
 
   def test_agent_forwards_model_response_as_action(self):
     agent = gsm8k.GSM8KAgent()
