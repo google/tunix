@@ -19,6 +19,7 @@ import json
 from pathlib import Path
 from typing import Any, Iterable
 
+import numpy as np
 
 
 class M15WideSeamError(RuntimeError):

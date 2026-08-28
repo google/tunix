@@ -5,14 +5,11 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import ast
-import io
 import json
 from pathlib import Path
-import struct
 from typing import Any
-import zipfile
 
+import numpy as np
 
 
 class SeamError(RuntimeError):
@@ -607,138 +604,58 @@ def _load_v2_tail_join_records(
   return records
 
 
-def _load_npz_archive(path: Path) -> dict[str, dict[str, Any]]:
-  try:
-    import numpy as np  # type: ignore
-    with np.load(path, allow_pickle=False) as archive:
-      return {
-          name: {
-              "values": list(np.asarray(archive[name]).reshape(-1)),
-              "shape": archive[name].shape,
-              "raw": archive[name].tobytes(),
-          }
-          for name in archive.files
-      }
-  except ImportError:
-    pass
-
-  arrays: dict[str, dict[str, Any]] = {}
-  with zipfile.ZipFile(path, "r") as zf:
-    for name in zf.namelist():
-      if not name.endswith(".npy"):
-        continue
-      key = name[:-4]
-      raw = zf.read(name)
-      bio = io.BytesIO(raw)
-      magic = bio.read(6)
-      _require(magic == b"\x93NUMPY", f"invalid NPY magic in {path.name}/{name}")
-      major, _ = struct.unpack("BB", bio.read(2))
-      if major == 1:
-        hlen, = struct.unpack("<H", bio.read(2))
-      else:
-        hlen, = struct.unpack("<I", bio.read(4))
-      hdr = ast.literal_eval(bio.read(hlen).decode("latin1").strip())
-      data_bytes = bio.read()
-      shape = tuple(hdr["shape"])
-      descr = hdr["descr"]
-      count = 1
-      for s in shape:
-        count *= s
-      if descr in ("<i4", "<i8", "<f4", "<f8"):
-        fmt = {"<i4": "i", "<i8": "q", "<f4": "f", "<f8": "d"}[descr]
-        values = list(struct.unpack(f"<{count}{fmt}", data_bytes))
-      elif descr in ("|b1", "|u1", "|i1"):
-        values = [bool(b) if descr == "|b1" else b for b in data_bytes]
-      else:
-        values = data_bytes
-      arrays[key] = {
-          "shape": shape,
-          "descr": descr,
-          "values": values,
-          "raw": data_bytes,
-      }
-  return arrays
-
-
 def _red_points(capsules: list[Path]) -> list[dict[str, Any]]:
   points = []
   seen_rounds = set()
   for path in capsules:
-    arrays = _load_npz_archive(path)
+    with np.load(path, allow_pickle=False) as archive:
+      arrays = {name: np.asarray(archive[name]) for name in archive.files}
     required = {
         "metadata_json", "selected_rows", "prompt_ids", "prompt_mask",
         "completion_ids", "completion_valid_mask", "action_mask",
         "s_decode", "s_prefill",
     }
     _require(required.issubset(arrays), f"capsule is incomplete: {path}")
-    raw_meta = arrays["metadata_json"]["raw"]
-    metadata = json.loads(raw_meta.decode("utf-8"))
+    metadata = json.loads(arrays["metadata_json"].tobytes().decode())
     diagnostic_round = int(metadata.get("diagnostic_round", -1))
     _require(diagnostic_round not in seen_rounds,
              f"duplicate capsule round: {diagnostic_round}")
     seen_rounds.add(diagnostic_round)
-
-    selected_rows = arrays["selected_rows"]["values"]
-    num_selected = len(selected_rows)
-
-    prompt_shape = arrays["prompt_ids"]["shape"]
-    comp_shape = arrays["completion_ids"]["shape"]
-    prompt_w = prompt_shape[1] if len(prompt_shape) > 1 else len(arrays["prompt_ids"]["values"]) // max(1, num_selected)
-    comp_w = comp_shape[1] if len(comp_shape) > 1 else len(arrays["completion_ids"]["values"]) // max(1, num_selected)
-
-    p_ids = arrays["prompt_ids"]["values"]
-    p_mask = arrays["prompt_mask"]["values"]
-    c_ids = arrays["completion_ids"]["values"]
-    c_mask = arrays["completion_valid_mask"]["values"]
-    a_mask = arrays["action_mask"]["values"]
-    s_dec = arrays["s_decode"]["values"]
-    s_pref = arrays["s_prefill"]["values"]
-    dec_raw = arrays["s_decode"]["raw"]
-    pref_raw = arrays["s_prefill"]["raw"]
-
-    for capsule_row, source_row_raw in enumerate(selected_rows):
-      p_offset = capsule_row * prompt_w
-      c_offset = capsule_row * comp_w
-      row_prompt = [
-          int(p_ids[p_offset + j])
-          for j in range(prompt_w)
-          if bool(p_mask[p_offset + j])
-      ]
-      row_completion = [
-          int(c_ids[c_offset + j])
-          for j in range(comp_w)
-          if bool(c_mask[c_offset + j])
-      ]
-      row_action = [bool(a_mask[c_offset + j]) for j in range(comp_w)]
-      row_decode = [float(s_dec[c_offset + j]) for j in range(comp_w)]
-      row_prefill = [float(s_pref[c_offset + j]) for j in range(comp_w)]
-      row_dec_raw = dec_raw[c_offset * 4 : (c_offset + comp_w) * 4]
-      row_pref_raw = pref_raw[c_offset * 4 : (c_offset + comp_w) * 4]
-
-      tokens = row_prompt + row_completion
-      for completion_position in range(comp_w):
-        if not row_action[completion_position]:
-          continue
-        byte_diff = (
-            row_dec_raw[completion_position * 4 : (completion_position + 1) * 4]
-            != row_pref_raw[completion_position * 4 : (completion_position + 1) * 4]
-        )
-        if byte_diff:
-          source_position = len(row_prompt) + completion_position - 1
-          _require(source_position >= 0,
-                   "red action has no causal source-token position")
-          points.append({
-              "diagnostic_round": diagnostic_round,
-              "source_row": int(source_row_raw),
-              "completion_position": int(completion_position),
-              "source_position": source_position,
-              "target_id": int(row_completion[completion_position]),
-              "decode_logprob": row_decode[completion_position],
-              "prefill_logprob": row_prefill[completion_position],
-              "token_prefix_sha256": _prefix_sha256(
-                  tokens[:source_position + 1]),
-              "capsule": path.name,
-          })
+    for capsule_row, source_row_raw in enumerate(
+        arrays["selected_rows"].reshape(-1)
+    ):
+      prompt = arrays["prompt_ids"][capsule_row][
+          np.asarray(arrays["prompt_mask"][capsule_row], dtype=np.bool_)]
+      completion = arrays["completion_ids"][capsule_row][
+          np.asarray(
+              arrays["completion_valid_mask"][capsule_row], dtype=np.bool_)]
+      action = np.asarray(arrays["action_mask"][capsule_row], dtype=np.bool_)
+      decode = np.asarray(arrays["s_decode"][capsule_row])
+      prefill = np.asarray(arrays["s_prefill"][capsule_row])
+      _require(action.shape == decode.shape == prefill.shape,
+               f"capsule row geometry drifted: {path.name}")
+      byte_diff = (
+          np.ascontiguousarray(decode).view(np.uint8)
+          != np.ascontiguousarray(prefill).view(np.uint8)
+      ).reshape(decode.size, decode.dtype.itemsize).any(axis=1).reshape(
+          decode.shape)
+      tokens = np.concatenate((prompt, completion)).astype(np.int32, copy=False)
+      for completion_position in np.flatnonzero(action & byte_diff):
+        source_position = int(prompt.size) + int(completion_position) - 1
+        _require(source_position >= 0,
+                 "red action has no causal source-token position")
+        points.append({
+            "diagnostic_round": diagnostic_round,
+            "source_row": int(source_row_raw),
+            "completion_position": int(completion_position),
+            "source_position": source_position,
+            "target_id": int(completion[completion_position]),
+            "decode_logprob": float(decode[completion_position]),
+            "prefill_logprob": float(prefill[completion_position]),
+            "token_prefix_sha256": _prefix_sha256(
+                tokens[:source_position + 1]),
+            "capsule": path.name,
+        })
   _require(points, "capsules contain no A-B-red action positions")
   return points
 

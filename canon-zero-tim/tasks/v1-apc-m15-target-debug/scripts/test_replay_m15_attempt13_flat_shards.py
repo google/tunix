@@ -10,7 +10,7 @@ import shutil
 import tempfile
 import unittest
 
-
+import numpy as np
 
 from replay_m15_attempt13_flat_shards import (
     Attempt13FlatReplayError,
