@@ -36,6 +36,17 @@ _CLASSIFICATIONS = {
         "M15_INTERNAL_FIRST_RED_LOCALIZED",
     },
 }
+_STAGE_SPECS = (
+    (10, "assemble"),
+    (20, "classify"),
+    (30, "package"),
+    (35, "local-export"),
+    (40, "manifest"),
+    (50, "upload"),
+    (60, "remote-verify"),
+    (70, "completion"),
+)
+_STAGE_STATUSES = ("STARTED", "PASS", "FAIL")
 
 
 def _require(condition: bool, message: str) -> None:
@@ -85,6 +96,141 @@ def _inventory(path: Path) -> dict[str, bool]:
   return rows
 
 
+def _audit_stages(
+    directory: Path,
+    *,
+    arm: str,
+    round_index: int,
+    source_commit: str,
+    output: Path,
+) -> dict[str, Any]:
+  stage_dir = directory / "stages"
+  receipts: list[dict[str, Any]] = []
+  files: dict[tuple[int, str, str], Path] = {}
+  expected_names = {
+      f"STAGE_{ordinal}_{stage}_{status}.json"
+      for ordinal, stage in _STAGE_SPECS
+      for status in _STAGE_STATUSES
+  }
+  if stage_dir.is_dir():
+    unexpected = {
+        path.name for path in stage_dir.iterdir()
+        if path.is_file() and path.name not in expected_names
+    }
+    _require(not unexpected,
+             f"{arm} round {round_index} has unexpected stage receipts: "
+             f"{sorted(unexpected)}")
+    for ordinal, stage in _STAGE_SPECS:
+      for status in _STAGE_STATUSES:
+        path = stage_dir / f"STAGE_{ordinal}_{stage}_{status}.json"
+        if path.is_file():
+          files[(ordinal, stage, status)] = path
+
+  inventory = _inventory(directory / "remote-inventory.txt")
+  for ordinal, stage in _STAGE_SPECS:
+    for status in _STAGE_STATUSES:
+      name = f"STAGE_{ordinal}_{stage}_{status}.json"
+      inventory_key = f"stages/{name}"
+      if inventory_key in inventory:
+        _require(
+            inventory[inventory_key]
+            == ((ordinal, stage, status) in files),
+            f"{arm} round {round_index} stage inventory drifted: {name}",
+        )
+
+  if not files:
+    return {
+        "status": "UNINSTRUMENTED",
+        "receipt_count": 0,
+        "last_completed_stage": None,
+        "active_stage": None,
+        "failure_stage": None,
+        "failure_exit_code": None,
+        "receipts": [],
+    }
+
+  terminal_seen = False
+  last_completed: str | None = None
+  active_stage: str | None = None
+  failure_stage: str | None = None
+  failure_exit_code: int | None = None
+  for ordinal, stage in _STAGE_SPECS:
+    statuses = {
+        status for status in _STAGE_STATUSES
+        if (ordinal, stage, status) in files
+    }
+    if not statuses:
+      terminal_seen = True
+      continue
+    _require(not terminal_seen,
+             f"{arm} round {round_index} has a stage after a pipeline gap: {stage}")
+    _require("STARTED" in statuses,
+             f"{arm} round {round_index} {stage} lacks STARTED")
+    _require(not ({"PASS", "FAIL"} <= statuses),
+             f"{arm} round {round_index} {stage} has PASS and FAIL")
+    for status in _STAGE_STATUSES:
+      path = files.get((ordinal, stage, status))
+      if path is None:
+        continue
+      value = _json(path)
+      exit_code = value.get("exit_code")
+      _require(
+          value.get("schema") == "m15-wide-round-stage-v1"
+          and int(value.get("diagnostic_round", -1)) == round_index
+          and value.get("runtime_source_commit") == source_commit
+          and value.get("stage") == stage
+          and value.get("status") == status
+          and type(exit_code) is int
+          and (
+              (status in ("STARTED", "PASS") and exit_code == 0)
+              or (status == "FAIL" and exit_code > 0)
+          ),
+          f"{arm} round {round_index} {stage}/{status} receipt drifted",
+      )
+      destination_name = (
+          f"{arm}.round-{round_index:06d}.stage-"
+          f"{ordinal}-{stage}-{status}.json"
+      )
+      destination = output / destination_name
+      destination.write_bytes(path.read_bytes())
+      receipts.append({
+          "stage": stage,
+          "ordinal": ordinal,
+          "status": status,
+          "exit_code": exit_code,
+          "sha256": _sha256(path),
+          "returned_file": destination_name,
+      })
+    if "PASS" in statuses:
+      last_completed = stage
+      continue
+    active_stage = stage
+    terminal_seen = True
+    if "FAIL" in statuses:
+      failure_stage = stage
+      failure_exit_code = int(
+          _json(files[(ordinal, stage, "FAIL")])["exit_code"]
+      )
+
+  if failure_stage is not None:
+    status = "FAILED"
+  elif active_stage is not None:
+    status = "STARTED_ONLY"
+  elif last_completed == _STAGE_SPECS[-1][1]:
+    status = "PIPELINE_COMPLETE"
+  else:
+    status = "PROGRESS_ONLY"
+  return {
+      "status": status,
+      "receipt_count": len(receipts),
+      "last_completed_stage": last_completed,
+      "active_stage": active_stage,
+      "failure_stage": failure_stage,
+      "failure_exit_code": failure_exit_code,
+      "receipts": receipts,
+  }
+
+
 def _audit_round(
     directory: Path,
     *,
@@ -94,9 +240,27 @@ def _audit_round(
     output: Path,
 ) -> dict[str, Any]:
   inventory = _inventory(directory / "remote-inventory.txt")
+  stage_state = _audit_stages(
+      directory,
+      arm=arm,
+      round_index=round_index,
+      source_commit=source_commit,
+      output=output,
+  )
   present = {name for name in _ROUND_FILES if (directory / name).is_file()}
   if not present and not any(inventory.values()):
-    return {"diagnostic_round": round_index, "status": "ABSENT"}
+    return {
+        "diagnostic_round": round_index,
+        "status": "ABSENT",
+        "stage_state": stage_state,
+    }
+  if present != _ROUND_FILES and stage_state["receipt_count"]:
+    return {
+        "diagnostic_round": round_index,
+        "status": "UNSEALED",
+        "partial_round_files": sorted(present),
+        "stage_state": stage_state,
+    }
   _require(present == _ROUND_FILES,
            f"{arm} round {round_index} small evidence is partial: {sorted(present)}")
   _require(inventory.get("m15_wide_seam_bundle.tar") is True,
@@ -151,6 +315,10 @@ def _audit_round(
       and completion.get("shards") == receipt.get("shards"),
       f"{arm} round {round_index} completion receipt drifted",
   )
+  _require(
+      stage_state["status"] in ("UNINSTRUMENTED", "PIPELINE_COMPLETE"),
+      f"{arm} round {round_index} is sealed but its stage pipeline is incomplete",
+  )
   destination = output / f"{arm}.round-{round_index:06d}.classification.json"
   destination.write_text(
       json.dumps(classification, sort_keys=True, indent=2) + "\n",
@@ -167,6 +335,7 @@ def _audit_round(
       "manifest_sha256": _sha256(manifest_path),
       "bundle_sha256": manifest["m15_wide_seam_bundle.tar"],
       "bundle_downloaded": False,
+      "stage_state": stage_state,
   }
 
 
@@ -224,6 +393,17 @@ def audit(
           "root_markers": _root_state(root / "root", source_commit),
       }
     sealed = [arms[arm]["sealed_rounds"] for arm in ("off", "on")]
+    stage_states = [
+        row["stage_state"]["status"]
+        for arm in ("off", "on")
+        for row in arms[arm]["rounds"]
+    ]
+    stage_receipt_count = sum(
+        int(row["stage_state"]["receipt_count"])
+        for arm in ("off", "on")
+        for row in arms[arm]["rounds"]
+    )
+    stage_failure_count = stage_states.count("FAILED")
     root_complete = all(
         arms[arm]["root_markers"]["COLLECTED.json"]["present"]
         and arms[arm]["root_markers"]["COMPLETE.json"]["present"]
@@ -238,6 +418,18 @@ def audit(
     elif any(sealed):
       status = "PARTIAL_ROUNDS_RECOVERED"
       next_action = "use recovered rounds; do not claim paired target completion"
+    elif "FAILED" in stage_states:
+      status = "ROUND_STAGE_FAILURE_IDENTIFIED"
+      next_action = (
+          "repair the reported failing stage; do not relaunch until its "
+          "focused negative and positive controls pass"
+      )
+    elif any(value != "UNINSTRUMENTED" for value in stage_states):
+      status = "ROUND_STAGE_PROGRESS_ONLY"
+      next_action = (
+          "inspect the last completed/active stage and terminal worker log "
+          "before another target launch"
+      )
     else:
       status = "NO_DURABLE_ROUND"
       next_action = "inspect worker/upload failure before another target launch"
@@ -249,8 +441,10 @@ def audit(
         "arms": arms,
         "next_action": next_action,
         "claim_ceiling": (
-            "Per-round classifiers are independently durable. Root COLLECTED/"
-            "COMPLETE are still required for a full signed target PASS."
+            "Only SEALED rows establish independently durable per-round "
+            "classifiers. Stage receipts locate persistence progress/failure "
+            "but carry no numerical equality claim. Root COLLECTED/COMPLETE "
+            "are still required for a full signed target PASS."
         ),
     }
     (partial / "MULTIROUND_SUMMARY.json").write_text(
@@ -261,6 +455,8 @@ def audit(
         f"status={status}\n"
         f"off_sealed_rounds={sealed[0]}\n"
         f"on_sealed_rounds={sealed[1]}\n"
+        f"stage_receipts={stage_receipt_count}\n"
+        f"stage_failures={stage_failure_count}\n"
         "token_bearing_bundle_returned=0\n"
         "remote_state_mutated=0\n",
         encoding="utf-8",

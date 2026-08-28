@@ -179,6 +179,36 @@ write_ack() {
   echo "[P38.GCS] LIVE_${action^^}_PASS ack=$ack_path"
 }
 
+write_round_failure() {
+  local round_text="$1" stage="$2" exit_code="$3"
+  local failure_path partial
+  failure_path="$CANON_P38_ROUND_SEAL_ACK_DIR/round-$round_text.failure.json"
+  partial="$failure_path.partial"
+  if [ -e "$failure_path" ]; then
+    return 0
+  fi
+  if [ -e "$CANON_P38_ROUND_SEAL_ACK_DIR/round-$round_text.ack" ]; then
+    echo "[P38.GCS] FATAL: cannot publish round failure after ACK: round=$round_text" >&2
+    return 2
+  fi
+  python3 - "$partial" "$((10#$round_text))" "$stage" "$exit_code" <<'PY'
+import json
+import pathlib
+import sys
+
+pathlib.Path(sys.argv[1]).write_text(json.dumps({
+    "action": "seal-round",
+    "diagnostic_round": int(sys.argv[2]),
+    "exit_code": int(sys.argv[4]),
+    "schema": "canon-p38-round-seal-failure-v1",
+    "stage": sys.argv[3],
+    "status": "FAIL",
+}, sort_keys=True) + "\n", encoding="utf-8")
+PY
+  mv -- "$partial" "$failure_path"
+  echo "[P38.GCS] LIVE_ROUND_FAILURE round=$((10#$round_text)) stage=$stage exit_code=$exit_code receipt=$failure_path" >&2
+}
+
 handle_terminal_requests() {
   if [ -e "$CANON_P38_LIVE_COLLECT_REQUEST_FILE" ] && \
      [ ! -e "$CANON_P38_LIVE_COLLECT_ACK_FILE" ]; then
@@ -198,7 +228,7 @@ handle_terminal_requests() {
 }
 
 handle_round_requests() {
-  local request_path request_name round_text expected_name ack_path partial
+  local request_path request_name round_text expected_name ack_path partial rc
   shopt -s nullglob
   local requests=("$CANON_P38_ROUND_SEAL_REQUEST_DIR"/round-*.request)
   shopt -u nullglob
@@ -230,10 +260,27 @@ if record != expected:
   raise SystemExit(f"round-seal request drifted: {record!r} != {expected!r}")
 PY
     if [ "$CANON_P38_DURABILITY_PROFILE" = m15-wide-v1 ]; then
-      flush_m15_shards
-      bash "$persist" m15-round "$round_text"
+      rc=0
+      flush_m15_shards || rc=$?
+      if [ "$rc" -ne 0 ]; then
+        write_round_failure "$round_text" flush-m15-shards "$rc" || true
+        return "$rc"
+      fi
+      rc=0
+      bash "$persist" m15-round "$round_text" || rc=$?
+      if [ "$rc" -ne 0 ]; then
+        # The M15 publisher writes a precise sub-stage when possible.  Keep a
+        # generic fallback for abrupt shell/tool failures.
+        write_round_failure "$round_text" persist-m15-round "$rc" || true
+        return "$rc"
+      fi
     else
-      bash "$persist" round "$round_text"
+      rc=0
+      bash "$persist" round "$round_text" || rc=$?
+      if [ "$rc" -ne 0 ]; then
+        write_round_failure "$round_text" persist-round "$rc" || true
+        return "$rc"
+      fi
     fi
     # The learner is still blocked here, so every record for this round is
     # already inside the verified round archive.  Mark that observer state as

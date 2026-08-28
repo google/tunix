@@ -182,6 +182,10 @@ class TestAuditM15Attempt14D33FlatShards(unittest.TestCase):
     )
     self.assertEqual(summary["decision"], "D33_FLAT_SHARDS_ROUND0_ONLY")
     self.assertEqual(summary["all_rounds_observed"], [0])
+    self.assertEqual(
+        summary["archive_payload_verification"],
+        "NOT_INDEPENDENTLY_REHASHED",
+    )
     self.assertEqual(summary["arms"]["off"]["total_shards"], 88)
     self.assertEqual(summary["arms"]["on"]["total_shards"], 74)
     self.assertTrue((self.output_dir / "SHA256SUMS").is_file())
@@ -203,6 +207,23 @@ class TestAuditM15Attempt14D33FlatShards(unittest.TestCase):
         storage_client=self.storage,
     )
     self.assertEqual(summary["decision"], "D33_FLAT_SHARDS_THREE_ROUNDS_VERIFIED")
+    self.assertEqual(summary["all_rounds_observed"], [0, 1, 2])
+
+  def test_reject_union_only_three_round_coverage(self) -> None:
+    def split_rounds(seq: int, arm: str) -> int:
+      if arm == "off":
+        return 0
+      return 1 if seq < 40 else 2
+
+    self._populate_valid_fake_shards(rounds_fn=split_rounds)
+    summary = audit_flat_shards(
+        recovery_receipt_path=self.recovery_receipt,
+        output_dir=self.output_dir,
+        storage_client=self.storage,
+    )
+    self.assertEqual(
+        summary["decision"], "D33_FLAT_SHARDS_METADATA_INSUFFICIENT"
+    )
     self.assertEqual(summary["all_rounds_observed"], [0, 1, 2])
 
   def test_reject_query_failed(self) -> None:
@@ -285,7 +306,7 @@ class TestAuditM15Attempt14D33FlatShards(unittest.TestCase):
       )
     self.assertIn("manifest SHA mismatch", str(ctx.exception))
 
-  def test_reject_archive_digest_mismatch(self) -> None:
+  def test_reject_malformed_producer_archive_digest(self) -> None:
     jobset = self.receipt_data["jobsets"]["on"]
     gcs_root = f"gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/{jobset}/attempt-0"
     comp_uri = f"{gcs_root}/wide/shards/000001/SHARD_COMPLETE.json"

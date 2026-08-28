@@ -143,6 +143,8 @@ def analyze(directory: Path) -> dict[str, Any]:
       "ROUNDS_RECOVERED_ROOT_INCOMPLETE",
       "PARTIAL_ROUNDS_RECOVERED",
       "NO_DURABLE_ROUND",
+      "ROUND_STAGE_FAILURE_IDENTIFIED",
+      "ROUND_STAGE_PROGRESS_ONLY",
   }, f"Attempt-13 return status is invalid: {status}")
 
   arms = summary.get("arms")
@@ -160,7 +162,7 @@ def analyze(directory: Path) -> dict[str, Any]:
       _require(int(round_value.get("diagnostic_round", -1)) == round_index,
                f"{arm} round ordering drifted")
       filename = f"{arm}.round-{round_index:06d}.classification.json"
-      if round_value.get("status") == "ABSENT":
+      if round_value.get("status") in ("ABSENT", "UNSEALED"):
         _require(filename not in rows,
                  f"{arm} absent round unexpectedly has a classifier")
         continue
@@ -213,8 +215,12 @@ def analyze(directory: Path) -> dict[str, Any]:
     decision = "PARTIAL_EVIDENCE_ONLY"
     next_action = "use recovered rounds without claiming paired target completion"
   else:
-    decision = "NO_DURABLE_ROUND"
-    next_action = "repair worker/upload durability before another target launch"
+    decision = status
+    next_action = (
+        "repair the identified persistence stage before another target launch"
+        if status == "ROUND_STAGE_FAILURE_IDENTIFIED"
+        else "inspect stage receipts and worker termination before another target launch"
+    )
 
   return {
       "schema": "m15-attempt13-return-analysis-v1",

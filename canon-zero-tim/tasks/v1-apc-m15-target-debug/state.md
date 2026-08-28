@@ -1,6 +1,6 @@
 # State
 
-- Status: active; Attempt 14 (d33) read-only flat-shard content audit completed and sealed in `evidence/v1_apc_m15_attempt14_d33_flat_shard_audit_20260828/`. Independent `sha256sum -c SHA256SUMS` verifies 5/5 summary members across all 88 off + 74 on shards (162 total shards).
+- Status: active; Phase D3a seal/ACK hardening is local PASS after Attempt 14 proved that all 88 off + 74 on completion receipts belong to round 0. Exact-image and target gates have not run.
 - Objective: explain and repair the M15 DP8xTP8 APC-on A-vs-B byte mismatch without changing the independent full-reset B arm or any unrelated numerical path.
 - Definition of done: `FIRST_RED_LOCALIZED` names the last exact and first red tensor plus `file:line`; one localized repair then passes host, exact-image, one-host clean/dirty controls, deterministic repeat, and separately approved DP8xTP8 A-B/B-C zero.
 - Task directory: `canon-zero-tim/tasks/v1-apc-m15-target-debug`.
@@ -8,16 +8,17 @@
 - Shard Content Audit Fact:
   - Off control arm: 88 flat shards (`wide/shards/000000..000087`), all `diagnostic_round: 0`, 2,780 total record pairs, 1,792,189,157 payload bytes.
   - On treatment arm: 74 flat shards (`wide/shards/000000..000073`), all `diagnostic_round: 0`, 2,302 total record pairs, 472,614,342 payload bytes.
-  - Every listed shard directory contains valid `SHARD_COMPLETE.json`, `SHA256SUMS`, and `SHARD_ARCHIVE.tar` with matching manifest SHA and archive digest.
+  - Every listed shard directory contains `SHARD_COMPLETE.json`, `SHA256SUMS`, and `SHARD_ARCHIVE.tar`; all completion receipts bind to their manifests. Archive digests are producer attestations only because the small audit did not download/re-hash the tar payloads.
   - Round histogram is 100% round 0 for both arms (`rounds=[0]`); neither arm crossed the first seal to emit round 1 or round 2.
   - Machine decision: `D33_FLAT_SHARDS_ROUND0_ONLY`.
 - Recovered operator return: `evidence/v1_apc_m15_attempt14_d33_operator_return_20260828/`, `evidence/v1_apc_m15_attempt14_d33_inventory_return_20260828/`, and `evidence/v1_apc_m15_attempt14_d33_flat_shard_audit_20260828/`.
 - One-host fact: local r10-r13c stayed exact through real scheduler publication, 32-request composition, `continue_decode=8`, and full M15 chronology. r13c APC-on reached 97.8% hits, 130,148 actions, and logical KV 988..7189.
-- Current phase: Phase D3 flat-shard content audit complete (`D33_FLAT_SHARDS_ROUND0_ONLY`). The first seal/ACK transition path must be inspected before any new multiround carrier run is authorized.
-- Implemented: `audit_m15_attempt14_d33_flat_shards.py`, `test_audit_m15_attempt14_d33_flat_shards.py` (11/11 tests PASS, full M15 suite 129/129 PASS).
+- Current phase: Phase D3a has host-validated stage receipts, fail-fast seal failure handling, three-round ACK progression, and stage-aware small-return collection. No new multiround carrier run is authorized by this local result.
+- Implemented: eight ordered publisher stages; atomic `round-N.failure.json`; learner failure polling; stage-aware small-return audit; corrected Attempt-14 receipt/manifest claim and independent per-arm round gate.
+- Local gates: M15 task suite 137/137 PASS; small-return audit/wrapper 10/10 PASS; P38 persistence PASS; flat-shard audit 12/12 PASS; flags 394/394 PASS; syntax/compile/diff checks PASS.
 - Numerical changes: none. RoPE, attention/RPA, KV values, LM head, loss, backward, optimizer, B full reset, and production APC are unchanged (APC-OFF retained in production full recipes).
-- Next action: inspect and fix the round advance / seal / ACK coordination logic in the D3 runner prior to any further multi-round execution.
-- Claim ceiling: `FLAT_SHARD_AUDIT_PASS / D33_FLAT_SHARDS_ROUND0_ONLY (88 off + 74 on) / ROUND1_2_NOT_REACHED / FIRST_RED_NOT_LOCALIZED / NUMERICAL_FIX_NOT_AUTHORIZED`.
+- Next action: review this local diff. Commit/push, exact-image, and a fresh matched target pair each remain separate user approval boundaries.
+- Claim ceiling: `DURABILITY_REPAIR_LOCAL_PASS / EXACT_IMAGE_NOT_RUN / TARGET_NOT_RUN / NUMERICAL_PATH_UNCHANGED / FIRST_RED_NOT_LOCALIZED / NUMERICAL_FIX_NOT_AUTHORIZED`.
 - Sensitive evidence: the compact bundle contains real tokens/capsules. `m15-wide-v1` publishes it only under the already registered per-run P38 GCS root after sealed-union classification; never return the payload through Git or chat.
 - Key artifacts: [Attempt-14 flat shard summary](evidence/v1_apc_m15_attempt14_d33_flat_shard_audit_20260828/FLAT_SHARD_AUDIT_SUMMARY.json), [Attempt-14 inventory summary](evidence/v1_apc_m15_attempt14_d33_inventory_return_20260828/INVENTORY_SUMMARY.json), [Attempt-14 operator return](evidence/v1_apc_m15_attempt14_d33_operator_return_20260828/OPERATOR_RETURN_SUMMARY.json).
-- Updated: 2026-08-28 (Attempt 14 flat-shard content audit completed: 88 off and 74 on shards verified, decision=D33_FLAT_SHARDS_ROUND0_ONLY).
+- Updated: 2026-08-28 (Phase D3a host gates passed; exact-image, commit/push, and target not run).

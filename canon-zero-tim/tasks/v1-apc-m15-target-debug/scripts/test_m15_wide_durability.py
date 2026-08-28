@@ -3,12 +3,17 @@
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
+import os
 from pathlib import Path
+import re
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
+from unittest import mock
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_DIR))
@@ -23,6 +28,68 @@ from verify_m15_wide_round import VerificationError, verify  # noqa: E402
 
 
 COMMIT = "1" * 40
+
+
+def _load_round_seal_function():
+  source_path = SCRIPT_DIR.parents[3] / "tunix" / "rl" / "alignment.py"
+  source = source_path.read_text(encoding="utf-8")
+  tree = ast.parse(source, filename=str(source_path))
+  function = next(
+      node for node in tree.body
+      if isinstance(node, ast.FunctionDef)
+      and node.name == "_seal_p38_diagnostic_round"
+  )
+  namespace = {
+      "AlignmentGateError": type("AlignmentGateError", (RuntimeError,), {}),
+      "P38_ONEHOST_REHEARSAL_ENV": "CANON_P38_ONEHOST_REHEARSAL",
+      "P38_ROUND_SEAL_ACK_DIR_ENV": "CANON_P38_ROUND_SEAL_ACK_DIR",
+      "P38_ROUND_SEAL_REQUEST_DIR_ENV": "CANON_P38_ROUND_SEAL_REQUEST_DIR",
+      "json": json,
+      "os": os,
+      "re": re,
+  }
+  exec(compile(ast.Module(body=[function], type_ignores=[]), str(source_path), "exec"), namespace)
+  return namespace
+
+
+class RoundSealFailureTest(unittest.TestCase):
+
+  def test_learner_fails_immediately_on_worker_failure_receipt(self):
+    namespace = _load_round_seal_function()
+    with tempfile.TemporaryDirectory() as tmp:
+      root = Path(tmp)
+      requests = root / "requests"
+      acknowledgements = root / "acks"
+      requests.mkdir()
+      acknowledgements.mkdir()
+      failure = acknowledgements / "round-000000.failure.json"
+
+      def publish_failure(_seconds):
+        failure.write_text(json.dumps({
+            "action": "seal-round",
+            "diagnostic_round": 0,
+            "exit_code": 17,
+            "schema": "canon-p38-round-seal-failure-v1",
+            "stage": "classify",
+            "status": "FAIL",
+        }, sort_keys=True) + "\n", encoding="utf-8")
+
+      namespace["time"] = SimpleNamespace(
+          monotonic=lambda: 0.0,
+          sleep=publish_failure,
+      )
+      environment = {
+          "CANON_P38_ROUND_SEAL_REQUEST_DIR": str(requests),
+          "CANON_P38_ROUND_SEAL_ACK_DIR": str(acknowledgements),
+      }
+      with mock.patch.dict(os.environ, environment, clear=False):
+        with self.assertRaisesRegex(
+            namespace["AlignmentGateError"],
+            "round=0 stage=classify exit_code=17",
+        ):
+          namespace["_seal_p38_diagnostic_round"](0)
+      self.assertTrue((requests / "round-000000.request").is_file())
+      self.assertFalse((acknowledgements / "round-000000.ack").exists())
 
 
 class M15WideDurabilityTest(unittest.TestCase):

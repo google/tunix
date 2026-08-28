@@ -73,7 +73,7 @@ for row in "${arm_rows[@]}"; do
     printf -v round_text '%06d' "$round_index"
     remote="$root/wide/rounds/$round_text"
     local_round="$arm_root/round-$round_text"
-    mkdir "$local_round"
+    mkdir "$local_round" "$local_round/stages"
     : > "$local_round/remote-inventory.txt"
     for name in ROUND_INPUT_RECEIPT.json p38_seam.classification.json \
         WIDE_SHA256SUMS WIDE_ROUND_COMPLETE.json m15_wide_seam_bundle.tar; do
@@ -85,6 +85,23 @@ for row in "${arm_rows[@]}"; do
       else
         printf '%s absent\n' "$name" >> "$local_round/remote-inventory.txt"
       fi
+    done
+    for stage_spec in \
+        10:assemble 20:classify 30:package 35:local-export \
+        40:manifest 50:upload 60:remote-verify 70:completion; do
+      ordinal="${stage_spec%%:*}"
+      stage_name="${stage_spec#*:}"
+      for stage_status in STARTED PASS FAIL; do
+        name="STAGE_${ordinal}_${stage_name}_${stage_status}.json"
+        if gcs_exists "$remote/stages/$name"; then
+          printf 'stages/%s present\n' "$name" \
+            >> "$local_round/remote-inventory.txt"
+          gcs_cp "$remote/stages/$name" "$local_round/stages/$name"
+        else
+          printf 'stages/%s absent\n' "$name" \
+            >> "$local_round/remote-inventory.txt"
+        fi
+      done
     done
   done
   for name in PREFLIGHT.json COLLECTED.json COMPLETE.json; do

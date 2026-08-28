@@ -25,6 +25,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sys
 import time
 from typing import Any, Mapping
@@ -143,9 +144,14 @@ def _seal_p38_diagnostic_round(round_index: int) -> None:
   stem = f"round-{int(round_index):06d}"
   request_path = os.path.join(request_dir, f"{stem}.request")
   ack_path = os.path.join(ack_dir, f"{stem}.ack")
-  if os.path.exists(request_path) or os.path.exists(ack_path):
+  failure_path = os.path.join(ack_dir, f"{stem}.failure.json")
+  if (
+      os.path.exists(request_path)
+      or os.path.exists(ack_path)
+      or os.path.exists(failure_path)
+  ):
     raise AlignmentGateError(
-        f"P38 round-seal control path already exists for round {round_index}"
+      f"P38 round-seal control path already exists for round {round_index}"
     )
   temporary = f"{request_path}.tmp"
   payload = {
@@ -166,6 +172,40 @@ def _seal_p38_diagnostic_round(round_index: int) -> None:
   )
   deadline = time.monotonic() + 900.0
   while time.monotonic() < deadline:
+    if os.path.isfile(failure_path) and os.path.getsize(failure_path) > 0:
+      try:
+        with open(failure_path, encoding="utf-8") as stream:
+          failure = json.load(stream)
+      except (OSError, json.JSONDecodeError) as exc:
+        raise AlignmentGateError(
+            f"P38 round-seal failure receipt is invalid: {failure_path}"
+        ) from exc
+      expected_identity = {
+          "action": "seal-round",
+          "diagnostic_round": int(round_index),
+          "schema": "canon-p38-round-seal-failure-v1",
+          "status": "FAIL",
+      }
+      if any(failure.get(key) != value for key, value in expected_identity.items()):
+        raise AlignmentGateError(
+            "P38 round-seal failure receipt drifted: "
+            f"expected_identity={expected_identity} observed={failure}"
+        )
+      stage = failure.get("stage")
+      exit_code = failure.get("exit_code")
+      if (
+          not isinstance(stage, str)
+          or re.fullmatch(r"[a-z0-9-]+", stage) is None
+          or type(exit_code) is not int
+          or exit_code <= 0
+      ):
+        raise AlignmentGateError(
+            f"P38 round-seal failure receipt fields are invalid: {failure}"
+        )
+      raise AlignmentGateError(
+          "P38 round-seal worker failed before acknowledgement: "
+          f"round={round_index} stage={stage} exit_code={exit_code}"
+      )
     if os.path.isfile(ack_path) and os.path.getsize(ack_path) > 0:
       try:
         with open(ack_path, encoding="utf-8") as stream:

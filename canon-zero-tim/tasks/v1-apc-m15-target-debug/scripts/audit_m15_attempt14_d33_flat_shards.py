@@ -5,7 +5,9 @@ This tool derives exact object roots and JobSet identities from
 RECOVERY_INPUT_RECEIPT.json. It downloads and verifies SHARD_COMPLETE.json
 and SHA256SUMS for all 88 off and 74 on sequences, validates manifest hashes,
 checks diagnostic_round metadata, computes round histograms, and emits a
-formal machine decision.
+formal machine decision. It confirms that each archive object is listed and
+that the producer receipt contains a well-formed archive digest; it does not
+download or independently re-hash the multi-gigabyte archive payloads.
 """
 
 from __future__ import annotations
@@ -196,6 +198,7 @@ def _validate_single_shard(
       "payload_bytes": payload_bytes,
       "manifest_sha256": manifest_sha,
       "archive_sha256": archive_sha,
+      "archive_verification": "producer-receipt-only",
       "complete_sha256": _sha(complete_path),
       "sums_sha256": calc_manifest_sha,
   }
@@ -332,10 +335,16 @@ def audit_flat_shards(
         "shards": shards_receipts,
     })
 
-  # Machine Decision
-  if all_rounds_observed == {0, 1, 2}:
+  arm_round_sets = {
+      arm: {int(value) for value in arm_summaries[arm]["rounds_histogram"]}
+      for arm in ("off", "on")
+  }
+  # A union-only check could falsely pass if one arm supplied round 0 while
+  # the other supplied rounds 1 and 2.  Each arm must independently cover the
+  # complete registered round set.
+  if all(rounds == {0, 1, 2} for rounds in arm_round_sets.values()):
     decision = "D33_FLAT_SHARDS_THREE_ROUNDS_VERIFIED"
-  elif all_rounds_observed == {0}:
+  elif all(rounds == {0} for rounds in arm_round_sets.values()):
     decision = "D33_FLAT_SHARDS_ROUND0_ONLY"
   elif not all_rounds_observed:
     decision = "D33_FLAT_SHARDS_METADATA_INSUFFICIENT"
@@ -348,6 +357,7 @@ def audit_flat_shards(
       "campaign_root": EXPECTED_CAMPAIGN,
       "decision": decision,
       "all_rounds_observed": sorted(list(all_rounds_observed)),
+      "archive_payload_verification": "NOT_INDEPENDENTLY_REHASHED",
       "arms": {
           arm: {
               "jobset": arm_summaries[arm]["jobset"],

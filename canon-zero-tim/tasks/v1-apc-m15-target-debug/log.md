@@ -982,3 +982,28 @@ is not a current fact or launch authority.
 - Fact: sealed 5 summary/manifest members + 162 per-shard receipt folders under `evidence/v1_apc_m15_attempt14_d33_flat_shard_audit_20260828/` with independently verified `SHA256SUMS`.
 - Fact: Phase D3 status remains `D33_FLAT_SHARDS_ROUND0_ONLY`. Before any rerun or carrier update, the first seal/ACK transition coordination in the D3 runner must be analyzed and repaired. Phase E remains closed.
 
+## 2026-08-28 — Phase D3a seal/ACK hardening passed host gates
+
+- Type: durability/control-plane implementation; zero numerical changes; zero
+  TPU, Kubernetes, pinned-image, GCS mutation, commit, or push.
+- The learner now waits on either a validated round ACK or an atomic
+  `round-N.failure.json`. A valid failure reports stage/exit code immediately;
+  stale or malformed request/ACK/failure identities fail closed.
+- The live worker now preserves flush and persistence failures without writing
+  an ACK. The round publisher emits ordered STARTED/PASS/FAIL receipts for
+  assemble, classify, package, local-export, manifest, upload, remote-verify,
+  and completion.
+- The small return now downloads those JSON receipts and mechanically reports
+  `ROUND_STAGE_FAILURE_IDENTIFIED`, `ROUND_STAGE_PROGRESS_ONLY`, or the legacy
+  `NO_DURABLE_ROUND`. Stage receipts carry no numerical claim; only official
+  sealed classifiers do.
+- Corrected two audit defects: the Attempt-14 small audit no longer describes
+  producer archive digests as independent payload re-hashes, and the round
+  decision now requires each arm independently to satisfy the round set rather
+  than using their union.
+- Host validation: M15 task discovery 137/137 PASS; stage-aware return including
+  fake GCS 10/10 PASS; P38 persistence PASS with three sequential ACKs and forced
+  failure negatives; flat-shard audit 12/12 PASS; flag audit 394/394 PASS;
+  Bash syntax, Python compilation, and `git diff --check` PASS.
+- Claim ceiling: `DURABILITY_REPAIR_LOCAL_PASS / EXACT_IMAGE_NOT_RUN /
+  TARGET_NOT_RUN / FIRST_RED_NOT_LOCALIZED / PHASE_E_CLOSED`.

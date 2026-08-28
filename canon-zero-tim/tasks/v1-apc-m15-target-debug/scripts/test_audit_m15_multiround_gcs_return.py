@@ -5,7 +5,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
+import shutil
+import subprocess
 import tempfile
 import unittest
 
@@ -111,6 +114,49 @@ class MultiRoundReturnTest(unittest.TestCase):
           "status": "PASS",
       }), encoding="utf-8")
 
+  def _stage(
+      self,
+      arm: str,
+      round_index: int,
+      ordinal: int,
+      stage: str,
+      status: str,
+      *,
+      exit_code: int = 0,
+  ) -> None:
+    root = (
+        (self.off if arm == "off" else self.on)
+        / f"round-{round_index:06d}"
+        / "stages"
+    )
+    root.mkdir(exist_ok=True)
+    name = f"STAGE_{ordinal}_{stage}_{status}.json"
+    (root / name).write_text(json.dumps({
+        "diagnostic_round": round_index,
+        "exit_code": exit_code,
+        "runtime_source_commit": SOURCE,
+        "schema": "m15-wide-round-stage-v1",
+        "stage": stage,
+        "status": status,
+    }), encoding="utf-8")
+    inventory = root.parent / "remote-inventory.txt"
+    with inventory.open("a", encoding="utf-8") as stream:
+      stream.write(f"stages/{name} present\n")
+
+  def _completed_stages(self, arm: str, round_index: int) -> None:
+    for ordinal, stage in (
+        (10, "assemble"),
+        (20, "classify"),
+        (30, "package"),
+        (35, "local-export"),
+        (40, "manifest"),
+        (50, "upload"),
+        (60, "remote-verify"),
+        (70, "completion"),
+    ):
+      self._stage(arm, round_index, ordinal, stage, "STARTED")
+      self._stage(arm, round_index, ordinal, stage, "PASS")
+
   def _all_rounds(self) -> None:
     for round_index in range(3):
       self._round("off", round_index)
@@ -118,6 +164,9 @@ class MultiRoundReturnTest(unittest.TestCase):
 
   def test_complete_pair_returns_six_hash_bound_classifiers(self) -> None:
     self._all_rounds()
+    for arm in ("off", "on"):
+      for round_index in range(3):
+        self._completed_stages(arm, round_index)
     self._markers(self.off, terminal=True)
     self._markers(self.on, terminal=True)
     output = self.root / "return"
@@ -130,6 +179,7 @@ class MultiRoundReturnTest(unittest.TestCase):
     )
     self.assertEqual(result["status"], "COMPLETE")
     self.assertEqual(len(list(output.glob("*.classification.json"))), 6)
+    self.assertEqual(len(list(output.glob("*.stage-*.json"))), 96)
 
   def test_all_rounds_survive_missing_root_terminal_markers(self) -> None:
     self._all_rounds()
@@ -169,6 +219,162 @@ class MultiRoundReturnTest(unittest.TestCase):
           on_root=self.on,
           output=self.root / "return",
       )
+
+  def test_explicit_stage_failure_is_returned_without_numerical_claim(self) -> None:
+    self._stage("off", 0, 10, "assemble", "STARTED")
+    self._stage("off", 0, 10, "assemble", "PASS")
+    self._stage("off", 0, 20, "classify", "STARTED")
+    self._stage("off", 0, 20, "classify", "FAIL", exit_code=17)
+    result = audit(
+        source_commit=SOURCE,
+        rounds=3,
+        off_root=self.off,
+        on_root=self.on,
+        output=self.root / "return",
+    )
+    self.assertEqual(result["status"], "ROUND_STAGE_FAILURE_IDENTIFIED")
+    row = result["arms"]["off"]["rounds"][0]
+    self.assertEqual(row["status"], "UNSEALED")
+    self.assertEqual(row["stage_state"]["failure_stage"], "classify")
+    self.assertEqual(row["stage_state"]["failure_exit_code"], 17)
+
+  def test_started_only_stage_reports_interrupted_progress(self) -> None:
+    self._stage("on", 0, 10, "assemble", "STARTED")
+    result = audit(
+        source_commit=SOURCE,
+        rounds=3,
+        off_root=self.off,
+        on_root=self.on,
+        output=self.root / "return",
+    )
+    self.assertEqual(result["status"], "ROUND_STAGE_PROGRESS_ONLY")
+    state = result["arms"]["on"]["rounds"][0]["stage_state"]
+    self.assertEqual(state["status"], "STARTED_ONLY")
+    self.assertEqual(state["active_stage"], "assemble")
+
+  def test_partial_official_files_are_not_mistaken_for_a_sealed_round(self) -> None:
+    self._stage("on", 0, 10, "assemble", "STARTED")
+    partial = self.on / "round-000000/ROUND_INPUT_RECEIPT.json"
+    partial.write_text("{}", encoding="utf-8")
+    with (self.on / "round-000000/remote-inventory.txt").open(
+        "a", encoding="utf-8"
+    ) as stream:
+      stream.write("ROUND_INPUT_RECEIPT.json present\n")
+    result = audit(
+        source_commit=SOURCE,
+        rounds=3,
+        off_root=self.off,
+        on_root=self.on,
+        output=self.root / "return",
+    )
+    row = result["arms"]["on"]["rounds"][0]
+    self.assertEqual(row["status"], "UNSEALED")
+    self.assertEqual(row["partial_round_files"], ["ROUND_INPUT_RECEIPT.json"])
+
+  def test_stage_after_pipeline_gap_is_rejected(self) -> None:
+    self._stage("off", 0, 20, "classify", "STARTED")
+    with self.assertRaisesRegex(MultiRoundAuditError, "after a pipeline gap"):
+      audit(
+          source_commit=SOURCE,
+          rounds=3,
+          off_root=self.off,
+          on_root=self.on,
+          output=self.root / "return",
+      )
+
+  def test_boolean_failure_exit_code_is_rejected(self) -> None:
+    self._stage("off", 0, 10, "assemble", "STARTED")
+    self._stage("off", 0, 10, "assemble", "FAIL", exit_code=True)
+    with self.assertRaisesRegex(MultiRoundAuditError, "receipt drifted"):
+      audit(
+          source_commit=SOURCE,
+          rounds=3,
+          off_root=self.off,
+          on_root=self.on,
+          output=self.root / "return",
+      )
+
+  def test_shell_return_downloads_stage_receipts(self) -> None:
+    render = self.root / "render"
+    render.mkdir()
+    remote = self.root / "gcs"
+    fake_bin = self.root / "bin"
+    fake_bin.mkdir()
+    fake = fake_bin / "gcloud"
+    shutil.copyfile(
+        Path(__file__).resolve().parents[3] / "tests/p38_serving/fake_gcloud.sh",
+        fake,
+    )
+    fake.chmod(0o755)
+    for arm in ("off", "on"):
+      label = f"m15-test-{arm}"
+      uri = (
+          "gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38/"
+          f"{label}/attempt-0"
+      )
+      (render / f"jobset-v1-apc-m15-{arm}-full.yaml").write_text(
+          "apiVersion: jobset.x-k8s.io/v1alpha2\n"
+          "kind: JobSet\n"
+          "metadata:\n"
+          f"  name: {label}\n"
+          "spec:\n"
+          "  replicatedJobs:\n"
+          "  - template:\n"
+          "      spec:\n"
+          "        template:\n"
+          "          spec:\n"
+          "            containers:\n"
+          "            - env:\n"
+          f"              - {{name: CANON_APC_M15_TARGET_DEBUG, value: '{arm}'}}\n"
+          f"              - {{name: CANON_EXPECT_COMMIT, value: {SOURCE}}}\n"
+          "              - {name: CANON_P38_DIAGNOSTIC_ROUNDS, value: '3'}\n"
+          "              - {name: CANON_P38_SEAM_OBSERVER, value: full}\n"
+          f"              - {{name: CANON_P38_GCS_PREFIX, value: {uri}}}\n",
+          encoding="utf-8",
+      )
+    stage_root = (
+        remote
+        / "yuxzhang-tunix-models/canon-zero-tim/evidence/p38/"
+        "m15-test-off/attempt-0/wide/rounds/000000/stages"
+    )
+    stage_root.mkdir(parents=True)
+    for status, exit_code in (("STARTED", 0), ("FAIL", 17)):
+      (stage_root / f"STAGE_10_assemble_{status}.json").write_text(
+          json.dumps({
+              "diagnostic_round": 0,
+              "exit_code": exit_code,
+              "runtime_source_commit": SOURCE,
+              "schema": "m15-wide-round-stage-v1",
+              "stage": "assemble",
+              "status": status,
+          }),
+          encoding="utf-8",
+      )
+    output = self.root / "shell-return"
+    env = dict(os.environ)
+    env["PATH"] = f"{fake_bin}:{env['PATH']}"
+    env["FAKE_GCS_ROOT"] = str(remote)
+    completed = subprocess.run(
+        [
+            "bash",
+            str(Path(__file__).with_name("run_m15_multiround_gcs_return.sh")),
+            str(render),
+            str(output),
+            str(self.root),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    self.assertEqual(completed.returncode, 0, completed.stderr)
+    summary = json.loads(
+        (output / "MULTIROUND_SUMMARY.json").read_text(encoding="utf-8")
+    )
+    self.assertEqual(summary["status"], "ROUND_STAGE_FAILURE_IDENTIFIED")
+    self.assertTrue(
+        (output / "off.round-000000.stage-10-assemble-FAIL.json").is_file()
+    )
 
 
 if __name__ == "__main__":

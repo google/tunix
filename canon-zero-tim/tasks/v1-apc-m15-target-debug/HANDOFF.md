@@ -13,12 +13,19 @@ Attempt 14 (`d33`) now has three immutable small returns:
 
 The flat-shard content audit verified:
 
-| Arm | Shards | Record pairs | Payload bytes | Diagnostic rounds | Manifest & Archive Hash |
+| Arm | Shards | Record pairs | Payload bytes | Diagnostic rounds | Receipt/manifest audit |
 |---|---:|---:|---:|---|---|
-| APC off | 88 (`000000..000087`) | 2,780 | 1,792,189,157 | Round 0: 88 (100%) | 88/88 OK |
-| APC on | 74 (`000000..000073`) | 2,302 | 472,614,342 | Round 0: 74 (100%) | 74/74 OK |
+| APC off | 88 (`000000..000087`) | 2,780 | 1,792,189,157 | Round 0: 88 (100%) | 88/88 completion + manifest OK |
+| APC on | 74 (`000000..000073`) | 2,302 | 472,614,342 | Round 0: 74 (100%) | 74/74 completion + manifest OK |
 
-Every listed shard directory contains valid `SHARD_COMPLETE.json`, `SHA256SUMS`, and `SHARD_ARCHIVE.tar` with matching manifest SHA and archive digest. However, **100% of shards belong to diagnostic round 0**. Neither arm crossed the first round 0 seal to emit round 1 or round 2.
+Every listed shard directory contains `SHARD_COMPLETE.json`, `SHA256SUMS`, and
+`SHARD_ARCHIVE.tar`.  The small audit independently binds each completion
+receipt to its manifest and confirms that the producer receipt carries a
+well-formed archive digest.  It does **not** download or independently re-hash
+the archive payload; the old wording that archive contents/digests were
+independently verified is withdrawn.  The round metadata itself is decisive:
+**100% of receipts belong to diagnostic round 0**. Neither arm crossed the
+first round 0 seal to emit round 1 or round 2.
 
 The machine decision is:
 
@@ -30,16 +37,26 @@ The strict status is:
 
 ```text
 FLAT_SHARD_AUDIT_PASS / D33_FLAT_SHARDS_ROUND0_ONLY /
-ARCHIVE_CONTENTS_ROUND0_VERIFIED / ROUND1_2_NOT_REACHED /
+ROUND0_RECEIPTS_AND_MANIFESTS_VERIFIED /
+ARCHIVE_PAYLOAD_NOT_INDEPENDENTLY_REHASHED / ROUND1_2_NOT_REACHED /
 OFFICIAL_CLASSIFIER_MISSING / FIRST_RED_NOT_LOCALIZED /
 PHASE_E_CLOSED / NUMERICAL_REPAIR_NOT_AUTHORIZED
 ```
 
-### Next agent work order — inspect first seal/ACK coordination before any rerun
+### Current work order — review locally green seal/ACK hardening before publication
 
 Per the decision table:
 - `D33_FLAT_SHARDS_ROUND0_ONLY`: "valid content exists only for round 0 -> inspect/fix the first seal/ACK path before any rerun".
-- Do not launch a new TPU run or add rollout steps until the seal/ACK transition logic in the D3 runner/collector is analyzed and verified to advance across rounds properly.
+- `phases/phase-d3-seal-ack-hardening.md` owns the additive repair: stage
+  receipts, an atomic `round-N.failure.json`, learner fail-fast handling, a
+  three-round positive control, a forced-persistence negative control, and a
+  stage-aware small-return audit.
+- Host gates are green: 137/137 M15 tests, the P38 persistence suite, 394/394
+  flag audit, syntax/compile checks, and `git diff --check` all pass. The fake
+  GCS end-to-end return distinguishes explicit failure from interrupted
+  progress without accepting either as numerical evidence.
+- This is not target admission. Exact-image, commit/push, and a fresh matched
+  pair each require separate user approval.
 - Phase E remains closed; production APC stays off; B remains an independent full-reset computation.
 
 ## Historical — offline-review d32, then render d33; do not launch implicitly
@@ -195,6 +212,8 @@ The directory itself must contain:
 - `MULTIROUND_SUMMARY.json`;
 - `off.round-000000..000002.classification.json` for sealed off rounds;
 - `on.round-000000..000002.classification.json` for sealed on rounds;
+- `off/on.round-XXXXXX.stage-<ordinal>-<stage>-<status>.json` for every small
+  stage receipt found remotely; these contain no token payload;
 - `JOBSET_STATUS.json`, containing the sanitized terminal condition for both
   exact JobSet names;
 - `RAW_LOG_RECEIPTS.json`, containing each immutable `run.log` identity,
@@ -209,7 +228,12 @@ Interpretation is mechanical:
   overall run is analysis-grade because root finalization died;
 - `PARTIAL_ROUNDS_RECOVERED`: at least one round survived; use it, but do not
   call the paired target run complete;
-- `NO_DURABLE_ROUND`: fix worker/upload before another launch;
+- `ROUND_STAGE_FAILURE_IDENTIFIED`: no round sealed, but a remote FAIL receipt
+  names the exact publisher stage and exit code; repair that stage first;
+- `ROUND_STAGE_PROGRESS_ONLY`: no round sealed, but ordered stage receipts show
+  the last completed or active stage; inspect the terminal worker log before
+  relaunch;
+- `NO_DURABLE_ROUND`: neither a sealed round nor any stage receipt exists;
 - any off-arm red, B-C red, source/round/hash mismatch: hard stop.
 
 `OPERATOR_RETURN_SUMMARY.json.status` equals the numerical core status only

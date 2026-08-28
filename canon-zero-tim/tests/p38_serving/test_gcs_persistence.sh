@@ -499,6 +499,158 @@ assert all(row["expected_source_commit"] == row["runtime_source_commit"]
            for row in receipts)
 PY
 
+# A failed M15 round assembly must leave both a durable remote sub-stage and a
+# local failure receipt that the blocked learner can observe immediately.
+export CANON_APC_M15_TARGET_DEBUG=off
+export CANON_P38_SEAM_CLASSIFICATION="$tmp/m15-wide/state/m15.classification.json"
+export CANON_APC_M15_SEAM_BUNDLE="$tmp/m15-wide/state/m15.bundle.tar"
+export CANON_APC_M15_REPLAY_LEDGER="$tmp/m15-wide/state/capture/m15-replay-envelope.jsonl"
+printf '{"diagnostic_round":2,"schema":"m15-apc-serving-envelope-v1"}\n' \
+  > "$CANON_APC_M15_REPLAY_LEDGER"
+m15_round_fail_rc=0
+bash "$PERSIST" m15-round 000002 \
+  > "$tmp/m15-wide/round-fail.log" 2>&1 || m15_round_fail_rc=$?
+test "$m15_round_fail_rc" -eq 2
+m15_round_failure="$CANON_P38_ROUND_SEAL_ACK_DIR/round-000002.failure.json"
+python3 - "$m15_round_failure" <<'PY'
+import json
+import pathlib
+import sys
+
+failure = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert failure == {
+    "action": "seal-round",
+    "diagnostic_round": 2,
+    "exit_code": 2,
+    "schema": "canon-p38-round-seal-failure-v1",
+    "stage": "assemble",
+    "status": "FAIL",
+}, failure
+PY
+m15_round_stage_remote="$m15_wide_remote/wide/rounds/000002/stages"
+test -s "$m15_round_stage_remote/STAGE_10_assemble_STARTED.json"
+test -s "$m15_round_stage_remote/STAGE_10_assemble_FAIL.json"
+test ! -e "$m15_wide_remote/wide/rounds/000002/WIDE_ROUND_COMPLETE.json"
+
+export FAKE_GCS_FAIL_CP=1
+m15_stage_upload_rc=0
+bash "$PERSIST" m15-round 000003 \
+  > "$tmp/m15-wide/stage-upload-fail.log" 2>&1 || m15_stage_upload_rc=$?
+unset FAKE_GCS_FAIL_CP
+test "$m15_stage_upload_rc" -ne 0
+python3 - "$CANON_P38_ROUND_SEAL_ACK_DIR/round-000003.failure.json" <<'PY'
+import json
+import pathlib
+import sys
+
+failure = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert failure["diagnostic_round"] == 3, failure
+assert failure["stage"] == "assemble-receipt", failure
+assert failure["status"] == "FAIL", failure
+PY
+test ! -e "$CANON_P38_ROUND_SEAL_ACK_DIR/round-000003.ack"
+
+# Isolate the live-worker coordination contract from classifier payloads.  A
+# fake persistence backend proves three ordered ACKs; a forced round failure
+# must instead emit one failure receipt and no ACK.
+worker_contract_root="$tmp/m15-worker-contract"
+fake_pkg="$worker_contract_root/pkg"
+mkdir -p "$fake_pkg/tasks/p38-pathways-decode-prefill-carrier/scripts"
+fake_persist="$fake_pkg/tasks/p38-pathways-decode-prefill-carrier/scripts/persist_p38_gcs.sh"
+apply_worker_contract_env() {
+  local case_root="$1"
+  mkdir -p "$case_root/state/capture" \
+    "$case_root/state/p38_round_seal_requests" \
+    "$case_root/state/p38_round_seal_acks"
+  printf 'run\n' > "$case_root/state/run.log"
+  printf '{}\n' > "$case_root/state/pre.jsonl"
+  printf 'capsule\n' > "$case_root/state/capsule.npz"
+  printf '{}\n' > "$case_root/state/request.jsonl"
+  printf '{}\n' > "$case_root/state/incident.jsonl"
+  printf '0\n' > "$case_root/state/p38_diagnostic_round"
+  export CANON_PKG="$fake_pkg"
+  export CANON_RUN_LOG="$case_root/state/run.log"
+  export CANON_PRE_ALIGN_REPORT="$case_root/state/pre.jsonl"
+  export CANON_P38_MISMATCH_CAPSULE="$case_root/state/capsule.npz"
+  export CANON_P38_REQUEST_JOURNAL="$case_root/state/request.jsonl"
+  export CANON_P38_INCIDENT_LEDGER="$case_root/state/incident.jsonl"
+  export CANON_P38_DIAGNOSTIC_ROUND_FILE="$case_root/state/p38_diagnostic_round"
+  export CANON_P38_ROUND_SEAL_REQUEST_DIR="$case_root/state/p38_round_seal_requests"
+  export CANON_P38_ROUND_SEAL_ACK_DIR="$case_root/state/p38_round_seal_acks"
+  export CANON_P38_LIVE_SNAPSHOT_INTERVAL_SECONDS=1
+  export CANON_P38_LIVE_SNAPSHOT_STOP_FILE="$case_root/state/live.stop"
+  export CANON_P38_LIVE_COLLECT_REQUEST_FILE="$case_root/state/collect.request"
+  export CANON_P38_LIVE_COLLECT_ACK_FILE="$case_root/state/collect.ack"
+  export CANON_P38_LIVE_COMPLETE_REQUEST_FILE="$case_root/state/complete.request"
+  export CANON_P38_LIVE_COMPLETE_ACK_FILE="$case_root/state/complete.ack"
+  export CANON_P38_DURABILITY_PROFILE=m15-wide-v1
+}
+cat > "$fake_persist" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+case "${1:?}" in
+  m15-shard) exit 3 ;;
+  m15-round)
+    if [ "${FAKE_M15_FAIL_ROUND:-}" = "${2:?}" ]; then
+      exit 17
+    fi
+    printf '%s\n' "$2" >> "${FAKE_M15_CALL_LOG:?}"
+    ;;
+  *) exit 2 ;;
+esac
+SH
+chmod +x "$fake_persist"
+
+worker_pass_root="$worker_contract_root/pass"
+apply_worker_contract_env "$worker_pass_root"
+export FAKE_M15_CALL_LOG="$worker_pass_root/state/calls.log"
+unset FAKE_M15_FAIL_ROUND
+worker_pass_log="$worker_pass_root/state/worker.log"
+bash "$ROOT/tasks/p38-pathways-decode-prefill-carrier/scripts/p38_live_snapshot_worker.sh" \
+  > "$worker_pass_log" 2>&1 &
+worker_pass_pid=$!
+for round_index in 0 1 2; do
+  make_round_request "$round_index"
+  ack="$CANON_P38_ROUND_SEAL_ACK_DIR/round-$(printf '%06d' "$round_index").ack"
+  for unused in 1 2 3 4 5; do
+    [ ! -s "$ack" ] || break
+    sleep 1
+  done
+  grep -q '"status": "PASS"' "$ack"
+done
+touch "$CANON_P38_LIVE_SNAPSHOT_STOP_FILE"
+wait "$worker_pass_pid"
+test "$(cat "$FAKE_M15_CALL_LOG")" = $'000000\n000001\n000002'
+grep -q 'LIVE_WORKER_COMPLETE snapshots=0 rounds=3 profile=m15-wide-v1' \
+  "$worker_pass_log"
+
+worker_fail_root="$worker_contract_root/fail"
+apply_worker_contract_env "$worker_fail_root"
+export FAKE_M15_CALL_LOG="$worker_fail_root/state/calls.log"
+export FAKE_M15_FAIL_ROUND=000000
+make_round_request 0
+worker_fail_log="$worker_fail_root/state/worker.log"
+worker_fail_rc=0
+bash "$ROOT/tasks/p38-pathways-decode-prefill-carrier/scripts/p38_live_snapshot_worker.sh" \
+  > "$worker_fail_log" 2>&1 || worker_fail_rc=$?
+test "$worker_fail_rc" -eq 17
+test ! -e "$CANON_P38_ROUND_SEAL_ACK_DIR/round-000000.ack"
+python3 - "$CANON_P38_ROUND_SEAL_ACK_DIR/round-000000.failure.json" <<'PY'
+import json
+import pathlib
+import sys
+
+failure = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert failure["diagnostic_round"] == 0, failure
+assert failure["exit_code"] == 17, failure
+assert failure["stage"] == "persist-m15-round", failure
+assert failure["status"] == "FAIL", failure
+PY
+grep -q 'LIVE_ROUND_FAILURE round=0 stage=persist-m15-round exit_code=17' \
+  "$worker_fail_log"
+unset FAKE_M15_FAIL_ROUND
+export CANON_PKG="$ROOT"
+
 install_fake_gcloud "$tmp/m15-source-mismatch"
 make_case "$tmp/m15-source-mismatch" canon-p38-test-m15-source-mismatch
 export CANON_P38_DURABILITY_PROFILE=m15-wide-v1
@@ -584,4 +736,4 @@ fi
 grep -q 'p58-seam-v1 requires the coarse selector' \
   "$tmp/p58-seam-missing-selector/run.log"
 
-echo "[P38.GCS] PERSISTENCE_TEST_PASS probe=verified prefix_reuse=rejected live=immutable bounded_objects=3 round_request=priority alignment_round=periodic_snapshot_disabled minimal_payload=verified worker=durable round_bundles=survive_abrupt_exit m15_shards=bounded-survive-abrupt-exit p58_three_round_collection=verified p58_missing_selector=rejected source_mismatch=rejected collected=verified complete=last out_of_order=rejected missing=rejected upload_failure=rejected"
+echo "[P38.GCS] PERSISTENCE_TEST_PASS probe=verified prefix_reuse=rejected live=immutable bounded_objects=3 round_request=priority alignment_round=periodic_snapshot_disabled minimal_payload=verified worker=durable round_bundles=survive_abrupt_exit m15_shards=bounded-survive-abrupt-exit m15_round_stage_failure=durable m15_stage_upload_failure=fail_closed m15_worker_rounds=3 m15_worker_failure=fail_fast p58_three_round_collection=verified p58_missing_selector=rejected source_mismatch=rejected collected=verified complete=last out_of_order=rejected missing=rejected upload_failure=rejected"

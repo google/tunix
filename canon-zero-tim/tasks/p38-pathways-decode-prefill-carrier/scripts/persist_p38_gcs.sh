@@ -157,6 +157,99 @@ upload() {
   echo "[P38.GCS] UPLOADED name=$name bytes=$(wc -c < "$source" | tr -d '[:space:]')"
 }
 
+write_m15_round_failure() {
+  local round_text="$1" stage_name="$2" exit_code="$3"
+  local failure_path partial
+  : "${CANON_P38_ROUND_SEAL_ACK_DIR:?}"
+  failure_path="$CANON_P38_ROUND_SEAL_ACK_DIR/round-$round_text.failure.json"
+  partial="$failure_path.partial"
+  if [ -e "$failure_path" ]; then
+    return 0
+  fi
+  python3 - "$partial" "$((10#$round_text))" "$stage_name" "$exit_code" <<'PY'
+import json
+import pathlib
+import sys
+
+pathlib.Path(sys.argv[1]).write_text(json.dumps({
+    "action": "seal-round",
+    "diagnostic_round": int(sys.argv[2]),
+    "exit_code": int(sys.argv[4]),
+    "schema": "canon-p38-round-seal-failure-v1",
+    "stage": sys.argv[3],
+    "status": "FAIL",
+}, sort_keys=True) + "\n", encoding="utf-8")
+PY
+  mv -- "$partial" "$failure_path"
+}
+
+publish_m15_round_stage() {
+  local ordinal="$1" stage_name="$2" status="$3" exit_code="$4"
+  local stage_dir stage_file stage_path remote_path verify_path rc=0
+  stage_file="STAGE_${ordinal}_${stage_name}_${status}.json"
+  stage_dir="$round_root/stages-$snapshot_sequence"
+  mkdir -p "$stage_dir"
+  stage_path="$stage_dir/$stage_file"
+  remote_path="$round_prefix/stages/$stage_file"
+  if gcs_exists "$remote_path"; then
+    echo "[P38.GCS] REFUSING: remote M15 round stage already exists: $stage_file" >&2
+    return 2
+  fi
+  python3 - "$stage_path.partial" "$round_index" "$stage_name" \
+      "$status" "$exit_code" "$runtime_source_commit" <<'PY'
+import json
+import pathlib
+import sys
+
+pathlib.Path(sys.argv[1]).write_text(json.dumps({
+    "diagnostic_round": int(sys.argv[2]),
+    "exit_code": int(sys.argv[5]),
+    "runtime_source_commit": sys.argv[6],
+    "schema": "m15-wide-round-stage-v1",
+    "stage": sys.argv[3],
+    "status": sys.argv[4],
+}, sort_keys=True) + "\n", encoding="utf-8")
+PY
+  rc=$?
+  [ "$rc" -eq 0 ] || return "$rc"
+  mv -- "$stage_path.partial" "$stage_path" || return $?
+  gcs_cp "$stage_path" "$remote_path" || return $?
+  verify_path="$(mktemp)" || return $?
+  gcs_cp "$remote_path" "$verify_path" || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    cmp -- "$stage_path" "$verify_path" || rc=$?
+  fi
+  rm -f "$verify_path"
+  [ "$rc" -eq 0 ] || return "$rc"
+  echo "[P38.GCS] M15_ROUND_STAGE round=$round_index stage=$stage_name status=$status exit_code=$exit_code"
+}
+
+begin_m15_round_stage() {
+  local ordinal="$1" stage_name="$2" rc=0
+  publish_m15_round_stage "$ordinal" "$stage_name" STARTED 0 || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    write_m15_round_failure \
+      "$snapshot_sequence" "$stage_name-receipt" "$rc" || true
+  fi
+  return "$rc"
+}
+
+finish_m15_round_stage() {
+  local ordinal="$1" stage_name="$2" exit_code="$3" receipt_rc=0
+  if [ "$exit_code" -eq 0 ]; then
+    publish_m15_round_stage "$ordinal" "$stage_name" PASS 0 || receipt_rc=$?
+    if [ "$receipt_rc" -ne 0 ]; then
+      write_m15_round_failure \
+        "$snapshot_sequence" "$stage_name-receipt" "$receipt_rc" || true
+      return "$receipt_rc"
+    fi
+    return 0
+  fi
+  write_m15_round_failure "$snapshot_sequence" "$stage_name" "$exit_code" || true
+  publish_m15_round_stage "$ordinal" "$stage_name" FAIL "$exit_code" || true
+  return "$exit_code"
+}
+
 if [ "$mode" = probe ]; then
   for marker in PREFLIGHT.json COLLECTED.json COMPLETE.json; do
     if gcs_exists "$CANON_P38_GCS_PREFIX/$marker"; then
@@ -324,6 +417,8 @@ if [ "$mode" = m15-round ]; then
     fi
   done
   mkdir -p "$round_root"
+  begin_m15_round_stage 10 assemble || exit $?
+  stage_rc=0
   python3 "$CANON_PKG/tasks/v1-apc-m15-target-debug/scripts/assemble_m15_wide_round.py" \
     --live-directory "$CANON_P38_SEAM_OBSERVER_DIR" \
     --shard-root "$shard_root" \
@@ -334,7 +429,8 @@ if [ "$mode" = m15-round ]; then
     --replay-ledger "$CANON_APC_M15_REPLAY_LEDGER" \
     --observer-mode "$CANON_P38_SEAM_OBSERVER" \
     --expected-commit "$CANON_EXPECT_COMMIT" \
-    --runtime-commit "$runtime_source_commit"
+    --runtime-commit "$runtime_source_commit" || stage_rc=$?
+  finish_m15_round_stage 10 assemble "$stage_rc" || exit $?
   m15_round_args=(
     --directory "$round_stage"
     --alignment-report "$round_stage/pre-alignment.jsonl"
@@ -352,48 +448,78 @@ if [ "$mode" = m15-round ]; then
     : "${CANON_P38_SEAM_LAYER:?}"
     m15_round_args+=(--expected-layer "$CANON_P38_SEAM_LAYER")
   fi
+  begin_m15_round_stage 20 classify || exit $?
+  stage_rc=0
   python3 "$CANON_PKG/tasks/v1-apc-m15-target-debug/scripts/classify_m15_apc_wide_seam.py" \
     "${m15_round_args[@]}" \
-    --output "$round_stage/p38_seam.classification.json"
+    --output "$round_stage/p38_seam.classification.json" || stage_rc=$?
+  finish_m15_round_stage 20 classify "$stage_rc" || exit $?
   package_args=()
   if [ -s "$round_stage/mismatch-capsule.npz" ]; then
     package_args+=(--capsule "$round_stage/mismatch-capsule.npz")
   fi
+  begin_m15_round_stage 30 package || exit $?
+  stage_rc=0
   python3 "$CANON_PKG/tasks/v1-apc-m15-target-debug/scripts/package_m15_apc_wide_seam.py" \
     --directory "$round_stage" \
     --classification "$round_stage/p38_seam.classification.json" \
     --alignment-report "$round_stage/pre-alignment.jsonl" \
     "${package_args[@]}" \
     --replay-ledger "$round_stage/m15-replay-envelope.jsonl" \
-    --output "$round_stage/m15_wide_seam_bundle.tar"
+    --output "$round_stage/m15_wide_seam_bundle.tar" || stage_rc=$?
+  finish_m15_round_stage 30 package "$stage_rc" || exit $?
+  begin_m15_round_stage 35 local-export || exit $?
+  stage_rc=0
   cp -- "$round_stage/p38_seam.classification.json" \
-    "$CANON_P38_SEAM_CLASSIFICATION"
-  cp -- "$round_stage/m15_wide_seam_bundle.tar" \
-    "$CANON_APC_M15_SEAM_BUNDLE"
+    "$CANON_P38_SEAM_CLASSIFICATION" || stage_rc=$?
+  if [ "$stage_rc" -eq 0 ]; then
+    cp -- "$round_stage/m15_wide_seam_bundle.tar" \
+      "$CANON_APC_M15_SEAM_BUNDLE" || stage_rc=$?
+  fi
+  finish_m15_round_stage 35 local-export "$stage_rc" || exit $?
   round_files=(
     ROUND_INPUT_RECEIPT.json
     p38_seam.classification.json
     m15_wide_seam_bundle.tar
   )
+  begin_m15_round_stage 40 manifest || exit $?
+  stage_rc=0
   (
     cd "$round_stage"
     sha256sum "${round_files[@]}" > WIDE_SHA256SUMS
     sha256sum -c WIDE_SHA256SUMS --quiet
-  )
+  ) || stage_rc=$?
+  finish_m15_round_stage 40 manifest "$stage_rc" || exit $?
+  begin_m15_round_stage 50 upload || exit $?
+  stage_rc=0
   for name in "${round_files[@]}" WIDE_SHA256SUMS; do
-    gcs_cp "$round_stage/$name" "$round_prefix/$name"
+    if [ "$stage_rc" -eq 0 ]; then
+      gcs_cp "$round_stage/$name" "$round_prefix/$name" || stage_rc=$?
+    fi
   done
+  finish_m15_round_stage 50 upload "$stage_rc" || exit $?
+  begin_m15_round_stage 60 remote-verify || exit $?
+  stage_rc=0
   verify_dir="$(mktemp -d)"
   trap 'rm -rf "$verify_dir"' EXIT
-  gcs_cp "$round_prefix/WIDE_SHA256SUMS" "$verify_dir/WIDE_SHA256SUMS"
-  cmp -- "$round_stage/WIDE_SHA256SUMS" "$verify_dir/WIDE_SHA256SUMS"
+  gcs_cp "$round_prefix/WIDE_SHA256SUMS" "$verify_dir/WIDE_SHA256SUMS" || stage_rc=$?
+  if [ "$stage_rc" -eq 0 ]; then
+    cmp -- "$round_stage/WIDE_SHA256SUMS" "$verify_dir/WIDE_SHA256SUMS" || stage_rc=$?
+  fi
   for name in "${round_files[@]}"; do
-    gcs_cp "$round_prefix/$name" "$verify_dir/$name"
+    if [ "$stage_rc" -eq 0 ]; then
+      gcs_cp "$round_prefix/$name" "$verify_dir/$name" || stage_rc=$?
+    fi
   done
-  (cd "$verify_dir" && sha256sum -c WIDE_SHA256SUMS --quiet)
+  if [ "$stage_rc" -eq 0 ]; then
+    (cd "$verify_dir" && sha256sum -c WIDE_SHA256SUMS --quiet) || stage_rc=$?
+  fi
+  finish_m15_round_stage 60 remote-verify "$stage_rc" || exit $?
   round_manifest_sha="$(sha256sum "$round_stage/WIDE_SHA256SUMS" | awk '{print $1}')"
+  begin_m15_round_stage 70 completion || exit $?
+  stage_rc=0
   python3 - "$round_stage/WIDE_ROUND_COMPLETE.json.partial" \
-    "$round_index" "$round_manifest_sha" "$runtime_source_commit" <<'PY'
+    "$round_index" "$round_manifest_sha" "$runtime_source_commit" <<'PY' || stage_rc=$?
 import json
 import os
 import pathlib
@@ -424,14 +550,23 @@ pathlib.Path(sys.argv[1]).write_text(
     json.dumps(record, sort_keys=True) + "\n", encoding="utf-8"
 )
 PY
-  mv -- "$round_stage/WIDE_ROUND_COMPLETE.json.partial" \
-    "$round_stage/WIDE_ROUND_COMPLETE.json"
-  gcs_cp "$round_stage/WIDE_ROUND_COMPLETE.json" \
-    "$round_prefix/WIDE_ROUND_COMPLETE.json"
-  gcs_cp "$round_prefix/WIDE_ROUND_COMPLETE.json" \
-    "$verify_dir/WIDE_ROUND_COMPLETE.json"
-  cmp -- "$round_stage/WIDE_ROUND_COMPLETE.json" \
-    "$verify_dir/WIDE_ROUND_COMPLETE.json"
+  if [ "$stage_rc" -eq 0 ]; then
+    mv -- "$round_stage/WIDE_ROUND_COMPLETE.json.partial" \
+      "$round_stage/WIDE_ROUND_COMPLETE.json" || stage_rc=$?
+  fi
+  if [ "$stage_rc" -eq 0 ]; then
+    gcs_cp "$round_stage/WIDE_ROUND_COMPLETE.json" \
+      "$round_prefix/WIDE_ROUND_COMPLETE.json" || stage_rc=$?
+  fi
+  if [ "$stage_rc" -eq 0 ]; then
+    gcs_cp "$round_prefix/WIDE_ROUND_COMPLETE.json" \
+      "$verify_dir/WIDE_ROUND_COMPLETE.json" || stage_rc=$?
+  fi
+  if [ "$stage_rc" -eq 0 ]; then
+    cmp -- "$round_stage/WIDE_ROUND_COMPLETE.json" \
+      "$verify_dir/WIDE_ROUND_COMPLETE.json" || stage_rc=$?
+  fi
+  finish_m15_round_stage 70 completion "$stage_rc" || exit $?
   echo "[P38.GCS] M15_WIDE_ROUND_COMPLETE round=$round_index prefix=$round_prefix manifest_sha256=$round_manifest_sha"
   exit 0
 fi

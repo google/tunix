@@ -5,7 +5,20 @@ commands; it does not edit YAML, numerical code, or evidence. Large payloads
 remain in GCS exactly like the earlier P38/lm-head investigation. Only small
 machine-generated receipts are returned through Git or chat.
 
-## Current operation: recover the already-run d33 pair
+## Current operation: no remote execution yet
+
+Phase D3a has passed host tests only.  It adds ordered round-stage receipts,
+an atomic learner-visible failure channel, and a return audit that reports the
+last completed/failed stage even when no classifier sealed.  Do not launch,
+render, mutate GCS, or reuse a historical label from this local result.
+
+The next gates are deliberately separate: review the diff, obtain commit/push
+approval, run the exact-image gate after approval, and only then request a
+fresh matched APC-off/APC-on target pair.  The existing operator-return command
+below is the only return command for that future pair; it now includes stage
+receipts automatically and still avoids token-bearing tars.
+
+## Historical operation: recover the already-run d33 pair
 
 Do not render, apply, restart, or delete a JobSet. The submitted d33 package is
 only a five-file analysis subset, so the current operation is a read-only
