@@ -344,7 +344,49 @@ class RLProgramTest(absltest.TestCase):
       self.mock_engine.save_checkpoint.assert_called_once()
       self.mock_engine.sync_weights.assert_not_called()
       self.assertIsNotNone(program.last_step_result)
-      self.assertEqual(program.last_step_result.policy_version, 1)
+      self.assertEqual(program.last_step_result.policy_version, 0)
+
+    asyncio.run(_run())
+
+  def test_policy_version_incremented_after_weight_sync(self):
+    async def _run():
+      self.mock_engine.sync_weights = mock.AsyncMock(return_value=None)
+      _set_mock_poll_batches(
+          self.mock_engine,
+          _make_trajectory_group("prompt_0"),
+          _make_trajectory_group("prompt_1"),
+      )
+      program = self._create_program(
+          dataset=["prompt_data_0", "prompt_data_1"],
+          max_steps=2,
+          sync_weights=True,
+      )
+
+      self.assertEqual(program.policy_version, 0)
+      await program.run_async(self.mock_engine)
+
+      self.assertEqual(self.mock_engine.sync_weights.call_count, 2)
+      self.assertEqual(program.policy_version, 2)
+      self.assertIsNotNone(program.last_step_result)
+      self.assertEqual(program.last_step_result.policy_version, 2)
+
+    asyncio.run(_run())
+
+  def test_policy_version_updated_with_explicit_version_after_weight_sync(self):
+    async def _run():
+      self.mock_engine.sync_weights = mock.AsyncMock(return_value=5)
+      _set_mock_poll_batches(self.mock_engine, _make_trajectory_group())
+      program = self._create_program(sync_weights=True)
+
+      self.assertEqual(program.policy_version, 0)
+      await program.run_async(self.mock_engine, num_steps=1)
+
+      self.mock_engine.sync_weights.assert_called_once_with(
+          role=datatypes.Role.ACTOR
+      )
+      self.assertEqual(program.policy_version, 5)
+      self.assertIsNotNone(program.last_step_result)
+      self.assertEqual(program.last_step_result.policy_version, 5)
 
     asyncio.run(_run())
 
@@ -792,7 +834,6 @@ class RLProgramTest(absltest.TestCase):
 
     asyncio.run(_run())
 
-
   def test_run_async_propagates_critique_stage_exception(self):
     async def _run():
       _set_mock_poll_batches(self.mock_engine, _make_trajectory_group())
@@ -953,11 +994,12 @@ class RLProgramTest(absltest.TestCase):
       )
 
       # 4. Orchestrator Metrics
+      self.mock_engine.sync_weights.assert_not_called()
       self.assertTrue(
           logger.metric_exists("", "orchestrator/policy_version", "train")
       )
       self.assertAlmostEqual(
-          logger.get_metric("", "orchestrator/policy_version", "train"), 1.0
+          logger.get_metric("", "orchestrator/policy_version", "train"), 0.0
       )
       self.assertTrue(
           logger.metric_exists("", "orchestrator/num_rollouts", "train")
