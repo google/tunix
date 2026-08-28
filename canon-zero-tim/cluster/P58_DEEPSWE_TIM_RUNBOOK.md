@@ -27,6 +27,15 @@ Qwen3-4B-Instruct-2507, the reviewed 1,012-task list, 16K response, 50 turns,
 seed 42, concurrency 128, prefix cache off, fixed lm-head, continue-decode 8,
 and strict B-C.  Backward and optimizer commit remain zero.
 
+`continue-decode 8` is part of this signed carrier and must not be disabled to
+work around an observer error.  The `p58-seam-v1` capture hook treats
+`standard` as the only tensor-strata source.  If the scheduler enters
+`continue_decode`, the hook preserves chronology, emits
+`CANON_P58_CONTINUE_DECODE_OBSERVER_BYPASS ... tensor_capture=0`, and returns
+before incident/tensor capture.  Postflight requires at least one exact bypass
+marker for this selector and rejects the marker for every other workload.
+Unknown program paths still fail closed.
+
 Prepare from a clean checkout only after the source and matching digest-pinned
 image have each been published with explicit approval:
 
@@ -88,8 +97,8 @@ bash canon-zero-tim/tests/p58_deepswe_native_zero/run_exact_image.sh \
   sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a
 ```
 
-Required terminal substring is `checked_vma_aba=1 coarse_seam=1 ...
-regressions=1`.  This CPU dependency-image result checks contracts and
+Required terminal substring is `continue_decode_observer=1 ...
+checked_vma_aba=1 coarse_seam=1 ... regressions=1`.  This CPU dependency-image result checks contracts and
 neighboring workloads; it does not run Qwen3 on TPU and is not target evidence.
 
 ## Historical: P58.18 checked-VMA matched triplicate — completed recipe

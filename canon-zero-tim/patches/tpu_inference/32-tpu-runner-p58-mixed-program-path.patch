@@ -1,0 +1,66 @@
+--- tpu_runner_p21_l30.py
++++ tpu_runner_p21_l30.py
+@@ -1143,6 +1143,7 @@
+     "CANON_APC_M15_TARGET_DEBUG", "")
+ _P38_DURABILITY_PROFILE = os.environ.get(
+     "CANON_P38_DURABILITY_PROFILE", "")
++_P38_P58_CONTINUE_BYPASS_STATE = {"calls": 0, "reported": False}
+ _P38_M15_REPLAY_LEDGER = os.environ.get(
+     "CANON_APC_M15_REPLAY_LEDGER", "")
+ _P38_M15_REPLAY_STATE = {"records": 0, "bytes": 0}
+@@ -3253,3 +3254,12 @@
++def _p38_p58_continue_program_path(program_path):
++    """Admit continue-decode chronology without mixing tensor strata."""
++    return (
++        _P38_DURABILITY_PROFILE == "p58-seam-v1"
++        and _P38_SERVING_CAPTURE_EXPECTED_PATH == "standard"
++        and program_path == "continue_decode"
++    )
++
++
+ def _p38_serving_begin(runner, scheduler_output, req_ids_dp, input_ids,
+                        input_positions, active_mask, attn_metadata,
+                        sampling_metadata, sample_fn, tokens_indices_selector,
+@@ -3260,8 +3270,9 @@
+     if not _P38_SERVING_CAPTURE_DIR:
+         return None
+     m15_continue_path = _p38_m15_continue_program_path(program_path)
++    p58_continue_path = _p38_p58_continue_program_path(program_path)
+     if (program_path != _P38_SERVING_CAPTURE_EXPECTED_PATH and
+-            not m15_continue_path):
++            not m15_continue_path and not p58_continue_path):
+         raise RuntimeError(
+             "P38 serving capture reached an unexpected program path: "
+             f"expected={_P38_SERVING_CAPTURE_EXPECTED_PATH} "
+@@ -3274,16 +3285,29 @@
+     scheduled_prefixes = _p38_scheduled_decode_prefixes(
+         runner, scheduler_output)
+     _p38_observe_scheduled_prefixes(scheduled_prefixes, program_path)
+-    journal_prefixes = [] if m15_continue_path else scheduled_prefixes
++    journal_prefixes = (
++        [] if m15_continue_path or p58_continue_path else scheduled_prefixes
++    )
+     call_index = _p38_request_journal(
+         runner, scheduler_output, req_ids_dp, journal_prefixes, program_path)
+     _p38_m15_replay_ledger(
+         runner, scheduler_output, req_ids_dp, call_index, program_path)
+-    if not m15_continue_path:
++    if not m15_continue_path and not p58_continue_path:
+         _p38_incident_ledger(
+             runner, scheduler_output, req_ids_dp, scheduled_prefixes,
+             program_path, call_index, input_ids, input_positions,
+             attn_metadata, padded_num_scheduled_tokens_per_dp_rank)
++    if p58_continue_path:
++        _P38_P58_CONTINUE_BYPASS_STATE["calls"] += 1
++        if not _P38_P58_CONTINUE_BYPASS_STATE["reported"]:
++            _P38_P58_CONTINUE_BYPASS_STATE["reported"] = True
++            print(
++                "[CANON_P58_CONTINUE_DECODE_OBSERVER_BYPASS] "
++                "profile=p58-seam-v1 expected=standard "
++                "actual=continue_decode tensor_capture=0",
++                flush=True,
++            )
++        return None
+     if _P38_SERVING_CAPTURE_SEQ["n"] >= _P38_SERVING_CAPTURE_MAX_CALLS:
+         return None
+     candidate_strata = []

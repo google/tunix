@@ -169,6 +169,12 @@ $DOCKER run --rm \
         trajectory.trajectory_collect_engine_test.TrajectoryCollectEngineTest.test_policy_seeded_original_input_missing_prompt_fails_closed \
         trajectory.trajectory_collect_engine_test.TrajectoryCollectEngineTest.test_token_missing_original_input_fails_closed
     )
+    bash canon-zero-tim/install.sh /tmp/p58-continue-overlay \
+      --from-path /usr/local/lib/python3.12/site-packages/tpu_inference \
+      --model qwen4b
+    PYTHONPATH=/workspace python3 \
+      canon-zero-tim/tests/p58_deepswe_native_zero/probe_continue_decode_observer_overlay.py \
+      --runner /tmp/p58-continue-overlay/tpu_runner_p21_l30.py
     observer_state="$(mktemp -d /tmp/p58-stock-observer-state.XXXXXX)"
     printf "%s\n" \
       "export CANON_PROFILE_FILE=cluster/profiles/qwen3-4b-dp8-tp8-deepswe-tim.env" \
@@ -188,5 +194,5 @@ $DOCKER run --rm \
       python3 \
       canon-zero-tim/tests/p58_deepswe_native_zero/probe_stock_prompt_observer.py
     rm -r "$observer_state"
-    echo "P58_EXACT_IMAGE_CPU_PASS loss_oracle=1 weighted_accumulation=1 compact_filter=1 durable_journal=1 paired_renderer=1 alignment_policy=1 stock_observer=1 onehost_xprof=1 zero_hp_full=1 checked_vma_diagnostic=1 checked_vma_aba=1 coarse_seam=1 qwen4b_fixed_head=1 checked_vma=1 vma_p59_only=1 first_update=1 stable_clip=1 apc=1 p59_tp4_tp8=2 p59_real_shim=4 p59_rpa=2 p59_fused_linear=2 disaggregated_trainer_mesh=4 p57_wandb=1 m15_token=1 regressions=1"
+    echo "P58_EXACT_IMAGE_CPU_PASS loss_oracle=1 weighted_accumulation=1 compact_filter=1 durable_journal=1 paired_renderer=1 alignment_policy=1 stock_observer=1 continue_decode_observer=1 onehost_xprof=1 zero_hp_full=1 checked_vma_diagnostic=1 checked_vma_aba=1 coarse_seam=1 qwen4b_fixed_head=1 checked_vma=1 vma_p59_only=1 first_update=1 stable_clip=1 apc=1 p59_tp4_tp8=2 p59_real_shim=4 p59_rpa=2 p59_fused_linear=2 disaggregated_trainer_mesh=4 p57_wandb=1 m15_token=1 regressions=1"
   '

@@ -1,5 +1,34 @@
 # P58 DeepSWE native-first training handoff
 
+## 2026-08-28 UTC — P58.19d continue-decode observer repair (local only)
+
+The latest operator source was synchronized to
+`61d7baf4027b02a1ffb51c45441dffee4f58b14a`.  The sealed `p58s19c`
+incident proves the repaired `[1686,4096)` window emitted 113 seam records,
+then the observer rejected `program_path=continue_decode` while configured
+for standard-path tensor capture.  Its `RAW_ERROR.log` is a short incident
+excerpt rather than a complete raw run; do not infer a three-round result.
+
+Do **not** disable `CANON_CONTINUE_DECODE`.  The signed P58 high-performance
+carrier requires value 8.  The local repair instead admits continue-decode
+only for exact `p58-seam-v1`: scheduler chronology remains visible, incident
+and tensor payloads are skipped, an exact
+`CANON_P58_CONTINUE_DECODE_OBSERVER_BYPASS ... tensor_capture=0` receipt is
+printed, and the hook returns before candidate construction.  Standard path
+remains the sole tensor-strata source.  Other profiles and unknown program
+paths keep the hard error.  Postflight requires the bypass receipt for P58.19
+coarse and rejects it everywhere else.
+
+The installed-overlay probe and complete pinned-image gate pass.  Terminal
+receipts are `P58_CONTINUE_DECODE_OVERLAY_PASS cases=5
+tensor_capture=standard-only` and `P58_EXACT_IMAGE_CPU_PASS ...
+continue_decode_observer=1 ... regressions=1`; all 37 Qwen3-4B overlay files
+match MANIFEST.  Focused P58 suites pass 52/52, P34 static passes 10 suites,
+and the deterministic flag audit passes 394/394/394 with the new runtime name
+registered as a marker rather than a settable flag.  This local work has not
+been committed or pushed; no image, Kubernetes object, Pathways run, or TPU
+target was created.
+
 ## 2026-08-28 UTC — DeepSWE P58.19c incident intake (`canon-p58-seamcoarse-full-p58s19c`, 128 TPU)
 
 ### Incident Summary
@@ -11,8 +40,12 @@ Target run `canon-p58-seamcoarse-full-p58s19c` executed Step 0 multi-turn rollou
   ```
 - **Sealed Incident Package**: `evidence/p58s19c_continue_decode_incident/` (`INCIDENT_REPORT.md`, `RAW_ERROR.log`, `SHA256SUMS`). Full multi-pod logs mirrored at `gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p58/canon-p58-seamcoarse-full-p58s19c/attempt-0`.
 
-### Action Required Before Rerun
-- Disable `CANON_CONTINUE_DECODE` (set to 0 or remove) in the JobSet profile so rollout strictly follows `standard` decode path, or extend `_p38_serving_begin` to allow `continue_decode`.
+### Reconciled action before rerun
+
+Preserve `CANON_CONTINUE_DECODE=8` and use the scoped P58.19d observer repair
+above.  Disabling it changes the signed carrier and is not an admissible
+repair.  A rerun remains separately approval-gated after source and matching
+image publication.
 
 ## 2026-08-28 UTC — P58.19c local seam-window coverage repair
 

@@ -2,7 +2,11 @@
 
 ## Current P58.19 three-round coarse seam-localization checkpoint (2026-08-28)
 
-- Current status: P58.19c execution and incident sealed in `evidence/p58s19c_continue_decode_incident/`. Seam window coverage `[1686, 4096)` verified functional (`p38_seam_records=113`). Failure triaged: `_p38_serving_begin` raised `RuntimeError: expected=standard actual=continue_decode` on multi-turn rollout.
+- Current status: P58.19d observer-path repair is implemented locally on
+  source base `61d7baf4027b02a1ffb51c45441dffee4f58b14a`, not committed or
+  published.  P58.19c execution and incident remain sealed in
+  `evidence/p58s19c_continue_decode_incident/`. Seam window coverage
+  `[1686, 4096)` is verified functional (`p38_seam_records=113`).
 - Target Incident (p58s19c): Attempt `canon-p58-seamcoarse-full-p58s19c` (128 TPU v5p)
   executed Step 0 rollout and successfully captured 113 records in `[1686, 4096)`, but terminated
   due to a program path assertion conflict in TPU runner (`continue_decode` vs `expected=standard`).
@@ -11,7 +15,19 @@
 - Prior Incident (p58s19b): Attempt `canon-p58-seamcoarse-full-p58s19b` (128 TPU v5p)
   terminated with `records=0` under the old `[3072, 4608)` window.
 - Sealed incident package (p58s19b): `evidence/p58s19b_seam_observer_contract_incident/`.
-- Repair requirement: disable `CANON_CONTINUE_DECODE` (or set `CANON_CONTINUE_DECODE=0`) in JobSet profile, or extend `_p38_serving_begin` to allow `continue_decode`. Production and neighboring workload defaults are unchanged.
+- Repair decision: keep signed `CANON_CONTINUE_DECODE=8`.  Exact
+  `p58-seam-v1` admits continue-decode scheduler chronology, emits an explicit
+  `tensor_capture=0` bypass receipt, and returns before incident/tensor
+  payload construction.  Standard remains the only tensor-strata source;
+  foreign profiles and unknown program paths fail closed.  Production and
+  neighboring workload defaults are unchanged.
+- P58.19d construction status: focused P58 suites pass 52/52, P34 static
+  passes 10 suites, deterministic flag audit passes 394/394/394, syntax and
+  diff hygiene pass, and the complete digest-pinned dependency-image gate
+  emits `P58_CONTINUE_DECODE_OVERLAY_PASS cases=5
+  tensor_capture=standard-only` plus `P58_EXACT_IMAGE_CPU_PASS ...
+  continue_decode_observer=1 ... regressions=1`.  All 37 installed Qwen3-4B
+  overlay files match MANIFEST.  No Pathways or TP8 target claim exists.
 - P58.19c validation: Python compilation and diff hygiene pass; focused
   renderer/profile/classifier tests pass 45/45; P34 static passes 10 suites;
   deterministic flag audit passes declared/actual/unique 394/394/394; and the

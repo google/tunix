@@ -30,6 +30,13 @@ optimizer state.  It does not reuse the P58.18 ON/OFF selector.
   zero records from `[3072,4608)`. Its returned excerpt does not prove the
   proposed prompt-length root cause, but it does prove the old window was not
   a reachable carrier in that attempt.
+- `p58s19c` proves the repaired `[1686,4096)` window emitted 113 records, then
+  the diagnostic crashed when the signed scheduler entered
+  `continue_decode`.  The returned `RAW_ERROR.log` is a short incident excerpt,
+  not a complete raw run, but it proves the quoted observer boundary when
+  paired with the sealed incident report.  `CANON_CONTINUE_DECODE=8` is part
+  of the carrier, so the repair belongs in observer path admission rather than
+  the workload profile.
 
 ## Shape and program ledger
 
@@ -62,6 +69,13 @@ are diagnostic, non-cryptographic summaries; equality is not promoted to
 full-tensor byte equality.  The independent endpoint gate remains the source
 of truth for A-B/B-C.
 
+The scheduler may execute both `standard` and `continue_decode`.  Only the
+standard path may produce tensor strata.  Under the exact `p58-seam-v1`
+profile, continue-decode calls preserve bounded chronology, emit one-or-more
+exact bypass receipts across the worker set, skip incident/tensor payloads,
+and return before candidate capture.  The same bypass is forbidden outside
+this selector; unknown paths retain the existing hard error.
+
 ## Phases and gates
 
 ### L0 — ledger reconciliation
@@ -85,6 +99,11 @@ Exit gate: current state and plan name P58.19 as the only active phase.
 Exit gate: host truth table and neighboring-workload negatives pass; the exact
 TP8 observer remains target-gated.  Real v5p execution remains separately
 authorized and must not be inferred from the old DP1xTP4 carrier.
+
+The installed-overlay gate must also prove that the continue-decode predicate
+admits only `(p58-seam-v1, expected=standard, actual=continue_decode)` and that
+its early return precedes tensor candidate construction.  This is a source
+and dependency-image contract, not a runtime-neutrality claim.
 
 ### L2 — exact-geometry three-round carrier
 
@@ -121,7 +140,8 @@ Decision table:
 
 Construction and one-host results do not localize the production seam.  A
 three-round exact-geometry result localizes only the observed standard-path
-interval; continue-decode rows remain explicitly unobserved, and fingerprint
+interval; continue-decode tensor rows remain explicitly unobserved even though
+their scheduler chronology is admitted, and fingerprint
 equality is not full-tensor equality.  No result from this phase certifies
 backward, optimizer correctness, full training, convergence, or general
 Zero-TIM readiness.

@@ -1462,3 +1462,49 @@
 - Multi-pod logs mirrored at `gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p58/canon-p58-seamcoarse-full-p58s19c/attempt-0`.
 - Required action: disable `CANON_CONTINUE_DECODE` (or set `CANON_CONTINUE_DECODE=0`) in JobSet profile so rollout strictly follows `standard` decode path, or extend `_p38_serving_begin` to allow `continue_decode`.
 
+## 2026-08-28 UTC — P58.19d continue-decode observer repair, local only
+
+- Type: latest-source synchronization / sealed-incident reconciliation /
+  observer-path repair / construction in progress.
+- Source: clean operator worktree fast-forwarded to
+  `61d7baf4027b02a1ffb51c45441dffee4f58b14a`; `main` was not modified.
+- Evidence correction: the preceding incident action offered disabling
+  continue-decode, but source/profile review proves
+  `CANON_CONTINUE_DECODE=8` is part of the signed P58 high-performance
+  carrier.  Disabling it would change the observed program and is rejected.
+- Repair: append-only runner patch 32 admits `continue_decode` only when the
+  durability profile is exact `p58-seam-v1` and expected tensor path remains
+  `standard`.  The hook keeps bounded scheduler chronology, skips incident
+  and tensor payloads, emits an exact `tensor_capture=0` receipt, and returns
+  before candidate construction.  Standard remains the only tensor-strata
+  source; M15 behavior is unchanged; other profiles and unknown paths still
+  fail closed.
+- Enforcement: postflight requires at least one bypass receipt for P58.19
+  coarse and rejects any such receipt for neighboring workloads.  The
+  installed-overlay probe tests five predicate controls plus early-return
+  ordering.  MANIFEST pins runner SHA-256
+  `1f118ece08c79ff8fe887669c73baebe011654ae551abc0ceb95e0cd43e24493`.
+- Validation checkpoint: syntax, installed-overlay predicate/ordering probe,
+  focused postflight tests, manifest hash, and diff hygiene pass.  The full
+  digest-pinned dependency-image suite remains pending at this checkpoint.
+- Boundary: no commit, push, image publication, Kubernetes mutation,
+  TPU/Pathways execution, credential access, or target rerun occurred.
+
+## 2026-08-28 UTC — P58.19d construction gate complete, local only
+
+- The first exact-image attempt correctly failed because the newly added
+  canonical installer probe ran after the stock-observer test had intentionally
+  rewritten site-packages.  The gate was repaired by moving the canonical
+  install/probe before that mutation; no production install order changed.
+- Final validation: focused P58 suites 52/52, P34 static 10 suites, flag
+  registry 394/394/394 with `FLAG_AUDIT_PASS`, Python/Bash syntax, manifest
+  hash, and diff hygiene pass.  The complete digest-pinned image gate installs
+  all 37 Qwen3-4B overlay files and emits
+  `P58_CONTINUE_DECODE_OVERLAY_PASS cases=5 tensor_capture=standard-only`
+  followed by `P58_EXACT_IMAGE_CPU_PASS ... continue_decode_observer=1 ...
+  regressions=1`.
+- Claim ceiling: these are construction results.  Continue-decode chronology,
+  standard-only tensor capture, three-round completion, TP8/Pathways behavior,
+  and observer neutrality remain unverified on target hardware.
+- Boundary remains local-only: no commit, push, image publication, Kubernetes
+  mutation, TPU/Pathways execution, credential access, or target rerun.
