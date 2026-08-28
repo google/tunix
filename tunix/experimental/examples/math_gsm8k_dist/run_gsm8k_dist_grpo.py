@@ -30,6 +30,7 @@ import argparse
 from collections.abc import Iterator
 from concurrent import futures
 import functools
+import itertools
 import logging
 import os
 import pickle
@@ -51,6 +52,12 @@ REPO_ROOT = os.path.abspath(
 if REPO_ROOT not in sys.path:
   sys.path.insert(0, REPO_ROOT)
 
+try:
+  from examples.math_gsm8k import data as gsm8k_data  # pylint: disable=g-import-not-at-top
+  from examples.math_gsm8k import env as gsm8k_env  # pylint: disable=g-import-not-at-top
+except ImportError:
+  gsm8k_data = None
+  gsm8k_env = None
 from tunix.experimental.common import datatypes  # pylint: disable=g-import-not-at-top
 from tunix.experimental.orchestrator import algorithm_adapter  # pylint: disable=g-import-not-at-top
 from tunix.experimental.orchestrator import batch_assembly  # pylint: disable=g-import-not-at-top
@@ -136,9 +143,30 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument(
       "--reward_mode",
       choices=("synthetic", "exact"),
-      default="synthetic",
-      help="synthetic proves the distributed chain without relying on quality.",
+      default="exact",
+      help="exact uses GSM8KEnv format + accuracy scoring; synthetic uses mock rewards.",
   )
+  parser.add_argument(
+      "--dataset_source",
+      choices=("huggingface", "demo"),
+      default="huggingface",
+      help="Source of GSM8K dataset (huggingface or demo).",
+  )
+  parser.add_argument(
+      "--dataset_split",
+      type=str,
+      default="train",
+      help="Dataset split to train on.",
+  )
+  parser.add_argument(
+      "--seed",
+      type=int,
+      default=42,
+      help="Random seed for dataset shuffling.",
+  )
+  parser.add_argument("--format_reward", type=float, default=0.1)
+  parser.add_argument("--accuracy_reward", type=float, default=1.0)
+  parser.add_argument("--partial_reward", type=float, default=0.5)
   parser.add_argument("--rpc_timeout_s", type=float, default=1800.0)
   parser.add_argument("--stop_workers_on_exit", action="store_true")
   parser.add_argument(
@@ -172,7 +200,13 @@ def _extract_answer(text: str) -> str | None:
   return numeric[-1].replace(",", "") if numeric else None
 
 
-def _make_reward_fn(mode: str, num_generations: int):
+def _make_reward_fn(
+    mode: str,
+    num_generations: int,
+    format_reward: float = 0.1,
+    accuracy_reward: float = 1.0,
+    partial_reward: float = 0.5,
+):
   """Creates the per-trajectory reward function used by StandardRLProgram."""
 
   def reward_fn(item: datatypes.TrajectoryItem) -> float:
@@ -180,24 +214,41 @@ def _make_reward_fn(mode: str, num_generations: int):
     text = str(metadata.get("text", ""))
     gold_answer = metadata.get("gold_answer")
     prompt_id = metadata.get("prompt_id", getattr(item, "group_id", "unknown"))
-    pair_index = int(metadata.get("pair_index", item.pair_index))
+    pair_index = int(metadata.get("pair_index", item.pair_index or 0))
+
+    format_ok = gsm8k_env.is_format_correct(text)
+    extracted = gsm8k_env.extract_boxed_answer(text)
+    answer_ok = gsm8k_env.answers_match(extracted, gold_answer)
+
+    if mode == "synthetic":
+      reward = pair_index / max(num_generations - 1, 1)
+    else:
+      if format_ok and answer_ok:
+        reward = accuracy_reward
+      elif format_ok and not answer_ok:
+        reward = format_reward
+      elif not format_ok and answer_ok:
+        reward = partial_reward
+      else:
+        reward = 0.0
 
     logging.info(
-        "[Orchestrator] Sampler response for %s (generation %d/%d):\n"
-        "--- [Sampled Response] ---\n%s\n--- [End Response] ---\n"
-        "Gold Answer: %s | Extracted Answer: %s",
+        "[Orchestrator] Sampler response for %s (generation %d/%d): "
+        "format_ok=%s, answer_ok=%s, reward=%.2f\n"
+        "Gold Answer: %s | Extracted Answer: %s\n"
+        "--- [Sampled Response] ---\n%s\n--- [End Response] ---",
         prompt_id,
         pair_index + 1,
         num_generations,
-        text,
+        format_ok,
+        answer_ok,
+        reward,
         gold_answer,
-        _extract_answer(text),
+        extracted,
+        text,
     )
 
-    if mode == "synthetic":
-      return pair_index / max(num_generations - 1, 1)
-
-    return 1.0 if gold_answer and _extract_answer(text) == gold_answer else 0.0
+    return float(reward)
 
   return reward_fn
 
@@ -386,53 +437,106 @@ def _register_workers(
     )
 
 
-def _build_prompt_item(
-    *,
-    prompt_idx: int,
-    max_response_length: int,
-    temperature: float,
-    top_p: float,
-    top_k: int | None,
-) -> dict[str, Any]:
-  question, gold_answer = DEMO_TASKS[prompt_idx % len(DEMO_TASKS)]
-  prompt = PROMPT_TEMPLATE.format(question=question)
-  prompt_id = f"prompt_{prompt_idx}"
-  return {
-      "prompt": prompt,
-      "prompt_id": prompt_id,
-      "group_id": prompt_id,
-      "generation_kwargs": {
-          "max_generation_steps": max_response_length,
-          "temperature": temperature,
-          "top_p": top_p,
-          "top_k": top_k,
-          "return_logprobs": True,
-      },
-      "metadata": {
-          "gold_answer": gold_answer,
-          "prefix_hash": prompt_id,
-          "env_config": {
-              "prompt": prompt,
-              "gold_answer": gold_answer,
-              "group_id": prompt_id,
-              "max_steps": 1,
-          },
-      },
-  }
-
-
 def _iter_prompt_items(
     args: argparse.Namespace,
 ) -> Iterator[dict[str, Any]]:
   top_k = None if args.top_k < 0 else args.top_k
-  for prompt_idx in range(args.max_steps * args.batch_size):
-    yield _build_prompt_item(
-        prompt_idx=prompt_idx,
-        max_response_length=args.max_response_length,
-        temperature=args.temperature,
-        top_p=args.top_p,
-        top_k=top_k,
+  total_prompts = args.max_steps * args.batch_size
+
+  raw_ds = None
+  if args.dataset_source == "huggingface":
+    if gsm8k_data is not None:
+      try:
+        raw_ds = list(
+            gsm8k_data.create_dataset(
+                split=args.dataset_split,
+                data_source="huggingface",
+                seed=args.seed,
+            )
+        )
+      except Exception as e:
+        logging.warning("gsm8k_data failed: %s", e)
+    if raw_ds is None:
+      try:
+        import datasets as hf_datasets
+
+        ds = hf_datasets.load_dataset(
+            "openai/gsm8k", "main", split=args.dataset_split
+        )
+        if args.seed is not None:
+          ds = ds.shuffle(seed=args.seed)
+        raw_ds = [
+            {
+                "question": x["question"].strip(),
+                "gold_answer": (
+                    x["answer"].split("####")[-1].strip()
+                    if "####" in x["answer"]
+                    else x["answer"].strip()
+                ),
+                "prompts": PROMPT_TEMPLATE.format(
+                    question=x["question"].strip()
+                ),
+            }
+            for x in ds
+        ]
+      except Exception as e:
+        logging.warning(
+            "Failed to load Hugging Face dataset (%s), using demo tasks.", e
+        )
+
+  if not raw_ds:
+    logging.info(
+        "Using GSM8K demo tasks (%d total prompts)...", total_prompts
     )
+    raw_ds = [
+        {
+            "question": q,
+            "gold_answer": a,
+            "prompts": PROMPT_TEMPLATE.format(question=q),
+        }
+        for q, a in DEMO_TASKS
+    ]
+
+  logging.info(
+      "Initialized prompt stream with %d base problems for %d total prompts"
+      " (max_steps=%d, batch_size=%d).",
+      len(raw_ds),
+      total_prompts,
+      args.max_steps,
+      args.batch_size,
+  )
+
+  ds_iter = itertools.cycle(raw_ds)
+
+  for prompt_idx in range(total_prompts):
+    example = next(ds_iter)
+    question = example["question"]
+    gold_answer = example["gold_answer"]
+    prompt = example.get("prompts") or PROMPT_TEMPLATE.format(question=question)
+    prompt_id = f"prompt_{prompt_idx}"
+    yield {
+        "prompt": prompt,
+        "prompt_id": prompt_id,
+        "group_id": prompt_id,
+        "generation_kwargs": {
+            "max_generation_steps": args.max_response_length,
+            "temperature": args.temperature,
+            "top_p": args.top_p,
+            "top_k": top_k,
+            "return_logprobs": True,
+        },
+        "metadata": {
+            "gold_answer": gold_answer,
+            "question": question,
+            "prefix_hash": prompt_id,
+            "env_config": {
+                "prompt": prompt,
+                "gold_answer": gold_answer,
+                "group_id": prompt_id,
+                "max_steps": 1,
+            },
+        },
+    }
 
 
 def main(argv: list[str], context: Any = None) -> None:
@@ -575,7 +679,15 @@ def main(argv: list[str], context: Any = None) -> None:
   program = rl_program.StandardRLProgram(
       algo=algo,
       dataset=_iter_prompt_items(args),
-      reward_fns=[_make_reward_fn(args.reward_mode, args.num_generations)],
+      reward_fns=[
+          _make_reward_fn(
+              args.reward_mode,
+              args.num_generations,
+              format_reward=args.format_reward,
+              accuracy_reward=args.accuracy_reward,
+              partial_reward=args.partial_reward,
+          )
+      ],
       assembler=batch_assembly.GRPOTrainExampleAssembler(
           batch_size=args.train_micro_batch_size,
           max_prompt_length=args.max_prompt_length,
