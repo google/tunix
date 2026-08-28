@@ -1305,6 +1305,55 @@ def _p59_partition_head_cotangent(dlogits, trainer_mesh, label: str):
   return jax.device_put(aligned, target)
 
 
+def _p74_partition_head_cotangent(dlogits, trainer_mesh, label: str):
+  """Partitions the checked head cotangent without a host roundtrip."""
+  if getattr(dlogits, "ndim", None) != 2:
+    raise FunctionalMappingError(
+        f"{label} requires rank-2 logits cotangent, got "
+        f"{getattr(dlogits, 'shape', None)}"
+    )
+  data_axis, model_axis = _p59_mesh_roles(trainer_mesh, label)
+  data_size = int(trainer_mesh.shape[data_axis])
+  model_size = int(trainer_mesh.shape[model_axis])
+  if int(dlogits.shape[0]) % data_size:
+    raise FunctionalMappingError(
+        f"{label} rows are not divisible by {data_axis}: "
+        f"shape={dlogits.shape} size={data_size}"
+    )
+  if int(dlogits.shape[1]) % model_size:
+    raise FunctionalMappingError(
+        f"{label} vocabulary is not divisible by {model_axis}: "
+        f"shape={dlogits.shape} size={model_size}"
+    )
+  aligned = _p59_align_to_mesh(dlogits, trainer_mesh, label)
+  target = jax.sharding.NamedSharding(
+      trainer_mesh,
+      jax.sharding.PartitionSpec(data_axis, model_axis),
+  )
+  # The TP-local logprob pullback returns DP-replicated rows. Direct
+  # device_put to the DP-partitioned head boundary enters JAX's sharded-array
+  # slow path: no resident source shard is the requested row slice, so PJRT
+  # materializes the full cotangent on host before splitting it. Pin the
+  # resident Format at a device executable boundary and let XLA take the
+  # local row slice. The value and target sharding are unchanged.
+  partition = _p74_head_cotangent_partitioner(aligned.format, target)
+  return partition(aligned)
+
+
+def _p74_identity_head_cotangent_partition(value):
+  return value
+
+
+@functools.lru_cache(maxsize=32)
+def _p74_head_cotangent_partitioner(source_format, target_sharding):
+  """Caches the checked-only device row partition by format vocabulary."""
+  return jax.jit(
+      _p74_identity_head_cotangent_partition,
+      in_shardings=source_format,
+      out_shardings=target_sharding,
+  )
+
+
 def _p59_align_serial_gradient_to_trainer_state(
     trainer_state, gradient, label: str
 ):
@@ -4274,9 +4323,14 @@ class _P28SegmentedEngineForward:
     trainer_mesh, _ = _p59_replicated_data_mesh(
         leaves, "P59 head cotangent"
     )
-    dlogits = _p59_partition_head_cotangent(
-        dlogits, trainer_mesh, "P59 head cotangent"
-    )
+    if os.environ.get("CANON_P66_P59_CHECK_VMA", "0") == "1":
+      dlogits = _p74_partition_head_cotangent(
+          dlogits, trainer_mesh, "P59 head cotangent"
+      )
+    else:
+      dlogits = _p59_partition_head_cotangent(
+          dlogits, trainer_mesh, "P59 head cotangent"
+      )
     if getattr(self, "_p59_head_pullback_fn", None) is None:
       data_axis, model_axis = _p59_mesh_roles(
           trainer_mesh, "P59 head cotangent"

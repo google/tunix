@@ -17,6 +17,20 @@ _CANON_ADAPTER_MARKER = "[CANON_" "ADAPTER]"
 _SIZE_SCHEMA = "canon.v1.gsm8k-onehost-xprof.size.v1"
 _SIZE_SOFT_WARNING_BYTES = 1_200_000_000
 _SIZE_HARD_MAX_BYTES = 1_500_000_000
+_P74_SCHEMA = "canon.v1.gsm8k-onehost-xprof.p74-gap.v1"
+_P74_EXPECTED_WINDOWS = 64
+_P74_MAX_MEAN_GAP_MS = 70.0
+_P74_MARKER = "V1_GSM8K_P74_GAP_CENSUS_GREEN"
+_P74_PARTITION_MODULE = "jit__p74_identity_head_cotangent_partition"
+_P74_VICTIM_KINDS = {
+    "slow_np.asarray(jax.Array)",
+    "slow_shard_args",
+    "D2H Dispatch",
+    "XlaDelinearize",
+    "d2h_77791232",
+    "h2d_buffer_bf16_256x75968",
+    "h2d_38895616",
+}
 # The two registered carrier geometries on the same four chips.  One
 # committed update owns one gradient group per local trajectory, and the
 # carriers share the global work (64 trajectories), so groups =
@@ -169,6 +183,81 @@ def _size_receipt(
   return receipt
 
 
+def _p74_receipt(path: Path, reasons: list[str]) -> dict | None:
+  """Validates the checked-VMA gap and exact transfer-family receipt."""
+  try:
+    receipt = json.loads(path.read_text(encoding="utf-8"))
+  except (OSError, json.JSONDecodeError) as exc:
+    reasons.append(f"p74_gap_receipt:{type(exc).__name__}")
+    return None
+  if not isinstance(receipt, dict):
+    reasons.append("p74_gap_receipt:not_object")
+    return None
+  expected = {
+      "schema": _P74_SCHEMA,
+      "status": "PASS",
+      "geometry": "dp2-tp2",
+      "identity_windows": _P74_EXPECTED_WINDOWS,
+      "windows_with_any_victim": 0,
+      "reasons": [],
+  }
+  for key, value in expected.items():
+    if receipt.get(key) != value:
+      reasons.append(f"p74_gap_receipt.{key}={receipt.get(key)!r}")
+  acceptance = receipt.get("acceptance")
+  if not isinstance(acceptance, dict):
+    reasons.append("p74_gap_receipt.acceptance:not_object")
+  else:
+    if acceptance.get("expected_windows") != _P74_EXPECTED_WINDOWS:
+      reasons.append(
+          "p74_gap_receipt.acceptance.expected_windows="
+          f"{acceptance.get('expected_windows')!r}"
+      )
+    if acceptance.get("max_mean_gap_ms") != _P74_MAX_MEAN_GAP_MS:
+      reasons.append(
+          "p74_gap_receipt.acceptance.max_mean_gap_ms="
+          f"{acceptance.get('max_mean_gap_ms')!r}"
+      )
+    if acceptance.get("exact_victim_overlap_events") != 0:
+      reasons.append(
+          "p74_gap_receipt.acceptance.exact_victim_overlap_events="
+          f"{acceptance.get('exact_victim_overlap_events')!r}"
+      )
+    if acceptance.get("partition_module_per_window") != _P74_PARTITION_MODULE:
+      reasons.append(
+          "p74_gap_receipt.acceptance.partition_module_per_window="
+          f"{acceptance.get('partition_module_per_window')!r}"
+      )
+  gap = receipt.get("gap")
+  if not isinstance(gap, dict):
+    reasons.append("p74_gap_receipt.gap:not_object")
+  else:
+    if gap.get("windows") != _P74_EXPECTED_WINDOWS:
+      reasons.append(f"p74_gap_receipt.gap.windows={gap.get('windows')!r}")
+    mean_ms = gap.get("mean_ms")
+    if (
+        not isinstance(mean_ms, (int, float))
+        or isinstance(mean_ms, bool)
+        or not 0 <= mean_ms <= _P74_MAX_MEAN_GAP_MS
+    ):
+      reasons.append(f"p74_gap_receipt.gap.mean_ms={mean_ms!r}")
+  victim = receipt.get("victim_overlap")
+  if (
+      not isinstance(victim, dict)
+      or set(victim) != _P74_VICTIM_KINDS
+      or any(
+          not isinstance(count, int) or isinstance(count, bool) or count != 0
+          for count in victim.values()
+      )
+  ):
+    reasons.append(f"p74_gap_receipt.victim_overlap={victim!r}")
+  intervening = receipt.get("intervening_modules")
+  expected_intervening = {_P74_PARTITION_MODULE: _P74_EXPECTED_WINDOWS}
+  if intervening != expected_intervening:
+    reasons.append(f"p74_gap_receipt.intervening_modules={intervening!r}")
+  return receipt
+
+
 def classify(
     *,
     arm: str,
@@ -186,6 +275,8 @@ def classify(
     require_hierarchy: bool = False,
     hierarchy_census_rc: int | None = None,
     trace_census_rc: int | None = None,
+    require_p74_gap: bool = False,
+    p74_gap_census_rc: int | None = None,
 ) -> dict:
   if arm not in ("native", "zero-hp"):
     raise ValueError(f"invalid arm: {arm!r}")
@@ -205,6 +296,8 @@ def classify(
   trace_census_path = state / "trace_census.txt"
   size_census_path = state / "xprof_size_census.txt"
   size_receipt_path = state / "xprof_size_receipt.json"
+  p74_gap_census_path = state / "p74_gap_census.txt"
+  p74_gap_receipt_path = state / "p74_gap_receipt.json"
   reasons = []
   required = [
       raw_path,
@@ -216,6 +309,8 @@ def classify(
   ]
   if require_hierarchy:
     required.extend((hierarchy_census_path, trace_census_path))
+  if require_p74_gap:
+    required.extend((p74_gap_census_path, p74_gap_receipt_path))
   for path in required:
     if not path.is_file() or path.stat().st_size == 0:
       reasons.append(f"missing_or_empty:{path.name}")
@@ -248,6 +343,16 @@ def classify(
   size_receipt = (
       _size_receipt(size_receipt_path, state / "xprof", reasons)
       if size_receipt_path.is_file()
+      else None
+  )
+  p74_gap_text = (
+      p74_gap_census_path.read_text(encoding="utf-8", errors="replace")
+      if p74_gap_census_path.is_file()
+      else ""
+  )
+  p74_gap_receipt = (
+      _p74_receipt(p74_gap_receipt_path, reasons)
+      if require_p74_gap and p74_gap_receipt_path.is_file()
       else None
   )
 
@@ -317,6 +422,11 @@ def classify(
         "V1_GSM8K_XPROF_TRACE_CENSUS_GREEN" not in trace_text
     ):
       reasons.append(f"trace_census_rc={trace_census_rc}")
+  if require_p74_gap:
+    if arm != "zero-hp" or geometry != "dp2-tp2":
+      reasons.append("p74_gap_requirement_is_zero_hp_dp2_tp2_only")
+    if p74_gap_census_rc != 0 or _P74_MARKER not in p74_gap_text:
+      reasons.append(f"p74_gap_census_rc={p74_gap_census_rc}")
 
   align_verdicts = [
       match.group(1)
@@ -388,7 +498,19 @@ def classify(
           "stop_step": 3,
           "updates": expected_updates,
           "hierarchy_required": require_hierarchy,
+          "p74_gap_required": require_p74_gap,
       },
+      "p74_gap": (
+          {
+              "status": p74_gap_receipt.get("status"),
+              "gap": p74_gap_receipt.get("gap"),
+              "identity_windows": p74_gap_receipt.get("identity_windows"),
+              "victim_overlap": p74_gap_receipt.get("victim_overlap"),
+              "reverse_wall": p74_gap_receipt.get("reverse_wall"),
+          }
+          if isinstance(p74_gap_receipt, dict)
+          else None
+      ),
       "xprof_budget": (
           {
               key: size_receipt.get(key)
@@ -438,6 +560,8 @@ def main() -> int:
   parser.add_argument("--require-hierarchy", action="store_true")
   parser.add_argument("--hierarchy-census-rc", type=int)
   parser.add_argument("--trace-census-rc", type=int)
+  parser.add_argument("--require-p74-gap", action="store_true")
+  parser.add_argument("--p74-gap-census-rc", type=int)
   parser.add_argument("--output", type=Path, required=True)
   args = parser.parse_args()
   if args.output.exists():
@@ -458,6 +582,8 @@ def main() -> int:
       require_hierarchy=args.require_hierarchy,
       hierarchy_census_rc=args.hierarchy_census_rc,
       trace_census_rc=args.trace_census_rc,
+      require_p74_gap=args.require_p74_gap,
+      p74_gap_census_rc=args.p74_gap_census_rc,
   )
   args.output.write_text(
       json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8"

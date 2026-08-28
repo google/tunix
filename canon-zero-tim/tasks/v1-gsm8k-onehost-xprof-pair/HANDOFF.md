@@ -1,14 +1,129 @@
-# Execution handoff: produce Native and Zero-HP backward XProf
+# Execution handoff: P74 one-host XProf and GSM8K DP16xTP4 full train
 
-> **Active follow-up is P60-2G. Do not execute the two-arm steps below.** The
-> only current carrier is the Zero-HP-only, warm update-2 command and fixed
-> 1.5-GB XProf budget in the authoritative
-> [`HANDOFF_P60_2.md`](HANDOFF_P60_2.md) quickstart. Its implementation is
-> presently local and uncommitted; a remote agent must wait for the approved
-> full source SHA. P60-2F remains a historical clean-SHA TARGET PASS for its
-> old whole-update contract, while its UI trace fails the new navigation gate.
-> The historical Native/Zero pair remains `INCONCLUSIVE_INPUT_MISMATCH` for
-> timing.
+> **Current as of 2026-08-28:** use the P74 commands in the next two sections.
+> The Native/Zero pair and P60 procedures later in this file are historical.
+> P74 is accepted on the immutable matched r3/r4 DP2xTP2 captures, but a run
+> from the newly published source SHA is still required before calling that
+> exact SHA one-host-certified. Target DP16xTP4 performance remains TARGET NOT
+> RUN for P74.
+
+## Current A — one-host DP2xTP2 backward XProf with P74
+
+Use a clean checkout of the approved pushed SHA whenever producing acceptance
+evidence. The development-only dirty override is shown separately and must not
+be used for a clean-SHA claim. Work from the physical worktree path, never a
+symlink, and never append a pipe to the launch command.
+
+First verify the one-host lane is idle. Do not stop or remove another user's
+container:
+
+```bash
+sudo docker ps --format '{{.Names}}|{{.Image}}|{{.Status}}'
+```
+
+Then launch one fresh immutable label:
+
+```bash
+cd <physical-clean-worktree>
+export V1_GSM8K_XPROF_EXPECT_HOSTNAME="$(hostname)"
+
+bash canon-zero-tim/tasks/v1-gsm8k-onehost-xprof-pair/scripts/run_onehost_xprof_backward_p74_dp2tp2.sh \
+  "<fresh-host-date-label>"
+```
+
+For an intentionally dirty development checkout only:
+
+```bash
+V1_GSM8K_XPROF_ALLOW_DIRTY=1 \
+bash canon-zero-tim/tasks/v1-gsm8k-onehost-xprof-pair/scripts/run_onehost_xprof_backward_p74_dp2tp2.sh \
+  "<fresh-development-label>"
+```
+
+The wrapper pins DP2xTP2, `fingerprint-hybrid`, `first-group-warmup`,
+`batched-commit`, and `CANON_P71_SCAN=fwd`. It does not set or weaken checked
+VMA: the signed DP2xTP2 profile requires `CANON_P66_P59_CHECK_VMA=1` and fails
+closed on drift. `num_chunks` remains data-derived as
+`ceil(max_real_tokens / local_M)` with `local_M=256`; P74 does not hard-code 2
+or fuse chunks.
+
+With the default evidence root, the run directory is:
+
+```text
+/mnt/disks/tunix-data/gsm8k-onehost-xprof/v1_zero-hp_dp2tp2-ba_<label>
+```
+
+Return and inspect all of these:
+
+```text
+train/p74_gap_census.txt
+train/p74_gap_receipt.json
+train/classification.json
+train/raw.log
+train/xprof/
+train/perf/
+SHA256SUMS
+```
+
+The P74 receipt is fail-closed: exactly 64 seed-to-head windows, mean gap
+`<=70ms`, one `jit__p74_identity_head_cotangent_partition` per window, and all
+seven old D2H/H2D victim overlaps equal zero. It separately records the final
+`[PERF] stage=p32_vag_reverse` row; do not add XProf gap and host wall columns.
+The three commit-gradient norms must be bitwise
+`1.6838101148605347 / 3.3025829792022705 / 1.8203867673873901`, strict
+alignment must be 96/96, and `[P66.VMA] outer_check_enabled` must remain in
+production logs. A capped trace JSON may keep the outer arm classifier RED at
+`trace_census_rc=1`; that convention does not waive any P74, numerical,
+full-XPlane hierarchy, or SHA-ledger red.
+
+Historical matched truth for comparison: r3 mean gap 150.746ms/chunk,
+726ms/group, reverse 24.458s; r4 mean 0.063ms/chunk, 459ms/group, reverse
+15.844s. The two exact chunk boundaries recovered 301.366ms/group, while the
+independent group wall recovered 267ms.
+
+## Current B — render one optimized GSM8K DP16xTP4 full train
+
+This command renders exactly one 64-chip, 200-update GSM8K JobSet. It never
+launches Kubernetes. Run it only after the P74 commit is pushed, the remote SHA
+is read back, and a clean checkout is at that exact 40-character SHA:
+
+```bash
+cd <physical-clean-worktree>
+approved_sha="$(git rev-parse HEAD)"
+
+bash canon-zero-tim/tasks/v1-phase4-three-full-recipes/scripts/prepare_gsm8k_full_dp16tp4_p74.sh \
+  "$approved_sha" \
+  "/tmp/v1-gsm8k-p74-<fresh-wave-id>" \
+  "<fresh-gsm8k-run-id>"
+```
+
+The script refuses a dirty tree, SHA/HEAD mismatch, reused output directory,
+or an empty ID. It writes one manifest plus `manifest-index.json`, hashes both,
+prints `V1_HP_GSM8K_P74_WAVE_READY ... launch=not-executed`, and prints one
+unpiped `kubectl apply` command for later review. It does not execute that
+command.
+
+The rendered contract is DP16xTP4 strict Zero-TIM full training with resident
+optimizer, checked VMA, fixed head, P63 overflow-safe clip, P74's flagless
+device partition, the three receipt-lightening selectors, and
+`CANON_P71_SCAN=fwd`. `CANON_DP_COLLECTIVE_REDUCE` is deliberately absent
+because the DP16 FP64-oracle gate is not complete; `CANON_P71_SCAN=bwd` is
+forbidden on TP4. The profile/`00_env.sh` chain maps
+`CANON_P59_CHECKED_VMA=1` to the exact compatibility alias consumed by P74.
+
+Before any separately approved launch, inspect the manifest and index, confirm
+the source SHA, one JobSet, mesh `16,4`, `--max_steps=200`, all selectors above,
+and absence of collective-reduce. At runtime, numerics and strict alignment
+come before timing. Parse the real `[PERF] p32_vag_reverse` and official step
+walls; do not mistake `grad_accumulate` for model backward. The one-host P74
+census is shape/count-specific and must not be used to certify the target
+XPlane. Target P74 performance stays unverified until a target-aware warm
+reverse receipt is captured.
+
+## Historical P60 procedure (do not use for current P74)
+
+P60-2F remains a historical clean-SHA TARGET PASS for its old whole-update
+contract, while its UI trace fails the newer navigation gate. The historical
+Native/Zero pair remains `INCONCLUSIVE_INPUT_MISMATCH` for timing.
 
 ## Historical two-arm procedure (do not use for P60-2G)
 

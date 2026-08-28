@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import types
 import unittest
@@ -24,6 +25,7 @@ def _load(name: str, path: Path):
   spec = importlib.util.spec_from_file_location(name, path)
   assert spec is not None and spec.loader is not None
   module = importlib.util.module_from_spec(spec)
+  sys.modules[spec.name] = module
   spec.loader.exec_module(module)
   return module
 
@@ -43,6 +45,10 @@ MODULE_CENSUS = _load(
 SIZE_CENSUS = _load(
     "v1_gsm8k_xprof_size_census",
     SCRIPTS / "census_gsm8k_xprof_size.py",
+)
+P74_GAP_CENSUS = _load(
+    "v1_gsm8k_p74_gap_census",
+    SCRIPTS / "census_gsm8k_p74_gap.py",
 )
 GSM8K_XPROF = _load("gsm8k_xprof", ROOT / "tunix/rl/gsm8k_xprof.py")
 
@@ -191,7 +197,161 @@ def _fixture(
   )
 
 
+def _p74_fixture(root: Path) -> None:
+  state = root / "train"
+  victim = {kind: 0 for kind in P74_GAP_CENSUS.VICTIM_KINDS}
+  receipt = {
+      "schema": P74_GAP_CENSUS.SCHEMA,
+      "status": "PASS",
+      "geometry": "dp2-tp2",
+      "acceptance": {
+          "expected_windows": 64,
+          "max_mean_gap_ms": 70.0,
+          "exact_victim_overlap_events": 0,
+          "partition_module_per_window": P74_GAP_CENSUS.PARTITION_MODULE,
+      },
+      "gap": {
+          "windows": 64,
+          "total_ms": 4.032,
+          "mean_ms": 0.063,
+          "max_ms": 0.064,
+          "min_ms": 0.062,
+      },
+      "identity_windows": 64,
+      "intervening_modules": {P74_GAP_CENSUS.PARTITION_MODULE: 64},
+      "victim_overlap": victim,
+      "victim_global": victim,
+      "windows_with_any_victim": 0,
+      "reverse_wall": {
+          "rows": [],
+          "captured_update": {
+              "seconds": 15.844,
+              "groups": 32,
+              "mean_seconds": 0.459,
+              "max_seconds": 0.542,
+          },
+      },
+      "reasons": [],
+  }
+  (state / "p74_gap_receipt.json").write_text(
+      json.dumps(receipt, indent=2, sort_keys=True) + "\n"
+  )
+  (state / "p74_gap_census.txt").write_text(
+      "V1_GSM8K_P74_GAP_CENSUS_GREEN windows=64 mean_ms=0.063 "
+      "max_ms=0.064 identity_windows=64 windows_with_any_victim=0\n"
+  )
+
+
 class ContractTest(unittest.TestCase):
+
+  def test_p74_gap_census_accepts_device_bridge_and_rejects_old_roundtrip(self):
+    fast_modules = []
+    slow_modules = []
+    for index in range(P74_GAP_CENSUS.EXPECTED_WINDOWS):
+      base = index * 1_000_000_000
+      seed = P74_GAP_CENSUS.Event(
+          P74_GAP_CENSUS.SEED_MODULE, base, 1_000, {}
+      )
+      identity = P74_GAP_CENSUS.Event(
+          P74_GAP_CENSUS.PARTITION_MODULE, base + 20_000, 20_000, {}
+      )
+      fast_modules.extend((
+          seed,
+          identity,
+          P74_GAP_CENSUS.Event(
+              P74_GAP_CENSUS.HEAD_MODULE, base + 64_000, 1_000, {}
+          ),
+      ))
+      slow_modules.extend((
+          seed,
+          P74_GAP_CENSUS.Event(
+              P74_GAP_CENSUS.HEAD_MODULE,
+              base + 150_747_000,
+              1_000,
+              {},
+          ),
+      ))
+
+    green = P74_GAP_CENSUS.analyze(fast_modules, [])
+    self.assertEqual(green["status"], "PASS", green)
+    self.assertEqual(green["gap"]["windows"], 64)
+    self.assertAlmostEqual(green["gap"]["mean_ms"], 0.063)
+    self.assertEqual(green["identity_windows"], 64)
+    self.assertEqual(set(green["victim_overlap"].values()), {0})
+
+    old_roundtrip = P74_GAP_CENSUS.Event(
+        "tpu::System::TransferFromDevice",
+        2_000,
+        120_000_000,
+        {"size": "77791232"},
+    )
+    red = P74_GAP_CENSUS.analyze(slow_modules, [old_roundtrip])
+    self.assertEqual(red["status"], "FAIL", red)
+    self.assertEqual(red["gap"]["mean_ms"], 150.746)
+    self.assertEqual(red["identity_windows"], 0)
+    self.assertEqual(red["victim_overlap"]["d2h_77791232"], 1)
+    self.assertTrue(
+        any(reason.startswith("mean_gap_ms=") for reason in red["reasons"]),
+        red,
+    )
+
+  def test_p74_gap_receipt_is_required_only_for_zero_dp2(self):
+    keys = dict(
+        source_sha="1" * 40,
+        source_diff_sha256="2" * 64,
+        runtime_manifest_sha256="5" * 64,
+        model_snapshot="3" * 40,
+        image_id="sha256:" + "4" * 64,
+        xprof_census_rc=0,
+        semantic_census_rc=0,
+    )
+    with tempfile.TemporaryDirectory() as directory:
+      root = Path(directory) / "zero-dp2"
+      _fixture(root, "zero-hp", geometry="dp2-tp2")
+      _p74_fixture(root)
+      green = ARM_CLASSIFIER.classify(
+          arm="zero-hp",
+          run_root=root,
+          geometry="dp2-tp2",
+          require_p74_gap=True,
+          p74_gap_census_rc=0,
+          **keys,
+      )
+      self.assertEqual(green["verdict"], "PASS", green)
+      self.assertEqual(green["p74_gap"]["gap"]["mean_ms"], 0.063)
+
+      receipt_path = root / "train/p74_gap_receipt.json"
+      receipt = json.loads(receipt_path.read_text())
+      receipt["gap"]["mean_ms"] = 70.001
+      receipt_path.write_text(json.dumps(receipt) + "\n")
+      red = ARM_CLASSIFIER.classify(
+          arm="zero-hp",
+          run_root=root,
+          geometry="dp2-tp2",
+          require_p74_gap=True,
+          p74_gap_census_rc=0,
+          **keys,
+      )
+      self.assertEqual(red["verdict"], "FAIL", red)
+      self.assertIn(
+          "p74_gap_receipt.gap.mean_ms=70.001", red["reasons"]
+      )
+
+      wrong_arm = Path(directory) / "native-dp2"
+      _fixture(wrong_arm, "native", geometry="dp2-tp2")
+      _p74_fixture(wrong_arm)
+      red = ARM_CLASSIFIER.classify(
+          arm="native",
+          run_root=wrong_arm,
+          geometry="dp2-tp2",
+          require_p74_gap=True,
+          p74_gap_census_rc=0,
+          **keys,
+      )
+      self.assertEqual(red["verdict"], "FAIL", red)
+      self.assertIn(
+          "p74_gap_requirement_is_zero_hp_dp2_tp2_only", red["reasons"]
+      )
 
   def test_evidence_ledger_green_red_and_post_manifest_tamper(self):
     helper = SCRIPTS / "finalize_gsm8k_xprof_evidence.sh"
@@ -1209,9 +1369,11 @@ fi
     self.assertIn("census_gsm8k_xprof_hierarchy.py", common)
     self.assertIn("census_gsm8k_xprof_trace.py", common)
     self.assertIn("census_gsm8k_xprof_size.py", common)
+    self.assertIn("census_gsm8k_p74_gap.py", common)
     self.assertIn("--require-hierarchy", common)
     self.assertIn('--trace-census-rc "$trace_census_rc"', common)
     self.assertIn('--size-census-rc "$size_census_rc"', common)
+    self.assertIn('--require-p74-gap --p74-gap-census-rc', common)
     self.assertIn("-e CANON_XPROF_SKIP_STEPS=2", common)
     # The TPU trace mode is passed through with the update-phase default so
     # the rollout wrappers can clear it; the arm contract enforces the
@@ -1226,6 +1388,7 @@ fi
     self.assertIn('sha_inputs=("$raw" "$driver")', common)
     self.assertIn('"$xprof_census" "$semantic_census" "$classification"', common)
     self.assertIn('"$size_census" "$size_receipt"', common)
+    self.assertIn('"$p74_gap_census" "$p74_gap_receipt"', common)
     self.assertIn('find "$xprof_dir" -type f', common)
     self.assertIn("hard:1500000000", common)
     choose = common.index("gsm8k_xprof_choose_terminal")
@@ -1249,6 +1412,15 @@ fi
     zero = (SCRIPTS / "run_onehost_gsm8k_xprof_zero_hp.sh").read_text()
     self.assertIn('common.sh" native', native)
     self.assertIn('common.sh" zero-hp', zero)
+    p74 = (
+        SCRIPTS / "run_onehost_xprof_backward_p74_dp2tp2.sh"
+    ).read_text()
+    self.assertIn("V1_GSM8K_XPROF_GEOMETRY=dp2-tp2", p74)
+    self.assertIn("CANON_DP_COMPARE_MODE=fingerprint-hybrid", p74)
+    self.assertIn("CANON_DP_DISTINCT_SCHEDULE=first-group-warmup", p74)
+    self.assertIn("CANON_DP_FINITE_FETCH=batched-commit", p74)
+    self.assertIn("CANON_P71_SCAN=fwd", p74)
+    self.assertNotIn("CANON_P66_P59_CHECK_VMA", p74)
 
 
 if __name__ == "__main__":

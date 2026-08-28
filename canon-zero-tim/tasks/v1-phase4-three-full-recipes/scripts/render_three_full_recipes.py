@@ -39,6 +39,47 @@ _JAX_CACHE_ENV = {
 }
 
 
+def _optimization_additions(label: str) -> dict[str, str]:
+  """Returns the reviewed reverse-path bundle for one full recipe."""
+  if label not in ("gsm8k", "p45", "m15"):
+    raise ValueError(f"unknown full-recipe label: {label!r}")
+  additions = {
+      "CANON_P59_CHECKED_VMA": "1",
+      "CANON_V1_HP_FIRST_UPDATE_GATE": "1",
+      # Receipt-lightening selectors do not alter gradient values. The
+      # collective-reduce selector deliberately remains absent until the
+      # DP16 oracle is green.
+      "CANON_DP_COMPARE_MODE": "fingerprint-hybrid",
+      "CANON_DP_DISTINCT_SCHEDULE": "first-group-warmup",
+      "CANON_DP_FINITE_FETCH": "batched-commit",
+      # fwd has TP>1 hardware certification on DP2xTP2. bwd is forbidden on
+      # a non-unit model axis and must not silently degrade on TP4/TP8.
+      "CANON_P71_SCAN": "fwd",
+  }
+  if label != "gsm8k":
+    additions["CANON_P67_P66_VMA_P59_ONLY"] = "1"
+  return additions
+
+
+def _gsm8k_spec() -> p33.JobSpec:
+  return p33.JobSpec(
+      key="gsm8k-v1-hp-full",
+      workload="gsm8k",
+      stage="full",
+      profile=_GSM8K_PROFILE,
+      no_commit=False,
+      job_prefix="canon-v1hp-gsm8k",
+      command=p33._gsm8k_command(200),  # pylint: disable=protected-access
+      dp_size=16,
+      tp_size=4,
+      optimizer_resident=True,
+      rank_parallel_backward=True,
+      fixed_lm_head=True,
+      strict_alignment=True,
+      v1_hp_full=True,
+  )
+
+
 def _container(document: dict) -> dict:
   pod = document["spec"]["replicatedJobs"][0]["template"]["spec"][
       "template"
@@ -104,22 +145,7 @@ def render_three(
   gsm_dir = output_dir / "gsm8k"
   gsm_dir.mkdir()
   base = p33.load_base(base_path)
-  gsm_spec = p33.JobSpec(
-      key="gsm8k-v1-hp-full",
-      workload="gsm8k",
-      stage="full",
-      profile=_GSM8K_PROFILE,
-      no_commit=False,
-      job_prefix="canon-v1hp-gsm8k",
-      command=p33._gsm8k_command(200),  # pylint: disable=protected-access
-      dp_size=16,
-      tp_size=4,
-      optimizer_resident=True,
-      rank_parallel_backward=True,
-      fixed_lm_head=True,
-      strict_alignment=True,
-      v1_hp_full=True,
-  )
+  gsm_spec = _gsm8k_spec()
   gsm_document = p33.render_jobset(
       base, gsm_spec, source_commit, gsm8k_run_id
   )
@@ -163,27 +189,7 @@ def render_three(
     raise ValueError(f"Phase4 must render exactly three manifests, got {len(outputs)}")
   for label, path in zip(("gsm8k", "p45", "m15"), outputs, strict=True):
     document = yaml.safe_load(path.read_text(encoding="utf-8"))
-    additions = {
-        "CANON_P59_CHECKED_VMA": "1",
-        "CANON_V1_HP_FIRST_UPDATE_GATE": "1",
-        # Receipt-lightening selectors: gradient values are unchanged
-        # bitwise by construction (only the cadence and the fetch point of
-        # the watchdogs move), kill-tested for single-bit and non-finite
-        # detection, and validated end to end at DP4xTP1.  The reduction
-        # selector stays absent until the DP16 oracle runs, and the scan
-        # ladder is set below per topology.
-        "CANON_DP_COMPARE_MODE": "fingerprint-hybrid",
-        "CANON_DP_DISTINCT_SCHEDULE": "first-group-warmup",
-        "CANON_DP_FINITE_FETCH": "batched-commit",
-        # Forward tape scan: bitwise on the norm anchor at DP4xTP1,
-        # DP16xTP1, and -- the axis the target adds -- DP2xTP2 (first
-        # TP>1 hardware certification, 2026-08-28).  bwd stays absent:
-        # the unrolled blocks fail closed on a non-unit model axis.
-        "CANON_P71_SCAN": "fwd",
-    }
-    if label != "gsm8k":
-      additions["CANON_P67_P66_VMA_P59_ONLY"] = "1"
-    _set_env(document, additions)
+    _set_env(document, _optimization_additions(label))
     _write_yaml(path, document)
 
   expected_profiles = {
@@ -258,6 +264,91 @@ def render_three(
       flush=True,
   )
   return outputs
+
+
+def render_gsm8k_full(
+    *,
+    source_commit: str,
+    output_dir: Path,
+    run_id: str,
+    base_path: Path,
+) -> Path:
+  """Renders one immutable optimized GSM8K DP16xTP4 full-training JobSet."""
+  if not _SHA_RE.fullmatch(source_commit):
+    raise ValueError("source commit must be exactly 40 lowercase hex characters")
+  if output_dir.exists():
+    raise FileExistsError(f"refusing to overwrite output root: {output_dir}")
+  if not run_id:
+    raise ValueError("run id must be non-empty")
+
+  output_dir.mkdir(parents=True)
+  document = p33.render_jobset(
+      p33.load_base(base_path), _gsm8k_spec(), source_commit, run_id
+  )
+  document["metadata"].setdefault("labels", {}).update({
+      "canon.zero-tim/performance-profile": "v1-hp",
+      "canon.zero-tim/full-recipe": "gsm8k",
+      "canon.zero-tim/p74-device-partition": "source-sha",
+  })
+  _set_env(document, _optimization_additions("gsm8k"))
+  path = output_dir / "jobset-v1-hp-gsm8k-dp16tp4-p74.yaml"
+  _write_yaml(path, document)
+
+  env = _env(document)
+  required = {
+      "CANON_PROFILE_FILE": _GSM8K_PROFILE,
+      "CANON_V1_HP_FULL": "1",
+      "CANON_P59_RANK_PARALLEL_BACKWARD": "1",
+      "CANON_P59_CHECKED_VMA": "1",
+      "CANON_V1_HP_FIRST_UPDATE_GATE": "1",
+      "CANON_P33_SHARED_MESH": "16,4",
+      "CANON_P33_RUN_STAGE": "full",
+      "CANON_P33_NO_COMMIT": "0",
+      "CANON_GSM8K_ALIGNMENT_WARN_ONLY": "0",
+      "CANON_P38_FIXED_LM_HEAD": "1",
+      "CANON_DP_COMPARE_MODE": "fingerprint-hybrid",
+      "CANON_DP_DISTINCT_SCHEDULE": "first-group-warmup",
+      "CANON_DP_FINITE_FETCH": "batched-commit",
+      "CANON_P71_SCAN": "fwd",
+      **_JAX_CACHE_ENV,
+  }
+  wrong = {
+      name: env.get(name)
+      for name, value in required.items()
+      if env.get(name) != value
+  }
+  if wrong:
+    raise ValueError(f"GSM8K rendered V1 contract drifted: {wrong}")
+  for forbidden in (
+      "CANON_DP_COLLECTIVE_REDUCE",
+      "CANON_P67_P66_VMA_P59_ONLY",
+  ):
+    if env.get(forbidden) not in (None, "", "0"):
+      raise ValueError(f"GSM8K must not render {forbidden}")
+
+  receipt = {
+      "schema": "v1-hp-gsm8k-dp16tp4-p74-v1",
+      "manifest": {
+          "path": str(path),
+          "sha256": _sha256(path),
+          "jobset": document["metadata"]["name"],
+          "source": source_commit,
+          "run_id": run_id,
+      },
+      "launch_executed": False,
+  }
+  index = output_dir / "manifest-index.json"
+  index.write_text(
+      json.dumps(receipt, indent=2, sort_keys=True) + "\n",
+      encoding="utf-8",
+  )
+  print(
+      "V1_HP_GSM8K_P74_MANIFEST_PASS "
+      f"path={path} sha256={receipt['manifest']['sha256']} "
+      f"source={source_commit}",
+      flush=True,
+  )
+  return path
 
 
 def main() -> int:

@@ -102,6 +102,8 @@ hierarchy_census="$state/hierarchy_census.txt"
 trace_census="$state/trace_census.txt"
 size_census="$state/xprof_size_census.txt"
 size_receipt="$state/xprof_size_receipt.json"
+p74_gap_census="$state/p74_gap_census.txt"
+p74_gap_receipt="$state/p74_gap_receipt.json"
 classification="$state/classification.json"
 canon_out="$root/canon"
 container="v1_gsm8k_xprof_${arm//-/_}_${label}"
@@ -120,6 +122,9 @@ runtime_files=(
   "$script_dir/census_gsm8k_xprof_size.py"
   "$script_dir/census_gsm8k_xprof_modules.py"
   "$script_dir/census_gsm8k_semantic_trace.py"
+  "$script_dir/census_gsm8k_p74_gap.py"
+  "$script_dir/run_onehost_xprof_backward_zero.sh"
+  "$script_dir/run_onehost_xprof_backward_p74_dp2tp2.sh"
 )
 runtime_manifest_sha256="$(sha256sum "${runtime_files[@]}" | sha256sum | awk '{print $1}')"
 
@@ -330,6 +335,7 @@ xprof_census_rc=1
 semantic_census_rc=1
 hierarchy_census_rc=1
 trace_census_rc=1
+p74_gap_census_rc=1
 set +e
 python3 "$script_dir/census_gsm8k_xprof_size.py" \
   --run-root "$root" --output "$size_receipt" \
@@ -361,6 +367,12 @@ if [ "$docker_rc" -eq 0 ]; then
       --geometry "$geometry" \
       >"$trace_census" 2>&1
     trace_census_rc=$?
+    if [ "$geometry" = dp2-tp2 ]; then
+      python3 "$script_dir/census_gsm8k_p74_gap.py" \
+        --run-root "$root" --output "$p74_gap_receipt" \
+        >"$p74_gap_census" 2>&1
+      p74_gap_census_rc=$?
+    fi
   fi
   set -e
 fi
@@ -384,6 +396,11 @@ if [ "$arm" = zero-hp ]; then
     --require-hierarchy --hierarchy-census-rc "$hierarchy_census_rc"
     --trace-census-rc "$trace_census_rc"
   )
+  if [ "$geometry" = dp2-tp2 ]; then
+    classifier_args+=(
+      --require-p74-gap --p74-gap-census-rc "$p74_gap_census_rc"
+    )
+  fi
 fi
 "${classifier_args[@]}" >>"$driver" 2>&1
 classifier_rc=$?
@@ -393,6 +410,7 @@ sha_inputs=("$raw" "$driver")
 for path in \
     "$xprof_census" "$semantic_census" "$classification" \
     "$hierarchy_census" "$trace_census" "$size_census" "$size_receipt" \
+    "$p74_gap_census" "$p74_gap_receipt" \
     "$pre" "$align" "$update"; do
   [ -e "$path" ] && sha_inputs+=("$path")
 done

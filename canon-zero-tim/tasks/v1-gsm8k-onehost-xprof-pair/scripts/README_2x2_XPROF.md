@@ -79,6 +79,39 @@ Representative-geometry variant (TP present; swap the scan rung to fwd):
     CANON_P71_SCAN=fwd \
     bash canon-zero-tim/tasks/v1-gsm8k-onehost-xprof-pair/scripts/run_onehost_xprof_backward_zero.sh "<host>_<date>"
 
+For the P74 checked-VMA treatment, use the signed wrapper below. It pins the
+same DP2xTP2 carrier settings and leaves `CANON_P66_P59_CHECK_VMA=1` under the
+profile's mandatory drift guard; it does not add a chunk-count flag:
+
+    V1_GSM8K_XPROF_ALLOW_DIRTY=1 \
+    bash canon-zero-tim/tasks/v1-gsm8k-onehost-xprof-pair/scripts/run_onehost_xprof_backward_p74_dp2tp2.sh "<host>_<date>_p74"
+
+Omit `V1_GSM8K_XPROF_ALLOW_DIRTY=1` for a clean committed carrier. Launch only
+from the physical worktree path, with a fresh label, and never append a pipe to
+the command. The wrapper automatically emits:
+
+- `train/p74_gap_census.txt`: one-line GREEN/RED verdict;
+- `train/p74_gap_receipt.json`: all 64 seed-to-head windows, mean/max gap,
+  exact P74 partition-module coverage, seven old D2H/H2D victim counts, and the
+  captured `[PERF] p32_vag_reverse` wall;
+- the receipt and census in the root `SHA256SUMS` ledger.
+
+The fail-closed P74 gate is mean gap <=70 ms, exactly 64/64 windows passing
+through `jit__p74_identity_head_cotangent_partition`, and zero overlap from
+the old transfer family. Historical matched captures replay through the same
+census as follows: r3 before the accepted device repartition was 150.746
+ms/chunk and 726 ms/group; r4 was 0.063 ms/chunk and 459 ms/group. There are
+two chunks per group in this frozen carrier, so the exact two boundary bubbles
+shrank by 301.366 ms/group, while the independently measured end-to-end group
+wall shrank by 267 ms (36.8%). These are different clocks and are deliberately
+reported separately.
+
+`num_chunks` remains the data-derived P32 specialization
+`ceil(max_real_tokens / local_M)` with `local_M=256`; P74 neither hard-codes 2
+nor fuses chunks. It removes the checked-VMA host materialization at every
+existing chunk boundary, so longer contexts with more chunks receive the same
+per-boundary fix.
+
 A six-update horizon (dark-time and warmup-knife studies) is available
 on either geometry with CANON_P33_RUN_STAGE=six-update.
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -22,6 +23,11 @@ _PREPARE = (
     _REPO
     / "canon-zero-tim/tasks/v1-phase4-three-full-recipes/scripts"
     / "prepare_checked_vma_three_full_wave.sh"
+)
+_PREPARE_GSM8K_P74 = (
+    _REPO
+    / "canon-zero-tim/tasks/v1-phase4-three-full-recipes/scripts"
+    / "prepare_gsm8k_full_dp16tp4_p74.sh"
 )
 _SPEC = importlib.util.spec_from_file_location("v1_phase4_renderer", _SCRIPT)
 assert _SPEC is not None and _SPEC.loader is not None
@@ -83,6 +89,69 @@ class ThreeFullRendererTest(unittest.TestCase):
         check=False,
     )
     self.assertEqual(completed.returncode, 0, msg=completed.stderr)
+
+  def test_gsm8k_p74_wrapper_renders_one_job_and_never_launches(self):
+    script = _PREPARE_GSM8K_P74.read_text(encoding="utf-8")
+    self.assertIn('git -C "$REPO_ROOT" rev-parse HEAD', script)
+    self.assertIn(
+        'git -C "$REPO_ROOT" status --porcelain --untracked-files=all',
+        script,
+    )
+    self.assertIn("refusing to render from a dirty worktree", script)
+    self.assertIn("V1_HP_GSM8K_P74_WAVE_READY", script)
+    self.assertIn("manifests=1", script)
+    self.assertIn("launch=not-executed", script)
+    self.assertEqual(script.count('"kubectl apply -f '), 1)
+    self.assertFalse(
+        any(line.strip().startswith("kubectl apply") for line in script.splitlines())
+    )
+    completed = subprocess.run(
+        ["bash", "-n", str(_PREPARE_GSM8K_P74)],
+        cwd=_REPO,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    self.assertEqual(completed.returncode, 0, msg=completed.stderr)
+
+    with tempfile.TemporaryDirectory() as tmp:
+      root = Path(tmp) / "gsm8k-p74"
+      path = renderer.render_gsm8k_full(
+          source_commit="b" * 40,
+          output_dir=root,
+          run_id="gsm-p74-a",
+          base_path=_REPO / "canon-zero-tim/cluster/jobset-64chip.yaml",
+      )
+      self.assertEqual(
+          path.name, "jobset-v1-hp-gsm8k-dp16tp4-p74.yaml"
+      )
+      document = yaml.safe_load(path.read_text(encoding="utf-8"))
+      values = _env(document)
+      self.assertEqual(values["CANON_EXPECT_COMMIT"], "b" * 40)
+      self.assertEqual(values["CANON_P33_SHARED_MESH"], "16,4")
+      self.assertEqual(values["CANON_P59_CHECKED_VMA"], "1")
+      self.assertEqual(
+          values["CANON_DP_COMPARE_MODE"], "fingerprint-hybrid"
+      )
+      self.assertEqual(
+          values["CANON_DP_DISTINCT_SCHEDULE"], "first-group-warmup"
+      )
+      self.assertEqual(values["CANON_DP_FINITE_FETCH"], "batched-commit")
+      self.assertEqual(values["CANON_P71_SCAN"], "fwd")
+      self.assertNotIn("CANON_DP_COLLECTIVE_REDUCE", values)
+      self.assertNotIn("CANON_P67_P66_VMA_P59_ONLY", values)
+      self.assertIn("--max_steps=200", values["CANON_RUN_CMD"])
+      index = json.loads((root / "manifest-index.json").read_text())
+      self.assertEqual(index["schema"], "v1-hp-gsm8k-dp16tp4-p74-v1")
+      self.assertFalse(index["launch_executed"])
+      self.assertEqual(index["manifest"]["source"], "b" * 40)
+      with self.assertRaises(FileExistsError):
+        renderer.render_gsm8k_full(
+            source_commit="b" * 40,
+            output_dir=root,
+            run_id="gsm-p74-b",
+            base_path=_REPO / "canon-zero-tim/cluster/jobset-64chip.yaml",
+        )
 
   def test_renders_exactly_three_strict_full_recipes(self):
     with tempfile.TemporaryDirectory() as tmp:
