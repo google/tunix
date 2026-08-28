@@ -2,23 +2,16 @@
 
 ## Current P58.19 three-round coarse seam-localization checkpoint (2026-08-28)
 
-- Current status: P58.19c coverage repair implementation
-  `b231ef39d0d2f5c270561f9acd1a26a6b0503654` is the approved source
-  publication for this delivery. Construction validation is complete. No
-  image, Kubernetes object, or TPU work has been created.
-- Target Incident (p58s19b): Attempt `canon-p58-seamcoarse-full-p58s19b` (128 TPU v5p)
-  executed Step-0 multi-turn rollouts, but terminated at the postflight gate with
-  `FATAL: P38 seam observer contract failed: init=1 records=0 classifier=1`.
-  The returned 26-line excerpt proves a zero-hit `[3072,4608)` observer window;
-  it does not contain the full log or scheduler journal needed to prove the
-  incident report's prompt-length attribution.
-- Sealed incident package: `evidence/p58s19b_seam_observer_contract_incident/`
+- Current status: P58.19c execution and incident sealed in `evidence/p58s19c_continue_decode_incident/`. Seam window coverage `[1686, 4096)` verified functional (`p38_seam_records=113`). Failure triaged: `_p38_serving_begin` raised `RuntimeError: expected=standard actual=continue_decode` on multi-turn rollout.
+- Target Incident (p58s19c): Attempt `canon-p58-seamcoarse-full-p58s19c` (128 TPU v5p)
+  executed Step 0 rollout and successfully captured 113 records in `[1686, 4096)`, but terminated
+  due to a program path assertion conflict in TPU runner (`continue_decode` vs `expected=standard`).
+- Sealed incident package: `evidence/p58s19c_continue_decode_incident/`
   with `RAW_ERROR.log`, `INCIDENT_REPORT.md`, and verified `SHA256SUMS`.
-- Repair: derive `[1686,4096)` and strata
-  `1686,2512,3072,3584,4096` through the single P58 selector. The interval
-  covers all five known first-red prefixes: p58z07 2,513/3,715 and P58.18
-  3,438/3,880/4,032. Production and neighboring workload defaults are
-  unchanged.
+- Prior Incident (p58s19b): Attempt `canon-p58-seamcoarse-full-p58s19b` (128 TPU v5p)
+  terminated with `records=0` under the old `[3072, 4608)` window.
+- Sealed incident package (p58s19b): `evidence/p58s19b_seam_observer_contract_incident/`.
+- Repair requirement: disable `CANON_CONTINUE_DECODE` (or set `CANON_CONTINUE_DECODE=0`) in JobSet profile, or extend `_p38_serving_begin` to allow `continue_decode`. Production and neighboring workload defaults are unchanged.
 - P58.19c validation: Python compilation and diff hygiene pass; focused
   renderer/profile/classifier tests pass 45/45; P34 static passes 10 suites;
   deterministic flag audit passes declared/actual/unique 394/394/394; and the

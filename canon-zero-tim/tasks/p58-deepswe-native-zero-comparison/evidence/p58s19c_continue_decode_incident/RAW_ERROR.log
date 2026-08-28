@@ -1,0 +1,33 @@
+=== [P58_DeepSWE Incident Log: canon-p58-seamcoarse-full-p58s19c] ===
+Timestamp: 2026-08-28T10:28:45Z
+Workload: canon-p58-seamcoarse-full-p58s19c
+Topology: 128 TPU v5p (4x4x8 topology: DP8xTP8 Rollout + DP8xTP8 Trainer)
+Image: europe-west4-docker.pkg.dev/cloud-tpu-multipod-dev/yuxzhang-repo/tunix_frozenlake_image@sha256:c9f9fd34054216bc67ba386f71e8d58658676f4a878e5980087c59db0b2d7d16
+Source commit: 6a8251b48676c093c3a0261298c6f38872caa828
+GCS Mirror: gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p58/canon-p58-seamcoarse-full-p58s19c/attempt-0
+Exit code: 1 (Runtime Error / Fail-Closed Assertion)
+
+[run] Initializing P38 Seam Observer...
+[CANON_P38_SEAM_OBSERVER_INIT] enabled=1 mode=layer layer=None min_position=1686 max_position=4096 max_bytes=1073741824
+[PATHTRACE] CANON_P38_SEAM_OBSERVER=layer layer=None
+[PATHTRACE] CANON_P38_SEAM_MIN_POSITION=1686 CANON_P38_SEAM_MAX_POSITION=4096
+
+[vLLM / Step 0 Rollout Executing]
+Prompt trajectories generating with multi-turn continue decode...
+[CANON_P38_SEAM_OBSERVER_SAMPLE] recorded=113 positions=[1686..4096)
+[P38_OBSERVER_SEAM_VALIDATION] p38_seam_records=113
+
+[TPU Runner Multi-turn Decode Failure]
+2026-08-28 10:28:41 - ERROR - [absl] Caught exception inside model_call / _execute_continue_decode:
+Traceback (most recent call last):
+  File "/app/vllm/worker/tpu_model_runner.py", line 512, in _execute_continue_decode
+    _p38_serving_begin(program_path="continue_decode", ...)
+  File "/app/canon-zero-tim/tunix/p38/serving_capture.py", line 142, in _p38_serving_begin
+    raise RuntimeError(
+RuntimeError: P38 serving capture reached an unexpected program path: expected=standard actual=continue_decode
+
+2026-08-28 10:28:41 - ERROR - [absl] Fatal error in runner:
+RuntimeError: P38 serving capture reached an unexpected program path: expected=standard actual=continue_decode
+
+[run] FATAL: TPU worker rank 0-31 exited with error in continue_decode serving capture
+[run] Exiting with code 1.

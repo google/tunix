@@ -1,5 +1,19 @@
 # P58 DeepSWE native-first training handoff
 
+## 2026-08-28 UTC — DeepSWE P58.19c incident intake (`canon-p58-seamcoarse-full-p58s19c`, 128 TPU)
+
+### Incident Summary
+Target run `canon-p58-seamcoarse-full-p58s19c` executed Step 0 multi-turn rollout on 128 TPU v5p:
+- **Observation Window Coverage (Verified PASS)**: Widened window `[1686, 4096)` successfully captured **113 seam records** (`p38_seam_records=113`), fixing the previous `p58s19b` zero-record failure.
+- **Fatal Error**: TPU Runner entered continuous decode `_execute_continue_decode`, invoking `_p38_serving_begin(program_path="continue_decode")`. `_p38_serving_begin` raised:
+  ```text
+  RuntimeError: P38 serving capture reached an unexpected program path: expected=standard actual=continue_decode
+  ```
+- **Sealed Incident Package**: `evidence/p58s19c_continue_decode_incident/` (`INCIDENT_REPORT.md`, `RAW_ERROR.log`, `SHA256SUMS`). Full multi-pod logs mirrored at `gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p58/canon-p58-seamcoarse-full-p58s19c/attempt-0`.
+
+### Action Required Before Rerun
+- Disable `CANON_CONTINUE_DECODE` (set to 0 or remove) in the JobSet profile so rollout strictly follows `standard` decode path, or extend `_p38_serving_begin` to allow `continue_decode`.
+
 ## 2026-08-28 UTC — P58.19c local seam-window coverage repair
 
 `p58s19b` proves only that the observer initialized but emitted zero records:

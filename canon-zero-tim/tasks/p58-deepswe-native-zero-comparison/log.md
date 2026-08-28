@@ -1451,3 +1451,14 @@
   Kubernetes mutation, or TPU/Pathways execution. The P58.19c target retry is
   NOT RUN and remains separately approval-gated. `main` is not a publication
   target.
+
+## 2026-08-28 UTC — DeepSWE P58.19c target execution & continue_decode incident sealed
+
+- Type: target execution / log intake / incident package sealing.
+- Target JobSet: `canon-p58-seamcoarse-full-p58s19c` on 128 TPU v5p.
+- Observation coverage fact: widened window `[1686, 4096)` successfully captured 113 seam records (`p38_seam_records=113`) in Step 0 rollout.
+- Failure symptom: during multi-turn generation, vLLM / TPU runner entered `_execute_continue_decode`, invoking `_p38_serving_begin(program_path="continue_decode")`. `_p38_serving_begin` raised `RuntimeError: P38 serving capture reached an unexpected program path: expected=standard actual=continue_decode` due to `_P38_SERVING_CAPTURE_EXPECTED_PATH="standard"`.
+- Sealed incident package: `evidence/p58s19c_continue_decode_incident/` containing `INCIDENT_REPORT.md`, `RAW_ERROR.log`, and verified `SHA256SUMS`.
+- Multi-pod logs mirrored at `gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p58/canon-p58-seamcoarse-full-p58s19c/attempt-0`.
+- Required action: disable `CANON_CONTINUE_DECODE` (or set `CANON_CONTINUE_DECODE=0`) in JobSet profile so rollout strictly follows `standard` decode path, or extend `_p38_serving_begin` to allow `continue_decode`.
+
