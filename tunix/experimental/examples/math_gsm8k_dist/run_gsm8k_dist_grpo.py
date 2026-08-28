@@ -387,7 +387,10 @@ def _make_weight_sync_coordinator(trainer_handle, rollout_handles):
     from tunix.experimental.orchestrator import raiden_handler  # pylint: disable=g-import-not-at-top
 
     handler = raiden_handler.RaidenHandler(
-        transfer_options=raiden_handler.make_host_staged_transfer_options()
+        transfer_options=raiden_handler.RaidenTransferOptions(
+            parallelism=16,
+            group_size=128,
+        )
     )
     logging.info(
         "Raiden weight sync enabled; controller on port %d.", handler.port
