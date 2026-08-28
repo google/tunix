@@ -1535,7 +1535,11 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
     checked_vma_full = checked_vma_value == "1"
     first_update_gate_enabled = first_update_gate_value == "1"
     workload_identity = (
-        workload.contract_name if p34_workload else workload.name
+        workload.contract_name
+        if p34_workload
+        else workload.name
+        if p33_workload
+        else "legacy-segmented"
     )
     if checked_vma_full or first_update_gate_enabled:
       exact_checked_vma_geometry = (
@@ -4394,6 +4398,9 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
             mode=rl_cluster_lib.Mode.TRAIN,
             step=self.rl_cluster.global_steps,
         )
+        next_prompt_batch = None
+        next_prompt_batch_ready = False
+        prompt_input_exhausted = False
         if p58_all_filtered_no_commit:
           if (
               self.rl_cluster.global_steps != pre_update_global_step
@@ -4416,10 +4423,10 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
                 perf_constants.DATA_LOADING,
                 tags={perf_constants.STEP: self.rl_cluster.global_steps},
             ):
-              batch = next(full_dataset_iterator)
-            self._put_prompts_to_queue(prompt_queue, batch)
+              next_prompt_batch = next(full_dataset_iterator)
+            next_prompt_batch_ready = True
           except StopIteration:
-            prompt_queue.put(None)
+            prompt_input_exhausted = True
         elif self.should_sync_weights:
           logging.info("Requesting sync lock to sync weights...")
           self._rollout_sync_lock.acquire_weight_sync()
@@ -4460,10 +4467,10 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
                       perf_constants.STEP: self.rl_cluster.global_steps,
                   },
               ):
-                batch = next(full_dataset_iterator)
-              self._put_prompts_to_queue(prompt_queue, batch)
+                next_prompt_batch = next(full_dataset_iterator)
+              next_prompt_batch_ready = True
             except StopIteration:
-              prompt_queue.put(None)
+              prompt_input_exhausted = True
           finally:
             self._rollout_sync_lock.release_weight_sync()
             logging.info("Sync lock released.")
@@ -4476,10 +4483,23 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
                     perf_constants.STEP: self.rl_cluster.global_steps,
                 },
             ):
-              batch = next(full_dataset_iterator)
-            self._put_prompts_to_queue(prompt_queue, batch)
+              next_prompt_batch = next(full_dataset_iterator)
+            next_prompt_batch_ready = True
           except StopIteration:
-            prompt_queue.put(None)
+            prompt_input_exhausted = True
+
+        # Commit the completed step before making the next prompt batch visible
+        # to the asynchronous producer.  Otherwise a new rollout host span can
+        # be opened and then destructively crossed by this step boundary.
+        perf_v2_metrics = self.rl_cluster.perf_v2.export()
+        if next_prompt_batch_ready:
+          self._put_prompts_to_queue(prompt_queue, next_prompt_batch)
+        elif prompt_input_exhausted:
+          prompt_queue.put(None)
+        else:
+          raise RuntimeError(
+              "step finalization did not resolve the next prompt batch"
+          )
 
         if p45_host_memory_enabled:
           # These are complete-step host references, not device state. Drop
@@ -4505,8 +4525,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           )
 
         self.rl_cluster.buffer_metrics(
-            self.rl_cluster.perf_v2.export(),
-            mode=rl_cluster_lib.Mode.TRAIN,
+            perf_v2_metrics, mode=rl_cluster_lib.Mode.TRAIN
         )
         update_steps_since_last_sync = 0
         did_eval_this_global_step = False

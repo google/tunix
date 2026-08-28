@@ -160,7 +160,10 @@ class PerfTracer(NoopTracer):
     self._born = time.perf_counter()
 
     self._main_thread_id = timeline_utils.generate_host_timeline_id()
-    self._timelines_lock = threading.Lock()
+    # Span entry/exit and step commit share this lock so a new host span cannot
+    # appear between the active-span preflight and the timeline commit.  It is
+    # re-entrant because the helpers below also protect map creation.
+    self._timelines_lock = threading.RLock()
 
     self._host_timelines: dict[str, Timeline] = {
         self._main_thread_id: Timeline(self._main_thread_id, self._born)
@@ -269,6 +272,19 @@ class PerfTracer(NoopTracer):
   def process_and_commit_timelines(self) -> None:
     """Explicitly commits current steps across all active timelines."""
     with self._timelines_lock:
+      active_host_spans = {}
+      for timeline_id, tl in self._host_timelines.items():
+        active = tl.active_spans
+        if active:
+          active_host_spans[timeline_id] = tuple(
+              span.name for span in active
+          )
+      if active_host_spans:
+        raise RuntimeError(
+            "cannot commit PerfTracer timelines with active host spans: "
+            f"{active_host_spans}"
+        )
+
       # 1. Post process timelines
       # Sequentialize overlapping device timelines, except for those in ignore list.
       if self._concurrent_spans != "all":
@@ -335,18 +351,20 @@ class PerfTracer(NoopTracer):
     host_timeline = None
     device_waitlist = AsyncWaitlist()
     try:
-      host_timeline = self._get_or_create_host_timeline(
-          timeline_utils.generate_host_timeline_id()
-      )
-      host_timeline.start_span(name, begin, tags=tags)
+      with self._timelines_lock:
+        host_timeline = self._get_or_create_host_timeline(
+            timeline_utils.generate_host_timeline_id()
+        )
+        host_timeline.start_span(name, begin, tags=tags)
       yield device_waitlist
     finally:
       if host_timeline is not None:
         end = time.perf_counter()
-        host_timeline.stop_span(end)
-        self._get_or_create_device_timelines(span_devices).span(
-            name, begin, device_waitlist.waitlist, tags=tags
-        )  # pylint: disable=protected-access
+        with self._timelines_lock:
+          host_timeline.stop_span(end)
+          self._get_or_create_device_timelines(span_devices).span(
+              name, begin, device_waitlist.waitlist, tags=tags
+          )  # pylint: disable=protected-access
 
 
 Tracer = PerfTracer | NoopTracer

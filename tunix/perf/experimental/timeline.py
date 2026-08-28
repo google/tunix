@@ -197,6 +197,16 @@ class Timeline:
     with self._lock:
       return self._committed_steps + [dict(self._cur_step)]
 
+  @property
+  def active_spans(self) -> tuple[Span, ...]:
+    """A stable snapshot of synchronous spans that have not ended."""
+    with self._lock:
+      return tuple(
+          self._cur_step[sid]
+          for sid in self._spans_stack
+          if sid in self._cur_step
+      )
+
   def start_span(
       self, name: str, begin: float, tags: Mapping[str, Any] | None = None
   ) -> Span:
@@ -244,22 +254,19 @@ class Timeline:
       _span.end = end
 
   def commit_step(self) -> None:
-    """Commits current step spans to history, purging any uncompleted/dangling spans."""
+    """Commits a completed step without mutating live synchronous spans."""
     with self._lock:
-      to_remove = []
-      for sid, span in self._cur_step.items():
-        if span.end == float("inf") or sid in self._spans_stack:
-          logging.warning(
-              "Purging uncompleted span %r crossing step boundary in"
-              " timeline %s",
-              span.name,
-              self.id,
-          )
-          to_remove.append(sid)
-
-      for sid in to_remove:
-        self._cur_step.pop(sid, None)
-      self._spans_stack.clear()
+      incomplete = tuple(
+          span
+          for sid, span in self._cur_step.items()
+          if span.end == float("inf") or sid in self._spans_stack
+      )
+      if incomplete:
+        names = [span.name for span in incomplete]
+        raise RuntimeError(
+            f"{self.id}: cannot commit step with active spans "
+            f"count={len(incomplete)} names={names}"
+        )
 
       # Archive current step dict and reset via copy-on-write
       self._committed_steps = list(self._committed_steps) + [self._cur_step]

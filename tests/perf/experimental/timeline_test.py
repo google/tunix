@@ -75,22 +75,24 @@ class TimelineTest(absltest.TestCase):
       self.assertLen(t.cur_step, 2)
       self.assertEmpty(t.committed_steps)
 
-    # Commit step
-    with self.assertLogs(level="WARNING") as cm:
+    # A step boundary must not destroy a span whose context is still live.
+    with self.assertRaisesRegex(
+        RuntimeError, "cannot commit.*active.*span2"
+    ):
       t.commit_step()
 
-    with self.subTest("Post-commit purging"):
-      # Verify uncompleted span was purged
-      self.assertTrue(
-          any("Purging uncompleted span 'span2'" in o for o in cm.output)
-      )
+    with self.subTest("Rejected commit is non-destructive"):
+      self.assertEmpty(t.committed_steps)
+      self.assertIn(s1.id, t.cur_step)
+      self.assertIn(s2.id, t.cur_step)
 
-    with self.subTest("Committed steps"):
+    t.stop_span(4.0)
+    t.commit_step()
+
+    with self.subTest("Completed spans commit together"):
       self.assertLen(t.committed_steps, 1)
       self.assertIn(s1.id, t.committed_steps[0])
-      self.assertNotIn(s2.id, t.committed_steps[0])
-
-    with self.subTest("All steps and current step"):
+      self.assertIn(s2.id, t.committed_steps[0])
       self.assertEmpty(t.cur_step)
       self.assertLen(t.all_steps, 2)
       self.assertEqual(t.all_steps[0], t.committed_steps[0])

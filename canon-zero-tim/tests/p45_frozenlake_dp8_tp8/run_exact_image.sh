@@ -37,6 +37,14 @@ $DOCKER run --rm \
       AgenticRLLearnerTest.test_p57_evaluate_only_covers_dataset_without_train_update \
       AgenticRLLearnerTest.test_p57_rollout_only_evaluate_skips_trainer_recompute
     PYTHONPATH=/workspace python3 \
+      tests/perf/experimental/timeline_test.py \
+      TimelineTest.test_commit_step
+    PYTHONPATH=/workspace python3 \
+      tests/perf/experimental/tracer_test.py \
+      PerfTracerTest.test_commit_rejects_active_host_span_without_mutating_it \
+      NoopTracerTest.test_commit_uncompleted_span
+    echo "P57_PERF_V2_STEP_BOUNDARY_PASS active_commit=non_destructive order=export_then_queue"
+    PYTHONPATH=/workspace python3 \
       tests/rl/agentic/trajectory/trajectory_collect_engine_test.py \
       TrajectoryCollectEngineTest.test_reset_timeout_token_preserves_environment_task \
       TrajectoryCollectEngineTest.test_token_prefers_policy_seeded_environment_task \

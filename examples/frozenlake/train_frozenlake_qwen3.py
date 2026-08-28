@@ -1399,8 +1399,9 @@ if not os.path.isdir(MODEL_DOWNLOAD_DIR) or not any(
   oss_utils.hf_pipeline(MODEL_VERSION, MODEL_DOWNLOAD_DIR)
 
 config = model_lib.ModelConfig.qwen3_8b()
-if CANON_P32_WORKLOAD:
-  dp_workloads.configure_replicated_parameter_sharding(config)
+dp_workloads.configure_model_sharding_for_mesh(
+    config, SHARED_MESH_AXIS_NAMES
+)
 if ENABLE_REMAT:
   config.remat_config = model_lib.RematConfig.DECODER
 if ENABLE_FLASH_ATTENTION:
@@ -1624,7 +1625,11 @@ cluster_config = rl_cluster_lib.ClusterConfig(
         ),
         compute_logps_micro_batch_size=MINI_BATCH_SIZE,
         optimizer_offload=CANON_P30_OPT_STATE_OFFLOAD,
-        data_sharding_axis=("dp",) if CANON_P32_WORKLOAD else ("fsdp",),
+        data_sharding_axis=(
+            ("dp",)
+            if CANON_P32_WORKLOAD or args.mesh_dp is not None
+            else ("fsdp",)
+        ),
         metrics_logging_options=metrics_logging_options,
         checkpoint_root_directory=CKPT_DIR,
         checkpointing_options=checkpointing_options,

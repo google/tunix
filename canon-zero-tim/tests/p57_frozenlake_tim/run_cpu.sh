@@ -8,6 +8,8 @@ python3 -m unittest \
   canon-zero-tim/tests/p57_frozenlake_tim/test_renderer.py \
   canon-zero-tim/tests/p57_frozenlake_tim/test_checkpoint_eval.py \
   canon-zero-tim/tests/p57_frozenlake_tim/test_eval_cycle_counter.py \
+  canon-zero-tim/tests/p57_frozenlake_tim/test_perf_v2_step_boundary.py \
+  canon-zero-tim/tests/p57_frozenlake_tim/test_perf_v2_onehost.py \
   canon-zero-tim/tests/p45_frozenlake_dp8_tp8/test_checkpoint_contract.py \
   canon-zero-tim/tests/p57_frozenlake_tim/test_eval_classifier.py \
   canon-zero-tim/tests/p57_frozenlake_tim/test_inprocess_eval_classifier.py \
@@ -27,7 +29,9 @@ python3 -m py_compile \
   canon-zero-tim/tests/p33_workloads/classify_run.py \
   canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts/classify_checkpoint_eval.py \
   canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts/classify_inprocess_eval.py \
+  canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts/classify_perf_v2_onehost.py \
   canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts/classify_stock_discovery.py \
+  canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts/census_perf_v2_onehost.py \
   canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts/collect_jobset_logs_to_gcs.py \
   canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts/derive_calibration_provenance.py \
   canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts/verify_calibration_manifest.py \
@@ -39,6 +43,8 @@ python3 -m py_compile \
   examples/frozenlake/train_frozenlake_qwen3.py \
   tunix/rl/agentic/agentic_rl_learner.py \
   tunix/rl/agentic/trajectory/trajectory_collect_engine.py \
+  tunix/perf/experimental/timeline.py \
+  tunix/perf/experimental/tracer.py \
   tunix/rl/frozenlake_checkpoint.py
 bash -n \
   canon-zero-tim/cluster/steps/00_env.sh \
@@ -50,5 +56,6 @@ bash -n \
   canon-zero-tim/cluster/steps/90_run.sh \
   canon-zero-tim/cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env \
   canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts/render_eval_schedule.sh \
+  canon-zero-tim/tasks/p57-frozenlake-tim-causal-study/scripts/run_perf_v2_onehost.sh \
   canon-zero-tim/tests/p57_frozenlake_tim/run_cpu.sh
 echo "P57_FROZENLAKE_TIM_CPU_PASS"

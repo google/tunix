@@ -386,6 +386,38 @@ class PerfTracerTest(absltest.TestCase):
     t2 = tracer.PerfTracer()
     self.assertEqual(t2.export(), {})
 
+  def test_commit_rejects_active_host_span_without_mutating_it(self):
+    export_mock = mock.Mock(return_value={})
+    t = tracer.PerfTracer(export_fn=export_mock)
+    opened = threading.Event()
+    release = threading.Event()
+    worker_errors = []
+
+    def worker() -> None:
+      try:
+        with t.span("rollout"):
+          opened.set()
+          release.wait(timeout=5.0)
+      except Exception as exc:  # pragma: no cover - asserted below
+        worker_errors.append(exc)
+
+    worker_thread = threading.Thread(target=worker)
+    worker_thread.start()
+    self.assertTrue(opened.wait(timeout=5.0))
+
+    with self.assertRaisesRegex(
+        RuntimeError, "cannot commit.*active.*rollout"
+    ):
+      t.export()
+
+    release.set()
+    worker_thread.join(timeout=5.0)
+    self.assertFalse(worker_thread.is_alive())
+    self.assertEmpty(worker_errors)
+
+    t.export()
+    export_mock.assert_called_once()
+
   def test_commit_timelines(self):
     d0 = MockDevice("tpu", 0)
     t = tracer.PerfTracer(devices=[d0])
@@ -738,13 +770,17 @@ class NoopTracerTest(absltest.TestCase):
 
   def test_commit_uncompleted_span(self):
     tl = timeline.Timeline("host", 0.0)
-    tl.start_span("test", 10.0)
-    with self.assertLogs(level="WARNING") as cm:
+    span = tl.start_span("test", 10.0)
+    with self.assertRaisesRegex(
+        RuntimeError, "cannot commit.*active.*test"
+    ):
       tl.commit_step()
-    self.assertIn("Purging uncompleted span", cm.output[0])
-    # The span should be removed
-    self.assertEmpty(tl.cur_step)
-    self.assertEmpty(tl.committed_steps[0])
+    self.assertEqual(tl.cur_step, {span.id: span})
+    self.assertEmpty(tl.committed_steps)
+
+    tl.stop_span(11.0)
+    tl.commit_step()
+    self.assertEqual(tl.committed_steps[0], {span.id: span})
 
   def test_timeline_properties(self):
     tl = timeline.Timeline("host", 0.0)
