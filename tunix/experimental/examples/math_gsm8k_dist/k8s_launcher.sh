@@ -18,8 +18,24 @@ TUNIX_IMAGE="us-central1-docker.pkg.dev/cloud-tpu-multipod-dev/yangmu/tunix/tuni
 
 export MODEL_NAME=${MODEL_NAME:-Qwen3-0.6B}
 export MODEL_ID=${MODEL_ID:-Qwen/Qwen3-0.6B}
-export MODEL_DIR=${MODEL_DIR:-artifacts/qwen3_dist_gsm8k/models}
-export TOKENIZER_PATH=${TOKENIZER_PATH:-${MODEL_DIR}}
+# Must be model-specific: it's a local HF snapshot cache, and vLLM's own
+# model_config reads config.json straight from here whenever the directory
+# is non-empty, bypassing MODEL_ID entirely. A shared path across different
+# models silently reuses a stale snapshot -- confirmed root cause of a
+# multi-hour KV-cache shape-mismatch chase on Qwen3-30B-A3B: with a leftover
+# Qwen3-0.6B snapshot sitting here, vLLM's config (num_key_value_heads=8)
+# and MaxText's own model construction (num_key_value_heads=4, correctly
+# built from MAXTEXT_MODEL_NAME) silently disagreed.
+export MODEL_DIR=${MODEL_DIR:-artifacts/qwen3_dist_gsm8k/models/${MODEL_NAME}}
+# Defaults to MODEL_ID (an HF hub repo id), not MODEL_DIR: MODEL_DIR is a
+# per-model-name local directory that starts out empty for any model that
+# hasn't been downloaded there before by *something* -- nothing pre-populates
+# it before the trainer's own AutoTokenizer.from_pretrained(tokenizer_path)
+# call, which then misreads a nonexistent local path as a malformed hub repo
+# id and fails HFValidationError. MODEL_ID always works: it's a genuine hub
+# id AutoTokenizer downloads directly, independent of any local directory
+# state or trainer/rollout pod download-ordering races.
+export TOKENIZER_PATH=${TOKENIZER_PATH:-${MODEL_ID}}
 
 export MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-512}
 export MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-128}
