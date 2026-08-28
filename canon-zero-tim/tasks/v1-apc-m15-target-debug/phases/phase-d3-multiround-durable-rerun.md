@@ -97,7 +97,7 @@ receipts, and one final manifest.  It never downloads or returns `run.log` or
 the token-bearing tars.  The underlying GCS-only wrapper remains an internal
 primitive and must not be run separately by the remote executor.
 
-## Attempt-14 return recovery (active)
+## Attempt-14 return recovery result (incomplete)
 
 d33 has already run. Its submitted five-file directory did not use the
 operator wrapper above and therefore does not satisfy this phase gate. Do not
@@ -114,7 +114,19 @@ The recovery script treats the committed subset only as a locator: it verifies
 the subset manifest, derives the exact source/JobSet identities, emits
 `RECOVERY_INPUT_RECEIPT.json`, and then runs the official per-round and
 operator audits. It never uses the subset's numerical prose as a classifier.
-Phase D3 remains open until the recovered machine package is reviewed.
+
+The returned directory is now sealed and its seven listed payloads verify.
+Its numerical status is nevertheless `NO_DURABLE_ROUND`: both arms report zero
+sealed rounds and contain no official per-round classifier. Both JobSet
+queries failed; both raw-log receipts are `ABSENT`. Because the current GCS
+probe maps every non-zero query to `absent` and derives log absence from the
+root-manifest probe rather than an independent log stat, this is a durability
+audit failure, not certified physical absence and not a numerical result.
+
+The active D3 gate is therefore a receipt-bound, read-only recursive inventory
+with three-way `PASS|NOT_FOUND|QUERY_FAILED` semantics and sanitized
+round-handshake marker extraction. The exact contract is at the top of
+`HANDOFF.md`. Phase E remains closed.
 
 ## Target gate and decision table
 
@@ -139,10 +151,10 @@ red checkpoint.
 
 ## Claim ceiling
 
-After d33 execution but before a complete operator return:
+After the current d33 recovery return:
 
 ```text
-TARGET_EXECUTED / SUBMITTED_SUBSET_HASH_VALID /
-EVIDENCE_COMPLETENESS_RED / ANALYSIS_GRADE_ONLY /
-NUMERICAL_FIX_NOT_AUTHORIZED
+TARGET_EXECUTED / RETURN_FILE_INTEGRITY_PASS /
+NO_DURABLE_ROUND_REPORTED / DURABILITY_AUDIT_INCONCLUSIVE /
+FIRST_RED_NOT_LOCALIZED / NUMERICAL_FIX_NOT_AUTHORIZED
 ```

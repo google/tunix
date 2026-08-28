@@ -1,89 +1,115 @@
 # M15 APC target-debug handoff
 
-## START HERE — recover the existing d33 machine return; do not launch or repair
+## START HERE — audit d33 durability; do not launch or repair
 
-The submitted Attempt-14 directory is internally hash-valid, but it contains
-only an incident report, two manually minimized classifier JSONs, and one
-receipt. It does **not** contain the six per-round official classifiers,
-`MULTIROUND_SUMMARY.json`, JobSet terminal receipts, manifest-bound raw-log
-receipts, or the operator packaging files required by the published D3
-contract. Its strict status is:
+The Attempt-14 (`d33`) recovery has already run and its returned directory is
+sealed at
+`evidence/v1_apc_m15_attempt14_d33_operator_return_20260828/`. Independent
+`sha256sum -c SHA256SUMS` verifies all seven listed payloads. File integrity is
+green; scientific completeness is red. The machine statuses are:
 
 ```text
-FILE_INTEGRITY_PASS / EVIDENCE_COMPLETENESS_RED / ANALYSIS_GRADE_ONLY
-RPA_OUTPUT_FIRST_RED_REPORTED / ROOT_CAUSE_NOT_YET_PROVEN
+MULTIROUND_SUMMARY.status=NO_DURABLE_ROUND
+off.sealed_rounds=0
+on.sealed_rounds=0
+OPERATOR_RETURN_SUMMARY.status=NO_DURABLE_ROUND_OPERATOR_RECEIPTS_INCOMPLETE
+off.jobset.query_status=QUERY_FAILED
+on.jobset.query_status=QUERY_FAILED
+off.raw_log.status=ABSENT
+on.raw_log.status=ABSENT
 ```
 
-The reported off-exact/on-red result is scientifically useful: the submitted
-summary places the last exact checkpoint at Layer-0 `k_post_rope` and the first
-observed red checkpoint at `rpa_output`, while B-C remains exact. It does not
-yet prove that the RPA tensor has 99 differing bytes, that the three rounds
-share one stable signature, or that the defect is specifically the block-table
-lookup in `rpa_kernel_p66.py`. The reported 99 bytes are the endpoint A-B
-logprob count in the minimized receipt. Phase E remains closed.
+Both arms have source-verified `PREFLIGHT.json`, but neither arm has a returned
+per-round classifier, `COLLECTED.json`, or `COMPLETE.json`. There is therefore
+no new numerical evidence in this recovery. The older manually minimized d33
+subset still reports off-exact/on-red, endpoint A-B=99 bytes, B-C=0, and the
+analysis-grade interval `k_post_rope -> rpa_output`; none of those statements
+has been reproduced from an official per-round classifier.
 
-### Bucket/Kubernetes-capable agent: run this one read-only command
+The strict status is:
 
-Do not re-run either 64-TPU JobSet. The original `/tmp` render directory is
-not required. The dedicated script verifies the committed five-file package,
-reconstructs only the two immutable d33 object locators, then invokes the
-official per-round GCS audit and operator packager. It performs `kubectl get`
-and bucket reads only; it does not apply/delete a JobSet, mutate GCS, download
-`run.log`, or return token/NPZ/tar payloads.
-
-```bash
-cd /home/yuxuan/code_rl_repro/sequence_packing/tunix
-git fetch origin yuxzhang/canon-zero-tim
-git pull --ff-only origin yuxzhang/canon-zero-tim
-test -z "$(git status --porcelain)"
-
-RETURN=/tmp/v1-apc-m15-attempt14-d33-operator-return
-test ! -e "$RETURN"
-bash canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/recover_m15_attempt14_d33_operator_return.sh \
-  "$RETURN" /mnt/disks/tunix-data default
-(cd "$RETURN" && sha256sum -c SHA256SUMS)
+```text
+RETURN_FILE_INTEGRITY_PASS / DURABILITY_AUDIT_INCONCLUSIVE /
+NO_DURABLE_ROUND_REPORTED / OPERATOR_RECEIPTS_INCOMPLETE /
+RPA_OUTPUT_FIRST_RED_REPORTED_ONLY / FIRST_RED_NOT_LOCALIZED /
+PHASE_E_CLOSED / NUMERICAL_REPAIR_NOT_AUTHORIZED
 ```
 
-Return the **entire** `$RETURN` directory unchanged plus both terminal lines
-printed by the wrapper and the independent `sha256sum -c` output. Do not
-rewrite JSON, summarize it by hand, or commit another five-file substitute.
-The expected small members are:
+### Why `ABSENT` is not yet proof of physical absence
 
-- `RECOVERY_INPUT_RECEIPT.json`, binding the submitted receipt/manifest SHA,
-  exact source, and exact off/on JobSet names;
-- `MULTIROUND_SUMMARY.json` and every recovered
-  `off|on.round-000000..000002.classification.json`;
-- `JOBSET_STATUS.json` and `RAW_LOG_RECEIPTS.json`;
-- `OPERATOR_RETURN_SUMMARY.json`, `PACKAGING.txt`,
-  `OPERATOR_PACKAGING.txt`, and one final `SHA256SUMS`.
+The current audit collapses every non-zero object query into `absent`:
 
-Interpret only the machine status:
+- `run_m15_multiround_gcs_return.sh` uses a boolean `gcs_exists`; permission,
+  transient, path, and not-found failures all become the same inventory word;
+- `run_m15_multiround_operator_return.sh` reports `run.log` as `ABSENT` when
+  the root `SHA256SUMS` query fails. It does not independently stat `run.log`;
+- both `kubectl get jobset` calls returned exit code 1 and discarded stderr,
+  so no terminal JobSet fact was recovered.
 
-- `COMPLETE`: inspect all six signatures, then decide whether Phase D closes;
-- `ROUNDS_RECOVERED_ROOT_INCOMPLETE`: numerical rounds survived, but the whole
-  run remains analysis-grade;
-- `PARTIAL_ROUNDS_RECOVERED`: use surviving rounds without claiming a complete
-  paired target result;
-- `NO_DURABLE_ROUND`: only then consider another target run;
-- any off red, B-C red, source/round/hash mismatch: hard stop.
+The returned `NO_DURABLE_ROUND` is the valid result of the current audit, but
+it is not yet a certified statement that every remote round/log object is
+physically absent. Do not repair `rpa_kernel_p66.py`, do not open Phase E, and
+do not spend another 64-TPU run until this ambiguity is removed.
 
-If the user separately approves evidence publication, copy the whole return
-to a **new** additive evidence directory; never overwrite the existing
-five-file subset:
+### Next agent work order — one read-only inventory, then stop
 
-```bash
-DEST=canon-zero-tim/tasks/v1-apc-m15-target-debug/evidence/v1_apc_m15_attempt14_d33_operator_return_20260828
-test ! -e "$DEST"
-cp -a "$RETURN" "$DEST"
-(cd "$DEST" && sha256sum -c SHA256SUMS)
-```
+Use a fresh `local/*` branch/worktree from the latest operator tip. Do not
+launch TPU/Kubernetes, alter GCS, or fetch token/NPZ/tar payloads. Make an
+additive audit CL with tests; do not rewrite the sealed return.
 
-Commit only that exact directory plus a factual task-log checkpoint. Push is a
-separate user approval. The evidence commit must not edit or delete
-`v1_apc_m15_attempt14_paired_d33_20260828/`.
+1. Add a d33 receipt-driven inventory entrypoint. It must derive both exact
+   object roots, source SHA, and JobSet names from
+   `RECOVERY_INPUT_RECEIPT.json`; no hand-entered remote path is accepted.
+2. Perform one recursive listing per arm and preserve the query outcome as
+   `PASS`, `NOT_FOUND`, or `QUERY_FAILED`. A non-zero command may not be
+   relabeled `NOT_FOUND` without a provider-specific not-found classification.
+   Record the exit code plus a sanitized stderr SHA/excerpt; never return a
+   credential, signed URL, or bucket root.
+3. Return sanitized relative object names and counts for root aliases,
+   `wide/rounds/`, `wide/shards/`, and `live/`. Direct-stat `run.log`
+   independently from root `SHA256SUMS` and record its SHA/size only.
+4. Query both exact JobSets independently. Preserve sanitized stderr when the
+   query fails instead of discarding it.
+5. If `run.log` exists, extract only these marker families into a small,
+   self-hashed text/JSON receipt; do not return the full log:
 
-Production APC remains off. No numerical repair is authorized by the current
-five-file package.
+   ```text
+   LIVE_WORKER_START
+   ROUND_SEAL_REQUESTED
+   M15_WIDE_ROUND_COMPLETE
+   LIVE_ROUND_PASS
+   ROUND_SEAL_ACKNOWLEDGED
+   CONTROLLED_EXIT
+   FATAL
+   Traceback
+   ```
+
+6. Package one immutable small return with a self-excluding `SHA256SUMS` and
+   negative tests for permission failure, not-found, partial listing, wrong
+   source/root, missing log manifest, and a one-bit receipt mutation.
+7. Update this task's `state.md`, `plan.md`, `log.md`, and Phase D3 only after
+   the machine return is classified. Stop and report before any commit, push,
+   GCS query, Kubernetes query, or relaunch unless the user separately
+   authorizes that action.
+
+Interpret the new inventory mechanically:
+
+| Observed markers/objects | Meaning | Next action |
+|---|---|---|
+| no `ROUND_SEAL_REQUESTED` in either existing log | learner never entered the published round handshake, or the wrong runtime/log was inspected | bind the real runtime path before changing durability code |
+| seal requested, no `M15_WIDE_ROUND_COMPLETE` | worker assemble/classify/upload failed before ACK | localize that worker stage; do not rerun yet |
+| round-complete marker exists, remote round object absent | publication/root-path defect | repair only the durability path and test forced death |
+| per-round objects exist under another registered layout | current recovery queried the wrong schema | extend the read-only classifier; no numerical code change |
+| both recursive inventories succeed and truly contain only `PREFLIGHT.json` | d33 produced no durable round | repair and certify durability, then request one matched off/on rerun |
+| any official red classifier is recovered | numerical evidence becomes usable at that round only | compare its exact first-red signatures before deciding Phase D |
+
+More rollout steps alone do not fix this failure: d33 already required every
+round to be sealed and ACKed before advancing. If no round survived, the
+failure is in handshake/publication or the audit's path semantics, not in an
+insufficient number of evaluation steps.
+
+Production APC remains off. B remains independent full-reset. No numerical
+code, TPU launch, Kubernetes mutation, or GCS mutation is authorized here.
 
 ## Historical — offline-review d32, then render d33; do not launch implicitly
 

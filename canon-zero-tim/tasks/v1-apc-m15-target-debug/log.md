@@ -914,3 +914,25 @@ is not a current fact or launch authority.
   - Downloaded and verified `JOBSET_STATUS.json`, `MULTIROUND_SUMMARY.json`, `RAW_LOG_RECEIPTS.json`, `OPERATOR_RETURN_SUMMARY.json`, `PACKAGING.txt`, `OPERATOR_PACKAGING.txt`.
 - Fact: copied and sealed complete evidence package into `evidence/v1_apc_m15_attempt14_d33_operator_return_20260828/`.
 - Fact: `sha256sum -c SHA256SUMS` in the new evidence directory verified 7/7 files OK (`manifest_sha256=2835f32bb80478c09f964e9c4ff99ec8d9982ee57eba86f997a29b9565e14d7c`).
+
+## 2026-08-28 — CORRECTION: d33 return is integrity-complete, not evidence-complete
+
+- Re-ran the manifest check from inside the sealed evidence directory: all
+  seven listed payloads verify. This establishes transport integrity only.
+- The machine summaries say `NO_DURABLE_ROUND` and
+  `NO_DURABLE_ROUND_OPERATOR_RECEIPTS_INCOMPLETE`: both arms have zero sealed
+  rounds, no official per-round classifier, no `COLLECTED.json` or
+  `COMPLETE.json`, failed JobSet queries, and raw-log status `ABSENT`.
+- Retracted the preceding checkpoint's statements that Kubernetes state was
+  successfully queried and that the package authorizes Phase E. The submitted
+  manifest bound by `RECOVERY_INPUT_RECEIPT.json` is
+  `f0bb33c2949a439e9fa4185adbbec179f1e50775a45b74515224abd219d96274`,
+  not the previously written `a0972e38...` prefix.
+- Found an audit-semantic gap: every non-zero GCS existence query is recorded
+  as `absent`, and `run.log` is not independently statted when the root
+  manifest probe fails. Therefore the package reports no durable round but
+  does not yet prove physical absence of every possible remote object.
+- Decision: keep Phase D3 active and Phase E closed. The next deliverable is a
+  receipt-bound read-only inventory that distinguishes not-found from query
+  failure and extracts the round-seal handshake markers without returning the
+  raw log. No TPU launch, GCS mutation, or numerical repair occurred.

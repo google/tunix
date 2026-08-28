@@ -24,7 +24,7 @@ B - C = 0 bytes
 | C | executable replay-prefix input plan followed by a single-variable reproduction ladder | saved bytes and chronology revalidate; control A-B=0; treatment either reproduces red or is `ONEHOST_NOT_REPRODUCED` | complete: r10-r13c one-host ladder exact through full chronology; scale/topology remains |
 | D | observer-neutral coarse-to-fine first-red walk on known-red DP8xTP8 | `FIRST_RED_LOCALIZED` names last exact and first red tensor, shape ledger, request/token/cache coordinate, and `file:line` | d33 five-file subset reports `k_post_rope -> rpa_output`, but official per-round classifiers/operator receipts are missing; not complete |
 | D2 | M15-only incremental observer shards, sealed-input classifier, terminal ordering, and source self-verification | forced death preserves a verified shard; unsealed/tampered/source-mismatched inputs fail closed | host and exact-image pass; Attempt-12 runtime used this path, but its committed return omitted the remote binding audit |
-| D3 | three frozen-weight full Layer-0 rounds per arm plus one self-hashed numerical/operator return | each round seals before the next; root-incomplete, partial-round, missing JobSet terminal, and missing raw-log receipt remain mechanically distinguishable | d33 ran, but its submitted package bypassed the wrapper; dedicated zero-TPU recovery from the existing roots is the active gate |
+| D3 | three frozen-weight full Layer-0 rounds per arm plus one self-hashed numerical/operator return | each round seals before the next; root-incomplete, partial-round, missing JobSet terminal, and missing raw-log receipt remain mechanically distinguishable | recovery return sealed, but reports zero durable rounds; audit semantics still conflate query failure with absence, so a receipt-bound read-only inventory is active |
 | D4 | Attempt-13 two-arm registered-root inventory and offline semantic review | both listings succeed; exact 77/70 shard triples verify; physical shard counts and immutable classifier counts remain separate; seven-file inventory self-verifies | transport complete; no-live confirmed; count drift -29/+101 preserved; official replay impossible |
 | E | minimal localized repair, default off or experiment-bound | reproducer flips red to zero; APC-off and B are unchanged; adjacent and dirty-page negatives fire | pending |
 | F | certification ladder | host -> exact-image -> one-host clean/repeat/dirty -> matched profile -> separately approved DP8xTP8 G-E | pending |
@@ -172,3 +172,12 @@ B - C = 0 bytes
 - Decision: recover d33 in place before any relaunch. The submitted receipt is
   used only to locate the immutable source, JobSets, and object roots; all
   numerical claims must be regenerated from the official per-round artifacts.
+- Correction after reviewing the recovered machine return: all seven listed
+  payloads verify, but `MULTIROUND_SUMMARY.status=NO_DURABLE_ROUND`, both arms
+  have zero sealed rounds, both JobSet queries failed, and both raw-log
+  receipts are reported absent. No official per-round classifier was returned.
+- Decision: Phase E remains closed. Before another target launch, replace the
+  boolean remote probes with a receipt-bound read-only inventory that
+  distinguishes permission/transient/query failure from not-found, directly
+  stats `run.log`, and extracts only round-handshake/durability markers. More
+  rollout steps are not a substitute for per-round seal durability.
