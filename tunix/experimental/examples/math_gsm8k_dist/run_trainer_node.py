@@ -77,8 +77,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument("--eval_every_n_steps", type=int, default=1000000)
   parser.add_argument("--learning_rate", type=float, default=2.0e-7)
   parser.add_argument("--use_lora", action="store_true")
-  parser.add_argument("--lora_rank", type=int, default=16)
-  parser.add_argument("--lora_alpha", type=float, default=16.0)
+  parser.add_argument("--lora_rank", type=int, default=64)
+  parser.add_argument("--lora_alpha", type=float, default=64.0)
   parser.add_argument("--checkpoint_save_interval_steps", type=int, default=1)
   parser.add_argument("--checkpoint_max_to_keep", type=int, default=10)
   parser.add_argument(

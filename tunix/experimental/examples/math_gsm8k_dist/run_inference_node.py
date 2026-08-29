@@ -60,8 +60,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   parser.add_argument("--mesh_fsdp", type=int, default=2)
   parser.add_argument("--mesh_tp", type=int, default=1)
   parser.add_argument("--compute_logps_micro_batch_size", type=int, default=1)
-  parser.add_argument("--max_prompt_length", type=int, default=512)
-  parser.add_argument("--max_response_length", type=int, default=128)
+  parser.add_argument("--max_prompt_length", type=int, default=1024)
+  parser.add_argument("--max_response_length", type=int, default=1024)
   parser.add_argument("--temperature", type=float, default=1.0)
   return parser.parse_args(argv)
 

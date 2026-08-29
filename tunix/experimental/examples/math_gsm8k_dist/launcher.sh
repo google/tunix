@@ -32,17 +32,24 @@ MODEL_ID=${MODEL_ID:-Qwen/Qwen3-1.7B}
 ARTIFACT_ROOT=${ARTIFACT_ROOT:-"${REPO_ROOT}/artifacts/qwen3_dist_gsm8k"}
 MODEL_DIR=${MODEL_DIR:-${MODEL_DOWNLOAD_DIR:-"${ARTIFACT_ROOT}/models"}}
 TOKENIZER_PATH=${TOKENIZER_PATH:-$MODEL_DIR}
-MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-512}
-MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-128}
-BATCH_SIZE=${BATCH_SIZE:-2}
-NUM_GENERATIONS=${NUM_GENERATIONS:-2}
+MAX_PROMPT_LENGTH=${MAX_PROMPT_LENGTH:-1024}
+MAX_RESPONSE_LENGTH=${MAX_RESPONSE_LENGTH:-1024}
+BATCH_SIZE=${BATCH_SIZE:-4}
+NUM_GENERATIONS=${NUM_GENERATIONS:-8}
 MAX_STEPS=${MAX_STEPS:-1}
 TRAIN_MICRO_BATCH_SIZE=${TRAIN_MICRO_BATCH_SIZE:-1}
-MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-$((BATCH_SIZE * NUM_GENERATIONS))}
-EVAL_EVERY_N_STEPS=${EVAL_EVERY_N_STEPS:-1000000}
-LORA_RANK=${LORA_RANK:-16}
-LORA_ALPHA=${LORA_ALPHA:-16.0}
+MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-2}
+EVAL_EVERY_N_STEPS=${EVAL_EVERY_N_STEPS:-50}
+LORA_RANK=${LORA_RANK:-64}
+LORA_ALPHA=${LORA_ALPHA:-64.0}
 USE_LORA=${USE_LORA:-0}
+REWARD_MODE=${REWARD_MODE:-env}
+TFDS_DATA_DIR=${TFDS_DATA_DIR:-"${ARTIFACT_ROOT}/data"}
+TFDS_SPLIT=${TFDS_SPLIT:-train}
+SEED=${SEED:-42}
+SHUFFLE=${SHUFFLE:-true}
+BETA=${BETA:-0.04}
+EPSILON=${EPSILON:-0.2}
 WANDB_PROJECT=${WANDB_PROJECT:-trellis-gsm8k}
 WANDB_RUN_NAME=${WANDB_RUN_NAME:-}
 WANDB_API_KEY=${WANDB_API_KEY:-}
@@ -315,6 +322,12 @@ echo "  prompt length:  $MAX_PROMPT_LENGTH"
 echo "  response len:   $MAX_RESPONSE_LENGTH"
 echo "  train micro:    $TRAIN_MICRO_BATCH_SIZE"
 echo "  mini batch:     $MINI_BATCH_SIZE"
+echo "  beta:           $BETA"
+echo "  epsilon:        $EPSILON"
+echo "  reward mode:    $REWARD_MODE"
+echo "  tfds split:     $TFDS_SPLIT"
+echo "  tfds data dir:  $TFDS_DATA_DIR"
+echo "  shuffle:        $SHUFFLE"
 echo "  use lora:       $USE_LORA"
 echo "  sampler:        $SAMPLER"
 echo "  trainer chips:  $TRAINER_TPU_CHIPS"
@@ -335,6 +348,17 @@ echo "  trainer log:    $TRAINER_LOG"
 echo "  rollout log:    $ROLLOUT_LOG"
 echo "  orch log:       $ORCHESTRATOR_LOG"
 echo "=================================================="
+
+if [[ "$BETA" != "0" && "$BETA" != "0.0" && -z "$INFERENCE_ADDR" ]]; then
+  if [[ "$RUN_INFERENCE_NODE" != "1" &&
+        "$RUN_INFERENCE_NODE" != "true" &&
+        "$RUN_INFERENCE_NODE" != "True" ]]; then
+    echo "Error: BETA=$BETA requires a reference inference worker."
+    echo "Set RUN_INFERENCE_NODE=1 with INFERENCE_TPU_CHIPS, pass INFERENCE_ADDR,"
+    echo "or use BETA=0 for a trainer+rollout smoke run."
+    exit 1
+  fi
+fi
 
 ensure_model_dir
 mkdir -p "${LOG_ROOT}"
@@ -603,8 +627,19 @@ echo "Launching CPU orchestrator..."
     --max_prompt_length="$MAX_PROMPT_LENGTH"
     --max_response_length="$MAX_RESPONSE_LENGTH"
     --train_micro_batch_size="$TRAIN_MICRO_BATCH_SIZE"
+    --beta="$BETA"
+    --epsilon="$EPSILON"
+    --reward_mode="$REWARD_MODE"
+    --tfds_data_dir="$TFDS_DATA_DIR"
+    --tfds_split="$TFDS_SPLIT"
+    --seed="$SEED"
     --stop_workers_on_exit
   )
+  if [[ "$SHUFFLE" == "0" || "$SHUFFLE" == "false" || "$SHUFFLE" == "False" ]]; then
+    ORCHESTRATOR_CMD+=(--no-shuffle)
+  else
+    ORCHESTRATOR_CMD+=(--shuffle)
+  fi
   if [[ -n "$INFERENCE_ADDR" ]]; then
     ORCHESTRATOR_CMD+=(--inference_addr="$INFERENCE_ADDR")
   fi
