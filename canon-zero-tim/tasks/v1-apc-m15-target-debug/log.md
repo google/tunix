@@ -1258,3 +1258,46 @@ is not a current fact or launch authority.
 - Next gate after publication: a cold-start agent runs the prepare-only wrapper
   from a clean exact-SHA worktree. The official pinned-image aggregate and
   target launch remain two later, separately approved actions.
+
+## 2026-08-29 — E0 prepare-wrapper launch-readiness follow-up local HOST PASS
+
+- Reviewed published base `12207e3281db13461350fe7ef68dbaadfe713a58`.
+  Its NumPy fallback used mutable `tunix_base_image:latest`, did not prevent a
+  pull or network access, had no immutable execution receipt, accepted run
+  labels longer than the renderer's 16-character contract, and deleted failed
+  admission scratch. This was a carrier readiness defect, not an APC numerical
+  result.
+- Replaced the inline fallback with
+  `run_m15_e0_kv_classifier_gate.sh`. The Docker route now requires the
+  registered exact image ID to be already local, resolves and compares its
+  immutable ID, executes by that ID with `--pull=never` and `--network=none`,
+  and emits `KV_CLASSIFIER_RUNTIME.json`. The prepare wrapper includes that
+  receipt in `RUN_CONTRACT.json` and `SHA256SUMS`.
+- Aligned wrapper admission to the renderer's fresh 1-16 character lowercase
+  DNS label contract. Failed preparation now prints and preserves
+  `scratch_preserved=<path>`; successful preparation keeps the runtime receipt
+  in the output before cleaning transient admission scratch.
+- Added real host-Python and mocked forced-Docker positive tests plus missing-
+  image, wrong-image, long-run-label, and scratch-preservation negatives. The
+  mocked Docker route verifies the exact `image inspect` and `run` arguments;
+  no real Docker daemon or image was used in this turn.
+- Host gates: task discovery 173/173 PASS; E0 admission/runtime 9/9 PASS;
+  target carrier 19/19 PASS; resolved environment 11/11 PASS; KV classifier
+  7/7 PASS; V1 CPU 91/91 PASS; P3 12/12 PASS; P38
+  `PERSISTENCE_TEST_PASS`; flag audit 398/398 PASS. Bash/Python syntax and
+  `git diff --check` PASS.
+- Local runtime receipt:
+  `/tmp/m15-e0-kv-classifier-runtime-12207e32.json`, SHA256
+  `e14a00b96ac458c18d43796b5b54af1fbdc49182e84f28dd135a7b320f018952`.
+- The end-to-end prepare wrapper intentionally remains NOT RUN on this dirty
+  local implementation tree because its contract requires clean HEAD equality
+  to the exact published source. After an explicitly approved commit/push, a
+  clean exact-SHA executor must run it with a fresh <=16-character label.
+- External status: official E0 pinned exact-image NOT RUN; real Docker NOT RUN;
+  DP8xTP8 target NOT RUN; GCS return NOT RUN. No commit, push, GCS,
+  Kubernetes, TPU, or other remote mutation occurred. Numerical code, A/B/C,
+  B full reset, production APC-off defaults, and Phase E authorization are
+  unchanged.
+- Delivery approval: the user explicitly approved committing and pushing this
+  additive follow-up. The full published SHA is returned by the delivery
+  operation rather than self-recorded inside its own commit.

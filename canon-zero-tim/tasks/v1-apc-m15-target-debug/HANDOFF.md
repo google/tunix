@@ -1,6 +1,6 @@
 # M15 APC target-debug handoff
 
-## START HERE — E0 layer-0 live-KV discriminator is prepared, not published or run
+## START HERE — E0 and prepare-wrapper hardening are published; target not run
 
 The current numerical result is **not** “APC fixed.” Attempt 17 remains red:
 A-B=207 bytes / 95 elements, B-C=0 over 119,150 action tokens. D3e has now
@@ -9,12 +9,17 @@ shape `[2048,1,15,8]`, source row 217 / completion position 0 / source
 position 1225. The next useful experiment is one default-off live-KV
 fingerprint discriminator inside that interval.
 
-The committed D3e evidence tip is
-`b6bcfd904538993e37268da8264cdbda81a58e78`. The E0 implementation described
-below is currently local work based on that commit. A remote executor must be
-given a **new full published E0 SHA** containing this section, Patch 35, the KV
-classifier change, and both E0 wrappers. It must not render or launch from
-`b6bcfd...`, from an abbreviated SHA, or from a dirty tree.
+The E0 implementation was published at
+`1c7391da5336033abd0727e610f7bad4c5c4e2be`. A later published fallback at
+`12207e3281db13461350fe7ef68dbaadfe713a58` used a mutable image name and was
+not launch-ready. The current additive follow-up replaces that fallback with a
+strict already-local immutable-image route, aligns the run-label contract,
+preserves failed scratch, and self-hashes the classifier-runtime receipt. The
+user approved this additive follow-up for publication; its exact source identity
+is the full fact-branch commit containing this section, returned by the delivery
+operation rather than self-recorded here. A remote executor must receive that
+**exact full published SHA**. It must not render or launch from either older
+SHA, an abbreviated SHA, or a dirty tree.
 
 ### What E0 measures
 
@@ -41,15 +46,17 @@ all KV bytes. It does not authorize a numerical repair.
   prepare wrapper; compact read-only GCS return wrapper. Production profiles,
   APC defaults, A/B/C, RoPE, attention/RPA math, KV values, backward, loss, and
   optimizer are unchanged.
-- Validation: task-local discovery 168/168, KV classifier 7/7, M15 carrier
-  19/19, real resolved-env 11/11, E0 admission/wrapper 4/4, V1 CPU 91/91,
+- Validation: task-local discovery 173/173, KV classifier 7/7, M15 carrier
+  19/19, real resolved-env 11/11, E0 admission/runtime 9/9, V1 CPU 91/91,
   P3 12/12, P38 persistence, flags 398/398, overlay patch/manifest,
-  Python/Bash syntax, production/default scope, secret scan, and
-  `git diff --check` PASS. The optional broad P33 host aggregate is
+  and Python/Bash syntax PASS. The real host-Python route and mocked forced
+  Docker route PASS; missing and wrong images fail before `docker run`. Real
+  Docker has not run. The optional broad P33 host aggregate is
   INCONCLUSIVE because this host lacks `datasets` and `metrax`; the official
   pinned-image gate is still required. E0 pinned exact-image and DP8xTP8 target
   are NOT RUN.
-- Claim: `FIRST_RED_LOCALIZED / E0_IMPLEMENTED_LOCAL /
+- Claim: `FIRST_RED_LOCALIZED / E0_IMPLEMENTED_PUBLISHED /
+  E0_LAUNCH_READINESS_FOLLOWUP_PUBLISHED / HOST_PASS / REAL_DOCKER_NOT_RUN /
   EXACT_IMAGE_NOT_RUN / TARGET_NOT_RUN / NUMERICAL_REPAIR_NOT_AUTHORIZED`.
 
 ### Cold-start instructions for the other agent
@@ -74,15 +81,15 @@ Run canonical preflight and require `CANON_PREFLIGHT PASS`, a `local/*`
 branch, exact HEAD equality, and a clean tree. Do not print remotes,
 credentials, configured accounts/projects, or the registered evidence root.
 
-### Step 1 — render only; no external access
+### Step 1 — render only; no external or remote access
 
 This command verifies the committed D3e manifest, rechecks focused host gates,
 and writes two immutable JobSet YAMLs plus a self-hashed contract. It has no
 TPU, Kubernetes, or GCS operation:
 
 ```bash
-SOURCE_COMMIT=<full-published-E0-SHA>
-RUN_ID=<fresh-never-reused-dns-label>
+SOURCE_COMMIT=<full-published-E0-follow-up-SHA>
+RUN_ID=<fresh-1-to-16-char-lowercase-dns-label>
 OUT=/tmp/m15-e0-kv-${RUN_ID}
 test ! -e "$OUT"
 bash canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/prepare_m15_attempt18_e0_kv_pair.sh \
@@ -96,9 +103,15 @@ Required terminal tail:
 [M15.E0.KV] TARGET_NOT_RUN pinned_exact_image=required launch_approval=required gcs=0 kubernetes=0 tpu=0
 ```
 
-Any missing marker, dirty/source failure, D3e manifest drift, extra arm,
+The output must include self-hashed `KV_CLASSIFIER_RUNTIME.json`. If host Python
+lacks NumPy, the focused classifier may use only the registered pinned image
+ID already present locally; it verifies exact identity, sets `--pull=never`
+and `--network=none`, and records the route. It cannot pull an image or access
+a registry and is not the official aggregate in Step 2. Any missing marker,
+dirty/source failure, D3e manifest drift, runtime-receipt failure, extra arm,
 non-APC pair difference, or environment-resolution failure is a hard stop.
-Do not edit the YAML.
+The wrapper prints `scratch_preserved=<path>` on failure. Do not delete it or
+edit the YAML.
 
 ### Step 2 — separate pinned exact-image approval
 
@@ -126,7 +139,7 @@ Require exit 0 and the complete terminal marker containing:
 V1_HP_EXACT_IMAGE_PASS
 apc_m15_carrier=70
 m15_d3e=1
-m15_e0=11
+m15_e0=16
 m15_durability=1
 m15_round_provenance=1
 manifests=3

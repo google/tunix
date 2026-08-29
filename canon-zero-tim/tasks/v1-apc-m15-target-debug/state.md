@@ -1,14 +1,17 @@
 # State
 
 - Status: active; D3e returned `FIRST_RED_LOCALIZED` for the canonical
-  completion-position-zero action. Phase E0 now prepares a default-off Layer-0
-  live-KV discriminator inside the localized `k_post_rope -> rpa_output`
-  interval. No APC numerical repair has been made or authorized.
-- Current implementation base:
-  `b6bcfd904538993e37268da8264cdbda81a58e78`. The E0 source identity is the
-  future full published commit containing this state and Patch 35, not this
-  base SHA. A downstream executor must use a clean `local/*` worktree at that
-  exact full published E0 SHA.
+  completion-position-zero action. The Phase E0 Layer-0 live-KV discriminator
+  and its additive launch-readiness follow-up are published. No APC numerical
+  repair has been made or authorized.
+- Published E0 implementation:
+  `1c7391da5336033abd0727e610f7bad4c5c4e2be`. Published follow-up base:
+  `12207e3281db13461350fe7ef68dbaadfe713a58`. The latter added an unsafe
+  mutable-image fallback; the published additive follow-up replaces it with an
+  immutable already-local image gate, aligns the wrapper run-id contract with
+  the renderer, preserves failed scratch, and checkpoints the classifier
+  runtime route. A downstream executor must use a clean `local/*` worktree at
+  the exact full published SHA containing this follow-up, not either older SHA.
 - Attempt-17 runtime source:
   `16c224aa80eb6b3a544be19f693c0542ab4b0dcb`; D3e analysis source:
   `d83707e3cdbf13f912c489d6ad3568b9e84e16ad`.
@@ -37,14 +40,16 @@
   prepare-only wrapper; and compact read-only GCS-return wrapper. The observer
   captures all eight aliases, masks 77 valid pages within a 96-page static
   bound, and keeps B on the independent full-reset path.
-- Host validation: PASS. Task-local discovery 168/168; KV classifier 7/7;
-  target carrier 19/19; resolved environment 11/11; E0 admission/wrapper 4/4;
+- Host validation: PASS. Task-local discovery 173/173; KV classifier 7/7;
+  target carrier 19/19; resolved environment 11/11; E0 admission/runtime 9/9;
   V1 CPU 91/91; P3 contract 12/12; P38 persistence
   `PERSISTENCE_TEST_PASS`; flag audit 398/398; Patch 35 applied to the
   registered overlay, compiled, and matched manifest SHA256
   `b8f7e9577003ebb6ffdd3a2b12694261a0eaf0cb65b6d116953976734d849588`.
-  Python/Bash syntax, production/default scope, secret scan, and
-  `git diff --check` PASS. The optional broad P33 host aggregate is
+  The real host-Python route and mocked forced-Docker route PASS; missing and
+  wrong local image identities fail before `docker run`. Real Docker was not
+  executed. Python/Bash syntax and `git diff --check` PASS. The optional broad
+  P33 host aggregate is
   INCONCLUSIVE on this host because `datasets` and `metrax` are absent; the
   official pinned-image gate remains the dependency-complete judge.
 - D3e pinned exact-image validation remains PASS on immutable image
@@ -57,14 +62,17 @@
   loss, backward, optimizer, B full reset, production profiles, and production
   APC-off defaults are unchanged.
 - Next action after publication: on a clean exact-SHA worktree, run the
-  prepare-only wrapper. Then request separate approval for the official pinned
-  exact-image aggregate. Only a later, separate approval may launch the
-  rendered matched DP8xTP8 pair.
+  prepare-only wrapper with a fresh 1-16 character run label. The wrapper emits
+  a self-hashed classifier-runtime receipt and cannot pull or network a Docker
+  fallback. Then request separate approval for the official pinned exact-image
+  aggregate. Only a later, separate approval may launch the rendered matched
+  DP8xTP8 pair.
 - Claim ceiling:
   `ATTEMPT17_PARTIAL_ROUNDS_RECOVERED /
   FIRST_RED_LOCALIZED_K_POST_ROPE_TO_RPA_OUTPUT /
-  E0_LAYER0_LIVE_KV_DISCRIMINATOR_IMPLEMENTED_LOCAL /
-  E0_HOST_PASS /
+  E0_LAYER0_LIVE_KV_DISCRIMINATOR_IMPLEMENTED_PUBLISHED /
+  E0_LAUNCH_READINESS_FOLLOWUP_PUBLISHED /
+  E0_HOST_PASS / REAL_DOCKER_NOT_RUN /
   E0_EXACT_IMAGE_NOT_RUN /
   E0_TARGET_NOT_RUN /
   APC_NUMERICAL_FIX_NOT_IMPLEMENTED /

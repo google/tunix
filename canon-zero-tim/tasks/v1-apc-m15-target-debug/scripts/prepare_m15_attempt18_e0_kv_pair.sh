@@ -10,14 +10,25 @@ canon="$(cd "$script_dir/../../.." && pwd)"
 repo="$(cd "$canon/.." && pwd)"
 evidence="$canon/tasks/v1-apc-m15-target-debug/evidence/v1_apc_m15_attempt17_d3e_canonical_action_20260829"
 review_tmp="$(mktemp -d -p /tmp m15-e0-admission.XXXXXX)"
-trap 'rm -rf "$review_tmp"' EXIT
+preparation_complete=0
+preserve_or_clean_scratch() {
+  rc=$?
+  trap - EXIT
+  if [ "$preparation_complete" -eq 1 ]; then
+    rm -rf -- "$review_tmp"
+  else
+    echo "[M15.E0.KV] scratch_preserved=$review_tmp output=$output" >&2
+  fi
+  exit "$rc"
+}
+trap preserve_or_clean_scratch EXIT
 
 if [[ ! "$source_commit" =~ ^[0-9a-f]{40}$ ]]; then
   echo "[M15.E0.KV] REFUSING source must be one full lowercase SHA" >&2
   exit 2
 fi
-if [[ ! "$run_id" =~ ^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$ ]]; then
-  echo "[M15.E0.KV] REFUSING run id must be a fresh DNS-safe label" >&2
+if [[ ! "$run_id" =~ ^[a-z0-9]([a-z0-9-]{0,14}[a-z0-9])?$ ]]; then
+  echo "[M15.E0.KV] REFUSING run id must be a fresh 1-16 character lowercase DNS label component" >&2
   exit 2
 fi
 test ! -e "$output"
@@ -51,18 +62,11 @@ python3 "$canon/cluster/render_v1_apc_m15_target_debug.py" \
 python3 "$script_dir/test_review_m15_attempt18_e0_admission.py"
 python3 "$script_dir/test_target_carrier.py"
 python3 "$script_dir/test_resolved_env.py"
-if python3 -c "import numpy" >/dev/null 2>&1; then
-  python3 "$canon/tests/p38_serving/test_kv_observer_classifier.py"
-else
-  ${DOCKER:-docker} run --rm \
-    -v "$canon/..:/workspace:ro" \
-    -w /workspace \
-    -e PYTHONPATH=/workspace \
-    tunix_base_image:latest \
-    python3 "/workspace/canon-zero-tim/tests/p38_serving/test_kv_observer_classifier.py"
-fi
+bash "$script_dir/run_m15_e0_kv_classifier_gate.sh" \
+  "$review_tmp/KV_CLASSIFIER_RUNTIME.json"
 
 cp "$review_tmp/D3E_ADMISSION.json" "$output/D3E_ADMISSION.json"
+cp "$review_tmp/KV_CLASSIFIER_RUNTIME.json" "$output/KV_CLASSIFIER_RUNTIME.json"
 python3 - "$output" "$source_commit" "$run_id" <<'PY'
 import copy
 import hashlib
@@ -77,6 +81,8 @@ source = sys.argv[2]
 run_id = sys.argv[3]
 admission_path = root / "D3E_ADMISSION.json"
 admission = json.loads(admission_path.read_text(encoding="utf-8"))
+runtime_path = root / "KV_CLASSIFIER_RUNTIME.json"
+runtime = json.loads(runtime_path.read_text(encoding="utf-8"))
 if not (
     admission.get("status") == "E0_PREPARATION_ADMITTED"
     and admission.get("d3e_gate") == "FIRST_RED_LOCALIZED"
@@ -87,6 +93,20 @@ if not (
     and admission.get("target_prefix", {}).get("logical_pages") == 77
 ):
   raise SystemExit("D3e admission report does not admit E0 rendering")
+if not (
+    runtime.get("schema") == "m15-e0-kv-classifier-runtime-v1"
+    and runtime.get("status") == "PASS"
+    and runtime.get("route") in {"host", "docker"}
+    and runtime.get("external_access") is False
+):
+  raise SystemExit("KV classifier runtime receipt is not admissible")
+if runtime["route"] == "docker" and not (
+    runtime.get("image_id")
+    == "sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a"
+    and runtime.get("pull_policy") == "never"
+    and runtime.get("network_mode") == "none"
+):
+  raise SystemExit("KV classifier Docker runtime is not pinned and offline")
 
 rows = []
 documents = []
@@ -158,6 +178,7 @@ contract = {
     "source_commit": source,
     "run_id": run_id,
     "d3e_admission_sha256": hashlib.sha256(admission_path.read_bytes()).hexdigest(),
+    "kv_classifier_runtime_sha256": hashlib.sha256(runtime_path.read_bytes()).hexdigest(),
     "observer": {
         "kind": "live-kv-prefix-fingerprint",
         "layer": 0,
@@ -182,7 +203,7 @@ contract = {
     json.dumps(contract, sort_keys=True, indent=2) + "\n", encoding="utf-8"
 )
 names = sorted(path.name for path in root.glob("*.yaml")) + [
-    "D3E_ADMISSION.json", "RUN_CONTRACT.json"
+    "D3E_ADMISSION.json", "KV_CLASSIFIER_RUNTIME.json", "RUN_CONTRACT.json"
 ]
 (root / "SHA256SUMS").write_text("".join(
     f"{hashlib.sha256((root / name).read_bytes()).hexdigest()}  {name}\n"
@@ -191,5 +212,6 @@ names = sorted(path.name for path in root.glob("*.yaml")) + [
 PY
 
 (cd "$output" && sha256sum -c SHA256SUMS --quiet)
+preparation_complete=1
 echo "[M15.E0.KV] RENDER_PASS source=$source_commit rounds=1 layer=0 aliases=8 pages=96 output=$output"
 echo "[M15.E0.KV] TARGET_NOT_RUN pinned_exact_image=required launch_approval=required gcs=0 kubernetes=0 tpu=0"

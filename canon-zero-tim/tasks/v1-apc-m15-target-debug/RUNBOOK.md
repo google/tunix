@@ -18,8 +18,8 @@ The executor must receive the exact full published E0 SHA. From a new clean
 `local/*` worktree at that SHA, run only the prepare command first:
 
 ```bash
-SOURCE_COMMIT=<full-published-E0-SHA>
-RUN_ID=<fresh-never-reused-dns-label>
+SOURCE_COMMIT=<full-published-E0-follow-up-SHA>
+RUN_ID=<fresh-1-to-16-char-lowercase-dns-label>
 OUT=/tmp/m15-e0-kv-${RUN_ID}
 test ! -e "$OUT"
 bash canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/prepare_m15_attempt18_e0_kv_pair.sh \
@@ -27,8 +27,12 @@ bash canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/prepare_m15_attempt18_
 ```
 
 This verifies the committed D3e manifest, reruns focused host gates, and emits
-two immutable YAMLs, `D3E_ADMISSION.json`, `RUN_CONTRACT.json`, and
-`SHA256SUMS`. It does not access GCS or Kubernetes and does not launch TPU.
+two immutable YAMLs, `D3E_ADMISSION.json`, `KV_CLASSIFIER_RUNTIME.json`,
+`RUN_CONTRACT.json`, and `SHA256SUMS`. If host Python lacks NumPy, the focused
+classifier can use only the registered exact image ID already present locally,
+with `--pull=never` and `--network=none`; the selected route is recorded in the
+self-hashed receipt. This is not the official exact-image aggregate. The
+wrapper does not access GCS or Kubernetes and does not launch TPU.
 Require both terminal markers:
 
 ```text
@@ -36,8 +40,10 @@ Require both terminal markers:
 [M15.E0.KV] TARGET_NOT_RUN pinned_exact_image=required launch_approval=required gcs=0 kubernetes=0 tpu=0
 ```
 
-Stop on any source, clean-tree, manifest, pair-normalization, or marker failure.
-Do not edit either YAML. Next, request explicit approval for the complete
+Stop on any source, clean-tree, manifest, classifier-runtime receipt,
+pair-normalization, or marker failure. The wrapper preserves and prints its
+scratch path on failure. Do not edit either YAML. Next, request explicit
+approval for the complete
 official pinned-image aggregate on
 `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`.
 Pinned-image PASS still does not authorize launch. A later DP8xTP8 launch and a

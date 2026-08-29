@@ -60,11 +60,12 @@ in every claim.
 ## Preparation command
 
 Run only from a clean `local/*` worktree whose HEAD equals the full published
-E0 source SHA:
+E0 source SHA. `RUN_ID` must be a fresh 1-16 character lowercase DNS label
+component:
 
 ```bash
 SOURCE_COMMIT=<full-published-E0-SHA>
-RUN_ID=<fresh-never-reused-label>
+RUN_ID=<fresh-1-to-16-char-label>
 OUT=/tmp/m15-e0-kv-${RUN_ID}
 test ! -e "$OUT"
 bash canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/prepare_m15_attempt18_e0_kv_pair.sh \
@@ -79,8 +80,14 @@ Success must end with both markers:
 ```
 
 The output contains two immutable YAMLs, `D3E_ADMISSION.json`,
-`RUN_CONTRACT.json`, and `SHA256SUMS`. The wrapper has no Kubernetes or GCS
-operation.
+`KV_CLASSIFIER_RUNTIME.json`, `RUN_CONTRACT.json`, and `SHA256SUMS`. The
+runtime receipt records whether the classifier used host Python or the local
+Docker dependency fallback. The Docker route accepts only the registered exact
+image ID already present in the daemon and runs with `--pull=never` and
+`--network=none`; it cannot contact a registry. It is only a focused dependency
+route, not the official pinned exact-image aggregate. The wrapper has no
+Kubernetes or GCS operation. On failure it prints `scratch_preserved=<path>`
+and does not delete that diagnostic directory.
 
 ## Certification and approval order
 
@@ -125,12 +132,17 @@ requires a user discussion and a new phase contract.
 
 ## Current status
 
-- Implementation: local, default-off observer/renderer/classifier plus prepare
-  and compact-return wrappers.
-- Host validation: PASS (task 168/168, KV 7/7, V1 CPU 91/91, P3 12/12,
-  persistence and flags 398/398). Optional broad P33 host aggregate is
-  dependency-INCONCLUSIVE; exact-image remains required.
+- Implementation: the default-off observer/renderer/classifier and additive
+  prepare-wrapper launch-readiness hardening are published.
+- Host validation: PASS (task 173/173, E0 admission/runtime 9/9, KV 7/7,
+  carrier 19/19, resolved-env 11/11, V1 CPU 91/91, P3 12/12, persistence and
+  flags 398/398). Host Python executed the real classifier. A mocked
+  forced-Docker route proved immutable-ID/`pull=never`/`network=none` command
+  construction; missing and wrong images failed before run. Real Docker was
+  not executed. Optional broad P33 host aggregate is dependency-INCONCLUSIVE;
+  exact-image remains required.
 - Official pinned exact-image for this E0 source: NOT RUN.
 - Fresh DP8xTP8 E0 pair: NOT RUN.
-- Commit/push: NOT DONE in the implementation turn.
+- Publication: user-approved; the full published source SHA is returned by the
+  delivery operation rather than self-recorded inside its own commit.
 - Numerical repair: NOT IMPLEMENTED / NOT AUTHORIZED.
