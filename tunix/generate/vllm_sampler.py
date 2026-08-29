@@ -44,6 +44,48 @@ from vllm.sampling_params import SamplingParams
 os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 
 
+def _placement(x) -> str:
+  """Device-id span behind an array, for weight-sync debugging."""
+  arr = getattr(x, "value", x)
+  sharding = getattr(arr, "sharding", None)
+  if sharding is None:
+    return "<unsharded>"
+  mesh = getattr(sharding, "mesh", None)
+  try:
+    devices = (
+        np.asarray(mesh.devices).flatten().tolist()
+        if mesh is not None
+        else list(getattr(sharding, "device_set", ()))
+    )
+    ids = sorted(int(d.id) for d in devices)
+  except Exception:  # pylint: disable=broad-except
+    return "<unknown>"
+  if not ids:
+    return "<unknown>"
+  return f"[{ids[0]}..{ids[-1]}]({len(ids)}) spec={getattr(sharding, 'spec', None)}"
+
+
+def _log_reshard_placement(resharded_flat, spec_flat) -> None:
+  """Reports whether resharded weights match target mesh placement."""
+  stale = []
+  for key, value in resharded_flat.items():
+    want = _placement(spec_flat[key])
+    got = _placement(value)
+    if want != got:
+      stale.append((".".join(map(str, key)), got, want))
+  if stale:
+    logging.error(
+        "weight_sync_debug: %d/%d resharded params did NOT land on the target "
+        "sharding. First 10 (name, got, want): %s",
+        len(stale), len(resharded_flat), stale[:10],
+    )
+  else:
+    logging.info(
+        "weight_sync_debug: all %d resharded params match their target "
+        "sharding.", len(resharded_flat),
+    )
+
+
 @dataclasses.dataclass
 class VllmConfig:
   """Vllm rollout configuations."""
@@ -185,13 +227,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       )
 
   def _assign_converted_state(self, converted: Any) -> None:
-    """Reshards an externally-converted state onto the model runner.
-
-    Generic on purpose: a converter is expected to return weights already keyed
-    like `transformer_state`, so this knows nothing about any particular model
-    family. Anything the converter did not supply keeps its current value --
-    coverage is the converter's contract to enforce, not this engine's.
-    """
+    """Reshards an externally-converted state onto the model runner."""
     state = self.transformer_state
     state_dict = (
         (state.to_pure_dict() if hasattr(state, "to_pure_dict") else dict(state))
@@ -230,16 +266,33 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         self.config.delete_dst_buffers,
     )
 
-    if debug:
-      utils.log_reshard_placement(resharded_flat, spec_flat)
+    # Filter out string keys so unflatten_dict receives only tuple paths.
+    resharded_flat = {k: v for k, v in resharded_flat.items() if isinstance(k, tuple)}
 
-    resharded = traverse_util.unflatten_dict(resharded_flat)
+    if debug:
+      _log_reshard_placement(resharded_flat, spec_flat)
+
     if isinstance(state, nnx.State):
-      nnx.update(state, resharded)
+      # Update VariableState values directly by path to bypass nnx.update issues.
+      for path, var in state.flat_state():
+        val = resharded_flat.get(path)
+        if val is None:
+          val = resharded_flat.get(path + ("value",))
+        if val is None:
+          continue
+        if hasattr(var, "set_value"):
+          var.set_value(val)
+        elif hasattr(var, "value"):
+          var.value = val
+        else:
+          try:
+            var[...] = val
+          except Exception:  # pylint: disable=broad-except
+            var.value = val
     elif hasattr(state, "update"):
-      state.update(resharded)
+      state.update(traverse_util.unflatten_dict(resharded_flat))
     else:
-      self._model_runner.state = resharded
+      self._model_runner.state = traverse_util.unflatten_dict(resharded_flat)
 
   # TODO(b/434969743): Optimize weight sharing between trainer and vllm sampler.
   def update_params(
@@ -260,9 +313,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     jax.effects_barrier()
 
     if self.converter is not None:
-      # Conversion is owned by the integrator (MaxText), not by this engine:
-      # it returns weights already shaped for `transformer_state`, and all we
-      # do here is reshard them onto the runner's shardings and assign.
+      # Reshard and assign weights converted by the integrator.
       logging.info("Weight sync via converter %s.", type(self.converter).__name__)
       self._assign_converted_state(
           self.converter.convert(
@@ -356,7 +407,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
       args["additional_config"]["lora_config"] = config.lora_config
 
     tp, dp, ep = utils.resolve_parallelism_sizes(
-        mesh=config.mesh,  # pyrefly: ignore[bad-argument-type]
+        mesh=config.mesh,
         tensor_parallel_size=config.tensor_parallel_size,
         data_parallel_size=config.data_parallel_size,
         expert_parallel_size=config.expert_parallel_size,
@@ -435,22 +486,15 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         input_strings, request_outputs
     ):
       for idx, single_output in enumerate(multi_sampling_output.outputs):
-        # KEEP the eos token in the returned token_ids — needed so multi-turn
-        # consumers (agentic engine) can reconstruct the exact sequence the
-        # next turn's prompt was rendered from. Combined with
-        # `include_stop_str_in_output=True`, vLLM emits one eos at the end of
-        # each generation. Stripping it (the previous behavior) made
-        # trainer-side concatenation miss `<|im_end|>` at every turn boundary
-        # and produced 30+ nat sampler-trainer logp diffs.
-
+        # Keep EOS token in token_ids for multi-turn prompt reconstruction.
         out_tokens[idx].append(
             np.array(single_output.token_ids, dtype=np.int32)
         )
         decoded_outputs[idx].append(
-            self.tokenizer.decode(single_output.token_ids)  # pyrefly: ignore[bad-argument-type]
+            self.tokenizer.decode(single_output.token_ids)
         )
         logprobs = utils.get_logprobs_from_vllm_output(
-            list(single_output.token_ids), single_output.logprobs  # pyrefly: ignore[bad-argument-type]
+            list(single_output.token_ids), single_output.logprobs
         )
         out_logprobs[idx].append(logprobs)
         logging.debug(
@@ -540,26 +584,21 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         else:
           sampling_params = SamplingParams()
       else:
-        sampling_params = self.llm.get_default_sampling_params()  # pyrefly: ignore[missing-attribute]
+        sampling_params = self.llm.get_default_sampling_params()
       sampling_params.detokenize = False
       sampling_params.max_tokens = max_generation_steps
       sampling_params.n = multi_sampling
       sampling_params.temperature = temperature
       if self.config.return_logprobs:
         sampling_params.logprobs = 1  # b/428730696
-        sampling_params.prompt_logprobs = None  # b/428730696
+        sampling_params.prompt_logprobs = 0  # b/428730696
       else:
         sampling_params.logprobs = 0
+        # Use None (not 0) to avoid unsupported prompt_logprobs checks in vLLM.
         sampling_params.prompt_logprobs = None
       sampling_params.stop_token_ids = [self.tokenizer.eos_id()]
       sampling_params.skip_special_tokens = True
-      # Keep the stop token in the returned ``token_ids`` so multi-turn
-      # consumers can reconstruct the exact sequence the model was sampled
-      # on. This makes the trainer-side concatenation align with what
-      # ``apply_chat_template`` produces for the next turn's prompt; without
-      # it, the trailing ``<|im_end|>`` (or equivalent eos token) is missing
-      # at every turn boundary in the recorded sequence, biasing logp
-      # recomputation against the model's actual sampling context.
+      # Retain stop token in output for multi-turn prompt alignment.
       sampling_params.include_stop_str_in_output = True
 
       if top_p is not None:
@@ -602,7 +641,7 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
     if self._driver is not None:
       outputs = self._generate_server_mode(prompt_objects, sampling_params)
     else:
-      outputs = self.llm.generate(  # pyrefly: ignore[missing-attribute]
+      outputs = self.llm.generate(
           prompts=prompt_objects,
           sampling_params=sampling_params,
           use_tqdm=True,
@@ -636,5 +675,5 @@ class VllmSampler(base_sampler.BaseSampler):  # pylint: disable=invalid-name
         logits=None,
         tokens=out_tokens[0],
         padded_prompt_tokens=all_input_ids,
-        logprobs=out_logprobs[0] if self.config.return_logprobs else None,  # pyrefly: ignore[bad-argument-type]
+        logprobs=out_logprobs[0] if self.config.return_logprobs else None,
     )
