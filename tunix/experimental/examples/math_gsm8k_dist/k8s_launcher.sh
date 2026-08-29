@@ -235,6 +235,7 @@ start_rollout() {
           --temperature=${TEMPERATURE} \
           --top_p=${TOP_P} \
           ${ROLLOUT_MAXTEXT_ATTENTION:+--maxtext_attention=${ROLLOUT_MAXTEXT_ATTENTION}} \
+          ${MAXTEXT_CKPT:+--maxtext_load_parameters_path=${MAXTEXT_CKPT}} \
       " \
       | kubectl apply -f -
   done
