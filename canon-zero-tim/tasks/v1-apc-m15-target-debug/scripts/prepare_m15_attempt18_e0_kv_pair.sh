@@ -51,7 +51,16 @@ python3 "$canon/cluster/render_v1_apc_m15_target_debug.py" \
 python3 "$script_dir/test_review_m15_attempt18_e0_admission.py"
 python3 "$script_dir/test_target_carrier.py"
 python3 "$script_dir/test_resolved_env.py"
-python3 "$canon/tests/p38_serving/test_kv_observer_classifier.py"
+if python3 -c "import numpy" >/dev/null 2>&1; then
+  python3 "$canon/tests/p38_serving/test_kv_observer_classifier.py"
+else
+  ${DOCKER:-docker} run --rm \
+    -v "$canon/..:/workspace:ro" \
+    -w /workspace \
+    -e PYTHONPATH=/workspace \
+    tunix_base_image:latest \
+    python3 "/workspace/canon-zero-tim/tests/p38_serving/test_kv_observer_classifier.py"
+fi
 
 cp "$review_tmp/D3E_ADMISSION.json" "$output/D3E_ADMISSION.json"
 python3 - "$output" "$source_commit" "$run_id" <<'PY'
