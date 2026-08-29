@@ -5,47 +5,64 @@ commands; it does not edit YAML, numerical code, or evidence. Large payloads
 remain in GCS exactly like the earlier P38/lm-head investigation. Only small
 machine-generated receipts are returned through Git or chat.
 
-## Current operation: review Phase D3c; no remote execution yet
+## Current operation: Attempt-17 offline binding; CPU/GCS read only
 
-Attempt 16 reproduced APC-on A-B=1,711 bytes / 786 elements with B-C=0, then
-failed in analysis because different requests sharing one token prefix were
-treated as aliases. Phase D3c is an analysis/durability repair:
+Attempt 17 (`d36`) already preserved one sealed APC-on treatment round with
+A-B=207 differing bytes / 95 elements, B-C=0, and
+`M15_INTERNAL_FIRST_RED_CANDIDATE_SET`. Do not launch another JobSet yet. The
+sealed compact bundle contains the selected seam rows, mismatch capsule, and
+full replay ledger needed to test a stable source-row/request join offline.
 
-- serving identity includes request and call;
-- same-prefix requests remain a candidate set;
-- conflicting duplicates within one request and multiple numerical B variants
-  still fail closed;
-- mixed A first-red signatures return `FIRST_RED_CANDIDATE_SET` and no fake
-  interval;
-- every selected candidate enters the compact bundle;
-- after assemble, stage 15 durably uploads and remotely re-verifies the
-  classifier's host-only inputs before stage 20 runs analysis.
+The analysis change must first be committed and pushed with explicit user
+approval. The remote executor then creates a clean `local/*` worktree at that
+exact analysis commit. GCS read access is a separate approval. No TPU or
+Kubernetes approval is needed for this operation because the wrapper neither
+queries nor mutates them.
 
-The stage-15 checkpoint contains true request/capsule data and must remain
-under the registered per-run evidence root. Never copy it into Git or chat.
-The observer arrays remain in the existing immutable wide shards. Together,
-those two sets are sufficient for offline reclassification if later analysis
-code fails.
+Run exactly one command on the bucket-capable machine:
 
-No remote command is authorized from the dirty worktree. The next gates are
-separate: review; approved pinned exact-image; approved commit; approved push;
-then a separately approved fresh matched APC-off/APC-on target pair if the
-Attempt-16 pod-local assembled round is no longer available. Reuse neither the
-d35 labels nor their roots.
+```bash
+bash canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/run_m15_attempt17_d36_offline_binding.sh \
+  /mnt/disks/tunix-data/m15-d36-offline-binding-return
+```
 
-For the future target run, acceptance requires all of the following:
+The output directory must not exist. The wrapper:
 
-- `STAGE_10_assemble_PASS` followed by `STAGE_15_checkpoint-input_PASS`;
-- the remote `classifier-input/CLASSIFIER_INPUT_RECEIPT.json` and manifest
-  independently verify;
-- off remains A-B=0 and B-C=0;
-- on preserves B-C=0 and emits either a unique `FIRST_RED_LOCALIZED` or an
-  explicit candidate set;
-- every completed round reaches package, upload, remote verify, completion,
-  and ACK.
+1. requires a clean `local/*` analysis worktree and canonical preflight PASS;
+2. verifies the committed 84-member Attempt-17 evidence package;
+3. reconstructs the runtime-source d36 full/Layer-0 render and matches both
+   JobSet identities to the committed receipts;
+4. performs the existing small multiround GCS return;
+5. reads only treatment Round 0's `WIDE_SHA256SUMS` and compact bundle;
+6. verifies the outer bundle digest, safe tar membership, internal manifest,
+   and byte-identical committed classification;
+7. reruns the official classifier with fail-closed future-prefix binding; and
+8. writes a three-file, self-hashed local return.
 
-`FIRST_RED_CANDIDATE_SET` is not Phase-E admission. It means tensor candidates
-were safely preserved but a stable source-row/request join is still required.
+It does not upload, write, delete, restart, apply, or launch remote state. The
+large token-bearing bundle exists only in the registered evidence root and
+ephemeral scratch. On failure, scratch is preserved on the executor for
+diagnosis; do not return its payload.
+
+Success has two terminal lines:
+
+```text
+[M15.D36.OFFLINE] COMPLETE status=<FIRST_RED_LOCALIZED|FIRST_RED_CANDIDATE_SET_PRESERVED> ...
+[M15.D36.OFFLINE] TARGET_NOT_RUN gcs_read=1 gcs_write=0 kubernetes=0 tpu=0
+```
+
+Return only `D36_OFFLINE_REVIEW.json`, `D36_RECLASSIFICATION.json`,
+`REMOTE_MULTIROUND_SUMMARY.json`, `SHA256SUMS`, the terminal lines, and the
+manifest SHA. Do not return bucket roots, credentials, tar/capsule/ledger
+payloads, or raw token prefixes.
+
+`FIRST_RED_LOCALIZED` is review input, not an automatic repair authorization.
+It must contain last exact, first red, shape, request/call/token/cache/page
+coordinates, and source anchors. `FIRST_RED_CANDIDATE_SET_PRESERVED` means the
+next implementation is one observational producer-row/request provenance
+field followed by host and exact-image gates; only then may a new matched
+DP8xTP8 pair be proposed. Phase E stays closed in both cases until explicitly
+reviewed.
 
 ## Historical operation: recover the already-run d33 pair
 

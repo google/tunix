@@ -74,6 +74,187 @@ def _sha256(path: Path) -> str:
   return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _token_prefix_sha256(tokens: np.ndarray) -> str:
+  values = np.ascontiguousarray(np.asarray(tokens, dtype="<i8"))
+  return hashlib.sha256(values.tobytes()).hexdigest()
+
+
+def _capsule_source_tokens(
+    capsules: list[Path], expected_round: int
+) -> dict[int, np.ndarray]:
+  """Return the complete token chronology for every selected source row."""
+  result: dict[int, np.ndarray] = {}
+  for path in capsules:
+    with np.load(path, allow_pickle=False) as archive:
+      arrays = {name: np.asarray(archive[name]) for name in archive.files}
+    required = {
+        "metadata_json", "selected_rows", "prompt_ids", "prompt_mask",
+        "completion_ids", "completion_valid_mask",
+    }
+    _require(required.issubset(arrays), f"capsule token chronology is incomplete: {path}")
+    metadata = json.loads(arrays["metadata_json"].tobytes().decode())
+    if int(metadata.get("diagnostic_round", -1)) != expected_round:
+      continue
+    rows = arrays["selected_rows"].reshape(-1)
+    _require(
+        rows.size == arrays["prompt_ids"].shape[0]
+        == arrays["completion_ids"].shape[0],
+        f"capsule token chronology row geometry drifted: {path}",
+    )
+    for offset, source_row_raw in enumerate(rows):
+      prompt = arrays["prompt_ids"][offset][
+          np.asarray(arrays["prompt_mask"][offset], dtype=np.bool_)
+      ]
+      completion = arrays["completion_ids"][offset][
+          np.asarray(arrays["completion_valid_mask"][offset], dtype=np.bool_)
+      ]
+      tokens = np.concatenate((prompt, completion)).astype(np.int64, copy=False)
+      source_row = int(source_row_raw)
+      if source_row in result:
+        _require(
+            np.array_equal(result[source_row], tokens),
+            f"capsules disagree on source-row token chronology: {source_row}",
+        )
+      else:
+        result[source_row] = np.array(tokens, copy=True)
+  return result
+
+
+def _replay_request_histories(
+    path: Path | None, expected_round: int
+) -> dict[str, list[dict[str, Any]]]:
+  """Index A request token-history receipts without returning token payloads."""
+  if path is None:
+    return {}
+  _require(path.is_file(), f"M15 replay ledger is absent: {path}")
+  result: dict[str, list[dict[str, Any]]] = {}
+  with path.open(encoding="utf-8") as handle:
+    for line_number, line in enumerate(handle, start=1):
+      if not line.strip():
+        continue
+      record = json.loads(line)
+      _require(
+          record.get("schema") == "m15-apc-serving-envelope-v1",
+          f"M15 replay ledger schema drifted at line {line_number}",
+      )
+      if int(record.get("diagnostic_round", -1)) != expected_round:
+        continue
+      if str(record.get("serving_arm")) != "A":
+        continue
+      call_index = int(record.get("call_index", -1))
+      for request in record.get("requests", ()):
+        request_id = str(request.get("request_id", ""))
+        _require(request_id, f"M15 replay request id is absent at line {line_number}")
+        result.setdefault(request_id, []).append({
+            "call_index": call_index,
+            "num_tokens": request.get("num_tokens"),
+            "token_history_sha256": request.get("token_history_sha256"),
+        })
+  for rows in result.values():
+    rows.sort(key=lambda item: int(item["call_index"]))
+  return result
+
+
+def _bind_source_request(
+    observations: list[dict[str, Any]],
+    *,
+    source_tokens: np.ndarray,
+    source_position: int,
+    histories: dict[str, list[dict[str, Any]]],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+  """Use future token-prefix receipts to bind one source row fail closed.
+
+  A request is selected only when it has a matching prefix strictly after the
+  red action and every other same-prefix candidate has an explicit conflicting
+  future prefix.  Missing or out-of-range history remains unresolved; absence
+  is never treated as contradiction.
+  """
+  request_ids = sorted({str(item.get("request_id", "")) for item in observations})
+  _require(all(request_ids), "M15 A observation lacks a request id")
+  anchor_tokens = int(source_position) + 1
+  _require(
+      0 < anchor_tokens <= int(source_tokens.size),
+      "M15 source-row anchor is outside its token chronology",
+  )
+  candidates = []
+  for request_id in request_ids:
+    matching_lengths = set()
+    conflicting_lengths = set()
+    out_of_range_lengths = set()
+    for receipt in histories.get(request_id, ()):
+      raw_length = receipt.get("num_tokens")
+      digest = receipt.get("token_history_sha256")
+      if not isinstance(raw_length, int) or not isinstance(digest, str):
+        continue
+      length = int(raw_length)
+      if length <= anchor_tokens:
+        continue
+      if length > int(source_tokens.size):
+        out_of_range_lengths.add(length)
+        continue
+      expected = _token_prefix_sha256(source_tokens[:length])
+      if digest == expected:
+        matching_lengths.add(length)
+      else:
+        conflicting_lengths.add(length)
+    if matching_lengths and not conflicting_lengths:
+      status = "FUTURE_PREFIX_MATCH"
+    elif conflicting_lengths:
+      status = "FUTURE_PREFIX_CONFLICT"
+    else:
+      status = "UNRESOLVED"
+    candidates.append({
+        "request_id": request_id,
+        "status": status,
+        "matching_prefix_lengths": sorted(matching_lengths),
+        "conflicting_prefix_lengths": sorted(conflicting_lengths),
+        "out_of_range_prefix_lengths": sorted(out_of_range_lengths),
+    })
+  matches = [
+      item for item in candidates if item["status"] == "FUTURE_PREFIX_MATCH"
+  ]
+  conflicts = [
+      item for item in candidates if item["status"] == "FUTURE_PREFIX_CONFLICT"
+  ]
+  required_horizon = (
+      max(min(item["conflicting_prefix_lengths"]) for item in conflicts)
+      if conflicts else None
+  )
+  selected_horizon = (
+      max(matches[0]["matching_prefix_lengths"]) if len(matches) == 1 else None
+  )
+  unique = (
+      len(matches) == 1
+      and len(conflicts) == len(candidates) - 1
+      and required_horizon is not None
+      and selected_horizon is not None
+      and selected_horizon >= required_horizon
+  )
+  selected_request_id = str(matches[0]["request_id"]) if unique else None
+  selected = (
+      [
+          item for item in observations
+          if str(item.get("request_id")) == selected_request_id
+      ]
+      if selected_request_id is not None else observations
+  )
+  return selected, {
+      "schema": "m15-source-row-request-binding-v1",
+      "status": "UNIQUE_FUTURE_PREFIX_BINDING" if unique else "UNRESOLVED",
+      "anchor_prefix_tokens": anchor_tokens,
+      "source_token_count": int(source_tokens.size),
+      "selected_request_id": selected_request_id,
+      "required_disambiguation_prefix_tokens": required_horizon,
+      "selected_proof_prefix_tokens": selected_horizon,
+      "candidates": candidates,
+      "claim_ceiling": (
+          "A unique binding requires one matching future token prefix and an "
+          "explicit conflicting future prefix for every alternative request; "
+          "the selected proof must reach the latest elimination horizon."
+      ),
+  }
+
+
 def _same_candidate(left: dict[str, Any], right: dict[str, Any]) -> bool:
   scalar_keys = (
       "position", "token_id", "checkpoint_names", "layer_indices",
@@ -567,6 +748,10 @@ def classify(
   _require(arm == "on", "APC-off control became A-B red under observation")
   _require(capsules, "red M15 observer arm has no mismatch capsule")
   red_points = P38._red_points(capsules)  # pylint: disable=protected-access
+  source_tokens = _capsule_source_tokens(capsules, diagnostic_round)
+  request_histories = _replay_request_histories(
+      replay_ledger, diagnostic_round
+  )
   _require(
       all(int(point["diagnostic_round"]) == diagnostic_round
           for point in red_points),
@@ -583,6 +768,24 @@ def classify(
       continue
     a_observations = _resolve_observations(
         seam[seam_keys[0]], f"A seam {base}"
+    )
+    point_source_row = int(point["source_row"])
+    _require(
+        point_source_row in source_tokens,
+        f"M15 red source row lacks token chronology: {point_source_row}",
+    )
+    point_tokens = source_tokens[point_source_row]
+    _require(
+        _token_prefix_sha256(
+            point_tokens[:int(point["source_position"]) + 1]
+        ) == point["token_prefix_sha256"].decode("ascii"),
+        "M15 red source-row token chronology differs from its anchor prefix",
+    )
+    a_observations, source_request_binding = _bind_source_request(
+        a_observations,
+        source_tokens=point_tokens,
+        source_position=int(point["source_position"]),
+        histories=request_histories,
     )
     b_observations = _resolve_observations(
         seam[seam_keys[1]], f"B seam {base}"
@@ -673,6 +876,7 @@ def classify(
           "candidate_ambiguous": (
               len(a_observations) > 1 or len(b_observations) > 1
           ),
+          "source_request_binding": source_request_binding,
           "candidate_outcome": (
               "FIRST_DIFFERENCE" if first is not None
               else "EXACT_THROUGH_OBSERVER"
@@ -785,6 +989,11 @@ def classify(
           ),
           "ambiguous_joined_anchors": sum(
               bool(join["candidate_ambiguous"]) for join in joins
+          ),
+          "future_prefix_bound_anchors": sum(
+              join["source_request_binding"]["status"]
+              == "UNIQUE_FUTURE_PREFIX_BINDING"
+              for join in joins
           ),
           "exact_through_observer_candidate_anchors": exact_candidate_anchors,
           "selected_anchor_truncated": len(preferred) > _MAX_ANCHORS,

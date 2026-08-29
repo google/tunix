@@ -80,6 +80,7 @@ class Fixture:
     )
     self.source_position = 2 + completion_position
     tokens = [10, 11, 12, 13, 14]
+    self.tokens = tokens
     self.prefix = _prefix(tokens[:self.source_position + 1])
     self.target = int(completion[0, completion_position])
     self.decode = float(decode[0, completion_position])
@@ -318,6 +319,25 @@ class Fixture:
     self._write_npz_record("p38_tail", index, metadata, arrays)
     return index
 
+  def append_future_request_identity(
+      self, *, request_id: str, tokens: list[int], call_index: int
+  ) -> None:
+    with self.ledger.open("a", encoding="utf-8") as stream:
+      stream.write(json.dumps({
+          "schema": "m15-apc-serving-envelope-v1",
+          "diagnostic_round": self.diagnostic_round,
+          "arm": "on",
+          "serving_arm": "A",
+          "call_index": call_index,
+          "program_path": "standard",
+          "request_order": [request_id],
+          "requests": [{
+              "request_id": request_id,
+              "num_tokens": len(tokens),
+              "token_history_sha256": _prefix(tokens).decode("ascii"),
+          }],
+      }) + "\n")
+
   def classify(self, *, arm: str = "on", require_first_action: bool = True):
     return MODULE.classify(
         directory=self.capture,
@@ -414,6 +434,73 @@ class M15WideSeamClassifierTest(unittest.TestCase):
         {"layer": None, "checkpoint": "EXACT_THROUGH_OBSERVER"},
         result["first_difference_signatures"],
     )
+
+  def test_future_prefix_receipts_bind_unique_red_request(self):
+    fixture = self._fixture(mode="full")
+    fixture.duplicate_seam(
+        arm="A",
+        request_id="request-a-exact",
+        call_index=20,
+        numeric_source_arm="B",
+    )
+    fixture.append_future_request_identity(
+        request_id="request-a", tokens=fixture.tokens[:4], call_index=30
+    )
+    fixture.append_future_request_identity(
+        request_id="request-a-exact", tokens=[10, 11, 12, 99], call_index=31
+    )
+    result = fixture.classify()
+    self.assertEqual(result["gate"], "FIRST_RED_LOCALIZED")
+    self.assertEqual(result["first_red_boundary"]["checkpoint"], "q_post_rope")
+    self.assertEqual(result["coverage"]["future_prefix_bound_anchors"], 1)
+    binding = result["anchors"][0]["source_request_binding"]
+    self.assertEqual(binding["status"], "UNIQUE_FUTURE_PREFIX_BINDING")
+    self.assertEqual(binding["selected_request_id"], "request-a")
+
+  def test_unique_exact_request_does_not_fabricate_first_red(self):
+    fixture = self._fixture(mode="full")
+    fixture.duplicate_seam(
+        arm="A",
+        request_id="request-a-exact",
+        call_index=20,
+        numeric_source_arm="B",
+    )
+    fixture.append_future_request_identity(
+        request_id="request-a", tokens=[10, 11, 12, 99], call_index=30
+    )
+    fixture.append_future_request_identity(
+        request_id="request-a-exact", tokens=fixture.tokens[:4], call_index=31
+    )
+    result = fixture.classify()
+    self.assertEqual(result["gate"], "FIRST_RED_CANDIDATE_SET")
+    self.assertIsNone(result["first_red_boundary"])
+    self.assertEqual(result["coverage"]["future_prefix_bound_anchors"], 1)
+    self.assertEqual(
+        result["anchors"][0]["candidate_outcome"], "EXACT_THROUGH_OBSERVER"
+    )
+
+  def test_selected_prefix_must_reach_latest_elimination_horizon(self):
+    fixture = self._fixture(mode="full")
+    fixture.duplicate_seam(
+        arm="A",
+        request_id="request-a-exact",
+        call_index=20,
+        numeric_source_arm="B",
+    )
+    fixture.append_future_request_identity(
+        request_id="request-a", tokens=fixture.tokens[:4], call_index=30
+    )
+    fixture.append_future_request_identity(
+        request_id="request-a-exact",
+        tokens=[10, 11, 12, 13, 99],
+        call_index=31,
+    )
+    result = fixture.classify()
+    self.assertEqual(result["gate"], "FIRST_RED_CANDIDATE_SET")
+    binding = result["anchors"][0]["source_request_binding"]
+    self.assertEqual(binding["status"], "UNRESOLVED")
+    self.assertEqual(binding["selected_proof_prefix_tokens"], 4)
+    self.assertEqual(binding["required_disambiguation_prefix_tokens"], 5)
 
   def test_same_request_conflicting_duplicate_remains_fail_closed(self):
     fixture = self._fixture(mode="full")

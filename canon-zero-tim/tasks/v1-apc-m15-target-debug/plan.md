@@ -27,7 +27,8 @@ B - C = 0 bytes
 | D3 | three frozen-weight full Layer-0 rounds per arm plus one self-hashed numerical/operator return | each round seals before the next; root-incomplete, partial-round, missing JobSet terminal, and missing raw-log receipt remain mechanically distinguishable | 162/162 completion receipts and manifests checked, 100% round 0 (`D33_FLAT_SHARDS_ROUND0_ONLY`); tar payloads were not independently re-hashed and seal/ACK repair is required before rerun |
 | D3a | harden the first seal/ACK transition with stage receipts and a fail-fast failure channel | host three-round ACK positive control and forced-persistence failure negative control pass; numerical source remains unchanged | local PASS (137/137 task tests, P38 persistence PASS, flag audit 394/394); exact-image and target not run |
 | D3b | bind every cumulative replay-envelope row to its live diagnostic round | installed-source AST gate rejects missing or hard-coded round; assembler selects round 0/1/2 independently | local PASS (139/139 task tests, patch applies to registered runner, P38 persistence PASS); exact-image and target not run |
-| D3c | distinguish same-prefix serving requests and checkpoint classifier inputs before analysis | candidate-set classifier never conflates requests or fabricates a single interval; classifier inputs survive an analysis failure | local PASS (task suite PASS, 18/18 classifier, 11/11 durability, P38 persistence PASS); exact-image and target rerun not performed |
+| D3c | distinguish same-prefix serving requests and checkpoint classifier inputs before analysis | candidate-set classifier never conflates requests or fabricates a single interval; classifier inputs survive an analysis failure | cluster exercised by Attempt 17: request-aware classification and checkpoint durability PASS; treatment Round 0 preserved a mixed candidate set, not a localization |
+| D3d | bind Attempt-17 source rows to serving requests from future token-prefix continuity without another rollout | immutable bundle and committed receipt verify; one request is selected only beyond the latest explicit elimination horizon, otherwise the candidate set is preserved | implementation and host tests PASS; bucket/GCS reclassification, exact-image, and target not run |
 | D4 | Attempt-13 two-arm registered-root inventory and offline semantic review | both listings succeed; exact 77/70 shard triples verify; physical shard counts and immutable classifier counts remain separate; seven-file inventory self-verifies | transport complete; no-live confirmed; count drift -29/+101 preserved; official replay impossible |
 | E | minimal localized repair, default off or experiment-bound | reproducer flips red to zero; APC-off and B are unchanged; adjacent and dirty-page negatives fire | pending |
 | F | certification ladder | host -> exact-image -> one-host clean/repeat/dirty -> matched profile -> separately approved DP8xTP8 G-E | pending |
@@ -184,3 +185,18 @@ B - C = 0 bytes
   distinguishes permission/transient/query failure from not-found, directly
   stats `run.log`, and extracts only round-handshake/durability markers. More
   rollout steps are not a substitute for per-round seal durability.
+- Confirmed by Attempt 17: D3c no longer conflates same-prefix concurrent
+  requests. Three control rounds sealed exact; treatment Round 0 sealed with
+  A-B=207 bytes / 95 elements and B-C=0, then returned a mixed
+  `FIRST_RED_CANDIDATE_SET`. Treatment Round 1 failed assembly and Round 2 is
+  absent, so the paired run is analysis-grade partial evidence.
+- Decision: do not spend another 64-chip run before testing whether the sealed
+  treatment bundle already contains enough future request history to bind
+  source row 217. Absence never disambiguates a request; every eliminated
+  candidate needs an explicit conflicting future prefix, and the selected
+  proof must reach the latest elimination horizon.
+- Decision: a read-only GCS/CPU reclassification and a future target launch
+  are separate approvals. A preserved candidate set justifies observational
+  provenance work, not a numerical repair. A unique offline localization must
+  still be reviewed for last exact, first red, shape, coordinates, and source
+  anchors before Phase E opens.

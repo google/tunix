@@ -1,11 +1,144 @@
 # M15 APC target-debug handoff
 
-## START HERE — Attempt 17 (d36) validated request-aware candidate disambiguation and sealed 3/3 control rounds + 1 durable treatment round
+## START HERE — Attempt 17 preserved a real candidate set; run Phase D3d offline before discussing another TPU pair
 
-Attempt 17 (`d36`) was executed from commit `16c224aa80eb6b3a544be19f693c0542ab4b0dcb` on a matched 64 TPU v5p pair (16 workers + 1 head per arm) with Layer 0 full observation and zero backward/optimizer commits.
+### Cold-start contract for the bucket-capable executor
+
+Your task is **not** to launch a new target pair. Your only current operation is
+the Phase D3d read-only GCS + CPU reclassification described below.
+
+Two commits have different roles and must not be confused:
+
+- Attempt-17 runtime source:
+  `16c224aa80eb6b3a544be19f693c0542ab4b0dcb`;
+- Phase D3d analysis source: a new full published SHA supplied by the user that
+  contains this HANDOFF, the future-prefix classifier change, and
+  `run_m15_attempt17_d36_offline_binding.sh`.
+
+`6e4e7f587941ee7e0c83753bc321a995912c8021` contains the Attempt-17 evidence
+return but not the Phase D3d implementation. Do not use it as the analysis
+source. If the user has not supplied the new full analysis SHA, stop and ask
+for it.
+
+First read `/home/yuxuan/code_rl_repro/AGENTS.md`. Then create the clean
+worktree. Do not use or modify
+`/home/yuxuan/code_rl_repro/worktrees/p57_zero_noeval_0828`.
+
+Create the new worktree from the exact published analysis SHA:
+
+```bash
+ANALYSIS_SHA=REPLACE_WITH_FULL_USER_SUPPLIED_PHASE_D3D_SHA
+UNIQUE_LABEL=replace-with-a-fresh-unique-label
+PRIMARY=/home/yuxuan/code_rl_repro/sequence_packing/tunix
+WT=/home/yuxuan/code_rl_repro/worktrees/m15_d36_offline_binding_${UNIQUE_LABEL}
+test ! -e "$WT"
+git -C "$PRIMARY" fetch --quiet origin yuxzhang/canon-zero-tim
+test "$(git -C "$PRIMARY" rev-parse origin/yuxzhang/canon-zero-tim)" = "$ANALYSIS_SHA"
+git -C "$PRIMARY" worktree add -b local/m15-d36-offline-${UNIQUE_LABEL} \
+  "$WT" "$ANALYSIS_SHA"
+cd "$WT"
+test "$(git rev-parse HEAD)" = "$ANALYSIS_SHA"
+```
+
+After entering the new worktree, read in this order before preflight or any
+remote access:
+
+1. `canon-zero-tim/AGENTS.md`;
+2. `canon-zero-tim/.claude/skills/manage-canon-zero-tim-branch/SKILL.md`;
+3. `/home/yuxuan/.codex/skills/run-phased-work/SKILL.md`;
+4. `canon-zero-tim/THREADS.md`;
+5. the APC/M15 entries in `canon-zero-tim/FLAGS.md`;
+6. the M15 APC entries in `canon-zero-tim/EVIDENCE.md`;
+7. this HANDOFF section;
+8. `state.md` and `plan.md`;
+9. `phases/phase-d3d-attempt17-offline-request-binding.md`;
+10. the current operation in `RUNBOOK.md`;
+11. the latest Phase D3d checkpoint in `log.md`.
+
+Then run canonical preflight:
+
+```bash
+python3 canon-zero-tim/.claude/skills/manage-canon-zero-tim-branch/scripts/preflight_runtime.py \
+  --repo . --require-clean
+```
+
+Required preflight terminal marker:
+
+```text
+CANON_PREFLIGHT PASS
+```
+
+The user must separately approve read access to the registered Attempt-17 GCS
+evidence. Check only that `gcloud` or `gsutil` is available; do not print
+credentials, configured accounts, project values, remote roots, or environment
+secrets. No Kubernetes or TPU permission is required or implied.
+
+After explicit GCS-read approval, use a fresh local output directory and run
+the wrapper directly, without a pipe:
+
+```bash
+RETURN=/mnt/disks/tunix-data/m15-d36-offline-binding-return-${UNIQUE_LABEL}
+test ! -e "$RETURN"
+bash canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/run_m15_attempt17_d36_offline_binding.sh \
+  "$RETURN" /mnt/disks/tunix-data
+```
+
+The complete success marker sequence includes:
+
+```text
+CANON_PREFLIGHT PASS
+M15_D36_RENDER_IDENTITY_PASS source=16c224aa rounds=3 observer=full seam_layer=0
+[M15.MULTIROUND] COMPLETE status=<refreshed-remote-status> ...
+M15_D36_BUNDLE_IDENTITY_PASS treatment_round=0 sealed=1
+M15_D36_OFFLINE_REVIEW_COMPLETE status=<status> gate=<gate> ...
+[M15.D36.OFFLINE] COMPLETE status=<FIRST_RED_LOCALIZED|FIRST_RED_CANDIDATE_SET_PRESERVED> ...
+[M15.D36.OFFLINE] TARGET_NOT_RUN gcs_read=1 gcs_write=0 kubernetes=0 tpu=0
+```
+
+Missing markers or a nonzero exit are not a numerical verdict. Return the
+exit code, complete stderr, and the printed `scratch_preserved` path. Do not
+delete the preserved failure directory, retry into the same output directory,
+or bypass an identity/manifest failure. Authentication, permission, or network
+failures are `INCONCLUSIVE`.
+
+On success, verify the return and send back only:
+
+```bash
+(cd "$RETURN" && sha256sum -c SHA256SUMS)
+sha256sum "$RETURN/SHA256SUMS"
+```
+
+- the complete terminal marker lines;
+- `D36_OFFLINE_REVIEW.json`;
+- `D36_RECLASSIFICATION.json`;
+- `REMOTE_MULTIROUND_SUMMARY.json`;
+- `SHA256SUMS` and its SHA256.
+
+Do not return the downloaded tar, capsule, replay ledger, token hashes or token
+payloads, bucket root, remote URL, credentials, or secret-bearing environment
+values. Do not commit or push the returned package unless the user separately
+approves that exact publication.
+
+Interpretation is fail closed:
+
+| Returned status | Required decision |
+|---|---|
+| `FIRST_RED_LOCALIZED` | Confirm one `UNIQUE_FUTURE_PREFIX_BINDING`, selected proof horizon at least the required elimination horizon, last exact, first red, shape ledger, request/call/token/cache/page coordinates, and both source anchors. Then report the result and stop. Pinned exact-image and Phase E are separate approvals. |
+| `FIRST_RED_CANDIDATE_SET_PRESERVED` | Report that existing d36 evidence cannot uniquely bind the request. Do not rerun TPU immediately. The next code phase is one observational producer-row/request provenance field, followed by host and exact-image gates and a separately approved matched DP8xTP8 pair. |
+| Any identity, manifest, B invariant, classifier, or return verification failure | Preserve everything and stop. Do not downgrade or relaunch. |
+
+In every case: production M15 APC remains off; B remains an independent
+full-reset judge; Phase E remains closed until the user reviews a complete
+`FIRST_RED_LOCALIZED` return.
+
+Attempt 17 (`d36`) used runtime source
+`16c224aa80eb6b3a544be19f693c0542ab4b0dcb`. The committed operator return
+proves three sealed control rounds and one sealed treatment round. It does not
+contain root completion markers, terminal JobSet conditions, raw logs, or the
+original render contract, so the pair remains analysis-grade partial evidence.
 
 The self-hashed operator return is sealed in:
-`evidence/v1_apc_m15_attempt17_d36_operator_return_20260829/` (all 76 manifest members verified via `SHA256SUMS`).
+`evidence/v1_apc_m15_attempt17_d36_operator_return_20260829/` (all 84 manifest members verify via `SHA256SUMS`; the manifest excludes itself).
 
 ### What Attempt 17 (d36) proves
 
@@ -15,7 +148,6 @@ The self-hashed operator return is sealed in:
 - **Stage 15 Preclassify Input Checkpoint Durability Verified**:
   - Both arms uploaded and verified `STAGE_15_checkpoint-input_PASS.json` and `CLASSIFIER_INPUT_RECEIPT.json` to GCS before entering classification.
 - **APC-On Target Red Fork Confirmed**:
-  - APC-on reached **93.0% prefix cache hit rate**.
   - Re-confirmed exact serving-only APC cache fork:
     - $A-B = 207$ differing bytes / 95 elements
     - $B-C = 0$ differing bytes (policy forward pass exact)
@@ -23,17 +155,19 @@ The self-hashed operator return is sealed in:
 - **APC-Off 3/3 Complete Durable Rounds**:
   - Control arm completed all 3 diagnostic rounds (`PIPELINE_COMPLETE` on rounds 0, 1, 2).
   - Round 0: 2,633 record pairs / 1.76 GB, $A-B=0$, $B-C=0$, $N_{\text{action}}=117,236$, `M15_OBSERVER_CONTROL_EXACT`.
-  - Round 1: ~2,600 record pairs, $A-B=0$, $B-C=0$, `M15_OBSERVER_CONTROL_EXACT`.
+  - Round 1: 2,223 record pairs, $A-B=0$, $B-C=0$, `M15_OBSERVER_CONTROL_EXACT`.
   - Round 2: 2,599 record pairs, $A-B=0$, $B-C=0$, `M15_OBSERVER_CONTROL_EXACT`.
 - **Fail-Fast Treatment Lifecycle**:
-  - APC-on completed Round 0 diagnosis, sealed and ACKed Round 0 artifacts, and cleanly transitioned out on Round 1 as expected.
+  - APC-on completed, sealed, and ACKed Round 0. Round 1 then failed at
+    Stage 10 assembly with exit code 2. The return lacks raw stderr, so its
+    cause is unknown; Round 2 is absent.
 
 ### Round Inventory Table
 
 | Arm | Round | Record Pairs | Differing Bytes ($A-B$) | Differing Bytes ($B-C$) | Classification Verdict | Stage Pipeline Status |
 |---|---:|---:|---:|---:|---|---|
 | APC off | 0 | 2,633 | 0 | 0 | `M15_OBSERVER_CONTROL_EXACT` | `PIPELINE_COMPLETE` (Stages 10..70 PASS) |
-| APC off | 1 | ~2,600 | 0 | 0 | `M15_OBSERVER_CONTROL_EXACT` | `PIPELINE_COMPLETE` (Stages 10..70 PASS) |
+| APC off | 1 | 2,223 | 0 | 0 | `M15_OBSERVER_CONTROL_EXACT` | `PIPELINE_COMPLETE` (Stages 10..70 PASS) |
 | APC off | 2 | 2,599 | 0 | 0 | `M15_OBSERVER_CONTROL_EXACT` | `PIPELINE_COMPLETE` (Stages 10..70 PASS) |
 | APC on | 0 | 2,218 | 207 (95 el) | 0 | `M15_INTERNAL_FIRST_RED_CANDIDATE_SET` | `PIPELINE_COMPLETE` (Stages 10..70 PASS) |
 
@@ -45,10 +179,49 @@ PRECLASSIFY_INPUT_DURABILITY_CLUSTER_PASS /
 CONTROL_3_ROUNDS_EXACT_PASS /
 ATTEMPT17_TARGET_RED_PRESERVED /
 FIRST_RED_CANDIDATE_SET_CAPTURED /
+PARTIAL_ROUNDS_RECOVERED_OPERATOR_RECEIPTS_INCOMPLETE /
 FIRST_RED_NOT_YET_LOCALIZED /
 APC_NUMERICAL_FIX_NOT_IMPLEMENTED /
 PHASE_E_CLOSED
 ```
+
+### Phase D3d next action — CPU/GCS read only, no TPU
+
+The durable treatment bundle contains the selected seam candidates, mismatch
+capsule, and replay ledger. Phase D3d tests whether later token-prefix receipts
+bind source row 217 to one request. The implementation and host tests are in
+`phases/phase-d3d-attempt17-offline-request-binding.md`.
+
+After the Phase D3d analysis change is published with explicit user approval,
+a bucket-capable agent uses a clean `local/*` worktree and one command:
+
+```bash
+bash canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/run_m15_attempt17_d36_offline_binding.sh \
+  /mnt/disks/tunix-data/m15-d36-offline-binding-return
+```
+
+This command reconstructs and verifies the d36 render identity, reads the
+sealed treatment Round-0 compact bundle, verifies both manifests, and runs the
+official classifier. It does not query Kubernetes, launch TPU work, or write
+GCS. GCS read access still requires a separate user approval.
+
+Accepted terminal outcomes are:
+
+```text
+[M15.D36.OFFLINE] COMPLETE status=FIRST_RED_LOCALIZED ...
+```
+
+or:
+
+```text
+[M15.D36.OFFLINE] COMPLETE status=FIRST_RED_CANDIDATE_SET_PRESERVED ...
+```
+
+The first outcome must still contain and survive review of last exact, first
+red, shape, request/call/token/cache/page coordinates, and source anchors. The
+second means one observational source-row/request provenance field is needed
+before a separately approved target rerun. Neither outcome by itself claims a
+numerical fix.
 
 ## Historical — Attempt 16 exposed a classifier identity bug after capturing a real APC red
 

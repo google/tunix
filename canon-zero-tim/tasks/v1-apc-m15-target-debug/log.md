@@ -1081,3 +1081,48 @@ is not a current fact or launch authority.
   ATTEMPT16_TARGET_RED_PRESERVED / FIRST_RED_NOT_YET_LOCALIZED /
   APC_NUMERICAL_FIX_NOT_IMPLEMENTED / EXACT_IMAGE_NOT_RUN /
   TARGET_NOT_RERUN / PHASE_E_CLOSED`.
+
+## 2026-08-29 — Phase D3d prepared an offline Attempt-17 request binding
+
+- Reviewed the committed Attempt-17 operator return at published evidence base
+  `6e4e7f587941ee7e0c83753bc321a995912c8021`. All 84 manifest members verify.
+  The machine status is
+  `PARTIAL_ROUNDS_RECOVERED_OPERATOR_RECEIPTS_INCOMPLETE`, not target PASS.
+- Preserved the actual numerical boundary: control rounds 0/1/2 are sealed
+  exact; treatment Round 0 is sealed with A-B=207 bytes / 95 elements and
+  B-C=0; treatment Round 1 failed assembly and Round 2 is absent.
+- Added fail-closed future-prefix request binding. One same-prefix A request is
+  selected only when it has matching future source-row prefixes, all
+  alternatives have explicit conflicting prefixes, and the selected proof
+  reaches the latest elimination horizon. Missing history and request absence
+  remain unresolved.
+- Added a safe offline reviewer that verifies the compact bundle's tar
+  geometry and internal manifest, requires a byte-identical committed
+  classification, reruns the official classifier, and produces a small
+  self-hashed return.
+- Added one bucket-executor wrapper. It requires a clean `local/*` analysis
+  commit, reconstructs d36 from runtime source
+  `16c224aa80eb6b3a544be19f693c0542ab4b0dcb`, verifies render identity, reads
+  only the sealed treatment Round-0 bundle, and performs no GCS write,
+  Kubernetes action, or TPU launch.
+- Local d36 reconstruction: `M15_D36_RENDER_IDENTITY_PASS`, full observer,
+  seam layer 0, two arms, three rounds, source identity exact.
+- Local validation: task discovery 157/157 PASS; focused
+  classifier/reviewer 24/24 PASS; P38 persistence
+  `PERSISTENCE_TEST_PASS`; flag audit 395/395 PASS; Python/Bash syntax and
+  `git diff --check` PASS. The executor wrapper's dirty-worktree negative
+  exited 2 with `[M15.D36.OFFLINE] REFUSING: analysis worktree is dirty`
+  before any remote access.
+- External status: offline GCS reclassification NOT RUN; pinned exact-image
+  NOT RUN; target NOT RUN. No commit, push, GCS access/mutation,
+  Kubernetes, or TPU action occurred.
+- Next gate: after explicit commit/push approval, a clean bucket-capable agent
+  runs `run_m15_attempt17_d36_offline_binding.sh` with a fresh local output
+  directory under `/mnt/disks/tunix-data`. GCS read access is a separate user
+  approval. Phase E remains closed until a returned `FIRST_RED_LOCALIZED`
+  contains and survives review of the complete boundary and coordinate ledger.
+- Handoff update: the top of `HANDOFF.md` now gives a cold-start executor the
+  distinct runtime/analysis SHA roles, forbidden dirty worktree, ordered reads,
+  clean-worktree construction and preflight, exact no-pipe wrapper command,
+  terminal markers, failure preservation, allowed return files, and the
+  fail-closed decision table. It contains no bucket root or credential value.
