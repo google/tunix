@@ -74,8 +74,10 @@ $docker run --rm \
       DPWorkloadsTest.test_p62_numeric_debug_is_exact_no_commit_geometry \
       DPWorkloadsTest.test_p64_numeric_debug_is_exact_p45_no_commit_geometry \
       DPWorkloadsTest.test_p57_zero_full_admits_its_signed_wandb_project_only \
+      DPWorkloadsTest.test_frozenlake_v1_full_requires_exact_system_optimization_tuple \
       DPWorkloadsTest.test_p57_m15_uses_its_signed_wide_token_contract \
       DPWorkloadsTest.test_p57_token_contract_rejects_partial_or_foreign_pairs
+    python3 canon-zero-tim/tests/v1_system_optimization/test_workload_rollout.py
     XLA_FLAGS=--xla_force_host_platform_device_count=64 \
       python3 canon-zero-tim/tasks/v1-phase4-three-full-recipes/scripts/probe_gsm_fixed_replay_scale.py
     python3 tests/perf/profile_window_test.py
@@ -89,5 +91,5 @@ $docker run --rm \
     python3 canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/test_classify_m15_apc_wide_seam.py
     python3 canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/test_m15_wide_durability.py
     bash canon-zero-tim/tests/p38_serving/test_gcs_persistence.sh
-    echo "V1_HP_EXACT_IMAGE_PASS dp16_gathered=1 dp2tp2_parallel=2 p59_tp4_tp8=2 p59_checked_vma_real_shim=4 p59_rpa=2 p59_fused_linear=2 p62_numeric=6 p64_numeric=4 p64_capsule=3 p63_clip=1 first_update_gate=4 gsm_scale_replay=1 p57_wandb=1 m15_token=1 apc_m15_carrier=68 m15_durability=1 m15_round_provenance=1 perfetto_window=1 manifests=3"
+    echo "V1_HP_EXACT_IMAGE_PASS dp16_gathered=1 dp2tp2_parallel=2 p59_tp4_tp8=2 p59_checked_vma_real_shim=4 p59_rpa=2 p59_fused_linear=2 p62_numeric=6 p64_numeric=4 p64_capsule=3 p63_clip=1 first_update_gate=4 gsm_scale_replay=1 p57_wandb=1 frozenlake_system_optimization=1 m15_token=1 apc_m15_carrier=68 m15_durability=1 m15_round_provenance=1 perfetto_window=1 manifests=3"
   '

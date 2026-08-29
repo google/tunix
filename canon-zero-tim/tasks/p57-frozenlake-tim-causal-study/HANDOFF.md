@@ -1,5 +1,37 @@
 # P57 300-update execution handoff
 
+## START HERE — optimized Zero references use the P74-enabled two-full wrapper
+
+For the next strict Zero P45 and M15/main full references, do not use the
+baseline P57 profile, `render_three_arm_wave.sh`, the legacy P45 resident
+renderer, or any previously rendered YAML. The registered route is now the
+Phase4 two-full wrapper:
+
+```bash
+bash canon-zero-tim/tasks/v1-phase4-three-full-recipes/scripts/prepare_p67_frozenlake_two_full_wave.sh \
+  <approved-40-character-sha> \
+  <fresh-output-dir> \
+  <fresh-campaign-root> \
+  <fresh-p45-run-id> \
+  <fresh-m15-run-id>
+```
+
+This command is render-only and requires a clean checkout of the exact
+published source. The current rollout implementation is local and uncommitted;
+commit/push and either target launch each need separate approval.
+
+Both manifests must resolve checked-VMA/P67/first-update protection plus
+`CANON_DP_COMPARE_MODE=fingerprint-hybrid`,
+`CANON_DP_DISTINCT_SCHEDULE=first-group-warmup`,
+`CANON_DP_FINITE_FETCH=batched-commit`, and `CANON_P71_SCAN=fwd`.
+`CANON_DP_COLLECTIVE_REDUCE` remains absent. P74 itself has no flag: it is the
+checked-VMA source path selected by `CANON_P59_CHECKED_VMA=1`.
+
+This optimized Zero route is no-eval, checkpoint-disabled, strict, APC-off,
+and fixed at 300 updates. It does not change the Native/no-IS or Native/IS
+comparison arms described below. Target performance and full-horizon results
+remain `TARGET NOT RUN` for this rollout.
+
 ## START HERE — P57.1c Perf v2 step-boundary repair passed one-host G4
 
 This section supersedes the Wave 15 incident queue below.

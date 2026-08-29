@@ -1,0 +1,108 @@
+V1 GSM8K STOCK-NATIVE FULL CONTROL VALIDATION
+Date: 2026-08-29 UTC
+Worktree: /home/yuxuan/code_rl_repro/worktrees/p57_zero_noeval_0828
+Bound starting source: d4128940464054866d466a6cce5adf326f513caf
+Pinned image: sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a
+
+FOCUSED HOST GATES
+
+Command: python3 canon-zero-tim/tests/v1_gsm8k_native_full/test_renderer.py
+Result: PASS, exit 0, 10 tests with 1 pinned-image-only test skipped on host.
+Coverage: stock profile selection; raw Zero-selector absence; P33 command and
+restart-policy reuse; identical Native/Zero command, geometry, source,
+project, group, and SEED=42; real 00_env.sh positive; injected P32 mixed-arm
+negative; entrypoint stock-path routing; clean-SHA/fresh-output/render-only
+wrapper contract; handoff routing.
+
+Command: python3 canon-zero-tim/tests/v1_system_optimization/test_workload_rollout.py
+Result: PASS, exit 0, 4 tests.
+
+Command: python3 canon-zero-tim/tests/v1_phase4/test_p67_frozenlake_two_full_renderer.py
+Result: PASS, exit 0, 5 tests.
+
+Command: python3 canon-zero-tim/tests/p58_deepswe_native_zero/test_renderer.py
+Result: PASS, exit 0, 31 tests.
+
+Command: bash canon-zero-tim/tests/v1_gsm8k_xprof_pair/run_cpu.sh
+Result: PASS, exit 0, 25 tests.
+Receipt: V1_GSM8K_XPROF_CPU_PASS.
+Coverage: the existing executed P56 Native oracle remains compatible with the
+shared driver W&B routing change.
+
+Command: python3 canon-zero-tim/tests/manage_canon_flags/test_audit_flag_registry.py
+Result: PASS, exit 0, 2 tests.
+
+STATIC GATES
+
+Command: python3 -m py_compile <changed Python implementation and tests>
+Result: PASS, exit 0.
+
+Command: bash -n <Native, FrozenLake, and DeepSWE entrypoint/wrapper scripts>
+Result: PASS, exit 0.
+
+Command: git diff --check
+Result: PASS, exit 0 before the final validation-ledger update. The final
+authority is the rerun at the end of this file.
+
+PINNED-IMAGE CPU GATES
+
+Command: bash canon-zero-tim/tests/v1_gsm8k_native_full/run_exact_image.sh sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a
+Result: PASS, exit 0, 10 Native tests plus 1 optimized-Zero neighbor test.
+Receipt: V1_GSM8K_NATIVE_FULL_EXACT_IMAGE_PASS native_contract=10 zero_neighbor=1
+Proof: six stock engine files matched, the normal GSM8K driver imported, the
+canonical overlay and alignment path remained absent, and the worktree was
+mounted read-only with JAX_PLATFORMS=cpu.
+
+Command: bash canon-zero-tim/tests/v1_phase4/run_exact_image.sh sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a
+Result: PASS, exit 0.
+Receipt: V1_HP_EXACT_IMAGE_PASS ... frozenlake_system_optimization=1 ... manifests=3
+Proof: the P45 and M15 Zero/full manifests, real 00_env.sh resolution, TP8
+checked-VMA shims, partial-tuple negatives, and adjacent Phase4 suites passed.
+
+Command: bash canon-zero-tim/tests/p58_deepswe_native_zero/run_exact_image.sh sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a
+Result: PASS, exit 0.
+Receipt: P58_EXACT_IMAGE_CPU_PASS ... zero_hp_full=1 system_optimization=1 ... regressions=1
+Proof: the DeepSWE Zero/full/HP renderer, environment contract, Qwen3-4B TP8
+overlay, P59 checked-VMA path, first-update gate, and Native/diagnostic
+isolation controls passed.
+
+FOUR-CARRIER AGGREGATE RENDER
+
+Commands: render_p67_frozenlake_two_full_recipes.py;
+render_p58_deepswe_tim.py --stage full --arm zero --high-performance;
+render_gsm8k_native_full.py; then fail-fast manifest counts and selector
+isolation checks under /tmp/v1-four-full-verify.bmpPtT.
+Result: PASS, exit 0.
+Receipt: FOUR_CARRIER_RENDER_PASS manifests=4 optimized_zero=3 stock_native=1 launch=not-executed
+Manifests: FrozenLake P45 Zero/full, FrozenLake M15/main Zero/full, DeepSWE
+Zero/full/HP, and GSM8K stock Native/full.
+
+CORRECTED VALIDATION INVOCATIONS
+
+The first aggregate-render attempt passed a filesystem path where the P57
+renderer requires a short campaign tag. The renderer correctly rejected it;
+the attempt is a harness error and no aggregate PASS is claimed from it.
+The next check searched a YAML name/value pair on one line even though YAML
+stores them on adjacent lines. All four manifests rendered, but the check
+exited 1. The final fail-fast check above counts selector names and is the
+authority.
+
+Running test_environment_contract.py with bare host Python first lacked the
+workspace PYTHONPATH and then reached the known missing optional dependency
+metrax. Neither invocation is a product result. The same suite ran with the
+correct dependencies inside the pinned P58 image and passed 7/7.
+
+NOT RUN
+
+- Clean-worktree wrapper success paths: no committed post-change source SHA
+  exists; the current development worktree is intentionally dirty.
+- Kubernetes server dry-run or apply.
+- FrozenLake DP8xTP8, DeepSWE DP8xTP8, or GSM8K DP16xTP4 target training.
+- Target XProf, whole-step/reverse performance, convergence, or live W&B
+  comparison for these four jobs.
+- Commit, push, image publication, or other remote mutation.
+
+FINAL HYGIENE
+
+Command: git diff --check
+Result: PASS, exit 0 after the final ledger edits.

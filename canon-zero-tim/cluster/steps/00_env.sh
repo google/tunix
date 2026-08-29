@@ -40,6 +40,35 @@ for _canon_p46_key in CANON_P46_DEEPSWE_TRAIN CANON_P34_DEEPSWE \
 done
 unset _canon_p46_key
 
+# A Native GSM8K manifest must not smuggle an active Zero selector through the
+# raw JobSet and rely on the stock profile to unset it. Snapshot contradictions
+# before profile resolution so hand-edited mixed arms fail closed.
+_CANON_GSM8K_NATIVE_INPUT_CONTRADICTIONS=()
+if [ "${CANON_PROFILE_FILE:-}" = \
+     "cluster/profiles/qwen3-1p7b-dp16-tp4-gsm8k-native.env" ] && \
+   [ "${CANON_GSM8K_TRAIN:-}" = "1" ] && \
+   [ "${CANON_GSM8K_VANILLA:-}" = "1" ]; then
+  for _canon_gsm_native_key in CANON_P32_WORKLOAD CANON_ENGINE_MODULE_C \
+      CANON_ALIGNMENT_GATE CANON_ALIGNMENT_GATE_ONLY \
+      CANON_ALIGNMENT_UPDATE_CANARY CANON_ALIGNMENT_TRAIN \
+      CANON_PRE_ALIGN_GATE CANON_GSM8K_AB_REPORT_ONLY \
+      CANON_GSM8K_ALIGNMENT_WARN_ONLY CANON_P38_FIXED_LM_HEAD \
+      CANON_P59_RANK_PARALLEL_BACKWARD CANON_P59_CHECKED_VMA \
+      CANON_V1_HP_FULL CANON_V1_HP_FIRST_UPDATE_GATE \
+      CANON_P63_OVERFLOW_SAFE_CLIP CANON_DP_COMPARE_MODE \
+      CANON_DP_DISTINCT_SCHEDULE CANON_DP_FINITE_FETCH CANON_P71_SCAN \
+      CANON_DP_COLLECTIVE_REDUCE CANON_P67_P66_VMA_P59_ONLY; do
+    if [[ -v "$_canon_gsm_native_key" && \
+          -n "${!_canon_gsm_native_key}" && \
+          "${!_canon_gsm_native_key}" != "0" ]]; then
+      _CANON_GSM8K_NATIVE_INPUT_CONTRADICTIONS+=(
+        "${_canon_gsm_native_key}=${!_canon_gsm_native_key}"
+      )
+    fi
+  done
+  unset _canon_gsm_native_key
+fi
+
 # shellcheck disable=SC1090
 set -a
 export ENABLE_PATHWAYS_PERSISTENCE="${ENABLE_PATHWAYS_PERSISTENCE:-1}"
@@ -73,6 +102,13 @@ if [ "${CANON_PROFILE_FILE:-}" = \
    [ "${CANON_P58_DEEPSWE_TIM:-}" = "1" ] && \
    [ "${CANON_P58_TIM_ARM:-}" = "native" ]; then
   P58_NATIVE=1
+fi
+GSM8K_NATIVE=0
+if [ "${CANON_PROFILE_FILE:-}" = \
+     "cluster/profiles/qwen3-1p7b-dp16-tp4-gsm8k-native.env" ] && \
+   [ "${CANON_GSM8K_TRAIN:-}" = "1" ] && \
+   [ "${CANON_GSM8K_VANILLA:-}" = "1" ]; then
+  GSM8K_NATIVE=1
 fi
 
 # Secrets: keep out of the env file on disk; strip whitespace; never echo the value.
@@ -575,9 +611,11 @@ validate_train_mesh_pin() {
 for k in MIN_TOKEN_BUCKET NEW_MODEL_DESIGN XLA_FLAGS CANON_PROFILE \
          CANON_MODEL_DIR_NAME CANON_QWEN3_HIDDEN_SIZE \
          CANON_QWEN3_TP_SIZE; do req "$k"; done
-if [ "$P57_STOCK_FAST" = "1" ] || [ "$P58_NATIVE" = "1" ]; then
+if [ "$P57_STOCK_FAST" = "1" ] || [ "$P58_NATIVE" = "1" ] || \
+   [ "$GSM8K_NATIVE" = "1" ]; then
   stock_label="P57 stock-fast"
   [ "$P58_NATIVE" = "0" ] || stock_label="P58 native"
+  [ "$GSM8K_NATIVE" = "0" ] || stock_label="GSM8K native"
   for k in CANON_FIXED_AR CANON_FIXED_AR_EMBED \
            CANON_RPA_D CANON_RPA_P CANON_RPA_M CANON_LOGPROB_M \
            CANON_PALLAS_ALL_PROJ CANON_PALLAS_ALL_RMSNORM \
@@ -644,6 +682,44 @@ if [ "$P57_STOCK_FAST" = "1" ] || [ "$P58_NATIVE" = "1" ]; then
      [ "${CANON_P58_NATIVE_STOCK_PROMPT_OBSERVER:-0}" != "0" ]; then
     echo "[env] P57 stock-fast forbids the P58 stock prompt observer" >&2
     fail=1
+  fi
+  if [ "$GSM8K_NATIVE" = "1" ]; then
+    if [ "${#_CANON_GSM8K_NATIVE_INPUT_CONTRADICTIONS[@]}" -ne 0 ]; then
+      echo "[env] GSM8K native caller contradictions: ${_CANON_GSM8K_NATIVE_INPUT_CONTRADICTIONS[*]}" >&2
+      fail=1
+    fi
+    [ "${CANON_PROFILE:-}" = \
+      "qwen3-1p7b-dp16-tp4-gsm8k-native" ] && \
+    [ "${CANON_GSM8K_TRAIN:-}" = "1" ] && \
+    [ "${CANON_GSM8K_VANILLA:-}" = "1" ] && \
+    [ -z "${CANON_P32_WORKLOAD:-}" ] && \
+    [ "${CANON_P33_RUN_STAGE:-}" = "full" ] && \
+    [ "${CANON_P33_NO_COMMIT:-1}" = "0" ] && \
+    [ "${CANON_P32_TRAIN_ADMITTED:-1}" = "0" ] && \
+    [ "${CANON_P32_DP_REDUCTION_ADMITTED:-1}" = "0" ] && \
+    [ "${CANON_P33_WORKLOAD_LAUNCH_ADMITTED:-1}" = "0" ] && \
+    [ "${CANON_ALIGNMENT_GATE:-1}" = "0" ] && \
+    [ "${CANON_ALIGNMENT_TRAIN:-1}" = "0" ] && \
+    [ "${CANON_PRE_ALIGN_GATE:-1}" = "0" ] && \
+    [ "${CANON_GSM8K_ALIGNMENT_WARN_ONLY:-1}" = "0" ] && \
+    [ "${CANON_P38_FIXED_LM_HEAD:-1}" = "0" ] && \
+    [ "${CANON_P59_RANK_PARALLEL_BACKWARD:-1}" = "0" ] && \
+    [ "${CANON_V1_HP_FULL:-1}" = "0" ] || {
+      echo "[env] GSM8K native requires stock vanilla full training with P32, alignment, P59, and V1 disabled" >&2
+      fail=1
+    }
+    for _canon_gsm_native_arg in \
+      examples/math_gsm8k/qwen3_grpo_demo.py \
+      --mesh_dp=16 --mesh_tp=4 --max_steps=200; do
+      case " ${CANON_RUN_CMD:-} " in
+        *" $_canon_gsm_native_arg "*) ;;
+        *)
+          echo "[env] GSM8K native command lacks $_canon_gsm_native_arg" >&2
+          fail=1
+          ;;
+      esac
+    done
+    unset _canon_gsm_native_arg
   fi
   unset stock_expected
   case "${XLA_FLAGS:-}" in
@@ -2713,6 +2789,9 @@ if [ "$P57_STOCK_FAST" = "1" ]; then
   else
     echo "[P57.STOCK_FAST] ZERO_TIM_OFF_PASS absent=12 zero=25"
   fi
+fi
+if [ "$GSM8K_NATIVE" = "1" ]; then
+  echo "[GSM8K.NATIVE] ZERO_TIM_OFF_PASS p32=absent canonical_engine=off alignment=off p59=off v1=off"
 fi
 
 # Emit the resolved configuration as an authoritative snapshot.  00_env.sh runs in a child

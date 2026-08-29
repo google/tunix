@@ -84,6 +84,15 @@ class P67FrozenLakeTwoFullRendererTest(unittest.TestCase):
         self.assertEqual(values["CANON_P59_CHECKED_VMA"], "1")
         self.assertEqual(values["CANON_P67_P66_VMA_P59_ONLY"], "1")
         self.assertEqual(values["CANON_V1_HP_FIRST_UPDATE_GATE"], "1")
+        self.assertEqual(
+            values["CANON_DP_COMPARE_MODE"], "fingerprint-hybrid"
+        )
+        self.assertEqual(
+            values["CANON_DP_DISTINCT_SCHEDULE"], "first-group-warmup"
+        )
+        self.assertEqual(values["CANON_DP_FINITE_FETCH"], "batched-commit")
+        self.assertEqual(values["CANON_P71_SCAN"], "fwd")
+        self.assertNotIn("CANON_DP_COLLECTIVE_REDUCE", values)
         self.assertEqual(values["CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY"], "0")
         self.assertEqual(values["CANON_P33_ENABLE_EVAL"], "0")
         self.assertEqual(values["CANON_P33_DISABLE_EVAL"], "1")
@@ -147,6 +156,15 @@ class P67FrozenLakeTwoFullRendererTest(unittest.TestCase):
         self.assertIn("export CANON_P59_CHECKED_VMA=1", snapshot)
         self.assertIn("export CANON_P66_P59_CHECK_VMA=1", snapshot)
         self.assertIn("export CANON_P67_P66_VMA_P59_ONLY=1", snapshot)
+        self.assertIn(
+            "export CANON_DP_COMPARE_MODE=fingerprint-hybrid", snapshot
+        )
+        self.assertIn(
+            "export CANON_DP_DISTINCT_SCHEDULE=first-group-warmup", snapshot
+        )
+        self.assertIn("export CANON_DP_FINITE_FETCH=batched-commit", snapshot)
+        self.assertIn("export CANON_P71_SCAN=fwd", snapshot)
+        self.assertNotIn("CANON_DP_COLLECTIVE_REDUCE", snapshot)
 
   def test_wrong_profile_and_partial_scope_are_rejected(self):
     with tempfile.TemporaryDirectory() as tmp:

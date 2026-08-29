@@ -1,0 +1,144 @@
+V1 SYSTEM-OPTIMIZATION WORKLOAD ROLLOUT VALIDATION
+Date: 2026-08-29 UTC
+Worktree: /home/yuxuan/code_rl_repro/worktrees/p57_zero_noeval_0828
+Bound starting source: d4128940464054866d466a6cce5adf326f513caf
+Pinned image: sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a
+
+FOCUSED HOST GATES
+
+Command: python3 canon-zero-tim/tests/v1_system_optimization/test_workload_rollout.py
+Result: PASS, exit 0, 3 tests.
+Coverage: exact registered tuples, fresh-copy behavior, unregistered-workload
+negative control, and render-only DeepSWE preparation wrapper.
+
+Command: python3 canon-zero-tim/tests/v1_phase4/test_p67_frozenlake_two_full_renderer.py
+Result: PASS, exit 0, 5 tests.
+Coverage: P45/M15 positive manifests, effective-env persistence, exact tuple,
+checked-VMA/P67 protection, and collective-reducer absence.
+
+Command: python3 canon-zero-tim/tests/v1_phase4/test_three_full_renderer.py
+Result: PASS, exit 0, 9 tests.
+Coverage: existing GSM8K/P45/M15 renderer behavior after sharing the tuple.
+
+Command: python3 canon-zero-tim/tests/p58_deepswe_native_zero/test_renderer.py
+Result: PASS, exit 0, 31 tests.
+Coverage: exact DeepSWE Zero/full/HP tuple plus absence on Native, Native+IS,
+ordinary Zero, three-update, checked-VMA diagnostics, and seam diagnostics.
+
+Command: python3 canon-zero-tim/tests/manage_canon_flags/test_audit_flag_registry.py
+Result: PASS, exit 0, 2 tests.
+
+Focused host total: 50 passed (48 renderer/shared plus 2 registry audit).
+
+STATIC GATES
+
+Command: python3 -m py_compile canon-zero-tim/cluster/v1_full_system_optimization.py canon-zero-tim/cluster/render_p58_deepswe_tim.py canon-zero-tim/tasks/v1-phase4-three-full-recipes/scripts/render_three_full_recipes.py canon-zero-tim/tasks/v1-phase4-three-full-recipes/scripts/render_p67_frozenlake_two_full_recipes.py tunix/rl/deepswe_contract.py tunix/rl/dp_workloads.py canon-zero-tim/tests/v1_system_optimization/test_workload_rollout.py
+Result: PASS, exit 0.
+
+Command: bash -n canon-zero-tim/tasks/v1-system-optimization-workload-rollout/prepare_deepswe_zero_hp_full.sh canon-zero-tim/tasks/v1-phase4-three-full-recipes/scripts/prepare_p67_frozenlake_two_full_wave.sh canon-zero-tim/tests/v1_phase4/run_exact_image.sh canon-zero-tim/tests/p58_deepswe_native_zero/run_exact_image.sh
+Result: PASS, exit 0.
+
+Command: git diff --check
+Result: PASS, exit 0.
+
+PINNED-IMAGE CPU GATES
+
+Command: bash canon-zero-tim/tests/v1_phase4/run_exact_image.sh tunix_frozenlake_image:vllm-tpu0.25.0
+Result: PASS, exit 0.
+Receipt: V1_HP_EXACT_IMAGE_PASS ... frozenlake_system_optimization=1 ... manifests=3
+Coverage includes real 00_env.sh persistence/reload, FrozenLake runtime
+contract, partial-tuple and collective-reducer negatives, and adjacent V1
+Phase4 suites.
+
+Command: sudo docker run --rm -v /home/yuxuan/code_rl_repro/worktrees/p57_zero_noeval_0828:/workspace:ro -w /workspace -e JAX_PLATFORMS=cpu -e PYTHONPATH=/workspace sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a pytest -q tests/rl/test_p70_receipt_selectors.py tests/rl/test_p71_fwd_scan.py
+Result: PASS, exit 0, 40 passed, 3 skipped, 4 warnings.
+Skip reason: TPU-only cases had no /dev/vfio in this deliberately CPU-only
+container. Read-only mount produced the expected pytest-cache warning.
+
+Command: bash canon-zero-tim/tests/p58_deepswe_native_zero/run_exact_image.sh sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a
+Result: PASS, exit 0.
+Receipt: P58_EXACT_IMAGE_CPU_PASS ... zero_hp_full=1 system_optimization=1 ... regressions=1
+Coverage includes P44 Qwen4B parity, P59 TP4/TP8 installed shims, P58
+renderer/profile/real-env/runtime contracts, negative controls, and adjacent
+DeepSWE regressions.
+
+CORRECTED HARNESS INVOCATIONS
+
+Command: python3 canon-zero-tim/tests/v1_phase4/test_three_full_recipes.py
+Result: HARNESS ERROR, exit 2, file does not exist; no tests ran. Corrected to
+test_three_full_renderer.py above, which passed 9/9.
+
+Command: python3 canon-zero-tim/tests/p58_deepswe_native_zero/test_environment_contract.py on the host
+Result: HOST DEPENDENCY ERROR because the host Python lacks metrax. This was
+not treated as a product result; the same real-environment suite ran and
+passed inside the pinned P58 exact-image gate above.
+
+NOT RUN
+
+- FrozenLake DP8xTP8 TPU full training.
+- DeepSWE DP8xTP8 TPU/Kubernetes full training.
+- Target XProf or target performance/convergence comparison.
+- Commit, push, image publication, Kubernetes apply, or any remote mutation.
+
+HANDOFF-INTEGRATION ADDENDUM — 2026-08-29 UTC
+
+Command: python3 canon-zero-tim/tests/v1_system_optimization/test_workload_rollout.py
+Result: PASS, exit 0, 4 tests.
+Coverage: the first handoff section routes P45/P57/Phase4 and P58 production
+full training through the registered wrappers; all owning runbooks contain the
+exact P70/P71 tuple and collective-reducer absence.
+
+Command: python3 canon-zero-tim/tests/v1_phase4/test_p67_frozenlake_two_full_renderer.py
+Result: PASS, exit 0, 5 tests.
+
+Command: python3 canon-zero-tim/tests/p58_deepswe_native_zero/test_renderer.py
+Result: PASS, exit 0, 31 tests.
+
+Command: python3 canon-zero-tim/tests/manage_canon_flags/test_audit_flag_registry.py
+Result: PASS, exit 0, 2 tests.
+
+Command: python3 -m py_compile canon-zero-tim/tests/v1_system_optimization/test_workload_rollout.py
+Result: PASS, exit 0.
+
+Command: bash -n canon-zero-tim/tasks/v1-system-optimization-workload-rollout/prepare_deepswe_zero_hp_full.sh canon-zero-tim/tasks/v1-phase4-three-full-recipes/scripts/prepare_p67_frozenlake_two_full_wave.sh
+Result: PASS, exit 0.
+
+Command: sudo docker run --rm -v /home/yuxuan/code_rl_repro/worktrees/p57_zero_noeval_0828:/workspace:ro -w /workspace -e JAX_PLATFORMS=cpu -e PYTHONPATH=/workspace sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a python3 canon-zero-tim/tests/v1_system_optimization/test_workload_rollout.py
+Result: PASS, exit 0, 4 tests.
+
+Command: git diff --check
+Result: PASS, exit 0 before the final phase-ledger-only update; rerun below is
+the final authority.
+
+Not run: FrozenLake or DeepSWE target training, target XProf, Kubernetes
+server dry-run/apply, commit, push, or image publication.
+
+Final command after phase-ledger update: git diff --check
+Final result: PASS, exit 0.
+
+FOUR-CARRIER REVALIDATION ADDENDUM — 2026-08-29 UTC
+
+Command: bash canon-zero-tim/tests/v1_phase4/run_exact_image.sh sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a
+Result: PASS, exit 0.
+Receipt: V1_HP_EXACT_IMAGE_PASS ... frozenlake_system_optimization=1 ... manifests=3
+
+Command: bash canon-zero-tim/tests/p58_deepswe_native_zero/run_exact_image.sh sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a
+Result: PASS, exit 0.
+Receipt: P58_EXACT_IMAGE_CPU_PASS ... zero_hp_full=1 system_optimization=1 ... regressions=1
+
+Command: bash canon-zero-tim/tests/v1_gsm8k_native_full/run_exact_image.sh sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a
+Result: PASS, exit 0, 10 Native contracts plus 1 Zero neighbor.
+Receipt: V1_GSM8K_NATIVE_FULL_EXACT_IMAGE_PASS native_contract=10 zero_neighbor=1
+
+Command: direct fail-fast render of P45/M15 two-full, DeepSWE
+zero/full/high-performance, and GSM8K stock Native followed by manifest and
+selector counts under /tmp/v1-four-full-verify.bmpPtT.
+Result: PASS, exit 0.
+Receipt: FOUR_CARRIER_RENDER_PASS manifests=4 optimized_zero=3 stock_native=1 launch=not-executed
+
+Not run: clean-SHA wrapper success, Kubernetes server dry-run/apply, any of
+the four TPU training jobs, target XProf/performance/convergence, commit,
+push, or image publication.
+
+Final command after the four-carrier ledger update: git diff --check
+Final result: PASS, exit 0.

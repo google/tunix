@@ -188,10 +188,41 @@ class P58RendererTest(unittest.TestCase):
         "1",
     )
     self.assertIn("zero-hp-full", document["metadata"]["name"])
+    self.assertEqual(env["CANON_P59_CHECKED_VMA"], "1")
+    self.assertEqual(env["CANON_P67_P66_VMA_P59_ONLY"], "1")
+    self.assertEqual(env["CANON_V1_HP_FIRST_UPDATE_GATE"], "1")
+    self.assertEqual(env["CANON_DP_COMPARE_MODE"], "fingerprint-hybrid")
+    self.assertEqual(
+        env["CANON_DP_DISTINCT_SCHEDULE"], "first-group-warmup"
+    )
+    self.assertEqual(env["CANON_DP_FINITE_FETCH"], "batched-commit")
+    self.assertEqual(env["CANON_P71_SCAN"], "fwd")
+    self.assertNotIn("CANON_DP_COLLECTIVE_REDUCE", env)
     for arm, stage in (("native", "full"), ("zero", "three-update")):
       with self.subTest(arm=arm, stage=stage):
         with self.assertRaisesRegex(ValueError, "only for Zero full"):
           self._render(arm, stage, high_performance=True)
+
+  def test_system_optimization_is_absent_from_neighboring_and_diagnostic_arms(self):
+    documents = (
+        self._render("native", "full"),
+        self._render("native", "full", sampler_is=True),
+        self._render("zero", "three-update"),
+        self._render("zero", "full"),
+        self._render(
+            "zero", "full", checked_vma_off_diagnostic=True
+        ),
+        self._render(
+            "zero", "full", checked_vma_on_diagnostic=True
+        ),
+        self._render("zero", "full", seam_localization="coarse"),
+    )
+    for document in documents:
+      env = renderer.p34._env(document)
+      with self.subTest(jobset=document["metadata"]["name"]):
+        for key in renderer.FULL_SYSTEM_OPTIMIZATION_ENV_NAMES:
+          self.assertNotIn(key, env)
+        self.assertNotIn("CANON_DP_COLLECTIVE_REDUCE", env)
 
   def test_checked_vma_off_diagnostic_is_exact_zero_hp_step0_selector(self):
     production = self._render(

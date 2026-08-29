@@ -23,6 +23,7 @@ for path in (_REPO_ROOT, _CLUSTER_DIR):
 
 import render_p33_jobsets as p33
 import render_p57_frozenlake_tim as p57
+from v1_full_system_optimization import full_system_optimization_additions
 
 
 _SHA_RE = re.compile(r"[0-9a-f]{40}")
@@ -41,24 +42,14 @@ _JAX_CACHE_ENV = {
 
 def _optimization_additions(label: str) -> dict[str, str]:
   """Returns the reviewed reverse-path bundle for one full recipe."""
-  if label not in ("gsm8k", "p45", "m15"):
+  workload = {
+      "gsm8k": "gsm8k",
+      "p45": "frozenlake-p45",
+      "m15": "frozenlake-m15",
+  }.get(label)
+  if workload is None:
     raise ValueError(f"unknown full-recipe label: {label!r}")
-  additions = {
-      "CANON_P59_CHECKED_VMA": "1",
-      "CANON_V1_HP_FIRST_UPDATE_GATE": "1",
-      # Receipt-lightening selectors do not alter gradient values. The
-      # collective-reduce selector deliberately remains absent until the
-      # DP16 oracle is green.
-      "CANON_DP_COMPARE_MODE": "fingerprint-hybrid",
-      "CANON_DP_DISTINCT_SCHEDULE": "first-group-warmup",
-      "CANON_DP_FINITE_FETCH": "batched-commit",
-      # fwd has TP>1 hardware certification on DP2xTP2. bwd is forbidden on
-      # a non-unit model axis and must not silently degrade on TP4/TP8.
-      "CANON_P71_SCAN": "fwd",
-  }
-  if label != "gsm8k":
-    additions["CANON_P67_P66_VMA_P59_ONLY"] = "1"
-  return additions
+  return full_system_optimization_additions(workload)
 
 
 def _gsm8k_spec() -> p33.JobSpec:

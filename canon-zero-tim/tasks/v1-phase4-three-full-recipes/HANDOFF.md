@@ -1,5 +1,85 @@
 # V1 Phase4 three-full handoff
 
+## START HERE — next P45/M15 full wave must use the P74 system-optimization bundle
+
+This section is the authoritative launch preparation for the two optimized
+FrozenLake Zero full recipes. It supersedes older P45/M15 render commands in
+this historical handoff, but does not erase their incident evidence.
+
+Status is `LOCAL IMPLEMENTED / PINNED-IMAGE CPU PASS / SOURCE NOT COMMITTED /
+TARGET NOT RUN`. The implementation CL must first be reviewed, explicitly
+approved for commit/push, published, read back at one exact 40-character SHA,
+and checked out clean. Do not render the next wave from the older published
+`a8449b3d...` source or from this dirty development worktree.
+
+Run the exact-image admission and then the render-only wrapper from the
+physical repository root:
+
+```bash
+bash canon-zero-tim/tests/v1_phase4/run_exact_image.sh \
+  tunix_frozenlake_image:vllm-tpu0.25.0
+
+bash canon-zero-tim/tasks/v1-phase4-three-full-recipes/scripts/prepare_p67_frozenlake_two_full_wave.sh \
+  <approved-40-character-sha> \
+  <fresh-output-dir> \
+  <fresh-campaign-root> \
+  <fresh-p45-run-id> \
+  <fresh-m15-run-id>
+```
+
+The wrapper never launches. It must emit
+`V1_P67_FROZENLAKE_WAVE_READY ... manifests=2 ... launch=not-executed`.
+Before a separately approved apply, both resolved environments must contain:
+
+```text
+CANON_P59_CHECKED_VMA=1
+CANON_P66_P59_CHECK_VMA=1        # derived compatibility alias
+CANON_P67_P66_VMA_P59_ONLY=1
+CANON_V1_HP_FIRST_UPDATE_GATE=1
+CANON_DP_COMPARE_MODE=fingerprint-hybrid
+CANON_DP_DISTINCT_SCHEDULE=first-group-warmup
+CANON_DP_FINITE_FETCH=batched-commit
+CANON_P71_SCAN=fwd
+```
+
+`CANON_DP_COLLECTIVE_REDUCE` must remain absent. P74 is source behavior under
+the checked-VMA path, not a flag to add by hand. P45 and M15/main retain their
+strict Zero, APC-off, no-eval, no-checkpoint, 300-update identities. Native,
+IS, diagnostic, legacy resident, and evaluation carriers do not inherit this
+tuple.
+
+Offline admission is recorded under
+`../v1-system-optimization-workload-rollout/validation.log`. It does not
+certify DP8xTP8 performance or convergence. Each target run must independently
+return strict alignment, checked-VMA/P67 receipts, the first-update gate,
+complete `p32_vag_reverse` timing, 300 committed updates, and its own final
+classification.
+
+## START HERE — GSM8K Native/mismatch and Zero full now have matched controls
+
+The optimized GSM8K full renderer remains the single-job P74 wrapper:
+
+```text
+scripts/prepare_gsm8k_full_dp16tp4_p74.sh
+```
+
+Its matched stock Native/mismatch control is now prepared by:
+
+```text
+../v1-gsm8k-native-full-control/prepare_gsm8k_native_full.sh
+```
+
+The two arms use the same source, `_gsm8k_command(200)`, driver `SEED=42`,
+DP16xTP4 geometry, resident optimizer, and W&B project/group
+`zero-tim-gsm8k-dp16-tp4` / `qwen3-1p7b-dp16-tp4`. They use distinct
+JobSet-derived run names. The Native arm is the stock P56 vanilla path:
+`CANON_GSM8K_VANILLA=1`, no `CANON_P32_WORKLOAD`, no canonical engine overlay,
+no alignment observer, ordinary Tunix backward, and stock lm head. All Zero
+numerical and optimization selectors remain absent from its raw manifest. See
+`../v1-gsm8k-native-full-control/HANDOFF.md` for the two render-only commands,
+the exact manifest gate, and the comparison receipt bundle. No target run is
+authorized or claimed by this documentation update.
+
 ## START HERE — GSM8K Zero-TIM Full (`gfull1`) step 64 rescore incident sealed
 
 This section supersedes every later `START HERE` block.

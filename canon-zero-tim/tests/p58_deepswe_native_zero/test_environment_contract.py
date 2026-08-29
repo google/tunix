@@ -286,9 +286,15 @@ class P58EnvironmentContractTest(unittest.TestCase):
         "CANON_V1_HP_FIRST_UPDATE_GATE": "1",
         "CANON_P63_OVERFLOW_SAFE_CLIP": "1",
         "CANON_VLLM_ENABLE_PREFIX_CACHING": "0",
+        "CANON_DP_COMPARE_MODE": "fingerprint-hybrid",
+        "CANON_DP_DISTINCT_SCHEDULE": "first-group-warmup",
+        "CANON_DP_FINITE_FETCH": "batched-commit",
+        "CANON_P71_SCAN": "fwd",
     }.items():
       self.assertEqual(values[key], expected)
       self.assertIn(f"export {key}={expected}", resolved)
+    self.assertNotIn("CANON_DP_COLLECTIVE_REDUCE", values)
+    self.assertNotIn("CANON_DP_COLLECTIVE_REDUCE", resolved)
     deepswe_contract.validate_environment(values)
 
   def test_zero_hp_partial_bundle_is_rejected_by_python_contract(self):
@@ -306,9 +312,18 @@ class P58EnvironmentContractTest(unittest.TestCase):
         ("CANON_P63_OVERFLOW_SAFE_CLIP", "0"),
         ("CANON_P38_FIXED_LM_HEAD", "0"),
         ("CANON_VLLM_ENABLE_PREFIX_CACHING", "1"),
+        ("CANON_DP_COMPARE_MODE", "full"),
+        ("CANON_DP_DISTINCT_SCHEDULE", "every-group"),
+        ("CANON_DP_FINITE_FETCH", "sync"),
+        ("CANON_P71_SCAN", "off"),
     ):
       with self.subTest(key=key), self.assertRaises(ValueError):
         deepswe_contract.validate_environment({**values, key: replacement})
+    with self.assertRaises(ValueError):
+      deepswe_contract.validate_environment({
+          **values,
+          "CANON_DP_COLLECTIVE_REDUCE": "1",
+      })
 
   def test_checked_vma_off_diagnostic_survives_real_env_contract(self):
     completed, resolved, values = self._persisted(
@@ -330,6 +345,14 @@ class P58EnvironmentContractTest(unittest.TestCase):
     }.items():
       self.assertEqual(values[key], expected)
       self.assertIn(f"export {key}={expected}", resolved)
+    for key in (
+        "CANON_DP_COMPARE_MODE",
+        "CANON_DP_DISTINCT_SCHEDULE",
+        "CANON_DP_FINITE_FETCH",
+        "CANON_P71_SCAN",
+        "CANON_DP_COLLECTIVE_REDUCE",
+    ):
+      self.assertNotIn(key, values)
     deepswe_contract.validate_environment(values)
 
   def test_checked_vma_off_diagnostic_rejects_partial_tuple(self):
@@ -369,6 +392,14 @@ class P58EnvironmentContractTest(unittest.TestCase):
     }.items():
       self.assertEqual(values[key], expected)
       self.assertIn(f"export {key}={expected}", resolved)
+    for key in (
+        "CANON_DP_COMPARE_MODE",
+        "CANON_DP_DISTINCT_SCHEDULE",
+        "CANON_DP_FINITE_FETCH",
+        "CANON_P71_SCAN",
+        "CANON_DP_COLLECTIVE_REDUCE",
+    ):
+      self.assertNotIn(key, values)
     deepswe_contract.validate_environment(values)
 
   def test_checked_vma_on_diagnostic_rejects_partial_tuple(self):

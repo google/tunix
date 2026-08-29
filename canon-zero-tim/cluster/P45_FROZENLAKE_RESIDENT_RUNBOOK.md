@@ -1,6 +1,13 @@
 # P45 FrozenLake DP8xTP8 resident no-eval full-training runbook
 
-This is the recommended 64-chip FrozenLake DP8xTP8 full-training route. It is
+> This is the legacy 450-update resident/checkpoint carrier. For the active
+> strict P45/300 optimized Zero full, use
+> `tasks/v1-phase4-three-full-recipes/scripts/prepare_p67_frozenlake_two_full_wave.sh`
+> together with M15/main. The active route includes the P74 checked-VMA source
+> repair, P70 receipt tuple, and `CANON_P71_SCAN=fwd`; do not copy those fields
+> into this warning-only carrier by hand.
+
+This is the preserved historical 64-chip FrozenLake DP8xTP8 route. It is
 separate from the P42/P33 DP16xTP4 carrier and preserves those manifests for
 diagnosis and historical comparison. Current branch defaults may place the
 optimizer on device in both routes; topology and model overlay, not only

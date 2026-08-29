@@ -1,5 +1,22 @@
 # V1 high-performance three-full runbook
 
+## Current — render the matched GSM8K Native/mismatch and Zero controls
+
+Use the dedicated handoff at
+`../v1-gsm8k-native-full-control/HANDOFF.md`. The Native preparation wrapper
+is `../v1-gsm8k-native-full-control/prepare_gsm8k_native_full.sh`; the Zero
+wrapper is `scripts/prepare_gsm8k_full_dp16tp4_p74.sh`. Both are render-only,
+must receive the same clean published source SHA and fresh identities, and
+must resolve the same W&B project/group
+`zero-tim-gsm8k-dp16-tp4` / `qwen3-1p7b-dp16-tp4`.
+
+The Native manifest must select `CANON_GSM8K_VANILLA=1`, keep
+`CANON_P32_WORKLOAD` and all alignment/P59/V1/P70/P71/P63 selectors absent,
+remove the proxy excess-precision pin, and enter the stock-engine branch with
+`canonical_overlay=skipped alignment=off`. The Zero manifest must contain the
+registered system tuple documented in the handoff, while
+`CANON_DP_COLLECTIVE_REDUCE` remains absent. Neither wrapper launches.
+
 ## Current — render the P45/M15 fast Zero pair, never launch from here
 
 The selected wave is direct P45 plus M15/main optimized Zero full training,
@@ -28,9 +45,19 @@ resolution contain the same published source SHA, `CANON_P59_CHECKED_VMA=1`,
 `CANON_P67_P66_VMA_P59_ONLY=1`, `CANON_V1_HP_FIRST_UPDATE_GATE=1`, strict
 alignment, APC-off, full/300 updates, evaluation-off, checkpoint mode
 `disabled`, empty checkpoint residual fields, and the correct P45 versus
-M15/main identity. The command must contain `--eval_every_n_steps=0` and no
-`--num_test_batches`. Check no conflicting workload is live. The user may
-apply both YAMLs together; never append a pipe to either launch command.
+M15/main identity. Both must also resolve the reviewed system tuple:
+
+```text
+CANON_DP_COMPARE_MODE=fingerprint-hybrid
+CANON_DP_DISTINCT_SCHEDULE=first-group-warmup
+CANON_DP_FINITE_FETCH=batched-commit
+CANON_P71_SCAN=fwd
+```
+
+`CANON_DP_COLLECTIVE_REDUCE` must be absent. The command must contain
+`--eval_every_n_steps=0` and no `--num_test_batches`. Check no conflicting
+workload is live. The user may apply both YAMLs together; never append a pipe
+to either launch command.
 
 Watch both raw logs immediately. For each recipe, update 0 must pass strict
 prealignment, one checked-VMA/P67 resolved-env contract, one first-update

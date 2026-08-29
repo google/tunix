@@ -1,5 +1,59 @@
 # P58 DeepSWE native-first training handoff
 
+## START HERE — future Zero-HP full training must use the P74-enabled wrapper
+
+This section defines the production wiring for the next DeepSWE Qwen3-4B
+Zero/full/HP training attempt. It does not override the current P58.19 seam
+localization queue: the selector-absent 1,000-update full run remains blocked
+until the strict A-B prealignment case is resolved and a new launch is
+separately approved.
+
+Status is `LOCAL IMPLEMENTED / PINNED-IMAGE CPU PASS / SOURCE NOT COMMITTED /
+TARGET NOT RUN`. Once the implementation CL is reviewed, separately approved
+for commit/push, published, and read back at an exact clean SHA, render with:
+
+```bash
+bash canon-zero-tim/tests/p58_deepswe_native_zero/run_exact_image.sh \
+  <exact-local-image-sha256-id>
+
+bash canon-zero-tim/tasks/v1-system-optimization-workload-rollout/prepare_deepswe_zero_hp_full.sh \
+  <approved-40-character-sha> \
+  <matching-registry-image@sha256:digest> \
+  <fresh-output.yaml> \
+  <fresh-run-id> \
+  <worker-nodepool> \
+  <model-pvc>
+```
+
+The wrapper never launches and must emit
+`V1_DEEPSWE_ZERO_HP_RFULL_READY ... launch=not-executed`. The resolved trainer
+environment must retain the full P58 numerical protection and add the
+registered system tuple:
+
+```text
+CANON_P59_CHECKED_VMA=1
+CANON_P66_P59_CHECK_VMA=1        # derived compatibility alias
+CANON_P67_P66_VMA_P59_ONLY=1
+CANON_V1_HP_FIRST_UPDATE_GATE=1
+CANON_P63_OVERFLOW_SAFE_CLIP=1
+CANON_DP_COMPARE_MODE=fingerprint-hybrid
+CANON_DP_DISTINCT_SCHEDULE=first-group-warmup
+CANON_DP_FINITE_FETCH=batched-commit
+CANON_P71_SCAN=fwd
+```
+
+`CANON_DP_COLLECTIVE_REDUCE` must remain absent. P74 is source behavior, not a
+new switch. Native raw, Native+IS, ordinary non-HP Zero, three-update,
+checked-VMA diagnostic, and seam-localization arms must keep all four new
+receipt/scan selectors absent.
+
+The exact-image terminal is
+`P58_EXACT_IMAGE_CPU_PASS ... system_optimization=1 ... regressions=1`; this
+is construction evidence only. A future target must still pass strict A=B=C,
+16-group first-update admission, coherent AdamW `0 -> 1`, all 1,000 commits,
+performance/XProf receipts, and the P58 final classifier. Do not reuse a
+previous P58 YAML, run ID, image tag, or evidence root.
+
 ## 2026-08-28 UTC — DeepSWE P58.19e incident intake (`canon-p58-seamcoarse-full-p58s19e`, 128 TPU)
 
 ### Incident Summary

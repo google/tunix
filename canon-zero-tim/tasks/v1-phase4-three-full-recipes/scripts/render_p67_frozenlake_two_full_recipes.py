@@ -22,6 +22,7 @@ for path in (_REPO_ROOT, _CLUSTER_DIR):
     sys.path.insert(0, str(path))
 
 import render_p57_frozenlake_tim as p57
+from v1_full_system_optimization import full_system_optimization_additions
 
 
 _SHA_RE = re.compile(r"[0-9a-f]{40}")
@@ -132,11 +133,10 @@ def render_two(
   receipts = []
   for label, path in zip(("p45", "m15"), outputs, strict=True):
     document = yaml.safe_load(path.read_text(encoding="utf-8"))
-    _set_env(document, {
-        "CANON_P59_CHECKED_VMA": "1",
-        "CANON_P67_P66_VMA_P59_ONLY": "1",
-        "CANON_V1_HP_FIRST_UPDATE_GATE": "1",
-    })
+    additions = full_system_optimization_additions(
+        f"frozenlake-{label}"
+    )
+    _set_env(document, additions)
     _write_yaml(path, document)
 
     document = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -154,6 +154,10 @@ def render_two(
         "CANON_P59_CHECKED_VMA": "1",
         "CANON_P67_P66_VMA_P59_ONLY": "1",
         "CANON_V1_HP_FIRST_UPDATE_GATE": "1",
+        "CANON_DP_COMPARE_MODE": "fingerprint-hybrid",
+        "CANON_DP_DISTINCT_SCHEDULE": "first-group-warmup",
+        "CANON_DP_FINITE_FETCH": "batched-commit",
+        "CANON_P71_SCAN": "fwd",
         "CANON_P33_ENABLE_EVAL": "0",
         "CANON_P33_DISABLE_EVAL": "1",
         "CANON_P31_ENABLE_EVAL": "0",
@@ -182,6 +186,10 @@ def render_two(
     }
     if wrong:
       raise ValueError(f"{label} rendered P67 full contract drifted: {wrong}")
+    if "CANON_DP_COLLECTIVE_REDUCE" in env:
+      raise ValueError(
+          f"{label} rendered an uncertified DP collective reducer"
+      )
     receipts.append({
         "recipe": label,
         "path": str(path),

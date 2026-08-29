@@ -18,6 +18,43 @@ P58 does not modify `main`. Rendering and local validation do not authorize a
 Kubernetes apply. An operator must separately approve image publication and
 each launch.
 
+## Production Zero-HP full system-optimization route
+
+The production Qwen3-4B Zero/full/HP renderer now consumes the P74-era system
+bundle. This is wiring readiness, not launch readiness: P58.19 seam
+localization remains the active numerical queue, and no selector-absent
+1,000-update full run may launch until strict prealignment is unblocked and
+the user separately approves that exact launch.
+
+After the implementation is committed, published, paired with a digest-pinned
+image, and checked out clean at the approved SHA, render only with:
+
+```bash
+bash canon-zero-tim/tasks/v1-system-optimization-workload-rollout/prepare_deepswe_zero_hp_full.sh \
+  <approved-40-character-sha> \
+  <matching-registry-image@sha256:digest> \
+  <fresh-output.yaml> \
+  <fresh-run-id> \
+  <worker-nodepool> \
+  <model-pvc>
+```
+
+Require `V1_DEEPSWE_ZERO_HP_RFULL_READY ... launch=not-executed`, then inspect
+the resolved environment for checked-VMA/P67/first-update/P63 plus:
+
+```text
+CANON_DP_COMPARE_MODE=fingerprint-hybrid
+CANON_DP_DISTINCT_SCHEDULE=first-group-warmup
+CANON_DP_FINITE_FETCH=batched-commit
+CANON_P71_SCAN=fwd
+```
+
+`CANON_DP_COLLECTIVE_REDUCE` must remain absent. Native raw, Native+IS,
+ordinary Zero, three-update, checked-VMA diagnostics, and seam diagnostics do
+not inherit these selectors. The wrapper has no apply step; server dry-run,
+capacity admission, Kubernetes apply, and target monitoring each remain
+separately approval-gated.
+
 ## P58.19 three-round coarse seam localization — render-only recipe
 
 The current diagnostic is one 128-chip JobSet with three sequential

@@ -12,6 +12,10 @@ from typing import Any, Mapping
 import yaml
 
 import render_p34_jobset as p34
+from v1_full_system_optimization import (
+    FULL_SYSTEM_OPTIMIZATION_ENV_NAMES,
+    full_system_optimization_additions,
+)
 
 
 MODEL = "Qwen/Qwen3-4B-Instruct-2507"
@@ -380,6 +384,10 @@ def render(
       ),
       "CANON_OPTIMIZER_HBM_MIN_FREE_BYTES": str(8 * 1024**3),
   })
+  if high_performance:
+    p34._set_env(
+        main, full_system_optimization_additions("deepswe-qwen4b")
+    )
   if checked_vma_diagnostic:
     p34._set_env(main, {
         "CANON_P58_CHECKED_VMA_DIAGNOSTIC": checked_vma_diagnostic,
@@ -696,6 +704,32 @@ def validate(
   }
   if wrong:
     raise ValueError(f"P58 rendered environment mismatch: {wrong}")
+  optimization_additions = (
+      full_system_optimization_additions("deepswe-qwen4b")
+      if high_performance
+      else {}
+  )
+  optimization_wrong = {
+      key: env.get(key)
+      for key, value in optimization_additions.items()
+      if env.get(key) != value
+  }
+  if optimization_wrong:
+    raise ValueError(
+        "P58 production system-optimization bundle drifted: "
+        f"{optimization_wrong}"
+    )
+  if not high_performance:
+    leaked = [
+        key for key in FULL_SYSTEM_OPTIMIZATION_ENV_NAMES if key in env
+    ]
+    if leaked:
+      raise ValueError(
+          "P58 non-production arm contains system-optimization selectors: "
+          f"{leaked}"
+      )
+  if "CANON_DP_COLLECTIVE_REDUCE" in env:
+    raise ValueError("P58 contains an uncertified DP collective reducer")
   unproven_transport_env = (
       "PATHWAYS_HEARTBEAT_TIMEOUT_SEC",
       "IFRT_PROXY_TIMEOUT_SECONDS",

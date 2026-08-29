@@ -5,13 +5,35 @@ three-treatment concept study. It renders JobSets but never applies them.
 Every `kubectl apply`, commit, and push requires separate user approval. Never
 hand-edit a rendered YAML.
 
+## Optimized Zero full routing
+
+The active strict Zero references no longer use the baseline three-arm
+renderer. Render P45 and M15/main together through the registered Phase4
+entry point after exact source publication and read-back:
+
+```bash
+bash canon-zero-tim/tasks/v1-phase4-three-full-recipes/scripts/prepare_p67_frozenlake_two_full_wave.sh \
+  <approved-40-character-sha> \
+  <fresh-output-dir> \
+  <fresh-campaign-root> \
+  <fresh-p45-run-id> \
+  <fresh-m15-run-id>
+```
+
+The exact manifests carry checked-VMA/P67/first-update protection,
+`CANON_DP_COMPARE_MODE=fingerprint-hybrid`,
+`CANON_DP_DISTINCT_SCHEDULE=first-group-warmup`,
+`CANON_DP_FINITE_FETCH=batched-commit`, and `CANON_P71_SCAN=fwd`.
+`CANON_DP_COLLECTIVE_REDUCE` must remain absent. This route is render-only and
+still requires a separate target launch approval.
+
 ## Active contract
 
 | Wave | Runtime arm | Numerical program | Sampler correction | Launch now |
 |---|---|---|---|---|
 | `native` | `mismatch` | stock-fast / zero-TIM bundle off | none; old=A | yes |
 | `is` | `is` | identical stock-fast program | token TIS; old=C | yes |
-| `zero` | `zero` | complete registered zero-TIM bundle | none; old=A | deferred |
+| `zero` | `zero` | registered V1 HP + P74 system bundle | none; old=A | separately gated through the Phase4 two-full wrapper |
 
 Each wave renders two independent 64-chip DP8xTP8 jobs:
 

@@ -127,6 +127,15 @@ elif p57_is_stock_fast_runtime; then
   fi
   log "P57_STOCK_FAST_PATH run_kind=$CANON_P57_RUN_KIND regime=stock-fast source=$CANON_EXPECT_COMMIT canonical_overlay=skipped observer_overlay=$p57_observer_overlay"
   unset p57_observer_overlay
+elif [ "${CANON_PROFILE_FILE:-}" = \
+       "cluster/profiles/qwen3-1p7b-dp16-tp4-gsm8k-native.env" ] && \
+     [ "${CANON_GSM8K_TRAIN:-}" = "1" ] && \
+     [ "${CANON_GSM8K_VANILLA:-}" = "1" ]; then
+  # GSM8K Native is the untreated numerical baseline already exercised by
+  # the one-host P56/P60 carrier. It must use the image's stock serving engine
+  # and ordinary Tunix trainer with no canonical overlay or observer.
+  step gsm8k_verify_stock_engine.sh
+  log "GSM8K_NATIVE_STOCK_PATH source=$CANON_EXPECT_COMMIT canonical_overlay=skipped alignment=off"
 else
   step 30_install_canon.sh
   step 35_install_r2egym.sh

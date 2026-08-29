@@ -1021,6 +1021,21 @@ def validate_environment(
     expected["CANON_P33_ENABLE_EVAL"] = "1" if evaluation_enabled else "0"
     expected["CANON_P33_DISABLE_EVAL"] = "0" if evaluation_enabled else "1"
     expected["CANON_P31_ENABLE_EVAL"] = "1" if evaluation_enabled else "0"
+    v1_hp_full = values.get("CANON_V1_HP_FULL", "0") == "1"
+    expected.update({
+        "CANON_DP_COMPARE_MODE": (
+            "fingerprint-hybrid" if v1_hp_full else None
+        ),
+        "CANON_DP_DISTINCT_SCHEDULE": (
+            "first-group-warmup" if v1_hp_full else None
+        ),
+        "CANON_DP_FINITE_FETCH": (
+            "batched-commit" if v1_hp_full else None
+        ),
+        "CANON_P71_SCAN": "fwd" if v1_hp_full else None,
+        # P69 remains unadmitted for DP8 and target execution.
+        "CANON_DP_COLLECTIVE_REDUCE": None,
+    })
   if workload.name.startswith("gsm8k"):
     expected["CANON_GSM8K_GRAD_PROBE"] = "0"
   wrong = {

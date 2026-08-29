@@ -755,16 +755,27 @@ wandb_config.update({
 })
 metrics_logging_options = None
 if not CANON_GSM8K_L3:
+  vanilla_wandb = (
+      CANON_GSM8K_ACTIVE
+      and os.getenv("CANON_GSM8K_VANILLA", "") == "1"
+  )
+  selected_wandb_group = (
+      os.environ.get("CANON_WANDB_GROUP", "") if vanilla_wandb else ""
+  )
   metrics_logging_options = metrics_logger.MetricsLoggerOptions(
       log_dir=TB_LOG_DIR,
       project_name=(
           os.environ["CANON_WANDB_PROJECT"]
           if CANON_P32_WORKLOAD
+          else os.environ.get("CANON_WANDB_PROJECT", args.wandb_project)
+          if vanilla_wandb
           else args.wandb_project
       ),
       run_name=(
           os.environ["CANON_WANDB_RUN_NAME"]
           if CANON_P32_WORKLOAD
+          else os.environ.get("CANON_WANDB_RUN_NAME", args.wandb_run_name)
+          if vanilla_wandb
           else args.wandb_run_name
       ),
       flush_every_n_steps=1,
@@ -772,8 +783,8 @@ if not CANON_GSM8K_L3:
           "wandb": {
               "config": wandb_config,
               **(
-                  {"group": os.environ["CANON_WANDB_GROUP"]}
-                  if CANON_P32_WORKLOAD
+                  {"group": selected_wandb_group}
+                  if CANON_P32_WORKLOAD or selected_wandb_group
                   else {}
               ),
           }

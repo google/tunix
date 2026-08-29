@@ -941,6 +941,9 @@ def validate_environment(values: Mapping[str, str]) -> None:
       "FL_SHARED_MESH": f"{workload.dp_size},{workload.tp_size}",
   }
   if p58_tim:
+    p58_production_hp = bool(
+        p58_hp and not p58_vma_diagnostic and not p58_seam_localization
+    )
     expected.update({
         "CANON_PROMPT_PROCESSED_LOGPROBS": (
             "0" if p58_arm == "native" else "1"
@@ -957,6 +960,19 @@ def validate_environment(values: Mapping[str, str]) -> None:
             "0" if p58_vma_diagnostic == "off" else
             "1" if p58_hp else None
         ),
+        "CANON_DP_COMPARE_MODE": (
+            "fingerprint-hybrid" if p58_production_hp else None
+        ),
+        "CANON_DP_DISTINCT_SCHEDULE": (
+            "first-group-warmup" if p58_production_hp else None
+        ),
+        "CANON_DP_FINITE_FETCH": (
+            "batched-commit" if p58_production_hp else None
+        ),
+        "CANON_P71_SCAN": "fwd" if p58_production_hp else None,
+        # P69 has no DP8/target oracle. Presence, including an explicit zero,
+        # is rejected so an operator cannot mistake it for an admitted arm.
+        "CANON_DP_COLLECTIVE_REDUCE": None,
     })
     if p58_hp:
       expected.update({

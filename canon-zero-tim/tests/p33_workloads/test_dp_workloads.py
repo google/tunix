@@ -772,6 +772,46 @@ class DPWorkloadsTest(unittest.TestCase):
           require_reduction_admission=True,
       )
 
+  def test_frozenlake_v1_full_requires_exact_system_optimization_tuple(self):
+    workload = dp_workloads.get_workload("frozenlake-dp8-tp8")
+    environ = _environment("frozenlake-dp8-tp8")
+    environ.update({
+        "CANON_P32_TRAIN_ADMITTED": "1",
+        "CANON_P32_DP_REDUCTION_ADMITTED": "1",
+        "CANON_P33_WORKLOAD_LAUNCH_ADMITTED": "1",
+        "FL_SHARED_MESH": "8,8",
+        "CANON_OPT_STATE_RESIDENT": "1",
+        "CANON_P30_OPT_STATE_OFFLOAD": "0",
+        "CANON_V1_HP_FULL": "1",
+        "CANON_DP_COMPARE_MODE": "fingerprint-hybrid",
+        "CANON_DP_DISTINCT_SCHEDULE": "first-group-warmup",
+        "CANON_DP_FINITE_FETCH": "batched-commit",
+        "CANON_P71_SCAN": "fwd",
+    })
+    dp_workloads.validate_environment(
+        workload, environ, require_reduction_admission=True
+    )
+    for key, replacement in (
+        ("CANON_DP_COMPARE_MODE", "full"),
+        ("CANON_DP_DISTINCT_SCHEDULE", "every-group"),
+        ("CANON_DP_FINITE_FETCH", "sync"),
+        ("CANON_P71_SCAN", "off"),
+    ):
+      with self.subTest(key=key), self.assertRaisesRegex(
+          ValueError, key
+      ):
+        dp_workloads.validate_environment(
+            workload,
+            {**environ, key: replacement},
+            require_reduction_admission=True,
+        )
+    with self.assertRaisesRegex(ValueError, "CANON_DP_COLLECTIVE_REDUCE"):
+      dp_workloads.validate_environment(
+          workload,
+          {**environ, "CANON_DP_COLLECTIVE_REDUCE": "1"},
+          require_reduction_admission=True,
+      )
+
   def test_frozenlake_evaluation_rejects_diagnostic_stage(self):
     environ = _environment("frozenlake")
     environ.update({

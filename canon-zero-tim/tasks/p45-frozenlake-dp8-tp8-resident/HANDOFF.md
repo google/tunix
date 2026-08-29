@@ -1,5 +1,37 @@
 # P45 FrozenLake DP8xTP8 resident no-eval handoff
 
+## START HERE — use the P74 route, not this legacy carrier, for strict P45 full
+
+This handoff preserves the historical 450-update, checkpointed,
+alignment-warning P45 resident carrier. It is not the current optimized strict
+Zero P45/300 full-training route.
+
+The next P45 strict full must be rendered together with M15/main through:
+
+```bash
+bash canon-zero-tim/tasks/v1-phase4-three-full-recipes/scripts/prepare_p67_frozenlake_two_full_wave.sh \
+  <approved-40-character-sha> \
+  <fresh-output-dir> \
+  <fresh-campaign-root> \
+  <fresh-p45-run-id> \
+  <fresh-m15-run-id>
+```
+
+That wrapper selects the `frozenlake-v1-hp` profile and the P74-era bundle:
+checked-VMA/P67/first-update protection,
+`CANON_DP_COMPARE_MODE=fingerprint-hybrid`,
+`CANON_DP_DISTINCT_SCHEDULE=first-group-warmup`,
+`CANON_DP_FINITE_FETCH=batched-commit`, and `CANON_P71_SCAN=fwd`;
+`CANON_DP_COLLECTIVE_REDUCE` must remain absent. It is
+render-only and may be used only after the implementation source is committed,
+published with explicit approval, read back, and checked out clean. See
+`../v1-phase4-three-full-recipes/HANDOFF.md` for the active contract.
+
+The legacy commands below remain valid only for reproducing or continuing the
+separate historical resident/checkpoint study. Do not translate their
+warning-only alignment, 450-step horizon, checkpoint tag, or old renderer into
+the active strict P45 full.
+
 The canonical operator entry point is
 [`../../cluster/P45_FROZENLAKE_RESIDENT_RUNBOOK.md`](../../cluster/P45_FROZENLAKE_RESIDENT_RUNBOOK.md).
 The P42 evaluation runbook is a separate DP16xTP4 carrier and must not be used
