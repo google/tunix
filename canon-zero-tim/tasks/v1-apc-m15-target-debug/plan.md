@@ -30,8 +30,8 @@ B - C = 0 bytes
 | D3c | distinguish same-prefix serving requests and checkpoint classifier inputs before analysis | candidate-set classifier never conflates requests or fabricates a single interval; classifier inputs survive an analysis failure | cluster exercised by Attempt 17: request-aware classification and checkpoint durability PASS; treatment Round 0 preserved a mixed candidate set, not a localization |
 | D3d | bind Attempt-17 source rows to serving requests from future token-prefix continuity without another rollout | immutable bundle and committed receipt verify; one request is selected only beyond the latest explicit elimination horizon, otherwise the candidate set is preserved | complete for request identity: read-only GCS/CPU return binds source row 217 uniquely through prefix 1300; global mixed signatures preserve the candidate-set verdict |
 | D3e | separate the canonical completion-position-zero decision scope from later red-action diagnostics | decision-scope mixed/exact candidates still fail closed; global signatures and all unobserved red points remain explicit; immutable Attempt-17 bundle is reclassified without target execution | complete: committed return is `FIRST_RED_LOCALIZED` at Layer 0 `k_post_rope -> rpa_output`; evidence remains partial-round/analysis-grade and does not authorize a repair |
-| E0 | distinguish stored Layer-0 live-KV content from page selection/read/RPA execution context at the uniquely bound 1226-token prefix | all eight prefix aliases are captured; future-prefix proof selects exactly one request; control and B-C stay exact; compact evidence self-verifies | target execution is reported at `ff33dcd2`, but the committed compact return is incomplete/non-official and the E0 verdict is not admitted |
-| E0r | recover and fail-closed admit the official Attempt-18 compact return | exact four-file inventory; SHA256 manifest; full eight-candidate binding; source/COMPLETE/B-reset/zero-cached-token receipts; official and intake markers | local implementation active; host intake 9/9 PASS; GCS recovery and exact-image NOT RUN |
+| E0 | distinguish stored Layer-0 live-KV content from page selection/read/RPA execution context at the uniquely bound 1226-token prefix | all eight prefix aliases are captured; future-prefix proof selects exactly one request; control and B-C stay exact; compact evidence self-verifies | target metrics are reported, but both ff33dcd2 and the replacement 971bb228 packages fail official provenance; no E0 mechanism verdict is admitted |
+| E0r | recover and fail-closed admit the official Attempt-18 compact return | exact four-file inventory; exact runtime classifier identity and complete fields; distinct record/arm provenance; SHA256 manifest; full eight-candidate binding; source/COMPLETE/B-reset/zero-cached-token/raw-log receipts; official and intake markers | provenance hardening HOST PASS: task 187/187, intake 14/14, E0 admission 9/9; 971bb228 is a locked rejection regression; exact-image and real GCS recovery NOT RUN |
 | D4 | Attempt-13 two-arm registered-root inventory and offline semantic review | both listings succeed; exact 77/70 shard triples verify; physical shard counts and immutable classifier counts remain separate; seven-file inventory self-verifies | transport complete; no-live confirmed; count drift -29/+101 preserved; official replay impossible |
 | E | minimal localized repair, default off or experiment-bound | reproducer flips red to zero; APC-off and B are unchanged; adjacent and dirty-page negatives fire | pending |
 | F | certification ladder | host -> exact-image -> one-host clean/repeat/dirty -> matched profile -> separately approved DP8xTP8 G-E | pending |
@@ -236,3 +236,16 @@ B - C = 0 bytes
   `LIVE_KV_FINGERPRINT_EQUAL` directs it toward page-table/read/RPA execution
   context. Neither verdict authorizes changing RoPE, RPA, attention, KV values,
   production defaults, or the B full-reset judge.
+- Correction after reviewing `971bb228`: a verifying inventory manifest and
+  schema-shaped JSON do not establish runtime provenance. The committed files
+  name the wrong classifier and wrong classifier SHA, collapse unrelated
+  observer/root digests, omit runtime-emitted fields, use impossible absolute
+  paths, and lack the raw terminal receipt. The hardened reviewer must reject
+  this exact package forever; no `LIVE_KV_FINGERPRINT_EQUAL`, Pallas mechanism,
+  or numerical-repair claim may inherit from it.
+- Decision: preserve both rejected snapshots additively. Any future official
+  recovery uses a fresh local output and a new Git evidence directory. The
+  next execution ladder is publish hardening -> separately approved pinned
+  exact-image -> separately approved read-only GCS recovery. It is not a TPU
+  rerun. Phase E stays closed until an official return passes and the user
+  reviews the bounded next discriminator.

@@ -1,5 +1,62 @@
 # Log
 
+## 2026-08-29 UTC — 971bb228 E0 return rejected; provenance hardening HOST PASS
+
+- Pulled and reviewed published commit
+  `971bb2281417ecb6e33cfa6bb68a422f7fd24f00`. Its four-file directory
+  manifest verifies; `SHA256SUMS` has SHA256
+  `ce762783e6b2f1a6fae37190f3af6e96baa39302931d29081c1d93146b7c9475`.
+  Inventory integrity does not establish runtime provenance.
+- Verdict correction: `LIVE_KV_FINGERPRINT_EQUAL` is not admitted. Both arm
+  files name `classify_m15_apc_wide_seam.py` and SHA
+  `0b4a81c5...`; runtime source
+  `12207e3281db13461350fe7ef68dbaadfe713a58` emits from
+  `classify_p38_kv_observer.py`, SHA256
+  `99cc7d9c50777a9be182e2edd33a3cdca3daabaa396c019e4925e0ac531049f6`.
+  The same impossible digest is repeated for every observer JSON/NPZ and both
+  root manifests; runtime comparison/red-join fields are omitted; temporary
+  absolute paths replace runtime basenames; the claim ceiling is truncated;
+  and no recovery raw-log path/SHA/terminal receipt was durably recorded.
+- The reviewer now pins exact runtime/classifier identity, complete
+  runtime-emitted fields, 16 distinct record identities and JSON provenance,
+  distinct off/on arm manifests/classifiers/logs, basename-only provenance,
+  exact four-line claim ceiling, and mandatory CLI `--raw-log`. The exact
+  971bb228 package, collapsed-record/root digests, and absolute paths are
+  locked regression negatives.
+- Evidence preservation: the rejected 971bb228 package remains unchanged.
+  A self-hashed rejection audit is stored at
+  `evidence/v1_apc_m15_attempt18_e0_return_rejection_20260829/` with report
+  SHA256
+  `92b704d5e6cb9ed0dd90e6d2b8648ee7980d7643218bb176d146fc40b1e5b9fa`.
+  The overwritten/deleted ff33dcd2 two-file input is restored byte-for-byte
+  under
+  `evidence/v1_apc_m15_attempt18_e0_incoming_rejected_ff33dcd2_20260829/`;
+  its two original member hashes verify.
+- Validation: task discovery 187/187, intake/recovery 14/14, E0 admission
+  9/9, V1 CPU 91/91, P3 prefix-cache 31/31, P38 persistence, flags 398/398,
+  Python/Bash syntax, and `git diff --check` PASS. Terminal marker:
+  `M15_E0R_PROVENANCE_HARDENING_HOST_PASS task_discovery=187
+  return_intake=14 e0_admission=9 v1_cpu=91 p3_prefix_cache=31
+  persistence=1 flags=398 syntax=1 diff_check=1 exact_image=0 gcs=0
+  kubernetes=0 tpu=0`. Complete raw log:
+  `/tmp/m15-e0r-provenance-hardening-971bb228-retry2-20260829.log`, SHA256
+  `f11ab8b9bf137f7f7ca39a801fe06b6da6298b7b558fe817ea2f503f7f74a4e4`.
+  The first aggregation attempt hit the local 30-second command wait after P3
+  PASS and is preserved at
+  `/tmp/m15-e0r-provenance-hardening-971bb228-20260829.log`, SHA256
+  `ff99522bf7a9cc48b9b3bee0ba6da2f543c415d3d088b496bc9860d52743fc0f`;
+  it is partial, not a failed numerical gate.
+- Scope: no A/B/C, APC read, RoPE, RPA/attention, KV, production flag,
+  backward, or optimizer behavior changed. The following historical E1 toy
+  probe and “Attempt 18 outcome sealed” entries are superseded as mechanism
+  claims: the toy does not prove target causality, and the target return lacks
+  admissible provenance.
+- Next: after separate commit/push approval, pass the separately approved
+  pinned exact-image aggregate (`m15_e0=30`). Then, under separate read-only
+  GCS approval, the bucket-capable agent uses the preserved `e01` render and
+  checked-in recovery wrapper into a fresh path. No TPU/Kubernetes rerun is
+  currently requested. Phase E remains closed.
+
 ## 2026-08-29 UTC — Phase E1 RPA online softmax numerical divergence probe reproduced target error
 
 - Simulation: `canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/probe_m15_rpa_tail_padding.py`.

@@ -1,0 +1,44 @@
+{
+  "claim": "The 971bb228 compact return is schema-shaped but is not admitted as official runtime output.",
+  "failed_invariants": [
+    {
+      "actual": "classify_m15_apc_wide_seam.py",
+      "expected": "classify_p38_kv_observer.py",
+      "name": "runtime_classifier_path"
+    },
+    {
+      "actual": "0b4a81c5362420fd61b146f577374023b6f0cd49fa58bdb50fae576163cd6b65",
+      "expected": "99cc7d9c50777a9be182e2edd33a3cdca3daabaa396c019e4925e0ac531049f6",
+      "name": "runtime_classifier_sha256"
+    },
+    {
+      "actual": "0b4a81c5362420fd61b146f577374023b6f0cd49fa58bdb50fae576163cd6b65",
+      "expected": "distinct hashes because the two arm manifests contain different run logs and classifier outputs",
+      "name": "off_on_root_manifest_sha256"
+    },
+    {
+      "actual": "one JSON SHA and one NPZ SHA repeated across all 16 records in each arm",
+      "expected": "complete per-record identity and per-record JSON provenance",
+      "name": "observer_record_provenance"
+    },
+    {
+      "actual": "truncated comparison/red-join fields and absolute temporary capsule/replay paths",
+      "expected": "the complete p38-live-kv-classification-v2 runtime payload with basename-only provenance",
+      "name": "classifier_payload_shape"
+    },
+    {
+      "actual": "absent from the committed evidence and task ledger",
+      "expected": "preserved recovery raw log, SHA256, and all terminal markers",
+      "name": "recovery_receipt"
+    }
+  ],
+  "next_gate": "publish validator hardening, pass the official pinned exact-image aggregate, then perform a fresh read-only GCS recovery into a new additive evidence directory",
+  "numerical_repair_authorized": false,
+  "package_manifest_sha256": "ce762783e6b2f1a6fae37190f3af6e96baa39302931d29081c1d93146b7c9475",
+  "package_path": "evidence/v1_apc_m15_attempt18_e0_kv_20260829",
+  "published_commit_reviewed": "971bb2281417ecb6e33cfa6bb68a422f7fd24f00",
+  "runtime_source_commit": "12207e3281db13461350fe7ef68dbaadfe713a58",
+  "schema": "m15-attempt18-e0-return-rejection-v1",
+  "status": "OFFICIAL_RETURN_PROVENANCE_FAIL",
+  "target_claim_admitted": false
+}

@@ -22,6 +22,17 @@ _EXPECTED_FILES = {
 _CLASSIFIER_CLAIM_LEVEL = (
     "bit-level-diagnostic-fingerprint-not-full-kv-bytes"
 )
+_EXPECTED_RUNTIME_SOURCE = "12207e3281db13461350fe7ef68dbaadfe713a58"
+_EXPECTED_CLASSIFIER_PATH = "classify_p38_kv_observer.py"
+_EXPECTED_CLASSIFIER_SHA256 = (
+    "99cc7d9c50777a9be182e2edd33a3cdca3daabaa396c019e4925e0ac531049f6"
+)
+_EXPECTED_CLASSIFIER_CLAIM_CEILING = [
+    "A/B token prefixes and valid extents are exact.",
+    "The integer aggregates and fixed samples are diagnostic fingerprints, not cryptographic hashes.",
+    "An equal fingerprint does not mathematically prove full KV byte equality.",
+    "Only a candidate joined to an A/B-red capsule row can choose the mechanism branch.",
+]
 _RETURN_CLAIM = (
     "The KV result is a diagnostic fingerprint over the uniquely bound "
     "red request, not a collision-free proof of all KV bytes."
@@ -43,6 +54,10 @@ def _sha256(path: Path) -> str:
     while chunk := stream.read(1024 * 1024):
       digest.update(chunk)
   return digest.hexdigest()
+
+
+def _is_basename(value: Any) -> bool:
+  return isinstance(value, str) and value and Path(value).name == value
 
 
 def _load_canonical_json(path: Path) -> dict[str, Any]:
@@ -86,17 +101,69 @@ def _review_classifier(
       and value.get("pairs") == 8,
       f"classifier inventory is incomplete: {path.name}",
   )
+  source_inputs = value.get("source_inputs") or {}
+  _require(isinstance(source_inputs, dict),
+           f"classifier source inputs are not an object: {path.name}")
+  classifier_input = source_inputs.get("classifier") or {}
+  observer_records = source_inputs.get("observer_records")
+  _require(
+      classifier_input.get("path") == _EXPECTED_CLASSIFIER_PATH
+      and classifier_input.get("sha256") == _EXPECTED_CLASSIFIER_SHA256
+      and isinstance(observer_records, list)
+      and len(observer_records) == 16,
+      f"classifier source identity/provenance drifted: {path.name}",
+  )
   comparisons = value.get("comparisons")
   _require(isinstance(comparisons, list) and len(comparisons) == 8,
            f"classifier comparisons are incomplete: {path.name}")
   for comparison in comparisons:
+    _require(isinstance(comparison, dict),
+             f"classifier comparison is not an object: {path.name}")
     valid = comparison.get("valid_tokens")
+    required_comparison_fields = {
+        "source_a_record_index", "source_a_request_id",
+        "clean_b_record_index", "clean_b_request_id", "diagnostic_round",
+        "target_seq_len", "valid_tokens",
+        "aggregate_prefix_cells_differing",
+        "sample_prefix_cells_differing", "differing_layers",
+        "differing_logical_pages", "first_difference",
+        "fingerprint_equal",
+    }
     _require(
-        comparison.get("target_seq_len") == 1226
+        required_comparison_fields.issubset(comparison)
+        and comparison.get("target_seq_len") == 1226
+        and comparison.get("diagnostic_round") == 0
         and valid == [16] * 76 + [10]
+        and isinstance(comparison.get("source_a_request_id"), str)
+        and comparison.get("source_a_request_id")
+        and isinstance(comparison.get("clean_b_request_id"), str)
+        and comparison.get("clean_b_request_id")
+        and isinstance(comparison.get("aggregate_prefix_cells_differing"), int)
+        and comparison.get("aggregate_prefix_cells_differing") >= 0
+        and isinstance(comparison.get("sample_prefix_cells_differing"), int)
+        and comparison.get("sample_prefix_cells_differing") >= 0
+        and isinstance(comparison.get("differing_layers"), list)
+        and isinstance(comparison.get("differing_logical_pages"), list)
         and isinstance(comparison.get("fingerprint_equal"), bool),
         f"classifier prefix geometry drifted: {path.name}",
     )
+    if comparison["fingerprint_equal"]:
+      _require(
+          comparison["aggregate_prefix_cells_differing"] == 0
+          and comparison["sample_prefix_cells_differing"] == 0
+          and comparison["differing_layers"] == []
+          and comparison["differing_logical_pages"] == []
+          and comparison["first_difference"] is None,
+          f"equal classifier comparison carries red payload: {path.name}",
+      )
+    else:
+      _require(
+          comparison["aggregate_prefix_cells_differing"] > 0
+          or comparison["sample_prefix_cells_differing"] > 0,
+          f"red classifier comparison lacks differing cells: {path.name}",
+      )
+      _require(isinstance(comparison["first_difference"], dict),
+               f"red classifier comparison lacks first difference: {path.name}")
   source_indices = [item.get("source_a_record_index") for item in comparisons]
   clean_indices = [item.get("clean_b_record_index") for item in comparisons]
   _require(
@@ -105,21 +172,24 @@ def _review_classifier(
       and len(set(clean_indices)) == 8,
       f"classifier pair identities are incomplete: {path.name}",
   )
-  source_inputs = value.get("source_inputs") or {}
-  classifier_input = source_inputs.get("classifier") or {}
-  observer_records = source_inputs.get("observer_records")
-  _require(
-      _SHA_RE.fullmatch(str(classifier_input.get("sha256", ""))) is not None
-      and isinstance(observer_records, list)
-      and len(observer_records) == 16,
-      f"classifier source inputs are incomplete: {path.name}",
-  )
+  assert isinstance(observer_records, list)
   for record in observer_records:
     _require(
-        _SHA_RE.fullmatch(str(record.get("json_sha256", ""))) is not None
+        isinstance(record, dict)
+        and {"arm", "record_index", "json", "json_sha256", "npz",
+             "npz_sha256", "valid_tokens"}.issubset(record)
+        and _is_basename(record.get("json"))
+        and _is_basename(record.get("npz"))
+        and _SHA_RE.fullmatch(str(record.get("json_sha256", ""))) is not None
         and _SHA_RE.fullmatch(str(record.get("npz_sha256", ""))) is not None,
-        f"observer source digest is invalid: {path.name}",
+        f"observer source identity/digest is invalid: {path.name}",
     )
+  _require(
+      len({record["json"] for record in observer_records}) == 16
+      and len({record["npz"] for record in observer_records}) == 16
+      and len({record["json_sha256"] for record in observer_records}) == 16,
+      f"observer source identities collapse distinct records: {path.name}",
+  )
   a_records = {
       record.get("record_index") for record in observer_records
       if record.get("arm") == "A"
@@ -140,10 +210,7 @@ def _review_classifier(
   )
   _require(
       value.get("claim_level") == _CLASSIFIER_CLAIM_LEVEL
-      and any(
-          "does not mathematically prove full KV byte equality" in str(item)
-          for item in value.get("claim_ceiling", ())
-      ),
+      and value.get("claim_ceiling") == _EXPECTED_CLASSIFIER_CLAIM_CEILING,
       f"classifier claim ceiling drifted: {path.name}",
   )
 
@@ -181,6 +248,8 @@ def _review_classifier(
       and len(candidates) == 8,
       "treatment source-request binding is truncated or invalid",
   )
+  _require(all(isinstance(candidate, dict) for candidate in candidates),
+           "treatment source-request candidates are not objects")
   statuses = [candidate.get("status") for candidate in candidates]
   _require(
       statuses.count("FUTURE_PREFIX_MATCH") == 1
@@ -213,11 +282,16 @@ def _review_classifier(
   _require(
       isinstance(capsules, list)
       and capsules
-      and all(_SHA_RE.fullmatch(str(item.get("sha256", ""))) is not None
-              for item in capsules)
+      and all(
+          isinstance(item, dict)
+          and _is_basename(item.get("path"))
+          and _SHA_RE.fullmatch(str(item.get("sha256", ""))) is not None
+          for item in capsules
+      )
       and binding.get("capsule") in {
           item.get("path") for item in capsules
       }
+      and _is_basename(replay.get("path"))
       and _SHA_RE.fullmatch(str(replay.get("sha256", ""))) is not None,
       "treatment classifier lacks capsule/replay provenance",
   )
@@ -225,12 +299,22 @@ def _review_classifier(
   _require(
       isinstance(red_joins, list)
       and len(red_joins) == 8
+      and all(isinstance(item, dict) for item in red_joins)
       and {item.get("source_a_record_index") for item in red_joins}
       == set(source_indices)
       and all(
           item.get("diagnostic_round") == 0
           and item.get("source_row") == 217
           and item.get("target_seq_len") == 1226
+          and _is_basename(item.get("capsule"))
+          and item.get("capsule") in {
+              capsule.get("path") for capsule in capsules
+          }
+          and isinstance(item.get("mismatch_positions"), list)
+          and item.get("mismatch_positions")
+          and all(isinstance(position, int)
+                  for position in item["mismatch_positions"])
+          and item.get("mismatch_count") == len(item["mismatch_positions"])
           for item in red_joins
       ),
       "treatment red joins are incomplete or drifted",
@@ -241,6 +325,8 @@ def _review_classifier(
 def review(root: Path, expected_source: str, raw_log: Path | None = None) -> dict[str, Any]:
   _require(_SOURCE_RE.fullmatch(expected_source) is not None,
            "expected runtime source is not one full SHA")
+  _require(expected_source == _EXPECTED_RUNTIME_SOURCE,
+           "expected runtime source is not the pinned Attempt-18 source")
   _require(root.is_dir(), "official return directory is absent")
   inventory = {path.name for path in root.iterdir()}
   _require(inventory == _EXPECTED_FILES, "official return file inventory drifted")
@@ -258,6 +344,8 @@ def review(root: Path, expected_source: str, raw_log: Path | None = None) -> dic
   arms = report.get("arms")
   _require(isinstance(arms, dict) and set(arms) == {"off", "on"},
            "E0 return arms are incomplete")
+  _require(all(isinstance(arms[arm], dict) for arm in ("off", "on")),
+           "E0 return arm summaries are not objects")
   classifiers = {
       arm: _review_classifier(
           root / f"{arm}.kv-observer-classification.json",
@@ -297,6 +385,23 @@ def review(root: Path, expected_source: str, raw_log: Path | None = None) -> dic
         and row.get("n_action") > 0,
         f"E0 return arm summary does not match classifier: {arm}",
     )
+    _require(
+        len({
+            row["root_manifest_sha256"],
+            row["kv_classification_sha256"],
+            execution["run_log_sha256"],
+        }) == 3,
+        f"E0 return provenance digests collapse unrelated inputs: {arm}",
+    )
+  _require(
+      arms["off"]["root_manifest_sha256"]
+      != arms["on"]["root_manifest_sha256"]
+      and arms["off"]["kv_classification_sha256"]
+      != arms["on"]["kv_classification_sha256"]
+      and arms["off"]["execution_receipts"]["run_log_sha256"]
+      != arms["on"]["execution_receipts"]["run_log_sha256"],
+      "off/on provenance digests collapse distinct arm payloads",
+  )
   _require(
       arms["off"].get("a_b_differing_bytes") == 0
       and arms["off"].get("a_b_differing_elements") == 0
@@ -346,7 +451,7 @@ def main() -> int:
   parser = argparse.ArgumentParser()
   parser.add_argument("--return-dir", required=True, type=Path)
   parser.add_argument("--expected-source", required=True)
-  parser.add_argument("--raw-log", type=Path)
+  parser.add_argument("--raw-log", required=True, type=Path)
   args = parser.parse_args()
   result = review(args.return_dir, args.expected_source, args.raw_log)
   print(

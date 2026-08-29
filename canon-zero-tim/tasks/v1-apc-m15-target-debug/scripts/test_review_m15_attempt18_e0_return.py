@@ -21,12 +21,22 @@ RECOVERY_WRAPPER = (
     ROOT / "canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/"
     "run_m15_attempt18_e0_return_recovery.sh"
 )
+COMMITTED_971_RETURN = (
+    ROOT / "canon-zero-tim/tasks/v1-apc-m15-target-debug/evidence/"
+    "v1_apc_m15_attempt18_e0_kv_20260829"
+)
 SPEC = importlib.util.spec_from_file_location("m15_e0_return_review", MODULE)
 assert SPEC and SPEC.loader
 reviewer = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(reviewer)
-SOURCE = "1" * 40
-SHA = "a" * 64
+SOURCE = "12207e3281db13461350fe7ef68dbaadfe713a58"
+CLASSIFIER_SHA = (
+    "99cc7d9c50777a9be182e2edd33a3cdca3daabaa396c019e4925e0ac531049f6"
+)
+
+
+def _digest(label: str) -> str:
+  return hashlib.sha256(label.encode("utf-8")).hexdigest()
 
 
 def _canonical(path: Path, value: dict) -> None:
@@ -38,18 +48,31 @@ class Attempt18E0ReturnReviewTest(unittest.TestCase):
   def _classifier(self, arm: str) -> dict:
     comparisons = [{
         "source_a_record_index": index * 2,
+        "source_a_request_id": f"decode-{index * 2}",
         "clean_b_record_index": index * 2 + 1,
+        "clean_b_request_id": f"clean-{index * 2 + 1}",
+        "diagnostic_round": 0,
         "target_seq_len": 1226,
         "valid_tokens": [16] * 76 + [10],
+        "aggregate_prefix_cells_differing": 0,
+        "sample_prefix_cells_differing": 0,
+        "differing_layers": [],
+        "differing_logical_pages": [],
+        "first_difference": None,
         "fingerprint_equal": True,
     } for index in range(8)]
     source_inputs = {
-        "classifier": {"path": "classify.py", "sha256": SHA},
+        "classifier": {
+            "path": "classify_p38_kv_observer.py",
+            "sha256": CLASSIFIER_SHA,
+        },
         "observer_records": [{
             "arm": "A" if index % 2 == 0 else "B",
             "record_index": index,
-            "json_sha256": SHA,
-            "npz_sha256": SHA,
+            "json": f"kv-observer-{index}.json",
+            "json_sha256": _digest(f"observer-json-{arm}-{index}"),
+            "npz": f"kv-observer-{index}.npz",
+            "npz_sha256": _digest(f"observer-npz-{arm}-{index}"),
             "valid_tokens": [16] * 76 + [10],
         } for index in range(16)],
         "capsules": [],
@@ -58,8 +81,14 @@ class Attempt18E0ReturnReviewTest(unittest.TestCase):
     classification = "observer_pairs_valid_red_join_pending"
     if arm == "on":
       classification = "live_kv_fingerprint_equal_on_red_row"
-      source_inputs["capsules"] = [{"path": "capsule.npz", "sha256": SHA}]
-      source_inputs["replay_ledger"] = {"path": "ledger.jsonl", "sha256": SHA}
+      source_inputs["capsules"] = [{
+          "path": "capsule.npz",
+          "sha256": _digest("capsule"),
+      }]
+      source_inputs["replay_ledger"] = {
+          "path": "ledger.jsonl",
+          "sha256": _digest("replay-ledger"),
+      }
       binding = {
           "schema": "m15-kv-source-request-binding-v1",
           "status": "UNIQUE_FUTURE_PREFIX_BINDING",
@@ -99,13 +128,19 @@ class Attempt18E0ReturnReviewTest(unittest.TestCase):
             "source_a_record_index": index * 2,
             "diagnostic_round": 0,
             "source_row": 217,
+            "capsule": "capsule.npz",
+            "mismatch_positions": [88],
+            "mismatch_count": 1,
             "target_seq_len": 1226,
         } for index in range(8)],
         "source_request_binding": binding,
         "source_inputs": source_inputs,
         "claim_level": "bit-level-diagnostic-fingerprint-not-full-kv-bytes",
         "claim_ceiling": [
-            "An equal fingerprint does not mathematically prove full KV byte equality."
+            "A/B token prefixes and valid extents are exact.",
+            "The integer aggregates and fixed samples are diagnostic fingerprints, not cryptographic hashes.",
+            "An equal fingerprint does not mathematically prove full KV byte equality.",
+            "Only a candidate joined to an A/B-red capsule row can choose the mechanism branch.",
         ],
     }
 
@@ -135,10 +170,10 @@ class Attempt18E0ReturnReviewTest(unittest.TestCase):
                 "kv_all_pairs_equal": True,
                 "kv_classification": "observer_pairs_valid_red_join_pending",
                 "source_request_binding": None,
-                "root_manifest_sha256": SHA,
+                "root_manifest_sha256": _digest("off-root-manifest"),
                 "kv_classification_sha256": classifiers["off"],
                 "execution_receipts": {
-                    "run_log_sha256": SHA,
+                    "run_log_sha256": _digest("off-run-log"),
                     "runtime_source_exact": True,
                     "b_full_reset": True,
                     "all_num_cached_tokens_zero": True,
@@ -156,10 +191,10 @@ class Attempt18E0ReturnReviewTest(unittest.TestCase):
                 "source_request_binding": self._classifier("on")[
                     "source_request_binding"
                 ],
-                "root_manifest_sha256": SHA,
+                "root_manifest_sha256": _digest("on-root-manifest"),
                 "kv_classification_sha256": classifiers["on"],
                 "execution_receipts": {
-                    "run_log_sha256": SHA,
+                    "run_log_sha256": _digest("on-run-log"),
                     "runtime_source_exact": True,
                     "b_full_reset": True,
                     "all_num_cached_tokens_zero": True,
@@ -193,6 +228,71 @@ class Attempt18E0ReturnReviewTest(unittest.TestCase):
       self.assertEqual(result["status"], "LIVE_KV_FINGERPRINT_EQUAL")
       self.assertEqual(result["inventory_members"], 3)
       self.assertFalse(result["numerical_repair_authorized"])
+
+  def test_committed_971_schema_shaped_return_is_rejected(self):
+    with self.assertRaisesRegex(
+        reviewer.ReturnReviewError, "source identity/provenance"
+    ):
+      reviewer.review(COMMITTED_971_RETURN, SOURCE)
+
+  def test_collapsed_observer_json_digests_are_rejected(self):
+    with tempfile.TemporaryDirectory() as directory:
+      root = Path(directory) / "return"
+      root.mkdir()
+      self._fixture(root)
+      path = root / "off.kv-observer-classification.json"
+      value = json.loads(path.read_text())
+      for record in value["source_inputs"]["observer_records"]:
+        record["json_sha256"] = _digest("one-impossible-json")
+      _canonical(path, value)
+      (root / "SHA256SUMS").write_text("".join(
+          f"{hashlib.sha256(item.read_bytes()).hexdigest()}  {item.name}\n"
+          for item in sorted(root.glob("*.json"))
+      ))
+      with self.assertRaisesRegex(
+          reviewer.ReturnReviewError, "collapse distinct records"
+      ):
+        reviewer.review(root, SOURCE)
+
+  def test_absolute_observer_path_is_rejected(self):
+    with tempfile.TemporaryDirectory() as directory:
+      root = Path(directory) / "return"
+      root.mkdir()
+      self._fixture(root)
+      path = root / "on.kv-observer-classification.json"
+      value = json.loads(path.read_text())
+      value["source_inputs"]["observer_records"][0]["json"] = (
+          "/tmp/kv-observer-0.json"
+      )
+      _canonical(path, value)
+      (root / "SHA256SUMS").write_text("".join(
+          f"{hashlib.sha256(item.read_bytes()).hexdigest()}  {item.name}\n"
+          for item in sorted(root.glob("*.json"))
+      ))
+      with self.assertRaisesRegex(
+          reviewer.ReturnReviewError, "source identity/digest"
+      ):
+        reviewer.review(root, SOURCE)
+
+  def test_collapsed_off_on_root_manifests_are_rejected(self):
+    with tempfile.TemporaryDirectory() as directory:
+      root = Path(directory) / "return"
+      root.mkdir()
+      self._fixture(root)
+      path = root / "E0_KV_RETURN.json"
+      report = json.loads(path.read_text())
+      report["arms"]["on"]["root_manifest_sha256"] = (
+          report["arms"]["off"]["root_manifest_sha256"]
+      )
+      _canonical(path, report)
+      (root / "SHA256SUMS").write_text("".join(
+          f"{hashlib.sha256(item.read_bytes()).hexdigest()}  {item.name}\n"
+          for item in sorted(root.glob("*.json"))
+      ))
+      with self.assertRaisesRegex(
+          reviewer.ReturnReviewError, "off/on provenance digests"
+      ):
+        reviewer.review(root, SOURCE)
 
   def test_missing_classifier_is_rejected(self):
     with tempfile.TemporaryDirectory() as directory:

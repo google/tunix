@@ -1,102 +1,93 @@
 # M15 APC target-debug handoff
 
-## START HERE — recover the official Attempt-18 return; do not run TPU
+## START HERE — 971bb228 return rejected; harden, certify, then recover read-only
 
-The latest committed operator update is
-`ff33dcd200a4577927ac4917839a0b86bac42e7a`. It reports a real fresh
-Attempt-18 pair from runtime source
-`12207e3281db13461350fe7ef68dbaadfe713a58`:
+The latest published tip reviewed here is
+`971bb2281417ecb6e33cfa6bb68a422f7fd24f00`. It replaced the earlier
+two-file incoming package with a four-file directory and reported
+`LIVE_KV_FINGERPRINT_EQUAL`, but that verdict is **not admitted**. The
+directory manifest verifies locally and has SHA256
+`ce762783e6b2f1a6fae37190f3af6e96baa39302931d29081c1d93146b7c9475`;
+the payload is nevertheless impossible as output from the pinned runtime
+classifier:
 
-- control APC-off: A-B=0, B-C=0, `N_action=123010`;
-- treatment APC-on: A-B=1499 bytes / 88 elements, B-C=0,
-  `N_action=117834`, 92.8% cache hits;
-- reported E0 status: `LIVE_KV_FINGERPRINT_EQUAL`.
+- it names `classify_m15_apc_wide_seam.py`; runtime source
+  `12207e3281db13461350fe7ef68dbaadfe713a58` invokes
+  `classify_p38_kv_observer.py`;
+- it reports classifier SHA256 `0b4a81c5...`, while the exact runtime file is
+  `99cc7d9c50777a9be182e2edd33a3cdca3daabaa396c019e4925e0ac531049f6`;
+- one digest is repeated for every observer JSON, every observer NPZ, and
+  both arm root manifests even though the arm logs and classifiers differ;
+- observer records, comparisons, and red joins omit fields emitted by the
+  runtime classifier; capsule/replay paths are absolute although runtime
+  output uses basenames; the four-line claim ceiling is truncated;
+- no preserved recovery raw-log path/SHA or complete terminal-marker receipt
+  exists in Git or the task ledger.
 
-Those numbers are **reported target facts, not an admitted E0 verdict yet**.
-The committed directory
-`evidence/v1_apc_m15_attempt18_e0_kv_20260829/` self-verifies its two listed
-members; its `SHA256SUMS` has SHA256
-`9eabd0317cb32b29655c841beff35974c07fec93767cf4e87084071141d27917`.
-It is not the output of the official compact-return wrapper:
+The hardened reviewer now rejects this exact package with
+`classifier source identity/provenance drifted`. The rejection is durable at
+`evidence/v1_apc_m15_attempt18_e0_return_rejection_20260829/`; its report SHA
+is `92b704d5e6cb9ed0dd90e6d2b8648ee7980d7643218bb176d146fc40b1e5b9fa`.
+The overwritten/deleted `ff33dcd2` two-file evidence is preserved byte-for-byte
+under `evidence/v1_apc_m15_attempt18_e0_incoming_rejected_ff33dcd2_20260829/`.
+Do not edit, replace, or call either rejected snapshot official evidence.
 
-- both required `off/on.kv-observer-classification.json` files are absent;
-- both recorded classifier digests are 32 characters, not SHA256;
-- the treatment request binding omits the selected record index, proof
-  horizon, eight candidates, capsule digest, and replay-ledger digest;
-- the control incorrectly claims a red-row KV classification despite A-B=0;
-- no official return terminal log is present;
-- the incident report turns diagnostic aggregate/sample equality into a
-  claim about every KV byte and excludes cache allocation/writes. The
-  classifier explicitly does not support those claims.
-
-Therefore the current claim is:
+The only target numbers retained are **reported, provenance-unadmitted**
+facts: control APC-off A-B=0/B-C=0, `N_action=123010`; treatment APC-on
+A-B=1499 bytes / 88 elements, B-C=0, `N_action=117834`, and 92.8% cache hits.
+The last admitted boundary remains D3e: Layer 0
+`k_post_rope -> rpa_output`, shape `[2048,1,15,8]`, source row 217 / source
+position 1225 / A call 83. The NumPy probe added by `1707700e` is only a toy
+non-associativity example and does not establish the target mechanism.
 
 ```text
-ATTEMPT18_TARGET_REPORTED /
-ATTEMPT18_E0_RETURN_NOT_ADMITTED /
+ATTEMPT18_E0_RETURN_PROVENANCE_FAIL /
+TARGET_RESULT_NOT_ADMITTED /
 FIRST_RED_LOCALIZED_FROM_D3E /
+PHASE_E_CLOSED /
 NUMERICAL_REPAIR_NOT_AUTHORIZED
 ```
 
-The last admitted numerical boundary remains D3e: Layer 0
-`k_post_rope -> rpa_output`, shape `[2048,1,15,8]`, source row 217 / source
-position 1225 / A call 83. Do not modify RoPE, RPA, attention, KV, page-table,
-or numerical code from the incoming report.
+### Exact next sequence for the other agent
 
-### What the bucket-capable agent must do
+Do **not** run TPU or Kubernetes. Do not perform GCS recovery from 971bb228.
+First wait for this provenance-hardening tree to be committed and pushed after
+separate user approval; use the returned full published SHA, not a placeholder
+or abbreviated SHA. Create a fresh clean `local/*` worktree and read the outer
+and inner `AGENTS.md`, same-revision branch/flags skills,
+`run-phased-work/SKILL.md`, then this section, `state.md`, `plan.md`,
+`phases/phase-e0r-attempt18-return-recovery.md`, and `RUNBOOK.md`. Require
+canonical preflight, exact HEAD equality, and a clean tree. Do not print
+remotes, credentials, configured projects/accounts, or evidence roots.
 
-This is a CPU/disk plus **read-only GCS recovery**, not a TPU or Kubernetes
-run. The current machine cannot perform the GCS part. On 2026-08-29 the user
-explicitly approved commit/push of the HOST-PASS recovery tree while its
-exact-image debt remains recorded. That approval permits code publication
-only; it does not approve or waive the pinned-image or GCS operations.
-
-Before the bucket-side recovery, a clean worktree at the new full published
-SHA must pass the separately approved official pinned-image aggregate. The
-exact command is:
+Gate 1 is the separately approved pinned exact-image aggregate. Exact command:
 
 ```bash
-RAW=/tmp/m15-e0r-exact-image-<fresh-label>.log
+RAW=/tmp/m15-e0r-provenance-exact-image-<fresh-label>.log
 test ! -e "$RAW"
 bash canon-zero-tim/tests/v1_phase4/run_exact_image.sh \
   sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a \
   >"$RAW" 2>&1
 ```
 
-It is local Docker/CPU only and does not access TPU, Kubernetes, or GCS.
-Require exit zero, exact image identity, and the aggregate terminal marker
+This is local Docker/CPU only; it does not access TPU, Kubernetes, or GCS.
+Require exit zero, the exact immutable image identity, and an aggregate marker
 containing `V1_HP_EXACT_IMAGE_PASS`, `apc_m15_carrier=70`, `m15_d3e=1`,
-`m15_e0=26`, `m15_durability=1`, `m15_round_provenance=1`, and
-`manifests=3`. Preserve the raw log on every outcome. Missing marker, nonzero
-exit, image drift, or manifest drift is FAIL/INCONCLUSIVE and blocks GCS
-recovery.
+`m15_e0=30`, `m15_durability=1`, `m15_round_provenance=1`, and
+`manifests=3`. Preserve the raw log on every outcome and return its local path
+and SHA256. Missing marker, nonzero exit, image drift, or manifest drift blocks
+the recovery.
 
-After that gate, the bucket-capable machine creates a fresh clean `local/*`
-worktree at exactly the published recovery SHA and reads, in order:
+Gate 2 is a **separate explicit approval** for one read-only GCS recovery. It
+requires the original preserved Attempt-18 `e01` render directory with a
+verifying `SHA256SUMS` and `RUN_CONTRACT.json`. If absent, return
+`INCONCLUSIVE / RENDER_CONTRACT_NOT_AVAILABLE`; do not guess a bucket root,
+reconstruct a locator, hand-build YAML, or launch another target.
 
-1. `/home/yuxuan/code_rl_repro/AGENTS.md`;
-2. `canon-zero-tim/AGENTS.md`;
-3. the branch and flags skills from that same package revision;
-4. `/home/yuxuan/.codex/skills/run-phased-work/SKILL.md`;
-5. this section, `state.md`, `plan.md`,
-   `phases/phase-e0r-attempt18-return-recovery.md`, and the current
-   `RUNBOOK.md` operation.
-
-Require a clean `local/*` branch, exact full HEAD equality, and canonical
-`CANON_PREFLIGHT PASS`. Do not print Git remotes, credentials, configured
-projects/accounts, or the registered evidence roots.
-
-The operator must also have the original preserved Attempt-18 `e01` render
-directory containing a verifying `SHA256SUMS` and `RUN_CONTRACT.json`. Do not
-guess a bucket root, hand-build YAML, or reconstruct a locator from the job
-name. If this directory is absent, return `INCONCLUSIVE / RENDER_CONTRACT_NOT_AVAILABLE`
-and ask the original executor to provide the preserved local directory.
-
-After explicit approval for this one GCS-read operation, run directly without
-a pipe:
+After both gates, run directly without a pipe and use a never-reused output:
 
 ```bash
-ANALYSIS_SOURCE=<full-published-E0-recovery-SHA>
+ANALYSIS_SOURCE=<full-published-provenance-hardening-SHA>
 RENDER=<preserved-attempt18-e01-render-directory>
 RETURN=/mnt/disks/tunix-data/m15-e0-return-recovery-<fresh-label>
 test ! -e "$RETURN"
@@ -104,14 +95,14 @@ bash canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/run_m15_attempt18_e0_r
   "$ANALYSIS_SOURCE" "$RENDER" "$RETURN" /mnt/disks/tunix-data
 ```
 
-The wrapper verifies the preserved render, reruns its ten host intake tests,
-delegates to the official GCS return, and then applies a second fail-closed
-intake. The official return temporarily reads the manifest-bound `run.log`
-only to prove exact runtime source, B `reset_prefix_cache=True`, all B cached
-token counts zero, zero backward, and zero optimizer commit. The raw run log
-and large token/capsule/archive payloads never enter the output, Git, or chat.
+The wrapper performs CPU/disk plus GCS reads only. It reruns 14 fail-closed
+intake tests, verifies the render, retrieves the official compact members,
+and requires exact runtime classifier identity, complete per-record and
+comparison provenance, distinct arm manifests, B full reset/all cached tokens
+zero, zero backward, zero optimizer commit, and the raw terminal receipt. It
+does not write GCS, query/apply Kubernetes, or use TPU.
 
-Required terminal markers are all of:
+Required terminal markers are:
 
 ```text
 M15_E0_KV_RETURN_PASS status=<status> control_a_b=<n> treatment_a_b=<n> b_c=0
@@ -122,58 +113,42 @@ M15_E0_RETURN_INTAKE_PASS status=<status> ... claim=diagnostic-fingerprint-only 
 [M15.E0.RECOVERY] READ_ONLY gcs_read=1 gcs_write=0 kubernetes=0 tpu=0
 ```
 
-The output inventory must be exactly:
-
-```text
-E0_KV_RETURN.json
-off.kv-observer-classification.json
-on.kv-observer-classification.json
-SHA256SUMS
-```
-
-Return the directory unchanged, its manifest SHA256, the sanitized markers,
-and the local recovery raw-log path/SHA256. Do not return the raw log contents,
-remote roots, URLs, tokens, capsules, replay ledger, observer NPZs, or serving
-archive. A failed official read preserves remote scratch; a failed intake
-preserves both the four-file output and raw log. Never delete them and never
-retry into the same output path.
+Return the unchanged four-file output, its manifest SHA256, sanitized markers,
+and the recovery raw-log local path/SHA256. Do not return raw-log contents,
+remote roots/URLs, tokens, capsules, replay ledger, observer NPZs, or archives.
+On any failure, preserve output, scratch, and raw log; never retry into the
+same path. Import any successful or failed compact return into a **new additive
+evidence directory**. Never overwrite the rejected 971bb228 directory.
 
 ### Recovery decision table
 
 | Result | Meaning and next action |
 |---|---|
-| original render missing | `INCONCLUSIVE`; recover that local contract, no target rerun |
-| any GCS member/manifest/COMPLETE/source/B-reset marker missing | `INCONCLUSIVE`; preserve scratch, no numerical claim |
+| original render or raw terminal receipt missing | `INCONCLUSIVE`; preserve, no target rerun |
+| classifier identity/field/path/hash/manifest invariant fails | `OFFICIAL_RETURN_PROVENANCE_FAIL`; preserve, Phase E closed |
 | control A-B red or any B-C red | hard stop; carrier/shared path invalid |
 | treatment exact | `TARGET_NON_REPRODUCTION`; bug not fixed |
-| admitted `LIVE_KV_FINGERPRINT_DIFFERS` | stored live-KV diagnostic differs; discuss one cache content/page-ownership probe, no repair yet |
-| admitted `LIVE_KV_FINGERPRINT_EQUAL` | only aggregate/fixed-sample fingerprints match; next proposed probe must bind the exact `attn_metadata.block_tables` row and gathered K/V used by RPA, including the 10/16-token tail page |
-
-Even after an equal return, do not jump directly into the Pallas kernel. The
-current observer reads pages obtained from `request_state.block_ids`, while
-RPA consumes the selected `attn_metadata.block_tables` row plus sequence and
-position metadata. The next experiment must distinguish physical page/row
-selection and gathered bytes from internal RPA causal-mask/online-softmax
-math. It requires user discussion and a separate implementation phase. No
-fresh TPU run is needed for the present recovery.
+| admitted `LIVE_KV_FINGERPRINT_DIFFERS` | discuss one cache content/page-ownership probe; no repair yet |
+| admitted `LIVE_KV_FINGERPRINT_EQUAL` | only diagnostic fingerprints match; discuss exact block-table/metadata/gather discriminator before internal RPA math |
 
 ### Current three-layer audit
 
-- Implementation: local recovery wrapper and fail-closed intake only;
-  official return now includes manifest-bound B reset/zero-cached-token
-  receipts. A/B/C, APC reads, RoPE/RPA/attention/KV arithmetic, production
-  defaults, backward, and optimizer are unchanged.
-- Validation: host intake/recovery 10/10 and E0 admission/runtime 9/9 pass. Official
-  pinned exact-image for this additive recovery tree and real GCS recovery are
-  NOT RUN. Full host marker:
-  `M15_E0R_HOST_PASS task_discovery=183 return_intake=10 e0_admission=9
-  v1_cpu=91 p3_prefix_cache=31 persistence=1 flags=398 syntax=1
-  diff_check=1 exact_image=0 gcs=0 kubernetes=0 tpu=0`. Local raw log:
-  `/tmp/m15-e0r-host-gate-ff33dcd2-20260829.log`, SHA256
-  `7758ee965a06edddd5fed1c37f6253e6e5629d30a791521ed887bb34cb2e687c`.
-- Claim: the incoming target result remains unadmitted until the exact
-  four-file return and all markers pass. `TARGET NOT ADMITTED`; numerical
-  repair remains unauthorized.
+- Implementation: reviewer now pins runtime source/classifier identity, full
+  runtime-emitted fields, per-record provenance, basename-only paths, distinct
+  arm/root digests, exact claim ceiling, and mandatory CLI raw log. It changes
+  no A/B/C, APC read, RoPE/RPA/attention/KV arithmetic, production default,
+  backward, or optimizer behavior.
+- Validation: task discovery 187/187, intake/recovery 14/14, E0 admission 9/9,
+  V1 CPU 91/91, P3 prefix-cache 31/31, P38 persistence, flags 398/398,
+  Python/Bash syntax, and `git diff --check` PASS. Marker:
+  `M15_E0R_PROVENANCE_HARDENING_HOST_PASS task_discovery=187
+  return_intake=14 e0_admission=9 v1_cpu=91 p3_prefix_cache=31
+  persistence=1 flags=398 syntax=1 diff_check=1 exact_image=0 gcs=0
+  kubernetes=0 tpu=0`. Raw log:
+  `/tmp/m15-e0r-provenance-hardening-971bb228-retry2-20260829.log`, SHA256
+  `f11ab8b9bf137f7f7ca39a801fe06b6da6298b7b558fe817ea2f503f7f74a4e4`.
+- Claim: HOST PASS only. Official pinned exact-image and real GCS recovery are
+  NOT RUN; target verdict is NOT ADMITTED; numerical repair is unauthorized.
 
 ## SUPERSEDED — pre-Attempt-18 E0 launch instructions
 

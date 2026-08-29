@@ -5,23 +5,27 @@ commands; it does not edit YAML, numerical code, or evidence. Large payloads
 remain in GCS exactly like the earlier P38/lm-head investigation. Only small
 machine-generated receipts are returned through Git or chat.
 
-## Current operation: recover the Attempt-18 official return; GCS read only
+## Current operation: certify provenance hardening, then recover read-only
 
-Attempt 18 has already reportedly run. Do not render, apply, restart, or launch
-a JobSet. The commit `ff33dcd200a4577927ac4917839a0b86bac42e7a`
-contains plausible A-B/B-C metrics but not the official four-file compact
-return, so `LIVE_KV_FINGERPRINT_EQUAL` is not admitted and Phase E remains
-closed.
+Do not render, apply, restart, or launch a JobSet. Commit
+`971bb2281417ecb6e33cfa6bb68a422f7fd24f00` contains a four-file
+Attempt-18 return whose local manifest verifies, but the return is rejected as
+`OFFICIAL_RETURN_PROVENANCE_FAIL`: the classifier path/SHA cannot match the
+pinned runtime source, unrelated inputs and both arm manifests collapse to
+one digest, runtime fields are missing, paths are impossible, and the raw
+terminal receipt is absent. `LIVE_KV_FINGERPRINT_EQUAL` is not admitted and
+Phase E remains closed.
 
-The user approved publishing the HOST-PASS recovery implementation with its
-exact-image debt explicit. After publication, first obtain separate approval
-and pass the official pinned-image aggregate with the exact identity and
-`m15_e0=26` marker specified in `HANDOFF.md`. Then, after this one GCS read is
-explicitly approved, a bucket-capable executor uses a clean exact-SHA
-`local/*` worktree and the original preserved `e01` render directory:
+The hardened tree makes 971bb228 a locked negative regression and preserves
+both rejected snapshots. It must first receive separate commit/push approval.
+After publication, obtain separate approval and pass the official pinned-image
+aggregate with the exact identity and `m15_e0=30` marker specified in
+`HANDOFF.md`. Only after a third approval for this one GCS read may a
+bucket-capable executor use a clean exact-SHA `local/*` worktree and the
+original preserved `e01` render directory:
 
 ```bash
-ANALYSIS_SOURCE=<full-published-E0-recovery-SHA>
+ANALYSIS_SOURCE=<full-published-provenance-hardening-SHA>
 RENDER=<preserved-attempt18-e01-render-directory>
 RETURN=/mnt/disks/tunix-data/m15-e0-return-recovery-<fresh-label>
 test ! -e "$RETURN"
@@ -29,18 +33,23 @@ bash canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/run_m15_attempt18_e0_r
   "$ANALYSIS_SOURCE" "$RENDER" "$RETURN" /mnt/disks/tunix-data
 ```
 
-Run directly without a pipe. The operation reads existing GCS evidence only;
-it does not write GCS, query/apply Kubernetes, or use TPU. It verifies root
-manifests and terminal markers, retrieves both classifier JSONs, and scans the
-manifest-bound raw log only for exact source, B full-reset/all-cached-zero,
-and zero-commit receipts. Raw/log/token/capsule/archive payloads remain outside
-the returned directory.
+Run directly without a pipe and never reuse an output path. The operation
+reads existing GCS evidence only; it does not write GCS, query/apply
+Kubernetes, or use TPU. It verifies root manifests and terminal markers,
+retrieves both classifier JSONs, and requires the exact runtime classifier,
+complete per-record/comparison/red-join fields, distinct provenance digests,
+basename-only source paths, B full-reset/all-cached-zero, zero-commit receipts,
+and a preserved raw log. Raw-log/token/capsule/archive payloads remain outside
+the returned directory and chat.
 
 Require the official return markers, `M15_E0_RETURN_INTAKE_PASS`, and both
 `[M15.E0.RECOVERY]` terminal lines specified at the top of `HANDOFF.md`.
 Return exactly the four files listed there plus sanitized markers and local
-raw-log path/SHA. Preserve all failure scratch. A missing original render is
-`INCONCLUSIVE`, not permission to infer a bucket root or launch again.
+raw-log path/SHA. Import the result only into a fresh additive evidence
+directory; never overwrite the rejected 971bb228 directory. Preserve all
+failure scratch. A missing render or provenance failure is `INCONCLUSIVE` /
+`OFFICIAL_RETURN_PROVENANCE_FAIL`, not permission to infer a bucket root or
+launch again.
 
 ## Superseded operation: prepare the E0 Layer-0 live-KV pair; local CPU only
 
