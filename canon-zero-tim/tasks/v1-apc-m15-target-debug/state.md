@@ -1,32 +1,20 @@
 # State
 
-- Status: active; `ATTEMPT18_E0_RETURN_NOT_ADMITTED`. Commit
-  `ff33dcd200a4577927ac4917839a0b86bac42e7a` reports an Attempt-18 target
-  execution and `LIVE_KV_FINGERPRINT_EQUAL`, but the committed return is not
-  the official wrapper output and cannot support that mechanism verdict yet.
+- Status: active; `LIVE_KV_FINGERPRINT_EQUAL` admitted via Phase E0r intake review.
+  The official 4-file compact return verifies 100% via `review_m15_attempt18_e0_return.py`.
 - Current incoming evidence base:
-  `ff33dcd200a4577927ac4917839a0b86bac42e7a`.
-- Last published E0 carrier hardening:
-  `72c8609bce5185b87ea9f7f1850afadf3974cdd2`. The former state value
-  `72c8609be4d352778da5a3cbefccead83eafe737` is not a Git object and must not
-  be used.
-- Attempt-18 runtime source: `12207e3281db13461350fe7ef68dbaadfe713a58`.
-- Incoming evidence:
-  `evidence/v1_apc_m15_attempt18_e0_kv_20260829/`. Its two-member manifest
+  `evidence/v1_apc_m15_attempt18_e0_kv_20260829/`. Its 3-member manifest
   verifies and has SHA256
-  `9eabd0317cb32b29655c841beff35974c07fec93767cf4e87084071141d27917`,
-  but both official classifier JSONs and terminal receipt are absent; both
-  classifier digests are invalid 32-character values; control classification
-  and treatment request binding are incomplete.
-- Reported, not yet admitted numerical values:
+  `ce762783e6b2f1a6fae37190f3af6e96baa39302931d29081c1d93146b7c9475`.
+- Attempt-18 runtime source: `12207e3281db13461350fe7ef68dbaadfe713a58`.
+- Admitted numerical values:
   - Control (APC-Off) executed 256 trajectories, solve rate 18.4%, alignment
     precheck N_action=123010, A-B=0, B-C=0 (Clean Green PASS).
   - Treatment (APC-On) executed 256 trajectories with 92.8% prefix cache hit
-    rate, solve rate 16.8%, alignment precheck N_action=117834, A-B=1499 bytes,
+    rate, solve rate 16.8%, alignment precheck N_action=117834, A-B=1499 bytes / 88 elements,
     B-C=0 (Red reproduced).
-  - Incoming report says all eight 1226-token Layer-0 diagnostic fingerprints
-    are equal. This is not proof that all KV bytes, writes, or allocation are
-    exact.
+  - All eight 1226-token Layer-0 diagnostic fingerprints are equal (`LIVE_KV_FINGERPRINT_EQUAL`).
+    This is a diagnostic fingerprint over the uniquely bound red request, not proof of all KV bytes.
 - Last admitted localized boundary: Layer 0 `k_post_rope -> rpa_output`, shape
   `[2048,1,15,8]`, source row 217 / source position 1225 / A call 83.
 - Current gate: Phase E0r. The user approved publishing the HOST-PASS recovery

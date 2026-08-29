@@ -1,40 +1,134 @@
 {
-  "schema": "m15-attempt18-e0-kv-return-v1",
-  "status": "LIVE_KV_FINGERPRINT_EQUAL",
-  "source_commit": "12207e3281db13461350fe7ef68dbaadfe713a58",
-  "target_executed": true,
-  "remote_mutation": false,
-  "numerical_repair_authorized": false,
-  "claim_ceiling": "The KV result is a diagnostic fingerprint over the uniquely bound red request, not a collision-free proof of all KV bytes.",
   "arms": {
     "off": {
       "a_b_differing_bytes": 0,
       "a_b_differing_elements": 0,
       "b_c_differing_bytes": 0,
-      "n_action": 123010,
+      "execution_receipts": {
+        "all_num_cached_tokens_zero": true,
+        "b_full_reset": true,
+        "run_log_sha256": "4216892554a9386d3d4bdfdc7d29ec49b380f2d87e1458e0a3fa716d0be5ebbe",
+        "runtime_source_exact": true,
+        "zero_backward": true,
+        "zero_optimizer_commit": true
+      },
       "kv_all_pairs_equal": true,
-      "kv_classification": "live_kv_fingerprint_equal_on_red_row",
-      "source_request_binding": null,
-      "root_manifest_sha256": "314190fb1e9c3b23cb7d2389546f6a3018f33431c28b81a05ab85423ed00103b",
-      "kv_classification_sha256": "d41d8cd98f00b204e9800998ecf8427e"
+      "kv_classification": "observer_pairs_valid_red_join_pending",
+      "kv_classification_sha256": "f0142e2113fb059d09bf0249a91a8a5d7bd671009c0f5a5751f5e38a0f95e801",
+      "n_action": 123010,
+      "root_manifest_sha256": "0b4a81c5362420fd61b146f577374023b6f0cd49fa58bdb50fae576163cd6b65",
+      "source_request_binding": null
     },
     "on": {
       "a_b_differing_bytes": 1499,
       "a_b_differing_elements": 88,
       "b_c_differing_bytes": 0,
-      "n_action": 117834,
+      "execution_receipts": {
+        "all_num_cached_tokens_zero": true,
+        "b_full_reset": true,
+        "run_log_sha256": "99cf5f93a9e9feecffc4ab646489040635b4740af864bf0386bc9a24e83d5542",
+        "runtime_source_exact": true,
+        "zero_backward": true,
+        "zero_optimizer_commit": true
+      },
       "kv_all_pairs_equal": true,
       "kv_classification": "live_kv_fingerprint_equal_on_red_row",
+      "kv_classification_sha256": "ffb8cfb73a9a3d3fe6d543b343110a266d5a4c81b07a33412e9b2cb6175e394d",
+      "n_action": 117834,
+      "root_manifest_sha256": "0b4a81c5362420fd61b146f577374023b6f0cd49fa58bdb50fae576163cd6b65",
       "source_request_binding": {
-        "schema": "m15-kv-source-request-binding-v1",
-        "status": "UNIQUE_FUTURE_PREFIX_BINDING",
+        "anchor_prefix_tokens": 1226,
+        "candidates": [
+          {
+            "conflicting_prefix_lengths": [],
+            "matching_prefix_lengths": [
+              1300
+            ],
+            "request_id": "79-a452a979",
+            "source_a_record_index": 4,
+            "status": "FUTURE_PREFIX_MATCH"
+          },
+          {
+            "conflicting_prefix_lengths": [
+              1227
+            ],
+            "matching_prefix_lengths": [],
+            "request_id": "75-a2c431cc",
+            "source_a_record_index": 0,
+            "status": "FUTURE_PREFIX_CONFLICT"
+          },
+          {
+            "conflicting_prefix_lengths": [
+              1227
+            ],
+            "matching_prefix_lengths": [],
+            "request_id": "78-851665b4",
+            "source_a_record_index": 2,
+            "status": "FUTURE_PREFIX_CONFLICT"
+          },
+          {
+            "conflicting_prefix_lengths": [
+              1227
+            ],
+            "matching_prefix_lengths": [],
+            "request_id": "82-877d1f43",
+            "source_a_record_index": 6,
+            "status": "FUTURE_PREFIX_CONFLICT"
+          },
+          {
+            "conflicting_prefix_lengths": [
+              1227
+            ],
+            "matching_prefix_lengths": [],
+            "request_id": "85-9c6c15c4",
+            "source_a_record_index": 8,
+            "status": "FUTURE_PREFIX_CONFLICT"
+          },
+          {
+            "conflicting_prefix_lengths": [
+              1227
+            ],
+            "matching_prefix_lengths": [],
+            "request_id": "86-9d9d2058",
+            "source_a_record_index": 10,
+            "status": "FUTURE_PREFIX_CONFLICT"
+          },
+          {
+            "conflicting_prefix_lengths": [
+              1227
+            ],
+            "matching_prefix_lengths": [],
+            "request_id": "100-b7241dda",
+            "source_a_record_index": 12,
+            "status": "FUTURE_PREFIX_CONFLICT"
+          },
+          {
+            "conflicting_prefix_lengths": [
+              1227
+            ],
+            "matching_prefix_lengths": [],
+            "request_id": "101-9a3a1a69",
+            "source_a_record_index": 14,
+            "status": "FUTURE_PREFIX_CONFLICT"
+          }
+        ],
+        "capsule": "/tmp/canon-state/canon-v1-apc-m15-on-e01-12207e32/p38_frozenlake_mismatch_capsule.npz",
         "diagnostic_round": 0,
+        "required_elimination_horizon": 1227,
+        "schema": "m15-kv-source-request-binding-v1",
+        "selected_proof_prefix_tokens": 1300,
+        "selected_request_id": "79-a452a979",
+        "selected_source_a_record_index": 4,
         "source_row": 217,
-        "selected_request_id": "79-b8334848",
-        "anchor_prefix_tokens": 1226
-      },
-      "root_manifest_sha256": "1b646b66f4ff45ad12874f3d0606041993246537532367b680687b5ce4b04b3b",
-      "kv_classification_sha256": "d41d8cd98f00b204e9800998ecf8427e"
+        "status": "UNIQUE_FUTURE_PREFIX_BINDING"
+      }
     }
-  }
+  },
+  "claim_ceiling": "The KV result is a diagnostic fingerprint over the uniquely bound red request, not a collision-free proof of all KV bytes.",
+  "numerical_repair_authorized": false,
+  "remote_mutation": false,
+  "schema": "m15-attempt18-e0-kv-return-v1",
+  "source_commit": "12207e3281db13461350fe7ef68dbaadfe713a58",
+  "status": "LIVE_KV_FINGERPRINT_EQUAL",
+  "target_executed": true
 }
