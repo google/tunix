@@ -149,6 +149,19 @@ class ResolvedEnvironmentTest(unittest.TestCase):
     self.assertIn("export CANON_P38_DURABILITY_PROFILE=m15-wide-v1", resolved)
     self.assertIn("export CANON_P38_DIAGNOSTIC_ROUNDS=3", resolved)
 
+  def test_targeted_kv_observer_resolves_with_exact_alias_contract(self):
+    result, resolved = self._resolve("on", observer="kv")
+    self.assertEqual(result.returncode, 0, result.stdout)
+    self.assertIn("export CANON_P38_KV_OBSERVER_LAYER=0", resolved)
+    self.assertIn(
+        "export CANON_P38_KV_OBSERVER_TARGET_PREFIX_TOKENS=1226", resolved
+    )
+    self.assertIn("export CANON_P38_KV_OBSERVER_MAX_CANDIDATES=8", resolved)
+    self.assertIn("export CANON_P38_KV_OBSERVER_MAX_PAGES=96", resolved)
+    self.assertIn("export CANON_P38_DURABILITY_PROFILE=round-alignment-v1", resolved)
+    self.assertIn("export CANON_P38_DIAGNOSTIC_ROUNDS=1", resolved)
+    self.assertNotIn("export CANON_P38_SEAM_OBSERVER=", resolved)
+
   def test_wrong_profile_is_rejected_before_runtime(self):
     result, resolved = self._resolve("on", wrong_profile=True)
     self.assertNotEqual(result.returncode, 0, result.stdout)

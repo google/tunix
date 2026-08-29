@@ -85,6 +85,40 @@ admission_geometry, p38_batch_contract = _load_train_geometry_contracts()
 
 class TargetCarrierTest(unittest.TestCase):
 
+  def test_m15_targeted_kv_patch_is_append_only_and_default_off(self):
+    patch = (
+        CANON / "patches/tpu_inference/35-tpu-runner-m15-layer0-kv-prefix.patch"
+    ).read_text(encoding="utf-8")
+    installer = (CANON / "install.sh").read_text(encoding="utf-8")
+    runner = (CANON / "cluster/steps/90_run.sh").read_text(encoding="utf-8")
+    self.assertIn("CANON_P38_KV_OBSERVER_TARGET_PREFIX_SHA256", patch)
+    self.assertIn("selected_caches", patch)
+    self.assertIn('"layer_indices"', patch)
+    self.assertIn('state["last_call_index"] = int(call_index)', patch)
+    self.assertIn(
+        '_P38_M15_REPLAY_STATE.get("last_call_index", -1)', patch
+    )
+    self.assertIn("35-tpu-runner-m15-layer0-kv-prefix.patch", installer)
+    self.assertLess(
+        installer.index("34-tpu-runner-p58-multiround-budget.patch"),
+        installer.index("35-tpu-runner-m15-layer0-kv-prefix.patch"),
+    )
+    self.assertIn("p38_kv_red_join_args=(--require-red-join)", runner)
+    self.assertIn(
+        'if [ "${CANON_APC_M15_TARGET_DEBUG:-}" = "off" ]; then', runner
+    )
+    self.assertIn('p38_kv_red_join_args=()', runner)
+    self.assertIn('"${p38_kv_red_join_args[@]}"', runner)
+    self.assertIn("p38_kv_expected_candidates=3", runner)
+    self.assertIn(
+        'p38_kv_expected_candidates="${CANON_P38_KV_OBSERVER_MAX_CANDIDATES:?}"',
+        runner,
+    )
+    self.assertIn(
+        '"$n_p38_kv_observer_candidate" -ne "$p38_kv_expected_candidates"',
+        runner,
+    )
+
   def test_m15_replay_round_provenance_patch_is_additive(self):
     patch = (
         CANON / "patches/tpu_inference/33-tpu-runner-m15-replay-round-provenance.patch"
@@ -392,8 +426,41 @@ def _p38_m15_replay_ledger():
             output_dir=Path(directory) / "bad",
             source_commit=SOURCE,
             run_id="full-bad",
-            observer="full",
+          observer="full",
         )
+
+  def test_targeted_kv_observer_renders_one_round_layer0_alias_pair(self):
+    with tempfile.TemporaryDirectory() as directory:
+      paths = renderer.render_all(
+          base_path=BASE,
+          output_dir=Path(directory),
+          source_commit=SOURCE,
+          run_id="kv-a",
+          observer="kv",
+      )
+      self.assertEqual([path.name for path in paths], [
+          "jobset-v1-apc-m15-off-kv.yaml",
+          "jobset-v1-apc-m15-on-kv.yaml",
+      ])
+      for path in paths:
+        document = yaml.safe_load(path.read_text(encoding="utf-8"))
+        env = renderer.p33._env_values(document)
+        self.assertEqual(env["CANON_P38_DIAGNOSTIC_ROUNDS"], "1")
+        self.assertEqual(
+            env["CANON_P38_DURABILITY_PROFILE"], "round-alignment-v1"
+        )
+        self.assertEqual(env["CANON_P38_KV_OBSERVER_LAYER"], "0")
+        self.assertEqual(
+            env["CANON_P38_KV_OBSERVER_TARGET_PREFIX_TOKENS"], "1226"
+        )
+        self.assertEqual(env["CANON_P38_KV_OBSERVER_MAX_CANDIDATES"], "8")
+        self.assertEqual(env["CANON_P38_KV_OBSERVER_MAX_PAGES"], "96")
+        self.assertEqual(
+            document["metadata"]["labels"]["canon.zero-tim/kv-observer"],
+            "layer0-target-prefix",
+        )
+        self.assertNotIn("CANON_P38_SEAM_OBSERVER", env)
+        self.assertNotIn("CANON_P38_TAIL_OBSERVER", env)
 
   def test_m15_coverage_contract_uses_one_full_producer_unit(self):
     self.assertEqual(

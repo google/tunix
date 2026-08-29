@@ -5,7 +5,47 @@ commands; it does not edit YAML, numerical code, or evidence. Large payloads
 remain in GCS exactly like the earlier P38/lm-head investigation. Only small
 machine-generated receipts are returned through Git or chat.
 
-## Current operation: D3e canonical first-action reclassification; CPU/GCS read only
+## Current operation: prepare the E0 Layer-0 live-KV pair; local CPU only
+
+D3e is complete and committed: the canonical completion-position-zero action
+is `FIRST_RED_LOCALIZED` at Layer 0 `k_post_rope -> rpa_output`, shape
+`[2048,1,15,8]`, with A-B=207 bytes / 95 elements and B-C=0. The evidence is
+still analysis-grade partial, not a complete target PASS. E0 observes whether
+the uniquely future-bound A request already has a different stored Layer-0 KV
+fingerprint before RPA. It is not a numerical repair.
+
+The executor must receive the exact full published E0 SHA. From a new clean
+`local/*` worktree at that SHA, run only the prepare command first:
+
+```bash
+SOURCE_COMMIT=<full-published-E0-SHA>
+RUN_ID=<fresh-never-reused-dns-label>
+OUT=/tmp/m15-e0-kv-${RUN_ID}
+test ! -e "$OUT"
+bash canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/prepare_m15_attempt18_e0_kv_pair.sh \
+  "$SOURCE_COMMIT" "$RUN_ID" "$OUT"
+```
+
+This verifies the committed D3e manifest, reruns focused host gates, and emits
+two immutable YAMLs, `D3E_ADMISSION.json`, `RUN_CONTRACT.json`, and
+`SHA256SUMS`. It does not access GCS or Kubernetes and does not launch TPU.
+Require both terminal markers:
+
+```text
+[M15.E0.KV] RENDER_PASS ... rounds=1 layer=0 aliases=8 pages=96 ...
+[M15.E0.KV] TARGET_NOT_RUN pinned_exact_image=required launch_approval=required gcs=0 kubernetes=0 tpu=0
+```
+
+Stop on any source, clean-tree, manifest, pair-normalization, or marker failure.
+Do not edit either YAML. Next, request explicit approval for the complete
+official pinned-image aggregate on
+`sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`.
+Pinned-image PASS still does not authorize launch. A later DP8xTP8 launch and a
+later compact GCS read each require separate approvals. Exact commands,
+required markers, failure preservation, and the decision table are at the top
+of `HANDOFF.md` and in `phases/phase-e0-layer0-live-kv-discriminator.md`.
+
+## Historical operation: D3e canonical first-action reclassification; CPU/GCS read only
 
 D3d has completed. Do not run its old entrypoint directly and do not launch a
 JobSet. The verified return uniquely binds source row 217 / completion

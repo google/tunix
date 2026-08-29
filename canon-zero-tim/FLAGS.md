@@ -4,7 +4,7 @@
 > 焊死数值类 flag = 删代码路径 = 程序变更,走与开启同级认证门(verify+ALIGN+canary)。
 > 生命周期档位:试验 → 已认证 → 默认开 → 焊死(开关可删)→ 退役/否决。
 > 普查基点 a94d6c0c(285 个可设置 env flag,与 ebba4850 普查零漂移);普查后续现役附录
-> 当前 395 个;本表分层登记,D 层按前缀组、语义欠账标"待考古"。
+> 当前 398 个;本表分层登记,D 层按前缀组、语义欠账标"待考古"。
 > 全量机器清单:落地 CL 时由 `grep -rhoE` 生成为附录,条目数必须 == 普查数(排除项列明)。
 
 ## A 层 · 数值语义类(动它 = 动程序身份;焊死走认证门)
@@ -75,6 +75,7 @@
 | capture/journal/ledger/capsule/GCS/replay | SERVING_CAPTURE_*、REQUEST_JOURNAL、INCIDENT_LEDGER、MISMATCH_CAPSULE、GCS_PREFIX、DURABILITY_PROFILE、FROZENLAKE_REPLAY、PRECHECK_ONLY… | **carrier 结案(strict 复验全绿)→ 全家整体退役**;判决类结论(U 臂、slot bug、co-batch、shape-1)迁 FOOTGUNS 后删 |
 | Phase3 APC dirty-page negative | CANON_P3_APC_DIRTY_PAGE:布尔诊断旗标;缺省/空/0 不污染,仅 boundary dirty mode 的 writer 向直接 JAX/vLLM reader 透传 1;污染 A 确定会复用的 layer-0 单个真实 KV page,B 仍 full reset | G-D `p3gd1` 已命中;为 G-E 复验保留默认-off 载具,Phase3 最终结案 CL 退役 |
 | M15 target APC carrier | CANON_APC_M15_TARGET_DEBUG=`off\|on`:只准入 DP8×TP8、M15/main、zero-commit 的 bounded target reproducer；observer=`none` 精确单轮，`m15-wide-v1` 的 layer/full observer 精确三轮且每轮权重冻结、先 seal/readback 再推进；`off` 是 APC-off control，`on` 是 production cache-read treatment；两臂保留生产 `CANON_CONTINUE_DECODE=8` 和签名的 `sampler_is=None` rollout-logprob recipe，不允许 TIS weights；四个 tensor capture 仍限定 standard path；A 强制 `prompt_logprobs=None/logprobs=1/skip_reading_prefix_cache=False`，B 强制 `reset_prefix_cache=True` 且 cache tokens 全零 | fresh target red 冻结并完成首红定位、修复后 G-E 全零与脏页负控再次通过后退役；不得进入 full production profile |
+| M15 E0 targeted live-KV discriminator | `CANON_P38_KV_OBSERVER_LAYER`、`CANON_P38_KV_OBSERVER_TARGET_PREFIX_SHA256`、`CANON_P38_KV_OBSERVER_TARGET_PREFIX_TOKENS`:三者只能成组设置；仅 D3e 已登记的 M15/main DP8×TP8 frozen one-round off/on carrier 可设为 layer 0、1226-token canonical-action 前缀及其 self-hashed identity。载具保留该前缀的 8 个合法 request alias，各自只读取 77 个逻辑页（静态上限 96），随后用同轮 replay-ledger future-prefix 证据唯一绑定 source request；旧 P38 observer 缺省仍读全部层且页上限 32。输出是整数 aggregate/fixed-sample diagnostic fingerprint，不是完整 KV bytes；任何 alias 缺失、非唯一 future binding、无 red join、B-C red 或 observer-neutrality red 均 fail closed | 默认 absent/off；host 实现完成，fresh pinned exact-image 与 DP8×TP8 target 未跑；成功区分 live stored-KV red/equal 后退役，不能进入 production profile 或放宽 B full reset |
 | M15 replay envelope | CANON_APC_M15_REPLAY_LEDGER=`<capture-dir>/m15_replay_envelope.jsonl`:仅与 `CANON_APC_M15_TARGET_DEBUG=off\|on` 成对启用；逐 serving call 保存 host 侧 dispatch/request/position/page 几何与 token-history SHA，不读取 device tensor；A 的冻结 carrier 必须机械证明 standard+continue-decode，B 必须只走 full-reset standard；路径直接位于 P38 capture 目录。无 seam observer 的旧 carrier 仍保留 incident/replay 单文件界；`m15-wide-v1` seam carrier 明确跳过重复且曾超过 2 GiB 的 incident ledger，replay envelope 继续作为 chronology authority | M15 target red 的完整 producer unit、serving chronology 与 first-red join 已冻结并完成 deterministic replay 后退役；不得单独开启 |
 | M15 wide durability | CANON_P38_DURABILITY_PROFILE=`m15-wide-v1`:只允许精确 M15 target `off\|on` + `layer\|full` observer；精确三轮，每轮独立 shard root 与 observer byte budget，record 序号不复用；每 30 秒最多复制 32 对完整 JSON/NPZ、逻辑 payload 最多 256 MiB，生成确定性 archive/SHA，远端下载复核后才写 `SHARD_COMPLETE.json`；round classifier 只读本轮 sealed shard 隔离副本并过滤 cumulative replay ledger；终态顺序固定为 shard complete → round complete → COLLECTED → postflight COMPLETE；根终态丢失时可用 checked-in 小回传脚本恢复已 seal 轮次；每次持久化还核对执行 checkout HEAD 与 rendered full SHA | 试验、仅 M15 wide target；首红定位和最小修复完成后整体退役，失败 shard 永久保留 |
 | M15 wide seam bundle | CANON_APC_M15_SEAM_BUNDLE=`<state>/m15_wide_seam_bundle.tar`:仅在 M15 target 的 `layer\|full` seam observer 上启用；round worker 从 sealed shard union 中运行 classifier，再从 A/B 精确 join 选出的原始 seam/tail records、alignment、capsule、replay ledger 生成 deterministic SHA bundle。`m15-wide-v1` 会把该紧凑 bundle、分类和输入收据上传到既有任务 GCS evidence prefix；它不上传整个 live capture 目录 | 首红定位完成并把最小修复通过 G-E 后退役；新的 target 发射仍需用户单独批准 |
@@ -323,10 +324,13 @@ CANON_P38_INCIDENT_MAX_PREFIX
 CANON_P38_INCIDENT_MIN_PREFIX
 CANON_P38_KV_OBSERVER_CLASSIFICATION
 CANON_P38_KV_OBSERVER_DIR
+CANON_P38_KV_OBSERVER_LAYER
 CANON_P38_KV_OBSERVER_MAX_BYTES
 CANON_P38_KV_OBSERVER_MAX_CANDIDATES
 CANON_P38_KV_OBSERVER_MAX_PAGES
 CANON_P38_KV_OBSERVER_MAX_READ_BYTES
+CANON_P38_KV_OBSERVER_TARGET_PREFIX_SHA256
+CANON_P38_KV_OBSERVER_TARGET_PREFIX_TOKENS
 CANON_P38_LIVE_COLLECT_ACK_FILE
 CANON_P38_LIVE_COLLECT_REQUEST_FILE
 CANON_P38_LIVE_COMPLETE_ACK_FILE
@@ -522,4 +526,4 @@ CANON_XPROF_STEPS
 CANON_XPROF_TPU_TRACE_MODE
 ```
 
-Count: 395 settable names (appendix inventory above; exclusions: none).
+Count: 398 settable names (appendix inventory above; exclusions: none).

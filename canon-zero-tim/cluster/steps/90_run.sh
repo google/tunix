@@ -582,12 +582,22 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
       [ -s "$p38_kv_capsule" ] || continue
       p38_kv_args+=(--capsule "$p38_kv_capsule")
     done
+    p38_kv_replay_args=()
+    p38_kv_red_join_args=(--require-red-join)
+    if [ "${CANON_APC_M15_TARGET_DEBUG:-}" = "off" ]; then
+      p38_kv_red_join_args=()
+    elif [ -n "${CANON_APC_M15_REPLAY_LEDGER:-}" ]; then
+      p38_kv_replay_args+=(
+        --replay-ledger "$CANON_APC_M15_REPLAY_LEDGER"
+      )
+    fi
     echo "[CANON_P38_KV_OBSERVER_INPUTS] source=$p38_kv_capsule_source capsules=$((${#p38_kv_args[@]} / 2))"
     JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
       python3 "$CANON_PKG/tasks/p38-pathways-decode-prefill-carrier/scripts/classify_p38_kv_observer.py" \
         --directory "$CANON_P38_KV_OBSERVER_DIR" \
         "${p38_kv_args[@]}" \
-        --require-red-join \
+        "${p38_kv_replay_args[@]}" \
+        "${p38_kv_red_join_args[@]}" \
         --output "$CANON_P38_KV_OBSERVER_CLASSIFICATION" || \
       p38_kv_observer_rc=$?
     if [ -s "$CANON_P38_KV_OBSERVER_CLASSIFICATION" ]; then
@@ -817,6 +827,10 @@ n_p38_kv_observer_init=$(grep -ac '^\[CANON_P38_KV_OBSERVER_INIT\]' "$LOG" || tr
 n_p38_kv_observer_candidate=$(grep -ac '^\[CANON_P38_KV_OBSERVER_CANDIDATE\]' "$LOG" || true)
 n_p38_kv_observer_a=$(grep -ac '^\[CANON_P38_KV_OBSERVER_RECORD\] arm=A ' "$LOG" || true)
 n_p38_kv_observer_b=$(grep -ac '^\[CANON_P38_KV_OBSERVER_RECORD\] arm=B ' "$LOG" || true)
+p38_kv_expected_candidates=3
+if [ -n "${CANON_P38_KV_OBSERVER_TARGET_PREFIX_SHA256:-}" ]; then
+  p38_kv_expected_candidates="${CANON_P38_KV_OBSERVER_MAX_CANDIDATES:?}"
+fi
 n_p38_seam_init=$(grep -ac '^\[CANON_P38_SEAM_OBSERVER_INIT\] ' "$LOG" || true)
 n_p38_seam_records=$(grep -ac '^\[CANON_P38_SEAM_OBSERVER_RECORD\] ' "$LOG" || true)
 n_p38_tail_init=$(grep -ac '^\[CANON_P38_TAIL_OBSERVER_INIT\] ' "$LOG" || true)
@@ -934,12 +948,12 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
   fi
   if [ -n "${CANON_P38_KV_OBSERVER_DIR:-}" ] && \
      { [ "$n_p38_kv_observer_init" -ne 1 ] || \
-       [ "$n_p38_kv_observer_candidate" -ne 3 ] || \
-       [ "$n_p38_kv_observer_a" -ne 3 ] || \
-       [ "$n_p38_kv_observer_b" -ne 3 ] || \
+       [ "$n_p38_kv_observer_candidate" -ne "$p38_kv_expected_candidates" ] || \
+       [ "$n_p38_kv_observer_a" -ne "$p38_kv_expected_candidates" ] || \
+       [ "$n_p38_kv_observer_b" -ne "$p38_kv_expected_candidates" ] || \
        [ "${p38_kv_observer_rc:-1}" -ne 0 ] || \
        [ ! -s "${CANON_P38_KV_OBSERVER_CLASSIFICATION:-}" ]; }; then
-    echo "[run] FATAL: P38 KV observer contract failed: init=$n_p38_kv_observer_init candidates=$n_p38_kv_observer_candidate A=$n_p38_kv_observer_a B=$n_p38_kv_observer_b classifier=${p38_kv_observer_rc:-unset}" >&2
+    echo "[run] FATAL: P38 KV observer contract failed: init=$n_p38_kv_observer_init expected=$p38_kv_expected_candidates candidates=$n_p38_kv_observer_candidate A=$n_p38_kv_observer_a B=$n_p38_kv_observer_b classifier=${p38_kv_observer_rc:-unset}" >&2
     exit 1
   fi
   if [ -n "${CANON_P38_SEAM_OBSERVER:-}" ] && \

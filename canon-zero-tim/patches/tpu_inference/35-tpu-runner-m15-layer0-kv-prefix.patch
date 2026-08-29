@@ -1,0 +1,217 @@
+--- tpu_runner_p21_l30.py
++++ tpu_runner_p21_l30.py
+@@ -1158,6 +1158,12 @@
+ _P38_KV_OBSERVER_MAX_READ_BYTES = int(os.environ.get(
+     "CANON_P38_KV_OBSERVER_MAX_READ_BYTES", str(640 * 1024 * 1024)) or
+     str(640 * 1024 * 1024))
++_P38_KV_OBSERVER_LAYER_TEXT = os.environ.get(
++    "CANON_P38_KV_OBSERVER_LAYER", "")
++_P38_KV_OBSERVER_TARGET_PREFIX_SHA256 = os.environ.get(
++    "CANON_P38_KV_OBSERVER_TARGET_PREFIX_SHA256", "")
++_P38_KV_OBSERVER_TARGET_PREFIX_TOKENS = int(os.environ.get(
++    "CANON_P38_KV_OBSERVER_TARGET_PREFIX_TOKENS", "0") or "0")
+ _P38_KV_OBSERVER_CANDIDATES = {}
+ _P38_KV_OBSERVER_CANDIDATE_ROUNDS = set()
+ _P38_KV_OBSERVER_A_RECORDS = []
+@@ -1332,6 +1338,7 @@
+         flush=True,
+     )
+
++_P38_KV_OBSERVER_LAYER = None
+ if _P38_KV_OBSERVER_DIR:
+     if not _P38_SERVING_CAPTURE_DIR:
+         raise RuntimeError("P38 KV observer requires serving capture")
+@@ -1343,19 +1350,52 @@
+         raise RuntimeError("P38 KV observer requires the standard path")
+     if not (1 <= _P38_KV_OBSERVER_MAX_CANDIDATES <= 8):
+         raise RuntimeError("P38 KV observer candidate bound is invalid")
+-    if not (1 <= _P38_KV_OBSERVER_MAX_PAGES <= 32):
+-        raise RuntimeError("P38 KV observer page bound is invalid")
++    target_fields = (
++        bool(_P38_KV_OBSERVER_LAYER_TEXT),
++        bool(_P38_KV_OBSERVER_TARGET_PREFIX_SHA256),
++        bool(_P38_KV_OBSERVER_TARGET_PREFIX_TOKENS),
++    )
++    if any(target_fields) != all(target_fields):
++        raise RuntimeError(
++            "P38 KV observer layer/target-prefix fields must be set together")
++    if all(target_fields):
++        if not _P38_KV_OBSERVER_LAYER_TEXT.isdigit():
++            raise RuntimeError("P38 KV observer layer must be an integer")
++        _P38_KV_OBSERVER_LAYER = int(_P38_KV_OBSERVER_LAYER_TEXT)
++        digest = _P38_KV_OBSERVER_TARGET_PREFIX_SHA256
++        if len(digest) != 64 or any(value not in "0123456789abcdef"
++                                    for value in digest):
++            raise RuntimeError(
++                "P38 KV observer target-prefix SHA256 is invalid")
++        if _P38_KV_OBSERVER_TARGET_PREFIX_TOKENS < 1:
++            raise RuntimeError(
++                "P38 KV observer target-prefix token count is invalid")
++        if _P38_KV_OBSERVER_MAX_CANDIDATES != 8:
++            raise RuntimeError(
++                "M15 targeted KV observation requires eight aliases")
++        if not (1 <= _P38_KV_OBSERVER_MAX_PAGES <= 128):
++            raise RuntimeError("targeted P38 KV observer page bound is invalid")
++    elif not (1 <= _P38_KV_OBSERVER_MAX_PAGES <= 32):
++        raise RuntimeError("legacy P38 KV observer page bound is invalid")
+     if not (1024 * 1024 <= _P38_KV_OBSERVER_MAX_BYTES <= 256 * 1024 * 1024):
+         raise RuntimeError("P38 KV observer output byte bound is invalid")
+     if not (64 * 1024 * 1024 <= _P38_KV_OBSERVER_MAX_READ_BYTES <=
+             2 * 1024 * 1024 * 1024):
+         raise RuntimeError("P38 KV observer read byte bound is invalid")
++    if _P38_KV_OBSERVER_TARGET_PREFIX_SHA256 and (
++            _P38_M15_TARGET_DEBUG not in ("off", "on")
++            or _P38_DURABILITY_PROFILE != "round-alignment-v1"):
++        raise RuntimeError(
++            "targeted P38 KV observation requires one-round M15 target debug")
+     print(
+         "[CANON_P38_KV_OBSERVER_INIT] "
+         f"enabled=1 candidates={_P38_KV_OBSERVER_MAX_CANDIDATES} "
+         f"pages={_P38_KV_OBSERVER_MAX_PAGES} "
+         f"max_output_bytes={_P38_KV_OBSERVER_MAX_BYTES} "
+-        f"max_read_bytes={_P38_KV_OBSERVER_MAX_READ_BYTES}",
++        f"max_read_bytes={_P38_KV_OBSERVER_MAX_READ_BYTES} "
++        f"layer={_P38_KV_OBSERVER_LAYER if _P38_KV_OBSERVER_LAYER is not None else 'all'} "
++        "target_prefix_tokens="
++        f"{_P38_KV_OBSERVER_TARGET_PREFIX_TOKENS}",
+         flush=True,
+     )
+
+@@ -1880,6 +1920,7 @@
+         _os.close(descriptor)
+     state["records"] += 1
+     state["bytes"] += len(encoded)
++    state["last_call_index"] = int(call_index)
+     if state["records"] == 1 or state["records"] % 256 == 0:
+         print(
+             "[CANON_APC_M15_REPLAY_LEDGER] "
+
+@@ -2076,7 +2116,8 @@
+
+ def _p38_kv_observer_note_candidate(incident_record):
+     """Remember one deep, naturally single-active decode request per round."""
+-    if not _P38_KV_OBSERVER_DIR:
++    if (not _P38_KV_OBSERVER_DIR
++            or _P38_KV_OBSERVER_TARGET_PREFIX_SHA256):
+         return
+     if int(incident_record["scheduled_request_count"]) != 1:
+         return
+@@ -2244,7 +2285,7 @@
+ def _p38_kv_observer_capture(
+         runner, arm, request_id, dp_rank, target_token_ids, physical_pages,
+         candidate):
+-    """Capture one fixed-shape all-prefix table from every live KV layer."""
++    """Capture one fixed-shape prefix table from the selected live KV layers."""
+     import time as _time
+
+     global _P38_KV_OBSERVER_FN
+@@ -2253,8 +2294,19 @@
+         raise RuntimeError("P38 KV observer target token prefix is empty")
+     if not runner.kv_caches:
+         raise RuntimeError("P38 KV observer found no KV cache layers")
++    if (_P38_KV_OBSERVER_LAYER is not None
++            and _P38_KV_OBSERVER_LAYER >= len(runner.kv_caches)):
++        raise RuntimeError(
++            "P38 KV observer selected layer is outside the live cache tuple")
++    layer_indices = (
++        tuple(range(len(runner.kv_caches)))
++        if _P38_KV_OBSERVER_LAYER is None
++        else (_P38_KV_OBSERVER_LAYER,)
++    )
++    selected_caches = tuple(runner.kv_caches[index]
++                            for index in layer_indices)
+     cache_shapes = [tuple(int(value) for value in cache.shape)
+-                    for cache in runner.kv_caches]
++                    for cache in selected_caches]
+     if len(set(cache_shapes)) != 1:
+         raise RuntimeError("P38 KV observer cache layer shapes drifted")
+     cache_shape = cache_shapes[0]
+@@ -2293,7 +2345,7 @@
+             fingerprint_kv_cache_layer_prefixes)
+     start = _time.monotonic()
+     result = _P38_KV_OBSERVER_FN(
+-        tuple(runner.kv_caches),
++        selected_caches,
+         jnp.asarray(padded_global_pages, dtype=jnp.int32),
+     )
+     aggregates, samples = jax.device_get(result)
+@@ -2322,11 +2374,12 @@
+         "block_size": int(runner.block_size),
+         "logical_pages": int(logical_pages),
+         "observer_pages": int(_P38_KV_OBSERVER_MAX_PAGES),
+-        "layer_count": int(len(runner.kv_caches)),
++        "layer_count": int(len(selected_caches)),
++        "layer_indices": [int(value) for value in layer_indices],
+         "cache_shape": list(cache_shape),
+-        "cache_dtype": str(runner.kv_caches[0].dtype),
++        "cache_dtype": str(selected_caches[0].dtype),
+         "cache_sharding": str(getattr(
+-            runner.kv_caches[0], "sharding", None)),
++            selected_caches[0], "sharding", None)),
+         "device_read_bytes": int(read_bytes),
+         "elapsed_seconds": float(elapsed),
+         "fingerprint_claim": "diagnostic_non_cryptographic",
+@@ -2362,6 +2415,63 @@
+         if len(req_ids) != len(sampled_rows):
+             raise RuntimeError("P38 KV observer sampled-request rows drifted")
+         for request_id, sampled_ids in zip(req_ids, sampled_rows):
++            if _P38_KV_OBSERVER_TARGET_PREFIX_SHA256:
++                if any(record["request_id"] == request_id
++                       for record in _P38_KV_OBSERVER_A_RECORDS):
++                    continue
++                if (len(_P38_KV_OBSERVER_A_RECORDS) >=
++                        _P38_KV_OBSERVER_MAX_CANDIDATES):
++                    continue
++                scheduled_tokens = int(
++                    scheduler_output.num_scheduled_tokens.get(request_id, 0))
++                if scheduled_tokens <= 0:
++                    continue
++                request_state = runner.requests.get(request_id)
++                if request_state is None:
++                    raise RuntimeError(
++                        "P38 targeted KV request disappeared: "
++                        f"{request_id}")
++                seq_len = (int(request_state.num_computed_tokens) +
++                           scheduled_tokens)
++                if seq_len < _P38_KV_OBSERVER_TARGET_PREFIX_TOKENS:
++                    continue
++                request_index = int(
++                    runner.input_batch.req_id_to_index[request_id])
++                token_ids = np.asarray(
++                    runner.input_batch.token_ids_cpu[
++                        request_index,
++                        :_P38_KV_OBSERVER_TARGET_PREFIX_TOKENS],
++                    dtype=np.int32)
++                if (_p38_token_history_sha256(token_ids) !=
++                        _P38_KV_OBSERVER_TARGET_PREFIX_SHA256):
++                    continue
++                dp_rank = _p38_kv_observer_dp_rank(req_ids_dp, request_id)
++                pages = _p38_primary_pages(request_state.block_ids)
++                candidate = {
++                    "request_id": request_id,
++                    "diagnostic_round": int(_p38_seam_round()),
++                    "tag_call_index": int(
++                        _P38_M15_REPLAY_STATE.get("last_call_index", -1)),
++                    "tag_prefix": _P38_KV_OBSERVER_TARGET_PREFIX_TOKENS,
++                    "tag_dp_rank": int(dp_rank),
++                    "tag_physical_pages": [int(value) for value in pages],
++                }
++                if candidate["tag_call_index"] < 0:
++                    raise RuntimeError("targeted KV capture lacks replay call")
++                _P38_KV_OBSERVER_CANDIDATES[request_id] = candidate
++                print(
++                    "[CANON_P38_KV_OBSERVER_CANDIDATE] "
++                    f"round={candidate['diagnostic_round']} "
++                    f"request={request_id} "
++                    f"call={candidate['tag_call_index']} "
++                    f"prefix={candidate['tag_prefix']}",
++                    flush=True,
++                )
++                record = _p38_kv_observer_capture(
++                    runner, "A", request_id, dp_rank, token_ids, pages,
++                    candidate)
++                _P38_KV_OBSERVER_A_RECORDS.append(record)
++                continue
+             scheduled_tokens = int(
+                 scheduler_output.num_scheduled_tokens.get(request_id, 0))
+             if scheduled_tokens <= 0:

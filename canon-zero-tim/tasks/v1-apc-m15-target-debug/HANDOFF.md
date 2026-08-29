@@ -1,6 +1,199 @@
 # M15 APC target-debug handoff
 
-## START HERE — D3e host/exact-image gates passed; publish before the read-only canonical-action reclassification
+## START HERE — E0 layer-0 live-KV discriminator is prepared, not published or run
+
+The current numerical result is **not** “APC fixed.” Attempt 17 remains red:
+A-B=207 bytes / 95 elements, B-C=0 over 119,150 action tokens. D3e has now
+localized the canonical first action to Layer 0 `k_post_rope -> rpa_output`,
+shape `[2048,1,15,8]`, source row 217 / completion position 0 / source
+position 1225. The next useful experiment is one default-off live-KV
+fingerprint discriminator inside that interval.
+
+The committed D3e evidence tip is
+`b6bcfd904538993e37268da8264cdbda81a58e78`. The E0 implementation described
+below is currently local work based on that commit. A remote executor must be
+given a **new full published E0 SHA** containing this section, Patch 35, the KV
+classifier change, and both E0 wrappers. It must not render or launch from
+`b6bcfd...`, from an abbreviated SHA, or from a dirty tree.
+
+### What E0 measures
+
+At the 1226-token first-red prefix there are eight legitimate A requests with
+the same prefix. The E0 observer captures all eight aliases at exactly 77
+logical pages, reads only Layer 0 with a static 96-page bound, then uses later
+replay-ledger token-history receipts to require one matching source request and
+explicit conflicts for the other seven. B remains the independent
+`reset_prefix_cache=True` rescore.
+
+This closes the request-identity hole before choosing between:
+
+- stored live KV already differs before RPA; or
+- stored live KV fingerprints match and the red is in page selection/read/RPA
+  execution context.
+
+The result is an integer diagnostic fingerprint, not a collision-free dump of
+all KV bytes. It does not authorize a numerical repair.
+
+### Current three-layer status
+
+- Implementation: default-absent Layer-0/target-prefix selector in append-only
+  Patch 35; M15 `--observer kv` renderer; request-aware replay-ledger binding;
+  prepare wrapper; compact read-only GCS return wrapper. Production profiles,
+  APC defaults, A/B/C, RoPE, attention/RPA math, KV values, backward, loss, and
+  optimizer are unchanged.
+- Validation: task-local discovery 168/168, KV classifier 7/7, M15 carrier
+  19/19, real resolved-env 11/11, E0 admission/wrapper 4/4, V1 CPU 91/91,
+  P3 12/12, P38 persistence, flags 398/398, overlay patch/manifest,
+  Python/Bash syntax, production/default scope, secret scan, and
+  `git diff --check` PASS. The optional broad P33 host aggregate is
+  INCONCLUSIVE because this host lacks `datasets` and `metrax`; the official
+  pinned-image gate is still required. E0 pinned exact-image and DP8xTP8 target
+  are NOT RUN.
+- Claim: `FIRST_RED_LOCALIZED / E0_IMPLEMENTED_LOCAL /
+  EXACT_IMAGE_NOT_RUN / TARGET_NOT_RUN / NUMERICAL_REPAIR_NOT_AUTHORIZED`.
+
+### Cold-start instructions for the other agent
+
+Create a new clean `local/*` worktree from the exact full published E0 SHA.
+Do not use or modify
+`/home/yuxuan/code_rl_repro/worktrees/p57_zero_noeval_0828`.
+
+Before any action, read in order:
+
+1. `/home/yuxuan/code_rl_repro/AGENTS.md`;
+2. `canon-zero-tim/AGENTS.md`;
+3. `canon-zero-tim/.claude/skills/manage-canon-zero-tim-branch/SKILL.md`;
+4. `canon-zero-tim/.claude/skills/manage-canon-flags/SKILL.md`;
+5. `/home/yuxuan/.codex/skills/run-phased-work/SKILL.md`;
+6. APC/M15 entries in `THREADS.md`, `FLAGS.md`, and `EVIDENCE.md`;
+7. this section, `state.md`, `plan.md`, and
+   `phases/phase-e0-layer0-live-kv-discriminator.md`;
+8. the current operation in `RUNBOOK.md` and latest E0 checkpoint in `log.md`.
+
+Run canonical preflight and require `CANON_PREFLIGHT PASS`, a `local/*`
+branch, exact HEAD equality, and a clean tree. Do not print remotes,
+credentials, configured accounts/projects, or the registered evidence root.
+
+### Step 1 — render only; no external access
+
+This command verifies the committed D3e manifest, rechecks focused host gates,
+and writes two immutable JobSet YAMLs plus a self-hashed contract. It has no
+TPU, Kubernetes, or GCS operation:
+
+```bash
+SOURCE_COMMIT=<full-published-E0-SHA>
+RUN_ID=<fresh-never-reused-dns-label>
+OUT=/tmp/m15-e0-kv-${RUN_ID}
+test ! -e "$OUT"
+bash canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/prepare_m15_attempt18_e0_kv_pair.sh \
+  "$SOURCE_COMMIT" "$RUN_ID" "$OUT"
+```
+
+Required terminal tail:
+
+```text
+[M15.E0.KV] RENDER_PASS source=<full-sha> rounds=1 layer=0 aliases=8 pages=96 ...
+[M15.E0.KV] TARGET_NOT_RUN pinned_exact_image=required launch_approval=required gcs=0 kubernetes=0 tpu=0
+```
+
+Any missing marker, dirty/source failure, D3e manifest drift, extra arm,
+non-APC pair difference, or environment-resolution failure is a hard stop.
+Do not edit the YAML.
+
+### Step 2 — separate pinned exact-image approval
+
+Rendering does not authorize this gate. First return the exact command, image
+identity, marker, and raw-log path to the user and obtain explicit approval.
+The registered immutable image identity remains:
+
+```text
+sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a
+```
+
+After approval, run the official aggregate directly without a pipe:
+
+```bash
+RAW=/tmp/m15-e0-exact-image-<source8>-<fresh-label>.log
+test ! -e "$RAW"
+bash canon-zero-tim/tests/v1_phase4/run_exact_image.sh \
+  sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a \
+  >"$RAW" 2>&1
+```
+
+Require exit 0 and the complete terminal marker containing:
+
+```text
+V1_HP_EXACT_IMAGE_PASS
+apc_m15_carrier=70
+m15_d3e=1
+m15_e0=11
+m15_durability=1
+m15_round_provenance=1
+manifests=3
+```
+
+Missing markers, install/manifest drift, nonzero exit, or an unverified image
+identity is FAIL/INCONCLUSIVE. Preserve the raw log. This local Docker/CPU gate
+does not use TPU, Kubernetes, or GCS and still does not authorize launch.
+
+### Step 3 — separate target-launch approval
+
+Only after Step 2 is green, return both YAML paths and request a new explicit
+launch approval. After approval, apply the two checked-in render outputs
+directly, with no pipe, dry-run substitution, hand edit, or reused label:
+
+```bash
+kubectl apply -f "$OUT/jobset-v1-apc-m15-off-kv.yaml"
+kubectl apply -f "$OUT/jobset-v1-apc-m15-on-kv.yaml"
+```
+
+The pair is one frozen round, DP8xTP8, M15/main, production
+`continue_decode=8`, zero backward, and zero optimizer commit. Control and
+treatment differ only at APC. B full reset and zero cached-token evidence are
+immutable. The JobSet persistence worker owns remote write/readback and
+terminal completion; do not manually copy large archives.
+
+### Step 4 — compact read-only return on the bucket-capable machine
+
+After both JobSets have terminal evidence, obtain separate GCS-read approval.
+Then run directly:
+
+```bash
+RETURN=/mnt/disks/tunix-data/m15-e0-kv-return-<fresh-label>
+test ! -e "$RETURN"
+bash canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/run_m15_attempt18_e0_kv_gcs_return.sh \
+  "$OUT" "$RETURN" /mnt/disks/tunix-data
+```
+
+Required terminal tail:
+
+```text
+M15_E0_KV_RETURN_PASS status=<status> control_a_b=<n> treatment_a_b=<n> b_c=0
+[M15.E0.KV.RETURN] COMPLETE status=<status> manifest_sha256=<sha> ...
+[M15.E0.KV.RETURN] READ_ONLY gcs_read=1 gcs_write=0 kubernetes=0 tpu=0
+```
+
+Return only those markers, `E0_KV_RETURN.json`, the two small classifier JSONs,
+`SHA256SUMS`, and the SHA256 of `SHA256SUMS`. Do not return the serving archive,
+replay ledger, raw token/capsule/page payload, remote root, URL, or credential.
+On failure, return the sanitized error and printed `scratch_preserved` path;
+do not delete it or retry into the same output directory.
+
+### E0 decision table
+
+| Returned status | Required interpretation |
+|---|---|
+| `CONTROL_RED_STOP` | carrier/observer invalid; stop before any mechanism claim |
+| any B-C red or CANON_ALIGN failure | non-APC/shared red; preserve and stop |
+| `TARGET_NON_REPRODUCTION` | fresh treatment exact; bug not reproduced, not fixed |
+| `LIVE_KV_FINGERPRINT_DIFFERS` | uniquely bound live A Layer-0 KV fingerprint is already red before RPA; next discussion is cache production/storage/page ownership, still no numerical repair authorization |
+| `LIVE_KV_FINGERPRINT_EQUAL` | observed stored KV fingerprint matches B; next discussion is page table/read/RPA execution context, not a stale-content claim |
+| missing aliases, future binding, red join, manifest, COMPLETE, or terminal marker | `INCONCLUSIVE`; preserve and stop |
+
+No E0 result alone opens numerical edits. Update the phase ledger and discuss a
+single-variable next probe or repair with the user first.
+
+## Historical — D3e host/exact-image gates and canonical-action reclassification
 
 Do **not** rerun the old D3d command and do **not** launch a TPU pair. The
 verified D3d return is already committed at

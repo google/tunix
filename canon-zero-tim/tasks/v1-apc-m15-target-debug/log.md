@@ -1203,3 +1203,58 @@ is not a current fact or launch authority.
   own commit.
 - Next gate after publication: GCS read remains a separate approval for the
   checked-in bucket-executor wrapper. Do not launch TPU/Kubernetes yet.
+
+## 2026-08-29 — D3e return admitted; Phase E0 live-KV discriminator prepared
+
+- Admitted the committed D3e evidence at
+  `evidence/v1_apc_m15_attempt17_d3e_canonical_action_20260829/`; its
+  `SHA256SUMS` SHA256 is
+  `cdf4130bcab5ffeeb38d19fe40dfca9e15898f6a8a7208d21fcbeb9a2e957858`.
+  The return is `FIRST_RED_LOCALIZED` for completion position zero at Layer 0
+  `k_post_rope -> rpa_output`, shape `[2048,1,15,8]`, source row 217 /
+  position 1225 / A call 83. A-B remains 207 bytes / 95 elements and B-C is
+  zero. Treatment rounds 1/2 and root completion remain absent, so this is
+  analysis-grade partial evidence rather than target PASS.
+- Identified the next bounded discriminator: at prefix length 1226, eight A
+  requests share the same token prefix. Capture all eight Layer-0 live-KV
+  fingerprints over 77 valid logical pages, then use future replay history
+  through prefix length 1300 to select exactly one request and explicitly
+  eliminate seven alternatives. Never select an arbitrary same-prefix alias.
+- Added append-only Patch 35 with three default-absent target selectors,
+  `--observer kv` one-round M15 rendering, request-aware KV classification,
+  M15-only environment admission, a committed-evidence admission verifier, a
+  prepare-only pair wrapper, and a compact read-only GCS-return wrapper.
+- The renderer uses Layer 0, 8 aliases, a 96-page static bound, 128 MiB output,
+  and 640 MiB read bounds. Control and treatment differ only at APC. B remains
+  a full-reset independent rescore. Production M15 remains APC-off; model,
+  RoPE, RPA/attention, KV values, loss, backward, and optimizer arithmetic are
+  unchanged.
+- Local overlay reconstruction against the registered immutable image applied
+  Patch 35 and compiled the installed runner. This was a local implementation
+  smoke test, not the official pinned exact-image aggregate.
+- Focused checkpoints retained in the final gate: KV classifier 7/7 PASS,
+  target carrier 19/19 PASS, resolved environment 11/11 PASS, E0
+  admission/wrapper 4/4 PASS.
+- Final runtime review caught and fixed one carrier-only false-negative: the
+  legacy postflight hard-coded three KV candidate/A/B markers. It now retains
+  exact three-marker admission for legacy P38 and requires the signed eight
+  markers for targeted E0. Patch 35 also records the replay ledger's actual
+  call index and binds the KV candidate to it rather than inferring call index
+  from record count.
+- Hardened the compact return to require source-bound serving-classifier PASS,
+  exact terminal marker schemas/runtime source/prefix identity, complete A-B
+  and B-C fields, and eight control KV comparisons. APC-off alignment red or
+  any control KV fingerprint difference returns `CONTROL_RED_STOP`.
+- Final host gates: task discovery 168/168, KV classifier 7/7, target carrier
+  19/19, resolved environment 11/11, E0 admission/wrapper 4/4, V1 CPU 91/91,
+  P3 12/12, P38 persistence PASS, flag audit 398/398, Patch 35 exact-overlay
+  compile/manifest PASS, Python/Bash syntax, production/default scope, secret
+  scan, and `git diff --check` PASS. The optional broad P33 host aggregate is
+  INCONCLUSIVE because this host lacks `datasets` and `metrax`; no numerical
+  inference is made from that environment failure.
+- External status: official E0 pinned exact-image NOT RUN; DP8xTP8 E0 pair NOT
+  RUN; compact GCS return NOT RUN. No GCS, Kubernetes, TPU, commit, or push
+  occurred in this implementation checkpoint.
+- Next gate after publication: a cold-start agent runs the prepare-only wrapper
+  from a clean exact-SHA worktree. The official pinned-image aggregate and
+  target launch remain two later, separately approved actions.

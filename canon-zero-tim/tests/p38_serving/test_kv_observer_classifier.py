@@ -31,6 +31,9 @@ class KvObserverClassifierTest(unittest.TestCase):
       *,
       changed=False,
       invalid_tail_changed=False,
+      request_id: str | None = None,
+      source_a_index: int = 0,
+      layer_indices: list[int] | None = None,
   ):
     token_ids = np.array([1, 2, 3], dtype=np.int32)
     aggregates = np.zeros((1, 2, 4, 4), dtype=np.uint32)
@@ -52,13 +55,20 @@ class KvObserverClassifierTest(unittest.TestCase):
     npz = Path(str(base) + ".npz")
     token_sha = hashlib.sha256(
         np.ascontiguousarray(token_ids, dtype="<i8").tobytes()).hexdigest()
+    resolved_request_id = request_id or (
+        "decode-a" if arm == "A" else "clean-b"
+    )
+    resolved_source_a_request_id = (
+        resolved_request_id if arm == "A"
+        else ("decode-a" if request_id is None else f"decode-{source_a_index}")
+    )
     record = {
         "schema": "p38-live-kv-prefix-table-v1",
         "arm": arm,
         "record_index": index,
-        "request_id": "decode-a" if arm == "A" else "clean-b",
-        "source_a_request_id": "decode-a",
-        "source_a_record_index": None if arm == "A" else 0,
+        "request_id": resolved_request_id,
+        "source_a_request_id": resolved_source_a_request_id,
+        "source_a_record_index": None if arm == "A" else source_a_index,
         "diagnostic_round": 0,
         "target_seq_len": 3,
         "token_history_sha256": token_sha,
@@ -72,6 +82,8 @@ class KvObserverClassifierTest(unittest.TestCase):
         "npz_sha256": hashlib.sha256(npz.read_bytes()).hexdigest(),
         "array_keys": sorted(arrays),
     }
+    if layer_indices is not None:
+      record["layer_indices"] = layer_indices
     Path(str(base) + ".json").write_text(json.dumps(record))
 
   def _capsule(self, root: Path) -> Path:
@@ -153,6 +165,70 @@ class KvObserverClassifierTest(unittest.TestCase):
       )
       self.assertEqual(
           len(report["source_inputs"]["capsules"][0]["sha256"]), 64
+      )
+
+  def test_selected_layer_reports_absolute_layer_index(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      root = Path(tmp)
+      self._record(root, 0, "A", changed=True, layer_indices=[7])
+      self._record(root, 1, "B", layer_indices=[7])
+      report = classifier.classify(root, [self._capsule(root)], True)
+      self.assertEqual(
+          report["comparisons"][0]["first_difference"]["layer"], 7
+      )
+      self.assertEqual(report["comparisons"][0]["differing_layers"], [7])
+
+  def test_replay_ledger_selects_one_future_bound_alias(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      root = Path(tmp)
+      for alias in range(8):
+        a_index = alias * 2
+        self._record(
+            root, a_index, "A", changed=alias == 3,
+            request_id=f"decode-{a_index}", source_a_index=a_index,
+            layer_indices=[0],
+        )
+        self._record(
+            root, a_index + 1, "B", request_id=f"clean-{a_index}",
+            source_a_index=a_index, layer_indices=[0],
+        )
+      source = np.array([1, 2, 3, 4], dtype=np.int32)
+      conflict = np.array([1, 2, 3, 9], dtype=np.int32)
+      lines = []
+      for alias in range(8):
+        request_id = f"decode-{alias * 2}"
+        values = source if alias == 3 else conflict
+        digest = hashlib.sha256(
+            np.ascontiguousarray(values, dtype="<i8").tobytes()
+        ).hexdigest()
+        lines.append(json.dumps({
+            "schema": "m15-apc-serving-envelope-v1",
+            "serving_arm": "A",
+            "diagnostic_round": 0,
+            "call_index": 10 + alias,
+            "requests": [{
+                "request_id": request_id,
+                "num_tokens": 4,
+                "token_history_sha256": digest,
+            }],
+        }))
+      replay = root / "m15_replay_envelope.jsonl"
+      replay.write_text("\n".join(lines) + "\n", encoding="utf-8")
+      report = classifier.classify(
+          root, [self._capsule(root)], True, replay
+      )
+      self.assertEqual(
+          report["classification"],
+          "live_kv_fingerprint_differs_on_red_row",
+      )
+      binding = report["source_request_binding"]
+      self.assertEqual(binding["status"], "UNIQUE_FUTURE_PREFIX_BINDING")
+      self.assertEqual(binding["selected_request_id"], "decode-6")
+      self.assertEqual(binding["selected_source_a_record_index"], 6)
+      self.assertEqual(binding["required_elimination_horizon"], 4)
+      self.assertEqual(binding["selected_proof_prefix_tokens"], 4)
+      self.assertEqual(
+          report["source_inputs"]["replay_ledger"]["path"], replay.name
       )
 
   def test_require_red_join_rejects_an_unjoined_observer_pair(self):
