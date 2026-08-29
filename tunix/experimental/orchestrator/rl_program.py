@@ -197,7 +197,8 @@ class StandardRLProgram(RLProgram):
         group = await self.raw_q.get_group()
       except asyncio.CancelledError:
         break
-      except Exception:
+      except Exception as exc:
+        logging.error("Exception in critique_stage: %s", exc, exc_info=True)
         break
 
       rewards = []

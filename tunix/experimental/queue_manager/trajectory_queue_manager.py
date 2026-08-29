@@ -90,6 +90,16 @@ class TrajectoryQueueManager(group_queue_manager.GroupQueueManager):
             for item in group
             if getattr(item, "policy_version", 0) < min_allowed
         ]
+        if filtered:
+          logging.warning(
+              "[TrajectoryQueueManager] Filtered %d item(s) due to staleness: "
+              "item policy_version(s)=%s < min_allowed=%d (current=%d, max_staleness=%d)",
+              len(filtered),
+              [getattr(x, "policy_version", 0) for x in filtered[:5]],
+              min_allowed,
+              current_policy_version(),
+              max_staleness,
+          )
         if filter_fn is not None:
           res = filter_fn(valid)
           if isinstance(res, tuple):

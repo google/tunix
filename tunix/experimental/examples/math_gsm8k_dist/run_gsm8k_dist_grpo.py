@@ -402,8 +402,9 @@ def _make_weight_sync_coordinator(trainer_handle, rollout_handles):
 
     class _NoOpCoordinator:
 
-      def __init__(self):
+      def __init__(self, rollout_handles=None):
         self._policy_version = 0
+        self._rollout_handles = list(rollout_handles or [])
 
       async def sync(self, policy_version=None, **kwargs):
         version = (
@@ -416,6 +417,14 @@ def _make_weight_sync_coordinator(trainer_handle, rollout_handles):
             "[NoopWeightSyncCoordinator] Syncing policy_version -> %d (noop)...",
             version,
         )
+        for handle in self._rollout_handles:
+          try:
+            await handle.asubmit("set_policy_version", version=version)
+          except Exception as exc:
+            logging.warning(
+                "[NoopWeightSyncCoordinator] Failed to set policy_version on worker: %s",
+                exc,
+            )
         return weight_sync_coordinator.WeightSyncResult(
             policy_version=version,
             round_index=version,
@@ -427,7 +436,7 @@ def _make_weight_sync_coordinator(trainer_handle, rollout_handles):
             destination_units=(),
         )
 
-    return _NoOpCoordinator()
+    return _NoOpCoordinator(rollout_handles=rollout_handles)
   else:
     raise ValueError(f"Unknown weight sync backend: {backend!r}")
   return weight_sync_coordinator.WeightSyncCoordinator(

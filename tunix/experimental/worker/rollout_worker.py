@@ -554,3 +554,12 @@ class RolloutWorker(abstract_worker.Worker):
       self._sync_round["req_id"] = extra.get("req_id")
       self._sync_round["uuid"] = extra.get("uuid", 0)
     self._sync_round["phase"] = phase
+
+  def set_policy_version(self, version: int) -> int:
+    """Sets the policy version for subsequent rollout generations."""
+    self._policy_version = int(version)
+    logging.info(
+        "[RolloutWorker] Updated policy_version to %d.", self._policy_version
+    )
+    return self._policy_version
+
