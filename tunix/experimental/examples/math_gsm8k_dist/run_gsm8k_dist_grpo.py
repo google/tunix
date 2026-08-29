@@ -396,8 +396,38 @@ def _make_weight_sync_coordinator(trainer_handle, rollout_handles):
         "Raiden weight sync enabled; controller on port %d.", handler.port
     )
   elif backend == "noop":
-    handler = _NullHandler()
-    logging.info("Weight sync running protocol-only; no bytes move.")
+    logging.info(
+        "Weight sync disabled (noop); returning NoOpWeightSyncCoordinator."
+    )
+
+    class _NoOpCoordinator:
+
+      def __init__(self):
+        self._policy_version = 0
+
+      async def sync(self, policy_version=None, **kwargs):
+        version = (
+            policy_version
+            if policy_version is not None
+            else self._policy_version + 1
+        )
+        self._policy_version = version
+        logging.info(
+            "[NoopWeightSyncCoordinator] Syncing policy_version -> %d (noop)...",
+            version,
+        )
+        return weight_sync_coordinator.WeightSyncResult(
+            policy_version=version,
+            round_index=version,
+            req_id=f"noop-r{version}",
+            uuid=version,
+            state=weight_sync_coordinator.RoundState.COMMITTED,
+            transfer=None,
+            source_units=(),
+            destination_units=(),
+        )
+
+    return _NoOpCoordinator()
   else:
     raise ValueError(f"Unknown weight sync backend: {backend!r}")
   return weight_sync_coordinator.WeightSyncCoordinator(
