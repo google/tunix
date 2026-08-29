@@ -70,6 +70,7 @@ export USE_LORA=${USE_LORA:-0}
 # rollout sides during weight sync, for cross-verification of a real run.
 export VERIFY_WEIGHTS=${VERIFY_WEIGHTS:-false}
 export RAIDEN_WEIGHT_SYNC_CHUNKS=${RAIDEN_WEIGHT_SYNC_CHUNKS:-1}
+export WEIGHT_SYNC_BACKEND=${WEIGHT_SYNC_BACKEND:-raiden}
 
 export ORCHESTRATOR_ID=$USER-orch
 export ORCHESTRATOR_PORT=20000
@@ -130,7 +131,7 @@ start_orchestrator() {
     --worker_container_port="${ORCHESTRATOR_PORT}" \
     --worker_startup_command=" \
       cd /app && git fetch https://github.com/google/tunix.git ${SYNC_GIT_BRANCH} && git checkout FETCH_HEAD -- tunix examples && \
-      python -m tunix.experimental.distributed.runtime.main \
+      WEIGHT_SYNC_BACKEND=${WEIGHT_SYNC_BACKEND} python -m tunix.experimental.distributed.runtime.main \
         --discovery_id=${ORCHESTRATOR_ID} \
         --discovery_port=${ORCHESTRATOR_PORT} \
         --process_main=tunix.experimental.examples.math_gsm8k_dist.run_gsm8k_dist_grpo.main \
