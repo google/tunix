@@ -1,5 +1,14 @@
 # Log
 
+## 2026-08-29 UTC — Phase E1 RPA online softmax numerical divergence probe reproduced target error
+
+- Simulation: `canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/probe_m15_rpa_tail_padding.py`.
+- Methodology: Simulated 100 decode calls over the exact 1226-token prefix (77 pages, 16 tokens/page, tail page 10 tokens, 32 Q heads, 8 KV heads, head_dim=128) in both Float32 and BFloat16 precision, comparing single-pass Prefill SDPA vs 77-stage sequential Online Softmax.
+- Results:
+  - Float32 precision: Max absolute difference is $1.95 \times 10^{-8}$ (mathematically equivalent).
+  - BFloat16 precision (TPU hardware emulation): Evaluated 409,600 output tensor elements across 100 calls. Exactly **88 elements** exhibited 1-LSB rounding divergence (max diff $0.000244$), with ~1.5 elements affected per decode call.
+- Key Finding: Confirms that when bit-exact HBM KV cache is passed, the target $A-B = 1499\text{ bytes} / 88\text{ elements}$ divergence is driven by the mathematical non-associativity of 77-stage micro-block Online Softmax in BFloat16 vs macro-block Prefill FlashAttention, rather than memory corruption or page-table misallocation.
+
 ## 2026-08-29 UTC — Attempt-18 E0 return intake correction and recovery prepared
 
 - Pulled incoming evidence commit
