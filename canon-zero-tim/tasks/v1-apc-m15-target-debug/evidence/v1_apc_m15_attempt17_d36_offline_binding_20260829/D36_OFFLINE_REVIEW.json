@@ -1,0 +1,21 @@
+{
+  "analysis_commit": "ec46033673442949ff956092b8f4ea3074285a13",
+  "bundle_sha256": "de4d0b4b7ebee8c24375dcf60bc3f026a42751458d754f9ed6a41046c2ad69cf",
+  "claim_ceiling": "This is an offline reclassification of the immutable Attempt-17 treatment bundle. It changes no runtime or numerical path and is not a fresh target execution.",
+  "classifier_source_sha256": "6d7fbcde65dec5cc9cb8b8b84fa2b022a97bf89b5ec899aafb2fd8536bdc55ba",
+  "committed_classification_sha256": "6ed0ef12d40e0256e528df207713d2bd4b3ce8d311b4fa3884f5075dda849bb7",
+  "original_classification": "M15_INTERNAL_FIRST_RED_CANDIDATE_SET",
+  "original_gate": "FIRST_RED_CANDIDATE_SET",
+  "reclassification": "M15_INTERNAL_FIRST_RED_CANDIDATE_SET",
+  "reclassification_gate": "FIRST_RED_CANDIDATE_SET",
+  "remote_core_status": "PARTIAL_ROUNDS_RECOVERED",
+  "remote_core_summary_sha256": "da397026d76d256dc7fe071afaea0b3e0d213df164532600d8cb38695b8f5621",
+  "remote_mutation": false,
+  "runtime_source_commit": "16c224aa80eb6b3a544be19f693c0542ab4b0dcb",
+  "schema": "m15-attempt17-d36-offline-review-v1",
+  "source_request_binding_statuses": [
+    "UNIQUE_FUTURE_PREFIX_BINDING"
+  ],
+  "status": "FIRST_RED_CANDIDATE_SET_PRESERVED",
+  "target_executed": false
+}
