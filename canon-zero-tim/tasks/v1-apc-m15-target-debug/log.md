@@ -1,5 +1,17 @@
 # Log
 
+## 2026-08-29 UTC — Attempt 18 (Phase E0 Live-KV Discriminator) outcome sealed
+
+- Workload: `canon-v1-apc-m15-off-e01-12207e32` (Control) and `canon-v1-apc-m15-on-e01-12207e32` (Treatment) on 64 TPU v5p (DP8 × TP8).
+- Facts:
+  - Control (APC-Off) executed 256 trajectories, solve rate 18.4%, alignment precheck $N_{\text{action}} = 123,010$, $S_{\text{decode}} - S_{\text{prefill}} = 0$ bytes (Clean Green PASS).
+  - Treatment (APC-On) executed 256 trajectories with 92.8% prefix cache hit rate, solve rate 16.8%, alignment precheck $N_{\text{action}} = 117,834$, $S_{\text{decode}} - S_{\text{prefill}} = 1,499$ bytes differing (Red reproduced).
+  - Layer-0 Live-KV Observation across 77 logical pages (1226 prefix tokens): 8/8 aliases in HBM KV cache are **100% Bit-For-Bit Identical** between Arm A (rollout with APC-On) and Arm B (clean prefill rescore). Pages 0..75 (1216 tokens) and Page 76 valid tokens (1216..1225) match completely.
+- Decision Table Outcome: **`LIVE_KV_FINGERPRINT_EQUAL`**.
+- Localization: Excludes KV cache production, cache poisoning, and slot allocation. Defect is strictly localized to the **Read / Execution Path inside the Pallas RPA Kernel** during decode (Block Table indexing on partial blocks, token masking, or RoPE causal slicing).
+- Evidence: Sealed in `evidence/v1_apc_m15_attempt18_e0_kv_20260829/` (`INCIDENT_REPORT.md`, `E0_KV_RETURN.json`, `SHA256SUMS`).
+
+
 ## 2026-08-28 UTC — Attempt 15 (d34) incident intake sealed
 
 - Workload: `canon-v1-apc-m15-off-d34-57d9ab8e` and `canon-v1-apc-m15-on-d34-57d9ab8e` (64 TPU v5p each).

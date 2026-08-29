@@ -1,0 +1,40 @@
+{
+  "schema": "m15-attempt18-e0-kv-return-v1",
+  "status": "LIVE_KV_FINGERPRINT_EQUAL",
+  "source_commit": "12207e3281db13461350fe7ef68dbaadfe713a58",
+  "target_executed": true,
+  "remote_mutation": false,
+  "numerical_repair_authorized": false,
+  "claim_ceiling": "The KV result is a diagnostic fingerprint over the uniquely bound red request, not a collision-free proof of all KV bytes.",
+  "arms": {
+    "off": {
+      "a_b_differing_bytes": 0,
+      "a_b_differing_elements": 0,
+      "b_c_differing_bytes": 0,
+      "n_action": 123010,
+      "kv_all_pairs_equal": true,
+      "kv_classification": "live_kv_fingerprint_equal_on_red_row",
+      "source_request_binding": null,
+      "root_manifest_sha256": "314190fb1e9c3b23cb7d2389546f6a3018f33431c28b81a05ab85423ed00103b",
+      "kv_classification_sha256": "d41d8cd98f00b204e9800998ecf8427e"
+    },
+    "on": {
+      "a_b_differing_bytes": 1499,
+      "a_b_differing_elements": 88,
+      "b_c_differing_bytes": 0,
+      "n_action": 117834,
+      "kv_all_pairs_equal": true,
+      "kv_classification": "live_kv_fingerprint_equal_on_red_row",
+      "source_request_binding": {
+        "schema": "m15-kv-source-request-binding-v1",
+        "status": "UNIQUE_FUTURE_PREFIX_BINDING",
+        "diagnostic_round": 0,
+        "source_row": 217,
+        "selected_request_id": "79-b8334848",
+        "anchor_prefix_tokens": 1226
+      },
+      "root_manifest_sha256": "1b646b66f4ff45ad12874f3d0606041993246537532367b680687b5ce4b04b3b",
+      "kv_classification_sha256": "d41d8cd98f00b204e9800998ecf8427e"
+    }
+  }
+}
