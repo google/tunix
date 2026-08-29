@@ -89,7 +89,7 @@ for row in "${arm_rows[@]}"; do
   arm_dir="$scratch/$arm"
   mkdir -m 700 "$arm_dir"
   for name in PREFLIGHT.json COLLECTED.json COMPLETE.json SHA256SUMS \
-      pre-alignment.jsonl serving-classification.json \
+      run.log pre-alignment.jsonl serving-classification.json \
       kv-observer-classification.json; do
     gcs_cp "$remote/$name" "$arm_dir/$name" || {
       echo "[M15.E0.KV.RETURN] INCONCLUSIVE arm=$arm missing=$name" >&2
@@ -128,7 +128,7 @@ for arm in ("off", "on"):
   root = scratch / arm
   entries = manifest(root / "SHA256SUMS")
   for name in (
-      "pre-alignment.jsonl", "serving-classification.json",
+      "run.log", "pre-alignment.jsonl", "serving-classification.json",
       "kv-observer-classification.json",
   ):
     if entries.get(name) != sha256(root / name):
@@ -165,6 +165,29 @@ for arm in ("off", "on"):
       and serving.get("source_commit") == source
   ):
     raise SystemExit(f"{arm} serving classifier is not source-bound PASS")
+  raw = (root / "run.log").read_text(encoding="utf-8", errors="replace")
+  runtime_marker = f"[sync] HEAD={source}"
+  b_marker = (
+      "[CAN" "ON_APC_M15_B_CONTRACT] reset_prefix_cache=True "
+      "all_num_cached_tokens_zero=True"
+  )
+  target_marker = (
+      f"[CAN" f"ON_APC_M15_TARGET_CONTRACT] arm={arm} topology=DP8xTP8 "
+      "workload=m15/main backward=0 optimizer_commits=0"
+  )
+  controlled_exit = (
+      "[CANON_P38] CONTROLLED_EXIT code=42 backward=0 "
+      "optimizer_commits=0"
+  )
+  if not (
+      raw.count(runtime_marker) == 1
+      and raw.count(b_marker) >= 1
+      and "all_num_cached_tokens_zero=False" not in raw
+      and raw.count(target_marker) == 1
+      and raw.count(controlled_exit) == 1
+      and "OPTIMIZER_COMMIT" not in raw
+  ):
+    raise SystemExit(f"{arm} runtime reset/zero-commit receipt is incomplete")
   records = [json.loads(line) for line in
              (root / "pre-alignment.jsonl").read_text().splitlines()
              if line.strip()]
@@ -203,6 +226,14 @@ for arm in ("off", "on"):
       "kv_classification_sha256": sha256(
           root / "kv-observer-classification.json"
       ),
+      "execution_receipts": {
+          "run_log_sha256": sha256(root / "run.log"),
+          "runtime_source_exact": True,
+          "b_full_reset": True,
+          "all_num_cached_tokens_zero": True,
+          "zero_backward": True,
+          "zero_optimizer_commit": True,
+      },
   }
 
 if (arms["off"]["a_b_differing_bytes"] != 0

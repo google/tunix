@@ -1,5 +1,53 @@
 # Log
 
+## 2026-08-29 UTC — Attempt-18 E0 return intake correction and recovery prepared
+
+- Pulled incoming evidence commit
+  `ff33dcd200a4577927ac4917839a0b86bac42e7a`. Its two-member manifest
+  verifies; `SHA256SUMS` has SHA256
+  `9eabd0317cb32b29655c841beff35974c07fec93767cf4e87084071141d27917`.
+- Preserved the reported target metrics: control A-B=0/B-C=0 and treatment
+  A-B=1499 bytes / 88 elements, B-C=0, 92.8% cache hits. These remain reported
+  facts until official intake passes.
+- Downgraded the incoming `LIVE_KV_FINGERPRINT_EQUAL` and Pallas root-cause
+  claims to `ATTEMPT18_E0_RETURN_NOT_ADMITTED`. The package omits both official
+  classifier JSONs and terminal log, contains invalid 32-character classifier
+  digests, truncates the treatment binding, misclassifies the exact control as
+  a red-row join, and overstates diagnostic fingerprints as all-byte proof.
+- Corrected the nonexistent implementation SHA in `state.md` to published
+  `72c8609bce5185b87ea9f7f1850afadf3974cdd2`.
+- Added a standard-library fail-closed intake and a clean-worktree recovery
+  wrapper. The official return now temporarily reads the manifest-bound raw
+  log to attest exact runtime source, B full reset, all B cached-token counts
+  zero, zero backward, and zero optimizer commit. Raw logs and large payloads
+  never enter the four-file return.
+- Local tests: return intake/recovery 10/10 PASS, including a complete fake
+  read-only transport; existing E0 admission/runtime 9/9; task discovery
+  183/183; V1 CPU 91/91; P3 prefix-cache 31/31; P38 persistence; and flag
+  registry 398/398 PASS. Python/Bash syntax PASS. Official exact-image and
+  real GCS recovery are NOT RUN.
+- Host terminal marker:
+  `M15_E0R_HOST_PASS task_discovery=183 return_intake=10 e0_admission=9
+  v1_cpu=91 p3_prefix_cache=31 persistence=1 flags=398 syntax=1
+  diff_check=1 exact_image=0 gcs=0 kubernetes=0 tpu=0`. Raw log:
+  `/tmp/m15-e0r-host-gate-ff33dcd2-20260829.log`, SHA256
+  `7758ee965a06edddd5fed1c37f6253e6e5629d30a791521ed887bb34cb2e687c`.
+- Current action: after publication, first pass the separately approved pinned
+  exact-image gate. Then a bucket-capable agent uses the preserved `e01`
+  render directory and the exact command at the top of `HANDOFF.md` after
+  separate GCS-read approval. This is one read-only GCS operation; no
+  TPU/Kubernetes run is needed. Failure evidence is preserved and no output
+  path is reused.
+- Delivery authorization: on 2026-08-29 the user explicitly approved commit
+  and push of this HOST-PASS tree. Publication does not convert
+  `EXACT_IMAGE_NOT_RUN` or `GCS_NOT_RUN` into PASS and does not authorize
+  either external gate. The exact published SHA is returned by the delivery
+  operation rather than self-recorded in this commit.
+- Numerical scope: no A/B/C, APC cache read, RoPE, RPA/attention, KV, loss,
+  backward, optimizer, flag, or production-profile value changed. The last
+  admitted boundary remains Layer 0 `k_post_rope -> rpa_output`, shape
+  `[2048,1,15,8]`. Numerical repair remains unauthorized.
+
 ## 2026-08-29 UTC — Attempt 18 (Phase E0 Live-KV Discriminator) outcome sealed
 
 - Workload: `canon-v1-apc-m15-off-e01-12207e32` (Control) and `canon-v1-apc-m15-on-e01-12207e32` (Treatment) on 64 TPU v5p (DP8 × TP8).
