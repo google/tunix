@@ -36,8 +36,8 @@ from tunix.rl.rollout import base_rollout
 from tunix.rl.rollout import mock_rollout
 from tunix.tests import test_common as tc
 
-# Some tests relying on SGLang and vLLM cannot run in run_prod environment.
-is_run_prod = os.environ.get('GITHUB_JOB') == 'run_prod'
+# Some tests relying on SGLang and vLLM cannot run in run_core environment.
+is_run_core = os.environ.get('GITHUB_JOB') == 'run_core'
 
 PreTrainedTokenizerBase = tokenization_utils_base.PreTrainedTokenizerBase
 os.environ['XLA_FLAGS'] = '--xla_force_host_platform_device_count=4'
@@ -60,7 +60,7 @@ class RlEngineTest(parameterized.TestCase):
     super().setUpClass()
 
     cls.num_cpus = int(os.environ.get('DEVICE_COUNTS', 4))
-    chex.set_n_cpu_devices(cls.num_cpus)
+    tc.safe_set_n_cpu_devices(cls.num_cpus)
     print(f'Setting up test with {cls.num_cpus} CPU devices before JAX init')
     cls.device_count = jax.device_count()
 
@@ -524,7 +524,7 @@ class RlEngineTest(parameterized.TestCase):
           expected_cache_size=2048,
       ),
   )
-  @unittest.skipIf(is_run_prod, 'Skipping in run_prod')
+  @unittest.skipIf(is_run_core, 'Skipping in run_core')
   def test_init_vllm_rollout_engine(
       self,
       rollout_config,
@@ -548,7 +548,7 @@ class RlEngineTest(parameterized.TestCase):
       )
       self.assertIn('mesh', called_kwargs)
 
-  @unittest.skipIf(is_run_prod, 'Skipping in run_prod')
+  @unittest.skipIf(is_run_core, 'Skipping in run_core')
   def test_init_vllm_rollout_engine_missing_version_raises(self):
     rollout_config = base_rollout.RolloutConfig(
         rollout_vllm_model_version=None,
@@ -583,7 +583,7 @@ class RlEngineTest(parameterized.TestCase):
           ),
       ),
   )
-  @unittest.skipIf(is_run_prod, 'Skipping in run_prod')
+  @unittest.skipIf(is_run_core, 'Skipping in run_core')
   def test_init_sglang_jax_rollout_engine(
       self, rollout_config, expected_train_config
   ):
@@ -601,7 +601,7 @@ class RlEngineTest(parameterized.TestCase):
       self.assertEqual(called_kwargs['rollout_config'], expected_train_config)
       self.assertIn('mesh', called_kwargs)
 
-  @unittest.skipIf(is_run_prod, 'Skipping in run_prod')
+  @unittest.skipIf(is_run_core, 'Skipping in run_core')
   @mock.patch.object(rl_engine_lib.sft_utils, 'is_lora_enabled', autospec=True)
   def test_init_sglang_jax_rollout_engine_lora_error(self, mock_is_lora):
     mock_is_lora.return_value = True

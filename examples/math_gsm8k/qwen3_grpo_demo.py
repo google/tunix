@@ -74,9 +74,11 @@ import numpy as np
 import optax
 from orbax import checkpoint as ocp
 import tensorflow_datasets as tfds
-
-# For OSS usage
-# import tensorflow_datasets.text.gsm8k
+try:
+  # For OSS usage
+  import tensorflow_datasets.text.gsm8k  # pylint: disable=unused-import
+except (ImportError, ModuleNotFoundError):
+  pass
 from transformers import AutoTokenizer
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))

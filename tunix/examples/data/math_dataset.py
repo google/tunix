@@ -20,8 +20,11 @@ import grain
 import tensorflow_datasets as tfds
 from tunix.utils import token_sanitization
 
-# For OSS usage
-import tensorflow_datasets.text.gsm8k
+try:
+  # For OSS usage
+  import tensorflow_datasets.text.gsm8k  # pylint: disable=unused-import
+except (ImportError, ModuleNotFoundError):
+  pass
 
 reasoning_start = "<reasoning>"
 reasoning_end = "</reasoning>"

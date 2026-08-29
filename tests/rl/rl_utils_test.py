@@ -36,7 +36,7 @@ class UtilsTest(absltest.TestCase):
   def setUp(self):
     super().setUp()
     self.num_cpus = 4
-    chex.set_n_cpu_devices(self.num_cpus)
+    tc.safe_set_n_cpu_devices(self.num_cpus)
     self.device_count = jax.device_count()
 
   def test_get_pytree_mesh_info(self):

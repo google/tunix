@@ -23,11 +23,13 @@ on:
 permissions:
   contents: read
 jobs:
-  run:
+  run_core:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
         with:
           python-version: '3.11'
 
@@ -59,6 +61,10 @@ jobs:
         run: |
           python -m pytest tests/rl/agentic/ -v --tb=short
 
+      - name: Run RL unit tests
+        run: |
+          python -m pytest tests/rl/ -v --tb=short -k "not test_grpo_with_lora_model" --ignore=tests/rl/agentic --ignore=tests/rl/rl_cluster_test.py
+
       - name: Run Cli utils tests
         run: |
           python -m pytest tests/cli/utils/ -v --tb=short
@@ -71,13 +77,10 @@ jobs:
         run: |
           python -m pytest tests/perf/ -v --tb=short
 
-      - name: Run model registry tests
+      - name: Run model tests
         run: |
-          python -m pytest tests/models/registry_test.py -v --tb=short
-
-      - name: Run CPU-only flash attention cache regression test
-        run: |
-          python -m pytest tests/models/flash_attention_cache_test.py -v --tb=short
+          python -m pytest tests/models/ -v --tb=short \
+            --ignore=tests/models/naming_test.py
 
       - name: Compile gRPC Protobuf definitions
         run: |
@@ -89,3 +92,29 @@ jobs:
         run: |
           # TODO(tunix-dev): add back raiden tests after tpu_sync lib is ready.
           python -m pytest tests/experimental/ -v --tb=short --ignore-glob='*/raiden_handler_test.py' --ignore-glob='*/raiden_integration_test.py'
+
+  run_vllm:
+    runs-on: ubuntu-latest
+    container:
+      image: vllm/vllm-tpu:nightly-20260819-12eed6e-9842d70 # zizmor: ignore[unpinned-images]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Download the tunix wheel
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          name: tunix-wheel
+
+      - name: Install the tunix wheel
+        run: |
+          python3 -m pip install --upgrade pip setuptools wheel
+          WHEEL=$(ls -1 google_tunix-*-py3-none-any.whl | head -n1)
+          python3 -m pip install "${WHEEL}[prod,test,experimental]"
+          # tpu-inference/Numba needs NumPy 2.3 or less.
+          python3 -m pip install numpy==2.3.5 --force-reinstall
+
+      - name: Run vllm driver tests
+        run: |
+          python3 -m pytest tests/generate/vllm_driver_test.py -v --tb=short

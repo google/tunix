@@ -523,7 +523,8 @@ class CheckpointManagerTest(parameterized.TestCase):
         nnx.state(new_optimizer, nnx.optimizer.OptState),
     )
     if errors:
-      self.fail(f'Found sharding mismatches:\n{"\n".join(errors)}')
+      error_msg = '\n'.join(errors)
+      self.fail(f'Found sharding mismatches:\n{error_msg}')
 
   def test_restore_without_optimizer(self):
     cp_path = f'{self.temp_path}/{self.id()}'

@@ -78,7 +78,7 @@ class PPOLearnerTest(parameterized.TestCase):
   def setUpClass(cls):
     super().setUpClass()
     num_cpus = int(os.environ.get('DEVICE_COUNTS', 2))
-    chex.set_n_cpu_devices(num_cpus)
+    tc.safe_set_n_cpu_devices(num_cpus)
     print(f'Setting up test with {num_cpus} devices')
 
   # def test_iterator(self):

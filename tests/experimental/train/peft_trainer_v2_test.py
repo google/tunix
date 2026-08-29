@@ -96,7 +96,7 @@ class PeftTrainerTest(parameterized.TestCase):
     # CPU env setup to simulate multi device env. Won't affect TPU env. But
     # need to be careful not to use self.num_cpus in TPU env.
     self.num_cpus = 4
-    chex.set_n_cpu_devices(self.num_cpus)
+    tc.safe_set_n_cpu_devices(self.num_cpus)
 
     self.eval_ds = self.train_ds = dummy_datasets(batch_size=4)
     total_devices = jax.device_count()

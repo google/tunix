@@ -372,7 +372,11 @@ from tunix.rl.agentic.rewards.reward_types import RewardOutput
 # %%
 
 import tensorflow_datasets as tfds
-import tensorflow_datasets.text.gsm8k
+try:
+  # For OSS usage
+  import tensorflow_datasets.text.gsm8k  # pylint: disable=unused-import
+except (ImportError, ModuleNotFoundError):
+  pass
 import re
 
 

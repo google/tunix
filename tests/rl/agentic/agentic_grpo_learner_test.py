@@ -227,7 +227,7 @@ class AgenticGrpoLearnerTest(parameterized.TestCase):
   @classmethod
   def setUpClass(cls):
     super().setUpClass()
-    chex.set_n_cpu_devices(2)
+    test_common.safe_set_n_cpu_devices(2)
     cls.device_count = jax.device_count()
 
   def setUp(self):
