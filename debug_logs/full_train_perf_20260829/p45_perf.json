@@ -1,0 +1,74 @@
+[
+  {
+    "step": 0,
+    "reward": 0.617,
+    "solve_rate": 0.617,
+    "compl_len": 184.7,
+    "raw_compl_len": 348.9,
+    "step_time_sec": 2007.3
+  },
+  {
+    "step": 1,
+    "reward": 0.395,
+    "solve_rate": 0.395,
+    "compl_len": 174.3,
+    "raw_compl_len": 368.5,
+    "step_time_sec": 917.6
+  },
+  {
+    "step": 2,
+    "reward": 0.371,
+    "solve_rate": 0.371,
+    "compl_len": 193.6,
+    "raw_compl_len": 393.9,
+    "step_time_sec": 969.0
+  },
+  {
+    "step": 3,
+    "reward": 0.418,
+    "solve_rate": 0.418,
+    "compl_len": 184.8,
+    "raw_compl_len": 381.9,
+    "step_time_sec": 929.3
+  },
+  {
+    "step": 4,
+    "reward": 0.586,
+    "solve_rate": 0.586,
+    "compl_len": 187.6,
+    "raw_compl_len": 388.1,
+    "step_time_sec": 934.7
+  },
+  {
+    "step": 5,
+    "reward": 0.516,
+    "solve_rate": 0.516,
+    "compl_len": 206.4,
+    "raw_compl_len": 414.4,
+    "step_time_sec": 925.8
+  },
+  {
+    "step": 6,
+    "reward": 0.512,
+    "solve_rate": 0.512,
+    "compl_len": 200.8,
+    "raw_compl_len": 410.6,
+    "step_time_sec": 935.1
+  },
+  {
+    "step": 7,
+    "reward": 0.527,
+    "solve_rate": 0.527,
+    "compl_len": 168.5,
+    "raw_compl_len": 346.5,
+    "step_time_sec": 906.4
+  },
+  {
+    "step": 8,
+    "reward": 0.34,
+    "solve_rate": 0.34,
+    "compl_len": 177.5,
+    "raw_compl_len": 356.2,
+    "step_time_sec": 907.6
+  }
+]

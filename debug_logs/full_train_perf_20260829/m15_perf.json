@@ -1,0 +1,26 @@
+[
+  {
+    "step": 0,
+    "reward": 0.176,
+    "solve_rate": 0.176,
+    "compl_len": 433.0,
+    "raw_compl_len": 1567.5,
+    "step_time_sec": 3670.0
+  },
+  {
+    "step": 1,
+    "reward": 0.164,
+    "solve_rate": 0.164,
+    "compl_len": 408.8,
+    "raw_compl_len": 1270.6,
+    "step_time_sec": 2040.7
+  },
+  {
+    "step": 2,
+    "reward": 0.203,
+    "solve_rate": 0.203,
+    "compl_len": 485.1,
+    "raw_compl_len": 1570.4,
+    "step_time_sec": 2149.4
+  }
+]
