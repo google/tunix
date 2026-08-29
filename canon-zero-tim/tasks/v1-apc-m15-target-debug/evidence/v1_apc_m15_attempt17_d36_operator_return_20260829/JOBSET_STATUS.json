@@ -1,0 +1,70 @@
+{
+  "off": {
+    "arm": "off",
+    "conditions": [
+      {
+        "lastTransitionTime": "2026-08-28T23:49:38Z",
+        "message": "jobset is resumed",
+        "reason": "ResumeJobs",
+        "status": "False",
+        "type": "Suspended"
+      },
+      {
+        "lastTransitionTime": "2026-08-28T23:49:26Z",
+        "message": "in order startup policy is in progress",
+        "reason": "InOrderStartupPolicyInProgress",
+        "status": "False",
+        "type": "StartupPolicyInProgress"
+      },
+      {
+        "lastTransitionTime": "2026-08-28T23:49:38Z",
+        "message": "in order startup policy has completed",
+        "reason": "InOrderStartupPolicyCompleted",
+        "status": "True",
+        "type": "StartupPolicyCompleted"
+      }
+    ],
+    "generation": 2,
+    "jobset": "canon-v1-apc-m15-off-d36-16c224aa",
+    "query_exit_code": 0,
+    "query_status": "PASS",
+    "schema": "m15-apc-jobset-status-v1",
+    "source_commit": "16c224aa80eb6b3a544be19f693c0542ab4b0dcb",
+    "terminal_condition": null,
+    "uid": "1eb7a35d-ebe4-4cc7-b783-73d2b3d4d183"
+  },
+  "on": {
+    "arm": "on",
+    "conditions": [
+      {
+        "lastTransitionTime": "2026-08-28T23:49:39Z",
+        "message": "jobset is resumed",
+        "reason": "ResumeJobs",
+        "status": "False",
+        "type": "Suspended"
+      },
+      {
+        "lastTransitionTime": "2026-08-28T23:49:28Z",
+        "message": "in order startup policy is in progress",
+        "reason": "InOrderStartupPolicyInProgress",
+        "status": "False",
+        "type": "StartupPolicyInProgress"
+      },
+      {
+        "lastTransitionTime": "2026-08-28T23:49:39Z",
+        "message": "in order startup policy has completed",
+        "reason": "InOrderStartupPolicyCompleted",
+        "status": "True",
+        "type": "StartupPolicyCompleted"
+      }
+    ],
+    "generation": 2,
+    "jobset": "canon-v1-apc-m15-on-d36-16c224aa",
+    "query_exit_code": 0,
+    "query_status": "PASS",
+    "schema": "m15-apc-jobset-status-v1",
+    "source_commit": "16c224aa80eb6b3a544be19f693c0542ab4b0dcb",
+    "terminal_condition": null,
+    "uid": "3d963313-7151-4b2b-b3b4-3d48173693b1"
+  }
+}

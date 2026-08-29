@@ -1,0 +1,24 @@
+{
+  "off": {
+    "arm": "off",
+    "bytes": null,
+    "jobset": "canon-v1-apc-m15-off-d36-16c224aa",
+    "object_identity": "canon-v1-apc-m15-off-d36-16c224aa/attempt-0/run.log",
+    "payload_returned": false,
+    "schema": "m15-apc-raw-log-receipt-v1",
+    "sha256": null,
+    "source_commit": "16c224aa80eb6b3a544be19f693c0542ab4b0dcb",
+    "status": "ABSENT"
+  },
+  "on": {
+    "arm": "on",
+    "bytes": null,
+    "jobset": "canon-v1-apc-m15-on-d36-16c224aa",
+    "object_identity": "canon-v1-apc-m15-on-d36-16c224aa/attempt-0/run.log",
+    "payload_returned": false,
+    "schema": "m15-apc-raw-log-receipt-v1",
+    "sha256": null,
+    "source_commit": "16c224aa80eb6b3a544be19f693c0542ab4b0dcb",
+    "status": "ABSENT"
+  }
+}

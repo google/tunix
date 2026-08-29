@@ -1,0 +1,8 @@
+M15 three-round small evidence return
+status=PARTIAL_ROUNDS_RECOVERED
+off_sealed_rounds=3
+on_sealed_rounds=1
+stage_receipts=74
+stage_failures=1
+token_bearing_bundle_returned=0
+remote_state_mutated=0

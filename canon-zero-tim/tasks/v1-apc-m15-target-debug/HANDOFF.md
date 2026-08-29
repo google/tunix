@@ -1,6 +1,56 @@
 # M15 APC target-debug handoff
 
-## START HERE — Attempt 16 exposed a classifier identity bug after capturing a real APC red
+## START HERE — Attempt 17 (d36) validated request-aware candidate disambiguation and sealed 3/3 control rounds + 1 durable treatment round
+
+Attempt 17 (`d36`) was executed from commit `16c224aa80eb6b3a544be19f693c0542ab4b0dcb` on a matched 64 TPU v5p pair (16 workers + 1 head per arm) with Layer 0 full observation and zero backward/optimizer commits.
+
+The self-hashed operator return is sealed in:
+`evidence/v1_apc_m15_attempt17_d36_operator_return_20260829/` (all 76 manifest members verified via `SHA256SUMS`).
+
+### What Attempt 17 (d36) proves
+
+- **Phase D3c Request-Aware Candidate Disambiguation Verified on Cluster**:
+  - The classifier identity bug from Attempt 16 (where distinct concurrent requests sharing a prefix collided on `request_id`) is completely resolved.
+  - APC-on Round 0 assembled 2,218 record pairs / 658,468 unique keys and executed the official classifier without crashing, successfully emitting `FIRST_RED_CANDIDATE_SET` across 2 candidate anchors with full replay-ledger receipts.
+- **Stage 15 Preclassify Input Checkpoint Durability Verified**:
+  - Both arms uploaded and verified `STAGE_15_checkpoint-input_PASS.json` and `CLASSIFIER_INPUT_RECEIPT.json` to GCS before entering classification.
+- **APC-On Target Red Fork Confirmed**:
+  - APC-on reached **93.0% prefix cache hit rate**.
+  - Re-confirmed exact serving-only APC cache fork:
+    - $A-B = 207$ differing bytes / 95 elements
+    - $B-C = 0$ differing bytes (policy forward pass exact)
+    - $N_{\text{action}} = 119,150$ actions
+- **APC-Off 3/3 Complete Durable Rounds**:
+  - Control arm completed all 3 diagnostic rounds (`PIPELINE_COMPLETE` on rounds 0, 1, 2).
+  - Round 0: 2,633 record pairs / 1.76 GB, $A-B=0$, $B-C=0$, $N_{\text{action}}=117,236$, `M15_OBSERVER_CONTROL_EXACT`.
+  - Round 1: ~2,600 record pairs, $A-B=0$, $B-C=0$, `M15_OBSERVER_CONTROL_EXACT`.
+  - Round 2: 2,599 record pairs, $A-B=0$, $B-C=0$, `M15_OBSERVER_CONTROL_EXACT`.
+- **Fail-Fast Treatment Lifecycle**:
+  - APC-on completed Round 0 diagnosis, sealed and ACKed Round 0 artifacts, and cleanly transitioned out on Round 1 as expected.
+
+### Round Inventory Table
+
+| Arm | Round | Record Pairs | Differing Bytes ($A-B$) | Differing Bytes ($B-C$) | Classification Verdict | Stage Pipeline Status |
+|---|---:|---:|---:|---:|---|---|
+| APC off | 0 | 2,633 | 0 | 0 | `M15_OBSERVER_CONTROL_EXACT` | `PIPELINE_COMPLETE` (Stages 10..70 PASS) |
+| APC off | 1 | ~2,600 | 0 | 0 | `M15_OBSERVER_CONTROL_EXACT` | `PIPELINE_COMPLETE` (Stages 10..70 PASS) |
+| APC off | 2 | 2,599 | 0 | 0 | `M15_OBSERVER_CONTROL_EXACT` | `PIPELINE_COMPLETE` (Stages 10..70 PASS) |
+| APC on | 0 | 2,218 | 207 (95 el) | 0 | `M15_INTERNAL_FIRST_RED_CANDIDATE_SET` | `PIPELINE_COMPLETE` (Stages 10..70 PASS) |
+
+Current claim ceiling:
+
+```text
+REQUEST_AWARE_CLASSIFIER_CLUSTER_PASS /
+PRECLASSIFY_INPUT_DURABILITY_CLUSTER_PASS /
+CONTROL_3_ROUNDS_EXACT_PASS /
+ATTEMPT17_TARGET_RED_PRESERVED /
+FIRST_RED_CANDIDATE_SET_CAPTURED /
+FIRST_RED_NOT_YET_LOCALIZED /
+APC_NUMERICAL_FIX_NOT_IMPLEMENTED /
+PHASE_E_CLOSED
+```
+
+## Historical — Attempt 16 exposed a classifier identity bug after capturing a real APC red
 
 Phase D3c was developed from
 `fbc4fa03cdb35ac519d183b03ecd25ede485a5e3`. Delivery may rebase it onto a

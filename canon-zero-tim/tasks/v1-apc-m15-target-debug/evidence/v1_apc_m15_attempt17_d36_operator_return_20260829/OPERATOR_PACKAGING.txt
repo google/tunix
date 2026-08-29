@@ -1,0 +1,9 @@
+M15 multiround operator return
+status=PARTIAL_ROUNDS_RECOVERED_OPERATOR_RECEIPTS_INCOMPLETE
+core_status=PARTIAL_ROUNDS_RECOVERED
+jobsets_terminal=0
+raw_logs_present=0
+recovery_input_bound=0
+raw_log_payload_returned=0
+token_bearing_bundle_returned=0
+remote_state_mutated=0
