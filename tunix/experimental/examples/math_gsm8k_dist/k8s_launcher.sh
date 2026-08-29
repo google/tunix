@@ -128,7 +128,7 @@ start_orchestrator() {
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${ORCHESTRATOR_PORT}" \
     --worker_startup_command=" \
-      cd /app && git fetch https://github.com/google/tunix.git ${SYNC_GIT_BRANCH} && git checkout FETCH_HEAD -- examples/math_gsm8k tunix/experimental/examples/math_gsm8k_dist/run_gsm8k_dist_grpo.py tunix/experimental/orchestrator/distributed_rl_engine.py tunix/experimental/orchestrator/rl_program.py && \
+      cd /app && git fetch https://github.com/google/tunix.git ${SYNC_GIT_BRANCH} && git checkout FETCH_HEAD -- tunix examples && \
       python -m tunix.experimental.distributed.runtime.main \
         --discovery_id=${ORCHESTRATOR_ID} \
         --discovery_port=${ORCHESTRATOR_PORT} \
@@ -168,6 +168,7 @@ start_trainer() {
     --worker_container_image="${TUNIX_IMAGE}" \
     --worker_container_port="${TRAINER_PORT}" \
     --worker_startup_command=" \
+      ${SYNC_GIT_BRANCH:+cd /app && git fetch https://github.com/google/tunix.git ${SYNC_GIT_BRANCH} && git checkout FETCH_HEAD -- tunix examples &&} \
       VERIFY_WEIGHTS=${VERIFY_WEIGHTS} ${RAIDEN_WEIGHT_SYNC_CHUNKS:+RAIDEN_WEIGHT_SYNC_CHUNKS=${RAIDEN_WEIGHT_SYNC_CHUNKS}} python -m tunix.experimental.distributed.runtime.main \
         --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
         --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
@@ -214,7 +215,7 @@ start_rollout() {
       --worker_container_image="${TUNIX_IMAGE}" \
       --worker_container_port="${ROLLOUT_PORT}" \
       --worker_startup_command=" \
-        ${SYNC_GIT_BRANCH:+cd /app && git fetch https://github.com/google/tunix.git ${SYNC_GIT_BRANCH} && git checkout FETCH_HEAD -- tunix/experimental/examples/math_gsm8k_dist/run_rollout_node.py &&} \
+        ${SYNC_GIT_BRANCH:+cd /app && git fetch https://github.com/google/tunix.git ${SYNC_GIT_BRANCH} && git checkout FETCH_HEAD -- tunix examples &&} \
         SKIP_JAX_PRECOMPILE=1 VERIFY_WEIGHTS=${VERIFY_WEIGHTS} ${ROLLOUT_USE_BATCHED_RPA:+USE_BATCHED_RPA_KERNEL=1} python -m tunix.experimental.distributed.runtime.main \
           --discovery_addrs=${ORCHESTRATOR_ID}:${ORCHESTRATOR_PORT} \
           --process_executor=tunix.experimental.distributed.runtime.executor.K8sExecutor \
