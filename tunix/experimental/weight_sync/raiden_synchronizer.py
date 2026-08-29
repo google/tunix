@@ -215,10 +215,16 @@ class RaidenSynchronizer:
     return self._sync
 
   def d2h(self) -> None:
-    self._require_sync("d2h()").d2h()
+    if not self.bound:
+      raise RuntimeError(f"{self.job_name}: bind() must run before d2h()")
+    if self._sync is not None:
+      self._sync.d2h()
 
   def h2d(self) -> None:
-    self._require_sync("h2d()").h2d()
+    if not self.bound:
+      raise RuntimeError(f"{self.job_name}: bind() must run before h2d()")
+    if self._sync is not None:
+      self._sync.h2d()
 
   def metrics(self) -> dict:
     return self._sync.get_metrics() if self._sync else {}

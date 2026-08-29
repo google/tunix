@@ -65,6 +65,9 @@ class WeightSyncStagingTest(absltest.TestCase):
   def _fake_trainer(self):
     return types.SimpleNamespace(
         model=_TinyModel(),
+        config=types.SimpleNamespace(),
+        _target_state=None,
+        _sampler_type="inprocess_vllm",
         _weight_sync_worker=None,
         _weight_sync_worker_factory=None,
     )

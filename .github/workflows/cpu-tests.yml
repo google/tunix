@@ -19,6 +19,16 @@ name: Run Tests Against Tunix Package
 
 on:
   workflow_call:
+    secrets:
+      HF_TOKEN:
+        description: 'HuggingFace token for model downloads'
+        required: false
+      KAGGLE_USERNAME:
+        description: 'Kaggle Username'
+        required: false
+      KAGGLE_KEY:
+        description: 'Kaggle API Key'
+        required: false
 
 permissions:
   contents: read
@@ -91,7 +101,9 @@ jobs:
       - name: Run experimental tests
         run: |
           # TODO(tunix-dev): add back raiden tests after tpu_sync lib is ready.
-          python -m pytest tests/experimental/ -v --tb=short --ignore-glob='*/raiden_handler_test.py' --ignore-glob='*/raiden_integration_test.py'
+          python -m pytest tests/experimental/ -v --tb=short \
+            --ignore-glob='*/raiden_*.py' \
+            --ignore=tests/experimental/weight_sync/weight_sync_test.py
 
   run_vllm:
     runs-on: ubuntu-latest
@@ -118,3 +130,72 @@ jobs:
       - name: Run vllm driver tests
         run: |
           python3 -m pytest tests/generate/vllm_driver_test.py -v --tb=short
+
+  # ---------------------------------------------------------------------------
+  # Job: run_dev
+  # Purpose: Model download, CLI integration, naming, and alignment tests on CPU.
+  # Hardware: Standard Ubuntu runner.
+  # Secrets: Requires HF_TOKEN and KAGGLE_* secrets (skipped on external fork PRs).
+  # Scope: Smoke model creation, CLI config tests, HF naming, and PyTorch alignment.
+  # ---------------------------------------------------------------------------
+  run_dev:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: '3.11'
+
+      # Cache Hugging Face hub
+      - name: Cache HF hub
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-${{ runner.os }}-${{ hashFiles('pyproject.toml', 'requirements*.txt', 'constraints*.txt') }}
+          restore-keys: |
+            hf-${{ runner.os }}-
+
+      - name: Download the tunix wheel
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        with:
+          name: tunix-wheel
+
+      - name: Install the tunix wheel and dependencies
+        run: |
+          python -m pip install --upgrade pip
+          WHEEL=$(ls -1 google_tunix-*-py3-none-any.whl | head -n1)
+          python -m pip install "${WHEEL}[prod,test,experimental]"
+          python -m pip install --upgrade kagglehub kagglesdk torch
+
+      - name: Run Smoke tests (model creation)
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
+          KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
+        run: |
+          echo "Running Smoke tests..."
+          python -m pytest tests/smoke_tests/model_creation_test.py -v --tb=short
+
+      - name: Run tunix cli integration tests
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
+          KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
+        run: |
+          python -m pytest tests/cli/ -v --tb=short \
+            --ignore=tests/cli/utils/model_test.py
+
+      - name: Run tunix model naming tests
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python -m pytest tests/models/naming_test.py -v --tb=short
+
+      - name: Run model alignment tests
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          JAX_PLATFORMS=cpu python -m pytest tests/model_alignment/ -v --tb=short

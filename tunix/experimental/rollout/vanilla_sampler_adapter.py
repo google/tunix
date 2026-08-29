@@ -18,6 +18,8 @@ import abc
 import numbers
 from typing import Any, List, Sequence
 from absl import logging
+from flax import nnx
+import jax
 import numpy as np
 from tunix.experimental.rollout import sampler as base_sampler_lib
 from tunix.experimental.weight_sync import weight_sync
@@ -380,6 +382,25 @@ class VanillaSamplerAdapter(Sampler, abc.ABC):
     # In Fallback mode, no transport binding is required.
     return None
 
+  def get_target_state(self) -> Any:
+    """Returns target state shape/dtype pytree for weight conversion."""
+    if self.sampler is None:
+      raise RuntimeError(
+          f"VanillaSamplerAdapter [{self.server_id}] sampler is not initialized."
+      )
+    if hasattr(self.sampler, "get_target_state"):
+      return self.sampler.get_target_state()
+    if hasattr(self.sampler, "transformer_state"):
+      state = self.sampler.transformer_state
+      return jax.tree.map(
+          lambda x: nnx.Param(jax.ShapeDtypeStruct(shape=x.shape, dtype=x.dtype)),
+          state,
+          is_leaf=lambda x: isinstance(x, nnx.Variable),
+      )
+    raise AttributeError(
+        f"VanillaSamplerAdapter [{self.server_id}] cannot extract target_state."
+    )
+
   async def pre_weight_sync(
       self,
       sync_request: base_sampler_lib.WeightSyncRequest | Any = None,
@@ -418,7 +439,7 @@ class VanillaSamplerAdapter(Sampler, abc.ABC):
             " sync_request is None."
             % self.server_id
         )
-      if self.sampler and hasattr(self.sampler, "transformer_state"):
+      if self.sampler and hasattr(self.sampler, "update_params"):
         weights = getattr(sync_request, "weights", None)
         if weights is None:
           raise ValueError(
@@ -426,7 +447,7 @@ class VanillaSamplerAdapter(Sampler, abc.ABC):
               " in sync_request."
               % self.server_id
           )
-        self.sampler.transformer_state = weights
+        self.sampler.update_params(weights)
       else:
         raise RuntimeError(
             f"VanillaSamplerAdapter [{self.server_id}] does not support"

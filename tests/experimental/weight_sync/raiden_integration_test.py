@@ -6,6 +6,7 @@ from absl.testing import absltest
 from flax import nnx
 import jax
 import jax.numpy as jnp
+from tunix.experimental.weight_sync import raiden_synchronizer
 from tunix.experimental.weight_sync import weight_sync
 from tunix.experimental.weight_sync.raiden_handler import RaidenHandler
 from tunix.experimental.weight_sync.raiden_synchronizer import RaidenSynchronizer
@@ -14,6 +15,10 @@ from tunix.tests.test_common import ModelConfig, ToyTransformer
 
 class RaidenIntegrationTest(absltest.TestCase):
 
+  @absltest.skipIf(
+      raiden_synchronizer._ws_lib is None,
+      "Requires TPU Raiden C++ extension (_ws_lib)",
+  )
   def test_toy_transformer_raiden_sync(self):
     config = ModelConfig(vocab_size=128, num_layers=2)
 
