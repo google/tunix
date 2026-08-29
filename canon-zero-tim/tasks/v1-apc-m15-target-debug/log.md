@@ -1126,3 +1126,80 @@ is not a current fact or launch authority.
   clean-worktree construction and preflight, exact no-pipe wrapper command,
   terminal markers, failure preservation, allowed return files, and the
   fail-closed decision table. It contains no bucket root or credential value.
+
+## 2026-08-29 — Phase D3e prepared canonical first-action reclassification
+
+- Pulled and verified evidence commit
+  `b74c4ba38f293606000398c29818cea0c8ca5c8b`. The D3d three-member return
+  manifest verifies with SHA256
+  `c3dd6ab4e8ee191e1012b011a6e8ff8d845e528aa85f59936c06315b10cbbb31`.
+- Corrected the stale task state: D3d GCS/CPU execution did run. It uniquely
+  binds source row 217 / completion position 0 to A request
+  `79-b8334848`; selected proof prefix 1300 exceeds required horizon 1227.
+  Request identity is no longer the blocker for the first-action anchor.
+- Preserved the real numerical facts: control 3/3 sealed exact; treatment
+  Round 0 A-B=207 bytes / 95 elements and B-C=0; treatment Round 1 failed
+  assembly; Round 2 and root completion are absent. This remains
+  analysis-grade partial target evidence.
+- Identified a classifier-accounting mismatch. Public anchors preferred
+  completion-position-zero, but the gate combined all seven joinable red
+  points. D3e names completion-position-zero as the decision scope when the
+  existing first-action contract is required, while retaining the global
+  `rpa_output`/`final_norm` signatures and 88 unobserved red points in explicit
+  `all_join_*` and coverage fields.
+- Added fail-closed tests proving later signatures stay diagnostic but mixed
+  completion-position-zero signatures remain a candidate set. Existing
+  same-request conflict, exact-through candidate, B variant, insufficient
+  proof-horizon, missing first-action, and B-C negatives remain active.
+- Added `run_m15_attempt17_d3e_canonical_action.sh`. It delegates to the
+  immutable manifest-bound D36 recovery and then verifies the Attempt-17
+  A-B/B-C boundary, decision scope, unique binding, Layer-0
+  `k_post_rope -> rpa_output` interval, fingerprint geometry, source anchors,
+  and presence of cache-page coordinates. It performs read-only GCS access and
+  no GCS write, Kubernetes operation, or TPU launch.
+- Updated `HANDOFF.md`, `RUNBOOK.md`, `state.md`, `plan.md`, and the D3e phase
+  file. The old D3d instructions remain under an explicitly superseded
+  provenance heading so a cold-start agent does not repeat them.
+- Host gates: task discovery 161/161 PASS; classifier 23/23 PASS;
+  reviewer/wrapper/evidence 5/5 PASS; P38
+  `PERSISTENCE_TEST_PASS`; flag audit 395/395 PASS; Python/Bash syntax, scope
+  audit, secret scan, executable mode, and `git diff --check` PASS.
+- External status: pinned exact-image NOT RUN; D3e read-only GCS execution NOT
+  RUN; target NOT RUN. No commit, push, GCS, Kubernetes, or TPU action occurred
+  in this implementation turn.
+- Next gate: request separate approval for the official pinned exact-image
+  aggregate. After it passes, commit/push and GCS read remain two separate user
+  approvals. A fresh matched DP8xTP8 pair is not admitted unless the D3e return
+  remains a candidate set or its complete localization ledger fails review.
+
+## 2026-08-29 — Phase D3e official pinned exact-image PASS
+
+- Ran the separately approved official aggregate directly, without a pipe:
+  `bash canon-zero-tim/tests/v1_phase4/run_exact_image.sh sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`.
+- Exit code: 0. The aggregate printed matching `image_ref` and `image_id`
+  `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`.
+- Terminal marker:
+  `V1_HP_EXACT_IMAGE_PASS ... apc_m15_carrier=68 m15_d3e=1 m15_durability=1 m15_round_provenance=1 ... manifests=3`.
+  The D3e focused segments included classifier 23/23 PASS, reviewer/wrapper
+  5/5 PASS, and P38 `PERSISTENCE_TEST_PASS`.
+- Raw log: `/tmp/m15-d3e-exact-image-b74c4ba3-20260829.log`; 1096 lines,
+  228555 bytes; SHA256
+  `59efa6ddc6e0399050cbbbbc5b463fc6b94486d96834f1e8b50f4fd9d3b22d97`.
+- Scope: local Docker/CPU only. No GCS read/write, Kubernetes operation, TPU
+  launch, commit, or push occurred. TARGET NOT RUN; Phase E remains closed.
+- Claim ceiling:
+  `ATTEMPT17_PARTIAL_ROUNDS_RECOVERED /
+  REQUEST_IDENTITY_UNIQUE_FIRST_ACTION /
+  D3E_CANONICAL_ACTION_SCOPE_IMPLEMENTED /
+  HOST_PASS /
+  EXACT_IMAGE_PASS /
+  D3E_GCS_RECLASSIFICATION_NOT_RUN /
+  TARGET_NOT_RERUN /
+  APC_NUMERICAL_FIX_NOT_IMPLEMENTED /
+  PHASE_E_CLOSED`.
+- Delivery approval: the user explicitly approved committing and pushing this
+  reviewed D3e tree after the pinned exact-image PASS. The published full SHA
+  is returned by the delivery operation rather than self-recorded inside its
+  own commit.
+- Next gate after publication: GCS read remains a separate approval for the
+  checked-in bucket-executor wrapper. Do not launch TPU/Kubernetes yet.

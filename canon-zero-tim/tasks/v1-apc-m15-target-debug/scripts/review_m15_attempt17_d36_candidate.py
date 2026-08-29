@@ -182,9 +182,15 @@ def review(
       "original_gate": original["gate"],
       "reclassification": reclassification["classification"],
       "reclassification_gate": gate,
+      "decision_scope": reclassification.get("decision_scope"),
+      "all_join_mixed_first_difference_signatures": reclassification.get(
+          "all_join_mixed_first_difference_signatures"
+      ),
       "source_request_binding_statuses": binding_statuses,
       "target_executed": False,
       "remote_mutation": False,
+      "numerical_repair_authorized": False,
+      "pinned_exact_image_required": gate == "FIRST_RED_LOCALIZED",
       "remote_core_status": core.get("status") if core is not None else None,
       "remote_core_summary_sha256": (
           _sha256(core_summary) if core_summary is not None else None
@@ -192,7 +198,9 @@ def review(
       "claim_ceiling": (
           "This is an offline reclassification of the immutable Attempt-17 "
           "treatment bundle. It changes no runtime or numerical path and is "
-          "not a fresh target execution."
+          "not a fresh target execution. A localized completion-position-zero "
+          "interval still requires independent shape/coordinate review and "
+          "the pinned exact-image gate before any Phase-E discussion."
       ),
   }
   summary_path = output / "D36_OFFLINE_REVIEW.json"

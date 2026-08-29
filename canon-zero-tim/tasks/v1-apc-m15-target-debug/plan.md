@@ -28,7 +28,8 @@ B - C = 0 bytes
 | D3a | harden the first seal/ACK transition with stage receipts and a fail-fast failure channel | host three-round ACK positive control and forced-persistence failure negative control pass; numerical source remains unchanged | local PASS (137/137 task tests, P38 persistence PASS, flag audit 394/394); exact-image and target not run |
 | D3b | bind every cumulative replay-envelope row to its live diagnostic round | installed-source AST gate rejects missing or hard-coded round; assembler selects round 0/1/2 independently | local PASS (139/139 task tests, patch applies to registered runner, P38 persistence PASS); exact-image and target not run |
 | D3c | distinguish same-prefix serving requests and checkpoint classifier inputs before analysis | candidate-set classifier never conflates requests or fabricates a single interval; classifier inputs survive an analysis failure | cluster exercised by Attempt 17: request-aware classification and checkpoint durability PASS; treatment Round 0 preserved a mixed candidate set, not a localization |
-| D3d | bind Attempt-17 source rows to serving requests from future token-prefix continuity without another rollout | immutable bundle and committed receipt verify; one request is selected only beyond the latest explicit elimination horizon, otherwise the candidate set is preserved | implementation and host tests PASS; bucket/GCS reclassification, exact-image, and target not run |
+| D3d | bind Attempt-17 source rows to serving requests from future token-prefix continuity without another rollout | immutable bundle and committed receipt verify; one request is selected only beyond the latest explicit elimination horizon, otherwise the candidate set is preserved | complete for request identity: read-only GCS/CPU return binds source row 217 uniquely through prefix 1300; global mixed signatures preserve the candidate-set verdict |
+| D3e | separate the canonical completion-position-zero decision scope from later red-action diagnostics | decision-scope mixed/exact candidates still fail closed; global signatures and all unobserved red points remain explicit; immutable Attempt-17 bundle is reclassified without target execution | implementation, host gates, and official pinned exact-image PASS (`m15_d3e=1`, `manifests=3`); read-only GCS execution not run |
 | D4 | Attempt-13 two-arm registered-root inventory and offline semantic review | both listings succeed; exact 77/70 shard triples verify; physical shard counts and immutable classifier counts remain separate; seven-file inventory self-verifies | transport complete; no-live confirmed; count drift -29/+101 preserved; official replay impossible |
 | E | minimal localized repair, default off or experiment-bound | reproducer flips red to zero; APC-off and B are unchanged; adjacent and dirty-page negatives fire | pending |
 | F | certification ladder | host -> exact-image -> one-host clean/repeat/dirty -> matched profile -> separately approved DP8xTP8 G-E | pending |
@@ -200,3 +201,22 @@ B - C = 0 bytes
   provenance work, not a numerical repair. A unique offline localization must
   still be reviewed for last exact, first red, shape, coordinates, and source
   anchors before Phase E opens.
+- Confirmed by the verified D3d return: source row 217 / completion position 0
+  uniquely binds to A request `79-b8334848`; selected future-prefix proof 1300
+  exceeds the required elimination horizon 1227. The former request-identity
+  ambiguity is closed for this anchor.
+- Confirmed: D3d still reports two global signatures across seven joinable red
+  points, Layer-0 `rpa_output` and `final_norm`, with 88 red points explicitly
+  unobserved. The completion-position-zero decision anchor itself is uniquely
+  red at Layer-0 `rpa_output` with no exact-through alternative.
+- Decision: Phase D3e makes completion-position-zero the declared classifier
+  decision scope when `require_first_action=True`, while preserving all later
+  signatures under separate `all_join_*` fields. Mixed or exact candidates
+  within the decision scope remain fail closed. This is an analysis-accounting
+  change, not a numerical repair.
+- Decision: do not launch a new TPU pair yet. Host and separately approved
+  pinned exact-image gates now pass. Publish only after explicit commit/push
+  approval, then obtain separate GCS-read approval for the D3e wrapper against
+  the immutable Attempt-17 bundle. A fresh DP8xTP8 pair is considered only if
+  that return still preserves the decision-scope candidate set or lacks the
+  required shape/coordinate ledger.

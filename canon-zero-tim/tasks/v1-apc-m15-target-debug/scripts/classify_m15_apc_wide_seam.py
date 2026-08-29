@@ -5,9 +5,10 @@ The generic P38 seam classifier requires every red action to have a standard-
 path record.  M15 intentionally keeps CANON_CONTINUE_DECODE=8, so that
 requirement is impossible: most suffix actions are produced inside the device
 loop.  This classifier is stricter about the claim instead of weakening the
-join.  It localizes only red actions with exact A and B standard-path records,
-requires at least one completion-position-zero anchor, and accounts for every
-other red action as unobserved.
+join.  It localizes only red actions with exact A and B standard-path records.
+When a first action is required, completion-position-zero candidates are the
+declared decision scope; later joined signatures and every unobserved action
+remain explicit diagnostics and do not inherit that boundary.
 """
 
 from __future__ import annotations
@@ -340,6 +341,41 @@ def _numeric_variants(
     else:
       variants.append({"selected": observation, "observations": [observation]})
   return variants
+
+
+def _first_difference_signatures(
+    joins: Iterable[dict[str, Any]],
+) -> tuple[list[tuple[Any, str]], int]:
+  """Return deterministic boundary signatures and exact candidate count."""
+  materialized = list(joins)
+  signatures = sorted({
+      (
+          join["first_difference"].get("layer"),
+          str(join["first_difference"]["checkpoint"]),
+      ) if join["first_difference"] is not None
+      else (None, "EXACT_THROUGH_OBSERVER")
+      for join in materialized
+  }, key=lambda item: (10**9 if item[0] is None else int(item[0]), item[1]))
+  exact_candidates = sum(
+      join["first_difference"] is None for join in materialized
+  )
+  return signatures, exact_candidates
+
+
+def _decision_joins(
+    joins: list[dict[str, Any]], require_first_action: bool
+) -> tuple[list[dict[str, Any]], str]:
+  """Select the declared localization scope without hiding other joins."""
+  if not require_first_action:
+    return joins, "ALL_JOINABLE_RED_POINTS"
+  selected = [
+      join for join in joins if int(join["completion_position"]) == 0
+  ]
+  _require(
+      selected,
+      "M15 observer did not join a completion-position-zero red anchor",
+  )
+  return selected, "COMPLETION_POSITION_ZERO"
 
 
 def _load_npz(path: Path) -> dict[str, np.ndarray]:
@@ -886,11 +922,10 @@ def classify(
     joins.extend(point_joins)
   _require(joins, "no A-B-red M15 action joined exact standard-path seam records")
   first_action_joins = [join for join in joins if join["completion_position"] == 0]
-  if require_first_action:
-    _require(first_action_joins,
-             "M15 observer did not join a completion-position-zero red anchor")
-  preferred = first_action_joins or joins
-  anchors = preferred[:_MAX_ANCHORS]
+  decision_joins, decision_scope = _decision_joins(
+      joins, require_first_action
+  )
+  anchors = decision_joins[:_MAX_ANCHORS]
   ledger = _ledger_receipts(replay_ledger, anchors)
   joined_points = {
       (join["source_row"], join["completion_position"])
@@ -900,15 +935,11 @@ def classify(
       (join["source_row"], join["completion_position"])
       for join in first_action_joins
   }
-  signatures = sorted({
-      (
-          join["first_difference"].get("layer"),
-          str(join["first_difference"]["checkpoint"]),
-      ) if join["first_difference"] is not None else (None, "EXACT_THROUGH_OBSERVER")
-      for join in joins
-  }, key=lambda item: (10**9 if item[0] is None else int(item[0]), item[1]))
-  exact_candidate_anchors = sum(
-      join["first_difference"] is None for join in joins
+  signatures, exact_candidate_anchors = _first_difference_signatures(
+      decision_joins
+  )
+  all_join_signatures, all_join_exact_candidate_anchors = (
+      _first_difference_signatures(joins)
   )
   red_signatures = {
       signature for signature in signatures
@@ -968,6 +999,7 @@ def classify(
       "diagnostic_round": diagnostic_round,
       "observer_mode": mode,
       "expected_layer": expected_layer,
+      "decision_scope": decision_scope,
       "alignment": {
           "a_b_differing_bytes": ab_bytes,
           "a_b_differing_elements": int(ab.get("differing_elements", -1)),
@@ -980,6 +1012,7 @@ def classify(
           "unobserved_red_points": len(red_points) - len(joined_points),
           "first_action_joinable_red_points": len(first_action_points),
           "candidate_anchors": len(joins),
+          "decision_candidate_anchors": len(decision_joins),
           "selected_anchors": len(anchors),
           "max_selected_anchors": _MAX_ANCHORS,
           "candidate_observations": sum(
@@ -996,7 +1029,10 @@ def classify(
               for join in joins
           ),
           "exact_through_observer_candidate_anchors": exact_candidate_anchors,
-          "selected_anchor_truncated": len(preferred) > _MAX_ANCHORS,
+          "all_join_exact_through_observer_candidate_anchors": (
+              all_join_exact_candidate_anchors
+          ),
+          "selected_anchor_truncated": len(decision_joins) > _MAX_ANCHORS,
       },
       "seam_inventory": seam_inventory,
       "tail_inventory": tail_inventory,
@@ -1005,6 +1041,13 @@ def classify(
           for layer, checkpoint in signatures
       ],
       "mixed_first_difference_signatures": len(signatures) > 1,
+      "all_join_first_difference_signatures": [
+          {"layer": layer, "checkpoint": checkpoint}
+          for layer, checkpoint in all_join_signatures
+      ],
+      "all_join_mixed_first_difference_signatures": (
+          len(all_join_signatures) > 1
+      ),
       "selected_layer": (
           numeric_layers[0]
           if unique_signature and len(numeric_layers) == 1 else None
@@ -1019,11 +1062,14 @@ def classify(
       "replay_ledger_receipts": ledger,
       "next_action": next_action,
       "claim_ceiling": (
-          "This report localizes exact standard-path red candidates only. "
-          "Distinct requests sharing a token prefix remain distinct; a mixed "
-          "candidate signature is not promoted to one tensor interval. "
-          "Continue-decode red actions remain explicitly unobserved; integer "
-          "fingerprint equality is not full-tensor byte equality."
+          "This report localizes only the admitted decision scope over exact "
+          "standard-path A/B observations. Completion-position-zero is the "
+          "decision scope when required; later joinable and continue-decode "
+          "red actions do not inherit that boundary and remain separately "
+          "accounted. Distinct requests sharing a token prefix remain "
+          "distinct, and a mixed decision-scope candidate signature is not "
+          "promoted to one tensor interval. Integer fingerprint equality is "
+          "not full-tensor byte equality."
       ),
   }
 

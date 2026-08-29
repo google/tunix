@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 import tempfile
@@ -16,6 +17,8 @@ from test_classify_m15_apc_wide_seam import Fixture, PACKAGER
 
 
 SOURCE = "1" * 40
+SCRIPT_DIR = Path(__file__).resolve().parent
+TASK_DIR = SCRIPT_DIR.parent
 
 
 class M15Attempt17OfflineReviewTest(unittest.TestCase):
@@ -89,6 +92,9 @@ class M15Attempt17OfflineReviewTest(unittest.TestCase):
     self.assertEqual(result["source_request_binding_statuses"], [
         "UNIQUE_FUTURE_PREFIX_BINDING"
     ])
+    self.assertEqual(result["decision_scope"], "COMPLETION_POSITION_ZERO")
+    self.assertFalse(result["numerical_repair_authorized"])
+    self.assertTrue(result["pinned_exact_image_required"])
     self.assertTrue((output / "SHA256SUMS").is_file())
     self.assertTrue((output / "REMOTE_MULTIROUND_SUMMARY.json").is_file())
 
@@ -119,6 +125,57 @@ class M15Attempt17OfflineReviewTest(unittest.TestCase):
           output=self.root / "return",
           scratch_parent=self.root,
       )
+
+  def test_d3e_wrapper_is_read_only_and_delegates_verified_recovery(self):
+    wrapper = (
+        SCRIPT_DIR / "run_m15_attempt17_d3e_canonical_action.sh"
+    ).read_text(encoding="utf-8")
+    self.assertIn("run_m15_attempt17_d36_offline_binding.sh", wrapper)
+    self.assertIn("M15_D3E_CANONICAL_ACTION_REVIEW_PASS", wrapper)
+    self.assertIn("gcs_write=0 kubernetes=0 tpu=0", wrapper)
+    self.assertNotIn("kubectl", wrapper)
+    self.assertNotIn("gcs_write=1", wrapper)
+
+  def test_committed_d3d_return_requires_canonical_action_scope(self):
+    evidence = (
+        TASK_DIR / "evidence" /
+        "v1_apc_m15_attempt17_d36_offline_binding_20260829"
+    )
+    for line in (evidence / "SHA256SUMS").read_text(
+        encoding="ascii"
+    ).splitlines():
+      digest, separator, name = line.partition("  ")
+      self.assertEqual(separator, "  ")
+      self.assertEqual(
+          hashlib.sha256((evidence / name).read_bytes()).hexdigest(), digest
+      )
+    classification = json.loads(
+        (evidence / "D36_RECLASSIFICATION.json").read_text(encoding="utf-8")
+    )
+    self.assertEqual(classification["gate"], "FIRST_RED_CANDIDATE_SET")
+    self.assertEqual(classification["alignment"]["a_b_differing_bytes"], 207)
+    self.assertEqual(classification["alignment"]["b_c_differing_bytes"], 0)
+    self.assertEqual(classification["coverage"]["total_red_points"], 95)
+    self.assertEqual(
+        classification["coverage"]["first_action_joinable_red_points"], 1
+    )
+    self.assertEqual(classification["coverage"]["candidate_anchors"], 7)
+    self.assertEqual(classification["coverage"]["unobserved_red_points"], 88)
+    self.assertEqual(
+        classification["first_difference_signatures"],
+        [
+            {"layer": 0, "checkpoint": "rpa_output"},
+            {"layer": None, "checkpoint": "final_norm"},
+        ],
+    )
+    self.assertEqual(len(classification["anchors"]), 1)
+    anchor = classification["anchors"][0]
+    self.assertEqual(anchor["completion_position"], 0)
+    self.assertEqual(anchor["first_difference"]["checkpoint"], "rpa_output")
+    self.assertEqual(
+        anchor["source_request_binding"]["status"],
+        "UNIQUE_FUTURE_PREFIX_BINDING",
+    )
 
 
 if __name__ == "__main__":

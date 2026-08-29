@@ -358,6 +358,57 @@ class M15WideSeamClassifierTest(unittest.TestCase):
     self.addCleanup(fixture.close)
     return fixture
 
+  def test_completion_zero_decision_scope_keeps_later_signatures_diagnostic(self):
+    joins = [
+        {
+            "completion_position": 0,
+            "first_difference": {"layer": 0, "checkpoint": "rpa_output"},
+        },
+        {
+            "completion_position": 1,
+            "first_difference": {"layer": None, "checkpoint": "final_norm"},
+        },
+    ]
+    selected, scope = MODULE._decision_joins(  # pylint: disable=protected-access
+        joins, True
+    )
+    selected_signatures, selected_exact = (
+        MODULE._first_difference_signatures(selected)  # pylint: disable=protected-access
+    )
+    all_signatures, _ = MODULE._first_difference_signatures(  # pylint: disable=protected-access
+        joins
+    )
+    self.assertEqual(scope, "COMPLETION_POSITION_ZERO")
+    self.assertEqual(selected_signatures, [(0, "rpa_output")])
+    self.assertEqual(selected_exact, 0)
+    self.assertEqual(
+        all_signatures, [(0, "rpa_output"), (None, "final_norm")]
+    )
+
+  def test_mixed_completion_zero_signatures_remain_a_candidate_set(self):
+    joins = [
+        {
+            "completion_position": 0,
+            "first_difference": {"layer": 0, "checkpoint": "rpa_output"},
+        },
+        {
+            "completion_position": 0,
+            "first_difference": {"layer": None, "checkpoint": "final_norm"},
+        },
+    ]
+    selected, _ = MODULE._decision_joins(  # pylint: disable=protected-access
+        joins, True
+    )
+    signatures, exact = MODULE._first_difference_signatures(  # pylint: disable=protected-access
+        selected
+    )
+    red_signatures = {
+        signature for signature in signatures
+        if signature[1] != "EXACT_THROUGH_OBSERVER"
+    }
+    self.assertEqual(len(red_signatures), 2)
+    self.assertEqual(exact, 0)
+
   def test_layer_mode_localizes_first_action_and_preserves_ledger_geometry(self):
     result = self._fixture().classify()
     self.assertEqual(result["status"], "PASS")
@@ -368,6 +419,12 @@ class M15WideSeamClassifierTest(unittest.TestCase):
         "layer": 5, "checkpoint": "layer_input"
     })
     self.assertEqual(result["coverage"]["first_action_joinable_red_points"], 1)
+    self.assertEqual(result["decision_scope"], "COMPLETION_POSITION_ZERO")
+    self.assertEqual(result["coverage"]["decision_candidate_anchors"], 1)
+    self.assertEqual(
+        result["all_join_first_difference_signatures"],
+        result["first_difference_signatures"],
+    )
     self.assertEqual(len(result["replay_ledger_receipts"]), 2)
 
   def test_full_mode_localizes_q_post_rope(self):

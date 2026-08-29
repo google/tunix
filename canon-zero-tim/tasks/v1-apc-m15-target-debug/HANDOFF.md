@@ -1,6 +1,172 @@
 # M15 APC target-debug handoff
 
-## START HERE — Attempt 17 preserved a real candidate set; run Phase D3d offline before discussing another TPU pair
+## START HERE — D3e host/exact-image gates passed; publish before the read-only canonical-action reclassification
+
+Do **not** rerun the old D3d command and do **not** launch a TPU pair. The
+verified D3d return is already committed at
+`b74c4ba38f293606000398c29818cea0c8ca5c8b`. It proves that source row 217 /
+completion position 0 uniquely binds to one A request. The remaining
+candidate-set verdict comes from classifier decision accounting across later
+red actions, not from unresolved identity at the first action.
+
+The current D3e implementation is analysis-only. It declares
+completion-position-zero as the decision scope when the existing
+`--require-first-action` contract is active, while preserving every later
+joinable signature and all unobserved continue-decode red points in separate
+fields. It changes no model, cache, attention, RoPE, KV, A/B/C, backward,
+optimizer, or production-profile behavior.
+
+### Current immutable facts
+
+- Attempt-17 runtime source:
+  `16c224aa80eb6b3a544be19f693c0542ab4b0dcb`.
+- D3d analysis source:
+  `ec46033673442949ff956092b8f4ea3074285a13`.
+- Verified D3d evidence commit / current published tip:
+  `b74c4ba38f293606000398c29818cea0c8ca5c8b`.
+- D3d manifest SHA256:
+  `c3dd6ab4e8ee191e1012b011a6e8ff8d845e528aa85f59936c06315b10cbbb31`.
+- APC-off rounds 0/1/2 are sealed exact.
+- APC-on Round 0 is sealed with A-B=207 bytes / 95 elements, B-C=0, and
+  119,150 action tokens. Round 1 failed Stage-10 assembly with exit 2; Round 2
+  is absent. Root `COLLECTED`/`COMPLETE` is absent, so the pair remains
+  analysis-grade partial evidence.
+- D3d uniquely binds source row 217 / completion position 0 / source position
+  1225 to A request `79-b8334848`. Selected proof prefix 1300 reaches beyond
+  required horizon 1227 and explicitly eliminates seven alternatives.
+- The unique first-action candidate is Layer 0
+  `k_post_rope -> rpa_output`. Fingerprint geometry is
+  `[2048,1,15,8]` for the layer record and `[2048,8]` for final norm.
+- Across all seven joinable red points, signatures remain Layer-0
+  `rpa_output` and `final_norm`; 88/95 red points are unobserved because they
+  run under continue-decode. Those facts must remain visible and are not
+  inherited by the first-action boundary.
+- Production M15 APC remains off. Phase E remains closed. No numerical repair
+  exists.
+
+### Why D3e exists
+
+The classifier already selected completion-position-zero anchors for its
+public result, but computed `unique_signature` over every joinable red point.
+That mixed the one uniquely bound first-action candidate with six later red
+points. D3e makes the decision scope explicit and keeps global signatures as
+diagnostics. It remains fail closed for a mixed/exact first-action candidate,
+B numeric variants, same-request conflicts, B-C red, missing first-action
+coverage, source drift, or manifest drift.
+
+The exact phase contract is in
+`phases/phase-d3e-canonical-first-action-scope.md`.
+
+### Current gate and approval order
+
+1. **Host CPU:** PASS. Task-local discovery, focused classifier/reviewer,
+   durability/P38 persistence, flags, syntax, scope, secret, and diff gates
+   are green.
+2. **Pinned exact-image:** PASS on the official aggregate with exit 0 and the
+   immutable image identity recorded below. The terminal includes
+   `apc_m15_carrier=68 m15_d3e=1 m15_durability=1
+   m15_round_provenance=1` and `manifests=3`. This used local Docker/CPU only;
+   it did not use TPU, Kubernetes, or GCS.
+3. **Commit/push:** the user explicitly approved publication after the host
+   and pinned exact-image gates passed. The bucket-capable agent must receive
+   the resulting full D3e commit SHA; it must not use the D3d base SHA.
+4. **Read-only GCS D3e:** after publication, separate GCS-read approval. A
+   bucket-capable agent uses the one command below. It performs no GCS write,
+   Kubernetes query, or TPU launch.
+5. **TPU:** not currently requested or admitted. Consider a fresh matched
+   DP8xTP8 pair only if D3e still preserves the decision-scope candidate set or
+   the returned shape/coordinate ledger fails review. Pinned-image green and
+   GCS-read green do not authorize a launch.
+
+The read-only local image inspection and completed aggregate resolved the exact identity
+`sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`.
+The separately approved aggregate was run directly with no pipe and its raw
+log was preserved at the following path:
+
+```bash
+test ! -e /tmp/m15-d3e-exact-image-b74c4ba3-20260829.log
+bash canon-zero-tim/tests/v1_phase4/run_exact_image.sh \
+  sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a \
+  >/tmp/m15-d3e-exact-image-b74c4ba3-20260829.log 2>&1
+```
+
+Observed result:
+
+```text
+exit=0
+V1_HP_EXACT_IMAGE image_ref=sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a image_id=sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a
+V1_HP_EXACT_IMAGE_PASS ... apc_m15_carrier=68 m15_d3e=1 m15_durability=1 m15_round_provenance=1 ... manifests=3
+raw_log=/tmp/m15-d3e-exact-image-b74c4ba3-20260829.log
+raw_log_sha256=59efa6ddc6e0399050cbbbbc5b463fc6b94486d96834f1e8b50f4fd9d3b22d97
+```
+
+After publication, the next gate is a separate GCS-read approval. Exact-image
+PASS is not target PASS and does not authorize TPU/Kubernetes or Phase E.
+
+### Cold-start contract for the bucket-capable D3e executor
+
+The user must provide the full published D3e analysis SHA. Create a fresh
+clean `local/*` worktree from exactly that SHA; never use or modify
+`/home/yuxuan/code_rl_repro/worktrees/p57_zero_noeval_0828`.
+
+Read, in order:
+
+1. `/home/yuxuan/code_rl_repro/AGENTS.md`;
+2. `canon-zero-tim/AGENTS.md`;
+3. `canon-zero-tim/.claude/skills/manage-canon-zero-tim-branch/SKILL.md`;
+4. `/home/yuxuan/.codex/skills/run-phased-work/SKILL.md`;
+5. `canon-zero-tim/THREADS.md`;
+6. APC/M15 entries in `FLAGS.md` and `EVIDENCE.md`;
+7. this section, then `state.md`, `plan.md`, and
+   `phases/phase-d3e-canonical-first-action-scope.md`;
+8. the current operation in `RUNBOOK.md` and the latest D3e checkpoint in
+   `log.md`.
+
+Run canonical preflight and require `CANON_PREFLIGHT PASS`. Confirm the branch
+is `local/*`, HEAD equals the exact published D3e SHA, and the tree is clean.
+Do not print a remote URL, configured account, project, credential, or bucket
+root.
+
+After explicit GCS-read approval, use a fresh local return directory and run
+directly without a pipe:
+
+```bash
+RETURN=/mnt/disks/tunix-data/m15-d3e-canonical-action-return-<fresh-label>
+test ! -e "$RETURN"
+bash canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/run_m15_attempt17_d3e_canonical_action.sh \
+  "$RETURN" /mnt/disks/tunix-data
+```
+
+Expected terminal tail:
+
+```text
+M15_D3E_CANONICAL_ACTION_REVIEW_PASS status=<status> decision_scope=completion-position-zero ... numerical_repair_authorized=0
+[M15.D3E.OFFLINE] COMPLETE status=<FIRST_RED_LOCALIZED|FIRST_RED_CANDIDATE_SET_PRESERVED> ...
+[M15.D3E.OFFLINE] TARGET_NOT_RUN gcs_read=1 gcs_write=0 kubernetes=0 tpu=0
+```
+
+On success, return only the terminal marker lines, the three JSON files,
+`SHA256SUMS`, and the SHA256 of `SHA256SUMS`. Never return the downloaded tar,
+token/capsule payload, replay ledger, physical page list, remote root, URL, or
+credentials. On any failure, return the exit code, complete sanitized stderr,
+and printed `scratch_preserved` path; do not delete it or retry into the same
+output directory.
+
+Interpretation:
+
+| Result | Required action |
+|---|---|
+| `FIRST_RED_LOCALIZED` with unique binding, `k_post_rope -> rpa_output`, fingerprint geometry, cache-page receipt, request/call/token coordinate, and both source anchors | Return the package and stop. This opens user review of the localization ledger, not Phase E automatically. |
+| `FIRST_RED_CANDIDATE_SET_PRESERVED` | Return the package and stop. Prepare direct producer/request provenance plus original checkpoint-shape metadata, host and exact-image gates, then request approval for a new matched target pair. |
+| Any identity, manifest, B, geometry, source-anchor, or page-receipt failure | Preserve and stop. Do not launch TPU. |
+| Auth/network/tool failure | `INCONCLUSIVE`; preserve and repair infrastructure only. |
+
+The intermediate commit `653a10d5ce23c3c426dfd0f69c480610289fd6fa`
+changes full-training carriers and the aggregate exact-image harness. It does
+not change the immutable Attempt-17 interpretation, but its scope must be
+included in exact-image review before any future render SHA is frozen.
+
+## Superseded — pre-D3d executor instructions retained for provenance
 
 ### Cold-start contract for the bucket-capable executor
 

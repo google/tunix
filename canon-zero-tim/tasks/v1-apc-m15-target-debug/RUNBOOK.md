@@ -5,7 +5,49 @@ commands; it does not edit YAML, numerical code, or evidence. Large payloads
 remain in GCS exactly like the earlier P38/lm-head investigation. Only small
 machine-generated receipts are returned through Git or chat.
 
-## Current operation: Attempt-17 offline binding; CPU/GCS read only
+## Current operation: D3e canonical first-action reclassification; CPU/GCS read only
+
+D3d has completed. Do not run its old entrypoint directly and do not launch a
+JobSet. The verified return uniquely binds source row 217 / completion
+position 0 to one A request, but the old gate mixed that first-action boundary
+with later joinable red actions.
+
+The D3e analysis tree has passed host and the separately approved official
+pinned exact-image aggregate. It must now be committed/pushed only with
+explicit user approval. After the user supplies that full published SHA and
+separately approves GCS read access, a bucket-capable executor uses a clean
+`local/*` worktree and one fresh local output directory:
+
+```bash
+RETURN=/mnt/disks/tunix-data/m15-d3e-canonical-action-return-<fresh-label>
+test ! -e "$RETURN"
+bash canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/run_m15_attempt17_d3e_canonical_action.sh \
+  "$RETURN" /mnt/disks/tunix-data
+```
+
+Run directly without a pipe. The wrapper delegates to the existing immutable
+D36 recovery, then independently verifies the D3e decision scope, A-B/B-C
+boundary, unique future-prefix binding, fingerprint geometry, source anchors,
+and presence of cache-page coordinates. It performs GCS reads only and no GCS
+write, Kubernetes query, or TPU launch.
+
+Required final markers:
+
+```text
+M15_D3E_CANONICAL_ACTION_REVIEW_PASS status=<status> decision_scope=completion-position-zero ... numerical_repair_authorized=0
+[M15.D3E.OFFLINE] COMPLETE status=<FIRST_RED_LOCALIZED|FIRST_RED_CANDIDATE_SET_PRESERVED> ...
+[M15.D3E.OFFLINE] TARGET_NOT_RUN gcs_read=1 gcs_write=0 kubernetes=0 tpu=0
+```
+
+Return only the three JSON files, `SHA256SUMS`, its SHA256, and sanitized
+terminal markers. Preserve any failed scratch directory. A localized return
+is review input only; it does not authorize Phase E. A preserved candidate set
+means direct producer/request provenance and original checkpoint-shape
+metadata must be added before a separately approved fresh matched DP8xTP8
+pair. Full details are at the top of `HANDOFF.md` and in
+`phases/phase-d3e-canonical-first-action-scope.md`.
+
+## Superseded operation: Attempt-17 D3d offline binding; retained for provenance
 
 Attempt 17 (`d36`) already preserved one sealed APC-on treatment round with
 A-B=207 differing bytes / 95 elements, B-C=0, and
