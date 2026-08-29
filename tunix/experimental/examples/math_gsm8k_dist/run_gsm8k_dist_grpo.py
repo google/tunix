@@ -160,6 +160,11 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
   )
   parser.add_argument("--rpc_timeout_s", type=float, default=1800.0)
   parser.add_argument("--stop_workers_on_exit", action="store_true")
+  parser.add_argument(
+      "--debug",
+      action="store_true",
+      help="Enable debug logging and print full sampler responses.",
+  )
   return parser.parse_args(argv)
 
 
@@ -179,7 +184,7 @@ def _extract_answer(text: str) -> str | None:
   return numeric[-1].replace(",", "") if numeric else None
 
 
-def _make_reward_fn(mode: str, num_generations: int):
+def _make_reward_fn(mode: str, num_generations: int, debug: bool = False):
   """Creates the per-trajectory reward function used by StandardRLProgram."""
 
   def reward_fn(item: datatypes.TrajectoryItem) -> float:
@@ -189,6 +194,18 @@ def _make_reward_fn(mode: str, num_generations: int):
 
     text = str(metadata.get("text", ""))
     gold_answer = metadata.get("gold_answer")
+    if debug:
+      prompt_id = metadata.get("prompt_id", getattr(item, "group_id", "unknown"))
+      gold_answer = metadata.get("gold_answer")
+      logging.debug(
+          "[Orchestrator] Sampler response for %s:\n"
+          "[Sampled Response] ---\n%s\n--- [End Response] ---\n"
+          "Gold Answer: %s, Extracted Answer: %s",
+          prompt_id,
+          text,
+          gold_answer,
+          _extract_answer(text),
+      )
     return 1.0 if gold_answer and _extract_answer(text) == gold_answer else 0.0
 
   return reward_fn
@@ -392,11 +409,14 @@ def main(argv: list[str], context: Any = None) -> None:
 
     match service_type:
       case "trainer":
-        trainer_addr_future.set_result(service_address)
+        if not trainer_addr_future.done():
+          trainer_addr_future.set_result(service_address)
       case "rollout":
-        rollout_addr_future.set_result(service_address)
+        if not rollout_addr_future.done():
+          rollout_addr_future.set_result(service_address)
       case "inference":
-        inference_addr_future.set_result(service_address)
+        if not inference_addr_future.done():
+          inference_addr_future.set_result(service_address)
       case _:
         raise RuntimeError(f"unknown service type {service_type}")
 
@@ -457,11 +477,12 @@ def main(argv: list[str], context: Any = None) -> None:
       algo=algo,
       dataset=_iter_prompt_items(args),
       max_steps=args.max_steps,
-      reward_fns=[_make_reward_fn(args.reward_mode, args.num_generations)],
+      reward_fns=[
+          _make_reward_fn(args.reward_mode, args.num_generations, args.debug)
+      ],
       assembler=batch_assembly.GRPOTrainExampleAssembler(
           batch_size=args.train_micro_batch_size,
           max_prompt_length=args.max_prompt_length,
-          max_response_length=args.max_response_length,
           pad_id=pad_id,
       ),
       metrics_logging_options=metrics_logging_options,
@@ -485,6 +506,7 @@ def main(argv: list[str], context: Any = None) -> None:
     )
     cluster.run_program(
         program=program,
+        num_steps=args.max_steps,
         bring_up=False,
     )
   finally:

@@ -69,10 +69,6 @@ def _chat_parser_for(model_id: str, tokenizer):
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
   """Parses command line arguments for the rollout worker process."""
-  from tunix.experimental.weight_sync import (  # pylint: disable=g-import-not-at-top
-      weight_sync,
-  )
-
   parser = argparse.ArgumentParser(description="vLLM rollout worker process")
   parser.add_argument("--port", type=int, default=20001)
   parser.add_argument("--worker_id", type=str, default="vllm-rollout-0")
@@ -95,16 +91,32 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
       "--sampler",
       type=str,
       default=os.getenv("SAMPLER", "inprocess_vllm"),
-      choices=["inprocess_vllm", "vanilla"],
+      choices=["vllm", "inprocess_vllm", "vanilla"],
+      help="Rollout sampler backend: vllm, inprocess_vllm, or vanilla.",
+  )
+  parser.add_argument("--sampler_mesh_tp", type=int, default=4)
+  parser.add_argument(
+      "--maxtext_model_name",
+      type=str,
+      default="",
+      help=(
+          "MaxText model name (e.g. qwen3-0.6b) to load via"
+          " maxtext_vllm_adapter's MaxTextForCausalLM."
+      ),
   )
   parser.add_argument(
-      "--weight_sync_mode",
-      type=weight_sync.WeightSyncMode,
-      default=weight_sync.WeightSyncMode(
-          os.getenv("WEIGHT_SYNC_MODE", "raiden")
+      "--maxtext_attention",
+      type=str,
+      default="",
+      help=(
+          "Override MaxText inference attention kernel (e.g."
+          " vllm_batched_rpa)."
       ),
-      choices=list(weight_sync.WeightSyncMode),
-      help="Weight sync mode (e.g. raiden, fallback).",
+  )
+  parser.add_argument(
+      "--debug",
+      action="store_true",
+      help="Enable debug logging for rollout worker.",
   )
   return parser.parse_args(argv)
 
@@ -133,12 +145,6 @@ def _create_vanilla_worker(args, tokenizer):
   from tunix.experimental.rollout import (  # pylint: disable=g-import-not-at-top
       vanilla_sampler_adapter,
   )
-  from tunix.experimental.weight_sync import (  # pylint: disable=g-import-not-at-top
-      raiden_weight_sync_delegate,
-  )
-  from tunix.experimental.weight_sync import (  # pylint: disable=g-import-not-at-top
-      weight_sync,
-  )
   from tunix.experimental.worker import (  # pylint: disable=g-import-not-at-top
       rollout_worker,
   )
@@ -152,11 +158,6 @@ def _create_vanilla_worker(args, tokenizer):
     model = models.create_model(
         args.model_name, args.model_dir or args.model_id, mesh
     )
-  raiden_delegate = (
-      raiden_weight_sync_delegate.RaidenWeightSyncDelegate()
-      if args.weight_sync_mode == weight_sync.WeightSyncMode.RAIDEN
-      else None
-  )
   config = rollout_worker.RolloutConfig(
       sampler_type="vanilla",
       weight_sync_mode=args.weight_sync_mode,
@@ -174,7 +175,6 @@ def _create_vanilla_worker(args, tokenizer):
       tokenizer=tokenizer,
       cache_config=args.max_prompt_length + args.max_response_length,
       config=config,
-      raiden_sync_delegate=raiden_delegate,
   )
 
   rollout_tokenizer = tokenizer_adapter_lib.TokenizerAdapter(tokenizer)
@@ -190,6 +190,33 @@ def _create_vanilla_worker(args, tokenizer):
 
 
 def _create_vllm_worker(args, tokenizer):
+  """Creates an in-process vLLM sampler rollout worker instance."""
+  from tunix.experimental.worker import (  # pylint: disable=g-import-not-at-top
+      rollout_worker,
+  )
+  from tunix.generate import (  # pylint: disable=g-import-not-at-top
+      tokenizer_adapter as tokenizer_adapter_lib,
+  )
+
+  if args.sampler == "vllm":
+    sampler_adapter, rollout_config = _create_vllm_sampler(args)
+  else:
+    sampler_adapter, rollout_config = _create_inprocess_vllm_sampler(args, tokenizer)
+
+  rollout_tokenizer = tokenizer_adapter_lib.TokenizerAdapter(tokenizer)
+  chat_parser = _chat_parser_for(args.model_id or args.model_name, tokenizer)
+  logging.info("Creating RolloutWorker wrapper...")
+  return rollout_worker.RolloutWorker(
+      worker_id=args.worker_id,
+      config=rollout_config,
+      sampler=sampler_adapter,
+      tokenizer=rollout_tokenizer,
+      chat_parser=chat_parser,
+      max_concurrency=64,
+  )
+
+
+def _create_inprocess_vllm_sampler(args, tokenizer):
   """Creates an in-process vLLM sampler rollout worker instance."""
   vllm_sampler = _import_vllm_sampler()
   import jax  # pylint: disable=g-import-not-at-top
@@ -247,13 +274,85 @@ def _create_vllm_worker(args, tokenizer):
       server_id=args.worker_id,
       tokenizer=tokenizer,
       config=vllm_config,
-      weight_sync_mode=args.weight_sync_mode,
   )
-  rollout_tokenizer = tokenizer_adapter_lib.TokenizerAdapter(tokenizer)
-  chat_parser = _chat_parser_for(args.model_id or args.model_name, tokenizer)
-  logging.info("Creating RolloutWorker wrapper...")
   config = rollout_worker.RolloutConfig(
       sampler_type="inprocess_vllm",
+      max_prompt_length=args.max_prompt_length,
+      max_tokens_to_generate=args.max_response_length,
+      temperature=1.0,
+      top_p=1.0,
+      return_logprobs=True,
+      rollout_vllm_model_version=vllm_model,
+      env_name=gsm8k.GSM8K_ENV_NAME,
+      agent_name=gsm8k.GSM8K_AGENT_NAME,
+  )
+  return sampler_adapter, config
+
+
+def _create_vllm_sampler(args):
+  """Creates a vLLM sampler rollout worker instance."""
+  from tunix.experimental.rollout import vllm_sampler_adapter  # pylint: disable=g-import-not-at-top
+  from tunix.experimental.worker import rollout_worker  # pylint: disable=g-import-not-at-top
+  from vllm.engine.arg_utils import AsyncEngineArgs  # pylint: disable=g-import-not-at-top
+
+  vllm_model = (
+      args.model_dir
+      if (
+          args.model_dir
+          and os.path.exists(args.model_dir)
+          and any(os.scandir(args.model_dir))
+      )
+      else args.model_id
+  )
+  max_model_len = args.max_prompt_length + args.max_response_length
+  logging.info(
+      "Creating vLLM RLVllmSampler config for model=%s tensor_parallel_size=%d "
+      "max_model_len=%d...",
+      vllm_model,
+      args.sampler_mesh_tp,
+      max_model_len,
+  )
+  engine_kwargs = dict(
+      model=vllm_model,
+      tokenizer=args.tokenizer_path or vllm_model,
+      tensor_parallel_size=args.sampler_mesh_tp,
+      max_model_len=max_model_len,
+      trust_remote_code=True,
+      dtype="bfloat16",
+      enable_lora=args.use_lora,
+      max_lora_rank=args.lora_rank if args.use_lora else None,
+      max_loras=1 if args.use_lora else None,
+  )
+  if args.maxtext_model_name:
+    logging.info(
+        "Loading MaxText model %r natively via maxtext_vllm_adapter's"
+        " MaxTextForCausalLM (architectures override).",
+        args.maxtext_model_name,
+    )
+    engine_kwargs["hf_overrides"] = {"architectures": ["MaxTextForCausalLM"]}
+    # MaxText inference config. prefuse_moe_weights is left False so rollout
+    # variable names match unfused trainer parameters during weight sync.
+    maxtext_config_overrides = {
+        "model_name": args.maxtext_model_name,
+        "model_call_mode": "inference",
+        "enable_dp_attention": False,
+        "allow_split_physical_axes": True,
+        "log_config": False,
+        "weight_dtype": "bfloat16",
+    }
+    if args.maxtext_attention:
+      maxtext_config_overrides["attention"] = args.maxtext_attention
+    engine_kwargs["additional_config"] = {
+        "maxtext_config": maxtext_config_overrides
+    }
+  engine_args = AsyncEngineArgs(**engine_kwargs)
+  sampler_adapter = vllm_sampler_adapter.VllmSamplerAdapter(
+      server_id=args.worker_id,
+      engine_args=engine_args,
+      model_name=vllm_model,
+  )
+  config = rollout_worker.RolloutConfig(
+      sampler_type="vllm",
       weight_sync_mode=args.weight_sync_mode,
       max_prompt_length=args.max_prompt_length,
       max_tokens_to_generate=args.max_response_length,
@@ -264,14 +363,7 @@ def _create_vllm_worker(args, tokenizer):
       env_name=gsm8k.GSM8K_ENV_NAME,
       agent_name=gsm8k.GSM8K_AGENT_NAME,
   )
-  return rollout_worker.RolloutWorker(
-      worker_id=args.worker_id,
-      config=config,
-      sampler=sampler_adapter,
-      tokenizer=rollout_tokenizer,
-      chat_parser=chat_parser,
-      max_concurrency=64,
-  )
+  return sampler_adapter, config
 
 
 def main(argv: list[str], context: Any = None) -> None:
@@ -291,12 +383,14 @@ def main(argv: list[str], context: Any = None) -> None:
   args = _parse_args(argv)
   logging.info("Parsed args: %s", args)
 
-  if context:
+  if context and args.sampler != "vllm":
     context.jax.initialize()
   os.environ.setdefault("VLLM_ALLOW_LONG_MAX_MODEL_LEN", "1")
   os.environ.setdefault("VLLM_TPU_RPA_VERSION", "2")
   os.environ.setdefault("DISABLE_MOSAIC_ATTN", "1")
   os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+  if args.maxtext_model_name:
+    os.environ.setdefault("NEW_MODEL_DESIGN", "1")
   if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
   logging.info("Repo root inserted into sys.path: %s", REPO_ROOT)
@@ -326,6 +420,17 @@ def main(argv: list[str], context: Any = None) -> None:
     server = remote_execution.GrpcRemoteExecutionServer(worker_service)
     await server.start_serving_async(args.port)
     logging.info("Serving vLLM rollout worker on port %d.", args.port)
+
+    if args.sampler != "vanilla":
+      # Eagerly start the sampler engine so all pods in a multihost rollout
+      # jobset join the JAX distributed group at startup rather than lazily.
+      logging.info("Eagerly starting sampler engine...")
+      await worker_service.sampler.start()
+      logging.info("Sampler engine started.")
+      if hasattr(worker_service.sampler, "bind_weight_sync"):
+        logging.info("Eagerly warming up Raiden weight sync...")
+        await worker_service.sampler.bind_weight_sync()
+        logging.info("Raiden weight sync warmed up.")
 
     context.ipc.discovery.register(
         metadata=pickle.dumps({
