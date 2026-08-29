@@ -59,7 +59,8 @@ export TOP_P=${TOP_P:-0.95}
 # peft runs tunix's PeftTrainer; maxtext runs MaxText's MaxTextTrainingEngine.
 export TRAINER_BACKEND=${TRAINER_BACKEND:-maxtext}
 export MAXTEXT_CKPT=${MAXTEXT_CKPT:-gs://cloud-tpu-multipod-dev-bucket-europe-west4/users/atwigg/checkpoints/qwen3_1.7b_fixed/0/items}
-export ROLLOUT_MAXTEXT_CKPT=${ROLLOUT_MAXTEXT_CKPT:-gs://cloud-tpu-multipod-dev-bucket-europe-west4/users/atwigg/checkpoints/qwen3_1.7b_unrolled/0/items}
+export ROLLOUT_MAXTEXT_CKPT=${ROLLOUT_MAXTEXT_CKPT:-}
+export ROLLOUT_MAXTEXT_MODEL_NAME=${ROLLOUT_MAXTEXT_MODEL_NAME:-}
 export MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-$((BATCH_SIZE * NUM_GENERATIONS))}
 export EVAL_EVERY_N_STEPS=${EVAL_EVERY_N_STEPS:-1000000}
 export LORA_RANK=${LORA_RANK:-16}
@@ -233,7 +234,7 @@ start_rollout() {
           --lora_rank=${LORA_RANK} \
           --lora_alpha=${LORA_ALPHA} \
           --tensor_parallel_size=${ROLLOUT_TENSOR_PARALLEL_SIZE} \
-          --maxtext_model_name=${MAXTEXT_MODEL_NAME} \
+          ${ROLLOUT_MAXTEXT_MODEL_NAME:+--maxtext_model_name=${ROLLOUT_MAXTEXT_MODEL_NAME}} \
           --temperature=${TEMPERATURE} \
           --top_p=${TOP_P} \
           ${ROLLOUT_MAXTEXT_ATTENTION:+--maxtext_attention=${ROLLOUT_MAXTEXT_ATTENTION}} \
