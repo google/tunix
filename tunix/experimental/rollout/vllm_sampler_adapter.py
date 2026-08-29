@@ -62,6 +62,7 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
 
     self._tracker = weight_sync_coordinator.WorkerRoundTracker()
     self._sync_lock = asyncio.Lock()
+    self._sample_lock = asyncio.Lock()
     self._policy_version = 0
     self._kv_cache_freed = False
 
@@ -149,7 +150,16 @@ class VllmSamplerAdapter(Sampler, weight_sync.WeightSyncDestination):
       )
 
     is_sequence = isinstance(sampling_requests, (list, tuple))
-    raw_responses = await self.sampler.sample(sampling_requests, **kwargs)
+    req_list = list(sampling_requests) if is_sequence else [sampling_requests]
+
+    raw_responses = []
+    async with self._sample_lock:
+      for req in req_list:
+        res = await self.sampler.sample([req], **kwargs)
+        if isinstance(res, (list, tuple)):
+          raw_responses.extend(res)
+        else:
+          raw_responses.append(res)
 
     if isinstance(raw_responses, (list, tuple)):
       formatted = []

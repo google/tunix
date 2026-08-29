@@ -247,10 +247,20 @@ class RolloutWorker(abstract_worker.Worker):
           f"Sampler returned {len(responses)} responses for"
           f" {len(prompt_list)} prompts."
       )
-    prompt_token_ids = [
-        np.asarray(response.prompt_token_ids, dtype=np.int32).reshape(-1)
-        for response in responses
-    ]
+    prompt_token_ids = []
+    for i, response in enumerate(responses):
+      ids = getattr(response, "prompt_token_ids", None)
+      if ids is not None:
+        prompt_token_ids.append(np.asarray(ids, dtype=np.int32).reshape(-1))
+      elif (
+          self.manager.tokenizer is not None
+          and hasattr(self.manager.tokenizer, "encode")
+      ):
+        prompt_token_ids.append(
+            np.asarray(self.manager.tokenizer.encode(prompt_list[i]), dtype=np.int32).reshape(-1)
+        )
+      else:
+        prompt_token_ids.append(np.zeros(0, dtype=np.int32))
 
     logprobs: list[np.ndarray] | None = None
     if return_logprobs:

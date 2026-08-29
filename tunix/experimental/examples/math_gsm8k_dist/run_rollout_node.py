@@ -221,6 +221,7 @@ def _create_vllm_worker(args, tokenizer):
         enable_lora=args.use_lora,
         max_lora_rank=args.lora_rank if args.use_lora else None,
         max_loras=1 if args.use_lora else None,
+        max_num_seqs=1,
     )
     if args.maxtext_model_name:
       logging.info(

@@ -29,7 +29,7 @@ export MODEL_ID=${MODEL_ID:-Qwen/Qwen3-1.7B}
 # Qwen3-0.6B snapshot sitting here, vLLM's config (num_key_value_heads=8)
 # and MaxText's own model construction (num_key_value_heads=4, correctly
 # built from MAXTEXT_MODEL_NAME) silently disagreed.
-export MODEL_DIR=${MODEL_DIR:-artifacts/qwen3_dist_gsm8k/models/${MODEL_NAME}}
+export MODEL_DIR=${MODEL_DIR:-/app/artifacts/qwen3_dist_gsm8k/models}
 # Defaults to MODEL_ID (an HF hub repo id), not MODEL_DIR: MODEL_DIR is a
 # per-model-name local directory that starts out empty for any model that
 # hasn't been downloaded there before by *something* -- nothing pre-populates
@@ -58,7 +58,7 @@ export TOP_P=${TOP_P:-0.95}
 
 # peft runs tunix's PeftTrainer; maxtext runs MaxText's MaxTextTrainingEngine.
 export TRAINER_BACKEND=${TRAINER_BACKEND:-maxtext}
-export MAXTEXT_CKPT=${MAXTEXT_CKPT:-gs://cloud-tpu-multipod-dev-bucket-europe-west4/users/atwigg/checkpoints/qwen3_1.7b/0/items}
+export MAXTEXT_CKPT=${MAXTEXT_CKPT:-gs://cloud-tpu-multipod-dev-bucket-europe-west4/users/atwigg/checkpoints/qwen3_1.7b_fixed/0/items}
 export MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-$((BATCH_SIZE * NUM_GENERATIONS))}
 export EVAL_EVERY_N_STEPS=${EVAL_EVERY_N_STEPS:-1000000}
 export LORA_RANK=${LORA_RANK:-16}
