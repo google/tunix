@@ -285,3 +285,72 @@ class ExplicitSplashKernelShardingTest(absltest.TestCase):
 
 if __name__ == '__main__':
   absltest.main()
+
+
+class EinsumOutShardingTest(absltest.TestCase):
+  """A contraction over a doubly-sharded axis must name its output sharding.
+
+  The output projection contracts over the head axis, which both the
+  activation and the weight shard over the model axis, so the product can be
+  reduced into either a replicated or a scattered layout; sharding-in-types
+  refuses to choose and the recipe has to say which one it means.
+  """
+
+  def _mesh(self):
+    import jax  # pylint: disable=g-import-not-at-top
+    import jax.sharding as shd  # pylint: disable=g-import-not-at-top
+
+    devices = jax.devices()
+    if len(devices) < 8:
+      self.skipTest(
+          'needs >= 8 devices; run with '
+          'XLA_FLAGS=--xla_force_host_platform_device_count=8'
+      )
+    return shd.Mesh(
+        np.asarray(devices[:8]).reshape(2, 4),
+        ('data', 'model'),
+        axis_types=(shd.AxisType.Explicit,) * 2,
+    )
+
+  def test_projection_sites_all_carry_an_output_spec(self):
+    """q, k, v and o must each name one; lm_head deliberately does not."""
+    import inspect  # pylint: disable=g-import-not-at-top
+
+    source = inspect.getsource(model)
+    self.assertEqual(source.count('out_spec=self.shd_config.act_btnh'), 3)
+    self.assertEqual(source.count('out_spec=self.shd_config.act_btd'), 1)
+
+  def test_out_sharding_resolves_the_output_projection(self):
+    import jax  # pylint: disable=g-import-not-at-top
+    import jax.numpy as jnp  # pylint: disable=g-import-not-at-top
+    import jax.sharding as shd  # pylint: disable=g-import-not-at-top
+
+    mesh = self._mesh()
+    jax.sharding.set_mesh(mesh)
+    try:
+      b, t, n, h, d = 2, 3, 4, 2, 8
+      x = jax.device_put(
+          jnp.arange(b * t * n * h, dtype=jnp.float32).reshape(b, t, n, h),
+          shd.NamedSharding(
+              mesh, shd.PartitionSpec('data', None, 'model', None)
+          ),
+      )
+      w = jax.device_put(
+          jnp.arange(n * h * d, dtype=jnp.float32).reshape(n, h, d),
+          shd.NamedSharding(mesh, shd.PartitionSpec('model', None, None)),
+      )
+      with self.assertRaises(Exception):
+        jnp.einsum('BTNH,NHD->BTD', x, w)
+      out_sharding = shd.NamedSharding(
+          mesh, shd.PartitionSpec('data', None, 'model')
+      )
+      got = jnp.einsum('BTNH,NHD->BTD', x, w, out_sharding=out_sharding)
+      self.assertEqual(got.sharding.spec, out_sharding.spec)
+      np.testing.assert_allclose(
+          np.asarray(got),
+          np.einsum('BTNH,NHD->BTD', np.asarray(x), np.asarray(w)),
+          rtol=0,
+          atol=0,
+      )
+    finally:
+      jax.sharding.set_mesh(None)

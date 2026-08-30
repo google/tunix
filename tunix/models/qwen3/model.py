@@ -399,10 +399,16 @@ class Einsum(nnx.Module):
       sharding: Tuple[str | None, ...],
       dtype: jnp.dtype,
       param_dtype: jnp.dtype,
+      out_spec: Tuple[str | None, ...] | None = None,
   ):
     self.einsum_str = einsum_str
     self.shape = shape
     self.dtype = dtype
+    # Activation sharding the product must land in.  Required whenever the
+    # contraction runs over an axis both operands shard, because then the
+    # result can be reduced either into a replicated or into a scattered
+    # layout and sharding-in-types refuses to choose for us.
+    self.out_spec = out_spec
     self.w = nnx.Param(
         nnx.initializers.glorot_uniform()(
             rngs.params(), shape, dtype=param_dtype
@@ -414,7 +420,14 @@ class Einsum(nnx.Module):
   def __call__(self, x: jaxtyping.ArrayLike) -> jaxtyping.Array:
     x = jnp.astype(x, self.dtype)
     w = jnp.astype(self.w.value, self.dtype)
-    return jnp.einsum(self.einsum_str, x, w)
+    out_sharding = (
+        None
+        if self.out_spec is None
+        else _activation_out_sharding(self.out_spec)
+    )
+    if out_sharding is None:
+      return jnp.einsum(self.einsum_str, x, w)
+    return jnp.einsum(self.einsum_str, x, w, out_sharding=out_sharding)
 
 
 class Embedder(nnx.Module):
@@ -535,6 +548,7 @@ class Attention(nnx.Module):
         sharding=self.shd_config.q_weight_dnh,
         dtype=config.dtype,
         param_dtype=config.param_dtype,
+        out_spec=self.shd_config.act_btnh,
     )
     self.k_proj = Einsum(
         einsum_str='BSD,DKH->BSKH',
@@ -543,6 +557,7 @@ class Attention(nnx.Module):
         sharding=self.shd_config.kv_weight_dnh,
         dtype=config.dtype,
         param_dtype=config.param_dtype,
+        out_spec=self.shd_config.act_btnh,
     )
     self.v_proj = Einsum(
         einsum_str='BSD,DKH->BSKH',
@@ -551,6 +566,7 @@ class Attention(nnx.Module):
         sharding=self.shd_config.kv_weight_dnh,
         dtype=config.dtype,
         param_dtype=config.param_dtype,
+        out_spec=self.shd_config.act_btnh,
     )
     self.o_proj = Einsum(
         einsum_str='BTNH,NHD->BTD',
@@ -559,6 +575,7 @@ class Attention(nnx.Module):
         sharding=self.shd_config.o_weight_nhd,
         dtype=config.dtype,
         param_dtype=config.param_dtype,
+        out_spec=self.shd_config.act_btd,
     )
     self.q_norm = RMSNorm(
         config.head_dim,
