@@ -1,0 +1,31 @@
+{
+  "schema": "canon.multiturn-tito-cross-workload.m15-onehost-summary.v1",
+  "label": "tito-exact-r8-0830",
+  "status": "EXACT_TOKEN_CONTINUITY_ALIGNMENT_PASS",
+  "scope": "Qwen3-8B M15/main DP1xTP4 APC-off exact TiTO",
+  "source_commit": "0b90ff75ef7581c4230c0253df67779d06066792",
+  "source_diff_sha256": "e788a1c8571ef335b8851c45d310b96a855d76249d42bf7fc2ddb38450a75a64",
+  "image_id": "sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a",
+  "external_root": "/mnt/disks/tunix-data/logp_probe_1host/m15_tito_exact_tito-exact-r8-0830",
+  "elapsed_seconds": 499,
+  "rounds": 3,
+  "token_receipts": 17,
+  "equal_receipts": 17,
+  "different_receipts": 0,
+  "b_full_reset_receipts": 3,
+  "a_b_differing_bytes": [0, 0, 0],
+  "b_c_differing_bytes": [0, 0, 0],
+  "action_tokens": [515, 766, 748],
+  "backward": 0,
+  "optimizer_commits": 0,
+  "controlled_exit": 42,
+  "manifest_verified": true,
+  "sha256": {
+    "SHA256SUMS": "6033f868659bcfa16fcb882cf764ff0fd2c6f4b000996978e35aa93c19e978f4",
+    "classification.json": "9fda62f3e286ba7c3b087141860817b3660ffc90614557a2186896433c1b0b20",
+    "RUN_CONTRACT.json": "920094ec1175840495c23f56e08444619619be1ba78a3359dc8754a258663055",
+    "raw.log": "c3f026734255dc06a4cfca2d82f0769e62ffdafeca2926b68331c45c93d4dd64",
+    "pre_alignment.jsonl": "0870b5079a0443730a80f14f389e1608c5bd991cd71bf28bc4024f05fe0e6239"
+  },
+  "claim": "one-host exact-token transport and strict alignment only; DP8xTP8 and production TiTO admission unverified"
+}

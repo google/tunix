@@ -38,14 +38,13 @@ The wrapper refuses a dirty tree, SHA mismatch, reused output root, or
 duplicate IDs. It hashes exactly two immutable manifests, preserves the P57
 64-chip autoscale/exclusive-topology carrier, emits
 `V1_P67_FROZENLAKE_WAVE_READY ... manifests=2 ... launch=not-executed`, and
-only prints two unpiped `kubectl apply` commands. It never executes them. For
-the current curve-first wave, review both but apply only the M15 command; P45
-is not part of the launch set.
+only prints two unpiped `kubectl apply` commands. It never executes them.
+Review both; each apply still requires explicit launch approval.
 
 After reviewing `manifest-index.json`, confirm both YAMLs and their profile
 resolution contain the same published source SHA, `CANON_P59_CHECKED_VMA=1`,
-`CANON_P67_P66_VMA_P59_ONLY=1`, `CANON_V1_HP_FIRST_UPDATE_GATE=1`, strict
-alignment, APC-off, full/300 updates, evaluation-off, checkpoint mode
+`CANON_P67_P66_VMA_P59_ONLY=1`, `CANON_V1_HP_FIRST_UPDATE_GATE=1`, the exact
+narrow FrozenLake A-B warning policy, APC-off, full/300 updates, evaluation-off, checkpoint mode
 `disabled`, empty checkpoint residual fields, and the correct P45 versus
 M15/main identity. Both must also resolve the reviewed system tuple:
 
@@ -63,27 +62,37 @@ frozenlake-p45: CANON_M15_TOKEN_CONTINUITY absent
 frozenlake-m15: CANON_M15_TOKEN_CONTINUITY absent
 ```
 
+This is the default. TiTO is only an optional M15 full target: append
+`--m15-tito-exact` as the wrapper's sixth argument to set
+`CANON_M15_TOKEN_CONTINUITY=exact` in M15 alone. Never use that option for the
+current P45 restart. P45 must remain selector-absent in every render.
+
 Reload both generated `env.sh` files and recheck absence. Empty and `0` values
-still count as presence. Reject `verify`, `exact`, or any other selector value
-in either production recipe or a neighboring workload. Before accepting M15
-postflight, require zero `[CANON_M15_TOKEN_CONTINUITY]` receipts. Any receipt
-means the deferred experimental input path leaked into this curve carrier.
+still count as presence. Reject `verify` or any unknown value everywhere, and
+reject `exact` outside explicitly selected M15 full. For default M15
+postflight require zero token receipts. For explicit exact M15 require all
+receipts to be `TOKEN_STREAM_EQUAL` plus exactly one env admission receipt;
+DP8xTP8 exact remains a target gate rather than inherited certification.
 
 `CANON_DP_COLLECTIVE_REDUCE` must be absent. The command must contain
 `--eval_every_n_steps=0` and no `--num_test_batches`. Check no conflicting
-workload is live. Apply only the M15 YAML in this wave; never append a pipe to
-the launch command.
+workload is live. Apply only the separately approved YAML or YAMLs; never
+append a pipe to a launch command.
 
-Watch the M15 raw log immediately. Update 0 must pass its registered
-prealignment policy, one checked-VMA/P67 resolved-env contract, one first-update
+Watch both P45 and M15 raw logs immediately. Update 0 must pass the recipe's
+registered prealignment policy, one checked-VMA/P67 resolved-env contract, one first-update
 precommit receipt (`microsteps=32`, denominator 32, finite, nonzero,
 `stable_norm <= 1e6`), and one valid `0 -> 1` AdamW commit receipt before
-weight sync. Any fatal alignment mismatch, non-finite gradient,
-missing/duplicate receipt, or invalid optimizer transaction stops M15.
+weight sync. Any B-C/T-current/r mismatch, non-finite value or gradient,
+missing/duplicate receipt, invalid optimizer transaction, or other fatal
+alignment result stops that run. A finite A-B-only red must emit
+`PASS_WITH_ALIGNMENT_WARNINGS` and remain counted; it is not a strict pass.
 Preserve all evidence.
 
-Do not call the M15 run complete until the in-container full classifier passes
-all 300 updates, all strict alignment records, both evaluation/checkpoint
+Do not call either run complete until the in-container full classifier passes
+all 300 updates, accepts only `PASS` or the registered
+`PASS_WITH_ALIGNMENT_WARNINGS`, observes zero `FAIL`, records the complete A-B
+warning dose, and verifies both evaluation/checkpoint
 disabled runtime markers, P59/fixed-head/reduction evidence, JAX-cache
 receipts, XProf, Perfetto, and artifact hashes. These fast runs intentionally
 have no held-out evaluation JSON, no resume point, and no final checkpoint;

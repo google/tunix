@@ -1,0 +1,19 @@
+{
+  "schema": "canon.multiturn-tito-external-exact-control.v1",
+  "status": "ANALYSIS_GRADE_CONTROL",
+  "source_commit": "cd32949e9b63b927e99f3cfba724f4f5f6d03cda",
+  "source_diff_sha256": "bf2b6dd9fa5c0b8147b701353ad6f381b742caf70edd5da30f630c7875ee5db0",
+  "image_id": "sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a",
+  "evidence_root": "/mnt/disks/tunix-data/logp_probe_1host/m15_e0v_tito_e0w4_pair",
+  "pair_status": "ONEHOST_PAIR_EXACT",
+  "topology": "DP1xTP4",
+  "arms": "APC off/on; exact TiTO in both",
+  "rounds_per_arm": 3,
+  "exact_equal_receipts_per_arm": 17,
+  "a_b_differing_bytes": [0, 0, 0, 0, 0, 0],
+  "b_c_differing_bytes": [0, 0, 0, 0, 0, 0],
+  "backward": 0,
+  "optimizer_commits": 0,
+  "target_executed": false,
+  "claim_ceiling": "different source diff and exact input override; does not classify legacy retokenization or DP8xTP8"
+}

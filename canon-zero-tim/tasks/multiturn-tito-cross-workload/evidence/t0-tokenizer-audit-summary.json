@@ -1,0 +1,27 @@
+{
+  "schema": "canon.multiturn-tito-tokenizer-audit-summary.v1",
+  "source_commit": "0b90ff75ef7581c4230c0253df67779d06066792",
+  "oracle_sha256": "5352b8420a3d9f6d503bae9f38fd73da92659af7b71de193c9780aa168e21b45",
+  "focused_unittest": {
+    "passed": 3,
+    "failed": 0
+  },
+  "deepswe": {
+    "scope": "real persisted Qwen3-4B-Instruct-2507 trajectory",
+    "trajectory_sha256": "30e44424f774f684e0d1cabdf0caf536a62da69adb54bdbdc02051c7f709f118",
+    "audit_sha256": "9b5235b80b57a6627387cc9848e2dcf819ebd76122e5998dcf40e22f54f98f97",
+    "later_turns": 11,
+    "different_turns": 10,
+    "first_red_turn": 2,
+    "first_mismatch_token": 2242,
+    "poison_negative": "PASS"
+  },
+  "frozenlake": {
+    "scope": "synthetic Qwen3-8B thinking-off user-role tokenizer fixture",
+    "audit_sha256": "d8ed005febfb33d392d65766c0965fc9593316135456eb8305c5e67a942d5b51",
+    "later_turns": 2,
+    "different_turns": 0,
+    "poison_negative": "PASS",
+    "claim_ceiling": "parser mechanism only; real M15 observer not run"
+  }
+}

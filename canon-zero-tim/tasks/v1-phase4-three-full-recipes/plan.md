@@ -3,8 +3,8 @@
 ## Outcome
 
 Prepare the optimized P45 and M15/main 64-chip full trains as direct
-300-update efficiency-first concept runs. P45 remains strict. M15 temporarily
-uses its registered finite A-B warning lane and is alignment-degraded, while
+300-update efficiency-first concept runs. P45 and M15 temporarily use the
+registered finite A-B warning lane and are alignment-degraded, while
 retaining B-C, nonfinite, backward-health, optimizer,
 timing, W&B, JAX-cache, XProf, and Perfetto gates. Both deliberately omit
 in-process held-out evaluation and all checkpoint I/O. The next M15 curve uses
@@ -30,12 +30,13 @@ debug carrier.
 | V1.P4.13 | Repair the missing FrozenLake effective-learning-rate observation exposed by P45 Wave 02 | keep scalar AdamW unchanged; register the same constant only for receipts; pin entrypoint structure; host and P45 immutable-image gates; then fresh target weight sync | source published by current CL; P57 147/147, Phase4 89/89, P45 exact image PASS; post-fix target not run |
 | V1.P4.14 | Admit exact no-eval/no-checkpoint P45+M15 Zero fast concept runs after f45w09 | both manifests fail closed on eval disabled, checkpoint mode disabled, and empty residual fields; host plus immutable-image gates; then two fresh 300-update targets | active; runtime `a8449b3d` published and exactly read back, host/exact-image PASS; TPU target not run |
 | V1.P4.15 | Make exact TITO the signed M15 full default while retaining the finite A-B concept lane | exact-M15 selector in YAML/profile/runtime; prompt-token equality hard gate; neighboring negatives; host/pinned-image; one-host mechanism; then DP8xTP8 full target | superseded before target; runtime `3fc7ef8b` and historical construction evidence preserved, one-host/target never run |
-| V1.P4.16 | Restore the M15 full default to rendered-text input and defer TITO to a dedicated debug carrier | raw/resolved P45 and M15 selectors absent; no token-continuity receipt; leakage negatives; full host/immutable-image; then non-TITO DP8xTP8 curve | active; focused 43/43, P57 181/181, V1 92/92, flags 409/409 PASS; image, publication, and target pending |
+| V1.P4.16 | Restore the M15 full default to rendered-text input and defer TITO to a dedicated debug carrier | raw/resolved P45 and M15 selectors absent; no token-continuity receipt; leakage negatives; full host/immutable-image; then non-TITO DP8xTP8 curve | host and immutable-image PASS; publication and target pending; dedicated one-host exact TiTO debug separately passes but does not alter production default |
+| V1.P4.17 | Extend the narrow finite decode/prefill warning policy to optimized P45 Zero full | exact P45 identity; finite A-B and derived warnings only; B-C/nonfinite/backward/optimizer fatal; renderer/postflight/host/exact-image; then full curve | host P57 183/183, V1 92/92, flags 409/409, full immutable-image PASS; publication and target pending |
 
 ## Decisions
 
 - Decision: P59 is accepted under the user's ordinary-JAX FP64 gradient-correctness policy; serial/update trajectory differences remain disclosed.
-- Decision: attempt-2 target evidence VETOES APC for M15/main; user elected the same APC-off production policy for P45. All three full recipes are APC-off. B rescore always resets the cache and the strict gate is unchanged.
+- Decision: attempt-2 target evidence VETOES APC for M15/main; user elected the same APC-off production policy for P45. All three full recipes are APC-off. B rescore always resets the cache. P45/M15 only demote finite A-B and direct derived items; B-C and all independent hard gates remain unchanged.
 - Decision: all three manifests retain the P33 JAX persistent-cache bucket. Exact restore/save receipts are mandatory carrier evidence; miss/error remains a performance limitation, not a numerical verdict.
 - Decision: the profiled update is excluded from steady-state performance means.
 - Historical decision (superseded by P4.14): launch all three full-horizon jobs in one wave with no short canary and no cross-recipe first-commit dependency. The current launch set is the two optimized FrozenLake fast runs only.
@@ -121,3 +122,9 @@ debug carrier.
   still count as presence, and any token-continuity receipt is leakage. Keep
   the implementation and all historical evidence for a later, separately
   admitted debug carrier; do not infer a TITO verdict from the curve run.
+- Decision (2026-08-30 V1.P4.18): retain non-TiTO as the P67 full-render
+  default while exposing exact TiTO as one explicit `--m15-tito-exact`
+  option for M15/main only. P45 always rejects the selector. One-host r8
+  certifies token transport and strict alignment but does not certify the
+  first DP8xTP8 exact target. The currently authorized P45 restart omits the
+  option.

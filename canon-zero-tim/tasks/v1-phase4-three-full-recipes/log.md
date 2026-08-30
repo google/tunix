@@ -1144,3 +1144,51 @@
   render/launch, the next apply set contains only the non-TITO M15 full
   300-update curve. The paired renderer may emit P45 for contract comparison,
   but P45 must not be applied in this wave.
+
+## 2026-08-30T19:35:19Z — V1.P4.17 P45 finite A-B warning admission PASS
+
+- User decision: prioritize the P45 optimized curve and give its exact
+  production identity the same narrow finite decode-versus-prefill warning
+  shape as M15. This supersedes the preceding M15-only launch-scope note.
+- Scope: only v1-hp Zero P45 with empty candidate/split, DP8xTP8, 300 updates,
+  no evaluation, no checkpoint. Native, IS, eval, resident, P64, diagnostics,
+  partial identities, and wrong topology/profile/horizon remain negative.
+- Policy: finite `S_decode_vs_S_prefill` and direct w/wr/clip/TIS
+  consequences may produce `PASS_WITH_ALIGNMENT_WARNINGS`.
+  `S_prefill_vs_T_old`, `T_old_vs_T_current`, r, nonfinite values, gradients,
+  backward health, replica equality, and optimizer transactions remain fatal.
+- Validation: P57 183/183, V1 Phase4 92/92, flag audit 409/409, TiTO task 8/8
+  in the pinned environment, rollout canonical 31/31 in the pinned
+  environment, shell syntax, and diff hygiene pass. The complete immutable-
+  image gate against
+  `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`
+  exited zero with `V1_HP_EXACT_IMAGE_PASS ...
+  frozenlake_ab_warning=2 ... m15_tito_default=off ... manifests=3`.
+- Evidence boundary: the successful exact-image console transcript was not
+  durably redirected, so it is an admission receipt without a raw-log SHA.
+  No DP8xTP8 target, render for launch, Kubernetes mutation, optimizer update,
+  commit, or push occurred.
+- Claim: `HOST PASS / IMMUTABLE-IMAGE PASS / PUBLICATION PENDING / TARGET NOT
+  RUN / convergence-only / alignment-degraded`.
+
+## 2026-08-30T19:48:18Z — V1.P4.18 M15 exact TiTO becomes optional, default off
+
+- User decision: retain exact TiTO as one explicit M15 full-training option,
+  keep the no-option default non-TiTO, and restart only P45 full after
+  publication. The earlier failed P45 evidence remains immutable.
+- Delivery: P67 accepts optional `--m15-tito-exact`, writes `exact` into M15
+  alone, and records the choice in its manifest index/readiness receipt. P45
+  rejects the selector in every mode. The default invocation writes neither
+  selector and must report `m15_tito=off`.
+- Classification: off mode requires zero token receipts; explicit exact M15
+  requires every prompt receipt to be exact/equal and exactly one env
+  admission receipt. Missing, unequal, verify, and neighboring receipts fail.
+- Evidence boundary: one-host r8 supports the option's transport mechanism but
+  does not certify DP8xTP8. Modified host/image gates, publication readback,
+  and the fresh P45 target are still pending. No M15 launch is authorized by
+  this entry.
+- Admission result: P57 183/183, V1 93/93, flags 409/409, focused 35/35, syntax
+  and diff hygiene pass. The complete pinned-image run exited zero with
+  `V1_HP_EXACT_IMAGE_PASS ... m15_tito_option=exact m15_tito_default=off ...
+  manifests=3`. Its console transcript was not durably redirected. Publication
+  readback and the P45 target remain pending.

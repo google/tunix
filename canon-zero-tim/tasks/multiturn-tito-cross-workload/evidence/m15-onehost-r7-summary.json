@@ -1,0 +1,31 @@
+{
+  "schema": "canon.multiturn-tito-cross-workload.m15-onehost-summary.v1",
+  "label": "tito-vfy-r7-0830",
+  "status": "LEGACY_TOKEN_EQUAL",
+  "scope": "Qwen3-8B M15/main DP1xTP4 APC-off rendered-text observer",
+  "source_commit": "0b90ff75ef7581c4230c0253df67779d06066792",
+  "source_diff_sha256": "01f7b7338cb62113df7cafa5fbc61fd0d6061bfa2b3e001e441665b72e4b41af",
+  "image_id": "sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a",
+  "external_root": "/mnt/disks/tunix-data/logp_probe_1host/m15_tito_verify_tito-vfy-r7-0830",
+  "elapsed_seconds": 489,
+  "rounds": 3,
+  "token_receipts": 17,
+  "equal_receipts": 17,
+  "different_receipts": 0,
+  "b_full_reset_receipts": 3,
+  "a_b_differing_bytes": [0, 0, 0],
+  "b_c_differing_bytes": [0, 0, 0],
+  "action_tokens": [515, 766, 748],
+  "backward": 0,
+  "optimizer_commits": 0,
+  "controlled_exit": 42,
+  "manifest_verified": true,
+  "sha256": {
+    "SHA256SUMS": "67fa6facb3d14981cbb4c00cbcfa824b91d6ebe7cf7d71a8064200a69d932a17",
+    "classification.json": "99c3ed3fc97afb46c9cd95962e33c731b949198cfcfc5526becb3df67e467f86",
+    "RUN_CONTRACT.json": "616fea011cd860ca3a07e97f582b0ffbc3ebb84e2a94750af2f5ff7973830dfd",
+    "raw.log": "85884d53a0d3bac9e0da3db4c2878ab977095d5e4fa35b0136f7ea34b7b41921",
+    "pre_alignment.jsonl": "a40573fdb00e70e9b5cbfd8eff9d092b36aab0b33cb188a5b746979d4aa4262f"
+  },
+  "claim": "one-host transport observer only; DP8xTP8 and production TiTO admission unverified and not requested"
+}

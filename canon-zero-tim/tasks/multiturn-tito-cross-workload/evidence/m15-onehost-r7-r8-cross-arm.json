@@ -1,0 +1,50 @@
+{
+  "exact_root": "/mnt/disks/tunix-data/logp_probe_1host/m15_tito_exact_tito-exact-r8-0830",
+  "exact_rounds": [
+    {
+      "N_action": 515,
+      "action_mask": "15da66cf7c0523f31474840158daab3c1cf8f7fe0a66e55e515d32e132967287",
+      "diagnostic_round": 0,
+      "tokens": "59304c9006b013e78f8434c0b6cf3fac23f7269cffe58ea37b782b96e811e5a9"
+    },
+    {
+      "N_action": 766,
+      "action_mask": "616a5865c0fd557cf4504d7499a1c7a036f781787f1f660f3dd0f3f6d91aefe2",
+      "diagnostic_round": 1,
+      "tokens": "0b53078646b9e5fff04395a090372f06bc96f4011d735a2cd0f34e48f70fe6f7"
+    },
+    {
+      "N_action": 748,
+      "action_mask": "383f582b890ad7959b0ba51be09a7c95267a6ac90fa067916e61b81305cbdad4",
+      "diagnostic_round": 2,
+      "tokens": "962ebfde1faac97be42e6a5ed1534c09b0153845c40fb5a2a532b1375b895841"
+    }
+  ],
+  "first_prompt_difference": null,
+  "ordered_prompt_receipts_equal": true,
+  "round_receipts_equal": true,
+  "schema": "canon.m15-onehost-verify-exact-comparison.v1",
+  "status": "MATCH",
+  "token_receipts": 17,
+  "verify_root": "/mnt/disks/tunix-data/logp_probe_1host/m15_tito_verify_tito-vfy-r7-0830",
+  "verify_rounds": [
+    {
+      "N_action": 515,
+      "action_mask": "15da66cf7c0523f31474840158daab3c1cf8f7fe0a66e55e515d32e132967287",
+      "diagnostic_round": 0,
+      "tokens": "59304c9006b013e78f8434c0b6cf3fac23f7269cffe58ea37b782b96e811e5a9"
+    },
+    {
+      "N_action": 766,
+      "action_mask": "616a5865c0fd557cf4504d7499a1c7a036f781787f1f660f3dd0f3f6d91aefe2",
+      "diagnostic_round": 1,
+      "tokens": "0b53078646b9e5fff04395a090372f06bc96f4011d735a2cd0f34e48f70fe6f7"
+    },
+    {
+      "N_action": 748,
+      "action_mask": "383f582b890ad7959b0ba51be09a7c95267a6ac90fa067916e61b81305cbdad4",
+      "diagnostic_round": 2,
+      "tokens": "962ebfde1faac97be42e6a5ed1534c09b0153845c40fb5a2a532b1375b895841"
+    }
+  ]
+}
