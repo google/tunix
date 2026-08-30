@@ -6,12 +6,13 @@ This section is the authoritative launch preparation for the two optimized
 FrozenLake Zero full recipes. It supersedes older P45/M15 render commands in
 this historical handoff, but does not erase their incident evidence.
 
-Status is `M15 EXACT TITO LOCAL CL READY / HOST PASS / PINNED-IMAGE PASS /
-REMOTE READBACK REQUIRED / ONEHOST NOT RUN / TARGET NOT RUN`.
-Published commit `509d3866b39228ce7df29d4eb3e5394591c69de0`
-contains only the observer and does **not** make M15 use TITO. Do not render an
-M15 full run from that source. The next M15 YAML must come from a later,
-explicitly reviewed and remote-read exact-TITO SHA checked out clean.
+Status is `M15 EXACT TITO PUBLISHED / HOST PASS / PINNED-IMAGE PASS / REMOTE
+READBACK PASS / ONEHOST NOT RUN / TARGET NOT RUN`. Runtime/delivery commit
+`3fc7ef8b93426d0b9ec6b1b9e133198f0b37aa45` was fast-forward published and
+read back exactly. Observer commit
+`509d3866b39228ce7df29d4eb3e5394591c69de0` alone does **not** make M15 use
+TITO. Render M15 only from a clean checkout containing `3fc7ef8b...` or a
+later explicitly reviewed remote-read descendant.
 
 After separate commit/push approval and exact remote read-back, run the
 exact-image admission and then the render-only wrapper from the physical
@@ -70,7 +71,7 @@ identities. M15 output is `convergence-only / alignment-degraded`, never a
 Zero-TIM pass. Native, IS, diagnostic, legacy resident, and evaluation
 carriers do not inherit this exact-arm policy.
 
-The warning lane and observer are published, but exact TITO is not. The fresh
+The warning lane, observer, and exact TITO runtime are published. The fresh
 pinned-image admission on image
 `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`
 exited zero with `V1_HP_EXACT_IMAGE_PASS ... m15_tito_exact=1 ... manifests=3`.

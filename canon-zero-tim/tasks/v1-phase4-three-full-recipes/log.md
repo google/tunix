@@ -1107,3 +1107,16 @@
 - Claim boundary: `LOCAL CL READY / HOST PASS / PINNED-IMAGE PASS / REMOTE
   READBACK REQUIRED / ONEHOST NOT RUN / TARGET NOT RUN`. No render, launch,
   Kubernetes mutation, TPU use, or optimizer update occurred.
+
+## 2026-08-30T06:52:50Z — exact M15 TITO runtime published and read back
+
+- Fast-forward pushed runtime/delivery commit
+  `3fc7ef8b93426d0b9ec6b1b9e133198f0b37aa45` over publication tip
+  `18f29c56daf471cc0ac011396d7c7a09f35d695b`.
+- A fresh fetch returned the exact runtime SHA for local HEAD, FETCH_HEAD, and
+  the remote-tracking branch; divergence was `0/0`.
+- Result: `PUBLISHED / HOST PASS / PINNED-IMAGE PASS / ONEHOST NOT RUN /
+  TARGET NOT RUN`. No manifest render, launch, Kubernetes mutation, TPU use,
+  one-host mechanism run, target optimizer update, or target convergence claim
+  occurred. M15 remains `convergence-only / alignment-degraded` while its A-B
+  warning lane is enabled.

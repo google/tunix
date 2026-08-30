@@ -2,9 +2,9 @@
 
 Status: active; user overrode the verify-first prerequisite and selected exact
 TITO as the signed M15 full default. T1/T2 runtime, YAML/profile delivery, and
-postflight hard gates are in the local publication CL; host and post-rebase
-exact pinned-image construction pass. Remote readback, one-host, and DP8xTP8
-target are not run.
+postflight hard gates are published/read back at `3fc7ef8b`; host and
+post-rebase exact pinned-image construction pass. One-host and DP8xTP8 target
+are not run.
 
 ## Problem and evidence boundary
 
@@ -216,3 +216,8 @@ No rollback deletes a run directory.
   `V1_HP_EXACT_IMAGE_PASS ... m15_tito_exact=1 ... manifests=3`. Not verified
   on one-host or DP8xTP8 target. No render, launch, Kubernetes mutation, or TPU
   use occurred.
+- 2026-08-30: fast-forward published runtime/delivery commit
+  `3fc7ef8b93426d0b9ec6b1b9e133198f0b37aa45`. A post-push fetch returned the
+  same SHA for local HEAD, FETCH_HEAD, and the remote-tracking branch. This is
+  source publication only: no manifest render, launch, Kubernetes mutation,
+  TPU use, one-host mechanism run, DP8xTP8 target, or optimizer update occurred.
