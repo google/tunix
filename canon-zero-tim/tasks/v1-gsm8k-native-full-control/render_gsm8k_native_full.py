@@ -97,7 +97,7 @@ def _registered_spec() -> p33.JobSpec:
   return dataclasses.replace(
       original,
       profile=_NATIVE_PROFILE,
-      job_prefix="canon-v1ctl-gsm-native",
+      job_prefix="canon-v1ctl-gsm-nat",
       fixed_lm_head=False,
   )
 

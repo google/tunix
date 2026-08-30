@@ -18,7 +18,7 @@ group=qwen3-1p7b-dp16-tp4
 JobSet-derived W&B run names are intentionally different:
 
 ```text
-Native/mismatch: canon-v1ctl-gsm-native-<run-id>-<sha8>
+Native/mismatch: canon-v1ctl-gsm-nat-<run-id>-<sha8>
 Zero V1-HP:      canon-v1hp-gsm8k-<run-id>-<sha8>
 ```
 
