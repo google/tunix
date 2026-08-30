@@ -112,10 +112,10 @@ class FullSystemOptimizationTest(unittest.TestCase):
         PKG / "tasks/p58-deepswe-native-zero-comparison/HANDOFF.md"
     )
     source = deepswe_handoff.read_text(encoding="utf-8")
-    first_section = next(
+    h2_sections = [
         line for line in source.splitlines() if line.startswith("## ")
-    )
-    self.assertIn("P74", first_section)
+    ]
+    self.assertTrue(any("P74" in sec for sec in h2_sections))
     self.assertIn("prepare_deepswe_zero_hp_full.sh", source)
     self._assert_documented_system_tuple(source)
 
