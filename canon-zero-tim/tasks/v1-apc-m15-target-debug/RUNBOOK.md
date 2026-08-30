@@ -5,94 +5,88 @@ commands; it does not edit YAML, numerical code, or evidence. Large payloads
 remain in GCS exactly like the earlier P38/lm-head investigation. Only small
 machine-generated receipts are returned through Git or chat.
 
-## Current operation: certify E0t and run a fresh Attempt-20 pair
+## Current operation: recover Attempt-20 treatment round 0, no target launch
 
-Attempt 19 is `INCONCLUSIVE_CARRIER_FAILURE`, not a mechanism verdict. The
-APC-on arm reproduced A-B 366 bytes / 160 elements with B-C zero and first red
-at `[131,0]`, logical prefix 1226, but the old classifier rejected the valid
-`snapshot_length == red_logical_prefix` next-token boundary. The APC-off arm
-sealed exact round 0, then round 1 emitted zero KV records because the dataset
-advanced away from the single D3e-bound target prefix. No arm completed three
-rounds. Do not reuse Attempt-19 YAML, labels, output, or remote prefix.
+Attempt 20 already ran on DP8×TP8. Do not render or apply another pair. Its
+committed return is `ROUND_EVIDENCE_PARTIAL`: APC-off rounds 0/1/2 are exact,
+but APC-on has zero completed rounds. Treatment round 0 reached the durable
+classifier-input checkpoint and then lost classification/completion during
+early resource release. The only current operation is to recover that
+checkpoint from its registered GCS location and run its archived classifier on
+CPU.
 
-The E0t repair admits the next-token equality boundary while retaining the
-future-position negative. Only the exact `m15-e0-kv-v1` profile freezes and
-hashes the 32 round-0 prompt identities and requeues them for rounds 1/2.
-Every round still reruns rollout/request/cache chronology and A/B/C. This is a
-carrier repair; no numerical or production path changed.
+The current E0u source has host terminal
+`M15_E0U_HOST_PASS task_discovery=199 return=1 round0_recovery=6 v1_cpu=91
+p3_prefix_cache=31 persistence=1 flags=409 manifest=dae6dfa8 syntax=1
+diff_check=1 exact_image=0 target_rerun=0 gcs=0 kubernetes=0 tpu=0`.
+Pinned exact-image and real GCS recovery are NOT RUN.
 
-From a clean `local/*` worktree at the exact published SHA, first run:
+Use a clean named `local/*` worktree at the exact published SHA containing the
+E0u recovery script. Verify the original Attempt-20 render directory first;
+do not edit it and do not apply its YAMLs. Real GCS read requires separate
+explicit user approval.
+
+After approval, on the bucket-capable machine:
 
 ```bash
-bash canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/run_m15_e0_kv3_host_gate.sh
+OUT=<preserved-original-Attempt20-render-dir>
+RETURN=/mnt/disks/tunix-data/m15-attempt20-on-r0-recovery-k02
+test -d "$OUT"
+test ! -e "$RETURN"
+bash canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/run_m15_attempt20_on_round0_offline_recovery.sh \
+  "$OUT" "$RETURN" /mnt/disks/tunix-data
 ```
 
-Require:
+`$OUT` is the preserved original Attempt-20 render directory. The wrapper
+binds target source `97e813de84f6c8b3e2ba911fc96ff8397b199603` to the
+committed salvage return, derives the treatment round-0 classifier-input root
+without printing it, downloads only archive/manifest/receipt, validates every
+source and SHA field, safely extracts, and runs the archived source-bound
+classifier with `JAX_PLATFORMS=cpu`.
+If `$OUT` is absent, return
+`status=ORIGINAL_RENDER_UNAVAILABLE classification=NONE`; never re-render or
+guess another label/root.
+
+Success prints one sanitized marker beginning:
 
 ```text
-M15_E0_KV3R_HOST_PASS task_discovery=193 return=1 v1_cpu=91 p3_prefix_cache=31 persistence=1 flags=408 manifest=dae6dfa8 syntax=1 diff_check=1 exact_image=0 target=0 gcs=0 kubernetes=0 tpu=0
+[M15.E0U.ON-R0] RECOVERY_COMPLETE
 ```
 
-Then prepare a fresh immutable pair locally:
+An unavailable object/read prints:
 
-```bash
-SOURCE_COMMIT=<full-published-E0t-SHA>
-RUN_ID=<fresh-1-to-16-char-lowercase-dns-label>
-OUT=/mnt/disks/tunix-data/m15-e0-kv3r-render-${RUN_ID}
-test ! -e "$OUT"
-bash canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/prepare_m15_attempt20_e0_kv3_pair.sh \
-  "$SOURCE_COMMIT" "$RUN_ID" "$OUT"
+```text
+[M15.E0U.ON-R0] INCONCLUSIVE status=CLASSIFIER_INPUT_UNAVAILABLE classification=NONE
 ```
 
-Require `[M15.E0.KV3R] RENDER_PASS` and `[M15.E0.KV3R] TARGET_NOT_RUN`, then
-verify `SHA256SUMS`. This preparation is CPU/disk plus fake GCS only and does
-not use Docker, real GCS, Kubernetes, or TPU.
+A receipt/archive/source/binding/classifier failure prints:
 
-Pinned exact-image requires a separate user approval. After approval:
-
-```bash
-RAW=/mnt/disks/tunix-data/m15-e0-kv3r-exact-image-${RUN_ID}.log
-test ! -e "$RAW"
-bash canon-zero-tim/tests/v1_phase4/run_exact_image.sh \
-  sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a \
-  >"$RAW" 2>&1
+```text
+[M15.E0U.ON-R0] INCONCLUSIVE status=INVALID_OR_CLASSIFIER_FAILED classification=NONE
 ```
 
-Require exit zero, matching immutable image ID, and
-`V1_HP_EXACT_IMAGE_PASS` with `apc_m15_carrier=70`, `m15_e0_kv3=3`,
-`m15_e0_kv3_return=1`, `m15_durability=1`,
-`m15_round_provenance=1`, and `manifests=3`. Return raw path/SHA. This is
-local Docker/CPU and does not authorize target launch.
+The wrapper performs `gcs_read=1 gcs_write=0 kubernetes=0 tpu=0`. It preserves
+raw log and scratch on failure. Return only the compact self-hashed output,
+manifest SHA, sanitized marker, and local raw-log path/SHA. Never return the
+remote root, archive contents, token/capsule/replay rows, or NPZ payloads.
 
-The DP8×TP8 pair requires another approval. Apply the two renderer outputs
-directly, without pipes or edits:
+Every result, including successful classification, is one-round
+analysis-grade evidence:
 
-```bash
-kubectl apply -f "$OUT/jobset-v1-apc-m15-off-kv3.yaml"
-kubectl apply -f "$OUT/jobset-v1-apc-m15-on-kv3.yaml"
+```text
+three_round_verdict=false
+terminal_pair_complete=false
+target_pass=false
+numerical_repair_authorized=false
+B_full_reset_runtime_receipt=NONE
+all_num_cached_tokens_zero_runtime_receipt=NONE
+TARGET_RERUN=NO
 ```
 
-Each arm must emit one frozen-prompt marker, two requeue markers, and one
-common prompt SHA. Every round requires 16 KV records, classifier-input
-upload/readback, classifier PASS, final upload/readback, `ROUND_COMPLETE`, then
-learner ACK. Control and every B-C boundary must be exact; B is full-reset and
-all cached-token counts must be zero.
-
-After completion, a further explicit approval is required for the read-only
-GCS return:
-
-```bash
-ANALYSIS_SOURCE=<full-published-E0t-SHA>
-RETURN=/mnt/disks/tunix-data/m15-e0-kv3r-return-${RUN_ID}
-test ! -e "$RETURN"
-bash canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/run_m15_attempt20_e0_kv3_return_recovery.sh \
-  "$ANALYSIS_SOURCE" "$OUT" "$RETURN" /mnt/disks/tunix-data
-```
-
-Require `[M15.E0.KV3R.RECOVERY] COMPLETE ... gcs_read=1 gcs_write=0
-kubernetes=0 tpu=0`. Partial rounds and root-incomplete runs stay
-INCONCLUSIVE. Large evidence stays in registered GCS; return only compact
-receipts, sanitized markers, and local log/manifest SHAs.
+If the script returns no classification, report `classification=NONE`; do not
+substitute Attempt-19 numbers or the prose-only 93.0% cache-hit statement. See
+`HANDOFF.md` and `phases/phase-e0u-attempt20-round0-offline-recovery.md` for
+the exact response template and decision table.
 
 ## Superseded operation: pre-repair Attempt-19 three-round E0 KV pair
 

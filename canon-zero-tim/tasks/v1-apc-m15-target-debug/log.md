@@ -1551,3 +1551,45 @@ is not a current fact or launch authority.
   self-recorded in its own commit. A clean published-SHA agent then runs
   `prepare_m15_attempt20_e0_kv3_pair.sh`; pinned exact-image, target launch,
   and read-only GCS recovery remain separate approval gates.
+
+## 2026-08-30 — Attempt 20 partial return reconciled; E0u offline recovery HOST PASS
+
+- Pulled the latest shared tree and admitted the committed Attempt-20 compact
+  return at
+  `evidence/v1_apc_m15_attempt20_e0_kv3_salvage_return_20260830/`;
+  its `SHA256SUMS` file has SHA256
+  `986491ae7dd08a5643c832b4e7c1218000eaca652d257e3055e76be2129a32fc`.
+  Target source is `97e813de84f6c8b3e2ba911fc96ff8397b199603`.
+- Preserved the actual verdict: APC-off rounds 0/1/2 are A-B/B-C exact but
+  root-terminal incomplete; APC-on has zero completed rounds. Treatment round
+  0 lacks returned input/classification/completion while its checkpoint
+  receipt is not listed missing. The current target result is
+  `ROUND_EVIDENCE_PARTIAL`, not target PASS and not a numerical repair.
+- Added E0u's single read-only bucket-side entrypoint. It binds the original
+  Attempt-20 render and committed source, downloads only treatment round-0
+  classifier archive/manifest/receipt, verifies every hash/source field,
+  safely extracts, and runs the archived source-bound classifier on CPU.
+  Missing input, invalid evidence, classifier failure, and ambiguous binding
+  return `classification=NONE`; none can create a 3/3 or target-PASS claim.
+- Added six focused tests covering fingerprint different, fingerprint equal,
+  round-0 non-reproduction, source drift, ambiguous future binding, and
+  refusal to reconstruct a missing original render. Added the recovery to
+  host and exact-image aggregates and rewrote the current handoff/runbook with
+  one command and an exact response template.
+- The first full aggregate exposed a stale terminal count (`flags=408`) while
+  the current registry truth was 409/409. No flag changed in E0u. The marker
+  was corrected and the complete aggregate rerun.
+- Final host terminal:
+  `M15_E0U_HOST_PASS task_discovery=199 return=1 round0_recovery=6 v1_cpu=91
+  p3_prefix_cache=31 persistence=1 flags=409 manifest=dae6dfa8 syntax=1
+  diff_check=1 exact_image=0 target_rerun=0 gcs=0 kubernetes=0 tpu=0`.
+  Raw log `/tmp/m15-e0u-host-gate-20260830-r4.log`, SHA256
+  `738d8df5a7ca9adef35735375e319c242f225b1404e14ef818fb72ef5ba4c4bf`.
+- Scope: recovery/evidence handling, tests, aggregate wiring, and operator
+  documentation only. No flag, renderer, A/B/C, B reset, cache read, RoPE,
+  attention/RPA, KV value, LM head, loss, backward, optimizer, production
+  profile, or production APC default changed.
+- External status: exact-image NOT RUN; real GCS recovery NOT RUN; target NOT
+  RERUN. No commit, push, Docker, GCS, Kubernetes, TPU, or other external
+  mutation occurred. Commit/push, exact-image, GCS read, and any future target
+  launch remain separate user approvals.
