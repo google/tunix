@@ -848,6 +848,9 @@ n_p38_request_journal=$(grep -ac '^\[CANON_P38_REQUEST_JOURNAL\]' "$LOG" || true
 n_p38_incident_ledger=$(grep -ac '^\[CANON_P38_INCIDENT_LEDGER\]' "$LOG" || true)
 n_p38_incident_bypass=$(grep -ac '^\[CANON_P38_INCIDENT_LEDGER_BYPASS\] profile=m15-wide-v1' "$LOG" || true)
 n_p38_incident_bypass_e0=$(grep -ac '^\[CANON_P38_INCIDENT_LEDGER_BYPASS\] profile=m15-e0-kv-v1 replacement=replay-envelope+sealed-kv-rounds$' "$LOG" || true)
+n_p38_e0_kv3_prompt_frozen=$(grep -aEc '^\[CANON_P38\] E0_KV3_PROMPT_BATCH_FROZEN prompts=32 sha256=[0-9a-f]{64} rounds=3 dataset_advance=0$' "$LOG" || true)
+n_p38_e0_kv3_prompt_requeued_1=$(grep -aEc '^\[CANON_P38\] E0_KV3_PROMPT_BATCH_REQUEUED completed=1/3 sha256=[0-9a-f]{64} dataset_advance=0$' "$LOG" || true)
+n_p38_e0_kv3_prompt_requeued_2=$(grep -aEc '^\[CANON_P38\] E0_KV3_PROMPT_BATCH_REQUEUED completed=2/3 sha256=[0-9a-f]{64} dataset_advance=0$' "$LOG" || true)
 n_p58_continue_decode_observer_bypass=$(grep -ac '^\[CANON_P58_CONTINUE_DECODE_OBSERVER_BYPASS\] profile=p58-seam-v1 expected=standard actual=continue_decode tensor_capture=0$' "$LOG" || true)
 n_m15_replay_ledger=$(grep -ac '^\[CAN''ON_APC_M15_REPLAY_LEDGER\]' "$LOG" || true)
 n_m15_producer_carrier=$(grep -ac '^\[CAN''ON_APC_M15_PRODUCER_CARRIER\]' "$LOG" || true)
@@ -1045,6 +1048,18 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
        [ "$n_p38_incident_ledger" -ne 0 ] || \
        [ -s "${CANON_P38_INCIDENT_LEDGER:-}" ]; then
       echo "[run] FATAL: M15 E0 KV run did not bypass the redundant incident ledger: bypass=$n_p38_incident_bypass_e0 incident_markers=$n_p38_incident_ledger" >&2
+      exit 1
+    fi
+    p38_e0_kv3_prompt_hashes="$(
+      { grep -aE '^\[CANON_P38\] E0_KV3_PROMPT_BATCH_(FROZEN|REQUEUED) ' "$LOG" || true; } | \
+        sed -E 's/.* sha256=([0-9a-f]{64}) .*/\1/' | \
+        sort -u | wc -l | tr -d '[:space:]'
+    )"
+    if [ "$n_p38_e0_kv3_prompt_frozen" -ne 1 ] || \
+       [ "$n_p38_e0_kv3_prompt_requeued_1" -ne 1 ] || \
+       [ "$n_p38_e0_kv3_prompt_requeued_2" -ne 1 ] || \
+       [ "$p38_e0_kv3_prompt_hashes" != "1" ]; then
+      echo "[run] FATAL: M15 E0 KV3 frozen prompt replay drifted: frozen=$n_p38_e0_kv3_prompt_frozen requeued_1=$n_p38_e0_kv3_prompt_requeued_1 requeued_2=$n_p38_e0_kv3_prompt_requeued_2 unique_hashes=${p38_e0_kv3_prompt_hashes:-invalid}" >&2
       exit 1
     fi
   elif [ "$n_p38_incident_ledger" -le 0 ] || \

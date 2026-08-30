@@ -1,6 +1,204 @@
 # M15 APC target-debug handoff
 
-## START HERE — use the additive three-round E0 KV3 carrier
+## START HERE — certify the Attempt-20 carrier repair, then run a fresh pair
+
+Attempt 19 did run on DP8×TP8, but it did **not** produce the requested
+three-round mechanism result. Do not reuse its YAML, labels, output directory,
+or GCS prefix.
+
+### What Attempt 19 proved
+
+- APC-on round 0 reproduced a real serving-only red: A-B 366 bytes / 160
+  elements, B-C zero, 92.8% cache hits. First mismatch was `[131,0]` in the
+  `[256,8192]` comparison arrays at logical KV prefix 1226.
+- APC-off round 0 completed exact. APC-off round 1 was numerically exact but
+  captured zero targeted KV records. Round 2 is absent.
+- APC-on round 0 uploaded its classifier-input checkpoint, then the classifier
+  stopped before `ROUND_COMPLETE`; rounds 1 and 2 are absent.
+- Incident evidence is
+  `evidence/m15_e0_kv3_attempt19_incident/`. Its `SHA256SUMS` file has SHA256
+  `bc824561d39ed4e0bb5df65f56baff68e86ac64b8694a073f13a40bf31ba1636`.
+
+Attempt 19 is `INCONCLUSIVE_CARRIER_FAILURE`. It is not a 3/3 live-KV verdict
+and not an APC repair result.
+
+### What E0t repairs
+
+1. The old red join required a red logical prefix to be strictly less than the
+   KV snapshot length. The Attempt-19 first action is scored *from* the
+   prefix-1226 snapshot, so `1226 == 1226` is the valid next-token boundary.
+   The repaired classifier admits equality, reports it separately, and keeps
+   future positions greater than the snapshot length fail closed.
+2. The old three-round loop advanced to a new FrozenLake batch even though the
+   KV selector was statically bound to the D3e round-0 prefix. The repaired
+   exact `m15-e0-kv-v1` profile freezes and hashes the 32 round-0 prompt
+   identities, then requeues that inventory for rounds 1 and 2. Each round
+   still reruns rollout requests, calls, cache chronology, A, B, and C.
+   Neighboring profiles still advance their dataset.
+3. Runtime postflight requires exactly one frozen marker, two requeue markers,
+   and one common prompt-inventory SHA.
+
+This is classifier/scheduling/durability work only. It changes no RoPE, RPA,
+attention, page/KV value, LM-head, loss, backward, optimizer, production
+profile, or production APC default. The last admitted tensor boundary remains
+Layer 0 `k_post_rope -> rpa_output`, shape `[2048,1,15,8]`. Phase E is closed.
+
+### Cold-start requirements
+
+Read the outer and inner `AGENTS.md`, the same-revision branch and flag skills,
+`run-phased-work/SKILL.md`, `state.md`, `plan.md`,
+`phases/phase-e0t-attempt19-carrier-repair.md`, this section, and the current
+operation in `RUNBOOK.md`. Use a new clean `local/*` worktree at the exact full
+published SHA containing this section. Do not use the dirty implementation
+worktree or infer the source from its base SHA.
+
+Never print remotes, credentials, configured accounts/projects, bucket roots,
+or large token/capsule/replay/observer payloads.
+
+### Gate 0 — canonical host aggregate
+
+```bash
+bash canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/run_m15_e0_kv3_host_gate.sh
+```
+
+Require exactly:
+
+```text
+M15_E0_KV3R_HOST_PASS task_discovery=193 return=1 v1_cpu=91 p3_prefix_cache=31 persistence=1 flags=408 manifest=dae6dfa8 syntax=1 diff_check=1 exact_image=0 target=0 gcs=0 kubernetes=0 tpu=0
+```
+
+The implementation raw log is
+`/tmp/m15-e0-kv3r-host-gate-postrebase-20260830.log`, SHA256
+`ef6992bc55079965759b12395f15378c0ca1d693628ac05e5d60742f4712e811`.
+This is host evidence only.
+
+### Gate 1 — prepare only, no external service
+
+After publication, choose a fresh 1–16 character lowercase DNS label and a
+new output path:
+
+```bash
+SOURCE_COMMIT=<full-published-E0t-SHA>
+RUN_ID=<fresh-attempt20-label>
+OUT=/mnt/disks/tunix-data/m15-e0-kv3r-render-${RUN_ID}
+test ! -e "$OUT"
+bash canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/prepare_m15_attempt20_e0_kv3_pair.sh \
+  "$SOURCE_COMMIT" "$RUN_ID" "$OUT"
+```
+
+This command is local CPU/disk plus fake GCS only. It does not use Docker,
+real GCS, Kubernetes, or TPU. Require its two final markers:
+
+```text
+[M15.E0.KV3R] RENDER_PASS source=<full-sha> generation=attempt20-carrier-repair-v1 rounds=3 red_join=next-token-boundary prompt_inventory=frozen ...
+[M15.E0.KV3R] TARGET_NOT_RUN pinned_exact_image=required launch_approval=required gcs=0 kubernetes=0 tpu=0
+```
+
+Verify `SHA256SUMS`. `RUN_CONTRACT.json` must contain the admitted
+`m15-e0-kv3-carrier-repair-v1` contract, the Attempt-19 incident-manifest SHA,
+`dataset_advance=false`, and `numerical_path_changed=false`. Do not edit the
+rendered files. Preserve the output and printed scratch path on failure.
+
+### Gate 2 — separate pinned exact-image approval
+
+Gate 1 does not authorize Docker. First return the exact command, immutable
+image identity, expected marker, and raw-log path to the user. After explicit
+approval, run the official aggregate directly:
+
+```bash
+RAW=/mnt/disks/tunix-data/m15-e0-kv3r-exact-image-${RUN_ID}.log
+test ! -e "$RAW"
+bash canon-zero-tim/tests/v1_phase4/run_exact_image.sh \
+  sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a \
+  >"$RAW" 2>&1
+```
+
+This is local Docker/CPU only. It does not access TPU, Kubernetes, or GCS.
+Require exit zero, matching `image_id`, and one terminal
+`V1_HP_EXACT_IMAGE_PASS` containing at least:
+
+```text
+apc_m15_carrier=70
+m15_e0_kv3=3
+m15_e0_kv3_return=1
+m15_durability=1
+m15_round_provenance=1
+manifests=3
+```
+
+Return the raw log path and SHA. Missing marker, nonzero exit, or image drift
+is FAIL/INCONCLUSIVE and does not authorize target execution.
+
+### Gate 3 — separate fresh DP8×TP8 approval
+
+Pinned-image PASS still does not authorize launch. Return both exact rendered
+YAML paths and ask for a new approval. Only after approval, apply directly
+without a pipe, substitution, edit, or reused label:
+
+```bash
+kubectl apply -f "$OUT/jobset-v1-apc-m15-off-kv3.yaml"
+kubectl apply -f "$OUT/jobset-v1-apc-m15-on-kv3.yaml"
+```
+
+The arms may run concurrently but are judged control-first. Require all three
+rounds in each arm. Each runtime log must contain one
+`E0_KV3_PROMPT_BATCH_FROZEN`, two `E0_KV3_PROMPT_BATCH_REQUEUED`, and one
+shared prompt SHA. Every round must follow:
+
+```text
+16 KV records
+-> classifier-input self-hash/upload/readback
+-> classifier PASS
+-> final archive/upload/readback
+-> ROUND_COMPLETE readback
+-> learner ACK
+```
+
+B must remain full reset and prove every cached-token count is zero. Any B-C
+red, control red, prompt-SHA drift, missing marker, incomplete round, or
+`CANON_ALIGN FAIL` is a hard stop. Do not wait for a root tar before checking
+per-round receipts, and never delete partial evidence.
+
+### Gate 4 — separate read-only GCS approval
+
+Only after the jobs stop and the user separately approves this GCS read, run
+on the bucket-capable machine:
+
+```bash
+ANALYSIS_SOURCE=<full-published-E0t-SHA>
+RETURN=/mnt/disks/tunix-data/m15-e0-kv3r-return-${RUN_ID}
+test ! -e "$RETURN"
+bash canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/run_m15_attempt20_e0_kv3_return_recovery.sh \
+  "$ANALYSIS_SOURCE" "$OUT" "$RETURN" /mnt/disks/tunix-data
+```
+
+The wrapper verifies the Attempt-20 carrier contract before delegating to the
+salvage-first reader. It reads GCS but performs no GCS write, Kubernetes query
+or mutation, or TPU operation. Require:
+
+```text
+[M15.E0.KV3R.RECOVERY] COMPLETE generation=attempt20-carrier-repair-v1 gcs_read=1 gcs_write=0 kubernetes=0 tpu=0 ...
+```
+
+Return only sanitized terminal markers, the compact return/manifest SHA, and
+local raw-log path/SHA. Three recovered rounds with missing root state remain
+`ROUNDS_RECOVERED_ROOT_INCOMPLETE`; fewer completed rounds remain
+`ROUND_EVIDENCE_PARTIAL`. Both are INCONCLUSIVE.
+
+### Decision boundary
+
+| Result | Meaning / next action |
+|---|---|
+| control not `CONTROL_EXACT_3_OF_3` | hard stop; shared carrier invalid |
+| any B-C red or B reset/zero-token failure | hard stop; not APC-specific |
+| treatment `TARGET_NON_REPRODUCTION_3_OF_3` | bug not reproduced; not fixed |
+| treatment `LIVE_KV_FINGERPRINT_DIFFERS_3_OF_3` | discuss one stored-KV/page-production discriminator; do not patch yet |
+| treatment `LIVE_KV_FINGERPRINT_EQUAL_3_OF_3` | discuss one page-table/read/RPA-context discriminator; do not patch yet |
+| mixed/partial/root-incomplete | preserve as INCONCLUSIVE; do not choose a mechanism |
+
+No E0 fingerprint result automatically opens numerical Phase E.
+
+## SUPERSEDED — pre-repair Attempt-19 KV3 instructions
 
 The next target is **not** another run of the historical Attempt-18
 `observer=kv` YAML. Attempt 18 was intentionally one round under its old

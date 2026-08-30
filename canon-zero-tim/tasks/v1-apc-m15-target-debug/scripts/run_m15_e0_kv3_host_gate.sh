@@ -35,15 +35,17 @@ bash -n \
   canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/p38_live_snapshot_worker.sh \
   canon-zero-tim/tasks/p38-pathways-decode-prefill-carrier/scripts/persist_p38_gcs.sh \
   canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/prepare_m15_attempt19_e0_kv3_pair.sh \
+  canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/prepare_m15_attempt20_e0_kv3_pair.sh \
   canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/run_m15_attempt19_e0_kv3_gcs_return.sh \
   canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/run_m15_attempt19_e0_kv3_return_recovery.sh \
+  canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/run_m15_attempt20_e0_kv3_return_recovery.sh \
   canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/test_m15_attempt19_e0_kv3_return.sh \
   canon-zero-tim/tests/p38_serving/test_gcs_persistence.sh \
   canon-zero-tim/tests/v1_phase4/run_exact_image.sh
 
 grep -Fqx \
-  '15fddce5eb5157494cc01639a50e677e5d7ce775b883ff5c7d29f6a854317f67  tpu_runner_p21_l30.py' \
+  'dae6dfa8a45bfd0a34b41baa9ec7c258229e8824c427a2fb863b620add074f98  tpu_runner_p21_l30.py' \
   canon-zero-tim/MANIFEST.sha256
 git diff --check
 
-echo "M15_E0_KV3_HOST_PASS task_discovery=193 return=1 v1_cpu=91 p3_prefix_cache=31 persistence=1 flags=398 manifest=static syntax=1 diff_check=1 exact_image=0 target=0 gcs=0 kubernetes=0 tpu=0"
+echo "M15_E0_KV3R_HOST_PASS task_discovery=193 return=1 v1_cpu=91 p3_prefix_cache=31 persistence=1 flags=408 manifest=dae6dfa8 syntax=1 diff_check=1 exact_image=0 target=0 gcs=0 kubernetes=0 tpu=0"

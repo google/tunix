@@ -5,13 +5,17 @@ from __future__ import annotations
 
 import ast
 import copy
+import hashlib
 import importlib.util
+import json
 import os
 from pathlib import Path
 import sys
 import tempfile
+import types
 import unittest
 
+import numpy as np
 import yaml
 
 
@@ -125,6 +129,15 @@ class TargetCarrierTest(unittest.TestCase):
     ).read_text(encoding="utf-8")
     installer = (CANON / "install.sh").read_text(encoding="utf-8")
     runner = (CANON / "cluster/steps/90_run.sh").read_text(encoding="utf-8")
+    learner = LEARNER_PATH.read_text(encoding="utf-8")
+    repaired_prepare = (
+        CANON / "tasks/v1-apc-m15-target-debug/scripts/"
+        "prepare_m15_attempt20_e0_kv3_pair.sh"
+    ).read_text(encoding="utf-8")
+    repaired_return = (
+        CANON / "tasks/v1-apc-m15-target-debug/scripts/"
+        "run_m15_attempt20_e0_kv3_return_recovery.sh"
+    ).read_text(encoding="utf-8")
     self.assertIn('_P38_DURABILITY_PROFILE == "m15-e0-kv-v1"', patch)
     self.assertIn("_p38_kv_observer_begin_target_round", patch)
     self.assertIn("previous_indices.issubset", patch)
@@ -138,6 +151,83 @@ class TargetCarrierTest(unittest.TestCase):
     )
     self.assertIn("aggregate_m15_e0_kv_rounds.py", runner)
     self.assertIn('p38_kv_expected_candidates * 3', runner)
+    self.assertIn("n_p38_e0_kv3_prompt_frozen", runner)
+    self.assertIn("n_p38_e0_kv3_prompt_requeued_1", runner)
+    self.assertIn("n_p38_e0_kv3_prompt_requeued_2", runner)
+    self.assertIn("p38_e0_kv3_prompt_hashes", runner)
+    self.assertIn("M15 E0 KV3 frozen prompt replay drifted", runner)
+    self.assertIn("def _p38_m15_e0_kv_frozen_prompt_replay", learner)
+    self.assertIn('== "m15-e0-kv-v1"', learner)
+    self.assertIn("E0_KV3_PROMPT_BATCH_FROZEN", learner)
+    self.assertIn("E0_KV3_PROMPT_BATCH_REQUEUED", learner)
+    self.assertIn(
+        "next_prompts = copy.deepcopy(m15_e0_kv_frozen_prompt_batch)",
+        learner,
+    )
+    self.assertIn("dataset_advance=0", learner)
+    tree = ast.parse(learner)
+    helper_names = {
+        "_p38_m15_e0_kv_frozen_prompt_replay",
+        "_p38_m15_e0_kv_prompt_batch_sha256",
+    }
+    helpers = [
+        node for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name in helper_names
+    ]
+    self.assertEqual({node.name for node in helpers}, helper_names)
+    namespace = {
+        "alignment": types.SimpleNamespace(AlignmentGateError=ValueError),
+        "hashlib": hashlib,
+        "json": json,
+        "np": np,
+    }
+    exec(  # pylint: disable=exec-used
+        compile(
+            ast.fix_missing_locations(ast.Module(body=helpers, type_ignores=[])),
+            str(LEARNER_PATH),
+            "exec",
+        ),
+        namespace,
+    )
+    replay = namespace["_p38_m15_e0_kv_frozen_prompt_replay"]
+    digest = namespace["_p38_m15_e0_kv_prompt_batch_sha256"]
+    exact_environment = {
+        "CANON_APC_M15_TARGET_DEBUG": "on",
+        "CANON_P38_PRECHECK_ONLY": "1",
+        "CANON_P38_DURABILITY_PROFILE": "m15-e0-kv-v1",
+        "CANON_P38_DIAGNOSTIC_ROUNDS": "3",
+    }
+    self.assertTrue(replay(exact_environment))
+    self.assertTrue(replay({**exact_environment,
+                            "CANON_APC_M15_TARGET_DEBUG": "off"}))
+    self.assertFalse(replay({**exact_environment,
+                             "CANON_P38_DURABILITY_PROFILE": "m15-wide-v1"}))
+    self.assertFalse(replay({**exact_environment,
+                             "CANON_P38_DIAGNOSTIC_ROUNDS": "2"}))
+    self.assertFalse(replay({**exact_environment,
+                             "CANON_P38_PRECHECK_ONLY": "0"}))
+    batch = {
+        "p57_index": np.array([0, 1]),
+        "seed": np.array([42, 43]),
+        "map_sha256": np.array(["a" * 64, "b" * 64]),
+    }
+    first_digest = digest(batch, 2)
+    self.assertEqual(len(first_digest), 64)
+    bytes_batch = copy.deepcopy(batch)
+    bytes_batch["map_sha256"] = bytes_batch["map_sha256"].astype("S64")
+    self.assertEqual(digest(bytes_batch, 2), first_digest)
+    changed = copy.deepcopy(batch)
+    changed["map_sha256"][1] = "c" * 64
+    self.assertNotEqual(digest(changed, 2), first_digest)
+    with self.assertRaisesRegex(ValueError, "coverage changed"):
+      digest(batch, 3)
+    self.assertIn("attempt20-carrier-repair-v1", repaired_prepare)
+    self.assertIn("snapshot-prefix-or-next-token-boundary", repaired_prepare)
+    self.assertIn("round0-frozen-requeued-for-rounds1-and2", repaired_prepare)
+    self.assertIn("numerical_path_changed", repaired_prepare)
+    self.assertIn("run_m15_attempt19_e0_kv3_return_recovery.sh", repaired_return)
+    self.assertIn("Attempt-20 repaired carrier contract", repaired_return)
+    self.assertIn("gcs_write=0 kubernetes=0 tpu=0", repaired_return)
 
   def test_m15_replay_round_provenance_patch_is_additive(self):
     patch = (

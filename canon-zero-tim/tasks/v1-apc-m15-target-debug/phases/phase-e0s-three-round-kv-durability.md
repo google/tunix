@@ -98,8 +98,17 @@ No later gate inherits approval from an earlier gate.
 
 ## Current status
 
-Local host focused gates and fake-GCS durability/failure injection pass.
-The aggregate host gate also passes task discovery 193/193, V1 CPU 91/91, P3
-31/31, flag registry 398/398, syntax, static manifest binding, return recovery,
-and diff checks. Official pinned exact-image and DP8×TP8 target have not run.
-Phase E remains closed and no numerical repair is implemented or authorized.
+The original host focused gates and fake-GCS durability/failure injection
+passed, then Attempt 19 executed this target contract at source
+`d93d2729c5f036506fe754b929d42b142177a9b7`.
+
+Attempt 19 did not complete the phase. Treatment round 0 reproduced A-B 366
+bytes / 160 elements with B-C zero, then the classifier excluded the valid
+next-token equality boundary. Control round 0 sealed exact; round 1 was
+numerically exact but emitted zero targeted KV records after the dataset
+advanced away from the static D3e prefix. Round 2 is absent in both cases.
+The result is `INCONCLUSIVE_CARRIER_FAILURE`, not a 3/3 mechanism verdict.
+
+Phase E0t supersedes the broken execution contract with a next-token boundary
+repair and one frozen prompt inventory across three rerun chronologies. Phase
+E remains closed and no numerical repair is implemented or authorized.

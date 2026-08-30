@@ -357,7 +357,7 @@ def _bind_source_request(
         if target.size <= history["tokens"].size
         and np.array_equal(target, history["tokens"][:target.size])
         and any(
-            int(history["prompt_length"]) + int(position) < target.size
+            int(history["prompt_length"]) + int(position) <= target.size
             for position in history["mismatch_positions"]
         )
     ]
@@ -475,19 +475,30 @@ def _join_red_candidates(
     if not candidates:
       continue
     match = candidates[0]
-    covered_mismatches = [
+    snapshot_mismatches = [
         int(position) for position in match["mismatch_positions"]
         if int(match["prompt_length"]) + int(position) < int(target.size)
     ]
-    if not covered_mismatches:
+    next_token_boundary_mismatches = [
+        int(position) for position in match["mismatch_positions"]
+        if int(match["prompt_length"]) + int(position) == int(target.size)
+    ]
+    joined_mismatches = (
+        snapshot_mismatches + next_token_boundary_mismatches
+    )
+    if not joined_mismatches:
       continue
     joins.append({
         "source_a_record_index": int(live["record_index"]),
         "diagnostic_round": diagnostic_round,
         "source_row": int(match["source_row"]),
         "capsule": match["capsule"],
-        "mismatch_positions": covered_mismatches,
-        "mismatch_count": len(covered_mismatches),
+        "mismatch_positions": joined_mismatches,
+        "mismatch_count": len(joined_mismatches),
+        "snapshot_mismatch_positions": snapshot_mismatches,
+        "next_token_boundary_mismatch_positions": (
+            next_token_boundary_mismatches
+        ),
         "target_seq_len": int(target.size),
     })
   return joins
@@ -596,6 +607,7 @@ def classify(
           "The integer aggregates and fixed samples are diagnostic fingerprints, not cryptographic hashes.",
           "An equal fingerprint does not mathematically prove full KV byte equality.",
           "Only a candidate joined to an A/B-red capsule row can choose the mechanism branch.",
+          "A KV snapshot at prefix length L is eligible for a red action whose logical KV prefix is exactly L.",
       ],
   }
 

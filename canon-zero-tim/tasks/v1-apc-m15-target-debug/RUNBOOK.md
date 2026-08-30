@@ -5,7 +5,96 @@ commands; it does not edit YAML, numerical code, or evidence. Large payloads
 remain in GCS exactly like the earlier P38/lm-head investigation. Only small
 machine-generated receipts are returned through Git or chat.
 
-## Current operation: prepare and gate the three-round E0 KV pair
+## Current operation: certify E0t and run a fresh Attempt-20 pair
+
+Attempt 19 is `INCONCLUSIVE_CARRIER_FAILURE`, not a mechanism verdict. The
+APC-on arm reproduced A-B 366 bytes / 160 elements with B-C zero and first red
+at `[131,0]`, logical prefix 1226, but the old classifier rejected the valid
+`snapshot_length == red_logical_prefix` next-token boundary. The APC-off arm
+sealed exact round 0, then round 1 emitted zero KV records because the dataset
+advanced away from the single D3e-bound target prefix. No arm completed three
+rounds. Do not reuse Attempt-19 YAML, labels, output, or remote prefix.
+
+The E0t repair admits the next-token equality boundary while retaining the
+future-position negative. Only the exact `m15-e0-kv-v1` profile freezes and
+hashes the 32 round-0 prompt identities and requeues them for rounds 1/2.
+Every round still reruns rollout/request/cache chronology and A/B/C. This is a
+carrier repair; no numerical or production path changed.
+
+From a clean `local/*` worktree at the exact published SHA, first run:
+
+```bash
+bash canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/run_m15_e0_kv3_host_gate.sh
+```
+
+Require:
+
+```text
+M15_E0_KV3R_HOST_PASS task_discovery=193 return=1 v1_cpu=91 p3_prefix_cache=31 persistence=1 flags=408 manifest=dae6dfa8 syntax=1 diff_check=1 exact_image=0 target=0 gcs=0 kubernetes=0 tpu=0
+```
+
+Then prepare a fresh immutable pair locally:
+
+```bash
+SOURCE_COMMIT=<full-published-E0t-SHA>
+RUN_ID=<fresh-1-to-16-char-lowercase-dns-label>
+OUT=/mnt/disks/tunix-data/m15-e0-kv3r-render-${RUN_ID}
+test ! -e "$OUT"
+bash canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/prepare_m15_attempt20_e0_kv3_pair.sh \
+  "$SOURCE_COMMIT" "$RUN_ID" "$OUT"
+```
+
+Require `[M15.E0.KV3R] RENDER_PASS` and `[M15.E0.KV3R] TARGET_NOT_RUN`, then
+verify `SHA256SUMS`. This preparation is CPU/disk plus fake GCS only and does
+not use Docker, real GCS, Kubernetes, or TPU.
+
+Pinned exact-image requires a separate user approval. After approval:
+
+```bash
+RAW=/mnt/disks/tunix-data/m15-e0-kv3r-exact-image-${RUN_ID}.log
+test ! -e "$RAW"
+bash canon-zero-tim/tests/v1_phase4/run_exact_image.sh \
+  sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a \
+  >"$RAW" 2>&1
+```
+
+Require exit zero, matching immutable image ID, and
+`V1_HP_EXACT_IMAGE_PASS` with `apc_m15_carrier=70`, `m15_e0_kv3=3`,
+`m15_e0_kv3_return=1`, `m15_durability=1`,
+`m15_round_provenance=1`, and `manifests=3`. Return raw path/SHA. This is
+local Docker/CPU and does not authorize target launch.
+
+The DP8×TP8 pair requires another approval. Apply the two renderer outputs
+directly, without pipes or edits:
+
+```bash
+kubectl apply -f "$OUT/jobset-v1-apc-m15-off-kv3.yaml"
+kubectl apply -f "$OUT/jobset-v1-apc-m15-on-kv3.yaml"
+```
+
+Each arm must emit one frozen-prompt marker, two requeue markers, and one
+common prompt SHA. Every round requires 16 KV records, classifier-input
+upload/readback, classifier PASS, final upload/readback, `ROUND_COMPLETE`, then
+learner ACK. Control and every B-C boundary must be exact; B is full-reset and
+all cached-token counts must be zero.
+
+After completion, a further explicit approval is required for the read-only
+GCS return:
+
+```bash
+ANALYSIS_SOURCE=<full-published-E0t-SHA>
+RETURN=/mnt/disks/tunix-data/m15-e0-kv3r-return-${RUN_ID}
+test ! -e "$RETURN"
+bash canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/run_m15_attempt20_e0_kv3_return_recovery.sh \
+  "$ANALYSIS_SOURCE" "$OUT" "$RETURN" /mnt/disks/tunix-data
+```
+
+Require `[M15.E0.KV3R.RECOVERY] COMPLETE ... gcs_read=1 gcs_write=0
+kubernetes=0 tpu=0`. Partial rounds and root-incomplete runs stay
+INCONCLUSIVE. Large evidence stays in registered GCS; return only compact
+receipts, sanitized markers, and local log/manifest SHAs.
+
+## Superseded operation: pre-repair Attempt-19 three-round E0 KV pair
 
 Do not use the historical Attempt-18 one-round YAML for a new target. Its
 `observer=kv`/`round-alignment-v1` identity is preserved only for read-only

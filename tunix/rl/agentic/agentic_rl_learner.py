@@ -250,6 +250,71 @@ def _p38_diagnostic_consumer_contract(
   return full_batch_size, True, full_batch_size // mini_batch_size
 
 
+def _p38_m15_e0_kv_frozen_prompt_replay(environment) -> bool:
+  """Whether E0 KV3 must rerun one prompt inventory across all rounds."""
+  return (
+      environment.get("CANON_APC_M15_TARGET_DEBUG", "") in ("off", "on")
+      and environment.get("CANON_P38_PRECHECK_ONLY", "0") == "1"
+      and environment.get("CANON_P38_DURABILITY_PROFILE", "")
+      == "m15-e0-kv-v1"
+      and environment.get("CANON_P38_DIAGNOSTIC_ROUNDS", "") == "3"
+  )
+
+
+def _p38_m15_e0_kv_prompt_batch_sha256(batch, expected_prompts: int) -> str:
+  """Hash the non-token M15 prompt identities used by the KV3 replay."""
+  rows = {}
+  for key in ("p57_index", "seed", "map_sha256"):
+    if key not in batch:
+      raise alignment.AlignmentGateError(
+          f"M15 E0 KV3 frozen prompt batch is missing {key!r}"
+      )
+    values = np.asarray(batch[key]).reshape(-1)
+    if values.size != expected_prompts:
+      raise alignment.AlignmentGateError(
+          "M15 E0 KV3 frozen prompt identity coverage changed: "
+          f"field={key} observed={values.size} expected={expected_prompts}"
+      )
+    if key == "map_sha256":
+      normalized = []
+      for value in values:
+        if isinstance(value, np.generic):
+          value = value.item()
+        if isinstance(value, bytes):
+          try:
+            value = value.decode("ascii")
+          except UnicodeDecodeError as exc:
+            raise alignment.AlignmentGateError(
+                "M15 E0 KV3 frozen prompt map identity is malformed"
+            ) from exc
+        normalized.append(str(value))
+      if any(
+          len(value) != 64
+          or any(character not in "0123456789abcdef" for character in value)
+          for value in normalized
+      ):
+        raise alignment.AlignmentGateError(
+            "M15 E0 KV3 frozen prompt map identity is malformed"
+        )
+    else:
+      normalized = [int(value) for value in values]
+    rows[key] = normalized
+  if len(set(rows["p57_index"])) != expected_prompts:
+    raise alignment.AlignmentGateError(
+        "M15 E0 KV3 frozen prompt indices are not unique"
+    )
+  payload = json.dumps(
+      {
+          "schema": "m15-e0-kv3-frozen-prompt-batch-v1",
+          "prompts": expected_prompts,
+          "rows": rows,
+      },
+      sort_keys=True,
+      separators=(",", ":"),
+  ).encode("utf-8")
+  return hashlib.sha256(payload).hexdigest()
+
+
 def _frozenlake_evaluation_metrics(
     rewards: Any, *, wall_seconds: float, policy_step: int
 ) -> dict[str, float | int]:
@@ -3418,6 +3483,25 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
 
     logging.info("Starting AgenticRLLearner training loop.")
     full_dataset_iterator = itertools.chain([first_item], full_batch_iterator)
+    m15_e0_kv_frozen_prompt_replay = (
+        _p38_m15_e0_kv_frozen_prompt_replay(os.environ)
+    )
+    m15_e0_kv_frozen_prompt_batch = None
+    m15_e0_kv_frozen_prompt_sha256 = ""
+    if m15_e0_kv_frozen_prompt_replay:
+      m15_e0_kv_frozen_prompt_batch = copy.deepcopy(first_item)
+      m15_e0_kv_frozen_prompt_sha256 = (
+          _p38_m15_e0_kv_prompt_batch_sha256(
+              m15_e0_kv_frozen_prompt_batch, full_batch_size
+          )
+      )
+      print(
+          "[CANON_P38] E0_KV3_PROMPT_BATCH_FROZEN "
+          f"prompts={full_batch_size} "
+          f"sha256={m15_e0_kv_frozen_prompt_sha256} "
+          "rounds=3 dataset_advance=0",
+          flush=True,
+      )
 
     all_eval_prompts = (
         list(self._create_micro_batch_iterator(iter(eval_dataset), 1))
@@ -3528,12 +3612,24 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       logging.info(
           "Prefilling prompt queue with %d batches.", initial_buffer_size
       )
-      for _ in range(initial_buffer_size):
-        try:
-          self._put_prompts_to_queue(prompt_queue, next(full_dataset_iterator))
-        except StopIteration:
-          prompt_queue.put(None)
-          break
+      if m15_e0_kv_frozen_prompt_replay:
+        if initial_buffer_size != 1:
+          raise alignment.AlignmentGateError(
+              "M15 E0 KV3 frozen prompt replay requires off_policy_steps=0"
+          )
+        assert m15_e0_kv_frozen_prompt_batch is not None
+        self._put_prompts_to_queue(
+            prompt_queue, copy.deepcopy(m15_e0_kv_frozen_prompt_batch)
+        )
+      else:
+        for _ in range(initial_buffer_size):
+          try:
+            self._put_prompts_to_queue(
+                prompt_queue, next(full_dataset_iterator)
+            )
+          except StopIteration:
+            prompt_queue.put(None)
+            break
 
       producer_future = asyncio.run_coroutine_threadsafe(
           self._producer(orchestrator, prompt_queue, train_data_queue),
@@ -3686,14 +3782,25 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
                 f"completed_rounds={completed}",
                 flush=True,
             )
-          try:
-            next_prompts = next(full_dataset_iterator)
-          except StopIteration as exc:
-            prompt_queue.put(None)
-            raise RuntimeError(
-                "P38 frozen-weight diagnostic exhausted the dataset after "
-                f"{completed}/{total} rounds"
-            ) from exc
+          if m15_e0_kv_frozen_prompt_replay:
+            assert m15_e0_kv_frozen_prompt_batch is not None
+            next_prompts = copy.deepcopy(m15_e0_kv_frozen_prompt_batch)
+            print(
+                "[CANON_P38] E0_KV3_PROMPT_BATCH_REQUEUED "
+                f"completed={completed}/{total} "
+                f"sha256={m15_e0_kv_frozen_prompt_sha256} "
+                "dataset_advance=0",
+                flush=True,
+            )
+          else:
+            try:
+              next_prompts = next(full_dataset_iterator)
+            except StopIteration as exc:
+              prompt_queue.put(None)
+              raise RuntimeError(
+                  "P38 frozen-weight diagnostic exhausted the dataset after "
+                  f"{completed}/{total} rounds"
+              ) from exc
           self._put_prompts_to_queue(prompt_queue, next_prompts)
           print(
               "[CANON_P38] DIAGNOSTIC_ROUND_SKIPPED_UPDATE "

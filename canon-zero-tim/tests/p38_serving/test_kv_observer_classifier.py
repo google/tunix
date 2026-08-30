@@ -96,9 +96,9 @@ class KvObserverClassifierTest(unittest.TestCase):
         path,
         metadata_json=np.frombuffer(metadata, dtype=np.uint8),
         selected_rows=np.array([255], dtype=np.int32),
-        prompt_ids=np.array([[1, 2]], dtype=np.int32),
-        prompt_mask=np.array([[True, True]]),
-        completion_ids=np.array([[3, 4]], dtype=np.int32),
+        prompt_ids=np.array([[1, 2, 3]], dtype=np.int32),
+        prompt_mask=np.array([[True, True, True]]),
+        completion_ids=np.array([[4, 5]], dtype=np.int32),
         completion_valid_mask=np.array([[True, True]]),
         action_mask=np.array([[True, True]]),
         s_decode=np.array([[0.1, 0.0]], dtype=np.float32),
@@ -150,6 +150,13 @@ class KvObserverClassifierTest(unittest.TestCase):
       )
       self.assertEqual(report["red_joins"][0]["source_row"], 255)
       self.assertEqual(
+          report["red_joins"][0]["snapshot_mismatch_positions"], []
+      )
+      self.assertEqual(
+          report["red_joins"][0]["next_token_boundary_mismatch_positions"],
+          [0],
+      )
+      self.assertEqual(
           report["comparisons"][0]["first_difference"],
           {
               "layer": 0,
@@ -166,6 +173,16 @@ class KvObserverClassifierTest(unittest.TestCase):
       self.assertEqual(
           len(report["source_inputs"]["capsules"][0]["sha256"]), 64
       )
+      capsule = self._capsule(root)
+      with np.load(capsule, allow_pickle=False) as arrays:
+        values = {name: arrays[name] for name in arrays.files}
+      values["s_decode"] = np.array([[0.0, 0.1]], dtype=np.float32)
+      values["s_prefill"] = np.array([[0.0, 0.2]], dtype=np.float32)
+      np.savez(capsule, **values)
+      with self.assertRaisesRegex(
+          classifier.ObserverError, "no paired observer candidate joined"
+      ):
+        classifier.classify(root, [capsule], True)
 
   def test_selected_layer_reports_absolute_layer_index(self):
     with tempfile.TemporaryDirectory() as tmp:

@@ -1496,3 +1496,48 @@ is not a current fact or launch authority.
   than self-recorded in its own commit. After publication, a clean exact-SHA
   agent runs prepare-only; pinned exact-image and DP8×TP8 launch each require
   their own later approval.
+
+## 2026-08-30 — Attempt 19 carrier failure analyzed; E0t repair HOST PASS
+
+- Reviewed the committed Attempt-19 incident at
+  `evidence/m15_e0_kv3_attempt19_incident/`; its `SHA256SUMS` file has SHA256
+  `bc824561d39ed4e0bb5df65f56baff68e86ac64b8694a073f13a40bf31ba1636`.
+- Preserved the real numerical result: APC-on round 0 has A-B 366 bytes / 160
+  elements, B-C zero, 92.8% cache hits, and first mismatch `[131,0]` at
+  logical prefix 1226 in `[256,8192]`. APC-off round 0 sealed exact; round 1
+  was A-B/B-C exact but emitted zero targeted KV records. Neither arm reached
+  round 2, so Attempt 19 is `INCONCLUSIVE_CARRIER_FAILURE`.
+- Corrected the incident's preliminary classifier explanation. The observed KV
+  snapshot and the first red action both end at logical prefix 1226. A
+  snapshot at prefix L is the causal state for scoring the next token at L;
+  the old strict `<L` join incorrectly excluded that equality boundary.
+- Updated source-request binding and red joins to admit `==L`, report
+  next-token-boundary positions separately, and retain the `>L` future red
+  negative. Existing ambiguous-prefix and request-binding fail-closed gates
+  remain active.
+- Restricted three-round prompt replay to the exact signed
+  `m15-e0-kv-v1` profile. It deep-copies the round-0 32-prompt inventory,
+  self-hashes `p57_index/seed/map_sha256`, and requeues it after rounds 0/1.
+  Rollout requests, call chronology, cache behavior, sampling, A, B, and C
+  rerun each round; neighboring profiles retain dataset advancement.
+- Added runtime admission for one frozen marker, exactly two requeue markers,
+  and one common prompt SHA. Added Attempt-20 prepare and read-only recovery
+  wrappers bound to the incident manifest and repaired carrier contract.
+- Focused gates PASS: KV classifier 7/7, target carrier 21/21, P3 contract
+  12/12, Python/Bash syntax, and `git diff --check`.
+- Aggregate HOST PASS:
+  `M15_E0_KV3R_HOST_PASS task_discovery=193 return=1 v1_cpu=91
+  p3_prefix_cache=31 persistence=1 flags=408 manifest=dae6dfa8 syntax=1
+  diff_check=1 exact_image=0 target=0 gcs=0 kubernetes=0 tpu=0`.
+  Raw log `/tmp/m15-e0-kv3r-host-gate-postrebase-20260830.log`, SHA256
+  `ef6992bc55079965759b12395f15378c0ca1d693628ac05e5d60742f4712e811`.
+- Scope: classifier accounting, exact-profile prompt scheduling, postflight,
+  tests, scripts, and phase/operator documentation only. No numerical or
+  production APC code changed. Post-repair pinned exact-image and target are
+  NOT RUN. No commit, push, Docker, GCS, Kubernetes, TPU, or other external
+  mutation occurred in this checkpoint.
+- Delivery authorization: the user explicitly authorized this E0t commit/push.
+  The full delivered SHA is reported by the delivery operation rather than
+  self-recorded in its own commit. A clean published-SHA agent then runs
+  `prepare_m15_attempt20_e0_kv3_pair.sh`; pinned exact-image, target launch,
+  and read-only GCS recovery remain separate approval gates.

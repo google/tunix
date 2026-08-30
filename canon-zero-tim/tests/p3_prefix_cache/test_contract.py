@@ -134,6 +134,9 @@ class PrefixCacheContractTest(unittest.TestCase):
         catch.index("next_prompts = next(full_dataset_iterator)"),
     )
     self.assertIn("self.rl_cluster.perf_v2.export()", catch)
+    self.assertIn("if m15_e0_kv_frozen_prompt_replay:", catch)
+    self.assertIn("E0_KV3_PROMPT_BATCH_REQUEUED", catch)
+    self.assertIn("dataset_advance=0", catch)
     self.assertIn('mode not in ("step", "update", "diagnostic")', learner)
 
 

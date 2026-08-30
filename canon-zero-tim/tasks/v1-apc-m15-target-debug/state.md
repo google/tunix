@@ -1,77 +1,73 @@
 # State
 
-- Status: active; `E0_KV3_DURABILITY_IMPLEMENTED_HOST_PASS`. The implementation
-  was built from base `a951656e90ee91d5d7781d625377831dfd6c255d`; the user
-  explicitly authorized its commit/push delivery. The published source is the
-  full commit containing this file and must be resolved with `git rev-parse
-  HEAD`, not inferred from the implementation base.
-- Why this phase exists: Attempt 18 was deliberately rendered as a one-round
-  E0 discriminator; it did not accidentally stop before round 3. Its returned
-  package later failed provenance admission, and a one-round/root-dependent
-  design cannot establish repeat stability or guarantee that useful evidence
-  survives a later round/root failure. The historical `observer=kv` one-round
-  route remains unchanged for read-only Attempt-18 recovery.
-- New execution identity: `observer=kv3`, durability profile
-  `m15-e0-kv-v1`, exactly three frozen-weight DP8×TP8 M15/main rounds per
-  arm. Production profiles remain APC-off and do not select this identity.
-- Per-round order is fail closed:
-  `16 KV records (8A+8B) staged -> classifier-input self-hash/archive ->
-  upload/readback -> classifier PASS -> round archive/upload/readback ->
-  ROUND_COMPLETE -> learner ACK`. `ROUND_COMPLETE` hashes the round input,
-  classifier result, and classifier-input receipt. The full run log is
-  collected once at the root instead of being copied into every round.
-  Record indices remain globally monotonic; only the per-round candidate set
-  and byte budget reset. Cross-round A/B pairing is rejected.
-- Durability boundary: round 0/1 evidence is independently recoverable even
-  if round 2 or root collection fails. The read-only return downloads the
-  small per-round completion/classifier/checkpoint receipts before attempting
-  `COLLECTED.json` or `COMPLETE.json`; missing root terminal state is reported
-  as `ROUNDS_RECOVERED_ROOT_INCOMPLETE`, not as missing evidence and not as a
-  target PASS.
-- Incident ledger: the three-round E0 profile bypasses the redundant bounded
-  incident ledger, which otherwise saturates across the M15 chronology. The
-  replay envelope plus sealed KV rounds are the replacement. Legacy and
-  non-E0 profiles retain their old behavior.
-- Aggregate decisions require all three rounds. APC-off must be
-  `CONTROL_EXACT_3_OF_3`. APC-on may be
-  `TARGET_NON_REPRODUCTION_3_OF_3`,
-  `LIVE_KV_FINGERPRINT_EQUAL_3_OF_3`, or
-  `LIVE_KV_FINGERPRINT_DIFFERS_3_OF_3`; mixed outcomes fail closed. Every
-  round still requires B-C exact and B full reset with zero cached tokens.
-- Last admitted numerical boundary remains D3e, Layer 0
+- Status: active;
+  `E0T_ATTEMPT19_CARRIER_REPAIR_IMPLEMENTED_HOST_PASS_DELIVERY_AUTHORIZED`.
+  Implementation started at full SHA
+  `ba4316ffbfbe181c9f7e2bb7f73ae6047db577bb`; that is an implementation base,
+  not an execution identity. The user explicitly authorized commit/push. The
+  published source is the full delivered commit containing this file and must
+  be resolved from the remote branch after delivery.
+- Attempt 19 used target source
+  `d93d2729c5f036506fe754b929d42b142177a9b7`. Its incident bundle is
+  `evidence/m15_e0_kv3_attempt19_incident/`; the `SHA256SUMS` file has SHA256
+  `bc824561d39ed4e0bb5df65f56baff68e86ac64b8694a073f13a40bf31ba1636`.
+- Treatment round 0 is a real serving-only red: A-B 366 bytes / 160 elements,
+  B-C zero, 92.8% prefix-cache hits, first mismatch `[131,0]`, logical KV
+  prefix 1226, comparison geometry `[256,8192]`. It preserved classifier input
+  but failed classification before `ROUND_COMPLETE`; rounds 1/2 are absent.
+- Control round 0 completed exact. Control round 1 was also A-B/B-C exact but
+  emitted zero targeted KV records; round 2 is absent. Attempt 19 is therefore
+  `INCONCLUSIVE_CARRIER_FAILURE`, not a three-round mechanism verdict.
+- Root cause 1: the classifier required a red logical prefix to be strictly
+  inside the KV snapshot. The first red is the next action scored from the
+  prefix-1226 snapshot, so equality is causally valid. The repair admits
+  equality in source binding/red join, reports it separately as
+  `next_token_boundary_mismatch_positions`, and still rejects future `>L`
+  reds.
+- Root cause 2: the three diagnostic rounds advanced the FrozenLake dataset
+  although the KV target prefix was statically bound to the D3e round-0 prompt.
+  The repair freezes and hashes the exact 32-prompt round-0 identity inventory
+  and requeues it for rounds 1/2 only under the exact `m15-e0-kv-v1` profile.
+  Every round still reruns rollout requests, calls, cache chronology, A, B,
+  and C. Neighboring profiles still advance their dataset.
+- Runtime admission now requires one
+  `E0_KV3_PROMPT_BATCH_FROZEN` marker, two
+  `E0_KV3_PROMPT_BATCH_REQUEUED` markers, and one common prompt-batch SHA.
+  Missing, duplicate, or drifting markers fail closed in `90_run.sh`.
+- The immutable per-round order remains:
+  `16 KV records -> classifier-input self-hash/upload/readback -> classifier
+  PASS -> round archive/upload/readback -> ROUND_COMPLETE -> learner ACK`.
+  B remains `reset_prefix_cache=True` with all cached-token counts zero.
+- Last admitted tensor localization remains D3e Layer 0
   `k_post_rope -> rpa_output`, shape `[2048,1,15,8]`, source row 217 / source
-  position 1225 / A call 83. No RoPE, RPA, attention, KV value, LM-head,
-  loss, backward, optimizer, or production-default repair is present.
-- Attempt-18 official-return status remains rejected:
-  `ATTEMPT18_E0_RETURN_PROVENANCE_FAIL`. Its reported control/treatment
-  values do not become official evidence through this implementation.
+  position 1225 / A call 83. This change touches classifier accounting,
+  diagnostic prompt scheduling, postflight admission, tests, and operator
+  wrappers only. No RoPE, RPA, attention, KV value, LM-head, loss, backward,
+  optimizer, production profile, or production APC default changed.
 - Validation: aggregate HOST PASS — task discovery 193/193, salvage-first
-  return partial/full paths, V1 CPU 91/91, P3 prefix-cache 31/31, fake-GCS
-  persistence including three sealed/classified/readback rounds and a forced
-  round-2 failure preserving rounds 0/1, flag registry 398/398, Python/Bash
-  syntax, static manifest binding, and `git diff --check`. Patch 36 also
-  applied to the registered pre-Patch-36 runner and reproduced manifest SHA
-  `15fddce5eb5157494cc01639a50e677e5d7ce775b883ff5c7d29f6a854317f67`.
-  Raw host log: `/tmp/m15-e0-kv3-host-gate-final-20260830.log`, SHA256
-  `cccc0bdce2dd01d5dd84f1fdc61f31ba4be7570ed692fccedb43387e839cf12d`.
-  Official pinned exact-image and DP8×TP8 target are NOT RUN.
-- Prepared local-only scripts:
+  return paths, V1 CPU 91/91, P3 prefix-cache 31/31, fake-GCS persistence and
+  forced failure, flag registry 408/408, Python/Bash syntax, current static
+  runner manifest `dae6dfa8...`, and `git diff --check`. Terminal:
+  `M15_E0_KV3R_HOST_PASS task_discovery=193 return=1 v1_cpu=91
+  p3_prefix_cache=31 persistence=1 flags=408 manifest=dae6dfa8 syntax=1
+  diff_check=1 exact_image=0 target=0 gcs=0 kubernetes=0 tpu=0`.
+  Raw log: `/tmp/m15-e0-kv3r-host-gate-postrebase-20260830.log`, SHA256
+  `ef6992bc55079965759b12395f15378c0ca1d693628ac05e5d60742f4712e811`.
+- Prepared scripts:
   `run_m15_e0_kv3_host_gate.sh`,
-  `prepare_m15_attempt19_e0_kv3_pair.sh`,
-  `run_m15_attempt19_e0_kv3_gcs_return.sh`, and
-  `run_m15_attempt19_e0_kv3_return_recovery.sh`. Running the prepare script is
-  local CPU/disk only. Pinned Docker, GCS reads, and Kubernetes/TPU launch are
-  separate approval gates.
-- Current gate: clean exact-SHA prepare after publication. The other agent must
-  use a clean worktree at the full delivered SHA, run prepare-only, obtain
-  separate pinned exact-image approval, then obtain a separate target-launch
-  approval. GCS return is a further read-only approval.
+  `prepare_m15_attempt20_e0_kv3_pair.sh`, and
+  `run_m15_attempt20_e0_kv3_return_recovery.sh`. Prepare is local CPU/disk and
+  fake GCS only. The return wrapper is read-only GCS and must not run here.
+- Current gate: deliver the authorized commit/push, verify the remote-tracking
+  SHA, then have a clean exact-SHA executor run prepare-only. Official pinned
+  exact-image, fresh DP8xTP8 launch, and read-only GCS return are three separate
+  later approvals.
 - Claim ceiling:
-  `FIRST_RED_LOCALIZED_FROM_D3E /
-  E0_KV3_DURABILITY_HOST_PASS /
-  EXACT_IMAGE_NOT_RUN /
-  TARGET_NOT_RUN /
+  `ATTEMPT19_REAL_APC_RED /
+  ATTEMPT19_INCONCLUSIVE_CARRIER_FAILURE /
+  E0T_REPAIR_HOST_PASS /
+  POST_REPAIR_EXACT_IMAGE_NOT_RUN /
+  POST_REPAIR_TARGET_NOT_RUN /
   PHASE_E_CLOSED /
-  APC_NUMERICAL_FIX_NOT_IMPLEMENTED /
-  NUMERICAL_REPAIR_NOT_AUTHORIZED`.
+  APC_NUMERICAL_FIX_NOT_IMPLEMENTED`.
 - Updated: 2026-08-30.
