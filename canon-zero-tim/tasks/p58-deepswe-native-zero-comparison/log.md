@@ -1948,3 +1948,32 @@
   with `transport=token-in-token-out`.  The complete digest-pinned gate also
   exits zero with `P58_EXACT_IMAGE_CPU_PASS ... zero_hp_full=1 ...
   regressions=1`.  No hardware result is reattributed to the new parent.
+
+## 2026-08-30 UTC — P58.26 K09 full-startup scope repair
+
+- Pulled the operator branch from `953eae75` through the immutable K09
+  incident and both shared Qwen explicit-mesh resharding changes. Final local
+  parent is `0d224e4a0e8c278f1bf9f699af235fdea83ef327`; the P58.26 diff was
+  preserved and restored without conflict when the final Qwen commit arrived.
+- K09 source `0b62b6bbd3d9fa44268c7640047d4b60047cb4d5`
+  passed TiTO, 4,578-to-1,012 clean-data filtering, 128-device discovery, and
+  rollout/trainer DP8xTP8 mesh construction, then stopped before rollout.
+  `P58_Q4_TP4_TRAJECTORY_REPLAY` was assigned only inside the one-host branch
+  but loaded later during shared `ClusterConfig` construction, producing a
+  full-mode `NameError`.
+- The source now binds that one-host selector to `False` before the branch and
+  requires both `ONEHOST_SMOKE` and the selector before deriving replay
+  geometry. An executable AST regression runs the real full-mode negative and
+  one-host positive paths and rejects any later-loaded uppercase one-host name
+  without a top-level binding.
+- Final gates: P34 static ten suites, focused P58 49/49, script contract 10/10,
+  Python/diff hygiene, and deterministic flag audit 409/409 with
+  `changed_names=0`. The complete pinned-image gate on
+  `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`
+  exits zero with `P58_EXACT_IMAGE_CPU_PASS ... regressions=1`.
+- No flag, model, data, sampler, loss, precision, optimizer, topology,
+  deadline, TiTO, or Zero-HP bundle changed. This closes the K09 source/image
+  exception only. No successor target, rollout, trajectory, backward,
+  optimizer commit, checkpoint, or completion evidence exists.
+- No commit, push, image publication, Kubernetes mutation, or TPU launch was
+  performed.

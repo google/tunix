@@ -1,5 +1,45 @@
 # P58 DeepSWE native-first training handoff
 
+## START HERE — K09 is a pre-rollout Python scope failure
+
+K09 is not a model, TiTO, R2E dataset, or DP8xTP8 admission failure. Source
+`0b62b6bbd3d9fa44268c7640047d4b60047cb4d5` reached all of these receipts:
+
+```text
+[DEEPSWE.TITO] ADMISSION_PASS ... retokenize_sampled_tokens=0
+[P34.DATASET] CLEAN_DATA_PASS source_rows=4578 filtered_rows=1012 ...
+[P34.DEVICE_INVENTORY] PASS devices=128 ...
+[P34.TOPOLOGY] PASS rollout_devices=64 trainer_devices=64 ...
+Rollout Mesh: dp=8,tp=8
+Train Mesh: dp=8,tp=8
+```
+
+It then read `P58_Q4_TP4_TRAJECTORY_REPLAY` during shared `ClusterConfig`
+construction even though that diagnostic name had only been assigned inside
+the one-host branch. The local P58.26 repair binds it to `False` before that
+branch and short-circuits replay geometry on `ONEHOST_SMOKE`. The regression
+executes both the full-mode negative path and one-host positive path, and a
+scope audit rejects future one-host uppercase names escaping unbound.
+
+The repair is locally validated on exact operator parent
+`0d224e4a0e8c278f1bf9f699af235fdea83ef327`, including both latest shared
+Qwen explicit-mesh resharding changes. P34 static passes ten suites, focused
+P58 passes 49/49, script contract passes 10/10, and the flag audit passes
+409/409 with `changed_names=0`. The complete pinned-image gate exits zero with
+`P58_EXACT_IMAGE_CPU_PASS ... regressions=1` on image
+`sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`.
+This is local source/image admission; it is not a published source SHA or a
+128-chip target result.
+
+Do not claim the full target is healthy from this source repair. After source
+publication, matching-image publication, capacity admission, and separate
+launch approval, use a fresh Attempt-0 run. It must progress past the former
+line 1804 and produce a real TiTO continuation plus a complete 128-row Step-0
+journal before any numerical conclusion. K09 has no trajectory, backward,
+optimizer commit, checkpoint, or resumable training state. See
+`phases/p58-26-k09-full-startup-scope.md` and the immutable incident package
+under `canon-zero-tim/evidence/p58_k09_deepswe_unbound_variable_incident/`.
+
 ## START HERE — default full YAML now fail-closes on TiTO
 
 For every P58 Native, Native+IS, Zero, and Zero-HP render, require both the raw

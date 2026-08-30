@@ -857,6 +857,10 @@ if (
 
 P58_ONEHOST_XPROF_ARM = ""
 P58_ONEHOST_SEAM_PROBE = False
+# This selector is assigned from the environment only inside the one-host
+# admission block.  Production DeepSWE must still bind it so later shared
+# cluster-config construction cannot read an unbound diagnostic name.
+P58_Q4_TP4_TRAJECTORY_REPLAY = False
 if ONEHOST_SMOKE:
   if not deepswe_debug.deepswe_exact_token_continuity(os.environ):
     raise ValueError("one-host DeepSWE requires token-in/token-out")
@@ -1801,7 +1805,7 @@ else:
 
 P58_REPLAY_UPDATE_GEOMETRY = (
     deepswe_debug.q4_tp4_trajectory_replay_update_geometry(os.environ)
-    if P58_Q4_TP4_TRAJECTORY_REPLAY
+    if ONEHOST_SMOKE and P58_Q4_TP4_TRAJECTORY_REPLAY
     else None
 )
 

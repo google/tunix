@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import ast
 import os
 from pathlib import Path
 import subprocess
 import sys
 import textwrap
+import types
 import unittest
 
 
@@ -74,6 +76,100 @@ class DeepSWEScriptContractTest(unittest.TestCase):
     self.assertIn("argparse.BooleanOptionalAction", block)
     self.assertIn('"--optimizer-offload"', block)
     self.assertNotIn("type=bool", block)
+
+  def test_full_startup_cannot_read_the_onehost_replay_selector_unbound(self):
+    source = ROOT / "examples/deepswe/train_deepswe_nb.py"
+    tree = ast.parse(source.read_text())
+
+    def assigned_name(node, name):
+      return (
+          isinstance(node, ast.Assign)
+          and any(
+              isinstance(target, ast.Name) and target.id == name
+              for target in node.targets
+          )
+      )
+
+    onehost_block = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.If)
+        and isinstance(node.test, ast.Name)
+        and node.test.id == "ONEHOST_SMOKE"
+        and node.lineno > 800
+    )
+    replay_default = next(
+        node
+        for node in tree.body
+        if assigned_name(node, "P58_Q4_TP4_TRAJECTORY_REPLAY")
+    )
+    replay_geometry = next(
+        node
+        for node in tree.body
+        if assigned_name(node, "P58_REPLAY_UPDATE_GEOMETRY")
+    )
+    self.assertLess(replay_default.lineno, onehost_block.lineno)
+    self.assertIs(ast.literal_eval(replay_default.value), False)
+    self.assertIsInstance(replay_geometry.value, ast.IfExp)
+    self.assertIsInstance(replay_geometry.value.test, ast.BoolOp)
+    self.assertIsInstance(replay_geometry.value.test.op, ast.And)
+
+    onehost_names = {
+        node.id
+        for node in ast.walk(onehost_block)
+        if isinstance(node, ast.Name)
+        and isinstance(node.ctx, ast.Store)
+        and node.id.isupper()
+    }
+    names_bound_before_onehost = {
+        node.id
+        for statement in tree.body
+        if getattr(statement, "lineno", 0) < onehost_block.lineno
+        for node in ast.walk(statement)
+        if isinstance(node, ast.Name)
+        and isinstance(node.ctx, ast.Store)
+        and node.id.isupper()
+    }
+    names_loaded_after_onehost = {
+        node.id
+        for statement in tree.body
+        if getattr(statement, "lineno", 0) > onehost_block.end_lineno
+        for node in ast.walk(statement)
+        if isinstance(node, ast.Name)
+        and isinstance(node.ctx, ast.Load)
+        and node.id.isupper()
+    }
+    self.assertEqual(
+        (onehost_names & names_loaded_after_onehost)
+        - names_bound_before_onehost,
+        set(),
+    )
+
+    calls = []
+    namespace = {
+        "ONEHOST_SMOKE": False,
+        "deepswe_debug": types.SimpleNamespace(
+            q4_tp4_trajectory_replay_update_geometry=(
+                lambda env: calls.append(dict(env)) or (4, 2)
+            )
+        ),
+        "os": types.SimpleNamespace(environ={}),
+    }
+    probe = ast.fix_missing_locations(
+        ast.Module(body=[replay_default, replay_geometry], type_ignores=[])
+    )
+    exec(compile(probe, str(source), "exec"), namespace)
+    self.assertIsNone(namespace["P58_REPLAY_UPDATE_GEOMETRY"])
+    self.assertEqual(calls, [])
+
+    namespace["ONEHOST_SMOKE"] = True
+    namespace["P58_Q4_TP4_TRAJECTORY_REPLAY"] = True
+    replay_probe = ast.fix_missing_locations(
+        ast.Module(body=[replay_geometry], type_ignores=[])
+    )
+    exec(compile(replay_probe, str(source), "exec"), namespace)
+    self.assertEqual(namespace["P58_REPLAY_UPDATE_GEOMETRY"], (4, 2))
+    self.assertEqual(calls, [{}])
 
   def test_full_capture_runs_before_rollout_only_or_backward(self):
     learner = (

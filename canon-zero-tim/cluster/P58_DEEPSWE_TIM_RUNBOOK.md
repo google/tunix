@@ -18,6 +18,41 @@ P58 does not modify `main`. Rendering and local validation do not authorize a
 Kubernetes apply. An operator must separately approve image publication and
 each launch.
 
+## K09 startup-scope gate
+
+K09 proved source/data/topology admission but stopped before rollout. The
+required positive receipts were TiTO admission, 1,012 clean rows from the
+signed 4,578-row source, all 128 devices, and DP8xTP8 meshes for both roles.
+The first failure was a Python `NameError`: full mode read the one-host-only
+`P58_Q4_TP4_TRAJECTORY_REPLAY` selector while deriving cluster update
+geometry.
+
+P58.26 binds that selector to `False` before the one-host block and derives
+replay geometry only when both `ONEHOST_SMOKE` and the replay selector are
+true. Before rendering a successor, require the P34 script-contract test to
+prove:
+
+```text
+full mode: replay helper calls=0, replay geometry=None
+one-host replay: helper calls=1, signed geometry returned
+one-host uppercase scope audit: unbound later loads=0
+```
+
+This gate changes no recipe value. A source/image PASS only closes the K09
+startup exception. The successor remains `TARGET NOT RUN` until a separately
+approved Attempt-0 produces at least one real TiTO continuation, all 128
+Step-0 trajectory rows, strict pre-backward alignment, and the later trainer
+receipts.
+
+The current local admission is based on exact operator parent
+`0d224e4a0e8c278f1bf9f699af235fdea83ef327` plus the P58.26 diff. P34 static
+passes ten suites, focused P58 passes 49/49, script contract passes 10/10,
+and flag audit passes 409/409 with `changed_names=0`. The complete gate on
+image `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`
+ends with `P58_EXACT_IMAGE_CPU_PASS ... regressions=1`. Do not turn this local
+dirty-tree receipt into a launch source: first publish under separate user
+approval, then fetch and verify the resulting clean remote readback SHA.
+
 ## Default-full TiTO admission gate
 
 All P58 arm/stage renders must contain both:

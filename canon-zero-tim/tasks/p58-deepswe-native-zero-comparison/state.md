@@ -1,5 +1,34 @@
 # State
 
+## P58.26 K09 full-startup scope repair (2026-08-30)
+
+- Latest operator tip `0d224e4a0e8c278f1bf9f699af235fdea83ef327`
+  contains the immutable K09 incident but no runtime repair. The local repair
+  was reconciled without conflict over both shared Qwen explicit-mesh
+  resharding changes (`0b62b6bb` and `0d224e4a`). K09 source
+  `0b62b6bbd3d9fa44268c7640047d4b60047cb4d5` passed TiTO admission, clean-data
+  filtering (4,578 to 1,012), 128-device inventory, and rollout/trainer
+  DP8xTP8 mesh construction, then failed before rollout with an unbound
+  one-host-only `P58_Q4_TP4_TRAJECTORY_REPLAY` name.
+- The local repair initializes that selector to `False` before the one-host
+  admission block and additionally gates replay geometry on
+  `ONEHOST_SMOKE`. Full training therefore cannot call or inherit one-host
+  replay geometry; the admitted one-host replay path is unchanged.
+- A new executable AST regression covers the exact K09 full-mode branch and
+  the positive one-host branch. It also rejects any future uppercase selector
+  assigned only inside the one-host block and loaded later without a top-level
+  binding.
+- Final validation on `0d224e4a0e8c278f1bf9f699af235fdea83ef327`:
+  P34 static passes ten suites, focused P58 passes 49/49, the script contract
+  passes 10/10, Python/diff hygiene passes, and the flag audit passes 409/409
+  with `changed_names=0`. The complete digest-pinned image gate exits zero
+  with `P58_EXACT_IMAGE_CPU_PASS ... regressions=1` on image
+  `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`.
+- No model/data/sampling/loss/precision/optimizer/mesh/timeout/TiTO/Zero-HP
+  setting changed. K09 remains `INCONCLUSIVE_PRE_ROLLOUT`; no fresh target,
+  backward, optimizer commit, checkpoint, or training-completion evidence
+  exists. No image publication or Kubernetes/TPU mutation occurred.
+
 ## P58.25a default-full YAML TiTO admission and one-host proof (2026-08-30)
 
 - The P58 JobSet renderer now places `CANON_P34_DEEPSWE=1` in the raw
