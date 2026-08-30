@@ -1,0 +1,45 @@
+wandb: Find logs at: ./wandb/run-20260830_085938-f9bndb1l/logs
+[rank0]: Traceback (most recent call last):
+[rank0]:   File "/app/examples/math_gsm8k/qwen3_grpo_demo.py", line 1353, in <module>
+[rank0]:     main()
+[rank0]:   File "/app/examples/math_gsm8k/qwen3_grpo_demo.py", line 1316, in main
+[rank0]:     grpo_trainer.train(
+[rank0]:   File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 3771, in train
+[rank0]:     train_examples = self._batch_to_train_example(
+[rank0]:                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 3071, in _batch_to_train_example
+[rank0]:     return self._process_results(
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/rl/agentic/agentic_grpo_learner.py", line 862, in _process_results
+[rank0]:     trainer_per_token_logps = self.rl_cluster.get_actor_per_token_logps(
+[rank0]:                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/rl/rl_cluster.py", line 1350, in get_actor_per_token_logps
+[rank0]:     common.compute_per_token_logps(
+[rank0]:   File "/app/tunix/rl/common.py", line 455, in compute_per_token_logps
+[rank0]:     outputs, _ = model(input_tokens, **model_kwargs)
+[rank0]:                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/models/qwen3/model.py", line 1347, in __call__
+[rank0]:     layer_cache, x = layer(
+[rank0]:                      ^^^^^^
+[rank0]:   File "/app/tunix/models/qwen3/model.py", line 1248, in __call__
+[rank0]:     return self.block(
+[rank0]:            ^^^^^^^^^^^
+[rank0]:   File "/app/tunix/models/qwen3/model.py", line 1212, in block
+[rank0]:     cache, attn_output = self.attn(
+[rank0]:                          ^^^^^^^^^^
+[rank0]:   File "/app/tunix/models/qwen3/model.py", line 783, in __call__
+[rank0]:     return self.block(x, segment_pos, cache, attn_mask, segment_ids=segment_ids)
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/models/qwen3/model.py", line 746, in block
+[rank0]:     outputs = self.o_proj(qkv)
+[rank0]:               ^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/models/qwen3/model.py", line 417, in __call__
+[rank0]:     return jnp.einsum(self.einsum_str, x, w)
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/usr/local/lib/python3.12/site-packages/jax/_src/numpy/einsum.py", line 338, in einsum
+[rank0]:     return jit_einsum(operand_arrays, contractions, precision,
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/usr/local/lib/python3.12/site-packages/jax/_src/numpy/einsum.py", line 566, in _einsum
+[rank0]:     operand = _dot_general(rhs, lhs, dimension_numbers, precision,
+[rank0]:               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]: jax._src.core.ShardingTypeError: Contracting dimensions are sharded and it is ambiguous how the output should be sharded. Please specify the output sharding via the `out_sharding` parameter. Got lhs_contracting_spec=(None, 'model') and rhs_contracting_spec=(None, 'model')
