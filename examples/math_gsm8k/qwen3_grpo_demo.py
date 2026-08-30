@@ -418,10 +418,32 @@ if CANON_P32_WORKLOAD:
   shared_mesh = dp_workloads.create_mesh(jax.devices(), P32_WORKLOAD)
 else:
   fl_shared_mesh = os.environ.get("FL_SHARED_MESH", "")
+  # FL_SHARED_MESH names the mesh SHAPE; it also selected Explicit axis types,
+  # so a recipe could not ask for this shape with the Auto types every other
+  # entry point in the repo uses.  CANON_GSM8K_MESH_AXIS_TYPES separates the
+  # two decisions: unset keeps the historical pairing byte for byte, and
+  # "auto" asks for Auto types at the same shape -- the stock trainer's own
+  # code leaves several shardings to inference, which Explicit axes refuse to
+  # infer, so the untreated Native arm needs that option to run at all.
+  axis_type_choice = os.environ.get("CANON_GSM8K_MESH_AXIS_TYPES", "")
+  if axis_type_choice not in ("", "auto", "explicit"):
+    raise ValueError(
+        "CANON_GSM8K_MESH_AXIS_TYPES must be unset, 'auto', or 'explicit'; "
+        f"got {axis_type_choice!r}"
+    )
   if fl_shared_mesh:
     mesh_axis_names = ("data", "model")
-    mesh_axis_types = (jax.sharding.AxisType.Explicit,) * len(SHARED_MESH_SHAPE)
+    explicit_axes = axis_type_choice != "auto"
+    mesh_axis_types = (
+        (jax.sharding.AxisType.Explicit,) * len(SHARED_MESH_SHAPE)
+        if explicit_axes
+        else (jax.sharding.AxisType.Auto,) * len(SHARED_MESH_SHAPE)
+    )
   else:
+    if axis_type_choice == "explicit":
+      raise ValueError(
+          "CANON_GSM8K_MESH_AXIS_TYPES=explicit requires FL_SHARED_MESH"
+      )
     mesh_axis_names = SHARED_MESH_AXIS_NAMES
     mesh_axis_types = (jax.sharding.AxisType.Auto,) * len(SHARED_MESH_SHAPE)
   shared_device_list = jax._src.mesh_utils.create_device_mesh(

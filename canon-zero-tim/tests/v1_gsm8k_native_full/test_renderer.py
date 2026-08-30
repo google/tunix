@@ -268,6 +268,40 @@ class Gsm8kNativeFullRendererTest(unittest.TestCase):
       )
       self.assertEqual(resolved.returncode, 0, msg=resolved.stderr)
 
+  def test_native_profile_asks_for_auto_mesh_axis_types(self):
+    """The untreated arm cannot run on Explicit axes; the Zero arm must not
+    inherit the escape hatch."""
+    native_profile = (
+        _PACKAGE / "cluster/profiles/qwen3-1p7b-dp16-tp4-gsm8k-native.env"
+    ).read_text(encoding="utf-8")
+    self.assertIn("export CANON_GSM8K_MESH_AXIS_TYPES=auto", native_profile)
+    self.assertIn("export FL_SHARED_MESH=16,4", native_profile)
+    for zero_profile_name in (
+        "qwen3-1p7b-dp16-tp4-gsm8k.env",
+        "qwen3-1p7b-dp16-tp4-gsm8k-v1-hp.env",
+    ):
+      zero_profile = (
+          _PACKAGE / "cluster/profiles" / zero_profile_name
+      ).read_text(encoding="utf-8")
+      self.assertNotIn("CANON_GSM8K_MESH_AXIS_TYPES", zero_profile)
+
+  def test_demo_mesh_axis_type_selector_is_fail_closed(self):
+    """Unset keeps the historical pairing; junk and orphaned values raise."""
+    demo = (
+        _PACKAGE.parent / "examples/math_gsm8k/qwen3_grpo_demo.py"
+    ).read_text(encoding="utf-8")
+    self.assertIn(
+        'axis_type_choice = os.environ.get("CANON_GSM8K_MESH_AXIS_TYPES", "")',
+        demo,
+    )
+    self.assertIn('if axis_type_choice not in ("", "auto", "explicit"):', demo)
+    # Unset with a shape still means Explicit, exactly as before.
+    self.assertIn('explicit_axes = axis_type_choice != "auto"', demo)
+    # Asking for Explicit without a shape is refused rather than ignored.
+    self.assertIn(
+        'CANON_GSM8K_MESH_AXIS_TYPES=explicit requires FL_SHARED_MESH', demo
+    )
+
   def test_real_env_rejects_mixed_p32_native_input(self):
     with tempfile.TemporaryDirectory() as tmp:
       native_path = native.render_native_full(
