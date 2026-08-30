@@ -1,0 +1,19 @@
+[CANON_ALIGN_PRE_EVIDENCE] path=/tmp/canon-state/canon-p57-fl-zero-f45w18-b74c4ba3/pre_alignment.jsonl sha256=669a31ed0fdb574ad8d3fe46b8cbf6cfb3cb8cc28dfbc67e0c9c3f63ec74d246
+[CANON_ALIGN_PRE] step=103 verdict=FAIL N_action=77535 bounds=[('S_decode_vs_S_prefill', 40), ('S_prefill_vs_T_old', 0)]
+[rank0]: Traceback (most recent call last):
+[rank0]:   File "<frozen runpy>", line 198, in _run_module_as_main
+[rank0]:   File "<frozen runpy>", line 88, in _run_code
+[rank0]:   File "/app/examples/frozenlake/train_frozenlake_qwen3.py", line 2129, in <module>
+[rank0]:     grpo_trainer.train(
+[rank0]:   File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 3509, in train
+[rank0]:     train_examples = self._batch_to_train_example(
+[rank0]:                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 2878, in _batch_to_train_example
+[rank0]:     return self._process_results(
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/rl/agentic/agentic_grpo_learner.py", line 1938, in _process_results
+[rank0]:     precheck_record = alignment.check_pre_backward(
+[rank0]:                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/rl/alignment.py", line 1632, in check_pre_backward
+[rank0]:     raise AlignmentGateError(
+[rank0]: tunix.rl.alignment.AlignmentGateError: pre-backward alignment gate RED: ['S_decode_vs_S_prefill']; report=/tmp/canon-state/canon-p57-fl-zero-f45w18-b74c4ba3/pre_alignment.jsonl

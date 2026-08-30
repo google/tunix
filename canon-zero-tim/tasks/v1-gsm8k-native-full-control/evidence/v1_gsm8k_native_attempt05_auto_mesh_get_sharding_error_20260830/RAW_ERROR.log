@@ -1,0 +1,43 @@
+[entrypoint] --> 00_env.sh
+[GSM8K.NATIVE] ZERO_TIM_OFF_PASS p32=absent canonical_engine=off alignment=off p59=off v1=off
+[entrypoint] <-- 00_env.sh ok
+[entrypoint] --> 10_sync_repo.sh
+[sync] HEAD=29c923dc042654a59968f9b062a72c3d30646230
+[sync] describe=29c923dc Let the untreated GSM8K arm ask for Auto mesh axis types
+[entrypoint] <-- 10_sync_repo.sh ok
+[entrypoint] --> 20_probe_image.sh
+[probe] SUMMARY same=6 drift=0 missing=0
+[entrypoint] <-- 20_probe_image.sh ok
+INFO 08-30 09:42:06 [loggers.py:273] Engine 000: Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 5668.9 tokens/s, Running: 193 reqs, Waiting: 0 reqs, GPU KV cache usage: 1.0%, Prefix cache hit rate: 0.0%
+[PERF] stage=rollout_generate seconds=44.738 rows=1
+[rank0]: Traceback (most recent call last):
+[rank0]:   File "/app/examples/math_gsm8k/qwen3_grpo_demo.py", line 1375, in <module>
+[rank0]:     main()
+[rank0]:   File "/app/examples/math_gsm8k/qwen3_grpo_demo.py", line 1338, in main
+[rank0]:     grpo_trainer.train(
+[rank0]:   File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 3771, in train
+[rank0]:     train_examples = self._batch_to_train_example(
+[rank0]:                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 3071, in _batch_to_train_example
+[rank0]:     return self._process_results(
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/rl/agentic/agentic_grpo_learner.py", line 862, in _process_results
+[rank0]:     trainer_per_token_logps = self.rl_cluster.get_actor_per_token_logps(
+[rank0]:                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/rl/rl_cluster.py", line 1350, in get_actor_per_token_logps
+[rank0]:     common.compute_per_token_logps(
+[rank0]:   File "/app/tunix/rl/common.py", line 455, in compute_per_token_logps
+[rank0]:     outputs, _ = model(input_tokens, **model_kwargs)
+[rank0]:                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/models/qwen3/model.py", line 1359, in __call__
+[rank0]:     x = self.embedder.encode(input_tokens)
+[rank0]:         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/models/qwen3/model.py", line 468, in encode
+[rank0]:     x = self.input_embedding.value.at[(x,)].get(out_sharding=out_sharding)
+[rank0]:         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/usr/local/lib/python3.12/site-packages/jax/_src/numpy/array_methods.py", line 1185, in get
+[rank0]:     out_sharding = canonicalize_sharding(out_sharding, '.get')
+[rank0]:                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/usr/local/lib/python3.12/site-packages/jax/_src/sharding_impls.py", line 890, in canonicalize_sharding
+[rank0]:     raise ValueError(
+[rank0]: ValueError: PartitionSpec passed to .get cannot contain axis names that are of type Auto or Manual. Got PartitionSpec: P('data', None, 'model') with axis name: data of type: AxisType.Auto. This error occurs at source:  /app/tunix/models/qwen3/model.py:468:10 (Embedder.encode)

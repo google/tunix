@@ -1,0 +1,51 @@
+[overlay] qwen2_p22xk.py               -> models/jax/qwen2.py
+[overlay] rpa_kernel_p66.py            -> kernels/ragged_paged_attention/v3/kernel.py
+[overlay] PYTHONPATH and CANON_SHIM_ROOT recorded; originals in /mnt/disks/linchai_data/deepswe_zero_tim/canon-p58-ds4b-zero-hp-full-k10/stock_backup
+[entrypoint] <-- 40_overlay_engine.sh ok
+[entrypoint] --> 50_verify_overlay.sh
+[verify] Section A passed: all 6 overlay files verified by SHA256 byte identity.
+[verify] OVERLAY VERIFIED -- the canonical chain is installed and live.
+[entrypoint] <-- 50_verify_overlay.sh ok
+[entrypoint] --> 90_run.sh
+[DEEPSWE.TITO] ADMISSION_PASS contract=p58-qwen4b-tim-128 arm=zero mode=token-in-token-out retokenize_sampled_tokens=0
+[P34.CLI] PASS model=Qwen3-4B-Instruct-2507 prompts=8 generations=16 prompt=4096 response=16384 turns=50 trajectory_deadline=3000s batch_deadline=3600s scheduler_per_dp=16/256
+[P34.DATASET] SOURCE name=R2E-Gym/R2E-Gym-Subset revision=2e8108ff942f24fcb5686badfaf7f9a8808566d5 split=train rows=4578 fingerprint=594200d1b0ff72fd
+[P34.DATASET] GOLD_FILTER_PASS rows=4578->1012 images=1012 whitelist_rows=1012
+[P34.DATASET] CLEAN_DATA_PASS source_rows=4578 filtered_rows=1012 whitelist_rows=1012 unique_images=1012
+[P34.DEVICE_INVENTORY] PASS devices=128 host_source=logical_task hosts=32 devices_per_host=4 rollout_hosts=16 trainer_hosts=16
+[P34.TOPOLOGY] PASS rollout_devices=64 trainer_devices=64 rollout_processes=16 trainer_processes=16
+*** Rollout Mesh *** | dims: [('dp', 8), ('tp', 8)] | Shape: OrderedDict({'dp': 8, 'tp': 8})
+*** Train Mesh *** | dims: [('dp', 8), ('tp', 8)] | Shape: OrderedDict({'dp': 8, 'tp': 8})
+[DEEPSWE.DATA_SHARDING] PASS axes=('dp',) mesh=('dp', 'tp')
+INFO:root:[SWEEnv group=0 pair=0] creating RepoEnv backend=kubernetes scaffold=r2egym step_timeout=600s reward_timeout=600s
+[DEEPSWE.TITO] CONTINUATION turn=13 prompt_tokens=4786 sha256=4f2ff77f18e7ab2b1234f3d97e26e26478f6efb94a315e7d9b547106d8c30fac
+[DEEPSWE.TITO] CONTINUATION turn=18 prompt_tokens=5984 sha256=ce13ef9b36da662d0c8f7b4282cd74011cf2e86c9ec60ed450d1764821dc9787
+[PERF] step=0 stage=rescore_b seconds=111.343 rows=128
+INFO:absl:[CANON_ALIGN] attached host sidecar rows=128 completion_width=16384
+[CANON_ALIGN_PRE_JSON] {"N_action":404028,"action_geometry":{"max_logical_kv_prefix_length":14823,"min_logical_kv_prefix_length":1737,"rows_reaching_1686":118,"valid":true},"admission_policy":{"bounded_ab_only":false,"byte_fraction_limit":0.004,"claim_level":"strict-zero-tim","enabled":false,"id":"gsm8k-full-ab-report-v1","max_abs_limit":0.0001,"stage":"","warning_boundaries":null,"warning_items":null,"warning_only":false,"workload":""},"all_compact_filtered":false,"blocking_reds":[],"boundaries":{"S_decode_vs_S_prefill":{"byte_fraction":0.0,"differing_bytes":0,"differing_elements":0,"element_fraction":0.0,"finite":true,"first_mismatch":null,"max_abs":0.0,"max_abs_mismatch":null,"mismatches":[],"mismatches_truncated":false,"reported_mismatches":0,"total_bytes":1616112,"total_elements":404028,"valid":true},"S_prefill_vs_T_old":{"byte_fraction":0.0,"differing_bytes":0,"differing_elements":0,"element_fraction":0.0,"finite":true,"first_mismatch":null,"max_abs":0.0,"max_abs_mismatch":null,"mismatches":[],"mismatches_truncated":false,"reported_mismatches":0,"total_bytes":1616112,"total_elements":404028,"valid":true}},"context":{"bucket":"2048","mesh":"8,8","run_stage":"","source":"VllmRollout.get_prefill_rescore_logps"},"hashes":{"S_decode":"4505164aa9807f2ce0d0a49c66ec49c0ea16886f150e65727d48e318fc93f4a6","S_prefill":"d4b51d921095e603f6bf18257674e6fc33855b5d70da3e5be22b4a5795ace001","T_old":"d4b51d921095e603f6bf18257674e6fc33855b5d70da3e5be22b4a5795ace001","action_mask":"d19f906c74acc2113094d3291c4bfb9fb54ec9793f27ac60e0edddd7540771df","policy_version":"076a27c79e5ace2a3d47f9dd2e83e4ff6ea8872b3c2218f66c92b89b55f36560","tokens":"4c071bf6353b7d3d1f9a0c630c7d88353f6e46729db296c16719b3d4a94bd8d7"},"masked_hashes":{"S_decode":"cb9cd8e988ee1c46dfb41aade68457fe1fcfa992ee1f809e512c20a45c16ed91","S_prefill":"cb9cd8e988ee1c46dfb41aade68457fe1fcfa992ee1f809e512c20a45c16ed91","T_old":"cb9cd8e988ee1c46dfb41aade68457fe1fcfa992ee1f809e512c20a45c16ed91"},"no_signal_admitted":false,"reds":[],"reported_reds":[],"step":0,"timestamp":1788084990.0008893,"verdict":"PASS","warning_reds":[]}
+[CANON_ALIGN_PRE_EVIDENCE] path=/mnt/disks/linchai_data/deepswe_zero_tim/canon-p58-ds4b-zero-hp-full-k10/pre_alignment.jsonl sha256=5f6c890e2a1c090ee3ae25435f85f7df1d0a98935a8905186fb652a6d7ab7686
+[CANON_ALIGN_PRE] step=0 verdict=PASS N_action=404028 bounds=[('S_decode_vs_S_prefill', 0), ('S_prefill_vs_T_old', 0)]
+[CANON_P34_DP8] trajectory_microbatch total=128 size=16 chunks=8 grad_acc=8 segmented=1
+[P41.OPTIMIZER] before_reverse placement=device-resident memory_kind=device
+[rank0]: Traceback (most recent call last):
+[rank0]:   File "/app/examples/deepswe/canonical_entrypoint.py", line 36, in <module>
+[rank0]:     main()
+[rank0]:   File "/app/examples/deepswe/canonical_entrypoint.py", line 32, in main
+[rank0]:     runpy.run_module("examples.deepswe.train_deepswe_nb", run_name="__main__")
+[rank0]:   File "<frozen runpy>", line 229, in run_module
+[rank0]:   File "<frozen runpy>", line 88, in _run_code
+[rank0]:   File "/app/examples/deepswe/train_deepswe_nb.py", line 2011, in <module>
+[rank0]:     agentic_grpo_learner.train(train_dataset=train_dataset)
+[rank0]:   File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 3999, in train
+[rank0]:     segmented_result = self._run_p28_g6_update(
+[rank0]:                        ^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 1622, in _run_p28_g6_update
+[rank0]:     result = adapter.segmented_dp_grpo_value_and_grad(
+[rank0]:              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/rl/canonical_qwen3_adapter.py", line 8532, in segmented_dp_grpo_value_and_grad
+[rank0]:     expected_widths = dp_workloads.expected_token_widths(workload)
+[rank0]:                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/rl/dp_workloads.py", line 822, in expected_token_widths
+[rank0]:     if workload.name == "frozenlake-dp8-tp8":
+[rank0]:        ^^^^^^^^^^^^^
+[rank0]: AttributeError: 'DeepSWEWorkload' object has no attribute 'name'
