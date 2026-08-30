@@ -149,7 +149,9 @@ def render_two(
         "CANON_P33_NO_COMMIT": "0",
         "CANON_P57_TIM_ARM": "zero",
         "CANON_P57_EXPECTED_UPDATES": "300",
-        "CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY": "0",
+        "CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY": (
+            "1" if label == "m15" else "0"
+        ),
         "CANON_P59_RANK_PARALLEL_BACKWARD": "1",
         "CANON_P59_CHECKED_VMA": "1",
         "CANON_P67_P66_VMA_P59_ONLY": "1",

@@ -93,7 +93,6 @@ class P67FrozenLakeTwoFullRendererTest(unittest.TestCase):
         self.assertEqual(values["CANON_DP_FINITE_FETCH"], "batched-commit")
         self.assertEqual(values["CANON_P71_SCAN"], "fwd")
         self.assertNotIn("CANON_DP_COLLECTIVE_REDUCE", values)
-        self.assertEqual(values["CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY"], "0")
         self.assertEqual(values["CANON_P33_ENABLE_EVAL"], "0")
         self.assertEqual(values["CANON_P33_DISABLE_EVAL"], "1")
         self.assertEqual(values["CANON_P31_ENABLE_EVAL"], "0")
@@ -118,8 +117,10 @@ class P67FrozenLakeTwoFullRendererTest(unittest.TestCase):
         self.assertEqual(selectors["cloud.google.com/gke-tpu-topology"], "4x4x4")
       self.assertEqual(p45["CANON_P57_WORKLOAD_CANDIDATE"], "")
       self.assertEqual(p45["CANON_P57_DATA_SPLIT"], "")
+      self.assertEqual(p45["CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY"], "0")
       self.assertEqual(m15["CANON_P57_WORKLOAD_CANDIDATE"], "m15")
       self.assertEqual(m15["CANON_P57_DATA_SPLIT"], "main")
+      self.assertEqual(m15["CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY"], "1")
       index = (root / "manifest-index.json").read_text(encoding="utf-8")
       self.assertIn('"schema": "v1-p67-frozenlake-two-full-v1"', index)
 

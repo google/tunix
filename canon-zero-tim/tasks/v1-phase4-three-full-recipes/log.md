@@ -978,3 +978,22 @@
 - Terminal error: At step 64 rollout call 65, multi-turn trajectory clipping triggered `MAX_CONTEXT_LIMIT_REACHED` on row 255 (1130 total tokens). During `get_prefill_rescore_logps` in `vllm_rollout.py:526`, vLLM returned 1 prompt logprob for 1130 tokens, triggering `RuntimeError: row 255: engine returned 1 prompt logprobs for 1130 tokens; cannot align the re-score`.
 - Evidence sealed: `run.log`, `RAW_ERROR.log`, `pre_alignment.jsonl`, `updates.jsonl`, `env.sh`, `receipt.json`, `SHA256SUMS`.
 
+## 2026-08-30T05:02:00Z — Exact M15 A-B warning lane admitted on host and pinned image
+
+- Scope: only the optimized Zero M15/main v1-hp DP8xTP8, 300-update,
+  no-eval/no-checkpoint arm sets `CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY=1`.
+  Finite `S_decode_vs_S_prefill` and its direct w/wr/clip/TIS consequences are
+  warnings. B-C, T-current/r, any nonfinite value, backward health, replica
+  consistency, and optimizer transaction remain fatal. P45 remains strict.
+- Validation: P57 host gate 176/176, V1 host gate 91/91, flag audit 408/408,
+  syntax, and diff hygiene passed. Immutable image
+  `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`
+  exited zero with terminal `V1_HP_EXACT_IMAGE_PASS ... m15_ab_warning=1 ...
+  manifests=3`. The terminal was observed directly; no durable raw log was
+  saved, so this is an exact-image admission receipt rather than a signed
+  evidence artifact.
+- Claim boundary: `LOCAL IMPLEMENTED / HOST PASS / PINNED-IMAGE PASS /
+  UNCOMMITTED / UNPUBLISHED / TPU TARGET NOT RUN`. An M15 run under this policy
+  is `convergence-only / alignment-degraded`; it is not a Zero-TIM pass. No
+  commit, push, render, launch, JobSet, TPU target, or optimizer update was
+  performed in this change.

@@ -81,6 +81,7 @@ $docker run --rm \
     XLA_FLAGS=--xla_force_host_platform_device_count=64 \
       python3 canon-zero-tim/tasks/v1-phase4-three-full-recipes/scripts/probe_gsm_fixed_replay_scale.py
     python3 tests/perf/profile_window_test.py
+    python3 canon-zero-tim/tests/p57_frozenlake_tim/test_m15_alignment_warning.py
     bash canon-zero-tim/tests/v1_phase4/run_cpu.sh
     python3 canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/test_analyze_m15i_evidence.py
     python3 canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/test_classify_m15_apc_target_run.py
@@ -97,5 +98,5 @@ $docker run --rm \
     python3 canon-zero-tim/tests/p38_serving/test_kv_observer_classifier.py
     python3 canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/test_m15_wide_durability.py
     bash canon-zero-tim/tests/p38_serving/test_gcs_persistence.sh
-    echo "V1_HP_EXACT_IMAGE_PASS dp16_gathered=1 dp2tp2_parallel=2 p59_tp4_tp8=2 p59_checked_vma_real_shim=4 p59_rpa=2 p59_fused_linear=2 p62_numeric=6 p64_numeric=4 p64_capsule=3 p63_clip=1 first_update_gate=4 gsm_scale_replay=1 p57_wandb=1 frozenlake_system_optimization=1 m15_token=1 apc_m15_carrier=70 m15_d3e=1 m15_e0=30 m15_e0_kv3=3 m15_e0_kv3_return=1 m15_durability=1 m15_round_provenance=1 perfetto_window=1 manifests=3"
+    echo "V1_HP_EXACT_IMAGE_PASS dp16_gathered=1 dp2tp2_parallel=2 p59_tp4_tp8=2 p59_checked_vma_real_shim=4 p59_rpa=2 p59_fused_linear=2 p62_numeric=6 p64_numeric=4 p64_capsule=3 p63_clip=1 first_update_gate=4 gsm_scale_replay=1 p57_wandb=1 frozenlake_system_optimization=1 m15_ab_warning=1 m15_token=1 apc_m15_carrier=70 m15_d3e=1 m15_e0=30 m15_e0_kv3=3 m15_e0_kv3_return=1 m15_durability=1 m15_round_provenance=1 perfetto_window=1 manifests=3"
   '

@@ -126,6 +126,7 @@ def _validate_warning_policy(
     record: dict[str, Any],
     *,
     expected: bool,
+    p57_ab_only: bool = False,
     prefix: str,
     reasons: list[str],
 ) -> None:
@@ -170,6 +171,25 @@ def _validate_warning_policy(
       f"{prefix}.policy_claim",
       reasons,
   )
+  if p57_ab_only:
+    _require(
+        policy.get("warning_boundaries") == ["S_decode_vs_S_prefill"]
+        or policy.get("warning_boundaries") == ("S_decode_vs_S_prefill",),
+        f"{prefix}.policy_warning_boundaries",
+        reasons,
+    )
+    _require(
+        set(policy.get("warning_items", ()))
+        == {
+            "S_decode_vs_S_prefill",
+            "w_all_exactly_1",
+            "wr_all_exactly_1",
+            "clip_hits",
+            "tis_hits",
+        },
+        f"{prefix}.policy_warning_items",
+        reasons,
+    )
 
 
 def _validate_boundary(
@@ -231,7 +251,11 @@ def _validate_alignment_records(
   for index, record in enumerate(rows):
     prefix = f"alignment[{index}]"
     _validate_warning_policy(
-        record, expected=policy_expected, prefix=prefix, reasons=reasons
+        record,
+        expected=policy_expected,
+        p57_ab_only=p57_ab_only,
+        prefix=prefix,
+        reasons=reasons,
     )
     warned = record.get("verdict") == "PASS_WITH_ALIGNMENT_WARNINGS"
     if warned:
@@ -342,7 +366,11 @@ def _validate_pre_alignment_records(
   for index, record in enumerate(rows):
     prefix = f"pre_alignment[{index}]"
     _validate_warning_policy(
-        record, expected=policy_expected, prefix=prefix, reasons=reasons
+        record,
+        expected=policy_expected,
+        p57_ab_only=p57_ab_only,
+        prefix=prefix,
+        reasons=reasons,
     )
     warned = record.get("verdict") == "PASS_WITH_ALIGNMENT_WARNINGS"
     if warned:

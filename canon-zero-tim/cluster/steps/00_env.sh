@@ -76,6 +76,28 @@ source "$CANON_PKG/cluster/profiles/_canonical_engine.env"
 source "$PROFILE_ABS"
 set +a
 
+# Only the exact optimized M15/main concept run may demote finite A-B drift.
+# Every neighboring FrozenLake lane, including P45 Zero, remains strict.
+P57_ZERO_ALIGNMENT_WARNING_EXPECTED=0
+if [ "${CANON_PROFILE_FILE:-}" = \
+       "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env" ] && \
+   [ "${CANON_PROFILE:-}" = \
+       "qwen3-8b-dp8-tp8-frozenlake-v1-hp" ] && \
+   [ "${CANON_P32_WORKLOAD:-}" = "frozenlake-dp8-tp8" ] && \
+   [ "${CANON_V1_HP_FULL:-0}" = "1" ] && \
+   [ "${CANON_P57_RUN_KIND:-}" = "train" ] && \
+   [ "${CANON_P57_TIM_ARM:-}" = "zero" ] && \
+   [ "${CANON_P57_EXPECTED_UPDATES:-}" = "300" ] && \
+   [ "${CANON_P57_STOP_AFTER_STEP:-}" = "300" ] && \
+   [ "${CANON_P57_WORKLOAD_CANDIDATE:-}" = "m15" ] && \
+   [ "${CANON_P57_DATA_SPLIT:-}" = "main" ] && \
+   [ "${CANON_P33_ENABLE_EVAL:-}" = "0" ] && \
+   [ "${CANON_P33_DISABLE_EVAL:-}" = "1" ] && \
+   [ "${CANON_P31_ENABLE_EVAL:-}" = "0" ] && \
+   [ "${CANON_FROZENLAKE_CKPT_MODE:-}" = "disabled" ]; then
+  P57_ZERO_ALIGNMENT_WARNING_EXPECTED=1
+fi
+
 P57_STOCK_FAST=0
 if [ "${CANON_PROFILE_FILE:-}" = \
      "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-tim.env" ] && \
@@ -504,8 +526,9 @@ case "${CANON_P63_OVERFLOW_SAFE_CLIP:-0}" in
         }
         ;;
       cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env:qwen3-8b-dp8-tp8-frozenlake-v1-hp:frozenlake-dp8-tp8)
-        [ "${CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY:-1}" = "0" ] || {
-          echo "[env] P63 FrozenLake overflow-safe clip requires strict alignment" >&2
+        [ "${CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY:-1}" = \
+          "$P57_ZERO_ALIGNMENT_WARNING_EXPECTED" ] || {
+          echo "[env] P63 FrozenLake alignment policy drifted" >&2
           fail=1
         }
         ;;
@@ -1344,7 +1367,8 @@ if [ "${CANON_PROFILE_FILE:-}" = \
     train:zero)
       [ -z "${CANON_P57_INFERENCE_REGIME:-}" ] && \
       [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "1" ] && \
-      [ "${CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY:-0}" = "0" ] && \
+      [ "${CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY:-0}" = \
+        "$P57_ZERO_ALIGNMENT_WARNING_EXPECTED" ] && \
       [ "${CANON_P33_ENABLE_EVAL:-}" = "$p57_expected_eval_enabled" ] && \
       [ "${CANON_P33_DISABLE_EVAL:-}" = "$p57_expected_eval_disabled" ] && \
       [ "${CANON_P31_ENABLE_EVAL:-}" = "$p57_expected_eval_enabled" ] && \
@@ -1497,14 +1521,15 @@ if [ "${CANON_P38_FIXED_LM_HEAD:-0}" = "1" ] && \
     frozenlake-dp8-tp8:full:0:cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env)
       case "${CANON_P57_RUN_KIND:-}:${CANON_P57_TIM_ARM:-}" in
         train:zero)
-          [ "${CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY:-0}" = "0" ] && \
+          [ "${CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY:-0}" = \
+            "$P57_ZERO_ALIGNMENT_WARNING_EXPECTED" ] && \
           [ "${CANON_P33_ENABLE_EVAL:-}" = "0" ] && \
           [ "${CANON_P33_DISABLE_EVAL:-}" = "1" ] && \
           [ "${CANON_P31_ENABLE_EVAL:-}" = "0" ] || {
-            echo "[env] P57 zero arm requires strict full training with in-process evaluation disabled" >&2
+            echo "[env] P57 zero-arm full-training alignment/evaluation contract drifted" >&2
             fail=1
           }
-          echo "[env] P57 zero-TIM fixed lm-head training enabled"
+          echo "[env] P57 optimized fixed lm-head training enabled alignment_warning=${CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY:-0}"
           ;;
         eval:zero)
           [ "${CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY:-0}" = "0" ] && \

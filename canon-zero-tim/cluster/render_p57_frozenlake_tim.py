@@ -467,11 +467,25 @@ def render_all(
         )
     )
     checkpoint_max_to_keep = "" if checkpoint_disabled else "1"
+    m15_zero_ab_warning = (
+        high_performance
+        and run_kind == "train"
+        and arm.name == "zero"
+        and workload_candidate == "m15"
+        and data_split == "main"
+        and expected_updates == _PAIRED_ARM_UPDATES
+        and stop_after_step == _PAIRED_ARM_UPDATES
+        and disable_eval
+        and checkpoint_disabled
+    )
+    alignment_warning_only = (
+        run_kind == "train" and (arm.warning_only or m15_zero_ab_warning)
+    )
     _replace_env(
         document,
         {
             "CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY": (
-                "1" if run_kind == "train" and arm.warning_only else "0"
+                "1" if alignment_warning_only else "0"
             ),
             "CANON_P38_FIXED_LM_HEAD": "1" if arm.fixed_lm_head else "0",
             "CANON_P57_TIM_ARM": arm.name,
@@ -525,7 +539,7 @@ def render_all(
         run_id,
         fixed_lm_head=arm.fixed_lm_head,
         fixed_lm_head_explicit_off=not arm.fixed_lm_head,
-        alignment_warning_only=(run_kind == "train" and arm.warning_only),
+        alignment_warning_only=alignment_warning_only,
     )
     env = _env(document)
     expected = {
@@ -541,6 +555,9 @@ def render_all(
         "CANON_P57_EXPECTED_UPDATES": str(expected_updates),
         "CANON_P57_WORKLOAD_CANDIDATE": workload_candidate,
         "CANON_P57_DATA_SPLIT": data_split,
+        "CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY": (
+            "1" if alignment_warning_only else "0"
+        ),
         "CANON_P33_ENABLE_EVAL": "1" if spec.enable_evaluation else "0",
         "CANON_P33_DISABLE_EVAL": "0" if spec.enable_evaluation else "1",
         "CANON_P31_ENABLE_EVAL": "1" if spec.enable_evaluation else "0",

@@ -6,8 +6,9 @@ This section is the authoritative launch preparation for the two optimized
 FrozenLake Zero full recipes. It supersedes older P45/M15 render commands in
 this historical handoff, but does not erase their incident evidence.
 
-Status is `LOCAL IMPLEMENTED / PINNED-IMAGE CPU PASS / SOURCE NOT COMMITTED /
-TARGET NOT RUN`. The implementation CL must first be reviewed, explicitly
+Status is `M15 A-B WARNING LANE LOCAL IMPLEMENTED / HOST PASS /
+PINNED-IMAGE PASS / SOURCE NOT COMMITTED / TARGET NOT RUN`. The implementation
+CL must first be reviewed, explicitly
 approved for commit/push, published, read back at one exact 40-character SHA,
 and checked out clean. Do not render the next wave from the older published
 `a8449b3d...` source or from this dirty development worktree.
@@ -43,12 +44,22 @@ CANON_P71_SCAN=fwd
 ```
 
 `CANON_DP_COLLECTIVE_REDUCE` must remain absent. P74 is source behavior under
-the checked-VMA path, not a flag to add by hand. P45 and M15/main retain their
-strict Zero, APC-off, no-eval, no-checkpoint, 300-update identities. Native,
-IS, diagnostic, legacy resident, and evaluation carriers do not inherit this
-tuple.
+the checked-VMA path, not a flag to add by hand. P45 retains strict Zero.
+M15/main temporarily sets `CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY=1`, but only
+finite `S_decode_vs_S_prefill` and its direct w/wr/clip/TIS consequences are
+warnings; B-C, T-current/r, nonfinite, gradient, replica, and optimizer faults
+still stop the run. Both remain APC-off, no-eval, no-checkpoint, 300-update
+identities. M15 output is `convergence-only / alignment-degraded`, never a
+Zero-TIM pass. Native, IS, diagnostic, legacy resident, and evaluation
+carriers do not inherit this exact-arm policy.
 
-Offline admission is recorded under
+The M15 warning-lane changes are local and have not yet produced target
+evidence. Host admission passed, and pinned image
+`sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`
+exited zero with terminal `V1_HP_EXACT_IMAGE_PASS ... m15_ab_warning=1 ...
+manifests=3`; the terminal is an admission receipt, not a durably saved raw
+log. Commit, push, and launch still require separate approvals. Offline P74
+admission is recorded under
 `../v1-system-optimization-workload-rollout/validation.log`. It does not
 certify DP8xTP8 performance or convergence. Each target run must independently
 return strict alignment, checked-VMA/P67 receipts, the first-update gate,

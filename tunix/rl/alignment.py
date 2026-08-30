@@ -61,6 +61,13 @@ _GSM8K_ALIGNMENT_WARNING_POLICY_ID = "gsm8k-full-alignment-warning-v2"
 _FROZENLAKE_ALIGNMENT_WARNING_POLICY_ID = (
     "frozenlake-full-alignment-warning-v1"
 )
+_FROZENLAKE_M15_ZERO_WARNING_ITEMS = (
+    "S_decode_vs_S_prefill",
+    "w_all_exactly_1",
+    "wr_all_exactly_1",
+    "clip_hits",
+    "tis_hits",
+)
 _DEEPSWE_ALIGNMENT_WARNING_POLICY_ID = "deepswe-pilot-alignment-warning-v1"
 _GSM8K_AB_MAX_ABS = 1.0e-4
 _GSM8K_AB_MAX_BYTE_FRACTION = 4.0e-3
@@ -452,6 +459,7 @@ def gsm8k_ab_report_policy() -> dict[str, Any]:
   p58_active = os.environ.get("CANON_P58_DEEPSWE_TIM", "") == "1"
   p58_arm = os.environ.get("CANON_P58_TIM_ARM", "") if p58_active else ""
   p58_onehost_native = False
+  p57_m15_zero_ab_warning = False
   if p58_active and p58_arm not in ("native", "zero"):
     raise AlignmentGateError("P58 alignment arm must be native or zero")
   if p58_active and (deepswe_warning_only != (p58_arm == "native")):
@@ -563,6 +571,30 @@ def gsm8k_ab_report_policy() -> dict[str, Any]:
           "FrozenLake alignment warning policy is admitted only for committed "
           "FrozenLake full training"
       )
+    p57_zero_arm = os.environ.get("CANON_P57_TIM_ARM", "") == "zero"
+    if p57_zero_arm:
+      p57_m15_zero_ab_warning = all((
+          workload == "frozenlake-dp8-tp8",
+          os.environ.get("CANON_PROFILE_FILE", "")
+          == "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env",
+          os.environ.get("CANON_PROFILE", "")
+          == "qwen3-8b-dp8-tp8-frozenlake-v1-hp",
+          os.environ.get("CANON_V1_HP_FULL", "") == "1",
+          os.environ.get("CANON_P57_RUN_KIND", "") == "train",
+          os.environ.get("CANON_P57_EXPECTED_UPDATES", "") == "300",
+          os.environ.get("CANON_P57_STOP_AFTER_STEP", "") == "300",
+          os.environ.get("CANON_P57_WORKLOAD_CANDIDATE", "") == "m15",
+          os.environ.get("CANON_P57_DATA_SPLIT", "") == "main",
+          os.environ.get("CANON_P33_ENABLE_EVAL", "") == "0",
+          os.environ.get("CANON_P33_DISABLE_EVAL", "") == "1",
+          os.environ.get("CANON_P31_ENABLE_EVAL", "") == "0",
+          os.environ.get("CANON_FROZENLAKE_CKPT_MODE", "") == "disabled",
+      ))
+      if not p57_m15_zero_ab_warning:
+        raise AlignmentGateError(
+            "FrozenLake Zero A-B warning admission is restricted to the exact "
+            "M15/main v1-hp 300-update concept run"
+        )
     # The policy schema describes the workload family, while topology remains
     # attested independently by the P33/P45 update record.
     workload = "frozenlake"
@@ -594,12 +626,20 @@ def gsm8k_ab_report_policy() -> dict[str, Any]:
           warning_only or frozenlake_warning_only or deepswe_warning_only
       ),
       "warning_boundaries": (
+          ("S_decode_vs_S_prefill",)
+          if p57_m15_zero_ab_warning
+          else
           (
               "S_decode_vs_S_prefill",
               "S_prefill_vs_T_old",
               "T_old_vs_T_current",
           )
           if p58_arm == "native" or p58_onehost_native
+          else None
+      ),
+      "warning_items": (
+          _FROZENLAKE_M15_ZERO_WARNING_ITEMS
+          if p57_m15_zero_ab_warning
           else None
       ),
       "bounded_ab_only": bounded_ab,
@@ -629,6 +669,9 @@ def _policy_warns(policy: Mapping[str, Any], item: str) -> bool:
   """Returns whether a finite mismatch is observer-only for this boundary."""
   if not policy.get("warning_only", False):
     return False
+  warning_items = policy.get("warning_items")
+  if warning_items is not None:
+    return item in warning_items
   boundaries = policy.get("warning_boundaries")
   if boundaries is None:
     return True

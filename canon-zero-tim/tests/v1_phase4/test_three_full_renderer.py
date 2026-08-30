@@ -153,7 +153,7 @@ class ThreeFullRendererTest(unittest.TestCase):
             base_path=_REPO / "canon-zero-tim/cluster/jobset-64chip.yaml",
         )
 
-  def test_renders_exactly_three_strict_full_recipes(self):
+  def test_renders_two_strict_and_one_m15_warning_full_recipe(self):
     with tempfile.TemporaryDirectory() as tmp:
       root = Path(tmp) / "rendered"
       outputs = self._render(root)
@@ -179,7 +179,6 @@ class ThreeFullRendererTest(unittest.TestCase):
         self.assertEqual(frozen["CANON_P33_ENABLE_EVAL"], "0")
         self.assertEqual(frozen["CANON_P33_DISABLE_EVAL"], "1")
         self.assertEqual(frozen["CANON_P31_ENABLE_EVAL"], "0")
-        self.assertEqual(frozen["CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY"], "0")
         self.assertEqual(frozen["CANON_P67_P66_VMA_P59_ONLY"], "1")
         self.assertEqual(frozen["CANON_FROZENLAKE_CKPT_MODE"], "disabled")
         for name in (
@@ -193,9 +192,11 @@ class ThreeFullRendererTest(unittest.TestCase):
         self.assertIn("--eval_every_n_steps=0", frozen["CANON_RUN_CMD"])
         self.assertNotIn("--num_test_batches=", frozen["CANON_RUN_CMD"])
       self.assertNotIn("--p57_workload_candidate=", p45["CANON_RUN_CMD"])
+      self.assertEqual(p45["CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY"], "0")
       self.assertIn("--p57_workload_candidate=m15", m15["CANON_RUN_CMD"])
       self.assertIn("--p57_data_split=main", m15["CANON_RUN_CMD"])
       self.assertIn("--max_response_length=8192", m15["CANON_RUN_CMD"])
+      self.assertEqual(m15["CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY"], "1")
 
       for values in envs:
         self.assertEqual(values["CANON_V1_HP_FULL"], "1")

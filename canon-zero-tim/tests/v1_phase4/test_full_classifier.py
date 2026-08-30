@@ -255,10 +255,17 @@ class FullClassifierTest(unittest.TestCase):
     required = classifier._required_recipe_env(
         "p45", classifier._RECIPES["p45"]
     )
+    m15_required = classifier._required_recipe_env(
+        "m15", classifier._RECIPES["m15"]
+    )
     self.assertEqual(required["CANON_P33_ENABLE_EVAL"], "0")
     self.assertEqual(required["CANON_P33_DISABLE_EVAL"], "1")
     self.assertEqual(required["CANON_P31_ENABLE_EVAL"], "0")
     self.assertEqual(required["CANON_FROZENLAKE_CKPT_MODE"], "disabled")
+    self.assertEqual(required["CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY"], "0")
+    self.assertEqual(
+        m15_required["CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY"], "1"
+    )
     for name in (
         "CANON_FROZENLAKE_CKPT_ROOT",
         "CANON_FROZENLAKE_CKPT_TAG",

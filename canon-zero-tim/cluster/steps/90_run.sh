@@ -1722,7 +1722,12 @@ elif [ "$rc" -eq 0 ] && [ "${CANON_P33_WORKLOAD_LAUNCH_ADMITTED:-0}" = "1" ]; th
       echo "[P57.EVAL] EVIDENCE classification=$p57_eval_classification classification_sha256=$p57_eval_class_sha"
     fi
     if [ "${CANON_V1_HP_FULL:-0}" = "1" ]; then
-      p57_classifier_args+=(--alignment-warning-only 0)
+      if [ "${CANON_P32_WORKLOAD:-}" = "frozenlake-dp8-tp8" ] && \
+         [ "${CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY:-0}" = "1" ]; then
+        p57_classifier_args+=(--alignment-warning-only 1 --p57-ab-only 1)
+      else
+        p57_classifier_args+=(--alignment-warning-only 0)
+      fi
       if [ "${CANON_P32_WORKLOAD:-}" = "frozenlake-dp8-tp8" ]; then
         p57_classifier_args+=(--expected-updates "$CANON_P57_EXPECTED_UPDATES")
       fi

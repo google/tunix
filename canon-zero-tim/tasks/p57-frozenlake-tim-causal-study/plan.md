@@ -65,9 +65,12 @@ M15 as if workload were controlled.
   differ only in `sampler_is`, old-logprob identity, and TIS weights.
 - Native/no-IS and zero/no-IS share sampler semantics; they differ by the
   complete registered zero-TIM bundle, not fixed lm-head alone.
-- Native arms continue through finite A-B as warning-only. B-C, nonfinite,
-  structural, replica, transaction, optimizer, and checkpoint failures remain
-  fatal. Zero is strict on A-B-C.
+- Native arms continue through finite A-B as warning-only. The exact optimized
+  M15/main Zero concept arm temporarily uses an A-B-only warning policy so the
+  convergence curve can finish; its B-C, T-current/r, nonfinite, structural,
+  replica, transaction, optimizer, and checkpoint failures remain fatal. P45
+  Zero remains strict on A-B-C. An M15 warning-lane result is alignment-degraded
+  convergence evidence, not a Zero-TIM result.
 - The observer-only processed-B helper never supplies old logprobs or gradients.
   The IS arm's trainer C is intentionally a training input and must be declared
   as such by its runtime receipt.
@@ -119,7 +122,8 @@ M15 as if workload were controlled.
 - One valid curve per cell is concept evidence, not a stability theorem.
 - A P45 null with an M15 positive is consistent with ceiling masking.
 - A null on both workloads means only robustness to the measured mismatch dose.
-- Missing A-B dose is `NO_TREATMENT`; nonexact zero, B-C failure, truncation,
+- Missing A-B dose is `NO_TREATMENT`; M15 warning-lane output is explicitly
+  `alignment-degraded` and cannot support a Zero-TIM claim. B-C failure, truncation,
   floor/ceiling, or incomplete receipts invalidates the affected contrast.
 - General capability/stability claims require paired multi-seed replication and
   counterbalanced launch order.

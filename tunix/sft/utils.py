@@ -287,9 +287,27 @@ def canonical_overflow_safe_clip_max_norm(
         f"{wrong}"
     )
   warn_only_name = context["alignment_flag"]
-  if environ.get(warn_only_name) != "0":
+  expected_warn_only = "0"
+  if key == (
+      "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env",
+      "qwen3-8b-dp8-tp8-frozenlake-v1-hp",
+      "frozenlake-dp8-tp8",
+  ) and all((
+      environ.get("CANON_P57_RUN_KIND") == "train",
+      environ.get("CANON_P57_TIM_ARM") == "zero",
+      environ.get("CANON_P57_EXPECTED_UPDATES") == "300",
+      environ.get("CANON_P57_STOP_AFTER_STEP") == "300",
+      environ.get("CANON_P57_WORKLOAD_CANDIDATE") == "m15",
+      environ.get("CANON_P57_DATA_SPLIT") == "main",
+      environ.get("CANON_P33_ENABLE_EVAL") == "0",
+      environ.get("CANON_P33_DISABLE_EVAL") == "1",
+      environ.get("CANON_P31_ENABLE_EVAL") == "0",
+      environ.get("CANON_FROZENLAKE_CKPT_MODE") == "disabled",
+  )):
+    expected_warn_only = "1"
+  if environ.get(warn_only_name) != expected_warn_only:
     raise ValueError(
-        "CANON_P63_OVERFLOW_SAFE_CLIP requires strict alignment: "
+        "CANON_P63_OVERFLOW_SAFE_CLIP alignment policy changed: "
         f"{warn_only_name}={environ.get(warn_only_name)!r}"
     )
   return context["max_norm"]

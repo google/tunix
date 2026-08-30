@@ -332,6 +332,18 @@ class ClassifyP33RunTest(unittest.TestCase):
     post["boundaries"]["S_prefill_vs_T_old"] = _boundary()
     post["boundaries"]["T_old_vs_T_current"] = _boundary()
     post["exact"]["r_all_exactly_1"] = True
+    p57_warning_items = [
+        "S_decode_vs_S_prefill",
+        "w_all_exactly_1",
+        "wr_all_exactly_1",
+        "clip_hits",
+        "tis_hits",
+    ]
+    for record in (pre, post):
+      record["admission_policy"]["warning_boundaries"] = [
+          "S_decode_vs_S_prefill"
+      ]
+      record["admission_policy"]["warning_items"] = p57_warning_items
     reasons = []
     classifier._validate_pre_alignment_records(
         [pre],

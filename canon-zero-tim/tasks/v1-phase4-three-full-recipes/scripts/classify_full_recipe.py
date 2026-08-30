@@ -81,7 +81,8 @@ _JAX_CACHE_ENV = {
 _FIELD_RE = re.compile(r"([a-zA-Z_][a-zA-Z0-9_]*)=([^ ]+)")
 _STEP_RE = re.compile(r"Global step (\d+) completed in ([0-9.]+) seconds\.")
 _ALIGN_RE = re.compile(
-    r"^\[CANON_ALIGN(?:_PRE)?\].*\bverdict=(PASS|FAIL)\b"
+    r"^\[CANON_ALIGN(?:_PRE)?\].*\bverdict="
+    r"(PASS|PASS_WITH_ALIGNMENT_WARNINGS|FAIL)\b"
 )
 _FIRST_UPDATE_PREFIX = "[V1.FIRST_UPDATE] "
 
@@ -365,7 +366,9 @@ def _required_recipe_env(recipe: str, contract: dict[str, Any]) -> dict[str, str
   else:
     required.update({
         "CANON_P67_P66_VMA_P59_ONLY": "1",
-        "CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY": "0",
+        "CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY": (
+            "1" if recipe == "m15" else "0"
+        ),
         "CANON_BATCHED_EVIDENCE": "0",
         "CANON_P57_TIM_ARM": "zero",
         "CANON_P57_EXPECTED_UPDATES": "300",
@@ -505,8 +508,23 @@ def classify(
     )
 
   base = json.loads(base_classification.read_text(encoding="utf-8"))
-  _require(base.get("verdict") == "PASS", f"base_verdict={base.get('verdict')}", reasons)
-  _require(base.get("claim_level") == "strict-zero-tim", "base_claim_level", reasons)
+  alignment_warning_mode = recipe == "m15"
+  expected_base_verdict = (
+      "PASS_WITH_ALIGNMENT_WARNINGS" if alignment_warning_mode else "PASS"
+  )
+  expected_claim_level = (
+      "convergence-only" if alignment_warning_mode else "strict-zero-tim"
+  )
+  _require(
+      base.get("verdict") == expected_base_verdict,
+      f"base_verdict={base.get('verdict')}",
+      reasons,
+  )
+  _require(
+      base.get("claim_level") == expected_claim_level,
+      "base_claim_level",
+      reasons,
+  )
   _require(base.get("expected_updates") == expected_updates, "base_expected_updates", reasons)
   _require(base.get("observed_updates") == expected_updates, "base_observed_updates", reasons)
   _require(base.get("observed_pre_alignments") == expected_updates, "base_pre_alignments", reasons)
@@ -515,8 +533,16 @@ def classify(
       "base_alignments",
       reasons,
   )
-  _require(base.get("alignment_warning_records") == 0, "base_alignment_warnings", reasons)
-  _require(base.get("pre_alignment_warning_records") == 0, "base_pre_alignment_warnings", reasons)
+  for name in ("alignment_warning_records", "pre_alignment_warning_records"):
+    value = base.get(name)
+    _require(
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and value >= 0
+        and (alignment_warning_mode or value == 0),
+        f"base_{name}",
+        reasons,
+    )
 
   text = run_log.read_text(encoding="utf-8", errors="replace")
   align_verdicts = [
@@ -524,9 +550,15 @@ def classify(
       for line in text.splitlines()
       if (match := _ALIGN_RE.match(line.strip()))
   ]
+  accepted_alignment_count = align_verdicts.count("PASS")
+  if alignment_warning_mode:
+    accepted_alignment_count += align_verdicts.count(
+        "PASS_WITH_ALIGNMENT_WARNINGS"
+    )
   _require(
-      align_verdicts.count("PASS") == expected_alignment_pass,
-      f"canon_align_pass={align_verdicts.count('PASS')} expected={expected_alignment_pass}",
+      accepted_alignment_count == expected_alignment_pass,
+      f"canon_align_accepted={accepted_alignment_count} "
+      f"expected={expected_alignment_pass}",
       reasons,
   )
   _require(
@@ -1038,10 +1070,18 @@ def classify(
       "topology": {"dp": dp_size, "tp": tp_size},
       "updates": {"expected": expected_updates, "observed": len(updates)},
       "zero_tim": {
+          "status": (
+              "alignment-degraded"
+              if alignment_warning_mode
+              else "strict-zero-tim"
+          ),
           "expected_pass": expected_alignment_pass,
           "observed_pass": align_verdicts.count("PASS"),
+          "observed_warning": align_verdicts.count(
+              "PASS_WITH_ALIGNMENT_WARNINGS"
+          ),
           "observed_fail": align_verdicts.count("FAIL"),
-          "claim_level": "strict-zero-tim",
+          "claim_level": expected_claim_level,
       },
       "p59_acceptance": "ordinary-jax-fp64-gradient-correctness",
       "first_update_admission": {
