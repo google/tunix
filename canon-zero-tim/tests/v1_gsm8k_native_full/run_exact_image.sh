@@ -25,5 +25,5 @@ $docker run --rm \
       python3 tests/models/qwen3/qwen_dp_sharding_test.py
     python3 canon-zero-tim/tests/v1_phase4/test_three_full_renderer.py \
       ThreeFullRendererTest.test_gsm8k_p74_wrapper_renders_one_job_and_never_launches
-    echo "V1_GSM8K_NATIVE_FULL_EXACT_IMAGE_PASS native_contract=10 qwen_sharding=9 zero_neighbor=1"
+    echo "V1_GSM8K_NATIVE_FULL_EXACT_IMAGE_PASS native_contract=12 qwen_sharding=13 auto_out_sharding=2 zero_neighbor=1"
   '

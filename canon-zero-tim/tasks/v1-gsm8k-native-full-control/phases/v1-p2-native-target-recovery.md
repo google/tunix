@@ -12,6 +12,8 @@ without changing model mathematics or importing any Zero-TIM selector.
 | 01 | embedder gather output layout ambiguous on Explicit DPxTP mesh | output sharding named; preserved as immutable evidence |
 | 02 | activation `with_sharding_constraint` names Explicit axes | Explicit meshes use `reshard`; Auto and CPU legacy path retained |
 | 03 | replicated Splash kernel leaf conflicts with model-sharded `shard_map.in_specs` | local repair maps real kernel leaves to their existing manual specs |
+| 04 | output projection contracts a model-sharded head axis without naming its Explicit-axis output | projection sites name their existing activation specs |
+| 05 | Auto-axis Native embedder passes an illegal named `out_sharding` to `.get` | superseded by P5 axis-type-aware output-sharding guard |
 
 ## Repair contract
 
@@ -38,9 +40,7 @@ without changing model mathematics or importing any Zero-TIM selector.
 
 ## Result log
 
-`IMPLEMENTED / PINNED-IMAGE PASS / TARGET NOT RUN` on repair base
-`2af1197f4d0bb604d7c423f703251fc5187b4594`. The final pinned-image receipt is
-`V1_GSM8K_NATIVE_FULL_EXACT_IMAGE_PASS native_contract=10 qwen_sharding=9
-zero_neighbor=1`. This phase file ships with the repair CL. No post-fix TPU
-run, optimizer commit, image publication, or Kubernetes mutation was
-performed during validation.
+The Attempt-03 repair is target-proven for its Splash boundary because
+Attempts 04 and 05 crossed it. Broader training remains incomplete. The
+current Attempt-05 repair and authoritative exact-image result live in
+`v1-p5-auto-output-sharding.md`.

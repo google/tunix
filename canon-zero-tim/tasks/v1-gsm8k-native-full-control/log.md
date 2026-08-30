@@ -126,3 +126,43 @@
 - This establishes `PINNED-IMAGE PASS`, not target success. This entry ships
   with the repair CL; no post-fix TPU run, optimizer commit, image publication,
   or Kubernetes mutation occurred during validation.
+
+## 2026-08-30 — Attempts 04/05 and Auto/Manual output-sharding repair
+
+- Pulled exact operator tip
+  `89ef0ad567d5abe33074a53c6655a6b8bc80cf6e` and verified both immutable
+  incident packages. Attempt 04 crossed Splash and failed at an Explicit-axis
+  doubly-sharded output projection. Attempt 05 used Native Auto axes, completed
+  rollout at 5,668.9 tokens/s, then failed before trainer math because the
+  embedder passed a spec naming Auto axes to `.get(out_sharding=...)`.
+- `_activation_out_sharding()` now returns a named placement only when every
+  axis referenced by the spec is Explicit. Auto/Manual named axes return
+  `None`; unknown names remain fail-closed. Explicit projection/gather behavior
+  from Attempt 04 remains intact.
+- Added Auto and Manual controls plus a mixed-axis referenced-name control.
+  The first exact-image run exposed a pre-existing harness omission:
+  `absltest.main()` occurred before the Attempt-04 class, so only 11 of 13
+  tests ran even though the terminal count was static. The entrypoint moved to
+  EOF and the authoritative rerun executed 13/13.
+- Final gates: Native image contracts 12/12, Qwen sharding 13/13, Zero neighbor
+  1/1, host P34 static ten suites, and flag audit 409/409 with
+  `changed_names=0`. Terminal:
+  `V1_GSM8K_NATIVE_FULL_EXACT_IMAGE_PASS native_contract=12
+  qwen_sharding=13 auto_out_sharding=2 zero_neighbor=1`.
+- No model math, partition spec, mesh shape, loss, precision, gradient,
+  optimizer, flag, profile, arm identity, or update horizon changed. No
+  repaired target, optimizer commit, commit/push, image publication,
+  Kubernetes mutation, or TPU launch occurred.
+
+## 2026-08-30 — P5 post-rebase admission
+
+- Fast-forwarded the operator worktree to
+  `98d102eb27fe05fcee327688d0aa6d236b32be4a` and reran the complete pinned
+  image gate. Native contracts pass 12/12, the Qwen suite executes and passes
+  all 13/13 tests, and the Zero neighbor passes 1/1.
+- Exact terminal:
+  `V1_GSM8K_NATIVE_FULL_EXACT_IMAGE_PASS native_contract=12
+  qwen_sharding=13 auto_out_sharding=2 zero_neighbor=1`.
+- This is transcript-only construction evidence. No repaired DP16xTP4 target,
+  optimizer commit, commit/push, image publication, Kubernetes mutation, or
+  TPU launch occurred.

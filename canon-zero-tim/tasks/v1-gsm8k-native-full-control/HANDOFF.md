@@ -2,21 +2,25 @@
 
 ## START HERE — prepare a matched DP16xTP4 full comparison
 
-Status is `ATTEMPT 03 REPAIR IMPLEMENTED / PINNED-IMAGE PASS /
-SOURCE CL READY / TARGET NOT RUN`. This task prepares one stock
+Status is `ATTEMPT 05 REPAIR IMPLEMENTED / PINNED-IMAGE PASS /
+TARGET NOT RUN AFTER REPAIR`. This task prepares one stock
 Native/mismatch control; it does not launch it. Commit, push, and
 Kubernetes/TPU launch each require their own explicit user approval. Render
 only from a clean checkout of the exact approved, published 40-character SHA.
 
-The latest immutable failure is Attempt 03 at source `0b62b6bb`: the learner
-reached real Qwen3 Splash Attention, where an Explicit DPxTP mesh rejected a
-replicated kernel-mask leaf against `shard_map.in_specs=P('model', ...)` before
-executing model math. On repair base `2af1197f`, the current source CL
-reshards the real Splash kernel pytree to its existing
-`manual_sharding_spec`, only when the mesh has Explicit axes. Auto-mesh
-programs are unchanged. The pinned production image passes the exact failing
-negative, repaired positive, value-equality control, and adjacent Zero
-renderer. A fresh target run is still required.
+Attempts 04 and 05 crossed the former Splash failure. Attempt 04 exposed and
+repaired the Explicit-axis projection output placement. Attempt 05 at source
+`29c923dc042654a59968f9b062a72c3d30646230` completed rollout at
+5,668.9 tokens/s, then failed in the trainer embedder because Auto-axis names
+were passed illegally to `.get(out_sharding=...)`.
+
+On operator parent `98d102eb27fe05fcee327688d0aa6d236b32be4a`, the local
+P5 repair supplies output sharding only when every axis named by the spec is
+Explicit. Auto and Manual use the historical inferred path; unknown axes fail
+closed. The authoritative pinned-image rerun executes 12/12 Native contracts,
+all 13/13 Qwen sharding tests, and one Zero neighbor, ending with
+`auto_out_sharding=2`. A fresh target run is still required; see
+`phases/v1-p5-auto-output-sharding.md`.
 
 The comparison uses one W&B project and group for both arms:
 
@@ -179,14 +183,20 @@ as matched-configuration controls, not guaranteed bitwise paired rollouts.
 
 ## Offline verification status
 
-The host task suite passed nine tests with one pinned-image-only skip. After
-the Attempt 03 repair, the pinned image passed all ten Native contracts, nine
-Qwen sharding tests (including the real Splash negative/positive), and one
-Zero neighbor, emitting
-`V1_GSM8K_NATIVE_FULL_EXACT_IMAGE_PASS native_contract=10 qwen_sharding=9
-zero_neighbor=1`. Earlier FrozenLake/DeepSWE gates, the GSM8K XProf contract,
-and the four-carrier aggregate remain construction evidence only. Commands
-and rejected harness attempts are recorded in `validation.log`.
+The host task suite passes 11 tests with one pinned-image-only skip; the pinned
+image passes 12/12 Native contracts. The authoritative forced eight-device
+Qwen invocation executes 13/13, including Attempt-04 projection and
+Attempt-05 Auto/Manual controls, plus one Zero neighbor:
+
+```text
+V1_GSM8K_NATIVE_FULL_EXACT_IMAGE_PASS native_contract=12 qwen_sharding=13 auto_out_sharding=2 zero_neighbor=1
+```
+
+An earlier same-source image invocation executed only 11/13 because
+`absltest.main()` preceded the Attempt-04 class definition; it is rejected as
+an incomplete harness run and preserved in the task log. Earlier
+FrozenLake/DeepSWE gates, the GSM8K XProf contract, and the four-carrier
+aggregate remain construction evidence only.
 
 Not verified: clean-SHA wrapper success for this repair, post-fix Kubernetes
 server dry-run/apply, TPU full training, a real optimizer commit, target

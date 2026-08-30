@@ -1,9 +1,9 @@
 # GSM8K Native/mismatch full-control state
 
-- Status: `ATTEMPT 03 REPAIR IMPLEMENTED / PINNED-IMAGE PASS / TARGET NOT RUN`
-- Bound worktree: `/home/yuxuan/code_rl_repro/worktrees/m15_apc_attempt17_review_0829`
-- Repair base: `2af1197f4d0bb604d7c423f703251fc5187b4594`
-- Active phase: `P4 — Explicit-mesh Splash input recovery`
+- Status: `ATTEMPT 05 REPAIR IMPLEMENTED / PINNED-IMAGE PASS / TARGET NOT RERUN`
+- Bound worktree: `/home/yuxuan/code_rl_repro/worktrees/p58_q4_systemopt_0830`
+- Repair base: `98d102eb27fe05fcee327688d0aa6d236b32be4a`
+- Active phase: `P5 — Auto/Manual output-sharding legality`
 - Objective: expose the registered P56 stock GSM8K trainer as a separately
   named Native/mismatch control for the V1-HP Zero full recipe,
   while retaining identical model, data, seed, command, DP16xTP4 geometry,
@@ -44,21 +44,24 @@ Both arms use W&B project `zero-tim-gsm8k-dp16-tp4` and group
 
 ## Current result
 
-The stock carrier passed its offline construction gates, then three approved
-target attempts advanced through three independent Explicit-mesh admission
-errors. Attempt 03 reached the real learner Splash Attention path and failed
-before model math because the kernel mask pytree was replicated while
-`shard_map.in_specs` required TP/model-sharded leaves.
+Five approved targets successively crossed the earlier admissions. Attempt 04
+proved the Splash repair and exposed the Explicit-axis projection contraction;
+source then named its output placement. Attempt 05 switched only Native to an
+Auto-axis mesh, completed rollout at 5,668.9 tokens/s, and failed in the first
+trainer embedder gather because `_activation_out_sharding()` still supplied a
+`NamedSharding` containing Auto axes to `.get(out_sharding=...)`, which JAX
+forbids.
 
-The local repair reshares only the Splash kernel's dynamic leaves to the
-already-declared `manual_sharding_spec` on Explicit meshes. Auto meshes return
-the historical kernel object unchanged. A forced eight-device CPU negative
-reproduces the exact replicated-versus-model error with a real Splash leaf;
-the repaired leaf passes the same `shard_map` and remains byte-identical. The
-pinned production image passes 10 Native contracts, 9 Qwen sharding tests,
-and 1 optimized-Zero renderer neighbor.
+The local repair returns an output sharding only when every axis named by the
+requested spec is Explicit. Auto or Manual named axes return `None`, preserving
+compiler inference; Explicit axes retain the Attempt-04 projection/gather
+repair. Unknown axis names remain fail-closed. A forced eight-device pinned
+image executes 13/13 Qwen sharding tests, including both Attempt-04 projection
+tests and two Auto/Manual controls, plus 12/12 Native contracts and one Zero
+neighbor.
 
-The repair is contained in the current source CL. No post-fix Kubernetes/TPU
-target, optimizer commit, convergence/performance comparison, or image
-publication has occurred. The claim remains `TARGET NOT RUN` until a fresh
-Native Attempt-0 crosses Splash admission and a real optimizer commit.
+The first pinned-image invocation revealed that `absltest.main()` preceded the
+Attempt-04 test class, so only 11/13 tests executed. The entrypoint now sits at
+EOF; the authoritative rerun executes all 13 and ends
+`V1_GSM8K_NATIVE_FULL_EXACT_IMAGE_PASS ... auto_out_sharding=2 ...`.
+No repaired Kubernetes/TPU target or optimizer commit has run.

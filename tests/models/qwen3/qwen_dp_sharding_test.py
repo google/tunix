@@ -77,7 +77,9 @@ class EmbedderGatherOutShardingTest(absltest.TestCase):
     )
     devices = jax.devices()
     mesh = shd.Mesh(
-        np.asarray(devices[:1]).reshape(1, 1), axis_names=('data', 'model')
+        np.asarray(devices[:1]).reshape(1, 1),
+        axis_names=('data', 'model'),
+        axis_types=(shd.AxisType.Explicit,) * 2,
     )
     fake_env = mock.MagicMock()
     fake_env.physical_mesh = mesh
@@ -89,6 +91,57 @@ class EmbedderGatherOutShardingTest(absltest.TestCase):
       out = model._activation_out_sharding(config.act_btd)
     self.assertIsInstance(out, shd.NamedSharding)
     self.assertEqual(out.spec, shd.PartitionSpec('data', None, 'model'))
+
+  def test_helper_omits_out_sharding_for_auto_and_manual_axes(self):
+    import unittest.mock as mock  # pylint: disable=g-import-not-at-top
+
+    import jax  # pylint: disable=g-import-not-at-top
+    import jax.sharding as shd  # pylint: disable=g-import-not-at-top
+
+    config = model.ShardingConfig.get_data_parallel_sharding(
+        data_axis='data', tp_axis='model'
+    )
+    fake_device = mock.MagicMock()
+    fake_device.platform = 'tpu'
+    for axis_type in (shd.AxisType.Auto, shd.AxisType.Manual):
+      with self.subTest(axis_type=axis_type):
+        mesh = shd.Mesh(
+            np.asarray(jax.devices()[:1]).reshape(1, 1),
+            axis_names=('data', 'model'),
+            axis_types=(axis_type,) * 2,
+        )
+        fake_env = mock.MagicMock()
+        fake_env.physical_mesh = mesh
+        with mock.patch.object(
+            model.pxla.thread_resources, 'env', fake_env
+        ), mock.patch.object(jax, 'devices', return_value=[fake_device]):
+          self.assertIsNone(
+              model._activation_out_sharding(config.act_btd)
+          )
+
+  def test_helper_checks_only_axes_named_by_the_output_spec(self):
+    import unittest.mock as mock  # pylint: disable=g-import-not-at-top
+
+    import jax  # pylint: disable=g-import-not-at-top
+    import jax.sharding as shd  # pylint: disable=g-import-not-at-top
+
+    mesh = shd.Mesh(
+        np.asarray(jax.devices()[:1]).reshape(1, 1),
+        axis_names=('data', 'model'),
+        axis_types=(shd.AxisType.Explicit, shd.AxisType.Auto),
+    )
+    fake_env = mock.MagicMock()
+    fake_env.physical_mesh = mesh
+    fake_device = mock.MagicMock()
+    fake_device.platform = 'tpu'
+    with mock.patch.object(
+        model.pxla.thread_resources, 'env', fake_env
+    ), mock.patch.object(jax, 'devices', return_value=[fake_device]):
+      data_only = model._activation_out_sharding(('data', None, None))
+      self.assertEqual(data_only.spec, shd.PartitionSpec('data', None, None))
+      self.assertIsNone(
+          model._activation_out_sharding(('data', None, 'model'))
+      )
 
   def test_gather_with_out_sharding_matches_the_plain_gather(self):
     """The API the fix uses returns the same values as indexing."""
@@ -282,11 +335,6 @@ class ExplicitSplashKernelShardingTest(absltest.TestCase):
         kernel,
     )
 
-
-if __name__ == '__main__':
-  absltest.main()
-
-
 class EinsumOutShardingTest(absltest.TestCase):
   """A contraction over a doubly-sharded axis must name its output sharding.
 
@@ -354,3 +402,7 @@ class EinsumOutShardingTest(absltest.TestCase):
       )
     finally:
       jax.sharding.set_mesh(None)
+
+
+if __name__ == '__main__':
+  absltest.main()

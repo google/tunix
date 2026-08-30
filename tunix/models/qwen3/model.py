@@ -320,14 +320,30 @@ class ModelConfig:
 def _activation_out_sharding(
     s: Tuple[str | None, ...],
 ) -> shd.NamedSharding | None:
-  """Returns the activation sharding to demand from a gather, or None.
+  """Returns a legal Explicit-axis output sharding, or None.
 
   Mirrors ``shard``'s guards: with no physical mesh, or on CPU, the gather is
   unambiguous and must stay untouched so single-device and test paths keep
-  their exact current behavior.
+  their exact current behavior. JAX also forbids ``out_sharding`` from naming
+  Auto or Manual axes, so only demand a placement when every mesh axis named
+  by the activation spec is Explicit.
   """
   mesh = pxla.thread_resources.env.physical_mesh
   if mesh.empty or jax.devices()[0].platform == 'cpu':
+    return None
+  axis_types = getattr(mesh, 'axis_types', ())
+  explicit = getattr(shd.AxisType, 'Explicit', None)
+  if explicit is None or not axis_types:
+    return None
+  axis_type_by_name = dict(zip(mesh.axis_names, axis_types, strict=True))
+  named_axes = {axis for axis in s if axis is not None}
+  unknown_axes = named_axes.difference(axis_type_by_name)
+  if unknown_axes:
+    raise ValueError(
+        'activation output sharding names axes absent from the physical mesh: '
+        f'{sorted(unknown_axes)!r}'
+    )
+  if any(axis_type_by_name[axis] is not explicit for axis in named_axes):
     return None
   return shd.NamedSharding(mesh, shd.PartitionSpec(*s))
 

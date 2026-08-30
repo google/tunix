@@ -6,7 +6,8 @@
 | P1 — render-only carrier | `DONE` | Renderer uses the stock profile, strips raw Zero selectors and proxy precision pin, preserves the P33 command/restart shell, and never launches |
 | P2 — offline validation | `DONE` | Real `00_env.sh`, mixed-arm negatives, stock-file hashes, driver import, adjacent suites, flag audit, and exact-image gate pass |
 | P3 — handoff | `DONE` | Native and Phase4 handoffs describe the stock path, exact receipts, target gates, and unrun work without stale warning-only claims |
-| P4 — target admission recovery | `IMPLEMENTED / TARGET NOT RUN` | Real Splash-kernel negative reproduces Attempt 03; Explicit-only reshard and Auto-mesh negative pass in the pinned image; a fresh DP16xTP4 Native target must cross the first learner forward and optimizer commit |
+| P4 — target admission recovery | `DONE FOR SPLASH BOUNDARY` | Attempts 04/05 crossed the Attempt-03 Splash failure; later projection/Auto-gather failures are preserved separately |
+| P5 — Auto/Manual output-sharding legality | `IMPLEMENTED / PINNED-IMAGE PASS / TARGET NOT RERUN` | Output sharding is supplied only for every-named-axis Explicit specs; Auto/Manual use inference; all 13 Qwen sharding tests actually execute; fresh Native target reaches one optimizer commit |
 
 ## Rejection rules
 
