@@ -1,5 +1,31 @@
 # State
 
+## Publication checkpoint for P58.23 (2026-08-30)
+
+- User approval for commit/push was granted for this delivery. Implementation
+  commit `fb178803d53ff562cefdfdc8e7b3fac3563d9d6e` is rebased onto exact
+  operator tip `4ce03fad6e10466acece308a3fe05b41af3825c2`; executors must use the
+  final remote readback commit that contains it.
+- The final digest-pinned gate passes with `system_optimization=1`,
+  `trajectory_replay_b2g2=1`, `p59_tp4_tp8=2`, `m15_token=1`, and
+  `regressions=1`. P34 static passes 10 suites, flag audit passes 408/408,
+  and focused P58/M15 post-rebase gates pass.
+- Upstream M15 runner patch 36 and P58 patch 37 compose into runner SHA-256
+  `dae6dfa8a45bfd0a34b41baa9ec7c258229e8824c427a2fb863b620add074f98`.
+  P58 is a single round-zero observer and does not require M15's diagnostic
+  round file; M15 retains its strict explicit-round contract.
+- Clean render-only verification resolves Qwen3-4B-Instruct-2507 Zero/full,
+  DP8xTP8 per role, B8xG16, 1,000 updates, resident optimizer, P59 checked VMA,
+  P67 serving scope, first-update gate, P63 stable clip,
+  fingerprint-hybrid compare, first-group warmup, batched finite fetch, and
+  P71 forward scan. DP collective reduce remains absent. Render artifact
+  SHA-256 was
+  `61b837dbc9915373c931eebfbbee0fc67c75f9726d7db3893b108c67eac1331c`;
+  it was not applied.
+- Publication does not certify DP8xTP8 performance, strict Zero-TIM, P59 target
+  behavior, or optimizer commits. No image publication or cluster launch
+  occurred.
+
 ## Completed P58.23 optimized B2xG2 one-host backward (2026-08-30)
 
 - P58.22 real-R2E evidence remains valid: Qwen3-4B-Instruct-2507 DP1xTP4,
@@ -46,9 +72,9 @@
   (`trajectory_replay_b2g2=1`, `system_optimization=1`, `regressions=1`), P34
   static 10 suites, flag registry 408/408 with `FLAG_AUDIT_PASS`, focused
   replay/one-host 7/7, Python/Bash syntax, and `git diff --check`.
-- P58.23 is complete.  There is no active target launch while publication and
-  the later TP8 promotion remain separately user-gated.  No commit or push is
-  authorized.
+- P58.23 is complete. There is no active target launch; final remote readback
+  and the later TP8 promotion remain separate gates. Commit/push is approved
+  for this delivery, but image publication and every launch remain unapproved.
 
 ## Completed P58.22 Qwen3-4B continue-decode repair (2026-08-29)
 

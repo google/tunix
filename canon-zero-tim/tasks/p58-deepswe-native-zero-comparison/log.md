@@ -1788,3 +1788,29 @@
   rollout, optimizer commit, TP8/P59/Pathways run, prompt-diversity test, or
   production certification.  Publication and every later launch remain
   separately user-gated; no commit or push occurred here.
+
+## 2026-08-30 UTC — P58.23 publication construction closeout
+
+- User authorized commit and push. Implementation commit
+  `fb178803d53ff562cefdfdc8e7b3fac3563d9d6e` was replayed over fetched
+  operator tip `4ce03fad6e10466acece308a3fe05b41af3825c2` after that tip advanced by
+  one M15 status-document commit.
+- Rebase preserved upstream M15 runner patch 36 and renumbered the P58
+  continue-KV observer to patch 37. The fixed-image gate exposed and then
+  closed two integration-only defects: P58 no longer reads the M15 diagnostic
+  round file, and the assembled probe uses the real round-zero record schema.
+  Combined runner SHA-256 is
+  `dae6dfa8a45bfd0a34b41baa9ec7c258229e8824c427a2fb863b620add074f98`.
+- Final fixed-image terminal is `P58_EXACT_IMAGE_CPU_PASS` with
+  `trajectory_replay_b2g2=1 system_optimization=1 p59_tp4_tp8=2
+  m15_token=1 regressions=1`. Focused P58 observer is 8/8; upstream M15
+  target-carrier and three-round gates are 21/21 and 3/3; P34 static is 10
+  suites; flag audit is 408/408 with 12 registered markers.
+- Clean render-only production verification resolves Qwen3-4B-Instruct-2507,
+  Zero/full, B8xG16, DP8xTP8 per role, 1,000 updates, resident optimizer, and
+  the registered P59/P67/first-update/P63/P70/P71 system tuple. Collective DP
+  reduce remains absent. Render manifest SHA-256 is
+  `61b837dbc9915373c931eebfbbee0fc67c75f9726d7db3893b108c67eac1331c`.
+- No image was published and the rendered YAML was not applied. DP8xTP8
+  strict Zero-TIM/performance and optimizer-commit certification remain target
+  work under separate launch approval.

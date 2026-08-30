@@ -18,6 +18,24 @@ P58 does not modify `main`. Rendering and local validation do not authorize a
 Kubernetes apply. An operator must separately approve image publication and
 each launch.
 
+## Publication/readback gate for the optimized Zero/full profile
+
+Implementation commit `fb178803d53ff562cefdfdc8e7b3fac3563d9d6e` contains
+the accepted P58.23 one-host evidence and production wiring. Before rendering,
+fetch the operator branch, record its exact remote SHA, and verify that commit
+is an ancestor. Run the complete P58 fixed-image gate, then use only
+`prepare_deepswe_zero_hp_full.sh`; it renders but never applies the JobSet.
+
+The resolved full profile must be Qwen3-4B-Instruct-2507, B8xG16, 1,000
+updates, rollout DP8xTP8 plus trainer DP8xTP8, strict alignment, and
+device-resident optimizer. Require P59 rank-parallel backward/checked VMA,
+P67 P59-only VMA scope, first-update and P63 finite/clip gates,
+`fingerprint-hybrid`, `first-group-warmup`, `batched-commit`, and P71 forward
+scan. `CANON_DP_COLLECTIVE_REDUCE` must be absent. The last local render was
+verification only (manifest SHA-256
+`61b837dbc9915373c931eebfbbee0fc67c75f9726d7db3893b108c67eac1331c`);
+render a fresh YAML from remote readback and obtain separate launch approval.
+
 ## P58.23 direct-v5p optimized backward — completed
 
 Do not use global batch size one.  The accepted one-host backward carrier is

@@ -1,5 +1,35 @@
 # P58 DeepSWE native-first training handoff
 
+## PUBLICATION CHECKPOINT — optimized Qwen3-4B Zero/full wiring
+
+The implementation commit is
+`fb178803d53ff562cefdfdc8e7b3fac3563d9d6e`. It is a descendant of the
+fetched operator tip `4ce03fad6e10466acece308a3fe05b41af3825c2`; the final
+publication commit is the remote tip that contains this implementation. A
+remote executor must fetch `yuxzhang/canon-zero-tim`, record its exact
+40-character readback SHA, and prove that it contains the implementation
+commit. Do not substitute either hash by hand in an old YAML.
+
+The final fixed-image construction gate exits zero with
+`P58_EXACT_IMAGE_CPU_PASS ... trajectory_replay_b2g2=1
+system_optimization=1 ... m15_token=1 regressions=1`. Rebase integration
+preserves upstream M15 runner patch 36 and installs the P58 observer as patch
+37; the combined runner manifest SHA-256 is
+`dae6dfa8a45bfd0a34b41baa9ec7c258229e8824c427a2fb863b620add074f98`.
+The focused P58 observer probe passes 8/8 and the upstream M15 target-carrier
+and three-round contracts pass 21/21 and 3/3. Flag audit is 408/408 with 12
+registered non-settable markers.
+
+A clean render from the implementation commit produced manifest SHA-256
+`61b837dbc9915373c931eebfbbee0fc67c75f9726d7db3893b108c67eac1331c`
+and `launch=not-executed`. That manifest was a local verification artifact,
+not a launch input. Render again from the final remote readback. The resolved
+production identity is Qwen3-4B-Instruct-2507, Zero/full, DP8xTP8 per role,
+B8xG16, 1,000 updates, TPU-resident optimizer, and the latest registered
+system-optimization tuple described below. `CANON_DP_COLLECTIVE_REDUCE`
+remains absent because DP8 target certification does not exist. No image was
+published and no Kubernetes/Pathways/TPU job was launched by publication.
+
 ## START HERE — future Zero-HP full training must use the P74-enabled wrapper
 
 This section defines the production wiring for the next DeepSWE Qwen3-4B
@@ -8,9 +38,9 @@ localization queue: the selector-absent 1,000-update full run remains blocked
 until the strict A-B prealignment case is resolved and a new launch is
 separately approved.
 
-Status is `LOCAL IMPLEMENTED / PINNED-IMAGE CPU PASS / SOURCE NOT COMMITTED /
-TARGET NOT RUN`. Once the implementation CL is reviewed, separately approved
-for commit/push, published, and read back at an exact clean SHA, render with:
+Status is `IMPLEMENTATION COMMITTED / PINNED-IMAGE CPU PASS / PUBLICATION
+READBACK REQUIRED / TARGET NOT RUN`. After fetching and reading back the final
+published clean SHA, render with:
 
 ```bash
 bash canon-zero-tim/tests/p58_deepswe_native_zero/run_exact_image.sh \
@@ -109,10 +139,10 @@ shape; it is not prompt-diversity evidence.  Never substitute replay v1: its
 Coverage group is historical alignment-red evidence.  Timeout is
 `ZERO_TIM_BACKWARD_INCOMPLETE`, not PASS.  Replay validates the trainer path
 but does not itself run R2E/decode, TP8, Pathways, P59, or an optimizer update.
-See `phases/p58-23-qwen4b-systemopt-b2g2.md`.  The next executor action is to
-wait for explicit commit/push approval, fetch and read back the resulting
-operator SHA if published, and only then prepare the separately approved TP8
-promotion.  Do not launch or claim TP8 from this local receipt.
+See `phases/p58-23-qwen4b-systemopt-b2g2.md`. The next executor action is to
+fetch and read back the final operator SHA, prove it contains implementation
+commit `fb178803d53f`, and only then prepare the separately approved TP8
+promotion. Do not launch or claim TP8 from this local receipt.
 
 ## 2026-08-28 UTC — DeepSWE P58.19e incident intake (`canon-p58-seamcoarse-full-p58s19e`, 128 TPU)
 
