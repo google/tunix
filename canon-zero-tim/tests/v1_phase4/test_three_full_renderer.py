@@ -153,7 +153,7 @@ class ThreeFullRendererTest(unittest.TestCase):
             base_path=_REPO / "canon-zero-tim/cluster/jobset-64chip.yaml",
         )
 
-  def test_renders_two_strict_and_one_m15_warning_full_recipe(self):
+  def test_renders_one_strict_and_two_frozenlake_warning_full_recipes(self):
     with tempfile.TemporaryDirectory() as tmp:
       root = Path(tmp) / "rendered"
       outputs = self._render(root)
@@ -193,7 +193,7 @@ class ThreeFullRendererTest(unittest.TestCase):
         self.assertIn("--eval_every_n_steps=0", frozen["CANON_RUN_CMD"])
         self.assertNotIn("--num_test_batches=", frozen["CANON_RUN_CMD"])
       self.assertNotIn("--p57_workload_candidate=", p45["CANON_RUN_CMD"])
-      self.assertEqual(p45["CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY"], "0")
+      self.assertEqual(p45["CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY"], "1")
       self.assertNotIn("CANON_M15_TOKEN_CONTINUITY", p45)
       self.assertIn("--p57_workload_candidate=m15", m15["CANON_RUN_CMD"])
       self.assertIn("--p57_data_split=main", m15["CANON_RUN_CMD"])

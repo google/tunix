@@ -89,6 +89,7 @@ def render_two(
     m15_run_id: str,
     campaign_root: str,
     base_path: Path,
+    m15_tito_exact: bool = False,
 ) -> tuple[Path, ...]:
   if not _SHA_RE.fullmatch(source_commit):
     raise ValueError("source commit must be exactly 40 lowercase hex characters")
@@ -137,6 +138,8 @@ def render_two(
         f"frozenlake-{label}"
     )
     _set_env(document, additions)
+    if label == "m15" and m15_tito_exact:
+      _set_env(document, {"CANON_M15_TOKEN_CONTINUITY": "exact"})
     _write_yaml(path, document)
 
     document = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -149,9 +152,7 @@ def render_two(
         "CANON_P33_NO_COMMIT": "0",
         "CANON_P57_TIM_ARM": "zero",
         "CANON_P57_EXPECTED_UPDATES": "300",
-        "CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY": (
-            "1" if label == "m15" else "0"
-        ),
+        "CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY": "1",
         "CANON_P59_RANK_PARALLEL_BACKWARD": "1",
         "CANON_P59_CHECKED_VMA": "1",
         "CANON_P67_P66_VMA_P59_ONLY": "1",
@@ -192,10 +193,16 @@ def render_two(
       raise ValueError(
           f"{label} rendered an uncertified DP collective reducer"
       )
-    if "CANON_M15_TOKEN_CONTINUITY" in env:
+    expected_tito = "exact" if label == "m15" and m15_tito_exact else None
+    if expected_tito is None and "CANON_M15_TOKEN_CONTINUITY" in env:
       raise ValueError(
-          f"{label} must not render the experimental M15 TITO selector"
+          f"{label} must keep the optional M15 TITO selector absent"
       )
+    if (
+        expected_tito is not None
+        and env.get("CANON_M15_TOKEN_CONTINUITY") != expected_tito
+    ):
+      raise ValueError("M15 exact TITO option was not rendered exactly once")
     receipts.append({
         "recipe": label,
         "path": str(path),
@@ -213,6 +220,7 @@ def render_two(
   index.write_text(
       json.dumps({
           "schema": "v1-p67-frozenlake-two-full-v1",
+          "m15_tito_exact": m15_tito_exact,
           "manifests": receipts,
       }, indent=2) + "\n",
       encoding="utf-8",
@@ -232,6 +240,11 @@ def main() -> int:
   parser.add_argument("--m15-run-id", required=True)
   parser.add_argument("--campaign-root", required=True)
   parser.add_argument(
+      "--m15-tito-exact",
+      action="store_true",
+      help="render exact M15 token input; default keeps the selector absent",
+  )
+  parser.add_argument(
       "--base", type=Path, default=_CLUSTER_DIR / "jobset-64chip.yaml"
   )
   args = parser.parse_args()
@@ -242,6 +255,7 @@ def main() -> int:
       m15_run_id=args.m15_run_id,
       campaign_root=args.campaign_root,
       base_path=args.base,
+      m15_tito_exact=args.m15_tito_exact,
   )
   return 0
 

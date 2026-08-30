@@ -262,10 +262,13 @@ class FullClassifierTest(unittest.TestCase):
     self.assertEqual(required["CANON_P33_DISABLE_EVAL"], "1")
     self.assertEqual(required["CANON_P31_ENABLE_EVAL"], "0")
     self.assertEqual(required["CANON_FROZENLAKE_CKPT_MODE"], "disabled")
-    self.assertEqual(required["CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY"], "0")
+    self.assertEqual(required["CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY"], "1")
     self.assertEqual(
         m15_required["CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY"], "1"
     )
+    self.assertTrue(classifier._alignment_warning_mode("p45"))
+    self.assertTrue(classifier._alignment_warning_mode("m15"))
+    self.assertFalse(classifier._alignment_warning_mode("gsm8k"))
     self.assertNotIn("CANON_M15_TOKEN_CONTINUITY", m15_required)
     self.assertNotIn("CANON_M15_TOKEN_CONTINUITY", required)
     for name in (
@@ -277,10 +280,10 @@ class FullClassifierTest(unittest.TestCase):
     ):
       self.assertEqual(required[name], "")
 
-  def test_m15_tito_is_absent_from_all_full_recipes(self):
+  def test_m15_tito_defaults_off_and_accepts_explicit_exact(self):
     digest = "a" * 64
     exact = (
-        "[env] M15 exact TITO enabled mode=exact\n"
+        "[env] M15 exact TITO enabled mode=exact default=off\n"
         "[CANON_M15_TOKEN_CONTINUITY] mode=exact turn=1 "
         "verdict=TOKEN_STREAM_EQUAL actual_tokens=5 expected_tokens=5 "
         f"actual_sha256={digest} expected_sha256={digest} "
@@ -296,12 +299,34 @@ class FullClassifierTest(unittest.TestCase):
     receipts, equal = classifier._validate_m15_tito(
         "m15", {"CANON_M15_TOKEN_CONTINUITY": "exact"}, exact, reasons
     )
+    self.assertEqual(reasons, [])
+    self.assertEqual(len(receipts), 1)
+    self.assertEqual(len(equal), 1)
+
+    reasons = []
+    classifier._validate_m15_tito(
+        "m15", {"CANON_M15_TOKEN_CONTINUITY": "exact"}, "", reasons
+    )
+    self.assertIn("m15_exact_tito_receipts_missing", reasons)
+    self.assertIn("m15_exact_tito_env_receipt_count", reasons)
+
+    reasons = []
+    different = exact.replace("TOKEN_STREAM_EQUAL", "TOKEN_STREAM_DIFFERENT")
+    classifier._validate_m15_tito(
+        "m15",
+        {"CANON_M15_TOKEN_CONTINUITY": "exact"},
+        different,
+        reasons,
+    )
+    self.assertIn("m15_exact_tito_receipt_not_equal", reasons)
+
+    reasons = []
+    classifier._validate_m15_tito(
+        "m15", {"CANON_M15_TOKEN_CONTINUITY": "verify"}, "", reasons
+    )
     self.assertIn(
         "resolved_env.CANON_M15_TOKEN_CONTINUITY_unexpected", reasons
     )
-    self.assertIn("unexpected_m15_token_receipt", reasons)
-    self.assertEqual(len(receipts), 1)
-    self.assertEqual(len(equal), 1)
 
     reasons = []
     classifier._validate_m15_tito(

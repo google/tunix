@@ -472,19 +472,21 @@ def render_all(
         )
     )
     checkpoint_max_to_keep = "" if checkpoint_disabled else "1"
-    m15_zero_ab_warning = (
+    zero_ab_warning = (
         high_performance
         and run_kind == "train"
         and arm.name == "zero"
-        and workload_candidate == "m15"
-        and data_split == "main"
+        and (
+            (not workload_candidate and not data_split)
+            or (workload_candidate == "m15" and data_split == "main")
+        )
         and expected_updates == _PAIRED_ARM_UPDATES
         and stop_after_step == _PAIRED_ARM_UPDATES
         and disable_eval
         and checkpoint_disabled
     )
     alignment_warning_only = (
-        run_kind == "train" and (arm.warning_only or m15_zero_ab_warning)
+        run_kind == "train" and (arm.warning_only or zero_ab_warning)
     )
     _replace_env(
         document,

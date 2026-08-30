@@ -123,14 +123,12 @@ class M15TokenContinuityTest(unittest.TestCase):
   def test_selector_is_absence_sensitive_and_exact_identity_only(self):
     self.assertIsNone(token_continuity.m15_token_continuity_mode({}))
     self.assertEqual(
-        token_continuity.m15_token_continuity_mode(_environment()), "verify"
-    )
-    self.assertEqual(
         token_continuity.m15_token_continuity_mode(_environment("exact")),
         "exact",
     )
     for field, value in (
         (token_continuity.M15_TOKEN_CONTINUITY_ENV, ""),
+        (token_continuity.M15_TOKEN_CONTINUITY_ENV, "verify"),
         (token_continuity.M15_TOKEN_CONTINUITY_ENV, "unknown"),
         ("CANON_P57_WORKLOAD_CANDIDATE", ""),
         ("CANON_P57_TIM_ARM", "mismatch"),
@@ -172,8 +170,13 @@ class M15TokenContinuityTest(unittest.TestCase):
           ),
           "exact",
       )
+    self.assertEqual(
+        token_continuity.m15_token_continuity_mode(
+            _onehost_environment(mode="verify", apc="0")
+        ),
+        "verify",
+    )
     for field, value in (
-        (token_continuity.M15_TOKEN_CONTINUITY_ENV, "verify"),
         ("CANON_VLLM_ENABLE_PREFIX_CACHING", ""),
         ("CANON_P38_DIAGNOSTIC_ROUNDS", "1"),
         ("CANON_P38_ONEHOST_REHEARSAL", "0"),
@@ -186,6 +189,11 @@ class M15TokenContinuityTest(unittest.TestCase):
       values[field] = value
       with self.subTest(field=field, value=value), self.assertRaises(ValueError):
         token_continuity.m15_token_continuity_mode(values)
+
+    with self.assertRaises(ValueError):
+      token_continuity.m15_token_continuity_mode(
+          _onehost_environment(mode="verify", apc="1")
+      )
 
   def test_reconstruction_preserves_exact_turn_tokens_and_padding_tail(self):
     actual = token_continuity.reconstruct_continuation_prompt_tokens(

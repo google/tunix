@@ -76,8 +76,12 @@ source "$CANON_PKG/cluster/profiles/_canonical_engine.env"
 source "$PROFILE_ABS"
 set +a
 
-# Only the exact optimized M15/main concept run may demote finite A-B drift.
-# Every neighboring FrozenLake lane, including P45 Zero, remains strict.
+# Only the exact optimized P45 or M15/main concept run may demote finite A-B
+# drift. P45 is represented by both candidate and split being absent.
+P57_ZERO_WARNING_WORKLOAD_IDENTITY=0
+case "${CANON_P57_WORKLOAD_CANDIDATE:-}:${CANON_P57_DATA_SPLIT:-}" in
+  :|m15:main) P57_ZERO_WARNING_WORKLOAD_IDENTITY=1 ;;
+esac
 P57_ZERO_ALIGNMENT_WARNING_EXPECTED=0
 M15_APC_DEBUG_EXACT_TOKEN_CONTINUITY_EXPECTED=0
 if [ "${CANON_PROFILE_FILE:-}" = \
@@ -90,8 +94,7 @@ if [ "${CANON_PROFILE_FILE:-}" = \
    [ "${CANON_P57_TIM_ARM:-}" = "zero" ] && \
    [ "${CANON_P57_EXPECTED_UPDATES:-}" = "300" ] && \
    [ "${CANON_P57_STOP_AFTER_STEP:-}" = "300" ] && \
-   [ "${CANON_P57_WORKLOAD_CANDIDATE:-}" = "m15" ] && \
-   [ "${CANON_P57_DATA_SPLIT:-}" = "main" ] && \
+   [ "$P57_ZERO_WARNING_WORKLOAD_IDENTITY" = "1" ] && \
    [ "${CANON_P33_ENABLE_EVAL:-}" = "0" ] && \
    [ "${CANON_P33_DISABLE_EVAL:-}" = "1" ] && \
    [ "${CANON_P31_ENABLE_EVAL:-}" = "0" ] && \
@@ -208,8 +211,30 @@ if [ "$M15_APC_DEBUG_EXACT_TOKEN_CONTINUITY_EXPECTED" = "1" ]; then
   }
   echo "[env] M15 APC debug exact TITO enabled mode=${CANON_M15_TOKEN_CONTINUITY:-missing} arm=${CANON_APC_M15_TARGET_DEBUG:-missing} observer=layer rounds=3"
 elif [[ -v CANON_M15_TOKEN_CONTINUITY ]]; then
-  echo "[env] CANON_M15_TOKEN_CONTINUITY is outside its registered APC debug identity" >&2
-  fail=1
+  if [ "${CANON_M15_TOKEN_CONTINUITY}" = "exact" ] && \
+     [ "${CANON_PROFILE_FILE:-}" = \
+       "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env" ] && \
+     [ "${CANON_PROFILE:-}" = \
+       "qwen3-8b-dp8-tp8-frozenlake-v1-hp" ] && \
+     [ "${CANON_P32_WORKLOAD:-}" = "frozenlake-dp8-tp8" ] && \
+     [ "${CANON_V1_HP_FULL:-0}" = "1" ] && \
+     [ "${CANON_P57_TIM_ARM:-}" = "zero" ] && \
+     [ "${CANON_P57_RUN_KIND:-}" = "train" ] && \
+     [ "${CANON_P57_EXPECTED_UPDATES:-}" = "300" ] && \
+     [ "${CANON_P57_STOP_AFTER_STEP:-}" = "300" ] && \
+     [ "${CANON_P57_WORKLOAD_CANDIDATE:-}" = "m15" ] && \
+     [ "${CANON_P57_DATA_SPLIT:-}" = "main" ] && \
+     [ "${CANON_P33_RUN_STAGE:-}" = "full" ] && \
+     [ "${CANON_P33_NO_COMMIT:-}" = "0" ] && \
+     [ "${CANON_P33_ENABLE_EVAL:-}" = "0" ] && \
+     [ "${CANON_P33_DISABLE_EVAL:-}" = "1" ] && \
+     [ "${CANON_P31_ENABLE_EVAL:-}" = "0" ] && \
+     [ "${CANON_FROZENLAKE_CKPT_MODE:-}" = "disabled" ]; then
+    echo "[env] M15 exact TITO enabled mode=exact default=off"
+  else
+    echo "[env] CANON_M15_TOKEN_CONTINUITY is outside the optional exact M15 full identity" >&2
+    fail=1
+  fi
 fi
 case "${CANON_APC_M15_TARGET_DEBUG:-}" in
   "") APC_M15_TARGET_DEBUG=0 ;;

@@ -108,7 +108,7 @@ def _validate_m15_tito(
     text: str,
     reasons: list[str],
 ) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
-  """Requires experimental M15 TITO to remain absent from full recipes."""
+  """Validates default-off or explicitly selected exact M15 full TiTO."""
   receipts = _token_continuity_receipts(text)
   exact_equal = [
       receipt
@@ -119,17 +119,31 @@ def _validate_m15_tito(
       and receipt.get("actual_tokens") == receipt.get("expected_tokens")
       and receipt.get("actual_sha256") == receipt.get("expected_sha256")
   ]
-  _require(
-      "CANON_M15_TOKEN_CONTINUITY" not in env,
-      "resolved_env.CANON_M15_TOKEN_CONTINUITY_unexpected",
-      reasons,
-  )
-  _require(not receipts, "unexpected_m15_token_receipt", reasons)
-  _require(
-      "[env] M15 exact TITO enabled" not in text,
-      "unexpected_m15_exact_tito_env_receipt",
-      reasons,
-  )
+  mode = env.get("CANON_M15_TOKEN_CONTINUITY")
+  if recipe == "m15" and mode == "exact":
+    _require(bool(receipts), "m15_exact_tito_receipts_missing", reasons)
+    _require(
+        len(exact_equal) == len(receipts),
+        "m15_exact_tito_receipt_not_equal",
+        reasons,
+    )
+    _require(
+        text.count("[env] M15 exact TITO enabled mode=exact default=off") == 1,
+        "m15_exact_tito_env_receipt_count",
+        reasons,
+    )
+  else:
+    _require(
+        mode is None,
+        "resolved_env.CANON_M15_TOKEN_CONTINUITY_unexpected",
+        reasons,
+    )
+    _require(not receipts, "unexpected_m15_token_receipt", reasons)
+    _require(
+        "[env] M15 exact TITO enabled" not in text,
+        "unexpected_m15_exact_tito_env_receipt",
+        reasons,
+    )
   return receipts, exact_equal
 
 
@@ -407,9 +421,7 @@ def _required_recipe_env(recipe: str, contract: dict[str, Any]) -> dict[str, str
   else:
     required.update({
         "CANON_P67_P66_VMA_P59_ONLY": "1",
-        "CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY": (
-            "1" if recipe == "m15" else "0"
-        ),
+        "CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY": "1",
         "CANON_BATCHED_EVIDENCE": "0",
         "CANON_P57_TIM_ARM": "zero",
         "CANON_P57_EXPECTED_UPDATES": "300",
@@ -426,6 +438,11 @@ def _required_recipe_env(recipe: str, contract: dict[str, Any]) -> dict[str, str
         "CANON_FROZENLAKE_CKPT_MILESTONE_INTERVAL": "",
     })
   return required
+
+
+def _alignment_warning_mode(recipe: str) -> bool:
+  """Returns whether a full recipe admits only finite A-B warnings."""
+  return recipe in ("p45", "m15")
 
 
 def classify(
@@ -549,7 +566,7 @@ def classify(
     )
 
   base = json.loads(base_classification.read_text(encoding="utf-8"))
-  alignment_warning_mode = recipe == "m15"
+  alignment_warning_mode = _alignment_warning_mode(recipe)
   expected_base_verdict = (
       "PASS_WITH_ALIGNMENT_WARNINGS" if alignment_warning_mode else "PASS"
   )
@@ -1150,7 +1167,7 @@ def classify(
           "max_hit_rate_percent": max(hit_rates) if hit_rates else None,
       },
       "m15_tito": {
-          "mode": "exact" if recipe == "m15" else None,
+          "mode": env.get("CANON_M15_TOKEN_CONTINUITY"),
           "receipts": len(token_receipts),
           "exact_equal_receipts": len(exact_equal_token_receipts),
       },

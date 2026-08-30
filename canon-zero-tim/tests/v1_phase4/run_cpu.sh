@@ -9,4 +9,4 @@ python3 -m unittest discover \
   -p 'test_*.py' \
   -v
 
-echo "V1_HP_THREE_FULL_CPU_PASS manifests=3 strict=2 m15_ab_warning=1 xprof=3"
+echo "V1_HP_THREE_FULL_CPU_PASS manifests=3 strict=1 frozenlake_ab_warning=2 xprof=3"

@@ -79,7 +79,6 @@ _M15_APC_DEBUG_ABSENT = (
     "CANON_P57_STOP_AFTER_STEP",
     "CANON_FROZENLAKE_CKPT_MODE",
 )
-
 _M15_ONEHOST_IDENTITY = {
     "CANON_V1_HP_FULL": "0",
     "CANON_P57_WORKLOAD_CANDIDATE": "m15",
@@ -140,11 +139,13 @@ def m15_token_continuity_mode(
       if env.get(name) != expected
   }
   if onehost_identity:
-    if mode != "exact":
-      raise ValueError("M15 one-host rehearsal admits exact continuity only")
     apc = env.get("CANON_VLLM_ENABLE_PREFIX_CACHING")
-    if apc not in ("0", "1"):
-      drift["CANON_VLLM_ENABLE_PREFIX_CACHING"] = (apc, "0|1")
+    admitted_apc = ("0", "1") if mode == "exact" else ("0",)
+    if apc not in admitted_apc:
+      drift["CANON_VLLM_ENABLE_PREFIX_CACHING"] = (
+          apc,
+          "|".join(admitted_apc),
+      )
     for name in _M15_ONEHOST_ABSENT:
       if env.get(name) not in (None, ""):
         drift[name] = (env.get(name), "absent")
@@ -157,6 +158,8 @@ def m15_token_continuity_mode(
     for name in _M15_APC_DEBUG_ABSENT:
       if env.get(name) not in (None, ""):
         drift[name] = (env.get(name), "absent")
+  elif mode != "exact":
+    raise ValueError("M15 full training admits exact continuity only")
   if drift:
     details = ", ".join(
         f"{name}={actual!r} expected {expected!r}"

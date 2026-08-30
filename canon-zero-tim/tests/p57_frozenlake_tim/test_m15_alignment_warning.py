@@ -25,7 +25,9 @@ sys.modules[ALIGNMENT_SPEC.name] = alignment
 ALIGNMENT_SPEC.loader.exec_module(alignment)
 
 
-def _environment(report: str) -> dict[str, str]:
+def _environment(
+    report: str, *, candidate: str = "m15", data_split: str = "main"
+) -> dict[str, str]:
   return {
       alignment.GATE_ONLY_ENV: "0",
       alignment.UPDATE_CANARY_ENV: "0",
@@ -48,8 +50,8 @@ def _environment(report: str) -> dict[str, str]:
       "CANON_P57_TIM_ARM": "zero",
       "CANON_P57_EXPECTED_UPDATES": "300",
       "CANON_P57_STOP_AFTER_STEP": "300",
-      "CANON_P57_WORKLOAD_CANDIDATE": "m15",
-      "CANON_P57_DATA_SPLIT": "main",
+      "CANON_P57_WORKLOAD_CANDIDATE": candidate,
+      "CANON_P57_DATA_SPLIT": data_split,
       "CANON_P33_ENABLE_EVAL": "0",
       "CANON_P33_DISABLE_EVAL": "1",
       "CANON_P31_ENABLE_EVAL": "0",
@@ -135,13 +137,26 @@ class M15AlignmentWarningTest(unittest.TestCase):
         ), self.assertRaisesRegex(alignment.AlignmentGateError, expected):
           alignment.check_pre_backward(sidecar, step=0)
 
-  def test_p45_cannot_inherit_the_m15_warning_lane(self):
+  def test_exact_p45_identity_uses_the_same_narrow_ab_warning_lane(self):
     with tempfile.TemporaryDirectory() as root:
-      values = _environment(f"{root}/pre.jsonl")
-      values["CANON_P57_WORKLOAD_CANDIDATE"] = ""
-      values["CANON_P57_DATA_SPLIT"] = ""
+      values = _environment(
+          f"{root}/pre.jsonl", candidate="", data_split=""
+      )
+      with mock.patch.dict(os.environ, values, clear=True):
+        policy = alignment.gsm8k_ab_report_policy()
+    self.assertEqual(policy["claim_level"], "convergence-only")
+    self.assertEqual(
+        policy["warning_boundaries"], ("S_decode_vs_S_prefill",)
+    )
+    self.assertFalse(alignment._policy_warns(policy, "S_prefill_vs_T_old"))
+
+  def test_partial_or_foreign_p45_identity_is_rejected(self):
+    with tempfile.TemporaryDirectory() as root:
+      values = _environment(
+          f"{root}/pre.jsonl", candidate="", data_split="main"
+      )
       with mock.patch.dict(os.environ, values, clear=True), self.assertRaisesRegex(
-          alignment.AlignmentGateError, "exact M15/main"
+          alignment.AlignmentGateError, "exact P45 or M15/main"
       ):
         alignment.gsm8k_ab_report_policy()
 

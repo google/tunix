@@ -14,7 +14,9 @@
 
 """CPU contracts for canonical re-score through both in-process vLLM modes."""
 
+import contextlib
 import inspect
+import io
 import os
 from itertools import count
 from absl.testing import absltest
@@ -201,6 +203,58 @@ class VllmRolloutCanonicalTest(absltest.TestCase):
         [prompt["prompt_token_ids"] for prompt in rollout._sampler.prompts],
         [[1, 2, 3, 4], [5, 6]],
     )
+
+  def test_m15_onehost_modes_attest_independent_b_rescore(self):
+    for mode in ("verify", "exact"):
+      with self.subTest(mode=mode):
+        rollout = object.__new__(vllm_rollout.VllmRollout)
+        rollout._sampler = _RescoreSampler()
+        rollout._last_prefill_rescore_provenance = None
+        output = io.StringIO()
+        with mock.patch.dict(os.environ, {
+            "CANON_M15_TOKEN_CONTINUITY": mode,
+            "CANON_P38_ONEHOST_REHEARSAL": "1",
+            "CANON_P57_WORKLOAD_CANDIDATE": "m15",
+        }, clear=True), contextlib.redirect_stdout(output):
+          rollout.get_prefill_rescore_logps(
+              prompt_tokens=np.asarray([[0, 1, 2]], np.int32),
+              completion_tokens=np.asarray([[3, 0]], np.int32),
+              processed=False,
+              completion_lengths=np.asarray([1], np.int32),
+          )
+        self.assertIn(
+            "reset_prefix_cache=True all_num_cached_tokens_zero=True",
+            output.getvalue(),
+        )
+
+  def test_m15_onehost_verify_rejects_cached_b_rescore(self):
+    class _CachedRescoreSampler(_RescoreSampler):
+
+      def generate_request_outputs(
+          self, prompts, sampling_params, *, reset_prefix_cache=False
+      ):
+        outputs = super().generate_request_outputs(
+            prompts, sampling_params, reset_prefix_cache=reset_prefix_cache
+        )
+        outputs[0].num_cached_tokens = 1
+        return outputs
+
+    rollout = object.__new__(vllm_rollout.VllmRollout)
+    rollout._sampler = _CachedRescoreSampler()
+    rollout._last_prefill_rescore_provenance = None
+    with mock.patch.dict(os.environ, {
+        "CANON_M15_TOKEN_CONTINUITY": "verify",
+        "CANON_P38_ONEHOST_REHEARSAL": "1",
+        "CANON_P57_WORKLOAD_CANDIDATE": "m15",
+    }, clear=True), self.assertRaisesRegex(
+        RuntimeError, "independent full-reset judge"
+    ):
+      rollout.get_prefill_rescore_logps(
+          prompt_tokens=np.asarray([[0, 1, 2]], np.int32),
+          completion_tokens=np.asarray([[3, 0]], np.int32),
+          processed=False,
+          completion_lengths=np.asarray([1], np.int32),
+      )
 
   def test_short_prompt_logprobs_row_is_retried_alone_and_recovers(self):
     """The engine's chunked prompt-logprob accounting can drop a request's

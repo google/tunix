@@ -57,7 +57,7 @@ def _env(document: dict) -> dict[str, str]:
 
 class P67FrozenLakeTwoFullRendererTest(unittest.TestCase):
 
-  def _render(self, output: Path):
+  def _render(self, output: Path, *, m15_tito_exact: bool = False):
     return renderer.render_two(
         source_commit="b" * 40,
         output_dir=output,
@@ -65,6 +65,7 @@ class P67FrozenLakeTwoFullRendererTest(unittest.TestCase):
         m15_run_id="m15p67a",
         campaign_root="v1p67-a",
         base_path=_REPO / "canon-zero-tim/cluster/jobset-64chip.yaml",
+        m15_tito_exact=m15_tito_exact,
     )
 
   def test_renders_exactly_two_scoped_full_recipes_without_topology_drift(self):
@@ -117,7 +118,7 @@ class P67FrozenLakeTwoFullRendererTest(unittest.TestCase):
         self.assertEqual(selectors["cloud.google.com/gke-tpu-topology"], "4x4x4")
       self.assertEqual(p45["CANON_P57_WORKLOAD_CANDIDATE"], "")
       self.assertEqual(p45["CANON_P57_DATA_SPLIT"], "")
-      self.assertEqual(p45["CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY"], "0")
+      self.assertEqual(p45["CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY"], "1")
       self.assertNotIn("CANON_M15_TOKEN_CONTINUITY", p45)
       self.assertEqual(m15["CANON_P57_WORKLOAD_CANDIDATE"], "m15")
       self.assertEqual(m15["CANON_P57_DATA_SPLIT"], "main")
@@ -125,6 +126,51 @@ class P67FrozenLakeTwoFullRendererTest(unittest.TestCase):
       self.assertNotIn("CANON_M15_TOKEN_CONTINUITY", m15)
       index = (root / "manifest-index.json").read_text(encoding="utf-8")
       self.assertIn('"schema": "v1-p67-frozenlake-two-full-v1"', index)
+      self.assertIn('"m15_tito_exact": false', index)
+
+  def test_explicit_exact_tito_changes_only_m15(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      root = Path(tmp)
+      outputs = self._render(root / "rendered", m15_tito_exact=True)
+      p45, m15 = [
+          _env(yaml.safe_load(path.read_text(encoding="utf-8")))
+          for path in outputs
+      ]
+      self.assertNotIn("CANON_M15_TOKEN_CONTINUITY", p45)
+      self.assertEqual(m15["CANON_M15_TOKEN_CONTINUITY"], "exact")
+      index = (root / "rendered/manifest-index.json").read_text(
+          encoding="utf-8"
+      )
+      self.assertIn('"m15_tito_exact": true', index)
+
+      state = root / "state-m15-exact"
+      state.mkdir()
+      completed = subprocess.run(
+          ["bash", str(_REPO / "canon-zero-tim/cluster/steps/00_env.sh")],
+          cwd=_REPO,
+          env={
+              **os.environ,
+              **m15,
+              "CANON_PKG": str(_REPO / "canon-zero-tim"),
+              "CANON_STATE": str(state),
+              "JOBSET_RESTART_ATTEMPT": "0",
+              "INJECTED_WANDB_API_KEY": "test-key-not-a-credential",
+          },
+          text=True,
+          capture_output=True,
+          check=False,
+      )
+      self.assertEqual(
+          completed.returncode,
+          0,
+          msg=f"stdout={completed.stdout}\nstderr={completed.stderr}",
+      )
+      self.assertIn(
+          "[env] M15 exact TITO enabled mode=exact default=off",
+          completed.stdout,
+      )
+      snapshot = (state / "env.sh").read_text(encoding="utf-8")
+      self.assertIn("export CANON_M15_TOKEN_CONTINUITY=exact", snapshot)
 
   def test_both_manifests_pass_real_env_resolution(self):
     with tempfile.TemporaryDirectory() as tmp:
@@ -219,6 +265,8 @@ class P67FrozenLakeTwoFullRendererTest(unittest.TestCase):
     self.assertIn("refusing to render from a dirty worktree", script)
     self.assertIn("V1_P67_FROZENLAKE_WAVE_READY", script)
     self.assertIn("launch=not-executed", script)
+    self.assertIn("[--m15-tito-exact]", script)
+    self.assertIn("M15_TITO_MODE=off", script)
     self.assertEqual(script.count('"kubectl apply -f '), 2)
     self.assertFalse(
         any(line.strip().startswith("kubectl apply") for line in script.splitlines())

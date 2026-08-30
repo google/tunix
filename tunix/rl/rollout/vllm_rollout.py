@@ -573,7 +573,8 @@ class VllmRollout(base_rollout.BaseRollout):
     m15_b_contract = (
         os.environ.get("CANON_APC_M15_TARGET_DEBUG", "") in ("off", "on")
         or (
-            os.environ.get("CANON_M15_TOKEN_CONTINUITY", "") == "exact"
+            os.environ.get("CANON_M15_TOKEN_CONTINUITY", "")
+            in ("verify", "exact")
             and os.environ.get("CANON_P38_ONEHOST_REHEARSAL", "0") == "1"
             and os.environ.get("CANON_P57_WORKLOAD_CANDIDATE", "") == "m15"
         )

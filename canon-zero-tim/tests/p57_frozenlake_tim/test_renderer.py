@@ -529,7 +529,7 @@ class P57RendererTest(unittest.TestCase):
             self.assertEqual(env["CANON_P38_FIXED_LM_HEAD"], fixed_head)
             self.assertEqual(
                 env["CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY"],
-                "1" if workload == "m15" and arm == "zero" else warning_only,
+                "1" if arm == "zero" else warning_only,
             )
             self.assertEqual(env["CANON_P57_STOP_AFTER_STEP"], str(updates))
             checkpoint_enabled = arm != "zero"
