@@ -31,6 +31,7 @@ _SEAM_MAX_POSITION = 4096
 _SEAM_MAX_BYTES = 8 * 1024 * 1024 * 1024
 _TAIL_MAX_BYTES = 256 * 1024 * 1024
 _WIDE_DIAGNOSTIC_ROUNDS = 3
+_E0_KV_DIAGNOSTIC_ROUNDS = 3
 _KV_TARGET_LAYER = 0
 _KV_TARGET_PREFIX_TOKENS = 1226
 _KV_TARGET_PREFIX_SHA256 = (
@@ -43,6 +44,22 @@ _KV_TARGET_MAX_READ_BYTES = 640 * 1024 * 1024
 _ARTIFACT_BUCKET = "gs://yuxzhang-tunix-models/canon-zero-tim/evidence/p38"
 _WORKLOAD_CANDIDATE = "m15"
 _DATA_SPLIT = "main"
+
+
+def _diagnostic_rounds(observer: str) -> int:
+  if observer in ("layer", "full"):
+    return _WIDE_DIAGNOSTIC_ROUNDS
+  if observer == "kv3":
+    return _E0_KV_DIAGNOSTIC_ROUNDS
+  return 1
+
+
+def _durability_profile(observer: str) -> str:
+  if observer in ("layer", "full"):
+    return "m15-wide-v1"
+  if observer == "kv3":
+    return "m15-e0-kv-v1"
+  return "round-alignment-v1"
 
 
 def _replace_arg(command: list[str], prefix: str, replacement: str) -> None:
@@ -124,10 +141,7 @@ def _capture_values(
       "CANON_KV_UNIFIED": "0",
       "CANON_P38_PRECHECK_ONLY": "1",
       "CANON_P38_CONTROLLED_EXIT": "1",
-      "CANON_P38_DIAGNOSTIC_ROUNDS": (
-          str(_WIDE_DIAGNOSTIC_ROUNDS)
-          if observer in ("layer", "full") else "1"
-      ),
+      "CANON_P38_DIAGNOSTIC_ROUNDS": str(_diagnostic_rounds(observer)),
       "CANON_P38_DIAGNOSTIC_ROUND_FILE": f"{state}/p38_diagnostic_round",
       "CANON_P38_ROUND_SEAL_REQUEST_DIR": f"{state}/p38_round_seal_requests",
       "CANON_P38_ROUND_SEAL_ACK_DIR": f"{state}/p38_round_seal_acks",
@@ -141,10 +155,7 @@ def _capture_values(
       "CANON_P38_INCIDENT_MAX_PREFIX": str(_INCIDENT_MAX_PREFIX),
       "CANON_P38_INCIDENT_MAX_BYTES": str(_INCIDENT_MAX_BYTES),
       "CANON_P38_LIVE_SNAPSHOT_INTERVAL_SECONDS": "30",
-      "CANON_P38_DURABILITY_PROFILE": (
-          "m15-wide-v1"
-          if observer in ("layer", "full") else "round-alignment-v1"
-      ),
+      "CANON_P38_DURABILITY_PROFILE": _durability_profile(observer),
       "CANON_P38_LIVE_SNAPSHOT_STOP_FILE": f"{state}/p38_live.stop",
       "CANON_P38_LIVE_SNAPSHOT_WORKER_LOG": f"{state}/p38_live_worker.log",
       "CANON_P38_LIVE_COLLECT_REQUEST_FILE": f"{state}/p38_collect.request",
@@ -161,7 +172,7 @@ def _capture_values(
       "CANON_P38_SERVING_CAPTURE_ARCHIVE": f"{state}/p38_serving_capture.tar",
       "CANON_P38_GCS_PREFIX": f"{_ARTIFACT_BUCKET}/{name}/attempt-0",
   }
-  if observer == "kv":
+  if observer in ("kv", "kv3"):
     values.update({
         "CANON_P38_KV_OBSERVER_DIR": capture,
         "CANON_P38_KV_OBSERVER_MAX_CANDIDATES": str(_KV_TARGET_ALIASES),
@@ -232,7 +243,7 @@ def validate(
         for name in env
     ):
       raise ValueError("observer=none must not attach a numerical observer")
-  elif observer == "kv":
+  elif observer in ("kv", "kv3"):
     expected_kv = {
         "CANON_P38_KV_OBSERVER_MAX_CANDIDATES": str(_KV_TARGET_ALIASES),
         "CANON_P38_KV_OBSERVER_MAX_PAGES": str(_KV_TARGET_MAX_PAGES),
@@ -258,9 +269,15 @@ def validate(
         for name in env
     ):
       raise ValueError(f"M15 targeted KV observer contract drifted: {wrong_kv}")
-    if env.get("CANON_P38_DIAGNOSTIC_ROUNDS") != "1" or \
-       env.get("CANON_P38_DURABILITY_PROFILE") != "round-alignment-v1":
-      raise ValueError("M15 targeted KV observer must be one round")
+    expected_rounds = "3" if observer == "kv3" else "1"
+    expected_profile = (
+        "m15-e0-kv-v1" if observer == "kv3" else "round-alignment-v1"
+    )
+    if env.get("CANON_P38_DIAGNOSTIC_ROUNDS") != expected_rounds or \
+       env.get("CANON_P38_DURABILITY_PROFILE") != expected_profile:
+      raise ValueError(
+          "M15 targeted KV observer round/durability contract drifted"
+      )
   elif observer == "layer":
     if any(name.startswith("CANON_" "P38_KV_OBSERVER") for name in env):
       raise ValueError("M15 wide seam runs must not attach the KV observer")
@@ -278,7 +295,7 @@ def validate(
        "CANON_P38_TAIL_OBSERVER" in env:
       raise ValueError("M15 full observer contract drifted")
   else:
-    raise ValueError("observer must be none, kv, layer, or full")
+    raise ValueError("observer must be none, kv, kv3, layer, or full")
   command = shlex.split(env["CANON_RUN_CMD"])
   if tuple(command[:4]) != (
       "python3", "-u", "-m", "examples.frozenlake.train_frozenlake_qwen3"
@@ -311,8 +328,8 @@ def render_all(
 ) -> tuple[Path, ...]:
   if len(source_commit) != 40 or any(c not in "0123456789abcdef" for c in source_commit):
     raise ValueError("source commit must be a full lowercase SHA")
-  if observer not in ("none", "kv", "layer", "full"):
-    raise ValueError("observer must be none, kv, layer, or full")
+  if observer not in ("none", "kv", "kv3", "layer", "full"):
+    raise ValueError("observer must be none, kv, kv3, layer, or full")
   if observer == "full" and (seam_layer is None or not 0 <= seam_layer < 36):
     raise ValueError("full M15 seam observer requires --seam-layer in [0,36)")
   if observer != "full" and seam_layer is not None:
@@ -340,19 +357,15 @@ def render_all(
             observer if observer in ("layer", "full") else "none"
         ),
         "canon.zero-tim/kv-observer": (
-            "layer0-target-prefix" if observer == "kv" else "none"
+            "layer0-target-prefix" if observer in ("kv", "kv3") else "none"
         ),
         "canon.zero-tim/terminal-tail": "1" if observer == "layer" else "0",
         "canon.zero-tim/terminal-discriminator": "0",
         "canon.zero-tim/lm-head-algo": "0",
         "canon.zero-tim/fixed-lm-head": "1",
-        "canon.zero-tim/durability-profile": (
-            "m15-wide-v1"
-            if observer in ("layer", "full") else "round-alignment-v1"
-        ),
-        "canon.zero-tim/diagnostic-rounds": (
-            str(_WIDE_DIAGNOSTIC_ROUNDS)
-            if observer in ("layer", "full") else "1"
+        "canon.zero-tim/durability-profile": _durability_profile(observer),
+        "canon.zero-tim/diagnostic-rounds": str(
+            _diagnostic_rounds(observer)
         ),
     })
     validate(
@@ -383,7 +396,8 @@ def main() -> None:
   parser.add_argument("--source-commit", required=True)
   parser.add_argument("--run-id", required=True)
   parser.add_argument(
-      "--observer", choices=("none", "kv", "layer", "full"), default="none"
+      "--observer", choices=("none", "kv", "kv3", "layer", "full"),
+      default="none",
   )
   parser.add_argument("--seam-layer", type=int)
   args = parser.parse_args()

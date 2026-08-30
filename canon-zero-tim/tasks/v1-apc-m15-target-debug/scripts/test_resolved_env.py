@@ -162,6 +162,15 @@ class ResolvedEnvironmentTest(unittest.TestCase):
     self.assertIn("export CANON_P38_DIAGNOSTIC_ROUNDS=1", resolved)
     self.assertNotIn("export CANON_P38_SEAM_OBSERVER=", resolved)
 
+  def test_targeted_kv3_observer_resolves_three_round_durability(self):
+    result, resolved = self._resolve("on", observer="kv3")
+    self.assertEqual(result.returncode, 0, result.stdout)
+    self.assertIn("export CANON_P38_KV_OBSERVER_LAYER=0", resolved)
+    self.assertIn("export CANON_P38_KV_OBSERVER_MAX_CANDIDATES=8", resolved)
+    self.assertIn("export CANON_P38_DURABILITY_PROFILE=m15-e0-kv-v1", resolved)
+    self.assertIn("export CANON_P38_DIAGNOSTIC_ROUNDS=3", resolved)
+    self.assertNotIn("export CANON_P38_SEAM_OBSERVER=", resolved)
+
   def test_wrong_profile_is_rejected_before_runtime(self):
     result, resolved = self._resolve("on", wrong_profile=True)
     self.assertNotEqual(result.returncode, 0, result.stdout)

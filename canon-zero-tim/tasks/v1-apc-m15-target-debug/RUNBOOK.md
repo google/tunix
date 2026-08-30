@@ -5,7 +5,104 @@ commands; it does not edit YAML, numerical code, or evidence. Large payloads
 remain in GCS exactly like the earlier P38/lm-head investigation. Only small
 machine-generated receipts are returned through Git or chat.
 
-## Current operation: certify provenance hardening, then recover read-only
+## Current operation: prepare and gate the three-round E0 KV pair
+
+Do not use the historical Attempt-18 one-round YAML for a new target. Its
+`observer=kv`/`round-alignment-v1` identity is preserved only for read-only
+recovery. The next pair is the additive `observer=kv3` identity: exactly three
+frozen-weight M15/main rounds per arm with `m15-e0-kv-v1` durability.
+
+The local implementation has passed its aggregate host gate. To reproduce
+that local-only gate:
+
+```bash
+bash canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/run_m15_e0_kv3_host_gate.sh
+```
+
+Require `M15_E0_KV3_HOST_PASS` with `task_discovery=193`, `v1_cpu=91`,
+`p3_prefix_cache=31`, `persistence=1`, `flags=398`, and
+`exact_image=0 target=0 gcs=0 kubernetes=0 tpu=0`.
+
+The user explicitly approved commit/push publication. After delivery, create a
+fresh clean `local/*` worktree at the exact full commit containing this
+runbook. The prepare-only command is:
+
+```bash
+SOURCE_COMMIT=<full-published-E0-KV3-SHA>
+RUN_ID=<fresh-1-to-16-char-lowercase-dns-label>
+OUT=/mnt/disks/tunix-data/m15-e0-kv3-render-${RUN_ID}
+test ! -e "$OUT"
+bash canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/prepare_m15_attempt19_e0_kv3_pair.sh \
+  "$SOURCE_COMMIT" "$RUN_ID" "$OUT"
+```
+
+This command performs CPU/disk host tests and fake-GCS tests only. It does not
+use Docker, real GCS, Kubernetes, or TPU. Require:
+
+```text
+[M15.E0.KV3] RENDER_PASS ... rounds=3 ... durability=m15-e0-kv-v1 ...
+[M15.E0.KV3] TARGET_NOT_RUN ... gcs=0 kubernetes=0 tpu=0
+```
+
+The output contains two immutable YAMLs ending in `-off-kv3.yaml` and
+`-on-kv3.yaml`, plus `RUN_CONTRACT.json` and `SHA256SUMS`. Do not edit them.
+
+Pinned exact-image is a separate approval. After approval, run the complete
+official aggregate directly and preserve the raw log:
+
+```bash
+RAW=/mnt/disks/tunix-data/m15-e0-kv3-exact-image-${RUN_ID}.log
+test ! -e "$RAW"
+bash canon-zero-tim/tests/v1_phase4/run_exact_image.sh \
+  sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a \
+  >"$RAW" 2>&1
+```
+
+Require exit zero, the exact image identity, and the complete
+`V1_HP_EXACT_IMAGE_PASS` marker including `m15_e0_kv3=3`,
+`m15_e0_kv3_return=1`, `m15_durability=1`,
+`m15_round_provenance=1`, and `manifests=3`. This is local Docker/CPU only and
+does not authorize a target launch.
+
+The DP8×TP8 launch is another separate approval. After approval, apply both
+rendered YAMLs directly without a pipe or edit:
+
+```bash
+kubectl apply -f "$OUT/jobset-v1-apc-m15-off-kv3.yaml"
+kubectl apply -f "$OUT/jobset-v1-apc-m15-on-kv3.yaml"
+```
+
+The arms may run concurrently. Every round must complete the
+classifier-input checkpoint, classifier, final upload/readback, and
+`ROUND_COMPLETE` before learner ACK. Control must be exact; B-C must be exact
+in every arm/round. A failed round or root collection is INCONCLUSIVE, but
+earlier completed rounds must remain registered and must not be deleted.
+
+After the jobs finish, real GCS reads require another explicit approval. On
+the bucket-capable machine, run the salvage-first wrapper from a clean exact
+analysis SHA:
+
+```bash
+ANALYSIS_SOURCE=<full-published-E0-KV3-SHA>
+RETURN=/mnt/disks/tunix-data/m15-e0-kv3-return-${RUN_ID}
+test ! -e "$RETURN"
+bash canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/run_m15_attempt19_e0_kv3_return_recovery.sh \
+  "$ANALYSIS_SOURCE" "$OUT" "$RETURN" /mnt/disks/tunix-data
+```
+
+The return reads the small per-round receipts before root terminal objects. A
+fully sealed but root-incomplete arm remains recoverable as
+`ROUNDS_RECOVERED_ROOT_INCOMPLETE`; partial round evidence remains
+`ROUND_EVIDENCE_PARTIAL`. Both exit INCONCLUSIVE and preserve output/scratch.
+Only a complete matched pair can return a stable `*_3_OF_3` decision. The
+wrapper performs no GCS write, Kubernetes operation, or TPU work.
+
+Never return remote roots, raw logs, token/capsule/replay/NPZ payloads, or
+archives through chat or Git. Return sanitized terminal markers, the compact
+`E0_KV3_RETURN.json`, its manifest SHA, and local raw-log path/SHA. No E0
+fingerprint verdict authorizes a numerical repair; Phase E remains closed.
+
+## Superseded operation: certify Attempt-18 provenance hardening, then recover read-only
 
 Do not render, apply, restart, or launch a JobSet. Commit
 `971bb2281417ecb6e33cfa6bb68a422f7fd24f00` contains a four-file

@@ -240,6 +240,11 @@ patch -s --no-backup-if-mismatch "$OUT/tpu_runner_p21_l30.py" \
   echo "      PATCH FAILED: 35-tpu-runner-m15-layer0-kv-prefix.patch" >&2
   exit 1
 }
+patch -s --no-backup-if-mismatch "$OUT/tpu_runner_p21_l30.py" \
+  "$PKG/patches/tpu_inference/36-tpu-runner-m15-e0-kv-multiround.patch" || {
+  echo "      PATCH FAILED: 36-tpu-runner-m15-e0-kv-multiround.patch" >&2
+  exit 1
+}
 
 echo "[3/4] laying down the shim chain (model=$MODEL)"
 cp "$PKG"/src/engine_shims/*.py "$OUT/"

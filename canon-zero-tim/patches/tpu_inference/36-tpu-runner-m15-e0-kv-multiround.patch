@@ -1,0 +1,161 @@
+--- tpu_runner_p21_l30.py
++++ tpu_runner_p21_l30.py
+@@ -1169,6 +1169,7 @@
+ _P38_KV_OBSERVER_A_RECORDS = []
+ _P38_KV_OBSERVER_MATCHED_A = set()
+ _P38_KV_OBSERVER_STATE = {"records": 0, "bytes": 0}
++_P38_KV_OBSERVER_ACTIVE_TARGET_ROUND = None
+ _P38_KV_OBSERVER_FN = None
+ _P38_SEAM_OBSERVER = os.environ.get("CANON_P38_SEAM_OBSERVER", "")
+ _P38_SEAM_OBSERVER_DIR = os.environ.get("CANON_P38_SEAM_OBSERVER_DIR", "")
+@@ -1249,6 +1250,13 @@
+         or _P38_SEAM_OBSERVER not in ("layer", "full")):
+     raise RuntimeError(
+         "m15-wide-v1 requires the signed M15 target and seam observer")
++if _P38_DURABILITY_PROFILE == "m15-e0-kv-v1" and (
++        _P38_M15_TARGET_DEBUG not in ("off", "on")
++        or not _P38_KV_OBSERVER_TARGET_PREFIX_SHA256
++        or _P38_SEAM_OBSERVER):
++    raise RuntimeError(
++        "m15-e0-kv-v1 requires the signed M15 target, targeted KV "
++        "observer, and no seam observer")
+
+ if _P38_SEAM_OBSERVER not in ("", "layer", "full"):
+     raise RuntimeError(
+@@ -1382,11 +1390,19 @@
+     if not (64 * 1024 * 1024 <= _P38_KV_OBSERVER_MAX_READ_BYTES <=
+             2 * 1024 * 1024 * 1024):
+         raise RuntimeError("P38 KV observer read byte bound is invalid")
+-    if _P38_KV_OBSERVER_TARGET_PREFIX_SHA256 and (
+-            _P38_M15_TARGET_DEBUG not in ("off", "on")
+-            or _P38_DURABILITY_PROFILE != "round-alignment-v1"):
+-        raise RuntimeError(
+-            "targeted P38 KV observation requires one-round M15 target debug")
++    if _P38_KV_OBSERVER_TARGET_PREFIX_SHA256:
++        target_contract = (
++            (_P38_DURABILITY_PROFILE == "round-alignment-v1"
++             and os.environ.get("CANON_P38_DIAGNOSTIC_ROUNDS", "") == "1")
++            or (_P38_DURABILITY_PROFILE == "m15-e0-kv-v1"
++                and os.environ.get(
++                    "CANON_P38_DIAGNOSTIC_ROUNDS", "") == "3")
++        )
++        if (_P38_M15_TARGET_DEBUG not in ("off", "on")
++                or not target_contract):
++            raise RuntimeError(
++                "targeted P38 KV observation requires the signed M15 E0 "
++                "one-round or three-round durability contract")
+     print(
+         "[CANON_P38_KV_OBSERVER_INIT] "
+         f"enabled=1 candidates={_P38_KV_OBSERVER_MAX_CANDIDATES} "
+@@ -1935,12 +1951,17 @@
+         call_index, input_ids, input_positions, attn_metadata,
+         padded_rows_per_dp):
+     """Append one bounded exact-call record using host scheduler metadata."""
+-    if _P38_DURABILITY_PROFILE == "m15-wide-v1":
++    if _P38_DURABILITY_PROFILE in ("m15-wide-v1", "m15-e0-kv-v1"):
+         if not _P38_INCIDENT_STATE.get("bypass_reported", False):
+             _P38_INCIDENT_STATE["bypass_reported"] = True
++            replacement = (
++                "replay-envelope+sealed-seam-shards"
++                if _P38_DURABILITY_PROFILE == "m15-wide-v1"
++                else "replay-envelope+sealed-kv-rounds"
++            )
+             print(
+                 "[CANON_P38_INCIDENT_LEDGER_BYPASS] "
+-                "profile=m15-wide-v1 replacement=replay-envelope+sealed-seam-shards",
++                f"profile={_P38_DURABILITY_PROFILE} replacement={replacement}",
+                 flush=True,
+             )
+         return
+@@ -2397,6 +2418,51 @@
+     }
+
+
++def _p38_kv_observer_begin_target_round(diagnostic_round):
++    """Reset only per-round targeted-KV state; never reuse record indices."""
++    global _P38_KV_OBSERVER_ACTIVE_TARGET_ROUND
++    if (not _P38_KV_OBSERVER_TARGET_PREFIX_SHA256
++            or _P38_DURABILITY_PROFILE != "m15-e0-kv-v1"):
++        return
++    diagnostic_round = int(diagnostic_round)
++    previous = _P38_KV_OBSERVER_ACTIVE_TARGET_ROUND
++    if previous is None:
++        if diagnostic_round != 0:
++            raise RuntimeError(
++                "M15 E0 KV observation must begin at diagnostic round 0")
++    elif diagnostic_round == previous:
++        return
++    else:
++        if diagnostic_round != int(previous) + 1:
++            raise RuntimeError(
++                "M15 E0 KV rounds must increase by one: "
++                f"previous={previous} current={diagnostic_round}")
++        previous_records = [
++            record for record in _P38_KV_OBSERVER_A_RECORDS
++            if int(record["diagnostic_round"]) == int(previous)
++        ]
++        previous_indices = {
++            int(record["record_index"]) for record in previous_records
++        }
++        if (len(previous_records) != _P38_KV_OBSERVER_MAX_CANDIDATES
++                or not previous_indices.issubset(
++                    _P38_KV_OBSERVER_MATCHED_A)):
++            raise RuntimeError(
++                "M15 E0 KV round advanced before eight A/B pairs completed: "
++                f"round={previous} A={len(previous_records)} "
++                f"B={len(previous_indices & _P38_KV_OBSERVER_MATCHED_A)}")
++        _P38_KV_OBSERVER_CANDIDATES.clear()
++        _P38_KV_OBSERVER_STATE["bytes"] = 0
++    _P38_KV_OBSERVER_ACTIVE_TARGET_ROUND = diagnostic_round
++    print(
++        "[P38_KV_OBSERVER_ROUND_BUDGET] "
++        f"round={diagnostic_round} "
++        f"records={_P38_KV_OBSERVER_STATE['records']} "
++        f"bytes={_P38_KV_OBSERVER_STATE['bytes']}",
++        flush=True,
++    )
++
++
+ def _p38_kv_observer_after_standard(
+         runner, scheduler_output, req_ids_dp, prompt_rescore_req_ids, output):
+     """Capture finished live A candidates and exact-prefix clean B records."""
+@@ -2417,10 +2483,16 @@
+             raise RuntimeError("P38 KV observer sampled-request rows drifted")
+         for request_id, sampled_ids in zip(req_ids, sampled_rows):
+             if _P38_KV_OBSERVER_TARGET_PREFIX_SHA256:
++                diagnostic_round = int(_p38_seam_round())
++                _p38_kv_observer_begin_target_round(diagnostic_round)
++                round_a_records = [
++                    record for record in _P38_KV_OBSERVER_A_RECORDS
++                    if int(record["diagnostic_round"]) == diagnostic_round
++                ]
+                 if any(record["request_id"] == request_id
+-                       for record in _P38_KV_OBSERVER_A_RECORDS):
++                       for record in round_a_records):
+                     continue
+-                if (len(_P38_KV_OBSERVER_A_RECORDS) >=
++                if (len(round_a_records) >=
+                         _P38_KV_OBSERVER_MAX_CANDIDATES):
+                     continue
+                 scheduled_tokens = int(
+@@ -2450,7 +2522,7 @@
+                 pages = _p38_primary_pages(request_state.block_ids)
+                 candidate = {
+                     "request_id": request_id,
+-                    "diagnostic_round": int(_p38_seam_round()),
++                    "diagnostic_round": diagnostic_round,
+                     "tag_call_index": int(
+                         _P38_M15_REPLAY_STATE.get("last_call_index", -1)),
+                     "tag_prefix": _P38_KV_OBSERVER_TARGET_PREFIX_TOKENS,
+@@ -2532,7 +2604,11 @@
+             runner.input_batch.token_ids_cpu[
+                 request_index, :int(request_state.num_tokens)],
+             dtype=np.int32)
++        diagnostic_round = int(_p38_seam_round())
++        _p38_kv_observer_begin_target_round(diagnostic_round)
+         for candidate in _P38_KV_OBSERVER_A_RECORDS:
++            if int(candidate["diagnostic_round"]) != diagnostic_round:
++                continue
+             candidate_index = int(candidate["record_index"])
+             if candidate_index in _P38_KV_OBSERVER_MATCHED_A:
+                 continue

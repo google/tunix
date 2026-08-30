@@ -20,7 +20,7 @@ set -euo pipefail
 : "${CANON_PKG:?CANON_PKG unset}"
 
 case "$CANON_P38_DURABILITY_PROFILE" in
-  full-v1|round-alignment-v1|m15-wide-v1|p58-seam-v1) ;;
+  full-v1|round-alignment-v1|m15-wide-v1|m15-e0-kv-v1|p58-seam-v1) ;;
   *)
     echo "[P38.GCS] REFUSING: invalid durability profile: $CANON_P38_DURABILITY_PROFILE" >&2
     exit 2
@@ -119,6 +119,7 @@ snapshot_if_changed() {
   # and cannot be preempted once a GCS transfer starts, so running them here
   # can starve a later round request past the learner's 900-second deadline.
   if [ "$CANON_P38_DURABILITY_PROFILE" = round-alignment-v1 ] || \
+     [ "$CANON_P38_DURABILITY_PROFILE" = m15-e0-kv-v1 ] || \
      [ "$CANON_P38_DURABILITY_PROFILE" = p58-seam-v1 ]; then
     return 0
   fi
@@ -274,6 +275,13 @@ PY
         write_round_failure "$round_text" persist-m15-round "$rc" || true
         return "$rc"
       fi
+    elif [ "$CANON_P38_DURABILITY_PROFILE" = m15-e0-kv-v1 ]; then
+      rc=0
+      bash "$persist" m15-e0-round "$round_text" || rc=$?
+      if [ "$rc" -ne 0 ]; then
+        write_round_failure "$round_text" persist-m15-e0-round "$rc" || true
+        return "$rc"
+      fi
     else
       rc=0
       bash "$persist" round "$round_text" || rc=$?
@@ -288,6 +296,7 @@ PY
     # not redundantly archive the just-sealed round.
     observer_dir="${CANON_P38_SEAM_OBSERVER_DIR:-${CANON_P38_KV_OBSERVER_DIR:-}}"
     if [ "$CANON_P38_DURABILITY_PROFILE" != m15-wide-v1 ] && \
+       [ "$CANON_P38_DURABILITY_PROFILE" != m15-e0-kv-v1 ] && \
        [ -n "$observer_dir" ] && [ -d "$observer_dir" ]; then
       last_observer_signature="$(observer_signature_for_round \
         "$observer_dir" "$next_round_to_seal" | tr '\n' ',')"

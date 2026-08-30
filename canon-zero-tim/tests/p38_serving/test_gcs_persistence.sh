@@ -405,6 +405,70 @@ test -s "$alignment_remote/COMPLETE.json"
 test ! -e "$alignment_remote/mismatch-capsule.npz"
 (cd "$alignment_remote" && sha256sum -c SHA256SUMS --quiet)
 
+# The E0 KV carrier seals, classifies, uploads, and reads back each of exactly
+# three rounds before the learner ACK.  Verify that all round evidence remains
+# independently recoverable before root collection exists.
+install_fake_gcloud "$tmp/m15-e0-kv"
+make_case "$tmp/m15-e0-kv" canon-p38-test-m15-e0-kv
+export CANON_P38_DURABILITY_PROFILE=m15-e0-kv-v1
+export CANON_P38_FIXED_LM_HEAD=1
+export CANON_P38_DIAGNOSTIC_ROUNDS=3
+export CANON_APC_M15_TARGET_DEBUG=off
+export CANON_P38_KV_OBSERVER_DIR="$tmp/m15-e0-kv/state/observer"
+export CANON_P38_KV_OBSERVER_CLASSIFICATION="$tmp/m15-e0-kv/state/p38_kv_observer.classification.json"
+export CANON_APC_M15_REPLAY_LEDGER="$tmp/m15-e0-kv/state/m15-replay-envelope.jsonl"
+export CANON_P38_MISMATCH_CAPSULE="$tmp/m15-e0-kv/state/mismatch-capsule.npz"
+python3 - "$ROOT/tasks/v1-apc-m15-target-debug/scripts/test_m15_e0_kv_three_round.py" \
+    "$tmp/m15-e0-kv/state" <<'PY'
+import importlib.util
+import pathlib
+import sys
+
+spec = importlib.util.spec_from_file_location("e0_fixture", sys.argv[1])
+assert spec and spec.loader
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+root = pathlib.Path(sys.argv[2])
+fixture = module.E0KvThreeRoundTest()._stage_fixture(root)
+assert fixture["observer"] == root / "observer"
+PY
+export CANON_PRE_ALIGN_REPORT="$tmp/m15-e0-kv/state/pre-alignment.jsonl"
+bash "$PERSIST" probe > "$tmp/m15-e0-kv/probe.log"
+for round_index in 0 1 2; do
+  printf -v round_text '%06d' "$round_index"
+  bash "$PERSIST" m15-e0-round "$round_text" \
+    > "$tmp/m15-e0-kv/round-$round_text.log"
+done
+m15_e0_remote="$FAKE_GCS_ROOT/yuxzhang-tunix-models/canon-zero-tim/evidence/p38/canon-p38-test-m15-e0-kv/attempt-0"
+test ! -e "$m15_e0_remote/COLLECTED.json"
+test ! -e "$m15_e0_remote/COMPLETE.json"
+for round_index in 0 1 2; do
+  printf -v round_text '%06d' "$round_index"
+  round_remote="$m15_e0_remote/rounds/$round_text"
+  for name in ROUND_ARCHIVE.tar SHA256SUMS ROUND_INPUT.json \
+      kv-observer-classification.json ROUND_COMPLETE.json; do
+    test -s "$round_remote/$name"
+  done
+  for name in CLASSIFIER_INPUT_ARCHIVE.tar CLASSIFIER_INPUT_SHA256SUMS \
+      CLASSIFIER_INPUT_RECEIPT.json; do
+    test -s "$round_remote/classifier-input/$name"
+  done
+  grep -q 'M15_E0_CLASSIFIER_INPUT_CHECKPOINT .*status=uploaded-readback-verified' \
+    "$tmp/m15-e0-kv/round-$round_text.log"
+  grep -q 'M15_E0_ROUND_COMPLETE .*input_checkpoint=PASS classifier=PASS upload=PASS readback=PASS' \
+    "$tmp/m15-e0-kv/round-$round_text.log"
+done
+python3 "$ROOT/tasks/v1-apc-m15-target-debug/scripts/aggregate_m15_e0_kv_rounds.py" \
+  --root "$CANON_STATE/p38_m15_e0_kv_rounds" \
+  --arm off --rounds 3 --expected-source "$CANON_EXPECT_COMMIT" \
+  --output "$CANON_P38_KV_OBSERVER_CLASSIFICATION" \
+  > "$tmp/m15-e0-kv/aggregate.log"
+bash "$PERSIST" collect > "$tmp/m15-e0-kv/collect.log"
+test -s "$m15_e0_remote/COLLECTED.json"
+grep -q '"status": "CONTROL_EXACT_3_OF_3"' \
+  "$m15_e0_remote/kv-observer-classification.json"
+grep -q 'profile=m15-e0-kv-v1 rounds=3' "$tmp/m15-e0-kv/collect.log"
+
 # The M15 wide observer never waits for a terminal multi-GiB tar.  Completed
 # JSON/NPZ pairs are copied into bounded shards and each shard publishes its
 # completion marker only after a remote download-and-verify round trip.
@@ -633,7 +697,7 @@ fake_pkg="$worker_contract_root/pkg"
 mkdir -p "$fake_pkg/tasks/p38-pathways-decode-prefill-carrier/scripts"
 fake_persist="$fake_pkg/tasks/p38-pathways-decode-prefill-carrier/scripts/persist_p38_gcs.sh"
 apply_worker_contract_env() {
-  local case_root="$1"
+  local case_root="$1" profile="${2:-m15-wide-v1}"
   mkdir -p "$case_root/state/capture" \
     "$case_root/state/p38_round_seal_requests" \
     "$case_root/state/p38_round_seal_acks"
@@ -658,14 +722,14 @@ apply_worker_contract_env() {
   export CANON_P38_LIVE_COLLECT_ACK_FILE="$case_root/state/collect.ack"
   export CANON_P38_LIVE_COMPLETE_REQUEST_FILE="$case_root/state/complete.request"
   export CANON_P38_LIVE_COMPLETE_ACK_FILE="$case_root/state/complete.ack"
-  export CANON_P38_DURABILITY_PROFILE=m15-wide-v1
+  export CANON_P38_DURABILITY_PROFILE="$profile"
 }
 cat > "$fake_persist" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 case "${1:?}" in
   m15-shard) exit 3 ;;
-  m15-round)
+  m15-round|m15-e0-round)
     if [ "${FAKE_M15_FAIL_ROUND:-}" = "${2:?}" ]; then
       exit 17
     fi
@@ -723,6 +787,41 @@ assert failure["status"] == "FAIL", failure
 PY
 grep -q 'LIVE_ROUND_FAILURE round=0 stage=persist-m15-round exit_code=17' \
   "$worker_fail_log"
+unset FAKE_M15_FAIL_ROUND
+
+# The E0 KV profile must preserve the first two durable ACKs when round 2
+# fails.  This is the exact salvage boundary needed when the pod disappears
+# before root collection: completed round evidence is not rolled back.
+worker_e0_root="$worker_contract_root/e0-round-2-fail"
+apply_worker_contract_env "$worker_e0_root" m15-e0-kv-v1
+export FAKE_M15_CALL_LOG="$worker_e0_root/state/calls.log"
+export FAKE_M15_FAIL_ROUND=000002
+worker_e0_log="$worker_e0_root/state/worker.log"
+bash "$ROOT/tasks/p38-pathways-decode-prefill-carrier/scripts/p38_live_snapshot_worker.sh" \
+  > "$worker_e0_log" 2>&1 &
+worker_e0_pid=$!
+for round_index in 0 1 2; do
+  make_round_request "$round_index"
+  round_text="$(printf '%06d' "$round_index")"
+  ack="$CANON_P38_ROUND_SEAL_ACK_DIR/round-$round_text.ack"
+  failure="$CANON_P38_ROUND_SEAL_ACK_DIR/round-$round_text.failure.json"
+  for unused in 1 2 3 4 5; do
+    [ ! -s "$ack" ] && [ ! -s "$failure" ] || break
+    sleep 1
+  done
+  if [ "$round_index" -lt 2 ]; then
+    grep -q '"status": "PASS"' "$ack"
+  else
+    test ! -e "$ack"
+    grep -q '"status": "FAIL"' "$failure"
+  fi
+done
+worker_e0_rc=0
+wait "$worker_e0_pid" || worker_e0_rc=$?
+test "$worker_e0_rc" -eq 17
+test "$(cat "$FAKE_M15_CALL_LOG")" = $'000000\n000001'
+grep -q 'LIVE_ROUND_FAILURE round=2 stage=persist-m15-e0-round exit_code=17' \
+  "$worker_e0_log"
 unset FAKE_M15_FAIL_ROUND
 export CANON_PKG="$ROOT"
 
@@ -811,4 +910,4 @@ fi
 grep -q 'p58-seam-v1 requires the coarse selector' \
   "$tmp/p58-seam-missing-selector/run.log"
 
-echo "[P38.GCS] PERSISTENCE_TEST_PASS probe=verified prefix_reuse=rejected live=immutable bounded_objects=3 round_request=priority alignment_round=periodic_snapshot_disabled minimal_payload=verified worker=durable round_bundles=survive_abrupt_exit m15_shards=bounded-survive-abrupt-exit m15_round_stage_failure=durable m15_stage_upload_failure=fail_closed m15_worker_rounds=3 m15_worker_failure=fail_fast p58_three_round_collection=verified p58_missing_selector=rejected source_mismatch=rejected collected=verified complete=last out_of_order=rejected missing=rejected upload_failure=rejected"
+echo "[P38.GCS] PERSISTENCE_TEST_PASS probe=verified prefix_reuse=rejected live=immutable bounded_objects=3 round_request=priority alignment_round=periodic_snapshot_disabled minimal_payload=verified worker=durable round_bundles=survive_abrupt_exit m15_shards=bounded-survive-abrupt-exit m15_round_stage_failure=durable m15_stage_upload_failure=fail_closed m15_worker_rounds=3 m15_worker_failure=fail_fast m15_e0_three_round=sealed-classified-readback m15_e0_round2_failure=rounds0_1_preserved p58_three_round_collection=verified p58_missing_selector=rejected source_mismatch=rejected collected=verified complete=last out_of_order=rejected missing=rejected upload_failure=rejected"

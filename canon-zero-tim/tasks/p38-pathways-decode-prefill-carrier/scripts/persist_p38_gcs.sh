@@ -2,14 +2,15 @@
 # Persist the in-pod P38 evidence before a controlled diagnostic exit.
 set -euo pipefail
 
-mode="${1:?usage: persist_p38_gcs.sh probe|snapshot|round|m15-shard|m15-round|collect|complete [sequence]}"
+mode="${1:?usage: persist_p38_gcs.sh probe|snapshot|round|m15-shard|m15-round|m15-e0-round|collect|complete [sequence]}"
 case "$mode" in
-  probe|snapshot|round|m15-shard|m15-round|collect|complete) ;;
+  probe|snapshot|round|m15-shard|m15-round|m15-e0-round|collect|complete) ;;
   *) echo "[P38.GCS] REFUSING: invalid mode: $mode" >&2; exit 2 ;;
 esac
 snapshot_sequence="${2:-}"
 if [ "$mode" = snapshot ] || [ "$mode" = round ] || \
-   [ "$mode" = m15-shard ] || [ "$mode" = m15-round ]; then
+   [ "$mode" = m15-shard ] || [ "$mode" = m15-round ] || \
+   [ "$mode" = m15-e0-round ]; then
   case "$snapshot_sequence" in
     [0-9][0-9][0-9][0-9][0-9][0-9]) ;;
     *)
@@ -26,7 +27,7 @@ fi
 : "${CANON_P38_GCS_PREFIX:?CANON_P38_GCS_PREFIX unset}"
 : "${CANON_P38_DURABILITY_PROFILE:?CANON_P38_DURABILITY_PROFILE unset}"
 case "$CANON_P38_DURABILITY_PROFILE" in
-  full-v1|round-alignment-v1|m15-wide-v1|p58-seam-v1) ;;
+  full-v1|round-alignment-v1|m15-wide-v1|m15-e0-kv-v1|p58-seam-v1) ;;
   *)
     echo "[P38.GCS] REFUSING: invalid durability profile: $CANON_P38_DURABILITY_PROFILE" >&2
     exit 2
@@ -800,6 +801,237 @@ PY
   exit 0
 fi
 
+if [ "$mode" = m15-e0-round ]; then
+  [ "$CANON_P38_DURABILITY_PROFILE" = m15-e0-kv-v1 ] || {
+    echo "[P38.GCS] REFUSING: m15-e0-round requires m15-e0-kv-v1" >&2
+    exit 2
+  }
+  [ "${CANON_P38_DIAGNOSTIC_ROUNDS:-}" = 3 ] || {
+    echo "[P38.GCS] REFUSING: M15 E0 KV durability requires three rounds" >&2
+    exit 2
+  }
+  case "${CANON_APC_M15_TARGET_DEBUG:-}" in
+    off|on) ;;
+    *) echo "[P38.GCS] REFUSING: M15 E0 KV arm is invalid" >&2; exit 2 ;;
+  esac
+  : "${CANON_P38_KV_OBSERVER_DIR:?}"
+  : "${CANON_P38_KV_OBSERVER_CLASSIFICATION:?}"
+  : "${CANON_APC_M15_REPLAY_LEDGER:?}"
+  : "${CANON_PRE_ALIGN_REPORT:?}"
+  : "${CANON_RUN_LOG:?}"
+  : "${CANON_P38_MISMATCH_CAPSULE:?}"
+  round_index=$((10#$snapshot_sequence))
+  [ "$round_index" -lt 3 ] || {
+    echo "[P38.GCS] REFUSING: M15 E0 KV round is outside [0,3)" >&2
+    exit 2
+  }
+  round_prefix="$CANON_P38_GCS_PREFIX/rounds/$snapshot_sequence"
+  round_root="$CANON_STATE/p38_m15_e0_kv_rounds"
+  round_stage="$round_root/$snapshot_sequence"
+  classifier_input_prefix="$round_prefix/classifier-input"
+  if [ -e "$round_stage" ]; then
+    echo "[P38.GCS] REFUSING: local M15 E0 round already exists: $snapshot_sequence" >&2
+    exit 2
+  fi
+  for remote_name in ROUND_ARCHIVE.tar SHA256SUMS ROUND_INPUT.json \
+      kv-observer-classification.json ROUND_COMPLETE.json; do
+    if gcs_exists "$round_prefix/$remote_name"; then
+      echo "[P38.GCS] REFUSING: remote M15 E0 round object already exists: $snapshot_sequence/$remote_name" >&2
+      exit 2
+    fi
+  done
+  for remote_name in CLASSIFIER_INPUT_ARCHIVE.tar \
+      CLASSIFIER_INPUT_SHA256SUMS CLASSIFIER_INPUT_RECEIPT.json; do
+    if gcs_exists "$classifier_input_prefix/$remote_name"; then
+      echo "[P38.GCS] REFUSING: remote M15 E0 classifier input already exists: $snapshot_sequence/$remote_name" >&2
+      exit 2
+    fi
+  done
+  mkdir -p "$round_root"
+  stage_rc=0
+  python3 "$CANON_PKG/tasks/v1-apc-m15-target-debug/scripts/stage_m15_e0_kv_round.py" \
+    --directory "$CANON_P38_KV_OBSERVER_DIR" \
+    --alignment-report "$CANON_PRE_ALIGN_REPORT" \
+    --capsule-base "$CANON_P38_MISMATCH_CAPSULE" \
+    --replay-ledger "$CANON_APC_M15_REPLAY_LEDGER" \
+    --classifier "$CANON_PKG/tasks/p38-pathways-decode-prefill-carrier/scripts/classify_p38_kv_observer.py" \
+    --output "$round_stage" \
+    --round "$round_index" \
+    --arm "$CANON_APC_M15_TARGET_DEBUG" \
+    --expected-source "$CANON_EXPECT_COMMIT" \
+    --runtime-source "$runtime_source_commit" || stage_rc=$?
+  if [ "$stage_rc" -ne 0 ]; then
+    write_m15_round_failure "$snapshot_sequence" stage-e0-kv-input "$stage_rc" || true
+    exit "$stage_rc"
+  fi
+
+  mapfile -t classifier_input_files < <(
+    cd "$round_stage"
+    find . -maxdepth 1 -type f ! -name 'CLASSIFIER_INPUT_SHA256SUMS' \
+      ! -name 'kv-observer-classification.json' \
+      ! -name 'SHA256SUMS' ! -name 'ROUND_COMPLETE.json' \
+      -printf '%f\n' | LC_ALL=C sort
+  )
+  (
+    cd "$round_stage"
+    sha256sum "${classifier_input_files[@]}" > CLASSIFIER_INPUT_SHA256SUMS
+    sha256sum -c CLASSIFIER_INPUT_SHA256SUMS --quiet
+  )
+  classifier_input_archive="$round_root/$snapshot_sequence.classifier-input.tar"
+  python3 "$archive_tool" create \
+    --root "$round_stage" \
+    --manifest "$round_stage/CLASSIFIER_INPUT_SHA256SUMS" \
+    --output "$classifier_input_archive"
+  classifier_input_archive_sha="$(sha256sum "$classifier_input_archive" | awk '{print $1}')"
+  classifier_input_manifest_sha="$(sha256sum "$round_stage/CLASSIFIER_INPUT_SHA256SUMS" | awk '{print $1}')"
+  gcs_cp "$classifier_input_archive" \
+    "$classifier_input_prefix/CLASSIFIER_INPUT_ARCHIVE.tar"
+  gcs_cp "$round_stage/CLASSIFIER_INPUT_SHA256SUMS" \
+    "$classifier_input_prefix/CLASSIFIER_INPUT_SHA256SUMS"
+  verify_dir="$(mktemp -d)"
+  trap 'rm -rf "$verify_dir"' EXIT
+  gcs_cp "$classifier_input_prefix/CLASSIFIER_INPUT_ARCHIVE.tar" \
+    "$verify_dir/CLASSIFIER_INPUT_ARCHIVE.tar"
+  gcs_cp "$classifier_input_prefix/CLASSIFIER_INPUT_SHA256SUMS" \
+    "$verify_dir/CLASSIFIER_INPUT_SHA256SUMS"
+  python3 "$archive_tool" verify \
+    --archive "$verify_dir/CLASSIFIER_INPUT_ARCHIVE.tar" \
+    --expected-sha256 "$classifier_input_archive_sha"
+  cmp -- "$round_stage/CLASSIFIER_INPUT_SHA256SUMS" \
+    "$verify_dir/CLASSIFIER_INPUT_SHA256SUMS"
+  python3 - "$round_stage/CLASSIFIER_INPUT_RECEIPT.json.partial" \
+      "$round_stage/ROUND_INPUT.json" "$round_index" \
+      "$classifier_input_archive_sha" "$classifier_input_manifest_sha" \
+      "$runtime_source_commit" <<'PY'
+import json
+import os
+import pathlib
+import sys
+
+target = pathlib.Path(sys.argv[1])
+round_input = json.loads(pathlib.Path(sys.argv[2]).read_text(encoding="utf-8"))
+target.write_text(json.dumps({
+    "a_b_differing_bytes": round_input["a_b_differing_bytes"],
+    "archive_sha256": sys.argv[4],
+    "arm": round_input["arm"],
+    "diagnostic_round": int(sys.argv[3]),
+    "kv_pairs": round_input["kv_pairs"],
+    "kv_records": round_input["kv_records"],
+    "manifest_sha256": sys.argv[5],
+    "runtime_source_commit": sys.argv[6],
+    "schema": "m15-e0-kv-classifier-input-receipt-v1",
+    "source_commit": os.environ["CANON_EXPECT_COMMIT"],
+    "status": "uploaded-readback-verified-before-classification",
+}, sort_keys=True) + "\n", encoding="utf-8")
+PY
+  mv -- "$round_stage/CLASSIFIER_INPUT_RECEIPT.json.partial" \
+    "$round_stage/CLASSIFIER_INPUT_RECEIPT.json"
+  gcs_cp "$round_stage/CLASSIFIER_INPUT_RECEIPT.json" \
+    "$classifier_input_prefix/CLASSIFIER_INPUT_RECEIPT.json"
+  gcs_cp "$classifier_input_prefix/CLASSIFIER_INPUT_RECEIPT.json" \
+    "$verify_dir/CLASSIFIER_INPUT_RECEIPT.json"
+  cmp -- "$round_stage/CLASSIFIER_INPUT_RECEIPT.json" \
+    "$verify_dir/CLASSIFIER_INPUT_RECEIPT.json"
+  echo "[P38.GCS] M15_E0_CLASSIFIER_INPUT_CHECKPOINT round=$round_index status=uploaded-readback-verified"
+
+  mapfile -t e0_classifier_args < <(python3 - "$round_stage/ROUND_INPUT.json" <<'PY'
+import json
+import pathlib
+import sys
+
+value = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+if value["a_b_differing_bytes"] > 0:
+  print("--capsule")
+  print("mismatch-capsule.npz")
+  print("--require-red-join")
+  if value["arm"] == "on":
+    print("--replay-ledger")
+    print("m15-replay-envelope.jsonl")
+PY
+  )
+  classifier_rc=0
+  (
+    cd "$round_stage"
+    JAX_PLATFORMS=cpu PYTHONPATH="$CANON_PKG/..:${PYTHONPATH:-}" \
+      python3 classify_p38_kv_observer.py \
+        --directory . "${e0_classifier_args[@]}" \
+        --output kv-observer-classification.json
+  ) || classifier_rc=$?
+  if [ "$classifier_rc" -ne 0 ]; then
+    write_m15_round_failure "$snapshot_sequence" classify-e0-kv "$classifier_rc" || true
+    exit "$classifier_rc"
+  fi
+
+  mapfile -t round_files < <(
+    cd "$round_stage"
+    find . -maxdepth 1 -type f ! -name 'SHA256SUMS' \
+      ! -name 'ROUND_COMPLETE.json' -printf '%f\n' | LC_ALL=C sort
+  )
+  (
+    cd "$round_stage"
+    sha256sum "${round_files[@]}" > SHA256SUMS
+    sha256sum -c SHA256SUMS --quiet
+  )
+  round_archive="$round_root/$snapshot_sequence.tar"
+  python3 "$archive_tool" create \
+    --root "$round_stage" --manifest "$round_stage/SHA256SUMS" \
+    --output "$round_archive"
+  round_archive_sha="$(sha256sum "$round_archive" | awk '{print $1}')"
+  round_manifest_sha="$(sha256sum "$round_stage/SHA256SUMS" | awk '{print $1}')"
+  gcs_cp "$round_archive" "$round_prefix/ROUND_ARCHIVE.tar"
+  gcs_cp "$round_stage/SHA256SUMS" "$round_prefix/SHA256SUMS"
+  gcs_cp "$round_stage/ROUND_INPUT.json" "$round_prefix/ROUND_INPUT.json"
+  gcs_cp "$round_stage/kv-observer-classification.json" \
+    "$round_prefix/kv-observer-classification.json"
+  gcs_cp "$round_prefix/ROUND_ARCHIVE.tar" "$verify_dir/ROUND_ARCHIVE.tar"
+  gcs_cp "$round_prefix/SHA256SUMS" "$verify_dir/SHA256SUMS"
+  gcs_cp "$round_prefix/ROUND_INPUT.json" "$verify_dir/ROUND_INPUT.json"
+  gcs_cp "$round_prefix/kv-observer-classification.json" \
+    "$verify_dir/kv-observer-classification.json"
+  python3 "$archive_tool" verify \
+    --archive "$verify_dir/ROUND_ARCHIVE.tar" \
+    --expected-sha256 "$round_archive_sha"
+  cmp -- "$round_stage/SHA256SUMS" "$verify_dir/SHA256SUMS"
+  cmp -- "$round_stage/ROUND_INPUT.json" "$verify_dir/ROUND_INPUT.json"
+  cmp -- "$round_stage/kv-observer-classification.json" \
+    "$verify_dir/kv-observer-classification.json"
+  python3 - "$round_stage/ROUND_COMPLETE.json.partial" \
+      "$round_stage/ROUND_INPUT.json" "$round_index" \
+      "$round_archive_sha" "$round_manifest_sha" \
+      "$runtime_source_commit" \
+      "$(sha256sum "$round_stage/kv-observer-classification.json" | awk '{print $1}')" \
+      "$(sha256sum "$round_stage/ROUND_INPUT.json" | awk '{print $1}')" \
+      "$(sha256sum "$round_stage/CLASSIFIER_INPUT_RECEIPT.json" | awk '{print $1}')" <<'PY'
+import json
+import os
+import pathlib
+import sys
+
+target = pathlib.Path(sys.argv[1])
+round_input = json.loads(pathlib.Path(sys.argv[2]).read_text(encoding="utf-8"))
+target.write_text(json.dumps({
+    "archive_sha256": sys.argv[4],
+    "arm": round_input["arm"],
+    "classification_sha256": sys.argv[7],
+    "classifier_input_receipt_sha256": sys.argv[9],
+    "diagnostic_round": int(sys.argv[3]),
+    "manifest_sha256": sys.argv[5],
+    "round_input_sha256": sys.argv[8],
+    "runtime_source_commit": sys.argv[6],
+    "schema": "m15-e0-kv-round-completion-v1",
+    "source_commit": os.environ["CANON_EXPECT_COMMIT"],
+    "status": "sealed-uploaded-readback-verified",
+}, sort_keys=True) + "\n", encoding="utf-8")
+PY
+  mv -- "$round_stage/ROUND_COMPLETE.json.partial" \
+    "$round_stage/ROUND_COMPLETE.json"
+  gcs_cp "$round_stage/ROUND_COMPLETE.json" "$round_prefix/ROUND_COMPLETE.json"
+  gcs_cp "$round_prefix/ROUND_COMPLETE.json" "$verify_dir/ROUND_COMPLETE.json"
+  cmp -- "$round_stage/ROUND_COMPLETE.json" "$verify_dir/ROUND_COMPLETE.json"
+  echo "[P38.GCS] M15_E0_ROUND_COMPLETE arm=$CANON_APC_M15_TARGET_DEBUG round=$round_index records=16 pairs=8 input_checkpoint=PASS classifier=PASS upload=PASS readback=PASS"
+  exit 0
+fi
+
 if [ "$mode" = round ]; then
   round_index=$((10#$snapshot_sequence))
   round_prefix="$CANON_P38_GCS_PREFIX/rounds/$snapshot_sequence"
@@ -945,6 +1177,84 @@ if [ "$mode" = collect ]; then
   if gcs_exists "$CANON_P38_GCS_PREFIX/COLLECTED.json"; then
     echo "[P38.GCS] REFUSING: remote collection marker already exists" >&2
     exit 1
+  fi
+
+  if [ "$CANON_P38_DURABILITY_PROFILE" = m15-e0-kv-v1 ]; then
+    [ "${CANON_P38_DIAGNOSTIC_ROUNDS:-}" = 3 ] || {
+      echo "[P38.GCS] REFUSING: M15 E0 collection requires three rounds" >&2
+      exit 2
+    }
+    case "${CANON_APC_M15_TARGET_DEBUG:-}" in
+      off|on) ;;
+      *) echo "[P38.GCS] REFUSING: M15 E0 collection arm is invalid" >&2; exit 2 ;;
+    esac
+    copy_required "${CANON_RUN_LOG:?}" run.log
+    copy_required "${CANON_PRE_ALIGN_REPORT:?}" pre-alignment.jsonl
+    copy_required "${CANON_P38_KV_OBSERVER_CLASSIFICATION:?}" \
+      kv-observer-classification.json
+    collected_files=(
+      run.log pre-alignment.jsonl kv-observer-classification.json
+    )
+    for round_index in 0 1 2; do
+      printf -v round_text '%06d' "$round_index"
+      round_stage="$CANON_STATE/p38_m15_e0_kv_rounds/$round_text"
+      for spec in \
+          "ROUND_INPUT.json:ROUND_INPUT.$round_text.json" \
+          "kv-observer-classification.json:kv-observer-classification.$round_text.json" \
+          "CLASSIFIER_INPUT_RECEIPT.json:CLASSIFIER_INPUT_RECEIPT.$round_text.json" \
+          "ROUND_COMPLETE.json:ROUND_COMPLETE.$round_text.json"; do
+        source_name="${spec%%:*}"
+        target_name="${spec#*:}"
+        copy_required "$round_stage/$source_name" "$target_name"
+        collected_files+=("$target_name")
+      done
+    done
+    for remote_name in "${collected_files[@]}" SHA256SUMS COLLECTED.json; do
+      if gcs_exists "$CANON_P38_GCS_PREFIX/$remote_name"; then
+        echo "[P38.GCS] REFUSING: remote M15 E0 collection object already exists: $remote_name" >&2
+        exit 2
+      fi
+    done
+    (
+      cd "$stage"
+      sha256sum "${collected_files[@]}" > SHA256SUMS
+      sha256sum -c SHA256SUMS --quiet
+    )
+    python3 - "$stage/COLLECTED.json.partial" "$runtime_source_commit" <<'PY'
+import json
+import os
+import pathlib
+import sys
+
+pathlib.Path(sys.argv[1]).write_text(json.dumps({
+    "arm": os.environ["CANON_APC_M15_TARGET_DEBUG"],
+    "attempt": os.environ.get("JOBSET_RESTART_ATTEMPT", "unknown"),
+    "diagnostic_rounds": 3,
+    "prefix": os.environ["CANON_P38_GCS_PREFIX"],
+    "runtime_source_commit": sys.argv[2],
+    "schema": "m15-e0-kv-gcs-collection-v1",
+    "source_commit": os.environ["CANON_EXPECT_COMMIT"],
+    "status": "collected-from-three-sealed-kv-rounds",
+}, sort_keys=True) + "\n", encoding="utf-8")
+PY
+    mv -- "$stage/COLLECTED.json.partial" "$stage/COLLECTED.json"
+    for name in "${collected_files[@]}" SHA256SUMS; do
+      upload "$stage/$name" "$name"
+    done
+    upload "$stage/COLLECTED.json" COLLECTED.json
+    verify_dir="$(mktemp -d)"
+    trap 'rm -rf "$verify_dir"' EXIT
+    gcs_cp "$CANON_P38_GCS_PREFIX/SHA256SUMS" "$verify_dir/SHA256SUMS"
+    cmp -- "$stage/SHA256SUMS" "$verify_dir/SHA256SUMS"
+    for name in "${collected_files[@]}"; do
+      gcs_cp "$CANON_P38_GCS_PREFIX/$name" "$verify_dir/$name"
+    done
+    (cd "$verify_dir" && sha256sum -c SHA256SUMS --quiet)
+    gcs_cp "$CANON_P38_GCS_PREFIX/COLLECTED.json" \
+      "$verify_dir/COLLECTED.json"
+    cmp -- "$stage/COLLECTED.json" "$verify_dir/COLLECTED.json"
+    echo "[P38.GCS] COLLECTED prefix=$CANON_P38_GCS_PREFIX profile=m15-e0-kv-v1 rounds=3"
+    exit 0
   fi
 
   if [ "$CANON_P38_DURABILITY_PROFILE" = m15-wide-v1 ]; then

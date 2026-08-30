@@ -1,58 +1,77 @@
 # State
 
-- Status: active; `OFFICIAL_RETURN_PROVENANCE_FAIL`. Published commit
-  `971bb2281417ecb6e33cfa6bb68a422f7fd24f00` contains a locally
-  manifest-valid four-file Attempt-18 E0 package, but its classifier source
-  identity and payload provenance cannot come from the pinned runtime source.
-  `LIVE_KV_FINGERPRINT_EQUAL` is not admitted.
-- Rejected package:
-  `evidence/v1_apc_m15_attempt18_e0_kv_20260829/`; `SHA256SUMS` SHA256
-  `ce762783e6b2f1a6fae37190f3af6e96baa39302931d29081c1d93146b7c9475`.
-  It is an immutable rejected snapshot and must not be overwritten.
-- Rejection audit:
-  `evidence/v1_apc_m15_attempt18_e0_return_rejection_20260829/`;
-  `REJECTION_REPORT.json` SHA256
-  `92b704d5e6cb9ed0dd90e6d2b8648ee7980d7643218bb176d146fc40b1e5b9fa`.
-  The overwritten/deleted ff33dcd2 inputs are preserved byte-for-byte under
-  `evidence/v1_apc_m15_attempt18_e0_incoming_rejected_ff33dcd2_20260829/`.
-- Attempt-18 runtime source:
-  `12207e3281db13461350fe7ef68dbaadfe713a58`. Its official classifier is
-  `classify_p38_kv_observer.py`, SHA256
-  `99cc7d9c50777a9be182e2edd33a3cdca3daabaa396c019e4925e0ac531049f6`.
-  The rejected package instead names a different classifier, collapses
-  unrelated record/manifest digests, truncates runtime fields, uses absolute
-  temporary paths, and lacks a preserved raw terminal receipt.
-- Reported but unadmitted target values: control APC-off `N_action=123010`,
-  A-B=0, B-C=0; treatment APC-on `N_action=117834`, A-B=1499 bytes / 88
-  elements, B-C=0, 92.8% cache hits. These values do not admit a mechanism
-  verdict.
-- Last admitted numerical boundary: D3e, Layer 0
-  `k_post_rope -> rpa_output`, shape `[2048,1,15,8]`, source row 217 /
-  source position 1225 / A call 83. The 1707700e NumPy online-softmax probe is
-  a toy hypothesis example, not target causality or a repair.
-- Implementation: provenance admission only. The reviewer pins the exact
-  runtime/classifier identity, complete runtime-emitted comparison/red-join
-  fields, distinct record/arm provenance, basename-only paths, exact claim
-  ceiling, and mandatory CLI raw log. A/B/C, APC behavior, numerical code,
-  production flags, backward, and optimizer are unchanged.
-- Validation: HOST PASS — task discovery 187/187; return intake 14/14; E0
-  admission 9/9; V1 CPU 91/91; P3 prefix-cache 31/31; P38 persistence; flag
-  audit 398/398; Python/Bash syntax and `git diff --check`. Raw log:
-  `/tmp/m15-e0r-provenance-hardening-971bb228-retry2-20260829.log`, SHA256
-  `f11ab8b9bf137f7f7ca39a801fe06b6da6298b7b558fe817ea2f503f7f74a4e4`.
-  Official pinned exact-image, real GCS recovery, TPU, and Kubernetes are NOT
-  RUN.
-- Current gate: after separately approved commit/push, a clean exact-SHA
-  worktree must pass the separately approved official pinned exact-image
-  aggregate (`m15_e0=30`). Then a bucket-capable agent may, under a separate
-  explicit GCS-read approval, run the checked-in recovery wrapper against the
-  preserved `e01` render and a fresh local output path. No TPU target rerun is
-  currently requested.
+- Status: active; `E0_KV3_DURABILITY_IMPLEMENTED_HOST_PASS`. The implementation
+  was built from base `a951656e90ee91d5d7781d625377831dfd6c255d`; the user
+  explicitly authorized its commit/push delivery. The published source is the
+  full commit containing this file and must be resolved with `git rev-parse
+  HEAD`, not inferred from the implementation base.
+- Why this phase exists: Attempt 18 was deliberately rendered as a one-round
+  E0 discriminator; it did not accidentally stop before round 3. Its returned
+  package later failed provenance admission, and a one-round/root-dependent
+  design cannot establish repeat stability or guarantee that useful evidence
+  survives a later round/root failure. The historical `observer=kv` one-round
+  route remains unchanged for read-only Attempt-18 recovery.
+- New execution identity: `observer=kv3`, durability profile
+  `m15-e0-kv-v1`, exactly three frozen-weight DP8×TP8 M15/main rounds per
+  arm. Production profiles remain APC-off and do not select this identity.
+- Per-round order is fail closed:
+  `16 KV records (8A+8B) staged -> classifier-input self-hash/archive ->
+  upload/readback -> classifier PASS -> round archive/upload/readback ->
+  ROUND_COMPLETE -> learner ACK`. `ROUND_COMPLETE` hashes the round input,
+  classifier result, and classifier-input receipt. The full run log is
+  collected once at the root instead of being copied into every round.
+  Record indices remain globally monotonic; only the per-round candidate set
+  and byte budget reset. Cross-round A/B pairing is rejected.
+- Durability boundary: round 0/1 evidence is independently recoverable even
+  if round 2 or root collection fails. The read-only return downloads the
+  small per-round completion/classifier/checkpoint receipts before attempting
+  `COLLECTED.json` or `COMPLETE.json`; missing root terminal state is reported
+  as `ROUNDS_RECOVERED_ROOT_INCOMPLETE`, not as missing evidence and not as a
+  target PASS.
+- Incident ledger: the three-round E0 profile bypasses the redundant bounded
+  incident ledger, which otherwise saturates across the M15 chronology. The
+  replay envelope plus sealed KV rounds are the replacement. Legacy and
+  non-E0 profiles retain their old behavior.
+- Aggregate decisions require all three rounds. APC-off must be
+  `CONTROL_EXACT_3_OF_3`. APC-on may be
+  `TARGET_NON_REPRODUCTION_3_OF_3`,
+  `LIVE_KV_FINGERPRINT_EQUAL_3_OF_3`, or
+  `LIVE_KV_FINGERPRINT_DIFFERS_3_OF_3`; mixed outcomes fail closed. Every
+  round still requires B-C exact and B full reset with zero cached tokens.
+- Last admitted numerical boundary remains D3e, Layer 0
+  `k_post_rope -> rpa_output`, shape `[2048,1,15,8]`, source row 217 / source
+  position 1225 / A call 83. No RoPE, RPA, attention, KV value, LM-head,
+  loss, backward, optimizer, or production-default repair is present.
+- Attempt-18 official-return status remains rejected:
+  `ATTEMPT18_E0_RETURN_PROVENANCE_FAIL`. Its reported control/treatment
+  values do not become official evidence through this implementation.
+- Validation: aggregate HOST PASS — task discovery 193/193, salvage-first
+  return partial/full paths, V1 CPU 91/91, P3 prefix-cache 31/31, fake-GCS
+  persistence including three sealed/classified/readback rounds and a forced
+  round-2 failure preserving rounds 0/1, flag registry 398/398, Python/Bash
+  syntax, static manifest binding, and `git diff --check`. Patch 36 also
+  applied to the registered pre-Patch-36 runner and reproduced manifest SHA
+  `15fddce5eb5157494cc01639a50e677e5d7ce775b883ff5c7d29f6a854317f67`.
+  Raw host log: `/tmp/m15-e0-kv3-host-gate-final-20260830.log`, SHA256
+  `cccc0bdce2dd01d5dd84f1fdc61f31ba4be7570ed692fccedb43387e839cf12d`.
+  Official pinned exact-image and DP8×TP8 target are NOT RUN.
+- Prepared local-only scripts:
+  `run_m15_e0_kv3_host_gate.sh`,
+  `prepare_m15_attempt19_e0_kv3_pair.sh`,
+  `run_m15_attempt19_e0_kv3_gcs_return.sh`, and
+  `run_m15_attempt19_e0_kv3_return_recovery.sh`. Running the prepare script is
+  local CPU/disk only. Pinned Docker, GCS reads, and Kubernetes/TPU launch are
+  separate approval gates.
+- Current gate: clean exact-SHA prepare after publication. The other agent must
+  use a clean worktree at the full delivered SHA, run prepare-only, obtain
+  separate pinned exact-image approval, then obtain a separate target-launch
+  approval. GCS return is a further read-only approval.
 - Claim ceiling:
-  `ATTEMPT18_E0_RETURN_PROVENANCE_FAIL /
-  TARGET_RESULT_NOT_ADMITTED /
-  FIRST_RED_LOCALIZED_FROM_D3E /
+  `FIRST_RED_LOCALIZED_FROM_D3E /
+  E0_KV3_DURABILITY_HOST_PASS /
+  EXACT_IMAGE_NOT_RUN /
+  TARGET_NOT_RUN /
   PHASE_E_CLOSED /
   APC_NUMERICAL_FIX_NOT_IMPLEMENTED /
   NUMERICAL_REPAIR_NOT_AUTHORIZED`.
-- Updated: 2026-08-29.
+- Updated: 2026-08-30.

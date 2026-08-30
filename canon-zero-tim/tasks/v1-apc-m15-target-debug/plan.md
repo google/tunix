@@ -32,6 +32,7 @@ B - C = 0 bytes
 | D3e | separate the canonical completion-position-zero decision scope from later red-action diagnostics | decision-scope mixed/exact candidates still fail closed; global signatures and all unobserved red points remain explicit; immutable Attempt-17 bundle is reclassified without target execution | complete: committed return is `FIRST_RED_LOCALIZED` at Layer 0 `k_post_rope -> rpa_output`; evidence remains partial-round/analysis-grade and does not authorize a repair |
 | E0 | distinguish stored Layer-0 live-KV content from page selection/read/RPA execution context at the uniquely bound 1226-token prefix | all eight prefix aliases are captured; future-prefix proof selects exactly one request; control and B-C stay exact; compact evidence self-verifies | target metrics are reported, but both ff33dcd2 and the replacement 971bb228 packages fail official provenance; no E0 mechanism verdict is admitted |
 | E0r | recover and fail-closed admit the official Attempt-18 compact return | exact four-file inventory; exact runtime classifier identity and complete fields; distinct record/arm provenance; SHA256 manifest; full eight-candidate binding; source/COMPLETE/B-reset/zero-cached-token/raw-log receipts; official and intake markers | provenance hardening HOST PASS: task 187/187, intake 14/14, E0 admission 9/9; 971bb228 is a locked rejection regression; exact-image and real GCS recovery NOT RUN |
+| E0s | rerun the E0 discriminator as an independently durable three-round stability pair | `kv3`/`m15-e0-kv-v1`; every round seals 8A+8B, checkpoints classifier input, classifies, uploads/readbacks, writes `ROUND_COMPLETE`, then ACKs; all three outcomes agree; root loss cannot erase completed rounds | aggregate host gate PASS (task 193, V1 91, P3 31, fake-GCS forced-death, flags 398); exact-image and target NOT RUN |
 | D4 | Attempt-13 two-arm registered-root inventory and offline semantic review | both listings succeed; exact 77/70 shard triples verify; physical shard counts and immutable classifier counts remain separate; seven-file inventory self-verifies | transport complete; no-live confirmed; count drift -29/+101 preserved; official replay impossible |
 | E | minimal localized repair, default off or experiment-bound | reproducer flips red to zero; APC-off and B are unchanged; adjacent and dirty-page negatives fire | pending |
 | F | certification ladder | host -> exact-image -> one-host clean/repeat/dirty -> matched profile -> separately approved DP8xTP8 G-E | pending |
@@ -249,3 +250,17 @@ B - C = 0 bytes
   exact-image -> separately approved read-only GCS recovery. It is not a TPU
   rerun. Phase E stays closed until an official return passes and the user
   reviews the bounded next discriminator.
+- Decision: Attempt 18's one round was an explicit historical contract, not an
+  accidental early exit. It remains available only for read-only recovery.
+  The next target uses the additive `kv3` identity and exactly three rounds;
+  silently changing `observer=kv` would make the old render/recovery contract
+  ambiguous and is forbidden.
+- Decision: the three-round E0 stability gate is per-round durability, not
+  merely `CANON_P38_DIAGNOSTIC_ROUNDS=3`. The learner may advance only after
+  the current round's classifier-input checkpoint, classifier, final upload,
+  remote readback, and `ROUND_COMPLETE` all pass. A later round or root failure
+  preserves earlier completions and returns INCONCLUSIVE/partial evidence.
+- Decision: only a stable three-of-three treatment outcome is interpretable.
+  Mixed exact/equal/different outcomes are a stability failure and do not
+  authorize a numerical change. Diagnostic fingerprints remain weaker than a
+  complete byte proof even when all three agree.

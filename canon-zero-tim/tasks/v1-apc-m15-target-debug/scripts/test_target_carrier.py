@@ -119,6 +119,26 @@ class TargetCarrierTest(unittest.TestCase):
         runner,
     )
 
+  def test_m15_e0_kv_three_round_patch_is_profile_gated(self):
+    patch = (
+        CANON / "patches/tpu_inference/36-tpu-runner-m15-e0-kv-multiround.patch"
+    ).read_text(encoding="utf-8")
+    installer = (CANON / "install.sh").read_text(encoding="utf-8")
+    runner = (CANON / "cluster/steps/90_run.sh").read_text(encoding="utf-8")
+    self.assertIn('_P38_DURABILITY_PROFILE == "m15-e0-kv-v1"', patch)
+    self.assertIn("_p38_kv_observer_begin_target_round", patch)
+    self.assertIn("previous_indices.issubset", patch)
+    self.assertIn('_P38_KV_OBSERVER_STATE["bytes"] = 0', patch)
+    self.assertNotIn('_P38_KV_OBSERVER_STATE["records"] = 0', patch)
+    self.assertIn("replay-envelope+sealed-kv-rounds", patch)
+    self.assertIn("36-tpu-runner-m15-e0-kv-multiround.patch", installer)
+    self.assertLess(
+        installer.index("35-tpu-runner-m15-layer0-kv-prefix.patch"),
+        installer.index("36-tpu-runner-m15-e0-kv-multiround.patch"),
+    )
+    self.assertIn("aggregate_m15_e0_kv_rounds.py", runner)
+    self.assertIn('p38_kv_expected_candidates * 3', runner)
+
   def test_m15_replay_round_provenance_patch_is_additive(self):
     patch = (
         CANON / "patches/tpu_inference/33-tpu-runner-m15-replay-round-provenance.patch"
@@ -461,6 +481,30 @@ def _p38_m15_replay_ledger():
         )
         self.assertNotIn("CANON_P38_SEAM_OBSERVER", env)
         self.assertNotIn("CANON_P38_TAIL_OBSERVER", env)
+
+  def test_targeted_kv3_observer_renders_three_independently_sealed_rounds(self):
+    with tempfile.TemporaryDirectory() as directory:
+      paths = renderer.render_all(
+          base_path=BASE,
+          output_dir=Path(directory),
+          source_commit=SOURCE,
+          run_id="kv3-a",
+          observer="kv3",
+      )
+      self.assertEqual([path.name for path in paths], [
+          "jobset-v1-apc-m15-off-kv3.yaml",
+          "jobset-v1-apc-m15-on-kv3.yaml",
+      ])
+      for path in paths:
+        document = yaml.safe_load(path.read_text(encoding="utf-8"))
+        env = renderer.p33._env_values(document)
+        self.assertEqual(env["CANON_P38_DIAGNOSTIC_ROUNDS"], "3")
+        self.assertEqual(
+            env["CANON_P38_DURABILITY_PROFILE"], "m15-e0-kv-v1"
+        )
+        self.assertEqual(env["CANON_P38_KV_OBSERVER_MAX_CANDIDATES"], "8")
+        self.assertEqual(env["CANON_P38_KV_OBSERVER_LAYER"], "0")
+        self.assertNotIn("CANON_P38_SEAM_OBSERVER", env)
 
   def test_m15_coverage_contract_uses_one_full_producer_unit(self):
     self.assertEqual(

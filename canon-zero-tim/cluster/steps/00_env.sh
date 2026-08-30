@@ -834,7 +834,8 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
   expected_p38_rounds=3
   if [ "$APC_M15_TARGET_DEBUG" = "1" ]; then
     expected_p38_rounds=1
-    if [ "${CANON_P38_DURABILITY_PROFILE:-}" = "m15-wide-v1" ]; then
+    if [ "${CANON_P38_DURABILITY_PROFILE:-}" = "m15-wide-v1" ] || \
+       [ "${CANON_P38_DURABILITY_PROFILE:-}" = "m15-e0-kv-v1" ]; then
       expected_p38_rounds=3
     fi
   fi
@@ -854,7 +855,7 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
       ;;
   esac
   case "${CANON_P38_DURABILITY_PROFILE:-}" in
-    full-v1|round-alignment-v1|m15-wide-v1|p58-seam-v1) ;;
+    full-v1|round-alignment-v1|m15-wide-v1|m15-e0-kv-v1|p58-seam-v1) ;;
     *)
       echo "[env] P38 durability profile is not admitted" >&2
       fail=1
@@ -901,9 +902,12 @@ if [ -n "${CANON_P38_SERVING_CAPTURE_DIR:-}" ]; then
       }
     elif [ "$APC_M15_TARGET_DEBUG" = "1" ] && \
        [ -n "${CANON_P38_KV_OBSERVER_DIR:-}" ]; then
-      [ "${CANON_P38_DURABILITY_PROFILE:-}" = "round-alignment-v1" ] && \
+      { { [ "${CANON_P38_DURABILITY_PROFILE:-}" = "round-alignment-v1" ] && \
+          [ "${CANON_P38_DIAGNOSTIC_ROUNDS:-}" = "1" ]; } || \
+        { [ "${CANON_P38_DURABILITY_PROFILE:-}" = "m15-e0-kv-v1" ] && \
+          [ "${CANON_P38_DIAGNOSTIC_ROUNDS:-}" = "3" ]; }; } && \
       [ -z "${CANON_P38_SEAM_OBSERVER:-}${CANON_P38_TAIL_OBSERVER:-}${CANON_P38_TERMINAL_DISCRIMINATOR:-}" ] || {
-        echo "[env] M15 targeted KV observer requires one-round isolation" >&2
+        echo "[env] M15 targeted KV observer durability contract drifted" >&2
         fail=1
       }
     else

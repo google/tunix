@@ -1,6 +1,233 @@
 # M15 APC target-debug handoff
 
-## START HERE — 971bb228 return rejected; harden, certify, then recover read-only
+## START HERE — use the additive three-round E0 KV3 carrier
+
+The next target is **not** another run of the historical Attempt-18
+`observer=kv` YAML. Attempt 18 was intentionally one round under its old
+contract; it did not accidentally stop before round 3. That one-round design
+cannot establish repeat stability, and its returned package remains rejected
+for provenance. It is retained only for read-only historical recovery.
+
+The current local implementation adds a new, unambiguous identity:
+
+```text
+observer=kv3
+CANON_P38_DURABILITY_PROFILE=m15-e0-kv-v1
+CANON_P38_DIAGNOSTIC_ROUNDS=3
+```
+
+The implementation base was
+`a951656e90ee91d5d7781d625377831dfd6c255d`; it is not the source identity to
+run. The user explicitly authorized commit/push delivery. A remote agent must
+use the full delivered commit containing this handoff and create a fresh clean
+`local/*` worktree at exactly that SHA. No pinned image, GCS, Kubernetes, or
+TPU action occurred during implementation/delivery.
+
+### What changed and why
+
+- Patch 36 gives each E0 round a fresh eight-alias candidate set and 128 MiB
+  byte budget while keeping record indices globally monotonic. It rejects
+  skipped rounds, cross-round A/B pairs, or advancing before all 8A+8B pairs
+  complete.
+- The new durability profile bypasses the redundant incident ledger, which
+  would saturate across the three-round M15 chronology. The round-filtered
+  replay envelope plus sealed KV records replace it. Other profiles are
+  unchanged.
+- Every round stages exactly 16 KV records, filters alignment/replay/capsule
+  to that round, self-hashes and readback-verifies classifier input **before**
+  classification, then classifies, archives/uploads/readbacks final evidence,
+  publishes `ROUND_COMPLETE`, and only then ACKs the learner. The completion
+  receipt hashes the classifier-input receipt as well as the round input and
+  classification. The root collects `run.log` once; it is not redundantly
+  copied into three per-round archives.
+- The arm aggregate refuses fewer than three rounds or mixed treatment
+  outcomes.
+- The return path is salvage-first: it reads small per-round receipts before
+  looking for root `COLLECTED.json`/`COMPLETE.json`. Round 0/1 therefore remain
+  recoverable if round 2 or root collection fails.
+- Historical `observer=kv` remains one round. Production profiles remain
+  APC-off. A/B/C, B full reset, zero cached-token requirement, RoPE, RPA,
+  attention, KV values, LM head, loss, backward, optimizer, and model weights
+  are unchanged.
+
+The last admitted numerical boundary is still D3e:
+
+```text
+Layer 0: k_post_rope -> rpa_output
+shape: [2048,1,15,8]
+source row / position / A call: 217 / 1225 / 83
+```
+
+No numerical repair has been implemented or authorized.
+
+### Per-round hard order
+
+```text
+8 A + 8 B KV records staged
+-> classifier-input SHA/archive
+-> upload + remote readback verification
+-> official KV classifier PASS
+-> final round SHA/archive
+-> upload + remote readback verification
+-> ROUND_COMPLETE readback verification
+-> learner ACK
+```
+
+Any missing stage is FAIL/INCONCLUSIVE. Never synthesize an ACK, retry into
+the same run label/prefix/output, or delete partial evidence.
+
+### Exact next sequence for the other agent
+
+Before acting, read the outer/inner `AGENTS.md`, same-revision branch and flag
+skills, `run-phased-work/SKILL.md`, `state.md`, `plan.md`,
+`phases/phase-e0s-three-round-kv-durability.md`, this section, and the current
+operation in `RUNBOOK.md`. Run canonical preflight and require a clean
+`local/*` branch at the supplied full SHA. Do not print remotes, credentials,
+configured accounts/projects, or evidence roots.
+
+The implementation-side aggregate host gate is:
+
+```bash
+bash canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/run_m15_e0_kv3_host_gate.sh
+```
+
+Its current terminal marker is:
+
+```text
+M15_E0_KV3_HOST_PASS task_discovery=193 return=1 v1_cpu=91 p3_prefix_cache=31 persistence=1 flags=398 manifest=static syntax=1 diff_check=1 exact_image=0 target=0 gcs=0 kubernetes=0 tpu=0
+```
+
+This marker is host construction evidence only. It is not the official
+installed-image gate and does not authorize a target launch.
+
+#### Gate 1 — prepare only; CPU/disk and fake GCS only
+
+This gate requires a published full SHA but no external approval beyond local
+execution:
+
+```bash
+SOURCE_COMMIT=<full-published-E0-KV3-SHA>
+RUN_ID=<fresh-1-to-16-char-lowercase-dns-label>
+OUT=/mnt/disks/tunix-data/m15-e0-kv3-render-${RUN_ID}
+test ! -e "$OUT"
+bash canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/prepare_m15_attempt19_e0_kv3_pair.sh \
+  "$SOURCE_COMMIT" "$RUN_ID" "$OUT"
+```
+
+Required tail:
+
+```text
+[M15.E0.KV3] RENDER_PASS source=<full-sha> rounds=3 layer=0 aliases_per_round=8 pages=96 durability=m15-e0-kv-v1 ...
+[M15.E0.KV3] TARGET_NOT_RUN pinned_exact_image=required launch_approval=required gcs=0 kubernetes=0 tpu=0
+```
+
+The command runs host tests and a local fake-GCS durability/failure campaign.
+It does not use Docker, real GCS, Kubernetes, or TPU. The output must contain
+the two `*-kv3.yaml` files, `D3E_ADMISSION.json`,
+`KV_CLASSIFIER_RUNTIME.json`, `RUN_CONTRACT.json`, and `SHA256SUMS`. Do not
+edit any file. On failure preserve the printed scratch and output paths.
+
+#### Gate 2 — separate pinned exact-image approval
+
+Prepare PASS does not authorize Docker. First return the exact command, image
+identity, expected markers, and raw-log path; obtain explicit approval. Then:
+
+```bash
+RAW=/mnt/disks/tunix-data/m15-e0-kv3-exact-image-${RUN_ID}.log
+test ! -e "$RAW"
+bash canon-zero-tim/tests/v1_phase4/run_exact_image.sh \
+  sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a \
+  >"$RAW" 2>&1
+```
+
+Require exit zero, exact `image_id`, and the aggregate marker containing:
+
+```text
+V1_HP_EXACT_IMAGE_PASS
+m15_e0_kv3=3
+m15_e0_kv3_return=1
+m15_durability=1
+m15_round_provenance=1
+manifests=3
+```
+
+Preserve the raw log and return its local path/SHA. This gate is local
+Docker/CPU only and still does not authorize target launch.
+
+#### Gate 3 — separate fresh DP8×TP8 launch approval
+
+After Gate 2 PASS, return both YAML paths and request explicit launch approval.
+Only after approval, apply directly without a pipe, substitution, manual edit,
+or reused label:
+
+```bash
+kubectl apply -f "$OUT/jobset-v1-apc-m15-off-kv3.yaml"
+kubectl apply -f "$OUT/jobset-v1-apc-m15-on-kv3.yaml"
+```
+
+The arms may run concurrently but are interpreted control-first. Both are
+M15/main, DP8×TP8, production `continue_decode=8`, frozen weights, zero
+backward, and zero optimizer commit; they differ only at APC. B remains
+`reset_prefix_cache=True` with all cached-token counts zero.
+
+For each arm require round 0, 1, and 2 to produce classifier-input checkpoint,
+classifier PASS, `ROUND_COMPLETE`, and learner ACK. Do not wait for a root tar
+before checking round evidence. Do not put token/capsule/replay/observer NPZ
+payloads in Git or chat.
+
+#### Gate 4 — separate read-only GCS approval and salvage-first return
+
+After the jobs finish, obtain explicit GCS-read approval. From a clean exact
+analysis SHA on the bucket-capable machine:
+
+```bash
+ANALYSIS_SOURCE=<full-published-E0-KV3-SHA>
+RETURN=/mnt/disks/tunix-data/m15-e0-kv3-return-${RUN_ID}
+test ! -e "$RETURN"
+bash canon-zero-tim/tasks/v1-apc-m15-target-debug/scripts/run_m15_attempt19_e0_kv3_return_recovery.sh \
+  "$ANALYSIS_SOURCE" "$OUT" "$RETURN" /mnt/disks/tunix-data
+```
+
+The wrapper performs GCS reads only. It does not write GCS, query/apply
+Kubernetes, or use TPU. It returns one compact `E0_KV3_RETURN.json` and
+`SHA256SUMS`; raw logs and large evidence remain local/GCS. A missing root with
+three recovered rounds returns `ROUNDS_RECOVERED_ROOT_INCOMPLETE`; fewer
+completed rounds return `ROUND_EVIDENCE_PARTIAL`. Both are honest
+INCONCLUSIVE results and preserve output/scratch.
+
+### Decision table
+
+| Result | Meaning / next action |
+|---|---|
+| control not `CONTROL_EXACT_3_OF_3` | hard stop; carrier/shared path invalid |
+| any B-C red or B cache reset/zero-token failure | hard stop; not APC-specific |
+| treatment `TARGET_NON_REPRODUCTION_3_OF_3` | three exact rounds; bug not reproduced, not fixed |
+| treatment `LIVE_KV_FINGERPRINT_DIFFERS_3_OF_3` | stable stored-KV fingerprint difference; discuss one cache production/storage/page-ownership discriminator |
+| treatment `LIVE_KV_FINGERPRINT_EQUAL_3_OF_3` | stable observed fingerprints match; discuss one exact page-table/read/RPA-context discriminator |
+| mixed three-round treatment outcomes | stability failure; preserve, do not choose a mechanism |
+| root incomplete or partial rounds | INCONCLUSIVE; preserve and inspect per-round receipts before considering rerun |
+
+All fingerprint conclusions remain diagnostic rather than complete-byte proof.
+None opens Phase E automatically.
+
+### Current three-layer audit
+
+- Implementation: additive `kv3` renderer/profile, Patch 36 per-round KV
+  budgeting, per-round input/final durability, three-round aggregate,
+  prepare-only wrapper, and salvage-first return. Production and numerical
+  paths are unchanged.
+- Validation: focused HOST PASS — E0 staging/aggregate 3/3, target carrier
+  21/21, resolved environment 12/12, task discovery 193/193, V1 CPU 91/91,
+  P3 31/31, fake-GCS three-round persistence and round-2 failure
+  preservation, partial/full return paths, flags 398/398, syntax, static
+  manifest binding, Patch-36 overlay reconstruction, and diff check. Raw log
+  `/tmp/m15-e0-kv3-host-gate-final-20260830.log` has SHA256
+  `cccc0bdce2dd01d5dd84f1fdc61f31ba4be7570ed692fccedb43387e839cf12d`.
+- Claim: `HOST PASS` only. Official pinned exact-image and target are NOT RUN;
+  commit/push delivery does not promote that claim; numerical repair remains
+  unauthorized.
+
+## SUPERSEDED — 971bb228 return rejected; harden, certify, then recover read-only
 
 The latest published tip reviewed here is
 `971bb2281417ecb6e33cfa6bb68a422f7fd24f00`. It replaced the earlier

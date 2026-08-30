@@ -129,8 +129,11 @@ def _load_records(directory: Path) -> list[dict[str, Any]]:
         "npz_path": npz_path.name,
     })
   indices = [int(record["record_index"]) for record in records]
-  _require(indices == list(range(len(indices))),
-           "observer record indices are not contiguous")
+  _require(
+      indices
+      and indices == list(range(indices[0], indices[0] + len(indices))),
+      "observer record indices are not one contiguous window",
+  )
   return records
 
 

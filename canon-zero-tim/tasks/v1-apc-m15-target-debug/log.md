@@ -1443,3 +1443,46 @@ is not a current fact or launch authority.
 - Delivery approval: the user explicitly approved committing and pushing this
   additive follow-up. The full published SHA is returned by the delivery
   operation rather than self-recorded inside its own commit.
+
+## 2026-08-30 — E0 KV discriminator upgraded to independently durable 3-round carrier
+
+- Confirmed Attempt 18 was intentionally one round; it did not terminate early
+  by accidentally omitting rounds 1/2. One round cannot establish mechanism
+  stability, and root-dependent recovery can hide useful completed evidence.
+- Added the separate `observer=kv3` / `m15-e0-kv-v1` identity. Patch 36 resets
+  only the targeted candidate set and 128 MiB byte budget per round, preserves
+  globally monotonic record indices, rejects cross-round pairs, and requires
+  all eight A/B pairs before advancing 0 -> 1 -> 2. Historical `observer=kv`
+  remains one round.
+- Each round now stages exactly 8A+8B records, uploads and readback-verifies a
+  self-hashed classifier input before classification, classifies, seals and
+  readback-verifies final evidence, publishes `ROUND_COMPLETE`, then permits
+  learner ACK. The completion hashes the input, classification, and
+  classifier-input receipt. `run.log` is collected once at root rather than
+  duplicated into each round archive.
+- Added three-round aggregation, prepare-only rendering, salvage-first GCS
+  return/recovery, and a local aggregate host gate. Missing root state cannot
+  erase already completed rounds; mixed mechanisms, red control, B-C red,
+  missing receipts, or provenance drift fail closed.
+- Host validation PASS: task discovery 193/193; KV3 staging/aggregate 3/3;
+  target carrier 21/21; resolved environment 12/12; salvage-first return
+  partial/full; V1 CPU 91/91; P3 prefix cache 31/31; fake-GCS three-round
+  sealing/readback and round-2 failure preserving rounds 0/1; flag registry
+  398/398; Python/Bash syntax; Patch-36 runner reconstruction with manifest
+  SHA `15fddce5eb5157494cc01639a50e677e5d7ce775b883ff5c7d29f6a854317f67`;
+  and `git diff --check`.
+- Aggregate marker:
+  `M15_E0_KV3_HOST_PASS task_discovery=193 return=1 v1_cpu=91
+  p3_prefix_cache=31 persistence=1 flags=398 manifest=static syntax=1
+  diff_check=1 exact_image=0 target=0 gcs=0 kubernetes=0 tpu=0`.
+- Raw host log: `/tmp/m15-e0-kv3-host-gate-final-20260830.log`, SHA256
+  `cccc0bdce2dd01d5dd84f1fdc61f31ba4be7570ed692fccedb43387e839cf12d`.
+- Scope: no RoPE, RPA, attention, KV value, LM-head, loss, backward,
+  optimizer, production profile, A/B/C, or B-reset arithmetic changed. No
+  official pinned exact-image, real GCS, Kubernetes, or TPU ran. Phase E
+  remains closed and no numerical repair is authorized.
+- Delivery approval: the user explicitly authorized commit/push after this host
+  gate. The full delivered SHA is reported by the delivery operation rather
+  than self-recorded in its own commit. After publication, a clean exact-SHA
+  agent runs prepare-only; pinned exact-image and DP8×TP8 launch each require
+  their own later approval.
