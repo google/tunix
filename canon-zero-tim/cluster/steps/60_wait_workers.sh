@@ -12,7 +12,8 @@
 # than an accident, and the value is printed with the verdict.
 set -euo pipefail
 source "$CANON_STATE/env.sh"
-if [ -z "${PATHWAYS_HEAD:-}" ]; then
+target_head="${CANON_TARGET_PATHWAYS_HEAD:-${PATHWAYS_HEAD:-}}"
+if [ -z "$target_head" ]; then
   echo "[wait] no PATHWAYS_HEAD -- nothing to wait for"
   exit 0
 fi
