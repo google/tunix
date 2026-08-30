@@ -1,5 +1,15 @@
 # Log
 
+## 2026-08-30 UTC — Attempt 19 (Phase E0s Three-Round KV3 Diagnostic Pair) rendered and submitted
+
+- Rendered from published source commit `d93d2729c5f036506fe754b929d42b142177a9b7` with `run_id=k01` using `prepare_m15_attempt19_e0_kv3_pair.sh`.
+- Contract: `RUN_CONTRACT.json` verifies 5/5 manifest files in `/tmp/m15-e0-kv3-k01`:
+  - Control: `canon-v1-apc-m15-off-k01-d93d2729` (APC off, 64 TPU v5p, 3 diagnostic rounds, zero backward, zero optimizer commit).
+  - Treatment: `canon-v1-apc-m15-on-k01-d93d2729` (APC on, 64 TPU v5p, 3 diagnostic rounds, zero backward, zero optimizer commit).
+  - Observer: `kv3` (Layer 0, 1226 prefix tokens, 8 aliases per round, 96 pages bound, `durability=m15-e0-kv-v1`).
+- Cluster Execution: submitted via `kubectl apply` with explicit user approval; both JobSets successfully acquired all 64 TPUs across all 16 workers and entered Pallas hot path execution.
+- Terminal recovery: upon completion, `run_m15_attempt19_e0_kv3_return_recovery.sh` will execute read-only GCS salvage and official provenance intake.
+
 ## 2026-08-30 UTC — Phase E0r Attempt-18 GCS read-only recovery audit and live training monitoring
 
 - Pulled and synchronized with latest published commit `07a427612bf34c1910436cecb3d4deafdaa71015` ("Reject unproven M15 E0 return provenance.").
