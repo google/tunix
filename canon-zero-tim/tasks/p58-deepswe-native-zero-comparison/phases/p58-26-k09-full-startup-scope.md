@@ -1,6 +1,6 @@
 # P58.26 — K09 full-startup one-host selector scope
 
-Status: `IMPLEMENTED / HOST PASS / PINNED-IMAGE PASS / TARGET NOT RERUN`
+Status: `IMPLEMENTED / HOST PASS / PINNED-IMAGE PASS / STARTUP TARGET PASS`
 
 ## Incident
 
@@ -59,3 +59,8 @@ optimizer commit, checkpointing, or 1,000-step completion. A fresh, separately
 approved Attempt-0 target is still required. Its first required post-K09
 receipts are one real `[DEEPSWE.TITO] CONTINUATION`, a complete 128-row Step-0
 journal, and strict pre-backward A=B=C.
+
+K10 at source `0e954153cdfd21ee79ebf57eaa6afb4bf273aff0` supplied those
+receipts and crossed the former K09 failure boundary. It is therefore target
+PASS for this startup-scope phase. K10's later shared-workload identity failure
+is owned by P58.27 and does not prove backward or optimizer completion.

@@ -83,6 +83,17 @@ class DeepSWEWorkload:
   max_num_batched_tokens_per_dp: int = 256
 
   @property
+  def name(self) -> str:
+    """Exposes the common segmented-workload identity without changing it.
+
+    The generic DP adapter consumes ``name`` while DeepSWE historically calls
+    the same signed identity ``contract_name``.  Keep one source of truth: a
+    property makes DeepSWE satisfy the shared adapter interface without adding
+    a second serialized recipe field that could drift.
+    """
+    return self.contract_name
+
+  @property
   def global_trajectories(self) -> int:
     return self.global_prompts * self.generations
 

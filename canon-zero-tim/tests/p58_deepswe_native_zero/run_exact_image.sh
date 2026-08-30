@@ -152,7 +152,8 @@ $DOCKER run --rm \
       canon-zero-tim/tests/p33_workloads/test_dp_workloads.py \
       DPWorkloadsTest.test_p57_zero_full_admits_its_signed_wandb_project_only \
       DPWorkloadsTest.test_p57_m15_uses_its_signed_wide_token_contract \
-      DPWorkloadsTest.test_p57_token_contract_rejects_partial_or_foreign_pairs
+      DPWorkloadsTest.test_p57_token_contract_rejects_partial_or_foreign_pairs \
+      DPWorkloadsTest.test_deepswe_p58_satisfies_the_shared_token_width_interface
     PYTHONPATH=/workspace python3 \
       canon-zero-tim/tests/p34_deepswe/test_contract.py
     PYTHONPATH=/workspace python3 \
@@ -254,5 +255,5 @@ $DOCKER run --rm \
       python3 \
       canon-zero-tim/tests/p58_deepswe_native_zero/probe_stock_prompt_observer.py
     rm -r "$observer_state"
-    echo "P58_EXACT_IMAGE_CPU_PASS loss_oracle=1 weighted_accumulation=1 compact_filter=1 durable_journal=1 paired_renderer=1 alignment_policy=1 stock_observer=1 continue_decode_observer=1 continue_kv_observer=1 onehost_xprof=1 zero_hp_full=1 system_optimization=1 checked_vma_diagnostic=1 checked_vma_aba=1 coarse_seam=1 qwen4b_fixed_head=1 qwen4b_tp4=1 trajectory_replay_b2g2=1 checked_vma=1 vma_p59_only=1 first_update=1 stable_clip=1 apc=1 p59_tp4_tp8=2 p59_real_shim=4 p59_rpa=2 p59_fused_linear=2 disaggregated_trainer_mesh=4 p57_wandb=1 m15_token=1 regressions=1"
+    echo "P58_EXACT_IMAGE_CPU_PASS loss_oracle=1 weighted_accumulation=1 compact_filter=1 durable_journal=1 paired_renderer=1 alignment_policy=1 stock_observer=1 continue_decode_observer=1 continue_kv_observer=1 onehost_xprof=1 zero_hp_full=1 system_optimization=1 checked_vma_diagnostic=1 checked_vma_aba=1 coarse_seam=1 qwen4b_fixed_head=1 qwen4b_tp4=1 trajectory_replay_b2g2=1 checked_vma=1 vma_p59_only=1 first_update=1 stable_clip=1 apc=1 p59_tp4_tp8=2 p59_real_shim=4 p59_rpa=2 p59_fused_linear=2 disaggregated_trainer_mesh=4 p57_wandb=1 m15_token=1 deepswe_workload_identity=1 regressions=1"
   '

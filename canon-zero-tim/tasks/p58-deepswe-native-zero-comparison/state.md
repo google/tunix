@@ -1,5 +1,30 @@
 # State
 
+## P58.27 K10 common workload identity repair (2026-08-30)
+
+- K10 source `0e954153cdfd21ee79ebf57eaa6afb4bf273aff0` proves the
+  P58.26/K09 startup repair on the real 128-device target. It completed 128
+  multi-turn R2E trajectories, 404,028 action tokens, Rescore-B, and strict
+  Step-0 pre-alignment with A-B and B-C both zero. It then stopped before the
+  first segmented forward/backward because `DeepSWEWorkload` exposes
+  `contract_name` while the shared DP adapter expects `.name`.
+- Latest operator parent is
+  `98d102eb27fe05fcee327688d0aa6d236b32be4a`. The local repair adds a
+  read-only `name` property returning the existing `contract_name`; it does
+  not add a dataclass/recipe field. All P34/P39/P43/P44/P46/P58 DeepSWE
+  contracts therefore satisfy the common adapter identity, and the exact P58
+  token-width path returns 4096/16384 rather than raising `AttributeError`.
+- Host P34 static passes ten suites; DeepSWE contract passes 6/6; GSM8K
+  renderer passes 12/12 in the pinned image; flag audit passes 409/409 with
+  `changed_names=0`. The complete pinned P58 gate exits zero with
+  `deepswe_workload_identity=1`, installed TP4/TP8 shims, and
+  `P58_EXACT_IMAGE_CPU_PASS`.
+- No flag, model, data, sampler, loss, precision, optimizer, topology,
+  deadline, TiTO, or Zero-HP bundle changed. K10 is a signed strict-alignment
+  target PASS only through pre-backward. The repair has not been rerun on the
+  128-device target; segmented forward, backward, optimizer commit,
+  checkpoint, and 1,000-step completion remain unproved.
+
 ## P58.26 K09 full-startup scope repair (2026-08-30)
 
 - Latest operator tip `0d224e4a0e8c278f1bf9f699af235fdea83ef327`

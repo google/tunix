@@ -48,6 +48,7 @@ class DeepSWEContractTest(unittest.TestCase):
   def test_signed_workload_and_rank_groups(self):
     workload = deepswe_contract.P34_WORKLOAD
     workload.validate()
+    self.assertEqual(workload.name, workload.contract_name)
     self.assertEqual(workload.global_trajectories, 64)
     self.assertEqual(workload.local_trajectories, 4)
     self.assertEqual(workload.max_num_seqs_per_dp, 4)
@@ -61,6 +62,27 @@ class DeepSWEContractTest(unittest.TestCase):
         tuple(group * 16 + rank for rank in range(16))
         for group in range(4)
     ))
+
+  def test_every_deepswe_contract_exposes_the_shared_adapter_identity(self):
+    workloads = (
+        deepswe_contract.P34_WORKLOAD,
+        deepswe_contract.P39_PILOT_WORKLOAD,
+        deepswe_contract.P43_DEBUG_WORKLOAD,
+        deepswe_contract.P44_PARITY_64_WORKLOAD,
+        deepswe_contract.P44_PARITY_128_WORKLOAD,
+        deepswe_contract.P46_Q32_64_WORKLOAD,
+        deepswe_contract.P46_Q32_256_WORKLOAD,
+        deepswe_contract.P58_Q4_TIM_128_WORKLOAD,
+    )
+    for workload in workloads:
+      with self.subTest(contract=workload.contract_name):
+        self.assertEqual(workload.name, workload.contract_name)
+    self.assertNotIn(
+        "name",
+        deepswe_contract.p44_recipe_signature(
+            deepswe_contract.P44_PARITY_128_WORKLOAD
+        ),
+    )
 
   def test_legal_physical_halves_are_disjoint_and_exhaustive(self):
     rollout, trainer, report = deepswe_contract.split_4x8x8_role_devices(

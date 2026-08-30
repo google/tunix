@@ -1,5 +1,31 @@
 # P58 DeepSWE native-first training handoff
 
+## START HERE — K10 passed strict rollout alignment, then hit a workload interface mismatch
+
+K10 is not another rollout, TiTO, dataset, topology, or alignment failure.
+Source `0e954153cdfd21ee79ebf57eaa6afb4bf273aff0` completed all 128
+multi-turn R2E trajectories, produced 404,028 action tokens, finished
+Rescore-B, and passed strict Step-0 pre-alignment with A-B=0 and B-C=0. It
+also proves the P58.26/K09 startup repair on the real DP8xTP8 target.
+
+The run stopped before segmented forward/backward because the generic DP
+adapter reads `workload.name`, while `DeepSWEWorkload` historically stored the
+same signed identity only as `contract_name`. The local P58.27 repair adds a
+read-only `name` property returning `contract_name`; it does not add a second
+serialized recipe field. Tests cover every registered DeepSWE contract and
+the real P58 4096/16384 token-width call.
+
+Local validation on operator parent
+`98d102eb27fe05fcee327688d0aa6d236b32be4a` passes P34 static ten
+suites, focused DeepSWE 6/6, flag audit 409/409 with `changed_names=0`, and
+the complete pinned P58 gate with `deepswe_workload_identity=1` and
+`P58_EXACT_IMAGE_CPU_PASS`. This is not a repaired target PASS. After separate
+publication and launch approval, a fresh Attempt-0 must preserve the K10
+strict alignment, cross segmented forward/backward, and produce the first
+valid optimizer commit. See `phases/p58-27-k10-workload-identity.md` and the
+immutable incident directory
+`canon-zero-tim/evidence/p58_k10_deepswe_workload_attribute_incident/`.
+
 ## START HERE — K09 is a pre-rollout Python scope failure
 
 K09 is not a model, TiTO, R2E dataset, or DP8xTP8 admission failure. Source

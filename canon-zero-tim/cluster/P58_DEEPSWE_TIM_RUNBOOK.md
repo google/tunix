@@ -18,6 +18,29 @@ P58 does not modify `main`. Rendering and local validation do not authorize a
 Kubernetes apply. An operator must separately approve image publication and
 each launch.
 
+## K10 common-workload identity gate
+
+K10 completed the full 128-row rollout and strict Step-0 pre-alignment over
+404,028 action tokens, then stopped before segmented forward/backward at the
+shared adapter's first `workload.name` read. DeepSWE calls that signed identity
+`contract_name`; generic DP workloads call it `name`.
+
+P58.27 exposes `name` only as a property returning `contract_name`. Require:
+
+```text
+all registered DeepSWE workloads: name == contract_name
+serialized P44 recipe signature: name absent
+P58 shared token widths: 4096/16384
+exact-image terminal: deepswe_workload_identity=1
+```
+
+Do not patch only `expected_token_widths`: the shared segmented adapter has
+later `.name` reads. Do not add an independently settable or serialized name
+field, which could drift from the signed contract. The source/image PASS
+closes the interface exception only. A fresh, separately approved 128-device
+Attempt-0 must preserve strict A=B=C and reach segmented forward/backward plus
+the first optimizer commit.
+
 ## K09 startup-scope gate
 
 K09 proved source/data/topology admission but stopped before rollout. The

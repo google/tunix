@@ -1977,3 +1977,47 @@
   optimizer commit, checkpoint, or completion evidence exists.
 - No commit, push, image publication, Kubernetes mutation, or TPU launch was
   performed.
+
+## 2026-08-30 UTC — P58.27 K10 common-workload identity repair
+
+- Pulled exact operator tip
+  `89ef0ad567d5abe33074a53c6655a6b8bc80cf6e` and verified the immutable
+  K10 package. Source `0e954153cdfd21ee79ebf57eaa6afb4bf273aff0`
+  completed 128 multi-turn trajectories, 404,028 action tokens, Rescore-B,
+  and strict A-B/B-C zero pre-alignment, then failed before segmented
+  forward/backward at `expected_token_widths(workload)` because
+  `DeepSWEWorkload` had no `.name`.
+- The first line was only the first consumer: the shared adapter has later
+  `.name` reads. The repair therefore gives `DeepSWEWorkload` a read-only
+  `name` property backed by its existing `contract_name`, rather than adding
+  fallbacks at individual call sites or a second serialized identity.
+- Regressions prove all registered DeepSWE contracts share that identity,
+  recipe serialization is unchanged, and the real P58 token-width helper
+  returns 4096/16384. The complete P58 exact-image gate now executes that
+  helper and ends with `deepswe_workload_identity=1` and
+  `P58_EXACT_IMAGE_CPU_PASS`.
+- Host P34 static passes ten suites, focused DeepSWE passes 6/6, Python/Bash
+  syntax and diff hygiene pass, and flag audit passes 409/409 with
+  `changed_names=0`. The initial bare-host direct import was inconclusive
+  because that shell lacks `metrax`; the dependency-complete pinned image ran
+  the actual integration assertion.
+- No flag, model, data, sampler, loss, precision, optimizer, topology,
+  deadline, TiTO, or Zero-HP setting changed. No repaired target, optimizer
+  commit, checkpoint, commit/push, image publication, Kubernetes mutation, or
+  TPU launch occurred.
+
+## 2026-08-30 UTC — P58.27 post-rebase admission
+
+- Fast-forwarded the operator worktree to
+  `98d102eb27fe05fcee327688d0aa6d236b32be4a` without conflict. The intervening
+  M15 commit changes token-continuity/rollout neighbors, so the older-base P58
+  image result was not reused as current-base evidence.
+- On the pinned image
+  `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`,
+  the complete P58 gate reran through P44/P59 installed shims, the new shared
+  workload identity assertion, and adjacent contracts; its final container
+  exited 0 and the gate includes `deepswe_workload_identity=1` in
+  `P58_EXACT_IMAGE_CPU_PASS`.
+- This is transcript-only construction evidence. No repaired 128-device
+  target, backward, optimizer commit, commit/push, image publication,
+  Kubernetes mutation, or TPU launch occurred.

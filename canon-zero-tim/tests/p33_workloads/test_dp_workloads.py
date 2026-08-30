@@ -16,6 +16,7 @@ import pandas as pd
 from examples.frozenlake import data as frozenlake_data
 from tunix.models.qwen3 import model as qwen3_model
 from tunix.cli.utils import data as data_lib
+from tunix.rl import deepswe_contract
 from tunix.rl import dp_workloads
 from tunix.rl.agentic import agentic_rl_learner
 
@@ -552,6 +553,13 @@ class DPWorkloadsTest(unittest.TestCase):
               "CANON_P57_DATA_SPLIT": "main",
           },
       )
+
+  def test_deepswe_p58_satisfies_the_shared_token_width_interface(self):
+    workload = deepswe_contract.P58_Q4_TIM_128_WORKLOAD
+    self.assertEqual(workload.name, "p58-qwen4b-tim-128")
+    self.assertEqual(
+        dp_workloads.expected_token_widths(workload, {}), (4096, 16384)
+    )
 
   def test_frozenlake_short_alignment_preserves_shape_contract(self):
     workload = dp_workloads.get_workload("frozenlake")
