@@ -132,7 +132,7 @@ export TPU_MIN_LOG_LEVEL="${TPU_MIN_LOG_LEVEL:-0}"
 export TF_CPP_MIN_LOG_LEVEL="${TF_CPP_MIN_LOG_LEVEL:-0}"
 export TPU_STDERR_LOG_LEVEL="${TPU_STDERR_LOG_LEVEL:-0}"
 export PYTHONDONTWRITEBYTECODE=1
-export CANON_TPU_INFERENCE_PATH="${CANON_TPU_INFERENCE_PATH:-/usr/local/lib/python3.12/site-packages/tpu_inference}"
+export CANON_TPU_INFERENCE_PATH="${CANON_TPU_INFERENCE_PATH:-}"
 
 # Pathways & gRPC peer communication timeouts & buffers (mitigating worker-to-worker pipe timeouts during long JIT compilation)
 export PATHWAYS_PIPE_UNREACHABLE_TIMEOUT="${PATHWAYS_PIPE_UNREACHABLE_TIMEOUT:-300s}"

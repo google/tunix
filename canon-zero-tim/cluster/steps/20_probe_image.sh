@@ -11,7 +11,10 @@ set -euo pipefail
 source "$CANON_STATE/env.sh"
 
 find_tpu_inference() {
-  if [ -n "${CANON_TPU_INFERENCE_PATH:-}" ]; then echo "$CANON_TPU_INFERENCE_PATH"; return; fi
+  if [ -n "${CANON_TPU_INFERENCE_PATH:-}" ] && [ -d "$CANON_TPU_INFERENCE_PATH" ]; then
+    echo "$CANON_TPU_INFERENCE_PATH"
+    return
+  fi
   PATHWAYS_HEAD="" JAX_BACKEND_TARGET="" JAX_PLATFORMS=cpu python3 - <<'PY' 2>/dev/null || true
 import importlib.util, os
 spec = importlib.util.find_spec("tpu_inference")
