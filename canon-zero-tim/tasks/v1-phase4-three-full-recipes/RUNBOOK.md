@@ -54,6 +54,21 @@ CANON_DP_FINITE_FETCH=batched-commit
 CANON_P71_SCAN=fwd
 ```
 
+The token-input diff is mandatory and must be the only TITO admission:
+
+```text
+frozenlake-p45: CANON_M15_TOKEN_CONTINUITY absent
+frozenlake-m15: CANON_M15_TOKEN_CONTINUITY=exact
+```
+
+Reload both generated `env.sh` files and recheck the same tuple. Reject an
+empty P45 key as presence, a M15 `verify` value, or any neighboring workload
+with the selector. Before accepting M15 postflight, require at least one
+runtime `mode=exact verdict=TOKEN_STREAM_EQUAL first_mismatch=-1` receipt and
+require every token-continuity receipt to have matching lengths and SHA256.
+Any missing or unequal token receipt is fatal; the finite A-B warning policy
+does not cover token-input inequality.
+
 `CANON_DP_COLLECTIVE_REDUCE` must be absent. The command must contain
 `--eval_every_n_steps=0` and no `--num_test_batches`. Check no conflicting
 workload is live. The user may apply both YAMLs together; never append a pipe

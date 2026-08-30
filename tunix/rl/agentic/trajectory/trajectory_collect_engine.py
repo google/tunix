@@ -123,12 +123,19 @@ class TrajectoryCollectEngine:
           "caller-supplied override"
       )
     if (
-        self._m15_token_continuity_mode == "verify"
+        self._m15_token_continuity_mode in ("verify", "exact")
         and "prompt_token_ids" in self.model_call_kwargs
     ):
       raise ValueError(
-          "M15 token-continuity verify requires the rendered-text path; "
-          "refusing a caller-supplied prompt_token_ids override"
+          "M15 token continuity owns prompt_token_ids; refusing a "
+          "caller-supplied override"
+      )
+    if (
+        self._deepswe_exact_token_continuity
+        and self._m15_token_continuity_mode is not None
+    ):
+      raise ValueError(
+          "DeepSWE and M15 exact-token admissions are mutually exclusive"
       )
     self.perf_v2 = (
         perf_v2 if perf_v2 is not None else perf_tracer_v2.NoopTracer()
@@ -729,6 +736,18 @@ class TrajectoryCollectEngine:
               f"prompt_tokens={prompt_token_ids.size} sha256={digest}",
               flush=True,
           )
+        elif (
+            self._m15_token_continuity_mode == "exact"
+            and self.agent.trajectory.steps
+        ):
+          prompt_token_ids = (
+              token_continuity.reconstruct_continuation_prompt_tokens(
+                  self.agent.trajectory,
+                  self._response_token_count,
+                  contract="M15",
+              )
+          )
+          continuity_kwargs["prompt_token_ids"] = prompt_token_ids
         return self.model_call(
             self.agent.chat_completions,
             self.env,
@@ -760,10 +779,11 @@ class TrajectoryCollectEngine:
       return True
     logging.debug("%s model_call done", self._debug_prefix)
 
-    # Observer-only M15 verification runs after serving has consumed the text
-    # prompt. It does not add prompt_token_ids or otherwise change sampling.
+    # Verify observes the rendered-text path. Exact supplies reconstructed
+    # integer IDs above. Both compare the prompt actually consumed by serving;
+    # exact mode fails closed on any difference.
     if (
-        self._m15_token_continuity_mode == "verify"
+        self._m15_token_continuity_mode in ("verify", "exact")
         and self.agent.trajectory.steps
     ):
       expected_prompt = (
@@ -776,14 +796,22 @@ class TrajectoryCollectEngine:
       actual_prompt = token_continuity.unpadded_rollout_prompt_tokens(
           rollout_output
       )
-      print(
-          token_continuity.continuity_receipt(
-              actual_prompt,
-              expected_prompt,
-              turn=len(self.agent.trajectory.steps),
-          ),
-          flush=True,
+      receipt = token_continuity.continuity_receipt(
+          actual_prompt,
+          expected_prompt,
+          turn=len(self.agent.trajectory.steps),
+          mode=self._m15_token_continuity_mode,
       )
+      print(receipt, flush=True)
+      if (
+          self._m15_token_continuity_mode == "exact"
+          and not token_continuity.token_streams_equal(
+              actual_prompt, expected_prompt
+          )
+      ):
+        raise ValueError(
+            "M15 exact token continuity differs from the serving prompt"
+        )
 
     # Align trajectory prompt tokens with the rollout worker's actual
     # tokenization on the first turn to prevent prompt token desync.

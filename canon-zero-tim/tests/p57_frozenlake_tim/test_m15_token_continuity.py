@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Admission and fail-closed tests for the M15 token observer."""
+"""Admission and fail-closed tests for M15 token continuity."""
 
 from __future__ import annotations
 
@@ -22,9 +22,9 @@ sys.modules[TOKEN_SPEC.name] = token_continuity
 TOKEN_SPEC.loader.exec_module(token_continuity)
 
 
-def _environment() -> dict[str, str]:
+def _environment(mode: str = "verify") -> dict[str, str]:
   return {
-      token_continuity.M15_TOKEN_CONTINUITY_ENV: "verify",
+      token_continuity.M15_TOKEN_CONTINUITY_ENV: mode,
       "CANON_P32_WORKLOAD": "frozenlake-dp8-tp8",
       "CANON_PROFILE_FILE": (
           "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env"
@@ -70,9 +70,13 @@ class M15TokenContinuityTest(unittest.TestCase):
     self.assertEqual(
         token_continuity.m15_token_continuity_mode(_environment()), "verify"
     )
+    self.assertEqual(
+        token_continuity.m15_token_continuity_mode(_environment("exact")),
+        "exact",
+    )
     for field, value in (
         (token_continuity.M15_TOKEN_CONTINUITY_ENV, ""),
-        (token_continuity.M15_TOKEN_CONTINUITY_ENV, "exact"),
+        (token_continuity.M15_TOKEN_CONTINUITY_ENV, "unknown"),
         ("CANON_P57_WORKLOAD_CANDIDATE", ""),
         ("CANON_P57_TIM_ARM", "mismatch"),
         ("CANON_P33_ENABLE_EVAL", "1"),
@@ -132,6 +136,14 @@ class M15TokenContinuityTest(unittest.TestCase):
     receipt = token_continuity.continuity_receipt(tokens, tokens, turn=1)
     self.assertIn("verdict=TOKEN_STREAM_EQUAL", receipt)
     self.assertIn("first_mismatch=-1", receipt)
+    exact_receipt = token_continuity.continuity_receipt(
+        tokens, tokens, turn=1, mode="exact"
+    )
+    self.assertIn("mode=exact", exact_receipt)
+    self.assertTrue(token_continuity.token_streams_equal(tokens, tokens))
+    self.assertFalse(
+        token_continuity.token_streams_equal(tokens, tokens[:-1])
+    )
 
 
 if __name__ == "__main__":

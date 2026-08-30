@@ -79,6 +79,7 @@ set +a
 # Only the exact optimized M15/main concept run may demote finite A-B drift.
 # Every neighboring FrozenLake lane, including P45 Zero, remains strict.
 P57_ZERO_ALIGNMENT_WARNING_EXPECTED=0
+M15_EXACT_TOKEN_CONTINUITY_EXPECTED=0
 if [ "${CANON_PROFILE_FILE:-}" = \
        "cluster/profiles/qwen3-8b-dp8-tp8-frozenlake-v1-hp.env" ] && \
    [ "${CANON_PROFILE:-}" = \
@@ -96,6 +97,7 @@ if [ "${CANON_PROFILE_FILE:-}" = \
    [ "${CANON_P31_ENABLE_EVAL:-}" = "0" ] && \
    [ "${CANON_FROZENLAKE_CKPT_MODE:-}" = "disabled" ]; then
   P57_ZERO_ALIGNMENT_WARNING_EXPECTED=1
+  M15_EXACT_TOKEN_CONTINUITY_EXPECTED=1
 fi
 
 P57_STOCK_FAST=0
@@ -174,6 +176,16 @@ echo "[env] preflight mode: JAX_PLATFORMS=cpu (Pathways connection deferred to S
 # Preflight: refuse an incomplete canonical set rather than warn inside a log nobody reads.
 fail=0
 req() { [ -n "${!1:-}" ] || { echo "[env] MISSING: $1" >&2; fail=1; }; }
+if [ "$M15_EXACT_TOKEN_CONTINUITY_EXPECTED" = "1" ]; then
+  [ "${CANON_M15_TOKEN_CONTINUITY:-}" = "exact" ] || {
+    echo "[env] exact M15 full requires CANON_M15_TOKEN_CONTINUITY=exact" >&2
+    fail=1
+  }
+  echo "[env] M15 exact TITO enabled mode=${CANON_M15_TOKEN_CONTINUITY:-missing}"
+elif [[ -v CANON_M15_TOKEN_CONTINUITY ]]; then
+  echo "[env] CANON_M15_TOKEN_CONTINUITY is restricted to exact M15 full" >&2
+  fail=1
+fi
 case "${CANON_APC_M15_TARGET_DEBUG:-}" in
   "") APC_M15_TARGET_DEBUG=0 ;;
   off|on)

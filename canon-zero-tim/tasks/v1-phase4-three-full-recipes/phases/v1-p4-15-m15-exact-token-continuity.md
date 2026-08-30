@@ -1,7 +1,10 @@
 # V1.P4.15 — M15 exact token continuity (TITO)
 
-Status: active; T0 observer-only implementation passes host and pinned-image
-construction gates; real M15 observation, exact input, and target are not run.
+Status: active; user overrode the verify-first prerequisite and selected exact
+TITO as the signed M15 full default. T1/T2 runtime, YAML/profile delivery, and
+postflight hard gates are in the local publication CL; host and post-rebase
+exact pinned-image construction pass. Remote readback, one-host, and DP8xTP8
+target are not run.
 
 ## Problem and evidence boundary
 
@@ -21,9 +24,10 @@ the current M15 verdict.
 
 ## Intended outcome
 
-Prove whether a real M15 trajectory gives different later-turn token IDs to
-serving A and trainer B/C. Only if that observer fires, admit a default-off,
-exact-M15 TITO path that feeds the accumulated integer token IDs back to vLLM.
+Feed the accumulated integer token IDs back to vLLM by default for the exact
+M15 full recipe and prove that serving consumed those same IDs on every later
+turn. The user explicitly authorized this input change before a real M15
+verify verdict; it remains target-unverified and cannot inherit P58 evidence.
 Keep the already published finite A-B warning lane so a 300-update convergence
 concept run can continue through residual decode/prefill program drift. TITO
 never weakens token equality, B-C, nonfinite, backward, replica, or optimizer
@@ -67,8 +71,10 @@ Exit gate:
 - M15 supplies a durable `TOKEN_STREAM_EQUAL` or `TOKEN_STREAM_DIFFERENT`
   verdict before any TITO behavior is enabled.
 
-If M15 is `TOKEN_STREAM_EQUAL` through the first observed A-B red, stop this
-phase as `TITO_EXONERATED_FOR_INCIDENT`; do not change production input.
+Historical preregistration: if M15 were `TOKEN_STREAM_EQUAL` through the first
+observed A-B red, TITO would have been exonerated before changing production
+input. The user superseded that sequencing rule for the signed M15 full recipe
+on 2026-08-30; the observation remains useful but no longer blocks exact mode.
 
 ### T1 — generic helper and exact-M15 selector
 
@@ -77,9 +83,9 @@ Land two separable concerns:
 1. extract P58's reconstruction into a generic helper while keeping P58
    behavior and markers unchanged;
 2. register an absence-sensitive enum selector for M15 with values
-   `verify|exact`, default absent. `verify` remains observational. `exact`
-   supplies integer prompt IDs and disables chat-template reapplication only
-   for the exact M15 Zero v1-hp tuple.
+   `verify|exact`, globally absent. `verify` remains observational. The exact
+   M15 Zero v1-hp profile and YAML default to `exact`, which supplies integer
+   prompt IDs and disables chat-template reapplication only for that tuple.
 
 The selector must traverse renderer -> profile -> `00_env.sh` -> authoritative
 `env.sh` -> learner process -> runtime marker -> postflight. P45, GSM8K,
@@ -180,3 +186,33 @@ No rollback deletes a run directory.
   M15 DP8xTP8 because no TPU launch was approved. No M15
   `TOKEN_STREAM_EQUAL|DIFFERENT` target verdict exists, so `exact` remains
   unreachable and production profiles/renderers are unchanged.
+- 2026-08-30: user explicitly overrode the verify-first prerequisite and
+  selected exact TITO as the M15 full default. Local implementation admits
+  `exact` only for the signed M15/main Zero v1-hp DP8xTP8 300-update,
+  no-eval/no-checkpoint identity; the first turn establishes the actual
+  serving prompt tail, and every later turn passes the reconstructed integer
+  stream with chat-template reapplication disabled. Serving-returned prompt
+  IDs are checked exactly and any mismatch is fatal. The M15 YAML/profile now
+  write `CANON_M15_TOKEN_CONTINUITY=exact`; P45/GSM8K/Native/IS/eval and other
+  profiles require the key absent. The full classifier requires a runtime env
+  marker plus one or more exact/equal receipts and rejects verify, drift, or
+  neighboring leakage. Focused helper 5/5 and renderer 14/14 passed locally.
+  Full host gates passed: P57 181/181, V1 92/92, classifier 29/29, and flag
+  audit 409/409. The complete immutable-image gate on
+  `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`
+  exited zero with `V1_HP_EXACT_IMAGE_PASS ... m15_tito_exact=1 ...
+  manifests=3`; the raw console log was not durably saved, so this is an
+  admission receipt rather than a signed artifact. Not verified on one-host
+  or DP8xTP8 target because no TPU launch was approved. Commit, push, render,
+  launch, and TPU remain unrun.
+- 2026-08-30: rebased the exact-M15 CL over publication tip `18f29c56`, which
+  contains generic DeepSWE TITO. The first post-rebase pinned-image run stopped
+  at trajectory construction because one automatically merged mutual-exclusion
+  check still referenced the removed `_p58_exact_token_continuity` field.
+  Replaced it with `_deepswe_exact_token_continuity`, retained independent
+  DeepSWE and M15 admissions, and added learner plus trajectory mutual-exclusion
+  negatives. Post-fix P57 181/181, V1 92/92, flag audit 409/409, syntax, and
+  diff hygiene pass. The complete pinned-image rerun exited zero with
+  `V1_HP_EXACT_IMAGE_PASS ... m15_tito_exact=1 ... manifests=3`. Not verified
+  on one-host or DP8xTP8 target. No render, launch, Kubernetes mutation, or TPU
+  use occurred.

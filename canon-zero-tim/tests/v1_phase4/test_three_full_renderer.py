@@ -168,6 +168,7 @@ class ThreeFullRendererTest(unittest.TestCase):
       self.assertEqual(gsm8k["CANON_P33_SHARED_MESH"], "16,4")
       self.assertEqual(gsm8k["CANON_GSM8K_ALIGNMENT_WARN_ONLY"], "0")
       self.assertEqual(gsm8k["CANON_P38_FIXED_LM_HEAD"], "1")
+      self.assertNotIn("CANON_M15_TOKEN_CONTINUITY", gsm8k)
       self.assertNotIn("CANON_P67_P66_VMA_P59_ONLY", gsm8k)
       self.assertIn("--max_steps=200", gsm8k["CANON_RUN_CMD"])
 
@@ -193,10 +194,12 @@ class ThreeFullRendererTest(unittest.TestCase):
         self.assertNotIn("--num_test_batches=", frozen["CANON_RUN_CMD"])
       self.assertNotIn("--p57_workload_candidate=", p45["CANON_RUN_CMD"])
       self.assertEqual(p45["CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY"], "0")
+      self.assertNotIn("CANON_M15_TOKEN_CONTINUITY", p45)
       self.assertIn("--p57_workload_candidate=m15", m15["CANON_RUN_CMD"])
       self.assertIn("--p57_data_split=main", m15["CANON_RUN_CMD"])
       self.assertIn("--max_response_length=8192", m15["CANON_RUN_CMD"])
       self.assertEqual(m15["CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY"], "1")
+      self.assertEqual(m15["CANON_M15_TOKEN_CONTINUITY"], "exact")
 
       for values in envs:
         self.assertEqual(values["CANON_V1_HP_FULL"], "1")

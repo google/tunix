@@ -85,11 +85,70 @@ _ALIGN_RE = re.compile(
     r"(PASS|PASS_WITH_ALIGNMENT_WARNINGS|FAIL)\b"
 )
 _FIRST_UPDATE_PREFIX = "[V1.FIRST_UPDATE] "
+_M15_TOKEN_PREFIX = "[CANON_M15_TOKEN_CONTINUITY] "
 
 
 def _require(condition: bool, reason: str, reasons: list[str]) -> None:
   if not condition:
     reasons.append(reason)
+
+
+def _token_continuity_receipts(text: str) -> list[dict[str, str]]:
+  """Parses bounded M15 token-continuity receipt fields."""
+  return [
+      dict(_FIELD_RE.findall(line.removeprefix(_M15_TOKEN_PREFIX)))
+      for line in text.splitlines()
+      if line.strip().startswith(_M15_TOKEN_PREFIX)
+  ]
+
+
+def _validate_m15_tito(
+    recipe: str,
+    env: dict[str, str],
+    text: str,
+    reasons: list[str],
+) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+  """Requires exact-equal TITO receipts only for the M15 full recipe."""
+  receipts = _token_continuity_receipts(text)
+  exact_equal = [
+      receipt
+      for receipt in receipts
+      if receipt.get("mode") == "exact"
+      and receipt.get("verdict") == "TOKEN_STREAM_EQUAL"
+      and receipt.get("first_mismatch") == "-1"
+      and receipt.get("actual_tokens") == receipt.get("expected_tokens")
+      and receipt.get("actual_sha256") == receipt.get("expected_sha256")
+  ]
+  if recipe == "m15":
+    _require(
+        env.get("CANON_M15_TOKEN_CONTINUITY") == "exact",
+        "resolved_env.CANON_M15_TOKEN_CONTINUITY",
+        reasons,
+    )
+    _require(
+        text.count("[env] M15 exact TITO enabled mode=exact") >= 1,
+        "missing_m15_exact_tito_env_receipt",
+        reasons,
+    )
+    _require(bool(receipts), "missing_m15_exact_token_receipt", reasons)
+    _require(
+        len(exact_equal) == len(receipts),
+        "m15_exact_token_receipt_not_all_equal",
+        reasons,
+    )
+  else:
+    _require(
+        "CANON_M15_TOKEN_CONTINUITY" not in env,
+        "resolved_env.CANON_M15_TOKEN_CONTINUITY_unexpected",
+        reasons,
+    )
+    _require(not receipts, "unexpected_m15_token_receipt", reasons)
+    _require(
+        "[env] M15 exact TITO enabled" not in text,
+        "unexpected_m15_exact_tito_env_receipt",
+        reasons,
+    )
+  return receipts, exact_equal
 
 
 def _sha256(path: Path) -> str:
@@ -384,6 +443,8 @@ def _required_recipe_env(recipe: str, contract: dict[str, Any]) -> dict[str, str
         "CANON_FROZENLAKE_CKPT_MAX_TO_KEEP": "",
         "CANON_FROZENLAKE_CKPT_MILESTONE_INTERVAL": "",
     })
+    if recipe == "m15":
+      required["CANON_M15_TOKEN_CONTINUITY"] = "exact"
   return required
 
 
@@ -545,6 +606,9 @@ def classify(
     )
 
   text = run_log.read_text(encoding="utf-8", errors="replace")
+  token_receipts, exact_equal_token_receipts = _validate_m15_tito(
+      recipe, env, text, reasons
+  )
   align_verdicts = [
       match.group(1)
       for line in text.splitlines()
@@ -1104,6 +1168,11 @@ def classify(
           "enabled": apc_on,
           "hit_rates_percent": hit_rates,
           "max_hit_rate_percent": max(hit_rates) if hit_rates else None,
+      },
+      "m15_tito": {
+          "mode": "exact" if recipe == "m15" else None,
+          "receipts": len(token_receipts),
+          "exact_equal_receipts": len(exact_equal_token_receipts),
       },
       "jax_persistent_cache": {
           "configuration": {

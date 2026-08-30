@@ -227,6 +227,10 @@ def render_three(
           "CANON_P33_DISABLE_EVAL": "1",
           "CANON_P31_ENABLE_EVAL": "0",
       })
+      if label == "m15":
+        required["CANON_M15_TOKEN_CONTINUITY"] = "exact"
+      elif "CANON_M15_TOKEN_CONTINUITY" in env:
+        raise ValueError("P45 must not render the M15 TITO selector")
     wrong = {
         name: env.get(name)
         for name, value in required.items()

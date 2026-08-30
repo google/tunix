@@ -1055,3 +1055,55 @@
   UNCOMMITTED / UNPUBLISHED`. No production profile, renderer, model input,
   alignment policy, commit, push, render, Kubernetes object, TPU use, or
   optimizer update changed.
+
+## 2026-08-30T06:35:40Z — exact TITO selected as the M15 full default
+
+- User override: enable exact TITO by default for the signed M15/main Zero
+  v1-hp DP8xTP8 300-update no-eval/no-checkpoint concept run without waiting
+  for a real M15 verify receipt. This authorizes a model-input change but does
+  not transfer the DeepSWE TP4 target claim.
+- Runtime: turn 0 keeps the rendered prompt so serving supplies the canonical
+  unpadded initial token tail. Every later turn reconstructs that tail plus
+  exact sampled assistant and nonterminal environment token IDs, passes the
+  resulting integer vector through `prompt_token_ids`, and disables chat
+  template reapplication in the learner. The serving-returned prompt is then
+  compared byte-for-byte; any inequality is fatal.
+- Delivery: the exact M15 full profile and rendered YAML write
+  `CANON_M15_TOKEN_CONTINUITY=exact`. P45, GSM8K, Native, IS, eval,
+  diagnostics, and other topologies require the key absent. `00_env.sh`
+  prints an exact-mode receipt, and the full classifier requires one or more
+  exact/equal token receipts while rejecting verify, different, malformed,
+  missing, or neighboring receipts.
+- Validation: helper 5/5; P67 renderer 5/5; three-full renderer 9/9;
+  classifier 29/29; P57 181/181; V1 92/92; flags 409/409; Python/Bash syntax
+  and diff hygiene pass. Complete pinned-image admission on
+  `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`
+  exited zero with `V1_HP_EXACT_IMAGE_PASS ... m15_tito_exact=1 ...
+  manifests=3`. Its raw console log was not durably saved, so it is not a
+  signed evidence artifact. One-host and DP8xTP8 target are not run.
+- Claim and publication boundary: `LOCAL IMPLEMENTED / HOST PASS /
+  PINNED-IMAGE PASS / ONEHOST NOT RUN / TARGET NOT RUN /
+  UNCOMMITTED / UNPUBLISHED`. No render for launch, Kubernetes mutation, TPU,
+  commit, or push occurred. The M15 warning lane still limits the final claim
+  to `convergence-only / alignment-degraded`.
+
+## 2026-08-30T06:51:19Z — exact TITO CL rebased and re-admitted
+
+- Fetched publication tip `18f29c56daf471cc0ac011396d7c7a09f35d695b`,
+  three commits beyond the observer baseline, and linearly rebased the exact
+  M15 CL. The overlap was the generic DeepSWE TITO admission added upstream.
+- The first post-rebase pinned-image run was RED at trajectory construction:
+  an automatically merged mutual-exclusion check retained the removed
+  `_p58_exact_token_continuity` field and raised `AttributeError` before the
+  ordinary FrozenLake provenance tests. No downstream result from that run was
+  admitted.
+- The repair uses `_deepswe_exact_token_continuity`, keeps DeepSWE and M15
+  token-input ownership mutually exclusive, and adds exact learner and
+  trajectory negative controls for simultaneous admission. P45 and all other
+  neighboring workloads still require the M15 selector absent.
+- Post-fix validation passed: P57 181/181, V1 92/92, flag audit 409/409,
+  syntax, diff hygiene, and a complete pinned-image rerun ending in
+  `V1_HP_EXACT_IMAGE_PASS ... m15_tito_exact=1 ... manifests=3`.
+- Claim boundary: `LOCAL CL READY / HOST PASS / PINNED-IMAGE PASS / REMOTE
+  READBACK REQUIRED / ONEHOST NOT RUN / TARGET NOT RUN`. No render, launch,
+  Kubernetes mutation, TPU use, or optimizer update occurred.

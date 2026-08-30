@@ -27,7 +27,7 @@ in-process held-out evaluation and all checkpoint I/O.
 | V1.P4.12 | Repair the stale G6 checkpoint admission exposed by Attempt 10 | one checkpoint source of truth; legacy-10 and primary-300 positives; wrong identity/cadence negatives; host and immutable-image gates; then fresh target first update | source published by current CL; host and immutable image PASS; target first gradient sink/AdamW not rerun |
 | V1.P4.13 | Repair the missing FrozenLake effective-learning-rate observation exposed by P45 Wave 02 | keep scalar AdamW unchanged; register the same constant only for receipts; pin entrypoint structure; host and P45 immutable-image gates; then fresh target weight sync | source published by current CL; P57 147/147, Phase4 89/89, P45 exact image PASS; post-fix target not run |
 | V1.P4.14 | Admit exact no-eval/no-checkpoint P45+M15 Zero fast concept runs after f45w09 | both manifests fail closed on eval disabled, checkpoint mode disabled, and empty residual fields; host plus immutable-image gates; then two fresh 300-update targets | active; runtime `a8449b3d` published and exactly read back, host/exact-image PASS; TPU target not run |
-| V1.P4.15 | Prove and, only if warranted, repair M15 cross-turn token continuity with TITO while retaining the finite A-B concept lane | observer neutrality and first token-drift receipt; exact-M15 selector with neighboring negatives; host/pinned-image; one-host mechanism; then DP8xTP8 full target | active; T0 observer host+pinned-image PASS, real M15 observation/exact input/target not run |
+| V1.P4.15 | Make exact TITO the signed M15 full default while retaining the finite A-B concept lane | exact-M15 selector in YAML/profile/runtime; prompt-token equality hard gate; neighboring negatives; host/pinned-image; one-host mechanism; then DP8xTP8 full target | active; local CL rebased on `18f29c56`, host and post-rebase pinned-image construction PASS; remote readback/one-host/target not run |
 
 ## Decisions
 
@@ -105,3 +105,9 @@ in-process held-out evaluation and all checkpoint I/O.
   exact-token input path is admitted only after M15 token drift is observed.
   Finite A-B remains warning-only for the concept run; token mismatch, B-C,
   nonfinite, backward, replica, and optimizer faults remain fatal.
+- Decision override (2026-08-30 V1.P4.15): user explicitly selected exact TITO
+  as the default for the signed M15 full recipe before a real M15 verify
+  verdict. This authorizes the model-input change but does not transfer P58
+  certification. P45, GSM8K, Native, IS, eval, diagnostics, and every other
+  topology keep the selector absent; exact token inequality is fatal and the
+  first DP8xTP8 full run is the target gate.

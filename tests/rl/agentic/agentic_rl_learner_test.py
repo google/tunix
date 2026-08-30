@@ -409,8 +409,64 @@ class AgenticRLLearnerTest(parameterized.TestCase):
         agentic_rl_learner.deepswe_debug,
         "deepswe_exact_token_continuity",
         return_value=False,
+    ), mock.patch.object(
+        agentic_rl_learner.token_continuity,
+        "m15_token_continuity_mode",
+        return_value=None,
     ):
-      with self.assertRaisesRegex(ValueError, "restricted to the signed DeepSWE"):
+      with self.assertRaisesRegex(ValueError, "signed DeepSWE or M15"):
+        learner._model_call(
+            [{"role": "user", "content": "ignored"}],
+            prompt_token_ids=[1, 2, 3],
+        )
+    learner.rl_cluster.generate.assert_not_called()
+
+  def test_model_call_routes_signed_m15_pre_tokenized_prompt_exactly(self):
+    learner = object.__new__(DummyLearner)
+    learner.chat_parser = mock.Mock()
+    learner.rl_cluster = mock.Mock()
+    learner.rl_cluster.generate.return_value = mock.sentinel.rollout
+    prompt_ids = np.asarray([151644, 28, 1725], dtype=np.int32)
+
+    with mock.patch.object(
+        agentic_rl_learner.deepswe_debug,
+        "deepswe_exact_token_continuity",
+        return_value=False,
+    ), mock.patch.object(
+        agentic_rl_learner.token_continuity,
+        "m15_token_continuity_mode",
+        return_value="exact",
+    ):
+      result = learner._model_call(
+          [{"role": "user", "content": "ignored"}],
+          prompt_token_ids=prompt_ids,
+      )
+
+    self.assertIs(result, mock.sentinel.rollout)
+    learner.chat_parser.parse.assert_not_called()
+    self.assertEqual(
+        learner.rl_cluster.generate.call_args.kwargs["prompts"],
+        [[151644, 28, 1725]],
+    )
+    self.assertFalse(
+        learner.rl_cluster.generate.call_args.kwargs["apply_chat_template"]
+    )
+
+  def test_model_call_rejects_simultaneous_deepswe_and_m15_admission(self):
+    learner = object.__new__(DummyLearner)
+    learner.chat_parser = mock.Mock()
+    learner.rl_cluster = mock.Mock()
+
+    with mock.patch.object(
+        agentic_rl_learner.deepswe_debug,
+        "deepswe_exact_token_continuity",
+        return_value=True,
+    ), mock.patch.object(
+        agentic_rl_learner.token_continuity,
+        "m15_token_continuity_mode",
+        return_value="exact",
+    ):
+      with self.assertRaisesRegex(ValueError, "mutually exclusive"):
         learner._model_call(
             [{"role": "user", "content": "ignored"}],
             prompt_token_ids=[1, 2, 3],

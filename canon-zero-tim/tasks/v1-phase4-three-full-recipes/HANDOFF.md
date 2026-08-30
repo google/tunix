@@ -1,21 +1,21 @@
 # V1 Phase4 three-full handoff
 
-## START HERE — next P45/M15 full wave must use the P74 system-optimization bundle
+## START HERE — P74 FrozenLake wave: next M15 full defaults to exact TITO
 
 This section is the authoritative launch preparation for the two optimized
 FrozenLake Zero full recipes. It supersedes older P45/M15 render commands in
 this historical handoff, but does not erase their incident evidence.
 
-Status is `M15 A-B WARNING LANE PUBLISHED / HOST PASS / PINNED-IMAGE PASS /
-TARGET NOT RUN`. Runtime commit
-`ae8d4721d74634492f2c722b6fe4236ac5da3d8c` was pushed and independently read
-back from `yuxzhang/canon-zero-tim`. Render only from that exact 40-character
-source or a later explicitly reviewed ledger-only descendant checked out
-clean. Do not render the next wave from the older `a8449b3d...` source or from
-a dirty development worktree.
+Status is `M15 EXACT TITO LOCAL CL READY / HOST PASS / PINNED-IMAGE PASS /
+REMOTE READBACK REQUIRED / ONEHOST NOT RUN / TARGET NOT RUN`.
+Published commit `509d3866b39228ce7df29d4eb3e5394591c69de0`
+contains only the observer and does **not** make M15 use TITO. Do not render an
+M15 full run from that source. The next M15 YAML must come from a later,
+explicitly reviewed and remote-read exact-TITO SHA checked out clean.
 
-Run the exact-image admission and then the render-only wrapper from the
-physical repository root:
+After separate commit/push approval and exact remote read-back, run the
+exact-image admission and then the render-only wrapper from the physical
+repository root:
 
 ```bash
 bash canon-zero-tim/tests/v1_phase4/run_exact_image.sh \
@@ -44,6 +44,22 @@ CANON_DP_FINITE_FETCH=batched-commit
 CANON_P71_SCAN=fwd
 ```
 
+Additionally, the raw and resolved manifests must satisfy this asymmetric
+token-input contract:
+
+```text
+P45: CANON_M15_TOKEN_CONTINUITY absent
+M15: CANON_M15_TOKEN_CONTINUITY=exact
+```
+
+An empty value is not absence. Any P45/GSM8K/Native/IS/eval/diagnostic leak is
+fatal. M15 turn 0 still uses the original prompt to record the serving token
+tail. Every later turn submits the accumulated exact integer IDs directly,
+with no chat-template reapplication. The runtime must return one or more
+`[CANON_M15_TOKEN_CONTINUITY] mode=exact ...
+verdict=TOKEN_STREAM_EQUAL ... first_mismatch=-1` receipts; any verify-mode,
+different, malformed, or missing receipt fails postflight.
+
 `CANON_DP_COLLECTIVE_REDUCE` must remain absent. P74 is source behavior under
 the checked-VMA path, not a flag to add by hand. P45 retains strict Zero.
 M15/main temporarily sets `CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY=1`, but only
@@ -54,12 +70,16 @@ identities. M15 output is `convergence-only / alignment-degraded`, never a
 Zero-TIM pass. Native, IS, diagnostic, legacy resident, and evaluation
 carriers do not inherit this exact-arm policy.
 
-The M15 warning-lane changes are published but have not yet produced target
-evidence. Host admission passed, and pinned image
+The warning lane and observer are published, but exact TITO is not. The fresh
+pinned-image admission on image
 `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`
-exited zero with terminal `V1_HP_EXACT_IMAGE_PASS ... m15_ab_warning=1 ...
-manifests=3`; the terminal is an admission receipt, not a durably saved raw
-log. Launch still requires separate approval. Offline P74 admission is
+exited zero with `V1_HP_EXACT_IMAGE_PASS ... m15_tito_exact=1 ... manifests=3`.
+Its raw console log was not durably saved, so this is an exact-image admission
+receipt rather than a signed evidence artifact. The older
+pinned-image terminal `V1_HP_EXACT_IMAGE_PASS ... m15_token=1 ...` certified
+only observer construction and cannot certify exact input. A fresh complete
+image gate must include `m15_tito_exact=1` after any runtime change. Launch
+still requires separate approval. Offline P74 admission is
 recorded under
 `../v1-system-optimization-workload-rollout/validation.log`. It does not
 certify DP8xTP8 performance or convergence. Each target run must independently
@@ -67,6 +87,12 @@ return its registered alignment policy receipts—strict zero for P45, and zero
 fatal FAIL plus a complete warning count for M15—checked-VMA/P67 receipts, the
 first-update gate, complete `p32_vag_reverse` timing, 300 committed updates,
 and its own final classification.
+
+Return for M15: immutable YAML and manifest index, resolved `env.sh`, complete
+raw log, every token-continuity receipt count, pre-alignment/alignment/update
+reports, full classification JSON, XProf/Perfetto artifacts, and SHA256
+ledger. The claim remains `convergence-only / alignment-degraded` while the
+A-B warning lane is enabled, even if every observed A-B value is zero.
 
 ## START HERE — GSM8K Native/mismatch and Zero full now have matched controls
 

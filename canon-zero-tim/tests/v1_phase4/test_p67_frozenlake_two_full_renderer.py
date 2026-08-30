@@ -118,9 +118,11 @@ class P67FrozenLakeTwoFullRendererTest(unittest.TestCase):
       self.assertEqual(p45["CANON_P57_WORKLOAD_CANDIDATE"], "")
       self.assertEqual(p45["CANON_P57_DATA_SPLIT"], "")
       self.assertEqual(p45["CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY"], "0")
+      self.assertNotIn("CANON_M15_TOKEN_CONTINUITY", p45)
       self.assertEqual(m15["CANON_P57_WORKLOAD_CANDIDATE"], "m15")
       self.assertEqual(m15["CANON_P57_DATA_SPLIT"], "main")
       self.assertEqual(m15["CANON_FROZENLAKE_ALIGNMENT_WARN_ONLY"], "1")
+      self.assertEqual(m15["CANON_M15_TOKEN_CONTINUITY"], "exact")
       index = (root / "manifest-index.json").read_text(encoding="utf-8")
       self.assertIn('"schema": "v1-p67-frozenlake-two-full-v1"', index)
 
@@ -166,6 +168,15 @@ class P67FrozenLakeTwoFullRendererTest(unittest.TestCase):
         self.assertIn("export CANON_DP_FINITE_FETCH=batched-commit", snapshot)
         self.assertIn("export CANON_P71_SCAN=fwd", snapshot)
         self.assertNotIn("CANON_DP_COLLECTIVE_REDUCE", snapshot)
+        if index == 0:
+          self.assertNotIn("CANON_M15_TOKEN_CONTINUITY", snapshot)
+        else:
+          self.assertIn(
+              "export CANON_M15_TOKEN_CONTINUITY=exact", snapshot
+          )
+          self.assertIn(
+              "[env] M15 exact TITO enabled mode=exact", completed.stdout
+          )
 
   def test_wrong_profile_and_partial_scope_are_rejected(self):
     with tempfile.TemporaryDirectory() as tmp:

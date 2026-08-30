@@ -70,6 +70,7 @@ from tunix.rl import rl_cluster as rl_cluster_lib
 from tunix.rl.rollout import base_rollout
 from tunix.rl import utils as rl_utils
 from tunix.rl.agentic import utils as agentic_utils
+from tunix.rl.agentic import token_continuity
 from tunix.rl.agentic.agents import base_agent
 from tunix.rl.agentic.agents import model_agent
 from tunix.rl.agentic.environments import base_environment
@@ -2835,10 +2836,17 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       env.task["policy_version"] = self.policy_version
 
     if prompt_token_ids is not None:
-      if not deepswe_debug.deepswe_exact_token_continuity():
+      deepswe_exact = deepswe_debug.deepswe_exact_token_continuity()
+      m15_exact = token_continuity.m15_token_continuity_mode() == "exact"
+      if deepswe_exact and m15_exact:
         raise ValueError(
-            "pre-tokenized agentic prompts are restricted to the signed "
-            "DeepSWE token-in/token-out admission"
+            "DeepSWE and M15 pre-tokenized prompt admissions are mutually "
+            "exclusive"
+        )
+      if not (deepswe_exact or m15_exact):
+        raise ValueError(
+            "pre-tokenized agentic prompts require a signed DeepSWE or M15 "
+            "exact-token admission"
         )
       exact_prompt = np.asarray(prompt_token_ids)
       if (
@@ -2847,8 +2855,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           or exact_prompt.size == 0
       ):
         raise ValueError(
-            "DeepSWE pre-tokenized agentic prompt must be a nonempty 1-D "
-            "integer array"
+            "pre-tokenized agentic prompt must be a nonempty 1-D integer array"
         )
       prompts = [np.asarray(exact_prompt, dtype=np.int32).tolist()]
       apply_chat_template = False

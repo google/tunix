@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Exact-token reconstruction and observer-only continuity receipts."""
+"""Exact-token reconstruction and M15 continuity receipts."""
 
 import hashlib
 import os
@@ -51,23 +51,14 @@ _M15_VERIFY_IDENTITY = {
 def m15_token_continuity_mode(
     values: Mapping[str, str] | None = None,
 ) -> str | None:
-  """Returns the admitted M15 observer mode, failing closed on drift.
-
-  Exact input is deliberately not admitted here. It changes model input and is
-  reserved until a real M15 verify receipt proves token-stream divergence.
-  """
+  """Returns the admitted M15 continuity mode, failing closed on drift."""
   env = os.environ if values is None else values
   if M15_TOKEN_CONTINUITY_ENV not in env:
     return None
   mode = env[M15_TOKEN_CONTINUITY_ENV]
-  if mode == "exact":
+  if mode not in ("verify", "exact"):
     raise ValueError(
-        "CANON_M15_TOKEN_CONTINUITY=exact is reserved until M15 verify "
-        "evidence admits the numerical input change"
-    )
-  if mode != "verify":
-    raise ValueError(
-        "CANON_M15_TOKEN_CONTINUITY must be absent or exactly 'verify'"
+        "CANON_M15_TOKEN_CONTINUITY must be absent, 'verify', or 'exact'"
     )
   drift = {
       name: (env.get(name), expected)
@@ -80,7 +71,7 @@ def m15_token_continuity_mode(
         for name, (actual, expected) in sorted(drift.items())
     )
     raise ValueError(
-        "M15 token-continuity verify is outside its registered identity: "
+        f"M15 token-continuity {mode} is outside its registered identity: "
         + details
     )
   forbidden_checkpoint_values = "".join(
@@ -95,7 +86,7 @@ def m15_token_continuity_mode(
   )
   if forbidden_checkpoint_values:
     raise ValueError(
-        "M15 token-continuity verify requires the checkpoint-free concept "
+        f"M15 token-continuity {mode} requires the checkpoint-free concept "
         "run identity"
     )
   return mode
@@ -216,8 +207,11 @@ def continuity_receipt(
     expected: Sequence[int] | np.ndarray,
     *,
     turn: int,
+    mode: str = "verify",
 ) -> str:
   """Builds a bounded, token-content-free equality receipt."""
+  if mode not in ("verify", "exact"):
+    raise ValueError(f"unsupported M15 token-continuity mode: {mode!r}")
   actual_tokens = _integer_vector(actual, field="M15 actual prompt tokens")
   expected_tokens = _integer_vector(
       expected, field="M15 expected prompt tokens"
@@ -248,7 +242,7 @@ def continuity_receipt(
   verdict = "TOKEN_STREAM_EQUAL" if equal else "TOKEN_STREAM_DIFFERENT"
   return (
       "[CANON_M15_TOKEN_CONTINUITY] "
-      f"mode=verify turn={turn} verdict={verdict} "
+      f"mode={mode} turn={turn} verdict={verdict} "
       f"actual_tokens={actual_tokens.size} "
       f"expected_tokens={expected_tokens.size} "
       f"actual_sha256={_digest(actual_tokens)} "
@@ -256,3 +250,15 @@ def continuity_receipt(
       f"first_mismatch={first_mismatch} actual_token={actual_token} "
       f"expected_token={expected_token}"
   )
+
+
+def token_streams_equal(
+    actual: Sequence[int] | np.ndarray,
+    expected: Sequence[int] | np.ndarray,
+) -> bool:
+  """Returns exact token-stream equality after validating both operands."""
+  actual_tokens = _integer_vector(actual, field="M15 actual prompt tokens")
+  expected_tokens = _integer_vector(
+      expected, field="M15 expected prompt tokens"
+  )
+  return bool(np.array_equal(actual_tokens, expected_tokens))
