@@ -1,0 +1,28 @@
+[PERF] step=0 stage=rescore_b seconds=111.920 rows=128
+INFO:absl:[CANON_ALIGN] attached host sidecar rows=128 completion_width=16384
+[CANON_ALIGN_PRE_JSON] {"N_action":432921,"action_geometry":{"max_logical_kv_prefix_length":16961,"min_logical_kv_prefix_length":1737,"rows_reaching_1686":119,"valid":true},"admission_policy":{"bounded_ab_only":false,"byte_fraction_limit":0.004,"claim_level":"strict-zero-tim","enabled":false,"id":"gsm8k-full-ab-report-v1","max_abs_limit":0.0001,"stage":"","warning_boundaries":null,"warning_only":false,"workload":""},"all_compact_filtered":false,"blocking_reds":["S_decode_vs_S_prefill"],"boundaries":{"S_decode_vs_S_prefill":{"byte_fraction":0.03833955848757625,"differing_bytes":66392,"differing_elements":30250,"element_fraction":0.069874180277695,"finite":true,"first_mismatch":{"a":-0.00408172607421875,"a_bits":"0xbb85c000","abs_delta":0.001155853271484375,"action_run_end":false,"action_run_start":true,"b":-0.005237579345703125,"b_bits":"0xbbaba000","completion_chunk_index":4,"completion_position":1034,"completion_valid_length":2110,"coordinate":[1,1034],"differing_byte_offsets":[1,2],"distance_to_next_sequence_chunk":175,"logical_kv_prefix_length":2897,"masked_index":2739,"offset_in_action_run":0,"offset_in_sequence_chunk":81,"previous_token_is_environment":true,"prompt_length":1863,"sequence_chunk_index":11,"sequence_row":1,"token_id":785,"turn_index":4,"ulp_distance":2482176,"xor_bits":"0x002e6000"},"max_abs":15.125,"max_abs_mismatch":{"a":0.0,"a_bits":"0x00000000","abs_delta":15.125,"action_run_end":false,"action_run_start":false,"b":-15.125,"b_bits":"0xc1720000","completion_chunk_index":27,"completion_position":7119,"completion_valid_length":11310,"coordinate":[126,7119],"differing_byte_offsets":[2,3],"distance_to_next_sequence_chunk":30,"logical_kv_prefix_length":8930,"masked_index":420438,"offset_in_action_run":242,"offset_in_sequence_chunk":226,"previous_token_is_environment":false,"prompt_length":1811,"sequence_chunk_index":34,"sequence_row":126,"token_id":60,"turn_index":27,"ulp_distance":1097990145,"xor_bits":"0xc1720000"}},"S_prefill_vs_T_old":{"byte_fraction":0.0,"differing_bytes":0,"differing_elements":0,"element_fraction":0.0,"finite":true,"max_abs":0.0}}}
+[CANON_ALIGN_PRE_EVIDENCE] path=/mnt/disks/linchai_data/deepswe_zero_tim/canon-p58-ds4b-zero-hp-full-k04/pre_alignment.jsonl sha256=31daa99c1a27174814fa21e11a6c7189871f8219ac712786da881331b4bd6dc7
+[CANON_ALIGN_PRE] step=0 verdict=FAIL N_action=432921 bounds=[('S_decode_vs_S_prefill', 66392), ('S_prefill_vs_T_old', 0)]
+[rank0]: Traceback (most recent call last):
+[rank0]:   File "/app/examples/deepswe/canonical_entrypoint.py", line 36, in <module>
+[rank0]:     main()
+[rank0]:   File "/app/examples/deepswe/canonical_entrypoint.py", line 32, in main
+[rank0]:     runpy.run_module("examples.deepswe.train_deepswe_nb", run_name="__main__")
+[rank0]:   File "<frozen runpy>", line 229, in run_module
+[rank0]:   File "<frozen runpy>", line 88, in _run_code
+[rank0]:   File "/app/examples/deepswe/train_deepswe_nb.py", line 1841, in <module>
+[rank0]:     agentic_grpo_learner.train(train_dataset=train_dataset)
+[rank0]:   File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 3498, in train
+[rank0]:     train_examples = self._batch_to_train_example(
+[rank0]:                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/rl/agentic/agentic_rl_learner.py", line 2871, in _batch_to_train_example
+[rank0]:     return self._process_results(
+[rank0]:            ^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/rl/agentic/agentic_grpo_learner.py", line 1938, in _process_results
+[rank0]:     precheck_record = alignment.check_pre_backward(
+[rank0]:                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[rank0]:   File "/app/tunix/rl/alignment.py", line 1592, in check_pre_backward
+[rank0]:     raise AlignmentGateError(
+[rank0]: tunix.rl.alignment.AlignmentGateError: pre-backward alignment gate RED: ['S_decode_vs_S_prefill']; report=/mnt/disks/linchai_data/deepswe_zero_tim/canon-p58-ds4b-zero-hp-full-k04/pre_alignment.jsonl
+E0830 04:42:53.028721     826 quick_restart.cc:19] Client 2017971317895971945 has died, and was configured to restart servers if it died. [ServerConfig{ job_info=JobInfo{ name=10638188560162611084 job_instance_id=10638188560162611084 task_index=28 num_tasks=32 addr=canon-p58-ds4b-zero-hp-full-k04-pathways-worker-0-28.canon-p58-ds4b-zero-hp-full-k04:29000 } }]
+F0830 04:42:53.028795     826 quick_restart.cc:40] Client 2017971317895971945 has died, and was configured to restart servers if it died. (Quick-restart requested but unsupported in Cloud/OSS.)
