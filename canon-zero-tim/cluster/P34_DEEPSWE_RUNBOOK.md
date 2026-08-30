@@ -19,6 +19,14 @@ The production configuration and branch provenance are frozen in
 topology with DP16xTP8 replicated parameters and pins every algorithm field
 that would otherwise depend on a Python default.
 
+All admitted DeepSWE profiles use token-in/token-out continuation. The first
+prompt is anchored to the rollout worker's actual token IDs; later requests
+append exact sampled assistant IDs plus each R2E observation encoded once and
+are submitted with `apply_chat_template=False`. Require
+`[DEEPSWE.TITO] ADMISSION_PASS ... retokenize_sampled_tokens=0` before rollout
+and `[DEEPSWE.TITO] CONTINUATION ... sha256=<64-hex>` on exercised later
+turns. Native, Zero, 4B, and 32B do not differ on this transport contract.
+
 This runbook renders manifests only. Do not apply a manifest until the implementation branch is
 committed, pushed, read back at the exact SHA, and the 256-device experiment is approved.
 

@@ -374,7 +374,7 @@ class AgenticRLLearnerTest(parameterized.TestCase):
         [conversation],
     )
 
-  def test_model_call_routes_signed_p58_pre_tokenized_prompt_exactly(self):
+  def test_model_call_routes_signed_deepswe_pre_tokenized_prompt_exactly(self):
     learner = object.__new__(DummyLearner)
     learner.chat_parser = mock.Mock()
     learner.rl_cluster = mock.Mock()
@@ -383,7 +383,7 @@ class AgenticRLLearnerTest(parameterized.TestCase):
 
     with mock.patch.object(
         agentic_rl_learner.deepswe_debug,
-        "q4_tp4_zero_admission",
+        "deepswe_exact_token_continuity",
         return_value=True,
     ):
       result = learner._model_call(
@@ -407,10 +407,10 @@ class AgenticRLLearnerTest(parameterized.TestCase):
     learner.rl_cluster = mock.Mock()
     with mock.patch.object(
         agentic_rl_learner.deepswe_debug,
-        "q4_tp4_zero_admission",
+        "deepswe_exact_token_continuity",
         return_value=False,
     ):
-      with self.assertRaisesRegex(ValueError, "restricted to the signed P58"):
+      with self.assertRaisesRegex(ValueError, "restricted to the signed DeepSWE"):
         learner._model_call(
             [{"role": "user", "content": "ignored"}],
             prompt_token_ids=[1, 2, 3],

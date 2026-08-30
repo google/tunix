@@ -1,5 +1,44 @@
 # P58 DeepSWE native-first training handoff
 
+## START HERE — P58.25 makes TiTO common to every DeepSWE arm
+
+Do not preserve or reintroduce the historical multi-turn text/re-tokenize
+path for Native. DeepSWE is token-in/token-out: Native, Native+IS, Zero,
+Qwen3-32B, diagnostics, and one-host all carry the exact sampled assistant
+token IDs into the next request. R2E environment observations originate as
+text and are encoded once; those IDs are then reused. The continuation request
+must be an integer token list with `apply_chat_template=False`.
+
+The startup log must contain exactly one line matching:
+
+```text
+[DEEPSWE.TITO] ADMISSION_PASS contract=<contract> arm=<arm> mode=token-in-token-out retokenize_sampled_tokens=0
+```
+
+An ordinary P58 training rollout must also contain one or more:
+
+```text
+[DEEPSWE.TITO] CONTINUATION turn=<positive> prompt_tokens=<positive> sha256=<64-hex>
+```
+
+`90_run.sh` rejects a missing/duplicate admission receipt and rejects an
+ordinary P58 run that never exercises a multi-turn continuation. Native and
+Zero are now compared on one identical TiTO transport. Their differences are
+the registered numerical/alignment/IS treatments only.
+
+The source concern was rebased onto exact operator parent
+`509d3866b39228ce7df29d4eb3e5394591c69de0`. Its collector overlap with the
+upstream observer-only M15 token verifier was reconciled by sharing the strict
+reconstruction helper while keeping M15 observer-only and DeepSWE exact input
+separately admitted. Focused host, P34 static, 409/409 flag-audit, and
+post-rebase digest-pinned complete image gates pass. The image gate observed a
+real focused continuation receipt and ended in
+`P58_EXACT_IMAGE_CPU_PASS ... regressions=1`. Use the final remote readback SHA
+that contains P58.25; do not substitute the parent SHA. Real target evidence
+remains pending. Source commit/push was explicitly authorized, but image
+publication, render/apply, and TPU/Kubernetes launch remain separately
+unapproved. See `phases/p58-25-deepswe-tito.md`.
+
 ## K04 START HERE — use JobSet-level exclusive topology
 
 K03 is immutable infrastructure `INCONCLUSIVE`. Kueue admitted the JobSet and

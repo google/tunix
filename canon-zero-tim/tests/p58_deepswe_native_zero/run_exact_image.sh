@@ -182,9 +182,9 @@ $DOCKER run --rm \
     (
       cd tests/rl/agentic
       PYTHONPATH=/workspace python3 -m unittest \
-        trajectory.trajectory_collect_engine_test.TrajectoryCollectEngineTest.test_p58_continuation_reuses_exact_sampled_and_environment_tokens \
-        trajectory.trajectory_collect_engine_test.TrajectoryCollectEngineTest.test_p58_continuation_rejects_missing_environment_tokens \
-        agentic_rl_learner_test.AgenticRLLearnerTest.test_model_call_routes_signed_p58_pre_tokenized_prompt_exactly \
+        trajectory.trajectory_collect_engine_test.TrajectoryCollectEngineTest.test_deepswe_continuation_reuses_exact_sampled_and_environment_tokens \
+        trajectory.trajectory_collect_engine_test.TrajectoryCollectEngineTest.test_deepswe_continuation_rejects_missing_environment_tokens \
+        agentic_rl_learner_test.AgenticRLLearnerTest.test_model_call_routes_signed_deepswe_pre_tokenized_prompt_exactly \
         agentic_rl_learner_test.AgenticRLLearnerTest.test_model_call_rejects_unsigned_pre_tokenized_prompt \
         agentic_rl_learner_test.AgenticRLLearnerTest.test_p38_diagnostic_consumer_admits_p58_seam_localization \
         agentic_rl_learner_test.AgenticRLLearnerTest.test_p38_diagnostic_consumer_admits_p58_q4_continue_kv \

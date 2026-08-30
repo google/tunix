@@ -1840,3 +1840,42 @@
   `trajectory_replay_b2g2=1`, and `regressions=1`.
 - No numerical flag or recipe changed. No commit, push, image publication,
   Kubernetes mutation, Pathways run, or TPU launch occurred.
+
+## 2026-08-30 UTC — P58.25 common DeepSWE TiTO repair
+
+- Re-read the cross-turn data path after the K04 environment-seam residual.
+  The exact sampled/environment token continuation implemented in P58.22 was
+  still admitted only by the special Qwen3-4B TP4 Zero selector. Production
+  DP8xTP8 Native/Zero and other DeepSWE profiles rebuilt later prompts from
+  chat text, permitting decode/re-tokenize drift.
+- Corrected the scope: every `CANON_P34_DEEPSWE=1` profile and every one-host
+  DeepSWE profile now uses the same exact TiTO path. Non-DeepSWE agentic
+  workloads remain off. Native and Zero therefore no longer differ in token
+  transport.
+- Continuations concatenate the rollout worker's actual initial prompt IDs,
+  exact sampled assistant IDs, and once-tokenized environment IDs. The learner
+  passes integer IDs with `apply_chat_template=False`. Missing IDs, noninteger
+  shapes, response-width drift, selector overlap, and prompt-ID overrides fail
+  closed.
+- Added `[DEEPSWE.TITO]` admission and per-continuation SHA-256 receipts plus
+  P58 postflight checks. Updated focused unit names and pinned-image commands.
+- Python/Bash syntax, diff hygiene, one-host selector tests 5/5, and sampler /
+  postflight tests 8/8 pass. The bare-host renderer test is blocked by missing
+  `metrax`, so that invocation is not a PASS. The complete digest-pinned image
+  gate covers the renderer/environment and actual agentic test boundary,
+  observes `[DEEPSWE.TITO] CONTINUATION`, and emits
+  `P58_EXACT_IMAGE_CPU_PASS ... regressions=1`. P34 static passes ten suites;
+  flag audit passes 409/409. P58.25 introduces no new flag name. No target ran.
+- User authorized source commit/push. The single TiTO concern was committed,
+  then rebased onto exact operator parent
+  `509d3866b39228ce7df29d4eb3e5394591c69de0`. The collector overlap with that
+  parent's observer-only M15 token verifier was reconciled by reusing its
+  strict reconstruction helper; M15 remains observer-only, while DeepSWE exact
+  token input is separately admitted.
+- Post-rebase Python/Bash/diff gates, focused selector/sampler tests, P34 static
+  ten-suite gate, and 409/409 flag audit pass. The complete digest-pinned image
+  gate was rerun after the rebase and again emitted
+  `P58_EXACT_IMAGE_CPU_PASS ... regressions=1`.
+- Publication uses the final remote readback SHA containing this entry. `main`
+  is untouched. No image publication, Kubernetes mutation, TPU launch, model
+  download, or credential change occurred.

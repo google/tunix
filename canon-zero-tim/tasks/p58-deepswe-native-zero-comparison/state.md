@@ -1,5 +1,37 @@
 # State
 
+## P58.25 DeepSWE token-in/token-out continuity (2026-08-30)
+
+- DeepSWE continuation is now treated as TiTO for every admitted DeepSWE
+  profile, including Native, Native+IS, Zero, Qwen3-32B, diagnostics, and
+  one-host. It is a common transport invariant and no longer a TP4-Zero-only
+  intervention.
+- Later turns concatenate the rollout worker's actual initial prompt IDs,
+  exact sampled assistant IDs, and once-tokenized R2E environment IDs. The
+  integer prompt is sent with `apply_chat_template=False`; sampled assistant
+  text is never re-tokenized.
+- Native and Zero therefore differ only in their registered numerical /
+  algorithm bundles, not token transport. Non-DeepSWE agentic workloads keep
+  their previous path.
+- Startup and each real continuation emit `[DEEPSWE.TITO]` receipts.
+  P58 postflight requires exactly one admission receipt and, for ordinary
+  training, at least one multi-turn continuation receipt.
+- Host syntax, selector, one-host, sampler, and postflight contracts pass.
+  The full renderer test is unavailable on the bare host because `metrax` is
+  absent, but the digest-pinned complete image gate passes and emits
+  `P58_EXACT_IMAGE_CPU_PASS ... regressions=1`; it observes a real focused
+  `[DEEPSWE.TITO] CONTINUATION` receipt. P34 static passes ten suites and the
+  flag audit passes 409/409. No target has run.
+- User authorized this source commit and operator-branch push. The TiTO concern
+  was rebased onto exact operator parent
+  `509d3866b39228ce7df29d4eb3e5394591c69de0`. Its collector overlap with the
+  upstream observer-only M15 token verifier was reconciled by sharing the
+  strict reconstruction helper while keeping M15 observer-only and DeepSWE
+  exact input separately admitted. Post-rebase focused, P34 static,
+  flag-audit, and digest-pinned complete gates pass. Executors must use the
+  final remote readback SHA that contains this phase. `main` remains untouched;
+  no image publication, Kubernetes mutation, or TPU launch occurred.
+
 ## P58.24 K03 JobSet exclusive-topology repair (2026-08-30)
 
 - Operator tip `ae1e92f7660eb0ad73b20b47b8a4d7703aaea57c` preserves the K03

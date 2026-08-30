@@ -699,6 +699,16 @@ if P34_DEEPSWE:
       if p58_tim
       else "native-raw"
   )
+  deepswe_tito = deepswe_debug.deepswe_exact_token_continuity(os.environ)
+  if not deepswe_tito:
+    raise ValueError("admitted DeepSWE workloads require token-in/token-out")
+  print(
+      "[DEEPSWE.TITO] ADMISSION_PASS "
+      f"contract={p34.contract_name} "
+      f"arm={os.environ.get('CANON_P58_TIM_ARM', 'none')} "
+      "mode=token-in-token-out retokenize_sampled_tokens=0",
+      flush=True,
+  )
   p58_vma_diagnostic = os.environ.get(
       "CANON_P58_CHECKED_VMA_DIAGNOSTIC", ""
   )
@@ -848,6 +858,13 @@ if (
 P58_ONEHOST_XPROF_ARM = ""
 P58_ONEHOST_SEAM_PROBE = False
 if ONEHOST_SMOKE:
+  if not deepswe_debug.deepswe_exact_token_continuity(os.environ):
+    raise ValueError("one-host DeepSWE requires token-in/token-out")
+  print(
+      "[DEEPSWE.TITO] ADMISSION_PASS contract=onehost "
+      "arm=none mode=token-in-token-out retokenize_sampled_tokens=0",
+      flush=True,
+  )
   stage = os.environ.get("CANON_DEEPSWE_ONEHOST_STAGE", "")
   if stage not in ("rollout-only", "backward-no-commit", "one-update"):
     raise ValueError(

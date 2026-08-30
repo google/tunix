@@ -185,6 +185,23 @@ class OnehostXprofTest(unittest.TestCase):
           {**self._env("native"), "CANON_P58_ONEHOST_XPROF_ARM": "other"}
       )
     self.assertFalse(deepswe_debug.onehost_seam_probe(self._env("zero-hp")))
+    self.assertFalse(deepswe_debug.deepswe_exact_token_continuity({}))
+    self.assertTrue(
+        deepswe_debug.deepswe_exact_token_continuity(self._env("native"))
+    )
+    self.assertTrue(deepswe_debug.deepswe_exact_token_continuity({
+        "CANON_P34_DEEPSWE": "1",
+    }))
+    for invalid in (
+        {"CANON_P34_DEEPSWE": "invalid"},
+        {"CANON_DEEPSWE_ONEHOST_SMOKE": "invalid"},
+        {
+            "CANON_P34_DEEPSWE": "1",
+            "CANON_DEEPSWE_ONEHOST_SMOKE": "1",
+        },
+    ):
+      with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+        deepswe_debug.deepswe_exact_token_continuity(invalid)
     self.assertTrue(deepswe_debug.onehost_seam_probe({
         **self._env("zero-hp"),
         "CANON_P58_ONEHOST_SEAM_PROBE": "1",

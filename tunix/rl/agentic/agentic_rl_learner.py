@@ -2835,10 +2835,10 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
       env.task["policy_version"] = self.policy_version
 
     if prompt_token_ids is not None:
-      if not deepswe_debug.q4_tp4_zero_admission():
+      if not deepswe_debug.deepswe_exact_token_continuity():
         raise ValueError(
             "pre-tokenized agentic prompts are restricted to the signed "
-            "P58 Qwen3-4B TP4 Zero admission"
+            "DeepSWE token-in/token-out admission"
         )
       exact_prompt = np.asarray(prompt_token_ids)
       if (
@@ -2847,7 +2847,7 @@ class AgenticRLLearner(abc.ABC, Generic[TConfig]):
           or exact_prompt.size == 0
       ):
         raise ValueError(
-            "P58 pre-tokenized agentic prompt must be a nonempty 1-D "
+            "DeepSWE pre-tokenized agentic prompt must be a nonempty 1-D "
             "integer array"
         )
       prompts = [np.asarray(exact_prompt, dtype=np.int32).tolist()]

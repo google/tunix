@@ -3,6 +3,21 @@
 This file does not authorize execution. Commit/push, direct-host runs, image
 publication, Kubernetes apply, and 128-chip launch are separate approvals.
 
+## Common TiTO preflight
+
+Every DeepSWE arm is token-in/token-out. Native is not a legacy
+re-tokenization control. Before accepting a run, require exactly one
+`[DEEPSWE.TITO] ADMISSION_PASS` receipt with
+`mode=token-in-token-out retokenize_sampled_tokens=0`. For an ordinary P58
+training run, require at least one `[DEEPSWE.TITO] CONTINUATION` receipt with a
+positive turn, positive prompt-token count, and SHA-256.
+
+The continuation prompt must reuse sampled assistant token IDs exactly and
+encode each new R2E observation once. It must reach rollout as token IDs with
+`apply_chat_template=False`. Missing IDs, shape/dtype drift, width drift, or a
+caller-supplied token override is a hard error. Decoded text remains legal for
+action parsing only; it must not become the source of later model prompt IDs.
+
 ## P58.6 matched one-host XProf pair
 
 Run both arms serially on the same direct-attached four-chip host from one

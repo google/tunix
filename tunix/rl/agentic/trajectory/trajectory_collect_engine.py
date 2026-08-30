@@ -108,16 +108,18 @@ class TrajectoryCollectEngine:
     self.model_call = model_call
     self.final_reward_fn = None
     self.model_call_kwargs = model_call_kwargs or {}
-    self._p58_exact_token_continuity = deepswe_debug.q4_tp4_zero_admission()
+    self._deepswe_exact_token_continuity = (
+        deepswe_debug.deepswe_exact_token_continuity()
+    )
     self._m15_token_continuity_mode = (
         token_continuity.m15_token_continuity_mode()
     )
     if (
-        self._p58_exact_token_continuity
+        self._deepswe_exact_token_continuity
         and "prompt_token_ids" in self.model_call_kwargs
     ):
       raise ValueError(
-          "P58 exact token continuity owns prompt_token_ids; refusing a "
+          "DeepSWE exact token continuity owns prompt_token_ids; refusing a "
           "caller-supplied override"
       )
     if (
@@ -656,14 +658,14 @@ class TrajectoryCollectEngine:
         tags[perf_constants.STEP] = policy_version
     return tags
 
-  def _p58_continuation_prompt_token_ids(self) -> np.ndarray:
+  def _deepswe_continuation_prompt_token_ids(self) -> np.ndarray:
     """Reconstructs the exact token stream sampled across completed turns."""
-    if not self._p58_exact_token_continuity:
-      raise RuntimeError("P58 exact token continuity is not enabled")
+    if not self._deepswe_exact_token_continuity:
+      raise RuntimeError("DeepSWE exact token continuity is not enabled")
     return token_continuity.reconstruct_continuation_prompt_tokens(
         self.agent.trajectory,
         self._response_token_count,
-        contract="P58",
+        contract="DeepSWE",
     )
 
   def _check_and_set_context_limit_reached(self) -> bool:
@@ -712,14 +714,17 @@ class TrajectoryCollectEngine:
         abort_margin = min(5.0, max(0.1, model_timeout * 0.01))
         request_timeout = max(0.001, model_timeout - abort_margin)
         continuity_kwargs = {}
-        if self._p58_exact_token_continuity and self.agent.trajectory.steps:
-          prompt_token_ids = self._p58_continuation_prompt_token_ids()
+        if (
+            self._deepswe_exact_token_continuity
+            and self.agent.trajectory.steps
+        ):
+          prompt_token_ids = self._deepswe_continuation_prompt_token_ids()
           continuity_kwargs["prompt_token_ids"] = prompt_token_ids
           digest = hashlib.sha256(
               np.ascontiguousarray(prompt_token_ids).tobytes()
           ).hexdigest()
           print(
-              "[P58.TOKEN_CONTINUITY] "
+              "[DEEPSWE.TITO] CONTINUATION "
               f"turn={len(self.agent.trajectory.steps)} "
               f"prompt_tokens={prompt_token_ids.size} sha256={digest}",
               flush=True,

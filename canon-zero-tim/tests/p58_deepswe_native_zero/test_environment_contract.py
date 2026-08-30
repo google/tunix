@@ -28,6 +28,14 @@ if CONTRACT_SPEC is None or CONTRACT_SPEC.loader is None:
 deepswe_contract = importlib.util.module_from_spec(CONTRACT_SPEC)
 sys.modules[CONTRACT_SPEC.name] = deepswe_contract
 CONTRACT_SPEC.loader.exec_module(deepswe_contract)
+DEBUG_SPEC = importlib.util.spec_from_file_location(
+    "p58_deepswe_debug", ROOT / "tunix/rl/deepswe_debug.py"
+)
+if DEBUG_SPEC is None or DEBUG_SPEC.loader is None:
+  raise RuntimeError("cannot import DeepSWE debug contract")
+deepswe_debug = importlib.util.module_from_spec(DEBUG_SPEC)
+sys.modules[DEBUG_SPEC.name] = deepswe_debug
+DEBUG_SPEC.loader.exec_module(deepswe_debug)
 ALIGNMENT_SPEC = importlib.util.spec_from_file_location(
     "p58_environment_alignment", ROOT / "tunix/rl/alignment.py"
 )
@@ -240,6 +248,7 @@ class P58EnvironmentContractTest(unittest.TestCase):
     self.assertEqual(values["HF_TOKEN"], "test-hf-runtime-token")
     self.assertEqual(values["WANDB_API_KEY"], "test-wandb-runtime-key")
     deepswe_contract.validate_environment(values)
+    self.assertTrue(deepswe_debug.deepswe_exact_token_continuity(values))
 
   def test_zero_renderer_environment_survives_authoritative_reload(self):
     _, resolved, values = self._persisted("zero", "three-update")
@@ -249,6 +258,7 @@ class P58EnvironmentContractTest(unittest.TestCase):
     self.assertEqual(values["HF_TOKEN"], "test-hf-runtime-token")
     self.assertEqual(values["WANDB_API_KEY"], "test-wandb-runtime-key")
     deepswe_contract.validate_environment(values)
+    self.assertTrue(deepswe_debug.deepswe_exact_token_continuity(values))
 
   def test_native_is_renderer_environment_survives_authoritative_reload(self):
     completed, resolved, values = self._persisted(
@@ -261,6 +271,7 @@ class P58EnvironmentContractTest(unittest.TestCase):
         deepswe_contract.p58_sampler_recipe(values), "native-is"
     )
     deepswe_contract.validate_environment(values)
+    self.assertTrue(deepswe_debug.deepswe_exact_token_continuity(values))
 
   def test_native_rejects_partial_sampler_tuple(self):
     values = self._resolved("native", "full", sampler_is=True)
@@ -296,6 +307,7 @@ class P58EnvironmentContractTest(unittest.TestCase):
     self.assertNotIn("CANON_DP_COLLECTIVE_REDUCE", values)
     self.assertNotIn("CANON_DP_COLLECTIVE_REDUCE", resolved)
     deepswe_contract.validate_environment(values)
+    self.assertTrue(deepswe_debug.deepswe_exact_token_continuity(values))
 
   def test_zero_hp_partial_bundle_is_rejected_by_python_contract(self):
     _, _, values = self._persisted(

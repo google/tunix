@@ -86,6 +86,17 @@ class P58SamplerRecipeTest(unittest.TestCase):
     self.assertIn("P58 fixed-seed marker contract failed", postflight)
     self.assertIn("P58 native-raw recipe marker contract failed", postflight)
     self.assertIn("P58 native-is recipe marker contract failed", postflight)
+    self.assertIn("n_deepswe_tito_admission", postflight)
+    self.assertIn("n_deepswe_tito_continuation", postflight)
+    self.assertIn("DeepSWE TiTO admission receipt contract failed", postflight)
+    self.assertIn("P58 did not exercise a multi-turn TiTO continuation", postflight)
+
+  def test_deepswe_tito_is_common_to_native_and_zero(self):
+    script = (ROOT / "examples/deepswe/train_deepswe_nb.py").read_text()
+    self.assertIn("deepswe_exact_token_continuity", script)
+    self.assertIn("[DEEPSWE.TITO] ADMISSION_PASS", script)
+    self.assertIn("mode=token-in-token-out retokenize_sampled_tokens=0", script)
+    self.assertNotIn("legacy-text-control", script)
 
   def test_native_raw_contract(self):
     recipe = recipe_kind(env("1", "1"))

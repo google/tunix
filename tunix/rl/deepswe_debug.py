@@ -331,6 +331,30 @@ def q4_tp4_zero_admission(
   return True
 
 
+def deepswe_exact_token_continuity(
+    values: Mapping[str, str] | None = None,
+) -> bool:
+  """Selects token-in/token-out for every admitted DeepSWE workload.
+
+  Exact continuation tokens are a DeepSWE transport invariant, not a
+  Zero-TIM treatment.  The environment observation is tokenized once because
+  R2E-Gym returns text, while sampled assistant token IDs are carried forward
+  unchanged.  Non-DeepSWE agentic workloads retain their existing path.
+  """
+  environ = os.environ if values is None else values
+  p34_raw = environ.get("CANON_P34_DEEPSWE", "0")
+  onehost_raw = environ.get("CANON_DEEPSWE_ONEHOST_SMOKE", "0")
+  if p34_raw not in ("0", "1"):
+    raise ValueError("CANON_P34_DEEPSWE must be exactly 0 or 1")
+  if onehost_raw not in ("0", "1"):
+    raise ValueError(
+        "CANON_DEEPSWE_ONEHOST_SMOKE must be exactly 0 or 1"
+    )
+  if p34_raw == "1" and onehost_raw == "1":
+    raise ValueError("DeepSWE production and one-host modes cannot overlap")
+  return p34_raw == "1" or onehost_raw == "1"
+
+
 def q4_tp4_seam_diagnostic(
     values: Mapping[str, str] | None = None,
 ) -> str:

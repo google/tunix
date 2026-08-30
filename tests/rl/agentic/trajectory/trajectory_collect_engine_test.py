@@ -354,7 +354,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     )
 
   @mock.patch.object(utils, 'tokenize_and_generate_masks')
-  def test_p58_continuation_reuses_exact_sampled_and_environment_tokens(
+  def test_deepswe_continuation_reuses_exact_sampled_and_environment_tokens(
       self, mock_convert
   ):
     mock_convert.side_effect = [
@@ -363,7 +363,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     ]
     with mock.patch.object(
         trajectory_collect_engine.deepswe_debug,
-        'q4_tp4_zero_admission',
+        'deepswe_exact_token_continuity',
         return_value=True,
     ):
       engine = trajectory_collect_engine.TrajectoryCollectEngine(
@@ -383,10 +383,10 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
         np.asarray([101, 201, 202, 301, 302], dtype=np.int32),
     )
 
-  def test_p58_continuation_rejects_missing_environment_tokens(self):
+  def test_deepswe_continuation_rejects_missing_environment_tokens(self):
     with mock.patch.object(
         trajectory_collect_engine.deepswe_debug,
-        'q4_tp4_zero_admission',
+        'deepswe_exact_token_continuity',
         return_value=True,
     ):
       engine = trajectory_collect_engine.TrajectoryCollectEngine(
@@ -405,7 +405,7 @@ class TrajectoryCollectEngineTest(absltest.TestCase):
     )
     engine._response_token_count = 1
     with self.assertRaisesRegex(ValueError, 'has no environment tokens'):
-      engine._p58_continuation_prompt_token_ids()
+      engine._deepswe_continuation_prompt_token_ids()
 
   @mock.patch.object(utils, 'tokenize_and_generate_masks')
   def test_m15_verify_observes_drift_without_replacing_text_prompt(
