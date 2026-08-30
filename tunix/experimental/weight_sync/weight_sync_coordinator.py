@@ -125,11 +125,12 @@ import asyncio
 import dataclasses
 import enum
 import functools
-import logging
 import os
 import threading
+import time
 from typing import Any, Optional, Sequence
 
+from absl import logging
 from tunix.experimental.common import datatypes
 from tunix.experimental.orchestrator import worker_registry
 from tunix.experimental.weight_sync import weight_sync
@@ -871,9 +872,12 @@ class WeightSyncCoordinator:
       )
 
     self._in_flight = True
+    start_time = time.monotonic()
     try:
       return await self._run_round(policy_version, extra_config)
     finally:
+      elapsed_time = time.monotonic() - start_time
+      logging.info("Weight sync finished in %.2f seconds.", elapsed_time)
       self._in_flight = False
 
   async def _run_round(
