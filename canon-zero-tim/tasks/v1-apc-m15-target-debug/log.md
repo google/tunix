@@ -1,5 +1,21 @@
 # Log
 
+## 2026-08-30 UTC — Phase E0r Attempt-18 GCS read-only recovery audit and live training monitoring
+
+- Pulled and synchronized with latest published commit `07a427612bf34c1910436cecb3d4deafdaa71015` ("Reject unproven M15 E0 return provenance.").
+- Verified local test suites:
+  - Return reviewer unit tests (`test_review_m15_attempt18_e0_return.py`): 14/14 PASS.
+  - Full task discovery test suite: 187/187 PASS.
+- Executed read-only GCS recovery audit using preserved `e01` render contract (`/tmp/m15-e0-kv-e01`, 4/4 verified) via `run_m15_attempt18_e0_return_recovery.sh`.
+- Audit finding:
+  - Cluster Attempt-18 GCS attempt-0 roots contain per-round archives (`rounds/000000/ROUND_ARCHIVE.tar`, `ROUND_COMPLETE.json`, `SHA256SUMS`), but lack root-level terminal collection files (`COLLECTED.json`, `COMPLETE.json`, `kv-observer-classification.json`).
+  - Result: `[M15.E0.RECOVERY] INCONCLUSIVE official_return_exit=3` (`arm=off missing=COLLECTED.json`).
+  - Decision Table outcome: `INCONCLUSIVE`; scratch preserved at `/tmp/m15-e0-kv-return.*`; no target rerun without explicit approval.
+- Cluster training monitoring (Wave 18):
+  - FrozenLake P45 Zero-TIM Full: Step 73/300 (24.3%), Solve rate 61.7%, step time ~2.9m (backward 1.5s).
+  - FrozenLake M15 Zero-TIM Full: Step 29/300 (9.7%), Solve rate 36.3%, step time ~7.0m (backward 1.7s).
+- Numerical scope: no A/B/C, APC read, RoPE, RPA/attention, KV, production flag, backward, or optimizer behavior changed. Numerical repair remains unauthorized.
+
 ## 2026-08-29 UTC — 971bb228 E0 return rejected; provenance hardening HOST PASS
 
 - Pulled and reviewed published commit
