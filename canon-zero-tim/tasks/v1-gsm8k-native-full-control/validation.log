@@ -106,3 +106,29 @@ FINAL HYGIENE
 
 Command: git diff --check
 Result: PASS, exit 0 after the final ledger edits.
+
+ATTEMPT 03 EXPLICIT SPLASH RECOVERY — 2026-08-30 UTC
+
+Repair base: 2af1197f4d0bb604d7c423f703251fc5187b4594
+Immutable failed target source: 0b62b6bbd3d9fa44268c7640047d4b60047cb4d5
+
+Negative control: forced eight-device CPU, real Splash kernel-mask leaf,
+replicated input versus `shard_map.in_specs=P('model', ...)`.
+Result: PASS as a negative, reproducing the target error text before model
+math. The same leaf passes after Explicit-only reshard and remains
+byte-identical; Auto meshes retain the original kernel object.
+
+First pinned-image invocation: REJECTED as a test-harness assertion error.
+The test compared `P('model', None)` with JAX's equivalent rank-normalized
+`P('model', None, None)`. The product placement was the intended normalized
+spec; no product code changed in response.
+
+Command: bash canon-zero-tim/tests/v1_gsm8k_native_full/run_exact_image.sh
+  sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a
+Final result: PASS, exit 0.
+Receipt: V1_GSM8K_NATIVE_FULL_EXACT_IMAGE_PASS native_contract=10
+  qwen_sharding=9 zero_neighbor=1
+
+Claim: ATTEMPT 03 REPAIR IMPLEMENTED / PINNED-IMAGE PASS / TARGET NOT RUN.
+Not run: post-fix DP16xTP4 TPU target, real optimizer commit, convergence,
+performance/XProf, image publication, or Kubernetes mutation.

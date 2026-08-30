@@ -49,10 +49,6 @@ class QwenDPShardingTest(absltest.TestCase):
           model.ShardingConfig.get_data_parallel_sharding(axis)
 
 
-if __name__ == '__main__':
-  absltest.main()
-
-
 class EmbedderGatherOutShardingTest(absltest.TestCase):
   """The embedder gather must name its output sharding on a DP x TP mesh.
 
@@ -169,3 +165,123 @@ class ExplicitAxisShardTest(absltest.TestCase):
       # Clearing is the documented way back to no bound mesh; passing the
       # abstract mesh that get_abstract_mesh returns is rejected.
       jax.sharding.set_mesh(None)
+
+
+class ExplicitSplashKernelShardingTest(absltest.TestCase):
+  """Splash kernel inputs must already match shard_map on Explicit meshes."""
+
+  def _mesh(self, *, explicit: bool):
+    import jax  # pylint: disable=g-import-not-at-top
+    import jax.sharding as shd  # pylint: disable=g-import-not-at-top
+
+    devices = jax.devices()
+    if len(devices) < 8:
+      self.skipTest(
+          'needs 8 devices; run with '
+          'XLA_FLAGS=--xla_force_host_platform_device_count=8'
+      )
+    kwargs = {}
+    if explicit:
+      kwargs['axis_types'] = (shd.AxisType.Explicit,) * 2
+    return shd.Mesh(
+        np.asarray(devices[:8]).reshape(2, 4),
+        ('data', 'model'),
+        **kwargs,
+    )
+
+  def _kernel_and_specs(self, mesh):
+    from jax.experimental.pallas.ops.tpu.splash_attention import (
+        splash_attention_kernel as splash,  # pylint: disable=g-import-not-at-top,g-importing-member
+    )
+    from jax.experimental.pallas.ops.tpu.splash_attention import (
+        splash_attention_mask as mask_lib,  # pylint: disable=g-import-not-at-top,g-importing-member
+    )
+    import jax.sharding as shd  # pylint: disable=g-import-not-at-top
+
+    causal_mask = mask_lib.CausalMask((128, 128))
+    multi_head_mask = mask_lib.MultiHeadMask([causal_mask for _ in range(4)])
+    block_sizes = splash.BlockSizes(
+        block_q=128,
+        block_kv=128,
+        block_q_dkv=128,
+        block_kv_dkv=128,
+        block_kv_dkv_compute=128,
+        block_q_dq=128,
+        block_kv_dq=128,
+    )
+    kernel = splash.make_splash_mha(
+        multi_head_mask,
+        block_sizes=block_sizes,
+        head_shards=4,
+        q_seq_shards=1,
+    )
+    specs = kernel.manual_sharding_spec(
+        shd.NamedSharding(mesh, shd.PartitionSpec('model', None))
+    )
+    return kernel, specs
+
+  def test_real_kernel_negative_and_explicit_reshard(self):
+    import jax  # pylint: disable=g-import-not-at-top
+    import jax.sharding as shd  # pylint: disable=g-import-not-at-top
+    from jax.experimental.shard_map import shard_map  # pylint: disable=g-import-not-at-top,g-importing-member
+
+    mesh = self._mesh(explicit=True)
+    kernel, specs = self._kernel_and_specs(mesh)
+    def is_spec(value):
+      return isinstance(value, shd.PartitionSpec)
+
+    kernel_leaves = jax.tree_util.tree_leaves(kernel)
+    spec_leaves = jax.tree_util.tree_leaves(specs, is_leaf=is_spec)
+    self.assertLen(kernel_leaves, len(spec_leaves))
+    self.assertGreater(len(kernel_leaves), 0)
+
+    # Reproduce the production admission failure with a real Splash mask leaf:
+    # its value is replicated while shard_map expects a model-sharded input.
+    first = jax.device_put(
+        kernel_leaves[0], shd.NamedSharding(mesh, shd.PartitionSpec())
+    )
+    first_spec = spec_leaves[0]
+    identity = shard_map(
+        lambda value: value,
+        mesh=mesh,
+        in_specs=first_spec,
+        out_specs=first_spec,
+        check_rep=False,
+    )
+    jax.sharding.set_mesh(mesh)
+    try:
+      with self.assertRaisesRegex(ValueError, 'does not match the specs'):
+        identity(first)
+
+      placed = model._reshard_splash_kernel_for_explicit_mesh(
+          kernel, specs, mesh
+      )
+      placed_leaves = jax.tree_util.tree_leaves(placed)
+      for before, after, spec in zip(
+          kernel_leaves, placed_leaves, spec_leaves, strict=True
+      ):
+        expected_spec = shd.PartitionSpec(
+            *tuple(spec), *(None,) * (after.ndim - len(spec))
+        )
+        self.assertEqual(after.sharding.spec, expected_spec)
+        np.testing.assert_array_equal(np.asarray(after), np.asarray(before))
+
+      # The formerly rejected real leaf now satisfies the exact same map.
+      np.testing.assert_array_equal(
+          np.asarray(identity(placed_leaves[0])),
+          np.asarray(kernel_leaves[0]),
+      )
+    finally:
+      jax.sharding.set_mesh(None)
+
+  def test_auto_mesh_keeps_the_historical_kernel_object(self):
+    mesh = self._mesh(explicit=False)
+    kernel, specs = self._kernel_and_specs(mesh)
+    self.assertIs(
+        model._reshard_splash_kernel_for_explicit_mesh(kernel, specs, mesh),
+        kernel,
+    )
+
+
+if __name__ == '__main__':
+  absltest.main()

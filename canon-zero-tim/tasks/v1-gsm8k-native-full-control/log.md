@@ -99,3 +99,30 @@
   clean-worktree path remains unrun. No Kubernetes server dry-run/apply,
   TPU target training, target XProf/performance, convergence, W&B comparison,
   commit, push, or image publication occurred.
+
+## 2026-08-30 — Attempt 03 Splash input-layout repair implemented
+
+- Fast-forwarded the clean task worktree to published source
+  `2af1197f4d0bb604d7c423f703251fc5187b4594` and evaluated the immutable
+  Attempt 03 report and raw error. The first failing boundary is the learner's
+  Qwen3 Splash `shard_map` admission: a replicated `int8[4,8,8]` kernel-mask
+  leaf does not match the declared TP input `P('model', None, None)`. No model
+  math or optimizer update ran in that attempt.
+- Added an Explicit-mesh-only helper that maps the real Splash kernel pytree
+  to the `manual_sharding_spec` it already declares. Auto meshes return the
+  original kernel object, so their historical program is untouched. No loss,
+  attention math, precision, gradient, optimizer, profile, renderer, YAML, or
+  Zero selector changed.
+- Added a forced eight-device CPU gate using a real Splash kernel leaf. The
+  negative reproduces the production `in_specs ... does not match` error; the
+  repaired leaf passes the same `shard_map`, every kernel leaf has the
+  normalized intended spec, and all values are byte-identical. The Auto-mesh
+  negative proves object identity.
+- The first pinned-image run stopped on a test-only assertion that compared
+  equivalent short and rank-normalized `PartitionSpec` spellings. The product
+  helper had already produced the intended normalized placement. The assertion
+  was corrected to compare normalized specs, then the complete gate passed:
+  Native 10/10, Qwen sharding 9/9, Zero neighbor 1/1.
+- This establishes `PINNED-IMAGE PASS`, not target success. This entry ships
+  with the repair CL; no post-fix TPU run, optimizer commit, image publication,
+  or Kubernetes mutation occurred during validation.

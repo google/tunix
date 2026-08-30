@@ -347,6 +347,32 @@ def _mesh_has_explicit_axes(mesh) -> bool:
   return any(axis_type is explicit for axis_type in axis_types)
 
 
+def _reshard_splash_kernel_for_explicit_mesh(kernel, kernel_spec, mesh):
+  """Makes Splash's array leaves match its shard_map input specs.
+
+  ``manual_sharding_spec`` describes the layout expected by Splash's
+  ``shard_map``, but it does not place the kernel arrays in that layout.  Auto
+  meshes can insert the required reshard implicitly.  Explicit meshes carry
+  sharding in their input types and therefore require the actual arguments to
+  match ``in_specs`` before the map is admitted.
+
+  Keep the historical Auto-mesh program untouched.  On an Explicit mesh,
+  reshard each dynamic kernel leaf according to the matching PartitionSpec;
+  this changes placement only, not the kernel values.
+  """
+  if not _mesh_has_explicit_axes(mesh):
+    return kernel
+
+  return jax.tree_util.tree_map(
+      lambda value, spec: jax.sharding.reshard(
+          value, shd.NamedSharding(mesh, spec)
+      ),
+      kernel,
+      kernel_spec,
+      is_leaf=lambda value: isinstance(value, shd.PartitionSpec),
+  )
+
+
 def shard(x: jnp.ndarray, s: Tuple[str, ...]):
   mesh = pxla.thread_resources.env.physical_mesh
   if mesh.empty or jax.devices()[0].platform == 'cpu':
@@ -643,6 +669,9 @@ class Attention(nnx.Module):
       unsharded_seq = P(shd_b, shd_n, None, shd_h)
       kernel_spec = splash_attn_kernel.manual_sharding_spec(
           shd.NamedSharding(mesh, P(shd_n, shd_t))
+      )
+      splash_attn_kernel = _reshard_splash_kernel_for_explicit_mesh(
+          splash_attn_kernel, kernel_spec, mesh
       )
 
       # Per-position segment ids let splash suppress cross-segment attention

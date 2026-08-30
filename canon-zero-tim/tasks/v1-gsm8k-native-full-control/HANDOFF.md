@@ -2,11 +2,21 @@
 
 ## START HERE — prepare a matched DP16xTP4 full comparison
 
-Status is `OFFLINE COMPLETE / PINNED-IMAGE CPU PASS / SOURCE NOT COMMITTED /
-TARGET NOT RUN`. This task prepares one stock Native/mismatch control;
-it does not launch it. Commit, push, and Kubernetes/TPU launch each require
-their own explicit user approval. Render only from a clean checkout of the
-exact approved, published 40-character SHA.
+Status is `ATTEMPT 03 REPAIR IMPLEMENTED / PINNED-IMAGE PASS /
+SOURCE CL READY / TARGET NOT RUN`. This task prepares one stock
+Native/mismatch control; it does not launch it. Commit, push, and
+Kubernetes/TPU launch each require their own explicit user approval. Render
+only from a clean checkout of the exact approved, published 40-character SHA.
+
+The latest immutable failure is Attempt 03 at source `0b62b6bb`: the learner
+reached real Qwen3 Splash Attention, where an Explicit DPxTP mesh rejected a
+replicated kernel-mask leaf against `shard_map.in_specs=P('model', ...)` before
+executing model math. On repair base `2af1197f`, the current source CL
+reshards the real Splash kernel pytree to its existing
+`manual_sharding_spec`, only when the mesh has Explicit axes. Auto-mesh
+programs are unchanged. The pinned production image passes the exact failing
+negative, repaired positive, value-equality control, and adjacent Zero
+renderer. A fresh target run is still required.
 
 The comparison uses one W&B project and group for both arms:
 
@@ -169,13 +179,19 @@ as matched-configuration controls, not guaranteed bitwise paired rollouts.
 
 ## Offline verification status
 
-The host task suite passed nine tests with one pinned-image-only skip; the
-pinned image passed all ten Native contracts plus one Zero neighbor. The
-FrozenLake and DeepSWE pinned-image gates passed, the existing GSM8K XProf
-contract passed 25/25, and an aggregate render returned
-`FOUR_CARRIER_RENDER_PASS manifests=4 optimized_zero=3 stock_native=1`.
-Commands and corrected harness attempts are recorded in `validation.log`.
+The host task suite passed nine tests with one pinned-image-only skip. After
+the Attempt 03 repair, the pinned image passed all ten Native contracts, nine
+Qwen sharding tests (including the real Splash negative/positive), and one
+Zero neighbor, emitting
+`V1_GSM8K_NATIVE_FULL_EXACT_IMAGE_PASS native_contract=10 qwen_sharding=9
+zero_neighbor=1`. Earlier FrozenLake/DeepSWE gates, the GSM8K XProf contract,
+and the four-carrier aggregate remain construction evidence only. Commands
+and rejected harness attempts are recorded in `validation.log`.
 
-Not verified: clean-SHA wrapper success, Kubernetes server dry-run/apply, TPU
-full training, target performance/XProf/convergence, live W&B comparison,
-commit, push, or image publication.
+Not verified: clean-SHA wrapper success for this repair, post-fix Kubernetes
+server dry-run/apply, TPU full training, a real optimizer commit, target
+performance/XProf/convergence, live W&B comparison, or image publication.
+The next approved target must use a fresh run ID and is accepted
+only after the learner crosses the previously failing Splash call and at
+least one optimizer commit; an admission pass alone is not a convergence or
+performance result.
