@@ -42,13 +42,21 @@ the fresh P45 YAML. Do not launch M15 in this action.
 
 ## Result
 
-Verified by P57 183/183, V1 Phase4 93/93, flag audit 409/409, focused renderer
-and classifier 35/35, shell syntax, and `git diff --check`. The complete pinned
+Verified after rebasing onto fetched operator tip `2f61f8fc` by P57 184/184,
+V1 Phase4 93/93, flag audit 409/409, focused renderer and classifier 35/35,
+shell syntax, and `git diff --check`. The complete pinned
 image gate against
 `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`
 exited zero with terminal `V1_HP_EXACT_IMAGE_PASS ... m15_tito_option=exact
 m15_tito_default=off ... manifests=3`. The console transcript was observed
 directly but was not redirected to a durable raw log.
+
+The first post-rebase image run stopped on two stale source-shape assertions:
+they still required the old exact-only one-host variable and equality spelling,
+while upstream now deliberately shares the one-host carrier between `verify`
+and `exact`. The runtime contracts were unchanged by this follow-up; the
+focused test passed 3/3 after checking the new semantic spelling, and the
+complete pinned-image gate was rerun from the beginning to the terminal above.
 
 Not verified because no exact remote readback, fresh publication-SHA render,
 P45 DP8xTP8 restart, or M15 DP8xTP8 exact target has occurred under this phase.

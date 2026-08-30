@@ -97,12 +97,15 @@ carriers do not inherit this narrow warning lane.
 The warning lane and experimental TITO implementation are published
 historically. The new one-host r8 evidence certifies exact token transport and
 strict alignment only; it does not certify DP8xTP8 or change the restored
-non-TITO production default. The current P45 extension has P57 183/183, V1
-92/92, flag audit 409/409, and complete immutable-image evidence ending
+non-TITO production default. The rebased P45 extension has P57 184/184, V1
+93/93, flag audit 409/409, and complete immutable-image evidence ending
 `V1_HP_EXACT_IMAGE_PASS ... frozenlake_ab_warning=2 ...
-m15_tito_default=off ... manifests=3`. Before launch, rerun the immutable-image
-gate from the approved clean publication SHA and require the same terminal
-policy receipts. Offline P75 admission under
+m15_tito_option=exact m15_tito_default=off ... manifests=3`. This admission
+was rerun after rebasing onto fetched operator tip `2f61f8fc`; the first image
+attempt stopped on two stale source-shape assertions, and the complete rerun
+passed after those assertions were updated to the upstream verify/exact shared
+carrier names. Before launch, require the approved clean publication SHA to
+read back exactly. Offline P75 admission under
 `../v1-system-optimization-workload-rollout/validation.log` does not certify
 DP8xTP8 performance or convergence. Each target run must independently return
 its registered alignment policy receipts—zero fatal FAIL plus a complete

@@ -1,6 +1,6 @@
 # State
 
-- Status: active; V1.P4.17 extends the narrow finite A-B warning policy to optimized P45, and V1.P4.18 exposes exact M15 TiTO as an explicit full option while keeping the default off. Host and pinned-image admission pass; publication/readback and target gates remain pending.
+- Status: active; V1.P4.17 extends the narrow finite A-B warning policy to optimized P45, and V1.P4.18 exposes exact M15 TiTO as an explicit full option while keeping the default off. Post-rebase host and pinned-image admission pass; publication/readback and target gates remain pending.
 - Objective: obtain P45 and M15 optimized convergence curves while retaining every B-C, T-current/r, nonfinite, backward-health, replica, and optimizer hard gate.
 - Definition of done: each separately approved target concept run completes 300 updates with zero fatal alignment FAIL, bounded and fully counted A-B warnings, healthy optimizer receipts, complete timing/profile artifacts, and explicit receipts.
 - Task directory: `canon-zero-tim/tasks/v1-phase4-three-full-recipes`
@@ -10,4 +10,4 @@
 - Next action: publish/read back the exact SHA, render the default-off pair, and apply only a fresh P45 full manifest. M15 is not launched in this action.
 - Blockers: exact remote readback and DP8xTP8 targets are outstanding. Any result under either warning lane retains an alignment-degraded claim ceiling.
 - Key artifacts: `evidence/v1_hp_gsm8k_gfull1_step64_incident_20260828/`; `HANDOFF.md`; `RUNBOOK.md`.
-- Updated: 2026-08-30T19:35:19Z
+- Updated: 2026-08-30T20:16:25Z

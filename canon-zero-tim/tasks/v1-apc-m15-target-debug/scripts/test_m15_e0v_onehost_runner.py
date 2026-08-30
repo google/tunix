@@ -67,13 +67,17 @@ class OnehostRunnerContractTest(unittest.TestCase):
     rollout = (ROOT.parent / "tunix/rl/rollout/vllm_rollout.py").read_text(
         encoding="utf-8"
     )
-    self.assertIn('os.environ.get("CANON_M15_TOKEN_CONTINUITY", "") == "exact"', rollout)
+    self.assertIn(
+        'os.environ.get("CANON_M15_TOKEN_CONTINUITY", "")\n'
+        '            in ("verify", "exact")',
+        rollout,
+    )
     self.assertIn('os.environ.get("CANON_P38_ONEHOST_REHEARSAL", "0") == "1"', rollout)
     self.assertIn("all_num_cached_tokens_zero=True", rollout)
     entrypoint = (
         ROOT.parent / "examples/frozenlake/train_frozenlake_qwen3.py"
     ).read_text(encoding="utf-8")
-    self.assertIn("_M15_ONEHOST_EXACT", entrypoint)
+    self.assertIn("_M15_ONEHOST_TOKEN_CONTINUITY", entrypoint)
     self.assertIn("token_continuity_lib.m15_token_continuity_mode", entrypoint)
 
 

@@ -1192,3 +1192,21 @@
   `V1_HP_EXACT_IMAGE_PASS ... m15_tito_option=exact m15_tito_default=off ...
   manifests=3`. Its console transcript was not durably redirected. Publication
   readback and the P45 target remain pending.
+
+## 2026-08-30T20:16:25Z — V1.P4.18 rebased admission green
+
+- Fetched operator tip had advanced through `2f61f8fc`; the two local CLs were
+  rebased and the M15 APC-debug identity was merged with the optional full
+  identity without widening either selector.
+- Post-rebase host admission is P57 184/184, V1 93/93, flags 409/409, and the
+  focused merged carrier set 79/79.
+- The first complete image attempt stopped on two stale source-string
+  assertions that named the old exact-only one-host spelling. The test was
+  updated to require the upstream `verify`/`exact` shared one-host semantic;
+  focused rerun is 3/3.
+- The complete pinned-image rerun then exited zero with terminal
+  `V1_HP_EXACT_IMAGE_PASS ... frozenlake_ab_warning=2 ...
+  m15_tito_option=exact m15_tito_default=off ... manifests=3`. The transcript
+  was observed directly and was not redirected to a durable raw artifact.
+- Claim: `POST-REBASE HOST PASS / IMMUTABLE-IMAGE PASS / PUBLICATION PENDING /
+  P45 RESTART NOT RUN / M15 TARGET NOT RUN`.
