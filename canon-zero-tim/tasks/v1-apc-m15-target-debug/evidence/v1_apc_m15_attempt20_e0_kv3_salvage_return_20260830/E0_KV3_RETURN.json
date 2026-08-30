@@ -1,0 +1,86 @@
+{
+  "arms": {
+    "off": {
+      "completed_rounds": [
+        0,
+        1,
+        2
+      ],
+      "missing": [],
+      "root_terminal_complete": false,
+      "round_status": "CONTROL_EXACT_3_OF_3",
+      "rounds": [
+        {
+          "a_b_differing_bytes": 0,
+          "a_b_differing_elements": 0,
+          "b_c_differing_bytes": 0,
+          "classification": "observer_pairs_valid_red_join_pending",
+          "classification_sha256": "dfc9ef26f9432d46259a9f17b978dbbd079acddb1d34074624d2e980dd6090d9",
+          "diagnostic_round": 0,
+          "round_completion_sha256": "a316e921e285c6dce2cdd1a94ea62936b25791cb8a7234dde0eb23ca51706ee9"
+        },
+        {
+          "a_b_differing_bytes": 0,
+          "a_b_differing_elements": 0,
+          "b_c_differing_bytes": 0,
+          "classification": "observer_pairs_valid_red_join_pending",
+          "classification_sha256": "1153bc5b55793deb83c889187e6e5b17e70574463635318b3d1d3d0750530cfe",
+          "diagnostic_round": 1,
+          "round_completion_sha256": "d2d3601f75d61fa7e6430e7a189ad3d8b57e7d467b6790007e5aab1cc4b66ed2"
+        },
+        {
+          "a_b_differing_bytes": 0,
+          "a_b_differing_elements": 0,
+          "b_c_differing_bytes": 0,
+          "classification": "observer_pairs_valid_red_join_pending",
+          "classification_sha256": "a847767b898ba216386de728cb3bf4abeededab680c6c90ce3da8b179a8df4a9",
+          "diagnostic_round": 2,
+          "round_completion_sha256": "49ba5e7a18e82e5ea88450302bc7d2a8849507e867b97d0293d8185055297e2c"
+        }
+      ]
+    },
+    "on": {
+      "completed_rounds": [],
+      "missing": [
+        {
+          "diagnostic_round": 0,
+          "missing": [
+            "classification",
+            "completion",
+            "input"
+          ]
+        },
+        {
+          "diagnostic_round": 1,
+          "missing": [
+            "classification",
+            "classifier_input_receipt",
+            "completion",
+            "input"
+          ]
+        },
+        {
+          "diagnostic_round": 2,
+          "missing": [
+            "classification",
+            "classifier_input_receipt",
+            "completion",
+            "input"
+          ]
+        }
+      ],
+      "root_terminal_complete": false,
+      "round_status": "ROUND_EVIDENCE_PARTIAL",
+      "rounds": []
+    }
+  },
+  "claim_ceiling": "Each KV result is a diagnostic fingerprint over a uniquely bound request, not a collision-free proof of all KV bytes.",
+  "numerical_repair_authorized": false,
+  "remote_mutation": false,
+  "round_salvage_complete": false,
+  "schema": "m15-attempt19-e0-kv3-return-v1",
+  "source_commit": "97e813de84f6c8b3e2ba911fc96ff8397b199603",
+  "status": "ROUND_EVIDENCE_PARTIAL",
+  "target_executed": true,
+  "terminal_pair_complete": false
+}

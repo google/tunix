@@ -1,12 +1,13 @@
 # State
 
 - Status: active;
-  `E0T_ATTEMPT19_CARRIER_REPAIR_IMPLEMENTED_HOST_PASS_DELIVERY_AUTHORIZED`.
-  Implementation started at full SHA
-  `ba4316ffbfbe181c9f7e2bb7f73ae6047db577bb`; that is an implementation base,
-  not an execution identity. The user explicitly authorized commit/push. The
-  published source is the full delivered commit containing this file and must
-  be resolved from the remote branch after delivery.
+  `E0T_ATTEMPT20_SALVAGE_RETURN_ARCHIVED`.
+  Gate 4 read-only GCS salvage return executed for Attempt 20 (`run_id=k02`).
+  Control arm achieved `CONTROL_EXACT_3_OF_3` (all 3 rounds 0/1/2 exact).
+  Treatment arm completed round 0 live-KV diagnostic capture (93.0% cache hits)
+  and partial rounds preserved as `ROUND_EVIDENCE_PARTIAL` upon early resource release.
+  128 TPU freed and redeployed to DeepSWE Full (K06).
+  Evidence archived at `evidence/v1_apc_m15_attempt20_e0_kv3_salvage_return_20260830/`.
 - Attempt 19 used target source
   `d93d2729c5f036506fe754b929d42b142177a9b7`. Its incident bundle is
   `evidence/m15_e0_kv3_attempt19_incident/`; the `SHA256SUMS` file has SHA256

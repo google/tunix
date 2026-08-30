@@ -1,5 +1,15 @@
 # Log
 
+## 2026-08-30 UTC — Attempt 20 (Phase E0t Carrier Repair & KV3 Salvage Return) executed and archived
+
+- Executed Gate 4 read-only GCS salvage return for Attempt 20 (`run_id=k02`) across Control (APC-off) and Treatment (APC-on) arms.
+- Evidence archived under `evidence/v1_apc_m15_attempt20_e0_kv3_salvage_return_20260830/` (`SHA256SUMS` hash `986491ae7dd08a5643c832b4e7c1218000eaca652d257e3055e76be2129a32fc`):
+  - `E0_KV3_RETURN.json`: Control arm achieved `round_status=CONTROL_EXACT_3_OF_3` (all 3 rounds 0/1/2 completed with `a_b_differing_bytes=0`, `b_c_differing_bytes=0`).
+  - Treatment arm: verified 93.0% prefix-cache hit rate on Round 0 with diagnostic live-KV dumps; partial rounds preserved as `status=ROUND_EVIDENCE_PARTIAL` upon early resource release.
+  - Off-arm per-round classification JSONs verified: Round 0 (`dfc9ef26...`), Round 1 (`1153bc5b...`), Round 2 (`a847767b...`).
+- Resource status: 128 TPU v5p cleanly freed from cluster and redeployed to DeepSWE Qwen3-4B Full (K06).
+- Numerical boundary: Phase E remains closed; zero weights, RoPE, RPA, KV values, or numerical paths modified.
+
 ## 2026-08-30 UTC — Attempt 19 (Phase E0s Three-Round KV3 Diagnostic Pair) rendered and submitted
 
 - Rendered from published source commit `d93d2729c5f036506fe754b929d42b142177a9b7` with `run_id=k01` using `prepare_m15_attempt19_e0_kv3_pair.sh`.
