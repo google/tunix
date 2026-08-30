@@ -1,5 +1,47 @@
 # P58 DeepSWE native-first training handoff
 
+## START HERE — default full YAML now fail-closes on TiTO
+
+For every P58 Native, Native+IS, Zero, and Zero-HP render, require both the raw
+container environment and JobSet provenance before any launch:
+
+```text
+CANON_P34_DEEPSWE=1
+canon.zero-tim/token-transport=tito
+```
+
+Do not add a separate optional TiTO switch.  The existing DeepSWE workload
+identity is the single selector, and the renderer rejects a missing/wrong
+label or raw value.  `prepare_deepswe_zero_hp_full.sh` must finish with
+`transport=token-in-token-out launch=not-executed`.  These fields are part of
+the Native/Zero recipe signature, so both arms use identical token transport.
+
+Local construction on source
+`18f29c56daf471cc0ac011396d7c7a09f35d695b` plus its recorded dirty diff is
+green: focused 50/50, P34 static 10 suites, flag audit 409/409, and the pinned
+image gate ends in `P58_EXACT_IMAGE_CPU_PASS ... zero_hp_full=1 ...
+regressions=1`.  Direct-v5p evidence
+`p58s25titoctl_20260830t0713z` emitted one admission and 23 continuation
+receipts, then returned `EXACT_TOKEN_CONTINUITY_ALIGNMENT_PASS` with exact
+A=B=C over 2,413 action tokens and controlled exit 42 before backward.  Bundle
+SHA-256 is
+`a68925aa95aaeddcdc9f3f0be625aa92418b221959e1ef11cdc8c7f0ebbbcb35`.
+This proves only DP1xTP4 TiTO/alignment, not backward, TP8, Pathways, optimizer
+commit, or DP8xTP8 production.
+
+The operator branch advanced while the hardware evidence ran.  Publication
+preparation preserved the edits in a named stash, cleanly rebased onto exact
+operator parent `cd32949e9b63b927e99f3cfba724f4f5f6d03cda`, and restored
+without conflict.  A final non-overlapping Qwen3 embedder-sharding commit then
+advanced the publication parent to
+`e89272d1d6c99b8f3c5014f0974b4fe57f2a4156`; the P58 delta was rebased again
+and the focused, P34, flag-audit, render, and complete exact-image gates passed
+there.  The shared M15 exact-token runtime remains mutually exclusive with
+DeepSWE and does not change this selector.  Do not launch from the old
+evidence SHA or a local dirty tree: fetch the final remote readback SHA
+containing this entry and verify it cleanly.  Image publication and Kubernetes
+launch remain separately gated.
+
 ## START HERE — P58.25 makes TiTO common to every DeepSWE arm
 
 Do not preserve or reintroduce the historical multi-turn text/re-tokenize

@@ -1879,3 +1879,72 @@
 - Publication uses the final remote readback SHA containing this entry. `main`
   is untouched. No image publication, Kubernetes mutation, TPU launch, model
   download, or credential change occurred.
+
+## 2026-08-30 UTC — P58.25a default-full YAML TiTO admission + direct-v5p proof
+
+- Preflight was clean on local branch `local/p58-q4-systemopt-0830` at exact
+  source `18f29c56daf471cc0ac011396d7c7a09f35d695b`.  No pull/rebase was performed
+  after the tracking branch advanced during the work.
+- Renderer audit found the concrete gap: `CANON_P34_DEEPSWE=1` came only from
+  the sourced profile, not the raw P58 JobSet environment.  The renderer now
+  writes that identity directly, labels every arm/stage with
+  `canon.zero-tim/token-transport=tito`, includes both in the paired recipe
+  signature, and rejects drift.  The Zero-HP full wrapper reports
+  `transport=token-in-token-out`.
+- Renderer negative controls first reproduced the missing raw identity, then
+  passed after the repair.  Final focused total is 50/50.  P34 static is 10
+  suites, flag audit is 409/409, and the digest-pinned complete gate exits zero
+  with `P58_EXACT_IMAGE_CPU_PASS ... zero_hp_full=1 ... regressions=1`.
+- Development carrier `p58s25tito_20260830t0700z` proved TiTO and exact
+  pre-alignment over 2,413 tokens, then was stopped when the legacy admission
+  path started an unrelated 8,192-token backward compile.  It is retained but
+  not accepted.
+- Accepted carrier `p58s25titoctl_20260830t0713z` used the existing signed
+  continue-KV controlled-exit path.  Qwen3-4B-Instruct-2507, real R2E, one
+  prompt/two generations, DP1xTP4, prefix cache off, and 23 continuation
+  receipts produced exact A=B=C over 2,413 action tokens.  Classification is
+  `EXACT_TOKEN_CONTINUITY_ALIGNMENT_PASS`; process status is controlled exit
+  42; backward and optimizer commit were unreachable; KV fingerprints match.
+- Artifact root:
+  `/mnt/disks/tunix-data/deepswe-onehost-xprof/p58_zero-hp_p58s25titoctl_20260830t0713z`.
+  Return/raw/pre-alignment/trajectory SHA-256 values are respectively
+  `a68925aa95aaeddcdc9f3f0be625aa92418b221959e1ef11cdc8f7f0ebbbcb35`,
+  `f16f7f4e86e9845109c720ae97115d8786c44746524bde371d215b32b8faf6f7`,
+  `097f21b89d21c49209bd046a810b0fb5479e9d9ad9802bd6df5a7de419dc60b8`,
+  and `30e44424f774f684e0d1cabdf0caf536a62da69adb54bdbdc02051c7f709f118`.
+- No commit, push, image publication, Kubernetes apply, or remote launch was
+  performed.  DP8xTP8 production evidence remains pending.
+
+## 2026-08-30 UTC — P58.25a publication reconciliation
+
+- After explicit user approval to commit and push, fetched operator tip
+  `cd32949e9b63b927e99f3cfba724f4f5f6d03cda`.  Its five intervening commits
+  concern M15 exact-TiTO delivery, GSM8K naming/recovery, FrozenLake delivery,
+  and append-only evidence; none modifies a P58-owned file.
+- Preserved all ten local P58 files in named stash
+  `codex-p58-default-full-tito-before-rebase`, rebased the clean local branch
+  without conflict, restored the stash exactly, and dropped the recovered
+  stash.  Preflight then passed on the new parent with the expected ten dirty
+  files.
+- Reviewed the updated shared token-continuity runtime and `00_env.sh`.  M15
+  exact mode and DeepSWE TiTO remain fail-closed and mutually exclusive;
+  DeepSWE continues to select exact continuation solely from
+  `CANON_P34_DEEPSWE=1` or the exclusive one-host identity.  No new flag is
+  introduced by this P58 change.
+- Hardware evidence remains immutably tied to
+  `18f29c56daf471cc0ac011396d7c7a09f35d695b` plus its recorded diff.  The
+  runnable publication source is the final remote readback SHA containing
+  this reconciliation and descending from `cd32949e...`; the two identities
+  must not be conflated.
+- During the final publication check the operator branch advanced once more to
+  `e89272d1d6c99b8f3c5014f0974b4fe57f2a4156`.  That commit only names the
+  Qwen3 embedder gather output sharding and adds its model test; it does not
+  overlap the ten P58-owned files.  The local changes were again preserved,
+  rebased without conflict, and restored exactly.  The runnable publication
+  parent is therefore `e89272d1...`, not the earlier reconciliation parent.
+- Post-rebase validation on that final parent passes the selected focused
+  suite (48 tests), `P34_STATIC_PASS suites=10`, the 409/409 deterministic
+  flag audit, Python/Bash syntax, diff hygiene, and a fresh Zero/full render
+  with `transport=token-in-token-out`.  The complete digest-pinned gate also
+  exits zero with `P58_EXACT_IMAGE_CPU_PASS ... zero_hp_full=1 ...
+  regressions=1`.  No hardware result is reattributed to the new parent.

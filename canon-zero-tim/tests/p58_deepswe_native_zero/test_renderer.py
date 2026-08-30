@@ -74,6 +74,13 @@ class P58RendererTest(unittest.TestCase):
           self.assertEqual(worker["completions"], 32)
           self.assertEqual(worker["parallelism"], 32)
           self.assertEqual(env["CANON_P58_TIM_ARM"], arm)
+          self.assertEqual(env["CANON_P34_DEEPSWE"], "1")
+          self.assertEqual(
+              document["metadata"]["labels"][
+                  renderer._TOKEN_TRANSPORT_LABEL
+              ],
+              renderer._TOKEN_TRANSPORT,
+          )
           self.assertEqual(env["CANON_P58_EXPECTED_UPDATES"], str(steps))
           self.assertIn(f"--max_steps={steps}", env["CANON_RUN_CMD"])
           self.assertIn("--num_generations=16", env["CANON_RUN_CMD"])
@@ -202,6 +209,49 @@ class P58RendererTest(unittest.TestCase):
       with self.subTest(arm=arm, stage=stage):
         with self.assertRaisesRegex(ValueError, "only for Zero full"):
           self._render(arm, stage, high_performance=True)
+
+  def test_full_zero_hp_tito_identity_is_fail_closed(self):
+    document = self._render(
+        "zero", "full", high_performance=True, run_id="hp-tito"
+    )
+    env = renderer.p34._env(document)
+    self.assertEqual(env["CANON_P34_DEEPSWE"], "1")
+    self.assertEqual(
+        document["metadata"]["labels"][renderer._TOKEN_TRANSPORT_LABEL],
+        renderer._TOKEN_TRANSPORT,
+    )
+
+    document["metadata"]["labels"].pop(renderer._TOKEN_TRANSPORT_LABEL)
+    with self.assertRaisesRegex(ValueError, "token transport must be TiTO"):
+      renderer.validate(
+          document,
+          source_commit="1" * 40,
+          client_image="registry.example/tunix@sha256:" + "2" * 64,
+          stage="full",
+          arm="zero",
+          worker_nodepool="tpu-pool",
+          high_performance=True,
+      )
+
+    document = self._render(
+        "zero", "full", high_performance=True, run_id="hp-not-deepswe"
+    )
+    renderer.p34._set_env(
+        renderer.p34._container(
+            renderer.p34._head(document)["containers"], "jax-tpu"
+        ),
+        {"CANON_P34_DEEPSWE": "0"},
+    )
+    with self.assertRaisesRegex(ValueError, "rendered environment mismatch"):
+      renderer.validate(
+          document,
+          source_commit="1" * 40,
+          client_image="registry.example/tunix@sha256:" + "2" * 64,
+          stage="full",
+          arm="zero",
+          worker_nodepool="tpu-pool",
+          high_performance=True,
+      )
 
   def test_system_optimization_is_absent_from_neighboring_and_diagnostic_arms(self):
     documents = (

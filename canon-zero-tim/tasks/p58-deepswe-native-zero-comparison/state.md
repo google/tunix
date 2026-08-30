@@ -1,5 +1,46 @@
 # State
 
+## P58.25a default-full YAML TiTO admission and one-host proof (2026-08-30)
+
+- The P58 JobSet renderer now places `CANON_P34_DEEPSWE=1` in the raw
+  container environment for every Native/Native+IS/Zero stage, rather than
+  relying only on the later profile source.  Every rendered JobSet also has
+  `canon.zero-tim/token-transport=tito` provenance.  Missing/wrong provenance
+  or a raw DeepSWE identity of `0` fails closed; the paired recipe signature
+  includes both fields.
+- This adds no new settable flag.  TiTO remains selected by the existing
+  DeepSWE workload identity and is common to Native and Zero.  The full
+  Zero-HP prepare marker now states `transport=token-in-token-out`.
+- Focused renderer/sampler/one-host/wrapper tests pass 50/50; P34 static passes
+  ten suites; syntax/diff hygiene and the 409/409 flag audit pass.  The
+  digest-pinned complete gate on image ID
+  `sha256:418dc632edd8ff990e8880df6a5ca82369f6c4d705e16152c1ee6f9708d5e53a`
+  ends with `P58_EXACT_IMAGE_CPU_PASS ... zero_hp_full=1 ... regressions=1`.
+- Direct-v5p run `p58s25titoctl_20260830t0713z` is a real Qwen3-4B-Instruct
+  DP1xTP4/R2E TiTO proof.  It emitted one admission plus 23 continuation
+  receipts and returned `EXACT_TOKEN_CONTINUITY_ALIGNMENT_PASS` over 2,413
+  action tokens with zero A-B and B-C differing elements.  KV fingerprints
+  were equal.  Controlled exit 42 proves backward and optimizer commits were
+  not reached.  Return bundle SHA-256 is
+  `a68925aa95aaeddcdc9f3f0be625aa92418b221959e1ef11cdc8c7f0ebbbcb35`.
+- The first development carrier `p58s25tito_20260830t0700z` reached the same
+  exact pre-alignment but was intentionally stopped after it fell into an
+  irrelevant long backward compile.  It is not acceptance evidence; only the
+  controlled, classified `...titoctl...` run is admitted.
+- The hardware evidence remains bound to source
+  `18f29c56daf471cc0ac011396d7c7a09f35d695b` plus its recorded dirty diff.
+  Publication preparation then preserved the local changes in a named stash,
+  cleanly rebased onto exact operator parent
+  `cd32949e9b63b927e99f3cfba724f4f5f6d03cda`, restored without conflict, and
+  reviewed the intervening M15/GSM8K/FrozenLake commits.  The shared M15 exact
+  token path remains mutually exclusive with DeepSWE and does not change the
+  `CANON_P34_DEEPSWE=1` TiTO selector.  A final non-overlapping Qwen3 embedder
+  sharding commit advanced the operator parent to
+  `e89272d1d6c99b8f3c5014f0974b4fe57f2a4156`; the P58 changes were rebased
+  again without conflict and the focused/P34/flag/exact-image gates passed on
+  that parent.  Executors must use the final remote readback SHA containing
+  this entry.  No image publication or Kubernetes mutation occurred.
+
 ## P58.25 DeepSWE token-in/token-out continuity (2026-08-30)
 
 - DeepSWE continuation is now treated as TiTO for every admitted DeepSWE

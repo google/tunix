@@ -126,7 +126,7 @@ commit remain unreachable.
 | P58.22 | Qwen3-4B continue-decode cross-turn token/KV repair | Keep value `8`; preserve exact sampled/environment token IDs across agent turns, require an identical-prefix A/B join, then pass controlled strict alignment and finite nonzero backward-no-commit on the attested 1792+2880 one-host carrier with signed persistent compilation cache | completed alignment prerequisite — real rollout and A=B=C PASS over 2,413 action tokens; serial backward carriers remained incomplete and are superseded by P58.23 |
 | P58.23 | Qwen3-4B optimized B2xG2 one-host backward | Repeat one strict-exact immutable real mixed-reward prompt pair as two physical groups at B2xG2/K2560 through P28/P30/P71-forward; require strict A=B=C, four nonzero advantages, finite nonzero backward, unchanged TPU state, and zero commits inside 1,800 seconds | completed — `p58s23optb2g2g_20260830t0132z` returned A=B=C over 1,254 action tokens, exact finite nonzero repeated gradients, device-resident unchanged optimizer state, and zero commits; profiled repeat 12.418 seconds; TP8 and optimizer-update promotion remain unproved |
 | P58.24 | JobSet-level exclusive-topology contract | Put the nodepool topology key exactly once on JobSet metadata, forbid its worker-Pod copy, preserve Kueue/NAP sentinel resolution and explicit-pool exactness, and require server dry-run before launch | implemented locally; host and pinned-image construction PASS; target not run |
-| P58.25 | Common DeepSWE token-in/token-out continuity | All admitted DeepSWE workloads carry exact sampled assistant token IDs into later prompts, tokenize each environment observation once, bypass chat-template re-tokenization on continuation, and emit admission plus exercised-turn receipts; Native/Zero token transport is identical | active; local host and digest-pinned construction PASS; target not run |
+| P58.25 | Common DeepSWE token-in/token-out continuity | All admitted DeepSWE workloads carry exact sampled assistant token IDs into later prompts, tokenize each environment observation once, bypass chat-template re-tokenization on continuation, and emit admission plus exercised-turn receipts; default-full YAML carries fail-closed DeepSWE/TiTO provenance; Native/Zero token transport is identical | active; host and digest-pinned construction PASS; direct-v5p DP1xTP4 real-R2E TiTO/A=B=C PASS over 2,413 action tokens with controlled pre-backward exit; DP8xTP8 target not run |
 
 At most one phase may be active. P58.25 is the active construction repair and
 no target launch is active. Commit, push, image publication, Kubernetes render/application, and
@@ -139,7 +139,9 @@ calling it PASS. P58.4N was superseded after p58c05 failed Kueue admission.
 P58.5N never completed and is not a valid full Native baseline. P58.23 is
 complete; P58.6 through P58.22 retain their historical phase records.
 P58.24 construction is complete and its target was not run. P58.25 owns the
-current TiTO source, receipt, and exact-image gates.
+current TiTO source, default-full YAML admission, receipt, exact-image, and
+direct-v5p alignment gates.  Its one-host PASS does not certify backward,
+TP8, Pathways, optimizer commits, or the DP8xTP8 target.
 P58.7's historical target remains not run and is superseded for new Zero
 launches by P58.11 plus the P58.12 seed-route correction. P58.9 and P58.10
 source are published and read back. P58.13 implementation

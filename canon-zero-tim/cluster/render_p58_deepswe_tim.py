@@ -53,6 +53,8 @@ _CPU_NODEPOOL = "cpu-np"
 _JOBSET_REPLICATEDJOB_LABEL = "jobset.sigs.k8s.io/replicatedjob-name"
 _PATHWAYS_HEAD_REPLICATEDJOB = "pathways-head"
 _HOSTNAME_TOPOLOGY_KEY = "kubernetes.io/hostname"
+_TOKEN_TRANSPORT_LABEL = "canon.zero-tim/token-transport"
+_TOKEN_TRANSPORT = "tito"
 _KUBERNETES_DNS_LABEL = re.compile(
     r"[a-z0-9](?:[-a-z0-9]*[a-z0-9])?\Z"
 )
@@ -253,6 +255,7 @@ def render(
       "canon.zero-tim/arm": arm,
       "canon.zero-tim/topology": "128",
       "canon.zero-tim/fixed-lm-head": "1" if hp_bundle else "0",
+      _TOKEN_TRANSPORT_LABEL: _TOKEN_TRANSPORT,
   })
   if sampler_is:
     document["metadata"]["labels"]["canon.zero-tim/sampler-recipe"] = (
@@ -330,6 +333,10 @@ def render(
   p34._set_env(main, {
       "CANON_PROFILE_FILE": HP_PROFILE if hp_bundle else PROFILE,
       "CANON_STATE": run_root,
+      # TiTO is selected by the DeepSWE workload identity itself.  Keep the
+      # identity in the raw JobSet as well as the sourced profile so a
+      # rendered full-training YAML cannot depend on a later implicit default.
+      "CANON_P34_DEEPSWE": "1",
       "CANON_P34_RUN_STAGE": stage,
       "CANON_P34_NO_COMMIT": "0",
       "CANON_P34_TRAJECTORY_CAPTURE": "0",
@@ -541,6 +548,10 @@ def recipe_signature(document: Mapping[str, Any]) -> dict[str, Any]:
   return {
       "command": command,
       "stage": env["CANON_P34_RUN_STAGE"],
+      "deepswe_identity": env["CANON_P34_DEEPSWE"],
+      "token_transport": document["metadata"]["labels"][
+          _TOKEN_TRANSPORT_LABEL
+      ],
       "source_commit": env["CANON_EXPECT_COMMIT"],
       "whitelist_sha256": env["CANON_P34_WHITELIST_SHA256"],
       "optimizer_resident": env["CANON_OPT_STATE_RESIDENT"],
@@ -622,6 +633,10 @@ def validate(
       "canon.zero-tim/fixed-lm-head"
   ) != ("1" if hp_bundle else "0"):
     raise ValueError("P58 fixed lm-head label drifted from the selected bundle")
+  if document["metadata"]["labels"].get(
+      _TOKEN_TRANSPORT_LABEL
+  ) != _TOKEN_TRANSPORT:
+    raise ValueError("P58 DeepSWE token transport must be TiTO")
   if cpu_nodepool != _CPU_NODEPOOL:
     raise ValueError("P58 CPU head lost the admitted cpu-np node pool")
   if (
@@ -649,6 +664,7 @@ def validate(
   expected = {
       "CANON_EXPECT_COMMIT": source_commit,
       "CANON_PROFILE_FILE": HP_PROFILE if hp_bundle else PROFILE,
+      "CANON_P34_DEEPSWE": "1",
       "CANON_P34_RUN_STAGE": stage,
       "CANON_P34_NO_COMMIT": "0",
       "CANON_P58_DEEPSWE_TIM": "1",
@@ -945,6 +961,7 @@ def main() -> None:
   print(
       "P58_DEEPSWE_TIM_RENDER_PASS "
       f"arm={args.arm} stage={args.stage} recipe={recipe} "
+      "transport=token-in-token-out "
       f"output={args.output}"
   )
 

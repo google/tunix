@@ -1,7 +1,8 @@
 # P58.25 — DeepSWE token-in/token-out continuity
 
-Status: implemented locally; host and digest-pinned exact-image construction
-pass; target not run.
+Status: default-full YAML admission implemented locally; host and
+digest-pinned exact-image construction pass; direct-v5p TiTO/alignment PASS;
+DP8xTP8 target not run.
 
 ## Problem
 
@@ -60,6 +61,20 @@ P58 postflight requires one admission receipt and at least one continuation
 receipt for ordinary Native/Zero training.  Pre-backward recorded diagnostics
 retain the admission check but are exempt from the live continuation count.
 
+The P58 renderer now also makes the common DeepSWE identity explicit in the
+raw JobSet environment before any profile is sourced:
+
+```text
+CANON_P34_DEEPSWE=1
+canon.zero-tim/token-transport=tito
+```
+
+Every Native, Native+IS, Zero, and Zero-HP stage carries both fields.  The
+renderer rejects a missing/wrong label or a raw DeepSWE identity of `0`, and
+the recipe signature includes both fields.  This is intentionally not a new
+optional TiTO flag: the existing DeepSWE workload identity selects TiTO and
+cannot be independently disabled by a YAML author.
+
 ## Gates and claim ceiling
 
 - Python and Bash syntax plus diff hygiene: PASS.
@@ -73,10 +88,26 @@ retain the admission check but are exempt from the live continuation count.
   `P58_EXACT_IMAGE_CPU_PASS ... regressions=1`.
 - P34 static: PASS, ten suites.
 - Flag registry: PASS, 409/409 names; P58.25 introduces no new flag name.
-- Fresh real one-host / DP8xTP8 run: not run.
+- Fresh real one-host: PASS on source
+  `18f29c56daf471cc0ac011396d7c7a09f35d695b` plus the recorded dirty diff.
+  Run `p58s25titoctl_20260830t0713z` used Qwen3-4B-Instruct-2507, real R2E,
+  DP1xTP4, one prompt and two generations.  It emitted one TiTO admission and
+  23 continuation receipts, then classified 2,413 action tokens with exact
+  `S_decode=S_prefill=T_old`.  It stopped with the signed controlled exit 42
+  before backward and optimizer commit.  Return-bundle SHA-256:
+  `a68925aa95aaeddcdc9f3f0be625aa92418b221959e1ef11cdc8c7f0ebbbcb35`.
+- Fresh DP8xTP8 run: not run.
 
 This implementation proves the source no longer reconstructs a DeepSWE
-continuation from sampled assistant text.  It does not yet prove that TiTO
-alone removes the K04 DP8xTP8 A-B residual; that requires a fresh target run
-with the receipts above. Source commit/push was explicitly authorized for this
-delivery. Launch and image publication remain separately unapproved.
+continuation from sampled assistant text and proves exact TiTO alignment on
+the direct-v5p DP1xTP4 carrier.  It does not prove backward, TP8, Pathways, or
+that TiTO alone removes the K04 DP8xTP8 A-B residual; that requires a fresh
+target run with the receipts above.  For publication, the default-full YAML
+follow-up was recovered after a clean, conflict-free rebase onto exact
+operator parent `cd32949e9b63b927e99f3cfba724f4f5f6d03cda`, then rebased
+again without conflict when the non-overlapping Qwen3 embedder-sharding change
+advanced the parent to `e89272d1d6c99b8f3c5014f0974b4fe57f2a4156`.
+Focused/P34/flag/render/exact-image gates passed on the latter parent.  The
+final runnable source is the remote readback SHA containing this entry; the
+older one-host source must not be substituted for it.  Image publication and
+cluster launch remain separately unapproved.

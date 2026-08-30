@@ -57,6 +57,6 @@ python3 "$PKG_ROOT/cluster/render_p58_deepswe_tim.py" \
 
 sha256sum "$OUTPUT_YAML"
 printf '%s\n' \
-  "V1_DEEPSWE_ZERO_HP_RFULL_READY source=$SOURCE_SHA manifest=$OUTPUT_YAML launch=not-executed" \
+  "V1_DEEPSWE_ZERO_HP_RFULL_READY source=$SOURCE_SHA manifest=$OUTPUT_YAML transport=token-in-token-out launch=not-executed" \
   "Review the manifest and verify the published source and image by remote read-back before launch." \
   "kubectl apply -f $OUTPUT_YAML"

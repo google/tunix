@@ -18,6 +18,52 @@ P58 does not modify `main`. Rendering and local validation do not authorize a
 Kubernetes apply. An operator must separately approve image publication and
 each launch.
 
+## Default-full TiTO admission gate
+
+All P58 arm/stage renders must contain both:
+
+```text
+env: CANON_P34_DEEPSWE=1
+label: canon.zero-tim/token-transport=tito
+```
+
+The raw environment value is required before profile sourcing; the label is
+durable JobSet provenance.  Both are in the paired recipe signature.  A
+missing/wrong value is a renderer failure, not a warning.  TiTO has no
+independent disable flag: it is selected by the common DeepSWE identity for
+Native, Native+IS, Zero, and Zero-HP alike.
+
+For the default Qwen3-4B-Instruct Zero-HP full render, require the wrapper
+terminal marker to include:
+
+```text
+V1_DEEPSWE_ZERO_HP_RFULL_READY transport=token-in-token-out launch=not-executed
+```
+
+Before any 128-chip target, run the focused renderer tests, P34 static, flag
+audit, and digest-pinned P58 exact-image gate.  The current local proof on
+source `18f29c56daf471cc0ac011396d7c7a09f35d695b` plus its recorded dirty diff
+also has a real direct-v5p controlled carrier:
+
+```text
+label: p58s25titoctl_20260830t0713z
+classification: EXACT_TOKEN_CONTINUITY_ALIGNMENT_PASS
+N_action: 2413
+S_decode_vs_S_prefill differing_elements: 0
+S_prefill_vs_T_old differing_elements: 0
+process status: 42 (controlled pre-backward exit)
+bundle sha256: a68925aa95aaeddcdc9f3f0be625aa92418b221959e1ef11cdc8c7f0ebbbcb35
+```
+
+That run validates Qwen3-4B DP1xTP4 real-R2E TiTO and strict alignment only.
+It does not validate backward, TP8, Pathways, 128-chip behavior, optimizer
+commit, or production readiness.  Publication preparation cleanly rebased the
+implementation onto exact operator parent
+`cd32949e9b63b927e99f3cfba724f4f5f6d03cda`, then rebased once more onto
+`e89272d1d6c99b8f3c5014f0974b4fe57f2a4156` after a non-overlapping Qwen3
+embedder-sharding update; render only from the final clean remote readback SHA
+containing this entry, never from the older evidence SHA.
+
 ## K03 correction: exclusive topology belongs on the JobSet
 
 K03 failed before rollout when `vpod.kb.io` rejected indexed worker followers.
