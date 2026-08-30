@@ -43,6 +43,11 @@ import grain  # pylint: disable=g-import-not-at-top
 import jax  # pylint: disable=g-import-not-at-top
 import numpy as np  # pylint: disable=g-import-not-at-top
 import tensorflow_datasets as tfds  # pylint: disable=g-import-not-at-top
+
+try:
+  import tensorflow_datasets.text.gsm8k  # pylint: disable=unused-import
+except (ImportError, ModuleNotFoundError):
+  pass
 from transformers import AutoTokenizer  # pylint: disable=g-import-not-at-top
 
 REPO_ROOT = os.path.abspath(
@@ -232,7 +237,7 @@ def _make_reward_fn(mode: str, debug: bool = False):
           prompt_id,
           text,
           gold_answer,
-          _extract_answer(text),
+          gsm8k.extract_boxed_answer(text),
       )
     return reward
 
@@ -530,15 +535,17 @@ def main(argv: list[str], context: Any = None) -> None:
       },
   )
 
-  reward_fn = _make_reward_fn(args.reward_mode)
+  reward_fn = _make_reward_fn(args.reward_mode, debug=args.debug)
+  reward_fns = [reward_fn] if reward_fn is not None else []
   program = rl_program.StandardRLProgram(
       algo=algo,
       dataset=_iter_prompt_items(args),
       max_steps=args.max_steps,
-      reward_fns=[_make_reward_fn(args.reward_mode, args.num_generations)],
+      reward_fns=reward_fns,
       assembler=batch_assembly.GRPOTrainExampleAssembler(
           batch_size=args.train_micro_batch_size,
           max_prompt_length=args.max_prompt_length,
+          max_response_length=args.max_response_length,
           pad_id=pad_id,
       ),
       metrics_logging_options=metrics_logging_options,
